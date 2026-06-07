@@ -3,10 +3,15 @@ package llm
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
 )
+
+// maxSSELine bounds a single SSE line (large reasoning/tool-arg frames are real,
+// but unbounded growth is not). Raised from B0's 1 MiB.
+const maxSSELine = 10 * 1024 * 1024
 
 type streamChunk struct {
 	Model   string         `json:"model"`
@@ -49,8 +54,12 @@ type apiError struct {
 // the final frame, and surfaces mid-stream error frames as an error. onDelta
 // (nullable) receives incremental content/reasoning.
 func parseStream(r io.Reader, onDelta func(Delta)) (Response, error) {
+	return parseStreamWithLimit(r, onDelta, maxSSELine)
+}
+
+func parseStreamWithLimit(r io.Reader, onDelta func(Delta), maxLine int) (Response, error) {
 	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	sc.Buffer(make([]byte, 0, min(64*1024, maxLine)), maxLine)
 
 	var resp Response
 	acc := map[int]*streamToolCall{}
@@ -119,6 +128,9 @@ func parseStream(r io.Reader, onDelta func(Delta)) (Response, error) {
 		}
 	}
 	if err := sc.Err(); err != nil {
+		if errors.Is(err, bufio.ErrTooLong) {
+			return resp, fmt.Errorf("sse line exceeds %d bytes: %w", maxLine, err)
+		}
 		return resp, fmt.Errorf("read sse: %w", err)
 	}
 

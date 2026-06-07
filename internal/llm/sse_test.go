@@ -66,3 +66,11 @@ func TestParseStreamMidStreamError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "boom")
 }
+
+func TestParseStreamRejectsOverlongLineClearly(t *testing.T) {
+	// A data line longer than the (tiny, test-injected) cap must yield a clear error.
+	long := `data: {"choices":[{"delta":{"content":"` + strings.Repeat("x", 256) + `"}}]}` + "\n"
+	_, err := parseStreamWithLimit(strings.NewReader(long), nil, 64)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds")
+}
