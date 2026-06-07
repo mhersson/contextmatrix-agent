@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -39,6 +40,22 @@ func TestResolveInRootRejectsEscape(t *testing.T) {
 
 	_, err = resolveInRoot(root, "../escape.txt")
 	require.Error(t, err)
+}
+
+func TestResolveInRootRejectsSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	require.NoError(t, os.Symlink(outside, filepath.Join(root, "link")))
+
+	// A path that traverses a symlink pointing outside the root must be rejected.
+	_, err := resolveInRoot(root, "link/secret.txt")
+	require.Error(t, err)
+
+	// A genuinely in-root path through a real subdir still resolves.
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "real"), 0o755))
+	got, err := resolveInRoot(root, "real/ok.txt")
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(root, "real/ok.txt"), got)
 }
 
 func TestRequireString(t *testing.T) {
