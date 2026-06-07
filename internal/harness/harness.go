@@ -39,6 +39,7 @@ type Result struct {
 	ToolCallFailures int
 	RepairCount      int
 	ModelUsed        string
+	Output           string // final assistant text of the last turn
 }
 
 // Run drives the bare agent loop: model call → tool dispatch → repeat, until the
@@ -83,6 +84,7 @@ func Run(ctx context.Context, client llm.LLM, reg *tools.Registry, emit *events.
 		if resp.Model != "" {
 			res.ModelUsed = resp.Model
 		}
+		res.Output = resp.Content
 		emit.Emit(events.ModelResponse, map[string]any{
 			"turn": res.Turns, "finish_reason": resp.FinishReason,
 			"tool_calls": len(resp.ToolCalls), "content_len": len(resp.Content),
