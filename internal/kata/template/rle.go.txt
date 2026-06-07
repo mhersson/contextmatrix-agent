@@ -1,0 +1,7 @@
+package kata
+
+// Encode returns the run-length encoding of s, e.g. "aaabbc" -> "3a2b1c".
+// TODO: implement.
+func Encode(s string) string {
+	return ""
+}
