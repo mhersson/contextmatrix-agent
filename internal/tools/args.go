@@ -1,6 +1,9 @@
 package tools
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 func requireString(args map[string]any, key string) (string, error) {
 	v, ok := args[key]
@@ -37,5 +40,29 @@ func optInt(args map[string]any, key string, def int) int {
 		return v
 	default:
 		return def
+	}
+}
+
+// optStringSlice coerces a JSON array (decoded as []any), a []string, or a
+// single space-separated string into []string. Missing key -> nil.
+func optStringSlice(args map[string]any, key string) []string {
+	switch v := args[key].(type) {
+	case []string:
+		return v
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, e := range v {
+			if s, ok := e.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	case string:
+		if v == "" {
+			return nil
+		}
+		return strings.Fields(v)
+	default:
+		return nil
 	}
 }
