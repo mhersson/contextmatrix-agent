@@ -1,0 +1,85 @@
+package cli
+
+import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"testing"
+
+	"github.com/mhersson/contextmatrix-agent/internal/kata"
+	"github.com/mhersson/contextmatrix-agent/internal/llm"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// solverLLM scripts a model that rewrites rle.go with the correct Encode via
+// edit, runs the tests, then stops — exercising the whole wiring offline.
+type solverLLM struct {
+	root string
+	step int
+}
+
+func (s *solverLLM) Send(ctx context.Context, req llm.Request) (llm.Response, error) {
+	return s.SendStream(ctx, req, nil)
+}
+
+func (s *solverLLM) SendStream(ctx context.Context, req llm.Request, onDelta func(llm.Delta)) (llm.Response, error) {
+	s.step++
+	good := `package kata
+import "strconv"
+func Encode(s string) string {
+	if s == "" { return "" }
+	r := []rune(s); out := ""; count := 1
+	for i := 1; i <= len(r); i++ {
+		if i < len(r) && r[i] == r[i-1] { count++; continue }
+		out += strconv.Itoa(count) + string(r[i-1]); count = 1
+	}
+	return out
+}`
+	switch s.step {
+	case 1:
+		// Read the actual skeleton and replace the whole file in one valid edit.
+		cur, err := os.ReadFile(filepath.Join(s.root, "rle.go"))
+		if err != nil {
+			return llm.Response{}, err
+		}
+		return llm.Response{ToolCalls: []llm.ToolCall{{
+			ID: "1", Type: "function",
+			Function: llm.FunctionCall{Name: "edit", Arguments: mustJSON(map[string]any{
+				"path": "rle.go", "old_string": string(cur), "new_string": good,
+			})},
+		}}}, nil
+	case 2:
+		return llm.Response{ToolCalls: []llm.ToolCall{{
+			ID: "2", Type: "function",
+			Function: llm.FunctionCall{Name: "bash", Arguments: `{"command":"go test ./..."}`},
+		}}}, nil
+	default:
+		return llm.Response{Content: "tests pass", FinishReason: "stop"}, nil
+	}
+}
+
+func TestRunSpikeDrivesKataGreen(t *testing.T) {
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go toolchain not available")
+	}
+	dir := t.TempDir()
+	require.NoError(t, kata.Copy(dir))
+
+	res, err := runSpike(context.Background(), &solverLLM{root: dir}, runOpts{
+		taskDir: dir, task: "Make the failing test pass.", maxTurns: 10,
+	})
+	require.NoError(t, err)
+	assert.True(t, res.Completed)
+
+	// The kata must now actually pass.
+	cmd := exec.Command("go", "test", "./...")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run(), "kata should be green after the run")
+
+	b, _ := os.ReadFile(filepath.Join(dir, "rle.go"))
+	assert.Contains(t, string(b), "strconv")
+}
+
+func mustJSON(m map[string]any) string { return toJSON(m) }
