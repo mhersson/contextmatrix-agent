@@ -35,9 +35,13 @@ func TestVerifyNilCheckIsNoop(t *testing.T) {
 }
 
 func TestVerifyPropagatesError(t *testing.T) {
-	emit := events.NewEmitter(nil, nil)
+	var transcript bytes.Buffer
+	emit := events.NewEmitter(nil, &transcript)
 	_, err := Verify(context.Background(), emit, func(ctx context.Context) (Verdict, error) {
 		return Verdict{}, errors.New("check blew up")
 	})
 	require.Error(t, err)
+	// The error path still emits a verification event carrying the error detail.
+	assert.Contains(t, transcript.String(), "verification")
+	assert.Contains(t, transcript.String(), "check blew up")
 }
