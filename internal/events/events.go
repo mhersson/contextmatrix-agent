@@ -20,6 +20,7 @@ const (
 	UsageKind     Kind = "usage"
 	StateChange   Kind = "state_change"
 	ContextLimit  Kind = "context_limit"
+	Verification  Kind = "verification"
 	ErrorKind     Kind = "error"
 	ToolRepair    Kind = "tool_repair"
 )
