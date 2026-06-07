@@ -41,7 +41,15 @@ func TestDefaultsAndValidate(t *testing.T) {
 
 	bad := 0
 	c := Config{MaxTurns: &bad}
-	assert.Error(t, c.Validate())
+	err := c.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "max-turns") // user-facing hyphenated key
+
+	badCost := -1.0
+	cc := Config{MaxCostUSD: &badCost}
+	errc := cc.Validate()
+	require.Error(t, errc)
+	assert.Contains(t, errc.Error(), "max-cost")
 }
 
 func TestLoadUnsetStaysNil(t *testing.T) {

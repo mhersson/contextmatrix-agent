@@ -55,10 +55,10 @@ func Defaults() Config {
 // Validate checks invariants after merging.
 func (c *Config) Validate() error {
 	if c.MaxTurns != nil && *c.MaxTurns <= 0 {
-		return fmt.Errorf("max_turns must be > 0, got %d", *c.MaxTurns)
+		return fmt.Errorf("max-turns must be > 0, got %d", *c.MaxTurns)
 	}
 	if c.MaxCostUSD != nil && *c.MaxCostUSD < 0 {
-		return fmt.Errorf("max_cost must be >= 0, got %v", *c.MaxCostUSD)
+		return fmt.Errorf("max-cost must be >= 0, got %v", *c.MaxCostUSD)
 	}
 	return nil
 }
