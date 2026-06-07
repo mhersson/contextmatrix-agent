@@ -167,3 +167,29 @@ func TestRunMaxTurnsZeroUsesDefault(t *testing.T) {
 	assert.Equal(t, "max_turns", res.Reason)
 	assert.Equal(t, defaultMaxTurns, res.Turns)
 }
+
+func TestRunContextLimitReturnsIncomplete(t *testing.T) {
+	reg := tools.NewRegistry(tools.NewReadTool(t.TempDir()))
+	f := &fakeLLM{responses: []llm.Response{
+		{
+			Content: "thinking", Usage: llm.Usage{PromptTokens: 900},
+			ToolCalls: []llm.ToolCall{toolCall("1", "read", `{"path":"x"}`)},
+		},
+	}}
+	res, err := Run(context.Background(), f, reg, newEmitter(), "task", Config{MaxTurns: 10, ContextWindow: 1000})
+	require.NoError(t, err)
+	assert.False(t, res.Completed)
+	assert.Equal(t, "context_limit", res.Reason)
+	assert.Equal(t, 1, res.Turns)
+}
+
+func TestRunContextLimitDisabledWhenWindowZero(t *testing.T) {
+	reg := tools.NewRegistry(tools.NewReadTool(t.TempDir()))
+	f := &fakeLLM{responses: []llm.Response{
+		{Content: "done", FinishReason: "stop", Usage: llm.Usage{PromptTokens: 999999}},
+	}}
+	res, err := Run(context.Background(), f, reg, newEmitter(), "task", Config{MaxTurns: 10}) // window 0 = disabled
+	require.NoError(t, err)
+	assert.True(t, res.Completed)
+	assert.Equal(t, "done", res.Reason)
+}

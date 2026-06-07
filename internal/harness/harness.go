@@ -14,19 +14,25 @@ import (
 // never silently produces a no-op "completed" run.
 const defaultMaxTurns = 30
 
+// contextLimitThreshold is the fraction of the model's context window that, once
+// the prompt reaches it, makes the harness stop and return incomplete (v1 has
+// no compactor). Detection uses the provider's authoritative prompt_tokens.
+const contextLimitThreshold = 0.85
+
 type Config struct {
-	Model        string
-	Models       []string
-	Provider     json.RawMessage
-	Reasoning    json.RawMessage
-	SystemPrompt string
-	MaxTurns     int
-	MaxCostUSD   float64 // 0 disables the cost cap
+	Model         string
+	Models        []string
+	Provider      json.RawMessage
+	Reasoning     json.RawMessage
+	SystemPrompt  string
+	MaxTurns      int
+	MaxCostUSD    float64 // 0 disables the cost cap
+	ContextWindow int     // 0 disables context-limit detection
 }
 
 type Result struct {
 	Completed        bool
-	Reason           string // done | max_turns | max_cost | error
+	Reason           string // done | max_turns | max_cost | context_limit | error
 	Turns            int
 	TotalCostUSD     float64
 	ToolCallCount    int
@@ -85,6 +91,17 @@ func Run(ctx context.Context, client llm.LLM, reg *tools.Registry, emit *events.
 			"prompt_tokens": resp.Usage.PromptTokens, "completion_tokens": resp.Usage.CompletionTokens,
 			"cost_usd": resp.Usage.Cost,
 		})
+
+		if cfg.ContextWindow > 0 && resp.Usage.PromptTokens >= int(contextLimitThreshold*float64(cfg.ContextWindow)) {
+			res.Reason = "context_limit"
+			emit.Emit(events.ContextLimit, map[string]any{
+				"prompt_tokens":  resp.Usage.PromptTokens,
+				"context_window": cfg.ContextWindow,
+				"ratio":          float64(resp.Usage.PromptTokens) / float64(cfg.ContextWindow),
+				"threshold":      contextLimitThreshold,
+			})
+			return res, nil
+		}
 
 		msgs = append(msgs, llm.Message{Role: "assistant", Content: resp.Content, ToolCalls: resp.ToolCalls})
 
