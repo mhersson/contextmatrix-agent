@@ -44,7 +44,7 @@ func TestFitsWindow(t *testing.T) {
 
 func TestSelectByComplexityPrefersCheapestCapableToolModel(t *testing.T) {
 	r := NewRegistry(nil, "openai/gpt-oss-120b", testCatalog())
-	spec := r.SelectByComplexity(RoleCoder, TierComplex, testCatalog())
+	spec := r.SelectByComplexity(RoleCoder, TierComplex)
 	assert.Equal(t, "openai/gpt-oss-120b", spec.Model) // only seeded model clears the complex bar
 }
 
@@ -57,6 +57,6 @@ func TestSelectByComplexityFallsBackToCapable(t *testing.T) {
 		{ID: "unseeded/b", ContextLength: 8192, SupportedParameters: []string{"tools"}},
 	}
 	r := NewRegistry(nil, "capable/default", cat)
-	spec := r.SelectByComplexity(RoleCoder, TierSimple, cat)
+	spec := r.SelectByComplexity(RoleCoder, TierSimple)
 	assert.Equal(t, "capable/default", spec.Model)
 }

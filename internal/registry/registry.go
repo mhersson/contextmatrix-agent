@@ -78,13 +78,14 @@ func (r *Registry) fitsWindow(model string, estTokens int) bool {
 	return e.ContextLength >= estTokens
 }
 
-// SelectByComplexity is the seam C2 consumes: the cheapest tool-capable catalog
-// model whose seeded capability for role clears the tier bar, else the capable
-// default. Capability scores are hand-seeded in B1; B2 replaces them.
-func (r *Registry) SelectByComplexity(role Role, t Tier, cat llm.Catalog) ModelSpec {
+// SelectByComplexity is the seam C2 consumes: the cheapest tool-capable model in
+// the registry's catalog whose seeded capability for role clears the tier bar,
+// else the capable default. It reads r.catalog (single source of truth, matching
+// Resolve/fitsWindow). Capability scores are hand-seeded in B1; B2 replaces them.
+func (r *Registry) SelectByComplexity(role Role, t Tier) ModelSpec {
 	bar := tierBar(t)
 	best, bestPrice := "", -1.0
-	for _, e := range cat {
+	for _, e := range r.catalog {
 		if !e.SupportsTools() || r.capabilities[e.ID][role] < bar {
 			continue
 		}
@@ -97,7 +98,7 @@ func (r *Registry) SelectByComplexity(role Role, t Tier, cat llm.Catalog) ModelS
 		best = r.capable
 	}
 	spec := ModelSpec{Model: best}
-	if e, ok := cat.Find(best); ok {
+	if e, ok := r.catalog.Find(best); ok {
 		spec.ContextWindow = e.ContextLength
 	}
 	return spec
