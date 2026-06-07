@@ -48,6 +48,14 @@ type Request struct {
 	Tools    []Tool          `json:"tools,omitempty"`
 	Stream   bool            `json:"stream,omitempty"`
 	Provider json.RawMessage `json:"provider,omitempty"`
+	Usage    *UsageOpt       `json:"usage,omitempty"`
+}
+
+// UsageOpt opts into OpenRouter usage accounting (token counts + the
+// authoritative USD cost) on the response, including the final SSE frame for
+// streamed calls. OpenRouter omits cost on streamed responses without this.
+type UsageOpt struct {
+	Include bool `json:"include"`
 }
 
 type Usage struct {

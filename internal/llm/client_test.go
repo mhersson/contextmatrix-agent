@@ -36,6 +36,7 @@ func TestClientSendStream(t *testing.T) {
 	assert.Contains(t, gotBody, `"stream":true`)
 	assert.Contains(t, gotBody, `"model":"m"`)
 	assert.Contains(t, gotBody, `"name":"read"`)
+	assert.Contains(t, gotBody, `"usage":{"include":true}`)
 }
 
 func TestClientSendNonStream(t *testing.T) {

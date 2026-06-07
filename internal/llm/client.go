@@ -32,6 +32,7 @@ func NewClient(apiKey string, opts ...Option) *Client {
 
 func (c *Client) SendStream(ctx context.Context, req Request, onDelta func(Delta)) (Response, error) {
 	req.Stream = true
+	req.Usage = &UsageOpt{Include: true}
 	hr, err := c.do(ctx, req)
 	if err != nil {
 		return Response{}, err
@@ -46,6 +47,7 @@ func (c *Client) SendStream(ctx context.Context, req Request, onDelta func(Delta
 
 func (c *Client) Send(ctx context.Context, req Request) (Response, error) {
 	req.Stream = false
+	req.Usage = &UsageOpt{Include: true}
 	hr, err := c.do(ctx, req)
 	if err != nil {
 		return Response{}, err
