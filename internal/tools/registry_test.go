@@ -58,6 +58,18 @@ func TestResolveInRootRejectsSymlinkEscape(t *testing.T) {
 	assert.Equal(t, filepath.Join(root, "real/ok.txt"), got)
 }
 
+func TestResolveInRootAllowsInRootSymlink(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "real"), 0o755))
+	// A symlink whose target stays inside root must be accepted, and the returned
+	// path is the unresolved in-root path (resolveInRoot's stable-display contract).
+	require.NoError(t, os.Symlink(filepath.Join(root, "real"), filepath.Join(root, "link")))
+
+	got, err := resolveInRoot(root, "link/ok.txt")
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(root, "link/ok.txt"), got)
+}
+
 func TestRequireString(t *testing.T) {
 	v, err := requireString(map[string]any{"path": "x"}, "path")
 	require.NoError(t, err)
