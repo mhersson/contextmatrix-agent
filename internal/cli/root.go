@@ -12,5 +12,6 @@ func NewRootCmd() *cobra.Command {
 	}
 	root.AddCommand(newRunCmd())
 	root.AddCommand(newSweepCmd())
+	root.AddCommand(newFanoutCmd())
 	return root
 }

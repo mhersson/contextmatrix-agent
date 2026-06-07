@@ -83,3 +83,16 @@ func TestRunSpikeDrivesKataGreen(t *testing.T) {
 }
 
 func mustJSON(m map[string]any) string { return toJSON(m) }
+
+func TestCommandCheckPassAndFail(t *testing.T) {
+	root := t.TempDir()
+
+	v, err := commandCheck(root, "true")(context.Background())
+	require.NoError(t, err)
+	assert.True(t, v.OK)
+
+	v, err = commandCheck(root, "echo nope >&2; exit 1")(context.Background())
+	require.NoError(t, err)
+	assert.False(t, v.OK)
+	assert.Contains(t, v.Detail, "nope")
+}
