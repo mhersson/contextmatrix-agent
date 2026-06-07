@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -120,6 +121,33 @@ func TestRunMaxCost(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "max_cost", res.Reason)
 	assert.False(t, res.Completed)
+}
+
+type capturingLLM struct{ last llm.Request }
+
+func (c *capturingLLM) Send(ctx context.Context, req llm.Request) (llm.Response, error) {
+	c.last = req
+	return llm.Response{FinishReason: "stop"}, nil
+}
+
+func (c *capturingLLM) SendStream(ctx context.Context, req llm.Request, onDelta func(llm.Delta)) (llm.Response, error) {
+	c.last = req
+	return llm.Response{FinishReason: "stop"}, nil
+}
+
+func TestRunForwardsProviderAndReasoning(t *testing.T) {
+	reg := tools.NewRegistry(tools.NewReadTool(t.TempDir()))
+	cap := &capturingLLM{}
+	_, err := Run(context.Background(), cap, reg, newEmitter(), "task", Config{
+		MaxTurns:  1,
+		Models:    []string{"primary/m", "fallback/m"},
+		Provider:  json.RawMessage(`{"sort":"price"}`),
+		Reasoning: json.RawMessage(`{"effort":"high"}`),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"primary/m", "fallback/m"}, cap.last.Models) // models[] failover forwarded
+	assert.JSONEq(t, `{"sort":"price"}`, string(cap.last.Provider))
+	assert.JSONEq(t, `{"effort":"high"}`, string(cap.last.Reasoning))
 }
 
 func TestRunMaxTurnsZeroUsesDefault(t *testing.T) {

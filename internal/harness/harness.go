@@ -18,6 +18,7 @@ type Config struct {
 	Model        string
 	Models       []string
 	Provider     json.RawMessage
+	Reasoning    json.RawMessage
 	SystemPrompt string
 	MaxTurns     int
 	MaxCostUSD   float64 // 0 disables the cost cap
@@ -57,11 +58,12 @@ func Run(ctx context.Context, client llm.LLM, reg *tools.Registry, emit *events.
 		res.Turns++
 
 		req := llm.Request{
-			Model:    cfg.Model,
-			Models:   cfg.Models,
-			Provider: cfg.Provider,
-			Messages: msgs,
-			Tools:    reg.Schemas(),
+			Model:     cfg.Model,
+			Models:    cfg.Models,
+			Provider:  cfg.Provider,
+			Reasoning: cfg.Reasoning,
+			Messages:  msgs,
+			Tools:     reg.Schemas(),
 		}
 		emit.Emit(events.ModelRequest, map[string]any{"turn": res.Turns, "model": cfg.Model, "messages": len(msgs)})
 
