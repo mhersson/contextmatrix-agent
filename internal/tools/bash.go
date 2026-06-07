@@ -1,10 +1,12 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"syscall"
 	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/llm"
@@ -38,17 +40,40 @@ func (t BashTool) Execute(ctx context.Context, args map[string]any) (string, err
 	}
 	timeout := optInt(args, "timeout_seconds", 30)
 
-	cctx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(cctx, "bash", "-c", command)
+	cmd := exec.Command("bash", "-c", command)
 	cmd.Dir = t.root
-	out, runErr := cmd.CombinedOutput()
-	res := string(out)
-	if cctx.Err() == context.DeadlineExceeded {
-		res += fmt.Sprintf("\n[command timed out after %ds]", timeout)
-	} else if runErr != nil {
-		res += fmt.Sprintf("\n[command exited with error: %v]", runErr)
+	// New process group so we can signal the whole tree (the child is the
+	// group leader: pgid == child pid). Plain ctx-cancel leaves grandchildren.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("start command: %w", err)
 	}
-	return res, nil
+	pgid := cmd.Process.Pid
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	timer := time.NewTimer(time.Duration(timeout) * time.Second)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		_ = syscall.Kill(-pgid, syscall.SIGKILL) //nolint:errcheck
+		<-done
+		return buf.String() + fmt.Sprintf("\n[command timed out after %ds]", timeout), nil
+	case <-ctx.Done():
+		_ = syscall.Kill(-pgid, syscall.SIGKILL) //nolint:errcheck
+		<-done
+		return buf.String(), ctx.Err()
+	case werr := <-done:
+		res := buf.String()
+		if werr != nil {
+			res += fmt.Sprintf("\n[command exited with error: %v]", werr)
+		}
+		return res, nil
+	}
 }
