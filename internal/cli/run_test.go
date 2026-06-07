@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
@@ -83,6 +84,16 @@ func TestRunSpikeDrivesKataGreen(t *testing.T) {
 }
 
 func mustJSON(m map[string]any) string { return toJSON(m) }
+
+func TestPrintConfigSkipsValidation(t *testing.T) {
+	cmd := newRunCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	// max-turns=0 is invalid, but --print-config must still succeed and print it.
+	cmd.SetArgs([]string{"--print-config", "--max-turns=0"})
+	require.NoError(t, cmd.Execute())
+	assert.Contains(t, buf.String(), "max-turns: 0")
+}
 
 func TestCommandCheckPassAndFail(t *testing.T) {
 	root := t.TempDir()

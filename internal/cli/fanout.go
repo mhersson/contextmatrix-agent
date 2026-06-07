@@ -59,6 +59,9 @@ func newFanoutCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if err := cfg.Validate(); err != nil {
+				return err
+			}
 			key := os.Getenv("OPENROUTER_API_KEY")
 			if key == "" {
 				return fmt.Errorf("OPENROUTER_API_KEY is not set")

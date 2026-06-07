@@ -46,12 +46,12 @@ func newRunCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := cfg.Validate(); err != nil {
-				return err
-			}
 			if printConfig {
 				config.PrintRedacted(cmd.OutOrStdout(), cfg)
 				return nil
+			}
+			if err := cfg.Validate(); err != nil {
+				return err
 			}
 			key := os.Getenv("OPENROUTER_API_KEY")
 			if key == "" {

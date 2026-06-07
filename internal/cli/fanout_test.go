@@ -53,4 +53,22 @@ func TestParseTasks(t *testing.T) {
 
 	_, err = parseTasks([]string{"bad-no-equals"})
 	require.Error(t, err)
+
+	_, err = parseTasks([]string{"=prompt"}) // empty role
+	require.Error(t, err)
+	_, err = parseTasks([]string{"role="}) // empty prompt
+	require.Error(t, err)
+}
+
+func TestFanoutValidatesConfig(t *testing.T) {
+	t.Setenv("CMX_MAX_TURNS", "0")     // invalid config via env
+	t.Setenv("OPENROUTER_API_KEY", "") // ensure we never reach a real client
+
+	cmd := newFanoutCmd()
+	cmd.SetArgs([]string{"--model=m", "--workspace=" + t.TempDir(), "--task=a=b"})
+	err := cmd.Execute()
+	require.Error(t, err)
+	// Validation must fire before the api-key/model/workspace checks. The
+	// hyphenation-independent substring keeps this test independent of other tasks.
+	assert.Contains(t, err.Error(), "must be > 0")
 }
