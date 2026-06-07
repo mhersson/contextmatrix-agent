@@ -10,6 +10,10 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/tools"
 )
 
+// defaultMaxTurns is used when Config.MaxTurns is unset (<= 0), so a zero value
+// never silently produces a no-op "completed" run.
+const defaultMaxTurns = 30
+
 type Config struct {
 	Model        string
 	Models       []string
@@ -39,6 +43,10 @@ func Run(ctx context.Context, client llm.LLM, reg *tools.Registry, emit *events.
 		msgs = append(msgs, llm.Message{Role: "system", Content: cfg.SystemPrompt})
 	}
 	msgs = append(msgs, llm.Message{Role: "user", Content: task})
+
+	if cfg.MaxTurns <= 0 {
+		cfg.MaxTurns = defaultMaxTurns
+	}
 
 	for res.Turns < cfg.MaxTurns {
 		if cfg.MaxCostUSD > 0 && res.TotalCostUSD >= cfg.MaxCostUSD {

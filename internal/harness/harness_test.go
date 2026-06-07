@@ -121,3 +121,21 @@ func TestRunMaxCost(t *testing.T) {
 	assert.Equal(t, "max_cost", res.Reason)
 	assert.False(t, res.Completed)
 }
+
+func TestRunMaxTurnsZeroUsesDefault(t *testing.T) {
+	reg := tools.NewRegistry(tools.NewReadTool(t.TempDir()))
+	// Always asks for a (missing-path) read → never stops on its own.
+	resp := llm.Response{ToolCalls: []llm.ToolCall{toolCall("1", "read", `{"path":"missing"}`)}}
+	many := make([]llm.Response, 0, defaultMaxTurns)
+	for i := 0; i < defaultMaxTurns; i++ {
+		many = append(many, resp)
+	}
+	f := &fakeLLM{responses: many}
+
+	// MaxTurns 0 must NOT mean "run zero turns and silently complete".
+	res, err := Run(context.Background(), f, reg, newEmitter(), "task", Config{MaxTurns: 0})
+	require.NoError(t, err)
+	assert.False(t, res.Completed)
+	assert.Equal(t, "max_turns", res.Reason)
+	assert.Equal(t, defaultMaxTurns, res.Turns)
+}
