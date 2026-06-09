@@ -43,10 +43,7 @@ type Registry struct {
 }
 
 func NewRegistry(pins map[Role]string, capableDefault string, catalog llm.Catalog) *Registry {
-	if pins == nil {
-		pins = map[Role]string{}
-	}
-	return &Registry{pins: pins, capable: capableDefault, catalog: catalog, capabilities: seededCapabilities()}
+	return NewRegistryWithCapabilities(pins, capableDefault, catalog, seededCapabilities())
 }
 
 // Resolve returns the ModelSpec for role. actor is the multi-user seam (ignored
