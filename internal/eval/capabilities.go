@@ -34,5 +34,5 @@ func RenderScores(w io.Writer, mr MatrixResult, scores map[string]map[registry.R
 		fmt.Fprintf(w, "%-44s %-8.2f %-8.2f %-9.5f\n", //nolint:errcheck
 			m, scores[m][registry.RoleCoder], scores[m][registry.RoleReviewer], cost[m])
 	}
-	fmt.Fprintf(w, "total_cost_usd=%.5f aborted=%v\n", mr.TotalCost, mr.Aborted) //nolint:errcheck
+	fmt.Fprintf(w, "total_cost_usd=%.5f aborted=%v errors=%d\n", mr.TotalCost, mr.Aborted, mr.Errors) //nolint:errcheck
 }

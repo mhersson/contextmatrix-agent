@@ -2,6 +2,7 @@ package eval
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/mhersson/contextmatrix-agent/internal/harness"
@@ -61,4 +62,26 @@ func TestRunMatrixBudgetAbort(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, mr.Aborted)
 	assert.Len(t, mr.Outcomes, 2) // stops before the 3rd run (cost would be 1.50 >= 0.60)
+}
+
+// errLLM fails every call, simulating a transient provider/stream error.
+type errLLM struct{}
+
+func (errLLM) Send(context.Context, llm.Request) (llm.Response, error) {
+	return llm.Response{}, errors.New("provider stream error")
+}
+
+func (errLLM) SendStream(context.Context, llm.Request, func(llm.Delta)) (llm.Response, error) {
+	return llm.Response{}, errors.New("provider stream error")
+}
+
+func TestRunMatrixSkipsErroredRuns(t *testing.T) {
+	tasks := []Task{fakeTask{name: "c1", role: registry.RoleCoder, pass: true}}
+	mr, err := RunMatrix(context.Background(), errLLM{}, MatrixOpts{
+		Models: []string{"m1"}, Tasks: tasks, Samples: 3, MaxTurns: 3,
+	})
+	require.NoError(t, err)       // a per-run error must NOT abort the sweep
+	assert.Equal(t, 3, mr.Errors) // all 3 runs errored and were skipped
+	assert.Empty(t, mr.Outcomes)  // nothing scored
+	assert.False(t, mr.Aborted)
 }

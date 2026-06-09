@@ -29,11 +29,15 @@ type MatrixResult struct {
 	Outcomes  []Outcome
 	TotalCost float64
 	Aborted   bool
+	Errors    int // runs skipped due to a per-run error (provider/stream/check); see RunMatrix
 }
 
 // RunMatrix drives every (model × task × sample) in-process, scoring each run via
 // the task's Check. It aborts (Aborted=true) before starting a run once cumulative
-// cost has reached MaxTotalCost, returning whatever completed.
+// cost has reached MaxTotalCost, returning whatever completed. A per-run error
+// (transient provider/stream failure, or a check error) does not abort the sweep:
+// the run is skipped (not scored), counted in Errors, and any partial spend still
+// accrues to TotalCost.
 func RunMatrix(ctx context.Context, client llm.LLM, opts MatrixOpts) (MatrixResult, error) {
 	samples := opts.Samples
 	if samples <= 0 {
@@ -48,11 +52,16 @@ func RunMatrix(ctx context.Context, client llm.LLM, opts MatrixOpts) (MatrixResu
 					return mr, nil
 				}
 				o, err := runOne(ctx, client, model, task, s, opts)
+				mr.TotalCost += o.Cost // accrue any partial spend, even on error
 				if err != nil {
-					return mr, err
+					// A per-run error (transient provider/stream failure, or a check
+					// error) must not abort the whole costly sweep. Skip the run — it
+					// is not scored (no pass, no total in Score) — count it, continue.
+					// The errored run's transcript (if enabled) records the failure.
+					mr.Errors++
+					continue
 				}
 				mr.Outcomes = append(mr.Outcomes, o)
-				mr.TotalCost += o.Cost
 			}
 		}
 	}
@@ -99,11 +108,11 @@ func runOne(ctx context.Context, client llm.LLM, model string, task Task, sample
 		MaxCostUSD: opts.MaxCostUSD,
 	})
 	if err != nil {
-		return Outcome{}, fmt.Errorf("run %s on %s: %w", task.Name(), model, err)
+		return Outcome{Model: model, Role: task.Role(), Task: task.Name(), Cost: res.TotalCostUSD}, fmt.Errorf("run %s on %s: %w", task.Name(), model, err)
 	}
 	v, err := task.Check(ctx, dir, res)
 	if err != nil {
-		return Outcome{}, fmt.Errorf("check %s on %s: %w", task.Name(), model, err)
+		return Outcome{Model: model, Role: task.Role(), Task: task.Name(), Cost: res.TotalCostUSD}, fmt.Errorf("check %s on %s: %w", task.Name(), model, err)
 	}
 	return Outcome{Model: model, Role: task.Role(), Task: task.Name(), Pass: v.OK, Cost: res.TotalCostUSD, Res: res}, nil
 }
