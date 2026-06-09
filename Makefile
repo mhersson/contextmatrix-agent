@@ -1,4 +1,4 @@
-.PHONY: build test fmt lint
+.PHONY: build test fmt lint eval
 build:
 	go build ./...
 test:
@@ -7,3 +7,5 @@ fmt:
 	gofumpt -w .
 lint:
 	golangci-lint run
+eval:
+	go run ./cmd/contextmatrix-agent eval --role all --dry-run
