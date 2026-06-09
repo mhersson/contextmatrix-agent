@@ -1,0 +1,8 @@
+package reverse
+
+// Reverse returns s with its characters in reverse order. Implement it so the
+// tests pass.
+func Reverse(s string) string {
+	// TODO: implement
+	return s
+}

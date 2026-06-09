@@ -7,6 +7,10 @@ import "fmt"
 func DefaultTasks(role string) ([]Task, error) {
 	coder := []Task{
 		CoderTask{name: "sumlist", fixture: "fixtures/coder/sumlist", check: "go test ./..."},
+		CoderTask{name: "reverse", fixture: "fixtures/coder/reverse", check: "go test ./..."},
+		CoderTask{name: "fizzbuzz", fixture: "fixtures/coder/fizzbuzz", check: "go test ./..."},
+		CoderTask{name: "dedup", fixture: "fixtures/coder/dedup", check: "go test ./..."},
+		CoderTask{name: "stats", fixture: "fixtures/coder/stats", check: "go test ./..."},
 	}
 	reviewer := []Task{
 		ReviewerTask{name: "offbyone", fixture: "fixtures/reviewer/offbyone", wantApprove: false, plantedSymbol: "Last"},

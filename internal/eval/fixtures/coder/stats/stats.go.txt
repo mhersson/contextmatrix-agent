@@ -1,0 +1,16 @@
+package stats
+
+// Max returns the largest of xs, or 0 for an empty slice. There is a bug below —
+// fix it so the tests pass.
+func Max(xs []int) int {
+	if len(xs) == 0 {
+		return 0
+	}
+	m := xs[0]
+	for _, x := range xs {
+		if x < m {
+			m = x
+		}
+	}
+	return m
+}
