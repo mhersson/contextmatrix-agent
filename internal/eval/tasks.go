@@ -15,6 +15,12 @@ func DefaultTasks(role string) ([]Task, error) {
 	reviewer := []Task{
 		ReviewerTask{name: "offbyone", fixture: "fixtures/reviewer/offbyone", wantApprove: false, plantedSymbol: "Last"},
 		ReviewerTask{name: "clean_guard", fixture: "fixtures/reviewer/clean_guard", wantApprove: true},
+		ReviewerTask{name: "ignored_err", fixture: "fixtures/reviewer/ignored_err", wantApprove: false, plantedSymbol: "Balance"},
+		ReviewerTask{name: "flipped_cond", fixture: "fixtures/reviewer/flipped_cond", wantApprove: false, plantedSymbol: "Allow"},
+		ReviewerTask{name: "resource_leak", fixture: "fixtures/reviewer/resource_leak", wantApprove: false, plantedSymbol: "Load"},
+		ReviewerTask{name: "clean_contains", fixture: "fixtures/reviewer/clean_contains", wantApprove: true},
+		ReviewerTask{name: "clean_clamp", fixture: "fixtures/reviewer/clean_clamp", wantApprove: true},
+		ReviewerTask{name: "clean_close", fixture: "fixtures/reviewer/clean_close", wantApprove: true},
 	}
 	switch role {
 	case "coder":

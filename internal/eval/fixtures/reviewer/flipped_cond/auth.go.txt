@@ -1,0 +1,10 @@
+package auth
+
+// Allow reports whether a request from the given role may proceed. Only the
+// "admin" role is permitted; everyone else must be denied.
+func Allow(role string) bool {
+	if role != "admin" {
+		return true
+	}
+	return false
+}

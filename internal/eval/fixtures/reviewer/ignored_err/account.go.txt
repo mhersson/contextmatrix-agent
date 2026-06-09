@@ -1,0 +1,10 @@
+package account
+
+import "strconv"
+
+// Balance parses s as an integer balance. A malformed amount must be rejected by
+// returning an error — it must not be silently treated as zero.
+func Balance(s string) (int, error) {
+	n, _ := strconv.Atoi(s)
+	return n, nil
+}

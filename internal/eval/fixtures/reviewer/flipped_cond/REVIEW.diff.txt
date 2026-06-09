@@ -1,0 +1,12 @@
+--- a/auth.go
++++ b/auth.go
+@@
+-func Allow(role string) bool {
+-	return role == "admin"
+-}
++func Allow(role string) bool {
++	if role != "admin" {
++		return true
++	}
++	return false
++}
