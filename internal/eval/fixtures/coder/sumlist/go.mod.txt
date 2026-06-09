@@ -1,0 +1,3 @@
+module sumlist
+
+go 1.26
