@@ -66,3 +66,15 @@ func TestPrintRedacted(t *testing.T) {
 	assert.Contains(t, out, "redacted")
 	assert.NotContains(t, out, "sk-")
 }
+
+func TestCapabilitiesFileLoadsAndPrints(t *testing.T) {
+	t.Setenv("CMX_CAPABILITIES_FILE", "/tmp/caps.json")
+	c, err := Load(nil, "")
+	require.NoError(t, err)
+	require.NotNil(t, c.CapabilitiesFile)
+	assert.Equal(t, "/tmp/caps.json", *c.CapabilitiesFile)
+
+	var buf bytes.Buffer
+	PrintRedacted(&buf, c)
+	assert.Contains(t, buf.String(), "capabilities-file: /tmp/caps.json")
+}

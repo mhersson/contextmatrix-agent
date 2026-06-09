@@ -22,14 +22,15 @@ const envPrefix = "CMX_"
 // as keys) match — e.g. --max-turns ⇒ key "max-turns" ⇒ this tag. Env vars map
 // via the two-step transform in Load (CMX_MAX_TURNS ⇒ "max-turns").
 type Config struct {
-	Model        *string           `koanf:"model"`
-	Models       []string          `koanf:"models"`
-	MaxTurns     *int              `koanf:"max-turns"`
-	MaxCostUSD   *float64          `koanf:"max-cost"`
-	Roles        map[string]string `koanf:"roles"`
-	CapableModel *string           `koanf:"capable-model"`
-	Provider     *ProviderConfig   `koanf:"provider"`
-	Reasoning    *ReasoningConfig  `koanf:"reasoning"`
+	Model            *string           `koanf:"model"`
+	Models           []string          `koanf:"models"`
+	MaxTurns         *int              `koanf:"max-turns"`
+	MaxCostUSD       *float64          `koanf:"max-cost"`
+	Roles            map[string]string `koanf:"roles"`
+	CapableModel     *string           `koanf:"capable-model"`
+	CapabilitiesFile *string           `koanf:"capabilities-file"`
+	Provider         *ProviderConfig   `koanf:"provider"`
+	Reasoning        *ReasoningConfig  `koanf:"reasoning"`
 }
 
 type ProviderConfig struct {
@@ -108,6 +109,7 @@ func PrintRedacted(w io.Writer, c Config) {
 	fmt.Fprintf(w, "max-turns: %s\n", intDeref(c.MaxTurns))                              //nolint:errcheck
 	fmt.Fprintf(w, "max-cost: %s\n", floatDeref(c.MaxCostUSD))                           //nolint:errcheck
 	fmt.Fprintf(w, "capable-model: %s\n", strDeref(c.CapableModel))                      //nolint:errcheck
+	fmt.Fprintf(w, "capabilities-file: %s\n", strDeref(c.CapabilitiesFile))              //nolint:errcheck
 	fmt.Fprintf(w, "roles: %v\n", c.Roles)                                               //nolint:errcheck
 	if c.Provider != nil {
 		fmt.Fprintf(w, "provider: {require-parameters:%s order:%v sort:%s}\n", //nolint:errcheck
