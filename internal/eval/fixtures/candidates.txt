@@ -1,0 +1,5 @@
+# Curated B2 candidate models (one slug per line; blank lines and # comments ok).
+# Finalize against the live catalog in Task 10 — span cheap -> frontier for
+# coder + reviewer. These two are known-valid starting points.
+openai/gpt-oss-120b
+openai/gpt-oss-120b:free
