@@ -1,0 +1,15 @@
+package truncate
+
+// Truncate shortens s to at most n runes. If n <= 0 it returns "". If s has at
+// most n runes it is returned unchanged; otherwise the result is the first n-1
+// runes of s followed by "…" (so the result is exactly n runes long). There are
+// bugs below — fix them so the tests pass.
+func Truncate(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if len(s) <= n {
+		return s
+	}
+	return s[:n-1] + "…"
+}

@@ -1,0 +1,32 @@
+package truncate
+
+import "testing"
+
+func TestTruncate(t *testing.T) {
+	cases := []struct {
+		name string
+		s    string
+		n    int
+		want string
+	}{
+		{"empty under", "", 5, ""},
+		{"ascii under", "abc", 5, "abc"},
+		{"ascii exact", "abc", 3, "abc"},
+		{"ascii over", "abcdef", 5, "abcd…"},
+		{"n one", "hello", 1, "…"},
+		{"n zero", "hello", 0, ""},
+		{"n negative", "hello", -3, ""},
+		{"multibyte over", "héllo", 4, "hél…"},
+		{"multibyte exact", "café", 4, "café"},
+		{"multibyte prefix", "héllo", 3, "hé…"},
+		{"cjk over", "日本語テスト", 3, "日本…"},
+		{"emoji over", "a😀b😀c", 3, "a😀…"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := Truncate(c.s, c.n); got != c.want {
+				t.Errorf("Truncate(%q, %d) = %q, want %q", c.s, c.n, got, c.want)
+			}
+		})
+	}
+}

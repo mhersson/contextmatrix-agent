@@ -151,6 +151,25 @@ func (c *Cache) Put(key, value int) {
 `,
 		},
 		{
+			fixture:  "fixtures/coder/truncate",
+			implFile: "truncate.go",
+			impl: `package truncate
+
+import "unicode/utf8"
+
+func Truncate(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if utf8.RuneCountInString(s) <= n {
+		return s
+	}
+	runes := []rune(s)
+	return string(runes[:n-1]) + "…"
+}
+`,
+		},
+		{
 			fixture:  "fixtures/coder/calc",
 			implFile: "calc.go",
 			impl: `package calc
