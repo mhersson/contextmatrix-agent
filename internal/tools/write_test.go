@@ -17,6 +17,7 @@ func TestWriteToolCreatesAndOverwrites(t *testing.T) {
 	out, err := wt.Execute(context.Background(), map[string]any{"path": "a.txt", "content": "one\ntwo\n"})
 	require.NoError(t, err)
 	assert.Contains(t, out, "created a.txt")
+
 	b, _ := os.ReadFile(filepath.Join(root, "a.txt"))
 	assert.Equal(t, "one\ntwo\n", string(b))
 

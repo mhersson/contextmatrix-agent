@@ -62,7 +62,9 @@ func parseStreamWithLimit(r io.Reader, onDelta func(Delta), maxLine int) (Respon
 	sc.Buffer(make([]byte, 0, min(64*1024, maxLine)), maxLine)
 
 	var resp Response
+
 	acc := map[int]*streamToolCall{}
+
 	var order []int
 
 	for sc.Scan() {
@@ -75,6 +77,7 @@ func parseStreamWithLimit(r io.Reader, onDelta func(Delta), maxLine int) (Respon
 		case !strings.HasPrefix(line, "data:"):
 			continue
 		}
+
 		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if payload == "[DONE]" {
 			break
@@ -84,19 +87,24 @@ func parseStreamWithLimit(r io.Reader, onDelta func(Delta), maxLine int) (Respon
 		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
 			return resp, fmt.Errorf("decode sse chunk: %w", err)
 		}
+
 		if chunk.Error != nil {
 			return resp, fmt.Errorf("openrouter stream error: %s", chunk.Error.Message)
 		}
+
 		if chunk.Model != "" {
 			resp.Model = chunk.Model
 		}
+
 		if chunk.Usage != nil {
 			resp.Usage = *chunk.Usage
 		}
+
 		for _, ch := range chunk.Choices {
 			if ch.FinishReason != "" {
 				resp.FinishReason = ch.FinishReason
 			}
+
 			d := ch.Delta
 			if d.Content != "" {
 				resp.Content += d.Content
@@ -104,9 +112,11 @@ func parseStreamWithLimit(r io.Reader, onDelta func(Delta), maxLine int) (Respon
 					onDelta(Delta{Content: d.Content})
 				}
 			}
+
 			if d.Reasoning != "" && onDelta != nil {
 				onDelta(Delta{Reasoning: d.Reasoning})
 			}
+
 			for _, tc := range d.ToolCalls {
 				cur, ok := acc[tc.Index]
 				if !ok {
@@ -114,37 +124,46 @@ func parseStreamWithLimit(r io.Reader, onDelta func(Delta), maxLine int) (Respon
 					acc[tc.Index] = cur
 					order = append(order, tc.Index)
 				}
+
 				if tc.ID != "" {
 					cur.ID = tc.ID
 				}
+
 				if tc.Type != "" {
 					cur.Type = tc.Type
 				}
+
 				if tc.Function.Name != "" {
 					cur.Function.Name = tc.Function.Name
 				}
+
 				cur.Function.Arguments += tc.Function.Arguments
 			}
 		}
 	}
+
 	if err := sc.Err(); err != nil {
 		if errors.Is(err, bufio.ErrTooLong) {
 			return resp, fmt.Errorf("sse line exceeds %d bytes: %w", maxLine, err)
 		}
+
 		return resp, fmt.Errorf("read sse: %w", err)
 	}
 
 	for _, idx := range order {
 		tc := acc[idx]
+
 		typ := tc.Type
 		if typ == "" {
 			typ = "function"
 		}
+
 		resp.ToolCalls = append(resp.ToolCalls, ToolCall{
 			ID:       tc.ID,
 			Type:     typ,
 			Function: FunctionCall{Name: tc.Function.Name, Arguments: tc.Function.Arguments},
 		})
 	}
+
 	return resp, nil
 }

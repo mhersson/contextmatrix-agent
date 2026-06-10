@@ -23,6 +23,7 @@ func (e CatalogEntry) SupportsTools() bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -34,6 +35,7 @@ func (c Catalog) Find(id string) (CatalogEntry, bool) {
 			return e, true
 		}
 	}
+
 	return CatalogEntry{}, false
 }
 
@@ -52,6 +54,7 @@ func ParseCatalog(r io.Reader) (Catalog, error) {
 	if err := json.NewDecoder(r).Decode(&doc); err != nil {
 		return nil, fmt.Errorf("decode catalog: %w", err)
 	}
+
 	out := make(Catalog, 0, len(doc.Data))
 	for _, d := range doc.Data {
 		prompt, _ := strconv.ParseFloat(d.Pricing.Prompt, 64)
@@ -64,6 +67,7 @@ func ParseCatalog(r io.Reader) (Catalog, error) {
 			SupportedParameters:   d.SupportedParameters,
 		})
 	}
+
 	return out, nil
 }
 
@@ -73,15 +77,20 @@ func (c *Client) FetchCatalog(ctx context.Context) (Catalog, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	hr.Header.Set("Authorization", "Bearer "+c.apiKey)
+
 	resp, err := c.http.Do(hr)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close() //nolint:errcheck
+
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+
 		return nil, fmt.Errorf("catalog status %d: %s", resp.StatusCode, string(body))
 	}
+
 	return ParseCatalog(resp.Body)
 }

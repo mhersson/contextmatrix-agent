@@ -10,10 +10,12 @@ func requireString(args map[string]any, key string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("missing required argument %q", key)
 	}
+
 	s, ok := v.(string)
 	if !ok {
 		return "", fmt.Errorf("argument %q must be a string", key)
 	}
+
 	return s, nil
 }
 
@@ -21,14 +23,16 @@ func optString(args map[string]any, key, def string) string {
 	if v, ok := args[key].(string); ok {
 		return v
 	}
+
 	return def
 }
 
-func optBool(args map[string]any, key string, def bool) bool {
+func optBool(args map[string]any, key string) bool {
 	if v, ok := args[key].(bool); ok {
 		return v
 	}
-	return def
+
+	return false
 }
 
 // optInt accepts JSON numbers (decoded as float64) or ints.
@@ -56,11 +60,13 @@ func optStringSlice(args map[string]any, key string) []string {
 				out = append(out, s)
 			}
 		}
+
 		return out
 	case string:
 		if v == "" {
 			return nil
 		}
+
 		return strings.Fields(v)
 	default:
 		return nil

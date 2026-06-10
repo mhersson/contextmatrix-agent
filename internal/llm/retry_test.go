@@ -15,22 +15,30 @@ import (
 
 func TestRetryRecoversAfter429HonoringRetryAfter(t *testing.T) {
 	var calls int32
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if atomic.AddInt32(&calls, 1) < 3 {
 			w.Header().Set("Retry-After", "2")
 			w.WriteHeader(http.StatusTooManyRequests)
 			io.WriteString(w, `{"error":{"message":"rate limited"}}`) //nolint:errcheck
+
 			return
 		}
+
 		w.Header().Set("Content-Type", "text/event-stream")
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\ndata: [DONE]\n") //nolint:errcheck
 	}))
 	defer srv.Close()
 
 	var delays []time.Duration
+
 	c := NewClient("k", WithBaseURL(srv.URL),
 		WithRetry(RetryPolicy{MaxRetries: 4, BaseDelay: time.Second, MaxDelay: 30 * time.Second, Jitter: false}))
-	c.sleep = func(ctx context.Context, d time.Duration) error { delays = append(delays, d); return nil }
+	c.sleep = func(ctx context.Context, d time.Duration) error {
+		delays = append(delays, d)
+
+		return nil
+	}
 
 	resp, err := c.SendStream(context.Background(), Request{Messages: []Message{{Role: "user", Content: "x"}}}, nil)
 	require.NoError(t, err)
@@ -43,6 +51,7 @@ func TestRetryRecoversAfter429HonoringRetryAfter(t *testing.T) {
 
 func TestRetryExponentialBackoffWithoutRetryAfter(t *testing.T) {
 	var calls int32
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&calls, 1)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -51,9 +60,14 @@ func TestRetryExponentialBackoffWithoutRetryAfter(t *testing.T) {
 	defer srv.Close()
 
 	var delays []time.Duration
+
 	c := NewClient("k", WithBaseURL(srv.URL),
 		WithRetry(RetryPolicy{MaxRetries: 3, BaseDelay: time.Second, MaxDelay: 30 * time.Second, Jitter: false}))
-	c.sleep = func(ctx context.Context, d time.Duration) error { delays = append(delays, d); return nil }
+	c.sleep = func(ctx context.Context, d time.Duration) error {
+		delays = append(delays, d)
+
+		return nil
+	}
 
 	_, err := c.Send(context.Background(), Request{Messages: []Message{{Role: "user"}}})
 	require.Error(t, err)
@@ -64,6 +78,7 @@ func TestRetryExponentialBackoffWithoutRetryAfter(t *testing.T) {
 
 func TestNoRetryByDefault(t *testing.T) {
 	var calls int32
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&calls, 1)
 		w.WriteHeader(http.StatusTooManyRequests)

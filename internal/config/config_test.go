@@ -30,7 +30,7 @@ func TestLoadPrecedenceDefaultsFileEnvFlags(t *testing.T) {
 	require.NotNil(t, c.MaxTurns)
 	assert.Equal(t, 20, *c.MaxTurns) // env beats file; flag not passed for this key
 	require.NotNil(t, c.MaxCostUSD)
-	assert.Equal(t, 0.50, *c.MaxCostUSD) // default survives (untouched anywhere)
+	assert.InDelta(t, 0.50, *c.MaxCostUSD, 1e-9) // default survives (untouched anywhere)
 }
 
 func TestDefaultsAndValidate(t *testing.T) {
@@ -69,6 +69,7 @@ func TestPrintRedacted(t *testing.T) {
 
 func TestCapabilitiesFileLoadsAndPrints(t *testing.T) {
 	t.Setenv("CMX_CAPABILITIES_FILE", "/tmp/caps.json")
+
 	c, err := Load(nil, "")
 	require.NoError(t, err)
 	require.NotNil(t, c.CapabilitiesFile)

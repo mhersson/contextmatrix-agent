@@ -11,7 +11,7 @@ func TestParseArgs(t *testing.T) {
 	m, err := parseArgs(`{"path":"x","n":2}`)
 	require.NoError(t, err)
 	assert.Equal(t, "x", m["path"])
-	assert.Equal(t, float64(2), m["n"])
+	assert.InDelta(t, float64(2), m["n"], 1e-9)
 
 	_, err = parseArgs("")
 	require.Error(t, err)

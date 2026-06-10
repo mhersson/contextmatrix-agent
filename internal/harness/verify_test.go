@@ -14,6 +14,7 @@ import (
 
 func TestVerifyEmitsAndReturnsVerdict(t *testing.T) {
 	var transcript bytes.Buffer
+
 	emit := events.NewEmitter(nil, &transcript)
 	v, err := Verify(context.Background(), emit, func(ctx context.Context) (Verdict, error) {
 		return Verdict{OK: false, Detail: "2 tests failing"}, nil
@@ -27,6 +28,7 @@ func TestVerifyEmitsAndReturnsVerdict(t *testing.T) {
 
 func TestVerifyNilCheckIsNoop(t *testing.T) {
 	var transcript bytes.Buffer
+
 	emit := events.NewEmitter(nil, &transcript)
 	v, err := Verify(context.Background(), emit, nil)
 	require.NoError(t, err)
@@ -36,6 +38,7 @@ func TestVerifyNilCheckIsNoop(t *testing.T) {
 
 func TestVerifyPropagatesError(t *testing.T) {
 	var transcript bytes.Buffer
+
 	emit := events.NewEmitter(nil, &transcript)
 	_, err := Verify(context.Background(), emit, func(ctx context.Context) (Verdict, error) {
 		return Verdict{}, errors.New("check blew up")

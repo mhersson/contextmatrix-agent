@@ -44,10 +44,13 @@ func (t ReviewerTask) Check(_ context.Context, _ string, res harness.Result) (ha
 	if !ok {
 		return harness.Verdict{OK: false, Detail: "no parseable VERDICT line"}, nil
 	}
+
 	if t.wantApprove {
 		return harness.Verdict{OK: approve, Detail: "clean diff; approve=" + boolStr(approve)}, nil
 	}
+
 	caught := !approve && strings.Contains(strings.ToLower(defect), strings.ToLower(t.plantedSymbol))
+
 	return harness.Verdict{OK: caught, Detail: "mutant; defect=" + defect}, nil
 }
 
@@ -57,6 +60,7 @@ func parseVerdict(output string) (approve bool, defect string, ok bool) {
 	sc := bufio.NewScanner(strings.NewReader(output))
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
+
 		upper := strings.ToUpper(line)
 		switch {
 		case strings.HasPrefix(upper, "VERDICT:"):
@@ -66,6 +70,7 @@ func parseVerdict(output string) (approve bool, defect string, ok bool) {
 			defect = strings.TrimSpace(line[len("DEFECT:"):])
 		}
 	}
+
 	return approve, defect, ok
 }
 
@@ -73,5 +78,6 @@ func boolStr(b bool) string {
 	if b {
 		return "true"
 	}
+
 	return "false"
 }

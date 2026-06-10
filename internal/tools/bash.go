@@ -38,23 +38,28 @@ func (t BashTool) Execute(ctx context.Context, args map[string]any) (string, err
 	if err != nil {
 		return "", err
 	}
+
 	timeout := optInt(args, "timeout_seconds", 30)
 
-	cmd := exec.Command("bash", "-c", command)
+	cmd := exec.Command("bash", "-c", command) //nolint:noctx // ctx cancel is handled below by killing the whole process group; CommandContext would kill only the child
 	cmd.Dir = t.root
 	// New process group so we can signal the whole tree (the child is the
 	// group leader: pgid == child pid). Plain ctx-cancel leaves grandchildren.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
 	var buf bytes.Buffer
+
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
 
 	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("start command: %w", err)
 	}
+
 	pgid := cmd.Process.Pid
 
 	done := make(chan error, 1)
+
 	go func() { done <- cmd.Wait() }()
 
 	timer := time.NewTimer(time.Duration(timeout) * time.Second)
@@ -63,17 +68,22 @@ func (t BashTool) Execute(ctx context.Context, args map[string]any) (string, err
 	select {
 	case <-timer.C:
 		_ = syscall.Kill(-pgid, syscall.SIGKILL) //nolint:errcheck
+
 		<-done
+
 		return buf.String() + fmt.Sprintf("\n[command timed out after %ds]", timeout), nil
 	case <-ctx.Done():
 		_ = syscall.Kill(-pgid, syscall.SIGKILL) //nolint:errcheck
+
 		<-done
+
 		return buf.String(), ctx.Err()
 	case werr := <-done:
 		res := buf.String()
 		if werr != nil {
 			res += fmt.Sprintf("\n[command exited with error: %v]", werr)
 		}
+
 		return res, nil
 	}
 }

@@ -17,6 +17,7 @@ func TestGlobTool(t *testing.T) {
 			t.Skip("neither fd nor rg installed")
 		}
 	}
+
 	root := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(root, "a.go"), []byte("package x\n"), 0o644))
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "sub"), 0o755))
@@ -40,9 +41,11 @@ func TestGlobToolRespectsGitignore(t *testing.T) {
 			t.Skip("neither fd nor rg installed")
 		}
 	}
+
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
+
 	root := t.TempDir()
 	cmd := exec.Command("git", "init")
 	cmd.Dir = root
@@ -77,9 +80,11 @@ func TestGlobViaRgRespectsGitignore(t *testing.T) {
 	if _, err := exec.LookPath("rg"); err != nil {
 		t.Skip("rg not installed")
 	}
+
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
+
 	root := t.TempDir()
 	cmd := exec.Command("git", "init")
 	cmd.Dir = root

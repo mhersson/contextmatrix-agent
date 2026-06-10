@@ -38,6 +38,7 @@ func Encode(s string) string {
 	}
 	return out
 }`
+
 	switch s.step {
 	case 1:
 		// Read the actual skeleton and replace the whole file in one valid edit.
@@ -45,6 +46,7 @@ func Encode(s string) string {
 		if err != nil {
 			return llm.Response{}, err
 		}
+
 		return llm.Response{ToolCalls: []llm.ToolCall{{
 			ID: "1", Type: "function",
 			Function: llm.FunctionCall{Name: "edit", Arguments: mustJSON(map[string]any{
@@ -65,6 +67,7 @@ func TestRunSpikeDrivesKataGreen(t *testing.T) {
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Skip("go toolchain not available")
 	}
+
 	dir := t.TempDir()
 	require.NoError(t, kata.Copy(dir))
 
@@ -87,6 +90,7 @@ func mustJSON(m map[string]any) string { return toJSON(m) }
 
 func TestPrintConfigSkipsValidation(t *testing.T) {
 	cmd := newRunCmd()
+
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 	// max-turns=0 is invalid, but --print-config must still succeed and print it.

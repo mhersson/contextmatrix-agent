@@ -8,7 +8,7 @@ import (
 )
 
 func TestWilsonLowerBound(t *testing.T) {
-	assert.Equal(t, 0.0, wilsonLowerBound(0, 0, 1.96))
+	assert.InDelta(t, 0.0, wilsonLowerBound(0, 0, 1.96), 1e-9)
 	// All-pass at small n is pulled well below 1.0 (conservative).
 	lb := wilsonLowerBound(3, 3, 1.96)
 	assert.Less(t, lb, 0.5)
@@ -28,7 +28,7 @@ func TestScoreGroupsByModelRole(t *testing.T) {
 	}
 	s := Score(outcomes, 1.96)
 	assert.Greater(t, s["m1"][registry.RoleCoder], s["m1"][registry.RoleReviewer])
-	assert.Equal(t, 0.0, s["m2"][registry.RoleCoder]) // 0/1 -> 0
+	assert.InDelta(t, 0.0, s["m2"][registry.RoleCoder], 1e-9) // 0/1 -> 0
 }
 
 func TestTierRank(t *testing.T) {

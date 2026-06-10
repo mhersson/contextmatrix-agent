@@ -27,6 +27,7 @@ func TestSweepDispatchRunsEachModel(t *testing.T) {
 	rows, err := sweepDispatch(context.Background(), []string{"weak", "control"},
 		func(ctx context.Context, model string) (harness.Result, error) {
 			calls++
+
 			return harness.Result{ModelUsed: model, Completed: true, Reason: "done"}, nil
 		})
 	require.NoError(t, err)

@@ -37,12 +37,14 @@ func (t GlobTool) Execute(ctx context.Context, args map[string]any) (string, err
 	if err != nil {
 		return "", err
 	}
+
 	searchPath := t.root
 	if rel := optString(args, "path", ""); rel != "" {
 		abs, err := resolveInRoot(t.root, rel)
 		if err != nil {
 			return "", err
 		}
+
 		searchPath = abs
 	}
 
@@ -50,9 +52,11 @@ func (t GlobTool) Execute(ctx context.Context, args map[string]any) (string, err
 	if err != nil {
 		return "", err
 	}
+
 	if len(rels) == 0 {
 		return "no matches", nil
 	}
+
 	return strings.Join(rels, "\n"), nil
 }
 
@@ -62,9 +66,11 @@ func (t GlobTool) list(ctx context.Context, pattern, searchPath string) ([]strin
 	if bin := fdBinary(); bin != "" {
 		return t.globViaFd(ctx, bin, pattern, searchPath)
 	}
+
 	if _, err := exec.LookPath("rg"); err == nil {
 		return t.globViaRg(ctx, pattern, searchPath)
 	}
+
 	return nil, fmt.Errorf("glob requires fd or rg on PATH")
 }
 
@@ -73,10 +79,12 @@ func (t GlobTool) list(ctx context.Context, pattern, searchPath string) ([]strin
 func (t GlobTool) globViaFd(ctx context.Context, bin, pattern, searchPath string) ([]string, error) {
 	cmd := exec.CommandContext(ctx, bin, "--glob", "--type", "f", pattern, searchPath)
 	cmd.Dir = t.root
+
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("fd glob failed: %v: %s", err, strings.TrimSpace(string(out)))
 	}
+
 	return relLines(string(out), t.root), nil
 }
 
@@ -86,13 +94,16 @@ func (t GlobTool) globViaFd(ctx context.Context, bin, pattern, searchPath string
 func (t GlobTool) globViaRg(ctx context.Context, pattern, searchPath string) ([]string, error) {
 	cmd := exec.CommandContext(ctx, "rg", "--files", searchPath)
 	cmd.Dir = t.root
+
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 1 {
 			return nil, nil // rg: no files found
 		}
+
 		return nil, fmt.Errorf("rg --files failed: %v: %s", err, strings.TrimSpace(string(out)))
 	}
+
 	return filterByGlob(relLines(string(out), t.root), pattern), nil
 }
 
@@ -107,16 +118,20 @@ func (t GlobTool) globViaRg(ctx context.Context, pattern, searchPath string) ([]
 func filterByGlob(rels []string, pattern string) []string {
 	pattern = strings.TrimPrefix(pattern, "**/")
 	matchBase := !strings.Contains(pattern, "/")
+
 	var out []string
+
 	for _, rel := range rels {
 		name := rel
 		if matchBase {
 			name = filepath.Base(rel)
 		}
+
 		if ok, _ := filepath.Match(pattern, name); ok {
 			out = append(out, rel)
 		}
 	}
+
 	return out
 }
 
@@ -126,14 +141,18 @@ func relLines(out, root string) []string {
 	if out == "" {
 		return nil
 	}
+
 	var rels []string
+
 	for _, ln := range strings.Split(out, "\n") {
 		ln = strings.TrimSpace(ln)
 		if ln == "" {
 			continue
 		}
+
 		rels = append(rels, strings.TrimPrefix(ln, root+"/"))
 	}
+
 	return rels
 }
 
@@ -145,5 +164,6 @@ func fdBinary() string {
 			return name
 		}
 	}
+
 	return ""
 }

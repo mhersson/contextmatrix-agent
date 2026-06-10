@@ -51,16 +51,20 @@ func NewEmitter(human, transcript io.Writer) *Emitter {
 func (e *Emitter) Emit(kind Kind, data map[string]any) Event {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
 	e.seq++
+
 	ev := Event{Seq: e.seq, Kind: kind, Time: e.now(), Data: data}
 	if e.transcript != nil {
 		if b, err := json.Marshal(ev); err == nil {
 			fmt.Fprintln(e.transcript, string(b)) //nolint:errcheck
 		}
 	}
+
 	if e.human != nil {
 		fmt.Fprintf(e.human, "[%d] %-14s %s\n", ev.Seq, ev.Kind, summarize(data)) //nolint:errcheck
 	}
+
 	return ev
 }
 
@@ -68,10 +72,13 @@ func summarize(data map[string]any) string {
 	if len(data) == 0 {
 		return ""
 	}
+
 	b, _ := json.Marshal(data)
+
 	s := string(b)
 	if len(s) > 240 {
 		s = s[:240] + "…"
 	}
+
 	return s
 }

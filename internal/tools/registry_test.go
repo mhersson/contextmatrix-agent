@@ -85,8 +85,8 @@ func TestOptionalArgAccessors(t *testing.T) {
 	args := map[string]any{"s": "v", "b": true, "f": float64(5), "i": 3}
 	assert.Equal(t, "v", optString(args, "s", "def"))
 	assert.Equal(t, "def", optString(args, "missing", "def"))
-	assert.True(t, optBool(args, "b", false))
-	assert.False(t, optBool(args, "missing", false))
+	assert.True(t, optBool(args, "b"))
+	assert.False(t, optBool(args, "missing"))
 	assert.Equal(t, 5, optInt(args, "f", 0)) // JSON number → float64 path
 	assert.Equal(t, 3, optInt(args, "i", 0)) // int path
 	assert.Equal(t, 7, optInt(args, "missing", 7))

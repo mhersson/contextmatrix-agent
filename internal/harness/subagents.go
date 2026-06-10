@@ -44,36 +44,46 @@ func SpawnSubagents(ctx context.Context, client llm.LLM, root string, emit *even
 	if opts.MaxDepth > 0 && opts.Depth >= opts.MaxDepth {
 		return nil, fmt.Errorf("subagent depth %d reached the cap of %d", opts.Depth, opts.MaxDepth)
 	}
+
 	if len(specs) == 0 {
 		return nil, nil
 	}
+
 	reg := tools.NewReadOnlyRegistry(root)
 
 	perChild := 0.0
 	if opts.AggregateCostCap > 0 {
 		perChild = opts.AggregateCostCap / float64(len(specs))
 	}
+
 	emit.Emit(events.StateChange, map[string]any{"spawn_subagents": len(specs), "depth": opts.Depth})
 
 	results := make([]SubagentResult, len(specs))
+
 	var wg sync.WaitGroup
 	for i, spec := range specs {
 		wg.Add(1)
+
 		go func(i int, spec SubagentSpec) {
 			defer wg.Done()
+
 			model := spec.Model
 			if model == "" {
 				model = opts.DefaultModel
 			}
+
 			cost := spec.MaxCostUSD
 			if cost == 0 {
 				cost = perChild
 			}
+
 			res, err := Run(ctx, client, reg, emit, spec.Prompt,
 				Config{Model: model, MaxTurns: spec.MaxTurns, MaxCostUSD: cost})
 			results[i] = SubagentResult{Role: spec.Role, Output: res.Output, Result: res, Err: err}
 		}(i, spec)
 	}
+
 	wg.Wait()
+
 	return results, nil
 }

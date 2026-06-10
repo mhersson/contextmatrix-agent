@@ -20,14 +20,17 @@ func TestReviewerFixturesProvision(t *testing.T) {
 	require.NotEmpty(t, tasks)
 
 	var mutants, clean int
+
 	for _, task := range tasks {
 		rt, ok := task.(ReviewerTask)
 		require.True(t, ok)
+
 		if rt.wantApprove {
 			clean++
 		} else {
 			mutants++
 		}
+
 		t.Run(rt.name, func(t *testing.T) {
 			dir := t.TempDir()
 			require.NoError(t, rt.Provision(dir))
@@ -36,23 +39,30 @@ func TestReviewerFixturesProvision(t *testing.T) {
 			if rt.wantApprove {
 				return
 			}
+
 			require.NotEmpty(t, rt.plantedSymbol, "a mutant must name a planted symbol")
+
 			found := false
 			entries, err := os.ReadDir(dir)
 			require.NoError(t, err)
+
 			for _, e := range entries {
 				if !strings.HasSuffix(e.Name(), ".go") {
 					continue
 				}
+
 				b, err := os.ReadFile(filepath.Join(dir, e.Name()))
 				require.NoError(t, err)
+
 				if strings.Contains(string(b), rt.plantedSymbol) {
 					found = true
 				}
 			}
+
 			assert.True(t, found, "planted symbol %q must appear in a provisioned .go source", rt.plantedSymbol)
 		})
 	}
+
 	assert.GreaterOrEqual(t, mutants, 3, "want a balanced mutant set")
 	assert.GreaterOrEqual(t, clean, 3, "want a balanced clean set")
 }

@@ -14,10 +14,12 @@ func TestEditToolReplace(t *testing.T) {
 	root := t.TempDir()
 	p := filepath.Join(root, "f.txt")
 	require.NoError(t, os.WriteFile(p, []byte("hello world"), 0o644))
+
 	et := NewEditTool(root)
 
 	_, err := et.Execute(context.Background(), map[string]any{"path": "f.txt", "old_string": "world", "new_string": "gophers"})
 	require.NoError(t, err)
+
 	b, _ := os.ReadFile(p)
 	assert.Equal(t, "hello gophers", string(b))
 }

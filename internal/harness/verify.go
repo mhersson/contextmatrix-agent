@@ -23,11 +23,15 @@ func Verify(ctx context.Context, emit *events.Emitter, check Check) (Verdict, er
 	if check == nil {
 		return Verdict{}, nil
 	}
+
 	v, err := check(ctx)
 	if err != nil {
 		emit.Emit(events.Verification, map[string]any{"ok": false, "error": err.Error()})
+
 		return Verdict{}, err
 	}
+
 	emit.Emit(events.Verification, map[string]any{"ok": v.OK, "detail": v.Detail})
+
 	return v, nil
 }

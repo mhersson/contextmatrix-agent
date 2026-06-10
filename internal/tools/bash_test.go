@@ -47,6 +47,7 @@ func TestBashToolKillsProcessGroupOnTimeout(t *testing.T) {
 	assert.Contains(t, out, "timed out")
 
 	time.Sleep(3 * time.Second) // outlast the grandchild's sleep
+
 	_, statErr := os.Stat(marker)
 	assert.True(t, os.IsNotExist(statErr), "grandchild survived the timeout; process group was not killed")
 }

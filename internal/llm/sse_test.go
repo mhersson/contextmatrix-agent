@@ -18,6 +18,7 @@ func TestParseStreamContentAndUsage(t *testing.T) {
 	}, "\n") + "\n"
 
 	var streamed strings.Builder
+
 	resp, err := parseStream(strings.NewReader(sse), func(d Delta) { streamed.WriteString(d.Content) })
 	require.NoError(t, err)
 	assert.Equal(t, "Hello", resp.Content)
@@ -42,7 +43,7 @@ func TestParseStreamToolCallByIndexWithLateName(t *testing.T) {
 	require.Len(t, resp.ToolCalls, 1)
 	assert.Equal(t, "call_1", resp.ToolCalls[0].ID)
 	assert.Equal(t, "read", resp.ToolCalls[0].Function.Name)
-	assert.Equal(t, `{"path":"x"}`, resp.ToolCalls[0].Function.Arguments)
+	assert.JSONEq(t, `{"path":"x"}`, resp.ToolCalls[0].Function.Arguments)
 	assert.Equal(t, "function", resp.ToolCalls[0].Type)
 }
 

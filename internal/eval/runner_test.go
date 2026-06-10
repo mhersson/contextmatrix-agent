@@ -93,16 +93,19 @@ type captureLLM struct{ provider *json.RawMessage }
 
 func (c captureLLM) Send(_ context.Context, req llm.Request) (llm.Response, error) {
 	*c.provider = req.Provider
+
 	return llm.Response{FinishReason: "stop"}, nil
 }
 
 func (c captureLLM) SendStream(_ context.Context, req llm.Request, _ func(llm.Delta)) (llm.Response, error) {
 	*c.provider = req.Provider
+
 	return llm.Response{FinishReason: "stop"}, nil
 }
 
 func TestRunMatrixForwardsProvider(t *testing.T) {
 	var seen json.RawMessage
+
 	prov := json.RawMessage(`{"sort":"throughput","require_parameters":true}`)
 	_, err := RunMatrix(context.Background(), captureLLM{provider: &seen}, MatrixOpts{
 		Models:  []string{"m1"},

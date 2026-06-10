@@ -24,10 +24,13 @@ type evalParams struct {
 }
 
 func newEvalCmd() *cobra.Command {
-	var p evalParams
-	var modelsCSV string
-	var freeAuto bool
-	var minContext int
+	var (
+		p          evalParams
+		modelsCSV  string
+		freeAuto   bool
+		minContext int
+	)
+
 	cmd := &cobra.Command{
 		Use:   "eval",
 		Short: "Measure per-role capability scores across a model set",
@@ -36,19 +39,24 @@ func newEvalCmd() *cobra.Command {
 			if key == "" {
 				return fmt.Errorf("OPENROUTER_API_KEY is not set")
 			}
+
 			client := llm.NewClient(key, llm.WithRetry(llm.DefaultRetryPolicy()))
+
 			cat, err := client.FetchCatalog(cmd.Context())
 			if err != nil {
 				return fmt.Errorf("fetch catalog: %w", err)
 			}
+
 			models, err := resolveModels(modelsCSV, freeAuto, cat, minContext)
 			if err != nil {
 				return err
 			}
+
 			tasks, err := eval.DefaultTasks(p.role)
 			if err != nil {
 				return err
 			}
+
 			return runEval(cmd.Context(), cmd.OutOrStdout(), client, cat, models, tasks, p)
 		},
 	}
@@ -66,6 +74,7 @@ func newEvalCmd() *cobra.Command {
 	cmd.Flags().IntVar(&minContext, "min-context", 16384, "min context window for --free-auto models")
 	cmd.Flags().StringVar(&p.providerSort, "provider-sort", "throughput", "OpenRouter provider sort: throughput|price|latency (empty disables provider routing)")
 	cmd.Flags().StringVar(&p.quantAllow, "quant-allow", "fp16,bf16,fp8,unknown", "allowed provider quantizations (comma-separated); gates out heavy quant like fp4/int4")
+
 	return cmd
 }
 
@@ -78,6 +87,7 @@ func resolveModels(csv string, freeAuto bool, cat llm.Catalog, minContext int) (
 		if len(m) == 0 {
 			return nil, fmt.Errorf("--free-auto found no :free tool-capable models with context >= %d", minContext)
 		}
+
 		return m, nil
 	default:
 		return eval.DefaultCandidates(), nil
@@ -91,6 +101,7 @@ func runEval(ctx context.Context, w io.Writer, client llm.LLM, cat llm.Catalog, 
 		est := eval.EstimateCost(cat, models, len(tasks), p.samples, 8000, 1500)
 		fmt.Fprintf(w, "dry-run: %d models × %d tasks × %d samples = %d runs; rough est ≈ $%.2f\n", //nolint:errcheck
 			len(models), len(tasks), p.samples, len(models)*len(tasks)*p.samples, est)
+
 		return nil
 	}
 
@@ -98,9 +109,11 @@ func runEval(ctx context.Context, w io.Writer, client llm.LLM, cat llm.Catalog, 
 	if err != nil {
 		return err
 	}
+
 	if prov != nil {
 		fmt.Fprintf(w, "provider routing: %s\n", string(prov)) //nolint:errcheck
 	}
+
 	mr, err := eval.RunMatrix(ctx, client, eval.MatrixOpts{
 		Models: models, Tasks: tasks, Samples: p.samples,
 		TranscriptDir: p.transcriptDir, MaxTurns: p.maxTurns, MaxCostUSD: p.maxCost, MaxTotalCost: p.maxTotalCost,
@@ -109,21 +122,27 @@ func runEval(ctx context.Context, w io.Writer, client llm.LLM, cat llm.Catalog, 
 	if err != nil {
 		return err
 	}
+
 	measured := eval.Score(mr.Outcomes, 1.96)
 
 	// Merge over any existing file, then write.
 	final := measured
+
 	if f, err := os.Open(p.out); err == nil {
 		prior, perr := registry.LoadCapabilities(f)
 		f.Close() //nolint:errcheck
+
 		if perr == nil {
 			final = registry.MergeCapabilities(prior, measured)
 		}
 	}
+
 	if err := writeCapabilitiesFile(p.out, final); err != nil {
 		return err
 	}
+
 	eval.RenderScores(w, mr, measured)
+
 	if mr.Aborted {
 		fmt.Fprintf(w, "WARNING: budget $%.2f exceeded; wrote partial scores\n", p.maxTotalCost) //nolint:errcheck
 	}
@@ -131,6 +150,7 @@ func runEval(ctx context.Context, w io.Writer, client llm.LLM, cat llm.Catalog, 
 	if p.check != "" {
 		return runCheck(w, p.check, measured)
 	}
+
 	return nil
 }
 
@@ -140,11 +160,14 @@ func runCheck(w io.Writer, baselinePath string, measured map[string]map[registry
 		return fmt.Errorf("open baseline: %w", err)
 	}
 	defer f.Close() //nolint:errcheck
+
 	base, err := registry.LoadCapabilities(f)
 	if err != nil {
 		return err
 	}
+
 	var regressions []string
+
 	for m, roles := range base {
 		for r, bscore := range roles {
 			mscore := measured[m][r]
@@ -154,13 +177,17 @@ func runCheck(w io.Writer, baselinePath string, measured map[string]map[registry
 			}
 		}
 	}
+
 	if len(regressions) > 0 {
 		for _, line := range regressions {
 			fmt.Fprintf(w, "REGRESSION: %s\n", line) //nolint:errcheck
 		}
+
 		return fmt.Errorf("%d capability regression(s)", len(regressions))
 	}
+
 	fmt.Fprintln(w, "check: no regressions") //nolint:errcheck
+
 	return nil
 }
 
@@ -170,6 +197,7 @@ func writeCapabilitiesFile(path string, caps map[string]map[registry.Role]float6
 		return err
 	}
 	defer f.Close() //nolint:errcheck
+
 	return eval.WriteCapabilities(f, caps)
 }
 
@@ -182,6 +210,7 @@ func providerRouting(sort, quantCSV string) (json.RawMessage, error) {
 	if strings.TrimSpace(sort) == "" {
 		return nil, nil
 	}
+
 	block := map[string]any{
 		"sort":               sort,
 		"require_parameters": true,
@@ -189,19 +218,23 @@ func providerRouting(sort, quantCSV string) (json.RawMessage, error) {
 	if q := splitCSV(quantCSV); len(q) > 0 {
 		block["quantizations"] = q
 	}
+
 	b, err := json.Marshal(block)
 	if err != nil {
 		return nil, fmt.Errorf("marshal provider routing: %w", err)
 	}
+
 	return b, nil
 }
 
 func splitCSV(s string) []string {
 	var out []string
+
 	for _, p := range strings.Split(s, ",") {
 		if p = strings.TrimSpace(p); p != "" {
 			out = append(out, p)
 		}
 	}
+
 	return out
 }

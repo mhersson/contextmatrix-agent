@@ -33,44 +33,54 @@ func (t EditTool) Schema() llm.Tool {
 	}}
 }
 
-func (t EditTool) Execute(ctx context.Context, args map[string]any) (string, error) {
+func (t EditTool) Execute(_ context.Context, args map[string]any) (string, error) {
 	rel, err := requireString(args, "path")
 	if err != nil {
 		return "", err
 	}
+
 	oldStr, err := requireString(args, "old_string")
 	if err != nil {
 		return "", err
 	}
+
 	newStr, err := requireString(args, "new_string")
 	if err != nil {
 		return "", err
 	}
-	replaceAll := optBool(args, "replace_all", false)
+
+	replaceAll := optBool(args, "replace_all")
 
 	abs, err := resolveInRoot(t.root, rel)
 	if err != nil {
 		return "", err
 	}
+
 	b, err := os.ReadFile(abs)
 	if err != nil {
 		return "", err
 	}
+
 	content := string(b)
+
 	n := strings.Count(content, oldStr)
 	if n == 0 {
 		return "", fmt.Errorf("old_string not found in %s", rel)
 	}
+
 	if n > 1 && !replaceAll {
 		return "", fmt.Errorf("old_string appears %d times in %s; set replace_all or provide a unique string", n, rel)
 	}
+
 	if replaceAll {
 		content = strings.ReplaceAll(content, oldStr, newStr)
 	} else {
 		content = strings.Replace(content, oldStr, newStr, 1)
 	}
-	if err := os.WriteFile(abs, []byte(content), 0o644); err != nil {
+
+	if err := os.WriteFile(abs, []byte(content), 0o644); err != nil { //nolint:gosec // G703: abs is jail-resolved by resolveInRoot above
 		return "", err
 	}
+
 	return fmt.Sprintf("edited %s (%d replacement(s))", rel, n), nil
 }

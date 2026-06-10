@@ -26,6 +26,7 @@ func DefaultRetryPolicy() RetryPolicy {
 func ctxSleep(ctx context.Context, d time.Duration) error {
 	t := time.NewTimer(d)
 	defer t.Stop()
+
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -53,25 +54,31 @@ func retryAfter(resp *http.Response) (time.Duration, bool) {
 	if v == "" {
 		return 0, false
 	}
+
 	if secs, err := strconv.Atoi(v); err == nil {
 		return time.Duration(secs) * time.Second, true
 	}
+
 	if when, err := http.ParseTime(v); err == nil {
 		if d := time.Until(when); d > 0 {
 			return d, true
 		}
+
 		return 0, true
 	}
+
 	return 0, false
 }
 
-func capDelay(d, max time.Duration) time.Duration {
+func capDelay(d, ceiling time.Duration) time.Duration {
 	if d < 0 {
 		return 0
 	}
-	if max > 0 && d > max {
-		return max
+
+	if ceiling > 0 && d > ceiling {
+		return ceiling
 	}
+
 	return d
 }
 
@@ -83,10 +90,12 @@ func (c *Client) backoff(attempt int, lastResp *http.Response) time.Duration {
 			return capDelay(d, c.retry.MaxDelay)
 		}
 	}
+
 	d := capDelay(c.retry.BaseDelay<<(attempt-1), c.retry.MaxDelay)
 	if c.retry.Jitter && d > 1 {
 		half := d / 2
 		d = half + time.Duration(rand.Int64N(int64(half)+1)) //nolint:gosec // jitter, not security
 	}
+
 	return d
 }

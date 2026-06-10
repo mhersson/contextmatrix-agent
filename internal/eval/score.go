@@ -26,16 +26,19 @@ func wilsonLowerBound(passes, n int, z float64) float64 {
 	if n == 0 {
 		return 0
 	}
+
 	fn := float64(n)
 	phat := float64(passes) / fn
 	z2 := z * z
 	denom := 1 + z2/fn
 	center := phat + z2/(2*fn)
 	margin := z * math.Sqrt(phat*(1-phat)/fn+z2/(4*fn*fn))
+
 	lower := (center - margin) / denom
 	if lower < 0 {
 		return 0
 	}
+
 	return lower
 }
 
@@ -46,21 +49,27 @@ func Score(outcomes []Outcome, z float64) map[string]map[registry.Role]float64 {
 		model string
 		role  registry.Role
 	}
+
 	passes, total := map[key]int{}, map[key]int{}
+
 	for _, o := range outcomes {
 		k := key{o.Model, o.Role}
+
 		total[k]++
 		if o.Pass {
 			passes[k]++
 		}
 	}
+
 	out := map[string]map[registry.Role]float64{}
 	for k, n := range total {
 		if out[k.model] == nil {
 			out[k.model] = map[registry.Role]float64{}
 		}
+
 		out[k.model][k.role] = wilsonLowerBound(passes[k], n, z)
 	}
+
 	return out
 }
 

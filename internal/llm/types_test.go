@@ -20,6 +20,7 @@ func TestRequestMarshalsOpenRouterExtras(t *testing.T) {
 	}
 	b, err := json.Marshal(req)
 	require.NoError(t, err)
+
 	s := string(b)
 	assert.Contains(t, s, `"models":["primary/model","fallback/model"]`)
 	assert.Contains(t, s, `"provider":{"require_parameters":true}`)
@@ -29,6 +30,7 @@ func TestRequestMarshalsOpenRouterExtras(t *testing.T) {
 func TestResponseToleratesUnknownFields(t *testing.T) {
 	// Unknown top-level + nested fields must not break decoding.
 	raw := `{"model":"m","brand_new_field":42,"usage":{"prompt_tokens":3,"completion_tokens":5,"cost":0.0001,"surprise":true}}`
+
 	var nr nonStreamResponse
 	require.NoError(t, json.NewDecoder(strings.NewReader(raw)).Decode(&nr))
 	assert.Equal(t, "m", nr.Model)

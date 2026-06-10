@@ -5,7 +5,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -14,10 +13,12 @@ import (
 
 func TestClientSendStream(t *testing.T) {
 	var gotAuth, gotBody string
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
 		b, _ := io.ReadAll(r.Body)
 		gotBody = string(b)
+
 		w.Header().Set("Content-Type", "text/event-stream")
 		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}],\"usage\":{\"cost\":0.0002}}\ndata: [DONE]\n") //nolint:errcheck
 	}))
@@ -63,5 +64,5 @@ func TestClientNon200(t *testing.T) {
 	_, err := c.SendStream(context.Background(), Request{Messages: []Message{{Role: "user"}}}, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "429")
-	assert.True(t, strings.Contains(err.Error(), "rate limited"))
+	assert.Contains(t, err.Error(), "rate limited")
 }

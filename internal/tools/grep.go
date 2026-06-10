@@ -37,31 +37,38 @@ func (t GrepTool) Execute(ctx context.Context, args map[string]any) (string, err
 	if err != nil {
 		return "", err
 	}
+
 	searchPath := t.root
 	if rel := optString(args, "path", ""); rel != "" {
 		abs, err := resolveInRoot(t.root, rel)
 		if err != nil {
 			return "", err
 		}
+
 		searchPath = abs
 	}
+
 	cmdArgs := []string{"--line-number", "--no-heading", "--color=never"}
 	if g := optString(args, "glob", ""); g != "" {
 		cmdArgs = append(cmdArgs, "--glob", g)
 	}
+
 	cmdArgs = append(cmdArgs, "--", pattern, searchPath)
 
 	cmd := exec.CommandContext(ctx, "rg", cmdArgs...)
 	cmd.Dir = t.root
+
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		// rg exits 1 when there are no matches — not an error for us.
 		if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 1 {
 			return "no matches", nil
 		}
+
 		if _, lookErr := exec.LookPath("rg"); lookErr != nil {
 			return "", fmt.Errorf("ripgrep (rg) not installed")
 		}
+
 		return "", fmt.Errorf("rg failed: %v: %s", err, string(out))
 	}
 	// Strip the workspace root prefix for cleaner, portable output.

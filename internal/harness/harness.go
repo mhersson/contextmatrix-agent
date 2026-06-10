@@ -45,11 +45,15 @@ type Result struct {
 // Run drives the bare agent loop: model call → tool dispatch → repeat, until the
 // model emits no tool calls (done) or a cap trips. FSM-free; no orchestration.
 func Run(ctx context.Context, client llm.LLM, reg *tools.Registry, emit *events.Emitter, task string, cfg Config) (Result, error) {
-	var res Result
-	var msgs []llm.Message
+	var (
+		res  Result
+		msgs []llm.Message
+	)
+
 	if cfg.SystemPrompt != "" {
 		msgs = append(msgs, llm.Message{Role: "system", Content: cfg.SystemPrompt})
 	}
+
 	msgs = append(msgs, llm.Message{Role: "user", Content: task})
 
 	if cfg.MaxTurns <= 0 {
@@ -60,8 +64,10 @@ func Run(ctx context.Context, client llm.LLM, reg *tools.Registry, emit *events.
 		if cfg.MaxCostUSD > 0 && res.TotalCostUSD >= cfg.MaxCostUSD {
 			res.Reason = "max_cost"
 			emit.Emit(events.StateChange, map[string]any{"stop": "max_cost", "cost_usd": res.TotalCostUSD})
+
 			return res, nil
 		}
+
 		res.Turns++
 
 		req := llm.Request{
@@ -77,13 +83,17 @@ func Run(ctx context.Context, client llm.LLM, reg *tools.Registry, emit *events.
 		resp, err := client.SendStream(ctx, req, nil)
 		if err != nil {
 			emit.Emit(events.ErrorKind, map[string]any{"error": err.Error()})
+
 			res.Reason = "error"
+
 			return res, err
 		}
+
 		res.TotalCostUSD += resp.Usage.Cost
 		if resp.Model != "" {
 			res.ModelUsed = resp.Model
 		}
+
 		res.Output = resp.Content
 		emit.Emit(events.ModelResponse, map[string]any{
 			"turn": res.Turns, "finish_reason": resp.FinishReason,
@@ -96,12 +106,14 @@ func Run(ctx context.Context, client llm.LLM, reg *tools.Registry, emit *events.
 
 		if cfg.ContextWindow > 0 && resp.Usage.PromptTokens >= int(contextLimitThreshold*float64(cfg.ContextWindow)) {
 			res.Reason = "context_limit"
+
 			emit.Emit(events.ContextLimit, map[string]any{
 				"prompt_tokens":  resp.Usage.PromptTokens,
 				"context_window": cfg.ContextWindow,
 				"ratio":          float64(resp.Usage.PromptTokens) / float64(cfg.ContextWindow),
 				"threshold":      contextLimitThreshold,
 			})
+
 			return res, nil
 		}
 
@@ -112,19 +124,23 @@ func Run(ctx context.Context, client llm.LLM, reg *tools.Registry, emit *events.
 			res.Completed = true
 			res.Reason = "done"
 			emit.Emit(events.StateChange, map[string]any{"stop": "done", "turns": res.Turns})
+
 			return res, nil
 		}
 
 		for _, tc := range resp.ToolCalls {
 			res.ToolCallCount++
+
 			emit.Emit(events.ToolCallKind, map[string]any{"id": tc.ID, "name": tc.Function.Name, "raw_args": tc.Function.Arguments})
 
 			tool, ok := reg.Get(tc.Function.Name)
 			if !ok {
 				msg := fmt.Sprintf("unknown tool %q", tc.Function.Name)
 				res.ToolCallFailures++
+
 				msgs = append(msgs, toolResultMsg(tc.ID, msg))
 				emit.Emit(events.ToolResult, map[string]any{"id": tc.ID, "error": msg})
+
 				continue
 			}
 
@@ -134,6 +150,7 @@ func Run(ctx context.Context, client llm.LLM, reg *tools.Registry, emit *events.
 				rm := repairMessage(tc.Function.Name, err)
 				msgs = append(msgs, toolResultMsg(tc.ID, rm))
 				emit.Emit(events.ToolRepair, map[string]any{"id": tc.ID, "name": tc.Function.Name, "error": err.Error()})
+
 				continue
 			}
 
@@ -143,14 +160,18 @@ func Run(ctx context.Context, client llm.LLM, reg *tools.Registry, emit *events.
 				em := fmt.Sprintf("tool error: %v", err)
 				msgs = append(msgs, toolResultMsg(tc.ID, em))
 				emit.Emit(events.ToolResult, map[string]any{"id": tc.ID, "error": em})
+
 				continue
 			}
+
 			msgs = append(msgs, toolResultMsg(tc.ID, out))
 			emit.Emit(events.ToolResult, map[string]any{"id": tc.ID, "output_len": len(out)})
 		}
 	}
+
 	res.Reason = "max_turns"
 	emit.Emit(events.StateChange, map[string]any{"stop": "max_turns", "turns": res.Turns})
+
 	return res, nil
 }
 
@@ -158,5 +179,6 @@ func toolResultMsg(id, content string) llm.Message {
 	if content == "" {
 		content = "(no output)"
 	}
+
 	return llm.Message{Role: "tool", ToolCallID: id, Content: content}
 }

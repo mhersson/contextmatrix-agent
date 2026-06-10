@@ -46,21 +46,26 @@ func copyEmbedded(root, dest string) error {
 		if err != nil {
 			return err
 		}
+
 		if d.IsDir() {
 			return nil
 		}
+
 		data, err := fixturesFS.ReadFile(p)
 		if err != nil {
 			return err
 		}
+
 		rel, err := filepath.Rel(root, p)
 		if err != nil {
 			return err
 		}
+
 		out := filepath.Join(dest, strings.TrimSuffix(rel, ".txt"))
 		if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
 			return err
 		}
+
 		return os.WriteFile(out, data, 0o644)
 	})
 }
@@ -70,12 +75,15 @@ func copyEmbedded(root, dest string) error {
 func runCommand(ctx context.Context, dir, command string) (harness.Verdict, error) {
 	cmd := exec.CommandContext(ctx, "bash", "-c", command)
 	cmd.Dir = dir
+
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if _, ok := err.(*exec.ExitError); ok {
 			return harness.Verdict{OK: false, Detail: strings.TrimSpace(string(out))}, nil
 		}
+
 		return harness.Verdict{}, fmt.Errorf("check command: %w", err)
 	}
+
 	return harness.Verdict{OK: true, Detail: strings.TrimSpace(string(out))}, nil
 }

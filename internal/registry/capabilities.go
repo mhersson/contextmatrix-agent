@@ -14,9 +14,11 @@ func NewRegistryWithCapabilities(pins map[Role]string, capableDefault string, ca
 	if pins == nil {
 		pins = map[Role]string{}
 	}
+
 	if caps == nil {
 		caps = map[string]map[Role]float64{}
 	}
+
 	return &Registry{pins: pins, capable: capableDefault, catalog: catalog, capabilities: caps}
 }
 
@@ -27,6 +29,7 @@ func LoadCapabilities(r io.Reader) (map[string]map[Role]float64, error) {
 	if err := json.NewDecoder(r).Decode(&m); err != nil {
 		return nil, fmt.Errorf("decode capabilities: %w", err)
 	}
+
 	return m, nil
 }
 
@@ -40,13 +43,16 @@ func MergeCapabilities(base, over map[string]map[Role]float64) map[string]map[Ro
 			out[m][r] = v
 		}
 	}
+
 	for m, roles := range over {
 		if out[m] == nil {
 			out[m] = map[Role]float64{}
 		}
+
 		for r, v := range roles {
 			out[m][r] = v
 		}
 	}
+
 	return out
 }

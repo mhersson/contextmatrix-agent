@@ -33,8 +33,10 @@ func (f *fakeLLM) next() llm.Response {
 	if f.i >= len(f.responses) {
 		return llm.Response{FinishReason: "stop"}
 	}
+
 	r := f.responses[f.i]
 	f.i++
+
 	return r
 }
 
@@ -127,37 +129,41 @@ type capturingLLM struct{ last llm.Request }
 
 func (c *capturingLLM) Send(ctx context.Context, req llm.Request) (llm.Response, error) {
 	c.last = req
+
 	return llm.Response{FinishReason: "stop"}, nil
 }
 
 func (c *capturingLLM) SendStream(ctx context.Context, req llm.Request, onDelta func(llm.Delta)) (llm.Response, error) {
 	c.last = req
+
 	return llm.Response{FinishReason: "stop"}, nil
 }
 
 func TestRunForwardsProviderAndReasoning(t *testing.T) {
 	reg := tools.NewRegistry(tools.NewReadTool(t.TempDir()))
-	cap := &capturingLLM{}
-	_, err := Run(context.Background(), cap, reg, newEmitter(), "task", Config{
+	capt := &capturingLLM{}
+	_, err := Run(context.Background(), capt, reg, newEmitter(), "task", Config{
 		MaxTurns:  1,
 		Models:    []string{"primary/m", "fallback/m"},
 		Provider:  json.RawMessage(`{"sort":"price"}`),
 		Reasoning: json.RawMessage(`{"effort":"high"}`),
 	})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"primary/m", "fallback/m"}, cap.last.Models) // models[] failover forwarded
-	assert.JSONEq(t, `{"sort":"price"}`, string(cap.last.Provider))
-	assert.JSONEq(t, `{"effort":"high"}`, string(cap.last.Reasoning))
+	assert.Equal(t, []string{"primary/m", "fallback/m"}, capt.last.Models) // models[] failover forwarded
+	assert.JSONEq(t, `{"sort":"price"}`, string(capt.last.Provider))
+	assert.JSONEq(t, `{"effort":"high"}`, string(capt.last.Reasoning))
 }
 
 func TestRunMaxTurnsZeroUsesDefault(t *testing.T) {
 	reg := tools.NewRegistry(tools.NewReadTool(t.TempDir()))
 	// Always asks for a (missing-path) read → never stops on its own.
 	resp := llm.Response{ToolCalls: []llm.ToolCall{toolCall("1", "read", `{"path":"missing"}`)}}
+
 	many := make([]llm.Response, 0, defaultMaxTurns)
 	for i := 0; i < defaultMaxTurns; i++ {
 		many = append(many, resp)
 	}
+
 	f := &fakeLLM{responses: many}
 
 	// MaxTurns 0 must NOT mean "run zero turns and silently complete".

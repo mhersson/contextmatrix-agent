@@ -45,6 +45,7 @@ func Encode(s string) string {
 	return out
 }`
 	require.NoError(t, os.WriteFile(filepath.Join(dest, "rle.go"), []byte(good), 0o644))
+
 	cmd = exec.Command("go", "test", "./...")
 	cmd.Dir = dest
 	require.NoError(t, cmd.Run(), "correct impl should pass")

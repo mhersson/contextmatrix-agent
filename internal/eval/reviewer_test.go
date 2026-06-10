@@ -6,6 +6,7 @@ import (
 
 	"github.com/mhersson/contextmatrix-agent/internal/harness"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestParseVerdict(t *testing.T) {
@@ -26,7 +27,7 @@ func TestReviewerCheckMutant(t *testing.T) {
 	task := ReviewerTask{name: "offbyone", plantedSymbol: "Last"}
 	// Caught: requests changes citing Last.
 	v, err := task.Check(context.Background(), "", harness.Result{Output: "VERDICT: REQUEST_CHANGES\nDEFECT: last.go:Last - index out of range"})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.True(t, v.OK)
 	// Missed: approves the buggy diff.
 	v, _ = task.Check(context.Background(), "", harness.Result{Output: "VERDICT: APPROVE"})

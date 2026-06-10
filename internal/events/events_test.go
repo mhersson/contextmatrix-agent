@@ -13,6 +13,7 @@ import (
 
 func TestEmitterSeqAndDualOutput(t *testing.T) {
 	var human, transcript bytes.Buffer
+
 	e := NewEmitter(&human, &transcript)
 	e.now = func() time.Time { return time.Unix(0, 0).UTC() }
 

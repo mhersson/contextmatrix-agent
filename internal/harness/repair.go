@@ -14,10 +14,12 @@ func parseArgs(raw string) (map[string]any, error) {
 	if s == "" {
 		return nil, fmt.Errorf("empty arguments")
 	}
+
 	var m map[string]any
 	if err := json.Unmarshal([]byte(s), &m); err != nil {
 		return nil, fmt.Errorf("invalid JSON arguments: %w", err)
 	}
+
 	return m, nil
 }
 

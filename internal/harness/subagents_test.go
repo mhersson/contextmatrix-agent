@@ -28,6 +28,7 @@ func (s *scriptedLLM) SendStream(ctx context.Context, req llm.Request, onDelta f
 	if last.Role == "tool" {
 		return llm.Response{Content: s.final, FinishReason: "stop"}, nil
 	}
+
 	return llm.Response{ToolCalls: []llm.ToolCall{toolCall("1", s.tool, s.args)}}, nil
 }
 
@@ -46,6 +47,7 @@ func TestSpawnSubagentsParallelReadOnly(t *testing.T) {
 	require.Len(t, results, 2)
 	assert.Equal(t, "reader-a", results[0].Role)
 	assert.Equal(t, "reader-b", results[1].Role)
+
 	for _, r := range results {
 		require.NoError(t, r.Err)
 		assert.True(t, r.Result.Completed)
@@ -70,6 +72,7 @@ func TestSpawnSubagentsChildrenAreReadOnly(t *testing.T) {
 		SubagentOpts{MaxDepth: 2, DefaultModel: "m"})
 	require.NoError(t, err)
 	assert.Equal(t, 1, results[0].Result.ToolCallFailures) // "edit" is unknown in a read-only registry
+
 	b, _ := os.ReadFile(filepath.Join(root, "f.txt"))
 	assert.Equal(t, "orig", string(b)) // untouched
 }

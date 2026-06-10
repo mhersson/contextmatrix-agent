@@ -1,0 +1,74 @@
+version: "2"
+linters:
+  default: none
+  enable:
+  # Enabled by default -- Few false positives
+  - errcheck
+  - govet
+  - ineffassign
+  - staticcheck
+  - unused
+
+  # The following are additionally enabled
+  - containedctx
+  - gocritic
+  - godot
+  - gosec
+  - misspell
+  - nakedret
+  - nlreturn # new line before return
+  - noctx # check requests for context
+  - revive
+  - testifylint # use proper testify methods
+  - unconvert # Remove unnecessary type conversions
+  - unparam
+  - whitespace
+  - wsl_v5
+  settings:
+    nakedret:
+      max-func-lines: 5
+    wsl_v5:
+      allow-first-in-block: true
+      allow-whole-block: false
+      branch-max-lines: 2
+  exclusions:
+    generated: lax
+    presets:
+    - common-false-positives
+    - std-error-handling
+    - comments
+    rules:
+    # G104 duplicates errcheck; errcheck is the authoritative unhandled-error
+    # linter and its suppressions are deliberate per-line nolint directives.
+    - linters: [gosec]
+      text: "G104"
+    # G301/G302/G306: files written into agent workspaces are repo source files,
+    # not secrets — git checkouts use 0644/0755 and the worked code must keep
+    # standard modes. Secrets never go through these write paths.
+    - linters: [gosec]
+      text: "G301|G302|G306"
+    # Test fixtures legitimately use hardcoded credentials, variable URLs, and int conversions
+    - linters: [gosec]
+      text: "G101|G107|G115"
+      path: "_test\\.go$"
+    # noctx in tests: test HTTP helpers use context.Background() implicitly
+    - linters: [noctx]
+      path: "_test\\.go$"
+    # empty drain loops (for range ch {}) are idiomatic in tests
+    - linters: [revive]
+      text: "empty-block"
+      path: "_test\\.go$"
+    # unused parameters in test helpers (e.g. http.HandlerFunc signatures)
+    - linters: [revive]
+      text: "unused-parameter"
+      path: "_test\\.go$"
+    # test helpers with a single call site don't need flexible params
+    - linters: [unparam]
+      path: "_test\\.go$"
+issues:
+  max-issues-per-linter: 50
+  max-same-issues: 8
+  fix: true
+formatters:
+  enable:
+  - goimports

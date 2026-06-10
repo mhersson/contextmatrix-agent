@@ -20,15 +20,18 @@ func Copy(dest string) error {
 	if err != nil {
 		return err
 	}
+
 	for _, e := range entries {
 		data, err := templateFS.ReadFile("template/" + e.Name())
 		if err != nil {
 			return err
 		}
+
 		name := strings.TrimSuffix(e.Name(), ".txt") // go.mod.txt -> go.mod
 		if err := os.WriteFile(filepath.Join(dest, name), data, 0o644); err != nil {
 			return fmt.Errorf("write %s: %w", name, err)
 		}
 	}
+
 	return nil
 }

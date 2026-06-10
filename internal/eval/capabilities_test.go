@@ -11,11 +11,12 @@ import (
 
 func TestWriteCapabilitiesRoundTrip(t *testing.T) {
 	caps := map[string]map[registry.Role]float64{"m": {registry.RoleCoder: 0.7}}
+
 	var buf bytes.Buffer
 	require.NoError(t, WriteCapabilities(&buf, caps))
 	got, err := registry.LoadCapabilities(&buf)
 	require.NoError(t, err)
-	assert.Equal(t, 0.7, got["m"][registry.RoleCoder])
+	assert.InDelta(t, 0.7, got["m"][registry.RoleCoder], 1e-9)
 }
 
 func TestRenderScoresStable(t *testing.T) {
@@ -23,6 +24,7 @@ func TestRenderScoresStable(t *testing.T) {
 		"b/model": {registry.RoleCoder: 0.8},
 		"a/model": {registry.RoleReviewer: 0.5},
 	}
+
 	var buf bytes.Buffer
 	RenderScores(&buf, MatrixResult{}, scores)
 	out := buf.String()
@@ -35,5 +37,6 @@ func indexOf(s, sub string) int {
 			return i
 		}
 	}
+
 	return -1
 }

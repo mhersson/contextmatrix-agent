@@ -41,18 +41,23 @@ func (t GitTool) Execute(ctx context.Context, args map[string]any) (string, erro
 	if err != nil {
 		return "", err
 	}
+
 	if !readonlyGitSubcommands[sub] {
 		return "", fmt.Errorf("git subcommand %q is not allowed (read-only: status, diff, log, show, branch)", sub)
 	}
+
 	cmdArgs := append([]string{sub}, optStringSlice(args, "args")...)
 	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
 	cmd.Dir = t.root
+
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if _, ok := err.(*exec.ExitError); ok {
 			return string(out), nil // surface git's own message as output, not a hard failure
 		}
+
 		return "", fmt.Errorf("git failed: %v", err)
 	}
+
 	return string(out), nil
 }

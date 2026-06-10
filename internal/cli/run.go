@@ -36,8 +36,11 @@ type runOpts struct {
 const defaultSystemPrompt = "You are a coding agent working in a project workspace. Use the provided tools (read, edit, write, grep, glob, git, bash) to inspect and modify files. When the task is complete, run any relevant checks with bash and reply with a short confirmation and no tool call."
 
 func newRunCmd() *cobra.Command {
-	var taskDir, task, transcript, verify, configFile, systemPrompt string
-	var printConfig bool
+	var (
+		taskDir, task, transcript, verify, configFile, systemPrompt string
+		printConfig                                                 bool
+	)
+
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Run the harness on a workspace with a free-form task",
@@ -46,24 +49,31 @@ func newRunCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+
 			if printConfig {
 				config.PrintRedacted(cmd.OutOrStdout(), cfg)
+
 				return nil
 			}
+
 			if err := cfg.Validate(); err != nil {
 				return err
 			}
+
 			key := os.Getenv("OPENROUTER_API_KEY")
 			if key == "" {
 				return fmt.Errorf("OPENROUTER_API_KEY is not set")
 			}
+
 			model := derefStr(cfg.Model)
 			if model == "" {
 				return fmt.Errorf("--model (or config 'model') is required")
 			}
+
 			if taskDir == "" {
 				return fmt.Errorf("--workspace is required")
 			}
+
 			client := llm.NewClient(key, llm.WithRetry(llm.DefaultRetryPolicy()))
 
 			prov, reas := routingRaw(cfg)
@@ -80,23 +90,29 @@ func newRunCmd() *cobra.Command {
 				reasoning:     reas,
 				transcript:    transcript,
 			}
+
 			res, err := runSpike(cmd.Context(), client, o)
 			if err != nil {
 				return err
 			}
+
 			printResult(cmd.OutOrStdout(), model, res)
 
 			if verify != "" {
 				emit := events.NewEmitter(cmd.OutOrStdout(), nil)
+
 				v, vErr := harness.Verify(cmd.Context(), emit, commandCheck(taskDir, verify))
 				if vErr != nil {
 					return vErr
 				}
+
 				fmt.Fprintf(cmd.OutOrStdout(), "verified=%v %s\n", v.OK, v.Detail) //nolint:errcheck
+
 				if !v.OK {
 					return fmt.Errorf("verification failed")
 				}
 			}
+
 			return nil
 		},
 	}
@@ -111,6 +127,7 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&configFile, "config", "", "path to a YAML config file")
 	cmd.Flags().BoolVar(&printConfig, "print-config", false, "print the effective config (secrets redacted) and exit")
 	cmd.Flags().Bool("local", true, "run standalone without CM callbacks (B1: always true)")
+
 	return cmd
 }
 
@@ -120,6 +137,7 @@ func runSpike(ctx context.Context, client llm.LLM, o runOpts) (harness.Result, e
 	if o.taskDir == "" {
 		return harness.Result{}, fmt.Errorf("workspace is required")
 	}
+
 	reg := tools.NewRegistry(
 		tools.NewReadTool(o.taskDir),
 		tools.NewEditTool(o.taskDir),
@@ -129,25 +147,31 @@ func runSpike(ctx context.Context, client llm.LLM, o runOpts) (harness.Result, e
 		tools.NewGitTool(o.taskDir),
 		tools.NewBashTool(o.taskDir),
 	)
+
 	human := o.human
 	if human == nil {
 		human = os.Stdout
 	}
+
 	var transcriptW io.Writer
+
 	if o.transcript != "" {
 		f, err := os.Create(o.transcript)
 		if err != nil {
 			return harness.Result{}, err
 		}
 		defer f.Close() //nolint:errcheck
+
 		transcriptW = f
 	}
+
 	emit := events.NewEmitter(human, transcriptW)
 
 	sysPrompt := o.systemPrompt
 	if sysPrompt == "" {
 		sysPrompt = defaultSystemPrompt
 	}
+
 	cfg := harness.Config{
 		Model:         o.model,
 		Models:        o.models,
@@ -158,6 +182,7 @@ func runSpike(ctx context.Context, client llm.LLM, o runOpts) (harness.Result, e
 		MaxCostUSD:    o.maxCost,
 		ContextWindow: o.contextWindow,
 	}
+
 	return harness.Run(ctx, client, reg, emit, o.task, cfg)
 }
 
@@ -167,13 +192,16 @@ func commandCheck(root, command string) harness.Check {
 	return func(ctx context.Context) (harness.Verdict, error) {
 		cmd := exec.CommandContext(ctx, "bash", "-c", command)
 		cmd.Dir = root
+
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			if _, ok := err.(*exec.ExitError); ok {
 				return harness.Verdict{OK: false, Detail: strings.TrimSpace(string(out))}, nil
 			}
+
 			return harness.Verdict{}, fmt.Errorf("verify command: %w", err)
 		}
+
 		return harness.Verdict{OK: true, Detail: strings.TrimSpace(string(out))}, nil
 	}
 }
@@ -185,15 +213,18 @@ func resolveWindow(ctx context.Context, client *llm.Client, model string) int {
 	if err != nil {
 		return 0
 	}
+
 	spec, err := registry.NewRegistry(nil, model, cat).Resolve("", registry.RoleCoder)
 	if err != nil {
 		return 0
 	}
+
 	return spec.ContextWindow
 }
 
 func routingRaw(c config.Config) (json.RawMessage, json.RawMessage) {
 	var prov, reas json.RawMessage
+
 	if c.Provider != nil {
 		if raw, err := (llm.Provider{
 			RequireParameters: c.Provider.RequireParameters,
@@ -203,6 +234,7 @@ func routingRaw(c config.Config) (json.RawMessage, json.RawMessage) {
 			prov = raw
 		}
 	}
+
 	if c.Reasoning != nil {
 		if raw, err := (llm.Reasoning{
 			Effort:    c.Reasoning.Effort,
@@ -212,6 +244,7 @@ func routingRaw(c config.Config) (json.RawMessage, json.RawMessage) {
 			reas = raw
 		}
 	}
+
 	return prov, reas
 }
 
@@ -225,6 +258,7 @@ func derefStr(p *string) string {
 	if p == nil {
 		return ""
 	}
+
 	return *p
 }
 
@@ -232,6 +266,7 @@ func derefInt(p *int) int {
 	if p == nil {
 		return 0
 	}
+
 	return *p
 }
 
@@ -239,10 +274,12 @@ func derefFloat(p *float64) float64 {
 	if p == nil {
 		return 0
 	}
+
 	return *p
 }
 
 func toJSON(v any) string {
 	b, _ := json.Marshal(v)
+
 	return string(b)
 }

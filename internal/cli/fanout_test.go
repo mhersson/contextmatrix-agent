@@ -24,6 +24,7 @@ func (fanoutFakeLLM) SendStream(ctx context.Context, req llm.Request, onDelta fu
 	if req.Messages[len(req.Messages)-1].Role == "tool" {
 		return llm.Response{Content: "found it", FinishReason: "stop"}, nil
 	}
+
 	return llm.Response{ToolCalls: []llm.ToolCall{{
 		ID: "1", Type: "function",
 		Function: llm.FunctionCall{Name: "read", Arguments: `{"path":"f.txt"}`},

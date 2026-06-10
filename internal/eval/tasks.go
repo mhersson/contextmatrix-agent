@@ -27,6 +27,7 @@ func DefaultTasks(role string) ([]Task, error) {
 		ReviewerTask{name: "clean_clamp", fixture: "fixtures/reviewer/clean_clamp", wantApprove: true},
 		ReviewerTask{name: "clean_close", fixture: "fixtures/reviewer/clean_close", wantApprove: true},
 	}
+
 	switch role {
 	case "coder":
 		return coder, nil

@@ -42,7 +42,9 @@ func (t stubTask) Check(context.Context, string, harness.Result) (harness.Verdic
 
 func TestRunEvalDryRun(t *testing.T) {
 	cat := llm.Catalog{{ID: "m", PromptPricePerTok: 1e-6, CompletionPricePerTok: 1e-6}}
+
 	var buf bytes.Buffer
+
 	err := runEval(context.Background(), &buf, stubLLM{}, cat, []string{"m"},
 		[]eval.Task{stubTask{name: "c", role: registry.RoleCoder, pass: true}},
 		evalParams{role: "coder", samples: 3, dryRun: true})
@@ -53,14 +55,18 @@ func TestRunEvalDryRun(t *testing.T) {
 
 func TestRunEvalWritesScores(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "caps.json")
+
 	var buf bytes.Buffer
+
 	err := runEval(context.Background(), &buf, stubLLM{cost: 0.001}, llm.Catalog{}, []string{"m"},
 		[]eval.Task{stubTask{name: "c", role: registry.RoleCoder, pass: true}},
 		evalParams{role: "coder", samples: 4, out: out, maxTurns: 3})
 	require.NoError(t, err)
 	f, err := os.Open(out)
 	require.NoError(t, err)
+
 	defer f.Close() //nolint:errcheck
+
 	caps, err := registry.LoadCapabilities(f)
 	require.NoError(t, err)
 	assert.Greater(t, caps["m"][registry.RoleCoder], 0.0)
@@ -71,7 +77,9 @@ func TestRunEvalCheckRegression(t *testing.T) {
 	base := filepath.Join(t.TempDir(), "baseline.json")
 	require.NoError(t, os.WriteFile(base, []byte(`{"m":{"coder":0.95}}`), 0o644))
 	out := filepath.Join(t.TempDir(), "caps.json")
+
 	var buf bytes.Buffer
+
 	err := runEval(context.Background(), &buf, stubLLM{}, llm.Catalog{}, []string{"m"},
 		[]eval.Task{stubTask{name: "c", role: registry.RoleCoder, pass: false}},
 		evalParams{role: "coder", samples: 3, out: out, check: base, maxTurns: 3})
@@ -88,6 +96,7 @@ func TestProviderRouting(t *testing.T) {
 	// throughput builds the gated block
 	b, err = providerRouting("throughput", "fp16,bf16,fp8,unknown")
 	require.NoError(t, err)
+
 	var m map[string]any
 	require.NoError(t, json.Unmarshal(b, &m))
 	assert.Equal(t, "throughput", m["sort"])

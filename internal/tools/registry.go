@@ -25,13 +25,16 @@ func NewRegistry(ts ...Tool) *Registry {
 		if _, dup := r.tools[t.Name()]; !dup {
 			r.order = append(r.order, t.Name())
 		}
+
 		r.tools[t.Name()] = t
 	}
+
 	return r
 }
 
 func (r *Registry) Get(name string) (Tool, bool) {
 	t, ok := r.tools[name]
+
 	return t, ok
 }
 
@@ -40,5 +43,6 @@ func (r *Registry) Schemas() []llm.Tool {
 	for _, name := range r.order {
 		out = append(out, r.tools[name].Schema())
 	}
+
 	return out
 }

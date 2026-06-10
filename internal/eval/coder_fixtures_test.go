@@ -307,9 +307,11 @@ func (p *parser) parseFactor() (int, error) {
 			if check == "" {
 				check = "go test ./..."
 			}
+
 			if strings.Contains(check, "-race") && !cgoAvailable() {
 				check = "go test ./..."
 			}
+
 			ct := CoderTask{name: filepath.Base(c.fixture), fixture: c.fixture, check: check}
 			dir := t.TempDir()
 			require.NoError(t, ct.Provision(dir))
@@ -336,5 +338,6 @@ func cgoAvailable() bool {
 			return true
 		}
 	}
+
 	return false
 }

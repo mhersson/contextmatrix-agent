@@ -31,35 +31,44 @@ func (t ReadTool) Schema() llm.Tool {
 	}}
 }
 
-func (t ReadTool) Execute(ctx context.Context, args map[string]any) (string, error) {
+func (t ReadTool) Execute(_ context.Context, args map[string]any) (string, error) {
 	rel, err := requireString(args, "path")
 	if err != nil {
 		return "", err
 	}
+
 	abs, err := resolveInRoot(t.root, rel)
 	if err != nil {
 		return "", err
 	}
+
 	b, err := os.ReadFile(abs)
 	if err != nil {
 		return "", err
 	}
+
 	offset := optInt(args, "offset", 0)
+
 	limit := optInt(args, "limit", 0)
 	if offset <= 0 && limit <= 0 {
 		return string(b), nil
 	}
+
 	lines := strings.SplitAfter(string(b), "\n")
+
 	start := 0
 	if offset > 0 {
 		start = offset - 1
 	}
+
 	if start > len(lines) {
 		start = len(lines)
 	}
+
 	end := len(lines)
 	if limit > 0 && start+limit < end {
 		end = start + limit
 	}
+
 	return strings.Join(lines[start:end], ""), nil
 }
