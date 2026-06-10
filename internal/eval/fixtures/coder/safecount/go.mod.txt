@@ -1,0 +1,3 @@
+module safecount
+
+go 1.26

@@ -3,7 +3,9 @@ package eval
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -73,6 +75,36 @@ func Sum(xs []int) int {
 		total += x
 	}
 	return total
+}
+`,
+		},
+		{
+			fixture:  "fixtures/coder/safecount",
+			implFile: "safecount.go",
+			check:    "CGO_ENABLED=1 go test -race ./...",
+			impl: `package safecount
+
+import "sync"
+
+type Counter struct {
+	mu     sync.Mutex
+	counts map[string]int
+}
+
+func New() *Counter {
+	return &Counter{counts: make(map[string]int)}
+}
+
+func (c *Counter) Inc(key string) {
+	c.mu.Lock()
+	c.counts[key]++
+	c.mu.Unlock()
+}
+
+func (c *Counter) Get(key string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.counts[key]
 }
 `,
 		},
@@ -214,6 +246,9 @@ func (p *parser) parseFactor() (int, error) {
 			if check == "" {
 				check = "go test ./..."
 			}
+			if strings.Contains(check, "-race") && !cgoAvailable() {
+				check = "go test ./..."
+			}
 			ct := CoderTask{name: filepath.Base(c.fixture), fixture: c.fixture, check: check}
 			dir := t.TempDir()
 			require.NoError(t, ct.Provision(dir))
@@ -228,4 +263,17 @@ func (p *parser) parseFactor() (int, error) {
 			assert.True(t, v.OK, "reference impl should PASS: %s", v.Detail)
 		})
 	}
+}
+
+// cgoAvailable reports whether a C toolchain is present, used as a heuristic for
+// whether `go test -race` will work. It assumes a glibc toolchain; on a musl host
+// (e.g. Alpine) with gcc installed it may report true even where the race detector
+// cannot link. Race-checked fixtures fall back to a plain test run when it is false.
+func cgoAvailable() bool {
+	for _, cc := range []string{"gcc", "cc", "clang"} {
+		if _, err := exec.LookPath(cc); err == nil {
+			return true
+		}
+	}
+	return false
 }

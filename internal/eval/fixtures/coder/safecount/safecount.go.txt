@@ -1,0 +1,21 @@
+package safecount
+
+// Counter is a counter keyed by string. Many goroutines may call Inc and Get on
+// the same Counter simultaneously, so it must be safe for concurrent use. The
+// shipped implementation is NOT safe for concurrent use — make it safe so the
+// tests pass under the race detector.
+type Counter struct {
+	counts map[string]int
+}
+
+func New() *Counter {
+	return &Counter{counts: map[string]int{}}
+}
+
+func (c *Counter) Inc(key string) {
+	c.counts[key]++
+}
+
+func (c *Counter) Get(key string) int {
+	return c.counts[key]
+}

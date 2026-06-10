@@ -1,0 +1,66 @@
+package safecount
+
+import (
+	"sync"
+	"testing"
+)
+
+func TestCounterConcurrentWrites(t *testing.T) {
+	c := New()
+	const (
+		goroutines = 100
+		perG       = 1000
+	)
+	keys := []string{"a", "b", "c", "d"}
+	var wg sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < perG; i++ {
+				c.Inc(keys[i%len(keys)])
+			}
+		}()
+	}
+	wg.Wait()
+	// perG must be divisible by len(keys) so each key is incremented an equal,
+	// exact number of times.
+	want := goroutines * perG / len(keys)
+	for _, k := range keys {
+		if got := c.Get(k); got != want {
+			t.Errorf("Get(%q) = %d, want %d", k, got, want)
+		}
+	}
+}
+
+func TestCounterConcurrentReadWrite(t *testing.T) {
+	c := New()
+	const (
+		writers = 50
+		readers = 20
+		perOp   = 1000
+	)
+	var wg sync.WaitGroup
+	for w := 0; w < writers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < perOp; i++ {
+				c.Inc("x")
+			}
+		}()
+	}
+	for r := 0; r < readers; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < perOp; i++ {
+				_ = c.Get("x")
+			}
+		}()
+	}
+	wg.Wait()
+	if got := c.Get("x"); got != writers*perOp {
+		t.Errorf("Get(x) = %d, want %d", got, writers*perOp)
+	}
+}
