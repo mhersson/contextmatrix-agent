@@ -2,6 +2,7 @@ package eval
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -21,8 +22,9 @@ type MatrixOpts struct {
 	Samples       int
 	TranscriptDir string // "" disables per-run transcripts
 	MaxTurns      int
-	MaxCostUSD    float64 // per-run cap
-	MaxTotalCost  float64 // 0 = unlimited; abort before a run that would exceed this
+	MaxCostUSD    float64         // per-run cap
+	MaxTotalCost  float64         // 0 = unlimited; abort before a run that would exceed this
+	Provider      json.RawMessage // OpenRouter provider routing (sort/require_parameters/quantizations); nil = default routing
 }
 
 type MatrixResult struct {
@@ -106,6 +108,7 @@ func runOne(ctx context.Context, client llm.LLM, model string, task Task, sample
 		Model:      model,
 		MaxTurns:   opts.MaxTurns,
 		MaxCostUSD: opts.MaxCostUSD,
+		Provider:   opts.Provider,
 	})
 	if err != nil {
 		return Outcome{Model: model, Role: task.Role(), Task: task.Name(), Cost: res.TotalCostUSD}, fmt.Errorf("run %s on %s: %w", task.Name(), model, err)

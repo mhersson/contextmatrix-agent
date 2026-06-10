@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -18,6 +19,8 @@ type evalParams struct {
 	samples, maxTurns               int
 	maxCost, maxTotalCost           float64
 	dryRun                          bool
+	providerSort                    string
+	quantAllow                      string
 }
 
 func newEvalCmd() *cobra.Command {
@@ -61,6 +64,8 @@ func newEvalCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&p.dryRun, "dry-run", false, "print a rough cost estimate and exit")
 	cmd.Flags().IntVar(&p.maxTurns, "max-turns", 30, "max model turns per run")
 	cmd.Flags().IntVar(&minContext, "min-context", 16384, "min context window for --free-auto models")
+	cmd.Flags().StringVar(&p.providerSort, "provider-sort", "throughput", "OpenRouter provider sort: throughput|price|latency (empty disables provider routing)")
+	cmd.Flags().StringVar(&p.quantAllow, "quant-allow", "fp16,bf16,fp8,unknown", "allowed provider quantizations (comma-separated); gates out heavy quant like fp4/int4")
 	return cmd
 }
 
@@ -89,9 +94,17 @@ func runEval(ctx context.Context, w io.Writer, client llm.LLM, cat llm.Catalog, 
 		return nil
 	}
 
+	prov, err := providerRouting(p.providerSort, p.quantAllow)
+	if err != nil {
+		return err
+	}
+	if prov != nil {
+		fmt.Fprintf(w, "provider routing: %s\n", string(prov)) //nolint:errcheck
+	}
 	mr, err := eval.RunMatrix(ctx, client, eval.MatrixOpts{
 		Models: models, Tasks: tasks, Samples: p.samples,
 		TranscriptDir: p.transcriptDir, MaxTurns: p.maxTurns, MaxCostUSD: p.maxCost, MaxTotalCost: p.maxTotalCost,
+		Provider: prov,
 	})
 	if err != nil {
 		return err
@@ -158,6 +171,29 @@ func writeCapabilitiesFile(path string, caps map[string]map[registry.Role]float6
 	}
 	defer f.Close() //nolint:errcheck
 	return eval.WriteCapabilities(f, caps)
+}
+
+// providerRouting builds the OpenRouter provider routing block: sort by `sort`,
+// require tool support, restricted to the allowed quantizations. Returns nil
+// (OpenRouter's default routing) when sort is empty. "unknown" is kept in the
+// allowlist on purpose — native/proprietary endpoints (Anthropic, OpenAI,
+// DeepSeek-official) report their quantization as "unknown".
+func providerRouting(sort, quantCSV string) (json.RawMessage, error) {
+	if strings.TrimSpace(sort) == "" {
+		return nil, nil
+	}
+	block := map[string]any{
+		"sort":               sort,
+		"require_parameters": true,
+	}
+	if q := splitCSV(quantCSV); len(q) > 0 {
+		block["quantizations"] = q
+	}
+	b, err := json.Marshal(block)
+	if err != nil {
+		return nil, fmt.Errorf("marshal provider routing: %w", err)
+	}
+	return b, nil
 }
 
 func splitCSV(s string) []string {

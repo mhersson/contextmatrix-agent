@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -76,4 +77,20 @@ func TestRunEvalCheckRegression(t *testing.T) {
 		evalParams{role: "coder", samples: 3, out: out, check: base, maxTurns: 3})
 	require.Error(t, err)
 	assert.Contains(t, buf.String(), "REGRESSION")
+}
+
+func TestProviderRouting(t *testing.T) {
+	// empty sort disables routing
+	b, err := providerRouting("", "fp8")
+	require.NoError(t, err)
+	assert.Nil(t, b)
+
+	// throughput builds the gated block
+	b, err = providerRouting("throughput", "fp16,bf16,fp8,unknown")
+	require.NoError(t, err)
+	var m map[string]any
+	require.NoError(t, json.Unmarshal(b, &m))
+	assert.Equal(t, "throughput", m["sort"])
+	assert.Equal(t, true, m["require_parameters"])
+	assert.ElementsMatch(t, []any{"fp16", "bf16", "fp8", "unknown"}, m["quantizations"])
 }

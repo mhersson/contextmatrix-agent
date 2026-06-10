@@ -2,6 +2,7 @@ package eval
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -84,4 +85,30 @@ func TestRunMatrixSkipsErroredRuns(t *testing.T) {
 	assert.Equal(t, 3, mr.Errors) // all 3 runs errored and were skipped
 	assert.Empty(t, mr.Outcomes)  // nothing scored
 	assert.False(t, mr.Aborted)
+}
+
+// captureLLM records the last request's Provider so a test can assert that
+// MatrixOpts.Provider is threaded all the way to the wire.
+type captureLLM struct{ provider *json.RawMessage }
+
+func (c captureLLM) Send(_ context.Context, req llm.Request) (llm.Response, error) {
+	*c.provider = req.Provider
+	return llm.Response{FinishReason: "stop"}, nil
+}
+
+func (c captureLLM) SendStream(_ context.Context, req llm.Request, _ func(llm.Delta)) (llm.Response, error) {
+	*c.provider = req.Provider
+	return llm.Response{FinishReason: "stop"}, nil
+}
+
+func TestRunMatrixForwardsProvider(t *testing.T) {
+	var seen json.RawMessage
+	prov := json.RawMessage(`{"sort":"throughput","require_parameters":true}`)
+	_, err := RunMatrix(context.Background(), captureLLM{provider: &seen}, MatrixOpts{
+		Models:  []string{"m1"},
+		Tasks:   []Task{fakeTask{name: "c", role: registry.RoleCoder, pass: true}},
+		Samples: 1, MaxTurns: 2, Provider: prov,
+	})
+	require.NoError(t, err)
+	assert.JSONEq(t, string(prov), string(seen))
 }
