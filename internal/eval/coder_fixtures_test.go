@@ -76,6 +76,137 @@ func Sum(xs []int) int {
 }
 `,
 		},
+		{
+			fixture:  "fixtures/coder/calc",
+			implFile: "calc.go",
+			impl: `package calc
+
+import (
+	"errors"
+	"strconv"
+	"strings"
+)
+
+func Eval(expr string) (int, error) {
+	p := &parser{s: strings.TrimSpace(expr)}
+	if p.s == "" {
+		return 0, errors.New("empty expression")
+	}
+	v, err := p.parseExpr()
+	if err != nil {
+		return 0, err
+	}
+	p.skipSpaces()
+	if p.pos != len(p.s) {
+		return 0, errors.New("unexpected trailing input")
+	}
+	return v, nil
+}
+
+type parser struct {
+	s   string
+	pos int
+}
+
+func (p *parser) skipSpaces() {
+	for p.pos < len(p.s) && p.s[p.pos] == ' ' {
+		p.pos++
+	}
+}
+
+func (p *parser) parseExpr() (int, error) {
+	v, err := p.parseTerm()
+	if err != nil {
+		return 0, err
+	}
+	for {
+		p.skipSpaces()
+		if p.pos >= len(p.s) {
+			break
+		}
+		op := p.s[p.pos]
+		if op != '+' && op != '-' {
+			break
+		}
+		p.pos++
+		rhs, err := p.parseTerm()
+		if err != nil {
+			return 0, err
+		}
+		if op == '+' {
+			v += rhs
+		} else {
+			v -= rhs
+		}
+	}
+	return v, nil
+}
+
+func (p *parser) parseTerm() (int, error) {
+	v, err := p.parseFactor()
+	if err != nil {
+		return 0, err
+	}
+	for {
+		p.skipSpaces()
+		if p.pos >= len(p.s) {
+			break
+		}
+		op := p.s[p.pos]
+		if op != '*' && op != '/' {
+			break
+		}
+		p.pos++
+		rhs, err := p.parseFactor()
+		if err != nil {
+			return 0, err
+		}
+		if op == '*' {
+			v *= rhs
+		} else {
+			if rhs == 0 {
+				return 0, errors.New("division by zero")
+			}
+			v /= rhs
+		}
+	}
+	return v, nil
+}
+
+func (p *parser) parseFactor() (int, error) {
+	p.skipSpaces()
+	if p.pos >= len(p.s) {
+		return 0, errors.New("unexpected end of input")
+	}
+	c := p.s[p.pos]
+	if c == '(' {
+		p.pos++
+		v, err := p.parseExpr()
+		if err != nil {
+			return 0, err
+		}
+		p.skipSpaces()
+		if p.pos >= len(p.s) || p.s[p.pos] != ')' {
+			return 0, errors.New("missing closing paren")
+		}
+		p.pos++
+		return v, nil
+	}
+	if c >= '0' && c <= '9' {
+		start := p.pos
+		for p.pos < len(p.s) && p.s[p.pos] >= '0' && p.s[p.pos] <= '9' {
+			p.pos++
+		}
+		n, err := strconv.Atoi(p.s[start:p.pos])
+		if err != nil {
+			return 0, err
+		}
+		return n, nil
+	}
+	return 0, errors.New("unexpected character")
+}
+`,
+		},
 	}
 	for _, c := range cases {
 		t.Run(filepath.Base(c.fixture), func(t *testing.T) {

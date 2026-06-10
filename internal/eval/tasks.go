@@ -12,6 +12,7 @@ func DefaultTasks(role string) ([]Task, error) {
 		CoderTask{name: "dedup", fixture: "fixtures/coder/dedup", check: "go test ./..."},
 		CoderTask{name: "stats", fixture: "fixtures/coder/stats", check: "go test ./..."},
 		CoderTask{name: "meanfloor", fixture: "fixtures/coder/meanfloor", check: "go test ./..."},
+		CoderTask{name: "calc", fixture: "fixtures/coder/calc", check: "go test ./..."},
 	}
 	reviewer := []Task{
 		ReviewerTask{name: "offbyone", fixture: "fixtures/reviewer/offbyone", wantApprove: false, plantedSymbol: "Last"},
