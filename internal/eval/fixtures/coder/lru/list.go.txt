@@ -1,0 +1,42 @@
+package lru
+
+type node struct {
+	key, value int
+	prev, next *node
+}
+
+type list struct {
+	head, tail *node
+}
+
+func newList() *list {
+	h := &node{}
+	t := &node{}
+	h.next = t
+	t.prev = h
+	return &list{head: h, tail: t}
+}
+
+func (l *list) pushFront(n *node) {
+	n.prev = l.head
+	n.next = l.head.next
+	l.head.next.prev = n
+	l.head.next = n
+}
+
+func (l *list) remove(n *node) {
+	n.prev.next = n.next
+	n.next.prev = n.prev
+}
+
+func (l *list) moveToFront(n *node) {
+	l.remove(n)
+	l.pushFront(n)
+}
+
+func (l *list) oldest() *node {
+	if l.tail.prev == l.head {
+		return nil
+	}
+	return l.tail.prev
+}

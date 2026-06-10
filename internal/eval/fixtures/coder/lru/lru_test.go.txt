@@ -1,0 +1,69 @@
+package lru
+
+import "testing"
+
+func TestLRUGetRefreshesRecency(t *testing.T) {
+	c := New(2)
+	c.Put(1, 10)
+	c.Put(2, 20)
+	if v, ok := c.Get(1); !ok || v != 10 {
+		t.Fatalf("Get(1) = %d,%v; want 10,true", v, ok)
+	}
+	c.Put(3, 30) // Get(1) refreshed 1, so 2 is LRU and should be evicted
+	if _, ok := c.Get(2); ok {
+		t.Errorf("key 2 should have been evicted")
+	}
+	if v, ok := c.Get(1); !ok || v != 10 {
+		t.Errorf("key 1 should survive; Get(1) = %d,%v want 10,true", v, ok)
+	}
+	if v, ok := c.Get(3); !ok || v != 30 {
+		t.Errorf("Get(3) = %d,%v want 30,true", v, ok)
+	}
+}
+
+func TestLRUEvictionOrder(t *testing.T) {
+	c := New(3)
+	c.Put(1, 1)
+	c.Put(2, 2)
+	c.Put(3, 3)
+	c.Get(1)
+	c.Get(2) // 3 is now LRU
+	c.Put(4, 4)
+	if _, ok := c.Get(3); ok {
+		t.Errorf("key 3 should be evicted (was LRU)")
+	}
+	for _, k := range []int{1, 2, 4} {
+		if _, ok := c.Get(k); !ok {
+			t.Errorf("key %d should be present", k)
+		}
+	}
+}
+
+func TestLRUUpdateRefreshesRecency(t *testing.T) {
+	c := New(2)
+	c.Put(1, 1)
+	c.Put(2, 2)
+	c.Put(1, 100) // update existing -> 1 most recent; value updated
+	c.Put(3, 3)   // evicts 2
+	if _, ok := c.Get(2); ok {
+		t.Errorf("key 2 should be evicted")
+	}
+	if v, ok := c.Get(1); !ok || v != 100 {
+		t.Errorf("Get(1) = %d,%v want 100,true", v, ok)
+	}
+}
+
+func TestLRUMiss(t *testing.T) {
+	c := New(1)
+	if _, ok := c.Get(42); ok {
+		t.Errorf("Get on empty cache should miss")
+	}
+	c.Put(1, 1)
+	c.Put(2, 2) // evicts 1
+	if _, ok := c.Get(1); ok {
+		t.Errorf("key 1 should be evicted in cap-1 cache")
+	}
+	if v, ok := c.Get(2); !ok || v != 2 {
+		t.Errorf("Get(2) = %d,%v want 2,true", v, ok)
+	}
+}

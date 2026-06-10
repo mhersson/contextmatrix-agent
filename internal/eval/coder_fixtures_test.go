@@ -109,6 +109,48 @@ func (c *Counter) Get(key string) int {
 `,
 		},
 		{
+			fixture:  "fixtures/coder/lru",
+			implFile: "lru.go",
+			impl: `package lru
+
+type Cache struct {
+	cap   int
+	items map[int]*node
+	order *list
+}
+
+// New returns an empty cache that holds at most capacity entries (capacity >= 1).
+func New(capacity int) *Cache {
+	return &Cache{cap: capacity, items: make(map[int]*node), order: newList()}
+}
+
+func (c *Cache) Get(key int) (int, bool) {
+	n, ok := c.items[key]
+	if !ok {
+		return 0, false
+	}
+	c.order.moveToFront(n)
+	return n.value, true
+}
+
+func (c *Cache) Put(key, value int) {
+	if n, ok := c.items[key]; ok {
+		n.value = value
+		c.order.moveToFront(n)
+		return
+	}
+	n := &node{key: key, value: value}
+	c.items[key] = n
+	c.order.pushFront(n)
+	if len(c.items) > c.cap {
+		victim := c.order.oldest()
+		c.order.remove(victim)
+		delete(c.items, victim.key)
+	}
+}
+`,
+		},
+		{
 			fixture:  "fixtures/coder/calc",
 			implFile: "calc.go",
 			impl: `package calc
