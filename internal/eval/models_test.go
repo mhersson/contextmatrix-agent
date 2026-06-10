@@ -9,7 +9,7 @@ import (
 
 func TestDefaultCandidates(t *testing.T) {
 	c := DefaultCandidates()
-	assert.Contains(t, c, "openai/gpt-oss-120b")
+	assert.Contains(t, c, "anthropic/claude-sonnet-4.6")
 	for _, line := range c {
 		assert.NotContains(t, line, "#")
 	}

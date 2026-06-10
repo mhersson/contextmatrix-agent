@@ -1,29 +1,31 @@
 # Curated B2 candidate models — one slug per line; blank lines and # comments ok.
-# Spans cheap -> frontier for coder + reviewer, all tool-capable and present in the
-# live OpenRouter catalog (verified 2026-06-09). RunMatrix measures models in this
-# order, so under a tight --max-total-cost the earlier (cheaper) models are scored
-# first. Use --free-auto for the cheap :free regression subset instead of this list.
+# Enumerated from the live OpenRouter catalog (2026-06-10), current best per family
+# across tiers, tool-capable, coding-relevant. RunMatrix scores in file order, so a
+# tight --max-total-cost scores the cheap floor first. Use --free-auto for the cheap
+# :free regression subset instead of this list.
 
-# --- cheap tier (establishes the capability floor) ---
-openai/gpt-oss-20b
-openai/gpt-oss-120b
-mistralai/mistral-small-3.2-24b-instruct
+# --- cheap floor ---
+openai/gpt-5-nano
 google/gemini-2.5-flash-lite
-meta-llama/llama-3.3-70b-instruct
+deepseek/deepseek-v4-flash
+qwen/qwen3-coder-flash
 
 # --- mid tier ---
-deepseek/deepseek-chat-v3.1
-qwen/qwen3-coder
-openai/gpt-5-mini
-google/gemini-2.5-flash
-mistralai/codestral-2508
-z-ai/glm-4.6
-qwen/qwen3-235b-a22b
-moonshotai/kimi-k2
-
-# --- frontier tier (defines the upper tiers) ---
-deepseek/deepseek-r1
+openai/gpt-5.4-mini
 anthropic/claude-haiku-4.5
-google/gemini-2.5-pro
-openai/gpt-5
-anthropic/claude-sonnet-4.5
+google/gemini-3-flash-preview
+deepseek/deepseek-v3.2
+z-ai/glm-4.7
+qwen/qwen3-coder-plus
+mistralai/mistral-large-2512
+
+# --- frontier (current best; defines the upper tiers) ---
+anthropic/claude-opus-4.8
+anthropic/claude-sonnet-4.6
+openai/gpt-5.5
+openai/gpt-5.2-codex
+google/gemini-3.1-pro-preview
+deepseek/deepseek-v4-pro
+qwen/qwen3-max
+x-ai/grok-4.3
+moonshotai/kimi-k2.6
