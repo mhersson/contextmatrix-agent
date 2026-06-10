@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    paths-ignore:
+      - "README.md"
+      - "*-RESULTS.md"
+      - "capabilities-*.md"
+      - "docs/**"
+      - "LICENSE"
+  workflow_dispatch:
+
+jobs:
+  go-checks:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      # The tools tests skip rg/fd/git-dependent cases when the binary is
+      # missing — surface what this runner actually exercises.
+      - name: Tool availability
+        run: |
+          for t in git rg fd; do
+            command -v "$t" >/dev/null && echo "$t: $(command -v $t)" || echo "::warning::$t not installed — dependent tests will skip"
+          done
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
+
+      - name: go test -race
+        run: go test -race ./...
+        env:
+          CGO_ENABLED: "1"
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.11.3
