@@ -50,17 +50,21 @@ func NewRegistry(pins map[Role]string, capableDefault string, catalog llm.Catalo
 // today). Precedence: explicit pin > capable default.
 func (r *Registry) Resolve(actor string, role Role) (ModelSpec, error) {
 	_ = actor // seam: per-principal resolution is future work
+
 	model := r.pins[role]
 	if model == "" {
 		model = r.capable
 	}
+
 	if model == "" {
 		return ModelSpec{}, fmt.Errorf("no model pinned for role %q and no capable default set", role)
 	}
+
 	spec := ModelSpec{Model: model}
 	if e, ok := r.catalog.Find(model); ok {
 		spec.ContextWindow = e.ContextLength
 	}
+
 	return spec, nil
 }
 
@@ -72,6 +76,7 @@ func (r *Registry) fitsWindow(model string, estTokens int) bool {
 	if !ok {
 		return true
 	}
+
 	return e.ContextLength >= estTokens
 }
 
@@ -82,22 +87,27 @@ func (r *Registry) fitsWindow(model string, estTokens int) bool {
 func (r *Registry) SelectByComplexity(role Role, t Tier) ModelSpec {
 	bar := tierBar(t)
 	best, bestPrice := "", -1.0
+
 	for _, e := range r.catalog {
 		if !e.SupportsTools() || r.capabilities[e.ID][role] < bar {
 			continue
 		}
+
 		price := e.PromptPricePerTok + e.CompletionPricePerTok
 		if best == "" || price < bestPrice {
 			best, bestPrice = e.ID, price
 		}
 	}
+
 	if best == "" {
 		best = r.capable
 	}
+
 	spec := ModelSpec{Model: best}
 	if e, ok := r.catalog.Find(best); ok {
 		spec.ContextWindow = e.ContextLength
 	}
+
 	return spec
 }
 
@@ -112,11 +122,12 @@ func tierBar(t Tier) float64 {
 	}
 }
 
-// seededCapabilities is the conservative hand-seed reflecting the B0 model floor
-// (gpt-oss-120b-class completes; gemma-4-31b-class does not). B2 measures and
-// replaces these values.
+// seededCapabilities is the conservative hand-seed for the capable default.
+// deepseek-v4-flash scored a perfect coder record in both B2 sweeps, emits
+// standard-format tool calls (no harmony parsing gap), and carries a 1M
+// context window. B2 measures and replaces these values.
 func seededCapabilities() map[string]map[Role]float64 {
 	return map[string]map[Role]float64{
-		"openai/gpt-oss-120b": {RoleOrchestrator: 0.85, RolePlanner: 0.85, RoleCoder: 0.85, RoleReviewer: 0.85, RoleDocs: 0.85},
+		"deepseek/deepseek-v4-flash": {RoleOrchestrator: 0.85, RolePlanner: 0.85, RoleCoder: 0.85, RoleReviewer: 0.85, RoleDocs: 0.85},
 	}
 }

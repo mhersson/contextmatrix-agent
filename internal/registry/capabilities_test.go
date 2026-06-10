@@ -16,8 +16,8 @@ func TestLoadAndMergeCapabilities(t *testing.T) {
 	require.NoError(t, err)
 
 	merged := MergeCapabilities(seededCapabilities(), loaded)
-	assert.Equal(t, 0.85, merged["cheap/small"][RoleCoder])         // measured added
-	assert.Equal(t, 0.85, merged["openai/gpt-oss-120b"][RoleCoder]) // seed preserved
+	assert.InDelta(t, 0.85, merged["cheap/small"][RoleCoder], 1e-9)                // measured added
+	assert.InDelta(t, 0.85, merged["deepseek/deepseek-v4-flash"][RoleCoder], 1e-9) // seed preserved
 	// base not mutated
 	assert.NotContains(t, seededCapabilities(), "cheap/small")
 }
@@ -36,6 +36,7 @@ func TestSelectByComplexityReflectsLoadedScores(t *testing.T) {
 
 func TestRoundTripJSON(t *testing.T) {
 	caps := map[string]map[Role]float64{"m": {RoleCoder: 0.7, RoleReviewer: 0.5}}
+
 	var buf bytes.Buffer
 	require.NoError(t, writeCaps(&buf, caps)) // helper defined inline below
 	got, err := LoadCapabilities(&buf)
