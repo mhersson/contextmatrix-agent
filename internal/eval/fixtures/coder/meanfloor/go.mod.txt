@@ -1,0 +1,3 @@
+module meanfloor
+
+go 1.26
