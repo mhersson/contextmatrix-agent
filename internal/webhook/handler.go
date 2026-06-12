@@ -409,9 +409,11 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Retried request whose first attempt already landed: return a cached ack
-	// without re-writing the user frame to stdin.
-	if s.dedup.Seen(payload.Project, payload.CardID, payload.MessageID) {
+	// Retried request whose first attempt already DELIVERED: return a cached ack
+	// without re-writing the user frame to stdin. The record happens only after a
+	// successful write below, so a 404 or a failed write never poisons the cache —
+	// a retry then re-attempts delivery instead of getting a false duplicate ack.
+	if s.dedup.Contains(payload.Project, payload.CardID, payload.MessageID) {
 		writeJSON(w, http.StatusOK, protocol.SuccessResponse{
 			OK:        true,
 			Message:   "duplicate message acknowledged",
@@ -447,6 +449,9 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Delivered: record the message_id now so a retry is deduped, then clear the
+	// awaiting flag and touch the run.
+	s.dedup.Record(payload.Project, payload.CardID, payload.MessageID)
 	s.tracker.SetAwaiting(payload.Project, payload.CardID, false)
 	s.tracker.Touch(payload.Project, payload.CardID)
 

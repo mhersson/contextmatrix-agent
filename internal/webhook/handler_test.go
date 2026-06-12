@@ -158,6 +158,16 @@ func (n *nopWriteCloser) String() string {
 	return n.buf.String()
 }
 
+// errWriteCloser is a tracked run's stdin whose Write always fails, simulating a
+// closed pipe / dead container so the /message handler hits its write-error path.
+type errWriteCloser struct {
+	err error
+}
+
+func (e *errWriteCloser) Write(_ []byte) (int, error) { return 0, e.err }
+
+func (e *errWriteCloser) Close() error { return nil }
+
 // ---- harness ----------------------------------------------------------------
 
 type harness struct {
@@ -485,6 +495,96 @@ func TestMessage_UntrackedReturns404(t *testing.T) {
 
 	require.Equal(t, http.StatusNotFound, w.Code)
 	assert.Equal(t, protocol.CodeNotFound, decodeErr(t, w).Code)
+}
+
+// TestMessage_WriteFailureRetryDelivers proves the dedup cache is not poisoned
+// by a failed stdin write: the first attempt 500s, a same-message_id retry
+// against a now-healthy run delivers the frame (no false duplicate ack).
+func TestMessage_WriteFailureRetryDelivers(t *testing.T) {
+	h := newHarness(t, 4)
+
+	// First attempt: the tracked run's stdin errors on write.
+	errStdin := &errWriteCloser{err: errors.New("pipe closed")}
+	h.tracker.AddIfUnderLimit(&executor.Run{
+		ContainerID: "ctr-PROJ-001",
+		CardID:      "PROJ-001",
+		Project:     "proj",
+		StartedAt:   time.Now(),
+		Stdin:       errStdin,
+	})
+
+	payload := protocol.MessagePayload{CardID: "PROJ-001", Project: "proj", Content: "hi", MessageID: "m1"}
+
+	t1 := strconv.FormatInt(time.Now().Add(-2*time.Second).Unix(), 10)
+	t2 := strconv.FormatInt(time.Now().Unix(), 10)
+
+	w1 := h.doAt(t, http.MethodPost, "/message", payload, t1)
+	require.Equal(t, http.StatusInternalServerError, w1.Code)
+	assert.Equal(t, protocol.CodeInternal, decodeErr(t, w1).Code)
+
+	// The container is replaced by a healthy one (same card) before the retry.
+	h.tracker.Remove("proj", "PROJ-001")
+	healthy := h.addRun("PROJ-001", "proj")
+
+	// Retry with the SAME message_id: must NOT be deduped — it must deliver.
+	w2 := h.doAt(t, http.MethodPost, "/message", payload, t2)
+	require.Equal(t, http.StatusAccepted, w2.Code, "retry after failed write must deliver, not false-ack")
+
+	var frame struct {
+		Type      string `json:"type"`
+		Content   string `json:"content"`
+		MessageID string `json:"message_id"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(healthy.String())), &frame))
+	assert.Equal(t, "user_message", frame.Type)
+	assert.Equal(t, "hi", frame.Content)
+	assert.Equal(t, "m1", frame.MessageID)
+}
+
+// TestMessage_NotFoundDoesNotPoisonDedup proves a 404 (untracked run) does not
+// record the message_id: once the run appears, a same-message_id retry delivers.
+func TestMessage_NotFoundDoesNotPoisonDedup(t *testing.T) {
+	h := newHarness(t, 4)
+
+	payload := protocol.MessagePayload{CardID: "PROJ-001", Project: "proj", Content: "hi", MessageID: "m1"}
+
+	t1 := strconv.FormatInt(time.Now().Add(-2*time.Second).Unix(), 10)
+	t2 := strconv.FormatInt(time.Now().Unix(), 10)
+
+	// No run tracked yet → 404.
+	w1 := h.doAt(t, http.MethodPost, "/message", payload, t1)
+	require.Equal(t, http.StatusNotFound, w1.Code)
+
+	// The container now exists; the retry with the same message_id must deliver.
+	stdin := h.addRun("PROJ-001", "proj")
+
+	w2 := h.doAt(t, http.MethodPost, "/message", payload, t2)
+	require.Equal(t, http.StatusAccepted, w2.Code, "404 must not poison dedup; retry delivers")
+	assert.Contains(t, stdin.String(), `"message_id":"m1"`)
+}
+
+// TestMessage_DuplicateAfterDeliveryAcksWithoutSecondFrame confirms the happy
+// path still dedups: a delivered message is acked once with a frame, and a
+// retry acks (200) without writing a second frame.
+func TestMessage_DuplicateAfterDeliveryAcksWithoutSecondFrame(t *testing.T) {
+	h := newHarness(t, 4)
+	stdin := h.addRun("PROJ-001", "proj")
+
+	payload := protocol.MessagePayload{CardID: "PROJ-001", Project: "proj", Content: "hi", MessageID: "dup"}
+
+	t1 := strconv.FormatInt(time.Now().Add(-2*time.Second).Unix(), 10)
+	t2 := strconv.FormatInt(time.Now().Unix(), 10)
+
+	w1 := h.doAt(t, http.MethodPost, "/message", payload, t1)
+	require.Equal(t, http.StatusAccepted, w1.Code)
+
+	first := stdin.String()
+	require.Contains(t, first, `"message_id":"dup"`)
+
+	w2 := h.doAt(t, http.MethodPost, "/message", payload, t2)
+	require.Equal(t, http.StatusOK, w2.Code, "duplicate ack is 200, not 202")
+
+	assert.Equal(t, first, stdin.String(), "delivered duplicate must not re-write stdin")
 }
 
 // ---- promote ----------------------------------------------------------------
