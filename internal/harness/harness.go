@@ -109,10 +109,11 @@ func Run(ctx context.Context, client llm.LLM, reg *tools.Registry, emit *events.
 		emit.Emit(events.ModelResponse, map[string]any{
 			"turn": res.Turns, "finish_reason": resp.FinishReason,
 			"tool_calls": len(resp.ToolCalls), "content_len": len(resp.Content),
+			"content": resp.Content, "model": cfg.Model,
 		})
 		emit.Emit(events.UsageKind, map[string]any{
 			"prompt_tokens": resp.Usage.PromptTokens, "completion_tokens": resp.Usage.CompletionTokens,
-			"cost_usd": resp.Usage.Cost,
+			"cost_usd": resp.Usage.Cost, "model": cfg.Model,
 		})
 
 		if cfg.ContextWindow > 0 && resp.Usage.PromptTokens >= int(contextLimitThreshold*float64(cfg.ContextWindow)) {
