@@ -12,10 +12,12 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/events"
 	"github.com/mhersson/contextmatrix-agent/internal/frames"
+	"github.com/mhersson/contextmatrix-agent/internal/harness"
 	"github.com/mhersson/contextmatrix-agent/internal/llm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -509,4 +511,33 @@ func (b *syncBuffer) String() string {
 	defer b.mu.Unlock()
 
 	return string(b.buf)
+}
+
+// --- summaryFrom -----------------------------------------------------------
+
+func TestSummaryFrom_RuneSafeTruncation(t *testing.T) {
+	t.Parallel()
+
+	// "世" is 3 bytes; 67 of them is 201 bytes, so a naive 200-byte cut lands
+	// mid-rune (200 is not a rune boundary). The backoff must keep it valid.
+	out := strings.Repeat("世", 67)
+	require.Greater(t, len(out), summaryMaxLen)
+
+	got := summaryFrom(harness.Result{Output: out}, cmclient.TaskContext{Title: "fallback"})
+
+	assert.LessOrEqual(t, len(got), summaryMaxLen, "summary stays within the byte cap")
+	assert.True(t, utf8.ValidString(got), "truncated summary must be valid UTF-8")
+}
+
+func TestSummaryFrom_FirstLineAndFallback(t *testing.T) {
+	t.Parallel()
+
+	// First line only.
+	got := summaryFrom(harness.Result{Output: "done the thing\nmore detail"},
+		cmclient.TaskContext{Title: "title"})
+	assert.Equal(t, "done the thing", got)
+
+	// Empty output falls back to the card title.
+	got = summaryFrom(harness.Result{Output: "   \n  "}, cmclient.TaskContext{Title: "card title"})
+	assert.Equal(t, "card title", got)
 }

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/events"
@@ -396,7 +397,14 @@ func summaryFrom(res harness.Result, tcx cmclient.TaskContext) string {
 	}
 
 	if len(line) > summaryMaxLen {
-		line = line[:summaryMaxLen]
+		// Back off past any UTF-8 continuation bytes so the byte cut never
+		// splits a multi-byte rune (the summary must be valid UTF-8).
+		cut := summaryMaxLen
+		for cut > 0 && !utf8.RuneStart(line[cut]) {
+			cut--
+		}
+
+		line = line[:cut]
 	}
 
 	return line
