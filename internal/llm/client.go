@@ -75,7 +75,7 @@ func (c *Client) Send(ctx context.Context, req Request) (Response, error) {
 		return Response{}, fmt.Errorf("decode response: %w", err)
 	}
 
-	return nr.toResponse(), nil
+	return normalizeHarmony(nr.toResponse()), nil
 }
 
 // doWithRetry issues the request, retrying transport errors and retryable

@@ -174,5 +174,5 @@ func parseStreamWithLimit(r io.Reader, onDelta func(Delta), maxLine int) (Respon
 		})
 	}
 
-	return resp, nil
+	return normalizeHarmony(resp), nil
 }
