@@ -30,7 +30,7 @@ func TestSelectByComplexityReflectsLoadedScores(t *testing.T) {
 	// Measured: cheap/small clears the complex bar; without this it would not.
 	caps := map[string]map[Role]float64{"cheap/small": {RoleCoder: 0.9}}
 	r := NewRegistryWithCapabilities(nil, "capable/default", cat, caps)
-	spec := r.SelectByComplexity(RoleCoder, TierComplex)
+	spec := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierComplex})
 	assert.Equal(t, "cheap/small", spec.Model) // cheapest measured-capable model wins
 }
 
