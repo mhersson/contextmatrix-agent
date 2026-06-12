@@ -1,0 +1,646 @@
+package webhook
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/mhersson/contextmatrix-agent/internal/executor"
+	"github.com/mhersson/contextmatrix-agent/internal/logbridge"
+	protocol "github.com/mhersson/contextmatrix-protocol"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// ---- fakes ------------------------------------------------------------------
+
+// fakeExecutor records calls and lets a test inject a Launch error. On a
+// successful Launch it registers the run in the shared tracker so the handler's
+// capacity checks and /containers reflect it, mirroring the real executor.
+type fakeExecutor struct {
+	mu sync.Mutex
+
+	tracker *executor.Tracker
+
+	launchErr  error
+	launched   []executor.LaunchSpec
+	killed     [][2]string // project, cardID
+	stopAllArg string
+	stopAllRet []*executor.Run
+}
+
+func (f *fakeExecutor) Launch(_ context.Context, spec executor.LaunchSpec) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.launchErr != nil {
+		return f.launchErr
+	}
+
+	f.launched = append(f.launched, spec)
+
+	if f.tracker != nil {
+		f.tracker.AddIfUnderLimit(&executor.Run{
+			ContainerID: "ctr-" + spec.CardID,
+			CardID:      spec.CardID,
+			Project:     spec.Project,
+			StartedAt:   time.Now(),
+			Stdin:       &nopWriteCloser{},
+		})
+	}
+
+	return nil
+}
+
+func (f *fakeExecutor) Kill(_ context.Context, project, cardID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.killed = append(f.killed, [2]string{project, cardID})
+
+	if f.tracker != nil {
+		f.tracker.Remove(project, cardID)
+	}
+
+	return nil
+}
+
+func (f *fakeExecutor) List(_ context.Context) ([]*executor.Run, error) {
+	if f.tracker != nil {
+		return f.tracker.List(), nil
+	}
+
+	return nil, nil
+}
+
+func (f *fakeExecutor) StopAll(_ context.Context, project string) ([]*executor.Run, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.stopAllArg = project
+
+	return f.stopAllRet, nil
+}
+
+func (f *fakeExecutor) CleanupOrphans(_ context.Context) error { return nil }
+
+func (f *fakeExecutor) launchedSpecs() []executor.LaunchSpec {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	out := make([]executor.LaunchSpec, len(f.launched))
+	copy(out, f.launched)
+
+	return out
+}
+
+// fakeReporter records status callbacks.
+type fakeReporter struct {
+	mu    sync.Mutex
+	calls [][3]string // cardID, status, message
+}
+
+func (f *fakeReporter) ReportStatus(_ context.Context, cardID, _, status, message string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.calls = append(f.calls, [3]string{cardID, status, message})
+
+	return nil
+}
+
+func (f *fakeReporter) statuses() [][3]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	out := make([][3]string, len(f.calls))
+	copy(out, f.calls)
+
+	return out
+}
+
+// fakeVerifier returns a fixed autonomous result or error.
+type fakeVerifier struct {
+	autonomous bool
+	err        error
+}
+
+func (f *fakeVerifier) VerifyAutonomous(_ context.Context, _, _ string) (bool, error) {
+	return f.autonomous, f.err
+}
+
+// nopWriteCloser captures stdin frame writes for assertions.
+type nopWriteCloser struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (n *nopWriteCloser) Write(p []byte) (int, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	return n.buf.Write(p)
+}
+
+func (n *nopWriteCloser) Close() error { return nil }
+
+func (n *nopWriteCloser) String() string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	return n.buf.String()
+}
+
+// ---- harness ----------------------------------------------------------------
+
+type harness struct {
+	server   *Server
+	exec     *fakeExecutor
+	tracker  *executor.Tracker
+	reporter *fakeReporter
+	verifier *fakeVerifier
+	hub      *logbridge.Hub
+}
+
+func newHarness(t *testing.T, maxConcurrent int) *harness {
+	t.Helper()
+
+	tracker := executor.NewTracker(maxConcurrent)
+	exec := &fakeExecutor{tracker: tracker}
+	reporter := &fakeReporter{}
+	verifier := &fakeVerifier{autonomous: true}
+	hub := logbridge.NewHub()
+
+	server := NewServer(Config{
+		APIKey:        testAPIKey,
+		Skew:          protocol.DefaultMaxClockSkew,
+		MaxConcurrent: maxConcurrent,
+		Executor:      exec,
+		Tracker:       tracker,
+		Hub:           hub,
+		Reporter:      reporter,
+		Verifier:      verifier,
+		LaunchEnv: LaunchEnv{
+			BaseImage: "base:image",
+			MCPURL:    "http://cm:8080/mcp",
+			MCPAPIKey: "cfg-mcp-key",
+		},
+	})
+
+	return &harness{
+		server:   server,
+		exec:     exec,
+		tracker:  tracker,
+		reporter: reporter,
+		verifier: verifier,
+		hub:      hub,
+	}
+}
+
+// do signs and dispatches a request through the server's mux.
+func (h *harness) do(t *testing.T, method, target string, payload any) *httptest.ResponseRecorder {
+	t.Helper()
+
+	return h.doAt(t, method, target, payload, nowTS())
+}
+
+// doAt signs with an explicit timestamp so tests can issue two requests that the
+// replay cache treats as distinct (a real retry carries a fresh timestamp and
+// therefore a fresh signature).
+func (h *harness) doAt(t *testing.T, method, target string, payload any, ts string) *httptest.ResponseRecorder {
+	t.Helper()
+
+	var body []byte
+
+	if payload != nil {
+		var err error
+
+		body, err = json.Marshal(payload)
+		require.NoError(t, err)
+	}
+
+	r := httptest.NewRequest(method, target, strings.NewReader(string(body)))
+	signReq(t, r, testAPIKey, body, ts)
+
+	w := httptest.NewRecorder()
+	h.server.Routes().ServeHTTP(w, r)
+
+	return w
+}
+
+// addRun directly registers a tracked run with a capturable stdin, simulating a
+// container the executor already launched.
+func (h *harness) addRun(cardID, project string) *nopWriteCloser {
+	stdin := &nopWriteCloser{}
+	h.tracker.AddIfUnderLimit(&executor.Run{
+		ContainerID: "ctr-" + cardID,
+		CardID:      cardID,
+		Project:     project,
+		StartedAt:   time.Now(),
+		Stdin:       stdin,
+	})
+
+	return stdin
+}
+
+func decodeErr(t *testing.T, w *httptest.ResponseRecorder) protocol.ErrorResponse {
+	t.Helper()
+
+	var er protocol.ErrorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &er))
+
+	return er
+}
+
+// ---- trigger ----------------------------------------------------------------
+
+func TestTrigger_AcceptsAndLaunches(t *testing.T) {
+	h := newHarness(t, 4)
+
+	payload := protocol.TriggerPayload{
+		CardID:      "PROJ-001",
+		Project:     "proj",
+		RepoURL:     "https://github.com/org/repo",
+		BaseBranch:  "main",
+		Model:       "some-model",
+		Interactive: true,
+	}
+
+	w := h.do(t, http.MethodPost, "/trigger", payload)
+	require.Equal(t, http.StatusAccepted, w.Code)
+
+	var sr protocol.SuccessResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &sr))
+	assert.True(t, sr.OK)
+
+	// Launch happens asynchronously: poll the fake.
+	require.Eventually(t, func() bool {
+		return len(h.exec.launchedSpecs()) == 1
+	}, time.Second, 5*time.Millisecond)
+
+	spec := h.exec.launchedSpecs()[0]
+	assert.Equal(t, "PROJ-001", spec.CardID)
+	assert.Equal(t, "proj", spec.Project)
+	assert.Equal(t, "base:image", spec.Image)
+	assert.Contains(t, spec.Env, "CM_CARD_ID=PROJ-001")
+	assert.Contains(t, spec.Env, "CM_PROJECT=proj")
+	assert.Contains(t, spec.Env, "CM_REPO_URL=https://github.com/org/repo")
+	assert.Contains(t, spec.Env, "CM_BASE_BRANCH=main")
+	assert.Contains(t, spec.Env, "CM_INTERACTIVE=true")
+	assert.Contains(t, spec.Env, "CM_MODEL=some-model")
+	assert.Contains(t, spec.Env, "CM_MCP_URL=http://cm:8080/mcp")
+	assert.Contains(t, spec.Env, "CM_MCP_API_KEY=cfg-mcp-key")
+	assert.Contains(t, spec.Env, "CM_CORRELATION_ID=PROJ-001")
+
+	// running callback after successful launch.
+	require.Eventually(t, func() bool {
+		for _, c := range h.reporter.statuses() {
+			if c[1] == "running" {
+				return true
+			}
+		}
+
+		return false
+	}, time.Second, 5*time.Millisecond)
+}
+
+func TestTrigger_ImageAndMCPKeyOverride(t *testing.T) {
+	h := newHarness(t, 4)
+
+	payload := protocol.TriggerPayload{
+		CardID:      "PROJ-002",
+		Project:     "proj",
+		RepoURL:     "https://github.com/org/repo",
+		RunnerImage: "override:image",
+		MCPAPIKey:   "payload-mcp-key",
+	}
+
+	w := h.do(t, http.MethodPost, "/trigger", payload)
+	require.Equal(t, http.StatusAccepted, w.Code)
+
+	require.Eventually(t, func() bool {
+		return len(h.exec.launchedSpecs()) == 1
+	}, time.Second, 5*time.Millisecond)
+
+	spec := h.exec.launchedSpecs()[0]
+	assert.Equal(t, "override:image", spec.Image)
+	assert.Contains(t, spec.Env, "CM_MCP_API_KEY=payload-mcp-key")
+}
+
+func TestTrigger_CapacityReturns429(t *testing.T) {
+	h := newHarness(t, 1)
+
+	// Fill capacity.
+	h.addRun("PROJ-001", "proj")
+
+	payload := protocol.TriggerPayload{CardID: "PROJ-002", Project: "proj", RepoURL: "r"}
+	w := h.do(t, http.MethodPost, "/trigger", payload)
+
+	require.Equal(t, http.StatusTooManyRequests, w.Code)
+	assert.Equal(t, protocol.CodeLimitReached, decodeErr(t, w).Code)
+	assert.Empty(t, h.exec.launchedSpecs(), "no launch on a full backend")
+}
+
+func TestTrigger_LaunchErrorReportsFailed(t *testing.T) {
+	h := newHarness(t, 4)
+	h.exec.launchErr = errors.New("boom")
+
+	payload := protocol.TriggerPayload{CardID: "PROJ-003", Project: "proj", RepoURL: "r"}
+	w := h.do(t, http.MethodPost, "/trigger", payload)
+	require.Equal(t, http.StatusAccepted, w.Code)
+
+	require.Eventually(t, func() bool {
+		for _, c := range h.reporter.statuses() {
+			if c[1] == "failed" {
+				return true
+			}
+		}
+
+		return false
+	}, time.Second, 5*time.Millisecond)
+}
+
+// ---- kill -------------------------------------------------------------------
+
+func TestKill_TrackedReturns200(t *testing.T) {
+	h := newHarness(t, 4)
+	h.addRun("PROJ-001", "proj")
+
+	w := h.do(t, http.MethodPost, "/kill", protocol.KillPayload{CardID: "PROJ-001", Project: "proj"})
+
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var sr protocol.SuccessResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &sr))
+	assert.True(t, sr.OK)
+
+	h.exec.mu.Lock()
+	require.Len(t, h.exec.killed, 1)
+	assert.Equal(t, [2]string{"proj", "PROJ-001"}, h.exec.killed[0])
+	h.exec.mu.Unlock()
+}
+
+func TestKill_UntrackedReturns404(t *testing.T) {
+	h := newHarness(t, 4)
+
+	w := h.do(t, http.MethodPost, "/kill", protocol.KillPayload{CardID: "ghost", Project: "proj"})
+
+	require.Equal(t, http.StatusNotFound, w.Code)
+	assert.Equal(t, protocol.CodeNotFound, decodeErr(t, w).Code)
+}
+
+// ---- stop-all ---------------------------------------------------------------
+
+func TestStopAll_ReturnsResults(t *testing.T) {
+	h := newHarness(t, 4)
+	h.exec.stopAllRet = []*executor.Run{
+		{CardID: "PROJ-001", Project: "proj"},
+		{CardID: "PROJ-002", Project: "proj"},
+	}
+
+	w := h.do(t, http.MethodPost, "/stop-all", protocol.StopAllPayload{Project: "proj"})
+
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp protocol.StopAllResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+
+	assert.True(t, resp.OK)
+	assert.Equal(t, 2, resp.Total)
+	assert.Equal(t, 2, resp.Stopped)
+	assert.Equal(t, 0, resp.Failed)
+	require.Len(t, resp.Results, 2)
+	assert.Equal(t, "PROJ-001", resp.Results[0].CardID)
+	assert.True(t, resp.Results[0].OK)
+
+	h.exec.mu.Lock()
+	assert.Equal(t, "proj", h.exec.stopAllArg)
+	h.exec.mu.Unlock()
+}
+
+// ---- message ----------------------------------------------------------------
+
+func TestMessage_WritesFrameAnd202(t *testing.T) {
+	h := newHarness(t, 4)
+	stdin := h.addRun("PROJ-001", "proj")
+	h.tracker.SetAwaiting("proj", "PROJ-001", true)
+
+	payload := protocol.MessagePayload{
+		CardID:    "PROJ-001",
+		Project:   "proj",
+		Content:   "hello worker",
+		MessageID: "m1",
+	}
+
+	w := h.do(t, http.MethodPost, "/message", payload)
+	require.Equal(t, http.StatusAccepted, w.Code)
+
+	var frame struct {
+		Type      string `json:"type"`
+		Content   string `json:"content"`
+		MessageID string `json:"message_id"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(stdin.String())), &frame))
+	assert.Equal(t, "user_message", frame.Type)
+	assert.Equal(t, "hello worker", frame.Content)
+	assert.Equal(t, "m1", frame.MessageID)
+
+	assert.False(t, h.tracker.Awaiting("proj", "PROJ-001"), "awaiting cleared after message")
+}
+
+func TestMessage_DuplicateReturnsCachedAck(t *testing.T) {
+	h := newHarness(t, 4)
+	stdin := h.addRun("PROJ-001", "proj")
+
+	payload := protocol.MessagePayload{CardID: "PROJ-001", Project: "proj", Content: "hi", MessageID: "dup"}
+
+	// Two distinct timestamps so the replay cache admits both; the dedup cache
+	// (keyed on message_id) catches the second.
+	t1 := strconv.FormatInt(time.Now().Add(-2*time.Second).Unix(), 10)
+	t2 := strconv.FormatInt(time.Now().Unix(), 10)
+
+	w1 := h.doAt(t, http.MethodPost, "/message", payload, t1)
+	require.Equal(t, http.StatusAccepted, w1.Code)
+
+	first := stdin.String()
+
+	w2 := h.doAt(t, http.MethodPost, "/message", payload, t2)
+	require.Equal(t, http.StatusOK, w2.Code, "duplicate ack is 200, not 202")
+
+	assert.Equal(t, first, stdin.String(), "duplicate must not re-write stdin")
+}
+
+func TestMessage_UntrackedReturns404(t *testing.T) {
+	h := newHarness(t, 4)
+
+	w := h.do(t, http.MethodPost, "/message",
+		protocol.MessagePayload{CardID: "ghost", Project: "proj", Content: "x", MessageID: "m"})
+
+	require.Equal(t, http.StatusNotFound, w.Code)
+	assert.Equal(t, protocol.CodeNotFound, decodeErr(t, w).Code)
+}
+
+// ---- promote ----------------------------------------------------------------
+
+func TestPromote_AutonomousWritesFrame(t *testing.T) {
+	h := newHarness(t, 4)
+	stdin := h.addRun("PROJ-001", "proj")
+	h.verifier.autonomous = true
+
+	w := h.do(t, http.MethodPost, "/promote", protocol.PromotePayload{CardID: "PROJ-001", Project: "proj"})
+
+	require.Equal(t, http.StatusAccepted, w.Code)
+	assert.Contains(t, stdin.String(), `"type":"promote"`)
+}
+
+func TestPromote_NotAutonomousReturns409(t *testing.T) {
+	h := newHarness(t, 4)
+	stdin := h.addRun("PROJ-001", "proj")
+	h.verifier.autonomous = false
+
+	w := h.do(t, http.MethodPost, "/promote", protocol.PromotePayload{CardID: "PROJ-001", Project: "proj"})
+
+	require.Equal(t, http.StatusConflict, w.Code)
+	assert.Equal(t, protocol.CodeConflict, decodeErr(t, w).Code)
+	assert.Empty(t, stdin.String(), "no frame on a non-autonomous card")
+}
+
+func TestPromote_VerifyErrorReturns502(t *testing.T) {
+	h := newHarness(t, 4)
+	stdin := h.addRun("PROJ-001", "proj")
+	h.verifier.err = errors.New("upstream down")
+
+	w := h.do(t, http.MethodPost, "/promote", protocol.PromotePayload{CardID: "PROJ-001", Project: "proj"})
+
+	require.Equal(t, http.StatusBadGateway, w.Code)
+	assert.Equal(t, protocol.CodeUpstreamFailure, decodeErr(t, w).Code)
+	assert.Empty(t, stdin.String(), "fail closed: no frame when verification errors")
+}
+
+func TestPromote_UntrackedReturns404(t *testing.T) {
+	h := newHarness(t, 4)
+
+	w := h.do(t, http.MethodPost, "/promote", protocol.PromotePayload{CardID: "ghost", Project: "proj"})
+
+	require.Equal(t, http.StatusNotFound, w.Code)
+}
+
+// ---- end-session ------------------------------------------------------------
+
+func TestEndSession_TrackedWritesFrame(t *testing.T) {
+	h := newHarness(t, 4)
+	stdin := h.addRun("PROJ-001", "proj")
+
+	w := h.do(t, http.MethodPost, "/end-session", protocol.EndSessionPayload{CardID: "PROJ-001", Project: "proj"})
+
+	require.Equal(t, http.StatusAccepted, w.Code)
+	assert.Contains(t, stdin.String(), `"type":"end_session"`)
+}
+
+func TestEndSession_UntrackedReturns200(t *testing.T) {
+	h := newHarness(t, 4)
+
+	w := h.do(t, http.MethodPost, "/end-session", protocol.EndSessionPayload{CardID: "ghost", Project: "proj"})
+
+	require.Equal(t, http.StatusOK, w.Code, "idempotent: nothing to end is success")
+}
+
+// ---- refresh-knowledge ------------------------------------------------------
+
+func TestRefreshKnowledge_Returns501(t *testing.T) {
+	h := newHarness(t, 4)
+
+	w := h.do(t, http.MethodPost, "/refresh-knowledge",
+		protocol.RefreshKnowledgePayload{Project: "proj", Repo: "repo", RepoURL: "r", AgentID: "human:x"})
+
+	require.Equal(t, http.StatusNotImplemented, w.Code)
+
+	er := decodeErr(t, w)
+	assert.Equal(t, protocol.CodeForbidden, er.Code)
+	assert.Equal(t, "knowledge refresh is not supported by the agent backend", er.Message)
+}
+
+// ---- containers -------------------------------------------------------------
+
+func TestContainers_ListsTrackedRuns(t *testing.T) {
+	h := newHarness(t, 4)
+	h.addRun("PROJ-001", "proj")
+
+	w := h.do(t, http.MethodGet, "/containers", nil)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp protocol.ListContainersResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+
+	assert.True(t, resp.OK)
+	require.Len(t, resp.Containers, 1)
+
+	item := resp.Containers[0]
+	assert.Equal(t, "ctr-PROJ-001", item.ContainerID)
+	assert.Equal(t, "PROJ-001", item.CardID)
+	assert.Equal(t, "proj", item.Project)
+	assert.Equal(t, "running", item.State)
+	assert.True(t, item.Tracked)
+
+	_, err := time.Parse(time.RFC3339, item.StartedAt)
+	assert.NoError(t, err, "StartedAt must be RFC3339")
+}
+
+// ---- health / readyz --------------------------------------------------------
+
+func TestHealth_Unauthenticated(t *testing.T) {
+	h := newHarness(t, 7)
+	h.addRun("PROJ-001", "proj")
+
+	// No signing — /health is unauthenticated.
+	r := httptest.NewRequest(http.MethodGet, "/health", nil)
+	w := httptest.NewRecorder()
+	h.server.Routes().ServeHTTP(w, r)
+
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var hr protocol.HealthResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &hr))
+
+	assert.True(t, hr.OK)
+	assert.Equal(t, 1, hr.RunningContainers)
+	assert.Equal(t, 7, hr.MaxConcurrent)
+}
+
+func TestReadyz_OKAndDraining(t *testing.T) {
+	h := newHarness(t, 4)
+
+	r1 := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	w1 := httptest.NewRecorder()
+	h.server.Routes().ServeHTTP(w1, r1)
+	require.Equal(t, http.StatusOK, w1.Code)
+
+	h.server.draining.Store(true)
+
+	r2 := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	w2 := httptest.NewRecorder()
+	h.server.Routes().ServeHTTP(w2, r2)
+	require.Equal(t, http.StatusServiceUnavailable, w2.Code)
+	assert.Contains(t, w2.Body.String(), "draining")
+}
+
+// ---- drain gate on mutating routes -----------------------------------------
+
+func TestDrainGate_TriggerRefusedWhileDraining(t *testing.T) {
+	h := newHarness(t, 4)
+	h.server.draining.Store(true)
+
+	w := h.do(t, http.MethodPost, "/trigger",
+		protocol.TriggerPayload{CardID: "PROJ-001", Project: "proj", RepoURL: "r"})
+
+	require.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Equal(t, protocol.CodeDraining, decodeErr(t, w).Code)
+	assert.Empty(t, h.exec.launchedSpecs())
+}
