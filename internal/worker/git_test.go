@@ -240,3 +240,440 @@ func TestGuardZeroValueFailClosed(t *testing.T) {
 		}
 	}
 }
+
+// setupClonedRepo creates a bare remote with an initial commit on main and a
+// cloned workspace. It returns (bareDir, cloneDir, initialCommitHash).
+func setupClonedRepo(t *testing.T) (string, string, string) {
+	t.Helper()
+
+	bare := setupBareRemote(t)
+	ws := filepath.Join(t.TempDir(), "ws")
+
+	g := NewGit(ws, "")
+	require.NoError(t, g.Clone(context.Background(), bare, "main"))
+
+	// Get the initial commit hash.
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = ws
+	cmd.Env = gitEnv()
+
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err)
+
+	return bare, ws, strings.TrimSpace(string(out))
+}
+
+// pushFileToBranch commits filename in a fresh clone of bare and pushes the
+// result to branch on the remote — simulating work that lands after our clone.
+func pushFileToBranch(t *testing.T, bare, filename, branch string) {
+	t.Helper()
+
+	scratch := t.TempDir()
+	runGit(t, scratch, "clone", bare, scratch)
+	runGit(t, scratch, "config", "user.email", "test@example.com")
+	runGit(t, scratch, "config", "user.name", "test")
+
+	require.NoError(t, os.WriteFile(filepath.Join(scratch, filename), []byte(filename+"\n"), 0o644))
+
+	runGit(t, scratch, "add", filename)
+	runGit(t, scratch, "commit", "-m", "add "+filename)
+	runGit(t, scratch, "push", "origin", "HEAD:refs/heads/"+branch)
+}
+
+func TestRemoteTip(t *testing.T) {
+	t.Parallel()
+
+	bare, ws, _ := setupClonedRepo(t)
+	g := NewGit(ws, "")
+	ctx := context.Background()
+
+	// Existing branch returns a non-empty hash.
+	tip, err := g.RemoteTip(ctx, "main")
+	require.NoError(t, err)
+	assert.NotEmpty(t, tip)
+	assert.Len(t, tip, 40)
+
+	// Missing branch returns ("", nil).
+	tip, err = g.RemoteTip(ctx, "does-not-exist")
+	require.NoError(t, err)
+	assert.Empty(t, tip)
+
+	_ = bare
+}
+
+func TestFetch(t *testing.T) {
+	t.Parallel()
+
+	bare, ws, _ := setupClonedRepo(t)
+	ctx := context.Background()
+
+	// Create a new branch on the remote after the clone.
+	pushFileToBranch(t, bare, "extra.txt", "feature/new")
+
+	g := NewGit(ws, "")
+
+	// Before fetch the branch is unknown to our clone.
+	_, err := g.run(ctx, "rev-parse", "--verify", "origin/feature/new")
+	require.Error(t, err)
+
+	require.NoError(t, g.Fetch(ctx, "feature/new"))
+
+	// After fetch the remote ref exists.
+	out, err := g.run(ctx, "rev-parse", "--verify", "origin/feature/new")
+	require.NoError(t, err)
+	assert.NotEmpty(t, strings.TrimSpace(out))
+}
+
+func TestMergeBase(t *testing.T) {
+	t.Parallel()
+
+	_, ws, initHash := setupClonedRepo(t)
+	g := NewGit(ws, "")
+	ctx := context.Background()
+
+	// Create a branch off main and add a commit.
+	runGit(t, ws, "checkout", "-b", "cm/test")
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "branch.txt"), []byte("b\n"), 0o644))
+	runGit(t, ws, "add", "branch.txt")
+	runGit(t, ws, "commit", "-m", "branch commit")
+
+	base, err := g.MergeBase(ctx, "main", "cm/test")
+	require.NoError(t, err)
+	assert.Equal(t, initHash, base)
+}
+
+func TestCommitFixup(t *testing.T) {
+	t.Parallel()
+
+	_, ws, _ := setupClonedRepo(t)
+	g := NewGit(ws, "")
+	ctx := context.Background()
+
+	// Make an initial commit to target with fixup.
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "foo.txt"), []byte("original\n"), 0o644))
+	runGit(t, ws, "add", "foo.txt")
+	runGit(t, ws, "commit", "-m", "add foo")
+
+	// Get the hash of that commit.
+	out, err := g.run(ctx, "rev-parse", "HEAD")
+	require.NoError(t, err)
+
+	target := strings.TrimSpace(out)
+
+	// Make a change to fixup, plus a brand-new untracked file — fix runs can
+	// legitimately create files (e.g. a missing test).
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "foo.txt"), []byte("fixed\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "foo_test.txt"), []byte("new test\n"), 0o644))
+
+	dirty, err := g.CommitFixup(ctx, target)
+	require.NoError(t, err)
+	assert.True(t, dirty)
+
+	// Fixup commit subject should be "fixup! add foo".
+	out, err = g.run(ctx, "log", "--format=%s", "-1")
+	require.NoError(t, err)
+	assert.Equal(t, "fixup! add foo", strings.TrimSpace(out))
+
+	// The untracked file must be part of the fixup commit.
+	out, err = g.run(ctx, "show", "--format=", "--name-only", "HEAD")
+	require.NoError(t, err)
+	assert.Contains(t, out, "foo_test.txt")
+
+	// Nothing left behind in the working tree.
+	out, err = g.run(ctx, "status", "--porcelain")
+	require.NoError(t, err)
+	assert.Empty(t, strings.TrimSpace(out))
+}
+
+func TestCommitFixupCleanTree(t *testing.T) {
+	t.Parallel()
+
+	_, ws, _ := setupClonedRepo(t)
+	g := NewGit(ws, "")
+	ctx := context.Background()
+
+	// No changes; fixup on HEAD should be a no-op.
+	out, err := g.run(ctx, "rev-parse", "HEAD")
+	require.NoError(t, err)
+
+	target := strings.TrimSpace(out)
+
+	dirty, err := g.CommitFixup(ctx, target)
+	require.NoError(t, err)
+	assert.False(t, dirty)
+}
+
+func TestRebaseAutosquash(t *testing.T) {
+	t.Parallel()
+
+	t.Run("squashes fixup commit", func(t *testing.T) {
+		t.Parallel()
+
+		_, ws, _ := setupClonedRepo(t)
+		g := NewGit(ws, "")
+		ctx := context.Background()
+
+		// Capture the starting point (origin/main) before adding commits.
+		ontoOut, err := g.run(ctx, "rev-parse", "origin/main")
+		require.NoError(t, err)
+
+		onto := strings.TrimSpace(ontoOut)
+
+		// Create a commit to squash into.
+		require.NoError(t, os.WriteFile(filepath.Join(ws, "foo.txt"), []byte("original\n"), 0o644))
+		runGit(t, ws, "add", "foo.txt")
+		runGit(t, ws, "commit", "-m", "add foo")
+
+		targetOut, err := g.run(ctx, "rev-parse", "HEAD")
+		require.NoError(t, err)
+
+		target := strings.TrimSpace(targetOut)
+
+		// Create fixup commit.
+		require.NoError(t, os.WriteFile(filepath.Join(ws, "foo.txt"), []byte("fixed\n"), 0o644))
+
+		_, err = g.CommitFixup(ctx, target)
+		require.NoError(t, err)
+
+		// Two commits on top of onto before rebase.
+		out, err := g.run(ctx, "rev-list", onto+"..HEAD")
+		require.NoError(t, err)
+		assert.Len(t, strings.Fields(strings.TrimSpace(out)), 2)
+
+		require.NoError(t, g.RebaseAutosquash(ctx, onto))
+
+		// After autosquash rebase, exactly one commit on top of onto.
+		out, err = g.run(ctx, "rev-list", onto+"..HEAD")
+		require.NoError(t, err)
+		assert.Len(t, strings.Fields(strings.TrimSpace(out)), 1)
+
+		// Content should be the fixup version.
+		content, err := os.ReadFile(filepath.Join(ws, "foo.txt"))
+		require.NoError(t, err)
+		assert.Equal(t, "fixed\n", string(content))
+	})
+
+	t.Run("conflict aborts and returns ErrRebaseConflict", func(t *testing.T) {
+		t.Parallel()
+
+		bare, ws, _ := setupClonedRepo(t)
+		g := NewGit(ws, "")
+		ctx := context.Background()
+
+		// Create a commit on our branch.
+		require.NoError(t, os.WriteFile(filepath.Join(ws, "conflict.txt"), []byte("ours\n"), 0o644))
+		runGit(t, ws, "add", "conflict.txt")
+		runGit(t, ws, "commit", "-m", "our change")
+
+		// Create a diverged base: add conflicting content to the remote.
+		scratch := t.TempDir()
+		runGit(t, scratch, "clone", bare, scratch)
+		runGit(t, scratch, "config", "user.email", "test@example.com")
+		runGit(t, scratch, "config", "user.name", "test")
+		require.NoError(t, os.WriteFile(filepath.Join(scratch, "conflict.txt"), []byte("theirs\n"), 0o644))
+		runGit(t, scratch, "add", "conflict.txt")
+		runGit(t, scratch, "commit", "-m", "their conflicting change")
+		runGit(t, scratch, "push", "origin", "HEAD:main")
+
+		// Fetch the new tip as our onto target.
+		require.NoError(t, g.Fetch(ctx, "main"))
+		ontoOut, err := g.run(ctx, "rev-parse", "origin/main")
+		require.NoError(t, err)
+
+		onto := strings.TrimSpace(ontoOut)
+
+		err = g.RebaseAutosquash(ctx, onto)
+		require.ErrorIs(t, err, ErrRebaseConflict)
+
+		// Repo must be clean — no .git/rebase-merge leftover.
+		_, statErr := os.Stat(filepath.Join(ws, ".git", "rebase-merge"))
+		assert.True(t, os.IsNotExist(statErr), "rebase-merge dir should not exist after abort")
+	})
+}
+
+func TestSoftResetSquash(t *testing.T) {
+	t.Parallel()
+
+	_, ws, _ := setupClonedRepo(t)
+	g := NewGit(ws, "")
+	ctx := context.Background()
+
+	// Create two commits.
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "a.txt"), []byte("a\n"), 0o644))
+	runGit(t, ws, "add", "a.txt")
+	runGit(t, ws, "commit", "-m", "add a")
+
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "b.txt"), []byte("b\n"), 0o644))
+	runGit(t, ws, "add", "b.txt")
+	runGit(t, ws, "commit", "-m", "add b")
+
+	// Record the tree hash at HEAD before squash.
+	treeOut, err := g.run(ctx, "rev-parse", "HEAD^{tree}")
+	require.NoError(t, err)
+
+	preTree := strings.TrimSpace(treeOut)
+
+	// Merge-base is origin/main (2 commits behind HEAD; we're on main locally).
+	baseOut, err := g.run(ctx, "rev-parse", "origin/main")
+	require.NoError(t, err)
+
+	mergeBase := strings.TrimSpace(baseOut)
+
+	require.NoError(t, g.SoftReset(ctx, mergeBase))
+
+	// Everything should be staged (soft reset leaves index dirty).
+	out, err := g.run(ctx, "status", "--porcelain")
+	require.NoError(t, err)
+	assert.NotEmpty(t, strings.TrimSpace(out))
+
+	// Commit the squash.
+	committed, err := g.CommitWithMessage(ctx, "squashed")
+	require.NoError(t, err)
+	assert.True(t, committed)
+
+	// Only one commit on top of merge-base.
+	listOut, err := g.run(ctx, "rev-list", mergeBase+"..HEAD")
+	require.NoError(t, err)
+	assert.Len(t, strings.Fields(strings.TrimSpace(listOut)), 1)
+
+	// Tree hash must be identical to pre-squash HEAD.
+	treeOut2, err := g.run(ctx, "rev-parse", "HEAD^{tree}")
+	require.NoError(t, err)
+	assert.Equal(t, preTree, strings.TrimSpace(treeOut2))
+}
+
+func TestCommitWithMessage(t *testing.T) {
+	t.Parallel()
+
+	_, ws, _ := setupClonedRepo(t)
+	g := NewGit(ws, "")
+	ctx := context.Background()
+
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "new.txt"), []byte("hello\n"), 0o644))
+
+	committed, err := g.CommitWithMessage(ctx, "my exact message")
+	require.NoError(t, err)
+	assert.True(t, committed)
+
+	out, err := g.run(ctx, "log", "--format=%s", "-1")
+	require.NoError(t, err)
+	assert.Equal(t, "my exact message", strings.TrimSpace(out))
+}
+
+func TestCommitWithMessageCleanTree(t *testing.T) {
+	t.Parallel()
+
+	_, ws, _ := setupClonedRepo(t)
+	g := NewGit(ws, "")
+	ctx := context.Background()
+
+	committed, err := g.CommitWithMessage(ctx, "no changes")
+	require.NoError(t, err)
+	assert.False(t, committed)
+}
+
+func TestLastCommitTouching(t *testing.T) {
+	t.Parallel()
+
+	_, ws, _ := setupClonedRepo(t)
+	g := NewGit(ws, "")
+	ctx := context.Background()
+
+	// Commit touching foo.txt.
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "foo.txt"), []byte("foo\n"), 0o644))
+	runGit(t, ws, "add", "foo.txt")
+	runGit(t, ws, "commit", "-m", "add foo")
+
+	fooHash, err := g.run(ctx, "rev-parse", "HEAD")
+	require.NoError(t, err)
+
+	fooHash = strings.TrimSpace(fooHash)
+
+	// Commit touching bar.txt.
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "bar.txt"), []byte("bar\n"), 0o644))
+	runGit(t, ws, "add", "bar.txt")
+	runGit(t, ws, "commit", "-m", "add bar")
+
+	// Last commit touching foo.txt should be the first commit.
+	hash, err := g.LastCommitTouching(ctx, []string{"foo.txt"})
+	require.NoError(t, err)
+	assert.Equal(t, fooHash, hash)
+
+	// Last commit touching bar.txt should be HEAD.
+	headOut, err := g.run(ctx, "rev-parse", "HEAD")
+	require.NoError(t, err)
+
+	head := strings.TrimSpace(headOut)
+
+	hash, err = g.LastCommitTouching(ctx, []string{"bar.txt"})
+	require.NoError(t, err)
+	assert.Equal(t, head, hash)
+
+	// No commits touch nonexistent path.
+	hash, err = g.LastCommitTouching(ctx, []string{"nonexistent.txt"})
+	require.NoError(t, err)
+	assert.Empty(t, hash)
+}
+
+func TestHead(t *testing.T) {
+	t.Parallel()
+
+	_, ws, initHash := setupClonedRepo(t)
+	g := NewGit(ws, "")
+	ctx := context.Background()
+
+	h, err := g.Head(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, initHash, h)
+}
+
+func TestCheckout(t *testing.T) {
+	t.Parallel()
+
+	bare, ws, _ := setupClonedRepo(t)
+	g := NewGit(ws, "")
+	ctx := context.Background()
+
+	// Create a branch on the remote.
+	pushFileToBranch(t, bare, "feature.txt", "feature/resume")
+
+	require.NoError(t, g.Fetch(ctx, "feature/resume"))
+	require.NoError(t, g.Checkout(ctx, "feature/resume"))
+
+	// Verify we're on the right branch.
+	out, err := g.run(ctx, "rev-parse", "--abbrev-ref", "HEAD")
+	require.NoError(t, err)
+	assert.Equal(t, "feature/resume", strings.TrimSpace(out))
+}
+
+func TestDiff(t *testing.T) {
+	t.Parallel()
+
+	_, ws, _ := setupClonedRepo(t)
+	g := NewGit(ws, "")
+	ctx := context.Background()
+
+	// Add a commit on main branch.
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "diff.txt"), []byte("added line\n"), 0o644))
+	runGit(t, ws, "add", "diff.txt")
+	runGit(t, ws, "commit", "-m", "add diff.txt")
+
+	// Diff against origin/main (the merge-base...HEAD range).
+	diff, err := g.Diff(ctx, "origin/main")
+	require.NoError(t, err)
+	assert.Contains(t, diff, "added line")
+	assert.Contains(t, diff, "diff.txt")
+}
+
+func TestDiffNoChanges(t *testing.T) {
+	t.Parallel()
+
+	_, ws, _ := setupClonedRepo(t)
+	g := NewGit(ws, "")
+	ctx := context.Background()
+
+	// No commits beyond origin/main, diff should be empty.
+	diff, err := g.Diff(ctx, "origin/main")
+	require.NoError(t, err)
+	assert.Empty(t, strings.TrimSpace(diff))
+}

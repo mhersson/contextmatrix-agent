@@ -12,6 +12,10 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/tools"
 )
 
+// ErrRebaseConflict is returned by RebaseAutosquash when the rebase encounters
+// a conflict. The repo is left clean (rebase aborted) on this path.
+var ErrRebaseConflict = errors.New("rebase conflict")
+
 // Git runs code-driven git operations for one card's workspace. Credentials
 // are injected per invocation via an http.extraheader — they never land in
 // on-disk config or the model-facing tool env.
@@ -114,6 +118,17 @@ func (g *Git) CreateBranch(ctx context.Context, name string) error {
 	return err
 }
 
+// isDirty reports whether the working tree has any changes, including
+// untracked files.
+func (g *Git) isDirty(ctx context.Context) (bool, error) {
+	out, err := g.run(ctx, "status", "--porcelain")
+	if err != nil {
+		return false, fmt.Errorf("check status: %w", err)
+	}
+
+	return strings.TrimSpace(out) != "", nil
+}
+
 // CommitIfDirty stages all changes and commits them. It reports whether a
 // commit was made. A clean tree (no changes) returns (false, nil).
 //
@@ -121,12 +136,12 @@ func (g *Git) CreateBranch(ctx context.Context, name string) error {
 // container directory for this card only; staging everything is the correct
 // product behavior.
 func (g *Git) CommitIfDirty(ctx context.Context, title, cardID string) (bool, error) {
-	out, err := g.run(ctx, "status", "--porcelain")
+	dirty, err := g.isDirty(ctx)
 	if err != nil {
-		return false, fmt.Errorf("check status: %w", err)
+		return false, err
 	}
 
-	if strings.TrimSpace(out) == "" {
+	if !dirty {
 		return false, nil
 	}
 
@@ -217,4 +232,168 @@ func (g *Git) ForcePushWithLease(ctx context.Context, branch, expectedTip string
 		"origin", "HEAD:refs/heads/"+branch)
 
 	return err
+}
+
+// Fetch fetches ref from origin into the local FETCH_HEAD / remote-tracking ref.
+func (g *Git) Fetch(ctx context.Context, ref string) error {
+	_, err := g.run(ctx, "fetch", "origin", ref)
+
+	return err
+}
+
+// RemoteTip returns the commit hash at origin/branch via ls-remote. It returns
+// ("", nil) when the branch does not exist on the remote.
+func (g *Git) RemoteTip(ctx context.Context, branch string) (string, error) {
+	out, err := g.run(ctx, "ls-remote", "origin", "refs/heads/"+branch)
+	if err != nil {
+		return "", fmt.Errorf("remote tip %q: %w", branch, err)
+	}
+
+	line := strings.TrimSpace(out)
+	if line == "" {
+		return "", nil
+	}
+
+	// ls-remote output: "<hash>\trefs/heads/<branch>"
+	return strings.Fields(line)[0], nil
+}
+
+// MergeBase returns the merge-base commit hash between a and b.
+func (g *Git) MergeBase(ctx context.Context, a, b string) (string, error) {
+	out, err := g.run(ctx, "merge-base", a, b)
+	if err != nil {
+		return "", fmt.Errorf("merge-base %q %q: %w", a, b, err)
+	}
+
+	return strings.TrimSpace(out), nil
+}
+
+// CommitWithMessage stages all changes and commits with the given message. It
+// reports whether a commit was made. A clean tree returns (false, nil).
+//
+// git add -A is intentional: this operates inside the ephemeral container
+// workspace for this card; staging everything is the correct product behavior.
+func (g *Git) CommitWithMessage(ctx context.Context, message string) (bool, error) {
+	dirty, err := g.isDirty(ctx)
+	if err != nil {
+		return false, err
+	}
+
+	if !dirty {
+		return false, nil
+	}
+
+	if _, err := g.run(ctx, "add", "-A"); err != nil {
+		return false, fmt.Errorf("stage changes: %w", err)
+	}
+
+	if _, err := g.run(ctx, "commit", "-m", message); err != nil {
+		return false, fmt.Errorf("commit: %w", err)
+	}
+
+	return true, nil
+}
+
+// CommitFixup stages all changes — including untracked files, since fix runs
+// can legitimately create new ones — and creates a "fixup! <subject>" commit
+// targeting target (the hash of the commit to fix up). It reports whether a
+// commit was made. A clean tree returns (false, nil).
+func (g *Git) CommitFixup(ctx context.Context, target string) (bool, error) {
+	dirty, err := g.isDirty(ctx)
+	if err != nil {
+		return false, err
+	}
+
+	if !dirty {
+		return false, nil
+	}
+
+	if _, err := g.run(ctx, "add", "-A"); err != nil {
+		return false, fmt.Errorf("stage changes: %w", err)
+	}
+
+	if _, err := g.run(ctx, "commit", "--fixup="+target); err != nil {
+		return false, fmt.Errorf("commit fixup: %w", err)
+	}
+
+	return true, nil
+}
+
+// LastCommitTouching returns the hash of the most recent commit that touches
+// any of the given paths. It returns ("", nil) when no commit touches them.
+func (g *Git) LastCommitTouching(ctx context.Context, paths []string) (string, error) {
+	args := append([]string{"log", "-1", "--format=%H", "--"}, paths...)
+
+	out, err := g.run(ctx, args...)
+	if err != nil {
+		return "", fmt.Errorf("last commit touching %v: %w", paths, err)
+	}
+
+	return strings.TrimSpace(out), nil
+}
+
+// RebaseAutosquash rebases the current branch onto onto with --autosquash,
+// collapsing any fixup! commits. If the rebase encounters a conflict it aborts,
+// leaving the repo clean, and returns ErrRebaseConflict.
+//
+// GIT_SEQUENCE_EDITOR=true skips the interactive editor prompt.
+func (g *Git) RebaseAutosquash(ctx context.Context, onto string) error {
+	cmd := exec.CommandContext(ctx, "git", "rebase", "-i", "--autosquash", onto)
+	cmd.Dir = g.dir
+	cmd.Env = append(g.credEnv(), "GIT_SEQUENCE_EDITOR=true")
+
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return nil
+	}
+
+	// Rebase failed — abort to leave the repo clean.
+	_, abortErr := g.run(ctx, "rebase", "--abort")
+	if abortErr != nil {
+		return fmt.Errorf("rebase abort after conflict: %w (original: %s)", abortErr, strings.TrimSpace(string(out)))
+	}
+
+	return fmt.Errorf("%w: %s", ErrRebaseConflict, strings.TrimSpace(string(out)))
+}
+
+// SoftReset moves HEAD to to, leaving the index and working tree unchanged.
+func (g *Git) SoftReset(ctx context.Context, to string) error {
+	_, err := g.run(ctx, "reset", "--soft", to)
+
+	return err
+}
+
+// Head returns the current HEAD commit hash.
+func (g *Git) Head(ctx context.Context) (string, error) {
+	out, err := g.run(ctx, "rev-parse", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("head: %w", err)
+	}
+
+	return strings.TrimSpace(out), nil
+}
+
+// Checkout checks out ref, creating a local tracking branch if it exists on
+// origin but not locally.
+func (g *Git) Checkout(ctx context.Context, ref string) error {
+	_, err := g.run(ctx, "checkout", ref)
+
+	return err
+}
+
+// Diff returns the unified diff of all commits between merge-base(base, HEAD)
+// and HEAD. This is the three-dot diff: changes introduced on this branch
+// relative to base, ignoring divergence in base itself.
+func (g *Git) Diff(ctx context.Context, base string) (string, error) {
+	mergeBase, err := g.MergeBase(ctx, base, "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("diff: %w", err)
+	}
+
+	out, err := g.run(ctx, "diff", mergeBase+"...HEAD")
+	if err != nil {
+		return "", fmt.Errorf("diff %q...HEAD: %w", mergeBase, err)
+	}
+
+	return out, nil
 }
