@@ -51,7 +51,8 @@ type apiError struct {
 // parseStream reads an OpenRouter SSE body and assembles a Response. It skips
 // ":" keepalive comments, stops on "[DONE]", accumulates tool_calls by index
 // (the name may arrive in a later frame than id/arguments), captures usage from
-// the final frame, and surfaces mid-stream error frames as an error. onDelta
+// the final frame, surfaces mid-stream error frames as an error, and rejects a
+// stream that ends without [DONE] or a terminal finish_reason. onDelta
 // (nullable) receives incremental content/reasoning.
 func parseStream(r io.Reader, onDelta func(Delta)) (Response, error) {
 	return parseStreamWithLimit(r, onDelta, maxSSELine)
@@ -67,6 +68,8 @@ func parseStreamWithLimit(r io.Reader, onDelta func(Delta), maxLine int) (Respon
 
 	var order []int
 
+	var sawDone bool
+
 	for sc.Scan() {
 		line := sc.Text()
 		switch {
@@ -80,6 +83,8 @@ func parseStreamWithLimit(r io.Reader, onDelta func(Delta), maxLine int) (Respon
 
 		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if payload == "[DONE]" {
+			sawDone = true
+
 			break
 		}
 
@@ -148,6 +153,10 @@ func parseStreamWithLimit(r io.Reader, onDelta func(Delta), maxLine int) (Respon
 		}
 
 		return resp, fmt.Errorf("read sse: %w", err)
+	}
+
+	if !sawDone && resp.FinishReason == "" {
+		return resp, fmt.Errorf("truncated stream: ended without [DONE] or a terminal finish_reason")
 	}
 
 	for _, idx := range order {
