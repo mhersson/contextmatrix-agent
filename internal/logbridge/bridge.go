@@ -224,10 +224,17 @@ func (b *Bridge) mapEvent(kind string, data map[string]any) (entry protocol.LogE
 }
 
 // publish delivers e to the hub and fires the awaiting hook.
+//
+// stderr-typed entries (raw stderr, unparsable lines, and the error-kind
+// mapping) never touch the awaiting flag: a parked HITL worker still logs to
+// stderr (e.g. a heartbeat warning from its slog), and clearing awaiting on
+// such a line would let the idle watchdog reap a container that is legitimately
+// waiting for a human. Only real agent-progress entries (text, tool_call,
+// usage, non-awaiting system) clear it; the awaiting_human system entry sets it.
 func (b *Bridge) publish(e protocol.LogEntry, awaiting bool) {
 	b.hub.Publish(e)
 
-	if b.onAwaiting != nil {
+	if b.onAwaiting != nil && e.Type != "stderr" {
 		b.onAwaiting(e.Project, e.CardID, awaiting)
 	}
 }

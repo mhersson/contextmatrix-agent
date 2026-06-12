@@ -189,12 +189,14 @@ func TestMappingTable(t *testing.T) {
 			wantAwaiting: 0,
 		},
 		{
-			name: "error → stderr",
+			name: "error → stderr (awaiting flag untouched)",
 			line: makeEvent("error", map[string]any{
 				"error": "something went wrong",
 			}),
-			wantType:     "stderr",
-			wantAwaiting: 0,
+			wantType: "stderr",
+			// stderr-typed entries must NOT clear awaiting-human: a parked HITL
+			// worker still logs errors while waiting for a human.
+			wantAwaiting: -1,
 			checkContent: func(t *testing.T, content string) {
 				t.Helper()
 				assert.Contains(t, content, "something went wrong")
@@ -237,10 +239,11 @@ func TestMappingTable(t *testing.T) {
 			wantAwaiting: -1,
 		},
 		{
-			name:         "unparsable line → stderr passthrough",
-			line:         []byte("goroutine 1 [running]: panic: something bad happened"),
-			wantType:     "stderr",
-			wantAwaiting: 0,
+			name:     "unparsable line → stderr passthrough (awaiting flag untouched)",
+			line:     []byte("goroutine 1 [running]: panic: something bad happened"),
+			wantType: "stderr",
+			// stderr-typed: awaiting must not be cleared.
+			wantAwaiting: -1,
 			checkContent: func(t *testing.T, content string) {
 				t.Helper()
 				assert.Equal(t, "goroutine 1 [running]: panic: something bad happened", content)
@@ -316,6 +319,9 @@ func TestMappingTable(t *testing.T) {
 			case 0:
 				assert.True(t, awaitingCalled, "awaiting hook must fire with false for bridged lines")
 				assert.False(t, awaitingVal, "awaiting must be false")
+			case -1:
+				assert.False(t, awaitingCalled,
+					"awaiting hook must NOT fire for stderr-typed entries (keeps a parked HITL worker alive)")
 			}
 		})
 	}
@@ -346,6 +352,67 @@ func TestStderrStream(t *testing.T) {
 	assert.Equal(t, "stderr", got.Type)
 	assert.NotContains(t, got.Content, secret, "secret must be redacted")
 	assert.Contains(t, got.Content, "[REDACTED]")
+}
+
+// TestStderrDoesNotClearAwaiting proves that stderr output — raw stderr, the
+// error-kind mapping, and unparsable lines — leaves the awaiting-human flag
+// untouched, while a real agent-progress entry clears it. A parked HITL worker
+// keeps logging to stderr; clearing awaiting on those lines would let the idle
+// watchdog reap a container that is legitimately waiting for a human.
+func TestStderrDoesNotClearAwaiting(t *testing.T) {
+	t.Parallel()
+
+	newBridge := func() (*logbridge.Bridge, *bool, *bool) {
+		called := false
+		val := false
+		hub := logbridge.NewHub()
+		b := logbridge.New(hub, nil, func(_, _ string, awaiting bool) {
+			called = true
+			val = awaiting
+		})
+
+		return b, &called, &val
+	}
+
+	t.Run("raw stderr line does not fire the awaiting hook", func(t *testing.T) {
+		t.Parallel()
+
+		b, called, _ := newBridge()
+		b.BridgeLine(testProject, testCard, []byte("worker slog: heartbeat warning"), true)
+
+		assert.False(t, *called, "raw stderr must not clear awaiting")
+	})
+
+	t.Run("error-kind event does not fire the awaiting hook", func(t *testing.T) {
+		t.Parallel()
+
+		b, called, _ := newBridge()
+		b.BridgeLine(testProject, testCard, makeEvent("error", map[string]any{"error": "boom"}), false)
+
+		assert.False(t, *called, "error-kind stderr must not clear awaiting")
+	})
+
+	t.Run("text event fires the awaiting hook with false", func(t *testing.T) {
+		t.Parallel()
+
+		b, called, val := newBridge()
+		b.BridgeLine(testProject, testCard,
+			makeEvent("model_response", map[string]any{"content": "progress", "model": "m"}), false)
+
+		assert.True(t, *called, "agent-progress entry must fire the awaiting hook")
+		assert.False(t, *val, "agent-progress entry clears awaiting (false)")
+	})
+
+	t.Run("tool_call event fires the awaiting hook with false", func(t *testing.T) {
+		t.Parallel()
+
+		b, called, val := newBridge()
+		b.BridgeLine(testProject, testCard,
+			makeEvent("tool_call", map[string]any{"id": "c1", "name": "bash", "raw_args": "{}"}), false)
+
+		assert.True(t, *called, "tool_call entry must fire the awaiting hook")
+		assert.False(t, *val, "tool_call entry clears awaiting (false)")
+	})
 }
 
 // TestRedaction ensures secrets never appear in bridged frames.
