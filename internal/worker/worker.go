@@ -210,6 +210,18 @@ func prepareWorkspace(ctx context.Context, git *Git, spec RunSpec, branch string
 		return fmt.Errorf("create branch %s: %w", branch, err)
 	}
 
+	// Lock the push policy now: the run owns exactly this branch. baseBranch
+	// is the spec's base or the clone's default; remoteDefault is best-effort
+	// from origin/HEAD. All three are protected against force-push.
+	remoteDefault := git.RemoteDefaultBranch(ctx)
+
+	baseBranch := spec.BaseBranch
+	if baseBranch == "" {
+		baseBranch = remoteDefault
+	}
+
+	git.SetBranchPolicy(branch, baseBranch, remoteDefault)
+
 	return nil
 }
 

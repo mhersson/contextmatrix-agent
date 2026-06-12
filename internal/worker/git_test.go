@@ -76,6 +76,7 @@ func TestCloneBranchCommitPush(t *testing.T) {
 
 	require.NoError(t, g.Clone(ctx, remote, "main"))
 	require.NoError(t, g.CreateBranch(ctx, "cm/cmx-001"))
+	g.SetBranchPolicy("cm/cmx-001", "main", "main")
 
 	require.NoError(t, os.WriteFile(filepath.Join(ws, "new.txt"), []byte("x\n"), 0o644))
 
@@ -140,4 +141,102 @@ func TestCredEnvNoToken(t *testing.T) {
 
 	assert.NotContains(t, joined, "GIT_CONFIG_COUNT")
 	assert.NotContains(t, joined, "http.extraheader")
+}
+
+func TestPushGuard(t *testing.T) {
+	t.Parallel()
+
+	g := NewGit(t.TempDir(), "tok")
+	g.SetBranchPolicy("cm/test-001", "main", "main") // cardBranch, baseBranch, remoteDefault
+
+	tests := []struct {
+		name    string
+		branch  string
+		force   bool
+		wantErr string
+	}{
+		{"force to own branch allowed", "cm/test-001", true, ""}, // fails later at network, not at guard
+		{"plain push to own branch allowed", "cm/test-001", false, ""},
+		{"force to main refused", "main", true, "refusing"},
+		{"force to master refused", "master", true, "refusing"},
+		{"force to other cm branch refused", "cm/other-002", true, "refusing"},
+		{"plain push to main refused", "main", false, "refusing"},
+		{"plain push to other branch refused", "feature/x", false, "refusing"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := g.guardPush(tt.branch, tt.force)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+			} else {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestPushGuardDenylistRegardless pins the "denylist regardless" rule: even
+// when the policy itself names a protected ref as the card branch, a force
+// push to it is still refused. Card-ID validation makes this state
+// unconstructable from env, but the guard must not depend on call order or on
+// who set the policy.
+func TestPushGuardDenylistRegardless(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                                  string
+		cardBranch, baseBranch, remoteDefault string
+		wantErr                               string
+	}{
+		{"card branch is main", "main", "main", "main", "refusing"},
+		{"card branch is master, policy names neither", "master", "dev", "develop", "refusing"},
+		{"card branch is base branch", "release/1.0", "release/1.0", "main", "refusing"},
+		{"card branch outside cm namespace", "feature/x", "dev", "develop", "refusing"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			g := NewGit(t.TempDir(), "tok")
+			g.SetBranchPolicy(tt.cardBranch, tt.baseBranch, tt.remoteDefault)
+
+			err := g.guardPush(tt.cardBranch, true)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+// TestForcePushRequiresLeaseTip pins that force-with-lease without an explicit
+// expected tip is rejected BEFORE git is ever invoked. The temp dir is not a
+// repo, so a real git push would fail with a different (git-level) message; the
+// exact lease error proves the guard fired first.
+func TestForcePushRequiresLeaseTip(t *testing.T) {
+	t.Parallel()
+
+	g := NewGit(t.TempDir(), "tok")
+	g.SetBranchPolicy("cm/test-001", "main", "main")
+
+	err := g.ForcePushWithLease(context.Background(), "cm/test-001", "")
+	require.Error(t, err)
+	assert.EqualError(t, err, "force-with-lease: expected tip required")
+}
+
+// TestGuardZeroValueFailClosed pins the fail-closed posture: with no branch
+// policy set (zero-value Git), EVERY push must refuse — including a push to a
+// cm/ branch that would otherwise be legal.
+func TestGuardZeroValueFailClosed(t *testing.T) {
+	t.Parallel()
+
+	g := NewGit(t.TempDir(), "tok") // SetBranchPolicy never called
+
+	for _, branch := range []string{"cm/test-001", "main", "master", "feature/x", ""} {
+		for _, force := range []bool{false, true} {
+			err := g.guardPush(branch, force)
+			require.Error(t, err, "branch=%q force=%v must refuse when policy unset", branch, force)
+		}
+	}
 }
