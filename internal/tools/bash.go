@@ -17,10 +17,19 @@ const defaultBashMaxTimeout = 600 // seconds — hard server-side ceiling
 type BashTool struct {
 	root       string
 	maxTimeout int
+	extraEnv   []string
 }
 
 func NewBashTool(root string) BashTool {
 	return BashTool{root: root, maxTimeout: defaultBashMaxTimeout}
+}
+
+// WithExtraEnv returns a copy with additional KEY=VALUE entries appended to the
+// scrubbed environment (e.g. "GOCACHE=/tmp/gocache").
+func (t BashTool) WithExtraEnv(kvs []string) BashTool {
+	t.extraEnv = kvs
+
+	return t
 }
 
 // WithMaxTimeout returns a copy with a different clamp ceiling (seconds).
@@ -68,6 +77,7 @@ func (t BashTool) Execute(ctx context.Context, args map[string]any) (string, err
 
 	cmd := exec.Command("bash", "-c", command) //nolint:noctx // ctx cancel is handled below by killing the whole process group; CommandContext would kill only the child
 	cmd.Dir = t.root
+	cmd.Env = ScrubbedEnv(t.extraEnv)
 	// New process group so we can signal the whole tree (the child is the
 	// group leader: pgid == child pid). Plain ctx-cancel leaves grandchildren.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
