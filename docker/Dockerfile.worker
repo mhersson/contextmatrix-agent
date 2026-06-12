@@ -1,0 +1,79 @@
+# syntax=docker/dockerfile:1.7
+
+FROM golang:1.26.4-bookworm AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -o /out/contextmatrix-agent ./cmd/contextmatrix-agent
+
+FROM debian@sha256:4ae67669760b807c19f23902a3fd7c121a6a70cf2ae709035674b23e712e4d62
+# ^ debian:bookworm-slim resolved on 2026-04-21. Refresh intentionally via
+#   `docker pull debian:bookworm-slim && docker inspect --format='{{index .RepoDigests 0}}' debian:bookworm-slim`.
+
+# Pinned toolchain versions. Override at build time with --build-arg if a
+# newer release has been vetted.
+ARG GO_VERSION=1.26.4
+ARG GO_SHA256_AMD64=1153d3d50e0ac764b447adfe05c2bcf08e889d42a02e0fe0259bd47f6733ad7f
+ARG GO_SHA256_ARM64=ef758ae7c6cf9267c9c0ef080b8965f453d89ab2d25d9eb22de4405925238768
+ARG GOLANGCI_LINT_VERSION=v2.12.2
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    PATH="/usr/local/go/bin:/home/user/go/bin:/home/user/.local/bin:${PATH}"
+
+# hadolint ignore=DL3008
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      bash ca-certificates build-essential curl git jq \
+      libgcc-s1 libstdc++6 openssh-client ripgrep fd-find \
+    && ln -s "$(command -v fdfind)" /usr/local/bin/fd \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node 25. NodeSource's setup_25.x script adds a signed apt repo.
+# hadolint ignore=DL3008
+RUN curl -fsSL https://deb.nodesource.com/setup_25.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# github-cli isn't in Debian's main repo — install from GitHub's apt source.
+# hadolint ignore=DL3008
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+       > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Go. The tarball is SHA256-verified before extraction so a
+# compromised CDN or MITM cannot substitute a malicious toolchain.
+RUN set -eux; \
+    ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/'); \
+    case "$ARCH" in \
+      amd64) GO_SHA256="${GO_SHA256_AMD64}" ;; \
+      arm64) GO_SHA256="${GO_SHA256_ARM64}" ;; \
+      *) echo "unsupported arch: $ARCH" >&2; exit 1 ;; \
+    esac; \
+    TARBALL="go${GO_VERSION}.linux-${ARCH}.tar.gz"; \
+    curl -fsSL "https://go.dev/dl/${TARBALL}" -o "/tmp/${TARBALL}"; \
+    echo "${GO_SHA256}  /tmp/${TARBALL}" | sha256sum -c -; \
+    tar -C /usr/local -xzf "/tmp/${TARBALL}"; \
+    rm -f "/tmp/${TARBALL}"
+
+# Install golangci-lint from source so it is compiled against the pinned Go
+# toolchain. Running go clean -modcache drops the ~350MB shared module cache
+# in the same layer.
+RUN CGO_ENABLED=0 GOBIN=/usr/local/bin go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}" \
+    && go clean -modcache
+
+COPY --from=build /out/contextmatrix-agent /usr/local/bin/contextmatrix-agent
+
+RUN useradd -m -u 1000 -s /bin/bash user
+USER user
+WORKDIR /home/user
+RUN mkdir -p /home/user/workspace
+
+HEALTHCHECK NONE
+
+ENTRYPOINT ["contextmatrix-agent", "work"]
