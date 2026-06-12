@@ -33,6 +33,40 @@ func TestBashToolTimeout(t *testing.T) {
 	assert.Contains(t, out, "timed out")
 }
 
+func TestBashTimeoutClamp(t *testing.T) {
+	tool := NewBashTool(t.TempDir()).WithMaxTimeout(1)
+
+	start := time.Now()
+	out, err := tool.Execute(context.Background(), map[string]any{
+		"command": "sleep 30", "timeout_seconds": 9999,
+	})
+	require.NoError(t, err)
+	assert.Less(t, time.Since(start), 5*time.Second)
+	assert.Contains(t, out, "timed out after 1s")
+}
+
+func TestBashWithMaxTimeout(t *testing.T) {
+	root := t.TempDir()
+
+	tool := NewBashTool(root)
+	assert.Equal(t, defaultBashMaxTimeout, tool.maxTimeout)
+
+	// Non-positive values are no-ops: the current ceiling is kept.
+	assert.Equal(t, defaultBashMaxTimeout, tool.WithMaxTimeout(0).maxTimeout)
+	assert.Equal(t, defaultBashMaxTimeout, tool.WithMaxTimeout(-7).maxTimeout)
+
+	// Positive values take effect, without mutating the receiver.
+	assert.Equal(t, 5, tool.WithMaxTimeout(5).maxTimeout)
+	assert.Equal(t, defaultBashMaxTimeout, tool.maxTimeout)
+}
+
+func TestBashSchemaReflectsMaxTimeout(t *testing.T) {
+	root := t.TempDir()
+
+	assert.Contains(t, string(NewBashTool(root).Schema().Function.Parameters), "max 600")
+	assert.Contains(t, string(NewBashTool(root).WithMaxTimeout(42).Schema().Function.Parameters), "max 42")
+}
+
 func TestBashToolKillsProcessGroupOnTimeout(t *testing.T) {
 	root := t.TempDir()
 	marker := filepath.Join(root, "marker")
