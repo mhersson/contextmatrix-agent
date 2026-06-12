@@ -64,7 +64,7 @@ func newEvalCmd() *cobra.Command {
 	cmd.Flags().StringVar(&modelsCSV, "models", "", "comma-separated model allowlist (default: curated candidates)")
 	cmd.Flags().BoolVar(&freeAuto, "free-auto", false, "use the :free tool-capable subset from the live catalog")
 	cmd.Flags().IntVar(&p.samples, "samples", 3, "samples per (model, task)")
-	cmd.Flags().StringVar(&p.out, "out", "capabilities.json", "capabilities file to write/merge")
+	cmd.Flags().StringVar(&p.out, "out", "internal/registry/data/capabilities.json", "capabilities file to write/merge")
 	cmd.Flags().StringVar(&p.transcriptDir, "transcript-dir", "", "directory for per-run JSONL transcripts")
 	cmd.Flags().StringVar(&p.check, "check", "", "baseline capabilities.json; non-zero exit if any tier drops")
 	cmd.Flags().Float64Var(&p.maxCost, "max-cost", 0.50, "per-run USD cap")

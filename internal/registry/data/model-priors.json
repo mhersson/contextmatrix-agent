@@ -1,0 +1,12 @@
+{
+  "meta": {
+    "updated": "2026-06-13",
+    "procedure": "docs/model-priors.md",
+    "tier_bars": {
+      "simple": 0.30,
+      "moderate": 0.55,
+      "complex": 0.75
+    }
+  },
+  "models": {}
+}
