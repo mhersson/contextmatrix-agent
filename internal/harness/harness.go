@@ -20,14 +20,15 @@ const defaultMaxTurns = 30
 const contextLimitThreshold = 0.85
 
 type Config struct {
-	Model         string
-	Models        []string
-	Provider      json.RawMessage
-	Reasoning     json.RawMessage
-	SystemPrompt  string
-	MaxTurns      int
-	MaxCostUSD    float64 // 0 disables the cost cap
-	ContextWindow int     // 0 disables context-limit detection
+	Model              string
+	Models             []string
+	Provider           json.RawMessage
+	Reasoning          json.RawMessage
+	SystemPrompt       string
+	MaxTurns           int
+	MaxCostUSD         float64 // 0 disables the cost cap
+	ContextWindow      int     // 0 disables context-limit detection
+	ToolOutputMaxBytes int     // 0 disables the tool-result size cap
 }
 
 type Result struct {
@@ -164,6 +165,7 @@ func Run(ctx context.Context, client llm.LLM, reg *tools.Registry, emit *events.
 				continue
 			}
 
+			out = tools.HeadTail(out, cfg.ToolOutputMaxBytes)
 			msgs = append(msgs, toolResultMsg(tc.ID, out))
 			emit.Emit(events.ToolResult, map[string]any{"id": tc.ID, "output_len": len(out)})
 		}

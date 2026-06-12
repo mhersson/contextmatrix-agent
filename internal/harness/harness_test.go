@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/mhersson/contextmatrix-agent/internal/events"
@@ -198,4 +199,87 @@ func TestRunContextLimitDisabledWhenWindowZero(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, res.Completed)
 	assert.Equal(t, "done", res.Reason)
+}
+
+// bigTool is a fake tool that returns a large string with distinct head/tail content.
+type bigTool struct{ output string }
+
+func (b *bigTool) Name() string { return "big" }
+func (b *bigTool) Schema() llm.Tool {
+	return llm.Tool{Type: "function", Function: llm.ToolFunction{Name: "big"}}
+}
+
+func (b *bigTool) Execute(_ context.Context, _ map[string]any) (string, error) {
+	return b.output, nil
+}
+
+// capturingLLMSeq records all requests; scripted responses are returned in order.
+type capturingLLMSeq struct {
+	responses []llm.Response
+	requests  []llm.Request
+	i         int
+}
+
+func (c *capturingLLMSeq) Send(_ context.Context, req llm.Request) (llm.Response, error) {
+	return c.next(req), nil
+}
+
+func (c *capturingLLMSeq) SendStream(_ context.Context, req llm.Request, _ func(llm.Delta)) (llm.Response, error) {
+	return c.next(req), nil
+}
+
+func (c *capturingLLMSeq) next(req llm.Request) llm.Response {
+	c.requests = append(c.requests, req)
+	if c.i >= len(c.responses) {
+		return llm.Response{FinishReason: "stop"}
+	}
+
+	r := c.responses[c.i]
+	c.i++
+
+	return r
+}
+
+func TestRunToolOutputCapTruncates(t *testing.T) {
+	const maxBytes = 1000
+
+	head := strings.Repeat("H", 60000)
+	tail := strings.Repeat("T", 40000)
+	large := head + tail // 100 KiB, clearly distinct head/tail
+
+	bt := &bigTool{output: large}
+	reg := tools.NewRegistry(bt)
+
+	capt := &capturingLLMSeq{responses: []llm.Response{
+		{ToolCalls: []llm.ToolCall{toolCall("1", "big", `{}`)}},
+		{Content: "done", FinishReason: "stop"},
+	}}
+
+	_, err := Run(context.Background(), capt, reg, newEmitter(), "task", Config{
+		MaxTurns:           10,
+		ToolOutputMaxBytes: maxBytes,
+	})
+	require.NoError(t, err)
+
+	// The second request carries the tool-result message from the first turn.
+	require.Len(t, capt.requests, 2)
+	secondReq := capt.requests[1]
+
+	// Find the tool-result message.
+	var toolResultContent string
+
+	for _, m := range secondReq.Messages {
+		if m.Role == "tool" && m.ToolCallID == "1" {
+			toolResultContent = m.Content
+
+			break
+		}
+	}
+
+	require.NotEmpty(t, toolResultContent, "tool-result message not found in second request")
+
+	assert.Contains(t, toolResultContent, "bytes truncated")
+	assert.True(t, strings.HasPrefix(toolResultContent, "HH"), "head content preserved")
+	assert.True(t, strings.HasSuffix(toolResultContent, "TT"), "tail content preserved")
+	assert.LessOrEqual(t, len(toolResultContent), maxBytes+80) // marker allowance
 }
