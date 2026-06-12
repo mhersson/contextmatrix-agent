@@ -36,12 +36,14 @@ type RunSpec struct {
 	OpenRouterKey string // from /run/cm-secrets/env via the secrets source
 	GitToken      string // from /run/cm-secrets/env via the secrets source
 
-	BashTimeoutMax int // default 600
-	ToolOutputMax  int // default 30000
-	MaxTurns       int
-	MaxCostUSD     float64
-	DefaultModel   string // fallback when Model is absent/unresolvable
-	Workspace      string // parent dir for the clone (default /home/user/workspace)
+	BashTimeoutMax        int     // CMX_BASH_TIMEOUT_MAX_SECONDS; default 600
+	ToolOutputMax         int     // CMX_TOOL_OUTPUT_MAX_BYTES; default 30000
+	MaxTurns              int     // CMX_MAX_TURNS
+	MaxCostUSD            float64 // CMX_MAX_COST_USD
+	MaxCardCost           float64 // CMX_MAX_CARD_COST; 0 disables
+	SelectorPriceHeadroom float64 // CMX_SELECTOR_PRICE_HEADROOM; 0 uses worker default
+	DefaultModel          string  // CMX_DEFAULT_MODEL; fallback when Model is absent/unresolvable
+	Workspace             string  // CMX_WORKSPACE; parent dir for the clone (default /home/user/workspace)
 }
 
 // CardOps is the slice of cmclient the worker needs (interface here, where

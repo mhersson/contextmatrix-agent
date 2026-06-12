@@ -1,0 +1,195 @@
+# serve.yaml — contextmatrix-agent service configuration
+#
+# Copy to ~/.config/contextmatrix-agent/serve.yaml (the XDG default location)
+# and edit before starting the service. Every field can also be set or
+# overridden with a CMX_* environment variable (see each field below).
+# Nested keys use a double-underscore separator:
+#   CMX_GITHUB__AUTH_MODE=pat
+
+# ─── ContextMatrix connectivity ───────────────────────────────────────────────
+
+# URL of the ContextMatrix API reachable from the agent service host.
+# Used for status callbacks. Required.
+# CMX_CONTEXTMATRIX_URL
+contextmatrix_url: http://localhost:8080
+
+# URL of the ContextMatrix API as seen from inside worker containers.
+# Required in practice: workers resolve CM_MCP_URL from this value;
+# without it they point at their own localhost and fail at MCP connect.
+# For Docker bridge networking, use the bridge gateway (typically the
+# host's Docker bridge address):
+#   container_contextmatrix_url: http://172.17.0.1:8080
+# For host-network containers or a named Docker network, use the
+# service hostname or IP reachable from containers.
+# CMX_CONTAINER_CONTEXTMATRIX_URL
+# container_contextmatrix_url: http://172.17.0.1:8080
+
+# Shared secret between ContextMatrix and the agent service.
+# Must be at least 32 characters. Required.
+# CMX_API_KEY
+api_key: ""
+
+# MCP API key passed to worker containers as CM_MCP_API_KEY.
+# Workers use it to authenticate against the ContextMatrix MCP server.
+# CMX_MCP_API_KEY
+mcp_api_key: ""
+
+# ─── Serving ──────────────────────────────────────────────────────────────────
+
+# Port the agent service listens on. Default: 9092.
+# CMX_PORT
+port: 9092
+
+# Log level: debug | info | warn | error. Default: info.
+# CMX_LOG_LEVEL
+log_level: info
+
+# ─── Worker containers ────────────────────────────────────────────────────────
+
+# Docker image launched for each card. Pin to a digest for reproducibility.
+# Required.
+# CMX_BASE_IMAGE
+# base_image: ghcr.io/mhersson/contextmatrix-agent@sha256:<digest>
+
+# Image pull policy: never | if-not-present | always. Default: if-not-present.
+# CMX_IMAGE_PULL_POLICY
+image_pull_policy: if-not-present
+
+# Maximum number of concurrent worker containers. Default: 5.
+# CMX_MAX_CONCURRENT
+max_concurrent: 5
+
+# Maximum lifetime of a worker container before the agent's own watchdog kills
+# it. Must not exceed 150m (ContextMatrix force-kills containers older than
+# 150m externally; the agent must fire first so cleanup happens properly).
+# Default: 2h30m.
+# CMX_CONTAINER_TIMEOUT
+container_timeout: 2h30m
+
+# Maximum container memory in bytes. Default: 8589934592 (8 GiB).
+# CMX_CONTAINER_MEMORY_LIMIT
+container_memory_limit: 8589934592
+
+# Maximum container PID count. Default: 512.
+# CMX_CONTAINER_PIDS_LIMIT
+container_pids_limit: 512
+
+# How long a container can produce no stdout/stderr before it is considered
+# idle and killed. Default: 30m.
+# CMX_IDLE_OUTPUT_TIMEOUT
+idle_output_timeout: 30m
+
+# How often the idle watchdog polls for output. Default: 30s.
+# CMX_IDLE_WATCHDOG_INTERVAL
+idle_watchdog_interval: 30s
+
+# Host directory bind-mounted read-only into containers at /run/cm-secrets.
+# The agent refreshes <secrets_dir>/shared/env before each token expiry;
+# workers read their GitHub token and OpenRouter key from this file.
+# Default: /var/run/cm-agent/secrets.
+# CMX_SECRETS_DIR
+secrets_dir: /var/run/cm-agent/secrets
+
+# Additional environment variables injected verbatim into every worker
+# container. Useful for operator-specific passthrough.
+# worker_extra_env:
+#   HTTP_PROXY: http://proxy.example.com:3128
+#   NO_PROXY: localhost,127.0.0.1
+
+# ─── OpenRouter ───────────────────────────────────────────────────────────────
+
+# OpenRouter API key written to the shared secrets env file so workers can
+# authenticate with OpenRouter. Required.
+# CMX_OPENROUTER_API_KEY
+openrouter_api_key: ""
+
+# Default OpenRouter model slug used when a trigger does not specify a model or
+# the requested model is unresolvable. Optional.
+# CMX_DEFAULT_MODEL
+# default_model: deepseek/deepseek-v4-flash
+
+# ─── Per-card budget ──────────────────────────────────────────────────────────
+
+# Cumulative USD ceiling per card. Workers receive this as CMX_MAX_CARD_COST.
+# The orchestrator enforces this ceiling and aborts the card when exceeded.
+# 0 disables the ceiling. Note: koanf cannot distinguish an absent key from
+# an explicit 0 — if the key is absent the default (5.0) applies; an explicit
+# 0 in YAML or via env disables the ceiling.
+# Default: 5.0
+# CMX_MAX_CARD_COST
+max_card_cost: 5.0
+
+# Best-value band multiplier for the model selector. Workers receive this as
+# CMX_SELECTOR_PRICE_HEADROOM. A value of 1.5 means "consider any model whose
+# cost is within 1.5× of the cheapest option in the target capability band."
+# 0 omits the env var so workers apply their own default.
+# Default: 1.5
+# CMX_SELECTOR_PRICE_HEADROOM
+selector_price_headroom: 1.5
+
+# ─── Artificial Analysis API key ──────────────────────────────────────────────
+
+# API key for Artificial Analysis priors data — used ONLY by the priors-refresh
+# helper command. This key is redacted in logs and is NEVER passed into worker
+# containers. Leave empty unless you are running the priors-refresh helper.
+# CMX_ARTIFICIAL_ANALYSIS_API_KEY
+# artificial_analysis_api_key: ""
+
+# ─── GitHub authentication ────────────────────────────────────────────────────
+
+github:
+  # Authentication mode: app | pat. Required.
+  # CMX_GITHUB__AUTH_MODE
+  auth_mode: pat
+
+  # Optional GitHub API base URL. Defaults to https://api.github.com.
+  # CMX_GITHUB__API_BASE_URL
+  # api_base_url: https://api.github.com
+
+  # GitHub App credentials (required when auth_mode is "app").
+  app:
+    # CMX_GITHUB__APP__APP_ID
+    # app_id: 0
+    # CMX_GITHUB__APP__INSTALLATION_ID
+    # installation_id: 0
+    # CMX_GITHUB__APP__PRIVATE_KEY_PATH
+    # private_key_path: /etc/contextmatrix-agent/github-app.pem
+
+  # Fine-grained PAT (required when auth_mode is "pat").
+  pat:
+    # CMX_GITHUB__PAT__TOKEN
+    # token: ""
+
+# ─── Webhook replay protection ────────────────────────────────────────────────
+
+# Maximum clock skew (in seconds) tolerated between ContextMatrix and the agent
+# service when validating HMAC timestamps. Default: 330 (5.5 minutes).
+# CMX_WEBHOOK_REPLAY_SKEW_SECONDS
+webhook_replay_skew_seconds: 330
+
+# Maximum number of recent request signatures retained for replay detection.
+# Default: 10000.
+# CMX_WEBHOOK_REPLAY_CACHE_SIZE
+webhook_replay_cache_size: 10000
+
+# ─── Message deduplication ────────────────────────────────────────────────────
+
+# How long a delivered message_id is retained to suppress retries. Default: 600s.
+# CMX_MESSAGE_DEDUP_TTL_SECONDS
+message_dedup_ttl_seconds: 600
+
+# Maximum number of message_ids retained for deduplication. Default: 1000.
+# CMX_MESSAGE_DEDUP_CACHE_SIZE
+message_dedup_cache_size: 1000
+
+# ─── Worker CMX_* knobs ───────────────────────────────────────────────────────
+
+# Maximum wall-clock seconds a bash tool call may run inside a worker container.
+# Default: 600.
+# CMX_BASH_TIMEOUT_MAX_SECONDS
+bash_timeout_max_seconds: 600
+
+# Maximum bytes of tool output returned to the model per turn.
+# Default: 30000.
+# CMX_TOOL_OUTPUT_MAX_BYTES
+tool_output_max_bytes: 30000

@@ -110,7 +110,7 @@ func runServe(ctx context.Context, configPath string) error {
 
 	tracker := executor.NewTracker(cfg.MaxConcurrent)
 	hub := logbridge.NewHub()
-	redactor := redact.New([]string{cfg.OpenRouterAPIKey, cfg.MCPAPIKey, cfg.APIKey})
+	redactor := redact.New([]string{cfg.OpenRouterAPIKey, cfg.MCPAPIKey, cfg.APIKey, cfg.ArtificialAnalysisAPIKey})
 
 	cbClient := callback.New(cfg.ContextMatrixURL, cfg.APIKey, logger)
 
@@ -287,6 +287,8 @@ func launchEnv(cfg *config.ServiceConfig, secretsHostDir string) webhook.LaunchE
 		BashTimeoutMaxSeconds: cfg.BashTimeoutMaxSeconds,
 		ToolOutputMaxBytes:    cfg.ToolOutputMaxBytes,
 		DefaultModel:          cfg.DefaultModel,
+		MaxCardCost:           cfg.MaxCardCost,
+		SelectorPriceHeadroom: cfg.SelectorPriceHeadroom,
 		WorkerExtraEnv:        flattenEnv(cfg.WorkerExtraEnv),
 	}
 }

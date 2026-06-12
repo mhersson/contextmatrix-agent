@@ -112,6 +112,16 @@ func specFromEnv() (worker.RunSpec, error) {
 		return worker.RunSpec{}, err
 	}
 
+	maxCardCost, err := envFloat("CMX_MAX_CARD_COST", 0)
+	if err != nil {
+		return worker.RunSpec{}, err
+	}
+
+	selectorPriceHeadroom, err := envFloat("CMX_SELECTOR_PRICE_HEADROOM", 0)
+	if err != nil {
+		return worker.RunSpec{}, err
+	}
+
 	defaultModel := os.Getenv("CMX_DEFAULT_MODEL")
 	if defaultModel == "" {
 		defaultModel = derefStr(defaults.CapableModel)
@@ -123,21 +133,23 @@ func specFromEnv() (worker.RunSpec, error) {
 	}
 
 	spec := worker.RunSpec{
-		CardID:         cardID,
-		Project:        project,
-		RepoURL:        repoURL,
-		MCPURL:         mcpURL,
-		MCPAPIKey:      mcpAPIKey,
-		BaseBranch:     os.Getenv("CM_BASE_BRANCH"),
-		Model:          os.Getenv("CM_MODEL"),
-		CorrelationID:  os.Getenv("CM_CORRELATION_ID"),
-		Interactive:    os.Getenv("CM_INTERACTIVE") == "true",
-		BashTimeoutMax: bashTimeoutMax,
-		ToolOutputMax:  toolOutputMax,
-		MaxTurns:       maxTurns,
-		MaxCostUSD:     maxCostUSD,
-		DefaultModel:   defaultModel,
-		Workspace:      workspace,
+		CardID:                cardID,
+		Project:               project,
+		RepoURL:               repoURL,
+		MCPURL:                mcpURL,
+		MCPAPIKey:             mcpAPIKey,
+		BaseBranch:            os.Getenv("CM_BASE_BRANCH"),
+		Model:                 os.Getenv("CM_MODEL"),
+		CorrelationID:         os.Getenv("CM_CORRELATION_ID"),
+		Interactive:           os.Getenv("CM_INTERACTIVE") == "true",
+		BashTimeoutMax:        bashTimeoutMax,
+		ToolOutputMax:         toolOutputMax,
+		MaxTurns:              maxTurns,
+		MaxCostUSD:            maxCostUSD,
+		MaxCardCost:           maxCardCost,
+		SelectorPriceHeadroom: selectorPriceHeadroom,
+		DefaultModel:          defaultModel,
+		Workspace:             workspace,
 	}
 
 	return spec, nil
