@@ -26,9 +26,10 @@ type Config struct {
 	Reasoning          json.RawMessage
 	SystemPrompt       string
 	MaxTurns           int
-	MaxCostUSD         float64 // 0 disables the cost cap
-	ContextWindow      int     // 0 disables context-limit detection
-	ToolOutputMaxBytes int     // 0 disables the tool-result size cap
+	MaxCostUSD         float64             // 0 disables the cost cap
+	ContextWindow      int                 // 0 disables context-limit detection
+	ToolOutputMaxBytes int                 // 0 disables the tool-result size cap
+	RedactToolOutput   func(string) string // nil = identity; applied before the size cap
 }
 
 type Result struct {
@@ -158,11 +159,20 @@ func Run(ctx context.Context, client llm.LLM, reg *tools.Registry, emit *events.
 			out, err := tool.Execute(ctx, args)
 			if err != nil {
 				res.ToolCallFailures++
+
 				em := fmt.Sprintf("tool error: %v", err)
+				if cfg.RedactToolOutput != nil {
+					em = cfg.RedactToolOutput(em)
+				}
+
 				msgs = append(msgs, toolResultMsg(tc.ID, em))
 				emit.Emit(events.ToolResult, map[string]any{"id": tc.ID, "error": em})
 
 				continue
+			}
+
+			if cfg.RedactToolOutput != nil {
+				out = cfg.RedactToolOutput(out)
 			}
 
 			out = tools.HeadTail(out, cfg.ToolOutputMaxBytes)

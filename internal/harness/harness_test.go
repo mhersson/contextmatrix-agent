@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/mhersson/contextmatrix-agent/internal/events"
 	"github.com/mhersson/contextmatrix-agent/internal/llm"
+	"github.com/mhersson/contextmatrix-agent/internal/redact"
 	"github.com/mhersson/contextmatrix-agent/internal/tools"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -282,4 +284,60 @@ func TestRunToolOutputCapTruncates(t *testing.T) {
 	assert.True(t, strings.HasPrefix(toolResultContent, "HH"), "head content preserved")
 	assert.True(t, strings.HasSuffix(toolResultContent, "TT"), "tail content preserved")
 	assert.LessOrEqual(t, len(toolResultContent), maxBytes+80) // marker allowance
+}
+
+// secretTool is a fake tool that embeds a known secret in its output.
+type secretTool struct{ secret string }
+
+func (s *secretTool) Name() string { return "secret" }
+func (s *secretTool) Schema() llm.Tool {
+	return llm.Tool{Type: "function", Function: llm.ToolFunction{Name: "secret"}}
+}
+
+func (s *secretTool) Execute(_ context.Context, _ map[string]any) (string, error) {
+	return "output contains " + s.secret + " end", nil
+}
+
+func TestRunRedactToolOutput(t *testing.T) {
+	const seedSecret = "sk-or-v1-supersecretkey99"
+
+	st := &secretTool{secret: seedSecret}
+	reg := tools.NewRegistry(st)
+
+	capt := &capturingLLMSeq{responses: []llm.Response{
+		{ToolCalls: []llm.ToolCall{toolCall("1", "secret", `{}`)}},
+		{Content: "done", FinishReason: "stop"},
+	}}
+
+	var transcript bytes.Buffer
+
+	emit := events.NewEmitter(nil, &transcript)
+
+	r := redact.New([]string{seedSecret})
+
+	_, err := Run(context.Background(), capt, reg, emit, "task", Config{
+		MaxTurns:         10,
+		RedactToolOutput: r.Apply,
+	})
+	require.NoError(t, err)
+
+	// The second request must carry the tool-result message with redacted content.
+	require.Len(t, capt.requests, 2)
+
+	var toolResultContent string
+
+	for _, m := range capt.requests[1].Messages {
+		if m.Role == "tool" && m.ToolCallID == "1" {
+			toolResultContent = m.Content
+
+			break
+		}
+	}
+
+	require.NotEmpty(t, toolResultContent, "tool-result message not found in second request")
+	assert.Contains(t, toolResultContent, "[REDACTED]", "secret must be masked in tool message")
+	assert.NotContains(t, toolResultContent, seedSecret, "raw secret must not appear in tool message")
+
+	// No event in the JSONL transcript may contain the raw secret.
+	assert.NotContains(t, transcript.String(), seedSecret, "raw secret must not appear in any event")
 }
