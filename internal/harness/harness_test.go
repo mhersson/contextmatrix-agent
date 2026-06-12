@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/mhersson/contextmatrix-agent/internal/events"
@@ -340,4 +341,308 @@ func TestRunRedactToolOutput(t *testing.T) {
 
 	// No event in the JSONL transcript may contain the raw secret.
 	assert.NotContains(t, transcript.String(), seedSecret, "raw secret must not appear in any event")
+}
+
+// scriptedInbox: queue of messages; Drain pops all pending; Wait pops one or
+// returns closeErr when the queue is empty. When deliverViaWaitOnly is set,
+// Drain returns nothing so the pending queue is delivered exclusively through
+// Wait (models a message that only arrives while the loop is parked at Wait).
+type scriptedInbox struct {
+	mu                 sync.Mutex
+	pending            []UserMessage
+	closeErr           error // ErrInboxClosed once exhausted, or nil to block forever
+	deliverViaWaitOnly bool
+}
+
+func (s *scriptedInbox) Drain() []UserMessage {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.deliverViaWaitOnly || len(s.pending) == 0 {
+		return nil
+	}
+
+	out := s.pending
+	s.pending = nil
+
+	return out
+}
+
+func (s *scriptedInbox) Wait(ctx context.Context) (UserMessage, error) {
+	s.mu.Lock()
+
+	if len(s.pending) > 0 {
+		um := s.pending[0]
+		s.pending = s.pending[1:]
+		s.mu.Unlock()
+
+		return um, nil
+	}
+
+	closeErr := s.closeErr
+	s.mu.Unlock()
+
+	if closeErr != nil {
+		return UserMessage{}, closeErr
+	}
+
+	// Block forever unless ctx fires.
+	<-ctx.Done()
+
+	return UserMessage{}, ctx.Err()
+}
+
+func (s *scriptedInbox) push(um UserMessage) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.pending = append(s.pending, um)
+}
+
+// parseEvents decodes JSONL transcript events for assertions.
+func parseEvents(t *testing.T, transcript string) []events.Event {
+	t.Helper()
+
+	var out []events.Event
+
+	for _, line := range strings.Split(strings.TrimSpace(transcript), "\n") {
+		if line == "" {
+			continue
+		}
+
+		var ev events.Event
+		require.NoError(t, json.Unmarshal([]byte(line), &ev))
+		out = append(out, ev)
+	}
+
+	return out
+}
+
+// findToolResult locates the tool-result message for a given tool-call id.
+func findToolResult(msgs []llm.Message, id string) (string, bool) {
+	for _, m := range msgs {
+		if m.Role == "tool" && m.ToolCallID == id {
+			return m.Content, true
+		}
+	}
+
+	return "", false
+}
+
+// firstUserMessageIndex returns the index of the first user message at-or-after
+// offset, or -1.
+func userMessageIndexAfter(msgs []llm.Message, offset int) int {
+	for i := offset; i < len(msgs); i++ {
+		if msgs[i].Role == "user" {
+			return i
+		}
+	}
+
+	return -1
+}
+
+// Case 2: a message arriving during turn 1's (single) tool call drains at the
+// top of turn 2 and lands in request 2 AFTER turn 1's tool results.
+func TestInboxTurnTopDrain(t *testing.T) {
+	inbox := &scriptedInbox{closeErr: ErrInboxClosed}
+	it := &interjectingTool{inbox: inbox, msg: UserMessage{Content: "human steers here", MessageID: "m1"}}
+	reg := tools.NewRegistry(it)
+
+	capt := &capturingLLMSeq{responses: []llm.Response{
+		// single tool call → mid-batch skip does not apply; drain happens at turn 2 top.
+		{ToolCalls: []llm.ToolCall{toolCall("1", "interject", `{}`)}},
+		{Content: "done", FinishReason: "stop"},
+	}}
+
+	res, err := Run(context.Background(), capt, reg, newEmitter(), "do it", Config{MaxTurns: 10, Inbox: inbox})
+	require.NoError(t, err)
+	assert.True(t, res.Completed)
+
+	require.Len(t, capt.requests, 2)
+	second := capt.requests[1].Messages
+
+	// Turn 1's tool result must be present and precede the injected user message.
+	_, ok := findToolResult(second, "1")
+	require.True(t, ok, "turn 1 tool result missing from request 2")
+
+	// Locate the tool result index, then the user message after it.
+	toolIdx := -1
+
+	for i, m := range second {
+		if m.Role == "tool" && m.ToolCallID == "1" {
+			toolIdx = i
+
+			break
+		}
+	}
+
+	require.GreaterOrEqual(t, toolIdx, 0)
+
+	uIdx := userMessageIndexAfter(second, toolIdx)
+	require.GreaterOrEqual(t, uIdx, 0, "injected user message not found after tool result")
+	assert.Equal(t, "human steers here", second[uIdx].Content)
+}
+
+// Case 3: natural stop blocks on Wait, gets one message, continues, then closed.
+func TestInboxNaturalStopWaitThenContinue(t *testing.T) {
+	reg := tools.NewRegistry(tools.NewReadTool(t.TempDir()))
+
+	inbox := &scriptedInbox{
+		pending:            []UserMessage{{Content: "keep going", MessageID: "m1"}},
+		closeErr:           ErrInboxClosed,
+		deliverViaWaitOnly: true, // message arrives only via Wait, not the turn-top drain
+	}
+
+	// Turn 1: no tool calls. Turn 2: no tool calls. Then inbox is empty → closed.
+	f := &fakeLLM{responses: []llm.Response{
+		{Content: "first", FinishReason: "stop"},
+		{Content: "second", FinishReason: "stop"},
+	}}
+
+	var transcript bytes.Buffer
+
+	emit := events.NewEmitter(nil, &transcript)
+
+	res, err := Run(context.Background(), f, reg, emit, "task", Config{MaxTurns: 10, Inbox: inbox})
+	require.NoError(t, err)
+	assert.True(t, res.Completed)
+	assert.Equal(t, "done", res.Reason)
+	assert.Equal(t, 2, res.Turns)
+
+	// An awaiting_human state change must precede the wait, carrying the
+	// plural "turns" key like every other StateChange payload.
+	evs := parseEvents(t, transcript.String())
+
+	var sawAwaiting bool
+
+	for _, ev := range evs {
+		if ev.Kind == events.StateChange && ev.Data["state"] == "awaiting_human" {
+			sawAwaiting = true
+
+			assert.Contains(t, ev.Data, "turns", "awaiting_human payload must use plural turns key")
+
+			break
+		}
+	}
+
+	assert.True(t, sawAwaiting, "awaiting_human state change not emitted")
+}
+
+// Case 4: closed inbox behaves like autonomous — single turn, done.
+func TestInboxClosedIsAutonomous(t *testing.T) {
+	reg := tools.NewRegistry(tools.NewReadTool(t.TempDir()))
+
+	inbox := &scriptedInbox{closeErr: ErrInboxClosed}
+
+	f := &fakeLLM{responses: []llm.Response{
+		{Content: "all done", FinishReason: "stop"},
+	}}
+
+	res, err := Run(context.Background(), f, reg, newEmitter(), "task", Config{MaxTurns: 10, Inbox: inbox})
+	require.NoError(t, err)
+	assert.True(t, res.Completed)
+	assert.Equal(t, "done", res.Reason)
+	assert.Equal(t, 1, res.Turns)
+}
+
+// interjectingTool pushes a message into the inbox the first time it executes.
+type interjectingTool struct {
+	inbox *scriptedInbox
+	msg   UserMessage
+	calls int
+}
+
+func (i *interjectingTool) Name() string { return "interject" }
+func (i *interjectingTool) Schema() llm.Tool {
+	return llm.Tool{Type: "function", Function: llm.ToolFunction{Name: "interject"}}
+}
+
+func (i *interjectingTool) Execute(_ context.Context, _ map[string]any) (string, error) {
+	i.calls++
+	if i.calls == 1 {
+		i.inbox.push(i.msg)
+	}
+
+	return "ok", nil
+}
+
+// Case 5: mid-batch interrupt. Turn 1 has three tool calls; the first pushes a
+// message; calls 2 and 3 are skipped with synthesized results; the user message
+// follows after all tool results.
+func TestInboxMidBatchInterrupt(t *testing.T) {
+	inbox := &scriptedInbox{closeErr: ErrInboxClosed}
+	it := &interjectingTool{inbox: inbox, msg: UserMessage{Content: "stop and listen", MessageID: "m1"}}
+	reg := tools.NewRegistry(it)
+
+	capt := &capturingLLMSeq{responses: []llm.Response{
+		{ToolCalls: []llm.ToolCall{
+			toolCall("1", "interject", `{}`),
+			toolCall("2", "interject", `{}`),
+			toolCall("3", "interject", `{}`),
+		}},
+		{Content: "done", FinishReason: "stop"},
+	}}
+
+	res, err := Run(context.Background(), capt, reg, newEmitter(), "task", Config{MaxTurns: 10, Inbox: inbox})
+	require.NoError(t, err)
+	assert.True(t, res.Completed)
+
+	// Only the first call executed.
+	assert.Equal(t, 1, it.calls, "calls 2 and 3 must not execute")
+
+	require.Len(t, capt.requests, 2)
+	second := capt.requests[1].Messages
+
+	// Call 1 executed result.
+	c1, ok := findToolResult(second, "1")
+	require.True(t, ok)
+	assert.Equal(t, "ok", c1)
+
+	// Calls 2 and 3 carry synthesized skip results.
+	c2, ok := findToolResult(second, "2")
+	require.True(t, ok)
+	assert.Equal(t, "skipped: user interjected", c2)
+
+	c3, ok := findToolResult(second, "3")
+	require.True(t, ok)
+	assert.Equal(t, "skipped: user interjected", c3)
+
+	// The user message must appear AFTER all three tool results.
+	lastToolIdx := -1
+
+	for i, m := range second {
+		if m.Role == "tool" && (m.ToolCallID == "1" || m.ToolCallID == "2" || m.ToolCallID == "3") {
+			lastToolIdx = i
+		}
+	}
+
+	require.GreaterOrEqual(t, lastToolIdx, 0)
+
+	uIdx := userMessageIndexAfter(second, lastToolIdx)
+	require.GreaterOrEqual(t, uIdx, 0, "user message must follow the tool results")
+	assert.Equal(t, "stop and listen", second[uIdx].Content)
+}
+
+// Case 6: ctx cancel during Wait → Run returns ctx.Err() with Reason canceled.
+func TestInboxCtxCancelDuringWait(t *testing.T) {
+	reg := tools.NewRegistry(tools.NewReadTool(t.TempDir()))
+
+	// Inbox never closes and has no pending messages → Wait blocks until ctx.
+	inbox := &scriptedInbox{}
+
+	f := &fakeLLM{responses: []llm.Response{
+		{Content: "first", FinishReason: "stop"},
+	}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// Cancel up front: the fakeLLM ignores ctx, so turn 1 still completes; the
+	// loop then reaches the natural-stop Wait, which returns ctx.Err()
+	// immediately because Done is already closed.
+	cancel()
+
+	res, err := Run(ctx, f, reg, newEmitter(), "task", Config{MaxTurns: 10, Inbox: inbox})
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, "canceled", res.Reason)
+	assert.False(t, res.Completed)
 }
