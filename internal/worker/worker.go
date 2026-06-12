@@ -52,8 +52,8 @@ type CardOps interface {
 	ClaimCard(ctx context.Context, cardID string) error
 	GetTaskContext(ctx context.Context, cardID string) (cmclient.TaskContext, error)
 	Heartbeat(ctx context.Context, cardID string) error
-	ReportUsage(ctx context.Context, cardID, model string, promptTokens, completionTokens int64) error
-	ReportPush(ctx context.Context, cardID, branch string) error
+	ReportUsage(ctx context.Context, cardID, model string, promptTokens, completionTokens int64, actualCostUSD float64) error
+	ReportPush(ctx context.Context, cardID, branch, prURL string) error
 	CompleteTask(ctx context.Context, cardID, summary string) error
 	ReleaseCard(ctx context.Context, cardID string) error
 }
@@ -359,7 +359,7 @@ func commitPushReport(ctx context.Context, a finalizeArgs) error {
 		return fmt.Errorf("push: %w", err)
 	}
 
-	if err := a.ops.ReportPush(ctx, a.spec.CardID, a.branch); err != nil {
+	if err := a.ops.ReportPush(ctx, a.spec.CardID, a.branch, ""); err != nil {
 		return fmt.Errorf("report push: %w", err)
 	}
 
@@ -369,7 +369,7 @@ func commitPushReport(ctx context.Context, a finalizeArgs) error {
 // reportUsage reports token usage (tokens were spent on every path). Best
 // effort: a failure is logged, never masks the run's outcome.
 func reportUsage(ctx context.Context, a finalizeArgs) {
-	if err := a.ops.ReportUsage(ctx, a.spec.CardID, a.model, a.res.PromptTokens, a.res.CompletionTokens); err != nil {
+	if err := a.ops.ReportUsage(ctx, a.spec.CardID, a.model, a.res.PromptTokens, a.res.CompletionTokens, 0); err != nil {
 		slog.Warn("report usage failed", "card", a.spec.CardID, "error", err)
 	}
 }

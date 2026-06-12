@@ -69,14 +69,37 @@ func (c *Client) Close() error {
 	return nil
 }
 
-// TaskContext is the subset of get_task_context the worker needs. Parent,
-// siblings, and project config from the server response are intentionally
-// ignored.
+// TaskContext is the subset of get_task_context the worker and orchestrator
+// need. Parent, siblings, and project config from the server response are
+// intentionally ignored.
 type TaskContext struct {
+	// Base fields — populated for all cards.
 	CardID      string
 	Title       string
 	Description string
 	State       string
+
+	// Orchestrator fields — populated for autonomous cards (may be zero-valued
+	// for cards that were created before the C2 phase fields were added).
+	Phase             string
+	Autonomous        bool
+	CreatePR          bool
+	BaseBranch        string
+	ReviewAttempts    int
+	ModelOrchestrator string
+	ModelCoder        string
+	ModelReviewer     string
+	// ReportedCostUSD is seeded from token_usage.estimated_cost_usd at context
+	// fetch time. The orchestrator uses this as the budget ledger's starting
+	// value so prior sub-agent spend is included in cost accounting.
+	ReportedCostUSD float64
+}
+
+// SubtaskState is the per-card state summary returned by SubtaskStates.
+type SubtaskState struct {
+	CardID string
+	Title  string
+	State  string
 }
 
 // call invokes a tool and surfaces both transport errors and tool-level
@@ -127,9 +150,9 @@ func (c *Client) ClaimCard(ctx context.Context, cardID string) error {
 	return err
 }
 
-// GetTaskContext fetches the card context, parsing card_id/title/description/
-// state from the card portion of the response. include_images is forced false:
-// the worker reads card text, not inline image bytes.
+// GetTaskContext fetches the card context, parsing the card portion of the
+// get_task_context response. include_images is forced false: the worker reads
+// card text, not inline image bytes.
 func (c *Client) GetTaskContext(ctx context.Context, cardID string) (TaskContext, error) {
 	text, err := c.call(ctx, "get_task_context", map[string]any{
 		"card_id":        cardID,
@@ -140,25 +163,49 @@ func (c *Client) GetTaskContext(ctx context.Context, cardID string) (TaskContext
 	}
 
 	// Mirrors the server's get_task_context output: {card, parent, siblings,
-	// config}. Only the card is parsed.
+	// config}. Only the card is parsed; parent/siblings/config are ignored.
 	var payload struct {
 		Card struct {
-			ID    string `json:"id"`
-			Title string `json:"title"`
-			Body  string `json:"body"`
-			State string `json:"state"`
+			ID                string `json:"id"`
+			Title             string `json:"title"`
+			Body              string `json:"body"`
+			State             string `json:"state"`
+			Phase             string `json:"phase"`
+			Autonomous        bool   `json:"autonomous"`
+			CreatePR          bool   `json:"create_pr"`
+			BaseBranch        string `json:"base_branch"`
+			ReviewAttempts    int    `json:"review_attempts"`
+			ModelOrchestrator string `json:"model_orchestrator"`
+			ModelCoder        string `json:"model_coder"`
+			ModelReviewer     string `json:"model_reviewer"`
+			TokenUsage        *struct {
+				EstimatedCostUSD float64 `json:"estimated_cost_usd"`
+			} `json:"token_usage"`
 		} `json:"card"`
 	}
 	if err := json.Unmarshal([]byte(text), &payload); err != nil {
 		return TaskContext{}, fmt.Errorf("parse task context: %w", err)
 	}
 
-	return TaskContext{
-		CardID:      payload.Card.ID,
-		Title:       payload.Card.Title,
-		Description: payload.Card.Body,
-		State:       payload.Card.State,
-	}, nil
+	tc := TaskContext{
+		CardID:            payload.Card.ID,
+		Title:             payload.Card.Title,
+		Description:       payload.Card.Body,
+		State:             payload.Card.State,
+		Phase:             payload.Card.Phase,
+		Autonomous:        payload.Card.Autonomous,
+		CreatePR:          payload.Card.CreatePR,
+		BaseBranch:        payload.Card.BaseBranch,
+		ReviewAttempts:    payload.Card.ReviewAttempts,
+		ModelOrchestrator: payload.Card.ModelOrchestrator,
+		ModelCoder:        payload.Card.ModelCoder,
+		ModelReviewer:     payload.Card.ModelReviewer,
+	}
+	if payload.Card.TokenUsage != nil {
+		tc.ReportedCostUSD = payload.Card.TokenUsage.EstimatedCostUSD
+	}
+
+	return tc, nil
 }
 
 // Heartbeat reports liveness for the card.
@@ -169,8 +216,10 @@ func (c *Client) Heartbeat(ctx context.Context, cardID string) error {
 }
 
 // ReportUsage records token usage for cost tracking. model may be empty, in
-// which case it is omitted and the server applies its default.
-func (c *Client) ReportUsage(ctx context.Context, cardID, model string, promptTokens, completionTokens int64) error {
+// which case it is omitted and the server applies its default. actualCostUSD
+// is the authoritative provider-reported cost; it is omitted when zero so
+// the server uses its rate table.
+func (c *Client) ReportUsage(ctx context.Context, cardID, model string, promptTokens, completionTokens int64, actualCostUSD float64) error {
 	args := map[string]any{
 		"card_id":           cardID,
 		"prompt_tokens":     promptTokens,
@@ -180,17 +229,27 @@ func (c *Client) ReportUsage(ctx context.Context, cardID, model string, promptTo
 		args["model"] = model
 	}
 
+	if actualCostUSD != 0 {
+		args["actual_cost_usd"] = actualCostUSD
+	}
+
 	_, err := c.call(ctx, "report_usage", args)
 
 	return err
 }
 
-// ReportPush records that work was pushed to the given git branch.
-func (c *Client) ReportPush(ctx context.Context, cardID, branch string) error {
-	_, err := c.call(ctx, "report_push", map[string]any{
+// ReportPush records that work was pushed to the given git branch. prURL may
+// be empty when no PR was created; it is omitted from the wire in that case.
+func (c *Client) ReportPush(ctx context.Context, cardID, branch, prURL string) error {
+	args := map[string]any{
 		"card_id": cardID,
 		"branch":  branch,
-	})
+	}
+	if prURL != "" {
+		args["pr_url"] = prURL
+	}
+
+	_, err := c.call(ctx, "report_push", args)
 
 	return err
 }
@@ -208,6 +267,137 @@ func (c *Client) CompleteTask(ctx context.Context, cardID, summary string) error
 // ReleaseCard releases this client's claim on the card.
 func (c *Client) ReleaseCard(ctx context.Context, cardID string) error {
 	_, err := c.call(ctx, "release_card", map[string]any{"card_id": cardID})
+
+	return err
+}
+
+// CreateCard creates a new subtask card under parent in the given project.
+// body is the markdown description. dependsOn is the list of card IDs this
+// card depends on; nil omits the field. Returns the server-assigned card ID.
+func (c *Client) CreateCard(ctx context.Context, project, parent, title, body string, dependsOn []string) (string, error) {
+	args := map[string]any{
+		"project":  project,
+		"parent":   parent,
+		"title":    title,
+		"body":     body,
+		"type":     "task",
+		"priority": "medium",
+	}
+	if len(dependsOn) > 0 {
+		args["depends_on"] = dependsOn
+	}
+
+	text, err := c.call(ctx, "create_card", args)
+	if err != nil {
+		return "", err
+	}
+
+	// create_card returns the full board.Card JSON; extract the id field.
+	var card struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(text), &card); err != nil {
+		return "", fmt.Errorf("parse create_card response: %w", err)
+	}
+
+	return card.ID, nil
+}
+
+// SetPhase sets the orchestrator phase on the card via update_card.
+func (c *Client) SetPhase(ctx context.Context, cardID, phase string) error {
+	_, err := c.call(ctx, "update_card", map[string]any{
+		"card_id": cardID,
+		"phase":   phase,
+	})
+
+	return err
+}
+
+// TransitionCard changes the card's state via transition_card.
+func (c *Client) TransitionCard(ctx context.Context, cardID, state string) error {
+	_, err := c.call(ctx, "transition_card", map[string]any{
+		"card_id":   cardID,
+		"new_state": state,
+	})
+
+	return err
+}
+
+// StartReview atomically transitions the card to review via start_review. The
+// skill payload the server returns is intentionally not surfaced — the
+// orchestrator drives its own review flow.
+func (c *Client) StartReview(ctx context.Context, cardID string) error {
+	_, err := c.call(ctx, "start_review", map[string]any{"card_id": cardID})
+
+	return err
+}
+
+// IncrementReviewAttempts increments the review_attempts counter and returns
+// the new count.
+func (c *Client) IncrementReviewAttempts(ctx context.Context, cardID string) (int, error) {
+	text, err := c.call(ctx, "increment_review_attempts", map[string]any{"card_id": cardID})
+	if err != nil {
+		return 0, err
+	}
+
+	// increment_review_attempts returns {card: <board.Card>}.
+	var payload struct {
+		Card struct {
+			ReviewAttempts int `json:"review_attempts"`
+		} `json:"card"`
+	}
+	if err := json.Unmarshal([]byte(text), &payload); err != nil {
+		return 0, fmt.Errorf("parse increment_review_attempts response: %w", err)
+	}
+
+	return payload.Card.ReviewAttempts, nil
+}
+
+// SubtaskStates returns the per-card state for every subtask of the given
+// parent card. It uses list_cards with a parent filter so the orchestrator
+// can determine which subtasks are done without loading the full card bodies.
+// project is mandatory: list_cards declares it as a required schema field
+// with no card-ID resolution fallback.
+func (c *Client) SubtaskStates(ctx context.Context, project, parentID string) ([]SubtaskState, error) {
+	text, err := c.call(ctx, "list_cards", map[string]any{
+		"project": project,
+		"parent":  parentID,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// list_cards returns {cards: [...]}.
+	var payload struct {
+		Cards []struct {
+			ID    string `json:"id"`
+			Title string `json:"title"`
+			State string `json:"state"`
+		} `json:"cards"`
+	}
+	if err := json.Unmarshal([]byte(text), &payload); err != nil {
+		return nil, fmt.Errorf("parse list_cards response: %w", err)
+	}
+
+	states := make([]SubtaskState, 0, len(payload.Cards))
+	for _, card := range payload.Cards {
+		states = append(states, SubtaskState{
+			CardID: card.ID,
+			Title:  card.Title,
+			State:  card.State,
+		})
+	}
+
+	return states, nil
+}
+
+// AddLog appends a status_update activity log entry to the card.
+func (c *Client) AddLog(ctx context.Context, cardID, message string) error {
+	_, err := c.call(ctx, "add_log", map[string]any{
+		"card_id": cardID,
+		"action":  "status_update",
+		"message": message,
+	})
 
 	return err
 }

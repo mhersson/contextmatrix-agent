@@ -162,14 +162,14 @@ func (f *fakeOps) Heartbeat(_ context.Context, cardID string) error {
 	return nil
 }
 
-func (f *fakeOps) ReportUsage(_ context.Context, cardID, model string, prompt, completion int64) error {
-	f.record("ReportUsage", cardID, model, prompt, completion)
+func (f *fakeOps) ReportUsage(_ context.Context, cardID, model string, prompt, completion int64, actualCostUSD float64) error {
+	f.record("ReportUsage", cardID, model, prompt, completion, actualCostUSD)
 
 	return nil
 }
 
-func (f *fakeOps) ReportPush(_ context.Context, cardID, branch string) error {
-	f.record("ReportPush", cardID, branch)
+func (f *fakeOps) ReportPush(_ context.Context, cardID, branch, prURL string) error {
+	f.record("ReportPush", cardID, branch, prURL)
 
 	return nil
 }
