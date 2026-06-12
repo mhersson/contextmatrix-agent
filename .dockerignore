@@ -1,0 +1,15 @@
+# Keep the build context to what the multi-stage build actually needs
+# (go.mod, go.sum, cmd/, internal/).
+.git
+docker
+.dockerignore
+
+# Built binary and local artifacts (mirrors .gitignore).
+contextmatrix-agent
+*.test
+.envrc
+transcripts
+eval-out
+*-RESULTS.md
+capabilities-*.json
+capabilities-*.md

@@ -12,9 +12,35 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/llm"
 )
 
-type BashTool struct{ root string }
+const defaultBashMaxTimeout = 600 // seconds — hard server-side ceiling
 
-func NewBashTool(root string) BashTool { return BashTool{root: root} }
+type BashTool struct {
+	root       string
+	maxTimeout int
+	extraEnv   []string
+}
+
+func NewBashTool(root string) BashTool {
+	return BashTool{root: root, maxTimeout: defaultBashMaxTimeout}
+}
+
+// WithExtraEnv returns a copy with additional KEY=VALUE entries appended to the
+// scrubbed environment (e.g. "GOCACHE=/tmp/gocache").
+func (t BashTool) WithExtraEnv(kvs []string) BashTool {
+	t.extraEnv = kvs
+
+	return t
+}
+
+// WithMaxTimeout returns a copy with a different clamp ceiling (seconds).
+// Non-positive input keeps the current ceiling.
+func (t BashTool) WithMaxTimeout(s int) BashTool {
+	if s > 0 {
+		t.maxTimeout = s
+	}
+
+	return t
+}
 
 func (t BashTool) Name() string { return "bash" }
 
@@ -22,14 +48,14 @@ func (t BashTool) Schema() llm.Tool {
 	return llm.Tool{Type: "function", Function: llm.ToolFunction{
 		Name:        "bash",
 		Description: "Run a shell command in the workspace root and return combined stdout+stderr. Non-zero exits are returned as output, not as a hard failure.",
-		Parameters: json.RawMessage(`{
+		Parameters: json.RawMessage(fmt.Sprintf(`{
 			"type":"object",
 			"properties":{
 				"command":{"type":"string","description":"the shell command to run"},
-				"timeout_seconds":{"type":"integer","description":"optional timeout in seconds (default 30)"}
+				"timeout_seconds":{"type":"integer","description":"optional timeout in seconds (default 30, max %d)"}
 			},
 			"required":["command"]
-		}`),
+		}`, t.maxTimeout)),
 	}}
 }
 
@@ -41,8 +67,17 @@ func (t BashTool) Execute(ctx context.Context, args map[string]any) (string, err
 
 	timeout := optInt(args, "timeout_seconds", 30)
 
+	if timeout < 1 {
+		timeout = 1
+	}
+
+	if timeout > t.maxTimeout {
+		timeout = t.maxTimeout
+	}
+
 	cmd := exec.Command("bash", "-c", command) //nolint:noctx // ctx cancel is handled below by killing the whole process group; CommandContext would kill only the child
 	cmd.Dir = t.root
+	cmd.Env = ScrubbedEnv(t.extraEnv)
 	// New process group so we can signal the whole tree (the child is the
 	// group leader: pgid == child pid). Plain ctx-cancel leaves grandchildren.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

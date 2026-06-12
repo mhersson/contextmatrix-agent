@@ -23,6 +23,7 @@ const (
 	Verification  Kind = "verification"
 	ErrorKind     Kind = "error"
 	ToolRepair    Kind = "tool_repair"
+	UserInput     Kind = "user_input"
 )
 
 // Event is one entry in the stream.

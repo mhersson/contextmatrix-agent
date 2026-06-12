@@ -1,0 +1,186 @@
+package cli
+
+import (
+	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"strconv"
+	"strings"
+
+	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
+	"github.com/mhersson/contextmatrix-agent/internal/config"
+	"github.com/mhersson/contextmatrix-agent/internal/events"
+	"github.com/mhersson/contextmatrix-agent/internal/llm"
+	"github.com/mhersson/contextmatrix-agent/internal/secrets"
+	"github.com/mhersson/contextmatrix-agent/internal/worker"
+	"github.com/spf13/cobra"
+)
+
+// cmEnvFile is the bind-mounted env file path the service injects secrets into.
+const cmEnvFile = "/run/cm-secrets/env"
+
+func newWorkCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:    "work",
+		Short:  "Container entrypoint: execute one card under ContextMatrix control",
+		Hidden: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			spec, err := specFromEnv()
+			if err != nil {
+				return err
+			}
+
+			src, err := secrets.Open(cmEnvFile)
+			if err != nil {
+				return fmt.Errorf("read secrets: %w", err)
+			}
+
+			spec.OpenRouterKey = src.Get("OPENROUTER_API_KEY")
+			spec.GitToken = src.Get("CM_GIT_TOKEN")
+
+			// human off (io.Discard), JSONL → stdout for the service log bridge.
+			emit := events.NewEmitter(io.Discard, cmd.OutOrStdout())
+			client := llm.NewClient(spec.OpenRouterKey, llm.WithRetry(llm.DefaultRetryPolicy()))
+
+			ops, err := cmclient.New(cmd.Context(), spec.MCPURL, spec.MCPAPIKey, "cmx-agent-"+strings.ToLower(spec.CardID))
+			if err != nil {
+				return fmt.Errorf("connect mcp: %w", err)
+			}
+			defer ops.Close() //nolint:errcheck
+
+			res, err := worker.Run(cmd.Context(), spec, ops, client, emit, cmd.InOrStdin())
+			if err != nil {
+				return err
+			}
+
+			slog.Info("run finished", "reason", res.Reason)
+
+			return nil
+		},
+	}
+}
+
+// specFromEnv builds a RunSpec from the CM_*/CMX_* environment contract.
+// Required vars are CM_CARD_ID, CM_PROJECT, CM_REPO_URL, CM_MCP_URL,
+// CM_MCP_API_KEY. Missing required vars return an error naming the var.
+func specFromEnv() (worker.RunSpec, error) {
+	cardID, err := requireEnv("CM_CARD_ID")
+	if err != nil {
+		return worker.RunSpec{}, err
+	}
+
+	project, err := requireEnv("CM_PROJECT")
+	if err != nil {
+		return worker.RunSpec{}, err
+	}
+
+	repoURL, err := requireEnv("CM_REPO_URL")
+	if err != nil {
+		return worker.RunSpec{}, err
+	}
+
+	mcpURL, err := requireEnv("CM_MCP_URL")
+	if err != nil {
+		return worker.RunSpec{}, err
+	}
+
+	mcpAPIKey, err := requireEnv("CM_MCP_API_KEY")
+	if err != nil {
+		return worker.RunSpec{}, err
+	}
+
+	bashTimeoutMax, err := envInt("CMX_BASH_TIMEOUT_MAX_SECONDS", 600)
+	if err != nil {
+		return worker.RunSpec{}, err
+	}
+
+	toolOutputMax, err := envInt("CMX_TOOL_OUTPUT_MAX_BYTES", 30000)
+	if err != nil {
+		return worker.RunSpec{}, err
+	}
+
+	defaults := config.Defaults()
+
+	maxTurns, err := envInt("CMX_MAX_TURNS", derefInt(defaults.MaxTurns))
+	if err != nil {
+		return worker.RunSpec{}, err
+	}
+
+	maxCostUSD, err := envFloat("CMX_MAX_COST_USD", derefFloat(defaults.MaxCostUSD))
+	if err != nil {
+		return worker.RunSpec{}, err
+	}
+
+	defaultModel := os.Getenv("CMX_DEFAULT_MODEL")
+	if defaultModel == "" {
+		defaultModel = derefStr(defaults.CapableModel)
+	}
+
+	workspace := os.Getenv("CMX_WORKSPACE")
+	if workspace == "" {
+		workspace = "/home/user/workspace"
+	}
+
+	spec := worker.RunSpec{
+		CardID:         cardID,
+		Project:        project,
+		RepoURL:        repoURL,
+		MCPURL:         mcpURL,
+		MCPAPIKey:      mcpAPIKey,
+		BaseBranch:     os.Getenv("CM_BASE_BRANCH"),
+		Model:          os.Getenv("CM_MODEL"),
+		CorrelationID:  os.Getenv("CM_CORRELATION_ID"),
+		Interactive:    os.Getenv("CM_INTERACTIVE") == "true",
+		BashTimeoutMax: bashTimeoutMax,
+		ToolOutputMax:  toolOutputMax,
+		MaxTurns:       maxTurns,
+		MaxCostUSD:     maxCostUSD,
+		DefaultModel:   defaultModel,
+		Workspace:      workspace,
+	}
+
+	return spec, nil
+}
+
+// requireEnv returns the value of the named env var or an error naming it.
+func requireEnv(name string) (string, error) {
+	v := os.Getenv(name)
+	if v == "" {
+		return "", fmt.Errorf("required env var %s is not set", name)
+	}
+
+	return v, nil
+}
+
+// envInt parses an optional integer env var, returning defaultVal when the var
+// is absent. A non-empty value that fails to parse returns an error.
+func envInt(name string, defaultVal int) (int, error) {
+	s := os.Getenv(name)
+	if s == "" {
+		return defaultVal, nil
+	}
+
+	v, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf("env var %s: invalid integer %q", name, s)
+	}
+
+	return v, nil
+}
+
+// envFloat parses an optional float64 env var, returning defaultVal when the
+// var is absent. A non-empty value that fails to parse returns an error.
+func envFloat(name string, defaultVal float64) (float64, error) {
+	s := os.Getenv(name)
+	if s == "" {
+		return defaultVal, nil
+	}
+
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, fmt.Errorf("env var %s: invalid float %q", name, s)
+	}
+
+	return v, nil
+}

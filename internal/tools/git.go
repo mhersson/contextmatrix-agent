@@ -49,6 +49,7 @@ func (t GitTool) Execute(ctx context.Context, args map[string]any) (string, erro
 	cmdArgs := append([]string{sub}, optStringSlice(args, "args")...)
 	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
 	cmd.Dir = t.root
+	cmd.Env = ScrubbedEnv(nil)
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {

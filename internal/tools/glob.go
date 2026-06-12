@@ -79,6 +79,7 @@ func (t GlobTool) list(ctx context.Context, pattern, searchPath string) ([]strin
 func (t GlobTool) globViaFd(ctx context.Context, bin, pattern, searchPath string) ([]string, error) {
 	cmd := exec.CommandContext(ctx, bin, "--glob", "--type", "f", pattern, searchPath)
 	cmd.Dir = t.root
+	cmd.Env = ScrubbedEnv(nil)
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -94,6 +95,7 @@ func (t GlobTool) globViaFd(ctx context.Context, bin, pattern, searchPath string
 func (t GlobTool) globViaRg(ctx context.Context, pattern, searchPath string) ([]string, error) {
 	cmd := exec.CommandContext(ctx, "rg", "--files", searchPath)
 	cmd.Dir = t.root
+	cmd.Env = ScrubbedEnv(nil)
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {

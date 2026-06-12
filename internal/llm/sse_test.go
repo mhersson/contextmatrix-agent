@@ -75,3 +75,30 @@ func TestParseStreamRejectsOverlongLineClearly(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exceeds")
 }
+
+func TestParseStreamTruncationDetection(t *testing.T) {
+	chunk := `data: {"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}`
+	noFinish := `data: {"choices":[{"delta":{"content":"hi"}}]}`
+
+	tests := []struct {
+		name    string
+		body    string
+		wantErr bool
+	}{
+		{"done marker, no finish_reason", noFinish + "\n\ndata: [DONE]\n\n", false},
+		{"finish_reason, no done marker", chunk + "\n\n", false},
+		{"both", chunk + "\n\ndata: [DONE]\n\n", false},
+		{"neither: truncated", noFinish + "\n\n", true},
+		{"empty stream", "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parseStream(strings.NewReader(tt.body), nil)
+			if tt.wantErr {
+				require.ErrorContains(t, err, "truncated")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}

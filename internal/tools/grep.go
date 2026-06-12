@@ -57,6 +57,7 @@ func (t GrepTool) Execute(ctx context.Context, args map[string]any) (string, err
 
 	cmd := exec.CommandContext(ctx, "rg", cmdArgs...)
 	cmd.Dir = t.root
+	cmd.Env = ScrubbedEnv(nil)
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
