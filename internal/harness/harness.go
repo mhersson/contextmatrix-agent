@@ -39,6 +39,8 @@ type Result struct {
 	Reason           string // done | max_turns | max_cost | context_limit | error
 	Turns            int
 	TotalCostUSD     float64
+	PromptTokens     int64
+	CompletionTokens int64
 	ToolCallCount    int
 	ToolCallFailures int
 	RepairCount      int
@@ -96,6 +98,9 @@ func Run(ctx context.Context, client llm.LLM, reg *tools.Registry, emit *events.
 		}
 
 		res.TotalCostUSD += resp.Usage.Cost
+		res.PromptTokens += int64(resp.Usage.PromptTokens)
+		res.CompletionTokens += int64(resp.Usage.CompletionTokens)
+
 		if resp.Model != "" {
 			res.ModelUsed = resp.Model
 		}
