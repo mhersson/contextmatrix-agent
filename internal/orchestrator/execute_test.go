@@ -169,6 +169,57 @@ func TestExecuteCoderPromptBody(t *testing.T) {
 	})
 }
 
+func TestExecuteFirstPushLeasesStaleBranch(t *testing.T) {
+	// Fresh run + stale remote branch: reconcile recorded staleRemoteTip, so the
+	// FIRST subtask push overwrites the stale branch with a force-with-lease, and
+	// every subsequent push is plain (the branch is now ours).
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	llmFake := &planLLM{responses: []llm.Response{
+		stopResp("ok\nCOMMIT: feat: one", 0.01),
+		stopResp("ok\nCOMMIT: feat: two", 0.01),
+	}}
+	d := execTestDeps(ops, git, llmFake)
+
+	o := newExecRun(d, []subtaskRef{
+		{ID: "SUB-1", Title: "First", Tier: "simple"},
+		{ID: "SUB-2", Title: "Second", Tier: "simple"},
+	}, 0)
+	// Simulate what reconcile records on a fresh run with a stale remote branch.
+	o.staleRemoteTip = "stale-tip"
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	// First push is a lease push carrying the recorded tip to the git layer.
+	require.Len(t, git.leaseBranches, 1, "exactly one lease push (the first); git=%v", git.recorded())
+	assert.Equal(t, "cm/card-1", git.leaseBranches[0])
+	require.Len(t, git.leaseTips, 1)
+	assert.Equal(t, "stale-tip", git.leaseTips[0], "the reconcile-recorded tip must reach ForcePushWithLease")
+
+	// Second push is plain.
+	require.Len(t, git.pushBranches, 1, "second push must be plain; git=%v", git.recorded())
+	assert.Equal(t, "cm/card-1", git.pushBranches[0])
+
+	// Lease comes before the plain push.
+	git.assertOrder(t, "ForcePushWithLease:cm/card-1", "Push:cm/card-1")
+}
+
+func TestExecutePlainPushWhenNoStaleTip(t *testing.T) {
+	// No stale remote branch (staleRemoteTip ""): every push is plain, no lease.
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	llmFake := &planLLM{responses: []llm.Response{stopResp("ok\nCOMMIT: feat: x", 0.01)}}
+	d := execTestDeps(ops, git, llmFake)
+
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	assert.Empty(t, git.leaseBranches, "no lease push without a stale remote branch")
+	require.Len(t, git.pushBranches, 1)
+	assert.Equal(t, "cm/card-1", git.pushBranches[0])
+}
+
 func TestExecuteCleanTreeSkipsPush(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: false} // clean tree: nothing committed

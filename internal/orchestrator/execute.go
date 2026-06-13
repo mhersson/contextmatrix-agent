@@ -113,13 +113,43 @@ func (o *run) executeSubtask(ctx context.Context, sub subtaskRef) error {
 	// push but still completes the card. A push failure aborts the run — the
 	// spend has already been reported, so retry/resume must not double-charge.
 	if committed {
-		if err := d.Git.Push(ctx, cfg.Branch); err != nil {
+		if err := o.pushSubtask(ctx); err != nil {
 			return fmt.Errorf("push after subtask %s: %w", sub.ID, err)
 		}
 	}
 
 	if err := d.Ops.CompleteTask(ctx, sub.ID, subtaskSummary(res.Output, sub.Title)); err != nil {
 		return fmt.Errorf("complete subtask %s: %w", sub.ID, err)
+	}
+
+	return nil
+}
+
+// pushSubtask pushes the card branch after a subtask commit. On a FRESH run that
+// found a stale remote branch (o.staleRemoteTip != ""), the FIRST push overwrites
+// it with a force-with-lease against the recorded tip — per spec §5.1, a fresh
+// run owns its card branch and reclaims a stale one at first push. Every push
+// after that (firstPushDone) is plain, because the branch is now ours and a plain
+// push fast-forwards. A run with no stale branch (staleRemoteTip == "", the
+// normal case, including all resume runs which never record a tip) always uses a
+// plain push.
+func (o *run) pushSubtask(ctx context.Context) error {
+	branch := o.d.Cfg.Branch
+
+	// Every exit marks the first push as attempted: the lease is a one-shot
+	// overwrite, never to be repeated with a stale expected tip.
+	defer func() { o.firstPushDone = true }()
+
+	if !o.firstPushDone && o.staleRemoteTip != "" {
+		if err := o.d.Git.ForcePushWithLease(ctx, branch, o.staleRemoteTip); err != nil {
+			return fmt.Errorf("lease push %q: %w", branch, err)
+		}
+
+		return nil
+	}
+
+	if err := o.d.Git.Push(ctx, branch); err != nil {
+		return fmt.Errorf("push %q: %w", branch, err)
 	}
 
 	return nil

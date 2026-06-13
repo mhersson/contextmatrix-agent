@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -214,10 +215,24 @@ type fakeGit struct {
 	lastCommitPaths  [][]string
 
 	// Integrate-phase scripting.
-	remoteTip      string // RemoteTip return ("" -> plain push path)
+	remoteTip      string // RemoteTip return ("" -> plain push path / absent branch)
+	remoteTipErr   error  // RemoteTip error (resume probe failure -> fatal)
 	rebaseErr      error  // RebaseAutosquash return (ErrRebaseConflict -> fallback)
 	mergeBaseValue string // MergeBase return
+
+	// Resume-phase scripting: fetchErr/checkoutErr drive the transient-failure
+	// fatal paths (the branch exists per remoteTip, but fetch/checkout fail).
+	// leaseBranches/leaseTips capture each ForcePushWithLease branch and expected
+	// tip (index-aligned) so first-push-lease tests can assert the exact values
+	// reaching the git layer.
+	fetchErr      error
+	checkoutErr   error
+	leaseBranches []string
+	leaseTips     []string
 }
+
+// assertErr builds a sentinel error for fake scripting in tests.
+func assertErr(msg string) error { return errors.New(msg) }
 
 func (g *fakeGit) record(call string) {
 	g.mu.Lock()
@@ -258,6 +273,11 @@ func (g *fakeGit) Push(_ context.Context, branch string) error {
 }
 
 func (g *fakeGit) ForcePushWithLease(_ context.Context, branch, expectedTip string) error {
+	g.mu.Lock()
+	g.leaseBranches = append(g.leaseBranches, branch)
+	g.leaseTips = append(g.leaseTips, expectedTip)
+	g.mu.Unlock()
+
 	g.record("ForcePushWithLease:" + branch)
 
 	return nil
@@ -266,13 +286,13 @@ func (g *fakeGit) ForcePushWithLease(_ context.Context, branch, expectedTip stri
 func (g *fakeGit) Fetch(_ context.Context, ref string) error {
 	g.record("Fetch:" + ref)
 
-	return nil
+	return g.fetchErr
 }
 
 func (g *fakeGit) RemoteTip(_ context.Context, branch string) (string, error) {
 	g.record("RemoteTip:" + branch)
 
-	return g.remoteTip, nil
+	return g.remoteTip, g.remoteTipErr
 }
 
 func (g *fakeGit) MergeBase(_ context.Context, a, b string) (string, error) {
@@ -340,7 +360,7 @@ func (g *fakeGit) assertOrder(t *testing.T, names ...string) {
 func (g *fakeGit) Checkout(_ context.Context, ref string) error {
 	g.record("Checkout:" + ref)
 
-	return nil
+	return g.checkoutErr
 }
 
 func (g *fakeGit) Diff(_ context.Context, base string) (string, error) {

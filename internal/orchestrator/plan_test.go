@@ -181,22 +181,30 @@ func TestPlanPhaseRepairExhausted(t *testing.T) {
 func TestPlanPhaseResume(t *testing.T) {
 	ops := &fakeOps{
 		taskContext: cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body"},
-		subtaskStates: []cmclient.SubtaskState{
-			{CardID: "SUB-OLD-1", Title: "Existing subtask alpha", State: "in_progress"},
-			{CardID: "SUB-OLD-2", Title: "Existing subtask beta", State: "todo"},
-		},
-		createdIDs: []string{"SUB-1", "SUB-2"},
+		createdIDs:  []string{"SUB-1", "SUB-2"},
 	}
 	llmFake := &planLLM{responses: []llm.Response{stopResp(goodPlanJSON, 0.01)}}
 	d := planTestDeps(ops, llmFake)
 
 	o := newRun(d, ops.taskContext)
+	// The planner reuse list is fed from the RECONCILED refs (set by reconcile in
+	// the plan-resume case), NOT a fresh SubtaskStates call inside runPlan.
+	o.subtasks = []subtaskRef{
+		{ID: "SUB-OLD-1", Title: "Existing subtask alpha", State: "in_progress", Tier: "moderate"},
+		{ID: "SUB-OLD-2", Title: "Existing subtask beta", State: "todo", Tier: "moderate"},
+	}
+
 	require.NoError(t, runPlan(context.Background(), o))
 
 	require.NotEmpty(t, llmFake.tasks)
 	prompt := llmFake.tasks[0]
 	assert.Contains(t, prompt, "Existing subtask alpha", "resume prompt must list existing subtask titles")
 	assert.Contains(t, prompt, "Existing subtask beta")
+
+	// runPlan must NOT call SubtaskStates itself — the reconciled list is the
+	// source of truth for the reuse block.
+	assert.Equal(t, -1, indexOfCall(ops.recorded(), "SubtaskStates:proj/CARD-1"),
+		"runPlan must consume the reconciled refs, not re-call SubtaskStates")
 }
 
 func TestResolveOrchestratorModel(t *testing.T) {

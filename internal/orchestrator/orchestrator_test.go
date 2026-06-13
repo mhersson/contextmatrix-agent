@@ -38,7 +38,7 @@ func TestRunPersistsPhaseBeforeWork(t *testing.T) {
 	ops := &fakeOps{
 		taskContext: cmclient.TaskContext{CardID: "CARD-1"},
 	}
-	d := Deps{Ops: ops, Cfg: Config{CardID: "CARD-1"}}
+	d := Deps{Ops: ops, Git: &fakeGit{}, Cfg: Config{CardID: "CARD-1"}}
 
 	// Stub the plan phase to fail; SetPhase("plan") must still come FIRST.
 	o := newRun(d, ops.taskContext)
@@ -78,7 +78,7 @@ func TestRunSetPhaseFailureSkipsWork(t *testing.T) {
 		taskContext: cmclient.TaskContext{CardID: "CARD-1"},
 		setPhaseErr: errors.New("cm unreachable"),
 	}
-	d := Deps{Ops: ops, Cfg: Config{CardID: "CARD-1"}}
+	d := Deps{Ops: ops, Git: &fakeGit{}, Cfg: Config{CardID: "CARD-1"}}
 
 	o := newRun(d, ops.taskContext)
 
@@ -102,7 +102,7 @@ func TestRunEntersAtPersistedPhase(t *testing.T) {
 	ops := &fakeOps{
 		taskContext: cmclient.TaskContext{CardID: "CARD-1", Phase: "review"},
 	}
-	d := Deps{Ops: ops, Cfg: Config{CardID: "CARD-1"}}
+	d := Deps{Ops: ops, Git: &fakeGit{}, Cfg: Config{CardID: "CARD-1"}}
 
 	o := newRun(d, ops.taskContext)
 
@@ -143,7 +143,7 @@ func TestRunBudgetBreachParks(t *testing.T) {
 	ops := &fakeOps{
 		taskContext: cmclient.TaskContext{CardID: "CARD-1"},
 	}
-	d := Deps{Ops: ops, Cfg: Config{CardID: "CARD-1", MaxCardCost: 1.00}}
+	d := Deps{Ops: ops, Git: &fakeGit{}, Cfg: Config{CardID: "CARD-1", MaxCardCost: 1.00}}
 
 	o := newRun(d, ops.taskContext)
 	// Plan spends past the cap, then trips the ledger.
@@ -172,7 +172,7 @@ func TestRunSeedsLedgerFromReportedCost(t *testing.T) {
 	ops := &fakeOps{
 		taskContext: cmclient.TaskContext{CardID: "CARD-1", ReportedCostUSD: 0.90},
 	}
-	d := Deps{Ops: ops, Cfg: Config{CardID: "CARD-1", MaxCardCost: 1.00}}
+	d := Deps{Ops: ops, Git: &fakeGit{}, Cfg: Config{CardID: "CARD-1", MaxCardCost: 1.00}}
 
 	o := newRun(d, ops.taskContext)
 	// A tiny additional spend tips the already-reported total past the cap.

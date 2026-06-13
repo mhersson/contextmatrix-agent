@@ -215,15 +215,12 @@ func runPlan(ctx context.Context, o *run) error {
 		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel)
 
 	// Resume: surface any existing subtasks so the planner reuses their titles.
+	// The list is the RECONCILED set (reconcile loaded it from SubtaskStates
+	// before the phase loop); runPlan does not re-query the server. On a fresh
+	// run o.subtasks is empty, yielding an empty resume block.
 	var existingTitles []string
-
-	if states, err := d.Ops.SubtaskStates(ctx, cfg.Project, cfg.CardID); err == nil {
-		for _, st := range states {
-			existingTitles = append(existingTitles, st.Title)
-		}
-	} else {
-		slog.Warn("plan: subtask states unavailable, planning without resume block",
-			"card_id", cfg.CardID, "error", err)
+	for _, sub := range o.subtasks {
+		existingTitles = append(existingTitles, sub.Title)
 	}
 
 	resume := resumeBlock(existingTitles)

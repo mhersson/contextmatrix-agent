@@ -118,9 +118,23 @@ type run struct {
 	tc     cmclient.TaskContext
 	ledger *Ledger
 
-	// Plan-phase outputs, consumed by later phases. Set by runPlan.
+	// Plan-phase outputs, consumed by later phases. Set by runPlan, or — on
+	// resume — pre-loaded by reconcile from SubtaskStates before any phase runs.
 	subtasks []subtaskRef
 	cardTier string
+
+	// staleRemoteTip is the remote tip of this run's card branch as observed at
+	// reconcile time on a FRESH run (phase == ""). A non-empty value means a stale
+	// branch from a prior, abandoned run exists: per spec §5.1 the fresh run owns
+	// the branch and overwrites it at its first push with a force-with-lease
+	// against this tip. Empty means the branch is absent (plain push). It is NOT
+	// recorded on resume — resume continues the fetched branch, which is the state.
+	staleRemoteTip string
+
+	// firstPushDone guards the one-time stale-branch overwrite: the execute phase's
+	// FIRST push uses ForcePushWithLease(branch, staleRemoteTip) when a stale tip
+	// was recorded, and every push after that is plain (the branch is now ours).
+	firstPushDone bool
 
 	// reviewSummary is the synthesis verdict's one-line summary captured on
 	// approval, carried into the integrate phase's PR body. Empty when review was
@@ -210,6 +224,14 @@ func (o *run) execute(ctx context.Context) error {
 	from := indexOf(phaseOrder, start)
 	if from < 0 {
 		return fmt.Errorf("card has unknown persisted phase %q", start)
+	}
+
+	// Crash-resume reconciliation runs ONCE, before any phase: it sorts out the
+	// card branch (fresh: record the stale tip for the guarded overwrite; resume:
+	// fetch + check out the branch that IS the state) and loads prior subtask
+	// state into o.subtasks so phases skip finished work. See reconcile.
+	if err := o.reconcile(ctx); err != nil {
+		return fmt.Errorf("reconcile: %w", err)
 	}
 
 	for _, phase := range phaseOrder[from:] {
