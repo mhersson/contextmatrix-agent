@@ -83,6 +83,12 @@ func (o *run) executeSubtask(ctx context.Context, sub subtaskRef) error {
 		usedModel = model
 	}
 
+	// Track the resolved coder slug so the review panel can exclude it (a model
+	// must not review its own code). Keyed on the slug we configured, which is
+	// what SelectReviewPanel's Exclude set compares against. newRun initializes
+	// the map unconditionally.
+	o.coderModels[model] = true
+
 	if reportErr := d.Ops.ReportUsage(ctx, sub.ID, usedModel,
 		res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
 		slog.Warn("execute: report usage failed", "card_id", sub.ID, "error", reportErr)

@@ -110,12 +110,27 @@ type run struct {
 	subtasks []subtaskRef
 	cardTier string
 
+	// coderModels records every distinct model that coded a subtask during
+	// execute, so the review phase can exclude them from the specialist panel
+	// (a model should not review its own code). Populated in executeSubtask.
+	coderModels map[string]bool
+
+	// runVerify executes the detected verify command (best-effort spec/test gate)
+	// and returns its combined output plus a pass flag. It is a struct field so
+	// tests can stub the subprocess; the default shells out via execVerify.
+	runVerify verifyRunner
+
 	planFn      phaseFn
 	executeFn   phaseFn
 	reviewFn    phaseFn
 	integrateFn phaseFn
 	doneFn      phaseFn
 }
+
+// verifyRunner runs the review gate's verify command (argv) in the workspace
+// and reports the combined output plus whether it passed (exit 0). The default
+// implementation shells out; tests inject a stub.
+type verifyRunner func(ctx context.Context, argv []string) (output string, ok bool)
 
 // newRun builds a run seeded from the task context, with the budget ledger
 // pre-loaded from the card's already-reported cost and the phase functions
@@ -127,9 +142,14 @@ func newRun(d Deps, tc cmclient.TaskContext) *run {
 		ledger: NewLedger(d.Cfg.MaxCardCost, tc.ReportedCostUSD),
 	}
 
+	o.coderModels = map[string]bool{}
+	o.runVerify = func(ctx context.Context, argv []string) (string, bool) {
+		return execVerify(ctx, d.Cfg.Workspace, argv)
+	}
+
 	o.planFn = func(ctx context.Context) error { return runPlan(ctx, o) }
 	o.executeFn = func(ctx context.Context) error { return runExecute(ctx, o) }
-	o.reviewFn = o.notImplemented
+	o.reviewFn = func(ctx context.Context) error { return runReview(ctx, o) }
 	o.integrateFn = o.notImplemented
 	o.doneFn = o.notImplemented
 

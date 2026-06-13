@@ -3,7 +3,10 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
+	"testing"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/events"
@@ -26,6 +29,11 @@ type fakeOps struct {
 	setPhaseErr error
 	addLogErr   error
 	claimErr    error
+
+	// IncrementReviewAttempts scripting: reviewAttempts seeds the counter; each
+	// call increments it and returns the new running total, mirroring the server
+	// semantics (the card's persisted review_attempts plus this increment).
+	reviewAttempts int
 
 	// CreateCard scripting: createdIDs supplies the returned card ID per call
 	// (index-aligned to call order); when exhausted, IDs fall back to NEW-<n>.
@@ -125,7 +133,12 @@ func (f *fakeOps) StartReview(_ context.Context, cardID string) error {
 func (f *fakeOps) IncrementReviewAttempts(_ context.Context, cardID string) (int, error) {
 	f.record("IncrementReviewAttempts:" + cardID)
 
-	return 1, nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.reviewAttempts++
+
+	return f.reviewAttempts, nil
 }
 
 func (f *fakeOps) SubtaskStates(_ context.Context, project, parentID string) ([]cmclient.SubtaskState, error) {
@@ -185,6 +198,12 @@ type fakeGit struct {
 	// Push scripting: pushErr fails the call; pushBranches captures each branch.
 	pushErr      error
 	pushBranches []string
+
+	// LastCommitTouching scripting: lastCommitTarget is the returned target SHA
+	// (empty -> the caller falls back to HEAD); lastCommitPaths captures the path
+	// set passed on each call so tests can assert the fixup targeting input.
+	lastCommitTarget string
+	lastCommitPaths  [][]string
 }
 
 func (g *fakeGit) record(call string) {
@@ -252,13 +271,17 @@ func (g *fakeGit) MergeBase(_ context.Context, a, b string) (string, error) {
 func (g *fakeGit) CommitFixup(_ context.Context, target string) (bool, error) {
 	g.record("CommitFixup:" + target)
 
-	return false, nil
+	return g.committed, g.commitErr
 }
 
 func (g *fakeGit) LastCommitTouching(_ context.Context, paths []string) (string, error) {
+	g.mu.Lock()
+	g.lastCommitPaths = append(g.lastCommitPaths, append([]string(nil), paths...))
+	g.mu.Unlock()
+
 	g.record("LastCommitTouching")
 
-	return "", nil
+	return g.lastCommitTarget, nil
 }
 
 func (g *fakeGit) RebaseAutosquash(_ context.Context, onto string) error {
@@ -356,6 +379,16 @@ func planTestCatalog() llm.Catalog {
 
 func planTestRegistry() *registry.Registry {
 	return registry.NewRegistry(nil, "default/model", planTestCatalog())
+}
+
+// writeFile writes name under dir with the given content, failing the test on
+// any I/O error. Used by detectVerifyCommand tests to seed marker files.
+func writeFile(t *testing.T, dir, name, content string) {
+	t.Helper()
+
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
 }
 
 func planTestDeps(ops *fakeOps, client llm.LLM) Deps {
