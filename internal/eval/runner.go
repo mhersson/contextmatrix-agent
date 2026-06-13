@@ -132,7 +132,14 @@ func runOne(ctx context.Context, client llm.LLM, model string, task Task, sample
 		return Outcome{Model: model, Role: task.Role(), Task: task.Name(), Cost: res.TotalCostUSD}, fmt.Errorf("check %s on %s: %w", task.Name(), model, err)
 	}
 
-	return Outcome{Model: model, Role: task.Role(), Task: task.Name(), Pass: v.OK, Cost: res.TotalCostUSD, Res: res}, nil
+	// A coder Check fails a run that tampered with protected fixture files, marking
+	// the verdict with tamperedDetailPrefix. Surface that on the Outcome (Pass stays
+	// false either way) so the merge step can distinguish it from a wrong answer.
+	return Outcome{
+		Model: model, Role: task.Role(), Task: task.Name(),
+		Pass: v.OK, Cost: res.TotalCostUSD, Res: res,
+		Tampered: !v.OK && strings.HasPrefix(v.Detail, tamperedDetailPrefix),
+	}, nil
 }
 
 func transcriptName(model, task string, sample int) string {

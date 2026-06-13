@@ -312,7 +312,7 @@ func (p *parser) parseFactor() (int, error) {
 				check = "go test ./..."
 			}
 
-			ct := CoderTask{name: filepath.Base(c.fixture), fixture: c.fixture, check: check}
+			ct := CoderTask{name: filepath.Base(c.fixture), fixture: c.fixture, check: check, writable: []string{c.implFile}}
 			dir := t.TempDir()
 			require.NoError(t, ct.Provision(dir))
 

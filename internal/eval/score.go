@@ -16,6 +16,11 @@ type Outcome struct {
 	Pass  bool
 	Cost  float64
 	Res   harness.Result
+	// Tampered is true when a coder run failed because it altered protected fixture
+	// files (hidden tests, go.mod, helpers) rather than because the answer was wrong.
+	// Always paired with Pass=false; reserved for the merge step to distinguish
+	// "failed: tampered" from "failed: wrong answer" (no consumer reads it yet).
+	Tampered bool
 }
 
 // wilsonLowerBound returns the lower bound of the Wilson score interval for

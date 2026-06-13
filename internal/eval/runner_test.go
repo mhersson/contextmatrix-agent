@@ -103,6 +103,47 @@ func (c captureLLM) SendStream(_ context.Context, req llm.Request, _ func(llm.De
 	return llm.Response{FinishReason: "stop"}, nil
 }
 
+// verdictTask returns a fixed verdict from Check, letting a test drive the exact
+// Detail string the runner inspects for the tamper marker.
+type verdictTask struct {
+	name string
+	v    harness.Verdict
+}
+
+func (t verdictTask) Name() string           { return t.name }
+func (t verdictTask) Role() registry.Role    { return registry.RoleCoder }
+func (t verdictTask) Provision(string) error { return nil }
+func (t verdictTask) Prompt() string         { return "do it" }
+func (t verdictTask) Check(context.Context, string, harness.Result) (harness.Verdict, error) {
+	return t.v, nil
+}
+
+// TestRunMatrixSurfacesTamper proves the tamper marker survives to the Outcome: a
+// Check verdict carrying tamperedDetailPrefix sets Outcome.Tampered (Pass stays
+// false), while an ordinary failing verdict does not. Without this, the marker would
+// die in runOne and the merge step could not tell tampering from a wrong answer.
+func TestRunMatrixSurfacesTamper(t *testing.T) {
+	tasks := []Task{
+		verdictTask{name: "tampered", v: harness.Verdict{OK: false, Detail: tamperedDetailPrefix + " protected fixture files altered: sumlist_test.go"}},
+		verdictTask{name: "wrong", v: harness.Verdict{OK: false, Detail: "FAIL\tsumlist\t0.01s"}},
+	}
+	mr, err := RunMatrix(context.Background(), costLLM{}, MatrixOpts{
+		Models: []string{"m1"}, Tasks: tasks, Samples: 1, MaxTurns: 2,
+	})
+	require.NoError(t, err)
+	require.Len(t, mr.Outcomes, 2)
+
+	byTask := map[string]Outcome{}
+	for _, o := range mr.Outcomes {
+		byTask[o.Task] = o
+	}
+
+	assert.False(t, byTask["tampered"].Pass)
+	assert.True(t, byTask["tampered"].Tampered, "tampered verdict must set Outcome.Tampered")
+	assert.False(t, byTask["wrong"].Pass)
+	assert.False(t, byTask["wrong"].Tampered, "an ordinary wrong-answer fail must NOT be flagged tampered")
+}
+
 func TestRunMatrixForwardsProvider(t *testing.T) {
 	var seen json.RawMessage
 
