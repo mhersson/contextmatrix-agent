@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,11 +28,28 @@ type MatrixOpts struct {
 	Provider      json.RawMessage // OpenRouter provider routing (sort/require_parameters/quantizations); nil = default routing
 }
 
+// CellKey identifies one (model, role) capability cell in the matrix. Coverage and
+// scoring aggregate at this granularity (a model's coder cell spans all coder tasks
+// × samples).
+type CellKey struct {
+	Model string
+	Role  registry.Role
+}
+
 type MatrixResult struct {
 	Outcomes  []Outcome
 	TotalCost float64
 	Aborted   bool
 	Errors    int // runs skipped due to a per-run error (provider/stream/check); see RunMatrix
+	// Coverage counts the outcomes actually recorded per (model, role) cell. Errored
+	// and budget-aborted runs are NOT recorded, so a cell with Coverage < Expected is
+	// incomplete and must be excluded from the merged baseline.
+	Coverage map[CellKey]int
+	// Expected is the full battery size per (model, role) cell: samples × the number of
+	// tasks with that role. It is computed up front from the requested matrix, so an
+	// aborted cell still reports the count it WOULD have had — that gap is what marks
+	// the cell partial.
+	Expected map[CellKey]int
 }
 
 // RunMatrix drives every (model × task × sample) in-process, scoring each run via
@@ -46,7 +64,10 @@ func RunMatrix(ctx context.Context, client llm.LLM, opts MatrixOpts) (MatrixResu
 		samples = 1
 	}
 
-	var mr MatrixResult
+	mr := MatrixResult{
+		Coverage: map[CellKey]int{},
+		Expected: expectedCoverage(opts.Models, opts.Tasks, samples),
+	}
 
 	for _, model := range opts.Models {
 		for _, task := range opts.Tasks {
@@ -63,19 +84,73 @@ func RunMatrix(ctx context.Context, client llm.LLM, opts MatrixOpts) (MatrixResu
 				if err != nil {
 					// A per-run error (transient provider/stream failure, or a check
 					// error) must not abort the whole costly sweep. Skip the run — it
-					// is not scored (no pass, no total in Score) — count it, continue.
-					// The errored run's transcript (if enabled) records the failure.
+					// is not scored (no pass, no total in Score), does NOT count as
+					// coverage — count it, continue. The errored run's transcript (if
+					// enabled) records the failure.
 					mr.Errors++
 
 					continue
 				}
 
 				mr.Outcomes = append(mr.Outcomes, o)
+				mr.Coverage[CellKey{Model: model, Role: task.Role()}]++
 			}
 		}
 	}
 
 	return mr, nil
+}
+
+// MinCellTrials returns the per-cell trial count of the SMALLEST-battery role in the
+// requested matrix: samples × min over roles present of |tasks(role)|. This is the n
+// at which the floor must be calibrated — the achievable Wilson-LB ceiling depends on
+// the trial count per (model, role) cell (samples × tasks-of-role), NOT the raw
+// sample count. The stored meta Floor is a single scalar applied uniformly across
+// roles by the registry, so we calibrate against the most-conservative (smallest)
+// battery: a floor sized to the smaller-battery role can never exceed what any role's
+// cell can reach, so it never over-gates. Returns 0 when no tasks are requested.
+func MinCellTrials(tasks []Task, samples int) int {
+	perRole := tasksPerRole(tasks)
+	if len(perRole) == 0 {
+		return 0
+	}
+
+	minTasks := math.MaxInt
+	for _, n := range perRole {
+		if n < minTasks {
+			minTasks = n
+		}
+	}
+
+	return minTasks * samples
+}
+
+// tasksPerRole counts the requested tasks by role.
+func tasksPerRole(tasks []Task) map[registry.Role]int {
+	perRole := map[registry.Role]int{}
+	for _, task := range tasks {
+		perRole[task.Role()]++
+	}
+
+	return perRole
+}
+
+// expectedCoverage computes the full battery size per (model, role) cell:
+// samples × the number of requested tasks with that role. Every model runs the same
+// task list, so the per-role count is identical across models even when a model is
+// added mid-sweep.
+func expectedCoverage(models []string, tasks []Task, samples int) map[CellKey]int {
+	perRole := tasksPerRole(tasks)
+
+	expected := map[CellKey]int{}
+
+	for _, model := range models {
+		for role, n := range perRole {
+			expected[CellKey{Model: model, Role: role}] = n * samples
+		}
+	}
+
+	return expected
 }
 
 func runOne(ctx context.Context, client llm.LLM, model string, task Task, sample int, opts MatrixOpts) (Outcome, error) {
