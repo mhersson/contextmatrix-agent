@@ -128,7 +128,7 @@ func newRun(d Deps, tc cmclient.TaskContext) *run {
 	}
 
 	o.planFn = func(ctx context.Context) error { return runPlan(ctx, o) }
-	o.executeFn = o.notImplemented
+	o.executeFn = func(ctx context.Context) error { return runExecute(ctx, o) }
 	o.reviewFn = o.notImplemented
 	o.integrateFn = o.notImplemented
 	o.doneFn = o.notImplemented

@@ -111,10 +111,13 @@ func TestPlanPhaseCreatesSubtasks(t *testing.T) {
 	assert.Empty(t, ops.createCardArgs[0].dependsOn)
 	assert.Equal(t, []string{"SUB-1"}, ops.createCardArgs[1].dependsOn)
 
-	// Run struct carries the resolved subtask refs and the card tier.
+	// Run struct carries the resolved subtask refs and the card tier. Body holds
+	// the planner's description — the execute phase feeds it to the coder.
 	require.Len(t, o.subtasks, 2)
 	assert.Equal(t, "SUB-1", o.subtasks[0].ID)
 	assert.Equal(t, "SUB-2", o.subtasks[1].ID)
+	assert.Equal(t, "do first", o.subtasks[0].Body)
+	assert.Equal(t, "do second", o.subtasks[1].Body)
 	assert.Equal(t, []string{"SUB-1"}, o.subtasks[1].DependsOnIDs)
 	assert.Equal(t, "moderate", o.cardTier)
 

@@ -36,11 +36,17 @@ type plan struct {
 }
 
 // subtaskRef is a created subtask carried on the run struct for the execute
-// phase: the real card ID, its title, tier, and the real card IDs it depends on.
+// phase: the real card ID, its title, body, tier, current state, and the real
+// card IDs it depends on. State drives resume skipping in the execute phase
+// ("done" subtasks are not re-run); plan-created subtasks start "todo". Body
+// carries the planner's description (file lists, acceptance criteria) into the
+// coder prompt; resume-loaded refs lack it (SubtaskStates has no body field).
 type subtaskRef struct {
 	ID           string
 	Title        string
+	Body         string
 	Tier         string
+	State        string
 	DependsOnIDs []string
 }
 
@@ -139,6 +145,14 @@ func extractJSON(s string) (string, bool) {
 	return "", false
 }
 
+// resolvePin reports whether a non-empty card-pinned model slug is honourable:
+// the registry exists and the slug is present in the live catalog. Empty pins
+// and unknown slugs are not honoured. Both the orchestrator-model resolution and
+// the per-subtask coder-model resolution gate on this.
+func resolvePin(reg *registry.Registry, pin string) bool {
+	return pin != "" && reg != nil && reg.Has(pin)
+}
+
 // resolveOrchestratorModel picks the model the orchestrator's own model-bearing
 // phases (plan, review synthesis, docs) run on. Precedence:
 //  1. the card pin (pinned), if it is catalog-resolvable;
@@ -155,7 +169,7 @@ func resolveOrchestratorModel(
 	cardID, pinned, payload, fallback string,
 ) string {
 	if pinned != "" {
-		if reg != nil && reg.Has(pinned) {
+		if resolvePin(reg, pinned) {
 			return pinned
 		}
 
@@ -297,7 +311,9 @@ func (o *run) createSubtasks(ctx context.Context, p plan) error {
 		o.subtasks = append(o.subtasks, subtaskRef{
 			ID:           id,
 			Title:        st.Title,
+			Body:         st.Description,
 			Tier:         st.Tier,
+			State:        "todo", // freshly created; resume reconciliation refreshes this
 			DependsOnIDs: depIDs,
 		})
 	}

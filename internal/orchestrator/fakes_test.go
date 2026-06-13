@@ -25,6 +25,7 @@ type fakeOps struct {
 
 	setPhaseErr error
 	addLogErr   error
+	claimErr    error
 
 	// CreateCard scripting: createdIDs supplies the returned card ID per call
 	// (index-aligned to call order); when exhausted, IDs fall back to NEW-<n>.
@@ -69,7 +70,7 @@ func (f *fakeOps) recorded() []string {
 func (f *fakeOps) ClaimCard(_ context.Context, cardID string) error {
 	f.record("ClaimCard:" + cardID)
 
-	return nil
+	return f.claimErr
 }
 
 func (f *fakeOps) GetTaskContext(_ context.Context, cardID string) (cmclient.TaskContext, error) {
@@ -166,13 +167,144 @@ func (f *fakeOps) ReleaseCard(_ context.Context, cardID string) error {
 // compile-time assertion that the fake satisfies the consumer interface.
 var _ Ops = (*fakeOps)(nil)
 
+// fakeGit is a scripted implementation of the GitOps interface. It records every
+// call in order so tests can assert sequencing, and exposes programmable returns
+// for the methods the execute phase exercises. Only the methods the execute
+// phase calls carry interesting behaviour; the rest record and return zero.
+type fakeGit struct {
+	mu    sync.Mutex
+	calls []string
+
+	// CommitWithMessage scripting: committed is the returned "something was
+	// committed" flag; commitErr fails the call. commitMsgs captures each
+	// message passed so tests can assert the extracted commit line.
+	committed  bool
+	commitErr  error
+	commitMsgs []string
+
+	// Push scripting: pushErr fails the call; pushBranches captures each branch.
+	pushErr      error
+	pushBranches []string
+}
+
+func (g *fakeGit) record(call string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	g.calls = append(g.calls, call)
+}
+
+// recorded returns a copy of the call log.
+func (g *fakeGit) recorded() []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	out := make([]string, len(g.calls))
+	copy(out, g.calls)
+
+	return out
+}
+
+func (g *fakeGit) CommitWithMessage(_ context.Context, message string) (bool, error) {
+	g.mu.Lock()
+	g.commitMsgs = append(g.commitMsgs, message)
+	g.mu.Unlock()
+
+	g.record("CommitWithMessage")
+
+	return g.committed, g.commitErr
+}
+
+func (g *fakeGit) Push(_ context.Context, branch string) error {
+	g.mu.Lock()
+	g.pushBranches = append(g.pushBranches, branch)
+	g.mu.Unlock()
+
+	g.record("Push:" + branch)
+
+	return g.pushErr
+}
+
+func (g *fakeGit) ForcePushWithLease(_ context.Context, branch, expectedTip string) error {
+	g.record("ForcePushWithLease:" + branch)
+
+	return nil
+}
+
+func (g *fakeGit) Fetch(_ context.Context, ref string) error {
+	g.record("Fetch:" + ref)
+
+	return nil
+}
+
+func (g *fakeGit) RemoteTip(_ context.Context, branch string) (string, error) {
+	g.record("RemoteTip:" + branch)
+
+	return "", nil
+}
+
+func (g *fakeGit) MergeBase(_ context.Context, a, b string) (string, error) {
+	g.record("MergeBase")
+
+	return "", nil
+}
+
+func (g *fakeGit) CommitFixup(_ context.Context, target string) (bool, error) {
+	g.record("CommitFixup:" + target)
+
+	return false, nil
+}
+
+func (g *fakeGit) LastCommitTouching(_ context.Context, paths []string) (string, error) {
+	g.record("LastCommitTouching")
+
+	return "", nil
+}
+
+func (g *fakeGit) RebaseAutosquash(_ context.Context, onto string) error {
+	g.record("RebaseAutosquash:" + onto)
+
+	return nil
+}
+
+func (g *fakeGit) SoftReset(_ context.Context, to string) error {
+	g.record("SoftReset:" + to)
+
+	return nil
+}
+
+func (g *fakeGit) Head(_ context.Context) (string, error) {
+	g.record("Head")
+
+	return "", nil
+}
+
+func (g *fakeGit) Checkout(_ context.Context, ref string) error {
+	g.record("Checkout:" + ref)
+
+	return nil
+}
+
+func (g *fakeGit) Diff(_ context.Context, base string) (string, error) {
+	g.record("Diff")
+
+	return "", nil
+}
+
+// compile-time assertion that the fake satisfies the consumer interface.
+var _ GitOps = (*fakeGit)(nil)
+
 // planLLM is a scripted llm.LLM for the orchestrator phase tests. It returns
 // the queued responses in order (each as a single no-tool-call assistant turn
-// so harness.Run treats it as done) and captures the task string of every call
-// so tests can assert on prompt contents.
+// so harness.Run treats it as done) and captures the task string and request
+// model of every call so tests can assert on prompt contents and the model the
+// harness was configured with. All mutable state is mutex-guarded (mirroring
+// fakeGit) so future goroutine fan-out can't trip the race detector.
 type planLLM struct {
+	mu        sync.Mutex
 	responses []llm.Response
 	tasks     []string
+	models    []string
 	i         int
 }
 
@@ -185,6 +317,11 @@ func (p *planLLM) SendStream(_ context.Context, req llm.Request, _ func(llm.Delt
 }
 
 func (p *planLLM) next(req llm.Request) llm.Response {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.models = append(p.models, req.Model)
+
 	// Capture the last user message — the phase task prompt.
 	for j := len(req.Messages) - 1; j >= 0; j-- {
 		if req.Messages[j].Role == "user" {
