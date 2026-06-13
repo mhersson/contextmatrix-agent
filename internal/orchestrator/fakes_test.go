@@ -6,6 +6,10 @@ import (
 	"sync"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
+	"github.com/mhersson/contextmatrix-agent/internal/events"
+	"github.com/mhersson/contextmatrix-agent/internal/llm"
+	"github.com/mhersson/contextmatrix-agent/internal/registry"
+	"github.com/mhersson/contextmatrix-agent/internal/tools"
 )
 
 // fakeOps is a scripted implementation of the Ops interface. It records every
@@ -21,6 +25,27 @@ type fakeOps struct {
 
 	setPhaseErr error
 	addLogErr   error
+
+	// CreateCard scripting: createdIDs supplies the returned card ID per call
+	// (index-aligned to call order); when exhausted, IDs fall back to NEW-<n>.
+	// createCardArgs captures every CreateCard invocation for dependency-edge
+	// assertions. createCardErr fails every call; nil = success.
+	createdIDs     []string
+	createCardArgs []createCardCall
+	createCardErr  error
+
+	// SubtaskStates scripting.
+	subtaskStates    []cmclient.SubtaskState
+	subtaskStatesErr error
+}
+
+// createCardCall is a recorded CreateCard invocation.
+type createCardCall struct {
+	project   string
+	parent    string
+	title     string
+	body      string
+	dependsOn []string
 }
 
 func (f *fakeOps) record(call string) {
@@ -53,10 +78,29 @@ func (f *fakeOps) GetTaskContext(_ context.Context, cardID string) (cmclient.Tas
 	return f.taskContext, f.taskCtxErr
 }
 
-func (f *fakeOps) CreateCard(_ context.Context, project, parent, title, _ string, _ []string) (string, error) {
+func (f *fakeOps) CreateCard(_ context.Context, project, parent, title, body string, dependsOn []string) (string, error) {
+	f.mu.Lock()
+	idx := len(f.createCardArgs)
+	f.createCardArgs = append(f.createCardArgs, createCardCall{
+		project:   project,
+		parent:    parent,
+		title:     title,
+		body:      body,
+		dependsOn: append([]string(nil), dependsOn...),
+	})
+	f.mu.Unlock()
+
 	f.record(fmt.Sprintf("CreateCard:%s/%s/%s", project, parent, title))
 
-	return "NEW-1", nil
+	if f.createCardErr != nil {
+		return "", f.createCardErr
+	}
+
+	if idx < len(f.createdIDs) {
+		return f.createdIDs[idx], nil
+	}
+
+	return fmt.Sprintf("NEW-%d", idx+1), nil
 }
 
 func (f *fakeOps) SetPhase(_ context.Context, cardID, phase string) error {
@@ -86,7 +130,7 @@ func (f *fakeOps) IncrementReviewAttempts(_ context.Context, cardID string) (int
 func (f *fakeOps) SubtaskStates(_ context.Context, project, parentID string) ([]cmclient.SubtaskState, error) {
 	f.record(fmt.Sprintf("SubtaskStates:%s/%s", project, parentID))
 
-	return nil, nil
+	return f.subtaskStates, f.subtaskStatesErr
 }
 
 func (f *fakeOps) AddLog(_ context.Context, cardID, message string) error {
@@ -121,3 +165,75 @@ func (f *fakeOps) ReleaseCard(_ context.Context, cardID string) error {
 
 // compile-time assertion that the fake satisfies the consumer interface.
 var _ Ops = (*fakeOps)(nil)
+
+// planLLM is a scripted llm.LLM for the orchestrator phase tests. It returns
+// the queued responses in order (each as a single no-tool-call assistant turn
+// so harness.Run treats it as done) and captures the task string of every call
+// so tests can assert on prompt contents.
+type planLLM struct {
+	responses []llm.Response
+	tasks     []string
+	i         int
+}
+
+func (p *planLLM) Send(_ context.Context, req llm.Request) (llm.Response, error) {
+	return p.next(req), nil
+}
+
+func (p *planLLM) SendStream(_ context.Context, req llm.Request, _ func(llm.Delta)) (llm.Response, error) {
+	return p.next(req), nil
+}
+
+func (p *planLLM) next(req llm.Request) llm.Response {
+	// Capture the last user message — the phase task prompt.
+	for j := len(req.Messages) - 1; j >= 0; j-- {
+		if req.Messages[j].Role == "user" {
+			p.tasks = append(p.tasks, req.Messages[j].Content)
+
+			break
+		}
+	}
+
+	if p.i >= len(p.responses) {
+		return llm.Response{FinishReason: "stop"}
+	}
+
+	r := p.responses[p.i]
+	p.i++
+
+	return r
+}
+
+// stopResp wraps final assistant text as a no-tool-call (done) turn.
+func stopResp(content string, cost float64) llm.Response {
+	return llm.Response{Content: content, FinishReason: "stop", Usage: llm.Usage{Cost: cost}}
+}
+
+func planTestCatalog() llm.Catalog {
+	return llm.Catalog{
+		{ID: "payload/model", ContextLength: 131072, SupportedParameters: []string{"tools"}},
+		{ID: "default/model", ContextLength: 131072, SupportedParameters: []string{"tools"}},
+		{ID: "pinned/model", ContextLength: 131072, SupportedParameters: []string{"tools"}},
+	}
+}
+
+func planTestRegistry() *registry.Registry {
+	return registry.NewRegistry(nil, "default/model", planTestCatalog())
+}
+
+func planTestDeps(ops *fakeOps, client llm.LLM) Deps {
+	return Deps{
+		Ops:       ops,
+		Client:    client,
+		Emit:      events.NewEmitter(nil, nil),
+		Registry:  planTestRegistry(),
+		ReadTools: tools.NewRegistry(tools.NewReadTool(".")),
+		Cfg: Config{
+			Project:      "proj",
+			CardID:       "CARD-1",
+			PayloadModel: "payload/model",
+			DefaultModel: "default/model",
+			MaxTurns:     5,
+		},
+	}
+}

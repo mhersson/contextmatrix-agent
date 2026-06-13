@@ -106,6 +106,10 @@ type run struct {
 	tc     cmclient.TaskContext
 	ledger *Ledger
 
+	// Plan-phase outputs, consumed by later phases. Set by runPlan.
+	subtasks []subtaskRef
+	cardTier string
+
 	planFn      phaseFn
 	executeFn   phaseFn
 	reviewFn    phaseFn
@@ -123,7 +127,7 @@ func newRun(d Deps, tc cmclient.TaskContext) *run {
 		ledger: NewLedger(d.Cfg.MaxCardCost, tc.ReportedCostUSD),
 	}
 
-	o.planFn = o.notImplemented
+	o.planFn = func(ctx context.Context) error { return runPlan(ctx, o) }
 	o.executeFn = o.notImplemented
 	o.reviewFn = o.notImplemented
 	o.integrateFn = o.notImplemented

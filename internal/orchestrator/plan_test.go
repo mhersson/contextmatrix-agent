@@ -1,0 +1,244 @@
+package orchestrator
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
+	"github.com/mhersson/contextmatrix-agent/internal/events"
+	"github.com/mhersson/contextmatrix-agent/internal/llm"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+const goodPlanJSON = `{"card_tier":"moderate","subtasks":[` +
+	`{"title":"First task","description":"do first","depends_on":[],"tier":"simple"},` +
+	`{"title":"Second task","description":"do second","depends_on":[0],"tier":"moderate"}]}`
+
+func TestParsePlan(t *testing.T) {
+	t.Run("valid", func(t *testing.T) {
+		p, err := parsePlan(goodPlanJSON)
+		require.NoError(t, err)
+		assert.Equal(t, "moderate", p.CardTier)
+		require.Len(t, p.Subtasks, 2)
+		assert.Equal(t, "First task", p.Subtasks[0].Title)
+		assert.Equal(t, "simple", p.Subtasks[0].Tier)
+		assert.Equal(t, []int{0}, p.Subtasks[1].DependsOn)
+		assert.Equal(t, "moderate", p.Subtasks[1].Tier)
+	})
+
+	t.Run("junk wrapped JSON extracts", func(t *testing.T) {
+		wrapped := "Here is my plan:\n```json\n" + goodPlanJSON + "\n```\nHope that helps!"
+		p, err := parsePlan(wrapped)
+		require.NoError(t, err)
+		require.Len(t, p.Subtasks, 2)
+		assert.Equal(t, "moderate", p.CardTier)
+	})
+
+	t.Run("invalid tier", func(t *testing.T) {
+		bad := `{"card_tier":"moderate","subtasks":[{"title":"T","description":"d","depends_on":[],"tier":"epic"}]}`
+		_, err := parsePlan(bad)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "tier")
+	})
+
+	t.Run("invalid card_tier", func(t *testing.T) {
+		bad := `{"card_tier":"gigantic","subtasks":[{"title":"T","description":"d","depends_on":[],"tier":"simple"}]}`
+		_, err := parsePlan(bad)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "card_tier")
+	})
+
+	t.Run("dep index out of range", func(t *testing.T) {
+		bad := `{"card_tier":"simple","subtasks":[{"title":"T","description":"d","depends_on":[5],"tier":"simple"}]}`
+		_, err := parsePlan(bad)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "depends_on")
+	})
+
+	t.Run("forward-only dep rejected", func(t *testing.T) {
+		// Subtask 0 depends on subtask 1 (a later index) — forbidden.
+		bad := `{"card_tier":"simple","subtasks":[` +
+			`{"title":"A","description":"d","depends_on":[1],"tier":"simple"},` +
+			`{"title":"B","description":"d","depends_on":[],"tier":"simple"}]}`
+		_, err := parsePlan(bad)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "depends_on")
+	})
+
+	t.Run("self dep rejected", func(t *testing.T) {
+		bad := `{"card_tier":"simple","subtasks":[{"title":"A","description":"d","depends_on":[0],"tier":"simple"}]}`
+		_, err := parsePlan(bad)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "depends_on")
+	})
+
+	t.Run("empty subtasks rejected", func(t *testing.T) {
+		bad := `{"card_tier":"simple","subtasks":[]}`
+		_, err := parsePlan(bad)
+		require.Error(t, err)
+	})
+
+	t.Run("no JSON at all", func(t *testing.T) {
+		_, err := parsePlan("I could not produce a plan, sorry.")
+		require.Error(t, err)
+	})
+}
+
+func TestPlanPhaseCreatesSubtasks(t *testing.T) {
+	ops := &fakeOps{
+		taskContext: cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body"},
+		createdIDs:  []string{"SUB-1", "SUB-2"},
+	}
+	llmFake := &planLLM{responses: []llm.Response{stopResp(goodPlanJSON, 0.01)}}
+	d := planTestDeps(ops, llmFake)
+
+	o := newRun(d, ops.taskContext)
+	require.NoError(t, runPlan(context.Background(), o))
+
+	require.Len(t, ops.createCardArgs, 2, "two subtasks must be created")
+
+	// Order respects plan order.
+	assert.Equal(t, "First task", ops.createCardArgs[0].title)
+	assert.Equal(t, "Second task", ops.createCardArgs[1].title)
+
+	// Parent set on both.
+	assert.Equal(t, "CARD-1", ops.createCardArgs[0].parent)
+	assert.Equal(t, "CARD-1", ops.createCardArgs[1].parent)
+
+	// First has no deps; second depends on the FIRST CARD'S returned ID.
+	assert.Empty(t, ops.createCardArgs[0].dependsOn)
+	assert.Equal(t, []string{"SUB-1"}, ops.createCardArgs[1].dependsOn)
+
+	// Run struct carries the resolved subtask refs and the card tier.
+	require.Len(t, o.subtasks, 2)
+	assert.Equal(t, "SUB-1", o.subtasks[0].ID)
+	assert.Equal(t, "SUB-2", o.subtasks[1].ID)
+	assert.Equal(t, []string{"SUB-1"}, o.subtasks[1].DependsOnIDs)
+	assert.Equal(t, "moderate", o.cardTier)
+
+	// Usage was reported and budget spent.
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "ReportUsage:CARD-1"), 0)
+	assert.InDelta(t, 0.01, o.ledger.Spent(), 1e-9)
+}
+
+func TestPlanPhaseRepairLoop(t *testing.T) {
+	ops := &fakeOps{
+		taskContext: cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body"},
+		createdIDs:  []string{"SUB-1"},
+	}
+	// First response is junk (no JSON); second is a valid one-subtask plan.
+	valid := `{"card_tier":"simple","subtasks":[{"title":"Only","description":"d","depends_on":[],"tier":"simple"}]}`
+	llmFake := &planLLM{responses: []llm.Response{
+		stopResp("sorry, thinking out loud, no json here", 0.02),
+		stopResp(valid, 0.03),
+	}}
+	d := planTestDeps(ops, llmFake)
+
+	o := newRun(d, ops.taskContext)
+	require.NoError(t, runPlan(context.Background(), o))
+
+	// Two harness invocations: the original + one repair turn.
+	assert.Len(t, llmFake.tasks, 2, "expected exactly two model calls (original + repair)")
+
+	// The repair prompt must mention the parse error / contract.
+	assert.Contains(t, strings.ToLower(llmFake.tasks[1]), "json")
+
+	// Both turns' usage is spent and reported.
+	assert.InDelta(t, 0.05, o.ledger.Spent(), 1e-9)
+
+	// Subtask created from the repaired plan.
+	require.Len(t, ops.createCardArgs, 1)
+	assert.Equal(t, "Only", ops.createCardArgs[0].title)
+}
+
+func TestPlanPhaseRepairExhausted(t *testing.T) {
+	ops := &fakeOps{
+		taskContext: cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body"},
+	}
+	// Both responses are junk: original + one repair both fail → hard error.
+	llmFake := &planLLM{responses: []llm.Response{
+		stopResp("nope", 0.01),
+		stopResp("still nope", 0.01),
+	}}
+	d := planTestDeps(ops, llmFake)
+
+	o := newRun(d, ops.taskContext)
+	err := runPlan(context.Background(), o)
+	require.Error(t, err)
+
+	// Exactly two model calls — no third attempt.
+	assert.Len(t, llmFake.tasks, 2)
+
+	// No cards created on hard failure.
+	assert.Empty(t, ops.createCardArgs)
+}
+
+func TestPlanPhaseResume(t *testing.T) {
+	ops := &fakeOps{
+		taskContext: cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body"},
+		subtaskStates: []cmclient.SubtaskState{
+			{CardID: "SUB-OLD-1", Title: "Existing subtask alpha", State: "in_progress"},
+			{CardID: "SUB-OLD-2", Title: "Existing subtask beta", State: "todo"},
+		},
+		createdIDs: []string{"SUB-1", "SUB-2"},
+	}
+	llmFake := &planLLM{responses: []llm.Response{stopResp(goodPlanJSON, 0.01)}}
+	d := planTestDeps(ops, llmFake)
+
+	o := newRun(d, ops.taskContext)
+	require.NoError(t, runPlan(context.Background(), o))
+
+	require.NotEmpty(t, llmFake.tasks)
+	prompt := llmFake.tasks[0]
+	assert.Contains(t, prompt, "Existing subtask alpha", "resume prompt must list existing subtask titles")
+	assert.Contains(t, prompt, "Existing subtask beta")
+}
+
+func TestResolveOrchestratorModel(t *testing.T) {
+	reg := planTestRegistry()
+	emit := events.NewEmitter(nil, nil)
+
+	t.Run("card pin honoured when catalog-resolvable", func(t *testing.T) {
+		ops := &fakeOps{}
+		got := resolveOrchestratorModel(context.Background(), reg, emit, ops, "CARD-1",
+			"pinned/model", "payload/model", "default/model")
+		assert.Equal(t, "pinned/model", got)
+	})
+
+	t.Run("unresolvable pin falls back to payload model with warning", func(t *testing.T) {
+		ops := &fakeOps{}
+		got := resolveOrchestratorModel(context.Background(), reg, emit, ops, "CARD-1",
+			"ghost/model", "payload/model", "default/model")
+		assert.Equal(t, "payload/model", got)
+
+		// A warning note must be logged to the card — specifically an AddLog
+		// entry naming the unresolvable pin.
+		var addLogs []string
+
+		for _, c := range ops.recorded() {
+			if strings.HasPrefix(c, "AddLog:") {
+				addLogs = append(addLogs, c)
+			}
+		}
+
+		require.Len(t, addLogs, 1, "exactly one AddLog warning expected")
+		assert.Contains(t, addLogs[0], "ghost/model")
+		assert.Contains(t, addLogs[0], "payload/model")
+	})
+
+	t.Run("no pin uses payload model", func(t *testing.T) {
+		ops := &fakeOps{}
+		got := resolveOrchestratorModel(context.Background(), reg, emit, ops, "CARD-1",
+			"", "payload/model", "default/model")
+		assert.Equal(t, "payload/model", got)
+	})
+
+	t.Run("no pin no payload uses default", func(t *testing.T) {
+		ops := &fakeOps{}
+		got := resolveOrchestratorModel(context.Background(), reg, emit, ops, "CARD-1",
+			"", "", "default/model")
+		assert.Equal(t, "default/model", got)
+	})
+}

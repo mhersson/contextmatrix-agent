@@ -100,6 +100,15 @@ func (r *Registry) Resolve(actor string, role Role) (ModelSpec, error) {
 	return spec, nil
 }
 
+// Has reports whether model is present in the live catalog. The orchestrator
+// uses it to decide whether a card-pinned model slug is resolvable before
+// honouring the pin.
+func (r *Registry) Has(model string) bool {
+	_, ok := r.catalog.Find(model)
+
+	return ok
+}
+
 // fitsWindow reports whether model's context window can hold estTokens. Models
 // absent from the catalog are treated as fitting (fail-open; the harness still
 // enforces context_limit at runtime).

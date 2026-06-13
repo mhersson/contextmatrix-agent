@@ -73,6 +73,7 @@ func TestRunSetPhaseFailureSkipsWork(t *testing.T) {
 
 	o.planFn = func(context.Context) error {
 		planRan = true
+
 		return nil
 	}
 
