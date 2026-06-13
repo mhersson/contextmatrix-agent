@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -16,9 +17,28 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/events"
 	"github.com/mhersson/contextmatrix-agent/internal/harness"
 	"github.com/mhersson/contextmatrix-agent/internal/llm"
+	"github.com/mhersson/contextmatrix-agent/internal/orchestrator"
 	"github.com/mhersson/contextmatrix-agent/internal/redact"
+	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-agent/internal/tools"
 )
+
+// Compile-time proof that the concrete worker collaborators satisfy the
+// orchestrator's consumer-side interfaces. The import edge is one-way (worker
+// imports orchestrator, never the reverse), so these asserts belong here.
+var (
+	_ orchestrator.Ops    = (*cmclient.Client)(nil)
+	_ orchestrator.GitOps = (*Git)(nil)
+)
+
+// runOrchestrator is the FSM-entry seam: production points at orchestrator.Run;
+// tests swap this var to observe the Deps the worker built and script the FSM's
+// outcome without spinning up the real phase loop.
+var runOrchestrator = orchestrator.Run
+
+// reviewAttemptsCap is CM's convention: a card parks after this many review
+// rounds without approval.
+const reviewAttemptsCap = 5
 
 // RunSpec is the container-side contract: populated from CM_* env by the
 // work command.
@@ -109,7 +129,12 @@ func Run(ctx context.Context, spec RunSpec, ops CardOps, client llm.LLM, emit *e
 
 	inbox := NewInbox(
 		spec.Interactive,
-		func() {}, // promote: the inbox closes itself; no extra action here
+		func() {
+			// Promote: the inbox closes itself (Wait returns ErrInboxClosed), so
+			// the linear loop ends and the worker bridges to the phase loop. Log
+			// the hand-off so the run record shows the mid-run mode switch.
+			slog.Info("promote frame received; bridging to orchestrator after linear run", "card", spec.CardID)
+		},
 		func() {
 			// Uniform across modes: the host holds the container's stdin
 			// attach open for the container's whole life, so end_session or
@@ -153,7 +178,20 @@ func Run(ctx context.Context, spec RunSpec, ops CardOps, client llm.LLM, emit *e
 	// 5: model resolution.
 	model := resolveModel(ctx, client, emit, spec)
 
-	// 6: registry rooted at ws.
+	// Autonomous cards skip the linear harness entirely and run the phase loop.
+	// The heartbeat goroutine (started above on runCtx) covers every phase; the
+	// FSM context is runCtx, so an end_session frame cancels it mid-phase.
+	if !spec.Interactive {
+		return runFSM(ctx, runCtx, fsmArgs{
+			ops: ops, git: git, client: client, emit: emit,
+			spec: spec, tcx: tcx, branch: branchName,
+			ws: ws, endSession: &endSession,
+		})
+	}
+
+	// 6: registry rooted at ws. keep in sync with writeTools() (the FSM's
+	// model-facing toolset); the byte-for-byte linear contract forbids
+	// refactoring this inline list to call it.
 	reg := tools.NewRegistry(
 		tools.NewReadTool(ws),
 		tools.NewEditTool(ws),
@@ -179,6 +217,17 @@ func Run(ctx context.Context, spec RunSpec, ops CardOps, client llm.LLM, emit *e
 		RedactToolOutput:   red.Apply,
 		ToolOutputMaxBytes: spec.ToolOutputMax,
 	})
+
+	// Promote bridge: a promote frame arrived mid-HITL and the run ended by the
+	// inbox closing (not by end_session). Hand off to the phase loop, entering at
+	// the persisted phase (empty -> plan; the planner sees whatever HITL pushed).
+	if inbox.Promoted() && !endSession.Load() {
+		return runFSM(ctx, runCtx, fsmArgs{
+			ops: ops, git: git, client: client, emit: emit,
+			spec: spec, tcx: tcx, branch: branchName,
+			ws: ws, endSession: &endSession,
+		})
+	}
 
 	// 9: finalize on the PARENT ctx — runCtx may be canceled by end_session.
 	return finalize(ctx, finalizeArgs{
@@ -296,6 +345,216 @@ func emitModelFallback(emit *events.Emitter, spec RunSpec) {
 		"requested": spec.Model,
 		"using":     spec.DefaultModel,
 	})
+}
+
+// fsmArgs bundles what runFSM needs. ctx is the PARENT context (used for the
+// graceful finalize after a canceled run); runCtx is the run-scoped context an
+// end_session frame cancels — the FSM runs under it.
+type fsmArgs struct {
+	ops        CardOps
+	git        *Git
+	client     llm.LLM
+	emit       *events.Emitter
+	spec       RunSpec
+	tcx        cmclient.TaskContext
+	branch     string
+	ws         string
+	endSession *atomic.Bool
+}
+
+// runFSM drives the orchestrator phase loop for an autonomous (or promoted) card
+// and maps its outcome to a worker Result. The heartbeat goroutine and run
+// context are owned by Run; runFSM never starts or stops them. Token usage is
+// reported per-phase by the orchestrator, so the park paths here do not re-report.
+//
+// Error mapping (spec §3.2):
+//   - nil: the FSM completed the card (it called CompleteTask itself in done) ->
+//     graceful "completed", no extra CompleteTask here.
+//   - ReviewParkedError: graceful "completed", card left in review, NO
+//     CompleteTask and NO release — a human picks it up from review.
+//   - BudgetExceededError: push WIP, release the claim, return the error
+//     (non-zero exit; serve emits the failed callback).
+//   - ctx.Err() (end_session/kill): C1 graceful path — push WIP, release,
+//     exit 0; the persisted phase stays for a later resume.
+//   - any other error: release the claim and return it.
+func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, error) {
+	d := orchestrator.Deps{
+		Ops:        ops2orchestrator(a.ops),
+		Git:        a.git,
+		PR:         NewPRCreator(a.ws, a.spec.GitToken),
+		Client:     a.client,
+		Emit:       a.emit,
+		Registry:   buildRegistry(runCtx, a.client, a.spec),
+		WriteTools: tools.NewRegistry(writeTools(a.ws, a.spec.BashTimeoutMax)...),
+		ReadTools:  tools.NewReadOnlyRegistry(a.ws),
+		Cfg: orchestrator.Config{
+			Project:           a.spec.Project,
+			CardID:            a.spec.CardID,
+			Branch:            a.branch,
+			BaseBranch:        a.spec.BaseBranch,
+			AgentID:           "cmx-agent-" + strings.ToLower(a.spec.CardID),
+			Workspace:         a.ws,
+			MaxCardCost:       a.spec.MaxCardCost,
+			PriceHeadroom:     a.spec.SelectorPriceHeadroom,
+			PayloadModel:      a.spec.Model,
+			DefaultModel:      a.spec.DefaultModel,
+			MaxTurns:          a.spec.MaxTurns,
+			ToolOutputMax:     a.spec.ToolOutputMax,
+			ReviewAttemptsCap: reviewAttemptsCap,
+		},
+	}
+
+	err := runOrchestrator(runCtx, d)
+
+	return mapFSMResult(ctx, a, err)
+}
+
+// mapFSMResult turns the orchestrator's terminal error into the worker outcome
+// per the error-mapping contract. Split out for direct unit coverage.
+func mapFSMResult(ctx context.Context, a fsmArgs, err error) (Result, error) {
+	switch {
+	case err == nil:
+		// The done phase completed the card itself; nothing more to do.
+		return Result{Reason: "completed"}, nil
+
+	case isReviewParked(err):
+		// Parked, not failed: the card stays in review for a human. No
+		// CompleteTask, no release.
+		slog.Info("review parked; leaving card in review", "card", a.spec.CardID)
+
+		return Result{Reason: "completed"}, nil
+
+	case isBudgetExceeded(err):
+		// Push the partial work so a human (or resume) can pick it up, then fail.
+		// The budget numbers are already logged by the orchestrator, and usage was
+		// reported per-phase as it was spent; release the claim and surface the
+		// error so serve emits the failed callback.
+		pushWIP(ctx, a)
+		releaseQuietly(ctx, a.ops, a.spec.CardID)
+
+		return Result{Reason: "error"}, fmt.Errorf("orchestrator: %w", err)
+
+	case a.endSession.Load() || ctx.Err() != nil || errorsIsCanceled(err):
+		// end_session / kill mid-FSM: the C1 graceful park. Push whatever WIP
+		// exists, release the claim, exit 0. Usage was already reported per-phase
+		// by the orchestrator; the persisted phase stays so a later run resumes
+		// from it.
+		pushWIP(ctx, a)
+		releaseQuietly(ctx, a.ops, a.spec.CardID)
+
+		return Result{Reason: "end_session"}, nil
+
+	default:
+		releaseQuietly(ctx, a.ops, a.spec.CardID)
+
+		return Result{Reason: "error"}, fmt.Errorf("orchestrator: %w", err)
+	}
+}
+
+// isReviewParked reports whether err is the orchestrator's review-park sentinel.
+func isReviewParked(err error) bool {
+	var rp *orchestrator.ReviewParkedError
+
+	return errors.As(err, &rp)
+}
+
+// isBudgetExceeded reports whether err is the orchestrator's budget-ceiling sentinel.
+func isBudgetExceeded(err error) bool {
+	var be *orchestrator.BudgetExceededError
+
+	return errors.As(err, &be)
+}
+
+// errorsIsCanceled reports whether err is (or wraps) context cancellation, which
+// is what the FSM returns when an end_session frame cancels its run context.
+func errorsIsCanceled(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+// pushWIP commits any dirty tree and pushes the card branch on the PARENT ctx
+// (runCtx may already be canceled). Best-effort: a failure is logged, not fatal —
+// the park/fail outcome must still surface.
+func pushWIP(ctx context.Context, a fsmArgs) {
+	dirty, err := a.git.CommitIfDirty(ctx, a.tcx.Title, a.spec.CardID)
+	if err != nil {
+		slog.Warn("WIP commit failed", "card", a.spec.CardID, "error", err)
+
+		return
+	}
+
+	if !dirty {
+		return
+	}
+
+	if err := a.git.Push(ctx, a.branch); err != nil {
+		slog.Warn("WIP push failed", "card", a.spec.CardID, "error", err)
+
+		return
+	}
+
+	if err := a.ops.ReportPush(ctx, a.spec.CardID, a.branch, ""); err != nil {
+		slog.Warn("report WIP push failed", "card", a.spec.CardID, "error", err)
+	}
+}
+
+// releaseQuietly releases the claim, logging a failure rather than masking the
+// run outcome.
+func releaseQuietly(ctx context.Context, ops CardOps, cardID string) {
+	if err := ops.ReleaseCard(ctx, cardID); err != nil {
+		slog.Warn("release card failed", "card", cardID, "error", err)
+	}
+}
+
+// ops2orchestrator widens the worker's narrow CardOps to the orchestrator's Ops
+// surface. In production ops is *cmclient.Client, which satisfies both; the
+// assertion is comma-ok so a test fake that only implements CardOps yields a nil
+// Ops (harmless: such tests swap runOrchestrator and never touch Deps.Ops).
+func ops2orchestrator(ops CardOps) orchestrator.Ops {
+	if oo, ok := ops.(orchestrator.Ops); ok {
+		return oo
+	}
+
+	return nil
+}
+
+// writeTools is the full model-facing toolset rooted at ws, matching the linear
+// path's registry so the FSM coder has the same capabilities.
+func writeTools(ws string, bashTimeoutMax int) []tools.Tool {
+	return []tools.Tool{
+		tools.NewReadTool(ws),
+		tools.NewEditTool(ws),
+		tools.NewWriteTool(ws),
+		tools.NewGrepTool(ws),
+		tools.NewGlobTool(ws),
+		tools.NewGitTool(ws),
+		tools.NewBashTool(ws).WithMaxTimeout(bashTimeoutMax),
+	}
+}
+
+// buildRegistry assembles the model registry the FSM selects from: the embedded
+// capabilities baseline (with its calibrated floor) plus the embedded priors,
+// backed by the live OpenRouter catalog. A catalog-fetch failure degrades to an
+// empty catalog — selection still works off priors/capabilities, and the
+// harness enforces context limits at runtime.
+func buildRegistry(ctx context.Context, client llm.LLM, spec RunSpec) *registry.Registry {
+	var cat llm.Catalog
+
+	if fetcher, ok := client.(catalogFetcher); ok {
+		if fetched, err := fetcher.FetchCatalog(ctx); err == nil {
+			cat = fetched
+		} else {
+			slog.Warn("catalog fetch failed; selecting from priors/capabilities only", "error", err)
+		}
+	}
+
+	caps, meta := registry.DefaultCapabilities()
+
+	return registry.NewRegistryWithCapabilities(nil, spec.DefaultModel, cat, caps).
+		WithSelection(registry.Selection{
+			Priors:        registry.DefaultPriors(),
+			Floor:         meta.Floor,
+			PriceHeadroom: spec.SelectorPriceHeadroom,
+		})
 }
 
 type finalizeArgs struct {

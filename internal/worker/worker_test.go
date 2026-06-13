@@ -2,14 +2,16 @@ package worker
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -19,6 +21,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/frames"
 	"github.com/mhersson/contextmatrix-agent/internal/harness"
 	"github.com/mhersson/contextmatrix-agent/internal/llm"
+	"github.com/mhersson/contextmatrix-agent/internal/orchestrator"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -69,8 +72,14 @@ func (s *scriptedLLM) next(ctx context.Context) (llm.Response, error) {
 	return r, nil
 }
 
-func toolCall(id, name, args string) llm.ToolCall {
-	return llm.ToolCall{ID: id, Type: "function", Function: llm.FunctionCall{Name: name, Arguments: args}}
+// calls reports how many responses have been served, under the same lock that
+// guards the write in next() so -race stays clean if the read is ever reordered
+// relative to Run's return.
+func (s *scriptedLLM) calls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.i
 }
 
 // --- fake CardOps recorder -------------------------------------------------
@@ -217,55 +226,43 @@ func remoteHasBranch(t *testing.T, remote, branch string) bool {
 	return strings.Contains(string(out), branch)
 }
 
-// --- Test 1: autonomous happy path -----------------------------------------
+// --- Test 1: autonomous plumbing -> FSM -------------------------------------
 
-func TestRunAutonomousHappyPath(t *testing.T) {
-	t.Parallel()
-
+// TestRunAutonomousPlumbing verifies the shared setup runs before the FSM for an
+// autonomous card: clone + branch + claim + context, in order, then hand-off to
+// the orchestrator. The FSM owns completion (done phase), so on a nil return the
+// worker reports a graceful "completed" without calling CompleteTask itself.
+func TestRunAutonomousPlumbing(t *testing.T) {
 	remote := setupBareRemote(t)
 	wsParent := t.TempDir()
 	ops := newFakeOps()
 
-	// One write-tool call against the real registry, then a natural stop.
-	llmClient := &scriptedLLM{responses: []llm.Response{
-		{
-			ToolCalls: []llm.ToolCall{toolCall("1", "write", `{"path":"feature.txt","content":"done\n"}`)},
-			Usage:     llm.Usage{PromptTokens: 100, CompletionTokens: 40, Cost: 0.001},
-		},
-		{Content: "All done: added feature.txt", FinishReason: "stop", Usage: llm.Usage{PromptTokens: 50, CompletionTokens: 10}},
-	}}
+	var seenWorkspace string
+
+	swapRunOrchestrator(t, func(_ context.Context, d orchestrator.Deps) error {
+		seenWorkspace = d.Cfg.Workspace
+
+		return nil
+	})
 
 	emit := events.NewEmitter(io.Discard, io.Discard)
 
-	res, err := Run(context.Background(), baseSpec(t, remote, wsParent), ops, llmClient, emit, openStdin(t))
+	res, err := Run(context.Background(), baseSpec(t, remote, wsParent), ops, &scriptedLLM{}, emit, openStdin(t))
 	require.NoError(t, err)
 	assert.Equal(t, "completed", res.Reason)
 
-	// Call order: claim before context before push/usage/complete.
+	// Claim before context, both before the FSM ran.
 	order := ops.ops()
+	require.GreaterOrEqual(t, len(order), 2)
 	assert.Equal(t, "ClaimCard", order[0])
 	assert.Equal(t, "GetTaskContext", order[1])
 
-	// Branch landed on the remote.
-	assert.True(t, remoteHasBranch(t, remote, "cm/cmx-001"))
+	// The branch was cut and the workspace clone exists, wired into the Deps.
+	assert.Equal(t, filepath.Join(wsParent, "cmx-001"), seenWorkspace)
 
-	// ReportPush carried the branch.
-	push, ok := ops.find("ReportPush")
-	require.True(t, ok, "ReportPush not called")
-	assert.Equal(t, "cm/cmx-001", push.args[1])
-
-	// ReportUsage carried the accumulated token totals.
-	usage, ok := ops.find("ReportUsage")
-	require.True(t, ok, "ReportUsage not called")
-	assert.Equal(t, int64(150), usage.args[2])
-	assert.Equal(t, int64(50), usage.args[3])
-
-	// CompleteTask called with a summary from the model output.
-	complete, ok := ops.find("CompleteTask")
-	require.True(t, ok, "CompleteTask not called")
-	assert.Equal(t, "All done: added feature.txt", complete.args[1])
-
-	// No release on the happy path.
+	// The worker does not complete the card on the FSM happy path — the done
+	// phase does — and does not release a successful run.
+	assert.Equal(t, 0, ops.count("CompleteTask"))
 	assert.Equal(t, 0, ops.count("ReleaseCard"))
 }
 
@@ -307,20 +304,22 @@ func TestRunHITLEndSession(t *testing.T) {
 	assert.Equal(t, 1, ops.count("ReleaseCard"))
 }
 
-// --- Test 3: harness error -------------------------------------------------
+// --- Test 3: FSM generic error ----------------------------------------------
 
-func TestRunHarnessError(t *testing.T) {
-	t.Parallel()
-
+// TestRunFSMGenericError: a non-sentinel FSM error releases the claim and
+// surfaces as a non-zero exit, without completing the card.
+func TestRunFSMGenericError(t *testing.T) {
 	remote := setupBareRemote(t)
 	wsParent := t.TempDir()
 	ops := newFakeOps()
 
-	llmClient := &scriptedLLM{err: fmt.Errorf("model exploded")}
+	swapRunOrchestrator(t, func(_ context.Context, _ orchestrator.Deps) error {
+		return fmt.Errorf("model exploded")
+	})
 
 	emit := events.NewEmitter(io.Discard, io.Discard)
 
-	res, err := Run(context.Background(), baseSpec(t, remote, wsParent), ops, llmClient, emit, openStdin(t))
+	res, err := Run(context.Background(), baseSpec(t, remote, wsParent), ops, &scriptedLLM{}, emit, openStdin(t))
 	require.Error(t, err)
 	require.ErrorContains(t, err, "model exploded")
 	assert.Equal(t, "error", res.Reason)
@@ -331,36 +330,27 @@ func TestRunHarnessError(t *testing.T) {
 
 // --- Test 4: model fallback ------------------------------------------------
 
+// TestRunModelFallback verifies model resolution (step 5, shared by both paths)
+// emits the catalog-fallback warning when the requested model is absent. The FSM
+// seam is stubbed to a no-op completion so the assertion isolates resolution.
 func TestRunModelFallback(t *testing.T) {
-	t.Parallel()
-
 	remote := setupBareRemote(t)
 	wsParent := t.TempDir()
 	ops := newFakeOps()
 
-	// A real llm.Client pointed at a canned catalog + chat server. The catalog
-	// lists a different model than spec.Model, forcing the fallback path. The
-	// chat endpoint returns a trivial natural-stop so the harness completes.
-	var gotModel string
+	swapRunOrchestrator(t, func(context.Context, orchestrator.Deps) error { return nil })
 
+	// A real llm.Client pointed at a canned catalog: it lists a different model
+	// than spec.Model, forcing resolveModel's fallback path.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/models":
+		if r.URL.Path == "/models" {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"data":[{"id":"default/model","context_length":128000,"pricing":{"prompt":"0","completion":"0"},"supported_parameters":["tools"]}]}`))
-		case "/chat/completions":
-			var req struct {
-				Model string `json:"model"`
-			}
 
-			_ = json.NewDecoder(r.Body).Decode(&req)
-			gotModel = req.Model
-			// The harness streams (SendStream): respond as SSE ending in [DONE].
-			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = io.WriteString(w, "data: {\"model\":\"default/model\",\"choices\":[{\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\ndata: [DONE]\n")
-		default:
-			http.NotFound(w, r)
+			return
 		}
+
+		http.NotFound(w, r)
 	}))
 	defer srv.Close()
 
@@ -377,10 +367,7 @@ func TestRunModelFallback(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "completed", res.Reason)
 
-	// The harness ran with the default model, not the requested one.
-	assert.Equal(t, "default/model", gotModel)
-
-	// A warning state-change event was emitted.
+	// A warning state-change event was emitted naming the requested model.
 	assert.Contains(t, transcript.String(), "model not in catalog, using default")
 	assert.Contains(t, transcript.String(), "missing/model")
 }
@@ -398,79 +385,42 @@ func TestRunHeartbeats(t *testing.T) {
 	wsParent := t.TempDir()
 	ops := newFakeOps()
 
-	// A slow run: each model call sleeps so several heartbeat ticks fire.
-	llmClient := &scriptedLLM{
-		preDelay:  60 * time.Millisecond,
-		responses: []llm.Response{{Content: "done", FinishReason: "stop"}},
-	}
+	// A slow FSM run: the seam blocks long enough for several heartbeat ticks to
+	// fire, proving the heartbeat goroutine covers the whole FSM run.
+	swapRunOrchestrator(t, func(context.Context, orchestrator.Deps) error {
+		time.Sleep(60 * time.Millisecond)
+
+		return nil
+	})
 
 	emit := events.NewEmitter(io.Discard, io.Discard)
 
-	_, err := Run(context.Background(), baseSpec(t, remote, wsParent), ops, llmClient, emit, openStdin(t))
+	_, err := Run(context.Background(), baseSpec(t, remote, wsParent), ops, &scriptedLLM{}, emit, openStdin(t))
 	require.NoError(t, err)
 
 	assert.GreaterOrEqual(t, ops.count("Heartbeat"), 2, "expected at least two heartbeats during a slow run")
 }
 
-// --- Test 6: clean tree ----------------------------------------------------
+// --- Test 6: clean tree on FSM completion -----------------------------------
 
+// TestRunCleanTree: the FSM completes with no working-tree changes (nil return,
+// clean tree). The worker reports completed and does not push or complete —
+// pushes and completion are the FSM's responsibility.
 func TestRunCleanTree(t *testing.T) {
-	t.Parallel()
-
 	remote := setupBareRemote(t)
 	wsParent := t.TempDir()
 	ops := newFakeOps()
 
-	// Model makes no edits and stops immediately → no commit, no push.
-	llmClient := &scriptedLLM{responses: []llm.Response{
-		{Content: "Nothing to change", FinishReason: "stop"},
-	}}
+	swapRunOrchestrator(t, func(context.Context, orchestrator.Deps) error { return nil })
 
 	emit := events.NewEmitter(io.Discard, io.Discard)
 
-	res, err := Run(context.Background(), baseSpec(t, remote, wsParent), ops, llmClient, emit, openStdin(t))
+	res, err := Run(context.Background(), baseSpec(t, remote, wsParent), ops, &scriptedLLM{}, emit, openStdin(t))
 	require.NoError(t, err)
 	assert.Equal(t, "completed", res.Reason)
 
-	assert.Equal(t, 0, ops.count("ReportPush"), "no push on a clean tree")
-	assert.False(t, remoteHasBranch(t, remote, "cm/cmx-001"), "no branch pushed on a clean tree")
-	assert.Equal(t, 1, ops.count("CompleteTask"), "completion still reported on a clean tree")
-}
-
-// --- Test 7: autonomous + end_session mid-run --------------------------------
-
-func TestRunAutonomousEndSessionMidRun(t *testing.T) {
-	t.Parallel()
-
-	remote := setupBareRemote(t)
-	wsParent := t.TempDir()
-	ops := newFakeOps()
-
-	// The model turn is slow; the end_session frame arrives mid-run and must
-	// abort it: finalize WITHOUT CompleteTask, release the claim.
-	llmClient := &scriptedLLM{
-		preDelay:  500 * time.Millisecond,
-		responses: []llm.Response{{Content: "would have finished", FinishReason: "stop"}},
-	}
-
-	pr, pw := io.Pipe()
-
-	t.Cleanup(func() { _ = pw.Close() })
-
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-
-		_ = frames.Write(pw, frames.Frame{Type: frames.TypeEndSession})
-	}()
-
-	emit := events.NewEmitter(io.Discard, io.Discard)
-
-	res, err := Run(context.Background(), baseSpec(t, remote, wsParent), ops, llmClient, emit, pr)
-	require.NoError(t, err)
-	assert.Equal(t, "end_session", res.Reason)
-
-	assert.Equal(t, 0, ops.count("CompleteTask"))
-	assert.Equal(t, 1, ops.count("ReleaseCard"))
+	assert.Equal(t, 0, ops.count("ReportPush"), "worker does not push on the FSM happy path")
+	assert.False(t, remoteHasBranch(t, remote, "cm/cmx-001"), "no branch pushed by the worker")
 }
 
 // --- shared test plumbing --------------------------------------------------
@@ -511,6 +461,235 @@ func (b *syncBuffer) String() string {
 	defer b.mu.Unlock()
 
 	return string(b.buf)
+}
+
+// --- FSM entry / promote bridge --------------------------------------------
+
+// swapRunOrchestrator replaces the package-level runOrchestrator seam for the
+// duration of the test and restores it on cleanup. fn observes the Deps the
+// worker built and decides the FSM's outcome.
+func swapRunOrchestrator(t *testing.T, fn func(context.Context, orchestrator.Deps) error) {
+	t.Helper()
+
+	prev := runOrchestrator
+	runOrchestrator = fn
+
+	t.Cleanup(func() { runOrchestrator = prev })
+}
+
+// TestAutonomousEntersOrchestrator: a non-interactive spec routes to the FSM
+// seam and never drives the linear harness loop. Swaps the package-level
+// runOrchestrator var, so it must not run in parallel.
+func TestAutonomousEntersOrchestrator(t *testing.T) {
+	remote := setupBareRemote(t)
+	wsParent := t.TempDir()
+	ops := newFakeOps()
+
+	var fsmRan atomic.Bool
+
+	swapRunOrchestrator(t, func(_ context.Context, _ orchestrator.Deps) error {
+		fsmRan.Store(true)
+
+		return nil
+	})
+
+	// If the linear harness ran, this scripted call would be consumed.
+	llmClient := &scriptedLLM{responses: []llm.Response{
+		{Content: "linear path ran", FinishReason: "stop"},
+	}}
+
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	res, err := Run(context.Background(), baseSpec(t, remote, wsParent), ops, llmClient, emit, openStdin(t))
+	require.NoError(t, err)
+	assert.Equal(t, "completed", res.Reason)
+
+	assert.True(t, fsmRan.Load(), "autonomous spec must enter the orchestrator")
+	assert.Equal(t, 0, llmClient.calls(), "linear harness loop must not run for an autonomous card")
+}
+
+// TestHITLStaysLinear: an interactive spec with no promote uses the linear
+// path only; the FSM seam is never invoked. Swaps runOrchestrator to detect any
+// stray FSM entry, so it must not run in parallel.
+func TestHITLStaysLinear(t *testing.T) {
+	remote := setupBareRemote(t)
+	wsParent := t.TempDir()
+	ops := newFakeOps()
+
+	var fsmRan atomic.Bool
+
+	swapRunOrchestrator(t, func(_ context.Context, _ orchestrator.Deps) error {
+		fsmRan.Store(true)
+
+		return nil
+	})
+
+	// The model parks awaiting a human turn; an end_session (not a promote) ends
+	// the run via the linear finalize, so the FSM is never reached.
+	llmClient := &scriptedLLM{responses: []llm.Response{
+		{Content: "linear done", FinishReason: "stop"},
+	}}
+
+	spec := baseSpec(t, remote, wsParent)
+	spec.Interactive = true
+
+	pr, pw := io.Pipe()
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+
+		_ = frames.Write(pw, frames.Frame{Type: frames.TypeEndSession})
+	}()
+
+	t.Cleanup(func() { _ = pw.Close() })
+
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	res, err := Run(context.Background(), spec, ops, llmClient, emit, pr)
+	require.NoError(t, err)
+	assert.Equal(t, "end_session", res.Reason)
+
+	assert.False(t, fsmRan.Load(), "no promote: must stay on the linear path")
+	assert.GreaterOrEqual(t, llmClient.calls(), 1, "linear harness loop must run")
+}
+
+// TestPromoteBridge: an interactive run that receives a promote frame mid-run
+// hands off to the FSM after the linear harness returns (not via end_session).
+func TestPromoteBridge(t *testing.T) {
+	remote := setupBareRemote(t)
+	wsParent := t.TempDir()
+	ops := newFakeOps()
+
+	var fsmRan atomic.Bool
+
+	swapRunOrchestrator(t, func(_ context.Context, _ orchestrator.Deps) error {
+		fsmRan.Store(true)
+
+		return nil
+	})
+
+	// The model parks awaiting a human turn; the promote frame closes the inbox
+	// so the linear loop returns, then the worker bridges to the FSM.
+	llmClient := &scriptedLLM{responses: []llm.Response{
+		{Content: "awaiting guidance", FinishReason: "stop"},
+	}}
+
+	spec := baseSpec(t, remote, wsParent)
+	spec.Interactive = true
+
+	pr, pw := io.Pipe()
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+
+		_ = frames.Write(pw, frames.Frame{Type: frames.TypePromote})
+	}()
+
+	t.Cleanup(func() { _ = pw.Close() })
+
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	res, err := Run(context.Background(), spec, ops, llmClient, emit, pr)
+	require.NoError(t, err)
+	assert.Equal(t, "completed", res.Reason)
+
+	// The bridge calls runFSM synchronously before Run returns, so the seam has
+	// definitively run by now — no polling.
+	require.True(t, fsmRan.Load(), "promote bridge must enter the FSM")
+}
+
+// TestReviewParkedMapsToCompleted: a ReviewParkedError from the FSM is a
+// graceful completion — exit-0 path, completed reason, no CompleteTask call.
+func TestReviewParkedMapsToCompleted(t *testing.T) {
+	remote := setupBareRemote(t)
+	wsParent := t.TempDir()
+	ops := newFakeOps()
+
+	swapRunOrchestrator(t, func(_ context.Context, _ orchestrator.Deps) error {
+		return &orchestrator.ReviewParkedError{Findings: "outstanding nits"}
+	})
+
+	llmClient := &scriptedLLM{}
+
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	res, err := Run(context.Background(), baseSpec(t, remote, wsParent), ops, llmClient, emit, openStdin(t))
+	require.NoError(t, err)
+	assert.Equal(t, "completed", res.Reason)
+
+	assert.Equal(t, 0, ops.count("CompleteTask"), "review park must NOT complete the card")
+	assert.Equal(t, 0, ops.count("ReleaseCard"), "review park leaves the card in review")
+}
+
+// TestBudgetMapsToFailed: a BudgetExceededError pushes WIP, releases the claim,
+// and surfaces a non-nil error (serve maps the error to the failed callback).
+func TestBudgetMapsToFailed(t *testing.T) {
+	remote := setupBareRemote(t)
+	wsParent := t.TempDir()
+	ops := newFakeOps()
+
+	swapRunOrchestrator(t, func(_ context.Context, d orchestrator.Deps) error {
+		// Dirty the tree so the WIP commit/push path has something to push.
+		require.NoError(t, os.WriteFile(filepath.Join(d.Cfg.Workspace, "wip.txt"), []byte("partial\n"), 0o644))
+
+		return &orchestrator.BudgetExceededError{Spent: 1.50, Max: 1.00}
+	})
+
+	llmClient := &scriptedLLM{}
+
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	res, err := Run(context.Background(), baseSpec(t, remote, wsParent), ops, llmClient, emit, openStdin(t))
+	require.Error(t, err)
+	assert.Equal(t, "error", res.Reason)
+
+	assert.True(t, remoteHasBranch(t, remote, "cm/cmx-001"), "budget breach pushes WIP")
+	assert.GreaterOrEqual(t, ops.count("ReportPush"), 1, "WIP push reported")
+	assert.Equal(t, 1, ops.count("ReleaseCard"), "claim released on budget breach")
+	assert.Equal(t, 0, ops.count("CompleteTask"))
+	// Usage is reported per-phase by the orchestrator as it spends, and the
+	// budget numbers are logged by its execute loop (see TestRunBudgetBreachParks);
+	// the worker re-reports neither on the park path.
+}
+
+// TestEndSessionMidFSM: an end_session frame cancels the run context while the
+// FSM is in a phase; the orchestrator returns ctx.Err() and the worker takes
+// the C1 graceful path (push WIP, report usage, release, exit 0).
+func TestEndSessionMidFSM(t *testing.T) {
+	remote := setupBareRemote(t)
+	wsParent := t.TempDir()
+	ops := newFakeOps()
+
+	swapRunOrchestrator(t, func(ctx context.Context, d orchestrator.Deps) error {
+		// Block until the end_session cancels the run context, then return its
+		// error — exactly what the real FSM does when its ctx is canceled.
+		require.NoError(t, os.WriteFile(filepath.Join(d.Cfg.Workspace, "wip.txt"), []byte("partial\n"), 0o644))
+		<-ctx.Done()
+
+		return ctx.Err()
+	})
+
+	llmClient := &scriptedLLM{}
+
+	pr, pw := io.Pipe()
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+
+		_ = frames.Write(pw, frames.Frame{Type: frames.TypeEndSession})
+	}()
+
+	t.Cleanup(func() { _ = pw.Close() })
+
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	res, err := Run(context.Background(), baseSpec(t, remote, wsParent), ops, llmClient, emit, pr)
+	require.NoError(t, err)
+	assert.Equal(t, "end_session", res.Reason)
+
+	assert.True(t, remoteHasBranch(t, remote, "cm/cmx-001"), "WIP pushed on end_session mid-FSM")
+	assert.Equal(t, 1, ops.count("ReleaseCard"), "claim released on end_session")
+	assert.Equal(t, 0, ops.count("CompleteTask"), "no completion on a parked session")
 }
 
 // --- summaryFrom -----------------------------------------------------------

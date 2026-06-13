@@ -195,78 +195,97 @@ func branchFile(t *testing.T, remote, branch, path string) string {
 	return string(out)
 }
 
-// --- Test: autonomous end-to-end via the real SSE client -------------------
+// --- Test: HITL end-to-end via the real SSE client --------------------------
 
-func TestE2EAutonomousCompletes(t *testing.T) {
+// TestE2EHITLWriteThenEndSessionPushes drives the real linear stack — harness
+// loop, real write tool over a temp workspace, real git against a bare remote,
+// the real SSE client — in interactive mode. The model writes a file on turn 1,
+// parks awaiting a human on turn 2; an end_session frame then triggers the C1
+// finalize: commit the WIP, push the branch, report usage, release. (Autonomous
+// completion is exercised end-to-end against the FSM in the orchestrator suite.)
+func TestE2EHITLWriteThenEndSessionPushes(t *testing.T) {
 	t.Parallel()
 
 	remote := setupBareRemote(t)
 	wsParent := t.TempDir()
 	ops := newFakeOps()
 
-	const (
-		writePrompt, writeCompletion = 100, 40
-		stopPrompt, stopCompletion   = 50, 10
-		summary                      = "Added hello.txt as requested."
-	)
+	const writePrompt, writeCompletion = 100, 40
 
-	stub, stubURL := newStubOpenRouter(t,
+	_, stubURL := newStubOpenRouter(t,
 		writeToolBody("call_1", `{"path":"hello.txt","content":"hello from the model\n"}`, writePrompt, writeCompletion),
-		stopBodyUsage(summary, stopPrompt, stopCompletion),
+		stopBodyUsage("Done; awaiting next instruction.", 50, 10),
 	)
 
 	client := llm.NewClient("test-key", llm.WithBaseURL(stubURL))
+
+	spec := baseSpec(t, remote, wsParent)
+	spec.Interactive = true
+
+	pr, pw := io.Pipe()
+
+	t.Cleanup(func() { _ = pw.Close() })
 
 	var transcript syncBuffer
 
 	emit := events.NewEmitter(io.Discard, &transcript)
 
-	res, err := Run(context.Background(), baseSpec(t, remote, wsParent), ops, client, emit, openStdin(t))
-	require.NoError(t, err)
-	assert.Equal(t, "completed", res.Reason)
+	type result struct {
+		res Result
+		err error
+	}
 
-	// Two turns served: the write turn and the stop turn.
-	assert.Equal(t, 2, stub.requests())
+	done := make(chan result, 1)
 
-	// Call order: claim, then context; heartbeats (>= 0) may appear after.
+	go func() {
+		res, err := Run(context.Background(), spec, ops, client, emit, pr)
+		done <- result{res, err}
+	}()
+
+	// Turn 1 writes the file then turn 2 parks at awaiting_human.
+	require.Eventually(t, func() bool {
+		return strings.Contains(transcript.String(), `"state":"awaiting_human"`)
+	}, 5*time.Second, 10*time.Millisecond, "run never parked at awaiting_human")
+
+	// End the session while parked: the linear finalize commits + pushes the WIP.
+	require.NoError(t, frames.Write(pw, frames.Frame{Type: frames.TypeEndSession}))
+
+	var got result
+
+	select {
+	case got = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not exit after end_session")
+	}
+
+	require.NoError(t, got.err)
+	assert.Equal(t, "end_session", got.res.Reason)
+
+	// Claim then context.
 	order := ops.ops()
 	require.GreaterOrEqual(t, len(order), 2)
 	assert.Equal(t, "ClaimCard", order[0])
 	assert.Equal(t, "GetTaskContext", order[1])
 
-	// The real write tool landed hello.txt, committed and pushed to the remote.
+	// The real write tool landed hello.txt; the WIP was committed and pushed.
 	branch := "cm/cmx-001"
 	assert.True(t, remoteHasBranch(t, remote, branch))
 	assert.Equal(t, "hello from the model\n", branchFile(t, remote, branch, "hello.txt"))
 
-	// ReportPush carried the branch.
 	push, ok := ops.find("ReportPush")
 	require.True(t, ok, "ReportPush not called")
 	assert.Equal(t, branch, push.args[1])
 
-	// ReportUsage carried the summed token totals from both scripted usage frames.
-	usage, ok := ops.find("ReportUsage")
-	require.True(t, ok, "ReportUsage not called")
-	assert.Equal(t, int64(writePrompt+stopPrompt), usage.args[2])
-	assert.Equal(t, int64(writeCompletion+stopCompletion), usage.args[3])
+	// end_session releases the claim and never completes the card.
+	assert.Equal(t, 0, ops.count("CompleteTask"))
+	assert.Equal(t, 1, ops.count("ReleaseCard"))
 
-	// CompleteTask with a non-empty summary derived from the model output.
-	complete, ok := ops.find("CompleteTask")
-	require.True(t, ok, "CompleteTask not called")
-	require.Len(t, complete.args, 2)
-	assert.NotEmpty(t, complete.args[1])
-	assert.Equal(t, summary, complete.args[1])
-
-	// No release on the happy path.
-	assert.Equal(t, 0, ops.count("ReleaseCard"))
-
-	// The JSONL transcript records each event kind plus a terminal stop=done.
+	// The JSONL transcript records the real event kinds.
 	tx := transcript.String()
 	assert.Contains(t, tx, `"kind":"model_request"`)
 	assert.Contains(t, tx, `"kind":"tool_call"`)
 	assert.Contains(t, tx, `"kind":"usage"`)
 	assert.Contains(t, tx, `"kind":"state_change"`)
-	assert.Contains(t, tx, `"stop":"done"`)
 }
 
 // --- Test: HITL round-trip then end_session releases -----------------------
