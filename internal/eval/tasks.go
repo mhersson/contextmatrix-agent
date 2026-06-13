@@ -19,6 +19,7 @@ func DefaultTasks(role string) ([]Task, error) {
 		CoderTask{name: "safecount", fixture: "fixtures/coder/safecount", check: "CGO_ENABLED=1 go test -race ./...", writable: []string{"safecount.go"}},
 		CoderTask{name: "lru", fixture: "fixtures/coder/lru", check: "go test ./...", writable: []string{"lru.go"}},
 		CoderTask{name: "truncate", fixture: "fixtures/coder/truncate", check: "go test ./...", writable: []string{"truncate.go"}},
+		CoderTask{name: "ratelimit", fixture: "fixtures/coder/ratelimit", check: "go test ./...", writable: []string{"ratelimit.go"}},
 	}
 	reviewer := []Task{
 		ReviewerTask{name: "offbyone", fixture: "fixtures/reviewer/offbyone", wantApprove: false, plantedSymbol: "Last"},
