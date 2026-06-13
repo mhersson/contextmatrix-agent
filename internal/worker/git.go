@@ -9,12 +9,16 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/mhersson/contextmatrix-agent/internal/orchestrator"
 	"github.com/mhersson/contextmatrix-agent/internal/tools"
 )
 
-// ErrRebaseConflict is returned by RebaseAutosquash when the rebase encounters
-// a conflict. The repo is left clean (rebase aborted) on this path.
-var ErrRebaseConflict = errors.New("rebase conflict")
+// ErrRebaseConflict is the rebase-conflict sentinel. It aliases
+// orchestrator.ErrRebaseConflict so the orchestrator's integrate phase can match
+// it with errors.Is across the package boundary without importing worker (the
+// import edge is one-way: worker -> orchestrator). RebaseAutosquash returns it
+// with the repo left clean (rebase aborted).
+var ErrRebaseConflict = orchestrator.ErrRebaseConflict
 
 // Git runs code-driven git operations for one card's workspace. Credentials
 // are injected per invocation via an http.extraheader — they never land in

@@ -238,6 +238,42 @@ REVIEW FINDINGS TO FIX
 %s
 `
 
+// prBodyPrompt is the orchestrator-model instruction for writing the pull
+// request body in the integrate phase. The model has read-only tools to inspect
+// the merged branch but writes prose only — no card tools, no git. The body is a
+// human-facing PR description: what changed and why, the plan overview, and the
+// review outcome.
+//
+// The trailing %s slots are filled by writePRBody: parent card title, parent
+// card description, the plan overview (subtask titles), and the review outcome.
+const prBodyPrompt = `You are writing the pull request description for completed, reviewed work. You
+have read-only tools (read, grep, glob) to inspect the branch. Write the PR body
+as Markdown prose — do NOT run git, do NOT modify files.
+
+Structure the body with these sections:
+- "## What" — a concise summary of what this change does.
+- "## Why" — the motivation, grounded in the task below.
+- "## Plan overview" — the subtasks that made up the work (listed below).
+- "## Review" — the review outcome (summarized below).
+
+Be specific and factual. Do not invent changes that are not in the task or plan.
+Keep it tight: a reviewer should grasp the change in under a minute.
+
+TASK
+Title: %s
+
+Description:
+%s
+
+PLAN OVERVIEW (subtasks)
+%s
+
+REVIEW OUTCOME
+%s
+
+Respond with ONLY the Markdown PR body — no surrounding prose, no code fences.
+`
+
 // resumeBlock renders the existing-subtask reuse instruction inserted into the
 // planner prompt on resume. titles is the list of existing subtask titles.
 func resumeBlock(titles []string) string {

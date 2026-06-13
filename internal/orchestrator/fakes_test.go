@@ -46,6 +46,10 @@ type fakeOps struct {
 	// SubtaskStates scripting.
 	subtaskStates    []cmclient.SubtaskState
 	subtaskStatesErr error
+
+	// ReportPush scripting: reportPushURLs captures the pr_url passed on each
+	// call so integrate tests can assert the PR URL flowing through.
+	reportPushURLs []string
 }
 
 // createCardCall is a recorded CreateCard invocation.
@@ -160,6 +164,10 @@ func (f *fakeOps) ReportUsage(_ context.Context, cardID, model string, promptTok
 }
 
 func (f *fakeOps) ReportPush(_ context.Context, cardID, branch, prURL string) error {
+	f.mu.Lock()
+	f.reportPushURLs = append(f.reportPushURLs, prURL)
+	f.mu.Unlock()
+
 	f.record("ReportPush:" + cardID)
 
 	return nil
@@ -204,6 +212,11 @@ type fakeGit struct {
 	// set passed on each call so tests can assert the fixup targeting input.
 	lastCommitTarget string
 	lastCommitPaths  [][]string
+
+	// Integrate-phase scripting.
+	remoteTip      string // RemoteTip return ("" -> plain push path)
+	rebaseErr      error  // RebaseAutosquash return (ErrRebaseConflict -> fallback)
+	mergeBaseValue string // MergeBase return
 }
 
 func (g *fakeGit) record(call string) {
@@ -259,13 +272,13 @@ func (g *fakeGit) Fetch(_ context.Context, ref string) error {
 func (g *fakeGit) RemoteTip(_ context.Context, branch string) (string, error) {
 	g.record("RemoteTip:" + branch)
 
-	return "", nil
+	return g.remoteTip, nil
 }
 
 func (g *fakeGit) MergeBase(_ context.Context, a, b string) (string, error) {
 	g.record("MergeBase")
 
-	return "", nil
+	return g.mergeBaseValue, nil
 }
 
 func (g *fakeGit) CommitFixup(_ context.Context, target string) (bool, error) {
@@ -287,7 +300,7 @@ func (g *fakeGit) LastCommitTouching(_ context.Context, paths []string) (string,
 func (g *fakeGit) RebaseAutosquash(_ context.Context, onto string) error {
 	g.record("RebaseAutosquash:" + onto)
 
-	return nil
+	return g.rebaseErr
 }
 
 func (g *fakeGit) SoftReset(_ context.Context, to string) error {
@@ -300,6 +313,28 @@ func (g *fakeGit) Head(_ context.Context) (string, error) {
 	g.record("Head")
 
 	return "", nil
+}
+
+// assertOrder fails the test unless the named calls appear in g's recorded log
+// in the given relative order (gaps allowed). Missing calls fail too.
+func (g *fakeGit) assertOrder(t *testing.T, names ...string) {
+	t.Helper()
+
+	calls := g.recorded()
+	prev := -1
+
+	for _, n := range names {
+		idx := indexOfCall(calls, n)
+		if idx < 0 {
+			t.Fatalf("expected call %q not recorded; git=%v", n, calls)
+		}
+
+		if idx <= prev {
+			t.Fatalf("call %q out of order; git=%v", n, calls)
+		}
+
+		prev = idx
+	}
 }
 
 func (g *fakeGit) Checkout(_ context.Context, ref string) error {

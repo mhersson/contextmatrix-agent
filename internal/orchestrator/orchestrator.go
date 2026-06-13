@@ -40,6 +40,21 @@ type Ops interface {
 	ReleaseCard(ctx context.Context, cardID string) error
 }
 
+// ErrRebaseConflict is the sentinel the integrate phase matches to take its
+// conflict-fallback path. It lives here, in the consuming package, so the FSM
+// can detect the conflict class without importing internal/worker (the import
+// boundary is one-way: worker may import orchestrator, never the reverse). The
+// worker's RebaseAutosquash wraps THIS sentinel so errors.Is matches across the
+// package boundary.
+var ErrRebaseConflict = errors.New("rebase conflict")
+
+// PRCreator opens a pull request for the integrated branch and returns its URL.
+// It is the seam over the gh CLI: the worker provides the real implementation;
+// tests inject a fake. The orchestrator writes the body before calling Create.
+type PRCreator interface {
+	Create(ctx context.Context, title, body, base, head string) (string, error)
+}
+
 // GitOps is the slice of the worker git helper the FSM uses. It is defined
 // here, on the consuming side, per the interface-ownership convention;
 // *worker.Git implements it.
@@ -80,6 +95,7 @@ type Config struct {
 type Deps struct {
 	Ops        Ops
 	Git        GitOps
+	PR         PRCreator // opens the pull request in the integrate phase (gh CLI seam)
 	Client     llm.LLM
 	Emit       *events.Emitter
 	Registry   *registry.Registry
@@ -91,10 +107,6 @@ type Deps struct {
 // phaseOrder is the fixed forward sequence of phases. Run enters at the card's
 // persisted phase and never moves backward through this slice.
 var phaseOrder = []string{"plan", "execute", "review", "integrate", "done"}
-
-// errNotImplemented is the default phase-function result until the real phase
-// implementations land in later tasks. Tests override the phase functions.
-var errNotImplemented = errors.New("phase not implemented")
 
 // phaseFn is a single phase's body.
 type phaseFn func(context.Context) error
@@ -109,6 +121,11 @@ type run struct {
 	// Plan-phase outputs, consumed by later phases. Set by runPlan.
 	subtasks []subtaskRef
 	cardTier string
+
+	// reviewSummary is the synthesis verdict's one-line summary captured on
+	// approval, carried into the integrate phase's PR body. Empty when review was
+	// skipped (resume entering at integrate) or the summary was blank.
+	reviewSummary string
 
 	// coderModels records every distinct model that coded a subtask during
 	// execute, so the review phase can exclude them from the specialist panel
@@ -150,13 +167,11 @@ func newRun(d Deps, tc cmclient.TaskContext) *run {
 	o.planFn = func(ctx context.Context) error { return runPlan(ctx, o) }
 	o.executeFn = func(ctx context.Context) error { return runExecute(ctx, o) }
 	o.reviewFn = func(ctx context.Context) error { return runReview(ctx, o) }
-	o.integrateFn = o.notImplemented
-	o.doneFn = o.notImplemented
+	o.integrateFn = func(ctx context.Context) error { return runIntegrate(ctx, o) }
+	o.doneFn = func(ctx context.Context) error { return runDone(ctx, o) }
 
 	return o
 }
-
-func (o *run) notImplemented(context.Context) error { return errNotImplemented }
 
 // phaseFnFor returns the phase function bound to the named phase.
 func (o *run) phaseFnFor(phase string) phaseFn {

@@ -21,6 +21,19 @@ func indexOfCall(calls []string, name string) int {
 	return -1
 }
 
+// countCalls returns how many recorded calls equal name.
+func countCalls(calls []string, name string) int {
+	n := 0
+
+	for _, c := range calls {
+		if c == name {
+			n++
+		}
+	}
+
+	return n
+}
+
 func TestRunPersistsPhaseBeforeWork(t *testing.T) {
 	ops := &fakeOps{
 		taskContext: cmclient.TaskContext{CardID: "CARD-1"},

@@ -94,6 +94,8 @@ func runReview(ctx context.Context, o *run) error {
 		}
 
 		if approved {
+			o.reviewSummary = findings // synthesis verdict summary, for the PR body
+
 			return nil
 		}
 
