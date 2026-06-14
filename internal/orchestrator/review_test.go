@@ -294,6 +294,48 @@ func TestReviewFixLoop(t *testing.T) {
 	assert.Equal(t, 1, incCount, "exactly one fix round; calls=%v", ops.recorded())
 }
 
+func TestReviewFixCoderSelectionLogged(t *testing.T) {
+	// Round 1 is not approved -> fix coder run -> round 2 approves. The fix run
+	// must announce the selected coder model, the round number, and the tier on
+	// the activity log (mirrors the review panel-models log).
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+	client := &planLLM{responses: []llm.Response{
+		stopResp("Correctness: bug", 0.01),
+		stopResp("Design: ok", 0.01),
+		stopResp("Security: ok", 0.01),
+		stopResp(`{"approved":false,"summary":"fix it","fixes":[{"file":"a.go","issue":"bug","suggestion":"patch"}]}`, 0.02),
+		stopResp("coder: fixed the bug", 0.05),
+		stopResp("Correctness: ok now", 0.01),
+		stopResp("Design: ok", 0.01),
+		stopResp("Security: ok", 0.01),
+		stopResp(`{"approved":true,"summary":"clean now","fixes":[]}`, 0.02),
+	}}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	// Find the fix-coder selection line for round 1: the message shape must match
+	// the panel-models log style without hinging on a specific tier value.
+	var selection string
+
+	for _, m := range ops.logs {
+		if strings.Contains(m, "fix coder ") &&
+			strings.Contains(m, "selected for round 1 fixes") &&
+			strings.Contains(m, "(tier=") {
+			selection = m
+
+			break
+		}
+	}
+
+	require.NotEmpty(t, selection,
+		"fix run must log the coder selection for round 1; logs=%v", ops.logs)
+}
+
 func TestReviewRoundTwoDiffsAgainstSnapshot(t *testing.T) {
 	// Round 1 reviews the full branch (Diff base == BaseBranch). It is not
 	// approved, a fix lands, and round 2 reviews only the change since round 1 by

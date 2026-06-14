@@ -128,7 +128,7 @@ func runReview(ctx context.Context, o *run) error {
 			return &ReviewParkedError{Findings: findings}
 		}
 
-		if err := o.runFix(ctx, findings); err != nil {
+		if err := o.runFix(ctx, findings, round); err != nil {
 			return err
 		}
 	}
@@ -360,7 +360,7 @@ func (o *run) synthesize(ctx context.Context, findings string) (verdict, error) 
 // runFix runs one coder fix pass against the outstanding findings, lands the
 // changes as a fixup onto the commit that last touched the fixed files (HEAD
 // fallback), and pushes. Budget is checked before the model call.
-func (o *run) runFix(ctx context.Context, findings string) error {
+func (o *run) runFix(ctx context.Context, findings string, round int) error {
 	d := o.d
 	cfg := d.Cfg
 
@@ -369,6 +369,9 @@ func (o *run) runFix(ctx context.Context, findings string) error {
 	}
 
 	model := o.resolveFixModel()
+
+	_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory selection record
+		fmt.Sprintf("fix coder %s selected for round %d fixes (tier=%s)", model, round, o.cardTier))
 
 	prompt := fmt.Sprintf(fixPrompt, o.tc.Title, o.tc.Description, findings)
 
