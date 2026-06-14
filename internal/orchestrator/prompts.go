@@ -185,6 +185,12 @@ Review only the change set in the diff below. Read surrounding code for context
 as needed. Every finding must cite a file in the change set. Commit status is
 NOT a review concern — never flag uncommitted or untracked files.
 
+Judge the change against what the task requires (see PARENT CARD), not an idealized production service.
+Missing speculative abstractions, premature generalization, or hardening the task did not ask for
+(added timeouts, rate-limiting, caching, pluggable interfaces) are NOT defects. Genuine correctness
+bugs, real vulnerabilities (injection, secret exposure, path traversal), and broken or vacuous tests
+remain in scope.
+
 Severity scale (use Nits sparingly — only pure polish):
 - Critical: broken or unsafe.
 - Important: a real design or correctness defect with non-trivial impact.
@@ -219,7 +225,7 @@ Stay strictly within correctness; do not opine outside it.`
 // designPrompt is the Design & Maintainability specialist lens (Specialist B).
 const designPrompt = `Your specialty is DESIGN & MAINTAINABILITY. Focus on:
 - Architecture, separation of concerns, cross-package coupling.
-- API / interface design at module boundaries.
+- API and interface contracts at module boundaries — only a real defect in what the task required, not a missing abstraction.
 - Backward compatibility: public APIs, config formats, on-disk schemas. Flag
   breaking changes without a migration path.
 - Readability, naming, complexity, function length.
@@ -233,7 +239,7 @@ const securityPrompt = `Your specialty is SECURITY & PERFORMANCE. Focus on:
   absence of auth when the project states it has none.
 - Secrets handling; dependency hygiene on added/bumped packages.
 - Algorithmic complexity, N+1, quadratic loops on user input.
-- Memory / resource leaks; hot-path allocations; caching effectiveness.
+- Memory / resource leaks (real ones in the change), not speculative caching or allocation tuning the task did not call for.
 Stay strictly within security and performance; do not opine outside it.`
 
 // synthesisPrompt is the orchestrator-model synthesis instruction. It reads the

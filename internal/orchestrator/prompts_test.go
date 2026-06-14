@@ -13,3 +13,11 @@ func TestSelfReviewInBothCodingPrompts(t *testing.T) {
 		assert.Contains(t, p, "no fall-through after writing an error response", name)
 	}
 }
+
+func TestSpecialistPromptScopesToTask(t *testing.T) {
+	assert.Contains(t, specialistPrompt, "not an idealized production service")
+	assert.Contains(t, specialistPrompt, "speculative abstractions")
+	// trimmed gold-plating solicitations:
+	assert.NotContains(t, designPrompt, "API / interface design at module boundaries")
+	assert.NotContains(t, securityPrompt, "caching effectiveness")
+}
