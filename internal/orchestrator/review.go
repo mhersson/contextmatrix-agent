@@ -88,10 +88,18 @@ func runReview(ctx context.Context, o *run) error {
 	verifyCmd := detectVerifyCommand(cfg.Workspace)
 
 	for iter := 0; iter < hardReviewIterationCap; iter++ {
+		// Round number continues across resumes: review_attempts persists the
+		// count of prior rounds, so round N is stable for the body record.
+		round := o.tc.ReviewAttempts + iter + 1
+
 		findings, approved, err := o.reviewRound(ctx, verifyCmd)
 		if err != nil {
 			return err
 		}
+
+		// Record this round on the parent card body for the complete review
+		// history (the runner's review-task writes ## Review Findings the same way).
+		o.recordReview(ctx, round, findings, approved)
 
 		if approved {
 			o.reviewSummary = findings // synthesis verdict summary, for the PR body

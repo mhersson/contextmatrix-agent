@@ -323,6 +323,19 @@ func (c *Client) SetPhase(ctx context.Context, cardID, phase string) error {
 	return err
 }
 
+// UpdateCardBody replaces the card body via update_card. The orchestrator uses
+// it to record the run's history (diagnosis, plan, review rounds) on the parent
+// card. Only the body field is sent, so a concurrent phase update is not
+// clobbered — CM patches only the provided fields.
+func (c *Client) UpdateCardBody(ctx context.Context, cardID, body string) error {
+	_, err := c.call(ctx, "update_card", map[string]any{
+		"card_id": cardID,
+		"body":    body,
+	})
+
+	return err
+}
+
 // TransitionCard changes the card's state via transition_card.
 func (c *Client) TransitionCard(ctx context.Context, cardID, state string) error {
 	_, err := c.call(ctx, "transition_card", map[string]any{

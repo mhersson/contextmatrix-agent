@@ -295,6 +295,7 @@ type stubOps struct {
 	usageCalls  []usageRecord
 	pushCalls   []pushRecord
 	phases      []string
+	bodyUpdates []string
 }
 
 type opRecord struct {
@@ -401,6 +402,16 @@ func (s *stubOps) SetPhase(_ context.Context, _, phase string) error {
 	s.mu.Unlock()
 
 	s.record("SetPhase", phase)
+
+	return nil
+}
+
+func (s *stubOps) UpdateCardBody(_ context.Context, _, body string) error {
+	s.mu.Lock()
+	s.bodyUpdates = append(s.bodyUpdates, body)
+	s.mu.Unlock()
+
+	s.record("UpdateCardBody", body)
 
 	return nil
 }

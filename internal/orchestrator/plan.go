@@ -270,6 +270,11 @@ func runPlan(ctx context.Context, o *run) error {
 		switch {
 		case derr == nil:
 			diagnosis = diag
+			if strings.TrimSpace(diag) != "" {
+				// Record the root-cause investigation on the parent card body,
+				// like the runner's systematic-debugging skill writes ## Diagnosis.
+				o.recordSection(ctx, "Diagnosis", sectionFrom("Diagnosis", diag))
+			}
 		case isBudgetError(derr):
 			return derr // park: the FSM's execute() maps this to the budget log
 		default:
@@ -381,6 +386,11 @@ func (o *run) createSubtasks(ctx context.Context, p plan) error {
 	}
 
 	o.cardTier = p.CardTier
+
+	// Record the plan on the parent card body so it carries the full history
+	// (the subtask cards hold the detail; this is the consolidated view, like
+	// the runner's create-plan writes ## Plan).
+	o.recordSection(ctx, "Plan", sectionFrom("Plan", formatPlan(o.subtasks)))
 
 	return nil
 }

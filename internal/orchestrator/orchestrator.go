@@ -29,6 +29,7 @@ type Ops interface {
 	GetTaskContext(ctx context.Context, cardID string) (cmclient.TaskContext, error)
 	CreateCard(ctx context.Context, project, parent, title, body string, dependsOn []string) (string, error)
 	SetPhase(ctx context.Context, cardID, phase string) error
+	UpdateCardBody(ctx context.Context, cardID, body string) error
 	TransitionCard(ctx context.Context, cardID, state string) error
 	StartReview(ctx context.Context, cardID string) error
 	IncrementReviewAttempts(ctx context.Context, cardID string) (int, error)
@@ -123,6 +124,13 @@ type run struct {
 	subtasks []subtaskRef
 	cardTier string
 
+	// body is the live parent-card body the FSM accumulates run history into
+	// (## Diagnosis, ## Plan, ## Review Findings ...). Seeded from the task
+	// context at newRun; recordSection upserts a section and pushes the updated
+	// body to CM. On resume it starts from the refetched body, so prior sections
+	// are preserved and re-recorded sections replace rather than duplicate.
+	body string
+
 	// staleRemoteTip is the remote tip of this run's card branch as observed at
 	// reconcile time on a FRESH run (phase == ""). A non-empty value means a stale
 	// branch from a prior, abandoned run exists: per spec §5.1 the fresh run owns
@@ -174,6 +182,7 @@ func newRun(d Deps, tc cmclient.TaskContext) *run {
 	}
 
 	o.coderModels = map[string]bool{}
+	o.body = tc.Description
 	o.runVerify = func(ctx context.Context, argv []string) (string, bool) {
 		return execVerify(ctx, d.Cfg.Workspace, argv)
 	}

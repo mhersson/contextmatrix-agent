@@ -28,13 +28,18 @@ type fakeOps struct {
 	taskContext cmclient.TaskContext
 	taskCtxErr  error
 
-	setPhaseErr error
-	addLogErr   error
-	claimErr    error
+	setPhaseErr   error
+	addLogErr     error
+	claimErr      error
+	updateBodyErr error
 
 	// logs captures every AddLog message (verbatim) so model-selection tests can
 	// assert the activity feed received the expected entry.
 	logs []string
+
+	// bodyUpdates captures every UpdateCardBody body (verbatim) so history tests
+	// can assert the parent card accumulated the expected sections.
+	bodyUpdates []string
 
 	// IncrementReviewAttempts scripting: reviewAttempts seeds the counter; each
 	// call increments it and returns the new running total, mirroring the server
@@ -126,6 +131,28 @@ func (f *fakeOps) SetPhase(_ context.Context, cardID, phase string) error {
 	f.record("SetPhase:" + phase)
 
 	return f.setPhaseErr
+}
+
+func (f *fakeOps) UpdateCardBody(_ context.Context, cardID, body string) error {
+	f.mu.Lock()
+	f.bodyUpdates = append(f.bodyUpdates, body)
+	f.mu.Unlock()
+
+	f.record("UpdateCardBody:" + cardID)
+
+	return f.updateBodyErr
+}
+
+// lastBody returns the most recent UpdateCardBody body, or "" if none.
+func (f *fakeOps) lastBody() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if len(f.bodyUpdates) == 0 {
+		return ""
+	}
+
+	return f.bodyUpdates[len(f.bodyUpdates)-1]
 }
 
 func (f *fakeOps) TransitionCard(_ context.Context, cardID, state string) error {
