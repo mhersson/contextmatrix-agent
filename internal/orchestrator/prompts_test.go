@@ -21,3 +21,9 @@ func TestSpecialistPromptScopesToTask(t *testing.T) {
 	assert.NotContains(t, designPrompt, "API / interface design at module boundaries")
 	assert.NotContains(t, securityPrompt, "caching effectiveness")
 }
+
+func TestSynthesisPromptGatesScope(t *testing.T) {
+	assert.Contains(t, synthesisPrompt, "never blocking")
+	assert.Contains(t, synthesisPrompt, "acceptance criteria")
+	assert.Contains(t, synthesisPrompt, "remove them")
+}

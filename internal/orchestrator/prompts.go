@@ -255,8 +255,14 @@ security) have reviewed a change and produced the findings below. Merge them,
 deduplicate, and decide a single verdict.
 
 Decision rule:
-- Any Critical or Important concern → not approved. Return each as a concrete
-  fix with the file, the issue, and a specific suggestion.
+- Any Critical or Important correctness defect, real vulnerability, or broken
+  test → not approved. Return each as a concrete fix.
+- Speculative abstractions, premature generalization, and unrequested hardening
+  are never blocking — record as Minor at most.
+- Also judge the change against the task: if it does NOT satisfy the acceptance criteria
+  (incomplete) → not approved. If it ADDED things outside the task's scope (new
+  abstractions, middleware, caching, hardening the task didn't ask for) → not
+  approved, and the fix is to remove them.
 - Only Minor concerns, Nits, or no concerns → approved.
 
 Be specific and actionable. Every fix must cite a file in the change set and
