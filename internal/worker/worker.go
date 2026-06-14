@@ -157,9 +157,16 @@ func Run(ctx context.Context, spec RunSpec, ops CardOps, client llm.LLM, emit *e
 
 	git := NewGit(ws, spec.GitToken)
 
-	if err := prepareWorkspace(ctx, git, spec, branchName); err != nil {
+	resolvedBase, err := prepareWorkspace(ctx, git, spec, branchName)
+	if err != nil {
 		return releaseWithError(ctx, ops, spec.CardID, err)
 	}
+
+	// prepareWorkspace resolved an empty base to the remote default and locked
+	// the push policy to it. Propagate the resolved base so the FSM's review
+	// diff and integrate rebase target a real ref (an empty base makes
+	// `git merge-base "" HEAD` fail).
+	spec.BaseBranch = resolvedBase
 
 	// 3: claim + context.
 	if err := ops.ClaimCard(ctx, spec.CardID); err != nil {
@@ -249,18 +256,20 @@ func Run(ctx context.Context, spec RunSpec, ops CardOps, client llm.LLM, emit *e
 
 // prepareWorkspace creates the clone parent, clones the repo, and cuts the work
 // branch. Clone requires the parent dir to exist and the workspace itself to
-// not exist yet, so the per-card workspace path stays fresh.
-func prepareWorkspace(ctx context.Context, git *Git, spec RunSpec, branch string) error {
+// not exist yet, so the per-card workspace path stays fresh. It returns the
+// resolved base branch (the spec base, or the clone's default when the spec
+// base is empty) so the caller can propagate it to the FSM.
+func prepareWorkspace(ctx context.Context, git *Git, spec RunSpec, branch string) (string, error) {
 	if err := os.MkdirAll(spec.Workspace, 0o755); err != nil {
-		return fmt.Errorf("create workspace parent: %w", err)
+		return "", fmt.Errorf("create workspace parent: %w", err)
 	}
 
 	if err := git.Clone(ctx, spec.RepoURL, spec.BaseBranch); err != nil {
-		return fmt.Errorf("clone %s: %w", spec.RepoURL, err)
+		return "", fmt.Errorf("clone %s: %w", spec.RepoURL, err)
 	}
 
 	if err := git.CreateBranch(ctx, branch); err != nil {
-		return fmt.Errorf("create branch %s: %w", branch, err)
+		return "", fmt.Errorf("create branch %s: %w", branch, err)
 	}
 
 	// Lock the push policy now: the run owns exactly this branch. baseBranch
@@ -275,7 +284,9 @@ func prepareWorkspace(ctx context.Context, git *Git, spec RunSpec, branch string
 
 	git.SetBranchPolicy(branch, baseBranch, remoteDefault)
 
-	return nil
+	// Return the resolved base so the FSM's review diff / integrate rebase
+	// target a real ref — an empty base makes `git merge-base "" HEAD` fail.
+	return baseBranch, nil
 }
 
 // startHeartbeat ticks ops.Heartbeat on heartbeatInterval until the returned

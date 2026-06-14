@@ -534,6 +534,32 @@ func TestAutonomousFlagOverridesInteractive(t *testing.T) {
 	assert.True(t, entered, "autonomous card must enter the orchestrator FSM despite Interactive=true")
 }
 
+// An empty spec base branch must be resolved (to the clone's default) before
+// the FSM runs, or the review diff / integrate rebase get `git merge-base ""
+// HEAD` and fail.
+func TestRunResolvesEmptyBaseBranchForFSM(t *testing.T) {
+	remote := setupBareRemote(t)
+	wsParent := t.TempDir()
+	ops := newFakeOps()
+
+	var seenBase string
+
+	swapRunOrchestrator(t, func(_ context.Context, d orchestrator.Deps) error {
+		seenBase = d.Cfg.BaseBranch
+
+		return nil
+	})
+
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	spec := baseSpec(t, remote, wsParent)
+	spec.BaseBranch = "" // card has no base branch set
+
+	_, err := Run(context.Background(), spec, ops, &scriptedLLM{}, emit, openStdin(t))
+	require.NoError(t, err)
+	assert.Equal(t, "main", seenBase, "FSM must receive the resolved base branch, not empty")
+}
+
 // TestHITLStaysLinear: an interactive spec with no promote uses the linear
 // path only; the FSM seam is never invoked. Swaps runOrchestrator to detect any
 // stray FSM entry, so it must not run in parallel.
