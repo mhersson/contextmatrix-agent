@@ -155,6 +155,15 @@ type run struct {
 	// (a model should not review its own code). Populated in executeSubtask.
 	coderModels map[string]bool
 
+	// lastReviewBase is the HEAD SHA captured at the end of the previous round's
+	// specialist review (mirrors the runner's review_completed head=<sha>). The
+	// next round diffs against it so the panel sees only the change since the last
+	// review, not the whole branch. Empty -> full diff vs BaseBranch (round 1, or
+	// before any specialist review has run). NOT restored on crash-resume: the
+	// activity log is not readable through the current interfaces, and a resumed
+	// run safely re-runs one full review, after which the delta base re-establishes.
+	lastReviewBase string
+
 	// runVerify executes the detected verify command (best-effort spec/test gate)
 	// and returns its combined output plus a pass flag. It is a struct field so
 	// tests can stub the subprocess; the default shells out via execVerify.

@@ -294,6 +294,40 @@ func TestReviewFixLoop(t *testing.T) {
 	assert.Equal(t, 1, incCount, "exactly one fix round; calls=%v", ops.recorded())
 }
 
+func TestReviewRoundTwoDiffsAgainstSnapshot(t *testing.T) {
+	// Round 1 reviews the full branch (Diff base == BaseBranch). It is not
+	// approved, a fix lands, and round 2 reviews only the change since round 1 by
+	// diffing against the reviewed head captured at the end of round 1's review.
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, headSHA: "sha-reviewed-1"}
+	// Round 1: 3 specialists + synthesis (fixes) -> fix coder run.
+	// Round 2: 3 specialists + synthesis (approved).
+	client := &planLLM{responses: []llm.Response{
+		stopResp("Correctness: bug", 0.01),
+		stopResp("Design: ok", 0.01),
+		stopResp("Security: ok", 0.01),
+		stopResp(`{"approved":false,"summary":"fix it","fixes":[{"file":"a.go","issue":"bug","suggestion":"patch"}]}`, 0.02),
+		stopResp("coder: fixed the bug", 0.05),
+		stopResp("Correctness: ok now", 0.01),
+		stopResp("Design: ok", 0.01),
+		stopResp("Security: ok", 0.01),
+		stopResp(`{"approved":true,"summary":"clean now","fixes":[]}`, 0.02),
+	}}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	require.GreaterOrEqual(t, len(git.diffBases), 2,
+		"two specialist rounds must each diff once; diffBases=%v", git.diffBases)
+	assert.Equal(t, d.Cfg.BaseBranch, git.diffBases[0],
+		"round 1 must diff the full branch against the base branch")
+	assert.Equal(t, "sha-reviewed-1", git.diffBases[1],
+		"round 2 must diff the delta against the round-1 reviewed head")
+}
+
 func TestReviewCapParks(t *testing.T) {
 	// Seed the attempts counter one below the cap (5): the first non-approval
 	// increments to exactly 5, pinning the >= boundary (n == cap parks).

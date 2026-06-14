@@ -184,7 +184,12 @@ func (o *run) runSpecialists(ctx context.Context) (string, error) {
 	d := o.d
 	cfg := d.Cfg
 
-	diff, err := d.Git.Diff(ctx, cfg.BaseBranch)
+	base := o.lastReviewBase
+	if base == "" {
+		base = cfg.BaseBranch
+	}
+
+	diff, err := d.Git.Diff(ctx, base)
 	if err != nil {
 		return "", fmt.Errorf("review diff: %w", err)
 	}
@@ -249,6 +254,16 @@ func (o *run) runSpecialists(ctx context.Context) (string, error) {
 			b.WriteString(res.Output)
 			b.WriteString("\n")
 		}
+	}
+
+	// Capture the reviewed head as the next round's delta base (mirrors the
+	// runner's review_completed head=<sha>), so rounds 2+ review only the change
+	// since this review. Best-effort: the activity-log line is for the audit trail;
+	// on crash-resume lastReviewBase starts empty and the next round re-runs full.
+	if sha, herr := d.Git.Head(ctx); herr == nil && sha != "" {
+		o.lastReviewBase = sha
+		_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory snapshot record
+			fmt.Sprintf("review snapshot %s", sha))
 	}
 
 	return b.String(), nil

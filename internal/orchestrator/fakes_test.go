@@ -279,6 +279,13 @@ type fakeGit struct {
 	checkoutErr   error
 	leaseBranches []string
 	leaseTips     []string
+
+	// Diff/Head scripting: diffBases captures the base of each Diff call in order
+	// so delta-review tests can assert round 1 diffs the base branch and later
+	// rounds diff the captured reviewed head. headSHA is what Head returns; the
+	// default "" preserves the no-snapshot behaviour the other review tests rely on.
+	diffBases []string
+	headSHA   string
 }
 
 // assertErr builds a sentinel error for fake scripting in tests.
@@ -382,7 +389,7 @@ func (g *fakeGit) SoftReset(_ context.Context, to string) error {
 func (g *fakeGit) Head(_ context.Context) (string, error) {
 	g.record("Head")
 
-	return "", nil
+	return g.headSHA, nil
 }
 
 // assertOrder fails the test unless the named calls appear in g's recorded log
@@ -414,6 +421,10 @@ func (g *fakeGit) Checkout(_ context.Context, ref string) error {
 }
 
 func (g *fakeGit) Diff(_ context.Context, base string) (string, error) {
+	g.mu.Lock()
+	g.diffBases = append(g.diffBases, base)
+	g.mu.Unlock()
+
 	g.record("Diff")
 
 	return "", nil
