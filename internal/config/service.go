@@ -77,6 +77,23 @@ type ServiceConfig struct {
 	ToolOutputMaxBytes        int
 	DefaultModel              string
 	LogLevel                  string
+
+	// MaxCardCost is the cumulative USD ceiling per card. Workers receive it as
+	// CMX_MAX_CARD_COST. Zero disables the ceiling; the default (5.0) applies
+	// when the key is absent from config and env — koanf cannot distinguish
+	// absent-vs-zero, so an explicit 0 in YAML or env also disables the ceiling.
+	MaxCardCost float64
+
+	// SelectorPriceHeadroom is the best-value band multiplier used by the model
+	// selector. Workers receive it as CMX_SELECTOR_PRICE_HEADROOM. Zero is
+	// omitted from the container env (worker uses its own default); the default
+	// (1.5) applies when the key is absent from config and env.
+	SelectorPriceHeadroom float64
+
+	// ArtificialAnalysisAPIKey is used exclusively by the priors-refresh helper
+	// command. It is redacted in logs and must NEVER be passed into worker
+	// containers — it is a helper-only credential.
+	ArtificialAnalysisAPIKey string
 }
 
 // serviceRaw is the koanf-unmarshalled wire shape. Duration fields are split:
@@ -109,6 +126,9 @@ type serviceRaw struct {
 	ToolOutputMaxBytes        int               `koanf:"tool_output_max_bytes"`
 	DefaultModel              string            `koanf:"default_model"`
 	LogLevel                  string            `koanf:"log_level"`
+	MaxCardCost               float64           `koanf:"max_card_cost"`
+	SelectorPriceHeadroom     float64           `koanf:"selector_price_headroom"`
+	ArtificialAnalysisAPIKey  string            `koanf:"artificial_analysis_api_key"`
 }
 
 // serviceDefaults is the lowest-precedence layer. Durations are wire-form
@@ -130,7 +150,9 @@ func serviceDefaults() serviceRaw {
 		MessageDedupTTLSeconds: 600,
 		MessageDedupCacheSize:  1000,
 		BashTimeoutMaxSeconds:  600,
-		ToolOutputMaxBytes:     30000,
+		ToolOutputMaxBytes:     131072,
+		MaxCardCost:            5.0,
+		SelectorPriceHeadroom:  1.5,
 	}
 }
 
@@ -214,6 +236,9 @@ func (r serviceRaw) toConfig() (*ServiceConfig, error) {
 		ToolOutputMaxBytes:        r.ToolOutputMaxBytes,
 		DefaultModel:              r.DefaultModel,
 		LogLevel:                  r.LogLevel,
+		MaxCardCost:               r.MaxCardCost,
+		SelectorPriceHeadroom:     r.SelectorPriceHeadroom,
+		ArtificialAnalysisAPIKey:  r.ArtificialAnalysisAPIKey,
 	}, nil
 }
 
@@ -289,6 +314,14 @@ func (c *ServiceConfig) Validate() error {
 			"container_timeout %s exceeds the 150m reconcile cap: ContextMatrix force-kills "+
 				"containers older than 150m externally, so the agent's own watchdog must fire first",
 			c.ContainerTimeout)
+	}
+
+	if c.MaxCardCost < 0 {
+		return fmt.Errorf("max_card_cost must be >= 0 (0 disables the ceiling), got %g", c.MaxCardCost)
+	}
+
+	if c.SelectorPriceHeadroom < 0 {
+		return fmt.Errorf("selector_price_headroom must be >= 0 (0 uses worker default), got %g", c.SelectorPriceHeadroom)
 	}
 
 	return c.GitHub.validate()

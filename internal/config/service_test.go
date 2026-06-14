@@ -60,7 +60,7 @@ func TestServiceDefaults(t *testing.T) {
 	assert.Equal(t, 10*time.Minute, cfg.MessageDedupTTL)
 	assert.Equal(t, 1000, cfg.MessageDedupCacheSize)
 	assert.Equal(t, 600, cfg.BashTimeoutMaxSeconds)
-	assert.Equal(t, 30000, cfg.ToolOutputMaxBytes)
+	assert.Equal(t, 131072, cfg.ToolOutputMaxBytes)
 }
 
 func TestServiceLoadFromFile(t *testing.T) {
@@ -302,6 +302,104 @@ func TestServiceValidate(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "auth_mode")
 	})
+
+	t.Run("negative max_card_cost errors", func(t *testing.T) {
+		cfg := validServiceConfig()
+		cfg.MaxCardCost = -1.0
+		err := cfg.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "max_card_cost")
+	})
+
+	t.Run("zero max_card_cost passes (disables ceiling)", func(t *testing.T) {
+		cfg := validServiceConfig()
+		cfg.MaxCardCost = 0
+		require.NoError(t, cfg.Validate())
+	})
+
+	t.Run("negative selector_price_headroom errors", func(t *testing.T) {
+		cfg := validServiceConfig()
+		cfg.SelectorPriceHeadroom = -0.5
+		err := cfg.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "selector_price_headroom")
+	})
+
+	t.Run("zero selector_price_headroom passes (worker default)", func(t *testing.T) {
+		cfg := validServiceConfig()
+		cfg.SelectorPriceHeadroom = 0
+		require.NoError(t, cfg.Validate())
+	})
+}
+
+func TestServiceBudgetDefaults(t *testing.T) {
+	// max_card_cost and selector_price_headroom must default to 5.0 and 1.5
+	// when the keys are absent from config and env.
+	clearServiceEnv(t)
+
+	cfg, err := LoadService(filepath.Join(t.TempDir(), "does-not-exist.yaml"))
+	require.NoError(t, err)
+
+	assert.InDelta(t, 5.0, cfg.MaxCardCost, 1e-9, "max_card_cost default must be 5.0")
+	assert.InDelta(t, 1.5, cfg.SelectorPriceHeadroom, 1e-9, "selector_price_headroom default must be 1.5")
+	assert.Empty(t, cfg.ArtificialAnalysisAPIKey, "artificial_analysis_api_key default must be empty")
+}
+
+func TestServiceBudgetFromFile(t *testing.T) {
+	// max_card_cost: 8.0, selector_price_headroom: 2.0, artificial_analysis_api_key loaded from file.
+	clearServiceEnv(t)
+
+	content := `
+max_card_cost: 8.0
+selector_price_headroom: 2.0
+artificial_analysis_api_key: aa-test-key
+`
+	path := filepath.Join(t.TempDir(), "serve.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+
+	cfg, err := LoadService(path)
+	require.NoError(t, err)
+
+	assert.InDelta(t, 8.0, cfg.MaxCardCost, 1e-9)
+	assert.InDelta(t, 2.0, cfg.SelectorPriceHeadroom, 1e-9)
+	assert.Equal(t, "aa-test-key", cfg.ArtificialAnalysisAPIKey)
+}
+
+func TestServiceBudgetFromEnv(t *testing.T) {
+	// CMX_MAX_CARD_COST and CMX_SELECTOR_PRICE_HEADROOM override file values.
+	// CMX_ARTIFICIAL_ANALYSIS_API_KEY is also picked up via env.
+	clearServiceEnv(t)
+
+	t.Setenv("CMX_MAX_CARD_COST", "3.5")
+	t.Setenv("CMX_SELECTOR_PRICE_HEADROOM", "1.2")
+	t.Setenv("CMX_ARTIFICIAL_ANALYSIS_API_KEY", "aa-env-key")
+
+	cfg, err := LoadService(filepath.Join(t.TempDir(), "does-not-exist.yaml"))
+	require.NoError(t, err)
+
+	assert.InDelta(t, 3.5, cfg.MaxCardCost, 1e-9)
+	assert.InDelta(t, 1.2, cfg.SelectorPriceHeadroom, 1e-9)
+	assert.Equal(t, "aa-env-key", cfg.ArtificialAnalysisAPIKey)
+}
+
+func TestServiceBudgetZeroIsLegal(t *testing.T) {
+	// max_card_cost: 0 is a legal explicit value (disables the per-card ceiling).
+	// selector_price_headroom: 0 is also legal (0 = omit when passed to workers,
+	// worker applies its own default).
+	clearServiceEnv(t)
+
+	content := `
+max_card_cost: 0
+selector_price_headroom: 0
+`
+	path := filepath.Join(t.TempDir(), "serve.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+
+	cfg, err := LoadService(path)
+	require.NoError(t, err)
+
+	assert.InDelta(t, 0.0, cfg.MaxCardCost, 1e-9)
+	assert.InDelta(t, 0.0, cfg.SelectorPriceHeadroom, 1e-9)
 }
 
 // clearServiceEnv unsets any CMX_* vars that could leak into a default/file
@@ -313,6 +411,7 @@ func clearServiceEnv(t *testing.T) {
 		"CMX_CONTEXTMATRIX_URL", "CMX_PORT", "CMX_OPENROUTER_API_KEY",
 		"CMX_API_KEY", "CMX_BASE_IMAGE", "CMX_MAX_CONCURRENT",
 		"CMX_GITHUB__AUTH_MODE", "CMX_GITHUB__PAT__TOKEN",
+		"CMX_MAX_CARD_COST", "CMX_SELECTOR_PRICE_HEADROOM", "CMX_ARTIFICIAL_ANALYSIS_API_KEY",
 	} {
 		if _, ok := os.LookupEnv(e); ok {
 			t.Setenv(e, "")

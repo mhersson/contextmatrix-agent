@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -341,6 +342,62 @@ func TestRunRedactToolOutput(t *testing.T) {
 
 	// No event in the JSONL transcript may contain the raw secret.
 	assert.NotContains(t, transcript.String(), seedSecret, "raw secret must not appear in any event")
+}
+
+// erroringTool is a fake tool that fails with an error carrying a large,
+// secret-bearing message — models a subprocess error that dumps full output.
+type erroringTool struct{ msg string }
+
+func (e *erroringTool) Name() string { return "boom" }
+func (e *erroringTool) Schema() llm.Tool {
+	return llm.Tool{Type: "function", Function: llm.ToolFunction{Name: "boom"}}
+}
+
+func (e *erroringTool) Execute(_ context.Context, _ map[string]any) (string, error) {
+	return "", errors.New(e.msg)
+}
+
+func TestRunToolErrorOutputCappedAndRedacted(t *testing.T) {
+	const (
+		maxBytes   = 1000
+		seedSecret = "sk-or-v1-supersecretkey99"
+	)
+
+	// Error message far exceeds the cap and embeds a secret.
+	big := strings.Repeat("E", 50000) + " " + seedSecret + " " + strings.Repeat("F", 50000)
+	et := &erroringTool{msg: big}
+	reg := tools.NewRegistry(et)
+
+	capt := &capturingLLMSeq{responses: []llm.Response{
+		{ToolCalls: []llm.ToolCall{toolCall("1", "boom", `{}`)}},
+		{Content: "done", FinishReason: "stop"},
+	}}
+
+	r := redact.New([]string{seedSecret})
+
+	_, err := Run(context.Background(), capt, reg, newEmitter(), "task", Config{
+		MaxTurns:           10,
+		ToolOutputMaxBytes: maxBytes,
+		RedactToolOutput:   r.Apply,
+	})
+	require.NoError(t, err)
+
+	require.Len(t, capt.requests, 2)
+
+	var toolResultContent string
+
+	for _, m := range capt.requests[1].Messages {
+		if m.Role == "tool" && m.ToolCallID == "1" {
+			toolResultContent = m.Content
+
+			break
+		}
+	}
+
+	require.NotEmpty(t, toolResultContent, "tool-result message not found in second request")
+	assert.Contains(t, toolResultContent, "bytes truncated", "oversized tool error must be size-capped")
+	assert.LessOrEqual(t, len(toolResultContent), maxBytes+80, "tool error must be bounded by the cap") // marker allowance
+	assert.NotContains(t, toolResultContent, seedSecret, "secret must be redacted on the error path")
 }
 
 // scriptedInbox: queue of messages; Drain pops all pending; Wait pops one or

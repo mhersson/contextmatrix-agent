@@ -37,3 +37,30 @@ func TestTierRank(t *testing.T) {
 	assert.Equal(t, 2, TierRank(0.6))
 	assert.Equal(t, 3, TierRank(0.8))
 }
+
+// TestFloorCalibration: the functional floor is calibrated against the achievable
+// Wilson-LB ceiling for the battery size, not a fixed bar. At 15 samples the old
+// fixed 0.8 complex bar EXCEEDS the achievable ceiling (a perfect 15/15 record's
+// Wilson lower bound), so a fixed bar would be unreachable. The calibrated floor
+// must sit strictly below the ceiling.
+func TestFloorCalibration(t *testing.T) {
+	const n = 15
+
+	ceiling := wilsonLowerBound(n, n, 1.96)
+	assert.Less(t, ceiling, 0.8, "a perfect 15/15 Wilson LB is below the old fixed 0.8 bar")
+
+	floor := CalibratedFloor(n, 1.96)
+	assert.Less(t, floor, ceiling, "calibrated floor must sit below the achievable ceiling")
+	assert.InDelta(t, floorFraction*ceiling, floor, 1e-9)
+	assert.Greater(t, floor, 0.0)
+}
+
+// TestTaskLibraryHash: the hash is deterministic (sorted paths + contents over the
+// embedded fixture FS) and stable across calls, and non-empty.
+func TestTaskLibraryHash(t *testing.T) {
+	h1 := TaskLibraryHash()
+	h2 := TaskLibraryHash()
+	assert.Equal(t, h1, h2, "hash must be deterministic across calls")
+	assert.NotEmpty(t, h1)
+	assert.Len(t, h1, 64, "sha256 hex digest is 64 chars")
+}
