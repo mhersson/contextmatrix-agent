@@ -57,7 +57,7 @@ type RunSpec struct {
 	GitToken      string // from /run/cm-secrets/env via the secrets source
 
 	BashTimeoutMax        int     // CMX_BASH_TIMEOUT_MAX_SECONDS; default 600
-	ToolOutputMax         int     // CMX_TOOL_OUTPUT_MAX_BYTES; default 30000
+	ToolOutputMax         int     // CMX_TOOL_OUTPUT_MAX_BYTES; default 131072 (128 KB)
 	MaxTurns              int     // CMX_MAX_TURNS
 	MaxCostUSD            float64 // CMX_MAX_COST_USD
 	MaxCardCost           float64 // CMX_MAX_CARD_COST; 0 disables
@@ -97,7 +97,7 @@ var heartbeatInterval = 5 * time.Minute
 
 const (
 	defaultBashTimeoutMax = 600
-	defaultToolOutputMax  = 30000
+	defaultToolOutputMax  = 131072
 	defaultWorkspace      = "/home/user/workspace"
 	summaryMaxLen         = 200
 )
@@ -393,6 +393,8 @@ type fsmArgs struct {
 //     exit 0; the persisted phase stays for a later resume.
 //   - any other error: release the claim and return it.
 func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, error) {
+	red := redact.New([]string{a.spec.OpenRouterKey, a.spec.MCPAPIKey, a.spec.GitToken})
+
 	d := orchestrator.Deps{
 		Ops:        ops2orchestrator(a.ops),
 		Git:        a.git,
@@ -402,6 +404,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 		Registry:   buildRegistry(runCtx, a.client, a.spec),
 		WriteTools: tools.NewRegistry(writeTools(a.ws, a.spec.BashTimeoutMax)...),
 		ReadTools:  tools.NewReadOnlyRegistry(a.ws),
+		Redact:     red.Apply,
 		Cfg: orchestrator.Config{
 			Project:           a.spec.Project,
 			CardID:            a.spec.CardID,

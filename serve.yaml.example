@@ -189,7 +189,7 @@ message_dedup_cache_size: 1000
 # CMX_BASH_TIMEOUT_MAX_SECONDS
 bash_timeout_max_seconds: 600
 
-# Maximum bytes of tool output returned to the model per turn.
-# Default: 30000.
+# Maximum bytes of tool output returned to the model per turn (128 KB backstop).
+# Default: 131072.
 # CMX_TOOL_OUTPUT_MAX_BYTES
-tool_output_max_bytes: 30000
+tool_output_max_bytes: 131072

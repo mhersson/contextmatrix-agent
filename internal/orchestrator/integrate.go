@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-
-	"github.com/mhersson/contextmatrix-agent/internal/harness"
 )
 
 // runIntegrate is the integrate phase: pure code with one optional model call
@@ -144,10 +142,7 @@ func (o *run) writePRBody(ctx context.Context) (string, error) {
 
 	task := fmt.Sprintf(prBodyPrompt, o.tc.Title, o.tc.Description, o.planOverview(), o.reviewOutcome())
 
-	res, err := harness.Run(ctx, d.Client, d.ReadTools, d.Emit, task, harness.Config{
-		Model:    model,
-		MaxTurns: cfg.MaxTurns,
-	})
+	res, err := o.runModel(ctx, d.ReadTools, task, model)
 
 	o.ledger.Spend(res.TotalCostUSD)
 

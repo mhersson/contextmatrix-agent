@@ -110,7 +110,7 @@ func specFromEnv() (worker.RunSpec, error) {
 		return worker.RunSpec{}, err
 	}
 
-	toolOutputMax, err := envInt("CMX_TOOL_OUTPUT_MAX_BYTES", 30000)
+	toolOutputMax, err := envInt("CMX_TOOL_OUTPUT_MAX_BYTES", 131072)
 	if err != nil {
 		return worker.RunSpec{}, err
 	}

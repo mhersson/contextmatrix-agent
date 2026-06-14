@@ -109,6 +109,17 @@ func (r *Registry) Has(model string) bool {
 	return ok
 }
 
+// ContextWindow returns model's context window from the live catalog, or 0 if
+// the model is absent (0 disables the harness context-limit check for it).
+func (r *Registry) ContextWindow(model string) int {
+	e, ok := r.catalog.Find(model)
+	if !ok {
+		return 0
+	}
+
+	return e.ContextLength
+}
+
 // fitsWindow reports whether model's context window can hold estTokens. Models
 // absent from the catalog are treated as fitting (fail-open; the harness still
 // enforces context_limit at runtime).

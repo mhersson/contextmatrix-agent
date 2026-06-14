@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/mhersson/contextmatrix-agent/internal/harness"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 )
 
@@ -71,10 +70,7 @@ func (o *run) executeSubtask(ctx context.Context, sub subtaskRef) error {
 	_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory selection record
 		fmt.Sprintf("coder model %s selected for subtask %q (tier=%s)", model, sub.Title, tierOf(sub)))
 
-	res, err := harness.Run(ctx, d.Client, d.WriteTools, d.Emit, prompt, harness.Config{
-		Model:    model,
-		MaxTurns: cfg.MaxTurns,
-	})
+	res, err := o.runModel(ctx, d.WriteTools, prompt, model)
 
 	// Account for spend even on a transport error / partial run, then report the
 	// model actually used (falling back to the resolved slug when the provider

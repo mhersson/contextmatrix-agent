@@ -60,7 +60,7 @@ func TestServiceDefaults(t *testing.T) {
 	assert.Equal(t, 10*time.Minute, cfg.MessageDedupTTL)
 	assert.Equal(t, 1000, cfg.MessageDedupCacheSize)
 	assert.Equal(t, 600, cfg.BashTimeoutMaxSeconds)
-	assert.Equal(t, 30000, cfg.ToolOutputMaxBytes)
+	assert.Equal(t, 131072, cfg.ToolOutputMaxBytes)
 }
 
 func TestServiceLoadFromFile(t *testing.T) {

@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/mhersson/contextmatrix-agent/internal/events"
-	"github.com/mhersson/contextmatrix-agent/internal/harness"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 )
 
@@ -223,10 +222,7 @@ func (o *run) runDiagnose(ctx context.Context, model string) (string, error) {
 
 	task := fmt.Sprintf(diagnosePrompt, o.tc.Title, o.tc.Description)
 
-	res, err := harness.Run(ctx, d.Client, d.ReadTools, d.Emit, task, harness.Config{
-		Model:    model,
-		MaxTurns: cfg.MaxTurns,
-	})
+	res, err := o.runModel(ctx, d.ReadTools, task, model)
 
 	o.ledger.Spend(res.TotalCostUSD)
 
@@ -295,11 +291,6 @@ func runPlan(ctx context.Context, o *run) error {
 	resume := resumeBlock(existingTitles)
 	diagBlock := diagnosisBlock(diagnosis)
 
-	hcfg := harness.Config{
-		Model:    model,
-		MaxTurns: cfg.MaxTurns,
-	}
-
 	var (
 		p       plan
 		lastErr error
@@ -318,7 +309,7 @@ func runPlan(ctx context.Context, o *run) error {
 
 		task := fmt.Sprintf(planPrompt, o.tc.Title, o.tc.Description, diagBlock, resume, repair)
 
-		res, err := harness.Run(ctx, d.Client, d.ReadTools, d.Emit, task, hcfg)
+		res, err := o.runModel(ctx, d.ReadTools, task, model)
 
 		// Account for spend even on transport error / partial run.
 		o.ledger.Spend(res.TotalCostUSD)

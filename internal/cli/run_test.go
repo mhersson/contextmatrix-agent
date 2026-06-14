@@ -88,6 +88,16 @@ func TestRunSpikeDrivesKataGreen(t *testing.T) {
 
 func mustJSON(m map[string]any) string { return toJSON(m) }
 
+// TestToolOutputMaxDefaultIs131072 asserts that the --tool-output-max-bytes flag
+// defaults to 131072 (128 KB) — matching the FSM / RunSpec default so local runs
+// and autonomous runs cap tool output identically.
+func TestToolOutputMaxDefaultIs131072(t *testing.T) {
+	cmd := newRunCmd()
+	v, err := cmd.Flags().GetInt("tool-output-max-bytes")
+	require.NoError(t, err)
+	assert.Equal(t, 131072, v)
+}
+
 func TestPrintConfigSkipsValidation(t *testing.T) {
 	cmd := newRunCmd()
 

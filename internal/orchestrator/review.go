@@ -201,15 +201,20 @@ func (o *run) runSpecialists(ctx context.Context) (string, error) {
 	specs := make([]harness.SubagentSpec, len(lenses))
 	for i, l := range lenses {
 		specs[i] = harness.SubagentSpec{
-			Role:     l.role,
-			Prompt:   fmt.Sprintf(specialistPrompt, l.prompt, o.tc.Title, o.tc.Description, diff),
-			Model:    panel[i].Model,
-			MaxTurns: cfg.MaxTurns,
+			Role:          l.role,
+			Prompt:        fmt.Sprintf(specialistPrompt, l.prompt, o.tc.Title, o.tc.Description, diff),
+			Model:         panel[i].Model,
+			MaxTurns:      cfg.MaxTurns,
+			ContextWindow: panel[i].ContextWindow,
 		}
 	}
 
 	results, err := harness.SpawnSubagents(ctx, d.Client, cfg.Workspace, d.Emit, specs,
-		harness.SubagentOpts{DefaultModel: cfg.DefaultModel})
+		harness.SubagentOpts{
+			DefaultModel:       cfg.DefaultModel,
+			ToolOutputMaxBytes: cfg.ToolOutputMax,
+			RedactToolOutput:   d.Redact,
+		})
 	if err != nil {
 		return "", fmt.Errorf("spawn review specialists: %w", err)
 	}
@@ -253,7 +258,10 @@ func (o *run) runSpecialists(ctx context.Context) (string, error) {
 // card tier, excluding every model that coded a subtask on this run.
 func (o *run) reviewPanel(estTokens int) []registry.ModelSpec {
 	if resolvePin(o.d.Registry, o.tc.ModelReviewer) {
-		spec := registry.ModelSpec{Model: o.tc.ModelReviewer}
+		spec := registry.ModelSpec{
+			Model:         o.tc.ModelReviewer,
+			ContextWindow: o.d.Registry.ContextWindow(o.tc.ModelReviewer),
+		}
 
 		panel := make([]registry.ModelSpec, reviewPanelSize)
 		for i := range panel {
@@ -281,8 +289,6 @@ func (o *run) synthesize(ctx context.Context, findings string) (verdict, error) 
 	model := resolveOrchestratorModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
 		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel)
 
-	hcfg := harness.Config{Model: model, MaxTurns: cfg.MaxTurns}
-
 	var (
 		v       verdict
 		lastErr error
@@ -300,7 +306,7 @@ func (o *run) synthesize(ctx context.Context, findings string) (verdict, error) 
 
 		task := fmt.Sprintf(synthesisPrompt, o.tc.Title, o.tc.Description, findings, repair)
 
-		res, err := harness.Run(ctx, d.Client, d.ReadTools, d.Emit, task, hcfg)
+		res, err := o.runModel(ctx, d.ReadTools, task, model)
 
 		o.ledger.Spend(res.TotalCostUSD)
 
@@ -339,10 +345,7 @@ func (o *run) runFix(ctx context.Context, findings string) error {
 
 	prompt := fmt.Sprintf(fixPrompt, o.tc.Title, o.tc.Description, findings)
 
-	res, err := harness.Run(ctx, d.Client, d.WriteTools, d.Emit, prompt, harness.Config{
-		Model:    model,
-		MaxTurns: cfg.MaxTurns,
-	})
+	res, err := o.runModel(ctx, d.WriteTools, prompt, model)
 
 	o.ledger.Spend(res.TotalCostUSD)
 

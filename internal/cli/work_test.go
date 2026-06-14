@@ -96,7 +96,7 @@ func TestSpecFromEnv_IntParsing(t *testing.T) {
 		spec, err := specFromEnv()
 		require.NoError(t, err)
 		assert.Equal(t, 600, spec.BashTimeoutMax)
-		assert.Equal(t, 30000, spec.ToolOutputMax)
+		assert.Equal(t, 131072, spec.ToolOutputMax)
 		assert.Equal(t, derefInt(config.Defaults().MaxTurns), spec.MaxTurns)
 	})
 

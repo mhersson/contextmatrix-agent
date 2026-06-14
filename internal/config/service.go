@@ -150,7 +150,7 @@ func serviceDefaults() serviceRaw {
 		MessageDedupTTLSeconds: 600,
 		MessageDedupCacheSize:  1000,
 		BashTimeoutMaxSeconds:  600,
-		ToolOutputMaxBytes:     30000,
+		ToolOutputMaxBytes:     131072,
 		MaxCardCost:            5.0,
 		SelectorPriceHeadroom:  1.5,
 	}

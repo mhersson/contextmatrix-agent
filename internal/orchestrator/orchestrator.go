@@ -103,6 +103,7 @@ type Deps struct {
 	WriteTools *tools.Registry // full toolset rooted at the workspace
 	ReadTools  *tools.Registry // read-only subset for planner/reviewers
 	Cfg        Config
+	Redact     func(string) string // nil = identity; scrubs tool output in phase runs (wired by the worker)
 }
 
 // phaseOrder is the fixed forward sequence of phases. Run enters at the card's

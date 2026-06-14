@@ -226,6 +226,14 @@ func TestSelectReviewPanel(t *testing.T) {
 	assert.Equal(t, "alpha", panel2[2].Model) // reuse, no price escalation
 }
 
+func TestRegistryContextWindow(t *testing.T) {
+	r := NewRegistry(nil, "x", testCatalog())
+
+	assert.Equal(t, 131072, r.ContextWindow("deepseek/deepseek-v4-flash"))
+	assert.Equal(t, 8192, r.ContextWindow("cheap/small"))
+	assert.Equal(t, 0, r.ContextWindow("unknown/model"))
+}
+
 func TestSelectReviewPanelDryFromStart(t *testing.T) {
 	// Zero qualifying candidates (every model gated out by the floor): the panel
 	// must still be n non-empty specs — all the capable default, never ModelSpec{}.

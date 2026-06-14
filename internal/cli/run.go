@@ -26,6 +26,7 @@ type runOpts struct {
 	maxTurns      int
 	maxCost       float64
 	contextWindow int
+	toolOutputMax int
 	models        []string
 	provider      json.RawMessage
 	reasoning     json.RawMessage
@@ -76,6 +77,8 @@ func newRunCmd() *cobra.Command {
 
 			client := llm.NewClient(key, llm.WithRetry(llm.DefaultRetryPolicy()))
 
+			toolOutputMax, _ := cmd.Flags().GetInt("tool-output-max-bytes")
+
 			prov, reas := routingRaw(cfg)
 			o := runOpts{
 				model:         model,
@@ -85,6 +88,7 @@ func newRunCmd() *cobra.Command {
 				maxTurns:      derefInt(cfg.MaxTurns),
 				maxCost:       derefFloat(cfg.MaxCostUSD),
 				contextWindow: resolveWindow(cmd.Context(), client, model),
+				toolOutputMax: toolOutputMax,
 				models:        cfg.Models,
 				provider:      prov,
 				reasoning:     reas,
@@ -119,6 +123,7 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().String("model", "", "OpenRouter model slug (or set 'model' in config)")
 	cmd.Flags().Int("max-turns", 30, "maximum model turns")
 	cmd.Flags().Float64("max-cost", 0.50, "maximum USD spend (0 disables)")
+	cmd.Flags().Int("tool-output-max-bytes", 131072, "max bytes of a single tool result before head/tail truncation (0 disables)")
 	cmd.Flags().StringVar(&taskDir, "workspace", "", "workspace directory the agent operates in (required)")
 	cmd.Flags().StringVar(&task, "task", "Inspect the project and complete the requested change, then verify.", "task instruction")
 	cmd.Flags().StringVar(&systemPrompt, "system-prompt", "", "override the default system prompt")
@@ -173,14 +178,15 @@ func runSpike(ctx context.Context, client llm.LLM, o runOpts) (harness.Result, e
 	}
 
 	cfg := harness.Config{
-		Model:         o.model,
-		Models:        o.models,
-		Provider:      o.provider,
-		Reasoning:     o.reasoning,
-		SystemPrompt:  sysPrompt,
-		MaxTurns:      o.maxTurns,
-		MaxCostUSD:    o.maxCost,
-		ContextWindow: o.contextWindow,
+		Model:              o.model,
+		Models:             o.models,
+		Provider:           o.provider,
+		Reasoning:          o.reasoning,
+		SystemPrompt:       sysPrompt,
+		MaxTurns:           o.maxTurns,
+		MaxCostUSD:         o.maxCost,
+		ContextWindow:      o.contextWindow,
+		ToolOutputMaxBytes: o.toolOutputMax,
 	}
 
 	return harness.Run(ctx, client, reg, emit, o.task, cfg)

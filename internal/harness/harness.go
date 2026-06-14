@@ -224,6 +224,7 @@ func Run(ctx context.Context, client llm.LLM, reg *tools.Registry, emit *events.
 						em = cfg.RedactToolOutput(em)
 					}
 
+					em = tools.HeadTail(em, cfg.ToolOutputMaxBytes)
 					msgs = append(msgs, toolResultMsg(tc.ID, em))
 					emit.Emit(events.ToolResult, map[string]any{"id": tc.ID, "error": em})
 
