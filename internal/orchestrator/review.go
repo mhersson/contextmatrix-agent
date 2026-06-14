@@ -43,6 +43,7 @@ const verifyOutputTail = 4000
 type verdict struct {
 	Approved bool   `json:"approved"`
 	Summary  string `json:"summary"`
+	FixTier  string `json:"fix_tier"`
 	Fixes    []fix  `json:"fixes"`
 }
 
@@ -94,7 +95,7 @@ func runReview(ctx context.Context, o *run) error {
 		// count of prior rounds, so round N is stable for the body record.
 		round := o.tc.ReviewAttempts + iter + 1
 
-		findings, approved, err := o.reviewRound(ctx, verifyCmd)
+		findings, fixTier, approved, err := o.reviewRound(ctx, verifyCmd)
 		if err != nil {
 			return err
 		}
@@ -128,7 +129,7 @@ func runReview(ctx context.Context, o *run) error {
 			return &ReviewParkedError{Findings: findings}
 		}
 
-		if err := o.runFix(ctx, findings, round); err != nil {
+		if err := o.runFix(ctx, findings, round, fixTier); err != nil {
 			return err
 		}
 	}
@@ -141,44 +142,45 @@ func runReview(ctx context.Context, o *run) error {
 // The verify gate runs first: on failure it short-circuits to (gate output,
 // not-approved) WITHOUT spending reviewer tokens. On gate pass (or no gate), the
 // three specialists fan out and the synthesis verdict decides.
-func (o *run) reviewRound(ctx context.Context, verifyCmd []string) (string, bool, error) {
+func (o *run) reviewRound(ctx context.Context, verifyCmd []string) (findings string, fixTier string, approved bool, err error) {
 	// Budget gate before the verify subprocess too — the gate may be cheap, but
 	// the fix run it can trigger is not, and we park before doing any work.
 	if err := o.ledger.Check(); err != nil {
-		return "", false, err
+		return "", "", false, err
 	}
 
 	if len(verifyCmd) > 0 {
 		out, ok := o.runVerify(ctx, verifyCmd)
 		if !ok {
 			// Gate failure goes STRAIGHT to the fix loop without burning reviewer
-			// tokens. The command output (tail) is the finding the coder fixes.
+			// tokens. The command output (tail) is the finding the coder fixes. No
+			// verdict ran, so the fix run falls back to the card tier (empty fixTier).
 			return "verify command failed: " + strings.Join(verifyCmd, " ") + "\n" +
-				tools.HeadTail(out, verifyOutputTail), false, nil
+				tools.HeadTail(out, verifyOutputTail), "", false, nil
 		}
 	}
 
 	// Gate passed (or none) — the gate is a cheap pre-filter, not a substitute
 	// for review, so specialists always run.
-	findings, err := o.runSpecialists(ctx)
+	specialistFindings, err := o.runSpecialists(ctx)
 	if err != nil {
-		return "", false, err
+		return "", "", false, err
 	}
 
 	if err := o.ledger.Check(); err != nil {
-		return "", false, err
+		return "", "", false, err
 	}
 
-	v, err := o.synthesize(ctx, findings)
+	v, err := o.synthesize(ctx, specialistFindings)
 	if err != nil {
-		return "", false, err
+		return "", "", false, err
 	}
 
 	if v.Approved {
-		return v.Summary, true, nil
+		return v.Summary, v.FixTier, true, nil
 	}
 
-	return formatFixes(v), false, nil
+	return formatFixes(v), v.FixTier, false, nil
 }
 
 // runSpecialists fans the three review lenses out as parallel read-only child
@@ -360,7 +362,7 @@ func (o *run) synthesize(ctx context.Context, findings string) (verdict, error) 
 // runFix runs one coder fix pass against the outstanding findings, lands the
 // changes as a fixup onto the commit that last touched the fixed files (HEAD
 // fallback), and pushes. Budget is checked before the model call.
-func (o *run) runFix(ctx context.Context, findings string, round int) error {
+func (o *run) runFix(ctx context.Context, findings string, round int, fixTier string) error {
 	d := o.d
 	cfg := d.Cfg
 
@@ -368,10 +370,10 @@ func (o *run) runFix(ctx context.Context, findings string, round int) error {
 		return err
 	}
 
-	model := o.resolveFixModel()
+	model := o.resolveFixModel(fixTier)
 
 	_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory selection record
-		fmt.Sprintf("fix coder %s selected for round %d fixes (tier=%s)", model, round, o.cardTier))
+		fmt.Sprintf("fix coder %s selected for round %d fixes (tier=%s)", model, round, o.effectiveFixTier(fixTier)))
 
 	prompt := fmt.Sprintf(fixPrompt, o.tc.Title, o.tc.Description, findings)
 
@@ -416,18 +418,30 @@ func (o *run) runFix(ctx context.Context, findings string, round int) error {
 }
 
 // resolveFixModel picks the coder model for the fix run: the card's coder pin
-// when catalog-resolvable, else the best-value coder selection for the card tier.
-func (o *run) resolveFixModel() string {
+// when catalog-resolvable, else the best-value coder selection for the effective
+// fix tier (the synthesizer's fix_tier, falling back to the card tier).
+func (o *run) resolveFixModel(fixTier string) string {
 	if resolvePin(o.d.Registry, o.tc.ModelCoder) {
 		return o.tc.ModelCoder
 	}
 
 	spec := o.d.Registry.SelectByComplexity(registry.SelectInput{
 		Role: registry.RoleCoder,
-		Tier: tierFromString(o.cardTier),
+		Tier: tierFromString(o.effectiveFixTier(fixTier)),
 	})
 
 	return spec.Model
+}
+
+// effectiveFixTier is the tier the fix run sizes on: the synthesizer's fix_tier
+// when present, else the card tier. An empty fix_tier (synthesizer omitted it)
+// falls back so the fixer is never under-sized.
+func (o *run) effectiveFixTier(fixTier string) string {
+	if fixTier == "" {
+		return o.cardTier
+	}
+
+	return fixTier
 }
 
 // parseVerdict extracts the synthesis verdict JSON (tolerating prose / code

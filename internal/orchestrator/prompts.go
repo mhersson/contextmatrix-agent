@@ -284,8 +284,10 @@ SPECIALIST FINDINGS
 Respond with ONLY a JSON object, no prose:
 {"approved":true|false,
  "summary":"<one-line overall verdict>",
+ "fix_tier":"simple|moderate|complex",
  "fixes":[{"file":"...","issue":"...","suggestion":"..."}]}
 
+fix_tier is the difficulty of APPLYING these fixes (default to the card's tier if unsure).
 When approved is true, fixes must be an empty array.
 `
 

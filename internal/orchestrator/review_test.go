@@ -170,6 +170,51 @@ func TestParseVerdict(t *testing.T) {
 	})
 }
 
+func TestParseVerdictReadsFixTier(t *testing.T) {
+	v, err := parseVerdict(`{"approved":false,"summary":"s","fix_tier":"moderate","fixes":[]}`)
+	require.NoError(t, err)
+	assert.Equal(t, "moderate", v.FixTier)
+}
+
+// TestResolveFixModelUsesFixTier proves the fix run sizes its coder on the
+// synthesizer's fix_tier, not the card tier. The registry seeds one cheap coder
+// model whose prior (0.5) clears the simple tier bar (0.4) but sits below the
+// complex bar (0.8), with a DISTINCT capable fallback. So resolveFixModel("simple")
+// must pick the cheap coder; resolveFixModel("complex") must fall back.
+func TestResolveFixModelUsesFixTier(t *testing.T) {
+	const (
+		cheapCoder = "cheap/coder"
+		fallback   = "capable/fallback"
+	)
+
+	catalog := llm.Catalog{
+		{ID: cheapCoder, ContextLength: 200000, PromptPricePerTok: 0.0000005, CompletionPricePerTok: 0.0000015, SupportedParameters: []string{"tools"}},
+		{ID: fallback, ContextLength: 200000, PromptPricePerTok: 0.000006, CompletionPricePerTok: 0.000012, SupportedParameters: []string{"tools"}},
+	}
+	// Measured score clears the (default 0) floor so the functional gate passes;
+	// the prior is what the tier bar is measured against.
+	caps := map[string]map[registry.Role]float64{
+		cheapCoder: {registry.RoleCoder: 0.95},
+	}
+	prior := 0.5
+	priors := registry.Priors{
+		Meta:   registry.PriorsMeta{TierBars: map[string]float64{"simple": 0.4, "moderate": 0.6, "complex": 0.8}},
+		Models: map[string]registry.PriorEntry{cheapCoder: {Coder: &prior}},
+	}
+	reg := registry.NewRegistryWithCapabilities(nil, fallback, catalog, caps).
+		WithSelection(registry.Selection{Priors: priors, Floor: 0, PriceHeadroom: 1.5})
+
+	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reg)
+	// No coder pin -> complexity selection path; card tier is moderate by default.
+	o := newReviewRun(d, cmclient.TaskContext{CardID: "CARD-1"}, 0)
+
+	assert.Equal(t, cheapCoder, o.resolveFixModel("simple"),
+		"simple fix_tier clears the cheap coder's bar")
+	assert.Equal(t, fallback, o.resolveFixModel("complex"),
+		"complex fix_tier excludes the cheap coder -> capable fallback")
+	assert.NotEqual(t, cheapCoder, o.resolveFixModel("complex"))
+}
+
 // TestFormatFixesFixFilesRoundTrip pins the line-shape contract between
 // formatFixes (writer) and fixFiles (parser): every fix file path must survive
 // the format -> parse round trip, deduplicated, in order.
