@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -200,6 +201,47 @@ func resolveOrchestratorModel(
 	return fallback
 }
 
+// isBudgetError reports whether err is (or wraps) the budget-ceiling sentinel.
+func isBudgetError(err error) bool {
+	var be *BudgetExceededError
+
+	return errors.As(err, &be)
+}
+
+// runDiagnose runs one read-only investigation pass on the orchestrator model
+// for a bug-like card and returns a "## Diagnosis" text blob to ground the
+// plan. Budget-checked and usage-reported like every model-bearing step. The
+// caller treats a returned error as best-effort: planning proceeds without a
+// diagnosis rather than failing.
+func (o *run) runDiagnose(ctx context.Context, model string) (string, error) {
+	d := o.d
+	cfg := d.Cfg
+
+	if err := o.ledger.Check(); err != nil {
+		return "", err
+	}
+
+	task := fmt.Sprintf(diagnosePrompt, o.tc.Title, o.tc.Description)
+
+	res, err := harness.Run(ctx, d.Client, d.ReadTools, d.Emit, task, harness.Config{
+		Model:    model,
+		MaxTurns: cfg.MaxTurns,
+	})
+
+	o.ledger.Spend(res.TotalCostUSD)
+
+	if reportErr := d.Ops.ReportUsage(ctx, cfg.CardID, res.ModelUsed,
+		res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
+		slog.Warn("plan: report diagnose usage failed", "card_id", cfg.CardID, "error", reportErr)
+	}
+
+	if err != nil {
+		return "", fmt.Errorf("diagnose run: %w", err)
+	}
+
+	return strings.TrimSpace(res.Output), nil
+}
+
 // runPlan is the plan phase: one read-only planner run on the
 // orchestrator-resolved model that emits a strict JSON plan, then code creates
 // a subtask card per entry with dependency edges mapped to real card IDs.
@@ -216,6 +258,26 @@ func runPlan(ctx context.Context, o *run) error {
 
 	_ = d.Ops.AddLog(ctx, cfg.CardID, "orchestrator model: "+model) //nolint:errcheck // advisory selection record
 
+	// Bug-like cards get a read-only root-cause investigation before planning
+	// (mirrors the runner's create-plan Phase 0 Branch B). The diagnosis grounds
+	// the decomposition. Best-effort: a failed diagnose must not block planning.
+	diagnosis := ""
+
+	if isBugLike(o.tc) {
+		_ = d.Ops.AddLog(ctx, cfg.CardID, "running root-cause investigation (bug-like card)") //nolint:errcheck
+
+		diag, derr := o.runDiagnose(ctx, model)
+		switch {
+		case derr == nil:
+			diagnosis = diag
+		case isBudgetError(derr):
+			return derr // park: the FSM's execute() maps this to the budget log
+		default:
+			slog.Warn("plan: diagnose step failed; planning without a diagnosis",
+				"card_id", cfg.CardID, "error", derr)
+		}
+	}
+
 	// Resume: surface any existing subtasks so the planner reuses their titles.
 	// The list is the RECONCILED set (reconcile loaded it from SubtaskStates
 	// before the phase loop); runPlan does not re-query the server. On a fresh
@@ -226,6 +288,7 @@ func runPlan(ctx context.Context, o *run) error {
 	}
 
 	resume := resumeBlock(existingTitles)
+	diagBlock := diagnosisBlock(diagnosis)
 
 	hcfg := harness.Config{
 		Model:    model,
@@ -248,7 +311,7 @@ func runPlan(ctx context.Context, o *run) error {
 			repair = repairBlock(lastErr.Error())
 		}
 
-		task := fmt.Sprintf(planPrompt, o.tc.Title, o.tc.Description, resume, repair)
+		task := fmt.Sprintf(planPrompt, o.tc.Title, o.tc.Description, diagBlock, resume, repair)
 
 		res, err := harness.Run(ctx, d.Client, d.ReadTools, d.Emit, task, hcfg)
 

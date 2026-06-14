@@ -207,6 +207,60 @@ func TestPlanPhaseResume(t *testing.T) {
 		"runPlan must consume the reconciled refs, not re-call SubtaskStates")
 }
 
+func TestPlanPhaseDiagnosesBugLikeCard(t *testing.T) {
+	ops := &fakeOps{
+		taskContext: cmclient.TaskContext{
+			CardID: "CARD-1", Title: "Fix the broken parser", Description: "it throws on empty input",
+		},
+		createdIDs: []string{"SUB-1", "SUB-2"},
+	}
+	// Call 0 is the diagnose pass (returns a ## Diagnosis blob); call 1 is the
+	// planner (returns a valid plan). The diagnosis must be threaded into the
+	// plan prompt.
+	diagnosis := "## Diagnosis\n### Root cause\nThe parser dereferences a nil slice on empty input.\n"
+	llmFake := &planLLM{responses: []llm.Response{
+		stopResp(diagnosis, 0.02),
+		stopResp(goodPlanJSON, 0.03),
+	}}
+	d := planTestDeps(ops, llmFake)
+
+	o := newRun(d, ops.taskContext)
+	require.NoError(t, runPlan(context.Background(), o))
+
+	// Two model calls: diagnose then plan.
+	require.Len(t, llmFake.tasks, 2, "bug-like card must run the diagnose step then the plan")
+
+	// The bug-like card triggers a diagnose run, and the diagnosis text is
+	// threaded into the plan prompt.
+	assert.True(t, ops.loggedContains("root-cause investigation"),
+		"bug-like card must log the diagnose step")
+	assert.Contains(t, llmFake.tasks[1], "Root cause", "plan prompt must carry the diagnosis")
+
+	// Both turns' usage is spent.
+	assert.InDelta(t, 0.05, o.ledger.Spent(), 1e-9)
+}
+
+func TestPlanPhaseSkipsDiagnoseForFeatureCard(t *testing.T) {
+	ops := &fakeOps{
+		taskContext: cmclient.TaskContext{
+			CardID: "CARD-1", Title: "Add a health endpoint", Description: "expose /healthz", Type: "task",
+		},
+		createdIDs: []string{"SUB-1", "SUB-2"},
+	}
+	llmFake := &planLLM{responses: []llm.Response{stopResp(goodPlanJSON, 0.01)}}
+	d := planTestDeps(ops, llmFake)
+
+	o := newRun(d, ops.taskContext)
+	require.NoError(t, runPlan(context.Background(), o))
+
+	// A non-bug card skips the diagnose step: exactly one model call (the plan).
+	require.Len(t, llmFake.tasks, 1, "feature card must make exactly one model call (no diagnose)")
+	assert.False(t, ops.loggedContains("root-cause investigation"),
+		"feature card must not run the diagnose step")
+	assert.NotContains(t, llmFake.tasks[0], "ground the plan in this",
+		"feature card plan prompt must not carry an injected diagnosis block")
+}
+
 func TestResolveOrchestratorModel(t *testing.T) {
 	reg := planTestRegistry()
 	emit := events.NewEmitter(nil, nil)

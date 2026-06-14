@@ -9,11 +9,17 @@ import "strings"
 // emits a strict JSON plan. Card creation happens in code from the parsed JSON.
 //
 // The trailing %s slots are filled by runPlan: card title, card description,
-// an optional resume block (existing subtasks), and an optional repair block
-// (the previous parse error). Empty optional blocks collapse to nothing.
+// an optional diagnosis block (root-cause investigation for bug-like cards), an
+// optional resume block (existing subtasks), and an optional repair block (the
+// previous parse error). Empty optional blocks collapse to nothing.
 const planPrompt = `You are the planning agent for a software task. You have read-only
 tools (read, grep, glob) to inspect the codebase. You do NOT create or modify
 cards or files — you only read code and output a plan as JSON.
+
+First understand the task deeply, then decompose it. If a ROOT-CAUSE DIAGNOSIS
+is provided below, ground the plan in it — the subtasks must implement that fix
+approach. For feature work with no diagnosis, read the relevant code and settle
+on the simplest approach that solves the problem before decomposing.
 
 Decompose the task into subtasks following these rules:
 
@@ -52,10 +58,51 @@ Title: %s
 
 Description:
 %s
-%s%s
+%s%s%s
 Respond with ONLY a JSON object, no prose:
 {"card_tier":"simple|moderate|complex",
  "subtasks":[{"title":"...","description":"...","depends_on":[<earlier indices>],"tier":"simple|moderate|complex"}]}
+`
+
+// diagnosePrompt is the read-only debug-investigation pass run for bug-like
+// cards before planning. Adapted from the systematic-debugging workflow skill:
+// the same root-cause-first discipline, but the investigator has only read
+// tools and returns a "## Diagnosis" text blob (no card writes) that grounds
+// the plan. The trailing %s slots are filled by runDiagnose: card title, body.
+const diagnosePrompt = `You are a read-only debugging investigator for a task that looks like a bug.
+You have read-only tools (read, grep, glob) to inspect the codebase. You do NOT
+modify files, run git, or create cards. Find the ROOT CAUSE — a fix is planned
+separately, after you finish.
+
+Work the evidence in order:
+- Read the task below; quote any error messages, stack traces, or reproduction
+  steps it gives.
+- Read the referenced files in full; trace the failing path back to where the
+  bad value or behaviour originates. Fix at the source, not the symptom.
+- Find a similar path that works and list what differs.
+- Settle on the single most likely root cause, with the evidence for it.
+
+Do NOT propose detailed code — your job ends at the diagnosis.
+
+TASK
+Title: %s
+
+Description:
+%s
+
+Respond with ONLY a "## Diagnosis" section in exactly this shape:
+
+## Diagnosis
+### Root cause
+<1-2 sentences naming the cause>
+### Evidence
+- <observation that supports the cause>
+- <observation>
+### Fix approach
+<high-level strategy: what changes, where — concrete enough to decompose into
+subtasks, but no code>
+### Files affected
+- <path>
 `
 
 // coderPrompt is the per-subtask coder instruction block. The coder runs with
@@ -304,4 +351,14 @@ func repairBlock(parseErr string) string {
 
 	return "\nYOUR PREVIOUS RESPONSE COULD NOT BE PARSED: " + parseErr + "\n" +
 		"Respond again with ONLY the JSON object described below — no prose, no code fences.\n"
+}
+
+// diagnosisBlock renders the root-cause diagnosis inserted into the planner
+// prompt for bug-like cards. Empty diagnosis collapses to nothing.
+func diagnosisBlock(diagnosis string) string {
+	if strings.TrimSpace(diagnosis) == "" {
+		return ""
+	}
+
+	return "\nROOT-CAUSE DIAGNOSIS (ground the plan in this; the bug was investigated\nbefore planning):\n" + diagnosis + "\n"
 }
