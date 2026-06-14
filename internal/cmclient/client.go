@@ -79,6 +79,12 @@ type TaskContext struct {
 	Description string
 	State       string
 
+	// Type and Labels classify the card (bug vs feature vs maintenance) so the
+	// orchestrator's plan phase can pick a pre-plan branch. Populated from the
+	// card JSON get_task_context already returns.
+	Type   string
+	Labels []string
+
 	// Orchestrator fields — populated for autonomous cards (may be zero-valued
 	// for cards that were created before the C2 phase fields were added).
 	Phase             string
@@ -166,18 +172,20 @@ func (c *Client) GetTaskContext(ctx context.Context, cardID string) (TaskContext
 	// config}. Only the card is parsed; parent/siblings/config are ignored.
 	var payload struct {
 		Card struct {
-			ID                string `json:"id"`
-			Title             string `json:"title"`
-			Body              string `json:"body"`
-			State             string `json:"state"`
-			Phase             string `json:"phase"`
-			Autonomous        bool   `json:"autonomous"`
-			CreatePR          bool   `json:"create_pr"`
-			BaseBranch        string `json:"base_branch"`
-			ReviewAttempts    int    `json:"review_attempts"`
-			ModelOrchestrator string `json:"model_orchestrator"`
-			ModelCoder        string `json:"model_coder"`
-			ModelReviewer     string `json:"model_reviewer"`
+			ID                string   `json:"id"`
+			Title             string   `json:"title"`
+			Body              string   `json:"body"`
+			State             string   `json:"state"`
+			Type              string   `json:"type"`
+			Labels            []string `json:"labels"`
+			Phase             string   `json:"phase"`
+			Autonomous        bool     `json:"autonomous"`
+			CreatePR          bool     `json:"create_pr"`
+			BaseBranch        string   `json:"base_branch"`
+			ReviewAttempts    int      `json:"review_attempts"`
+			ModelOrchestrator string   `json:"model_orchestrator"`
+			ModelCoder        string   `json:"model_coder"`
+			ModelReviewer     string   `json:"model_reviewer"`
 			TokenUsage        *struct {
 				EstimatedCostUSD float64 `json:"estimated_cost_usd"`
 			} `json:"token_usage"`
@@ -192,6 +200,8 @@ func (c *Client) GetTaskContext(ctx context.Context, cardID string) (TaskContext
 		Title:             payload.Card.Title,
 		Description:       payload.Card.Body,
 		State:             payload.Card.State,
+		Type:              payload.Card.Type,
+		Labels:            payload.Card.Labels,
 		Phase:             payload.Card.Phase,
 		Autonomous:        payload.Card.Autonomous,
 		CreatePR:          payload.Card.CreatePR,

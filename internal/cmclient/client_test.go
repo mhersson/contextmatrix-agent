@@ -87,6 +87,8 @@ const taskContextPayload = `{
     "title": "Wire up the widget",
     "body": "Connect the widget to the gizmo and verify the blinkenlights.",
     "state": "in_progress",
+    "type": "bug",
+    "labels": ["bug", "backend"],
     "phase": "execute",
     "autonomous": true,
     "create_pr": true,
@@ -242,6 +244,10 @@ func TestGetTaskContext(t *testing.T) {
 	assert.Equal(t, "Wire up the widget", tc.Title)
 	assert.Equal(t, "Connect the widget to the gizmo and verify the blinkenlights.", tc.Description)
 	assert.Equal(t, "in_progress", tc.State)
+
+	// Classification fields from the card JSON.
+	assert.Equal(t, "bug", tc.Type)
+	assert.Equal(t, []string{"bug", "backend"}, tc.Labels)
 
 	// Orchestrator fields from the extended card JSON.
 	assert.Equal(t, "execute", tc.Phase)
