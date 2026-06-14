@@ -83,33 +83,73 @@ func TestStageForCommit_SkipsBuildArtifacts(t *testing.T) {
 	require.NoError(t, g.CreateBranch(context.Background(), "cm/cmx-001"))
 	g.SetBranchPolicy("cm/cmx-001", "main", "main")
 
+	// Isolate our artifact guard from the developer's global gitignore: a
+	// machine that globally ignores e.g. *.pyc would hide cache.pyc from git
+	// entirely, so the test would not exercise our extension denylist.
+	runGit(t, ws, "config", "core.excludesFile", "/dev/null")
+
 	// A legitimate source edit (tracked: the seeded README).
 	writeFile(t, ws, "README.md", []byte("# updated\n"), 0o644)
 	// A new source file (untracked, must be staged).
 	writeFile(t, ws, "main.go", []byte("package main\n"), 0o644)
-	// A compiled ELF binary (untracked, must be skipped).
+	// A compiled ELF binary (untracked, must be skipped by magic).
 	elf := append([]byte{0x7f, 'E', 'L', 'F'}, make([]byte, 64)...)
 	writeFile(t, ws, "app", elf, 0o755)
-	// A Go test binary by extension (untracked, must be skipped).
-	writeFile(t, ws, "pkg.test", []byte("not really a binary"), 0o755)
+	// Python bytecode by extension (untracked, must be skipped: no executable
+	// magic, so the extension denylist is what catches it).
+	writeFile(t, ws, "cache.pyc", []byte("not a real binary"), 0o644)
+	// A golden-output fixture (untracked, MUST be staged): a ".out" data file
+	// is legitimate source, not a build artifact. Real a.out binaries are
+	// caught by magic, not by extension.
+	writeFile(t, ws, "golden.out", []byte("expected output\n"), 0o644)
 
 	committed, err := g.CommitWithMessage(context.Background(), "feat: real work")
 	require.NoError(t, err)
 	require.True(t, committed)
 
-	// HEAD must contain README.md and main.go but NOT app or pkg.test.
+	// HEAD must contain the source files (incl. the golden fixture) but NOT the
+	// compiled binary or the bytecode.
 	out, err := g.run(context.Background(), "show", "--name-only", "--format=", "HEAD")
 	require.NoError(t, err)
 	assert.Contains(t, out, "README.md")
 	assert.Contains(t, out, "main.go")
+	assert.Contains(t, out, "golden.out")
 	assert.NotContains(t, out, "app")
-	assert.NotContains(t, out, "pkg.test")
+	assert.NotContains(t, out, "cache.pyc")
 
 	// The skipped artifacts remain untracked, not lost.
 	status, err := g.run(context.Background(), "status", "--porcelain")
 	require.NoError(t, err)
 	assert.Contains(t, status, "?? app")
-	assert.Contains(t, status, "?? pkg.test")
+	assert.Contains(t, status, "?? cache.pyc")
+}
+
+// A filename containing a space must still be staged. git status C-quotes such
+// paths unless -z is used; the quoted form would fail `git add` and abort the
+// whole commit. Regression guard for the -z parsing in stageForCommit (a
+// blanket `git add -A` handled spaced names transparently).
+func TestStageForCommit_HandlesSpacedFilenames(t *testing.T) {
+	remote := setupBareRemote(t)
+	ws := t.TempDir()
+
+	g := NewGit(ws, "")
+	require.NoError(t, g.Clone(context.Background(), remote, "main"))
+	require.NoError(t, g.CreateBranch(context.Background(), "cm/cmx-001"))
+	g.SetBranchPolicy("cm/cmx-001", "main", "main")
+
+	writeFile(t, ws, "my fixture.go", []byte("package x\n"), 0o644)
+
+	committed, err := g.CommitWithMessage(context.Background(), "feat: spaced filename")
+	require.NoError(t, err)
+	require.True(t, committed)
+
+	out, err := g.run(context.Background(), "show", "--name-only", "--format=", "HEAD")
+	require.NoError(t, err)
+	assert.Contains(t, out, "my fixture.go")
+
+	status, err := g.run(context.Background(), "status", "--porcelain")
+	require.NoError(t, err)
+	assert.Empty(t, strings.TrimSpace(status), "the spaced file must be committed, leaving a clean tree")
 }
 
 // When only artifacts are dirty, the commit helpers report no commit (no empty

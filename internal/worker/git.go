@@ -141,7 +141,7 @@ func (g *Git) isDirty(ctx context.Context) (bool, error) {
 // not staged.
 var buildArtifactExts = map[string]bool{
 	".exe": true, ".dll": true, ".so": true, ".dylib": true,
-	".o": true, ".a": true, ".test": true, ".out": true,
+	".o": true, ".a": true,
 	".pyc": true, ".pyo": true, ".class": true,
 }
 
@@ -214,17 +214,23 @@ func (g *Git) stageForCommit(ctx context.Context) error {
 		return fmt.Errorf("stage tracked changes: %w", err)
 	}
 
-	out, err := g.run(ctx, "status", "--porcelain", "--untracked-files=all")
+	// -z NUL-delimits records and disables path quoting, so filenames with
+	// spaces or non-ASCII bytes reach `git add` verbatim. Without it git
+	// C-quotes such paths and the quoted string fails to match, aborting the
+	// whole commit — a regression from the blanket `git add -A` this replaced.
+	out, err := g.run(ctx, "status", "--porcelain", "-z", "--untracked-files=all")
 	if err != nil {
 		return fmt.Errorf("list untracked: %w", err)
 	}
 
-	for _, line := range strings.Split(out, "\n") {
-		if !strings.HasPrefix(line, "?? ") {
+	for _, record := range strings.Split(out, "\x00") {
+		// Under -z each record is "XY <path>" with no quoting; untracked is
+		// "?? <path>". The trailing NUL yields a final empty record (skipped).
+		if !strings.HasPrefix(record, "?? ") {
 			continue
 		}
 
-		rel := strings.TrimSpace(strings.TrimPrefix(line, "?? "))
+		rel := strings.TrimPrefix(record, "?? ")
 		if rel == "" {
 			continue
 		}
