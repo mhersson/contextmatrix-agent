@@ -99,21 +99,20 @@ func parsePlan(s string) (plan, error) {
 	return p, nil
 }
 
-// extractJSON returns the first balanced top-level JSON object in s, tolerating
-// prose and code fences around it. It scans from the first '{' and tracks brace
-// depth while skipping over string literals (so braces inside strings don't
-// throw off the balance). Returns false when no complete object is present.
+// extractJSON returns the JSON object the model intended as its answer. It
+// prefers a fenced ```json block (models wrap the verdict in one and surround it
+// with prose that contains stray braces), and otherwise returns the LAST
+// balanced top-level object — robust to prose/code braces appearing before it.
 func extractJSON(s string) (string, bool) {
-	start := strings.IndexByte(s, '{')
-	if start < 0 {
-		return "", false
+	if fenced, ok := extractFenced(s); ok {
+		s = fenced
 	}
 
-	depth := 0
-	inStr := false
-	escaped := false
+	depth, start := 0, -1
+	lastStart, lastEnd := -1, -1
+	inStr, escaped := false, false
 
-	for i := start; i < len(s); i++ {
+	for i := 0; i < len(s); i++ {
 		c := s[i]
 
 		if inStr {
@@ -133,16 +132,46 @@ func extractJSON(s string) (string, bool) {
 		case '"':
 			inStr = true
 		case '{':
+			if depth == 0 {
+				start = i
+			}
+
 			depth++
 		case '}':
-			depth--
-			if depth == 0 {
-				return s[start : i+1], true
+			if depth > 0 {
+				depth--
+				if depth == 0 && start >= 0 {
+					lastStart, lastEnd = start, i+1
+				}
 			}
 		}
 	}
 
-	return "", false
+	if lastStart < 0 {
+		return "", false
+	}
+
+	return s[lastStart:lastEnd], true
+}
+
+// extractFenced returns the body of the first ```json (or bare ```) fenced block.
+func extractFenced(s string) (string, bool) {
+	i := strings.Index(s, "```")
+	if i < 0 {
+		return "", false
+	}
+
+	rest := s[i+3:]
+	if nl := strings.IndexByte(rest, '\n'); nl >= 0 { // drop the optional "json" tag line
+		rest = rest[nl+1:]
+	}
+
+	end := strings.Index(rest, "```")
+	if end < 0 {
+		return "", false
+	}
+
+	return rest[:end], true
 }
 
 // resolvePin reports whether a non-empty card-pinned model slug is honourable:

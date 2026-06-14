@@ -307,3 +307,27 @@ func TestResolveOrchestratorModel(t *testing.T) {
 		assert.Equal(t, "default/model", got)
 	})
 }
+
+func TestExtractJSON(t *testing.T) {
+	tests := []struct {
+		name, in, want string
+		ok             bool
+	}{
+		{"plain", `{"approved":true}`, `{"approved":true}`, true},
+		{"fenced after prose", "Verdict.\n```json\n{\"approved\":true,\"fixes\":[]}\n```", `{"approved":true,"fixes":[]}`, true},
+		{"brace in code before fenced json", "if m.conns >= m.max { m.mu.Unlock() }\n```json\n{\"approved\":false}\n```", `{"approved":false}`, true},
+		{"brace in prose then json, unfenced", "foo { bar } then {\"approved\":false}", `{"approved":false}`, true},
+		{"nested object", `pre {"a":{"b":1}} post`, `{"a":{"b":1}}`, true},
+		{"no object", "no json here", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := extractJSON(tt.in)
+			assert.Equal(t, tt.ok, ok)
+
+			if tt.ok {
+				assert.JSONEq(t, tt.want, got)
+			}
+		})
+	}
+}
