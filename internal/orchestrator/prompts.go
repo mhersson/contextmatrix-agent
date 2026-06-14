@@ -295,8 +295,9 @@ When approved is true, fixes must be an empty array.
 // description, and the findings list.
 const fixPrompt = `You are the coding agent addressing review feedback on the current branch.
 You have the full write toolset (read, grep, glob, edit, write, bash) rooted at
-the workspace. Apply fixes for EXACTLY the findings below — nothing speculative,
-nothing outside their scope.
+the workspace. Apply fixes for EXACTLY the findings below — apply only the literal
+fix, add no new abstractions, middleware, interfaces, or dependencies. If a finding
+demands new architecture, flag it, don't build it.
 
 Do NOT run git yourself (no commit, no push, no branch) — the orchestrator
 commits your changes as a fixup and pushes after you finish.

@@ -27,3 +27,8 @@ func TestSynthesisPromptGatesScope(t *testing.T) {
 	assert.Contains(t, synthesisPrompt, "acceptance criteria")
 	assert.Contains(t, synthesisPrompt, "remove them")
 }
+
+func TestFixPromptForbidsNewArchitecture(t *testing.T) {
+	assert.Contains(t, fixPrompt, "add no new abstractions")
+	assert.Contains(t, fixPrompt, "flag it, don't build it")
+}
