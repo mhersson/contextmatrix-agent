@@ -5,6 +5,9 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -133,12 +136,137 @@ func (g *Git) isDirty(ctx context.Context) (bool, error) {
 	return strings.TrimSpace(out) != "", nil
 }
 
-// CommitIfDirty stages all changes and commits them. It reports whether a
-// commit was made. A clean tree (no changes) returns (false, nil).
-//
-// git add -A is intentional here: the workspace is the agent's ephemeral
-// container directory for this card only; staging everything is the correct
-// product behavior.
+// buildArtifactExts are extensions that are essentially always compiled
+// outputs, never first-party source. Untracked files with these extensions are
+// not staged.
+var buildArtifactExts = map[string]bool{
+	".exe": true, ".dll": true, ".so": true, ".dylib": true,
+	".o": true, ".a": true, ".test": true, ".out": true,
+	".pyc": true, ".pyo": true, ".class": true,
+}
+
+// buildArtifactDirs are path segments whose contents are build outputs or
+// vendored dependencies, never source the agent should author.
+var buildArtifactDirs = map[string]bool{
+	"node_modules": true, "__pycache__": true, "target": true,
+}
+
+// isLikelyBuildArtifact reports whether the untracked file at absPath (relative
+// path rel) looks like a compiled build output that must not be committed: a
+// known build-output extension, a build-output path segment, or a native
+// executable magic number. Read errors are treated as "not an artifact" — the
+// guard never blocks on its own failure, only on positive evidence.
+func isLikelyBuildArtifact(absPath, rel string) bool {
+	if buildArtifactExts[strings.ToLower(filepath.Ext(rel))] {
+		return true
+	}
+
+	for _, seg := range strings.Split(filepath.ToSlash(rel), "/") {
+		if buildArtifactDirs[seg] {
+			return true
+		}
+	}
+
+	return hasExecutableMagic(absPath)
+}
+
+// hasExecutableMagic reports whether the file begins with a known native
+// executable magic number (ELF, Mach-O, or PE/COFF) — a compiled binary the
+// agent never legitimately authors as source.
+func hasExecutableMagic(absPath string) bool {
+	f, err := os.Open(absPath) //nolint:gosec // path is a workspace-relative entry from git status
+	if err != nil {
+		return false
+	}
+	defer f.Close() //nolint:errcheck // read-only sniff
+
+	var magic [4]byte
+	if n, _ := io.ReadFull(f, magic[:]); n < 4 {
+		return false
+	}
+
+	switch {
+	case magic[0] == 0x7f && magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F':
+		return true // ELF (Linux/BSD)
+	case magic[0] == 0xcf && magic[1] == 0xfa && magic[2] == 0xed && magic[3] == 0xfe:
+		return true // Mach-O 64-bit
+	case magic[0] == 0xce && magic[1] == 0xfa && magic[2] == 0xed && magic[3] == 0xfe:
+		return true // Mach-O 32-bit
+	case magic[0] == 0xca && magic[1] == 0xfe && magic[2] == 0xba && magic[3] == 0xbe:
+		return true // Mach-O universal
+	case magic[0] == 'M' && magic[1] == 'Z':
+		return true // PE/COFF (Windows)
+	}
+
+	return false
+}
+
+// stageForCommit stages the working tree while refusing to add untracked build
+// artifacts. It stages all TRACKED modifications/deletions (`git add -u`, which
+// never adds untracked files), then adds each UNTRACKED file individually
+// unless it looks like a build artifact, in which case the file is skipped with
+// a warning. This replaces a blanket `git add -A`: a build step's output can no
+// longer be committed just because the target repo's .gitignore failed to cover
+// it. Untracked files that look like build artifacts are skipped with a
+// warning rather than counted back to the caller.
+func (g *Git) stageForCommit(ctx context.Context) error {
+	if _, err := g.run(ctx, "add", "-u"); err != nil {
+		return fmt.Errorf("stage tracked changes: %w", err)
+	}
+
+	out, err := g.run(ctx, "status", "--porcelain", "--untracked-files=all")
+	if err != nil {
+		return fmt.Errorf("list untracked: %w", err)
+	}
+
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(line, "?? ") {
+			continue
+		}
+
+		rel := strings.TrimSpace(strings.TrimPrefix(line, "?? "))
+		if rel == "" {
+			continue
+		}
+
+		if isLikelyBuildArtifact(filepath.Join(g.dir, rel), rel) {
+			slog.Warn("refusing to stage likely build artifact", "path", rel)
+
+			continue
+		}
+
+		if _, err := g.run(ctx, "add", "--", rel); err != nil {
+			return fmt.Errorf("stage %q: %w", rel, err)
+		}
+	}
+
+	return nil
+}
+
+// hasStagedChanges reports whether the index has changes to commit. It runs
+// `git diff --cached --quiet` directly to read the exit code: 0 = nothing
+// staged, 1 = staged changes present.
+func (g *Git) hasStagedChanges(ctx context.Context) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "diff", "--cached", "--quiet")
+	cmd.Dir = g.dir
+	cmd.Env = g.credEnv()
+
+	err := cmd.Run()
+	if err == nil {
+		return false, nil
+	}
+
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 1 {
+		return true, nil
+	}
+
+	return false, fmt.Errorf("check staged changes: %w", err)
+}
+
+// CommitIfDirty stages tracked changes plus non-artifact untracked files via
+// stageForCommit (see its doc) and commits them. It reports whether a commit
+// was made. A clean tree (no changes) returns (false, nil).
 func (g *Git) CommitIfDirty(ctx context.Context, title, cardID string) (bool, error) {
 	dirty, err := g.isDirty(ctx)
 	if err != nil {
@@ -149,8 +277,18 @@ func (g *Git) CommitIfDirty(ctx context.Context, title, cardID string) (bool, er
 		return false, nil
 	}
 
-	if _, err := g.run(ctx, "add", "-A"); err != nil {
-		return false, fmt.Errorf("stage changes: %w", err)
+	if err := g.stageForCommit(ctx); err != nil {
+		return false, err
+	}
+
+	staged, err := g.hasStagedChanges(ctx)
+	if err != nil {
+		return false, err
+	}
+
+	if !staged {
+		// The tree was dirty only with skipped artifacts — nothing to commit.
+		return false, nil
 	}
 
 	body := "Automated commit by contextmatrix-agent for " + cardID + "."
@@ -272,23 +410,21 @@ func (g *Git) MergeBase(ctx context.Context, a, b string) (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
-// CommitWithMessage stages all changes and commits with the given message. It
+// CommitWithMessage stages tracked changes plus non-artifact untracked files
+// via stageForCommit (see its doc) and commits with the given message. It
 // reports whether a commit was made. A clean tree returns (false, nil).
-//
-// git add -A is intentional: this operates inside the ephemeral container
-// workspace for this card; staging everything is the correct product behavior.
 func (g *Git) CommitWithMessage(ctx context.Context, message string) (bool, error) {
-	dirty, err := g.isDirty(ctx)
+	if err := g.stageForCommit(ctx); err != nil {
+		return false, err
+	}
+
+	staged, err := g.hasStagedChanges(ctx)
 	if err != nil {
 		return false, err
 	}
 
-	if !dirty {
+	if !staged {
 		return false, nil
-	}
-
-	if _, err := g.run(ctx, "add", "-A"); err != nil {
-		return false, fmt.Errorf("stage changes: %w", err)
 	}
 
 	if _, err := g.run(ctx, "commit", "-m", message); err != nil {
@@ -298,22 +434,23 @@ func (g *Git) CommitWithMessage(ctx context.Context, message string) (bool, erro
 	return true, nil
 }
 
-// CommitFixup stages all changes — including untracked files, since fix runs
-// can legitimately create new ones — and creates a "fixup! <subject>" commit
-// targeting target (the hash of the commit to fix up). It reports whether a
-// commit was made. A clean tree returns (false, nil).
+// CommitFixup stages tracked changes plus non-artifact untracked files via
+// stageForCommit (see its doc) — fix runs can legitimately create new source
+// files — and creates a "fixup! <subject>" commit targeting target (the hash of
+// the commit to fix up). It reports whether a commit was made. A clean tree
+// returns (false, nil).
 func (g *Git) CommitFixup(ctx context.Context, target string) (bool, error) {
-	dirty, err := g.isDirty(ctx)
+	if err := g.stageForCommit(ctx); err != nil {
+		return false, err
+	}
+
+	staged, err := g.hasStagedChanges(ctx)
 	if err != nil {
 		return false, err
 	}
 
-	if !dirty {
+	if !staged {
 		return false, nil
-	}
-
-	if _, err := g.run(ctx, "add", "-A"); err != nil {
-		return false, fmt.Errorf("stage changes: %w", err)
 	}
 
 	if _, err := g.run(ctx, "commit", "--fixup="+target); err != nil {

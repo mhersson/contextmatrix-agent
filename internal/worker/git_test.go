@@ -64,6 +64,73 @@ func setupBareRemote(t *testing.T) string {
 	return bare
 }
 
+// writeFile writes content to dir/rel, creating parent dirs, with the given
+// mode. Helper for staging tests.
+func writeFile(t *testing.T, dir, rel string, content []byte, mode os.FileMode) {
+	t.Helper()
+
+	full := filepath.Join(dir, rel)
+	require.NoError(t, os.MkdirAll(filepath.Dir(full), 0o755))
+	require.NoError(t, os.WriteFile(full, content, mode))
+}
+
+func TestStageForCommit_SkipsBuildArtifacts(t *testing.T) {
+	remote := setupBareRemote(t)
+	ws := t.TempDir()
+
+	g := NewGit(ws, "")
+	require.NoError(t, g.Clone(context.Background(), remote, "main"))
+	require.NoError(t, g.CreateBranch(context.Background(), "cm/cmx-001"))
+	g.SetBranchPolicy("cm/cmx-001", "main", "main")
+
+	// A legitimate source edit (tracked: the seeded README).
+	writeFile(t, ws, "README.md", []byte("# updated\n"), 0o644)
+	// A new source file (untracked, must be staged).
+	writeFile(t, ws, "main.go", []byte("package main\n"), 0o644)
+	// A compiled ELF binary (untracked, must be skipped).
+	elf := append([]byte{0x7f, 'E', 'L', 'F'}, make([]byte, 64)...)
+	writeFile(t, ws, "app", elf, 0o755)
+	// A Go test binary by extension (untracked, must be skipped).
+	writeFile(t, ws, "pkg.test", []byte("not really a binary"), 0o755)
+
+	committed, err := g.CommitWithMessage(context.Background(), "feat: real work")
+	require.NoError(t, err)
+	require.True(t, committed)
+
+	// HEAD must contain README.md and main.go but NOT app or pkg.test.
+	out, err := g.run(context.Background(), "show", "--name-only", "--format=", "HEAD")
+	require.NoError(t, err)
+	assert.Contains(t, out, "README.md")
+	assert.Contains(t, out, "main.go")
+	assert.NotContains(t, out, "app")
+	assert.NotContains(t, out, "pkg.test")
+
+	// The skipped artifacts remain untracked, not lost.
+	status, err := g.run(context.Background(), "status", "--porcelain")
+	require.NoError(t, err)
+	assert.Contains(t, status, "?? app")
+	assert.Contains(t, status, "?? pkg.test")
+}
+
+// When only artifacts are dirty, the commit helpers report no commit (no empty
+// commit, no failed `git commit`).
+func TestCommitWithMessage_OnlyArtifactsIsNoOp(t *testing.T) {
+	remote := setupBareRemote(t)
+	ws := t.TempDir()
+
+	g := NewGit(ws, "")
+	require.NoError(t, g.Clone(context.Background(), remote, "main"))
+	require.NoError(t, g.CreateBranch(context.Background(), "cm/cmx-001"))
+	g.SetBranchPolicy("cm/cmx-001", "main", "main")
+
+	elf := append([]byte{0x7f, 'E', 'L', 'F'}, make([]byte, 64)...)
+	writeFile(t, ws, "app", elf, 0o755)
+
+	committed, err := g.CommitWithMessage(context.Background(), "feat: nothing real")
+	require.NoError(t, err)
+	assert.False(t, committed, "a tree dirty only with artifacts must not produce a commit")
+}
+
 func TestCloneBranchCommitPush(t *testing.T) {
 	t.Parallel()
 
