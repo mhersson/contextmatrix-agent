@@ -390,7 +390,7 @@ func (o *run) synthesize(ctx context.Context, findings string, authoritative boo
 	d := o.d
 	cfg := d.Cfg
 
-	model := resolveOrchestratorModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
+	model := resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
 		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel)
 
 	var (

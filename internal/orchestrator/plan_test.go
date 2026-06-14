@@ -8,6 +8,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/events"
 	"github.com/mhersson/contextmatrix-agent/internal/llm"
+	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -306,6 +307,74 @@ func TestResolveOrchestratorModel(t *testing.T) {
 			"", "", "default/model")
 		assert.Equal(t, "default/model", got)
 	})
+}
+
+func TestResolveDecisionModelFloorsWeakPayload(t *testing.T) {
+	reg := reviewerRegistry()
+	emit := events.NewEmitter(nil, nil)
+	ops := &fakeOps{}
+
+	got := resolveDecisionModel(context.Background(), reg, emit, ops, "CARD-1",
+		"", "payload/model", "default/model")
+
+	assert.Equal(t, "rev/alpha", got)
+	assert.NotEqual(t, "payload/model", got)
+	assert.NotEqual(t, "default/model", got)
+}
+
+func TestResolveDecisionModelHonorsPin(t *testing.T) {
+	reg := reviewerRegistry()
+	emit := events.NewEmitter(nil, nil)
+	ops := &fakeOps{}
+
+	got := resolveDecisionModel(context.Background(), reg, emit, ops, "CARD-1",
+		"pinned/model", "payload/model", "default/model")
+
+	assert.Equal(t, "pinned/model", got)
+}
+
+func TestResolveDecisionModelUnresolvablePinFloorsAndWarns(t *testing.T) {
+	reg := reviewerRegistry()
+	emit := events.NewEmitter(nil, nil)
+	ops := &fakeOps{}
+
+	got := resolveDecisionModel(context.Background(), reg, emit, ops, "CARD-1",
+		"ghost/model", "payload/model", "default/model")
+
+	assert.Equal(t, "rev/alpha", got)
+
+	var addLogs []string
+
+	for _, c := range ops.recorded() {
+		if strings.HasPrefix(c, "AddLog:") {
+			addLogs = append(addLogs, c)
+		}
+	}
+
+	require.Len(t, addLogs, 1)
+	assert.Contains(t, addLogs[0], "ghost/model")
+}
+
+func TestResolveDecisionModelNilRegistryFallsBack(t *testing.T) {
+	emit := events.NewEmitter(nil, nil)
+	ops := &fakeOps{}
+
+	got := resolveDecisionModel(context.Background(), nil, emit, ops, "CARD-1",
+		"", "payload/model", "default/model")
+
+	assert.Equal(t, "payload/model", got)
+}
+
+func TestResolveDecisionModelEmptyPoolReturnsCapableDefault(t *testing.T) {
+	reg := registry.NewRegistryWithCapabilities(nil, "default/model", reviewerCatalog(),
+		map[string]map[registry.Role]float64{"rev/alpha": {registry.RoleReviewer: 0.5}})
+	emit := events.NewEmitter(nil, nil)
+	ops := &fakeOps{}
+
+	got := resolveDecisionModel(context.Background(), reg, emit, ops, "CARD-1",
+		"", "payload/model", "default/model")
+
+	assert.Equal(t, "default/model", got)
 }
 
 func TestExtractJSON(t *testing.T) {

@@ -229,6 +229,44 @@ func resolveOrchestratorModel(
 	return fallback
 }
 
+// resolveDecisionModel resolves the model an orchestrator DECISION phase runs on
+// (plan decomposition, review synthesis). These phases are reasoning- and
+// calibration-sensitive — a weak model emits malformed plans and mis-calibrated
+// verdicts — so, unlike the low-stakes docs phase, they are floored to a capable
+// judgment model. A catalog-resolvable ModelOrchestrator pin still wins (operator
+// override; an unresolvable pin already warned inside resolveOrchestratorModel).
+// Otherwise the floor is the same best-value selection the authoritative review
+// panel uses — RoleReviewer @ TierComplex — the measured proxy for orchestrator-
+// level judgment (the live catalog measures only coder/reviewer; reviewer is the
+// closer fit for both decomposing and judging). Fixed at TierComplex for EVERY
+// call: decision quality does not scale with task complexity, so even a trivial
+// card gets a calibrated judge. Degrades to the base resolution when no registry
+// is present.
+func resolveDecisionModel(
+	ctx context.Context,
+	reg *registry.Registry,
+	emit *events.Emitter,
+	ops Ops,
+	cardID, pinned, payload, fallback string,
+) string {
+	base := resolveOrchestratorModel(ctx, reg, emit, ops, cardID, pinned, payload, fallback)
+
+	// A resolvable operator pin is authoritative — never floor over it.
+	if resolvePin(reg, pinned) || reg == nil {
+		return base
+	}
+
+	floor := reg.SelectByComplexity(registry.SelectInput{
+		Role: registry.RoleReviewer,
+		Tier: registry.TierComplex,
+	}).Model
+	if floor == "" {
+		return base // defensive; SelectByComplexity does not return empty today
+	}
+
+	return floor
+}
+
 // isBudgetError reports whether err is (or wraps) the budget-ceiling sentinel.
 func isBudgetError(err error) bool {
 	var be *BudgetExceededError
@@ -278,7 +316,7 @@ func runPlan(ctx context.Context, o *run) error {
 	d := o.d
 	cfg := d.Cfg
 
-	model := resolveOrchestratorModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
+	model := resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
 		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel)
 
 	_ = d.Ops.AddLog(ctx, cfg.CardID, "orchestrator model: "+model) //nolint:errcheck // advisory selection record
