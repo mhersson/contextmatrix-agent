@@ -32,3 +32,10 @@ func TestFixPromptForbidsNewArchitecture(t *testing.T) {
 	assert.Contains(t, fixPrompt, "add no new abstractions")
 	assert.Contains(t, fixPrompt, "flag it, don't build it")
 }
+
+func TestBuildArtifactHygieneInBothCodingPrompts(t *testing.T) {
+	for name, p := range map[string]string{"coder": coderPrompt, "fix": fixPrompt} {
+		assert.Contains(t, p, "do not leave the binary behind",
+			"%s prompt must include the build-hygiene note", name)
+	}
+}

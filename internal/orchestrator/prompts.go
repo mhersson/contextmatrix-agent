@@ -105,6 +105,15 @@ subtasks, but no code>
 - <path>
 `
 
+// buildHygieneNote tells the coder/fixer not to leave a compiled binary in the
+// workspace — leftover artifacts clutter the surface the reviewers read. Shared
+// by coderPrompt and fixPrompt so the guidance cannot drift (same pattern as
+// selfReviewBlock).
+const buildHygieneNote = `When you compile only to check the build, do not leave the binary behind — build
+to a throwaway path (e.g. go build -o /dev/null ./...) or delete the compiled
+output before you finish. Leftover build artifacts clutter the workspace the
+reviewers read.`
+
 // selfReviewBlock is the coder/fixer self-review gate, shared by coderPrompt and
 // fixPrompt so the two cannot drift. Hygiene only — it must not invite scope
 // expansion. Adapted from the runner's execute-task skill (Step 5).
@@ -136,6 +145,8 @@ them. Do NOT run git yourself (no commit, no push, no branch) — the orchestrat
 commits and pushes your changes after you finish.
 
 Write tests alongside the code and run them.
+
+` + buildHygieneNote + `
 
 ` + selfReviewBlock + `
 
@@ -311,6 +322,8 @@ commits your changes as a fixup and pushes after you finish.
 
 Run the project's
 tests after your changes to confirm they pass.
+
+` + buildHygieneNote + `
 
 PARENT CARD (context)
 Title: %s
