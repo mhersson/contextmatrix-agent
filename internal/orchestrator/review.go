@@ -109,6 +109,10 @@ func runReview(ctx context.Context, o *run) error {
 			return nil
 		}
 
+		// Carry this round's findings into the next round so the panel verifies
+		// their resolution without importing new scope (cross-round memory).
+		o.lastFindings = findings
+
 		// Not approved: count the attempt. Reaching the cap parks the card for a
 		// human rather than burning another fix round.
 		n, err := d.Ops.IncrementReviewAttempts(ctx, cfg.CardID)
@@ -205,11 +209,15 @@ func (o *run) runSpecialists(ctx context.Context) (string, error) {
 		{"security", securityPrompt},
 	}
 
+	// Prior findings are constant across the three lenses: the same previous-round
+	// context goes to every specialist (cross-round memory).
+	prior := priorFindingsBlock(o.lastFindings)
+
 	specs := make([]harness.SubagentSpec, len(lenses))
 	for i, l := range lenses {
 		specs[i] = harness.SubagentSpec{
 			Role:          l.role,
-			Prompt:        fmt.Sprintf(specialistPrompt, l.prompt, o.tc.Title, o.tc.Description, diff),
+			Prompt:        fmt.Sprintf(specialistPrompt, l.prompt, o.tc.Title, o.tc.Description, diff, prior),
 			Model:         panel[i].Model,
 			MaxTurns:      cfg.MaxTurns,
 			ContextWindow: panel[i].ContextWindow,
@@ -321,7 +329,9 @@ func (o *run) synthesize(ctx context.Context, findings string) (verdict, error) 
 			repair = repairBlock(lastErr.Error())
 		}
 
-		task := fmt.Sprintf(synthesisPrompt, o.tc.Title, o.tc.Description, findings, repair)
+		prior := priorFindingsBlock(o.lastFindings)
+
+		task := fmt.Sprintf(synthesisPrompt, o.tc.Title, o.tc.Description, prior, findings, repair)
 
 		res, err := o.runModel(ctx, d.ReadTools, task, model)
 

@@ -328,6 +328,87 @@ func TestReviewRoundTwoDiffsAgainstSnapshot(t *testing.T) {
 		"round 2 must diff the delta against the round-1 reviewed head")
 }
 
+func TestReviewPriorFindingsFedToNextRound(t *testing.T) {
+	// Round 1 is not approved with a recognizable finding (delta.go / nil deref);
+	// round 2 approves. The round-2 specialist panel must receive the round-1
+	// findings as a PRIOR FINDINGS block (cross-round memory), and round 1 — with
+	// no prior — must not carry that block.
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+	client := &planLLM{responses: []llm.Response{
+		// Round 1: specialists + synthesis returns the distinctive finding.
+		stopResp("Correctness: bug", 0.01),
+		stopResp("Design: ok", 0.01),
+		stopResp("Security: ok", 0.01),
+		stopResp(`{"approved":false,"summary":"fix it","fixes":[{"file":"delta.go","issue":"nil deref","suggestion":"guard the pointer"}]}`, 0.02),
+		// Fix run, then round 2 approves.
+		stopResp("coder: fixed", 0.05),
+		stopResp("Correctness: ok now", 0.01),
+		stopResp("Design: ok", 0.01),
+		stopResp("Security: ok", 0.01),
+		stopResp(`{"approved":true,"summary":"clean now","fixes":[]}`, 0.02),
+	}}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	// Partition the captured specialist prompts into round 1 (before the fix coder
+	// run) and round 2 (after it). The fix coder task is the one addressing review
+	// feedback; specialists are the "code-review specialist" prompts.
+	fixIdx := -1
+
+	for i, task := range client.tasks {
+		if strings.Contains(task, "addressing review feedback") {
+			fixIdx = i
+
+			break
+		}
+	}
+
+	require.GreaterOrEqual(t, fixIdx, 0, "fix coder run must appear in captured tasks; tasks=%v", client.tasks)
+
+	var round1Specialists, round2Specialists []string
+
+	for i, task := range client.tasks {
+		if !strings.Contains(task, "code-review specialist") {
+			continue
+		}
+
+		if i < fixIdx {
+			round1Specialists = append(round1Specialists, task)
+		} else {
+			round2Specialists = append(round2Specialists, task)
+		}
+	}
+
+	require.Len(t, round1Specialists, 3, "round 1 fans out three specialists")
+	require.Len(t, round2Specialists, 3, "round 2 fans out three specialists")
+
+	// Round 1 has no prior round: no PRIOR FINDINGS block.
+	for _, task := range round1Specialists {
+		assert.NotContains(t, task, "PRIOR FINDINGS",
+			"round 1 has no prior findings; specialist prompt must not carry the block")
+	}
+
+	// Round 2 must carry the round-1 findings (delta.go / nil deref) framed as
+	// PRIOR FINDINGS so the panel verifies resolution without re-raising scope.
+	carried := false
+
+	for _, task := range round2Specialists {
+		if strings.Contains(task, "PRIOR FINDINGS") &&
+			strings.Contains(task, "delta.go") &&
+			strings.Contains(task, "nil deref") {
+			carried = true
+		}
+	}
+
+	assert.True(t, carried,
+		"round 2 specialist prompt must carry the round-1 findings under PRIOR FINDINGS; round2=%v", round2Specialists)
+}
+
 func TestReviewCapParks(t *testing.T) {
 	// Seed the attempts counter one below the cap (5): the first non-approval
 	// increments to exactly 5, pinning the >= boundary (n == cap parks).

@@ -164,6 +164,11 @@ type run struct {
 	// run safely re-runs one full review, after which the delta base re-establishes.
 	lastReviewBase string
 
+	// lastFindings is the previous review round's findings text, fed to the next
+	// round's panel and synthesizer so they verify resolution without re-raising
+	// it as new scope (cross-round memory). Empty on round 1 and on resume.
+	lastFindings string
+
 	// runVerify executes the detected verify command (best-effort spec/test gate)
 	// and returns its combined output plus a pass flag. It is a struct field so
 	// tests can stub the subprocess; the default shells out via execVerify.

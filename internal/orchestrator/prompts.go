@@ -172,8 +172,9 @@ Description:
 // never a review concern.
 //
 // The trailing %s slots are filled by runSpecialists: the lens block (one of the
-// three below), parent card title, parent card description, and the full branch
-// diff against base.
+// three below), parent card title, parent card description, the full branch diff
+// against base, and an optional prior-findings block (the previous round's
+// findings on delta rounds). The empty prior-findings block collapses to nothing.
 const specialistPrompt = `You are a code-review specialist. You have read-only tools (read, grep, glob)
 to inspect the codebase. You do NOT create or modify cards or files, and you do
 NOT run git. Produce a findings report as TEXT — another agent synthesizes the
@@ -206,7 +207,7 @@ Description:
 
 BRANCH DIFF (changes under review)
 %s
-
+%s
 Respond with your findings as text: a short Strengths list, then Concerns
 grouped by severity, each as "file:line — what — why — fix". Omit empty severity
 groups. End with a one-sentence verdict for your specialty.
@@ -248,8 +249,10 @@ Stay strictly within security and performance; do not opine outside it.`
 // approved with a concrete fix list; only Minor/Nit/none → approved.
 //
 // The trailing %s slots are filled by synthesize: parent card title, parent
-// card description, the concatenated specialist findings, and an optional repair
-// block (the previous parse error). Empty optional blocks collapse to nothing.
+// card description, an optional prior-findings block (the previous round's
+// findings on delta rounds), the concatenated specialist findings, and an
+// optional repair block (the previous parse error). Empty optional blocks
+// collapse to nothing.
 const synthesisPrompt = `You are the review synthesizer. Three specialists (correctness, design,
 security) have reviewed a change and produced the findings below. Merge them,
 deduplicate, and decide a single verdict.
@@ -274,7 +277,7 @@ Title: %s
 
 Description:
 %s
-
+%s
 SPECIALIST FINDINGS
 %s
 %s
@@ -393,4 +396,16 @@ func diagnosisBlock(diagnosis string) string {
 	}
 
 	return "\nROOT-CAUSE DIAGNOSIS (ground the plan in this; the bug was investigated\nbefore planning):\n" + diagnosis + "\n"
+}
+
+// priorFindingsBlock renders the previous review round's findings as an optional
+// context block for the review panel and synthesizer, or "" when there are none.
+// It frames them as already-raised — verify genuine resolution without importing
+// new scope. Empty collapses to nothing, same pattern as repairBlock.
+func priorFindingsBlock(findings string) string {
+	if strings.TrimSpace(findings) == "" {
+		return ""
+	}
+
+	return "\nPRIOR FINDINGS (already raised — verify resolution, do not import new scope):\n" + findings + "\n"
 }
