@@ -208,11 +208,48 @@ func TestResolveFixModelUsesFixTier(t *testing.T) {
 	// No coder pin -> complexity selection path; card tier is moderate by default.
 	o := newReviewRun(d, cmclient.TaskContext{CardID: "CARD-1"}, 0)
 
-	assert.Equal(t, cheapCoder, o.resolveFixModel("simple"),
+	assert.Equal(t, cheapCoder, o.resolveFixModel("simple", false),
 		"simple fix_tier clears the cheap coder's bar")
-	assert.Equal(t, fallback, o.resolveFixModel("complex"),
+	assert.Equal(t, fallback, o.resolveFixModel("complex", false),
 		"complex fix_tier excludes the cheap coder -> capable fallback")
-	assert.NotEqual(t, cheapCoder, o.resolveFixModel("complex"))
+	assert.NotEqual(t, cheapCoder, o.resolveFixModel("complex", false))
+}
+
+// TestResolveFixModelAuthoritativeForcesComplex proves the authoritative pass
+// sizes the fix coder on the complex tier regardless of the synthesizer's
+// fix_tier. The cheap coder clears the simple bar (0.4) but not the complex bar
+// (0.8); so resolveFixModel("simple", false) picks it, but the authoritative
+// resolveFixModel("simple", true) escalates to complex, gating the cheap coder
+// out and falling back to the capable model.
+func TestResolveFixModelAuthoritativeForcesComplex(t *testing.T) {
+	const (
+		cheapCoder = "cheap/coder"
+		fallback   = "capable/fallback"
+	)
+
+	catalog := llm.Catalog{
+		{ID: cheapCoder, ContextLength: 200000, PromptPricePerTok: 0.0000005, CompletionPricePerTok: 0.0000015, SupportedParameters: []string{"tools"}},
+		{ID: fallback, ContextLength: 200000, PromptPricePerTok: 0.000006, CompletionPricePerTok: 0.000012, SupportedParameters: []string{"tools"}},
+	}
+	caps := map[string]map[registry.Role]float64{
+		cheapCoder: {registry.RoleCoder: 0.95},
+	}
+	prior := 0.5
+	priors := registry.Priors{
+		Meta:   registry.PriorsMeta{TierBars: map[string]float64{"simple": 0.4, "moderate": 0.6, "complex": 0.8}},
+		Models: map[string]registry.PriorEntry{cheapCoder: {Coder: &prior}},
+	}
+	reg := registry.NewRegistryWithCapabilities(nil, fallback, catalog, caps).
+		WithSelection(registry.Selection{Priors: priors, Floor: 0, PriceHeadroom: 1.5})
+
+	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reg)
+	o := newReviewRun(d, cmclient.TaskContext{CardID: "CARD-1"}, 0)
+
+	assert.Equal(t, cheapCoder, o.resolveFixModel("simple", false),
+		"non-authoritative simple fix_tier clears the cheap coder's bar")
+	assert.Equal(t, fallback, o.resolveFixModel("simple", true),
+		"authoritative pass forces complex -> cheap coder excluded -> capable fallback")
+	assert.NotEqual(t, cheapCoder, o.resolveFixModel("simple", true))
 }
 
 // TestFormatFixesFixFilesRoundTrip pins the line-shape contract between
@@ -497,32 +534,46 @@ func TestReviewPriorFindingsFedToNextRound(t *testing.T) {
 }
 
 func TestReviewCapParks(t *testing.T) {
-	// Seed the attempts counter one below the cap (5): the first non-approval
-	// increments to exactly 5, pinning the >= boundary (n == cap parks).
+	// At the review cliff the gated authoritative pass runs instead of parking on a
+	// cheap verdict: one strong review (rejects), ONE strong fix, one strong
+	// re-review (still rejects) -> park with the SECOND (strong) review's findings.
+	// Seed tc.ReviewAttempts = cap-1 (4) so iter 0 is the authoritative round, and
+	// ops.reviewAttempts = 4 so the running totals mirror the persisted count.
 	ops := &fakeOps{reviewAttempts: 4}
 	git := &fakeGit{committed: true}
 	client := &planLLM{responses: []llm.Response{
+		// Authoritative review 1: 3 specialists + synthesis (rejects).
 		stopResp("Correctness: bug", 0.01),
+		stopResp("Design: ok", 0.01),
+		stopResp("Security: ok", 0.01),
+		stopResp(`{"approved":false,"summary":"fix it","fixes":[{"file":"x.go","issue":"first","suggestion":"patch"}]}`, 0.02),
+		// Gated strong fix run.
+		stopResp("coder: attempted fix", 0.05),
+		// Authoritative re-review: 3 specialists + synthesis (still rejects).
+		stopResp("Correctness: still bug", 0.01),
 		stopResp("Design: ok", 0.01),
 		stopResp("Security: ok", 0.01),
 		stopResp(`{"approved":false,"summary":"still broken","fixes":[{"file":"a.go","issue":"bug","suggestion":"patch"}]}`, 0.02),
 	}}
 	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
 
-	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body", State: "in_progress"}
+	tc := cmclient.TaskContext{
+		CardID: "CARD-1", Title: "Parent", Description: "body",
+		State: "in_progress", ReviewAttempts: 4,
+	}
 	o := newReviewRun(d, tc, 0)
 
 	err := runReview(context.Background(), o)
 
 	var parked *ReviewParkedError
 	require.ErrorAs(t, err, &parked, "cap exhaustion must return ReviewParkedError")
-	// The findings must carry the actionable fix items, not just the summary.
+	// The park must carry the SECOND (strong) review's findings, not the first.
 	assert.Contains(t, parked.Findings, "still broken")
-	assert.Contains(t, parked.Findings, "a.go", "findings must carry the fix file")
-	assert.Contains(t, parked.Findings, "bug", "findings must carry the fix issue")
+	assert.Contains(t, parked.Findings, "a.go", "park findings must carry the strong re-review's fix file")
+	assert.Contains(t, parked.Findings, "bug", "park findings must carry the strong re-review's fix issue")
 
 	calls := ops.recorded()
-	// AddLog recorded with outstanding findings.
+	// AddLog recorded with the strong re-review's outstanding findings.
 	logged := false
 
 	for _, c := range calls {
@@ -531,11 +582,83 @@ func TestReviewCapParks(t *testing.T) {
 		}
 	}
 
-	assert.True(t, logged, "AddLog must record outstanding findings; calls=%v", calls)
+	assert.True(t, logged, "AddLog must record the strong re-review's findings; calls=%v", calls)
 
-	// No fix run after the park: no CommitFixup.
+	// Exactly ONE fix run (the gated strong fix) happened.
+	fixupCount := 0
+
+	for _, c := range git.recorded() {
+		if strings.HasPrefix(c, "CommitFixup:") {
+			fixupCount++
+		}
+	}
+
+	assert.Equal(t, 1, fixupCount, "exactly one gated fix run before park; git=%v", git.recorded())
+}
+
+func TestReviewAuthoritativeApprovesNoFix(t *testing.T) {
+	// At the cliff the authoritative pass runs and APPROVES on the first strong
+	// review: runReview finishes nil and NO fix runs (the gated fix is reserved for
+	// confirmed issues only).
+	ops := &fakeOps{reviewAttempts: 4}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: []llm.Response{
+		stopResp("Correctness: clean", 0.01),
+		stopResp("Design: clean", 0.01),
+		stopResp("Security: clean", 0.01),
+		stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.02),
+	}}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{
+		CardID: "CARD-1", Title: "Parent", Description: "body",
+		State: "in_progress", ReviewAttempts: 4,
+	}
+	o := newReviewRun(d, tc, 0)
+
+	require.NoError(t, runReview(context.Background(), o),
+		"authoritative approval must finish the card")
+
 	assert.Equal(t, -1, indexOfPrefix(git.recorded(), "CommitFixup:"),
-		"no fix run after cap park; git=%v", git.recorded())
+		"no fix when the authoritative review approves; git=%v", git.recorded())
+}
+
+func TestReviewAuthoritativeFullScope(t *testing.T) {
+	// The cliff re-widens to full scope even when a delta snapshot is set. iter 0
+	// is an INCREMENTAL round (cap-2 seed): it rejects, lands a fix, and captures
+	// the reviewed head as the next round's delta base. iter 1 is authoritative and
+	// must IGNORE that snapshot, diffing the full branch against the base again.
+	ops := &fakeOps{reviewAttempts: 3}
+	git := &fakeGit{committed: true, headSHA: "snap1"}
+	client := &planLLM{responses: []llm.Response{
+		// Incremental round (iter 0): 3 specialists + synthesis (rejects) -> fix.
+		stopResp("Correctness: bug", 0.01),
+		stopResp("Design: ok", 0.01),
+		stopResp("Security: ok", 0.01),
+		stopResp(`{"approved":false,"summary":"fix it","fixes":[{"file":"a.go","issue":"bug","suggestion":"patch"}]}`, 0.02),
+		stopResp("coder: fixed", 0.05),
+		// Authoritative round (iter 1): 3 specialists + synthesis (approves).
+		stopResp("Correctness: ok", 0.01),
+		stopResp("Design: ok", 0.01),
+		stopResp("Security: ok", 0.01),
+		stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.02),
+	}}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{
+		CardID: "CARD-1", Title: "Parent", Description: "body",
+		State: "in_progress", ReviewAttempts: 3,
+	}
+	o := newReviewRun(d, tc, 0)
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	require.GreaterOrEqual(t, len(git.diffBases), 2,
+		"both rounds must each diff once; diffBases=%v", git.diffBases)
+	assert.Equal(t, "main", git.diffBases[0],
+		"incremental round 1 has no prior snapshot -> diffs the base branch")
+	assert.Equal(t, "main", git.diffBases[1],
+		"authoritative round must re-widen to the base branch despite lastReviewBase==snap1")
 }
 
 func TestReviewZeroCapDefaultsToConvention(t *testing.T) {
@@ -594,7 +717,7 @@ func TestReviewPanelDiversity(t *testing.T) {
 	// The coder used rev/alpha on a subtask; the panel must exclude it.
 	o.coderModels = map[string]bool{"rev/alpha": true}
 
-	specs := o.reviewPanel(estimateTokens("diff"))
+	specs := o.reviewPanel(estimateTokens("diff"), false)
 	require.Len(t, specs, 3)
 
 	for _, s := range specs {
@@ -615,12 +738,88 @@ func TestReviewPinOverridesPanel(t *testing.T) {
 	o := newReviewRun(d, tc, 0)
 	o.coderModels = map[string]bool{"rev/alpha": true}
 
-	specs := o.reviewPanel(estimateTokens("diff"))
+	specs := o.reviewPanel(estimateTokens("diff"), false)
 	require.Len(t, specs, 3)
 
 	for _, s := range specs {
 		assert.Equal(t, "pinned/model", s.Model, "reviewer pin must override the whole panel")
 	}
+}
+
+// TestReviewPanelEscalatesWhenAuthoritative proves the authoritative pass sizes
+// the panel on the complex tier, not the card tier. Three cheap-but-weak
+// reviewers clear the moderate bar (0.6) but not the complex bar (0.8); one
+// expensive strong reviewer clears both. At moderate the cheap trio fills the
+// three slots (the strong model is priced out of the band), so it never appears.
+// At complex the weak trio is gated out, forcing the strong model in — a model
+// the moderate panel does not select.
+func TestReviewPanelEscalatesWhenAuthoritative(t *testing.T) {
+	const strong = "strong/reviewer"
+
+	catalog := llm.Catalog{
+		{ID: "weak/one", ContextLength: 200000, PromptPricePerTok: 0.0000004, CompletionPricePerTok: 0.0000006, SupportedParameters: []string{"tools"}},
+		{ID: "weak/two", ContextLength: 200000, PromptPricePerTok: 0.00000045, CompletionPricePerTok: 0.00000065, SupportedParameters: []string{"tools"}},
+		{ID: "weak/three", ContextLength: 200000, PromptPricePerTok: 0.0000005, CompletionPricePerTok: 0.0000007, SupportedParameters: []string{"tools"}},
+		{ID: strong, ContextLength: 200000, PromptPricePerTok: 0.000005, CompletionPricePerTok: 0.000005, SupportedParameters: []string{"tools"}},
+		{ID: "default/model", ContextLength: 131072, SupportedParameters: []string{"tools"}},
+	}
+	// Measured scores clear the (0) floor so the functional gate passes; the priors
+	// carry the tier bar.
+	caps := map[string]map[registry.Role]float64{
+		"weak/one":   {registry.RoleReviewer: 0.95},
+		"weak/two":   {registry.RoleReviewer: 0.95},
+		"weak/three": {registry.RoleReviewer: 0.95},
+		strong:       {registry.RoleReviewer: 0.95},
+	}
+	w1, w2, w3, st := 0.65, 0.66, 0.67, 0.90
+	priors := registry.Priors{
+		Meta: registry.PriorsMeta{TierBars: map[string]float64{"simple": 0.4, "moderate": 0.6, "complex": 0.8}},
+		Models: map[string]registry.PriorEntry{
+			"weak/one":   {Reviewer: &w1},
+			"weak/two":   {Reviewer: &w2},
+			"weak/three": {Reviewer: &w3},
+			strong:       {Reviewer: &st},
+		},
+	}
+	reg := registry.NewRegistryWithCapabilities(nil, "default/model", catalog, caps).
+		WithSelection(registry.Selection{Priors: priors, Floor: 0, PriceHeadroom: 1.5})
+
+	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reg)
+	o := newReviewRun(d, cmclient.TaskContext{CardID: "CARD-1"}, 0)
+	o.cardTier = "moderate" // no reviewer pin -> selection path
+
+	est := estimateTokens("diff")
+
+	moderatePanel := o.reviewPanel(est, false)
+	require.Len(t, moderatePanel, 3)
+
+	complexPanel := o.reviewPanel(est, true)
+	require.Len(t, complexPanel, 3)
+
+	moderateModels := map[string]bool{}
+	for _, s := range moderatePanel {
+		moderateModels[s.Model] = true
+	}
+
+	// The moderate panel never reaches the strong (expensive) model.
+	assert.NotContains(t, moderateModels, strong,
+		"moderate panel must be filled by the cheap trio; panel=%v", moderatePanel)
+
+	// The complex escalation must select at least one model the moderate panel did
+	// not — here the strong model, which only clears the complex bar.
+	escalated := false
+
+	for _, s := range complexPanel {
+		if !moderateModels[s.Model] {
+			escalated = true
+		}
+	}
+
+	assert.True(t, escalated,
+		"authoritative (complex) panel must pick a higher model the moderate panel does not; moderate=%v complex=%v",
+		moderatePanel, complexPanel)
+	assert.Contains(t, []string{complexPanel[0].Model, complexPanel[1].Model, complexPanel[2].Model}, strong,
+		"complex bar gates out the weak trio, forcing the strong model in; complex=%v", complexPanel)
 }
 
 func TestReviewGateFailureSkipsSpecialists(t *testing.T) {

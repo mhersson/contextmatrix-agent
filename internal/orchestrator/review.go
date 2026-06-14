@@ -64,11 +64,14 @@ func (e *ReviewParkedError) Error() string {
 }
 
 // runReview is the review phase. The parent enters review (idempotent on
-// resume), then loops: a cheap detected verify gate runs first and short-circuits
-// to the fix run on failure; otherwise three read-only specialists fan out on
-// diverse models and one synthesis call decides approve-or-fix. Approval exits
-// nil. Each non-approval increments the card's review attempts; reaching the cap
-// parks the card. The budget ledger is checked before every model-bearing step.
+// resume), then loops cheap incremental rounds: a detected verify gate runs first
+// and short-circuits to the fix run on failure; otherwise three read-only
+// specialists fan out on diverse models and one synthesis call decides
+// approve-or-fix. Approval exits nil; each non-approval increments the card's
+// review attempts and runs a fix. At the cliff (the round that would otherwise
+// park) the gated authoritative pass takes over instead of parking on a cheap
+// verdict — it is the sole park gate. The budget ledger is checked before every
+// model-bearing step.
 func runReview(ctx context.Context, o *run) error {
 	d := o.d
 	cfg := d.Cfg
@@ -80,9 +83,9 @@ func runReview(ctx context.Context, o *run) error {
 		}
 	}
 
-	// Guard a mis-wired worker: a zero or negative cap would make n >= cap true
-	// on the FIRST non-approval and park every card immediately. Fall back to
-	// CM's convention instead.
+	// Guard a mis-wired worker: a zero or negative cap would make the cliff trip
+	// on the FIRST round and park (via the authoritative pass) every card
+	// immediately. Fall back to CM's convention instead.
 	attemptsCap := cfg.ReviewAttemptsCap
 	if attemptsCap <= 0 {
 		attemptsCap = defaultReviewAttemptsCap
@@ -95,7 +98,14 @@ func runReview(ctx context.Context, o *run) error {
 		// count of prior rounds, so round N is stable for the body record.
 		round := o.tc.ReviewAttempts + iter + 1
 
-		findings, fixTier, approved, err := o.reviewRound(ctx, verifyCmd)
+		// At the cliff (the round that would otherwise park), run the gated
+		// authoritative pass instead of another cheap round — never park on a
+		// cheap verdict. It is terminal: returns nil (finished) or parks.
+		if round >= attemptsCap {
+			return o.authoritativeReview(ctx, verifyCmd, round)
+		}
+
+		findings, fixTier, approved, err := o.reviewRound(ctx, verifyCmd, false)
 		if err != nil {
 			return err
 		}
@@ -114,22 +124,11 @@ func runReview(ctx context.Context, o *run) error {
 		// their resolution without importing new scope (cross-round memory).
 		o.lastFindings = findings
 
-		// Not approved: count the attempt. Reaching the cap parks the card for a
-		// human rather than burning another fix round.
-		n, err := d.Ops.IncrementReviewAttempts(ctx, cfg.CardID)
-		if err != nil {
+		if _, err := d.Ops.IncrementReviewAttempts(ctx, cfg.CardID); err != nil {
 			return fmt.Errorf("increment review attempts: %w", err)
 		}
 
-		if n >= attemptsCap {
-			// Best-effort log; the parked sentinel is what must surface.
-			_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory; park must surface
-				fmt.Sprintf("review parked after %d attempts — outstanding findings:\n%s", n, findings))
-
-			return &ReviewParkedError{Findings: findings}
-		}
-
-		if err := o.runFix(ctx, findings, round, fixTier); err != nil {
+		if err := o.runFix(ctx, findings, round, fixTier, false); err != nil {
 			return err
 		}
 	}
@@ -137,12 +136,74 @@ func runReview(ctx context.Context, o *run) error {
 	return fmt.Errorf("review exceeded the hard iteration cap of %d", hardReviewIterationCap)
 }
 
+// authoritativeReview is the gated strong pass run at the review cliff instead of
+// parking on a cheap verdict: a strong, full-scope review; if it approves the
+// card finishes; if it confirms real issues, ONE strong full-scope fix and one
+// strong re-review; still failing → park with the strong findings. It never loops.
+func (o *run) authoritativeReview(ctx context.Context, verifyCmd []string, round int) error {
+	d := o.d
+	cfg := d.Cfg
+
+	findings, fixTier, approved, err := o.reviewRound(ctx, verifyCmd, true)
+	if err != nil {
+		return err
+	}
+
+	o.recordReview(ctx, round, findings, approved)
+
+	if approved {
+		o.reviewSummary = findings
+
+		return nil
+	}
+
+	o.lastFindings = findings
+
+	if _, err := d.Ops.IncrementReviewAttempts(ctx, cfg.CardID); err != nil {
+		return fmt.Errorf("increment review attempts: %w", err)
+	}
+
+	// Gated strong fix — runs only because the authoritative review confirmed
+	// real issues.
+	if err := o.runFix(ctx, findings, round, fixTier, true); err != nil {
+		return err
+	}
+
+	// One strong re-review of the full change.
+	round2 := round + 1
+
+	findings2, _, approved2, err := o.reviewRound(ctx, verifyCmd, true)
+	if err != nil {
+		return err
+	}
+
+	o.recordReview(ctx, round2, findings2, approved2)
+
+	if approved2 {
+		o.reviewSummary = findings2
+
+		return nil
+	}
+
+	o.lastFindings = findings2
+
+	n, err := d.Ops.IncrementReviewAttempts(ctx, cfg.CardID)
+	if err != nil {
+		return fmt.Errorf("increment review attempts: %w", err)
+	}
+
+	_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory; park must surface
+		fmt.Sprintf("review parked after %d attempts (authoritative pass) — outstanding findings:\n%s", n, findings2))
+
+	return &ReviewParkedError{Findings: findings2}
+}
+
 // reviewRound runs one review pass and returns the outstanding findings text,
 // whether the work is approved, and any fatal error (budget park, transport).
 // The verify gate runs first: on failure it short-circuits to (gate output,
 // not-approved) WITHOUT spending reviewer tokens. On gate pass (or no gate), the
 // three specialists fan out and the synthesis verdict decides.
-func (o *run) reviewRound(ctx context.Context, verifyCmd []string) (findings string, fixTier string, approved bool, err error) {
+func (o *run) reviewRound(ctx context.Context, verifyCmd []string, authoritative bool) (findings string, fixTier string, approved bool, err error) {
 	// Budget gate before the verify subprocess too — the gate may be cheap, but
 	// the fix run it can trigger is not, and we park before doing any work.
 	if err := o.ledger.Check(); err != nil {
@@ -162,7 +223,7 @@ func (o *run) reviewRound(ctx context.Context, verifyCmd []string) (findings str
 
 	// Gate passed (or none) — the gate is a cheap pre-filter, not a substitute
 	// for review, so specialists always run.
-	specialistFindings, err := o.runSpecialists(ctx)
+	specialistFindings, err := o.runSpecialists(ctx, authoritative)
 	if err != nil {
 		return "", "", false, err
 	}
@@ -171,7 +232,7 @@ func (o *run) reviewRound(ctx context.Context, verifyCmd []string) (findings str
 		return "", "", false, err
 	}
 
-	v, err := o.synthesize(ctx, specialistFindings)
+	v, err := o.synthesize(ctx, specialistFindings, authoritative)
 	if err != nil {
 		return "", "", false, err
 	}
@@ -186,12 +247,15 @@ func (o *run) reviewRound(ctx context.Context, verifyCmd []string) (findings str
 // runSpecialists fans the three review lenses out as parallel read-only child
 // agents over the branch diff and returns their concatenated findings. Each
 // child's spend is recorded on the ledger and reported per result.
-func (o *run) runSpecialists(ctx context.Context) (string, error) {
+func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, error) {
 	d := o.d
 	cfg := d.Cfg
 
+	// The authoritative pass is FULL scope even when a delta snapshot exists: it
+	// re-widens to the base branch so the strong panel reviews the whole change,
+	// not just the latest increment.
 	base := o.lastReviewBase
-	if base == "" {
+	if base == "" || authoritative {
 		base = cfg.BaseBranch
 	}
 
@@ -200,7 +264,7 @@ func (o *run) runSpecialists(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("review diff: %w", err)
 	}
 
-	panel := o.reviewPanel(estimateTokens(diff))
+	panel := o.reviewPanel(estimateTokens(diff), authoritative)
 
 	_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory selection record
 		fmt.Sprintf("review panel models: %s, %s, %s", panel[0].Model, panel[1].Model, panel[2].Model))
@@ -212,8 +276,14 @@ func (o *run) runSpecialists(ctx context.Context) (string, error) {
 	}
 
 	// Prior findings are constant across the three lenses: the same previous-round
-	// context goes to every specialist (cross-round memory).
-	prior := priorFindingsBlock(o.lastFindings)
+	// context goes to every specialist (cross-round memory). The authoritative pass
+	// gets the FULL recorded history, not just the last round.
+	priorText := o.lastFindings
+	if authoritative {
+		priorText = reviewFindingsHistory(o.body)
+	}
+
+	prior := priorFindingsBlock(priorText)
 
 	specs := make([]harness.SubagentSpec, len(lenses))
 	for i, l := range lenses {
@@ -283,7 +353,7 @@ func (o *run) runSpecialists(ctx context.Context) (string, error) {
 // catalog-resolvable reviewer pin overrides the entire panel (all three run on
 // the pinned model). Otherwise the registry selects a diverse panel for the
 // card tier, excluding every model that coded a subtask on this run.
-func (o *run) reviewPanel(estTokens int) []registry.ModelSpec {
+func (o *run) reviewPanel(estTokens int, authoritative bool) []registry.ModelSpec {
 	if resolvePin(o.d.Registry, o.tc.ModelReviewer) {
 		spec := registry.ModelSpec{
 			Model:         o.tc.ModelReviewer,
@@ -298,9 +368,16 @@ func (o *run) reviewPanel(estTokens int) []registry.ModelSpec {
 		return panel
 	}
 
+	// The authoritative pass escalates the panel to the complex tier so the
+	// strongest models judge the change before parking.
+	tier := tierFromString(o.cardTier)
+	if authoritative {
+		tier = registry.TierComplex
+	}
+
 	return o.d.Registry.SelectReviewPanel(registry.SelectInput{
 		Role:      registry.RoleReviewer,
-		Tier:      tierFromString(o.cardTier),
+		Tier:      tier,
 		EstTokens: estTokens,
 		Exclude:   o.coderModels,
 	}, reviewPanelSize)
@@ -309,7 +386,7 @@ func (o *run) reviewPanel(estTokens int) []registry.ModelSpec {
 // synthesize runs ONE orchestrator-model call that reads the three specialists'
 // findings and emits the structured verdict. The verdict JSON is parsed with the
 // same extractJSON + one repair turn the planner uses.
-func (o *run) synthesize(ctx context.Context, findings string) (verdict, error) {
+func (o *run) synthesize(ctx context.Context, findings string, authoritative bool) (verdict, error) {
 	d := o.d
 	cfg := d.Cfg
 
@@ -331,7 +408,12 @@ func (o *run) synthesize(ctx context.Context, findings string) (verdict, error) 
 			repair = repairBlock(lastErr.Error())
 		}
 
-		prior := priorFindingsBlock(o.lastFindings)
+		priorText := o.lastFindings
+		if authoritative {
+			priorText = reviewFindingsHistory(o.body)
+		}
+
+		prior := priorFindingsBlock(priorText)
 
 		task := fmt.Sprintf(synthesisPrompt, o.tc.Title, o.tc.Description, prior, findings, repair)
 
@@ -362,7 +444,7 @@ func (o *run) synthesize(ctx context.Context, findings string) (verdict, error) 
 // runFix runs one coder fix pass against the outstanding findings, lands the
 // changes as a fixup onto the commit that last touched the fixed files (HEAD
 // fallback), and pushes. Budget is checked before the model call.
-func (o *run) runFix(ctx context.Context, findings string, round int, fixTier string) error {
+func (o *run) runFix(ctx context.Context, findings string, round int, fixTier string, authoritative bool) error {
 	d := o.d
 	cfg := d.Cfg
 
@@ -370,10 +452,10 @@ func (o *run) runFix(ctx context.Context, findings string, round int, fixTier st
 		return err
 	}
 
-	model := o.resolveFixModel(fixTier)
+	model := o.resolveFixModel(fixTier, authoritative)
 
 	_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory selection record
-		fmt.Sprintf("fix coder %s selected for round %d fixes (tier=%s)", model, round, o.effectiveFixTier(fixTier)))
+		fmt.Sprintf("fix coder %s selected for round %d fixes (tier=%s)", model, round, o.fixTierFor(fixTier, authoritative)))
 
 	prompt := fmt.Sprintf(fixPrompt, o.tc.Title, o.tc.Description, findings)
 
@@ -420,14 +502,14 @@ func (o *run) runFix(ctx context.Context, findings string, round int, fixTier st
 // resolveFixModel picks the coder model for the fix run: the card's coder pin
 // when catalog-resolvable, else the best-value coder selection for the effective
 // fix tier (the synthesizer's fix_tier, falling back to the card tier).
-func (o *run) resolveFixModel(fixTier string) string {
+func (o *run) resolveFixModel(fixTier string, authoritative bool) string {
 	if resolvePin(o.d.Registry, o.tc.ModelCoder) {
 		return o.tc.ModelCoder
 	}
 
 	spec := o.d.Registry.SelectByComplexity(registry.SelectInput{
 		Role: registry.RoleCoder,
-		Tier: tierFromString(o.effectiveFixTier(fixTier)),
+		Tier: o.fixTierFor(fixTier, authoritative),
 	})
 
 	return spec.Model
@@ -442,6 +524,39 @@ func (o *run) effectiveFixTier(fixTier string) string {
 	}
 
 	return fixTier
+}
+
+// fixTierFor is the tier the fix coder is sized on: TierComplex on the
+// authoritative pass (escalated), else the synthesizer's fix_tier with the card
+// tier as fallback.
+func (o *run) fixTierFor(fixTier string, authoritative bool) registry.Tier {
+	if authoritative {
+		return registry.TierComplex
+	}
+
+	return tierFromString(o.effectiveFixTier(fixTier))
+}
+
+// reviewFindingsHistory returns every "## Review Findings" section recorded on
+// the parent body, concatenated — the full prior-findings context for the
+// authoritative pass. Empty when none have been recorded yet.
+func reviewFindingsHistory(body string) string {
+	var b strings.Builder
+
+	in := false
+
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, "## ") {
+			in = strings.HasPrefix(line, "## Review Findings")
+		}
+
+		if in {
+			b.WriteString(line)
+			b.WriteByte('\n')
+		}
+	}
+
+	return strings.TrimSpace(b.String())
 }
 
 // parseVerdict extracts the synthesis verdict JSON (tolerating prose / code
