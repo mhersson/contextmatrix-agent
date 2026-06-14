@@ -130,6 +130,10 @@ func TestExecuteSubtaskFlow(t *testing.T) {
 
 	// Actual cost spent on the ledger.
 	assert.InDelta(t, 0.10, o.ledger.Spent(), 1e-9)
+
+	// The selected coder model is logged to the card activity feed for the user.
+	assert.True(t, ops.loggedContains("coder model"),
+		"executeSubtask must log the selected coder model")
 }
 
 func TestExecuteCoderPromptBody(t *testing.T) {

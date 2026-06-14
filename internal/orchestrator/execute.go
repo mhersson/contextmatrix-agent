@@ -68,6 +68,9 @@ func (o *run) executeSubtask(ctx context.Context, sub subtaskRef) error {
 	prompt := fmt.Sprintf(coderPrompt, sub.Title, subtaskBody(sub), o.tc.Title, o.tc.Description)
 	model := o.resolveCoderModel(sub, prompt)
 
+	_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory selection record
+		fmt.Sprintf("coder model %s selected for subtask %q (tier=%s)", model, sub.Title, tierOf(sub)))
+
 	res, err := harness.Run(ctx, d.Client, d.WriteTools, d.Emit, prompt, harness.Config{
 		Model:    model,
 		MaxTurns: cfg.MaxTurns,

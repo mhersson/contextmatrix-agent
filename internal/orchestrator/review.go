@@ -181,6 +181,9 @@ func (o *run) runSpecialists(ctx context.Context) (string, error) {
 
 	panel := o.reviewPanel(estimateTokens(diff))
 
+	_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory selection record
+		fmt.Sprintf("review panel models: %s, %s, %s", panel[0].Model, panel[1].Model, panel[2].Model))
+
 	lenses := []struct{ role, prompt string }{
 		{"correctness", correctnessPrompt},
 		{"design", designPrompt},

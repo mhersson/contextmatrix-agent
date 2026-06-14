@@ -214,6 +214,8 @@ func runPlan(ctx context.Context, o *run) error {
 	model := resolveOrchestratorModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
 		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel)
 
+	_ = d.Ops.AddLog(ctx, cfg.CardID, "orchestrator model: "+model) //nolint:errcheck // advisory selection record
+
 	// Resume: surface any existing subtasks so the planner reuses their titles.
 	// The list is the RECONCILED set (reconcile loaded it from SubtaskStates
 	// before the phase loop); runPlan does not re-query the server. On a fresh

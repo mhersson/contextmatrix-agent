@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -30,6 +31,10 @@ type fakeOps struct {
 	setPhaseErr error
 	addLogErr   error
 	claimErr    error
+
+	// logs captures every AddLog message (verbatim) so model-selection tests can
+	// assert the activity feed received the expected entry.
+	logs []string
 
 	// IncrementReviewAttempts scripting: reviewAttempts seeds the counter; each
 	// call increments it and returns the new running total, mirroring the server
@@ -153,9 +158,27 @@ func (f *fakeOps) SubtaskStates(_ context.Context, project, parentID string) ([]
 }
 
 func (f *fakeOps) AddLog(_ context.Context, cardID, message string) error {
+	f.mu.Lock()
+	f.logs = append(f.logs, message)
+	f.mu.Unlock()
+
 	f.record("AddLog:" + message)
 
 	return f.addLogErr
+}
+
+// loggedContains reports whether any AddLog message contains sub.
+func (f *fakeOps) loggedContains(sub string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	for _, m := range f.logs {
+		if strings.Contains(m, sub) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (f *fakeOps) ReportUsage(_ context.Context, cardID, model string, promptTokens, completionTokens int64, actualCostUSD float64) error {
