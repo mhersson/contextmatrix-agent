@@ -179,9 +179,13 @@ func Run(ctx context.Context, spec RunSpec, ops CardOps, client llm.LLM, emit *e
 	model := resolveModel(ctx, client, emit, spec)
 
 	// Autonomous cards skip the linear harness entirely and run the phase loop.
-	// The heartbeat goroutine (started above on runCtx) covers every phase; the
-	// FSM context is runCtx, so an end_session frame cancels it mid-phase.
-	if !spec.Interactive {
+	// Route on the card's own autonomous flag in addition to the interactive
+	// flag: CM forces interactive off for autonomous cards, but the agent
+	// self-corrects if a stale/forced interactive flag ever arrives. The
+	// promote bridge is unaffected — a promote-flow card is non-autonomous at
+	// trigger time (tcx is fetched before any promote), so it still runs HITL
+	// then hands off via inbox.Promoted().
+	if !spec.Interactive || tcx.Autonomous {
 		return runFSM(ctx, runCtx, fsmArgs{
 			ops: ops, git: git, client: client, emit: emit,
 			spec: spec, tcx: tcx, branch: branchName,

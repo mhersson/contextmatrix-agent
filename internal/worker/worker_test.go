@@ -508,6 +508,32 @@ func TestAutonomousEntersOrchestrator(t *testing.T) {
 	assert.Equal(t, 0, llmClient.calls(), "linear harness loop must not run for an autonomous card")
 }
 
+// A card the server marks autonomous must enter the FSM even if a stale/forced
+// interactive flag arrives — the agent self-corrects on tcx.Autonomous.
+func TestAutonomousFlagOverridesInteractive(t *testing.T) {
+	remote := setupBareRemote(t)
+	wsParent := t.TempDir()
+	ops := newFakeOps()
+	ops.tcx.Autonomous = true
+
+	entered := false
+
+	swapRunOrchestrator(t, func(_ context.Context, _ orchestrator.Deps) error {
+		entered = true
+
+		return nil
+	})
+
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	spec := baseSpec(t, remote, wsParent)
+	spec.Interactive = true // forced/stale; the autonomous flag must win
+
+	_, err := Run(context.Background(), spec, ops, &scriptedLLM{}, emit, openStdin(t))
+	require.NoError(t, err)
+	assert.True(t, entered, "autonomous card must enter the orchestrator FSM despite Interactive=true")
+}
+
 // TestHITLStaysLinear: an interactive spec with no promote uses the linear
 // path only; the FSM seam is never invoked. Swaps runOrchestrator to detect any
 // stray FSM entry, so it must not run in parallel.
