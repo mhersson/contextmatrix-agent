@@ -60,24 +60,26 @@ func sectionFrom(heading, content string) string {
 	return "## " + heading + "\n\n" + c
 }
 
-// formatPlan renders the subtask decomposition as the "## Plan" body in the
-// runner's numbered SUBTASK shape (create-plan Step 3), so the parent card
-// shows the whole plan, not just scattered subtask cards.
+// formatPlan renders the subtask decomposition as the "## Plan" body, so the
+// parent card shows the whole plan, not just scattered subtask cards. Each
+// subtask is a numbered heading plus an italic tier/deps line and its own body
+// block, keeping multi-line bodies readable rather than crammed onto one line.
 func formatPlan(subs []subtaskRef) string {
 	var b strings.Builder
 
 	for i, s := range subs {
-		fmt.Fprintf(&b, "%d. SUBTASK %s: %s\n", i+1, s.ID, s.Title)
-
-		deps := "(none)"
+		deps := "none"
 		if len(s.DependsOnIDs) > 0 {
 			deps = strings.Join(s.DependsOnIDs, ", ")
 		}
 
-		fmt.Fprintf(&b, "   Tier: %s | Depends on: %s\n", s.Tier, deps)
+		fmt.Fprintf(&b, "### %d. %s — %s\n", i+1, s.ID, s.Title)
+		fmt.Fprintf(&b, "_Tier: %s · Depends on: %s_\n", s.Tier, deps)
 
 		if body := strings.TrimSpace(s.Body); body != "" {
-			fmt.Fprintf(&b, "   Body: %s\n", body)
+			b.WriteString("\n")
+			b.WriteString(body)
+			b.WriteString("\n")
 		}
 
 		b.WriteString("\n")

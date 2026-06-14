@@ -55,10 +55,25 @@ func TestFormatPlan(t *testing.T) {
 
 	got := formatPlan(subs)
 
-	assert.Contains(t, got, "1. SUBTASK C-1: First")
-	assert.Contains(t, got, "Tier: moderate | Depends on: (none)")
-	assert.Contains(t, got, "2. SUBTASK C-2: Second")
+	assert.Contains(t, got, "### 1. C-1 — First")
+	assert.Contains(t, got, "_Tier: moderate · Depends on: none_")
+	assert.Contains(t, got, "### 2. C-2 — Second")
 	assert.Contains(t, got, "Depends on: C-1")
+}
+
+func TestFormatPlanReadable(t *testing.T) {
+	subs := []subtaskRef{
+		{ID: "X-2", Title: "Sysinfo pkg", Tier: "simple", Body: "Create go.mod and a sysinfo package.\n\nFiles: go.mod, sysinfo/sysinfo.go"},
+		{ID: "X-3", Title: "HTTP server", Tier: "simple", DependsOnIDs: []string{"X-2"}, Body: "Add main.go serving GET /."},
+	}
+	got := formatPlan(subs)
+	assert.Contains(t, got, "### 1. X-2 — Sysinfo pkg")
+	assert.Contains(t, got, "_Tier: simple · Depends on: none_")
+	assert.Contains(t, got, "### 2. X-3 — HTTP server")
+	assert.Contains(t, got, "_Tier: simple · Depends on: X-2_")
+	// Body is its own block, not crammed onto a "Body:" line.
+	assert.NotContains(t, got, "Body:")
+	assert.Contains(t, got, "Create go.mod and a sysinfo package.")
 }
 
 func TestRecordReview_RoundHeadingsAndVerdict(t *testing.T) {
