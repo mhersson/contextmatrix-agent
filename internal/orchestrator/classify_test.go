@@ -18,6 +18,10 @@ func TestIsBugLike(t *testing.T) {
 		{"fix title", cmclient.TaskContext{Title: "Fix the broken parser"}, true},
 		{"body language", cmclient.TaskContext{Title: "Parser", Description: "it throws on empty input"}, true},
 		{"plain feature", cmclient.TaskContext{Type: "task", Title: "Add a health endpoint"}, false},
+		{"feature with 'should' in body is not a bug", cmclient.TaskContext{
+			Type: "task", Title: "Paginate the cards endpoint",
+			Description: "The endpoint should return 50 cards per page.",
+		}, false},
 		{"maintenance wins over bug label", cmclient.TaskContext{
 			Type: "bug", Labels: []string{"dependencies"}, Title: "Bump go-git to v5.13",
 		}, false},

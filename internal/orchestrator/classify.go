@@ -29,10 +29,13 @@ var bugTitleVerbs = map[string]bool{
 }
 
 // bugBodyMarkers are defect-report phrases (create-plan Branch B body test).
+// Each must be specific enough to stand alone — vague words like "should"
+// are excluded, as they false-positive on ordinary feature acceptance criteria
+// and would trigger a needless paid diagnose pass.
 var bugBodyMarkers = []string{
 	"doesn't work", "does not work", "is broken", "throws", "crashes",
 	"fails when", "unexpected behavior", "regression", "stack trace",
-	"panic", "error:", "should", // "should X but Y" — paired with a bug verb/label upstream
+	"panic", "error:",
 }
 
 // firstWord returns the lowercased first whitespace-delimited word of s,
