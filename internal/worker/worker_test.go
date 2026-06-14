@@ -815,6 +815,15 @@ func TestSummaryFrom_RuneSafeTruncation(t *testing.T) {
 	assert.True(t, utf8.ValidString(got), "truncated summary must be valid UTF-8")
 }
 
+// TestReviewAttemptsCapIsThree pins the worker's review-attempts cap to three:
+// with the convergence safeguards in place, three rounds suffice, matching the
+// runner's MAX_REVISION_PASSES.
+func TestReviewAttemptsCapIsThree(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, 3, reviewAttemptsCap)
+}
+
 func TestSummaryFrom_FirstLineAndFallback(t *testing.T) {
 	t.Parallel()
 

@@ -26,8 +26,10 @@ const reviewPanelSize = 3
 const hardReviewIterationCap = 50
 
 // defaultReviewAttemptsCap is CM's review-attempts convention, used when the
-// configured cap is missing or invalid.
-const defaultReviewAttemptsCap = 5
+// configured cap is missing or invalid. Three matches the runner's
+// MAX_REVISION_PASSES; with the convergence safeguards in place, three rounds
+// are enough.
+const defaultReviewAttemptsCap = 3
 
 // verifyTimeout bounds the spec/test gate subprocess.
 const verifyTimeout = 10 * time.Minute

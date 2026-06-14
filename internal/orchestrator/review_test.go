@@ -339,7 +339,7 @@ func TestReviewCapParks(t *testing.T) {
 func TestReviewZeroCapDefaultsToConvention(t *testing.T) {
 	// A mis-wired worker passing ReviewAttemptsCap 0 must NOT park the card on
 	// the first non-approval (n=1 >= 0 would otherwise trip immediately); the
-	// zero cap falls back to the convention (5), so the fix loop proceeds.
+	// zero cap falls back to the convention (3), so the fix loop proceeds.
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true}
 	client := &planLLM{responses: []llm.Response{

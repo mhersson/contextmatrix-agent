@@ -37,8 +37,9 @@ var (
 var runOrchestrator = orchestrator.Run
 
 // reviewAttemptsCap is CM's convention: a card parks after this many review
-// rounds without approval.
-const reviewAttemptsCap = 5
+// rounds without approval. Three matches the runner's MAX_REVISION_PASSES; with
+// the convergence safeguards in place, three rounds are enough.
+const reviewAttemptsCap = 3
 
 // RunSpec is the container-side contract: populated from CM_* env by the
 // work command.
