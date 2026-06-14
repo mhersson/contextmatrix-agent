@@ -258,6 +258,13 @@ func (o *run) execute(ctx context.Context) error {
 				_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, budgetLogMessage(be)) //nolint:errcheck
 			}
 
+			var cle *ContextLimitError
+			if errors.As(err, &cle) {
+				// Context-window park: same shape as the budget arm — log the
+				// numbers best-effort, then stop without entering the next phase.
+				_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, contextLimitLogMessage(cle)) //nolint:errcheck
+			}
+
 			return err
 		}
 	}
@@ -268,6 +275,11 @@ func (o *run) execute(ctx context.Context) error {
 // budgetLogMessage is the canonical card-log line for a budget park.
 func budgetLogMessage(be *BudgetExceededError) string {
 	return fmt.Sprintf("budget ceiling reached: spent $%.4f of $%.4f — parking work", be.Spent, be.Max)
+}
+
+// contextLimitLogMessage is the canonical card-log line for a context-window park.
+func contextLimitLogMessage(cle *ContextLimitError) string {
+	return fmt.Sprintf("context window reached on model %q (%d tokens) — parking work; split the subtask or pin a larger-window model", cle.Model, cle.ContextWindow)
 }
 
 // indexOf returns the position of v in s, or -1 if absent.

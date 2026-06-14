@@ -106,8 +106,12 @@ func TestRunModelNormalizesContextLimit(t *testing.T) {
 
 			if tt.wantTrip {
 				require.Error(t, err, "context_limit must surface as an error")
-				assert.Contains(t, err.Error(), "context limit")
-				assert.Contains(t, err.Error(), "default/model")
+
+				var cle *ContextLimitError
+				require.ErrorAs(t, err, &cle)
+				assert.Equal(t, "default/model", cle.Model)
+				assert.Equal(t, 131072, cle.ContextWindow,
+					"window resolved from the registry catalog")
 
 				// The result is returned alongside the error so the caller's
 				// Spend/ReportUsage pattern still works.

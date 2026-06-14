@@ -704,6 +704,61 @@ func TestBudgetMapsToFailed(t *testing.T) {
 	// the worker re-reports neither on the park path.
 }
 
+// TestContextLimitMapsToFailed: a ContextLimitError (raw or wrapped) pushes WIP,
+// releases the claim, and surfaces a non-nil error — the budget-park shape — so
+// in-flight work survives a context-window stop. The wrapped case proves
+// errors.As traverses the wrap so a phase that wraps the sentinel still maps.
+func TestContextLimitMapsToFailed(t *testing.T) {
+	tests := []struct {
+		name string
+		err  func() error
+	}{
+		{
+			name: "raw sentinel",
+			err: func() error {
+				return &orchestrator.ContextLimitError{Model: "m", ContextWindow: 1000}
+			},
+		},
+		{
+			name: "wrapped sentinel",
+			err: func() error {
+				return fmt.Errorf("coder run for SUB-1: %w",
+					&orchestrator.ContextLimitError{Model: "m", ContextWindow: 1000})
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			remote := setupBareRemote(t)
+			wsParent := t.TempDir()
+			ops := newFakeOps()
+
+			retErr := tt.err()
+
+			swapRunOrchestrator(t, func(_ context.Context, d orchestrator.Deps) error {
+				// Dirty the tree so the WIP commit/push path has something to push.
+				require.NoError(t, os.WriteFile(filepath.Join(d.Cfg.Workspace, "wip.txt"), []byte("partial\n"), 0o644))
+
+				return retErr
+			})
+
+			llmClient := &scriptedLLM{}
+
+			emit := events.NewEmitter(io.Discard, io.Discard)
+
+			res, err := Run(context.Background(), baseSpec(t, remote, wsParent), ops, llmClient, emit, openStdin(t))
+			require.Error(t, err)
+			assert.Equal(t, "error", res.Reason)
+
+			assert.True(t, remoteHasBranch(t, remote, "cm/cmx-001"), "context-window park pushes WIP")
+			assert.GreaterOrEqual(t, ops.count("ReportPush"), 1, "WIP push reported")
+			assert.Equal(t, 1, ops.count("ReleaseCard"), "claim released on context-window park")
+			assert.Equal(t, 0, ops.count("CompleteTask"))
+		})
+	}
+}
+
 // TestEndSessionMidFSM: an end_session frame cancels the run context while the
 // FSM is in a phase; the orchestrator returns ctx.Err() and the worker takes
 // the C1 graceful path (push WIP, report usage, release, exit 0).

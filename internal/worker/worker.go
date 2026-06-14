@@ -389,6 +389,8 @@ type fsmArgs struct {
 //     CompleteTask and NO release — a human picks it up from review.
 //   - BudgetExceededError: push WIP, release the claim, return the error
 //     (non-zero exit; serve emits the failed callback).
+//   - ContextLimitError: identical to the budget park — push WIP, release the
+//     claim, return the error — so in-flight work survives a context-window stop.
 //   - ctx.Err() (end_session/kill): C1 graceful path — push WIP, release,
 //     exit 0; the persisted phase stays for a later resume.
 //   - any other error: release the claim and return it.
@@ -452,6 +454,16 @@ func mapFSMResult(ctx context.Context, a fsmArgs, err error) (Result, error) {
 
 		return Result{Reason: "error"}, fmt.Errorf("orchestrator: %w", err)
 
+	case isContextLimit(err):
+		// Context-window park: identical shape to the budget arm. Push the
+		// partial work so a human (or resume) can pick it up, release the claim,
+		// and surface the error so serve emits the failed callback. The orchestrator
+		// already logged the park line; the worker re-reports neither usage nor log.
+		pushWIP(ctx, a)
+		releaseQuietly(ctx, a.ops, a.spec.CardID)
+
+		return Result{Reason: "error"}, fmt.Errorf("orchestrator: %w", err)
+
 	case a.endSession.Load() || ctx.Err() != nil || errorsIsCanceled(err):
 		// end_session / kill mid-FSM: the C1 graceful park. Push whatever WIP
 		// exists, release the claim, exit 0. Usage was already reported per-phase
@@ -481,6 +493,14 @@ func isBudgetExceeded(err error) bool {
 	var be *orchestrator.BudgetExceededError
 
 	return errors.As(err, &be)
+}
+
+// isContextLimit reports whether err is (or wraps) the orchestrator's
+// context-window sentinel.
+func isContextLimit(err error) bool {
+	var cle *orchestrator.ContextLimitError
+
+	return errors.As(err, &cle)
 }
 
 // errorsIsCanceled reports whether err is (or wraps) context cancellation, which

@@ -168,6 +168,33 @@ func TestRunBudgetBreachParks(t *testing.T) {
 	assert.Equal(t, -1, indexOfCall(calls, "SetPhase:execute"))
 }
 
+func TestRunContextLimitParks(t *testing.T) {
+	ops := &fakeOps{
+		taskContext: cmclient.TaskContext{CardID: "CARD-1"},
+	}
+	d := Deps{Ops: ops, Git: &fakeGit{}, Cfg: Config{CardID: "CARD-1"}}
+
+	o := newRun(d, ops.taskContext)
+	// Plan stops because the model neared its context window.
+	o.planFn = func(context.Context) error {
+		return &ContextLimitError{Model: "anthropic/claude-x", ContextWindow: 200000}
+	}
+
+	err := o.execute(context.Background())
+
+	var cle *ContextLimitError
+	require.ErrorAs(t, err, &cle)
+	assert.Equal(t, "anthropic/claude-x", cle.Model)
+	assert.Equal(t, 200000, cle.ContextWindow)
+
+	calls := ops.recorded()
+	// AddLog must be recorded on the context-window park.
+	assert.GreaterOrEqual(t, indexOfCall(calls, "AddLog:"+contextLimitLogMessage(cle)), 0,
+		"context-window park must AddLog the numbers; calls=%v", calls)
+	// No further phase entered after the park.
+	assert.Equal(t, -1, indexOfCall(calls, "SetPhase:execute"))
+}
+
 func TestRunSeedsLedgerFromReportedCost(t *testing.T) {
 	ops := &fakeOps{
 		taskContext: cmclient.TaskContext{CardID: "CARD-1", ReportedCostUSD: 0.90},
