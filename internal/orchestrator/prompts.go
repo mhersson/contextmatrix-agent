@@ -105,6 +105,17 @@ subtasks, but no code>
 - <path>
 `
 
+// selfReviewBlock is the coder/fixer self-review gate, shared by coderPrompt and
+// fixPrompt so the two cannot drift. Hygiene only — it must not invite scope
+// expansion. Adapted from the runner's execute-task skill (Step 5).
+const selfReviewBlock = `Before you finish, self-review. Re-read every file you changed — do not rely on
+memory. For each change verify:
+- Any comment you wrote or changed is accurate: trace the code path and confirm it matches.
+- The code matches the surrounding file's idiom: logging, error handling, control flow, naming.
+- No duplicated logic: if two or more blocks share the same structure, extract a helper.
+- Every exit path is correct: each early return and error branch releases what it acquired and stops where it should — no fall-through after writing an error response.
+Fix anything you find before finishing.`
+
 // coderPrompt is the per-subtask coder instruction block. The coder runs with
 // the FULL write toolset rooted at the shared workspace and implements exactly
 // one subtask on the current branch, where prior subtasks' commits are already
@@ -124,7 +135,11 @@ and their changes are visible in the working tree; build on them, do not redo
 them. Do NOT run git yourself (no commit, no push, no branch) — the orchestrator
 commits and pushes your changes after you finish.
 
-Write tests alongside the code and run them. When the subtask is complete, end
+Write tests alongside the code and run them.
+
+` + selfReviewBlock + `
+
+When the subtask is complete, end
 your FINAL message with exactly one line of the form:
 
 COMMIT: <conventional commit message>
@@ -272,7 +287,11 @@ the workspace. Apply fixes for EXACTLY the findings below — nothing speculativ
 nothing outside their scope.
 
 Do NOT run git yourself (no commit, no push, no branch) — the orchestrator
-commits your changes as a fixup and pushes after you finish. Run the project's
+commits your changes as a fixup and pushes after you finish.
+
+` + selfReviewBlock + `
+
+Run the project's
 tests after your changes to confirm they pass.
 
 PARENT CARD (context)
