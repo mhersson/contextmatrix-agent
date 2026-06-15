@@ -66,3 +66,17 @@ func TestReviewerFixturesProvision(t *testing.T) {
 	assert.GreaterOrEqual(t, mutants, 3, "want a balanced mutant set")
 	assert.GreaterOrEqual(t, clean, 3, "want a balanced clean set")
 }
+
+// TestOffByOneFixtureHasNoAnswerLeak guards against re-introducing a comment that
+// names the planted defect. The reviewer must catch the off-by-one on the code's
+// merits; a comment naming the bug (or spelling out the fix) hands it the answer
+// and makes the fixture measure reading-comprehension, not review skill.
+func TestOffByOneFixtureHasNoAnswerLeak(t *testing.T) {
+	data, err := fixturesFS.ReadFile("fixtures/reviewer/offbyone/last.go.txt")
+	require.NoError(t, err)
+
+	src := strings.ToLower(string(data))
+	for _, leak := range []string{"off-by-one", "off by one", "len(xs)-1", "len(xs) - 1", "should be"} {
+		assert.NotContains(t, src, leak, "offbyone fixture source leaks the planted answer")
+	}
+}

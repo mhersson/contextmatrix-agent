@@ -12,6 +12,7 @@ GOLANGCI_LINT_VERSION ?= v2.12.2
 
 build:
 	go build ./...
+	go build -trimpath -o contextmatrix-agent ./cmd/contextmatrix-agent
 test:
 	go test ./...
 fmt:

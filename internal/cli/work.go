@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -19,6 +20,16 @@ import (
 
 // cmEnvFile is the bind-mounted env file path the service injects secrets into.
 const cmEnvFile = "/run/cm-secrets/env"
+
+// cardIDPattern matches ContextMatrix card IDs (PREFIX-NNN, accepting upper-
+// and lower-case letters): a letter-led prefix of letters, digits, and dashes
+// (CM only requires the project prefix to be non-empty, so MY-PROJ-001 is a
+// legitimate ID), ending in a dash and a numeric suffix — exactly what CM's
+// server-side ID generator produces. The card ID becomes the cm/<id> work branch name, so this
+// conservative shape keeps crafted refs (colons, slashes, dots, spaces,
+// leading dashes) out of the push path entirely instead of relying on git's
+// refspec parser to reject them.
+var cardIDPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9-]*-[0-9]+$`)
 
 func newWorkCmd() *cobra.Command {
 	return &cobra.Command{
@@ -70,6 +81,10 @@ func specFromEnv() (worker.RunSpec, error) {
 		return worker.RunSpec{}, err
 	}
 
+	if !cardIDPattern.MatchString(cardID) {
+		return worker.RunSpec{}, fmt.Errorf("env var CM_CARD_ID: invalid card ID %q (want PREFIX-NNN)", cardID)
+	}
+
 	project, err := requireEnv("CM_PROJECT")
 	if err != nil {
 		return worker.RunSpec{}, err
@@ -95,7 +110,7 @@ func specFromEnv() (worker.RunSpec, error) {
 		return worker.RunSpec{}, err
 	}
 
-	toolOutputMax, err := envInt("CMX_TOOL_OUTPUT_MAX_BYTES", 30000)
+	toolOutputMax, err := envInt("CMX_TOOL_OUTPUT_MAX_BYTES", 131072)
 	if err != nil {
 		return worker.RunSpec{}, err
 	}
@@ -112,6 +127,16 @@ func specFromEnv() (worker.RunSpec, error) {
 		return worker.RunSpec{}, err
 	}
 
+	maxCardCost, err := envFloat("CMX_MAX_CARD_COST", 0)
+	if err != nil {
+		return worker.RunSpec{}, err
+	}
+
+	selectorPriceHeadroom, err := envFloat("CMX_SELECTOR_PRICE_HEADROOM", 0)
+	if err != nil {
+		return worker.RunSpec{}, err
+	}
+
 	defaultModel := os.Getenv("CMX_DEFAULT_MODEL")
 	if defaultModel == "" {
 		defaultModel = derefStr(defaults.CapableModel)
@@ -123,21 +148,23 @@ func specFromEnv() (worker.RunSpec, error) {
 	}
 
 	spec := worker.RunSpec{
-		CardID:         cardID,
-		Project:        project,
-		RepoURL:        repoURL,
-		MCPURL:         mcpURL,
-		MCPAPIKey:      mcpAPIKey,
-		BaseBranch:     os.Getenv("CM_BASE_BRANCH"),
-		Model:          os.Getenv("CM_MODEL"),
-		CorrelationID:  os.Getenv("CM_CORRELATION_ID"),
-		Interactive:    os.Getenv("CM_INTERACTIVE") == "true",
-		BashTimeoutMax: bashTimeoutMax,
-		ToolOutputMax:  toolOutputMax,
-		MaxTurns:       maxTurns,
-		MaxCostUSD:     maxCostUSD,
-		DefaultModel:   defaultModel,
-		Workspace:      workspace,
+		CardID:                cardID,
+		Project:               project,
+		RepoURL:               repoURL,
+		MCPURL:                mcpURL,
+		MCPAPIKey:             mcpAPIKey,
+		BaseBranch:            os.Getenv("CM_BASE_BRANCH"),
+		Model:                 os.Getenv("CM_MODEL"),
+		CorrelationID:         os.Getenv("CM_CORRELATION_ID"),
+		Interactive:           os.Getenv("CM_INTERACTIVE") == "true",
+		BashTimeoutMax:        bashTimeoutMax,
+		ToolOutputMax:         toolOutputMax,
+		MaxTurns:              maxTurns,
+		MaxCostUSD:            maxCostUSD,
+		MaxCardCost:           maxCardCost,
+		SelectorPriceHeadroom: selectorPriceHeadroom,
+		DefaultModel:          defaultModel,
+		Workspace:             workspace,
 	}
 
 	return spec, nil

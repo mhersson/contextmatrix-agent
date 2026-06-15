@@ -72,6 +72,14 @@ type LaunchEnv struct {
 	ToolOutputMaxBytes    int
 	DefaultModel          string
 
+	// MaxCardCost is the cumulative USD ceiling per card passed as
+	// CMX_MAX_CARD_COST. Zero is omitted (worker applies its own default).
+	MaxCardCost float64
+
+	// SelectorPriceHeadroom is the best-value band multiplier passed as
+	// CMX_SELECTOR_PRICE_HEADROOM. Zero is omitted (worker applies its own default).
+	SelectorPriceHeadroom float64
+
 	// WorkerExtraEnv is appended verbatim to every container's environment
 	// (KEY=VALUE strings). Used for operator-supplied passthrough.
 	WorkerExtraEnv []string
@@ -321,6 +329,14 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID string
 
 	if s.launchEnv.DefaultModel != "" {
 		env = append(env, "CMX_DEFAULT_MODEL="+s.launchEnv.DefaultModel)
+	}
+
+	if s.launchEnv.MaxCardCost != 0 {
+		env = append(env, "CMX_MAX_CARD_COST="+formatFloat(s.launchEnv.MaxCardCost))
+	}
+
+	if s.launchEnv.SelectorPriceHeadroom != 0 {
+		env = append(env, "CMX_SELECTOR_PRICE_HEADROOM="+formatFloat(s.launchEnv.SelectorPriceHeadroom))
 	}
 
 	env = append(env, s.launchEnv.WorkerExtraEnv...)
@@ -658,4 +674,11 @@ func boolEnv(b bool) string {
 	}
 
 	return ""
+}
+
+// formatFloat renders a float64 as a compact string without unnecessary
+// trailing zeros (e.g. 5.0 -> "5", 1.5 -> "1.5"). strconv.FormatFloat with
+// 'f' and -1 precision does this correctly.
+func formatFloat(f float64) string {
+	return strconv.FormatFloat(f, 'f', -1, 64)
 }

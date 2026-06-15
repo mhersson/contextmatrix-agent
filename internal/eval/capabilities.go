@@ -5,17 +5,35 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 )
 
-// WriteCapabilities serializes scores as pretty JSON (the capabilities.json the
-// registry loads).
+// WriteCapabilities serializes scores in the meta-wrapped format that the
+// registry loads. The meta envelope carries the date and any additional fields
+// provided in meta; fields not set in meta default to zero values.
 func WriteCapabilities(w io.Writer, caps map[string]map[registry.Role]float64) error {
+	return WriteCapabilitiesWithMeta(w, caps, registry.CapabilitiesMeta{
+		Date: time.Now().UTC().Format("2006-01-02"),
+	})
+}
+
+// WriteCapabilitiesWithMeta serializes scores in the meta-wrapped format with
+// a fully populated metadata envelope.
+func WriteCapabilitiesWithMeta(w io.Writer, caps map[string]map[registry.Role]float64, meta registry.CapabilitiesMeta) error {
+	doc := struct {
+		Meta   registry.CapabilitiesMeta            `json:"meta"`
+		Models map[string]map[registry.Role]float64 `json:"models"`
+	}{
+		Meta:   meta,
+		Models: caps,
+	}
+
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 
-	return enc.Encode(caps)
+	return enc.Encode(doc)
 }
 
 // RenderScores prints a stable, human-readable score table plus the run total.

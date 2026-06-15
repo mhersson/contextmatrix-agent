@@ -300,6 +300,38 @@ func (p *parser) parseFactor() (int, error) {
 }
 `,
 		},
+		{
+			fixture:  "fixtures/coder/ratelimit",
+			implFile: "ratelimit.go",
+			impl: `package ratelimit
+
+type Limiter struct {
+	capacity int
+	window   int64
+	events   []int64
+}
+
+func NewLimiter(capacity int, window int64) *Limiter {
+	return &Limiter{capacity: capacity, window: window}
+}
+
+func (l *Limiter) Allow(now int64) bool {
+	cutoff := now - l.window
+	kept := l.events[:0]
+	for _, t := range l.events {
+		if t > cutoff {
+			kept = append(kept, t)
+		}
+	}
+	l.events = kept
+	if len(l.events) >= l.capacity {
+		return false
+	}
+	l.events = append(l.events, now)
+	return true
+}
+`,
+		},
 	}
 	for _, c := range cases {
 		t.Run(filepath.Base(c.fixture), func(t *testing.T) {
@@ -312,7 +344,7 @@ func (p *parser) parseFactor() (int, error) {
 				check = "go test ./..."
 			}
 
-			ct := CoderTask{name: filepath.Base(c.fixture), fixture: c.fixture, check: check}
+			ct := CoderTask{name: filepath.Base(c.fixture), fixture: c.fixture, check: check, writable: []string{c.implFile}}
 			dir := t.TempDir()
 			require.NoError(t, ct.Provision(dir))
 

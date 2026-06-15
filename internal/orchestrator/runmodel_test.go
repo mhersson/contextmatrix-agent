@@ -1,0 +1,140 @@
+package orchestrator
+
+import (
+	"context"
+	"testing"
+
+	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
+	"github.com/mhersson/contextmatrix-agent/internal/llm"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// TestHarnessConfigPopulatesTriad pins that the centralized config builder
+// stamps every per-phase harness.Config with the run-wide safety triad: the
+// tool-output size cap, the secret-redaction func, and the model's own context
+// window (resolved from the registry). A future phase that forgets the
+// hardening is impossible because every phase routes through this builder.
+func TestHarnessConfigPopulatesTriad(t *testing.T) {
+	ops := &fakeOps{taskContext: cmclient.TaskContext{CardID: "CARD-1"}}
+	d := planTestDeps(ops, &planLLM{})
+	d.Cfg.ToolOutputMax = 65536
+
+	// A non-identity redactor with a recognisable mapping, so the test pins the
+	// redactor's BEHAVIOR — not just that the field is non-nil. A mis-wired but
+	// non-nil func (e.g. the wrong field) would fail the behavioral assert below.
+	const (
+		sentinel = "tok=SECRET"
+		scrubbed = "tok=[redacted]"
+	)
+
+	d.Redact = func(s string) string {
+		if s == sentinel {
+			return scrubbed
+		}
+
+		return s
+	}
+
+	o := newRun(d, ops.taskContext)
+
+	// "default/model" is in planTestCatalog with ContextLength 131072.
+	cfg := o.harnessConfig("default/model")
+
+	assert.Equal(t, "default/model", cfg.Model)
+	assert.Equal(t, 5, cfg.MaxTurns, "MaxTurns carried from Cfg")
+	assert.Equal(t, 65536, cfg.ToolOutputMaxBytes, "tool-output cap carried from Cfg")
+	require.NotNil(t, cfg.RedactToolOutput, "redactor wired from Deps.Redact")
+	assert.Equal(t, scrubbed, cfg.RedactToolOutput(sentinel),
+		"wired redactor must be the one from Deps.Redact (behavioral check)")
+	assert.Equal(t, 131072, cfg.ContextWindow, "context window resolved from the registry")
+}
+
+// TestHarnessConfigUnknownModelZeroWindow pins that a model absent from the
+// catalog yields ContextWindow 0 (the harness treats 0 as "no context-limit
+// check"), so an unknown slug never trips a spurious limit.
+func TestHarnessConfigUnknownModelZeroWindow(t *testing.T) {
+	ops := &fakeOps{taskContext: cmclient.TaskContext{CardID: "CARD-1"}}
+	d := planTestDeps(ops, &planLLM{})
+
+	o := newRun(d, ops.taskContext)
+
+	cfg := o.harnessConfig("ghost/model")
+	assert.Equal(t, 0, cfg.ContextWindow)
+}
+
+// TestRunModelNormalizesContextLimit pins the 0.85 threshold tightly: exactly
+// int(0.85*window) prompt tokens trips context_limit (surfaced by runModel as an
+// error so a phase never proceeds on truncated output), and one token below does
+// NOT. A boundary-precise pair catches a drifted threshold constant — a loose
+// "well over the limit" prompt would still pass against e.g. 0.95.
+func TestRunModelNormalizesContextLimit(t *testing.T) {
+	// "default/model" is in planTestCatalog with ContextLength 131072. The harness
+	// trips when prompt_tokens >= int(contextLimitThreshold * window); mirror that
+	// exact arithmetic here so the test pins the documented 0.85 constant.
+	// threshold is a var (not a const) so the conversion truncates at runtime,
+	// exactly as the harness does — a const expression would be a compile error.
+	const window = 131072
+
+	threshold := 0.85
+
+	tripAt := int(threshold * float64(window)) // 111411
+
+	tests := []struct {
+		name         string
+		promptTokens int
+		wantTrip     bool
+	}{
+		{"exactly at threshold trips", tripAt, true},
+		{"one token below does not trip", tripAt - 1, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{taskContext: cmclient.TaskContext{CardID: "CARD-1"}}
+			resp := llm.Response{
+				Content:      "partial",
+				FinishReason: "stop",
+				Usage:        llm.Usage{PromptTokens: tt.promptTokens, Cost: 0.01},
+			}
+			llmFake := &planLLM{responses: []llm.Response{resp}}
+			d := planTestDeps(ops, llmFake)
+
+			o := newRun(d, ops.taskContext)
+
+			res, err := o.runModel(context.Background(), d.ReadTools, "do the thing", "default/model")
+
+			if tt.wantTrip {
+				require.Error(t, err, "context_limit must surface as an error")
+
+				var cle *ContextLimitError
+				require.ErrorAs(t, err, &cle)
+				assert.Equal(t, "default/model", cle.Model)
+				assert.Equal(t, 131072, cle.ContextWindow,
+					"window resolved from the registry catalog")
+
+				// The result is returned alongside the error so the caller's
+				// Spend/ReportUsage pattern still works.
+				assert.Equal(t, "context_limit", res.Reason)
+				assert.InDelta(t, 0.01, res.TotalCostUSD, 1e-9)
+			} else {
+				require.NoError(t, err, "one token below the threshold must NOT trip")
+				assert.NotEqual(t, "context_limit", res.Reason)
+			}
+		})
+	}
+}
+
+// TestRunModelPassesThroughNormalResult pins that a normal (done) run is NOT
+// turned into an error by runModel — only context_limit is normalized.
+func TestRunModelPassesThroughNormalResult(t *testing.T) {
+	ops := &fakeOps{taskContext: cmclient.TaskContext{CardID: "CARD-1"}}
+	llmFake := &planLLM{responses: []llm.Response{stopResp("all good", 0.02)}}
+	d := planTestDeps(ops, llmFake)
+
+	o := newRun(d, ops.taskContext)
+
+	res, err := o.runModel(context.Background(), d.ReadTools, "do the thing", "default/model")
+	require.NoError(t, err)
+	assert.Equal(t, "all good", res.Output)
+}

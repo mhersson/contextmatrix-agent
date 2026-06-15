@@ -744,3 +744,97 @@ func TestDrainGate_TriggerRefusedWhileDraining(t *testing.T) {
 	assert.Equal(t, protocol.CodeDraining, decodeErr(t, w).Code)
 	assert.Empty(t, h.exec.launchedSpecs())
 }
+
+// ---- budget env threading ---------------------------------------------------
+
+// newHarnessWithBudget builds a Server with the budget knobs set.
+func newHarnessWithBudget(t *testing.T, maxCardCost, headroom float64) *harness {
+	t.Helper()
+
+	tracker := executor.NewTracker(4)
+	exec := &fakeExecutor{tracker: tracker}
+	reporter := &fakeReporter{}
+	verifier := &fakeVerifier{autonomous: true}
+	hub := logbridge.NewHub()
+
+	server := NewServer(Config{
+		APIKey:        testAPIKey,
+		Skew:          protocol.DefaultMaxClockSkew,
+		MaxConcurrent: 4,
+		Executor:      exec,
+		Tracker:       tracker,
+		Hub:           hub,
+		Reporter:      reporter,
+		Verifier:      verifier,
+		LaunchEnv: LaunchEnv{
+			BaseImage:             "base:image",
+			MCPURL:                "http://cm:8080/mcp",
+			MCPAPIKey:             "cfg-mcp-key",
+			MaxCardCost:           maxCardCost,
+			SelectorPriceHeadroom: headroom,
+		},
+	})
+
+	return &harness{
+		server:   server,
+		exec:     exec,
+		tracker:  tracker,
+		reporter: reporter,
+		verifier: verifier,
+		hub:      hub,
+	}
+}
+
+func TestBuildLaunchSpec_BudgetEnvEmitted(t *testing.T) {
+	// When MaxCardCost and SelectorPriceHeadroom are non-zero, both CMX_* vars
+	// must appear in the launched container env.
+	h := newHarnessWithBudget(t, 5.0, 1.5)
+
+	payload := protocol.TriggerPayload{
+		CardID:  "PROJ-010",
+		Project: "proj",
+		RepoURL: "https://github.com/org/repo",
+	}
+
+	w := h.do(t, http.MethodPost, "/trigger", payload)
+	require.Equal(t, http.StatusAccepted, w.Code)
+
+	require.Eventually(t, func() bool {
+		return len(h.exec.launchedSpecs()) == 1
+	}, time.Second, 5*time.Millisecond)
+
+	spec := h.exec.launchedSpecs()[0]
+	assert.Contains(t, spec.Env, "CMX_MAX_CARD_COST=5", "max_card_cost must be formatted without trailing decimal")
+	assert.Contains(t, spec.Env, "CMX_SELECTOR_PRICE_HEADROOM=1.5", "selector_price_headroom must appear")
+
+	// ArtificialAnalysisAPIKey must NEVER reach workers regardless of config.
+	for _, e := range spec.Env {
+		assert.NotContains(t, e, "ARTIFICIAL_ANALYSIS", "AA key must never be emitted to workers")
+	}
+}
+
+func TestBuildLaunchSpec_BudgetEnvOmittedWhenZero(t *testing.T) {
+	// When MaxCardCost and SelectorPriceHeadroom are zero, the CMX_* vars must
+	// be omitted so workers apply their own defaults.
+	h := newHarnessWithBudget(t, 0, 0)
+
+	payload := protocol.TriggerPayload{
+		CardID:  "PROJ-011",
+		Project: "proj",
+		RepoURL: "https://github.com/org/repo",
+	}
+
+	w := h.do(t, http.MethodPost, "/trigger", payload)
+	require.Equal(t, http.StatusAccepted, w.Code)
+
+	require.Eventually(t, func() bool {
+		return len(h.exec.launchedSpecs()) == 1
+	}, time.Second, 5*time.Millisecond)
+
+	spec := h.exec.launchedSpecs()[0]
+
+	for _, e := range spec.Env {
+		assert.NotContains(t, e, "CMX_MAX_CARD_COST", "zero max_card_cost must not be emitted")
+		assert.NotContains(t, e, "CMX_SELECTOR_PRICE_HEADROOM", "zero headroom must not be emitted")
+	}
+}

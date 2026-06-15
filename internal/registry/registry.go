@@ -1,6 +1,7 @@
 // Package registry resolves roles to concrete model specs for the harness. It
 // is caller-facing: the FSM-free harness loop never imports it. SelectByComplexity
-// is a seeded stub; measured capability scores arrive with the B2 eval harness.
+// is the two-signal best-value selector: an external prior carries the tier bar
+// while measured capabilities gate at a calibrated floor.
 package registry
 
 import (
@@ -40,6 +41,37 @@ type Registry struct {
 	capable      string
 	catalog      llm.Catalog
 	capabilities map[string]map[Role]float64 // seeded in B1; refined by B2
+	sel          Selection                   // two-signal selection config (optional)
+}
+
+// Selection configures the two-signal best-value selector. Zero value is valid:
+// no priors (bar applies to measured scores), Floor 0, headroom defaults to 1.5.
+type Selection struct {
+	Priors        Priors
+	Floor         float64 // functional gate on measured capabilities
+	PriceHeadroom float64 // <= 0 -> defaultPriceHeadroom
+}
+
+const defaultPriceHeadroom = 1.5
+
+// WithSelection stores the selection config and returns r. A zero or negative
+// PriceHeadroom defaults to defaultPriceHeadroom.
+func (r *Registry) WithSelection(s Selection) *Registry {
+	if s.PriceHeadroom <= 0 {
+		s.PriceHeadroom = defaultPriceHeadroom
+	}
+
+	r.sel = s
+
+	return r
+}
+
+// SelectInput describes a single best-value selection request.
+type SelectInput struct {
+	Role      Role
+	Tier      Tier
+	EstTokens int             // window-fit estimate; 0 skips the window check
+	Exclude   map[string]bool // diversity: models to avoid if alternatives exist
 }
 
 func NewRegistry(pins map[Role]string, capableDefault string, catalog llm.Catalog) *Registry {
@@ -68,6 +100,26 @@ func (r *Registry) Resolve(actor string, role Role) (ModelSpec, error) {
 	return spec, nil
 }
 
+// Has reports whether model is present in the live catalog. The orchestrator
+// uses it to decide whether a card-pinned model slug is resolvable before
+// honouring the pin.
+func (r *Registry) Has(model string) bool {
+	_, ok := r.catalog.Find(model)
+
+	return ok
+}
+
+// ContextWindow returns model's context window from the live catalog, or 0 if
+// the model is absent (0 disables the harness context-limit check for it).
+func (r *Registry) ContextWindow(model string) int {
+	e, ok := r.catalog.Find(model)
+	if !ok {
+		return 0
+	}
+
+	return e.ContextLength
+}
+
 // fitsWindow reports whether model's context window can hold estTokens. Models
 // absent from the catalog are treated as fitting (fail-open; the harness still
 // enforces context_limit at runtime).
@@ -80,38 +132,185 @@ func (r *Registry) fitsWindow(model string, estTokens int) bool {
 	return e.ContextLength >= estTokens
 }
 
-// SelectByComplexity is the seam C2 consumes: the cheapest tool-capable model in
-// the registry's catalog whose seeded capability for role clears the tier bar,
-// else the capable default. It reads r.catalog (single source of truth, matching
-// Resolve/fitsWindow). Capability scores are hand-seeded in B1; B2 replaces them.
-func (r *Registry) SelectByComplexity(role Role, t Tier) ModelSpec {
-	bar := tierBar(t)
-	best, bestPrice := "", -1.0
+// candidate is a model that passed the gate/bar/window filters, carried with the
+// quality score and blended price used by the best-value rule.
+type candidate struct {
+	id      string
+	quality float64
+	price   float64
+}
 
-	for _, e := range r.catalog {
-		if !e.SupportsTools() || r.capabilities[e.ID][role] < bar {
+// SelectByComplexity picks the best-value model for (role, tier) per the design
+// contract: a candidate must be tools-capable, not excluded, have a measured
+// score >= Floor (unmeasured cells are never selectable), have its quality
+// score (external prior when present, else measured) clear the tier bar, and
+// fit the window estimate. Among candidates, pick the most capable whose
+// blended price is within PriceHeadroom of the cheapest candidate; quality tie
+// breaks to the cheaper model. Nothing passes -> capable default.
+func (r *Registry) SelectByComplexity(in SelectInput) ModelSpec {
+	cands := r.candidates(in)
+	if len(cands) == 0 {
+		return r.specFor(r.capable)
+	}
+
+	cheapest := cands[0].price
+	for _, c := range cands[1:] {
+		if c.price < cheapest {
+			cheapest = c.price
+		}
+	}
+
+	headroom := r.sel.PriceHeadroom
+	if headroom <= 0 {
+		headroom = defaultPriceHeadroom
+	}
+
+	band := cheapest * headroom
+
+	best := candidate{}
+	have := false
+
+	for _, c := range cands {
+		if c.price > band {
 			continue
 		}
 
-		price := e.PromptPricePerTok + e.CompletionPricePerTok
-		if best == "" || price < bestPrice {
-			best, bestPrice = e.ID, price
+		switch {
+		case !have:
+			best, have = c, true
+		case c.quality > best.quality:
+			best = c
+		case c.quality == best.quality && c.price < best.price:
+			best = c
 		}
 	}
 
-	if best == "" {
-		best = r.capable
+	return r.specFor(best.id)
+}
+
+// candidates returns the models passing every filter for the given input.
+func (r *Registry) candidates(in SelectInput) []candidate {
+	bar := r.tierBar(in.Tier)
+
+	var cands []candidate
+
+	for _, e := range r.catalog {
+		if !e.SupportsTools() || in.Exclude[e.ID] {
+			continue
+		}
+
+		// Functional gate: measured score must exist AND clear the floor.
+		// Unmeasured (model, role) cells are unknown, never selectable.
+		measured, ok := r.measured(e.ID, in.Role)
+		if !ok || measured < r.sel.Floor {
+			continue
+		}
+
+		// Prior bar: external prior carries the bar when present; otherwise the
+		// bar applies to our measured score (today's behavior).
+		quality := measured
+		if p, ok := r.sel.Priors.ForRole(e.ID, in.Role); ok {
+			quality = p
+		}
+
+		if quality < bar {
+			continue
+		}
+
+		if in.EstTokens > 0 && !r.fitsWindow(e.ID, in.EstTokens) {
+			continue
+		}
+
+		cands = append(cands, candidate{
+			id:      e.ID,
+			quality: quality,
+			price:   e.PromptPricePerTok + e.CompletionPricePerTok,
+		})
 	}
 
-	spec := ModelSpec{Model: best}
-	if e, ok := r.catalog.Find(best); ok {
+	return cands
+}
+
+// measured returns the measured capability for (model, role) and whether one
+// exists. A missing model or role reports (0, false) — unmeasured, not zero.
+func (r *Registry) measured(model string, role Role) (float64, bool) {
+	roles, ok := r.capabilities[model]
+	if !ok {
+		return 0, false
+	}
+
+	v, ok := roles[role]
+
+	return v, ok
+}
+
+// SelectReviewPanel returns n specs for the review specialists: distinct models
+// chosen by repeated SelectByComplexity with a growing Exclude set. When the
+// pool runs dry, the last pick is reused to fill remaining slots rather than
+// escalating price.
+func (r *Registry) SelectReviewPanel(in SelectInput, n int) []ModelSpec {
+	if n <= 0 {
+		return nil
+	}
+
+	exclude := map[string]bool{}
+	for id := range in.Exclude {
+		exclude[id] = true
+	}
+
+	panel := make([]ModelSpec, 0, n)
+
+	var last ModelSpec
+
+	for len(panel) < n {
+		next := in
+		next.Exclude = exclude
+
+		// Probe the candidate pool directly: an empty pool means no distinct
+		// model remains, so reuse the last real pick rather than escalating to
+		// the (pricier) capable default. The probe duplicates the filter work
+		// SelectByComplexity does internally — accepted for clarity at catalog
+		// sizes.
+		if len(r.candidates(next)) == 0 {
+			if len(panel) == 0 {
+				// Dry from the start: every slot is the capable default, so the
+				// panel is always n non-empty specs.
+				last = r.SelectByComplexity(next)
+			}
+
+			panel = append(panel, last)
+
+			continue
+		}
+
+		spec := r.SelectByComplexity(next)
+		panel = append(panel, spec)
+		last = spec
+		exclude[spec.Model] = true
+	}
+
+	return panel
+}
+
+// specFor builds a ModelSpec for id, filling the context window from the catalog.
+func (r *Registry) specFor(id string) ModelSpec {
+	spec := ModelSpec{Model: id}
+	if e, ok := r.catalog.Find(id); ok {
 		spec.ContextWindow = e.ContextLength
 	}
 
 	return spec
 }
 
-func tierBar(t Tier) float64 {
+// tierBar returns the quality bar for a tier, reading the priors-file TierBars
+// when configured and falling back to the seeded constants otherwise.
+func (r *Registry) tierBar(t Tier) float64 {
+	if bars := r.sel.Priors.Meta.TierBars; bars != nil {
+		if v, ok := bars[string(t)]; ok {
+			return v
+		}
+	}
+
 	switch t {
 	case TierComplex:
 		return 0.8

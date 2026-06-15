@@ -96,7 +96,7 @@ func TestSpecFromEnv_IntParsing(t *testing.T) {
 		spec, err := specFromEnv()
 		require.NoError(t, err)
 		assert.Equal(t, 600, spec.BashTimeoutMax)
-		assert.Equal(t, 30000, spec.ToolOutputMax)
+		assert.Equal(t, 131072, spec.ToolOutputMax)
 		assert.Equal(t, derefInt(config.Defaults().MaxTurns), spec.MaxTurns)
 	})
 
@@ -206,6 +206,46 @@ func TestSpecFromEnv_WorkspaceDefault(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "/tmp/myworkspace", spec.Workspace)
 	})
+}
+
+func TestSpecFromEnv_CardIDShape(t *testing.T) {
+	valid := []string{"CM-001", "ALPHA-042", "TEST-12345", "cmx-7", "A2-001", "MY-PROJ-001", "A--1"}
+	for _, id := range valid {
+		t.Run("valid_"+id, func(t *testing.T) {
+			setRequired(t)
+			t.Setenv("CM_CARD_ID", id)
+
+			spec, err := specFromEnv()
+			require.NoError(t, err)
+			assert.Equal(t, id, spec.CardID)
+		})
+	}
+
+	invalid := []struct {
+		name string
+		id   string
+	}{
+		{"colon", "CM:001"},
+		{"slash", "cm/evil"},
+		{"space", "CM 001"},
+		{"leading dash", "-001"},
+		{"empty", ""},
+		{"no dash", "main"},
+		{"trailing junk after digits", "CM-001x"},
+		{"empty numeric part", "CM-"},
+		{"refspec injection", "CM-001:refs/heads/main"},
+		{"path traversal", "../etc"},
+	}
+	for _, tc := range invalid {
+		t.Run("invalid_"+tc.name, func(t *testing.T) {
+			setRequired(t)
+			t.Setenv("CM_CARD_ID", tc.id)
+
+			_, err := specFromEnv()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "CM_CARD_ID")
+		})
+	}
 }
 
 func TestSpecFromEnv_OptionalVars(t *testing.T) {

@@ -4,6 +4,7 @@ package logbridge
 
 import (
 	"encoding/json"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -156,9 +157,15 @@ func (b *Bridge) BridgeLine(project, cardID string, line []byte, isStderr bool) 
 func (b *Bridge) mapEvent(kind string, data map[string]any) (entry protocol.LogEntry, awaiting bool, skip bool) {
 	switch kind {
 	case "model_response":
+		content := strField(data, "content")
+		if strings.TrimSpace(content) == "" {
+			// Pure tool-call turn — no text to show; skip the empty frame.
+			return protocol.LogEntry{}, false, true
+		}
+
 		return protocol.LogEntry{
 			Type:    "text",
-			Content: strField(data, "content"),
+			Content: content,
 			Model:   strField(data, "model"),
 		}, false, false
 
