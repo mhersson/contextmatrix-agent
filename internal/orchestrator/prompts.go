@@ -255,9 +255,11 @@ const securityPrompt = `Your specialty is SECURITY & PERFORMANCE. Focus on:
 Stay strictly within security and performance; do not opine outside it.`
 
 // synthesisPrompt is the orchestrator-model synthesis instruction. It reads the
-// three specialist findings and emits the structured verdict. Adapted from the
-// review-task skill's synthesis step: any Critical or Important concern → not
-// approved with a concrete fix list; only Minor/Nit/none → approved.
+// three specialist findings and emits the structured verdict. The synthesizer
+// sets each finding's severity itself — a specialist's label and the number of
+// specialists raising it are inputs, not the verdict — and blocks only on a real
+// bug, a real vulnerability, a broken test, or a missed acceptance criterion;
+// unrequested hardening is Minor. Only Minor/Nit/none → approved.
 //
 // The trailing %s slots are filled by synthesize: parent card title, parent
 // card description, an optional prior-findings block (the previous round's
@@ -265,14 +267,24 @@ Stay strictly within security and performance; do not opine outside it.`
 // optional repair block (the previous parse error). Empty optional blocks
 // collapse to nothing.
 const synthesisPrompt = `You are the review synthesizer. Three specialists (correctness, design,
-security) have reviewed a change and produced the findings below. Merge them,
-deduplicate, and decide a single verdict.
+security) reviewed a change and produced the findings below, each with a
+suggested severity. Merge duplicates and decide a single verdict. Severity is
+yours to set: weigh each finding's actual impact on the task yourself — a
+specialist's label, and how many specialists raised it, are inputs, not the
+verdict.
 
 Decision rule:
-- Any Critical or Important correctness defect, real vulnerability, or broken
-  test → not approved. Return each as a concrete fix.
-- Speculative abstractions, premature generalization, and unrequested hardening
-  are never blocking — record as Minor at most.
+- A finding blocks the change (not approved) when, in your own judgement, it is
+  a genuine correctness bug, a real vulnerability, a broken or vacuous test, or
+  it makes the change fail the task's stated acceptance criteria — promote it
+  even if a specialist filed it as Minor. Return each blocker as a concrete fix.
+- Unrequested hardening is never blocking — error handling the task did not
+  require, added input or version validation, missing headers, defensive checks
+  on operations that cannot realistically fail, stricter-than-asked tests, and
+  style or naming are Minor at most, even if a specialist marked them Critical
+  or Important.
+- Weigh a passing build and passing tests as evidence: a "this could break" or
+  toolchain/version concern they contradict is Minor.
 - Also judge the change against the task: if it does NOT satisfy the acceptance criteria
   (incomplete) → not approved. If it ADDED things outside the task's scope (new
   abstractions, middleware, caching, hardening the task didn't ask for) → not
