@@ -51,6 +51,21 @@ func TestParsePlan(t *testing.T) {
 		assert.Contains(t, err.Error(), "card_tier")
 	})
 
+	t.Run("critical card_tier accepted", func(t *testing.T) {
+		j := `{"card_tier":"critical","subtasks":[{"title":"T","description":"d","depends_on":[],"tier":"critical"}]}`
+		p, err := parsePlan(j)
+		require.NoError(t, err)
+		assert.Equal(t, "critical", p.CardTier)
+		assert.Equal(t, "critical", p.Subtasks[0].Tier)
+	})
+
+	t.Run("unknown tier still rejected", func(t *testing.T) {
+		bad := `{"card_tier":"gigantic","subtasks":[{"title":"T","description":"d","depends_on":[],"tier":"simple"}]}`
+		_, err := parsePlan(bad)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "card_tier")
+	})
+
 	t.Run("dep index out of range", func(t *testing.T) {
 		bad := `{"card_tier":"simple","subtasks":[{"title":"T","description":"d","depends_on":[5],"tier":"simple"}]}`
 		_, err := parsePlan(bad)

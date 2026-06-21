@@ -14,7 +14,7 @@ import (
 
 // validTiers is the closed set of complexity tiers the planner may emit, for
 // both the overall card and each subtask. It drives reviewer selection later.
-var validTiers = map[string]bool{"simple": true, "moderate": true, "complex": true}
+var validTiers = map[string]bool{"simple": true, "moderate": true, "complex": true, "critical": true}
 
 // maxSubtasks caps a single plan; a runaway decomposition is a planning bug,
 // not a valid plan.
@@ -65,7 +65,7 @@ func parsePlan(s string) (plan, error) {
 	}
 
 	if !validTiers[p.CardTier] {
-		return plan{}, fmt.Errorf("invalid card_tier %q (want simple|moderate|complex)", p.CardTier)
+		return plan{}, fmt.Errorf("invalid card_tier %q (want simple|moderate|complex|critical)", p.CardTier)
 	}
 
 	if len(p.Subtasks) == 0 {
@@ -82,7 +82,7 @@ func parsePlan(s string) (plan, error) {
 		}
 
 		if !validTiers[st.Tier] {
-			return plan{}, fmt.Errorf("subtask %d has invalid tier %q (want simple|moderate|complex)", i, st.Tier)
+			return plan{}, fmt.Errorf("subtask %d has invalid tier %q (want simple|moderate|complex|critical)", i, st.Tier)
 		}
 
 		for _, dep := range st.DependsOn {

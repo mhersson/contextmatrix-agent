@@ -48,7 +48,8 @@ Decompose the task into subtasks following these rules:
 
 Also assign an overall card_tier reflecting the whole task's complexity, and a
 per-subtask tier. Tiers: "simple" (mechanical, low-risk), "moderate"
-(standard feature work), "complex" (architectural or high-risk).
+(standard feature work), "complex" (architectural or high-risk), "critical"
+(security-sensitive changes, or intricate concurrency/architecture work).
 
 Read the relevant code first to ground the plan in the real structure, then
 respond.
@@ -60,8 +61,8 @@ Description:
 %s
 %s%s%s
 Respond with ONLY a JSON object, no prose:
-{"card_tier":"simple|moderate|complex",
- "subtasks":[{"title":"...","description":"...","depends_on":[<earlier indices>],"tier":"simple|moderate|complex"}]}
+{"card_tier":"simple|moderate|complex|critical",
+ "subtasks":[{"title":"...","description":"...","depends_on":[<earlier indices>],"tier":"simple|moderate|complex|critical"}]}
 `
 
 // diagnosePrompt is the read-only debug-investigation pass run for bug-like
