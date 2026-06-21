@@ -153,7 +153,8 @@ func specFromEnv() (worker.RunSpec, error) {
 	if raw := os.Getenv("CMX_SELECTION"); raw != "" {
 		var sc protocol.SelectionContext
 		if err := json.Unmarshal([]byte(raw), &sc); err != nil {
-			slog.Warn("CMX_SELECTION parse failed; will use default model", "error", err)
+			slog.Warn("CMX_SELECTION parse failed; will use default model",
+				"card_id", cardID, "project", project, "error", err)
 		} else {
 			selection = &sc
 		}

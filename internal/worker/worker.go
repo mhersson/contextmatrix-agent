@@ -84,8 +84,9 @@ type CardOps interface {
 	ReleaseCard(ctx context.Context, cardID string) error
 }
 
-// catalogFetcher is the catalog-lookup seam, satisfied by *llm.Client. It is
-// defined here, where it is consumed, so model resolution stays best-effort:
+// catalogFetcher is the catalog-lookup seam used by resolveModel to check
+// whether an explicit CM_MODEL pin is resolvable, satisfied by *llm.Client. It
+// is defined here, where it is consumed, so model resolution stays best-effort:
 // a client that cannot fetch the catalog simply skips the lookup and the run
 // falls back to the default model.
 type catalogFetcher interface {

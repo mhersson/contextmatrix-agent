@@ -24,3 +24,11 @@ func TestFromSelectionBuildsCatalogPriorsAndFavorites(t *testing.T) {
 		t.Error("blacklist not applied")
 	}
 }
+
+func TestFromSelectionNilReturnsCapableDefault(t *testing.T) {
+	r := FromSelection(nil, "capable/default")
+	got := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierComplex})
+	if got.Model != "capable/default" {
+		t.Fatalf("nil selection must yield the capable default, got %q", got.Model)
+	}
+}
