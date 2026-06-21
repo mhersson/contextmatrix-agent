@@ -26,7 +26,18 @@ const (
 	TierSimple   Tier = "simple"
 	TierModerate Tier = "moderate"
 	TierComplex  Tier = "complex"
+	TierCritical Tier = "critical"
 )
+
+// DefaultTierBars are the normalized-prior thresholds per complexity tier.
+func DefaultTierBars() map[Tier]float64 {
+	return map[Tier]float64{
+		TierSimple:   0.65,
+		TierModerate: 0.76,
+		TierComplex:  0.82,
+		TierCritical: 0.90,
+	}
+}
 
 // ModelSpec is what the caller feeds into harness.Config for a given role.
 type ModelSpec struct {
@@ -48,8 +59,9 @@ type Registry struct {
 // no priors (bar applies to measured scores), Floor 0, headroom defaults to 1.5.
 type Selection struct {
 	Priors        Priors
-	Floor         float64 // functional gate on measured capabilities
-	PriceHeadroom float64 // <= 0 -> defaultPriceHeadroom
+	Floor         float64          // functional gate on measured capabilities
+	PriceHeadroom float64          // <= 0 -> defaultPriceHeadroom
+	TierBars      map[Tier]float64 // config-driven bars; nil -> DefaultTierBars()
 }
 
 const defaultPriceHeadroom = 1.5
@@ -302,23 +314,22 @@ func (r *Registry) specFor(id string) ModelSpec {
 	return spec
 }
 
-// tierBar returns the quality bar for a tier, reading the priors-file TierBars
-// when configured and falling back to the seeded constants otherwise.
+// tierBar returns the quality bar for a tier. It checks the config-driven
+// TierBars first, then the priors-file TierBars, then DefaultTierBars().
 func (r *Registry) tierBar(t Tier) float64 {
+	if r.sel.TierBars != nil {
+		if v, ok := r.sel.TierBars[t]; ok {
+			return v
+		}
+	}
+
 	if bars := r.sel.Priors.Meta.TierBars; bars != nil {
 		if v, ok := bars[string(t)]; ok {
 			return v
 		}
 	}
 
-	switch t {
-	case TierComplex:
-		return 0.8
-	case TierModerate:
-		return 0.6
-	default:
-		return 0.4
-	}
+	return DefaultTierBars()[t]
 }
 
 // seededCapabilities is the conservative hand-seed for the capable default.

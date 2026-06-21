@@ -226,6 +226,16 @@ func TestSelectReviewPanel(t *testing.T) {
 	assert.Equal(t, "alpha", panel2[2].Model) // reuse, no price escalation
 }
 
+func TestTierBarsIncludeCritical(t *testing.T) {
+	r := &Registry{sel: Selection{TierBars: DefaultTierBars()}}
+	if got := r.tierBar(TierCritical); got != 0.90 {
+		t.Errorf("critical bar = %v, want 0.90", got)
+	}
+	if got := r.tierBar(TierSimple); got != 0.65 {
+		t.Errorf("simple bar = %v, want 0.65", got)
+	}
+}
+
 func TestRegistryContextWindow(t *testing.T) {
 	r := NewRegistry(nil, "x", testCatalog())
 
