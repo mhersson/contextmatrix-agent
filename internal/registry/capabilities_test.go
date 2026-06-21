@@ -22,16 +22,17 @@ func TestLoadAndMergeCapabilities(t *testing.T) {
 	assert.NotContains(t, seededCapabilities(), "cheap/small")
 }
 
-func TestSelectByComplexityReflectsLoadedScores(t *testing.T) {
+func TestSelectByComplexityReflectsPriors(t *testing.T) {
 	cat := llm.Catalog{
 		{ID: "cheap/small", ContextLength: 8192, PromptPricePerTok: 1e-7, CompletionPricePerTok: 1e-7, SupportedParameters: []string{"tools"}},
 		{ID: "pricey/big", ContextLength: 131072, PromptPricePerTok: 1e-5, CompletionPricePerTok: 1e-5, SupportedParameters: []string{"tools"}},
 	}
-	// Measured: cheap/small clears the complex bar; without this it would not.
-	caps := map[string]map[Role]float64{"cheap/small": {RoleCoder: 0.9}}
-	r := NewRegistryWithCapabilities(nil, "capable/default", cat, caps)
+	// Prior: cheap/small clears the complex bar (0.82); pricey/big has no prior
+	// so it is never a candidate. Quality is the prior only.
+	pr := Priors{Models: map[string]PriorEntry{"cheap/small": {Coder: ptr(0.9)}}}
+	r := NewRegistryFromParts(cat, pr, nil, nil, "capable/default")
 	spec := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierComplex})
-	assert.Equal(t, "cheap/small", spec.Model) // cheapest measured-capable model wins
+	assert.Equal(t, "cheap/small", spec.Model) // cheapest model whose prior clears the bar wins
 }
 
 func TestRoundTripJSON(t *testing.T) {
