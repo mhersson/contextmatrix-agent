@@ -150,6 +150,7 @@ func specFromEnv() (worker.RunSpec, error) {
 	}
 
 	var selection *protocol.SelectionContext
+
 	if raw := os.Getenv("CMX_SELECTION"); raw != "" {
 		var sc protocol.SelectionContext
 		if err := json.Unmarshal([]byte(raw), &sc); err != nil {

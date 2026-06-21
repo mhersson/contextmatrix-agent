@@ -63,11 +63,6 @@ type Registry struct {
 	blacklist map[string]bool
 	favorites map[favKey][]string
 	sel       Selection // selection config (price headroom, tier bars)
-
-	// capabilities is the legacy measured-score table, still populated by
-	// NewRegistryWithCapabilities so worker.go keeps compiling. Selection no
-	// longer reads it (priors-only); T3 removes the old path and this field.
-	capabilities map[string]map[Role]float64
 }
 
 // Selection configures the best-value selector. Zero value is valid: headroom
@@ -75,12 +70,6 @@ type Registry struct {
 type Selection struct {
 	PriceHeadroom float64          // <= 0 -> defaultPriceHeadroom
 	TierBars      map[Tier]float64 // config-driven bars; nil -> DefaultTierBars()
-
-	// Priors and Floor are retained for the legacy WithSelection path
-	// (worker.go). WithSelection mirrors Priors onto Registry.priors; Floor is
-	// no longer consulted by selection (the measured floor-gate is gone).
-	Priors Priors
-	Floor  float64
 }
 
 const defaultPriceHeadroom = 1.5
@@ -107,21 +96,6 @@ func NewRegistryFromParts(cat llm.Catalog, pr Priors, blacklist map[string]bool,
 	}
 }
 
-// WithSelection stores the selection config and returns r. A zero or negative
-// PriceHeadroom defaults to defaultPriceHeadroom. The legacy path passes priors
-// via Selection.Priors; mirror them onto r.priors so the priors-only candidate
-// scan reads a single source regardless of constructor.
-func (r *Registry) WithSelection(s Selection) *Registry {
-	if s.PriceHeadroom <= 0 {
-		s.PriceHeadroom = defaultPriceHeadroom
-	}
-
-	r.sel = s
-	r.priors = s.Priors
-
-	return r
-}
-
 // SelectInput describes a single best-value selection request.
 type SelectInput struct {
 	Role      Role
@@ -130,8 +104,16 @@ type SelectInput struct {
 	Exclude   map[string]bool // diversity: models to avoid if alternatives exist
 }
 
+// NewRegistry builds a priors-only registry with the given role pins and capable
+// default. Selection is payload-driven: with no priors injected, SelectByComplexity
+// always falls back to the capable default. Pins still resolve via Resolve.
 func NewRegistry(pins map[Role]string, capableDefault string, catalog llm.Catalog) *Registry {
-	return NewRegistryWithCapabilities(pins, capableDefault, catalog, seededCapabilities())
+	r := NewRegistryFromParts(catalog, Priors{}, nil, nil, capableDefault)
+	if pins != nil {
+		r.pins = pins
+	}
+
+	return r
 }
 
 // Resolve returns the ModelSpec for role. actor is the multi-user seam (ignored
@@ -363,8 +345,8 @@ func (r *Registry) specFor(id string) ModelSpec {
 	return spec
 }
 
-// tierBar returns the quality bar for a tier. It checks the config-driven
-// TierBars first, then the priors-file TierBars, then DefaultTierBars().
+// tierBar returns the quality bar for a tier: the config-driven TierBars when
+// present, else DefaultTierBars().
 func (r *Registry) tierBar(t Tier) float64 {
 	if r.sel.TierBars != nil {
 		if v, ok := r.sel.TierBars[t]; ok {
@@ -372,21 +354,5 @@ func (r *Registry) tierBar(t Tier) float64 {
 		}
 	}
 
-	if bars := r.sel.Priors.Meta.TierBars; bars != nil {
-		if v, ok := bars[string(t)]; ok {
-			return v
-		}
-	}
-
 	return DefaultTierBars()[t]
-}
-
-// seededCapabilities is the conservative hand-seed for the capable default.
-// deepseek-v4-flash scored a perfect coder record in both B2 sweeps, emits
-// standard-format tool calls (no harmony parsing gap), and carries a 1M
-// context window. B2 measures and replaces these values.
-func seededCapabilities() map[string]map[Role]float64 {
-	return map[string]map[Role]float64{
-		"deepseek/deepseek-v4-flash": {RoleOrchestrator: 0.85, RolePlanner: 0.85, RoleCoder: 0.85, RoleReviewer: 0.85, RoleDocs: 0.85},
-	}
 }

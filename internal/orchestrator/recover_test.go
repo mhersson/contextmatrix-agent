@@ -106,8 +106,7 @@ func twoCoderRegistry() *registry.Registry {
 		},
 	}
 
-	return registry.NewRegistryWithCapabilities(nil, "capable/default", catalog, nil).
-		WithSelection(registry.Selection{Priors: priors, TierBars: registry.DefaultTierBars()})
+	return registry.NewRegistryFromParts(catalog, priors, nil, nil, "capable/default")
 }
 
 // TestExecuteRecoversFromIncapableCoder pins the in-run recovery: the first
@@ -202,8 +201,7 @@ func reviewFixRegistry() *registry.Registry {
 		},
 	}
 
-	return registry.NewRegistryWithCapabilities(nil, "capable/default", catalog, nil).
-		WithSelection(registry.Selection{Priors: priors, TierBars: registry.DefaultTierBars()})
+	return registry.NewRegistryFromParts(catalog, priors, nil, nil, "capable/default")
 }
 
 // TestReviewRecoversFromIncapableFixCoder pins that the review fix run shares the

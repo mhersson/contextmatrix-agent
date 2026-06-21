@@ -81,8 +81,7 @@ func reviewerRegistry() *registry.Registry {
 		},
 	}
 
-	return registry.NewRegistryWithCapabilities(nil, "default/model", reviewerCatalog(), nil).
-		WithSelection(registry.Selection{Priors: priors, TierBars: registry.DefaultTierBars()})
+	return registry.NewRegistryFromParts(reviewerCatalog(), priors, nil, nil, "default/model")
 }
 
 func TestDetectVerifyCommand(t *testing.T) {
@@ -183,8 +182,8 @@ func TestParseVerdictReadsFixTier(t *testing.T) {
 
 // TestResolveFixModelUsesFixTier proves the fix run sizes its coder on the
 // synthesizer's fix_tier, not the card tier. The registry seeds one cheap coder
-// model whose prior (0.5) clears the simple tier bar (0.4) but sits below the
-// complex bar (0.8), with a DISTINCT capable fallback. So resolveFixModel("simple")
+// model whose prior (0.70) clears the simple tier bar (0.65) but sits below the
+// complex bar (0.82), with a DISTINCT capable fallback. So resolveFixModel("simple")
 // must pick the cheap coder; resolveFixModel("complex") must fall back.
 func TestResolveFixModelUsesFixTier(t *testing.T) {
 	const (
@@ -196,18 +195,12 @@ func TestResolveFixModelUsesFixTier(t *testing.T) {
 		{ID: cheapCoder, ContextLength: 200000, PromptPricePerTok: 0.0000005, CompletionPricePerTok: 0.0000015, SupportedParameters: []string{"tools"}},
 		{ID: fallback, ContextLength: 200000, PromptPricePerTok: 0.000006, CompletionPricePerTok: 0.000012, SupportedParameters: []string{"tools"}},
 	}
-	// Measured score clears the (default 0) floor so the functional gate passes;
-	// the prior is what the tier bar is measured against.
-	caps := map[string]map[registry.Role]float64{
-		cheapCoder: {registry.RoleCoder: 0.95},
-	}
-	prior := 0.5
+	// Prior between the default simple (0.65) and complex (0.82) bars.
+	prior := 0.70
 	priors := registry.Priors{
-		Meta:   registry.PriorsMeta{TierBars: map[string]float64{"simple": 0.4, "moderate": 0.6, "complex": 0.8}},
 		Models: map[string]registry.PriorEntry{cheapCoder: {Coder: &prior}},
 	}
-	reg := registry.NewRegistryWithCapabilities(nil, fallback, catalog, caps).
-		WithSelection(registry.Selection{Priors: priors, Floor: 0, PriceHeadroom: 1.5})
+	reg := registry.NewRegistryFromParts(catalog, priors, nil, nil, fallback)
 
 	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reg)
 	// No coder pin -> complexity selection path; card tier is moderate by default.
@@ -222,8 +215,8 @@ func TestResolveFixModelUsesFixTier(t *testing.T) {
 
 // TestResolveFixModelAuthoritativeForcesComplex proves the authoritative pass
 // sizes the fix coder on the complex tier regardless of the synthesizer's
-// fix_tier. The cheap coder clears the simple bar (0.4) but not the complex bar
-// (0.8); so resolveFixModel("simple", false) picks it, but the authoritative
+// fix_tier. The cheap coder clears the simple bar (0.65) but not the complex bar
+// (0.82); so resolveFixModel("simple", false) picks it, but the authoritative
 // resolveFixModel("simple", true) escalates to complex, gating the cheap coder
 // out and falling back to the capable model.
 func TestResolveFixModelAuthoritativeForcesComplex(t *testing.T) {
@@ -236,16 +229,12 @@ func TestResolveFixModelAuthoritativeForcesComplex(t *testing.T) {
 		{ID: cheapCoder, ContextLength: 200000, PromptPricePerTok: 0.0000005, CompletionPricePerTok: 0.0000015, SupportedParameters: []string{"tools"}},
 		{ID: fallback, ContextLength: 200000, PromptPricePerTok: 0.000006, CompletionPricePerTok: 0.000012, SupportedParameters: []string{"tools"}},
 	}
-	caps := map[string]map[registry.Role]float64{
-		cheapCoder: {registry.RoleCoder: 0.95},
-	}
-	prior := 0.5
+	// Prior between the default simple (0.65) and complex (0.82) bars.
+	prior := 0.70
 	priors := registry.Priors{
-		Meta:   registry.PriorsMeta{TierBars: map[string]float64{"simple": 0.4, "moderate": 0.6, "complex": 0.8}},
 		Models: map[string]registry.PriorEntry{cheapCoder: {Coder: &prior}},
 	}
-	reg := registry.NewRegistryWithCapabilities(nil, fallback, catalog, caps).
-		WithSelection(registry.Selection{Priors: priors, Floor: 0, PriceHeadroom: 1.5})
+	reg := registry.NewRegistryFromParts(catalog, priors, nil, nil, fallback)
 
 	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reg)
 	o := newReviewRun(d, cmclient.TaskContext{CardID: "CARD-1"}, 0)
@@ -768,17 +757,11 @@ func TestReviewPanelEscalatesWhenAuthoritative(t *testing.T) {
 		{ID: strong, ContextLength: 200000, PromptPricePerTok: 0.000005, CompletionPricePerTok: 0.000005, SupportedParameters: []string{"tools"}},
 		{ID: "default/model", ContextLength: 131072, SupportedParameters: []string{"tools"}},
 	}
-	// Measured scores clear the (0) floor so the functional gate passes; the priors
-	// carry the tier bar.
-	caps := map[string]map[registry.Role]float64{
-		"weak/one":   {registry.RoleReviewer: 0.95},
-		"weak/two":   {registry.RoleReviewer: 0.95},
-		"weak/three": {registry.RoleReviewer: 0.95},
-		strong:       {registry.RoleReviewer: 0.95},
-	}
-	w1, w2, w3, st := 0.65, 0.66, 0.67, 0.90
+	// The weak trio clears the default moderate bar (0.76) but not complex (0.82);
+	// the strong model clears complex (0.82). So the moderate panel is the cheap
+	// trio and the complex escalation forces the strong model in.
+	w1, w2, w3, st := 0.77, 0.78, 0.79, 0.90
 	priors := registry.Priors{
-		Meta: registry.PriorsMeta{TierBars: map[string]float64{"simple": 0.4, "moderate": 0.6, "complex": 0.8}},
 		Models: map[string]registry.PriorEntry{
 			"weak/one":   {Reviewer: &w1},
 			"weak/two":   {Reviewer: &w2},
@@ -786,8 +769,7 @@ func TestReviewPanelEscalatesWhenAuthoritative(t *testing.T) {
 			strong:       {Reviewer: &st},
 		},
 	}
-	reg := registry.NewRegistryWithCapabilities(nil, "default/model", catalog, caps).
-		WithSelection(registry.Selection{Priors: priors, Floor: 0, PriceHeadroom: 1.5})
+	reg := registry.NewRegistryFromParts(catalog, priors, nil, nil, "default/model")
 
 	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reg)
 	o := newReviewRun(d, cmclient.TaskContext{CardID: "CARD-1"}, 0)

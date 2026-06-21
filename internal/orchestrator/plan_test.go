@@ -410,8 +410,7 @@ func TestResolveDecisionModelNilRegistryFallsBack(t *testing.T) {
 }
 
 func TestResolveDecisionModelEmptyPoolReturnsCapableDefault(t *testing.T) {
-	reg := registry.NewRegistryWithCapabilities(nil, "default/model", reviewerCatalog(),
-		map[string]map[registry.Role]float64{"rev/alpha": {registry.RoleReviewer: 0.5}})
+	reg := registry.NewRegistryFromParts(reviewerCatalog(), registry.Priors{}, nil, nil, "default/model")
 	emit := events.NewEmitter(nil, nil)
 	ops := &fakeOps{}
 

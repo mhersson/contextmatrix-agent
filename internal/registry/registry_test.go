@@ -43,14 +43,17 @@ func TestFitsWindow(t *testing.T) {
 }
 
 func TestSelectByComplexityPrefersCheapestCapableToolModel(t *testing.T) {
+	// NewRegistry injects no priors, so no catalog model carries a prior for the
+	// role: selection always falls back to the capable default.
 	r := NewRegistry(nil, "deepseek/deepseek-v4-flash", testCatalog())
 	spec := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierComplex})
-	assert.Equal(t, "deepseek/deepseek-v4-flash", spec.Model) // only seeded model clears the complex bar
+	assert.Equal(t, "deepseek/deepseek-v4-flash", spec.Model)
 }
 
 func TestSelectByComplexityFallsBackToCapable(t *testing.T) {
-	// All tool-capable models are unseeded (no measured score). Unmeasured cells
-	// are never selectable, so selection falls back to the capable default.
+	// All tool-capable models lack a prior (NewRegistry injects none). A model
+	// with no prior for the role is never selectable, so selection falls back to
+	// the capable default.
 	cat := llm.Catalog{
 		{ID: "unseeded/a", ContextLength: 8192, SupportedParameters: []string{"tools"}},
 		{ID: "unseeded/b", ContextLength: 8192, SupportedParameters: []string{"tools"}},
@@ -182,6 +185,7 @@ func TestTierBarsIncludeCritical(t *testing.T) {
 	if got := r.tierBar(TierCritical); got != 0.90 {
 		t.Errorf("critical bar = %v, want 0.90", got)
 	}
+
 	if got := r.tierBar(TierSimple); got != 0.65 {
 		t.Errorf("simple bar = %v, want 0.65", got)
 	}
@@ -196,18 +200,14 @@ func TestRegistryContextWindow(t *testing.T) {
 }
 
 func TestSelectReviewPanelDryFromStart(t *testing.T) {
-	// Zero qualifying candidates (every model gated out by the floor): the panel
-	// must still be n non-empty specs — all the capable default, never ModelSpec{}.
+	// Zero qualifying candidates (no model carries a prior for the role): the
+	// panel must still be n non-empty specs — all the capable default, never
+	// ModelSpec{}.
 	catalog := llm.Catalog{
 		entry("alpha", 0.7, 1.4, 200000),
 		entry("beta", 0.9, 1.8, 200000),
 	}
-	caps := map[string]map[Role]float64{
-		"alpha": {RoleReviewer: 0.10}, "beta": {RoleReviewer: 0.20}, // both < floor
-	}
-	priors := Priors{Meta: PriorsMeta{TierBars: map[string]float64{"moderate": 0.55}}}
-	r := NewRegistryWithCapabilities(nil, "capable-default", catalog, caps).
-		WithSelection(Selection{Priors: priors, Floor: 0.6, PriceHeadroom: 1.5})
+	r := NewRegistryFromParts(catalog, Priors{}, nil, nil, "capable-default")
 
 	panel := r.SelectReviewPanel(SelectInput{Role: RoleReviewer, Tier: TierModerate, EstTokens: 50000}, 3)
 	require.Len(t, panel, 3)
@@ -232,6 +232,7 @@ func TestCandidatesArePriorsOnlyAndSkipBlacklist(t *testing.T) {
 	if got.Model != "capable/default" {
 		t.Errorf("want capable default when nothing clears bar, got %q", got.Model)
 	}
+
 	got = r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierModerate}) // bar 0.76
 	if got.Model != "cheap/ok" {
 		t.Errorf("want cheap/ok at moderate, got %q (blacklisted must never win)", got.Model)
@@ -248,6 +249,7 @@ func TestFavoritesConsideredFirst(t *testing.T) {
 	}}
 	favs := map[favKey][]string{{Tier: TierComplex}: {"fav/pick"}}
 	r := NewRegistryFromParts(cat, pr, nil, favs, "capable/default")
+
 	got := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierComplex})
 	if got.Model != "fav/pick" {
 		t.Errorf("favorite must win over cheaper cost-optimal, got %q", got.Model)

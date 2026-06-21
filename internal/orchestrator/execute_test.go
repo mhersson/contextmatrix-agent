@@ -276,8 +276,7 @@ func TestExecuteModelSelectionByComplexity(t *testing.T) {
 			"the/coder": {Coder: &coderScore},
 		},
 	}
-	reg := registry.NewRegistryWithCapabilities(nil, "fallback/default", catalog, nil).
-		WithSelection(registry.Selection{Priors: priors, TierBars: registry.DefaultTierBars()})
+	reg := registry.NewRegistryFromParts(catalog, priors, nil, nil, "fallback/default")
 
 	d := execTestDeps(ops, git, llmFake)
 	d.Registry = reg
