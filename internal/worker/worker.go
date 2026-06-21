@@ -21,6 +21,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/redact"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-agent/internal/tools"
+	protocol "github.com/mhersson/contextmatrix-protocol"
 )
 
 // Compile-time proof that the concrete worker collaborators satisfy the
@@ -65,6 +66,10 @@ type RunSpec struct {
 	SelectorPriceHeadroom float64 // CMX_SELECTOR_PRICE_HEADROOM; 0 uses worker default
 	DefaultModel          string  // CMX_DEFAULT_MODEL; fallback when Model is absent/unresolvable
 	Workspace             string  // CMX_WORKSPACE; parent dir for the clone (default /home/user/workspace)
+
+	// Selection carries the CM-resolved model selection inputs (candidates,
+	// favorites, blacklist). Nil when absent (runner backend or old CM).
+	Selection *protocol.SelectionContext // CMX_SELECTION (JSON-encoded)
 }
 
 // CardOps is the slice of cmclient the worker needs (interface here, where
@@ -404,7 +409,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 		PR:         NewPRCreator(a.ws, a.spec.GitToken),
 		Client:     a.client,
 		Emit:       a.emit,
-		Registry:   buildRegistry(runCtx, a.client, a.spec),
+		Registry:   buildRegistry(a.spec),
 		WriteTools: tools.NewRegistry(writeTools(a.ws, a.spec.BashTimeoutMax)...),
 		ReadTools:  tools.NewReadOnlyRegistry(a.ws),
 		Redact:     red.Apply,
@@ -570,30 +575,13 @@ func writeTools(ws string, bashTimeoutMax int) []tools.Tool {
 	}
 }
 
-// buildRegistry assembles the model registry the FSM selects from: the embedded
-// capabilities baseline (with its calibrated floor) plus the embedded priors,
-// backed by the live OpenRouter catalog. A catalog-fetch failure degrades to an
-// empty catalog — selection still works off priors/capabilities, and the
-// harness enforces context limits at runtime.
-func buildRegistry(ctx context.Context, client llm.LLM, spec RunSpec) *registry.Registry {
-	var cat llm.Catalog
-
-	if fetcher, ok := client.(catalogFetcher); ok {
-		if fetched, err := fetcher.FetchCatalog(ctx); err == nil {
-			cat = fetched
-		} else {
-			slog.Warn("catalog fetch failed; selecting from priors/capabilities only", "error", err)
-		}
-	}
-
-	caps, meta := registry.DefaultCapabilities()
-
-	return registry.NewRegistryWithCapabilities(nil, spec.DefaultModel, cat, caps).
-		WithSelection(registry.Selection{
-			Priors:        registry.DefaultPriors(),
-			Floor:         meta.Floor,
-			PriceHeadroom: spec.SelectorPriceHeadroom,
-		})
+// buildRegistry assembles the model registry the FSM selects from. When a
+// SelectionContext is present on the spec (injected by CM at trigger time), it
+// is the authoritative source — the registry is built entirely from the
+// payload-injected catalog, priors, favorites, and blacklist. No live catalog
+// fetch or embedded baseline is consulted.
+func buildRegistry(spec RunSpec) *registry.Registry {
+	return registry.FromSelection(spec.Selection, spec.DefaultModel)
 }
 
 type finalizeArgs struct {
