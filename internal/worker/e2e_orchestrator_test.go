@@ -472,6 +472,12 @@ func (s *stubOps) ReportPush(_ context.Context, cardID, branch, prURL string) er
 	return nil
 }
 
+func (s *stubOps) BlacklistModel(_ context.Context, cardID, model, reason string) error {
+	s.record("BlacklistModel", cardID, model, reason)
+
+	return nil
+}
+
 func (s *stubOps) CompleteTask(_ context.Context, cardID, _ string) error {
 	s.record("CompleteTask", cardID)
 

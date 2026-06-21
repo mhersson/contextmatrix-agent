@@ -156,6 +156,19 @@ type run struct {
 	// (a model should not review its own code). Populated in executeSubtask.
 	coderModels map[string]bool
 
+	// reselects counts in-run model re-selections triggered by a harness-incapable
+	// model (one per recoverIncapable). It is capped at 3 per card across BOTH the
+	// execute (coder) and review (synthesis/fix) recovery paths — a shared budget,
+	// so a card that keeps drawing dud models parks rather than burning re-selections
+	// forever.
+	reselects int
+
+	// excluded is the per-card set of models proven harness-incapable on this run.
+	// It is threaded into every SelectInput.Exclude (coder selection and the review
+	// panel) so a model that could not drive the tool loop is never re-picked.
+	// Initialized in newRun.
+	excluded map[string]bool
+
 	// lastReviewBase is the HEAD SHA captured at the end of the previous round's
 	// specialist review (mirrors the runner's review_completed head=<sha>). The
 	// next round diffs against it so the panel sees only the change since the last
@@ -198,6 +211,7 @@ func newRun(d Deps, tc cmclient.TaskContext) *run {
 	}
 
 	o.coderModels = map[string]bool{}
+	o.excluded = map[string]bool{}
 	o.body = tc.Description
 	o.runVerify = func(ctx context.Context, argv []string) (string, bool) {
 		return execVerify(ctx, d.Cfg.Workspace, argv)
@@ -295,6 +309,41 @@ func budgetLogMessage(be *BudgetExceededError) string {
 // contextLimitLogMessage is the canonical card-log line for a context-window park.
 func contextLimitLogMessage(cle *ContextLimitError) string {
 	return fmt.Sprintf("context window reached on model %q (%d tokens) — parking work; split the subtask or pin a larger-window model", cle.Model, cle.ContextWindow)
+}
+
+// reselectCap bounds in-run model re-selections per card. A model that emits
+// tool calls every turn but never forms valid arguments (harness-incapable) is
+// blacklisted and swapped for the next-best pick; after this many swaps the run
+// parks rather than churning through the catalog indefinitely.
+const reselectCap = 3
+
+// recoverIncapable handles a harness-incapable model encountered mid-phase: it
+// blacklists the model on CM (best-effort), records the exclusion so the next
+// selection skips it, and logs the swap. It returns an error — wrapping the
+// IncapableError — once the per-card re-selection cap is exhausted, which the
+// caller propagates to park the run. The incapable model executed no tools, so
+// the caller can simply re-select and re-run the same unit; no git reset is
+// needed.
+func (o *run) recoverIncapable(ctx context.Context, ie *IncapableError) error {
+	if o.reselects >= reselectCap {
+		return fmt.Errorf("re-selection cap (%d) exhausted after model %q: %w", reselectCap, ie.Model, ie)
+	}
+
+	o.reselects++
+
+	if o.excluded == nil {
+		o.excluded = map[string]bool{}
+	}
+
+	o.excluded[ie.Model] = true
+
+	// Best-effort: the recovery proceeds (re-select + re-run) regardless of a
+	// reporting failure; the blacklist is an advisory hint to CM and future runs.
+	_ = o.d.Ops.BlacklistModel(ctx, o.d.Cfg.CardID, ie.Model, ie.Reason) //nolint:errcheck
+	_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID,                              //nolint:errcheck
+		fmt.Sprintf("model %q harness-incapable; blacklisted and re-selecting (attempt %d/%d)", ie.Model, o.reselects, reselectCap))
+
+	return nil
 }
 
 // indexOf returns the position of v in s, or -1 if absent.
