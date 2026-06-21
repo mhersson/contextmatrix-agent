@@ -15,6 +15,15 @@ import (
 // never silently produces a no-op "completed" run.
 const defaultMaxTurns = 30
 
+// defaultIncapableThreshold is the number of consecutive unproductive turns
+// (tool calls present but none executed successfully) before the harness stops
+// and reports "incapable".
+const defaultIncapableThreshold = 3
+
+// ReasonIncapable is set when the model emits tool calls every turn but none
+// ever execute successfully, indicating it cannot drive the tool loop.
+const ReasonIncapable = "incapable"
+
 // contextLimitThreshold is the fraction of the model's context window that, once
 // the prompt reaches it, makes the harness stop and return incomplete (v1 has
 // no compactor). Detection uses the provider's authoritative prompt_tokens.
@@ -32,11 +41,12 @@ type Config struct {
 	ToolOutputMaxBytes int                 // 0 disables the tool-result size cap
 	RedactToolOutput   func(string) string // nil = identity; applied before the size cap
 	Inbox              Inbox               // nil = autonomous; non-nil feeds mid-run human input
+	IncapableThreshold int                 // consecutive unproductive turns before "incapable"; 0 → default 3
 }
 
 type Result struct {
 	Completed        bool
-	Reason           string // done | max_turns | max_cost | context_limit | error
+	Reason           string // done | max_turns | max_cost | context_limit | incapable | error
 	Turns            int
 	TotalCostUSD     float64
 	PromptTokens     int64
@@ -65,6 +75,11 @@ func Run(ctx context.Context, client llm.LLM, reg *tools.Registry, emit *events.
 	if cfg.MaxTurns <= 0 {
 		cfg.MaxTurns = defaultMaxTurns
 	}
+
+	// unproductive counts consecutive turns that had tool calls but none executed
+	// successfully. Resets to zero on any successful tool execution. Turns with
+	// no tool calls are neutral and do not touch this counter.
+	unproductive := 0
 
 	for res.Turns < cfg.MaxTurns {
 		if cfg.MaxCostUSD > 0 && res.TotalCostUSD >= cfg.MaxCostUSD {
@@ -179,6 +194,13 @@ func Run(ctx context.Context, client llm.LLM, reg *tools.Registry, emit *events.
 
 		var pendingMsgs []UserMessage
 
+		// turnHadCapableTool is set to true by the closure below when at least
+		// one tool call in this turn produced parseable arguments (whether or not
+		// the tool itself returned an error). A parse/repair failure signals that
+		// the model cannot form valid tool arguments; an execution error is a
+		// domain failure, not a model incapability signal.
+		turnHadCapableTool := false
+
 		for i, tc := range resp.ToolCalls {
 			if interrupted {
 				msgs = append(msgs, toolResultMsg(tc.ID, "skipped: user interjected"))
@@ -215,6 +237,10 @@ func Run(ctx context.Context, client llm.LLM, reg *tools.Registry, emit *events.
 					return
 				}
 
+				// Args parsed successfully: the model is capable of driving the tool
+				// loop regardless of whether Execute succeeds or returns a domain error.
+				turnHadCapableTool = true
+
 				out, err := tool.Execute(ctx, args)
 				if err != nil {
 					res.ToolCallFailures++
@@ -245,6 +271,34 @@ func Run(ctx context.Context, client llm.LLM, reg *tools.Registry, emit *events.
 				if pending := cfg.Inbox.Drain(); len(pending) > 0 {
 					interrupted = true
 					pendingMsgs = pending // stash; appended after the loop
+				}
+			}
+		}
+
+		// Incapability detection: only evaluated when the model emitted tool calls.
+		// Turns with no tool calls are neutral (model answered or is awaiting input).
+		// Transport errors are caught above and return early — they never reach here.
+		// A turn is "unproductive" only when every tool call failed to parse valid
+		// arguments — execution errors are domain failures, not model incapability.
+		if len(resp.ToolCalls) > 0 {
+			if turnHadCapableTool {
+				unproductive = 0
+			} else {
+				unproductive++
+
+				thr := cfg.IncapableThreshold
+				if thr <= 0 {
+					thr = defaultIncapableThreshold
+				}
+
+				if unproductive >= thr {
+					res.Reason = ReasonIncapable
+					emit.Emit(events.ErrorKind, map[string]any{
+						"error": "model cannot drive the tool loop",
+						"model": res.ModelUsed,
+					})
+
+					return res, nil
 				}
 			}
 		}

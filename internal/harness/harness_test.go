@@ -680,6 +680,26 @@ func TestInboxMidBatchInterrupt(t *testing.T) {
 	assert.Equal(t, "stop and listen", second[uIdx].Content)
 }
 
+func TestRunDetectsIncapability(t *testing.T) {
+	reg := tools.NewRegistry(tools.NewReadTool(t.TempDir()))
+
+	// Every turn: one tool call whose Arguments is not valid JSON → never executes.
+	badCall := toolCall("1", "read", `{ this is not json`)
+	responses := make([]llm.Response, 20)
+
+	for i := range responses {
+		responses[i] = llm.Response{ToolCalls: []llm.ToolCall{badCall}}
+	}
+
+	f := &fakeLLM{responses: responses}
+
+	res, err := Run(context.Background(), f, reg, newEmitter(), "do x",
+		Config{Model: "weak/m", MaxTurns: 20, IncapableThreshold: 3})
+	require.NoError(t, err)
+	assert.Equal(t, "incapable", res.Reason)
+	assert.Less(t, res.Turns, 20, "incapable must fire before MaxTurns")
+}
+
 // Case 6: ctx cancel during Wait → Run returns ctx.Err() with Reason canceled.
 func TestInboxCtxCancelDuringWait(t *testing.T) {
 	reg := tools.NewRegistry(tools.NewReadTool(t.TempDir()))
