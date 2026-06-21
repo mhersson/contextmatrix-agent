@@ -135,10 +135,13 @@ func (o *run) runCoder(ctx context.Context, sub subtaskRef, prompt string) (harn
 			usedModel = model
 		}
 
-		// Track the resolved coder slug so the review panel can exclude it (a model
-		// must not review its own code). Keyed on the slug we configured, which is
-		// what SelectReviewPanel's Exclude set compares against. newRun initializes
-		// the map unconditionally.
+		// Record the resolved coder slug so the review panel excludes it: a capable
+		// model must not review its own code. This runs BEFORE the incapable check
+		// below, so an incapable model (which produced no code) is also recorded
+		// here — harmless, and it keeps that model out of its own review via this
+		// set plus o.excluded. Keyed on the slug we configured, which is what
+		// SelectReviewPanel's Exclude set compares against. newRun initializes the
+		// map unconditionally.
 		o.coderModels[model] = true
 
 		if reportErr := d.Ops.ReportUsage(ctx, sub.ID, usedModel,
@@ -206,6 +209,10 @@ func (o *run) pushSubtask(ctx context.Context) error {
 // the subtask's tier and a real window estimate of the coder prompt.
 func (o *run) resolveCoderModel(sub subtaskRef, prompt string) string {
 	if resolvePin(o.d.Registry, o.tc.ModelCoder) {
+		// A pinned model is returned even if it is in o.excluded: we never override
+		// an explicit operator pin with an auto-selected substitute. A pinned model
+		// that is harness-incapable therefore keeps being re-selected, exhausts the
+		// re-selection cap, and parks — the blacklist still records it.
 		return o.tc.ModelCoder
 	}
 

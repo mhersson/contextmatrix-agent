@@ -511,7 +511,7 @@ func (o *run) runFixModel(ctx context.Context, prompt string, round int, fixTier
 	}
 
 	// Unreachable: recoverIncapable errors at the cap before the loop exhausts.
-	return fmt.Errorf("review fix: re-selection loop exhausted")
+	return fmt.Errorf("review fix (card=%s): re-selection loop exhausted", o.d.Cfg.CardID)
 }
 
 // runFix runs one coder fix pass against the outstanding findings, lands the
@@ -558,6 +558,10 @@ func (o *run) runFix(ctx context.Context, findings string, round int, fixTier st
 // fix tier (the synthesizer's fix_tier, falling back to the card tier).
 func (o *run) resolveFixModel(fixTier string, authoritative bool) string {
 	if resolvePin(o.d.Registry, o.tc.ModelCoder) {
+		// A pinned model is returned even if it is in o.excluded: we never override
+		// an explicit operator pin with an auto-selected substitute. A pinned model
+		// that is harness-incapable therefore keeps being re-selected, exhausts the
+		// re-selection cap, and parks — the blacklist still records it.
 		return o.tc.ModelCoder
 	}
 
