@@ -102,6 +102,35 @@ func TestParsePlan(t *testing.T) {
 	})
 }
 
+func TestTierStringToRegistryTier(t *testing.T) {
+	// Lock the end-to-end mapping: the planner tier strings parsePlan accepts
+	// must convert to the matching registry.Tier at selection time. "critical"
+	// must reach registry.TierCritical (the 0.90 bar), not the moderate default.
+	t.Run("tierOf maps each subtask tier string", func(t *testing.T) {
+		assert.Equal(t, registry.TierSimple, tierOf(subtaskRef{Tier: "simple"}))
+		assert.Equal(t, registry.TierModerate, tierOf(subtaskRef{Tier: "moderate"}))
+		assert.Equal(t, registry.TierComplex, tierOf(subtaskRef{Tier: "complex"}))
+		assert.Equal(t, registry.TierCritical, tierOf(subtaskRef{Tier: "critical"}))
+	})
+
+	t.Run("tierOf unknown/empty defaults to moderate", func(t *testing.T) {
+		assert.Equal(t, registry.TierModerate, tierOf(subtaskRef{Tier: "epic"}))
+		assert.Equal(t, registry.TierModerate, tierOf(subtaskRef{Tier: ""}))
+	})
+
+	t.Run("tierFromString maps each card tier string", func(t *testing.T) {
+		assert.Equal(t, registry.TierSimple, tierFromString("simple"))
+		assert.Equal(t, registry.TierModerate, tierFromString("moderate"))
+		assert.Equal(t, registry.TierComplex, tierFromString("complex"))
+		assert.Equal(t, registry.TierCritical, tierFromString("critical"))
+	})
+
+	t.Run("tierFromString unknown/empty defaults to moderate", func(t *testing.T) {
+		assert.Equal(t, registry.TierModerate, tierFromString("gigantic"))
+		assert.Equal(t, registry.TierModerate, tierFromString(""))
+	})
+}
+
 func TestPlanPhaseCreatesSubtasks(t *testing.T) {
 	ops := &fakeOps{
 		taskContext: cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body"},

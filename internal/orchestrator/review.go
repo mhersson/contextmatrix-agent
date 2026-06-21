@@ -791,6 +791,8 @@ func tierFromString(tier string) registry.Tier {
 		return registry.TierSimple
 	case "complex":
 		return registry.TierComplex
+	case "critical":
+		return registry.TierCritical
 	default:
 		return registry.TierModerate
 	}
