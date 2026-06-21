@@ -37,6 +37,7 @@ type Ops interface {
 	AddLog(ctx context.Context, cardID, message string) error
 	ReportUsage(ctx context.Context, cardID, model string, promptTokens, completionTokens int64, actualCostUSD float64) error
 	ReportPush(ctx context.Context, cardID, branch, prURL string) error
+	BlacklistModel(ctx context.Context, cardID, model, reason string) error
 	CompleteTask(ctx context.Context, cardID, summary string) error
 	ReleaseCard(ctx context.Context, cardID string) error
 }

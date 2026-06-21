@@ -224,6 +224,12 @@ func (f *fakeOps) ReportPush(_ context.Context, cardID, branch, prURL string) er
 	return nil
 }
 
+func (f *fakeOps) BlacklistModel(_ context.Context, cardID, model, reason string) error {
+	f.record(fmt.Sprintf("BlacklistModel:%s/%s", cardID, model))
+
+	return nil
+}
+
 func (f *fakeOps) CompleteTask(_ context.Context, cardID, summary string) error {
 	f.record("CompleteTask:" + cardID)
 

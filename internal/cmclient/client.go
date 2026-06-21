@@ -414,6 +414,17 @@ func (c *Client) SubtaskStates(ctx context.Context, project, parentID string) ([
 	return states, nil
 }
 
+// BlacklistModel reports a harness-incapable model so CM never auto-selects it.
+func (c *Client) BlacklistModel(ctx context.Context, cardID, model, reason string) error {
+	_, err := c.call(ctx, "report_incapable_model", map[string]any{
+		"model_slug":     model,
+		"reason":         reason,
+		"sample_card_id": cardID,
+	})
+
+	return err
+}
+
 // AddLog appends a status_update activity log entry to the card.
 func (c *Client) AddLog(ctx context.Context, cardID, message string) error {
 	_, err := c.call(ctx, "add_log", map[string]any{
