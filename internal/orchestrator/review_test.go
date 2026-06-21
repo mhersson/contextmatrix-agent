@@ -71,13 +71,18 @@ func reviewerCatalog() llm.Catalog {
 }
 
 func reviewerRegistry() *registry.Registry {
-	return registry.NewRegistryWithCapabilities(nil, "default/model", reviewerCatalog(),
-		map[string]map[registry.Role]float64{
-			"rev/alpha": {registry.RoleReviewer: 0.90},
-			"rev/beta":  {registry.RoleReviewer: 0.88},
-			"rev/gamma": {registry.RoleReviewer: 0.86},
-			"rev/delta": {registry.RoleReviewer: 0.84},
-		})
+	alpha, beta, gamma, delta := 0.90, 0.88, 0.86, 0.84
+	priors := registry.Priors{
+		Models: map[string]registry.PriorEntry{
+			"rev/alpha": {Reviewer: &alpha},
+			"rev/beta":  {Reviewer: &beta},
+			"rev/gamma": {Reviewer: &gamma},
+			"rev/delta": {Reviewer: &delta},
+		},
+	}
+
+	return registry.NewRegistryWithCapabilities(nil, "default/model", reviewerCatalog(), nil).
+		WithSelection(registry.Selection{Priors: priors, TierBars: registry.DefaultTierBars()})
 }
 
 func TestDetectVerifyCommand(t *testing.T) {
