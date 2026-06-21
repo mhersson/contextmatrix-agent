@@ -20,6 +20,18 @@ func (e *ContextLimitError) Error() string {
 	return fmt.Sprintf("context limit reached for model %q (window %d tokens)", e.Model, e.ContextWindow)
 }
 
+// IncapableError marks a phase stopping because the model cannot drive the tool
+// loop — it emitted tool calls every turn but none parsed valid arguments. The
+// recovery path (a later task) catches this to blacklist the model and re-select.
+type IncapableError struct {
+	Model  string
+	Reason string
+}
+
+func (e *IncapableError) Error() string {
+	return fmt.Sprintf("model %q is harness-incapable: %s", e.Model, e.Reason)
+}
+
 // harnessConfig builds the per-phase harness.Config with the run-wide safety
 // fields (size cap, secret redaction) plus the model's own context window.
 // Centralizing this is the guard against a new phase forgetting the hardening.
@@ -46,6 +58,10 @@ func (o *run) runModel(ctx context.Context, reg *tools.Registry, prompt, model s
 	res, err := harness.Run(ctx, o.d.Client, reg, o.d.Emit, prompt, o.harnessConfig(model))
 	if err == nil && res.Reason == "context_limit" {
 		return res, &ContextLimitError{Model: model, ContextWindow: o.d.Registry.ContextWindow(model)}
+	}
+
+	if err == nil && res.Reason == harness.ReasonIncapable {
+		return res, &IncapableError{Model: model, Reason: "cannot drive the tool loop"}
 	}
 
 	return res, err

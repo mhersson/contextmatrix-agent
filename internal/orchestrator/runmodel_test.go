@@ -125,6 +125,46 @@ func TestRunModelNormalizesContextLimit(t *testing.T) {
 	}
 }
 
+// TestRunModelNormalizesIncapable pins that when the harness returns
+// Reason == "incapable" (model emits tool calls every turn but none parse),
+// runModel surfaces it as an *IncapableError carrying the model name. It mirrors
+// the context-limit test: inject a fake LLM whose every response contains an
+// unparseable tool call (bad JSON → harness never marks turnHadCapableTool) so
+// after IncapableThreshold turns the harness sets Reason = ReasonIncapable.
+func TestRunModelNormalizesIncapable(t *testing.T) {
+	ops := &fakeOps{taskContext: cmclient.TaskContext{CardID: "CARD-1"}}
+
+	// Each response carries a single tool call with invalid JSON arguments.
+	// The harness trips incapability after IncapableThreshold (default 3)
+	// consecutive unproductive turns; supply enough responses to reach the
+	// threshold without hitting MaxTurns.
+	badCall := llm.ToolCall{
+		ID:   "bad-1",
+		Type: "function",
+		Function: llm.FunctionCall{
+			Name:      "read",
+			Arguments: `{ this is not json`,
+		},
+	}
+	badResp := llm.Response{ToolCalls: []llm.ToolCall{badCall}}
+	llmFake := &planLLM{responses: []llm.Response{badResp, badResp, badResp, badResp, badResp}}
+	d := planTestDeps(ops, llmFake)
+
+	o := newRun(d, ops.taskContext)
+
+	res, err := o.runModel(context.Background(), d.ReadTools, "do the thing", "default/model")
+
+	require.Error(t, err, "incapable must surface as an error")
+
+	var ie *IncapableError
+	require.ErrorAs(t, err, &ie)
+	assert.Equal(t, "default/model", ie.Model)
+
+	// The result is returned alongside the error so the caller's
+	// Spend/ReportUsage pattern still works.
+	assert.Equal(t, "incapable", res.Reason)
+}
+
 // TestRunModelPassesThroughNormalResult pins that a normal (done) run is NOT
 // turned into an error by runModel — only context_limit is normalized.
 func TestRunModelPassesThroughNormalResult(t *testing.T) {
