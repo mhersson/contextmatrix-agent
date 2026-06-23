@@ -11,7 +11,7 @@ require (
 	github.com/knadh/koanf/providers/structs v1.0.0
 	github.com/knadh/koanf/v2 v2.3.5
 	github.com/mhersson/contextmatrix-githubauth v0.1.0
-	github.com/mhersson/contextmatrix-protocol v0.2.0
+	github.com/mhersson/contextmatrix-protocol v0.3.0
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/spf13/cobra v1.10.2
@@ -64,5 +64,3 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	gotest.tools/v3 v3.5.2 // indirect
 )
-
-replace github.com/mhersson/contextmatrix-protocol => ../contextmatrix-protocol
