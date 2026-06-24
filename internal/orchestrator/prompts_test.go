@@ -52,3 +52,12 @@ func TestDocumentPromptShape(t *testing.T) {
 	assert.Contains(t, low, "do not run git")
 	assert.Contains(t, low, "commit: docs(")
 }
+
+func TestBrainstormPromptShape(t *testing.T) {
+	low := strings.ToLower(brainstormPrompt)
+	assert.Contains(t, low, "one question at a time")
+	assert.Contains(t, low, "2-3 approaches")
+	assert.Contains(t, low, "## design")
+	assert.Contains(t, low, "design_complete")
+	assert.Contains(t, low, "read-only")
+}
