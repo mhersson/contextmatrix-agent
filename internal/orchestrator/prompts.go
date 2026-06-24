@@ -448,6 +448,26 @@ BRANCH DIFF (what actually changed)
 %s
 `
 
+// gateClassifyPrompt maps a human's freeform reply at a sign-off gate to a
+// structured approve/adjust verdict. There is no hard reject: anything short of
+// a clear approval is an adjustment whose feedback is folded into the next
+// round. A parse failure is treated as adjust upstream, never an approval.
+//
+// The %s slots are filled by classifyVerdict: the gate kind, then the reply.
+const gateClassifyPrompt = `A human was shown a %s gate and asked to approve the work or request changes.
+Their reply:
+
+%s
+
+Classify the reply. If they approve, accept, or are clearly satisfied (e.g.
+"approve", "looks good", "lgtm", "yes, ship it"), the verdict is "approve". If
+they request ANY change, raise a concern, or are not fully satisfied, the verdict
+is "adjust" and feedback summarizes the changes they want.
+
+Respond with ONLY a JSON object, no prose:
+{"verdict":"approve|adjust","feedback":"<changes to make; empty when approve>"}
+`
+
 // resumeBlock renders the existing-subtask reuse instruction inserted into the
 // planner prompt on resume. titles is the list of existing subtask titles.
 func resumeBlock(titles []string) string {

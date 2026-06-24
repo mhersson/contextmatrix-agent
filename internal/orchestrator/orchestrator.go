@@ -16,6 +16,7 @@ import (
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/events"
+	"github.com/mhersson/contextmatrix-agent/internal/harness"
 	"github.com/mhersson/contextmatrix-agent/internal/llm"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-agent/internal/tools"
@@ -91,6 +92,11 @@ type Config struct {
 	MaxTurns          int
 	ToolOutputMax     int
 	ReviewAttemptsCap int // 5, CM's convention
+	// Interactive is the sole mode flag: true => HITL (gates wait on Human and
+	// brainstorming runs for creative cards); false => autonomous (gates pass
+	// through, brainstorming skipped). Autonomous behavior is byte-for-byte the
+	// pre-HITL behavior.
+	Interactive bool
 }
 
 // Deps bundles the collaborators the FSM drives.
@@ -105,6 +111,10 @@ type Deps struct {
 	ReadTools  *tools.Registry // read-only subset for planner/reviewers
 	Cfg        Config
 	Redact     func(string) string // nil = identity; scrubs tool output in phase runs (wired by the worker)
+	// Human is the HITL ask-and-wait channel, satisfied by the worker's live
+	// Inbox. It is a genuine nil for autonomous runs; mode is read from
+	// Cfg.Interactive, never from Human != nil (the nil-concrete footgun).
+	Human harness.Inbox
 }
 
 // phaseOrder is the fixed forward sequence of phases. Run enters at the card's
