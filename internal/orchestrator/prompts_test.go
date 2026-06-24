@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -38,4 +39,16 @@ func TestBuildArtifactHygieneInBothCodingPrompts(t *testing.T) {
 		assert.Contains(t, p, "do not leave the binary behind",
 			"%s prompt must include the build-hygiene note", name)
 	}
+}
+
+// guard: the document prompt must carry the conservative gate, the docs-only
+// restriction, the no-git instruction, and the COMMIT: docs(...) convention.
+func TestDocumentPromptShape(t *testing.T) {
+	low := strings.ToLower(documentPrompt)
+	assert.Contains(t, low, "default: no external documentation is needed")
+	assert.Contains(t, low, "documentation only")
+	assert.Contains(t, low, "user-facing behavior")
+	assert.Contains(t, low, "api contracts")
+	assert.Contains(t, low, "do not run git")
+	assert.Contains(t, low, "commit: docs(")
 }

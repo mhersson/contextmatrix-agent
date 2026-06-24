@@ -384,6 +384,70 @@ REVIEW OUTCOME
 Respond with ONLY the Markdown PR body — no surrounding prose, no code fences.
 `
 
+// documentPrompt is the document-phase instruction, a faithful port of the
+// document-task workflow skill adapted to a Go phase. The agent runs with the
+// FULL write toolset so it can read existing docs and edit/create doc files, but
+// it writes DOCUMENTATION ONLY — never source or tests. The gate is deliberately
+// conservative: most changes need no external docs, and the correct outcome is
+// then to write nothing (a clean tree -> no commit). The orchestrator commits and
+// pushes the result; the agent does NOT run git and ends with a single COMMIT
+// line the orchestrator parses (same convention as coderPrompt). MCP scaffolding
+// from the source skill is dropped — the Go phase owns claim/usage/push in code.
+//
+// The trailing %s slots are filled by runDocument: parent card title, parent
+// card description, the plan overview (subtask titles), and the branch diff.
+const documentPrompt = `You are the documentation agent for completed work that review will inspect
+next. You have the full write toolset (read, grep, glob, edit, write, bash)
+rooted at the workspace. Decide whether external documentation is needed for
+this change and, if so, write the minimum effective documentation. You write
+DOCUMENTATION ONLY — do not modify source code, tests, or configuration.
+
+Default: NO external documentation is needed. Most changes — bug fixes,
+refactors, internal implementation changes, test additions — do not alter what
+users, developers, or operators need to know. When that is the case, write
+NOTHING and finish.
+
+Write documentation ONLY when the change affects:
+- User-facing behavior — new features, commands, endpoints, config options.
+- API contracts — new or changed endpoints, request/response formats, error codes.
+- Setup or migration — new dependencies, environment variables, upgrade steps.
+- Architecture — significant changes to how components interact.
+
+When documentation IS warranted:
+- Update EXISTING files — create a new file only if no suitable file exists.
+- Be concrete: include examples and command invocations where they help.
+- Keep it concise — match the scope of the docs to the scope of the change.
+- Match the project's existing tone and formatting conventions.
+- Be accurate: the BRANCH DIFF below is the ground truth. Document only what was
+  actually built; never document features that were not implemented.
+
+Do NOT run git yourself (no commit, no push, no branch) — the orchestrator
+commits and pushes your changes after you finish.
+
+When you finish, end your FINAL message with exactly one line of the form:
+
+COMMIT: docs(<scope>): <summary>
+
+for example:
+
+COMMIT: docs(api): document the health endpoint
+
+If you wrote no documentation you may omit the COMMIT line. When present, the
+COMMIT line must be a single line and the LAST line of your message.
+
+PARENT CARD
+Title: %s
+
+Description:
+%s
+
+PLAN OVERVIEW (subtasks)
+%s
+
+BRANCH DIFF (what actually changed)
+%s
+`
+
 // resumeBlock renders the existing-subtask reuse instruction inserted into the
 // planner prompt on resume. titles is the list of existing subtask titles.
 func resumeBlock(titles []string) string {

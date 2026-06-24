@@ -50,7 +50,7 @@ internal/registry/   → model selector: Resolve(actor, role), SelectByComplexit
 internal/events/     → event stream (model_request | model_response | tool_call | tool_result | usage | state_change | context_limit | error | …)
 
 # Autonomous executor — the FSM and its container lifecycle
-internal/orchestrator/ → light hand-FSM plan → execute → review → integrate → done; phase persistence; git finalize
+internal/orchestrator/ → light hand-FSM plan → execute → document → review → integrate → done; phase persistence; git finalize
 internal/worker/       → the `work` lifecycle: clone, claim, HITL-or-FSM, commit/push, PR; wires orchestrator.Deps
 internal/executor/     → Executor interface + DockerExecutor; Tracker (concurrency gate); watchdogs
 internal/secrets/      → SecretSource (static env file) + Refresher (mints GitHub tokens via githubauth)
@@ -142,8 +142,8 @@ or a mounted file only — never via flags or committed YAML.
 
 ## Key domain rules
 
-1. **Orchestrator phases.** `plan → execute → review → integrate → done`, in
-   `phaseOrder`. The current phase is **persisted to the card via MCP** before
+1. **Orchestrator phases.** `plan → execute → document → review → integrate → done`,
+   in `phaseOrder`. The current phase is **persisted to the card via MCP** before
    work, orthogonal to board state. Persisted phase + an incrementally pushed
    branch give crash-resume: a fresh container re-clones and re-enters at the
    stored phase.

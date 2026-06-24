@@ -1,6 +1,6 @@
 // Package orchestrator drives an autonomous card through plan -> execute ->
-// review -> integrate -> done. Code owns all sequencing; models run inside
-// phases. Each phase persists itself to the card BEFORE doing work, so the
+// document -> review -> integrate -> done. Code owns all sequencing; models run
+// inside phases. Each phase persists itself to the card BEFORE doing work, so the
 // stored phase always reads "in progress or interrupted".
 //
 // Boundary rule: this package imports harness, llm, registry, tools, events,
@@ -109,7 +109,7 @@ type Deps struct {
 
 // phaseOrder is the fixed forward sequence of phases. Run enters at the card's
 // persisted phase and never moves backward through this slice.
-var phaseOrder = []string{"plan", "execute", "review", "integrate", "done"}
+var phaseOrder = []string{"plan", "execute", "document", "review", "integrate", "done"}
 
 // phaseFn is a single phase's body.
 type phaseFn func(context.Context) error
@@ -190,6 +190,7 @@ type run struct {
 
 	planFn      phaseFn
 	executeFn   phaseFn
+	documentFn  phaseFn
 	reviewFn    phaseFn
 	integrateFn phaseFn
 	doneFn      phaseFn
@@ -219,6 +220,7 @@ func newRun(d Deps, tc cmclient.TaskContext) *run {
 
 	o.planFn = func(ctx context.Context) error { return runPlan(ctx, o) }
 	o.executeFn = func(ctx context.Context) error { return runExecute(ctx, o) }
+	o.documentFn = func(ctx context.Context) error { return runDocument(ctx, o) }
 	o.reviewFn = func(ctx context.Context) error { return runReview(ctx, o) }
 	o.integrateFn = func(ctx context.Context) error { return runIntegrate(ctx, o) }
 	o.doneFn = func(ctx context.Context) error { return runDone(ctx, o) }
@@ -233,6 +235,8 @@ func (o *run) phaseFnFor(phase string) phaseFn {
 		return o.planFn
 	case "execute":
 		return o.executeFn
+	case "document":
+		return o.documentFn
 	case "review":
 		return o.reviewFn
 	case "integrate":

@@ -87,7 +87,7 @@ func (o *run) executeSubtask(ctx context.Context, sub subtaskRef) error {
 	// push but still completes the card. A push failure aborts the run — the
 	// spend has already been reported, so retry/resume must not double-charge.
 	if committed {
-		if err := o.pushSubtask(ctx); err != nil {
+		if err := o.pushBranch(ctx); err != nil {
 			return fmt.Errorf("push after subtask %s: %w", sub.ID, err)
 		}
 	}
@@ -174,15 +174,15 @@ func (o *run) runCoder(ctx context.Context, sub subtaskRef, prompt string) (harn
 	return harness.Result{}, fmt.Errorf("coder for %s: re-selection loop exhausted", sub.ID)
 }
 
-// pushSubtask pushes the card branch after a subtask commit. On a FRESH run that
-// found a stale remote branch (o.staleRemoteTip != ""), the FIRST push overwrites
-// it with a force-with-lease against the recorded tip — per spec §5.1, a fresh
-// run owns its card branch and reclaims a stale one at first push. Every push
-// after that (firstPushDone) is plain, because the branch is now ours and a plain
-// push fast-forwards. A run with no stale branch (staleRemoteTip == "", the
-// normal case, including all resume runs which never record a tip) always uses a
-// plain push.
-func (o *run) pushSubtask(ctx context.Context) error {
+// pushBranch pushes the card branch after a commit. On a FRESH run that found a
+// stale remote branch (o.staleRemoteTip != ""), the FIRST push overwrites it
+// with a force-with-lease against the recorded tip — per spec §5.1, a fresh run
+// owns its card branch and reclaims a stale one at first push. Every push after
+// that (firstPushDone) is plain, because the branch is now ours and a plain push
+// fast-forwards. A run with no stale branch (staleRemoteTip == "", the normal
+// case, including all resume runs which never record a tip) always uses a plain
+// push. Shared by the execute and document phases.
+func (o *run) pushBranch(ctx context.Context) error {
 	branch := o.d.Cfg.Branch
 
 	// Every exit marks the first push as attempted: the lease is a one-shot
