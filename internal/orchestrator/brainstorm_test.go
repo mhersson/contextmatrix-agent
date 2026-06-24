@@ -1,9 +1,16 @@
 package orchestrator
 
 import (
+	"context"
 	"testing"
 
+	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
+	"github.com/mhersson/contextmatrix-agent/internal/events"
+	"github.com/mhersson/contextmatrix-agent/internal/harness"
+	"github.com/mhersson/contextmatrix-agent/internal/llm"
+	"github.com/mhersson/contextmatrix-agent/internal/tools"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestHasDesignSection(t *testing.T) {
@@ -33,4 +40,72 @@ func TestExtractDesign(t *testing.T) {
 		assert.Contains(t, design, "just add a flag")
 		assert.NotContains(t, design, "DESIGN_COMPLETE")
 	})
+}
+
+// brainstormRun builds a *run wired for brainstorm tests: scripted ops, a planLLM
+// serving the model turns, and an injected inbox serving the human turns.
+func brainstormRun(ops *fakeOps, inbox *fakeInbox, client llm.LLM, maxCost, reported float64) *run {
+	d := Deps{
+		Ops:       ops,
+		Client:    client,
+		Emit:      events.NewEmitter(nil, nil),
+		Registry:  planTestRegistry(),
+		ReadTools: tools.NewRegistry(tools.NewReadTool(".")),
+		Human:     inbox,
+		Cfg: Config{
+			Project: "proj", CardID: "CARD-1",
+			PayloadModel: "payload/model", DefaultModel: "default/model",
+			MaxTurns: 5, MaxCardCost: maxCost, Interactive: true,
+		},
+	}
+
+	return newRun(d, cmclient.TaskContext{CardID: "CARD-1", Title: "Add a palette", Description: "body", ReportedCostUSD: reported})
+}
+
+func TestBrainstormRecordsDesignOnMarker(t *testing.T) {
+	ops := &fakeOps{}
+	inbox := &fakeInbox{msgs: []harness.UserMessage{{Content: "approach A, please"}}}
+	client := &planLLM{responses: []llm.Response{
+		stopResp("Which approach: A or B?", 0.01),
+		stopResp("## Design\n\nApproach A: a palette config.\n\nDESIGN_COMPLETE", 0.01),
+	}}
+	o := brainstormRun(ops, inbox, client, 0, 0)
+
+	require.NoError(t, o.runBrainstorm(context.Background(), "payload/model"))
+	assert.True(t, hasDesignSection(o.body), "## Design recorded on the card body; body=%q", o.body)
+	assert.Contains(t, ops.lastBody(), "Approach A")
+}
+
+func TestBrainstormPromoteEndsWithoutDesign(t *testing.T) {
+	ops := &fakeOps{}
+	inbox := &fakeInbox{} // no messages, not blocking -> ErrInboxClosed after turn 1 (promote)
+	client := &planLLM{responses: []llm.Response{stopResp("What sizes do you need?", 0.01)}}
+	o := brainstormRun(ops, inbox, client, 0, 0)
+
+	require.NoError(t, o.runBrainstorm(context.Background(), "payload/model"))
+	assert.False(t, hasDesignSection(o.body), "no design recorded on a mid-dialogue promote")
+	assert.True(t, ops.loggedContains("promoted"), "promote logged; logs=%v", ops.logs)
+}
+
+func TestBrainstormEndSessionParks(t *testing.T) {
+	ops := &fakeOps{}
+	inbox := &fakeInbox{block: true}
+	client := &planLLM{responses: []llm.Response{stopResp("What sizes do you need?", 0.01)}}
+	o := brainstormRun(ops, inbox, client, 0, 0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	require.Error(t, o.runBrainstorm(ctx, "payload/model"), "end_session surfaces as an error")
+}
+
+func TestBrainstormBudgetParks(t *testing.T) {
+	ops := &fakeOps{}
+	inbox := &fakeInbox{}
+	o := brainstormRun(ops, inbox, &planLLM{}, 1.0, 2.0) // already over budget
+
+	err := o.runBrainstorm(context.Background(), "payload/model")
+
+	var be *BudgetExceededError
+	require.ErrorAs(t, err, &be, "an over-budget brainstorm parks before any model call")
 }
