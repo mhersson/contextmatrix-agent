@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/mhersson/contextmatrix-agent/internal/events"
 	"github.com/mhersson/contextmatrix-agent/internal/harness"
 )
 
@@ -124,6 +125,8 @@ func (o *run) runBrainstorm(ctx context.Context, model string) error {
 		case werr != nil:
 			return werr
 		}
+
+		d.Emit.Emit(events.UserInput, map[string]any{"message_id": msg.MessageID, "content_len": len(msg.Content)})
 
 		convo += "\n\nFACILITATOR:\n" + strings.TrimSpace(res.Output) +
 			"\n\nUSER:\n" + strings.TrimSpace(msg.Content)

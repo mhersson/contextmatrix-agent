@@ -67,6 +67,8 @@ func (o *run) gate(ctx context.Context, kind gateKind, model, presentation strin
 		return gateApprove, "", err
 	}
 
+	o.d.Emit.Emit(events.UserInput, map[string]any{"message_id": msg.MessageID, "content_len": len(msg.Content)})
+
 	return o.classifyVerdict(ctx, kind, model, msg.Content)
 }
 
