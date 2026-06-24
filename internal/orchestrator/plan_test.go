@@ -7,8 +7,10 @@ import (
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/events"
+	"github.com/mhersson/contextmatrix-agent/internal/harness"
 	"github.com/mhersson/contextmatrix-agent/internal/llm"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
+	"github.com/mhersson/contextmatrix-agent/internal/tools"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -442,4 +444,74 @@ func TestExtractJSON(t *testing.T) {
 			}
 		})
 	}
+}
+
+// hitlPlanRun builds a *run for HITL plan-phase tests. The card has a ## Design
+// already, so brainstorm is skipped and the plan-approval gate is exercised in
+// isolation. client serves the planner draft(s) AND the gate classification(s).
+func hitlPlanRun(ops *fakeOps, inbox *fakeInbox, client llm.LLM) *run {
+	d := Deps{
+		Ops:       ops,
+		Client:    client,
+		Emit:      events.NewEmitter(nil, nil),
+		Registry:  planTestRegistry(),
+		ReadTools: tools.NewRegistry(tools.NewReadTool(".")),
+		Human:     inbox,
+		Cfg: Config{
+			Project: "proj", CardID: "CARD-1",
+			PayloadModel: "payload/model", DefaultModel: "default/model",
+			MaxTurns: 5, Interactive: true,
+		},
+	}
+
+	tc := cmclient.TaskContext{
+		CardID: "CARD-1", Title: "Add a palette",
+		Description: "## Design\n\nA palette config.", // present -> brainstorm skipped
+	}
+
+	return newRun(d, tc)
+}
+
+const onePlanJSON = `{"card_tier":"simple","subtasks":[{"title":"Add the flag","description":"Files: a.go","depends_on":[],"tier":"simple"}]}`
+
+func TestRunPlanHITLApproveCreatesSubtasks(t *testing.T) {
+	ops := &fakeOps{}
+	inbox := &fakeInbox{msgs: []harness.UserMessage{{Content: "approve"}}}
+	client := &planLLM{responses: []llm.Response{
+		stopResp(onePlanJSON, 0.01),                            // draft
+		stopResp(`{"verdict":"approve","feedback":""}`, 0.001), // gate classify
+	}}
+	o := hitlPlanRun(ops, inbox, client)
+
+	require.NoError(t, runPlan(context.Background(), o))
+	assert.Len(t, ops.createCardArgs, 1, "subtasks created after approval")
+}
+
+func TestRunPlanHITLAdjustRedraftsThenApproves(t *testing.T) {
+	ops := &fakeOps{}
+	inbox := &fakeInbox{msgs: []harness.UserMessage{
+		{Content: "make it two subtasks"},
+		{Content: "approve"},
+	}}
+	llmFake := &planLLM{responses: []llm.Response{
+		stopResp(onePlanJSON, 0.01),                                       // draft 1
+		stopResp(`{"verdict":"adjust","feedback":"two subtasks"}`, 0.001), // gate -> adjust
+		stopResp(onePlanJSON, 0.01),                                       // draft 2 (re-draft)
+		stopResp(`{"verdict":"approve","feedback":""}`, 0.001),            // gate -> approve
+	}}
+	o := hitlPlanRun(ops, inbox, llmFake)
+
+	require.NoError(t, runPlan(context.Background(), o))
+	assert.Len(t, ops.createCardArgs, 1, "subtasks created only after the final approval")
+
+	// The re-draft prompt carried the human's feedback.
+	var sawFeedback bool
+
+	for _, task := range llmFake.tasks {
+		if strings.Contains(task, "REQUESTED CHANGES") && strings.Contains(task, "two subtasks") {
+			sawFeedback = true
+		}
+	}
+
+	assert.True(t, sawFeedback, "the re-draft prompt includes the adjust feedback")
 }

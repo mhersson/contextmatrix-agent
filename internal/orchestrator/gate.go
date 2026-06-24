@@ -47,7 +47,7 @@ const (
 //
 // The returned outcome is meaningful only when err == nil; callers check err
 // first.
-func (o *run) gate(ctx context.Context, kind gateKind, model, presentation string) (gateOutcome, string, error) { //nolint:unparam // model varies across call sites added in later tasks
+func (o *run) gate(ctx context.Context, kind gateKind, model, presentation string) (gateOutcome, string, error) {
 	if !o.d.Cfg.Interactive {
 		return gateApprove, "", nil
 	}

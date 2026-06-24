@@ -20,6 +20,11 @@ var validTiers = map[string]bool{"simple": true, "moderate": true, "complex": tr
 // not a valid plan.
 const maxSubtasks = 20
 
+// maxPlanDrafts bounds the HITL plan-approval re-draft loop: a human who keeps
+// adjusting can iterate, but a runaway never spins forever (they end a run via
+// end_session). The cap is generous; reaching it is an error.
+const maxPlanDrafts = 10
+
 // planSubtask is one decomposed unit of work in the planner's JSON output.
 type planSubtask struct {
 	Title       string `json:"title"`
@@ -380,6 +385,16 @@ func runPlan(ctx context.Context, o *run) error {
 
 	_ = d.Ops.AddLog(ctx, cfg.CardID, "orchestrator model: "+model) //nolint:errcheck // advisory selection record
 
+	// Creative HITL cards get a design dialogue before planning (create-plan
+	// Phase 0 Branch C). Skipped in autonomous, for non-creative cards, and when
+	// a design already exists. Branch C and the bug Branch B are mutually
+	// exclusive (isCreative excludes bug-like cards).
+	if cfg.Interactive && isCreative(o.tc) && !hasDesignSection(o.body) {
+		if err := o.runBrainstorm(ctx, model); err != nil {
+			return err
+		}
+	}
+
 	// Bug-like cards get a read-only root-cause investigation before planning
 	// (mirrors the runner's create-plan Phase 0 Branch B). The diagnosis grounds
 	// the decomposition. Best-effort: a failed diagnose must not block planning.
@@ -405,12 +420,48 @@ func runPlan(ctx context.Context, o *run) error {
 		}
 	}
 
-	p, err := o.draftPlan(ctx, model, diagnosis, "")
-	if err != nil {
-		return err
+	// Autonomous: draft once and create the subtasks, exactly as before.
+	if !cfg.Interactive {
+		p, err := o.draftPlan(ctx, model, diagnosis, "")
+		if err != nil {
+			return err
+		}
+
+		return o.createSubtasks(ctx, p)
 	}
 
-	return o.createSubtasks(ctx, p)
+	// HITL: draft -> present -> gate; on adjust, re-draft with the feedback.
+	// Subtasks are created only after approval, so an adjust never orphans cards.
+	feedback := ""
+
+	for draft := 0; draft < maxPlanDrafts; draft++ {
+		p, err := o.draftPlan(ctx, model, diagnosis, feedback)
+		if err != nil {
+			return err
+		}
+
+		o.recordSection(ctx, "Plan", sectionFrom("Plan", formatPlannedPlan(p)))
+
+		outcome, fb, gerr := o.gate(ctx, gatePlanApproval, model, presentPlan(p))
+		if gerr != nil {
+			return gerr
+		}
+
+		if outcome == gateApprove {
+			return o.createSubtasks(ctx, p)
+		}
+
+		feedback = fb
+	}
+
+	return fmt.Errorf("plan approval did not converge after %d drafts", maxPlanDrafts)
+}
+
+// presentPlan is the chat message for the plan-approval gate: the planned
+// decomposition plus the ask. The full plan is also on the card body.
+func presentPlan(p plan) string {
+	return "I've drafted the following plan:\n\n" + formatPlannedPlan(p) +
+		"\n\nApprove to start execution, or tell me what you'd like to adjust."
 }
 
 // createSubtasks creates one card per plan subtask in order, mapping each

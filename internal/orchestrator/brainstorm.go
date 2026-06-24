@@ -72,7 +72,7 @@ const maxBrainstormTurns = 30
 // end_session (ctx error) returns the error so the worker parks; a budget breach
 // returns the *BudgetExceededError so execute() parks; the turn cap logs and
 // returns nil so planning grounds on the card alone.
-func (o *run) runBrainstorm(ctx context.Context, model string) error { //nolint:unparam // model varies across call sites added in later tasks
+func (o *run) runBrainstorm(ctx context.Context, model string) error {
 	d := o.d
 	cfg := d.Cfg
 
