@@ -71,9 +71,11 @@ func TestBrainstormRecordsDesignOnMarker(t *testing.T) {
 	}}
 	o := brainstormRun(ops, inbox, client, 0, 0)
 
-	require.NoError(t, o.runBrainstorm(context.Background(), "payload/model"))
+	design, err := o.runBrainstorm(context.Background(), "payload/model")
+	require.NoError(t, err)
 	assert.True(t, hasDesignSection(o.body), "## Design recorded on the card body; body=%q", o.body)
 	assert.Contains(t, ops.lastBody(), "Approach A")
+	assert.Contains(t, design, "Approach A", "returned design carries the recorded design text")
 }
 
 func TestBrainstormPromoteEndsWithoutDesign(t *testing.T) {
@@ -82,7 +84,9 @@ func TestBrainstormPromoteEndsWithoutDesign(t *testing.T) {
 	client := &planLLM{responses: []llm.Response{stopResp("What sizes do you need?", 0.01)}}
 	o := brainstormRun(ops, inbox, client, 0, 0)
 
-	require.NoError(t, o.runBrainstorm(context.Background(), "payload/model"))
+	design, err := o.runBrainstorm(context.Background(), "payload/model")
+	require.NoError(t, err)
+	assert.Empty(t, design, "no design returned on a mid-dialogue promote")
 	assert.False(t, hasDesignSection(o.body), "no design recorded on a mid-dialogue promote")
 	assert.True(t, ops.loggedContains("promoted"), "promote logged; logs=%v", ops.logs)
 }
@@ -96,7 +100,8 @@ func TestBrainstormEndSessionParks(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	require.Error(t, o.runBrainstorm(ctx, "payload/model"), "end_session surfaces as an error")
+	_, err := o.runBrainstorm(ctx, "payload/model")
+	require.Error(t, err, "end_session surfaces as an error")
 }
 
 func TestBrainstormBudgetParks(t *testing.T) {
@@ -104,7 +109,7 @@ func TestBrainstormBudgetParks(t *testing.T) {
 	inbox := &fakeInbox{}
 	o := brainstormRun(ops, inbox, &planLLM{}, 1.0, 2.0) // already over budget
 
-	err := o.runBrainstorm(context.Background(), "payload/model")
+	_, err := o.runBrainstorm(context.Background(), "payload/model")
 
 	var be *BudgetExceededError
 	require.ErrorAs(t, err, &be, "an over-budget brainstorm parks before any model call")

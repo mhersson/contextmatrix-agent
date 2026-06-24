@@ -10,6 +10,7 @@ import "strings"
 //
 // The trailing %s slots are filled by draftPlan: card title, card description,
 // an optional diagnosis block (root-cause investigation for bug-like cards), an
+// optional design block (brainstormed design for creative HITL cards), an
 // optional resume block (existing subtasks), an optional feedback block (HITL
 // reviewer's requested changes on a re-draft), and an optional repair block
 // (the previous parse error). Empty optional blocks collapse to nothing.
@@ -60,7 +61,7 @@ Title: %s
 
 Description:
 %s
-%s%s%s%s
+%s%s%s%s%s
 Respond with ONLY a JSON object, no prose:
 {"card_tier":"simple|moderate|complex|critical",
  "subtasks":[{"title":"...","description":"...","depends_on":[<earlier indices>],"tier":"simple|moderate|complex|critical"}]}
@@ -582,4 +583,16 @@ func priorFindingsBlock(findings string) string {
 	}
 
 	return "\nPRIOR FINDINGS (already raised — verify resolution, do not import new scope):\n" + findings + "\n"
+}
+
+// designBlock renders the agreed design from the brainstorming dialogue into the
+// planner prompt so the first plan draft is grounded on it. Empty design (no
+// brainstorm ran — autonomous, non-creative, or a card that already had a design)
+// collapses to nothing, leaving the rendered prompt unchanged.
+func designBlock(design string) string {
+	if strings.TrimSpace(design) == "" {
+		return ""
+	}
+
+	return "\nAGREED DESIGN (the human and the agent converged on this design during\nbrainstorming — plan to implement it):\n" + design + "\n"
 }

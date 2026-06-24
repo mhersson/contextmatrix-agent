@@ -68,12 +68,12 @@ const maxBrainstormTurns = 30
 // generic). The agreed design is captured from the model's marked output and
 // recorded as a ## Design section; the model never writes the card.
 //
-// Termination: a DESIGN_COMPLETE marker records ## Design and returns nil; a
-// promote (ErrInboxClosed) returns nil so planning proceeds autonomously; an
-// end_session (ctx error) returns the error so the worker parks; a budget breach
-// returns the *BudgetExceededError so execute() parks; the turn cap logs and
-// returns nil so planning grounds on the card alone.
-func (o *run) runBrainstorm(ctx context.Context, model string) error {
+// Returns the recorded design string on DESIGN_COMPLETE so draftPlan can ground
+// the first plan draft on it (fixing the fresh-run/resume asymmetry). Returns ""
+// on every other path: promote (ErrInboxClosed) → ("", nil); end_session (ctx
+// error) → ("", err); budget breach → ("", *BudgetExceededError); turn cap →
+// ("", nil).
+func (o *run) runBrainstorm(ctx context.Context, model string) (string, error) {
 	d := o.d
 	cfg := d.Cfg
 
@@ -81,7 +81,7 @@ func (o *run) runBrainstorm(ctx context.Context, model string) error {
 
 	for turn := 0; turn < maxBrainstormTurns; turn++ {
 		if err := o.ledger.Check(); err != nil {
-			return err
+			return "", err
 		}
 
 		task := fmt.Sprintf(brainstormPrompt, o.tc.Title, o.tc.Description, convoBlock(convo))
@@ -101,7 +101,7 @@ func (o *run) runBrainstorm(ctx context.Context, model string) error {
 		}
 
 		if err != nil {
-			return fmt.Errorf("brainstorm run: %w", err)
+			return "", fmt.Errorf("brainstorm run: %w", err)
 		}
 
 		// The model's message already reached chat via harness.Run's
@@ -109,7 +109,7 @@ func (o *run) runBrainstorm(ctx context.Context, model string) error {
 		if design, done := extractDesign(res.Output); done {
 			o.recordSection(ctx, "Design", sectionFrom("Design", design))
 
-			return nil
+			return design, nil
 		}
 
 		o.emitAwaitingHuman(string(gatePlanApproval)) // brainstorm is part of the plan phase
@@ -121,9 +121,9 @@ func (o *run) runBrainstorm(ctx context.Context, model string) error {
 			_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory
 				"brainstorm: promoted mid-dialogue; proceeding to planning")
 
-			return nil
+			return "", nil
 		case werr != nil:
-			return werr
+			return "", werr
 		}
 
 		d.Emit.Emit(events.UserInput, map[string]any{"message_id": msg.MessageID, "content_len": len(msg.Content)})
@@ -135,7 +135,7 @@ func (o *run) runBrainstorm(ctx context.Context, model string) error {
 	_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory
 		"brainstorm: turn cap reached without a confirmed design; proceeding to planning")
 
-	return nil
+	return "", nil
 }
 
 // convoBlock renders the dialogue-so-far for the brainstorm prompt slot, or a

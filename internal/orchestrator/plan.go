@@ -311,11 +311,12 @@ func (o *run) runDiagnose(ctx context.Context, model string) (string, error) {
 }
 
 // draftPlan runs the read-only planner (initial attempt + at most one repair
-// turn) and returns the parsed plan. diagnosis grounds bug-like cards; feedback
-// carries a HITL reviewer's requested changes on a re-draft; both collapse to
+// turn) and returns the parsed plan. diagnosis grounds bug-like cards; design
+// carries the brainstormed agreed design for creative HITL cards; feedback
+// carries a HITL reviewer's requested changes on a re-draft; all collapse to
 // nothing when empty. The budget ledger is checked before every model call and
 // every call's usage is spent + reported.
-func (o *run) draftPlan(ctx context.Context, model, diagnosis, feedback string) (plan, error) {
+func (o *run) draftPlan(ctx context.Context, model, diagnosis, design, feedback string) (plan, error) {
 	d := o.d
 	cfg := d.Cfg
 
@@ -326,6 +327,7 @@ func (o *run) draftPlan(ctx context.Context, model, diagnosis, feedback string) 
 
 	resume := resumeBlock(existingTitles)
 	diagBlock := diagnosisBlock(diagnosis)
+	dsnBlock := designBlock(design)
 	fbBlock := feedbackBlock(feedback)
 
 	var (
@@ -343,7 +345,7 @@ func (o *run) draftPlan(ctx context.Context, model, diagnosis, feedback string) 
 			repair = repairBlock(lastErr.Error())
 		}
 
-		task := fmt.Sprintf(planPrompt, o.tc.Title, o.tc.Description, diagBlock, resume, fbBlock, repair)
+		task := fmt.Sprintf(planPrompt, o.tc.Title, o.tc.Description, diagBlock, dsnBlock, resume, fbBlock, repair)
 
 		res, err := o.runModel(ctx, d.ReadTools, task, model)
 
@@ -389,10 +391,15 @@ func runPlan(ctx context.Context, o *run) error {
 	// Phase 0 Branch C). Skipped in autonomous, for non-creative cards, and when
 	// a design already exists. Branch C and the bug Branch B are mutually
 	// exclusive (isCreative excludes bug-like cards).
+	design := ""
+
 	if cfg.Interactive && isCreative(o.tc) && !hasDesignSection(o.body) {
-		if err := o.runBrainstorm(ctx, model); err != nil {
+		d, err := o.runBrainstorm(ctx, model)
+		if err != nil {
 			return err
 		}
+
+		design = d
 	}
 
 	// Bug-like cards get a read-only root-cause investigation before planning
@@ -422,7 +429,7 @@ func runPlan(ctx context.Context, o *run) error {
 
 	// Autonomous: draft once and create the subtasks, exactly as before.
 	if !cfg.Interactive {
-		p, err := o.draftPlan(ctx, model, diagnosis, "")
+		p, err := o.draftPlan(ctx, model, diagnosis, "", "")
 		if err != nil {
 			return err
 		}
@@ -435,7 +442,7 @@ func runPlan(ctx context.Context, o *run) error {
 	feedback := ""
 
 	for draft := 0; draft < maxPlanDrafts; draft++ {
-		p, err := o.draftPlan(ctx, model, diagnosis, feedback)
+		p, err := o.draftPlan(ctx, model, diagnosis, design, feedback)
 		if err != nil {
 			return err
 		}

@@ -76,3 +76,11 @@ func TestDiagnosePromptRigor(t *testing.T) {
 	assert.Contains(t, low, "### test approach")
 	assert.Contains(t, low, "### risk / scope notes")
 }
+
+func TestDesignBlock(t *testing.T) {
+	assert.Empty(t, designBlock(""), "empty design collapses to nothing")
+	assert.Empty(t, designBlock("   "), "whitespace-only design collapses to nothing")
+	out := designBlock("## Design\n\nUse option A.")
+	assert.Contains(t, out, "AGREED DESIGN")
+	assert.Contains(t, out, "## Design\n\nUse option A.")
+}
