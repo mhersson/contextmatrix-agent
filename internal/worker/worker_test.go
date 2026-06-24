@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,12 +12,10 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/events"
 	"github.com/mhersson/contextmatrix-agent/internal/frames"
-	"github.com/mhersson/contextmatrix-agent/internal/harness"
 	"github.com/mhersson/contextmatrix-agent/internal/llm"
 	"github.com/mhersson/contextmatrix-agent/internal/orchestrator"
 	"github.com/stretchr/testify/assert"
@@ -140,19 +136,6 @@ func (f *fakeOps) count(op string) int {
 	return n
 }
 
-func (f *fakeOps) find(op string) (opCall, bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	for _, c := range f.calls {
-		if c.op == op {
-			return c, true
-		}
-	}
-
-	return opCall{}, false
-}
-
 func (f *fakeOps) ClaimCard(_ context.Context, cardID string) error {
 	f.record("ClaimCard", cardID)
 
@@ -266,44 +249,6 @@ func TestRunAutonomousPlumbing(t *testing.T) {
 	assert.Equal(t, 0, ops.count("ReleaseCard"))
 }
 
-// --- Test 2: HITL + end_session --------------------------------------------
-
-func TestRunHITLEndSession(t *testing.T) {
-	t.Parallel()
-
-	remote := setupBareRemote(t)
-	wsParent := t.TempDir()
-	ops := newFakeOps()
-
-	// Turn 1: no tool calls → the loop parks at awaiting-human (HITL).
-	llmClient := &scriptedLLM{responses: []llm.Response{
-		{Content: "Waiting for guidance", FinishReason: "stop"},
-	}}
-
-	spec := baseSpec(t, remote, wsParent)
-	spec.Interactive = true
-
-	pr, pw := io.Pipe()
-
-	// Send an end_session frame shortly after the run parks.
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-
-		_ = frames.Write(pw, frames.Frame{Type: frames.TypeEndSession})
-		_ = pw.Close()
-	}()
-
-	emit := events.NewEmitter(io.Discard, io.Discard)
-
-	res, err := Run(context.Background(), spec, ops, llmClient, emit, pr)
-	require.NoError(t, err)
-	assert.Equal(t, "end_session", res.Reason)
-
-	// Finalize without completing; the claim is released.
-	assert.Equal(t, 0, ops.count("CompleteTask"))
-	assert.Equal(t, 1, ops.count("ReleaseCard"))
-}
-
 // --- Test 3: FSM generic error ----------------------------------------------
 
 // TestRunFSMGenericError: a non-sentinel FSM error releases the claim and
@@ -326,50 +271,6 @@ func TestRunFSMGenericError(t *testing.T) {
 
 	assert.Equal(t, 1, ops.count("ReleaseCard"))
 	assert.Equal(t, 0, ops.count("CompleteTask"))
-}
-
-// --- Test 4: model fallback ------------------------------------------------
-
-// TestRunModelFallback verifies model resolution (step 5, shared by both paths)
-// emits the catalog-fallback warning when the requested model is absent. The FSM
-// seam is stubbed to a no-op completion so the assertion isolates resolution.
-func TestRunModelFallback(t *testing.T) {
-	remote := setupBareRemote(t)
-	wsParent := t.TempDir()
-	ops := newFakeOps()
-
-	swapRunOrchestrator(t, func(context.Context, orchestrator.Deps) error { return nil })
-
-	// A real llm.Client pointed at a canned catalog: it lists a different model
-	// than spec.Model, forcing resolveModel's fallback path.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/models" {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"data":[{"id":"default/model","context_length":128000,"pricing":{"prompt":"0","completion":"0"},"supported_parameters":["tools"]}]}`))
-
-			return
-		}
-
-		http.NotFound(w, r)
-	}))
-	defer srv.Close()
-
-	client := llm.NewClient("test-key", llm.WithBaseURL(srv.URL))
-
-	spec := baseSpec(t, remote, wsParent)
-	spec.Model = "missing/model" // not in the canned catalog → fallback expected
-
-	var transcript syncBuffer
-
-	emit := events.NewEmitter(io.Discard, &transcript)
-
-	res, err := Run(context.Background(), spec, ops, client, emit, openStdin(t))
-	require.NoError(t, err)
-	assert.Equal(t, "completed", res.Reason)
-
-	// A warning state-change event was emitted naming the requested model.
-	assert.Contains(t, transcript.String(), "model not in catalog, using default")
-	assert.Contains(t, transcript.String(), "missing/model")
 }
 
 // --- Test 5: heartbeats ----------------------------------------------------
@@ -438,29 +339,6 @@ func openStdin(t *testing.T) io.Reader {
 	t.Cleanup(func() { _ = pw.Close() })
 
 	return pr
-}
-
-// syncBuffer is a mutex-guarded buffer the Emitter can write to concurrently
-// with reads in the test (the heartbeat goroutine shares the emitter).
-type syncBuffer struct {
-	mu  sync.Mutex
-	buf []byte
-}
-
-func (b *syncBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	b.buf = append(b.buf, p...)
-
-	return len(p), nil
-}
-
-func (b *syncBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	return string(b.buf)
 }
 
 // --- FSM entry / promote bridge --------------------------------------------
@@ -560,94 +438,37 @@ func TestRunResolvesEmptyBaseBranchForFSM(t *testing.T) {
 	assert.Equal(t, "main", seenBase, "FSM must receive the resolved base branch, not empty")
 }
 
-// TestHITLStaysLinear: an interactive spec with no promote uses the linear
-// path only; the FSM seam is never invoked. Swaps runOrchestrator to detect any
-// stray FSM entry, so it must not run in parallel.
-func TestHITLStaysLinear(t *testing.T) {
+// TestHITLEntersOrchestrator: an interactive, non-autonomous card routes to the
+// FSM with HITL mode set and the live inbox injected. Swaps runOrchestrator to
+// capture the Deps the worker built, so it must not run in parallel.
+func TestHITLEntersOrchestrator(t *testing.T) {
 	remote := setupBareRemote(t)
 	wsParent := t.TempDir()
 	ops := newFakeOps()
 
-	var fsmRan atomic.Bool
+	var (
+		gotInteractive bool
+		gotHuman       bool
+	)
 
-	swapRunOrchestrator(t, func(_ context.Context, _ orchestrator.Deps) error {
-		fsmRan.Store(true)
-
-		return nil
-	})
-
-	// The model parks awaiting a human turn; an end_session (not a promote) ends
-	// the run via the linear finalize, so the FSM is never reached.
-	llmClient := &scriptedLLM{responses: []llm.Response{
-		{Content: "linear done", FinishReason: "stop"},
-	}}
-
-	spec := baseSpec(t, remote, wsParent)
-	spec.Interactive = true
-
-	pr, pw := io.Pipe()
-
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-
-		_ = frames.Write(pw, frames.Frame{Type: frames.TypeEndSession})
-	}()
-
-	t.Cleanup(func() { _ = pw.Close() })
-
-	emit := events.NewEmitter(io.Discard, io.Discard)
-
-	res, err := Run(context.Background(), spec, ops, llmClient, emit, pr)
-	require.NoError(t, err)
-	assert.Equal(t, "end_session", res.Reason)
-
-	assert.False(t, fsmRan.Load(), "no promote: must stay on the linear path")
-	assert.GreaterOrEqual(t, llmClient.calls(), 1, "linear harness loop must run")
-}
-
-// TestPromoteBridge: an interactive run that receives a promote frame mid-run
-// hands off to the FSM after the linear harness returns (not via end_session).
-func TestPromoteBridge(t *testing.T) {
-	remote := setupBareRemote(t)
-	wsParent := t.TempDir()
-	ops := newFakeOps()
-
-	var fsmRan atomic.Bool
-
-	swapRunOrchestrator(t, func(_ context.Context, _ orchestrator.Deps) error {
-		fsmRan.Store(true)
+	swapRunOrchestrator(t, func(_ context.Context, d orchestrator.Deps) error {
+		gotInteractive = d.Cfg.Interactive
+		gotHuman = d.Human != nil
 
 		return nil
 	})
 
-	// The model parks awaiting a human turn; the promote frame closes the inbox
-	// so the linear loop returns, then the worker bridges to the FSM.
-	llmClient := &scriptedLLM{responses: []llm.Response{
-		{Content: "awaiting guidance", FinishReason: "stop"},
-	}}
-
 	spec := baseSpec(t, remote, wsParent)
-	spec.Interactive = true
-
-	pr, pw := io.Pipe()
-
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-
-		_ = frames.Write(pw, frames.Frame{Type: frames.TypePromote})
-	}()
-
-	t.Cleanup(func() { _ = pw.Close() })
+	spec.Interactive = true // HITL: interactive and (default) non-autonomous
 
 	emit := events.NewEmitter(io.Discard, io.Discard)
 
-	res, err := Run(context.Background(), spec, ops, llmClient, emit, pr)
+	res, err := Run(context.Background(), spec, ops, &scriptedLLM{}, emit, openStdin(t))
 	require.NoError(t, err)
 	assert.Equal(t, "completed", res.Reason)
 
-	// The bridge calls runFSM synchronously before Run returns, so the seam has
-	// definitively run by now — no polling.
-	require.True(t, fsmRan.Load(), "promote bridge must enter the FSM")
+	assert.True(t, gotInteractive, "HITL card must set Cfg.Interactive")
+	assert.True(t, gotHuman, "HITL card must inject the live inbox as Deps.Human")
 }
 
 // TestReviewParkedMapsToCompleted: a ReviewParkedError from the FSM is a
@@ -799,22 +620,6 @@ func TestEndSessionMidFSM(t *testing.T) {
 	assert.Equal(t, 0, ops.count("CompleteTask"), "no completion on a parked session")
 }
 
-// --- summaryFrom -----------------------------------------------------------
-
-func TestSummaryFrom_RuneSafeTruncation(t *testing.T) {
-	t.Parallel()
-
-	// "世" is 3 bytes; 67 of them is 201 bytes, so a naive 200-byte cut lands
-	// mid-rune (200 is not a rune boundary). The backoff must keep it valid.
-	out := strings.Repeat("世", 67)
-	require.Greater(t, len(out), summaryMaxLen)
-
-	got := summaryFrom(harness.Result{Output: out}, cmclient.TaskContext{Title: "fallback"})
-
-	assert.LessOrEqual(t, len(got), summaryMaxLen, "summary stays within the byte cap")
-	assert.True(t, utf8.ValidString(got), "truncated summary must be valid UTF-8")
-}
-
 // TestReviewAttemptsCapIsThree pins the worker's review-attempts cap to three:
 // with the convergence safeguards in place, three rounds suffice, matching the
 // runner's MAX_REVISION_PASSES.
@@ -822,17 +627,4 @@ func TestReviewAttemptsCapIsThree(t *testing.T) {
 	t.Parallel()
 
 	assert.Equal(t, 3, reviewAttemptsCap)
-}
-
-func TestSummaryFrom_FirstLineAndFallback(t *testing.T) {
-	t.Parallel()
-
-	// First line only.
-	got := summaryFrom(harness.Result{Output: "done the thing\nmore detail"},
-		cmclient.TaskContext{Title: "title"})
-	assert.Equal(t, "done the thing", got)
-
-	// Empty output falls back to the card title.
-	got = summaryFrom(harness.Result{Output: "   \n  "}, cmclient.TaskContext{Title: "card title"})
-	assert.Equal(t, "card title", got)
 }

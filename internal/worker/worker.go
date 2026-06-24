@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/events"
@@ -84,15 +83,6 @@ type CardOps interface {
 	ReleaseCard(ctx context.Context, cardID string) error
 }
 
-// catalogFetcher is the catalog-lookup seam used by resolveModel to check
-// whether an explicit CM_MODEL pin is resolvable, satisfied by *llm.Client. It
-// is defined here, where it is consumed, so model resolution stays best-effort:
-// a client that cannot fetch the catalog simply skips the lookup and the run
-// falls back to the default model.
-type catalogFetcher interface {
-	FetchCatalog(ctx context.Context) (llm.Catalog, error)
-}
-
 // Result is the worker's outcome. Reason distinguishes a graceful finish from
 // an end-session park and a hard error.
 type Result struct {
@@ -106,26 +96,13 @@ const (
 	defaultBashTimeoutMax = 600
 	defaultToolOutputMax  = 131072
 	defaultWorkspace      = "/home/user/workspace"
-	summaryMaxLen         = 200
 )
 
-const taskTemplate = `You are an automated coding agent working on a task from a kanban card.
-
-Card %s: %s
-
-%s
-
-Work in the current directory (the repository is already cloned on a work
-branch). Make the change, verify it builds and its tests pass, then stop.
-Do not commit or push — that happens automatically after you finish.`
-
-const interactiveSuffix = "\n\nA human teammate may send you messages mid-run; treat them as corrections or added requirements."
-
-// Run executes the linear, card-scoped sequence for one container: clone the
-// repo on a work branch, claim the card, fetch its context, drive the harness
-// loop, then finalize (commit/push/report/complete or release). It builds the
-// Inbox and the run-scoped context internally so the inbox liveness contract
-// holds: an end_session frame cancels runCtx, waking any parked Wait.
+// Run executes the card-scoped sequence for one container: clone the repo on
+// a work branch, claim the card, fetch its context, drive the FSM, then
+// finalize. It builds the Inbox and the run-scoped context internally so the
+// inbox liveness contract holds: an end_session frame cancels runCtx, waking
+// any parked Wait.
 func Run(ctx context.Context, spec RunSpec, ops CardOps, client llm.LLM, emit *events.Emitter, stdin io.Reader) (Result, error) {
 	spec = withDefaults(spec)
 
@@ -157,8 +134,6 @@ func Run(ctx context.Context, spec RunSpec, ops CardOps, client llm.LLM, emit *e
 
 	branchName := "cm/" + strings.ToLower(spec.CardID)
 
-	red := redact.New([]string{spec.OpenRouterKey, spec.MCPAPIKey, spec.GitToken})
-
 	// 1-2: workspace + clone + branch.
 	ws := filepath.Join(spec.Workspace, strings.ToLower(spec.CardID))
 
@@ -189,75 +164,14 @@ func Run(ctx context.Context, spec RunSpec, ops CardOps, client llm.LLM, emit *e
 	stopHeartbeat := startHeartbeat(runCtx, ops, spec.CardID)
 	defer stopHeartbeat()
 
-	// 5: model resolution.
-	model := resolveModel(ctx, client, emit, spec)
-
-	// Autonomous cards skip the linear harness entirely and run the phase loop.
-	// Route on the card's own autonomous flag in addition to the interactive
-	// flag: CM forces interactive off for autonomous cards, but the agent
-	// self-corrects if a stale/forced interactive flag ever arrives. The
-	// promote bridge is unaffected — a promote-flow card is non-autonomous at
-	// trigger time (tcx is fetched before any promote), so it still runs HITL
-	// then hands off via inbox.Promoted().
-	if !spec.Interactive || tcx.Autonomous {
-		return runFSM(ctx, runCtx, fsmArgs{
-			ops: ops, git: git, client: client, emit: emit,
-			spec: spec, tcx: tcx, branch: branchName,
-			ws: ws, endSession: &endSession,
-		})
-	}
-
-	// 6: registry rooted at ws. keep in sync with writeTools() (the FSM's
-	// model-facing toolset); the byte-for-byte linear contract forbids
-	// refactoring this inline list to call it.
-	reg := tools.NewRegistry(
-		tools.NewReadTool(ws),
-		tools.NewEditTool(ws),
-		tools.NewWriteTool(ws),
-		tools.NewGrepTool(ws),
-		tools.NewGlobTool(ws),
-		tools.NewGitTool(ws),
-		tools.NewBashTool(ws).WithMaxTimeout(spec.BashTimeoutMax),
-	)
-
-	// 7: task prompt.
-	task := fmt.Sprintf(taskTemplate, spec.CardID, tcx.Title, tcx.Description)
-	if spec.Interactive {
-		task += interactiveSuffix
-	}
-
-	// 8: harness loop.
-	res, runErr := harness.Run(runCtx, client, reg, emit, task, harness.Config{
-		Model:              model,
-		MaxTurns:           spec.MaxTurns,
-		MaxCostUSD:         spec.MaxCostUSD,
-		Inbox:              inbox,
-		RedactToolOutput:   red.Apply,
-		ToolOutputMaxBytes: spec.ToolOutputMax,
-	})
-
-	// Promote bridge: a promote frame arrived mid-HITL and the run ended by the
-	// inbox closing (not by end_session). Hand off to the phase loop, entering at
-	// the persisted phase (empty -> plan; the planner sees whatever HITL pushed).
-	if inbox.Promoted() && !endSession.Load() {
-		return runFSM(ctx, runCtx, fsmArgs{
-			ops: ops, git: git, client: client, emit: emit,
-			spec: spec, tcx: tcx, branch: branchName,
-			ws: ws, endSession: &endSession,
-		})
-	}
-
-	// 9: finalize on the PARENT ctx — runCtx may be canceled by end_session.
-	return finalize(ctx, finalizeArgs{
-		ops:        ops,
-		git:        git,
-		spec:       spec,
-		tcx:        tcx,
-		branch:     branchName,
-		model:      model,
-		res:        res,
-		runErr:     runErr,
-		endSession: endSession.Load(),
+	// Every card runs the FSM. HITL (interactive && !autonomous) runs it in HITL
+	// mode — sign-off gates wait on the inbox and creative cards brainstorm;
+	// autonomous/non-interactive runs it with gates auto-passed and brainstorming
+	// skipped. The freeform linear path is retired.
+	return runFSM(ctx, runCtx, fsmArgs{
+		ops: ops, git: git, client: client, emit: emit,
+		spec: spec, tcx: tcx, branch: branchName,
+		ws: ws, endSession: &endSession, human: inbox,
 	})
 }
 
@@ -329,46 +243,6 @@ func startHeartbeat(ctx context.Context, ops CardOps, cardID string) func() {
 	}
 }
 
-// resolveModel picks the harness model. An explicit, catalog-resolvable slug
-// wins; an unresolvable slug or a catalog-fetch error falls back to the default
-// with a warning state-change event (a catalog hiccup must not fail the run).
-// An empty spec.Model uses the default silently.
-func resolveModel(ctx context.Context, client llm.LLM, emit *events.Emitter, spec RunSpec) string {
-	if spec.Model == "" {
-		return spec.DefaultModel
-	}
-
-	fetcher, ok := client.(catalogFetcher)
-	if !ok {
-		emitModelFallback(emit, spec)
-
-		return spec.DefaultModel
-	}
-
-	cat, err := fetcher.FetchCatalog(ctx)
-	if err != nil {
-		emitModelFallback(emit, spec)
-
-		return spec.DefaultModel
-	}
-
-	if _, found := cat.Find(spec.Model); !found {
-		emitModelFallback(emit, spec)
-
-		return spec.DefaultModel
-	}
-
-	return spec.Model
-}
-
-func emitModelFallback(emit *events.Emitter, spec RunSpec) {
-	emit.Emit(events.StateChange, map[string]any{
-		"warning":   "model not in catalog, using default",
-		"requested": spec.Model,
-		"using":     spec.DefaultModel,
-	})
-}
-
 // fsmArgs bundles what runFSM needs. ctx is the PARENT context (used for the
 // graceful finalize after a canceled run); runCtx is the run-scoped context an
 // end_session frame cancels — the FSM runs under it.
@@ -382,6 +256,7 @@ type fsmArgs struct {
 	branch     string
 	ws         string
 	endSession *atomic.Bool
+	human      *Inbox
 }
 
 // runFSM drives the orchestrator phase loop for an autonomous (or promoted) card
@@ -404,6 +279,15 @@ type fsmArgs struct {
 func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, error) {
 	red := redact.New([]string{a.spec.OpenRouterKey, a.spec.MCPAPIKey, a.spec.GitToken})
 
+	hitl := a.spec.Interactive && !a.tcx.Autonomous
+
+	// Genuine nil for autonomous (the nil-concrete footgun guard); the live
+	// inbox for HITL. Mode is read from Cfg.Interactive, never from Human != nil.
+	var human harness.Inbox
+	if hitl {
+		human = a.human
+	}
+
 	d := orchestrator.Deps{
 		Ops:        ops2orchestrator(a.ops),
 		Git:        a.git,
@@ -414,6 +298,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 		WriteTools: tools.NewRegistry(writeTools(a.ws, a.spec.BashTimeoutMax)...),
 		ReadTools:  tools.NewReadOnlyRegistry(a.ws),
 		Redact:     red.Apply,
+		Human:      human,
 		Cfg: orchestrator.Config{
 			Project:           a.spec.Project,
 			CardID:            a.spec.CardID,
@@ -428,6 +313,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 			MaxTurns:          a.spec.MaxTurns,
 			ToolOutputMax:     a.spec.ToolOutputMax,
 			ReviewAttemptsCap: reviewAttemptsCap,
+			Interactive:       hitl,
 		},
 	}
 
@@ -585,94 +471,6 @@ func buildRegistry(spec RunSpec) *registry.Registry {
 	return registry.FromSelection(spec.Selection, spec.DefaultModel)
 }
 
-type finalizeArgs struct {
-	ops        CardOps
-	git        *Git
-	spec       RunSpec
-	tcx        cmclient.TaskContext
-	branch     string
-	model      string
-	res        harness.Result
-	runErr     error
-	endSession bool
-}
-
-// finalize runs the end-of-run git + reporting sequence on the parent ctx. It
-// commits if the tree is dirty, pushes and reports the push, always reports
-// usage, then decides the card's fate: release on end-session (graceful),
-// complete on a finished run, or release + error otherwise.
-func finalize(ctx context.Context, a finalizeArgs) (Result, error) {
-	finishedClean := a.runErr == nil && a.res.Completed
-	shouldCommit := a.endSession || finishedClean
-
-	if shouldCommit {
-		if err := commitPushReport(ctx, a); err != nil {
-			slog.Warn("commit/push/report failed", "card", a.spec.CardID, "error", err)
-		}
-	}
-
-	reportUsage(ctx, a)
-
-	switch {
-	case a.endSession:
-		if err := a.ops.ReleaseCard(ctx, a.spec.CardID); err != nil {
-			slog.Warn("release card failed", "card", a.spec.CardID, "error", err)
-		}
-
-		return Result{Reason: "end_session"}, nil
-
-	case finishedClean:
-		summary := summaryFrom(a.res, a.tcx)
-		if err := a.ops.CompleteTask(ctx, a.spec.CardID, summary); err != nil {
-			return Result{Reason: "error"}, fmt.Errorf("complete task: %w", err)
-		}
-
-		return Result{Reason: "completed"}, nil
-
-	default:
-		if err := a.ops.ReleaseCard(ctx, a.spec.CardID); err != nil {
-			slog.Warn("release card failed", "card", a.spec.CardID, "error", err)
-		}
-
-		if a.runErr != nil {
-			return Result{Reason: "error"}, fmt.Errorf("harness run: %w", a.runErr)
-		}
-
-		return Result{Reason: "error"}, fmt.Errorf("run did not complete: %s", a.res.Reason)
-	}
-}
-
-// commitPushReport commits any changes and, if a commit was made, pushes the
-// branch and reports the push to ContextMatrix.
-func commitPushReport(ctx context.Context, a finalizeArgs) error {
-	dirty, err := a.git.CommitIfDirty(ctx, a.tcx.Title, a.spec.CardID)
-	if err != nil {
-		return fmt.Errorf("commit: %w", err)
-	}
-
-	if !dirty {
-		return nil
-	}
-
-	if err := a.git.Push(ctx, a.branch); err != nil {
-		return fmt.Errorf("push: %w", err)
-	}
-
-	if err := a.ops.ReportPush(ctx, a.spec.CardID, a.branch, ""); err != nil {
-		return fmt.Errorf("report push: %w", err)
-	}
-
-	return nil
-}
-
-// reportUsage reports token usage (tokens were spent on every path). Best
-// effort: a failure is logged, never masks the run's outcome.
-func reportUsage(ctx context.Context, a finalizeArgs) {
-	if err := a.ops.ReportUsage(ctx, a.spec.CardID, a.model, a.res.PromptTokens, a.res.CompletionTokens, 0); err != nil {
-		slog.Warn("report usage failed", "card", a.spec.CardID, "error", err)
-	}
-}
-
 // releaseWithError best-effort releases the claim and returns an error result.
 // Used on setup failures before the harness loop runs.
 func releaseWithError(ctx context.Context, ops CardOps, cardID string, err error) (Result, error) {
@@ -681,34 +479,6 @@ func releaseWithError(ctx context.Context, ops CardOps, cardID string, err error
 	}
 
 	return Result{Reason: "error"}, err
-}
-
-// summaryFrom builds the completion summary from the harness output: the first
-// line, capped at 200 chars, falling back to the card title when the output is
-// empty.
-func summaryFrom(res harness.Result, tcx cmclient.TaskContext) string {
-	line := strings.TrimSpace(res.Output)
-	if idx := strings.IndexByte(line, '\n'); idx >= 0 {
-		line = line[:idx]
-	}
-
-	line = strings.TrimSpace(line)
-	if line == "" {
-		return tcx.Title
-	}
-
-	if len(line) > summaryMaxLen {
-		// Back off past any UTF-8 continuation bytes so the byte cut never
-		// splits a multi-byte rune (the summary must be valid UTF-8).
-		cut := summaryMaxLen
-		for cut > 0 && !utf8.RuneStart(line[cut]) {
-			cut--
-		}
-
-		line = line[:cut]
-	}
-
-	return line
 }
 
 // withDefaults fills unset spec fields with their documented defaults.
