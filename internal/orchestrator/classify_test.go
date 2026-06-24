@@ -45,3 +45,22 @@ func TestIsPureMaintenance(t *testing.T) {
 		Title: "Bump dep", // mechanical title but no maintenance label
 	}))
 }
+
+func TestIsCreative(t *testing.T) {
+	tests := []struct {
+		name string
+		tc   cmclient.TaskContext
+		want bool
+	}{
+		{"plain feature is creative", cmclient.TaskContext{Type: "task", Title: "Add a config palette"}, true},
+		{"bug is not creative", cmclient.TaskContext{Type: "bug", Title: "Fix the parser"}, false},
+		{"maintenance is not creative", cmclient.TaskContext{Labels: []string{"chore"}, Title: "Rename the package"}, false},
+		{"bug body language is not creative", cmclient.TaskContext{Title: "Palette", Description: "it crashes on empty input"}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isCreative(tt.tc))
+		})
+	}
+}

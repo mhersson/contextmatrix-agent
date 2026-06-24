@@ -77,6 +77,14 @@ func isPureMaintenance(tc cmclient.TaskContext) bool {
 	return hasAnyLabel(tc.Labels, maintenanceLabels) && maintenanceTitleVerbs[firstWord(tc.Title)]
 }
 
+// isCreative reports whether the card warrants a brainstorming dialogue before
+// planning (create-plan Phase 0 Branch C): work that is neither pure maintenance
+// (Branch A) nor bug-like (Branch B). Branch C runs in HITL mode only; the
+// orchestrator gates the brainstorm call on Cfg.Interactive.
+func isCreative(tc cmclient.TaskContext) bool {
+	return !isPureMaintenance(tc) && !isBugLike(tc)
+}
+
 // isBugLike reports whether the card warrants a read-only debug investigation
 // before planning (create-plan Phase 0 Branch B): type==bug, a bug label, a
 // bug-verb title, or defect language in the body. Pure-maintenance cards are
