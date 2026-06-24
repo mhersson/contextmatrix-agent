@@ -81,8 +81,11 @@ Work the evidence in order:
   steps it gives.
 - Read the referenced files in full; trace the failing path back to where the
   bad value or behaviour originates. Fix at the source, not the symptom.
-- Find a similar path that works and list what differs.
-- Settle on the single most likely root cause, with the evidence for it.
+- Pattern analysis: find a similar path that works and list every difference
+  (parameters, error handling, config, env, helper calls, caller context). Do
+  not assume a small difference "can't matter".
+- Form 1-3 hypotheses, each with the evidence for and against it; rank them and
+  pick the single most likely root cause.
 
 Do NOT propose detailed code — your job ends at the diagnosis.
 
@@ -103,8 +106,12 @@ Respond with ONLY a "## Diagnosis" section in exactly this shape:
 ### Fix approach
 <high-level strategy: what changes, where — concrete enough to decompose into
 subtasks, but no code>
+### Test approach
+<the failing test to add (file + what it asserts) and the regression scope>
 ### Files affected
 - <path>
+### Risk / scope notes
+<related code paths to leave alone, refactoring hazards, assumptions made>
 `
 
 // buildHygieneNote tells the coder/fixer not to leave a compiled binary in the

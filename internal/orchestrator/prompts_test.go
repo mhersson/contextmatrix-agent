@@ -68,3 +68,11 @@ func TestFeedbackBlock(t *testing.T) {
 	assert.Contains(t, out, "REQUESTED CHANGES")
 	assert.Contains(t, out, "split subtask 2")
 }
+
+func TestDiagnosePromptRigor(t *testing.T) {
+	low := strings.ToLower(diagnosePrompt)
+	assert.Contains(t, low, "similar path that works")
+	assert.Contains(t, low, "hypothes")
+	assert.Contains(t, low, "### test approach")
+	assert.Contains(t, low, "### risk / scope notes")
+}
