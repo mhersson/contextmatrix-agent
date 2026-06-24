@@ -305,6 +305,65 @@ func (o *run) runDiagnose(ctx context.Context, model string) (string, error) {
 	return strings.TrimSpace(res.Output), nil
 }
 
+// draftPlan runs the read-only planner (initial attempt + at most one repair
+// turn) and returns the parsed plan. diagnosis grounds bug-like cards; feedback
+// carries a HITL reviewer's requested changes on a re-draft; both collapse to
+// nothing when empty. The budget ledger is checked before every model call and
+// every call's usage is spent + reported.
+func (o *run) draftPlan(ctx context.Context, model, diagnosis, feedback string) (plan, error) {
+	d := o.d
+	cfg := d.Cfg
+
+	var existingTitles []string
+	for _, sub := range o.subtasks {
+		existingTitles = append(existingTitles, sub.Title)
+	}
+
+	resume := resumeBlock(existingTitles)
+	diagBlock := diagnosisBlock(diagnosis)
+	fbBlock := feedbackBlock(feedback)
+
+	var (
+		p       plan
+		lastErr error
+	)
+
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := o.ledger.Check(); err != nil {
+			return plan{}, err
+		}
+
+		repair := ""
+		if attempt > 0 {
+			repair = repairBlock(lastErr.Error())
+		}
+
+		task := fmt.Sprintf(planPrompt, o.tc.Title, o.tc.Description, diagBlock, resume, fbBlock, repair)
+
+		res, err := o.runModel(ctx, d.ReadTools, task, model)
+
+		o.ledger.Spend(res.TotalCostUSD)
+
+		if reportErr := d.Ops.ReportUsage(ctx, cfg.CardID, res.ModelUsed,
+			res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
+			slog.Warn("plan: report usage failed", "card_id", cfg.CardID, "error", reportErr)
+		}
+
+		if err != nil {
+			return plan{}, fmt.Errorf("planner run: %w", err)
+		}
+
+		p, lastErr = parsePlan(res.Output)
+		if lastErr == nil {
+			return p, nil
+		}
+
+		slog.Warn("plan: parse failed", "card_id", cfg.CardID, "attempt", attempt, "error", lastErr)
+	}
+
+	return plan{}, fmt.Errorf("plan parse failed after repair: %w", lastErr)
+}
+
 // runPlan is the plan phase: one read-only planner run on the
 // orchestrator-resolved model that emits a strict JSON plan, then code creates
 // a subtask card per entry with dependency edges mapped to real card IDs.
@@ -346,60 +405,9 @@ func runPlan(ctx context.Context, o *run) error {
 		}
 	}
 
-	// Resume: surface any existing subtasks so the planner reuses their titles.
-	// The list is the RECONCILED set (reconcile loaded it from SubtaskStates
-	// before the phase loop); runPlan does not re-query the server. On a fresh
-	// run o.subtasks is empty, yielding an empty resume block.
-	var existingTitles []string
-	for _, sub := range o.subtasks {
-		existingTitles = append(existingTitles, sub.Title)
-	}
-
-	resume := resumeBlock(existingTitles)
-	diagBlock := diagnosisBlock(diagnosis)
-
-	var (
-		p       plan
-		lastErr error
-	)
-
-	// Initial attempt + at most one repair turn.
-	for attempt := 0; attempt < 2; attempt++ {
-		if err := o.ledger.Check(); err != nil {
-			return err
-		}
-
-		repair := ""
-		if attempt > 0 {
-			repair = repairBlock(lastErr.Error())
-		}
-
-		task := fmt.Sprintf(planPrompt, o.tc.Title, o.tc.Description, diagBlock, resume, repair)
-
-		res, err := o.runModel(ctx, d.ReadTools, task, model)
-
-		// Account for spend even on transport error / partial run.
-		o.ledger.Spend(res.TotalCostUSD)
-
-		if reportErr := d.Ops.ReportUsage(ctx, cfg.CardID, res.ModelUsed,
-			res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
-			slog.Warn("plan: report usage failed", "card_id", cfg.CardID, "error", reportErr)
-		}
-
-		if err != nil {
-			return fmt.Errorf("planner run: %w", err)
-		}
-
-		p, lastErr = parsePlan(res.Output)
-		if lastErr == nil {
-			break
-		}
-
-		slog.Warn("plan: parse failed", "card_id", cfg.CardID, "attempt", attempt, "error", lastErr)
-	}
-
-	if lastErr != nil {
-		return fmt.Errorf("plan parse failed after repair: %w", lastErr)
+	p, err := o.draftPlan(ctx, model, diagnosis, "")
+	if err != nil {
+		return err
 	}
 
 	return o.createSubtasks(ctx, p)

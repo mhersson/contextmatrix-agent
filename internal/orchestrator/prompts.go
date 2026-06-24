@@ -8,10 +8,11 @@ import "strings"
 // the planner has NO card tools — it only reads code (read/grep/glob) and
 // emits a strict JSON plan. Card creation happens in code from the parsed JSON.
 //
-// The trailing %s slots are filled by runPlan: card title, card description,
+// The trailing %s slots are filled by draftPlan: card title, card description,
 // an optional diagnosis block (root-cause investigation for bug-like cards), an
-// optional resume block (existing subtasks), and an optional repair block (the
-// previous parse error). Empty optional blocks collapse to nothing.
+// optional resume block (existing subtasks), an optional feedback block (HITL
+// reviewer's requested changes on a re-draft), and an optional repair block
+// (the previous parse error). Empty optional blocks collapse to nothing.
 const planPrompt = `You are the planning agent for a software task. You have read-only
 tools (read, grep, glob) to inspect the codebase. You do NOT create or modify
 cards or files — you only read code and output a plan as JSON.
@@ -59,7 +60,7 @@ Title: %s
 
 Description:
 %s
-%s%s%s
+%s%s%s%s
 Respond with ONLY a JSON object, no prose:
 {"card_tier":"simple|moderate|complex|critical",
  "subtasks":[{"title":"...","description":"...","depends_on":[<earlier indices>],"tier":"simple|moderate|complex|critical"}]}
@@ -541,6 +542,17 @@ func repairBlock(parseErr string) string {
 
 	return "\nYOUR PREVIOUS RESPONSE COULD NOT BE PARSED: " + parseErr + "\n" +
 		"Respond again with ONLY the JSON object described below — no prose, no code fences.\n"
+}
+
+// feedbackBlock renders a HITL reviewer's requested changes inserted into the
+// planner prompt on a re-draft. Empty feedback collapses to nothing.
+func feedbackBlock(feedback string) string {
+	if strings.TrimSpace(feedback) == "" {
+		return ""
+	}
+
+	return "\nREQUESTED CHANGES (the human reviewed the previous plan and asked for\n" +
+		"these revisions — address them):\n" + feedback + "\n"
 }
 
 // diagnosisBlock renders the root-cause diagnosis inserted into the planner

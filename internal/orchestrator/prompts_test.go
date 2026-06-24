@@ -61,3 +61,10 @@ func TestBrainstormPromptShape(t *testing.T) {
 	assert.Contains(t, low, "design_complete")
 	assert.Contains(t, low, "read-only")
 }
+
+func TestFeedbackBlock(t *testing.T) {
+	assert.Empty(t, feedbackBlock("   "), "empty feedback collapses to nothing")
+	out := feedbackBlock("split subtask 2")
+	assert.Contains(t, out, "REQUESTED CHANGES")
+	assert.Contains(t, out, "split subtask 2")
+}
