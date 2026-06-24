@@ -7,6 +7,7 @@ import (
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/events"
+	"github.com/mhersson/contextmatrix-agent/internal/harness"
 	"github.com/mhersson/contextmatrix-agent/internal/llm"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-agent/internal/tools"
@@ -891,4 +892,81 @@ func indexOfPrefix(calls []string, prefix string) int {
 	}
 
 	return -1
+}
+
+// hitlReviewDeps builds Deps for HITL review tests with both tool registries and
+// an injected inbox; the scripted client serves specialist + synthesis + gate
+// classification turns.
+func hitlReviewDeps(ops *fakeOps, git *fakeGit, inbox *fakeInbox, client llm.LLM) Deps {
+	return Deps{
+		Ops:        ops,
+		Git:        git,
+		Client:     client,
+		Emit:       events.NewEmitter(nil, nil),
+		Registry:   planTestRegistry(),
+		WriteTools: tools.NewRegistry(tools.NewReadTool(".")),
+		ReadTools:  tools.NewRegistry(tools.NewReadTool(".")),
+		Human:      inbox,
+		Cfg: Config{
+			Project: "proj", CardID: "CARD-1", Branch: "cm/card-1", BaseBranch: "main",
+			PayloadModel: "payload/model", DefaultModel: "default/model",
+			MaxTurns: 5, ReviewAttemptsCap: 3, Interactive: true,
+		},
+	}
+}
+
+func TestRunReviewHITLApproveProceeds(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{} // no go.mod in cwd -> no verify gate
+	inbox := &fakeInbox{msgs: []harness.UserMessage{{Content: "approve"}}}
+	// Three specialists (no-concern findings) + one synthesis (approved) + gate approve.
+	client := &planLLM{responses: []llm.Response{
+		stopResp("No concerns.", 0.001),
+		stopResp("No concerns.", 0.001),
+		stopResp("No concerns.", 0.001),
+		stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.001),
+		stopResp(`{"verdict":"approve","feedback":""}`, 0.001),
+	}}
+	o := newRun(hitlReviewDeps(ops, git, inbox, client), cmclient.TaskContext{CardID: "CARD-1", Title: "T", Description: "b", State: "review"})
+
+	require.NoError(t, runReview(context.Background(), o))
+	assert.Equal(t, 0, countCall(ops.recorded(), "IncrementReviewAttempts:CARD-1"), "approve does not increment attempts")
+}
+
+func TestRunReviewHITLAdjustFixesThenApproves(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	inbox := &fakeInbox{msgs: []harness.UserMessage{
+		{Content: "tighten error handling in a.go"},
+		{Content: "approve"},
+	}}
+	client := &planLLM{responses: []llm.Response{
+		// Round 1: specialists + synthesis (approved, but the human adjusts anyway).
+		stopResp("No concerns.", 0.001), stopResp("No concerns.", 0.001), stopResp("No concerns.", 0.001),
+		stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.001),
+		stopResp(`{"verdict":"adjust","feedback":"tighten error handling in a.go"}`, 0.001), // gate -> adjust
+		stopResp("Fixed.", 0.001), // fix coder
+		// Round 2: specialists + synthesis + gate approve.
+		stopResp("No concerns.", 0.001), stopResp("No concerns.", 0.001), stopResp("No concerns.", 0.001),
+		stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.001),
+		stopResp(`{"verdict":"approve","feedback":""}`, 0.001),
+	}}
+	o := newRun(hitlReviewDeps(ops, git, inbox, client), cmclient.TaskContext{CardID: "CARD-1", Title: "T", Description: "b", State: "review"})
+
+	require.NoError(t, runReview(context.Background(), o))
+	assert.GreaterOrEqual(t, countCall(ops.recorded(), "IncrementReviewAttempts:CARD-1"), 1, "an adjust increments attempts and runs a fix")
+	assert.NotEmpty(t, git.pushBranches, "the fix round pushed a fixup")
+}
+
+// countCall counts how many entries in calls equal name.
+func countCall(calls []string, name string) int {
+	n := 0
+
+	for _, c := range calls {
+		if c == name {
+			n++
+		}
+	}
+
+	return n
 }

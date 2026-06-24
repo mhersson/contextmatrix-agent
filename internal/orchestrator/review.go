@@ -84,6 +84,14 @@ func runReview(ctx context.Context, o *run) error {
 		}
 	}
 
+	verifyCmd := detectVerifyCommand(cfg.Workspace)
+
+	if cfg.Interactive {
+		return o.runReviewHITL(ctx, verifyCmd)
+	}
+
+	// ===== autonomous loop (UNCHANGED below this line) =====
+
 	// Guard a mis-wired worker: a zero or negative cap would make the cliff trip
 	// on the FIRST round and park (via the authoritative pass) every card
 	// immediately. Fall back to CM's convention instead.
@@ -91,8 +99,6 @@ func runReview(ctx context.Context, o *run) error {
 	if attemptsCap <= 0 {
 		attemptsCap = defaultReviewAttemptsCap
 	}
-
-	verifyCmd := detectVerifyCommand(cfg.Workspace)
 
 	for iter := 0; iter < hardReviewIterationCap; iter++ {
 		// Round number continues across resumes: review_attempts persists the
@@ -135,6 +141,77 @@ func runReview(ctx context.Context, o *run) error {
 	}
 
 	return fmt.Errorf("review exceeded the hard iteration cap of %d", hardReviewIterationCap)
+}
+
+// runReviewHITL is the HITL review loop: each round produces specialist findings
+// (verify gate + 3 specialists + synthesis), records them, and presents them to
+// the human, who decides. Approve -> proceed to integrate; adjust -> apply the
+// findings plus the human's feedback as a fix, then re-review. The human is the
+// decision-maker, so there is no authoritative pass or auto-park; the hard
+// iteration cap is only a runaway guard.
+func (o *run) runReviewHITL(ctx context.Context, verifyCmd []string) error {
+	d := o.d
+	cfg := d.Cfg
+
+	model := resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
+		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel)
+
+	for iter := 0; iter < hardReviewIterationCap; iter++ {
+		round := o.tc.ReviewAttempts + iter + 1
+
+		findings, fixTier, autoApproved, err := o.reviewRound(ctx, verifyCmd, false)
+		if err != nil {
+			return err
+		}
+
+		o.recordReview(ctx, round, findings, autoApproved)
+
+		outcome, fb, gerr := o.gate(ctx, gateReviewDecision, model, presentFindings(findings, autoApproved))
+		if gerr != nil {
+			return gerr
+		}
+
+		if outcome == gateApprove {
+			o.reviewSummary = findings
+
+			return nil
+		}
+
+		o.lastFindings = findings
+
+		if _, err := d.Ops.IncrementReviewAttempts(ctx, cfg.CardID); err != nil {
+			return fmt.Errorf("increment review attempts: %w", err)
+		}
+
+		if err := o.runFix(ctx, mergeFeedback(findings, fb), round, fixTier, false); err != nil {
+			return err
+		}
+	}
+
+	return fmt.Errorf("HITL review exceeded the hard iteration cap of %d", hardReviewIterationCap)
+}
+
+// presentFindings is the chat message for the review-decision gate: the
+// synthesized findings plus the automated recommendation (advisory; the human
+// decides).
+func presentFindings(findings string, autoApproved bool) string {
+	rec := "revise"
+	if autoApproved {
+		rec = "approve"
+	}
+
+	return "Review findings (automated recommendation: " + rec + "):\n\n" + findings +
+		"\n\nApprove to integrate, or tell me what you'd like changed."
+}
+
+// mergeFeedback folds the human's adjust feedback into the synthesized findings
+// fed to the fix coder, so the fix run addresses both.
+func mergeFeedback(findings, feedback string) string {
+	if strings.TrimSpace(feedback) == "" {
+		return findings
+	}
+
+	return findings + "\n\nADDITIONAL HUMAN FEEDBACK:\n" + feedback
 }
 
 // authoritativeReview is the gated strong pass run at the review cliff instead of
