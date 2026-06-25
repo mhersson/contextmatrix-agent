@@ -1,5 +1,10 @@
 # ContextMatrix Agent
 
+> [!WARNING]
+>
+> This project is under heavy development. Breaking changes should be expected
+> at the current stage.
+
 A custom Go agent harness, backed by OpenRouter, that runs as a ContextMatrix
 **task backend**. It replaces Claude Code headless as the in-container agent:
 ContextMatrix dispatches a card, this service launches a Docker worker container,
@@ -9,8 +14,8 @@ over MCP.
 
 It is for operators who run [ContextMatrix](https://github.com/mhersson/contextmatrix)
 and want model-flexible, cost-optimized autonomous execution: any
-OpenRouter-served model per role, picked by measured capability rather than a
-hard-coded vendor.
+OpenRouter-served model per role, picked by external quality priors per role
+rather than a hard-coded vendor.
 
 ## How it fits ContextMatrix
 
@@ -35,20 +40,29 @@ Two channels connect the agent to ContextMatrix:
 
 One binary, two runtime roles:
 
-```
-contextmatrix-agent serve     contextmatrix-agent work  (ENTRYPOINT)
-─────────────────────────     ──────────────────────────────────────
-Long-running host service.    Container entrypoint, one per card.
-Hosts CM lifecycle webhooks.  Clones the repo on a cm/<card-id> branch,
-Launches one Docker worker     claims the card, then drives either:
-container per card. Mints       • HITL: the bare harness loop (stdin
-GitHub tokens, stages the         injects human turns), or
-shared secrets env file,        • autonomous: the orchestrator FSM
-streams /logs, drains on          (plan → execute → document →
-SIGTERM.                          review → integrate → done).
-        │                                    │
-        │ launches ▼                         │ reports over MCP ▼
-        └──────────── Docker container ──────┴────────────► ContextMatrix
+```mermaid
+flowchart LR
+    CM(["ContextMatrix"])
+
+    subgraph serve["contextmatrix-agent serve · host service"]
+        direction TB
+        S["Hosts CM lifecycle webhooks<br/>Launches one Docker worker per card<br/>Mints GitHub tokens · stages secrets<br/>Streams /logs · drains on SIGTERM"]
+    end
+
+    subgraph work["contextmatrix-agent work · one Docker container per card"]
+        direction TB
+        W["Clone repo on cm/&lt;card-id&gt; · claim the card"]
+        FSM["Orchestrator FSM — mode-gated on Cfg.Interactive<br/>plan → execute → document → review → integrate → done"]
+        HITL["HITL: brainstorming for creative cards,<br/>plus plan-approval &amp; review-decision human gates"]
+        AUTO["Autonomous: gates auto-passed, brainstorming skipped"]
+        W --> FSM
+        FSM --> HITL
+        FSM --> AUTO
+    end
+
+    CM ==>|"lifecycle webhooks (HMAC)"| S
+    S ==>|"docker run"| W
+    W -.->|"card ops over MCP"| CM
 ```
 
 - **`serve`** is the task backend. It owns container lifecycle, resource limits,
@@ -87,14 +101,6 @@ export OPENROUTER_API_KEY=sk-or-...
   --task "Fix the failing TestAdd in calc_test.go, then run the tests." \
   --verify "go test ./..." \
   --transcript run.jsonl
-
-# Compare a weak model against a stronger control on the same kata.
-./contextmatrix-agent sweep --model google/gemma-4-31b-it:free --control-model openai/gpt-oss-120b:free
-
-# Fan out parallel read-only subagents over a workspace.
-./contextmatrix-agent fanout --workspace /path/to/checkout --model openai/gpt-oss-120b \
-  --task "correctness=Check the diff for logic bugs" \
-  --task "security=Check the diff for injection and auth flaws"
 ```
 
 ## Running as a ContextMatrix backend
@@ -144,35 +150,34 @@ export OPENROUTER_API_KEY=sk-or-...
 
 ## Commands
 
-| Command          | Purpose                                                                     |
-| ---------------- | --------------------------------------------------------------------------- |
-| `serve`          | Run the task backend: host CM lifecycle webhooks, launch worker containers. |
-| `work`           | Container entrypoint (hidden): execute one card under CM control.           |
-| `run`            | Run the harness on a workspace with a free-form task (standalone).          |
-| `sweep`          | Run the same kata on a weak and a control model and compare.                |
-| `fanout`         | Fan out parallel read-only subagents over a workspace.                      |
-| `eval`           | Measure per-role capability scores across a model set (Wilson-LB).          |
-| `priors-refresh` | Propose model-priors updates from Artificial Analysis indices.              |
+| Command | Purpose                                                                     |
+| ------- | --------------------------------------------------------------------------- |
+| `serve` | Run the task backend: host CM lifecycle webhooks, launch worker containers. |
+| `work`  | Container entrypoint (hidden): execute one card under CM control.           |
+| `run`   | Run the harness on a workspace with a free-form task (standalone).          |
 
 ## Model selection
 
 The agent never asks a model to name a model. During planning, a fixed capable
-model emits a **complexity tier per role** (simple / moderate / complex);
-deterministic code then maps each tier to the cost-optimal model — the cheapest
-whose measured capability clears the tier bar, within a price-headroom band, and
-whose context window fits the work. Explicit pins (global → project → card)
-always override.
+model emits a **complexity tier per role** — simple / moderate / complex /
+critical; deterministic code then maps each tier to the cost-optimal model. A
+candidate must be tool-capable, not blacklisted, fit the work's context window,
+and carry an external quality **prior** for the role that clears the tier's bar
+(floor 0.65). Among those, an eligible operator favorite wins outright;
+otherwise the selector picks the most capable candidate whose blended price is
+within a headroom band of the cheapest. Selection is **priors-only — there is no
+measured-capability gate.** Explicit pins (global → project → card) always
+override.
 
-Two data sources back the selector, both embedded into the binary at build time:
+The selector's inputs are supplied by ContextMatrix, not embedded in the binary.
+Each trigger payload carries a `SelectionContext` with the candidate set, their
+per-role priors, the operator favorites, and a self-learning blacklist;
+`registry.FromSelection` consumes it at run start. The Artificial-Analysis
+sourcing, normalization, and tier-bar tuning all live on the ContextMatrix side.
 
-- **`internal/registry/data/capabilities.json`** — per-role tool-use scores
-  measured by the eval harness on this project's own task batteries.
-- **`internal/registry/data/model-priors.json`** — external quality priors
-  (coding / intelligence indices) used as the tier bar. See
-  [`docs/model-priors.md`](docs/model-priors.md) for the refresh procedure.
-
-The `eval` command re-measures capabilities; `priors-refresh` proposes prior
-updates from Artificial Analysis. Updating either requires a rebuild to re-embed.
+The blacklist is self-learning: when a model proves harness-incapable mid-run
+(for example, it cannot reliably call tools), the agent reports it back so it is
+excluded and a replacement is re-selected.
 
 ## Development
 
@@ -181,7 +186,6 @@ make build          # go build ./... + the binary
 make test           # go test ./...
 make lint           # golangci-lint run
 make fmt            # gofumpt -w .
-make eval           # dry-run cost estimate for the eval matrix
 make docker-worker  # build the worker image
 ```
 
@@ -194,7 +198,6 @@ working **on** this codebase live in [`AGENTS.md`](AGENTS.md).
 
 - [`AGENTS.md`](AGENTS.md) — orientation for contributors and agents.
 - [`serve.yaml.example`](serve.yaml.example) — every service config field, documented.
-- [`docs/model-priors.md`](docs/model-priors.md) — model-priors refresh.
 - [ContextMatrix](https://github.com/mhersson/contextmatrix) — the control plane.
 
 ## License
