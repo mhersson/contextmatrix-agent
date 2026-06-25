@@ -65,7 +65,7 @@ func (o *run) executeSubtask(ctx context.Context, sub subtaskRef) error {
 		return fmt.Errorf("claim subtask %s: %w", sub.ID, err)
 	}
 
-	prompt := fmt.Sprintf(coderPrompt, sub.Title, subtaskBody(sub), o.tc.Title, o.tc.Description)
+	prompt := fmt.Sprintf(coderPrompt, o.skillEngage(), sub.Title, subtaskBody(sub), o.tc.Title, o.tc.Description)
 
 	res, err := o.runCoder(ctx, sub, prompt)
 	if err != nil {

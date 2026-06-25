@@ -2,6 +2,43 @@ package orchestrator
 
 import "strings"
 
+// skillEngageBlock is the model-driven engagement preamble prepended to the
+// coder/fix/document/review prompts when task-skills are mounted. It mirrors
+// Claude Code's using-superpowers pressure: list the skills and insist the model
+// engage a relevant one BEFORE working. menu is tools.SkillTool.MenuText() (one
+// "- name: description" line per skill). Callers inject "" when no skill tool is
+// present, so no-skills runs produce byte-identical prompts (parity).
+func skillEngageBlock(menu string) string {
+	return "TASK-SKILLS — engage the relevant skill BEFORE you start this work.\n" +
+		"You have a `skill` tool that loads curated, project-specific guidance (a senior\n" +
+		"engineer's playbook) for exactly this kind of work. If ANY skill below is even\n" +
+		"plausibly relevant, call `skill` with its name, read it, and follow it as you\n" +
+		"work — when in doubt, engage it; loading a skill is cheap and skipping a relevant\n" +
+		"one is a mistake. Available skills:\n" +
+		menu +
+		"\n"
+}
+
+// skillMenuer is the optional menu accessor satisfied by tools.SkillTool.
+type skillMenuer interface{ MenuText() string }
+
+// skillEngage returns the skill-engagement preamble for the subagent prompts when
+// task-skills are mounted, else "" so no-skills runs are byte-identical. It is the
+// leading %s in coderPrompt/fixPrompt/documentPrompt/specialistPrompt.
+func (o *run) skillEngage() string {
+	sm, ok := o.d.SkillTool.(skillMenuer)
+	if !ok {
+		return ""
+	}
+
+	menu := sm.MenuText()
+	if menu == "" {
+		return ""
+	}
+
+	return skillEngageBlock(menu)
+}
+
 // planPrompt is the read-only planner's instruction block. It is adapted from
 // the create-plan workflow skill's task-decomposition guidance: the same
 // rules for splitting work, dependency thinking, and right-sizing apply, but
@@ -144,7 +181,7 @@ Fix anything you find before finishing.`
 //
 // The trailing %s slots are filled by runExecute: subtask title, subtask
 // description, parent card title, parent card body.
-const coderPrompt = `You are the coding agent for one subtask of a larger task. You have the full
+const coderPrompt = `%sYou are the coding agent for one subtask of a larger task. You have the full
 write toolset (read, grep, glob, edit, write, bash) rooted at the workspace.
 Implement EXACTLY this subtask — nothing from sibling subtasks, nothing
 speculative.
@@ -196,7 +233,7 @@ Description:
 // three below), parent card title, parent card description, the full branch diff
 // against base, and an optional prior-findings block (the previous round's
 // findings on delta rounds). The empty prior-findings block collapses to nothing.
-const specialistPrompt = `You are a code-review specialist. You have read-only tools (read, grep, glob)
+const specialistPrompt = `%sYou are a code-review specialist. You have read-only tools (read, grep, glob)
 to inspect the codebase. You do NOT create or modify cards or files, and you do
 NOT run git. Produce a findings report as TEXT — another agent synthesizes the
 three specialist reports into a single verdict.
@@ -331,7 +368,7 @@ When approved is true, fixes must be an empty array.
 //
 // The trailing %s slots are filled by runFix: parent card title, parent card
 // description, and the findings list.
-const fixPrompt = `You are the coding agent addressing review feedback on the current branch.
+const fixPrompt = `%sYou are the coding agent addressing review feedback on the current branch.
 You have the full write toolset (read, grep, glob, edit, write, bash) rooted at
 the workspace. Apply fixes for EXACTLY the findings below — apply only the literal
 fix, add no new abstractions, middleware, interfaces, or dependencies. If a finding
@@ -405,7 +442,7 @@ Respond with ONLY the Markdown PR body — no surrounding prose, no code fences.
 //
 // The trailing %s slots are filled by runDocument: parent card title, parent
 // card description, the plan overview (subtask titles), and the branch diff.
-const documentPrompt = `You are the documentation agent for completed work that review will inspect
+const documentPrompt = `%sYou are the documentation agent for completed work that review will inspect
 next. You have the full write toolset (read, grep, glob, edit, write, bash)
 rooted at the workspace. Decide whether external documentation is needed for
 this change and, if so, write the minimum effective documentation. You write
