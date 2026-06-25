@@ -459,3 +459,18 @@ func (c *Client) AddLog(ctx context.Context, cardID, message string) error {
 
 	return err
 }
+
+// RecordSkillEngaged appends a "skill_engaged" activity log entry via the MCP
+// add_log tool. ContextMatrix records it as a deduped skill_engaged entry
+// (RecordSkillEngaged/skillNameOf parse "engaged <skill>" from the message) and
+// publishes card.log_added for the dashboard — the agent's report path, distinct
+// from AddLog's status_update. The call helper injects agent_id.
+func (c *Client) RecordSkillEngaged(ctx context.Context, cardID, skillName string) error {
+	_, err := c.call(ctx, "add_log", map[string]any{
+		"card_id": cardID,
+		"action":  "skill_engaged",
+		"message": "engaged " + skillName,
+	})
+
+	return err
+}
