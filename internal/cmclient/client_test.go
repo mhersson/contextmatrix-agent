@@ -3,6 +3,8 @@ package cmclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -12,6 +14,22 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestClassifyReleaseError(t *testing.T) {
+	require.NoError(t, classifyReleaseError(nil))
+
+	// CM surfaces the lock manager's "card is not claimed" text on a redundant
+	// release; classifyReleaseError maps it to the typed sentinel.
+	notClaimed := fmt.Errorf("call release_card: release card CARD-1: release card: %s", ErrCardNotClaimed.Error())
+	got := classifyReleaseError(notClaimed)
+	require.ErrorIs(t, got, ErrCardNotClaimed)
+	assert.Contains(t, got.Error(), "CARD-1", "original message is preserved in the chain")
+
+	other := errors.New("call release_card: connection refused")
+	got2 := classifyReleaseError(other)
+	require.NotErrorIs(t, got2, ErrCardNotClaimed, "unrelated errors are not the sentinel")
+	assert.Equal(t, other, got2, "unrelated errors pass through unchanged")
+}
 
 const testAgentID = "cmx-agent-cmx-001"
 

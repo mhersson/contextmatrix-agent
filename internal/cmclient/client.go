@@ -6,11 +6,18 @@ package cmclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// ErrCardNotClaimed is returned by ReleaseCard when ContextMatrix reports the
+// card is already unclaimed. Best-effort callers (the worker's cleanup release)
+// treat it as a benign no-op: the card is already in the desired released state.
+var ErrCardNotClaimed = errors.New("card is not claimed")
 
 // Client is a card-operations client bound to one agent identity. Every method
 // is a typed wrapper over a single MCP tool call; all calls carry the agent ID.
@@ -274,9 +281,26 @@ func (c *Client) CompleteTask(ctx context.Context, cardID, summary string) error
 	return err
 }
 
-// ReleaseCard releases this client's claim on the card.
+// ReleaseCard releases this client's claim on the card. A release that finds the
+// card already unclaimed returns ErrCardNotClaimed (wrapped), so best-effort
+// callers can treat the redundant release as a benign no-op.
 func (c *Client) ReleaseCard(ctx context.Context, cardID string) error {
 	_, err := c.call(ctx, "release_card", map[string]any{"card_id": cardID})
+
+	return classifyReleaseError(err)
+}
+
+// classifyReleaseError maps ContextMatrix's "card is not claimed" release error
+// to the typed ErrCardNotClaimed sentinel, preserving the original message in the
+// chain. Other errors pass through unchanged; nil stays nil.
+func classifyReleaseError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	if strings.Contains(err.Error(), ErrCardNotClaimed.Error()) {
+		return fmt.Errorf("%w: %w", ErrCardNotClaimed, err)
+	}
 
 	return err
 }

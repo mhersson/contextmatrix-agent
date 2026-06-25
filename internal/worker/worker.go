@@ -428,10 +428,11 @@ func pushWIP(ctx context.Context, a fsmArgs) {
 	}
 }
 
-// releaseQuietly releases the claim, logging a failure rather than masking the
-// run outcome.
+// releaseQuietly releases the claim, logging a real failure rather than masking
+// the run outcome. An already-unclaimed card (ErrCardNotClaimed) is a benign
+// no-op — the done phase released it first — so it is not logged.
 func releaseQuietly(ctx context.Context, ops CardOps, cardID string) {
-	if err := ops.ReleaseCard(ctx, cardID); err != nil {
+	if err := ops.ReleaseCard(ctx, cardID); err != nil && !errors.Is(err, cmclient.ErrCardNotClaimed) {
 		slog.Warn("release card failed", "card", cardID, "error", err)
 	}
 }
@@ -474,7 +475,7 @@ func buildRegistry(spec RunSpec) *registry.Registry {
 // releaseWithError best-effort releases the claim and returns an error result.
 // Used on setup failures before the harness loop runs.
 func releaseWithError(ctx context.Context, ops CardOps, cardID string, err error) (Result, error) {
-	if relErr := ops.ReleaseCard(ctx, cardID); relErr != nil {
+	if relErr := ops.ReleaseCard(ctx, cardID); relErr != nil && !errors.Is(relErr, cmclient.ErrCardNotClaimed) {
 		slog.Warn("release card failed", "card", cardID, "error", relErr)
 	}
 
