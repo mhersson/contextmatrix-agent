@@ -212,3 +212,24 @@ func TestLineWriter_BoundsLongLine(t *testing.T) {
 	assert.LessOrEqual(t, len(got), scannerBufferMax,
 		"line buffer must not grow past the cap")
 }
+
+func TestContainerConfigMountsSkillsReadOnly(t *testing.T) {
+	_, host := containerConfig(LaunchSpec{
+		CardID:         "CARD-1",
+		Project:        "proj",
+		Image:          "img",
+		SecretsHostDir: "/host/secrets",
+		SkillsHostDir:  "/host/skills",
+	})
+
+	assert.Contains(t, host.Binds, "/host/secrets:/run/cm-secrets:ro")
+	assert.Contains(t, host.Binds, "/host/skills:/run/cm-skills:ro", "skills dir is bound read-only")
+}
+
+func TestContainerConfigNoSkillsBindWhenUnset(t *testing.T) {
+	_, host := containerConfig(LaunchSpec{CardID: "CARD-1", Project: "proj", Image: "img"})
+
+	for _, b := range host.Binds {
+		assert.NotContains(t, b, "/run/cm-skills", "no skills bind when SkillsHostDir is empty")
+	}
+}
