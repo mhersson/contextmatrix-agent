@@ -497,6 +497,11 @@ func buildSkillTool(spec RunSpec, ops CardOps) tools.Tool {
 		return nil
 	}
 
+	slog.Info("skill tool registered",
+		"card_id", spec.CardID,
+		"dir", spec.TaskSkillsDir,
+		"skills", strings.Count(st.MenuText(), "\n"))
+
 	return st
 }
 
