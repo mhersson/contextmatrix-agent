@@ -21,10 +21,12 @@ func (fakeGen) GenerateToken(context.Context) (string, time.Time, error) {
 
 func TestResolveFetchesPointerClonesAndCaches(t *testing.T) {
 	var hits int32
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&hits, 1)
 		assert.Equal(t, "/api/agent/task-skills-source", r.URL.Path)
 		assert.NotEmpty(t, r.Header.Get("X-Signature-256"), "the GET is HMAC-signed")
+
 		_ = json.NewEncoder(w).Encode(map[string]string{
 			"git_remote_url": "https://example.test/skills.git",
 			"ref":            "abc123",
@@ -33,8 +35,10 @@ func TestResolveFetchesPointerClonesAndCaches(t *testing.T) {
 	defer srv.Close()
 
 	var gotURL, gotRef, gotDest, gotTok string
+
 	cloner := func(_ context.Context, url, ref, dest, token string) error {
 		gotURL, gotRef, gotDest, gotTok = url, ref, dest, token
+
 		return nil
 	}
 
@@ -71,12 +75,15 @@ func TestResolveEmptyPointerYieldsNoSkills(t *testing.T) {
 
 func TestResolveDoesNotCacheFailure(t *testing.T) {
 	var hits int32
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		n := atomic.AddInt32(&hits, 1)
 		if n == 1 {
 			w.WriteHeader(http.StatusInternalServerError)
+
 			return
 		}
+
 		_ = json.NewEncoder(w).Encode(map[string]string{"git_remote_url": "https://example.test/s.git", "ref": "r"})
 	}))
 	defer srv.Close()

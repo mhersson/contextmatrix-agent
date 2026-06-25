@@ -849,6 +849,7 @@ func TestBuildLaunchSpecNilSubsetOffersAll(t *testing.T) {
 
 	assert.Equal(t, "/host/skills", spec.SkillsHostDir)
 	assert.Contains(t, spec.Env, "CMX_TASK_SKILLS_DIR=/run/cm-skills")
+
 	for _, e := range spec.Env {
 		assert.NotEqual(t, "CM_TASK_SKILLS_SET=1", e, "nil subset must not set CM_TASK_SKILLS_SET")
 	}
@@ -860,6 +861,7 @@ func TestBuildLaunchSpecNoSkillsWhenDirEmpty(t *testing.T) {
 	spec := s.buildLaunchSpec(protocol.TriggerPayload{CardID: "C1", Project: "p", TaskSkills: sliceP("go-development")}, "corr", "")
 
 	assert.Empty(t, spec.SkillsHostDir)
+
 	for _, e := range spec.Env {
 		assert.NotContains(t, e, "CMX_TASK_SKILLS_DIR")
 		assert.NotContains(t, e, "CM_TASK_SKILLS")
@@ -876,6 +878,7 @@ func TestValidateTaskSkills(t *testing.T) {
 	for i := range tooMany {
 		tooMany[i] = "a"
 	}
+
 	require.Error(t, validateTaskSkills(tooMany), "more than 64 entries rejected")
 }
 

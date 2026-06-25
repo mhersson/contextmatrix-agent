@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -14,8 +13,10 @@ import (
 // writeSkill creates <root>/<name>/SKILL.md with the given description + body.
 func writeSkill(t *testing.T, root, name, desc, body string) {
 	t.Helper()
+
 	dir := filepath.Join(root, name)
 	require.NoError(t, os.MkdirAll(dir, 0o755))
+
 	content := "---\nname: " + name + "\ndescription: " + desc + "\n---\n\n" + body
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(content), 0o644))
 }
@@ -63,8 +64,10 @@ func TestSkillToolLoadReturnsBodyAndFiresOnEngage(t *testing.T) {
 	writeSkill(t, root, "go-development", "Use when writing Go.", "GO BODY CONTENT")
 
 	var engaged []string
+
 	st, ok := NewSkillTool(root, nil, false, func(_ context.Context, name string) error {
 		engaged = append(engaged, name)
+
 		return nil
 	})
 	require.True(t, ok)
@@ -121,7 +124,7 @@ func TestSkillToolName(t *testing.T) {
 	st, _ := NewSkillTool(root, nil, false, nil)
 	assert.Equal(t, "skill", st.Name())
 	assert.Equal(t, "skill", st.Schema().Function.Name)
-	assert.True(t, strings.Contains(string(st.Schema().Function.Parameters), `"skill"`), "schema declares the skill param")
+	assert.Contains(t, string(st.Schema().Function.Parameters), `"skill"`, "schema declares the skill param")
 }
 
 func TestSkillToolDescriptionBoundedToFrontmatter(t *testing.T) {

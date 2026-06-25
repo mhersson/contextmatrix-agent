@@ -135,6 +135,7 @@ func (r *Resolver) fetchPointer(ctx context.Context) (gitURL, ref string, err er
 	if derr != nil {
 		return "", "", fmt.Errorf("fetch task-skills-source: %w", derr)
 	}
+
 	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))

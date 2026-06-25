@@ -170,6 +170,7 @@ func specFromEnv() (worker.RunSpec, error) {
 
 	if _, ok := os.LookupEnv("CM_TASK_SKILLS_SET"); ok {
 		taskSkillsSet = true
+
 		if v := os.Getenv("CM_TASK_SKILLS"); v != "" {
 			taskSkills = strings.Split(v, ",")
 		}
