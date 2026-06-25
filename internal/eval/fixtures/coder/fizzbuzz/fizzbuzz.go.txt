@@ -1,9 +1,0 @@
-package fizzbuzz
-
-// FizzBuzz returns the FizzBuzz sequence for 1..n: "Fizz" for multiples of 3,
-// "Buzz" for multiples of 5, "FizzBuzz" for both, else the decimal number.
-// Implement it so the tests pass.
-func FizzBuzz(n int) []string {
-	// TODO: implement
-	return nil
-}

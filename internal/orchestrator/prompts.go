@@ -8,10 +8,12 @@ import "strings"
 // the planner has NO card tools — it only reads code (read/grep/glob) and
 // emits a strict JSON plan. Card creation happens in code from the parsed JSON.
 //
-// The trailing %s slots are filled by runPlan: card title, card description,
+// The trailing %s slots are filled by draftPlan: card title, card description,
 // an optional diagnosis block (root-cause investigation for bug-like cards), an
-// optional resume block (existing subtasks), and an optional repair block (the
-// previous parse error). Empty optional blocks collapse to nothing.
+// optional design block (brainstormed design for creative HITL cards), an
+// optional resume block (existing subtasks), an optional feedback block (HITL
+// reviewer's requested changes on a re-draft), and an optional repair block
+// (the previous parse error). Empty optional blocks collapse to nothing.
 const planPrompt = `You are the planning agent for a software task. You have read-only
 tools (read, grep, glob) to inspect the codebase. You do NOT create or modify
 cards or files — you only read code and output a plan as JSON.
@@ -48,7 +50,8 @@ Decompose the task into subtasks following these rules:
 
 Also assign an overall card_tier reflecting the whole task's complexity, and a
 per-subtask tier. Tiers: "simple" (mechanical, low-risk), "moderate"
-(standard feature work), "complex" (architectural or high-risk).
+(standard feature work), "complex" (architectural or high-risk), "critical"
+(security-sensitive changes, or intricate concurrency/architecture work).
 
 Read the relevant code first to ground the plan in the real structure, then
 respond.
@@ -58,10 +61,10 @@ Title: %s
 
 Description:
 %s
-%s%s%s
+%s%s%s%s%s
 Respond with ONLY a JSON object, no prose:
-{"card_tier":"simple|moderate|complex",
- "subtasks":[{"title":"...","description":"...","depends_on":[<earlier indices>],"tier":"simple|moderate|complex"}]}
+{"card_tier":"simple|moderate|complex|critical",
+ "subtasks":[{"title":"...","description":"...","depends_on":[<earlier indices>],"tier":"simple|moderate|complex|critical"}]}
 `
 
 // diagnosePrompt is the read-only debug-investigation pass run for bug-like
@@ -79,8 +82,11 @@ Work the evidence in order:
   steps it gives.
 - Read the referenced files in full; trace the failing path back to where the
   bad value or behaviour originates. Fix at the source, not the symptom.
-- Find a similar path that works and list what differs.
-- Settle on the single most likely root cause, with the evidence for it.
+- Pattern analysis: find a similar path that works and list every difference
+  (parameters, error handling, config, env, helper calls, caller context). Do
+  not assume a small difference "can't matter".
+- Form 1-3 hypotheses, each with the evidence for and against it; rank them and
+  pick the single most likely root cause.
 
 Do NOT propose detailed code — your job ends at the diagnosis.
 
@@ -101,8 +107,12 @@ Respond with ONLY a "## Diagnosis" section in exactly this shape:
 ### Fix approach
 <high-level strategy: what changes, where — concrete enough to decompose into
 subtasks, but no code>
+### Test approach
+<the failing test to add (file + what it asserts) and the regression scope>
 ### Files affected
 - <path>
+### Risk / scope notes
+<related code paths to leave alone, refactoring hazards, assumptions made>
 `
 
 // buildHygieneNote tells the coder/fixer not to leave a compiled binary in the
@@ -383,6 +393,133 @@ REVIEW OUTCOME
 Respond with ONLY the Markdown PR body — no surrounding prose, no code fences.
 `
 
+// documentPrompt is the document-phase instruction, a faithful port of the
+// document-task workflow skill adapted to a Go phase. The agent runs with the
+// FULL write toolset so it can read existing docs and edit/create doc files, but
+// it writes DOCUMENTATION ONLY — never source or tests. The gate is deliberately
+// conservative: most changes need no external docs, and the correct outcome is
+// then to write nothing (a clean tree -> no commit). The orchestrator commits and
+// pushes the result; the agent does NOT run git and ends with a single COMMIT
+// line the orchestrator parses (same convention as coderPrompt). MCP scaffolding
+// from the source skill is dropped — the Go phase owns claim/usage/push in code.
+//
+// The trailing %s slots are filled by runDocument: parent card title, parent
+// card description, the plan overview (subtask titles), and the branch diff.
+const documentPrompt = `You are the documentation agent for completed work that review will inspect
+next. You have the full write toolset (read, grep, glob, edit, write, bash)
+rooted at the workspace. Decide whether external documentation is needed for
+this change and, if so, write the minimum effective documentation. You write
+DOCUMENTATION ONLY — do not modify source code, tests, or configuration.
+
+Default: NO external documentation is needed. Most changes — bug fixes,
+refactors, internal implementation changes, test additions — do not alter what
+users, developers, or operators need to know. When that is the case, write
+NOTHING and finish.
+
+Write documentation ONLY when the change affects:
+- User-facing behavior — new features, commands, endpoints, config options.
+- API contracts — new or changed endpoints, request/response formats, error codes.
+- Setup or migration — new dependencies, environment variables, upgrade steps.
+- Architecture — significant changes to how components interact.
+
+When documentation IS warranted:
+- Update EXISTING files — create a new file only if no suitable file exists.
+- Be concrete: include examples and command invocations where they help.
+- Keep it concise — match the scope of the docs to the scope of the change.
+- Match the project's existing tone and formatting conventions.
+- Be accurate: the BRANCH DIFF below is the ground truth. Document only what was
+  actually built; never document features that were not implemented.
+
+Do NOT run git yourself (no commit, no push, no branch) — the orchestrator
+commits and pushes your changes after you finish.
+
+When you finish, end your FINAL message with exactly one line of the form:
+
+COMMIT: docs(<scope>): <summary>
+
+for example:
+
+COMMIT: docs(api): document the health endpoint
+
+If you wrote no documentation you may omit the COMMIT line. When present, the
+COMMIT line must be a single line and the LAST line of your message.
+
+PARENT CARD
+Title: %s
+
+Description:
+%s
+
+PLAN OVERVIEW (subtasks)
+%s
+
+BRANCH DIFF (what actually changed)
+%s
+`
+
+// gateClassifyPrompt maps a human's freeform reply at a sign-off gate to a
+// structured approve/adjust verdict. There is no hard reject: anything short of
+// a clear approval is an adjustment whose feedback is folded into the next
+// round. A parse failure is treated as adjust upstream, never an approval.
+//
+// The %s slots are filled by classifyVerdict: the gate kind, then the reply.
+const gateClassifyPrompt = `A human was shown a %s gate and asked to approve the work or request changes.
+Their reply:
+
+%s
+
+Classify the reply. If they approve, accept, or are clearly satisfied (e.g.
+"approve", "looks good", "lgtm", "yes, ship it"), the verdict is "approve". If
+they request ANY change, raise a concern, or are not fully satisfied, the verdict
+is "adjust" and feedback summarizes the changes they want.
+
+Respond with ONLY a JSON object, no prose:
+{"verdict":"approve|adjust","feedback":"<changes to make; empty when approve>"}
+`
+
+// brainstormPrompt is the design-dialogue instruction for creative HITL cards, a
+// port of the brainstorming workflow skill adapted to a Go phase: the model has
+// read-only tools to explore the codebase and converses with the human one
+// question at a time, then — only on the human's confirmation — emits the agreed
+// design as a "## Design" section followed by a DESIGN_COMPLETE marker line the
+// orchestrator parses. MCP/KB scaffolding from the source skill is dropped; the
+// orchestrator records the design from the marked output (the model never writes
+// the card). The %s slots are filled by runBrainstorm: card title, card
+// description, and the conversation-so-far block.
+const brainstormPrompt = `You are a design facilitator turning a card's stated intent into a fully-formed
+design through dialogue with a human teammate. You have read-only tools (read,
+grep, glob) to explore the codebase. You do NOT write files or run git — the
+agreed design is captured from your final message.
+
+Process:
+- Understand the intent. Read the card and the files it references; explore the
+  surrounding code so the design fits the real structure.
+- Ask ONE question at a time. Prefer concrete, multiple-choice questions. Focus
+  on purpose, constraints, and success criteria.
+- Propose 2-3 approaches with trade-offs and a recommendation before settling.
+- Present the design in sections scaled to their complexity (architecture,
+  components, data flow, error handling, testing). Confirm each part.
+- YAGNI: cut anything the card does not need. Favor small, well-bounded units.
+
+When — and only when — the user confirms the design, write the final design as a
+"## Design" section, then end your message with a line containing exactly:
+
+DESIGN_COMPLETE
+
+Until the user confirms, do NOT emit DESIGN_COMPLETE — continue the dialogue with
+your next single question or proposal. The design can be short for small work,
+but it must be confirmed before you finish.
+
+CARD
+Title: %s
+
+Description:
+%s
+
+CONVERSATION SO FAR
+%s
+`
+
 // resumeBlock renders the existing-subtask reuse instruction inserted into the
 // planner prompt on resume. titles is the list of existing subtask titles.
 func resumeBlock(titles []string) string {
@@ -415,6 +552,17 @@ func repairBlock(parseErr string) string {
 		"Respond again with ONLY the JSON object described below — no prose, no code fences.\n"
 }
 
+// feedbackBlock renders a HITL reviewer's requested changes inserted into the
+// planner prompt on a re-draft. Empty feedback collapses to nothing.
+func feedbackBlock(feedback string) string {
+	if strings.TrimSpace(feedback) == "" {
+		return ""
+	}
+
+	return "\nREQUESTED CHANGES (the human reviewed the previous plan and asked for\n" +
+		"these revisions — address them):\n" + feedback + "\n"
+}
+
 // diagnosisBlock renders the root-cause diagnosis inserted into the planner
 // prompt for bug-like cards. Empty diagnosis collapses to nothing.
 func diagnosisBlock(diagnosis string) string {
@@ -435,4 +583,16 @@ func priorFindingsBlock(findings string) string {
 	}
 
 	return "\nPRIOR FINDINGS (already raised — verify resolution, do not import new scope):\n" + findings + "\n"
+}
+
+// designBlock renders the agreed design from the brainstorming dialogue into the
+// planner prompt so the first plan draft is grounded on it. Empty design (no
+// brainstorm ran — autonomous, non-creative, or a card that already had a design)
+// collapses to nothing, leaving the rendered prompt unchanged.
+func designBlock(design string) string {
+	if strings.TrimSpace(design) == "" {
+		return ""
+	}
+
+	return "\nAGREED DESIGN (the human and the agent converged on this design during\nbrainstorming — plan to implement it):\n" + design + "\n"
 }

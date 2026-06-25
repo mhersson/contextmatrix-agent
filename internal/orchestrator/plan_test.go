@@ -7,8 +7,10 @@ import (
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/events"
+	"github.com/mhersson/contextmatrix-agent/internal/harness"
 	"github.com/mhersson/contextmatrix-agent/internal/llm"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
+	"github.com/mhersson/contextmatrix-agent/internal/tools"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -51,6 +53,21 @@ func TestParsePlan(t *testing.T) {
 		assert.Contains(t, err.Error(), "card_tier")
 	})
 
+	t.Run("critical card_tier accepted", func(t *testing.T) {
+		j := `{"card_tier":"critical","subtasks":[{"title":"T","description":"d","depends_on":[],"tier":"critical"}]}`
+		p, err := parsePlan(j)
+		require.NoError(t, err)
+		assert.Equal(t, "critical", p.CardTier)
+		assert.Equal(t, "critical", p.Subtasks[0].Tier)
+	})
+
+	t.Run("unknown tier still rejected", func(t *testing.T) {
+		bad := `{"card_tier":"gigantic","subtasks":[{"title":"T","description":"d","depends_on":[],"tier":"simple"}]}`
+		_, err := parsePlan(bad)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "card_tier")
+	})
+
 	t.Run("dep index out of range", func(t *testing.T) {
 		bad := `{"card_tier":"simple","subtasks":[{"title":"T","description":"d","depends_on":[5],"tier":"simple"}]}`
 		_, err := parsePlan(bad)
@@ -84,6 +101,35 @@ func TestParsePlan(t *testing.T) {
 	t.Run("no JSON at all", func(t *testing.T) {
 		_, err := parsePlan("I could not produce a plan, sorry.")
 		require.Error(t, err)
+	})
+}
+
+func TestTierStringToRegistryTier(t *testing.T) {
+	// Lock the end-to-end mapping: the planner tier strings parsePlan accepts
+	// must convert to the matching registry.Tier at selection time. "critical"
+	// must reach registry.TierCritical (the 0.90 bar), not the moderate default.
+	t.Run("tierOf maps each subtask tier string", func(t *testing.T) {
+		assert.Equal(t, registry.TierSimple, tierOf(subtaskRef{Tier: "simple"}))
+		assert.Equal(t, registry.TierModerate, tierOf(subtaskRef{Tier: "moderate"}))
+		assert.Equal(t, registry.TierComplex, tierOf(subtaskRef{Tier: "complex"}))
+		assert.Equal(t, registry.TierCritical, tierOf(subtaskRef{Tier: "critical"}))
+	})
+
+	t.Run("tierOf unknown/empty defaults to moderate", func(t *testing.T) {
+		assert.Equal(t, registry.TierModerate, tierOf(subtaskRef{Tier: "epic"}))
+		assert.Equal(t, registry.TierModerate, tierOf(subtaskRef{Tier: ""}))
+	})
+
+	t.Run("tierFromString maps each card tier string", func(t *testing.T) {
+		assert.Equal(t, registry.TierSimple, tierFromString("simple"))
+		assert.Equal(t, registry.TierModerate, tierFromString("moderate"))
+		assert.Equal(t, registry.TierComplex, tierFromString("complex"))
+		assert.Equal(t, registry.TierCritical, tierFromString("critical"))
+	})
+
+	t.Run("tierFromString unknown/empty defaults to moderate", func(t *testing.T) {
+		assert.Equal(t, registry.TierModerate, tierFromString("gigantic"))
+		assert.Equal(t, registry.TierModerate, tierFromString(""))
 	})
 }
 
@@ -366,8 +412,7 @@ func TestResolveDecisionModelNilRegistryFallsBack(t *testing.T) {
 }
 
 func TestResolveDecisionModelEmptyPoolReturnsCapableDefault(t *testing.T) {
-	reg := registry.NewRegistryWithCapabilities(nil, "default/model", reviewerCatalog(),
-		map[string]map[registry.Role]float64{"rev/alpha": {registry.RoleReviewer: 0.5}})
+	reg := registry.NewRegistryFromParts(reviewerCatalog(), registry.Priors{}, nil, nil, "default/model")
 	emit := events.NewEmitter(nil, nil)
 	ops := &fakeOps{}
 
@@ -399,4 +444,142 @@ func TestExtractJSON(t *testing.T) {
 			}
 		})
 	}
+}
+
+// hitlPlanRun builds a *run for HITL plan-phase tests. The card has a ## Design
+// already, so brainstorm is skipped and the plan-approval gate is exercised in
+// isolation. client serves the planner draft(s) AND the gate classification(s).
+func hitlPlanRun(ops *fakeOps, inbox *fakeInbox, client llm.LLM) *run {
+	d := Deps{
+		Ops:       ops,
+		Client:    client,
+		Emit:      events.NewEmitter(nil, nil),
+		Registry:  planTestRegistry(),
+		ReadTools: tools.NewRegistry(tools.NewReadTool(".")),
+		Human:     inbox,
+		Cfg: Config{
+			Project: "proj", CardID: "CARD-1",
+			PayloadModel: "payload/model", DefaultModel: "default/model",
+			MaxTurns: 5, Interactive: true,
+		},
+	}
+
+	tc := cmclient.TaskContext{
+		CardID: "CARD-1", Title: "Add a palette",
+		Description: "## Design\n\nA palette config.", // present -> brainstorm skipped
+	}
+
+	return newRun(d, tc)
+}
+
+const onePlanJSON = `{"card_tier":"simple","subtasks":[{"title":"Add the flag","description":"Files: a.go","depends_on":[],"tier":"simple"}]}`
+
+func TestRunPlanHITLApproveCreatesSubtasks(t *testing.T) {
+	ops := &fakeOps{}
+	inbox := &fakeInbox{msgs: []harness.UserMessage{{Content: "approve"}}}
+	client := &planLLM{responses: []llm.Response{
+		stopResp(onePlanJSON, 0.01),                            // draft
+		stopResp(`{"verdict":"approve","feedback":""}`, 0.001), // gate classify
+	}}
+	o := hitlPlanRun(ops, inbox, client)
+
+	require.NoError(t, runPlan(context.Background(), o))
+	assert.Len(t, ops.createCardArgs, 1, "subtasks created after approval")
+}
+
+func TestRunPlanHITLAdjustRedraftsThenApproves(t *testing.T) {
+	ops := &fakeOps{}
+	inbox := &fakeInbox{msgs: []harness.UserMessage{
+		{Content: "make it two subtasks"},
+		{Content: "approve"},
+	}}
+	llmFake := &planLLM{responses: []llm.Response{
+		stopResp(onePlanJSON, 0.01),                                       // draft 1
+		stopResp(`{"verdict":"adjust","feedback":"two subtasks"}`, 0.001), // gate -> adjust
+		stopResp(onePlanJSON, 0.01),                                       // draft 2 (re-draft)
+		stopResp(`{"verdict":"approve","feedback":""}`, 0.001),            // gate -> approve
+	}}
+	o := hitlPlanRun(ops, inbox, llmFake)
+
+	require.NoError(t, runPlan(context.Background(), o))
+	assert.Len(t, ops.createCardArgs, 1, "subtasks created only after the final approval")
+
+	// The re-draft prompt carried the human's feedback.
+	var sawFeedback bool
+
+	for _, task := range llmFake.tasks {
+		if strings.Contains(task, "REQUESTED CHANGES") && strings.Contains(task, "two subtasks") {
+			sawFeedback = true
+		}
+	}
+
+	assert.True(t, sawFeedback, "the re-draft prompt includes the adjust feedback")
+}
+
+// creativePlanRun builds a *run for the design-grounding test: a creative HITL
+// card with NO ## Design yet, so brainstorm runs and the produced design must
+// reach the planner prompt.
+func creativePlanRun(ops *fakeOps, inbox *fakeInbox, client llm.LLM) *run {
+	d := Deps{
+		Ops:       ops,
+		Client:    client,
+		Emit:      events.NewEmitter(nil, nil),
+		Registry:  planTestRegistry(),
+		ReadTools: tools.NewRegistry(tools.NewReadTool(".")),
+		Human:     inbox,
+		Cfg: Config{
+			Project: "proj", CardID: "CARD-1",
+			PayloadModel: "payload/model", DefaultModel: "default/model",
+			MaxTurns: 5, Interactive: true,
+		},
+	}
+
+	tc := cmclient.TaskContext{
+		CardID: "CARD-1", Title: "Add a palette",
+		Description: "Add colour-scheme support.", // no ## Design → brainstorm runs
+	}
+
+	return newRun(d, tc)
+}
+
+// TestRunPlanHITLDesignReachesPlanner proves the fresh-run/resume asymmetry is
+// fixed: the brainstormed design must appear in the planner prompt (not only in
+// the card body that is re-fetched on resume).
+func TestRunPlanHITLDesignReachesPlanner(t *testing.T) {
+	ops := &fakeOps{}
+	// The human replies once (to the brainstorm question) and then approves the plan.
+	inbox := &fakeInbox{msgs: []harness.UserMessage{
+		{Content: "use option A"},
+		{Content: "approve"},
+	}}
+
+	const agreedDesign = "## Design\n\nApproach A: a 4-slot palette config."
+
+	llmFake := &planLLM{responses: []llm.Response{
+		// Brainstorm turn 1: model asks a question.
+		stopResp("Which approach: A or B?", 0.01),
+		// Brainstorm turn 2: model confirms the design.
+		stopResp(agreedDesign+"\n\nDESIGN_COMPLETE", 0.01),
+		// Plan draft.
+		stopResp(onePlanJSON, 0.01),
+		// Gate classify: approve.
+		stopResp(`{"verdict":"approve","feedback":""}`, 0.001),
+	}}
+
+	o := creativePlanRun(ops, inbox, llmFake)
+	require.NoError(t, runPlan(context.Background(), o))
+
+	// Subtasks created after approval.
+	assert.Len(t, ops.createCardArgs, 1, "subtasks created after approval")
+
+	// The planner prompt (the plan-draft call) must carry the agreed design.
+	// llmFake.tasks captures the last user message of each harness.Run call in
+	// order: [brainstorm-q1, brainstorm-q2(design_complete), plan-draft, gate].
+	// The plan-draft is tasks[2].
+	require.GreaterOrEqual(t, len(llmFake.tasks), 3, "expected at least 3 model calls")
+	planDraftPrompt := llmFake.tasks[2]
+	assert.Contains(t, planDraftPrompt, "AGREED DESIGN",
+		"planner prompt must contain the AGREED DESIGN block")
+	assert.Contains(t, planDraftPrompt, "Approach A",
+		"planner prompt must contain the brainstormed design text")
 }

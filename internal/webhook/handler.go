@@ -339,6 +339,15 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID string
 		env = append(env, "CMX_SELECTOR_PRICE_HEADROOM="+formatFloat(s.launchEnv.SelectorPriceHeadroom))
 	}
 
+	if p.Selection != nil {
+		if b, err := json.Marshal(p.Selection); err == nil {
+			env = append(env, "CMX_SELECTION="+string(b))
+		} else {
+			s.logger.Warn("failed to marshal selection context; container will use default model",
+				"project", p.Project, "card_id", p.CardID, "error", err)
+		}
+	}
+
 	env = append(env, s.launchEnv.WorkerExtraEnv...)
 
 	return executor.LaunchSpec{

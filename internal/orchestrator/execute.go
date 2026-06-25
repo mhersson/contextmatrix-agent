@@ -2,10 +2,12 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 
+	"github.com/mhersson/contextmatrix-agent/internal/harness"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 )
 
@@ -43,7 +45,6 @@ func runExecute(ctx context.Context, o *run) error {
 // model resolution, coder harness run, usage accounting, commit, push, complete.
 func (o *run) executeSubtask(ctx context.Context, sub subtaskRef) error {
 	d := o.d
-	cfg := d.Cfg
 
 	// Resume: a subtask already completed in a prior run is not re-run.
 	if sub.State == "done" {
@@ -65,36 +66,10 @@ func (o *run) executeSubtask(ctx context.Context, sub subtaskRef) error {
 	}
 
 	prompt := fmt.Sprintf(coderPrompt, sub.Title, subtaskBody(sub), o.tc.Title, o.tc.Description)
-	model := o.resolveCoderModel(sub, prompt)
 
-	_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory selection record
-		fmt.Sprintf("coder model %s selected for subtask %q (tier=%s)", model, sub.Title, tierOf(sub)))
-
-	res, err := o.runModel(ctx, d.WriteTools, prompt, model)
-
-	// Account for spend even on a transport error / partial run, then report the
-	// model actually used (falling back to the resolved slug when the provider
-	// did not echo one).
-	o.ledger.Spend(res.TotalCostUSD)
-
-	usedModel := res.ModelUsed
-	if usedModel == "" {
-		usedModel = model
-	}
-
-	// Track the resolved coder slug so the review panel can exclude it (a model
-	// must not review its own code). Keyed on the slug we configured, which is
-	// what SelectReviewPanel's Exclude set compares against. newRun initializes
-	// the map unconditionally.
-	o.coderModels[model] = true
-
-	if reportErr := d.Ops.ReportUsage(ctx, sub.ID, usedModel,
-		res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
-		slog.Warn("execute: report usage failed", "card_id", sub.ID, "error", reportErr)
-	}
-
+	res, err := o.runCoder(ctx, sub, prompt)
 	if err != nil {
-		return fmt.Errorf("coder run for %s: %w", sub.ID, err)
+		return err
 	}
 
 	commitMsg, ok := extractCommitLine(res.Output)
@@ -112,7 +87,7 @@ func (o *run) executeSubtask(ctx context.Context, sub subtaskRef) error {
 	// push but still completes the card. A push failure aborts the run — the
 	// spend has already been reported, so retry/resume must not double-charge.
 	if committed {
-		if err := o.pushSubtask(ctx); err != nil {
+		if err := o.pushBranch(ctx); err != nil {
 			return fmt.Errorf("push after subtask %s: %w", sub.ID, err)
 		}
 	}
@@ -124,15 +99,90 @@ func (o *run) executeSubtask(ctx context.Context, sub subtaskRef) error {
 	return nil
 }
 
-// pushSubtask pushes the card branch after a subtask commit. On a FRESH run that
-// found a stale remote branch (o.staleRemoteTip != ""), the FIRST push overwrites
-// it with a force-with-lease against the recorded tip — per spec §5.1, a fresh
-// run owns its card branch and reclaims a stale one at first push. Every push
-// after that (firstPushDone) is plain, because the branch is now ours and a plain
-// push fast-forwards. A run with no stale branch (staleRemoteTip == "", the
-// normal case, including all resume runs which never record a tip) always uses a
-// plain push.
-func (o *run) pushSubtask(ctx context.Context) error {
+// runCoder runs the subtask's coder harness with in-run recovery from a
+// harness-incapable model: it resolves the coder model (skipping any model
+// already excluded this run), logs the pick, runs the harness, and accounts for
+// spend on every attempt. If the model proves incapable (*IncapableError) it
+// blacklists/excludes it via recoverIncapable and RE-SELECTS the next-best model
+// for the SAME subtask — the incapable model wrote nothing, so re-running is
+// clean (no git reset). The loop is bounded by recoverIncapable's per-card cap:
+// once exhausted it returns the wrapped park error. Any non-incapable run error
+// (transport, context limit, budget) is returned immediately, unwrapped of the
+// recovery loop. Returns the successful run's result.
+func (o *run) runCoder(ctx context.Context, sub subtaskRef, prompt string) (harness.Result, error) {
+	d := o.d
+	cfg := d.Cfg
+
+	// At most one initial attempt plus reselectCap re-selections; recoverIncapable
+	// is the authoritative bound (it errors at the cap), the +1 is a belt-and-braces
+	// ceiling so a logic slip can never spin.
+	for attempt := 0; attempt <= reselectCap; attempt++ {
+		model := o.resolveCoderModel(sub, prompt)
+
+		_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory selection record
+			fmt.Sprintf("coder model %s selected for subtask %q (tier=%s)", model, sub.Title, tierOf(sub)))
+
+		res, err := o.runModel(ctx, d.WriteTools, prompt, model)
+
+		// Account for spend even on a transport error / partial run, then report
+		// the model actually used (falling back to the resolved slug when the
+		// provider did not echo one). The incapable attempt is charged too — it
+		// burned tokens before tripping.
+		o.ledger.Spend(res.TotalCostUSD)
+
+		usedModel := res.ModelUsed
+		if usedModel == "" {
+			usedModel = model
+		}
+
+		// Record the resolved coder slug so the review panel excludes it: a capable
+		// model must not review its own code. This runs BEFORE the incapable check
+		// below, so an incapable model (which produced no code) is also recorded
+		// here — harmless, and it keeps that model out of its own review via this
+		// set plus o.excluded. Keyed on the slug we configured, which is what
+		// SelectReviewPanel's Exclude set compares against. newRun initializes the
+		// map unconditionally.
+		o.coderModels[model] = true
+
+		if reportErr := d.Ops.ReportUsage(ctx, sub.ID, usedModel,
+			res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
+			slog.Warn("execute: report usage failed", "card_id", sub.ID, "error", reportErr)
+		}
+
+		var ie *IncapableError
+		if errors.As(err, &ie) {
+			// recoverIncapable blacklists + excludes the model and returns an error
+			// only when the per-card re-selection cap is exhausted — park then.
+			if rerr := o.recoverIncapable(ctx, ie); rerr != nil {
+				return res, rerr
+			}
+
+			// Re-select (the failed model is now excluded) and re-run the SAME
+			// subtask: a clean restart since the incapable model committed nothing.
+			continue
+		}
+
+		if err != nil {
+			return res, fmt.Errorf("coder run for %s: %w", sub.ID, err)
+		}
+
+		return res, nil
+	}
+
+	// Unreachable in practice: recoverIncapable errors at the cap before the loop
+	// can exhaust its iterations. Defensive guard against an infinite loop.
+	return harness.Result{}, fmt.Errorf("coder for %s: re-selection loop exhausted", sub.ID)
+}
+
+// pushBranch pushes the card branch after a commit. On a FRESH run that found a
+// stale remote branch (o.staleRemoteTip != ""), the FIRST push overwrites it
+// with a force-with-lease against the recorded tip — per spec §5.1, a fresh run
+// owns its card branch and reclaims a stale one at first push. Every push after
+// that (firstPushDone) is plain, because the branch is now ours and a plain push
+// fast-forwards. A run with no stale branch (staleRemoteTip == "", the normal
+// case, including all resume runs which never record a tip) always uses a plain
+// push. Shared by the execute and document phases.
+func (o *run) pushBranch(ctx context.Context) error {
 	branch := o.d.Cfg.Branch
 
 	// Every exit marks the first push as attempted: the lease is a one-shot
@@ -159,6 +209,10 @@ func (o *run) pushSubtask(ctx context.Context) error {
 // the subtask's tier and a real window estimate of the coder prompt.
 func (o *run) resolveCoderModel(sub subtaskRef, prompt string) string {
 	if resolvePin(o.d.Registry, o.tc.ModelCoder) {
+		// A pinned model is returned even if it is in o.excluded: we never override
+		// an explicit operator pin with an auto-selected substitute. A pinned model
+		// that is harness-incapable therefore keeps being re-selected, exhausts the
+		// re-selection cap, and parks — the blacklist still records it.
 		return o.tc.ModelCoder
 	}
 
@@ -166,6 +220,7 @@ func (o *run) resolveCoderModel(sub subtaskRef, prompt string) string {
 		Role:      registry.RoleCoder,
 		Tier:      tierOf(sub),
 		EstTokens: estimateTokens(prompt),
+		Exclude:   o.excluded,
 	})
 
 	return spec.Model
@@ -192,6 +247,8 @@ func tierOf(sub subtaskRef) registry.Tier {
 		return registry.TierSimple
 	case "complex":
 		return registry.TierComplex
+	case "critical":
+		return registry.TierCritical
 	default:
 		return registry.TierModerate
 	}

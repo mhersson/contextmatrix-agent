@@ -11,12 +11,8 @@ func NewRootCmd() *cobra.Command {
 		SilenceErrors: true,
 	}
 	root.AddCommand(newRunCmd())
-	root.AddCommand(newSweepCmd())
-	root.AddCommand(newFanoutCmd())
-	root.AddCommand(newEvalCmd())
 	root.AddCommand(newWorkCmd())
 	root.AddCommand(newServeCmd())
-	root.AddCommand(newPriorsRefreshCmd())
 
 	return root
 }

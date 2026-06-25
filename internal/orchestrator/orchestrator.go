@@ -1,6 +1,6 @@
 // Package orchestrator drives an autonomous card through plan -> execute ->
-// review -> integrate -> done. Code owns all sequencing; models run inside
-// phases. Each phase persists itself to the card BEFORE doing work, so the
+// document -> review -> integrate -> done. Code owns all sequencing; models run
+// inside phases. Each phase persists itself to the card BEFORE doing work, so the
 // stored phase always reads "in progress or interrupted".
 //
 // Boundary rule: this package imports harness, llm, registry, tools, events,
@@ -16,6 +16,7 @@ import (
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/events"
+	"github.com/mhersson/contextmatrix-agent/internal/harness"
 	"github.com/mhersson/contextmatrix-agent/internal/llm"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-agent/internal/tools"
@@ -37,6 +38,7 @@ type Ops interface {
 	AddLog(ctx context.Context, cardID, message string) error
 	ReportUsage(ctx context.Context, cardID, model string, promptTokens, completionTokens int64, actualCostUSD float64) error
 	ReportPush(ctx context.Context, cardID, branch, prURL string) error
+	BlacklistModel(ctx context.Context, cardID, model, reason string) error
 	CompleteTask(ctx context.Context, cardID, summary string) error
 	ReleaseCard(ctx context.Context, cardID string) error
 }
@@ -90,6 +92,11 @@ type Config struct {
 	MaxTurns          int
 	ToolOutputMax     int
 	ReviewAttemptsCap int // 5, CM's convention
+	// Interactive is the sole mode flag: true => HITL (gates wait on Human and
+	// brainstorming runs for creative cards); false => autonomous (gates pass
+	// through, brainstorming skipped). Autonomous behavior is byte-for-byte the
+	// pre-HITL behavior.
+	Interactive bool
 }
 
 // Deps bundles the collaborators the FSM drives.
@@ -104,11 +111,15 @@ type Deps struct {
 	ReadTools  *tools.Registry // read-only subset for planner/reviewers
 	Cfg        Config
 	Redact     func(string) string // nil = identity; scrubs tool output in phase runs (wired by the worker)
+	// Human is the HITL ask-and-wait channel, satisfied by the worker's live
+	// Inbox. It is a genuine nil for autonomous runs; mode is read from
+	// Cfg.Interactive, never from Human != nil (the nil-concrete footgun).
+	Human harness.Inbox
 }
 
 // phaseOrder is the fixed forward sequence of phases. Run enters at the card's
 // persisted phase and never moves backward through this slice.
-var phaseOrder = []string{"plan", "execute", "review", "integrate", "done"}
+var phaseOrder = []string{"plan", "execute", "document", "review", "integrate", "done"}
 
 // phaseFn is a single phase's body.
 type phaseFn func(context.Context) error
@@ -155,6 +166,19 @@ type run struct {
 	// (a model should not review its own code). Populated in executeSubtask.
 	coderModels map[string]bool
 
+	// reselects counts in-run model re-selections triggered by a harness-incapable
+	// model (one per recoverIncapable). It is capped at 3 per card across BOTH the
+	// execute (coder) and review (synthesis/fix) recovery paths — a shared budget,
+	// so a card that keeps drawing dud models parks rather than burning re-selections
+	// forever.
+	reselects int
+
+	// excluded is the per-card set of models proven harness-incapable on this run.
+	// It is threaded into every SelectInput.Exclude (coder selection and the review
+	// panel) so a model that could not drive the tool loop is never re-picked.
+	// Initialized in newRun.
+	excluded map[string]bool
+
 	// lastReviewBase is the HEAD SHA captured at the end of the previous round's
 	// specialist review (mirrors the runner's review_completed head=<sha>). The
 	// next round diffs against it so the panel sees only the change since the last
@@ -176,6 +200,7 @@ type run struct {
 
 	planFn      phaseFn
 	executeFn   phaseFn
+	documentFn  phaseFn
 	reviewFn    phaseFn
 	integrateFn phaseFn
 	doneFn      phaseFn
@@ -197,6 +222,7 @@ func newRun(d Deps, tc cmclient.TaskContext) *run {
 	}
 
 	o.coderModels = map[string]bool{}
+	o.excluded = map[string]bool{}
 	o.body = tc.Description
 	o.runVerify = func(ctx context.Context, argv []string) (string, bool) {
 		return execVerify(ctx, d.Cfg.Workspace, argv)
@@ -204,6 +230,7 @@ func newRun(d Deps, tc cmclient.TaskContext) *run {
 
 	o.planFn = func(ctx context.Context) error { return runPlan(ctx, o) }
 	o.executeFn = func(ctx context.Context) error { return runExecute(ctx, o) }
+	o.documentFn = func(ctx context.Context) error { return runDocument(ctx, o) }
 	o.reviewFn = func(ctx context.Context) error { return runReview(ctx, o) }
 	o.integrateFn = func(ctx context.Context) error { return runIntegrate(ctx, o) }
 	o.doneFn = func(ctx context.Context) error { return runDone(ctx, o) }
@@ -218,6 +245,8 @@ func (o *run) phaseFnFor(phase string) phaseFn {
 		return o.planFn
 	case "execute":
 		return o.executeFn
+	case "document":
+		return o.documentFn
 	case "review":
 		return o.reviewFn
 	case "integrate":
@@ -294,6 +323,41 @@ func budgetLogMessage(be *BudgetExceededError) string {
 // contextLimitLogMessage is the canonical card-log line for a context-window park.
 func contextLimitLogMessage(cle *ContextLimitError) string {
 	return fmt.Sprintf("context window reached on model %q (%d tokens) — parking work; split the subtask or pin a larger-window model", cle.Model, cle.ContextWindow)
+}
+
+// reselectCap bounds in-run model re-selections per card. A model that emits
+// tool calls every turn but never forms valid arguments (harness-incapable) is
+// blacklisted and swapped for the next-best pick; after this many swaps the run
+// parks rather than churning through the catalog indefinitely.
+const reselectCap = 3
+
+// recoverIncapable handles a harness-incapable model encountered mid-phase: it
+// blacklists the model on CM (best-effort), records the exclusion so the next
+// selection skips it, and logs the swap. It returns an error — wrapping the
+// IncapableError — once the per-card re-selection cap is exhausted, which the
+// caller propagates to park the run. The incapable model executed no tools, so
+// the caller can simply re-select and re-run the same unit; no git reset is
+// needed.
+func (o *run) recoverIncapable(ctx context.Context, ie *IncapableError) error {
+	if o.reselects >= reselectCap {
+		return fmt.Errorf("re-selection cap (%d) exhausted after model %q: %w", reselectCap, ie.Model, ie)
+	}
+
+	o.reselects++
+
+	if o.excluded == nil {
+		o.excluded = map[string]bool{}
+	}
+
+	o.excluded[ie.Model] = true
+
+	// Best-effort: the recovery proceeds (re-select + re-run) regardless of a
+	// reporting failure; the blacklist is an advisory hint to CM and future runs.
+	_ = o.d.Ops.BlacklistModel(ctx, o.d.Cfg.CardID, ie.Model, ie.Reason) //nolint:errcheck
+	_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID,                              //nolint:errcheck
+		fmt.Sprintf("model %q harness-incapable; blacklisted and re-selecting (attempt %d/%d)", ie.Model, o.reselects, reselectCap))
+
+	return nil
 }
 
 // indexOf returns the position of v in s, or -1 if absent.

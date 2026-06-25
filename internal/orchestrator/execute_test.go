@@ -265,15 +265,18 @@ func TestExecuteModelSelectionByComplexity(t *testing.T) {
 	git := &fakeGit{committed: true}
 	llmFake := &planLLM{responses: []llm.Response{stopResp("ok\nCOMMIT: feat: x", 0.01)}}
 
-	// A registry where exactly one tools-capable model has a measured coder score
-	// and clears every tier bar, so SelectByComplexity is forced to pick it.
+	// A registry where exactly one tools-capable model has a prior coder score
+	// that clears every tier bar, so SelectByComplexity is forced to pick it.
 	catalog := llm.Catalog{
 		{ID: "the/coder", ContextLength: 200000, SupportedParameters: []string{"tools"}},
 	}
-	reg := registry.NewRegistryWithCapabilities(nil, "fallback/default", catalog,
-		map[string]map[registry.Role]float64{
-			"the/coder": {registry.RoleCoder: 0.95},
-		})
+	coderScore := 0.95
+	priors := registry.Priors{
+		Models: map[string]registry.PriorEntry{
+			"the/coder": {Coder: &coderScore},
+		},
+	}
+	reg := registry.NewRegistryFromParts(catalog, priors, nil, nil, "fallback/default")
 
 	d := execTestDeps(ops, git, llmFake)
 	d.Registry = reg

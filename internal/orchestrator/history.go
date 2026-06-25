@@ -88,6 +88,41 @@ func formatPlan(subs []subtaskRef) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// formatPlannedPlan renders a parsed (not-yet-created) plan for the HITL
+// plan-approval gate: numbered subtasks with tier and depends-on-by-index, so
+// the human sees the decomposition before any subtask card exists.
+func formatPlannedPlan(p plan) string {
+	var b strings.Builder
+
+	fmt.Fprintf(&b, "Overall tier: %s\n\n", p.CardTier)
+
+	for i, st := range p.Subtasks {
+		deps := "none"
+
+		if len(st.DependsOn) > 0 {
+			parts := make([]string, len(st.DependsOn))
+			for j, dep := range st.DependsOn {
+				parts[j] = fmt.Sprintf("#%d", dep+1)
+			}
+
+			deps = strings.Join(parts, ", ")
+		}
+
+		fmt.Fprintf(&b, "### %d. %s\n", i+1, st.Title)
+		fmt.Fprintf(&b, "_Tier: %s · Depends on: %s_\n", st.Tier, deps)
+
+		if body := strings.TrimSpace(st.Description); body != "" {
+			b.WriteString("\n")
+			b.WriteString(body)
+			b.WriteString("\n")
+		}
+
+		b.WriteString("\n")
+	}
+
+	return strings.TrimRight(b.String(), "\n")
+}
+
 // upsertSection replaces the "## <heading>" block in body (from that heading to
 // the next "## " heading, or the end of the body) with section, or appends
 // section when the heading is absent. section must be the complete block,

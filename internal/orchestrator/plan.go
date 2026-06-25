@@ -14,11 +14,16 @@ import (
 
 // validTiers is the closed set of complexity tiers the planner may emit, for
 // both the overall card and each subtask. It drives reviewer selection later.
-var validTiers = map[string]bool{"simple": true, "moderate": true, "complex": true}
+var validTiers = map[string]bool{"simple": true, "moderate": true, "complex": true, "critical": true}
 
 // maxSubtasks caps a single plan; a runaway decomposition is a planning bug,
 // not a valid plan.
 const maxSubtasks = 20
+
+// maxPlanDrafts bounds the HITL plan-approval re-draft loop: a human who keeps
+// adjusting can iterate, but a runaway never spins forever (they end a run via
+// end_session). The cap is generous; reaching it is an error.
+const maxPlanDrafts = 10
 
 // planSubtask is one decomposed unit of work in the planner's JSON output.
 type planSubtask struct {
@@ -65,7 +70,7 @@ func parsePlan(s string) (plan, error) {
 	}
 
 	if !validTiers[p.CardTier] {
-		return plan{}, fmt.Errorf("invalid card_tier %q (want simple|moderate|complex)", p.CardTier)
+		return plan{}, fmt.Errorf("invalid card_tier %q (want simple|moderate|complex|critical)", p.CardTier)
 	}
 
 	if len(p.Subtasks) == 0 {
@@ -82,7 +87,7 @@ func parsePlan(s string) (plan, error) {
 		}
 
 		if !validTiers[st.Tier] {
-			return plan{}, fmt.Errorf("subtask %d has invalid tier %q (want simple|moderate|complex)", i, st.Tier)
+			return plan{}, fmt.Errorf("subtask %d has invalid tier %q (want simple|moderate|complex|critical)", i, st.Tier)
 		}
 
 		for _, dep := range st.DependsOn {
@@ -305,6 +310,67 @@ func (o *run) runDiagnose(ctx context.Context, model string) (string, error) {
 	return strings.TrimSpace(res.Output), nil
 }
 
+// draftPlan runs the read-only planner (initial attempt + at most one repair
+// turn) and returns the parsed plan. diagnosis grounds bug-like cards; design
+// carries the brainstormed agreed design for creative HITL cards; feedback
+// carries a HITL reviewer's requested changes on a re-draft; all collapse to
+// nothing when empty. The budget ledger is checked before every model call and
+// every call's usage is spent + reported.
+func (o *run) draftPlan(ctx context.Context, model, diagnosis, design, feedback string) (plan, error) {
+	d := o.d
+	cfg := d.Cfg
+
+	var existingTitles []string
+	for _, sub := range o.subtasks {
+		existingTitles = append(existingTitles, sub.Title)
+	}
+
+	resume := resumeBlock(existingTitles)
+	diagBlock := diagnosisBlock(diagnosis)
+	dsnBlock := designBlock(design)
+	fbBlock := feedbackBlock(feedback)
+
+	var (
+		p       plan
+		lastErr error
+	)
+
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := o.ledger.Check(); err != nil {
+			return plan{}, err
+		}
+
+		repair := ""
+		if attempt > 0 {
+			repair = repairBlock(lastErr.Error())
+		}
+
+		task := fmt.Sprintf(planPrompt, o.tc.Title, o.tc.Description, diagBlock, dsnBlock, resume, fbBlock, repair)
+
+		res, err := o.runModel(ctx, d.ReadTools, task, model)
+
+		o.ledger.Spend(res.TotalCostUSD)
+
+		if reportErr := d.Ops.ReportUsage(ctx, cfg.CardID, res.ModelUsed,
+			res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
+			slog.Warn("plan: report usage failed", "card_id", cfg.CardID, "error", reportErr)
+		}
+
+		if err != nil {
+			return plan{}, fmt.Errorf("planner run: %w", err)
+		}
+
+		p, lastErr = parsePlan(res.Output)
+		if lastErr == nil {
+			return p, nil
+		}
+
+		slog.Warn("plan: parse failed", "card_id", cfg.CardID, "attempt", attempt, "error", lastErr)
+	}
+
+	return plan{}, fmt.Errorf("plan parse failed after repair: %w", lastErr)
+}
+
 // runPlan is the plan phase: one read-only planner run on the
 // orchestrator-resolved model that emits a strict JSON plan, then code creates
 // a subtask card per entry with dependency edges mapped to real card IDs.
@@ -320,6 +386,21 @@ func runPlan(ctx context.Context, o *run) error {
 		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel)
 
 	_ = d.Ops.AddLog(ctx, cfg.CardID, "orchestrator model: "+model) //nolint:errcheck // advisory selection record
+
+	// Creative HITL cards get a design dialogue before planning (create-plan
+	// Phase 0 Branch C). Skipped in autonomous, for non-creative cards, and when
+	// a design already exists. Branch C and the bug Branch B are mutually
+	// exclusive (isCreative excludes bug-like cards).
+	design := ""
+
+	if cfg.Interactive && isCreative(o.tc) && !hasDesignSection(o.body) {
+		d, err := o.runBrainstorm(ctx, model)
+		if err != nil {
+			return err
+		}
+
+		design = d
+	}
 
 	// Bug-like cards get a read-only root-cause investigation before planning
 	// (mirrors the runner's create-plan Phase 0 Branch B). The diagnosis grounds
@@ -346,63 +427,48 @@ func runPlan(ctx context.Context, o *run) error {
 		}
 	}
 
-	// Resume: surface any existing subtasks so the planner reuses their titles.
-	// The list is the RECONCILED set (reconcile loaded it from SubtaskStates
-	// before the phase loop); runPlan does not re-query the server. On a fresh
-	// run o.subtasks is empty, yielding an empty resume block.
-	var existingTitles []string
-	for _, sub := range o.subtasks {
-		existingTitles = append(existingTitles, sub.Title)
-	}
-
-	resume := resumeBlock(existingTitles)
-	diagBlock := diagnosisBlock(diagnosis)
-
-	var (
-		p       plan
-		lastErr error
-	)
-
-	// Initial attempt + at most one repair turn.
-	for attempt := 0; attempt < 2; attempt++ {
-		if err := o.ledger.Check(); err != nil {
+	// Autonomous: draft once and create the subtasks, exactly as before.
+	if !cfg.Interactive {
+		p, err := o.draftPlan(ctx, model, diagnosis, "", "")
+		if err != nil {
 			return err
 		}
 
-		repair := ""
-		if attempt > 0 {
-			repair = repairBlock(lastErr.Error())
-		}
+		return o.createSubtasks(ctx, p)
+	}
 
-		task := fmt.Sprintf(planPrompt, o.tc.Title, o.tc.Description, diagBlock, resume, repair)
+	// HITL: draft -> present -> gate; on adjust, re-draft with the feedback.
+	// Subtasks are created only after approval, so an adjust never orphans cards.
+	feedback := ""
 
-		res, err := o.runModel(ctx, d.ReadTools, task, model)
-
-		// Account for spend even on transport error / partial run.
-		o.ledger.Spend(res.TotalCostUSD)
-
-		if reportErr := d.Ops.ReportUsage(ctx, cfg.CardID, res.ModelUsed,
-			res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
-			slog.Warn("plan: report usage failed", "card_id", cfg.CardID, "error", reportErr)
-		}
-
+	for draft := 0; draft < maxPlanDrafts; draft++ {
+		p, err := o.draftPlan(ctx, model, diagnosis, design, feedback)
 		if err != nil {
-			return fmt.Errorf("planner run: %w", err)
+			return err
 		}
 
-		p, lastErr = parsePlan(res.Output)
-		if lastErr == nil {
-			break
+		o.recordSection(ctx, "Plan", sectionFrom("Plan", formatPlannedPlan(p)))
+
+		outcome, fb, gerr := o.gate(ctx, gatePlanApproval, model, presentPlan(p))
+		if gerr != nil {
+			return gerr
 		}
 
-		slog.Warn("plan: parse failed", "card_id", cfg.CardID, "attempt", attempt, "error", lastErr)
+		if outcome == gateApprove {
+			return o.createSubtasks(ctx, p)
+		}
+
+		feedback = fb
 	}
 
-	if lastErr != nil {
-		return fmt.Errorf("plan parse failed after repair: %w", lastErr)
-	}
+	return fmt.Errorf("plan approval did not converge after %d drafts", maxPlanDrafts)
+}
 
-	return o.createSubtasks(ctx, p)
+// presentPlan is the chat message for the plan-approval gate: the planned
+// decomposition plus the ask. The full plan is also on the card body.
+func presentPlan(p plan) string {
+	return "I've drafted the following plan:\n\n" + formatPlannedPlan(p) +
+		"\n\nApprove to start execution, or tell me what you'd like to adjust."
 }
 
 // createSubtasks creates one card per plan subtask in order, mapping each

@@ -3,6 +3,8 @@ package cmclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -12,6 +14,22 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestClassifyReleaseError(t *testing.T) {
+	require.NoError(t, classifyReleaseError(nil))
+
+	// CM surfaces the lock manager's "card is not claimed" text on a redundant
+	// release; classifyReleaseError maps it to the typed sentinel.
+	notClaimed := fmt.Errorf("call release_card: release card CARD-1: release card: %s", ErrCardNotClaimed.Error())
+	got := classifyReleaseError(notClaimed)
+	require.ErrorIs(t, got, ErrCardNotClaimed)
+	assert.Contains(t, got.Error(), "CARD-1", "original message is preserved in the chain")
+
+	other := errors.New("call release_card: connection refused")
+	got2 := classifyReleaseError(other)
+	require.NotErrorIs(t, got2, ErrCardNotClaimed, "unrelated errors are not the sentinel")
+	assert.Equal(t, other, got2, "unrelated errors pass through unchanged")
+}
 
 const testAgentID = "cmx-agent-cmx-001"
 
@@ -187,6 +205,7 @@ func startStubServer(t *testing.T, rec *recorder, failTool string) *httptest.Ser
 	addStub(server, rec, "increment_review_attempts", incrementReviewAttemptsPayload, failTool == "increment_review_attempts")
 	addStub(server, rec, "list_cards", listCardsSubtaskPayload, failTool == "list_cards", "project")
 	addStub(server, rec, "add_log", `{"id":"CMX-001","state":"in_progress"}`, failTool == "add_log")
+	addStub(server, rec, "report_incapable_model", `{"ok": true}`, failTool == "report_incapable_model")
 
 	return serveBearer(t, server)
 }
@@ -581,6 +600,30 @@ func TestAddLog_IsError(t *testing.T) {
 	err := c.AddLog(context.Background(), "CMX-001", "progress update")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "stub failure: add_log")
+}
+
+func TestBlacklistModel(t *testing.T) {
+	rec := newRecorder()
+	c := newTestClient(t, rec, "")
+
+	require.NoError(t, c.BlacklistModel(context.Background(), "CARD-1", "bad/model", "cannot drive the tool loop"))
+
+	args, ok := rec.get("report_incapable_model")
+	require.True(t, ok, "report_incapable_model stub should have been called")
+	assert.Equal(t, "bad/model", args["model_slug"])
+	assert.Equal(t, "cannot drive the tool loop", args["reason"])
+	assert.Equal(t, "CARD-1", args["sample_card_id"])
+	// agent_id is injected by c.call — must match the client's configured identity.
+	assert.Equal(t, testAgentID, args["agent_id"])
+}
+
+func TestBlacklistModel_IsError(t *testing.T) {
+	rec := newRecorder()
+	c := newTestClient(t, rec, "report_incapable_model")
+
+	err := c.BlacklistModel(context.Background(), "CARD-1", "bad/model", "cannot drive the tool loop")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "stub failure: report_incapable_model")
 }
 
 // --- existing edge-case tests ---

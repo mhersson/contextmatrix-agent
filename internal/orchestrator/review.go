@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -83,6 +84,14 @@ func runReview(ctx context.Context, o *run) error {
 		}
 	}
 
+	verifyCmd := detectVerifyCommand(cfg.Workspace)
+
+	if cfg.Interactive {
+		return o.runReviewHITL(ctx, verifyCmd)
+	}
+
+	// ===== autonomous loop (UNCHANGED below this line) =====
+
 	// Guard a mis-wired worker: a zero or negative cap would make the cliff trip
 	// on the FIRST round and park (via the authoritative pass) every card
 	// immediately. Fall back to CM's convention instead.
@@ -90,8 +99,6 @@ func runReview(ctx context.Context, o *run) error {
 	if attemptsCap <= 0 {
 		attemptsCap = defaultReviewAttemptsCap
 	}
-
-	verifyCmd := detectVerifyCommand(cfg.Workspace)
 
 	for iter := 0; iter < hardReviewIterationCap; iter++ {
 		// Round number continues across resumes: review_attempts persists the
@@ -134,6 +141,77 @@ func runReview(ctx context.Context, o *run) error {
 	}
 
 	return fmt.Errorf("review exceeded the hard iteration cap of %d", hardReviewIterationCap)
+}
+
+// runReviewHITL is the HITL review loop: each round produces specialist findings
+// (verify gate + 3 specialists + synthesis), records them, and presents them to
+// the human, who decides. Approve -> proceed to integrate; adjust -> apply the
+// findings plus the human's feedback as a fix, then re-review. The human is the
+// decision-maker, so there is no authoritative pass or auto-park; the hard
+// iteration cap is only a runaway guard.
+func (o *run) runReviewHITL(ctx context.Context, verifyCmd []string) error {
+	d := o.d
+	cfg := d.Cfg
+
+	model := resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
+		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel)
+
+	for iter := 0; iter < hardReviewIterationCap; iter++ {
+		round := o.tc.ReviewAttempts + iter + 1
+
+		findings, fixTier, autoApproved, err := o.reviewRound(ctx, verifyCmd, false)
+		if err != nil {
+			return err
+		}
+
+		o.recordReview(ctx, round, findings, autoApproved)
+
+		outcome, fb, gerr := o.gate(ctx, gateReviewDecision, model, presentFindings(findings, autoApproved))
+		if gerr != nil {
+			return gerr
+		}
+
+		if outcome == gateApprove {
+			o.reviewSummary = findings
+
+			return nil
+		}
+
+		o.lastFindings = findings
+
+		if _, err := d.Ops.IncrementReviewAttempts(ctx, cfg.CardID); err != nil {
+			return fmt.Errorf("increment review attempts: %w", err)
+		}
+
+		if err := o.runFix(ctx, mergeFeedback(findings, fb), round, fixTier, false); err != nil {
+			return err
+		}
+	}
+
+	return fmt.Errorf("HITL review exceeded the hard iteration cap of %d", hardReviewIterationCap)
+}
+
+// presentFindings is the chat message for the review-decision gate: the
+// synthesized findings plus the automated recommendation (advisory; the human
+// decides).
+func presentFindings(findings string, autoApproved bool) string {
+	rec := "revise"
+	if autoApproved {
+		rec = "approve"
+	}
+
+	return "Review findings (automated recommendation: " + rec + "):\n\n" + findings +
+		"\n\nApprove to integrate, or tell me what you'd like changed."
+}
+
+// mergeFeedback folds the human's adjust feedback into the synthesized findings
+// fed to the fix coder, so the fix run addresses both.
+func mergeFeedback(findings, feedback string) string {
+	if strings.TrimSpace(feedback) == "" {
+		return findings
+	}
+
+	return findings + "\n\nADDITIONAL HUMAN FEEDBACK:\n" + feedback
 }
 
 // authoritativeReview is the gated strong pass run at the review cliff instead of
@@ -379,8 +457,27 @@ func (o *run) reviewPanel(estTokens int, authoritative bool) []registry.ModelSpe
 		Role:      registry.RoleReviewer,
 		Tier:      tier,
 		EstTokens: estTokens,
-		Exclude:   o.coderModels,
+		// Exclude both the models that coded this run (a model must not review its
+		// own work) and any model proven harness-incapable this run (recoverIncapable
+		// records it). Merged so neither set masks the other.
+		Exclude: o.reviewExclusions(),
 	}, reviewPanelSize)
+}
+
+// reviewExclusions is the union of the coder models (a model must not review its
+// own code) and the per-card incapable set (models that could not drive the tool
+// loop). Both feed the review panel's diversity Exclude so neither is re-picked.
+func (o *run) reviewExclusions() map[string]bool {
+	excl := make(map[string]bool, len(o.coderModels)+len(o.excluded))
+	for m := range o.coderModels {
+		excl[m] = true
+	}
+
+	for m := range o.excluded {
+		excl[m] = true
+	}
+
+	return excl
 }
 
 // synthesize runs ONE orchestrator-model call that reads the three specialists'
@@ -441,6 +538,59 @@ func (o *run) synthesize(ctx context.Context, findings string, authoritative boo
 	return verdict{}, fmt.Errorf("verdict parse failed after repair: %w", lastErr)
 }
 
+// runFixModel runs the fix coder harness with the same in-run incapable recovery
+// as the subtask coder: it resolves the fix model (skipping the per-card exclude
+// set), logs the pick, runs, and accounts for spend each attempt. An incapable
+// model is blacklisted/excluded via recoverIncapable and the next-best fix model
+// re-selected for the SAME round; the cap (shared with the coder path via
+// o.reselects) parks the run when exhausted. A non-incapable run error returns
+// immediately. The successful run's output is consumed inside the harness loop
+// (the fixup targets files parsed from the findings, not the model output), so
+// only the error is returned.
+func (o *run) runFixModel(ctx context.Context, prompt string, round int, fixTier string, authoritative bool) error {
+	d := o.d
+	cfg := d.Cfg
+
+	for attempt := 0; attempt <= reselectCap; attempt++ {
+		model := o.resolveFixModel(fixTier, authoritative)
+
+		_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory selection record
+			fmt.Sprintf("fix coder %s selected for round %d fixes (tier=%s)", model, round, o.fixTierFor(fixTier, authoritative)))
+
+		res, err := o.runModel(ctx, d.WriteTools, prompt, model)
+
+		o.ledger.Spend(res.TotalCostUSD)
+
+		used := res.ModelUsed
+		if used == "" {
+			used = model
+		}
+
+		if reportErr := d.Ops.ReportUsage(ctx, cfg.CardID, used,
+			res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
+			slog.Warn("review: report fix usage failed", "card_id", cfg.CardID, "error", reportErr)
+		}
+
+		var ie *IncapableError
+		if errors.As(err, &ie) {
+			if rerr := o.recoverIncapable(ctx, ie); rerr != nil {
+				return rerr
+			}
+
+			continue
+		}
+
+		if err != nil {
+			return fmt.Errorf("review fix run: %w", err)
+		}
+
+		return nil
+	}
+
+	// Unreachable: recoverIncapable errors at the cap before the loop exhausts.
+	return fmt.Errorf("review fix (card=%s): re-selection loop exhausted", o.d.Cfg.CardID)
+}
+
 // runFix runs one coder fix pass against the outstanding findings, lands the
 // changes as a fixup onto the commit that last touched the fixed files (HEAD
 // fallback), and pushes. Budget is checked before the model call.
@@ -452,29 +602,10 @@ func (o *run) runFix(ctx context.Context, findings string, round int, fixTier st
 		return err
 	}
 
-	model := o.resolveFixModel(fixTier, authoritative)
-
-	_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory selection record
-		fmt.Sprintf("fix coder %s selected for round %d fixes (tier=%s)", model, round, o.fixTierFor(fixTier, authoritative)))
-
 	prompt := fmt.Sprintf(fixPrompt, o.tc.Title, o.tc.Description, findings)
 
-	res, err := o.runModel(ctx, d.WriteTools, prompt, model)
-
-	o.ledger.Spend(res.TotalCostUSD)
-
-	used := res.ModelUsed
-	if used == "" {
-		used = model
-	}
-
-	if reportErr := d.Ops.ReportUsage(ctx, cfg.CardID, used,
-		res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
-		slog.Warn("review: report fix usage failed", "card_id", cfg.CardID, "error", reportErr)
-	}
-
-	if err != nil {
-		return fmt.Errorf("review fix run: %w", err)
+	if err := o.runFixModel(ctx, prompt, round, fixTier, authoritative); err != nil {
+		return err
 	}
 
 	// Target the commit that last touched the fixed files so the fixup autosquashes
@@ -504,12 +635,17 @@ func (o *run) runFix(ctx context.Context, findings string, round int, fixTier st
 // fix tier (the synthesizer's fix_tier, falling back to the card tier).
 func (o *run) resolveFixModel(fixTier string, authoritative bool) string {
 	if resolvePin(o.d.Registry, o.tc.ModelCoder) {
+		// A pinned model is returned even if it is in o.excluded: we never override
+		// an explicit operator pin with an auto-selected substitute. A pinned model
+		// that is harness-incapable therefore keeps being re-selected, exhausts the
+		// re-selection cap, and parks — the blacklist still records it.
 		return o.tc.ModelCoder
 	}
 
 	spec := o.d.Registry.SelectByComplexity(registry.SelectInput{
-		Role: registry.RoleCoder,
-		Tier: o.fixTierFor(fixTier, authoritative),
+		Role:    registry.RoleCoder,
+		Tier:    o.fixTierFor(fixTier, authoritative),
+		Exclude: o.excluded,
 	})
 
 	return spec.Model
@@ -732,6 +868,8 @@ func tierFromString(tier string) registry.Tier {
 		return registry.TierSimple
 	case "complex":
 		return registry.TierComplex
+	case "critical":
+		return registry.TierCritical
 	default:
 		return registry.TierModerate
 	}

@@ -291,6 +291,7 @@ func TestExecuteCalledFromExecuteDriver(t *testing.T) {
 	// Stub the phase bodies so the driver only exercises reconcile + persistence.
 	o.planFn = func(context.Context) error { return nil }
 	o.executeFn = func(context.Context) error { return nil }
+	o.documentFn = func(context.Context) error { return nil }
 	o.reviewFn = func(context.Context) error { return nil }
 	o.integrateFn = func(context.Context) error { return nil }
 	o.doneFn = func(context.Context) error { return nil }

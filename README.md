@@ -44,8 +44,8 @@ Launches one Docker worker     claims the card, then drives either:
 container per card. Mints       • HITL: the bare harness loop (stdin
 GitHub tokens, stages the         injects human turns), or
 shared secrets env file,        • autonomous: the orchestrator FSM
-streams /logs, drains on          (plan → execute → review → integrate
-SIGTERM.                          → done).
+streams /logs, drains on          (plan → execute → document →
+SIGTERM.                          review → integrate → done).
         │                                    │
         │ launches ▼                         │ reports over MCP ▼
         └──────────── Docker container ──────┴────────────► ContextMatrix

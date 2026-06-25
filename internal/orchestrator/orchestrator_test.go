@@ -195,6 +195,37 @@ func TestRunContextLimitParks(t *testing.T) {
 	assert.Equal(t, -1, indexOfCall(calls, "SetPhase:execute"))
 }
 
+func TestPhaseOrderPlacesDocumentBetweenExecuteAndReview(t *testing.T) {
+	assert.Equal(t, []string{"plan", "execute", "document", "review", "integrate", "done"}, phaseOrder)
+}
+
+func TestRunWalksDocumentBetweenExecuteAndReview(t *testing.T) {
+	ops := &fakeOps{taskContext: cmclient.TaskContext{CardID: "CARD-1"}}
+	d := Deps{Ops: ops, Git: &fakeGit{}, Cfg: Config{CardID: "CARD-1"}}
+	o := newRun(d, ops.taskContext)
+
+	var order []string
+
+	mk := func(name string) phaseFn {
+		return func(context.Context) error {
+			order = append(order, name)
+
+			return nil
+		}
+	}
+
+	o.planFn = mk("plan")
+	o.executeFn = mk("execute")
+	o.documentFn = mk("document")
+	o.reviewFn = mk("review")
+	o.integrateFn = mk("integrate")
+	o.doneFn = mk("done")
+
+	require.NoError(t, o.execute(context.Background()))
+	assert.Equal(t, []string{"plan", "execute", "document", "review", "integrate", "done"}, order,
+		"document runs immediately after execute and before review")
+}
+
 func TestRunSeedsLedgerFromReportedCost(t *testing.T) {
 	ops := &fakeOps{
 		taskContext: cmclient.TaskContext{CardID: "CARD-1", ReportedCostUSD: 0.90},

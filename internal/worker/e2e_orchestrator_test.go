@@ -22,7 +22,7 @@ import (
 )
 
 // This file drives the REAL autonomous orchestrator FSM end-to-end in-process:
-// plan -> execute -> review -> integrate -> done. The only stubbed boundaries
+// plan -> execute -> document -> review -> integrate -> done. The only stubbed boundaries
 // are OpenRouter (a content-aware httptest SSE server) and the CM card-ops
 // surface (an in-process recorder satisfying both worker.CardOps and the wider
 // orchestrator.Ops). Git is REAL — a temp clone against a local bare origin —
@@ -56,6 +56,7 @@ type scriptedBackend struct {
 
 	planCost       float64
 	coderCost      float64
+	documentCost   float64
 	specialistCost float64
 	synthesisCost  float64
 	fixCost        float64
@@ -159,6 +160,15 @@ func (b *scriptedBackend) reply(req chatRequest) string {
 		}
 
 		return sseWriteTool("call_fix", writeArg(b.fixFile, "package main\n\n// fixed per review\n"), 0)
+
+	case strings.Contains(firstUser, "You are the documentation agent"):
+		// Conservative no-op: the agent writes nothing (no tool call), so the tree
+		// stays clean and the phase commits/pushes nothing — the common case for a
+		// change that needs no external docs. It still reports a costed usage so the
+		// ledger/usage assertions account for the document model call.
+		b.totalCost += b.documentCost
+
+		return sseStop("No external documentation is needed for this change.", b.documentCost)
 
 	case strings.Contains(firstUser, "You are writing the pull request description"):
 		// Only reached when CreatePR is set; the tests keep it off, so this is a
@@ -472,6 +482,12 @@ func (s *stubOps) ReportPush(_ context.Context, cardID, branch, prURL string) er
 	return nil
 }
 
+func (s *stubOps) BlacklistModel(_ context.Context, cardID, model, reason string) error {
+	s.record("BlacklistModel", cardID, model, reason)
+
+	return nil
+}
+
 func (s *stubOps) CompleteTask(_ context.Context, cardID, _ string) error {
 	s.record("CompleteTask", cardID)
 
@@ -593,6 +609,7 @@ func TestOrchestratorEndToEndHappyPath(t *testing.T) {
 		approveImmediately: true,
 		planCost:           0.0100,
 		coderCost:          0.0200,
+		documentCost:       0.0030,
 		specialistCost:     0.0050,
 		synthesisCost:      0.0100,
 	}
@@ -603,8 +620,8 @@ func TestOrchestratorEndToEndHappyPath(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "completed", res.Reason)
 
-	// --- phase order: plan, execute, review, integrate, done, in order -----
-	assert.Equal(t, []string{"plan", "execute", "review", "integrate", "done"}, ops.phases,
+	// --- phase order: plan, execute, document, review, integrate, done, in order -----
+	assert.Equal(t, []string{"plan", "execute", "document", "review", "integrate", "done"}, ops.phases,
 		"phases must be persisted in forward order exactly once each")
 
 	// --- subtask wiring: two create_card calls with parent + the dep edge ---
@@ -666,8 +683,9 @@ func TestOrchestratorEndToEndHappyPath(t *testing.T) {
 	assert.InDelta(t, emitted, reported, 1e-9,
 		"the scripted usage costs must sum to the total reported through report_usage")
 
-	// Expected spend: plan + 2 coders + 3 specialists + 1 synthesis.
-	expected := backend.planCost + 2*backend.coderCost + 3*backend.specialistCost + backend.synthesisCost
+	// Expected spend: plan + 2 coders + 1 document + 3 specialists + 1 synthesis.
+	expected := backend.planCost + 2*backend.coderCost + backend.documentCost +
+		3*backend.specialistCost + backend.synthesisCost
 	assert.InDelta(t, expected, reported, 1e-9, "the total reported cost matches the scripted script")
 }
 
@@ -699,6 +717,7 @@ func TestOrchestratorEndToEndFixLoop(t *testing.T) {
 		fixFile:            "feature_b.txt",
 		planCost:           0.0100,
 		coderCost:          0.0200,
+		documentCost:       0.0030,
 		specialistCost:     0.0050,
 		synthesisCost:      0.0100,
 		fixCost:            0.0150,
@@ -720,7 +739,7 @@ func TestOrchestratorEndToEndFixLoop(t *testing.T) {
 		"the single rejection increments review attempts once")
 
 	// The run still reached integrate and done.
-	assert.Equal(t, []string{"plan", "execute", "review", "integrate", "done"}, ops.phases)
+	assert.Equal(t, []string{"plan", "execute", "document", "review", "integrate", "done"}, ops.phases)
 	assert.Equal(t, 1, ops.count("TransitionCard"), "parent transitions to done")
 
 	// --- origin's integrated history is autosquashed: NO fixup! subjects ----
@@ -768,8 +787,8 @@ func TestOrchestratorEndToEndFixLoop(t *testing.T) {
 
 	assert.InDelta(t, emitted, reported, 1e-9, "ledger: scripted costs sum to the reported total")
 
-	// plan + 2 coders + (specialists+synthesis) x2 rounds + 1 fix run.
-	expected := backend.planCost + 2*backend.coderCost +
+	// plan + 2 coders + 1 document + (specialists+synthesis) x2 rounds + 1 fix run.
+	expected := backend.planCost + 2*backend.coderCost + backend.documentCost +
 		2*(3*backend.specialistCost+backend.synthesisCost) + backend.fixCost
 	assert.InDelta(t, expected, reported, 1e-9, "the fix-loop total matches the scripted script")
 

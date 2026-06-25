@@ -1,8 +1,0 @@
-package dedup
-
-// Dedup returns xs with duplicate ints removed, preserving first-seen order.
-// Implement it so the tests pass.
-func Dedup(xs []int) []int {
-	// TODO: implement
-	return xs
-}

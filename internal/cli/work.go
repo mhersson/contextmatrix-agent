@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -15,6 +16,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/llm"
 	"github.com/mhersson/contextmatrix-agent/internal/secrets"
 	"github.com/mhersson/contextmatrix-agent/internal/worker"
+	protocol "github.com/mhersson/contextmatrix-protocol"
 	"github.com/spf13/cobra"
 )
 
@@ -147,6 +149,18 @@ func specFromEnv() (worker.RunSpec, error) {
 		workspace = "/home/user/workspace"
 	}
 
+	var selection *protocol.SelectionContext
+
+	if raw := os.Getenv("CMX_SELECTION"); raw != "" {
+		var sc protocol.SelectionContext
+		if err := json.Unmarshal([]byte(raw), &sc); err != nil {
+			slog.Warn("CMX_SELECTION parse failed; will use default model",
+				"card_id", cardID, "project", project, "error", err)
+		} else {
+			selection = &sc
+		}
+	}
+
 	spec := worker.RunSpec{
 		CardID:                cardID,
 		Project:               project,
@@ -165,6 +179,7 @@ func specFromEnv() (worker.RunSpec, error) {
 		SelectorPriceHeadroom: selectorPriceHeadroom,
 		DefaultModel:          defaultModel,
 		Workspace:             workspace,
+		Selection:             selection,
 	}
 
 	return spec, nil

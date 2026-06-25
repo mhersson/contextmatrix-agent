@@ -13,7 +13,6 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/events"
 	"github.com/mhersson/contextmatrix-agent/internal/harness"
 	"github.com/mhersson/contextmatrix-agent/internal/llm"
-	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-agent/internal/tools"
 	"github.com/spf13/cobra"
 )
@@ -214,18 +213,19 @@ func commandCheck(root, command string) harness.Check {
 
 // resolveWindow best-effort fetches the catalog and returns model's context
 // window (0 if unavailable, which disables context-limit detection).
+// run uses the pinned --model directly; no registry or complexity selection.
 func resolveWindow(ctx context.Context, client *llm.Client, model string) int {
 	cat, err := client.FetchCatalog(ctx)
 	if err != nil {
 		return 0
 	}
 
-	spec, err := registry.NewRegistry(nil, model, cat).Resolve("", registry.RoleCoder)
-	if err != nil {
+	e, ok := cat.Find(model)
+	if !ok {
 		return 0
 	}
 
-	return spec.ContextWindow
+	return e.ContextLength
 }
 
 func routingRaw(c config.Config) (json.RawMessage, json.RawMessage) {

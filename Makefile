@@ -1,4 +1,4 @@
-.PHONY: build test fmt lint eval docker-worker
+.PHONY: build test fmt lint docker-worker
 
 # Pinned worker toolchain versions. Override on the command line
 # if a newer version has been vetted, e.g.
@@ -19,8 +19,6 @@ fmt:
 	gofumpt -w .
 lint:
 	golangci-lint run
-eval:
-	go run ./cmd/contextmatrix-agent eval --role all --dry-run
 docker-worker: ## Build the worker image
 	docker build \
 		-f docker/Dockerfile.worker \

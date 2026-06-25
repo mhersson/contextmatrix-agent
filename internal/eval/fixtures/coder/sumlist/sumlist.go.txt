@@ -1,7 +1,0 @@
-package sumlist
-
-// Sum returns the sum of xs. Implement it so the tests pass.
-func Sum(xs []int) int {
-	// TODO: implement
-	return -1
-}

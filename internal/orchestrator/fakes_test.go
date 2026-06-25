@@ -12,6 +12,7 @@ import (
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/events"
+	"github.com/mhersson/contextmatrix-agent/internal/harness"
 	"github.com/mhersson/contextmatrix-agent/internal/llm"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-agent/internal/tools"
@@ -220,6 +221,12 @@ func (f *fakeOps) ReportPush(_ context.Context, cardID, branch, prURL string) er
 	f.mu.Unlock()
 
 	f.record("ReportPush:" + cardID)
+
+	return nil
+}
+
+func (f *fakeOps) BlacklistModel(_ context.Context, cardID, model, reason string) error {
+	f.record(fmt.Sprintf("BlacklistModel:%s/%s", cardID, model))
 
 	return nil
 }
@@ -523,3 +530,48 @@ func planTestDeps(ops *fakeOps, client llm.LLM) Deps {
 		},
 	}
 }
+
+// fakeInbox is a scripted harness.Inbox for the HITL orchestrator tests. It
+// returns queued messages in order; once they are exhausted it either blocks
+// until ctx is done (block=true, simulating end_session) or returns
+// ErrInboxClosed (block=false, simulating a promote / pre-closed inbox).
+type fakeInbox struct {
+	mu    sync.Mutex
+	msgs  []harness.UserMessage
+	block bool
+	i     int
+}
+
+func (f *fakeInbox) Drain() []harness.UserMessage {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	out := f.msgs[f.i:]
+	f.i = len(f.msgs)
+
+	return out
+}
+
+func (f *fakeInbox) Wait(ctx context.Context) (harness.UserMessage, error) {
+	f.mu.Lock()
+	if f.i < len(f.msgs) {
+		m := f.msgs[f.i]
+		f.i++
+		f.mu.Unlock()
+
+		return m, nil
+	}
+
+	block := f.block
+	f.mu.Unlock()
+
+	if block {
+		<-ctx.Done()
+
+		return harness.UserMessage{}, ctx.Err()
+	}
+
+	return harness.UserMessage{}, harness.ErrInboxClosed
+}
+
+var _ harness.Inbox = (*fakeInbox)(nil)
