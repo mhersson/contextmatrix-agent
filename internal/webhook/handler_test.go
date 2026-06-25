@@ -808,6 +808,77 @@ func TestBuildLaunchSpec_BudgetEnvEmitted(t *testing.T) {
 	assert.Contains(t, spec.Env, "CMX_SELECTOR_PRICE_HEADROOM=1.5", "selector_price_headroom must appear")
 }
 
+// ---- task-skills threading --------------------------------------------------
+
+type fakeSkillsResolver struct {
+	dir string
+	err error
+}
+
+func (f fakeSkillsResolver) Resolve(context.Context) (string, error) { return f.dir, f.err }
+
+func newSkillsTestServer(resolver SkillsResolver) *Server {
+	return NewServer(Config{
+		APIKey:         "k",
+		Executor:       &fakeExecutor{},
+		Tracker:        executor.NewTracker(1),
+		SkillsResolver: resolver,
+		LaunchEnv:      LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"},
+	})
+}
+
+func sliceP(s ...string) *[]string { return &s }
+
+func TestBuildLaunchSpecThreadsSkillsSubset(t *testing.T) {
+	s := newSkillsTestServer(fakeSkillsResolver{dir: "/host/skills"})
+
+	spec := s.buildLaunchSpec(protocol.TriggerPayload{
+		CardID: "C1", Project: "p", TaskSkills: sliceP("go-development", "documentation"),
+	}, "corr", "/host/skills")
+
+	assert.Equal(t, "/host/skills", spec.SkillsHostDir)
+	assert.Contains(t, spec.Env, "CMX_TASK_SKILLS_DIR=/run/cm-skills")
+	assert.Contains(t, spec.Env, "CM_TASK_SKILLS_SET=1")
+	assert.Contains(t, spec.Env, "CM_TASK_SKILLS=go-development,documentation")
+}
+
+func TestBuildLaunchSpecNilSubsetOffersAll(t *testing.T) {
+	s := newSkillsTestServer(fakeSkillsResolver{dir: "/host/skills"})
+
+	spec := s.buildLaunchSpec(protocol.TriggerPayload{CardID: "C1", Project: "p"}, "corr", "/host/skills")
+
+	assert.Equal(t, "/host/skills", spec.SkillsHostDir)
+	assert.Contains(t, spec.Env, "CMX_TASK_SKILLS_DIR=/run/cm-skills")
+	for _, e := range spec.Env {
+		assert.NotEqual(t, "CM_TASK_SKILLS_SET=1", e, "nil subset must not set CM_TASK_SKILLS_SET")
+	}
+}
+
+func TestBuildLaunchSpecNoSkillsWhenDirEmpty(t *testing.T) {
+	s := newSkillsTestServer(fakeSkillsResolver{dir: "", err: errors.New("unreachable")})
+
+	spec := s.buildLaunchSpec(protocol.TriggerPayload{CardID: "C1", Project: "p", TaskSkills: sliceP("go-development")}, "corr", "")
+
+	assert.Empty(t, spec.SkillsHostDir)
+	for _, e := range spec.Env {
+		assert.NotContains(t, e, "CMX_TASK_SKILLS_DIR")
+		assert.NotContains(t, e, "CM_TASK_SKILLS")
+	}
+}
+
+func TestValidateTaskSkills(t *testing.T) {
+	require.NoError(t, validateTaskSkills(nil))
+	require.NoError(t, validateTaskSkills([]string{"go-development", "test-driven-development"}))
+	require.Error(t, validateTaskSkills([]string{"../etc"}), "path-ish names rejected")
+	require.Error(t, validateTaskSkills([]string{"UPPER"}), "uppercase rejected")
+
+	tooMany := make([]string, 65)
+	for i := range tooMany {
+		tooMany[i] = "a"
+	}
+	require.Error(t, validateTaskSkills(tooMany), "more than 64 entries rejected")
+}
+
 func TestBuildLaunchSpec_BudgetEnvOmittedWhenZero(t *testing.T) {
 	// When MaxCardCost and SelectorPriceHeadroom are zero, the CMX_* vars must
 	// be omitted so workers apply their own defaults.

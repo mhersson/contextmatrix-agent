@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,6 +30,11 @@ const (
 	// it on /trigger and threads it into the container as CM_CORRELATION_ID so
 	// runner and worker logs stitch to the same CM trace.
 	correlationHeader = "X-Correlation-ID"
+
+	// skillsMountPathEnv is the in-container path the executor mounts the skills
+	// dir at (must match executor.skillsMountPath). Passed to the worker as
+	// CMX_TASK_SKILLS_DIR.
+	skillsMountPathEnv = "/run/cm-skills"
 )
 
 // StatusReporter reports a task's runner-status transition back to
@@ -40,6 +48,13 @@ type StatusReporter interface {
 // a fake.
 type AutonomousVerifier interface {
 	VerifyAutonomous(ctx context.Context, project, cardID string) (bool, error)
+}
+
+// SkillsResolver resolves the host directory holding the task-skills the worker
+// container mounts. *taskskills.Resolver satisfies it; tests supply a fake.
+// Resolve is best-effort: a non-nil error means "no skills this run".
+type SkillsResolver interface {
+	Resolve(ctx context.Context) (hostDir string, err error)
 }
 
 // LaunchEnv carries the static, per-process inputs the handler folds together
@@ -92,11 +107,12 @@ type Config struct {
 	Skew          time.Duration
 	MaxConcurrent int
 
-	Executor executor.Executor
-	Tracker  *executor.Tracker
-	Hub      *logbridge.Hub
-	Reporter StatusReporter
-	Verifier AutonomousVerifier
+	Executor       executor.Executor
+	Tracker        *executor.Tracker
+	Hub            *logbridge.Hub
+	Reporter       StatusReporter
+	Verifier       AutonomousVerifier
+	SkillsResolver SkillsResolver
 
 	LaunchEnv LaunchEnv
 
@@ -120,11 +136,12 @@ type Server struct {
 	skew          time.Duration
 	maxConcurrent int
 
-	executor executor.Executor
-	tracker  *executor.Tracker
-	hub      *logbridge.Hub
-	reporter StatusReporter
-	verifier AutonomousVerifier
+	executor       executor.Executor
+	tracker        *executor.Tracker
+	hub            *logbridge.Hub
+	reporter       StatusReporter
+	verifier       AutonomousVerifier
+	skillsResolver SkillsResolver
 
 	launchEnv LaunchEnv
 
@@ -185,6 +202,7 @@ func NewServer(cfg Config) *Server {
 		hub:               cfg.Hub,
 		reporter:          cfg.Reporter,
 		verifier:          cfg.Verifier,
+		skillsResolver:    cfg.SkillsResolver,
 		launchEnv:         cfg.LaunchEnv,
 		replay:            replay,
 		dedup:             dedup,
@@ -248,8 +266,25 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if payload.TaskSkills != nil {
-		s.logger.Info("trigger task_skills ignored (not supported by agent backend)",
-			"project", payload.Project, "card_id", payload.CardID, "count", len(*payload.TaskSkills))
+		if err := validateTaskSkills(*payload.TaskSkills); err != nil {
+			s.logger.Warn("trigger rejected: invalid task_skills",
+				"project", payload.Project, "card_id", payload.CardID, "error", err)
+			writeError(w, http.StatusBadRequest, protocol.CodeInvalidField, "invalid task_skills")
+
+			return
+		}
+	}
+
+	// Resolve the skills dir best-effort: a failure means this run runs without
+	// skills (advisory), and the next trigger retries.
+	skillsDir := ""
+	if s.skillsResolver != nil {
+		if dir, err := s.skillsResolver.Resolve(r.Context()); err != nil {
+			s.logger.Warn("task-skills unavailable this run",
+				"project", payload.Project, "card_id", payload.CardID, "error", err)
+		} else {
+			skillsDir = dir
+		}
 	}
 
 	// Correlation ID travels in the X-Correlation-ID header (runner parity), not
@@ -260,7 +295,7 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 		correlationID = payload.CardID
 	}
 
-	spec := s.buildLaunchSpec(payload, correlationID)
+	spec := s.buildLaunchSpec(payload, correlationID, skillsDir)
 
 	// Respond 202 first, then launch asynchronously: /trigger must return fast,
 	// and the eventual outcome is carried by the running/failed status callback.
@@ -296,7 +331,7 @@ func (s *Server) launch(spec executor.LaunchSpec, project, cardID string) {
 // into a fully-resolved executor.LaunchSpec. The image override, repo URL, and
 // base branch come from the payload; the CM_*/CMX_* env contract is assembled
 // here.
-func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID string) executor.LaunchSpec {
+func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skillsDir string) executor.LaunchSpec {
 	image := s.launchEnv.BaseImage
 	if p.RunnerImage != "" {
 		image = p.RunnerImage
@@ -348,6 +383,15 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID string
 		}
 	}
 
+	if skillsDir != "" {
+		env = append(env, "CMX_TASK_SKILLS_DIR="+skillsMountPathEnv)
+
+		if p.TaskSkills != nil {
+			env = append(env, "CM_TASK_SKILLS_SET=1")
+			env = append(env, "CM_TASK_SKILLS="+strings.Join(*p.TaskSkills, ","))
+		}
+	}
+
 	env = append(env, s.launchEnv.WorkerExtraEnv...)
 
 	return executor.LaunchSpec{
@@ -356,6 +400,7 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID string
 		Image:          image,
 		Env:            env,
 		SecretsHostDir: s.launchEnv.SecretsHostDir,
+		SkillsHostDir:  skillsDir,
 		MemoryBytes:    s.launchEnv.MemoryBytes,
 		PidsLimit:      s.launchEnv.PidsLimit,
 		CorrelationID:  correlationID,
@@ -690,4 +735,25 @@ func boolEnv(b bool) string {
 // 'f' and -1 precision does this correctly.
 func formatFloat(f float64) string {
 	return strconv.FormatFloat(f, 'f', -1, 64)
+}
+
+const maxTaskSkills = 64
+
+var taskSkillNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
+
+// validateTaskSkills mirrors the runner's ValidateTaskSkills: at most 64 entries,
+// each a safe skill name. CM validates too, so this is a should-never-happen
+// guard against a malformed payload.
+func validateTaskSkills(skills []string) error {
+	if len(skills) > maxTaskSkills {
+		return fmt.Errorf("too many task_skills: %d > %d", len(skills), maxTaskSkills)
+	}
+
+	for _, s := range skills {
+		if !taskSkillNamePattern.MatchString(s) {
+			return fmt.Errorf("invalid task_skill name %q", s)
+		}
+	}
+
+	return nil
 }
