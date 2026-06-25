@@ -1,4 +1,4 @@
-.PHONY: build test fmt lint docker-worker
+.PHONY: build test test-race fmt lint docker-worker
 
 # Pinned worker toolchain versions. Override on the command line
 # if a newer version has been vetted, e.g.
@@ -15,6 +15,8 @@ build:
 	go build -trimpath -o contextmatrix-agent ./cmd/contextmatrix-agent
 test:
 	go test ./...
+test-race:
+	CGO_ENABLED=1 go test -race ./...
 fmt:
 	gofumpt -w .
 lint:

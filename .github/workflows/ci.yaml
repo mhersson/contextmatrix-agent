@@ -1,45 +1,161 @@
-name: CI
+# CI pipeline for contextmatrix-agent.
+#
+# Gates every pull_request on the full quality bar. Pushes to main skip the
+# checks (already validated on the PR) — branch protection requires the check
+# jobs to pass before merge.
+#
+# GitHub Actions are pinned to exact release tags; Dependabot
+# (.github/dependabot.yml) keeps them current.
+
+name: ci
 
 on:
   push:
-    paths-ignore:
-      - "README.md"
-      - "*-RESULTS.md"
-      - "capabilities-*.md"
-      - "docs/**"
-      - "LICENSE"
+    branches: [main]
+  pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  go-checks:
+  test:
+    name: test
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout
+        uses: actions/checkout@v6.0.3
 
-      - uses: actions/setup-go@v6
+      - name: Setup Go
+        uses: actions/setup-go@v6.4.0
         with:
           go-version-file: go.mod
-
-      # The tools tests skip rg/fd/git-dependent cases when the binary is
-      # missing — surface what this runner actually exercises.
-      - name: Tool availability
-        run: |
-          for t in git rg fd; do
-            command -v "$t" >/dev/null && echo "$t: $(command -v $t)" || echo "::warning::$t not installed — dependent tests will skip"
-          done
-
-      - name: go vet
-        run: go vet ./...
+          cache: true
 
       - name: go test
-        run: go test ./...
+        run: make test
 
       - name: go test -race
-        run: go test -race ./...
-        env:
-          CGO_ENABLED: "1"
+        run: make test-race
+
+  lint:
+    name: lint
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.3
+
+      - name: Setup Go
+        uses: actions/setup-go@v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Install golangci-lint at the version the Makefile pins, so CI and a
+      # local `make lint` use the same release.
+      - name: Install golangci-lint
+        run: |
+          set -euo pipefail
+          VERSION=$(grep '^GOLANGCI_LINT_VERSION' Makefile | head -1 | awk '{print $NF}')
+          curl -sSfL "https://raw.githubusercontent.com/golangci/golangci-lint/${VERSION}/install.sh" \
+            | sh -s -- -b "$(go env GOPATH)/bin" "${VERSION}"
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v9
+        run: make lint
+
+  build:
+    name: build
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.3
+
+      - name: Setup Go
+        uses: actions/setup-go@v6.4.0
         with:
-          version: v2.11.3
+          go-version-file: go.mod
+          cache: true
+
+      - name: go build
+        run: make build
+
+  govulncheck:
+    name: govulncheck
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.3
+
+      - name: Setup Go
+        uses: actions/setup-go@v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      # Fail only on findings that have an upstream fix (fixed_version set);
+      # transitive findings with no available fix are printed but do not block.
+      - name: Run govulncheck (fail only on fixable findings)
+        run: |
+          set -euo pipefail
+          govulncheck -format=json ./... > /tmp/vuln.json 2>&1 || true
+
+          FIXABLE=$(jq -s '[.[] | select(.finding != null
+                                          and .finding.fixed_version != null
+                                          and .finding.fixed_version != "")] | length' /tmp/vuln.json)
+
+          echo "fixable findings: ${FIXABLE}"
+
+          govulncheck ./... || true
+
+          if [ "${FIXABLE:-0}" -gt 0 ]; then
+            echo "::error::Fixable vulnerabilities detected. See output above."
+            exit 1
+          fi
+
+          echo "No fixable vulnerabilities. Remaining findings have no upstream fix available."
+
+  hadolint:
+    name: hadolint
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.3
+
+      - name: Hadolint
+        uses: hadolint/hadolint-action@v3.3.0
+        with:
+          dockerfile: docker/Dockerfile.worker
+
+  worker-image-scan:
+    name: worker-image-scan
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.3
+
+      - name: Build worker image
+        run: make docker-worker
+
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: contextmatrix-agent-worker:dev
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          # Only run the vulnerability scanner. The default secret scanner
+          # flags gosec regex literals (shipped with golangci-lint) as
+          # hardcoded credentials — false positives.
+          scanners: vuln
+          trivyignores: .trivyignore

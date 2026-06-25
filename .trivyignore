@@ -1,0 +1,8 @@
+# Trivy ignore file for the contextmatrix-agent worker-image scan.
+#
+# The worker-image-scan job fails on CRITICAL/HIGH vulnerabilities that have an
+# upstream fix (ignore-unfixed: true). Add a CVE ID here only to deliberately
+# accept a fixable finding — each entry should carry a justification and a
+# review date.
+#
+# (no accepted findings yet)
