@@ -127,14 +127,6 @@ max_card_cost: 5.0
 # CMX_SELECTOR_PRICE_HEADROOM
 selector_price_headroom: 1.5
 
-# ─── Artificial Analysis API key ──────────────────────────────────────────────
-
-# API key for Artificial Analysis priors data — used ONLY by the priors-refresh
-# helper command. This key is redacted in logs and is NEVER passed into worker
-# containers. Leave empty unless you are running the priors-refresh helper.
-# CMX_ARTIFICIAL_ANALYSIS_API_KEY
-# artificial_analysis_api_key: ""
-
 # ─── GitHub authentication ────────────────────────────────────────────────────
 
 github:

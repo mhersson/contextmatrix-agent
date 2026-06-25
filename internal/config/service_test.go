@@ -342,17 +342,15 @@ func TestServiceBudgetDefaults(t *testing.T) {
 
 	assert.InDelta(t, 5.0, cfg.MaxCardCost, 1e-9, "max_card_cost default must be 5.0")
 	assert.InDelta(t, 1.5, cfg.SelectorPriceHeadroom, 1e-9, "selector_price_headroom default must be 1.5")
-	assert.Empty(t, cfg.ArtificialAnalysisAPIKey, "artificial_analysis_api_key default must be empty")
 }
 
 func TestServiceBudgetFromFile(t *testing.T) {
-	// max_card_cost: 8.0, selector_price_headroom: 2.0, artificial_analysis_api_key loaded from file.
+	// max_card_cost: 8.0, selector_price_headroom: 2.0 loaded from file.
 	clearServiceEnv(t)
 
 	content := `
 max_card_cost: 8.0
 selector_price_headroom: 2.0
-artificial_analysis_api_key: aa-test-key
 `
 	path := filepath.Join(t.TempDir(), "serve.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
@@ -362,24 +360,20 @@ artificial_analysis_api_key: aa-test-key
 
 	assert.InDelta(t, 8.0, cfg.MaxCardCost, 1e-9)
 	assert.InDelta(t, 2.0, cfg.SelectorPriceHeadroom, 1e-9)
-	assert.Equal(t, "aa-test-key", cfg.ArtificialAnalysisAPIKey)
 }
 
 func TestServiceBudgetFromEnv(t *testing.T) {
 	// CMX_MAX_CARD_COST and CMX_SELECTOR_PRICE_HEADROOM override file values.
-	// CMX_ARTIFICIAL_ANALYSIS_API_KEY is also picked up via env.
 	clearServiceEnv(t)
 
 	t.Setenv("CMX_MAX_CARD_COST", "3.5")
 	t.Setenv("CMX_SELECTOR_PRICE_HEADROOM", "1.2")
-	t.Setenv("CMX_ARTIFICIAL_ANALYSIS_API_KEY", "aa-env-key")
 
 	cfg, err := LoadService(filepath.Join(t.TempDir(), "does-not-exist.yaml"))
 	require.NoError(t, err)
 
 	assert.InDelta(t, 3.5, cfg.MaxCardCost, 1e-9)
 	assert.InDelta(t, 1.2, cfg.SelectorPriceHeadroom, 1e-9)
-	assert.Equal(t, "aa-env-key", cfg.ArtificialAnalysisAPIKey)
 }
 
 func TestServiceBudgetZeroIsLegal(t *testing.T) {
@@ -411,7 +405,7 @@ func clearServiceEnv(t *testing.T) {
 		"CMX_CONTEXTMATRIX_URL", "CMX_PORT", "CMX_OPENROUTER_API_KEY",
 		"CMX_API_KEY", "CMX_BASE_IMAGE", "CMX_MAX_CONCURRENT",
 		"CMX_GITHUB__AUTH_MODE", "CMX_GITHUB__PAT__TOKEN",
-		"CMX_MAX_CARD_COST", "CMX_SELECTOR_PRICE_HEADROOM", "CMX_ARTIFICIAL_ANALYSIS_API_KEY",
+		"CMX_MAX_CARD_COST", "CMX_SELECTOR_PRICE_HEADROOM",
 	} {
 		if _, ok := os.LookupEnv(e); ok {
 			t.Setenv(e, "")

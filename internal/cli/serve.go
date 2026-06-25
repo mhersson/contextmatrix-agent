@@ -110,7 +110,7 @@ func runServe(ctx context.Context, configPath string) error {
 
 	tracker := executor.NewTracker(cfg.MaxConcurrent)
 	hub := logbridge.NewHub()
-	redactor := redact.New([]string{cfg.OpenRouterAPIKey, cfg.MCPAPIKey, cfg.APIKey, cfg.ArtificialAnalysisAPIKey})
+	redactor := redact.New([]string{cfg.OpenRouterAPIKey, cfg.MCPAPIKey, cfg.APIKey})
 
 	cbClient := callback.New(cfg.ContextMatrixURL, cfg.APIKey, logger)
 

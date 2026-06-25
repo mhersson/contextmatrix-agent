@@ -89,11 +89,6 @@ type ServiceConfig struct {
 	// omitted from the container env (worker uses its own default); the default
 	// (1.5) applies when the key is absent from config and env.
 	SelectorPriceHeadroom float64
-
-	// ArtificialAnalysisAPIKey is used exclusively by the priors-refresh helper
-	// command. It is redacted in logs and must NEVER be passed into worker
-	// containers — it is a helper-only credential.
-	ArtificialAnalysisAPIKey string
 }
 
 // serviceRaw is the koanf-unmarshalled wire shape. Duration fields are split:
@@ -128,7 +123,6 @@ type serviceRaw struct {
 	LogLevel                  string            `koanf:"log_level"`
 	MaxCardCost               float64           `koanf:"max_card_cost"`
 	SelectorPriceHeadroom     float64           `koanf:"selector_price_headroom"`
-	ArtificialAnalysisAPIKey  string            `koanf:"artificial_analysis_api_key"`
 }
 
 // serviceDefaults is the lowest-precedence layer. Durations are wire-form
@@ -238,7 +232,6 @@ func (r serviceRaw) toConfig() (*ServiceConfig, error) {
 		LogLevel:                  r.LogLevel,
 		MaxCardCost:               r.MaxCardCost,
 		SelectorPriceHeadroom:     r.SelectorPriceHeadroom,
-		ArtificialAnalysisAPIKey:  r.ArtificialAnalysisAPIKey,
 	}, nil
 }
 
