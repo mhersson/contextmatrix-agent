@@ -178,6 +178,12 @@ func (f *fakeOps) ReleaseCard(_ context.Context, cardID string) error {
 	return nil
 }
 
+func (f *fakeOps) RecordSkillEngaged(_ context.Context, cardID, skillName string) error {
+	f.record("RecordSkillEngaged", cardID, skillName)
+
+	return nil
+}
+
 // --- helpers ---------------------------------------------------------------
 
 // baseSpec returns a RunSpec wired for a local file:// remote with no tokens.
@@ -627,4 +633,23 @@ func TestReviewAttemptsCapIsThree(t *testing.T) {
 	t.Parallel()
 
 	assert.Equal(t, 3, reviewAttemptsCap)
+}
+
+func TestBuildSkillToolPresentAndAbsent(t *testing.T) {
+	root := t.TempDir()
+	skillsDir := filepath.Join(root, "skills")
+	require.NoError(t, os.MkdirAll(filepath.Join(skillsDir, "go-development"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(skillsDir, "go-development", "SKILL.md"),
+		[]byte("---\nname: go-development\ndescription: Use for Go.\n---\nbody"), 0o644))
+
+	// Present: a populated dir yields a tool.
+	tool := buildSkillTool(RunSpec{CardID: "C1", TaskSkillsDir: skillsDir}, nil)
+	require.NotNil(t, tool)
+	assert.Equal(t, "skill", tool.Name())
+
+	// Absent: no dir -> no tool (no-skills runs stay byte-identical).
+	assert.Nil(t, buildSkillTool(RunSpec{CardID: "C1"}, nil))
+
+	// Absent: explicit empty subset -> no tool.
+	assert.Nil(t, buildSkillTool(RunSpec{CardID: "C1", TaskSkillsDir: skillsDir, TaskSkillsSet: true, TaskSkills: nil}, nil))
 }

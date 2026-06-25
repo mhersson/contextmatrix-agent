@@ -36,6 +36,7 @@ type SubagentOpts struct {
 	DefaultModel       string              // model for specs that don't override
 	ToolOutputMaxBytes int                 // 0 disables the child tool-result size cap
 	RedactToolOutput   func(string) string // nil = identity; scrubs child tool output
+	ExtraReadOnlyTools []tools.Tool        // appended to the child read-only registry (e.g. the Skill tool)
 }
 
 // SpawnSubagents runs specs as parallel, READ-ONLY child Harness.Run calls over
@@ -52,7 +53,7 @@ func SpawnSubagents(ctx context.Context, client llm.LLM, root string, emit *even
 		return nil, nil
 	}
 
-	reg := tools.NewReadOnlyRegistry(root)
+	reg := tools.NewRegistry(append(tools.ReadOnlyTools(root), opts.ExtraReadOnlyTools...)...)
 
 	perChild := 0.0
 	if opts.AggregateCostCap > 0 {

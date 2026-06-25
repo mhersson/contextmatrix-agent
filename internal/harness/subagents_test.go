@@ -8,7 +8,9 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/mhersson/contextmatrix-agent/internal/events"
 	"github.com/mhersson/contextmatrix-agent/internal/llm"
+	"github.com/mhersson/contextmatrix-agent/internal/tools"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -206,3 +208,45 @@ func TestSpawnSubagentsToolOutputCapPropagates(t *testing.T) {
 	assert.Contains(t, toolResultContent, "bytes truncated", "child tool output must be size-capped")
 	assert.LessOrEqual(t, len(toolResultContent), maxBytes+80, "child tool output must be bounded by the cap") // marker allowance
 }
+
+// captureLLM records the tool schemas presented on the first Send, then stops.
+type captureLLM struct{ tools []llm.Tool }
+
+func (c *captureLLM) Send(_ context.Context, req llm.Request) (llm.Response, error) {
+	c.tools = req.Tools
+
+	return llm.Response{Content: "done", FinishReason: "stop"}, nil
+}
+
+func (c *captureLLM) SendStream(ctx context.Context, req llm.Request, _ func(llm.Delta)) (llm.Response, error) {
+	return c.Send(ctx, req)
+}
+
+func TestSpawnSubagentsIncludesExtraReadOnlyTools(t *testing.T) {
+	root := t.TempDir()
+	capLLM := &captureLLM{}
+	emit := events.NewEmitter(nil, nil)
+
+	extra := skillStub{} // a minimal tools.Tool named "skill"
+
+	_, err := SpawnSubagents(context.Background(), capLLM, root, emit,
+		[]SubagentSpec{{Role: "r", Prompt: "p", Model: "m"}},
+		SubagentOpts{DefaultModel: "m", ExtraReadOnlyTools: []tools.Tool{extra}})
+	require.NoError(t, err)
+
+	var names []string
+	for _, tl := range capLLM.tools {
+		names = append(names, tl.Function.Name)
+	}
+
+	assert.Contains(t, names, "skill", "the extra read-only tool is presented to the child harness")
+}
+
+// skillStub is a no-op tools.Tool used only to assert wiring.
+type skillStub struct{}
+
+func (skillStub) Name() string { return "skill" }
+func (skillStub) Schema() llm.Tool {
+	return llm.Tool{Type: "function", Function: llm.ToolFunction{Name: "skill"}}
+}
+func (skillStub) Execute(context.Context, map[string]any) (string, error) { return "", nil }

@@ -500,6 +500,10 @@ func (s *stubOps) ReleaseCard(_ context.Context, cardID string) error {
 	return nil
 }
 
+func (s *stubOps) RecordSkillEngaged(_ context.Context, _, _ string) error {
+	return nil
+}
+
 // --- bare-origin seeding helper --------------------------------------------
 
 // setupBareRemoteWithFiles is setupBareRemote plus extra seed files committed to

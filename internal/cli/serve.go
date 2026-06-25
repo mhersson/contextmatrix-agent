@@ -23,6 +23,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/logbridge"
 	"github.com/mhersson/contextmatrix-agent/internal/redact"
 	"github.com/mhersson/contextmatrix-agent/internal/secrets"
+	"github.com/mhersson/contextmatrix-agent/internal/taskskills"
 	"github.com/mhersson/contextmatrix-agent/internal/webhook"
 )
 
@@ -94,6 +95,9 @@ func runServe(ctx context.Context, configPath string) error {
 	envFile := filepath.Join(sharedDir, "env")
 	refresher := secrets.NewRefresher(envFile, cfg.OpenRouterAPIKey, provider, logger)
 
+	skillsCache := filepath.Join(filepath.Dir(sharedDir), "task-skills-cache")
+	skillsResolver := taskskills.NewResolver(cfg.ContextMatrixURL, cfg.APIKey, skillsCache, provider, logger)
+
 	refreshCtx, refreshCancel := context.WithCancel(context.Background())
 	defer refreshCancel()
 
@@ -140,19 +144,20 @@ func runServe(ctx context.Context, configPath string) error {
 	dedup := webhook.NewDedupCache(cfg.MessageDedupTTL, cfg.MessageDedupCacheSize)
 
 	srv := webhook.NewServer(webhook.Config{
-		APIKey:        cfg.APIKey,
-		Skew:          cfg.ReplaySkew,
-		MaxConcurrent: cfg.MaxConcurrent,
-		Executor:      exec,
-		Tracker:       tracker,
-		Hub:           hub,
-		Reporter:      cbClient,
-		Verifier:      cbClient,
-		LaunchEnv:     launchEnv(cfg, sharedDir),
-		Replay:        replay,
-		Dedup:         dedup,
-		Draining:      &draining,
-		Logger:        logger,
+		APIKey:         cfg.APIKey,
+		Skew:           cfg.ReplaySkew,
+		MaxConcurrent:  cfg.MaxConcurrent,
+		Executor:       exec,
+		Tracker:        tracker,
+		Hub:            hub,
+		Reporter:       cbClient,
+		Verifier:       cbClient,
+		SkillsResolver: skillsResolver,
+		LaunchEnv:      launchEnv(cfg, sharedDir),
+		Replay:         replay,
+		Dedup:          dedup,
+		Draining:       &draining,
+		Logger:         logger,
 	})
 
 	// The replay janitor sweeps expired entries on the cache's own interval.

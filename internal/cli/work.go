@@ -161,6 +161,21 @@ func specFromEnv() (worker.RunSpec, error) {
 		}
 	}
 
+	taskSkillsDir := os.Getenv("CMX_TASK_SKILLS_DIR")
+
+	var (
+		taskSkills    []string
+		taskSkillsSet bool
+	)
+
+	if _, ok := os.LookupEnv("CM_TASK_SKILLS_SET"); ok {
+		taskSkillsSet = true
+
+		if v := os.Getenv("CM_TASK_SKILLS"); v != "" {
+			taskSkills = strings.Split(v, ",")
+		}
+	}
+
 	spec := worker.RunSpec{
 		CardID:                cardID,
 		Project:               project,
@@ -180,6 +195,9 @@ func specFromEnv() (worker.RunSpec, error) {
 		DefaultModel:          defaultModel,
 		Workspace:             workspace,
 		Selection:             selection,
+		TaskSkillsDir:         taskSkillsDir,
+		TaskSkills:            taskSkills,
+		TaskSkillsSet:         taskSkillsSet,
 	}
 
 	return spec, nil

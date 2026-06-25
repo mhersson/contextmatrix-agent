@@ -69,6 +69,10 @@ type RunSpec struct {
 	// Selection carries the CM-resolved model selection inputs (candidates,
 	// favorites, blacklist). Nil when absent (runner backend or old CM).
 	Selection *protocol.SelectionContext // CMX_SELECTION (JSON-encoded)
+
+	TaskSkillsDir string   // in-container skills mount path (CMX_TASK_SKILLS_DIR); empty = no skills
+	TaskSkills    []string // per-card subset (CM_TASK_SKILLS)
+	TaskSkillsSet bool     // whether the subset was set (CM_TASK_SKILLS_SET)
 }
 
 // CardOps is the slice of cmclient the worker needs (interface here, where
@@ -81,6 +85,7 @@ type CardOps interface {
 	ReportPush(ctx context.Context, cardID, branch, prURL string) error
 	CompleteTask(ctx context.Context, cardID, summary string) error
 	ReleaseCard(ctx context.Context, cardID string) error
+	RecordSkillEngaged(ctx context.Context, cardID, skillName string) error
 }
 
 // Result is the worker's outcome. Reason distinguishes a graceful finish from
@@ -288,6 +293,13 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 		human = a.human
 	}
 
+	skillTool := buildSkillTool(a.spec, a.ops)
+	wt := writeTools(a.ws, a.spec.BashTimeoutMax)
+
+	if skillTool != nil {
+		wt = append(wt, skillTool)
+	}
+
 	d := orchestrator.Deps{
 		Ops:        ops2orchestrator(a.ops),
 		Git:        a.git,
@@ -295,8 +307,9 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 		Client:     a.client,
 		Emit:       a.emit,
 		Registry:   buildRegistry(a.spec),
-		WriteTools: tools.NewRegistry(writeTools(a.ws, a.spec.BashTimeoutMax)...),
+		WriteTools: tools.NewRegistry(wt...),
 		ReadTools:  tools.NewReadOnlyRegistry(a.ws),
+		SkillTool:  skillTool,
 		Redact:     red.Apply,
 		Human:      human,
 		Cfg: orchestrator.Config{
@@ -461,6 +474,35 @@ func writeTools(ws string, bashTimeoutMax int) []tools.Tool {
 		tools.NewGitTool(ws),
 		tools.NewBashTool(ws).WithMaxTimeout(bashTimeoutMax),
 	}
+}
+
+// buildSkillTool constructs the per-run Skill tool from the mounted skills dir
+// and the per-card subset, wiring onEngage to report engagement on the
+// top-level card. Returns nil when no skills are available, so no-skills runs
+// register no Skill tool and stay byte-identical.
+func buildSkillTool(spec RunSpec, ops CardOps) tools.Tool {
+	if spec.TaskSkillsDir == "" {
+		return nil
+	}
+
+	var onEngage func(ctx context.Context, name string) error
+	if ops != nil {
+		onEngage = func(ctx context.Context, name string) error {
+			return ops.RecordSkillEngaged(ctx, spec.CardID, name)
+		}
+	}
+
+	st, ok := tools.NewSkillTool(spec.TaskSkillsDir, spec.TaskSkills, spec.TaskSkillsSet, onEngage)
+	if !ok {
+		return nil
+	}
+
+	slog.Info("skill tool registered",
+		"card_id", spec.CardID,
+		"dir", spec.TaskSkillsDir,
+		"skills", strings.Count(st.MenuText(), "\n"))
+
+	return st
 }
 
 // buildRegistry assembles the model registry the FSM selects from. When a

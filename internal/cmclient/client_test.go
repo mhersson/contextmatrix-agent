@@ -745,3 +745,17 @@ func TestListCardsSubtaskPayloadIsValidJSON(t *testing.T) {
 	var v map[string]any
 	require.NoError(t, json.Unmarshal([]byte(listCardsSubtaskPayload), &v))
 }
+
+func TestRecordSkillEngaged(t *testing.T) {
+	rec := newRecorder()
+	c := newTestClient(t, rec, "")
+
+	require.NoError(t, c.RecordSkillEngaged(context.Background(), "CMX-001", "go-development"))
+
+	args, ok := rec.get("add_log")
+	require.True(t, ok, "RecordSkillEngaged must call the add_log tool")
+	assert.Equal(t, "CMX-001", args["card_id"])
+	assert.Equal(t, "skill_engaged", args["action"], "action must be skill_engaged so CM records a skill_engaged entry")
+	assert.Equal(t, "engaged go-development", args["message"], "message must be 'engaged <skill>' so skillNameOf parses it")
+	assert.Equal(t, testAgentID, args["agent_id"], "the call helper injects the per-card agent identity")
+}

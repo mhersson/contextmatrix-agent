@@ -367,7 +367,7 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 	for i, l := range lenses {
 		specs[i] = harness.SubagentSpec{
 			Role:          l.role,
-			Prompt:        fmt.Sprintf(specialistPrompt, l.prompt, o.tc.Title, o.tc.Description, diff, prior),
+			Prompt:        fmt.Sprintf(specialistPrompt, o.skillEngage(), l.prompt, o.tc.Title, o.tc.Description, diff, prior),
 			Model:         panel[i].Model,
 			MaxTurns:      cfg.MaxTurns,
 			ContextWindow: panel[i].ContextWindow,
@@ -379,6 +379,7 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 			DefaultModel:       cfg.DefaultModel,
 			ToolOutputMaxBytes: cfg.ToolOutputMax,
 			RedactToolOutput:   d.Redact,
+			ExtraReadOnlyTools: skillToolSlice(d.SkillTool),
 		})
 	if err != nil {
 		return "", fmt.Errorf("spawn review specialists: %w", err)
@@ -602,7 +603,7 @@ func (o *run) runFix(ctx context.Context, findings string, round int, fixTier st
 		return err
 	}
 
-	prompt := fmt.Sprintf(fixPrompt, o.tc.Title, o.tc.Description, findings)
+	prompt := fmt.Sprintf(fixPrompt, o.skillEngage(), o.tc.Title, o.tc.Description, findings)
 
 	if err := o.runFixModel(ctx, prompt, round, fixTier, authoritative); err != nil {
 		return err
@@ -873,4 +874,14 @@ func tierFromString(tier string) registry.Tier {
 	default:
 		return registry.TierModerate
 	}
+}
+
+// skillToolSlice wraps an optional Skill tool as a SubagentOpts.ExtraReadOnlyTools
+// slice. Nil tool → nil slice (the review panel then gets the default read-only set).
+func skillToolSlice(t tools.Tool) []tools.Tool {
+	if t == nil {
+		return nil
+	}
+
+	return []tools.Tool{t}
 }

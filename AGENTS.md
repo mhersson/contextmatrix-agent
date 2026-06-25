@@ -193,6 +193,17 @@ or a mounted file only — never via flags or committed YAML.
    inbox, so every later gate passes through and the run finishes autonomously at
    the persisted phase. Awaiting-human is **live**, not stalled — the idle
    watchdog must not false-stall a parked gate.
+10. **Task-skills.** Coder, fix-coder, the review panel, and the document phase
+    can engage ContextMatrix's task-skills (`go-development`, `code-review`, …)
+    via the model-driven `Skill` tool (`internal/tools/skill.go`): it lists the
+    available skills by description and loads a chosen `SKILL.md` on demand,
+    filtered to the per-card `task_skills` subset. Delivery is config-free on
+    the agent: `serve` fetches a `{git_remote_url, ref}` pointer from CM
+    (`GET /api/agent/task-skills-source`), shallow-clones it once
+    (`internal/taskskills`), and read-only-mounts it at `/run/cm-skills`.
+    Engagement is reported over MCP (`cmclient.RecordSkillEngaged` →
+    `add_log action=skill_engaged`), CM's source-agnostic "Path A". Distinct
+    from `workflow-skills` and the MCP `get_skill` tool.
 
 ## Running and testing
 
