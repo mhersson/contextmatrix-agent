@@ -1,0 +1,24 @@
+# Trivy ignore list for the contextmatrix-agent worker-image scan.
+#
+# The worker-image-scan job fails on CRITICAL/HIGH vulnerabilities that have an
+# upstream fix (ignore-unfixed: true). Every entry must carry a justification;
+# review on each worker-image / Go-dependency bump and delete entries whose fix
+# has shipped. Dependabot (.github/dependabot.yml) tracks the underlying bumps.
+
+# --- The bundled npm CLI ships tinyglobby -> picomatch 4.0.3
+# (/usr/lib/node_modules/npm/node_modules/tinyglobby/node_modules/picomatch);
+# 4.0.4 fixes the ReDoS. This is npm's own transitive dependency, so it clears
+# only when an npm upgrade pulls in the fixed tinyglobby/picomatch — no Go
+# change here affects it. The worker container is single-tenant and only parses
+# globs it generates itself, so the ReDoS is not reachable from a prompt
+# attacker.
+CVE-2026-33671
+
+# --- The agent binary embeds the Docker SDK (github.com/docker/docker
+# v28.5.2+incompatible); CVE-2026-34040 is a Moby *daemon* authorization-bypass,
+# fixed in v29.3.1. The agent uses only the Docker *client*, against a trusted
+# local daemon, so the daemon-side authz path is not reachable — govulncheck
+# (which is call-graph aware) reports no finding for it. The v28 -> v29 fix is a
+# major SDK bump; Dependabot will raise it as a reviewable PR. Accepted until
+# then.
+CVE-2026-34040
