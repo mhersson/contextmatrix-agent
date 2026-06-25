@@ -379,6 +379,7 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 			DefaultModel:       cfg.DefaultModel,
 			ToolOutputMaxBytes: cfg.ToolOutputMax,
 			RedactToolOutput:   d.Redact,
+			ExtraReadOnlyTools: skillToolSlice(d.SkillTool),
 		})
 	if err != nil {
 		return "", fmt.Errorf("spawn review specialists: %w", err)
@@ -873,4 +874,14 @@ func tierFromString(tier string) registry.Tier {
 	default:
 		return registry.TierModerate
 	}
+}
+
+// skillToolSlice wraps an optional Skill tool as a SubagentOpts.ExtraReadOnlyTools
+// slice. Nil tool → nil slice (the review panel then gets the default read-only set).
+func skillToolSlice(t tools.Tool) []tools.Tool {
+	if t == nil {
+		return nil
+	}
+
+	return []tools.Tool{t}
 }

@@ -109,6 +109,7 @@ type Deps struct {
 	Registry   *registry.Registry
 	WriteTools *tools.Registry // full toolset rooted at the workspace
 	ReadTools  *tools.Registry // read-only subset for planner/reviewers
+	SkillTool  tools.Tool      // optional; engaged by coder/review/document subagents (nil when no task-skills)
 	Cfg        Config
 	Redact     func(string) string // nil = identity; scrubs tool output in phase runs (wired by the worker)
 	// Human is the HITL ask-and-wait channel, satisfied by the worker's live
