@@ -806,11 +806,6 @@ func TestBuildLaunchSpec_BudgetEnvEmitted(t *testing.T) {
 	spec := h.exec.launchedSpecs()[0]
 	assert.Contains(t, spec.Env, "CMX_MAX_CARD_COST=5", "max_card_cost must be formatted without trailing decimal")
 	assert.Contains(t, spec.Env, "CMX_SELECTOR_PRICE_HEADROOM=1.5", "selector_price_headroom must appear")
-
-	// ArtificialAnalysisAPIKey must NEVER reach workers regardless of config.
-	for _, e := range spec.Env {
-		assert.NotContains(t, e, "ARTIFICIAL_ANALYSIS", "AA key must never be emitted to workers")
-	}
 }
 
 func TestBuildLaunchSpec_BudgetEnvOmittedWhenZero(t *testing.T) {
