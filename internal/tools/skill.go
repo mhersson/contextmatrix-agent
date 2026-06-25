@@ -68,13 +68,11 @@ func NewSkillTool(dir string, allowed []string, allowedSet bool, onEngage func(c
 
 func (t SkillTool) Name() string { return "skill" }
 
-func (t SkillTool) Schema() llm.Tool {
+// MenuText returns the available skills as one "- name: description" line each,
+// newline-terminated. Single source for both the tool's schema menu and the
+// orchestrator's prompt-injected skill list, so the two cannot drift.
+func (t SkillTool) MenuText() string {
 	var b strings.Builder
-	b.WriteString("Engage a specialist task-skill before doing role/language work. ")
-	b.WriteString("Call this with the skill name to load its full instructions; ")
-	b.WriteString("optionally pass 'file' to load a supporting file the skill references. ")
-	b.WriteString("Available skills:\n")
-
 	for _, e := range t.menu {
 		b.WriteString("- ")
 		b.WriteString(e.name)
@@ -82,6 +80,17 @@ func (t SkillTool) Schema() llm.Tool {
 		b.WriteString(e.description)
 		b.WriteString("\n")
 	}
+
+	return b.String()
+}
+
+func (t SkillTool) Schema() llm.Tool {
+	var b strings.Builder
+	b.WriteString("Engage a specialist task-skill before doing role/language work. ")
+	b.WriteString("Call this with the skill name to load its full instructions; ")
+	b.WriteString("optionally pass 'file' to load a supporting file the skill references. ")
+	b.WriteString("Available skills:\n")
+	b.WriteString(t.MenuText())
 
 	return llm.Tool{Type: "function", Function: llm.ToolFunction{
 		Name:        "skill",

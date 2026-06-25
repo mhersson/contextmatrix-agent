@@ -154,3 +154,18 @@ func TestParseSkillDescriptionStopsAtClosingDelimiter(t *testing.T) {
 	assert.False(t, ok, "no frontmatter description must yield ok=false")
 	assert.Empty(t, desc, "the body description: line must not be read once past the closing ---")
 }
+
+func TestSkillToolMenuText(t *testing.T) {
+	root := t.TempDir()
+	writeSkill(t, root, "go-development", "Use when writing Go.", "B")
+	writeSkill(t, root, "documentation", "Use when writing docs.", "B")
+
+	st, ok := NewSkillTool(root, nil, false, nil)
+	require.True(t, ok)
+
+	menu := st.MenuText()
+	assert.Contains(t, menu, "- go-development: Use when writing Go.\n")
+	assert.Contains(t, menu, "- documentation: Use when writing docs.\n")
+	// Schema reuses MenuText, so its description must contain exactly those lines.
+	assert.Contains(t, st.Schema().Function.Description, menu)
+}
