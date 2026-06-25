@@ -197,9 +197,7 @@ func scanSkills(dir string) []skillEntry {
 // if there is no frontmatter or no description.
 func parseSkillDescription(data []byte) (string, bool) {
 	s := string(data)
-	if strings.HasPrefix(s, "\uFEFF") {
-		s = strings.TrimPrefix(s, "\uFEFF")
-	}
+	s = strings.TrimPrefix(s, "\uFEFF")
 
 	if !strings.HasPrefix(s, "---\n") && !strings.HasPrefix(s, "---\r\n") {
 		return "", false
@@ -209,10 +207,13 @@ func parseSkillDescription(data []byte) (string, bool) {
 	rest := s
 
 	inFrontmatter := false
+
 	for _, line := range strings.Split(rest, "\n") {
 		line = strings.TrimRight(line, "\r")
+
 		if !inFrontmatter {
 			inFrontmatter = true // first line is the opening ---
+
 			continue
 		}
 

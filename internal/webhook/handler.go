@@ -278,6 +278,7 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 	// Resolve the skills dir best-effort: a failure means this run runs without
 	// skills (advisory), and the next trigger retries.
 	skillsDir := ""
+
 	if s.skillsResolver != nil {
 		if dir, err := s.skillsResolver.Resolve(r.Context()); err != nil {
 			s.logger.Warn("task-skills unavailable this run",
@@ -301,7 +302,7 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 	// and the eventual outcome is carried by the running/failed status callback.
 	writeJSON(w, http.StatusAccepted, protocol.SuccessResponse{OK: true})
 
-	go s.launch(spec, payload.Project, payload.CardID)
+	go s.launch(spec, payload.Project, payload.CardID) //nolint:gosec // G118: launch is fire-and-forget and outlives the request; a request-scoped context would cancel the worker
 }
 
 // launch runs on a detached context so the container's lifecycle outlives the

@@ -214,6 +214,7 @@ type captureLLM struct{ tools []llm.Tool }
 
 func (c *captureLLM) Send(_ context.Context, req llm.Request) (llm.Response, error) {
 	c.tools = req.Tools
+
 	return llm.Response{Content: "done", FinishReason: "stop"}, nil
 }
 
@@ -223,20 +224,21 @@ func (c *captureLLM) SendStream(ctx context.Context, req llm.Request, _ func(llm
 
 func TestSpawnSubagentsIncludesExtraReadOnlyTools(t *testing.T) {
 	root := t.TempDir()
-	cap := &captureLLM{}
+	capLLM := &captureLLM{}
 	emit := events.NewEmitter(nil, nil)
 
 	extra := skillStub{} // a minimal tools.Tool named "skill"
 
-	_, err := SpawnSubagents(context.Background(), cap, root, emit,
+	_, err := SpawnSubagents(context.Background(), capLLM, root, emit,
 		[]SubagentSpec{{Role: "r", Prompt: "p", Model: "m"}},
 		SubagentOpts{DefaultModel: "m", ExtraReadOnlyTools: []tools.Tool{extra}})
 	require.NoError(t, err)
 
 	var names []string
-	for _, tl := range cap.tools {
+	for _, tl := range capLLM.tools {
 		names = append(names, tl.Function.Name)
 	}
+
 	assert.Contains(t, names, "skill", "the extra read-only tool is presented to the child harness")
 }
 
