@@ -39,14 +39,14 @@ protocol carries.
 ```
 cmd/contextmatrix-agent/main.go → entrypoint; builds the cobra root command
 
-internal/cli/        → cobra commands: run, serve, work, eval, sweep, fanout, priors-refresh
+internal/cli/        → cobra commands: run, serve, work
 internal/config/     → cobra + koanf config; Config (harness) and ServiceConfig (serve); CMX_* env tags
 
 # Inner loop — FSM-free, dependency-light (the extraction-ready harness core)
 internal/harness/    → Harness.Run: the tool-dispatch loop; SpawnSubagents fan-out; Verify
 internal/llm/        → raw-HTTP OpenAI-compatible OpenRouter client (Send/SendStream, SSE, models[] failover, catalog)
 internal/tools/      → tool registry + impls: read/edit/write/grep/glob/git/bash, jailed + env-scrubbed
-internal/registry/   → model selector: Resolve(actor, role), SelectByComplexity, SelectReviewPanel; capabilities + priors
+internal/registry/   → model selector: Resolve(actor, role), SelectByComplexity, SelectReviewPanel; priors-only, payload-driven (FromSelection)
 internal/events/     → event stream (model_request | model_response | tool_call | tool_result | usage | state_change | context_limit | error | …)
 
 # Autonomous executor — the FSM and its container lifecycle
@@ -64,11 +64,9 @@ internal/frames/     → stdin control protocol (user_message | promote | end_se
 internal/redact/     → literal-secret redaction for logs and transcripts
 
 # Quality
-internal/eval/       → capability harness: coder + reviewer batteries, Wilson-LB scoring, capabilities.json output
-internal/kata/       → embedded throwaway kata used by the spike/sweep paths
+internal/kata/       → embedded throwaway kata fixture used by tests
 
 docker/Dockerfile.worker → the worker image (agent binary + git/rg/fd/gh/node/Go toolchain, pinned + SHA-verified)
-docs/model-priors.md     → model-priors refresh procedure
 ```
 
 ## Boundary discipline (the load-bearing invariant)
@@ -80,10 +78,10 @@ chat service. Verified import rules:
 - `internal/harness` imports **only** `internal/events`, `internal/llm`,
   `internal/tools`. It must **never** import `orchestrator`, `worker`, `config`,
   `registry`, `cli`, `cmclient`, or `webhook`.
-- `internal/orchestrator` imports `harness`, `registry`, `tools`, `events`, and
-  `cmclient` (for the `TaskContext` type). It **never** imports `worker`; the
-  git and card-ops surfaces are injected as interfaces (`Ops`, `GitOps`,
-  `PRCreator`).
+- `internal/orchestrator` imports `harness`, `llm`, `registry`, `tools`,
+  `events`, and `cmclient` (for the `TaskContext` type). It **never** imports
+  `worker`; the git and card-ops surfaces are injected as interfaces (`Ops`,
+  `GitOps`, `PRCreator`).
 - `internal/worker` is the only place that wires the full stack together.
 
 If a change makes the harness reach for orchestration, push the dependency the
@@ -163,11 +161,18 @@ or a mounted file only — never via flags or committed YAML.
    Performance — parallel, read-only (`NewReadOnlyRegistry`), behind a spec/test
    gate; the orchestrator synthesizes the report. Loop to the `review_attempts`
    cap.
-5. **Model selection is split in two.** The planner (a fixed capable model)
-   emits a complexity tier per role; deterministic code maps the tier to the
-   cost-optimal model. The LLM never names a model. Pins (global → project →
-   card) override. The window-fit guard keeps a too-small model off oversized
-   work.
+5. **Model selection is priors-only.** The planner (a fixed capable model) emits
+   a complexity tier per role — simple / moderate / complex / critical;
+   deterministic code maps the tier to the cost-optimal model. The LLM never
+   names a model. A candidate must be tool-capable, not blacklisted, fit the
+   window, and carry a per-role quality prior that clears the tier bar (floor
+   0.65); there is **no measured-capability gate**. An eligible operator
+   favorite wins outright; otherwise the most capable candidate within a price
+   headroom of the cheapest is chosen. Pins (global → project → card) override.
+   Priors, favorites, and the blacklist are injected at run start from CM's
+   `SelectionContext` payload (`registry.FromSelection`) — nothing is embedded.
+   The blacklist is self-learning: a model that proves harness-incapable mid-run
+   is reported back, excluded, and a replacement re-selected.
 6. **No compactor in v1.** Subagent isolation + `--max-turns`/`--max-cost`
    caps + window-aware selection bound context growth. Nearing the window emits
    a `context_limit` event and returns **incomplete** — the orchestrator treats
@@ -196,7 +201,6 @@ make build          # go build ./... + the contextmatrix-agent binary
 make test           # go test ./...
 make lint           # golangci-lint run
 make fmt            # gofumpt -w .
-make eval           # eval matrix cost estimate (--dry-run)
 make docker-worker  # build the worker image
 
 # Drive the harness locally, no ContextMatrix needed:
@@ -213,10 +217,9 @@ CI — keep it clean.
 
 These are gitignored point-in-time records — never commit them: `*-RESULTS.md`,
 `capabilities-*.json`, `capabilities-*.md`, `transcripts/`, `eval-out/`,
-`.envrc`. The **only** tracked capability baselines are
-`internal/registry/data/capabilities.json` and
-`internal/registry/data/model-priors.json`, both embedded at build time
-(changing either requires a rebuild).
+`.envrc`. Nothing model-related is embedded in the binary: priors, favorites,
+and the blacklist all arrive at run start from CM's `SelectionContext` payload
+(`registry.FromSelection`), so there is no tracked baseline to keep in sync.
 
 ## Mandatory verification before proceeding
 
