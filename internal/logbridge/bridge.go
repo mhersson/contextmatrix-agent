@@ -21,17 +21,31 @@ type sub struct {
 	project string // empty = all projects
 }
 
+// DropObserver is notified once per LogEntry dropped because a subscriber's
+// channel was full. The serve layer supplies a Prometheus-backed adapter; the
+// interface keeps logbridge free of any metrics dependency.
+type DropObserver interface {
+	ObserveDrop()
+}
+
 // Hub fans out LogEntry frames to registered subscribers.
 // mu protects subs and nextID.
 type Hub struct {
-	mu     sync.Mutex
-	subs   map[int]*sub
-	nextID int
+	mu           sync.Mutex
+	subs         map[int]*sub
+	nextID       int
+	dropObserver DropObserver
 }
 
 // NewHub creates a ready Hub.
 func NewHub() *Hub {
 	return &Hub{subs: make(map[int]*sub)}
+}
+
+// NewHubWithDropObserver creates a Hub that notifies obs each time a full
+// subscriber channel forces a drop. A nil obs behaves like NewHub.
+func NewHubWithDropObserver(obs DropObserver) *Hub {
+	return &Hub{subs: make(map[int]*sub), dropObserver: obs}
 }
 
 // Subscribe registers a subscriber. An empty project string receives all
@@ -73,6 +87,9 @@ func (h *Hub) Publish(e protocol.LogEntry) {
 		select {
 		case s.ch <- e:
 		default:
+			if h.dropObserver != nil {
+				h.dropObserver.ObserveDrop()
+			}
 		}
 	}
 }
