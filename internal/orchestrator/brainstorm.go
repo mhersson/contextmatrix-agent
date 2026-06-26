@@ -84,7 +84,7 @@ func (o *run) runBrainstorm(ctx context.Context, model string) (string, error) {
 			return "", err
 		}
 
-		task := fmt.Sprintf(brainstormPrompt, o.tc.Title, o.tc.Description, convoBlock(convo))
+		task := fmt.Sprintf(brainstormPrompt, o.grounding, o.tc.Title, o.tc.Description, convoBlock(convo))
 
 		res, err := o.runModel(ctx, d.ReadTools, task, model)
 

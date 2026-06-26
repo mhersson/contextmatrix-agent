@@ -51,7 +51,7 @@ func (o *run) skillEngage() string {
 // optional resume block (existing subtasks), an optional feedback block (HITL
 // reviewer's requested changes on a re-draft), and an optional repair block
 // (the previous parse error). Empty optional blocks collapse to nothing.
-const planPrompt = `You are the planning agent for a software task. You have read-only
+const planPrompt = `%sYou are the planning agent for a software task. You have read-only
 tools (read, grep, glob) to inspect the codebase. You do NOT create or modify
 cards or files — you only read code and output a plan as JSON.
 
@@ -109,7 +109,7 @@ Respond with ONLY a JSON object, no prose:
 // the same root-cause-first discipline, but the investigator has only read
 // tools and returns a "## Diagnosis" text blob (no card writes) that grounds
 // the plan. The trailing %s slots are filled by runDiagnose: card title, body.
-const diagnosePrompt = `You are a read-only debugging investigator for a task that looks like a bug.
+const diagnosePrompt = `%sYou are a read-only debugging investigator for a task that looks like a bug.
 You have read-only tools (read, grep, glob) to inspect the codebase. You do NOT
 modify files, run git, or create cards. Find the ROOT CAUSE — a fix is planned
 separately, after you finish.
@@ -181,7 +181,7 @@ Fix anything you find before finishing.`
 //
 // The trailing %s slots are filled by runExecute: subtask title, subtask
 // description, parent card title, parent card body.
-const coderPrompt = `%sYou are the coding agent for one subtask of a larger task. You have the full
+const coderPrompt = `%s%sYou are the coding agent for one subtask of a larger task. You have the full
 write toolset (read, grep, glob, edit, write, bash) rooted at the workspace.
 Implement EXACTLY this subtask — nothing from sibling subtasks, nothing
 speculative.
@@ -233,7 +233,7 @@ Description:
 // three below), parent card title, parent card description, the full branch diff
 // against base, and an optional prior-findings block (the previous round's
 // findings on delta rounds). The empty prior-findings block collapses to nothing.
-const specialistPrompt = `%sYou are a code-review specialist. You have read-only tools (read, grep, glob)
+const specialistPrompt = `%s%sYou are a code-review specialist. You have read-only tools (read, grep, glob)
 to inspect the codebase. You do NOT create or modify cards or files, and you do
 NOT run git. Produce a findings report as TEXT — another agent synthesizes the
 three specialist reports into a single verdict.
@@ -313,7 +313,7 @@ Stay strictly within security and performance; do not opine outside it.`
 // findings on delta rounds), the concatenated specialist findings, and an
 // optional repair block (the previous parse error). Empty optional blocks
 // collapse to nothing.
-const synthesisPrompt = `You are the review synthesizer. Three specialists (correctness, design,
+const synthesisPrompt = `%sYou are the review synthesizer. Three specialists (correctness, design,
 security) reviewed a change and produced the findings below, each with a
 suggested severity. Merge duplicates and decide a single verdict. Severity is
 yours to set: weigh each finding's actual impact on the task yourself — a
@@ -368,7 +368,7 @@ When approved is true, fixes must be an empty array.
 //
 // The trailing %s slots are filled by runFix: parent card title, parent card
 // description, and the findings list.
-const fixPrompt = `%sYou are the coding agent addressing review feedback on the current branch.
+const fixPrompt = `%s%sYou are the coding agent addressing review feedback on the current branch.
 You have the full write toolset (read, grep, glob, edit, write, bash) rooted at
 the workspace. Apply fixes for EXACTLY the findings below — apply only the literal
 fix, add no new abstractions, middleware, interfaces, or dependencies. If a finding
@@ -442,7 +442,7 @@ Respond with ONLY the Markdown PR body — no surrounding prose, no code fences.
 //
 // The trailing %s slots are filled by runDocument: parent card title, parent
 // card description, the plan overview (subtask titles), and the branch diff.
-const documentPrompt = `%sYou are the documentation agent for completed work that review will inspect
+const documentPrompt = `%s%sYou are the documentation agent for completed work that review will inspect
 next. You have the full write toolset (read, grep, glob, edit, write, bash)
 rooted at the workspace. Decide whether external documentation is needed for
 this change and, if so, write the minimum effective documentation. You write
@@ -523,7 +523,7 @@ Respond with ONLY a JSON object, no prose:
 // orchestrator records the design from the marked output (the model never writes
 // the card). The %s slots are filled by runBrainstorm: card title, card
 // description, and the conversation-so-far block.
-const brainstormPrompt = `You are a design facilitator turning a card's stated intent into a fully-formed
+const brainstormPrompt = `%sYou are a design facilitator turning a card's stated intent into a fully-formed
 design through dialogue with a human teammate. You have read-only tools (read,
 grep, glob) to explore the codebase. You do NOT write files or run git — the
 agreed design is captured from your final message.
