@@ -19,6 +19,8 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+
+	"github.com/mhersson/contextmatrix-agent/internal/metrics"
 )
 
 // Container labels. The agent label marks every container this executor owns so
@@ -160,7 +162,8 @@ type DockerExecutor struct {
 	onExit func(project, cardID string, exitCode int64)
 	onLog  func(project, cardID string, line []byte, stderr bool)
 
-	logger *slog.Logger
+	logger  *slog.Logger
+	metrics *metrics.Metrics
 }
 
 // Config carries the DockerExecutor dependencies. onExit and onLog may be nil
@@ -178,6 +181,9 @@ type Config struct {
 	OnLog  func(project, cardID string, line []byte, stderr bool)
 
 	Logger *slog.Logger
+	// Metrics is the Prometheus bundle. Nil disables container-duration
+	// observation.
+	Metrics *metrics.Metrics
 }
 
 // NewDockerExecutor wires a DockerExecutor from its dependencies.
@@ -197,6 +203,7 @@ func NewDockerExecutor(cfg Config) *DockerExecutor {
 		onExit:           cfg.OnExit,
 		onLog:            cfg.OnLog,
 		logger:           logger,
+		metrics:          cfg.Metrics,
 	}
 }
 
@@ -281,7 +288,7 @@ func (e *DockerExecutor) Launch(ctx context.Context, spec LaunchSpec) error {
 	// a returned webhook handler would cancel a still-running container's wait
 	// and cleanup. The container timeout is the bound.
 	//nolint:gosec // G118: detached ctx is intentional; container outlives the request
-	go e.waitAndCleanup(spec.Project, spec.CardID, resp.ID, attach, done, log)
+	go e.waitAndCleanup(spec.Project, spec.CardID, resp.ID, run.StartedAt, attach, done, log)
 
 	log.Info("container launched", "container_id", truncateID(resp.ID), "name", name)
 
@@ -316,10 +323,12 @@ func (e *DockerExecutor) pump(project, cardID string, r io.Reader, log *slog.Log
 }
 
 // waitAndCleanup blocks on ContainerWait under the container timeout, kills on
-// timeout, force-removes the container, clears the tracker entry, closes the
-// attach connection, signals the watchdog via done, and fires onExit.
+// timeout, force-removes the container, observes its duration by outcome,
+// clears the tracker entry, closes the attach connection, signals the watchdog
+// via done, and fires onExit.
 func (e *DockerExecutor) waitAndCleanup(
 	project, cardID, containerID string,
+	startedAt time.Time,
 	attach types.HijackedResponse,
 	done chan struct{},
 	log *slog.Logger,
@@ -328,6 +337,7 @@ func (e *DockerExecutor) waitAndCleanup(
 	defer attach.Close()
 
 	exitCode := int64(0)
+	timedOut := false
 
 	waitCtx, cancel := context.WithTimeout(context.Background(), e.containerTimeout)
 	defer cancel()
@@ -343,6 +353,8 @@ func (e *DockerExecutor) waitAndCleanup(
 	case err := <-errCh:
 		if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
 			log.Warn("container timed out, killing", "timeout", e.containerTimeout)
+
+			timedOut = true
 		} else {
 			log.Warn("container wait failed, killing", "error", err)
 		}
@@ -357,6 +369,11 @@ func (e *DockerExecutor) waitAndCleanup(
 
 	if err := e.docker.ContainerRemove(rmCtx, containerID, container.RemoveOptions{Force: true}); err != nil {
 		log.Warn("failed to remove container", "container_id", truncateID(containerID), "error", err)
+	}
+
+	if e.metrics != nil {
+		outcome := resolveOutcome(timedOut, e.tracker.Reason(project, cardID), exitCode)
+		e.metrics.ContainerDuration.WithLabelValues(outcome).Observe(time.Since(startedAt).Seconds())
 	}
 
 	e.tracker.Remove(project, cardID)
@@ -397,6 +414,7 @@ func (e *DockerExecutor) runIdleWatchdog(project, cardID, containerID string, do
 				"idle_timeout", e.idleTimeout,
 				"last_activity", last.Format(time.RFC3339Nano),
 			)
+			e.tracker.SetReason(project, cardID, metrics.OutcomeIdleTimeout)
 			e.kill(containerID, log)
 
 			return
@@ -411,6 +429,8 @@ func (e *DockerExecutor) Kill(ctx context.Context, project, cardID string) error
 	if !ok {
 		return fmt.Errorf("%w: %s/%s", ErrNotFound, project, cardID)
 	}
+
+	e.tracker.SetReason(project, cardID, metrics.OutcomeKilled)
 
 	if err := e.docker.ContainerKill(ctx, run.ContainerID, "SIGKILL"); err != nil {
 		return fmt.Errorf("kill container %s/%s: %w", project, cardID, err)
