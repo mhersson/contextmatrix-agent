@@ -17,6 +17,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/executor"
 	"github.com/mhersson/contextmatrix-agent/internal/frames"
 	"github.com/mhersson/contextmatrix-agent/internal/logbridge"
+	"github.com/mhersson/contextmatrix-agent/internal/metrics"
 	protocol "github.com/mhersson/contextmatrix-protocol"
 )
 
@@ -125,6 +126,9 @@ type Config struct {
 	// package default; tests shrink it.
 	KeepaliveInterval time.Duration
 
+	// Metrics is the Prometheus bundle. Nil disables request instrumentation.
+	Metrics *metrics.Metrics
+
 	Logger *slog.Logger
 }
 
@@ -153,6 +157,8 @@ type Server struct {
 	// keepaliveInterval is the SSE comment heartbeat period. Zero means the
 	// package default. Tests shrink it; production leaves it unset.
 	keepaliveInterval time.Duration
+
+	metrics *metrics.Metrics
 
 	logger *slog.Logger
 
@@ -208,6 +214,7 @@ func NewServer(cfg Config) *Server {
 		dedup:             dedup,
 		draining:          draining,
 		keepaliveInterval: cfg.KeepaliveInterval,
+		metrics:           cfg.Metrics,
 		logger:            logger,
 	}
 }
@@ -219,18 +226,26 @@ func NewServer(cfg Config) *Server {
 func (s *Server) Routes() *http.ServeMux {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("POST /trigger", s.auth(s.drainGate(s.handleTrigger)))
-	mux.HandleFunc("POST /kill", s.auth(s.handleKill))
-	mux.HandleFunc("POST /stop-all", s.auth(s.handleStopAll))
-	mux.HandleFunc("POST /message", s.auth(s.drainGate(s.handleMessage)))
-	mux.HandleFunc("POST /promote", s.auth(s.drainGate(s.handlePromote)))
-	mux.HandleFunc("POST /end-session", s.auth(s.drainGate(s.handleEndSession)))
-	mux.HandleFunc("GET /containers", s.auth(s.handleContainers))
-	mux.HandleFunc("GET /logs", s.auth(s.handleLogs))
-	mux.HandleFunc("GET /health", s.handleHealth)
-	mux.HandleFunc("GET /readyz", s.handleReadyz)
+	mux.HandleFunc("POST /trigger", s.recordMetrics(s.auth(s.drainGate(s.handleTrigger))))
+	mux.HandleFunc("POST /kill", s.recordMetrics(s.auth(s.handleKill)))
+	mux.HandleFunc("POST /stop-all", s.recordMetrics(s.auth(s.handleStopAll)))
+	mux.HandleFunc("POST /message", s.recordMetrics(s.auth(s.drainGate(s.handleMessage))))
+	mux.HandleFunc("POST /promote", s.recordMetrics(s.auth(s.drainGate(s.handlePromote))))
+	mux.HandleFunc("POST /end-session", s.recordMetrics(s.auth(s.drainGate(s.handleEndSession))))
+	mux.HandleFunc("GET /containers", s.recordMetrics(s.auth(s.handleContainers)))
+	mux.HandleFunc("GET /logs", s.recordMetrics(s.auth(s.handleLogs)))
+	mux.HandleFunc("GET /health", s.recordMetrics(s.handleHealth))
+	mux.HandleFunc("GET /readyz", s.recordMetrics(s.handleReadyz))
 
 	return mux
+}
+
+// AdminAuth exposes the HMAC verifier for the admin /metrics endpoint, which
+// the serve layer mounts on a separate loopback listener. It reuses the same
+// signed-GET verification, replay cache, and skew as the webhook routes — the
+// agent-backend signed-GET HMAC is real auth, preserved here.
+func (s *Server) AdminAuth(next http.HandlerFunc) http.HandlerFunc {
+	return s.auth(next)
 }
 
 // stdinLock returns the per-run mutex for project/cardID, creating it on first
