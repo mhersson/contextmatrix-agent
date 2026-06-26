@@ -16,6 +16,8 @@ import (
 	"time"
 
 	protocol "github.com/mhersson/contextmatrix-protocol"
+
+	"github.com/mhersson/contextmatrix-agent/internal/metrics"
 )
 
 const (
@@ -44,6 +46,9 @@ type Client struct {
 	// avoid sleeping. Index i is the delay before the (i+1)-th attempt; the
 	// first attempt (i=0) never sleeps.
 	delays [maxAttempts]time.Duration
+
+	// metrics counts retry attempts. Nil disables counting.
+	metrics *metrics.Metrics
 }
 
 // New creates a new Client. baseURL must not have a trailing slash; if it
@@ -60,6 +65,14 @@ func New(baseURL, apiKey string, logger *slog.Logger) *Client {
 		logger:  logger,
 		delays:  defaultDelays,
 	}
+}
+
+// WithMetrics attaches a metrics bundle so retry attempts are counted. Returns
+// the client for chaining. A nil bundle leaves counting disabled.
+func (c *Client) WithMetrics(m *metrics.Metrics) *Client {
+	c.metrics = m
+
+	return c
 }
 
 // ReportStatus posts runner_status ∈ running|completed|failed to
@@ -90,6 +103,10 @@ func (c *Client) ReportStatus(ctx context.Context, cardID, project, status, mess
 		if attempt > 0 {
 			if err := ctxSleep(ctx, c.delays[attempt]); err != nil {
 				return err
+			}
+
+			if c.metrics != nil {
+				c.metrics.CallbackRetriesTotal.WithLabelValues("status").Inc()
 			}
 		}
 
@@ -147,6 +164,10 @@ func (c *Client) VerifyAutonomous(ctx context.Context, project, cardID string) (
 		if attempt > 0 {
 			if err := ctxSleep(ctx, c.delays[attempt]); err != nil {
 				return false, err
+			}
+
+			if c.metrics != nil {
+				c.metrics.CallbackRetriesTotal.WithLabelValues("verify-autonomous").Inc()
 			}
 		}
 

@@ -13,8 +13,11 @@ import (
 	"time"
 
 	protocol "github.com/mhersson/contextmatrix-protocol"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/mhersson/contextmatrix-agent/internal/metrics"
 )
 
 func testLogger() *slog.Logger {
@@ -196,4 +199,27 @@ func TestVerifyAutonomous_MalformedBody(t *testing.T) {
 	auto, err := c.VerifyAutonomous(context.Background(), "proj", "CMX-001")
 	require.Error(t, err, "malformed body must return an error")
 	assert.False(t, auto)
+}
+
+func TestReportStatus_CountsRetries(t *testing.T) {
+	apiKey := "test-secret-key-that-is-long-enough"
+
+	var hits atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+
+		w.WriteHeader(http.StatusInternalServerError) // 5xx is retryable
+	}))
+	defer srv.Close()
+
+	m := metrics.New()
+	c := newFastClient(srv.URL, apiKey).WithMetrics(m)
+
+	err := c.ReportStatus(context.Background(), "C-1", "proj", "running", "")
+	require.Error(t, err, "all attempts fail")
+
+	assert.Equal(t, int32(3), hits.Load(), "three attempts were made")
+	assert.InEpsilon(t, float64(2), testutil.ToFloat64(m.CallbackRetriesTotal.WithLabelValues("status")), 1e-9,
+		"two retries follow the first attempt")
 }
