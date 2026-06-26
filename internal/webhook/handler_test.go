@@ -652,21 +652,6 @@ func TestEndSession_UntrackedReturns200(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code, "idempotent: nothing to end is success")
 }
 
-// ---- refresh-knowledge ------------------------------------------------------
-
-func TestRefreshKnowledge_Returns501(t *testing.T) {
-	h := newHarness(t, 4)
-
-	w := h.do(t, http.MethodPost, "/refresh-knowledge",
-		protocol.RefreshKnowledgePayload{Project: "proj", Repo: "repo", RepoURL: "r", AgentID: "human:x"})
-
-	require.Equal(t, http.StatusNotImplemented, w.Code)
-
-	er := decodeErr(t, w)
-	assert.Equal(t, protocol.CodeForbidden, er.Code)
-	assert.Equal(t, "knowledge refresh is not supported by the agent backend", er.Message)
-}
-
 // ---- containers -------------------------------------------------------------
 
 func TestContainers_ListsTrackedRuns(t *testing.T) {
