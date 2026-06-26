@@ -105,3 +105,33 @@ func TestDiscoverGrounding(t *testing.T) {
 		assert.Len(t, docs, groundingMaxDocs)
 	})
 }
+
+func TestGroundingBlock(t *testing.T) {
+	assert.Empty(t, groundingBlock(nil))
+
+	docs := []groundingDoc{
+		{relDir: ".", name: "CLAUDE.md", content: "# root rules"},
+		{relDir: "web", name: "CLAUDE.md", content: "# web rules"},
+	}
+	block := groundingBlock(docs)
+
+	assert.Contains(t, block, "REPO GROUNDING")
+	assert.Contains(t, block, "=== ./CLAUDE.md ===")
+	assert.Contains(t, block, "# root rules")
+	assert.Contains(t, block, "=== web/CLAUDE.md ===")
+	assert.Contains(t, block, "# web rules")
+
+	// Root divider must precede the web divider.
+	rootDiv := strings.Index(block, "=== ./CLAUDE.md ===")
+	webDiv := strings.Index(block, "=== web/CLAUDE.md ===")
+
+	assert.Less(t, rootDiv, webDiv, "root divider should appear before web divider")
+
+	// Each doc's content must appear after its own divider and before the next.
+	rootContent := strings.Index(block, "# root rules")
+	webContent := strings.Index(block, "# web rules")
+
+	assert.Less(t, rootDiv, rootContent, "root content should follow root divider")
+	assert.Less(t, rootContent, webDiv, "root content should precede web divider")
+	assert.Less(t, webDiv, webContent, "web content should follow web divider")
+}

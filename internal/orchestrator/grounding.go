@@ -133,3 +133,32 @@ func sortGroundingDocs(docs []groundingDoc) {
 		return docs[i].relDir < docs[j].relDir
 	})
 }
+
+// groundingBlock renders discovered instruction files as a prompt block.
+// Empty input yields "" so phases inject nothing when no files exist.
+func groundingBlock(docs []groundingDoc) string {
+	if len(docs) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+
+	b.WriteString("REPO GROUNDING — the target repository's own instructions; " +
+		"follow them, they override generic defaults.\n")
+
+	for _, d := range docs {
+		var label string
+
+		if d.relDir != "." {
+			label = filepath.ToSlash(d.relDir) + "/" + d.name
+		} else {
+			label = "./" + d.name
+		}
+
+		b.WriteString("\n=== " + label + " ===\n")
+		b.WriteString(d.content)
+		b.WriteString("\n")
+	}
+
+	return b.String()
+}
