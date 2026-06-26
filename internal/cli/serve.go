@@ -10,17 +10,20 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
 	githubauth "github.com/mhersson/contextmatrix-githubauth"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
 
 	"github.com/mhersson/contextmatrix-agent/internal/callback"
 	"github.com/mhersson/contextmatrix-agent/internal/config"
 	"github.com/mhersson/contextmatrix-agent/internal/executor"
 	"github.com/mhersson/contextmatrix-agent/internal/logbridge"
+	"github.com/mhersson/contextmatrix-agent/internal/metrics"
 	"github.com/mhersson/contextmatrix-agent/internal/redact"
 	"github.com/mhersson/contextmatrix-agent/internal/secrets"
 	"github.com/mhersson/contextmatrix-agent/internal/taskskills"
@@ -81,6 +84,8 @@ func runServe(ctx context.Context, configPath string) error {
 	logger := newServeLogger(cfg.LogLevel)
 	slog.SetDefault(logger)
 
+	mx := metrics.New()
+
 	provider, err := newTokenProvider(cfg.GitHub)
 	if err != nil {
 		return err
@@ -113,10 +118,10 @@ func runServe(ctx context.Context, configPath string) error {
 	}
 
 	tracker := executor.NewTracker(cfg.MaxConcurrent)
-	hub := logbridge.NewHub()
+	hub := logbridge.NewHubWithDropObserver(dropAdapter{mx: mx})
 	redactor := redact.New([]string{cfg.OpenRouterAPIKey, cfg.MCPAPIKey, cfg.APIKey})
 
-	cbClient := callback.New(cfg.ContextMatrixURL, cfg.APIKey, logger)
+	cbClient := callback.New(cfg.ContextMatrixURL, cfg.APIKey, logger).WithMetrics(mx)
 
 	bridge := logbridge.New(hub, redactor, tracker.SetAwaiting)
 
@@ -130,6 +135,7 @@ func runServe(ctx context.Context, configPath string) error {
 		OnLog:            bridge.BridgeLine,
 		OnExit:           onContainerExit(cbClient, logger),
 		Logger:           logger,
+		Metrics:          mx,
 	})
 
 	// Force-remove any agent-labeled containers left by a previous process before
@@ -158,6 +164,7 @@ func runServe(ctx context.Context, configPath string) error {
 		Dedup:          dedup,
 		Draining:       &draining,
 		Logger:         logger,
+		Metrics:        mx,
 	})
 
 	// The replay janitor sweeps expired entries on the cache's own interval.
@@ -170,6 +177,11 @@ func runServe(ctx context.Context, configPath string) error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
+	adminSrv := buildAdminServer(cfg, srv, mx, logger)
+
+	stopGauge := startRunningContainersGauge(tracker, mx, logger, 30*time.Second)
+	defer stopGauge()
+
 	serverErr := make(chan error, 1)
 
 	go func() {
@@ -179,6 +191,16 @@ func runServe(ctx context.Context, configPath string) error {
 			serverErr <- err
 		}
 	}()
+
+	if adminSrv != nil {
+		go func() {
+			logger.Info("admin server listening", "addr", adminSrv.Addr)
+
+			if err := adminSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Error("admin server error", "error", err)
+			}
+		}()
+	}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -192,7 +214,7 @@ func runServe(ctx context.Context, configPath string) error {
 		logger.Info("context cancelled, shutting down")
 	}
 
-	gracefulShutdown(httpServer, exec, tracker, cbClient, &draining, logger)
+	gracefulShutdown(httpServer, adminSrv, exec, tracker, cbClient, &draining, logger)
 	refreshCancel()
 	logger.Info("agent service stopped")
 
@@ -203,9 +225,11 @@ func runServe(ctx context.Context, configPath string) error {
 // reports each as failed to ContextMatrix. Mirrors the runner's structure:
 //  1. flip draining so /readyz returns 503 and mutating routes refuse new work
 //  2. Shutdown the HTTP server with a bounded budget
-//  3. for each tracked run: Kill the container and report "failed"
+//  3. Shutdown the admin server if enabled
+//  4. for each tracked run: Kill the container and report "failed"
 func gracefulShutdown(
 	httpServer *http.Server,
+	adminServer *http.Server,
 	exec executor.Executor,
 	tracker *executor.Tracker,
 	reporter webhook.StatusReporter,
@@ -220,6 +244,16 @@ func gracefulShutdown(
 
 	if err := httpServer.Shutdown(httpCtx); err != nil {
 		logger.Error("http server shutdown error", "error", err)
+	}
+
+	if adminServer != nil {
+		adminCtx, adminCancel := context.WithTimeout(context.Background(), httpShutdownTimeout)
+
+		if err := adminServer.Shutdown(adminCtx); err != nil {
+			logger.Error("admin server shutdown error", "error", err)
+		}
+
+		adminCancel()
 	}
 
 	for _, run := range tracker.List() {
@@ -368,4 +402,83 @@ func newServeLogger(lvl string) *slog.Logger {
 	}
 
 	return slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+}
+
+// dropAdapter bridges logbridge.DropObserver to the Prometheus broadcaster-drops
+// counter without forcing logbridge to import Prometheus.
+type dropAdapter struct{ mx *metrics.Metrics }
+
+func (a dropAdapter) ObserveDrop() {
+	if a.mx == nil {
+		return
+	}
+
+	a.mx.BroadcasterDropsTotal.Inc()
+}
+
+// buildAdminServer returns the loopback admin HTTP server serving Prometheus
+// /metrics behind HMAC, or nil when admin_port is 0. Bound to 127.0.0.1 so the
+// metrics surface is never exposed on a public interface.
+func buildAdminServer(
+	cfg *config.ServiceConfig,
+	srv *webhook.Server,
+	mx *metrics.Metrics,
+	logger *slog.Logger,
+) *http.Server {
+	if cfg.AdminPort == 0 {
+		logger.Info("admin endpoints disabled (admin_port=0)")
+
+		return nil
+	}
+
+	mux := http.NewServeMux()
+	metricsHandler := promhttp.HandlerFor(mx.Registry, promhttp.HandlerOpts{})
+	mux.HandleFunc("GET /metrics", srv.AdminAuth(metricsHandler.ServeHTTP))
+
+	logger.Info("admin endpoints registered", "port", cfg.AdminPort, "metrics_auth", "hmac")
+
+	return &http.Server{
+		Addr:              fmt.Sprintf("127.0.0.1:%d", cfg.AdminPort),
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+}
+
+// startRunningContainersGauge polls tracker.Count() on a ticker and publishes
+// it to the running-containers gauge. Returns an idempotent stop function. A
+// non-positive interval disables the poller.
+func startRunningContainersGauge(
+	tracker *executor.Tracker,
+	mx *metrics.Metrics,
+	logger *slog.Logger,
+	interval time.Duration,
+) func() {
+	if interval <= 0 {
+		logger.Warn("running-containers gauge disabled: non-positive interval", "interval", interval)
+
+		return func() {}
+	}
+
+	stop := make(chan struct{})
+
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				mx.RunningContainers.Set(float64(tracker.Count()))
+			}
+		}
+	}()
+
+	var once sync.Once
+
+	return func() { once.Do(func() { close(stop) }) }
 }
