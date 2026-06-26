@@ -244,6 +244,35 @@ and run exactly as before — grounding never fails a run.
 - **Prompt-caching the grounding block:** the primary cost lever (the block is
   identical across all phases in a run and is a natural cache candidate).
 
+## Observability
+
+`serve` exposes Prometheus metrics on a **separate, loopback-only admin
+listener**, mirroring the runner — metrics never ride the public webhook port.
+
+- **Endpoint:** `GET /metrics` on `127.0.0.1:<admin_port>`, HMAC-signed (the
+  same signed-GET scheme as the webhook routes: sign `METHOD\nURI\nTS.BODY` with
+  the backend `api_key`). `admin_port: 0` (the default) disables the listener; a
+  typical enabled value is `9093` (the public port defaults to `9092`). Env
+  override: `CMX_ADMIN_PORT`.
+- **Metric set** (`cm_agent_*`, on a dedicated registry that also carries the
+  standard `go_*` / `process_*` collectors):
+
+  | Metric | Type | Labels |
+  | --- | --- | --- |
+  | `cm_agent_webhook_requests_total` | counter | `endpoint`, `status`, `code` |
+  | `cm_agent_webhook_request_duration_seconds` | histogram | `endpoint` |
+  | `cm_agent_container_duration_seconds` | histogram | `outcome` (`success`/`failure`/`timeout`/`killed`/`idle_timeout`) |
+  | `cm_agent_running_containers` | gauge | — |
+  | `cm_agent_callback_retries_total` | counter | `endpoint` (`status`/`verify-autonomous`) |
+  | `cm_agent_broadcaster_drops_total` | counter | — |
+
+  `endpoint` labels are bounded by an allowlist
+  (`internal/metrics.NormalizeEndpoint`); unknown paths collapse to `other`. No
+  `card_id` / `project` labels anywhere.
+- **Deferred:** panic-recovery counting (`panic_recovered_total` — the serve
+  process has no recovery defers yet) and OTEL tracing. The agent keeps its
+  correlation IDs.
+
 ## Running and testing
 
 ```bash
