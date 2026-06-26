@@ -225,7 +225,6 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("POST /message", s.auth(s.drainGate(s.handleMessage)))
 	mux.HandleFunc("POST /promote", s.auth(s.drainGate(s.handlePromote)))
 	mux.HandleFunc("POST /end-session", s.auth(s.drainGate(s.handleEndSession)))
-	mux.HandleFunc("POST /refresh-knowledge", s.auth(s.handleRefreshKnowledge))
 	mux.HandleFunc("GET /containers", s.auth(s.handleContainers))
 	mux.HandleFunc("GET /logs", s.auth(s.handleLogs))
 	mux.HandleFunc("GET /health", s.handleHealth)
@@ -618,20 +617,6 @@ func (s *Server) handleEndSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusAccepted, protocol.SuccessResponse{OK: true})
-}
-
-// ---- refresh-knowledge ------------------------------------------------------
-
-func (s *Server) handleRefreshKnowledge(w http.ResponseWriter, _ *http.Request) {
-	// The agent backend has no knowledge-base machinery (it is retired with the
-	// KB in C3), so this endpoint always refuses. protocol/codes.go (v0.2.0)
-	// defines no "unsupported"/"not_supported" code, so we use the nearest
-	// existing semantic: CodeForbidden, an authoritative refusal of a
-	// well-formed, authenticated request. The 501 status conveys "not
-	// implemented" to the operator; CM never sends this endpoint to the agent
-	// backend in practice.
-	writeError(w, http.StatusNotImplemented, protocol.CodeForbidden,
-		"knowledge refresh is not supported by the agent backend")
 }
 
 // ---- containers -------------------------------------------------------------

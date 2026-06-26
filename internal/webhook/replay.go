@@ -1,6 +1,6 @@
 // Package webhook is the agent backend's HTTP surface: the HMAC-verified
-// lifecycle endpoints (trigger, kill, stop-all, message, promote, end-session,
-// refresh-knowledge), the SSE /logs stream, and the health/readiness/containers
+// lifecycle endpoints (trigger, kill, stop-all, message, promote, end-session),
+// the SSE /logs stream, and the health/readiness/containers
 // probes ContextMatrix drives the backend through. It implements the
 // contextmatrix-protocol wire contract.
 package webhook

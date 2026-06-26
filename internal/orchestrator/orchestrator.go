@@ -194,6 +194,11 @@ type run struct {
 	// it as new scope (cross-round memory). Empty on round 1 and on resume.
 	lastFindings string
 
+	// grounding is the prebuilt REPO GROUNDING block (root + nested
+	// AGENTS.md/CLAUDE.md), injected into model phases. Built once in
+	// newRun; "" when the workspace has no instruction files.
+	grounding string
+
 	// runVerify executes the detected verify command (best-effort spec/test gate)
 	// and returns its combined output plus a pass flag. It is a struct field so
 	// tests can stub the subprocess; the default shells out via execVerify.
@@ -225,6 +230,7 @@ func newRun(d Deps, tc cmclient.TaskContext) *run {
 	o.coderModels = map[string]bool{}
 	o.excluded = map[string]bool{}
 	o.body = tc.Description
+	o.grounding = groundingBlock(discoverGrounding(d.Cfg.Workspace))
 	o.runVerify = func(ctx context.Context, argv []string) (string, bool) {
 		return execVerify(ctx, d.Cfg.Workspace, argv)
 	}

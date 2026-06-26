@@ -205,6 +205,45 @@ or a mounted file only — never via flags or committed YAML.
     `add_log action=skill_engaged`), CM's source-agnostic "Path A". Distinct
     from `workflow-skills` and the MCP `get_skill` tool.
 
+## Repo grounding
+
+At the start of every run (`newRun`), the orchestrator walks the cloned
+workspace (`Cfg.Workspace`) with `discoverGrounding` and caches the result on
+`run.grounding`. All model-driven phases — plan, diagnose, brainstorm, coder,
+fix, specialist, synthesis, and document — inject this block into their prompts.
+
+**Discovery rules (`discoverGrounding`):**
+
+- Root is always visited. Walk descends up to `groundingMaxDepth` (4) levels.
+- Per directory: `AGENTS.md` is preferred; `CLAUDE.md` is the fallback. Only
+  one file per directory is included — never both.
+- Skipped directories: `.git`, `node_modules`, `vendor`, `dist`, `build`,
+  `.next`, `target`, `.worktrees`.
+- Per-file cap: `groundingByteCap` (64 KB); excess is replaced with a
+  `[... truncated at 64 KB ...]` marker.
+- Total file cap: `groundingMaxDocs` (24); shallowest files are kept, a
+  `slog.Warn` is emitted on overflow.
+- Sorted root-first, then shallow → deep (alphabetical within the same depth).
+
+**Injection and caching:**
+
+`groundingBlock` formats the docs into a `REPO GROUNDING` prompt block.
+`newRun` builds it once and stores it on `run.grounding`; every phase reads the
+cached field — there is no per-phase re-scan.
+
+**Best-effort semantics:**
+
+A missing, empty, or non-directory workspace returns `nil` from
+`discoverGrounding`; `groundingBlock` then returns `""`. Phases inject nothing
+and run exactly as before — grounding never fails a run.
+
+**Deferred (future work):**
+
+- **v2 proximity-scoping:** the coder sees only the instruction file for its
+  subtask's directory subtree, not the full block.
+- **Prompt-caching the grounding block:** the primary cost lever (the block is
+  identical across all phases in a run and is a natural cache candidate).
+
 ## Running and testing
 
 ```bash
