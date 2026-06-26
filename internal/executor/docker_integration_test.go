@@ -8,8 +8,11 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types/container"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/mhersson/contextmatrix-agent/internal/metrics"
 )
 
 // integrationGuard skips the test unless CMX_TEST_DOCKER is set. These tests
@@ -107,11 +110,13 @@ func TestIntegration_LaunchEchoAndExit(t *testing.T) {
 
 	exits := newExitRecorder()
 	logs := &logCollector{}
+	m := metrics.New()
 
 	exec := newTestExecutor(t, Config{
 		ContainerTimeout: 30 * time.Second,
 		OnExit:           exits.onExit,
 		OnLog:            logs.onLog,
+		Metrics:          m,
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -151,6 +156,41 @@ func TestIntegration_LaunchEchoAndExit(t *testing.T) {
 
 	code := exits.wait(t, 30*time.Second)
 	assert.Equal(t, int64(0), code, "clean exit")
+
+	// Verify that waitAndCleanup observed exactly one container_duration sample.
+	// The observation happens before onExit fires, so by the time wait() returns
+	// the histogram is already populated.
+	assert.Equal(t, 1, testutil.CollectAndCount(m.ContainerDuration), "one container_duration series after one exit")
+
+	mfs, err := m.Registry.Gather()
+	require.NoError(t, err)
+
+	var durationFound bool
+
+	for _, mf := range mfs {
+		if mf.GetName() != "cm_agent_container_duration_seconds" {
+			continue
+		}
+
+		require.Len(t, mf.GetMetric(), 1, "exactly one outcome label combination")
+
+		var outcomeVal string
+
+		for _, lp := range mf.GetMetric()[0].GetLabel() {
+			if lp.GetName() == "outcome" {
+				outcomeVal = lp.GetValue()
+			}
+		}
+
+		assert.Equal(t, metrics.OutcomeSuccess, outcomeVal, "outcome label must be success")
+		assert.Equal(t, uint64(1), mf.GetMetric()[0].GetHistogram().GetSampleCount(), "histogram sample count must be 1")
+
+		durationFound = true
+
+		break
+	}
+
+	require.True(t, durationFound, "cm_agent_container_duration_seconds family must be present")
 
 	// Pump captured the echoed line.
 	assert.Eventually(t, func() bool {

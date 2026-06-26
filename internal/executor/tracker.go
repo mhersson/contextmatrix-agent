@@ -33,6 +33,7 @@ type Tracker struct {
 	max          int
 	awaiting     map[string]bool
 	lastActivity map[string]time.Time
+	reason       map[string]string
 }
 
 // NewTracker returns a Tracker that admits at most maxConcurrent runs.
@@ -42,6 +43,7 @@ func NewTracker(maxConcurrent int) *Tracker {
 		max:          maxConcurrent,
 		awaiting:     make(map[string]bool),
 		lastActivity: make(map[string]time.Time),
+		reason:       make(map[string]string),
 	}
 }
 
@@ -90,6 +92,7 @@ func (t *Tracker) Remove(project, cardID string) {
 	delete(t.byKey, k)
 	delete(t.awaiting, k)
 	delete(t.lastActivity, k)
+	delete(t.reason, k)
 }
 
 // List returns a snapshot slice of the tracked runs. Mutating the slice does
@@ -149,4 +152,28 @@ func (t *Tracker) LastActivity(project, cardID string) time.Time {
 	defer t.mu.Unlock()
 
 	return t.lastActivity[key(project, cardID)]
+}
+
+// SetReason records why a container is being terminated so waitAndCleanup can
+// label container_duration_seconds. Call it before the SIGKILL it explains. It
+// no-ops for an untracked run so a dead key never carries a stale reason.
+func (t *Tracker) SetReason(project, cardID, reason string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	k := key(project, cardID)
+	if _, ok := t.byKey[k]; !ok {
+		return
+	}
+
+	t.reason[k] = reason
+}
+
+// Reason returns the recorded termination reason for project/cardID, or "" if
+// none was recorded.
+func (t *Tracker) Reason(project, cardID string) string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	return t.reason[key(project, cardID)]
 }

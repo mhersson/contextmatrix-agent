@@ -396,6 +396,55 @@ selector_price_headroom: 0
 	assert.InDelta(t, 0.0, cfg.SelectorPriceHeadroom, 1e-9)
 }
 
+func TestServiceAdminPort_DefaultZero(t *testing.T) {
+	clearServiceEnv(t)
+
+	cfg, err := LoadService(filepath.Join(t.TempDir(), "nope.yaml"))
+	require.NoError(t, err)
+	assert.Equal(t, 0, cfg.AdminPort, "admin_port defaults to 0 (disabled)")
+}
+
+func TestServiceAdminPort_FromEnv(t *testing.T) {
+	clearServiceEnv(t)
+	t.Setenv("CMX_ADMIN_PORT", "9093")
+
+	cfg, err := LoadService(filepath.Join(t.TempDir(), "nope.yaml"))
+	require.NoError(t, err)
+	assert.Equal(t, 9093, cfg.AdminPort)
+}
+
+func TestServiceAdminPort_Validate(t *testing.T) {
+	t.Run("disabled is valid", func(t *testing.T) {
+		c := validServiceConfig()
+		c.AdminPort = 0
+		require.NoError(t, c.Validate())
+	})
+
+	t.Run("distinct port is valid", func(t *testing.T) {
+		c := validServiceConfig()
+		c.Port = 9092
+		c.AdminPort = 9093
+		require.NoError(t, c.Validate())
+	})
+
+	t.Run("out of range is rejected", func(t *testing.T) {
+		c := validServiceConfig()
+		c.AdminPort = 70000
+		err := c.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "admin_port")
+	})
+
+	t.Run("collision with port is rejected", func(t *testing.T) {
+		c := validServiceConfig()
+		c.Port = 9092
+		c.AdminPort = 9092
+		err := c.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "admin_port")
+	})
+}
+
 // clearServiceEnv unsets any CMX_* vars that could leak into a default/file
 // test from the developer's shell. t.Setenv restores them after the test.
 func clearServiceEnv(t *testing.T) {
@@ -406,6 +455,7 @@ func clearServiceEnv(t *testing.T) {
 		"CMX_API_KEY", "CMX_BASE_IMAGE", "CMX_MAX_CONCURRENT",
 		"CMX_GITHUB__AUTH_MODE", "CMX_GITHUB__PAT__TOKEN",
 		"CMX_MAX_CARD_COST", "CMX_SELECTOR_PRICE_HEADROOM",
+		"CMX_ADMIN_PORT",
 	} {
 		if _, ok := os.LookupEnv(e); ok {
 			t.Setenv(e, "")

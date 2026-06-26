@@ -89,6 +89,11 @@ type ServiceConfig struct {
 	// omitted from the container env (worker uses its own default); the default
 	// (1.5) applies when the key is absent from config and env.
 	SelectorPriceHeadroom float64
+
+	// AdminPort is the loopback-only admin listener that serves Prometheus
+	// /metrics behind HMAC. Zero disables it (the default). Workers never see
+	// it; it is host-side only.
+	AdminPort int
 }
 
 // serviceRaw is the koanf-unmarshalled wire shape. Duration fields are split:
@@ -101,6 +106,7 @@ type serviceRaw struct {
 	APIKey                    string            `koanf:"api_key"`
 	MCPAPIKey                 string            `koanf:"mcp_api_key"`
 	Port                      int               `koanf:"port"`
+	AdminPort                 int               `koanf:"admin_port"`
 	BaseImage                 string            `koanf:"base_image"`
 	ImagePullPolicy           string            `koanf:"image_pull_policy"`
 	MaxConcurrent             int               `koanf:"max_concurrent"`
@@ -210,6 +216,7 @@ func (r serviceRaw) toConfig() (*ServiceConfig, error) {
 		APIKey:                    r.APIKey,
 		MCPAPIKey:                 r.MCPAPIKey,
 		Port:                      r.Port,
+		AdminPort:                 r.AdminPort,
 		BaseImage:                 r.BaseImage,
 		ImagePullPolicy:           r.ImagePullPolicy,
 		MaxConcurrent:             r.MaxConcurrent,
@@ -300,6 +307,14 @@ func (c *ServiceConfig) Validate() error {
 
 	if c.Port < 1 || c.Port > 65535 {
 		return fmt.Errorf("port must be in 1..65535, got %d", c.Port)
+	}
+
+	if c.AdminPort != 0 && (c.AdminPort < 1 || c.AdminPort > 65535) {
+		return fmt.Errorf("admin_port must be 0 (disabled) or in 1..65535, got %d", c.AdminPort)
+	}
+
+	if c.AdminPort != 0 && c.AdminPort == c.Port {
+		return fmt.Errorf("admin_port must differ from port (both set to %d)", c.Port)
 	}
 
 	if c.ContainerTimeout > reconcileCap {
