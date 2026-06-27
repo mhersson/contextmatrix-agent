@@ -50,6 +50,8 @@ github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0 h1:5VipnvEpbqr2gA2VbM+nYVbkIF2
 github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0/go.mod h1:Hyl3n6Twe1hvtd9XUXDec4pTvgMSEixRuQKPTMH2bNs=
 github.com/inconshreveable/mousetrap v1.1.0 h1:wN+x4NVGpMsO7ErUn/mUI3vEoE6Jt13X2s0bqwp9tc8=
 github.com/inconshreveable/mousetrap v1.1.0/go.mod h1:vpF70FUmC8bwa3OWnCshd2FqLfsEA9PFc4w1p2J65bw=
+github.com/klauspost/compress v1.18.0 h1:c/Cqfb0r+Yi+JtIEq73FWXVkRonBlf0CRNYc8Zttxdo=
+github.com/klauspost/compress v1.18.0/go.mod h1:2Pp+KzxcywXVXMr50+X0Q/Lsb43OQHYWRCY2AiWywWQ=
 github.com/knadh/koanf/maps v0.1.2 h1:RBfmAW5CnZT+PJ1CVc1QSJKf4Xu9kxfQgYVQSu8hpbo=
 github.com/knadh/koanf/maps v0.1.2/go.mod h1:npD/QZY3V6ghQDdcQzl1W4ICNVTkohC8E73eI2xW4yI=
 github.com/knadh/koanf/parsers/yaml v1.1.0 h1:3ltfm9ljprAHt4jxgeYLlFPmUaunuCgu1yILuTXRdM4=
@@ -72,6 +74,8 @@ github.com/kylelemons/godebug v1.1.0 h1:RPNrshWIDI6G2gRW9EHilWtl7Z6Sb1BR0xunSBf0
 github.com/kylelemons/godebug v1.1.0/go.mod h1:9/0rRGxNHcop5bhtWyNeEfOS8JIWk580+fNqagV/RAw=
 github.com/mhersson/contextmatrix-githubauth v0.1.0 h1:wzbTo6DTPAL6BQUcFcOhafPU6m92DLt4Er4xIp7LfD8=
 github.com/mhersson/contextmatrix-githubauth v0.1.0/go.mod h1:jjMMyN9ieQgdy56N23korXlV+msG0+Wd+en+zQkuN7U=
+github.com/mhersson/contextmatrix-harness v0.1.0 h1:c89vLptwsVpfAWzUxu19IPB9GDGlcQu7WHxlSG69/fQ=
+github.com/mhersson/contextmatrix-harness v0.1.0/go.mod h1:v0W5JtDJVBi8cbzMUwLroSzEKKELC9uGlVGQnzxSIko=
 github.com/mhersson/contextmatrix-protocol v0.4.0 h1:9Y1EC1kZvOOg3rE5Q3GWc8DQKk3jL17a5U6t8HLJHqQ=
 github.com/mhersson/contextmatrix-protocol v0.4.0/go.mod h1:oukqhfSUHf3sNL5x+cKhftwaBP+AKQwseGlNlc4JZqU=
 github.com/mitchellh/copystructure v1.2.0 h1:vpKXTN4ewci03Vljg/q9QvCGUDttBOGBIa15WveJJGw=

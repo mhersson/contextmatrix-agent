@@ -13,7 +13,7 @@ import (
 	"strings"
 
 	"github.com/mhersson/contextmatrix-agent/internal/orchestrator"
-	"github.com/mhersson/contextmatrix-agent/internal/tools"
+	"github.com/mhersson/contextmatrix-harness/tools"
 )
 
 // ErrRebaseConflict is the rebase-conflict sentinel. It aliases

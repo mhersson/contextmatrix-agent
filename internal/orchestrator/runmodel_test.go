@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
-	"github.com/mhersson/contextmatrix-agent/internal/llm"
+	"github.com/mhersson/contextmatrix-harness/llm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

@@ -71,9 +71,10 @@ flowchart LR
   read-only review subagents, commits and pushes incrementally, and finalizes
   with an autosquash + force-push.
 
-The inner loop itself (`internal/harness`) is FSM-free and dependency-light by
-design — it is extraction-ready for a future shared `contextmatrix-harness`
-module consumed by both the autonomous agent and a later chat service.
+The inner loop lives in the standalone `github.com/mhersson/contextmatrix-harness`
+module (`events`, `llm`, `tools`, `harness`, `redact`) — FSM-free and
+dependency-free, shared with a planned chat backend. This service wraps it with
+the task FSM (`orchestrator`/`worker`) to execute board cards.
 
 ## Requirements
 

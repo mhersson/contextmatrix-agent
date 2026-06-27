@@ -10,10 +10,10 @@ import (
 	"strings"
 
 	"github.com/mhersson/contextmatrix-agent/internal/config"
-	"github.com/mhersson/contextmatrix-agent/internal/events"
-	"github.com/mhersson/contextmatrix-agent/internal/harness"
-	"github.com/mhersson/contextmatrix-agent/internal/llm"
-	"github.com/mhersson/contextmatrix-agent/internal/tools"
+	"github.com/mhersson/contextmatrix-harness/events"
+	"github.com/mhersson/contextmatrix-harness/harness"
+	"github.com/mhersson/contextmatrix-harness/llm"
+	"github.com/mhersson/contextmatrix-harness/tools"
 	"github.com/spf13/cobra"
 )
 

@@ -7,8 +7,8 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/mhersson/contextmatrix-agent/internal/harness"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
+	"github.com/mhersson/contextmatrix-harness/harness"
 )
 
 // commitMarker is the line prefix the coder appends to its final message to

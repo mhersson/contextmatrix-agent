@@ -55,12 +55,10 @@ cmd/contextmatrix-agent/main.go → entrypoint; builds the cobra root command
 internal/cli/        → cobra commands: run, serve, work
 internal/config/     → cobra + koanf config; Config (harness) and ServiceConfig (serve); CMX_* env tags
 
-# Inner loop — FSM-free, dependency-light (the extraction-ready harness core)
-internal/harness/    → Harness.Run: the tool-dispatch loop; SpawnSubagents fan-out; Verify
-internal/llm/        → raw-HTTP OpenAI-compatible OpenRouter client (Send/SendStream, SSE, models[] failover, catalog)
-internal/tools/      → tool registry + impls: read/edit/write/grep/glob/git/bash, jailed + env-scrubbed
-internal/registry/   → model selector: Resolve(actor, role), SelectByComplexity, SelectReviewPanel; priors-only, payload-driven (FromSelection)
-internal/events/     → event stream (model_request | model_response | tool_call | tool_result | usage | state_change | context_limit | error | …)
+# Inner loop — now the external github.com/mhersson/contextmatrix-harness module
+# (events, llm, tools, harness, redact): the FSM-free loop, the OpenRouter
+# client, the jailed tool registry, the event stream, and secret redaction.
+internal/registry/   → model selector: Resolve(actor, role), SelectByComplexity, SelectReviewPanel; priors-only, payload-driven (FromSelection) — stays agent-side (policy, not mechanism)
 
 # Autonomous executor — the FSM and its container lifecycle
 internal/orchestrator/ → light hand-FSM plan → execute → document → review → integrate → done; phase persistence; git finalize
@@ -74,7 +72,6 @@ internal/callback/   → status callbacks to /api/agent/*; VerifyAutonomous (fai
 internal/cmclient/   → MCP client to CM card operations (one agent identity per card)
 internal/logbridge/  → worker JSONL events → protocol.LogEntry, fan-out to /logs SSE, redaction, awaiting-human signal
 internal/frames/     → stdin control protocol (user_message | promote | end_session)
-internal/redact/     → literal-secret redaction for logs and transcripts
 
 # Quality
 internal/kata/       → embedded throwaway kata fixture used by tests
@@ -84,21 +81,20 @@ docker/Dockerfile.worker → the worker image (agent binary + git/rg/fd/gh/node/
 
 ## Boundary discipline (the load-bearing invariant)
 
-The harness core must stay **FSM-free and dependency-light** so it can be
-promoted to a standalone `contextmatrix-harness` module and shared with a future
-chat service. Verified import rules:
+The harness core now lives in the standalone `contextmatrix-harness` module. Its
+invariant is enforced **there** by `scripts/deps-gate.sh` (`make deps-gate` in
+that repo): the `harness` package imports only `events`/`llm`/`tools`, and the
+module takes no `contextmatrix-*` dependency. Verified import rules in this repo:
 
-- `internal/harness` imports **only** `internal/events`, `internal/llm`,
-  `internal/tools`. It must **never** import `orchestrator`, `worker`, `config`,
-  `registry`, `cli`, `cmclient`, or `webhook`.
-- `internal/orchestrator` imports `harness`, `llm`, `registry`, `tools`,
-  `events`, and `cmclient` (for the `TaskContext` type). It **never** imports
-  `worker`; the git and card-ops surfaces are injected as interfaces (`Ops`,
-  `GitOps`, `PRCreator`).
+- `internal/orchestrator` imports the harness module (`harness`, `llm`, `tools`,
+  `events`), plus `registry` and `cmclient` (for the `TaskContext` type). It
+  **never** imports `worker`; the git and card-ops surfaces are injected as
+  interfaces (`Ops`, `GitOps`, `PRCreator`).
 - `internal/worker` is the only place that wires the full stack together.
 
-If a change makes the harness reach for orchestration, push the dependency the
-other way — inject it behind an interface the worker satisfies.
+If a change tempts you to push orchestration, protocol, or policy down into the
+harness module, push the dependency the other way instead — inject it behind an
+interface the consumer satisfies.
 
 ## Tech stack
 

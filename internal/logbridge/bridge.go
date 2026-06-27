@@ -9,7 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/mhersson/contextmatrix-agent/internal/redact"
+	"github.com/mhersson/contextmatrix-harness/redact"
 	protocol "github.com/mhersson/contextmatrix-protocol"
 )
 

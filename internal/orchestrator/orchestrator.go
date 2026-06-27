@@ -15,11 +15,11 @@ import (
 	"fmt"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
-	"github.com/mhersson/contextmatrix-agent/internal/events"
-	"github.com/mhersson/contextmatrix-agent/internal/harness"
-	"github.com/mhersson/contextmatrix-agent/internal/llm"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
-	"github.com/mhersson/contextmatrix-agent/internal/tools"
+	"github.com/mhersson/contextmatrix-harness/events"
+	"github.com/mhersson/contextmatrix-harness/harness"
+	"github.com/mhersson/contextmatrix-harness/llm"
+	"github.com/mhersson/contextmatrix-harness/tools"
 )
 
 // Ops is the card-operation surface the FSM needs. It is satisfied by
