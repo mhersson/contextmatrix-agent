@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/mhersson/contextmatrix-agent/internal/harness"
-	"github.com/mhersson/contextmatrix-agent/internal/tools"
+	"github.com/mhersson/contextmatrix-harness/harness"
+	"github.com/mhersson/contextmatrix-harness/tools"
 )
 
 // ContextLimitError marks a phase stopping because the model neared its context

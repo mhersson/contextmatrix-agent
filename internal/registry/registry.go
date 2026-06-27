@@ -8,7 +8,7 @@ package registry
 import (
 	"fmt"
 
-	"github.com/mhersson/contextmatrix-agent/internal/llm"
+	"github.com/mhersson/contextmatrix-harness/llm"
 )
 
 type Role string

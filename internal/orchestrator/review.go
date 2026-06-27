@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mhersson/contextmatrix-agent/internal/harness"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
-	"github.com/mhersson/contextmatrix-agent/internal/tools"
+	"github.com/mhersson/contextmatrix-harness/harness"
+	"github.com/mhersson/contextmatrix-harness/tools"
 )
 
 // reviewPanelSize is the fixed number of review specialists fanned out per

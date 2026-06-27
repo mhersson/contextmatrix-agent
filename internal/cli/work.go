@@ -12,10 +12,10 @@ import (
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/config"
-	"github.com/mhersson/contextmatrix-agent/internal/events"
-	"github.com/mhersson/contextmatrix-agent/internal/llm"
 	"github.com/mhersson/contextmatrix-agent/internal/secrets"
 	"github.com/mhersson/contextmatrix-agent/internal/worker"
+	"github.com/mhersson/contextmatrix-harness/events"
+	"github.com/mhersson/contextmatrix-harness/llm"
 	protocol "github.com/mhersson/contextmatrix-protocol"
 	"github.com/spf13/cobra"
 )

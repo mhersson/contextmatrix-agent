@@ -8,8 +8,8 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/mhersson/contextmatrix-agent/internal/events"
-	"github.com/mhersson/contextmatrix-agent/internal/harness"
+	"github.com/mhersson/contextmatrix-harness/events"
+	"github.com/mhersson/contextmatrix-harness/harness"
 )
 
 // gateOutcome is the human's decision at a sign-off gate. There is no hard

@@ -8,8 +8,8 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/mhersson/contextmatrix-agent/internal/events"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
+	"github.com/mhersson/contextmatrix-harness/events"
 )
 
 // validTiers is the closed set of complexity tiers the planner may emit, for

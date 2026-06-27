@@ -8,7 +8,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/mhersson/contextmatrix-agent/internal/tools"
+	"github.com/mhersson/contextmatrix-harness/tools"
 )
 
 // prURLPattern matches the http(s) PR URL gh prints on success. gh writes a

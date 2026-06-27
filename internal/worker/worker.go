@@ -13,13 +13,13 @@ import (
 	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
-	"github.com/mhersson/contextmatrix-agent/internal/events"
-	"github.com/mhersson/contextmatrix-agent/internal/harness"
-	"github.com/mhersson/contextmatrix-agent/internal/llm"
 	"github.com/mhersson/contextmatrix-agent/internal/orchestrator"
-	"github.com/mhersson/contextmatrix-agent/internal/redact"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
-	"github.com/mhersson/contextmatrix-agent/internal/tools"
+	"github.com/mhersson/contextmatrix-harness/events"
+	"github.com/mhersson/contextmatrix-harness/harness"
+	"github.com/mhersson/contextmatrix-harness/llm"
+	"github.com/mhersson/contextmatrix-harness/redact"
+	"github.com/mhersson/contextmatrix-harness/tools"
 	protocol "github.com/mhersson/contextmatrix-protocol"
 )
 

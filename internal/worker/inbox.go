@@ -9,7 +9,7 @@ import (
 	"sync"
 
 	"github.com/mhersson/contextmatrix-agent/internal/frames"
-	"github.com/mhersson/contextmatrix-agent/internal/harness"
+	"github.com/mhersson/contextmatrix-harness/harness"
 )
 
 // Inbox adapts stdin control frames to harness.Inbox. In autonomous mode (or

@@ -24,10 +24,10 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/executor"
 	"github.com/mhersson/contextmatrix-agent/internal/logbridge"
 	"github.com/mhersson/contextmatrix-agent/internal/metrics"
-	"github.com/mhersson/contextmatrix-agent/internal/redact"
 	"github.com/mhersson/contextmatrix-agent/internal/secrets"
 	"github.com/mhersson/contextmatrix-agent/internal/taskskills"
 	"github.com/mhersson/contextmatrix-agent/internal/webhook"
+	"github.com/mhersson/contextmatrix-harness/redact"
 )
 
 const (
