@@ -1,5 +1,5 @@
 // Package kata provides a small, deterministic coding task (run-length
-// encoding) used by the B0 spike to exercise the agent loop end-to-end.
+// encoding) used to exercise the agent loop end-to-end.
 package kata
 
 import (

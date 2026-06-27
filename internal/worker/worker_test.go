@@ -588,7 +588,7 @@ func TestContextLimitMapsToFailed(t *testing.T) {
 
 // TestEndSessionMidFSM: an end_session frame cancels the run context while the
 // FSM is in a phase; the orchestrator returns ctx.Err() and the worker takes
-// the C1 graceful path (push WIP, report usage, release, exit 0).
+// the graceful path (push WIP, report usage, release, exit 0).
 func TestEndSessionMidFSM(t *testing.T) {
 	remote := setupBareRemote(t)
 	wsParent := t.TempDir()

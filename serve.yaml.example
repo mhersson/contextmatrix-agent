@@ -40,6 +40,12 @@ mcp_api_key: ""
 # CMX_PORT
 port: 9092
 
+# Loopback-only admin listener serving Prometheus /metrics behind the same HMAC
+# signed-GET scheme as the webhook routes. 0 disables it (the default); a
+# typical enabled value is 9093. Must differ from port when set.
+# CMX_ADMIN_PORT
+# admin_port: 0
+
 # Log level: debug | info | warn | error. Default: info.
 # CMX_LOG_LEVEL
 log_level: info

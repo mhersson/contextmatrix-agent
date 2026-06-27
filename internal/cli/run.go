@@ -130,13 +130,13 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&verify, "verify", "", "shell command run after the loop; exit 0 = success")
 	cmd.Flags().StringVar(&configFile, "config", "", "path to a YAML config file")
 	cmd.Flags().BoolVar(&printConfig, "print-config", false, "print the effective config (secrets redacted) and exit")
-	cmd.Flags().Bool("local", true, "run standalone without CM callbacks (B1: always true)")
+	cmd.Flags().Bool("local", true, "run standalone without CM callbacks (always true)")
 
 	return cmd
 }
 
 // runSpike wires concrete deps and runs the harness once. Exposed for tests with
-// a fake LLM (B0's TestRunSpikeDrivesKataGreen).
+// a fake LLM (TestRunSpikeDrivesKataGreen).
 func runSpike(ctx context.Context, client llm.LLM, o runOpts) (harness.Result, error) {
 	if o.taskDir == "" {
 		return harness.Result{}, fmt.Errorf("workspace is required")

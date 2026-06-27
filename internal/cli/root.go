@@ -6,7 +6,7 @@ import "github.com/spf13/cobra"
 func NewRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "contextmatrix-agent",
-		Short:         "ContextMatrix agent harness (B0 spike)",
+		Short:         "ContextMatrix agent harness",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}

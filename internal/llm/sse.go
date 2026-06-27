@@ -10,7 +10,7 @@ import (
 )
 
 // maxSSELine bounds a single SSE line (large reasoning/tool-arg frames are real,
-// but unbounded growth is not). Raised from B0's 1 MiB.
+// but unbounded growth is not).
 const maxSSELine = 10 * 1024 * 1024
 
 type streamChunk struct {

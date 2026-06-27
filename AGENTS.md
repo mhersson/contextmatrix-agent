@@ -28,11 +28,12 @@ This agent is at **v1 parity** with `contextmatrix-runner` — a co-equal,
 operator-selectable task backend. Selection is global and lives in
 ContextMatrix, not here: CM's `backends` config picks the active task backend
 (`runner` if enabled, else `agent`), read once at CM startup. To run cards
-through this agent, the operator sets `backends.agent.{url, api_key,
-enabled: true}` and `backends.runner.enabled: false` in CM (matching HMAC
-keys), then restarts CM. The runner remains the default; the agent is opt-in.
-Per-project routing is not supported — selection is instance-wide. CM's
-`docs/agent-backend-parity.md` carries the full parity matrix.
+through this agent, the operator sets
+`backends.agent.{url, api_key, enabled: true}` and
+`backends.runner.enabled: false` in CM (matching HMAC keys), then restarts CM.
+The runner remains the default; the agent is opt-in. Per-project routing is not
+supported — selection is instance-wide. CM's `docs/agent-backend-parity.md`
+carries the full parity matrix.
 
 ## Two channels to ContextMatrix
 
@@ -150,13 +151,18 @@ tag-driven under the `CMX_*` prefix; nested keys use `__`
 secrets out of `--print-config` output (`PrintRedacted`). Secrets arrive via env
 or a mounted file only — never via flags or committed YAML.
 
+### Documentation
+
+- Document the CURRENT STATE not changed state. What exists NOW and WHY, not how
+  we got here
+
 ## Key domain rules
 
-1. **Orchestrator phases.** `plan → execute → document → review → integrate → done`,
-   in `phaseOrder`. The current phase is **persisted to the card via MCP** before
-   work, orthogonal to board state. Persisted phase + an incrementally pushed
-   branch give crash-resume: a fresh container re-clones and re-enters at the
-   stored phase.
+1. **Orchestrator phases.**
+   `plan → execute → document → review → integrate → done`, in `phaseOrder`. The
+   current phase is **persisted to the card via MCP** before work, orthogonal to
+   board state. Persisted phase + an incrementally pushed branch give
+   crash-resume: a fresh container re-clones and re-enters at the stored phase.
 2. **Git workflow.** Commit incrementally (one logical commit per subtask) and
    **push** after execute and after each review round — `git commit` alone does
    not survive an ephemeral container. Review fixes land as
@@ -197,14 +203,14 @@ or a mounted file only — never via flags or committed YAML.
    subprocesses get an allowlisted `cmd.Env` — secrets are not inheritable by
    model-driven commands — and known secret values are redacted from events and
    transcripts.
-9. **HITL gates + promote.** HITL cards run the same FSM as autonomous, mode-gated
-   on `Config.Interactive`: a brainstorming dialogue for creative cards plus
-   plan-approval and review-decision sign-off gates that wait on the inbox.
-   Autonomous is the same FSM with the gates auto-passed and brainstorming
-   skipped (byte-for-byte the pre-HITL behavior). A promote frame closes the
-   inbox, so every later gate passes through and the run finishes autonomously at
-   the persisted phase. Awaiting-human is **live**, not stalled — the idle
-   watchdog must not false-stall a parked gate.
+9. **HITL gates + promote.** HITL cards run the same FSM as autonomous,
+   mode-gated on `Config.Interactive`: a brainstorming dialogue for creative
+   cards plus plan-approval and review-decision sign-off gates that wait on the
+   inbox. Autonomous is the same FSM with the gates auto-passed and
+   brainstorming skipped. A promote frame
+   closes the inbox, so every later gate passes through and the run finishes
+   autonomously at the persisted phase. Awaiting-human is **live**, not stalled
+   — the idle watchdog must not false-stall a parked gate.
 10. **Task-skills.** Coder, fix-coder, the review panel, and the document phase
     can engage ContextMatrix's task-skills (`go-development`, `code-review`, …)
     via the model-driven `Skill` tool (`internal/tools/skill.go`): it lists the
@@ -227,8 +233,8 @@ fix, specialist, synthesis, and document — inject this block into their prompt
 **Discovery rules (`discoverGrounding`):**
 
 - Root is always visited. Walk descends up to `groundingMaxDepth` (4) levels.
-- Per directory: `AGENTS.md` is preferred; `CLAUDE.md` is the fallback. Only
-  one file per directory is included — never both.
+- Per directory: `AGENTS.md` is preferred; `CLAUDE.md` is the fallback. Only one
+  file per directory is included — never both.
 - Skipped directories: `.git`, `node_modules`, `vendor`, `dist`, `build`,
   `.next`, `target`, `.worktrees`.
 - Per-file cap: `groundingByteCap` (64 KB); excess is replaced with a
@@ -239,15 +245,15 @@ fix, specialist, synthesis, and document — inject this block into their prompt
 
 **Injection and caching:**
 
-`groundingBlock` formats the docs into a `REPO GROUNDING` prompt block.
-`newRun` builds it once and stores it on `run.grounding`; every phase reads the
-cached field — there is no per-phase re-scan.
+`groundingBlock` formats the docs into a `REPO GROUNDING` prompt block. `newRun`
+builds it once and stores it on `run.grounding`; every phase reads the cached
+field — there is no per-phase re-scan.
 
 **Best-effort semantics:**
 
 A missing, empty, or non-directory workspace returns `nil` from
 `discoverGrounding`; `groundingBlock` then returns `""`. Phases inject nothing
-and run exactly as before — grounding never fails a run.
+and run as they otherwise would — grounding never fails a run.
 
 **Deferred (future work):**
 
@@ -269,18 +275,19 @@ listener**, mirroring the runner — metrics never ride the public webhook port.
 - **Metric set** (`cm_agent_*`, on a dedicated registry that also carries the
   standard `go_*` / `process_*` collectors):
 
-  | Metric | Type | Labels |
-  | --- | --- | --- |
-  | `cm_agent_webhook_requests_total` | counter | `endpoint`, `status`, `code` |
-  | `cm_agent_webhook_request_duration_seconds` | histogram | `endpoint` |
-  | `cm_agent_container_duration_seconds` | histogram | `outcome` (`success`/`failure`/`timeout`/`killed`/`idle_timeout`) |
-  | `cm_agent_running_containers` | gauge | — |
-  | `cm_agent_callback_retries_total` | counter | `endpoint` (`status`/`verify-autonomous`) |
-  | `cm_agent_broadcaster_drops_total` | counter | — |
+  | Metric                                      | Type      | Labels                                                            |
+  | ------------------------------------------- | --------- | ----------------------------------------------------------------- |
+  | `cm_agent_webhook_requests_total`           | counter   | `endpoint`, `status`, `code`                                      |
+  | `cm_agent_webhook_request_duration_seconds` | histogram | `endpoint`                                                        |
+  | `cm_agent_container_duration_seconds`       | histogram | `outcome` (`success`/`failure`/`timeout`/`killed`/`idle_timeout`) |
+  | `cm_agent_running_containers`               | gauge     | —                                                                 |
+  | `cm_agent_callback_retries_total`           | counter   | `endpoint` (`status`/`verify-autonomous`)                         |
+  | `cm_agent_broadcaster_drops_total`          | counter   | —                                                                 |
 
   `endpoint` labels are bounded by an allowlist
   (`internal/metrics.NormalizeEndpoint`); unknown paths collapse to `other`. No
   `card_id` / `project` labels anywhere.
+
 - **Deferred:** panic-recovery counting (`panic_recovered_total` — the serve
   process has no recovery defers yet) and OTEL tracing. The agent keeps its
   correlation IDs.

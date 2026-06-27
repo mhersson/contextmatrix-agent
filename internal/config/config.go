@@ -106,8 +106,8 @@ func Load(flags *pflag.FlagSet, configFile string) (Config, error) {
 
 // PrintRedacted writes the effective config with secrets masked. The OpenRouter
 // API key is never part of Config (env-only) and is shown here as a reminder.
-// fmt.Fprint* return values are intentionally ignored (errcheck would flag them
-// as B0 does, so each carries //nolint:errcheck). Labels are hyphenated to match
+// fmt.Fprint* return values are intentionally ignored (errcheck would flag them,
+// so each carries //nolint:errcheck). Labels are hyphenated to match
 // the koanf keys users write in YAML.
 func PrintRedacted(w io.Writer, c Config) {
 	fmt.Fprintln(w, "# effective configuration (secrets redacted)")                      //nolint:errcheck

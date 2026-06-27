@@ -92,8 +92,8 @@ type TaskContext struct {
 	Type   string
 	Labels []string
 
-	// Orchestrator fields — populated for autonomous cards (may be zero-valued
-	// for cards that were created before the C2 phase fields were added).
+	// Orchestrator fields — populated for autonomous cards; zero-valued when the
+	// card JSON omits them.
 	Phase             string
 	Autonomous        bool
 	CreatePR          bool

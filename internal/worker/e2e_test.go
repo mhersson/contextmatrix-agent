@@ -9,8 +9,7 @@ import (
 )
 
 // These helpers are shared with e2e_orchestrator_test.go, which exercises
-// the real autonomous orchestrator FSM end-to-end. The linear e2e tests that
-// previously lived here have been retired — HITL now runs the FSM in gated
+// the real autonomous orchestrator FSM end-to-end. HITL runs the FSM in gated
 // mode, so the authoritative HITL end-to-end coverage is the FSM suite.
 
 // jsonString quotes s as a JSON string literal (handles the content/args

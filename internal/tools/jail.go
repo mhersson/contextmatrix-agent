@@ -17,7 +17,7 @@ import (
 // TOCTOU: containment is checked against the symlink-resolved path, but callers
 // open the returned (unresolved) path afterward, so a symlink swapped between
 // this check and the open could redirect outside root. This is accepted under
-// B1's single-tenant, non-adversarial-workspace trust model — the agent is the
+// the single-tenant, non-adversarial-workspace trust model — the agent is the
 // sole actor on the workspace. Fully closing it needs openat2(2) with
 // RESOLVE_NO_SYMLINKS (Linux 5.6+).
 func resolveInRoot(root, p string) (string, error) {
