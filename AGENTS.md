@@ -22,6 +22,18 @@ is a **coordination-aware executor**: it touches target code repositories
 (clone, edit, commit, push) but treats ContextMatrix as the source of truth for
 card state, reached over MCP.
 
+## v1 parity and backend selection
+
+This agent is at **v1 parity** with `contextmatrix-runner` — a co-equal,
+operator-selectable task backend. Selection is global and lives in
+ContextMatrix, not here: CM's `backends` config picks the active task backend
+(`runner` if enabled, else `agent`), read once at CM startup. To run cards
+through this agent, the operator sets `backends.agent.{url, api_key,
+enabled: true}` and `backends.runner.enabled: false` in CM (matching HMAC
+keys), then restarts CM. The runner remains the default; the agent is opt-in.
+Per-project routing is not supported — selection is instance-wide. CM's
+`docs/agent-backend-parity.md` carries the full parity matrix.
+
 ## Two channels to ContextMatrix
 
 | Channel            | Direction    | Transport                          | Used for                                                           |
