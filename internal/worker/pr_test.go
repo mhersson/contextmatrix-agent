@@ -57,7 +57,7 @@ func TestPRCreatorCommand(t *testing.T) {
 	assert.Equal(t, "ghs_secrettoken", ghToken)
 
 	// The env is the scrub helper + GH_TOKEN, nothing more: every non-GH_TOKEN
-	// entry must be an allowlisted key (assert against the C1 env-scrub helper).
+	// entry must be an allowlisted key (assert against the env-scrub helper).
 	want := tools.ScrubbedEnv([]string{"GH_TOKEN=ghs_secrettoken"})
 	assert.ElementsMatch(t, want, cmd.Env, "env must be exactly ScrubbedEnv + GH_TOKEN")
 }

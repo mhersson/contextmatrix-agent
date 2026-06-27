@@ -34,7 +34,7 @@ Two channels connect the agent to ContextMatrix:
 - **Card operations (worker → CM, over MCP).** Inside each container the worker
   claims the card, heartbeats, reports usage, sets the orchestrator phase,
   transitions state, and completes the task using ContextMatrix MCP tools — the
-  same surface the runner-driven agent uses today, inherited unchanged.
+  same surface the runner-driven agent uses.
 
 ## Architecture
 
@@ -189,7 +189,8 @@ make fmt            # gofumpt -w .
 make docker-worker  # build the worker image
 ```
 
-CI runs `go vet`, `go test`, `go test -race`, and `golangci-lint` on every push.
+CI gates every pull request on `go test`, `go test -race`, `golangci-lint`, and
+`go build`, plus `govulncheck` and a worker-image scan.
 
 Conventions, package boundaries, the git workflow, and commit discipline for
 working **on** this codebase live in [`AGENTS.md`](AGENTS.md).

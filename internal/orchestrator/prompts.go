@@ -437,8 +437,8 @@ Respond with ONLY the Markdown PR body — no surrounding prose, no code fences.
 // conservative: most changes need no external docs, and the correct outcome is
 // then to write nothing (a clean tree -> no commit). The orchestrator commits and
 // pushes the result; the agent does NOT run git and ends with a single COMMIT
-// line the orchestrator parses (same convention as coderPrompt). MCP scaffolding
-// from the source skill is dropped — the Go phase owns claim/usage/push in code.
+// line the orchestrator parses (same convention as coderPrompt). The Go phase
+// owns claim/usage/push in code.
 //
 // The trailing %s slots are filled by runDocument: parent card title, parent
 // card description, the plan overview (subtask titles), and the branch diff.
@@ -519,9 +519,9 @@ Respond with ONLY a JSON object, no prose:
 // read-only tools to explore the codebase and converses with the human one
 // question at a time, then — only on the human's confirmation — emits the agreed
 // design as a "## Design" section followed by a DESIGN_COMPLETE marker line the
-// orchestrator parses. MCP/KB scaffolding from the source skill is dropped; the
-// orchestrator records the design from the marked output (the model never writes
-// the card). The %s slots are filled by runBrainstorm: card title, card
+// orchestrator parses. The orchestrator records the design from the marked
+// output (the model never writes the card). The %s slots are filled by
+// runBrainstorm: card title, card
 // description, and the conversation-so-far block.
 const brainstormPrompt = `%sYou are a design facilitator turning a card's stated intent into a fully-formed
 design through dialogue with a human teammate. You have read-only tools (read,

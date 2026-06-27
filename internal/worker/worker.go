@@ -278,7 +278,7 @@ type fsmArgs struct {
 //     (non-zero exit; serve emits the failed callback).
 //   - ContextLimitError: identical to the budget park — push WIP, release the
 //     claim, return the error — so in-flight work survives a context-window stop.
-//   - ctx.Err() (end_session/kill): C1 graceful path — push WIP, release,
+//   - ctx.Err() (end_session/kill): graceful path — push WIP, release,
 //     exit 0; the persisted phase stays for a later resume.
 //   - any other error: release the claim and return it.
 func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, error) {
@@ -371,7 +371,7 @@ func mapFSMResult(ctx context.Context, a fsmArgs, err error) (Result, error) {
 		return Result{Reason: "error"}, fmt.Errorf("orchestrator: %w", err)
 
 	case a.endSession.Load() || ctx.Err() != nil || errorsIsCanceled(err):
-		// end_session / kill mid-FSM: the C1 graceful park. Push whatever WIP
+		// end_session / kill mid-FSM: the graceful park. Push whatever WIP
 		// exists, release the claim, exit 0. Usage was already reported per-phase
 		// by the orchestrator; the persisted phase stays so a later run resumes
 		// from it.
