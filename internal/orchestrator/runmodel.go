@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/mhersson/contextmatrix-harness/harness"
+	"github.com/mhersson/contextmatrix-harness/llm"
 	"github.com/mhersson/contextmatrix-harness/tools"
 )
 
@@ -62,11 +63,22 @@ func (o *run) harnessConfig(model string) harness.Config {
 }
 
 // runModel routes a phase model-call through the centralized config and
-// normalizes a context_limit result into an error, so a phase never proceeds on
-// truncated output. It returns res alongside the error so callers can still
-// Spend/ReportUsage before checking err (their existing pattern).
+// normalizes a context_limit/incapable result into a typed error.
 func (o *run) runModel(ctx context.Context, reg *tools.Registry, prompt, model string) (harness.Result, error) {
-	res, err := harness.Run(ctx, o.d.Client, reg, o.d.Emit, prompt, o.harnessConfig(model))
+	return o.runModelCfg(ctx, reg, prompt, model, o.harnessConfig(model))
+}
+
+// runModelImages is runModel with the card's images attached to the seed
+// message. Used by the planning phase only.
+func (o *run) runModelImages(ctx context.Context, reg *tools.Registry, prompt, model string, images []llm.ImageURL) (harness.Result, error) {
+	cfg := o.harnessConfig(model)
+	cfg.TaskImages = images
+
+	return o.runModelCfg(ctx, reg, prompt, model, cfg)
+}
+
+func (o *run) runModelCfg(ctx context.Context, reg *tools.Registry, prompt, model string, cfg harness.Config) (harness.Result, error) {
+	res, err := harness.Run(ctx, o.d.Client, reg, o.d.Emit, prompt, cfg)
 	if err == nil && res.Reason == "context_limit" {
 		return res, &ContextLimitError{Model: model, ContextWindow: o.d.Registry.ContextWindow(model)}
 	}

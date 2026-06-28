@@ -11,6 +11,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 
@@ -214,6 +215,10 @@ type run struct {
 	// newRun; "" when the workspace has no instruction files.
 	grounding string
 
+	// taskImages are the assigned card's body images as OpenAI data-URL content
+	// parts, attached to the planning-phase model calls only. nil when none.
+	taskImages []llm.ImageURL
+
 	// runVerify executes the detected verify command (best-effort spec/test gate)
 	// and returns its combined output plus a pass flag. It is a struct field so
 	// tests can stub the subprocess; the default shells out via execVerify.
@@ -232,6 +237,22 @@ type run struct {
 // implementation shells out; tests inject a stub.
 type verifyRunner func(ctx context.Context, argv []string) (output string, ok bool)
 
+// dataURLs encodes card image blobs as base64 data URLs for OpenAI image_url
+// content parts. Returns nil for no blobs.
+func dataURLs(blobs []cmclient.ImageBlob) []llm.ImageURL {
+	if len(blobs) == 0 {
+		return nil
+	}
+
+	out := make([]llm.ImageURL, 0, len(blobs))
+	for _, b := range blobs {
+		enc := base64.StdEncoding.EncodeToString(b.Data)
+		out = append(out, llm.ImageURL{URL: "data:" + b.MIME + ";base64," + enc})
+	}
+
+	return out
+}
+
 // newRun builds a run seeded from the task context, with the budget ledger
 // pre-loaded from the card's already-reported cost and the phase functions
 // defaulting to the not-yet-implemented stubs.
@@ -245,6 +266,7 @@ func newRun(d Deps, tc cmclient.TaskContext) *run {
 	o.coderModels = map[string]bool{}
 	o.excluded = map[string]bool{}
 	o.body = tc.Description
+	o.taskImages = dataURLs(tc.Images)
 	o.grounding = groundingBlock(discoverGrounding(d.Cfg.Workspace))
 	o.runVerify = func(ctx context.Context, argv []string) (string, bool) {
 		return execVerify(ctx, d.Cfg.Workspace, argv)

@@ -294,7 +294,7 @@ func (o *run) runDiagnose(ctx context.Context, model string) (string, error) {
 
 	task := fmt.Sprintf(diagnosePrompt, o.grounding, o.tc.Title, o.tc.Description)
 
-	res, err := o.runModel(ctx, d.ReadTools, task, model)
+	res, err := o.runModelImages(ctx, d.ReadTools, task, model, o.taskImages)
 
 	o.ledger.Spend(res.TotalCostUSD)
 
@@ -347,7 +347,7 @@ func (o *run) draftPlan(ctx context.Context, model, diagnosis, design, feedback 
 
 		task := fmt.Sprintf(planPrompt, o.grounding, o.tc.Title, o.tc.Description, diagBlock, dsnBlock, resume, fbBlock, repair)
 
-		res, err := o.runModel(ctx, d.ReadTools, task, model)
+		res, err := o.runModelImages(ctx, d.ReadTools, task, model, o.taskImages)
 
 		o.ledger.Spend(res.TotalCostUSD)
 
