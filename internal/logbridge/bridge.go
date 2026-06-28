@@ -186,6 +186,15 @@ func (b *Bridge) mapEvent(kind string, data map[string]any) (entry protocol.LogE
 			Model:   strField(data, "model"),
 		}, false, false
 
+	case "thinking":
+		// Model reasoning, emitted once per turn when the model produced it.
+		// Content is redacted centrally by BridgeLine, so don't redact here.
+		// It is agent progress, not an awaiting state: awaiting=false, skip=false.
+		return protocol.LogEntry{
+			Type:    "thinking",
+			Content: strField(data, "content"),
+		}, false, false
+
 	case "tool_call":
 		id := strField(data, "id")
 		name := strField(data, "name")
