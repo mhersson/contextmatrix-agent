@@ -63,6 +63,36 @@ func TestHarnessConfigUnknownModelZeroWindow(t *testing.T) {
 	assert.Equal(t, 0, cfg.ContextWindow)
 }
 
+// TestHarnessConfigCompactionGate pins that the per-phase harness.Config opts
+// into in-window compaction only when the run config enables it: enabled ->
+// Compaction non-nil with the configured threshold/keep-recent; disabled -> nil
+// (the hard context_limit stop, the agent's default behavior).
+func TestHarnessConfigCompactionGate(t *testing.T) {
+	ops := &fakeOps{taskContext: cmclient.TaskContext{CardID: "CARD-1"}}
+
+	t.Run("enabled yields non-nil Compaction", func(t *testing.T) {
+		d := planTestDeps(ops, &planLLM{})
+		d.Cfg.Compaction = Compaction{Enabled: true, Threshold: 0.8, KeepRecentTurns: 4}
+
+		o := newRun(d, ops.taskContext)
+		cfg := o.harnessConfig("default/model")
+
+		require.NotNil(t, cfg.Compaction)
+		assert.InDelta(t, 0.8, cfg.Compaction.Threshold, 1e-9)
+		assert.Equal(t, 4, cfg.Compaction.KeepRecentTurns)
+	})
+
+	t.Run("disabled yields nil Compaction", func(t *testing.T) {
+		d := planTestDeps(ops, &planLLM{})
+		d.Cfg.Compaction = Compaction{Enabled: false, Threshold: 0.8, KeepRecentTurns: 4}
+
+		o := newRun(d, ops.taskContext)
+		cfg := o.harnessConfig("default/model")
+
+		assert.Nil(t, cfg.Compaction)
+	})
+}
+
 // TestRunModelNormalizesContextLimit pins the 0.85 threshold tightly: exactly
 // int(0.85*window) prompt tokens trips context_limit (surfaced by runModel as an
 // error so a phase never proceeds on truncated output), and one token below does

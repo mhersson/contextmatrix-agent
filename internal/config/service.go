@@ -47,6 +47,17 @@ type GitHubConfig struct {
 	PAT        GitHubPATConfig `koanf:"pat"`
 }
 
+// CompactionConfig configures the worker harness loop's optional in-window
+// context compaction. Enabled=false (the default) preserves the hard
+// context_limit stop; Threshold is the fraction of the context window at which
+// compaction fires, and KeepRecentTurns is how many recent turns to keep
+// verbatim.
+type CompactionConfig struct {
+	Enabled         bool
+	Threshold       float64
+	KeepRecentTurns int
+}
+
 // ServiceConfig is the host-side agent service configuration. ContextMatrix
 // POSTs lifecycle webhooks at the service; it launches one worker container per
 // card. Durations carried as "<n>_seconds" YAML keys are plain ints in the wire
@@ -94,6 +105,12 @@ type ServiceConfig struct {
 	// /metrics behind HMAC. Zero disables it (the default). Workers never see
 	// it; it is host-side only.
 	AdminPort int
+
+	// Compaction configures optional in-window context compaction in the worker
+	// harness loop. Disabled by default (behavior-neutral): the agent keeps its
+	// hard context_limit stop. When enabled, the settings reach each worker via
+	// CMX_COMPACTION_* and become harness.Config.Compaction.
+	Compaction CompactionConfig
 }
 
 // serviceRaw is the koanf-unmarshalled wire shape. Duration fields are split:
@@ -129,6 +146,9 @@ type serviceRaw struct {
 	LogLevel                  string            `koanf:"log_level"`
 	MaxCardCost               float64           `koanf:"max_card_cost"`
 	SelectorPriceHeadroom     float64           `koanf:"selector_price_headroom"`
+	CompactionEnabled         bool              `koanf:"compaction_enabled"`
+	CompactionThreshold       float64           `koanf:"compaction_threshold"`
+	CompactionKeepRecentTurns int               `koanf:"compaction_keep_recent_turns"`
 }
 
 // serviceDefaults is the lowest-precedence layer. Durations are wire-form
@@ -153,6 +173,10 @@ func serviceDefaults() serviceRaw {
 		ToolOutputMaxBytes:     131072,
 		MaxCardCost:            5.0,
 		SelectorPriceHeadroom:  1.5,
+		// CompactionEnabled defaults to false (behavior-neutral); threshold and
+		// keep-recent carry sane values for when an operator opts in.
+		CompactionThreshold:       0.85,
+		CompactionKeepRecentTurns: 6,
 	}
 }
 
@@ -239,6 +263,11 @@ func (r serviceRaw) toConfig() (*ServiceConfig, error) {
 		LogLevel:                  r.LogLevel,
 		MaxCardCost:               r.MaxCardCost,
 		SelectorPriceHeadroom:     r.SelectorPriceHeadroom,
+		Compaction: CompactionConfig{
+			Enabled:         r.CompactionEnabled,
+			Threshold:       r.CompactionThreshold,
+			KeepRecentTurns: r.CompactionKeepRecentTurns,
+		},
 	}, nil
 }
 
@@ -330,6 +359,18 @@ func (c *ServiceConfig) Validate() error {
 
 	if c.SelectorPriceHeadroom < 0 {
 		return fmt.Errorf("selector_price_headroom must be >= 0 (0 uses worker default), got %g", c.SelectorPriceHeadroom)
+	}
+
+	if c.Compaction.Enabled {
+		if c.Compaction.Threshold <= 0 || c.Compaction.Threshold > 1 {
+			return fmt.Errorf(
+				"compaction_threshold must be in (0,1] when compaction is enabled, got %g", c.Compaction.Threshold)
+		}
+
+		if c.Compaction.KeepRecentTurns < 1 {
+			return fmt.Errorf(
+				"compaction_keep_recent_turns must be >= 1 when compaction is enabled, got %d", c.Compaction.KeepRecentTurns)
+		}
 	}
 
 	return c.GitHub.validate()

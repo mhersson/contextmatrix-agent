@@ -892,3 +892,43 @@ func TestBuildLaunchSpec_BudgetEnvOmittedWhenZero(t *testing.T) {
 		assert.NotContains(t, e, "CMX_SELECTOR_PRICE_HEADROOM", "zero headroom must not be emitted")
 	}
 }
+
+func TestBuildLaunchSpec_CompactionEnvEmittedWhenEnabled(t *testing.T) {
+	// When compaction is enabled, all three CMX_COMPACTION_* vars must reach the
+	// container env so the worker opts the harness loop into in-window compaction.
+	s := NewServer(Config{
+		APIKey:   "k",
+		Executor: &fakeExecutor{},
+		Tracker:  executor.NewTracker(1),
+		LaunchEnv: LaunchEnv{
+			BaseImage:                 "img",
+			MCPURL:                    "http://mcp",
+			CompactionEnabled:         true,
+			CompactionThreshold:       0.8,
+			CompactionKeepRecentTurns: 4,
+		},
+	})
+
+	spec := s.buildLaunchSpec(protocol.TriggerPayload{CardID: "C1", Project: "p"}, "corr", "")
+
+	assert.Contains(t, spec.Env, "CMX_COMPACTION_ENABLED=true")
+	assert.Contains(t, spec.Env, "CMX_COMPACTION_THRESHOLD=0.8")
+	assert.Contains(t, spec.Env, "CMX_COMPACTION_KEEP_RECENT_TURNS=4")
+}
+
+func TestBuildLaunchSpec_CompactionEnvOmittedWhenDisabled(t *testing.T) {
+	// Disabled compaction (the default) emits no CMX_COMPACTION_* vars, so the
+	// worker keeps the hard context_limit stop — behavior-neutral.
+	s := NewServer(Config{
+		APIKey:    "k",
+		Executor:  &fakeExecutor{},
+		Tracker:   executor.NewTracker(1),
+		LaunchEnv: LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"},
+	})
+
+	spec := s.buildLaunchSpec(protocol.TriggerPayload{CardID: "C1", Project: "p"}, "corr", "")
+
+	for _, e := range spec.Env {
+		assert.NotContains(t, e, "CMX_COMPACTION_", "disabled compaction must emit no CMX_COMPACTION_* env")
+	}
+}

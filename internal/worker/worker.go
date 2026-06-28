@@ -63,8 +63,13 @@ type RunSpec struct {
 	MaxCostUSD            float64 // CMX_MAX_COST_USD
 	MaxCardCost           float64 // CMX_MAX_CARD_COST; 0 disables
 	SelectorPriceHeadroom float64 // CMX_SELECTOR_PRICE_HEADROOM; 0 uses worker default
-	DefaultModel          string  // CMX_DEFAULT_MODEL; fallback when Model is absent/unresolvable
-	Workspace             string  // CMX_WORKSPACE; parent dir for the clone (default /home/user/workspace)
+
+	CompactionEnabled         bool    // CMX_COMPACTION_ENABLED; false (default) keeps the hard context_limit stop
+	CompactionThreshold       float64 // CMX_COMPACTION_THRESHOLD; fraction of the context window (default 0.85)
+	CompactionKeepRecentTurns int     // CMX_COMPACTION_KEEP_RECENT_TURNS; recent turns kept verbatim (default 6)
+
+	DefaultModel string // CMX_DEFAULT_MODEL; fallback when Model is absent/unresolvable
+	Workspace    string // CMX_WORKSPACE; parent dir for the clone (default /home/user/workspace)
 
 	// Selection carries the CM-resolved model selection inputs (candidates,
 	// favorites, blacklist). Nil when absent (runner backend or old CM).
@@ -327,6 +332,11 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 			ToolOutputMax:     a.spec.ToolOutputMax,
 			ReviewAttemptsCap: reviewAttemptsCap,
 			Interactive:       hitl,
+			Compaction: orchestrator.Compaction{
+				Enabled:         a.spec.CompactionEnabled,
+				Threshold:       a.spec.CompactionThreshold,
+				KeepRecentTurns: a.spec.CompactionKeepRecentTurns,
+			},
 		},
 	}
 

@@ -88,6 +88,21 @@ func TestLaunchEnvMCPURL(t *testing.T) {
 		assert.Equal(t, 40000, env.ToolOutputMaxBytes)
 		assert.Equal(t, "deepseek/deepseek-v4", env.DefaultModel)
 	})
+
+	t.Run("forwards compaction settings", func(t *testing.T) {
+		cfg := &config.ServiceConfig{
+			ContextMatrixURL: "http://public:8080",
+			Compaction: config.CompactionConfig{
+				Enabled:         true,
+				Threshold:       0.8,
+				KeepRecentTurns: 4,
+			},
+		}
+		env := launchEnv(cfg, "/secrets/shared")
+		assert.True(t, env.CompactionEnabled)
+		assert.InDelta(t, 0.8, env.CompactionThreshold, 1e-9)
+		assert.Equal(t, 4, env.CompactionKeepRecentTurns)
+	})
 }
 
 func TestFlattenEnv(t *testing.T) {

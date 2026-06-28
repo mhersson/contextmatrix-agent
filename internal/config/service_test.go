@@ -330,6 +330,34 @@ func TestServiceValidate(t *testing.T) {
 		cfg.SelectorPriceHeadroom = 0
 		require.NoError(t, cfg.Validate())
 	})
+
+	t.Run("enabled compaction with valid values passes", func(t *testing.T) {
+		cfg := validServiceConfig()
+		cfg.Compaction = CompactionConfig{Enabled: true, Threshold: 0.85, KeepRecentTurns: 6}
+		require.NoError(t, cfg.Validate())
+	})
+
+	t.Run("enabled compaction with out-of-range threshold errors", func(t *testing.T) {
+		cfg := validServiceConfig()
+		cfg.Compaction = CompactionConfig{Enabled: true, Threshold: 1.5, KeepRecentTurns: 6}
+		err := cfg.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "compaction_threshold")
+	})
+
+	t.Run("enabled compaction with non-positive keep_recent_turns errors", func(t *testing.T) {
+		cfg := validServiceConfig()
+		cfg.Compaction = CompactionConfig{Enabled: true, Threshold: 0.85, KeepRecentTurns: 0}
+		err := cfg.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "compaction_keep_recent_turns")
+	})
+
+	t.Run("disabled compaction skips validation", func(t *testing.T) {
+		cfg := validServiceConfig()
+		cfg.Compaction = CompactionConfig{Enabled: false, Threshold: 9, KeepRecentTurns: -1}
+		require.NoError(t, cfg.Validate())
+	})
 }
 
 func TestServiceBudgetDefaults(t *testing.T) {
@@ -445,6 +473,54 @@ func TestServiceAdminPort_Validate(t *testing.T) {
 	})
 }
 
+func TestServiceCompactionDefaults(t *testing.T) {
+	// Compaction is OFF by default (behavior-neutral): the agent keeps the hard
+	// context_limit stop. Threshold defaults to 0.85, keep-recent to 6.
+	clearServiceEnv(t)
+
+	cfg, err := LoadService(filepath.Join(t.TempDir(), "does-not-exist.yaml"))
+	require.NoError(t, err)
+
+	assert.False(t, cfg.Compaction.Enabled, "compaction must default to disabled")
+	assert.InDelta(t, 0.85, cfg.Compaction.Threshold, 1e-9)
+	assert.Equal(t, 6, cfg.Compaction.KeepRecentTurns)
+}
+
+func TestServiceCompactionFromEnv(t *testing.T) {
+	// CMX_COMPACTION_* overrides land on the typed Compaction config.
+	clearServiceEnv(t)
+
+	t.Setenv("CMX_COMPACTION_ENABLED", "true")
+	t.Setenv("CMX_COMPACTION_THRESHOLD", "0.8")
+	t.Setenv("CMX_COMPACTION_KEEP_RECENT_TURNS", "4")
+
+	cfg, err := LoadService(filepath.Join(t.TempDir(), "does-not-exist.yaml"))
+	require.NoError(t, err)
+
+	assert.True(t, cfg.Compaction.Enabled)
+	assert.InDelta(t, 0.8, cfg.Compaction.Threshold, 1e-9)
+	assert.Equal(t, 4, cfg.Compaction.KeepRecentTurns)
+}
+
+func TestServiceCompactionFromFile(t *testing.T) {
+	clearServiceEnv(t)
+
+	content := `
+compaction_enabled: true
+compaction_threshold: 0.7
+compaction_keep_recent_turns: 8
+`
+	path := filepath.Join(t.TempDir(), "serve.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+
+	cfg, err := LoadService(path)
+	require.NoError(t, err)
+
+	assert.True(t, cfg.Compaction.Enabled)
+	assert.InDelta(t, 0.7, cfg.Compaction.Threshold, 1e-9)
+	assert.Equal(t, 8, cfg.Compaction.KeepRecentTurns)
+}
+
 // clearServiceEnv unsets any CMX_* vars that could leak into a default/file
 // test from the developer's shell. t.Setenv restores them after the test.
 func clearServiceEnv(t *testing.T) {
@@ -456,6 +532,8 @@ func clearServiceEnv(t *testing.T) {
 		"CMX_GITHUB__AUTH_MODE", "CMX_GITHUB__PAT__TOKEN",
 		"CMX_MAX_CARD_COST", "CMX_SELECTOR_PRICE_HEADROOM",
 		"CMX_ADMIN_PORT",
+		"CMX_COMPACTION_ENABLED", "CMX_COMPACTION_THRESHOLD",
+		"CMX_COMPACTION_KEEP_RECENT_TURNS",
 	} {
 		if _, ok := os.LookupEnv(e); ok {
 			t.Setenv(e, "")

@@ -66,6 +66,19 @@ func TestMappingTable(t *testing.T) {
 			},
 		},
 		{
+			name: "thinking → thinking with content (awaiting cleared)",
+			line: makeEvent("thinking", map[string]any{
+				"content": "Let me reason about this.",
+				"turn":    float64(2),
+			}),
+			wantType:     "thinking",
+			wantAwaiting: 0,
+			checkContent: func(t *testing.T, content string) {
+				t.Helper()
+				assert.Equal(t, "Let me reason about this.", content)
+			},
+		},
+		{
 			name: "tool_call → tool_call with id and formatted content",
 			line: makeEvent("tool_call", map[string]any{
 				"id":       "call_abc123",
@@ -435,6 +448,22 @@ func TestRedaction(t *testing.T) {
 
 		select {
 		case got := <-ch:
+			assert.NotContains(t, got.Content, secret)
+			assert.Contains(t, got.Content, "[REDACTED]")
+		case <-time.After(100 * time.Millisecond):
+			t.Fatal("expected entry")
+		}
+	})
+
+	t.Run("thinking content redacted", func(t *testing.T) {
+		line := makeEvent("thinking", map[string]any{
+			"content": "internal reasoning mentions " + secret,
+		})
+		bridge.BridgeLine(testProject, testCard, line, false)
+
+		select {
+		case got := <-ch:
+			assert.Equal(t, "thinking", got.Type)
 			assert.NotContains(t, got.Content, secret)
 			assert.Contains(t, got.Content, "[REDACTED]")
 		case <-time.After(100 * time.Millisecond):
