@@ -435,6 +435,7 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 		MemoryBytes:    s.launchEnv.MemoryBytes,
 		PidsLimit:      s.launchEnv.PidsLimit,
 		CorrelationID:  correlationID,
+		MCPURL:         s.launchEnv.MCPURL,
 	}
 }
 
