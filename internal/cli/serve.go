@@ -317,18 +317,21 @@ func launchEnv(cfg *config.ServiceConfig, secretsHostDir string) webhook.LaunchE
 	}
 
 	return webhook.LaunchEnv{
-		BaseImage:             cfg.BaseImage,
-		MCPURL:                composeMCPURL(base),
-		MCPAPIKey:             cfg.MCPAPIKey,
-		SecretsHostDir:        secretsHostDir,
-		MemoryBytes:           cfg.ContainerMemoryBytes,
-		PidsLimit:             cfg.ContainerPidsLimit,
-		BashTimeoutMaxSeconds: cfg.BashTimeoutMaxSeconds,
-		ToolOutputMaxBytes:    cfg.ToolOutputMaxBytes,
-		DefaultModel:          cfg.DefaultModel,
-		MaxCardCost:           cfg.MaxCardCost,
-		SelectorPriceHeadroom: cfg.SelectorPriceHeadroom,
-		WorkerExtraEnv:        flattenEnv(cfg.WorkerExtraEnv),
+		BaseImage:                 cfg.BaseImage,
+		MCPURL:                    composeMCPURL(base),
+		MCPAPIKey:                 cfg.MCPAPIKey,
+		SecretsHostDir:            secretsHostDir,
+		MemoryBytes:               cfg.ContainerMemoryBytes,
+		PidsLimit:                 cfg.ContainerPidsLimit,
+		BashTimeoutMaxSeconds:     cfg.BashTimeoutMaxSeconds,
+		ToolOutputMaxBytes:        cfg.ToolOutputMaxBytes,
+		DefaultModel:              cfg.DefaultModel,
+		MaxCardCost:               cfg.MaxCardCost,
+		SelectorPriceHeadroom:     cfg.SelectorPriceHeadroom,
+		CompactionEnabled:         cfg.Compaction.Enabled,
+		CompactionThreshold:       cfg.Compaction.Threshold,
+		CompactionKeepRecentTurns: cfg.Compaction.KeepRecentTurns,
+		WorkerExtraEnv:            flattenEnv(cfg.WorkerExtraEnv),
 	}
 }
 

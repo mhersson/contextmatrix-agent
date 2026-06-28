@@ -261,3 +261,37 @@ func TestSpecFromEnv_OptionalVars(t *testing.T) {
 	assert.Equal(t, "anthropic/claude-3-5-sonnet", spec.Model)
 	assert.Equal(t, "corr-abc-123", spec.CorrelationID)
 }
+
+func TestSpecFromEnv_Compaction(t *testing.T) {
+	t.Run("defaults_disabled", func(t *testing.T) {
+		setRequired(t)
+
+		spec, err := specFromEnv()
+		require.NoError(t, err)
+		assert.False(t, spec.CompactionEnabled, "compaction disabled by default")
+		assert.InDelta(t, 0.85, spec.CompactionThreshold, 1e-9)
+		assert.Equal(t, 6, spec.CompactionKeepRecentTurns)
+	})
+
+	t.Run("enabled_via_env", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("CMX_COMPACTION_ENABLED", "true")
+		t.Setenv("CMX_COMPACTION_THRESHOLD", "0.8")
+		t.Setenv("CMX_COMPACTION_KEEP_RECENT_TURNS", "4")
+
+		spec, err := specFromEnv()
+		require.NoError(t, err)
+		assert.True(t, spec.CompactionEnabled)
+		assert.InDelta(t, 0.8, spec.CompactionThreshold, 1e-9)
+		assert.Equal(t, 4, spec.CompactionKeepRecentTurns)
+	})
+
+	t.Run("garbage_threshold_errors", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("CMX_COMPACTION_THRESHOLD", "high")
+
+		_, err := specFromEnv()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "CMX_COMPACTION_THRESHOLD")
+	})
+}

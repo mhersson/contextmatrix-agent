@@ -97,6 +97,21 @@ type Config struct {
 	// through, brainstorming skipped). Autonomous behavior is byte-for-byte the
 	// pre-HITL behavior.
 	Interactive bool
+
+	// Compaction configures optional in-window context compaction for phase
+	// model runs. Disabled (the zero value) preserves the hard context_limit
+	// stop, which is the agent's default behavior.
+	Compaction Compaction
+}
+
+// Compaction configures in-window context compaction for the FSM's phase model
+// runs. Enabled=false (the zero value, the default) preserves the hard
+// context_limit stop; when enabled, harnessConfig passes the threshold and
+// keep-recent settings through to the harness loop.
+type Compaction struct {
+	Enabled         bool
+	Threshold       float64
+	KeepRecentTurns int
 }
 
 // Deps bundles the collaborators the FSM drives.

@@ -41,13 +41,24 @@ func (e *IncapableError) Error() string {
 // unknown/uncatalogued model simply opts out of context-limit detection rather
 // than tripping it spuriously.
 func (o *run) harnessConfig(model string) harness.Config {
-	return harness.Config{
+	cfg := harness.Config{
 		Model:              model,
 		MaxTurns:           o.d.Cfg.MaxTurns,
 		ToolOutputMaxBytes: o.d.Cfg.ToolOutputMax,
 		RedactToolOutput:   o.d.Redact,
 		ContextWindow:      o.d.Registry.ContextWindow(model),
 	}
+
+	// Opt into in-window compaction only when enabled; otherwise leave
+	// Compaction nil so the harness keeps its hard context_limit stop.
+	if o.d.Cfg.Compaction.Enabled {
+		cfg.Compaction = &harness.Compaction{
+			Threshold:       o.d.Cfg.Compaction.Threshold,
+			KeepRecentTurns: o.d.Cfg.Compaction.KeepRecentTurns,
+		}
+	}
+
+	return cfg
 }
 
 // runModel routes a phase model-call through the centralized config and

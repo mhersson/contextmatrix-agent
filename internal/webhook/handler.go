@@ -96,6 +96,14 @@ type LaunchEnv struct {
 	// CMX_SELECTOR_PRICE_HEADROOM. Zero is omitted (worker applies its own default).
 	SelectorPriceHeadroom float64
 
+	// CompactionEnabled, CompactionThreshold, and CompactionKeepRecentTurns
+	// configure the worker harness loop's in-window compaction. When disabled
+	// (the default) the CMX_COMPACTION_* vars are omitted so the worker keeps the
+	// hard context_limit stop.
+	CompactionEnabled         bool
+	CompactionThreshold       float64
+	CompactionKeepRecentTurns int
+
 	// WorkerExtraEnv is appended verbatim to every container's environment
 	// (KEY=VALUE strings). Used for operator-supplied passthrough.
 	WorkerExtraEnv []string
@@ -387,6 +395,14 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 
 	if s.launchEnv.SelectorPriceHeadroom != 0 {
 		env = append(env, "CMX_SELECTOR_PRICE_HEADROOM="+formatFloat(s.launchEnv.SelectorPriceHeadroom))
+	}
+
+	if s.launchEnv.CompactionEnabled {
+		env = append(env,
+			"CMX_COMPACTION_ENABLED=true",
+			"CMX_COMPACTION_THRESHOLD="+formatFloat(s.launchEnv.CompactionThreshold),
+			"CMX_COMPACTION_KEEP_RECENT_TURNS="+strconv.Itoa(s.launchEnv.CompactionKeepRecentTurns),
+		)
 	}
 
 	if p.Selection != nil {
