@@ -149,6 +149,33 @@ export OPENROUTER_API_KEY=sk-or-...
    `/api/agent/*`) and flip `default_backend` to it. A backend switch needs a
    ContextMatrix restart: drain running jobs → switch → restart.
 
+### Service management
+
+For an unattended deployment, run the agent as a systemd **user** service
+instead of the foreground `serve` command:
+
+```bash
+make build                    # build the contextmatrix-agent binary
+./svc.sh install              # write + enable ~/.config/systemd/user/contextmatrix-agent.service
+./svc.sh start                # start it (also: stop / status / print / verify / uninstall)
+```
+
+The generated unit is sandboxed (read-only home, restricted syscalls, resource
+caps) and runs `serve --config ${XDG_CONFIG_HOME:-~/.config}/contextmatrix-agent/serve.yaml`.
+
+`redeploy.sh` updates a running install in place — rebuild the binary and worker
+image, pin the new image digest into `serve.yaml`, and restart the service:
+
+```bash
+./redeploy.sh
+```
+
+> **Writable runtime dir.** The agent writes secrets under `secrets_dir`
+> (default `/var/run/cm-agent/secrets`). `/var/run` is root-owned and not created
+> for a user service — either pre-create `/var/run/cm-agent` and `chown` it to
+> your user, or set `secrets_dir` to a path under your home (e.g.
+> `~/.cm-agent/secrets`); the unit whitelists both.
+
 ## Commands
 
 | Command | Purpose                                                                     |
