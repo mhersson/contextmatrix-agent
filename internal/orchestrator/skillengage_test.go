@@ -5,15 +5,18 @@ import (
 	"testing"
 
 	"github.com/mhersson/contextmatrix-harness/llm"
+	"github.com/mhersson/contextmatrix-harness/tools"
 	"github.com/stretchr/testify/assert"
 )
 
 type menuToolStub struct{}
 
-func (menuToolStub) Name() string                                            { return "skill" }
-func (menuToolStub) Schema() llm.Tool                                        { return llm.Tool{} }
-func (menuToolStub) Execute(context.Context, map[string]any) (string, error) { return "", nil }
-func (menuToolStub) MenuText() string                                        { return "- go-development: Use when writing Go.\n" }
+func (menuToolStub) Name() string     { return "skill" }
+func (menuToolStub) Schema() llm.Tool { return llm.Tool{} }
+func (menuToolStub) Execute(context.Context, map[string]any) (tools.Result, error) {
+	return tools.Result{}, nil
+}
+func (menuToolStub) MenuText() string { return "- go-development: Use when writing Go.\n" }
 
 func TestSkillEngageBlockContent(t *testing.T) {
 	b := skillEngageBlock("- go-development: Use when writing Go.\n")
