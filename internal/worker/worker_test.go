@@ -88,9 +88,10 @@ type opCall struct {
 // fakeOps records every CardOps call in order under a mutex (the heartbeat
 // goroutine calls concurrently). GetTaskContext returns a canned context.
 type fakeOps struct {
-	mu    sync.Mutex
-	calls []opCall
-	tcx   cmclient.TaskContext
+	mu                       sync.Mutex
+	calls                    []opCall
+	tcx                      cmclient.TaskContext
+	lastGetTaskContextImages bool // captured from GetTaskContext's includeImages arg
 }
 
 func newFakeOps() *fakeOps {
@@ -142,7 +143,11 @@ func (f *fakeOps) ClaimCard(_ context.Context, cardID string) error {
 	return nil
 }
 
-func (f *fakeOps) GetTaskContext(_ context.Context, cardID string) (cmclient.TaskContext, error) {
+func (f *fakeOps) GetTaskContext(_ context.Context, cardID string, includeImages bool) (cmclient.TaskContext, error) {
+	f.mu.Lock()
+	f.lastGetTaskContextImages = includeImages
+	f.mu.Unlock()
+
 	f.record("GetTaskContext", cardID)
 
 	return f.tcx, nil
@@ -253,6 +258,32 @@ func TestRunAutonomousPlumbing(t *testing.T) {
 	// phase does — and does not release a successful run.
 	assert.Equal(t, 0, ops.count("CompleteTask"))
 	assert.Equal(t, 0, ops.count("ReleaseCard"))
+}
+
+// TestRunWorkerGetTaskContextNoImages verifies the worker bootstrap always
+// requests GetTaskContext with includeImages=false. The worker reads only scalar
+// fields (Autonomous, Title) and never uses images; requesting them here would
+// waste bytes on a run-gating call.
+func TestRunWorkerGetTaskContextNoImages(t *testing.T) {
+	remote := setupBareRemote(t)
+	wsParent := t.TempDir()
+	ops := newFakeOps()
+
+	swapRunOrchestrator(t, func(_ context.Context, _ orchestrator.Deps) error {
+		return nil
+	})
+
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	_, err := Run(context.Background(), baseSpec(t, remote, wsParent), ops, &scriptedLLM{}, emit, openStdin(t))
+	require.NoError(t, err)
+
+	// GetTaskContext must have been called with includeImages=false.
+	ops.mu.Lock()
+	got := ops.lastGetTaskContextImages
+	ops.mu.Unlock()
+
+	assert.False(t, got, "worker bootstrap must call GetTaskContext with includeImages=false")
 }
 
 // --- Test 3: FSM generic error ----------------------------------------------

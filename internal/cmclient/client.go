@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -190,12 +191,25 @@ func (c *Client) callFull(ctx context.Context, tool string, args map[string]any)
 }
 
 // cardImages extracts inline ImageContent blocks from an MCP result, skipping
-// any blob with empty data or MIME type.
+// any blob with empty data or MIME type (and warning about each skip).
 func cardImages(result *mcp.CallToolResult) []ImageBlob {
 	var out []ImageBlob
+
 	for _, content := range result.Content {
 		ic, ok := content.(*mcp.ImageContent)
-		if !ok || len(ic.Data) == 0 || ic.MIMEType == "" {
+		if !ok {
+			continue
+		}
+
+		if len(ic.Data) == 0 {
+			slog.Warn("skipping card image blob: empty data")
+
+			continue
+		}
+
+		if ic.MIMEType == "" {
+			slog.Warn("skipping card image blob: empty MIME type")
+
 			continue
 		}
 
@@ -213,12 +227,14 @@ func (c *Client) ClaimCard(ctx context.Context, cardID string) error {
 }
 
 // GetTaskContext fetches the card context, parsing the card portion of the
-// get_task_context response. include_images is requested as true so inline
-// image blobs are returned alongside the text payload.
-func (c *Client) GetTaskContext(ctx context.Context, cardID string) (TaskContext, error) {
+// get_task_context response. Pass includeImages=true to request inline image
+// blobs alongside the text payload (orchestrator bootstrap); pass false for
+// callers that read only scalar fields and do not use the images (worker
+// bootstrap).
+func (c *Client) GetTaskContext(ctx context.Context, cardID string, includeImages bool) (TaskContext, error) {
 	result, err := c.callFull(ctx, "get_task_context", map[string]any{
 		"card_id":        cardID,
-		"include_images": true,
+		"include_images": includeImages,
 	})
 	if err != nil {
 		return TaskContext{}, err

@@ -28,7 +28,7 @@ import (
 // (which is allowed to import both packages).
 type Ops interface {
 	ClaimCard(ctx context.Context, cardID string) error
-	GetTaskContext(ctx context.Context, cardID string) (cmclient.TaskContext, error)
+	GetTaskContext(ctx context.Context, cardID string, includeImages bool) (cmclient.TaskContext, error)
 	CreateCard(ctx context.Context, project, parent, title, body string, dependsOn []string) (string, error)
 	SetPhase(ctx context.Context, cardID, phase string) error
 	UpdateCardBody(ctx context.Context, cardID, body string) error
@@ -418,8 +418,9 @@ func indexOf(s []string, v string) int {
 // Run drives the FSM for one card from its persisted phase (empty -> plan).
 // It fetches the task context, seeds the budget ledger from the card's reported
 // cost, and runs each phase in order, persisting the phase before working.
+// Images are requested here because tc.Images feeds the planning phase.
 func Run(ctx context.Context, d Deps) error {
-	tc, err := d.Ops.GetTaskContext(ctx, d.Cfg.CardID)
+	tc, err := d.Ops.GetTaskContext(ctx, d.Cfg.CardID, true)
 	if err != nil {
 		return fmt.Errorf("get task context: %w", err)
 	}
