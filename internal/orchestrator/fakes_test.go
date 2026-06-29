@@ -97,7 +97,7 @@ func (f *fakeOps) ClaimCard(_ context.Context, cardID string) error {
 	return f.claimErr
 }
 
-func (f *fakeOps) GetTaskContext(_ context.Context, cardID string) (cmclient.TaskContext, error) {
+func (f *fakeOps) GetTaskContext(_ context.Context, cardID string, _ bool) (cmclient.TaskContext, error) {
 	f.record("GetTaskContext:" + cardID)
 
 	return f.taskContext, f.taskCtxErr

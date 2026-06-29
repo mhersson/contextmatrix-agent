@@ -376,7 +376,7 @@ func (s *stubOps) ClaimCard(_ context.Context, cardID string) error {
 	return nil
 }
 
-func (s *stubOps) GetTaskContext(_ context.Context, cardID string) (cmclient.TaskContext, error) {
+func (s *stubOps) GetTaskContext(_ context.Context, cardID string, _ bool) (cmclient.TaskContext, error) {
 	s.record("GetTaskContext", cardID)
 
 	return s.tcx, nil

@@ -247,16 +247,16 @@ func TestGetTaskContext(t *testing.T) {
 	rec := newRecorder()
 	c := newTestClient(t, rec, "")
 
-	tc, err := c.GetTaskContext(context.Background(), "CMX-001")
+	tc, err := c.GetTaskContext(context.Background(), "CMX-001", true)
 	require.NoError(t, err)
 
 	args, ok := rec.get("get_task_context")
 	require.True(t, ok, "get_task_context stub should have been called")
 	assert.Equal(t, "CMX-001", args["card_id"])
 	assert.Equal(t, testAgentID, args["agent_id"])
-	// include_images must be sent as an explicit false.
+	// include_images is now requested as true.
 	require.Contains(t, args, "include_images")
-	assert.Equal(t, false, args["include_images"])
+	assert.Equal(t, true, args["include_images"])
 
 	// Parsed from the card portion of the canned payload — base fields.
 	assert.Equal(t, "CMX-001", tc.CardID)
@@ -280,6 +280,62 @@ func TestGetTaskContext(t *testing.T) {
 	assert.InDelta(t, 0.0045, tc.ReportedCostUSD, 1e-9)
 }
 
+func TestGetTaskContext_NoImages(t *testing.T) {
+	rec := newRecorder()
+	c := newTestClient(t, rec, "")
+
+	tc, err := c.GetTaskContext(context.Background(), "CMX-001", true)
+	require.NoError(t, err)
+	assert.Empty(t, tc.Images) // canned stub returns text only
+}
+
+func TestGetTaskContext_IncludeImagesFalse(t *testing.T) {
+	rec := newRecorder()
+	c := newTestClient(t, rec, "")
+
+	_, err := c.GetTaskContext(context.Background(), "CMX-001", false)
+	require.NoError(t, err)
+
+	args, ok := rec.get("get_task_context")
+	require.True(t, ok, "get_task_context stub should have been called")
+	// When includeImages=false the wire arg must carry false, not the
+	// default JSON zero (missing key). The server honours the explicit value.
+	assert.Equal(t, false, args["include_images"])
+}
+
+func TestGetTaskContext_ParsesImages(t *testing.T) {
+	rec := newRecorder()
+	server := mcp.NewServer(&mcp.Implementation{Name: "stub-cm", Version: "0.0.0"}, nil)
+
+	png := []byte{0x89, 0x50, 0x4e, 0x47} // opaque bytes; the client does not decode
+
+	mcp.AddTool(server, &mcp.Tool{Name: "get_task_context"},
+		func(_ context.Context, _ *mcp.CallToolRequest, in genericInput) (*mcp.CallToolResult, any, error) {
+			rec.record("get_task_context", in)
+
+			return &mcp.CallToolResult{Content: []mcp.Content{
+				&mcp.TextContent{Text: `{"card":{"id":"CMX-001","title":"T","body":"see ![](/api/images/abc)","state":"todo"}}`},
+				&mcp.ImageContent{Data: png, MIMEType: "image/png"},
+			}}, nil, nil
+		})
+
+	ts := serveBearer(t, server)
+	c, err := New(context.Background(), ts.URL, "test-key", testAgentID)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+
+	tc, err := c.GetTaskContext(context.Background(), "CMX-001", true)
+	require.NoError(t, err)
+
+	args, ok := rec.get("get_task_context")
+	require.True(t, ok, "get_task_context stub should have been called")
+	assert.Equal(t, true, args["include_images"])
+
+	require.Len(t, tc.Images, 1)
+	assert.Equal(t, "image/png", tc.Images[0].MIME)
+	assert.Equal(t, png, tc.Images[0].Data)
+}
+
 func TestGetTaskContext_OrchestratorFieldsDefaultWhenAbsent(t *testing.T) {
 	rec := newRecorder()
 	server := mcp.NewServer(&mcp.Implementation{Name: "stub-cm", Version: "0.0.0"}, nil)
@@ -294,7 +350,7 @@ func TestGetTaskContext_OrchestratorFieldsDefaultWhenAbsent(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 
-	tc, err := c.GetTaskContext(context.Background(), "CMX-001")
+	tc, err := c.GetTaskContext(context.Background(), "CMX-001", true)
 	require.NoError(t, err)
 
 	assert.Empty(t, tc.Phase)
@@ -648,7 +704,7 @@ func newClientWithStub(t *testing.T, tool, rawText string) *Client {
 func TestGetTaskContext_MalformedJSON(t *testing.T) {
 	c := newClientWithStub(t, "get_task_context", "not json")
 
-	_, err := c.GetTaskContext(context.Background(), "CMX-001")
+	_, err := c.GetTaskContext(context.Background(), "CMX-001", true)
 	require.Error(t, err, "non-JSON payload must surface as a parse error")
 	assert.Contains(t, err.Error(), "parse task context")
 }

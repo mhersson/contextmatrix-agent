@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -76,6 +77,12 @@ func (c *Client) Close() error {
 	return nil
 }
 
+// ImageBlob is one inline card image fetched over MCP.
+type ImageBlob struct {
+	MIME string
+	Data []byte
+}
+
 // TaskContext is the subset of get_task_context the worker and orchestrator
 // need. Parent, siblings, and project config from the server response are
 // intentionally ignored.
@@ -106,6 +113,10 @@ type TaskContext struct {
 	// fetch time. The orchestrator uses this as the budget ledger's starting
 	// value so prior sub-agent spend is included in cost accounting.
 	ReportedCostUSD float64
+
+	// Images are the primary card body's inline images, fetched with
+	// include_images:true. nil when the card has none.
+	Images []ImageBlob
 }
 
 // SubtaskState is the per-card state summary returned by SubtaskStates.
@@ -156,6 +167,58 @@ func firstText(result *mcp.CallToolResult) string {
 	return ""
 }
 
+// callFull invokes a tool and returns the full result so callers can read
+// non-text content (e.g. ImageContent). Mirrors call's agent_id injection and
+// IsError surfacing.
+func (c *Client) callFull(ctx context.Context, tool string, args map[string]any) (*mcp.CallToolResult, error) {
+	withAgent := make(map[string]any, len(args)+1)
+	for k, v := range args {
+		withAgent[k] = v
+	}
+
+	withAgent["agent_id"] = c.agentID
+
+	result, err := c.session.CallTool(ctx, &mcp.CallToolParams{Name: tool, Arguments: withAgent})
+	if err != nil {
+		return nil, fmt.Errorf("call %s: %w", tool, err)
+	}
+
+	if result.IsError {
+		return nil, fmt.Errorf("call %s: %s", tool, firstText(result))
+	}
+
+	return result, nil
+}
+
+// cardImages extracts inline ImageContent blocks from an MCP result, skipping
+// any blob with empty data or MIME type (and warning about each skip).
+func cardImages(result *mcp.CallToolResult) []ImageBlob {
+	var out []ImageBlob
+
+	for _, content := range result.Content {
+		ic, ok := content.(*mcp.ImageContent)
+		if !ok {
+			continue
+		}
+
+		if len(ic.Data) == 0 {
+			slog.Warn("skipping card image blob: empty data")
+
+			continue
+		}
+
+		if ic.MIMEType == "" {
+			slog.Warn("skipping card image blob: empty MIME type")
+
+			continue
+		}
+
+		out = append(out, ImageBlob{MIME: ic.MIMEType, Data: ic.Data})
+	}
+
+	return out
+}
+
 // ClaimCard claims the card for this client's agent.
 func (c *Client) ClaimCard(ctx context.Context, cardID string) error {
 	_, err := c.call(ctx, "claim_card", map[string]any{"card_id": cardID})
@@ -164,16 +227,20 @@ func (c *Client) ClaimCard(ctx context.Context, cardID string) error {
 }
 
 // GetTaskContext fetches the card context, parsing the card portion of the
-// get_task_context response. include_images is forced false: the worker reads
-// card text, not inline image bytes.
-func (c *Client) GetTaskContext(ctx context.Context, cardID string) (TaskContext, error) {
-	text, err := c.call(ctx, "get_task_context", map[string]any{
+// get_task_context response. Pass includeImages=true to request inline image
+// blobs alongside the text payload (orchestrator bootstrap); pass false for
+// callers that read only scalar fields and do not use the images (worker
+// bootstrap).
+func (c *Client) GetTaskContext(ctx context.Context, cardID string, includeImages bool) (TaskContext, error) {
+	result, err := c.callFull(ctx, "get_task_context", map[string]any{
 		"card_id":        cardID,
-		"include_images": false,
+		"include_images": includeImages,
 	})
 	if err != nil {
 		return TaskContext{}, err
 	}
+
+	text := firstText(result)
 
 	// Mirrors the server's get_task_context output: {card, parent, siblings,
 	// config}. Only the card is parsed; parent/siblings/config are ignored.
@@ -217,6 +284,7 @@ func (c *Client) GetTaskContext(ctx context.Context, cardID string) (TaskContext
 		ModelOrchestrator: payload.Card.ModelOrchestrator,
 		ModelCoder:        payload.Card.ModelCoder,
 		ModelReviewer:     payload.Card.ModelReviewer,
+		Images:            cardImages(result),
 	}
 	if payload.Card.TokenUsage != nil {
 		tc.ReportedCostUSD = payload.Card.TokenUsage.EstimatedCostUSD

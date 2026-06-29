@@ -84,7 +84,7 @@ type RunSpec struct {
 // it's consumed, so tests fake it without MCP).
 type CardOps interface {
 	ClaimCard(ctx context.Context, cardID string) error
-	GetTaskContext(ctx context.Context, cardID string) (cmclient.TaskContext, error)
+	GetTaskContext(ctx context.Context, cardID string, includeImages bool) (cmclient.TaskContext, error)
 	Heartbeat(ctx context.Context, cardID string) error
 	ReportUsage(ctx context.Context, cardID, model string, promptTokens, completionTokens int64, actualCostUSD float64) error
 	ReportPush(ctx context.Context, cardID, branch, prURL string) error
@@ -165,7 +165,9 @@ func Run(ctx context.Context, spec RunSpec, ops CardOps, client llm.LLM, emit *e
 		return releaseWithError(ctx, ops, spec.CardID, fmt.Errorf("claim card: %w", err))
 	}
 
-	tcx, err := ops.GetTaskContext(ctx, spec.CardID)
+	// Worker bootstrap reads only scalar fields (Autonomous, Title); images are
+	// not used here and would be wasted bytes on this run-gating call.
+	tcx, err := ops.GetTaskContext(ctx, spec.CardID, false)
 	if err != nil {
 		return releaseWithError(ctx, ops, spec.CardID, fmt.Errorf("get task context: %w", err))
 	}
