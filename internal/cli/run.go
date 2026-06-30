@@ -124,7 +124,7 @@ func newRunCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().String("model", "", "OpenRouter model slug (or set 'model' in config)")
+	cmd.Flags().String("model", "", "model slug (or set 'model' in config)")
 	cmd.Flags().Int("max-turns", 30, "maximum model turns")
 	cmd.Flags().Float64("max-cost", 0.50, "maximum USD spend (0 disables)")
 	cmd.Flags().Int("tool-output-max-bytes", 131072, "max bytes of a single tool result before head/tail truncation (0 disables)")

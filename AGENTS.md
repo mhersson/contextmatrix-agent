@@ -6,7 +6,7 @@ build/test commands, conventions, invariants, and commit discipline.
 ## What is this project?
 
 ContextMatrix Agent is a custom Go agent harness with a configurable LLM
-endpoint, that runs as a ContextMatrix **task backend**. It replaces Claude Code headless as
+endpoint that runs as a ContextMatrix **task backend**. It replaces Claude Code headless as
 the in-container agent. A single binary plays two runtime roles:
 
 - **`serve`** — a long-running host service that hosts ContextMatrix lifecycle

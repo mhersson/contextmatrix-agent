@@ -55,8 +55,8 @@ type RunSpec struct {
 	CorrelationID string // CM_CORRELATION_ID (optional)
 
 	LLMKey     string // from /run/cm-secrets/env via the secrets source
-	LLMBaseURL string
-	LLMType    string
+	LLMBaseURL string // from /run/cm-secrets/env via the secrets source
+	LLMType    string // from /run/cm-secrets/env via the secrets source
 	GitToken   string // from /run/cm-secrets/env via the secrets source
 
 	BashTimeoutMax        int     // CMX_BASH_TIMEOUT_MAX_SECONDS; default 600

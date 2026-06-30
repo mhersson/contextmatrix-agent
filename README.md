@@ -5,7 +5,7 @@
 > This project is under heavy development. Breaking changes should be expected
 > at the current stage.
 
-A custom Go agent harness with a configurable LLM endpoint, that runs as a ContextMatrix
+A custom Go agent harness with a configurable LLM endpoint that runs as a ContextMatrix
 **task backend**. It replaces Claude Code headless as the in-container agent:
 ContextMatrix dispatches a card, this service launches a Docker worker container,
 and the worker drives a hand-built model-in-the-loop harness — claiming the card,

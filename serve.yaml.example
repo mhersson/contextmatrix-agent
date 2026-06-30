@@ -119,7 +119,7 @@ llm_endpoint:
 # default_model: deepseek/deepseek-v4-flash
 
 # Reasoning effort for every worker phase: "" (off) | low | medium | high |
-# provider-specific tiers (e.g. xhigh). CMX_REASONING_EFFORT.
+# provider-specific tiers (e.g. xhigh). CMX_REASONING_EFFORT
 # Sent to every selected model — the endpoint must accept reasoning_effort on
 # ALL served models, or leave this empty. (Per-model gating is a follow-up.)
 # reasoning_effort: ""
