@@ -54,8 +54,10 @@ type RunSpec struct {
 	MCPAPIKey     string // CM_MCP_API_KEY (required)
 	CorrelationID string // CM_CORRELATION_ID (optional)
 
-	OpenRouterKey string // from /run/cm-secrets/env via the secrets source
-	GitToken      string // from /run/cm-secrets/env via the secrets source
+	LLMKey     string // from /run/cm-secrets/env via the secrets source
+	LLMBaseURL string
+	LLMType    string
+	GitToken   string // from /run/cm-secrets/env via the secrets source
 
 	BashTimeoutMax        int     // CMX_BASH_TIMEOUT_MAX_SECONDS; default 600
 	ToolOutputMax         int     // CMX_TOOL_OUTPUT_MAX_BYTES; default 131072 (128 KB)
@@ -289,7 +291,7 @@ type fsmArgs struct {
 //     exit 0; the persisted phase stays for a later resume.
 //   - any other error: release the claim and return it.
 func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, error) {
-	red := redact.New([]string{a.spec.OpenRouterKey, a.spec.MCPAPIKey, a.spec.GitToken})
+	red := redact.New([]string{a.spec.LLMKey, a.spec.MCPAPIKey, a.spec.GitToken})
 
 	hitl := a.spec.Interactive && !a.tcx.Autonomous
 

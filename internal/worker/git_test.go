@@ -223,7 +223,7 @@ func TestCommitIfDirtyCleanTree(t *testing.T) {
 
 func TestCredEnvShape(t *testing.T) {
 	// t.Setenv mutates the process env; cannot use t.Parallel.
-	t.Setenv("OPENROUTER_API_KEY", "secret-openrouter-value")
+	t.Setenv("LLM_API_KEY", "secret-llm-value")
 
 	g := NewGit(t.TempDir(), "ghs_tok123456")
 	env := g.credEnv()
@@ -235,7 +235,7 @@ func TestCredEnvShape(t *testing.T) {
 
 	assert.NotContains(t, joined, "ghs_tok123456")
 	assert.Contains(t, joined, base64.StdEncoding.EncodeToString([]byte("x-access-token:ghs_tok123456")))
-	assert.NotContains(t, joined, "OPENROUTER")
+	assert.NotContains(t, joined, "LLM_API_KEY")
 }
 
 func TestCredEnvNoToken(t *testing.T) {

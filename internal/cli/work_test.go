@@ -4,9 +4,17 @@ import (
 	"testing"
 
 	"github.com/mhersson/contextmatrix-agent/internal/config"
+	"github.com/mhersson/contextmatrix-harness/llm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestDialectFromType(t *testing.T) {
+	assert.Equal(t, llm.DialectOpenAI, dialectFromType("openai"))
+	assert.Equal(t, llm.DialectOpenRouter, dialectFromType("openrouter"))
+	assert.Equal(t, llm.DialectOpenRouter, dialectFromType(""))
+	assert.Equal(t, llm.DialectOpenRouter, dialectFromType("anything-else"))
+}
 
 // requiredEnvVars is the full set of required CM_* vars for specFromEnv.
 var requiredEnvVars = map[string]string{
