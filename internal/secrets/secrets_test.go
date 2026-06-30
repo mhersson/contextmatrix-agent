@@ -207,6 +207,8 @@ func TestRefresherWritesAndRefreshes(t *testing.T) {
 	s, err := Open(path)
 	require.NoError(t, err)
 	assert.Equal(t, "llm-static-key", s.Get("LLM_API_KEY"))
+	assert.Equal(t, "", s.Get("LLM_BASE_URL"), "empty BaseURL must not appear in env file")
+	assert.Equal(t, "", s.Get("LLM_TYPE"), "empty Type must not appear in env file")
 
 	cancel()
 
