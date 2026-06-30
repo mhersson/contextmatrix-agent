@@ -5,8 +5,8 @@ build/test commands, conventions, invariants, and commit discipline.
 
 ## What is this project?
 
-ContextMatrix Agent is a custom Go agent harness, backed by OpenRouter, that
-runs as a ContextMatrix **task backend**. It replaces Claude Code headless as
+ContextMatrix Agent is a custom Go agent harness with a configurable LLM
+endpoint, that runs as a ContextMatrix **task backend**. It replaces Claude Code headless as
 the in-container agent. A single binary plays two runtime roles:
 
 - **`serve`** — a long-running host service that hosts ContextMatrix lifecycle
@@ -56,7 +56,7 @@ internal/cli/        → cobra commands: run, serve, work
 internal/config/     → cobra + koanf config; Config (harness) and ServiceConfig (serve); CMX_* env tags
 
 # Inner loop — now the external github.com/mhersson/contextmatrix-harness module
-# (events, llm, tools, harness, redact): the FSM-free loop, the OpenRouter
+# (events, llm, tools, harness, redact): the FSM-free loop, the LLM
 # client, the jailed tool registry, the event stream, and secret redaction.
 internal/registry/   → model selector: Resolve(actor, role), SelectByComplexity, SelectReviewPanel; priors-only, payload-driven (FromSelection) — stays agent-side (policy, not mechanism)
 
@@ -106,7 +106,7 @@ interface the consumer satisfies.
 - **`contextmatrix-githubauth`** — the only path to GitHub tokens (App + PAT).
 - **Go MCP SDK** (`github.com/modelcontextprotocol/go-sdk`) — the CM card-ops
   client.
-- **OpenRouter** via its OpenAI-compatible `/chat/completions`, spoken over
+- **LLM endpoint** (OpenAI-compatible `/chat/completions`), spoken over
   **raw HTTP** behind a narrow `Send`/`SendStream` interface — no SDK in the hot
   path.
 - **testify** — assertions (`assert`) and fatal checks (`require`).
@@ -195,7 +195,7 @@ or a mounted file only — never via flags or committed YAML.
    the orchestrator and every subagent; the run aborts when exceeded.
 8. **Secrets.** `serve` writes `<secrets_dir>/shared/env`, refreshed ahead of
    each GitHub-token expiry, bind-mounted read-only at `/run/cm-secrets/env`.
-   The worker reads `OPENROUTER_API_KEY` and `CM_GIT_TOKEN` from it. Tool
+   The worker reads the configured LLM endpoint key and `CM_GIT_TOKEN` from it. Tool
    subprocesses get an allowlisted `cmd.Env` — secrets are not inheritable by
    model-driven commands — and known secret values are redacted from events and
    transcripts.
@@ -298,7 +298,7 @@ make fmt            # gofumpt -w .
 make docker-worker  # build the worker image
 
 # Drive the harness locally, no ContextMatrix needed:
-export OPENROUTER_API_KEY=sk-or-...
+export CMX_LLM_ENDPOINT__API_KEY=<your-api-key>
 ./contextmatrix-agent run --model openai/gpt-oss-120b --workspace /path/to/checkout \
   --task "..." --verify "go test ./..." --transcript run.jsonl
 ```

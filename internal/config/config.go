@@ -104,20 +104,20 @@ func Load(flags *pflag.FlagSet, configFile string) (Config, error) {
 	return c, nil
 }
 
-// PrintRedacted writes the effective config with secrets masked. The OpenRouter
-// API key is never part of Config (env-only) and is shown here as a reminder.
-// fmt.Fprint* return values are intentionally ignored (errcheck would flag them,
-// so each carries //nolint:errcheck). Labels are hyphenated to match
-// the koanf keys users write in YAML.
+// PrintRedacted writes the effective config with secrets masked. The LLM
+// endpoint API key is never part of Config (env-only) and is shown here as a
+// reminder. fmt.Fprint* return values are intentionally ignored (errcheck
+// would flag them, so each carries //nolint:errcheck). Labels are hyphenated
+// to match the koanf keys users write in YAML.
 func PrintRedacted(w io.Writer, c Config) {
-	fmt.Fprintln(w, "# effective configuration (secrets redacted)")                      //nolint:errcheck
-	fmt.Fprintf(w, "openrouter-api-key: %s\n", "<redacted; set via OPENROUTER_API_KEY>") //nolint:errcheck
-	fmt.Fprintf(w, "model: %s\n", strDeref(c.Model))                                     //nolint:errcheck
-	fmt.Fprintf(w, "models: %v\n", c.Models)                                             //nolint:errcheck
-	fmt.Fprintf(w, "max-turns: %s\n", intDeref(c.MaxTurns))                              //nolint:errcheck
-	fmt.Fprintf(w, "max-cost: %s\n", floatDeref(c.MaxCostUSD))                           //nolint:errcheck
-	fmt.Fprintf(w, "capable-model: %s\n", strDeref(c.CapableModel))                      //nolint:errcheck
-	fmt.Fprintf(w, "roles: %v\n", c.Roles)                                               //nolint:errcheck
+	fmt.Fprintln(w, "# effective configuration (secrets redacted)")                               //nolint:errcheck
+	fmt.Fprintf(w, "llm-endpoint-api-key: %s\n", "<redacted; set via CMX_LLM_ENDPOINT__API_KEY>") //nolint:errcheck
+	fmt.Fprintf(w, "model: %s\n", strDeref(c.Model))                                              //nolint:errcheck
+	fmt.Fprintf(w, "models: %v\n", c.Models)                                                      //nolint:errcheck
+	fmt.Fprintf(w, "max-turns: %s\n", intDeref(c.MaxTurns))                                       //nolint:errcheck
+	fmt.Fprintf(w, "max-cost: %s\n", floatDeref(c.MaxCostUSD))                                    //nolint:errcheck
+	fmt.Fprintf(w, "capable-model: %s\n", strDeref(c.CapableModel))                               //nolint:errcheck
+	fmt.Fprintf(w, "roles: %v\n", c.Roles)                                                        //nolint:errcheck
 
 	if c.Provider != nil {
 		fmt.Fprintf(w, "provider: {require-parameters:%s order:%v sort:%s}\n", //nolint:errcheck
