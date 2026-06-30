@@ -546,7 +546,22 @@ llm_endpoint:
 	require.NoError(t, err)
 	assert.Equal(t, "openai", cfg.LLMEndpoint.Type)
 	assert.Equal(t, "k", cfg.LLMEndpoint.APIKey)
+	assert.Equal(t, "https://your-llm-endpoint.example/v1", cfg.LLMEndpoint.BaseURL)
 	assert.NoError(t, cfg.Validate())
+}
+
+func TestServiceLLMEndpointRejectsUnknownType(t *testing.T) {
+	c := &ServiceConfig{
+		ContextMatrixURL: "http://localhost:8080",
+		APIKey:           "0123456789012345678901234567890123456789",
+		BaseImage:        "img@sha256:abc",
+		GitHub:           GitHubConfig{AuthMode: "pat", PAT: GitHubPATConfig{Token: "t"}},
+		LLMEndpoint:      LLMEndpoint{Type: "anthropic", APIKey: "k"},
+	}
+	err := c.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "openrouter")
+	assert.Contains(t, err.Error(), "openai")
 }
 
 func TestServiceLLMEndpointOpenAIRequiresBaseURL(t *testing.T) {
