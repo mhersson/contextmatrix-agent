@@ -298,7 +298,10 @@ make fmt            # gofumpt -w .
 make docker-worker  # build the worker image
 
 # Drive the harness locally, no ContextMatrix needed:
-export CMX_LLM_ENDPOINT__API_KEY=<your-api-key>
+export LLM_API_KEY=<your-api-key>
+# For non-OpenRouter endpoints, also set:
+#   export LLM_TYPE=openai
+#   export LLM_BASE_URL=https://your-llm-endpoint.example/v1
 ./contextmatrix-agent run --model openai/gpt-oss-120b --workspace /path/to/checkout \
   --task "..." --verify "go test ./..." --transcript run.jsonl
 ```

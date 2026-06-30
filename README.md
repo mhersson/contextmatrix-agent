@@ -93,7 +93,10 @@ weak model's tool-call reliability.
 
 ```bash
 make build
-export CMX_LLM_ENDPOINT__API_KEY=<your-api-key>
+export LLM_API_KEY=<your-api-key>
+# For non-OpenRouter endpoints, also set:
+#   export LLM_TYPE=openai
+#   export LLM_BASE_URL=https://your-llm-endpoint.example/v1
 
 # Run the harness on a workspace with a free-form task.
 ./contextmatrix-agent run \
