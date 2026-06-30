@@ -95,6 +95,7 @@ type ServiceConfig struct {
 	BashTimeoutMaxSeconds     int
 	ToolOutputMaxBytes        int
 	DefaultModel              string
+	ReasoningEffort           string
 	LogLevel                  string
 
 	// MaxCardCost is the cumulative USD ceiling per card. Workers receive it as
@@ -151,6 +152,7 @@ type serviceRaw struct {
 	BashTimeoutMaxSeconds     int               `koanf:"bash_timeout_max_seconds"`
 	ToolOutputMaxBytes        int               `koanf:"tool_output_max_bytes"`
 	DefaultModel              string            `koanf:"default_model"`
+	ReasoningEffort           string            `koanf:"reasoning_effort"`
 	LogLevel                  string            `koanf:"log_level"`
 	MaxCardCost               float64           `koanf:"max_card_cost"`
 	SelectorPriceHeadroom     float64           `koanf:"selector_price_headroom"`
@@ -268,6 +270,7 @@ func (r serviceRaw) toConfig() (*ServiceConfig, error) {
 		BashTimeoutMaxSeconds:     r.BashTimeoutMaxSeconds,
 		ToolOutputMaxBytes:        r.ToolOutputMaxBytes,
 		DefaultModel:              r.DefaultModel,
+		ReasoningEffort:           r.ReasoningEffort,
 		LogLevel:                  r.LogLevel,
 		MaxCardCost:               r.MaxCardCost,
 		SelectorPriceHeadroom:     r.SelectorPriceHeadroom,

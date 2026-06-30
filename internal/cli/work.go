@@ -216,6 +216,7 @@ func specFromEnv() (worker.RunSpec, error) {
 		CompactionThreshold:       compactionThreshold,
 		CompactionKeepRecentTurns: compactionKeepRecentTurns,
 		DefaultModel:              defaultModel,
+		ReasoningEffort:           os.Getenv("CMX_REASONING_EFFORT"),
 		Workspace:                 workspace,
 		Selection:                 selection,
 		TaskSkillsDir:             taskSkillsDir,

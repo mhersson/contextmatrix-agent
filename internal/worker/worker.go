@@ -70,8 +70,9 @@ type RunSpec struct {
 	CompactionThreshold       float64 // CMX_COMPACTION_THRESHOLD; fraction of the context window (default 0.85)
 	CompactionKeepRecentTurns int     // CMX_COMPACTION_KEEP_RECENT_TURNS; recent turns kept verbatim (default 6)
 
-	DefaultModel string // CMX_DEFAULT_MODEL; fallback when Model is absent/unresolvable
-	Workspace    string // CMX_WORKSPACE; parent dir for the clone (default /home/user/workspace)
+	DefaultModel    string // CMX_DEFAULT_MODEL; fallback when Model is absent/unresolvable
+	ReasoningEffort string // CMX_REASONING_EFFORT; empty = off (no reasoning overhead)
+	Workspace       string // CMX_WORKSPACE; parent dir for the clone (default /home/user/workspace)
 
 	// Selection carries the CM-resolved model selection inputs (candidates,
 	// favorites, blacklist). Nil when absent (runner backend or old CM).
@@ -332,6 +333,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 			PriceHeadroom:     a.spec.SelectorPriceHeadroom,
 			PayloadModel:      a.spec.Model,
 			DefaultModel:      a.spec.DefaultModel,
+			ReasoningEffort:   a.spec.ReasoningEffort,
 			MaxTurns:          a.spec.MaxTurns,
 			ToolOutputMax:     a.spec.ToolOutputMax,
 			ReviewAttemptsCap: reviewAttemptsCap,

@@ -90,6 +90,7 @@ type Config struct {
 	PriceHeadroom     float64
 	PayloadModel      string // CM's default_model from the trigger; "" = serve default
 	DefaultModel      string // serve-config default
+	ReasoningEffort   string // CMX_REASONING_EFFORT; empty = off
 	MaxTurns          int
 	ToolOutputMax     int
 	ReviewAttemptsCap int // 5, CM's convention
