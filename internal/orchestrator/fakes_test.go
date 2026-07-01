@@ -29,10 +29,11 @@ type fakeOps struct {
 	taskContext cmclient.TaskContext
 	taskCtxErr  error
 
-	setPhaseErr   error
-	addLogErr     error
-	claimErr      error
-	updateBodyErr error
+	setPhaseErr    error
+	addLogErr      error
+	claimErr       error
+	updateBodyErr  error
+	releaseCardErr error
 
 	// logs captures every AddLog message (verbatim) so model-selection tests can
 	// assert the activity feed received the expected entry.
@@ -240,7 +241,7 @@ func (f *fakeOps) CompleteTask(_ context.Context, cardID, summary string) error 
 func (f *fakeOps) ReleaseCard(_ context.Context, cardID string) error {
 	f.record("ReleaseCard:" + cardID)
 
-	return nil
+	return f.releaseCardErr
 }
 
 // compile-time assertion that the fake satisfies the consumer interface.
