@@ -314,7 +314,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 	d := orchestrator.Deps{
 		Ops:        ops2orchestrator(a.ops),
 		Git:        a.git,
-		PR:         NewPRCreator(a.ws, a.spec.GitToken, a.spec.CACertFile),
+		PR:         NewPRCreator(a.ws, a.spec.GitToken, a.spec.CACertFile, a.spec.RepoURL),
 		Client:     a.client,
 		Emit:       a.emit,
 		Registry:   buildRegistry(a.spec),
