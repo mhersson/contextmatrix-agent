@@ -73,6 +73,49 @@ func TestResolveEmptyPointerYieldsNoSkills(t *testing.T) {
 	require.Error(t, err, "an empty remote URL means there is no skills source")
 }
 
+// TestGitCloneRejectsDashLeadingRef ensures that a git URL or ref beginning
+// with '-' (which git would interpret as a flag) is rejected before exec is
+// reached. The cloner must never be called with such inputs.
+func TestGitCloneRejectsDashLeadingRef(t *testing.T) {
+	t.Run("dash-leading ref is rejected", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"git_remote_url": "https://example.test/skills.git",
+				"ref":            "-upload-pack=/tmp/pwn",
+			})
+		}))
+		defer srv.Close()
+
+		r := NewResolver(srv.URL, "key", t.TempDir(), fakeGen{}, nil)
+		r.cloner = func(_ context.Context, _, _, _, _ string) error {
+			t.Fatal("cloner must not be called with a dash-leading ref")
+			return nil
+		}
+
+		_, err := r.Resolve(context.Background())
+		require.Error(t, err, "dash-leading ref must be rejected before exec")
+	})
+
+	t.Run("dash-leading URL is rejected", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"git_remote_url": "--upload-pack=/tmp/pwn",
+				"ref":            "abc123",
+			})
+		}))
+		defer srv.Close()
+
+		r := NewResolver(srv.URL, "key", t.TempDir(), fakeGen{}, nil)
+		r.cloner = func(_ context.Context, _, _, _, _ string) error {
+			t.Fatal("cloner must not be called with a dash-leading URL")
+			return nil
+		}
+
+		_, err := r.Resolve(context.Background())
+		require.Error(t, err, "dash-leading URL must be rejected before exec")
+	})
+}
+
 func TestResolveDoesNotCacheFailure(t *testing.T) {
 	var hits int32
 
