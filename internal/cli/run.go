@@ -60,9 +60,9 @@ func newRunCmd() *cobra.Command {
 				return err
 			}
 
-			key := os.Getenv("OPENROUTER_API_KEY")
+			key := os.Getenv("LLM_API_KEY")
 			if key == "" {
-				return fmt.Errorf("OPENROUTER_API_KEY is not set")
+				return fmt.Errorf("LLM_API_KEY is not set")
 			}
 
 			model := derefStr(cfg.Model)
@@ -74,7 +74,12 @@ func newRunCmd() *cobra.Command {
 				return fmt.Errorf("--workspace is required")
 			}
 
-			client := llm.NewClient(key, llm.WithRetry(llm.DefaultRetryPolicy()))
+			clientOpts := []llm.Option{llm.WithRetry(llm.DefaultRetryPolicy()), llm.WithDialect(dialectFromType(os.Getenv("LLM_TYPE")))}
+			if bu := os.Getenv("LLM_BASE_URL"); bu != "" {
+				clientOpts = append(clientOpts, llm.WithBaseURL(bu))
+			}
+
+			client := llm.NewClient(key, clientOpts...)
 
 			toolOutputMax, _ := cmd.Flags().GetInt("tool-output-max-bytes")
 
@@ -119,7 +124,7 @@ func newRunCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().String("model", "", "OpenRouter model slug (or set 'model' in config)")
+	cmd.Flags().String("model", "", "model slug (or set 'model' in config)")
 	cmd.Flags().Int("max-turns", 30, "maximum model turns")
 	cmd.Flags().Float64("max-cost", 0.50, "maximum USD spend (0 disables)")
 	cmd.Flags().Int("tool-output-max-bytes", 131072, "max bytes of a single tool result before head/tail truncation (0 disables)")

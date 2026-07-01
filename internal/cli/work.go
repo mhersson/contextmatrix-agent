@@ -49,12 +49,20 @@ func newWorkCmd() *cobra.Command {
 				return fmt.Errorf("read secrets: %w", err)
 			}
 
-			spec.OpenRouterKey = src.Get("OPENROUTER_API_KEY")
+			spec.LLMKey = src.Get("LLM_API_KEY")
+			spec.LLMBaseURL = src.Get("LLM_BASE_URL")
+			spec.LLMType = src.Get("LLM_TYPE")
 			spec.GitToken = src.Get("CM_GIT_TOKEN")
 
 			// human off (io.Discard), JSONL → stdout for the service log bridge.
 			emit := events.NewEmitter(io.Discard, cmd.OutOrStdout())
-			client := llm.NewClient(spec.OpenRouterKey, llm.WithRetry(llm.DefaultRetryPolicy()))
+
+			clientOpts := []llm.Option{llm.WithRetry(llm.DefaultRetryPolicy()), llm.WithDialect(dialectFromType(spec.LLMType))}
+			if spec.LLMBaseURL != "" {
+				clientOpts = append(clientOpts, llm.WithBaseURL(spec.LLMBaseURL))
+			}
+
+			client := llm.NewClient(spec.LLMKey, clientOpts...)
 
 			ops, err := cmclient.New(cmd.Context(), spec.MCPURL, spec.MCPAPIKey, "cmx-agent-"+strings.ToLower(spec.CardID))
 			if err != nil {
@@ -208,6 +216,7 @@ func specFromEnv() (worker.RunSpec, error) {
 		CompactionThreshold:       compactionThreshold,
 		CompactionKeepRecentTurns: compactionKeepRecentTurns,
 		DefaultModel:              defaultModel,
+		ReasoningEffort:           os.Getenv("CMX_REASONING_EFFORT"),
 		Workspace:                 workspace,
 		Selection:                 selection,
 		TaskSkillsDir:             taskSkillsDir,
@@ -258,4 +267,15 @@ func envFloat(name string, defaultVal float64) (float64, error) {
 	}
 
 	return v, nil
+}
+
+// dialectFromType maps the LLM_TYPE string to the harness dialect. Defaults to
+// OpenRouter for empty or unrecognised values so existing deployments with no
+// LLM_TYPE set keep working unchanged.
+func dialectFromType(s string) llm.Dialect {
+	if s == "openai" {
+		return llm.DialectOpenAI
+	}
+
+	return llm.DialectOpenRouter
 }

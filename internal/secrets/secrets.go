@@ -68,10 +68,19 @@ func (s *Source) Get(key string) string {
 // multi-user mode; it is intentionally ignored today.
 func (s *Source) For(_ string) *Source { return s }
 
+// EndpointSecrets is the static (non-rotating) LLM endpoint config staged into
+// the worker secrets file on every rewrite.
+type EndpointSecrets struct {
+	APIKey  string
+	BaseURL string
+	Type    string
+}
+
 // WriteEnvFile writes vals to path atomically (write-tmp + rename).
 // The directory is created with mode 0700; the file is written with mode 0600.
-// Lines are written in deterministic order: OPENROUTER_API_KEY first, then
-// CM_GIT_TOKEN, to make content predictable for tests and operators.
+// Lines are written in deterministic order: LLM_API_KEY, LLM_BASE_URL, LLM_TYPE,
+// CM_GIT_TOKEN first, then any extra keys in sorted order — output is
+// byte-identical across rewrites.
 func WriteEnvFile(path string, vals map[string]string) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -81,7 +90,7 @@ func WriteEnvFile(path string, vals map[string]string) error {
 	// Build content in fixed order.
 	var sb strings.Builder
 
-	for _, k := range []string{"OPENROUTER_API_KEY", "CM_GIT_TOKEN"} {
+	for _, k := range []string{"LLM_API_KEY", "LLM_BASE_URL", "LLM_TYPE", "CM_GIT_TOKEN"} {
 		if v, ok := vals[k]; ok {
 			sb.WriteString(k)
 			sb.WriteByte('=')
@@ -92,7 +101,7 @@ func WriteEnvFile(path string, vals map[string]string) error {
 
 	// Any other keys in sorted order — map iteration is randomized, and the
 	// output must be byte-identical across rewrites.
-	known := map[string]bool{"OPENROUTER_API_KEY": true, "CM_GIT_TOKEN": true}
+	known := map[string]bool{"LLM_API_KEY": true, "LLM_BASE_URL": true, "LLM_TYPE": true, "CM_GIT_TOKEN": true}
 	for _, k := range slices.Sorted(maps.Keys(vals)) {
 		if !known[k] {
 			sb.WriteString(k)
@@ -139,11 +148,11 @@ func WriteEnvFile(path string, vals map[string]string) error {
 }
 
 // Refresher writes the env file immediately on Run, then rewrites it
-// refreshBefore ahead of each token expiry. OPENROUTER_API_KEY is static and
-// persists across every rewrite.
+// refreshBefore ahead of each token expiry. The EndpointSecrets are static and
+// persist across every rewrite.
 type Refresher struct {
 	path          string
-	openRouterKey string
+	endpoint      EndpointSecrets
 	gen           TokenGenerator
 	logger        *slog.Logger
 	refreshBefore time.Duration // default 10m; override in tests
@@ -157,14 +166,14 @@ const (
 )
 
 // NewRefresher constructs a Refresher. Pass nil for logger to use the default.
-func NewRefresher(path, openRouterKey string, gen TokenGenerator, logger *slog.Logger) *Refresher {
+func NewRefresher(path string, endpoint EndpointSecrets, gen TokenGenerator, logger *slog.Logger) *Refresher {
 	if logger == nil {
 		logger = slog.Default()
 	}
 
 	return &Refresher{
 		path:          path,
-		openRouterKey: openRouterKey,
+		endpoint:      endpoint,
 		gen:           gen,
 		logger:        logger,
 		refreshBefore: defaultRefreshBefore,
@@ -192,11 +201,15 @@ func (r *Refresher) Run(ctx context.Context) error {
 			}
 		}
 
-		vals := map[string]string{
-			"CM_GIT_TOKEN": token,
+		vals := map[string]string{"CM_GIT_TOKEN": token}
+		if r.endpoint.APIKey != "" {
+			vals["LLM_API_KEY"] = r.endpoint.APIKey
 		}
-		if r.openRouterKey != "" {
-			vals["OPENROUTER_API_KEY"] = r.openRouterKey
+		if r.endpoint.BaseURL != "" {
+			vals["LLM_BASE_URL"] = r.endpoint.BaseURL
+		}
+		if r.endpoint.Type != "" {
+			vals["LLM_TYPE"] = r.endpoint.Type
 		}
 
 		if err := WriteEnvFile(r.path, vals); err != nil {

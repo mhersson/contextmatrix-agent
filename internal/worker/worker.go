@@ -54,8 +54,10 @@ type RunSpec struct {
 	MCPAPIKey     string // CM_MCP_API_KEY (required)
 	CorrelationID string // CM_CORRELATION_ID (optional)
 
-	OpenRouterKey string // from /run/cm-secrets/env via the secrets source
-	GitToken      string // from /run/cm-secrets/env via the secrets source
+	LLMKey     string // from /run/cm-secrets/env via the secrets source
+	LLMBaseURL string // from /run/cm-secrets/env via the secrets source
+	LLMType    string // from /run/cm-secrets/env via the secrets source
+	GitToken   string // from /run/cm-secrets/env via the secrets source
 
 	BashTimeoutMax        int     // CMX_BASH_TIMEOUT_MAX_SECONDS; default 600
 	ToolOutputMax         int     // CMX_TOOL_OUTPUT_MAX_BYTES; default 131072 (128 KB)
@@ -68,8 +70,9 @@ type RunSpec struct {
 	CompactionThreshold       float64 // CMX_COMPACTION_THRESHOLD; fraction of the context window (default 0.85)
 	CompactionKeepRecentTurns int     // CMX_COMPACTION_KEEP_RECENT_TURNS; recent turns kept verbatim (default 6)
 
-	DefaultModel string // CMX_DEFAULT_MODEL; fallback when Model is absent/unresolvable
-	Workspace    string // CMX_WORKSPACE; parent dir for the clone (default /home/user/workspace)
+	DefaultModel    string // CMX_DEFAULT_MODEL; fallback when Model is absent/unresolvable
+	ReasoningEffort string // CMX_REASONING_EFFORT; empty = off (no reasoning overhead)
+	Workspace       string // CMX_WORKSPACE; parent dir for the clone (default /home/user/workspace)
 
 	// Selection carries the CM-resolved model selection inputs (candidates,
 	// favorites, blacklist). Nil when absent (runner backend or old CM).
@@ -289,7 +292,7 @@ type fsmArgs struct {
 //     exit 0; the persisted phase stays for a later resume.
 //   - any other error: release the claim and return it.
 func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, error) {
-	red := redact.New([]string{a.spec.OpenRouterKey, a.spec.MCPAPIKey, a.spec.GitToken})
+	red := redact.New([]string{a.spec.LLMKey, a.spec.MCPAPIKey, a.spec.GitToken})
 
 	hitl := a.spec.Interactive && !a.tcx.Autonomous
 
@@ -330,6 +333,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 			PriceHeadroom:     a.spec.SelectorPriceHeadroom,
 			PayloadModel:      a.spec.Model,
 			DefaultModel:      a.spec.DefaultModel,
+			ReasoningEffort:   a.spec.ReasoningEffort,
 			MaxTurns:          a.spec.MaxTurns,
 			ToolOutputMax:     a.spec.ToolOutputMax,
 			ReviewAttemptsCap: reviewAttemptsCap,

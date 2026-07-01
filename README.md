@@ -5,7 +5,7 @@
 > This project is under heavy development. Breaking changes should be expected
 > at the current stage.
 
-A custom Go agent harness, backed by OpenRouter, that runs as a ContextMatrix
+A custom Go agent harness with a configurable LLM endpoint that runs as a ContextMatrix
 **task backend**. It replaces Claude Code headless as the in-container agent:
 ContextMatrix dispatches a card, this service launches a Docker worker container,
 and the worker drives a hand-built model-in-the-loop harness — claiming the card,
@@ -14,7 +14,7 @@ over MCP.
 
 It is for operators who run [ContextMatrix](https://github.com/mhersson/contextmatrix)
 and want model-flexible, cost-optimized autonomous execution: any
-OpenRouter-served model per role, picked by external quality priors per role
+OpenAI-compatible model per role, picked by external quality priors per role
 rather than a hard-coded vendor.
 
 ## How it fits ContextMatrix
@@ -80,7 +80,7 @@ the task FSM (`orchestrator`/`worker`) to execute board cards.
 
 - **Go 1.26+** to build.
 - **Docker** on the host running `serve` (the worker runtime).
-- An **OpenRouter API key** with credits for the models you route to.
+- An **LLM endpoint API key** with access to the models you route to.
 - A reachable **ContextMatrix** instance (API + MCP) and its MCP API key.
 - **GitHub auth** — a GitHub App (App ID + installation ID + private key) or a
   fine-grained PAT — for cloning and pushing target repositories.
@@ -93,7 +93,10 @@ weak model's tool-call reliability.
 
 ```bash
 make build
-export OPENROUTER_API_KEY=sk-or-...
+export LLM_API_KEY=<your-api-key>
+# For non-OpenRouter endpoints, also set:
+#   export LLM_TYPE=openai
+#   export LLM_BASE_URL=https://your-llm-endpoint.example/v1
 
 # Run the harness on a workspace with a free-form task.
 ./contextmatrix-agent run \
@@ -125,7 +128,7 @@ export OPENROUTER_API_KEY=sk-or-...
    ```bash
    mkdir -p ~/.config/contextmatrix-agent
    cp serve.yaml.example ~/.config/contextmatrix-agent/serve.yaml
-   # set: api_key, mcp_api_key, openrouter_api_key, base_image,
+   # set: api_key, mcp_api_key, llm_endpoint.api_key, base_image,
    #      container_contextmatrix_url, github.*
    ```
 

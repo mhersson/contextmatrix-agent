@@ -25,6 +25,14 @@ const reconcileCap = 150 * time.Minute
 // inside the defaults struct.
 const defaultSecretsDir = "/var/run/cm-agent/secrets" //nolint:gosec // path, not a credential
 
+// LLMEndpoint is the inference endpoint workers call. Type selects the harness
+// wire dialect ("openrouter" default | "openai"); BaseURL/APIKey address it.
+type LLMEndpoint struct {
+	Type    string `koanf:"type"`
+	BaseURL string `koanf:"base_url"`
+	APIKey  string `koanf:"api_key"`
+}
+
 // GitHubAppConfig holds GitHub App credentials for minting installation tokens.
 // Mirrors the runner's field shape so operators carry one mental model.
 type GitHubAppConfig struct {
@@ -77,7 +85,7 @@ type ServiceConfig struct {
 	IdleOutputTimeout         time.Duration
 	IdleWatchdogInterval      time.Duration
 	SecretsDir                string
-	OpenRouterAPIKey          string
+	LLMEndpoint               LLMEndpoint
 	GitHub                    GitHubConfig
 	WorkerExtraEnv            map[string]string
 	ReplaySkew                time.Duration
@@ -87,6 +95,7 @@ type ServiceConfig struct {
 	BashTimeoutMaxSeconds     int
 	ToolOutputMaxBytes        int
 	DefaultModel              string
+	ReasoningEffort           string
 	LogLevel                  string
 
 	// MaxCardCost is the cumulative USD ceiling per card. Workers receive it as
@@ -133,7 +142,7 @@ type serviceRaw struct {
 	IdleOutputTimeout         string            `koanf:"idle_output_timeout"`
 	IdleWatchdogInterval      string            `koanf:"idle_watchdog_interval"`
 	SecretsDir                string            `koanf:"secrets_dir"`
-	OpenRouterAPIKey          string            `koanf:"openrouter_api_key"`
+	LLMEndpoint               LLMEndpoint       `koanf:"llm_endpoint"`
 	GitHub                    GitHubConfig      `koanf:"github"`
 	WorkerExtraEnv            map[string]string `koanf:"worker_extra_env"`
 	ReplaySkewSeconds         int               `koanf:"webhook_replay_skew_seconds"`
@@ -143,6 +152,7 @@ type serviceRaw struct {
 	BashTimeoutMaxSeconds     int               `koanf:"bash_timeout_max_seconds"`
 	ToolOutputMaxBytes        int               `koanf:"tool_output_max_bytes"`
 	DefaultModel              string            `koanf:"default_model"`
+	ReasoningEffort           string            `koanf:"reasoning_effort"`
 	LogLevel                  string            `koanf:"log_level"`
 	MaxCardCost               float64           `koanf:"max_card_cost"`
 	SelectorPriceHeadroom     float64           `koanf:"selector_price_headroom"`
@@ -250,7 +260,7 @@ func (r serviceRaw) toConfig() (*ServiceConfig, error) {
 		IdleOutputTimeout:         idleOutput,
 		IdleWatchdogInterval:      idleWatchdog,
 		SecretsDir:                r.SecretsDir,
-		OpenRouterAPIKey:          r.OpenRouterAPIKey,
+		LLMEndpoint:               r.LLMEndpoint,
 		GitHub:                    r.GitHub,
 		WorkerExtraEnv:            r.WorkerExtraEnv,
 		ReplaySkew:                time.Duration(r.ReplaySkewSeconds) * time.Second,
@@ -260,6 +270,7 @@ func (r serviceRaw) toConfig() (*ServiceConfig, error) {
 		BashTimeoutMaxSeconds:     r.BashTimeoutMaxSeconds,
 		ToolOutputMaxBytes:        r.ToolOutputMaxBytes,
 		DefaultModel:              r.DefaultModel,
+		ReasoningEffort:           r.ReasoningEffort,
 		LogLevel:                  r.LogLevel,
 		MaxCardCost:               r.MaxCardCost,
 		SelectorPriceHeadroom:     r.SelectorPriceHeadroom,
@@ -308,8 +319,18 @@ func (c *ServiceConfig) Validate() error {
 		return fmt.Errorf("api_key must be at least 32 characters, got %d", len(c.APIKey))
 	}
 
-	if c.OpenRouterAPIKey == "" {
-		return fmt.Errorf("openrouter_api_key is required")
+	if c.LLMEndpoint.APIKey == "" {
+		return fmt.Errorf("llm_endpoint.api_key is required")
+	}
+
+	switch c.LLMEndpoint.Type {
+	case "", "openrouter":
+	case "openai":
+		if c.LLMEndpoint.BaseURL == "" {
+			return fmt.Errorf("llm_endpoint.base_url is required when llm_endpoint.type is \"openai\"")
+		}
+	default:
+		return fmt.Errorf("llm_endpoint.type must be \"openrouter\" or \"openai\", got %q", c.LLMEndpoint.Type)
 	}
 
 	if c.BaseImage == "" {

@@ -33,6 +33,28 @@ func (f *fakeGenerator) GenerateToken(_ context.Context) (string, time.Time, err
 	return c.token, c.expiresAt, nil
 }
 
+// TestWriteEnvFileNeutralKeys verifies WriteEnvFile round-trips the four neutral
+// worker env keys.
+func TestWriteEnvFileNeutralKeys(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "env")
+	require.NoError(t, WriteEnvFile(path, map[string]string{
+		"LLM_API_KEY":  "k",
+		"LLM_BASE_URL": "https://your-llm-endpoint.example/v1",
+		"LLM_TYPE":     "openai",
+		"CM_GIT_TOKEN": "t",
+	}))
+
+	src, err := Open(path)
+	require.NoError(t, err)
+	assert.Equal(t, "k", src.Get("LLM_API_KEY"))
+	assert.Equal(t, "https://your-llm-endpoint.example/v1", src.Get("LLM_BASE_URL"))
+	assert.Equal(t, "openai", src.Get("LLM_TYPE"))
+	assert.Equal(t, "t", src.Get("CM_GIT_TOKEN"))
+}
+
 // TestOpen parses KEY=value lines, skips blanks and comments.
 func TestOpen(t *testing.T) {
 	t.Parallel()
@@ -67,8 +89,8 @@ func TestWriteEnvFile(t *testing.T) {
 	path := filepath.Join(dir, "sub", "env")
 
 	vals := map[string]string{
-		"CM_GIT_TOKEN":       "tok123",
-		"OPENROUTER_API_KEY": "or-key",
+		"CM_GIT_TOKEN": "tok123",
+		"LLM_API_KEY":  "llm-key",
 	}
 
 	require.NoError(t, WriteEnvFile(path, vals))
@@ -87,11 +109,11 @@ func TestWriteEnvFile(t *testing.T) {
 	s, err := Open(path)
 	require.NoError(t, err)
 	assert.Equal(t, "tok123", s.Get("CM_GIT_TOKEN"))
-	assert.Equal(t, "or-key", s.Get("OPENROUTER_API_KEY"))
+	assert.Equal(t, "llm-key", s.Get("LLM_API_KEY"))
 }
 
 // TestWriteEnvFileDeterministic asserts byte-identical output across rewrites
-// even with keys beyond the fixed-order pair.
+// even with keys beyond the fixed-order set.
 func TestWriteEnvFileDeterministic(t *testing.T) {
 	t.Parallel()
 
@@ -99,10 +121,12 @@ func TestWriteEnvFileDeterministic(t *testing.T) {
 	path := filepath.Join(dir, "env")
 
 	vals := map[string]string{
-		"CM_GIT_TOKEN":       "tok123",
-		"OPENROUTER_API_KEY": "or-key",
-		"EXTRA_SECRET":       "extra-val",
-		"ANOTHER_KEY":        "another-val",
+		"CM_GIT_TOKEN": "tok123",
+		"LLM_API_KEY":  "llm-key",
+		"LLM_BASE_URL": "https://your-llm-endpoint.example/v1",
+		"LLM_TYPE":     "openai",
+		"EXTRA_SECRET": "extra-val",
+		"ANOTHER_KEY":  "another-val",
 	}
 
 	require.NoError(t, WriteEnvFile(path, vals))
@@ -115,7 +139,7 @@ func TestWriteEnvFileDeterministic(t *testing.T) {
 
 	assert.Equal(t, string(first), string(second))
 	assert.Equal(t,
-		"OPENROUTER_API_KEY=or-key\nCM_GIT_TOKEN=tok123\nANOTHER_KEY=another-val\nEXTRA_SECRET=extra-val\n",
+		"LLM_API_KEY=llm-key\nLLM_BASE_URL=https://your-llm-endpoint.example/v1\nLLM_TYPE=openai\nCM_GIT_TOKEN=tok123\nANOTHER_KEY=another-val\nEXTRA_SECRET=extra-val\n",
 		string(first))
 }
 
@@ -147,7 +171,7 @@ func TestRefresherWritesAndRefreshes(t *testing.T) {
 		},
 	}
 
-	r := NewRefresher(path, "or-static-key", gen, nil)
+	r := NewRefresher(path, EndpointSecrets{APIKey: "llm-static-key"}, gen, nil)
 	// Shrink timing constants so the test completes quickly.
 	r.refreshBefore = 20 * time.Millisecond
 	r.minSleep = 5 * time.Millisecond
@@ -179,10 +203,12 @@ func TestRefresherWritesAndRefreshes(t *testing.T) {
 		return s.Get("CM_GIT_TOKEN") == "tok2"
 	}, 2*time.Second, 10*time.Millisecond, "expected tok2 in env file")
 
-	// OPENROUTER_API_KEY must persist across rewrites.
+	// LLM_API_KEY must persist across rewrites.
 	s, err := Open(path)
 	require.NoError(t, err)
-	assert.Equal(t, "or-static-key", s.Get("OPENROUTER_API_KEY"))
+	assert.Equal(t, "llm-static-key", s.Get("LLM_API_KEY"))
+	assert.Equal(t, "", s.Get("LLM_BASE_URL"), "empty BaseURL must not appear in env file")
+	assert.Equal(t, "", s.Get("LLM_TYPE"), "empty Type must not appear in env file")
 
 	cancel()
 

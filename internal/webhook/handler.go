@@ -81,12 +81,13 @@ type LaunchEnv struct {
 	MemoryBytes int64
 	PidsLimit   int64
 
-	// BashTimeoutMaxSeconds, ToolOutputMaxBytes, and DefaultModel are the
-	// CMX_* worker knobs. Zero/empty values are omitted so the worker applies
-	// its own defaults.
+	// BashTimeoutMaxSeconds, ToolOutputMaxBytes, DefaultModel, and
+	// ReasoningEffort are the CMX_* worker knobs. Zero/empty values are omitted
+	// so the worker applies its own defaults.
 	BashTimeoutMaxSeconds int
 	ToolOutputMaxBytes    int
 	DefaultModel          string
+	ReasoningEffort       string
 
 	// MaxCardCost is the cumulative USD ceiling per card passed as
 	// CMX_MAX_CARD_COST. Zero is omitted (worker applies its own default).
@@ -387,6 +388,10 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 
 	if s.launchEnv.DefaultModel != "" {
 		env = append(env, "CMX_DEFAULT_MODEL="+s.launchEnv.DefaultModel)
+	}
+
+	if s.launchEnv.ReasoningEffort != "" {
+		env = append(env, "CMX_REASONING_EFFORT="+s.launchEnv.ReasoningEffort)
 	}
 
 	if s.launchEnv.MaxCardCost != 0 {

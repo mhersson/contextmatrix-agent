@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/mhersson/contextmatrix-harness/harness"
@@ -59,7 +60,24 @@ func (o *run) harnessConfig(model string) harness.Config {
 		}
 	}
 
+	// Reasoning is nil when effort is empty (off) so the field is omitted and
+	// models that don't support it are unaffected.
+	cfg.Reasoning = reasoningRaw(o.d.Cfg.ReasoningEffort)
+
 	return cfg
+}
+
+// reasoningRaw renders an effort string to the OpenRouter reasoning object the
+// harness carries. Returns nil for "" so the field is omitted. The L1 dialect
+// translates this to reasoning_effort for the openai endpoint.
+func reasoningRaw(effort string) json.RawMessage {
+	if effort == "" {
+		return nil
+	}
+
+	raw, _ := (llm.Reasoning{Effort: &effort}).Raw() //nolint:errcheck
+
+	return raw
 }
 
 // runModel routes a phase model-call through the centralized config and

@@ -916,6 +916,44 @@ func TestBuildLaunchSpec_CompactionEnvEmittedWhenEnabled(t *testing.T) {
 	assert.Contains(t, spec.Env, "CMX_COMPACTION_KEEP_RECENT_TURNS=4")
 }
 
+// TestBuildLaunchSpecEmitsReasoningEffort pins the CMX_REASONING_EFFORT env
+// threading: when LaunchEnv.ReasoningEffort is set the var must appear in the
+// container env; when empty (the default) it must be absent so workers use their
+// own default (no reasoning overhead).
+func TestBuildLaunchSpecEmitsReasoningEffort(t *testing.T) {
+	t.Run("emits when set", func(t *testing.T) {
+		s := NewServer(Config{
+			APIKey:   "k",
+			Executor: &fakeExecutor{},
+			Tracker:  executor.NewTracker(1),
+			LaunchEnv: LaunchEnv{
+				BaseImage:       "img",
+				MCPURL:          "http://mcp",
+				ReasoningEffort: "high",
+			},
+		})
+
+		spec := s.buildLaunchSpec(protocol.TriggerPayload{CardID: "C1", Project: "p"}, "corr", "")
+
+		assert.Contains(t, spec.Env, "CMX_REASONING_EFFORT=high")
+	})
+
+	t.Run("omits when empty", func(t *testing.T) {
+		s := NewServer(Config{
+			APIKey:    "k",
+			Executor:  &fakeExecutor{},
+			Tracker:   executor.NewTracker(1),
+			LaunchEnv: LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"},
+		})
+
+		spec := s.buildLaunchSpec(protocol.TriggerPayload{CardID: "C1", Project: "p"}, "corr", "")
+
+		for _, e := range spec.Env {
+			assert.NotContains(t, e, "CMX_REASONING_EFFORT", "empty effort must not be emitted")
+		}
+	})
+}
+
 func TestBuildLaunchSpec_CompactionEnvOmittedWhenDisabled(t *testing.T) {
 	// Disabled compaction (the default) emits no CMX_COMPACTION_* vars, so the
 	// worker keeps the hard context_limit stop — behavior-neutral.
