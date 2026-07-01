@@ -16,7 +16,7 @@ import (
 func TestPRCreatorCommand(t *testing.T) {
 	t.Parallel()
 
-	pc := NewPRCreator("/work/space", "ghs_secrettoken", "")
+	pc := NewPRCreator("/work/space", "ghs_secrettoken", "", "")
 
 	cmd := pc.buildCmd(t.Context(), "Add the widget", "the body\nwith detail", "main", "cm/cmx-001")
 
@@ -70,7 +70,7 @@ func TestPRCreatorCACert(t *testing.T) {
 	t.Run("cert set injects SSL_CERT_FILE and GH_CA_BUNDLE", func(t *testing.T) {
 		t.Parallel()
 
-		pc := NewPRCreator("/work/space", "ghs_tok", "/run/cm-ca/ca.crt")
+		pc := NewPRCreator("/work/space", "ghs_tok", "/run/cm-ca/ca.crt", "")
 		cmd := pc.buildCmd(t.Context(), "t", "b", "main", "cm/x-1")
 
 		assert.Contains(t, cmd.Env, "SSL_CERT_FILE=/run/cm-ca/ca.crt")
@@ -81,12 +81,37 @@ func TestPRCreatorCACert(t *testing.T) {
 	t.Run("no cert omits the CA vars", func(t *testing.T) {
 		t.Parallel()
 
-		pc := NewPRCreator("/work/space", "ghs_tok", "")
+		pc := NewPRCreator("/work/space", "ghs_tok", "", "")
 		cmd := pc.buildCmd(t.Context(), "t", "b", "main", "cm/x-1")
 
 		joined := strings.Join(cmd.Env, "\n")
 		assert.NotContains(t, joined, "SSL_CERT_FILE")
 		assert.NotContains(t, joined, "GH_CA_BUNDLE")
+	})
+}
+
+// TestPRCreatorGHHost verifies GH_HOST is exported for a GitHub Enterprise repo
+// URL (gh cannot infer such a host from the git remote) and omitted when the
+// repo URL yields no host, leaving gh on its github.com default.
+func TestPRCreatorGHHost(t *testing.T) {
+	t.Parallel()
+
+	t.Run("enterprise host sets GH_HOST", func(t *testing.T) {
+		t.Parallel()
+
+		pc := NewPRCreator("/work/space", "ghs_tok", "", "https://acme.ghe.com/org/repo.git")
+		cmd := pc.buildCmd(t.Context(), "t", "b", "main", "cm/x-1")
+
+		assert.Contains(t, cmd.Env, "GH_HOST=acme.ghe.com")
+	})
+
+	t.Run("empty repo URL omits GH_HOST", func(t *testing.T) {
+		t.Parallel()
+
+		pc := NewPRCreator("/work/space", "ghs_tok", "", "")
+		cmd := pc.buildCmd(t.Context(), "t", "b", "main", "cm/x-1")
+
+		assert.NotContains(t, strings.Join(cmd.Env, "\n"), "GH_HOST")
 	})
 }
 
