@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -123,6 +124,14 @@ type ServiceConfig struct {
 	ReasoningEffort           string
 	LogLevel                  string
 
+	// CACertFile is an optional path (on the serve host) to a PEM file of extra
+	// CA certificates for corporate TLS interception / a private-CA GitHub
+	// Enterprise. When set, it is bind-mounted read-only into each worker
+	// container and the worker trusts it for its own outbound TLS (harness LLM
+	// client, MCP/cmclient) and its git/gh subprocesses. Empty disables the
+	// feature. Container-only: the serve host itself uses the OS trust store.
+	CACertFile string
+
 	// MaxCardCost is the cumulative USD ceiling per card. Workers receive it as
 	// CMX_MAX_CARD_COST. Zero disables the ceiling; the default (5.0) applies
 	// when the key is absent from config and env — koanf cannot distinguish
@@ -167,6 +176,7 @@ type serviceRaw struct {
 	IdleOutputTimeout         string            `koanf:"idle_output_timeout"`
 	IdleWatchdogInterval      string            `koanf:"idle_watchdog_interval"`
 	SecretsDir                string            `koanf:"secrets_dir"`
+	CACertFile                string            `koanf:"ca_cert_file"`
 	LLMEndpoint               LLMEndpoint       `koanf:"llm_endpoint"`
 	GitHub                    GitHubConfig      `koanf:"github"`
 	WorkerExtraEnv            map[string]string `koanf:"worker_extra_env"`
@@ -285,6 +295,7 @@ func (r serviceRaw) toConfig() (*ServiceConfig, error) {
 		IdleOutputTimeout:         idleOutput,
 		IdleWatchdogInterval:      idleWatchdog,
 		SecretsDir:                r.SecretsDir,
+		CACertFile:                r.CACertFile,
 		LLMEndpoint:               r.LLMEndpoint,
 		GitHub:                    r.GitHub.withDerivedAPIBaseURL(),
 		WorkerExtraEnv:            r.WorkerExtraEnv,
@@ -407,6 +418,12 @@ func (c *ServiceConfig) Validate() error {
 		return fmt.Errorf(
 			"selector_price_headroom must be 0 (use worker default) or >= 1 (band multiplier), got %g",
 			c.SelectorPriceHeadroom)
+	}
+
+	if c.CACertFile != "" {
+		if _, err := os.Stat(c.CACertFile); err != nil {
+			return fmt.Errorf("ca_cert_file %q: %w", c.CACertFile, err)
+		}
 	}
 
 	if c.Compaction.Enabled {

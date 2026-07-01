@@ -16,7 +16,7 @@ import (
 func TestPRCreatorCommand(t *testing.T) {
 	t.Parallel()
 
-	pc := NewPRCreator("/work/space", "ghs_secrettoken")
+	pc := NewPRCreator("/work/space", "ghs_secrettoken", "")
 
 	cmd := pc.buildCmd(t.Context(), "Add the widget", "the body\nwith detail", "main", "cm/cmx-001")
 
@@ -60,6 +60,34 @@ func TestPRCreatorCommand(t *testing.T) {
 	// entry must be an allowlisted key (assert against the env-scrub helper).
 	want := tools.ScrubbedEnv([]string{"GH_TOKEN=ghs_secrettoken"})
 	assert.ElementsMatch(t, want, cmd.Env, "env must be exactly ScrubbedEnv + GH_TOKEN")
+}
+
+// TestPRCreatorCACert verifies the gh command's env carries the extra-CA vars
+// only when a cert path is configured.
+func TestPRCreatorCACert(t *testing.T) {
+	t.Parallel()
+
+	t.Run("cert set injects SSL_CERT_FILE and GH_CA_BUNDLE", func(t *testing.T) {
+		t.Parallel()
+
+		pc := NewPRCreator("/work/space", "ghs_tok", "/run/cm-ca/ca.crt")
+		cmd := pc.buildCmd(t.Context(), "t", "b", "main", "cm/x-1")
+
+		assert.Contains(t, cmd.Env, "SSL_CERT_FILE=/run/cm-ca/ca.crt")
+		assert.Contains(t, cmd.Env, "GH_CA_BUNDLE=/run/cm-ca/ca.crt")
+		assert.Contains(t, cmd.Env, "GH_TOKEN=ghs_tok")
+	})
+
+	t.Run("no cert omits the CA vars", func(t *testing.T) {
+		t.Parallel()
+
+		pc := NewPRCreator("/work/space", "ghs_tok", "")
+		cmd := pc.buildCmd(t.Context(), "t", "b", "main", "cm/x-1")
+
+		joined := strings.Join(cmd.Env, "\n")
+		assert.NotContains(t, joined, "SSL_CERT_FILE")
+		assert.NotContains(t, joined, "GH_CA_BUNDLE")
+	})
 }
 
 // TestParsePRURL pulls the first http(s) URL gh prints to stdout.

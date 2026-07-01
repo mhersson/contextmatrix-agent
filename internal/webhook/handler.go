@@ -77,6 +77,10 @@ type LaunchEnv struct {
 	// container at /run/cm-secrets. Empty disables the mount.
 	SecretsHostDir string
 
+	// CACertFile is the host path to an optional extra-CA PEM, bind-mounted
+	// read-only into each container at /run/cm-ca/ca.crt. Empty disables it.
+	CACertFile string
+
 	// MemoryBytes and PidsLimit are the per-container resource caps.
 	MemoryBytes int64
 	PidsLimit   int64
@@ -437,6 +441,7 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 		Env:            env,
 		SecretsHostDir: s.launchEnv.SecretsHostDir,
 		SkillsHostDir:  skillsDir,
+		CACertHostFile: s.launchEnv.CACertFile,
 		MemoryBytes:    s.launchEnv.MemoryBytes,
 		PidsLimit:      s.launchEnv.PidsLimit,
 		CorrelationID:  correlationID,

@@ -325,6 +325,7 @@ func launchEnv(cfg *config.ServiceConfig, secretsHostDir string) webhook.LaunchE
 		MCPURL:                    composeMCPURL(base),
 		MCPAPIKey:                 cfg.MCPAPIKey,
 		SecretsHostDir:            secretsHostDir,
+		CACertFile:                cfg.CACertFile,
 		MemoryBytes:               cfg.ContainerMemoryBytes,
 		PidsLimit:                 cfg.ContainerPidsLimit,
 		BashTimeoutMaxSeconds:     cfg.BashTimeoutMaxSeconds,

@@ -96,6 +96,17 @@ idle_watchdog_interval: 30s
 # CMX_SECRETS_DIR
 secrets_dir: /var/run/cm-agent/secrets
 
+# Optional host path to a PEM file of extra CA certificates (corporate TLS
+# interception / Zscaler, or a private-CA GitHub Enterprise). Container-only:
+# it is bind-mounted read-only into each worker at /run/cm-ca/ca.crt and the
+# worker trusts it for its OWN outbound TLS — the harness LLM client, the
+# MCP/cmclient connection, and the git/gh subprocesses. It does NOT cover
+# model-invoked bash tools (curl/pip/npm), whose env the harness scrubs;
+# covering those needs a harness change. The serve host itself uses the OS
+# trust store, so install the CA there separately if needed. Empty = disabled.
+# CMX_CA_CERT_FILE
+# ca_cert_file: /etc/contextmatrix-agent/extra-ca.pem
+
 # Additional environment variables injected verbatim into every worker
 # container. Useful for operator-specific passthrough.
 # worker_extra_env:

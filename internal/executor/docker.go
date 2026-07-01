@@ -41,6 +41,11 @@ const secretsMountPath = "/run/cm-secrets" //nolint:gosec // path, not a credent
 // inside the container. The worker reads it via CMX_TASK_SKILLS_DIR.
 const skillsMountPath = "/run/cm-skills" //nolint:gosec // path, not a credential
 
+// caCertMountPath is where the optional extra-CA PEM is mounted read-only
+// inside the container (matches the runner convention). The worker reads it via
+// CMX_CA_CERT_FILE and threads it onto its git/gh subprocesses.
+const caCertMountPath = "/run/cm-ca/ca.crt" //nolint:gosec // path, not a credential
+
 // scannerBufferMax bounds the per-line buffer of the stdout/stderr pump so a
 // pathological container cannot pin the host heap with one unbounded line.
 const scannerBufferMax = 1 << 20 // 1 MiB
@@ -70,6 +75,7 @@ type LaunchSpec struct {
 	Env             []string
 	SecretsHostDir  string // bind source; mounted read-only at /run/cm-secrets
 	SkillsHostDir   string // bind source; mounted read-only at /run/cm-skills (empty = no skills)
+	CACertHostFile  string // bind source; mounted read-only at /run/cm-ca/ca.crt (empty = no extra CA)
 	MemoryBytes     int64
 	PidsLimit       int64
 	CorrelationID   string
@@ -155,6 +161,18 @@ func containerConfig(spec LaunchSpec) (*container.Config, *container.HostConfig)
 
 	if spec.SkillsHostDir != "" {
 		host.Binds = append(host.Binds, spec.SkillsHostDir+":"+skillsMountPath+":ro")
+	}
+
+	if spec.CACertHostFile != "" {
+		// Mount the operator's extra CA read-only and point the worker at it via
+		// CMX_CA_CERT_FILE — the only CA var set at the container level. The
+		// worker reads it for its own outbound TLS (LLM, MCP) and threads the path
+		// onto its git/gh subprocesses explicitly. GIT_SSL_CAINFO / GH_CA_BUNDLE /
+		// SSL_CERT_FILE are deliberately NOT set here: the harness scrubs
+		// subprocess env, so they would be dead, and advertising them would wrongly
+		// imply git/gh inherit the container env.
+		host.Binds = append(host.Binds, spec.CACertHostFile+":"+caCertMountPath+":ro")
+		cfg.Env = append(cfg.Env, "CMX_CA_CERT_FILE="+caCertMountPath)
 	}
 
 	return cfg, host

@@ -1,13 +1,71 @@
 package cli
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/config"
 	"github.com/mhersson/contextmatrix-harness/llm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// writeSelfSignedCA writes a self-signed CA PEM to a temp file and returns its
+// path — enough for the CA helpers to parse and trust.
+func writeSelfSignedCA(t *testing.T) string {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "test-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+	}
+
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	require.NoError(t, err)
+
+	path := filepath.Join(t.TempDir(), "ca.pem")
+	require.NoError(t, os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600))
+
+	return path
+}
+
+func TestCAInjections(t *testing.T) {
+	t.Run("empty path yields no options", func(t *testing.T) {
+		l, m, err := caInjections("")
+		require.NoError(t, err)
+		assert.Empty(t, l)
+		assert.Empty(t, m)
+	})
+
+	t.Run("valid cert yields one llm and one cmclient option", func(t *testing.T) {
+		l, m, err := caInjections(writeSelfSignedCA(t))
+		require.NoError(t, err)
+		assert.Len(t, l, 1)
+		assert.Len(t, m, 1)
+	})
+
+	t.Run("bad path errors", func(t *testing.T) {
+		_, _, err := caInjections(filepath.Join(t.TempDir(), "nope.pem"))
+		require.Error(t, err)
+	})
+}
 
 func TestDialectFromType(t *testing.T) {
 	assert.Equal(t, llm.DialectOpenAI, dialectFromType("openai"))
@@ -68,6 +126,25 @@ func TestSpecFromEnv_HappyPath(t *testing.T) {
 	assert.Equal(t, "https://github.com/org/repo", spec.RepoURL)
 	assert.Equal(t, "http://localhost:8080/mcp", spec.MCPURL)
 	assert.Equal(t, "test-key", spec.MCPAPIKey)
+}
+
+func TestSpecFromEnv_CACertFile(t *testing.T) {
+	t.Run("absent leaves it empty", func(t *testing.T) {
+		setRequired(t)
+
+		spec, err := specFromEnv()
+		require.NoError(t, err)
+		assert.Empty(t, spec.CACertFile)
+	})
+
+	t.Run("set is threaded onto the spec", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("CMX_CA_CERT_FILE", "/run/cm-ca/ca.crt")
+
+		spec, err := specFromEnv()
+		require.NoError(t, err)
+		assert.Equal(t, "/run/cm-ca/ca.crt", spec.CACertFile)
+	})
 }
 
 func TestSpecFromEnv_BoolParsing(t *testing.T) {

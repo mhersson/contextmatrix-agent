@@ -676,6 +676,57 @@ func TestGitHubHostValidation(t *testing.T) {
 	})
 }
 
+func TestCACertFileValidation(t *testing.T) {
+	t.Run("empty is allowed (feature disabled)", func(t *testing.T) {
+		cfg := validServiceConfig()
+		cfg.CACertFile = ""
+		require.NoError(t, cfg.Validate())
+	})
+
+	t.Run("existing file passes", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "ca.pem")
+		require.NoError(t, os.WriteFile(path, []byte("x"), 0o600))
+
+		cfg := validServiceConfig()
+		cfg.CACertFile = path
+		require.NoError(t, cfg.Validate())
+	})
+
+	t.Run("missing file is rejected", func(t *testing.T) {
+		cfg := validServiceConfig()
+		cfg.CACertFile = filepath.Join(t.TempDir(), "nope.pem")
+		assert.ErrorContains(t, cfg.Validate(), "ca_cert_file")
+	})
+}
+
+func TestCACertFileFromEnv(t *testing.T) {
+	clearServiceEnv(t)
+
+	caPath := filepath.Join(t.TempDir(), "ca.pem")
+	require.NoError(t, os.WriteFile(caPath, []byte("x"), 0o600))
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "serve.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+contextmatrix_url: http://localhost:8080
+api_key: 0123456789012345678901234567890123456789
+base_image: img@sha256:abc
+github:
+  auth_mode: pat
+  pat:
+    token: t
+llm_endpoint:
+  api_key: k
+`), 0o600))
+
+	t.Setenv("CMX_CA_CERT_FILE", caPath)
+
+	cfg, err := LoadService(path)
+	require.NoError(t, err)
+	assert.Equal(t, caPath, cfg.CACertFile)
+	require.NoError(t, cfg.Validate())
+}
+
 // clearServiceEnv unsets any CMX_* vars that could leak into a default/file
 // test from the developer's shell. t.Setenv restores them after the test.
 func clearServiceEnv(t *testing.T) {
@@ -685,6 +736,7 @@ func clearServiceEnv(t *testing.T) {
 		"CMX_CONTEXTMATRIX_URL", "CMX_PORT", "CMX_LLM_ENDPOINT__API_KEY",
 		"CMX_API_KEY", "CMX_BASE_IMAGE", "CMX_MAX_CONCURRENT",
 		"CMX_GITHUB__AUTH_MODE", "CMX_GITHUB__PAT__TOKEN", "CMX_GITHUB__HOST",
+		"CMX_CA_CERT_FILE",
 		"CMX_MAX_CARD_COST", "CMX_SELECTOR_PRICE_HEADROOM",
 		"CMX_ADMIN_PORT",
 		"CMX_COMPACTION_ENABLED", "CMX_COMPACTION_THRESHOLD",

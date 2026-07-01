@@ -78,7 +78,7 @@ func TestStageForCommit_SkipsBuildArtifacts(t *testing.T) {
 	remote := setupBareRemote(t)
 	ws := t.TempDir()
 
-	g := NewGit(ws, "")
+	g := NewGit(ws, "", "")
 	require.NoError(t, g.Clone(context.Background(), remote, "main"))
 	require.NoError(t, g.CreateBranch(context.Background(), "cm/cmx-001"))
 	g.SetBranchPolicy("cm/cmx-001", "main", "main")
@@ -132,7 +132,7 @@ func TestStageForCommit_HandlesSpacedFilenames(t *testing.T) {
 	remote := setupBareRemote(t)
 	ws := t.TempDir()
 
-	g := NewGit(ws, "")
+	g := NewGit(ws, "", "")
 	require.NoError(t, g.Clone(context.Background(), remote, "main"))
 	require.NoError(t, g.CreateBranch(context.Background(), "cm/cmx-001"))
 	g.SetBranchPolicy("cm/cmx-001", "main", "main")
@@ -158,7 +158,7 @@ func TestCommitWithMessage_OnlyArtifactsIsNoOp(t *testing.T) {
 	remote := setupBareRemote(t)
 	ws := t.TempDir()
 
-	g := NewGit(ws, "")
+	g := NewGit(ws, "", "")
 	require.NoError(t, g.Clone(context.Background(), remote, "main"))
 	require.NoError(t, g.CreateBranch(context.Background(), "cm/cmx-001"))
 	g.SetBranchPolicy("cm/cmx-001", "main", "main")
@@ -177,7 +177,7 @@ func TestCloneBranchCommitPush(t *testing.T) {
 	remote := setupBareRemote(t)
 	ws := filepath.Join(t.TempDir(), "ws")
 
-	g := NewGit(ws, "") // no token: file:// remote needs none
+	g := NewGit(ws, "", "") // no token: file:// remote needs none
 
 	ctx := context.Background()
 
@@ -209,7 +209,7 @@ func TestCommitIfDirtyCleanTree(t *testing.T) {
 	remote := setupBareRemote(t)
 	ws := filepath.Join(t.TempDir(), "ws")
 
-	g := NewGit(ws, "")
+	g := NewGit(ws, "", "")
 
 	ctx := context.Background()
 
@@ -225,7 +225,7 @@ func TestCredEnvShape(t *testing.T) {
 	// t.Setenv mutates the process env; cannot use t.Parallel.
 	t.Setenv("LLM_API_KEY", "secret-llm-value")
 
-	g := NewGit(t.TempDir(), "ghs_tok123456")
+	g := NewGit(t.TempDir(), "ghs_tok123456", "")
 	env := g.credEnv()
 
 	assert.Contains(t, env, "GIT_CONFIG_COUNT=1")
@@ -241,7 +241,7 @@ func TestCredEnvShape(t *testing.T) {
 func TestCredEnvNoToken(t *testing.T) {
 	t.Parallel()
 
-	g := NewGit(t.TempDir(), "")
+	g := NewGit(t.TempDir(), "", "")
 	env := g.credEnv()
 
 	joined := strings.Join(env, "\n")
@@ -250,10 +250,28 @@ func TestCredEnvNoToken(t *testing.T) {
 	assert.NotContains(t, joined, "http.extraheader")
 }
 
+func TestCredEnvCACert(t *testing.T) {
+	t.Parallel()
+
+	t.Run("cert set injects GIT_SSL_CAINFO", func(t *testing.T) {
+		t.Parallel()
+
+		g := NewGit(t.TempDir(), "tok", "/run/cm-ca/ca.crt")
+		assert.Contains(t, g.credEnv(), "GIT_SSL_CAINFO=/run/cm-ca/ca.crt")
+	})
+
+	t.Run("no cert omits GIT_SSL_CAINFO", func(t *testing.T) {
+		t.Parallel()
+
+		g := NewGit(t.TempDir(), "tok", "")
+		assert.NotContains(t, strings.Join(g.credEnv(), "\n"), "GIT_SSL_CAINFO")
+	})
+}
+
 func TestPushGuard(t *testing.T) {
 	t.Parallel()
 
-	g := NewGit(t.TempDir(), "tok")
+	g := NewGit(t.TempDir(), "tok", "")
 	g.SetBranchPolicy("cm/test-001", "main", "main") // cardBranch, baseBranch, remoteDefault
 
 	tests := []struct {
@@ -307,7 +325,7 @@ func TestPushGuardDenylistRegardless(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			g := NewGit(t.TempDir(), "tok")
+			g := NewGit(t.TempDir(), "tok", "")
 			g.SetBranchPolicy(tt.cardBranch, tt.baseBranch, tt.remoteDefault)
 
 			err := g.guardPush(tt.cardBranch, true)
@@ -324,7 +342,7 @@ func TestPushGuardDenylistRegardless(t *testing.T) {
 func TestForcePushRequiresLeaseTip(t *testing.T) {
 	t.Parallel()
 
-	g := NewGit(t.TempDir(), "tok")
+	g := NewGit(t.TempDir(), "tok", "")
 	g.SetBranchPolicy("cm/test-001", "main", "main")
 
 	err := g.ForcePushWithLease(context.Background(), "cm/test-001", "")
@@ -338,7 +356,7 @@ func TestForcePushRequiresLeaseTip(t *testing.T) {
 func TestGuardZeroValueFailClosed(t *testing.T) {
 	t.Parallel()
 
-	g := NewGit(t.TempDir(), "tok") // SetBranchPolicy never called
+	g := NewGit(t.TempDir(), "tok", "") // SetBranchPolicy never called
 
 	for _, branch := range []string{"cm/test-001", "main", "master", "feature/x", ""} {
 		for _, force := range []bool{false, true} {
@@ -356,7 +374,7 @@ func setupClonedRepo(t *testing.T) (string, string, string) {
 	bare := setupBareRemote(t)
 	ws := filepath.Join(t.TempDir(), "ws")
 
-	g := NewGit(ws, "")
+	g := NewGit(ws, "", "")
 	require.NoError(t, g.Clone(context.Background(), bare, "main"))
 
 	// Get the initial commit hash.
@@ -391,7 +409,7 @@ func TestRemoteTip(t *testing.T) {
 	t.Parallel()
 
 	bare, ws, _ := setupClonedRepo(t)
-	g := NewGit(ws, "")
+	g := NewGit(ws, "", "")
 	ctx := context.Background()
 
 	// Existing branch returns a non-empty hash.
@@ -417,7 +435,7 @@ func TestFetch(t *testing.T) {
 	// Create a new branch on the remote after the clone.
 	pushFileToBranch(t, bare, "extra.txt", "feature/new")
 
-	g := NewGit(ws, "")
+	g := NewGit(ws, "", "")
 
 	// Before fetch the branch is unknown to our clone.
 	_, err := g.run(ctx, "rev-parse", "--verify", "origin/feature/new")
@@ -435,7 +453,7 @@ func TestMergeBase(t *testing.T) {
 	t.Parallel()
 
 	_, ws, initHash := setupClonedRepo(t)
-	g := NewGit(ws, "")
+	g := NewGit(ws, "", "")
 	ctx := context.Background()
 
 	// Create a branch off main and add a commit.
@@ -453,7 +471,7 @@ func TestCommitFixup(t *testing.T) {
 	t.Parallel()
 
 	_, ws, _ := setupClonedRepo(t)
-	g := NewGit(ws, "")
+	g := NewGit(ws, "", "")
 	ctx := context.Background()
 
 	// Make an initial commit to target with fixup.
@@ -496,7 +514,7 @@ func TestCommitFixupCleanTree(t *testing.T) {
 	t.Parallel()
 
 	_, ws, _ := setupClonedRepo(t)
-	g := NewGit(ws, "")
+	g := NewGit(ws, "", "")
 	ctx := context.Background()
 
 	// No changes; fixup on HEAD should be a no-op.
@@ -517,7 +535,7 @@ func TestRebaseAutosquash(t *testing.T) {
 		t.Parallel()
 
 		_, ws, _ := setupClonedRepo(t)
-		g := NewGit(ws, "")
+		g := NewGit(ws, "", "")
 		ctx := context.Background()
 
 		// Capture the starting point (origin/main) before adding commits.
@@ -564,7 +582,7 @@ func TestRebaseAutosquash(t *testing.T) {
 		t.Parallel()
 
 		bare, ws, _ := setupClonedRepo(t)
-		g := NewGit(ws, "")
+		g := NewGit(ws, "", "")
 		ctx := context.Background()
 
 		// Create a commit on our branch.
@@ -602,7 +620,7 @@ func TestSoftResetSquash(t *testing.T) {
 	t.Parallel()
 
 	_, ws, _ := setupClonedRepo(t)
-	g := NewGit(ws, "")
+	g := NewGit(ws, "", "")
 	ctx := context.Background()
 
 	// Create two commits.
@@ -653,7 +671,7 @@ func TestCommitWithMessage(t *testing.T) {
 	t.Parallel()
 
 	_, ws, _ := setupClonedRepo(t)
-	g := NewGit(ws, "")
+	g := NewGit(ws, "", "")
 	ctx := context.Background()
 
 	require.NoError(t, os.WriteFile(filepath.Join(ws, "new.txt"), []byte("hello\n"), 0o644))
@@ -671,7 +689,7 @@ func TestCommitWithMessageCleanTree(t *testing.T) {
 	t.Parallel()
 
 	_, ws, _ := setupClonedRepo(t)
-	g := NewGit(ws, "")
+	g := NewGit(ws, "", "")
 	ctx := context.Background()
 
 	committed, err := g.CommitWithMessage(ctx, "no changes")
@@ -683,7 +701,7 @@ func TestLastCommitTouching(t *testing.T) {
 	t.Parallel()
 
 	_, ws, _ := setupClonedRepo(t)
-	g := NewGit(ws, "")
+	g := NewGit(ws, "", "")
 	ctx := context.Background()
 
 	// Commit touching foo.txt.
@@ -726,7 +744,7 @@ func TestHead(t *testing.T) {
 	t.Parallel()
 
 	_, ws, initHash := setupClonedRepo(t)
-	g := NewGit(ws, "")
+	g := NewGit(ws, "", "")
 	ctx := context.Background()
 
 	h, err := g.Head(ctx)
@@ -738,7 +756,7 @@ func TestCheckout(t *testing.T) {
 	t.Parallel()
 
 	bare, ws, _ := setupClonedRepo(t)
-	g := NewGit(ws, "")
+	g := NewGit(ws, "", "")
 	ctx := context.Background()
 
 	// Create a branch on the remote.
@@ -757,7 +775,7 @@ func TestDiff(t *testing.T) {
 	t.Parallel()
 
 	_, ws, _ := setupClonedRepo(t)
-	g := NewGit(ws, "")
+	g := NewGit(ws, "", "")
 	ctx := context.Background()
 
 	// Add a commit on main branch.
@@ -776,7 +794,7 @@ func TestDiffNoChanges(t *testing.T) {
 	t.Parallel()
 
 	_, ws, _ := setupClonedRepo(t)
-	g := NewGit(ws, "")
+	g := NewGit(ws, "", "")
 	ctx := context.Background()
 
 	// No commits beyond origin/main, diff should be empty.

@@ -35,6 +35,12 @@ type Git struct {
 	dir   string
 	token string
 
+	// caCertFile is an optional in-container path to an extra CA PEM. When set,
+	// git subprocesses trust it via GIT_SSL_CAINFO — needed for TLS interception
+	// or a private-CA GitHub Enterprise. The container env is scrubbed for
+	// subprocesses, so this must be injected here rather than inherited.
+	caCertFile string
+
 	cardBranch    string // the run's own branch; the only ref this Git may push
 	baseBranch    string // the card's base branch; never a force-push target
 	remoteDefault string // origin/HEAD short name; never a force-push target
@@ -42,9 +48,10 @@ type Git struct {
 
 // NewGit creates a Git for the given workspace directory and optional GitHub
 // installation token. An empty token means no credential injection (suitable
-// for file:// remotes or public repos).
-func NewGit(workspace, gitToken string) *Git {
-	return &Git{dir: workspace, token: gitToken}
+// for file:// remotes or public repos). caCertFile is an optional in-container
+// path to an extra CA PEM; empty disables the extra trust.
+func NewGit(workspace, gitToken, caCertFile string) *Git {
+	return &Git{dir: workspace, token: gitToken, caCertFile: caCertFile}
 }
 
 // SetBranchPolicy records the push policy for this run: cardBranch is the only
@@ -68,6 +75,15 @@ func (g *Git) credEnv() []string {
 		"GIT_COMMITTER_NAME=contextmatrix-agent",
 		"GIT_COMMITTER_EMAIL=agent@contextmatrix.local",
 	})
+
+	if g.caCertFile != "" {
+		// GIT_SSL_CAINFO REPLACES the CA bundle for this invocation (unlike the
+		// in-process Go client, which appends to the system pool). That is
+		// correct for the target deployments: a TLS-intercepting proxy re-signs
+		// every cert from this root, and a private-CA GHES issues its host cert
+		// from it, so trusting only this file suffices.
+		env = append(env, "GIT_SSL_CAINFO="+g.caCertFile)
+	}
 
 	if g.token == "" {
 		return env
