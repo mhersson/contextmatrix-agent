@@ -559,8 +559,6 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.hub.PublishUser(payload.Project, payload.CardID, payload.Content)
-
 	mu := s.stdinLock(payload.Project, payload.CardID)
 	mu.Lock()
 	err := frames.Write(run.Stdin, frames.Frame{
@@ -578,8 +576,9 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Delivered: record the message_id now so a retry is deduped, then clear the
-	// awaiting flag and touch the run.
+	// Delivered: publish to the chat stream and record the message_id so a retry
+	// is deduped, then clear the awaiting flag and touch the run.
+	s.hub.PublishUser(payload.Project, payload.CardID, payload.Content)
 	s.dedup.Record(payload.Project, payload.CardID, payload.MessageID)
 	s.tracker.SetAwaiting(payload.Project, payload.CardID, false)
 	s.tracker.Touch(payload.Project, payload.CardID)
