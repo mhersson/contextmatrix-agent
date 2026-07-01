@@ -520,7 +520,12 @@ func (o *run) synthesize(ctx context.Context, findings string, authoritative boo
 
 		o.ledger.Spend(res.TotalCostUSD)
 
-		if reportErr := d.Ops.ReportUsage(ctx, cfg.CardID, res.ModelUsed,
+		used := res.ModelUsed
+		if used == "" {
+			used = model
+		}
+
+		if reportErr := d.Ops.ReportUsage(ctx, cfg.CardID, used,
 			res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
 			slog.Warn("review: report synthesis usage failed", "card_id", cfg.CardID, "error", reportErr)
 		}
