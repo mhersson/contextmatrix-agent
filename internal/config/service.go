@@ -378,8 +378,10 @@ func (c *ServiceConfig) Validate() error {
 		return fmt.Errorf("max_card_cost must be >= 0 (0 disables the ceiling), got %g", c.MaxCardCost)
 	}
 
-	if c.SelectorPriceHeadroom < 0 {
-		return fmt.Errorf("selector_price_headroom must be >= 0 (0 uses worker default), got %g", c.SelectorPriceHeadroom)
+	if c.SelectorPriceHeadroom < 0 || (c.SelectorPriceHeadroom > 0 && c.SelectorPriceHeadroom < 1) {
+		return fmt.Errorf(
+			"selector_price_headroom must be 0 (use worker default) or >= 1 (band multiplier), got %g",
+			c.SelectorPriceHeadroom)
 	}
 
 	if c.Compaction.Enabled {

@@ -335,6 +335,20 @@ func TestServiceValidate(t *testing.T) {
 		require.NoError(t, cfg.Validate())
 	})
 
+	t.Run("sub-unit selector_price_headroom errors (0 < h < 1 is meaningless)", func(t *testing.T) {
+		cfg := validServiceConfig()
+		cfg.SelectorPriceHeadroom = 0.5
+		err := cfg.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "selector_price_headroom")
+	})
+
+	t.Run("exactly 1.0 selector_price_headroom passes (no band)", func(t *testing.T) {
+		cfg := validServiceConfig()
+		cfg.SelectorPriceHeadroom = 1.0
+		require.NoError(t, cfg.Validate())
+	})
+
 	t.Run("enabled compaction with valid values passes", func(t *testing.T) {
 		cfg := validServiceConfig()
 		cfg.Compaction = CompactionConfig{Enabled: true, Threshold: 0.85, KeepRecentTurns: 6}
