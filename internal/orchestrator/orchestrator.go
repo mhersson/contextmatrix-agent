@@ -87,7 +87,6 @@ type Config struct {
 	AgentID           string
 	Workspace         string
 	MaxCardCost       float64
-	PriceHeadroom     float64
 	PayloadModel      string // CM's default_model from the trigger; "" = serve default
 	DefaultModel      string // serve-config default
 	ReasoningEffort   string // CMX_REASONING_EFFORT; empty = off

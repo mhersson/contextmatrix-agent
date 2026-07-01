@@ -331,7 +331,6 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 			AgentID:           "cmx-agent-" + strings.ToLower(a.spec.CardID),
 			Workspace:         a.ws,
 			MaxCardCost:       a.spec.MaxCardCost,
-			PriceHeadroom:     a.spec.SelectorPriceHeadroom,
 			PayloadModel:      a.spec.Model,
 			DefaultModel:      a.spec.DefaultModel,
 			ReasoningEffort:   a.spec.ReasoningEffort,
@@ -528,7 +527,7 @@ func buildSkillTool(spec RunSpec, ops CardOps) tools.Tool {
 // payload-injected catalog, priors, favorites, and blacklist. No live catalog
 // fetch or embedded baseline is consulted.
 func buildRegistry(spec RunSpec) *registry.Registry {
-	return registry.FromSelection(spec.Selection, spec.DefaultModel)
+	return registry.FromSelection(spec.Selection, spec.DefaultModel, spec.SelectorPriceHeadroom)
 }
 
 // releaseWithError best-effort releases the claim and returns an error result.
