@@ -348,6 +348,19 @@ func TestRunDoneToleratesReleaseError(t *testing.T) {
 
 		err := runDone(context.Background(), o)
 		require.NoError(t, err, "transient release error must not fail runDone")
+
+		calls := ops.recorded()
+		require.GreaterOrEqual(t, indexOfCall(calls, "ReleaseCard:CARD-1"), 0)
+
+		var logged bool
+
+		for _, c := range calls {
+			if strings.HasPrefix(c, "AddLog:") {
+				logged = true
+			}
+		}
+
+		assert.True(t, logged, "completion log written even when release returns a transient error")
 	})
 }
 
