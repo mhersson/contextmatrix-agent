@@ -150,7 +150,15 @@ github:
   # CMX_GITHUB__AUTH_MODE
   auth_mode: pat
 
-  # Optional GitHub API base URL. Defaults to https://api.github.com.
+  # Optional GitHub Enterprise host (bare hostname or full URL). When set and
+  # api_base_url is empty, the API base URL is derived as
+  # https://<host>/api/v3. An explicit api_base_url below wins.
+  # CMX_GITHUB__HOST
+  # host: ghe.example.com
+
+  # Optional GitHub API base URL. Defaults to https://api.github.com. Set this
+  # directly for non-standard layouts (e.g. GHEC-DR https://api.acme.ghe.com);
+  # otherwise prefer the simpler "host" above.
   # CMX_GITHUB__API_BASE_URL
   # api_base_url: https://api.github.com
 
