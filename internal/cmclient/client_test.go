@@ -223,6 +223,37 @@ func newTestClient(t *testing.T, rec *recorder, failTool string) *Client {
 	return c
 }
 
+// flagTransport records whether it carried any request, then delegates to base.
+type flagTransport struct {
+	mu   sync.Mutex
+	used bool
+	base http.RoundTripper
+}
+
+func (f *flagTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	f.mu.Lock()
+	f.used = true
+	f.mu.Unlock()
+
+	return f.base.RoundTrip(req)
+}
+
+func TestNew_WithBaseTransport(t *testing.T) {
+	ts := startStubServer(t, newRecorder(), "")
+
+	ft := &flagTransport{base: http.DefaultTransport}
+
+	c, err := New(context.Background(), ts.URL, "test-key", testAgentID, WithBaseTransport(ft))
+	require.NoError(t, err, "connect must succeed through the bearer gate with a custom base transport")
+	t.Cleanup(func() { _ = c.Close() })
+
+	ft.mu.Lock()
+	used := ft.used
+	ft.mu.Unlock()
+
+	assert.True(t, used, "the injected base transport must carry outbound MCP requests")
+}
+
 func TestNew_MissingBearerFails(t *testing.T) {
 	ts := startStubServer(t, newRecorder(), "")
 

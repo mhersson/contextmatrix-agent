@@ -61,6 +61,46 @@ func TestContainerConfig_EnvPassthrough(t *testing.T) {
 	assert.Equal(t, env, cfg.Env)
 }
 
+func TestContainerConfig_CACertMountAndEnv(t *testing.T) {
+	cfg, host := containerConfig(LaunchSpec{
+		CardID:         "ABC-1",
+		Project:        "demo",
+		Image:          "alpine:3",
+		Env:            []string{"FOO=bar"},
+		CACertHostFile: "/etc/cm/extra-ca.pem",
+	})
+
+	assert.Contains(t, host.Binds, "/etc/cm/extra-ca.pem:/run/cm-ca/ca.crt:ro")
+	assert.Contains(t, cfg.Env, "CMX_CA_CERT_FILE=/run/cm-ca/ca.crt")
+	assert.Contains(t, cfg.Env, "FOO=bar", "pre-existing env is preserved")
+
+	// The git/gh CA vars are deliberately NOT set at the container level — the
+	// harness scrubs subprocess env, so they would be dead and misleading. git/gh
+	// get them on their explicit subprocess env instead.
+	for _, e := range cfg.Env {
+		assert.NotContains(t, e, "GIT_SSL_CAINFO")
+		assert.NotContains(t, e, "GH_CA_BUNDLE")
+		assert.NotContains(t, e, "SSL_CERT_FILE")
+	}
+}
+
+func TestContainerConfig_NoCACertByDefault(t *testing.T) {
+	cfg, host := containerConfig(LaunchSpec{
+		CardID:  "ABC-1",
+		Project: "demo",
+		Image:   "alpine:3",
+		Env:     []string{"FOO=bar"},
+	})
+
+	for _, b := range host.Binds {
+		assert.NotContains(t, b, "/run/cm-ca/")
+	}
+
+	for _, e := range cfg.Env {
+		assert.NotContains(t, e, "CMX_CA_CERT_FILE")
+	}
+}
+
 func TestContainerConfig_HostConfigResourcesAndHardening(t *testing.T) {
 	const (
 		mem  = int64(8 * 1024 * 1024 * 1024)

@@ -73,6 +73,7 @@ type RunSpec struct {
 	DefaultModel    string // CMX_DEFAULT_MODEL; fallback when Model is absent/unresolvable
 	ReasoningEffort string // CMX_REASONING_EFFORT; empty = off (no reasoning overhead)
 	Workspace       string // CMX_WORKSPACE; parent dir for the clone (default /home/user/workspace)
+	CACertFile      string // CMX_CA_CERT_FILE; in-container path to an extra CA PEM (empty = disabled)
 
 	// Selection carries the CM-resolved model selection inputs (candidates,
 	// favorites, blacklist). Nil when absent (runner backend or old CM).
@@ -150,7 +151,7 @@ func Run(ctx context.Context, spec RunSpec, ops CardOps, client llm.LLM, emit *e
 	// 1-2: workspace + clone + branch.
 	ws := filepath.Join(spec.Workspace, strings.ToLower(spec.CardID))
 
-	git := NewGit(ws, spec.GitToken)
+	git := NewGit(ws, spec.GitToken, spec.CACertFile)
 
 	resolvedBase, err := prepareWorkspace(ctx, git, spec, branchName)
 	if err != nil {
@@ -313,7 +314,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 	d := orchestrator.Deps{
 		Ops:        ops2orchestrator(a.ops),
 		Git:        a.git,
-		PR:         NewPRCreator(a.ws, a.spec.GitToken),
+		PR:         NewPRCreator(a.ws, a.spec.GitToken, a.spec.CACertFile),
 		Client:     a.client,
 		Emit:       a.emit,
 		Registry:   buildRegistry(a.spec),

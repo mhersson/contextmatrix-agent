@@ -312,6 +312,58 @@ func TestDonePhase(t *testing.T) {
 	assert.True(t, logged, "a completion summary is logged; calls=%v", calls)
 }
 
+// TestRunDoneToleratesReleaseError: runDone must not fail the run when
+// ReleaseCard returns ErrCardNotClaimed (already released by another path) or a
+// transient error — in both cases it should warn and continue, leaving the
+// completion log entry still written.
+func TestRunDoneToleratesReleaseError(t *testing.T) {
+	t.Run("ErrCardNotClaimed is swallowed silently", func(t *testing.T) {
+		ops := &fakeOps{releaseCardErr: cmclient.ErrCardNotClaimed}
+		d := Deps{Ops: ops, Cfg: Config{CardID: "CARD-1"}}
+		tc := cmclient.TaskContext{CardID: "CARD-1", Title: "All done"}
+		o := newRun(d, tc)
+
+		err := runDone(context.Background(), o)
+		require.NoError(t, err, "ErrCardNotClaimed must not fail runDone")
+
+		calls := ops.recorded()
+		require.GreaterOrEqual(t, indexOfCall(calls, "ReleaseCard:CARD-1"), 0)
+
+		var logged bool
+
+		for _, c := range calls {
+			if strings.HasPrefix(c, "AddLog:") {
+				logged = true
+			}
+		}
+
+		assert.True(t, logged, "completion log written even when release returns ErrCardNotClaimed")
+	})
+
+	t.Run("transient error is warned and swallowed", func(t *testing.T) {
+		ops := &fakeOps{releaseCardErr: errors.New("network timeout")}
+		d := Deps{Ops: ops, Cfg: Config{CardID: "CARD-1"}}
+		tc := cmclient.TaskContext{CardID: "CARD-1", Title: "All done"}
+		o := newRun(d, tc)
+
+		err := runDone(context.Background(), o)
+		require.NoError(t, err, "transient release error must not fail runDone")
+
+		calls := ops.recorded()
+		require.GreaterOrEqual(t, indexOfCall(calls, "ReleaseCard:CARD-1"), 0)
+
+		var logged bool
+
+		for _, c := range calls {
+			if strings.HasPrefix(c, "AddLog:") {
+				logged = true
+			}
+		}
+
+		assert.True(t, logged, "completion log written even when release returns a transient error")
+	})
+}
+
 func TestSquashMessage(t *testing.T) {
 	assert.Equal(t, "feat: add the thing", squashMessage("Add the Thing"))
 	assert.Equal(t, "feat: untitled", squashMessage("  "))

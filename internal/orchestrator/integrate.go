@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+
+	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 )
 
 // runIntegrate is the integrate phase: pure code with one optional model call
@@ -199,13 +201,17 @@ func squashMessage(title string) string { return sanitizeTitle(title) }
 
 // runDone is the done phase: bookkeeping only. It releases the parent's claim
 // and logs a completion summary. Both are best-effort on the log; the release is
-// the meaningful side effect.
+// also best-effort — the branch is pushed and the card is done, so a transient
+// release error (including ErrCardNotClaimed when the claim lapsed) must not
+// fail the run and trigger a false FAILED status.
 func runDone(ctx context.Context, o *run) error {
 	d := o.d
 	cfg := d.Cfg
 
 	if err := d.Ops.ReleaseCard(ctx, cfg.CardID); err != nil {
-		return fmt.Errorf("release card: %w", err)
+		if !errors.Is(err, cmclient.ErrCardNotClaimed) {
+			slog.Warn("release card in done phase failed", "card", cfg.CardID, "error", err)
+		}
 	}
 
 	_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory completion note

@@ -362,9 +362,10 @@ func TestIntegration_StopAllAndCleanupOrphans(t *testing.T) {
 		Cmd:         []string{"sleep", "60"},
 	}))
 
-	killed, err := exec.StopAll(ctx, "demo")
+	results, err := exec.StopAll(ctx, "demo")
 	require.NoError(t, err)
-	assert.Len(t, killed, 1)
+	require.Len(t, results, 1)
+	require.NoError(t, results[0].Err, "the tracked container must be killed successfully")
 
 	code := exits.wait(t, 30*time.Second)
 	assert.Equal(t, int64(137), code, "SIGKILL surfaces 137 via the wait path")

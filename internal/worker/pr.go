@@ -21,14 +21,16 @@ var prURLPattern = regexp.MustCompile(`https?://\S+`)
 // env so gh authenticates to GitHub without inheriting any other secret from the
 // process; gh runs in the workspace so it resolves the repo from origin.
 type PRCreator struct {
-	workspace string
-	token     string
+	workspace  string
+	token      string
+	caCertFile string // optional in-container extra CA PEM path; empty disables it
 }
 
 // NewPRCreator builds a PRCreator for the given workspace and GitHub token (the
-// same minted token the worker's Git uses to push).
-func NewPRCreator(workspace, token string) *PRCreator {
-	return &PRCreator{workspace: workspace, token: token}
+// same minted token the worker's Git uses to push). caCertFile is an optional
+// in-container path to an extra CA PEM; empty disables the extra trust.
+func NewPRCreator(workspace, token, caCertFile string) *PRCreator {
+	return &PRCreator{workspace: workspace, token: token, caCertFile: caCertFile}
 }
 
 // buildCmd constructs the gh invocation without running it: argv, workspace
@@ -43,7 +45,18 @@ func (p *PRCreator) buildCmd(ctx context.Context, title, body, base, head string
 	)
 	cmd.Dir = p.workspace
 	cmd.Stdin = strings.NewReader(body)
-	cmd.Env = tools.ScrubbedEnv([]string{"GH_TOKEN=" + p.token})
+
+	extra := []string{"GH_TOKEN=" + p.token}
+	if p.caCertFile != "" {
+		// gh is a Go binary; crypto/x509 on Linux honours SSL_CERT_FILE for the
+		// system pool. GH_CA_BUNDLE is set defensively in case gh grows custom
+		// handling. Both REPLACE the trust store for this invocation, which is
+		// correct for the target deployments (see Git.credEnv). The container env
+		// is scrubbed for subprocesses, so these are injected here.
+		extra = append(extra, "SSL_CERT_FILE="+p.caCertFile, "GH_CA_BUNDLE="+p.caCertFile)
+	}
+
+	cmd.Env = tools.ScrubbedEnv(extra)
 
 	return cmd
 }

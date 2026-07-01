@@ -77,6 +77,10 @@ type LaunchEnv struct {
 	// container at /run/cm-secrets. Empty disables the mount.
 	SecretsHostDir string
 
+	// CACertFile is the host path to an optional extra-CA PEM, bind-mounted
+	// read-only into each container at /run/cm-ca/ca.crt. Empty disables it.
+	CACertFile string
+
 	// MemoryBytes and PidsLimit are the per-container resource caps.
 	MemoryBytes int64
 	PidsLimit   int64
@@ -437,6 +441,7 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 		Env:            env,
 		SecretsHostDir: s.launchEnv.SecretsHostDir,
 		SkillsHostDir:  skillsDir,
+		CACertHostFile: s.launchEnv.CACertFile,
 		MemoryBytes:    s.launchEnv.MemoryBytes,
 		PidsLimit:      s.launchEnv.PidsLimit,
 		CorrelationID:  correlationID,
@@ -482,7 +487,7 @@ func (s *Server) handleStopAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	killed, err := s.executor.StopAll(r.Context(), payload.Project)
+	stopResults, err := s.executor.StopAll(r.Context(), payload.Project)
 	if err != nil {
 		s.logger.Error("stop-all failed", "project", payload.Project, "error", err)
 		writeError(w, http.StatusInternalServerError, protocol.CodeInternal, "stop-all failed")
@@ -490,20 +495,37 @@ func (s *Server) handleStopAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results := make([]protocol.CardKillResult, 0, len(killed))
-	for _, run := range killed {
-		results = append(results, protocol.CardKillResult{
-			CardID:  run.CardID,
-			Project: run.Project,
-			OK:      true,
-		})
+	var stopped, failed int
+
+	results := make([]protocol.CardKillResult, 0, len(stopResults))
+
+	for _, sr := range stopResults {
+		ckr := protocol.CardKillResult{
+			CardID:  sr.Run.CardID,
+			Project: sr.Run.Project,
+			OK:      sr.Err == nil,
+		}
+
+		if sr.Err != nil {
+			ckr.Error = sr.Err.Error()
+			failed++
+		} else {
+			stopped++
+		}
+
+		results = append(results, ckr)
 	}
 
-	writeJSON(w, http.StatusOK, protocol.StopAllResponse{
-		OK:      true,
-		Total:   len(killed),
-		Stopped: len(killed),
-		Failed:  0,
+	status := http.StatusOK
+	if failed > 0 {
+		status = http.StatusMultiStatus
+	}
+
+	writeJSON(w, status, protocol.StopAllResponse{
+		OK:      failed == 0,
+		Total:   len(stopResults),
+		Stopped: stopped,
+		Failed:  failed,
 		Results: results,
 	})
 }

@@ -44,12 +44,36 @@ func (t *bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return t.base.RoundTrip(r)
 }
 
+// Option configures New.
+type Option func(*options)
+
+type options struct {
+	base http.RoundTripper
+}
+
+// WithBaseTransport sets the RoundTripper the bearer transport wraps. The
+// default is http.DefaultTransport; a caller supplies a CA-augmented transport
+// so the MCP connection shares the same trust store as the worker's other
+// clients. A nil transport is ignored (the default is kept).
+func WithBaseTransport(rt http.RoundTripper) Option {
+	return func(o *options) {
+		if rt != nil {
+			o.base = rt
+		}
+	}
+}
+
 // New connects to the ContextMatrix MCP endpoint. mcpURL e.g.
 // http://host:8080/mcp; apiKey goes out as a bearer header on every request.
 // agentID is the worker's identity (convention: cmx-agent-<card-id-lower>).
-func New(ctx context.Context, mcpURL, apiKey, agentID string) (*Client, error) {
+func New(ctx context.Context, mcpURL, apiKey, agentID string, opts ...Option) (*Client, error) {
+	o := options{base: http.DefaultTransport}
+	for _, opt := range opts {
+		opt(&o)
+	}
+
 	httpClient := &http.Client{
-		Transport: &bearerTransport{apiKey: apiKey, base: http.DefaultTransport},
+		Transport: &bearerTransport{apiKey: apiKey, base: o.base},
 	}
 
 	transport := &mcp.StreamableClientTransport{

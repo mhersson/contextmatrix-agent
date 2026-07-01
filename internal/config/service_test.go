@@ -335,6 +335,20 @@ func TestServiceValidate(t *testing.T) {
 		require.NoError(t, cfg.Validate())
 	})
 
+	t.Run("sub-unit selector_price_headroom errors (0 < h < 1 is meaningless)", func(t *testing.T) {
+		cfg := validServiceConfig()
+		cfg.SelectorPriceHeadroom = 0.5
+		err := cfg.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "selector_price_headroom")
+	})
+
+	t.Run("exactly 1.0 selector_price_headroom passes (no band)", func(t *testing.T) {
+		cfg := validServiceConfig()
+		cfg.SelectorPriceHeadroom = 1.0
+		require.NoError(t, cfg.Validate())
+	})
+
 	t.Run("enabled compaction with valid values passes", func(t *testing.T) {
 		cfg := validServiceConfig()
 		cfg.Compaction = CompactionConfig{Enabled: true, Threshold: 0.85, KeepRecentTurns: 6}
@@ -574,6 +588,145 @@ func TestServiceLLMEndpointOpenAIRequiresBaseURL(t *testing.T) {
 	assert.ErrorContains(t, c.Validate(), "base_url")
 }
 
+func TestGitHubHostDerivesAPIBaseURL(t *testing.T) {
+	t.Run("host set and api_base_url empty derives the GHES endpoint", func(t *testing.T) {
+		raw := serviceRaw{GitHub: GitHubConfig{Host: "ghe.example.com"}}
+
+		cfg, err := raw.toConfig()
+		require.NoError(t, err)
+		assert.Equal(t, "https://ghe.example.com/api/v3", cfg.GitHub.APIBaseURL)
+		// Host is convenience only; it survives derivation unchanged.
+		assert.Equal(t, "ghe.example.com", cfg.GitHub.Host)
+	})
+
+	t.Run("explicit api_base_url wins over host", func(t *testing.T) {
+		raw := serviceRaw{GitHub: GitHubConfig{
+			Host:       "ghe.example.com",
+			APIBaseURL: "https://api.acme.ghe.com",
+		}}
+
+		cfg, err := raw.toConfig()
+		require.NoError(t, err)
+		assert.Equal(t, "https://api.acme.ghe.com", cfg.GitHub.APIBaseURL)
+	})
+
+	t.Run("host given as a full URL derives from its authority", func(t *testing.T) {
+		raw := serviceRaw{GitHub: GitHubConfig{Host: "https://ghe.example.com"}}
+
+		cfg, err := raw.toConfig()
+		require.NoError(t, err)
+		assert.Equal(t, "https://ghe.example.com/api/v3", cfg.GitHub.APIBaseURL)
+	})
+}
+
+func TestGitHubHostFromEnvDerives(t *testing.T) {
+	clearServiceEnv(t)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "serve.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+contextmatrix_url: http://localhost:8080
+api_key: 0123456789012345678901234567890123456789
+base_image: img@sha256:abc
+github:
+  auth_mode: pat
+  pat:
+    token: t
+llm_endpoint:
+  api_key: k
+`), 0o600))
+
+	t.Setenv("CMX_GITHUB__HOST", "ghe.env.example.com")
+
+	cfg, err := LoadService(path)
+	require.NoError(t, err)
+	assert.Equal(t, "ghe.env.example.com", cfg.GitHub.Host)
+	assert.Equal(t, "https://ghe.env.example.com/api/v3", cfg.GitHub.APIBaseURL)
+}
+
+func TestGitHubHostValidation(t *testing.T) {
+	t.Run("bare hostname passes", func(t *testing.T) {
+		cfg := validServiceConfig()
+		cfg.GitHub.Host = "ghe.example.com"
+		require.NoError(t, cfg.Validate())
+	})
+
+	t.Run("full https URL passes", func(t *testing.T) {
+		cfg := validServiceConfig()
+		cfg.GitHub.Host = "https://ghe.example.com"
+		require.NoError(t, cfg.Validate())
+	})
+
+	t.Run("empty host passes (feature disabled)", func(t *testing.T) {
+		cfg := validServiceConfig()
+		cfg.GitHub.Host = ""
+		require.NoError(t, cfg.Validate())
+	})
+
+	t.Run("non-http scheme is rejected", func(t *testing.T) {
+		cfg := validServiceConfig()
+		cfg.GitHub.Host = "ftp://ghe.example.com"
+		assert.ErrorContains(t, cfg.Validate(), "github.host")
+	})
+
+	t.Run("embedded userinfo is rejected", func(t *testing.T) {
+		cfg := validServiceConfig()
+		cfg.GitHub.Host = "https://user:pw@ghe.example.com"
+		assert.ErrorContains(t, cfg.Validate(), "github.host")
+	})
+}
+
+func TestCACertFileValidation(t *testing.T) {
+	t.Run("empty is allowed (feature disabled)", func(t *testing.T) {
+		cfg := validServiceConfig()
+		cfg.CACertFile = ""
+		require.NoError(t, cfg.Validate())
+	})
+
+	t.Run("existing file passes", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "ca.pem")
+		require.NoError(t, os.WriteFile(path, []byte("x"), 0o600))
+
+		cfg := validServiceConfig()
+		cfg.CACertFile = path
+		require.NoError(t, cfg.Validate())
+	})
+
+	t.Run("missing file is rejected", func(t *testing.T) {
+		cfg := validServiceConfig()
+		cfg.CACertFile = filepath.Join(t.TempDir(), "nope.pem")
+		assert.ErrorContains(t, cfg.Validate(), "ca_cert_file")
+	})
+}
+
+func TestCACertFileFromEnv(t *testing.T) {
+	clearServiceEnv(t)
+
+	caPath := filepath.Join(t.TempDir(), "ca.pem")
+	require.NoError(t, os.WriteFile(caPath, []byte("x"), 0o600))
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "serve.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+contextmatrix_url: http://localhost:8080
+api_key: 0123456789012345678901234567890123456789
+base_image: img@sha256:abc
+github:
+  auth_mode: pat
+  pat:
+    token: t
+llm_endpoint:
+  api_key: k
+`), 0o600))
+
+	t.Setenv("CMX_CA_CERT_FILE", caPath)
+
+	cfg, err := LoadService(path)
+	require.NoError(t, err)
+	assert.Equal(t, caPath, cfg.CACertFile)
+	require.NoError(t, cfg.Validate())
+}
+
 // clearServiceEnv unsets any CMX_* vars that could leak into a default/file
 // test from the developer's shell. t.Setenv restores them after the test.
 func clearServiceEnv(t *testing.T) {
@@ -582,7 +735,8 @@ func clearServiceEnv(t *testing.T) {
 	for _, e := range []string{
 		"CMX_CONTEXTMATRIX_URL", "CMX_PORT", "CMX_LLM_ENDPOINT__API_KEY",
 		"CMX_API_KEY", "CMX_BASE_IMAGE", "CMX_MAX_CONCURRENT",
-		"CMX_GITHUB__AUTH_MODE", "CMX_GITHUB__PAT__TOKEN",
+		"CMX_GITHUB__AUTH_MODE", "CMX_GITHUB__PAT__TOKEN", "CMX_GITHUB__HOST",
+		"CMX_CA_CERT_FILE",
 		"CMX_MAX_CARD_COST", "CMX_SELECTOR_PRICE_HEADROOM",
 		"CMX_ADMIN_PORT",
 		"CMX_COMPACTION_ENABLED", "CMX_COMPACTION_THRESHOLD",

@@ -57,14 +57,24 @@ func newWorkCmd() *cobra.Command {
 			// human off (io.Discard), JSONL → stdout for the service log bridge.
 			emit := events.NewEmitter(io.Discard, cmd.OutOrStdout())
 
+			// When an extra CA is mounted, the worker's own outbound TLS (LLM
+			// client + MCP connection) must trust it. Build the injections once
+			// and share them across both clients.
+			caLLMOpts, caMCPOpts, err := caInjections(spec.CACertFile)
+			if err != nil {
+				return err
+			}
+
 			clientOpts := []llm.Option{llm.WithRetry(llm.DefaultRetryPolicy()), llm.WithDialect(dialectFromType(spec.LLMType))}
+			clientOpts = append(clientOpts, caLLMOpts...)
+
 			if spec.LLMBaseURL != "" {
 				clientOpts = append(clientOpts, llm.WithBaseURL(spec.LLMBaseURL))
 			}
 
 			client := llm.NewClient(spec.LLMKey, clientOpts...)
 
-			ops, err := cmclient.New(cmd.Context(), spec.MCPURL, spec.MCPAPIKey, "cmx-agent-"+strings.ToLower(spec.CardID))
+			ops, err := cmclient.New(cmd.Context(), spec.MCPURL, spec.MCPAPIKey, "cmx-agent-"+strings.ToLower(spec.CardID), caMCPOpts...)
 			if err != nil {
 				return fmt.Errorf("connect mcp: %w", err)
 			}
@@ -218,6 +228,7 @@ func specFromEnv() (worker.RunSpec, error) {
 		DefaultModel:              defaultModel,
 		ReasoningEffort:           os.Getenv("CMX_REASONING_EFFORT"),
 		Workspace:                 workspace,
+		CACertFile:                os.Getenv("CMX_CA_CERT_FILE"),
 		Selection:                 selection,
 		TaskSkillsDir:             taskSkillsDir,
 		TaskSkills:                taskSkills,
@@ -267,6 +278,30 @@ func envFloat(name string, defaultVal float64) (float64, error) {
 	}
 
 	return v, nil
+}
+
+// caInjections builds the extra-CA injections for the worker's in-container
+// clients from certPath (the in-container CA PEM path): an llm option so the
+// harness LLM client trusts the CA, and a cmclient option so the MCP connection
+// shares that trust. An empty certPath yields no options — the clients keep
+// their defaults. The git/gh subprocesses get the CA separately, via RunSpec
+// threaded to NewGit / NewPRCreator (their env is scrubbed by the harness).
+func caInjections(certPath string) ([]llm.Option, []cmclient.Option, error) {
+	if certPath == "" {
+		return nil, nil, nil
+	}
+
+	httpClient, err := config.HTTPClientWithCA(certPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("build ca http client: %w", err)
+	}
+
+	transport, err := config.CATransport(certPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("build ca transport: %w", err)
+	}
+
+	return []llm.Option{llm.WithHTTPClient(httpClient)}, []cmclient.Option{cmclient.WithBaseTransport(transport)}, nil
 }
 
 // dialectFromType maps the LLM_TYPE string to the harness dialect. Defaults to

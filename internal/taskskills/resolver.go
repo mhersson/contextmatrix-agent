@@ -88,6 +88,14 @@ func (r *Resolver) Resolve(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("task-skills source has no git_remote_url")
 	}
 
+	if strings.HasPrefix(gitURL, "-") {
+		return "", fmt.Errorf("task-skills git_remote_url begins with '-', which git interprets as a flag: %q", gitURL)
+	}
+
+	if strings.HasPrefix(ref, "-") {
+		return "", fmt.Errorf("task-skills ref begins with '-', which git interprets as a flag: %q", ref)
+	}
+
 	token, _, err := r.gen.GenerateToken(ctx)
 	if err != nil {
 		return "", fmt.Errorf("mint skills clone token: %w", err)
@@ -167,7 +175,7 @@ func (r *Resolver) gitClone(ctx context.Context, gitURL, ref, dest, token string
 	steps := [][]string{
 		{"init", "-q"},
 		{"remote", "add", "origin", gitURL},
-		{"fetch", "--depth", "1", "origin", fetchRef},
+		{"fetch", "--depth", "1", "origin", "--", fetchRef},
 		{"checkout", "-q", "FETCH_HEAD"},
 	}
 

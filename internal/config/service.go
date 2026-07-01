@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -48,11 +50,35 @@ type GitHubPATConfig struct {
 }
 
 // GitHubConfig is the unified GitHub auth block. Set AuthMode to "app" or "pat".
+// Host is an optional GitHub Enterprise convenience: when set and APIBaseURL is
+// empty, load derives APIBaseURL as "https://<host>/api/v3".
 type GitHubConfig struct {
 	AuthMode   string          `koanf:"auth_mode"`
+	Host       string          `koanf:"host"`
 	APIBaseURL string          `koanf:"api_base_url"`
 	App        GitHubAppConfig `koanf:"app"`
 	PAT        GitHubPATConfig `koanf:"pat"`
+}
+
+// withDerivedAPIBaseURL fills APIBaseURL from Host when only Host is set,
+// producing the standard GitHub Enterprise Server "https://<host>/api/v3"
+// endpoint. An explicit api_base_url is preserved so operators can still target
+// non-standard layouts (e.g. GHEC-DR "https://api.acme.ghe.com"). Any scheme on
+// Host is stripped; the derived URL is always https. Host is pure convenience —
+// after derivation only APIBaseURL is consumed (via githubauth.WithAPIBaseURL).
+func (g GitHubConfig) withDerivedAPIBaseURL() GitHubConfig {
+	if g.Host == "" || g.APIBaseURL != "" {
+		return g
+	}
+
+	host := g.Host
+	if i := strings.Index(host, "://"); i >= 0 {
+		host = host[i+len("://"):]
+	}
+
+	g.APIBaseURL = "https://" + host + "/api/v3"
+
+	return g
 }
 
 // CompactionConfig configures the worker harness loop's optional in-window
@@ -98,6 +124,14 @@ type ServiceConfig struct {
 	ReasoningEffort           string
 	LogLevel                  string
 
+	// CACertFile is an optional path (on the serve host) to a PEM file of extra
+	// CA certificates for corporate TLS interception / a private-CA GitHub
+	// Enterprise. When set, it is bind-mounted read-only into each worker
+	// container and the worker trusts it for its own outbound TLS (harness LLM
+	// client, MCP/cmclient) and its git/gh subprocesses. Empty disables the
+	// feature. Container-only: the serve host itself uses the OS trust store.
+	CACertFile string
+
 	// MaxCardCost is the cumulative USD ceiling per card. Workers receive it as
 	// CMX_MAX_CARD_COST. Zero disables the ceiling; the default (5.0) applies
 	// when the key is absent from config and env — koanf cannot distinguish
@@ -142,6 +176,7 @@ type serviceRaw struct {
 	IdleOutputTimeout         string            `koanf:"idle_output_timeout"`
 	IdleWatchdogInterval      string            `koanf:"idle_watchdog_interval"`
 	SecretsDir                string            `koanf:"secrets_dir"`
+	CACertFile                string            `koanf:"ca_cert_file"`
 	LLMEndpoint               LLMEndpoint       `koanf:"llm_endpoint"`
 	GitHub                    GitHubConfig      `koanf:"github"`
 	WorkerExtraEnv            map[string]string `koanf:"worker_extra_env"`
@@ -260,8 +295,9 @@ func (r serviceRaw) toConfig() (*ServiceConfig, error) {
 		IdleOutputTimeout:         idleOutput,
 		IdleWatchdogInterval:      idleWatchdog,
 		SecretsDir:                r.SecretsDir,
+		CACertFile:                r.CACertFile,
 		LLMEndpoint:               r.LLMEndpoint,
-		GitHub:                    r.GitHub,
+		GitHub:                    r.GitHub.withDerivedAPIBaseURL(),
 		WorkerExtraEnv:            r.WorkerExtraEnv,
 		ReplaySkew:                time.Duration(r.ReplaySkewSeconds) * time.Second,
 		ReplayCacheSize:           r.ReplayCacheSize,
@@ -378,8 +414,16 @@ func (c *ServiceConfig) Validate() error {
 		return fmt.Errorf("max_card_cost must be >= 0 (0 disables the ceiling), got %g", c.MaxCardCost)
 	}
 
-	if c.SelectorPriceHeadroom < 0 {
-		return fmt.Errorf("selector_price_headroom must be >= 0 (0 uses worker default), got %g", c.SelectorPriceHeadroom)
+	if c.SelectorPriceHeadroom < 0 || (c.SelectorPriceHeadroom > 0 && c.SelectorPriceHeadroom < 1) {
+		return fmt.Errorf(
+			"selector_price_headroom must be 0 (use worker default) or >= 1 (band multiplier), got %g",
+			c.SelectorPriceHeadroom)
+	}
+
+	if c.CACertFile != "" {
+		if _, err := os.Stat(c.CACertFile); err != nil {
+			return fmt.Errorf("ca_cert_file %q: %w", c.CACertFile, err)
+		}
 	}
 
 	if c.Compaction.Enabled {
@@ -400,6 +444,12 @@ func (c *ServiceConfig) Validate() error {
 // validate checks the GitHub auth block, mirroring the runner's contract:
 // exactly one auth path is populated per auth_mode.
 func (g *GitHubConfig) validate() error {
+	if g.Host != "" {
+		if err := validateGitHubHost(g.Host); err != nil {
+			return err
+		}
+	}
+
 	switch g.AuthMode {
 	case "app":
 		if g.App.AppID == 0 {
@@ -427,6 +477,35 @@ func (g *GitHubConfig) validate() error {
 		}
 	default:
 		return fmt.Errorf("github.auth_mode is required: must be \"app\" or \"pat\" (got %q)", g.AuthMode)
+	}
+
+	return nil
+}
+
+// validateGitHubHost accepts either a bare hostname ("ghe.example.com") or a
+// full URL ("https://ghe.example.com"). A bare host has https:// synthesised so
+// the same scheme/host/userinfo checks apply either way, mirroring the runner.
+func validateGitHubHost(host string) error {
+	forCheck := host
+	if !strings.Contains(forCheck, "://") {
+		forCheck = "https://" + forCheck
+	}
+
+	u, err := url.Parse(forCheck)
+	if err != nil {
+		return fmt.Errorf("github.host: invalid URL: %w", err)
+	}
+
+	if s := strings.ToLower(u.Scheme); s != "http" && s != "https" {
+		return fmt.Errorf("github.host: scheme must be http or https")
+	}
+
+	if u.Hostname() == "" {
+		return fmt.Errorf("github.host: host is required")
+	}
+
+	if u.User != nil {
+		return fmt.Errorf("github.host: must not embed userinfo credentials")
 	}
 
 	return nil

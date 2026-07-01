@@ -29,11 +29,11 @@ type fakeExecutor struct {
 
 	tracker *executor.Tracker
 
-	launchErr  error
-	launched   []executor.LaunchSpec
-	killed     [][2]string // project, cardID
-	stopAllArg string
-	stopAllRet []*executor.Run
+	launchErr      error
+	launched       []executor.LaunchSpec
+	killed         [][2]string // project, cardID
+	stopAllArg     string
+	stopAllResults []executor.StopResult
 }
 
 func (f *fakeExecutor) Launch(_ context.Context, spec executor.LaunchSpec) error {
@@ -80,13 +80,13 @@ func (f *fakeExecutor) List(_ context.Context) ([]*executor.Run, error) {
 	return nil, nil
 }
 
-func (f *fakeExecutor) StopAll(_ context.Context, project string) ([]*executor.Run, error) {
+func (f *fakeExecutor) StopAll(_ context.Context, project string) ([]executor.StopResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	f.stopAllArg = project
 
-	return f.stopAllRet, nil
+	return f.stopAllResults, nil
 }
 
 func (f *fakeExecutor) CleanupOrphans(_ context.Context) error { return nil }
@@ -410,9 +410,9 @@ func TestKill_UntrackedReturns404(t *testing.T) {
 
 func TestStopAll_ReturnsResults(t *testing.T) {
 	h := newHarness(t, 4)
-	h.exec.stopAllRet = []*executor.Run{
-		{CardID: "PROJ-001", Project: "proj"},
-		{CardID: "PROJ-002", Project: "proj"},
+	h.exec.stopAllResults = []executor.StopResult{
+		{Run: &executor.Run{CardID: "PROJ-001", Project: "proj"}, Err: nil},
+		{Run: &executor.Run{CardID: "PROJ-002", Project: "proj"}, Err: nil},
 	}
 
 	w := h.do(t, http.MethodPost, "/stop-all", protocol.StopAllPayload{Project: "proj"})
@@ -433,6 +433,54 @@ func TestStopAll_ReturnsResults(t *testing.T) {
 	h.exec.mu.Lock()
 	assert.Equal(t, "proj", h.exec.stopAllArg)
 	h.exec.mu.Unlock()
+}
+
+// TestStopAllReportsFailures: when one of two kills fails the handler must
+// respond 207 Multi-Status with OK:false, Failed:1, Stopped:1, and a per-card
+// Error on the failed entry.
+func TestStopAllReportsFailures(t *testing.T) {
+	h := newHarness(t, 4)
+	h.exec.stopAllResults = []executor.StopResult{
+		{Run: &executor.Run{CardID: "PROJ-001", Project: "proj"}, Err: nil},
+		{Run: &executor.Run{CardID: "PROJ-002", Project: "proj"}, Err: errors.New("container not responding")},
+	}
+
+	w := h.do(t, http.MethodPost, "/stop-all", protocol.StopAllPayload{Project: "proj"})
+
+	require.Equal(t, http.StatusMultiStatus, w.Code)
+
+	var resp protocol.StopAllResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+
+	assert.False(t, resp.OK)
+	assert.Equal(t, 2, resp.Total)
+	assert.Equal(t, 1, resp.Stopped)
+	assert.Equal(t, 1, resp.Failed)
+	require.Len(t, resp.Results, 2)
+
+	var failedResult *protocol.CardKillResult
+
+	for i := range resp.Results {
+		if !resp.Results[i].OK {
+			failedResult = &resp.Results[i]
+		}
+	}
+
+	require.NotNil(t, failedResult, "one result must have OK=false")
+	assert.Equal(t, "PROJ-002", failedResult.CardID)
+	assert.NotEmpty(t, failedResult.Error, "failed result must carry an Error")
+
+	// The successful entry is counted in Stopped, not Failed.
+	var okResult *protocol.CardKillResult
+
+	for i := range resp.Results {
+		if resp.Results[i].OK {
+			okResult = &resp.Results[i]
+		}
+	}
+
+	require.NotNil(t, okResult, "one result must have OK=true")
+	assert.Equal(t, "PROJ-001", okResult.CardID)
 }
 
 // ---- message ----------------------------------------------------------------

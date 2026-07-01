@@ -41,6 +41,11 @@ const secretsMountPath = "/run/cm-secrets" //nolint:gosec // path, not a credent
 // inside the container. The worker reads it via CMX_TASK_SKILLS_DIR.
 const skillsMountPath = "/run/cm-skills" //nolint:gosec // path, not a credential
 
+// caCertMountPath is where the optional extra-CA PEM is mounted read-only
+// inside the container (matches the runner convention). The worker reads it via
+// CMX_CA_CERT_FILE and threads it onto its git/gh subprocesses.
+const caCertMountPath = "/run/cm-ca/ca.crt" //nolint:gosec // path, not a credential
+
 // scannerBufferMax bounds the per-line buffer of the stdout/stderr pump so a
 // pathological container cannot pin the host heap with one unbounded line.
 const scannerBufferMax = 1 << 20 // 1 MiB
@@ -70,6 +75,7 @@ type LaunchSpec struct {
 	Env             []string
 	SecretsHostDir  string // bind source; mounted read-only at /run/cm-secrets
 	SkillsHostDir   string // bind source; mounted read-only at /run/cm-skills (empty = no skills)
+	CACertHostFile  string // bind source; mounted read-only at /run/cm-ca/ca.crt (empty = no extra CA)
 	MemoryBytes     int64
 	PidsLimit       int64
 	CorrelationID   string
@@ -85,13 +91,20 @@ type LaunchSpec struct {
 	Cmd []string
 }
 
+// StopResult is the outcome of killing one tracked run in a StopAll sweep. Err
+// is nil when the kill succeeded or the container was already gone.
+type StopResult struct {
+	Run *Run
+	Err error
+}
+
 // Executor is the seam a future KubernetesExecutor implements. The serve layer
 // depends on this interface, not on DockerExecutor.
 type Executor interface {
 	Launch(ctx context.Context, spec LaunchSpec) error
 	Kill(ctx context.Context, project, cardID string) error
 	List(ctx context.Context) ([]*Run, error)
-	StopAll(ctx context.Context, project string) ([]*Run, error)
+	StopAll(ctx context.Context, project string) ([]StopResult, error)
 	CleanupOrphans(ctx context.Context) error
 }
 
@@ -148,6 +161,18 @@ func containerConfig(spec LaunchSpec) (*container.Config, *container.HostConfig)
 
 	if spec.SkillsHostDir != "" {
 		host.Binds = append(host.Binds, spec.SkillsHostDir+":"+skillsMountPath+":ro")
+	}
+
+	if spec.CACertHostFile != "" {
+		// Mount the operator's extra CA read-only and point the worker at it via
+		// CMX_CA_CERT_FILE — the only CA var set at the container level. The
+		// worker reads it for its own outbound TLS (LLM, MCP) and threads the path
+		// onto its git/gh subprocesses explicitly. GIT_SSL_CAINFO / GH_CA_BUNDLE /
+		// SSL_CERT_FILE are deliberately NOT set here: the harness scrubs
+		// subprocess env, so they would be dead, and advertising them would wrongly
+		// imply git/gh inherit the container env.
+		host.Binds = append(host.Binds, spec.CACertHostFile+":"+caCertMountPath+":ro")
+		cfg.Env = append(cfg.Env, "CMX_CA_CERT_FILE="+caCertMountPath)
 	}
 
 	return cfg, host
@@ -457,27 +482,31 @@ func (e *DockerExecutor) List(_ context.Context) ([]*Run, error) {
 }
 
 // StopAll kills every tracked run, filtered to project when non-empty (empty
-// project means all), and returns the runs it killed. The returned *Run
-// elements are the tracker's shared pointers, not deep copies.
-func (e *DockerExecutor) StopAll(ctx context.Context, project string) ([]*Run, error) {
-	var killed []*Run
+// project means all), and returns a per-card outcome for every run attempted.
+// Failures are included in the results (Err != nil) rather than swallowed, so
+// the caller can surface partial failures to the CM operator.
+func (e *DockerExecutor) StopAll(ctx context.Context, project string) ([]StopResult, error) {
+	var results []StopResult
 
 	for _, run := range e.tracker.List() {
 		if project != "" && run.Project != project {
 			continue
 		}
 
-		if err := e.Kill(ctx, run.Project, run.CardID); err != nil && !errors.Is(err, ErrNotFound) {
-			e.logger.Warn("stop-all kill failed",
-				"project", run.Project, "card_id", run.CardID, "error", err)
-
-			continue
+		err := e.Kill(ctx, run.Project, run.CardID)
+		if errors.Is(err, ErrNotFound) {
+			err = nil // already gone is a success
 		}
 
-		killed = append(killed, run)
+		if err != nil {
+			e.logger.Warn("stop-all kill failed",
+				"project", run.Project, "card_id", run.CardID, "error", err)
+		}
+
+		results = append(results, StopResult{Run: run, Err: err})
 	}
 
-	return killed, nil
+	return results, nil
 }
 
 // CleanupOrphans force-removes every agent-labeled container found at boot.
