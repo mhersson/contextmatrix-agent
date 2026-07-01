@@ -147,6 +147,30 @@ func TestReconcileExecuteQueuesUnfinished(t *testing.T) {
 	git.assertOrder(t, "Fetch:cm/card-1", "Checkout:cm/card-1")
 }
 
+func TestReconcileSortsSubtasksByCardID(t *testing.T) {
+	// list_cards returns subtasks in nondeterministic (map-iteration) order and
+	// carries no dependency edges, so reconcile must impose a stable, dependency-
+	// valid order. Card IDs are server-assigned in zero-padded creation order, and
+	// the planner only makes a subtask depend on an earlier one, so sorting by card
+	// ID recovers a valid topological order regardless of list_cards' return order.
+	ops := &fakeOps{
+		subtaskStates: []cmclient.SubtaskState{
+			{CardID: "SUB-003", Title: "c", State: "todo"},
+			{CardID: "SUB-001", Title: "a", State: "done"},
+			{CardID: "SUB-002", Title: "b", State: "todo"},
+		},
+	}
+	git := &fakeGit{remoteTip: "tip-1"} // resume path: branch exists, fetch+checkout
+	o := reconcileTestRun(ops, git, "execute")
+
+	require.NoError(t, o.reconcile(context.Background()))
+
+	require.Len(t, o.subtasks, 3)
+	got := []string{o.subtasks[0].ID, o.subtasks[1].ID, o.subtasks[2].ID}
+	assert.Equal(t, []string{"SUB-001", "SUB-002", "SUB-003"}, got,
+		"reconciled subtasks must be sorted by card ID for a deterministic, dependency-valid resume order")
+}
+
 func TestReconcileTierRecoveryDefaultsModerate(t *testing.T) {
 	// Tier recovery: reconciled refs (no in-memory tier — tiers aren't persisted
 	// on subtask cards) get the conservative "moderate" default.
