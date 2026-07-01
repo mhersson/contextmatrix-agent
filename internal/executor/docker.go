@@ -85,13 +85,20 @@ type LaunchSpec struct {
 	Cmd []string
 }
 
+// StopResult is the outcome of killing one tracked run in a StopAll sweep. Err
+// is nil when the kill succeeded or the container was already gone.
+type StopResult struct {
+	Run *Run
+	Err error
+}
+
 // Executor is the seam a future KubernetesExecutor implements. The serve layer
 // depends on this interface, not on DockerExecutor.
 type Executor interface {
 	Launch(ctx context.Context, spec LaunchSpec) error
 	Kill(ctx context.Context, project, cardID string) error
 	List(ctx context.Context) ([]*Run, error)
-	StopAll(ctx context.Context, project string) ([]*Run, error)
+	StopAll(ctx context.Context, project string) ([]StopResult, error)
 	CleanupOrphans(ctx context.Context) error
 }
 
@@ -457,27 +464,31 @@ func (e *DockerExecutor) List(_ context.Context) ([]*Run, error) {
 }
 
 // StopAll kills every tracked run, filtered to project when non-empty (empty
-// project means all), and returns the runs it killed. The returned *Run
-// elements are the tracker's shared pointers, not deep copies.
-func (e *DockerExecutor) StopAll(ctx context.Context, project string) ([]*Run, error) {
-	var killed []*Run
+// project means all), and returns a per-card outcome for every run attempted.
+// Failures are included in the results (Err != nil) rather than swallowed, so
+// the caller can surface partial failures to the CM operator.
+func (e *DockerExecutor) StopAll(ctx context.Context, project string) ([]StopResult, error) {
+	var results []StopResult
 
 	for _, run := range e.tracker.List() {
 		if project != "" && run.Project != project {
 			continue
 		}
 
-		if err := e.Kill(ctx, run.Project, run.CardID); err != nil && !errors.Is(err, ErrNotFound) {
-			e.logger.Warn("stop-all kill failed",
-				"project", run.Project, "card_id", run.CardID, "error", err)
-
-			continue
+		err := e.Kill(ctx, run.Project, run.CardID)
+		if errors.Is(err, ErrNotFound) {
+			err = nil // already gone is a success
 		}
 
-		killed = append(killed, run)
+		if err != nil {
+			e.logger.Warn("stop-all kill failed",
+				"project", run.Project, "card_id", run.CardID, "error", err)
+		}
+
+		results = append(results, StopResult{Run: run, Err: err})
 	}
 
-	return killed, nil
+	return results, nil
 }
 
 // CleanupOrphans force-removes every agent-labeled container found at boot.
