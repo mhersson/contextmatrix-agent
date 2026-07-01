@@ -209,7 +209,6 @@ func specFromEnv() (worker.RunSpec, error) {
 		MCPAPIKey:                 mcpAPIKey,
 		BaseBranch:                os.Getenv("CM_BASE_BRANCH"),
 		Model:                     os.Getenv("CM_MODEL"),
-		CorrelationID:             os.Getenv("CM_CORRELATION_ID"),
 		Interactive:               os.Getenv("CM_INTERACTIVE") == "true",
 		BashTimeoutMax:            bashTimeoutMax,
 		ToolOutputMax:             toolOutputMax,

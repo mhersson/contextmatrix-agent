@@ -84,7 +84,6 @@ type Config struct {
 	CardID            string
 	Branch            string // cm/<card-id-lower>
 	BaseBranch        string
-	AgentID           string
 	Workspace         string
 	MaxCardCost       float64
 	PayloadModel      string // CM's default_model from the trigger; "" = serve default

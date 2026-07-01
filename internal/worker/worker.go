@@ -44,15 +44,14 @@ const reviewAttemptsCap = 3
 // RunSpec is the container-side contract: populated from CM_* env by the
 // work command.
 type RunSpec struct {
-	CardID        string // CM_CARD_ID (required)
-	Project       string // CM_PROJECT (required)
-	RepoURL       string // CM_REPO_URL (required)
-	BaseBranch    string // CM_BASE_BRANCH (optional)
-	Interactive   bool   // CM_INTERACTIVE ("true")
-	Model         string // CM_MODEL (optional; honored if catalog-resolvable)
-	MCPURL        string // CM_MCP_URL (required)
-	MCPAPIKey     string // CM_MCP_API_KEY (required)
-	CorrelationID string // CM_CORRELATION_ID (optional)
+	CardID      string // CM_CARD_ID (required)
+	Project     string // CM_PROJECT (required)
+	RepoURL     string // CM_REPO_URL (required)
+	BaseBranch  string // CM_BASE_BRANCH (optional)
+	Interactive bool   // CM_INTERACTIVE ("true")
+	Model       string // CM_MODEL (optional; honored if catalog-resolvable)
+	MCPURL      string // CM_MCP_URL (required)
+	MCPAPIKey   string // CM_MCP_API_KEY (required)
 
 	LLMKey     string // from /run/cm-secrets/env via the secrets source
 	LLMBaseURL string // from /run/cm-secrets/env via the secrets source
@@ -327,7 +326,6 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 			CardID:            a.spec.CardID,
 			Branch:            a.branch,
 			BaseBranch:        a.spec.BaseBranch,
-			AgentID:           "cmx-agent-" + strings.ToLower(a.spec.CardID),
 			Workspace:         a.ws,
 			MaxCardCost:       a.spec.MaxCardCost,
 			PayloadModel:      a.spec.Model,

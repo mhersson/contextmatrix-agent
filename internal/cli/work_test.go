@@ -309,14 +309,12 @@ func TestSpecFromEnv_OptionalVars(t *testing.T) {
 	setRequired(t)
 	t.Setenv("CM_BASE_BRANCH", "main")
 	t.Setenv("CM_MODEL", "anthropic/claude-3-5-sonnet")
-	t.Setenv("CM_CORRELATION_ID", "corr-abc-123")
 
 	spec, err := specFromEnv()
 	require.NoError(t, err)
 
 	assert.Equal(t, "main", spec.BaseBranch)
 	assert.Equal(t, "anthropic/claude-3-5-sonnet", spec.Model)
-	assert.Equal(t, "corr-abc-123", spec.CorrelationID)
 }
 
 func TestSpecFromEnv_Compaction(t *testing.T) {
