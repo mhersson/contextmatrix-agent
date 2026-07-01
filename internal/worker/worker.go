@@ -62,7 +62,6 @@ type RunSpec struct {
 	BashTimeoutMax        int     // CMX_BASH_TIMEOUT_MAX_SECONDS; default 600
 	ToolOutputMax         int     // CMX_TOOL_OUTPUT_MAX_BYTES; default 131072 (128 KB)
 	MaxTurns              int     // CMX_MAX_TURNS
-	MaxCostUSD            float64 // CMX_MAX_COST_USD
 	MaxCardCost           float64 // CMX_MAX_CARD_COST; 0 disables
 	SelectorPriceHeadroom float64 // CMX_SELECTOR_PRICE_HEADROOM; 0 uses worker default
 

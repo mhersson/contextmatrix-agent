@@ -226,34 +226,6 @@ func TestSpecFromEnv_IntParsing(t *testing.T) {
 	})
 }
 
-func TestSpecFromEnv_FloatParsing(t *testing.T) {
-	t.Run("default_max_cost", func(t *testing.T) {
-		setRequired(t)
-
-		spec, err := specFromEnv()
-		require.NoError(t, err)
-		assert.InDelta(t, derefFloat(config.Defaults().MaxCostUSD), spec.MaxCostUSD, 0.001)
-	})
-
-	t.Run("valid_override", func(t *testing.T) {
-		setRequired(t)
-		t.Setenv("CMX_MAX_COST_USD", "1.25")
-
-		spec, err := specFromEnv()
-		require.NoError(t, err)
-		assert.InDelta(t, 1.25, spec.MaxCostUSD, 0.001)
-	})
-
-	t.Run("garbage_max_cost", func(t *testing.T) {
-		setRequired(t)
-		t.Setenv("CMX_MAX_COST_USD", "cheap")
-
-		_, err := specFromEnv()
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "CMX_MAX_COST_USD")
-	})
-}
-
 func TestSpecFromEnv_DefaultModelFallback(t *testing.T) {
 	t.Run("uses_capable_default_when_unset", func(t *testing.T) {
 		setRequired(t)

@@ -142,11 +142,6 @@ func specFromEnv() (worker.RunSpec, error) {
 		return worker.RunSpec{}, err
 	}
 
-	maxCostUSD, err := envFloat("CMX_MAX_COST_USD", derefFloat(defaults.MaxCostUSD))
-	if err != nil {
-		return worker.RunSpec{}, err
-	}
-
 	maxCardCost, err := envFloat("CMX_MAX_CARD_COST", 0)
 	if err != nil {
 		return worker.RunSpec{}, err
@@ -219,7 +214,6 @@ func specFromEnv() (worker.RunSpec, error) {
 		BashTimeoutMax:            bashTimeoutMax,
 		ToolOutputMax:             toolOutputMax,
 		MaxTurns:                  maxTurns,
-		MaxCostUSD:                maxCostUSD,
 		MaxCardCost:               maxCardCost,
 		SelectorPriceHeadroom:     selectorPriceHeadroom,
 		CompactionEnabled:         compactionEnabled,
