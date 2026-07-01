@@ -622,10 +622,20 @@ func (o *run) runFix(ctx context.Context, findings string, round int, fixTier st
 		return fmt.Errorf("commit review fixup: %w", err)
 	}
 
-	if committed {
-		if err := d.Git.Push(ctx, cfg.Branch); err != nil {
-			return fmt.Errorf("push review fixup: %w", err)
-		}
+	if !committed {
+		// The fix produced no commit: HEAD is unchanged, so the reviewed-head
+		// snapshot captured this round would make the NEXT round diff HEAD...HEAD
+		// (an empty delta). An empty-delta panel sees nothing to critique and can
+		// approve, integrating the card with the unresolved finding and bypassing
+		// the authoritative pass. Drop the snapshot so the next round re-widens to
+		// the full base-branch diff and actually re-examines the outstanding work.
+		o.lastReviewBase = ""
+
+		return nil
+	}
+
+	if err := d.Git.Push(ctx, cfg.Branch); err != nil {
+		return fmt.Errorf("push review fixup: %w", err)
 	}
 
 	return nil
