@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -104,6 +105,59 @@ func TestDiscoverGrounding(t *testing.T) {
 		docs := discoverGrounding(root)
 		assert.Len(t, docs, groundingMaxDocs)
 	})
+}
+
+func TestReadGroundingDirRejectsOutOfTreeSymlink(t *testing.T) {
+	// A repo-committed instruction file symlinked OUT of the workspace (in
+	// production: /proc/self/environ, /run/cm-secrets/env) must not be read into
+	// the grounding block — that would smuggle secrets, unredacted, into every
+	// model prompt.
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "secret.env")
+	require.NoError(t, os.WriteFile(outside, []byte("CM_MCP_API_KEY=supersecret"), 0o600))
+	require.NoError(t, os.Symlink(outside, filepath.Join(root, "AGENTS.md")))
+
+	docs := discoverGrounding(root)
+
+	for _, d := range docs {
+		assert.NotContains(t, d.content, "supersecret",
+			"out-of-tree symlinked instruction file must not leak into grounding")
+	}
+
+	assert.Empty(t, docs, "the only instruction file escapes the workspace; nothing grounded")
+}
+
+func TestReadGroundingDirFollowsInRepoSymlink(t *testing.T) {
+	// The common in-repo CLAUDE.md -> AGENTS.md symlink is legitimate and must
+	// still be read (containment allows targets that stay within the workspace).
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte("# real rules"), 0o644))
+	sub := filepath.Join(root, "pkg")
+	require.NoError(t, os.MkdirAll(sub, 0o755))
+	require.NoError(t, os.Symlink(filepath.Join(root, "AGENTS.md"), filepath.Join(sub, "CLAUDE.md")))
+
+	var found bool
+
+	for _, d := range discoverGrounding(root) {
+		if d.relDir == "pkg" {
+			found = true
+
+			assert.Contains(t, d.content, "# real rules", "in-repo symlink must be followed")
+		}
+	}
+
+	assert.True(t, found, "in-tree symlinked instruction file must be grounded")
+}
+
+func TestGroundingTruncationIsRuneSafe(t *testing.T) {
+	// A 3-byte rune straddling the cap boundary must not be split into invalid UTF-8.
+	root := t.TempDir()
+	writeNestedFile(t, root, "AGENTS.md", strings.Repeat("a", groundingByteCap-1)+"…tail")
+
+	docs := discoverGrounding(root)
+	require.Len(t, docs, 1)
+	assert.True(t, utf8.ValidString(docs[0].content), "truncated grounding must be valid UTF-8")
+	assert.Contains(t, docs[0].content, "[... truncated at 64 KB ...]")
 }
 
 func TestGroundingBlock(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -743,11 +744,29 @@ func detectVerifyCommand(workspace string) []string {
 	return nil
 }
 
+// verifyMarkerByteCap bounds reads of repo-controlled build-metadata files. A
+// committed multi-GB file — or one symlinked to /dev/zero — must not OOM the
+// worker before the marker check runs. 1 MiB holds any real Makefile/package.json.
+const verifyMarkerByteCap = 1 << 20
+
+// readVerifyMarker reads at most verifyMarkerByteCap bytes from path, bounding
+// the allocation before it happens (os.ReadFile slurps the whole file first).
+func readVerifyMarker(path string) ([]byte, error) {
+	f, err := os.Open(path) //nolint:gosec // code-selected workspace marker, not model input
+	if err != nil {
+		return nil, err
+	}
+
+	defer f.Close() //nolint:errcheck // read-only
+
+	return io.ReadAll(io.LimitReader(f, verifyMarkerByteCap))
+}
+
 // makefileHasTestTarget reports whether path is a readable Makefile declaring a
 // "test:" target. Make targets are declared at column 0, so the match is
 // deliberately untrimmed — indented lines (recipes, comments) never match.
 func makefileHasTestTarget(path string) bool {
-	data, err := os.ReadFile(path)
+	data, err := readVerifyMarker(path)
 	if err != nil {
 		return false
 	}
@@ -764,7 +783,7 @@ func makefileHasTestTarget(path string) bool {
 // packageJSONHasTestScript reports whether path is a readable package.json whose
 // scripts object declares a non-empty "test" entry.
 func packageJSONHasTestScript(path string) bool {
-	data, err := os.ReadFile(path)
+	data, err := readVerifyMarker(path)
 	if err != nil {
 		return false
 	}
