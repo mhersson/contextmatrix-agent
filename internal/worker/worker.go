@@ -383,6 +383,16 @@ func mapFSMResult(ctx context.Context, a fsmArgs, err error) (Result, error) {
 
 		return Result{Reason: "error"}, fmt.Errorf("orchestrator: %w", err)
 
+	case isMaxTurns(err):
+		// Turn-cap park: the harness stopped mid-task, so the tree may hold
+		// half-done work that must NEVER be completed. Same shape as the
+		// context-limit park — push WIP so resume can pick it up, release the
+		// claim, surface the error so serve emits the failed callback.
+		pushWIP(ctx, a)
+		releaseQuietly(ctx, a.ops, a.spec.CardID)
+
+		return Result{Reason: "error"}, fmt.Errorf("orchestrator: %w", err)
+
 	case a.endSession.Load() || ctx.Err() != nil || errorsIsCanceled(err):
 		// end_session / kill mid-FSM: the graceful park. Push whatever WIP
 		// exists, release the claim, exit 0. Usage was already reported per-phase
@@ -420,6 +430,13 @@ func isContextLimit(err error) bool {
 	var cle *orchestrator.ContextLimitError
 
 	return errors.As(err, &cle)
+}
+
+// isMaxTurns reports whether err is (or wraps) the orchestrator's turn-cap sentinel.
+func isMaxTurns(err error) bool {
+	var mte *orchestrator.MaxTurnsError
+
+	return errors.As(err, &mte)
 }
 
 // errorsIsCanceled reports whether err is (or wraps) context cancellation, which

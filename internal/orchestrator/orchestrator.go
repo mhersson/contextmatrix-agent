@@ -362,6 +362,13 @@ func (o *run) execute(ctx context.Context) error {
 				_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, contextLimitLogMessage(cle)) //nolint:errcheck
 			}
 
+			var mte *MaxTurnsError
+			if errors.As(err, &mte) {
+				// Turn-cap park: same shape as the budget/context arms — log
+				// best-effort, then stop without entering the next phase.
+				_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, maxTurnsLogMessage(mte)) //nolint:errcheck
+			}
+
 			return err
 		}
 	}
@@ -377,6 +384,11 @@ func budgetLogMessage(be *BudgetExceededError) string {
 // contextLimitLogMessage is the canonical card-log line for a context-window park.
 func contextLimitLogMessage(cle *ContextLimitError) string {
 	return fmt.Sprintf("context window reached on model %q (%d tokens) — parking work; split the subtask or pin a larger-window model", cle.Model, cle.ContextWindow)
+}
+
+// maxTurnsLogMessage is the canonical card-log line for a turn-cap park.
+func maxTurnsLogMessage(mte *MaxTurnsError) string {
+	return fmt.Sprintf("turn cap reached on model %q after %d turns — parking work; raise CMX_MAX_TURNS or split the subtask", mte.Model, mte.Turns)
 }
 
 // reselectCap bounds in-run model re-selections per card. A model that emits

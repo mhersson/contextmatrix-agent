@@ -269,6 +269,35 @@ func TestExecuteSubtaskErrorReleasesClaim(t *testing.T) {
 	assert.Equal(t, -1, indexOfCall(calls, "CompleteTask:SUB-1"), "failed subtask must not complete")
 }
 
+// TestExecuteSubtaskMaxTurnsNeverCompletes pins the invariant: a coder run
+// truncated at the turn cap must not be committed, pushed, or marked done —
+// and the claim is returned (Task A1's error-path release).
+func TestExecuteSubtaskMaxTurnsNeverCompletes(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	call := llm.ToolCall{
+		ID:       "c1",
+		Type:     "function",
+		Function: llm.FunctionCall{Name: "read", Arguments: `{"path":"no-such-file.txt"}`},
+	}
+	llmFake := &planLLM{responses: []llm.Response{{ToolCalls: []llm.ToolCall{call}}}}
+	d := execTestDeps(ops, git, llmFake)
+	d.Cfg.MaxTurns = 1
+
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
+	err := runExecute(context.Background(), o)
+	require.Error(t, err)
+
+	var mte *MaxTurnsError
+	require.ErrorAs(t, err, &mte)
+
+	calls := ops.recorded()
+	assert.Equal(t, -1, indexOfCall(calls, "CompleteTask:SUB-1"), "truncated work marked done; calls=%v", calls)
+	assert.Empty(t, git.commitMsgs, "truncated work must not be committed")
+	assert.Empty(t, git.pushBranches, "truncated work must not be pushed")
+	assert.GreaterOrEqual(t, indexOfCall(calls, "ReleaseCard:SUB-1"), 0, "parked subtask claim must be released")
+}
+
 func TestExecuteCoderPromptBody(t *testing.T) {
 	t.Run("planner description reaches the coder prompt", func(t *testing.T) {
 		ops := &fakeOps{}

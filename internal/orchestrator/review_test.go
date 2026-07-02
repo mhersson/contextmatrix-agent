@@ -371,6 +371,41 @@ func TestReviewFixLoop(t *testing.T) {
 	assert.Equal(t, 1, incCount, "exactly one fix round; calls=%v", ops.recorded())
 }
 
+// TestReviewFixMaxTurnsAborts pins that a fix run truncated at the turn cap is
+// NOT fixup-committed and pushed as if the findings were addressed.
+func TestReviewFixMaxTurnsAborts(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+	call := llm.ToolCall{
+		ID:       "c1",
+		Type:     "function",
+		Function: llm.FunctionCall{Name: "read", Arguments: `{"path":"no-such-file.txt"}`},
+	}
+	client := &planLLM{responses: []llm.Response{
+		stopResp("Correctness: bug found", 0.01),
+		stopResp("Design: ok", 0.01),
+		stopResp("Security: ok", 0.01),
+		stopResp(`{"approved":false,"summary":"needs fix","fixes":[{"file":"a.go","issue":"bug"}]}`, 0.02),
+		{ToolCalls: []llm.ToolCall{call}}, // fix coder burns its single turn -> max_turns
+	}}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+	d.Cfg.MaxTurns = 1
+
+	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body", State: "review"}
+	o := newReviewRun(d, tc, 0)
+
+	err := runReview(context.Background(), o)
+	require.Error(t, err)
+
+	var mte *MaxTurnsError
+	require.ErrorAs(t, err, &mte)
+
+	for _, c := range git.recorded() {
+		assert.False(t, strings.HasPrefix(c, "CommitFixup"), "truncated fix fixup-committed: %v", git.recorded())
+		assert.False(t, strings.HasPrefix(c, "Push:"), "truncated fix pushed: %v", git.recorded())
+	}
+}
+
 func TestReviewFixCoderSelectionLogged(t *testing.T) {
 	// Round 1 is not approved -> fix coder run -> round 2 approves. The fix run
 	// must announce the selected coder model, the round number, and the tier on
