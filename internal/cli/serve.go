@@ -219,6 +219,7 @@ func runServe(ctx context.Context, configPath string) error {
 	}
 
 	gracefulShutdown(httpServer, adminSrv, exec, tracker, cbClient, &draining, logger)
+	cbClient.Close()
 	refreshCancel()
 	logger.Info("agent service stopped")
 
