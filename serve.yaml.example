@@ -133,6 +133,9 @@ llm_endpoint:
 # provider-specific tiers (e.g. xhigh). CMX_REASONING_EFFORT
 # Sent to every selected model — the endpoint must accept reasoning_effort on
 # ALL served models, or leave this empty. (Per-model gating is a follow-up.)
+# Non-canonical values (anything outside low|medium|high|"") are forwarded to
+# the provider as-is; the agent logs a startup warning so a typo doesn't go
+# unnoticed.
 # reasoning_effort: ""
 
 # ─── Per-card budget ──────────────────────────────────────────────────────────
