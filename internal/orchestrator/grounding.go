@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -80,17 +81,13 @@ func discoverGrounding(root string) []groundingDoc {
 }
 
 // readGroundingDir returns the chosen instruction file for dir, AGENTS.md
-// preferred over CLAUDE.md. ok is false when neither exists.
+// preferred over CLAUDE.md. ok is false when neither exists (or the candidate
+// escapes the workspace / is not a regular file).
 func readGroundingDir(root, dir string) (groundingDoc, bool) {
 	for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
-		data, err := os.ReadFile(filepath.Join(dir, name))
-		if err != nil {
+		content, ok := readGroundingFile(root, filepath.Join(dir, name))
+		if !ok {
 			continue
-		}
-
-		content := string(data)
-		if len(data) > groundingByteCap {
-			content = string(data[:groundingByteCap]) + "\n[... truncated at 64 KB ...]"
 		}
 
 		rel, err := filepath.Rel(root, dir)
@@ -102,6 +99,68 @@ func readGroundingDir(root, dir string) (groundingDoc, bool) {
 	}
 
 	return groundingDoc{}, false
+}
+
+// readGroundingFile reads path with the real target constrained to the workspace
+// root and the read bounded before allocation. In-repo symlinks (CLAUDE.md ->
+// AGENTS.md) are followed; a repo-committed symlink escaping the tree (->
+// /proc/self/environ, -> /run/cm-secrets/env) or a non-regular file (device,
+// FIFO) yields ok=false, so a poisoned repo cannot smuggle secrets or OOM the
+// worker via the grounding block that seeds every model prompt.
+func readGroundingFile(root, path string) (string, bool) {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", false
+	}
+
+	rootReal, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", false
+	}
+
+	rel, err := filepath.Rel(rootReal, resolved)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", false
+	}
+
+	f, err := os.Open(resolved) //nolint:gosec // path resolved and confined to the workspace root above
+	if err != nil {
+		return "", false
+	}
+
+	defer f.Close() //nolint:errcheck // read-only
+
+	if info, serr := f.Stat(); serr != nil || !info.Mode().IsRegular() {
+		return "", false
+	}
+
+	// Bound the read BEFORE allocation: a multi-GB committed file (or a symlink to
+	// /dev/zero) must not OOM the worker before the 64 KB cap is applied.
+	data, err := io.ReadAll(io.LimitReader(f, groundingByteCap+1))
+	if err != nil {
+		return "", false
+	}
+
+	if len(data) > groundingByteCap {
+		return truncateGroundingUTF8(data, groundingByteCap) + "\n[... truncated at 64 KB ...]", true
+	}
+
+	return string(data), true
+}
+
+// truncateGroundingUTF8 returns the first limit bytes of data backed off to the
+// nearest UTF-8 rune boundary, so a fixed-offset cut never splits a multi-byte
+// rune (which would emit U+FFFD in the grounding prompt).
+func truncateGroundingUTF8(data []byte, limit int) string {
+	if limit >= len(data) {
+		return string(data)
+	}
+
+	for limit > 0 && data[limit]&0xC0 == 0x80 {
+		limit--
+	}
+
+	return string(data[:limit])
 }
 
 func groundingDepth(root, path string) int {

@@ -187,10 +187,12 @@ or a mounted file only — never via flags or committed YAML.
    `SelectionContext` payload (`registry.FromSelection`) — nothing is embedded.
    The blacklist is self-learning: a model that proves harness-incapable mid-run
    is reported back, excluded, and a replacement re-selected.
-6. **No compactor in v1.** Subagent isolation + `--max-turns`/`--max-cost`
-   caps + window-aware selection bound context growth. Nearing the window emits
+6. **No compactor in v1.** Subagent isolation + `--max-turns` caps +
+   window-aware selection bound context growth. Nearing the window emits
    a `context_limit` event and returns **incomplete** — the orchestrator treats
-   it as a failed subtask, never a silent truncation.
+   it as a failed subtask, never a silent truncation. There is no `--max-cost`
+   cap in the container path; the per-card ledger (rule 7) is the sole FSM
+   cost cap.
 7. **Per-card budget.** One cumulative USD ceiling (`CMX_MAX_CARD_COST`) spans
    the orchestrator and every subagent; the run aborts when exceeded.
 8. **Secrets.** `serve` writes `<secrets_dir>/shared/env`, refreshed ahead of

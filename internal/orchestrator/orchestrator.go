@@ -84,10 +84,8 @@ type Config struct {
 	CardID            string
 	Branch            string // cm/<card-id-lower>
 	BaseBranch        string
-	AgentID           string
 	Workspace         string
 	MaxCardCost       float64
-	PriceHeadroom     float64
 	PayloadModel      string // CM's default_model from the trigger; "" = serve default
 	DefaultModel      string // serve-config default
 	ReasoningEffort   string // CMX_REASONING_EFFORT; empty = off
@@ -268,7 +266,17 @@ func newRun(d Deps, tc cmclient.TaskContext) *run {
 	o.excluded = map[string]bool{}
 	o.body = tc.Description
 	o.taskImages = dataURLs(tc.Images)
-	o.grounding = groundingBlock(discoverGrounding(d.Cfg.Workspace))
+
+	grounding := groundingBlock(discoverGrounding(d.Cfg.Workspace))
+	if d.Redact != nil {
+		// The seed prompt is NOT covered by the harness redactor (it masks only
+		// tool output/events), so a secret reaching the grounding block would go to
+		// the LLM endpoint unmasked. Redact here, mirroring the tool-output contract
+		// — defense-in-depth behind readGroundingFile's containment guard.
+		grounding = d.Redact(grounding)
+	}
+
+	o.grounding = grounding
 	o.runVerify = func(ctx context.Context, argv []string) (string, bool) {
 		return execVerify(ctx, d.Cfg.Workspace, argv)
 	}

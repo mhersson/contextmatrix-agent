@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 )
 
 // reconcileTierDefault is the conservative tier assigned to every reconciled
@@ -31,9 +32,12 @@ const reconcileTierDefault = "moderate"
 //     the fresh local branch; an existing branch is fetched + checked out, and
 //     any failure there is FATAL. See the inline rationale below.
 //
-// Subtask loading (resume only): SubtaskStates -> o.subtasks with the recovered
-// state and the conservative moderate tier. The execute phase skips "done" refs
-// and queues the rest in dependency order; the plan phase reuses the titles.
+// Subtask loading (resume only): SubtaskStates -> o.subtasks, sorted by card ID.
+// Dependency edges are NOT persisted (list_cards returns only id/title/state), so
+// reconcile sorts by the server-assigned, zero-padded, creation-ordered card ID;
+// because the planner only makes a subtask depend on an earlier one, that ID order
+// is a valid topological order. The execute phase skips "done" refs and runs the
+// rest in that order; the plan phase reuses the titles.
 //
 // reconcile has NO side effects beyond git (fetch/checkout) and reads
 // (RemoteTip/SubtaskStates) plus the one advisory AddLog: it never creates or
@@ -122,6 +126,14 @@ func (o *run) reconcile(ctx context.Context) error {
 			Tier:  reconcileTierDefault, // tiers aren't persisted; conservative recovery
 		})
 	}
+
+	// list_cards carries no dependency edges, so topoOrder would otherwise schedule
+	// these in whatever (nondeterministic) order CM returned them. Sort by the
+	// zero-padded, creation-ordered card ID to recover a stable, dependency-valid
+	// order (the planner only depends on earlier-created subtasks).
+	sort.Slice(o.subtasks, func(i, j int) bool {
+		return o.subtasks[i].ID < o.subtasks[j].ID
+	})
 
 	return nil
 }

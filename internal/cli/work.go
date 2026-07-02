@@ -142,11 +142,6 @@ func specFromEnv() (worker.RunSpec, error) {
 		return worker.RunSpec{}, err
 	}
 
-	maxCostUSD, err := envFloat("CMX_MAX_COST_USD", derefFloat(defaults.MaxCostUSD))
-	if err != nil {
-		return worker.RunSpec{}, err
-	}
-
 	maxCardCost, err := envFloat("CMX_MAX_CARD_COST", 0)
 	if err != nil {
 		return worker.RunSpec{}, err
@@ -214,12 +209,10 @@ func specFromEnv() (worker.RunSpec, error) {
 		MCPAPIKey:                 mcpAPIKey,
 		BaseBranch:                os.Getenv("CM_BASE_BRANCH"),
 		Model:                     os.Getenv("CM_MODEL"),
-		CorrelationID:             os.Getenv("CM_CORRELATION_ID"),
 		Interactive:               os.Getenv("CM_INTERACTIVE") == "true",
 		BashTimeoutMax:            bashTimeoutMax,
 		ToolOutputMax:             toolOutputMax,
 		MaxTurns:                  maxTurns,
-		MaxCostUSD:                maxCostUSD,
 		MaxCardCost:               maxCardCost,
 		SelectorPriceHeadroom:     selectorPriceHeadroom,
 		CompactionEnabled:         compactionEnabled,

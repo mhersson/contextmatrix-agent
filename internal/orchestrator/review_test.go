@@ -447,6 +447,41 @@ func TestReviewRoundTwoDiffsAgainstSnapshot(t *testing.T) {
 		"round 2 must diff the delta against the round-1 reviewed head")
 }
 
+func TestReviewNoOpFixWidensNextRoundToBaseBranch(t *testing.T) {
+	// A fix round that commits nothing (the cheap coder made no edits) must not
+	// leave the stale reviewed-head snapshot as the next round's diff base — that
+	// makes round 2 diff HEAD...HEAD (empty), hiding the unresolved finding and
+	// letting an empty-delta panel spuriously approve. The next round must
+	// re-widen to the full base-branch diff.
+	ops := &fakeOps{}
+	git := &fakeGit{committed: false, headSHA: "sha-reviewed-1"}
+	client := &planLLM{responses: []llm.Response{
+		// Round 1: specialists flag a bug, synthesis returns a fix.
+		stopResp("Correctness: bug", 0.01),
+		stopResp("Design: ok", 0.01),
+		stopResp("Security: ok", 0.01),
+		stopResp(`{"approved":false,"summary":"fix it","fixes":[{"file":"a.go","issue":"bug","suggestion":"patch"}]}`, 0.02),
+		// Fix coder run makes no edits (git.committed == false).
+		stopResp("coder: could not locate the issue", 0.05),
+		// Round 2: specialists + synthesis.
+		stopResp("Correctness: ok", 0.01),
+		stopResp("Design: ok", 0.01),
+		stopResp("Security: ok", 0.01),
+		stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.02),
+	}}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	require.GreaterOrEqual(t, len(git.diffBases), 2,
+		"two specialist rounds must each diff once; diffBases=%v", git.diffBases)
+	assert.Equal(t, d.Cfg.BaseBranch, git.diffBases[1],
+		"after a no-op fix, round 2 must re-widen to the base branch, not the stale reviewed-head snapshot")
+}
+
 func TestReviewPriorFindingsFedToNextRound(t *testing.T) {
 	// Round 1 is not approved with a recognizable finding (delta.go / nil deref);
 	// round 2 approves. The round-2 specialist panel must receive the round-1

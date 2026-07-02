@@ -119,7 +119,7 @@ func (g *Git) Clone(ctx context.Context, url, baseBranch string) error {
 		args = append(args, "--branch", baseBranch)
 	}
 
-	args = append(args, url, g.dir)
+	args = append(args, "--", url, g.dir)
 
 	// Clone targets a not-yet-existing path, so Dir must be the parent.
 	cmd := exec.CommandContext(ctx, "git", args...)

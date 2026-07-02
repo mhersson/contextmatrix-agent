@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -519,7 +520,12 @@ func (o *run) synthesize(ctx context.Context, findings string, authoritative boo
 
 		o.ledger.Spend(res.TotalCostUSD)
 
-		if reportErr := d.Ops.ReportUsage(ctx, cfg.CardID, res.ModelUsed,
+		used := res.ModelUsed
+		if used == "" {
+			used = model
+		}
+
+		if reportErr := d.Ops.ReportUsage(ctx, cfg.CardID, used,
 			res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
 			slog.Warn("review: report synthesis usage failed", "card_id", cfg.CardID, "error", reportErr)
 		}
@@ -622,10 +628,20 @@ func (o *run) runFix(ctx context.Context, findings string, round int, fixTier st
 		return fmt.Errorf("commit review fixup: %w", err)
 	}
 
-	if committed {
-		if err := d.Git.Push(ctx, cfg.Branch); err != nil {
-			return fmt.Errorf("push review fixup: %w", err)
-		}
+	if !committed {
+		// The fix produced no commit: HEAD is unchanged, so the reviewed-head
+		// snapshot captured this round would make the NEXT round diff HEAD...HEAD
+		// (an empty delta). An empty-delta panel sees nothing to critique and can
+		// approve, integrating the card with the unresolved finding and bypassing
+		// the authoritative pass. Drop the snapshot so the next round re-widens to
+		// the full base-branch diff and actually re-examines the outstanding work.
+		o.lastReviewBase = ""
+
+		return nil
+	}
+
+	if err := d.Git.Push(ctx, cfg.Branch); err != nil {
+		return fmt.Errorf("push review fixup: %w", err)
 	}
 
 	return nil
@@ -733,11 +749,29 @@ func detectVerifyCommand(workspace string) []string {
 	return nil
 }
 
+// verifyMarkerByteCap bounds reads of repo-controlled build-metadata files. A
+// committed multi-GB file — or one symlinked to /dev/zero — must not OOM the
+// worker before the marker check runs. 1 MiB holds any real Makefile/package.json.
+const verifyMarkerByteCap = 1 << 20
+
+// readVerifyMarker reads at most verifyMarkerByteCap bytes from path, bounding
+// the allocation before it happens (os.ReadFile slurps the whole file first).
+func readVerifyMarker(path string) ([]byte, error) {
+	f, err := os.Open(path) //nolint:gosec // code-selected workspace marker, not model input
+	if err != nil {
+		return nil, err
+	}
+
+	defer f.Close() //nolint:errcheck // read-only
+
+	return io.ReadAll(io.LimitReader(f, verifyMarkerByteCap))
+}
+
 // makefileHasTestTarget reports whether path is a readable Makefile declaring a
 // "test:" target. Make targets are declared at column 0, so the match is
 // deliberately untrimmed — indented lines (recipes, comments) never match.
 func makefileHasTestTarget(path string) bool {
-	data, err := os.ReadFile(path)
+	data, err := readVerifyMarker(path)
 	if err != nil {
 		return false
 	}
@@ -754,7 +788,7 @@ func makefileHasTestTarget(path string) bool {
 // packageJSONHasTestScript reports whether path is a readable package.json whose
 // scripts object declares a non-empty "test" entry.
 func packageJSONHasTestScript(path string) bool {
-	data, err := os.ReadFile(path)
+	data, err := readVerifyMarker(path)
 	if err != nil {
 		return false
 	}

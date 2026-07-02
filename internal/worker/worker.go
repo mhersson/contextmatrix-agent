@@ -44,15 +44,14 @@ const reviewAttemptsCap = 3
 // RunSpec is the container-side contract: populated from CM_* env by the
 // work command.
 type RunSpec struct {
-	CardID        string // CM_CARD_ID (required)
-	Project       string // CM_PROJECT (required)
-	RepoURL       string // CM_REPO_URL (required)
-	BaseBranch    string // CM_BASE_BRANCH (optional)
-	Interactive   bool   // CM_INTERACTIVE ("true")
-	Model         string // CM_MODEL (optional; honored if catalog-resolvable)
-	MCPURL        string // CM_MCP_URL (required)
-	MCPAPIKey     string // CM_MCP_API_KEY (required)
-	CorrelationID string // CM_CORRELATION_ID (optional)
+	CardID      string // CM_CARD_ID (required)
+	Project     string // CM_PROJECT (required)
+	RepoURL     string // CM_REPO_URL (required)
+	BaseBranch  string // CM_BASE_BRANCH (optional)
+	Interactive bool   // CM_INTERACTIVE ("true")
+	Model       string // CM_MODEL (optional; honored if catalog-resolvable)
+	MCPURL      string // CM_MCP_URL (required)
+	MCPAPIKey   string // CM_MCP_API_KEY (required)
 
 	LLMKey     string // from /run/cm-secrets/env via the secrets source
 	LLMBaseURL string // from /run/cm-secrets/env via the secrets source
@@ -62,7 +61,6 @@ type RunSpec struct {
 	BashTimeoutMax        int     // CMX_BASH_TIMEOUT_MAX_SECONDS; default 600
 	ToolOutputMax         int     // CMX_TOOL_OUTPUT_MAX_BYTES; default 131072 (128 KB)
 	MaxTurns              int     // CMX_MAX_TURNS
-	MaxCostUSD            float64 // CMX_MAX_COST_USD
 	MaxCardCost           float64 // CMX_MAX_CARD_COST; 0 disables
 	SelectorPriceHeadroom float64 // CMX_SELECTOR_PRICE_HEADROOM; 0 uses worker default
 
@@ -328,10 +326,8 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 			CardID:            a.spec.CardID,
 			Branch:            a.branch,
 			BaseBranch:        a.spec.BaseBranch,
-			AgentID:           "cmx-agent-" + strings.ToLower(a.spec.CardID),
 			Workspace:         a.ws,
 			MaxCardCost:       a.spec.MaxCardCost,
-			PriceHeadroom:     a.spec.SelectorPriceHeadroom,
 			PayloadModel:      a.spec.Model,
 			DefaultModel:      a.spec.DefaultModel,
 			ReasoningEffort:   a.spec.ReasoningEffort,
@@ -528,7 +524,7 @@ func buildSkillTool(spec RunSpec, ops CardOps) tools.Tool {
 // payload-injected catalog, priors, favorites, and blacklist. No live catalog
 // fetch or embedded baseline is consulted.
 func buildRegistry(spec RunSpec) *registry.Registry {
-	return registry.FromSelection(spec.Selection, spec.DefaultModel)
+	return registry.FromSelection(spec.Selection, spec.DefaultModel, spec.SelectorPriceHeadroom)
 }
 
 // releaseWithError best-effort releases the claim and returns an error result.
