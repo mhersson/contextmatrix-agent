@@ -93,7 +93,7 @@ type Config struct {
 	ReasoningEffort   string // CMX_REASONING_EFFORT; empty = off
 	MaxTurns          int
 	ToolOutputMax     int
-	ReviewAttemptsCap int // 5, CM's convention
+	ReviewAttemptsCap int // 3, CM's convention
 	// Interactive is the sole mode flag: true => HITL (gates wait on Human and
 	// brainstorming runs for creative cards); false => autonomous (gates pass
 	// through, brainstorming skipped). Autonomous behavior is byte-for-byte the
