@@ -307,7 +307,6 @@ func TestTrigger_AcceptsAndLaunches(t *testing.T) {
 	assert.Contains(t, spec.Env, "CM_MODEL=some-model")
 	assert.Contains(t, spec.Env, "CM_MCP_URL=http://cm:8080/mcp")
 	assert.Contains(t, spec.Env, "CM_MCP_API_KEY=cfg-mcp-key")
-	assert.Contains(t, spec.Env, "CM_CORRELATION_ID=PROJ-001")
 
 	// running callback after successful launch.
 	require.Eventually(t, func() bool {

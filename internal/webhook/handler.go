@@ -28,8 +28,8 @@ const (
 	maxRequestBodyBytes = 1 << 20 // 1 MiB
 
 	// correlationHeader carries the client's trace ID. The agent backend reads
-	// it on /trigger and threads it into the container as CM_CORRELATION_ID so
-	// runner and worker logs stitch to the same CM trace.
+	// it on /trigger and threads it into executor.LaunchSpec.CorrelationID (the
+	// container label) so runner and worker logs stitch to the same CM trace.
 	correlationHeader = "X-Correlation-ID"
 
 	// skillsMountPathEnv is the in-container path the executor mounts the skills
@@ -379,7 +379,6 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 		"CM_MODEL=" + p.Model,
 		"CM_MCP_URL=" + s.launchEnv.MCPURL,
 		"CM_MCP_API_KEY=" + mcpKey,
-		"CM_CORRELATION_ID=" + correlationID,
 	}
 
 	if s.launchEnv.BashTimeoutMaxSeconds > 0 {

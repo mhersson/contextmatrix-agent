@@ -64,10 +64,6 @@ func (s *Source) Get(key string) string {
 	return s.vals[key]
 }
 
-// For returns the same source. The per-run parameter is reserved for a future
-// multi-user mode; it is intentionally ignored today.
-func (s *Source) For(_ string) *Source { return s }
-
 // EndpointSecrets is the static (non-rotating) LLM endpoint config staged into
 // the worker secrets file on every rewrite.
 type EndpointSecrets struct {

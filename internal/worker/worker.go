@@ -125,12 +125,7 @@ func Run(ctx context.Context, spec RunSpec, ops CardOps, client llm.LLM, emit *e
 
 	inbox := NewInbox(
 		spec.Interactive,
-		func() {
-			// Promote: the inbox closes itself (Wait returns ErrInboxClosed), so
-			// the linear loop ends and the worker bridges to the phase loop. Log
-			// the hand-off so the run record shows the mid-run mode switch.
-			slog.Info("promote frame received; bridging to orchestrator after linear run", "card", spec.CardID)
-		},
+		func() {},
 		func() {
 			// Uniform across modes: the host holds the container's stdin
 			// attach open for the container's whole life, so end_session or
