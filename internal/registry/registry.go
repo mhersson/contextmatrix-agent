@@ -6,19 +6,14 @@
 package registry
 
 import (
-	"fmt"
-
 	"github.com/mhersson/contextmatrix-harness/llm"
 )
 
 type Role string
 
 const (
-	RoleOrchestrator Role = "orchestrator"
-	RolePlanner      Role = "planner"
-	RoleCoder        Role = "coder"
-	RoleReviewer     Role = "reviewer"
-	RoleDocs         Role = "docs"
+	RoleCoder    Role = "coder"
+	RoleReviewer Role = "reviewer"
 )
 
 type Tier string
@@ -106,7 +101,7 @@ type SelectInput struct {
 
 // NewRegistry builds a priors-only registry with the given role pins and capable
 // default. Selection is payload-driven: with no priors injected, SelectByComplexity
-// always falls back to the capable default. Pins still resolve via Resolve.
+// always falls back to the capable default.
 func NewRegistry(pins map[Role]string, capableDefault string, catalog llm.Catalog) *Registry {
 	r := NewRegistryFromParts(catalog, Priors{}, nil, nil, capableDefault)
 	if pins != nil {
@@ -114,28 +109,6 @@ func NewRegistry(pins map[Role]string, capableDefault string, catalog llm.Catalo
 	}
 
 	return r
-}
-
-// Resolve returns the ModelSpec for role. actor is the multi-user seam (ignored
-// today). Precedence: explicit pin > capable default.
-func (r *Registry) Resolve(actor string, role Role) (ModelSpec, error) {
-	_ = actor // seam: per-principal resolution is future work
-
-	model := r.pins[role]
-	if model == "" {
-		model = r.capable
-	}
-
-	if model == "" {
-		return ModelSpec{}, fmt.Errorf("no model pinned for role %q and no capable default set", role)
-	}
-
-	spec := ModelSpec{Model: model}
-	if e, ok := r.catalog.Find(model); ok {
-		spec.ContextWindow = e.ContextLength
-	}
-
-	return spec, nil
 }
 
 // Has reports whether model is present in the live catalog. The orchestrator
