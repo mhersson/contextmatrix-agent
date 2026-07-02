@@ -581,6 +581,14 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 	mu.Unlock()
 
 	if err != nil {
+		if errors.Is(err, frames.ErrFrameTooLarge) {
+			s.logger.Warn("message rejected: frame too large",
+				"project", payload.Project, "card_id", payload.CardID)
+			writeError(w, http.StatusRequestEntityTooLarge, protocol.CodeTooLarge, "message content too large")
+
+			return
+		}
+
 		s.logger.Error("message stdin write failed",
 			"project", payload.Project, "card_id", payload.CardID, "error", err)
 		writeError(w, http.StatusInternalServerError, protocol.CodeInternal, "write failed")

@@ -1,6 +1,7 @@
 package frames
 
 import (
+	"bytes"
 	"io"
 	"strings"
 	"testing"
@@ -44,10 +45,21 @@ func TestReaderSkipsGarbageAndUnknownTypes(t *testing.T) {
 }
 
 func TestReaderOversizedLineIsFatal(t *testing.T) {
-	in := strings.Repeat("a", maxLine+1) + "\n"
+	in := strings.Repeat("a", MaxLine+1) + "\n"
 	r := NewReader(strings.NewReader(in))
 
 	_, err := r.Next()
 	require.Error(t, err)
 	require.NotErrorIs(t, err, io.EOF)
+}
+
+func TestWriteRejectsOversizedFrame(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+
+	err := Write(&buf, Frame{Type: TypeUserMessage, Content: strings.Repeat("x", MaxLine)})
+
+	require.ErrorIs(t, err, ErrFrameTooLarge)
+	assert.Zero(t, buf.Len(), "nothing must be written on an oversized frame")
 }
