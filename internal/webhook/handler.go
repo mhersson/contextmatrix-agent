@@ -181,6 +181,12 @@ type Server struct {
 	// the wire. Keyed by project+"/"+cardID. Given the low message volume a
 	// per-key lock is cheaper than a global one under concurrency.
 	stdinMu sync.Map // map[string]*sync.Mutex
+
+	// sseShutdown is closed by CloseSSE at drain so every in-flight /logs handler
+	// returns promptly (an SSE stream never idles, so http.Server.Shutdown would
+	// otherwise block the full timeout). Guarded by sseShutdownOnce for idempotency.
+	sseShutdown     chan struct{}
+	sseShutdownOnce sync.Once
 }
 
 // NewServer wires a Server from its dependencies. The replay cache, dedup
@@ -229,7 +235,14 @@ func NewServer(cfg Config) *Server {
 		keepaliveInterval: cfg.KeepaliveInterval,
 		metrics:           cfg.Metrics,
 		logger:            logger,
+		sseShutdown:       make(chan struct{}),
 	}
+}
+
+// CloseSSE unblocks every in-flight /logs SSE handler. Wire it via
+// httpServer.RegisterOnShutdown so SIGTERM drain returns promptly. Idempotent.
+func (s *Server) CloseSSE() {
+	s.sseShutdownOnce.Do(func() { close(s.sseShutdown) })
 }
 
 // Routes returns the mux with every webhook route mounted. The mutating

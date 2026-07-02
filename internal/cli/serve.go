@@ -181,6 +181,11 @@ func runServe(ctx context.Context, configPath string) error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
+	// Unblock in-flight /logs SSE streams when Shutdown starts; otherwise
+	// http.Server.Shutdown waits the full httpShutdownTimeout on a stream that
+	// never goes idle. (Mirror this in contextmatrix-runner's handleLogs.)
+	httpServer.RegisterOnShutdown(srv.CloseSSE)
+
 	adminSrv := buildAdminServer(cfg, srv, mx, logger)
 
 	stopGauge := startRunningContainersGauge(tracker, mx, logger, 30*time.Second)

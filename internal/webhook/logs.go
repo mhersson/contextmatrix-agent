@@ -68,6 +68,11 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 
 			return
 
+		case <-s.sseShutdown:
+			s.logger.Info("SSE log client closed on drain", "project_filter", project, "remote_addr", r.RemoteAddr)
+
+			return
+
 		case <-ticker.C:
 			if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
 				s.logger.Debug("SSE keepalive write failed", "error", err)
