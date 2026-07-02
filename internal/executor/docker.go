@@ -276,7 +276,8 @@ func (e *DockerExecutor) Launch(ctx context.Context, spec LaunchSpec) error {
 	}
 
 	// Attach BEFORE start so no early output is missed and stdin is ready for
-	// the priming control frame the serve layer writes.
+	// the control frames (message/promote/end_session) the serve layer writes
+	// over the run.
 	attach, err := e.docker.ContainerAttach(ctx, resp.ID, container.AttachOptions{
 		Stream: true,
 		Stdin:  true,

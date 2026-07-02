@@ -118,11 +118,6 @@ func New(hub *Hub, r *redact.Redactor, onAwaiting func(project, cardID string, a
 	return &Bridge{hub: hub, redactor: r, onAwaiting: onAwaiting}
 }
 
-// PublishUser emits a "user"-type entry bypassing redaction.
-func (b *Bridge) PublishUser(project, cardID, content string) {
-	b.hub.PublishUser(project, cardID, content)
-}
-
 // BridgeLine maps one worker output line (stdout JSONL event or raw stderr)
 // to zero or one published LogEntry, stamped with project/cardID/time.Now().
 func (b *Bridge) BridgeLine(project, cardID string, line []byte, isStderr bool) {

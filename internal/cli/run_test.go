@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -86,7 +87,11 @@ func TestRunSpikeDrivesKataGreen(t *testing.T) {
 	assert.Contains(t, string(b), "strconv")
 }
 
-func mustJSON(m map[string]any) string { return toJSON(m) }
+func mustJSON(m map[string]any) string {
+	b, _ := json.Marshal(m)
+
+	return string(b)
+}
 
 // TestToolOutputMaxDefaultIs131072 asserts that the --tool-output-max-bytes flag
 // defaults to 131072 (128 KB) — matching the FSM / RunSpec default so local runs

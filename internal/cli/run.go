@@ -288,9 +288,3 @@ func derefFloat(p *float64) float64 {
 
 	return *p
 }
-
-func toJSON(v any) string {
-	b, _ := json.Marshal(v)
-
-	return string(b)
-}

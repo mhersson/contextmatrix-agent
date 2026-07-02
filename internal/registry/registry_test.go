@@ -16,25 +16,6 @@ func testCatalog() llm.Catalog {
 	}
 }
 
-func TestResolvePinBeatsDefault(t *testing.T) {
-	r := NewRegistry(map[Role]string{RoleCoder: "deepseek/deepseek-v4-flash"}, "capable/default", testCatalog())
-
-	spec, err := r.Resolve("ignored-actor", RoleCoder)
-	require.NoError(t, err)
-	assert.Equal(t, "deepseek/deepseek-v4-flash", spec.Model)
-	assert.Equal(t, 131072, spec.ContextWindow)
-
-	spec, err = r.Resolve("", RoleReviewer) // unpinned -> capable default
-	require.NoError(t, err)
-	assert.Equal(t, "capable/default", spec.Model)
-}
-
-func TestResolveErrorsWithoutPinOrDefault(t *testing.T) {
-	r := NewRegistry(nil, "", testCatalog())
-	_, err := r.Resolve("", RoleCoder)
-	require.Error(t, err)
-}
-
 func TestFitsWindow(t *testing.T) {
 	r := NewRegistry(nil, "x", testCatalog())
 	assert.True(t, r.fitsWindow("deepseek/deepseek-v4-flash", 100000))

@@ -16,13 +16,12 @@ import (
 // after a promote frame) Wait reports ErrInboxClosed so a natural stop means
 // done; in HITL mode Wait blocks for the next human turn.
 type Inbox struct {
-	mu       sync.Mutex
-	pending  []harness.UserMessage
-	closed   bool // autonomous, or promoted
-	signal   chan struct{}
-	onProm   func()
-	onEnd    func()
-	promoted bool
+	mu      sync.Mutex
+	pending []harness.UserMessage
+	closed  bool // autonomous, or promoted
+	signal  chan struct{}
+	onProm  func()
+	onEnd   func()
 }
 
 // NewInbox constructs an Inbox. hitl=false means autonomous (pre-closed).
@@ -64,7 +63,6 @@ func (in *Inbox) Pump(r io.Reader) {
 		case frames.TypePromote:
 			in.mu.Lock()
 			in.closed = true
-			in.promoted = true
 			in.mu.Unlock()
 			in.onProm()
 			in.ping()
@@ -123,12 +121,4 @@ func (in *Inbox) Wait(ctx context.Context) (harness.UserMessage, error) {
 		case <-in.signal:
 		}
 	}
-}
-
-// Promoted reports whether a promote frame arrived during the run.
-func (in *Inbox) Promoted() bool {
-	in.mu.Lock()
-	defer in.mu.Unlock()
-
-	return in.promoted
 }

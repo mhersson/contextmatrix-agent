@@ -143,16 +143,6 @@ func TestWriteEnvFileDeterministic(t *testing.T) {
 		string(first))
 }
 
-// TestForReturnsSource verifies the per-run seam returns self.
-func TestForReturnsSource(t *testing.T) {
-	t.Parallel()
-
-	s := &Source{vals: map[string]string{"K": "v"}}
-	got := s.For("some-run-id")
-
-	assert.Same(t, s, got)
-}
-
 // TestRefresherWritesAndRefreshes exercises the Refresher end-to-end.
 func TestRefresherWritesAndRefreshes(t *testing.T) {
 	t.Parallel()

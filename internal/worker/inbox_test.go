@@ -113,10 +113,10 @@ func TestAutonomousModeQueuedMessageDeliveredBeforeClose(t *testing.T) {
 	assert.ErrorIs(t, err, harness.ErrInboxClosed)
 }
 
-// TestPromoteFrameUnblocksWaitAndSetsPromoted verifies that a promote frame
-// causes a blocked Wait to return ErrInboxClosed and Promoted() to be true,
-// and fires the onPromote callback.
-func TestPromoteFrameUnblocksWaitAndSetsPromoted(t *testing.T) {
+// TestPromoteFrameUnblocksWaitAndFiresCallback verifies that a promote frame
+// causes a blocked Wait to return ErrInboxClosed and fires the onPromote
+// callback.
+func TestPromoteFrameUnblocksWaitAndFiresCallback(t *testing.T) {
 	t.Parallel()
 
 	in, pw, promotes, _ := newTestInbox(t, true)
@@ -140,8 +140,6 @@ func TestPromoteFrameUnblocksWaitAndSetsPromoted(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Wait did not unblock after promote frame")
 	}
-
-	assert.True(t, in.Promoted())
 
 	require.Eventually(t, func() bool { return promotes.Load() == 1 }, time.Second, 5*time.Millisecond)
 }

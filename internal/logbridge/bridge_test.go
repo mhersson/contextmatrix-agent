@@ -575,11 +575,8 @@ func TestHubSubscribers(t *testing.T) {
 
 		hub := logbridge.NewHub()
 		_, ch := hub.Subscribe("")
-		// Bridge with redactor — PublishUser bypasses it.
-		red := redact.New([]string{secret})
-		bridge := logbridge.New(hub, red, nil)
 
-		bridge.PublishUser(testProject, testCard, "user said: "+secret)
+		hub.PublishUser(testProject, testCard, "user said: "+secret)
 
 		select {
 		case got := <-ch:

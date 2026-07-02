@@ -1,43 +1,16 @@
 package registry
 
-import (
-	"encoding/json"
-	"fmt"
-	"io"
-)
-
 // PriorEntry holds external quality scores for a model (e.g. from Artificial
 // Analysis). Role scores are pointers so an omitted role is distinguishable
 // from an explicit zero: absent/null decodes to nil, meaning no prior exists.
 type PriorEntry struct {
-	Coder     *float64 `json:"coder"`
-	Reviewer  *float64 `json:"reviewer"`
-	Source    string   `json:"source"`
-	Retrieved string   `json:"retrieved"`
+	Coder    *float64 `json:"coder"`
+	Reviewer *float64 `json:"reviewer"`
 }
 
-// PriorsMeta carries provenance information for the priors file.
-type PriorsMeta struct {
-	Updated   string             `json:"updated"`
-	Procedure string             `json:"procedure"`
-	TierBars  map[string]float64 `json:"tier_bars"` // keyed by Tier string
-}
-
-// Priors is the parsed model-priors.json document.
+// Priors is the parsed model-priors document.
 type Priors struct {
-	Meta   PriorsMeta            `json:"meta"`
 	Models map[string]PriorEntry `json:"models"`
-}
-
-// LoadPriors decodes a model-priors.json document from r.
-// Unknown fields are tolerated for forward compatibility.
-func LoadPriors(r io.Reader) (Priors, error) {
-	var p Priors
-	if err := json.NewDecoder(r).Decode(&p); err != nil {
-		return Priors{}, fmt.Errorf("decode priors: %w", err)
-	}
-
-	return p, nil
 }
 
 // ForRole returns the prior score for the given model and role, and whether one
