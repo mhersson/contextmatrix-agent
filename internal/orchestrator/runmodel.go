@@ -64,6 +64,7 @@ func (o *run) harnessConfig(model string) harness.Config {
 		ToolOutputMaxBytes: o.d.Cfg.ToolOutputMax,
 		RedactToolOutput:   o.d.Redact,
 		ContextWindow:      o.d.Registry.ContextWindow(model),
+		Provider:           o.d.Cfg.Provider,
 	}
 
 	// Opt into in-window compaction only when enabled; otherwise leave
