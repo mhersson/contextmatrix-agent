@@ -224,8 +224,11 @@ func prepareWorkspace(ctx context.Context, git *Git, spec RunSpec, branch string
 // MCP hiccup must not abort an otherwise healthy run.
 func startHeartbeat(ctx context.Context, ops CardOps, cardID string) func() {
 	done := make(chan struct{})
+	stopped := make(chan struct{})
 
 	go func() {
+		defer close(stopped)
+
 		ticker := time.NewTicker(heartbeatInterval)
 		defer ticker.Stop()
 
@@ -245,10 +248,15 @@ func startHeartbeat(ctx context.Context, ops CardOps, cardID string) func() {
 
 	var once atomic.Bool
 
+	// The stop func joins the goroutine, not just signals it: Run must not
+	// return while its heartbeat goroutine can still tick a card it has
+	// already released or completed.
 	return func() {
 		if once.CompareAndSwap(false, true) {
 			close(done)
 		}
+
+		<-stopped
 	}
 }
 
