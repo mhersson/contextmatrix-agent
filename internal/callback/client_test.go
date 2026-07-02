@@ -223,3 +223,111 @@ func TestReportStatus_CountsRetries(t *testing.T) {
 	assert.InEpsilon(t, float64(2), testutil.ToFloat64(m.CallbackRetriesTotal.WithLabelValues("status")), 1e-9,
 		"two retries follow the first attempt")
 }
+
+// TestReportStatus_TerminalBackgroundRetry verifies that a terminal
+// (completed/failed) status callback which exhausts the fast synchronous
+// retries falls back to a persistent background retry — the only mechanism
+// that clears the parent claim and runner_status in ContextMatrix, so it
+// must not be silently dropped by a brief CM outage.
+func TestReportStatus_TerminalBackgroundRetry(t *testing.T) {
+	t.Run("completed_recovers_via_background_retry", func(t *testing.T) {
+		apiKey := "bg-retry-key"
+
+		var hits atomic.Int32
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			n := hits.Add(1)
+			if n <= 3 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+
+				return
+			}
+
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer srv.Close()
+
+		c := newFastClient(srv.URL, apiKey)
+		c.backgroundDelay = func(int) time.Duration { return 0 } // no sleeping in tests
+		attempted := make(chan struct{}, 8)
+		c.bgAttempted = attempted
+
+		defer c.Close()
+
+		err := c.ReportStatus(context.Background(), "CMX-001", "proj", "completed", "")
+		require.Error(t, err, "the three fast attempts still fail")
+		assert.EqualValues(t, 3, hits.Load())
+
+		select {
+		case <-attempted:
+		case <-time.After(2 * time.Second):
+			t.Fatal("background retry did not fire in time")
+		}
+
+		assert.EqualValues(t, 4, hits.Load(), "background retry reached the server")
+	})
+
+	t.Run("running_status_has_no_background_retry", func(t *testing.T) {
+		apiKey := "no-bg-retry-key"
+
+		var hits atomic.Int32
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			hits.Add(1)
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}))
+		defer srv.Close()
+
+		c := newFastClient(srv.URL, apiKey)
+		c.backgroundDelay = func(int) time.Duration { return 0 }
+		attempted := make(chan struct{}, 1)
+		c.bgAttempted = attempted
+
+		defer c.Close()
+
+		err := c.ReportStatus(context.Background(), "CMX-001", "proj", "running", "")
+		require.Error(t, err)
+		assert.EqualValues(t, 3, hits.Load())
+
+		select {
+		case <-attempted:
+			t.Fatal("non-terminal status must not schedule a background retry")
+		case <-time.After(100 * time.Millisecond):
+		}
+	})
+
+	t.Run("close_cancels_pending_background_retry", func(t *testing.T) {
+		apiKey := "close-key"
+
+		var hits atomic.Int32
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			hits.Add(1)
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}))
+		defer srv.Close()
+
+		c := newFastClient(srv.URL, apiKey)
+		// A long delay: Close must interrupt the sleep, not race a real attempt.
+		c.backgroundDelay = func(int) time.Duration { return time.Hour }
+
+		err := c.ReportStatus(context.Background(), "CMX-001", "proj", "failed", "")
+		require.Error(t, err)
+		assert.EqualValues(t, 3, hits.Load())
+
+		done := make(chan struct{})
+
+		go func() {
+			c.Close()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("Close did not return — background retry goroutine leaked")
+		}
+
+		assert.EqualValues(t, 3, hits.Load(), "Close must cancel before another attempt lands")
+	})
+}

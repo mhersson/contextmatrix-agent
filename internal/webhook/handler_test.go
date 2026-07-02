@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/executor"
+	"github.com/mhersson/contextmatrix-agent/internal/frames"
 	"github.com/mhersson/contextmatrix-agent/internal/logbridge"
 	protocol "github.com/mhersson/contextmatrix-protocol"
 	"github.com/stretchr/testify/assert"
@@ -532,6 +533,27 @@ func TestMessage_DuplicateReturnsCachedAck(t *testing.T) {
 	require.Equal(t, http.StatusOK, w2.Code, "duplicate ack is 200, not 202")
 
 	assert.Equal(t, first, stdin.String(), "duplicate must not re-write stdin")
+}
+
+// TestMessage_OversizedContentRejected proves a frame that would exceed
+// frames.MaxLine is refused before it reaches the container: the handler
+// maps frames.ErrFrameTooLarge to 413 CodeTooLarge and stdin stays empty.
+func TestMessage_OversizedContentRejected(t *testing.T) {
+	h := newHarness(t, 4)
+	stdin := h.addRun("PROJ-001", "proj")
+
+	payload := protocol.MessagePayload{
+		CardID:    "PROJ-001",
+		Project:   "proj",
+		Content:   strings.Repeat("x", frames.MaxLine),
+		MessageID: "m1",
+	}
+
+	w := h.do(t, http.MethodPost, "/message", payload)
+
+	require.Equal(t, http.StatusRequestEntityTooLarge, w.Code)
+	assert.Equal(t, protocol.CodeTooLarge, decodeErr(t, w).Code)
+	assert.Empty(t, stdin.String(), "oversized frame must not reach the container stdin")
 }
 
 func TestMessage_UntrackedReturns404(t *testing.T) {

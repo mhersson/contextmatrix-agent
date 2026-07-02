@@ -103,6 +103,30 @@ func TestLogs_SSEStream(t *testing.T) {
 	readUntil(func(s string) bool { return s == ": keepalive" }, "keepalive comment")
 }
 
+func TestHandleLogs_ReturnsOnSSEShutdown(t *testing.T) {
+	t.Parallel()
+
+	srv := NewServer(Config{Hub: logbridge.NewHub()})
+
+	req := httptest.NewRequest(http.MethodGet, "/logs", nil) // context.Background: never cancels
+	rec := httptest.NewRecorder()                            // implements http.Flusher
+
+	done := make(chan struct{})
+
+	go func() {
+		srv.handleLogs(rec, req)
+		close(done)
+	}()
+
+	srv.CloseSSE() // closing the channel keeps the select case ready even if it lands first
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleLogs did not return after CloseSSE; SSE drain signal ignored")
+	}
+}
+
 func TestLogs_ProjectFilter(t *testing.T) {
 	hub := logbridge.NewHub()
 

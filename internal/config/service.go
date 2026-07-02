@@ -341,7 +341,8 @@ func isNotExist(err error) bool {
 }
 
 // Validate checks the service config invariants after merging. A non-digest
-// BaseImage is permitted but warns via slog so operators notice tag drift.
+// BaseImage and a non-canonical ReasoningEffort tier are both permitted but
+// warn via slog so operators notice tag drift or provider-specific values.
 func (c *ServiceConfig) Validate() error {
 	if c.ContextMatrixURL == "" {
 		return fmt.Errorf("contextmatrix_url is required")
@@ -382,6 +383,14 @@ func (c *ServiceConfig) Validate() error {
 	case "never", "if-not-present", "always":
 	default:
 		return fmt.Errorf("image_pull_policy must be never|if-not-present|always, got %q", c.ImagePullPolicy)
+	}
+
+	switch c.ReasoningEffort {
+	case "", "low", "medium", "high":
+	default:
+		slog.Warn("reasoning_effort is not a canonical tier (low|medium|high); "+
+			"forwarding to the provider as-is",
+			"reasoning_effort", c.ReasoningEffort)
 	}
 
 	if c.MaxConcurrent < 1 {

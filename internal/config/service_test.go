@@ -378,6 +378,25 @@ func TestServiceValidate(t *testing.T) {
 	})
 }
 
+func TestServiceValidate_ReasoningEffort(t *testing.T) {
+	t.Parallel()
+
+	ok := validServiceConfig()
+	ok.ReasoningEffort = "high"
+	require.NoError(t, ok.Validate())
+
+	// Non-canonical values are forwarded to the provider as-is (serve.yaml.example
+	// documents provider-specific tiers like "xhigh"), so Validate must not reject
+	// them — it only logs a startup warning (verified by code inspection; slog.Warn
+	// here mirrors the existing base_image-not-pinned warning, which is likewise
+	// untested via log capture in this file).
+	for _, v := range []string{"extreme", "xhigh"} {
+		nonCanonical := validServiceConfig()
+		nonCanonical.ReasoningEffort = v
+		assert.NoError(t, nonCanonical.Validate(), "reasoning_effort %q should be allowed", v)
+	}
+}
+
 func TestServiceBudgetDefaults(t *testing.T) {
 	// max_card_cost and selector_price_headroom must default to 5.0 and 1.5
 	// when the keys are absent from config and env.
