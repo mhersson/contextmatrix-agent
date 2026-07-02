@@ -98,6 +98,12 @@ func (f *fakeOps) ClaimCard(_ context.Context, cardID string) error {
 	return f.claimErr
 }
 
+func (f *fakeOps) Heartbeat(_ context.Context, cardID string) error {
+	f.record("Heartbeat:" + cardID)
+
+	return nil
+}
+
 func (f *fakeOps) GetTaskContext(_ context.Context, cardID string, _ bool) (cmclient.TaskContext, error) {
 	f.record("GetTaskContext:" + cardID)
 

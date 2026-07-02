@@ -28,6 +28,7 @@ import (
 // (which is allowed to import both packages).
 type Ops interface {
 	ClaimCard(ctx context.Context, cardID string) error
+	Heartbeat(ctx context.Context, cardID string) error
 	GetTaskContext(ctx context.Context, cardID string, includeImages bool) (cmclient.TaskContext, error)
 	CreateCard(ctx context.Context, project, parent, title, body string, dependsOn []string) (string, error)
 	SetPhase(ctx context.Context, cardID, phase string) error

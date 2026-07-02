@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
+	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-harness/harness"
 )
@@ -65,6 +67,35 @@ func (o *run) executeSubtask(ctx context.Context, sub subtaskRef) error {
 		return fmt.Errorf("claim subtask %s: %w", sub.ID, err)
 	}
 
+	if err := o.executeClaimed(ctx, sub); err != nil {
+		// The run is aborting (or parking) while we still own the subtask:
+		// release it, or it stays claimed until CM's stall sweep mislabels a
+		// deliberately-parked run as crashed 30 minutes later.
+		o.releaseSubtask(ctx, sub.ID)
+
+		return err
+	}
+
+	return nil
+}
+
+// subtaskHeartbeatInterval matches the worker's parent-card cadence (5m against
+// CM's default 30m heartbeat_timeout). A var so tests can shrink it.
+var subtaskHeartbeatInterval = 5 * time.Minute
+
+// executeClaimed is the owned span of a subtask: coder run, commit, push,
+// complete. A heartbeat goroutine covers the whole span — CM's stall sweep
+// reclaims ANY claimed card whose last_heartbeat exceeds the timeout, the
+// parent-card heartbeat does not cover subtask claims, and a coder run is
+// wall-clock unbounded. The deferred stop cancels the goroutine AND waits for
+// it to actually exit on every exit path (complete, error, park), so it can
+// never outlive the claim — or this function's return.
+func (o *run) executeClaimed(ctx context.Context, sub subtaskRef) error {
+	d := o.d
+
+	stopHeartbeat := startSubtaskHeartbeat(ctx, d.Ops, sub.ID)
+	defer stopHeartbeat()
+
 	prompt := fmt.Sprintf(coderPrompt, o.skillEngage(), o.grounding, sub.Title, subtaskBody(sub), o.tc.Title, o.tc.Description)
 
 	res, err := o.runCoder(ctx, sub, prompt)
@@ -97,6 +128,58 @@ func (o *run) executeSubtask(ctx context.Context, sub subtaskRef) error {
 	}
 
 	return nil
+}
+
+// startSubtaskHeartbeat ticks ops.Heartbeat for cardID on
+// subtaskHeartbeatInterval until the returned stop func is called. Unlike the
+// worker's parent-card startHeartbeat (which only cancels and does not wait),
+// stop here BLOCKS until the goroutine has actually exited: executeClaimed
+// must never return while the goroutine could still be running, or a package
+// var read (subtaskHeartbeatInterval) could outlive the caller's stack frame.
+func startSubtaskHeartbeat(ctx context.Context, ops Ops, cardID string) func() {
+	hbCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		heartbeatLoop(hbCtx, ops, cardID)
+	}()
+
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
+// heartbeatLoop ticks ops.Heartbeat for cardID on subtaskHeartbeatInterval
+// until ctx is canceled. Mirrors the worker's parent-card heartbeat: failures
+// are logged, never fatal — a transient MCP hiccup must not abort a healthy run.
+func heartbeatLoop(ctx context.Context, ops Ops, cardID string) {
+	ticker := time.NewTicker(subtaskHeartbeatInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := ops.Heartbeat(ctx, cardID); err != nil {
+				slog.Warn("subtask heartbeat failed", "card_id", cardID, "error", err)
+			}
+		}
+	}
+}
+
+// releaseSubtask best-effort releases a claimed subtask on an error exit.
+// WithoutCancel: the release must still go out when the run context is the
+// thing that died (end_session/kill). An already-unclaimed card
+// (ErrCardNotClaimed) is a benign no-op, mirroring the worker's releaseQuietly.
+func (o *run) releaseSubtask(ctx context.Context, cardID string) {
+	if err := o.d.Ops.ReleaseCard(context.WithoutCancel(ctx), cardID); err != nil &&
+		!errors.Is(err, cmclient.ErrCardNotClaimed) {
+		slog.Warn("release subtask failed", "card_id", cardID, "error", err)
+	}
 }
 
 // runCoder runs the subtask's coder harness with in-run recovery from a

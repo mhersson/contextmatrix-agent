@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
@@ -14,6 +15,26 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// slowLLM delegates to inner after a fixed delay, so heartbeat ticks can fire
+// during a "long" coder run. Both LLM methods are overridden because the
+// harness streams.
+type slowLLM struct {
+	inner *planLLM
+	delay time.Duration
+}
+
+func (s *slowLLM) Send(ctx context.Context, req llm.Request) (llm.Response, error) {
+	time.Sleep(s.delay)
+
+	return s.inner.Send(ctx, req)
+}
+
+func (s *slowLLM) SendStream(ctx context.Context, req llm.Request, onDelta func(llm.Delta)) (llm.Response, error) {
+	time.Sleep(s.delay)
+
+	return s.inner.SendStream(ctx, req, onDelta)
+}
 
 // execTestDeps builds Deps wired for the execute phase: scripted ops + git, a
 // single stop-response coder LLM, full write tools, and the plan test registry.
@@ -134,6 +155,118 @@ func TestExecuteSubtaskFlow(t *testing.T) {
 	// The selected coder model is logged to the card activity feed for the user.
 	assert.True(t, ops.loggedContains("coder model"),
 		"executeSubtask must log the selected coder model")
+}
+
+// TestExecuteSubtaskHeartbeatsClaim pins that a claimed subtask is heartbeated
+// for the whole coder span (CM's stall sweep reclaims any claimed card whose
+// last_heartbeat exceeds 30m; the parent heartbeat does not cover subtasks),
+// and that the heartbeat goroutine stops when the subtask completes.
+func TestExecuteSubtaskHeartbeatsClaim(t *testing.T) {
+	// Mutates package-level subtaskHeartbeatInterval; cannot run in parallel.
+	prev := subtaskHeartbeatInterval
+	subtaskHeartbeatInterval = 10 * time.Millisecond
+
+	defer func() { subtaskHeartbeatInterval = prev }()
+
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	client := &slowLLM{
+		inner: &planLLM{responses: []llm.Response{stopResp("done\nCOMMIT: feat: x", 0.01)}},
+		delay: 80 * time.Millisecond,
+	}
+	d := execTestDeps(ops, git, client)
+
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
+	require.NoError(t, runExecute(context.Background(), o))
+
+	beats := countCalls(ops.recorded(), "Heartbeat:SUB-1")
+	assert.GreaterOrEqual(t, beats, 2, "expected >=2 subtask heartbeats during a slow coder run; calls=%v", ops.recorded())
+
+	// The goroutine must stop with the claim: no further ticks after return.
+	time.Sleep(60 * time.Millisecond)
+	assert.Equal(t, beats, countCalls(ops.recorded(), "Heartbeat:SUB-1"),
+		"heartbeats must stop once the subtask completes (goroutine leak)")
+}
+
+// blockingHeartbeatOps wraps fakeOps and makes Heartbeat block until ctx is
+// canceled, then return ctx.Err() — mirroring a well-behaved Ops transport.
+// entered is closed the instant Heartbeat is invoked, so a test can wait for a
+// tick to be genuinely in flight (inside the blocking call) before exercising
+// the stop func.
+type blockingHeartbeatOps struct {
+	*fakeOps
+
+	entered chan struct{}
+}
+
+func (b *blockingHeartbeatOps) Heartbeat(ctx context.Context, cardID string) error {
+	b.fakeOps.record("Heartbeat:" + cardID)
+	close(b.entered)
+
+	<-ctx.Done()
+
+	return ctx.Err()
+}
+
+// TestSubtaskHeartbeatStopUnblocksBlockedHeartbeat pins that
+// startSubtaskHeartbeat's stop func returns promptly even while a heartbeat
+// tick is blocked mid-call — but only because the Ops implementation honors
+// context cancellation. The blocking stop func in executeClaimed's defer
+// depends entirely on that contract: if a future Ops implementation or
+// transport ignored ctx, stop would hang forever and every subtask completion
+// would deadlock. This test proves the contract is exercised, not assumed.
+func TestSubtaskHeartbeatStopUnblocksBlockedHeartbeat(t *testing.T) {
+	// Mutates package-level subtaskHeartbeatInterval; cannot run in parallel.
+	prev := subtaskHeartbeatInterval
+	subtaskHeartbeatInterval = 10 * time.Millisecond
+
+	defer func() { subtaskHeartbeatInterval = prev }()
+
+	ops := &blockingHeartbeatOps{fakeOps: &fakeOps{}, entered: make(chan struct{})}
+
+	stop := startSubtaskHeartbeat(context.Background(), ops, "SUB-1")
+
+	select {
+	case <-ops.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("heartbeat tick never fired")
+	}
+
+	stopped := make(chan struct{})
+
+	go func() {
+		stop()
+		close(stopped)
+	}()
+
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stop() did not return within 2s: heartbeat goroutine leaked past cancellation")
+	}
+}
+
+// TestExecuteSubtaskErrorReleasesClaim pins that an error exit after a
+// successful claim releases the subtask, so an aborted run does not leave the
+// in-flight subtask claimed until CM's 30-minute stall sweep.
+func TestExecuteSubtaskErrorReleasesClaim(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{commitErr: assertErr("disk full")}
+	llmFake := &planLLM{responses: []llm.Response{stopResp("done\nCOMMIT: feat: x", 0.01)}}
+	d := execTestDeps(ops, git, llmFake)
+
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
+	err := runExecute(context.Background(), o)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "commit subtask SUB-1")
+
+	calls := ops.recorded()
+	claim := indexOfCall(calls, "ClaimCard:SUB-1")
+	release := indexOfCall(calls, "ReleaseCard:SUB-1")
+	require.GreaterOrEqual(t, claim, 0, "claim recorded; calls=%v", calls)
+	require.GreaterOrEqual(t, release, 0, "error exit must release the subtask; calls=%v", calls)
+	assert.Less(t, claim, release, "release after claim")
+	assert.Equal(t, -1, indexOfCall(calls, "CompleteTask:SUB-1"), "failed subtask must not complete")
 }
 
 func TestExecuteCoderPromptBody(t *testing.T) {
