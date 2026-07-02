@@ -375,12 +375,20 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 		}
 	}
 
+	// Children inherit the parent phase-run routing (harness v0.7.x
+	// SubagentOpts.Provider/Reasoning): both fields derive from the same
+	// builder every parent model call uses, so parent and children can never
+	// drift. Only Provider/Reasoning are read from parentCfg.
+	parentCfg := o.harnessConfig(cfg.DefaultModel)
+
 	results, err := harness.SpawnSubagents(ctx, d.Client, cfg.Workspace, d.Emit, specs,
 		harness.SubagentOpts{
 			DefaultModel:       cfg.DefaultModel,
 			ToolOutputMaxBytes: cfg.ToolOutputMax,
 			RedactToolOutput:   d.Redact,
 			ExtraReadOnlyTools: skillToolSlice(d.SkillTool),
+			Provider:           parentCfg.Provider,
+			Reasoning:          parentCfg.Reasoning,
 		})
 	if err != nil {
 		return "", fmt.Errorf("spawn review specialists: %w", err)

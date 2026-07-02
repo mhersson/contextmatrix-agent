@@ -22,6 +22,21 @@ func (e *ContextLimitError) Error() string {
 	return fmt.Sprintf("context limit reached for model %q (window %d tokens)", e.Model, e.ContextWindow)
 }
 
+// MaxTurnsError marks a phase stopping because the harness exhausted its turn
+// cap (Reason "max_turns", Completed=false, err==nil). It is normalized to a
+// typed error at the runModelCfg choke point so NO phase treats truncated work
+// as success — the invariant is that partial work is never committed+pushed+
+// marked done. The worker maps it like the context-limit park: push WIP,
+// release, fail — so the partial work survives for resume.
+type MaxTurnsError struct {
+	Model string
+	Turns int
+}
+
+func (e *MaxTurnsError) Error() string {
+	return fmt.Sprintf("turn cap reached on model %q after %d turns", e.Model, e.Turns)
+}
+
 // IncapableError marks a phase stopping because the model cannot drive the tool
 // loop — it emitted tool calls every turn but none parsed valid arguments. The
 // recovery path (a later task) catches this to blacklist the model and re-select.
@@ -49,6 +64,7 @@ func (o *run) harnessConfig(model string) harness.Config {
 		ToolOutputMaxBytes: o.d.Cfg.ToolOutputMax,
 		RedactToolOutput:   o.d.Redact,
 		ContextWindow:      o.d.Registry.ContextWindow(model),
+		Provider:           o.d.Cfg.Provider,
 	}
 
 	// Opt into in-window compaction only when enabled; otherwise leave
@@ -103,6 +119,10 @@ func (o *run) runModelCfg(ctx context.Context, reg *tools.Registry, prompt, mode
 
 	if err == nil && res.Reason == harness.ReasonIncapable {
 		return res, &IncapableError{Model: model, Reason: "cannot drive the tool loop"}
+	}
+
+	if err == nil && res.Reason == "max_turns" {
+		return res, &MaxTurnsError{Model: model, Turns: res.Turns}
 	}
 
 	return res, err

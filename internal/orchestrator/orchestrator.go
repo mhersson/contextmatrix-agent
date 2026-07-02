@@ -12,6 +12,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -28,6 +29,7 @@ import (
 // (which is allowed to import both packages).
 type Ops interface {
 	ClaimCard(ctx context.Context, cardID string) error
+	Heartbeat(ctx context.Context, cardID string) error
 	GetTaskContext(ctx context.Context, cardID string, includeImages bool) (cmclient.TaskContext, error)
 	CreateCard(ctx context.Context, project, parent, title, body string, dependsOn []string) (string, error)
 	SetPhase(ctx context.Context, cardID, phase string) error
@@ -102,6 +104,13 @@ type Config struct {
 	// model runs. Disabled (the zero value) preserves the hard context_limit
 	// stop, which is the agent's default behavior.
 	Compaction Compaction
+
+	// Provider is the raw OpenRouter provider-routing object (e.g.
+	// require_parameters/order/sort) applied to every phase model run via
+	// harnessConfig and inherited by review subagents. nil = default routing.
+	// No serve/work env knob populates it yet; it is the orchestrator-level
+	// seam mirroring the standalone run command's provider config.
+	Provider json.RawMessage
 }
 
 // Compaction configures in-window context compaction for the FSM's phase model
@@ -361,6 +370,13 @@ func (o *run) execute(ctx context.Context) error {
 				_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, contextLimitLogMessage(cle)) //nolint:errcheck
 			}
 
+			var mte *MaxTurnsError
+			if errors.As(err, &mte) {
+				// Turn-cap park: same shape as the budget/context arms — log
+				// best-effort, then stop without entering the next phase.
+				_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, maxTurnsLogMessage(mte)) //nolint:errcheck
+			}
+
 			return err
 		}
 	}
@@ -376,6 +392,11 @@ func budgetLogMessage(be *BudgetExceededError) string {
 // contextLimitLogMessage is the canonical card-log line for a context-window park.
 func contextLimitLogMessage(cle *ContextLimitError) string {
 	return fmt.Sprintf("context window reached on model %q (%d tokens) — parking work; split the subtask or pin a larger-window model", cle.Model, cle.ContextWindow)
+}
+
+// maxTurnsLogMessage is the canonical card-log line for a turn-cap park.
+func maxTurnsLogMessage(mte *MaxTurnsError) string {
+	return fmt.Sprintf("turn cap reached on model %q after %d turns — parking work; raise CMX_MAX_TURNS or split the subtask", mte.Model, mte.Turns)
 }
 
 // reselectCap bounds in-run model re-selections per card. A model that emits

@@ -617,6 +617,34 @@ func TestContextLimitMapsToFailed(t *testing.T) {
 	}
 }
 
+// TestMaxTurnsMapsToFailed: a MaxTurnsError (wrapped, as the coder path wraps
+// it) pushes WIP, releases the claim, and surfaces a non-nil error — the
+// context-limit park shape — so truncated work survives for resume but is
+// never completed.
+func TestMaxTurnsMapsToFailed(t *testing.T) {
+	remote := setupBareRemote(t)
+	wsParent := t.TempDir()
+	ops := newFakeOps()
+
+	swapRunOrchestrator(t, func(_ context.Context, d orchestrator.Deps) error {
+		// Dirty the tree so the WIP commit/push path has something to push.
+		require.NoError(t, os.WriteFile(filepath.Join(d.Cfg.Workspace, "wip.txt"), []byte("partial\n"), 0o644))
+
+		return fmt.Errorf("coder run for SUB-1: %w", &orchestrator.MaxTurnsError{Model: "m", Turns: 30})
+	})
+
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	res, err := Run(context.Background(), baseSpec(t, remote, wsParent), ops, &scriptedLLM{}, emit, openStdin(t))
+	require.Error(t, err)
+	assert.Equal(t, "error", res.Reason)
+
+	assert.True(t, remoteHasBranch(t, remote, "cm/cmx-001"), "turn-cap park pushes WIP")
+	assert.GreaterOrEqual(t, ops.count("ReportPush"), 1, "WIP push reported")
+	assert.Equal(t, 1, ops.count("ReleaseCard"), "claim released on turn-cap park")
+	assert.Equal(t, 0, ops.count("CompleteTask"))
+}
+
 // TestEndSessionMidFSM: an end_session frame cancels the run context while the
 // FSM is in a phase; the orchestrator returns ctx.Err() and the worker takes
 // the graceful path (push WIP, report usage, release, exit 0).

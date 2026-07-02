@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -96,6 +97,12 @@ func (f *fakeOps) ClaimCard(_ context.Context, cardID string) error {
 	f.record("ClaimCard:" + cardID)
 
 	return f.claimErr
+}
+
+func (f *fakeOps) Heartbeat(_ context.Context, cardID string) error {
+	f.record("Heartbeat:" + cardID)
+
+	return nil
 }
 
 func (f *fakeOps) GetTaskContext(_ context.Context, cardID string, _ bool) (cmclient.TaskContext, error) {
@@ -453,6 +460,12 @@ type planLLM struct {
 	tasks     []string
 	models    []string
 	i         int
+
+	// providers/reasonings capture each request's raw routing objects
+	// (index-aligned with models) so propagation tests can assert children
+	// inherit the parent routing.
+	providers  []json.RawMessage
+	reasonings []json.RawMessage
 }
 
 func (p *planLLM) Send(_ context.Context, req llm.Request) (llm.Response, error) {
@@ -468,6 +481,8 @@ func (p *planLLM) next(req llm.Request) llm.Response {
 	defer p.mu.Unlock()
 
 	p.models = append(p.models, req.Model)
+	p.providers = append(p.providers, req.Provider)
+	p.reasonings = append(p.reasonings, req.Reasoning)
 
 	// Capture the last user message — the phase task prompt.
 	for j := len(req.Messages) - 1; j >= 0; j-- {

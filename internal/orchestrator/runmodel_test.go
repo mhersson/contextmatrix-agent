@@ -195,6 +195,40 @@ func TestRunModelNormalizesIncapable(t *testing.T) {
 	assert.Equal(t, "incapable", res.Reason)
 }
 
+// TestRunModelNormalizesMaxTurns pins that a run stopping at the turn cap
+// (Reason "max_turns", Completed=false, err==nil from the harness) surfaces as
+// a *MaxTurnsError, so no phase can treat truncated work as success.
+func TestRunModelNormalizesMaxTurns(t *testing.T) {
+	ops := &fakeOps{taskContext: cmclient.TaskContext{CardID: "CARD-1"}}
+
+	// One valid-JSON tool call keeps the loop alive without tripping the
+	// incapable detector (threshold 3); MaxTurns=1 stops after turn one.
+	call := llm.ToolCall{
+		ID:       "c1",
+		Type:     "function",
+		Function: llm.FunctionCall{Name: "read", Arguments: `{"path":"no-such-file.txt"}`},
+	}
+	llmFake := &planLLM{responses: []llm.Response{{ToolCalls: []llm.ToolCall{call}, Usage: llm.Usage{Cost: 0.01}}}}
+	d := planTestDeps(ops, llmFake)
+	d.Cfg.MaxTurns = 1
+
+	o := newRun(d, ops.taskContext)
+
+	res, err := o.runModel(context.Background(), d.ReadTools, "do the thing", "default/model")
+
+	require.Error(t, err, "max_turns must surface as an error")
+
+	var mte *MaxTurnsError
+	require.ErrorAs(t, err, &mte)
+	assert.Equal(t, "default/model", mte.Model)
+	assert.Equal(t, 1, mte.Turns)
+
+	// The result comes back alongside the error so the caller's Spend/ReportUsage
+	// pattern still works.
+	assert.Equal(t, "max_turns", res.Reason)
+	assert.InDelta(t, 0.01, res.TotalCostUSD, 1e-9)
+}
+
 // TestReasoningRaw pins the reasoningRaw helper: empty effort returns nil so
 // cfg.Reasoning is omitted; a non-empty effort marshals to the OpenRouter
 // reasoning object. Non-standard tiers (e.g. "xhigh") pass through verbatim.
