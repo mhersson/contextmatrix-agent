@@ -256,7 +256,13 @@ func TestReportStatus_TerminalBackgroundRetry(t *testing.T) {
 
 		err := c.ReportStatus(context.Background(), "CMX-001", "proj", "completed", "")
 		require.Error(t, err, "the three fast attempts still fail")
-		assert.EqualValues(t, 3, hits.Load())
+
+		// Deliberately NO hits==3 assertion here: with backgroundDelay=0 the
+		// background goroutine (spawned before ReportStatus returns) can land
+		// attempt #4 at any moment — there is no synchronization point where
+		// exactly-3 holds. The fast-attempt count is pinned by
+		// TestReportStatus_CountsRetries; the <-attempted + hits==4 pair below
+		// proves the background attempt reached the server.
 
 		select {
 		case <-attempted:
