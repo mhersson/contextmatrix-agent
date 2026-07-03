@@ -11,7 +11,7 @@ require (
 	github.com/knadh/koanf/providers/structs v1.0.0
 	github.com/knadh/koanf/v2 v2.3.5
 	github.com/mhersson/contextmatrix-githubauth v0.1.0
-	github.com/mhersson/contextmatrix-protocol v0.4.0
+	github.com/mhersson/contextmatrix-protocol v0.5.0
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/prometheus/client_golang v1.23.2

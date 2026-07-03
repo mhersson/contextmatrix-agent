@@ -187,6 +187,11 @@ type Server struct {
 	// otherwise block the full timeout). Guarded by sseShutdownOnce for idempotency.
 	sseShutdown     chan struct{}
 	sseShutdownOnce sync.Once
+
+	// credentialFallbackWarnOnce guards the compat-window deprecation warning
+	// (see warnCredentialFallbackOnce) so it logs once per process, not once per
+	// trigger.
+	credentialFallbackWarnOnce sync.Once
 }
 
 // NewServer wires a Server from its dependencies. The replay cache, dedup
@@ -394,6 +399,33 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 		"CM_MCP_API_KEY=" + mcpKey,
 	}
 
+	// Compat window: CM-provisioned credentials in the trigger payload override
+	// the shared-secrets values for this run when present. A payload from a
+	// pre-multi-user CM carries neither field — the worker keeps reading the
+	// shared secrets file staged from local github/llm_endpoint config, and this
+	// process logs the deprecation warning once (not per trigger).
+	if p.GitToken != "" {
+		env = append(env, "CM_GIT_TOKEN="+p.GitToken)
+	}
+
+	if p.LLMEndpoint != nil {
+		if p.LLMEndpoint.APIKey != "" {
+			env = append(env, "LLM_API_KEY="+p.LLMEndpoint.APIKey)
+		}
+
+		if p.LLMEndpoint.BaseURL != "" {
+			env = append(env, "LLM_BASE_URL="+p.LLMEndpoint.BaseURL)
+		}
+
+		if p.LLMEndpoint.Type != "" {
+			env = append(env, "LLM_TYPE="+p.LLMEndpoint.Type)
+		}
+	}
+
+	if p.GitToken == "" || p.LLMEndpoint == nil {
+		s.warnCredentialFallbackOnce()
+	}
+
 	if s.launchEnv.BashTimeoutMaxSeconds > 0 {
 		env = append(env, "CMX_BASH_TIMEOUT_MAX_SECONDS="+strconv.Itoa(s.launchEnv.BashTimeoutMaxSeconds))
 	}
@@ -459,6 +491,17 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 		CorrelationID:  correlationID,
 		MCPURL:         s.launchEnv.MCPURL,
 	}
+}
+
+// warnCredentialFallbackOnce logs the compat-window deprecation warning the
+// first time a trigger payload omits a CM-provisioned credential. Guarded by
+// credentialFallbackWarnOnce so a long-lived serve process logs it once,
+// regardless of how many triggers fall back to local config.
+func (s *Server) warnCredentialFallbackOnce() {
+	s.credentialFallbackWarnOnce.Do(func() {
+		s.logger.Warn("CM did not provision credentials; using local github/llm_endpoint config " +
+			"— this fallback is deprecated")
+	})
 }
 
 // ---- kill -------------------------------------------------------------------

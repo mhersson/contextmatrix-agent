@@ -1,9 +1,11 @@
 package webhook
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -1038,4 +1040,156 @@ func TestBuildLaunchSpec_CompactionEnvOmittedWhenDisabled(t *testing.T) {
 	for _, e := range spec.Env {
 		assert.NotContains(t, e, "CMX_COMPACTION_", "disabled compaction must emit no CMX_COMPACTION_* env")
 	}
+}
+
+// ---- CM-provisioned credentials (compat window) -----------------------------
+
+// TestBuildLaunchSpec_CredentialsEmittedWhenPresent pins the compat-window
+// override: a payload carrying CM-provisioned credentials must fold them into
+// the per-launch env, taking priority over the shared-secrets file for this run.
+func TestBuildLaunchSpec_CredentialsEmittedWhenPresent(t *testing.T) {
+	s := NewServer(Config{
+		APIKey:    "k",
+		Executor:  &fakeExecutor{},
+		Tracker:   executor.NewTracker(1),
+		LaunchEnv: LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"},
+	})
+
+	spec := s.buildLaunchSpec(protocol.TriggerPayload{
+		CardID:   "C1",
+		Project:  "p",
+		GitToken: "cm-git-token",
+		LLMEndpoint: &protocol.LLMEndpoint{
+			Type:    "openai",
+			BaseURL: "https://llm.example/v1",
+			APIKey:  "cm-llm-key",
+		},
+	}, "corr", "")
+
+	assert.Contains(t, spec.Env, "CM_GIT_TOKEN=cm-git-token")
+	assert.Contains(t, spec.Env, "LLM_API_KEY=cm-llm-key")
+	assert.Contains(t, spec.Env, "LLM_BASE_URL=https://llm.example/v1")
+	assert.Contains(t, spec.Env, "LLM_TYPE=openai")
+}
+
+// TestBuildLaunchSpec_CredentialsOmittedWhenAbsent mirrors the budget-env
+// omission tests: a payload without CM-provisioned credentials leaves the
+// current behavior unchanged — no CM_GIT_TOKEN/LLM_* vars in the per-launch
+// env, so the worker falls back to the shared secrets file staged from local
+// github/llm_endpoint config.
+func TestBuildLaunchSpec_CredentialsOmittedWhenAbsent(t *testing.T) {
+	s := NewServer(Config{
+		APIKey:    "k",
+		Executor:  &fakeExecutor{},
+		Tracker:   executor.NewTracker(1),
+		LaunchEnv: LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"},
+	})
+
+	spec := s.buildLaunchSpec(protocol.TriggerPayload{CardID: "C1", Project: "p"}, "corr", "")
+
+	for _, e := range spec.Env {
+		assert.NotContains(t, e, "CM_GIT_TOKEN", "absent git token must not be emitted")
+		assert.NotContains(t, e, "LLM_API_KEY", "absent llm endpoint must not be emitted")
+		assert.NotContains(t, e, "LLM_BASE_URL", "absent llm endpoint must not be emitted")
+		assert.NotContains(t, e, "LLM_TYPE", "absent llm endpoint must not be emitted")
+	}
+}
+
+// TestBuildLaunchSpec_CredentialFallbackWarnsOncePerProcess pins the
+// once-per-process (not per-run) deprecation warning: two triggers that both
+// lack CM-provisioned credentials must log the fallback warning exactly once.
+func TestBuildLaunchSpec_CredentialFallbackWarnsOncePerProcess(t *testing.T) {
+	var buf bytes.Buffer
+
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+	s := NewServer(Config{
+		APIKey:    "k",
+		Executor:  &fakeExecutor{},
+		Tracker:   executor.NewTracker(1),
+		LaunchEnv: LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"},
+		Logger:    logger,
+	})
+
+	s.buildLaunchSpec(protocol.TriggerPayload{CardID: "C1", Project: "p"}, "corr", "")
+	s.buildLaunchSpec(protocol.TriggerPayload{CardID: "C2", Project: "p"}, "corr", "")
+
+	warnCount := strings.Count(buf.String(),
+		"CM did not provision credentials; using local github/llm_endpoint config — this fallback is deprecated")
+	assert.Equal(t, 1, warnCount, "deprecation warning must fire once per process, not per run")
+}
+
+// TestBuildLaunchSpec_CredentialFallbackWarnSkippedWhenBothProvisioned asserts
+// the deprecation warning stays silent once CM provisions both credentials.
+func TestBuildLaunchSpec_CredentialFallbackWarnSkippedWhenBothProvisioned(t *testing.T) {
+	var buf bytes.Buffer
+
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+	s := NewServer(Config{
+		APIKey:    "k",
+		Executor:  &fakeExecutor{},
+		Tracker:   executor.NewTracker(1),
+		LaunchEnv: LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"},
+		Logger:    logger,
+	})
+
+	s.buildLaunchSpec(protocol.TriggerPayload{
+		CardID:      "C1",
+		Project:     "p",
+		GitToken:    "cm-git-token",
+		LLMEndpoint: &protocol.LLMEndpoint{Type: "openai", APIKey: "cm-llm-key"},
+	}, "corr", "")
+
+	assert.Empty(t, buf.String(), "no fallback warning expected when both credentials are provisioned")
+}
+
+// TestBuildLaunchSpec_CredentialFallbackWarnsOnPartialAbsence documents that
+// the fallback warning fires when either credential is missing, not only when
+// both are — a real (if unlikely) intermediate CM state should still surface
+// the deprecated fallback for the half that's missing.
+func TestBuildLaunchSpec_CredentialFallbackWarnsOnPartialAbsence(t *testing.T) {
+	t.Run("git token missing", func(t *testing.T) {
+		var buf bytes.Buffer
+
+		logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+		s := NewServer(Config{
+			APIKey:    "k",
+			Executor:  &fakeExecutor{},
+			Tracker:   executor.NewTracker(1),
+			LaunchEnv: LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"},
+			Logger:    logger,
+		})
+
+		s.buildLaunchSpec(protocol.TriggerPayload{
+			CardID:      "C1",
+			Project:     "p",
+			LLMEndpoint: &protocol.LLMEndpoint{Type: "openai", APIKey: "cm-llm-key"},
+		}, "corr", "")
+
+		assert.Contains(t, buf.String(), "this fallback is deprecated")
+	})
+
+	t.Run("llm endpoint missing", func(t *testing.T) {
+		var buf bytes.Buffer
+
+		logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+		s := NewServer(Config{
+			APIKey:    "k",
+			Executor:  &fakeExecutor{},
+			Tracker:   executor.NewTracker(1),
+			LaunchEnv: LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"},
+			Logger:    logger,
+		})
+
+		s.buildLaunchSpec(protocol.TriggerPayload{
+			CardID:   "C1",
+			Project:  "p",
+			GitToken: "cm-git-token",
+		}, "corr", "")
+
+		assert.Contains(t, buf.String(), "this fallback is deprecated")
+	})
 }
