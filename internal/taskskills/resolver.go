@@ -45,6 +45,11 @@ type Resolver struct {
 
 	mu       sync.Mutex
 	resolved string // cached host dir once a clone has succeeded
+
+	// mintWarnOnce guards the compat-window deprecation warning (see
+	// warnLocalMintOnce) so it logs once per process, not once per resolve
+	// attempt.
+	mintWarnOnce sync.Once
 }
 
 // NewResolver builds a Resolver. cmURL is ContextMatrix's base URL, apiKey the
@@ -79,10 +84,12 @@ func (r *Resolver) Resolve(ctx context.Context) (string, error) {
 		return r.resolved, nil
 	}
 
-	gitURL, ref, err := r.fetchPointer(ctx)
+	p, err := r.fetchPointer(ctx)
 	if err != nil {
 		return "", err
 	}
+
+	gitURL, ref := p.GitRemoteURL, p.Ref
 
 	if gitURL == "" {
 		return "", fmt.Errorf("task-skills source has no git_remote_url")
@@ -96,9 +103,21 @@ func (r *Resolver) Resolve(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("task-skills ref begins with '-', which git interprets as a flag: %q", ref)
 	}
 
-	token, _, err := r.gen.GenerateToken(ctx)
-	if err != nil {
-		return "", fmt.Errorf("mint skills clone token: %w", err)
+	// Compat window: a CM-provisioned clone token in the task-skills-source
+	// response overrides local minting for this clone. A CM version that
+	// predates provisioned task-skills tokens sends neither field — the
+	// resolver keeps self-minting via the local github config, and this
+	// process logs the deprecation warning once (not per resolve attempt).
+	token := p.Token
+	if token == "" {
+		r.warnLocalMintOnce()
+
+		var genErr error
+
+		token, _, genErr = r.gen.GenerateToken(ctx)
+		if genErr != nil {
+			return "", fmt.Errorf("mint skills clone token: %w", genErr)
+		}
 	}
 
 	dest := filepath.Join(r.cacheDir, "task-skills")
@@ -115,25 +134,35 @@ func (r *Resolver) Resolve(ctx context.Context) (string, error) {
 	return dest, nil
 }
 
+// pointer is the local decode target for the task-skills-source response.
+// Token/TokenExpiresAt are optional: a CM-provisioned clone token for this
+// task-skills repo, provisioned the same way TriggerPayload.GitToken is
+// (see protocol.TriggerPayload). Absent on pre-multi-user CM versions —
+// the resolver then self-mints via the local github config.
 type pointer struct {
 	GitRemoteURL string `json:"git_remote_url"`
 	Ref          string `json:"ref"`
+	// Token is a short-lived token scoped to cloning the task-skills repo.
+	Token string `json:"token,omitempty"`
+	// TokenExpiresAt is the RFC3339 expiry of Token, mirroring
+	// protocol.TriggerPayload.GitTokenExpiresAt's string convention.
+	TokenExpiresAt string `json:"token_expires_at,omitempty"`
 }
 
 // fetchPointer does a signed GET to /api/agent/task-skills-source.
-func (r *Resolver) fetchPointer(ctx context.Context) (gitURL, ref string, err error) {
+func (r *Resolver) fetchPointer(ctx context.Context) (pointer, error) {
 	const path = "/api/agent/task-skills-source"
 
 	uri, perr := requestURI(r.cmURL + path)
 	if perr != nil {
-		return "", "", perr
+		return pointer{}, perr
 	}
 
 	sig, ts := protocol.SignRequestHeaders(r.apiKey, http.MethodGet, uri, nil)
 
 	req, rerr := http.NewRequestWithContext(ctx, http.MethodGet, r.cmURL+path, nil)
 	if rerr != nil {
-		return "", "", fmt.Errorf("create task-skills-source request: %w", rerr)
+		return pointer{}, fmt.Errorf("create task-skills-source request: %w", rerr)
 	}
 
 	req.Header.Set(protocol.SignatureHeader, sig)
@@ -141,22 +170,33 @@ func (r *Resolver) fetchPointer(ctx context.Context) (gitURL, ref string, err er
 
 	resp, derr := r.http.Do(req) //nolint:gosec // cmURL is operator config
 	if derr != nil {
-		return "", "", fmt.Errorf("fetch task-skills-source: %w", derr)
+		return pointer{}, fmt.Errorf("fetch task-skills-source: %w", derr)
 	}
 
 	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode >= 400 {
-		return "", "", fmt.Errorf("task-skills-source returned %d", resp.StatusCode)
+		return pointer{}, fmt.Errorf("task-skills-source returned %d", resp.StatusCode)
 	}
 
 	var p pointer
 	if uerr := json.Unmarshal(body, &p); uerr != nil {
-		return "", "", fmt.Errorf("parse task-skills-source: %w", uerr)
+		return pointer{}, fmt.Errorf("parse task-skills-source: %w", uerr)
 	}
 
-	return p.GitRemoteURL, p.Ref, nil
+	return p, nil
+}
+
+// warnLocalMintOnce logs the compat-window deprecation warning the first time
+// CM's task-skills-source response omits a clone token. Guarded by
+// mintWarnOnce so a long-lived serve process logs it once, regardless of how
+// many resolve attempts fall back to local minting.
+func (r *Resolver) warnLocalMintOnce() {
+	r.mintWarnOnce.Do(func() {
+		r.logger.Warn("CM did not provision a task-skills clone token; " +
+			"self-minting via local github config is deprecated")
+	})
 }
 
 // gitClone shallow-fetches ref (a SHA, branch, or tag) into dest using the
