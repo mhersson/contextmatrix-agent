@@ -2,7 +2,6 @@ package worker
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/mhersson/contextmatrix-agent/internal/orchestrator"
 	"github.com/mhersson/contextmatrix-harness/tools"
@@ -24,16 +24,24 @@ import (
 var ErrRebaseConflict = orchestrator.ErrRebaseConflict
 
 // Git runs code-driven git operations for one card's workspace. Credentials
-// are injected per invocation via an http.extraheader — they never land in
-// on-disk config or the model-facing tool env.
+// reach git through a credential helper that re-reads the token from the secrets
+// file on every git auth, so a token the host rotates on disk mid-run is picked
+// up on the next operation — the token value never lands in on-disk config, the
+// injected env, or the model-facing tool env; only the path to the helper does.
 //
 // The branch-policy fields (cardBranch, baseBranch, remoteDefault) gate every
 // push through guardPush. They are a hard safety invariant: no config or env
 // can loosen them, and the zero value (cardBranch == "") is fail-closed — a Git
 // whose policy was never set refuses every push.
 type Git struct {
-	dir   string
-	token string
+	dir string
+
+	// secretsEnvPath is the KEY=value secrets file the credential helper re-reads
+	// CM_GIT_TOKEN from on every git auth. Empty disables credential injection
+	// (file:// remotes or public repos). host scopes the helper to that GitHub
+	// host so a live token is never offered to any other host git may contact.
+	secretsEnvPath string
+	host           string
 
 	// caCertFile is an optional in-container path to an extra CA PEM. When set,
 	// git subprocesses trust it via GIT_SSL_CAINFO — needed for TLS interception
@@ -41,17 +49,31 @@ type Git struct {
 	// subprocesses, so this must be injected here rather than inherited.
 	caCertFile string
 
+	// credHelper* memoize the one-time write of the credential-helper script so
+	// concurrent git operations share a single write; the token itself is still
+	// read fresh from secretsEnvPath by the script on every git auth.
+	credHelperOnce sync.Once
+	credHelperPath string
+	credHelperErr  error
+
 	cardBranch    string // the run's own branch; the only ref this Git may push
 	baseBranch    string // the card's base branch; never a force-push target
 	remoteDefault string // origin/HEAD short name; never a force-push target
 }
 
-// NewGit creates a Git for the given workspace directory and optional GitHub
-// installation token. An empty token means no credential injection (suitable
-// for file:// remotes or public repos). caCertFile is an optional in-container
-// path to an extra CA PEM; empty disables the extra trust.
-func NewGit(workspace, gitToken, caCertFile string) *Git {
-	return &Git{dir: workspace, token: gitToken, caCertFile: caCertFile}
+// NewGit creates a Git for the given workspace directory. secretsEnvPath is the
+// KEY=value secrets file (e.g. /run/cm-secrets/env) the credential helper
+// re-reads CM_GIT_TOKEN from on every git auth; an empty secretsEnvPath means no
+// credential injection (suitable for file:// remotes or public repos). host
+// scopes the credential helper to that GitHub host, defaulting to github.com; it
+// is ignored when secretsEnvPath is empty. caCertFile is an optional
+// in-container path to an extra CA PEM; empty disables the extra trust.
+func NewGit(workspace, secretsEnvPath, host, caCertFile string) *Git {
+	if secretsEnvPath != "" && host == "" {
+		host = "github.com"
+	}
+
+	return &Git{dir: workspace, secretsEnvPath: secretsEnvPath, host: host, caCertFile: caCertFile}
 }
 
 // SetBranchPolicy records the push policy for this run: cardBranch is the only
@@ -64,10 +86,13 @@ func (g *Git) SetBranchPolicy(cardBranch, baseBranch, remoteDefault string) {
 	g.remoteDefault = remoteDefault
 }
 
-// credEnv builds the env for git subprocesses: the scrubbed allowlist base
-// plus fixed identity variables, plus per-invocation credentials as an
-// http.extraheader. The token is base64-encoded and never stored on disk.
-func (g *Git) credEnv() []string {
+// credEnv builds the env for git subprocesses: the scrubbed allowlist base plus
+// fixed identity variables, an optional extra-CA path, and — when a secrets file
+// is configured — a git credential helper that re-reads CM_GIT_TOKEN from that
+// file on every git auth. The token value is never baked into git config or the
+// env; only the path to the helper (which reads the file) is, so a token the
+// host rotates on disk is picked up on the next git operation.
+func (g *Git) credEnv() ([]string, error) {
 	env := tools.ScrubbedEnv([]string{
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_AUTHOR_NAME=contextmatrix-agent",
@@ -85,23 +110,80 @@ func (g *Git) credEnv() []string {
 		env = append(env, "GIT_SSL_CAINFO="+g.caCertFile)
 	}
 
-	if g.token == "" {
-		return env
+	if g.secretsEnvPath == "" {
+		return env, nil
 	}
 
-	auth := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + g.token))
+	scriptPath, err := g.ensureCredentialHelper()
+	if err != nil {
+		return nil, err
+	}
+
+	// Scope the helper to the repo host only. An unscoped credential.helper would
+	// offer the token to ANY https host git contacts (a malicious submodule URL or
+	// redirect), leaking a live installation token off-platform. useHttpPath=false
+	// makes the host alone the credential context, so the scope matches every repo
+	// path on that host. Injected via GIT_CONFIG_* (not global git config) so it
+	// applies only to the worker's own code-driven git, never the model's tools.
+	scope := "credential.https://" + g.host
 
 	return append(env,
-		"GIT_CONFIG_COUNT=1",
-		"GIT_CONFIG_KEY_0=http.extraheader",
-		"GIT_CONFIG_VALUE_0=Authorization: Basic "+auth,
-	)
+		"GIT_CONFIG_COUNT=2",
+		"GIT_CONFIG_KEY_0="+scope+".helper",
+		"GIT_CONFIG_VALUE_0="+scriptPath,
+		"GIT_CONFIG_KEY_1="+scope+".useHttpPath",
+		"GIT_CONFIG_VALUE_1=false",
+	), nil
+}
+
+// ensureCredentialHelper writes the credential-helper script once (memoized) and
+// returns its path; concurrent git operations share the single write.
+func (g *Git) ensureCredentialHelper() (string, error) {
+	g.credHelperOnce.Do(func() {
+		g.credHelperPath, g.credHelperErr = writeGitCredentialHelper(g.secretsEnvPath)
+	})
+
+	return g.credHelperPath, g.credHelperErr
+}
+
+// writeGitCredentialHelper writes a git credential-helper script to os.TempDir()
+// that reads CM_GIT_TOKEN from secretsEnvPath on every `get` call and echoes it
+// as the password. Only the path is baked into the script; the token is read
+// fresh each call, so host-side rotation is transparent. It is written to
+// os.TempDir() (not alongside secretsEnvPath) because the secrets mount is
+// read-only in the container. Ported from the chat backend's credential helper.
+func writeGitCredentialHelper(secretsEnvPath string) (string, error) {
+	scriptPath := filepath.Join(os.TempDir(), "cm-git-credential-helper.sh")
+
+	// Path is baked in; the token is read fresh on each git auth call.
+	script := fmt.Sprintf(`#!/bin/sh
+SECRETS_ENV='%s'
+
+case "$1" in
+    get)
+        token=$(grep '^CM_GIT_TOKEN=' "$SECRETS_ENV" | cut -d= -f2-)
+        echo "username=x-access-token"
+        echo "password=$token"
+        ;;
+esac
+`, secretsEnvPath)
+
+	if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {
+		return "", fmt.Errorf("write git credential helper: %w", err)
+	}
+
+	return scriptPath, nil
 }
 
 func (g *Git) run(ctx context.Context, args ...string) (string, error) {
+	env, err := g.credEnv()
+	if err != nil {
+		return "", fmt.Errorf("git %s: %w", args[0], err)
+	}
+
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = g.dir
-	cmd.Env = g.credEnv()
+	cmd.Env = env
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -121,10 +203,15 @@ func (g *Git) Clone(ctx context.Context, url, baseBranch string) error {
 
 	args = append(args, "--", url, g.dir)
 
+	env, err := g.credEnv()
+	if err != nil {
+		return fmt.Errorf("git clone: %w", err)
+	}
+
 	// Clone targets a not-yet-existing path, so Dir must be the parent.
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = filepath.Dir(g.dir)
-	cmd.Env = g.credEnv()
+	cmd.Env = env
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -269,11 +356,16 @@ func (g *Git) stageForCommit(ctx context.Context) error {
 // `git diff --cached --quiet` directly to read the exit code: 0 = nothing
 // staged, 1 = staged changes present.
 func (g *Git) hasStagedChanges(ctx context.Context) (bool, error) {
+	env, err := g.credEnv()
+	if err != nil {
+		return false, fmt.Errorf("check staged changes: %w", err)
+	}
+
 	cmd := exec.CommandContext(ctx, "git", "diff", "--cached", "--quiet")
 	cmd.Dir = g.dir
-	cmd.Env = g.credEnv()
+	cmd.Env = env
 
-	err := cmd.Run()
+	err = cmd.Run()
 	if err == nil {
 		return false, nil
 	}
@@ -501,9 +593,16 @@ func (g *Git) LastCommitTouching(ctx context.Context, paths []string) (string, e
 //
 // GIT_SEQUENCE_EDITOR=true skips the interactive editor prompt.
 func (g *Git) RebaseAutosquash(ctx context.Context, onto string) error {
+	env, err := g.credEnv()
+	if err != nil {
+		return fmt.Errorf("rebase: %w", err)
+	}
+
+	env = append(env, "GIT_SEQUENCE_EDITOR=true")
+
 	cmd := exec.CommandContext(ctx, "git", "rebase", "-i", "--autosquash", onto)
 	cmd.Dir = g.dir
-	cmd.Env = append(g.credEnv(), "GIT_SEQUENCE_EDITOR=true")
+	cmd.Env = env
 
 	out, err := cmd.CombinedOutput()
 	if err == nil {

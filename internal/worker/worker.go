@@ -56,7 +56,12 @@ type RunSpec struct {
 	LLMKey     string // from /run/cm-secrets/env via the secrets source
 	LLMBaseURL string // from /run/cm-secrets/env via the secrets source
 	LLMType    string // from /run/cm-secrets/env via the secrets source
-	GitToken   string // from /run/cm-secrets/env via the secrets source
+	GitToken   string // from /run/cm-secrets/env via the secrets source; startup value, used for redaction and to gate credential injection
+
+	// SecretsEnvPath is the KEY=value secrets file (/run/cm-secrets/env) that git
+	// and gh re-read the current CM_GIT_TOKEN from per operation, so a token the
+	// host rotates on disk reaches a long-running worker without a restart.
+	SecretsEnvPath string
 
 	BashTimeoutMax        int     // CMX_BASH_TIMEOUT_MAX_SECONDS; default 600
 	ToolOutputMax         int     // CMX_TOOL_OUTPUT_MAX_BYTES; default 131072 (128 KB)
@@ -144,7 +149,7 @@ func Run(ctx context.Context, spec RunSpec, ops CardOps, client llm.LLM, emit *e
 	// 1-2: workspace + clone + branch.
 	ws := filepath.Join(spec.Workspace, strings.ToLower(spec.CardID))
 
-	git := NewGit(ws, spec.GitToken, spec.CACertFile)
+	git := NewGit(ws, secretsPathForAuth(spec), hostFromRepoURL(spec.RepoURL), spec.CACertFile)
 
 	resolvedBase, err := prepareWorkspace(ctx, git, spec, branchName)
 	if err != nil {
@@ -315,7 +320,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 	d := orchestrator.Deps{
 		Ops:        ops2orchestrator(a.ops),
 		Git:        a.git,
-		PR:         NewPRCreator(a.ws, a.spec.GitToken, a.spec.CACertFile, a.spec.RepoURL),
+		PR:         NewPRCreator(a.ws, secretsPathForAuth(a.spec), a.spec.CACertFile, a.spec.RepoURL),
 		Client:     a.client,
 		Emit:       a.emit,
 		Registry:   buildRegistry(a.spec),
@@ -555,6 +560,19 @@ func releaseWithError(ctx context.Context, ops CardOps, cardID string, err error
 	}
 
 	return Result{Reason: "error"}, err
+}
+
+// secretsPathForAuth returns the secrets env file path when the run started with
+// a git token — so git and gh re-read the current token per operation — or ""
+// when the run has no git auth (public or file:// remotes), which disables
+// credential injection. Auth PRESENCE is fixed at startup (GitToken); only the
+// token VALUE rotates and is read fresh from this path per operation.
+func secretsPathForAuth(spec RunSpec) string {
+	if spec.GitToken == "" {
+		return ""
+	}
+
+	return spec.SecretsEnvPath
 }
 
 // withDefaults fills unset spec fields with their documented defaults.

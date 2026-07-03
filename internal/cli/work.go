@@ -207,6 +207,7 @@ func specFromEnv() (worker.RunSpec, error) {
 		RepoURL:                   repoURL,
 		MCPURL:                    mcpURL,
 		MCPAPIKey:                 mcpAPIKey,
+		SecretsEnvPath:            cmEnvFile,
 		BaseBranch:                os.Getenv("CM_BASE_BRANCH"),
 		Model:                     os.Getenv("CM_MODEL"),
 		Interactive:               os.Getenv("CM_INTERACTIVE") == "true",
