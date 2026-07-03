@@ -199,9 +199,10 @@ func (r *Resolver) warnLocalMintOnce() {
 	})
 }
 
-// gitClone shallow-fetches ref (a SHA, branch, or tag) into dest using the
-// token as an http.extraheader (mirrors the worker's credEnv pattern). When ref
-// is empty it fetches the remote's default branch (HEAD).
+// gitClone does a one-shot shallow fetch+checkout of ref (a SHA, branch, or tag)
+// into dest, authenticating with a per-invocation token passed as an
+// http.extraheader via the subprocess env (see gitAuthEnv). When ref is empty it
+// fetches the remote's default branch (HEAD).
 func (r *Resolver) gitClone(ctx context.Context, gitURL, ref, dest, token string) error {
 	if err := os.MkdirAll(dest, 0o755); err != nil {
 		return fmt.Errorf("mkdir skills dest: %w", err)

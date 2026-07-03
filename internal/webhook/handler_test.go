@@ -167,8 +167,8 @@ type provisionCall struct {
 	endpoint                          secrets.EndpointSecrets
 }
 
-func (f *fakeCredentials) HostDir(cardID string) string {
-	return "/secrets/runs/" + cardID
+func (f *fakeCredentials) HostDir(project, cardID string) string {
+	return "/secrets/runs/" + project + "/" + cardID
 }
 
 func (f *fakeCredentials) Provision(project, cardID, token, expiresAt string, endpoint secrets.EndpointSecrets) error {
@@ -1116,37 +1116,106 @@ func TestBuildLaunchSpec_CompactionEnvOmittedWhenDisabled(t *testing.T) {
 
 // ---- CM-provisioned credentials (compat window) -----------------------------
 
-// TestBuildLaunchSpec_CredentialsNeverInPlainEnv pins the A1 reconciliation:
-// CM-provisioned credentials must NOT appear in the container's plain env. They
-// travel via the per-run secrets file (mounted at /run/cm-secrets), which is the
-// only place the worker reads them and the thing the refresh loop rewrites —
-// plain env would go stale.
-func TestBuildLaunchSpec_CredentialsNeverInPlainEnv(t *testing.T) {
+// TestBuildLaunchSpec_CredentialDeliveryMatrix pins the precise plain-env
+// matrix across the credential delivery channels. The git token NEVER appears
+// in plain env in any case (the credential helper reads it from the mounted
+// file per operation). LLM values appear in plain env ONLY for the llm-only
+// payload (no git token): there they ride per-launch env (the worker reads them
+// env-first-then-file); in every other case they ride the mounted file, so they
+// stay out of plain env and cannot go stale.
+func TestBuildLaunchSpec_CredentialDeliveryMatrix(t *testing.T) {
+	llm := &protocol.LLMEndpoint{Type: "openai", BaseURL: "https://llm.example/v1", APIKey: "cm-llm-key"}
+
+	tests := []struct {
+		name       string
+		payload    protocol.TriggerPayload
+		wantLLMEnv bool // LLM_* expected in plain env
+	}{
+		{
+			name:       "git token and llm endpoint: both ride the per-run file",
+			payload:    protocol.TriggerPayload{CardID: "C1", Project: "p", GitToken: "cm-git-token", LLMEndpoint: llm},
+			wantLLMEnv: false,
+		},
+		{
+			name:       "git token only: llm rides the per-run file (local default)",
+			payload:    protocol.TriggerPayload{CardID: "C1", Project: "p", GitToken: "cm-git-token"},
+			wantLLMEnv: false,
+		},
+		{
+			name:       "llm endpoint only: llm rides per-launch env",
+			payload:    protocol.TriggerPayload{CardID: "C1", Project: "p", LLMEndpoint: llm},
+			wantLLMEnv: true,
+		},
+		{
+			name:       "neither: nothing in plain env",
+			payload:    protocol.TriggerPayload{CardID: "C1", Project: "p"},
+			wantLLMEnv: false,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewServer(Config{
+				APIKey:      "k",
+				Executor:    &fakeExecutor{},
+				Tracker:     executor.NewTracker(1),
+				Credentials: &fakeCredentials{},
+				LaunchEnv:   LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"},
+				Logger:      quietLogger(),
+			})
+
+			spec := s.buildLaunchSpec(tc.payload, "corr", "")
+
+			for _, e := range spec.Env {
+				assert.NotContains(t, e, "CM_GIT_TOKEN", "git token must never leak into plain env")
+			}
+
+			if tc.wantLLMEnv {
+				assert.Contains(t, spec.Env, "LLM_API_KEY=cm-llm-key")
+				assert.Contains(t, spec.Env, "LLM_BASE_URL=https://llm.example/v1")
+				assert.Contains(t, spec.Env, "LLM_TYPE=openai")
+			} else {
+				for _, e := range spec.Env {
+					assert.NotContains(t, e, "LLM_API_KEY", "llm key must not leak into plain env")
+					assert.NotContains(t, e, "LLM_BASE_URL", "llm base url must not leak into plain env")
+					assert.NotContains(t, e, "LLM_TYPE", "llm type must not leak into plain env")
+				}
+			}
+		})
+	}
+}
+
+// TestBuildLaunchSpec_LLMOnlyPayloadDeliversEnvAndKeepsSharedMount pins the
+// llm-only delivery: a payload with an llm_endpoint but no git token keeps the
+// shared secrets mount (it still needs the rotating shared git token) and
+// delivers all three LLM values as per-launch env — including an empty BaseURL,
+// which means "the type's canonical default".
+func TestBuildLaunchSpec_LLMOnlyPayloadDeliversEnvAndKeepsSharedMount(t *testing.T) {
 	s := NewServer(Config{
 		APIKey:      "k",
 		Executor:    &fakeExecutor{},
 		Tracker:     executor.NewTracker(1),
 		Credentials: &fakeCredentials{},
-		LaunchEnv:   LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"},
+		LaunchEnv:   LaunchEnv{BaseImage: "img", MCPURL: "http://mcp", SecretsHostDir: "/secrets/shared"},
 		Logger:      quietLogger(),
 	})
 
 	spec := s.buildLaunchSpec(protocol.TriggerPayload{
-		CardID:   "C1",
-		Project:  "p",
-		GitToken: "cm-git-token",
-		LLMEndpoint: &protocol.LLMEndpoint{
-			Type:    "openai",
-			BaseURL: "https://llm.example/v1",
-			APIKey:  "cm-llm-key",
-		},
+		CardID:      "C1",
+		Project:     "p",
+		LLMEndpoint: &protocol.LLMEndpoint{Type: "openai", APIKey: "cm-llm-key"}, // empty BaseURL on purpose
 	}, "corr", "")
 
+	assert.Equal(t, "/secrets/shared", spec.SecretsHostDir,
+		"an llm-only payload keeps the shared mount for the rotating git token")
+	assert.Contains(t, spec.Env, "LLM_API_KEY=cm-llm-key")
+	assert.Contains(t, spec.Env, "LLM_BASE_URL=", "empty BaseURL is delivered as set-but-empty")
+	assert.Contains(t, spec.Env, "LLM_TYPE=openai")
+
 	for _, e := range spec.Env {
-		assert.NotContains(t, e, "CM_GIT_TOKEN", "git token must not leak into plain env")
-		assert.NotContains(t, e, "LLM_API_KEY", "llm key must not leak into plain env")
-		assert.NotContains(t, e, "LLM_BASE_URL", "llm base url must not leak into plain env")
-		assert.NotContains(t, e, "LLM_TYPE", "llm type must not leak into plain env")
+		assert.NotContains(t, e, "CM_GIT_TOKEN", "git token must never leak into plain env")
 	}
 }
 
@@ -1170,7 +1239,7 @@ func TestBuildLaunchSpec_PerRunMountWhenTokenPresent(t *testing.T) {
 		Project:  "p",
 		GitToken: "cm-git-token",
 	}, "corr", "")
-	assert.Equal(t, creds.HostDir("C1"), withToken.SecretsHostDir,
+	assert.Equal(t, creds.HostDir("p", "C1"), withToken.SecretsHostDir,
 		"a payload token mounts the per-run dir")
 
 	withoutToken := s.buildLaunchSpec(protocol.TriggerPayload{CardID: "C2", Project: "p"}, "corr", "")
@@ -1355,10 +1424,11 @@ func TestLaunch_NoProvisionWhenNoToken(t *testing.T) {
 // TestLaunch_DuplicateTriggerDoesNotClobberWinnerCredentials pins the
 // duplicate-trigger race: /trigger has no request dedup and the capacity
 // pre-check does not serialize same-card admission, so two launches for one
-// card can both reach launch. The loser must fail closed at the executor
-// WITHOUT touching the winner's per-run credentials — before this fix the loser
-// re-provisioned over the winner (stopping its refresh loop) and its
-// launch-failure branch tore down the winner's still-mounted run dir.
+// card can both reach admission. The loser must be rejected up front (the card
+// is already tracked) WITHOUT provisioning, launching, or touching the winner's
+// per-run credentials — before this fix the loser skipped provisioning but
+// still reached the executor, and a tracker.Remove landing in that window could
+// admit it against an unprovisioned run dir the winner's Teardown then deleted.
 func TestLaunch_DuplicateTriggerDoesNotClobberWinnerCredentials(t *testing.T) {
 	// Capacity 2 so the duplicate key, not raw capacity, rejects the loser: the
 	// executor's AddIfUnderLimit enforces one container per card.
@@ -1385,13 +1455,13 @@ func TestLaunch_DuplicateTriggerDoesNotClobberWinnerCredentials(t *testing.T) {
 	spec := s.buildLaunchSpec(payload, "corr", "")
 
 	s.launch(spec, payload) // winner: provisions and launches
-	s.launch(spec, payload) // duplicate: must fail closed without re-provisioning or tearing down
+	s.launch(spec, payload) // duplicate: must be rejected up front, before provisioning
 
 	assert.Len(t, creds.provisionCalls(), 1,
 		"the duplicate must not re-provision over the winner")
 	assert.Empty(t, creds.teardownCalls(),
-		"the duplicate's launch failure must not tear down the winner's credentials")
-	assert.Equal(t, [][3]string{{"C1", "running", ""}, {"C1", "failed", "launch failed"}},
+		"the rejected duplicate must not tear down the winner's credentials")
+	assert.Equal(t, [][3]string{{"C1", "running", ""}, {"C1", "failed", "card already running"}},
 		reporter.statuses())
 }
 

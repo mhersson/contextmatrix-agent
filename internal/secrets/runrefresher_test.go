@@ -114,7 +114,7 @@ func newTestManager(t *testing.T, cmURL, apiKey string) *RunCredentials {
 }
 
 // TestRunCredentialsInitialWrite verifies Provision writes the per-run env file
-// with the payload token and LLM values at HostDir(cardID)/env.
+// with the payload token and LLM values at HostDir(project, cardID)/env.
 func TestRunCredentialsInitialWrite(t *testing.T) {
 	t.Parallel()
 
@@ -129,7 +129,7 @@ func TestRunCredentialsInitialWrite(t *testing.T) {
 
 	t.Cleanup(func() { m.Teardown("proj", "CARD-1") })
 
-	path := filepath.Join(m.HostDir("CARD-1"), "env")
+	path := filepath.Join(m.HostDir("proj", "CARD-1"), "env")
 	src, err := Open(path)
 	require.NoError(t, err)
 
@@ -162,7 +162,7 @@ func TestRunCredentialsRefreshesFromCM(t *testing.T) {
 	require.NoError(t, m.Provision("proj", "CARD-1", "payload-token", expiry, EndpointSecrets{APIKey: "llm-key"}))
 	t.Cleanup(func() { m.Teardown("proj", "CARD-1") })
 
-	path := filepath.Join(m.HostDir("CARD-1"), "env")
+	path := filepath.Join(m.HostDir("proj", "CARD-1"), "env")
 
 	// Initial write carries the payload token.
 	src, err := Open(path)
@@ -204,7 +204,7 @@ func TestRunCredentialsPATNoRefresh(t *testing.T) {
 	require.NoError(t, m.Provision("proj", "CARD-1", "pat-token", "", EndpointSecrets{}))
 	t.Cleanup(func() { m.Teardown("proj", "CARD-1") })
 
-	path := filepath.Join(m.HostDir("CARD-1"), "env")
+	path := filepath.Join(m.HostDir("proj", "CARD-1"), "env")
 	src, err := Open(path)
 	require.NoError(t, err)
 	assert.Equal(t, "pat-token", src.Get("CM_GIT_TOKEN"))
@@ -228,7 +228,7 @@ func TestRunCredentialsTeardownStopsLoopAndRemovesDir(t *testing.T) {
 	expiry := time.Now().Add(40 * time.Millisecond).UTC().Format(time.RFC3339Nano)
 	require.NoError(t, m.Provision("proj", "CARD-1", "payload-token", expiry, EndpointSecrets{}))
 
-	dir := m.HostDir("CARD-1")
+	dir := m.HostDir("proj", "CARD-1")
 
 	// Wait for at least one refresh so the loop is definitely running.
 	require.Eventually(t, func() bool {
@@ -258,15 +258,60 @@ func TestRunCredentialsTeardownUnknownRunIsNoop(t *testing.T) {
 }
 
 // TestRunCredentialsHostDirSanitizesCardID verifies HostDir keeps the run
-// directory under the runs base dir even for a hostile card ID.
+// directory under the runs base dir even for a hostile project or card ID: both
+// path components are sanitized with the same traversal-safe rules.
 func TestRunCredentialsHostDirSanitizesCardID(t *testing.T) {
 	t.Parallel()
 
 	m := newTestManager(t, "http://cm.invalid", "key")
 
-	dir := m.HostDir("../escape")
-	assert.NotContains(t, filepath.Base(dir), "/")
+	dir := m.HostDir("../evil", "../escape")
 	assert.NotContains(t, dir, "..")
+
+	rel, err := filepath.Rel(m.runsDir, dir)
+	require.NoError(t, err)
+	assert.NotContains(t, rel, "..", "the run dir must stay under the runs base dir")
+	assert.False(t, filepath.IsAbs(rel), "the run dir must be a descendant of the runs base dir")
+}
+
+// TestRunCredentialsProjectScopedIsolation pins the multi-user isolation
+// invariant: the same card ID reused across two projects must map to distinct
+// run directories with each project's own token, and tearing one down must
+// leave the other's live credentials intact. A card-ID-only path would collide
+// both projects on one env file and let either teardown delete the other's
+// credentials.
+func TestRunCredentialsProjectScopedIsolation(t *testing.T) {
+	t.Parallel()
+
+	m := newTestManager(t, "http://cm.invalid", "key")
+
+	require.NoError(t, m.Provision("projA", "CARD-1", "token-A", "", EndpointSecrets{APIKey: "key-A"}))
+	require.NoError(t, m.Provision("projB", "CARD-1", "token-B", "", EndpointSecrets{APIKey: "key-B"}))
+
+	t.Cleanup(func() { m.Teardown("projB", "CARD-1") })
+
+	dirA := m.HostDir("projA", "CARD-1")
+	dirB := m.HostDir("projB", "CARD-1")
+	assert.NotEqual(t, dirA, dirB, "the same card ID in two projects must map to distinct run dirs")
+
+	srcA, err := Open(filepath.Join(dirA, "env"))
+	require.NoError(t, err)
+	assert.Equal(t, "token-A", srcA.Get("CM_GIT_TOKEN"), "project A keeps its own token")
+
+	srcB, err := Open(filepath.Join(dirB, "env"))
+	require.NoError(t, err)
+	assert.Equal(t, "token-B", srcB.Get("CM_GIT_TOKEN"), "project B keeps its own token")
+
+	// Tearing down project A must not touch project B's still-live credentials.
+	m.Teardown("projA", "CARD-1")
+
+	_, err = os.Stat(dirA)
+	assert.True(t, os.IsNotExist(err), "the torn-down run dir must be gone")
+
+	srcB2, err := Open(filepath.Join(dirB, "env"))
+	require.NoError(t, err)
+	assert.Equal(t, "token-B", srcB2.Get("CM_GIT_TOKEN"),
+		"the other project's credentials must survive a sibling teardown")
 }
 
 // TestRunCredentialsCleanupOrphans verifies the boot-time sweep removes any
@@ -277,13 +322,13 @@ func TestRunCredentialsCleanupOrphans(t *testing.T) {
 	m := newTestManager(t, "http://cm.invalid", "key")
 
 	require.NoError(t, m.Provision("proj", "CARD-1", "tok", "", EndpointSecrets{}))
-	path := filepath.Join(m.HostDir("CARD-1"), "env")
+	path := filepath.Join(m.HostDir("proj", "CARD-1"), "env")
 	_, err := os.Stat(path)
 	require.NoError(t, err)
 
 	require.NoError(t, m.CleanupOrphans())
 
-	_, err = os.Stat(m.HostDir("CARD-1"))
+	_, err = os.Stat(m.HostDir("proj", "CARD-1"))
 	assert.True(t, os.IsNotExist(err), "orphan run dirs must be swept at boot")
 }
 
@@ -360,6 +405,6 @@ func TestRunCredentialsConcurrentProvisionNoLeakedLoop(t *testing.T) {
 	assert.Equal(t, before, stub.callCount(),
 		"a leaked refresh loop kept calling CM after teardown")
 
-	_, err := os.Stat(m.HostDir("CARD-1"))
+	_, err := os.Stat(m.HostDir("proj", "CARD-1"))
 	assert.True(t, os.IsNotExist(err), "run dir must be removed on teardown")
 }

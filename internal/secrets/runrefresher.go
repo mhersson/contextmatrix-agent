@@ -24,15 +24,18 @@ import (
 const gitCredentialsPath = "/api/agent/git-credentials" //nolint:gosec // path, not a credential
 
 // runsSubdir is the directory under the secrets dir that holds one env file per
-// active run: <secrets_dir>/runs/<card_id>/env.
+// active run: <secrets_dir>/runs/<project>/<card_id>/env. The project component
+// scopes the run dir per project so the same card ID reused across projects
+// never collides on one env file.
 const runsSubdir = "runs"
 
 // credentialsRequestTimeout bounds each git-credentials GET to CM.
 const credentialsRequestTimeout = 15 * time.Second
 
-// runIDSanitize replaces every character outside a conservative filesystem-safe
-// set so a hostile card ID can never escape the runs directory (no '/', no '.').
-var runIDSanitize = regexp.MustCompile(`[^A-Za-z0-9_-]`)
+// pathSanitize replaces every character outside a conservative filesystem-safe
+// set so a hostile project or card ID can never escape the runs directory (no
+// '/', no '.'). Applied to each path component independently.
+var pathSanitize = regexp.MustCompile(`[^A-Za-z0-9_-]`)
 
 // RunCredentials stages per-run credential files and refreshes the git token
 // from ContextMatrix for the run's lifetime. One instance is shared
@@ -95,9 +98,13 @@ func NewRunCredentials(secretsDir, cmURL, apiKey string, logger *slog.Logger) *R
 }
 
 // HostDir returns the per-run directory bind-mounted read-only at
-// /run/cm-secrets. The card ID is sanitized so it cannot escape the runs dir.
-func (m *RunCredentials) HostDir(cardID string) string {
-	return filepath.Join(m.runsDir, runIDSanitize.ReplaceAllString(cardID, "-"))
+// /run/cm-secrets. Project and card ID are each sanitized and joined as separate
+// path components (<runs>/<project>/<card_id>) so two projects reusing the same
+// card ID map to distinct dirs and neither can escape the runs dir.
+func (m *RunCredentials) HostDir(project, cardID string) string {
+	return filepath.Join(m.runsDir,
+		pathSanitize.ReplaceAllString(project, "-"),
+		pathSanitize.ReplaceAllString(cardID, "-"))
 }
 
 // Provision writes the per-run env file (git token + LLM endpoint values) and,
@@ -129,7 +136,7 @@ func (m *RunCredentials) Provision(project, cardID, token, expiresAt string, end
 		old.stop()
 	}
 
-	dir := m.HostDir(cardID)
+	dir := m.HostDir(project, cardID)
 	path := filepath.Join(dir, "env")
 
 	if err := WriteEnvFile(path, endpointVals(token, endpoint)); err != nil {

@@ -66,7 +66,8 @@ type SkillsResolver interface {
 // secrets file (the fallback path).
 type CredentialProvisioner interface {
 	// HostDir is the per-run directory bind-mounted read-only at /run/cm-secrets.
-	HostDir(cardID string) string
+	// Keyed by (project, cardID) so the same card ID across projects stays isolated.
+	HostDir(project, cardID string) string
 	// Provision writes the initial per-run env file and starts the refresh loop
 	// (when the token carries an expiry). Synchronous initial write; returns its
 	// error.
@@ -423,14 +424,17 @@ func (s *Server) launch(spec executor.LaunchSpec, p protocol.TriggerPayload) {
 // admitAndLaunch provisions the per-run credentials and launches the container,
 // serialized per card. Returns "" on success or a client-safe failure message.
 //
-// The serialization plus the tracked-run check close the duplicate-trigger
-// window: two concurrent triggers for one card both reach launch (no request
-// dedup, and the capacity pre-check does not serialize same-card admission),
-// but under the lock the winner fully provisions and launches first, so the
-// loser sees the card already tracked, skips provisioning, fails closed at the
-// executor (duplicate admission or container-name conflict), and — having
-// provisioned nothing — tears nothing down. The winner's refresh loop and
-// mounted run dir stay intact.
+// The serialization plus the early tracked-run rejection close the
+// duplicate-trigger window: two concurrent triggers for one card both reach
+// admission (no request dedup, and the capacity pre-check does not serialize
+// same-card admission), but under the lock the winner is admitted first and the
+// loser sees the card already tracked and fails closed HERE — before it can
+// provision or reach the executor. Proceeding to the executor on a tracked card
+// would race the asynchronous tracker.Remove on the old run's exit: if Remove
+// lands between the check and Launch, the executor would admit the duplicate — a
+// container mounting a per-run dir nothing provisioned, which the old run's
+// Teardown then deletes. Rejecting up front is the only race-free outcome; the
+// winner's refresh loop and mounted run dir stay intact.
 func (s *Server) admitAndLaunch(ctx context.Context, spec executor.LaunchSpec, p protocol.TriggerPayload) string {
 	project, cardID := p.Project, p.CardID
 
@@ -438,19 +442,27 @@ func (s *Server) admitAndLaunch(ctx context.Context, spec executor.LaunchSpec, p
 	mu.Lock()
 	defer mu.Unlock()
 
+	if _, tracked := s.tracker.Get(project, cardID); tracked {
+		s.logger.Warn("trigger rejected: card already running",
+			"project", project, "card_id", cardID)
+
+		return "card already running"
+	}
+
 	provisioned := false
 
+	// Two credential delivery channels (see buildLaunchSpec): a git-token payload
+	// provisions the per-run FILE here; an llm-only payload rides per-launch env
+	// (env-first read) with no per-run file, so it is not provisioned.
 	if s.credentials != nil && p.GitToken != "" {
-		if _, tracked := s.tracker.Get(project, cardID); !tracked {
-			if err := s.credentials.Provision(project, cardID, p.GitToken, p.GitTokenExpiresAt, s.runEndpoint(p)); err != nil {
-				s.logger.Error("provision per-run credentials failed",
-					"project", project, "card_id", cardID, "error", err)
+		if err := s.credentials.Provision(project, cardID, p.GitToken, p.GitTokenExpiresAt, s.runEndpoint(p)); err != nil {
+			s.logger.Error("provision per-run credentials failed",
+				"project", project, "card_id", cardID, "error", err)
 
-				return "credential provisioning failed"
-			}
-
-			provisioned = true
+			return "credential provisioning failed"
 		}
+
+		provisioned = true
 	}
 
 	if err := s.executor.Launch(ctx, spec); err != nil {
@@ -514,16 +526,34 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 	}
 
 	// Compat window: CM-provisioned credentials in the trigger payload override
-	// the shared-secrets values for this run. They travel via a per-run secrets
-	// FILE (written and refreshed by the credential provisioner, mounted at
-	// /run/cm-secrets), never plain container env — the worker reads them only
-	// from that file, and plain env would go stale as the refresh loop rewrites
-	// the token. A payload from a pre-multi-user CM carries neither field: the run
-	// mounts the shared secrets file staged from local github/llm_endpoint config,
-	// and this process logs the deprecation warning once (not per trigger).
+	// the shared-secrets values for this run over two delivery channels. When a
+	// git token is present, ALL credentials (git token + LLM values) travel via a
+	// per-run secrets FILE (written and refreshed by the credential provisioner,
+	// mounted at /run/cm-secrets), never plain container env — the worker reads
+	// them only from that file, and plain env would go stale as the refresh loop
+	// rewrites the token. When the payload carries an llm_endpoint but NO git
+	// token, the run keeps the shared mount (it still needs the rotating shared
+	// git token) and the LLM values ride per-launch container env instead, which
+	// the worker resolves env-first-then-file. A payload from a pre-multi-user CM
+	// carries neither field: the run mounts the shared secrets file staged from
+	// local github/llm_endpoint config, and this process logs the deprecation
+	// warning once (not per trigger).
 	secretsHostDir := s.launchEnv.SecretsHostDir
 	if s.credentials != nil && p.GitToken != "" {
-		secretsHostDir = s.credentials.HostDir(p.CardID)
+		secretsHostDir = s.credentials.HostDir(p.Project, p.CardID)
+	}
+
+	// LLM-only payload: deliver the payload's LLM endpoint values as per-launch
+	// container env (all three, even when empty — an empty BaseURL means "the
+	// type's canonical default"). The worker reads LLM_* env-first-then-file, so
+	// these override the shared file's values without disturbing the rotating git
+	// token the shared mount still provides.
+	if p.LLMEndpoint != nil && p.GitToken == "" {
+		env = append(env,
+			"LLM_API_KEY="+p.LLMEndpoint.APIKey,
+			"LLM_BASE_URL="+p.LLMEndpoint.BaseURL,
+			"LLM_TYPE="+p.LLMEndpoint.Type,
+		)
 	}
 
 	if p.GitToken == "" || p.LLMEndpoint == nil {
