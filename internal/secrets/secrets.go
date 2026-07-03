@@ -72,6 +72,27 @@ type EndpointSecrets struct {
 	Type    string
 }
 
+// endpointVals assembles the worker env map from a git token and the (optional)
+// LLM endpoint values. Empty endpoint fields are omitted so they never appear in
+// the env file. Shared by the process-wide Refresher and the per-run refresher.
+func endpointVals(token string, e EndpointSecrets) map[string]string {
+	vals := map[string]string{"CM_GIT_TOKEN": token}
+
+	if e.APIKey != "" {
+		vals["LLM_API_KEY"] = e.APIKey
+	}
+
+	if e.BaseURL != "" {
+		vals["LLM_BASE_URL"] = e.BaseURL
+	}
+
+	if e.Type != "" {
+		vals["LLM_TYPE"] = e.Type
+	}
+
+	return vals
+}
+
 // WriteEnvFile writes vals to path atomically (write-tmp + rename).
 // The directory is created with mode 0700; the file is written with mode 0600.
 // Lines are written in deterministic order: LLM_API_KEY, LLM_BASE_URL, LLM_TYPE,
@@ -199,20 +220,7 @@ func (r *Refresher) Run(ctx context.Context) error {
 			}
 		}
 
-		vals := map[string]string{"CM_GIT_TOKEN": token}
-		if r.endpoint.APIKey != "" {
-			vals["LLM_API_KEY"] = r.endpoint.APIKey
-		}
-
-		if r.endpoint.BaseURL != "" {
-			vals["LLM_BASE_URL"] = r.endpoint.BaseURL
-		}
-
-		if r.endpoint.Type != "" {
-			vals["LLM_TYPE"] = r.endpoint.Type
-		}
-
-		if err := WriteEnvFile(r.path, vals); err != nil {
+		if err := WriteEnvFile(r.path, endpointVals(token, r.endpoint)); err != nil {
 			// A failed write staged no fresh secrets (on the first pass there is no
 			// prior file at all). Retry on the short backoff — NOT the expiry-derived
 			// sleep below: in PAT mode the token expiry is a year-9999 sentinel, so

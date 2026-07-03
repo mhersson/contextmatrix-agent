@@ -18,6 +18,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/frames"
 	"github.com/mhersson/contextmatrix-agent/internal/logbridge"
 	"github.com/mhersson/contextmatrix-agent/internal/metrics"
+	"github.com/mhersson/contextmatrix-agent/internal/secrets"
 	protocol "github.com/mhersson/contextmatrix-protocol"
 )
 
@@ -58,6 +59,22 @@ type SkillsResolver interface {
 	Resolve(ctx context.Context) (hostDir string, err error)
 }
 
+// CredentialProvisioner stages a per-run credential file (the payload git token
+// plus LLM endpoint values) and refreshes the git token from ContextMatrix until
+// the run is torn down. *secrets.RunCredentials satisfies it; tests supply a
+// fake. Nil disables per-run provisioning — the run then mounts the shared
+// secrets file (the fallback path).
+type CredentialProvisioner interface {
+	// HostDir is the per-run directory bind-mounted read-only at /run/cm-secrets.
+	HostDir(cardID string) string
+	// Provision writes the initial per-run env file and starts the refresh loop
+	// (when the token carries an expiry). Synchronous initial write; returns its
+	// error.
+	Provision(project, cardID, token, expiresAt string, endpoint secrets.EndpointSecrets) error
+	// Teardown stops the refresh loop and removes the run directory. Idempotent.
+	Teardown(project, cardID string)
+}
+
 // LaunchEnv carries the static, per-process inputs the handler folds together
 // with each TriggerPayload to compose an executor.LaunchSpec. Per-request
 // fields (card ID, project, repo URL, base branch, model, interactive,
@@ -74,8 +91,16 @@ type LaunchEnv struct {
 	MCPAPIKey string
 
 	// SecretsHostDir is the host directory bind-mounted read-only into each
-	// container at /run/cm-secrets. Empty disables the mount.
+	// container at /run/cm-secrets. Empty disables the mount. Used when a run has
+	// no CM-provisioned git token (the shared, process-wide secrets file); a run
+	// with a payload token mounts its per-run directory instead.
 	SecretsHostDir string
+
+	// DefaultLLMEndpoint is the local-config LLM endpoint staged into a per-run
+	// credential file when the trigger payload omits its own llm_endpoint (the
+	// compat-window fallback). The shared secrets file already carries these
+	// values for the no-token path.
+	DefaultLLMEndpoint secrets.EndpointSecrets
 
 	// CACertFile is the host path to an optional extra-CA PEM, bind-mounted
 	// read-only into each container at /run/cm-ca/ca.crt. Empty disables it.
@@ -127,6 +152,7 @@ type Config struct {
 	Reporter       StatusReporter
 	Verifier       AutonomousVerifier
 	SkillsResolver SkillsResolver
+	Credentials    CredentialProvisioner
 
 	LaunchEnv LaunchEnv
 
@@ -159,6 +185,7 @@ type Server struct {
 	reporter       StatusReporter
 	verifier       AutonomousVerifier
 	skillsResolver SkillsResolver
+	credentials    CredentialProvisioner
 
 	launchEnv LaunchEnv
 
@@ -181,6 +208,14 @@ type Server struct {
 	// the wire. Keyed by project+"/"+cardID. Given the low message volume a
 	// per-key lock is cheaper than a global one under concurrency.
 	stdinMu sync.Map // map[string]*sync.Mutex
+
+	// launchMu serializes per-card admission (credential provisioning + executor
+	// launch). /trigger has no request dedup, so two concurrent triggers for one
+	// card can both reach launch; without serialization the loser's provisioning
+	// and launch-failure teardown interleave with — and clobber — the winner's
+	// per-run credentials. Keyed like stdinMu; entries are likewise never
+	// reclaimed (one bare mutex per card ever seen).
+	launchMu sync.Map // map[string]*sync.Mutex
 
 	// sseShutdown is closed by CloseSSE at drain so every in-flight /logs handler
 	// returns promptly (an SSE stream never idles, so http.Server.Shutdown would
@@ -233,6 +268,7 @@ func NewServer(cfg Config) *Server {
 		reporter:          cfg.Reporter,
 		verifier:          cfg.Verifier,
 		skillsResolver:    cfg.SkillsResolver,
+		credentials:       cfg.Credentials,
 		launchEnv:         cfg.LaunchEnv,
 		replay:            replay,
 		dedup:             dedup,
@@ -287,6 +323,15 @@ func (s *Server) AdminAuth(next http.HandlerFunc) http.HandlerFunc {
 func (s *Server) stdinLock(project, cardID string) *sync.Mutex {
 	k := project + "/" + cardID
 	v, _ := s.stdinMu.LoadOrStore(k, &sync.Mutex{})
+
+	return v.(*sync.Mutex)
+}
+
+// launchLock returns the per-card admission mutex, creating it on first use.
+// See the launchMu field comment for why launch serializes per card.
+func (s *Server) launchLock(project, cardID string) *sync.Mutex {
+	k := project + "/" + cardID
+	v, _ := s.launchMu.LoadOrStore(k, &sync.Mutex{})
 
 	return v.(*sync.Mutex)
 }
@@ -347,19 +392,21 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 	// and the eventual outcome is carried by the running/failed status callback.
 	writeJSON(w, http.StatusAccepted, protocol.SuccessResponse{OK: true})
 
-	go s.launch(spec, payload.Project, payload.CardID) //nolint:gosec // G118: launch is fire-and-forget and outlives the request; a request-scoped context would cancel the worker
+	go s.launch(spec, payload) //nolint:gosec // G118: launch is fire-and-forget and outlives the request; a request-scoped context would cancel the worker
 }
 
 // launch runs on a detached context so the container's lifecycle outlives the
-// HTTP request that triggered it. It reports running on success and failed on a
-// launch error.
-func (s *Server) launch(spec executor.LaunchSpec, project, cardID string) {
+// HTTP request that triggered it. It provisions the per-run credential file when
+// the payload carried a git token, launches the container, and reports running
+// on success and failed on a provisioning or launch error. Status callbacks run
+// outside the admission lock so a slow ContextMatrix response cannot serialize
+// later triggers for the card.
+func (s *Server) launch(spec executor.LaunchSpec, p protocol.TriggerPayload) {
 	ctx := context.Background()
+	project, cardID := p.Project, p.CardID
 
-	if err := s.executor.Launch(ctx, spec); err != nil {
-		s.logger.Error("launch failed", "project", project, "card_id", cardID, "error", err)
-
-		if rerr := s.reporter.ReportStatus(ctx, cardID, project, "failed", "launch failed"); rerr != nil {
+	if failure := s.admitAndLaunch(ctx, spec, p); failure != "" {
+		if rerr := s.reporter.ReportStatus(ctx, cardID, project, "failed", failure); rerr != nil {
 			s.logger.Error("report failed-status callback failed",
 				"project", project, "card_id", cardID, "error", rerr)
 		}
@@ -371,6 +418,73 @@ func (s *Server) launch(spec executor.LaunchSpec, project, cardID string) {
 		s.logger.Error("report running-status callback failed",
 			"project", project, "card_id", cardID, "error", err)
 	}
+}
+
+// admitAndLaunch provisions the per-run credentials and launches the container,
+// serialized per card. Returns "" on success or a client-safe failure message.
+//
+// The serialization plus the tracked-run check close the duplicate-trigger
+// window: two concurrent triggers for one card both reach launch (no request
+// dedup, and the capacity pre-check does not serialize same-card admission),
+// but under the lock the winner fully provisions and launches first, so the
+// loser sees the card already tracked, skips provisioning, fails closed at the
+// executor (duplicate admission or container-name conflict), and — having
+// provisioned nothing — tears nothing down. The winner's refresh loop and
+// mounted run dir stay intact.
+func (s *Server) admitAndLaunch(ctx context.Context, spec executor.LaunchSpec, p protocol.TriggerPayload) string {
+	project, cardID := p.Project, p.CardID
+
+	mu := s.launchLock(project, cardID)
+	mu.Lock()
+	defer mu.Unlock()
+
+	provisioned := false
+
+	if s.credentials != nil && p.GitToken != "" {
+		if _, tracked := s.tracker.Get(project, cardID); !tracked {
+			if err := s.credentials.Provision(project, cardID, p.GitToken, p.GitTokenExpiresAt, s.runEndpoint(p)); err != nil {
+				s.logger.Error("provision per-run credentials failed",
+					"project", project, "card_id", cardID, "error", err)
+
+				return "credential provisioning failed"
+			}
+
+			provisioned = true
+		}
+	}
+
+	if err := s.executor.Launch(ctx, spec); err != nil {
+		// Tear down only what THIS launch provisioned: a duplicate that skipped
+		// provisioning must not touch the winner's credentials.
+		if provisioned {
+			s.credentials.Teardown(project, cardID)
+		}
+
+		s.logger.Error("launch failed", "project", project, "card_id", cardID, "error", err)
+
+		return "launch failed"
+	}
+
+	return ""
+}
+
+// runEndpoint resolves the LLM endpoint staged into the per-run credential file:
+// the payload's llm_endpoint when present, else the local-config default (the
+// compat-window fallback). Gating the per-run file on the git token alone means
+// a git-token-only payload still gets a working LLM endpoint from local config.
+// A git-token-only payload with no local LLM config yields an empty endpoint —
+// intentional: the env file then carries only the git token, matching what a
+// shared-secrets deployment without llm_endpoint config would stage.
+func (s *Server) runEndpoint(p protocol.TriggerPayload) secrets.EndpointSecrets {
+	if p.LLMEndpoint != nil {
+		return secrets.EndpointSecrets{
+			APIKey:  p.LLMEndpoint.APIKey,
+			BaseURL: p.LLMEndpoint.BaseURL,
+			Type:    p.LLMEndpoint.Type,
+		}
+	}
+
+	return s.launchEnv.DefaultLLMEndpoint
 }
 
 // buildLaunchSpec folds the trigger payload together with the static LaunchEnv
@@ -400,26 +514,16 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 	}
 
 	// Compat window: CM-provisioned credentials in the trigger payload override
-	// the shared-secrets values for this run when present. A payload from a
-	// pre-multi-user CM carries neither field — the worker keeps reading the
-	// shared secrets file staged from local github/llm_endpoint config, and this
-	// process logs the deprecation warning once (not per trigger).
-	if p.GitToken != "" {
-		env = append(env, "CM_GIT_TOKEN="+p.GitToken)
-	}
-
-	if p.LLMEndpoint != nil {
-		if p.LLMEndpoint.APIKey != "" {
-			env = append(env, "LLM_API_KEY="+p.LLMEndpoint.APIKey)
-		}
-
-		if p.LLMEndpoint.BaseURL != "" {
-			env = append(env, "LLM_BASE_URL="+p.LLMEndpoint.BaseURL)
-		}
-
-		if p.LLMEndpoint.Type != "" {
-			env = append(env, "LLM_TYPE="+p.LLMEndpoint.Type)
-		}
+	// the shared-secrets values for this run. They travel via a per-run secrets
+	// FILE (written and refreshed by the credential provisioner, mounted at
+	// /run/cm-secrets), never plain container env — the worker reads them only
+	// from that file, and plain env would go stale as the refresh loop rewrites
+	// the token. A payload from a pre-multi-user CM carries neither field: the run
+	// mounts the shared secrets file staged from local github/llm_endpoint config,
+	// and this process logs the deprecation warning once (not per trigger).
+	secretsHostDir := s.launchEnv.SecretsHostDir
+	if s.credentials != nil && p.GitToken != "" {
+		secretsHostDir = s.credentials.HostDir(p.CardID)
 	}
 
 	if p.GitToken == "" || p.LLMEndpoint == nil {
@@ -483,7 +587,7 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 		Project:        p.Project,
 		Image:          image,
 		Env:            env,
-		SecretsHostDir: s.launchEnv.SecretsHostDir,
+		SecretsHostDir: secretsHostDir,
 		SkillsHostDir:  skillsDir,
 		CACertHostFile: s.launchEnv.CACertFile,
 		MemoryBytes:    s.launchEnv.MemoryBytes,

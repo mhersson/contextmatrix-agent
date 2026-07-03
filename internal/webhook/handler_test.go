@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/executor"
 	"github.com/mhersson/contextmatrix-agent/internal/frames"
 	"github.com/mhersson/contextmatrix-agent/internal/logbridge"
+	"github.com/mhersson/contextmatrix-agent/internal/secrets"
 	protocol "github.com/mhersson/contextmatrix-protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -47,17 +49,22 @@ func (f *fakeExecutor) Launch(_ context.Context, spec executor.LaunchSpec) error
 		return f.launchErr
 	}
 
-	f.launched = append(f.launched, spec)
-
+	// Mirror the real executor's fail-closed admission: a duplicate card key (or
+	// a full tracker) is refused with ErrCapacity and the launch never happens.
 	if f.tracker != nil {
-		f.tracker.AddIfUnderLimit(&executor.Run{
+		admitted := f.tracker.AddIfUnderLimit(&executor.Run{
 			ContainerID: "ctr-" + spec.CardID,
 			CardID:      spec.CardID,
 			Project:     spec.Project,
 			StartedAt:   time.Now(),
 			Stdin:       &nopWriteCloser{},
 		})
+		if !admitted {
+			return executor.ErrCapacity
+		}
 	}
+
+	f.launched = append(f.launched, spec)
 
 	return nil
 }
@@ -137,6 +144,71 @@ type fakeVerifier struct {
 
 func (f *fakeVerifier) VerifyAutonomous(_ context.Context, _, _ string) (bool, error) {
 	return f.autonomous, f.err
+}
+
+// quietLogger silences slog output so tests that exercise the deprecation
+// warning and launch/provision error paths keep pristine output.
+func quietLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// fakeCredentials records per-run credential provisioning and teardown, and can
+// inject a Provision error. It satisfies CredentialProvisioner.
+type fakeCredentials struct {
+	mu sync.Mutex
+
+	provisionErr error
+	provisions   []provisionCall
+	teardowns    [][2]string // project, cardID
+}
+
+type provisionCall struct {
+	project, cardID, token, expiresAt string
+	endpoint                          secrets.EndpointSecrets
+}
+
+func (f *fakeCredentials) HostDir(cardID string) string {
+	return "/secrets/runs/" + cardID
+}
+
+func (f *fakeCredentials) Provision(project, cardID, token, expiresAt string, endpoint secrets.EndpointSecrets) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.provisionErr != nil {
+		return f.provisionErr
+	}
+
+	f.provisions = append(f.provisions, provisionCall{project, cardID, token, expiresAt, endpoint})
+
+	return nil
+}
+
+func (f *fakeCredentials) Teardown(project, cardID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.teardowns = append(f.teardowns, [2]string{project, cardID})
+}
+
+func (f *fakeCredentials) provisionCalls() []provisionCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	out := make([]provisionCall, len(f.provisions))
+	copy(out, f.provisions)
+
+	return out
+}
+
+func (f *fakeCredentials) teardownCalls() [][2]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	out := make([][2]string, len(f.teardowns))
+	copy(out, f.teardowns)
+
+	return out
 }
 
 // nopWriteCloser captures stdin frame writes for assertions.
@@ -1044,15 +1116,19 @@ func TestBuildLaunchSpec_CompactionEnvOmittedWhenDisabled(t *testing.T) {
 
 // ---- CM-provisioned credentials (compat window) -----------------------------
 
-// TestBuildLaunchSpec_CredentialsEmittedWhenPresent pins the compat-window
-// override: a payload carrying CM-provisioned credentials must fold them into
-// the per-launch env, taking priority over the shared-secrets file for this run.
-func TestBuildLaunchSpec_CredentialsEmittedWhenPresent(t *testing.T) {
+// TestBuildLaunchSpec_CredentialsNeverInPlainEnv pins the A1 reconciliation:
+// CM-provisioned credentials must NOT appear in the container's plain env. They
+// travel via the per-run secrets file (mounted at /run/cm-secrets), which is the
+// only place the worker reads them and the thing the refresh loop rewrites —
+// plain env would go stale.
+func TestBuildLaunchSpec_CredentialsNeverInPlainEnv(t *testing.T) {
 	s := NewServer(Config{
-		APIKey:    "k",
-		Executor:  &fakeExecutor{},
-		Tracker:   executor.NewTracker(1),
-		LaunchEnv: LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"},
+		APIKey:      "k",
+		Executor:    &fakeExecutor{},
+		Tracker:     executor.NewTracker(1),
+		Credentials: &fakeCredentials{},
+		LaunchEnv:   LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"},
+		Logger:      quietLogger(),
 	})
 
 	spec := s.buildLaunchSpec(protocol.TriggerPayload{
@@ -1066,10 +1142,319 @@ func TestBuildLaunchSpec_CredentialsEmittedWhenPresent(t *testing.T) {
 		},
 	}, "corr", "")
 
-	assert.Contains(t, spec.Env, "CM_GIT_TOKEN=cm-git-token")
-	assert.Contains(t, spec.Env, "LLM_API_KEY=cm-llm-key")
-	assert.Contains(t, spec.Env, "LLM_BASE_URL=https://llm.example/v1")
-	assert.Contains(t, spec.Env, "LLM_TYPE=openai")
+	for _, e := range spec.Env {
+		assert.NotContains(t, e, "CM_GIT_TOKEN", "git token must not leak into plain env")
+		assert.NotContains(t, e, "LLM_API_KEY", "llm key must not leak into plain env")
+		assert.NotContains(t, e, "LLM_BASE_URL", "llm base url must not leak into plain env")
+		assert.NotContains(t, e, "LLM_TYPE", "llm type must not leak into plain env")
+	}
+}
+
+// TestBuildLaunchSpec_PerRunMountWhenTokenPresent verifies the mount routing: a
+// payload with a git token mounts the per-run directory; without one it mounts
+// the shared secrets dir (today's fallback path).
+func TestBuildLaunchSpec_PerRunMountWhenTokenPresent(t *testing.T) {
+	creds := &fakeCredentials{}
+
+	s := NewServer(Config{
+		APIKey:      "k",
+		Executor:    &fakeExecutor{},
+		Tracker:     executor.NewTracker(1),
+		Credentials: creds,
+		LaunchEnv:   LaunchEnv{BaseImage: "img", MCPURL: "http://mcp", SecretsHostDir: "/secrets/shared"},
+		Logger:      quietLogger(),
+	})
+
+	withToken := s.buildLaunchSpec(protocol.TriggerPayload{
+		CardID:   "C1",
+		Project:  "p",
+		GitToken: "cm-git-token",
+	}, "corr", "")
+	assert.Equal(t, creds.HostDir("C1"), withToken.SecretsHostDir,
+		"a payload token mounts the per-run dir")
+
+	withoutToken := s.buildLaunchSpec(protocol.TriggerPayload{CardID: "C2", Project: "p"}, "corr", "")
+	assert.Equal(t, "/secrets/shared", withoutToken.SecretsHostDir,
+		"no payload token mounts the shared dir")
+}
+
+// TestBuildLaunchSpec_SharedMountWhenNoProvisioner verifies that without a
+// credential provisioner wired, every run mounts the shared dir even if a token
+// is present (defensive: the provisioner is the only per-run writer).
+func TestBuildLaunchSpec_SharedMountWhenNoProvisioner(t *testing.T) {
+	s := NewServer(Config{
+		APIKey:    "k",
+		Executor:  &fakeExecutor{},
+		Tracker:   executor.NewTracker(1),
+		LaunchEnv: LaunchEnv{BaseImage: "img", MCPURL: "http://mcp", SecretsHostDir: "/secrets/shared"},
+		Logger:    quietLogger(),
+	})
+
+	spec := s.buildLaunchSpec(protocol.TriggerPayload{
+		CardID:   "C1",
+		Project:  "p",
+		GitToken: "cm-git-token",
+	}, "corr", "")
+
+	assert.Equal(t, "/secrets/shared", spec.SecretsHostDir)
+}
+
+// TestLaunch_ProvisionsPerRunCredentials verifies launch provisions the per-run
+// credentials (payload token + expiry + resolved endpoint) before starting the
+// container, and does not tear them down on a successful launch.
+func TestLaunch_ProvisionsPerRunCredentials(t *testing.T) {
+	tracker := executor.NewTracker(1)
+	creds := &fakeCredentials{}
+	reporter := &fakeReporter{}
+
+	s := NewServer(Config{
+		APIKey:      "k",
+		Executor:    &fakeExecutor{tracker: tracker},
+		Tracker:     tracker,
+		Reporter:    reporter,
+		Credentials: creds,
+		LaunchEnv:   LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"},
+		Logger:      quietLogger(),
+	})
+
+	payload := protocol.TriggerPayload{
+		CardID:            "C1",
+		Project:           "p",
+		GitToken:          "cm-git-token",
+		GitTokenExpiresAt: "2026-07-05T12:00:00Z",
+		LLMEndpoint:       &protocol.LLMEndpoint{Type: "openai", BaseURL: "https://llm.example/v1", APIKey: "cm-llm-key"},
+	}
+	spec := s.buildLaunchSpec(payload, "corr", "")
+
+	s.launch(spec, payload)
+
+	calls := creds.provisionCalls()
+	require.Len(t, calls, 1)
+	assert.Equal(t, provisionCall{
+		project:   "p",
+		cardID:    "C1",
+		token:     "cm-git-token",
+		expiresAt: "2026-07-05T12:00:00Z",
+		endpoint:  secrets.EndpointSecrets{Type: "openai", BaseURL: "https://llm.example/v1", APIKey: "cm-llm-key"},
+	}, calls[0])
+	assert.Empty(t, creds.teardownCalls(), "no teardown on a successful launch")
+	assert.Equal(t, [][3]string{{"C1", "running", ""}}, reporter.statuses())
+}
+
+// TestLaunch_FallsBackToDefaultEndpoint verifies a git-token-only payload stages
+// the local-config LLM endpoint into the per-run file (compat-window fallback),
+// so a run whose payload omits llm_endpoint still gets a working endpoint.
+func TestLaunch_FallsBackToDefaultEndpoint(t *testing.T) {
+	tracker := executor.NewTracker(1)
+	creds := &fakeCredentials{}
+
+	s := NewServer(Config{
+		APIKey:      "k",
+		Executor:    &fakeExecutor{tracker: tracker},
+		Tracker:     tracker,
+		Reporter:    &fakeReporter{},
+		Credentials: creds,
+		LaunchEnv: LaunchEnv{
+			BaseImage:          "img",
+			MCPURL:             "http://mcp",
+			DefaultLLMEndpoint: secrets.EndpointSecrets{Type: "openrouter", APIKey: "cfg-llm-key"},
+		},
+		Logger: quietLogger(),
+	})
+
+	payload := protocol.TriggerPayload{CardID: "C1", Project: "p", GitToken: "cm-git-token"}
+	s.launch(s.buildLaunchSpec(payload, "corr", ""), payload)
+
+	calls := creds.provisionCalls()
+	require.Len(t, calls, 1)
+	assert.Equal(t, secrets.EndpointSecrets{Type: "openrouter", APIKey: "cfg-llm-key"}, calls[0].endpoint)
+}
+
+// TestLaunch_TearsDownPerRunCredentialsOnLaunchFailure verifies a launch error
+// tears down the just-provisioned per-run credentials and reports failed.
+func TestLaunch_TearsDownPerRunCredentialsOnLaunchFailure(t *testing.T) {
+	creds := &fakeCredentials{}
+	reporter := &fakeReporter{}
+
+	s := NewServer(Config{
+		APIKey:      "k",
+		Executor:    &fakeExecutor{launchErr: errors.New("boom")},
+		Tracker:     executor.NewTracker(1),
+		Reporter:    reporter,
+		Credentials: creds,
+		LaunchEnv:   LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"},
+		Logger:      quietLogger(),
+	})
+
+	payload := protocol.TriggerPayload{
+		CardID:            "C1",
+		Project:           "p",
+		GitToken:          "cm-git-token",
+		GitTokenExpiresAt: "2026-07-05T12:00:00Z",
+	}
+	s.launch(s.buildLaunchSpec(payload, "corr", ""), payload)
+
+	assert.Len(t, creds.provisionCalls(), 1)
+	assert.Equal(t, [][2]string{{"p", "C1"}}, creds.teardownCalls(),
+		"a launch failure must tear down the per-run credentials")
+	assert.Equal(t, [][3]string{{"C1", "failed", "launch failed"}}, reporter.statuses())
+}
+
+// TestLaunch_ProvisionFailureReportsFailedWithoutLaunching verifies a provision
+// error short-circuits: the container is never started and the run reports failed.
+func TestLaunch_ProvisionFailureReportsFailedWithoutLaunching(t *testing.T) {
+	creds := &fakeCredentials{provisionErr: errors.New("disk full")}
+	exec := &fakeExecutor{}
+	reporter := &fakeReporter{}
+
+	s := NewServer(Config{
+		APIKey:      "k",
+		Executor:    exec,
+		Tracker:     executor.NewTracker(1),
+		Reporter:    reporter,
+		Credentials: creds,
+		LaunchEnv:   LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"},
+		Logger:      quietLogger(),
+	})
+
+	payload := protocol.TriggerPayload{
+		CardID:            "C1",
+		Project:           "p",
+		GitToken:          "cm-git-token",
+		GitTokenExpiresAt: "2026-07-05T12:00:00Z",
+	}
+	s.launch(s.buildLaunchSpec(payload, "corr", ""), payload)
+
+	assert.Empty(t, exec.launchedSpecs(), "container must not launch when provisioning fails")
+	assert.Equal(t, [][3]string{{"C1", "failed", "credential provisioning failed"}}, reporter.statuses())
+}
+
+// TestLaunch_NoProvisionWhenNoToken verifies a payload without a git token never
+// provisions per-run credentials (today's shared/env path).
+func TestLaunch_NoProvisionWhenNoToken(t *testing.T) {
+	tracker := executor.NewTracker(1)
+	creds := &fakeCredentials{}
+
+	s := NewServer(Config{
+		APIKey:      "k",
+		Executor:    &fakeExecutor{tracker: tracker},
+		Tracker:     tracker,
+		Reporter:    &fakeReporter{},
+		Credentials: creds,
+		LaunchEnv:   LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"},
+		Logger:      quietLogger(),
+	})
+
+	payload := protocol.TriggerPayload{CardID: "C1", Project: "p"}
+	s.launch(s.buildLaunchSpec(payload, "corr", ""), payload)
+
+	assert.Empty(t, creds.provisionCalls(), "no token means no per-run provisioning")
+	assert.Empty(t, creds.teardownCalls())
+}
+
+// TestLaunch_DuplicateTriggerDoesNotClobberWinnerCredentials pins the
+// duplicate-trigger race: /trigger has no request dedup and the capacity
+// pre-check does not serialize same-card admission, so two launches for one
+// card can both reach launch. The loser must fail closed at the executor
+// WITHOUT touching the winner's per-run credentials — before this fix the loser
+// re-provisioned over the winner (stopping its refresh loop) and its
+// launch-failure branch tore down the winner's still-mounted run dir.
+func TestLaunch_DuplicateTriggerDoesNotClobberWinnerCredentials(t *testing.T) {
+	// Capacity 2 so the duplicate key, not raw capacity, rejects the loser: the
+	// executor's AddIfUnderLimit enforces one container per card.
+	tracker := executor.NewTracker(2)
+	creds := &fakeCredentials{}
+	reporter := &fakeReporter{}
+
+	s := NewServer(Config{
+		APIKey:      "k",
+		Executor:    &fakeExecutor{tracker: tracker},
+		Tracker:     tracker,
+		Reporter:    reporter,
+		Credentials: creds,
+		LaunchEnv:   LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"},
+		Logger:      quietLogger(),
+	})
+
+	payload := protocol.TriggerPayload{
+		CardID:            "C1",
+		Project:           "p",
+		GitToken:          "cm-git-token",
+		GitTokenExpiresAt: "2026-07-05T12:00:00Z",
+	}
+	spec := s.buildLaunchSpec(payload, "corr", "")
+
+	s.launch(spec, payload) // winner: provisions and launches
+	s.launch(spec, payload) // duplicate: must fail closed without re-provisioning or tearing down
+
+	assert.Len(t, creds.provisionCalls(), 1,
+		"the duplicate must not re-provision over the winner")
+	assert.Empty(t, creds.teardownCalls(),
+		"the duplicate's launch failure must not tear down the winner's credentials")
+	assert.Equal(t, [][3]string{{"C1", "running", ""}, {"C1", "failed", "launch failed"}},
+		reporter.statuses())
+}
+
+// TestLaunch_ConcurrentDuplicateTriggersSerialized drives the same duplicate
+// race with real concurrency (meaningful under -race): whichever interleaving
+// the scheduler picks, exactly one trigger provisions and runs, the other fails
+// closed, and the winner's credentials are never torn down.
+func TestLaunch_ConcurrentDuplicateTriggersSerialized(t *testing.T) {
+	tracker := executor.NewTracker(2)
+	creds := &fakeCredentials{}
+	reporter := &fakeReporter{}
+
+	s := NewServer(Config{
+		APIKey:      "k",
+		Executor:    &fakeExecutor{tracker: tracker},
+		Tracker:     tracker,
+		Reporter:    reporter,
+		Credentials: creds,
+		LaunchEnv:   LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"},
+		Logger:      quietLogger(),
+	})
+
+	payload := protocol.TriggerPayload{
+		CardID:            "C1",
+		Project:           "p",
+		GitToken:          "cm-git-token",
+		GitTokenExpiresAt: "2026-07-05T12:00:00Z",
+	}
+	spec := s.buildLaunchSpec(payload, "corr", "")
+
+	var wg sync.WaitGroup
+
+	for range 2 {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			s.launch(spec, payload)
+		}()
+	}
+
+	wg.Wait()
+
+	assert.Len(t, creds.provisionCalls(), 1, "exactly one trigger provisions")
+	assert.Empty(t, creds.teardownCalls(), "the loser must not tear down the winner")
+
+	statuses := reporter.statuses()
+	require.Len(t, statuses, 2)
+
+	var running, failed int
+
+	for _, st := range statuses {
+		switch st[1] {
+		case "running":
+			running++
+		case "failed":
+			failed++
+		}
+	}
+
+	assert.Equal(t, 1, running, "exactly one trigger reports running")
+	assert.Equal(t, 1, failed, "exactly one trigger reports failed")
 }
 
 // TestBuildLaunchSpec_CredentialsOmittedWhenAbsent mirrors the budget-env
