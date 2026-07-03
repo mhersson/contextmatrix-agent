@@ -267,11 +267,14 @@ func (m *RunCredentials) refreshLoop(
 	}
 }
 
-// gitCredentials is the decode target for the CM git-credentials response. It
-// mirrors protocol.TriggerPayload's field names for the token and its expiry.
+// gitCredentials is the decode target for CM's git-credentials response:
+// {"token": "...", "expires_at": "..."} per docs/api-reference.md in the CM
+// repo. Note the keys deliberately differ from TriggerPayload's git_token /
+// git_token_expires_at — different endpoint, different shape; expires_at is
+// absent for PAT-backed credentials (no refresh needed).
 type gitCredentials struct {
-	GitToken          string `json:"git_token"`
-	GitTokenExpiresAt string `json:"git_token_expires_at"`
+	Token     string `json:"token"`
+	ExpiresAt string `json:"expires_at"`
 }
 
 // fetchGitCredentials does a signed GET to CM's git-credentials endpoint for the
@@ -315,13 +318,13 @@ func (m *RunCredentials) fetchGitCredentials(ctx context.Context, project, cardI
 		return "", time.Time{}, fmt.Errorf("parse git-credentials: %w", err)
 	}
 
-	if gc.GitToken == "" {
+	if gc.Token == "" {
 		return "", time.Time{}, fmt.Errorf("git-credentials response carried no token")
 	}
 
-	expiry, _ := parseExpiry(gc.GitTokenExpiresAt)
+	expiry, _ := parseExpiry(gc.ExpiresAt)
 
-	return gc.GitToken, expiry, nil
+	return gc.Token, expiry, nil
 }
 
 // runKey is the map key for a run: project and card ID together disambiguate the

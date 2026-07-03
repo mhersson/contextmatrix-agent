@@ -75,9 +75,11 @@ func (s *stubCM) handler(t *testing.T) http.HandlerFunc {
 			expiry = 10 * time.Second
 		}
 
+		// Response keys match CM's documented git-credentials shape
+		// ({token, expires_at}) — deliberately NOT TriggerPayload's names.
 		resp := map[string]string{
-			"git_token":            "refreshed-token-" + strconv.Itoa(n),
-			"git_token_expires_at": time.Now().Add(expiry).UTC().Format(time.RFC3339Nano),
+			"token":      "refreshed-token-" + strconv.Itoa(n),
+			"expires_at": time.Now().Add(expiry).UTC().Format(time.RFC3339Nano),
 		}
 
 		w.Header().Set("Content-Type", "application/json")
