@@ -2,7 +2,6 @@ package worker
 
 import (
 	"context"
-	"encoding/base64"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -78,7 +77,7 @@ func TestStageForCommit_SkipsBuildArtifacts(t *testing.T) {
 	remote := setupBareRemote(t)
 	ws := t.TempDir()
 
-	g := NewGit(ws, "", "")
+	g := NewGit(ws, "", "", "")
 	require.NoError(t, g.Clone(context.Background(), remote, "main"))
 	require.NoError(t, g.CreateBranch(context.Background(), "cm/cmx-001"))
 	g.SetBranchPolicy("cm/cmx-001", "main", "main")
@@ -132,7 +131,7 @@ func TestStageForCommit_HandlesSpacedFilenames(t *testing.T) {
 	remote := setupBareRemote(t)
 	ws := t.TempDir()
 
-	g := NewGit(ws, "", "")
+	g := NewGit(ws, "", "", "")
 	require.NoError(t, g.Clone(context.Background(), remote, "main"))
 	require.NoError(t, g.CreateBranch(context.Background(), "cm/cmx-001"))
 	g.SetBranchPolicy("cm/cmx-001", "main", "main")
@@ -158,7 +157,7 @@ func TestCommitWithMessage_OnlyArtifactsIsNoOp(t *testing.T) {
 	remote := setupBareRemote(t)
 	ws := t.TempDir()
 
-	g := NewGit(ws, "", "")
+	g := NewGit(ws, "", "", "")
 	require.NoError(t, g.Clone(context.Background(), remote, "main"))
 	require.NoError(t, g.CreateBranch(context.Background(), "cm/cmx-001"))
 	g.SetBranchPolicy("cm/cmx-001", "main", "main")
@@ -177,7 +176,7 @@ func TestCloneBranchCommitPush(t *testing.T) {
 	remote := setupBareRemote(t)
 	ws := filepath.Join(t.TempDir(), "ws")
 
-	g := NewGit(ws, "", "") // no token: file:// remote needs none
+	g := NewGit(ws, "", "", "") // no token: file:// remote needs none
 
 	ctx := context.Background()
 
@@ -209,7 +208,7 @@ func TestCommitIfDirtyCleanTree(t *testing.T) {
 	remote := setupBareRemote(t)
 	ws := filepath.Join(t.TempDir(), "ws")
 
-	g := NewGit(ws, "", "")
+	g := NewGit(ws, "", "", "")
 
 	ctx := context.Background()
 
@@ -224,29 +223,47 @@ func TestCommitIfDirtyCleanTree(t *testing.T) {
 func TestCredEnvShape(t *testing.T) {
 	// t.Setenv mutates the process env; cannot use t.Parallel.
 	t.Setenv("LLM_API_KEY", "secret-llm-value")
+	// os.TempDir honors TMPDIR; redirect it so the helper script writes into a
+	// per-test temp dir instead of the shared /tmp.
+	t.Setenv("TMPDIR", t.TempDir())
 
-	g := NewGit(t.TempDir(), "ghs_tok123456", "")
-	env := g.credEnv()
+	secretsPath := filepath.Join(t.TempDir(), "env")
+	require.NoError(t, os.WriteFile(secretsPath, []byte("CM_GIT_TOKEN=ghs_tok123456\n"), 0o600))
 
-	assert.Contains(t, env, "GIT_CONFIG_COUNT=1")
-	assert.Contains(t, env, "GIT_CONFIG_KEY_0=http.extraheader")
+	g := NewGit(t.TempDir(), secretsPath, "github.com", "")
+
+	env, err := g.credEnv()
+	require.NoError(t, err)
+
+	scriptPath := filepath.Join(os.TempDir(), "cm-git-credential-helper.sh")
+
+	// The helper is host-scoped and points at the script; no baked token.
+	assert.Contains(t, env, "GIT_CONFIG_COUNT=2")
+	assert.Contains(t, env, "GIT_CONFIG_KEY_0=credential.https://github.com.helper")
+	assert.Contains(t, env, "GIT_CONFIG_VALUE_0="+scriptPath)
+	assert.Contains(t, env, "GIT_CONFIG_KEY_1=credential.https://github.com.useHttpPath")
+	assert.Contains(t, env, "GIT_CONFIG_VALUE_1=false")
 
 	joined := strings.Join(env, "\n")
 
+	// The token VALUE never lands in the env — only the path to the helper does.
 	assert.NotContains(t, joined, "ghs_tok123456")
-	assert.Contains(t, joined, base64.StdEncoding.EncodeToString([]byte("x-access-token:ghs_tok123456")))
+	assert.NotContains(t, joined, "http.extraheader")
 	assert.NotContains(t, joined, "LLM_API_KEY")
 }
 
 func TestCredEnvNoToken(t *testing.T) {
 	t.Parallel()
 
-	g := NewGit(t.TempDir(), "", "")
-	env := g.credEnv()
+	g := NewGit(t.TempDir(), "", "", "")
+
+	env, err := g.credEnv()
+	require.NoError(t, err)
 
 	joined := strings.Join(env, "\n")
 
 	assert.NotContains(t, joined, "GIT_CONFIG_COUNT")
+	assert.NotContains(t, joined, "credential.https://")
 	assert.NotContains(t, joined, "http.extraheader")
 }
 
@@ -256,22 +273,123 @@ func TestCredEnvCACert(t *testing.T) {
 	t.Run("cert set injects GIT_SSL_CAINFO", func(t *testing.T) {
 		t.Parallel()
 
-		g := NewGit(t.TempDir(), "tok", "/run/cm-ca/ca.crt")
-		assert.Contains(t, g.credEnv(), "GIT_SSL_CAINFO=/run/cm-ca/ca.crt")
+		g := NewGit(t.TempDir(), "", "", "/run/cm-ca/ca.crt")
+
+		env, err := g.credEnv()
+		require.NoError(t, err)
+		assert.Contains(t, env, "GIT_SSL_CAINFO=/run/cm-ca/ca.crt")
 	})
 
 	t.Run("no cert omits GIT_SSL_CAINFO", func(t *testing.T) {
 		t.Parallel()
 
-		g := NewGit(t.TempDir(), "tok", "")
-		assert.NotContains(t, strings.Join(g.credEnv(), "\n"), "GIT_SSL_CAINFO")
+		g := NewGit(t.TempDir(), "", "", "")
+
+		env, err := g.credEnv()
+		require.NoError(t, err)
+		assert.NotContains(t, strings.Join(env, "\n"), "GIT_SSL_CAINFO")
 	})
+}
+
+// TestGitCredentialHelperScriptEchoesToken pins that the credential-helper script
+// credEnv installs echoes the CM_GIT_TOKEN it reads from the secrets file on
+// every `get` call, and re-reads a rotated file — the direct analog of the chat
+// backend's credhelper test.
+func TestGitCredentialHelperScriptEchoesToken(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	// TMPDIR isolates the helper script (also forbids t.Parallel, as intended).
+	t.Setenv("TMPDIR", t.TempDir())
+
+	secretsPath := filepath.Join(t.TempDir(), "env")
+	require.NoError(t, os.WriteFile(secretsPath, []byte("CM_GIT_TOKEN=tok1\n"), 0o600))
+
+	g := NewGit(t.TempDir(), secretsPath, "github.com", "")
+
+	// credEnv writes the helper script as a side effect.
+	_, err := g.credEnv()
+	require.NoError(t, err)
+
+	scriptPath := filepath.Join(os.TempDir(), "cm-git-credential-helper.sh")
+
+	runHelper := func(t *testing.T) string {
+		t.Helper()
+
+		out, err := exec.Command(scriptPath, "get").Output()
+		require.NoError(t, err)
+
+		return string(out)
+	}
+
+	out := runHelper(t)
+	assert.Contains(t, out, "username=x-access-token")
+	assert.Contains(t, out, "password=tok1")
+
+	// Rotate the secrets file; the helper must re-read fresh on the next call.
+	require.NoError(t, os.WriteFile(secretsPath, []byte("CM_GIT_TOKEN=tok2\n"), 0o600))
+
+	out = runHelper(t)
+	assert.Contains(t, out, "username=x-access-token")
+	assert.Contains(t, out, "password=tok2")
+}
+
+// TestGitCredentialRotation is the credential-rotation contract: it drives git's
+// real credential subsystem (`git credential fill`) with the env credEnv builds,
+// so the injected helper resolves the token exactly as a clone/fetch/push would.
+// It rewrites the secrets file between two fills and asserts the SECOND fill
+// returned the NEW token — proving a git op after rotation uses the current
+// token, not the one present when the worker started.
+func TestGitCredentialRotation(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	// TMPDIR isolates the helper script (also forbids t.Parallel, as intended).
+	t.Setenv("TMPDIR", t.TempDir())
+
+	secretsPath := filepath.Join(t.TempDir(), "env")
+	require.NoError(t, os.WriteFile(secretsPath, []byte("CM_GIT_TOKEN=tok-initial\n"), 0o600))
+
+	g := NewGit(t.TempDir(), secretsPath, "github.com", "")
+
+	gitconfig := filepath.Join(t.TempDir(), "gitconfig")
+
+	// fill runs `git credential fill` for https://github.com with credEnv's env,
+	// isolating global/system config so ONLY the injected helper answers.
+	fill := func(t *testing.T) string {
+		t.Helper()
+
+		env, err := g.credEnv()
+		require.NoError(t, err)
+
+		env = append(env, "GIT_CONFIG_GLOBAL="+gitconfig, "GIT_CONFIG_NOSYSTEM=1")
+
+		cmd := exec.Command("git", "credential", "fill")
+		cmd.Env = env
+		cmd.Stdin = strings.NewReader("protocol=https\nhost=github.com\n\n")
+
+		out, err := cmd.Output()
+		require.NoError(t, err)
+
+		return string(out)
+	}
+
+	// First git op resolves the initial token.
+	assert.Contains(t, fill(t), "password=tok-initial")
+
+	// The host rewrites the secrets file ~10m before expiry.
+	require.NoError(t, os.WriteFile(secretsPath, []byte("CM_GIT_TOKEN=tok-rotated\n"), 0o600))
+
+	// The SECOND git op must observe the rotated token — the bug this fixes.
+	second := fill(t)
+	assert.Contains(t, second, "password=tok-rotated")
+	assert.NotContains(t, second, "password=tok-initial")
 }
 
 func TestPushGuard(t *testing.T) {
 	t.Parallel()
 
-	g := NewGit(t.TempDir(), "tok", "")
+	g := NewGit(t.TempDir(), "", "", "")
 	g.SetBranchPolicy("cm/test-001", "main", "main") // cardBranch, baseBranch, remoteDefault
 
 	tests := []struct {
@@ -325,7 +443,7 @@ func TestPushGuardDenylistRegardless(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			g := NewGit(t.TempDir(), "tok", "")
+			g := NewGit(t.TempDir(), "", "", "")
 			g.SetBranchPolicy(tt.cardBranch, tt.baseBranch, tt.remoteDefault)
 
 			err := g.guardPush(tt.cardBranch, true)
@@ -342,7 +460,7 @@ func TestPushGuardDenylistRegardless(t *testing.T) {
 func TestForcePushRequiresLeaseTip(t *testing.T) {
 	t.Parallel()
 
-	g := NewGit(t.TempDir(), "tok", "")
+	g := NewGit(t.TempDir(), "", "", "")
 	g.SetBranchPolicy("cm/test-001", "main", "main")
 
 	err := g.ForcePushWithLease(context.Background(), "cm/test-001", "")
@@ -356,7 +474,7 @@ func TestForcePushRequiresLeaseTip(t *testing.T) {
 func TestGuardZeroValueFailClosed(t *testing.T) {
 	t.Parallel()
 
-	g := NewGit(t.TempDir(), "tok", "") // SetBranchPolicy never called
+	g := NewGit(t.TempDir(), "", "", "") // SetBranchPolicy never called
 
 	for _, branch := range []string{"cm/test-001", "main", "master", "feature/x", ""} {
 		for _, force := range []bool{false, true} {
@@ -374,7 +492,7 @@ func setupClonedRepo(t *testing.T) (string, string, string) {
 	bare := setupBareRemote(t)
 	ws := filepath.Join(t.TempDir(), "ws")
 
-	g := NewGit(ws, "", "")
+	g := NewGit(ws, "", "", "")
 	require.NoError(t, g.Clone(context.Background(), bare, "main"))
 
 	// Get the initial commit hash.
@@ -409,7 +527,7 @@ func TestRemoteTip(t *testing.T) {
 	t.Parallel()
 
 	bare, ws, _ := setupClonedRepo(t)
-	g := NewGit(ws, "", "")
+	g := NewGit(ws, "", "", "")
 	ctx := context.Background()
 
 	// Existing branch returns a non-empty hash.
@@ -435,7 +553,7 @@ func TestFetch(t *testing.T) {
 	// Create a new branch on the remote after the clone.
 	pushFileToBranch(t, bare, "extra.txt", "feature/new")
 
-	g := NewGit(ws, "", "")
+	g := NewGit(ws, "", "", "")
 
 	// Before fetch the branch is unknown to our clone.
 	_, err := g.run(ctx, "rev-parse", "--verify", "origin/feature/new")
@@ -453,7 +571,7 @@ func TestMergeBase(t *testing.T) {
 	t.Parallel()
 
 	_, ws, initHash := setupClonedRepo(t)
-	g := NewGit(ws, "", "")
+	g := NewGit(ws, "", "", "")
 	ctx := context.Background()
 
 	// Create a branch off main and add a commit.
@@ -471,7 +589,7 @@ func TestCommitFixup(t *testing.T) {
 	t.Parallel()
 
 	_, ws, _ := setupClonedRepo(t)
-	g := NewGit(ws, "", "")
+	g := NewGit(ws, "", "", "")
 	ctx := context.Background()
 
 	// Make an initial commit to target with fixup.
@@ -514,7 +632,7 @@ func TestCommitFixupCleanTree(t *testing.T) {
 	t.Parallel()
 
 	_, ws, _ := setupClonedRepo(t)
-	g := NewGit(ws, "", "")
+	g := NewGit(ws, "", "", "")
 	ctx := context.Background()
 
 	// No changes; fixup on HEAD should be a no-op.
@@ -535,7 +653,7 @@ func TestRebaseAutosquash(t *testing.T) {
 		t.Parallel()
 
 		_, ws, _ := setupClonedRepo(t)
-		g := NewGit(ws, "", "")
+		g := NewGit(ws, "", "", "")
 		ctx := context.Background()
 
 		// Capture the starting point (origin/main) before adding commits.
@@ -582,7 +700,7 @@ func TestRebaseAutosquash(t *testing.T) {
 		t.Parallel()
 
 		bare, ws, _ := setupClonedRepo(t)
-		g := NewGit(ws, "", "")
+		g := NewGit(ws, "", "", "")
 		ctx := context.Background()
 
 		// Create a commit on our branch.
@@ -620,7 +738,7 @@ func TestSoftResetSquash(t *testing.T) {
 	t.Parallel()
 
 	_, ws, _ := setupClonedRepo(t)
-	g := NewGit(ws, "", "")
+	g := NewGit(ws, "", "", "")
 	ctx := context.Background()
 
 	// Create two commits.
@@ -671,7 +789,7 @@ func TestCommitWithMessage(t *testing.T) {
 	t.Parallel()
 
 	_, ws, _ := setupClonedRepo(t)
-	g := NewGit(ws, "", "")
+	g := NewGit(ws, "", "", "")
 	ctx := context.Background()
 
 	require.NoError(t, os.WriteFile(filepath.Join(ws, "new.txt"), []byte("hello\n"), 0o644))
@@ -689,7 +807,7 @@ func TestCommitWithMessageCleanTree(t *testing.T) {
 	t.Parallel()
 
 	_, ws, _ := setupClonedRepo(t)
-	g := NewGit(ws, "", "")
+	g := NewGit(ws, "", "", "")
 	ctx := context.Background()
 
 	committed, err := g.CommitWithMessage(ctx, "no changes")
@@ -701,7 +819,7 @@ func TestLastCommitTouching(t *testing.T) {
 	t.Parallel()
 
 	_, ws, _ := setupClonedRepo(t)
-	g := NewGit(ws, "", "")
+	g := NewGit(ws, "", "", "")
 	ctx := context.Background()
 
 	// Commit touching foo.txt.
@@ -744,7 +862,7 @@ func TestHead(t *testing.T) {
 	t.Parallel()
 
 	_, ws, initHash := setupClonedRepo(t)
-	g := NewGit(ws, "", "")
+	g := NewGit(ws, "", "", "")
 	ctx := context.Background()
 
 	h, err := g.Head(ctx)
@@ -756,7 +874,7 @@ func TestCheckout(t *testing.T) {
 	t.Parallel()
 
 	bare, ws, _ := setupClonedRepo(t)
-	g := NewGit(ws, "", "")
+	g := NewGit(ws, "", "", "")
 	ctx := context.Background()
 
 	// Create a branch on the remote.
@@ -775,7 +893,7 @@ func TestDiff(t *testing.T) {
 	t.Parallel()
 
 	_, ws, _ := setupClonedRepo(t)
-	g := NewGit(ws, "", "")
+	g := NewGit(ws, "", "", "")
 	ctx := context.Background()
 
 	// Add a commit on main branch.
@@ -794,7 +912,7 @@ func TestDiffNoChanges(t *testing.T) {
 	t.Parallel()
 
 	_, ws, _ := setupClonedRepo(t)
-	g := NewGit(ws, "", "")
+	g := NewGit(ws, "", "", "")
 	ctx := context.Background()
 
 	// No commits beyond origin/main, diff should be empty.

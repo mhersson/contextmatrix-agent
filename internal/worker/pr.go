@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os/exec"
 	"regexp"
 	"strings"
 
+	"github.com/mhersson/contextmatrix-agent/internal/secrets"
 	"github.com/mhersson/contextmatrix-harness/tools"
 )
 
@@ -18,28 +20,55 @@ import (
 var prURLPattern = regexp.MustCompile(`https?://\S+`)
 
 // PRCreator opens a pull request via the gh CLI. It satisfies
-// orchestrator.PRCreator. The git token is injected as GH_TOKEN over a scrubbed
-// env so gh authenticates to GitHub without inheriting any other secret from the
-// process; gh runs in the workspace so it resolves the repo from origin.
+// orchestrator.PRCreator. GH_TOKEN is resolved fresh from the secrets file at
+// call time and injected over a scrubbed env so gh authenticates to GitHub
+// without inheriting any other secret from the process; gh runs in the workspace
+// so it resolves the repo from origin.
 type PRCreator struct {
-	workspace  string
-	token      string
+	workspace string
+
+	// secretsEnvPath is the KEY=value secrets file CM_GIT_TOKEN is re-read from
+	// per gh invocation, so an end-of-run PR uses the current token even after the
+	// host rotated it. Empty means no auth (public/file:// remotes).
+	secretsEnvPath string
+
 	caCertFile string // optional in-container extra CA PEM path; empty disables it
 	host       string // repo host for GH_HOST (e.g. acme.ghe.com); empty leaves gh on its github.com default
 }
 
-// NewPRCreator builds a PRCreator for the given workspace and GitHub token (the
-// same minted token the worker's Git uses to push). caCertFile is an optional
-// in-container path to an extra CA PEM; empty disables the extra trust. repoURL
-// is the clone URL (CM_REPO_URL); its host is exported as GH_HOST so gh
-// recognizes a GitHub Enterprise host that it cannot infer from the git remote.
-func NewPRCreator(workspace, token, caCertFile, repoURL string) *PRCreator {
+// NewPRCreator builds a PRCreator for the given workspace. secretsEnvPath is the
+// secrets file gh re-reads CM_GIT_TOKEN from per invocation (empty disables
+// auth). caCertFile is an optional in-container path to an extra CA PEM; empty
+// disables the extra trust. repoURL is the clone URL (CM_REPO_URL); its host is
+// exported as GH_HOST so gh recognizes a GitHub Enterprise host that it cannot
+// infer from the git remote.
+func NewPRCreator(workspace, secretsEnvPath, caCertFile, repoURL string) *PRCreator {
 	return &PRCreator{
-		workspace:  workspace,
-		token:      token,
-		caCertFile: caCertFile,
-		host:       hostFromRepoURL(repoURL),
+		workspace:      workspace,
+		secretsEnvPath: secretsEnvPath,
+		caCertFile:     caCertFile,
+		host:           hostFromRepoURL(repoURL),
 	}
+}
+
+// gitToken reads CM_GIT_TOKEN fresh from the secrets file so each gh invocation
+// authenticates with the current token, not one cached at startup. It returns ""
+// when no secrets file is configured (public/file:// remotes) or the file cannot
+// be read — gh then runs unauthenticated and fails loudly rather than silently
+// using a stale token.
+func (p *PRCreator) gitToken() string {
+	if p.secretsEnvPath == "" {
+		return ""
+	}
+
+	src, err := secrets.Open(p.secretsEnvPath)
+	if err != nil {
+		slog.Warn("read git token for gh failed", "error", err)
+
+		return ""
+	}
+
+	return src.Get("CM_GIT_TOKEN")
 }
 
 // hostFromRepoURL returns the host[:port] of an https repo URL, or "" when
@@ -71,7 +100,12 @@ func (p *PRCreator) buildCmd(ctx context.Context, title, body, base, head string
 	cmd.Dir = p.workspace
 	cmd.Stdin = strings.NewReader(body)
 
-	extra := []string{"GH_TOKEN=" + p.token}
+	var extra []string
+
+	if token := p.gitToken(); token != "" {
+		extra = append(extra, "GH_TOKEN="+token)
+	}
+
 	if p.host != "" {
 		// gh does not treat a GitHub Enterprise host (e.g. acme.ghe.com) as a
 		// known host from the git remote alone and refuses to open the PR; GH_HOST

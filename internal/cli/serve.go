@@ -107,6 +107,11 @@ func runServe(ctx context.Context, configPath string) error {
 	skillsCache := filepath.Join(filepath.Dir(sharedDir), "task-skills-cache")
 	skillsResolver := taskskills.NewResolver(cfg.ContextMatrixURL, cfg.APIKey, skillsCache, provider, logger)
 
+	// Per-run credentials: when a trigger carries a CM-provisioned git token, its
+	// credentials are staged into <secrets_dir>/runs/<card_id>/env and refreshed
+	// from CM until the run is torn down, rather than shared process-wide.
+	credentials := secrets.NewRunCredentials(cfg.SecretsDir, cfg.ContextMatrixURL, cfg.APIKey, logger)
+
 	refreshCtx, refreshCancel := context.WithCancel(context.Background())
 	defer refreshCancel()
 
@@ -137,7 +142,7 @@ func runServe(ctx context.Context, configPath string) error {
 		IdleTimeout:      cfg.IdleOutputTimeout,
 		PollInterval:     cfg.IdleWatchdogInterval,
 		OnLog:            bridge.BridgeLine,
-		OnExit:           onContainerExit(cbClient, logger),
+		OnExit:           onContainerExit(cbClient, credentials, logger),
 		Logger:           logger,
 		Metrics:          mx,
 	})
@@ -146,6 +151,12 @@ func runServe(ctx context.Context, configPath string) error {
 	// we start serving — a labeled container in a fresh process is an orphan.
 	if err := exec.CleanupOrphans(ctx); err != nil {
 		logger.Warn("orphan cleanup failed", "error", err)
+	}
+
+	// Likewise sweep leftover per-run secret files: a fresh process tracks no
+	// runs, so any run dir on disk is stale secret material from a previous one.
+	if err := credentials.CleanupOrphans(); err != nil {
+		logger.Warn("per-run secrets cleanup failed", "error", err)
 	}
 
 	var draining atomic.Bool
@@ -163,6 +174,7 @@ func runServe(ctx context.Context, configPath string) error {
 		Reporter:       cbClient,
 		Verifier:       cbClient,
 		SkillsResolver: skillsResolver,
+		Credentials:    credentials,
 		LaunchEnv:      launchEnv(cfg, sharedDir),
 		Replay:         replay,
 		Dedup:          dedup,
@@ -288,11 +300,28 @@ func gracefulShutdown(
 	}
 }
 
-// onContainerExit builds the executor OnExit hook: it maps the container exit
-// code to a runner-status and reports it to ContextMatrix on a bounded detached
-// context (the supervision goroutine carries no request ctx).
-func onContainerExit(reporter webhook.StatusReporter, logger *slog.Logger) func(project, cardID string, exitCode int64) {
+// onContainerExit builds the executor OnExit hook: it tears down the run's
+// per-run credentials (stop the refresh loop, remove the run dir), maps the
+// container exit code to a runner-status, and reports it to ContextMatrix on a
+// bounded detached context (the supervision goroutine carries no request ctx).
+// waitAndCleanup is the single funnel every container exits through, so this is
+// the teardown seam for the per-run refresh loop.
+//
+// Ordering invariant: this exit-path Teardown runs BEFORE the exit status
+// callback below, and that callback is what gates CM's re-triggers (CM learns
+// the run finished only from it). So under the normal flow the tracker.Remove →
+// Teardown window is already closed before CM can re-trigger, and it cannot be
+// hit. A re-trigger racing in out of band inside that microsecond window would
+// at worst lose its own fresh provisioning to this Teardown — a loud,
+// self-inflicted failure — never a leaked or cross-run token.
+func onContainerExit(
+	reporter webhook.StatusReporter,
+	credentials *secrets.RunCredentials,
+	logger *slog.Logger,
+) func(project, cardID string, exitCode int64) {
 	return func(project, cardID string, exitCode int64) {
+		credentials.Teardown(project, cardID)
+
 		status, message := exitStatus(exitCode)
 
 		ctx, cancel := context.WithTimeout(context.Background(), onExitTimeout)
@@ -327,9 +356,14 @@ func launchEnv(cfg *config.ServiceConfig, secretsHostDir string) webhook.LaunchE
 	}
 
 	return webhook.LaunchEnv{
-		BaseImage:                 cfg.BaseImage,
-		MCPURL:                    composeMCPURL(base),
-		MCPAPIKey:                 cfg.MCPAPIKey,
+		BaseImage: cfg.BaseImage,
+		MCPURL:    composeMCPURL(base),
+		MCPAPIKey: cfg.MCPAPIKey,
+		DefaultLLMEndpoint: secrets.EndpointSecrets{
+			APIKey:  cfg.LLMEndpoint.APIKey,
+			BaseURL: cfg.LLMEndpoint.BaseURL,
+			Type:    cfg.LLMEndpoint.Type,
+		},
 		SecretsHostDir:            secretsHostDir,
 		CACertFile:                cfg.CACertFile,
 		MemoryBytes:               cfg.ContainerMemoryBytes,

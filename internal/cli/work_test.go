@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/config"
+	"github.com/mhersson/contextmatrix-agent/internal/secrets"
 	"github.com/mhersson/contextmatrix-harness/llm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -64,6 +65,45 @@ func TestCAInjections(t *testing.T) {
 	t.Run("bad path errors", func(t *testing.T) {
 		_, _, err := caInjections(filepath.Join(t.TempDir(), "nope.pem"))
 		require.Error(t, err)
+	})
+}
+
+// TestResolveLLMValue pins the env-first-then-file resolution the worker uses
+// for LLM endpoint values: a set container env var wins (set-but-empty counts
+// as set, so an empty LLM_BASE_URL overrides the file with "use the canonical
+// default"), and an unset env var falls back to the mounted secrets file.
+func TestResolveLLMValue(t *testing.T) {
+	writeEnvFile := func(t *testing.T, body string) *secrets.Source {
+		t.Helper()
+
+		path := filepath.Join(t.TempDir(), "env")
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+
+		src, err := secrets.Open(path)
+		require.NoError(t, err)
+
+		return src
+	}
+
+	t.Run("env set wins over file", func(t *testing.T) {
+		src := writeEnvFile(t, "LLM_API_KEY=from-file\n")
+		t.Setenv("LLM_API_KEY", "from-env")
+
+		assert.Equal(t, "from-env", resolveLLMValue("LLM_API_KEY", src))
+	})
+
+	t.Run("env set-but-empty wins over file", func(t *testing.T) {
+		src := writeEnvFile(t, "LLM_BASE_URL=https://from-file/v1\n")
+		t.Setenv("LLM_BASE_URL", "")
+
+		assert.Empty(t, resolveLLMValue("LLM_BASE_URL", src),
+			"set-but-empty env must win: empty base url means the type's canonical default")
+	})
+
+	t.Run("env unset falls back to file", func(t *testing.T) {
+		src := writeEnvFile(t, "LLM_TYPE=openai\n")
+		// LLM_TYPE deliberately not set in the environment.
+		assert.Equal(t, "openai", resolveLLMValue("LLM_TYPE", src))
 	})
 }
 

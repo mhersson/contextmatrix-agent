@@ -49,9 +49,14 @@ func newWorkCmd() *cobra.Command {
 				return fmt.Errorf("read secrets: %w", err)
 			}
 
-			spec.LLMKey = src.Get("LLM_API_KEY")
-			spec.LLMBaseURL = src.Get("LLM_BASE_URL")
-			spec.LLMType = src.Get("LLM_TYPE")
+			// LLM values resolve env-first-then-file: the llm-only-payload delivery
+			// sets LLM_* as container env, which wins (set-but-empty counts as set),
+			// falling back to the mounted file otherwise. The git token is NOT
+			// resolved from env — the credential helper re-reads CM_GIT_TOKEN from the
+			// file per git op so host-side rotation reaches a long-running worker.
+			spec.LLMKey = resolveLLMValue("LLM_API_KEY", src)
+			spec.LLMBaseURL = resolveLLMValue("LLM_BASE_URL", src)
+			spec.LLMType = resolveLLMValue("LLM_TYPE", src)
 			spec.GitToken = src.Get("CM_GIT_TOKEN")
 
 			// human off (io.Discard), JSONL → stdout for the service log bridge.
@@ -207,6 +212,7 @@ func specFromEnv() (worker.RunSpec, error) {
 		RepoURL:                   repoURL,
 		MCPURL:                    mcpURL,
 		MCPAPIKey:                 mcpAPIKey,
+		SecretsEnvPath:            cmEnvFile,
 		BaseBranch:                os.Getenv("CM_BASE_BRANCH"),
 		Model:                     os.Getenv("CM_MODEL"),
 		Interactive:               os.Getenv("CM_INTERACTIVE") == "true",
@@ -229,6 +235,20 @@ func specFromEnv() (worker.RunSpec, error) {
 	}
 
 	return spec, nil
+}
+
+// resolveLLMValue resolves an LLM endpoint value env-first-then-file: a
+// container env var set by the llm-only-payload delivery wins (os.LookupEnv, so
+// set-but-empty counts as set — an empty LLM_BASE_URL means "the type's
+// canonical default"), falling back to the mounted secrets file when the var is
+// unset. Used only for the LLM_* values; the git token stays file-only so the
+// credential helper picks up host-side rotation.
+func resolveLLMValue(name string, src *secrets.Source) string {
+	if v, ok := os.LookupEnv(name); ok {
+		return v
+	}
+
+	return src.Get(name)
 }
 
 // requireEnv returns the value of the named env var or an error naming it.
