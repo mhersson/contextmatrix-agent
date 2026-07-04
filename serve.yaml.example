@@ -6,7 +6,7 @@
 # Nested keys use a double-underscore separator:
 #   CMX_GITHUB__AUTH_MODE=pat
 
-# ─── ContextMatrix connectivity ───────────────────────────────────────────────
+# --- ContextMatrix connectivity -----------------------------------------------
 
 # URL of the ContextMatrix API reachable from the agent service host.
 # Used for status callbacks. Required.
@@ -34,7 +34,7 @@ api_key: ""
 # CMX_MCP_API_KEY
 mcp_api_key: ""
 
-# ─── Serving ──────────────────────────────────────────────────────────────────
+# --- Serving ------------------------------------------------------------------
 
 # Port the agent service listens on. Default: 9092.
 # CMX_PORT
@@ -50,7 +50,7 @@ port: 9092
 # CMX_LOG_LEVEL
 log_level: info
 
-# ─── Worker containers ────────────────────────────────────────────────────────
+# --- Worker containers --------------------------------------------------------
 
 # Docker image launched for each card. Pin to a digest for reproducibility.
 # Required.
@@ -113,17 +113,6 @@ secrets_dir: /var/run/cm-agent/secrets
 #   HTTP_PROXY: http://proxy.example.com:3128
 #   NO_PROXY: localhost,127.0.0.1
 
-# ─── LLM endpoint ─────────────────────────────────────────────────────────────
-# The inference endpoint workers call.
-#   type:     openrouter (default) | openai
-#   base_url: required for the openai type (operator-supplied)
-#   api_key:  bearer key for the endpoint
-# CMX_LLM_ENDPOINT__TYPE / CMX_LLM_ENDPOINT__BASE_URL / CMX_LLM_ENDPOINT__API_KEY
-llm_endpoint:
-  type: openrouter
-  # base_url: https://your-llm-endpoint.example/v1
-  api_key: ""
-
 # Default model slug used when a trigger does not specify a model or
 # the requested model is unresolvable. Optional.
 # CMX_DEFAULT_MODEL
@@ -138,7 +127,7 @@ llm_endpoint:
 # unnoticed.
 # reasoning_effort: ""
 
-# ─── Per-card budget ──────────────────────────────────────────────────────────
+# --- Per-card budget ----------------------------------------------------------
 
 # Cumulative USD ceiling per card. Workers receive this as CMX_MAX_CARD_COST.
 # The orchestrator enforces this ceiling and aborts the card when exceeded.
@@ -157,40 +146,7 @@ max_card_cost: 5.0
 # CMX_SELECTOR_PRICE_HEADROOM
 selector_price_headroom: 1.5
 
-# ─── GitHub authentication ────────────────────────────────────────────────────
-
-github:
-  # Authentication mode: app | pat. Required.
-  # CMX_GITHUB__AUTH_MODE
-  auth_mode: pat
-
-  # Optional GitHub Enterprise host (bare hostname or full URL). When set and
-  # api_base_url is empty, the API base URL is derived as
-  # https://<host>/api/v3. An explicit api_base_url below wins.
-  # CMX_GITHUB__HOST
-  # host: ghe.example.com
-
-  # Optional GitHub API base URL. Defaults to https://api.github.com. Set this
-  # directly for non-standard layouts (e.g. GHEC-DR https://api.acme.ghe.com);
-  # otherwise prefer the simpler "host" above.
-  # CMX_GITHUB__API_BASE_URL
-  # api_base_url: https://api.github.com
-
-  # GitHub App credentials (required when auth_mode is "app").
-  app:
-    # CMX_GITHUB__APP__APP_ID
-    # app_id: 0
-    # CMX_GITHUB__APP__INSTALLATION_ID
-    # installation_id: 0
-    # CMX_GITHUB__APP__PRIVATE_KEY_PATH
-    # private_key_path: /etc/contextmatrix-agent/github-app.pem
-
-  # Fine-grained PAT (required when auth_mode is "pat").
-  pat:
-    # CMX_GITHUB__PAT__TOKEN
-    # token: ""
-
-# ─── Webhook replay protection ────────────────────────────────────────────────
+# --- Webhook replay protection ------------------------------------------------
 
 # Maximum clock skew (in seconds) tolerated between ContextMatrix and the agent
 # service when validating HMAC timestamps. Default: 330 (5.5 minutes).
@@ -202,7 +158,7 @@ webhook_replay_skew_seconds: 330
 # CMX_WEBHOOK_REPLAY_CACHE_SIZE
 webhook_replay_cache_size: 10000
 
-# ─── Message deduplication ────────────────────────────────────────────────────
+# --- Message deduplication ----------------------------------------------------
 
 # How long a delivered message_id is retained to suppress retries. Default: 600s.
 # CMX_MESSAGE_DEDUP_TTL_SECONDS
@@ -212,7 +168,7 @@ message_dedup_ttl_seconds: 600
 # CMX_MESSAGE_DEDUP_CACHE_SIZE
 message_dedup_cache_size: 1000
 
-# ─── Worker CMX_* knobs ───────────────────────────────────────────────────────
+# --- Worker CMX_* knobs -------------------------------------------------------
 
 # Maximum wall-clock seconds a bash tool call may run inside a worker container.
 # Default: 600.
@@ -223,3 +179,58 @@ bash_timeout_max_seconds: 600
 # Default: 131072.
 # CMX_TOOL_OUTPUT_MAX_BYTES
 tool_output_max_bytes: 131072
+
+# --- Local credential fallback (deprecated) -----------------------------------
+#
+# Both blocks below are optional. In a multi-user ContextMatrix deployment
+# (the default), CM provisions the GitHub token and the LLM endpoint per run —
+# via the trigger payload's git_token/llm_endpoint fields and the
+# task-skills-source clone token — so leave both absent entirely; the agent
+# then runs in "CM-provisioned credential mode" (logged at startup).
+#
+# Set either block only to talk to a pre-multi-user ContextMatrix that does
+# not yet provision that credential. This fallback exists for that compat
+# window only and will be removed once CM-provisioned credentials are
+# universal — do not build new deployments around it.
+
+# The inference endpoint workers call, used when CM does not provision one.
+#   type:     openrouter (default) | openai
+#   base_url: required for the openai type (operator-supplied)
+#   api_key:  bearer key for the endpoint
+# CMX_LLM_ENDPOINT__TYPE / CMX_LLM_ENDPOINT__BASE_URL / CMX_LLM_ENDPOINT__API_KEY
+# llm_endpoint:
+#   type: openrouter
+#   base_url: https://your-llm-endpoint.example/v1
+#   api_key: ""
+
+# GitHub credentials, used when CM does not provision a per-run git token.
+# github:
+#   # Authentication mode: app | pat.
+#   # CMX_GITHUB__AUTH_MODE
+#   auth_mode: pat
+#
+#   # Optional GitHub Enterprise host (bare hostname or full URL). When set and
+#   # api_base_url is empty, the API base URL is derived as
+#   # https://<host>/api/v3. An explicit api_base_url below wins.
+#   # CMX_GITHUB__HOST
+#   # host: ghe.example.com
+#
+#   # Optional GitHub API base URL. Defaults to https://api.github.com. Set
+#   # this directly for non-standard layouts (e.g. GHEC-DR
+#   # https://api.acme.ghe.com); otherwise prefer the simpler "host" above.
+#   # CMX_GITHUB__API_BASE_URL
+#   # api_base_url: https://api.github.com
+#
+#   # GitHub App credentials (required when auth_mode is "app").
+#   app:
+#     # CMX_GITHUB__APP__APP_ID
+#     # app_id: 0
+#     # CMX_GITHUB__APP__INSTALLATION_ID
+#     # installation_id: 0
+#     # CMX_GITHUB__APP__PRIVATE_KEY_PATH
+#     # private_key_path: /etc/contextmatrix-agent/github-app.pem
+#
+#   # Fine-grained PAT (required when auth_mode is "pat").
+#   pat:
+#     # CMX_GITHUB__PAT__TOKEN
+#     # token: ""

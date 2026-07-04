@@ -128,9 +128,13 @@ export LLM_API_KEY=<your-api-key>
    ```bash
    mkdir -p ~/.config/contextmatrix-agent
    cp serve.yaml.example ~/.config/contextmatrix-agent/serve.yaml
-   # set: api_key, mcp_api_key, llm_endpoint.api_key, base_image,
-   #      container_contextmatrix_url, github.*
+   # set: api_key, mcp_api_key, base_image, container_contextmatrix_url
    ```
+
+   A multi-user ContextMatrix provisions git tokens and the LLM endpoint per
+   run, so the local `github.*` and `llm_endpoint.*` blocks are optional —
+   they are the deprecated fallback for pre-multi-user servers (see the
+   "Local credential fallback" section in `serve.yaml.example`).
 
    `container_contextmatrix_url` is required in practice — workers resolve their
    MCP URL from it; without it they point at their own localhost and fail to
