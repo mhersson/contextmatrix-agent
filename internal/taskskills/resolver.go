@@ -110,6 +110,10 @@ func (r *Resolver) Resolve(ctx context.Context) (string, error) {
 	// process logs the deprecation warning once (not per resolve attempt).
 	token := p.Token
 	if token == "" {
+		if r.gen == nil {
+			return "", fmt.Errorf("CM did not provision a task-skills clone token and no local github config exists")
+		}
+
 		r.warnLocalMintOnce()
 
 		var genErr error

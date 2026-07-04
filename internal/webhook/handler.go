@@ -97,6 +97,15 @@ type LaunchEnv struct {
 	// with a payload token mounts its per-run directory instead.
 	SecretsHostDir string
 
+	// SharedSecretsAvailable is true only when the shared, process-wide secrets
+	// refresher is running — i.e. local github config is present, so the
+	// SecretsHostDir mount actually carries a git token. False when github is
+	// unconfigured (CM-provisioned credentials are the only source): a trigger
+	// with no payload git token then has no fallback at all, and
+	// admitAndLaunch fail-closes it rather than launching a container with a
+	// dud mount.
+	SharedSecretsAvailable bool
+
 	// DefaultLLMEndpoint is the local-config LLM endpoint staged into a per-run
 	// credential file when the trigger payload omits its own llm_endpoint (the
 	// compat-window fallback). The shared secrets file already carries these
@@ -435,6 +444,13 @@ func (s *Server) launch(spec executor.LaunchSpec, p protocol.TriggerPayload) {
 // container mounting a per-run dir nothing provisioned, which the old run's
 // Teardown then deletes. Rejecting up front is the only race-free outcome; the
 // winner's refresh loop and mounted run dir stay intact.
+//
+// Credential-availability guards: github and llm_endpoint are both optional
+// local config now that ContextMatrix can provision either per run, but a run
+// needs at least ONE source for each. A payload missing a credential AND
+// lacking the corresponding local fallback is fail-closed rejected here —
+// before any provisioning or executor call — rather than launched with a dud
+// mount or an empty LLM endpoint.
 func (s *Server) admitAndLaunch(ctx context.Context, spec executor.LaunchSpec, p protocol.TriggerPayload) string {
 	project, cardID := p.Project, p.CardID
 
@@ -447,6 +463,20 @@ func (s *Server) admitAndLaunch(ctx context.Context, spec executor.LaunchSpec, p
 			"project", project, "card_id", cardID)
 
 		return "card already running"
+	}
+
+	if p.GitToken == "" && !s.launchEnv.SharedSecretsAvailable {
+		s.logger.Warn("trigger rejected: no git credential source",
+			"project", project, "card_id", cardID)
+
+		return "CM did not provision a git token and no local github config exists"
+	}
+
+	if p.LLMEndpoint == nil && s.launchEnv.DefaultLLMEndpoint.APIKey == "" {
+		s.logger.Warn("trigger rejected: no llm_endpoint credential source",
+			"project", project, "card_id", cardID)
+
+		return "CM did not provision an llm_endpoint and no local llm_endpoint config exists"
 	}
 
 	provisioned := false
@@ -484,9 +514,10 @@ func (s *Server) admitAndLaunch(ctx context.Context, spec executor.LaunchSpec, p
 // the payload's llm_endpoint when present, else the local-config default (the
 // compat-window fallback). Gating the per-run file on the git token alone means
 // a git-token-only payload still gets a working LLM endpoint from local config.
-// A git-token-only payload with no local LLM config yields an empty endpoint —
-// intentional: the env file then carries only the git token, matching what a
-// shared-secrets deployment without llm_endpoint config would stage.
+// admitAndLaunch's llm_endpoint guard runs before this is ever called, so by
+// the time we get here p.LLMEndpoint != nil or DefaultLLMEndpoint.APIKey != ""
+// — the fully-empty result this used to describe as "intentional" is no
+// longer reachable in production.
 func (s *Server) runEndpoint(p protocol.TriggerPayload) secrets.EndpointSecrets {
 	if p.LLMEndpoint != nil {
 		return secrets.EndpointSecrets{
