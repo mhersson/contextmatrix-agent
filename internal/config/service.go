@@ -60,6 +60,15 @@ type GitHubConfig struct {
 	PAT        GitHubPATConfig `koanf:"pat"`
 }
 
+// Configured reports whether a GitHub auth mode is set locally. False means
+// ContextMatrix provisions git credentials per run instead: the github block
+// may be entirely absent (validate() then permits it), or — if some other
+// field is set while auth_mode is left empty — an invalid partial config that
+// validate() still rejects.
+func (g GitHubConfig) Configured() bool {
+	return g.AuthMode != ""
+}
+
 // withDerivedAPIBaseURL fills APIBaseURL from Host when only Host is set,
 // producing the standard GitHub Enterprise Server "https://<host>/api/v3"
 // endpoint. An explicit api_base_url is preserved so operators can still target
@@ -356,10 +365,10 @@ func (c *ServiceConfig) Validate() error {
 		return fmt.Errorf("api_key must be at least 32 characters, got %d", len(c.APIKey))
 	}
 
-	if c.LLMEndpoint.APIKey == "" {
-		return fmt.Errorf("llm_endpoint.api_key is required")
-	}
-
+	// llm_endpoint.api_key is intentionally not required here: ContextMatrix
+	// provisions the inference endpoint per run in multi-user deployments, and
+	// this block is only a fallback for a pre-multi-user CM (see GitHub.validate
+	// below for the analogous github fallback).
 	switch c.LLMEndpoint.Type {
 	case "", "openrouter":
 	case "openai":
@@ -451,8 +460,21 @@ func (c *ServiceConfig) Validate() error {
 }
 
 // validate checks the GitHub auth block, mirroring the runner's contract:
-// exactly one auth path is populated per auth_mode.
+// exactly one auth path is populated per auth_mode. An entirely empty block
+// (Configured() false and every other field zero) is valid: ContextMatrix
+// provisions a per-run git token instead, and the agent never constructs a
+// local token provider (see cli.newTokenProvider). A PARTIAL block — some
+// other field set while auth_mode is left empty, e.g. a stray pat.token —
+// is still rejected below via the same "auth_mode is required" error a fully
+// unknown auth_mode produces; silently ignoring it would strand credentials
+// the operator meant to use.
 func (g *GitHubConfig) validate() error {
+	if !g.Configured() &&
+		g.Host == "" && g.APIBaseURL == "" &&
+		g.App == (GitHubAppConfig{}) && g.PAT == (GitHubPATConfig{}) {
+		return nil
+	}
+
 	if g.Host != "" {
 		if err := validateGitHubHost(g.Host); err != nil {
 			return err

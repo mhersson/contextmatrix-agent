@@ -266,6 +266,59 @@ func TestResolveWarnsOncePerProcessNotPerAttempt(t *testing.T) {
 	assert.Equal(t, 1, warnCount, "deprecation warning must fire once per process, not per resolve attempt")
 }
 
+// ---- nil gen (github unconfigured) -------------------------------------------
+
+// TestResolveNilGenAndNoTokenReturnsClearError pins the fail-closed guard: when
+// CM's task-skills-source response carries no clone token AND the agent has no
+// local github config (gen is nil), Resolve must return a clear error rather
+// than panic on a nil-interface method call, and must never reach the cloner.
+func TestResolveNilGenAndNoTokenReturnsClearError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"git_remote_url": "https://example.test/skills.git",
+			"ref":            "abc123",
+		})
+	}))
+	defer srv.Close()
+
+	r := NewResolver(srv.URL, "key", t.TempDir(), nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	r.cloner = func(context.Context, string, string, string, string) error {
+		t.Fatal("cloner must not be called when there is no token source at all")
+
+		return nil
+	}
+
+	_, err := r.Resolve(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no local github config")
+}
+
+// TestResolveNilGenWithCMTokenSucceeds proves a nil gen only matters when local
+// minting would actually be needed: a CM-provisioned token must still work.
+func TestResolveNilGenWithCMTokenSucceeds(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"git_remote_url": "https://example.test/skills.git",
+			"ref":            "abc123",
+			"token":          "cm-provisioned-token",
+		})
+	}))
+	defer srv.Close()
+
+	var gotTok string
+
+	r := NewResolver(srv.URL, "key", t.TempDir(), nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	r.cloner = func(_ context.Context, _, _, _, token string) error {
+		gotTok = token
+
+		return nil
+	}
+
+	_, err := r.Resolve(context.Background())
+	require.NoError(t, err, "a nil gen must not block a CM-provisioned token")
+	assert.Equal(t, "cm-provisioned-token", gotTok)
+}
+
 // TestResolveNoWarnWhenTokenProvisioned asserts the deprecation warning stays
 // silent once CM provisions a clone token.
 func TestResolveNoWarnWhenTokenProvisioned(t *testing.T) {

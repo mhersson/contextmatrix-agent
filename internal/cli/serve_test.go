@@ -51,6 +51,21 @@ func TestExitStatus(t *testing.T) {
 	}
 }
 
+func TestLaunchEnv_SharedSecretsAvailable(t *testing.T) {
+	t.Run("true when github is configured", func(t *testing.T) {
+		cfg := &config.ServiceConfig{
+			ContextMatrixURL: "http://public:8080",
+			GitHub:           config.GitHubConfig{AuthMode: "pat", PAT: config.GitHubPATConfig{Token: "t"}},
+		}
+		assert.True(t, launchEnv(cfg, "/secrets/shared").SharedSecretsAvailable)
+	})
+
+	t.Run("false when github is unconfigured", func(t *testing.T) {
+		cfg := &config.ServiceConfig{ContextMatrixURL: "http://public:8080"}
+		assert.False(t, launchEnv(cfg, "/secrets/shared").SharedSecretsAvailable)
+	})
+}
+
 func TestLaunchEnvMCPURL(t *testing.T) {
 	t.Run("container override wins for MCP base", func(t *testing.T) {
 		cfg := &config.ServiceConfig{
@@ -131,6 +146,38 @@ func TestNewTokenProvider(t *testing.T) {
 		_, err := newTokenProvider(config.GitHubConfig{AuthMode: "oauth"})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "auth_mode")
+	})
+
+	t.Run("unconfigured returns nil provider and nil error", func(t *testing.T) {
+		p, err := newTokenProvider(config.GitHubConfig{})
+		require.NoError(t, err)
+		assert.Nil(t, p, "an empty github block must yield no provider, not an error")
+	})
+}
+
+func TestLocalCredentialConfigIncomplete(t *testing.T) {
+	t.Run("both configured is complete", func(t *testing.T) {
+		cfg := &config.ServiceConfig{
+			GitHub:      config.GitHubConfig{AuthMode: "pat", PAT: config.GitHubPATConfig{Token: "t"}},
+			LLMEndpoint: config.LLMEndpoint{APIKey: "k"},
+		}
+		assert.False(t, localCredentialConfigIncomplete(cfg))
+	})
+
+	t.Run("github absent is incomplete", func(t *testing.T) {
+		cfg := &config.ServiceConfig{LLMEndpoint: config.LLMEndpoint{APIKey: "k"}}
+		assert.True(t, localCredentialConfigIncomplete(cfg))
+	})
+
+	t.Run("llm_endpoint absent is incomplete", func(t *testing.T) {
+		cfg := &config.ServiceConfig{
+			GitHub: config.GitHubConfig{AuthMode: "pat", PAT: config.GitHubPATConfig{Token: "t"}},
+		}
+		assert.True(t, localCredentialConfigIncomplete(cfg))
+	})
+
+	t.Run("both absent is incomplete", func(t *testing.T) {
+		assert.True(t, localCredentialConfigIncomplete(&config.ServiceConfig{}))
 	})
 }
 
