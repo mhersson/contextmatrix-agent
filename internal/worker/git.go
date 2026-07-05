@@ -659,3 +659,68 @@ func (g *Git) Diff(ctx context.Context, base string) (string, error) {
 
 	return out, nil
 }
+
+// AddWorktree creates a linked worktree at path on a new branch cut from
+// startRef. Candidate worktrees share the clone's object store.
+func (g *Git) AddWorktree(ctx context.Context, path, branch, startRef string) error {
+	_, err := g.run(ctx, "worktree", "add", "-b", branch, path, startRef)
+
+	return err
+}
+
+// RemoveWorktree force-removes a linked worktree (dirty trees included —
+// losing candidates are discarded wholesale).
+func (g *Git) RemoveWorktree(ctx context.Context, path string) error {
+	_, err := g.run(ctx, "worktree", "remove", "--force", path)
+
+	return err
+}
+
+// DeleteBranch deletes a local candidate branch. Only cm/-namespaced branches
+// other than the run's own card branch may be deleted.
+func (g *Git) DeleteBranch(ctx context.Context, name string) error {
+	if !strings.HasPrefix(name, "cm/") {
+		return fmt.Errorf("refusing to delete %q: outside the cm/ namespace", name)
+	}
+
+	if g.cardBranch != "" && name == g.cardBranch {
+		return fmt.Errorf("refusing to delete %q: the run's own card branch", name)
+	}
+
+	_, err := g.run(ctx, "branch", "-D", name)
+
+	return err
+}
+
+// HardReset moves the checked-out branch to ref, discarding the work tree.
+// Used once, to adopt the Best-of-N winner onto the card branch.
+func (g *Git) HardReset(ctx context.Context, ref string) error {
+	_, err := g.run(ctx, "reset", "--hard", ref)
+
+	return err
+}
+
+// DiffStat is Diff's --stat form, for judge prompts where the full diff
+// exceeds the token cap.
+func (g *Git) DiffStat(ctx context.Context, base string) (string, error) {
+	mergeBase, err := g.MergeBase(ctx, base, "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("diffstat: %w", err)
+	}
+
+	out, err := g.run(ctx, "diff", "--stat", mergeBase+"...HEAD")
+	if err != nil {
+		return "", fmt.Errorf("diffstat %q...HEAD: %w", mergeBase, err)
+	}
+
+	return out, nil
+}
+
+// DisableAutoGC turns off auto-gc for the clone: candidate worktrees share
+// the object store, and a background gc racing N writers is the one shared
+// failure mode worktrees introduce.
+func (g *Git) DisableAutoGC(ctx context.Context) error {
+	_, err := g.run(ctx, "config", "gc.auto", "0")
+
+	return err
+}

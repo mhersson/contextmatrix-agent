@@ -78,6 +78,12 @@ type GitOps interface {
 	Head(ctx context.Context) (string, error)
 	Checkout(ctx context.Context, ref string) error
 	Diff(ctx context.Context, base string) (string, error)
+	AddWorktree(ctx context.Context, path, branch, startRef string) error
+	RemoveWorktree(ctx context.Context, path string) error
+	DeleteBranch(ctx context.Context, name string) error
+	HardReset(ctx context.Context, ref string) error
+	DiffStat(ctx context.Context, base string) (string, error)
+	DisableAutoGC(ctx context.Context) error
 }
 
 // Config carries the per-run parameters the FSM needs.
@@ -129,17 +135,24 @@ type Compaction struct {
 
 // Deps bundles the collaborators the FSM drives.
 type Deps struct {
-	Ops        Ops
-	Git        GitOps
+	Ops Ops
+	Git GitOps
+	// GitForDir returns a GitOps rooted at dir with NO branch policy set —
+	// guardPush fails closed, so candidate handles structurally cannot push.
+	// Used by Best-of-N to hand each candidate worktree its own git handle.
+	GitForDir  func(dir string) GitOps
 	PR         PRCreator // opens the pull request in the integrate phase (gh CLI seam)
 	Client     llm.LLM
 	Emit       *events.Emitter
 	Registry   *registry.Registry
 	WriteTools *tools.Registry // full toolset rooted at the workspace
-	ReadTools  *tools.Registry // read-only subset for planner/reviewers
-	SkillTool  tools.Tool      // optional; engaged by coder/review/document subagents (nil when no task-skills)
-	Cfg        Config
-	Redact     func(string) string // nil = identity; scrubs tool output in phase runs (wired by the worker)
+	// WriteToolsForDir builds the full write toolset rooted at dir. Used by
+	// Best-of-N to give each candidate worktree its own jailed tool registry.
+	WriteToolsForDir func(dir string) *tools.Registry
+	ReadTools        *tools.Registry // read-only subset for planner/reviewers
+	SkillTool        tools.Tool      // optional; engaged by coder/review/document subagents (nil when no task-skills)
+	Cfg              Config
+	Redact           func(string) string // nil = identity; scrubs tool output in phase runs (wired by the worker)
 	// Human is the HITL ask-and-wait channel, satisfied by the worker's live
 	// Inbox. It is a genuine nil for autonomous runs; mode is read from
 	// Cfg.Interactive, never from Human != nil (the nil-concrete footgun).

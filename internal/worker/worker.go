@@ -312,24 +312,30 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 	}
 
 	skillTool := buildSkillTool(a.spec, a.ops)
-	wt := writeTools(a.ws, a.spec.BashTimeoutMax)
+	wt := writeToolsFor(a.ws, a.spec.BashTimeoutMax)
 
 	if skillTool != nil {
 		wt = append(wt, skillTool)
 	}
 
 	d := orchestrator.Deps{
-		Ops:        ops2orchestrator(a.ops),
-		Git:        a.git,
+		Ops: ops2orchestrator(a.ops),
+		Git: a.git,
+		GitForDir: func(dir string) orchestrator.GitOps {
+			return NewGit(dir, secretsPathForAuth(a.spec), hostFromRepoURL(a.spec.RepoURL), a.spec.CACertFile)
+		},
 		PR:         NewPRCreator(a.ws, secretsPathForAuth(a.spec), a.spec.CACertFile, a.spec.RepoURL),
 		Client:     a.client,
 		Emit:       a.emit,
 		Registry:   buildRegistry(a.spec),
 		WriteTools: tools.NewRegistry(wt...),
-		ReadTools:  tools.NewReadOnlyRegistry(a.ws),
-		SkillTool:  skillTool,
-		Redact:     red.Apply,
-		Human:      human,
+		WriteToolsForDir: func(dir string) *tools.Registry {
+			return tools.NewRegistry(writeToolsFor(dir, a.spec.BashTimeoutMax)...)
+		},
+		ReadTools: tools.NewReadOnlyRegistry(a.ws),
+		SkillTool: skillTool,
+		Redact:    red.Apply,
+		Human:     human,
 		Cfg: orchestrator.Config{
 			Project:           a.spec.Project,
 			CardID:            a.spec.CardID,
@@ -502,17 +508,20 @@ func ops2orchestrator(ops CardOps) orchestrator.Ops {
 	return nil
 }
 
-// writeTools is the full model-facing toolset rooted at ws, matching the linear
-// path's registry so the FSM coder has the same capabilities.
-func writeTools(ws string, bashTimeoutMax int) []tools.Tool {
+// writeToolsFor is the full model-facing toolset rooted at dir, matching the
+// linear path's registry so the FSM coder has the same capabilities. It is
+// parameterized only by the root dir — every other argument is fixed for the
+// run — so it is the one source of truth behind both the main workspace's
+// WriteTools registry and Best-of-N's per-candidate WriteToolsForDir factory.
+func writeToolsFor(dir string, bashTimeoutMax int) []tools.Tool {
 	return []tools.Tool{
-		tools.NewReadTool(ws),
-		tools.NewEditTool(ws),
-		tools.NewWriteTool(ws),
-		tools.NewGrepTool(ws),
-		tools.NewGlobTool(ws),
-		tools.NewGitTool(ws),
-		tools.NewBashTool(ws).WithMaxTimeout(bashTimeoutMax),
+		tools.NewReadTool(dir),
+		tools.NewEditTool(dir),
+		tools.NewWriteTool(dir),
+		tools.NewGrepTool(dir),
+		tools.NewGlobTool(dir),
+		tools.NewGitTool(dir),
+		tools.NewBashTool(dir).WithMaxTimeout(bashTimeoutMax),
 	}
 }
 

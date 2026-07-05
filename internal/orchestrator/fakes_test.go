@@ -301,6 +301,17 @@ type fakeGit struct {
 	// default "" preserves the no-snapshot behaviour the other review tests rely on.
 	diffBases []string
 	headSHA   string
+
+	// Worktree/branch lifecycle scripting (Best-of-N candidate fan-out):
+	// worktreeErr fails AddWorktree and RemoveWorktree; deleteBranchErr fails
+	// DeleteBranch; hardResetErr fails HardReset. removedWorktrees,
+	// deletedBranches, and hardResetRefs capture each call's argument, in order.
+	worktreeErr      error
+	deleteBranchErr  error
+	hardResetErr     error
+	removedWorktrees []string
+	deletedBranches  []string
+	hardResetRefs    []string
 }
 
 // assertErr builds a sentinel error for fake scripting in tests.
@@ -443,6 +454,54 @@ func (g *fakeGit) Diff(_ context.Context, base string) (string, error) {
 	g.record("Diff")
 
 	return "", nil
+}
+
+func (g *fakeGit) AddWorktree(_ context.Context, path, branch, startRef string) error {
+	g.record("AddWorktree:" + branch)
+
+	return g.worktreeErr
+}
+
+func (g *fakeGit) RemoveWorktree(_ context.Context, path string) error {
+	g.mu.Lock()
+	g.removedWorktrees = append(g.removedWorktrees, path)
+	g.mu.Unlock()
+
+	g.record("RemoveWorktree:" + path)
+
+	return g.worktreeErr
+}
+
+func (g *fakeGit) DeleteBranch(_ context.Context, name string) error {
+	g.mu.Lock()
+	g.deletedBranches = append(g.deletedBranches, name)
+	g.mu.Unlock()
+
+	g.record("DeleteBranch:" + name)
+
+	return g.deleteBranchErr
+}
+
+func (g *fakeGit) HardReset(_ context.Context, ref string) error {
+	g.mu.Lock()
+	g.hardResetRefs = append(g.hardResetRefs, ref)
+	g.mu.Unlock()
+
+	g.record("HardReset:" + ref)
+
+	return g.hardResetErr
+}
+
+func (g *fakeGit) DiffStat(_ context.Context, base string) (string, error) {
+	g.record("DiffStat")
+
+	return "", nil
+}
+
+func (g *fakeGit) DisableAutoGC(_ context.Context) error {
+	g.record("DisableAutoGC")
+
+	return nil
 }
 
 // compile-time assertion that the fake satisfies the consumer interface.

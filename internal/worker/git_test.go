@@ -920,3 +920,99 @@ func TestDiffNoChanges(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, strings.TrimSpace(diff))
 }
+
+// TestWorktreeLifecycle exercises the full candidate-worktree cycle a
+// Best-of-N candidate goes through: add a linked worktree on a new branch cut
+// from main, commit inside it via a Git handle rooted at the worktree,
+// hard-reset the main checkout onto that commit (the winner-adoption path),
+// then remove the worktree and delete its branch.
+func TestWorktreeLifecycle(t *testing.T) {
+	t.Parallel()
+
+	_, ws, _ := setupClonedRepo(t)
+	ctx := context.Background()
+
+	g := NewGit(ws, "", "", "")
+	require.NoError(t, g.DisableAutoGC(ctx))
+
+	wt := filepath.Join(ws, ".worktrees", "c1")
+	branch := "cm/x-1-c1"
+
+	require.NoError(t, g.AddWorktree(ctx, wt, branch, "main"))
+
+	info, err := os.Stat(wt)
+	require.NoError(t, err)
+	assert.True(t, info.IsDir(), "worktree directory must exist")
+
+	// A Git handle rooted at the worktree sees the new branch checked out.
+	wtGit := NewGit(wt, "", "", "")
+
+	out, err := wtGit.run(ctx, "branch", "--show-current")
+	require.NoError(t, err)
+	assert.Equal(t, branch, strings.TrimSpace(out))
+
+	// Commit a file inside the worktree via that handle.
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "candidate.txt"), []byte("c1\n"), 0o644))
+
+	committed, err := wtGit.CommitWithMessage(ctx, "candidate c1 change")
+	require.NoError(t, err)
+	require.True(t, committed)
+
+	wtHead, err := wtGit.Head(ctx)
+	require.NoError(t, err)
+
+	// Adopt the candidate: hard-reset the main checkout onto the worktree HEAD.
+	require.NoError(t, g.HardReset(ctx, wtHead))
+
+	mainHead, err := g.Head(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, wtHead, mainHead)
+
+	require.NoError(t, g.RemoveWorktree(ctx, wt))
+
+	_, err = os.Stat(wt)
+	assert.True(t, os.IsNotExist(err), "worktree directory should be gone after RemoveWorktree")
+
+	require.NoError(t, g.DeleteBranch(ctx, branch))
+
+	branchList, err := g.run(ctx, "branch", "--list", branch)
+	require.NoError(t, err)
+	assert.Empty(t, strings.TrimSpace(branchList), "branch should be gone after DeleteBranch")
+}
+
+// TestDeleteBranchGuards pins DeleteBranch's two refusals: anything outside
+// the cm/ namespace, and — once a branch policy is set — the run's own card
+// branch, which must survive even though it IS cm/-namespaced.
+func TestDeleteBranchGuards(t *testing.T) {
+	t.Parallel()
+
+	_, ws, _ := setupClonedRepo(t)
+	ctx := context.Background()
+
+	g := NewGit(ws, "", "", "")
+
+	err := g.DeleteBranch(ctx, "main")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "outside the cm/ namespace")
+
+	require.NoError(t, g.CreateBranch(ctx, "cm/x-1"))
+	g.SetBranchPolicy("cm/x-1", "main", "main")
+
+	err = g.DeleteBranch(ctx, "cm/x-1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "the run's own card branch")
+}
+
+// TestCandidateGitCannotPush pins the structural safety property GitForDir
+// relies on: a Git handle whose SetBranchPolicy was never called — exactly
+// what a candidate worktree handle looks like — refuses every push, even to a
+// cm/-namespaced branch, because guardPush is fail-closed on the zero value.
+func TestCandidateGitCannotPush(t *testing.T) {
+	t.Parallel()
+
+	g := NewGit(t.TempDir(), "", "", "") // no SetBranchPolicy call
+
+	err := g.Push(context.Background(), "cm/x-1-c1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "branch policy not set")
+}

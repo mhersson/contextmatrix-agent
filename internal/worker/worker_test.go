@@ -18,6 +18,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/orchestrator"
 	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/mhersson/contextmatrix-harness/llm"
+	"github.com/mhersson/contextmatrix-harness/tools"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -473,6 +474,76 @@ func TestRunResolvesEmptyBaseBranchForFSM(t *testing.T) {
 	_, err := Run(context.Background(), spec, ops, &scriptedLLM{}, emit, openStdin(t))
 	require.NoError(t, err)
 	assert.Equal(t, "main", seenBase, "FSM must receive the resolved base branch, not empty")
+}
+
+// toolNames extracts the registered tool names from a registry's schemas, for
+// comparing two registries' composition (Registry has no public Names()).
+func toolNames(t *testing.T, r *tools.Registry) []string {
+	t.Helper()
+
+	schemas := r.Schemas()
+	names := make([]string, len(schemas))
+
+	for i, s := range schemas {
+		names[i] = s.Function.Name
+	}
+
+	return names
+}
+
+// TestRunFSMWiresPerDirFactories pins the Best-of-N per-candidate seam: Deps.
+// GitForDir must hand back a git handle that structurally cannot push (no
+// branch policy was set on it), and Deps.WriteToolsForDir must build the same
+// tool composition as the main Deps.WriteTools registry when pointed at the
+// same directory — proving writeToolsFor is the one source of truth behind
+// both the main call site and the per-candidate factory.
+func TestRunFSMWiresPerDirFactories(t *testing.T) {
+	remote := setupBareRemote(t)
+	wsParent := t.TempDir()
+	ops := newFakeOps()
+
+	var gitForDir func(string) orchestrator.GitOps
+
+	var writeToolsForDir func(string) *tools.Registry
+
+	var mainWriteTools *tools.Registry
+
+	swapRunOrchestrator(t, func(_ context.Context, d orchestrator.Deps) error {
+		gitForDir = d.GitForDir
+		writeToolsForDir = d.WriteToolsForDir
+		mainWriteTools = d.WriteTools
+
+		return nil
+	})
+
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	spec := baseSpec(t, remote, wsParent)
+
+	res, err := Run(context.Background(), spec, ops, &scriptedLLM{}, emit, openStdin(t))
+	require.NoError(t, err)
+	assert.Equal(t, "completed", res.Reason)
+
+	require.NotNil(t, gitForDir, "Deps.GitForDir must be wired")
+	require.NotNil(t, writeToolsForDir, "Deps.WriteToolsForDir must be wired")
+	require.NotNil(t, mainWriteTools)
+
+	ws := filepath.Join(wsParent, "cmx-001")
+
+	// A candidate handle rooted at a worktree dir has no branch policy set on
+	// it: it structurally cannot push, matching the Deps.GitForDir contract.
+	candidateGit := gitForDir(filepath.Join(ws, ".worktrees", "c1"))
+	require.NotNil(t, candidateGit)
+
+	pushErr := candidateGit.Push(context.Background(), "cm/cmx-001-c1")
+	require.Error(t, pushErr)
+	assert.Contains(t, pushErr.Error(), "branch policy not set")
+
+	// WriteToolsForDir(ws) must build the identical toolset as the main
+	// WriteTools registry built for the same ws.
+	forDirRegistry := writeToolsForDir(ws)
+	require.NotNil(t, forDirRegistry)
+	assert.ElementsMatch(t, toolNames(t, mainWriteTools), toolNames(t, forDirRegistry))
 }
 
 // TestHITLEntersOrchestrator: an interactive, non-autonomous card routes to the
