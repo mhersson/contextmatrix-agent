@@ -46,6 +46,13 @@ type solverCtx struct {
 // model-bearing step. The parent run drives its solver (o.solver), bound in
 // newRun to the main workspace, run ledger, and the board.
 func runExecute(ctx context.Context, o *run) error {
+	// Best-of-N replaces the single-solver execute with a candidate fan-out: N
+	// implementations of the shared plan race in isolated worktrees, off the board
+	// and never pushing, and a later phase judges them.
+	if o.d.Cfg.BestOfN >= 2 {
+		return o.runFanout(ctx)
+	}
+
 	ordered, err := topoOrder(o.subtasks)
 	if err != nil {
 		return fmt.Errorf("order subtasks: %w", err)
@@ -265,8 +272,11 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 		// here — harmless, and it keeps that model out of its own review via this
 		// set plus o.excluded. Keyed on the slug we configured, which is what
 		// SelectReviewPanel's Exclude set compares against. newRun initializes the
-		// map unconditionally.
+		// map unconditionally. selMu guards it: Best-of-N candidates write here in
+		// parallel; the review-phase read is sequenced after the fan-out's wg.Wait.
+		o.selMu.Lock()
 		o.coderModels[model] = true
+		o.selMu.Unlock()
 
 		if reportErr := d.Ops.ReportUsage(ctx, sub.ID, usedModel,
 			res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {

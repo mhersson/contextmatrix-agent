@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
@@ -181,6 +182,16 @@ type run struct {
 	// the board.
 	solver *solverCtx
 
+	// Best-of-N fan-out state (Cfg.BestOfN >= 2). candidates holds every
+	// candidate implementation raced inside execute; winner is the one the judge
+	// selects; judgeModel is the model the judge phase runs on; notes fans mid-run
+	// human turns out to the live candidates. All nil/empty for a single-solver
+	// run.
+	candidates []*candidate
+	winner     *candidate //nolint:unused // set by the judge phase when it picks a winner.
+	judgeModel string     //nolint:unused // the model the judge phase runs on.
+	notes      *userNotes
+
 	// Plan-phase outputs, consumed by later phases. Set by runPlan, or — on
 	// resume — pre-loaded by reconcile from SubtaskStates before any phase runs.
 	subtasks []subtaskRef
@@ -211,9 +222,16 @@ type run struct {
 	// skipped (resume entering at integrate) or the summary was blank.
 	reviewSummary string
 
+	// selMu guards the shared model-selection state (coderModels, reselects,
+	// excluded) so the Best-of-N fan-out's parallel candidate goroutines — which
+	// all run through runCoderWith and recoverIncapable — never race on it. The
+	// single-threaded parent execute path acquires it uncontended (a no-op).
+	selMu sync.Mutex
+
 	// coderModels records every distinct model that coded a subtask during
 	// execute, so the review phase can exclude them from the specialist panel
-	// (a model should not review its own code). Populated in runCoderWith.
+	// (a model should not review its own code). Populated in runCoderWith under
+	// selMu.
 	coderModels map[string]bool
 
 	// reselects counts in-run model re-selections triggered by a harness-incapable
@@ -291,9 +309,13 @@ func dataURLs(blobs []cmclient.ImageBlob) []llm.ImageURL {
 // defaulting to the not-yet-implemented stubs.
 func newRun(d Deps, tc cmclient.TaskContext) *run {
 	o := &run{
-		d:      d,
-		tc:     tc,
-		ledger: NewLedger(d.Cfg.MaxCardCost, tc.ReportedCostUSD),
+		d:  d,
+		tc: tc,
+		// The run ledger spans the shared phases; effectiveCeiling scales it for
+		// Best-of-N (N execute allowances plus one for plan/judge/document/review/
+		// integrate). For BestOfN < 2 effectiveCeiling degenerates to MaxCardCost,
+		// so a single-solver run is byte-identical to before.
+		ledger: NewLedger(effectiveCeiling(d.Cfg), tc.ReportedCostUSD),
 	}
 
 	o.coderModels = map[string]bool{}
@@ -451,11 +473,20 @@ const reselectCap = 3
 // the caller can simply re-select and re-run the same unit; no git reset is
 // needed.
 func (o *run) recoverIncapable(ctx context.Context, ie *IncapableError) error {
+	// The cap check + increment + exclusion must be atomic: under a Best-of-N
+	// fan-out, parallel candidates share o.reselects and o.excluded, and the cap
+	// is a single shared budget. Hold selMu across the whole mutation, capture the
+	// attempt number, then release before the advisory I/O.
+	o.selMu.Lock()
+
 	if o.reselects >= reselectCap {
+		o.selMu.Unlock()
+
 		return fmt.Errorf("re-selection cap (%d) exhausted after model %q: %w", reselectCap, ie.Model, ie)
 	}
 
 	o.reselects++
+	attempt := o.reselects
 
 	if o.excluded == nil {
 		o.excluded = map[string]bool{}
@@ -463,11 +494,13 @@ func (o *run) recoverIncapable(ctx context.Context, ie *IncapableError) error {
 
 	o.excluded[ie.Model] = true
 
+	o.selMu.Unlock()
+
 	// Best-effort: the recovery proceeds (re-select + re-run) regardless of a
 	// reporting failure; the blacklist is an advisory hint to CM and future runs.
 	_ = o.d.Ops.BlacklistModel(ctx, o.d.Cfg.CardID, ie.Model, ie.Reason) //nolint:errcheck
 	_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID,                              //nolint:errcheck
-		fmt.Sprintf("model %q harness-incapable; blacklisted and re-selecting (attempt %d/%d)", ie.Model, o.reselects, reselectCap))
+		fmt.Sprintf("model %q harness-incapable; blacklisted and re-selecting (attempt %d/%d)", ie.Model, attempt, reselectCap))
 
 	return nil
 }
