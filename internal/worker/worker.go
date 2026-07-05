@@ -49,6 +49,7 @@ type RunSpec struct {
 	RepoURL     string // CM_REPO_URL (required)
 	BaseBranch  string // CM_BASE_BRANCH (optional)
 	Interactive bool   // CM_INTERACTIVE ("true")
+	BestOfN     int    // CM_BEST_OF_N; >= 2 races N candidate implementations (0 = normal run)
 	Model       string // CM_MODEL (optional; honored if catalog-resolvable)
 	MCPURL      string // CM_MCP_URL (required)
 	MCPAPIKey   string // CM_MCP_API_KEY (required)
@@ -343,6 +344,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 			ToolOutputMax:     a.spec.ToolOutputMax,
 			ReviewAttemptsCap: reviewAttemptsCap,
 			Interactive:       hitl,
+			BestOfN:           a.spec.BestOfN,
 			Compaction: orchestrator.Compaction{
 				Enabled:         a.spec.CompactionEnabled,
 				Threshold:       a.spec.CompactionThreshold,

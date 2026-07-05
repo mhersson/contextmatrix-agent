@@ -223,6 +223,7 @@ func TestSpecFromEnv_IntParsing(t *testing.T) {
 		assert.Equal(t, 600, spec.BashTimeoutMax)
 		assert.Equal(t, 131072, spec.ToolOutputMax)
 		assert.Equal(t, derefInt(config.Defaults().MaxTurns), spec.MaxTurns)
+		assert.Equal(t, 0, spec.BestOfN, "CM_BEST_OF_N unset must default to 0 (normal run)")
 	})
 
 	t.Run("valid_override", func(t *testing.T) {
@@ -230,12 +231,14 @@ func TestSpecFromEnv_IntParsing(t *testing.T) {
 		t.Setenv("CMX_BASH_TIMEOUT_MAX_SECONDS", "120")
 		t.Setenv("CMX_TOOL_OUTPUT_MAX_BYTES", "50000")
 		t.Setenv("CMX_MAX_TURNS", "50")
+		t.Setenv("CM_BEST_OF_N", "3")
 
 		spec, err := specFromEnv()
 		require.NoError(t, err)
 		assert.Equal(t, 120, spec.BashTimeoutMax)
 		assert.Equal(t, 50000, spec.ToolOutputMax)
 		assert.Equal(t, 50, spec.MaxTurns)
+		assert.Equal(t, 3, spec.BestOfN)
 	})
 
 	t.Run("garbage_bash_timeout", func(t *testing.T) {
@@ -263,6 +266,15 @@ func TestSpecFromEnv_IntParsing(t *testing.T) {
 		_, err := specFromEnv()
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "CMX_MAX_TURNS")
+	})
+
+	t.Run("garbage_best_of_n", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("CM_BEST_OF_N", "x")
+
+		_, err := specFromEnv()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "CM_BEST_OF_N")
 	})
 }
 

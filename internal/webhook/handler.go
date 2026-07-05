@@ -556,6 +556,10 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 		"CM_MCP_API_KEY=" + mcpKey,
 	}
 
+	if p.BestOfN > 1 {
+		env = append(env, "CM_BEST_OF_N="+strconv.Itoa(p.BestOfN))
+	}
+
 	// Compat window: CM-provisioned credentials in the trigger payload override
 	// the shared-secrets values for this run over two delivery channels. When a
 	// git token is present, ALL credentials (git token + LLM values) travel via a
@@ -643,6 +647,15 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 
 	env = append(env, s.launchEnv.WorkerExtraEnv...)
 
+	// Best-of-N races N candidate implementations concurrently, so the pids
+	// cap (a per-container ceiling) scales with N; the memory limit is
+	// intentionally left alone here — candidate verifies are serialized in a
+	// later task.
+	pids := s.launchEnv.PidsLimit
+	if p.BestOfN > 1 && pids > 0 {
+		pids *= int64(p.BestOfN)
+	}
+
 	return executor.LaunchSpec{
 		CardID:         p.CardID,
 		Project:        p.Project,
@@ -652,7 +665,7 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 		SkillsHostDir:  skillsDir,
 		CACertHostFile: s.launchEnv.CACertFile,
 		MemoryBytes:    s.launchEnv.MemoryBytes,
-		PidsLimit:      s.launchEnv.PidsLimit,
+		PidsLimit:      pids,
 		CorrelationID:  correlationID,
 		MCPURL:         s.launchEnv.MCPURL,
 	}

@@ -1123,6 +1123,52 @@ func TestBuildLaunchSpec_CompactionEnvOmittedWhenDisabled(t *testing.T) {
 	}
 }
 
+// TestBuildLaunchSpec_BestOfN pins the CM_BEST_OF_N env emission and pids-limit
+// scaling: BestOfN > 1 emits the env var and multiplies PidsLimit by N;
+// BestOfN <= 1 (the default) emits nothing and leaves PidsLimit unchanged. The
+// memory limit is intentionally left alone here — candidate verifies are
+// serialized in a later task.
+func TestBuildLaunchSpec_BestOfN(t *testing.T) {
+	newServerWithPids := func(pids int64) *Server {
+		return NewServer(Config{
+			APIKey:    "k",
+			Executor:  &fakeExecutor{},
+			Tracker:   executor.NewTracker(1),
+			LaunchEnv: LaunchEnv{BaseImage: "img", MCPURL: "http://mcp", PidsLimit: pids},
+		})
+	}
+
+	t.Run("emits env and scales pids when greater than 1", func(t *testing.T) {
+		s := newServerWithPids(128)
+
+		spec := s.buildLaunchSpec(protocol.TriggerPayload{CardID: "C1", Project: "p", BestOfN: 3}, "corr", "")
+
+		assert.Contains(t, spec.Env, "CM_BEST_OF_N=3")
+		assert.Equal(t, int64(384), spec.PidsLimit, "pids limit must scale by N")
+	})
+
+	t.Run("omits env and leaves pids unchanged when zero", func(t *testing.T) {
+		s := newServerWithPids(128)
+
+		spec := s.buildLaunchSpec(protocol.TriggerPayload{CardID: "C1", Project: "p", BestOfN: 0}, "corr", "")
+
+		for _, e := range spec.Env {
+			assert.NotContains(t, e, "CM_BEST_OF_N", "BestOfN 0 must not emit the env var")
+		}
+
+		assert.Equal(t, int64(128), spec.PidsLimit)
+	})
+
+	t.Run("does not scale an unset (zero) pids limit", func(t *testing.T) {
+		s := newServerWithPids(0)
+
+		spec := s.buildLaunchSpec(protocol.TriggerPayload{CardID: "C1", Project: "p", BestOfN: 3}, "corr", "")
+
+		assert.Contains(t, spec.Env, "CM_BEST_OF_N=3")
+		assert.Equal(t, int64(0), spec.PidsLimit, "an unset pids limit (uncapped) must stay unset")
+	})
+}
+
 // ---- CM-provisioned credentials (compat window) -----------------------------
 
 // TestBuildLaunchSpec_CredentialDeliveryMatrix pins the precise plain-env

@@ -100,6 +100,10 @@ type Config struct {
 	// pre-HITL behavior.
 	Interactive bool
 
+	// BestOfN, when >= 2, fans execute out into N candidate implementations
+	// judged before document. 0/1 = normal single-solver run.
+	BestOfN int
+
 	// Compaction configures optional in-window context compaction for phase
 	// model runs. Disabled (the zero value) preserves the hard context_limit
 	// stop, which is the agent's default behavior.
