@@ -161,8 +161,10 @@ type Deps struct {
 }
 
 // phaseOrder is the fixed forward sequence of phases. Run enters at the card's
-// persisted phase and never moves backward through this slice.
-var phaseOrder = []string{"plan", "execute", "document", "review", "integrate", "done"}
+// persisted phase and never moves backward through this slice. The judge phase
+// is a no-op for normal single-solver runs (Cfg.BestOfN < 2); it races and picks
+// the Best-of-N winner between execute and document.
+var phaseOrder = []string{"plan", "execute", "judge", "document", "review", "integrate", "done"}
 
 // phaseFn is a single phase's body.
 type phaseFn func(context.Context) error
@@ -188,8 +190,8 @@ type run struct {
 	// human turns out to the live candidates. All nil/empty for a single-solver
 	// run.
 	candidates []*candidate
-	winner     *candidate //nolint:unused // set by the judge phase when it picks a winner.
-	judgeModel string     //nolint:unused // the model the judge phase runs on.
+	winner     *candidate // set by the judge phase when it picks a winner.
+	judgeModel string     // the model the judge phase ran on ("" for an auto-win or fallback).
 	notes      *userNotes
 
 	// Plan-phase outputs, consumed by later phases. Set by runPlan, or — on
@@ -277,16 +279,18 @@ type run struct {
 
 	planFn      phaseFn
 	executeFn   phaseFn
+	judgeFn     phaseFn
 	documentFn  phaseFn
 	reviewFn    phaseFn
 	integrateFn phaseFn
 	doneFn      phaseFn
 }
 
-// verifyRunner runs the review gate's verify command (argv) in the workspace
-// and reports the combined output plus whether it passed (exit 0). The default
-// implementation shells out; tests inject a stub.
-type verifyRunner func(ctx context.Context, argv []string) (output string, ok bool)
+// verifyRunner runs a verify command (argv) rooted at dir and reports the
+// combined output plus whether it passed (exit 0). dir is the review workspace
+// for the review gate and the candidate worktree for the Best-of-N judge. The
+// default implementation shells out via execVerify; tests inject a stub.
+type verifyRunner func(ctx context.Context, dir string, argv []string) (output string, ok bool)
 
 // dataURLs encodes card image blobs as base64 data URLs for OpenAI image_url
 // content parts. Returns nil for no blobs.
@@ -346,12 +350,13 @@ func newRun(d Deps, tc cmclient.TaskContext) *run {
 	}
 
 	o.grounding = grounding
-	o.runVerify = func(ctx context.Context, argv []string) (string, bool) {
-		return execVerify(ctx, d.Cfg.Workspace, argv)
-	}
+	// execVerify already matches verifyRunner (ctx, dir, argv): the review gate
+	// passes the workspace, the judge passes each candidate worktree.
+	o.runVerify = execVerify
 
 	o.planFn = func(ctx context.Context) error { return runPlan(ctx, o) }
 	o.executeFn = func(ctx context.Context) error { return runExecute(ctx, o) }
+	o.judgeFn = func(ctx context.Context) error { return runJudge(ctx, o) }
 	o.documentFn = func(ctx context.Context) error { return runDocument(ctx, o) }
 	o.reviewFn = func(ctx context.Context) error { return runReview(ctx, o) }
 	o.integrateFn = func(ctx context.Context) error { return runIntegrate(ctx, o) }
@@ -367,6 +372,8 @@ func (o *run) phaseFnFor(phase string) phaseFn {
 		return o.planFn
 	case "execute":
 		return o.executeFn
+	case "judge":
+		return o.judgeFn
 	case "document":
 		return o.documentFn
 	case "review":
@@ -394,6 +401,13 @@ func (o *run) execute(ctx context.Context) error {
 	start := o.tc.Phase
 	if start == "" {
 		start = "plan"
+	}
+
+	// Judge state is container-local (candidate worktrees, verify results, the
+	// raced diffs) and never persisted, so a run that crashed in judge cannot be
+	// resumed there — re-enter at execute to re-race the fan-out.
+	if start == "judge" {
+		start = "execute"
 	}
 
 	from := indexOf(phaseOrder, start)
