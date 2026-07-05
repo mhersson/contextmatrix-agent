@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-harness/harness"
@@ -95,10 +96,17 @@ func fanoutDeps(t *testing.T, ops *fakeOps, mainGit *fakeGit, client llm.LLM, n 
 }
 
 // newFanoutRun seeds a run for the fan-out with the given subtasks and card
-// budget, defaulting the card tier the candidate selection reads.
-func newFanoutRun(d Deps, subs []subtaskRef, maxCost float64) *run {
+// budget, defaulting the card tier the candidate selection reads. The cleanup
+// stops any fan-out heartbeater the run started: in production it outlives
+// runFanout on purpose (the judge span holds the claims), but a goroutine
+// outliving a TEST races the package-var interval shrink other tests do.
+func newFanoutRun(t *testing.T, d Deps, subs []subtaskRef, maxCost float64) *run {
+	t.Helper()
+
 	o := newExecRun(d, subs, maxCost)
 	o.cardTier = "moderate"
+
+	t.Cleanup(o.stopFanoutHeartbeat)
 
 	return o
 }
@@ -134,7 +142,7 @@ func TestFanoutHappyPath(t *testing.T) {
 	// cleanly at zero cost; commits land because the per-dir fakes commit=true.
 	d, pdg, _ := fanoutDeps(t, ops, mainGit, &planLLM{}, 3)
 
-	o := newFanoutRun(d, []subtaskRef{
+	o := newFanoutRun(t, d, []subtaskRef{
 		{ID: "SUB-1", Title: "First", Tier: "simple"},
 		{ID: "SUB-2", Title: "Second", Tier: "simple"},
 	}, 0)
@@ -153,10 +161,14 @@ func TestFanoutHappyPath(t *testing.T) {
 		"candidate worktrees are excluded from the parent clone's staging path")
 	assert.Equal(t, []string{".worktrees/"}, mainGit.infoExcludes, "the exclude pattern is .worktrees/")
 
-	// Zero subtask board writes during the fan-out.
+	// First-arrival claims: the RUN claims each subtask exactly once when the
+	// first candidate reaches it, so the board shows in_progress during the
+	// race (and CM's parent auto-transition fires). Candidates themselves never
+	// claim — three racers, one claim per subtask. Completions still wait for
+	// the winner replay.
 	opCalls := ops.recorded()
-	assert.Equal(t, 0, countCalls(opCalls, "ClaimCard:SUB-1"), "candidates never claim subtasks")
-	assert.Equal(t, 0, countCalls(opCalls, "ClaimCard:SUB-2"))
+	assert.Equal(t, 1, countCalls(opCalls, "ClaimCard:SUB-1"), "each subtask claimed exactly once, not per candidate")
+	assert.Equal(t, 1, countCalls(opCalls, "ClaimCard:SUB-2"))
 	assert.Equal(t, -1, indexOfCall(opCalls, "CompleteTask:SUB-1"), "candidates never complete subtasks")
 	assert.Equal(t, -1, indexOfCall(opCalls, "CompleteTask:SUB-2"))
 
@@ -194,7 +206,7 @@ func TestFanoutCandidateFailureIsolated(t *testing.T) {
 	// Candidate 2's worktree cannot commit: it must drop out alone.
 	pdg.set(filepath.Join(ws, ".worktrees", "c2"), &fakeGit{commitErr: assertErr("disk full")})
 
-	o := newFanoutRun(d, []subtaskRef{
+	o := newFanoutRun(t, d, []subtaskRef{
 		{ID: "SUB-1", Title: "First", Tier: "simple"},
 		{ID: "SUB-2", Title: "Second", Tier: "simple"},
 	}, 0)
@@ -219,7 +231,7 @@ func TestFanoutPanicIsolated(t *testing.T) {
 	// convert it into a per-candidate error without crashing the run.
 	pdg.set(filepath.Join(ws, ".worktrees", "c1"), &panicGit{fakeGit: &fakeGit{committed: true}})
 
-	o := newFanoutRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
 
 	require.NoError(t, o.runFanout(context.Background()))
 
@@ -236,7 +248,7 @@ func TestFanoutDegradeLogged(t *testing.T) {
 	d, _, _ := fanoutDeps(t, ops, mainGit, &planLLM{}, 3)
 
 	// MaxCardCost 5, ceiling 20, already reported 12.6 -> remaining 7.4 funds one.
-	o := newFanoutRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 5)
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 5)
 	o.tc.ReportedCostUSD = 12.6
 
 	require.NoError(t, o.runFanout(context.Background()))
@@ -254,11 +266,69 @@ func TestFanoutAllFailed(t *testing.T) {
 	// Every coder run errors (transport failure), so no candidate survives.
 	d, _, _ := fanoutDeps(t, ops, mainGit, &errLLM{err: errors.New("connection reset")}, 3)
 
-	o := newFanoutRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
 
 	err := o.runFanout(context.Background())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "all 3 candidates failed")
+
+	// The run parked while holding first-arrival subtask claims: they are
+	// released on the way out (mirroring the single-solver error path) instead
+	// of dangling until CM's stall sweep mislabels them 30 minutes later.
+	opCalls := ops.recorded()
+	assert.Equal(t, countCalls(opCalls, "ClaimCard:SUB-1"), countCalls(opCalls, "ReleaseCard:SUB-1"),
+		"every first-arrival claim is released on the all-failed path")
+}
+
+// TestFanoutFirstArrivalClaimBestEffort: the first-arrival claim is board
+// cosmetics, not a correctness gate — a claim failure must not kill the race.
+func TestFanoutFirstArrivalClaimBestEffort(t *testing.T) {
+	ops := &fakeOps{claimErr: errors.New("cm unreachable")}
+	mainGit := &fakeGit{}
+	d, _, _ := fanoutDeps(t, ops, mainGit, &planLLM{}, 3)
+
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
+
+	require.NoError(t, o.runFanout(context.Background()), "claim failure must not abort the fan-out")
+	assert.Equal(t, 1, countCalls(ops.recorded(), "ClaimCard:SUB-1"),
+		"the claim was attempted once despite failing")
+
+	for i, c := range o.candidates {
+		require.NoError(t, c.err, "candidate %d must succeed", i+1)
+	}
+}
+
+// TestFanoutHeartbeatStopBlocksAndCovers: the fan-out heartbeater ticks every
+// first-arrival-claimed subtask (CM's stall sweep reclaims any claimed card
+// whose heartbeat lapses, and the race + judge span is wall-clock unbounded)
+// and its stop func blocks until the goroutine exits.
+func TestFanoutHeartbeatStopBlocksAndCovers(t *testing.T) {
+	prev := subtaskHeartbeatInterval
+	subtaskHeartbeatInterval = 10 * time.Millisecond
+
+	defer func() { subtaskHeartbeatInterval = prev }()
+
+	ops := &fakeOps{}
+	mainGit := &fakeGit{}
+	d, _, _ := fanoutDeps(t, ops, mainGit, &planLLM{}, 2)
+
+	o := newFanoutRun(t, d, nil, 0)
+	o.claimedSubs = map[string]bool{"SUB-1": true, "SUB-2": true}
+
+	stop := o.startFanoutHeartbeat(context.Background())
+
+	require.Eventually(t, func() bool {
+		calls := ops.recorded()
+
+		return countCalls(calls, "Heartbeat:SUB-1") >= 1 && countCalls(calls, "Heartbeat:SUB-2") >= 1
+	}, 2*time.Second, 5*time.Millisecond, "every claimed subtask gets heartbeated")
+
+	stop()
+
+	quiesced := len(ops.recorded())
+
+	time.Sleep(5 * subtaskHeartbeatInterval)
+	assert.Len(t, ops.recorded(), quiesced, "no heartbeats after stop returns")
 }
 
 // TestFanoutIncapableRecoveryRaceSafe fans out three candidates when EVERY coder
@@ -276,7 +346,7 @@ func TestFanoutIncapableRecoveryRaceSafe(t *testing.T) {
 	d, _, _ := fanoutDeps(t, ops, mainGit, client, 3)
 	d.Registry = twoCoderRegistry()
 
-	o := newFanoutRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "moderate"}}, 0)
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "moderate"}}, 0)
 
 	err := o.runFanout(context.Background())
 	require.Error(t, err, "no capable model exists, so every candidate fails")
@@ -296,7 +366,7 @@ func TestFanoutSkipsWhenAllSubtasksDone(t *testing.T) {
 	mainGit := &fakeGit{}
 	d, _, _ := fanoutDeps(t, ops, mainGit, &planLLM{}, 3)
 
-	o := newFanoutRun(d, []subtaskRef{
+	o := newFanoutRun(t, d, []subtaskRef{
 		{ID: "SUB-1", Title: "First", State: "done"},
 		{ID: "SUB-2", Title: "Second", State: "done"},
 	}, 0)
@@ -326,7 +396,7 @@ func TestFanoutFoldsCandidateSpendIntoParentLedger(t *testing.T) {
 	d, _, _ := fanoutDeps(t, ops, mainGit, &modelAwareLLM{}, 3)
 
 	// Generous budget so nothing parks and all three candidates run both subtasks.
-	o := newFanoutRun(d, []subtaskRef{
+	o := newFanoutRun(t, d, []subtaskRef{
 		{ID: "SUB-1", Title: "First", Tier: "simple"},
 		{ID: "SUB-2", Title: "Second", Tier: "simple"},
 	}, 100)
@@ -359,7 +429,7 @@ func TestFanoutCandidateReselectsOnIncapable(t *testing.T) {
 		nil, nil, "capgood/default",
 	)
 
-	o := newFanoutRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "moderate"}}, 0)
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "moderate"}}, 0)
 
 	require.NoError(t, o.runFanout(context.Background()))
 	require.Len(t, o.candidates, 1)
@@ -396,7 +466,7 @@ func TestFanoutCandidateDropsWhenPoolExhausted(t *testing.T) {
 		nil, nil, "bad2/default",
 	)
 
-	o := newFanoutRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "moderate"}}, 0)
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "moderate"}}, 0)
 	o.tc.ModelCoder = "pinned/coder" // fan-out gives slot 1 the pin
 
 	require.NoError(t, o.runFanout(context.Background()), "one survivor keeps the fan-out alive")
@@ -448,7 +518,7 @@ func TestFanoutInteractiveBroadcast(t *testing.T) {
 	// One queued turn, then the inbox closes (block=false) so the collector stops.
 	d.Human = &fakeInbox{msgs: []harness.UserMessage{{Content: "please add tests", MessageID: "m1"}}}
 
-	o := newFanoutRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
 
 	require.NoError(t, o.runFanout(context.Background()))
 
@@ -467,7 +537,7 @@ func TestFanoutInteractiveCollectorLifecycle(t *testing.T) {
 	d.Cfg.Interactive = true
 	d.Human = &fakeInbox{block: true} // no messages; blocks until canceled
 
-	o := newFanoutRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
 
 	require.NoError(t, o.runFanout(context.Background()))
 

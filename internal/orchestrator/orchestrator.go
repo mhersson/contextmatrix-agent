@@ -196,6 +196,17 @@ type run struct {
 	judgeModel string     // the model the judge phase ran on ("" for an auto-win or fallback).
 	notes      *userNotes
 
+	// First-arrival subtask claims (Best-of-N only). The run — not any single
+	// candidate — claims each subtask once, when the first candidate reaches
+	// it, so the board shows in_progress while the race runs (and CM's parent
+	// auto-transition fires on the first claim). subClaimMu guards claimedSubs;
+	// stopSubHB stops the fan-out heartbeater that keeps those claims alive
+	// against CM's stall sweep until the winner replay completes them (nil when
+	// no heartbeater is running).
+	subClaimMu  sync.Mutex
+	claimedSubs map[string]bool
+	stopSubHB   func()
+
 	// Plan-phase outputs, consumed by later phases. Set by runPlan, or — on
 	// resume — pre-loaded by reconcile from SubtaskStates before any phase runs.
 	subtasks []subtaskRef

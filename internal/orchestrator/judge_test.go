@@ -321,7 +321,16 @@ func TestWinnerAdoption(t *testing.T) {
 	verify := map[string]bool{"dir-c1": true, "dir-c2": true}
 	o := newJudgeRun(t, ops, mainGit, client, []*candidate{c1, c2, c3}, verify)
 
+	// A fan-out heartbeater is still running when adoption starts (the judge
+	// span is covered by it); adoption must stop it before replaying the
+	// subtasks, or completed cards would keep receiving heartbeats.
+	hbStopped := false
+	o.stopSubHB = func() { hbStopped = true }
+
 	require.NoError(t, runJudge(context.Background(), o))
+
+	assert.True(t, hbStopped, "adoption stops the fan-out heartbeater")
+	assert.Nil(t, o.stopSubHB, "the stop func is cleared so a second stop is a no-op")
 
 	require.NotNil(t, o.winner)
 	assert.Same(t, c2, o.winner, "verdict winner=2 maps to pool[1] = c2 once c3 is excluded")

@@ -466,6 +466,11 @@ func (o *run) adoptWinner(ctx context.Context) error {
 		return fmt.Errorf("best-of-n: push winner: %w", err)
 	}
 
+	// Stop heartbeating the first-arrival claims before the replay completes
+	// them — heartbeats against just-completed (released) cards are noise.
+	// Replay itself takes seconds, nowhere near the stall timeout.
+	o.stopFanoutHeartbeat()
+
 	o.replayWinnerSubtasks(ctx)
 	o.cleanupCandidates(ctx)
 	o.reportCandidateOutcomes(ctx)
