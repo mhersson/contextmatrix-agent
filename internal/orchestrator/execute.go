@@ -90,11 +90,15 @@ func (o *run) executeSubtaskWith(ctx context.Context, sc *solverCtx, sub subtask
 	// Claim conflicts mean another agent owns the subtask — abort the run rather
 	// than skip, because the workspace is shared and we cannot safely proceed
 	// without ownership of the card we are about to build on. A candidate solver
-	// (boardOps false) never claims, so there is no card to conflict over.
+	// (boardOps false) never claims per-candidate; instead the RUN claims each
+	// subtask once when the first candidate reaches it, so the board shows
+	// in_progress during the race without N writers colliding.
 	if sc.boardOps {
 		if err := d.Ops.ClaimCard(ctx, sub.ID); err != nil {
 			return fmt.Errorf("claim subtask %s: %w", sub.ID, err)
 		}
+	} else {
+		o.claimSubtaskOnce(ctx, sub)
 	}
 
 	if err := o.executeClaimedWith(ctx, sc, sub); err != nil {

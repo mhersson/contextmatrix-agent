@@ -200,7 +200,7 @@ type blockingHeartbeatOps struct {
 }
 
 func (b *blockingHeartbeatOps) Heartbeat(ctx context.Context, cardID string) error {
-	b.fakeOps.record("Heartbeat:" + cardID)
+	b.record("Heartbeat:" + cardID)
 	close(b.entered)
 
 	<-ctx.Done()

@@ -3,9 +3,11 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-harness/harness"
@@ -75,7 +77,16 @@ func degradeN(cfg Config, reported float64) int {
 // make no subtask board writes and never push — their work is judged in place.
 // It returns an error only when EVERY candidate dropped out; a single survivor is
 // enough for the judge phase to proceed.
-func (o *run) runFanout(ctx context.Context) error {
+func (o *run) runFanout(ctx context.Context) (retErr error) {
+	// The fan-out heartbeater deliberately survives a SUCCESSFUL return (the
+	// judge phase still holds the first-arrival claims); on any ERROR return
+	// the run is parking, so stop it here rather than leaking the goroutine.
+	defer func() {
+		if retErr != nil {
+			o.stopFanoutHeartbeat()
+		}
+	}()
+
 	cfg := o.d.Cfg
 
 	ordered, err := topoOrder(o.subtasks)
@@ -115,6 +126,16 @@ func (o *run) runFanout(ctx context.Context) error {
 	if err := o.d.Git.AddInfoExclude(ctx, ".worktrees/"); err != nil {
 		return fmt.Errorf("exclude candidate worktrees: %w", err)
 	}
+
+	// First-arrival subtask claims (made as candidates reach each subtask) must
+	// stay heartbeated until the winner replay completes them: CM's stall sweep
+	// reclaims ANY claimed card whose last_heartbeat lapses, and the race plus
+	// the judge's serialized verifies are wall-clock unbounded. One goroutine
+	// covers the whole claimed set; it outlives runFanout on purpose (the judge
+	// span still holds the claims) and is stopped by adoptWinner before the
+	// replay, or on the all-failed exit below. Hard parks mid-judge leave the
+	// claims to CM's stall sweep, same as a single-solver crash.
+	o.stopSubHB = o.startFanoutHeartbeat(ctx)
 
 	pin := ""
 	if resolvePin(o.d.Registry, o.tc.ModelCoder) {
@@ -215,7 +236,101 @@ func (o *run) runFanout(ctx context.Context) error {
 		}
 	}
 
+	// The run is parking with first-arrival claims still held: release them,
+	// mirroring the single-solver error path, so the board shows the truth now
+	// instead of a misleading "stalled" 30 minutes later. (The heartbeater is
+	// stopped by the deferred error hook before this function returns.)
+	o.stopFanoutHeartbeat()
+
+	for _, id := range o.claimedSubIDs() {
+		o.releaseSubtask(ctx, id)
+	}
+
 	return fmt.Errorf("best-of-n: all %d candidates failed; first error: %w", nEff, o.candidates[0].err)
+}
+
+// claimSubtaskOnce claims sub for the run the first time ANY candidate reaches
+// it, flipping the board card to in_progress for the duration of the race (the
+// MCP claim_card auto-transitions, and CM flips the parent on the first subtask
+// claim). Exactly one claim per subtask regardless of how many candidates race;
+// best-effort — board visibility must never kill a healthy race. The winner
+// replay later re-claims idempotently (same agent identity) and completes.
+func (o *run) claimSubtaskOnce(ctx context.Context, sub subtaskRef) {
+	o.subClaimMu.Lock()
+
+	if o.claimedSubs == nil {
+		o.claimedSubs = make(map[string]bool)
+	}
+
+	if o.claimedSubs[sub.ID] {
+		o.subClaimMu.Unlock()
+
+		return
+	}
+
+	o.claimedSubs[sub.ID] = true
+	o.subClaimMu.Unlock()
+
+	// Claim outside the lock: candidates must not serialize on board I/O.
+	if err := o.d.Ops.ClaimCard(ctx, sub.ID); err != nil {
+		slog.Warn("best-of-n: first-arrival subtask claim failed; board state will lag",
+			"card_id", sub.ID, "error", err)
+	}
+}
+
+// claimedSubIDs snapshots the first-arrival-claimed subtask IDs.
+func (o *run) claimedSubIDs() []string {
+	o.subClaimMu.Lock()
+	defer o.subClaimMu.Unlock()
+
+	ids := make([]string, 0, len(o.claimedSubs))
+	for id := range o.claimedSubs {
+		ids = append(ids, id)
+	}
+
+	return ids
+}
+
+// startFanoutHeartbeat ticks ops.Heartbeat for every first-arrival-claimed
+// subtask on subtaskHeartbeatInterval until the returned stop func is called.
+// Like startSubtaskHeartbeat, stop BLOCKS until the goroutine has exited.
+func (o *run) startFanoutHeartbeat(ctx context.Context) func() {
+	hbCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		ticker := time.NewTicker(subtaskHeartbeatInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-hbCtx.Done():
+				return
+			case <-ticker.C:
+				for _, id := range o.claimedSubIDs() {
+					if err := o.d.Ops.Heartbeat(hbCtx, id); err != nil {
+						slog.Warn("best-of-n: subtask heartbeat failed", "card_id", id, "error", err)
+					}
+				}
+			}
+		}
+	}()
+
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
+// stopFanoutHeartbeat stops the fan-out heartbeater if one is running.
+// Idempotent: the stop func is cleared after the first call.
+func (o *run) stopFanoutHeartbeat() {
+	if o.stopSubHB != nil {
+		o.stopSubHB()
+		o.stopSubHB = nil
+	}
 }
 
 // allSubtasksDone reports whether every subtask is already in the terminal
