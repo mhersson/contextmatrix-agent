@@ -327,6 +327,12 @@ type fakeGit struct {
 	removedWorktrees []string
 	deletedBranches  []string
 	hardResetRefs    []string
+
+	// AddInfoExclude scripting: infoExcludes captures each pattern passed so
+	// fan-out tests can assert the candidate-worktree exclude was written;
+	// infoExcludeErr fails every call.
+	infoExcludes   []string
+	infoExcludeErr error
 }
 
 // assertErr builds a sentinel error for fake scripting in tests.
@@ -517,6 +523,16 @@ func (g *fakeGit) DisableAutoGC(_ context.Context) error {
 	g.record("DisableAutoGC")
 
 	return nil
+}
+
+func (g *fakeGit) AddInfoExclude(_ context.Context, pattern string) error {
+	g.mu.Lock()
+	g.infoExcludes = append(g.infoExcludes, pattern)
+	g.mu.Unlock()
+
+	g.record("AddInfoExclude:" + pattern)
+
+	return g.infoExcludeErr
 }
 
 // compile-time assertion that the fake satisfies the consumer interface.

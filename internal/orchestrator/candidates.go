@@ -78,6 +78,25 @@ func degradeN(cfg Config, reported float64) int {
 func (o *run) runFanout(ctx context.Context) error {
 	cfg := o.d.Cfg
 
+	ordered, err := topoOrder(o.subtasks)
+	if err != nil {
+		return fmt.Errorf("order subtasks: %w", err)
+	}
+
+	// Crash-resume after a completed fan-out: SetPhase persists BEFORE the phase
+	// body, so a crash after adoptWinner but before SetPhase("document") resumes at
+	// execute -> judge. If every subtask is already board-done the winner was
+	// already adopted and replayed; re-racing would burn budget and write duplicate
+	// outcome rows. Mirror single-solver skip-if-done and return with NO candidates
+	// (runJudge's len(candidates)==0 no-op then flows straight to document) before
+	// cutting any worktree.
+	if allSubtasksDone(ordered) {
+		_ = o.d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck
+			"best-of-n: every subtask already complete; skipping fan-out (resume after adoption)")
+
+		return nil
+	}
+
 	nEff := degradeN(cfg, o.tc.ReportedCostUSD)
 	if nEff < cfg.BestOfN {
 		_ = o.d.Ops.AddLog(ctx, cfg.CardID, fmt.Sprintf( //nolint:errcheck
@@ -86,6 +105,15 @@ func (o *run) runFanout(ctx context.Context) error {
 
 	if err := o.d.Git.DisableAutoGC(ctx); err != nil {
 		return fmt.Errorf("disable auto-gc: %w", err)
+	}
+
+	// Keep candidate worktrees out of the parent clone's staging path: a WIP push
+	// on a budget/context/turn park runs CommitIfDirty on the main clone while the
+	// .worktrees/cK dirs are still present and untracked; without this exclude git
+	// stages them as mode-160000 gitlinks onto the card branch. Clone-local and
+	// idempotent (stageForCommit also skips the prefix, as belt-and-braces).
+	if err := o.d.Git.AddInfoExclude(ctx, ".worktrees/"); err != nil {
+		return fmt.Errorf("exclude candidate worktrees: %w", err)
 	}
 
 	pin := ""
@@ -99,11 +127,6 @@ func (o *run) runFanout(ctx context.Context) error {
 		EstTokens: estimateTokens(o.tc.Description),
 		Exclude:   o.excluded,
 	}, nEff, pin)
-
-	ordered, err := topoOrder(o.subtasks)
-	if err != nil {
-		return fmt.Errorf("order subtasks: %w", err)
-	}
 
 	// Build every candidate and cut its worktree BEFORE spawning any goroutine, so
 	// an AddWorktree failure returns cleanly with nothing running to leak.
@@ -173,6 +196,19 @@ func (o *run) runFanout(ctx context.Context) error {
 
 	wg.Wait()
 
+	// Fold every candidate's spend into the run ledger so the post-fan-out phases
+	// (judge/document/review/integrate) budget against the true remaining envelope
+	// rather than a pre-fan-out one. Candidates ran on their own separate ledgers,
+	// so none of this spend touched o.ledger during the race. Failed candidates
+	// burned real tokens too — spend is spend — so their spend counts. This keeps
+	// the run under the (N+1)x effectiveCeiling: ~Nx for candidates plus plan,
+	// leaving ~1x for the shared tail.
+	for _, c := range o.candidates {
+		if c != nil {
+			o.ledger.Spend(c.ledger.Spent())
+		}
+	}
+
 	for _, c := range o.candidates {
 		if c.err == nil {
 			return nil
@@ -182,23 +218,39 @@ func (o *run) runFanout(ctx context.Context) error {
 	return fmt.Errorf("best-of-n: all %d candidates failed; first error: %w", nEff, o.candidates[0].err)
 }
 
+// allSubtasksDone reports whether every subtask is already in the terminal
+// "done" state — the same skip-if-done signal executeSubtaskWith applies per
+// subtask. An empty set is not "done": there is nothing completed to resume, so
+// the normal (degenerate) path handles it unchanged.
+func allSubtasksDone(subs []subtaskRef) bool {
+	if len(subs) == 0 {
+		return false
+	}
+
+	for _, s := range subs {
+		if s.State != "done" {
+			return false
+		}
+	}
+
+	return true
+}
+
 // runCandidate runs every subtask sequentially through a candidate solver: a
 // worktree-rooted git and toolset, the candidate's own ledger and fixed model,
 // with board ops and pushes disabled. Mid-run user notes (HITL) are prepended to
 // each subtask body before it runs. It records the executed subtasks on the
 // candidate and returns the first subtask error, which drops the candidate.
 func (o *run) runCandidate(ctx context.Context, c *candidate, ordered []subtaskRef, nEff int) error {
-	model := c.model
-
 	sc := &solverCtx{
 		git:        c.git,
 		ledger:     c.ledger,
 		tools:      o.d.WriteToolsForDir(c.dir),
 		workspace:  c.dir,
-		coderModel: func(subtaskRef, string) string { return model },
+		coderModel: o.candidateCoderModel(c),
 		boardOps:   false,
 		push:       false,
-		tag:        fmt.Sprintf("candidate %d/%d (%s)", c.idx, nEff, model),
+		tag:        fmt.Sprintf("candidate %d/%d", c.idx, nEff),
 	}
 
 	for si, sub := range ordered {
@@ -211,12 +263,61 @@ func (o *run) runCandidate(ctx context.Context, c *candidate, ordered []subtaskR
 		}
 
 		_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, fmt.Sprintf( //nolint:errcheck
-			"best-of-n: candidate %d/%d (%s): subtask %d/%d done", c.idx, nEff, model, si+1, len(ordered)))
+			"best-of-n: candidate %d/%d (%s): subtask %d/%d done", c.idx, nEff, c.model, si+1, len(ordered)))
 	}
 
 	c.completed = sc.completed
 
 	return nil
+}
+
+// candidateCoderModel builds candidate c's reselection-aware coder resolver.
+// Unlike the fan-out's one-shot selection, it is consulted before EVERY coder
+// attempt: while c's current model is viable it is returned unchanged, but once
+// recoverIncapable has excluded it (o.excluded) the resolver re-picks the
+// next-best coder model for the card tier — mirroring the fan-out selection with
+// every dropped model merged into the exclude set — and updates c.model, so a
+// candidate that drew a dud model continues on a different one instead of
+// hot-looping the same slug and burning the shared reselect cap. c.model
+// therefore always reflects the LAST model the candidate ran (what logs and
+// outcome rows report). An explicit operator coder pin is never overridden
+// (mirroring resolveCoderModel): the pinned candidate keeps the pin, exhausts the
+// shared cap, and parks. When the pool is exhausted — the registry can only offer
+// an already-excluded model (its capable-default fallback) — it returns "", the
+// pool-exhausted sentinel runCoderWith turns into a clean candidate drop.
+func (o *run) candidateCoderModel(c *candidate) func(subtaskRef, string) string {
+	return func(_ subtaskRef, prompt string) string {
+		o.selMu.Lock()
+		defer o.selMu.Unlock()
+
+		// Never override an explicit operator coder pin (the fan-out assigns it to a
+		// single candidate); let a pinned-but-incapable model park via the cap.
+		if c.model == o.tc.ModelCoder && resolvePin(o.d.Registry, o.tc.ModelCoder) {
+			return c.model
+		}
+
+		if !o.excluded[c.model] {
+			return c.model
+		}
+
+		spec := o.d.Registry.SelectByComplexity(registry.SelectInput{
+			Role:      registry.RoleCoder,
+			Tier:      tierFromString(o.cardTier),
+			EstTokens: estimateTokens(prompt),
+			Exclude:   o.excluded,
+		})
+
+		// Pool exhausted: the registry could only return an already-excluded model
+		// (its capable-default fallback fired), so this candidate has no viable model
+		// left. Signal the drop with the empty sentinel.
+		if spec.Model == "" || o.excluded[spec.Model] {
+			return ""
+		}
+
+		c.model = spec.Model
+
+		return c.model
+	}
 }
 
 // userNotes fans mid-run human turns out to the live Best-of-N candidates. In

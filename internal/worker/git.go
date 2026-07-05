@@ -338,6 +338,16 @@ func (g *Git) stageForCommit(ctx context.Context) error {
 			continue
 		}
 
+		// Defense in depth for the Best-of-N fan-out: a candidate worktree lives at
+		// .worktrees/cK and shows up untracked in the parent clone. Staging it adds
+		// a mode-160000 gitlink to the card branch. The fan-out also writes a clone-
+		// local exclude for this, but never stage it regardless of that exclude.
+		if rel == ".worktrees" || strings.HasPrefix(rel, ".worktrees/") {
+			slog.Warn("refusing to stage candidate worktree path", "path", rel)
+
+			continue
+		}
+
 		if isLikelyBuildArtifact(filepath.Join(g.dir, rel), rel) {
 			slog.Warn("refusing to stage likely build artifact", "path", rel)
 
@@ -723,4 +733,59 @@ func (g *Git) DisableAutoGC(ctx context.Context) error {
 	_, err := g.run(ctx, "config", "gc.auto", "0")
 
 	return err
+}
+
+// AddInfoExclude appends pattern to the clone's local exclude file
+// ($GIT_COMMON_DIR/info/exclude) unless it is already listed, so untracked
+// paths matching it never surface to `git status` and can never be staged.
+// Unlike .gitignore this is clone-local (never committed) and unlike the model
+// tool env it needs no repo write the coder could observe. Idempotent: a re-run
+// that finds the pattern already present is a no-op. The fan-out uses it to hide
+// candidate worktrees (.worktrees/) from the parent clone's staging path so a
+// WIP push on a park cannot stage them as gitlinks. This is a file write, not a
+// git command: rev-parse resolves the git dir, then os handles the append.
+func (g *Git) AddInfoExclude(ctx context.Context, pattern string) error {
+	// A worktree's --git-common-dir points at the main clone's .git, which is
+	// where info/exclude lives. The path may be relative to the clone, so anchor
+	// it under g.dir.
+	out, err := g.run(ctx, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return fmt.Errorf("resolve git-common-dir: %w", err)
+	}
+
+	gitDir := strings.TrimSpace(out)
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(g.dir, gitDir)
+	}
+
+	excludePath := filepath.Join(gitDir, "info", "exclude")
+
+	if existing, err := os.ReadFile(excludePath); err == nil {
+		for _, line := range strings.Split(string(existing), "\n") {
+			if strings.TrimSpace(line) == pattern {
+				return nil // already excluded — idempotent no-op
+			}
+		}
+	}
+
+	if err := os.MkdirAll(filepath.Dir(excludePath), 0o755); err != nil {
+		return fmt.Errorf("ensure info dir: %w", err)
+	}
+
+	f, err := os.OpenFile(excludePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("open exclude file: %w", err)
+	}
+
+	if _, err := f.WriteString(pattern + "\n"); err != nil {
+		_ = f.Close() //nolint:errcheck // write already failed; report that error
+
+		return fmt.Errorf("append exclude pattern: %w", err)
+	}
+
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close exclude file: %w", err)
+	}
+
+	return nil
 }

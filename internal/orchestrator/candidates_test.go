@@ -7,12 +7,19 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-harness/harness"
 	"github.com/mhersson/contextmatrix-harness/llm"
 	"github.com/mhersson/contextmatrix-harness/tools"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// coderPrior builds a PriorEntry with only the coder role scored, for registries
+// whose candidate selection is coder-role only.
+func coderPrior(v float64) registry.PriorEntry {
+	return registry.PriorEntry{Coder: &v}
+}
 
 // perDirGit hands each candidate worktree its own *fakeGit so per-candidate
 // assertions stay isolated. get lazily creates a committing fake for an unseen
@@ -142,6 +149,9 @@ func TestFanoutHappyPath(t *testing.T) {
 	}
 
 	assert.Equal(t, 1, countCalls(gitCalls, "DisableAutoGC"), "auto-gc disabled exactly once")
+	assert.Equal(t, 1, countCalls(gitCalls, "AddInfoExclude:.worktrees/"),
+		"candidate worktrees are excluded from the parent clone's staging path")
+	assert.Equal(t, []string{".worktrees/"}, mainGit.infoExcludes, "the exclude pattern is .worktrees/")
 
 	// Zero subtask board writes during the fan-out.
 	opCalls := ops.recorded()
@@ -149,6 +159,12 @@ func TestFanoutHappyPath(t *testing.T) {
 	assert.Equal(t, 0, countCalls(opCalls, "ClaimCard:SUB-2"))
 	assert.Equal(t, -1, indexOfCall(opCalls, "CompleteTask:SUB-1"), "candidates never complete subtasks")
 	assert.Equal(t, -1, indexOfCall(opCalls, "CompleteTask:SUB-2"))
+
+	// Candidate spend is reported against the PARENT card, never the subtasks, so
+	// the run's cost authority (and resume-time degradeN) sees it.
+	assert.Positive(t, countCalls(opCalls, "ReportUsage:CARD-1"), "candidate usage reports on the parent card")
+	assert.Equal(t, 0, countCalls(opCalls, "ReportUsage:SUB-1"), "candidate usage never lands on a subtask card")
+	assert.Equal(t, 0, countCalls(opCalls, "ReportUsage:SUB-2"))
 
 	// Zero pushes anywhere: the main branch and every candidate branch stay local.
 	assert.Empty(t, mainGit.pushBranches, "no push on the main git")
@@ -245,11 +261,12 @@ func TestFanoutAllFailed(t *testing.T) {
 	assert.Contains(t, err.Error(), "all 3 candidates failed")
 }
 
-// TestFanoutIncapableRecoveryRaceSafe fans out three candidates whose models are
-// all harness-incapable, so every candidate drives the shared incapable-recovery
-// state (o.reselects / o.excluded) and the coder-model record concurrently. Run
-// under -race, it proves the selMu discipline serializes those mutations; the
-// shared re-selection cap starves every candidate, so the fan-out fails.
+// TestFanoutIncapableRecoveryRaceSafe fans out three candidates when EVERY coder
+// model is harness-incapable, so each candidate drives the shared recovery state
+// (o.reselects / o.excluded) and re-picks concurrently. Run under -race, it proves
+// the selMu discipline serializes those mutations. With no capable model anywhere,
+// every candidate fails — some via the shared re-selection cap, some via a drained
+// pool (the empty-model sentinel) — so the fan-out fails.
 func TestFanoutIncapableRecoveryRaceSafe(t *testing.T) {
 	ops := &fakeOps{}
 	mainGit := &fakeGit{}
@@ -262,13 +279,141 @@ func TestFanoutIncapableRecoveryRaceSafe(t *testing.T) {
 	o := newFanoutRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "moderate"}}, 0)
 
 	err := o.runFanout(context.Background())
-	require.Error(t, err, "all candidates park on the shared re-selection cap")
+	require.Error(t, err, "no capable model exists, so every candidate fails")
 
 	require.Len(t, o.candidates, 3)
 
 	for i, c := range o.candidates {
-		require.Error(t, c.err, "candidate %d must park", i+1)
+		require.Error(t, c.err, "candidate %d must fail", i+1)
 	}
+}
+
+// TestFanoutSkipsWhenAllSubtasksDone proves the crash-window guard: a resume that
+// finds every subtask already board-done returns without cutting worktrees or
+// creating candidates, so the run cannot re-race and double-report outcomes.
+func TestFanoutSkipsWhenAllSubtasksDone(t *testing.T) {
+	ops := &fakeOps{}
+	mainGit := &fakeGit{}
+	d, _, _ := fanoutDeps(t, ops, mainGit, &planLLM{}, 3)
+
+	o := newFanoutRun(d, []subtaskRef{
+		{ID: "SUB-1", Title: "First", State: "done"},
+		{ID: "SUB-2", Title: "Second", State: "done"},
+	}, 0)
+
+	require.NoError(t, o.runFanout(context.Background()))
+
+	assert.Nil(t, o.candidates, "no candidates created when every subtask is already done")
+
+	gitCalls := mainGit.recorded()
+	assert.Equal(t, 0, countCalls(gitCalls, "DisableAutoGC"), "no fan-out setup on the done-skip path")
+
+	for _, c := range gitCalls {
+		assert.NotContains(t, c, "AddWorktree", "no worktree is cut when the fan-out is skipped")
+	}
+
+	assert.True(t, ops.loggedContains("every subtask already complete"), "the skip is logged; logs=%v", ops.logs)
+}
+
+// TestFanoutFoldsCandidateSpendIntoParentLedger proves every candidate's spend
+// (winners and losers) is folded into the run ledger after the race, so the
+// post-fan-out phases budget against the true remaining envelope.
+func TestFanoutFoldsCandidateSpendIntoParentLedger(t *testing.T) {
+	ops := &fakeOps{}
+	mainGit := &fakeGit{}
+	// modelAwareLLM with no incapable models: every coder run is a canned stop
+	// costing $0.01.
+	d, _, _ := fanoutDeps(t, ops, mainGit, &modelAwareLLM{}, 3)
+
+	// Generous budget so nothing parks and all three candidates run both subtasks.
+	o := newFanoutRun(d, []subtaskRef{
+		{ID: "SUB-1", Title: "First", Tier: "simple"},
+		{ID: "SUB-2", Title: "Second", Tier: "simple"},
+	}, 100)
+
+	require.NoError(t, o.runFanout(context.Background()))
+	require.Len(t, o.candidates, 3)
+
+	// 3 candidates x 2 subtasks x $0.01 = $0.06, all folded into the run ledger
+	// (which started at zero reported spend).
+	assert.InDelta(t, 0.06, o.ledger.Spent(), 1e-9,
+		"every candidate's spend folds into the run ledger")
+}
+
+// TestFanoutCandidateReselectsOnIncapable proves a candidate whose model is
+// reported incapable once does NOT hot-loop that model: it re-picks the next-best
+// coder model and completes on it. capGood/default is capable, so once bad/coder
+// is excluded the candidate finishes rather than dropping.
+func TestFanoutCandidateReselectsOnIncapable(t *testing.T) {
+	ops := &fakeOps{}
+	mainGit := &fakeGit{}
+	// Single incapable coder model; the capable default is fine.
+	client := &modelAwareLLM{incapable: map[string]bool{"solo/coder": true}}
+	d, pdg, _ := fanoutDeps(t, ops, mainGit, client, 1)
+	d.Registry = registry.NewRegistryFromParts(
+		llm.Catalog{
+			{ID: "solo/coder", ContextLength: 200000, SupportedParameters: []string{"tools"}, PromptPricePerTok: 1e-6},
+			{ID: "capgood/default", ContextLength: 200000, SupportedParameters: []string{"tools"}},
+		},
+		registry.Priors{Models: map[string]registry.PriorEntry{"solo/coder": coderPrior(0.9)}},
+		nil, nil, "capgood/default",
+	)
+
+	o := newFanoutRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "moderate"}}, 0)
+
+	require.NoError(t, o.runFanout(context.Background()))
+	require.Len(t, o.candidates, 1)
+
+	c := o.candidates[0]
+	require.NoError(t, c.err, "the candidate must recover on a different model, not drop")
+	assert.Equal(t, "capgood/default", c.model, "c.model reflects the LAST model the candidate ran")
+	assert.Contains(t, ops.recorded(), "BlacklistModel:CARD-1/solo/coder", "the incapable model was blacklisted")
+
+	fg := pdg.fakeGitFor(c.dir)
+	require.NotNil(t, fg)
+	assert.Positive(t, countCalls(fg.recorded(), "CommitWithMessage"), "the recovered candidate committed its work")
+}
+
+// TestFanoutCandidateDropsWhenPoolExhausted proves a candidate whose model pool
+// drains (every viable model excluded) drops cleanly via the empty-model
+// sentinel, while a sibling candidate on a pinned, prior-less model — invisible to
+// auto-selection, so the drained candidate cannot steal it — is unaffected.
+func TestFanoutCandidateDropsWhenPoolExhausted(t *testing.T) {
+	ops := &fakeOps{}
+	mainGit := &fakeGit{}
+	// pinned/coder is capable; bad1/coder and the capable default are incapable.
+	client := &modelAwareLLM{incapable: map[string]bool{"bad1/coder": true, "bad2/default": true}}
+	d, pdg, _ := fanoutDeps(t, ops, mainGit, client, 2)
+	d.Registry = registry.NewRegistryFromParts(
+		llm.Catalog{
+			// pinned/coder has NO prior, so it is reachable only via the pin — the
+			// drained candidate's auto re-pick can never land on it.
+			{ID: "pinned/coder", ContextLength: 200000, SupportedParameters: []string{"tools"}},
+			{ID: "bad1/coder", ContextLength: 200000, SupportedParameters: []string{"tools"}, PromptPricePerTok: 1e-6},
+			{ID: "bad2/default", ContextLength: 200000, SupportedParameters: []string{"tools"}},
+		},
+		registry.Priors{Models: map[string]registry.PriorEntry{"bad1/coder": coderPrior(0.8)}},
+		nil, nil, "bad2/default",
+	)
+
+	o := newFanoutRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "moderate"}}, 0)
+	o.tc.ModelCoder = "pinned/coder" // fan-out gives slot 1 the pin
+
+	require.NoError(t, o.runFanout(context.Background()), "one survivor keeps the fan-out alive")
+	require.Len(t, o.candidates, 2)
+
+	// Candidate 1 (the pinned, capable model) completes and is unaffected.
+	require.NoError(t, o.candidates[0].err, "the pinned candidate completes")
+	assert.Equal(t, "pinned/coder", o.candidates[0].model)
+
+	// Candidate 2's pool drains (bad1 then the capable default, both incapable) and
+	// it drops on the exhausted-pool sentinel.
+	require.Error(t, o.candidates[1].err, "the drained candidate drops")
+	assert.Contains(t, o.candidates[1].err.Error(), "pool exhausted")
+
+	fg := pdg.fakeGitFor(o.candidates[0].dir)
+	require.NotNil(t, fg)
+	assert.Positive(t, countCalls(fg.recorded(), "CommitWithMessage"), "the surviving candidate committed its work")
 }
 
 func TestUserNotesUnseen(t *testing.T) {

@@ -244,6 +244,15 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 	for attempt := 0; attempt <= reselectCap; attempt++ {
 		model := sc.coderModel(sub, prompt)
 
+		// A candidate's reselection-aware resolver returns "" when its model pool is
+		// exhausted (every viable model excluded this run). Drop the candidate
+		// cleanly rather than run the harness with no model. The parent/single-solver
+		// resolver never returns "" (it falls back to the capable default), so this
+		// is candidate-only in practice.
+		if model == "" {
+			return harness.Result{}, fmt.Errorf("coder for %s: candidate model pool exhausted", sub.ID)
+		}
+
 		logMsg := fmt.Sprintf("coder model %s selected for subtask %q (tier=%s)", model, sub.Title, tierOf(sub))
 		if sc.tag != "" {
 			// A candidate solver tags its log line so parallel selections are
@@ -278,9 +287,19 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 		o.coderModels[model] = true
 		o.selMu.Unlock()
 
-		if reportErr := d.Ops.ReportUsage(ctx, sub.ID, usedModel,
+		// Best-of-N candidates report spend against the PARENT card, not the subtask:
+		// report_usage is not claim-gated, and folding candidate spend onto the
+		// parent's token_usage is what lets a resumed run's trigger context (and thus
+		// degradeN) see it. The parent/single-solver solver (boardOps) reports on the
+		// subtask as before.
+		target := sub.ID
+		if !sc.boardOps {
+			target = cfg.CardID
+		}
+
+		if reportErr := d.Ops.ReportUsage(ctx, target, usedModel,
 			res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
-			slog.Warn("execute: report usage failed", "card_id", sub.ID, "error", reportErr)
+			slog.Warn("execute: report usage failed", "card_id", target, "error", reportErr)
 		}
 
 		var ie *IncapableError

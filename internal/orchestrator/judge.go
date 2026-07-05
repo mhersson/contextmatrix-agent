@@ -94,6 +94,13 @@ func runJudge(ctx context.Context, o *run) error {
 		pool = survivors
 	}
 
+	// Insurance against a refactor: runFanout only proceeds to judge with at least
+	// one surviving candidate, so pool is non-empty here today. Guard anyway rather
+	// than index pool[0] on an empty slice.
+	if len(pool) == 0 {
+		return fmt.Errorf("best-of-n: no candidates to judge")
+	}
+
 	// One viable candidate: auto-win, no model call.
 	if len(pool) == 1 {
 		o.winner = pool[0]
@@ -117,8 +124,12 @@ func runJudge(ctx context.Context, o *run) error {
 	model := d.Registry.SelectByComplexity(registry.SelectInput{
 		Role:      registry.RoleReviewer,
 		Tier:      registry.TierComplex,
-		EstTokens: len(prompt) / 4,
-		Exclude:   o.excluded,
+		EstTokens: estimateTokens(prompt),
+		// The judge reviews the candidates, so exclude every candidate's coder model
+		// (a model must not judge its own work) plus the per-card incapable set —
+		// exactly the authoritative-review exclusions. Candidates register their
+		// models in o.coderModels before judging.
+		Exclude: o.reviewExclusions(),
 	}).Model
 
 	v, ok, err := o.runJudgeVerdict(ctx, model, prompt, len(pool))
@@ -321,6 +332,17 @@ func (o *run) recordJudgeReport(ctx context.Context, v *judgeVerdict) {
 		b.WriteString("\n")
 	}
 
+	// Per-candidate assessments from the verdict. The judge numbers candidates by
+	// pool position (matching the winner index), which is NOT the table's candidate
+	// index once the pool is filtered — the clarifier keeps that unambiguous.
+	if v != nil {
+		if rows := renderJudgeNotes(v.Notes); rows != "" {
+			b.WriteString("\n### Assessments\n\n")
+			b.WriteString("_(candidate numbers in judge text are pool positions)_\n\n")
+			b.WriteString(rows)
+		}
+	}
+
 	judge := o.judgeModel
 	if judge == "" {
 		judge = "— (no model verdict)"
@@ -329,6 +351,24 @@ func (o *run) recordJudgeReport(ctx context.Context, v *judgeVerdict) {
 	fmt.Fprintf(&b, "\n_Judge model: %s_\n", judge)
 
 	o.recordSection(ctx, "Best-of-N Report", b.String())
+}
+
+// renderJudgeNotes renders the verdict's per-candidate assessments as a bullet
+// list ("- Candidate <n>: <assessment>"), skipping blank assessments. It returns
+// "" when there is nothing to render, so the caller can omit the whole section.
+func renderJudgeNotes(notes []judgeNote) string {
+	var b strings.Builder
+
+	for _, note := range notes {
+		assessment := strings.TrimSpace(note.Assessment)
+		if assessment == "" {
+			continue
+		}
+
+		fmt.Fprintf(&b, "- Candidate %d: %s\n", note.Candidate, assessment)
+	}
+
+	return b.String()
 }
 
 // judgeVerifyCell renders a candidate's verify result for the report table. A

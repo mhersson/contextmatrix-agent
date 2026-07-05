@@ -170,6 +170,73 @@ func TestCommitWithMessage_OnlyArtifactsIsNoOp(t *testing.T) {
 	assert.False(t, committed, "a tree dirty only with artifacts must not produce a commit")
 }
 
+// TestAddInfoExcludeHidesWorktrees proves the clone-local exclude keeps a
+// candidate-worktree path out of `git status` (and thus out of any staging
+// path), and that a re-run is idempotent — the pattern is appended exactly once.
+func TestAddInfoExcludeHidesWorktrees(t *testing.T) {
+	remote := setupBareRemote(t)
+	ws := t.TempDir()
+
+	g := NewGit(ws, "", "", "")
+	require.NoError(t, g.Clone(context.Background(), remote, "main"))
+
+	// Isolate from any developer global gitignore that might already hide the dir.
+	runGit(t, ws, "config", "core.excludesFile", "/dev/null")
+
+	// An untracked file under .worktrees/ (the fan-out's candidate-worktree root).
+	writeFile(t, ws, ".worktrees/c1/candidate.txt", []byte("wip\n"), 0o644)
+
+	status, err := g.run(context.Background(), "status", "--porcelain")
+	require.NoError(t, err)
+	require.Contains(t, status, ".worktrees", "sanity: the worktree dir is untracked before the exclude")
+
+	require.NoError(t, g.AddInfoExclude(context.Background(), ".worktrees/"))
+
+	status, err = g.run(context.Background(), "status", "--porcelain")
+	require.NoError(t, err)
+	assert.NotContains(t, status, ".worktrees", "the excluded worktree dir must not appear in status")
+
+	// Idempotent: a second call is a no-op — the pattern is present exactly once.
+	require.NoError(t, g.AddInfoExclude(context.Background(), ".worktrees/"))
+
+	data, err := os.ReadFile(filepath.Join(ws, ".git", "info", "exclude"))
+	require.NoError(t, err)
+	assert.Equal(t, 1, strings.Count(string(data), ".worktrees/"), "pattern appended exactly once")
+}
+
+// TestStageForCommit_SkipsCandidateWorktrees proves the second layer of the
+// defense: even with NO clone-local exclude, the staging path never stages a
+// candidate worktree. A real linked worktree at .worktrees/c1 is exactly the
+// mode-160000 gitlink a bare `git add .worktrees/` would land on the card branch.
+func TestStageForCommit_SkipsCandidateWorktrees(t *testing.T) {
+	remote := setupBareRemote(t)
+	ws := t.TempDir()
+
+	g := NewGit(ws, "", "", "")
+	require.NoError(t, g.Clone(context.Background(), remote, "main"))
+	require.NoError(t, g.CreateBranch(context.Background(), "cm/cmx-001"))
+	g.SetBranchPolicy("cm/cmx-001", "main", "main")
+
+	runGit(t, ws, "config", "core.excludesFile", "/dev/null")
+
+	// Cut a real candidate worktree (the fan-out shape). NO AddInfoExclude here —
+	// this exercises the stageForCommit prefix skip directly.
+	wt := filepath.Join(ws, ".worktrees", "c1")
+	require.NoError(t, g.AddWorktree(context.Background(), wt, "cm/cmx-001-c1", "cm/cmx-001"))
+
+	// A legitimate source edit on the parent branch so the commit is non-empty.
+	writeFile(t, ws, "main.go", []byte("package main\n"), 0o644)
+
+	committed, err := g.CommitWithMessage(context.Background(), "feat: real work")
+	require.NoError(t, err)
+	require.True(t, committed)
+
+	out, err := g.run(context.Background(), "show", "--name-only", "--format=", "HEAD")
+	require.NoError(t, err)
+	assert.Contains(t, out, "main.go")
+	assert.NotContains(t, out, ".worktrees", "a candidate worktree must never be staged onto the card branch")
+}
+
 func TestCloneBranchCommitPush(t *testing.T) {
 	t.Parallel()
 

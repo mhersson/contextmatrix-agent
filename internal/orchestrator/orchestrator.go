@@ -86,6 +86,7 @@ type GitOps interface {
 	HardReset(ctx context.Context, ref string) error
 	DiffStat(ctx context.Context, base string) (string, error)
 	DisableAutoGC(ctx context.Context) error
+	AddInfoExclude(ctx context.Context, pattern string) error
 }
 
 // Config carries the per-run parameters the FSM needs.

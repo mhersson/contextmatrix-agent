@@ -205,6 +205,79 @@ func TestJudgeUnparsableVerdictFallsBack(t *testing.T) {
 	assert.True(t, ops.loggedContains("falling back"), "the fallback is logged; logs=%v", ops.logs)
 }
 
+// TestJudgeExcludesCandidateModels proves the judge never runs a candidate's own
+// coder model (a model must not judge its own work): with both candidate models
+// recorded in o.coderModels, the reviewer selection falls past them.
+func TestJudgeExcludesCandidateModels(t *testing.T) {
+	ops := &fakeOps{}
+	client := &planLLM{responses: []llm.Response{
+		stopResp(`{"winner": 1, "ranking": [1, 2], "rationale": "c1 wins.", "notes": []}`, 0.02),
+	}}
+	cands := []*candidate{
+		judgeCandidate(1, "alpha/coder", "dir-c1", "DIFF_ONE"),
+		judgeCandidate(2, "beta/coder", "dir-c2", "DIFF_TWO"),
+	}
+	verify := map[string]bool{"dir-c1": true, "dir-c2": true}
+	o := newJudgeRun(t, ops, &fakeGit{}, client, cands, verify)
+	o.d.Registry = twoCoderRegistry()
+	// Post-fan-out, every candidate's coder model is recorded here; the judge must
+	// exclude them via reviewExclusions.
+	o.coderModels = map[string]bool{"alpha/coder": true, "beta/coder": true}
+
+	require.NoError(t, runJudge(context.Background(), o))
+
+	// alpha/coder is the highest-prior reviewer, but it coded a candidate. With both
+	// candidate models excluded the only model left is the capable default — so the
+	// judge is NOT alpha/coder (which excluding only o.excluded would have picked).
+	assert.NotEqual(t, "alpha/coder", o.judgeModel, "the judge must not run a candidate's own coder model")
+	assert.NotEqual(t, "beta/coder", o.judgeModel, "the judge must not run a candidate's own coder model")
+	assert.Equal(t, "capable/default", o.judgeModel, "both candidate models excluded -> only the capable default remains")
+}
+
+// TestJudgeEmptyPoolErrors covers the M1 insurance guard directly: a pool with no
+// survivors (every candidate dropped before judging) errors rather than indexing
+// pool[0]. runFanout never reaches judge with zero survivors today, so this drives
+// runJudge with a hand-built all-dropped slice.
+func TestJudgeEmptyPoolErrors(t *testing.T) {
+	ops := &fakeOps{}
+	client := &planLLM{}
+	c1 := judgeCandidate(1, "coder/one", "dir-c1", "")
+	c2 := judgeCandidate(2, "coder/two", "dir-c2", "")
+	c1.err = assertErr("build failed")
+	c2.err = assertErr("build failed")
+	o := newJudgeRun(t, ops, &fakeGit{}, client, []*candidate{c1, c2}, map[string]bool{})
+
+	err := runJudge(context.Background(), o)
+	require.Error(t, err, "an empty pool must error, not panic on pool[0]")
+	assert.Contains(t, err.Error(), "no candidates to judge")
+	assert.Empty(t, client.tasks, "no judge model call on an empty pool")
+	assert.Nil(t, o.winner, "no winner on an empty pool")
+}
+
+// TestJudgeReportRendersAssessments proves the parsed per-candidate assessments
+// are rendered beneath the report table, with the pool-position clarifier.
+func TestJudgeReportRendersAssessments(t *testing.T) {
+	ops := &fakeOps{}
+	client := &planLLM{responses: []llm.Response{
+		stopResp(`{"winner": 1, "ranking": [1, 2], "rationale": "c1 is cleaner.", "notes": [{"candidate": 1, "assessment": "solid and minimal"}, {"candidate": 2, "assessment": "overcomplicated"}]}`, 0.02),
+	}}
+	cands := []*candidate{
+		judgeCandidate(1, "coder/one", "dir-c1", "DIFF_ONE"),
+		judgeCandidate(2, "coder/two", "dir-c2", "DIFF_TWO"),
+	}
+	verify := map[string]bool{"dir-c1": true, "dir-c2": true}
+	o := newJudgeRun(t, ops, &fakeGit{}, client, cands, verify)
+
+	require.NoError(t, runJudge(context.Background(), o))
+
+	body := ops.lastBody()
+	require.Contains(t, body, "## Best-of-N Report", "the report body was recorded")
+	assert.Contains(t, body, "### Assessments")
+	assert.Contains(t, body, "candidate numbers in judge text are pool positions")
+	assert.Contains(t, body, "- Candidate 1: solid and minimal")
+	assert.Contains(t, body, "- Candidate 2: overcomplicated")
+}
+
 // adoptionCandidate builds on judgeCandidate with the extra fields the
 // adoption tail reads: a distinct container-local branch (mirroring the
 // fan-out's cm/<card>-cK convention) and a ledger pre-loaded with the
