@@ -330,7 +330,15 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 		Registry:   buildRegistry(a.spec),
 		WriteTools: tools.NewRegistry(wt...),
 		WriteToolsForDir: func(dir string) *tools.Registry {
-			return tools.NewRegistry(writeToolsFor(dir, a.spec.BashTimeoutMax)...)
+			// Candidates get the same skill tool as the main solver — the
+			// skills mount is a fixed path, not workspace-relative, so the
+			// shared instance is safe across worktrees.
+			wts := writeToolsFor(dir, a.spec.BashTimeoutMax)
+			if skillTool != nil {
+				wts = append(wts, skillTool)
+			}
+
+			return tools.NewRegistry(wts...)
 		},
 		ReadTools: tools.NewReadOnlyRegistry(a.ws),
 		SkillTool: skillTool,

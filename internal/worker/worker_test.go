@@ -546,6 +546,55 @@ func TestRunFSMWiresPerDirFactories(t *testing.T) {
 	assert.ElementsMatch(t, toolNames(t, mainWriteTools), toolNames(t, forDirRegistry))
 }
 
+// TestRunFSMWiresSkillToolIntoCandidateRegistries: when a skills dir is
+// mounted, WriteToolsForDir must include the same Skill tool the main
+// WriteTools registry gets — Best-of-N candidates race with full tool parity
+// instead of a skill-less write set. Swaps runOrchestrator, so it must not
+// run in parallel.
+func TestRunFSMWiresSkillToolIntoCandidateRegistries(t *testing.T) {
+	remote := setupBareRemote(t)
+	wsParent := t.TempDir()
+	ops := newFakeOps()
+
+	skillsDir := filepath.Join(t.TempDir(), "skills")
+	require.NoError(t, os.MkdirAll(filepath.Join(skillsDir, "go-development"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(skillsDir, "go-development", "SKILL.md"),
+		[]byte("---\nname: go-development\ndescription: Use for Go.\n---\nbody"), 0o644))
+
+	var writeToolsForDir func(string) *tools.Registry
+
+	var mainWriteTools *tools.Registry
+
+	swapRunOrchestrator(t, func(_ context.Context, d orchestrator.Deps) error {
+		writeToolsForDir = d.WriteToolsForDir
+		mainWriteTools = d.WriteTools
+
+		return nil
+	})
+
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	spec := baseSpec(t, remote, wsParent)
+	spec.TaskSkillsDir = skillsDir
+
+	res, err := Run(context.Background(), spec, ops, &scriptedLLM{}, emit, openStdin(t))
+	require.NoError(t, err)
+	assert.Equal(t, "completed", res.Reason)
+
+	require.NotNil(t, writeToolsForDir, "Deps.WriteToolsForDir must be wired")
+	require.NotNil(t, mainWriteTools)
+
+	ws := filepath.Join(wsParent, "cmx-001")
+	forDirRegistry := writeToolsForDir(filepath.Join(ws, ".worktrees", "c1"))
+	require.NotNil(t, forDirRegistry)
+
+	require.Contains(t, toolNames(t, mainWriteTools), "skill",
+		"main registry must carry the skill tool when a skills dir is mounted")
+	assert.Contains(t, toolNames(t, forDirRegistry), "skill",
+		"candidate registries must carry the same skill tool as the main solver")
+	assert.ElementsMatch(t, toolNames(t, mainWriteTools), toolNames(t, forDirRegistry))
+}
+
 // TestHITLEntersOrchestrator: an interactive, non-autonomous card routes to the
 // FSM with HITL mode set and the live inbox injected. Swaps runOrchestrator to
 // capture the Deps the worker built, so it must not run in parallel.
