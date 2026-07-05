@@ -173,6 +173,14 @@ type run struct {
 	tc     cmclient.TaskContext
 	ledger *Ledger
 
+	// solver is the parent run's implementation seam: the collaborators the
+	// execute phase writes each subtask through (main-workspace git and tools,
+	// the run ledger, the run's coder-model resolver) plus the board-ops/push
+	// flags. Built in newRun bound to today's exact collaborators; Best-of-N
+	// derives additional candidate solvers that target worktrees and stay off
+	// the board.
+	solver *solverCtx
+
 	// Plan-phase outputs, consumed by later phases. Set by runPlan, or — on
 	// resume — pre-loaded by reconcile from SubtaskStates before any phase runs.
 	subtasks []subtaskRef
@@ -205,7 +213,7 @@ type run struct {
 
 	// coderModels records every distinct model that coded a subtask during
 	// execute, so the review phase can exclude them from the specialist panel
-	// (a model should not review its own code). Populated in executeSubtask.
+	// (a model should not review its own code). Populated in runCoderWith.
 	coderModels map[string]bool
 
 	// reselects counts in-run model re-selections triggered by a harness-incapable
@@ -292,6 +300,19 @@ func newRun(d Deps, tc cmclient.TaskContext) *run {
 	o.excluded = map[string]bool{}
 	o.body = tc.Description
 	o.taskImages = dataURLs(tc.Images)
+
+	// The parent solver binds the execute seam to today's exact collaborators:
+	// the main workspace git/tools, the run ledger (o.ledger IS its ledger), and
+	// the run's coder-model resolver, driving the board and pushing.
+	o.solver = &solverCtx{
+		git:        d.Git,
+		ledger:     o.ledger,
+		tools:      d.WriteTools,
+		workspace:  d.Cfg.Workspace,
+		coderModel: o.resolveCoderModel,
+		boardOps:   true,
+		push:       true,
+	}
 
 	grounding := groundingBlock(discoverGrounding(d.Cfg.Workspace))
 	if d.Redact != nil {

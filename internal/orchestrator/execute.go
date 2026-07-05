@@ -11,6 +11,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-harness/harness"
+	"github.com/mhersson/contextmatrix-harness/tools"
 )
 
 // commitMarker is the line prefix the coder appends to its final message to
@@ -23,11 +24,27 @@ const commitMarker = "COMMIT:"
 // prompt, the tool schemas, and headroom for the conversation that follows.
 func estimateTokens(prompt string) int { return len(prompt)/4 + 24000 }
 
+// solverCtx carries the collaborators one implementation attempt writes
+// through. The parent run's solver targets the main workspace and the board;
+// Best-of-N candidates target a worktree and stay off the board.
+type solverCtx struct {
+	git        GitOps
+	ledger     *Ledger
+	tools      *tools.Registry
+	workspace  string
+	coderModel func(sub subtaskRef, prompt string) string
+	boardOps   bool         // false: no subtask claim/heartbeat/complete (candidate mode)
+	push       bool         // false: never push (candidate mode)
+	tag        string       // "" parent; "candidate 2/3 (slug)" for candidate log lines
+	completed  []subtaskRef // subtasks this solver actually executed
+}
+
 // runExecute is the execute phase: subtasks run SEQUENTIALLY in dependency
 // order over a single shared workspace (no parallel writers). Each subtask gets
 // a fresh-context coder harness with the full write toolset; code commits and
 // pushes after every subtask. The budget ledger is checked before every
-// model-bearing step.
+// model-bearing step. The parent run drives its solver (o.solver), bound in
+// newRun to the main workspace, run ledger, and the board.
 func runExecute(ctx context.Context, o *run) error {
 	ordered, err := topoOrder(o.subtasks)
 	if err != nil {
@@ -35,7 +52,7 @@ func runExecute(ctx context.Context, o *run) error {
 	}
 
 	for _, sub := range ordered {
-		if err := o.executeSubtask(ctx, sub); err != nil {
+		if err := o.executeSubtaskWith(ctx, o.solver, sub); err != nil {
 			return err
 		}
 	}
@@ -43,9 +60,12 @@ func runExecute(ctx context.Context, o *run) error {
 	return nil
 }
 
-// executeSubtask runs one subtask end to end: skip-if-done, budget check, claim,
-// model resolution, coder harness run, usage accounting, commit, push, complete.
-func (o *run) executeSubtask(ctx context.Context, sub subtaskRef) error {
+// executeSubtaskWith runs one subtask end to end through the given solver:
+// skip-if-done, budget check, claim, model resolution, coder harness run, usage
+// accounting, commit, push, complete. Board ops (claim/heartbeat/complete/
+// release) run only when sc.boardOps and pushes only when sc.push, so a
+// Best-of-N candidate solver stays off the board and never pushes.
+func (o *run) executeSubtaskWith(ctx context.Context, sc *solverCtx, sub subtaskRef) error {
 	d := o.d
 
 	// Resume: a subtask already completed in a prior run is not re-run.
@@ -56,25 +76,33 @@ func (o *run) executeSubtask(ctx context.Context, sub subtaskRef) error {
 	}
 
 	// Budget gate BEFORE claiming, so a parked subtask is never owned.
-	if err := o.ledger.Check(); err != nil {
+	if err := sc.ledger.Check(); err != nil {
 		return err
 	}
 
 	// Claim conflicts mean another agent owns the subtask — abort the run rather
 	// than skip, because the workspace is shared and we cannot safely proceed
-	// without ownership of the card we are about to build on.
-	if err := d.Ops.ClaimCard(ctx, sub.ID); err != nil {
-		return fmt.Errorf("claim subtask %s: %w", sub.ID, err)
+	// without ownership of the card we are about to build on. A candidate solver
+	// (boardOps false) never claims, so there is no card to conflict over.
+	if sc.boardOps {
+		if err := d.Ops.ClaimCard(ctx, sub.ID); err != nil {
+			return fmt.Errorf("claim subtask %s: %w", sub.ID, err)
+		}
 	}
 
-	if err := o.executeClaimed(ctx, sub); err != nil {
+	if err := o.executeClaimedWith(ctx, sc, sub); err != nil {
 		// The run is aborting (or parking) while we still own the subtask:
 		// release it, or it stays claimed until CM's stall sweep mislabels a
-		// deliberately-parked run as crashed 30 minutes later.
-		o.releaseSubtask(ctx, sub.ID)
+		// deliberately-parked run as crashed 30 minutes later. A candidate holds
+		// no claim, so there is nothing to release.
+		if sc.boardOps {
+			o.releaseSubtask(ctx, sub.ID)
+		}
 
 		return err
 	}
+
+	sc.completed = append(sc.completed, sub)
 
 	return nil
 }
@@ -83,22 +111,25 @@ func (o *run) executeSubtask(ctx context.Context, sub subtaskRef) error {
 // CM's default 30m heartbeat_timeout). A var so tests can shrink it.
 var subtaskHeartbeatInterval = 5 * time.Minute
 
-// executeClaimed is the owned span of a subtask: coder run, commit, push,
-// complete. A heartbeat goroutine covers the whole span — CM's stall sweep
-// reclaims ANY claimed card whose last_heartbeat exceeds the timeout, the
-// parent-card heartbeat does not cover subtask claims, and a coder run is
-// wall-clock unbounded. The deferred stop cancels the goroutine AND waits for
-// it to actually exit on every exit path (complete, error, park), so it can
-// never outlive the claim — or this function's return.
-func (o *run) executeClaimed(ctx context.Context, sub subtaskRef) error {
+// executeClaimedWith is the owned span of a subtask: coder run, commit, push,
+// complete. When sc.boardOps a heartbeat goroutine covers the whole span — CM's
+// stall sweep reclaims ANY claimed card whose last_heartbeat exceeds the
+// timeout, the parent-card heartbeat does not cover subtask claims, and a coder
+// run is wall-clock unbounded. The deferred stop cancels the goroutine AND waits
+// for it to actually exit on every exit path (complete, error, park), so it can
+// never outlive the claim — or this function's return. A candidate solver
+// (boardOps false) holds no claim, so it runs no heartbeat and no complete.
+func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtaskRef) error {
 	d := o.d
 
-	stopHeartbeat := startSubtaskHeartbeat(ctx, d.Ops, sub.ID)
-	defer stopHeartbeat()
+	if sc.boardOps {
+		stopHeartbeat := startSubtaskHeartbeat(ctx, d.Ops, sub.ID)
+		defer stopHeartbeat()
+	}
 
 	prompt := fmt.Sprintf(coderPrompt, o.skillEngage(), o.grounding, sub.Title, subtaskBody(sub), o.tc.Title, o.tc.Description)
 
-	res, err := o.runCoder(ctx, sub, prompt)
+	res, err := o.runCoderWith(ctx, sc, sub, prompt)
 	if err != nil {
 		return err
 	}
@@ -108,7 +139,7 @@ func (o *run) executeClaimed(ctx context.Context, sub subtaskRef) error {
 		commitMsg = sanitizeTitle(sub.Title)
 	}
 
-	committed, err := d.Git.CommitWithMessage(ctx, commitMsg)
+	committed, err := sc.git.CommitWithMessage(ctx, commitMsg)
 	if err != nil {
 		return fmt.Errorf("commit subtask %s: %w", sub.ID, err)
 	}
@@ -117,14 +148,17 @@ func (o *run) executeClaimed(ctx context.Context, sub subtaskRef) error {
 	// subtask builds on a pushed base. A clean tree (nothing committed) skips the
 	// push but still completes the card. A push failure aborts the run — the
 	// spend has already been reported, so retry/resume must not double-charge.
-	if committed {
+	// A candidate solver (sc.push false) never pushes: its work is judged in place.
+	if committed && sc.push {
 		if err := o.pushBranch(ctx); err != nil {
 			return fmt.Errorf("push after subtask %s: %w", sub.ID, err)
 		}
 	}
 
-	if err := d.Ops.CompleteTask(ctx, sub.ID, subtaskSummary(res.Output, sub.Title)); err != nil {
-		return fmt.Errorf("complete subtask %s: %w", sub.ID, err)
+	if sc.boardOps {
+		if err := d.Ops.CompleteTask(ctx, sub.ID, subtaskSummary(res.Output, sub.Title)); err != nil {
+			return fmt.Errorf("complete subtask %s: %w", sub.ID, err)
+		}
 	}
 
 	return nil
@@ -133,7 +167,7 @@ func (o *run) executeClaimed(ctx context.Context, sub subtaskRef) error {
 // startSubtaskHeartbeat ticks ops.Heartbeat for cardID on
 // subtaskHeartbeatInterval until the returned stop func is called. Unlike the
 // worker's parent-card startHeartbeat (which only cancels and does not wait),
-// stop here BLOCKS until the goroutine has actually exited: executeClaimed
+// stop here BLOCKS until the goroutine has actually exited: executeClaimedWith
 // must never return while the goroutine could still be running, or a package
 // var read (subtaskHeartbeatInterval) could outlive the caller's stack frame.
 func startSubtaskHeartbeat(ctx context.Context, ops Ops, cardID string) func() {
@@ -182,17 +216,18 @@ func (o *run) releaseSubtask(ctx context.Context, cardID string) {
 	}
 }
 
-// runCoder runs the subtask's coder harness with in-run recovery from a
-// harness-incapable model: it resolves the coder model (skipping any model
-// already excluded this run), logs the pick, runs the harness, and accounts for
-// spend on every attempt. If the model proves incapable (*IncapableError) it
+// runCoderWith runs the subtask's coder harness through the solver, with in-run
+// recovery from a harness-incapable model: it resolves the coder model via
+// sc.coderModel (skipping any model already excluded this run), logs the pick,
+// runs the harness on sc.tools, and accounts for spend on sc.ledger for every
+// attempt. If the model proves incapable (*IncapableError) it
 // blacklists/excludes it via recoverIncapable and RE-SELECTS the next-best model
 // for the SAME subtask — the incapable model wrote nothing, so re-running is
 // clean (no git reset). The loop is bounded by recoverIncapable's per-card cap:
 // once exhausted it returns the wrapped park error. Any non-incapable run error
 // (transport, context limit, budget) is returned immediately, unwrapped of the
 // recovery loop. Returns the successful run's result.
-func (o *run) runCoder(ctx context.Context, sub subtaskRef, prompt string) (harness.Result, error) {
+func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, prompt string) (harness.Result, error) {
 	d := o.d
 	cfg := d.Cfg
 
@@ -200,18 +235,24 @@ func (o *run) runCoder(ctx context.Context, sub subtaskRef, prompt string) (harn
 	// is the authoritative bound (it errors at the cap), the +1 is a belt-and-braces
 	// ceiling so a logic slip can never spin.
 	for attempt := 0; attempt <= reselectCap; attempt++ {
-		model := o.resolveCoderModel(sub, prompt)
+		model := sc.coderModel(sub, prompt)
 
-		_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory selection record
-			fmt.Sprintf("coder model %s selected for subtask %q (tier=%s)", model, sub.Title, tierOf(sub)))
+		logMsg := fmt.Sprintf("coder model %s selected for subtask %q (tier=%s)", model, sub.Title, tierOf(sub))
+		if sc.tag != "" {
+			// A candidate solver tags its log line so parallel selections are
+			// distinguishable; the parent (tag "") logs the bare line as before.
+			logMsg = sc.tag + ": " + logMsg
+		}
 
-		res, err := o.runModel(ctx, d.WriteTools, prompt, model)
+		_ = d.Ops.AddLog(ctx, cfg.CardID, logMsg) //nolint:errcheck // advisory selection record
+
+		res, err := o.runModel(ctx, sc.tools, prompt, model)
 
 		// Account for spend even on a transport error / partial run, then report
 		// the model actually used (falling back to the resolved slug when the
 		// provider did not echo one). The incapable attempt is charged too — it
 		// burned tokens before tripping.
-		o.ledger.Spend(res.TotalCostUSD)
+		sc.ledger.Spend(res.TotalCostUSD)
 
 		usedModel := res.ModelUsed
 		if usedModel == "" {
