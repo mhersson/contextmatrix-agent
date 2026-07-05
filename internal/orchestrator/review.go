@@ -290,7 +290,7 @@ func (o *run) reviewRound(ctx context.Context, verifyCmd []string, authoritative
 	}
 
 	if len(verifyCmd) > 0 {
-		out, ok := o.runVerify(ctx, verifyCmd)
+		out, ok := o.runVerify(ctx, o.d.Cfg.Workspace, verifyCmd)
 		if !ok {
 			// Gate failure goes STRAIGHT to the fix loop without burning reviewer
 			// tokens. The command output (tail) is the finding the coder fixes. No

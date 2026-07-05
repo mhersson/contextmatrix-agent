@@ -308,6 +308,32 @@ func (r *Registry) SelectReviewPanel(in SelectInput, n int) []ModelSpec {
 	return panel
 }
 
+// SelectCandidateModels picks n coder models for a Best-of-N fan-out. pin, if
+// non-empty, occupies slot 1 (excluded from the auto picks); the remaining
+// slots are distinct-first with wrap-around when the pool is smaller than n
+// (SelectReviewPanel semantics) — model scarcity never shrinks n.
+func (r *Registry) SelectCandidateModels(in SelectInput, n int, pin string) []ModelSpec {
+	if n <= 0 {
+		return nil
+	}
+
+	if pin == "" {
+		return r.SelectReviewPanel(in, n)
+	}
+
+	next := in
+	next.Exclude = map[string]bool{pin: true}
+
+	for id := range in.Exclude {
+		next.Exclude[id] = true
+	}
+
+	out := make([]ModelSpec, 0, n)
+	out = append(out, ModelSpec{Model: pin, ContextWindow: r.ContextWindow(pin)})
+
+	return append(out, r.SelectReviewPanel(next, n-1)...)
+}
+
 // specFor builds a ModelSpec for id, filling the context window from the catalog.
 func (r *Registry) specFor(id string) ModelSpec {
 	spec := ModelSpec{Model: id}

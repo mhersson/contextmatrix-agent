@@ -206,6 +206,7 @@ func startStubServer(t *testing.T, rec *recorder, failTool string) *httptest.Ser
 	addStub(server, rec, "list_cards", listCardsSubtaskPayload, failTool == "list_cards", "project")
 	addStub(server, rec, "add_log", `{"id":"CMX-001","state":"in_progress"}`, failTool == "add_log")
 	addStub(server, rec, "report_incapable_model", `{"ok": true}`, failTool == "report_incapable_model")
+	addStub(server, rec, "report_model_outcome", `{"ok": true}`, failTool == "report_model_outcome")
 
 	return serveBearer(t, server)
 }
@@ -473,6 +474,55 @@ func TestReportPush_SendsPRURLWhenSet(t *testing.T) {
 	args, ok := rec.get("report_push")
 	require.True(t, ok)
 	assert.Equal(t, "https://github.com/org/repo/pull/42", args["pr_url"])
+}
+
+func TestReportModelOutcomes(t *testing.T) {
+	rec := newRecorder()
+	c := newTestClient(t, rec, "")
+
+	err := c.ReportModelOutcomes(context.Background(), "CMX-001", []ModelOutcome{
+		{Model: "coder/one", Result: "loss", VerifyPass: true, CostUSD: 0.12, NCandidates: 3, JudgeModel: "judge/model"},
+		{Model: "coder/two", Result: "win", VerifyPass: true, CostUSD: 0.34, NCandidates: 3, JudgeModel: "judge/model"},
+	})
+	require.NoError(t, err)
+
+	args, ok := rec.get("report_model_outcome")
+	require.True(t, ok, "report_model_outcome stub should have been called")
+	assert.Equal(t, "CMX-001", args["card_id"])
+	assert.Equal(t, testAgentID, args["agent_id"])
+
+	rows, ok := args["outcomes"].([]interface{})
+	require.True(t, ok, "outcomes must be a slice; got %T", args["outcomes"])
+	require.Len(t, rows, 2)
+
+	row0, ok := rows[0].(map[string]interface{})
+	require.True(t, ok, "each outcome row must be a map; got %T", rows[0])
+	assert.Equal(t, "coder/one", row0["model"])
+	assert.Equal(t, "loss", row0["result"])
+	assert.Equal(t, true, row0["verify_pass"])
+	assert.InDelta(t, 0.12, row0["cost_usd"], 1e-9)
+	assert.EqualValues(t, 3, row0["n_candidates"])
+	assert.Equal(t, "judge/model", row0["judge_model"])
+}
+
+func TestReportModelOutcomes_OmitsEmptyJudgeModel(t *testing.T) {
+	rec := newRecorder()
+	c := newTestClient(t, rec, "")
+
+	require.NoError(t, c.ReportModelOutcomes(context.Background(), "CMX-001", []ModelOutcome{
+		{Model: "coder/one", Result: "win", VerifyPass: true, CostUSD: 0.1, NCandidates: 1},
+	}))
+
+	args, ok := rec.get("report_model_outcome")
+	require.True(t, ok)
+
+	rows, ok := args["outcomes"].([]interface{})
+	require.True(t, ok)
+	require.Len(t, rows, 1)
+
+	row, ok := rows[0].(map[string]interface{})
+	require.True(t, ok)
+	assert.NotContains(t, row, "judge_model", "empty judge_model must be omitted")
 }
 
 func TestCompleteTask(t *testing.T) {

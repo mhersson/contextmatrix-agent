@@ -167,6 +167,11 @@ func specFromEnv() (worker.RunSpec, error) {
 		return worker.RunSpec{}, err
 	}
 
+	bestOfN, err := envInt("CM_BEST_OF_N", 0)
+	if err != nil {
+		return worker.RunSpec{}, err
+	}
+
 	compactionEnabled := os.Getenv("CMX_COMPACTION_ENABLED") == "true"
 
 	defaultModel := os.Getenv("CMX_DEFAULT_MODEL")
@@ -216,6 +221,7 @@ func specFromEnv() (worker.RunSpec, error) {
 		BaseBranch:                os.Getenv("CM_BASE_BRANCH"),
 		Model:                     os.Getenv("CM_MODEL"),
 		Interactive:               os.Getenv("CM_INTERACTIVE") == "true",
+		BestOfN:                   bestOfN,
 		BashTimeoutMax:            bashTimeoutMax,
 		ToolOutputMax:             toolOutputMax,
 		MaxTurns:                  maxTurns,

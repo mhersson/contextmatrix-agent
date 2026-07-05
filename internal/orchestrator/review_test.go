@@ -54,7 +54,7 @@ func newReviewRun(d Deps, tc cmclient.TaskContext, maxCost float64) *run {
 	o := newRun(d, tc)
 	o.cardTier = "moderate"
 	// Default: no verify command, so the gate never runs in tests that ignore it.
-	o.runVerify = func(context.Context, []string) (string, bool) { return "", true }
+	o.runVerify = func(context.Context, string, []string) (string, bool) { return "", true }
 
 	return o
 }
@@ -938,7 +938,7 @@ func TestReviewGateFailureSkipsSpecialists(t *testing.T) {
 
 	// Gate fails on the first round, passes on every subsequent round.
 	round := 0
-	o.runVerify = func(context.Context, []string) (string, bool) {
+	o.runVerify = func(context.Context, string, []string) (string, bool) {
 		round++
 		if round == 1 {
 			return "FAIL: tests broke\nexit status 1", false

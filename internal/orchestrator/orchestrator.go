@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
@@ -41,6 +42,7 @@ type Ops interface {
 	AddLog(ctx context.Context, cardID, message string) error
 	ReportUsage(ctx context.Context, cardID, model string, promptTokens, completionTokens int64, actualCostUSD float64) error
 	ReportPush(ctx context.Context, cardID, branch, prURL string) error
+	ReportModelOutcomes(ctx context.Context, cardID string, outcomes []cmclient.ModelOutcome) error
 	BlacklistModel(ctx context.Context, cardID, model, reason string) error
 	CompleteTask(ctx context.Context, cardID, summary string) error
 	ReleaseCard(ctx context.Context, cardID string) error
@@ -78,6 +80,13 @@ type GitOps interface {
 	Head(ctx context.Context) (string, error)
 	Checkout(ctx context.Context, ref string) error
 	Diff(ctx context.Context, base string) (string, error)
+	AddWorktree(ctx context.Context, path, branch, startRef string) error
+	RemoveWorktree(ctx context.Context, path string) error
+	DeleteBranch(ctx context.Context, name string) error
+	HardReset(ctx context.Context, ref string) error
+	DiffStat(ctx context.Context, base string) (string, error)
+	DisableAutoGC(ctx context.Context) error
+	AddInfoExclude(ctx context.Context, pattern string) error
 }
 
 // Config carries the per-run parameters the FSM needs.
@@ -99,6 +108,10 @@ type Config struct {
 	// through, brainstorming skipped). Autonomous behavior is byte-for-byte the
 	// pre-HITL behavior.
 	Interactive bool
+
+	// BestOfN, when >= 2, fans execute out into N candidate implementations
+	// judged before document. 0/1 = normal single-solver run.
+	BestOfN int
 
 	// Compaction configures optional in-window context compaction for phase
 	// model runs. Disabled (the zero value) preserves the hard context_limit
@@ -125,17 +138,24 @@ type Compaction struct {
 
 // Deps bundles the collaborators the FSM drives.
 type Deps struct {
-	Ops        Ops
-	Git        GitOps
+	Ops Ops
+	Git GitOps
+	// GitForDir returns a GitOps rooted at dir with NO branch policy set —
+	// guardPush fails closed, so candidate handles structurally cannot push.
+	// Used by Best-of-N to hand each candidate worktree its own git handle.
+	GitForDir  func(dir string) GitOps
 	PR         PRCreator // opens the pull request in the integrate phase (gh CLI seam)
 	Client     llm.LLM
 	Emit       *events.Emitter
 	Registry   *registry.Registry
 	WriteTools *tools.Registry // full toolset rooted at the workspace
-	ReadTools  *tools.Registry // read-only subset for planner/reviewers
-	SkillTool  tools.Tool      // optional; engaged by coder/review/document subagents (nil when no task-skills)
-	Cfg        Config
-	Redact     func(string) string // nil = identity; scrubs tool output in phase runs (wired by the worker)
+	// WriteToolsForDir builds the full write toolset rooted at dir. Used by
+	// Best-of-N to give each candidate worktree its own jailed tool registry.
+	WriteToolsForDir func(dir string) *tools.Registry
+	ReadTools        *tools.Registry // read-only subset for planner/reviewers
+	SkillTool        tools.Tool      // optional; engaged by coder/review/document subagents (nil when no task-skills)
+	Cfg              Config
+	Redact           func(string) string // nil = identity; scrubs tool output in phase runs (wired by the worker)
 	// Human is the HITL ask-and-wait channel, satisfied by the worker's live
 	// Inbox. It is a genuine nil for autonomous runs; mode is read from
 	// Cfg.Interactive, never from Human != nil (the nil-concrete footgun).
@@ -143,8 +163,10 @@ type Deps struct {
 }
 
 // phaseOrder is the fixed forward sequence of phases. Run enters at the card's
-// persisted phase and never moves backward through this slice.
-var phaseOrder = []string{"plan", "execute", "document", "review", "integrate", "done"}
+// persisted phase and never moves backward through this slice. The judge phase
+// is a no-op for normal single-solver runs (Cfg.BestOfN < 2); it races and picks
+// the Best-of-N winner between execute and document.
+var phaseOrder = []string{"plan", "execute", "judge", "document", "review", "integrate", "done"}
 
 // phaseFn is a single phase's body.
 type phaseFn func(context.Context) error
@@ -155,6 +177,24 @@ type run struct {
 	d      Deps
 	tc     cmclient.TaskContext
 	ledger *Ledger
+
+	// solver is the parent run's implementation seam: the collaborators the
+	// execute phase writes each subtask through (main-workspace git and tools,
+	// the run ledger, the run's coder-model resolver) plus the board-ops/push
+	// flags. Built in newRun bound to today's exact collaborators; Best-of-N
+	// derives additional candidate solvers that target worktrees and stay off
+	// the board.
+	solver *solverCtx
+
+	// Best-of-N fan-out state (Cfg.BestOfN >= 2). candidates holds every
+	// candidate implementation raced inside execute; winner is the one the judge
+	// selects; judgeModel is the model the judge phase runs on; notes fans mid-run
+	// human turns out to the live candidates. All nil/empty for a single-solver
+	// run.
+	candidates []*candidate
+	winner     *candidate // set by the judge phase when it picks a winner.
+	judgeModel string     // the model the judge phase ran on ("" for an auto-win or fallback).
+	notes      *userNotes
 
 	// Plan-phase outputs, consumed by later phases. Set by runPlan, or — on
 	// resume — pre-loaded by reconcile from SubtaskStates before any phase runs.
@@ -186,9 +226,16 @@ type run struct {
 	// skipped (resume entering at integrate) or the summary was blank.
 	reviewSummary string
 
+	// selMu guards the shared model-selection state (coderModels, reselects,
+	// excluded) so the Best-of-N fan-out's parallel candidate goroutines — which
+	// all run through runCoderWith and recoverIncapable — never race on it. The
+	// single-threaded parent execute path acquires it uncontended (a no-op).
+	selMu sync.Mutex
+
 	// coderModels records every distinct model that coded a subtask during
 	// execute, so the review phase can exclude them from the specialist panel
-	// (a model should not review its own code). Populated in executeSubtask.
+	// (a model should not review its own code). Populated in runCoderWith under
+	// selMu.
 	coderModels map[string]bool
 
 	// reselects counts in-run model re-selections triggered by a harness-incapable
@@ -234,16 +281,18 @@ type run struct {
 
 	planFn      phaseFn
 	executeFn   phaseFn
+	judgeFn     phaseFn
 	documentFn  phaseFn
 	reviewFn    phaseFn
 	integrateFn phaseFn
 	doneFn      phaseFn
 }
 
-// verifyRunner runs the review gate's verify command (argv) in the workspace
-// and reports the combined output plus whether it passed (exit 0). The default
-// implementation shells out; tests inject a stub.
-type verifyRunner func(ctx context.Context, argv []string) (output string, ok bool)
+// verifyRunner runs a verify command (argv) rooted at dir and reports the
+// combined output plus whether it passed (exit 0). dir is the review workspace
+// for the review gate and the candidate worktree for the Best-of-N judge. The
+// default implementation shells out via execVerify; tests inject a stub.
+type verifyRunner func(ctx context.Context, dir string, argv []string) (output string, ok bool)
 
 // dataURLs encodes card image blobs as base64 data URLs for OpenAI image_url
 // content parts. Returns nil for no blobs.
@@ -266,15 +315,32 @@ func dataURLs(blobs []cmclient.ImageBlob) []llm.ImageURL {
 // defaulting to the not-yet-implemented stubs.
 func newRun(d Deps, tc cmclient.TaskContext) *run {
 	o := &run{
-		d:      d,
-		tc:     tc,
-		ledger: NewLedger(d.Cfg.MaxCardCost, tc.ReportedCostUSD),
+		d:  d,
+		tc: tc,
+		// The run ledger spans the shared phases; effectiveCeiling scales it for
+		// Best-of-N (N execute allowances plus one for plan/judge/document/review/
+		// integrate). For BestOfN < 2 effectiveCeiling degenerates to MaxCardCost,
+		// so a single-solver run is byte-identical to before.
+		ledger: NewLedger(effectiveCeiling(d.Cfg), tc.ReportedCostUSD),
 	}
 
 	o.coderModels = map[string]bool{}
 	o.excluded = map[string]bool{}
 	o.body = tc.Description
 	o.taskImages = dataURLs(tc.Images)
+
+	// The parent solver binds the execute seam to today's exact collaborators:
+	// the main workspace git/tools, the run ledger (o.ledger IS its ledger), and
+	// the run's coder-model resolver, driving the board and pushing.
+	o.solver = &solverCtx{
+		git:        d.Git,
+		ledger:     o.ledger,
+		tools:      d.WriteTools,
+		workspace:  d.Cfg.Workspace,
+		coderModel: o.resolveCoderModel,
+		boardOps:   true,
+		push:       true,
+	}
 
 	grounding := groundingBlock(discoverGrounding(d.Cfg.Workspace))
 	if d.Redact != nil {
@@ -286,12 +352,13 @@ func newRun(d Deps, tc cmclient.TaskContext) *run {
 	}
 
 	o.grounding = grounding
-	o.runVerify = func(ctx context.Context, argv []string) (string, bool) {
-		return execVerify(ctx, d.Cfg.Workspace, argv)
-	}
+	// execVerify already matches verifyRunner (ctx, dir, argv): the review gate
+	// passes the workspace, the judge passes each candidate worktree.
+	o.runVerify = execVerify
 
 	o.planFn = func(ctx context.Context) error { return runPlan(ctx, o) }
 	o.executeFn = func(ctx context.Context) error { return runExecute(ctx, o) }
+	o.judgeFn = func(ctx context.Context) error { return runJudge(ctx, o) }
 	o.documentFn = func(ctx context.Context) error { return runDocument(ctx, o) }
 	o.reviewFn = func(ctx context.Context) error { return runReview(ctx, o) }
 	o.integrateFn = func(ctx context.Context) error { return runIntegrate(ctx, o) }
@@ -307,6 +374,8 @@ func (o *run) phaseFnFor(phase string) phaseFn {
 		return o.planFn
 	case "execute":
 		return o.executeFn
+	case "judge":
+		return o.judgeFn
 	case "document":
 		return o.documentFn
 	case "review":
@@ -334,6 +403,13 @@ func (o *run) execute(ctx context.Context) error {
 	start := o.tc.Phase
 	if start == "" {
 		start = "plan"
+	}
+
+	// Judge state is container-local (candidate worktrees, verify results, the
+	// raced diffs) and never persisted, so a run that crashed in judge cannot be
+	// resumed there — re-enter at execute to re-race the fan-out.
+	if start == "judge" {
+		start = "execute"
 	}
 
 	from := indexOf(phaseOrder, start)
@@ -413,11 +489,20 @@ const reselectCap = 3
 // the caller can simply re-select and re-run the same unit; no git reset is
 // needed.
 func (o *run) recoverIncapable(ctx context.Context, ie *IncapableError) error {
+	// The cap check + increment + exclusion must be atomic: under a Best-of-N
+	// fan-out, parallel candidates share o.reselects and o.excluded, and the cap
+	// is a single shared budget. Hold selMu across the whole mutation, capture the
+	// attempt number, then release before the advisory I/O.
+	o.selMu.Lock()
+
 	if o.reselects >= reselectCap {
+		o.selMu.Unlock()
+
 		return fmt.Errorf("re-selection cap (%d) exhausted after model %q: %w", reselectCap, ie.Model, ie)
 	}
 
 	o.reselects++
+	attempt := o.reselects
 
 	if o.excluded == nil {
 		o.excluded = map[string]bool{}
@@ -425,11 +510,13 @@ func (o *run) recoverIncapable(ctx context.Context, ie *IncapableError) error {
 
 	o.excluded[ie.Model] = true
 
+	o.selMu.Unlock()
+
 	// Best-effort: the recovery proceeds (re-select + re-run) regardless of a
 	// reporting failure; the blacklist is an advisory hint to CM and future runs.
 	_ = o.d.Ops.BlacklistModel(ctx, o.d.Cfg.CardID, ie.Model, ie.Reason) //nolint:errcheck
 	_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID,                              //nolint:errcheck
-		fmt.Sprintf("model %q harness-incapable; blacklisted and re-selecting (attempt %d/%d)", ie.Model, o.reselects, reselectCap))
+		fmt.Sprintf("model %q harness-incapable; blacklisted and re-selecting (attempt %d/%d)", ie.Model, attempt, reselectCap))
 
 	return nil
 }

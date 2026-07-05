@@ -196,7 +196,7 @@ func TestRunContextLimitParks(t *testing.T) {
 }
 
 func TestPhaseOrderPlacesDocumentBetweenExecuteAndReview(t *testing.T) {
-	assert.Equal(t, []string{"plan", "execute", "document", "review", "integrate", "done"}, phaseOrder)
+	assert.Equal(t, []string{"plan", "execute", "judge", "document", "review", "integrate", "done"}, phaseOrder)
 }
 
 func TestRunWalksDocumentBetweenExecuteAndReview(t *testing.T) {

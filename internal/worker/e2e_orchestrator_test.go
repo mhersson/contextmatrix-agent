@@ -482,6 +482,12 @@ func (s *stubOps) ReportPush(_ context.Context, cardID, branch, prURL string) er
 	return nil
 }
 
+func (s *stubOps) ReportModelOutcomes(_ context.Context, cardID string, outcomes []cmclient.ModelOutcome) error {
+	s.record("ReportModelOutcomes", cardID, len(outcomes))
+
+	return nil
+}
+
 func (s *stubOps) BlacklistModel(_ context.Context, cardID, model, reason string) error {
 	s.record("BlacklistModel", cardID, model, reason)
 
@@ -624,8 +630,9 @@ func TestOrchestratorEndToEndHappyPath(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "completed", res.Reason)
 
-	// --- phase order: plan, execute, document, review, integrate, done, in order -----
-	assert.Equal(t, []string{"plan", "execute", "document", "review", "integrate", "done"}, ops.phases,
+	// --- phase order: plan, execute, judge, document, review, integrate, done, in order -----
+	// judge is persisted like every phase even on a normal run, where its body is a no-op.
+	assert.Equal(t, []string{"plan", "execute", "judge", "document", "review", "integrate", "done"}, ops.phases,
 		"phases must be persisted in forward order exactly once each")
 
 	// --- subtask wiring: two create_card calls with parent + the dep edge ---
@@ -742,8 +749,8 @@ func TestOrchestratorEndToEndFixLoop(t *testing.T) {
 	assert.Equal(t, 1, ops.count("IncrementReviewAttempts"),
 		"the single rejection increments review attempts once")
 
-	// The run still reached integrate and done.
-	assert.Equal(t, []string{"plan", "execute", "document", "review", "integrate", "done"}, ops.phases)
+	// The run still reached integrate and done (judge is a persisted no-op on a normal run).
+	assert.Equal(t, []string{"plan", "execute", "judge", "document", "review", "integrate", "done"}, ops.phases)
 	assert.Equal(t, 1, ops.count("TransitionCard"), "parent transitions to done")
 
 	// --- origin's integrated history is autosquashed: NO fixup! subjects ----

@@ -338,6 +338,16 @@ func (g *Git) stageForCommit(ctx context.Context) error {
 			continue
 		}
 
+		// Defense in depth for the Best-of-N fan-out: a candidate worktree lives at
+		// .worktrees/cK and shows up untracked in the parent clone. Staging it adds
+		// a mode-160000 gitlink to the card branch. The fan-out also writes a clone-
+		// local exclude for this, but never stage it regardless of that exclude.
+		if rel == ".worktrees" || strings.HasPrefix(rel, ".worktrees/") {
+			slog.Warn("refusing to stage candidate worktree path", "path", rel)
+
+			continue
+		}
+
 		if isLikelyBuildArtifact(filepath.Join(g.dir, rel), rel) {
 			slog.Warn("refusing to stage likely build artifact", "path", rel)
 
@@ -658,4 +668,124 @@ func (g *Git) Diff(ctx context.Context, base string) (string, error) {
 	}
 
 	return out, nil
+}
+
+// AddWorktree creates a linked worktree at path on a new branch cut from
+// startRef. Candidate worktrees share the clone's object store.
+func (g *Git) AddWorktree(ctx context.Context, path, branch, startRef string) error {
+	_, err := g.run(ctx, "worktree", "add", "-b", branch, path, startRef)
+
+	return err
+}
+
+// RemoveWorktree force-removes a linked worktree (dirty trees included —
+// losing candidates are discarded wholesale).
+func (g *Git) RemoveWorktree(ctx context.Context, path string) error {
+	_, err := g.run(ctx, "worktree", "remove", "--force", path)
+
+	return err
+}
+
+// DeleteBranch deletes a local candidate branch. Only cm/-namespaced branches
+// other than the run's own card branch may be deleted.
+func (g *Git) DeleteBranch(ctx context.Context, name string) error {
+	if !strings.HasPrefix(name, "cm/") {
+		return fmt.Errorf("refusing to delete %q: outside the cm/ namespace", name)
+	}
+
+	if g.cardBranch != "" && name == g.cardBranch {
+		return fmt.Errorf("refusing to delete %q: the run's own card branch", name)
+	}
+
+	_, err := g.run(ctx, "branch", "-D", name)
+
+	return err
+}
+
+// HardReset moves the checked-out branch to ref, discarding the work tree.
+// Used once, to adopt the Best-of-N winner onto the card branch.
+func (g *Git) HardReset(ctx context.Context, ref string) error {
+	_, err := g.run(ctx, "reset", "--hard", ref)
+
+	return err
+}
+
+// DiffStat is Diff's --stat form, for judge prompts where the full diff
+// exceeds the token cap.
+func (g *Git) DiffStat(ctx context.Context, base string) (string, error) {
+	mergeBase, err := g.MergeBase(ctx, base, "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("diffstat: %w", err)
+	}
+
+	out, err := g.run(ctx, "diff", "--stat", mergeBase+"...HEAD")
+	if err != nil {
+		return "", fmt.Errorf("diffstat %q...HEAD: %w", mergeBase, err)
+	}
+
+	return out, nil
+}
+
+// DisableAutoGC turns off auto-gc for the clone: candidate worktrees share
+// the object store, and a background gc racing N writers is the one shared
+// failure mode worktrees introduce.
+func (g *Git) DisableAutoGC(ctx context.Context) error {
+	_, err := g.run(ctx, "config", "gc.auto", "0")
+
+	return err
+}
+
+// AddInfoExclude appends pattern to the clone's local exclude file
+// ($GIT_COMMON_DIR/info/exclude) unless it is already listed, so untracked
+// paths matching it never surface to `git status` and can never be staged.
+// Unlike .gitignore this is clone-local (never committed) and unlike the model
+// tool env it needs no repo write the coder could observe. Idempotent: a re-run
+// that finds the pattern already present is a no-op. The fan-out uses it to hide
+// candidate worktrees (.worktrees/) from the parent clone's staging path so a
+// WIP push on a park cannot stage them as gitlinks. This is a file write, not a
+// git command: rev-parse resolves the git dir, then os handles the append.
+func (g *Git) AddInfoExclude(ctx context.Context, pattern string) error {
+	// A worktree's --git-common-dir points at the main clone's .git, which is
+	// where info/exclude lives. The path may be relative to the clone, so anchor
+	// it under g.dir.
+	out, err := g.run(ctx, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return fmt.Errorf("resolve git-common-dir: %w", err)
+	}
+
+	gitDir := strings.TrimSpace(out)
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(g.dir, gitDir)
+	}
+
+	excludePath := filepath.Join(gitDir, "info", "exclude")
+
+	if existing, err := os.ReadFile(excludePath); err == nil {
+		for _, line := range strings.Split(string(existing), "\n") {
+			if strings.TrimSpace(line) == pattern {
+				return nil // already excluded — idempotent no-op
+			}
+		}
+	}
+
+	if err := os.MkdirAll(filepath.Dir(excludePath), 0o755); err != nil {
+		return fmt.Errorf("ensure info dir: %w", err)
+	}
+
+	f, err := os.OpenFile(excludePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("open exclude file: %w", err)
+	}
+
+	if _, err := f.WriteString(pattern + "\n"); err != nil {
+		_ = f.Close() //nolint:errcheck // write already failed; report that error
+
+		return fmt.Errorf("append exclude pattern: %w", err)
+	}
+
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close exclude file: %w", err)
+	}
+
+	return nil
 }

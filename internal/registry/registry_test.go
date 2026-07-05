@@ -220,6 +220,112 @@ func TestCandidatesArePriorsOnlyAndSkipBlacklist(t *testing.T) {
 	}
 }
 
+func TestSelectCandidateModelsNoPinWrapsAround(t *testing.T) {
+	// Three equally-priced, equally-qualified models: the exclude set built up
+	// across rounds forces distinct picks in catalog order while the pool
+	// lasts (m1, m2, m3), then the pool runs dry and the 4th slot reuses the
+	// last real pick (SelectReviewPanel wrap semantics) rather than shrinking
+	// n or escalating price.
+	catalog := llm.Catalog{
+		entry("m1", 1.0, 2.0, 200000),
+		entry("m2", 1.0, 2.0, 200000),
+		entry("m3", 1.0, 2.0, 200000),
+	}
+	priors := Priors{Models: map[string]PriorEntry{
+		"m1": {Coder: ptr(0.80)}, "m2": {Coder: ptr(0.80)}, "m3": {Coder: ptr(0.80)},
+	}}
+	r := NewRegistryFromParts(catalog, priors, nil, nil, "capable-default")
+	in := SelectInput{Role: RoleCoder, Tier: TierSimple, EstTokens: 50000}
+
+	specs := r.SelectCandidateModels(in, 4, "")
+	require.Len(t, specs, 4)
+	assert.Equal(t, "m1", specs[0].Model)
+	assert.Equal(t, "m2", specs[1].Model)
+	assert.Equal(t, "m3", specs[2].Model)
+	assert.Equal(t, specs[2], specs[3], "4th slot must wrap and repeat the 3rd pick exactly")
+}
+
+func TestSelectCandidateModelsSingleModelPoolRepeatsThroughout(t *testing.T) {
+	catalog := llm.Catalog{entry("m1", 1.0, 2.0, 200000)}
+	priors := Priors{Models: map[string]PriorEntry{"m1": {Coder: ptr(0.80)}}}
+	r := NewRegistryFromParts(catalog, priors, nil, nil, "capable-default")
+	in := SelectInput{Role: RoleCoder, Tier: TierSimple, EstTokens: 50000}
+
+	specs := r.SelectCandidateModels(in, 3, "")
+	require.Len(t, specs, 3)
+
+	for i, s := range specs {
+		assert.Equal(t, "m1", s.Model, "slot %d", i)
+		assert.Equal(t, 200000, s.ContextWindow, "slot %d", i)
+	}
+}
+
+func TestSelectCandidateModelsPinOccupiesSlotOneExcludedFromRest(t *testing.T) {
+	// pinned/x sits first in catalog order with the same price/quality profile
+	// as m1..m3: if the pin were not excluded from the auto-pick rounds, tie
+	// break would select it again for slot 2. Catching that requires pinned/x
+	// to be genuinely attractive, not just present.
+	catalog := llm.Catalog{
+		entry("pinned/x", 1.0, 2.0, 99000),
+		entry("m1", 1.0, 2.0, 200000),
+		entry("m2", 1.0, 2.0, 200000),
+		entry("m3", 1.0, 2.0, 200000),
+	}
+	priors := Priors{Models: map[string]PriorEntry{
+		"pinned/x": {Coder: ptr(0.80)}, "m1": {Coder: ptr(0.80)},
+		"m2": {Coder: ptr(0.80)}, "m3": {Coder: ptr(0.80)},
+	}}
+	r := NewRegistryFromParts(catalog, priors, nil, nil, "capable-default")
+	in := SelectInput{Role: RoleCoder, Tier: TierSimple, EstTokens: 50000}
+
+	specs := r.SelectCandidateModels(in, 3, "pinned/x")
+	require.Len(t, specs, 3)
+	assert.Equal(t, "pinned/x", specs[0].Model)
+	assert.Equal(t, 99000, specs[0].ContextWindow, "pin must carry its own catalog context window")
+	assert.Equal(t, "m1", specs[1].Model)
+	assert.Equal(t, "m2", specs[2].Model)
+}
+
+func TestSelectCandidateModelsPinMergesExcludeWithoutMutatingCaller(t *testing.T) {
+	catalog := llm.Catalog{
+		entry("pinned/x", 1.0, 2.0, 200000),
+		entry("m1", 1.0, 2.0, 200000),
+		entry("m2", 1.0, 2.0, 200000),
+		entry("m3", 1.0, 2.0, 200000),
+		entry("already-excluded", 1.0, 2.0, 200000),
+	}
+	priors := Priors{Models: map[string]PriorEntry{
+		"pinned/x": {Coder: ptr(0.80)}, "m1": {Coder: ptr(0.80)}, "m2": {Coder: ptr(0.80)},
+		"m3": {Coder: ptr(0.80)}, "already-excluded": {Coder: ptr(0.80)},
+	}}
+	r := NewRegistryFromParts(catalog, priors, nil, nil, "capable-default")
+
+	origExclude := map[string]bool{"already-excluded": true}
+	in := SelectInput{Role: RoleCoder, Tier: TierSimple, EstTokens: 50000, Exclude: origExclude}
+
+	specs := r.SelectCandidateModels(in, 3, "pinned/x")
+	require.Len(t, specs, 3)
+	assert.Equal(t, "pinned/x", specs[0].Model)
+	assert.Equal(t, "m1", specs[1].Model)
+	assert.Equal(t, "m2", specs[2].Model)
+
+	for _, s := range specs {
+		assert.NotEqual(t, "already-excluded", s.Model, "pre-existing Exclude entries must carry through to the auto picks")
+	}
+
+	assert.Equal(t, map[string]bool{"already-excluded": true}, origExclude,
+		"SelectCandidateModels must not mutate the caller's Exclude map")
+}
+
+func TestSelectCandidateModelsZeroOrNegativeNReturnsNil(t *testing.T) {
+	r := NewRegistry(nil, "capable-default", testCatalog())
+	in := SelectInput{Role: RoleCoder, Tier: TierSimple}
+
+	assert.Nil(t, r.SelectCandidateModels(in, 0, ""))
+	assert.Nil(t, r.SelectCandidateModels(in, -1, ""))
+	assert.Nil(t, r.SelectCandidateModels(in, 0, "pinned/x"))
+}
+
 func TestFavoritesConsideredFirst(t *testing.T) {
 	cat := llm.Catalog{
 		{ID: "cheap/win", PromptPricePerTok: 1e-8, CompletionPricePerTok: 1e-8, ContextLength: 200000, SupportedParameters: []string{"tools"}},
