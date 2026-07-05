@@ -23,10 +23,12 @@ func FromSelection(sc *protocol.SelectionContext, capable string, priceHeadroom 
 				ContextLength:         c.ContextWindow,
 				SupportedParameters:   []string{"tools"},
 			})
+
 			coder, rev := c.CoderPrior, c.ReviewerPrior
 			if sc.OutcomeFloor > 0 && c.Outcomes != nil && c.Outcomes.Samples >= sc.OutcomeFloor {
 				coder *= outcomeBiasFactor(c.Outcomes)
 			}
+
 			priors.Models[c.Slug] = PriorEntry{Coder: &coder, Reviewer: &rev}
 		}
 	}
