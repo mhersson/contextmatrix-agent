@@ -64,6 +64,11 @@ type fakeOps struct {
 	// ReportPush scripting: reportPushURLs captures the pr_url passed on each
 	// call so integrate tests can assert the PR URL flowing through.
 	reportPushURLs []string
+
+	// ReportModelOutcomes scripting: reportOutcomes captures each call's outcome
+	// rows (index-aligned to call order); reportOutcomesErr fails every call.
+	reportOutcomes    [][]cmclient.ModelOutcome
+	reportOutcomesErr error
 }
 
 // createCardCall is a recorded CreateCard invocation.
@@ -249,6 +254,16 @@ func (f *fakeOps) ReleaseCard(_ context.Context, cardID string) error {
 	f.record("ReleaseCard:" + cardID)
 
 	return f.releaseCardErr
+}
+
+func (f *fakeOps) ReportModelOutcomes(_ context.Context, cardID string, outcomes []cmclient.ModelOutcome) error {
+	f.mu.Lock()
+	f.reportOutcomes = append(f.reportOutcomes, outcomes)
+	f.mu.Unlock()
+
+	f.record("ReportModelOutcomes:" + cardID)
+
+	return f.reportOutcomesErr
 }
 
 // compile-time assertion that the fake satisfies the consumer interface.

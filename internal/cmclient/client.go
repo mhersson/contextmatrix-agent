@@ -363,6 +363,44 @@ func (c *Client) ReportPush(ctx context.Context, cardID, branch, prURL string) e
 	return err
 }
 
+// ModelOutcome is one Best-of-N candidate's result, reported on the parent
+// card via ReportModelOutcomes.
+type ModelOutcome struct {
+	Model       string  `json:"model"`
+	Result      string  `json:"result"` // win | loss | failed
+	VerifyPass  bool    `json:"verify_pass"`
+	CostUSD     float64 `json:"cost_usd"`
+	NCandidates int     `json:"n_candidates"`
+	JudgeModel  string  `json:"judge_model,omitempty"`
+}
+
+// ReportModelOutcomes records per-candidate Best-of-N results on the parent
+// card via the report_model_outcome tool.
+func (c *Client) ReportModelOutcomes(ctx context.Context, cardID string, outcomes []ModelOutcome) error {
+	rows := make([]map[string]any, 0, len(outcomes))
+	for _, o := range outcomes {
+		row := map[string]any{
+			"model":        o.Model,
+			"result":       o.Result,
+			"verify_pass":  o.VerifyPass,
+			"cost_usd":     o.CostUSD,
+			"n_candidates": o.NCandidates,
+		}
+		if o.JudgeModel != "" {
+			row["judge_model"] = o.JudgeModel
+		}
+
+		rows = append(rows, row)
+	}
+
+	_, err := c.call(ctx, "report_model_outcome", map[string]any{
+		"card_id":  cardID,
+		"outcomes": rows,
+	})
+
+	return err
+}
+
 // CompleteTask marks the card done with the given summary.
 func (c *Client) CompleteTask(ctx context.Context, cardID, summary string) error {
 	_, err := c.call(ctx, "complete_task", map[string]any{

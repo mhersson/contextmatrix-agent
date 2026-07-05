@@ -25,10 +25,10 @@ type candidate struct {
 	completed []subtaskRef
 	err       error // non-nil = dropped before judging
 
-	verifyOut string //nolint:unused // set by the judge phase when it verifies a candidate.
-	verifyOK  bool   //nolint:unused // set by the judge phase when it verifies a candidate.
-	diff      string //nolint:unused // set by the judge phase from the candidate worktree.
-	diffStat  string //nolint:unused // set by the judge phase from the candidate worktree.
+	verifyOut string // set by the judge phase when it verifies a candidate.
+	verifyOK  bool   // set by the judge phase when it verifies a candidate.
+	diff      string // set by the judge phase from the candidate worktree.
+	diffStat  string // set by the judge phase from the candidate worktree.
 }
 
 // effectiveCeiling scales the run's budget ceiling for Best-of-N: N execute

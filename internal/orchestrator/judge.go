@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 )
 
@@ -53,9 +54,12 @@ type judgeNote struct {
 // model call); otherwise a complex-tier reviewer model reads the pool and emits
 // a JSON verdict, mirroring the review synthesis call (two parse attempts, then
 // a mechanical fallback to the first verifying candidate). For a normal run
-// (BestOfN < 2, or no candidates) it is a strict no-op. It sets o.winner and
-// o.judgeModel for the integrate phase and records a Best-of-N Report section on
-// the parent card.
+// (BestOfN < 2, or no candidates) it is a strict no-op. Every path that picks a
+// winner (auto-win, a parsed verdict, and the unparsable-verdict fallback)
+// records a Best-of-N Report section on the parent card and then adopts the
+// winner via adoptWinner: hard-reset + push the card branch, replay the
+// winner's subtask completions, clean up every candidate's worktree/branch, and
+// report per-candidate outcomes to CM.
 func runJudge(ctx context.Context, o *run) error {
 	d := o.d
 	cfg := d.Cfg
@@ -100,7 +104,7 @@ func runJudge(ctx context.Context, o *run) error {
 
 		o.recordJudgeReport(ctx, nil)
 
-		return nil
+		return o.adoptWinner(ctx)
 	}
 
 	if err := o.ledger.Check(); err != nil {
@@ -133,7 +137,7 @@ func runJudge(ctx context.Context, o *run) error {
 
 		o.recordJudgeReport(ctx, nil)
 
-		return nil
+		return o.adoptWinner(ctx)
 	}
 
 	o.winner = pool[v.Winner-1]
@@ -144,7 +148,7 @@ func runJudge(ctx context.Context, o *run) error {
 
 	o.recordJudgeReport(ctx, &v)
 
-	return nil
+	return o.adoptWinner(ctx)
 }
 
 // runJudgeVerdict runs the judge model the way review synthesize runs its verdict
@@ -393,4 +397,142 @@ func rationaleHead(s string) string {
 	}
 
 	return s
+}
+
+// adoptWinner lands the Best-of-N winner on the card branch, replays its
+// subtask completions to the board, cleans up every candidate's worktree and
+// branch, and reports per-candidate outcomes. It runs at the end of runJudge on
+// every path that sets o.winner (auto-win, a parsed verdict, and the
+// unparsable-verdict fallback all share this tail).
+//
+// The adopt-and-push sequence is fatal: the run cannot continue without the
+// winner's work actually on the card branch. Everything after it — subtask
+// replay, candidate cleanup, and outcome reporting — is best-effort: the code
+// is already safely on the branch, so a failure there is logged, not fatal.
+func (o *run) adoptWinner(ctx context.Context) error {
+	head, err := o.winner.git.Head(ctx)
+	if err != nil {
+		return fmt.Errorf("best-of-n: winner head: %w", err)
+	}
+
+	if err := o.d.Git.HardReset(ctx, head); err != nil {
+		return fmt.Errorf("best-of-n: hard reset to winner head %q: %w", head, err)
+	}
+
+	// The winner never pushed (candidates stay off-board and never push, per the
+	// fan-out contract), so this is the run's first push regardless of how many
+	// subtasks the winner completed in its worktree.
+	if err := o.pushBranch(ctx); err != nil {
+		return fmt.Errorf("best-of-n: push winner: %w", err)
+	}
+
+	o.replayWinnerSubtasks(ctx)
+	o.cleanupCandidates(ctx)
+	o.reportCandidateOutcomes(ctx)
+
+	return nil
+}
+
+// replayWinnerSubtasks re-applies the winner candidate's subtask completions to
+// the board: a candidate runs entirely off-board (Best-of-N disables
+// boardOps), so nothing about its subtasks exists in CM until this replay.
+// Best-effort per subtask: a claim or complete failure is logged (warn plus a
+// card activity entry), not fatal — the winner's code is already on the card
+// branch, so board state is cosmetic by comparison.
+func (o *run) replayWinnerSubtasks(ctx context.Context) {
+	cfg := o.d.Cfg
+	summary := "completed by best-of-n winner (" + o.winner.model + ")"
+
+	for _, sub := range o.winner.completed {
+		if err := o.d.Ops.ClaimCard(ctx, sub.ID); err != nil {
+			slog.Warn("adopt: replay claim failed", "card_id", cfg.CardID, "subtask_id", sub.ID, "error", err)
+			_ = o.d.Ops.AddLog(ctx, cfg.CardID, fmt.Sprintf( //nolint:errcheck // advisory record
+				"best-of-n: replay claim failed for subtask %s: %v", sub.ID, err))
+		}
+
+		if err := o.d.Ops.CompleteTask(ctx, sub.ID, summary); err != nil {
+			slog.Warn("adopt: replay complete failed", "card_id", cfg.CardID, "subtask_id", sub.ID, "error", err)
+			_ = o.d.Ops.AddLog(ctx, cfg.CardID, fmt.Sprintf( //nolint:errcheck // advisory record
+				"best-of-n: replay complete failed for subtask %s: %v", sub.ID, err))
+		}
+	}
+}
+
+// cleanupCandidates removes every candidate's worktree and branch — the winner
+// included, since its work now lives on the card branch, not its container-
+// local one. This MUST go through the main o.d.Git handle: a candidate's
+// GitForDir handle has no cardBranch set (guardPush fails closed on it), so its
+// DeleteBranch guard cannot protect the real card branch, and `git worktree
+// remove` operates from the superproject regardless of which worktree it
+// targets. nil-safe (a partially-populated fan-out slice may hold nil slots for
+// a candidate whose worktree was never built) and best-effort per candidate: a
+// failure is logged, not fatal, and does not stop the rest of the cleanup.
+func (o *run) cleanupCandidates(ctx context.Context) {
+	cfg := o.d.Cfg
+
+	for _, c := range o.candidates {
+		if c == nil {
+			continue
+		}
+
+		if err := o.d.Git.RemoveWorktree(ctx, c.dir); err != nil {
+			slog.Warn("adopt: remove candidate worktree failed",
+				"card_id", cfg.CardID, "candidate", c.idx, "dir", c.dir, "error", err)
+		}
+
+		if err := o.d.Git.DeleteBranch(ctx, c.branch); err != nil {
+			slog.Warn("adopt: delete candidate branch failed",
+				"card_id", cfg.CardID, "candidate", c.idx, "branch", c.branch, "error", err)
+		}
+	}
+}
+
+// reportCandidateOutcomes builds one cmclient.ModelOutcome per non-nil
+// candidate — the winner "win", a candidate that dropped out before judging
+// ("err != nil") "failed", every other survivor "loss" — and reports them to CM
+// in a single call. NCandidates counts only non-nil entries: a nil slot means no
+// candidate ever started (a fan-out that aborted before that worktree was
+// built), so it never raced and must not inflate the denominator; a non-nil
+// candidate with err != nil DID race (and lost, or crashed), so it counts.
+// Best-effort: a report failure is logged, not fatal.
+func (o *run) reportCandidateOutcomes(ctx context.Context) {
+	cfg := o.d.Cfg
+
+	n := 0
+
+	for _, c := range o.candidates {
+		if c != nil {
+			n++
+		}
+	}
+
+	rows := make([]cmclient.ModelOutcome, 0, n)
+
+	for _, c := range o.candidates {
+		if c == nil {
+			continue
+		}
+
+		result := "loss"
+
+		switch {
+		case c == o.winner:
+			result = "win"
+		case c.err != nil:
+			result = "failed"
+		}
+
+		rows = append(rows, cmclient.ModelOutcome{
+			Model:       c.model,
+			Result:      result,
+			VerifyPass:  c.verifyOK,
+			CostUSD:     c.ledger.Spent(),
+			NCandidates: n,
+			JudgeModel:  o.judgeModel,
+		})
+	}
+
+	if err := o.d.Ops.ReportModelOutcomes(ctx, cfg.CardID, rows); err != nil {
+		slog.Warn("adopt: report model outcomes failed", "card_id", cfg.CardID, "error", err)
+	}
 }

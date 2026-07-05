@@ -482,6 +482,12 @@ func (s *stubOps) ReportPush(_ context.Context, cardID, branch, prURL string) er
 	return nil
 }
 
+func (s *stubOps) ReportModelOutcomes(_ context.Context, cardID string, outcomes []cmclient.ModelOutcome) error {
+	s.record("ReportModelOutcomes", cardID, len(outcomes))
+
+	return nil
+}
+
 func (s *stubOps) BlacklistModel(_ context.Context, cardID, model, reason string) error {
 	s.record("BlacklistModel", cardID, model, reason)
 

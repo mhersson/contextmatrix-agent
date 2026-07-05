@@ -25,24 +25,31 @@ func (g *diffGit) Diff(ctx context.Context, base string) (string, error) {
 }
 
 // judgeCandidate builds a survivor candidate (err == nil) with a diff-returning
-// git handle and a distinct worktree dir the verify stub keys on.
+// git handle, a distinct worktree dir the verify stub keys on, and a ledger
+// pre-loaded with zero spend (the adoption tail reads c.ledger.Spent() for
+// every candidate, so it must never be nil).
 func judgeCandidate(idx int, model, dir, diff string) *candidate {
 	return &candidate{
-		idx:   idx,
-		model: model,
-		dir:   dir,
-		git:   &diffGit{fakeGit: &fakeGit{}, diff: diff},
+		idx:    idx,
+		model:  model,
+		dir:    dir,
+		git:    &diffGit{fakeGit: &fakeGit{}, diff: diff},
+		ledger: NewLedger(0, 0),
 	}
 }
 
 // newJudgeRun wires a run for the judge phase: BestOfN=2, a scripted verify stub
-// keyed by candidate dir, and the given candidates pre-populated.
-func newJudgeRun(t *testing.T, ops *fakeOps, client llm.LLM, cands []*candidate, verify map[string]bool) *run {
+// keyed by candidate dir, and the given candidates pre-populated. mainGit is the
+// run's main (superproject) git handle — distinct from each candidate's own
+// worktree-rooted git — so adoption tests can assert the hard-reset/push/
+// cleanup calls landed on the right handle.
+func newJudgeRun(t *testing.T, ops *fakeOps, mainGit *fakeGit, client llm.LLM, cands []*candidate, verify map[string]bool) *run {
 	t.Helper()
 
 	d := planTestDeps(ops, client)
-	d.Git = &fakeGit{}
+	d.Git = mainGit
 	d.Cfg.BestOfN = 2
+	d.Cfg.Branch = "cm/card-1"
 	d.Cfg.BaseBranch = "main"
 	d.Cfg.Workspace = t.TempDir()
 
@@ -114,7 +121,7 @@ func TestJudgeVerifyFilter(t *testing.T) {
 		judgeCandidate(3, "coder/three", "dir-c3", "DIFF_THREE_marker"),
 	}
 	verify := map[string]bool{"dir-c1": true, "dir-c2": false, "dir-c3": true}
-	o := newJudgeRun(t, ops, client, cands, verify)
+	o := newJudgeRun(t, ops, &fakeGit{}, client, cands, verify)
 
 	require.NoError(t, runJudge(context.Background(), o))
 
@@ -139,7 +146,7 @@ func TestJudgeAutoWin(t *testing.T) {
 	}
 	// Only c1 passes verify -> single-entry pool -> auto-win, no model call.
 	verify := map[string]bool{"dir-c1": true, "dir-c2": false}
-	o := newJudgeRun(t, ops, client, cands, verify)
+	o := newJudgeRun(t, ops, &fakeGit{}, client, cands, verify)
 
 	require.NoError(t, runJudge(context.Background(), o))
 
@@ -161,7 +168,7 @@ func TestJudgeAllVerifyFail(t *testing.T) {
 		judgeCandidate(3, "coder/three", "dir-c3", "DIFF_THREE"),
 	}
 	verify := map[string]bool{"dir-c1": false, "dir-c2": false, "dir-c3": false}
-	o := newJudgeRun(t, ops, client, cands, verify)
+	o := newJudgeRun(t, ops, &fakeGit{}, client, cands, verify)
 
 	require.NoError(t, runJudge(context.Background(), o))
 
@@ -187,7 +194,7 @@ func TestJudgeUnparsableVerdictFallsBack(t *testing.T) {
 		judgeCandidate(2, "coder/two", "dir-c2", "DIFF_TWO"),
 	}
 	verify := map[string]bool{"dir-c1": true, "dir-c2": true}
-	o := newJudgeRun(t, ops, client, cands, verify)
+	o := newJudgeRun(t, ops, &fakeGit{}, client, cands, verify)
 
 	require.NoError(t, runJudge(context.Background(), o))
 
@@ -196,4 +203,151 @@ func TestJudgeUnparsableVerdictFallsBack(t *testing.T) {
 	assert.Equal(t, 1, o.winner.idx, "fallback picks pool[0], the first verifying candidate")
 	assert.Empty(t, o.judgeModel, "no usable verdict means no recorded judge model")
 	assert.True(t, ops.loggedContains("falling back"), "the fallback is logged; logs=%v", ops.logs)
+}
+
+// adoptionCandidate builds on judgeCandidate with the extra fields the
+// adoption tail reads: a distinct container-local branch (mirroring the
+// fan-out's cm/<card>-cK convention) and a ledger pre-loaded with the
+// candidate's spend.
+func adoptionCandidate(idx int, model, dir, diff, branch string, spentUSD float64) *candidate {
+	c := judgeCandidate(idx, model, dir, diff)
+	c.branch = branch
+	c.ledger = NewLedger(0, spentUSD)
+
+	return c
+}
+
+// TestWinnerAdoption exercises the full adoption tail at the end of runJudge:
+// the winner (c2) is hard-reset onto the main card branch and pushed, its
+// completed subtasks are replayed to the board in order, every candidate's
+// worktree/branch is cleaned up on the MAIN git (winner and dropped candidate
+// included), and one outcome row per candidate is reported in a single call.
+func TestWinnerAdoption(t *testing.T) {
+	ops := &fakeOps{}
+	mainGit := &fakeGit{}
+	// Verdict picks pool position 2. c3 drops out before judging (err != nil),
+	// so the pool is only [c1, c2] and pool[1] is c2.
+	client := &planLLM{responses: []llm.Response{
+		stopResp(`{"winner": 2, "ranking": [2, 1], "rationale": "c2 is the cleanest.", "notes": []}`, 0.04),
+	}}
+
+	c1 := adoptionCandidate(1, "coder/one", "dir-c1", "DIFF_ONE", "cm/card-1-c1", 0.01)
+	c2 := adoptionCandidate(2, "coder/two", "dir-c2", "DIFF_TWO", "cm/card-1-c2", 0.02)
+	c3 := adoptionCandidate(3, "coder/three", "dir-c3", "DIFF_THREE", "cm/card-1-c3", 0.03)
+	c3.err = assertErr("candidate 3 build failed")
+
+	c2.completed = []subtaskRef{{ID: "SUB-1", Title: "First"}, {ID: "SUB-2", Title: "Second"}}
+
+	// c2's worktree git reports a distinct head SHA; the adoption must hard-reset
+	// the MAIN branch to it.
+	c2Git, ok := c2.git.(*diffGit)
+	require.True(t, ok, "judgeCandidate must build a *diffGit handle")
+
+	c2Git.headSHA = "c2-winner-sha"
+
+	verify := map[string]bool{"dir-c1": true, "dir-c2": true}
+	o := newJudgeRun(t, ops, mainGit, client, []*candidate{c1, c2, c3}, verify)
+
+	require.NoError(t, runJudge(context.Background(), o))
+
+	require.NotNil(t, o.winner)
+	assert.Same(t, c2, o.winner, "verdict winner=2 maps to pool[1] = c2 once c3 is excluded")
+
+	// (1) Main branch hard-reset to the winner's head, then the run's first push.
+	mainGit.assertOrder(t, "HardReset:c2-winner-sha", "Push:cm/card-1")
+	assert.Equal(t, []string{"c2-winner-sha"}, mainGit.hardResetRefs)
+	assert.Equal(t, []string{"cm/card-1"}, mainGit.pushBranches, "the run's first push")
+
+	// (2) Winner's completed subtasks replayed to the board, in order.
+	opCalls := ops.recorded()
+	i1 := indexOfCall(opCalls, "ClaimCard:SUB-1")
+	i2 := indexOfCall(opCalls, "CompleteTask:SUB-1")
+	i3 := indexOfCall(opCalls, "ClaimCard:SUB-2")
+	i4 := indexOfCall(opCalls, "CompleteTask:SUB-2")
+	require.True(t, i1 >= 0 && i2 >= 0 && i3 >= 0 && i4 >= 0, "opCalls=%v", opCalls)
+	assert.True(t, i1 < i2 && i2 < i3 && i3 < i4, "subtasks must be claimed/completed in order; opCalls=%v", opCalls)
+
+	// (3) Every candidate's worktree and branch cleaned up, on the MAIN git,
+	// including the winner and the dropped candidate.
+	assert.Equal(t, []string{"dir-c1", "dir-c2", "dir-c3"}, mainGit.removedWorktrees)
+	assert.Equal(t, []string{"cm/card-1-c1", "cm/card-1-c2", "cm/card-1-c3"}, mainGit.deletedBranches)
+
+	// (4) Outcomes reported once, one row per candidate.
+	require.Len(t, ops.reportOutcomes, 1)
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 3)
+
+	byModel := map[string]cmclient.ModelOutcome{}
+	for _, row := range rows {
+		byModel[row.Model] = row
+	}
+
+	assert.Equal(t, "win", byModel["coder/two"].Result)
+	assert.Equal(t, "loss", byModel["coder/one"].Result)
+	assert.Equal(t, "failed", byModel["coder/three"].Result)
+
+	for model, row := range byModel {
+		assert.Equal(t, 3, row.NCandidates, "model %s: NCandidates must count every candidate", model)
+		assert.Equal(t, "default/model", row.JudgeModel, "model %s: judge slug recorded on every row", model)
+	}
+
+	assert.InDelta(t, 0.01, byModel["coder/one"].CostUSD, 1e-9)
+	assert.InDelta(t, 0.02, byModel["coder/two"].CostUSD, 1e-9)
+	assert.InDelta(t, 0.03, byModel["coder/three"].CostUSD, 1e-9)
+	assert.True(t, byModel["coder/two"].VerifyPass)
+	assert.False(t, byModel["coder/three"].VerifyPass, "c3 never verified")
+}
+
+// TestAdoptionOutcomeReportBestEffort proves a failed outcome report does not
+// fail the run: the rest of the adoption tail (adopt, push, cleanup) still
+// completes, and the report is still attempted.
+func TestAdoptionOutcomeReportBestEffort(t *testing.T) {
+	ops := &fakeOps{reportOutcomesErr: assertErr("cm unreachable")}
+	mainGit := &fakeGit{}
+	client := &planLLM{}
+
+	c1 := adoptionCandidate(1, "coder/one", "dir-c1", "DIFF_ONE", "cm/card-1-c1", 0.0)
+	c2 := adoptionCandidate(2, "coder/two", "dir-c2", "DIFF_TWO", "cm/card-1-c2", 0.0)
+	// Only c1 verifies -> single-entry pool -> auto-win (no model call), which
+	// is one of the three paths that sets o.winner and reaches the adoption tail.
+	verify := map[string]bool{"dir-c1": true, "dir-c2": false}
+	o := newJudgeRun(t, ops, mainGit, client, []*candidate{c1, c2}, verify)
+
+	err := runJudge(context.Background(), o)
+
+	require.NoError(t, err, "a failed outcome report must not fail the run")
+	require.NotNil(t, o.winner)
+	assert.Equal(t, 1, o.winner.idx)
+
+	assert.NotEmpty(t, mainGit.pushBranches, "the winner is still adopted and pushed")
+	assert.NotEmpty(t, mainGit.removedWorktrees, "cleanup still runs")
+	require.Len(t, ops.reportOutcomes, 1, "the report call is still attempted despite the scripted error")
+}
+
+// TestAdoptionNilCandidateSkipped proves cleanup and outcome reporting are
+// nil-safe: a partially-populated fan-out slice (a candidate slot whose
+// worktree build aborted before the struct was created) must not panic, and
+// its nil slot must not count toward NCandidates — only candidates that
+// actually raced do.
+func TestAdoptionNilCandidateSkipped(t *testing.T) {
+	ops := &fakeOps{}
+	mainGit := &fakeGit{}
+	client := &planLLM{}
+
+	c1 := adoptionCandidate(1, "coder/one", "dir-c1", "DIFF_ONE", "cm/card-1-c1", 0.0)
+	c2 := adoptionCandidate(2, "coder/two", "dir-c2", "DIFF_TWO", "cm/card-1-c2", 0.0)
+	verify := map[string]bool{"dir-c1": true, "dir-c2": false}
+	o := newJudgeRun(t, ops, mainGit, client, []*candidate{c1, c2, nil}, verify)
+
+	require.NoError(t, runJudge(context.Background(), o), "a nil candidate slot must not panic or fail the run")
+
+	assert.Equal(t, []string{"dir-c1", "dir-c2"}, mainGit.removedWorktrees, "the nil slot is skipped during cleanup")
+
+	require.Len(t, ops.reportOutcomes, 1)
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 2, "the nil slot produces no outcome row")
+
+	for _, row := range rows {
+		assert.Equal(t, 2, row.NCandidates, "NCandidates counts only the non-nil candidates that actually raced")
+	}
 }
