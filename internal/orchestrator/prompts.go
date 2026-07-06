@@ -1,6 +1,9 @@
 package orchestrator
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // skillEngageBlock is the model-driven engagement preamble prepended to the
 // coder/fix/document/review prompts when task-skills are mounted. It mirrors
@@ -650,3 +653,15 @@ func designBlock(design string) string {
 
 	return "\nAGREED DESIGN (the human and the agent converged on this design during\nbrainstorming — plan to implement it):\n" + design + "\n"
 }
+
+// Wrap-up nudge messages, injected by the harness when wrapUpTurns turns
+// remain (runModelWrapUp). Built from the shared constant so the stated count
+// can never drift from the threshold. Phase-appropriate: fix runs carry no
+// COMMIT line, and document's COMMIT line is optional (omit rule).
+var (
+	coderWrapUpMessage = fmt.Sprintf("%d turns remain. If the acceptance criteria pass, STOP now: reply with your final summary ending with the COMMIT line and make no more tool calls. Do not re-run checks that already passed.", wrapUpTurns)
+
+	fixWrapUpMessage = fmt.Sprintf("%d turns remain. If the findings are addressed and the tests pass, STOP now: reply with your final summary and make no more tool calls. Do not re-run checks that already passed.", wrapUpTurns)
+
+	documentWrapUpMessage = fmt.Sprintf("%d turns remain. Finish now: reply with your final message — ending with the COMMIT line only if you wrote documentation — and make no more tool calls.", wrapUpTurns)
+)

@@ -32,14 +32,18 @@ func reviewTestDeps(t *testing.T, ops *fakeOps, git *fakeGit, client llm.LLM, re
 		WriteTools: tools.NewRegistry(tools.NewReadTool(".")),
 		ReadTools:  tools.NewRegistry(tools.NewReadTool(".")),
 		Cfg: Config{
-			Project:           "proj",
-			CardID:            "CARD-1",
-			Branch:            "cm/card-1",
-			BaseBranch:        "main",
-			Workspace:         t.TempDir(),
-			PayloadModel:      "payload/model",
-			DefaultModel:      "default/model",
-			MaxTurns:          5,
+			Project:      "proj",
+			CardID:       "CARD-1",
+			Branch:       "cm/card-1",
+			BaseBranch:   "main",
+			Workspace:    t.TempDir(),
+			PayloadModel: "payload/model",
+			DefaultModel: "default/model",
+			// Comfortably above wrapUpTurns (5): these single-turn fixtures must
+			// finish before the one-shot nudge fires, or it becomes the captured
+			// "last user message" instead of the real prompt. Tests that exercise
+			// the turn cap or the nudge itself override this explicitly.
+			MaxTurns:          20,
 			ReviewAttemptsCap: 5,
 		},
 	}
@@ -1022,7 +1026,11 @@ func hitlReviewDeps(ops *fakeOps, git *fakeGit, inbox *fakeInbox, client llm.LLM
 		Cfg: Config{
 			Project: "proj", CardID: "CARD-1", Branch: "cm/card-1", BaseBranch: "main",
 			PayloadModel: "payload/model", DefaultModel: "default/model",
-			MaxTurns: 5, ReviewAttemptsCap: 3, Interactive: true,
+			// Comfortably above wrapUpTurns (5): these single-turn fixtures must
+			// finish before the one-shot nudge fires, or it becomes the captured
+			// "last user message" instead of the real prompt. Tests that exercise
+			// the turn cap or the nudge itself override this explicitly.
+			MaxTurns: 20, ReviewAttemptsCap: 3, Interactive: true,
 		},
 	}
 }

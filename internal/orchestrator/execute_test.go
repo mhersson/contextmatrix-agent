@@ -53,7 +53,11 @@ func execTestDeps(ops *fakeOps, git *fakeGit, client llm.LLM) Deps {
 			Branch:       "cm/card-1",
 			PayloadModel: "payload/model",
 			DefaultModel: "default/model",
-			MaxTurns:     5,
+			// Comfortably above wrapUpTurns (5): these single-turn fixtures must
+			// finish before the one-shot nudge fires, or it becomes the captured
+			// "last user message" instead of the real prompt. Tests that exercise
+			// the turn cap or the nudge itself override this explicitly.
+			MaxTurns: 20,
 		},
 	}
 }
@@ -626,4 +630,34 @@ func TestSubtaskSummary(t *testing.T) {
 func TestCoderPromptShape(t *testing.T) {
 	assert.Contains(t, strings.ToUpper(coderPrompt), "COMMIT:")
 	assert.Contains(t, strings.ToLower(coderPrompt), "branch")
+}
+
+// burnResp is a tool-call turn that never lets the run stop on its own;
+// content rides along so cap-path tests can inspect the final output.
+func burnResp(content string) llm.Response {
+	return llm.Response{
+		Content: content,
+		ToolCalls: []llm.ToolCall{{
+			ID: "b", Type: "function",
+			Function: llm.FunctionCall{Name: "read", Arguments: `{"path":"missing"}`},
+		}},
+	}
+}
+
+func TestCoderRunGetsWrapUpNudge(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	// Three burn turns, then the exhausted fallback (stop) ends the run: with
+	// MaxTurns=8 the nudge fires after 8-5=3 consumed turns.
+	client := &planLLM{responses: []llm.Response{burnResp(""), burnResp(""), burnResp("")}}
+
+	d := execTestDeps(ops, git, client)
+	d.Cfg.MaxTurns = 8
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	joined := strings.Join(client.tasks, "\n")
+	assert.Contains(t, joined, coderWrapUpMessage,
+		"the wrap-up nudge reaches the coder conversation as a user message")
 }

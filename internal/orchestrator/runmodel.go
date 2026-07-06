@@ -127,3 +127,21 @@ func (o *run) runModelCfg(ctx context.Context, reg *tools.Registry, prompt, mode
 
 	return res, err
 }
+
+// wrapUpTurns is the remaining-turn threshold at which coder-family runs get
+// the harness wrap-up nudge: late enough to matter, early enough that a model
+// can ignore it once, run one final check, and still land its closing message.
+// An orchestrator constant on purpose — not an operator knob.
+const wrapUpTurns = 5
+
+// runModelWrapUp is runModel with the wrap-up nudge configured: when
+// wrapUpTurns turns remain before the cap, the harness injects msg once as a
+// fresh user message. Used by the coder, fix, and document runs — the phases
+// whose models dither on post-green re-verification instead of finishing.
+func (o *run) runModelWrapUp(ctx context.Context, reg *tools.Registry, prompt, model, msg string) (harness.Result, error) {
+	cfg := o.harnessConfig(model)
+	cfg.WrapUpTurns = wrapUpTurns
+	cfg.WrapUpMessage = msg
+
+	return o.runModelCfg(ctx, reg, prompt, model, cfg)
+}

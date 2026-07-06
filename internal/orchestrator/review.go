@@ -572,7 +572,7 @@ func (o *run) runFixModel(ctx context.Context, prompt string, round int, fixTier
 		_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory selection record
 			fmt.Sprintf("fix coder %s selected for round %d fixes (tier=%s)", model, round, o.fixTierFor(fixTier, authoritative)))
 
-		res, err := o.runModel(ctx, d.WriteTools, prompt, model)
+		res, err := o.runModelWrapUp(ctx, d.WriteTools, prompt, model, fixWrapUpMessage)
 
 		o.ledger.Spend(res.TotalCostUSD)
 

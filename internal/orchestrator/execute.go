@@ -267,7 +267,7 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 
 		_ = d.Ops.AddLog(ctx, cfg.CardID, logMsg) //nolint:errcheck // advisory selection record
 
-		res, err := o.runModel(ctx, sc.tools, prompt, model)
+		res, err := o.runModelWrapUp(ctx, sc.tools, prompt, model, coderWrapUpMessage)
 
 		// Account for spend even on a transport error / partial run, then report
 		// the model actually used (falling back to the resolved slug when the

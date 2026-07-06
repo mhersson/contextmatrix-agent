@@ -48,7 +48,7 @@ func runDocument(ctx context.Context, o *run) error {
 	task := fmt.Sprintf(documentPrompt, o.skillEngage(), o.grounding, cfg.Workspace,
 		o.tc.Title, o.tc.Description, o.planOverview(), diff)
 
-	res, err := o.runModel(ctx, d.WriteTools, task, model)
+	res, err := o.runModelWrapUp(ctx, d.WriteTools, task, model, documentWrapUpMessage)
 
 	o.ledger.Spend(res.TotalCostUSD)
 
