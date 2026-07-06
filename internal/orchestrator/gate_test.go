@@ -154,3 +154,14 @@ func (b *syncBuf) String() string {
 
 	return string(b.buf)
 }
+
+// TestParseGateVerdictBareJSONWithInStringFence: a bare, valid gate verdict
+// whose feedback embeds a fenced snippet must not be mangled into ("", "") —
+// that silently downgrades an approve to adjust.
+func TestParseGateVerdictBareJSONWithInStringFence(t *testing.T) {
+	raw := "{\"verdict\":\"Approve\",\"feedback\":\"keep the ```go\\nfunc x() {}\\n``` example\"}"
+
+	verdict, feedback := parseGateVerdict(raw)
+	assert.Equal(t, "approve", verdict)
+	assert.Contains(t, feedback, "```go\nfunc x() {}\n```")
+}

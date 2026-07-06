@@ -432,6 +432,18 @@ func TestExtractJSON(t *testing.T) {
 		{"brace in code before fenced json", "if m.conns >= m.max { m.mu.Unlock() }\n```json\n{\"approved\":false}\n```", `{"approved":false}`, true},
 		{"brace in prose then json, unfenced", "foo { bar } then {\"approved\":false}", `{"approved":false}`, true},
 		{"nested object", `pre {"a":{"b":1}} post`, `{"a":{"b":1}}`, true},
+		{
+			"bare object with in-string fence (compact)",
+			"{\"desc\":\"use ```go\\nfunc foo() {}\\n``` here\",\"ok\":true}",
+			"{\"desc\":\"use ```go\\nfunc foo() {}\\n``` here\",\"ok\":true}",
+			true,
+		},
+		{
+			"bare pretty object with fences in two string values",
+			"{\n  \"a\": \"x: ```go\\nfunc a() {}\\n``` end\",\n  \"b\": \"y: ```go\\nfunc b() {}\\n``` end\"\n}",
+			"{\"a\":\"x: ```go\\nfunc a() {}\\n``` end\",\"b\":\"y: ```go\\nfunc b() {}\\n``` end\"}",
+			true,
+		},
 		{"no object", "no json here", "", false},
 	}
 	for _, tt := range tests {
@@ -444,6 +456,26 @@ func TestExtractJSON(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestParsePlanBareJSONWithInStringFences mirrors the live failure payload: a
+// bare, valid JSON plan whose subtask descriptions carry fenced code blocks
+// must parse on attempt 0 with the fenced content intact.
+func TestParsePlanBareJSONWithInStringFences(t *testing.T) {
+	raw := "{\n" +
+		"  \"card_tier\": \"simple\",\n" +
+		"  \"subtasks\": [\n" +
+		"    {\"title\": \"Add fast path\", \"description\": \"Guard extraction: ```go\\nif json.Valid(b) {\\n\\treturn s, true\\n}\\n``` before fence stripping.\", \"depends_on\": [], \"tier\": \"simple\"},\n" +
+		"    {\"title\": \"Add regression tests\", \"description\": \"Cover payloads like ```go\\nfunc a() {}\\n``` inside descriptions.\", \"depends_on\": [0], \"tier\": \"moderate\"}\n" +
+		"  ]\n" +
+		"}"
+
+	p, err := parsePlan(raw)
+	require.NoError(t, err)
+	assert.Equal(t, "simple", p.CardTier)
+	require.Len(t, p.Subtasks, 2)
+	assert.Contains(t, p.Subtasks[0].Description, "```go\nif json.Valid(b) {\n\treturn s, true\n}\n```")
+	assert.Equal(t, []int{0}, p.Subtasks[1].DependsOn)
 }
 
 // hitlPlanRun builds a *run for HITL plan-phase tests. The card has a ## Design
