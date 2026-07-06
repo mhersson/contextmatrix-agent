@@ -617,7 +617,8 @@ func (o *run) runFix(ctx context.Context, findings string, round int, fixTier st
 		return err
 	}
 
-	prompt := fmt.Sprintf(fixPrompt, o.skillEngage(), o.grounding, o.tc.Title, o.tc.Description, findings)
+	prompt := fmt.Sprintf(fixPrompt, o.skillEngage(), o.grounding, cfg.Workspace,
+		o.tc.Title, o.tc.Description, findings)
 
 	if err := o.runFixModel(ctx, prompt, round, fixTier, authoritative); err != nil {
 		return err

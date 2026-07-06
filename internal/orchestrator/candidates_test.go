@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -555,4 +556,19 @@ func TestFanoutInteractiveCollectorLifecycle(t *testing.T) {
 	for i, c := range o.candidates {
 		require.NoError(t, c.err, "candidate %d", i+1)
 	}
+}
+
+// TestFanoutCoderPromptsCarryWorktreeRoot proves each candidate's coder prompt
+// names ITS OWN worktree as the repo root, not the shared parent workspace.
+func TestFanoutCoderPromptsCarryWorktreeRoot(t *testing.T) {
+	ops := &fakeOps{}
+	client := &planLLM{}
+	d, _, ws := fanoutDeps(t, ops, &fakeGit{}, client, 2)
+
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+	require.NoError(t, o.runFanout(context.Background()))
+
+	joined := strings.Join(client.tasks, "\n")
+	assert.Contains(t, joined, filepath.Join(ws, ".worktrees", "c1"))
+	assert.Contains(t, joined, filepath.Join(ws, ".worktrees", "c2"))
 }

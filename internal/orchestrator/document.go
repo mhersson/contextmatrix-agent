@@ -45,7 +45,8 @@ func runDocument(ctx context.Context, o *run) error {
 		diff = "(branch diff unavailable)"
 	}
 
-	task := fmt.Sprintf(documentPrompt, o.skillEngage(), o.grounding, o.tc.Title, o.tc.Description, o.planOverview(), diff)
+	task := fmt.Sprintf(documentPrompt, o.skillEngage(), o.grounding, cfg.Workspace,
+		o.tc.Title, o.tc.Description, o.planOverview(), diff)
 
 	res, err := o.runModel(ctx, d.WriteTools, task, model)
 
