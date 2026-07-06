@@ -104,11 +104,18 @@ func parsePlan(s string) (plan, error) {
 	return p, nil
 }
 
-// extractJSON returns the JSON object the model intended as its answer. It
-// prefers a fenced ```json block (models wrap the verdict in one and surround it
-// with prose that contains stray braces), and otherwise returns the LAST
-// balanced top-level object — robust to prose/code braces appearing before it.
+// extractJSON returns the JSON object the model intended as its answer. A
+// whole-output bare object is returned as-is — fence markers inside its string
+// values must never trigger fence-stripping, which is not string-aware and
+// would mangle the payload. Otherwise it prefers a fenced ```json block
+// (models wrap the verdict in one and surround it with prose that contains
+// stray braces), and finally returns the LAST balanced top-level object —
+// robust to prose/code braces appearing before it.
 func extractJSON(s string) (string, bool) {
+	if t := strings.TrimSpace(s); strings.HasPrefix(t, "{") && json.Valid([]byte(t)) {
+		return t, true
+	}
+
 	if fenced, ok := extractFenced(s); ok {
 		s = fenced
 	}

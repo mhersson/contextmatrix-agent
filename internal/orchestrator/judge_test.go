@@ -487,3 +487,14 @@ func TestAdoptionNilCandidateSkipped(t *testing.T) {
 		assert.Equal(t, 2, row.NCandidates, "NCandidates counts only the non-nil candidates that actually raced")
 	}
 }
+
+// TestParseJudgeVerdictBareJSONWithInStringFence: a bare, valid judge verdict
+// whose rationale embeds a fenced snippet must parse on attempt 0.
+func TestParseJudgeVerdictBareJSONWithInStringFence(t *testing.T) {
+	raw := "{\"winner\":2,\"ranking\":[2,1],\"rationale\":\"2 guards the hot path: ```go\\nif ok {\\n\\treturn\\n}\\n``` cleaner\",\"notes\":[]}"
+
+	v, err := parseJudgeVerdict(raw, 2)
+	require.NoError(t, err)
+	assert.Equal(t, 2, v.Winner)
+	assert.Contains(t, v.Rationale, "```go\nif ok {\n\treturn\n}\n```")
+}

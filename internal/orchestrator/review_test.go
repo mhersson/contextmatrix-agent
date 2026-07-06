@@ -198,6 +198,14 @@ func TestParseVerdict(t *testing.T) {
 		assert.Equal(t, "a.go", v.Fixes[0].File)
 	})
 
+	t.Run("bare JSON with in-string fence", func(t *testing.T) {
+		raw := "{\"approved\":false,\"summary\":\"tighten the guard: ```go\\nfoo()\\n``` as discussed\",\"fixes\":[]}"
+		v, err := parseVerdict(raw)
+		require.NoError(t, err)
+		assert.False(t, v.Approved)
+		assert.Contains(t, v.Summary, "```go\nfoo()\n```")
+	})
+
 	t.Run("invalid JSON", func(t *testing.T) {
 		_, err := parseVerdict("no json here at all")
 		require.Error(t, err)
