@@ -196,6 +196,7 @@ func TestFanoutHappyPath(t *testing.T) {
 
 	assert.True(t, ops.loggedContains("best-of-n: candidate 2/3"),
 		"the fan-out logs each candidate start; logs=%v", ops.logs)
+	assert.False(t, ops.loggedContains("dropped:"), "no drop lines when every candidate survives")
 }
 
 func TestFanoutCandidateFailureIsolated(t *testing.T) {
@@ -220,6 +221,13 @@ func TestFanoutCandidateFailureIsolated(t *testing.T) {
 	require.NoError(t, o.candidates[2].err)
 	assert.Len(t, o.candidates[0].completed, 2)
 	assert.Len(t, o.candidates[2].completed, 2)
+
+	assert.True(t, ops.loggedContains("best-of-n: candidate 2/3"),
+		"the dropped candidate is named; logs=%v", ops.logs)
+	assert.True(t, ops.loggedContains("dropped:"),
+		"the drop is logged after the join; logs=%v", ops.logs)
+	assert.True(t, ops.loggedContains("disk full"),
+		"the drop reason is carried into the log; logs=%v", ops.logs)
 }
 
 func TestFanoutPanicIsolated(t *testing.T) {

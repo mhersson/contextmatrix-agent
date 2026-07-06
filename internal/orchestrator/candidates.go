@@ -230,6 +230,17 @@ func (o *run) runFanout(ctx context.Context) (retErr error) {
 		}
 	}
 
+	// Name every dropped candidate the moment the join releases. Until here a
+	// failing candidate (turn cap, context limit, pool exhaustion, ...) is
+	// silent: it would otherwise surface only in the post-judge report table,
+	// long after the user watched the fan-out apparently hang on it.
+	for _, c := range o.candidates {
+		if c != nil && c.err != nil {
+			_ = o.d.Ops.AddLog(ctx, cfg.CardID, fmt.Sprintf( //nolint:errcheck
+				"best-of-n: candidate %d/%d (%s) dropped: %v", c.idx, len(o.candidates), c.model, c.err))
+		}
+	}
+
 	for _, c := range o.candidates {
 		if c.err == nil {
 			return nil
