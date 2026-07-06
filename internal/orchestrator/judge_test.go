@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
@@ -88,6 +89,57 @@ func TestJudgeNoopWhenOff(t *testing.T) {
 	require.NoError(t, runJudge(context.Background(), o))
 	assert.Nil(t, o.winner, "no winner picked when best-of-n is off")
 	assert.Empty(t, client.tasks, "no model call when best-of-n is off")
+	assert.False(t, ops.loggedContains("judge phase started"), "no announcement when best-of-n is off")
+}
+
+// TestJudgePhaseStartAndVerifyProgressLogged proves the judge narrates the
+// previously-silent window between the fan-out join and the verdict: a phase
+// start line before the serial verifies, and one progress line per survivor.
+func TestJudgePhaseStartAndVerifyProgressLogged(t *testing.T) {
+	ops := &fakeOps{}
+	client := &planLLM{responses: []llm.Response{
+		stopResp(`{"winner": 1, "ranking": [1, 2], "rationale": "c1 wins.", "notes": []}`, 0.02),
+	}}
+	cands := []*candidate{
+		judgeCandidate(1, "coder/one", "dir-c1", "DIFF_ONE"),
+		judgeCandidate(2, "coder/two", "dir-c2", "DIFF_TWO"),
+	}
+	verify := map[string]bool{"dir-c1": true, "dir-c2": true}
+	o := newJudgeRun(t, ops, &fakeGit{}, client, cands, verify)
+
+	require.NoError(t, runJudge(context.Background(), o))
+
+	assert.True(t, ops.loggedContains("best-of-n: judge phase started — verifying 2 candidate(s) before comparison"),
+		"the judge announces itself before verifying; logs=%v", ops.logs)
+	assert.True(t, ops.loggedContains("best-of-n: verifying candidate 1 (coder/one) — 1 of 2"),
+		"per-candidate verify progress is logged; logs=%v", ops.logs)
+	assert.True(t, ops.loggedContains("best-of-n: verifying candidate 2 (coder/two) — 2 of 2"),
+		"per-candidate verify progress is logged; logs=%v", ops.logs)
+}
+
+// TestJudgeOutcomeLabels pins the report-table labels, in particular that a
+// turn-capped candidate is labeled honestly instead of "failed (build)".
+func TestJudgeOutcomeLabels(t *testing.T) {
+	win := &candidate{idx: 1}
+	o := &run{winner: win}
+
+	tests := []struct {
+		name string
+		c    *candidate
+		want string
+	}{
+		{"winner", win, "win"},
+		{"turn cap", &candidate{err: &MaxTurnsError{Model: "m/x", Turns: 30}}, "failed (turn cap)"},
+		{"wrapped turn cap", &candidate{err: fmt.Errorf("subtask 2: %w", &MaxTurnsError{Model: "m/x", Turns: 30})}, "failed (turn cap)"},
+		{"other error", &candidate{err: assertErr("disk full")}, "failed (error)"},
+		{"verify pass loses", &candidate{verifyOK: true}, "loss"},
+		{"verify fail", &candidate{}, "failed (verify)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, o.judgeOutcome(tt.c))
+		})
+	}
 }
 
 func TestJudgeResumeRemap(t *testing.T) {
@@ -155,6 +207,8 @@ func TestJudgeAutoWin(t *testing.T) {
 	assert.Equal(t, 1, o.winner.idx)
 	assert.Empty(t, o.judgeModel, "auto-win records no judge model")
 	assert.True(t, ops.loggedContains("auto-win"), "auto-win is logged; logs=%v", ops.logs)
+	assert.True(t, ops.loggedContains("judge phase started"),
+		"the start line precedes the pool filter, so auto-win still announces; logs=%v", ops.logs)
 }
 
 func TestJudgeAllVerifyFail(t *testing.T) {

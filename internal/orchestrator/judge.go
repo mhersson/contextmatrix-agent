@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -73,10 +74,21 @@ func runJudge(ctx context.Context, o *run) error {
 
 	survivors := survivingCandidates(o.candidates)
 
+	// Announce the phase before the serial verifies + model call below: they are
+	// wall-clock unbounded and otherwise emit nothing until the verdict, which
+	// reads as a hang on the card activity log.
+	if len(survivors) > 0 {
+		_ = d.Ops.AddLog(ctx, cfg.CardID, fmt.Sprintf( //nolint:errcheck // advisory record
+			"best-of-n: judge phase started — verifying %d candidate(s) before comparison", len(survivors)))
+	}
+
 	// Verify each survivor SERIALLY (the fan-out already peaked memory; parallel
 	// verify subprocesses on top would risk the container cap) and capture its
 	// diff against the base branch. A diff over the cap is summarized as a --stat.
-	for _, c := range survivors {
+	for i, c := range survivors {
+		_ = d.Ops.AddLog(ctx, cfg.CardID, fmt.Sprintf( //nolint:errcheck // advisory record
+			"best-of-n: verifying candidate %d (%s) — %d of %d", c.idx, c.model, i+1, len(survivors)))
+
 		argv := detectVerifyCommand(c.dir)
 		c.verifyOut, c.verifyOK = o.runVerify(ctx, c.dir, argv)
 
@@ -405,7 +417,12 @@ func (o *run) judgeOutcome(c *candidate) string {
 	case c == o.winner:
 		return "win"
 	case c.err != nil:
-		return "failed (build)"
+		var mte *MaxTurnsError
+		if errors.As(c.err, &mte) {
+			return "failed (turn cap)"
+		}
+
+		return "failed (error)"
 	case c.verifyOK:
 		return "loss"
 	default:
