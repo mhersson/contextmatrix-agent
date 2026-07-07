@@ -53,7 +53,11 @@ func execTestDeps(ops *fakeOps, git *fakeGit, client llm.LLM) Deps {
 			Branch:       "cm/card-1",
 			PayloadModel: "payload/model",
 			DefaultModel: "default/model",
-			MaxTurns:     5,
+			// Comfortably above wrapUpTurns (5): these single-turn fixtures must
+			// finish before the one-shot nudge fires, or it becomes the captured
+			// "last user message" instead of the real prompt. Tests that exercise
+			// the turn cap or the nudge itself override this explicitly.
+			MaxTurns: 20,
 		},
 	}
 }
@@ -626,4 +630,177 @@ func TestSubtaskSummary(t *testing.T) {
 func TestCoderPromptShape(t *testing.T) {
 	assert.Contains(t, strings.ToUpper(coderPrompt), "COMMIT:")
 	assert.Contains(t, strings.ToLower(coderPrompt), "branch")
+}
+
+// burnResp is a tool-call turn that never lets the run stop on its own;
+// content rides along so cap-path tests can inspect the final output.
+func burnResp(content string) llm.Response {
+	return llm.Response{
+		Content: content,
+		ToolCalls: []llm.ToolCall{{
+			ID: "b", Type: "function",
+			Function: llm.FunctionCall{Name: "read", Arguments: `{"path":"missing"}`},
+		}},
+	}
+}
+
+func TestCoderRunGetsWrapUpNudge(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	// Three burn turns, then the exhausted fallback (stop) ends the run: with
+	// MaxTurns=8 the nudge fires after 8-5=3 consumed turns.
+	client := &planLLM{responses: []llm.Response{burnResp(""), burnResp(""), burnResp("")}}
+
+	d := execTestDeps(ops, git, client)
+	d.Cfg.MaxTurns = 8
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	joined := strings.Join(client.tasks, "\n")
+	assert.Contains(t, joined, coderWrapUpMessage,
+		"the wrap-up nudge reaches the coder conversation as a user message")
+}
+
+func TestSalvageCappedFinalSubtask(t *testing.T) {
+	ops := &fakeOps{}
+	// Five burn turns == MaxTurns(5) from execTestDeps: the coder run caps.
+	// The final output carries a COMMIT line the salvage must extract.
+	client := &planLLM{responses: []llm.Response{
+		burnResp(""), burnResp(""), burnResp(""), burnResp(""),
+		burnResp("wrapping up\nCOMMIT: feat: salvage me"),
+	}}
+	d := execTestDeps(ops, &fakeGit{committed: true}, client)
+	// execTestDeps defaults MaxTurns to 20 (avoids the wrapUpTurns==MaxTurns
+	// nudge-at-turn-0 quirk for unrelated fixtures); this test scripts exactly
+	// 5 burn turns and needs the cap to trip on the 5th.
+	d.Cfg.MaxTurns = 5
+	o := newExecRun(d, nil, 0)
+
+	cg := &fakeGit{committed: true}
+	sc := &solverCtx{
+		git: cg, ledger: NewLedger(0, 0), tools: d.WriteTools,
+		workspace: "ws", coderModel: o.resolveCoderModel,
+		boardOps: false, push: false, tag: "candidate 1/1",
+		lastSubID: "SUB-2",
+	}
+
+	sub := subtaskRef{ID: "SUB-2", Title: "Final", Tier: "simple"}
+	require.NoError(t, o.executeSubtaskWith(context.Background(), sc, sub),
+		"a cap on the final subtask is salvaged, not dropped")
+
+	assert.True(t, sc.capped, "the solver is marked capped")
+	require.NotEmpty(t, cg.commitMsgs, "the worktree is committed")
+	assert.Equal(t, "feat: salvage me", cg.commitMsgs[len(cg.commitMsgs)-1],
+		"the COMMIT line survives from the truncated output")
+	require.Len(t, sc.completed, 1)
+	assert.Equal(t, "SUB-2", sc.completed[0].ID, "the salvaged subtask counts as completed for winner replay")
+	assert.True(t, ops.loggedContains("turn cap on final subtask SUB-2"), "logs=%v", ops.logs)
+}
+
+// TestNoSalvageOnCleanTree proves a capped candidate whose final-subtask tree
+// is clean (nothing to commit) is NOT salvaged: CommitWithMessage returning
+// (false, nil) means there is no diff, and an empty tree carries no completion
+// evidence for the judge's verify gate to ride on.
+func TestNoSalvageOnCleanTree(t *testing.T) {
+	ops := &fakeOps{}
+	// Five burn turns == MaxTurns(5) from execTestDeps: the coder run caps.
+	client := &planLLM{responses: []llm.Response{
+		burnResp(""), burnResp(""), burnResp(""), burnResp(""),
+		burnResp("wrapping up\nCOMMIT: feat: salvage me"),
+	}}
+	d := execTestDeps(ops, &fakeGit{committed: true}, client)
+	d.Cfg.MaxTurns = 5
+	o := newExecRun(d, nil, 0)
+
+	cg := &fakeGit{committed: false}
+	sc := &solverCtx{
+		git: cg, ledger: NewLedger(0, 0), tools: d.WriteTools,
+		workspace: "ws", coderModel: o.resolveCoderModel,
+		boardOps: false, push: false, tag: "candidate 1/1",
+		lastSubID: "SUB-2",
+	}
+
+	sub := subtaskRef{ID: "SUB-2", Title: "Final", Tier: "simple"}
+	err := o.executeSubtaskWith(context.Background(), sc, sub)
+	require.Error(t, err, "a clean tree on the final subtask must not be salvaged")
+
+	var mte *MaxTurnsError
+	require.ErrorAs(t, err, &mte)
+	assert.False(t, sc.capped, "the solver is not marked capped when nothing was committed")
+	assert.Empty(t, sc.completed, "no subtask counts as completed when salvage is refused")
+}
+
+func TestSalvageFallsBackToTitleCommitMessage(t *testing.T) {
+	ops := &fakeOps{}
+	client := &planLLM{responses: []llm.Response{
+		burnResp(""), burnResp(""), burnResp(""), burnResp(""), burnResp("no commit line here"),
+	}}
+	d := execTestDeps(ops, &fakeGit{committed: true}, client)
+	// execTestDeps defaults MaxTurns to 20; this test scripts exactly 5 burn
+	// turns and needs the cap to trip on the 5th.
+	d.Cfg.MaxTurns = 5
+	o := newExecRun(d, nil, 0)
+
+	cg := &fakeGit{committed: true}
+	sc := &solverCtx{
+		git: cg, ledger: NewLedger(0, 0), tools: d.WriteTools,
+		workspace: "ws", coderModel: o.resolveCoderModel,
+		boardOps: false, push: false, tag: "candidate 1/1",
+		lastSubID: "SUB-2",
+	}
+
+	require.NoError(t, o.executeSubtaskWith(context.Background(), sc,
+		subtaskRef{ID: "SUB-2", Title: "Final", Tier: "simple"}))
+	require.NotEmpty(t, cg.commitMsgs)
+	assert.Equal(t, "feat: final", cg.commitMsgs[len(cg.commitMsgs)-1])
+}
+
+func TestNoSalvageOnEarlierSubtask(t *testing.T) {
+	ops := &fakeOps{}
+	client := &planLLM{responses: []llm.Response{
+		burnResp(""), burnResp(""), burnResp(""), burnResp(""), burnResp(""),
+	}}
+	d := execTestDeps(ops, &fakeGit{committed: true}, client)
+	// execTestDeps defaults MaxTurns to 20; this test scripts exactly 5 burn
+	// turns and needs the cap to trip on the 5th.
+	d.Cfg.MaxTurns = 5
+	o := newExecRun(d, nil, 0)
+
+	cg := &fakeGit{committed: true}
+	sc := &solverCtx{
+		git: cg, ledger: NewLedger(0, 0), tools: d.WriteTools,
+		workspace: "ws", coderModel: o.resolveCoderModel,
+		boardOps: false, push: false, tag: "candidate 1/1",
+		lastSubID: "SUB-9", // the capped subtask is NOT the final one
+	}
+
+	err := o.executeSubtaskWith(context.Background(), sc, subtaskRef{ID: "SUB-2", Title: "Mid", Tier: "simple"})
+	require.Error(t, err, "a cap on an earlier subtask still drops the candidate")
+
+	var mte *MaxTurnsError
+	require.ErrorAs(t, err, &mte)
+	assert.False(t, sc.capped)
+	assert.Empty(t, cg.commitMsgs, "nothing is committed for a non-final cap")
+}
+
+func TestNoSalvageForParentSolver(t *testing.T) {
+	ops := &fakeOps{}
+	client := &planLLM{responses: []llm.Response{
+		burnResp(""), burnResp(""), burnResp(""), burnResp(""), burnResp(""),
+	}}
+	git := &fakeGit{committed: true}
+	d := execTestDeps(ops, git, client)
+	// execTestDeps defaults MaxTurns to 20; this test scripts exactly 5 burn
+	// turns and needs the cap to trip on the 5th.
+	d.Cfg.MaxTurns = 5
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+
+	err := runExecute(context.Background(), o)
+	require.Error(t, err, "the single-solver path keeps its park-and-resume behavior")
+
+	var mte *MaxTurnsError
+	require.ErrorAs(t, err, &mte)
+	assert.Empty(t, git.commitMsgs, "no salvage commit on the parent solver")
+	assert.Positive(t, countCalls(ops.recorded(), "ReleaseCard:SUB-1"), "the claim is released on the park")
 }

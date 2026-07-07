@@ -1,6 +1,9 @@
 package orchestrator
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // skillEngageBlock is the model-driven engagement preamble prepended to the
 // coder/fix/document/review prompts when task-skills are mounted. It mirrors
@@ -45,15 +48,18 @@ func (o *run) skillEngage() string {
 // the planner has NO card tools — it only reads code (read/grep/glob) and
 // emits a strict JSON plan. Card creation happens in code from the parsed JSON.
 //
-// The trailing %s slots are filled by draftPlan: card title, card description,
-// an optional diagnosis block (root-cause investigation for bug-like cards), an
-// optional design block (brainstormed design for creative HITL cards), an
-// optional resume block (existing subtasks), an optional feedback block (HITL
-// reviewer's requested changes on a re-draft), and an optional repair block
-// (the previous parse error). Empty optional blocks collapse to nothing.
+// The trailing %s slots are filled by draftPlan: workspace root, card title,
+// card description, an optional diagnosis block (root-cause investigation for
+// bug-like cards), an optional design block (brainstormed design for creative
+// HITL cards), an optional resume block (existing subtasks), an optional
+// feedback block (HITL reviewer's requested changes on a re-draft), and an
+// optional repair block (the previous parse error). Empty optional blocks
+// collapse to nothing.
 const planPrompt = `%sYou are the planning agent for a software task. You have read-only
 tools (read, grep, glob) to inspect the codebase. You do NOT create or modify
 cards or files — you only read code and output a plan as JSON.
+
+Repo root: %s — paths are relative to it.
 
 First understand the task deeply, then decompose it. If a ROOT-CAUSE DIAGNOSIS
 is provided below, ground the plan in it — the subtasks must implement that fix
@@ -108,11 +114,14 @@ Respond with ONLY a JSON object, no prose:
 // cards before planning. Adapted from the systematic-debugging workflow skill:
 // the same root-cause-first discipline, but the investigator has only read
 // tools and returns a "## Diagnosis" text blob (no card writes) that grounds
-// the plan. The trailing %s slots are filled by runDiagnose: card title, body.
+// the plan. The trailing %s slots are filled by runDiagnose: workspace root,
+// card title, body.
 const diagnosePrompt = `%sYou are a read-only debugging investigator for a task that looks like a bug.
 You have read-only tools (read, grep, glob) to inspect the codebase. You do NOT
 modify files, run git, or create cards. Find the ROOT CAUSE — a fix is planned
 separately, after you finish.
+
+Repo root: %s — paths are relative to it.
 
 Work the evidence in order:
 - Read the task below; quote any error messages, stack traces, or reproduction
@@ -179,19 +188,23 @@ Fix anything you find before finishing.`
 // NOT run git itself — it ends with a single COMMIT line the orchestrator parses
 // into the commit message.
 //
-// The trailing %s slots are filled by runExecute: subtask title, subtask
-// description, parent card title, parent card body.
+// The trailing %s slots are filled by runExecute: workspace root, subtask
+// title, subtask description, parent card title, parent card body.
 const coderPrompt = `%s%sYou are the coding agent for one subtask of a larger task. You have the full
 write toolset (read, grep, glob, edit, write, bash) rooted at the workspace.
 Implement EXACTLY this subtask — nothing from sibling subtasks, nothing
 speculative.
+
+Repo root: %s — bash commands already execute there; use paths relative to the
+repo root.
 
 Work happens on the current branch. Prior subtasks have already been committed
 and their changes are visible in the working tree; build on them, do not redo
 them. Do NOT run git yourself (no commit, no push, no branch) — the orchestrator
 commits and pushes your changes after you finish.
 
-Write tests alongside the code and run them.
+Write tests alongside the code and run them. Once the acceptance criteria
+pass, finish immediately — do not repeat verification that already passed.
 
 ` + buildHygieneNote + `
 
@@ -366,13 +379,16 @@ When approved is true, fixes must be an empty array.
 // listed findings — nothing speculative. The orchestrator commits the result as
 // a fixup and pushes; the coder does NOT run git.
 //
-// The trailing %s slots are filled by runFix: parent card title, parent card
-// description, and the findings list.
+// The trailing %s slots are filled by runFix: workspace root, parent card
+// title, parent card description, and the findings list.
 const fixPrompt = `%s%sYou are the coding agent addressing review feedback on the current branch.
 You have the full write toolset (read, grep, glob, edit, write, bash) rooted at
 the workspace. Apply fixes for EXACTLY the findings below — apply only the literal
 fix, add no new abstractions, middleware, interfaces, or dependencies. If a finding
 demands new architecture, flag it, don't build it.
+
+Repo root: %s — bash commands already execute there; use paths relative to the
+repo root.
 
 Do NOT run git yourself (no commit, no push, no branch) — the orchestrator
 commits your changes as a fixup and pushes after you finish.
@@ -440,13 +456,17 @@ Respond with ONLY the Markdown PR body — no surrounding prose, no code fences.
 // line the orchestrator parses (same convention as coderPrompt). The Go phase
 // owns claim/usage/push in code.
 //
-// The trailing %s slots are filled by runDocument: parent card title, parent
-// card description, the plan overview (subtask titles), and the branch diff.
+// The trailing %s slots are filled by runDocument: workspace root, parent card
+// title, parent card description, the plan overview (subtask titles), and the
+// branch diff.
 const documentPrompt = `%s%sYou are the documentation agent for completed work that review will inspect
 next. You have the full write toolset (read, grep, glob, edit, write, bash)
 rooted at the workspace. Decide whether external documentation is needed for
 this change and, if so, write the minimum effective documentation. You write
 DOCUMENTATION ONLY — do not modify source code, tests, or configuration.
+
+Repo root: %s — bash commands already execute there; use paths relative to the
+repo root.
 
 Default: NO external documentation is needed. Most changes — bug fixes,
 refactors, internal implementation changes, test additions — do not alter what
@@ -633,3 +653,15 @@ func designBlock(design string) string {
 
 	return "\nAGREED DESIGN (the human and the agent converged on this design during\nbrainstorming — plan to implement it):\n" + design + "\n"
 }
+
+// Wrap-up nudge messages, injected by the harness when wrapUpTurns turns
+// remain (runModelWrapUp). Built from the shared constant so the stated count
+// can never drift from the threshold. Phase-appropriate: fix runs carry no
+// COMMIT line, and document's COMMIT line is optional (omit rule).
+var (
+	coderWrapUpMessage = fmt.Sprintf("%d turns remain. If the acceptance criteria pass, STOP now: reply with your final summary ending with the COMMIT line and make no more tool calls. Do not re-run checks that already passed.", wrapUpTurns)
+
+	fixWrapUpMessage = fmt.Sprintf("%d turns remain. If the findings are addressed and the tests pass, STOP now: reply with your final summary and make no more tool calls. Do not re-run checks that already passed.", wrapUpTurns)
+
+	documentWrapUpMessage = fmt.Sprintf("%d turns remain. Finish now: reply with your final message — ending with the COMMIT line only if you wrote documentation — and make no more tool calls.", wrapUpTurns)
+)

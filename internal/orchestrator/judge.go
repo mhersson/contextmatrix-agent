@@ -90,6 +90,7 @@ func runJudge(ctx context.Context, o *run) error {
 			"best-of-n: verifying candidate %d (%s) — %d of %d", c.idx, c.model, i+1, len(survivors)))
 
 		argv := detectVerifyCommand(c.dir)
+		c.verifyRan = len(argv) > 0
 		c.verifyOut, c.verifyOK = o.runVerify(ctx, c.dir, argv)
 
 		c.diff, _ = c.git.Diff(ctx, cfg.BaseBranch)
@@ -99,18 +100,28 @@ func runJudge(ctx context.Context, o *run) error {
 	}
 
 	// Verify failures are eliminated only when at least one candidate passes;
-	// when none pass, every survivor stays in so the judge still picks the least
-	// broken one.
+	// when none pass, every UNCAPPED survivor stays in so the judge still picks
+	// the least broken one. A capped candidate may enter the pool ONLY through
+	// a passing verify — its coder run never confirmed completion, so
+	// unverified capped work must never be adoptable, not even as "least
+	// broken".
 	pool := verifyingCandidates(survivors)
 	if len(pool) == 0 {
-		pool = survivors
+		pool = uncappedCandidates(survivors)
 	}
 
-	// Insurance against a refactor: runFanout only proceeds to judge with at least
-	// one surviving candidate, so pool is non-empty here today. Guard anyway rather
-	// than index pool[0] on an empty slice.
+	// Reachable when every survivor is capped with a failing verify (plus, as
+	// refactor insurance, an empty survivor set). The run is parking with
+	// first-arrival claims still held: release them, mirroring runFanout's
+	// all-failed exit, so the board shows the truth now.
 	if len(pool) == 0 {
-		return fmt.Errorf("best-of-n: no candidates to judge")
+		o.stopFanoutHeartbeat()
+
+		for _, id := range o.claimedSubIDs() {
+			o.releaseSubtask(ctx, id)
+		}
+
+		return errors.New("best-of-n: no candidates to judge")
 	}
 
 	// One viable candidate: auto-win, no model call.
@@ -266,13 +277,34 @@ func survivingCandidates(cs []*candidate) []*candidate {
 	return out
 }
 
-// verifyingCandidates returns the subset whose verify command passed, preserving
-// order.
+// verifyingCandidates returns the subset whose verify command passed,
+// preserving order. Uncapped candidates keep today's behavior: a passing
+// verify is enough, since they also carry the model's own completion signal.
+// A capped candidate is additionally gated on verifyRan — its coder run never
+// confirmed completion, so a verify that only "passed" because no command was
+// detected (a vacuous green) must not admit it; a vacuous green proves
+// nothing.
 func verifyingCandidates(cs []*candidate) []*candidate {
 	var out []*candidate
 
 	for _, c := range cs {
-		if c.verifyOK {
+		if c.verifyOK && (!c.capped || c.verifyRan) {
+			out = append(out, c)
+		}
+	}
+
+	return out
+}
+
+// uncappedCandidates returns the survivors that did NOT hit the turn cap,
+// preserving order. It is the "nobody passes verify" fallback pool: capped
+// candidates are excluded because their completion was never confirmed by
+// their own coder run, so only a passing verify may admit them.
+func uncappedCandidates(cs []*candidate) []*candidate {
+	var out []*candidate
+
+	for _, c := range cs {
+		if !c.capped {
 			out = append(out, c)
 		}
 	}
@@ -290,6 +322,10 @@ func judgeSections(pool []*candidate) string {
 	for i, c := range pool {
 		fmt.Fprintf(&b, "### Candidate %d\n", i+1)
 		fmt.Fprintf(&b, "- Coder model: %s\n", c.model)
+
+		if c.capped {
+			b.WriteString("- Note: hit the turn cap during the final subtask's wrap-up; the orchestrator committed the work — weigh the verify result and diff.\n")
+		}
 
 		if c.verifyOK {
 			b.WriteString("- Verify: PASSED\n")
@@ -411,10 +447,15 @@ func judgeDiffCell(c *candidate) string {
 	return fmt.Sprintf("%d chars", len(c.diff))
 }
 
-// judgeOutcome labels a candidate's fate for the report table.
+// judgeOutcome labels a candidate's fate for the report table. Capped
+// candidates carry the marker so the table shows how the work landed.
 func (o *run) judgeOutcome(c *candidate) string {
 	switch {
 	case c == o.winner:
+		if c.capped {
+			return "win (capped)"
+		}
+
 		return "win"
 	case c.err != nil:
 		var mte *MaxTurnsError
@@ -423,7 +464,13 @@ func (o *run) judgeOutcome(c *candidate) string {
 		}
 
 		return "failed (error)"
+	case c.capped && !c.verifyOK:
+		return "failed (turn cap + verify)"
 	case c.verifyOK:
+		if c.capped {
+			return "loss (capped)"
+		}
+
 		return "loss"
 	default:
 		return "failed (verify)"
@@ -550,13 +597,14 @@ func (o *run) cleanupCandidates(ctx context.Context) {
 }
 
 // reportCandidateOutcomes builds one cmclient.ModelOutcome per non-nil
-// candidate — the winner "win", a candidate that dropped out before judging
-// ("err != nil") "failed", every other survivor "loss" — and reports them to CM
-// in a single call. NCandidates counts only non-nil entries: a nil slot means no
-// candidate ever started (a fan-out that aborted before that worktree was
-// built), so it never raced and must not inflate the denominator; a non-nil
-// candidate with err != nil DID race (and lost, or crashed), so it counts.
-// Best-effort: a report failure is logged, not fatal.
+// candidate — the winner "win"; a candidate that dropped out before judging
+// ("err != nil"), or capped work whose verify failed (it never entered the
+// judge pool either), reports "failed"; every other survivor "loss" — and
+// reports them to CM in a single call. NCandidates counts only non-nil
+// entries: a nil slot means no candidate ever started (a fan-out that aborted
+// before that worktree was built), so it never raced and must not inflate the
+// denominator; a non-nil candidate with err != nil DID race (and lost, or
+// crashed), so it counts. Best-effort: a report failure is logged, not fatal.
 func (o *run) reportCandidateOutcomes(ctx context.Context) {
 	cfg := o.d.Cfg
 
@@ -580,7 +628,9 @@ func (o *run) reportCandidateOutcomes(ctx context.Context) {
 		switch {
 		case c == o.winner:
 			result = "win"
-		case c.err != nil:
+		case c.err != nil, c.capped && !c.verifyOK:
+			// Dropped before judging, or capped work whose verify failed — it
+			// never entered the pool, so it raced and failed.
 			result = "failed"
 		}
 

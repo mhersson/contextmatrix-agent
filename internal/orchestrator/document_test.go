@@ -46,7 +46,10 @@ func documentTestDeps(ops *fakeOps, git *fakeGit, client llm.LLM) Deps {
 			BaseBranch:   "main",
 			PayloadModel: "payload/model",
 			DefaultModel: "default/model",
-			MaxTurns:     5,
+			// Comfortably above wrapUpTurns (5): this single-turn fixture must
+			// finish before the one-shot nudge fires, or it becomes the captured
+			// "last user message" instead of the real prompt.
+			MaxTurns: 20,
 		},
 	}
 }

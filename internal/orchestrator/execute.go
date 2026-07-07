@@ -37,6 +37,8 @@ type solverCtx struct {
 	push       bool         // false: never push (candidate mode)
 	tag        string       // "" parent; "candidate 2/3 (slug)" for candidate log lines
 	completed  []subtaskRef // subtasks this solver actually executed
+	lastSubID  string       // final subtask ID in execution order; "" disables turn-cap salvage (parent/single-solver)
+	capped     bool         // the final subtask hit the turn cap; its work was salvage-committed for judge verification
 }
 
 // runExecute is the execute phase: subtasks run SEQUENTIALLY in dependency
@@ -138,10 +140,15 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 		defer stopHeartbeat()
 	}
 
-	prompt := fmt.Sprintf(coderPrompt, o.skillEngage(), o.grounding, sub.Title, subtaskBody(sub), o.tc.Title, o.tc.Description)
+	prompt := fmt.Sprintf(coderPrompt, o.skillEngage(), o.grounding, sc.workspace,
+		sub.Title, subtaskBody(sub), o.tc.Title, o.tc.Description)
 
 	res, err := o.runCoderWith(ctx, sc, sub, prompt)
 	if err != nil {
+		if o.salvageCapped(ctx, sc, sub, res.Output, err) {
+			return nil
+		}
+
 		return err
 	}
 
@@ -266,7 +273,7 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 
 		_ = d.Ops.AddLog(ctx, cfg.CardID, logMsg) //nolint:errcheck // advisory selection record
 
-		res, err := o.runModel(ctx, sc.tools, prompt, model)
+		res, err := o.runModelWrapUp(ctx, sc.tools, prompt, model, coderWrapUpMessage)
 
 		// Account for spend even on a transport error / partial run, then report
 		// the model actually used (falling back to the resolved slug when the
@@ -409,6 +416,52 @@ func tierOf(sub subtaskRef) registry.Tier {
 	default:
 		return registry.TierModerate
 	}
+}
+
+// salvageCapped rescues a Best-of-N candidate that hit the turn cap on its
+// FINAL subtask: the work may well be complete (the observed failure mode is
+// turns burned on post-green re-verification, not missing work), and the judge
+// verifies every candidate in place — so the project's verify command, not the
+// model's self-report, is the completion authority. The tree is committed
+// (COMMIT line from the truncated output when present, else the title
+// fallback) and the solver marked capped, but ONLY when the commit actually
+// captures a change: a clean tree (nothing to commit) has no diff — the only
+// completion evidence a capped run has — so it is NOT salvaged and the
+// candidate drops exactly as it would without this rescue path. runJudge
+// admits a capped candidate only when its verify passes. A cap on an EARLIER
+// subtask is never salvaged — whole subtasks are missing, which a green
+// verify cannot expose — and the parent/single-solver (boardOps) keeps its
+// park-and-resume path.
+//
+// Turn-budget decision: the default max-turns is 45 for headroom, and there is
+// deliberately NO separate candidate cap — the wrap-up nudge removes post-green
+// dithering and this salvage removes the cliff, so a bigger candidate budget
+// would only fund waste (see the turn-waste design spec).
+func (o *run) salvageCapped(ctx context.Context, sc *solverCtx, sub subtaskRef, output string, err error) bool {
+	var mte *MaxTurnsError
+	if sc.boardOps || sc.lastSubID == "" || sub.ID != sc.lastSubID || !errors.As(err, &mte) {
+		return false
+	}
+
+	commitMsg, ok := extractCommitLine(output)
+	if !ok {
+		commitMsg = sanitizeTitle(sub.Title)
+	}
+
+	committed, cerr := sc.git.CommitWithMessage(ctx, commitMsg)
+	if cerr != nil || !committed {
+		// No commit (error or clean tree), no salvage: the diff is the only
+		// completion evidence a capped run has — an empty tree has none.
+		// The candidate drops exactly as before.
+		return false
+	}
+
+	sc.capped = true
+
+	_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, fmt.Sprintf( //nolint:errcheck // advisory record
+		"%s: turn cap on final subtask %s — work committed; the judge's verify decides", sc.tag, sub.ID))
+
+	return true
 }
 
 // extractCommitLine scans the coder's final output for the last COMMIT: line and

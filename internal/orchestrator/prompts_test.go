@@ -84,3 +84,20 @@ func TestDesignBlock(t *testing.T) {
 	assert.Contains(t, out, "AGREED DESIGN")
 	assert.Contains(t, out, "## Design\n\nUse option A.")
 }
+
+func TestPromptsCarryRepoRoot(t *testing.T) {
+	for name, tpl := range map[string]string{
+		"coder":    coderPrompt,
+		"fix":      fixPrompt,
+		"document": documentPrompt,
+		"diagnose": diagnosePrompt,
+		"plan":     planPrompt,
+	} {
+		assert.Contains(t, tpl, "Repo root: %s", "the %s prompt must name the repo root", name)
+	}
+}
+
+func TestCoderPromptDiscouragesRepeatVerification(t *testing.T) {
+	assert.Contains(t, coderPrompt, "finish immediately",
+		"the coder prompt sets the stop-when-green expectation early")
+}

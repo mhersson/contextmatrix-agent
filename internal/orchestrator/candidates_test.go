@@ -3,7 +3,9 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -555,4 +557,58 @@ func TestFanoutInteractiveCollectorLifecycle(t *testing.T) {
 	for i, c := range o.candidates {
 		require.NoError(t, c.err, "candidate %d", i+1)
 	}
+}
+
+// TestFanoutCoderPromptsCarryWorktreeRoot proves each candidate's coder prompt
+// names ITS OWN worktree as the repo root, not the shared parent workspace.
+func TestFanoutCoderPromptsCarryWorktreeRoot(t *testing.T) {
+	ops := &fakeOps{}
+	client := &planLLM{}
+	d, _, ws := fanoutDeps(t, ops, &fakeGit{}, client, 2)
+
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+	require.NoError(t, o.runFanout(context.Background()))
+
+	joined := strings.Join(client.tasks, "\n")
+	assert.Contains(t, joined, filepath.Join(ws, ".worktrees", "c1"))
+	assert.Contains(t, joined, filepath.Join(ws, ".worktrees", "c2"))
+}
+
+// TestFanoutSalvagesCappedCandidates proves a candidate that hits the turn cap
+// on its FINAL subtask survives the fan-out marked capped, with its work
+// committed, instead of dropping and shrinking the judge pool.
+func TestFanoutSalvagesCappedCandidates(t *testing.T) {
+	ops := &fakeOps{}
+	mainGit := &fakeGit{}
+
+	// Every request burns a turn: both candidates (MaxTurns=5 each, one subtask)
+	// cap. 12 responses > 2x5 so neither ever reaches the exhausted stop.
+	responses := make([]llm.Response, 0, 12)
+	for range 12 {
+		responses = append(responses, burnResp(""))
+	}
+
+	d, pdg, ws := fanoutDeps(t, ops, mainGit, &planLLM{responses: responses}, 2)
+	// fanoutDeps builds on execTestDeps, which defaults MaxTurns to 20; this
+	// test needs each candidate's coder run to cap after 5 scripted burn
+	// turns — set BEFORE newFanoutRun, or 12 responses against MaxTurns=20
+	// exhaust into a clean stop and nothing caps.
+	d.Cfg.MaxTurns = 5
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+
+	require.NoError(t, o.runFanout(context.Background()), "capped candidates are survivors, not failures")
+
+	require.Len(t, o.candidates, 2)
+
+	for i, c := range o.candidates {
+		require.NoError(t, c.err, "candidate %d survives", i+1)
+		assert.True(t, c.capped, "candidate %d is marked capped", i+1)
+		require.Len(t, c.completed, 1, "candidate %d records the salvaged subtask", i+1)
+
+		fg := pdg.fakeGitFor(filepath.Join(ws, ".worktrees", fmt.Sprintf("c%d", i+1)))
+		require.NotNil(t, fg)
+		assert.NotEmpty(t, fg.commitMsgs, "candidate %d worktree is committed", i+1)
+	}
+
+	assert.True(t, ops.loggedContains("turn cap on final subtask"), "logs=%v", ops.logs)
 }
