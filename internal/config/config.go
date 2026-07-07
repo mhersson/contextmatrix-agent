@@ -45,7 +45,7 @@ type ReasoningConfig struct {
 
 // Defaults is the lowest-precedence layer.
 func Defaults() Config {
-	mt := 30
+	mt := 45
 	mc := 0.50
 	capable := "deepseek/deepseek-v4-flash"
 

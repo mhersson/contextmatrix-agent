@@ -36,7 +36,7 @@ func TestLoadPrecedenceDefaultsFileEnvFlags(t *testing.T) {
 func TestDefaultsAndValidate(t *testing.T) {
 	d := Defaults()
 	require.NotNil(t, d.MaxTurns)
-	assert.Equal(t, 30, *d.MaxTurns)
+	assert.Equal(t, 45, *d.MaxTurns)
 	require.NoError(t, d.Validate())
 
 	bad := 0
