@@ -487,7 +487,7 @@ func TestExecuteSkipsDone(t *testing.T) {
 }
 
 func TestExecuteCommitMessage(t *testing.T) {
-	t.Run("handoff COMMIT line extracted", func(t *testing.T) {
+	t.Run("commit message resolved from finish call", func(t *testing.T) {
 		ops := &fakeOps{}
 		git := &fakeGit{committed: true}
 		llmFake := &planLLM{responses: []llm.Response{
@@ -525,8 +525,8 @@ func TestExecuteBudget(t *testing.T) {
 	// Subtask 1 spends 0.60; cap is 1.00 but seeded at 0.50 already, so after
 	// subtask 1 the ledger is at 1.10 — subtask 2's pre-claim Check trips.
 	llmFake := &planLLM{responses: []llm.Response{
-		stopResp("ok\nCOMMIT: feat: one", 0.60),
-		stopResp("ok\nCOMMIT: feat: two", 0.60),
+		finishResp("feat: one", 0.60),
+		finishResp("feat: two", 0.60),
 	}}
 	d := execTestDeps(ops, git, llmFake)
 	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body", ReportedCostUSD: 0.50}
@@ -584,30 +584,6 @@ func TestSanitizeTitle(t *testing.T) {
 	assert.Equal(t, "feat: untitled", sanitizeTitle("   "))
 }
 
-func TestExtractCommitLine(t *testing.T) {
-	t.Run("extracts trailing commit line", func(t *testing.T) {
-		got, ok := extractCommitLine("blah\nCOMMIT: fix(core): handle nil\n")
-		require.True(t, ok)
-		assert.Equal(t, "fix(core): handle nil", got)
-	})
-
-	t.Run("multiple commit lines: last wins", func(t *testing.T) {
-		got, ok := extractCommitLine("COMMIT: feat: first\nmore handoff prose\nCOMMIT: feat: final\n")
-		require.True(t, ok)
-		assert.Equal(t, "feat: final", got)
-	})
-
-	t.Run("no commit line", func(t *testing.T) {
-		_, ok := extractCommitLine("just some prose with no marker")
-		assert.False(t, ok)
-	})
-
-	t.Run("empty after marker is not accepted", func(t *testing.T) {
-		_, ok := extractCommitLine("COMMIT:    ")
-		assert.False(t, ok)
-	})
-}
-
 // guard: the coder prompt template must reference the branch-state note and the
 // COMMIT line convention so the extractor has something to extract.
 func TestCoderPromptShape(t *testing.T) {
@@ -646,8 +622,7 @@ func TestCoderRunGetsWrapUpNudge(t *testing.T) {
 }
 
 // TestSalvageCappedFinalSubtask proves a turn-capped final subtask is still
-// committed and the solver marked capped, not dropped. The final burn turn's
-// content looks like it hands off a commit line, but a genuinely capped run
+// committed and the solver marked capped, not dropped. A genuinely capped run
 // never calls finish (a successful finish call would end the run cleanly
 // before the cap ever trips), so res.CompletionArgs is always empty here —
 // the salvage commit message is the sanitized-title fallback, proving the
@@ -658,7 +633,7 @@ func TestSalvageCappedFinalSubtask(t *testing.T) {
 	// without ever calling finish.
 	client := &planLLM{responses: []llm.Response{
 		burnResp(""), burnResp(""), burnResp(""), burnResp(""),
-		burnResp("wrapping up\nCOMMIT: feat: salvage me"),
+		burnResp("wrapping up"),
 	}}
 	d := execTestDeps(ops, &fakeGit{committed: true}, client)
 	// execTestDeps defaults MaxTurns to 20 (avoids the wrapUpTurns==MaxTurns
@@ -697,7 +672,7 @@ func TestNoSalvageOnCleanTree(t *testing.T) {
 	// Five burn turns == MaxTurns(5) from execTestDeps: the coder run caps.
 	client := &planLLM{responses: []llm.Response{
 		burnResp(""), burnResp(""), burnResp(""), burnResp(""),
-		burnResp("wrapping up\nCOMMIT: feat: salvage me"),
+		burnResp("wrapping up"),
 	}}
 	d := execTestDeps(ops, &fakeGit{committed: true}, client)
 	d.Cfg.MaxTurns = 5

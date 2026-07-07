@@ -14,11 +14,6 @@ import (
 	"github.com/mhersson/contextmatrix-harness/tools"
 )
 
-// commitMarker is the line prefix the coder appends to its final message to
-// hand off a conventional commit summary. The orchestrator (not the coder)
-// performs the commit, so this is the only channel for the message.
-const commitMarker = "COMMIT:"
-
 // estimateTokens approximates the prompt budget for window fitting: chars/4
 // (the rough bytes-per-token rule) plus a fixed overhead covering the system
 // prompt, the tool schemas, and headroom for the conversation that follows.
@@ -465,34 +460,10 @@ func (o *run) salvageCapped(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 	return true
 }
 
-// extractCommitLine scans the coder's final output for the last COMMIT: line and
-// returns the trimmed conventional-commit summary after the marker. A missing
-// marker or an empty summary returns ("", false) so the caller falls back to the
-// sanitized subtask title.
-func extractCommitLine(output string) (string, bool) {
-	var (
-		found string
-		ok    bool
-	)
-
-	for _, line := range strings.Split(output, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if !strings.HasPrefix(trimmed, commitMarker) {
-			continue
-		}
-
-		msg := strings.TrimSpace(strings.TrimPrefix(trimmed, commitMarker))
-		if msg != "" {
-			found, ok = msg, true // keep scanning: the LAST valid line wins
-		}
-	}
-
-	return found, ok
-}
-
 // sanitizeTitle builds the fallback commit message from a subtask title when the
-// coder omits a usable COMMIT line. Format: lowercase "feat: <title>" — a sane,
-// conventional-ish default. A blank title yields "feat: untitled".
+// coder's finish call carries no usable commit message. Format: lowercase
+// "feat: <title>" — a sane, conventional-ish default. A blank title yields
+// "feat: untitled".
 func sanitizeTitle(title string) string {
 	t := strings.ToLower(strings.TrimSpace(title))
 	if t == "" {

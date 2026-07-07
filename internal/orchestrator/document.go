@@ -6,8 +6,8 @@ import (
 	"log/slog"
 )
 
-// fallbackDocCommitMessage is used when the document agent wrote docs but emitted
-// no usable COMMIT line.
+// fallbackDocCommitMessage is used when the document agent wrote docs but its
+// finish call carried no usable commit message.
 const fallbackDocCommitMessage = "docs: update documentation"
 
 // runDocument is the document phase: one orchestrator-model pass that decides
@@ -79,10 +79,11 @@ func runDocument(ctx context.Context, o *run) error {
 
 	// Commit iff the tree is dirty. After execute the tree is clean, so the only
 	// uncommitted changes are doc files the agent just wrote. No docs → clean tree
-	// → committed == false → no commit, no push. The COMMIT: line supplies the
-	// message; a missing line falls back to the canonical docs message.
-	msg, ok := extractCommitLine(res.Output)
-	if !ok {
+	// → committed == false → no commit, no push. The finish call's commit_message
+	// supplies the message; a missing or empty one falls back to the canonical
+	// docs message.
+	msg := finishCommitMessage(res.CompletionArgs)
+	if msg == "" {
 		msg = fallbackDocCommitMessage
 	}
 

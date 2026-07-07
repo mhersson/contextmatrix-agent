@@ -12,7 +12,7 @@ import (
 )
 
 // designMarker is the sentinel the brainstorming model appends once the human has
-// confirmed the design. Same single-line-handoff convention as commitMarker.
+// confirmed the design. Same single-line-handoff convention the design phase uses.
 const designMarker = "DESIGN_COMPLETE"
 
 // extractDesign reports whether the brainstorming model signalled completion (a

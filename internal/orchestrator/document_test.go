@@ -37,7 +37,7 @@ func documentTestDeps(ops *fakeOps, git *fakeGit, client llm.LLM) Deps {
 		Client:     client,
 		Emit:       events.NewEmitter(nil, nil),
 		Registry:   planTestRegistry(),
-		WriteTools: tools.NewRegistry(tools.NewReadTool(".")),
+		WriteTools: testWriteTools(),
 		ReadTools:  tools.NewRegistry(tools.NewReadTool(".")),
 		Cfg: Config{
 			Project:      "proj",
@@ -81,7 +81,7 @@ func TestDocumentWritesAndPushesDocs(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true} // agent wrote docs -> dirty tree
 	llmFake := &planLLM{responses: []llm.Response{
-		stopResp("Updated the API reference.\nCOMMIT: docs(api): document health endpoint", 0.03),
+		finishResp("docs(api): document health endpoint", 0.03),
 	}}
 	d := documentTestDeps(ops, git, llmFake)
 
@@ -92,7 +92,7 @@ func TestDocumentWritesAndPushesDocs(t *testing.T) {
 
 	require.NotEmpty(t, git.commitMsgs)
 	assert.Equal(t, "docs(api): document health endpoint", git.commitMsgs[len(git.commitMsgs)-1],
-		"commit message parsed from the COMMIT line")
+		"commit message resolved from the finish call")
 	require.NotEmpty(t, git.pushBranches, "doc commit must be pushed")
 	assert.Equal(t, "cm/card-1", git.pushBranches[len(git.pushBranches)-1])
 }
@@ -110,7 +110,7 @@ func TestDocumentCommitMessageFallback(t *testing.T) {
 
 	require.NotEmpty(t, git.commitMsgs)
 	assert.Equal(t, "docs: update documentation", git.commitMsgs[len(git.commitMsgs)-1],
-		"missing COMMIT line falls back to the canonical docs message")
+		"missing commit message falls back to the canonical docs message")
 	require.NotEmpty(t, git.pushBranches)
 }
 
@@ -174,7 +174,7 @@ func TestDocumentBestEffortOnModelError(t *testing.T) {
 func TestDocumentBestEffortOnCommitFailure(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{commitErr: errors.New("index locked")}
-	llmFake := &planLLM{responses: []llm.Response{stopResp("Docs.\nCOMMIT: docs: x", 0.02)}}
+	llmFake := &planLLM{responses: []llm.Response{finishResp("docs: x", 0.02)}}
 	d := documentTestDeps(ops, git, llmFake)
 
 	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "T", Description: "body"}
@@ -188,7 +188,7 @@ func TestDocumentBestEffortOnCommitFailure(t *testing.T) {
 func TestDocumentBestEffortOnPushFailure(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true, pushErr: errors.New("remote rejected")}
-	llmFake := &planLLM{responses: []llm.Response{stopResp("Docs.\nCOMMIT: docs: update", 0.02)}}
+	llmFake := &planLLM{responses: []llm.Response{finishResp("docs: update", 0.02)}}
 	d := documentTestDeps(ops, git, llmFake)
 
 	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "T", Description: "body"}
@@ -203,7 +203,7 @@ func TestDocumentBestEffortOnPushFailure(t *testing.T) {
 func TestDocumentReportsUsage(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true}
-	llmFake := &planLLM{responses: []llm.Response{stopResp("Docs.\nCOMMIT: docs: x", 0.05)}}
+	llmFake := &planLLM{responses: []llm.Response{finishResp("docs: x", 0.05)}}
 	d := documentTestDeps(ops, git, llmFake)
 
 	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "T", Description: "body"}
