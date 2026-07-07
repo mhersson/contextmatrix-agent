@@ -506,17 +506,22 @@ func TestParseJudgeVerdictBareJSONWithInStringFence(t *testing.T) {
 }
 
 // TestJudgeCappedAdmittedOnGreenVerify proves a capped candidate with a
-// passing verify enters the pool and its section carries the capped note.
+// passing verify enters the pool and its section carries the capped note. The
+// candidate's dir is a real t.TempDir() seeded with a go.mod marker so
+// detectVerifyCommand finds a real command (verifyRan=true) — the admission
+// gate requires that in addition to the stubbed verifyOK.
 func TestJudgeCappedAdmittedOnGreenVerify(t *testing.T) {
 	ops := &fakeOps{}
 	client := &planLLM{responses: []llm.Response{
 		stopResp(`{"winner": 2, "ranking": [2, 1], "rationale": "clean finisher wins.", "notes": []}`, 0.02),
 	}}
-	c1 := judgeCandidate(1, "coder/one", "dir-c1", "DIFF_ONE")
+	dir1 := t.TempDir()
+	writeFile(t, dir1, "go.mod", "module candidate1\n")
+	c1 := judgeCandidate(1, "coder/one", dir1, "DIFF_ONE")
 	c1.capped = true
 	c2 := judgeCandidate(2, "coder/two", "dir-c2", "DIFF_TWO")
 
-	verify := map[string]bool{"dir-c1": true, "dir-c2": true}
+	verify := map[string]bool{dir1: true, "dir-c2": true}
 	o := newJudgeRun(t, ops, &fakeGit{}, client, []*candidate{c1, c2}, verify)
 
 	require.NoError(t, runJudge(context.Background(), o))
@@ -525,6 +530,31 @@ func TestJudgeCappedAdmittedOnGreenVerify(t *testing.T) {
 	prompt := client.tasks[0]
 	assert.Contains(t, prompt, "DIFF_ONE", "the capped-but-verified candidate is in the pool")
 	assert.Contains(t, prompt, "hit the turn cap", "the judge is told about the cap")
+}
+
+// TestJudgeCappedNeedsRealVerifyCommand proves a capped candidate is not
+// admitted merely because the verify stub reports true: admission also
+// requires detectVerifyCommand to have found a real command in the
+// candidate's dir. c1's dir is an empty t.TempDir() with no recognizable
+// marker, so verifyRan stays false even though the (irrelevant) stub says
+// verify passed — a vacuous green must not admit capped work. With an
+// uncapped sibling present, the sibling is the sole pool entry and auto-wins.
+func TestJudgeCappedNeedsRealVerifyCommand(t *testing.T) {
+	ops := &fakeOps{}
+	client := &planLLM{}
+	dir1 := t.TempDir() // no go.mod/Makefile/package.json marker
+	c1 := judgeCandidate(1, "coder/one", dir1, "DIFF_ONE")
+	c1.capped = true
+	c2 := judgeCandidate(2, "coder/two", "dir-c2", "DIFF_TWO")
+
+	verify := map[string]bool{dir1: true, "dir-c2": true}
+	o := newJudgeRun(t, ops, &fakeGit{}, client, []*candidate{c1, c2}, verify)
+
+	require.NoError(t, runJudge(context.Background(), o))
+
+	assert.Empty(t, client.tasks, "single viable candidate -> auto-win, no model call")
+	require.NotNil(t, o.winner)
+	assert.Equal(t, 2, o.winner.idx, "the capped candidate with no real verify command must not be admitted")
 }
 
 // TestJudgeCappedExcludedFromFallbackPool proves an unverified capped candidate

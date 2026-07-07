@@ -90,6 +90,7 @@ func runJudge(ctx context.Context, o *run) error {
 			"best-of-n: verifying candidate %d (%s) — %d of %d", c.idx, c.model, i+1, len(survivors)))
 
 		argv := detectVerifyCommand(c.dir)
+		c.verifyRan = len(argv) > 0
 		c.verifyOut, c.verifyOK = o.runVerify(ctx, c.dir, argv)
 
 		c.diff, _ = c.git.Diff(ctx, cfg.BaseBranch)
@@ -120,7 +121,7 @@ func runJudge(ctx context.Context, o *run) error {
 			o.releaseSubtask(ctx, id)
 		}
 
-		return fmt.Errorf("best-of-n: no candidates to judge")
+		return errors.New("best-of-n: no candidates to judge")
 	}
 
 	// One viable candidate: auto-win, no model call.
@@ -276,13 +277,18 @@ func survivingCandidates(cs []*candidate) []*candidate {
 	return out
 }
 
-// verifyingCandidates returns the subset whose verify command passed, preserving
-// order.
+// verifyingCandidates returns the subset whose verify command passed,
+// preserving order. Uncapped candidates keep today's behavior: a passing
+// verify is enough, since they also carry the model's own completion signal.
+// A capped candidate is additionally gated on verifyRan — its coder run never
+// confirmed completion, so a verify that only "passed" because no command was
+// detected (a vacuous green) must not admit it; a vacuous green proves
+// nothing.
 func verifyingCandidates(cs []*candidate) []*candidate {
 	var out []*candidate
 
 	for _, c := range cs {
-		if c.verifyOK {
+		if c.verifyOK && (!c.capped || c.verifyRan) {
 			out = append(out, c)
 		}
 	}

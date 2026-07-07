@@ -30,6 +30,9 @@ type candidate struct {
 
 	verifyOut string // set by the judge phase when it verifies a candidate.
 	verifyOK  bool   // set by the judge phase when it verifies a candidate.
+	// verifyRan is set by the judge phase: a verify command was detected and
+	// actually executed; vacuous green (no command) must not admit capped work.
+	verifyRan bool
 	diff      string // set by the judge phase from the candidate worktree.
 	diffStat  string // set by the judge phase from the candidate worktree.
 }

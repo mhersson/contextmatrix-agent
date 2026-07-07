@@ -25,8 +25,9 @@ func (e *ContextLimitError) Error() string {
 // MaxTurnsError marks a phase stopping because the harness exhausted its turn
 // cap (Reason "max_turns", Completed=false, err==nil). It is normalized to a
 // typed error at the runModelCfg choke point so NO phase treats truncated work
-// as success — the invariant is that partial work is never committed+pushed+
-// marked done. The worker maps it like the context-limit park: push WIP,
+// as success — except a Best-of-N candidate capped on its FINAL subtask, whose
+// committed work may be salvaged behind the judge's verify gate (see
+// salvageCapped). The worker maps it like the context-limit park: push WIP,
 // release, fail — so the partial work survives for resume.
 type MaxTurnsError struct {
 	Model string

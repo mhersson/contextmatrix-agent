@@ -698,6 +698,39 @@ func TestSalvageCappedFinalSubtask(t *testing.T) {
 	assert.True(t, ops.loggedContains("turn cap on final subtask SUB-2"), "logs=%v", ops.logs)
 }
 
+// TestNoSalvageOnCleanTree proves a capped candidate whose final-subtask tree
+// is clean (nothing to commit) is NOT salvaged: CommitWithMessage returning
+// (false, nil) means there is no diff, and an empty tree carries no completion
+// evidence for the judge's verify gate to ride on.
+func TestNoSalvageOnCleanTree(t *testing.T) {
+	ops := &fakeOps{}
+	// Five burn turns == MaxTurns(5) from execTestDeps: the coder run caps.
+	client := &planLLM{responses: []llm.Response{
+		burnResp(""), burnResp(""), burnResp(""), burnResp(""),
+		burnResp("wrapping up\nCOMMIT: feat: salvage me"),
+	}}
+	d := execTestDeps(ops, &fakeGit{committed: true}, client)
+	d.Cfg.MaxTurns = 5
+	o := newExecRun(d, nil, 0)
+
+	cg := &fakeGit{committed: false}
+	sc := &solverCtx{
+		git: cg, ledger: NewLedger(0, 0), tools: d.WriteTools,
+		workspace: "ws", coderModel: o.resolveCoderModel,
+		boardOps: false, push: false, tag: "candidate 1/1",
+		lastSubID: "SUB-2",
+	}
+
+	sub := subtaskRef{ID: "SUB-2", Title: "Final", Tier: "simple"}
+	err := o.executeSubtaskWith(context.Background(), sc, sub)
+	require.Error(t, err, "a clean tree on the final subtask must not be salvaged")
+
+	var mte *MaxTurnsError
+	require.ErrorAs(t, err, &mte)
+	assert.False(t, sc.capped, "the solver is not marked capped when nothing was committed")
+	assert.Empty(t, sc.completed, "no subtask counts as completed when salvage is refused")
+}
+
 func TestSalvageFallsBackToTitleCommitMessage(t *testing.T) {
 	ops := &fakeOps{}
 	client := &planLLM{responses: []llm.Response{
