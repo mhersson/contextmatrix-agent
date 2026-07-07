@@ -25,6 +25,7 @@ type candidate struct {
 	git       GitOps
 	ledger    *Ledger
 	completed []subtaskRef
+	capped    bool  // final subtask hit the turn cap; admitted to the judge pool only on a passing verify
 	err       error // non-nil = dropped before judging
 
 	verifyOut string // set by the judge phase when it verifies a candidate.
@@ -377,6 +378,7 @@ func (o *run) runCandidate(ctx context.Context, c *candidate, ordered []subtaskR
 		boardOps:   false,
 		push:       false,
 		tag:        fmt.Sprintf("candidate %d/%d", c.idx, nEff),
+		lastSubID:  lastSubtaskID(ordered),
 	}
 
 	for si, sub := range ordered {
@@ -393,8 +395,19 @@ func (o *run) runCandidate(ctx context.Context, c *candidate, ordered []subtaskR
 	}
 
 	c.completed = sc.completed
+	c.capped = sc.capped
 
 	return nil
+}
+
+// lastSubtaskID returns the final subtask's ID in execution order, or "" for
+// an empty plan (salvage disabled).
+func lastSubtaskID(subs []subtaskRef) string {
+	if len(subs) == 0 {
+		return ""
+	}
+
+	return subs[len(subs)-1].ID
 }
 
 // candidateCoderModel builds candidate c's reselection-aware coder resolver.
