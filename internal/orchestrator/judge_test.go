@@ -134,12 +134,18 @@ func TestJudgeOutcomeLabels(t *testing.T) {
 		{"other error", &candidate{err: assertErr("disk full")}, "failed (error)"},
 		{"verify pass loses", &candidate{verifyOK: true}, "loss"},
 		{"verify fail", &candidate{}, "failed (verify)"},
+		{"capped red", &candidate{capped: true}, "failed (turn cap + verify)"},
+		{"capped loss", &candidate{capped: true, verifyOK: true}, "loss (capped)"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, o.judgeOutcome(tt.c))
 		})
 	}
+
+	cappedWin := &candidate{idx: 2, capped: true, verifyOK: true}
+	o2 := &run{winner: cappedWin}
+	assert.Equal(t, "win (capped)", o2.judgeOutcome(cappedWin))
 }
 
 func TestJudgeResumeRemap(t *testing.T) {
@@ -497,4 +503,88 @@ func TestParseJudgeVerdictBareJSONWithInStringFence(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, v.Winner)
 	assert.Contains(t, v.Rationale, "```go\nif ok {\n\treturn\n}\n```")
+}
+
+// TestJudgeCappedAdmittedOnGreenVerify proves a capped candidate with a
+// passing verify enters the pool and its section carries the capped note.
+func TestJudgeCappedAdmittedOnGreenVerify(t *testing.T) {
+	ops := &fakeOps{}
+	client := &planLLM{responses: []llm.Response{
+		stopResp(`{"winner": 2, "ranking": [2, 1], "rationale": "clean finisher wins.", "notes": []}`, 0.02),
+	}}
+	c1 := judgeCandidate(1, "coder/one", "dir-c1", "DIFF_ONE")
+	c1.capped = true
+	c2 := judgeCandidate(2, "coder/two", "dir-c2", "DIFF_TWO")
+
+	verify := map[string]bool{"dir-c1": true, "dir-c2": true}
+	o := newJudgeRun(t, ops, &fakeGit{}, client, []*candidate{c1, c2}, verify)
+
+	require.NoError(t, runJudge(context.Background(), o))
+
+	require.Len(t, client.tasks, 1, "two viable candidates -> a real judge call")
+	prompt := client.tasks[0]
+	assert.Contains(t, prompt, "DIFF_ONE", "the capped-but-verified candidate is in the pool")
+	assert.Contains(t, prompt, "hit the turn cap", "the judge is told about the cap")
+}
+
+// TestJudgeCappedExcludedFromFallbackPool proves an unverified capped candidate
+// never rides the "nobody passes" fallback into adoption.
+func TestJudgeCappedExcludedFromFallbackPool(t *testing.T) {
+	ops := &fakeOps{}
+	client := &planLLM{}
+	c1 := judgeCandidate(1, "coder/one", "dir-c1", "DIFF_ONE")
+	c1.capped = true
+	c2 := judgeCandidate(2, "coder/two", "dir-c2", "DIFF_TWO")
+
+	// Nobody passes verify: the fallback pool keeps only the UNCAPPED survivor.
+	verify := map[string]bool{}
+	o := newJudgeRun(t, ops, &fakeGit{}, client, []*candidate{c1, c2}, verify)
+
+	require.NoError(t, runJudge(context.Background(), o))
+
+	assert.Empty(t, client.tasks, "single-entry pool -> auto-win, no model call")
+	require.NotNil(t, o.winner)
+	assert.Equal(t, 2, o.winner.idx, "the unverified capped candidate must not win")
+}
+
+// TestJudgeAllCappedRedParksAndReleases proves the newly-reachable empty-pool
+// exit releases the first-arrival claims like runFanout's all-failed path.
+func TestJudgeAllCappedRedParksAndReleases(t *testing.T) {
+	ops := &fakeOps{}
+	client := &planLLM{}
+	c1 := judgeCandidate(1, "coder/one", "dir-c1", "DIFF_ONE")
+	c1.capped = true
+	c2 := judgeCandidate(2, "coder/two", "dir-c2", "DIFF_TWO")
+	c2.capped = true
+
+	o := newJudgeRun(t, ops, &fakeGit{}, client, []*candidate{c1, c2}, map[string]bool{})
+	o.claimedSubs = map[string]bool{"SUB-1": true}
+
+	err := runJudge(context.Background(), o)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no candidates to judge")
+	assert.Empty(t, client.tasks)
+	assert.Positive(t, countCalls(ops.recorded(), "ReleaseCard:SUB-1"),
+		"held claims are released when the judge parks; calls=%v", ops.recorded())
+}
+
+// TestReportCandidateOutcomesCappedRedIsFailed pins the outcome row for an
+// unverified capped candidate: it never entered the pool, so it reports failed.
+func TestReportCandidateOutcomesCappedRedIsFailed(t *testing.T) {
+	ops := &fakeOps{}
+	c1 := judgeCandidate(1, "coder/one", "dir-c1", "")
+	c1.capped = true // verifyOK stays false
+	c2 := judgeCandidate(2, "coder/two", "dir-c2", "")
+	c2.verifyOK = true
+
+	o := newJudgeRun(t, ops, &fakeGit{}, &planLLM{}, []*candidate{c1, c2}, map[string]bool{})
+	o.winner = c2
+
+	o.reportCandidateOutcomes(context.Background())
+
+	require.Len(t, ops.reportOutcomes, 1)
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 2)
+	assert.Equal(t, "failed", rows[0].Result, "capped + red verify reports failed")
+	assert.Equal(t, "win", rows[1].Result)
 }
