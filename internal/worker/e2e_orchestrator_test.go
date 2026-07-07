@@ -280,13 +280,17 @@ func writeArgsFor(prompt string) string {
 }
 
 // coderCommitFor returns the conventional commit message for the subtask the
-// prompt is about.
+// prompt is about. The messages carry a scope ("app") so they diverge from
+// sanitizeTitle's scopeless "feat: <lowercased title>" fallback — if the
+// streamed finish commit_message argument were ever dropped, resolution would
+// fall through to that fallback and the git-log assertions below would fail
+// instead of passing vacuously.
 func coderCommitFor(prompt string) string {
 	if strings.Contains(prompt, "Add feature B") {
-		return "feat: add feature b"
+		return "feat(app): add feature b"
 	}
 
-	return "feat: add feature a"
+	return "feat(app): add feature a"
 }
 
 func writeArg(path, content string) string {
@@ -669,8 +673,8 @@ func TestOrchestratorEndToEndHappyPath(t *testing.T) {
 	require.True(t, remoteHasBranch(t, remote, branch), "the card branch must exist on origin")
 
 	subjects := gitLog(t, remote, branch)
-	assert.Contains(t, subjects, "feat: add feature a")
-	assert.Contains(t, subjects, "feat: add feature b")
+	assert.Contains(t, subjects, "feat(app): add feature a")
+	assert.Contains(t, subjects, "feat(app): add feature b")
 
 	for _, s := range subjects {
 		assert.NotContains(t, s, "fixup!", "the happy path produces no fixup commits")
@@ -782,15 +786,15 @@ func TestOrchestratorEndToEndFixLoop(t *testing.T) {
 			"autosquash must collapse the review fixup; no fixup! subject survives on origin")
 	}
 
-	assert.Contains(t, subjects, "feat: add feature a")
-	assert.Contains(t, subjects, "feat: add feature b")
+	assert.Contains(t, subjects, "feat(app): add feature a")
+	assert.Contains(t, subjects, "feat(app): add feature b")
 
 	// Non-vacuous autosquash proof. The fix coder OVERWROTE feature_b.txt (the
 	// cited file), the orchestrator committed that as a fixup targeting B's
 	// commit and pushed it, and integrate's --autosquash folded it back in. So:
 	//   1. the integrated tree carries the FIXED content (the fix really ran),
-	//   2. yet there is exactly ONE "feat: add feature b" subject and no fixup!
-	//      (the fixup collapsed rather than surviving as its own commit).
+	//   2. yet there is exactly ONE "feat(app): add feature b" subject and no
+	//      fixup! (the fixup collapsed rather than surviving as its own commit).
 	// A surviving fixup would show seed + three functional commits (== 4) and a
 	// fixup! subject; this pins the collapse to the fix, not just subject text.
 	assert.Equal(t, "package main\n\n// fixed per review\n",
@@ -801,7 +805,7 @@ func TestOrchestratorEndToEndFixLoop(t *testing.T) {
 	featBCommits := 0
 
 	for _, s := range subjects {
-		if s == "feat: add feature b" {
+		if s == "feat(app): add feature b" {
 			featBCommits++
 		}
 	}

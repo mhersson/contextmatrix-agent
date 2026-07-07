@@ -54,6 +54,14 @@ func TestDocumentPromptShape(t *testing.T) {
 	assert.NotContains(t, low, "commit:")
 }
 
+// guard: the fix prompt must reference the finish tool and carry no remnant of
+// the removed commit-prefix convention.
+func TestFixPromptShape(t *testing.T) {
+	low := strings.ToLower(fixPrompt)
+	assert.Contains(t, low, "finish tool")
+	assert.NotContains(t, low, "commit:")
+}
+
 func TestBrainstormPromptShape(t *testing.T) {
 	low := strings.ToLower(brainstormPrompt)
 	assert.Contains(t, low, "one question at a time")

@@ -17,8 +17,11 @@ type finishTool struct{}
 // NewFinishTool returns the stateless finish tool for the write toolset.
 func NewFinishTool() tools.Tool { return finishTool{} }
 
+// Name returns the tool's identifier, "finish".
 func (finishTool) Name() string { return "finish" }
 
+// Schema returns the tool's function-calling definition: a single required
+// commit_message string argument.
 func (finishTool) Schema() llm.Tool {
 	return llm.Tool{
 		Type: "function",

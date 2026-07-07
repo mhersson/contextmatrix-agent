@@ -34,6 +34,7 @@ func TestFinishCommitMessage(t *testing.T) {
 		{"trims", json.RawMessage(`{"commit_message":"  feat: x  "}`), "feat: x"},
 		{"empty object", json.RawMessage(`{}`), ""},
 		{"nil", nil, ""},
+		{"json null", json.RawMessage("null"), ""},
 		{"malformed", json.RawMessage(`{bad`), ""},
 	}
 	for _, tc := range cases {
