@@ -151,8 +151,9 @@ func (b *scriptedBackend) reply(req chatRequest) string {
 		return sseStop(verdictReject(b.fixFile), b.synthesisCost)
 
 	case strings.Contains(firstUser, "You are the coding agent addressing review feedback"):
-		// The fix coder edits the cited file then stops; no COMMIT line — the
-		// orchestrator lands it as a fixup.
+		// The fix coder edits the cited file then stops; no finish call is required
+		// here — the orchestrator lands it as a fixup regardless of what the model
+		// outputs.
 		if hasToolResult {
 			b.totalCost += b.fixCost
 

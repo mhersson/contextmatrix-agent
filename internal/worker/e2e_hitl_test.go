@@ -73,7 +73,7 @@ func (b *hitlBackend) handler() http.HandlerFunc {
 // reply selects the SSE body from the request's first user message, mirroring
 // e2e_orchestrator_test.go's scriptedBackend (content match, not call order, so
 // the parallel review specialists never race). hasToolResult distinguishes the
-// coder's first (write) turn from its second (COMMIT handoff); the brainstorm
+// coder's first (write) turn from its second (finish call); the brainstorm
 // turn is distinguished by whether the threaded conversation already has a USER
 // line. chatRequest, sseStop, sseCoderCommit, sseWriteTool, and writeArg are all
 // defined in e2e_orchestrator_test.go (same package).
@@ -115,7 +115,7 @@ func (b *hitlBackend) reply(req chatRequest) string {
 		return sseStop(plan, b.cost)
 
 	case strings.Contains(firstUser, "You are the coding agent for one subtask"):
-		// Turn 1 (no tool result yet) writes the file; turn 2 hands off the COMMIT line.
+		// Turn 1 (no tool result yet) writes the file; turn 2 calls finish to end the run.
 		if hasToolResult {
 			return sseCoderCommit("feat: add palette config", b.cost)
 		}

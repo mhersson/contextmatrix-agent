@@ -584,11 +584,13 @@ func TestSanitizeTitle(t *testing.T) {
 	assert.Equal(t, "feat: untitled", sanitizeTitle("   "))
 }
 
-// guard: the coder prompt template must reference the branch-state note and the
-// COMMIT line convention so the extractor has something to extract.
+// guard: the coder prompt template must reference the branch-state note and
+// instruct the model to end the subtask by calling the finish tool.
 func TestCoderPromptShape(t *testing.T) {
-	assert.Contains(t, strings.ToUpper(coderPrompt), "COMMIT:")
-	assert.Contains(t, strings.ToLower(coderPrompt), "branch")
+	low := strings.ToLower(coderPrompt)
+	assert.Contains(t, low, "finish tool")
+	assert.NotContains(t, low, "commit:")
+	assert.Contains(t, low, "branch")
 }
 
 // burnResp is a tool-call turn that never lets the run stop on its own;
