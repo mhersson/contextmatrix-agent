@@ -21,13 +21,13 @@ import (
 //
 // Capable calls return responses in order: from the queued responses slice when
 // set (the review path needs distinct specialist/verdict payloads), else a
-// single canned no-tool-call stop with a COMMIT line (the execute path only
+// single canned finish call carrying a commit message (the execute path only
 // needs one clean coder turn). Every call's model is recorded so tests can assert
 // the retry switched to a different slug.
 type modelAwareLLM struct {
 	mu        sync.Mutex
 	incapable map[string]bool
-	responses []llm.Response // capable-call script; empty -> canned coder stop
+	responses []llm.Response // capable-call script; empty -> canned coder finish
 	i         int
 	models    []string
 }
@@ -58,11 +58,7 @@ func (m *modelAwareLLM) next(req llm.Request) llm.Response {
 	}
 
 	if len(m.responses) == 0 {
-		return llm.Response{
-			Content:      "did the work\nCOMMIT: feat(x): add y",
-			FinishReason: "stop",
-			Usage:        llm.Usage{Cost: 0.01},
-		}
+		return finishResp("feat(x): add y", 0.01)
 	}
 
 	if m.i >= len(m.responses) {

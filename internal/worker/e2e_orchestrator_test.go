@@ -126,7 +126,7 @@ func (b *scriptedBackend) reply(req chatRequest) string {
 
 	case strings.Contains(firstUser, "You are the coding agent for one subtask"):
 		// Turn 1 writes the file; turn 2 (the tool result is now in the
-		// conversation) hands off the COMMIT line and stops.
+		// conversation) calls finish with the commit message and ends the run.
 		if hasToolResult {
 			b.totalCost += b.coderCost
 
@@ -221,6 +221,24 @@ func sseWriteTool(callID, args string, cost float64) string {
 	return sb.String()
 }
 
+// sseFinish is a turn emitting one streamed `finish` tool call (id+name, then
+// the JSON commit_message argument) plus a tool_calls finish — mirrors
+// sseWriteTool's exact SSE delta framing with the tool name and args swapped.
+func sseFinish(commitMsg string, cost float64) string {
+	args, _ := json.Marshal(map[string]string{"commit_message": commitMsg})
+
+	var sb strings.Builder
+
+	sb.WriteString(`data: {"model":"default/model","choices":[{"delta":{"tool_calls":[` +
+		`{"index":0,"id":"call_finish","type":"function","function":{"name":"finish","arguments":""}}]}}]}` + "\n")
+	sb.WriteString(`data: {"choices":[{"delta":{"tool_calls":[` +
+		`{"index":0,"function":{"arguments":` + jsonString(string(args)) + `}}]}}]}` + "\n")
+	sb.WriteString(`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}],` + usageWithCost(cost) + "}\n")
+	sb.WriteString("data: [DONE]\n")
+
+	return sb.String()
+}
+
 // ssePlan is the planner's stop turn: a two-subtask plan with one dependency
 // edge (subtask 1 depends on subtask 0).
 func ssePlan(cost float64) string {
@@ -232,9 +250,9 @@ func ssePlan(cost float64) string {
 	return sseStop(plan, cost)
 }
 
-// sseCoderCommit is a coder's final stop turn carrying the COMMIT handoff line.
+// sseCoderCommit is a coder's final turn: it ends the run by calling finish.
 func sseCoderCommit(commitMsg string, cost float64) string {
-	return sseStop("Implemented the subtask.\nCOMMIT: "+commitMsg, cost)
+	return sseFinish(commitMsg, cost)
 }
 
 const specialistFindings = "Strengths: clear change.\nNo concerns.\nVerdict: looks good."

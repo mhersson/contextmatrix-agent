@@ -598,6 +598,29 @@ func stopResp(content string, cost float64) llm.Response {
 	return llm.Response{Content: content, FinishReason: "stop", Usage: llm.Usage{Cost: cost}}
 }
 
+// finishResp is a coder/document turn that ends the run by calling the finish
+// tool with the given commit message (replaces the old stopResp COMMIT: prose).
+func finishResp(commitMessage string, cost float64) llm.Response {
+	args, _ := json.Marshal(map[string]string{"commit_message": commitMessage})
+
+	return llm.Response{
+		ToolCalls: []llm.ToolCall{{
+			ID:       "finish-1",
+			Type:     "function",
+			Function: llm.FunctionCall{Name: "finish", Arguments: string(args)},
+		}},
+		FinishReason: "tool_calls",
+		Usage:        llm.Usage{Cost: cost},
+	}
+}
+
+// testWriteTools is the write registry for orchestrator tests that drive a coder
+// or document run: it includes the finish tool so the real harness recognizes
+// the finishResp call as terminal.
+func testWriteTools() *tools.Registry {
+	return tools.NewRegistry(tools.NewReadTool("."), NewFinishTool())
+}
+
 func planTestCatalog() llm.Catalog {
 	return llm.Catalog{
 		{ID: "payload/model", ContextLength: 131072, SupportedParameters: []string{"tools"}},

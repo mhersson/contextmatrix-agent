@@ -91,7 +91,7 @@ func fanoutDeps(t *testing.T, ops *fakeOps, mainGit *fakeGit, client llm.LLM, n 
 	d.Cfg.BestOfN = n
 	d.GitForDir = pdg.get
 	d.WriteToolsForDir = func(string) *tools.Registry {
-		return tools.NewRegistry(tools.NewReadTool("."))
+		return testWriteTools()
 	}
 
 	return d, pdg, ws
