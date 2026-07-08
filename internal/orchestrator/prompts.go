@@ -73,7 +73,10 @@ Decompose the task into subtasks following these rules:
 - Each subtask should touch at most 4-5 files. If it touches more, split it.
 - Subtasks must be independently verifiable — each one produces a testable
   result. Each subtask includes its own tests; do NOT create separate
-  "write tests" subtasks.
+  "write tests" subtasks. This is absolute: a subtask whose deliverable is
+  testing, pinning, asserting, or verifying another subtask's code is always
+  wrong — the subtask that writes the code writes and runs its own tests. Fold
+  any such "add/pin tests for X" work into X.
 - Set depends_on correctly: a subtask that needs another subtask's output
   must declare the dependency. depends_on lists the indices of EARLIER
   subtasks in this array (a subtask may only depend on subtasks that appear

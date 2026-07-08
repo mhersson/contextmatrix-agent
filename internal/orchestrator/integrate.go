@@ -204,9 +204,15 @@ func squashMessage(title string) string { return sanitizeTitle(title) }
 // also best-effort — the branch is pushed and the card is done, so a transient
 // release error (including ErrCardNotClaimed when the claim lapsed) must not
 // fail the run and trigger a false FAILED status.
+//
+// WithoutCancel on both: done runs as the FSM winds up, exactly when an
+// end_session/EOF frame may have canceled the run context. The release and the
+// completion note must still go out even when the run context is the thing that
+// died — mirroring releaseSubtask (execute.go).
 func runDone(ctx context.Context, o *run) error {
 	d := o.d
 	cfg := d.Cfg
+	ctx = context.WithoutCancel(ctx)
 
 	if err := d.Ops.ReleaseCard(ctx, cfg.CardID); err != nil {
 		if !errors.Is(err, cmclient.ErrCardNotClaimed) {

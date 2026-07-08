@@ -24,6 +24,15 @@ func TestFinishToolIsTerminal(t *testing.T) {
 	assert.NotEmpty(t, res.Text)
 }
 
+// guard: the finish schema must steer the model to put its summary in the
+// commit message rather than emit a prose recap in the same turn (discarded
+// tokens the harness never surfaces).
+func TestFinishSchemaDiscouragesProseRecap(t *testing.T) {
+	desc := NewFinishTool().Schema().Function.Description
+	assert.Contains(t, desc, "commit_message only")
+	assert.Contains(t, desc, "discarded")
+}
+
 func TestFinishCommitMessage(t *testing.T) {
 	cases := []struct {
 		name string

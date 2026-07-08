@@ -110,3 +110,14 @@ func TestCoderPromptDiscouragesRepeatVerification(t *testing.T) {
 	assert.Contains(t, coderPrompt, "finish immediately",
 		"the coder prompt sets the stop-when-green expectation early")
 }
+
+// guard: the plan prompt must emphatically forbid test-only / test-pinning
+// subtasks. A prior run produced a subtask titled "pin ... with a prompts test"
+// despite the softer "do NOT create separate write-tests subtasks" wording, so
+// the rule is strengthened to name that failure mode.
+func TestPlanPromptForbidsTestOnlySubtasks(t *testing.T) {
+	low := strings.ToLower(planPrompt)
+	assert.Contains(t, low, "do not create separate")
+	assert.Contains(t, low, "testing, pinning, asserting, or verifying another subtask's code")
+	assert.Contains(t, low, "writes and runs its own tests")
+}
