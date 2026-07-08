@@ -655,7 +655,7 @@ func planTestDeps(ops *fakeOps, client llm.LLM) Deps {
 			CardID:       "CARD-1",
 			PayloadModel: "payload/model",
 			DefaultModel: "default/model",
-			MaxTurns:     5,
+			MaxTurns:     20, // > wrapUpTurns so the nudge never fires on 1-turn plan-content fakes
 		},
 	}
 }

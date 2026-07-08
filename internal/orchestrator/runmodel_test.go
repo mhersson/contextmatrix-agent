@@ -42,7 +42,7 @@ func TestHarnessConfigPopulatesTriad(t *testing.T) {
 	cfg := o.harnessConfig("default/model")
 
 	assert.Equal(t, "default/model", cfg.Model)
-	assert.Equal(t, 5, cfg.MaxTurns, "MaxTurns carried from Cfg")
+	assert.Equal(t, 20, cfg.MaxTurns, "MaxTurns carried from Cfg")
 	assert.Equal(t, 65536, cfg.ToolOutputMaxBytes, "tool-output cap carried from Cfg")
 	require.NotNil(t, cfg.RedactToolOutput, "redactor wired from Deps.Redact")
 	assert.Equal(t, scrubbed, cfg.RedactToolOutput(sentinel),

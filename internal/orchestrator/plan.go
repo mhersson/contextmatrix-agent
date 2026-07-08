@@ -360,7 +360,7 @@ func (o *run) draftPlan(ctx context.Context, model, diagnosis, design, feedback 
 		task := fmt.Sprintf(planPrompt, o.grounding, cfg.Workspace, o.tc.Title, o.tc.Description,
 			diagBlock, dsnBlock, resume, fbBlock, repair)
 
-		res, err := o.runModelImages(ctx, d.ReadTools, task, model, o.taskImages)
+		res, err := o.runModelPlan(ctx, d.ReadTools, task, model, o.taskImages, attempt > 0)
 
 		o.ledger.Spend(res.TotalCostUSD)
 

@@ -135,6 +135,13 @@ func (o *run) runModelCfg(ctx context.Context, reg *tools.Registry, prompt, mode
 // An orchestrator constant on purpose — not an operator knob.
 const wrapUpTurns = 5
 
+// planRepairMaxTurns caps the planner's single repair turn. The first attempt
+// already ran a full exploration pass; the repair must re-emit a valid plan,
+// not restart the investigation — so it gets a tight budget (min'd with the
+// configured cap so a smaller MaxTurns is never raised). Kept comfortably above
+// wrapUpTurns so the wrap-up nudge still lands.
+const planRepairMaxTurns = 12
+
 // runModelWrapUp is runModel with the wrap-up nudge configured: when
 // wrapUpTurns turns remain before the cap, the harness injects msg once as a
 // fresh user message. Used by the coder, fix, and document runs — the phases
@@ -143,6 +150,25 @@ func (o *run) runModelWrapUp(ctx context.Context, reg *tools.Registry, prompt, m
 	cfg := o.harnessConfig(model)
 	cfg.WrapUpTurns = wrapUpTurns
 	cfg.WrapUpMessage = msg
+
+	return o.runModelCfg(ctx, reg, prompt, model, cfg)
+}
+
+// runModelPlan is the planner's model call. Unlike the coder phases, the planner
+// finishes by emitting a JSON plan as its final message (there is no finish
+// tool), so it gets a plan-specific wrap-up nudge that forces the emit before
+// the turn cap instead of letting the model explore straight into it. On the
+// repair turn (repair=true) the turn budget is capped tight: the model already
+// had a full exploration pass and must re-emit a valid plan, not start over.
+func (o *run) runModelPlan(ctx context.Context, reg *tools.Registry, prompt, model string, images []llm.ImageURL, repair bool) (harness.Result, error) {
+	cfg := o.harnessConfig(model)
+	cfg.TaskImages = images
+	cfg.WrapUpTurns = wrapUpTurns
+	cfg.WrapUpMessage = planWrapUpMessage
+
+	if repair {
+		cfg.MaxTurns = min(cfg.MaxTurns, planRepairMaxTurns)
+	}
 
 	return o.runModelCfg(ctx, reg, prompt, model, cfg)
 }

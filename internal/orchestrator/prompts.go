@@ -77,6 +77,15 @@ Decompose the task into subtasks following these rules:
   testing, pinning, asserting, or verifying another subtask's code is always
   wrong — the subtask that writes the code writes and runs its own tests. Fold
   any such "add/pin tests for X" work into X.
+- Exception to the file-count and independent-verifiability rules above: when a
+  change is ONE coordinated, cross-cutting edit that genuinely cannot be split
+  into independently-compiling pieces — e.g. deleting a shared type or changing
+  a shared signature breaks all of its consumers in the same commit — emit it as
+  a single subtask even if it exceeds the ~5-file guidance. A larger subtask that
+  keeps the tree building and its tests green is correct; several smaller ones
+  that each leave the tree broken are not. Do NOT invent artificial staging
+  (dead fields, temporary shims, "zero out now / delete later") solely to satisfy
+  the file cap.
 - Set depends_on correctly: a subtask that needs another subtask's output
   must declare the dependency. depends_on lists the indices of EARLIER
   subtasks in this array (a subtask may only depend on subtasks that appear
@@ -613,7 +622,9 @@ func repairBlock(parseErr string) string {
 	}
 
 	return "\nYOUR PREVIOUS RESPONSE COULD NOT BE PARSED: " + parseErr + "\n" +
-		"Respond again with ONLY the JSON object described below — no prose, no code fences.\n"
+		"You have already investigated the codebase — do not start over. Fix the\n" +
+		"specific problem above and respond again with ONLY the JSON object described\n" +
+		"below — no prose, no code fences. Read a file only if strictly necessary.\n"
 }
 
 // feedbackBlock renders a HITL reviewer's requested changes inserted into the
@@ -662,14 +673,19 @@ func designBlock(design string) string {
 }
 
 // Wrap-up nudge messages, injected by the harness when wrapUpTurns turns
-// remain (runModelWrapUp). Built from the shared constant so the stated count
-// can never drift from the threshold. All three phases wrap up by driving the
-// model to call the finish tool; document always calls it (even with no doc
-// changes) since the orchestrator only commits when files actually changed.
+// remain (runModelWrapUp / runModelPlan). Built from the shared constant so the
+// stated count can never drift from the threshold. The coder, fix, and document
+// phases wrap up by driving the model to call the finish tool (document always
+// calls it, even with no doc changes, since the orchestrator only commits when
+// files actually changed). The planner has no finish tool: it wraps up by
+// emitting its JSON plan as the final message, so its nudge forces that emit
+// rather than a tool call.
 var (
 	coderWrapUpMessage = fmt.Sprintf("%d turns remain. If the acceptance criteria pass, call the finish tool now with your commit message and make no further tool calls. Do not re-run checks that already passed.", wrapUpTurns)
 
 	fixWrapUpMessage = fmt.Sprintf("%d turns remain. If the findings are addressed and the tests pass, call the finish tool now and make no further tool calls. Do not re-run checks that already passed.", wrapUpTurns)
 
 	documentWrapUpMessage = fmt.Sprintf("%d turns remain. Call the finish tool now with your docs commit message (whether or not you wrote documentation) and make no further tool calls.", wrapUpTurns)
+
+	planWrapUpMessage = fmt.Sprintf("%d turns remain. Stop investigating now and output your final answer: ONLY the JSON plan object described above, built from the analysis you already have. Make no further tool calls, no prose, no code fences.", wrapUpTurns)
 )
