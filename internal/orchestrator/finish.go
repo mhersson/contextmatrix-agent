@@ -27,7 +27,7 @@ func (finishTool) Schema() llm.Tool {
 		Type: "function",
 		Function: llm.ToolFunction{
 			Name:        "finish",
-			Description: `Call this when your work is complete. Provide the conventional-commit message summarizing your change (e.g. "feat(api): add health endpoint"). Calling finish ends the run; make no further tool calls after it.`,
+			Description: `Call this when your work is complete. Provide the conventional-commit message summarizing your change (e.g. "feat(api): add health endpoint"). Put your summary in the commit_message only — do not also write a prose recap of what you did; any message text alongside this call is discarded. Calling finish ends the run; make no further tool calls after it.`,
 			Parameters: json.RawMessage(`{
 	"type": "object",
 	"properties": {
