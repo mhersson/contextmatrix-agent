@@ -530,6 +530,7 @@ func writeToolsFor(dir string, bashTimeoutMax int) []tools.Tool {
 		tools.NewGlobTool(dir),
 		tools.NewGitTool(dir),
 		tools.NewBashTool(dir).WithMaxTimeout(bashTimeoutMax),
+		orchestrator.NewFinishTool(),
 	}
 }
 

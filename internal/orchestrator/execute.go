@@ -14,11 +14,6 @@ import (
 	"github.com/mhersson/contextmatrix-harness/tools"
 )
 
-// commitMarker is the line prefix the coder appends to its final message to
-// hand off a conventional commit summary. The orchestrator (not the coder)
-// performs the commit, so this is the only channel for the message.
-const commitMarker = "COMMIT:"
-
 // estimateTokens approximates the prompt budget for window fitting: chars/4
 // (the rough bytes-per-token rule) plus a fixed overhead covering the system
 // prompt, the tool schemas, and headroom for the conversation that follows.
@@ -145,15 +140,15 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 
 	res, err := o.runCoderWith(ctx, sc, sub, prompt)
 	if err != nil {
-		if o.salvageCapped(ctx, sc, sub, res.Output, err) {
+		if o.salvageCapped(ctx, sc, sub, res, err) {
 			return nil
 		}
 
 		return err
 	}
 
-	commitMsg, ok := extractCommitLine(res.Output)
-	if !ok {
+	commitMsg := finishCommitMessage(res.CompletionArgs)
+	if commitMsg == "" {
 		commitMsg = sanitizeTitle(sub.Title)
 	}
 
@@ -174,7 +169,7 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 	}
 
 	if sc.boardOps {
-		if err := d.Ops.CompleteTask(ctx, sub.ID, subtaskSummary(res.Output, sub.Title)); err != nil {
+		if err := d.Ops.CompleteTask(ctx, sub.ID, commitMsg); err != nil {
 			return fmt.Errorf("complete subtask %s: %w", sub.ID, err)
 		}
 	}
@@ -422,29 +417,30 @@ func tierOf(sub subtaskRef) registry.Tier {
 // FINAL subtask: the work may well be complete (the observed failure mode is
 // turns burned on post-green re-verification, not missing work), and the judge
 // verifies every candidate in place — so the project's verify command, not the
-// model's self-report, is the completion authority. The tree is committed
-// (COMMIT line from the truncated output when present, else the title
-// fallback) and the solver marked capped, but ONLY when the commit actually
-// captures a change: a clean tree (nothing to commit) has no diff — the only
-// completion evidence a capped run has — so it is NOT salvaged and the
-// candidate drops exactly as it would without this rescue path. runJudge
-// admits a capped candidate only when its verify passes. A cap on an EARLIER
-// subtask is never salvaged — whole subtasks are missing, which a green
-// verify cannot expose — and the parent/single-solver (boardOps) keeps its
-// park-and-resume path.
+// model's self-report, is the completion authority. The tree is committed with
+// the sanitized-title fallback message — a capped run by definition never
+// completed via a successful finish call (that would have ended the run before
+// the cap could trip), so res.CompletionArgs is always empty here — and the
+// solver marked capped, but ONLY when the commit actually captures a change: a
+// clean tree (nothing to commit) has no diff — the only completion evidence a
+// capped run has — so it is NOT salvaged and the candidate drops exactly as it
+// would without this rescue path. runJudge admits a capped candidate only when
+// its verify passes. A cap on an EARLIER subtask is never salvaged — whole
+// subtasks are missing, which a green verify cannot expose — and the
+// parent/single-solver (boardOps) keeps its park-and-resume path.
 //
 // Turn-budget decision: the default max-turns is 45 for headroom, and there is
 // deliberately NO separate candidate cap — the wrap-up nudge removes post-green
 // dithering and this salvage removes the cliff, so a bigger candidate budget
 // would only fund waste (see the turn-waste design spec).
-func (o *run) salvageCapped(ctx context.Context, sc *solverCtx, sub subtaskRef, output string, err error) bool {
+func (o *run) salvageCapped(ctx context.Context, sc *solverCtx, sub subtaskRef, res harness.Result, err error) bool {
 	var mte *MaxTurnsError
 	if sc.boardOps || sc.lastSubID == "" || sub.ID != sc.lastSubID || !errors.As(err, &mte) {
 		return false
 	}
 
-	commitMsg, ok := extractCommitLine(output)
-	if !ok {
+	commitMsg := finishCommitMessage(res.CompletionArgs)
+	if commitMsg == "" {
 		commitMsg = sanitizeTitle(sub.Title)
 	}
 
@@ -464,34 +460,10 @@ func (o *run) salvageCapped(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 	return true
 }
 
-// extractCommitLine scans the coder's final output for the last COMMIT: line and
-// returns the trimmed conventional-commit summary after the marker. A missing
-// marker or an empty summary returns ("", false) so the caller falls back to the
-// sanitized subtask title.
-func extractCommitLine(output string) (string, bool) {
-	var (
-		found string
-		ok    bool
-	)
-
-	for _, line := range strings.Split(output, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if !strings.HasPrefix(trimmed, commitMarker) {
-			continue
-		}
-
-		msg := strings.TrimSpace(strings.TrimPrefix(trimmed, commitMarker))
-		if msg != "" {
-			found, ok = msg, true // keep scanning: the LAST valid line wins
-		}
-	}
-
-	return found, ok
-}
-
 // sanitizeTitle builds the fallback commit message from a subtask title when the
-// coder omits a usable COMMIT line. Format: lowercase "feat: <title>" — a sane,
-// conventional-ish default. A blank title yields "feat: untitled".
+// coder's finish call carries no usable commit message. Format: lowercase
+// "feat: <title>" — a sane, conventional-ish default. A blank title yields
+// "feat: untitled".
 func sanitizeTitle(title string) string {
 	t := strings.ToLower(strings.TrimSpace(title))
 	if t == "" {
@@ -499,18 +471,6 @@ func sanitizeTitle(title string) string {
 	}
 
 	return "feat: " + t
-}
-
-// subtaskSummary derives the complete_task summary: the first non-empty line of
-// the coder's handoff, falling back to the subtask title.
-func subtaskSummary(output, title string) string {
-	for _, line := range strings.Split(output, "\n") {
-		if trimmed := strings.TrimSpace(line); trimmed != "" {
-			return trimmed
-		}
-	}
-
-	return title
 }
 
 // topoOrder returns the subtasks in dependency order via Kahn's algorithm:

@@ -185,8 +185,8 @@ Fix anything you find before finishing.`
 // the FULL write toolset rooted at the shared workspace and implements exactly
 // one subtask on the current branch, where prior subtasks' commits are already
 // visible. The orchestrator commits and pushes after the run; the coder does
-// NOT run git itself — it ends with a single COMMIT line the orchestrator parses
-// into the commit message.
+// NOT run git itself — it ends the subtask by calling the finish tool with the
+// commit message, which the orchestrator reads from the tool call arguments.
 //
 // The trailing %s slots are filled by runExecute: workspace root, subtask
 // title, subtask description, parent card title, parent card body.
@@ -210,17 +210,12 @@ pass, finish immediately — do not repeat verification that already passed.
 
 ` + selfReviewBlock + `
 
-When the subtask is complete, end
-your FINAL message with exactly one line of the form:
+When the subtask is complete, call the finish tool with the conventional-commit
+message for your change, for example:
 
-COMMIT: <conventional commit message>
+  finish(commit_message: "feat(api): add health endpoint")
 
-for example:
-
-COMMIT: feat(api): add health endpoint
-
-The COMMIT line must be a single line, a real conventional-commit summary for the
-change you made, and the LAST line of your message.
+Calling finish ends the subtask. Make no further tool calls after it.
 
 SUBTASK
 Title: %s
@@ -400,6 +395,10 @@ tests after your changes to confirm they pass.
 
 ` + buildHygieneNote + `
 
+When you have addressed the findings and the tests pass, call the finish tool
+with a short conventional-commit message summarizing the fixes, then make no
+further tool calls.
+
 PARENT CARD (context)
 Title: %s
 
@@ -452,9 +451,9 @@ Respond with ONLY the Markdown PR body — no surrounding prose, no code fences.
 // it writes DOCUMENTATION ONLY — never source or tests. The gate is deliberately
 // conservative: most changes need no external docs, and the correct outcome is
 // then to write nothing (a clean tree -> no commit). The orchestrator commits and
-// pushes the result; the agent does NOT run git and ends with a single COMMIT
-// line the orchestrator parses (same convention as coderPrompt). The Go phase
-// owns claim/usage/push in code.
+// pushes the result; the agent does NOT run git and ends by calling the finish
+// tool with the docs commit message (same convention as coderPrompt). The Go
+// phase owns claim/usage/push in code.
 //
 // The trailing %s slots are filled by runDocument: workspace root, parent card
 // title, parent card description, the plan overview (subtask titles), and the
@@ -490,16 +489,14 @@ When documentation IS warranted:
 Do NOT run git yourself (no commit, no push, no branch) — the orchestrator
 commits and pushes your changes after you finish.
 
-When you finish, end your FINAL message with exactly one line of the form:
-
-COMMIT: docs(<scope>): <summary>
-
+When you finish, call the finish tool with the docs conventional-commit message,
 for example:
 
-COMMIT: docs(api): document the health endpoint
+  finish(commit_message: "docs(api): document the health endpoint")
 
-If you wrote no documentation you may omit the COMMIT line. When present, the
-COMMIT line must be a single line and the LAST line of your message.
+Call finish even if you wrote no documentation (give a short docs(...) message);
+the orchestrator commits only if you actually changed files. Make no further tool
+calls after finish.
 
 PARENT CARD
 Title: %s
@@ -656,12 +653,13 @@ func designBlock(design string) string {
 
 // Wrap-up nudge messages, injected by the harness when wrapUpTurns turns
 // remain (runModelWrapUp). Built from the shared constant so the stated count
-// can never drift from the threshold. Phase-appropriate: fix runs carry no
-// COMMIT line, and document's COMMIT line is optional (omit rule).
+// can never drift from the threshold. All three phases wrap up by driving the
+// model to call the finish tool; document always calls it (even with no doc
+// changes) since the orchestrator only commits when files actually changed.
 var (
-	coderWrapUpMessage = fmt.Sprintf("%d turns remain. If the acceptance criteria pass, STOP now: reply with your final summary ending with the COMMIT line and make no more tool calls. Do not re-run checks that already passed.", wrapUpTurns)
+	coderWrapUpMessage = fmt.Sprintf("%d turns remain. If the acceptance criteria pass, call the finish tool now with your commit message and make no further tool calls. Do not re-run checks that already passed.", wrapUpTurns)
 
-	fixWrapUpMessage = fmt.Sprintf("%d turns remain. If the findings are addressed and the tests pass, STOP now: reply with your final summary and make no more tool calls. Do not re-run checks that already passed.", wrapUpTurns)
+	fixWrapUpMessage = fmt.Sprintf("%d turns remain. If the findings are addressed and the tests pass, call the finish tool now and make no further tool calls. Do not re-run checks that already passed.", wrapUpTurns)
 
-	documentWrapUpMessage = fmt.Sprintf("%d turns remain. Finish now: reply with your final message — ending with the COMMIT line only if you wrote documentation — and make no more tool calls.", wrapUpTurns)
+	documentWrapUpMessage = fmt.Sprintf("%d turns remain. Call the finish tool now with your docs commit message (whether or not you wrote documentation) and make no further tool calls.", wrapUpTurns)
 )

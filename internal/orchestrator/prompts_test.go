@@ -42,7 +42,7 @@ func TestBuildArtifactHygieneInBothCodingPrompts(t *testing.T) {
 }
 
 // guard: the document prompt must carry the conservative gate, the docs-only
-// restriction, the no-git instruction, and the COMMIT: docs(...) convention.
+// restriction, the no-git instruction, and the finish-tool docs(...) convention.
 func TestDocumentPromptShape(t *testing.T) {
 	low := strings.ToLower(documentPrompt)
 	assert.Contains(t, low, "default: no external documentation is needed")
@@ -50,7 +50,16 @@ func TestDocumentPromptShape(t *testing.T) {
 	assert.Contains(t, low, "user-facing behavior")
 	assert.Contains(t, low, "api contracts")
 	assert.Contains(t, low, "do not run git")
-	assert.Contains(t, low, "commit: docs(")
+	assert.Contains(t, low, "finish tool")
+	assert.NotContains(t, low, "commit:")
+}
+
+// guard: the fix prompt must reference the finish tool and carry no remnant of
+// the removed commit-prefix convention.
+func TestFixPromptShape(t *testing.T) {
+	low := strings.ToLower(fixPrompt)
+	assert.Contains(t, low, "finish tool")
+	assert.NotContains(t, low, "commit:")
 }
 
 func TestBrainstormPromptShape(t *testing.T) {

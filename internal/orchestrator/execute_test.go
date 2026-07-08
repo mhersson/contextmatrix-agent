@@ -45,7 +45,7 @@ func execTestDeps(ops *fakeOps, git *fakeGit, client llm.LLM) Deps {
 		Client:     client,
 		Emit:       events.NewEmitter(nil, nil),
 		Registry:   planTestRegistry(),
-		WriteTools: tools.NewRegistry(tools.NewReadTool(".")),
+		WriteTools: testWriteTools(),
 		ReadTools:  tools.NewRegistry(tools.NewReadTool(".")),
 		Cfg: Config{
 			Project:      "proj",
@@ -127,7 +127,7 @@ func TestExecuteSubtaskFlow(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true}
 	llmFake := &planLLM{responses: []llm.Response{
-		stopResp("done\nCOMMIT: feat(x): add y", 0.10),
+		finishResp("feat(x): add y", 0.10),
 	}}
 	d := execTestDeps(ops, git, llmFake)
 
@@ -175,7 +175,7 @@ func TestExecuteSubtaskHeartbeatsClaim(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true}
 	client := &slowLLM{
-		inner: &planLLM{responses: []llm.Response{stopResp("done\nCOMMIT: feat: x", 0.01)}},
+		inner: &planLLM{responses: []llm.Response{finishResp("feat: x", 0.01)}},
 		delay: 80 * time.Millisecond,
 	}
 	d := execTestDeps(ops, git, client)
@@ -256,7 +256,7 @@ func TestSubtaskHeartbeatStopUnblocksBlockedHeartbeat(t *testing.T) {
 func TestExecuteSubtaskErrorReleasesClaim(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{commitErr: assertErr("disk full")}
-	llmFake := &planLLM{responses: []llm.Response{stopResp("done\nCOMMIT: feat: x", 0.01)}}
+	llmFake := &planLLM{responses: []llm.Response{finishResp("feat: x", 0.01)}}
 	d := execTestDeps(ops, git, llmFake)
 
 	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
@@ -306,7 +306,7 @@ func TestExecuteCoderPromptBody(t *testing.T) {
 	t.Run("planner description reaches the coder prompt", func(t *testing.T) {
 		ops := &fakeOps{}
 		git := &fakeGit{committed: true}
-		llmFake := &planLLM{responses: []llm.Response{stopResp("ok\nCOMMIT: feat: x", 0.01)}}
+		llmFake := &planLLM{responses: []llm.Response{finishResp("feat: x", 0.01)}}
 		d := execTestDeps(ops, git, llmFake)
 
 		o := newExecRun(d, []subtaskRef{{
@@ -326,7 +326,7 @@ func TestExecuteCoderPromptBody(t *testing.T) {
 	t.Run("empty body falls back to title", func(t *testing.T) {
 		ops := &fakeOps{}
 		git := &fakeGit{committed: true}
-		llmFake := &planLLM{responses: []llm.Response{stopResp("ok\nCOMMIT: feat: x", 0.01)}}
+		llmFake := &planLLM{responses: []llm.Response{finishResp("feat: x", 0.01)}}
 		d := execTestDeps(ops, git, llmFake)
 
 		// Resume-loaded refs lack bodies; the title stands in as the description.
@@ -346,8 +346,8 @@ func TestExecuteFirstPushLeasesStaleBranch(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true}
 	llmFake := &planLLM{responses: []llm.Response{
-		stopResp("ok\nCOMMIT: feat: one", 0.01),
-		stopResp("ok\nCOMMIT: feat: two", 0.01),
+		finishResp("feat: one", 0.01),
+		finishResp("feat: two", 0.01),
 	}}
 	d := execTestDeps(ops, git, llmFake)
 
@@ -378,7 +378,7 @@ func TestExecutePlainPushWhenNoStaleTip(t *testing.T) {
 	// No stale remote branch (staleRemoteTip ""): every push is plain, no lease.
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true}
-	llmFake := &planLLM{responses: []llm.Response{stopResp("ok\nCOMMIT: feat: x", 0.01)}}
+	llmFake := &planLLM{responses: []llm.Response{finishResp("feat: x", 0.01)}}
 	d := execTestDeps(ops, git, llmFake)
 
 	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
@@ -394,7 +394,7 @@ func TestExecuteCleanTreeSkipsPush(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: false} // clean tree: nothing committed
 	llmFake := &planLLM{responses: []llm.Response{
-		stopResp("nothing to change\nCOMMIT: chore: noop", 0.02),
+		finishResp("chore: noop", 0.02),
 	}}
 	d := execTestDeps(ops, git, llmFake)
 
@@ -412,7 +412,7 @@ func TestExecuteCleanTreeSkipsPush(t *testing.T) {
 func TestExecuteModelSelectionPin(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true}
-	llmFake := &planLLM{responses: []llm.Response{stopResp("ok\nCOMMIT: feat: x", 0.01)}}
+	llmFake := &planLLM{responses: []llm.Response{finishResp("feat: x", 0.01)}}
 	d := execTestDeps(ops, git, llmFake)
 	// The card pins a catalog-resolvable coder model.
 	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body", ModelCoder: "pinned/model"}
@@ -429,7 +429,7 @@ func TestExecuteModelSelectionPin(t *testing.T) {
 func TestExecuteModelSelectionByComplexity(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true}
-	llmFake := &planLLM{responses: []llm.Response{stopResp("ok\nCOMMIT: feat: x", 0.01)}}
+	llmFake := &planLLM{responses: []llm.Response{finishResp("feat: x", 0.01)}}
 
 	// A registry where exactly one tools-capable model has a prior coder score
 	// that clears every tier bar, so SelectByComplexity is forced to pick it.
@@ -469,7 +469,7 @@ func TestExecuteWindowEstimatePositive(t *testing.T) {
 func TestExecuteSkipsDone(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true}
-	llmFake := &planLLM{responses: []llm.Response{stopResp("ok\nCOMMIT: feat: x", 0.01)}}
+	llmFake := &planLLM{responses: []llm.Response{finishResp("feat: x", 0.01)}}
 	d := execTestDeps(ops, git, llmFake)
 
 	// SUB-1 is already done (resume); SUB-2 is fresh and must run.
@@ -487,11 +487,11 @@ func TestExecuteSkipsDone(t *testing.T) {
 }
 
 func TestExecuteCommitMessage(t *testing.T) {
-	t.Run("handoff COMMIT line extracted", func(t *testing.T) {
+	t.Run("commit message resolved from finish call", func(t *testing.T) {
 		ops := &fakeOps{}
 		git := &fakeGit{committed: true}
 		llmFake := &planLLM{responses: []llm.Response{
-			stopResp("I did the work.\nCOMMIT: feat(api): add health endpoint", 0.01),
+			finishResp("feat(api): add health endpoint", 0.01),
 		}}
 		d := execTestDeps(ops, git, llmFake)
 
@@ -525,8 +525,8 @@ func TestExecuteBudget(t *testing.T) {
 	// Subtask 1 spends 0.60; cap is 1.00 but seeded at 0.50 already, so after
 	// subtask 1 the ledger is at 1.10 — subtask 2's pre-claim Check trips.
 	llmFake := &planLLM{responses: []llm.Response{
-		stopResp("ok\nCOMMIT: feat: one", 0.60),
-		stopResp("ok\nCOMMIT: feat: two", 0.60),
+		finishResp("feat: one", 0.60),
+		finishResp("feat: two", 0.60),
 	}}
 	d := execTestDeps(ops, git, llmFake)
 	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body", ReportedCostUSD: 0.50}
@@ -550,7 +550,7 @@ func TestExecuteBudget(t *testing.T) {
 func TestExecuteClaimFailureAborts(t *testing.T) {
 	ops := &fakeOps{claimErr: errors.New("claim conflict")}
 	git := &fakeGit{committed: true}
-	llmFake := &planLLM{responses: []llm.Response{stopResp("ok\nCOMMIT: feat: x", 0.01)}}
+	llmFake := &planLLM{responses: []llm.Response{finishResp("feat: x", 0.01)}}
 	d := execTestDeps(ops, git, llmFake)
 
 	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
@@ -565,7 +565,7 @@ func TestExecuteClaimFailureAborts(t *testing.T) {
 func TestExecutePushFailureAborts(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true, pushErr: errors.New("remote rejected")}
-	llmFake := &planLLM{responses: []llm.Response{stopResp("ok\nCOMMIT: feat: x", 0.01)}}
+	llmFake := &planLLM{responses: []llm.Response{finishResp("feat: x", 0.01)}}
 	d := execTestDeps(ops, git, llmFake)
 
 	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
@@ -584,52 +584,13 @@ func TestSanitizeTitle(t *testing.T) {
 	assert.Equal(t, "feat: untitled", sanitizeTitle("   "))
 }
 
-func TestExtractCommitLine(t *testing.T) {
-	t.Run("extracts trailing commit line", func(t *testing.T) {
-		got, ok := extractCommitLine("blah\nCOMMIT: fix(core): handle nil\n")
-		require.True(t, ok)
-		assert.Equal(t, "fix(core): handle nil", got)
-	})
-
-	t.Run("multiple commit lines: last wins", func(t *testing.T) {
-		got, ok := extractCommitLine("COMMIT: feat: first\nmore handoff prose\nCOMMIT: feat: final\n")
-		require.True(t, ok)
-		assert.Equal(t, "feat: final", got)
-	})
-
-	t.Run("no commit line", func(t *testing.T) {
-		_, ok := extractCommitLine("just some prose with no marker")
-		assert.False(t, ok)
-	})
-
-	t.Run("empty after marker is not accepted", func(t *testing.T) {
-		_, ok := extractCommitLine("COMMIT:    ")
-		assert.False(t, ok)
-	})
-}
-
-func TestSubtaskSummary(t *testing.T) {
-	t.Run("first non-empty line of the handoff", func(t *testing.T) {
-		got := subtaskSummary("\n\nImplemented the endpoint.\nCOMMIT: feat: x\n", "Title fallback")
-		assert.Equal(t, "Implemented the endpoint.", got)
-	})
-
-	t.Run("all blank lines falls back to title", func(t *testing.T) {
-		got := subtaskSummary("\n   \n\t\n", "Title fallback")
-		assert.Equal(t, "Title fallback", got)
-	})
-
-	t.Run("empty output falls back to title", func(t *testing.T) {
-		got := subtaskSummary("", "Title fallback")
-		assert.Equal(t, "Title fallback", got)
-	})
-}
-
-// guard: the coder prompt template must reference the branch-state note and the
-// COMMIT line convention so the extractor has something to extract.
+// guard: the coder prompt template must reference the branch-state note and
+// instruct the model to end the subtask by calling the finish tool.
 func TestCoderPromptShape(t *testing.T) {
-	assert.Contains(t, strings.ToUpper(coderPrompt), "COMMIT:")
-	assert.Contains(t, strings.ToLower(coderPrompt), "branch")
+	low := strings.ToLower(coderPrompt)
+	assert.Contains(t, low, "finish tool")
+	assert.NotContains(t, low, "commit:")
+	assert.Contains(t, low, "branch")
 }
 
 // burnResp is a tool-call turn that never lets the run stop on its own;
@@ -662,13 +623,19 @@ func TestCoderRunGetsWrapUpNudge(t *testing.T) {
 		"the wrap-up nudge reaches the coder conversation as a user message")
 }
 
+// TestSalvageCappedFinalSubtask proves a turn-capped final subtask is still
+// committed and the solver marked capped, not dropped. A genuinely capped run
+// never calls finish (a successful finish call would end the run cleanly
+// before the cap ever trips), so res.CompletionArgs is always empty here —
+// the salvage commit message is the sanitized-title fallback, proving the
+// salvage path no longer scrapes free text for a commit message.
 func TestSalvageCappedFinalSubtask(t *testing.T) {
 	ops := &fakeOps{}
-	// Five burn turns == MaxTurns(5) from execTestDeps: the coder run caps.
-	// The final output carries a COMMIT line the salvage must extract.
+	// Five burn turns == MaxTurns(5) from execTestDeps: the coder run caps
+	// without ever calling finish.
 	client := &planLLM{responses: []llm.Response{
 		burnResp(""), burnResp(""), burnResp(""), burnResp(""),
-		burnResp("wrapping up\nCOMMIT: feat: salvage me"),
+		burnResp("wrapping up"),
 	}}
 	d := execTestDeps(ops, &fakeGit{committed: true}, client)
 	// execTestDeps defaults MaxTurns to 20 (avoids the wrapUpTurns==MaxTurns
@@ -691,8 +658,8 @@ func TestSalvageCappedFinalSubtask(t *testing.T) {
 
 	assert.True(t, sc.capped, "the solver is marked capped")
 	require.NotEmpty(t, cg.commitMsgs, "the worktree is committed")
-	assert.Equal(t, "feat: salvage me", cg.commitMsgs[len(cg.commitMsgs)-1],
-		"the COMMIT line survives from the truncated output")
+	assert.Equal(t, "feat: final", cg.commitMsgs[len(cg.commitMsgs)-1],
+		"a capped run never called finish, so the salvage commit uses the sanitized-title fallback, not the trailing prose")
 	require.Len(t, sc.completed, 1)
 	assert.Equal(t, "SUB-2", sc.completed[0].ID, "the salvaged subtask counts as completed for winner replay")
 	assert.True(t, ops.loggedContains("turn cap on final subtask SUB-2"), "logs=%v", ops.logs)
@@ -707,7 +674,7 @@ func TestNoSalvageOnCleanTree(t *testing.T) {
 	// Five burn turns == MaxTurns(5) from execTestDeps: the coder run caps.
 	client := &planLLM{responses: []llm.Response{
 		burnResp(""), burnResp(""), burnResp(""), burnResp(""),
-		burnResp("wrapping up\nCOMMIT: feat: salvage me"),
+		burnResp("wrapping up"),
 	}}
 	d := execTestDeps(ops, &fakeGit{committed: true}, client)
 	d.Cfg.MaxTurns = 5
