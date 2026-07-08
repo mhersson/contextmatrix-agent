@@ -110,3 +110,30 @@ func TestCoderPromptDiscouragesRepeatVerification(t *testing.T) {
 	assert.Contains(t, coderPrompt, "finish immediately",
 		"the coder prompt sets the stop-when-green expectation early")
 }
+
+// guard: the planner prompt must carry the release-mechanics prohibition and the
+// tree-verifiable-acceptance rule, placed after the documentation-subtasks bullet
+// in the decompose-rules list.
+func TestPlanPromptGuardrails(t *testing.T) {
+	low := strings.ToLower(planPrompt)
+
+	// Release-mechanics prohibition.
+	assert.Contains(t, low, "release mechanics")
+	assert.Contains(t, low, "tagging, versioning,")
+	assert.Contains(t, low, "pushing, publishing, deploying")
+	assert.Contains(t, low, "out-of-scope for the plan")
+
+	// Tree-verifiable-acceptance rule.
+	assert.Contains(t, low, "verifiable from the working tree")
+	assert.Contains(t, low, "git metadata or history shape")
+	assert.Contains(t, low, "commit messages") // red flag example
+
+	// Both bullets sit after the documentation-subtasks bullet in the decompose list.
+	docsIdx := strings.Index(low, "do not include documentation subtasks")
+	releaseIdx := strings.Index(low, "release mechanics")
+	treeIdx := strings.Index(low, "verifiable from the working tree")
+
+	assert.True(t, docsIdx > 0, "documentation-subtasks bullet must exist")
+	assert.True(t, releaseIdx > docsIdx, "release-mechanics prohibition must appear after the doc-subtasks bullet")
+	assert.True(t, treeIdx > releaseIdx, "tree-verifiable-acceptance rule must appear after release-mechanics prohibition")
+}
