@@ -90,6 +90,13 @@ Decompose the task into subtasks following these rules:
   abstractions or premature generalization.
 - Do not include documentation subtasks — documentation is handled
   separately after execution.
+- Do not create subtasks for release mechanics — tagging, versioning,
+  pushing, publishing, deploying. If the parent card's acceptance
+  mentions a release step, note it as out-of-scope for the plan rather
+  than decomposing it into a subtask.
+- Acceptance criteria must be verifiable from the working tree and test
+  runs. Never write criteria about git metadata or history shape (tags,
+  commit counts, commit messages, git show output).
 
 Also assign an overall card_tier reflecting the whole task's complexity, and a
 per-subtask tier. Tiers: "simple" (mechanical, low-risk), "moderate"
