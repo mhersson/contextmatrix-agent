@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
+	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-harness/llm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -236,6 +237,34 @@ func TestReasoningRaw(t *testing.T) {
 	assert.Nil(t, reasoningRaw(""))
 	assert.JSONEq(t, `{"effort":"high"}`, string(reasoningRaw("high")))
 	assert.JSONEq(t, `{"effort":"xhigh"}`, string(reasoningRaw("xhigh"))) // non-standard tier passes through
+}
+
+// TestCoderMaxTurns pins the tier-scaled coder turn budget: simple/moderate keep
+// the configured base, complex gets 1.5x and critical 2x (rounded to the nearest
+// turn). Expressed as factors of the base so lifting the base lifts every tier
+// with it.
+func TestCoderMaxTurns(t *testing.T) {
+	tests := []struct {
+		name string
+		base int
+		tier registry.Tier
+		want int
+	}{
+		{"simple keeps base", 45, registry.TierSimple, 45},
+		{"moderate keeps base", 45, registry.TierModerate, 45},
+		{"complex is 1.5x base, rounded", 45, registry.TierComplex, 68}, // round(67.5)
+		{"critical is 2x base", 45, registry.TierCritical, 90},
+		{"complex scales with a lifted base", 60, registry.TierComplex, 90},
+		{"critical scales with a lifted base", 60, registry.TierCritical, 120},
+		{"complex scales with a lowered base", 30, registry.TierComplex, 45},
+		{"critical scales with a lowered base", 30, registry.TierCritical, 60},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, coderMaxTurns(tt.base, tt.tier))
+		})
+	}
 }
 
 // TestRunModelPassesThroughNormalResult pins that a normal (done) run is NOT

@@ -565,14 +565,15 @@ func (o *run) synthesize(ctx context.Context, findings string, authoritative boo
 func (o *run) runFixModel(ctx context.Context, prompt string, round int, fixTier string, authoritative bool) error {
 	d := o.d
 	cfg := d.Cfg
+	tier := o.fixTierFor(fixTier, authoritative)
 
 	for attempt := 0; attempt <= reselectCap; attempt++ {
 		model := o.resolveFixModel(fixTier, authoritative)
 
 		_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory selection record
-			fmt.Sprintf("fix coder %s selected for round %d fixes (tier=%s)", model, round, o.fixTierFor(fixTier, authoritative)))
+			fmt.Sprintf("fix coder %s selected for round %d fixes (tier=%s)", model, round, tier))
 
-		res, err := o.runModelWrapUp(ctx, d.WriteTools, prompt, model, fixWrapUpMessage)
+		res, err := o.runModelCoder(ctx, d.WriteTools, prompt, model, fixWrapUpMessage, tier)
 
 		o.ledger.Spend(res.TotalCostUSD)
 

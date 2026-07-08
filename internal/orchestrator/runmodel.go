@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 
+	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-harness/harness"
 	"github.com/mhersson/contextmatrix-harness/llm"
 	"github.com/mhersson/contextmatrix-harness/tools"
@@ -142,14 +144,55 @@ const wrapUpTurns = 5
 // wrapUpTurns so the wrap-up nudge still lands.
 const planRepairMaxTurns = 12
 
+// complexTurnFactor and criticalTurnFactor scale a coder run's turn budget above
+// the configured base for the two heaviest tiers, so a single unsplittable
+// cross-cutting subtask can land its source changes AND the tests those changes
+// break in one session instead of turn-capping mid-way. Factors of the base (not
+// absolute floors) so lifting the base lifts every tier with it; simple/moderate
+// run at the base unchanged.
+const (
+	complexTurnFactor  = 1.5
+	criticalTurnFactor = 2.0
+)
+
+// coderMaxTurns scales a coder run's turn budget by subtask tier: complex gets
+// complexTurnFactor x the base, critical criticalTurnFactor x, rounded to the
+// nearest turn; simple/moderate keep the base.
+func coderMaxTurns(base int, tier registry.Tier) int {
+	switch tier {
+	case registry.TierComplex:
+		return int(math.Round(float64(base) * complexTurnFactor))
+	case registry.TierCritical:
+		return int(math.Round(float64(base) * criticalTurnFactor))
+	default:
+		return base
+	}
+}
+
 // runModelWrapUp is runModel with the wrap-up nudge configured: when
 // wrapUpTurns turns remain before the cap, the harness injects msg once as a
-// fresh user message. Used by the coder, fix, and document runs — the phases
-// whose models dither on post-green re-verification instead of finishing.
+// fresh user message. Used by the document run; the coder and fix runs use
+// runModelCoder, which layers a tier-scaled turn budget on the same nudge.
 func (o *run) runModelWrapUp(ctx context.Context, reg *tools.Registry, prompt, model, msg string) (harness.Result, error) {
 	cfg := o.harnessConfig(model)
 	cfg.WrapUpTurns = wrapUpTurns
 	cfg.WrapUpMessage = msg
+
+	return o.runModelCfg(ctx, reg, prompt, model, cfg)
+}
+
+// runModelCoder is runModelWrapUp with a tier-scaled turn budget: complex and
+// critical work gets more turns than the flat base (via coderMaxTurns) so a
+// single unsplittable cross-cutting subtask can land its source changes AND the
+// tests those changes break in one session instead of turn-capping mid-way;
+// simple/moderate keep the base. Used by the execute-phase coder and the
+// review-phase fix run — both tier-sized coder work. document.go keeps
+// runModelWrapUp: its work carries no tier.
+func (o *run) runModelCoder(ctx context.Context, reg *tools.Registry, prompt, model, msg string, tier registry.Tier) (harness.Result, error) {
+	cfg := o.harnessConfig(model)
+	cfg.WrapUpTurns = wrapUpTurns
+	cfg.WrapUpMessage = msg
+	cfg.MaxTurns = coderMaxTurns(cfg.MaxTurns, tier)
 
 	return o.runModelCfg(ctx, reg, prompt, model, cfg)
 }
