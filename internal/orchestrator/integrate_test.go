@@ -364,6 +364,58 @@ func TestRunDoneToleratesReleaseError(t *testing.T) {
 	})
 }
 
+// ctxHonoringOps wraps fakeOps so ReleaseCard and AddLog fail on a canceled
+// context, the way the real cmclient does (each issues an HTTP call that
+// respects ctx). It proves runDone's cleanup survives a canceled run context —
+// the exact race where end_session/EOF cancels runCtx as the FSM reaches done.
+type ctxHonoringOps struct{ *fakeOps }
+
+func (o ctxHonoringOps) ReleaseCard(ctx context.Context, cardID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	return o.fakeOps.ReleaseCard(ctx, cardID)
+}
+
+func (o ctxHonoringOps) AddLog(ctx context.Context, cardID, message string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	return o.fakeOps.AddLog(ctx, cardID, message)
+}
+
+// TestRunDoneReleasesUnderCanceledContext: the done phase runs as the FSM winds
+// up, exactly when end_session/EOF may have canceled the run context. runDone
+// must still release the parent claim and write the completion log — it shields
+// both with context.WithoutCancel, so a dead run context does not drop them.
+func TestRunDoneReleasesUnderCanceledContext(t *testing.T) {
+	ops := &fakeOps{}
+	d := Deps{Ops: ctxHonoringOps{ops}, Cfg: Config{CardID: "CARD-1"}}
+	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "All done"}
+	o := newRun(d, tc)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the run context is already dead when done runs
+
+	require.NoError(t, runDone(ctx, o), "runDone stays best-effort")
+
+	calls := ops.recorded()
+	assert.GreaterOrEqual(t, indexOfCall(calls, "ReleaseCard:CARD-1"), 0,
+		"claim released despite the canceled run context; calls=%v", calls)
+
+	var logged bool
+
+	for _, c := range calls {
+		if strings.HasPrefix(c, "AddLog:") {
+			logged = true
+		}
+	}
+
+	assert.True(t, logged, "completion log written despite the canceled run context; calls=%v", calls)
+}
+
 func TestSquashMessage(t *testing.T) {
 	assert.Equal(t, "feat: add the thing", squashMessage("Add the Thing"))
 	assert.Equal(t, "feat: untitled", squashMessage("  "))
