@@ -452,6 +452,43 @@ func TestReviewFixMaxTurnsAborts(t *testing.T) {
 	}
 }
 
+// TestFixRunTierScalesTurnBudget proves a complex fix tier lifts the fix coder
+// turn budget above the flat base: 25 turns (more than the base of 20, fewer
+// than the complex budget of 30 = 1.5x base) run to completion instead of
+// capping mid-way.
+func TestFixRunTierScalesTurnBudget(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: burnResps(25)}
+
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+	d.Cfg.MaxTurns = 20
+	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body", State: "review"}
+	o := newReviewRun(d, tc, 0)
+
+	require.NoError(t, o.runFixModel(context.Background(), "fix prompt", 1, "complex", false),
+		"a complex fix tier scales the budget above the base, so 25 turns do not cap")
+}
+
+// TestFixRunSimpleTierCapsAtBase proves a simple fix tier is NOT scaled: the
+// same 25 turns cap at the flat base of 20.
+func TestFixRunSimpleTierCapsAtBase(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: burnResps(25)}
+
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+	d.Cfg.MaxTurns = 20
+	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body", State: "review"}
+	o := newReviewRun(d, tc, 0)
+
+	err := o.runFixModel(context.Background(), "fix prompt", 1, "simple", false)
+	require.Error(t, err, "a simple fix tier keeps the flat base, so 25 turns cap")
+
+	var mte *MaxTurnsError
+	require.ErrorAs(t, err, &mte)
+}
+
 func TestReviewFixCoderSelectionLogged(t *testing.T) {
 	// Round 1 is not approved -> fix coder run -> round 2 approves. The fix run
 	// must announce the selected coder model, the round number, and the tier on

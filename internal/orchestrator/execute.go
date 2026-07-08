@@ -268,7 +268,7 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 
 		_ = d.Ops.AddLog(ctx, cfg.CardID, logMsg) //nolint:errcheck // advisory selection record
 
-		res, err := o.runModelWrapUp(ctx, sc.tools, prompt, model, coderWrapUpMessage)
+		res, err := o.runModelCoder(ctx, sc.tools, prompt, model, coderWrapUpMessage, tierOf(sub))
 
 		// Account for spend even on a transport error / partial run, then report
 		// the model actually used (falling back to the resolved slug when the
@@ -429,10 +429,12 @@ func tierOf(sub subtaskRef) registry.Tier {
 // subtasks are missing, which a green verify cannot expose — and the
 // parent/single-solver (boardOps) keeps its park-and-resume path.
 //
-// Turn-budget decision: the default max-turns is 45 for headroom, and there is
-// deliberately NO separate candidate cap — the wrap-up nudge removes post-green
-// dithering and this salvage removes the cliff, so a bigger candidate budget
-// would only fund waste (see the turn-waste design spec).
+// Turn-budget decision: the coder budget is tier-scaled (complex 1.5x / critical
+// 2x the configured base via coderMaxTurns) with deliberately NO separate
+// candidate cap — candidates run the same tier-sized coder budget. The wrap-up
+// nudge removes post-green dithering and this salvage removes the cliff, so the
+// extra headroom is spent only on genuinely productive work; a flat candidate
+// bump would only fund waste (see the turn-waste design spec).
 func (o *run) salvageCapped(ctx context.Context, sc *solverCtx, sub subtaskRef, res harness.Result, err error) bool {
 	var mte *MaxTurnsError
 	if sc.boardOps || sc.lastSubID == "" || sub.ID != sc.lastSubID || !errors.As(err, &mte) {

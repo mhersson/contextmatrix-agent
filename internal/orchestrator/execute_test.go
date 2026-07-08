@@ -605,6 +605,16 @@ func burnResp(content string) llm.Response {
 	}
 }
 
+// burnResps returns n burn turns (see burnResp) for cap/budget tests.
+func burnResps(n int) []llm.Response {
+	rs := make([]llm.Response, n)
+	for i := range rs {
+		rs[i] = burnResp("")
+	}
+
+	return rs
+}
+
 func TestCoderRunGetsWrapUpNudge(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true}
@@ -621,6 +631,40 @@ func TestCoderRunGetsWrapUpNudge(t *testing.T) {
 	joined := strings.Join(client.tasks, "\n")
 	assert.Contains(t, joined, coderWrapUpMessage,
 		"the wrap-up nudge reaches the coder conversation as a user message")
+}
+
+// TestCoderRunTierScalesTurnBudget proves a complex subtask lifts the coder turn
+// budget above the flat base: 25 turns (more than the base of 20, fewer than the
+// complex budget of 30 = 1.5x base) run to completion instead of capping mid-way.
+func TestCoderRunTierScalesTurnBudget(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: burnResps(25)}
+
+	d := execTestDeps(ops, git, client)
+	d.Cfg.MaxTurns = 20
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "complex"}}, 0)
+
+	require.NoError(t, runExecute(context.Background(), o),
+		"a complex subtask scales the coder budget above the base, so 25 turns do not cap")
+}
+
+// TestCoderRunSimpleTierCapsAtBase proves a simple subtask is NOT scaled: the
+// same 25 turns cap at the flat base of 20, parking the single-solver run.
+func TestCoderRunSimpleTierCapsAtBase(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: burnResps(25)}
+
+	d := execTestDeps(ops, git, client)
+	d.Cfg.MaxTurns = 20
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+
+	err := runExecute(context.Background(), o)
+	require.Error(t, err, "a simple subtask keeps the flat base, so 25 turns cap")
+
+	var mte *MaxTurnsError
+	require.ErrorAs(t, err, &mte)
 }
 
 // TestSalvageCappedFinalSubtask proves a turn-capped final subtask is still
