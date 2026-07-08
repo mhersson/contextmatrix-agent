@@ -492,7 +492,7 @@ func hitlPlanRun(ops *fakeOps, inbox *fakeInbox, client llm.LLM) *run {
 		Cfg: Config{
 			Project: "proj", CardID: "CARD-1",
 			PayloadModel: "payload/model", DefaultModel: "default/model",
-			MaxTurns: 5, Interactive: true,
+			MaxTurns: 20, Interactive: true, // > wrapUpTurns so the nudge never fires on these 1-turn fakes
 		},
 	}
 
@@ -517,6 +517,53 @@ func TestRunPlanHITLApproveCreatesSubtasks(t *testing.T) {
 
 	require.NoError(t, runPlan(context.Background(), o))
 	assert.Len(t, ops.createCardArgs, 1, "subtasks created after approval")
+}
+
+// autoPlanRun builds an autonomous (non-interactive) *run for planner tests: a
+// plain, non-bug-like card so runPlan goes straight to draft → createSubtasks
+// with no brainstorm or diagnose detour consuming a scripted response.
+func autoPlanRun(ops *fakeOps, client llm.LLM, maxTurns int) *run {
+	d := Deps{
+		Ops:       ops,
+		Client:    client,
+		Emit:      events.NewEmitter(nil, nil),
+		Registry:  planTestRegistry(),
+		ReadTools: tools.NewRegistry(tools.NewReadTool(".")),
+		Cfg: Config{
+			Project: "proj", CardID: "CARD-1",
+			PayloadModel: "payload/model", DefaultModel: "default/model",
+			MaxTurns: maxTurns, Interactive: false,
+		},
+	}
+
+	tc := cmclient.TaskContext{
+		CardID: "CARD-1", Title: "Add a config flag",
+		Description: "Add a config flag to toggle the feature.",
+	}
+
+	return newRun(d, tc)
+}
+
+// TestRunPlanGetsWrapUpNudge proves the planner opts into the wrap-up nudge:
+// when the run burns down to wrapUpTurns remaining, the plan-specific nudge is
+// injected as a user message, steering the model to emit its JSON plan before
+// the cap instead of exploring into it.
+func TestRunPlanGetsWrapUpNudge(t *testing.T) {
+	ops := &fakeOps{}
+	// Three burn turns, then the plan JSON: with MaxTurns=8 the nudge fires
+	// after 8-5=3 consumed turns, before the model emits its plan.
+	client := &planLLM{responses: []llm.Response{
+		burnResp(""), burnResp(""), burnResp(""),
+		stopResp(onePlanJSON, 0.01),
+	}}
+	o := autoPlanRun(ops, client, 8)
+
+	require.NoError(t, runPlan(context.Background(), o))
+	assert.Len(t, ops.createCardArgs, 1, "the plan is emitted and its subtask created")
+
+	joined := strings.Join(client.tasks, "\n")
+	assert.Contains(t, joined, planWrapUpMessage,
+		"the wrap-up nudge reaches the planner conversation as a user message")
 }
 
 func TestRunPlanHITLAdjustRedraftsThenApproves(t *testing.T) {
@@ -562,7 +609,7 @@ func creativePlanRun(ops *fakeOps, inbox *fakeInbox, client llm.LLM) *run {
 		Cfg: Config{
 			Project: "proj", CardID: "CARD-1",
 			PayloadModel: "payload/model", DefaultModel: "default/model",
-			MaxTurns: 5, Interactive: true,
+			MaxTurns: 20, Interactive: true, // > wrapUpTurns so the nudge never fires on these 1-turn fakes
 		},
 	}
 
