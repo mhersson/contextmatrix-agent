@@ -52,7 +52,7 @@ flowchart LR
     subgraph work["contextmatrix-agent work · one Docker container per card"]
         direction TB
         W["Clone repo on cm/&lt;card-id&gt; · claim the card"]
-        FSM["Orchestrator FSM — mode-gated on Cfg.Interactive<br/>plan → execute → document → review → integrate → done"]
+        FSM["Orchestrator FSM — mode-gated on Cfg.Interactive<br/>plan → execute → judge → document → review → integrate → done"]
         HITL["HITL: brainstorming for creative cards,<br/>plus plan-approval &amp; review-decision human gates"]
         AUTO["Autonomous: gates auto-passed, brainstorming skipped"]
         W --> FSM
@@ -198,11 +198,11 @@ model emits a **complexity tier per role** — simple / moderate / complex /
 critical; deterministic code then maps each tier to the cost-optimal model. A
 candidate must be tool-capable, not blacklisted, fit the work's context window,
 and carry an external quality **prior** for the role that clears the tier's bar
-(floor 0.65). Among those, an eligible operator favorite wins outright;
-otherwise the selector picks the most capable candidate whose blended price is
-within a headroom band of the cheapest. Selection is **priors-only — there is no
-measured-capability gate.** Explicit pins (global → project → card) always
-override.
+(the bar rises with the tier, from 0.65 for simple up to 0.90 for critical).
+Among those, an eligible operator favorite wins outright; otherwise the selector
+picks the most capable candidate whose blended price is within a headroom band of
+the cheapest. Selection is **priors-only — there is no measured-capability
+gate.** An explicit model pin on the card always overrides.
 
 The selector's inputs are supplied by ContextMatrix, not embedded in the binary.
 Each trigger payload carries a `SelectionContext` with the candidate set, their
