@@ -126,3 +126,11 @@ func TestCommandCheckPassAndFail(t *testing.T) {
 	assert.False(t, v.OK)
 	assert.Contains(t, v.Detail, "nope")
 }
+
+func TestCommandCheckUnrunnableErrors(t *testing.T) {
+	root := t.TempDir()
+
+	_, err := commandCheck(root, "definitely-not-a-real-tool-xyz --check")(context.Background())
+	require.Error(t, err, "an unrunnable declared command is a loud error, not a fake pass")
+	assert.Contains(t, err.Error(), "cannot run")
+}

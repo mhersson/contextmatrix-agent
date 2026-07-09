@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/config"
+	"github.com/mhersson/contextmatrix-agent/internal/verifyexec"
 	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/mhersson/contextmatrix-harness/harness"
 	"github.com/mhersson/contextmatrix-harness/llm"
@@ -196,23 +197,30 @@ func runSpike(ctx context.Context, client llm.LLM, o runOpts) (harness.Result, e
 	return harness.Run(ctx, client, reg, emit, o.task, cfg)
 }
 
-// commandCheck builds a harness.Check that runs a shell command in root; exit 0
-// means success. Non-zero exit -> not-OK with the output as detail.
+// runVerifyTimeout bounds a standalone `run --verify` command. Generous — a slow
+// local suite must complete, not be cut off — while still bounding a hang.
+const runVerifyTimeout = time.Hour
+
+// commandCheck builds a harness.Check that runs a shell command in root with the
+// shared bash-pipefail semantics. It PROBES the command first: an unrunnable
+// declared command (a missing tool) is a loud error, never a silent pass or
+// skip. A command that runs and exits 0 is OK; a non-zero exit is not-OK with the
+// output as detail.
 func commandCheck(root, command string) harness.Check {
 	return func(ctx context.Context) (harness.Verdict, error) {
-		cmd := exec.CommandContext(ctx, "bash", "-c", command)
-		cmd.Dir = root
-
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			if _, ok := err.(*exec.ExitError); ok {
-				return harness.Verdict{OK: false, Detail: strings.TrimSpace(string(out))}, nil
-			}
-
-			return harness.Verdict{}, fmt.Errorf("verify command: %w", err)
+		if err := verifyexec.ProbeShell(root, command); err != nil {
+			return harness.Verdict{}, fmt.Errorf("verify command cannot run: %w", err)
 		}
 
-		return harness.Verdict{OK: true, Detail: strings.TrimSpace(string(out))}, nil
+		out := verifyexec.Exec(ctx, root, verifyexec.ShellArgv(command), runVerifyTimeout, nil)
+		if out.StartErr {
+			return harness.Verdict{}, fmt.Errorf("verify command failed to start")
+		}
+
+		return harness.Verdict{
+			OK:     out.ExitCode == 0 && !out.TimedOut,
+			Detail: strings.TrimSpace(out.Output),
+		}, nil
 	}
 }
 
