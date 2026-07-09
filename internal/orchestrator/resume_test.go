@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
@@ -239,6 +240,11 @@ func TestReconcileResumeBranchGenuinelyAbsent(t *testing.T) {
 	assert.Equal(t, -1, indexOfCall(gitCalls, "Fetch:cm/card-1"), "absent branch: fetch must be skipped, not tolerated")
 	assert.Equal(t, -1, indexOfCall(gitCalls, "Checkout:cm/card-1"), "absent branch: checkout must be skipped")
 
+	for _, c := range gitCalls {
+		assert.False(t, strings.HasPrefix(c, "HardReset"),
+			"absent branch: no remote tip to adopt, HardReset must be skipped; calls=%v", gitCalls)
+	}
+
 	require.Len(t, o.subtasks, 1)
 	assert.Equal(t, "SUB-1", o.subtasks[0].ID)
 }
@@ -295,6 +301,51 @@ func TestReconcileResumeCheckoutFailureFatal(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "checkout")
 
+	assert.Equal(t, -1, indexOfCall(ops.recorded(), "SubtaskStates:proj/CARD-1"))
+}
+
+func TestReconcileResumeAdoptsRemoteTip(t *testing.T) {
+	// The core resume contract: an existing remote branch is fetched, checked
+	// out, AND hard-reset onto the probed tip. The reset is load-bearing — the
+	// worker's prepareWorkspace already created a local branch of this name at
+	// base HEAD, so `git checkout <branch>` alone leaves the local branch at base
+	// (git does not fast-forward a pre-existing local branch to the fetched tip).
+	// Without the adopt the run silently restarts from base and its next WIP push
+	// is a non-fast-forward reject. reconcile must issue HardReset with the exact
+	// probed tip, in order, after the checkout.
+	ops := &fakeOps{
+		subtaskStates: []cmclient.SubtaskState{
+			{CardID: "SUB-1", Title: "one", State: "in_progress"},
+		},
+	}
+	git := &fakeGit{remoteTip: "wip-tip-9"} // the remote branch exists: it IS the state
+	o := reconcileTestRun(ops, git, "execute")
+
+	require.NoError(t, o.reconcile(context.Background()))
+
+	git.assertOrder(t, "RemoteTip:cm/card-1", "Fetch:cm/card-1", "Checkout:cm/card-1", "HardReset:wip-tip-9")
+	assert.Equal(t, []string{"wip-tip-9"}, git.hardResetRefs,
+		"resume must adopt the exact probed remote tip, not some other ref")
+}
+
+func TestReconcileResumeHardResetFailureFatal(t *testing.T) {
+	// The branch EXISTS and Fetch + Checkout succeeded, but the hard reset onto
+	// the remote tip fails. FATAL for the same reason as fetch/checkout failure:
+	// proceeding would run on a base-pointing tree that is NOT the resumed branch
+	// state, dropping pushed work and later overwriting the genuine branch with an
+	// incomplete tree.
+	ops := &fakeOps{}
+	git := &fakeGit{
+		remoteTip:    "wip-tip-9",
+		hardResetErr: assertErr("reset --hard: unknown revision"),
+	}
+	o := reconcileTestRun(ops, git, "execute")
+
+	err := o.reconcile(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "adopt")
+
+	// Nothing proceeds past the failed adopt.
 	assert.Equal(t, -1, indexOfCall(ops.recorded(), "SubtaskStates:proj/CARD-1"))
 }
 

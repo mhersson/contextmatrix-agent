@@ -956,6 +956,89 @@ func TestCheckout(t *testing.T) {
 	assert.Equal(t, "feature/resume", strings.TrimSpace(out))
 }
 
+// TestResumeAdoptsRemoteWIPTree is the real-git regression for the crash-resume
+// bug. Unlike TestCheckout (no local branch, so `git checkout` DWIMs a tracking
+// branch from origin), a real resume runs prepareWorkspace FIRST, which cuts a
+// LOCAL card branch from base HEAD. `git checkout <branch>` then merely switches
+// to that base-pointing branch and does NOT fast-forward it to the pushed WIP —
+// so the orchestrator's reconcile must hard-reset onto the probed remote tip.
+// This drives the real *worker.Git through the exact prepareWorkspace + reconcile
+// git sequence and proves the pushed WIP is adopted and a follow-up WIP push
+// fast-forwards. Without the HardReset, the NoFileExists assertion would instead
+// hold through the end and the final Push would be rejected non-fast-forward —
+// the failure the orchestrator's fake-git unit tests structurally cannot see.
+func TestResumeAdoptsRemoteWIPTree(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	bare := setupBareRemote(t)
+
+	const branch = "cm/card-1"
+
+	// The ORIGINAL run pushed WIP onto the card branch, then "crashed".
+	pushFileToBranch(t, bare, "original_wip.txt", branch)
+
+	// The RESUME worker: the REAL prepareWorkspace clones base and cuts a LOCAL
+	// card branch from base HEAD (git checkout -b), exactly as every run does.
+	spec := RunSpec{
+		CardID:     "CARD-1",
+		Project:    "proj",
+		RepoURL:    bare,
+		BaseBranch: "main",
+		Workspace:  t.TempDir(),
+	}
+	ws := filepath.Join(spec.Workspace, "card-1")
+	g := NewGit(ws, "", "", "") // local path remote needs no token
+
+	_, err := prepareWorkspace(ctx, g, spec, branch)
+	require.NoError(t, err)
+
+	// reconcile's resume sequence, driven through the real Git methods.
+	tip, err := g.RemoteTip(ctx, branch)
+	require.NoError(t, err)
+	require.NotEmpty(t, tip)
+
+	require.NoError(t, g.Fetch(ctx, branch))
+	require.NoError(t, g.Checkout(ctx, branch))
+
+	// The bug: prepareWorkspace already created a local branch of this name at
+	// base, so the checkout above switches to that base-pointing branch and does
+	// NOT adopt the fetched tip. The pushed WIP is absent until the reset below.
+	assert.NoFileExists(t, filepath.Join(ws, "original_wip.txt"),
+		"checkout of the pre-existing local branch must not adopt the remote tip on its own")
+
+	// The fix: hard-reset the local branch onto the probed remote tip.
+	require.NoError(t, g.HardReset(ctx, tip))
+
+	assert.FileExists(t, filepath.Join(ws, "original_wip.txt"),
+		"after adopting the tip, the resumed tree must carry the original run's WIP")
+
+	head, err := g.Head(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, tip, head, "local branch must sit on the adopted remote tip")
+
+	// A follow-up WIP push must fast-forward: the resumed run builds on the
+	// adopted tip instead of diverging from base — the non-fast-forward reject
+	// this whole path exists to prevent.
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "resumed_work.txt"), []byte("more\n"), 0o644))
+
+	dirty, err := g.CommitIfDirty(ctx, "WIP: resumed run", "CARD-1")
+	require.NoError(t, err)
+	require.True(t, dirty)
+
+	require.NoError(t, g.Push(ctx, branch), "WIP push must fast-forward after adopting the remote tip")
+
+	// The remote branch now carries both the original and the resumed commit.
+	cmd := exec.Command("git", "log", "--format=%s", branch)
+	cmd.Dir = bare
+	cmd.Env = gitEnv()
+
+	logOut, err := cmd.CombinedOutput()
+	require.NoError(t, err, "git log: %s", logOut)
+	assert.Contains(t, string(logOut), "add original_wip.txt")
+	assert.Contains(t, string(logOut), "WIP: resumed run")
+}
+
 func TestDiff(t *testing.T) {
 	t.Parallel()
 
