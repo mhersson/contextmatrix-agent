@@ -79,10 +79,10 @@ Decompose the task into subtasks following these rules:
   any such "add/pin tests for X" work into X.
 - Exception to the file-count and independent-verifiability rules above: when a
   change is ONE coordinated, cross-cutting edit that genuinely cannot be split
-  into independently-compiling pieces — e.g. deleting a shared type or changing
+  into independently-verifiable pieces — e.g. deleting a shared type or changing
   a shared signature breaks all of its consumers in the same commit — emit it as
   a single subtask even if it exceeds the ~5-file guidance. A larger subtask that
-  keeps the tree building and its tests green is correct; several smaller ones
+  keeps the tree passing its checks and its tests green is correct; several smaller ones
   that each leave the tree broken are not. Do NOT invent artificial staging
   (dead fields, temporary shims, "zero out now / delete later") solely to satisfy
   the file cap.
@@ -180,14 +180,13 @@ subtasks, but no code>
 <related code paths to leave alone, refactoring hazards, assumptions made>
 `
 
-// buildHygieneNote tells the coder/fixer not to leave a compiled binary in the
+// buildHygieneNote tells the coder/fixer not to leave build output in the
 // workspace — leftover artifacts clutter the surface the reviewers read. Shared
 // by coderPrompt and fixPrompt so the guidance cannot drift (same pattern as
-// selfReviewBlock).
-const buildHygieneNote = `When you compile only to check the build, do not leave the binary behind — build
-to a throwaway path (e.g. go build -o /dev/null ./...) or delete the compiled
-output before you finish. Leftover build artifacts clutter the workspace the
-reviewers read.`
+// selfReviewBlock). Deliberately language-neutral: it names no build tool.
+const buildHygieneNote = `If you run a build or compile step only to check it, do not leave its output
+behind — write it to a throwaway path or delete it before you finish. Leftover
+build artifacts clutter the workspace the reviewers read.`
 
 // selfReviewBlock is the coder/fixer self-review gate, shared by coderPrompt and
 // fixPrompt so the two cannot drift. Hygiene only — it must not invite scope
@@ -302,7 +301,7 @@ groups. End with a one-sentence verdict for your specialty.
 const correctnessPrompt = `Your specialty is CORRECTNESS. Focus on:
 - Bugs, logic errors, off-by-one, edge cases.
 - Error handling completeness (silent failures, swallowed errors).
-- Concurrency, races, lock ordering, goroutine leaks.
+- Concurrency, races, lock ordering, leaked concurrent workers (threads, tasks, coroutines, goroutines).
 - Observability: structured logging, debuggable error context.
 - Test coverage and quality — do tests exercise new behavior, or are they
   vacuous? Flag flakiness, time coupling, ordering dependencies.
@@ -310,12 +309,12 @@ Stay strictly within correctness; do not opine outside it.`
 
 // designPrompt is the Design & Maintainability specialist lens (Specialist B).
 const designPrompt = `Your specialty is DESIGN & MAINTAINABILITY. Focus on:
-- Architecture, separation of concerns, cross-package coupling.
+- Architecture, separation of concerns, cross-module coupling.
 - API and interface contracts at module boundaries — only a real defect in what the task required, not a missing abstraction.
 - Backward compatibility: public APIs, config formats, on-disk schemas. Flag
   breaking changes without a migration path.
 - Readability, naming, complexity, function length.
-- Duplication, dead code, unused exports.
+- Duplication, dead code, unused public symbols.
 Stay strictly within design; do not opine outside it.`
 
 // securityPrompt is the Security & Performance specialist lens (Specialist C).
@@ -357,7 +356,7 @@ Decision rule:
   on operations that cannot realistically fail, stricter-than-asked tests, and
   style or naming are Minor at most, even if a specialist marked them Critical
   or Important.
-- Weigh a passing build and passing tests as evidence: a "this could break" or
+- Weigh a passing verify run and passing tests as evidence: a "this could break" or
   toolchain/version concern they contradict is Minor.
 - Also judge the change against the task: if it does NOT satisfy the acceptance criteria
   (incomplete) → not approved. If it ADDED things outside the task's scope (new
