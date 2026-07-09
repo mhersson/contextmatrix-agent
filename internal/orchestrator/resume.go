@@ -29,8 +29,9 @@ const reconcileTierDefault = "moderate"
 //     local branch.
 //   - Resume (phase != ""): the fetched branch IS the state. Probe the remote
 //     FIRST to decide: an absent branch (crash-before-first-push) continues on
-//     the fresh local branch; an existing branch is fetched + checked out, and
-//     any failure there is FATAL. See the inline rationale below.
+//     the fresh local branch; an existing branch is fetched, checked out, and
+//     hard-reset onto its remote tip, and any failure there is FATAL. See the
+//     inline rationale below.
 //
 // Subtask loading (resume only): SubtaskStates -> o.subtasks, sorted by card ID.
 // Dependency edges are NOT persisted (list_cards returns only id/title/state), so
@@ -105,6 +106,20 @@ func (o *run) reconcile(ctx context.Context) error {
 
 		if err := o.d.Git.Checkout(ctx, cfg.Branch); err != nil {
 			return fmt.Errorf("checkout resume branch %q: %w", cfg.Branch, err)
+		}
+
+		// prepareWorkspace already created a LOCAL branch of this name at base HEAD
+		// (git checkout -b), so the Checkout above merely switches to that
+		// base-pointing branch — git checkout does NOT fast-forward a pre-existing
+		// local branch to the fetched tip. Reset hard onto the probed remote tip so
+		// the local branch, index, and working tree all carry the pushed WIP.
+		// Without this the resume silently restarts from base: it redoes finished
+		// work AND its next WIP push is a non-fast-forward reject against the very
+		// branch it was meant to resume. The tip commit is in the object store
+		// after Fetch, so the reset is deterministic and independent of the fetch
+		// refspec.
+		if err := o.d.Git.HardReset(ctx, tip); err != nil {
+			return fmt.Errorf("adopt resume branch %q at %s: %w", cfg.Branch, tip, err)
 		}
 	}
 
