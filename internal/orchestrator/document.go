@@ -46,7 +46,7 @@ func runDocument(ctx context.Context, o *run) error {
 	}
 
 	task := fmt.Sprintf(documentPrompt, o.skillEngage(), o.grounding, cfg.Workspace,
-		o.tc.Title, o.tc.Description, o.planOverview(), diff)
+		o.tc.Title, o.tc.Description, o.planOverview(), diff, o.verifyDocContext())
 
 	res, err := o.runModelWrapUp(ctx, d.WriteTools, task, model, documentWrapUpMessage)
 

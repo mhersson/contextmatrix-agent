@@ -308,6 +308,12 @@ type run struct {
 	// resolved; a resume into any phase re-resolves lazily.
 	verify *verifyPlan
 
+	// lastVerify is the run's most recent gate result, updated each review round
+	// (and left the zero skipped value when no gate ran). It feeds the honest
+	// verify trailers on the PR body and the completion note — the run-level
+	// answer to "was this change verified?".
+	lastVerify verifyResult
+
 	// runVerify is the RAW verify subprocess runner: it executes an argv and
 	// reports the unclassified outcome, so classifyVerify (pure) does the tri-state
 	// decision and test stubs stay trivial. It is a struct field so tests can stub

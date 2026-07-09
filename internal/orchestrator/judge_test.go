@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,6 +13,59 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// seqGit records a marker into a shared sequence whenever Diff is called, so a
+// test can pin the ordering of Diff relative to the verify runner.
+type seqGit struct {
+	*fakeGit
+	mu  *sync.Mutex
+	seq *[]string
+}
+
+func (g *seqGit) Diff(context.Context, string) (string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	*g.seq = append(*g.seq, "diff")
+
+	return "DIFF", nil
+}
+
+// TestJudgeCapturesDiffBeforeVerify pins the order-swap: the candidate diff is
+// snapshotted BEFORE verify runs, so a mutating verify command cannot pollute the
+// artifact the judge compares.
+func TestJudgeCapturesDiffBeforeVerify(t *testing.T) {
+	var (
+		mu  sync.Mutex
+		seq []string
+	)
+
+	c := &candidate{
+		idx:    1,
+		model:  "coder/one",
+		dir:    "dir-c1",
+		git:    &seqGit{fakeGit: &fakeGit{}, mu: &mu, seq: &seq},
+		ledger: NewLedger(0, 0),
+	}
+
+	ops := &fakeOps{}
+	o := newJudgeRun(t, ops, &fakeGit{}, &planLLM{}, []*candidate{c}, map[string]bool{"dir-c1": true})
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		mu.Lock()
+		defer mu.Unlock()
+
+		seq = append(seq, "verify")
+
+		return verifyexec.Outcome{ExitCode: 0}
+	}
+
+	require.NoError(t, runJudge(context.Background(), o))
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	assert.Equal(t, []string{"diff", "verify"}, seq, "the diff must be captured before verify runs")
+}
 
 // diffGit is a fakeGit whose Diff returns a preset per-candidate string, so the
 // judge tests can assert which candidate diffs reached the prompt. DiffStat is
@@ -347,6 +401,36 @@ func TestJudgeReportRendersAssessments(t *testing.T) {
 	assert.Contains(t, body, "candidate numbers in judge text are pool positions")
 	assert.Contains(t, body, "- Candidate 1: solid and minimal")
 	assert.Contains(t, body, "- Candidate 2: overcomplicated")
+}
+
+// TestJudgeReportUnverifiedWinnerFooter proves the report warns loudly when the
+// adopted winner did not pass verify, and stays quiet when it did.
+func TestJudgeReportUnverifiedWinnerFooter(t *testing.T) {
+	t.Run("unverified winner gets the footer", func(t *testing.T) {
+		ops := &fakeOps{}
+		o := &run{d: Deps{Ops: ops, Cfg: Config{CardID: "CARD-1"}}}
+		c := &candidate{idx: 1, model: "m", verify: verifyResult{Status: verifySkipped, Note: "tool missing"}}
+		o.candidates = []*candidate{c}
+		o.winner = c
+
+		o.recordJudgeReport(context.Background(), nil)
+
+		body := ops.lastBody()
+		assert.Contains(t, body, "Winner adopted without a passing verify — tool missing")
+	})
+
+	t.Run("verified winner has no footer", func(t *testing.T) {
+		ops := &fakeOps{}
+		o := &run{d: Deps{Ops: ops, Cfg: Config{CardID: "CARD-1"}}}
+		c := &candidate{idx: 1, model: "m", verify: verifyResult{Status: verifyPassed}}
+		o.candidates = []*candidate{c}
+		o.winner = c
+
+		o.recordJudgeReport(context.Background(), nil)
+
+		body := ops.lastBody()
+		assert.NotContains(t, body, "Winner adopted without a passing verify")
+	})
 }
 
 // adoptionCandidate builds on judgeCandidate with the extra fields the

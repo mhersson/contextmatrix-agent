@@ -962,6 +962,56 @@ func TestReviewGateFailureSkipsSpecialists(t *testing.T) {
 	assert.Equal(t, 1, incCount, "gate failure increments the attempt counter via the fix path")
 }
 
+func TestReviewGateSkippedProceedsUnverified(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{}
+	// Gate skips -> specialists run and approve; no fix coder is invoked.
+	client := &planLLM{responses: []llm.Response{
+		stopResp("No concerns.", 0.01), stopResp("No concerns.", 0.01), stopResp("No concerns.", 0.01),
+		stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.01),
+	}}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "P", Description: "b", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+	o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
+	// The verify tool is missing -> a skipped (inconclusive) gate.
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		return verifyexec.Outcome{StartErr: true, ExitCode: -1}
+	}
+
+	findings, _, approved, vres, err := o.reviewRound(context.Background(), *o.verify, 1, false)
+	require.NoError(t, err)
+	assert.Equal(t, verifySkipped, vres.Status)
+	assert.True(t, approved, "a skipped gate proceeds to the specialists, which approve")
+	assert.NotEmpty(t, findings)
+	assert.True(t, ops.loggedContains("verify skipped"), "the skip is logged loudly; logs=%v", ops.logs)
+	assert.Len(t, client.tasks, 4, "a skipped gate runs the full panel (3 specialists + synthesis), not a fix loop")
+}
+
+func TestReviewGateFailureRedactsFindings(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{}
+	client := &planLLM{}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+	d.Redact = func(s string) string { return strings.ReplaceAll(s, "SECRETTOKEN", "[MASKED]") }
+
+	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "P", Description: "b", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+	o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 1, Output: "auth error: SECRETTOKEN leaked in the log"}
+	}
+
+	findings, _, approved, vres, err := o.reviewRound(context.Background(), *o.verify, 1, false)
+	require.NoError(t, err)
+	assert.False(t, approved)
+	assert.Equal(t, verifyFailed, vres.Status)
+	assert.Contains(t, findings, "[MASKED]", "the verify output is redacted before it enters the findings")
+	assert.NotContains(t, findings, "SECRETTOKEN", "a secret must never reach the fix prompt or the activity log")
+	assert.Empty(t, client.tasks, "a gate failure short-circuits to the fix loop before any reviewer model call")
+}
+
 func TestReviewBudgetParkBeforeSpecialists(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{}

@@ -162,7 +162,12 @@ func (o *run) writePRBody(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("PR-body run: %w", err)
 	}
 
-	return strings.TrimSpace(res.Output), nil
+	// Mechanically append the verify status: the model-written body is not a
+	// guaranteed surface, so the honest verification line is added BY CODE and
+	// cannot be omitted or softened by the model.
+	body := strings.TrimSpace(res.Output)
+
+	return body + "\n\n---\n**Verification:** " + verifyStatusLine(o.lastVerify, o.resolvedVerifyPlan()) + "\n", nil
 }
 
 // planOverview renders the subtask titles as the PR body's plan-overview block.
@@ -185,13 +190,20 @@ func (o *run) planOverview() string {
 }
 
 // reviewOutcome returns the captured review summary, or a neutral note when the
-// review phase was skipped on resume (no summary recorded).
+// review phase was skipped on resume (no summary recorded). The fallback must
+// never read as verified when the run's verify did not pass — otherwise a
+// summary-less, unverified run would feed the PR-body model "review approved" and
+// invite a false "tests pass" claim.
 func (o *run) reviewOutcome() string {
-	if strings.TrimSpace(o.reviewSummary) == "" {
-		return "(review approved; no summary recorded)"
+	if strings.TrimSpace(o.reviewSummary) != "" {
+		return o.reviewSummary
 	}
 
-	return o.reviewSummary
+	if o.lastVerify.Status != verifyPassed {
+		return "(review approved; no summary recorded; the change was not verified)"
+	}
+
+	return "(review approved; no summary recorded)"
 }
 
 // squashMessage derives the single squashed commit's conventional message from
@@ -221,8 +233,8 @@ func runDone(ctx context.Context, o *run) error {
 	}
 
 	_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory completion note
-		fmt.Sprintf("run complete: %q integrated and pushed on %s; total spend $%.4f",
-			o.tc.Title, cfg.Branch, o.ledger.Spent()))
+		fmt.Sprintf("run complete: %q integrated and pushed on %s; total spend $%.4f; verify: %s",
+			o.tc.Title, cfg.Branch, o.ledger.Spent(), verifyStatusLine(o.lastVerify, o.resolvedVerifyPlan())))
 
 	return nil
 }

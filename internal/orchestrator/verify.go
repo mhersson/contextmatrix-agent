@@ -79,6 +79,64 @@ func (o *run) resolvedVerifyPlan() verifyPlan {
 	return *o.verify
 }
 
+// verifyStatusWord is the lowercase word for a verify status, for activity-log
+// lines ("passed" / "failed" / "skipped").
+func verifyStatusWord(s verifyStatus) string {
+	switch s {
+	case verifyPassed:
+		return "passed"
+	case verifyFailed:
+		return "failed"
+	default:
+		return "skipped"
+	}
+}
+
+// verifyDocContext is the advisory verify line handed to the document phase:
+// the winner's judged result for a Best-of-N run, else the resolved command the
+// review gate will run (the single-solver gate has not run yet at document time).
+// It is context only — the document model's prose is not a guaranteed surface.
+func (o *run) verifyDocContext() string {
+	if o.winner != nil {
+		return verifyStatusLine(o.winner.verify, o.resolvedVerifyPlan())
+	}
+
+	p := o.resolvedVerifyPlan()
+	if len(p.Argv) == 0 {
+		return "no verify command resolved for this run"
+	}
+
+	return fmt.Sprintf("the change will be verified by `%s` (%s)", p.Display, p.Source)
+}
+
+// verifyStatusLine renders the run-level verify status for the PR body and the
+// completion note: PASSED/FAILED name the command and source; a non-pass reads as
+// NOT VERIFIED with the reason. It is built BY CODE so these surfaces are honest
+// regardless of what any model wrote.
+func verifyStatusLine(vres verifyResult, plan verifyPlan) string {
+	switch vres.Status {
+	case verifyPassed:
+		if plan.Display != "" {
+			return fmt.Sprintf("PASSED — `%s` (%s)", plan.Display, plan.Source)
+		}
+
+		return "PASSED"
+	case verifyFailed:
+		if plan.Display != "" {
+			return fmt.Sprintf("FAILED — `%s` (%s)", plan.Display, plan.Source)
+		}
+
+		return "FAILED"
+	default:
+		note := vres.Note
+		if note == "" {
+			note = "no verify command resolved"
+		}
+
+		return "NOT VERIFIED — " + note
+	}
+}
+
 // verifyProvenance labels the source of a resolved verify command for the judge
 // report and prompts. A nil plan or a none-source (defensive) reads as unknown.
 func verifyProvenance(p *verifyPlan) string {

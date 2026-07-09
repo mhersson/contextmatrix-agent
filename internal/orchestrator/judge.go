@@ -111,6 +111,9 @@ func runJudge(ctx context.Context, o *run) error {
 		}
 
 		c.verify = res
+
+		_ = d.Ops.AddLog(ctx, cfg.CardID, fmt.Sprintf( //nolint:errcheck // advisory per-candidate result
+			"best-of-n: candidate %d (%s) verify %s", c.idx, c.model, verifyStatusWord(res.Status)))
 	}
 
 	// Verify failures are eliminated only when at least one candidate passes;
@@ -407,6 +410,17 @@ func (o *run) recordJudgeReport(ctx context.Context, v *judgeVerdict) {
 			b.WriteString("_(candidate numbers in judge text are pool positions)_\n\n")
 			b.WriteString(rows)
 		}
+	}
+
+	// A winner adopted on a non-passing verify is flagged loudly on the card, so a
+	// human reading the Best-of-N report sees the unverified adoption directly.
+	if o.winner != nil && o.winner.verify.Status != verifyPassed {
+		note := o.winner.verify.Note
+		if note == "" {
+			note = "verify did not pass"
+		}
+
+		fmt.Fprintf(&b, "\n**⚠ Winner adopted without a passing verify — %s**\n", note)
 	}
 
 	judge := o.judgeModel

@@ -108,14 +108,14 @@ func runReview(ctx context.Context, o *run) error {
 			return o.authoritativeReview(ctx, plan, round)
 		}
 
-		findings, fixTier, approved, err := o.reviewRound(ctx, plan, round, false)
+		findings, fixTier, approved, vres, err := o.reviewRound(ctx, plan, round, false)
 		if err != nil {
 			return err
 		}
 
 		// Record this round on the parent card body for the complete review
 		// history (the runner's review-task writes ## Review Findings the same way).
-		o.recordReview(ctx, round, findings, approved)
+		o.recordReview(ctx, round, findings, approved, vres)
 
 		if approved {
 			o.reviewSummary = findings // synthesis verdict summary, for the PR body
@@ -155,12 +155,12 @@ func (o *run) runReviewHITL(ctx context.Context, plan verifyPlan) error {
 	for iter := range hardReviewIterationCap {
 		round := o.tc.ReviewAttempts + iter + 1
 
-		findings, fixTier, autoApproved, err := o.reviewRound(ctx, plan, round, false)
+		findings, fixTier, autoApproved, vres, err := o.reviewRound(ctx, plan, round, false)
 		if err != nil {
 			return err
 		}
 
-		o.recordReview(ctx, round, findings, autoApproved)
+		o.recordReview(ctx, round, findings, autoApproved, vres)
 
 		outcome, fb, gerr := o.gate(ctx, gateReviewDecision, model, presentFindings(findings, autoApproved))
 		if gerr != nil {
@@ -218,12 +218,12 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 	d := o.d
 	cfg := d.Cfg
 
-	findings, fixTier, approved, err := o.reviewRound(ctx, plan, round, true)
+	findings, fixTier, approved, vres, err := o.reviewRound(ctx, plan, round, true)
 	if err != nil {
 		return err
 	}
 
-	o.recordReview(ctx, round, findings, approved)
+	o.recordReview(ctx, round, findings, approved, vres)
 
 	if approved {
 		o.reviewSummary = findings
@@ -246,12 +246,12 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 	// One strong re-review of the full change.
 	round2 := round + 1
 
-	findings2, _, approved2, err := o.reviewRound(ctx, plan, round2, true)
+	findings2, _, approved2, vres2, err := o.reviewRound(ctx, plan, round2, true)
 	if err != nil {
 		return err
 	}
 
-	o.recordReview(ctx, round2, findings2, approved2)
+	o.recordReview(ctx, round2, findings2, approved2, vres2)
 
 	if approved2 {
 		o.reviewSummary = findings2
@@ -280,18 +280,20 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 // WITHOUT the fix loop (a missing/timed-out gate is not a defect to fix); PASSED
 // (or no command) proceeds. On any gate outcome that reaches them, the three
 // specialists fan out and the synthesis verdict decides.
-func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, authoritative bool) (findings string, fixTier string, approved bool, err error) {
+func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, authoritative bool) (findings string, fixTier string, approved bool, vres verifyResult, err error) {
 	// Budget gate before the verify subprocess too — the gate may be cheap, but
 	// the fix run it can trigger is not, and we park before doing any work.
 	if err := o.ledger.Check(); err != nil {
-		return "", "", false, err
+		return "", "", false, verifyResult{}, err
 	}
 
 	if len(plan.Argv) > 0 {
 		res, verr := o.runVerifyPlan(ctx, o.d.Cfg.Workspace, plan)
 		if verr != nil {
-			return "", "", false, verr
+			return "", "", false, verifyResult{}, verr
 		}
+
+		vres = res
 
 		switch res.Status {
 		case verifyFailed:
@@ -299,7 +301,7 @@ func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, autho
 			// tokens. The redacted output tail is the finding the coder fixes. No
 			// verdict ran, so the fix run falls back to the card tier (empty fixTier).
 			return "verify command failed: " + plan.Display + "\n" +
-				tools.HeadTail(res.Output, verifyOutputTail), "", false, nil
+				tools.HeadTail(res.Output, verifyOutputTail), "", false, vres, nil
 		case verifySkipped:
 			// A missing or timed-out gate is inconclusive, not a defect: log it
 			// loudly and proceed to the specialists without a fix loop.
@@ -314,23 +316,23 @@ func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, autho
 	// substitute for review, so specialists always run.
 	specialistFindings, err := o.runSpecialists(ctx, authoritative)
 	if err != nil {
-		return "", "", false, err
+		return "", "", false, vres, err
 	}
 
 	if err := o.ledger.Check(); err != nil {
-		return "", "", false, err
+		return "", "", false, vres, err
 	}
 
 	v, err := o.synthesize(ctx, specialistFindings, authoritative)
 	if err != nil {
-		return "", "", false, err
+		return "", "", false, vres, err
 	}
 
 	if v.Approved {
-		return v.Summary, v.FixTier, true, nil
+		return v.Summary, v.FixTier, true, vres, nil
 	}
 
-	return formatFixes(v), v.FixTier, false, nil
+	return formatFixes(v), v.FixTier, false, vres, nil
 }
 
 // runSpecialists fans the three review lenses out as parallel read-only child

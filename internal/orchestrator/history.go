@@ -29,7 +29,9 @@ func (o *run) recordSection(ctx context.Context, heading, section string) {
 // heading, later rounds use "## Review Findings (Round N)". Each round is
 // preserved (the per-round heading makes the upsert effectively an append),
 // while a re-run of the same round on resume replaces rather than duplicates.
-func (o *run) recordReview(ctx context.Context, round int, findings string, approved bool) {
+// Every round leads with the round's verify result, so a human reading the card
+// sees whether the change was verified — never inferring it from silence.
+func (o *run) recordReview(ctx context.Context, round int, findings string, approved bool, vres verifyResult) {
 	heading := "Review Findings"
 	if round > 1 {
 		heading = fmt.Sprintf("Review Findings (Round %d)", round)
@@ -40,10 +42,38 @@ func (o *run) recordReview(ctx context.Context, round int, findings string, appr
 		verdict = "approve"
 	}
 
-	section := fmt.Sprintf("## %s\n\n%s\n\n### Recommendation\n\n%s",
-		heading, strings.TrimSpace(findings), verdict)
+	// The run-level verify status tracks the latest round's gate result, feeding
+	// the PR-body and completion-note trailers.
+	o.lastVerify = vres
+
+	section := fmt.Sprintf("## %s\n\n%s\n\n%s\n\n### Recommendation\n\n%s",
+		heading, verifyRoundLine(vres, o.resolvedVerifyPlan()), strings.TrimSpace(findings), verdict)
 
 	o.recordSection(ctx, heading, section)
+}
+
+// verifyRoundLine renders the "**Verify:** ..." status line prepended to each
+// recorded review round. It is derived BY CODE from the round's verify result
+// and the resolved plan's provenance, so the honesty of the record does not
+// depend on any model choosing to mention it.
+func verifyRoundLine(vres verifyResult, plan verifyPlan) string {
+	switch vres.Status {
+	case verifyPassed:
+		return fmt.Sprintf("**Verify:** PASSED _(source: %s)_", plan.Source)
+	case verifyFailed:
+		return fmt.Sprintf("**Verify:** FAILED _(source: %s)_", plan.Source)
+	default:
+		note := vres.Note
+		if note == "" {
+			note = "no verify command resolved"
+		}
+
+		if plan.Source == verifySourceNone {
+			return "**Verify:** SKIPPED — " + note
+		}
+
+		return fmt.Sprintf("**Verify:** SKIPPED — %s _(source: %s)_", note, plan.Source)
+	}
 }
 
 // sectionFrom normalizes content into a "## <heading>" section: if content

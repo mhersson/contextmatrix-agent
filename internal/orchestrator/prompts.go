@@ -496,8 +496,8 @@ Respond with ONLY the Markdown PR body — no surrounding prose, no code fences.
 // phase owns claim/usage/push in code.
 //
 // The trailing %s slots are filled by runDocument: workspace root, parent card
-// title, parent card description, the plan overview (subtask titles), and the
-// branch diff.
+// title, parent card description, the plan overview (subtask titles), the branch
+// diff, and the run's verify context (advisory — not a guaranteed surface).
 const documentPrompt = `%s%sYou are the documentation agent for completed work that review will inspect
 next. You have the full write toolset (read, grep, glob, edit, write, bash)
 rooted at the workspace. Decide whether external documentation is needed for
@@ -548,6 +548,9 @@ PLAN OVERVIEW (subtasks)
 %s
 
 BRANCH DIFF (what actually changed)
+%s
+
+VERIFY (how this change is gated)
 %s
 `
 
