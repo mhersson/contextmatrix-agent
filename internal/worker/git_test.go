@@ -111,19 +111,27 @@ func TestStageForCommit_SkipsNativeBinariesAndHonoursGitignore(t *testing.T) {
 	// A golden-output fixture (untracked, MUST be staged): a ".out" data file is
 	// legitimate source. Real a.out binaries are caught by magic, not by name.
 	writeFile(t, ws, "golden.out", []byte("expected output\n"), 0o644)
+	// An untracked TEXT artifact the repo forgot to .gitignore. It IS staged: the
+	// content guard blocks only NATIVE BINARIES (executable magic), so a text build
+	// log rides along. This is the accepted trade of the content-based guard — the
+	// repo's own .gitignore is the ONLY defense against committed text artifacts;
+	// the agent adds no name-based denylist that would also drop first-party source.
+	writeFile(t, ws, "build.log", []byte("compiling...\nok\n"), 0o644)
 
 	committed, err := g.CommitWithMessage(context.Background(), "feat: real work")
 	require.NoError(t, err)
 	require.True(t, committed)
 
 	// HEAD must contain every source file (incl. target/ source and the golden
-	// fixture) but NOT the native binary or the repo-ignored bytecode.
+	// fixture) plus the un-ignored text artifact, but NOT the native binary or the
+	// repo-ignored bytecode.
 	out, err := g.run(context.Background(), "show", "--name-only", "--format=", "HEAD")
 	require.NoError(t, err)
 	assert.Contains(t, out, "README.md")
 	assert.Contains(t, out, "main.go")
 	assert.Contains(t, out, "target/config.rs")
 	assert.Contains(t, out, "golden.out")
+	assert.Contains(t, out, "build.log")
 	assert.NotContains(t, out, "app")
 	assert.NotContains(t, out, "stale.pyc")
 
