@@ -202,7 +202,6 @@ func (o *run) runFanout(ctx context.Context) (retErr error) {
 	var wg sync.WaitGroup
 
 	for _, cand := range o.candidates {
-
 		wg.Go(func() {
 			defer func() {
 				if r := recover(); r != nil {

@@ -142,7 +142,6 @@ func TestSpecFromEnv_RequiredVars(t *testing.T) {
 	}
 
 	for _, missing := range required {
-
 		t.Run("missing_"+missing, func(t *testing.T) {
 			setRequired(t)
 			t.Setenv(missing, "") // blank the specific required var
@@ -200,7 +199,6 @@ func TestSpecFromEnv_BoolParsing(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-
 		t.Run(tc.name, func(t *testing.T) {
 			setRequired(t)
 			t.Setenv("CM_INTERACTIVE", tc.value)
