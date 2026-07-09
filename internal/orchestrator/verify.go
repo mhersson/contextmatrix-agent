@@ -48,6 +48,12 @@ type verifyPlan struct {
 	Timeout time.Duration
 	Env     []string // resolved KEY=VALUE pass-throughs
 	Notes   []string // resolution notes (e.g. a declared command that could not run)
+	// Wrapper marks a DETECTED test-wrapper command (make/just/task), which masks
+	// a missing inner toolchain binary as an ordinary non-127 exit. Only for a
+	// wrapper does classifyVerify consult the tool-missing heuristic; every other
+	// command keeps the strict 127/start-error signal, so a genuine failure that
+	// merely prints a not-found line is never downgraded to skipped.
+	Wrapper bool
 }
 
 // verifyResult is one execution's classified outcome. Output is redacted at
@@ -161,7 +167,10 @@ func classifyVerify(plan verifyPlan, out verifyexec.Outcome) verifyResult {
 			Output: out.Output,
 			Note:   fmt.Sprintf("verify timed out after %s — inconclusive, treated as unverified", plan.Timeout),
 		}
-	case out.StartErr || out.ExitCode == 127 || verifyexec.LooksToolMissing(out.Output):
+	case out.StartErr || out.ExitCode == 127 || (plan.Wrapper && verifyexec.LooksToolMissing(out.Output)):
+		// The tool-missing heuristic is consulted ONLY for a detected wrapper, which
+		// swallows an inner tool's 127 into a plain exit code. For every other
+		// command a genuine failure that merely prints a not-found line stays FAILED.
 		return verifyResult{
 			Status: verifySkipped,
 			Output: out.Output,
@@ -235,7 +244,7 @@ func (o *run) resolveVerify(ctx context.Context) (verifyPlan, error) {
 	}
 
 	// Tier 2: repo-convention detection.
-	if argv, display := detectVerifyCommand(cfg.Workspace); len(argv) > 0 {
+	if argv, display, wrapper := detectVerifyCommand(cfg.Workspace); len(argv) > 0 {
 		return verifyPlan{
 			Argv:    argv,
 			Display: display,
@@ -243,6 +252,7 @@ func (o *run) resolveVerify(ctx context.Context) (verifyPlan, error) {
 			Timeout: timeout,
 			Env:     env,
 			Notes:   notes, // carry a declared-cannot-run note onto the resolved plan
+			Wrapper: wrapper,
 		}, nil
 	}
 
@@ -358,21 +368,23 @@ func (o *run) logVerifyResolution(ctx context.Context, p verifyPlan) {
 // then the wrapper would shell out to a missing binary and false-fail, so it is
 // skipped. Otherwise the marker table is walked in priority order and the first
 // toolchain whose tool actually resolves is used. Returns (nil, "") when nothing
-// runnable is found.
-func detectVerifyCommand(workspace string) ([]string, string) {
-	if argv := detectWrapper(workspace); argv != nil {
-		return argv, strings.Join(argv, " ")
+// runnable is found. wrapper reports whether the returned command is a
+// test-wrapper (make/just/task) — the caller uses it to scope the tool-missing
+// heuristic to exactly that case.
+func detectVerifyCommand(workspace string) (argv []string, display string, wrapper bool) {
+	if a := detectWrapper(workspace); a != nil {
+		return a, strings.Join(a, " "), true
 	}
 
 	for _, row := range detectRows {
 		if row.present(workspace) {
-			if argv := row.resolve(workspace); argv != nil {
-				return argv, strings.Join(argv, " ")
+			if a := row.resolve(workspace); a != nil {
+				return a, strings.Join(a, " "), false
 			}
 		}
 	}
 
-	return nil, ""
+	return nil, "", false
 }
 
 // detectWrapper applies the wrapper rule: a test wrapper is used when its binary
@@ -538,25 +550,37 @@ func hasDotnetProject(workspace string) bool {
 	return false
 }
 
-// hasPytestMarker reports a pytest project: a pyproject, a pytest.ini, or a
-// setup.cfg declaring a [tool:pytest] section.
+// hasPytestMarker reports a project that EXPLICITLY configures pytest: a
+// pytest.ini, a pyproject.toml declaring a [tool.pytest...] table, or a setup.cfg
+// declaring a [tool:pytest] section. A BARE pyproject.toml (poetry/hatch metadata
+// with no pytest config) is deliberately NOT a marker — running `pytest -q` on a
+// project with no collectable tests exits 5 and reads as a false failure — so it
+// falls through to the model-proposal tier, the sanctioned language-aware
+// fallback. (The classifier stays command-neutral; no pytest-exit-5 special case.)
 func hasPytestMarker(workspace string) bool {
-	if fileExists(filepath.Join(workspace, "pyproject.toml")) ||
-		fileExists(filepath.Join(workspace, "pytest.ini")) {
+	if fileExists(filepath.Join(workspace, "pytest.ini")) {
 		return true
 	}
 
-	data, err := readVerifyMarker(filepath.Join(workspace, "setup.cfg"))
-	if err != nil {
-		return false
+	if data, err := readVerifyMarker(filepath.Join(workspace, "pyproject.toml")); err == nil &&
+		strings.Contains(string(data), "[tool.pytest") {
+		return true
 	}
 
-	return strings.Contains(string(data), "[tool:pytest]")
+	if data, err := readVerifyMarker(filepath.Join(workspace, "setup.cfg")); err == nil &&
+		strings.Contains(string(data), "[tool:pytest]") {
+		return true
+	}
+
+	return false
 }
 
 // justfileTestRe matches a justfile "test" recipe: a line beginning with the
 // recipe name "test", optionally with parameters, ending in the recipe colon.
-var justfileTestRe = regexp.MustCompile(`^test([ \t][^:]*)?:`)
+// The trailing `(?:[^=]|$)` guards against a justfile VARIABLE assignment
+// (`test := "..."`), whose `:=` would otherwise be read as a recipe colon and
+// send `just test` at a nonexistent recipe.
+var justfileTestRe = regexp.MustCompile(`^test([ \t][^:]*)?:(?:[^=]|$)`)
 
 // justfileHasTestRecipe reports whether a justfile in the workspace declares a
 // "test" recipe. Recipe names are at column 0, so the match is untrimmed.

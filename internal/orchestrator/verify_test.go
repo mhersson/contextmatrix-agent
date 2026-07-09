@@ -42,7 +42,9 @@ func TestClassifyVerify(t *testing.T) {
 		{"exit-127-skip", verifyexec.Outcome{ExitCode: 127}, verifySkipped, true},
 		{"start-err-skip", verifyexec.Outcome{StartErr: true, ExitCode: -1}, verifySkipped, true},
 		{"timeout-skip", verifyexec.Outcome{TimedOut: true, ExitCode: -1}, verifySkipped, true},
-		{"anchored-make-not-found-skip", verifyexec.Outcome{ExitCode: 2, Output: "make: cargo: command not found"}, verifySkipped, true},
+		// A non-wrapper command whose output prints a not-found line is a REAL
+		// failure — the tool-missing heuristic is not consulted for it.
+		{"non-wrapper-not-found-stays-fail", verifyexec.Outcome{ExitCode: 2, Output: "make: cargo: command not found"}, verifyFailed, false},
 		{"printed-not-found-stays-fail", verifyexec.Outcome{ExitCode: 1, Output: "FAIL: asserted 'command not found'"}, verifyFailed, false},
 	}
 
@@ -53,6 +55,22 @@ func TestClassifyVerify(t *testing.T) {
 			assert.Equal(t, tt.hasNote, res.Note != "", "note=%q", res.Note)
 		})
 	}
+}
+
+// TestClassifyVerifyWrapperScopedToolMissing pins that the tool-missing heuristic
+// is consulted ONLY for a detected wrapper: a plain-argv command that fails while
+// printing an anchored not-found line (its suite shells to a missing helper)
+// stays FAILED, so a real failure is never downgraded to skipped; the same output
+// under a make/just/task wrapper — which masks the inner 127 as a plain exit — is
+// SKIPPED.
+func TestClassifyVerifyWrapperScopedToolMissing(t *testing.T) {
+	out := verifyexec.Outcome{ExitCode: 1, Output: "/bin/sh: 1: helper: not found\n--- FAIL: TestX"}
+
+	plain := classifyVerify(verifyPlan{}, out)
+	assert.Equal(t, verifyFailed, plain.Status, "a non-wrapper failure that prints a not-found line stays FAILED")
+
+	wrapped := classifyVerify(verifyPlan{Wrapper: true}, out)
+	assert.Equal(t, verifySkipped, wrapped.Status, "a wrapper masks the inner missing tool -> SKIPPED")
 }
 
 func TestClassifyVerifyTimeoutNote(t *testing.T) {
@@ -72,9 +90,10 @@ func TestDetectVerifyCommand(t *testing.T) {
 		dir := t.TempDir()
 		writeFile(t, dir, "go.mod", "module example.com/x\n")
 
-		argv, display := detectVerifyCommand(dir)
+		argv, display, wrapper := detectVerifyCommand(dir)
 		assert.Equal(t, []string{"go", "test", "./..."}, argv)
 		assert.Equal(t, "go test ./...", display)
+		assert.False(t, wrapper, "a marker-table command is not a wrapper")
 	})
 
 	t.Run("cargo project", func(t *testing.T) {
@@ -83,7 +102,7 @@ func TestDetectVerifyCommand(t *testing.T) {
 		dir := t.TempDir()
 		writeFile(t, dir, "Cargo.toml", "[package]\nname=\"x\"\n")
 
-		argv, _ := detectVerifyCommand(dir)
+		argv, _, _ := detectVerifyCommand(dir)
 		assert.Equal(t, []string{"cargo", "test"}, argv)
 	})
 
@@ -94,8 +113,9 @@ func TestDetectVerifyCommand(t *testing.T) {
 		writeFile(t, dir, "Makefile", "build:\n\tgo build ./...\ntest:\n\tgo test ./...\n")
 		writeFile(t, dir, "go.mod", "module example.com/x\n")
 
-		argv, _ := detectVerifyCommand(dir)
+		argv, _, wrapper := detectVerifyCommand(dir)
 		assert.Equal(t, []string{"make", "test"}, argv)
+		assert.True(t, wrapper, "a make wrapper is flagged for the tool-missing heuristic")
 	})
 
 	t.Run("pure-make repo uses make", func(t *testing.T) {
@@ -104,8 +124,9 @@ func TestDetectVerifyCommand(t *testing.T) {
 		dir := t.TempDir()
 		writeFile(t, dir, "Makefile", "test:\n\t./run-tests.sh\n")
 
-		argv, _ := detectVerifyCommand(dir)
+		argv, _, wrapper := detectVerifyCommand(dir)
 		assert.Equal(t, []string{"make", "test"}, argv)
+		assert.True(t, wrapper)
 	})
 
 	t.Run("Rust Makefile without cargo skips the wrapper", func(t *testing.T) {
@@ -118,7 +139,7 @@ func TestDetectVerifyCommand(t *testing.T) {
 		writeFile(t, dir, "Makefile", "test:\n\tcargo test\n")
 		writeFile(t, dir, "Cargo.toml", "[package]\nname=\"x\"\n")
 
-		argv, _ := detectVerifyCommand(dir)
+		argv, _, _ := detectVerifyCommand(dir)
 		assert.Nil(t, argv, "make must be skipped when the declared toolchain is absent")
 	})
 
@@ -128,7 +149,7 @@ func TestDetectVerifyCommand(t *testing.T) {
 		dir := t.TempDir()
 		writeFile(t, dir, "package.json", `{"name":"x","scripts":{"test":"echo \"Error: no test specified\" && exit 1"}}`)
 
-		argv, _ := detectVerifyCommand(dir)
+		argv, _, _ := detectVerifyCommand(dir)
 		assert.Nil(t, argv, "the npm-init placeholder test script is not a real command")
 	})
 
@@ -138,7 +159,7 @@ func TestDetectVerifyCommand(t *testing.T) {
 		dir := t.TempDir()
 		writeFile(t, dir, "package.json", `{"name":"x","scripts":{"test":"vitest run"}}`)
 
-		argv, _ := detectVerifyCommand(dir)
+		argv, _, _ := detectVerifyCommand(dir)
 		assert.Equal(t, []string{"npm", "test"}, argv)
 	})
 
@@ -148,7 +169,7 @@ func TestDetectVerifyCommand(t *testing.T) {
 		dir := t.TempDir()
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "gradlew"), []byte("#!/bin/sh\n"), 0o644))
 
-		argv, _ := detectVerifyCommand(dir)
+		argv, _, _ := detectVerifyCommand(dir)
 		assert.Nil(t, argv, "a non-executable gradlew and no system gradle resolves nothing")
 	})
 
@@ -157,10 +178,46 @@ func TestDetectVerifyCommand(t *testing.T) {
 
 		dir := t.TempDir()
 
-		argv, display := detectVerifyCommand(dir)
+		argv, display, _ := detectVerifyCommand(dir)
 		assert.Nil(t, argv)
 		assert.Empty(t, display)
 	})
+}
+
+func TestJustfileTestRecipeRegex(t *testing.T) {
+	recipes := []string{"test:", "test arg:", "test a b:", "test foo: dep"}
+	notRecipes := []string{`test := "just test"`, `test  :=  "x"`, "testfile:", "test-helper:", "# a test: comment"}
+
+	for _, l := range recipes {
+		assert.True(t, justfileTestRe.MatchString(l), "recipe line should match: %q", l)
+	}
+
+	for _, l := range notRecipes {
+		assert.False(t, justfileTestRe.MatchString(l), "non-recipe line must not match: %q", l)
+	}
+}
+
+func TestHasPytestMarker(t *testing.T) {
+	tests := []struct {
+		name    string
+		file    string
+		content string
+		want    bool
+	}{
+		{"bare pyproject is not pytest", "pyproject.toml", "[tool.poetry]\nname = \"x\"\n", false},
+		{"pyproject with pytest table", "pyproject.toml", "[tool.pytest.ini_options]\naddopts = \"-q\"\n", true},
+		{"pytest.ini", "pytest.ini", "[pytest]\n", true},
+		{"setup.cfg with tool:pytest", "setup.cfg", "[tool:pytest]\n", true},
+		{"setup.cfg without pytest", "setup.cfg", "[metadata]\nname = x\n", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, dir, tt.file, tt.content)
+			assert.Equal(t, tt.want, hasPytestMarker(dir))
+		})
+	}
 }
 
 func TestVerifyTimeoutClamp(t *testing.T) {
