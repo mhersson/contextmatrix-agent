@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
@@ -124,6 +125,22 @@ type Config struct {
 	// No serve/work env knob populates it yet; it is the orchestrator-level
 	// seam mirroring the standalone run command's provider config.
 	Provider json.RawMessage
+
+	// Verify is the operator-declared verify gate (CM's card-over-project
+	// resolution), delivered via CMX_VERIFY. nil means nothing declared — the
+	// gate falls back to repo-convention detection and then a model proposal.
+	// It is an orchestrator-local type so the package need not import protocol.
+	Verify *DeclaredVerify
+}
+
+// DeclaredVerify is the operator-declared verify configuration for a run, mapped
+// from protocol.VerifyConfig by the worker. Command is a shell string; Timeout is
+// 0 when unset (the default applies); Env names container variables to pass
+// through to the verify subprocess (re-filtered agent-side before use).
+type DeclaredVerify struct {
+	Command string
+	Timeout time.Duration
+	Env     []string
 }
 
 // Compaction configures in-window context compaction for the FSM's phase model

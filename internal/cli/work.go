@@ -196,6 +196,18 @@ func specFromEnv() (worker.RunSpec, error) {
 		}
 	}
 
+	var verify *protocol.VerifyConfig
+
+	if raw := os.Getenv("CMX_VERIFY"); raw != "" {
+		var vc protocol.VerifyConfig
+		if err := json.Unmarshal([]byte(raw), &vc); err != nil {
+			slog.Warn("CMX_VERIFY parse failed; will detect the verify command",
+				"card_id", cardID, "project", project, "error", err)
+		} else {
+			verify = &vc
+		}
+	}
+
 	taskSkillsDir := os.Getenv("CMX_TASK_SKILLS_DIR")
 
 	var (
@@ -235,6 +247,7 @@ func specFromEnv() (worker.RunSpec, error) {
 		Workspace:                 workspace,
 		CACertFile:                os.Getenv("CMX_CA_CERT_FILE"),
 		Selection:                 selection,
+		Verify:                    verify,
 		TaskSkillsDir:             taskSkillsDir,
 		TaskSkills:                taskSkills,
 		TaskSkillsSet:             taskSkillsSet,
