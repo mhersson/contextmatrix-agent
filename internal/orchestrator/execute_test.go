@@ -69,6 +69,9 @@ func newExecRun(d Deps, subs []subtaskRef, maxCost float64) *run {
 	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent card", Description: "parent body"}
 	o := newRun(d, tc)
 	o.subtasks = subs
+	// Pre-resolve a skip plan so runExecute's ensureVerify is a cached no-op —
+	// execute tests exercise the coder loop, not verify resolution.
+	o.verify = &verifyPlan{Source: verifySourceNone}
 
 	return o
 }

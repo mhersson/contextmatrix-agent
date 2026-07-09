@@ -43,6 +43,11 @@ type solverCtx struct {
 // model-bearing step. The parent run drives its solver (o.solver), bound in
 // newRun to the main workspace, run ledger, and the board.
 func runExecute(ctx context.Context, o *run) error {
+	// Resolve the verify plan once at execute entry (the first phase to reach the
+	// gate on a fresh run), so the resolution log fires early and the coder prompt
+	// can name the command.
+	o.ensureVerify(ctx)
+
 	// Best-of-N replaces the single-solver execute with a candidate fan-out: N
 	// implementations of the shared plan race in isolated worktrees, off the board
 	// and never pushing, and a later phase judges them.

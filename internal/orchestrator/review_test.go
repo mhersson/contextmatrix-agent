@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
+	"github.com/mhersson/contextmatrix-agent/internal/verifyexec"
 	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/mhersson/contextmatrix-harness/harness"
 	"github.com/mhersson/contextmatrix-harness/llm"
@@ -50,15 +52,19 @@ func reviewTestDeps(t *testing.T, ops *fakeOps, git *fakeGit, client llm.LLM, re
 }
 
 // newReviewRun builds a review run with a parent task context and the configured
-// ledger cap. The verify-command runner is stubbed to "no command detected" by
-// default so tests that don't care about the gate skip it; tests that exercise
-// the gate override runVerify.
+// ledger cap. The verify plan is pre-resolved to "skip" so tests that don't care
+// about the gate never trigger resolution (which could otherwise propose a
+// command via a model call); tests that exercise the gate set o.verify to a real
+// plan and override runVerify.
 func newReviewRun(d Deps, tc cmclient.TaskContext, maxCost float64) *run {
 	d.Cfg.MaxCardCost = maxCost
 	o := newRun(d, tc)
 	o.cardTier = "moderate"
-	// Default: no verify command, so the gate never runs in tests that ignore it.
-	o.runVerify = func(context.Context, string, []string) (string, bool) { return "", true }
+	// Default: pre-resolved skip, so ensureVerify is a cached no-op and no gate runs.
+	o.verify = &verifyPlan{Source: verifySourceNone}
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 0}
+	}
 
 	return o
 }
@@ -121,65 +127,6 @@ func TestReviewSubagentsInheritRouting(t *testing.T) {
 		assert.JSONEq(t, `{"require_parameters":true}`, string(client.providers[i]), "call %d must carry the provider routing", i)
 		assert.JSONEq(t, `{"effort":"high"}`, string(client.reasonings[i]), "call %d must carry the reasoning config", i)
 	}
-}
-
-func TestDetectVerifyCommand(t *testing.T) {
-	t.Run("Makefile with test target -> make test", func(t *testing.T) {
-		dir := t.TempDir()
-		writeFile(t, dir, "Makefile", "build:\n\tgo build ./...\ntest:\n\tgo test ./...\n")
-
-		got := detectVerifyCommand(dir)
-		assert.Equal(t, []string{"make", "test"}, got)
-	})
-
-	t.Run("go.mod only -> go test ./...", func(t *testing.T) {
-		dir := t.TempDir()
-		writeFile(t, dir, "go.mod", "module example.com/x\n\ngo 1.26\n")
-
-		got := detectVerifyCommand(dir)
-		assert.Equal(t, []string{"go", "test", "./..."}, got)
-	})
-
-	t.Run("package.json with scripts.test -> npm test", func(t *testing.T) {
-		dir := t.TempDir()
-		writeFile(t, dir, "package.json", `{"name":"x","scripts":{"test":"jest"}}`)
-
-		got := detectVerifyCommand(dir)
-		assert.Equal(t, []string{"npm", "test"}, got)
-	})
-
-	t.Run("Makefile without test target falls through to go.mod", func(t *testing.T) {
-		dir := t.TempDir()
-		writeFile(t, dir, "Makefile", "build:\n\tgo build ./...\n")
-		writeFile(t, dir, "go.mod", "module example.com/x\n")
-
-		got := detectVerifyCommand(dir)
-		assert.Equal(t, []string{"go", "test", "./..."}, got)
-	})
-
-	t.Run("indented test: in a recipe is not a target", func(t *testing.T) {
-		// Targets are column-0 in Make; an indented "test:" (recipe text, comment)
-		// must not be detected as a test target.
-		dir := t.TempDir()
-		writeFile(t, dir, "Makefile", "build:\n\techo 'test: skipped'\n\ttest: foo\n")
-
-		got := detectVerifyCommand(dir)
-		assert.Nil(t, got)
-	})
-
-	t.Run("package.json without test script is not detected", func(t *testing.T) {
-		dir := t.TempDir()
-		writeFile(t, dir, "package.json", `{"name":"x","scripts":{"build":"vite"}}`)
-
-		got := detectVerifyCommand(dir)
-		assert.Nil(t, got)
-	})
-
-	t.Run("none -> nil", func(t *testing.T) {
-		dir := t.TempDir()
-		got := detectVerifyCommand(dir)
-		assert.Nil(t, got)
-	})
 }
 
 func TestParseVerdict(t *testing.T) {
@@ -978,22 +925,21 @@ func TestReviewGateFailureSkipsSpecialists(t *testing.T) {
 		stopResp(`{"approved":true,"summary":"ok","fixes":[]}`, 0.01),
 	}}
 	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
-	// Seed a go.mod so detectVerifyCommand finds a real command (go test ./...);
-	// the stub below controls whether that gate passes or fails.
-	writeFile(t, d.Cfg.Workspace, "go.mod", "module example.com/x\n")
 
 	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body", State: "in_progress"}
 	o := newReviewRun(d, tc, 0)
+	// Opt into a real gate: a detected command the stub below drives.
+	o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
 
 	// Gate fails on the first round, passes on every subsequent round.
 	round := 0
-	o.runVerify = func(context.Context, string, []string) (string, bool) {
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
 		round++
 		if round == 1 {
-			return "FAIL: tests broke\nexit status 1", false
+			return verifyexec.Outcome{ExitCode: 1, Output: "FAIL: tests broke\nexit status 1"}
 		}
 
-		return "", true
+		return verifyexec.Outcome{ExitCode: 0}
 	}
 
 	require.NoError(t, runReview(context.Background(), o))

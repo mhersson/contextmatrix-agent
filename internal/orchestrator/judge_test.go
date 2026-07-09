@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
+	"github.com/mhersson/contextmatrix-agent/internal/verifyexec"
 	"github.com/mhersson/contextmatrix-harness/llm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -57,12 +59,15 @@ func newJudgeRun(t *testing.T, ops *fakeOps, mainGit *fakeGit, client llm.LLM, c
 	o := newRun(d, cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body"})
 	o.cardTier = "moderate"
 	o.candidates = cands
-	o.runVerify = func(_ context.Context, dir string, _ []string) (string, bool) {
+	// Pre-resolve a non-empty plan so runVerifyPlan invokes the stub on each
+	// candidate worktree (an empty plan would short-circuit to skipped).
+	o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
+	o.runVerify = func(_ context.Context, dir string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
 		if verify[dir] {
-			return "", true
+			return verifyexec.Outcome{ExitCode: 0}
 		}
 
-		return "FAIL: verify failed in " + dir + "\nexit status 1", false
+		return verifyexec.Outcome{ExitCode: 1, Output: "FAIL: verify failed in " + dir + "\nexit status 1"}
 	}
 
 	return o
@@ -120,7 +125,7 @@ func TestJudgePhaseStartAndVerifyProgressLogged(t *testing.T) {
 // TestJudgeOutcomeLabels pins the report-table labels, in particular that a
 // turn-capped candidate is labeled honestly instead of "failed (build)".
 func TestJudgeOutcomeLabels(t *testing.T) {
-	win := &candidate{idx: 1}
+	win := &candidate{idx: 1, verify: verifyResult{Status: verifyPassed}}
 	o := &run{winner: win}
 
 	tests := []struct {
@@ -132,10 +137,11 @@ func TestJudgeOutcomeLabels(t *testing.T) {
 		{"turn cap", &candidate{err: &MaxTurnsError{Model: "m/x", Turns: 30}}, "failed (turn cap)"},
 		{"wrapped turn cap", &candidate{err: fmt.Errorf("subtask 2: %w", &MaxTurnsError{Model: "m/x", Turns: 30})}, "failed (turn cap)"},
 		{"other error", &candidate{err: assertErr("disk full")}, "failed (error)"},
-		{"verify pass loses", &candidate{verifyOK: true}, "loss"},
-		{"verify fail", &candidate{}, "failed (verify)"},
+		{"verify pass loses", &candidate{verify: verifyResult{Status: verifyPassed}}, "loss"},
+		{"verify fail", &candidate{verify: verifyResult{Status: verifyFailed}}, "failed (verify)"},
+		{"verify skip loses", &candidate{verify: verifyResult{Status: verifySkipped}}, "loss (unverified)"},
 		{"capped red", &candidate{capped: true}, "failed (turn cap + verify)"},
-		{"capped loss", &candidate{capped: true, verifyOK: true}, "loss (capped)"},
+		{"capped loss", &candidate{capped: true, verify: verifyResult{Status: verifyPassed}}, "loss (capped)"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -143,9 +149,14 @@ func TestJudgeOutcomeLabels(t *testing.T) {
 		})
 	}
 
-	cappedWin := &candidate{idx: 2, capped: true, verifyOK: true}
+	cappedWin := &candidate{idx: 2, capped: true, verify: verifyResult{Status: verifyPassed}}
 	o2 := &run{winner: cappedWin}
 	assert.Equal(t, "win (capped)", o2.judgeOutcome(cappedWin))
+
+	// A winner adopted on a non-passing verify is flagged unverified.
+	unverifiedWin := &candidate{idx: 3, verify: verifyResult{Status: verifySkipped}}
+	o3 := &run{winner: unverifiedWin}
+	assert.Equal(t, "win (unverified)", o3.judgeOutcome(unverifiedWin))
 }
 
 func TestJudgeResumeRemap(t *testing.T) {
@@ -505,23 +516,20 @@ func TestParseJudgeVerdictBareJSONWithInStringFence(t *testing.T) {
 	assert.Contains(t, v.Rationale, "```go\nif ok {\n\treturn\n}\n```")
 }
 
-// TestJudgeCappedAdmittedOnGreenVerify proves a capped candidate with a
-// passing verify enters the pool and its section carries the capped note. The
-// candidate's dir is a real t.TempDir() seeded with a go.mod marker so
-// detectVerifyCommand finds a real command (verifyRan=true) — the admission
-// gate requires that in addition to the stubbed verifyOK.
+// TestJudgeCappedAdmittedOnGreenVerify proves a capped candidate whose verify
+// PASSES enters the pool and its section carries the capped note. A passing
+// verify implies a command actually ran, which is exactly what admits salvaged
+// capped work.
 func TestJudgeCappedAdmittedOnGreenVerify(t *testing.T) {
 	ops := &fakeOps{}
 	client := &planLLM{responses: []llm.Response{
 		stopResp(`{"winner": 2, "ranking": [2, 1], "rationale": "clean finisher wins.", "notes": []}`, 0.02),
 	}}
-	dir1 := t.TempDir()
-	writeFile(t, dir1, "go.mod", "module candidate1\n")
-	c1 := judgeCandidate(1, "coder/one", dir1, "DIFF_ONE")
+	c1 := judgeCandidate(1, "coder/one", "dir-c1", "DIFF_ONE")
 	c1.capped = true
 	c2 := judgeCandidate(2, "coder/two", "dir-c2", "DIFF_TWO")
 
-	verify := map[string]bool{dir1: true, "dir-c2": true}
+	verify := map[string]bool{"dir-c1": true, "dir-c2": true}
 	o := newJudgeRun(t, ops, &fakeGit{}, client, []*candidate{c1, c2}, verify)
 
 	require.NoError(t, runJudge(context.Background(), o))
@@ -532,29 +540,32 @@ func TestJudgeCappedAdmittedOnGreenVerify(t *testing.T) {
 	assert.Contains(t, prompt, "hit the turn cap", "the judge is told about the cap")
 }
 
-// TestJudgeCappedNeedsRealVerifyCommand proves a capped candidate is not
-// admitted merely because the verify stub reports true: admission also
-// requires detectVerifyCommand to have found a real command in the
-// candidate's dir. c1's dir is an empty t.TempDir() with no recognizable
-// marker, so verifyRan stays false even though the (irrelevant) stub says
-// verify passed — a vacuous green must not admit capped work. With an
-// uncapped sibling present, the sibling is the sole pool entry and auto-wins.
-func TestJudgeCappedNeedsRealVerifyCommand(t *testing.T) {
+// TestJudgeCappedSkippedVerifyNotAdmitted proves a capped candidate whose verify
+// SKIPPED (the tool was missing, not a real pass) is not admitted: a skip is not
+// a pass, and only a pass salvages capped work. With an uncapped, passing sibling
+// present, the sibling is the sole pool entry and auto-wins.
+func TestJudgeCappedSkippedVerifyNotAdmitted(t *testing.T) {
 	ops := &fakeOps{}
 	client := &planLLM{}
-	dir1 := t.TempDir() // no go.mod/Makefile/package.json marker
-	c1 := judgeCandidate(1, "coder/one", dir1, "DIFF_ONE")
+	c1 := judgeCandidate(1, "coder/one", "dir-c1", "DIFF_ONE")
 	c1.capped = true
 	c2 := judgeCandidate(2, "coder/two", "dir-c2", "DIFF_TWO")
 
-	verify := map[string]bool{dir1: true, "dir-c2": true}
-	o := newJudgeRun(t, ops, &fakeGit{}, client, []*candidate{c1, c2}, verify)
+	o := newJudgeRun(t, ops, &fakeGit{}, client, []*candidate{c1, c2}, map[string]bool{"dir-c2": true})
+	// c1's verify SKIPS (tool missing); c2's passes.
+	o.runVerify = func(_ context.Context, dir string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		if dir == "dir-c1" {
+			return verifyexec.Outcome{StartErr: true, ExitCode: -1}
+		}
+
+		return verifyexec.Outcome{ExitCode: 0}
+	}
 
 	require.NoError(t, runJudge(context.Background(), o))
 
 	assert.Empty(t, client.tasks, "single viable candidate -> auto-win, no model call")
 	require.NotNil(t, o.winner)
-	assert.Equal(t, 2, o.winner.idx, "the capped candidate with no real verify command must not be admitted")
+	assert.Equal(t, 2, o.winner.idx, "the capped candidate whose verify skipped must not be admitted")
 }
 
 // TestJudgeCappedExcludedFromFallbackPool proves an unverified capped candidate
@@ -603,9 +614,9 @@ func TestJudgeAllCappedRedParksAndReleases(t *testing.T) {
 func TestReportCandidateOutcomesCappedRedIsFailed(t *testing.T) {
 	ops := &fakeOps{}
 	c1 := judgeCandidate(1, "coder/one", "dir-c1", "")
-	c1.capped = true // verifyOK stays false
+	c1.capped = true // verify stays skipped (non-pass)
 	c2 := judgeCandidate(2, "coder/two", "dir-c2", "")
-	c2.verifyOK = true
+	c2.verify = verifyResult{Status: verifyPassed}
 
 	o := newJudgeRun(t, ops, &fakeGit{}, &planLLM{}, []*candidate{c1, c2}, map[string]bool{})
 	o.winner = c2

@@ -635,7 +635,8 @@ func TestOrchestratorEndToEndHappyPath(t *testing.T) {
 
 	t.Parallel()
 
-	// No go.mod at root -> detectVerifyCommand returns nil -> gate absent.
+	// No recognizable toolchain marker at root -> verify resolves to skip -> the
+	// gate proceeds unverified.
 	remote := setupBareRemote(t)
 
 	backend := &scriptedBackend{
