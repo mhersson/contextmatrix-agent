@@ -101,7 +101,7 @@ func runReview(ctx context.Context, o *run) error {
 		attemptsCap = defaultReviewAttemptsCap
 	}
 
-	for iter := 0; iter < hardReviewIterationCap; iter++ {
+	for iter := range hardReviewIterationCap {
 		// Round number continues across resumes: review_attempts persists the
 		// count of prior rounds, so round N is stable for the body record.
 		round := o.tc.ReviewAttempts + iter + 1
@@ -157,7 +157,7 @@ func (o *run) runReviewHITL(ctx context.Context, verifyCmd []string) error {
 	model := resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
 		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel)
 
-	for iter := 0; iter < hardReviewIterationCap; iter++ {
+	for iter := range hardReviewIterationCap {
 		round := o.tc.ReviewAttempts + iter + 1
 
 		findings, fixTier, autoApproved, err := o.reviewRound(ctx, verifyCmd, false)
@@ -505,7 +505,7 @@ func (o *run) synthesize(ctx context.Context, findings string, authoritative boo
 		lastErr error
 	)
 
-	for attempt := 0; attempt < 2; attempt++ {
+	for attempt := range 2 {
 		if err := o.ledger.Check(); err != nil {
 			return verdict{}, err
 		}
@@ -708,7 +708,7 @@ func reviewFindingsHistory(body string) string {
 
 	in := false
 
-	for _, line := range strings.Split(body, "\n") {
+	for line := range strings.SplitSeq(body, "\n") {
 		if strings.HasPrefix(line, "## ") {
 			in = strings.HasPrefix(line, "## Review Findings")
 		}
@@ -786,7 +786,7 @@ func makefileHasTestTarget(path string) bool {
 		return false
 	}
 
-	for _, line := range strings.Split(string(data), "\n") {
+	for line := range strings.SplitSeq(string(data), "\n") {
 		if strings.HasPrefix(line, "test:") {
 			return true
 		}
@@ -879,7 +879,7 @@ func fixFiles(findings string) []string {
 		seen  = map[string]bool{}
 	)
 
-	for _, line := range strings.Split(findings, "\n") {
+	for line := range strings.SplitSeq(findings, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if !strings.HasPrefix(trimmed, "- ") {
 			continue

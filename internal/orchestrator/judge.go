@@ -200,7 +200,7 @@ func (o *run) runJudgeVerdict(ctx context.Context, model, prompt string, poolLen
 		lastErr error
 	)
 
-	for attempt := 0; attempt < 2; attempt++ {
+	for attempt := range 2 {
 		if err := o.ledger.Check(); err != nil {
 			return judgeVerdict{}, false, err
 		}

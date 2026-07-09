@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"testing"
 
@@ -256,13 +257,7 @@ func TestReviewRecoversFromIncapableFixCoder(t *testing.T) {
 // modelsUsed reports whether the model-aware stub ran the given model at least
 // once.
 func modelsUsed(m *modelAwareLLM, model string) bool {
-	for _, got := range m.recordedModels() {
-		if got == model {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(m.recordedModels(), model)
 }
 
 // TestRecoverIncapableCapsAtThree is a focused unit test of the helper: the

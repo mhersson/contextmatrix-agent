@@ -6,8 +6,8 @@ build/test commands, conventions, invariants, and commit discipline.
 ## What is this project?
 
 ContextMatrix Agent is a custom Go agent harness with a configurable LLM
-endpoint that runs as a ContextMatrix **task backend**. It replaces Claude Code headless as
-the in-container agent. A single binary plays two runtime roles:
+endpoint that runs as a ContextMatrix **task backend**. It replaces Claude Code
+headless as the in-container agent. A single binary plays two runtime roles:
 
 - **`serve`** — a long-running host service that hosts ContextMatrix lifecycle
   webhooks and launches one Docker worker container per card.
@@ -84,7 +84,8 @@ docker/Dockerfile.worker → the worker image (agent binary + git/rg/fd/gh/node/
 The harness core now lives in the standalone `contextmatrix-harness` module. Its
 invariant is enforced **there** by `scripts/deps-gate.sh` (`make deps-gate` in
 that repo): the `harness` package imports only `events`/`llm`/`tools`, and the
-module takes no `contextmatrix-*` dependency. Verified import rules in this repo:
+module takes no `contextmatrix-*` dependency. Verified import rules in this
+repo:
 
 - `internal/orchestrator` imports the harness module (`harness`, `llm`, `tools`,
   `events`), plus `registry` and `cmclient` (for the `TaskContext` type). It
@@ -106,9 +107,8 @@ interface the consumer satisfies.
 - **`contextmatrix-githubauth`** — the only path to GitHub tokens (App + PAT).
 - **Go MCP SDK** (`github.com/modelcontextprotocol/go-sdk`) — the CM card-ops
   client.
-- **LLM endpoint** (OpenAI-compatible `/chat/completions`), spoken over
-  **raw HTTP** behind a narrow `Send`/`SendStream` interface — no SDK in the hot
-  path.
+- **LLM endpoint** (OpenAI-compatible `/chat/completions`), spoken over **raw
+  HTTP** behind a narrow `Send`/`SendStream` interface — no SDK in the hot path.
 - **testify** — assertions (`assert`) and fatal checks (`require`).
 
 ## Coding conventions
@@ -188,27 +188,26 @@ or a mounted file only — never via flags or committed YAML.
    The blacklist is self-learning: a model that proves harness-incapable mid-run
    is reported back, excluded, and a replacement re-selected.
 6. **No compactor in v1.** Subagent isolation + `--max-turns` caps +
-   window-aware selection bound context growth. Nearing the window emits
-   a `context_limit` event and returns **incomplete** — the orchestrator treats
-   it as a failed subtask, never a silent truncation. There is no `--max-cost`
-   cap in the container path; the per-card ledger (rule 7) is the sole FSM
-   cost cap.
+   window-aware selection bound context growth. Nearing the window emits a
+   `context_limit` event and returns **incomplete** — the orchestrator treats it
+   as a failed subtask, never a silent truncation. There is no `--max-cost` cap
+   in the container path; the per-card ledger (rule 7) is the sole FSM cost cap.
 7. **Per-card budget.** One cumulative USD ceiling (`CMX_MAX_CARD_COST`) spans
    the orchestrator and every subagent; the run aborts when exceeded.
 8. **Secrets.** `serve` writes `<secrets_dir>/shared/env`, refreshed ahead of
    each GitHub-token expiry, bind-mounted read-only at `/run/cm-secrets/env`.
-   The worker reads the configured LLM endpoint key and `CM_GIT_TOKEN` from it. Tool
-   subprocesses get an allowlisted `cmd.Env` — secrets are not inheritable by
-   model-driven commands — and known secret values are redacted from events and
-   transcripts.
+   The worker reads the configured LLM endpoint key and `CM_GIT_TOKEN` from it.
+   Tool subprocesses get an allowlisted `cmd.Env` — secrets are not inheritable
+   by model-driven commands — and known secret values are redacted from events
+   and transcripts.
 9. **HITL gates + promote.** HITL cards run the same FSM as autonomous,
    mode-gated on `Config.Interactive`: a brainstorming dialogue for creative
    cards plus plan-approval and review-decision sign-off gates that wait on the
    inbox. Autonomous is the same FSM with the gates auto-passed and
-   brainstorming skipped. A promote frame
-   closes the inbox, so every later gate passes through and the run finishes
-   autonomously at the persisted phase. Awaiting-human is **live**, not stalled
-   — the idle watchdog must not false-stall a parked gate.
+   brainstorming skipped. A promote frame closes the inbox, so every later gate
+   passes through and the run finishes autonomously at the persisted phase.
+   Awaiting-human is **live**, not stalled — the idle watchdog must not
+   false-stall a parked gate.
 10. **Task-skills.** Coder, fix-coder, the review panel, and the document phase
     can engage ContextMatrix's task-skills (`go-development`, `code-review`, …)
     via the model-driven `Skill` tool (`internal/tools/skill.go`): it lists the
@@ -334,6 +333,7 @@ Fix any failure before moving on.
 ## Commit discipline
 
 ```bash
+go fix ./...        # must be run before every commit
 make fmt    # gofumpt -w . — CI flags any gofmt-vs-gofumpt difference
 make test   # must be clean before every commit
 make lint   # must be clean before every commit

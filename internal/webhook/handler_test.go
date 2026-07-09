@@ -964,7 +964,8 @@ func newSkillsTestServer(resolver SkillsResolver) *Server {
 	})
 }
 
-func sliceP(s ...string) *[]string { return &s }
+//go:fix inline
+func sliceP(s ...string) *[]string { return new(s) }
 
 func TestBuildLaunchSpecThreadsSkillsSubset(t *testing.T) {
 	s := newSkillsTestServer(fakeSkillsResolver{dir: "/host/skills"})
@@ -1209,7 +1210,6 @@ func TestBuildLaunchSpec_CredentialDeliveryMatrix(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 
 		t.Run(tc.name, func(t *testing.T) {
 			s := NewServer(Config{
@@ -1583,13 +1583,11 @@ func TestLaunch_ConcurrentDuplicateTriggersSerialized(t *testing.T) {
 	var wg sync.WaitGroup
 
 	for range 2 {
-		wg.Add(1)
 
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 
 			s.launch(spec, payload)
-		}()
+		})
 	}
 
 	wg.Wait()

@@ -491,11 +491,11 @@ func TestReportModelOutcomes(t *testing.T) {
 	assert.Equal(t, "CMX-001", args["card_id"])
 	assert.Equal(t, testAgentID, args["agent_id"])
 
-	rows, ok := args["outcomes"].([]interface{})
+	rows, ok := args["outcomes"].([]any)
 	require.True(t, ok, "outcomes must be a slice; got %T", args["outcomes"])
 	require.Len(t, rows, 2)
 
-	row0, ok := rows[0].(map[string]interface{})
+	row0, ok := rows[0].(map[string]any)
 	require.True(t, ok, "each outcome row must be a map; got %T", rows[0])
 	assert.Equal(t, "coder/one", row0["model"])
 	assert.Equal(t, "loss", row0["result"])
@@ -516,11 +516,11 @@ func TestReportModelOutcomes_OmitsEmptyJudgeModel(t *testing.T) {
 	args, ok := rec.get("report_model_outcome")
 	require.True(t, ok)
 
-	rows, ok := args["outcomes"].([]interface{})
+	rows, ok := args["outcomes"].([]any)
 	require.True(t, ok)
 	require.Len(t, rows, 1)
 
-	row, ok := rows[0].(map[string]interface{})
+	row, ok := rows[0].(map[string]any)
 	require.True(t, ok)
 	assert.NotContains(t, row, "judge_model", "empty judge_model must be omitted")
 }
@@ -571,7 +571,7 @@ func TestCreateCard(t *testing.T) {
 	depRaw, hasDeps := args["depends_on"]
 	require.True(t, hasDeps, "depends_on must be present")
 	// JSON round-trip makes this []interface{}.
-	deps, ok := depRaw.([]interface{})
+	deps, ok := depRaw.([]any)
 	require.True(t, ok, "depends_on must be a slice")
 	require.Len(t, deps, 1)
 	assert.Equal(t, "CMX-010", deps[0])

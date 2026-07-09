@@ -238,10 +238,7 @@ func (r *Refresher) Run(ctx context.Context) error {
 
 		r.logger.Info("env file written", "expires_at", expiresAt)
 
-		sleep := time.Until(expiresAt) - r.refreshBefore
-		if sleep < r.minSleep {
-			sleep = r.minSleep
-		}
+		sleep := max(time.Until(expiresAt)-r.refreshBefore, r.minSleep)
 
 		select {
 		case <-ctx.Done():

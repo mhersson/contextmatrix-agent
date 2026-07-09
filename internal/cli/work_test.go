@@ -142,7 +142,6 @@ func TestSpecFromEnv_RequiredVars(t *testing.T) {
 	}
 
 	for _, missing := range required {
-		missing := missing
 
 		t.Run("missing_"+missing, func(t *testing.T) {
 			setRequired(t)
@@ -201,7 +200,6 @@ func TestSpecFromEnv_BoolParsing(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 
 		t.Run(tc.name, func(t *testing.T) {
 			setRequired(t)

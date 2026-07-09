@@ -25,7 +25,7 @@ func extractDesign(output string) (string, bool) {
 
 	var kept []string
 
-	for _, line := range strings.Split(output, "\n") {
+	for line := range strings.SplitSeq(output, "\n") {
 		if strings.TrimSpace(line) == designMarker {
 			continue
 		}
@@ -46,7 +46,7 @@ func extractDesign(output string) (string, bool) {
 // a card that arrives with a design (a prior brainstorm pass, or a
 // thoroughly-written description) skips the dialogue.
 func hasDesignSection(body string) bool {
-	for _, line := range strings.Split(body, "\n") {
+	for line := range strings.SplitSeq(body, "\n") {
 		if strings.TrimSpace(line) == "## Design" {
 			return true
 		}
@@ -79,7 +79,7 @@ func (o *run) runBrainstorm(ctx context.Context, model string) (string, error) {
 
 	convo := ""
 
-	for turn := 0; turn < maxBrainstormTurns; turn++ {
+	for range maxBrainstormTurns {
 		if err := o.ledger.Check(); err != nil {
 			return "", err
 		}

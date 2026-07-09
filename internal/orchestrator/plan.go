@@ -168,22 +168,22 @@ func extractJSON(s string) (string, bool) {
 
 // extractFenced returns the body of the first ```json (or bare ```) fenced block.
 func extractFenced(s string) (string, bool) {
-	i := strings.Index(s, "```")
-	if i < 0 {
+	_, after, ok := strings.Cut(s, "```")
+	if !ok {
 		return "", false
 	}
 
-	rest := s[i+3:]
+	rest := after
 	if nl := strings.IndexByte(rest, '\n'); nl >= 0 { // drop the optional "json" tag line
 		rest = rest[nl+1:]
 	}
 
-	end := strings.Index(rest, "```")
-	if end < 0 {
+	before, _, ok := strings.Cut(rest, "```")
+	if !ok {
 		return "", false
 	}
 
-	return rest[:end], true
+	return before, true
 }
 
 // resolvePin reports whether a non-empty card-pinned model slug is honourable:
@@ -347,7 +347,7 @@ func (o *run) draftPlan(ctx context.Context, model, diagnosis, design, feedback 
 		lastErr error
 	)
 
-	for attempt := 0; attempt < 2; attempt++ {
+	for attempt := range 2 {
 		if err := o.ledger.Check(); err != nil {
 			return plan{}, err
 		}
@@ -459,7 +459,7 @@ func runPlan(ctx context.Context, o *run) error {
 	// Subtasks are created only after approval, so an adjust never orphans cards.
 	feedback := ""
 
-	for draft := 0; draft < maxPlanDrafts; draft++ {
+	for range maxPlanDrafts {
 		p, err := o.draftPlan(ctx, model, diagnosis, design, feedback)
 		if err != nil {
 			return err

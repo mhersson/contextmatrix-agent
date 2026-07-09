@@ -370,16 +370,14 @@ func TestRunCredentialsConcurrentProvisionNoLeakedLoop(t *testing.T) {
 		var wg sync.WaitGroup
 
 		for range perWave {
-			wg.Add(1)
 
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 
 				<-start
 
 				expiry := time.Now().Add(runExpiry).UTC().Format(time.RFC3339Nano)
 				errCh <- m.Provision("proj", "CARD-1", runToken, expiry, EndpointSecrets{})
-			}()
+			})
 		}
 
 		close(start)
