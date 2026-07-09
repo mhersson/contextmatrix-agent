@@ -134,3 +134,17 @@ func TestCommandCheckUnrunnableErrors(t *testing.T) {
 	require.Error(t, err, "an unrunnable declared command is a loud error, not a fake pass")
 	assert.Contains(t, err.Error(), "cannot run")
 }
+
+func TestCommandCheckInheritsEnv(t *testing.T) {
+	// The standalone `run --verify` runs OUTSIDE the container trust boundary, so
+	// it inherits the developer's full environment — a scrubbed allowlist would
+	// silently drop DATABASE_URL etc. and break integration-style verify commands.
+	t.Setenv("VERIFY_SMOKE_VAR", "inherited-value")
+
+	root := t.TempDir()
+
+	v, err := commandCheck(root, "echo $VERIFY_SMOKE_VAR")(context.Background())
+	require.NoError(t, err)
+	assert.True(t, v.OK)
+	assert.Contains(t, v.Detail, "inherited-value", "the CLI verify command must see the caller's environment")
+}

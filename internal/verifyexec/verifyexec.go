@@ -165,10 +165,26 @@ func ShellArgv(cmd string) []string {
 
 // Exec runs argv in dir with its OWN timeout context, a scrubbed environment
 // (the allowlist plus extraEnv KEY=VALUE entries), and combined output capture.
-// It disambiguates its own timeout (TimedOut) from a parent-context cancellation:
-// on cancellation it returns an ordinary Outcome and the caller detects the abort
-// via the parent ctx. An empty argv is a start error, never a vacuous pass.
+// This is the CONTAINER path: the agent's verify subprocesses must never inherit
+// the model-run environment. An empty argv is a start error, never a vacuous pass.
 func Exec(ctx context.Context, dir string, argv []string, timeout time.Duration, extraEnv []string) Outcome {
+	return execWithEnv(ctx, dir, argv, timeout, tools.ScrubbedEnv(extraEnv))
+}
+
+// ExecInherit runs argv like Exec but with the CALLER's FULL environment. It is
+// for the standalone `run --verify` CLI, which runs OUTSIDE the container trust
+// boundary and is expected to see the developer's environment (DATABASE_URL and
+// the like). The orchestrator/container paths must keep Exec (scrubbed env).
+func ExecInherit(ctx context.Context, dir string, argv []string, timeout time.Duration) Outcome {
+	return execWithEnv(ctx, dir, argv, timeout, os.Environ())
+}
+
+// execWithEnv is the shared core: it runs argv in dir with its own timeout
+// context and the given process environment, capturing combined output. It
+// disambiguates its own timeout (TimedOut) from a parent-context cancellation:
+// on cancellation it returns an ordinary Outcome and the caller detects the abort
+// via the parent ctx.
+func execWithEnv(ctx context.Context, dir string, argv []string, timeout time.Duration, env []string) Outcome {
 	if len(argv) == 0 {
 		return Outcome{ExitCode: -1, StartErr: true}
 	}
@@ -178,7 +194,7 @@ func Exec(ctx context.Context, dir string, argv []string, timeout time.Duration,
 
 	cmd := exec.CommandContext(cctx, argv[0], argv[1:]...) //nolint:gosec // argv is code-resolved or probe-gated, never raw model input
 	cmd.Dir = dir
-	cmd.Env = tools.ScrubbedEnv(extraEnv)
+	cmd.Env = env
 
 	out, err := cmd.CombinedOutput()
 

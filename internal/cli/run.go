@@ -133,7 +133,7 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&task, "task", "Inspect the project and complete the requested change, then verify.", "task instruction")
 	cmd.Flags().StringVar(&systemPrompt, "system-prompt", "", "override the default system prompt")
 	cmd.Flags().StringVar(&transcript, "transcript", "", "path to write the JSON event transcript")
-	cmd.Flags().StringVar(&verify, "verify", "", "shell command run after the loop; exit 0 = success")
+	cmd.Flags().StringVar(&verify, "verify", "", "shell command run after the loop with your full environment; exit 0 = success")
 	cmd.Flags().StringVar(&configFile, "config", "", "path to a YAML config file")
 	cmd.Flags().BoolVar(&printConfig, "print-config", false, "print the effective config (secrets redacted) and exit")
 	cmd.Flags().Bool("local", true, "run standalone without CM callbacks (always true)")
@@ -205,14 +205,16 @@ const runVerifyTimeout = time.Hour
 // shared bash-pipefail semantics. It PROBES the command first: an unrunnable
 // declared command (a missing tool) is a loud error, never a silent pass or
 // skip. A command that runs and exits 0 is OK; a non-zero exit is not-OK with the
-// output as detail.
+// output as detail. It runs with the CALLER's full environment (ExecInherit):
+// the standalone CLI is outside the container trust boundary, so a verify command
+// like `pytest integration/` sees DATABASE_URL and the rest of the dev env.
 func commandCheck(root, command string) harness.Check {
 	return func(ctx context.Context) (harness.Verdict, error) {
 		if err := verifyexec.ProbeShell(root, command); err != nil {
 			return harness.Verdict{}, fmt.Errorf("verify command cannot run: %w", err)
 		}
 
-		out := verifyexec.Exec(ctx, root, verifyexec.ShellArgv(command), runVerifyTimeout, nil)
+		out := verifyexec.ExecInherit(ctx, root, verifyexec.ShellArgv(command), runVerifyTimeout)
 		if out.StartErr {
 			return harness.Verdict{}, fmt.Errorf("verify command failed to start")
 		}
