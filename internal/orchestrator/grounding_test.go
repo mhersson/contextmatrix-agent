@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -19,6 +20,12 @@ func writeNestedFile(t *testing.T, dir, rel, content string) {
 
 	require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
 	require.NoError(t, os.WriteFile(p, []byte(content), 0o644))
+}
+
+func gitInit(t *testing.T, dir string) {
+	t.Helper()
+
+	require.NoError(t, exec.Command("git", "-C", dir, "init", "-q").Run())
 }
 
 func TestDiscoverGrounding(t *testing.T) {
@@ -71,15 +78,27 @@ func TestDiscoverGrounding(t *testing.T) {
 		assert.Contains(t, docs[0].content, "[... truncated at 64 KB ...]")
 	})
 
-	t.Run("excluded dirs are not walked", func(t *testing.T) {
+	t.Run("hidden and gitignored dirs are not walked", func(t *testing.T) {
 		root := t.TempDir()
+		gitInit(t, root)
+		// The repo's own .gitignore is the agnostic source of truth for which
+		// non-hidden dirs to skip — grounding names no ecosystem directory.
+		writeNestedFile(t, root, ".gitignore", "node_modules/\n")
 		writeNestedFile(t, root, "CLAUDE.md", "# root")
+		// Skipped because the repo ignores it, not because grounding knows the
+		// name "node_modules".
 		writeNestedFile(t, root, "node_modules/pkg/CLAUDE.md", "# vendored")
-		writeNestedFile(t, root, ".git/CLAUDE.md", "# git")
+		// Hidden dot-dir: always skipped (VCS/tooling/build state).
+		writeNestedFile(t, root, ".cache/CLAUDE.md", "# hidden")
+		// An ordinary, non-ignored subdir IS walked.
+		writeNestedFile(t, root, "svc/CLAUDE.md", "# tracked subdir")
 
 		docs := discoverGrounding(root)
-		require.Len(t, docs, 1)
-		assert.Equal(t, ".", docs[0].relDir)
+		require.Len(t, docs, 2)
+
+		relDirs := []string{docs[0].relDir, docs[1].relDir}
+		assert.Contains(t, relDirs, ".")
+		assert.Contains(t, relDirs, "svc")
 	})
 
 	t.Run("dirs deeper than max depth are not walked", func(t *testing.T) {

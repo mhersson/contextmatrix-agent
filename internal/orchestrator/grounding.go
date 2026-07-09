@@ -1,9 +1,11 @@
 package orchestrator
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -23,9 +25,24 @@ const (
 	groundingMaxDepth = 4         // directory levels below root to walk
 )
 
-var groundingSkipDirs = map[string]struct{}{
-	".git": {}, "node_modules": {}, "vendor": {}, "dist": {},
-	"build": {}, ".next": {}, "target": {}, ".worktrees": {},
+// gitIgnoresDir reports whether the target repo's own ignore rules exclude path.
+// It is the language-agnostic source of truth for "don't descend here":
+// node_modules, vendor, target, build, dist and friends are skipped because the
+// repo gitignores them, not because grounding names any ecosystem. Best-effort —
+// if root is not a git repo (or git is unavailable) it returns false and the
+// directory is walked.
+func gitIgnoresDir(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == "." || rel == "" {
+		return false
+	}
+
+	// check-ignore exits 0 when path is ignored, 1 when not, 128 on error (e.g.
+	// not a git repo). Only a clean exit 0 means "ignored". Grounding's walk is
+	// uncancellable, so a background context is consistent here.
+	cmd := exec.CommandContext(context.Background(), "git", "-C", root, "check-ignore", "-q", "--", rel) //nolint:gosec // fixed args; rel is a workspace-relative walk entry
+
+	return cmd.Run() == nil
 }
 
 // discoverGrounding walks the workspace root and returns the repo's
@@ -53,7 +70,12 @@ func discoverGrounding(root string) []groundingDoc {
 			return nil
 		}
 
-		if _, skip := groundingSkipDirs[d.Name()]; skip && path != root {
+		// Skip hidden dot-directories (.git, .worktrees, .venv, .gradle, .next,
+		// ...) and anything the repo's own .gitignore excludes (node_modules,
+		// vendor, target, build, ...). This names NO ecosystem directory: the
+		// repo's gitignore is the language-agnostic source of truth, exactly as in
+		// the commit-staging guard. The depth and count caps below bound the rest.
+		if path != root && (strings.HasPrefix(d.Name(), ".") || gitIgnoresDir(root, path)) {
 			return filepath.SkipDir
 		}
 
