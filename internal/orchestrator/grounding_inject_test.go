@@ -20,7 +20,7 @@ func TestGroundingInjectedIntoCoderPrompt(t *testing.T) {
 	// coderPrompt is assembled in executeSubtask; assert the assembled
 	// prompt carries the grounding rule.
 	prompt := fmt.Sprintf(coderPrompt, o.skillEngage(), o.grounding, root,
-		"sub title", "sub body", o.tc.Title, o.tc.Description)
+		verifyCommandBlock(o.resolvedVerifyPlan()), "sub title", "sub body", o.tc.Title, o.tc.Description)
 
 	assert.Contains(t, prompt, "PROJECT RULE: always run gofumpt")
 	assert.Contains(t, prompt, "REPO GROUNDING")

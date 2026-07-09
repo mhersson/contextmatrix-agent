@@ -629,7 +629,7 @@ func (o *run) runFix(ctx context.Context, findings string, round int, fixTier st
 	}
 
 	prompt := fmt.Sprintf(fixPrompt, o.skillEngage(), o.grounding, cfg.Workspace,
-		o.tc.Title, o.tc.Description, findings)
+		fixVerifyLine(o.resolvedVerifyPlan()), o.tc.Title, o.tc.Description, findings)
 
 	if err := o.runFixModel(ctx, prompt, round, fixTier, authoritative); err != nil {
 		return err

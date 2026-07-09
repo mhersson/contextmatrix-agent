@@ -68,6 +68,17 @@ const (
 	maxVerifyTimeout = 2 * time.Hour
 )
 
+// resolvedVerifyPlan returns the run's resolved verify plan, or a zero (skip)
+// plan when resolution has not run — so prompt/render helpers can read it
+// unconditionally.
+func (o *run) resolvedVerifyPlan() verifyPlan {
+	if o.verify == nil {
+		return verifyPlan{}
+	}
+
+	return *o.verify
+}
+
 // verifyProvenance labels the source of a resolved verify command for the judge
 // report and prompts. A nil plan or a none-source (defensive) reads as unknown.
 func verifyProvenance(p *verifyPlan) string {

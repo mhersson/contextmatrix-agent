@@ -143,7 +143,7 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 	}
 
 	prompt := fmt.Sprintf(coderPrompt, o.skillEngage(), o.grounding, sc.workspace,
-		sub.Title, subtaskBody(sub), o.tc.Title, o.tc.Description)
+		verifyCommandBlock(o.resolvedVerifyPlan()), sub.Title, subtaskBody(sub), o.tc.Title, o.tc.Description)
 
 	res, err := o.runCoderWith(ctx, sc, sub, prompt)
 	if err != nil {
