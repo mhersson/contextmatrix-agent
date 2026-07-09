@@ -78,6 +78,17 @@ If a change tempts you to push orchestration, protocol, or policy down into the
 harness module, push the dependency the other way instead — inject it behind an
 interface the consumer satisfies.
 
+## Target-language agnosticism (an invariant)
+
+The agent is **language-agnostic with respect to the target project**: prompts,
+file detection, commit/staging guards, and repo grounding must carry no
+assumption about the target's language or ecosystem, and no hard-coded tool or
+directory names (`go build`, `node_modules`, `vendor`, `npm`, …). The
+repository's own metadata — its `.gitignore`, its tracked files, its declared
+config — is the single source of truth for what to ignore, stage, or read; when
+you must exclude or classify a path, ask the repo (git, `.gitignore`, content
+inspection), never a built-in ecosystem list.
+
 ## Tech stack
 
 Go 1.26+, **cobra** + **koanf** (not viper), the **Docker SDK**
@@ -214,21 +225,32 @@ via flags or committed YAML.
 
 ## Repo grounding
 
-At run start (`newRun`) the orchestrator walks the workspace with
-`discoverGrounding`, formats a `REPO GROUNDING` block once (`groundingBlock`),
+At run start (`newRun`) the orchestrator discovers the repo's instruction files
+(`discoverGrounding`), formats a `REPO GROUNDING` block once (`groundingBlock`),
 and caches it on `run.grounding`. All eight model-driven phases — plan,
 diagnose, brainstorm, coder, fix, specialist, synthesis, document — inject the
 cached block; there is no per-phase re-scan.
 
-Discovery rules: the root is always visited; the walk descends up to
-`groundingMaxDepth` (4) levels; per directory `AGENTS.md` is preferred and
-`CLAUDE.md` is the fallback, never both; skipped directories are `.git`,
-`node_modules`, `vendor`, `dist`, `build`, `.next`, `target`, `.worktrees`;
-per-file cap `groundingByteCap` (64 KB, excess replaced with a truncation
-marker); total cap `groundingMaxDocs` (24, shallowest kept, `slog.Warn` on
-overflow); sorted root-first, then shallow → deep. Best-effort: a missing,
-empty, or non-directory workspace yields an empty block and phases run unchanged
-— grounding never fails a run.
+Two tiers, so a committed third-party tree can never masquerade as the repo's
+own rules:
+
+- **Root doc — injected in full.** The workspace root's `AGENTS.md` (preferred)
+  or `CLAUDE.md` (fallback) is read and embedded verbatim, capped at
+  `groundingByteCap` (64 KB, excess replaced with a truncation marker), with
+  symlinks resolved and confined to the workspace — an out-of-tree or non-regular
+  target is dropped, so a poisoned repo cannot smuggle secrets into the prompt.
+- **Nested docs — enumerated, never injected.** Nested `AGENTS.md`/`CLAUDE.md`
+  files are listed as PATHS only, for the model to read on demand; their content
+  is never embedded, so a vendored `vendor/.../CLAUDE.md` cannot pose as the
+  repo's own instructions. In a git workspace the listing comes from one
+  `git ls-files` (tracked files only, so gitignored and untracked trees are
+  structurally excluded); a non-git workspace falls back to a filesystem walk
+  that skips dot-directories. Both apply the same post-filters: `AGENTS.md`
+  preferred per directory, depth ≤ `groundingMaxDepth` (4), total ≤
+  `groundingMaxDocs` (24, `slog.Warn` on overflow), sorted shallow → deep.
+
+Best-effort: a missing, empty, or non-directory workspace yields an empty block
+and phases run unchanged — grounding never fails a run.
 
 Deferred: v2 proximity-scoping (the coder sees only the instruction file for its
 subtask's subtree) and prompt-caching the block.
