@@ -236,6 +236,35 @@ func TestResolveVerifyDeclaredUnrunnableFallsThrough(t *testing.T) {
 	assert.Equal(t, []string{"go", "test", "./..."}, plan.Argv)
 }
 
+func TestResolveVerifyDeclaredNoteThreadedIntoResolvedPlan(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX-only")
+	}
+
+	// A declared command that cannot run, but a detectable go.mod exists: the
+	// declared-cannot-run note must survive onto the resolved plan and reach the
+	// resolution log, rather than being silently dropped when a lower tier wins.
+	stubTools(t, "go") // no pytest
+
+	dir := t.TempDir()
+	writeFile(t, dir, "go.mod", "module example.com/x\n")
+
+	ops := &fakeOps{}
+	o := &run{d: Deps{Ops: ops, Cfg: Config{CardID: "CARD-1", Workspace: dir, Verify: &DeclaredVerify{Command: "pytest -q"}}}}
+
+	p, err := o.resolveVerify(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, verifySourceDetected, p.Source)
+	require.NotEmpty(t, p.Notes, "the declared-cannot-run note is carried onto the resolved plan")
+	assert.Contains(t, p.Notes[0], "declared verify command cannot run: pytest -q")
+
+	o.logVerifyResolution(context.Background(), p)
+	assert.True(t, ops.loggedContains("declared verify command cannot run: pytest -q"),
+		"the resolution log surfaces the dropped-declared note; logs=%v", ops.logs)
+	assert.True(t, ops.loggedContains("verify command resolved: go test ./... (detected)"),
+		"the resolution line still names the resolved command; logs=%v", ops.logs)
+}
+
 func TestResolveVerifySkipWhenNothingResolves(t *testing.T) {
 	// No registry -> the proposal tier is skipped, resolution falls to skip.
 	o := &run{d: Deps{Cfg: Config{Workspace: t.TempDir()}}}

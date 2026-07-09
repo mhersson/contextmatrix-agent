@@ -242,6 +242,7 @@ func (o *run) resolveVerify(ctx context.Context) (verifyPlan, error) {
 			Source:  verifySourceDetected,
 			Timeout: timeout,
 			Env:     env,
+			Notes:   notes, // carry a declared-cannot-run note onto the resolved plan
 		}, nil
 	}
 
@@ -257,6 +258,8 @@ func (o *run) resolveVerify(ctx context.Context) (verifyPlan, error) {
 		}
 
 		if len(proposed.Argv) > 0 {
+			proposed.Notes = notes // carry a declared-cannot-run note onto the resolved plan
+
 			return proposed, nil
 		}
 	}
@@ -327,7 +330,17 @@ func (o *run) logVerifyResolution(ctx context.Context, p verifyPlan) {
 
 	switch {
 	case len(p.Argv) > 0:
-		msg = fmt.Sprintf("verify command resolved: %s (%s)", p.Display, p.Source)
+		if p.Source == verifySourceProposed {
+			// proposeVerify already logged the command and its provenance; keep this
+			// resolution line terse to avoid two near-identical lines.
+			msg = "verify command resolved via model proposal (see the model-proposed note above)"
+		} else {
+			msg = fmt.Sprintf("verify command resolved: %s (%s)", p.Display, p.Source)
+		}
+
+		if len(p.Notes) > 0 {
+			msg += " — " + strings.Join(p.Notes, "; ")
+		}
 	case len(p.Notes) > 0:
 		msg = strings.Join(p.Notes, "; ") + " — no fallback found; work will proceed UNVERIFIED"
 	default:
