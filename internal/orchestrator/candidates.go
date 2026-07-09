@@ -64,10 +64,7 @@ func degradeN(cfg Config, reported float64) int {
 
 	remaining := effectiveCeiling(cfg) - reported
 
-	n := int(remaining / cfg.MaxCardCost)
-	if n < 1 {
-		n = 1
-	}
+	n := max(int(remaining/cfg.MaxCardCost), 1)
 
 	if n > cfg.BestOfN {
 		n = cfg.BestOfN
@@ -205,10 +202,8 @@ func (o *run) runFanout(ctx context.Context) (retErr error) {
 	var wg sync.WaitGroup
 
 	for _, cand := range o.candidates {
-		wg.Add(1)
 
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			defer func() {
 				if r := recover(); r != nil {
 					cand.err = fmt.Errorf("candidate %d panic: %v", cand.idx, r)
@@ -216,7 +211,7 @@ func (o *run) runFanout(ctx context.Context) (retErr error) {
 			}()
 
 			cand.err = o.runCandidate(ctx, cand, ordered, nEff)
-		}()
+		})
 	}
 
 	wg.Wait()

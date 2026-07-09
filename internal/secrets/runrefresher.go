@@ -209,10 +209,7 @@ func (m *RunCredentials) refreshLoop(
 	expiresAt time.Time,
 ) {
 	for {
-		sleep := time.Until(expiresAt) - m.refreshBefore
-		if sleep < m.minSleep {
-			sleep = m.minSleep
-		}
+		sleep := max(time.Until(expiresAt)-m.refreshBefore, m.minSleep)
 
 		select {
 		case <-ctx.Done():

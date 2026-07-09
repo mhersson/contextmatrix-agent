@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"strings"
 
@@ -156,9 +157,7 @@ type SubtaskState struct {
 // mutated; agent_id is injected into a fresh copy.
 func (c *Client) call(ctx context.Context, tool string, args map[string]any) (string, error) {
 	withAgent := make(map[string]any, len(args)+1)
-	for k, v := range args {
-		withAgent[k] = v
-	}
+	maps.Copy(withAgent, args)
 
 	withAgent["agent_id"] = c.agentID
 
@@ -196,9 +195,7 @@ func firstText(result *mcp.CallToolResult) string {
 // IsError surfacing.
 func (c *Client) callFull(ctx context.Context, tool string, args map[string]any) (*mcp.CallToolResult, error) {
 	withAgent := make(map[string]any, len(args)+1)
-	for k, v := range args {
-		withAgent[k] = v
-	}
+	maps.Copy(withAgent, args)
 
 	withAgent["agent_id"] = c.agentID
 

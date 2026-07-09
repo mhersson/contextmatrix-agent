@@ -264,7 +264,7 @@ func isLikelyBuildArtifact(absPath, rel string) bool {
 		return true
 	}
 
-	for _, seg := range strings.Split(filepath.ToSlash(rel), "/") {
+	for seg := range strings.SplitSeq(filepath.ToSlash(rel), "/") {
 		if buildArtifactDirs[seg] {
 			return true
 		}
@@ -326,7 +326,7 @@ func (g *Git) stageForCommit(ctx context.Context) error {
 		return fmt.Errorf("list untracked: %w", err)
 	}
 
-	for _, record := range strings.Split(out, "\x00") {
+	for record := range strings.SplitSeq(out, "\x00") {
 		// Under -z each record is "XY <path>" with no quoting; untracked is
 		// "?? <path>". The trailing NUL yields a final empty record (skipped).
 		if !strings.HasPrefix(record, "?? ") {
@@ -761,7 +761,7 @@ func (g *Git) AddInfoExclude(ctx context.Context, pattern string) error {
 	excludePath := filepath.Join(gitDir, "info", "exclude")
 
 	if existing, err := os.ReadFile(excludePath); err == nil {
-		for _, line := range strings.Split(string(existing), "\n") {
+		for line := range strings.SplitSeq(string(existing), "\n") {
 			if strings.TrimSpace(line) == pattern {
 				return nil // already excluded — idempotent no-op
 			}

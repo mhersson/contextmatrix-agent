@@ -61,8 +61,8 @@ func TestPRCreatorCommand(t *testing.T) {
 	tokenCount := 0
 
 	for _, kv := range cmd.Env {
-		if strings.HasPrefix(kv, "GH_TOKEN=") {
-			ghToken = strings.TrimPrefix(kv, "GH_TOKEN=")
+		if after, ok := strings.CutPrefix(kv, "GH_TOKEN="); ok {
+			ghToken = after
 			tokenCount++
 		}
 	}
@@ -166,7 +166,6 @@ func TestParsePRURL(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

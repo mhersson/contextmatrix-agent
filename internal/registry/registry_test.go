@@ -45,7 +45,9 @@ func TestSelectByComplexityFallsBackToCapable(t *testing.T) {
 }
 
 // ptr returns a pointer to v; used to build *float64 prior literals.
-func ptr(v float64) *float64 { return &v }
+//
+//go:fix inline
+func ptr(v float64) *float64 { return new(v) }
 
 // entry builds a CatalogEntry from prices given in dollars per million tokens,
 // converting to the per-token units the catalog stores.
@@ -73,9 +75,9 @@ func TestSelectByComplexityPriorsOnly(t *testing.T) {
 		entry("small-window", 0.6, 1.2, 8000),
 	}
 	priors := Priors{Models: map[string]PriorEntry{
-		"cheap-weak": {Coder: ptr(0.50)}, "cheap-good": {Coder: ptr(0.70)},
-		"mid-better": {Coder: ptr(0.85)}, "frontier": {Coder: ptr(0.95)},
-		"star": {Coder: ptr(0.99)}, "small-window": {Coder: ptr(0.85)},
+		"cheap-weak": {Coder: new(0.50)}, "cheap-good": {Coder: new(0.70)},
+		"mid-better": {Coder: new(0.85)}, "frontier": {Coder: new(0.95)},
+		"star": {Coder: new(0.99)}, "small-window": {Coder: new(0.85)},
 	}}
 	r := NewRegistryFromParts(catalog, priors, nil, nil, "capable-default")
 
@@ -123,8 +125,8 @@ func TestSelectReviewPanel(t *testing.T) {
 	}
 	// Bars come from DefaultTierBars (moderate 0.76); headroom 1.5.
 	priors := Priors{Models: map[string]PriorEntry{
-		"alpha": {Reviewer: ptr(0.80)}, "beta": {Reviewer: ptr(0.85)},
-		"gamma": {Reviewer: ptr(0.82)}, "delta": {Reviewer: ptr(0.95)},
+		"alpha": {Reviewer: new(0.80)}, "beta": {Reviewer: new(0.85)},
+		"gamma": {Reviewer: new(0.82)}, "delta": {Reviewer: new(0.95)},
 	}}
 	r := NewRegistryFromParts(catalog, priors, nil, nil, "capable-default")
 
@@ -145,8 +147,8 @@ func TestSelectReviewPanel(t *testing.T) {
 	// than escalating price. Restrict the pool via priors: gamma/delta sit below
 	// the moderate bar (0.76) so they are never candidates.
 	priors2 := Priors{Models: map[string]PriorEntry{
-		"alpha": {Reviewer: ptr(0.80)}, "beta": {Reviewer: ptr(0.85)},
-		"gamma": {Reviewer: ptr(0.50)}, "delta": {Reviewer: ptr(0.50)},
+		"alpha": {Reviewer: new(0.80)}, "beta": {Reviewer: new(0.85)},
+		"gamma": {Reviewer: new(0.50)}, "delta": {Reviewer: new(0.50)},
 	}}
 	r2 := NewRegistryFromParts(catalog, priors2, nil, nil, "capable-default")
 	in2 := SelectInput{Role: RoleReviewer, Tier: TierModerate, EstTokens: 50000}
@@ -204,8 +206,8 @@ func TestCandidatesArePriorsOnlyAndSkipBlacklist(t *testing.T) {
 		{ID: "black/listed", PromptPricePerTok: 1e-8, CompletionPricePerTok: 1e-8, ContextLength: 200000, SupportedParameters: []string{"tools"}},
 	}
 	pr := Priors{Models: map[string]PriorEntry{
-		"cheap/ok":     {Coder: ptr(0.80)},
-		"black/listed": {Coder: ptr(0.95)},
+		"cheap/ok":     {Coder: new(0.80)},
+		"black/listed": {Coder: new(0.95)},
 	}}
 	r := NewRegistryFromParts(cat, pr, map[string]bool{"black/listed": true}, nil, "capable/default")
 	got := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierComplex}) // bar 0.82
@@ -232,7 +234,7 @@ func TestSelectCandidateModelsNoPinWrapsAround(t *testing.T) {
 		entry("m3", 1.0, 2.0, 200000),
 	}
 	priors := Priors{Models: map[string]PriorEntry{
-		"m1": {Coder: ptr(0.80)}, "m2": {Coder: ptr(0.80)}, "m3": {Coder: ptr(0.80)},
+		"m1": {Coder: new(0.80)}, "m2": {Coder: new(0.80)}, "m3": {Coder: new(0.80)},
 	}}
 	r := NewRegistryFromParts(catalog, priors, nil, nil, "capable-default")
 	in := SelectInput{Role: RoleCoder, Tier: TierSimple, EstTokens: 50000}
@@ -247,7 +249,7 @@ func TestSelectCandidateModelsNoPinWrapsAround(t *testing.T) {
 
 func TestSelectCandidateModelsSingleModelPoolRepeatsThroughout(t *testing.T) {
 	catalog := llm.Catalog{entry("m1", 1.0, 2.0, 200000)}
-	priors := Priors{Models: map[string]PriorEntry{"m1": {Coder: ptr(0.80)}}}
+	priors := Priors{Models: map[string]PriorEntry{"m1": {Coder: new(0.80)}}}
 	r := NewRegistryFromParts(catalog, priors, nil, nil, "capable-default")
 	in := SelectInput{Role: RoleCoder, Tier: TierSimple, EstTokens: 50000}
 
@@ -272,8 +274,8 @@ func TestSelectCandidateModelsPinOccupiesSlotOneExcludedFromRest(t *testing.T) {
 		entry("m3", 1.0, 2.0, 200000),
 	}
 	priors := Priors{Models: map[string]PriorEntry{
-		"pinned/x": {Coder: ptr(0.80)}, "m1": {Coder: ptr(0.80)},
-		"m2": {Coder: ptr(0.80)}, "m3": {Coder: ptr(0.80)},
+		"pinned/x": {Coder: new(0.80)}, "m1": {Coder: new(0.80)},
+		"m2": {Coder: new(0.80)}, "m3": {Coder: new(0.80)},
 	}}
 	r := NewRegistryFromParts(catalog, priors, nil, nil, "capable-default")
 	in := SelectInput{Role: RoleCoder, Tier: TierSimple, EstTokens: 50000}
@@ -295,8 +297,8 @@ func TestSelectCandidateModelsPinMergesExcludeWithoutMutatingCaller(t *testing.T
 		entry("already-excluded", 1.0, 2.0, 200000),
 	}
 	priors := Priors{Models: map[string]PriorEntry{
-		"pinned/x": {Coder: ptr(0.80)}, "m1": {Coder: ptr(0.80)}, "m2": {Coder: ptr(0.80)},
-		"m3": {Coder: ptr(0.80)}, "already-excluded": {Coder: ptr(0.80)},
+		"pinned/x": {Coder: new(0.80)}, "m1": {Coder: new(0.80)}, "m2": {Coder: new(0.80)},
+		"m3": {Coder: new(0.80)}, "already-excluded": {Coder: new(0.80)},
 	}}
 	r := NewRegistryFromParts(catalog, priors, nil, nil, "capable-default")
 
@@ -332,7 +334,7 @@ func TestFavoritesConsideredFirst(t *testing.T) {
 		{ID: "fav/pick", PromptPricePerTok: 1e-6, CompletionPricePerTok: 1e-6, ContextLength: 200000, SupportedParameters: []string{"tools"}},
 	}
 	pr := Priors{Models: map[string]PriorEntry{
-		"cheap/win": {Coder: ptr(0.90)}, "fav/pick": {Coder: ptr(0.90)},
+		"cheap/win": {Coder: new(0.90)}, "fav/pick": {Coder: new(0.90)},
 	}}
 	favs := map[favKey][]string{{Tier: TierComplex}: {"fav/pick"}}
 	r := NewRegistryFromParts(cat, pr, nil, favs, "capable/default")
