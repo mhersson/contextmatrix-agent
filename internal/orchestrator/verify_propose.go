@@ -21,13 +21,27 @@ const proposeTurnCap = 8
 // is short; anything longer is a model that misunderstood the task.
 const maxProposedCommandLen = 200
 
-// proposeLeadDeny are lead tokens a proposed command must not start with: shell
-// no-ops and trivial commands that would form a vacuous always-green gate.
+// proposeLeadDeny are program names a proposed command may not start with: shell
+// no-ops and trivial commands that form a vacuous always-green gate, plus
+// read-only inspection commands that run cleanly while verifying nothing.
 var proposeLeadDeny = map[string]bool{
+	// shell no-ops / trivial commands
 	"true": true, "false": true, ":": true, "exit": true, "echo": true,
 	"printf": true, "test": true, "[": true, "sleep": true, "cd": true,
 	"pwd": true, "ls": true, "cat": true,
+	// read-only / inspection commands that exit 0 without running any tests
+	"git": true, "find": true, "grep": true, "rg": true, "which": true,
+	"whereis": true, "file": true, "stat": true, "head": true, "tail": true,
+	"wc": true, "env": true, "date": true,
 }
+
+// proposedForbidden are the characters a model-proposed command may not contain.
+// A proposed command is executed as PLAIN ARGV — never through a shell — so any
+// shell metacharacter (substitution, pipeline, list, redirection, glob, quoting)
+// is an arbitrary-code-execution vector from attacker-influenced convention docs
+// and rejects the whole proposal. Operator-DECLARED commands keep full shell
+// semantics; this restriction is Source==proposed only.
+const proposedForbidden = "$`();|&<>{}*?\\\"'\n\r\t"
 
 // verifyProposePrompt asks a read-only model to name the repository's own test
 // command. It is deliberately target-language-agnostic: it names no toolchain and
@@ -44,13 +58,16 @@ determine the single command a developer runs from the repo root to execute the
 test suite.
 
 Rules:
-- Output the command exactly as a developer would type it, on ONE line. Prefer
-  the project's own aggregate test command over an ad-hoc invocation.
+- Output a SINGLE plain command: one program and its arguments, on ONE line, with
+  NO shell operators — no pipes (|), no "&&"/";"/"||", no redirection (< >), no
+  command substitution ($(...) or backticks), no globs (* ?), no quoting. A
+  command that needs shell operators will be rejected.
+- Name the project's own aggregate test command, not an ad-hoc inspection command.
 - Base it strictly on what the repository declares; do NOT invent a command.
 - If the repository genuinely has no automated tests, output an empty command.
 
 Respond with ONLY a JSON object, no prose:
-{"command":"<one-line test command, or empty string when there is no test suite>"}
+{"command":"<one-line plain test command, or empty string when there is no test suite>"}
 `
 
 // proposeVerify runs ONE read-only model call to propose the repository's verify
@@ -113,11 +130,19 @@ func (o *run) proposeVerify(ctx context.Context) (verifyPlan, error) {
 	}
 
 	cmd, ok := parseProposedCommand(res.Output)
-	if !ok || !acceptProposedCommand(cmd) {
+	if !ok {
 		return verifyPlan{}, nil
 	}
 
-	if verifyexec.ProbeShell(cfg.Workspace, cmd) != nil {
+	// A proposed command is metachar-free and runs as PLAIN ARGV, never a shell —
+	// so a substitution/pipeline from attacker-influenced convention docs cannot
+	// reach bash -c. Probe argv[0] directly.
+	argv, ok := acceptProposedCommand(cmd)
+	if !ok {
+		return verifyPlan{}, nil
+	}
+
+	if verifyexec.Probe(cfg.Workspace, argv) != nil {
 		return verifyPlan{}, nil
 	}
 
@@ -126,7 +151,7 @@ func (o *run) proposeVerify(ctx context.Context) (verifyPlan, error) {
 	o.recordSection(ctx, "Verify Command", verifyCommandSection(cmd, used))
 
 	return verifyPlan{
-		Argv:    verifyexec.ShellArgv(cmd),
+		Argv:    argv, // plain argv — executed WITHOUT a shell
 		Display: cmd,
 		Source:  verifySourceProposed,
 		Timeout: o.verifyTimeout(),
@@ -156,17 +181,23 @@ func parseProposedCommand(output string) (string, bool) {
 	return cmd, cmd != ""
 }
 
-// acceptProposedCommand applies the cheap acceptance gate before the probe: a
-// single non-empty line within the length bound whose lead token is not a shell
-// no-op. Runnability is verified separately by ProbeShell.
-func acceptProposedCommand(cmd string) bool {
-	if strings.ContainsAny(cmd, "\n\r") || len(cmd) > maxProposedCommandLen {
-		return false
+// acceptProposedCommand validates a model-proposed command and splits it into a
+// plain argv, or returns ok=false to reject it: it rejects anything over the
+// length bound, anything carrying a shell metacharacter (so the command can be
+// run WITHOUT a shell), and any command whose program is a shell no-op or a
+// read-only inspection command. Runnability is verified separately by Probe on
+// the returned argv.
+func acceptProposedCommand(cmd string) ([]string, bool) {
+	if len(cmd) > maxProposedCommandLen || strings.ContainsAny(cmd, proposedForbidden) {
+		return nil, false
 	}
 
 	fields := strings.Fields(cmd)
+	if len(fields) == 0 || proposeLeadDeny[fields[0]] {
+		return nil, false
+	}
 
-	return len(fields) > 0 && !proposeLeadDeny[fields[0]]
+	return fields, true
 }
 
 // verifyCommandSection renders the human-facing "## Verify Command" body recorded
