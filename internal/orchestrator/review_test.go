@@ -1031,6 +1031,7 @@ func TestRunReviewHITLApproveProceeds(t *testing.T) {
 		stopResp(`{"verdict":"approve","feedback":""}`, 0.001),
 	}}
 	o := newRun(hitlReviewDeps(ops, git, inbox, client), cmclient.TaskContext{CardID: "CARD-1", Title: "T", Description: "b", State: "review"})
+	o.verify = &verifyPlan{Source: verifySourceNone} // isolate from verify resolution
 
 	require.NoError(t, runReview(context.Background(), o))
 	assert.Equal(t, 0, countCall(ops.recorded(), "IncrementReviewAttempts:CARD-1"), "approve does not increment attempts")
@@ -1055,6 +1056,7 @@ func TestRunReviewHITLAdjustFixesThenApproves(t *testing.T) {
 		stopResp(`{"verdict":"approve","feedback":""}`, 0.001),
 	}}
 	o := newRun(hitlReviewDeps(ops, git, inbox, client), cmclient.TaskContext{CardID: "CARD-1", Title: "T", Description: "b", State: "review"})
+	o.verify = &verifyPlan{Source: verifySourceNone} // isolate from verify resolution
 
 	require.NoError(t, runReview(context.Background(), o))
 	assert.GreaterOrEqual(t, countCall(ops.recorded(), "IncrementReviewAttempts:CARD-1"), 1, "an adjust increments attempts and runs a fix")

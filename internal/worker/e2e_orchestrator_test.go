@@ -635,8 +635,8 @@ func TestOrchestratorEndToEndHappyPath(t *testing.T) {
 
 	t.Parallel()
 
-	// No recognizable toolchain marker at root -> verify resolves to skip -> the
-	// gate proceeds unverified.
+	// baseSpec declares a trivial always-pass verify command, so the gate is a
+	// deterministic pass and no model proposal fires during resolution.
 	remote := setupBareRemote(t)
 
 	backend := &scriptedBackend{

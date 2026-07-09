@@ -77,7 +77,10 @@ func runReview(ctx context.Context, o *run) error {
 		}
 	}
 
-	plan := o.ensureVerify(ctx)
+	plan, err := o.ensureVerify(ctx)
+	if err != nil {
+		return err
+	}
 
 	if cfg.Interactive {
 		return o.runReviewHITL(ctx, plan)

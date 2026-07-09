@@ -206,7 +206,8 @@ func TestResolveVerifyDeclaredRunnable(t *testing.T) {
 		Verify:    &DeclaredVerify{Command: "cargo test"},
 	}}}
 
-	plan := o.resolveVerify()
+	plan, err := o.resolveVerify(context.Background())
+	require.NoError(t, err)
 	assert.Equal(t, verifySourceDeclared, plan.Source)
 	assert.Equal(t, "cargo test", plan.Display)
 	assert.Equal(t, []string{"bash", "-c", "set -o pipefail; cargo test"}, plan.Argv)
@@ -229,15 +230,18 @@ func TestResolveVerifyDeclaredUnrunnableFallsThrough(t *testing.T) {
 		Verify:    &DeclaredVerify{Command: "pytest -q"},
 	}}}
 
-	plan := o.resolveVerify()
+	plan, err := o.resolveVerify(context.Background())
+	require.NoError(t, err)
 	assert.Equal(t, verifySourceDetected, plan.Source)
 	assert.Equal(t, []string{"go", "test", "./..."}, plan.Argv)
 }
 
 func TestResolveVerifySkipWhenNothingResolves(t *testing.T) {
+	// No registry -> the proposal tier is skipped, resolution falls to skip.
 	o := &run{d: Deps{Cfg: Config{Workspace: t.TempDir()}}}
 
-	plan := o.resolveVerify()
+	plan, err := o.resolveVerify(context.Background())
+	require.NoError(t, err)
 	assert.Equal(t, verifySourceNone, plan.Source)
 	assert.Empty(t, plan.Argv)
 }
@@ -246,7 +250,8 @@ func TestEnsureVerifyCachesAndLogs(t *testing.T) {
 	ops := &fakeOps{}
 	o := &run{d: Deps{Ops: ops, Cfg: Config{CardID: "CARD-1", Workspace: t.TempDir()}}}
 
-	plan := o.ensureVerify(context.Background())
+	plan, err := o.ensureVerify(context.Background())
+	require.NoError(t, err)
 	assert.Equal(t, verifySourceNone, plan.Source)
 	require.NotNil(t, o.verify)
 	assert.True(t, ops.loggedContains("work will proceed UNVERIFIED"), "the loud skip line fires once; logs=%v", ops.logs)
@@ -254,7 +259,8 @@ func TestEnsureVerifyCachesAndLogs(t *testing.T) {
 	// A second call reuses the cache and does not log again.
 	logsBefore := len(ops.logs)
 
-	o.ensureVerify(context.Background())
+	_, err = o.ensureVerify(context.Background())
+	require.NoError(t, err)
 	assert.Len(t, ops.logs, logsBefore, "ensureVerify caches: no second resolution log")
 }
 

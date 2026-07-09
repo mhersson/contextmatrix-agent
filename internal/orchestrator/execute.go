@@ -45,8 +45,10 @@ type solverCtx struct {
 func runExecute(ctx context.Context, o *run) error {
 	// Resolve the verify plan once at execute entry (the first phase to reach the
 	// gate on a fresh run), so the resolution log fires early and the coder prompt
-	// can name the command.
-	o.ensureVerify(ctx)
+	// can name the command. A budget park during the proposal tier propagates.
+	if _, err := o.ensureVerify(ctx); err != nil {
+		return err
+	}
 
 	// Best-of-N replaces the single-solver execute with a candidate fan-out: N
 	// implementations of the shared plan race in isolated worktrees, off the board

@@ -106,26 +106,30 @@ func classifyVerify(plan verifyPlan, out verifyexec.Outcome) verifyResult {
 // ensureVerify resolves the verify plan once per run and caches it: the first
 // phase to reach the gate (execute, judge, or review) resolves it, and every
 // later phase reuses the result. It emits the single resolution log line on
-// first resolve.
-func (o *run) ensureVerify(ctx context.Context) verifyPlan {
+// first resolve. A budget park during resolution (the proposal tier) propagates
+// and is not cached, so a resumed run re-attempts.
+func (o *run) ensureVerify(ctx context.Context) (verifyPlan, error) {
 	if o.verify != nil {
-		return *o.verify
+		return *o.verify, nil
 	}
 
-	p := o.resolveVerify()
+	p, err := o.resolveVerify(ctx)
+	if err != nil {
+		return verifyPlan{}, err
+	}
 
 	o.verify = &p
 	o.logVerifyResolution(ctx, p)
 
-	return p
+	return p, nil
 }
 
 // resolveVerify runs the resolution ladder: declared command (probed) beats
-// repo-convention detection beats skip. A declared command that cannot run does
-// NOT disable the gate — it records a note and falls through, so a typo cannot
-// silently drop verification. (A model-proposal tier lands between detection and
-// skip in a later change.)
-func (o *run) resolveVerify() verifyPlan {
+// repo-convention detection beats a model proposal beats skip. A declared
+// command that cannot run does NOT disable the gate — it records a note and
+// falls through, so a typo cannot silently drop verification. A budget park from
+// the proposal tier propagates; every other failure degrades toward skip.
+func (o *run) resolveVerify(ctx context.Context) (verifyPlan, error) {
 	cfg := o.d.Cfg
 	timeout := o.verifyTimeout()
 	env := o.verifyEnv()
@@ -144,7 +148,7 @@ func (o *run) resolveVerify() verifyPlan {
 				Source:  verifySourceDeclared,
 				Timeout: timeout,
 				Env:     env,
-			}
+			}, nil
 		}
 
 		// A declared command that cannot run does not disable the gate: note it and
@@ -160,11 +164,21 @@ func (o *run) resolveVerify() verifyPlan {
 			Source:  verifySourceDetected,
 			Timeout: timeout,
 			Env:     env,
-		}
+		}, nil
 	}
 
-	// Tier 3: skip. The gate proceeds unverified; the resolution log says so.
-	return verifyPlan{Source: verifySourceNone, Timeout: timeout, Env: env, Notes: notes}
+	// Tier 3: model proposal (a code-executed command, never persisted).
+	proposed, err := o.proposeVerify(ctx)
+	if err != nil {
+		return verifyPlan{}, err // budget park
+	}
+
+	if len(proposed.Argv) > 0 {
+		return proposed, nil
+	}
+
+	// Tier 4: skip. The gate proceeds unverified; the resolution log says so.
+	return verifyPlan{Source: verifySourceNone, Timeout: timeout, Env: env, Notes: notes}, nil
 }
 
 // runVerifyPlan executes the resolved plan in dir and returns the classified

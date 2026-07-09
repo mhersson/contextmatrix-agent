@@ -83,9 +83,12 @@ func runJudge(ctx context.Context, o *run) error {
 	}
 
 	// Resolve the verify plan once (first caller wins) and run it per candidate on
-	// each worktree. The declared/detected command is repo-level, so the same plan
-	// applies to every candidate clone.
-	plan := o.ensureVerify(ctx)
+	// each worktree. The declared/detected/proposed command is repo-level, so the
+	// same plan applies to every candidate clone.
+	plan, err := o.ensureVerify(ctx)
+	if err != nil {
+		return err
+	}
 
 	// Verify each survivor SERIALLY (the fan-out already peaked memory; parallel
 	// verify subprocesses on top would risk the container cap). Capture the diff
