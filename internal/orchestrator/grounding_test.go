@@ -22,112 +22,148 @@ func writeNestedFile(t *testing.T, dir, rel, content string) {
 	require.NoError(t, os.WriteFile(p, []byte(content), 0o644))
 }
 
+// gitInit initialises a repo isolated from the developer's global gitignore, so
+// only the repo's own rules and its tracked index decide what ls-files sees.
 func gitInit(t *testing.T, dir string) {
 	t.Helper()
 
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+
 	require.NoError(t, exec.Command("git", "-C", dir, "init", "-q").Run())
+	require.NoError(t, exec.Command("git", "-C", dir, "config", "core.excludesFile", "/dev/null").Run())
+}
+
+// gitAddAll stages the whole tree so the nested files become tracked — the
+// listing is built from git's tracked index, so a file must be added (not merely
+// present) to appear.
+func gitAddAll(t *testing.T, dir string) {
+	t.Helper()
+
+	require.NoError(t, exec.Command("git", "-C", dir, "add", "-A").Run())
 }
 
 func TestDiscoverGrounding(t *testing.T) {
 	t.Run("empty or missing root yields nil", func(t *testing.T) {
-		assert.Nil(t, discoverGrounding(""))
-		assert.Nil(t, discoverGrounding(filepath.Join(t.TempDir(), "nope")))
+		root, nested := discoverGrounding("")
+		assert.Nil(t, root)
+		assert.Nil(t, nested)
+
+		root, nested = discoverGrounding(filepath.Join(t.TempDir(), "nope"))
+		assert.Nil(t, root)
+		assert.Nil(t, nested)
 	})
 
-	t.Run("AGENTS.md preferred over CLAUDE.md in the same dir", func(t *testing.T) {
+	t.Run("root AGENTS.md preferred over CLAUDE.md", func(t *testing.T) {
 		root := t.TempDir()
 		writeNestedFile(t, root, "AGENTS.md", "# agents")
 		writeNestedFile(t, root, "CLAUDE.md", "# claude")
 
-		docs := discoverGrounding(root)
-		require.Len(t, docs, 1)
-		assert.Equal(t, "AGENTS.md", docs[0].name)
-		assert.Equal(t, ".", docs[0].relDir)
-		assert.Contains(t, docs[0].content, "# agents")
+		doc, nested := discoverGrounding(root)
+		require.NotNil(t, doc)
+		assert.Equal(t, "AGENTS.md", doc.name)
+		assert.Equal(t, ".", doc.relDir)
+		assert.Contains(t, doc.content, "# agents")
+		assert.Empty(t, nested)
 	})
 
-	t.Run("CLAUDE.md used as fallback when no AGENTS.md", func(t *testing.T) {
+	t.Run("root CLAUDE.md used as fallback when no AGENTS.md", func(t *testing.T) {
 		root := t.TempDir()
 		writeNestedFile(t, root, "CLAUDE.md", "# claude")
 
-		docs := discoverGrounding(root)
-		require.Len(t, docs, 1)
-		assert.Equal(t, "CLAUDE.md", docs[0].name)
+		doc, _ := discoverGrounding(root)
+		require.NotNil(t, doc)
+		assert.Equal(t, "CLAUDE.md", doc.name)
 	})
 
-	t.Run("nested files discovered, root first then shallow to deep", func(t *testing.T) {
-		root := t.TempDir()
-		writeNestedFile(t, root, "CLAUDE.md", "# root")
-		writeNestedFile(t, root, "web/CLAUDE.md", "# web")
-		writeNestedFile(t, root, "internal/api/AGENTS.md", "# api")
-
-		docs := discoverGrounding(root)
-		require.Len(t, docs, 3)
-		assert.Equal(t, ".", docs[0].relDir)
-		assert.Equal(t, "web", docs[1].relDir)
-		assert.Equal(t, filepath.Join("internal", "api"), docs[2].relDir)
-	})
-
-	t.Run("file over 64KB is truncated with a marker", func(t *testing.T) {
-		root := t.TempDir()
-		writeNestedFile(t, root, "CLAUDE.md", strings.Repeat("x", 70*1024))
-
-		docs := discoverGrounding(root)
-		require.Len(t, docs, 1)
-		assert.LessOrEqual(t, len(docs[0].content), groundingByteCap+64)
-		assert.Contains(t, docs[0].content, "[... truncated at 64 KB ...]")
-	})
-
-	t.Run("hidden and gitignored dirs are not walked", func(t *testing.T) {
+	t.Run("git workspace: root injected, nested listed shallow to deep, gitignored excluded", func(t *testing.T) {
 		root := t.TempDir()
 		gitInit(t, root)
-		// The repo's own .gitignore is the agnostic source of truth for which
-		// non-hidden dirs to skip — grounding names no ecosystem directory.
+		// The repo's own .gitignore is the agnostic source of truth for which trees
+		// to exclude — grounding names no ecosystem directory.
 		writeNestedFile(t, root, ".gitignore", "node_modules/\n")
-		writeNestedFile(t, root, "CLAUDE.md", "# root")
-		// Skipped because the repo ignores it, not because grounding knows the
-		// name "node_modules".
+		writeNestedFile(t, root, "CLAUDE.md", "# root rules")
+		writeNestedFile(t, root, "internal/api/AGENTS.md", "# api rules")
+		writeNestedFile(t, root, "web/CLAUDE.md", "# web rules")
+		// Gitignored: `git add -A` refuses it, so it never enters the tracked index
+		// and cannot reach the listing — no name-based knowledge of "node_modules".
 		writeNestedFile(t, root, "node_modules/pkg/CLAUDE.md", "# vendored")
-		// Hidden dot-dir: always skipped (VCS/tooling/build state).
-		writeNestedFile(t, root, ".cache/CLAUDE.md", "# hidden")
-		// An ordinary, non-ignored subdir IS walked.
-		writeNestedFile(t, root, "svc/CLAUDE.md", "# tracked subdir")
+		gitAddAll(t, root)
 
-		docs := discoverGrounding(root)
-		require.Len(t, docs, 2)
+		doc, nested := discoverGrounding(root)
+		require.NotNil(t, doc)
+		assert.Equal(t, "CLAUDE.md", doc.name)
+		assert.Contains(t, doc.content, "# root rules")
 
-		relDirs := []string{docs[0].relDir, docs[1].relDir}
-		assert.Contains(t, relDirs, ".")
-		assert.Contains(t, relDirs, "svc")
+		// Nested docs are ENUMERATED as paths, shallow → deep, never read.
+		require.Equal(t, []string{"web/CLAUDE.md", filepath.ToSlash("internal/api/AGENTS.md")}, nested)
+
+		// The rendered block injects the root content but only LISTS nested paths.
+		block := groundingBlock(doc, nested)
+		assert.Contains(t, block, "# root rules")
+		assert.Contains(t, block, "web/CLAUDE.md")
+		assert.NotContains(t, block, "# web rules", "a nested doc's content must never be injected")
 	})
 
-	t.Run("dirs deeper than max depth are not walked", func(t *testing.T) {
+	t.Run("committed third-party tree is listed, its content never injected", func(t *testing.T) {
+		// REGRESSION PIN. A repo that COMMITS its dependency tree (Go vendor/, a
+		// checked-in node_modules) carries third-party AGENTS.md/CLAUDE.md files that
+		// are TRACKED, not gitignored — a gitignore-only prune would walk them and
+		// inject a foreign library's instructions as if they were the target repo's
+		// own rules. The trade this pins: a committed third-party instruction file
+		// appears at most as a PATH in the listing; its content is never injected
+		// into the block every phase presents as "the target repo's own instructions".
 		root := t.TempDir()
-		writeNestedFile(t, root, "CLAUDE.md", "# root")
+		gitInit(t, root)
+		writeNestedFile(t, root, "AGENTS.md", "# first-party rules")
+		writeNestedFile(t, root, "vendor/github.com/x/CLAUDE.md", "# THIRD-PARTY do not inject")
+		gitAddAll(t, root)
+
+		doc, nested := discoverGrounding(root)
+		require.NotNil(t, doc)
+		assert.Contains(t, nested, "vendor/github.com/x/CLAUDE.md", "a tracked nested doc is enumerated as a path")
+
+		block := groundingBlock(doc, nested)
+		assert.NotContains(t, block, "THIRD-PARTY do not inject",
+			"a committed third-party instruction file must never be injected as the repo's own")
+	})
+
+	t.Run("non-git fallback: root injected, nested listed, dot-dirs and depth pruned", func(t *testing.T) {
+		root := t.TempDir() // no git init: exercises the WalkDir fallback
+		writeNestedFile(t, root, "CLAUDE.md", "# root rules")
+		writeNestedFile(t, root, "svc/CLAUDE.md", "# svc rules")
+		// Hidden dot-dir: always skipped (VCS/tooling/build state).
+		writeNestedFile(t, root, ".cache/CLAUDE.md", "# hidden")
+		// Deeper than the depth cap: skipped before any read.
 		writeNestedFile(t, root, "a/b/c/d/e/CLAUDE.md", "# too deep")
 
-		tooDeep := filepath.Join("a", "b", "c", "d", "e")
-		docs := discoverGrounding(root)
+		doc, nested := discoverGrounding(root)
+		require.NotNil(t, doc)
+		assert.Contains(t, doc.content, "# root rules")
 
-		for _, doc := range docs {
-			assert.NotEqual(t, tooDeep, doc.relDir, "depth-5 dir should be skipped")
+		assert.Contains(t, nested, "svc/CLAUDE.md")
+
+		for _, p := range nested {
+			assert.NotContains(t, p, ".cache", "a hidden dot-dir must not appear in the listing")
+			assert.NotEqual(t, filepath.ToSlash("a/b/c/d/e/CLAUDE.md"), p, "a depth-5 dir must not be listed")
 		}
 	})
 
-	t.Run("count cap limits results to groundingMaxDocs", func(t *testing.T) {
+	t.Run("listing is capped at groundingMaxDocs", func(t *testing.T) {
 		root := t.TempDir()
 
-		for i := range 25 {
+		for i := range groundingMaxDocs + 5 {
 			writeNestedFile(t, root, filepath.Join(fmt.Sprintf("pkg%02d", i), "CLAUDE.md"), "# content")
 		}
 
-		docs := discoverGrounding(root)
-		assert.Len(t, docs, groundingMaxDocs)
+		_, nested := discoverGrounding(root)
+		assert.Len(t, nested, groundingMaxDocs)
 	})
 }
 
 func TestReadGroundingDirRejectsOutOfTreeSymlink(t *testing.T) {
-	// A repo-committed instruction file symlinked OUT of the workspace (in
+	// A repo-committed root instruction file symlinked OUT of the workspace (in
 	// production: /proc/self/environ, /run/cm-secrets/env) must not be read into
 	// the grounding block — that would smuggle secrets, unredacted, into every
 	// model prompt.
@@ -136,36 +172,28 @@ func TestReadGroundingDirRejectsOutOfTreeSymlink(t *testing.T) {
 	require.NoError(t, os.WriteFile(outside, []byte("CM_MCP_API_KEY=supersecret"), 0o600))
 	require.NoError(t, os.Symlink(outside, filepath.Join(root, "AGENTS.md")))
 
-	docs := discoverGrounding(root)
+	doc, _ := discoverGrounding(root)
 
-	for _, d := range docs {
-		assert.NotContains(t, d.content, "supersecret",
+	assert.Nil(t, doc, "the root instruction file escapes the workspace; nothing grounded")
+
+	if doc != nil {
+		assert.NotContains(t, doc.content, "supersecret",
 			"out-of-tree symlinked instruction file must not leak into grounding")
 	}
-
-	assert.Empty(t, docs, "the only instruction file escapes the workspace; nothing grounded")
 }
 
 func TestReadGroundingDirFollowsInRepoSymlink(t *testing.T) {
-	// The common in-repo CLAUDE.md -> AGENTS.md symlink is legitimate and must
-	// still be read (containment allows targets that stay within the workspace).
+	// A legitimate in-repo symlink for the root doc (AGENTS.md -> an in-tree file)
+	// is followed and read (containment allows targets that stay within the
+	// workspace); only escaping symlinks are rejected.
 	root := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte("# real rules"), 0o644))
-	sub := filepath.Join(root, "pkg")
-	require.NoError(t, os.MkdirAll(sub, 0o755))
-	require.NoError(t, os.Symlink(filepath.Join(root, "AGENTS.md"), filepath.Join(sub, "CLAUDE.md")))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "rules.md"), []byte("# real rules"), 0o644))
+	require.NoError(t, os.Symlink(filepath.Join(root, "rules.md"), filepath.Join(root, "AGENTS.md")))
 
-	var found bool
-
-	for _, d := range discoverGrounding(root) {
-		if d.relDir == "pkg" {
-			found = true
-
-			assert.Contains(t, d.content, "# real rules", "in-repo symlink must be followed")
-		}
-	}
-
-	assert.True(t, found, "in-tree symlinked instruction file must be grounded")
+	doc, _ := discoverGrounding(root)
+	require.NotNil(t, doc, "in-tree symlinked root instruction file must be grounded")
+	assert.Equal(t, "AGENTS.md", doc.name)
+	assert.Contains(t, doc.content, "# real rules", "in-repo symlink must be followed")
 }
 
 func TestGroundingTruncationIsRuneSafe(t *testing.T) {
@@ -173,38 +201,34 @@ func TestGroundingTruncationIsRuneSafe(t *testing.T) {
 	root := t.TempDir()
 	writeNestedFile(t, root, "AGENTS.md", strings.Repeat("a", groundingByteCap-1)+"…tail")
 
-	docs := discoverGrounding(root)
-	require.Len(t, docs, 1)
-	assert.True(t, utf8.ValidString(docs[0].content), "truncated grounding must be valid UTF-8")
-	assert.Contains(t, docs[0].content, "[... truncated at 64 KB ...]")
+	doc, _ := discoverGrounding(root)
+	require.NotNil(t, doc)
+	assert.True(t, utf8.ValidString(doc.content), "truncated grounding must be valid UTF-8")
+	assert.Contains(t, doc.content, "[... truncated at 64 KB ...]")
 }
 
 func TestGroundingBlock(t *testing.T) {
-	assert.Empty(t, groundingBlock(nil))
+	assert.Empty(t, groundingBlock(nil, nil))
 
-	docs := []groundingDoc{
-		{relDir: ".", name: "CLAUDE.md", content: "# root rules"},
-		{relDir: "web", name: "CLAUDE.md", content: "# web rules"},
-	}
-	block := groundingBlock(docs)
+	root := &groundingDoc{relDir: ".", name: "CLAUDE.md", content: "# root rules"}
+	nested := []string{"web/CLAUDE.md", "internal/api/AGENTS.md"}
+	block := groundingBlock(root, nested)
 
 	assert.Contains(t, block, "REPO GROUNDING")
 	assert.Contains(t, block, "=== ./CLAUDE.md ===")
 	assert.Contains(t, block, "# root rules")
-	assert.Contains(t, block, "=== web/CLAUDE.md ===")
-	assert.Contains(t, block, "# web rules")
 
-	// Root divider must precede the web divider.
+	// Nested files are named as PATHS with a read-on-demand instruction — their
+	// content is NOT part of the block.
+	assert.Contains(t, block, "web/CLAUDE.md")
+	assert.Contains(t, block, "internal/api/AGENTS.md")
+	assert.Contains(t, block, "read that directory's instruction file first")
+
+	// The root divider (injected content) must precede the nested listing.
 	rootDiv := strings.Index(block, "=== ./CLAUDE.md ===")
-	webDiv := strings.Index(block, "=== web/CLAUDE.md ===")
+	listing := strings.Index(block, "Directory-specific instruction files exist at:")
+	assert.Less(t, rootDiv, listing, "root content should precede the nested listing")
 
-	assert.Less(t, rootDiv, webDiv, "root divider should appear before web divider")
-
-	// Each doc's content must appear after its own divider and before the next.
-	rootContent := strings.Index(block, "# root rules")
-	webContent := strings.Index(block, "# web rules")
-
-	assert.Less(t, rootDiv, rootContent, "root content should follow root divider")
-	assert.Less(t, rootContent, webDiv, "root content should precede web divider")
-	assert.Less(t, webDiv, webContent, "web content should follow web divider")
+	// A root-only block carries no listing sentence.
+	assert.NotContains(t, groundingBlock(root, nil), "Directory-specific instruction files")
 }
