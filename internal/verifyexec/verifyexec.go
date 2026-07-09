@@ -42,14 +42,25 @@ type Outcome struct {
 // survive.
 const captureCapBytes = 1 << 16 // 64 KiB
 
-// toolMissingPatterns are anchored stderr signatures of a missing tool. They are
-// anchored precisely (the message must BEGIN the line) so that a verify run that
-// merely PRINTS "command not found" in its own output cannot be misread as a
-// missing tool and weaken the gate.
+// toolMissingPatterns are anchored stderr signatures of a missing tool — the
+// backstop for a make/just/task wrapper that shells out to a toolchain binary
+// that is not installed and exits non-127. They match the shapes GNU make and
+// the POSIX shells actually emit (empirically): the shell may prefix its own
+// interpreter path (`/bin/sh:`) and a line-number infix (`1:` / `line 1:`), the
+// message casing varies (`command not found` / `Command not found`), and make's
+// own summary line reports `Error 127`. Every pattern is anchored to the START
+// of a line so a verify run that merely PRINTS a not-found message mid-output
+// cannot be misread as a missing tool and reclassify a real failure as skipped.
 var toolMissingPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?m)^make(\[\d+\])?: .*: (command )?not found`),
-	regexp.MustCompile(`(?m)^sh: .*: not found`),
-	regexp.MustCompile(`(?m)^bash: .*: command not found`),
+	// make announcing a missing recipe tool: "make: cargo: command not found",
+	// "make[1]: mvn: not found", "make: pytest: No such file or directory".
+	regexp.MustCompile(`(?mi)^make(\[\d+\])?: .+: (command not found|not found|no such file or directory)`),
+	// make's exit-127 summary line: "make: *** [Makefile:3: test] Error 127".
+	regexp.MustCompile(`(?m)^make(\[\d+\])?: \*\*\* .* Error 127$`),
+	// sh/bash reporting a missing command, with an optional leading interpreter
+	// path and an optional line-number infix: "/bin/sh: 1: cargo: not found",
+	// "bash: line 1: cargo: command not found".
+	regexp.MustCompile(`(?mi)^(/\S+/)?(ba)?sh: ((line )?\d+: )?.+: (command not found|not found)`),
 }
 
 // LooksToolMissing reports whether output carries an anchored "tool not found"

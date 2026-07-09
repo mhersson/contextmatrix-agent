@@ -170,10 +170,22 @@ func TestLooksToolMissing(t *testing.T) {
 		{"make-command-not-found", "make: cargo: command not found", true},
 		{"make-sublevel", "make[1]: mvn: command not found", true},
 		{"make-not-found", "make: pytest: not found", true},
+		{"make-no-such-file", "make: cargo: No such file or directory", true},
+		{"make-error-127", "make: *** [Makefile:3: test] Error 127", true},
+		{"make-error-127-sublevel", "make[1]: *** [test] Error 127", true},
 		{"sh-not-found", "sh: gradle: not found", true},
 		{"bash-command-not-found", "bash: dotnet: command not found", true},
+		// The real shapes GNU make/dash/bash emit when a recipe tool is missing.
+		{"sh-with-path-and-linenum", "/bin/sh: 1: cargo: not found", true},
+		{"bash-with-line-infix", "bash: line 1: cargo: command not found", true},
+		{"sh-with-path-and-line-infix", "/usr/bin/sh: line 5: pytest: command not found", true},
+		{"capital-command-not-found", "bash: gradle: Command not found", true},
+		// A real failure whose output merely mentions the phrase must STAY a
+		// failure, not be reclassified as a missing tool.
 		{"printed-mid-output", "FAIL: test asserted 'command not found' message", false},
+		{"printed-mid-line", "test log: bash: x: command not found (this is expected)", false},
 		{"printed-with-leading-space", "  bash: x: command not found", false},
+		{"assertion-diff", "-  want: command not found\n+  got:  ok", false},
 		{"ordinary-failure", "--- FAIL: TestFoo\n2 tests failed", false},
 	}
 
