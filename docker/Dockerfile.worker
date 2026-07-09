@@ -1,5 +1,24 @@
 # syntax=docker/dockerfile:1.7
 
+# Pinned toolchain versions, declared once as global ARGs and re-declared in the
+# stages that consume them. Override any of them at build time with --build-arg
+# when a newer release has been vetted; the Makefile passes matching values.
+ARG GO_VERSION=1.26.4
+ARG GO_SHA256_AMD64=1153d3d50e0ac764b447adfe05c2bcf08e889d42a02e0fe0259bd47f6733ad7f
+ARG GO_SHA256_ARM64=ef758ae7c6cf9267c9c0ef080b8965f453d89ab2d25d9eb22de4405925238768
+ARG GOLANGCI_LINT_VERSION=v2.12.2
+ARG GOFUMPT_VERSION=v0.10.0
+ARG RUST_VERSION=1.97.0
+ARG RUSTUP_VERSION=1.29.0
+ARG RUSTUP_SHA256_AMD64=4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10
+ARG RUSTUP_SHA256_ARM64=9732d6c5e2a098d3521fca8145d826ae0aaa067ef2385ead08e6feac88fa5792
+ARG PYTHON_VERSION=3.14.6
+ARG TY_VERSION=0.0.57
+ARG RUFF_VERSION=0.15.21
+
+# ---------------------------------------------------------------------------
+# build — compile the agent binary.
+# ---------------------------------------------------------------------------
 FROM golang:1.26.4-bookworm AS build
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -7,17 +26,21 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -o /out/contextmatrix-agent ./cmd/contextmatrix-agent
 
-FROM debian@sha256:d07d1b51c39f51188e60be9b64e6bf769fa94e187f092bc32b91305cfa34ba5a
+# ---------------------------------------------------------------------------
+# uv — source image for the uv/uvx binaries copied into the Python toolchain.
+# Digest-pinned like the debian base below; refresh intentionally via
+#   docker buildx imagetools inspect ghcr.io/astral-sh/uv:<version>
+# uv 0.11.28 multi-arch index digest resolved 2026-07-09.
+# ---------------------------------------------------------------------------
+FROM ghcr.io/astral-sh/uv:0.11.28@sha256:0f36cb9361a3346885ca3677e3767016687b5a170c1a6b88465ec14aefec90aa AS uv
+
+# ---------------------------------------------------------------------------
+# base — the shared runtime layer: apt baseline CLIs + GitHub CLI. Every worker
+# variant builds on this; Node and the language toolchains layer on top.
+# ---------------------------------------------------------------------------
+FROM debian@sha256:d07d1b51c39f51188e60be9b64e6bf769fa94e187f092bc32b91305cfa34ba5a AS base
 # ^ debian:bookworm-slim resolved on 2026-04-21. Refresh intentionally via
 #   `docker pull debian:bookworm-slim && docker inspect --format='{{index .RepoDigests 0}}' debian:bookworm-slim`.
-
-# Pinned toolchain versions. Override at build time with --build-arg if a
-# newer release has been vetted.
-ARG GO_VERSION=1.26.4
-ARG GO_SHA256_AMD64=1153d3d50e0ac764b447adfe05c2bcf08e889d42a02e0fe0259bd47f6733ad7f
-ARG GO_SHA256_ARM64=ef758ae7c6cf9267c9c0ef080b8965f453d89ab2d25d9eb22de4405925238768
-ARG GOLANGCI_LINT_VERSION=v2.12.2
-ARG GOFUMPT_VERSION=v0.10.0
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -32,12 +55,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -s "$(command -v fdfind)" /usr/local/bin/fd \
     && rm -rf /var/lib/apt/lists/*
 
-# Node 25. NodeSource's setup_25.x script adds a signed apt repo.
-# hadolint ignore=DL3008
-RUN curl -fsSL https://deb.nodesource.com/setup_25.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
-    && rm -rf /var/lib/apt/lists/*
-
 # github-cli isn't in Debian's main repo — install from GitHub's apt source.
 # hadolint ignore=DL3008
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
@@ -46,6 +63,31 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
        > /etc/apt/sources.list.d/github-cli.list \
     && apt-get update && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------
+# node — base + Node.js 25. Shared by the go-node, python, and full variants.
+# ---------------------------------------------------------------------------
+FROM base AS node
+# SHELL is re-declared per stage: hadolint (DL4006) does not track the base
+# stage's pipefail shell across FROM boundaries even though Docker inherits it.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+# Node 25. NodeSource's setup_25.x script adds a signed apt repo.
+# hadolint ignore=DL3008
+RUN curl -fsSL https://deb.nodesource.com/setup_25.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------
+# go-node-toolchain — node + the Go toolchain, golangci-lint, and gofumpt.
+# This is the historical worker image content.
+# ---------------------------------------------------------------------------
+FROM node AS go-node-toolchain
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ARG GO_VERSION
+ARG GO_SHA256_AMD64
+ARG GO_SHA256_ARM64
+ARG GOLANGCI_LINT_VERSION
+ARG GOFUMPT_VERSION
 
 # Install Go. The tarball is SHA256-verified before extraction so a
 # compromised CDN or MITM cannot substitute a malicious toolchain.
@@ -73,13 +115,134 @@ RUN CGO_ENABLED=0 GOBIN=/usr/local/bin go install "github.com/golangci/golangci-
 RUN CGO_ENABLED=0 GOBIN=/usr/local/bin go install "mvdan.cc/gofumpt@${GOFUMPT_VERSION}" \
     && go clean -modcache
 
-COPY --from=build /out/contextmatrix-agent /usr/local/bin/contextmatrix-agent
+# ---------------------------------------------------------------------------
+# rust-toolchain — base + Rust via rustup (minimal profile + clippy + rustfmt).
+# No Node: a pure-Rust project does not need it; use the full image otherwise.
+# ---------------------------------------------------------------------------
+FROM base AS rust-toolchain
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ARG RUST_VERSION
+ARG RUSTUP_VERSION
+ARG RUSTUP_SHA256_AMD64
+ARG RUSTUP_SHA256_ARM64
 
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo
+ENV PATH="/usr/local/cargo/bin:${PATH}"
+
+# Install Rust. rustup-init is SHA256-verified before execution, mirroring the
+# Go tarball check above. --profile minimal keeps the footprint down; clippy and
+# rustfmt are added explicitly. RUSTUP_HOME/CARGO_HOME are made world-writable so
+# the unprivileged runtime user (UID 1000) can populate the cargo registry cache
+# — the official rust image uses the same pattern.
+RUN set -eux; \
+    ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/'); \
+    case "$ARCH" in \
+      amd64) RUSTUP_SHA256="${RUSTUP_SHA256_AMD64}"; RUST_ARCH="x86_64-unknown-linux-gnu" ;; \
+      arm64) RUSTUP_SHA256="${RUSTUP_SHA256_ARM64}"; RUST_ARCH="aarch64-unknown-linux-gnu" ;; \
+      *) echo "unsupported arch: $ARCH" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${RUST_ARCH}/rustup-init" -o /tmp/rustup-init; \
+    echo "${RUSTUP_SHA256}  /tmp/rustup-init" | sha256sum -c -; \
+    chmod +x /tmp/rustup-init; \
+    /tmp/rustup-init -y --no-modify-path --profile minimal \
+      --default-toolchain "${RUST_VERSION}" --component clippy --component rustfmt; \
+    rm -f /tmp/rustup-init; \
+    chmod -R a+w "${RUSTUP_HOME}" "${CARGO_HOME}"
+
+# ---------------------------------------------------------------------------
+# python-toolchain — node + uv + a managed CPython + ty + ruff.
+# ---------------------------------------------------------------------------
+FROM node AS python-toolchain
+ARG PYTHON_VERSION
+ARG TY_VERSION
+ARG RUFF_VERSION
+
+COPY --from=uv /uv /uvx /usr/local/bin/
+
+# Managed CPython via uv. UV_PYTHON_INSTALL_DIR points the download at a
+# root-owned prefix for the pinned version only; it is deliberately NOT persisted
+# as ENV so that at runtime uv installs any alternate version into the user's
+# writable home instead of failing on this root-owned directory.
+RUN set -eux; \
+    export UV_PYTHON_INSTALL_DIR=/opt/python; \
+    uv python install "${PYTHON_VERSION}"; \
+    PYBIN="$(uv python find "${PYTHON_VERSION}")"; \
+    ln -s "${PYBIN}" /usr/local/bin/python3; \
+    ln -s "${PYBIN}" /usr/local/bin/python
+
+# ty and ruff installed as uv tools into a shared prefix with launcher shims on
+# PATH. One layer for both; a version bump here never invalidates the CPython
+# layer above.
+RUN set -eux; \
+    export UV_PYTHON_INSTALL_DIR=/opt/python UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin; \
+    uv tool install --python "${PYTHON_VERSION}" "ty==${TY_VERSION}"; \
+    uv tool install --python "${PYTHON_VERSION}" "ruff==${RUFF_VERSION}"
+
+# ---------------------------------------------------------------------------
+# go-node — the Go + Node worker variant (historical image content).
+# ---------------------------------------------------------------------------
+FROM go-node-toolchain AS go-node
+COPY --from=build /out/contextmatrix-agent /usr/local/bin/contextmatrix-agent
 RUN useradd -m -u 1000 -s /bin/bash user
 USER user
 WORKDIR /home/user
 RUN mkdir -p /home/user/workspace
-
 HEALTHCHECK NONE
+ENTRYPOINT ["contextmatrix-agent", "work"]
 
+# ---------------------------------------------------------------------------
+# rust — the Rust worker variant.
+# ---------------------------------------------------------------------------
+FROM rust-toolchain AS rust
+COPY --from=build /out/contextmatrix-agent /usr/local/bin/contextmatrix-agent
+RUN useradd -m -u 1000 -s /bin/bash user
+USER user
+WORKDIR /home/user
+RUN mkdir -p /home/user/workspace
+HEALTHCHECK NONE
+ENTRYPOINT ["contextmatrix-agent", "work"]
+
+# ---------------------------------------------------------------------------
+# python — the Python worker variant.
+# ---------------------------------------------------------------------------
+FROM python-toolchain AS python
+COPY --from=build /out/contextmatrix-agent /usr/local/bin/contextmatrix-agent
+RUN useradd -m -u 1000 -s /bin/bash user
+USER user
+WORKDIR /home/user
+RUN mkdir -p /home/user/workspace
+HEALTHCHECK NONE
+ENTRYPOINT ["contextmatrix-agent", "work"]
+
+# ---------------------------------------------------------------------------
+# full — every toolchain (Go, Node, Rust, Python). The DEFAULT target: this is
+# what `make docker-worker` builds and what the :dev / :latest tags point at.
+#
+# Built FROM python-toolchain so the managed CPython, its /usr/local/bin symlinks
+# and the uv tool shims stay intact (an explicit-source COPY would dereference
+# them). Go and Rust are self-contained prefixes and copy in cleanly. --chmod on
+# the Rust copy re-applies the world-writable bits (COPY --from drops them) in the
+# same layer, so UID 1000 can populate the cargo registry cache without a second
+# ~1 GB chmod layer.
+# ---------------------------------------------------------------------------
+FROM python-toolchain AS full
+
+# Go toolchain (self-contained prefix + static binaries; read-only at runtime).
+COPY --from=go-node-toolchain /usr/local/go /usr/local/go
+COPY --from=go-node-toolchain /usr/local/bin/golangci-lint /usr/local/bin/gofumpt /usr/local/bin/
+
+# Rust toolchain.
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo
+ENV PATH="/usr/local/cargo/bin:${PATH}"
+COPY --chmod=0777 --from=rust-toolchain /usr/local/rustup /usr/local/rustup
+COPY --chmod=0777 --from=rust-toolchain /usr/local/cargo /usr/local/cargo
+
+COPY --from=build /out/contextmatrix-agent /usr/local/bin/contextmatrix-agent
+RUN useradd -m -u 1000 -s /bin/bash user
+USER user
+WORKDIR /home/user
+RUN mkdir -p /home/user/workspace
+HEALTHCHECK NONE
 ENTRYPOINT ["contextmatrix-agent", "work"]
