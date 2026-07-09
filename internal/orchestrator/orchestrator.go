@@ -305,8 +305,14 @@ type run struct {
 
 	// verify is the resolved verify plan for this run, cached by ensureVerify on
 	// the first phase to reach the gate (execute, judge, or review). nil until
-	// resolved; a resume into any phase re-resolves lazily.
+	// resolved. A resolved COMMAND is reused; a prior SKIP is re-resolved on
+	// re-entry, so a bootstrap task that adds the project's tooling is verified.
 	verify *verifyPlan
+
+	// proposeAttempted records that the model-proposal tier has already fired this
+	// run, so a skip re-resolved at a later phase re-runs only the cheap
+	// declared/detection tiers and never fires a second proposal model call.
+	proposeAttempted bool
 
 	// lastVerify is the run's most recent gate result, updated each review round
 	// (and left the zero skipped value when no gate ran). It feeds the honest

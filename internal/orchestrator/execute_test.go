@@ -71,7 +71,7 @@ func newExecRun(d Deps, subs []subtaskRef, maxCost float64) *run {
 	o.subtasks = subs
 	// Pre-resolve a skip plan so runExecute's ensureVerify is a cached no-op —
 	// execute tests exercise the coder loop, not verify resolution.
-	o.verify = &verifyPlan{Source: verifySourceNone}
+	isolateVerify(o)
 
 	return o
 }
@@ -421,7 +421,7 @@ func TestExecuteModelSelectionPin(t *testing.T) {
 	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body", ModelCoder: "pinned/model"}
 	d.Cfg.MaxCardCost = 0
 	o := newRun(d, tc)
-	o.verify = &verifyPlan{Source: verifySourceNone} // isolate from verify resolution
+	isolateVerify(o)
 	o.subtasks = []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "complex"}}
 
 	require.NoError(t, runExecute(context.Background(), o))
@@ -454,7 +454,7 @@ func TestExecuteModelSelectionByComplexity(t *testing.T) {
 	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body"}
 	d.Cfg.MaxCardCost = 0
 	o := newRun(d, tc)
-	o.verify = &verifyPlan{Source: verifySourceNone} // isolate from verify resolution
+	isolateVerify(o)
 	o.subtasks = []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "moderate"}}
 
 	require.NoError(t, runExecute(context.Background(), o))
@@ -537,7 +537,7 @@ func TestExecuteBudget(t *testing.T) {
 	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body", ReportedCostUSD: 0.50}
 	d.Cfg.MaxCardCost = 1.00
 	o := newRun(d, tc)
-	o.verify = &verifyPlan{Source: verifySourceNone} // isolate from verify resolution
+	isolateVerify(o)
 	o.subtasks = []subtaskRef{
 		{ID: "SUB-1", Title: "One", Tier: "simple"},
 		{ID: "SUB-2", Title: "Two", Tier: "simple"},

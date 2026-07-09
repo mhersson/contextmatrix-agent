@@ -61,7 +61,7 @@ func newReviewRun(d Deps, tc cmclient.TaskContext, maxCost float64) *run {
 	o := newRun(d, tc)
 	o.cardTier = "moderate"
 	// Default: pre-resolved skip, so ensureVerify is a cached no-op and no gate runs.
-	o.verify = &verifyPlan{Source: verifySourceNone}
+	isolateVerify(o)
 	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
 		return verifyexec.Outcome{ExitCode: 0}
 	}
@@ -1081,7 +1081,7 @@ func TestRunReviewHITLApproveProceeds(t *testing.T) {
 		stopResp(`{"verdict":"approve","feedback":""}`, 0.001),
 	}}
 	o := newRun(hitlReviewDeps(ops, git, inbox, client), cmclient.TaskContext{CardID: "CARD-1", Title: "T", Description: "b", State: "review"})
-	o.verify = &verifyPlan{Source: verifySourceNone} // isolate from verify resolution
+	isolateVerify(o)
 
 	require.NoError(t, runReview(context.Background(), o))
 	assert.Equal(t, 0, countCall(ops.recorded(), "IncrementReviewAttempts:CARD-1"), "approve does not increment attempts")
@@ -1106,7 +1106,7 @@ func TestRunReviewHITLAdjustFixesThenApproves(t *testing.T) {
 		stopResp(`{"verdict":"approve","feedback":""}`, 0.001),
 	}}
 	o := newRun(hitlReviewDeps(ops, git, inbox, client), cmclient.TaskContext{CardID: "CARD-1", Title: "T", Description: "b", State: "review"})
-	o.verify = &verifyPlan{Source: verifySourceNone} // isolate from verify resolution
+	isolateVerify(o)
 
 	require.NoError(t, runReview(context.Background(), o))
 	assert.GreaterOrEqual(t, countCall(ops.recorded(), "IncrementReviewAttempts:CARD-1"), 1, "an adjust increments attempts and runs a fix")

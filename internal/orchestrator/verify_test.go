@@ -256,12 +256,43 @@ func TestEnsureVerifyCachesAndLogs(t *testing.T) {
 	require.NotNil(t, o.verify)
 	assert.True(t, ops.loggedContains("work will proceed UNVERIFIED"), "the loud skip line fires once; logs=%v", ops.logs)
 
-	// A second call reuses the cache and does not log again.
+	// A skip re-resolves on re-entry but, still finding nothing, does not re-log.
 	logsBefore := len(ops.logs)
 
 	_, err = o.ensureVerify(context.Background())
 	require.NoError(t, err)
-	assert.Len(t, ops.logs, logsBefore, "ensureVerify caches: no second resolution log")
+	assert.Len(t, ops.logs, logsBefore, "a re-confirmed skip does not re-log the UNVERIFIED line")
+}
+
+// TestEnsureVerifyReresolvesSkip pins finding 4: a skip resolved at execute entry
+// (pre-code) is NOT final — a phase that adds the project's tooling makes the
+// command detectable, and the later gate must run it rather than ship unverified.
+func TestEnsureVerifyReresolvesSkip(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX-only")
+	}
+
+	stubTools(t, "go")
+
+	ops := &fakeOps{}
+	dir := t.TempDir()
+	// No registry -> the proposal tier is a no-op, isolating the detection re-resolve.
+	o := &run{d: Deps{Ops: ops, Cfg: Config{CardID: "CARD-1", Workspace: dir}}}
+
+	// Execute-entry resolution: no markers yet -> skip.
+	p1, err := o.ensureVerify(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, verifySourceNone, p1.Source)
+
+	// A bootstrap phase adds the project's tooling.
+	writeFile(t, dir, "go.mod", "module example.com/x\n")
+
+	// Review-entry resolution re-resolves the skip and now detects the command.
+	p2, err := o.ensureVerify(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, verifySourceDetected, p2.Source, "a prior skip must re-resolve once tooling exists")
+	assert.Equal(t, []string{"go", "test", "./..."}, p2.Argv)
+	assert.True(t, ops.loggedContains("verify command resolved"), "the upgrade from skip to a real command is logged")
 }
 
 func TestRunVerifyPlanRedactsAndSkipsEmpty(t *testing.T) {

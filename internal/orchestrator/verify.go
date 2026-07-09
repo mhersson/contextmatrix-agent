@@ -172,15 +172,19 @@ func classifyVerify(plan verifyPlan, out verifyexec.Outcome) verifyResult {
 	}
 }
 
-// ensureVerify resolves the verify plan once per run and caches it: the first
-// phase to reach the gate (execute, judge, or review) resolves it, and every
-// later phase reuses the result. It emits the single resolution log line on
-// first resolve. A budget park during resolution (the proposal tier) propagates
-// and is not cached, so a resumed run re-attempts.
+// ensureVerify resolves the verify plan for the phase that reached the gate. A
+// resolved COMMAND is stable and reused from cache; a prior SKIP is NOT final —
+// a phase (e.g. a bootstrap task that adds go.mod and tests) can make a command
+// resolvable, so a cached skip is re-resolved on re-entry (cheap: only the
+// declared/detection tiers re-run; the proposal fires at most once per run). A
+// budget park during resolution propagates and is not cached, so a resumed run
+// re-attempts.
 func (o *run) ensureVerify(ctx context.Context) (verifyPlan, error) {
-	if o.verify != nil {
+	if o.verify != nil && len(o.verify.Argv) > 0 {
 		return *o.verify, nil
 	}
+
+	firstResolve := o.verify == nil
 
 	p, err := o.resolveVerify(ctx)
 	if err != nil {
@@ -188,7 +192,12 @@ func (o *run) ensureVerify(ctx context.Context) (verifyPlan, error) {
 	}
 
 	o.verify = &p
-	o.logVerifyResolution(ctx, p)
+
+	// Log the first resolution, and any later re-resolve that UPGRADED a prior
+	// skip to a real command — but not a skip re-confirmed as a skip each phase.
+	if firstResolve || len(p.Argv) > 0 {
+		o.logVerifyResolution(ctx, p)
+	}
 
 	return p, nil
 }
@@ -236,14 +245,20 @@ func (o *run) resolveVerify(ctx context.Context) (verifyPlan, error) {
 		}, nil
 	}
 
-	// Tier 3: model proposal (a code-executed command, never persisted).
-	proposed, err := o.proposeVerify(ctx)
-	if err != nil {
-		return verifyPlan{}, err // budget park
-	}
+	// Tier 3: model proposal — ONCE per run (a code-executed command, never
+	// persisted). A skip re-resolved at a later phase re-runs only the cheap tiers
+	// above; it does not fire a second proposal model call.
+	if !o.proposeAttempted {
+		o.proposeAttempted = true
 
-	if len(proposed.Argv) > 0 {
-		return proposed, nil
+		proposed, err := o.proposeVerify(ctx)
+		if err != nil {
+			return verifyPlan{}, err // budget park
+		}
+
+		if len(proposed.Argv) > 0 {
+			return proposed, nil
+		}
 	}
 
 	// Tier 4: skip. The gate proceeds unverified; the resolution log says so.
