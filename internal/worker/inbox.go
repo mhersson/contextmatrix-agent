@@ -41,8 +41,7 @@ func NewInbox(hitl bool, onPromote, onEndSession func()) *Inbox {
 }
 
 // Pump reads frames until EOF or error. Run it in a goroutine; EOF or
-// end_session triggers onEndSession (closing stdin ends the session, matching
-// runner semantics).
+// end_session triggers onEndSession (closing stdin ends the session).
 func (in *Inbox) Pump(r io.Reader) {
 	fr := frames.NewReader(r)
 

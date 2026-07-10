@@ -9,8 +9,8 @@ import (
 
 // recordSection upserts a "## <heading>" markdown section into the parent card
 // body and pushes the updated body to CM, so the parent accumulates the run's
-// history (diagnosis, plan, review rounds) for a complete record — mirroring the
-// runner's workflow-skills, which write these sections onto the card. section
+// history (diagnosis, plan, review rounds) for a complete record — mirroring
+// CM's workflow-skills, which write these sections onto the card. section
 // must be the COMPLETE block, starting with its "## <heading>" line.
 //
 // Best-effort: a failure is logged, not fatal — the body is a human-facing
@@ -24,8 +24,8 @@ func (o *run) recordSection(ctx context.Context, heading, section string) {
 	}
 }
 
-// recordReview records one review round on the parent card body, matching the
-// runner's review-task convention: round 1 uses the bare "## Review Findings"
+// recordReview records one review round on the parent card body, matching
+// CM's review-task workflow skill: round 1 uses the bare "## Review Findings"
 // heading, later rounds use "## Review Findings (Round N)". Each round is
 // preserved (the per-round heading makes the upsert effectively an append),
 // while a re-run of the same round on resume replaces rather than duplicates.

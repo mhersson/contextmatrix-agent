@@ -30,7 +30,7 @@ const (
 
 	// correlationHeader carries the client's trace ID. The agent backend reads
 	// it on /trigger and threads it into executor.LaunchSpec.CorrelationID (the
-	// container label) so runner and worker logs stitch to the same CM trace.
+	// container label) so host and worker logs stitch to the same CM trace.
 	correlationHeader = "X-Correlation-ID"
 
 	// skillsMountPathEnv is the in-container path the executor mounts the skills
@@ -39,7 +39,7 @@ const (
 	skillsMountPathEnv = "/run/cm-skills"
 )
 
-// StatusReporter reports a task's runner-status transition back to
+// StatusReporter reports a task's worker-status transition back to
 // ContextMatrix. *callback.Client satisfies it; tests supply a fake.
 type StatusReporter interface {
 	ReportStatus(ctx context.Context, cardID, project, status, message string) error
@@ -83,7 +83,7 @@ type CredentialProvisioner interface {
 // fixed at serve time.
 type LaunchEnv struct {
 	// BaseImage is the worker image launched when the payload does not override
-	// it via runner_image.
+	// it via worker_image.
 	BaseImage string
 
 	// MCPURL and MCPAPIKey wire the worker's MCP client back to ContextMatrix.
@@ -369,9 +369,9 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Correlation ID travels in the X-Correlation-ID header (runner parity), not
-	// the trigger body. Fall back to the card ID so the worker always has a
-	// non-empty trace key.
+	// Correlation ID travels in the X-Correlation-ID header, not the trigger
+	// body. Fall back to the card ID so the worker always has a non-empty
+	// trace key.
 	correlationID := r.Header.Get(correlationHeader)
 	if correlationID == "" {
 		correlationID = payload.CardID
@@ -509,8 +509,8 @@ func (s *Server) runEndpoint(p protocol.TriggerPayload) secrets.EndpointSecrets 
 // here.
 func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skillsDir string) executor.LaunchSpec {
 	image := s.launchEnv.BaseImage
-	if p.RunnerImage != "" {
-		image = p.RunnerImage
+	if p.WorkerImage != "" {
+		image = p.WorkerImage
 	}
 
 	mcpKey := s.launchEnv.MCPAPIKey
@@ -974,7 +974,7 @@ const maxTaskSkills = 64
 
 var taskSkillNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
 
-// validateTaskSkills mirrors the runner's ValidateTaskSkills: at most 64 entries,
+// validateTaskSkills enforces the task_skills contract: at most 64 entries,
 // each a safe skill name. CM validates too, so this is a should-never-happen
 // guard against a malformed payload.
 func validateTaskSkills(skills []string) error {

@@ -411,7 +411,7 @@ func TestTrigger_ImageAndMCPKeyOverride(t *testing.T) {
 	h := newHarness(t, 4)
 
 	payload := provisionedPayload("PROJ-002")
-	payload.RunnerImage = "override:image"
+	payload.WorkerImage = "override:image"
 	payload.MCPAPIKey = "payload-mcp-key"
 
 	w := h.do(t, http.MethodPost, "/trigger", payload)
@@ -424,6 +424,38 @@ func TestTrigger_ImageAndMCPKeyOverride(t *testing.T) {
 	spec := h.exec.launchedSpecs()[0]
 	assert.Equal(t, "override:image", spec.Image)
 	assert.Contains(t, spec.Env, "CM_MCP_API_KEY=payload-mcp-key")
+}
+
+// TestTrigger_WorkerImageWireTag pins the decode side of the protocol v0.8.0
+// rename: a raw trigger body carrying "worker_image" (not the pre-rename
+// "runner_image") must drive the launch spec's image. Building the body from a
+// raw JSON string rather than marshalling a TriggerPayload is the point — it
+// exercises the actual wire tag, which a shared-struct round-trip cannot.
+func TestTrigger_WorkerImageWireTag(t *testing.T) {
+	h := newHarness(t, 4)
+
+	const body = `{` +
+		`"card_id":"PROJ-002",` +
+		`"project":"proj",` +
+		`"repo_url":"https://github.com/org/repo",` +
+		`"git_token":"cm-git-token",` +
+		`"worker_image":"override:image",` +
+		`"llm_endpoint":{"type":"openai","base_url":"https://llm.example/v1","api_key":"cm-llm-key"}` +
+		`}`
+
+	ts := nowTS()
+	r := httptest.NewRequest(http.MethodPost, "/trigger", strings.NewReader(body))
+	signReq(t, r, testAPIKey, []byte(body), ts)
+
+	w := httptest.NewRecorder()
+	h.server.Routes().ServeHTTP(w, r)
+	require.Equal(t, http.StatusAccepted, w.Code)
+
+	require.Eventually(t, func() bool {
+		return len(h.exec.launchedSpecs()) == 1
+	}, time.Second, 5*time.Millisecond)
+
+	assert.Equal(t, "override:image", h.exec.launchedSpecs()[0].Image)
 }
 
 func TestTrigger_CapacityReturns429(t *testing.T) {

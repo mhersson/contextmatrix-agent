@@ -169,7 +169,7 @@ func runServe(ctx context.Context, configPath string) error {
 
 	// Unblock in-flight /logs SSE streams when Shutdown starts; otherwise
 	// http.Server.Shutdown waits the full httpShutdownTimeout on a stream that
-	// never goes idle. (Mirror this in contextmatrix-runner's handleLogs.)
+	// never goes idle. (Mirror this in contextmatrix-chat's handleLogs.)
 	httpServer.RegisterOnShutdown(srv.CloseSSE)
 
 	adminSrv := buildAdminServer(cfg, srv, mx, logger)
@@ -217,7 +217,7 @@ func runServe(ctx context.Context, configPath string) error {
 }
 
 // gracefulShutdown drains the HTTP listener, kills every tracked worker, and
-// reports each as failed to ContextMatrix. Mirrors the runner's structure:
+// reports each as failed to ContextMatrix. Structure:
 //  1. flip draining so /readyz returns 503 and mutating routes refuse new work
 //  2. Shutdown the HTTP server with a bounded budget
 //  3. Shutdown the admin server if enabled
@@ -275,7 +275,7 @@ func gracefulShutdown(
 
 // onContainerExit builds the executor OnExit hook: it tears down the run's
 // per-run credentials (stop the refresh loop, remove the run dir), maps the
-// container exit code to a runner-status, and reports it to ContextMatrix on a
+// container exit code to a worker-status, and reports it to ContextMatrix on a
 // bounded detached context (the supervision goroutine carries no request ctx).
 // waitAndCleanup is the single funnel every container exits through, so this is
 // the teardown seam for the per-run refresh loop.
@@ -307,7 +307,7 @@ func onContainerExit(
 	}
 }
 
-// exitStatus maps a container exit code to a ContextMatrix runner-status and a
+// exitStatus maps a container exit code to a ContextMatrix worker-status and a
 // human-readable message. Exit 0 is "completed"; anything else is "failed",
 // with the code carried in the message for the operator.
 func exitStatus(exitCode int64) (status, message string) {

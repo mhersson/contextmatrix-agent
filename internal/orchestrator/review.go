@@ -23,9 +23,8 @@ const reviewPanelSize = 3
 const hardReviewIterationCap = 50
 
 // defaultReviewAttemptsCap is CM's review-attempts convention, used when the
-// configured cap is missing or invalid. Three matches the runner's
-// MAX_REVISION_PASSES; with the convergence safeguards in place, three rounds
-// are enough.
+// configured cap is missing or invalid. With the convergence safeguards in
+// place, three rounds are enough.
 const defaultReviewAttemptsCap = 3
 
 // verifyOutputTail caps the verify-command output carried into findings, so a
@@ -114,7 +113,7 @@ func runReview(ctx context.Context, o *run) error {
 		}
 
 		// Record this round on the parent card body for the complete review
-		// history (the runner's review-task writes ## Review Findings the same way).
+		// history (CM's review-task workflow skill writes ## Review Findings the same way).
 		o.recordReview(ctx, round, findings, approved, vres)
 
 		if approved {
@@ -436,8 +435,9 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 		}
 	}
 
-	// Capture the reviewed head as the next round's delta base (mirrors the
-	// runner's review_completed head=<sha>), so rounds 2+ review only the change
+	// Capture the reviewed head as the next round's delta base (mirrors CM's
+	// review-task workflow skill, which records review_completed head=<sha>), so
+	// rounds 2+ review only the change
 	// since this review. Best-effort: the activity-log line is for the audit trail;
 	// on crash-resume lastReviewBase starts empty and the next round re-runs full.
 	if sha, herr := d.Git.Head(ctx); herr == nil && sha != "" {

@@ -37,8 +37,8 @@ var (
 var runOrchestrator = orchestrator.Run
 
 // reviewAttemptsCap is CM's convention: a card parks after this many review
-// rounds without approval. Three matches the runner's MAX_REVISION_PASSES; with
-// the convergence safeguards in place, three rounds are enough.
+// rounds without approval. With the convergence safeguards in place, three
+// rounds are enough.
 const reviewAttemptsCap = 3
 
 // RunSpec is the container-side contract: populated from CM_* env by the
@@ -80,7 +80,7 @@ type RunSpec struct {
 	CACertFile      string // CMX_CA_CERT_FILE; in-container path to an extra CA PEM (empty = disabled)
 
 	// Selection carries the CM-resolved model selection inputs (candidates,
-	// favorites, blacklist). Nil when absent (runner backend or old CM).
+	// favorites, blacklist). Nil when CM sends none (old CM).
 	Selection *protocol.SelectionContext // CMX_SELECTION (JSON-encoded)
 
 	// Verify carries CM's card-over-project verify config for this run. Nil when
