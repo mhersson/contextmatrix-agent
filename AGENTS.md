@@ -54,7 +54,7 @@ internal/metrics/    → Prometheus registry + cm_agent_* collectors; NormalizeE
 
 internal/kata/       → embedded throwaway kata fixture used by tests
 
-docker/Dockerfile.worker → the worker image (agent binary + git/rg/fd/gh/node/Go toolchain, pinned + SHA-verified)
+docker/Dockerfile.worker → multi-target worker image family (agent binary + git/rg/fd/gh baseline; default `full` = Go/Node/Python/Rust toolchains; slim `go-node`/`python`/`rust` variants; pinned + SHA-verified)
 
 # Inner loop — the external github.com/mhersson/contextmatrix-harness module
 # (events, llm, tools, harness, redact): the FSM-free loop, the LLM client, the
@@ -288,7 +288,8 @@ make test           # go test ./...
 make test-race      # CGO_ENABLED=1 go test -race ./...
 make lint           # golangci-lint run
 make fmt            # gofumpt -w .
-make docker-worker  # build the worker image
+make docker-worker           # build the default (full) worker image
+make docker-worker-variants  # build the go-node / python / rust variants
 ```
 
 To drive the harness standalone against a local workspace (no ContextMatrix
