@@ -297,7 +297,7 @@ func splitShellSegments(cmd string) []string {
 // after any leading FOO=bar env-assignment prefixes, or "" when the segment is
 // blank or only env assignments.
 func leadToken(seg string) string {
-	for _, f := range strings.Fields(seg) {
+	for f := range strings.FieldsSeq(seg) {
 		if isEnvAssignment(f) {
 			continue
 		}

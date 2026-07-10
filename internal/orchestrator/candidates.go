@@ -63,11 +63,7 @@ func degradeN(cfg Config, reported float64) int {
 
 	remaining := effectiveCeiling(cfg) - reported
 
-	n := max(int(remaining/cfg.MaxCardCost), 1)
-
-	if n > cfg.BestOfN {
-		n = cfg.BestOfN
-	}
+	n := min(max(int(remaining/cfg.MaxCardCost), 1), cfg.BestOfN)
 
 	return n
 }
