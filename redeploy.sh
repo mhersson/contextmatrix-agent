@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Rebuild the agent binary + worker image, pin the new digest in
-# serve.yaml, and restart the user service. Intended for a local
-# bumblebee-style single-host deployment. Run from the agent repo root.
+# Rebuild the agent binary + all worker images (full + variants), pin the
+# new full-image digest in serve.yaml, and restart the user service.
+# Intended for a local bumblebee-style single-host deployment. Run from
+# the agent repo root.
 #
 # Overridable env vars:
 #   AGENT_CONFIG       path to serve.yaml
@@ -45,6 +46,12 @@ make build
 
 echo "==> make docker-worker"
 make docker-worker
+
+# A ContextMatrix project can pin a variant tag via its runner_image
+# override, which bypasses the digest-pinned base_image below — a stale
+# variant would then run an old worker binary. Rebuild them all.
+echo "==> make docker-worker-variants"
+make docker-worker-variants
 
 echo "==> capturing RepoDigest for ${WORKER_IMAGE}"
 digest=$(docker image inspect "$WORKER_IMAGE" \
