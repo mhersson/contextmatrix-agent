@@ -143,8 +143,7 @@ export LLM_API_KEY=<your-api-key>
    `base_image`.
 
 2. **Write the service config.** Copy the template and edit it. Every field also
-   has a `CMX_*` environment override (nested keys use `__`, e.g.
-   `CMX_GITHUB__AUTH_MODE`).
+   has a `CMX_*` environment override (e.g. `CMX_BASE_IMAGE`).
 
    ```bash
    mkdir -p ~/.config/contextmatrix-agent
@@ -152,10 +151,9 @@ export LLM_API_KEY=<your-api-key>
    # set: api_key, mcp_api_key, base_image, container_contextmatrix_url
    ```
 
-   A multi-user ContextMatrix provisions git tokens and the LLM endpoint per
-   run, so the local `github.*` and `llm_endpoint.*` blocks are optional —
-   they are the deprecated fallback for pre-multi-user servers (see the
-   "Local credential fallback" section in `serve.yaml.example`).
+   ContextMatrix provisions the git token and the LLM endpoint per run over
+   the trigger payload — the agent carries no local credential config, and a
+   trigger without CM-provisioned credentials is rejected.
 
    `container_contextmatrix_url` is required in practice — workers resolve their
    MCP URL from it; without it they point at their own localhost and fail to

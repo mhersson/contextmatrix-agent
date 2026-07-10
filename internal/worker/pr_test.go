@@ -32,7 +32,8 @@ func TestPRCreatorCommand(t *testing.T) {
 
 	pc := NewPRCreator("/work/space", writeSecrets(t, "ghs_secrettoken"), "", "")
 
-	cmd := pc.buildCmd(t.Context(), "Add the widget", "the body\nwith detail", "main", "cm/cmx-001")
+	cmd, err := pc.buildCmd(t.Context(), "Add the widget", "the body\nwith detail", "main", "cm/cmx-001")
+	require.NoError(t, err)
 
 	// argv: gh pr create --title <t> --body-file - --base <b> --head <h>
 	require.GreaterOrEqual(t, len(cmd.Args), 9)
@@ -50,8 +51,8 @@ func TestPRCreatorCommand(t *testing.T) {
 
 	// Body is fed on stdin.
 	require.NotNil(t, cmd.Stdin)
-	body, err := io.ReadAll(cmd.Stdin)
-	require.NoError(t, err)
+	body, readErr := io.ReadAll(cmd.Stdin)
+	require.NoError(t, readErr)
 	assert.Equal(t, "the body\nwith detail", string(body))
 
 	// Env carries GH_TOKEN exactly once and the scrubbed allowlist — no secrets
@@ -86,15 +87,43 @@ func TestPRCreatorTokenRotation(t *testing.T) {
 	secretsPath := writeSecrets(t, "ghs_initial")
 	pc := NewPRCreator("/work/space", secretsPath, "", "")
 
-	first := pc.buildCmd(t.Context(), "t", "b", "main", "cm/x-1")
+	first, err := pc.buildCmd(t.Context(), "t", "b", "main", "cm/x-1")
+	require.NoError(t, err)
 	assert.Contains(t, first.Env, "GH_TOKEN=ghs_initial")
 
 	// Rotate the secrets file the way the host refresh loop does.
 	require.NoError(t, os.WriteFile(secretsPath, []byte("CM_GIT_TOKEN=ghs_rotated\n"), 0o600))
 
-	second := pc.buildCmd(t.Context(), "t", "b", "main", "cm/x-1")
+	second, err := pc.buildCmd(t.Context(), "t", "b", "main", "cm/x-1")
+	require.NoError(t, err)
 	assert.Contains(t, second.Env, "GH_TOKEN=ghs_rotated")
 	assert.NotContains(t, strings.Join(second.Env, "\n"), "ghs_initial")
+}
+
+// TestPRCreatorMissingSecretsFileErrors pins the fail-loud path: a configured
+// but unreadable secrets file must fail buildCmd with a clear error instead of
+// producing an unauthenticated gh command that fails generically later.
+func TestPRCreatorMissingSecretsFileErrors(t *testing.T) {
+	t.Parallel()
+
+	pc := NewPRCreator("/work/space", filepath.Join(t.TempDir(), "missing-env"), "", "")
+
+	cmd, err := pc.buildCmd(t.Context(), "t", "b", "main", "cm/x-1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "read git token")
+	assert.Nil(t, cmd)
+}
+
+// TestPRCreatorEmptySecretsPathBuildsUnauthenticated pins the public-remote
+// path: no secrets file configured means no GH_TOKEN and no error.
+func TestPRCreatorEmptySecretsPathBuildsUnauthenticated(t *testing.T) {
+	t.Parallel()
+
+	pc := NewPRCreator("/work/space", "", "", "")
+
+	cmd, err := pc.buildCmd(t.Context(), "t", "b", "main", "cm/x-1")
+	require.NoError(t, err)
+	assert.NotContains(t, strings.Join(cmd.Env, "\n"), "GH_TOKEN")
 }
 
 // TestPRCreatorCACert verifies the gh command's env carries the extra-CA vars
@@ -106,7 +135,8 @@ func TestPRCreatorCACert(t *testing.T) {
 		t.Parallel()
 
 		pc := NewPRCreator("/work/space", writeSecrets(t, "ghs_tok"), "/run/cm-ca/ca.crt", "")
-		cmd := pc.buildCmd(t.Context(), "t", "b", "main", "cm/x-1")
+		cmd, err := pc.buildCmd(t.Context(), "t", "b", "main", "cm/x-1")
+		require.NoError(t, err)
 
 		assert.Contains(t, cmd.Env, "SSL_CERT_FILE=/run/cm-ca/ca.crt")
 		assert.Contains(t, cmd.Env, "GH_CA_BUNDLE=/run/cm-ca/ca.crt")
@@ -117,7 +147,8 @@ func TestPRCreatorCACert(t *testing.T) {
 		t.Parallel()
 
 		pc := NewPRCreator("/work/space", writeSecrets(t, "ghs_tok"), "", "")
-		cmd := pc.buildCmd(t.Context(), "t", "b", "main", "cm/x-1")
+		cmd, err := pc.buildCmd(t.Context(), "t", "b", "main", "cm/x-1")
+		require.NoError(t, err)
 
 		joined := strings.Join(cmd.Env, "\n")
 		assert.NotContains(t, joined, "SSL_CERT_FILE")
@@ -135,7 +166,8 @@ func TestPRCreatorGHHost(t *testing.T) {
 		t.Parallel()
 
 		pc := NewPRCreator("/work/space", writeSecrets(t, "ghs_tok"), "", "https://acme.ghe.com/org/repo.git")
-		cmd := pc.buildCmd(t.Context(), "t", "b", "main", "cm/x-1")
+		cmd, err := pc.buildCmd(t.Context(), "t", "b", "main", "cm/x-1")
+		require.NoError(t, err)
 
 		assert.Contains(t, cmd.Env, "GH_HOST=acme.ghe.com")
 	})
@@ -144,7 +176,8 @@ func TestPRCreatorGHHost(t *testing.T) {
 		t.Parallel()
 
 		pc := NewPRCreator("/work/space", writeSecrets(t, "ghs_tok"), "", "")
-		cmd := pc.buildCmd(t.Context(), "t", "b", "main", "cm/x-1")
+		cmd, err := pc.buildCmd(t.Context(), "t", "b", "main", "cm/x-1")
+		require.NoError(t, err)
 
 		assert.NotContains(t, strings.Join(cmd.Env, "\n"), "GH_HOST")
 	})

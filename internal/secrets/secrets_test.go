@@ -1,37 +1,13 @@
 package secrets
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// fakeGenerator simulates a TokenGenerator that returns pre-configured tokens.
-type fakeGenerator struct {
-	calls []fakeCall
-	idx   int
-}
-
-type fakeCall struct {
-	token     string
-	expiresAt time.Time
-}
-
-func (f *fakeGenerator) GenerateToken(_ context.Context) (string, time.Time, error) {
-	if f.idx >= len(f.calls) {
-		return "", time.Time{}, nil
-	}
-
-	c := f.calls[f.idx]
-	f.idx++
-
-	return c.token, c.expiresAt, nil
-}
 
 // TestWriteEnvFileNeutralKeys verifies WriteEnvFile round-trips the four neutral
 // worker env keys.
@@ -141,105 +117,4 @@ func TestWriteEnvFileDeterministic(t *testing.T) {
 	assert.Equal(t,
 		"LLM_API_KEY=llm-key\nLLM_BASE_URL=https://your-llm-endpoint.example/v1\nLLM_TYPE=openai\nCM_GIT_TOKEN=tok123\nANOTHER_KEY=another-val\nEXTRA_SECRET=extra-val\n",
 		string(first))
-}
-
-// TestRefresherWritesAndRefreshes exercises the Refresher end-to-end.
-func TestRefresherWritesAndRefreshes(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	path := filepath.Join(dir, "env")
-
-	now := time.Now()
-	firstExpiry := now.Add(60 * time.Millisecond)
-	secondExpiry := now.Add(10 * time.Second)
-
-	gen := &fakeGenerator{
-		calls: []fakeCall{
-			{token: "tok1", expiresAt: firstExpiry},
-			{token: "tok2", expiresAt: secondExpiry},
-		},
-	}
-
-	r := NewRefresher(path, EndpointSecrets{APIKey: "llm-static-key"}, gen, nil)
-	// Shrink timing constants so the test completes quickly.
-	r.refreshBefore = 20 * time.Millisecond
-	r.minSleep = 5 * time.Millisecond
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	errCh := make(chan error, 1)
-
-	go func() { errCh <- r.Run(ctx) }()
-
-	// After Run starts, the file must contain tok1.
-	require.Eventually(t, func() bool {
-		s, err := Open(path)
-		if err != nil {
-			return false
-		}
-
-		return s.Get("CM_GIT_TOKEN") == "tok1"
-	}, 2*time.Second, 10*time.Millisecond, "expected tok1 in env file")
-
-	// After the refresh window passes, the file must contain tok2.
-	require.Eventually(t, func() bool {
-		s, err := Open(path)
-		if err != nil {
-			return false
-		}
-
-		return s.Get("CM_GIT_TOKEN") == "tok2"
-	}, 2*time.Second, 10*time.Millisecond, "expected tok2 in env file")
-
-	// LLM_API_KEY must persist across rewrites.
-	s, err := Open(path)
-	require.NoError(t, err)
-	assert.Equal(t, "llm-static-key", s.Get("LLM_API_KEY"))
-	assert.Empty(t, s.Get("LLM_BASE_URL"), "empty BaseURL must not appear in env file")
-	assert.Empty(t, s.Get("LLM_TYPE"), "empty Type must not appear in env file")
-
-	cancel()
-
-	select {
-	case err := <-errCh:
-		require.NoError(t, err)
-	case <-time.After(2 * time.Second):
-		t.Fatal("Run did not return after context cancel")
-	}
-}
-
-// countingPATGenerator always returns the PAT-mode year-9999 sentinel expiry, so
-// every loop iteration would otherwise take the expiry-derived (~8000-year) sleep.
-type countingPATGenerator struct{ calls int }
-
-func (g *countingPATGenerator) GenerateToken(_ context.Context) (string, time.Time, error) {
-	g.calls++
-
-	return "tok", time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC), nil
-}
-
-func TestRefresherRetriesOnWriteFailure(t *testing.T) {
-	// A regular file where WriteEnvFile needs a directory makes MkdirAll fail on
-	// every attempt — a persistent staging failure (bind-mount not ready, ENOSPC,
-	// permission race).
-	blocker := filepath.Join(t.TempDir(), "blocker")
-	require.NoError(t, os.WriteFile(blocker, []byte("x"), 0o600))
-	path := filepath.Join(blocker, "env") // parent is a file -> MkdirAll errors
-
-	gen := &countingPATGenerator{}
-	r := NewRefresher(path, EndpointSecrets{}, gen, nil)
-	r.retryBackoff = 5 * time.Millisecond
-
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-
-	_ = r.Run(ctx)
-
-	// With the expiry-derived sleep the refresher would call GenerateToken exactly
-	// once, then sleep ~8000 years. Retrying on the short backoff lands many
-	// attempts inside the 200ms window.
-	assert.Greater(t, gen.calls, 1,
-		"write failure must retry on the short backoff, not sleep until token expiry")
 }

@@ -79,7 +79,7 @@ func (s *stubCM) handler(t *testing.T) http.HandlerFunc {
 		// ({token, expires_at}) — deliberately NOT TriggerPayload's names.
 		resp := map[string]string{
 			"token":      "refreshed-token-" + strconv.Itoa(n),
-			"expires_at": time.Now().Add(expiry).UTC().Format(time.RFC3339Nano),
+			"expires_at": time.Now().Add(expiry).UTC().Format(time.RFC3339),
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -159,7 +159,7 @@ func TestRunCredentialsRefreshesFromCM(t *testing.T) {
 	m := newTestManager(t, srv.URL, "test-key")
 
 	// A token that expires very soon so the loop fetches promptly.
-	expiry := time.Now().Add(40 * time.Millisecond).UTC().Format(time.RFC3339Nano)
+	expiry := time.Now().Add(40 * time.Millisecond).UTC().Format(time.RFC3339)
 
 	require.NoError(t, m.Provision("proj", "CARD-1", "payload-token", expiry, EndpointSecrets{APIKey: "llm-key"}))
 	t.Cleanup(func() { m.Teardown("proj", "CARD-1") })
@@ -227,7 +227,7 @@ func TestRunCredentialsTeardownStopsLoopAndRemovesDir(t *testing.T) {
 
 	m := newTestManager(t, srv.URL, "test-key")
 
-	expiry := time.Now().Add(40 * time.Millisecond).UTC().Format(time.RFC3339Nano)
+	expiry := time.Now().Add(40 * time.Millisecond).UTC().Format(time.RFC3339)
 	require.NoError(t, m.Provision("proj", "CARD-1", "payload-token", expiry, EndpointSecrets{}))
 
 	dir := m.HostDir("proj", "CARD-1")
@@ -373,7 +373,7 @@ func TestRunCredentialsConcurrentProvisionNoLeakedLoop(t *testing.T) {
 			wg.Go(func() {
 				<-start
 
-				expiry := time.Now().Add(runExpiry).UTC().Format(time.RFC3339Nano)
+				expiry := time.Now().Add(runExpiry).UTC().Format(time.RFC3339)
 				errCh <- m.Provision("proj", "CARD-1", runToken, expiry, EndpointSecrets{})
 			})
 		}
@@ -405,4 +405,40 @@ func TestRunCredentialsConcurrentProvisionNoLeakedLoop(t *testing.T) {
 
 	_, err := os.Stat(m.HostDir("proj", "CARD-1"))
 	assert.True(t, os.IsNotExist(err), "run dir must be removed on teardown")
+}
+
+// TestParseExpiry pins the expiry contract: only CM's RFC3339 tokenExpiryString
+// format (plus Go's parse-time tolerance for fractional seconds) yields an
+// expiry; empty, garbage, and the year-9999 PAT sentinel all mean "no expiry".
+func TestParseExpiry(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		in     string
+		wantOK bool
+	}{
+		{"empty means no expiry", "", false},
+		{"garbage is rejected", "not-a-timestamp", false},
+		{"date without time is rejected", "2026-07-10", false},
+		{"year-9999 sentinel means no expiry", "9999-01-01T00:00:00Z", false},
+		{"plain RFC3339 parses", "2026-07-10T12:00:00Z", true},
+		// Go's time.Parse accepts a fractional second even though the RFC3339
+		// layout carries none, so the old RFC3339Nano fallback was dead code and
+		// its removal changes nothing for sub-second inputs.
+		{"sub-second precision still parses", "2026-07-10T12:00:00.123456789Z", true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, ok := parseExpiry(tc.in)
+			assert.Equal(t, tc.wantOK, ok)
+
+			if !tc.wantOK {
+				assert.True(t, got.IsZero(), "a rejected expiry must be the zero time")
+			}
+		})
+	}
 }

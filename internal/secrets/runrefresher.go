@@ -49,7 +49,8 @@ type RunCredentials struct {
 	http    *http.Client
 	logger  *slog.Logger
 
-	// Timing knobs. Defaults match the process-wide Refresher; tests shrink them.
+	// Timing knobs. Defaults come from the default* consts in secrets.go; tests
+	// shrink them.
 	refreshBefore time.Duration // rewrite this far ahead of expiry
 	minSleep      time.Duration // floor on the sleep between refreshes
 	retryBackoff  time.Duration // fast retry after a transient failure
@@ -330,9 +331,11 @@ func runKey(project, cardID string) string {
 	return project + "/" + cardID
 }
 
-// parseExpiry parses an RFC3339 expiry. It returns ok=false for an empty,
-// unparseable, or sentinel (year 9999, the PAT convention) timestamp — those all
-// mean "no expiry", so no refresh loop.
+// parseExpiry parses an RFC3339 expiry (CM's tokenExpiryString format). It
+// returns ok=false for an empty, unparseable, or sentinel (year 9999, the PAT
+// convention) timestamp — those all mean "no expiry", so no refresh loop.
+// Sub-second precision still parses: Go's time.Parse accepts a fractional
+// second on input even though the RFC3339 layout carries none.
 func parseExpiry(s string) (time.Time, bool) {
 	if s == "" {
 		return time.Time{}, false
@@ -340,10 +343,7 @@ func parseExpiry(s string) (time.Time, bool) {
 
 	t, err := time.Parse(time.RFC3339, s)
 	if err != nil {
-		t, err = time.Parse(time.RFC3339Nano, s)
-		if err != nil {
-			return time.Time{}, false
-		}
+		return time.Time{}, false
 	}
 
 	if t.Year() >= 9999 {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/url"
 	"os/exec"
 	"regexp"
@@ -52,23 +51,21 @@ func NewPRCreator(workspace, secretsEnvPath, caCertFile, repoURL string) *PRCrea
 }
 
 // gitToken reads CM_GIT_TOKEN fresh from the secrets file so each gh invocation
-// authenticates with the current token, not one cached at startup. It returns ""
-// when no secrets file is configured (public/file:// remotes) or the file cannot
-// be read — gh then runs unauthenticated and fails loudly rather than silently
-// using a stale token.
-func (p *PRCreator) gitToken() string {
+// authenticates with the current token, not one cached at startup. It returns
+// ("", nil) when no secrets file is configured (public/file:// remotes — no
+// auth needed); an unreadable file is an error so the caller surfaces a clear
+// authentication-setup failure instead of a generic unauthenticated gh one.
+func (p *PRCreator) gitToken() (string, error) {
 	if p.secretsEnvPath == "" {
-		return ""
+		return "", nil
 	}
 
 	src, err := secrets.Open(p.secretsEnvPath)
 	if err != nil {
-		slog.Warn("read git token for gh failed", "error", err)
-
-		return ""
+		return "", fmt.Errorf("read git token for gh: %w", err)
 	}
 
-	return src.Get("CM_GIT_TOKEN")
+	return src.Get("CM_GIT_TOKEN"), nil
 }
 
 // hostFromRepoURL returns the host[:port] of an https repo URL, or "" when
@@ -89,8 +86,10 @@ func hostFromRepoURL(repoURL string) string {
 
 // buildCmd constructs the gh invocation without running it: argv, workspace
 // dir, body on stdin, and the scrubbed env carrying GH_TOKEN. Split out so tests
-// assert command construction without shelling out to gh.
-func (p *PRCreator) buildCmd(ctx context.Context, title, body, base, head string) *exec.Cmd {
+// assert command construction without shelling out to gh. An unreadable
+// secrets file is an error — gh must not run unauthenticated on a stale or
+// broken credential mount.
+func (p *PRCreator) buildCmd(ctx context.Context, title, body, base, head string) (*exec.Cmd, error) {
 	cmd := exec.CommandContext(ctx, "gh", "pr", "create",
 		"--title", title,
 		"--body-file", "-",
@@ -102,7 +101,12 @@ func (p *PRCreator) buildCmd(ctx context.Context, title, body, base, head string
 
 	var extra []string
 
-	if token := p.gitToken(); token != "" {
+	token, err := p.gitToken()
+	if err != nil {
+		return nil, err
+	}
+
+	if token != "" {
 		extra = append(extra, "GH_TOKEN="+token)
 	}
 
@@ -125,13 +129,16 @@ func (p *PRCreator) buildCmd(ctx context.Context, title, body, base, head string
 
 	cmd.Env = tools.ScrubbedEnv(extra)
 
-	return cmd
+	return cmd, nil
 }
 
 // Create opens the pull request and returns its URL. It feeds the body on stdin
 // (so arbitrary markdown is safe) and parses the URL gh prints to stdout.
 func (p *PRCreator) Create(ctx context.Context, title, body, base, head string) (string, error) {
-	cmd := p.buildCmd(ctx, title, body, base, head)
+	cmd, err := p.buildCmd(ctx, title, body, base, head)
+	if err != nil {
+		return "", fmt.Errorf("gh pr create: %w", err)
+	}
 
 	out, err := cmd.Output()
 	if err != nil {

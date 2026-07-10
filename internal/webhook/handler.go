@@ -91,26 +91,12 @@ type LaunchEnv struct {
 	MCPURL    string
 	MCPAPIKey string
 
-	// SecretsHostDir is the host directory bind-mounted read-only into each
-	// container at /run/cm-secrets. Empty disables the mount. Used when a run has
-	// no CM-provisioned git token (the shared, process-wide secrets file); a run
-	// with a payload token mounts its per-run directory instead.
+	// SecretsHostDir is the fallback host directory bind-mounted read-only into
+	// a container at /run/cm-secrets when the launch spec is built for a payload
+	// without a git token (such specs are rejected by admitAndLaunch before
+	// launch). Admitted runs always mount their per-run credential directory
+	// instead. Empty disables the mount.
 	SecretsHostDir string
-
-	// SharedSecretsAvailable is true only when the shared, process-wide secrets
-	// refresher is running — i.e. local github config is present, so the
-	// SecretsHostDir mount actually carries a git token. False when github is
-	// unconfigured (CM-provisioned credentials are the only source): a trigger
-	// with no payload git token then has no fallback at all, and
-	// admitAndLaunch fail-closes it rather than launching a container with a
-	// dud mount.
-	SharedSecretsAvailable bool
-
-	// DefaultLLMEndpoint is the local-config LLM endpoint staged into a per-run
-	// credential file when the trigger payload omits its own llm_endpoint (the
-	// compat-window fallback). The shared secrets file already carries these
-	// values for the no-token path.
-	DefaultLLMEndpoint secrets.EndpointSecrets
 
 	// CACertFile is the host path to an optional extra-CA PEM, bind-mounted
 	// read-only into each container at /run/cm-ca/ca.crt. Empty disables it.
@@ -232,11 +218,6 @@ type Server struct {
 	// otherwise block the full timeout). Guarded by sseShutdownOnce for idempotency.
 	sseShutdown     chan struct{}
 	sseShutdownOnce sync.Once
-
-	// credentialFallbackWarnOnce guards the compat-window deprecation warning
-	// (see warnCredentialFallbackOnce) so it logs once per process, not once per
-	// trigger.
-	credentialFallbackWarnOnce sync.Once
 }
 
 // NewServer wires a Server from its dependencies. The replay cache, dedup
@@ -445,12 +426,11 @@ func (s *Server) launch(spec executor.LaunchSpec, p protocol.TriggerPayload) {
 // Teardown then deletes. Rejecting up front is the only race-free outcome; the
 // winner's refresh loop and mounted run dir stay intact.
 //
-// Credential-availability guards: github and llm_endpoint are both optional
-// local config now that ContextMatrix can provision either per run, but a run
-// needs at least ONE source for each. A payload missing a credential AND
-// lacking the corresponding local fallback is fail-closed rejected here —
-// before any provisioning or executor call — rather than launched with a dud
-// mount or an empty LLM endpoint.
+// Credential-availability guards: ContextMatrix provisions both credentials
+// per run — there is no local fallback. A payload missing the git token or the
+// llm_endpoint is fail-closed rejected here, before any provisioning or
+// executor call, rather than launched with a dud mount or an empty LLM
+// endpoint.
 func (s *Server) admitAndLaunch(ctx context.Context, spec executor.LaunchSpec, p protocol.TriggerPayload) string {
 	project, cardID := p.Project, p.CardID
 
@@ -465,25 +445,22 @@ func (s *Server) admitAndLaunch(ctx context.Context, spec executor.LaunchSpec, p
 		return "card already running"
 	}
 
-	if p.GitToken == "" && !s.launchEnv.SharedSecretsAvailable {
+	if p.GitToken == "" {
 		s.logger.Warn("trigger rejected: no git credential source",
 			"project", project, "card_id", cardID)
 
-		return "CM did not provision a git token and no local github config exists"
+		return "CM did not provision a git token"
 	}
 
-	if p.LLMEndpoint == nil && s.launchEnv.DefaultLLMEndpoint.APIKey == "" {
+	if p.LLMEndpoint == nil {
 		s.logger.Warn("trigger rejected: no llm_endpoint credential source",
 			"project", project, "card_id", cardID)
 
-		return "CM did not provision an llm_endpoint and no local llm_endpoint config exists"
+		return "CM did not provision an llm_endpoint"
 	}
 
 	provisioned := false
 
-	// Two credential delivery channels (see buildLaunchSpec): a git-token payload
-	// provisions the per-run FILE here; an llm-only payload rides per-launch env
-	// (env-first read) with no per-run file, so it is not provisioned.
 	if s.credentials != nil && p.GitToken != "" {
 		if err := s.credentials.Provision(project, cardID, p.GitToken, p.GitTokenExpiresAt, s.runEndpoint(p)); err != nil {
 			s.logger.Error("provision per-run credentials failed",
@@ -510,24 +487,20 @@ func (s *Server) admitAndLaunch(ctx context.Context, spec executor.LaunchSpec, p
 	return ""
 }
 
-// runEndpoint resolves the LLM endpoint staged into the per-run credential file:
-// the payload's llm_endpoint when present, else the local-config default (the
-// compat-window fallback). Gating the per-run file on the git token alone means
-// a git-token-only payload still gets a working LLM endpoint from local config.
-// admitAndLaunch's llm_endpoint guard runs before this is ever called, so by
-// the time we get here p.LLMEndpoint != nil or DefaultLLMEndpoint.APIKey != ""
-// — the fully-empty result this used to describe as "intentional" is no
-// longer reachable in production.
+// runEndpoint maps the payload's llm_endpoint into the per-run credential
+// file's shape. admitAndLaunch's guard rejects a nil payload endpoint before
+// this is ever called; the zero-value return only covers that unreachable
+// path.
 func (s *Server) runEndpoint(p protocol.TriggerPayload) secrets.EndpointSecrets {
-	if p.LLMEndpoint != nil {
-		return secrets.EndpointSecrets{
-			APIKey:  p.LLMEndpoint.APIKey,
-			BaseURL: p.LLMEndpoint.BaseURL,
-			Type:    p.LLMEndpoint.Type,
-		}
+	if p.LLMEndpoint == nil {
+		return secrets.EndpointSecrets{}
 	}
 
-	return s.launchEnv.DefaultLLMEndpoint
+	return secrets.EndpointSecrets{
+		APIKey:  p.LLMEndpoint.APIKey,
+		BaseURL: p.LLMEndpoint.BaseURL,
+		Type:    p.LLMEndpoint.Type,
+	}
 }
 
 // buildLaunchSpec folds the trigger payload together with the static LaunchEnv
@@ -560,39 +533,16 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 		env = append(env, "CM_BEST_OF_N="+strconv.Itoa(p.BestOfN))
 	}
 
-	// Compat window: CM-provisioned credentials in the trigger payload override
-	// the shared-secrets values for this run over two delivery channels. When a
-	// git token is present, ALL credentials (git token + LLM values) travel via a
-	// per-run secrets FILE (written and refreshed by the credential provisioner,
-	// mounted at /run/cm-secrets), never plain container env — the worker reads
-	// them only from that file, and plain env would go stale as the refresh loop
-	// rewrites the token. When the payload carries an llm_endpoint but NO git
-	// token, the run keeps the shared mount (it still needs the rotating shared
-	// git token) and the LLM values ride per-launch container env instead, which
-	// the worker resolves env-first-then-file. A payload from a pre-multi-user CM
-	// carries neither field: the run mounts the shared secrets file staged from
-	// local github/llm_endpoint config, and this process logs the deprecation
-	// warning once (not per trigger).
+	// CM-provisioned credentials (git token + LLM values) travel via a per-run
+	// secrets FILE (written and refreshed by the credential provisioner, mounted
+	// at /run/cm-secrets), never plain container env — the worker reads them
+	// only from that file, and plain env would go stale as the refresh loop
+	// rewrites the token. A spec built for a payload without a git token keeps
+	// the static SecretsHostDir fallback, but admitAndLaunch rejects such
+	// payloads before launch.
 	secretsHostDir := s.launchEnv.SecretsHostDir
 	if s.credentials != nil && p.GitToken != "" {
 		secretsHostDir = s.credentials.HostDir(p.Project, p.CardID)
-	}
-
-	// LLM-only payload: deliver the payload's LLM endpoint values as per-launch
-	// container env (all three, even when empty — an empty BaseURL means "the
-	// type's canonical default"). The worker reads LLM_* env-first-then-file, so
-	// these override the shared file's values without disturbing the rotating git
-	// token the shared mount still provides.
-	if p.LLMEndpoint != nil && p.GitToken == "" {
-		env = append(env,
-			"LLM_API_KEY="+p.LLMEndpoint.APIKey,
-			"LLM_BASE_URL="+p.LLMEndpoint.BaseURL,
-			"LLM_TYPE="+p.LLMEndpoint.Type,
-		)
-	}
-
-	if p.GitToken == "" || p.LLMEndpoint == nil {
-		s.warnCredentialFallbackOnce()
 	}
 
 	if s.launchEnv.BashTimeoutMaxSeconds > 0 {
@@ -678,17 +628,6 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 		CorrelationID:  correlationID,
 		MCPURL:         s.launchEnv.MCPURL,
 	}
-}
-
-// warnCredentialFallbackOnce logs the compat-window deprecation warning the
-// first time a trigger payload omits a CM-provisioned credential. Guarded by
-// credentialFallbackWarnOnce so a long-lived serve process logs it once,
-// regardless of how many triggers fall back to local config.
-func (s *Server) warnCredentialFallbackOnce() {
-	s.credentialFallbackWarnOnce.Do(func() {
-		s.logger.Warn("CM did not provision credentials; using local github/llm_endpoint config " +
-			"— this fallback is deprecated")
-	})
 }
 
 // ---- kill -------------------------------------------------------------------
