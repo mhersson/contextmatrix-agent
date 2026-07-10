@@ -83,6 +83,10 @@ type RunSpec struct {
 	// favorites, blacklist). Nil when absent (runner backend or old CM).
 	Selection *protocol.SelectionContext // CMX_SELECTION (JSON-encoded)
 
+	// Verify carries CM's card-over-project verify config for this run. Nil when
+	// absent (nothing declared, or an old CM). Delivered via CMX_VERIFY.
+	Verify *protocol.VerifyConfig
+
 	TaskSkillsDir string   // in-container skills mount path (CMX_TASK_SKILLS_DIR); empty = no skills
 	TaskSkills    []string // per-card subset (CM_TASK_SKILLS)
 	TaskSkillsSet bool     // whether the subset was set (CM_TASK_SKILLS_SET)
@@ -364,6 +368,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 				Threshold:       a.spec.CompactionThreshold,
 				KeepRecentTurns: a.spec.CompactionKeepRecentTurns,
 			},
+			Verify: declaredVerify(a.spec.Verify),
 		},
 	}
 
@@ -570,6 +575,21 @@ func buildSkillTool(spec RunSpec, ops CardOps) tools.Tool {
 // fetch or embedded baseline is consulted.
 func buildRegistry(spec RunSpec) *registry.Registry {
 	return registry.FromSelection(spec.Selection, spec.DefaultModel, spec.SelectorPriceHeadroom)
+}
+
+// declaredVerify maps the protocol verify config onto the orchestrator-local
+// type so the orchestrator package need not import protocol. TimeoutSeconds
+// becomes a duration; the orchestrator clamps it. nil in -> nil out.
+func declaredVerify(v *protocol.VerifyConfig) *orchestrator.DeclaredVerify {
+	if v == nil {
+		return nil
+	}
+
+	return &orchestrator.DeclaredVerify{
+		Command: v.Command,
+		Timeout: time.Duration(v.TimeoutSeconds) * time.Second,
+		Env:     v.Env,
+	}
 }
 
 // releaseWithError best-effort releases the claim and returns an error result.

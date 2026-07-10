@@ -398,3 +398,36 @@ func TestSpecFromEnv_Compaction(t *testing.T) {
 		assert.Contains(t, err.Error(), "CMX_COMPACTION_THRESHOLD")
 	})
 }
+
+func TestSpecFromEnv_Verify(t *testing.T) {
+	t.Run("absent_leaves_nil", func(t *testing.T) {
+		setRequired(t)
+
+		spec, err := specFromEnv()
+		require.NoError(t, err)
+		assert.Nil(t, spec.Verify)
+	})
+
+	t.Run("parsed", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("CMX_VERIFY", `{"command":"cargo test","timeout_seconds":900,"env":["JAVA_HOME"]}`)
+
+		spec, err := specFromEnv()
+		require.NoError(t, err)
+		require.NotNil(t, spec.Verify)
+		assert.Equal(t, "cargo test", spec.Verify.Command)
+		assert.Equal(t, 900, spec.Verify.TimeoutSeconds)
+		assert.Equal(t, []string{"JAVA_HOME"}, spec.Verify.Env)
+	})
+
+	t.Run("malformed_degrades_to_nil", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("CMX_VERIFY", "{not json")
+
+		// Mirrors CMX_SELECTION: a malformed value is a warning, not an error —
+		// the run proceeds and falls back to detection.
+		spec, err := specFromEnv()
+		require.NoError(t, err)
+		assert.Nil(t, spec.Verify)
+	})
+}

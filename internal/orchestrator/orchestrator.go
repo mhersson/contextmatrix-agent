@@ -16,9 +16,11 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
+	"github.com/mhersson/contextmatrix-agent/internal/verifyexec"
 	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/mhersson/contextmatrix-harness/harness"
 	"github.com/mhersson/contextmatrix-harness/llm"
@@ -124,6 +126,22 @@ type Config struct {
 	// No serve/work env knob populates it yet; it is the orchestrator-level
 	// seam mirroring the standalone run command's provider config.
 	Provider json.RawMessage
+
+	// Verify is the operator-declared verify gate (CM's card-over-project
+	// resolution), delivered via CMX_VERIFY. nil means nothing declared — the
+	// gate falls back to repo-convention detection and then a model proposal.
+	// It is an orchestrator-local type so the package need not import protocol.
+	Verify *DeclaredVerify
+}
+
+// DeclaredVerify is the operator-declared verify configuration for a run, mapped
+// from protocol.VerifyConfig by the worker. Command is a shell string; Timeout is
+// 0 when unset (the default applies); Env names container variables to pass
+// through to the verify subprocess (re-filtered agent-side before use).
+type DeclaredVerify struct {
+	Command string
+	Timeout time.Duration
+	Env     []string
 }
 
 // Compaction configures in-window context compaction for the FSM's phase model
@@ -285,9 +303,27 @@ type run struct {
 	// parts, attached to the planning-phase model calls only. nil when none.
 	taskImages []llm.ImageURL
 
-	// runVerify executes the detected verify command (best-effort spec/test gate)
-	// and returns its combined output plus a pass flag. It is a struct field so
-	// tests can stub the subprocess; the default shells out via execVerify.
+	// verify is the resolved verify plan for this run, cached by ensureVerify on
+	// the first phase to reach the gate (execute, judge, or review). nil until
+	// resolved. A resolved COMMAND is reused; a prior SKIP is re-resolved on
+	// re-entry, so a bootstrap task that adds the project's tooling is verified.
+	verify *verifyPlan
+
+	// proposeAttempted records that the model-proposal tier has already fired this
+	// run, so a skip re-resolved at a later phase re-runs only the cheap
+	// declared/detection tiers and never fires a second proposal model call.
+	proposeAttempted bool
+
+	// lastVerify is the run's most recent gate result, updated each review round
+	// (and left the zero skipped value when no gate ran). It feeds the honest
+	// verify trailers on the PR body and the completion note — the run-level
+	// answer to "was this change verified?".
+	lastVerify verifyResult
+
+	// runVerify is the RAW verify subprocess runner: it executes an argv and
+	// reports the unclassified outcome, so classifyVerify (pure) does the tri-state
+	// decision and test stubs stay trivial. It is a struct field so tests can stub
+	// the subprocess; the default is verifyexec.Exec.
 	runVerify verifyRunner
 
 	planFn      phaseFn
@@ -299,11 +335,12 @@ type run struct {
 	doneFn      phaseFn
 }
 
-// verifyRunner runs a verify command (argv) rooted at dir and reports the
-// combined output plus whether it passed (exit 0). dir is the review workspace
-// for the review gate and the candidate worktree for the Best-of-N judge. The
-// default implementation shells out via execVerify; tests inject a stub.
-type verifyRunner func(ctx context.Context, dir string, argv []string) (output string, ok bool)
+// verifyRunner runs a verify command (argv) rooted at dir with a per-command
+// timeout and extra KEY=VALUE env, and reports the raw execution outcome. dir is
+// the review workspace for the review gate and the candidate worktree for the
+// Best-of-N judge. classifyVerify turns the outcome into the tri-state result;
+// the default runner is verifyexec.Exec, and tests inject a stub.
+type verifyRunner func(ctx context.Context, dir string, argv []string, timeout time.Duration, extraEnv []string) verifyexec.Outcome
 
 // dataURLs encodes card image blobs as base64 data URLs for OpenAI image_url
 // content parts. Returns nil for no blobs.
@@ -363,9 +400,9 @@ func newRun(d Deps, tc cmclient.TaskContext) *run {
 	}
 
 	o.grounding = grounding
-	// execVerify already matches verifyRunner (ctx, dir, argv): the review gate
-	// passes the workspace, the judge passes each candidate worktree.
-	o.runVerify = execVerify
+	// verifyexec.Exec matches verifyRunner: the review gate passes the workspace,
+	// the judge passes each candidate worktree, and both pass the plan's timeout/env.
+	o.runVerify = verifyexec.Exec
 
 	o.planFn = func(ctx context.Context) error { return runPlan(ctx, o) }
 	o.executeFn = func(ctx context.Context) error { return runExecute(ctx, o) }

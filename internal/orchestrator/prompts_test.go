@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -13,6 +14,32 @@ func TestSelfReviewInBothCodingPrompts(t *testing.T) {
 		assert.Contains(t, p, "Re-read every file you changed", name)
 		assert.Contains(t, p, "no fall-through after writing an error response", name)
 	}
+}
+
+func TestVerifyCommandBlock(t *testing.T) {
+	assert.Empty(t, verifyCommandBlock(verifyPlan{}), "an empty plan yields no block (prompt unchanged)")
+	assert.Empty(t, verifyCommandBlock(verifyPlan{Source: verifySourceNone}), "a skip plan yields no block")
+
+	out := verifyCommandBlock(verifyPlan{Argv: []string{"go", "test", "./..."}, Display: "go test ./...", Source: verifySourceDetected})
+	assert.Contains(t, out, "The project's verify command is `go test ./...` (detected)")
+	assert.Contains(t, out, "make it pass")
+}
+
+func TestFixVerifyLine(t *testing.T) {
+	// Empty plan keeps the generic wording (line break mended: no embedded newline).
+	generic := fixVerifyLine(verifyPlan{})
+	assert.Equal(t, "Run the project's tests after your changes to confirm they pass.", generic)
+
+	out := fixVerifyLine(verifyPlan{Argv: []string{"cargo", "test"}, Display: "cargo test", Source: verifySourceProposed})
+	assert.Contains(t, out, "`cargo test` (model-proposed)")
+}
+
+// TestCoderPromptEmptyVerifyByteIdentical proves the empty-verify coder prompt is
+// byte-identical to the pre-verify wording, so no-gate runs are unaffected.
+func TestCoderPromptEmptyVerifyByteIdentical(t *testing.T) {
+	withEmpty := fmt.Sprintf(coderPrompt, "", "", "/ws", verifyCommandBlock(verifyPlan{}), "st", "sb", "pt", "pb")
+	assert.Contains(t, withEmpty, "that already passed.\n\n"+buildHygieneNote,
+		"an empty verify block leaves the coder prompt spacing unchanged")
 }
 
 func TestSpecialistPromptScopesToTask(t *testing.T) {

@@ -633,6 +633,15 @@ func planTestRegistry() *registry.Registry {
 	return registry.NewRegistry(nil, "default/model", planTestCatalog())
 }
 
+// isolateVerify pins a run's verify plan to a resolved skip and marks the
+// model-proposal tier spent, so ensureVerify is a cheap no-op in tests that do
+// not exercise the gate: a re-resolve finds nothing and never fires a proposal
+// model call. Tests that DO exercise the gate set o.verify to a real plan.
+func isolateVerify(o *run) {
+	o.verify = &verifyPlan{Source: verifySourceNone}
+	o.proposeAttempted = true
+}
+
 // writeFile writes name under dir with the given content, failing the test on
 // any I/O error. Used by detectVerifyCommand tests to seed marker files.
 func writeFile(t *testing.T, dir, name, content string) {

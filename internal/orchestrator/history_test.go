@@ -80,8 +80,8 @@ func TestRecordReview_RoundHeadingsAndVerdict(t *testing.T) {
 	o := &run{d: Deps{Ops: &fakeOps{}, Cfg: Config{CardID: "CARD-1"}}, body: "Task."}
 	ops := o.d.Ops.(*fakeOps)
 
-	o.recordReview(t.Context(), 1, "first round findings", false)
-	o.recordReview(t.Context(), 2, "second round findings", true)
+	o.recordReview(t.Context(), 1, "first round findings", false, verifyResult{Status: verifyPassed})
+	o.recordReview(t.Context(), 2, "second round findings", true, verifyResult{Status: verifySkipped, Note: "tool missing"})
 
 	body := ops.lastBody()
 	// Round 1 uses the bare heading; round 2 is numbered. Both preserved.
@@ -91,4 +91,7 @@ func TestRecordReview_RoundHeadingsAndVerdict(t *testing.T) {
 	assert.Contains(t, body, "second round findings")
 	assert.Contains(t, body, "### Recommendation\n\nrevise")
 	assert.Contains(t, body, "### Recommendation\n\napprove")
+	// Each round leads with its verify status, recorded by code.
+	assert.Contains(t, body, "**Verify:** PASSED")
+	assert.Contains(t, body, "**Verify:** SKIPPED — tool missing")
 }

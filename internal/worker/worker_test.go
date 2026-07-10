@@ -19,6 +19,7 @@ import (
 	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/mhersson/contextmatrix-harness/llm"
 	"github.com/mhersson/contextmatrix-harness/tools"
+	protocol "github.com/mhersson/contextmatrix-protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -204,6 +205,10 @@ func baseSpec(t *testing.T, remote, workspaceParent string) RunSpec {
 		DefaultModel: "default/model",
 		Workspace:    workspaceParent,
 		MaxTurns:     10,
+		// A trivial always-pass declared command makes the verify gate deterministic
+		// in the full-FSM tests: resolution stops at the declared tier, so no model
+		// proposal fires and the scripted response sequences stay exact.
+		Verify: &protocol.VerifyConfig{Command: "true"},
 	}
 }
 

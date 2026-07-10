@@ -22,6 +22,27 @@ func skillEngageBlock(menu string) string {
 		"\n"
 }
 
+// verifyCommandBlock names the resolved verify command for the coder prompt when
+// one resolved, or "" (today's generic wording, unchanged) when the gate is a
+// skip. The command text is runtime data, so the template stays language-neutral.
+func verifyCommandBlock(p verifyPlan) string {
+	if len(p.Argv) == 0 || p.Display == "" {
+		return ""
+	}
+
+	return fmt.Sprintf("\n\nThe project's verify command is `%s` (%s). Run it before finishing and make it pass.", p.Display, p.Source)
+}
+
+// fixVerifyLine is the fix prompt's verify instruction: the resolved command when
+// one resolved, else today's generic wording (with the stray line break mended).
+func fixVerifyLine(p verifyPlan) string {
+	if len(p.Argv) == 0 || p.Display == "" {
+		return "Run the project's tests after your changes to confirm they pass."
+	}
+
+	return fmt.Sprintf("The project's verify command is `%s` (%s). Run it after your changes and make it pass.", p.Display, p.Source)
+}
+
 // skillMenuer is the optional menu accessor satisfied by tools.SkillTool.
 type skillMenuer interface{ MenuText() string }
 
@@ -206,8 +227,9 @@ Fix anything you find before finishing.`
 // NOT run git itself — it ends the subtask by calling the finish tool with the
 // commit message, which the orchestrator reads from the tool call arguments.
 //
-// The trailing %s slots are filled by runExecute: workspace root, subtask
-// title, subtask description, parent card title, parent card body.
+// The trailing %s slots are filled by runExecute: workspace root, the verify
+// command block (empty when none resolved), subtask title, subtask description,
+// parent card title, parent card body.
 const coderPrompt = `%s%sYou are the coding agent for one subtask of a larger task. You have the full
 write toolset (read, grep, glob, edit, write, bash) rooted at the workspace.
 Implement EXACTLY this subtask — nothing from sibling subtasks, nothing
@@ -222,7 +244,7 @@ them. Do NOT run git yourself (no commit, no push, no branch) — the orchestrat
 commits and pushes your changes after you finish.
 
 Write tests alongside the code and run them. Once the acceptance criteria
-pass, finish immediately — do not repeat verification that already passed.
+pass, finish immediately — do not repeat verification that already passed.%s
 
 ` + buildHygieneNote + `
 
@@ -392,8 +414,9 @@ When approved is true, fixes must be an empty array.
 // listed findings — nothing speculative. The orchestrator commits the result as
 // a fixup and pushes; the coder does NOT run git.
 //
-// The trailing %s slots are filled by runFix: workspace root, parent card
-// title, parent card description, and the findings list.
+// The trailing %s slots are filled by runFix: workspace root, the verify
+// instruction line, parent card title, parent card description, and the findings
+// list.
 const fixPrompt = `%s%sYou are the coding agent addressing review feedback on the current branch.
 You have the full write toolset (read, grep, glob, edit, write, bash) rooted at
 the workspace. Apply fixes for EXACTLY the findings below — apply only the literal
@@ -408,8 +431,7 @@ commits your changes as a fixup and pushes after you finish.
 
 ` + selfReviewBlock + `
 
-Run the project's
-tests after your changes to confirm they pass.
+%s
 
 ` + buildHygieneNote + `
 
@@ -474,8 +496,8 @@ Respond with ONLY the Markdown PR body — no surrounding prose, no code fences.
 // phase owns claim/usage/push in code.
 //
 // The trailing %s slots are filled by runDocument: workspace root, parent card
-// title, parent card description, the plan overview (subtask titles), and the
-// branch diff.
+// title, parent card description, the plan overview (subtask titles), the branch
+// diff, and the run's verify context (advisory — not a guaranteed surface).
 const documentPrompt = `%s%sYou are the documentation agent for completed work that review will inspect
 next. You have the full write toolset (read, grep, glob, edit, write, bash)
 rooted at the workspace. Decide whether external documentation is needed for
@@ -526,6 +548,9 @@ PLAN OVERVIEW (subtasks)
 %s
 
 BRANCH DIFF (what actually changed)
+%s
+
+VERIFY (how this change is gated)
 %s
 `
 

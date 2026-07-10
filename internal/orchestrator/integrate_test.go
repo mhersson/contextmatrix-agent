@@ -290,6 +290,52 @@ func TestIntegrateNoRemoteBranch(t *testing.T) {
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
 }
 
+// TestWritePRBodyAppendsVerificationTrailer proves the verify trailer is added
+// BY CODE: a model body that never mentions verification still ends with the
+// honest verification line for each verify status.
+func TestWritePRBodyAppendsVerificationTrailer(t *testing.T) {
+	cases := []struct {
+		name string
+		vres verifyResult
+		plan verifyPlan
+		want string
+	}{
+		{"passed", verifyResult{Status: verifyPassed}, verifyPlan{Argv: []string{"x"}, Display: "go test ./...", Source: verifySourceDetected}, "PASSED — `go test ./...` (detected)"},
+		{"failed", verifyResult{Status: verifyFailed}, verifyPlan{Argv: []string{"x"}, Display: "cargo test", Source: verifySourceDeclared}, "FAILED — `cargo test` (declared)"},
+		{"skipped", verifyResult{Status: verifySkipped, Note: "tool missing"}, verifyPlan{}, "NOT VERIFIED — tool missing"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			client := &planLLM{responses: []llm.Response{stopResp("## What\nDid the work.\n", 0.01)}}
+			d := integrateTestDeps(ops, &fakeGit{}, &fakePR{}, client)
+			o := newIntegrateRun(d, cmclient.TaskContext{CardID: "CARD-1", Title: "T", Description: "b"}, 0)
+			o.lastVerify = tc.vres
+			o.verify = &tc.plan
+
+			body, err := o.writePRBody(context.Background())
+			require.NoError(t, err)
+			assert.Contains(t, body, "## What", "the model-written body is preserved")
+			assert.NotContains(t, client.tasks[0], "**Verification:**", "the model was not asked to write the trailer")
+			assert.Contains(t, body, "**Verification:** "+tc.want, "the trailer is appended by code")
+		})
+	}
+}
+
+func TestReviewOutcomeVerifyCaveat(t *testing.T) {
+	o := &run{}
+
+	o.lastVerify = verifyResult{Status: verifySkipped}
+	assert.Contains(t, o.reviewOutcome(), "was not verified", "an unverified, summary-less run must not read as verified")
+
+	o.lastVerify = verifyResult{Status: verifyPassed}
+	assert.Equal(t, "(review approved; no summary recorded)", o.reviewOutcome())
+
+	o.reviewSummary = "clean"
+	assert.Equal(t, "clean", o.reviewOutcome())
+}
+
 func TestDonePhase(t *testing.T) {
 	ops := &fakeOps{}
 	d := Deps{Ops: ops, Cfg: Config{CardID: "CARD-1"}}
@@ -300,6 +346,7 @@ func TestDonePhase(t *testing.T) {
 
 	calls := ops.recorded()
 	require.GreaterOrEqual(t, indexOfCall(calls, "ReleaseCard:CARD-1"), 0, "claim released; calls=%v", calls)
+	assert.True(t, ops.loggedContains("verify: NOT VERIFIED"), "the completion note carries the verify trailer; logs=%v", ops.logs)
 
 	var logged bool
 

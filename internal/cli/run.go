@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/config"
+	"github.com/mhersson/contextmatrix-agent/internal/verifyexec"
 	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/mhersson/contextmatrix-harness/harness"
 	"github.com/mhersson/contextmatrix-harness/llm"
@@ -132,7 +133,7 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&task, "task", "Inspect the project and complete the requested change, then verify.", "task instruction")
 	cmd.Flags().StringVar(&systemPrompt, "system-prompt", "", "override the default system prompt")
 	cmd.Flags().StringVar(&transcript, "transcript", "", "path to write the JSON event transcript")
-	cmd.Flags().StringVar(&verify, "verify", "", "shell command run after the loop; exit 0 = success")
+	cmd.Flags().StringVar(&verify, "verify", "", "shell command run after the loop with your full environment; exit 0 = success")
 	cmd.Flags().StringVar(&configFile, "config", "", "path to a YAML config file")
 	cmd.Flags().BoolVar(&printConfig, "print-config", false, "print the effective config (secrets redacted) and exit")
 	cmd.Flags().Bool("local", true, "run standalone without CM callbacks (always true)")
@@ -196,23 +197,32 @@ func runSpike(ctx context.Context, client llm.LLM, o runOpts) (harness.Result, e
 	return harness.Run(ctx, client, reg, emit, o.task, cfg)
 }
 
-// commandCheck builds a harness.Check that runs a shell command in root; exit 0
-// means success. Non-zero exit -> not-OK with the output as detail.
+// runVerifyTimeout bounds a standalone `run --verify` command. Generous — a slow
+// local suite must complete, not be cut off — while still bounding a hang.
+const runVerifyTimeout = time.Hour
+
+// commandCheck builds a harness.Check that runs a shell command in root with the
+// shared bash-pipefail semantics. It PROBES the command first: an unrunnable
+// declared command (a missing tool) is a loud error, never a silent pass or
+// skip. A command that runs and exits 0 is OK; a non-zero exit is not-OK with the
+// output as detail. It runs with the CALLER's full environment (ExecInherit):
+// the standalone CLI is outside the container trust boundary, so a verify command
+// like `pytest integration/` sees DATABASE_URL and the rest of the dev env.
 func commandCheck(root, command string) harness.Check {
 	return func(ctx context.Context) (harness.Verdict, error) {
-		cmd := exec.CommandContext(ctx, "bash", "-c", command)
-		cmd.Dir = root
-
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			if _, ok := err.(*exec.ExitError); ok {
-				return harness.Verdict{OK: false, Detail: strings.TrimSpace(string(out))}, nil
-			}
-
-			return harness.Verdict{}, fmt.Errorf("verify command: %w", err)
+		if err := verifyexec.ProbeShell(root, command); err != nil {
+			return harness.Verdict{}, fmt.Errorf("verify command cannot run: %w", err)
 		}
 
-		return harness.Verdict{OK: true, Detail: strings.TrimSpace(string(out))}, nil
+		out := verifyexec.ExecInherit(ctx, root, verifyexec.ShellArgv(command), runVerifyTimeout)
+		if out.StartErr {
+			return harness.Verdict{}, fmt.Errorf("verify command failed to start")
+		}
+
+		return harness.Verdict{
+			OK:     out.ExitCode == 0 && !out.TimedOut,
+			Detail: strings.TrimSpace(out.Output),
+		}, nil
 	}
 }
 
