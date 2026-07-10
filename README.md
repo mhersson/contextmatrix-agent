@@ -189,8 +189,9 @@ make build                    # build the contextmatrix-agent binary
 The generated unit is sandboxed (read-only home, restricted syscalls, resource
 caps) and runs `serve --config ${XDG_CONFIG_HOME:-~/.config}/contextmatrix-agent/serve.yaml`.
 
-`redeploy.sh` updates a running install in place — rebuild the binary and worker
-image, pin the new image digest into `serve.yaml`, and restart the service:
+`redeploy.sh` updates a running install in place — rebuild the binary and all
+worker images (full + variants), pin the new full-image digest into
+`serve.yaml`, and restart the service:
 
 ```bash
 ./redeploy.sh
