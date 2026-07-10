@@ -636,6 +636,15 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 		}
 	}
 
+	if p.Verify != nil {
+		if b, err := json.Marshal(p.Verify); err == nil {
+			env = append(env, "CMX_VERIFY="+string(b))
+		} else {
+			s.logger.Warn("failed to marshal verify config; container will detect the verify command",
+				"project", p.Project, "card_id", p.CardID, "error", err)
+		}
+	}
+
 	if skillsDir != "" {
 		env = append(env, "CMX_TASK_SKILLS_DIR="+skillsMountPathEnv)
 

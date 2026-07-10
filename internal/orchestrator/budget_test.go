@@ -48,9 +48,7 @@ func TestBudgetLedger(t *testing.T) {
 
 		var wg sync.WaitGroup
 		for range 100 {
-
 			wg.Go(func() {
-
 				l.Spend(0.01)
 			})
 		}

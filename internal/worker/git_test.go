@@ -73,7 +73,7 @@ func writeFile(t *testing.T, dir, rel string, content []byte, mode os.FileMode) 
 	require.NoError(t, os.WriteFile(full, content, mode))
 }
 
-func TestStageForCommit_SkipsBuildArtifacts(t *testing.T) {
+func TestStageForCommit_SkipsNativeBinariesAndHonoursGitignore(t *testing.T) {
 	remote := setupBareRemote(t)
 	ws := t.TempDir()
 
@@ -82,45 +82,65 @@ func TestStageForCommit_SkipsBuildArtifacts(t *testing.T) {
 	require.NoError(t, g.CreateBranch(context.Background(), "cm/cmx-001"))
 	g.SetBranchPolicy("cm/cmx-001", "main", "main")
 
-	// Isolate our artifact guard from the developer's global gitignore: a
-	// machine that globally ignores e.g. *.pyc would hide cache.pyc from git
-	// entirely, so the test would not exercise our extension denylist.
+	// Isolate from the developer's global gitignore so the repo's own .gitignore
+	// (below) is the only ignore rule in effect — that repo file is the
+	// language-agnostic source of truth for "don't commit this".
 	runGit(t, ws, "config", "core.excludesFile", "/dev/null")
+
+	// The repo declares what to ignore; git status honours it, so it never
+	// reaches our staging loop. This is how ANY ecosystem's artifacts are
+	// excluded — no language-specific denylist in the agent.
+	writeFile(t, ws, ".gitignore", []byte("*.pyc\ndist/\n"), 0o644)
 
 	// A legitimate source edit (tracked: the seeded README).
 	writeFile(t, ws, "README.md", []byte("# updated\n"), 0o644)
-	// A new source file (untracked, must be staged).
+	// New source files (untracked, must be staged).
 	writeFile(t, ws, "main.go", []byte("package main\n"), 0o644)
-	// A compiled ELF binary (untracked, must be skipped by magic).
+	// Source under a directory named "target": the old ecosystem-directory
+	// denylist matched the literal segment "target" and silently DROPPED this
+	// first-party source. It must now be committed (language-agnostic: only
+	// .gitignore decides, and this repo does not ignore target/).
+	writeFile(t, ws, "target/config.rs", []byte("// rust source\n"), 0o644)
+	// A ".pyc"-named text file that the repo DOES ignore -> git hides it; it must
+	// not appear in the commit, proving .gitignore is the mechanism.
+	writeFile(t, ws, "stale.pyc", []byte("ignored by repo\n"), 0o644)
+	// A compiled ELF binary the repo forgot to ignore (untracked, must be skipped
+	// by content magic regardless of name or ecosystem).
 	elf := append([]byte{0x7f, 'E', 'L', 'F'}, make([]byte, 64)...)
 	writeFile(t, ws, "app", elf, 0o755)
-	// Python bytecode by extension (untracked, must be skipped: no executable
-	// magic, so the extension denylist is what catches it).
-	writeFile(t, ws, "cache.pyc", []byte("not a real binary"), 0o644)
-	// A golden-output fixture (untracked, MUST be staged): a ".out" data file
-	// is legitimate source, not a build artifact. Real a.out binaries are
-	// caught by magic, not by extension.
+	// A golden-output fixture (untracked, MUST be staged): a ".out" data file is
+	// legitimate source. Real a.out binaries are caught by magic, not by name.
 	writeFile(t, ws, "golden.out", []byte("expected output\n"), 0o644)
+	// An untracked TEXT artifact the repo forgot to .gitignore. It IS staged: the
+	// content guard blocks only NATIVE BINARIES (executable magic), so a text build
+	// log rides along. This is the accepted trade of the content-based guard — the
+	// repo's own .gitignore is the ONLY defense against committed text artifacts;
+	// the agent adds no name-based denylist that would also drop first-party source.
+	writeFile(t, ws, "build.log", []byte("compiling...\nok\n"), 0o644)
 
 	committed, err := g.CommitWithMessage(context.Background(), "feat: real work")
 	require.NoError(t, err)
 	require.True(t, committed)
 
-	// HEAD must contain the source files (incl. the golden fixture) but NOT the
-	// compiled binary or the bytecode.
+	// HEAD must contain every source file (incl. target/ source and the golden
+	// fixture) plus the un-ignored text artifact, but NOT the native binary or the
+	// repo-ignored bytecode.
 	out, err := g.run(context.Background(), "show", "--name-only", "--format=", "HEAD")
 	require.NoError(t, err)
 	assert.Contains(t, out, "README.md")
 	assert.Contains(t, out, "main.go")
+	assert.Contains(t, out, "target/config.rs")
 	assert.Contains(t, out, "golden.out")
+	assert.Contains(t, out, "build.log")
 	assert.NotContains(t, out, "app")
-	assert.NotContains(t, out, "cache.pyc")
+	assert.NotContains(t, out, "stale.pyc")
 
-	// The skipped artifacts remain untracked, not lost.
+	// The native binary remains untracked, not lost; the ignored bytecode stays
+	// ignored (never surfaced by git status).
 	status, err := g.run(context.Background(), "status", "--porcelain")
 	require.NoError(t, err)
 	assert.Contains(t, status, "?? app")
-	assert.Contains(t, status, "?? cache.pyc")
+	assert.NotContains(t, status, "stale.pyc")
 }
 
 // A filename containing a space must still be staged. git status C-quotes such

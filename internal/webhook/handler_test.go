@@ -945,6 +945,56 @@ func TestBuildLaunchSpec_BudgetEnvEmitted(t *testing.T) {
 	assert.Contains(t, spec.Env, "CMX_SELECTOR_PRICE_HEADROOM=1.5", "selector_price_headroom must appear")
 }
 
+func TestBuildLaunchSpec_VerifyEnvEmitted(t *testing.T) {
+	// A verify config on the payload is JSON-marshalled into CMX_VERIFY.
+	h := newHarness(t, 4)
+
+	payload := protocol.TriggerPayload{
+		CardID:  "PROJ-011",
+		Project: "proj",
+		RepoURL: "https://github.com/org/repo",
+		Verify: &protocol.VerifyConfig{
+			Command:        "cargo test",
+			TimeoutSeconds: 900,
+			Env:            []string{"JAVA_HOME"},
+		},
+	}
+
+	w := h.do(t, http.MethodPost, "/trigger", payload)
+	require.Equal(t, http.StatusAccepted, w.Code)
+
+	require.Eventually(t, func() bool {
+		return len(h.exec.launchedSpecs()) == 1
+	}, time.Second, 5*time.Millisecond)
+
+	spec := h.exec.launchedSpecs()[0]
+	assert.Contains(t, spec.Env,
+		`CMX_VERIFY={"command":"cargo test","timeout_seconds":900,"env":["JAVA_HOME"]}`)
+}
+
+func TestBuildLaunchSpec_VerifyEnvAbsentWhenNil(t *testing.T) {
+	// No verify config -> no CMX_VERIFY var at all (consumers detect instead).
+	h := newHarness(t, 4)
+
+	payload := protocol.TriggerPayload{
+		CardID:  "PROJ-012",
+		Project: "proj",
+		RepoURL: "https://github.com/org/repo",
+	}
+
+	w := h.do(t, http.MethodPost, "/trigger", payload)
+	require.Equal(t, http.StatusAccepted, w.Code)
+
+	require.Eventually(t, func() bool {
+		return len(h.exec.launchedSpecs()) == 1
+	}, time.Second, 5*time.Millisecond)
+
+	spec := h.exec.launchedSpecs()[0]
+	for _, e := range spec.Env {
+		assert.NotContains(t, e, "CMX_VERIFY=")
+	}
+}
+
 // ---- task-skills threading --------------------------------------------------
 
 type fakeSkillsResolver struct {
@@ -964,7 +1014,6 @@ func newSkillsTestServer(resolver SkillsResolver) *Server {
 	})
 }
 
-//go:fix inline
 func sliceP(s ...string) *[]string { return new(s) }
 
 func TestBuildLaunchSpecThreadsSkillsSubset(t *testing.T) {
@@ -1210,7 +1259,6 @@ func TestBuildLaunchSpec_CredentialDeliveryMatrix(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-
 		t.Run(tc.name, func(t *testing.T) {
 			s := NewServer(Config{
 				APIKey:      "k",
@@ -1583,9 +1631,7 @@ func TestLaunch_ConcurrentDuplicateTriggersSerialized(t *testing.T) {
 	var wg sync.WaitGroup
 
 	for range 2 {
-
 		wg.Go(func() {
-
 			s.launch(spec, payload)
 		})
 	}

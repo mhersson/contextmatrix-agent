@@ -5,13 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-harness/harness"
@@ -32,9 +27,6 @@ const hardReviewIterationCap = 50
 // MAX_REVISION_PASSES; with the convergence safeguards in place, three rounds
 // are enough.
 const defaultReviewAttemptsCap = 3
-
-// verifyTimeout bounds the spec/test gate subprocess.
-const verifyTimeout = 10 * time.Minute
 
 // verifyOutputTail caps the verify-command output carried into findings, so a
 // noisy failing suite does not swamp the fix prompt.
@@ -85,10 +77,13 @@ func runReview(ctx context.Context, o *run) error {
 		}
 	}
 
-	verifyCmd := detectVerifyCommand(cfg.Workspace)
+	plan, err := o.ensureVerify(ctx)
+	if err != nil {
+		return err
+	}
 
 	if cfg.Interactive {
-		return o.runReviewHITL(ctx, verifyCmd)
+		return o.runReviewHITL(ctx, plan)
 	}
 
 	// ===== autonomous loop (UNCHANGED below this line) =====
@@ -110,17 +105,17 @@ func runReview(ctx context.Context, o *run) error {
 		// authoritative pass instead of another cheap round — never park on a
 		// cheap verdict. It is terminal: returns nil (finished) or parks.
 		if round >= attemptsCap {
-			return o.authoritativeReview(ctx, verifyCmd, round)
+			return o.authoritativeReview(ctx, plan, round)
 		}
 
-		findings, fixTier, approved, err := o.reviewRound(ctx, verifyCmd, false)
+		findings, fixTier, approved, vres, err := o.reviewRound(ctx, plan, round, false)
 		if err != nil {
 			return err
 		}
 
 		// Record this round on the parent card body for the complete review
 		// history (the runner's review-task writes ## Review Findings the same way).
-		o.recordReview(ctx, round, findings, approved)
+		o.recordReview(ctx, round, findings, approved, vres)
 
 		if approved {
 			o.reviewSummary = findings // synthesis verdict summary, for the PR body
@@ -150,7 +145,7 @@ func runReview(ctx context.Context, o *run) error {
 // findings plus the human's feedback as a fix, then re-review. The human is the
 // decision-maker, so there is no authoritative pass or auto-park; the hard
 // iteration cap is only a runaway guard.
-func (o *run) runReviewHITL(ctx context.Context, verifyCmd []string) error {
+func (o *run) runReviewHITL(ctx context.Context, plan verifyPlan) error {
 	d := o.d
 	cfg := d.Cfg
 
@@ -160,12 +155,12 @@ func (o *run) runReviewHITL(ctx context.Context, verifyCmd []string) error {
 	for iter := range hardReviewIterationCap {
 		round := o.tc.ReviewAttempts + iter + 1
 
-		findings, fixTier, autoApproved, err := o.reviewRound(ctx, verifyCmd, false)
+		findings, fixTier, autoApproved, vres, err := o.reviewRound(ctx, plan, round, false)
 		if err != nil {
 			return err
 		}
 
-		o.recordReview(ctx, round, findings, autoApproved)
+		o.recordReview(ctx, round, findings, autoApproved, vres)
 
 		outcome, fb, gerr := o.gate(ctx, gateReviewDecision, model, presentFindings(findings, autoApproved))
 		if gerr != nil {
@@ -219,16 +214,16 @@ func mergeFeedback(findings, feedback string) string {
 // parking on a cheap verdict: a strong, full-scope review; if it approves the
 // card finishes; if it confirms real issues, ONE strong full-scope fix and one
 // strong re-review; still failing → park with the strong findings. It never loops.
-func (o *run) authoritativeReview(ctx context.Context, verifyCmd []string, round int) error {
+func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round int) error {
 	d := o.d
 	cfg := d.Cfg
 
-	findings, fixTier, approved, err := o.reviewRound(ctx, verifyCmd, true)
+	findings, fixTier, approved, vres, err := o.reviewRound(ctx, plan, round, true)
 	if err != nil {
 		return err
 	}
 
-	o.recordReview(ctx, round, findings, approved)
+	o.recordReview(ctx, round, findings, approved, vres)
 
 	if approved {
 		o.reviewSummary = findings
@@ -251,12 +246,12 @@ func (o *run) authoritativeReview(ctx context.Context, verifyCmd []string, round
 	// One strong re-review of the full change.
 	round2 := round + 1
 
-	findings2, _, approved2, err := o.reviewRound(ctx, verifyCmd, true)
+	findings2, _, approved2, vres2, err := o.reviewRound(ctx, plan, round2, true)
 	if err != nil {
 		return err
 	}
 
-	o.recordReview(ctx, round2, findings2, approved2)
+	o.recordReview(ctx, round2, findings2, approved2, vres2)
 
 	if approved2 {
 		o.reviewSummary = findings2
@@ -278,49 +273,66 @@ func (o *run) authoritativeReview(ctx context.Context, verifyCmd []string, round
 }
 
 // reviewRound runs one review pass and returns the outstanding findings text,
-// whether the work is approved, and any fatal error (budget park, transport).
-// The verify gate runs first: on failure it short-circuits to (gate output,
-// not-approved) WITHOUT spending reviewer tokens. On gate pass (or no gate), the
-// three specialists fan out and the synthesis verdict decides.
-func (o *run) reviewRound(ctx context.Context, verifyCmd []string, authoritative bool) (findings string, fixTier string, approved bool, err error) {
+// whether the work is approved, the round's verify result, and any fatal error
+// (budget park, transport). The tri-state verify gate runs first: FAILED
+// short-circuits to the fix loop (redacted output tail as the finding) WITHOUT
+// spending reviewer tokens; SKIPPED logs loudly and proceeds to the specialists
+// WITHOUT the fix loop (a missing/timed-out gate is not a defect to fix); PASSED
+// (or no command) proceeds. On any gate outcome that reaches them, the three
+// specialists fan out and the synthesis verdict decides.
+func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, authoritative bool) (findings string, fixTier string, approved bool, vres verifyResult, err error) {
 	// Budget gate before the verify subprocess too — the gate may be cheap, but
 	// the fix run it can trigger is not, and we park before doing any work.
 	if err := o.ledger.Check(); err != nil {
-		return "", "", false, err
+		return "", "", false, verifyResult{}, err
 	}
 
-	if len(verifyCmd) > 0 {
-		out, ok := o.runVerify(ctx, o.d.Cfg.Workspace, verifyCmd)
-		if !ok {
+	if len(plan.Argv) > 0 {
+		res, verr := o.runVerifyPlan(ctx, o.d.Cfg.Workspace, plan)
+		if verr != nil {
+			return "", "", false, verifyResult{}, verr
+		}
+
+		vres = res
+
+		switch res.Status {
+		case verifyFailed:
 			// Gate failure goes STRAIGHT to the fix loop without burning reviewer
-			// tokens. The command output (tail) is the finding the coder fixes. No
+			// tokens. The redacted output tail is the finding the coder fixes. No
 			// verdict ran, so the fix run falls back to the card tier (empty fixTier).
-			return "verify command failed: " + strings.Join(verifyCmd, " ") + "\n" +
-				tools.HeadTail(out, verifyOutputTail), "", false, nil
+			return "verify command failed: " + plan.Display + "\n" +
+				tools.HeadTail(res.Output, verifyOutputTail), "", false, vres, nil
+		case verifySkipped:
+			// A missing or timed-out gate is inconclusive, not a defect: log it
+			// loudly and proceed to the specialists without a fix loop.
+			_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, //nolint:errcheck // advisory skip record
+				fmt.Sprintf("verify skipped (%s) — review round %d proceeds unverified", res.Note, round))
+		case verifyPassed:
+			// Proceed to the specialist panel.
 		}
 	}
 
-	// Gate passed (or none) — the gate is a cheap pre-filter, not a substitute
-	// for review, so specialists always run.
+	// Gate passed, skipped, or absent — the gate is a cheap pre-filter, not a
+	// substitute for review, so specialists always run.
 	specialistFindings, err := o.runSpecialists(ctx, authoritative)
 	if err != nil {
-		return "", "", false, err
+		return "", "", false, vres, err
 	}
 
 	if err := o.ledger.Check(); err != nil {
-		return "", "", false, err
+		return "", "", false, vres, err
 	}
 
 	v, err := o.synthesize(ctx, specialistFindings, authoritative)
 	if err != nil {
-		return "", "", false, err
+		return "", "", false, vres, err
 	}
 
 	if v.Approved {
-		return v.Summary, v.FixTier, true, nil
+		return v.Summary, v.FixTier, true, vres, nil
 	}
 
-	return formatFixes(v), v.FixTier, false, nil
+	return formatFixes(v), v.FixTier, false, vres, nil
 }
 
 // runSpecialists fans the three review lenses out as parallel read-only child
@@ -619,7 +631,7 @@ func (o *run) runFix(ctx context.Context, findings string, round int, fixTier st
 	}
 
 	prompt := fmt.Sprintf(fixPrompt, o.skillEngage(), o.grounding, cfg.Workspace,
-		o.tc.Title, o.tc.Description, findings)
+		fixVerifyLine(o.resolvedVerifyPlan()), o.tc.Title, o.tc.Description, findings)
 
 	if err := o.runFixModel(ctx, prompt, round, fixTier, authoritative); err != nil {
 		return err
@@ -737,107 +749,6 @@ func parseVerdict(s string) (verdict, error) {
 	}
 
 	return v, nil
-}
-
-// detectVerifyCommand best-effort selects the project's test command from the
-// workspace markers, in priority order: a Makefile declaring a "test" target ->
-// ["make","test"]; else a go.mod -> ["go","test","./..."]; else a package.json
-// declaring a scripts.test -> ["npm","test"]; none -> nil (gate skipped).
-func detectVerifyCommand(workspace string) []string {
-	if makefileHasTestTarget(filepath.Join(workspace, "Makefile")) {
-		return []string{"make", "test"}
-	}
-
-	if fileExists(filepath.Join(workspace, "go.mod")) {
-		return []string{"go", "test", "./..."}
-	}
-
-	if packageJSONHasTestScript(filepath.Join(workspace, "package.json")) {
-		return []string{"npm", "test"}
-	}
-
-	return nil
-}
-
-// verifyMarkerByteCap bounds reads of repo-controlled build-metadata files. A
-// committed multi-GB file — or one symlinked to /dev/zero — must not OOM the
-// worker before the marker check runs. 1 MiB holds any real Makefile/package.json.
-const verifyMarkerByteCap = 1 << 20
-
-// readVerifyMarker reads at most verifyMarkerByteCap bytes from path, bounding
-// the allocation before it happens (os.ReadFile slurps the whole file first).
-func readVerifyMarker(path string) ([]byte, error) {
-	f, err := os.Open(path) //nolint:gosec // code-selected workspace marker, not model input
-	if err != nil {
-		return nil, err
-	}
-
-	defer f.Close() //nolint:errcheck // read-only
-
-	return io.ReadAll(io.LimitReader(f, verifyMarkerByteCap))
-}
-
-// makefileHasTestTarget reports whether path is a readable Makefile declaring a
-// "test:" target. Make targets are declared at column 0, so the match is
-// deliberately untrimmed — indented lines (recipes, comments) never match.
-func makefileHasTestTarget(path string) bool {
-	data, err := readVerifyMarker(path)
-	if err != nil {
-		return false
-	}
-
-	for line := range strings.SplitSeq(string(data), "\n") {
-		if strings.HasPrefix(line, "test:") {
-			return true
-		}
-	}
-
-	return false
-}
-
-// packageJSONHasTestScript reports whether path is a readable package.json whose
-// scripts object declares a non-empty "test" entry.
-func packageJSONHasTestScript(path string) bool {
-	data, err := readVerifyMarker(path)
-	if err != nil {
-		return false
-	}
-
-	var pkg struct {
-		Scripts map[string]string `json:"scripts"`
-	}
-
-	if err := json.Unmarshal(data, &pkg); err != nil {
-		return false
-	}
-
-	return strings.TrimSpace(pkg.Scripts["test"]) != ""
-}
-
-func fileExists(path string) bool {
-	info, err := os.Stat(path)
-
-	return err == nil && !info.IsDir()
-}
-
-// execVerify runs argv in workspace with a scrubbed env and a 10-minute timeout,
-// returning the combined output and whether it exited cleanly. The command is
-// always rooted at the workspace (cmd.Dir) so a verify run cannot escape it.
-func execVerify(ctx context.Context, workspace string, argv []string) (string, bool) {
-	if len(argv) == 0 {
-		return "", true
-	}
-
-	cctx, cancel := context.WithTimeout(ctx, verifyTimeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(cctx, argv[0], argv[1:]...) //nolint:gosec // argv is code-selected, not model input
-	cmd.Dir = workspace
-	cmd.Env = tools.ScrubbedEnv(nil)
-
-	out, err := cmd.CombinedOutput()
-
-	return string(out), err == nil
 }
 
 // formatFixes renders a verdict's fix list as the findings text carried into the

@@ -635,7 +635,8 @@ func TestOrchestratorEndToEndHappyPath(t *testing.T) {
 
 	t.Parallel()
 
-	// No go.mod at root -> detectVerifyCommand returns nil -> gate absent.
+	// baseSpec declares a trivial always-pass verify command, so the gate is a
+	// deterministic pass and no model proposal fires during resolution.
 	remote := setupBareRemote(t)
 
 	backend := &scriptedBackend{

@@ -22,6 +22,27 @@ func skillEngageBlock(menu string) string {
 		"\n"
 }
 
+// verifyCommandBlock names the resolved verify command for the coder prompt when
+// one resolved, or "" (today's generic wording, unchanged) when the gate is a
+// skip. The command text is runtime data, so the template stays language-neutral.
+func verifyCommandBlock(p verifyPlan) string {
+	if len(p.Argv) == 0 || p.Display == "" {
+		return ""
+	}
+
+	return fmt.Sprintf("\n\nThe project's verify command is `%s` (%s). Run it before finishing and make it pass.", p.Display, p.Source)
+}
+
+// fixVerifyLine is the fix prompt's verify instruction: the resolved command when
+// one resolved, else today's generic wording (with the stray line break mended).
+func fixVerifyLine(p verifyPlan) string {
+	if len(p.Argv) == 0 || p.Display == "" {
+		return "Run the project's tests after your changes to confirm they pass."
+	}
+
+	return fmt.Sprintf("The project's verify command is `%s` (%s). Run it after your changes and make it pass.", p.Display, p.Source)
+}
+
 // skillMenuer is the optional menu accessor satisfied by tools.SkillTool.
 type skillMenuer interface{ MenuText() string }
 
@@ -79,10 +100,10 @@ Decompose the task into subtasks following these rules:
   any such "add/pin tests for X" work into X.
 - Exception to the file-count and independent-verifiability rules above: when a
   change is ONE coordinated, cross-cutting edit that genuinely cannot be split
-  into independently-compiling pieces — e.g. deleting a shared type or changing
+  into independently-verifiable pieces — e.g. deleting a shared type or changing
   a shared signature breaks all of its consumers in the same commit — emit it as
   a single subtask even if it exceeds the ~5-file guidance. A larger subtask that
-  keeps the tree building and its tests green is correct; several smaller ones
+  keeps the tree passing its checks and its tests green is correct; several smaller ones
   that each leave the tree broken are not. Do NOT invent artificial staging
   (dead fields, temporary shims, "zero out now / delete later") solely to satisfy
   the file cap.
@@ -180,14 +201,13 @@ subtasks, but no code>
 <related code paths to leave alone, refactoring hazards, assumptions made>
 `
 
-// buildHygieneNote tells the coder/fixer not to leave a compiled binary in the
+// buildHygieneNote tells the coder/fixer not to leave build output in the
 // workspace — leftover artifacts clutter the surface the reviewers read. Shared
 // by coderPrompt and fixPrompt so the guidance cannot drift (same pattern as
-// selfReviewBlock).
-const buildHygieneNote = `When you compile only to check the build, do not leave the binary behind — build
-to a throwaway path (e.g. go build -o /dev/null ./...) or delete the compiled
-output before you finish. Leftover build artifacts clutter the workspace the
-reviewers read.`
+// selfReviewBlock). Deliberately language-neutral: it names no build tool.
+const buildHygieneNote = `If you run a build or compile step only to check it, do not leave its output
+behind — write it to a throwaway path or delete it before you finish. Leftover
+build artifacts clutter the workspace the reviewers read.`
 
 // selfReviewBlock is the coder/fixer self-review gate, shared by coderPrompt and
 // fixPrompt so the two cannot drift. Hygiene only — it must not invite scope
@@ -207,8 +227,9 @@ Fix anything you find before finishing.`
 // NOT run git itself — it ends the subtask by calling the finish tool with the
 // commit message, which the orchestrator reads from the tool call arguments.
 //
-// The trailing %s slots are filled by runExecute: workspace root, subtask
-// title, subtask description, parent card title, parent card body.
+// The trailing %s slots are filled by runExecute: workspace root, the verify
+// command block (empty when none resolved), subtask title, subtask description,
+// parent card title, parent card body.
 const coderPrompt = `%s%sYou are the coding agent for one subtask of a larger task. You have the full
 write toolset (read, grep, glob, edit, write, bash) rooted at the workspace.
 Implement EXACTLY this subtask — nothing from sibling subtasks, nothing
@@ -223,7 +244,7 @@ them. Do NOT run git yourself (no commit, no push, no branch) — the orchestrat
 commits and pushes your changes after you finish.
 
 Write tests alongside the code and run them. Once the acceptance criteria
-pass, finish immediately — do not repeat verification that already passed.
+pass, finish immediately — do not repeat verification that already passed.%s
 
 ` + buildHygieneNote + `
 
@@ -302,7 +323,7 @@ groups. End with a one-sentence verdict for your specialty.
 const correctnessPrompt = `Your specialty is CORRECTNESS. Focus on:
 - Bugs, logic errors, off-by-one, edge cases.
 - Error handling completeness (silent failures, swallowed errors).
-- Concurrency, races, lock ordering, goroutine leaks.
+- Concurrency, races, lock ordering, leaked concurrent workers (threads, tasks, coroutines, goroutines).
 - Observability: structured logging, debuggable error context.
 - Test coverage and quality — do tests exercise new behavior, or are they
   vacuous? Flag flakiness, time coupling, ordering dependencies.
@@ -310,12 +331,12 @@ Stay strictly within correctness; do not opine outside it.`
 
 // designPrompt is the Design & Maintainability specialist lens (Specialist B).
 const designPrompt = `Your specialty is DESIGN & MAINTAINABILITY. Focus on:
-- Architecture, separation of concerns, cross-package coupling.
+- Architecture, separation of concerns, cross-module coupling.
 - API and interface contracts at module boundaries — only a real defect in what the task required, not a missing abstraction.
 - Backward compatibility: public APIs, config formats, on-disk schemas. Flag
   breaking changes without a migration path.
 - Readability, naming, complexity, function length.
-- Duplication, dead code, unused exports.
+- Duplication, dead code, unused public symbols.
 Stay strictly within design; do not opine outside it.`
 
 // securityPrompt is the Security & Performance specialist lens (Specialist C).
@@ -357,7 +378,7 @@ Decision rule:
   on operations that cannot realistically fail, stricter-than-asked tests, and
   style or naming are Minor at most, even if a specialist marked them Critical
   or Important.
-- Weigh a passing build and passing tests as evidence: a "this could break" or
+- Weigh a passing verify run and passing tests as evidence: a "this could break" or
   toolchain/version concern they contradict is Minor.
 - Also judge the change against the task: if it does NOT satisfy the acceptance criteria
   (incomplete) → not approved. If it ADDED things outside the task's scope (new
@@ -393,8 +414,9 @@ When approved is true, fixes must be an empty array.
 // listed findings — nothing speculative. The orchestrator commits the result as
 // a fixup and pushes; the coder does NOT run git.
 //
-// The trailing %s slots are filled by runFix: workspace root, parent card
-// title, parent card description, and the findings list.
+// The trailing %s slots are filled by runFix: workspace root, the verify
+// instruction line, parent card title, parent card description, and the findings
+// list.
 const fixPrompt = `%s%sYou are the coding agent addressing review feedback on the current branch.
 You have the full write toolset (read, grep, glob, edit, write, bash) rooted at
 the workspace. Apply fixes for EXACTLY the findings below — apply only the literal
@@ -409,8 +431,7 @@ commits your changes as a fixup and pushes after you finish.
 
 ` + selfReviewBlock + `
 
-Run the project's
-tests after your changes to confirm they pass.
+%s
 
 ` + buildHygieneNote + `
 
@@ -475,8 +496,8 @@ Respond with ONLY the Markdown PR body — no surrounding prose, no code fences.
 // phase owns claim/usage/push in code.
 //
 // The trailing %s slots are filled by runDocument: workspace root, parent card
-// title, parent card description, the plan overview (subtask titles), and the
-// branch diff.
+// title, parent card description, the plan overview (subtask titles), the branch
+// diff, and the run's verify context (advisory — not a guaranteed surface).
 const documentPrompt = `%s%sYou are the documentation agent for completed work that review will inspect
 next. You have the full write toolset (read, grep, glob, edit, write, bash)
 rooted at the workspace. Decide whether external documentation is needed for
@@ -527,6 +548,9 @@ PLAN OVERVIEW (subtasks)
 %s
 
 BRANCH DIFF (what actually changed)
+%s
+
+VERIFY (how this change is gated)
 %s
 `
 

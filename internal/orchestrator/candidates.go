@@ -28,13 +28,12 @@ type candidate struct {
 	capped    bool  // final subtask hit the turn cap; admitted to the judge pool only on a passing verify
 	err       error // non-nil = dropped before judging
 
-	verifyOut string // set by the judge phase when it verifies a candidate.
-	verifyOK  bool   // set by the judge phase when it verifies a candidate.
-	// verifyRan is set by the judge phase: a verify command was detected and
-	// actually executed; vacuous green (no command) must not admit capped work.
-	verifyRan bool
-	diff      string // set by the judge phase from the candidate worktree.
-	diffStat  string // set by the judge phase from the candidate worktree.
+	// verify is the candidate's tri-state verify result, set by the judge phase.
+	// A verifyPassed status implies a command actually ran (an empty/skipped gate
+	// never passes), which is what gates capped-work salvage.
+	verify   verifyResult
+	diff     string // set by the judge phase from the candidate worktree.
+	diffStat string // set by the judge phase from the candidate worktree.
 }
 
 // effectiveCeiling scales the run's budget ceiling for Best-of-N: N execute
@@ -202,7 +201,6 @@ func (o *run) runFanout(ctx context.Context) (retErr error) {
 	var wg sync.WaitGroup
 
 	for _, cand := range o.candidates {
-
 		wg.Go(func() {
 			defer func() {
 				if r := recover(); r != nil {
