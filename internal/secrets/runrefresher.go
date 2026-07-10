@@ -49,7 +49,8 @@ type RunCredentials struct {
 	http    *http.Client
 	logger  *slog.Logger
 
-	// Timing knobs. Defaults match the process-wide Refresher; tests shrink them.
+	// Timing knobs. Defaults come from the default* consts in secrets.go; tests
+	// shrink them.
 	refreshBefore time.Duration // rewrite this far ahead of expiry
 	minSleep      time.Duration // floor on the sleep between refreshes
 	retryBackoff  time.Duration // fast retry after a transient failure

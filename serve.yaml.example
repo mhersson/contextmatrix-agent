@@ -89,9 +89,10 @@ idle_output_timeout: 30m
 # CMX_IDLE_WATCHDOG_INTERVAL
 idle_watchdog_interval: 30s
 
-# Host directory bind-mounted read-only into containers at /run/cm-secrets.
-# The agent refreshes <secrets_dir>/shared/env before each token expiry;
-# workers read their GitHub token and LLM endpoint key from this file.
+# Host directory holding per-run credential files, each bind-mounted read-only
+# into its container at /run/cm-secrets. The agent stages the CM-provisioned
+# git token and LLM endpoint key into <secrets_dir>/runs/<card_id>/env and
+# refreshes the token from ContextMatrix until the run is torn down.
 # Default: /var/run/cm-agent/secrets.
 # CMX_SECRETS_DIR
 secrets_dir: /var/run/cm-agent/secrets

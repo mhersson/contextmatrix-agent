@@ -24,38 +24,29 @@ import (
 
 const requestTimeout = 15 * time.Second
 
-// tokenGen mints a GitHub token for the clone. secrets.TokenGenerator satisfies it.
-type tokenGen interface {
-	GenerateToken(ctx context.Context) (token string, expiresAt time.Time, err error)
-}
-
 // Resolver fetches the task-skills pointer from CM and clones it once, caching
-// the resolved host dir for the process. Safe for concurrent use.
+// the resolved host dir for the process. The clone authenticates with the
+// CM-provisioned token carried on the pointer — there is no local token
+// source. Safe for concurrent use.
 type Resolver struct {
 	cmURL    string
 	apiKey   string
 	cacheDir string
-	gen      tokenGen
 	http     *http.Client
 	logger   *slog.Logger
 
 	// cloner is the clone implementation; overridable in tests. Production uses
-	// gitClone (a shallow git fetch+checkout with the minted token).
+	// gitClone (a shallow git fetch+checkout with the CM-provisioned token).
 	cloner func(ctx context.Context, gitURL, ref, dest, token string) error
 
 	mu       sync.Mutex
 	resolved string // cached host dir once a clone has succeeded
-
-	// mintWarnOnce guards the compat-window deprecation warning (see
-	// warnLocalMintOnce) so it logs once per process, not once per resolve
-	// attempt.
-	mintWarnOnce sync.Once
 }
 
 // NewResolver builds a Resolver. cmURL is ContextMatrix's base URL, apiKey the
 // agent backend HMAC key, cacheDir a host directory the clone lands in (and the
-// executor binds), gen the GitHub token source.
-func NewResolver(cmURL, apiKey, cacheDir string, gen tokenGen, logger *slog.Logger) *Resolver {
+// executor binds).
+func NewResolver(cmURL, apiKey, cacheDir string, logger *slog.Logger) *Resolver {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -64,7 +55,6 @@ func NewResolver(cmURL, apiKey, cacheDir string, gen tokenGen, logger *slog.Logg
 		cmURL:    strings.TrimRight(cmURL, "/"),
 		apiKey:   apiKey,
 		cacheDir: cacheDir,
-		gen:      gen,
 		http:     &http.Client{Timeout: requestTimeout},
 		logger:   logger,
 	}
@@ -103,25 +93,9 @@ func (r *Resolver) Resolve(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("task-skills ref begins with '-', which git interprets as a flag: %q", ref)
 	}
 
-	// Compat window: a CM-provisioned clone token in the task-skills-source
-	// response overrides local minting for this clone. A CM version that
-	// predates provisioned task-skills tokens sends neither field — the
-	// resolver keeps self-minting via the local github config, and this
-	// process logs the deprecation warning once (not per resolve attempt).
 	token := p.Token
 	if token == "" {
-		if r.gen == nil {
-			return "", fmt.Errorf("CM did not provision a task-skills clone token and no local github config exists")
-		}
-
-		r.warnLocalMintOnce()
-
-		var genErr error
-
-		token, _, genErr = r.gen.GenerateToken(ctx)
-		if genErr != nil {
-			return "", fmt.Errorf("mint skills clone token: %w", genErr)
-		}
+		return "", fmt.Errorf("CM did not provision a task-skills clone token")
 	}
 
 	dest := filepath.Join(r.cacheDir, "task-skills")
@@ -139,10 +113,11 @@ func (r *Resolver) Resolve(ctx context.Context) (string, error) {
 }
 
 // pointer is the local decode target for the task-skills-source response.
-// Token/TokenExpiresAt are optional: a CM-provisioned clone token for this
-// task-skills repo, provisioned the same way TriggerPayload.GitToken is
-// (see protocol.TriggerPayload). Absent on pre-multi-user CM versions —
-// the resolver then self-mints via the local github config.
+// Token is required: the CM-provisioned clone token for this task-skills
+// repo, provisioned the same way TriggerPayload.GitToken is (see
+// protocol.TriggerPayload). A pointer without it fails the resolve.
+// TokenExpiresAt is informational for the one-shot clone; the resolver does
+// not parse it.
 type pointer struct {
 	GitRemoteURL string `json:"git_remote_url"`
 	Ref          string `json:"ref"`
@@ -190,17 +165,6 @@ func (r *Resolver) fetchPointer(ctx context.Context) (pointer, error) {
 	}
 
 	return p, nil
-}
-
-// warnLocalMintOnce logs the compat-window deprecation warning the first time
-// CM's task-skills-source response omits a clone token. Guarded by
-// mintWarnOnce so a long-lived serve process logs it once, regardless of how
-// many resolve attempts fall back to local minting.
-func (r *Resolver) warnLocalMintOnce() {
-	r.mintWarnOnce.Do(func() {
-		r.logger.Warn("CM did not provision a task-skills clone token; " +
-			"self-minting via local github config is deprecated")
-	})
 }
 
 // gitClone does a one-shot shallow fetch+checkout of ref (a SHA, branch, or tag)

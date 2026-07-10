@@ -15,7 +15,6 @@ import (
 	"syscall"
 	"time"
 
-	githubauth "github.com/mhersson/contextmatrix-githubauth"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
 
@@ -86,52 +85,15 @@ func runServe(ctx context.Context, configPath string) error {
 
 	mx := metrics.New()
 
-	provider, err := newTokenProvider(cfg.GitHub)
-	if err != nil {
-		return err
-	}
+	skillsCache := filepath.Join(cfg.SecretsDir, "task-skills-cache")
+	skillsResolver := taskskills.NewResolver(cfg.ContextMatrixURL, cfg.APIKey, skillsCache, logger)
 
-	if provider != nil {
-		logger.Info("github token provider initialized", "auth_mode", cfg.GitHub.AuthMode)
-	}
-
-	if localCredentialConfigIncomplete(cfg) {
-		logger.Info("running in CM-provisioned credential mode")
-	}
-
-	// Secrets refresher: writes <secrets_dir>/shared/env, rewritten ahead of each
-	// token expiry. The worker reads /run/cm-secrets/env, which is <shared> bound
-	// read-only into the container. Skipped entirely when github is unconfigured
-	// (provider == nil): the refresher's GenerateToken call would panic on a nil
-	// provider, and every run then either carries a CM-provisioned git token or
-	// is fail-closed rejected by the webhook launch guard.
-	sharedDir := filepath.Join(cfg.SecretsDir, "shared")
-
-	skillsCache := filepath.Join(filepath.Dir(sharedDir), "task-skills-cache")
-	skillsResolver := taskskills.NewResolver(cfg.ContextMatrixURL, cfg.APIKey, skillsCache, provider, logger)
-
-	// Per-run credentials: when a trigger carries a CM-provisioned git token, its
-	// credentials are staged into <secrets_dir>/runs/<card_id>/env and refreshed
-	// from CM until the run is torn down, rather than shared process-wide.
+	// Per-run credentials: every admitted trigger carries a CM-provisioned git
+	// token; its credentials are staged into <secrets_dir>/runs/<card_id>/env
+	// and refreshed from CM until the run is torn down. There is no local
+	// credential source — a payload without CM-provisioned credentials is
+	// fail-closed rejected by the webhook launch guards.
 	credentials := secrets.NewRunCredentials(cfg.SecretsDir, cfg.ContextMatrixURL, cfg.APIKey, logger)
-
-	refreshCtx, refreshCancel := context.WithCancel(context.Background())
-	defer refreshCancel()
-
-	if provider != nil {
-		envFile := filepath.Join(sharedDir, "env")
-		refresher := secrets.NewRefresher(envFile, secrets.EndpointSecrets{
-			APIKey:  cfg.LLMEndpoint.APIKey,
-			BaseURL: cfg.LLMEndpoint.BaseURL,
-			Type:    cfg.LLMEndpoint.Type,
-		}, provider, logger)
-
-		go func() {
-			if err := refresher.Run(refreshCtx); err != nil {
-				logger.Error("secrets refresher stopped with error", "error", err)
-			}
-		}()
-	}
 
 	docker, err := executor.NewClient()
 	if err != nil {
@@ -140,7 +102,7 @@ func runServe(ctx context.Context, configPath string) error {
 
 	tracker := executor.NewTracker(cfg.MaxConcurrent)
 	hub := logbridge.NewHubWithDropObserver(dropAdapter{mx: mx})
-	redactor := redact.New([]string{cfg.LLMEndpoint.APIKey, cfg.MCPAPIKey, cfg.APIKey})
+	redactor := redact.New([]string{cfg.MCPAPIKey, cfg.APIKey})
 
 	cbClient := callback.New(cfg.ContextMatrixURL, cfg.APIKey, logger).WithMetrics(mx)
 
@@ -187,7 +149,7 @@ func runServe(ctx context.Context, configPath string) error {
 		Verifier:       cbClient,
 		SkillsResolver: skillsResolver,
 		Credentials:    credentials,
-		LaunchEnv:      launchEnv(cfg, sharedDir),
+		LaunchEnv:      launchEnv(cfg, filepath.Join(cfg.SecretsDir, "shared")),
 		Replay:         replay,
 		Dedup:          dedup,
 		Draining:       &draining,
@@ -249,7 +211,6 @@ func runServe(ctx context.Context, configPath string) error {
 
 	gracefulShutdown(httpServer, adminSrv, exec, tracker, cbClient, &draining, logger)
 	cbClient.Close()
-	refreshCancel()
 	logger.Info("agent service stopped")
 
 	return nil
@@ -357,14 +318,6 @@ func exitStatus(exitCode int64) (status, message string) {
 	return "failed", fmt.Sprintf("worker exited with code %d", exitCode)
 }
 
-// localCredentialConfigIncomplete reports whether either local credential
-// block — github or llm_endpoint — is left unconfigured, meaning
-// ContextMatrix must provision that credential per run for any launch to
-// succeed (see the webhook package's admitAndLaunch guards).
-func localCredentialConfigIncomplete(cfg *config.ServiceConfig) bool {
-	return !cfg.GitHub.Configured() || cfg.LLMEndpoint.APIKey == ""
-}
-
 // launchEnv assembles the static per-process LaunchEnv folded into each
 // container. The MCP URL base seen from containers is the container-specific
 // override when set, else the public ContextMatrix URL; "/mcp" is appended to
@@ -376,15 +329,9 @@ func launchEnv(cfg *config.ServiceConfig, secretsHostDir string) webhook.LaunchE
 	}
 
 	return webhook.LaunchEnv{
-		BaseImage: cfg.BaseImage,
-		MCPURL:    composeMCPURL(base),
-		MCPAPIKey: cfg.MCPAPIKey,
-		DefaultLLMEndpoint: secrets.EndpointSecrets{
-			APIKey:  cfg.LLMEndpoint.APIKey,
-			BaseURL: cfg.LLMEndpoint.BaseURL,
-			Type:    cfg.LLMEndpoint.Type,
-		},
-		SharedSecretsAvailable:    cfg.GitHub.Configured(),
+		BaseImage:                 cfg.BaseImage,
+		MCPURL:                    composeMCPURL(base),
+		MCPAPIKey:                 cfg.MCPAPIKey,
 		SecretsHostDir:            secretsHostDir,
 		CACertFile:                cfg.CACertFile,
 		MemoryBytes:               cfg.ContainerMemoryBytes,
@@ -422,43 +369,6 @@ func flattenEnv(m map[string]string) []string {
 	}
 
 	return out
-}
-
-// newTokenProvider selects the GitHub token provider per auth_mode, mirroring
-// the runner: app -> NewAppProvider, pat -> NewPATProvider. No caching wrapper;
-// the refresher mints ahead of expiry and the worker needs freshness at
-// hand-off. Validate() has already rejected unknown modes, but this defends in
-// depth. An unconfigured github block (Configured() false) returns (nil, nil):
-// ContextMatrix provisions git credentials per run instead, and the caller
-// skips constructing the shared secrets refresher entirely.
-func newTokenProvider(gh config.GitHubConfig) (secrets.TokenGenerator, error) {
-	if !gh.Configured() {
-		return nil, nil
-	}
-
-	switch gh.AuthMode {
-	case "app":
-		p, err := githubauth.NewAppProvider(
-			gh.App.AppID,
-			gh.App.InstallationID,
-			gh.App.PrivateKeyPath,
-			githubauth.WithAPIBaseURL(gh.APIBaseURL),
-		)
-		if err != nil {
-			return nil, fmt.Errorf("construct github app provider: %w", err)
-		}
-
-		return p, nil
-	case "pat":
-		p, err := githubauth.NewPATProvider(gh.PAT.Token)
-		if err != nil {
-			return nil, fmt.Errorf("construct github pat provider: %w", err)
-		}
-
-		return p, nil
-	default:
-		return nil, fmt.Errorf("unknown github auth_mode %q", gh.AuthMode)
-	}
 }
 
 // newServeLogger builds a JSON slog logger at the level named by lvl

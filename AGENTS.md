@@ -41,7 +41,7 @@ internal/registry/   → model selector: SelectByComplexity, SelectReviewPanel; 
 internal/orchestrator/ → hand-written FSM plan → execute → judge → document → review → integrate → done; phase persistence; git finalize
 internal/worker/       → the `work` lifecycle: clone, claim, run the FSM (HITL-gated or autonomous), commit/push, PR; wires the orchestrator deps
 internal/executor/     → Executor interface + DockerExecutor; Tracker (concurrency + awaiting-human gate); watchdogs
-internal/secrets/      → Source (static env file) + Refresher (mints GitHub tokens via githubauth)
+internal/secrets/      → Source (static env file) + RunCredentials (stages per-run CM-provisioned credentials)
 internal/taskskills/   → fetches the {git_remote_url, ref} task-skills pointer from CM and shallow-clones it for read-only mount
 
 # serve plumbing
@@ -97,7 +97,8 @@ Go 1.26+, **cobra** + **koanf** (not viper), the **Docker SDK**
 (`assert`/`require`). Three rules that are easy to get wrong:
 
 - HMAC is `contextmatrix-protocol`'s job — do not re-implement it locally.
-- GitHub tokens come only from `contextmatrix-githubauth` (App + PAT).
+- Git tokens and the LLM endpoint are CM-provisioned per run — the agent
+  carries no local credential config and mints no tokens itself.
 - The LLM endpoint (OpenAI-compatible `/chat/completions`) is spoken over **raw
   HTTP** behind a narrow `Send`/`SendStream` interface — no SDK in the hot path.
 
@@ -122,11 +123,13 @@ Go 1.26+, **cobra** + **koanf** (not viper), the **Docker SDK**
 - **Spell names out.** Use "runner" and "agent", never "cmr". No abbreviations
   in config keys, code, comments, or commit messages.
 
-### GitHub auth
+### Git credentials
 
-All GitHub tokens come from `githubauth` providers (App or PAT) via the
-`secrets.Refresher`. Do not read raw tokens from config or env in new code
-paths.
+All git tokens are CM-provisioned: ContextMatrix mints them per run and sends
+them on the trigger payload (and on the task-skills pointer for the skills
+clone); `secrets.RunCredentials` stages and refreshes them in per-run secret
+files. Do not read raw tokens from config or env in new code paths, and do not
+add local minting back.
 
 ### Config
 
@@ -196,9 +199,11 @@ via flags or committed YAML.
 7. **Per-card budget.** One cumulative USD ceiling (`CMX_MAX_CARD_COST`, default
    5.0) spans the orchestrator and every subagent. A breach parks the card — WIP
    pushed, card released, failed callback — it does not kill mid-turn.
-8. **Secrets.** `serve` writes `<secrets_dir>/shared/env`, refreshed ahead of
-   each GitHub-token expiry, bind-mounted read-only at `/run/cm-secrets/env`.
-   The worker reads the LLM endpoint key and `CM_GIT_TOKEN` from it. Tool
+8. **Secrets.** `serve` stages each run's CM-provisioned credentials into
+   `<secrets_dir>/runs/<card_id>/env`, refreshed from ContextMatrix ahead of
+   each git-token expiry and bind-mounted read-only at `/run/cm-secrets/env`;
+   the per-run dir is torn down with the run. The worker reads the LLM
+   endpoint key and `CM_GIT_TOKEN` from it. Tool
    subprocesses get an allowlisted `cmd.Env` (`tools.ScrubbedEnv`) — secrets are
    not inheritable by model-driven commands — and known secret values are
    redacted from events and transcripts.

@@ -1,39 +1,23 @@
 package taskskills
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-type fakeGen struct{}
-
-func (fakeGen) GenerateToken(context.Context) (string, time.Time, error) {
-	return "tok", time.Now().Add(time.Hour), nil
-}
-
-// recordingGen is a tokenGen that records how many times it was invoked, so
-// tests can assert local minting was (or was not) reached.
-type recordingGen struct {
-	calls int32
-}
-
-func (g *recordingGen) GenerateToken(context.Context) (string, time.Time, error) {
-	atomic.AddInt32(&g.calls, 1)
-
-	return "self-minted", time.Now().Add(time.Hour), nil
+// discardLogger returns a logger that swallows output, for tests that only
+// care about Resolve's return values.
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
 func TestResolveFetchesPointerClonesAndCaches(t *testing.T) {
@@ -47,6 +31,7 @@ func TestResolveFetchesPointerClonesAndCaches(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]string{
 			"git_remote_url": "https://example.test/skills.git",
 			"ref":            "abc123",
+			"token":          "tok",
 		})
 	}))
 	defer srv.Close()
@@ -59,7 +44,7 @@ func TestResolveFetchesPointerClonesAndCaches(t *testing.T) {
 		return nil
 	}
 
-	r := NewResolver(srv.URL, "key", t.TempDir(), fakeGen{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	r := NewResolver(srv.URL, "key", t.TempDir(), discardLogger())
 	r.cloner = cloner
 
 	dir, err := r.Resolve(context.Background())
@@ -83,7 +68,7 @@ func TestResolveEmptyPointerYieldsNoSkills(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	r := NewResolver(srv.URL, "key", t.TempDir(), fakeGen{}, nil)
+	r := NewResolver(srv.URL, "key", t.TempDir(), nil)
 	r.cloner = func(context.Context, string, string, string, string) error { return nil }
 
 	_, err := r.Resolve(context.Background())
@@ -103,7 +88,7 @@ func TestGitCloneRejectsDashLeadingRef(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		r := NewResolver(srv.URL, "key", t.TempDir(), fakeGen{}, nil)
+		r := NewResolver(srv.URL, "key", t.TempDir(), nil)
 		r.cloner = func(_ context.Context, _, _, _, _ string) error {
 			t.Fatal("cloner must not be called with a dash-leading ref")
 
@@ -123,7 +108,7 @@ func TestGitCloneRejectsDashLeadingRef(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		r := NewResolver(srv.URL, "key", t.TempDir(), fakeGen{}, nil)
+		r := NewResolver(srv.URL, "key", t.TempDir(), nil)
 		r.cloner = func(_ context.Context, _, _, _, _ string) error {
 			t.Fatal("cloner must not be called with a dash-leading URL")
 
@@ -146,11 +131,15 @@ func TestResolveDoesNotCacheFailure(t *testing.T) {
 			return
 		}
 
-		_ = json.NewEncoder(w).Encode(map[string]string{"git_remote_url": "https://example.test/s.git", "ref": "r"})
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"git_remote_url": "https://example.test/s.git",
+			"ref":            "r",
+			"token":          "tok",
+		})
 	}))
 	defer srv.Close()
 
-	r := NewResolver(srv.URL, "key", t.TempDir(), fakeGen{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	r := NewResolver(srv.URL, "key", t.TempDir(), discardLogger())
 	r.cloner = func(context.Context, string, string, string, string) error { return nil }
 
 	_, err := r.Resolve(context.Background())
@@ -160,11 +149,10 @@ func TestResolveDoesNotCacheFailure(t *testing.T) {
 	require.NoError(t, err, "a prior failure is not cached; the next call retries")
 }
 
-// ---- CM-provisioned clone token (compat window) ------------------------------
+// ---- CM-provisioned clone token ----------------------------------------------
 
-// TestResolveUsesCMProvisionedTokenWhenPresent pins the compat-window
-// override: when the task-skills-source response carries a token, the
-// resolver must clone with THAT token and must never reach local minting.
+// TestResolveUsesCMProvisionedTokenWhenPresent pins that the resolver clones
+// with the token carried on the task-skills-source response.
 func TestResolveUsesCMProvisionedTokenWhenPresent(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{
@@ -176,138 +164,9 @@ func TestResolveUsesCMProvisionedTokenWhenPresent(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	gen := &recordingGen{}
-
 	var gotTok string
 
-	cloner := func(_ context.Context, _, _, _, token string) error {
-		gotTok = token
-
-		return nil
-	}
-
-	r := NewResolver(srv.URL, "key", t.TempDir(), gen, nil)
-	r.cloner = cloner
-
-	_, err := r.Resolve(context.Background())
-	require.NoError(t, err)
-	assert.Equal(t, "cm-provisioned-token", gotTok)
-	assert.Equal(t, int32(0), atomic.LoadInt32(&gen.calls), "a CM-provisioned token must skip local minting")
-}
-
-// TestResolveSelfMintsWhenTokenAbsent mirrors the pre-existing behavior: when
-// the task-skills-source response carries no token, the resolver falls back
-// to minting one via the local generator.
-func TestResolveSelfMintsWhenTokenAbsent(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"git_remote_url": "https://example.test/skills.git",
-			"ref":            "abc123",
-		})
-	}))
-	defer srv.Close()
-
-	gen := &recordingGen{}
-
-	var gotTok string
-
-	cloner := func(_ context.Context, _, _, _, token string) error {
-		gotTok = token
-
-		return nil
-	}
-
-	r := NewResolver(srv.URL, "key", t.TempDir(), gen, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	r.cloner = cloner
-
-	_, err := r.Resolve(context.Background())
-	require.NoError(t, err)
-	assert.Equal(t, "self-minted", gotTok)
-	assert.Equal(t, int32(1), atomic.LoadInt32(&gen.calls), "an absent CM token must fall back to local minting")
-}
-
-// TestResolveWarnsOncePerProcessNotPerAttempt pins the once-per-process (not
-// once per resolve attempt) deprecation warning, mirroring the webhook
-// handler's credentialFallbackWarnOnce pattern: a first attempt that reaches
-// local minting and then fails downstream (clone failure) must not cause a
-// retried attempt to log the warning a second time.
-func TestResolveWarnsOncePerProcessNotPerAttempt(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"git_remote_url": "https://example.test/skills.git",
-			"ref":            "abc123",
-		})
-	}))
-	defer srv.Close()
-
-	var buf bytes.Buffer
-
-	logger := slog.New(slog.NewTextHandler(&buf, nil))
-
-	var attempt int32
-
-	r := NewResolver(srv.URL, "key", t.TempDir(), fakeGen{}, logger)
-	r.cloner = func(context.Context, string, string, string, string) error {
-		if atomic.AddInt32(&attempt, 1) == 1 {
-			return errors.New("boom")
-		}
-
-		return nil
-	}
-
-	_, err := r.Resolve(context.Background())
-	require.Error(t, err)
-
-	_, err = r.Resolve(context.Background())
-	require.NoError(t, err)
-
-	warnCount := strings.Count(buf.String(),
-		"CM did not provision a task-skills clone token; self-minting via local github config is deprecated")
-	assert.Equal(t, 1, warnCount, "deprecation warning must fire once per process, not per resolve attempt")
-}
-
-// ---- nil gen (github unconfigured) -------------------------------------------
-
-// TestResolveNilGenAndNoTokenReturnsClearError pins the fail-closed guard: when
-// CM's task-skills-source response carries no clone token AND the agent has no
-// local github config (gen is nil), Resolve must return a clear error rather
-// than panic on a nil-interface method call, and must never reach the cloner.
-func TestResolveNilGenAndNoTokenReturnsClearError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"git_remote_url": "https://example.test/skills.git",
-			"ref":            "abc123",
-		})
-	}))
-	defer srv.Close()
-
-	r := NewResolver(srv.URL, "key", t.TempDir(), nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	r.cloner = func(context.Context, string, string, string, string) error {
-		t.Fatal("cloner must not be called when there is no token source at all")
-
-		return nil
-	}
-
-	_, err := r.Resolve(context.Background())
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no local github config")
-}
-
-// TestResolveNilGenWithCMTokenSucceeds proves a nil gen only matters when local
-// minting would actually be needed: a CM-provisioned token must still work.
-func TestResolveNilGenWithCMTokenSucceeds(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"git_remote_url": "https://example.test/skills.git",
-			"ref":            "abc123",
-			"token":          "cm-provisioned-token",
-		})
-	}))
-	defer srv.Close()
-
-	var gotTok string
-
-	r := NewResolver(srv.URL, "key", t.TempDir(), nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	r := NewResolver(srv.URL, "key", t.TempDir(), nil)
 	r.cloner = func(_ context.Context, _, _, _, token string) error {
 		gotTok = token
 
@@ -315,31 +174,80 @@ func TestResolveNilGenWithCMTokenSucceeds(t *testing.T) {
 	}
 
 	_, err := r.Resolve(context.Background())
-	require.NoError(t, err, "a nil gen must not block a CM-provisioned token")
+	require.NoError(t, err)
 	assert.Equal(t, "cm-provisioned-token", gotTok)
 }
 
-// TestResolveNoWarnWhenTokenProvisioned asserts the deprecation warning stays
-// silent once CM provisions a clone token.
-func TestResolveNoWarnWhenTokenProvisioned(t *testing.T) {
+// TestResolveErrorsWhenTokenAbsent pins the fail-closed guard: a pointer
+// without a CM-provisioned clone token fails the resolve with a clear error
+// and never reaches the cloner.
+func TestResolveErrorsWhenTokenAbsent(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{
 			"git_remote_url": "https://example.test/skills.git",
 			"ref":            "abc123",
-			"token":          "cm-provisioned-token",
 		})
 	}))
 	defer srv.Close()
 
-	var buf bytes.Buffer
+	r := NewResolver(srv.URL, "key", t.TempDir(), discardLogger())
+	r.cloner = func(context.Context, string, string, string, string) error {
+		t.Fatal("cloner must not be called without a clone token")
 
-	logger := slog.New(slog.NewTextHandler(&buf, nil))
-
-	r := NewResolver(srv.URL, "key", t.TempDir(), fakeGen{}, logger)
-	r.cloner = func(context.Context, string, string, string, string) error { return nil }
+		return nil
+	}
 
 	_, err := r.Resolve(context.Background())
-	require.NoError(t, err)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "CM did not provision a task-skills clone token")
+}
 
-	assert.Empty(t, buf.String(), "no deprecation warning expected when CM provisions the clone token")
+// TestResolveTokenExpiresAtAbsentMalformed pins that token_expires_at is
+// informational only: the resolver does not parse it, so an absent or
+// malformed value must not fail a resolve that carries a token.
+func TestResolveTokenExpiresAtAbsentMalformed(t *testing.T) {
+	cases := []struct {
+		name     string
+		response map[string]string
+	}{
+		{
+			name: "token_expires_at absent",
+			response: map[string]string{
+				"git_remote_url": "https://example.test/skills.git",
+				"ref":            "abc123",
+				"token":          "cm-provisioned-token",
+			},
+		},
+		{
+			name: "token_expires_at malformed",
+			response: map[string]string{
+				"git_remote_url":   "https://example.test/skills.git",
+				"ref":              "abc123",
+				"token":            "cm-provisioned-token",
+				"token_expires_at": "not-a-timestamp",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(tc.response)
+			}))
+			defer srv.Close()
+
+			var gotTok string
+
+			r := NewResolver(srv.URL, "key", t.TempDir(), discardLogger())
+			r.cloner = func(_ context.Context, _, _, _, token string) error {
+				gotTok = token
+
+				return nil
+			}
+
+			_, err := r.Resolve(context.Background())
+			require.NoError(t, err, "expiry is informational for the clone; the resolver must not parse it")
+			assert.Equal(t, "cm-provisioned-token", gotTok)
+		})
+	}
 }

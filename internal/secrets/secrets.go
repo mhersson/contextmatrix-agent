@@ -1,13 +1,12 @@
 // Package secrets stages worker secrets on the host and reads them in the
-// container. The host side mirrors the runner: a shared env file, rewritten
-// before the GitHub token expires, bind-mounted read-only into workers.
+// container. The host side stages one env file per run from CM-provisioned
+// credentials, rewritten before the git token expires, bind-mounted read-only
+// into the worker.
 package secrets
 
 import (
 	"bufio"
-	"context"
 	"fmt"
-	"log/slog"
 	"maps"
 	"os"
 	"path/filepath"
@@ -15,12 +14,6 @@ import (
 	"strings"
 	"time"
 )
-
-// TokenGenerator matches the githubauth generator surface so *githubauth.AppProvider
-// and *githubauth.PATProvider satisfy it without an adapter.
-type TokenGenerator interface {
-	GenerateToken(ctx context.Context) (token string, expiresAt time.Time, err error)
-}
 
 // Source holds key-value pairs parsed from an env file.
 type Source struct{ vals map[string]string }
@@ -74,7 +67,7 @@ type EndpointSecrets struct {
 
 // endpointVals assembles the worker env map from a git token and the (optional)
 // LLM endpoint values. Empty endpoint fields are omitted so they never appear in
-// the env file. Shared by the process-wide Refresher and the per-run refresher.
+// the env file. Used by the per-run refresher.
 func endpointVals(token string, e EndpointSecrets) map[string]string {
 	vals := map[string]string{"CM_GIT_TOKEN": token}
 
@@ -164,86 +157,9 @@ func WriteEnvFile(path string, vals map[string]string) error {
 	return nil
 }
 
-// Refresher writes the env file immediately on Run, then rewrites it
-// refreshBefore ahead of each token expiry. The EndpointSecrets are static and
-// persist across every rewrite.
-type Refresher struct {
-	path          string
-	endpoint      EndpointSecrets
-	gen           TokenGenerator
-	logger        *slog.Logger
-	refreshBefore time.Duration // default 10m; override in tests
-	minSleep      time.Duration // floor on sleep; default 30s; override in tests
-	retryBackoff  time.Duration // fast retry after a transient failure; default 5s; override in tests
-}
-
+// Refresh-loop timing shared with the per-run refresher (runrefresher.go).
 const (
 	defaultRefreshBefore = 10 * time.Minute
 	defaultMinSleep      = 30 * time.Second
 	defaultRetryBackoff  = 5 * time.Second
 )
-
-// NewRefresher constructs a Refresher. Pass nil for logger to use the default.
-func NewRefresher(path string, endpoint EndpointSecrets, gen TokenGenerator, logger *slog.Logger) *Refresher {
-	if logger == nil {
-		logger = slog.Default()
-	}
-
-	return &Refresher{
-		path:          path,
-		endpoint:      endpoint,
-		gen:           gen,
-		logger:        logger,
-		refreshBefore: defaultRefreshBefore,
-		minSleep:      defaultMinSleep,
-		retryBackoff:  defaultRetryBackoff,
-	}
-}
-
-// Run writes the env file immediately, then rewrites it ahead of each expiry.
-// Blocks until ctx is done; returns nil on clean shutdown.
-func (r *Refresher) Run(ctx context.Context) error {
-	for {
-		token, expiresAt, err := r.gen.GenerateToken(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-
-			r.logger.Error("generate token failed, retrying", "error", err, "backoff", r.retryBackoff)
-
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-time.After(r.retryBackoff):
-				continue
-			}
-		}
-
-		if err := WriteEnvFile(r.path, endpointVals(token, r.endpoint)); err != nil {
-			// A failed write staged no fresh secrets (on the first pass there is no
-			// prior file at all). Retry on the short backoff — NOT the expiry-derived
-			// sleep below: in PAT mode the token expiry is a year-9999 sentinel, so
-			// that sleep would wedge staging for ~8000 years. Bounds the outage to
-			// retryBackoff in every auth mode.
-			r.logger.Error("write env file failed; retrying on backoff", "error", err, "backoff", r.retryBackoff)
-
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-time.After(r.retryBackoff):
-				continue
-			}
-		}
-
-		r.logger.Info("env file written", "expires_at", expiresAt)
-
-		sleep := max(time.Until(expiresAt)-r.refreshBefore, r.minSleep)
-
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-time.After(sleep):
-		}
-	}
-}
