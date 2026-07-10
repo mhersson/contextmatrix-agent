@@ -239,37 +239,18 @@ func (g *Git) isDirty(ctx context.Context) (bool, error) {
 	return strings.TrimSpace(out) != "", nil
 }
 
-// buildArtifactExts are extensions that are essentially always compiled
-// outputs, never first-party source. Untracked files with these extensions are
-// not staged.
-var buildArtifactExts = map[string]bool{
-	".exe": true, ".dll": true, ".so": true, ".dylib": true,
-	".o": true, ".a": true,
-	".pyc": true, ".pyo": true, ".class": true,
-}
-
-// buildArtifactDirs are path segments whose contents are build outputs or
-// vendored dependencies, never source the agent should author.
-var buildArtifactDirs = map[string]bool{
-	"node_modules": true, "__pycache__": true, "target": true,
-}
-
-// isLikelyBuildArtifact reports whether the untracked file at absPath (relative
-// path rel) looks like a compiled build output that must not be committed: a
-// known build-output extension, a build-output path segment, or a native
-// executable magic number. Read errors are treated as "not an artifact" — the
-// guard never blocks on its own failure, only on positive evidence.
-func isLikelyBuildArtifact(absPath, rel string) bool {
-	if buildArtifactExts[strings.ToLower(filepath.Ext(rel))] {
-		return true
-	}
-
-	for seg := range strings.SplitSeq(filepath.ToSlash(rel), "/") {
-		if buildArtifactDirs[seg] {
-			return true
-		}
-	}
-
+// isLikelyBuildArtifact reports whether the untracked file at absPath looks like
+// a compiled build output that must not be committed. It is deliberately
+// language-agnostic: the target repo's own .gitignore is the source of truth for
+// "don't commit this" (git status --untracked-files=all already honours it), so
+// this guard adds only a content-based net for stray native binaries the
+// .gitignore missed — a native executable magic number (ELF, Mach-O, PE). It
+// carries NO filename, extension, or ecosystem-directory heuristic: those encode
+// language knowledge and, worse, a directory-name match like "target" or
+// "build" silently drops first-party source that merely lives under that name.
+// Read errors are treated as "not an artifact" — the guard never blocks on its
+// own failure, only on positive evidence.
+func isLikelyBuildArtifact(absPath string) bool {
 	return hasExecutableMagic(absPath)
 }
 
@@ -304,14 +285,16 @@ func hasExecutableMagic(absPath string) bool {
 	return false
 }
 
-// stageForCommit stages the working tree while refusing to add untracked build
-// artifacts. It stages all TRACKED modifications/deletions (`git add -u`, which
-// never adds untracked files), then adds each UNTRACKED file individually
-// unless it looks like a build artifact, in which case the file is skipped with
-// a warning. This replaces a blanket `git add -A`: a build step's output can no
-// longer be committed just because the target repo's .gitignore failed to cover
-// it. Untracked files that look like build artifacts are skipped with a
-// warning rather than counted back to the caller.
+// stageForCommit stages the working tree while refusing to add stray native
+// binaries. It stages all TRACKED modifications/deletions (`git add -u`, which
+// never adds untracked files), then adds each UNTRACKED file individually unless
+// it carries native-executable magic, in which case the file is skipped with a
+// warning. This replaces a blanket `git add -A`: a compiled binary the target
+// repo's .gitignore failed to cover can no longer sneak into the commit. The
+// repo's own .gitignore (honoured by `git status --untracked-files=all`) remains
+// the language-agnostic source of truth for everything else — no extension or
+// directory-name denylist that would encode language knowledge or drop
+// first-party source under a name like build/ or target/.
 func (g *Git) stageForCommit(ctx context.Context) error {
 	if _, err := g.run(ctx, "add", "-u"); err != nil {
 		return fmt.Errorf("stage tracked changes: %w", err)
@@ -348,8 +331,8 @@ func (g *Git) stageForCommit(ctx context.Context) error {
 			continue
 		}
 
-		if isLikelyBuildArtifact(filepath.Join(g.dir, rel), rel) {
-			slog.Warn("refusing to stage likely build artifact", "path", rel)
+		if isLikelyBuildArtifact(filepath.Join(g.dir, rel)) {
+			slog.Warn("refusing to stage likely native binary", "path", rel)
 
 			continue
 		}

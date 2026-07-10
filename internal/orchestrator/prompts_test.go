@@ -36,8 +36,11 @@ func TestFixPromptForbidsNewArchitecture(t *testing.T) {
 
 func TestBuildArtifactHygieneInBothCodingPrompts(t *testing.T) {
 	for name, p := range map[string]string{"coder": coderPrompt, "fix": fixPrompt} {
-		assert.Contains(t, p, "do not leave the binary behind",
+		assert.Contains(t, p, "do not leave its output",
 			"%s prompt must include the build-hygiene note", name)
+		// The hygiene note must name no build tool — it applies to every language.
+		assert.NotContains(t, p, "go build",
+			"%s prompt build-hygiene note must stay language-neutral", name)
 	}
 }
 
@@ -120,4 +123,62 @@ func TestPlanPromptForbidsTestOnlySubtasks(t *testing.T) {
 	assert.Contains(t, low, "do not create separate")
 	assert.Contains(t, low, "testing, pinning, asserting, or verifying another subtask's code")
 	assert.Contains(t, low, "writes and runs its own tests")
+}
+
+// allPhasePrompts is every phase prompt constant defined in prompts.go, keyed by
+// a readable name for failure messages. The neutrality sweep runs over all of
+// them so a language-specific token cannot slip back into any single prompt.
+var allPhasePrompts = map[string]string{
+	"plan":         planPrompt,
+	"diagnose":     diagnosePrompt,
+	"buildHygiene": buildHygieneNote,
+	"selfReview":   selfReviewBlock,
+	"coder":        coderPrompt,
+	"specialist":   specialistPrompt,
+	"correctness":  correctnessPrompt,
+	"design":       designPrompt,
+	"security":     securityPrompt,
+	"synthesis":    synthesisPrompt,
+	"fix":          fixPrompt,
+	"prBody":       prBodyPrompt,
+	"document":     documentPrompt,
+	"gateClassify": gateClassifyPrompt,
+	"brainstorm":   brainstormPrompt,
+}
+
+// TestPromptsAreLanguageNeutral sweeps every phase prompt for target-language and
+// target-ecosystem tokens. The agent is language-agnostic w.r.t. the target repo,
+// so no prompt may name a specific toolchain. The concurrency ban is the precise
+// "goroutine leaks", not bare "goroutine": the correctness lens legitimately lists
+// "threads, tasks, coroutines, goroutines" as an inclusive, cross-language set of
+// worker kinds, which must stay allowed.
+func TestPromptsAreLanguageNeutral(t *testing.T) {
+	banned := []string{
+		"go build", "go test", "goroutine leaks", "golang", "gofmt",
+		"make test", "npm ", "typescript",
+	}
+
+	for name, p := range allPhasePrompts {
+		low := strings.ToLower(p)
+		for _, b := range banned {
+			assert.NotContainsf(t, low, b, "%s prompt must stay language-neutral (found %q)", name, b)
+		}
+	}
+}
+
+// TestPromptsCarryNeutralisedStrings pins the language-neutral replacements from
+// the de-Go'ing of the prompts: each must survive in the specific prompt that
+// carries it, so a future edit cannot silently drop the neutral wording (or
+// re-introduce a Go-specific phrasing in its place).
+func TestPromptsCarryNeutralisedStrings(t *testing.T) {
+	assert.Contains(t, correctnessPrompt, "leaked concurrent workers",
+		"the correctness lens must keep the language-neutral concurrency wording")
+	assert.Contains(t, designPrompt, "cross-module coupling",
+		"the design lens must keep the neutral coupling wording")
+	assert.Contains(t, designPrompt, "unused public symbols",
+		"the design lens must keep the neutral dead-symbol wording")
+	assert.Contains(t, synthesisPrompt, "passing verify run",
+		"synthesis must weigh a passing verify run, not a language-specific test command")
+	assert.Contains(t, planPrompt, "keeps the tree passing its checks",
+		"the plan prompt must keep the neutral 'passing its checks' wording")
 }

@@ -44,11 +44,6 @@ func TestSelectByComplexityFallsBackToCapable(t *testing.T) {
 	assert.Equal(t, "capable/default", spec.Model)
 }
 
-// ptr returns a pointer to v; used to build *float64 prior literals.
-//
-//go:fix inline
-func ptr(v float64) *float64 { return new(v) }
-
 // entry builds a CatalogEntry from prices given in dollars per million tokens,
 // converting to the per-token units the catalog stores.
 func entry(id string, promptPerM, completionPerM float64, window int) llm.CatalogEntry {
