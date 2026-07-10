@@ -143,8 +143,7 @@ export LLM_API_KEY=<your-api-key>
    `base_image`.
 
 2. **Write the service config.** Copy the template and edit it. Every field also
-   has a `CMX_*` environment override (nested keys use `__`, e.g.
-   `CMX_GITHUB__AUTH_MODE`).
+   has a `CMX_*` environment override (e.g. `CMX_BASE_IMAGE`).
 
    ```bash
    mkdir -p ~/.config/contextmatrix-agent

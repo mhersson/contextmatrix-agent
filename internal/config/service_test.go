@@ -17,15 +17,10 @@ func validServiceConfig() ServiceConfig {
 		ContextMatrixURL: "http://contextmatrix:8080",
 		APIKey:           "0123456789abcdef0123456789abcdef", // 32 chars
 		BaseImage:        "ghcr.io/example/agent@sha256:" + repeatHex(64),
-		LLMEndpoint:      LLMEndpoint{Type: "openrouter", APIKey: "sk-or-test"},
 		ImagePullPolicy:  "if-not-present",
 		MaxConcurrent:    5,
 		Port:             9092,
 		ContainerTimeout: 150 * time.Minute,
-		GitHub: GitHubConfig{
-			AuthMode: "pat",
-			PAT:      GitHubPATConfig{Token: "ghp_test"},
-		},
 	}
 }
 
@@ -81,9 +76,6 @@ container_pids_limit: 256
 idle_output_timeout: 15m
 idle_watchdog_interval: 10s
 secrets_dir: /opt/secrets
-llm_endpoint:
-  type: openrouter
-  api_key: sk-or-fromfile
 webhook_replay_skew_seconds: 120
 webhook_replay_cache_size: 4096
 message_dedup_ttl_seconds: 300
@@ -92,12 +84,6 @@ bash_timeout_max_seconds: 900
 tool_output_max_bytes: 50000
 default_model: deepseek/deepseek-v4
 log_level: debug
-github:
-  auth_mode: app
-  app:
-    app_id: 12345
-    installation_id: 67890
-    private_key_path: /etc/key.pem
 worker_extra_env:
   FOO: bar
   BAZ: qux
@@ -122,8 +108,6 @@ worker_extra_env:
 	assert.Equal(t, 15*time.Minute, cfg.IdleOutputTimeout)
 	assert.Equal(t, 10*time.Second, cfg.IdleWatchdogInterval)
 	assert.Equal(t, "/opt/secrets", cfg.SecretsDir)
-	assert.Equal(t, "openrouter", cfg.LLMEndpoint.Type)
-	assert.Equal(t, "sk-or-fromfile", cfg.LLMEndpoint.APIKey)
 	assert.Equal(t, 120*time.Second, cfg.ReplaySkew)
 	assert.Equal(t, 4096, cfg.ReplayCacheSize)
 	assert.Equal(t, 300*time.Second, cfg.MessageDedupTTL)
@@ -132,10 +116,6 @@ worker_extra_env:
 	assert.Equal(t, 50000, cfg.ToolOutputMaxBytes)
 	assert.Equal(t, "deepseek/deepseek-v4", cfg.DefaultModel)
 	assert.Equal(t, "debug", cfg.LogLevel)
-	assert.Equal(t, "app", cfg.GitHub.AuthMode)
-	assert.Equal(t, int64(12345), cfg.GitHub.App.AppID)
-	assert.Equal(t, int64(67890), cfg.GitHub.App.InstallationID)
-	assert.Equal(t, "/etc/key.pem", cfg.GitHub.App.PrivateKeyPath)
 	assert.Equal(t, map[string]string{"FOO": "bar", "BAZ": "qux"}, cfg.WorkerExtraEnv)
 }
 
@@ -146,29 +126,18 @@ func TestServiceEnvOverridesFile(t *testing.T) {
 contextmatrix_url: http://from-file:8080
 api_key: filekeyfilekeyfilekeyfilekeyfile
 base_image: ghcr.io/example/worker:v1
-llm_endpoint:
-  api_key: sk-or-file
-github:
-  auth_mode: pat
-  pat:
-    token: ghp_file
 `
 	path := filepath.Join(t.TempDir(), "serve.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(yaml), 0o600))
 
 	t.Setenv("CMX_CONTEXTMATRIX_URL", "http://from-env:8080")
 	t.Setenv("CMX_PORT", "7777")
-	t.Setenv("CMX_LLM_ENDPOINT__API_KEY", "sk-or-env")
-	t.Setenv("CMX_GITHUB__AUTH_MODE", "pat")
-	t.Setenv("CMX_GITHUB__PAT__TOKEN", "ghp_env")
 
 	cfg, err := LoadService(path)
 	require.NoError(t, err)
 
 	assert.Equal(t, "http://from-env:8080", cfg.ContextMatrixURL)
 	assert.Equal(t, 7777, cfg.Port)
-	assert.Equal(t, "sk-or-env", cfg.LLMEndpoint.APIKey)
-	assert.Equal(t, "ghp_env", cfg.GitHub.PAT.Token)
 	// Untouched file value survives.
 	assert.Equal(t, "ghcr.io/example/worker:v1", cfg.BaseImage)
 }
@@ -209,52 +178,6 @@ func TestServiceValidate(t *testing.T) {
 		err := cfg.Validate()
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "base_image")
-	})
-
-	t.Run("missing llm_endpoint.api_key passes (CM-provisioned fallback)", func(t *testing.T) {
-		cfg := validServiceConfig()
-		cfg.LLMEndpoint.APIKey = ""
-		require.NoError(t, cfg.Validate())
-	})
-
-	t.Run("empty github and llm_endpoint blocks pass (CM-provisioned fallback)", func(t *testing.T) {
-		cfg := validServiceConfig()
-		cfg.GitHub = GitHubConfig{}
-		cfg.LLMEndpoint = LLMEndpoint{}
-		require.NoError(t, cfg.Validate())
-	})
-
-	t.Run("partial github config errors naming auth_mode", func(t *testing.T) {
-		// auth_mode left empty while some OTHER github field is set must still
-		// error: only a github block with every field zero is treated as
-		// "fully absent" (CM-provisioned fallback).
-		tests := []struct {
-			name string
-			gh   GitHubConfig
-		}{
-			{"pat.token set", GitHubConfig{PAT: GitHubPATConfig{Token: "ghp_orphaned"}}},
-			{"host set", GitHubConfig{Host: "ghe.example.com"}},
-			{"api_base_url set", GitHubConfig{APIBaseURL: "https://api.acme.ghe.com"}},
-			{"app.app_id set", GitHubConfig{App: GitHubAppConfig{AppID: 123}}},
-		}
-
-		for _, tc := range tests {
-			t.Run(tc.name, func(t *testing.T) {
-				cfg := validServiceConfig()
-				cfg.GitHub = tc.gh
-				err := cfg.Validate()
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), "auth_mode")
-			})
-		}
-	})
-
-	t.Run("openai type without base_url errors even with empty api_key", func(t *testing.T) {
-		cfg := validServiceConfig()
-		cfg.LLMEndpoint = LLMEndpoint{Type: "openai"}
-		err := cfg.Validate()
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "base_url")
 	})
 
 	t.Run("bad image_pull_policy errors", func(t *testing.T) {
@@ -319,30 +242,6 @@ func TestServiceValidate(t *testing.T) {
 		cfg := validServiceConfig()
 		cfg.BaseImage = "ghcr.io/example/worker:v1"
 		require.NoError(t, cfg.Validate())
-	})
-
-	t.Run("app auth_mode requires app fields", func(t *testing.T) {
-		cfg := validServiceConfig()
-		cfg.GitHub = GitHubConfig{AuthMode: "app"}
-		err := cfg.Validate()
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "app")
-	})
-
-	t.Run("pat auth_mode requires token", func(t *testing.T) {
-		cfg := validServiceConfig()
-		cfg.GitHub = GitHubConfig{AuthMode: "pat"}
-		err := cfg.Validate()
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "token")
-	})
-
-	t.Run("unknown auth_mode errors", func(t *testing.T) {
-		cfg := validServiceConfig()
-		cfg.GitHub = GitHubConfig{AuthMode: "oauth"}
-		err := cfg.Validate()
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "auth_mode")
 	})
 
 	t.Run("negative max_card_cost errors", func(t *testing.T) {
@@ -596,149 +495,6 @@ compaction_keep_recent_turns: 8
 	assert.Equal(t, 8, cfg.Compaction.KeepRecentTurns)
 }
 
-func TestServiceLLMEndpointLoadsAndValidates(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "serve.yaml")
-	require.NoError(t, os.WriteFile(path, []byte(`
-contextmatrix_url: http://localhost:8080
-api_key: 0123456789012345678901234567890123456789
-base_image: img@sha256:abc
-github:
-  auth_mode: pat
-  pat:
-    token: t
-llm_endpoint:
-  type: openai
-  base_url: https://your-llm-endpoint.example/v1
-  api_key: k
-`), 0o600))
-
-	cfg, err := LoadService(path)
-	require.NoError(t, err)
-	assert.Equal(t, "openai", cfg.LLMEndpoint.Type)
-	assert.Equal(t, "k", cfg.LLMEndpoint.APIKey)
-	assert.Equal(t, "https://your-llm-endpoint.example/v1", cfg.LLMEndpoint.BaseURL)
-	assert.NoError(t, cfg.Validate())
-}
-
-func TestServiceLLMEndpointRejectsUnknownType(t *testing.T) {
-	c := &ServiceConfig{
-		ContextMatrixURL: "http://localhost:8080",
-		APIKey:           "0123456789012345678901234567890123456789",
-		BaseImage:        "img@sha256:abc",
-		GitHub:           GitHubConfig{AuthMode: "pat", PAT: GitHubPATConfig{Token: "t"}},
-		LLMEndpoint:      LLMEndpoint{Type: "anthropic", APIKey: "k"},
-	}
-	err := c.Validate()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "openrouter")
-	assert.Contains(t, err.Error(), "openai")
-}
-
-func TestServiceLLMEndpointOpenAIRequiresBaseURL(t *testing.T) {
-	c := &ServiceConfig{
-		ContextMatrixURL: "x", APIKey: "0123456789012345678901234567890123456789",
-		BaseImage:   "img@sha256:abc",
-		GitHub:      GitHubConfig{AuthMode: "pat", PAT: GitHubPATConfig{Token: "t"}},
-		LLMEndpoint: LLMEndpoint{Type: "openai", APIKey: "k"},
-	}
-	assert.ErrorContains(t, c.Validate(), "base_url")
-}
-
-func TestGitHubConfigConfigured(t *testing.T) {
-	assert.False(t, GitHubConfig{}.Configured(), "empty auth_mode is not configured")
-	assert.True(t, GitHubConfig{AuthMode: "pat"}.Configured())
-	assert.True(t, GitHubConfig{AuthMode: "app"}.Configured())
-}
-
-func TestGitHubHostDerivesAPIBaseURL(t *testing.T) {
-	t.Run("host set and api_base_url empty derives the GHES endpoint", func(t *testing.T) {
-		raw := serviceRaw{GitHub: GitHubConfig{Host: "ghe.example.com"}}
-
-		cfg, err := raw.toConfig()
-		require.NoError(t, err)
-		assert.Equal(t, "https://ghe.example.com/api/v3", cfg.GitHub.APIBaseURL)
-		// Host is convenience only; it survives derivation unchanged.
-		assert.Equal(t, "ghe.example.com", cfg.GitHub.Host)
-	})
-
-	t.Run("explicit api_base_url wins over host", func(t *testing.T) {
-		raw := serviceRaw{GitHub: GitHubConfig{
-			Host:       "ghe.example.com",
-			APIBaseURL: "https://api.acme.ghe.com",
-		}}
-
-		cfg, err := raw.toConfig()
-		require.NoError(t, err)
-		assert.Equal(t, "https://api.acme.ghe.com", cfg.GitHub.APIBaseURL)
-	})
-
-	t.Run("host given as a full URL derives from its authority", func(t *testing.T) {
-		raw := serviceRaw{GitHub: GitHubConfig{Host: "https://ghe.example.com"}}
-
-		cfg, err := raw.toConfig()
-		require.NoError(t, err)
-		assert.Equal(t, "https://ghe.example.com/api/v3", cfg.GitHub.APIBaseURL)
-	})
-}
-
-func TestGitHubHostFromEnvDerives(t *testing.T) {
-	clearServiceEnv(t)
-
-	dir := t.TempDir()
-	path := filepath.Join(dir, "serve.yaml")
-	require.NoError(t, os.WriteFile(path, []byte(`
-contextmatrix_url: http://localhost:8080
-api_key: 0123456789012345678901234567890123456789
-base_image: img@sha256:abc
-github:
-  auth_mode: pat
-  pat:
-    token: t
-llm_endpoint:
-  api_key: k
-`), 0o600))
-
-	t.Setenv("CMX_GITHUB__HOST", "ghe.env.example.com")
-
-	cfg, err := LoadService(path)
-	require.NoError(t, err)
-	assert.Equal(t, "ghe.env.example.com", cfg.GitHub.Host)
-	assert.Equal(t, "https://ghe.env.example.com/api/v3", cfg.GitHub.APIBaseURL)
-}
-
-func TestGitHubHostValidation(t *testing.T) {
-	t.Run("bare hostname passes", func(t *testing.T) {
-		cfg := validServiceConfig()
-		cfg.GitHub.Host = "ghe.example.com"
-		require.NoError(t, cfg.Validate())
-	})
-
-	t.Run("full https URL passes", func(t *testing.T) {
-		cfg := validServiceConfig()
-		cfg.GitHub.Host = "https://ghe.example.com"
-		require.NoError(t, cfg.Validate())
-	})
-
-	t.Run("empty host passes (feature disabled)", func(t *testing.T) {
-		cfg := validServiceConfig()
-		cfg.GitHub.Host = ""
-		require.NoError(t, cfg.Validate())
-	})
-
-	t.Run("non-http scheme is rejected", func(t *testing.T) {
-		cfg := validServiceConfig()
-		cfg.GitHub.Host = "ftp://ghe.example.com"
-		assert.ErrorContains(t, cfg.Validate(), "github.host")
-	})
-
-	t.Run("embedded userinfo is rejected", func(t *testing.T) {
-		cfg := validServiceConfig()
-		cfg.GitHub.Host = "https://user:pw@ghe.example.com"
-		assert.ErrorContains(t, cfg.Validate(), "github.host")
-	})
-}
-
 func TestCACertFileValidation(t *testing.T) {
 	t.Run("empty is allowed (feature disabled)", func(t *testing.T) {
 		cfg := validServiceConfig()
@@ -774,12 +530,6 @@ func TestCACertFileFromEnv(t *testing.T) {
 contextmatrix_url: http://localhost:8080
 api_key: 0123456789012345678901234567890123456789
 base_image: img@sha256:abc
-github:
-  auth_mode: pat
-  pat:
-    token: t
-llm_endpoint:
-  api_key: k
 `), 0o600))
 
 	t.Setenv("CMX_CA_CERT_FILE", caPath)
@@ -796,9 +546,8 @@ func clearServiceEnv(t *testing.T) {
 	t.Helper()
 
 	for _, e := range []string{
-		"CMX_CONTEXTMATRIX_URL", "CMX_PORT", "CMX_LLM_ENDPOINT__API_KEY",
+		"CMX_CONTEXTMATRIX_URL", "CMX_PORT",
 		"CMX_API_KEY", "CMX_BASE_IMAGE", "CMX_MAX_CONCURRENT",
-		"CMX_GITHUB__AUTH_MODE", "CMX_GITHUB__PAT__TOKEN", "CMX_GITHUB__HOST",
 		"CMX_CA_CERT_FILE",
 		"CMX_MAX_CARD_COST", "CMX_SELECTOR_PRICE_HEADROOM",
 		"CMX_ADMIN_PORT",

@@ -3,8 +3,6 @@
 # Copy to ~/.config/contextmatrix-agent/serve.yaml (the XDG default location)
 # and edit before starting the service. Every field can also be set or
 # overridden with a CMX_* environment variable (see each field below).
-# Nested keys use a double-underscore separator:
-#   CMX_GITHUB__AUTH_MODE=pat
 
 # --- ContextMatrix connectivity -----------------------------------------------
 
@@ -180,58 +178,3 @@ bash_timeout_max_seconds: 600
 # Default: 131072.
 # CMX_TOOL_OUTPUT_MAX_BYTES
 tool_output_max_bytes: 131072
-
-# --- Local credential fallback (deprecated) -----------------------------------
-#
-# Both blocks below are optional. In a multi-user ContextMatrix deployment
-# (the default), CM provisions the GitHub token and the LLM endpoint per run —
-# via the trigger payload's git_token/llm_endpoint fields and the
-# task-skills-source clone token — so leave both absent entirely; the agent
-# then runs in "CM-provisioned credential mode" (logged at startup).
-#
-# Set either block only to talk to a pre-multi-user ContextMatrix that does
-# not yet provision that credential. This fallback exists for that compat
-# window only and will be removed once CM-provisioned credentials are
-# universal — do not build new deployments around it.
-
-# The inference endpoint workers call, used when CM does not provision one.
-#   type:     openrouter (default) | openai
-#   base_url: required for the openai type (operator-supplied)
-#   api_key:  bearer key for the endpoint
-# CMX_LLM_ENDPOINT__TYPE / CMX_LLM_ENDPOINT__BASE_URL / CMX_LLM_ENDPOINT__API_KEY
-# llm_endpoint:
-#   type: openrouter
-#   base_url: https://your-llm-endpoint.example/v1
-#   api_key: ""
-
-# GitHub credentials, used when CM does not provision a per-run git token.
-# github:
-#   # Authentication mode: app | pat.
-#   # CMX_GITHUB__AUTH_MODE
-#   auth_mode: pat
-#
-#   # Optional GitHub Enterprise host (bare hostname or full URL). When set and
-#   # api_base_url is empty, the API base URL is derived as
-#   # https://<host>/api/v3. An explicit api_base_url below wins.
-#   # CMX_GITHUB__HOST
-#   # host: ghe.example.com
-#
-#   # Optional GitHub API base URL. Defaults to https://api.github.com. Set
-#   # this directly for non-standard layouts (e.g. GHEC-DR
-#   # https://api.acme.ghe.com); otherwise prefer the simpler "host" above.
-#   # CMX_GITHUB__API_BASE_URL
-#   # api_base_url: https://api.github.com
-#
-#   # GitHub App credentials (required when auth_mode is "app").
-#   app:
-#     # CMX_GITHUB__APP__APP_ID
-#     # app_id: 0
-#     # CMX_GITHUB__APP__INSTALLATION_ID
-#     # installation_id: 0
-#     # CMX_GITHUB__APP__PRIVATE_KEY_PATH
-#     # private_key_path: /etc/contextmatrix-agent/github-app.pem
-#
-#   # Fine-grained PAT (required when auth_mode is "pat").
-#   pat:
-#     # CMX_GITHUB__PAT__TOKEN
-#     # token: ""
