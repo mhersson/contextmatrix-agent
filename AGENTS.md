@@ -11,8 +11,7 @@ lifecycle webhooks and launches one Docker worker container per card; **`work`**
 is the container entrypoint that clones the target repo, claims the card, drives
 the harness (HITL or autonomous), then commits, pushes, and reports back. It
 edits target repositories but treats ContextMatrix — reached over MCP — as the
-source of truth for card state. It is at v1 parity with `contextmatrix-runner`
-as an operator-selectable backend, with the runner as the fallback; backend
+source of truth for card state. It is ContextMatrix's task backend; backend
 selection lives in ContextMatrix, not here (see the README).
 
 ## Channels to ContextMatrix
@@ -120,8 +119,8 @@ Go 1.26+, **cobra** + **koanf** (not viper), the **Docker SDK**
   `t.Helper()` in helpers and `t.TempDir()` for scratch dirs.
 - **Format with `gofumpt -w .` (`make fmt`), not `gofmt`.** CI flags the
   difference.
-- **Spell names out.** Use "runner" and "agent", never "cmr". No abbreviations
-  in config keys, code, comments, or commit messages.
+- **Spell names out.** Use "agent", never "cmr". No abbreviations in config
+  keys, code, comments, or commit messages.
 
 ### Git credentials
 

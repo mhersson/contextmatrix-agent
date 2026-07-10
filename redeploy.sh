@@ -47,7 +47,7 @@ make build
 echo "==> make docker-worker"
 make docker-worker
 
-# A ContextMatrix project can pin a variant tag via its runner_image
+# A ContextMatrix project can pin a variant tag via its worker_image
 # override, which bypasses the digest-pinned base_image below — a stale
 # variant would then run an old worker binary. Rebuild them all.
 echo "==> make docker-worker-variants"

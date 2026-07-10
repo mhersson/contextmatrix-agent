@@ -21,9 +21,7 @@ rather than a hard-coded vendor.
 
 ContextMatrix splits its backend contract into a `TaskBackend` (card lifecycle)
 and a `ChatBackend` (interactive chat), resolved independently. This service
-implements `TaskBackend`. It coexists with `contextmatrix-runner`; the task
-cutover is a single global config flip on the ContextMatrix side, and the runner
-stays the one-flip fallback.
+implements `TaskBackend`.
 
 Two channels connect the agent to ContextMatrix:
 
@@ -33,8 +31,7 @@ Two channels connect the agent to ContextMatrix:
   HMAC contract. The agent reports status back to `/api/agent/*`.
 - **Card operations (worker → CM, over MCP).** Inside each container the worker
   claims the card, heartbeats, reports usage, sets the orchestrator phase,
-  transitions state, and completes the task using ContextMatrix MCP tools — the
-  same surface the runner-driven agent uses.
+  transitions state, and completes the task using ContextMatrix MCP tools.
 
 ## Architecture
 
@@ -121,7 +118,7 @@ export LLM_API_KEY=<your-api-key>
    ```
 
    The image also ships slimmer single-language variants, selectable per project
-   via the board's `remote_execution.runner_image`:
+   via the board's `remote_execution.worker_image`:
 
    | Variant   | Toolchains                                             |
    | --------- | ------------------------------------------------------ |
@@ -135,7 +132,7 @@ export LLM_API_KEY=<your-api-key>
    `contextmatrix-agent-worker:go-node`, `:python`, `:rust`).
 
    The default (`full`) image covers Go, Node, Python, and Rust; **any other
-   ecosystem ⇒ set the project's `remote_execution.runner_image` to a custom
+   ecosystem ⇒ set the project's `remote_execution.worker_image` to a custom
    image** (see `docs/custom-images.md`).
 
    For deployment, publish a digest-pinned image (for example

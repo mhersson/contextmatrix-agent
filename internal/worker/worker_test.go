@@ -811,8 +811,7 @@ func TestEndSessionMidFSM(t *testing.T) {
 }
 
 // TestReviewAttemptsCapIsThree pins the worker's review-attempts cap to three:
-// with the convergence safeguards in place, three rounds suffice, matching the
-// runner's MAX_REVISION_PASSES.
+// with the convergence safeguards in place, three rounds suffice.
 func TestReviewAttemptsCapIsThree(t *testing.T) {
 	t.Parallel()
 

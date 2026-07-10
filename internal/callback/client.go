@@ -31,7 +31,7 @@ const (
 	// 40s, 80s, then capped at 2m — retried indefinitely until it succeeds,
 	// is rejected with a non-retryable 4xx, or the client is Closed (process
 	// shutdown). A terminal callback is the only signal that clears a card's
-	// parent claim / runner_status in ContextMatrix, so it must not be
+	// parent claim / worker_status in ContextMatrix, so it must not be
 	// silently dropped by a brief CM outage.
 	backgroundBaseDelay = 5 * time.Second
 	backgroundMaxDelay  = 2 * time.Minute
@@ -129,9 +129,9 @@ func defaultBackgroundDelay(attempt int) time.Duration {
 	return d
 }
 
-// isTerminalStatus reports whether status is a terminal runner-status
+// isTerminalStatus reports whether status is a terminal worker-status
 // (completed/failed) — the only callbacks that clear a card's parent claim
-// and runner_status in ContextMatrix. "running" is superseded by the next
+// and worker_status in ContextMatrix. "running" is superseded by the next
 // status update, so it keeps the fast, bounded retry only.
 func isTerminalStatus(status string) bool {
 	return status == "completed" || status == "failed"
@@ -145,13 +145,13 @@ func (c *Client) WithMetrics(m *metrics.Metrics) *Client {
 	return c
 }
 
-// ReportStatus posts runner_status ∈ running|completed|failed to
+// ReportStatus posts worker_status ∈ running|completed|failed to
 // /api/agent/status (the path ContextMatrix mounts for the agent backend).
 func (c *Client) ReportStatus(ctx context.Context, cardID, project, status, message string) error {
 	payload := protocol.StatusCallbackPayload{
 		CardID:       cardID,
 		Project:      project,
-		RunnerStatus: status,
+		WorkerStatus: status,
 		Message:      message,
 	}
 
@@ -225,7 +225,7 @@ func (c *Client) sendStatusOnce(ctx context.Context, uri, path string, body []by
 // scheduleBackgroundRetry starts a goroutine that keeps retrying a failed
 // terminal status callback with exponential backoff until it succeeds, is
 // rejected with a non-retryable 4xx, or the client is Closed. CM's
-// runner-status handler safely re-applies the same idempotent field writes
+// worker-status handler safely re-applies the same idempotent field writes
 // for a duplicate terminal status, so replaying the same payload is safe.
 func (c *Client) scheduleBackgroundRetry(cardID, project, status, uri, path string, body []byte) {
 	c.bgMu.Lock()

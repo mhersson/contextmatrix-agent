@@ -421,8 +421,8 @@ func runPlan(ctx context.Context, o *run) error {
 	}
 
 	// Bug-like cards get a read-only root-cause investigation before planning
-	// (mirrors the runner's create-plan Phase 0 Branch B). The diagnosis grounds
-	// the decomposition. Best-effort: a failed diagnose must not block planning.
+	// (mirrors CM's create-plan workflow skill, Phase 0 Branch B). The diagnosis
+	// grounds the decomposition. Best-effort: a failed diagnose must not block planning.
 	diagnosis := ""
 
 	if isBugLike(o.tc) {
@@ -434,7 +434,7 @@ func runPlan(ctx context.Context, o *run) error {
 			diagnosis = diag
 			if strings.TrimSpace(diag) != "" {
 				// Record the root-cause investigation on the parent card body,
-				// like the runner's systematic-debugging skill writes ## Diagnosis.
+				// like CM's systematic-debugging workflow skill writes ## Diagnosis.
 				o.recordSection(ctx, "Diagnosis", sectionFrom("Diagnosis", diag))
 			}
 		case isBudgetError(derr):
@@ -531,7 +531,7 @@ func (o *run) createSubtasks(ctx context.Context, p plan) error {
 
 	// Record the plan on the parent card body so it carries the full history
 	// (the subtask cards hold the detail; this is the consolidated view, like
-	// the runner's create-plan writes ## Plan).
+	// CM's create-plan workflow skill writes ## Plan).
 	o.recordSection(ctx, "Plan", sectionFrom("Plan", formatPlan(o.subtasks)))
 
 	return nil

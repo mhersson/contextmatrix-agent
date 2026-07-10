@@ -70,7 +70,7 @@ func (p *PRCreator) gitToken() (string, error) {
 
 // hostFromRepoURL returns the host[:port] of an https repo URL, or "" when
 // repoURL is empty or not a parseable URL with a host (e.g. an scp-style
-// remote). Mirrors the runner entrypoint, which slices GIT_HOST off CM_REPO_URL.
+// remote). GIT_HOST is sliced off CM_REPO_URL this way.
 func hostFromRepoURL(repoURL string) string {
 	if repoURL == "" {
 		return ""
@@ -113,8 +113,8 @@ func (p *PRCreator) buildCmd(ctx context.Context, title, body, base, head string
 	if p.host != "" {
 		// gh does not treat a GitHub Enterprise host (e.g. acme.ghe.com) as a
 		// known host from the git remote alone and refuses to open the PR; GH_HOST
-		// names it explicitly. Harmless for github.com. Mirrors the runner
-		// entrypoint, which exports GH_HOST alongside GH_TOKEN.
+		// names it explicitly. Harmless for github.com. GH_HOST is exported
+		// alongside GH_TOKEN.
 		extra = append(extra, "GH_HOST="+p.host)
 	}
 

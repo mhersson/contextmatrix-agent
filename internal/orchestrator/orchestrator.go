@@ -281,7 +281,8 @@ type run struct {
 	excluded map[string]bool
 
 	// lastReviewBase is the HEAD SHA captured at the end of the previous round's
-	// specialist review (mirrors the runner's review_completed head=<sha>). The
+	// specialist review (mirrors CM's review-task workflow skill, which records
+	// review_completed head=<sha>). The
 	// next round diffs against it so the panel sees only the change since the last
 	// review, not the whole branch. Empty -> full diff vs BaseBranch (round 1, or
 	// before any specialist review has run). NOT restored on crash-resume: the

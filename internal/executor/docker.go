@@ -42,8 +42,8 @@ const secretsMountPath = "/run/cm-secrets" //nolint:gosec // path, not a credent
 const skillsMountPath = "/run/cm-skills" //nolint:gosec // path, not a credential
 
 // caCertMountPath is where the optional extra-CA PEM is mounted read-only
-// inside the container (matches the runner convention). The worker reads it via
-// CMX_CA_CERT_FILE and threads it onto its git/gh subprocesses.
+// inside the container. The worker reads it via CMX_CA_CERT_FILE and threads
+// it onto its git/gh subprocesses.
 const caCertMountPath = "/run/cm-ca/ca.crt" //nolint:gosec // path, not a credential
 
 // scannerBufferMax bounds the per-line buffer of the stdout/stderr pump so a

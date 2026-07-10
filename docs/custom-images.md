@@ -61,6 +61,6 @@ docker push ghcr.io/you/my-worker:jdk
 docker buildx imagetools inspect ghcr.io/you/my-worker:jdk   # copy the index digest
 ```
 
-Then set the project's `remote_execution.runner_image` on its board to
+Then set the project's `remote_execution.worker_image` on its board to
 `ghcr.io/you/my-worker@sha256:<digest>`. Cards for that project launch in your
 custom image; every other project keeps using the published default.

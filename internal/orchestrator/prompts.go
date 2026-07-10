@@ -211,7 +211,7 @@ build artifacts clutter the workspace the reviewers read.`
 
 // selfReviewBlock is the coder/fixer self-review gate, shared by coderPrompt and
 // fixPrompt so the two cannot drift. Hygiene only — it must not invite scope
-// expansion. Adapted from the runner's execute-task skill (Step 5).
+// expansion. Adapted from CM's execute-task workflow skill (Step 5).
 const selfReviewBlock = `Before you finish, self-review. Re-read every file you changed — do not rely on
 memory. For each change verify:
 - Any comment you wrote or changed is accurate: trace the code path and confirm it matches.

@@ -87,8 +87,40 @@ func TestReportStatus_Success(t *testing.T) {
 	assert.NotEmpty(t, receivedTS)
 	assert.Equal(t, "CMX-001", receivedPayload.CardID)
 	assert.Equal(t, "alpha", receivedPayload.Project)
-	assert.Equal(t, "running", receivedPayload.RunnerStatus)
+	assert.Equal(t, "running", receivedPayload.WorkerStatus)
 	assert.Equal(t, "task started", receivedPayload.Message)
+}
+
+// TestReportStatus_WorkerStatusWireTag pins the on-the-wire JSON tag: the status
+// field must serialize as "worker_status" (protocol v0.8.0), not the pre-rename
+// "runner_status". Asserting on the raw body — not a re-unmarshal — is the point:
+// a shared-struct round-trip would pass either way, so it cannot catch a wire drift.
+func TestReportStatus_WorkerStatusWireTag(t *testing.T) {
+	apiKey := "test-secret-key-that-is-long-enough"
+
+	var rawBody string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if !assert.NoError(t, err) {
+			w.WriteHeader(http.StatusInternalServerError)
+
+			return
+		}
+
+		rawBody = string(body)
+
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := newFastClient(srv.URL, apiKey)
+
+	err := c.ReportStatus(context.Background(), "CMX-001", "alpha", "running", "task started")
+	require.NoError(t, err)
+
+	assert.Contains(t, rawBody, `"worker_status":"running"`)
+	assert.NotContains(t, rawBody, "runner_status")
 }
 
 // TestReportStatus_Retries verifies that 5xx responses are retried (up to
@@ -227,7 +259,7 @@ func TestReportStatus_CountsRetries(t *testing.T) {
 // TestReportStatus_TerminalBackgroundRetry verifies that a terminal
 // (completed/failed) status callback which exhausts the fast synchronous
 // retries falls back to a persistent background retry — the only mechanism
-// that clears the parent claim and runner_status in ContextMatrix, so it
+// that clears the parent claim and worker_status in ContextMatrix, so it
 // must not be silently dropped by a brief CM outage.
 func TestReportStatus_TerminalBackgroundRetry(t *testing.T) {
 	t.Run("completed_recovers_via_background_retry", func(t *testing.T) {
