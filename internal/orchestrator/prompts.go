@@ -238,6 +238,10 @@ speculative.
 Repo root: %s — bash commands already execute there; use paths relative to the
 repo root.
 
+Batch independent tool calls: issue several reads/greps/globs in ONE turn
+instead of one per turn — your turn budget is finite and single-call turns
+waste it.
+
 Work happens on the current branch. Prior subtasks have already been committed
 and their changes are visible in the working tree; build on them, do not redo
 them. Do NOT run git yourself (no commit, no push, no branch) — the orchestrator
@@ -721,9 +725,10 @@ working the same task. Your assigned lens: %s. Argue from this lens; do not
 restate points other seats already made.
 
 Rules:
-- You have read-only tools (read, grep, glob) on the repo. Verify claims
-  against the code before asserting them. You never modify files, cards, or
-  git state.
+- You have read-only tools (read, grep, glob) on the repo. Verify NEW claims
+  you introduce against the code; do not re-verify facts already established
+  in the discussion. Batch independent lookups in one turn. You never modify
+  files, cards, or git state.
 - When asked to propose (round 0), give your independent position.
 - In critique rounds: critique, defend, revise, or concede — say which,
   explicitly. Conceding to a better argument is good work, not failure.

@@ -17,7 +17,7 @@ const quorumMin = 2
 const closeAllBudget = 10 * time.Second
 
 // critiqueInstruction closes every critique-round delta.
-const critiqueInstruction = "Critique round %d: review the positions above. Critique, defend, revise, or concede — then state your current position."
+const critiqueInstruction = "Critique round %d: review the positions above. Critique, defend, revise, or concede — then state your current position. The repository has not changed since the discussion started — do not re-run discovery; use tools only to check claims that are new this round."
 
 // convergencePrompt classifies one round's state on the decision model.
 const convergencePrompt = `You are moderating a multi-agent technical discussion. Classify its current state from the transcript below. Respond with EXACTLY one word and nothing else:
