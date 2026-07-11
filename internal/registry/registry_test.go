@@ -339,3 +339,105 @@ func TestFavoritesConsideredFirst(t *testing.T) {
 		t.Errorf("favorite must win over cheaper cost-optimal, got %q", got.Model)
 	}
 }
+
+// TestSelectDiscussionPanel pins the co-op seat-selection seam: it must give
+// distinct models first, honor the caller's exclusions (review discussions
+// exclude the models that coded the card), and wrap around on scarcity
+// instead of shrinking the panel — the SelectReviewPanel walk, by name.
+func TestSelectDiscussionPanel(t *testing.T) {
+	// Four qualifying reviewers at the complex bar (0.82) with distinct prices.
+	catalog := llm.Catalog{
+		entry("disc/alpha", 0.7, 1.4, 200000),
+		entry("disc/beta", 0.9, 1.8, 200000),
+		entry("disc/gamma", 1.0, 2.0, 200000),
+		entry("disc/delta", 6.0, 12.0, 200000),
+	}
+	fullPriors := Priors{Models: map[string]PriorEntry{
+		"disc/alpha": {Reviewer: new(0.95)}, "disc/beta": {Reviewer: new(0.92)},
+		"disc/gamma": {Reviewer: new(0.90)}, "disc/delta": {Reviewer: new(0.88)},
+	}}
+	// Scarce pool: only alpha and beta clear the complex bar.
+	scarcePriors := Priors{Models: map[string]PriorEntry{
+		"disc/alpha": {Reviewer: new(0.95)}, "disc/beta": {Reviewer: new(0.92)},
+		"disc/gamma": {Reviewer: new(0.50)}, "disc/delta": {Reviewer: new(0.50)},
+	}}
+
+	tests := []struct {
+		name    string
+		priors  Priors
+		in      SelectInput
+		n       int
+		want    []string
+		wantLen int
+	}{
+		{
+			// Blended $/Mtok: alpha 2.1, beta 2.7, gamma 3.0, delta 18. Pick 1:
+			// cheapest 2.1 -> band 3.15: alpha, beta, gamma in; top quality
+			// alpha. Pick 2 (alpha excluded): band from 2.7 -> 4.05: beta,
+			// gamma; top beta. Pick 3: gamma.
+			name:   "distinct models across seats",
+			priors: fullPriors,
+			in:     SelectInput{Role: RoleReviewer, Tier: TierComplex, EstTokens: 50000},
+			n:      3,
+			want:   []string{"disc/alpha", "disc/beta", "disc/gamma"},
+		},
+		{
+			// Excluding the coder's model removes it from every seat.
+			name:   "caller exclusions respected",
+			priors: fullPriors,
+			in: SelectInput{
+				Role: RoleReviewer, Tier: TierComplex, EstTokens: 50000,
+				Exclude: map[string]bool{"disc/alpha": true},
+			},
+			n:    3,
+			want: []string{"disc/beta", "disc/gamma", "disc/delta"},
+		},
+		{
+			// Two qualifying models, three seats: wrap around on the last real
+			// pick rather than escalating price or shrinking the panel.
+			name:   "wrap-around on scarcity",
+			priors: scarcePriors,
+			in:     SelectInput{Role: RoleReviewer, Tier: TierComplex, EstTokens: 50000},
+			n:      3,
+			want:   []string{"disc/alpha", "disc/beta", "disc/beta"},
+		},
+		{
+			// n far beyond the pool: still n non-empty specs.
+			name:    "n greater than available",
+			priors:  scarcePriors,
+			in:      SelectInput{Role: RoleReviewer, Tier: TierComplex, EstTokens: 50000},
+			n:       5,
+			wantLen: 5,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := NewRegistryFromParts(catalog, tt.priors, nil, nil, "capable-default")
+
+			panel := r.SelectDiscussionPanel(tt.in, tt.n)
+
+			if tt.wantLen > 0 {
+				require.Len(t, panel, tt.wantLen)
+
+				for i, spec := range panel {
+					assert.NotEmpty(t, spec.Model, "slot %d must not be empty", i)
+				}
+
+				return
+			}
+
+			require.Len(t, panel, len(tt.want))
+
+			for i, w := range tt.want {
+				assert.Equal(t, w, panel[i].Model, "slot %d", i)
+			}
+
+			if tt.in.Exclude != nil {
+				for i, spec := range panel {
+					assert.False(t, tt.in.Exclude[spec.Model], "slot %d picked an excluded model %q", i, spec.Model)
+				}
+			}
+		})
+	}
+}

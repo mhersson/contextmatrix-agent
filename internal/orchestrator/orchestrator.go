@@ -15,10 +15,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
+	"github.com/mhersson/contextmatrix-agent/internal/coop"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-agent/internal/verifyexec"
 	"github.com/mhersson/contextmatrix-harness/events"
@@ -115,6 +117,9 @@ type Config struct {
 	// judged before document. 0/1 = normal single-solver run.
 	BestOfN int
 
+	// Coop configures co-op discussions (spec 2026-07-10). Zero value = off.
+	Coop CoopConfig
+
 	// Compaction configures optional in-window context compaction for phase
 	// model runs. Disabled (the zero value) preserves the hard context_limit
 	// stop, which is the agent's default behavior.
@@ -178,6 +183,14 @@ type Deps struct {
 	// Inbox. It is a genuine nil for autonomous runs; mode is read from
 	// Cfg.Interactive, never from Human != nil (the nil-concrete footgun).
 	Human harness.Inbox
+
+	// SeatDebugWriter receives the JSONL event lines of co-op seat sub-runs,
+	// kind-rewritten to "seat_debug" so the service log bridge (which skips
+	// unknown kinds) keeps them off the live card stream while they stay in
+	// the container stdout for debugging. The worker points it at process
+	// stdout — the same stream the work command's transcript emitter writes.
+	// nil = io.Discard (tests, standalone runs).
+	SeatDebugWriter io.Writer
 }
 
 // phaseOrder is the fixed forward sequence of phases. Run enters at the card's
@@ -327,6 +340,18 @@ type run struct {
 	// the subprocess; the default is verifyexec.Exec.
 	runVerify verifyRunner
 
+	// seatDebug is where co-op seat sub-run events go (kind-rewritten JSONL);
+	// io.Discard when the worker supplied no writer. Set once in newRun.
+	seatDebug io.Writer
+
+	// coopSeats records the seat lineup of the most recent discussion so the
+	// ## Discussion card record can name seats and models.
+	coopSeats []coop.SeatConfig
+
+	// coopEngine is the discussion-engine seam: tests script (Outcome, error)
+	// here. nil = the real engine (coop.NewEngine(cfg).Discuss).
+	coopEngine func(ctx context.Context, cfg coop.EngineConfig, t coop.Topic) (coop.Outcome, error)
+
 	planFn      phaseFn
 	executeFn   phaseFn
 	judgeFn     phaseFn
@@ -404,6 +429,11 @@ func newRun(d Deps, tc cmclient.TaskContext) *run {
 	// verifyexec.Exec matches verifyRunner: the review gate passes the workspace,
 	// the judge passes each candidate worktree, and both pass the plan's timeout/env.
 	o.runVerify = verifyexec.Exec
+
+	o.seatDebug = d.SeatDebugWriter
+	if o.seatDebug == nil {
+		o.seatDebug = io.Discard
+	}
 
 	o.planFn = func(ctx context.Context) error { return runPlan(ctx, o) }
 	o.executeFn = func(ctx context.Context) error { return runExecute(ctx, o) }

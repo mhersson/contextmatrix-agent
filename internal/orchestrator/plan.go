@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"strings"
 
+	"github.com/mhersson/contextmatrix-agent/internal/coop"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-harness/events"
 )
@@ -389,6 +391,154 @@ func (o *run) draftPlan(ctx context.Context, model, diagnosis, design, feedback 
 	return plan{}, fmt.Errorf("plan parse failed after repair: %w", lastErr)
 }
 
+// coopAdjustTailEntries bounds the transcript tail replayed when a HITL
+// adjust re-opens a discussion.
+const coopAdjustTailEntries = 12
+
+// coopDraftPlan convenes a plan discussion and parses the synthesis into a
+// plan, with ONE moderator repair on a parse failure (mirroring draftPlan's
+// single repair turn). prior, when non-nil, re-opens the previous discussion
+// for one non-blind feedback round (HITL adjust): the briefing is the prior
+// transcript tail plus the human's feedback as a human-authored entry.
+// ok=false on any failure — the caller falls back to the solo draftPlan path.
+func (o *run) coopDraftPlan(ctx context.Context, diagnosis, design, feedback string, prior *coop.Outcome) (plan, *coop.Outcome, bool) {
+	seats := min(o.d.Cfg.Coop.Participants, len(planLenses))
+
+	t := coop.Topic{
+		Kind:     "plan",
+		Lenses:   planLenses[:seats],
+		Rounds:   o.d.Cfg.Coop.Rounds,
+		Blind:    true,
+		Briefing: o.coopPlanBriefing(diagnosis, design),
+		SynthesisPrompt: fmt.Sprintf(planSynthesisPrompt,
+			o.grounding, o.d.Cfg.Workspace, o.tc.Title, o.tc.Description),
+	}
+
+	if prior != nil {
+		t.Rounds = 1
+		t.Blind = false
+		t.Briefing = coopAdjustBriefing(*prior, feedback)
+	}
+
+	out, ok := o.coopDiscuss(ctx, t)
+	if !ok {
+		return plan{}, nil, false
+	}
+
+	p, perr := parsePlan(out.Synthesis)
+	if perr != nil {
+		repaired, rerr := o.coopResynthesize(ctx, t, out, perr.Error())
+		if rerr != nil {
+			slog.Warn("coop plan: repair synthesis failed; solo fallback",
+				"card_id", o.d.Cfg.CardID, "error", rerr)
+
+			return plan{}, nil, false
+		}
+
+		p, perr = parsePlan(repaired)
+		if perr != nil {
+			slog.Warn("coop plan: parse failed after repair; solo fallback",
+				"card_id", o.d.Cfg.CardID, "error", perr)
+
+			return plan{}, nil, false
+		}
+
+		out.Synthesis = repaired
+	}
+
+	return p, &out, true
+}
+
+// coopPlanBriefing assembles the plan-discussion briefing from the SAME
+// content blocks draftPlan feeds the solo planner: grounding, workspace,
+// title, description, diagnosis (bug-like cards), design (creative HITL
+// cards), and the resume-subtasks block.
+func (o *run) coopPlanBriefing(diagnosis, design string) string {
+	var existingTitles []string
+	for _, sub := range o.subtasks {
+		existingTitles = append(existingTitles, sub.Title)
+	}
+
+	resume := resumeBlock(existingTitles)
+	diagBlock := diagnosisBlock(diagnosis)
+	dsnBlock := designBlock(design)
+
+	return fmt.Sprintf(planBriefing, o.grounding, o.d.Cfg.Workspace, o.tc.Title, o.tc.Description,
+		diagBlock, dsnBlock, resume)
+}
+
+// coopAdjustBriefing re-opens a discussion after a HITL adjust: the tail of
+// the prior transcript restores shared context and the human's feedback
+// arrives as a human-authored line per the wire conventions.
+func coopAdjustBriefing(prior coop.Outcome, feedback string) string {
+	entries := prior.Transcript
+	if len(entries) > coopAdjustTailEntries {
+		entries = entries[len(entries)-coopAdjustTailEntries:]
+	}
+
+	return "The group previously discussed this plan. Recent transcript:\n\n" +
+		formatDiscussionEntries(entries) +
+		"\n\n[round 0] human: " + feedback +
+		"\n\nRevise the plan to address the human's feedback."
+}
+
+// coopResynthesize runs ONE moderator repair call after a synthesis parse
+// failure: the topic's synthesis instruction, the rendered transcript, and
+// the repair block naming the parse error. Shared by the plan and review
+// co-op paths (the moderator equivalent of draftPlan's repair turn).
+func (o *run) coopResynthesize(ctx context.Context, t coop.Topic, out coop.Outcome, parseErr string) (string, error) {
+	prompt := t.SynthesisPrompt +
+		"\n\nDISCUSSION TRANSCRIPT\n" + formatDiscussionEntries(out.Transcript) +
+		"\n" + repairBlock(parseErr)
+
+	moderate := o.coopModeratorRunner(events.NewEmitter(io.Discard, &seatDebugWriter{w: o.seatDebug}))
+
+	text, _, err := moderate(ctx, prompt)
+
+	return text, err
+}
+
+// recordDiscussion upserts the ## Discussion section on the parent card AFTER
+// the discussion's output was accepted: seats and models, guests, round
+// count, consensus or carried dissent, and cost. Best-effort, like every
+// card-body record.
+func (o *run) recordDiscussion(ctx context.Context, out *coop.Outcome) {
+	var b strings.Builder
+
+	b.WriteString("## Discussion\n\nSeats:\n")
+
+	for _, s := range o.coopSeats {
+		fmt.Fprintf(&b, "- %s (%s): %s\n", s.Name, s.Lens, s.Model)
+	}
+
+	for _, g := range o.d.Cfg.Coop.Guests {
+		fmt.Fprintf(&b, "- guest-%s\n", g.Name)
+	}
+
+	rounds := 0
+
+	for _, e := range out.Transcript {
+		if e.Round > rounds {
+			rounds = e.Round
+		}
+	}
+
+	fmt.Fprintf(&b, "\nCritique rounds: %d\n", rounds)
+
+	if out.Consensus {
+		b.WriteString("Outcome: consensus\n")
+	} else {
+		b.WriteString("Outcome: unresolved dissent — carried into the output as risk notes\n")
+	}
+
+	fmt.Fprintf(&b, "Cost: $%.4f", out.CostUSD)
+
+	o.recordSection(ctx, "Discussion", b.String())
+	_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, //nolint:errcheck // advisory record
+		fmt.Sprintf("co-op discussion recorded (%d seats, %d rounds, consensus=%t)",
+			len(o.coopSeats), rounds, out.Consensus))
+}
+
 // runPlan is the plan phase: one read-only planner run on the
 // orchestrator-resolved model that emits a strict JSON plan, then code creates
 // a subtask card per entry with dependency edges mapped to real card IDs.
@@ -445,8 +595,24 @@ func runPlan(ctx context.Context, o *run) error {
 		}
 	}
 
-	// Autonomous: draft once and create the subtasks, exactly as before.
+	coopPlan := cfg.Coop.enabled() && cfg.Coop.Plan
+
+	// Autonomous: draft once and create the subtasks. With co-op on, the
+	// draft comes from a panel discussion; any discussion failure degrades to
+	// the solo draftPlan path, byte-identical to before.
 	if !cfg.Interactive {
+		if coopPlan {
+			if p, out, ok := o.coopDraftPlan(ctx, diagnosis, "", "", nil); ok {
+				if err := o.createSubtasks(ctx, p); err != nil {
+					return err
+				}
+
+				o.recordDiscussion(ctx, out)
+
+				return nil
+			}
+		}
+
 		p, err := o.draftPlan(ctx, model, diagnosis, "", "")
 		if err != nil {
 			return err
@@ -456,13 +622,45 @@ func runPlan(ctx context.Context, o *run) error {
 	}
 
 	// HITL: draft -> present -> gate; on adjust, re-draft with the feedback.
-	// Subtasks are created only after approval, so an adjust never orphans cards.
+	// Subtasks are created only after approval, so an adjust never orphans
+	// cards. With co-op on, drafts come from discussions and an adjust
+	// re-opens the discussion for one feedback round; once a discussion
+	// fails, the rest of the phase stays on the solo path.
 	feedback := ""
 
+	var lastOut *coop.Outcome
+
+	coopSolo := false
+
 	for range maxPlanDrafts {
-		p, err := o.draftPlan(ctx, model, diagnosis, design, feedback)
-		if err != nil {
-			return err
+		var p plan
+
+		drafted := false
+
+		if coopPlan && !coopSolo {
+			var (
+				out *coop.Outcome
+				ok  bool
+			)
+
+			p, out, ok = o.coopDraftPlan(ctx, diagnosis, design, feedback, lastOut)
+			if ok {
+				drafted = true
+				lastOut = out
+			} else {
+				coopSolo = true
+			}
+		}
+
+		if !drafted {
+			var err error
+
+			p, err = o.draftPlan(ctx, model, diagnosis, design, feedback)
+			if err != nil {
+				return err
+			}
+
+			lastOut = nil
 		}
 
 		o.recordSection(ctx, "Plan", sectionFrom("Plan", formatPlannedPlan(p)))
@@ -473,7 +671,15 @@ func runPlan(ctx context.Context, o *run) error {
 		}
 
 		if outcome == gateApprove {
-			return o.createSubtasks(ctx, p)
+			if err := o.createSubtasks(ctx, p); err != nil {
+				return err
+			}
+
+			if lastOut != nil {
+				o.recordDiscussion(ctx, lastOut)
+			}
+
+			return nil
 		}
 
 		feedback = fb

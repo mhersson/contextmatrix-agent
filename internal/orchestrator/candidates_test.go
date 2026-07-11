@@ -127,6 +127,26 @@ func TestEffectiveCeilingAndDegrade(t *testing.T) {
 		{"n3 reported 12.6", Config{MaxCardCost: 5, BestOfN: 3}, 12.6, 20, 1},
 		{"n3 reported 19.9 never zero", Config{MaxCardCost: 5, BestOfN: 3}, 19.9, 20, 1},
 		{"n5 reported 5", Config{MaxCardCost: 5, BestOfN: 5}, 5, 30, 5},
+		{
+			"coop only adds the budget-factor term",
+			Config{MaxCardCost: 5, Coop: CoopConfig{Participants: 3, BudgetFactor: 0.75}},
+			0, 8.75, 0,
+		},
+		{
+			"coop composes with best-of-n",
+			Config{MaxCardCost: 5, BestOfN: 3, Coop: CoopConfig{Participants: 3, BudgetFactor: 0.75}},
+			0, 23.75, 3,
+		},
+		{
+			"coop off by participants leaves the ceiling alone",
+			Config{MaxCardCost: 5, Coop: CoopConfig{Participants: 1, BudgetFactor: 0.75}},
+			0, 5, 0,
+		},
+		{
+			"coop with gating disabled stays disabled",
+			Config{MaxCardCost: 0, Coop: CoopConfig{Participants: 3, BudgetFactor: 0.75}},
+			0, 0, 0,
+		},
 	}
 
 	for _, tt := range tests {

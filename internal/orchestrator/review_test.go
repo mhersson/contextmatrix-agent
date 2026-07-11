@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
+	"github.com/mhersson/contextmatrix-agent/internal/coop"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-agent/internal/verifyexec"
 	"github.com/mhersson/contextmatrix-harness/events"
@@ -1124,4 +1125,120 @@ func countCall(calls []string, name string) int {
 	}
 
 	return n
+}
+
+// coopReviewRun builds a review run with co-op review enabled and a scripted
+// engine.
+func coopReviewRun(t *testing.T, ops *fakeOps, git *fakeGit, client llm.LLM, eng *scriptedEngine) *run {
+	t.Helper()
+
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+	d.Cfg.Coop = CoopConfig{Participants: 3, Review: true, Rounds: 2, BudgetFactor: 0.75}
+
+	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+	o.coopEngine = eng.run
+
+	return o
+}
+
+const coopApprovedVerdict = `{"approved":true,"summary":"clean","fix_tier":"","fixes":[]}`
+
+func TestReviewCoopApprovedFirstPass(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{}
+	llmFake := &planLLM{}
+	eng := &scriptedEngine{outcomes: []coop.Outcome{{Synthesis: coopApprovedVerdict, Consensus: true}}}
+
+	o := coopReviewRun(t, ops, git, llmFake, eng)
+	require.NoError(t, runReview(context.Background(), o))
+
+	// The discussion replaced the whole specialist pass: zero LLM calls.
+	assert.Empty(t, llmFake.tasks, "no specialist or synthesis model calls on the co-op path")
+	assert.Equal(t, "clean", o.reviewSummary)
+	assert.Equal(t, -1, indexOfCall(ops.recorded(), "IncrementReviewAttempts:CARD-1"))
+
+	// The review topic carried the review knobs and the diff-scoped briefing.
+	require.Len(t, eng.topics, 1)
+	topic := eng.topics[0]
+	assert.Equal(t, "review", topic.Kind)
+	assert.True(t, topic.Blind)
+	assert.Equal(t, 1, topic.Rounds, "review discussions are one rebuttal round")
+	assert.Equal(t, reviewLenses[:3], topic.Lenses)
+	assert.Contains(t, topic.SynthesisPrompt, `"approved"`)
+}
+
+func TestReviewCoopRejectWithFixesRunsFixLoop(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+	// Only LLM call: the fix coder run between the two discussion rounds.
+	llmFake := &planLLM{responses: []llm.Response{
+		stopResp("coder: fixed the bug", 0.05),
+	}}
+	eng := &scriptedEngine{outcomes: []coop.Outcome{
+		{Synthesis: `{"approved":false,"summary":"fix it","fix_tier":"simple",` +
+			`"fixes":[{"file":"a.go","issue":"bug","suggestion":"patch"}]}`},
+		{Synthesis: coopApprovedVerdict, Consensus: true},
+	}}
+
+	o := coopReviewRun(t, ops, git, llmFake, eng)
+	require.NoError(t, runReview(context.Background(), o))
+
+	require.Len(t, eng.topics, 2, "round 2 re-convenes the discussion")
+
+	incCount := 0
+
+	for _, c := range ops.recorded() {
+		if c == "IncrementReviewAttempts:CARD-1" {
+			incCount++
+		}
+	}
+
+	assert.Equal(t, 1, incCount, "exactly one fix round")
+	assert.GreaterOrEqual(t, indexOfPrefix(git.recorded(), "CommitFixup:"), 0, "the fix landed as a fixup")
+}
+
+func TestReviewCoopFallsBackToSpecialists(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{}
+	// Solo fallback path: 3 specialists + 1 synthesis.
+	llmFake := &planLLM{responses: []llm.Response{
+		stopResp("Correctness: looks fine", 0.01),
+		stopResp("Design: looks fine", 0.01),
+		stopResp("Security: looks fine", 0.01),
+		stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.02),
+	}}
+	eng := &scriptedEngine{outcomes: []coop.Outcome{{}}, errs: []error{coop.ErrNoQuorum}}
+
+	o := coopReviewRun(t, ops, git, llmFake, eng)
+	require.NoError(t, runReview(context.Background(), o))
+
+	assert.Len(t, llmFake.tasks, 4, "the specialist pass ran after the discussion degraded")
+}
+
+func TestReviewCoopPassesExclusionsAndDeltaScope(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{}
+	llmFake := &planLLM{}
+	eng := &scriptedEngine{outcomes: []coop.Outcome{{Synthesis: coopApprovedVerdict, Consensus: true}}}
+
+	o := coopReviewRun(t, ops, git, llmFake, eng)
+	o.coderModels = map[string]bool{"rev/alpha": true}
+	o.lastReviewBase = "snapshot-sha"
+	o.lastFindings = "prior finding about a.go"
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	// The coder's model never takes a seat.
+	require.Len(t, eng.cfgs, 1)
+
+	for _, s := range eng.cfgs[0].Seats {
+		assert.NotEqual(t, "rev/alpha", s.Model, "review seats must exclude the coder's model")
+	}
+
+	// Delta scoping feeds the briefing unchanged: diff against the snapshot,
+	// prior findings included. fakeGit captures diff bases in diffBases.
+	assert.Contains(t, git.diffBases, "snapshot-sha",
+		"the briefing diff uses lastReviewBase; bases=%v", git.diffBases)
+	assert.Contains(t, eng.topics[0].Briefing, "prior finding about a.go")
 }
