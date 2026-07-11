@@ -289,13 +289,15 @@ func gracefulShutdown(
 // waitAndCleanup is the single funnel every container exits through, so this is
 // the teardown seam for the per-run refresh loop.
 //
-// Ordering invariant: this exit-path Teardown runs BEFORE the exit status
-// callback below, and that callback is what gates CM's re-triggers (CM learns
-// the run finished only from it). So under the normal flow the tracker.Remove →
-// Teardown window is already closed before CM can re-trigger, and it cannot be
-// hit. A re-trigger racing in out of band inside that microsecond window would
-// at worst lose its own fresh provisioning to this Teardown — a loud,
-// self-inflicted failure — never a leaked or cross-run token.
+// Ordering invariant: both files.End and this exit-path Teardown run BEFORE the
+// exit status callback below, and that callback is what gates CM's re-triggers
+// (CM learns the run finished only from it). files.End footers and closes the
+// per-card log first, so the log is closed before the status callback can let CM
+// admit a new run for the same card. Likewise for Teardown: under the normal
+// flow the tracker.Remove → Teardown window is already closed before CM can
+// re-trigger, and it cannot be hit. A re-trigger racing in out of band inside
+// that microsecond window would at worst lose its own fresh provisioning to this
+// Teardown — a loud, self-inflicted failure — never a leaked or cross-run token.
 func onContainerExit(
 	reporter webhook.StatusReporter,
 	credentials *secrets.RunCredentials,
