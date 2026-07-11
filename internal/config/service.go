@@ -67,6 +67,14 @@ type ServiceConfig struct {
 	ReasoningEffort           string
 	LogLevel                  string
 
+	// LogDir is an optional directory on the serve host for per-card raw
+	// container-output logs. When set, the agent writes one append file per
+	// card, <log_dir>/<project>/<card_id>.log, holding everything the container
+	// printed (as `docker logs -f` shows it). Files are 0600 and MAY contain
+	// unredacted secrets from model/tool output. Empty (the default) disables
+	// the feature. Logs are kept indefinitely — use an external logrotate.
+	LogDir string
+
 	// CACertFile is an optional path (on the serve host) to a PEM file of extra
 	// CA certificates for corporate TLS interception / a private-CA GitHub
 	// Enterprise. When set, it is bind-mounted read-only into each worker
@@ -120,6 +128,7 @@ type serviceRaw struct {
 	IdleWatchdogInterval      string            `koanf:"idle_watchdog_interval"`
 	SecretsDir                string            `koanf:"secrets_dir"`
 	CACertFile                string            `koanf:"ca_cert_file"`
+	LogDir                    string            `koanf:"log_dir"`
 	WorkerExtraEnv            map[string]string `koanf:"worker_extra_env"`
 	ReplaySkewSeconds         int               `koanf:"webhook_replay_skew_seconds"`
 	ReplayCacheSize           int               `koanf:"webhook_replay_cache_size"`
@@ -237,6 +246,7 @@ func (r serviceRaw) toConfig() (*ServiceConfig, error) {
 		IdleWatchdogInterval:      idleWatchdog,
 		SecretsDir:                r.SecretsDir,
 		CACertFile:                r.CACertFile,
+		LogDir:                    r.LogDir,
 		WorkerExtraEnv:            r.WorkerExtraEnv,
 		ReplaySkew:                time.Duration(r.ReplaySkewSeconds) * time.Second,
 		ReplayCacheSize:           r.ReplayCacheSize,
@@ -358,6 +368,21 @@ func (c *ServiceConfig) Validate() error {
 		if _, err := os.Stat(c.CACertFile); err != nil {
 			return fmt.Errorf("ca_cert_file %q: %w", c.CACertFile, err)
 		}
+	}
+
+	if c.LogDir != "" {
+		if err := os.MkdirAll(c.LogDir, 0o700); err != nil {
+			return fmt.Errorf("log_dir %q: %w", c.LogDir, err)
+		}
+
+		f, err := os.CreateTemp(c.LogDir, ".cm-agent-write-*")
+		if err != nil {
+			return fmt.Errorf("log_dir %q not writable: %w", c.LogDir, err)
+		}
+
+		name := f.Name()
+		_ = f.Close()
+		_ = os.Remove(name)
 	}
 
 	if c.Compaction.Enabled {
