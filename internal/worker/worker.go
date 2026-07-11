@@ -310,7 +310,10 @@ type fsmArgs struct {
 //     exit 0; the persisted phase stays for a later resume.
 //   - any other error: release the claim and return it.
 func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, error) {
-	red := redact.New([]string{a.spec.LLMKey, a.spec.MCPAPIKey, a.spec.GitToken})
+	// Guest bearer tokens are known at worker start, so they join the
+	// immutable redactor alongside the endpoint credentials.
+	red := redact.New(append([]string{a.spec.LLMKey, a.spec.MCPAPIKey, a.spec.GitToken},
+		coopGuestTokens(a.spec.Coop)...))
 
 	hitl := a.spec.Interactive && !a.tcx.Autonomous
 
@@ -354,6 +357,10 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 		SkillTool: skillTool,
 		Redact:    red.Apply,
 		Human:     human,
+		// The work command writes the JSONL transcript to process stdout;
+		// seat-debug lines belong on the same stream (kind-rewritten so the
+		// log bridge skips them).
+		SeatDebugWriter: os.Stdout,
 		Cfg: orchestrator.Config{
 			Project:           a.spec.Project,
 			CardID:            a.spec.CardID,
@@ -369,6 +376,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 			ReviewAttemptsCap: reviewAttemptsCap,
 			Interactive:       hitl,
 			BestOfN:           a.spec.BestOfN,
+			Coop:              coopConfig(a.spec.Coop),
 			Compaction: orchestrator.Compaction{
 				Enabled:         a.spec.CompactionEnabled,
 				Threshold:       a.spec.CompactionThreshold,
@@ -636,4 +644,67 @@ func withDefaults(spec RunSpec) RunSpec {
 	}
 
 	return spec
+}
+
+// coopConfig maps the payload co-op spec onto the orchestrator's config: the
+// phase list becomes per-phase booleans and the spec-level defaults (2
+// critique rounds, budget factor 0.75, phases plan+review) fill zero values
+// so the orchestrator never sees an ambiguous zero. Execute checkpoints are
+// a later slice: "execute" is accepted on the wire but not mapped. nil or
+// participants < 2 = off (zero value).
+func coopConfig(spec *protocol.CoopSpec) orchestrator.CoopConfig {
+	if spec == nil || spec.Participants < 2 {
+		return orchestrator.CoopConfig{}
+	}
+
+	c := orchestrator.CoopConfig{
+		Participants: spec.Participants,
+		Rounds:       spec.Rounds,
+		BudgetFactor: spec.BudgetFactor,
+	}
+
+	for _, ph := range spec.Phases {
+		switch ph {
+		case "plan":
+			c.Plan = true
+		case "review":
+			c.Review = true
+		}
+	}
+
+	if len(spec.Phases) == 0 {
+		c.Plan, c.Review = true, true
+	}
+
+	if c.Rounds <= 0 {
+		c.Rounds = 2
+	}
+
+	if c.BudgetFactor <= 0 {
+		c.BudgetFactor = 0.75
+	}
+
+	for _, g := range spec.Guests {
+		c.Guests = append(c.Guests, orchestrator.CoopGuest{Name: g.Name, URL: g.URL, Token: g.Token})
+	}
+
+	return c
+}
+
+// coopGuestTokens extracts the non-empty guest bearer tokens for redactor
+// registration.
+func coopGuestTokens(spec *protocol.CoopSpec) []string {
+	if spec == nil {
+		return nil
+	}
+
+	var tokens []string
+
+	for _, g := range spec.Guests {
+		if g.Token != "" {
+			tokens = append(tokens, g.Token)
+		}
+	}
+
+	return tokens
 }
