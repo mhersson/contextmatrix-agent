@@ -31,6 +31,13 @@ func TestClassifyReleaseError(t *testing.T) {
 	assert.Equal(t, other, got2, "unrelated errors pass through unchanged")
 }
 
+func TestNewTransportDisablesStandaloneSSE(t *testing.T) {
+	tr := newTransport("http://cm:8080/mcp", &http.Client{})
+	assert.True(t, tr.DisableStandaloneSSE,
+		"the worker consumes no server-initiated messages; the standalone GET stream only adds a session-poisoning failure mode")
+	assert.Equal(t, "http://cm:8080/mcp", tr.Endpoint)
+}
+
 const testAgentID = "cmx-agent-cmx-001"
 
 // recorder captures the arguments every stub tool received, keyed by tool

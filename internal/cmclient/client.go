@@ -64,6 +64,20 @@ func WithBaseTransport(rt http.RoundTripper) Option {
 	}
 }
 
+// newTransport builds the streamable transport. DisableStandaloneSSE: the
+// worker registers no server->client handlers (NewClient gets nil options), so
+// the standalone GET stream carries nothing — while its SDK-side retry counter
+// only resets on event-ID progress, meaning any 6 idle closes over the session
+// lifetime (proxy idle timeouts, CM redeploys, blips) would otherwise
+// deterministically poison the whole session.
+func newTransport(mcpURL string, httpClient *http.Client) *mcp.StreamableClientTransport {
+	return &mcp.StreamableClientTransport{
+		Endpoint:             mcpURL,
+		HTTPClient:           httpClient,
+		DisableStandaloneSSE: true,
+	}
+}
+
 // New connects to the ContextMatrix MCP endpoint. mcpURL e.g.
 // http://host:8080/mcp; apiKey goes out as a bearer header on every request.
 // agentID is the worker's identity (convention: cmx-agent-<card-id-lower>).
@@ -77,10 +91,7 @@ func New(ctx context.Context, mcpURL, apiKey, agentID string, opts ...Option) (*
 		Transport: &bearerTransport{apiKey: apiKey, base: o.base},
 	}
 
-	transport := &mcp.StreamableClientTransport{
-		Endpoint:   mcpURL,
-		HTTPClient: httpClient,
-	}
+	transport := newTransport(mcpURL, httpClient)
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "contextmatrix-agent-worker", Version: "0.1.0"}, nil)
 
