@@ -155,11 +155,11 @@ func (l *Logger) closeCard(k string, exitCode int64) {
 	footer := fmt.Sprintf("==== run ended %s container=%s exit=%d ====\n",
 		time.Now().UTC().Format(time.RFC3339), shortID(cf.containerID), exitCode)
 	if _, err := cf.f.WriteString(footer); err != nil {
-		l.logger.Warn("filelog: write footer failed", "error", err)
+		l.logger.Warn("filelog: write footer failed", "key", k, "error", err)
 	}
 
 	if err := cf.f.Close(); err != nil {
-		l.logger.Warn("filelog: close failed", "error", err)
+		l.logger.Warn("filelog: close failed", "key", k, "error", err)
 	}
 
 	cf.closed = true
