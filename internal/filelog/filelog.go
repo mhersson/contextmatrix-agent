@@ -65,11 +65,17 @@ func (l *Logger) path(project, cardID string) string {
 }
 
 // Begin opens (append) the card's log file and writes a run header. Call once
-// per container run, before any Write.
+// per container run, before any Write. The executor runs one container per card
+// and calls End before the next Begin, but if a prior run's entry is somehow
+// still open for this card (e.g. an End that never fired), it is footered as
+// aborted (exit=-1) and closed first, so a stray double-Begin never leaks the
+// old handle or drops its footer.
 func (l *Logger) Begin(project, cardID, containerID string) {
 	if !l.enabled() {
 		return
 	}
+
+	l.closeCard(key(project, cardID), -1) // supersede a still-open prior run, if any
 
 	p := l.path(project, cardID)
 
@@ -88,6 +94,7 @@ func (l *Logger) Begin(project, cardID, containerID string) {
 
 	header := fmt.Sprintf("==== run started %s container=%s ====\n",
 		time.Now().UTC().Format(time.RFC3339), shortID(containerID))
+	// Best-effort header: on failure keep capturing the run's output anyway.
 	if _, err := f.WriteString(header); err != nil {
 		l.logger.Warn("filelog: write header failed", "project", project, "card_id", cardID, "error", err)
 	}
@@ -130,15 +137,9 @@ func (l *Logger) Write(project, cardID string, line []byte, _ bool) {
 	}
 }
 
-// End writes a run footer, closes the file, and forgets the card. No-op if the
-// card has no open file.
-func (l *Logger) End(project, cardID string, exitCode int64) {
-	if !l.enabled() {
-		return
-	}
-
-	k := key(project, cardID)
-
+// closeCard writes the run footer with exitCode, closes the file, and forgets
+// the card. No-op if the card has no open file.
+func (l *Logger) closeCard(k string, exitCode int64) {
 	l.mu.Lock()
 	cf := l.files[k]
 	delete(l.files, k)
@@ -154,14 +155,24 @@ func (l *Logger) End(project, cardID string, exitCode int64) {
 	footer := fmt.Sprintf("==== run ended %s container=%s exit=%d ====\n",
 		time.Now().UTC().Format(time.RFC3339), shortID(cf.containerID), exitCode)
 	if _, err := cf.f.WriteString(footer); err != nil {
-		l.logger.Warn("filelog: write footer failed", "project", project, "card_id", cardID, "error", err)
+		l.logger.Warn("filelog: write footer failed", "error", err)
 	}
 
 	if err := cf.f.Close(); err != nil {
-		l.logger.Warn("filelog: close failed", "project", project, "card_id", cardID, "error", err)
+		l.logger.Warn("filelog: close failed", "error", err)
 	}
 
 	cf.closed = true
+}
+
+// End writes a run footer, closes the file, and forgets the card. No-op if the
+// card has no open file.
+func (l *Logger) End(project, cardID string, exitCode int64) {
+	if !l.enabled() {
+		return
+	}
+
+	l.closeCard(key(project, cardID), exitCode)
 }
 
 // sanitize lower-cases s and replaces every character outside [a-z0-9_-] with

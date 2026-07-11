@@ -62,6 +62,29 @@ func TestResumeAppends(t *testing.T) {
 	assert.Contains(t, s, "exit=1")
 }
 
+func TestBeginSupersedesUnclosedRun(t *testing.T) {
+	dir := t.TempDir()
+	l := New(dir, testLogger())
+
+	l.Begin("p", "C-1", "run-one")
+	l.Write("p", "C-1", []byte("first run line"), false)
+	// No End for the first run — its entry is still open.
+	l.Begin("p", "C-1", "run-two")
+	l.Write("p", "C-1", []byte("second run line"), false)
+	l.End("p", "C-1", 0)
+
+	data, err := os.ReadFile(filepath.Join(dir, "p", "c-1.log"))
+	require.NoError(t, err)
+
+	s := string(data)
+
+	assert.Equal(t, 2, strings.Count(s, "==== run started "))
+	assert.Equal(t, 2, strings.Count(s, "==== run ended "))
+	assert.Contains(t, s, "exit=-1") // superseded first run
+	assert.Contains(t, s, "exit=0")  // clean second run
+	assert.Less(t, strings.Index(s, "first run line"), strings.Index(s, "second run line"))
+}
+
 func TestConcurrentCardsSeparateFiles(t *testing.T) {
 	dir := t.TempDir()
 	l := New(dir, testLogger())
