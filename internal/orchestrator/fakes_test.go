@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
@@ -640,6 +641,19 @@ func planTestRegistry() *registry.Registry {
 func isolateVerify(o *run) {
 	o.verify = &verifyPlan{Source: verifySourceNone}
 	o.proposeAttempted = true
+}
+
+// seedResolvedVerifyPlan pins a run's verify plan to a non-empty detected
+// command, so ensureVerify returns it from cache (Argv non-empty) and the
+// authoritative gate in salvageSoloCapped is not vacuous. The caller still stubs
+// the o.runVerify seam to decide pass/fail without a subprocess.
+func seedResolvedVerifyPlan(o *run) {
+	o.verify = &verifyPlan{
+		Argv:    []string{"verify"},
+		Display: "verify",
+		Source:  verifySourceDetected,
+		Timeout: time.Minute,
+	}
 }
 
 // writeFile writes name under dir with the given content, failing the test on

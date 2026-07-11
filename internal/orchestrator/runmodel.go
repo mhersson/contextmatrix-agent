@@ -27,10 +27,14 @@ func (e *ContextLimitError) Error() string {
 // MaxTurnsError marks a phase stopping because the harness exhausted its turn
 // cap (Reason "max_turns", Completed=false, err==nil). It is normalized to a
 // typed error at the runModelCfg choke point so NO phase treats truncated work
-// as success — except a Best-of-N candidate capped on its FINAL subtask, whose
-// committed work may be salvaged behind the judge's verify gate (see
-// salvageCapped). The worker maps it like the context-limit park: push WIP,
-// release, fail — so the partial work survives for resume.
+// as success. Park-on-cap is no longer unconditional: two salvage paths rescue a
+// capped subtask whose committed work passes an authoritative verify — a
+// Best-of-N candidate capped on its FINAL subtask, deferred to the judge's
+// verify gate (see salvageCapped), and a single-solver (parent / co-op) subtask,
+// which has no judge and so runs the verify inline before completing (see
+// salvageSoloCapped). Every other cap parks: the worker maps it like the
+// context-limit park (push WIP, release, fail) so the partial work survives for
+// resume.
 type MaxTurnsError struct {
 	Model string
 	Turns int

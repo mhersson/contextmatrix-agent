@@ -9,6 +9,7 @@ import (
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
+	"github.com/mhersson/contextmatrix-agent/internal/verifyexec"
 	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/mhersson/contextmatrix-harness/llm"
 	"github.com/mhersson/contextmatrix-harness/tools"
@@ -276,9 +277,12 @@ func TestExecuteSubtaskErrorReleasesClaim(t *testing.T) {
 	assert.Equal(t, -1, indexOfCall(calls, "CompleteTask:SUB-1"), "failed subtask must not complete")
 }
 
-// TestExecuteSubtaskMaxTurnsNeverCompletes pins the invariant: a coder run
-// truncated at the turn cap must not be committed, pushed, or marked done —
-// and the claim is returned (Task A1's error-path release).
+// TestExecuteSubtaskMaxTurnsNeverCompletes pins the invariant when the verify
+// gate cannot confirm the work: a coder run truncated at the turn cap with an
+// UNRESOLVED verify (isolateVerify's skip plan) is NOT pushed or marked done,
+// and the claim is returned (the error-path release). The salvage gate requires
+// a passing verify — a skip is not a pass — so the run parks; the WIP is still
+// committed as resume evidence.
 func TestExecuteSubtaskMaxTurnsNeverCompletes(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true}
@@ -291,6 +295,8 @@ func TestExecuteSubtaskMaxTurnsNeverCompletes(t *testing.T) {
 	d := execTestDeps(ops, git, llmFake)
 	d.Cfg.MaxTurns = 1
 
+	// newExecRun's isolateVerify leaves the verify plan a skip (empty Argv), so
+	// the salvage gate cannot confirm the work and the run parks.
 	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
 	err := runExecute(context.Background(), o)
 	require.Error(t, err)
@@ -299,10 +305,13 @@ func TestExecuteSubtaskMaxTurnsNeverCompletes(t *testing.T) {
 	require.ErrorAs(t, err, &mte)
 
 	calls := ops.recorded()
-	assert.Equal(t, -1, indexOfCall(calls, "CompleteTask:SUB-1"), "truncated work marked done; calls=%v", calls)
-	assert.Empty(t, git.commitMsgs, "truncated work must not be committed")
-	assert.Empty(t, git.pushBranches, "truncated work must not be pushed")
+	assert.Equal(t, -1, indexOfCall(calls, "CompleteTask:SUB-1"), "unverified work marked done; calls=%v", calls)
+	assert.Empty(t, git.pushBranches, "unverified work must not be pushed")
 	assert.GreaterOrEqual(t, indexOfCall(calls, "ReleaseCard:SUB-1"), 0, "parked subtask claim must be released")
+	// The WIP is committed as resume evidence even though the run parks.
+	require.NotEmpty(t, git.commitMsgs, "the capped subtask commits its WIP as resume evidence")
+	assert.True(t, ops.loggedContains("no verify command resolved"),
+		"an unresolved-verify park is activity-logged; logs=%v", ops.logs)
 }
 
 func TestExecuteCoderPromptBody(t *testing.T) {
@@ -801,23 +810,105 @@ func TestNoSalvageOnEarlierSubtask(t *testing.T) {
 	assert.Empty(t, cg.commitMsgs, "nothing is committed for a non-final cap")
 }
 
-func TestNoSalvageForParentSolver(t *testing.T) {
+// TestSoloTurnCapSalvagedWhenVerifyPasses proves the single-solver (parent /
+// co-op) rescue: a capped subtask whose committed work passes the authoritative
+// verify completes exactly like a finish-terminated run — pushed and marked
+// done — instead of parking. The single solver has no judge, so the verify runs
+// inline and is the completion authority.
+func TestSoloTurnCapSalvagedWhenVerifyPasses(t *testing.T) {
 	ops := &fakeOps{}
-	client := &planLLM{responses: []llm.Response{
-		burnResp(""), burnResp(""), burnResp(""), burnResp(""), burnResp(""),
-	}}
-	git := &fakeGit{committed: true}
+	git := &fakeGit{committed: true} // a dirty tree the salvage commit captures
+	// Five burn turns == MaxTurns(5): the coder run caps without ever calling finish.
+	client := &planLLM{responses: burnResps(5)}
 	d := execTestDeps(ops, git, client)
-	// execTestDeps defaults MaxTurns to 20; this test scripts exactly 5 burn
-	// turns and needs the cap to trip on the 5th.
 	d.Cfg.MaxTurns = 5
 	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
 
+	// A non-empty resolved plan (so the gate is not vacuous) whose authoritative
+	// verify passes.
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 0} // pass
+	}
+
+	require.NoError(t, runExecute(context.Background(), o),
+		"a capped single-solver subtask whose committed work passes verify is salvaged as complete")
+
+	calls := ops.recorded()
+	assert.GreaterOrEqual(t, indexOfCall(calls, "CompleteTask:SUB-1"), 0,
+		"the verified subtask completes; calls=%v", calls)
+	assert.Equal(t, -1, indexOfCall(calls, "ReleaseCard:SUB-1"),
+		"a salvaged subtask is completed, not released")
+	require.NotEmpty(t, git.pushBranches, "salvaged work is pushed")
+	assert.Equal(t, "cm/card-1", git.pushBranches[0])
+	assert.True(t, ops.loggedContains("passed the authoritative verify"),
+		"the salvage is activity-logged; logs=%v", ops.logs)
+}
+
+// TestSoloTurnCapStillParksWhenVerifyFails proves the gate is inviolable: a
+// capped subtask whose committed work FAILS the authoritative verify parks
+// (MaxTurnsError) — it is not completed and not pushed — and the commit stays as
+// WIP evidence for resume.
+func TestSoloTurnCapStillParksWhenVerifyFails(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: burnResps(5)}
+	d := execTestDeps(ops, git, client)
+	d.Cfg.MaxTurns = 5
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 1, Output: "FAIL"} // fail
+	}
+
 	err := runExecute(context.Background(), o)
-	require.Error(t, err, "the single-solver path keeps its park-and-resume behavior")
+	require.Error(t, err, "a capped subtask whose committed work fails verify parks")
 
 	var mte *MaxTurnsError
 	require.ErrorAs(t, err, &mte)
-	assert.Empty(t, git.commitMsgs, "no salvage commit on the parent solver")
-	assert.Positive(t, countCalls(ops.recorded(), "ReleaseCard:SUB-1"), "the claim is released on the park")
+
+	calls := ops.recorded()
+	assert.Equal(t, -1, indexOfCall(calls, "CompleteTask:SUB-1"), "a failed verify must not complete the subtask")
+	assert.Empty(t, git.pushBranches, "failed-verify work must not be pushed")
+	assert.GreaterOrEqual(t, indexOfCall(calls, "ReleaseCard:SUB-1"), 0, "the parked claim is released")
+	assert.True(t, ops.loggedContains("verify did not pass"), "the park is activity-logged; logs=%v", ops.logs)
 }
+
+// TestSoloTurnCapStillParksOnCleanTree proves a clean tree is never salvaged:
+// CommitWithMessage reporting (false, nil) means there is no diff — the only
+// completion evidence a capped run has — so even a passing verify cannot rescue
+// it and the run parks.
+func TestSoloTurnCapStillParksOnCleanTree(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: false} // clean tree: nothing committed
+	client := &planLLM{responses: burnResps(5)}
+	d := execTestDeps(ops, git, client)
+	d.Cfg.MaxTurns = 5
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+
+	// Even a passing verify cannot rescue a clean tree: nothing was committed.
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 0}
+	}
+
+	err := runExecute(context.Background(), o)
+	require.Error(t, err, "a clean tree carries no completion evidence, so the cap parks")
+
+	var mte *MaxTurnsError
+	require.ErrorAs(t, err, &mte)
+
+	calls := ops.recorded()
+	assert.Equal(t, -1, indexOfCall(calls, "CompleteTask:SUB-1"), "a clean tree must not complete")
+	assert.Empty(t, git.pushBranches, "a clean tree must not push")
+	assert.GreaterOrEqual(t, indexOfCall(calls, "ReleaseCard:SUB-1"), 0, "the parked claim is released")
+}
+
+// The former TestNoSalvageForParentSolver asserted the single-solver path always
+// parked on the cap with no commit. That is no longer the contract: a capped
+// single-solver subtask now commits its WIP and salvages it when the
+// authoritative verify passes (salvageSoloCapped). Its coverage moved to
+// TestSoloTurnCapSalvagedWhenVerifyPasses / ...StillParksWhenVerifyFails /
+// ...StillParksOnCleanTree, plus TestExecuteSubtaskMaxTurnsNeverCompletes for the
+// unresolved-verify park.
