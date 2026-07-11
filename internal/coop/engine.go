@@ -135,6 +135,8 @@ func (e *Engine) Discuss(ctx context.Context, t Topic) (Outcome, error) {
 	consensus := false
 
 	for r := 1; r <= t.Rounds; r++ {
+		roundStart := len(entries) // convergence sees only this round's positions
+
 		if e.cfg.Inbox != nil {
 			for _, um := range e.cfg.Inbox.Drain() {
 				content := strings.TrimSpace(um.Content)
@@ -175,7 +177,7 @@ func (e *Engine) Discuss(ctx context.Context, t Topic) (Outcome, error) {
 			}
 		}
 
-		verdict, cost, err := e.classify(ctx, entries)
+		verdict, cost, err := e.classify(ctx, entries, roundStart)
 		totalCost += cost
 
 		if err != nil {
@@ -260,9 +262,11 @@ func (e *Engine) open(ctx context.Context) []*liveSeat {
 }
 
 // classify runs the convergence check and normalizes the verdict to one of
-// consensus / stalled / productive_disagreement.
-func (e *Engine) classify(ctx context.Context, entries []Entry) (string, float64, error) {
-	out, cost, err := e.cfg.Moderate(ctx, fmt.Sprintf(convergencePrompt, renderDelta(entries, 0, "", "")))
+// consensus / stalled / productive_disagreement. from bounds the transcript
+// to the current round's positions — the convergence model does not need
+// earlier rounds re-sent.
+func (e *Engine) classify(ctx context.Context, entries []Entry, from int) (string, float64, error) {
+	out, cost, err := e.cfg.Moderate(ctx, fmt.Sprintf(convergencePrompt, renderDelta(entries, from, "", "")))
 	if err != nil {
 		return "", cost, err
 	}
