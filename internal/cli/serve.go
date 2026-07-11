@@ -21,6 +21,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/callback"
 	"github.com/mhersson/contextmatrix-agent/internal/config"
 	"github.com/mhersson/contextmatrix-agent/internal/executor"
+	"github.com/mhersson/contextmatrix-agent/internal/filelog"
 	"github.com/mhersson/contextmatrix-agent/internal/logbridge"
 	"github.com/mhersson/contextmatrix-agent/internal/metrics"
 	"github.com/mhersson/contextmatrix-agent/internal/secrets"
@@ -95,6 +96,10 @@ func runServe(ctx context.Context, configPath string) error {
 	// fail-closed rejected by the webhook launch guards.
 	credentials := secrets.NewRunCredentials(cfg.SecretsDir, cfg.ContextMatrixURL, cfg.APIKey, logger)
 
+	// Per-card container-output logs. Empty cfg.LogDir disables the feature; the
+	// returned logger no-ops every call, so wiring below stays unconditional.
+	files := filelog.New(cfg.LogDir, logger)
+
 	docker, err := executor.NewClient()
 	if err != nil {
 		return fmt.Errorf("docker client: %w", err)
@@ -115,10 +120,14 @@ func runServe(ctx context.Context, configPath string) error {
 		ContainerTimeout: cfg.ContainerTimeout,
 		IdleTimeout:      cfg.IdleOutputTimeout,
 		PollInterval:     cfg.IdleWatchdogInterval,
-		OnLog:            bridge.BridgeLine,
-		OnExit:           onContainerExit(cbClient, credentials, logger),
-		Logger:           logger,
-		Metrics:          mx,
+		OnStart:          files.Begin,
+		OnLog: func(project, cardID string, line []byte, stderr bool) {
+			files.Write(project, cardID, line, stderr)
+			bridge.BridgeLine(project, cardID, line, stderr)
+		},
+		OnExit:  onContainerExit(cbClient, credentials, files, logger),
+		Logger:  logger,
+		Metrics: mx,
 	})
 
 	// Force-remove any agent-labeled containers left by a previous process before
@@ -290,9 +299,11 @@ func gracefulShutdown(
 func onContainerExit(
 	reporter webhook.StatusReporter,
 	credentials *secrets.RunCredentials,
+	files *filelog.Logger,
 	logger *slog.Logger,
 ) func(project, cardID string, exitCode int64) {
 	return func(project, cardID string, exitCode int64) {
+		files.End(project, cardID, exitCode)
 		credentials.Teardown(project, cardID)
 
 		status, message := exitStatus(exitCode)
