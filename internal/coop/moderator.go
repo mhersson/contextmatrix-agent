@@ -31,10 +31,11 @@ type seatHandle struct {
 	taskID   a2a.TaskID
 	deadline time.Duration
 	absent   bool // absent this round (timeout/error); may rejoin next round
-	// dead marks a seat permanently gone (open failed). Task 5 never opens a
-	// handle in this state (a failed dial returns no handle); the engine
-	// (Task 6) sets and reads it when tracking dead guests across rounds.
-	dead bool //nolint:unused // consumed by Task 6
+	// dead marks a seat permanently gone (open failed). A failed dial never
+	// returns a handle from dialSeat/dialGuest; the engine constructs the
+	// dead placeholder itself and reads it when skipping the seat across
+	// rounds.
+	dead bool
 
 	// bearer authenticates every call: the loopback server token for
 	// internal seats, the registry token for guests.
