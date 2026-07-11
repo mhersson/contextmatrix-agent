@@ -7,12 +7,15 @@ import (
 	"sort"
 )
 
-// reconcileTierDefault is the conservative tier assigned to every reconciled
-// subtask ref. Tiers are NOT persisted on subtask cards (SubtaskStates carries
-// only id/title/state), so a resumed run cannot recover the planner's original
-// tier. "moderate" is the safe middle: under-selecting a coder model for real
-// work is worse than slightly over-paying. tierOf maps this string to
-// registry.TierModerate.
+// reconcileTierDefault is the fallback tier assigned to a reconciled subtask
+// ref when its persisted tier cannot be recovered. Tiers ARE persisted on
+// subtask cards via an invisible marker in the body (see tiermarker.go),
+// written at creation and restored below via GetTaskContext — but
+// SubtaskStates itself carries only id/title/state, and the per-subtask
+// restore is advisory: an absent marker (e.g. a pre-existing card) or a failed
+// fetch falls back here. "moderate" is the safe middle: under-selecting a
+// coder model for real work is worse than slightly over-paying. tierOf maps
+// this string to registry.TierModerate.
 const reconcileTierDefault = "moderate"
 
 // reconcile is crash-resume reconciliation: a single pass, run once by execute()
@@ -134,12 +137,30 @@ func (o *run) reconcile(ctx context.Context) error {
 
 	o.subtasks = make([]subtaskRef, 0, len(states))
 	for _, st := range states {
-		o.subtasks = append(o.subtasks, subtaskRef{
-			ID:    st.CardID,
-			Title: st.Title,
-			State: st.State,
-			Tier:  reconcileTierDefault, // tiers aren't persisted; conservative recovery
-		})
+		ref := subtaskRef{ID: st.CardID, Title: st.Title, State: st.State, Tier: reconcileTierDefault}
+
+		// Pending refs get their persisted tier and planner body back from the
+		// card itself (done refs are never re-run — skip the fetch). A fetch
+		// failure degrades to today's conservative defaults; resume must not
+		// become fragile over an advisory enrichment.
+		if st.State != "done" {
+			tc, err := o.d.Ops.GetTaskContext(ctx, st.CardID, false)
+			if err != nil {
+				slog.Warn("reconcile: subtask context fetch failed; using defaults",
+					"card_id", st.CardID, "error", err)
+			} else {
+				tier, body := parseTierMarker(tc.Description)
+				if tier != "" {
+					ref.Tier = tier
+				}
+
+				if body != "" {
+					ref.Body = body
+				}
+			}
+		}
+
+		o.subtasks = append(o.subtasks, ref)
 	}
 
 	// list_cards carries no dependency edges, so topoOrder would otherwise schedule

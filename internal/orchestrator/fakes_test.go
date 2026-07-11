@@ -31,6 +31,12 @@ type fakeOps struct {
 	taskContext cmclient.TaskContext
 	taskCtxErr  error
 
+	// taskContexts scripts GetTaskContext per card ID (resume-restore tests):
+	// when the requested cardID has an entry, it wins over taskContext/
+	// taskCtxErr and always returns a nil error. Absent entries fall back to
+	// the single-value taskContext/taskCtxErr behaviour above.
+	taskContexts map[string]cmclient.TaskContext
+
 	setPhaseErr    error
 	addLogErr      error
 	claimErr       error
@@ -113,6 +119,14 @@ func (f *fakeOps) Heartbeat(_ context.Context, cardID string) error {
 
 func (f *fakeOps) GetTaskContext(_ context.Context, cardID string, _ bool) (cmclient.TaskContext, error) {
 	f.record("GetTaskContext:" + cardID)
+
+	f.mu.Lock()
+	tc, ok := f.taskContexts[cardID]
+	f.mu.Unlock()
+
+	if ok {
+		return tc, nil
+	}
 
 	return f.taskContext, f.taskCtxErr
 }

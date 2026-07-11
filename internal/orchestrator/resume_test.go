@@ -375,3 +375,58 @@ func TestExecuteCalledFromExecuteDriver(t *testing.T) {
 
 	assert.Equal(t, "deadbeef", o.staleRemoteTip, "execute() must call reconcile before the phase loop")
 }
+
+func TestReconcileRestoresTierAndBody(t *testing.T) {
+	// The core persistence contract: a pending subtask's card body carries the
+	// marker written at creation time (plan.go's withTierMarker), and reconcile
+	// restores both the tier and the marker-stripped planner body from it.
+	ops := &fakeOps{}
+	ops.subtaskStates = []cmclient.SubtaskState{{CardID: "SUB-2", Title: "impl", State: "todo"}}
+	ops.taskContexts = map[string]cmclient.TaskContext{
+		"SUB-2": {CardID: "SUB-2", Title: "impl", Description: withTierMarker("planner body", "complex")},
+	}
+	git := &fakeGit{remoteTip: "abc123"}
+
+	o := reconcileTestRun(ops, git, "execute")
+	require.NoError(t, o.reconcile(context.Background()))
+
+	require.Len(t, o.subtasks, 1)
+	assert.Equal(t, "complex", o.subtasks[0].Tier, "persisted tier survives resume")
+	assert.Equal(t, "planner body", o.subtasks[0].Body, "planner body survives resume, marker stripped")
+}
+
+func TestReconcileTierFallbackWithoutMarker(t *testing.T) {
+	// A subtask card body without a marker (e.g. created before this feature, or
+	// hand-edited) falls back to the conservative default tier, and the body is
+	// still restored from the fetched description (better than a bare title).
+	ops := &fakeOps{}
+	ops.subtaskStates = []cmclient.SubtaskState{{CardID: "SUB-2", Title: "impl", State: "todo"}}
+	ops.taskContexts = map[string]cmclient.TaskContext{
+		"SUB-2": {CardID: "SUB-2", Title: "impl", Description: "planner body, no marker"},
+	}
+	git := &fakeGit{remoteTip: "abc123"}
+
+	o := reconcileTestRun(ops, git, "execute")
+	require.NoError(t, o.reconcile(context.Background()))
+
+	require.Len(t, o.subtasks, 1)
+	assert.Equal(t, "moderate", o.subtasks[0].Tier, "no marker: falls back to the conservative default")
+	assert.Equal(t, "planner body, no marker", o.subtasks[0].Body, "body is still restored from the fetched description")
+}
+
+func TestReconcileToleratesTaskContextFailure(t *testing.T) {
+	// Resume must not become fragile: a GetTaskContext failure for a subtask
+	// degrades to today's defaults (title-only body, "moderate" tier) rather than
+	// failing the whole resume.
+	ops := &fakeOps{}
+	ops.subtaskStates = []cmclient.SubtaskState{{CardID: "SUB-2", Title: "impl", State: "todo"}}
+	ops.taskCtxErr = assertErr("context fetch unavailable")
+	git := &fakeGit{remoteTip: "abc123"}
+
+	o := reconcileTestRun(ops, git, "execute")
+	require.NoError(t, o.reconcile(context.Background()), "a subtask context fetch failure must not fail reconcile")
+
+	require.Len(t, o.subtasks, 1)
+	assert.Equal(t, "moderate", o.subtasks[0].Tier, "fetch failure falls back to the conservative default")
+	assert.Empty(t, o.subtasks[0].Body, "fetch failure leaves the body unset (title-only)")
+}

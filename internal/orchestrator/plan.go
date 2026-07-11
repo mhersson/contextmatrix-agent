@@ -717,7 +717,7 @@ func (o *run) createSubtasks(ctx context.Context, p plan) error {
 			depIDs = append(depIDs, ids[dep])
 		}
 
-		id, err := d.Ops.CreateCard(ctx, cfg.Project, cfg.CardID, st.Title, st.Description, depIDs)
+		id, err := d.Ops.CreateCard(ctx, cfg.Project, cfg.CardID, st.Title, withTierMarker(st.Description, st.Tier), depIDs)
 		if err != nil {
 			return fmt.Errorf("create subtask %q: %w", st.Title, err)
 		}
