@@ -180,4 +180,22 @@ func TestSanitize(t *testing.T) {
 	assert.Equal(t, "contextmatrix-agent", sanitize("contextmatrix-agent"))
 	assert.Equal(t, "--", sanitize(".."))
 	assert.Equal(t, "a-b-c", sanitize("a/b\\c"))
+	assert.Equal(t, "-", sanitize(""))
+}
+
+func TestFilePermissions(t *testing.T) {
+	dir := t.TempDir()
+	l := New(dir, testLogger())
+
+	l.Begin("proj", "CARD-1", "cid")
+	l.Write("proj", "CARD-1", []byte("line"), false)
+	l.End("proj", "CARD-1", 0)
+
+	fi, err := os.Stat(filepath.Join(dir, "proj", "card-1.log"))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), fi.Mode().Perm())
+
+	di, err := os.Stat(filepath.Join(dir, "proj"))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o700), di.Mode().Perm())
 }

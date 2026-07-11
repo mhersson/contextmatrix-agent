@@ -177,9 +177,13 @@ func (l *Logger) End(project, cardID string, exitCode int64) {
 
 // sanitize lower-cases s and replaces every character outside [a-z0-9_-] with
 // '-', so a project or card ID becomes a single safe path segment. Excluding
-// '.' makes "." and ".." collapse to dashes, defeating path traversal.
+// '.' makes "." and ".." collapse to dashes, defeating path traversal; an empty
+// string becomes "-" so it never collapses the path via filepath.Join.
 func sanitize(s string) string {
 	s = strings.ToLower(s)
+	if s == "" {
+		return "-"
+	}
 
 	var b strings.Builder
 

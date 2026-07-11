@@ -122,8 +122,11 @@ func runServe(ctx context.Context, configPath string) error {
 		PollInterval:     cfg.IdleWatchdogInterval,
 		OnStart:          files.Begin,
 		OnLog: func(project, cardID string, line []byte, stderr bool) {
-			files.Write(project, cardID, line, stderr)
+			// Bridge to the live /logs SSE stream first so the interactive
+			// stream is never gated on the durable-log disk write. BridgeLine
+			// does not mutate line and Write copies it, so the order is safe.
 			bridge.BridgeLine(project, cardID, line, stderr)
+			files.Write(project, cardID, line, stderr)
 		},
 		OnExit:  onContainerExit(cbClient, credentials, files, logger),
 		Logger:  logger,
