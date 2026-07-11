@@ -69,14 +69,16 @@ func (o *run) skillEngage() string {
 // the planner has NO card tools — it only reads code (read/grep/glob) and
 // emits a strict JSON plan. Card creation happens in code from the parsed JSON.
 //
-// The trailing %s slots are filled by draftPlan: workspace root, card title,
+// The leading %s is the grounding block; the second %s is the repo-snapshot
+// block (bounded tracked-file list + README head; "" when not a git repo). The
+// trailing %s slots are filled by draftPlan: workspace root, card title,
 // card description, an optional diagnosis block (root-cause investigation for
 // bug-like cards), an optional design block (brainstormed design for creative
 // HITL cards), an optional resume block (existing subtasks), an optional
 // feedback block (HITL reviewer's requested changes on a re-draft), and an
 // optional repair block (the previous parse error). Empty optional blocks
 // collapse to nothing.
-const planPrompt = `%sYou are the planning agent for a software task. You have read-only
+const planPrompt = `%s%sYou are the planning agent for a software task. You have read-only
 tools (read, grep, glob) to inspect the codebase. You do NOT create or modify
 cards or files — you only read code and output a plan as JSON.
 
@@ -738,10 +740,11 @@ Rules:
 
 // planBriefing is the plan-discussion problem statement. Unlike planPrompt it
 // carries NO output-format contract — seats discuss; the moderator's
-// synthesis prompt owns the strict JSON. Slots: grounding, workspace, title,
-// description, diagnosis block, design block, resume block (the same content
-// blocks draftPlan feeds the solo planner).
-const planBriefing = `%sYou are discussing how to plan a software task. Repo root: %s — paths are
+// synthesis prompt owns the strict JSON. Slots: grounding, repo-snapshot block
+// (bounded tracked-file list + README head; "" when not a git repo),
+// workspace, title, description, diagnosis block, design block, resume block
+// (the same content blocks draftPlan feeds the solo planner).
+const planBriefing = `%s%sYou are discussing how to plan a software task. Repo root: %s — paths are
 relative to it. You have read-only tools (read, grep, glob) — ground your
 positions in the real code structure.
 
