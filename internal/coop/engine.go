@@ -3,6 +3,7 @@ package coop
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -232,9 +233,21 @@ func (e *Engine) open(ctx context.Context) []*liveSeat {
 	}
 
 	for _, g := range e.cfg.Guests {
-		h, err := dialGuest(ctx, g)
+		// Bound the dial by the guest deadline: a registered endpoint that
+		// accepts the connection but never answers must degrade to a dead seat,
+		// not hang the whole run. dialGuest's signature stays untouched — the
+		// timeout rides its ctx. The client does not retain this ctx past
+		// construction, so cancelling it here is safe.
+		dialCtx, cancel := context.WithTimeout(ctx, e.cfg.GuestDeadline)
+		h, err := dialGuest(dialCtx, g)
+
+		cancel()
+
 		if err != nil {
-			e.cfg.Emit("moderator", "", -1, fmt.Sprintf("guest %s unreachable: %v", g.Name, err))
+			// Name only in the transcript — the URL (and any error detail) would
+			// otherwise reach the browser stream; keep the full error in the log.
+			slog.Warn("coop: guest dial failed", "guest", g.Name, "error", err)
+			e.cfg.Emit("moderator", "", -1, fmt.Sprintf("guest %s unreachable", g.Name))
 
 			h = &seatHandle{name: "guest-" + g.Name, guest: true, dead: true, absent: true}
 		}

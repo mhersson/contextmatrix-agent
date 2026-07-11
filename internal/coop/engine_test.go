@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -425,6 +427,73 @@ func TestDiscussInboxInterjections(t *testing.T) {
 	}
 
 	assert.True(t, emittedHuman)
+}
+
+func TestDiscussGuestDialBoundedByDeadline(t *testing.T) {
+	// A guest endpoint that accepts the connection but never answers must not
+	// hang the discussion: open() bounds the dial by GuestDeadline, the guest
+	// is surfaced as unreachable (name only — never the URL), and the internal
+	// seats discuss through to synthesis.
+	release := make(chan struct{})
+	guestSrv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	t.Cleanup(guestSrv.Close)
+	t.Cleanup(func() { close(release) })
+
+	seats := []SeatConfig{{Name: "seat-1", Lens: "a"}, {Name: "seat-2", Lens: "b"}}
+	script := &seatScript{reply: func(seat string, call int) (string, float64, error) {
+		return fmt.Sprintf("%s-%d", seat, call), 0.01, nil
+	}}
+	mod := &modScript{replies: []string{"consensus", "SYNTH"}}
+
+	eng, log := startEngine(t, seats, script.run, mod.run, func(cfg *EngineConfig) {
+		cfg.Guests = []GuestSeat{{Name: "laptop", URL: guestSrv.URL}}
+		cfg.GuestDeadline = 200 * time.Millisecond
+	})
+
+	done := make(chan struct{})
+
+	var (
+		out    Outcome
+		runErr error
+	)
+
+	go func() {
+		defer close(done)
+
+		out, runErr = eng.Discuss(t.Context(), Topic{
+			Briefing:        "brief",
+			Rounds:          1,
+			Blind:           true,
+			SynthesisPrompt: "synthesize",
+		})
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Discuss hung on an unresponsive guest dial")
+	}
+
+	require.NoError(t, runErr, "internal-seat discussion proceeds despite the dead guest")
+	assert.Equal(t, "SYNTH", out.Synthesis)
+
+	var sawUnreachable bool
+
+	for _, r := range log.snapshot() {
+		if r.author == "moderator" && strings.Contains(r.content, "laptop") &&
+			strings.Contains(r.content, "unreachable") {
+			sawUnreachable = true
+		}
+
+		assert.NotContains(t, r.content, guestSrv.URL, "guest URL must not leak into the transcript")
+	}
+
+	assert.True(t, sawUnreachable, "the unresponsive guest was surfaced as unreachable")
 }
 
 func TestDiscussNotBlindFirstRoundCarriesBriefing(t *testing.T) {

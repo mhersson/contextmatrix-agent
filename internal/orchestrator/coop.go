@@ -63,8 +63,33 @@ func (o *run) coopDiscuss(ctx context.Context, t coop.Topic) (coop.Outcome, bool
 		return coop.Outcome{}, false
 	}
 
+	// Bound this discussion by what remains of the run's single co-op budget
+	// term. effectiveCeiling adds exactly one BudgetFactor x MaxCardCost term on
+	// top of the card ceiling, so every discussion (plan draft, each review
+	// round, each HITL re-open) draws from that shared headroom rather than a
+	// fresh term each time. An unlimited ceiling (MaxCardCost <= 0) keeps the
+	// unbounded co-op sizing and never exhausts.
+	bounded := o.d.Cfg.MaxCardCost > 0
+
+	headroom := 0.0
+	if bounded {
+		headroom = effectiveCeiling(o.d.Cfg) - o.ledger.Spent()
+		if headroom <= 0 {
+			slog.Warn("coop: budget exhausted; continuing solo", "card_id", o.d.Cfg.CardID, "kind", t.Kind)
+			_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, //nolint:errcheck // advisory degrade record
+				fmt.Sprintf("co-op budget exhausted (%s) — continuing solo", t.Kind))
+
+			return coop.Outcome{}, false
+		}
+	}
+
 	cfg := buildEngineConfig(o, t, bearer)
 	o.coopSeats = cfg.Seats
+
+	// Clamp the co-op term to the remaining headroom (min keeps whichever binds).
+	if bounded {
+		cfg.BudgetUSD = min(cfg.BudgetUSD, headroom)
+	}
 
 	server, err := coop.StartServer(cfg.Seats, cfg.Runner, bearer)
 	if err != nil {

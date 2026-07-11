@@ -172,6 +172,73 @@ func TestCoopDiscussQuorumFallback(t *testing.T) {
 	assert.Contains(t, joined, "continuing solo", "the fallback is recorded on the card")
 }
 
+func TestCoopDiscussBudgetExhaustedRunsSolo(t *testing.T) {
+	ops := &fakeOps{}
+	o := coopTestRun(ops, CoopConfig{Participants: 2, Plan: true, Rounds: 2, BudgetFactor: 0.75}, 2.0)
+
+	// Pre-spend the run ledger up to the whole co-op envelope: no headroom left.
+	o.ledger.Spend(effectiveCeiling(o.d.Cfg))
+
+	eng := &scriptedEngine{outcomes: []coop.Outcome{{Synthesis: "SHOULD-NOT-RUN"}}}
+	o.coopEngine = eng.run
+
+	out, ok := o.coopDiscuss(context.Background(), coop.Topic{
+		Kind: "plan", Lenses: planLenses[:2], Rounds: 2, Blind: true, Briefing: "b",
+	})
+
+	assert.False(t, ok, "an exhausted co-op budget must degrade to solo")
+	assert.Empty(t, out.Synthesis)
+	assert.Empty(t, eng.cfgs, "the engine must not be invoked once the budget is exhausted")
+
+	joined := strings.Join(ops.logs, "\n")
+	assert.Contains(t, joined, "continuing solo")
+	assert.Contains(t, joined, "exhausted")
+}
+
+func TestCoopDiscussClampsBudgetToHeadroom(t *testing.T) {
+	ops := &fakeOps{}
+	o := coopTestRun(ops, CoopConfig{Participants: 2, Plan: true, Rounds: 2, BudgetFactor: 0.75}, 2.0)
+
+	// effectiveCeiling = MaxCardCost + BudgetFactor*MaxCardCost = 2.0 + 1.5 = 3.5.
+	// Pre-spend 2.5 → headroom 1.0, below the full co-op term (1.5): the engine
+	// gets the clamped 1.0.
+	o.ledger.Spend(2.5)
+
+	eng := &scriptedEngine{outcomes: []coop.Outcome{{Synthesis: "SYNTH"}}}
+	o.coopEngine = eng.run
+
+	out, ok := o.coopDiscuss(context.Background(), coop.Topic{
+		Kind: "plan", Lenses: planLenses[:2], Rounds: 2, Blind: true, Briefing: "b",
+	})
+
+	require.True(t, ok)
+	assert.Equal(t, "SYNTH", out.Synthesis)
+	require.Len(t, eng.cfgs, 1)
+	assert.InDelta(t, 1.0, eng.cfgs[0].BudgetUSD, 1e-9,
+		"budget clamped to remaining co-op headroom, not the full term")
+}
+
+func TestCoopDiscussUnlimitedCeilingKeepsUnbounded(t *testing.T) {
+	ops := &fakeOps{}
+	o := coopTestRun(ops, CoopConfig{Participants: 2, Plan: true, Rounds: 2, BudgetFactor: 0.75}, 0)
+
+	// Even with prior spend, MaxCardCost 0 means an unlimited ceiling: the co-op
+	// term stays unbounded (0) and the discussion is never treated as exhausted.
+	o.ledger.Spend(10.0)
+
+	eng := &scriptedEngine{outcomes: []coop.Outcome{{Synthesis: "SYNTH"}}}
+	o.coopEngine = eng.run
+
+	out, ok := o.coopDiscuss(context.Background(), coop.Topic{
+		Kind: "plan", Lenses: planLenses[:2], Rounds: 2, Blind: true, Briefing: "b",
+	})
+
+	require.True(t, ok)
+	assert.Equal(t, "SYNTH", out.Synthesis)
+	require.Len(t, eng.cfgs, 1)
+	assert.Zero(t, eng.cfgs[0].BudgetUSD, "unlimited ceiling keeps the co-op budget unbounded")
+}
+
 func TestSeatDebugWriterRewritesKinds(t *testing.T) {
 	var buf bytes.Buffer
 
