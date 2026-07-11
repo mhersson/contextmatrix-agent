@@ -845,6 +845,51 @@ func TestSoloTurnCapSalvagedWhenVerifyPasses(t *testing.T) {
 		"the salvage is activity-logged; logs=%v", ops.logs)
 }
 
+// TestCoderGraceTurnFinishes proves the grace turn is the first net at the cap:
+// a coder that dithers past the wrap-up nudge to the turn cap but is actually
+// done lands `finish` in the harness's terminal-only grace call, completing the
+// subtask through the NORMAL finish path — pushed and marked done via the finish
+// commit message — WITHOUT touching the verify-gated salvage path. No verify is
+// stubbed here: the grace finish never consults it.
+func TestCoderGraceTurnFinishes(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	// Five burn turns == MaxTurns(5) caps the main loop; the sixth response is
+	// consumed by the grace call, which lands finish before max_turns is returned.
+	client := &planLLM{responses: append(burnResps(5), finishResp("feat: done", 0.01))}
+	d := execTestDeps(ops, git, client)
+	d.Cfg.MaxTurns = 5
+	// A simple tier keeps coderMaxTurns at the flat base (5), so the cap trips on
+	// the fifth burn and the grace call fires on the sixth response.
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+
+	// Deliberately NO seedResolvedVerifyPlan / o.runVerify stub: a grace finish
+	// completes without the salvage path's authoritative verify.
+
+	require.NoError(t, runExecute(context.Background(), o),
+		"a coder that lands finish in the grace call completes like a normal finish")
+
+	calls := ops.recorded()
+	assert.GreaterOrEqual(t, indexOfCall(calls, "CompleteTask:SUB-1"), 0,
+		"the grace-finished subtask completes; calls=%v", calls)
+	assert.Equal(t, -1, indexOfCall(calls, "ReleaseCard:SUB-1"),
+		"a completed subtask is not released")
+	require.NotEmpty(t, git.pushBranches, "grace-finished work is pushed")
+	assert.Equal(t, "cm/card-1", git.pushBranches[0])
+
+	// The commit carries the grace finish's own message — not the sanitized-title
+	// fallback the salvage path uses — proving completion ran through finish.
+	require.NotEmpty(t, git.commitMsgs)
+	assert.Equal(t, "feat: done", git.commitMsgs[len(git.commitMsgs)-1])
+
+	// No salvage advisory: the run finished through the grace call, not the
+	// verify-gated turn-cap salvage.
+	assert.False(t, ops.loggedContains("passed the authoritative verify"),
+		"a grace finish must not log the salvage advisory; logs=%v", ops.logs)
+	assert.False(t, ops.loggedContains("turn cap"),
+		"a grace finish must not log any turn-cap advisory; logs=%v", ops.logs)
+}
+
 // TestSoloTurnCapStillParksWhenVerifyFails proves the gate is inviolable: a
 // capped subtask whose committed work FAILS the authoritative verify parks
 // (MaxTurnsError) — it is not completed and not pushed — and the commit stays as

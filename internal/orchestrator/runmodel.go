@@ -197,6 +197,10 @@ func (o *run) runModelCoder(ctx context.Context, reg *tools.Registry, prompt, mo
 	cfg.WrapUpTurns = wrapUpTurns
 	cfg.WrapUpMessage = msg
 	cfg.MaxTurns = coderMaxTurns(cfg.MaxTurns, tier)
+	// One terminal-only grace call at the cap: a coder whose work is done but
+	// that dithered past the wrap-up nudge can still land finish (a run-1 failure
+	// mode). This is the first net; the verify-gated salvage remains the second.
+	cfg.GraceTurn = true
 
 	return o.runModelCfg(ctx, reg, prompt, model, cfg)
 }
