@@ -308,6 +308,16 @@ func (r *Registry) SelectReviewPanel(in SelectInput, n int) []ModelSpec {
 	return panel
 }
 
+// SelectDiscussionPanel returns n distinct models for co-op discussion seats.
+// It is the review-panel diversity walk by construction — distinct-first with
+// wrap-around when the pool runs dry — honoring the caller's exclusions
+// (review discussions exclude the models that coded the card). It exists as a
+// named seam so discussion selection can diverge from review selection
+// without touching call sites.
+func (r *Registry) SelectDiscussionPanel(in SelectInput, n int) []ModelSpec {
+	return r.SelectReviewPanel(in, n)
+}
+
 // SelectCandidateModels picks n coder models for a Best-of-N fan-out. pin, if
 // non-empty, occupies slot 1 (excluded from the auto picks); the remaining
 // slots are distinct-first with wrap-around when the pool is smaller than n
