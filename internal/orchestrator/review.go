@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/mhersson/contextmatrix-agent/internal/coop"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-harness/harness"
 	"github.com/mhersson/contextmatrix-harness/tools"
@@ -312,7 +313,20 @@ func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, autho
 	}
 
 	// Gate passed, skipped, or absent — the gate is a cheap pre-filter, not a
-	// substitute for review, so specialists always run.
+	// substitute for review, so specialists always run. With co-op review on,
+	// a panel discussion replaces the specialist pass for non-authoritative
+	// rounds (the authoritative pass keeps the proven solo machinery); a
+	// failed discussion degrades to the fan-out below.
+	if o.d.Cfg.Coop.enabled() && o.d.Cfg.Coop.Review && !authoritative {
+		if v, ok := o.coopReviewVerdict(ctx); ok {
+			if v.Approved {
+				return v.Summary, v.FixTier, true, vres, nil
+			}
+
+			return formatFixes(v), v.FixTier, false, vres, nil
+		}
+	}
+
 	specialistFindings, err := o.runSpecialists(ctx, authoritative)
 	if err != nil {
 		return "", "", false, vres, err
@@ -500,6 +514,86 @@ func (o *run) reviewExclusions() map[string]bool {
 	}
 
 	return excl
+}
+
+// coopReviewVerdict convenes the review discussion and parses its synthesis
+// into the existing verdict shape, with ONE moderator repair on a parse
+// failure (mirroring synthesize's repair turn). ok=false on any failure —
+// the caller falls back to the specialist fan-out. On success it records the
+// review snapshot head, exactly like runSpecialists, so later rounds stay
+// delta-scoped.
+func (o *run) coopReviewVerdict(ctx context.Context) (verdict, bool) {
+	briefing, err := o.coopReviewBriefing(ctx)
+	if err != nil {
+		slog.Warn("coop review: briefing failed; solo fallback",
+			"card_id", o.d.Cfg.CardID, "error", err)
+
+		return verdict{}, false
+	}
+
+	seats := min(o.d.Cfg.Coop.Participants, len(reviewLenses))
+
+	t := coop.Topic{
+		Kind:     "review",
+		Briefing: briefing,
+		Lenses:   reviewLenses[:seats],
+		Rounds:   1,
+		Blind:    true,
+		SynthesisPrompt: fmt.Sprintf(reviewSynthesisPrompt,
+			o.grounding, o.tc.Title, o.tc.Description),
+	}
+
+	out, ok := o.coopDiscuss(ctx, t)
+	if !ok {
+		return verdict{}, false
+	}
+
+	v, perr := parseVerdict(out.Synthesis)
+	if perr != nil {
+		repaired, rerr := o.coopResynthesize(ctx, t, out, perr.Error())
+		if rerr != nil {
+			slog.Warn("coop review: repair synthesis failed; solo fallback",
+				"card_id", o.d.Cfg.CardID, "error", rerr)
+
+			return verdict{}, false
+		}
+
+		v, perr = parseVerdict(repaired)
+		if perr != nil {
+			slog.Warn("coop review: verdict parse failed after repair; solo fallback",
+				"card_id", o.d.Cfg.CardID, "error", perr)
+
+			return verdict{}, false
+		}
+	}
+
+	if sha, herr := o.d.Git.Head(ctx); herr == nil && sha != "" {
+		o.lastReviewBase = sha
+		_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, //nolint:errcheck // advisory snapshot record
+			fmt.Sprintf("review snapshot %s", sha))
+	}
+
+	return v, true
+}
+
+// coopReviewBriefing assembles the discussion briefing from the SAME scope
+// the specialist fan-out reviews: the branch diff against the delta base
+// (lastReviewBase when a prior round snapshotted, else the base branch) plus
+// the prior round's findings.
+func (o *run) coopReviewBriefing(ctx context.Context) (string, error) {
+	base := o.lastReviewBase
+	if base == "" {
+		base = o.d.Cfg.BaseBranch
+	}
+
+	diff, err := o.d.Git.Diff(ctx, base)
+	if err != nil {
+		return "", fmt.Errorf("review diff: %w", err)
+	}
+
+	prior := priorFindingsBlock(o.lastFindings)
+
+	return fmt.Sprintf(reviewBriefing, o.tc.Title, o.tc.Description, diff, prior), nil
 }
 
 // synthesize runs ONE orchestrator-model call that reads the three specialists'

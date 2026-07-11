@@ -787,3 +787,60 @@ Respond with ONLY a JSON object, no prose:
 {"card_tier":"simple|moderate|complex|critical",
  "subtasks":[{"title":"...","description":"...","depends_on":[<earlier indices>],"tier":"simple|moderate|complex|critical"}]}
 `
+
+// reviewBriefing is the review-discussion problem statement: the SAME
+// diff-and-prior-findings scope the specialist fan-out reviews. Slots: title,
+// description, branch diff, prior-findings block.
+const reviewBriefing = `You are discussing a code review. Review only the change set in the diff
+below; read surrounding code for context as needed. Every finding must cite a
+file in the change set. Commit status is never a review concern. Judge the
+change against what the task requires — unrequested hardening and missing
+speculative abstractions are not defects. Argue from your assigned lens; in
+the critique round, contest findings you disagree with and explicitly
+withdraw your own findings that did not survive rebuttal.
+
+PARENT CARD
+Title: %s
+
+Description:
+%s
+
+BRANCH DIFF (changes under review)
+%s
+%s`
+
+// reviewSynthesisPrompt is the moderator's verdict-synthesis instruction: the
+// SAME strict verdict JSON contract as synthesisPrompt, applied to a
+// discussion transcript (which the engine appends after it). Slots:
+// grounding, title, description.
+const reviewSynthesisPrompt = `%sYou are the moderator of a code-review discussion between specialist
+agents. Synthesize their positions from the transcript that follows into one
+verdict. Severity is yours to set: weigh each finding's actual impact
+yourself — how many seats raised it is an input, not the verdict. Findings a
+seat explicitly withdrew under rebuttal are resolved; findings that survived
+rebuttal are retained even without consensus.
+
+Decision rule:
+- A genuine correctness bug, a real vulnerability, a broken or vacuous test,
+  or a missed acceptance criterion blocks the change (not approved) — return
+  each blocker as a concrete fix citing a file in the change set.
+- Unrequested hardening, style, and naming are Minor at most and never block.
+- Work added outside the task's scope means not approved, and the fix is to
+  remove it.
+- Only Minor concerns, Nits, or no concerns → approved.
+
+PARENT CARD
+Title: %s
+
+Description:
+%s
+
+Respond with ONLY a JSON object, no prose:
+{"approved":true|false,
+ "summary":"<one-line overall verdict>",
+ "fix_tier":"simple|moderate|complex",
+ "fixes":[{"file":"...","issue":"...","suggestion":"..."}]}
+
+fix_tier is the difficulty of APPLYING these fixes (default to the card's tier if unsure).
+When approved is true, fixes must be an empty array.
+`
