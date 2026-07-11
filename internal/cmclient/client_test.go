@@ -31,6 +31,13 @@ func TestClassifyReleaseError(t *testing.T) {
 	assert.Equal(t, other, got2, "unrelated errors pass through unchanged")
 }
 
+func TestNewTransportDisablesStandaloneSSE(t *testing.T) {
+	tr := newTransport("http://cm:8080/mcp", &http.Client{})
+	assert.True(t, tr.DisableStandaloneSSE,
+		"the worker consumes no server-initiated messages; the standalone GET stream only adds a session-poisoning failure mode")
+	assert.Equal(t, "http://cm:8080/mcp", tr.Endpoint)
+}
+
 const testAgentID = "cmx-agent-cmx-001"
 
 // recorder captures the arguments every stub tool received, keyed by tool
@@ -273,6 +280,44 @@ func TestClaimCard(t *testing.T) {
 	require.True(t, ok, "claim_card stub should have been called")
 	assert.Equal(t, "CMX-001", args["card_id"])
 	assert.Equal(t, testAgentID, args["agent_id"])
+}
+
+func TestCallReconnectsAfterSessionClose(t *testing.T) {
+	rec := newRecorder()
+	c := newTestClient(t, rec, "")
+
+	require.NoError(t, c.ClaimCard(context.Background(), "CARD-1"))
+
+	// Poison the session the way the live incident did: the underlying session
+	// is closed, so the next call fails with an error wrapping ErrConnectionClosed.
+	c.mu.Lock()
+	old := c.session
+	c.mu.Unlock()
+	require.NoError(t, old.Close())
+
+	// Without reconnect this returns "client is closing"; with it, the call
+	// re-dials the same in-process server and succeeds.
+	require.NoError(t, c.ClaimCard(context.Background(), "CARD-2"))
+
+	args, ok := rec.get("claim_card")
+	require.True(t, ok, "claim_card stub should have been called after reconnect")
+	assert.Equal(t, "CARD-2", args["card_id"], "the retried call carries the new card id")
+}
+
+func TestCallDoesNotReconnectOnToolError(t *testing.T) {
+	rec := newRecorder()
+	c := newTestClient(t, rec, "claim_card") // failTool: server returns IsError
+
+	c.mu.Lock()
+	before := c.session
+	c.mu.Unlock()
+
+	err := c.ClaimCard(context.Background(), "CARD-1")
+	require.Error(t, err)
+
+	c.mu.Lock()
+	assert.Same(t, before, c.session, "tool-level IsError must not trigger a re-dial")
+	c.mu.Unlock()
 }
 
 func TestGetTaskContext(t *testing.T) {

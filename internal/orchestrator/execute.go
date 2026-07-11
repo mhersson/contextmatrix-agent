@@ -151,6 +151,10 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 			return nil
 		}
 
+		if o.salvageSoloCapped(ctx, sc, sub, res, err) {
+			return nil
+		}
+
 		return err
 	}
 
@@ -467,6 +471,87 @@ func (o *run) salvageCapped(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 		"%s: turn cap on final subtask %s — work committed; the judge's verify decides", sc.tag, sub.ID))
 
 	return true
+}
+
+// salvageSoloCapped rescues a single-solver (parent / co-op) subtask that hit
+// the turn cap — the run-1 failure mode: the work is complete and verified
+// in-run, but no turn is left for the finish call. Unlike the Best-of-N variant
+// (whose judge verifies every candidate later), the single solver has no judge,
+// so the authoritative verify runs HERE and gates the rescue: committed &&
+// verify actually ran && verify passed — the turn-waste campaign's contract,
+// never weakened. A skipped or unresolved verify plan is NOT a pass. On a pass
+// the subtask completes exactly like a finish-terminated run (push when sc.push,
+// then CompleteTask); on any other outcome the run parks unchanged and the
+// commit stays as WIP evidence for resume. Only the single-solver (boardOps)
+// path is eligible — a candidate solver is handled by salvageCapped.
+func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskRef, res harness.Result, err error) bool {
+	var mte *MaxTurnsError
+	if !sc.boardOps || !errors.As(err, &mte) {
+		return false
+	}
+
+	commitMsg := finishCommitMessage(res.CompletionArgs)
+	if commitMsg == "" {
+		commitMsg = sanitizeTitle(sub.Title)
+	}
+
+	// The commit is the only completion evidence a capped run has: a clean tree
+	// (nothing to commit) has no diff, so there is nothing to salvage and the run
+	// parks exactly as it would without this path.
+	committed, cerr := sc.git.CommitWithMessage(ctx, commitMsg)
+	if cerr != nil || !committed {
+		return false
+	}
+
+	// The authoritative verify: with no judge, the project's verify command — not
+	// the model's self-report — is the completion authority. A budget park during
+	// resolution or a skip (no command resolved) leaves the work unverified, which
+	// is NOT a pass: park with the commit standing as WIP evidence.
+	plan, verr := o.ensureVerify(ctx)
+	if verr != nil {
+		o.logSoloCapPark(ctx, sub.ID, "verify could not be resolved")
+
+		return false
+	}
+
+	if len(plan.Argv) == 0 {
+		o.logSoloCapPark(ctx, sub.ID, "no verify command resolved to confirm it")
+
+		return false
+	}
+
+	vres, rerr := o.runVerifyPlan(ctx, sc.workspace, plan)
+	if rerr != nil || vres.Status != verifyPassed {
+		o.logSoloCapPark(ctx, sub.ID, "verify did not pass")
+
+		return false
+	}
+
+	// Verified: complete exactly like a finish-terminated run. A push failure
+	// declines the salvage (the run parks); the spend was already reported, so a
+	// resume must not double-charge.
+	if sc.push {
+		if perr := o.pushBranch(ctx); perr != nil {
+			return false
+		}
+	}
+
+	if cerr := o.d.Ops.CompleteTask(ctx, sub.ID, commitMsg); cerr != nil {
+		return false
+	}
+
+	_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, fmt.Sprintf( //nolint:errcheck // advisory record
+		"turn cap on subtask %s — committed work passed the authoritative verify; salvaged as complete", sub.ID))
+
+	return true
+}
+
+// logSoloCapPark records the advisory when a capped single-solver subtask
+// committed work but could not be salvaged (verify unresolved, skipped, or not
+// passing): the run parks and the commit stands as WIP evidence for resume.
+func (o *run) logSoloCapPark(ctx context.Context, subID, reason string) {
+	_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, fmt.Sprintf( //nolint:errcheck // advisory record
+		"turn cap on subtask %s — work committed but %s; parking for resume", subID, reason))
 }
 
 // sanitizeTitle builds the fallback commit message from a subtask title when the

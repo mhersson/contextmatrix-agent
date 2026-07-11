@@ -12,6 +12,7 @@ import (
 	"maps"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -24,8 +25,11 @@ var ErrCardNotClaimed = errors.New("card is not claimed")
 // Client is a card-operations client bound to one agent identity. Every method
 // is a typed wrapper over a single MCP tool call; all calls carry the agent ID.
 type Client struct {
-	session *mcp.ClientSession
 	agentID string
+
+	mu      sync.Mutex
+	session *mcp.ClientSession
+	dial    func(ctx context.Context) (*mcp.ClientSession, error)
 }
 
 // bearerTransport injects a static Authorization: Bearer header on every
@@ -64,6 +68,20 @@ func WithBaseTransport(rt http.RoundTripper) Option {
 	}
 }
 
+// newTransport builds the streamable transport. DisableStandaloneSSE: the
+// worker registers no server->client handlers (NewClient gets nil options), so
+// the standalone GET stream carries nothing — while its SDK-side retry counter
+// only resets on event-ID progress, meaning any 6 idle closes over the session
+// lifetime (proxy idle timeouts, CM redeploys, blips) would otherwise
+// deterministically poison the whole session.
+func newTransport(mcpURL string, httpClient *http.Client) *mcp.StreamableClientTransport {
+	return &mcp.StreamableClientTransport{
+		Endpoint:             mcpURL,
+		HTTPClient:           httpClient,
+		DisableStandaloneSSE: true,
+	}
+}
+
 // New connects to the ContextMatrix MCP endpoint. mcpURL e.g.
 // http://host:8080/mcp; apiKey goes out as a bearer header on every request.
 // agentID is the worker's identity (convention: cmx-agent-<card-id-lower>).
@@ -77,29 +95,75 @@ func New(ctx context.Context, mcpURL, apiKey, agentID string, opts ...Option) (*
 		Transport: &bearerTransport{apiKey: apiKey, base: o.base},
 	}
 
-	transport := &mcp.StreamableClientTransport{
-		Endpoint:   mcpURL,
-		HTTPClient: httpClient,
+	dial := func(ctx context.Context) (*mcp.ClientSession, error) {
+		client := mcp.NewClient(&mcp.Implementation{Name: "contextmatrix-agent-worker", Version: "0.1.0"}, nil)
+
+		session, err := client.Connect(ctx, newTransport(mcpURL, httpClient), nil)
+		if err != nil {
+			return nil, fmt.Errorf("connect to mcp endpoint: %w", err)
+		}
+
+		return session, nil
 	}
 
-	client := mcp.NewClient(&mcp.Implementation{Name: "contextmatrix-agent-worker", Version: "0.1.0"}, nil)
-
-	session, err := client.Connect(ctx, transport, nil)
+	session, err := dial(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("connect to mcp endpoint: %w", err)
+		return nil, err
 	}
 
-	return &Client{session: session, agentID: agentID}, nil
+	return &Client{session: session, agentID: agentID, dial: dial}, nil
 }
 
 // Close ends the MCP session. The underlying SDK session Close is idempotent
-// and concurrency safe, so double-close is safe.
+// and concurrency safe, so double-close is safe. The mutex serialises Close
+// against a concurrent reconnect swapping c.session.
 func (c *Client) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if err := c.session.Close(); err != nil {
 		return fmt.Errorf("close mcp session: %w", err)
 	}
 
 	return nil
+}
+
+// callTool is the single session chokepoint: on a poisoned session
+// (ErrConnectionClosed from the SDK's client/server-closing states, or
+// ErrSessionMissing when CM restarted and forgot the session) it re-dials a
+// fresh session ONCE and retries the call once. Tool-level IsError results
+// (which come back as err==nil here) and context cancellation never trigger a
+// re-dial. Single-flight: concurrent callers piggyback on the first re-dial via
+// the c.session == sess guard.
+func (c *Client) callTool(ctx context.Context, params *mcp.CallToolParams) (*mcp.CallToolResult, error) {
+	c.mu.Lock()
+	sess := c.session
+	c.mu.Unlock()
+
+	result, err := sess.CallTool(ctx, params)
+	if err == nil || (!errors.Is(err, mcp.ErrConnectionClosed) && !errors.Is(err, mcp.ErrSessionMissing)) {
+		return result, err
+	}
+
+	c.mu.Lock()
+	if c.session == sess {
+		fresh, derr := c.dial(ctx)
+		if derr != nil {
+			c.mu.Unlock()
+
+			return nil, fmt.Errorf("reconnect after poisoned session: %w", errors.Join(err, derr))
+		}
+
+		_ = sess.Close()
+		c.session = fresh
+
+		slog.Warn("cmclient: mcp session poisoned; reconnected with a fresh session", "tool", params.Name)
+	}
+
+	sess = c.session
+	c.mu.Unlock()
+
+	return sess.CallTool(ctx, params)
 }
 
 // ImageBlob is one inline card image fetched over MCP.
@@ -161,7 +225,7 @@ func (c *Client) call(ctx context.Context, tool string, args map[string]any) (st
 
 	withAgent["agent_id"] = c.agentID
 
-	result, err := c.session.CallTool(ctx, &mcp.CallToolParams{
+	result, err := c.callTool(ctx, &mcp.CallToolParams{
 		Name:      tool,
 		Arguments: withAgent,
 	})
@@ -199,7 +263,7 @@ func (c *Client) callFull(ctx context.Context, tool string, args map[string]any)
 
 	withAgent["agent_id"] = c.agentID
 
-	result, err := c.session.CallTool(ctx, &mcp.CallToolParams{Name: tool, Arguments: withAgent})
+	result, err := c.callTool(ctx, &mcp.CallToolParams{Name: tool, Arguments: withAgent})
 	if err != nil {
 		return nil, fmt.Errorf("call %s: %w", tool, err)
 	}

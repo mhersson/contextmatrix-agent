@@ -13,6 +13,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/coop"
 	"github.com/mhersson/contextmatrix-harness/events"
+	"github.com/mhersson/contextmatrix-harness/harness"
 	"github.com/mhersson/contextmatrix-harness/tools"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -237,6 +238,15 @@ func TestCoopDiscussUnlimitedCeilingKeepsUnbounded(t *testing.T) {
 	assert.Equal(t, "SYNTH", out.Synthesis)
 	require.Len(t, eng.cfgs, 1)
 	assert.Zero(t, eng.cfgs[0].BudgetUSD, "unlimited ceiling keeps the co-op budget unbounded")
+}
+
+func TestSeatConfigCapsToolOutput(t *testing.T) {
+	base := harness.Config{ToolOutputMaxBytes: 131072, MaxTurns: 45}
+	cfg := seatConfig(base, coop.SeatConfig{Name: "seat-1", Lens: "risk"}, 0.10, nil)
+
+	assert.Equal(t, coopSeatToolOutputMaxBytes, cfg.ToolOutputMaxBytes)
+	assert.Equal(t, coopSeatMaxTurns, cfg.MaxTurns)
+	assert.InDelta(t, 0.10, cfg.MaxCostUSD, 1e-9)
 }
 
 func TestSeatDebugWriterRewritesKinds(t *testing.T) {

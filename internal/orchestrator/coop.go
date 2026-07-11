@@ -50,6 +50,11 @@ const coopSeatMaxTurns = 8
 // synthesis are read-and-answer work; a handful of turns is generous.
 const coopModeratorMaxTurns = 4
 
+// coopSeatToolOutputMaxBytes caps one tool result in a seat's context. Seats
+// argue positions from read-only lookups; the coder-sized cap (128 KB) let a
+// single broad grep inflate a seat prompt ~17x in the first live run.
+const coopSeatToolOutputMaxBytes = 16 * 1024
+
 // coopDiscuss convenes one discussion: it mints the per-discussion bearer,
 // starts the loopback seat server, builds the engine config, runs Discuss,
 // and closes the server. It NEVER fails the card: any error — bearer, server
@@ -196,11 +201,7 @@ func buildEngineConfig(o *run, t coop.Topic, bearer string) coop.EngineConfig {
 // Usage is spent against the run ledger and reported to CM per turn.
 func (o *run) coopSeatRunner(emit *events.Emitter, perTurnCap float64) coop.SeatRunner {
 	return func(ctx context.Context, seat coop.SeatConfig, history []coop.Turn, prompt string) (string, float64, error) {
-		cfg := o.harnessConfig(seat.Model)
-		cfg.SystemPrompt = fmt.Sprintf(seatSystemPrompt, seat.Name, seat.Lens)
-		cfg.MaxTurns = coopSeatMaxTurns
-		cfg.MaxCostUSD = perTurnCap
-		cfg.History = coopHistory(history)
+		cfg := seatConfig(o.harnessConfig(seat.Model), seat, perTurnCap, coopHistory(history))
 
 		res, err := harness.Run(ctx, o.d.Client, o.d.ReadTools, emit, prompt, cfg)
 
@@ -223,6 +224,17 @@ func (o *run) coopSeatRunner(emit *events.Emitter, perTurnCap float64) coop.Seat
 
 		return res.Output, res.TotalCostUSD, nil
 	}
+}
+
+// seatConfig derives one seat turn's harness config from the run-wide base.
+func seatConfig(base harness.Config, seat coop.SeatConfig, perTurnCap float64, history []llm.Message) harness.Config {
+	base.SystemPrompt = fmt.Sprintf(seatSystemPrompt, seat.Name, seat.Lens)
+	base.MaxTurns = coopSeatMaxTurns
+	base.MaxCostUSD = perTurnCap
+	base.ToolOutputMaxBytes = coopSeatToolOutputMaxBytes
+	base.History = history
+
+	return base
 }
 
 // coopModeratorRunner returns the ModeratorRunner: one-shot decision-model

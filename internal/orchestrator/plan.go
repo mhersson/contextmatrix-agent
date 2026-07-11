@@ -343,6 +343,7 @@ func (o *run) draftPlan(ctx context.Context, model, diagnosis, design, feedback 
 	diagBlock := diagnosisBlock(diagnosis)
 	dsnBlock := designBlock(design)
 	fbBlock := feedbackBlock(feedback)
+	snapshot := o.repoSnapshotBlock()
 
 	var (
 		p       plan
@@ -359,7 +360,7 @@ func (o *run) draftPlan(ctx context.Context, model, diagnosis, design, feedback 
 			repair = repairBlock(lastErr.Error())
 		}
 
-		task := fmt.Sprintf(planPrompt, o.grounding, cfg.Workspace, o.tc.Title, o.tc.Description,
+		task := fmt.Sprintf(planPrompt, o.grounding, snapshot, cfg.Workspace, o.tc.Title, o.tc.Description,
 			diagBlock, dsnBlock, resume, fbBlock, repair)
 
 		res, err := o.runModelPlan(ctx, d.ReadTools, task, model, o.taskImages, attempt > 0)
@@ -463,7 +464,7 @@ func (o *run) coopPlanBriefing(diagnosis, design string) string {
 	diagBlock := diagnosisBlock(diagnosis)
 	dsnBlock := designBlock(design)
 
-	return fmt.Sprintf(planBriefing, o.grounding, o.d.Cfg.Workspace, o.tc.Title, o.tc.Description,
+	return fmt.Sprintf(planBriefing, o.grounding, o.repoSnapshotBlock(), o.d.Cfg.Workspace, o.tc.Title, o.tc.Description,
 		diagBlock, dsnBlock, resume)
 }
 
@@ -717,7 +718,7 @@ func (o *run) createSubtasks(ctx context.Context, p plan) error {
 			depIDs = append(depIDs, ids[dep])
 		}
 
-		id, err := d.Ops.CreateCard(ctx, cfg.Project, cfg.CardID, st.Title, st.Description, depIDs)
+		id, err := d.Ops.CreateCard(ctx, cfg.Project, cfg.CardID, st.Title, withTierMarker(st.Description, st.Tier), depIDs)
 		if err != nil {
 			return fmt.Errorf("create subtask %q: %w", st.Title, err)
 		}
