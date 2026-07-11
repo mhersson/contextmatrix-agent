@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
+	"github.com/mhersson/contextmatrix-agent/internal/coop"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/mhersson/contextmatrix-harness/harness"
@@ -661,4 +662,165 @@ func TestRunPlanHITLDesignReachesPlanner(t *testing.T) {
 		"planner prompt must contain the AGREED DESIGN block")
 	assert.Contains(t, planDraftPrompt, "Approach A",
 		"planner prompt must contain the brainstormed design text")
+}
+
+// coopPlanRun builds an autonomous run with co-op plan enabled and a
+// scripted engine.
+func coopPlanRun(ops *fakeOps, client llm.LLM, eng *scriptedEngine) *run {
+	d := Deps{
+		Ops:       ops,
+		Git:       &fakeGit{},
+		Client:    client,
+		Emit:      events.NewEmitter(nil, nil),
+		Registry:  reviewerRegistry(),
+		ReadTools: tools.NewRegistry(tools.NewReadTool(".")),
+		Cfg: Config{
+			Project: "proj", CardID: "CARD-1",
+			PayloadModel: "payload/model", DefaultModel: "default/model",
+			MaxTurns: 20, MaxCardCost: 2.0,
+			Coop: CoopConfig{Participants: 3, Plan: true, Rounds: 2, BudgetFactor: 0.75},
+		},
+	}
+
+	tc := cmclient.TaskContext{
+		CardID: "CARD-1", Title: "Add a config flag",
+		Description: "Add a config flag to toggle the feature.",
+	}
+
+	o := newRun(d, tc)
+	o.coopEngine = eng.run
+
+	return o
+}
+
+func TestRunPlanCoopCreatesSubtasksFromSynthesis(t *testing.T) {
+	ops := &fakeOps{createdIDs: []string{"SUB-1", "SUB-2"}}
+	llmFake := &planLLM{}
+	eng := &scriptedEngine{outcomes: []coop.Outcome{{
+		Transcript: []coop.Entry{
+			{Author: "seat-1", Lens: "feasibility/simplicity", Round: 0, Content: "proposal A"},
+			{Author: "seat-2", Lens: "architecture/extensibility", Round: 1, Content: "critique"},
+		},
+		Synthesis: goodPlanJSON,
+		Consensus: true,
+		CostUSD:   0.10,
+	}}}
+
+	o := coopPlanRun(ops, llmFake, eng)
+	require.NoError(t, runPlan(context.Background(), o))
+
+	// Subtasks come from the synthesized JSON, through the normal parser.
+	require.Len(t, ops.createCardArgs, 2)
+	assert.Equal(t, "First task", ops.createCardArgs[0].title)
+	assert.Equal(t, "Second task", ops.createCardArgs[1].title)
+	assert.Equal(t, "moderate", o.cardTier)
+
+	// The topic carried the plan knobs and the briefing content.
+	require.Len(t, eng.topics, 1)
+	topic := eng.topics[0]
+	assert.Equal(t, "plan", topic.Kind)
+	assert.True(t, topic.Blind)
+	assert.Equal(t, 2, topic.Rounds)
+	assert.Equal(t, planLenses[:3], topic.Lenses)
+	assert.Contains(t, topic.Briefing, "Add a config flag")
+	assert.Contains(t, topic.SynthesisPrompt, "JSON")
+
+	// No solo planner model call happened.
+	assert.Empty(t, llmFake.tasks, "the discussion replaced the solo planner call")
+
+	// ## Discussion recorded AFTER acceptance, naming seats and outcome.
+	joined := strings.Join(ops.bodyUpdates, "\n===\n")
+	assert.Contains(t, joined, "## Discussion")
+	assert.Contains(t, joined, "seat-1")
+	assert.Contains(t, joined, "consensus")
+}
+
+func TestRunPlanCoopRepairSucceeds(t *testing.T) {
+	ops := &fakeOps{createdIDs: []string{"SUB-1", "SUB-2"}}
+	// The moderator repair call is the only LLM call: it returns valid JSON.
+	llmFake := &planLLM{responses: []llm.Response{stopResp(goodPlanJSON, 0.02)}}
+	eng := &scriptedEngine{outcomes: []coop.Outcome{{Synthesis: "sorry, prose only", Consensus: true}}}
+
+	o := coopPlanRun(ops, llmFake, eng)
+	require.NoError(t, runPlan(context.Background(), o))
+
+	require.Len(t, ops.createCardArgs, 2, "subtasks created from the repaired synthesis")
+	require.Len(t, llmFake.tasks, 1, "exactly one moderator repair call")
+	assert.Contains(t, llmFake.tasks[0], "COULD NOT BE PARSED", "the repair prompt names the parse failure")
+}
+
+func TestRunPlanCoopParseFailureFallsBackToDraftPlan(t *testing.T) {
+	ops := &fakeOps{createdIDs: []string{"SUB-1", "SUB-2"}}
+	// Call 1: moderator repair — still junk. Call 2: solo draftPlan — good.
+	llmFake := &planLLM{responses: []llm.Response{
+		stopResp("still not json", 0.01),
+		stopResp(goodPlanJSON, 0.01),
+	}}
+	eng := &scriptedEngine{outcomes: []coop.Outcome{{Synthesis: "prose"}}}
+
+	o := coopPlanRun(ops, llmFake, eng)
+	require.NoError(t, runPlan(context.Background(), o))
+
+	require.Len(t, ops.createCardArgs, 2, "the solo fallback produced the plan")
+	assert.Len(t, llmFake.tasks, 2, "one repair attempt, then one solo planner call")
+
+	joined := strings.Join(ops.bodyUpdates, "\n===\n")
+	assert.NotContains(t, joined, "## Discussion", "no discussion record when the discussion was abandoned")
+}
+
+func TestRunPlanCoopEngineFailureFallsBackToDraftPlan(t *testing.T) {
+	ops := &fakeOps{createdIDs: []string{"SUB-1", "SUB-2"}}
+	llmFake := &planLLM{responses: []llm.Response{stopResp(goodPlanJSON, 0.01)}}
+	eng := &scriptedEngine{outcomes: []coop.Outcome{{}}, errs: []error{coop.ErrNoQuorum}}
+
+	o := coopPlanRun(ops, llmFake, eng)
+	require.NoError(t, runPlan(context.Background(), o))
+
+	require.Len(t, ops.createCardArgs, 2, "quorum failure degrades to the solo path")
+	assert.Len(t, llmFake.tasks, 1, "exactly the solo planner call")
+}
+
+func TestRunPlanCoopHITLAdjustReopensDiscussion(t *testing.T) {
+	ops := &fakeOps{createdIDs: []string{"SUB-1", "SUB-2"}}
+	inbox := &fakeInbox{msgs: []harness.UserMessage{
+		{Content: "make it two subtasks"},
+		{Content: "approve"},
+	}}
+	// LLM calls: gate classify (adjust), then gate classify (approve).
+	llmFake := &planLLM{responses: []llm.Response{
+		stopResp(`{"verdict":"adjust","feedback":"two subtasks"}`, 0.001),
+		stopResp(`{"verdict":"approve","feedback":""}`, 0.001),
+	}}
+	eng := &scriptedEngine{outcomes: []coop.Outcome{
+		{
+			Transcript: []coop.Entry{{Author: "seat-1", Lens: "feasibility/simplicity", Round: 0, Content: "proposal"}},
+			Synthesis:  goodPlanJSON,
+			Consensus:  true,
+		},
+		{
+			Transcript: []coop.Entry{{Author: "seat-1", Lens: "feasibility/simplicity", Round: 1, Content: "revised"}},
+			Synthesis:  goodPlanJSON,
+			Consensus:  true,
+		},
+	}}
+
+	o := coopPlanRun(ops, llmFake, eng)
+	o.d.Cfg.Interactive = true
+	o.d.Human = inbox
+	// Pre-existing design section on the accumulated card body (what
+	// hasDesignSection actually checks) so the creative brainstorm is
+	// skipped and both scripted inbox messages reach the plan gate.
+	o.body = "## Design\n\nA config flag."
+
+	require.NoError(t, runPlan(context.Background(), o))
+
+	require.Len(t, eng.topics, 2, "the adjust re-opened the discussion")
+	reopen := eng.topics[1]
+	assert.False(t, reopen.Blind, "re-open is a critique-style round, not blind")
+	assert.Equal(t, 1, reopen.Rounds, "one feedback round")
+	assert.Contains(t, reopen.Briefing, "two subtasks", "the human feedback rides the briefing")
+	assert.Contains(t, reopen.Briefing, "human:", "feedback appears as a human-authored entry")
+	assert.Contains(t, reopen.Briefing, "proposal", "the prior transcript tail restores context")
+
+	assert.Len(t, ops.createCardArgs, 2, "subtasks created only after the final approval")
 }

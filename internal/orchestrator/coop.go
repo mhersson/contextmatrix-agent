@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 
 	"github.com/mhersson/contextmatrix-agent/internal/coop"
@@ -261,6 +262,23 @@ func coopBearer() (string, error) {
 	}
 
 	return hex.EncodeToString(b[:]), nil
+}
+
+// formatDiscussionEntries renders transcript entries in the wire convention
+// ("[round N] author (lens): text"), one blank line between entries. Used
+// for repair re-synthesis and HITL re-open briefings.
+func formatDiscussionEntries(entries []coop.Entry) string {
+	lines := make([]string, 0, len(entries))
+
+	for _, e := range entries {
+		if e.Lens != "" {
+			lines = append(lines, fmt.Sprintf("[round %d] %s (%s): %s", e.Round, e.Author, e.Lens, e.Content))
+		} else {
+			lines = append(lines, fmt.Sprintf("[round %d] %s: %s", e.Round, e.Author, e.Content))
+		}
+	}
+
+	return strings.Join(lines, "\n\n")
 }
 
 // seatDebugWriter rewrites worker JSONL event lines from co-op seat sub-runs

@@ -730,3 +730,60 @@ Rules:
 - Be concise and concrete: position, evidence, file references. No filler,
   no restating the briefing.
 - Respond with plain text only — no JSON, no code fences around your answer.`
+
+// planBriefing is the plan-discussion problem statement. Unlike planPrompt it
+// carries NO output-format contract — seats discuss; the moderator's
+// synthesis prompt owns the strict JSON. Slots: grounding, workspace, title,
+// description, diagnosis block, design block, resume block (the same content
+// blocks draftPlan feeds the solo planner).
+const planBriefing = `%sYou are discussing how to plan a software task. Repo root: %s — paths are
+relative to it. You have read-only tools (read, grep, glob) — ground your
+positions in the real code structure.
+
+Propose how to decompose the task into subtasks: the overall approach, the
+split, ordering and dependencies, risks, and the complexity tier. Each
+subtask should be completable by a single agent in one focused session,
+include its own tests, and touch a bounded set of files. Argue from your
+assigned lens.
+
+PARENT CARD
+Title: %s
+
+Description:
+%s
+%s%s%s`
+
+// planSynthesisPrompt is the moderator's plan-synthesis instruction: it
+// carries the SAME strict JSON contract as planPrompt and instructs the
+// moderator to keep unresolved dissent as explicit risk notes on the
+// affected subtasks. The engine appends the rendered transcript after it.
+// Slots: grounding, workspace, title, description.
+const planSynthesisPrompt = `%sYou are the moderator of a planning discussion between software agents.
+Repo root: %s — paths are relative to it.
+
+Synthesize the group's final plan for the task below from the discussion
+transcript that follows. Prefer positions the group converged on. Where
+unresolved dissent remains, keep the strongest position and carry the
+dissenting concern into the affected subtask descriptions as explicit risk
+notes ("Risk: ...") — never drop dissent silently.
+
+The plan must follow these rules:
+- Each subtask must be completable by a single agent in one focused session.
+- Each subtask includes its own tests; never emit separate "write tests"
+  subtasks.
+- depends_on lists the indices of EARLIER subtasks in the array only.
+- Each subtask description states concrete actions, the files touched
+  ("Files:" line), and acceptance criteria — no placeholders.
+- Assign an overall card_tier and a per-subtask tier: "simple", "moderate",
+  "complex", or "critical".
+
+PARENT CARD
+Title: %s
+
+Description:
+%s
+
+Respond with ONLY a JSON object, no prose:
+{"card_tier":"simple|moderate|complex|critical",
+ "subtasks":[{"title":"...","description":"...","depends_on":[<earlier indices>],"tier":"simple|moderate|complex|critical"}]}
+`
