@@ -522,3 +522,29 @@ func TestDiscussNotBlindFirstRoundCarriesBriefing(t *testing.T) {
 
 	assert.True(t, out.Consensus)
 }
+
+func TestClassifyRendersOnlyCurrentRound(t *testing.T) {
+	var gotPrompt string
+
+	e := NewEngine(EngineConfig{
+		Moderate: func(_ context.Context, prompt string) (string, float64, error) {
+			gotPrompt = prompt
+
+			return "productive_disagreement", 0, nil
+		},
+	})
+
+	entries := []Entry{
+		{Author: "seat-a", Round: 1, Content: "EARLY-ROUND-ONE-MARKER"},
+		{Author: "seat-b", Round: 1, Content: "EARLY-ROUND-ONE-MARKER-B"},
+		{Author: "seat-a", Round: 2, Content: "LATEST-ROUND-TWO-MARKER"},
+		{Author: "seat-b", Round: 2, Content: "LATEST-ROUND-TWO-MARKER-B"},
+	}
+
+	_, _, err := e.classify(context.Background(), entries, 2) // round 2 starts at index 2
+	require.NoError(t, err)
+
+	assert.Contains(t, gotPrompt, "LATEST-ROUND-TWO-MARKER")
+	assert.NotContains(t, gotPrompt, "EARLY-ROUND-ONE-MARKER",
+		"the convergence check must not re-send earlier rounds")
+}
