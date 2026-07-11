@@ -94,10 +94,7 @@ func TestConcurrentCardsSeparateFiles(t *testing.T) {
 	for i := range 8 {
 		card := fmt.Sprintf("CARD-%d", i)
 
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-
+		wg.Go(func() {
 			l.Begin("p", card, "cid")
 
 			for range 50 {
@@ -105,7 +102,7 @@ func TestConcurrentCardsSeparateFiles(t *testing.T) {
 			}
 
 			l.End("p", card, 0)
-		}()
+		})
 	}
 
 	wg.Wait()
