@@ -59,6 +59,12 @@ func newWorkCmd() *cobra.Command {
 			spec.LLMType = resolveLLMValue("LLM_TYPE", src)
 			spec.GitToken = src.Get("CM_GIT_TOKEN")
 
+			// Guest specs carry bearer tokens, so they ride the secrets file —
+			// same delivery as the git token, never plain container env.
+			if spec.Coop != nil {
+				spec.Coop.Guests = coopGuestsFromSecrets(src)
+			}
+
 			// human off (io.Discard), JSONL → stdout for the service log bridge.
 			emit := events.NewEmitter(io.Discard, cmd.OutOrStdout())
 
@@ -172,6 +178,37 @@ func specFromEnv() (worker.RunSpec, error) {
 		return worker.RunSpec{}, err
 	}
 
+	coopParticipants, err := envInt("CM_COOP_PARTICIPANTS", 0)
+	if err != nil {
+		return worker.RunSpec{}, err
+	}
+
+	coopRounds, err := envInt("CM_COOP_ROUNDS", 0)
+	if err != nil {
+		return worker.RunSpec{}, err
+	}
+
+	coopBudgetFactor, err := envFloat("CM_COOP_BUDGET_FACTOR", 0)
+	if err != nil {
+		return worker.RunSpec{}, err
+	}
+
+	// Guests are NOT read here: they carry bearer tokens and ride the mounted
+	// secrets file, resolved in RunE next to the LLM key.
+	var coopSpec *protocol.CoopSpec
+
+	if coopParticipants >= 2 {
+		coopSpec = &protocol.CoopSpec{
+			Participants: coopParticipants,
+			Rounds:       coopRounds,
+			BudgetFactor: coopBudgetFactor,
+		}
+
+		if v := os.Getenv("CM_COOP_PHASES"); v != "" {
+			coopSpec.Phases = strings.Split(v, ",")
+		}
+	}
+
 	compactionEnabled := os.Getenv("CMX_COMPACTION_ENABLED") == "true"
 
 	defaultModel := os.Getenv("CMX_DEFAULT_MODEL")
@@ -234,6 +271,7 @@ func specFromEnv() (worker.RunSpec, error) {
 		Model:                     os.Getenv("CM_MODEL"),
 		Interactive:               os.Getenv("CM_INTERACTIVE") == "true",
 		BestOfN:                   bestOfN,
+		Coop:                      coopSpec,
 		BashTimeoutMax:            bashTimeoutMax,
 		ToolOutputMax:             toolOutputMax,
 		MaxTurns:                  maxTurns,
@@ -345,4 +383,24 @@ func dialectFromType(s string) llm.Dialect {
 	}
 
 	return llm.DialectOpenRouter
+}
+
+// coopGuestsFromSecrets parses the CM_COOP_GUESTS JSON ([]protocol.GuestSpec)
+// from the mounted secrets file. Guests carry bearer tokens, so they ride the
+// secrets mount, never plain container env. A parse failure degrades to no
+// guests — a discussion must never fail the run.
+func coopGuestsFromSecrets(src *secrets.Source) []protocol.GuestSpec {
+	raw := src.Get("CM_COOP_GUESTS")
+	if raw == "" {
+		return nil
+	}
+
+	var guests []protocol.GuestSpec
+	if err := json.Unmarshal([]byte(raw), &guests); err != nil {
+		slog.Warn("CM_COOP_GUESTS parse failed; discussion runs without guests", "error", err)
+
+		return nil
+	}
+
+	return guests
 }

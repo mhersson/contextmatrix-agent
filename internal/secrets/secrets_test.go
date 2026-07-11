@@ -118,3 +118,34 @@ func TestWriteEnvFileDeterministic(t *testing.T) {
 		"LLM_API_KEY=llm-key\nLLM_BASE_URL=https://your-llm-endpoint.example/v1\nLLM_TYPE=openai\nCM_GIT_TOKEN=tok123\nANOTHER_KEY=another-val\nEXTRA_SECRET=extra-val\n",
 		string(first))
 }
+
+// TestEnvFileCarriesCoopGuests pins the refresh-safe guest delivery: guests
+// are part of endpointVals, so BOTH the initial Provision write and every
+// token-refresh rewrite emit the CM_COOP_GUESTS line, and the worker-side
+// Source reads it back verbatim.
+func TestEnvFileCarriesCoopGuests(t *testing.T) {
+	t.Parallel()
+
+	guestJSON := `[{"name":"laptop","url":"http://10.0.0.5:8484","token":"guest-secret"}]`
+
+	vals := endpointVals("git-tok", EndpointSecrets{
+		APIKey:     "k",
+		CoopGuests: guestJSON,
+	})
+	//nolint:testifylint // byte-exact round-trip check (verbatim passthrough), not semantic JSON equality
+	assert.Equal(t, guestJSON, vals["CM_COOP_GUESTS"])
+
+	path := filepath.Join(t.TempDir(), "env")
+	require.NoError(t, WriteEnvFile(path, vals))
+
+	src, err := Open(path)
+	require.NoError(t, err)
+	//nolint:testifylint // byte-exact round-trip check (verbatim passthrough), not semantic JSON equality
+	assert.Equal(t, guestJSON, src.Get("CM_COOP_GUESTS"))
+	assert.Equal(t, "git-tok", src.Get("CM_GIT_TOKEN"))
+
+	// Empty guests: the key must be absent from the file entirely.
+	valsNone := endpointVals("git-tok", EndpointSecrets{APIKey: "k"})
+	_, present := valsNone["CM_COOP_GUESTS"]
+	assert.False(t, present, "empty guests must not write an empty CM_COOP_GUESTS line")
+}

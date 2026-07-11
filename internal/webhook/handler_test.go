@@ -1731,3 +1731,109 @@ func TestTrigger_RejectsAndReportsFailedWhenNoCredentialSourceAtAll(t *testing.T
 	assert.Equal(t, "CM did not provision a git token", statuses[0][2])
 	assert.Empty(t, h.exec.launchedSpecs(), "no container launch when the payload provisions nothing")
 }
+
+// TestBuildLaunchSpec_Coop pins the CM_COOP_* env emission, mirroring the
+// Best-of-N pattern: scalar knobs ride plain env; guest specs (bearer tokens
+// inside) never do — they travel only via the per-run secrets file.
+func TestBuildLaunchSpec_Coop(t *testing.T) {
+	newServer := func() *Server {
+		return NewServer(Config{
+			APIKey:    "k",
+			Executor:  &fakeExecutor{},
+			Tracker:   executor.NewTracker(1),
+			LaunchEnv: LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"},
+		})
+	}
+
+	t.Run("emits scalar env when coop is on", func(t *testing.T) {
+		s := newServer()
+
+		spec := s.buildLaunchSpec(protocol.TriggerPayload{
+			CardID: "C1", Project: "p",
+			Coop: &protocol.CoopSpec{
+				Participants: 3,
+				Phases:       []string{"plan", "review"},
+				Rounds:       2,
+				BudgetFactor: 0.75,
+				Guests:       []protocol.GuestSpec{{Name: "laptop", URL: "http://10.0.0.5:8484", Token: "guest-secret"}},
+			},
+		}, "corr", "")
+
+		assert.Contains(t, spec.Env, "CM_COOP_PARTICIPANTS=3")
+		assert.Contains(t, spec.Env, "CM_COOP_PHASES=plan,review")
+		assert.Contains(t, spec.Env, "CM_COOP_ROUNDS=2")
+		assert.Contains(t, spec.Env, "CM_COOP_BUDGET_FACTOR=0.75")
+
+		for _, e := range spec.Env {
+			assert.NotContains(t, e, "guest-secret", "guest tokens must never ride plain container env")
+			assert.NotContains(t, e, "CM_COOP_GUESTS", "guest specs must never ride plain container env")
+		}
+	})
+
+	t.Run("omits all coop env when absent", func(t *testing.T) {
+		s := newServer()
+
+		spec := s.buildLaunchSpec(protocol.TriggerPayload{CardID: "C1", Project: "p"}, "corr", "")
+
+		for _, e := range spec.Env {
+			assert.NotContains(t, e, "CM_COOP", "no coop env for a non-coop run")
+		}
+	})
+
+	t.Run("omits coop env when participants below two", func(t *testing.T) {
+		s := newServer()
+
+		spec := s.buildLaunchSpec(protocol.TriggerPayload{
+			CardID: "C1", Project: "p",
+			Coop: &protocol.CoopSpec{Participants: 1},
+		}, "corr", "")
+
+		for _, e := range spec.Env {
+			assert.NotContains(t, e, "CM_COOP", "participants < 2 is off")
+		}
+	})
+}
+
+// TestRunEndpointCarriesCoopGuests pins the guest delivery seam: guest specs
+// land in EndpointSecrets.CoopGuests so the per-run secrets writer (initial
+// Provision AND every refresh rewrite) emits the CM_COOP_GUESTS line.
+func TestRunEndpointCarriesCoopGuests(t *testing.T) {
+	s := NewServer(Config{
+		APIKey:    "k",
+		Executor:  &fakeExecutor{},
+		Tracker:   executor.NewTracker(1),
+		LaunchEnv: LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"},
+	})
+
+	t.Run("guests marshal alongside the llm endpoint", func(t *testing.T) {
+		e := s.runEndpoint(protocol.TriggerPayload{
+			LLMEndpoint: &protocol.LLMEndpoint{Type: "openai", BaseURL: "https://llm.example/v1", APIKey: "key"},
+			Coop: &protocol.CoopSpec{
+				Participants: 3,
+				Guests:       []protocol.GuestSpec{{Name: "laptop", URL: "http://10.0.0.5:8484", Token: "guest-secret"}},
+			},
+		})
+
+		assert.Equal(t, "key", e.APIKey)
+		assert.JSONEq(t,
+			`[{"name":"laptop","url":"http://10.0.0.5:8484","token":"guest-secret"}]`,
+			e.CoopGuests)
+	})
+
+	t.Run("guests survive a nil llm endpoint", func(t *testing.T) {
+		e := s.runEndpoint(protocol.TriggerPayload{
+			Coop: &protocol.CoopSpec{
+				Participants: 2,
+				Guests:       []protocol.GuestSpec{{Name: "laptop", URL: "http://10.0.0.5:8484"}},
+			},
+		})
+
+		assert.Empty(t, e.APIKey)
+		assert.NotEmpty(t, e.CoopGuests)
+	})
+
+	t.Run("no guests yields empty string", func(t *testing.T) {
+		e := s.runEndpoint(protocol.TriggerPayload{Coop: &protocol.CoopSpec{Participants: 3}})
+		assert.Empty(t, e.CoopGuests)
+	})
+}

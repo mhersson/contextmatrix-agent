@@ -51,8 +51,14 @@ type RunSpec struct {
 	Interactive bool   // CM_INTERACTIVE ("true")
 	BestOfN     int    // CM_BEST_OF_N; >= 2 races N candidate implementations (0 = normal run)
 	Model       string // CM_MODEL (optional; honored if catalog-resolvable)
-	MCPURL      string // CM_MCP_URL (required)
-	MCPAPIKey   string // CM_MCP_API_KEY (required)
+
+	// Coop configures co-op discussions for this run: scalar knobs from
+	// CM_COOP_* env, guest specs (bearer tokens inside) from the mounted
+	// secrets file. nil = co-op off.
+	Coop *protocol.CoopSpec
+
+	MCPURL    string // CM_MCP_URL (required)
+	MCPAPIKey string // CM_MCP_API_KEY (required)
 
 	LLMKey     string // from /run/cm-secrets/env via the secrets source
 	LLMBaseURL string // from /run/cm-secrets/env via the secrets source
