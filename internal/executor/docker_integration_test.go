@@ -66,6 +66,25 @@ func (r *exitRecorder) wait(t *testing.T, d time.Duration) int64 {
 	}
 }
 
+// startRecorder captures the single onStart callback.
+type startRecorder struct {
+	mu          sync.Mutex
+	fired       bool
+	project     string
+	cardID      string
+	containerID string
+}
+
+func (r *startRecorder) onStart(project, cardID, containerID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.fired = true
+	r.project = project
+	r.cardID = cardID
+	r.containerID = containerID
+}
+
 // logCollector accumulates onLog lines.
 type logCollector struct {
 	mu    sync.Mutex
@@ -111,10 +130,12 @@ func TestIntegration_LaunchEchoAndExit(t *testing.T) {
 
 	exits := newExitRecorder()
 	logs := &logCollector{}
+	starts := &startRecorder{}
 	m := metrics.New()
 
 	exec := newTestExecutor(t, Config{
 		ContainerTimeout: 30 * time.Second,
+		OnStart:          starts.onStart,
 		OnExit:           exits.onExit,
 		OnLog:            logs.onLog,
 		Metrics:          m,
@@ -142,6 +163,13 @@ func TestIntegration_LaunchEchoAndExit(t *testing.T) {
 
 	run, ok := exec.tracker.Get(project, card)
 	require.True(t, ok, "run must be tracked after launch")
+
+	starts.mu.Lock()
+	assert.True(t, starts.fired, "OnStart must fire on launch")
+	assert.Equal(t, project, starts.project)
+	assert.Equal(t, card, starts.cardID)
+	assert.Equal(t, run.ContainerID, starts.containerID)
+	starts.mu.Unlock()
 
 	// Inspect: the container must carry the agent labels.
 	info, err := exec.docker.ContainerInspect(ctx, run.ContainerID)
