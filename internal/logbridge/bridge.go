@@ -241,6 +241,17 @@ func (b *Bridge) mapEvent(kind string, data map[string]any) (entry protocol.LogE
 			Content: strField(data, "error"),
 		}, false, false
 
+	case "discussion":
+		// Co-op live transcript: briefing, round utterances, moderator
+		// notices, synthesis — speaker-labeled via Agent. Seat sub-run
+		// events arrive as "seat_debug" and fall through to the default
+		// skip, keeping them off the live stream by construction.
+		return protocol.LogEntry{
+			Type:    "text",
+			Content: strField(data, "content"),
+			Agent:   strField(data, "agent"),
+		}, false, false
+
 	// Transcript-only kinds — not bridged.
 	case "model_request", "tool_result", "tool_repair", "user_input", "verification":
 		return protocol.LogEntry{}, false, true

@@ -587,3 +587,55 @@ func TestHubSubscribers(t *testing.T) {
 		}
 	})
 }
+
+// TestDiscussionMapping pins the co-op live-transcript bridging: kind
+// "discussion" maps to a text entry carrying the speaker in Agent, while the
+// seat-debug kind is never bridged.
+func TestDiscussionMapping(t *testing.T) {
+	t.Parallel()
+
+	t.Run("discussion → text with agent", func(t *testing.T) {
+		t.Parallel()
+
+		hub := logbridge.NewHub()
+		_, ch := hub.Subscribe("")
+		bridge := logbridge.New(hub, nil, func(string, string, bool) {})
+
+		bridge.BridgeLine(testProject, testCard, makeEvent("discussion", map[string]any{
+			"agent":   "seat-2",
+			"lens":    "security",
+			"round":   float64(1),
+			"content": "the token comparison is not constant-time",
+		}), false)
+
+		var got protocol.LogEntry
+		select {
+		case got = <-ch:
+		case <-time.After(100 * time.Millisecond):
+			t.Fatal("expected a bridged discussion entry (timeout)")
+		}
+
+		assert.Equal(t, "text", got.Type)
+		assert.Equal(t, "seat-2", got.Agent)
+		assert.Equal(t, "the token comparison is not constant-time", got.Content)
+	})
+
+	t.Run("seat_debug → skipped", func(t *testing.T) {
+		t.Parallel()
+
+		hub := logbridge.NewHub()
+		_, ch := hub.Subscribe("")
+		bridge := logbridge.New(hub, nil, func(string, string, bool) {})
+
+		bridge.BridgeLine(testProject, testCard, makeEvent("seat_debug", map[string]any{
+			"seat_kind": "tool_call",
+			"content":   "internal seat chatter",
+		}), false)
+
+		select {
+		case e := <-ch:
+			t.Errorf("seat_debug must not be bridged; got type=%q", e.Type)
+		case <-time.After(30 * time.Millisecond):
+		}
+	})
+}
