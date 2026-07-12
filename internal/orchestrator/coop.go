@@ -311,14 +311,17 @@ func (o *run) coopSeatRunner(sink *seatDebugSink, perTurnCap float64) coop.SeatR
 			if reportErr := o.d.Ops.ReportUsage(ctx, o.d.Cfg.CardID, used,
 				fres.PromptTokens, fres.CompletionTokens, fres.TotalCostUSD); reportErr != nil {
 				slog.Warn("coop: report seat usage failed",
-					"card_id", o.d.Cfg.CardID, "seat", seat.Name, "error", reportErr)
+					"card_id", o.d.Cfg.CardID, "seat", seat.Name, "call", "backstop", "error", reportErr)
 			}
 
 			if ferr == nil {
 				out = fres.Output
 				msgs = fres.Messages
-				res.TotalCostUSD += fres.TotalCostUSD
 			}
+
+			// Billed either way; keep the engine's discussion budget coherent
+			// with the ledger even when the backstop call errors.
+			res.TotalCostUSD += fres.TotalCostUSD
 		}
 
 		mu.Lock()

@@ -375,6 +375,45 @@ func TestCoopSeatRunnerForcesFinalAnswerOnEmptyOutput(t *testing.T) {
 	assert.Zero(t, counts[len(counts)-1], "backstop call must offer no tools")
 }
 
+// TestCoopSeatRunnerBackstopFailureFallsBackToAbsence drives the ferr != nil
+// branch of the empty-output backstop: same primary shape as
+// TestCoopSeatRunnerForcesFinalAnswerOnEmptyOutput (stops max_cost with
+// empty output), but this time the backstop call itself errors (e.g. a
+// transport failure). The runner must still degrade to an absent position
+// rather than failing the whole discussion.
+func TestCoopSeatRunnerBackstopFailureFallsBackToAbsence(t *testing.T) {
+	burn := llm.Response{
+		FinishReason: "tool_calls",
+		Usage:        llm.Usage{Cost: 0.30},
+		ToolCalls: []llm.ToolCall{{
+			ID: "c1", Type: "function",
+			Function: llm.FunctionCall{Name: "nope", Arguments: "{}"},
+		}},
+	}
+	// Only the primary turn is scripted; errAfter: 2 makes the second call
+	// (the backstop) return errPlanLLM instead of a response.
+	client := &planLLM{responses: []llm.Response{burn}, errAfter: 2}
+	o := coopTestRun(&fakeOps{}, CoopConfig{Participants: 2}, 10)
+	o.d.Client = client
+
+	runner := o.coopSeatRunner(&seatDebugSink{w: io.Discard}, 0.25)
+
+	out, cost, err := runner(t.Context(), coop.SeatConfig{Name: "seat-1", Lens: "risk", Model: "m/1"}, nil, "briefing")
+	require.NoError(t, err, "a failed backstop must degrade to absence, not fail the discussion")
+	assert.Empty(t, out)
+
+	// The harness only adds Usage.Cost on a successful response (see
+	// harness.Run), so an erroring call can never carry cost through
+	// fres.TotalCostUSD — the returned discussion cost is exactly the
+	// primary run's billed spend either way. Fix 1's unconditional
+	// `res.TotalCostUSD += fres.TotalCostUSD` is validated by inspection
+	// and the other cost-carrying paths; this test's essential assertions
+	// are the graceful degrade above (out=="", err==nil).
+	assert.InDelta(t, 0.30, cost, 1e-9)
+
+	require.Len(t, client.toolCountsSeen(), 2, "primary turn plus one backstop attempt")
+}
+
 func TestTrimSeatContext(t *testing.T) {
 	big := strings.Repeat("x", seatContextMaxBytes)
 	msgs := []llm.Message{
