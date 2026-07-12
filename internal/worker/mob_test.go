@@ -8,17 +8,17 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestCoopConfigMapping(t *testing.T) {
+func TestMobConfigMapping(t *testing.T) {
 	tests := []struct {
 		name string
-		spec *protocol.CoopSpec
+		spec *protocol.MobSpec
 		want orchestrator.MobConfig
 	}{
 		{"nil spec is off", nil, orchestrator.MobConfig{}},
-		{"participants below two is off", &protocol.CoopSpec{Participants: 1}, orchestrator.MobConfig{}},
+		{"participants below two is off", &protocol.MobSpec{Participants: 1}, orchestrator.MobConfig{}},
 		{
 			"full spec maps phases and guests",
-			&protocol.CoopSpec{
+			&protocol.MobSpec{
 				Participants: 3,
 				Phases:       []string{"plan", "review"},
 				Rounds:       3,
@@ -32,32 +32,32 @@ func TestCoopConfigMapping(t *testing.T) {
 		},
 		{
 			"zero rounds and factor take spec defaults",
-			&protocol.CoopSpec{Participants: 2, Phases: []string{"plan"}},
+			&protocol.MobSpec{Participants: 2, Phases: []string{"plan"}},
 			orchestrator.MobConfig{Participants: 2, Plan: true, Rounds: 2, BudgetFactor: 0.75},
 		},
 		{
 			"empty phases default to plan plus review",
-			&protocol.CoopSpec{Participants: 2, Rounds: 1, BudgetFactor: 0.6},
+			&protocol.MobSpec{Participants: 2, Rounds: 1, BudgetFactor: 0.6},
 			orchestrator.MobConfig{Participants: 2, Plan: true, Review: true, Rounds: 1, BudgetFactor: 0.6},
 		},
 		{
 			"unknown phases ignored, execute not mapped in this plan",
-			&protocol.CoopSpec{Participants: 2, Phases: []string{"review", "execute", "bogus"}, Rounds: 1, BudgetFactor: 0.6},
+			&protocol.MobSpec{Participants: 2, Phases: []string{"review", "execute", "bogus"}, Rounds: 1, BudgetFactor: 0.6},
 			orchestrator.MobConfig{Participants: 2, Review: true, Rounds: 1, BudgetFactor: 0.6},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, coopConfig(tt.spec))
+			assert.Equal(t, tt.want, mobConfig(tt.spec))
 		})
 	}
 }
 
-func TestCoopGuestTokens(t *testing.T) {
-	assert.Nil(t, coopGuestTokens(nil))
+func TestMobGuestTokens(t *testing.T) {
+	assert.Nil(t, mobGuestTokens(nil))
 
-	spec := &protocol.CoopSpec{
+	spec := &protocol.MobSpec{
 		Participants: 2,
 		Guests: []protocol.GuestSpec{
 			{Name: "a", URL: "http://a", Token: "tok-a"},
@@ -65,5 +65,5 @@ func TestCoopGuestTokens(t *testing.T) {
 			{Name: "c", URL: "http://c", Token: "tok-c"},
 		},
 	}
-	assert.Equal(t, []string{"tok-a", "tok-c"}, coopGuestTokens(spec))
+	assert.Equal(t, []string{"tok-a", "tok-c"}, mobGuestTokens(spec))
 }

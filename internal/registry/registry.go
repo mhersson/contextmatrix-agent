@@ -308,7 +308,7 @@ func (r *Registry) SelectReviewPanel(in SelectInput, n int) []ModelSpec {
 	return panel
 }
 
-// SelectDiscussionPanel returns n distinct models for co-op discussion seats.
+// SelectDiscussionPanel returns n distinct models for mob session discussion seats.
 // It is the review-panel diversity walk by construction — distinct-first with
 // wrap-around when the pool runs dry — honoring the caller's exclusions
 // (review discussions exclude the models that coded the card). It exists as a

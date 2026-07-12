@@ -432,51 +432,51 @@ func TestSpecFromEnv_Verify(t *testing.T) {
 	})
 }
 
-func TestSpecFromEnv_Coop(t *testing.T) {
-	t.Run("absent coop yields nil", func(t *testing.T) {
+func TestSpecFromEnv_Mob(t *testing.T) {
+	t.Run("absent mob yields nil", func(t *testing.T) {
 		setRequired(t)
 
 		spec, err := specFromEnv()
 		require.NoError(t, err)
-		assert.Nil(t, spec.Coop, "no CM_COOP_* env must leave Coop nil (co-op off)")
+		assert.Nil(t, spec.Mob, "no CM_MOB_* env must leave Mob nil (mob session off)")
 	})
 
 	t.Run("round trip", func(t *testing.T) {
 		setRequired(t)
-		t.Setenv("CM_COOP_PARTICIPANTS", "3")
-		t.Setenv("CM_COOP_PHASES", "plan,review")
-		t.Setenv("CM_COOP_ROUNDS", "2")
-		t.Setenv("CM_COOP_BUDGET_FACTOR", "0.75")
+		t.Setenv("CM_MOB_PARTICIPANTS", "3")
+		t.Setenv("CM_MOB_PHASES", "plan,review")
+		t.Setenv("CM_MOB_ROUNDS", "2")
+		t.Setenv("CM_MOB_BUDGET_FACTOR", "0.75")
 
 		spec, err := specFromEnv()
 		require.NoError(t, err)
-		require.NotNil(t, spec.Coop)
-		assert.Equal(t, 3, spec.Coop.Participants)
-		assert.Equal(t, []string{"plan", "review"}, spec.Coop.Phases)
-		assert.Equal(t, 2, spec.Coop.Rounds)
-		assert.InDelta(t, 0.75, spec.Coop.BudgetFactor, 1e-9)
+		require.NotNil(t, spec.Mob)
+		assert.Equal(t, 3, spec.Mob.Participants)
+		assert.Equal(t, []string{"plan", "review"}, spec.Mob.Phases)
+		assert.Equal(t, 2, spec.Mob.Rounds)
+		assert.InDelta(t, 0.75, spec.Mob.BudgetFactor, 1e-9)
 	})
 
 	t.Run("participants below two yields nil", func(t *testing.T) {
 		setRequired(t)
-		t.Setenv("CM_COOP_PARTICIPANTS", "1")
+		t.Setenv("CM_MOB_PARTICIPANTS", "1")
 
 		spec, err := specFromEnv()
 		require.NoError(t, err)
-		assert.Nil(t, spec.Coop, "participants < 2 is off; CM never sends it, be defensive")
+		assert.Nil(t, spec.Mob, "participants < 2 is off; CM never sends it, be defensive")
 	})
 
 	t.Run("invalid participants errors", func(t *testing.T) {
 		setRequired(t)
-		t.Setenv("CM_COOP_PARTICIPANTS", "x")
+		t.Setenv("CM_MOB_PARTICIPANTS", "x")
 
 		_, err := specFromEnv()
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "CM_COOP_PARTICIPANTS")
+		assert.Contains(t, err.Error(), "CM_MOB_PARTICIPANTS")
 	})
 }
 
-func TestCoopGuestsFromSecrets(t *testing.T) {
+func TestMobGuestsFromSecrets(t *testing.T) {
 	openSource := func(t *testing.T, content string) *secrets.Source {
 		t.Helper()
 
@@ -491,10 +491,10 @@ func TestCoopGuestsFromSecrets(t *testing.T) {
 
 	t.Run("parses guest specs", func(t *testing.T) {
 		src := openSource(t,
-			"CM_GIT_TOKEN=tok\nCM_COOP_GUESTS="+
+			"CM_GIT_TOKEN=tok\nCM_MOB_GUESTS="+
 				`[{"name":"laptop","url":"http://10.0.0.5:8484","token":"guest-secret"}]`+"\n")
 
-		guests := coopGuestsFromSecrets(src)
+		guests := mobGuestsFromSecrets(src)
 		require.Len(t, guests, 1)
 		assert.Equal(t, "laptop", guests[0].Name)
 		assert.Equal(t, "http://10.0.0.5:8484", guests[0].URL)
@@ -503,12 +503,12 @@ func TestCoopGuestsFromSecrets(t *testing.T) {
 
 	t.Run("absent key yields nil", func(t *testing.T) {
 		src := openSource(t, "CM_GIT_TOKEN=tok\n")
-		assert.Nil(t, coopGuestsFromSecrets(src))
+		assert.Nil(t, mobGuestsFromSecrets(src))
 	})
 
 	t.Run("malformed json degrades to nil", func(t *testing.T) {
-		src := openSource(t, "CM_COOP_GUESTS=not-json\n")
-		assert.Nil(t, coopGuestsFromSecrets(src), "a broken guest list must never fail the run")
+		src := openSource(t, "CM_MOB_GUESTS=not-json\n")
+		assert.Nil(t, mobGuestsFromSecrets(src), "a broken guest list must never fail the run")
 	})
 }
 

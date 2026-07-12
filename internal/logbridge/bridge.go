@@ -242,7 +242,7 @@ func (b *Bridge) mapEvent(kind string, data map[string]any) (entry protocol.LogE
 		}, false, false
 
 	case "discussion":
-		// Co-op live transcript: briefing, round utterances, moderator
+		// Mob session live transcript: briefing, round utterances, moderator
 		// notices, synthesis — speaker-labeled via Agent. Seat sub-run
 		// events arrive as "seat_debug" and fall through to the default
 		// skip, keeping them off the live stream by construction.
