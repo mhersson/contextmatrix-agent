@@ -50,6 +50,12 @@ const caCertMountPath = "/run/cm-ca/ca.crt" //nolint:gosec // path, not a creden
 // pathological container cannot pin the host heap with one unbounded line.
 const scannerBufferMax = 1 << 20 // 1 MiB
 
+// killGraceTimeout is how long Kill waits for a container to exit on its
+// own before SIGKILL. The terminal-state cleanup fires the moment a card
+// completes; killing the worker mid-teardown records exit 137 for a
+// successful run and labels its duration metric "killed".
+const killGraceTimeout = 3 * time.Second
+
 // Image pull policies.
 const (
 	PullNever        = "never"
@@ -65,6 +71,29 @@ var (
 	// ErrNotFound is returned by Kill when no run is tracked for the key.
 	ErrNotFound = errors.New("executor: container not found")
 )
+
+// containerWaiter is the one-method slice of the Docker API Kill needs to
+// observe a self-exit, narrow so tests can fake it.
+type containerWaiter interface {
+	ContainerWait(ctx context.Context, containerID string, condition container.WaitCondition) (<-chan container.WaitResponse, <-chan error)
+}
+
+// waitForSelfExit reports whether the container left the running state on
+// its own within grace. Wait errors and the grace timeout both report
+// false — the caller then kills.
+func waitForSelfExit(ctx context.Context, docker containerWaiter, containerID string, grace time.Duration) bool {
+	waitCtx, cancel := context.WithTimeout(ctx, grace)
+	defer cancel()
+
+	waitCh, errCh := docker.ContainerWait(waitCtx, containerID, container.WaitConditionNotRunning)
+
+	select {
+	case <-waitCh:
+		return true
+	case <-errCh:
+		return false
+	}
+}
 
 // LaunchSpec is the fully-resolved description of one container to launch. The
 // caller has already applied any payload image override and assembled Env and
@@ -475,6 +504,12 @@ func (e *DockerExecutor) Kill(ctx context.Context, project, cardID string) error
 	run, ok := e.tracker.Get(project, cardID)
 	if !ok {
 		return fmt.Errorf("%w: %s/%s", ErrNotFound, project, cardID)
+	}
+
+	// Give the worker a short window to exit on its own; the reason is only
+	// recorded (and SIGKILL sent) when it does not.
+	if waitForSelfExit(ctx, e.docker, run.ContainerID, killGraceTimeout) {
+		return nil
 	}
 
 	e.tracker.SetReason(project, cardID, metrics.OutcomeKilled)
