@@ -209,3 +209,20 @@ func TestPromptsCarryNeutralisedStrings(t *testing.T) {
 	assert.Contains(t, planPrompt, "keeps the tree passing its checks",
 		"the plan prompt must keep the neutral 'passing its checks' wording")
 }
+
+// TestFencedDiff pins the markdown fencing of diffs relayed to the board
+// chat: one ```diff block, trailing newline normalized, and a fence that
+// grows past any backtick run embedded in the diff so it cannot break out.
+func TestFencedDiff(t *testing.T) {
+	plain := "diff --git a/f.go b/f.go\n-old\n+new\n"
+	assert.Equal(t, "```diff\ndiff --git a/f.go b/f.go\n-old\n+new\n```", fencedDiff(plain))
+
+	// A diff touching a markdown file can itself contain a ``` fence; the
+	// wrapper must be strictly longer so renderers keep it one block.
+	embedded := "diff --git a/README.md b/README.md\n+```go\n+fmt.Println()\n+```\n"
+	out := fencedDiff(embedded)
+	assert.True(t, strings.HasPrefix(out, "````diff\n"), "fence must outgrow the embedded ``` run: %q", out)
+	assert.True(t, strings.HasSuffix(out, "\n````"), "closing fence must match the opening one: %q", out)
+
+	assert.Equal(t, "```diff\n\n```", fencedDiff(""), "empty diff still yields a well-formed block")
+}

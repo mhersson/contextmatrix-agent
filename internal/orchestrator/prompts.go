@@ -690,6 +690,20 @@ func priorFindingsBlock(findings string) string {
 	return "\nPRIOR FINDINGS (already raised — verify resolution, do not import new scope):\n" + findings + "\n"
 }
 
+// fencedDiff wraps a git diff in a ```diff code fence so markdown surfaces —
+// the co-op briefing relayed to the board chat in particular — render it as
+// one code block instead of interpreting -/+ lines as bullet lists. The fence
+// is extended past the longest backtick run inside the diff so embedded
+// fences cannot break out.
+func fencedDiff(diff string) string {
+	fence := "```"
+	for strings.Contains(diff, fence) {
+		fence += "`"
+	}
+
+	return fence + "diff\n" + strings.TrimRight(diff, "\n") + "\n" + fence
+}
+
 // designBlock renders the agreed design from the brainstorming dialogue into the
 // planner prompt so the first plan draft is grounded on it. Empty design (no
 // brainstorm ran — autonomous, non-creative, or a card that already had a design)
@@ -798,7 +812,9 @@ Respond with ONLY a JSON object, no prose:
 
 // reviewBriefing is the review-discussion problem statement: the SAME
 // diff-and-prior-findings scope the specialist fan-out reviews. Slots: title,
-// description, branch diff, prior-findings block.
+// description, branch diff (pre-wrapped by fencedDiff — the briefing is
+// relayed to the board chat, where a bare diff renders as bullet soup),
+// prior-findings block.
 const reviewBriefing = `You are discussing a code review. Review only the change set in the diff
 below; read surrounding code for context as needed. Every finding must cite a
 file in the change set. Commit status is never a review concern. Judge the
