@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"strings"
 
@@ -492,7 +491,7 @@ func (o *run) coopResynthesize(ctx context.Context, t coop.Topic, out coop.Outco
 		"\n\nDISCUSSION TRANSCRIPT\n" + formatDiscussionEntries(out.Transcript) +
 		"\n" + repairBlock(parseErr)
 
-	moderate := o.coopModeratorRunner(events.NewEmitter(io.Discard, &seatDebugWriter{w: o.seatDebug}))
+	moderate := o.coopModeratorRunner(&seatDebugSink{w: o.seatDebug})
 
 	text, _, err := moderate(ctx, prompt)
 

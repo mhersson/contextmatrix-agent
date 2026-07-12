@@ -732,6 +732,10 @@ var (
 	documentWrapUpMessage = fmt.Sprintf("%d turns remain. Call the finish tool now with your docs commit message (whether or not you wrote documentation) and make no further tool calls.", wrapUpTurns)
 
 	planWrapUpMessage = fmt.Sprintf("%d turns remain. Stop investigating now and output your final answer: ONLY the JSON plan object described above, built from the analysis you already have. Make no further tool calls, no prose, no code fences.", wrapUpTurns)
+
+	seatWrapUpMessage = fmt.Sprintf("%d turns remain in this round. Stop exploring and state your position now, built only from what you have already read — plain text, no further tool calls.", coopSeatWrapUpTurns)
+
+	seatForcedFinalPrompt = "Your exploration budget for this round is exhausted. State your position now, built only from what you have already read — plain text, concise. If you could not form a position, say in one sentence what you were missing."
 )
 
 // seatSystemPrompt is the per-seat co-op discussion persona. The two %s slots

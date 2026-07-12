@@ -14,6 +14,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/coop"
 	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/mhersson/contextmatrix-harness/harness"
+	"github.com/mhersson/contextmatrix-harness/llm"
 	"github.com/mhersson/contextmatrix-harness/tools"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -249,29 +250,198 @@ func TestSeatConfigCapsToolOutput(t *testing.T) {
 	assert.InDelta(t, 0.10, cfg.MaxCostUSD, 1e-9)
 }
 
+func TestSeatConfigSetsWrapUpNudge(t *testing.T) {
+	cfg := seatConfig(harness.Config{}, coop.SeatConfig{Name: "seat-1", Lens: "risk"}, 0.25, nil)
+
+	assert.Equal(t, coopSeatWrapUpTurns, cfg.WrapUpTurns)
+	assert.Equal(t, seatWrapUpMessage, cfg.WrapUpMessage)
+}
+
 func TestSeatDebugWriterRewritesKinds(t *testing.T) {
 	var buf bytes.Buffer
 
-	w := &seatDebugWriter{w: &buf}
+	sink := &seatDebugSink{w: &buf}
+	w := sink.named("seat-2")
 
-	emit := events.NewEmitter(io.Discard, w)
-	emit.Emit(events.ToolCallKind, map[string]any{"name": "read"})
-
-	var got map[string]any
-	require.NoError(t, json.Unmarshal(buf.Bytes(), &got))
-	assert.Equal(t, "seat_debug", got["kind"], "bridged kinds must be rewritten off the live stream")
-	assert.Equal(t, "tool_call", got["seat_kind"], "the original kind is preserved for debugging")
-
-	data, isMap := got["data"].(map[string]any)
-	require.True(t, isMap)
-	assert.Equal(t, "read", data["name"], "event payload passes through untouched")
-
-	// Non-JSON lines pass through verbatim (defensive; the emitter only
-	// writes JSON lines).
-	buf.Reset()
-
-	n, err := w.Write([]byte("not json\n"))
+	_, err := w.Write([]byte(`{"kind":"tool_call","data":{"name":"read"}}` + "\n"))
 	require.NoError(t, err)
-	assert.Equal(t, len("not json\n"), n)
-	assert.Equal(t, "not json\n", buf.String())
+
+	var m map[string]any
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &m))
+	assert.Equal(t, "seat_debug", m["kind"])
+	assert.Equal(t, "tool_call", m["seat_kind"])
+	assert.Equal(t, "seat-2", m["seat"])
+}
+
+func TestSeatDebugWriterPassesNonJSONThrough(t *testing.T) {
+	var buf bytes.Buffer
+
+	w := (&seatDebugSink{w: &buf}).named("moderator")
+
+	_, err := w.Write([]byte("plain log line\n"))
+	require.NoError(t, err)
+	assert.Equal(t, "plain log line\n", buf.String())
+}
+
+func TestCoopModeratorRunnerIsToolless(t *testing.T) {
+	client := &planLLM{responses: []llm.Response{stopResp("VERDICT", 0.01)}}
+	o := coopTestRun(&fakeOps{}, CoopConfig{Participants: 2}, 10)
+	o.d.Client = client
+
+	runner := o.coopModeratorRunner(&seatDebugSink{w: io.Discard})
+
+	out, cost, err := runner(t.Context(), "synthesize this")
+	require.NoError(t, err)
+	assert.Equal(t, "VERDICT", out)
+	assert.InDelta(t, 0.01, cost, 1e-9)
+
+	for _, n := range client.toolCountsSeen() {
+		assert.Zero(t, n, "moderator calls must offer no tools")
+	}
+}
+
+func TestCoopSeatRunnerPersistsContextAcrossRounds(t *testing.T) {
+	client := &planLLM{responses: []llm.Response{
+		stopResp("position A", 0.01),
+		stopResp("critique B", 0.01),
+	}}
+	o := coopTestRun(&fakeOps{}, CoopConfig{Participants: 2}, 10)
+	o.d.Client = client
+
+	runner := o.coopSeatRunner(&seatDebugSink{w: io.Discard}, 0)
+	seat := coop.SeatConfig{Name: "seat-1", Lens: "risk", Model: "m/1"}
+
+	out1, _, err := runner(t.Context(), seat, nil, "round 0 briefing")
+	require.NoError(t, err)
+	assert.Equal(t, "position A", out1)
+
+	out2, _, err := runner(t.Context(), seat, nil, "round 1 delta")
+	require.NoError(t, err)
+	assert.Equal(t, "critique B", out2)
+
+	// The second call must carry the first round's full exchange and
+	// exactly one system message (seatConfig re-adds it each run).
+	msgs := client.messagesOf(1)
+	require.NotNil(t, msgs)
+
+	var sys int
+
+	var sawBriefing, sawPosition bool
+
+	for _, m := range msgs {
+		if m.Role == "system" {
+			sys++
+		}
+
+		if strings.Contains(m.Content, "round 0 briefing") {
+			sawBriefing = true
+		}
+
+		if m.Role == "assistant" && strings.Contains(m.Content, "position A") {
+			sawPosition = true
+		}
+	}
+
+	assert.Equal(t, 1, sys)
+	assert.True(t, sawBriefing)
+	assert.True(t, sawPosition)
+}
+
+func TestCoopSeatRunnerForcesFinalAnswerOnEmptyOutput(t *testing.T) {
+	// The first turn tool-calls at a cost above the per-turn cap, so the
+	// run stops max_cost with empty output (deterministic — the cap is
+	// checked at the top of the next turn). The backstop call must then
+	// produce the position, toolless, despite the exhausted cap.
+	burn := llm.Response{
+		FinishReason: "tool_calls",
+		Usage:        llm.Usage{Cost: 0.30},
+		ToolCalls: []llm.ToolCall{{
+			ID: "c1", Type: "function",
+			Function: llm.FunctionCall{Name: "nope", Arguments: "{}"},
+		}},
+	}
+	client := &planLLM{responses: []llm.Response{burn, stopResp("forced position", 0.01)}}
+	o := coopTestRun(&fakeOps{}, CoopConfig{Participants: 2}, 10)
+	o.d.Client = client
+
+	runner := o.coopSeatRunner(&seatDebugSink{w: io.Discard}, 0.25)
+
+	out, _, err := runner(t.Context(), coop.SeatConfig{Name: "seat-1", Lens: "risk", Model: "m/1"}, nil, "briefing")
+	require.NoError(t, err)
+	assert.Equal(t, "forced position", out)
+
+	counts := client.toolCountsSeen()
+	require.NotEmpty(t, counts)
+	assert.Zero(t, counts[len(counts)-1], "backstop call must offer no tools")
+}
+
+// TestCoopSeatRunnerBackstopFailureFallsBackToAbsence drives the ferr != nil
+// branch of the empty-output backstop: same primary shape as
+// TestCoopSeatRunnerForcesFinalAnswerOnEmptyOutput (stops max_cost with
+// empty output), but this time the backstop call itself errors (e.g. a
+// transport failure). The runner must still degrade to an absent position
+// rather than failing the whole discussion.
+func TestCoopSeatRunnerBackstopFailureFallsBackToAbsence(t *testing.T) {
+	burn := llm.Response{
+		FinishReason: "tool_calls",
+		Usage:        llm.Usage{Cost: 0.30},
+		ToolCalls: []llm.ToolCall{{
+			ID: "c1", Type: "function",
+			Function: llm.FunctionCall{Name: "nope", Arguments: "{}"},
+		}},
+	}
+	// Only the primary turn is scripted; errAfter: 2 makes the second call
+	// (the backstop) return errPlanLLM instead of a response.
+	client := &planLLM{responses: []llm.Response{burn}, errAfter: 2}
+	o := coopTestRun(&fakeOps{}, CoopConfig{Participants: 2}, 10)
+	o.d.Client = client
+
+	runner := o.coopSeatRunner(&seatDebugSink{w: io.Discard}, 0.25)
+
+	out, cost, err := runner(t.Context(), coop.SeatConfig{Name: "seat-1", Lens: "risk", Model: "m/1"}, nil, "briefing")
+	require.NoError(t, err, "a failed backstop must degrade to absence, not fail the discussion")
+	assert.Empty(t, out)
+
+	// The harness only adds Usage.Cost on a successful response (see
+	// harness.Run), so an erroring call can never carry cost through
+	// fres.TotalCostUSD — the returned discussion cost is exactly the
+	// primary run's billed spend either way. Fix 1's unconditional
+	// `res.TotalCostUSD += fres.TotalCostUSD` is validated by inspection
+	// and the other cost-carrying paths; this test's essential assertions
+	// are the graceful degrade above (out=="", err==nil).
+	assert.InDelta(t, 0.30, cost, 1e-9)
+
+	require.Len(t, client.toolCountsSeen(), 2, "primary turn plus one backstop attempt")
+}
+
+func TestTrimSeatContext(t *testing.T) {
+	big := strings.Repeat("x", seatContextMaxBytes)
+	msgs := []llm.Message{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "briefing"},
+		{Role: "tool", Content: big},
+		{Role: "tool", Content: "small"},
+		{Role: "assistant", Content: "position"},
+	}
+
+	got := trimSeatContext(msgs)
+
+	require.Len(t, got, 4, "system message dropped")
+	assert.Equal(t, "briefing", got[0].Content)
+	assert.Equal(t, trimmedToolMarker, got[1].Content, "oldest oversized tool output blanked")
+	assert.Equal(t, "small", got[2].Content, "later tool output kept once under the cap")
+	assert.Equal(t, "position", got[3].Content)
+}
+
+func TestTrimSeatContextUnderCapUntouched(t *testing.T) {
+	msgs := []llm.Message{
+		{Role: "user", Content: "briefing"},
+		{Role: "tool", Content: "output"},
+		{Role: "assistant", Content: "position"},
+	}
+
+	got := trimSeatContext(msgs)
+
+	require.Len(t, got, 3)
+	assert.Equal(t, "output", got[1].Content)
 }

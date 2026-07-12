@@ -2,8 +2,11 @@ package executor
 
 import (
 	"bytes"
+	"context"
 	"testing"
+	"time"
 
+	"github.com/docker/docker/api/types/container"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -284,4 +287,34 @@ func TestNewDockerExecutor_WiresOnStart(t *testing.T) {
 
 	e.onStart("p", "c", "id")
 	assert.True(t, called)
+}
+
+type fakeWaiter struct{ exits bool }
+
+func (f *fakeWaiter) ContainerWait(ctx context.Context, _ string, _ container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
+	wc := make(chan container.WaitResponse, 1)
+	ec := make(chan error, 1)
+
+	if f.exits {
+		wc <- container.WaitResponse{StatusCode: 0}
+	} else {
+		go func() {
+			<-ctx.Done()
+
+			ec <- ctx.Err()
+		}()
+	}
+
+	return wc, ec
+}
+
+func TestWaitForSelfExitExited(t *testing.T) {
+	assert.True(t, waitForSelfExit(t.Context(), &fakeWaiter{exits: true}, "c1", time.Second))
+}
+
+func TestWaitForSelfExitTimesOut(t *testing.T) {
+	start := time.Now()
+
+	assert.False(t, waitForSelfExit(t.Context(), &fakeWaiter{exits: false}, "c1", 20*time.Millisecond))
+	assert.Less(t, time.Since(start), time.Second, "must give up at the grace bound")
 }

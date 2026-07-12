@@ -548,3 +548,81 @@ func TestClassifyRendersOnlyCurrentRound(t *testing.T) {
 	assert.NotContains(t, gotPrompt, "EARLY-ROUND-ONE-MARKER",
 		"the convergence check must not re-send earlier rounds")
 }
+
+func TestDiscussAllEmptyBlindRoundFailsQuorum(t *testing.T) {
+	seats := []SeatConfig{{Name: "seat-1", Lens: "a"}, {Name: "seat-2", Lens: "b"}}
+	script := &seatScript{reply: func(string, int) (string, float64, error) {
+		return "   ", 0.01, nil // budget-exhausted seats return blank text with nil error
+	}}
+	mod := &modScript{replies: []string{"SYNTH"}}
+
+	eng, log := startEngine(t, seats, script.run, mod.run, nil)
+
+	out, err := eng.Discuss(t.Context(), Topic{
+		Briefing:        "brief",
+		Rounds:          2,
+		Blind:           true,
+		SynthesisPrompt: "synthesize",
+	})
+
+	require.ErrorIs(t, err, ErrNoQuorum)
+	require.Len(t, out.Transcript, 1, "briefing only — no empty entries")
+	assert.Empty(t, mod.calls(), "no classify or synthesis after quorum failure")
+
+	var notices int
+
+	for _, r := range log.snapshot() {
+		if r.author == "moderator" && strings.Contains(r.content, "produced no position") {
+			notices++
+		}
+
+		if r.author == "seat-1" || r.author == "seat-2" {
+			assert.NotEmpty(t, strings.TrimSpace(r.content), "no empty seat bubbles on the live stream")
+		}
+	}
+
+	assert.Equal(t, 2, notices)
+}
+
+func TestDiscussEmptySeatBecomesAbsenceNotice(t *testing.T) {
+	seats := []SeatConfig{
+		{Name: "seat-1", Lens: "a"},
+		{Name: "seat-2", Lens: "b"},
+		{Name: "seat-3", Lens: "c"},
+	}
+	script := &seatScript{reply: func(seat string, _ int) (string, float64, error) {
+		if seat == "seat-2" {
+			return "", 0.01, nil // silent in every round
+		}
+
+		return seat + " position", 0.01, nil
+	}}
+	mod := &modScript{replies: []string{"consensus", "SYNTH"}}
+
+	eng, log := startEngine(t, seats, script.run, mod.run, nil)
+
+	out, err := eng.Discuss(t.Context(), Topic{
+		Briefing:        "brief",
+		Rounds:          1,
+		Blind:           true,
+		SynthesisPrompt: "synthesize",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "SYNTH", out.Synthesis)
+
+	for _, e := range out.Transcript {
+		assert.NotEqual(t, "seat-2", e.Author, "silent seat must not enter the transcript")
+	}
+
+	var noticed bool
+
+	for _, r := range log.snapshot() {
+		if r.author == "moderator" && strings.Contains(r.content, "seat-2") &&
+			strings.Contains(r.content, "produced no position") {
+			noticed = true
+		}
+	}
+
+	assert.True(t, noticed, "absence notice for seat-2 expected")
+}

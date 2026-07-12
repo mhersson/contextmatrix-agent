@@ -266,6 +266,8 @@ func gracefulShutdown(
 	for _, run := range tracker.List() {
 		logger.Info("killing container on shutdown", "project", run.Project, "card_id", run.CardID)
 
+		// Kill's self-exit grace window applies here too, bounded by this
+		// per-container killCtx (callbackShutdownTimeout).
 		killCtx, killCancel := context.WithTimeout(context.Background(), callbackShutdownTimeout)
 		if err := exec.Kill(killCtx, run.Project, run.CardID); err != nil &&
 			!errors.Is(err, executor.ErrNotFound) {

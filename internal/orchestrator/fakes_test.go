@@ -571,23 +571,43 @@ type planLLM struct {
 	// inherit the parent routing.
 	providers  []json.RawMessage
 	reasonings []json.RawMessage
+
+	// toolCounts captures len(req.Tools) for every call, index-aligned with
+	// models, so tests can assert a caller offered no tools.
+	toolCounts []int
+
+	// msgsPerCall captures each request's full message slice, index-aligned
+	// with models, so tests can assert on carried seat context.
+	msgsPerCall [][]llm.Message
+
+	// errAfter, if > 0, makes the call at this 1-indexed position (and any
+	// later call) return errPlanLLM instead of a scripted/default response.
+	// 0 (default) disables — every call succeeds.
+	errAfter int
 }
 
+// errPlanLLM is the scripted failure returned once errAfter is reached.
+var errPlanLLM = errors.New("planLLM: scripted failure")
+
 func (p *planLLM) Send(_ context.Context, req llm.Request) (llm.Response, error) {
-	return p.next(req), nil
+	return p.next(req)
 }
 
 func (p *planLLM) SendStream(_ context.Context, req llm.Request, _ func(llm.Delta)) (llm.Response, error) {
-	return p.next(req), nil
+	return p.next(req)
 }
 
-func (p *planLLM) next(req llm.Request) llm.Response {
+func (p *planLLM) next(req llm.Request) (llm.Response, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	call := len(p.models) + 1
 
 	p.models = append(p.models, req.Model)
 	p.providers = append(p.providers, req.Provider)
 	p.reasonings = append(p.reasonings, req.Reasoning)
+	p.toolCounts = append(p.toolCounts, len(req.Tools))
+	p.msgsPerCall = append(p.msgsPerCall, append([]llm.Message(nil), req.Messages...))
 
 	// Capture the last user message — the phase task prompt.
 	for j := len(req.Messages) - 1; j >= 0; j-- {
@@ -598,14 +618,36 @@ func (p *planLLM) next(req llm.Request) llm.Response {
 		}
 	}
 
+	if p.errAfter > 0 && call >= p.errAfter {
+		return llm.Response{}, errPlanLLM
+	}
+
 	if p.i >= len(p.responses) {
-		return llm.Response{FinishReason: "stop"}
+		return llm.Response{FinishReason: "stop"}, nil
 	}
 
 	r := p.responses[p.i]
 	p.i++
 
-	return r
+	return r, nil
+}
+
+func (p *planLLM) toolCountsSeen() []int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return append([]int(nil), p.toolCounts...)
+}
+
+func (p *planLLM) messagesOf(call int) []llm.Message {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if call >= len(p.msgsPerCall) {
+		return nil
+	}
+
+	return p.msgsPerCall[call]
 }
 
 // stopResp wraps final assistant text as a no-tool-call (done) turn.
