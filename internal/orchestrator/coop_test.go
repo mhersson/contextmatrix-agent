@@ -299,3 +299,82 @@ func TestCoopModeratorRunnerIsToolless(t *testing.T) {
 		assert.Zero(t, n, "moderator calls must offer no tools")
 	}
 }
+
+func TestCoopSeatRunnerPersistsContextAcrossRounds(t *testing.T) {
+	client := &planLLM{responses: []llm.Response{
+		stopResp("position A", 0.01),
+		stopResp("critique B", 0.01),
+	}}
+	o := coopTestRun(&fakeOps{}, CoopConfig{Participants: 2}, 10)
+	o.d.Client = client
+
+	runner := o.coopSeatRunner(&seatDebugSink{w: io.Discard}, 0)
+	seat := coop.SeatConfig{Name: "seat-1", Lens: "risk", Model: "m/1"}
+
+	out1, _, err := runner(t.Context(), seat, nil, "round 0 briefing")
+	require.NoError(t, err)
+	assert.Equal(t, "position A", out1)
+
+	out2, _, err := runner(t.Context(), seat, nil, "round 1 delta")
+	require.NoError(t, err)
+	assert.Equal(t, "critique B", out2)
+
+	// The second call must carry the first round's full exchange and
+	// exactly one system message (seatConfig re-adds it each run).
+	msgs := client.messagesOf(1)
+	require.NotNil(t, msgs)
+
+	var sys int
+
+	var sawBriefing, sawPosition bool
+
+	for _, m := range msgs {
+		if m.Role == "system" {
+			sys++
+		}
+
+		if strings.Contains(m.Content, "round 0 briefing") {
+			sawBriefing = true
+		}
+
+		if m.Role == "assistant" && strings.Contains(m.Content, "position A") {
+			sawPosition = true
+		}
+	}
+
+	assert.Equal(t, 1, sys)
+	assert.True(t, sawBriefing)
+	assert.True(t, sawPosition)
+}
+
+func TestTrimSeatContext(t *testing.T) {
+	big := strings.Repeat("x", seatContextMaxBytes)
+	msgs := []llm.Message{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "briefing"},
+		{Role: "tool", Content: big},
+		{Role: "tool", Content: "small"},
+		{Role: "assistant", Content: "position"},
+	}
+
+	got := trimSeatContext(msgs)
+
+	require.Len(t, got, 4, "system message dropped")
+	assert.Equal(t, "briefing", got[0].Content)
+	assert.Equal(t, trimmedToolMarker, got[1].Content, "oldest oversized tool output blanked")
+	assert.Equal(t, "small", got[2].Content, "later tool output kept once under the cap")
+	assert.Equal(t, "position", got[3].Content)
+}
+
+func TestTrimSeatContextUnderCapUntouched(t *testing.T) {
+	msgs := []llm.Message{
+		{Role: "user", Content: "briefing"},
+		{Role: "tool", Content: "output"},
+		{Role: "assistant", Content: "position"},
+	}
+
+	got := trimSeatContext(msgs)
+
+	require.Len(t, got, 3)
+	assert.Equal(t, "output", got[1].Content)
+}

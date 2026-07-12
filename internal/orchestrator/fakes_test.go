@@ -575,6 +575,10 @@ type planLLM struct {
 	// toolCounts captures len(req.Tools) for every call, index-aligned with
 	// models, so tests can assert a caller offered no tools.
 	toolCounts []int
+
+	// msgsPerCall captures each request's full message slice, index-aligned
+	// with models, so tests can assert on carried seat context.
+	msgsPerCall [][]llm.Message
 }
 
 func (p *planLLM) Send(_ context.Context, req llm.Request) (llm.Response, error) {
@@ -593,6 +597,7 @@ func (p *planLLM) next(req llm.Request) llm.Response {
 	p.providers = append(p.providers, req.Provider)
 	p.reasonings = append(p.reasonings, req.Reasoning)
 	p.toolCounts = append(p.toolCounts, len(req.Tools))
+	p.msgsPerCall = append(p.msgsPerCall, append([]llm.Message(nil), req.Messages...))
 
 	// Capture the last user message — the phase task prompt.
 	for j := len(req.Messages) - 1; j >= 0; j-- {
@@ -618,6 +623,17 @@ func (p *planLLM) toolCountsSeen() []int {
 	defer p.mu.Unlock()
 
 	return append([]int(nil), p.toolCounts...)
+}
+
+func (p *planLLM) messagesOf(call int) []llm.Message {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if call >= len(p.msgsPerCall) {
+		return nil
+	}
+
+	return p.msgsPerCall[call]
 }
 
 // stopResp wraps final assistant text as a no-tool-call (done) turn.
