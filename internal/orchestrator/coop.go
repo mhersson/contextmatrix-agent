@@ -288,11 +288,44 @@ func (o *run) coopSeatRunner(sink *seatDebugSink, perTurnCap float64) coop.SeatR
 			return "", res.TotalCostUSD, fmt.Errorf("seat %s run: %w", seat.Name, err)
 		}
 
+		out := res.Output
+		msgs := res.Messages
+
+		// Budget stops mid-exploration leave res.Output empty with a nil
+		// error; posting "" gave run 2 its empty bubbles and starved the
+		// moderator. One toolless single-turn call, seeded with the run's
+		// own transcript, converts the exploration already paid for into a
+		// position. Covers max_cost stops, which the wrap-up nudge cannot.
+		if strings.TrimSpace(out) == "" {
+			finalCfg := cfg
+			finalCfg.History = trimSeatContext(msgs)
+			finalCfg.MaxTurns = 1
+			finalCfg.MaxCostUSD = 0 // one bounded call; the turn cap is the guard
+			finalCfg.WrapUpTurns = 0
+			finalCfg.WrapUpMessage = ""
+
+			fres, ferr := harness.Run(ctx, o.d.Client, tools.NewRegistry(), emit, seatForcedFinalPrompt, finalCfg)
+
+			o.ledger.Spend(fres.TotalCostUSD)
+
+			if reportErr := o.d.Ops.ReportUsage(ctx, o.d.Cfg.CardID, used,
+				fres.PromptTokens, fres.CompletionTokens, fres.TotalCostUSD); reportErr != nil {
+				slog.Warn("coop: report seat usage failed",
+					"card_id", o.d.Cfg.CardID, "seat", seat.Name, "error", reportErr)
+			}
+
+			if ferr == nil {
+				out = fres.Output
+				msgs = fres.Messages
+				res.TotalCostUSD += fres.TotalCostUSD
+			}
+		}
+
 		mu.Lock()
-		sessions[seat.Name] = trimSeatContext(res.Messages)
+		sessions[seat.Name] = trimSeatContext(msgs)
 		mu.Unlock()
 
-		return res.Output, res.TotalCostUSD, nil
+		return out, res.TotalCostUSD, nil
 	}
 }
 

@@ -347,6 +347,34 @@ func TestCoopSeatRunnerPersistsContextAcrossRounds(t *testing.T) {
 	assert.True(t, sawPosition)
 }
 
+func TestCoopSeatRunnerForcesFinalAnswerOnEmptyOutput(t *testing.T) {
+	// The first turn tool-calls at a cost above the per-turn cap, so the
+	// run stops max_cost with empty output (deterministic — the cap is
+	// checked at the top of the next turn). The backstop call must then
+	// produce the position, toolless, despite the exhausted cap.
+	burn := llm.Response{
+		FinishReason: "tool_calls",
+		Usage:        llm.Usage{Cost: 0.30},
+		ToolCalls: []llm.ToolCall{{
+			ID: "c1", Type: "function",
+			Function: llm.FunctionCall{Name: "nope", Arguments: "{}"},
+		}},
+	}
+	client := &planLLM{responses: []llm.Response{burn, stopResp("forced position", 0.01)}}
+	o := coopTestRun(&fakeOps{}, CoopConfig{Participants: 2}, 10)
+	o.d.Client = client
+
+	runner := o.coopSeatRunner(&seatDebugSink{w: io.Discard}, 0.25)
+
+	out, _, err := runner(t.Context(), coop.SeatConfig{Name: "seat-1", Lens: "risk", Model: "m/1"}, nil, "briefing")
+	require.NoError(t, err)
+	assert.Equal(t, "forced position", out)
+
+	counts := client.toolCountsSeen()
+	require.NotEmpty(t, counts)
+	assert.Zero(t, counts[len(counts)-1], "backstop call must offer no tools")
+}
+
 func TestTrimSeatContext(t *testing.T) {
 	big := strings.Repeat("x", seatContextMaxBytes)
 	msgs := []llm.Message{
