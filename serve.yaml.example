@@ -48,6 +48,16 @@ port: 9092
 # CMX_LOG_LEVEL
 log_level: info
 
+# Directory on the agent host for per-card container-output logs. When set, the
+# agent writes one append file per card, <log_dir>/<project>/<card_id>.log,
+# containing the raw container output (as `docker logs -f` would show it). Files
+# are 0600 and MAY contain unredacted secrets from model/tool output. Empty (the
+# default) disables file logging. Logs are kept indefinitely; use an external
+# logrotate for retention. If this path is outside /var/run/cm-agent or
+# ~/.cm-agent, add it to ReadWritePaths in the systemd unit (see svc.sh).
+# CMX_LOG_DIR
+# log_dir: ~/.contextmatrix/agent/logs
+
 # --- Worker containers --------------------------------------------------------
 
 # Docker image launched for each card. Pin to a digest for reproducibility.

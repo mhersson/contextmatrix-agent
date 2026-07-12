@@ -1,12 +1,20 @@
 package cli
 
 import (
+	"context"
+	"io"
+	"log/slog"
+	"os"
+	"path/filepath"
 	"sort"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/mhersson/contextmatrix-agent/internal/config"
+	"github.com/mhersson/contextmatrix-agent/internal/filelog"
+	"github.com/mhersson/contextmatrix-agent/internal/secrets"
 )
 
 func TestComposeMCPURL(t *testing.T) {
@@ -114,6 +122,43 @@ func TestFlattenEnv(t *testing.T) {
 		sort.Strings(got)
 		assert.Equal(t, []string{"BAZ=qux", "FOO=bar"}, got)
 	})
+}
+
+type stubReporter struct{ status string }
+
+func (s *stubReporter) ReportStatus(_ context.Context, _, _, status, _ string) error {
+	s.status = status
+
+	return nil
+}
+
+func TestOnContainerExitClosesLogFile(t *testing.T) {
+	dir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	files := filelog.New(dir, logger)
+	files.Begin("proj", "CARD-1", "abcdef012345")
+	files.Write("proj", "CARD-1", []byte("a line"), false)
+
+	creds := secrets.NewRunCredentials(t.TempDir(), "http://cm", "key", logger)
+	rep := &stubReporter{}
+
+	onExit := onContainerExit(rep, creds, files, logger)
+	onExit("proj", "CARD-1", 0)
+
+	data, err := os.ReadFile(filepath.Join(dir, "proj", "card-1.log"))
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "a line")
+	assert.Contains(t, string(data), "==== run ended ")
+	assert.Contains(t, string(data), "exit=0")
+	assert.Equal(t, "completed", rep.status)
+
+	// The file is closed and forgotten: a further Write does not reach it.
+	files.Write("proj", "CARD-1", []byte("after close"), false)
+
+	after, err := os.ReadFile(filepath.Join(dir, "proj", "card-1.log"))
+	require.NoError(t, err)
+	assert.NotContains(t, string(after), "after close")
 }
 
 func TestServeCommandRegistered(t *testing.T) {

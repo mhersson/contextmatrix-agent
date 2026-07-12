@@ -194,15 +194,16 @@ type DockerExecutor struct {
 	idleTimeout      time.Duration
 	pollInterval     time.Duration
 
-	onExit func(project, cardID string, exitCode int64)
-	onLog  func(project, cardID string, line []byte, stderr bool)
+	onStart func(project, cardID, containerID string)
+	onExit  func(project, cardID string, exitCode int64)
+	onLog   func(project, cardID string, line []byte, stderr bool)
 
 	logger  *slog.Logger
 	metrics *metrics.Metrics
 }
 
-// Config carries the DockerExecutor dependencies. onExit and onLog may be nil
-// (the executor no-ops them) but the serve layer wires both.
+// Config carries the DockerExecutor dependencies. onStart, onExit, and onLog
+// may be nil (the executor no-ops them) but the serve layer wires all three.
 type Config struct {
 	Docker     client.APIClient
 	Tracker    *Tracker
@@ -212,8 +213,9 @@ type Config struct {
 	IdleTimeout      time.Duration
 	PollInterval     time.Duration
 
-	OnExit func(project, cardID string, exitCode int64)
-	OnLog  func(project, cardID string, line []byte, stderr bool)
+	OnStart func(project, cardID, containerID string)
+	OnExit  func(project, cardID string, exitCode int64)
+	OnLog   func(project, cardID string, line []byte, stderr bool)
 
 	Logger *slog.Logger
 	// Metrics is the Prometheus bundle. Nil disables container-duration
@@ -236,6 +238,7 @@ func NewDockerExecutor(cfg Config) *DockerExecutor {
 		containerTimeout: cfg.ContainerTimeout,
 		idleTimeout:      cfg.IdleTimeout,
 		pollInterval:     cfg.PollInterval,
+		onStart:          cfg.OnStart,
 		onExit:           cfg.OnExit,
 		onLog:            cfg.OnLog,
 		logger:           logger,
@@ -316,6 +319,12 @@ func (e *DockerExecutor) Launch(ctx context.Context, spec LaunchSpec) error {
 	// Seed the idle clock so a container that exits before any output is not
 	// flagged idle retroactively.
 	e.tracker.Touch(spec.Project, spec.CardID)
+
+	// Signal the run started now that the container ID and card are both known,
+	// before the pump starts, so a per-card log header precedes any output.
+	if e.onStart != nil {
+		e.onStart(spec.Project, spec.CardID, resp.ID)
+	}
 
 	done := make(chan struct{})
 

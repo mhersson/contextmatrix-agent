@@ -273,3 +273,15 @@ func TestContainerConfigNoSkillsBindWhenUnset(t *testing.T) {
 		assert.NotContains(t, b, "/run/cm-skills", "no skills bind when SkillsHostDir is empty")
 	}
 }
+
+func TestNewDockerExecutor_WiresOnStart(t *testing.T) {
+	called := false
+	e := NewDockerExecutor(Config{
+		OnStart: func(_, _, _ string) { called = true },
+	})
+
+	require.NotNil(t, e.onStart)
+
+	e.onStart("p", "c", "id")
+	assert.True(t, called)
+}

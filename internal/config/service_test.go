@@ -56,6 +56,7 @@ func TestServiceDefaults(t *testing.T) {
 	assert.Equal(t, 1000, cfg.MessageDedupCacheSize)
 	assert.Equal(t, 600, cfg.BashTimeoutMaxSeconds)
 	assert.Equal(t, 131072, cfg.ToolOutputMaxBytes)
+	assert.Empty(t, cfg.LogDir, "log_dir is opt-in; empty by default")
 }
 
 func TestServiceLoadFromFile(t *testing.T) {
@@ -540,6 +541,55 @@ base_image: img@sha256:abc
 	require.NoError(t, cfg.Validate())
 }
 
+func TestLogDirValidation(t *testing.T) {
+	t.Run("empty is allowed (feature disabled)", func(t *testing.T) {
+		cfg := validServiceConfig()
+		cfg.LogDir = ""
+		require.NoError(t, cfg.Validate())
+	})
+
+	t.Run("nonexistent dir is created and passes", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "logs")
+		cfg := validServiceConfig()
+		cfg.LogDir = p
+		require.NoError(t, cfg.Validate())
+
+		info, err := os.Stat(p)
+		require.NoError(t, err)
+		assert.True(t, info.IsDir())
+	})
+
+	t.Run("path that is a regular file is rejected", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "afile")
+		require.NoError(t, os.WriteFile(p, []byte("x"), 0o600))
+
+		cfg := validServiceConfig()
+		cfg.LogDir = p
+		assert.ErrorContains(t, cfg.Validate(), "log_dir")
+	})
+}
+
+func TestLogDirFromEnv(t *testing.T) {
+	clearServiceEnv(t)
+
+	logDir := filepath.Join(t.TempDir(), "logs")
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "serve.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+contextmatrix_url: http://localhost:8080
+api_key: 0123456789012345678901234567890123456789
+base_image: img@sha256:abc
+`), 0o600))
+
+	t.Setenv("CMX_LOG_DIR", logDir)
+
+	cfg, err := LoadService(path)
+	require.NoError(t, err)
+	assert.Equal(t, logDir, cfg.LogDir)
+	require.NoError(t, cfg.Validate())
+}
+
 // clearServiceEnv unsets any CMX_* vars that could leak into a default/file
 // test from the developer's shell. t.Setenv restores them after the test.
 func clearServiceEnv(t *testing.T) {
@@ -549,6 +599,7 @@ func clearServiceEnv(t *testing.T) {
 		"CMX_CONTEXTMATRIX_URL", "CMX_PORT",
 		"CMX_API_KEY", "CMX_BASE_IMAGE", "CMX_MAX_CONCURRENT",
 		"CMX_CA_CERT_FILE",
+		"CMX_LOG_DIR",
 		"CMX_MAX_CARD_COST", "CMX_SELECTOR_PRICE_HEADROOM",
 		"CMX_ADMIN_PORT",
 		"CMX_COMPACTION_ENABLED", "CMX_COMPACTION_THRESHOLD",

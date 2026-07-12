@@ -46,7 +46,9 @@
 # root-owned and not auto-created for a user service — either pre-create
 # /var/run/cm-agent and chown it to the operator, or set secrets_dir to a
 # path under %h (e.g. ~/.cm-agent/secrets). Both locations are whitelisted
-# below.
+# in ReadWritePaths. The recommended log_dir (~/.contextmatrix/agent/logs)
+# is whitelisted via -%h/.contextmatrix; a log_dir elsewhere needs its own
+# ReadWritePaths entry.
 #
 # Subcommands:
 #   install [--dry-run]  Write the unit file (or print to stdout), reload
@@ -105,7 +107,7 @@ ProtectHome=read-only
 # Agent needs RW access to its secrets dir. Paths are prefixed with '-'
 # so a missing dir does not block startup; the agent creates them on
 # demand. Both the /var/run default and a %h override are whitelisted.
-ReadWritePaths=-/var/run/cm-agent -%h/.cm-agent
+ReadWritePaths=-/var/run/cm-agent -%h/.cm-agent -%h/.contextmatrix
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectKernelTunables=yes
@@ -165,7 +167,7 @@ EXPECTED_DIRECTIVES=(
     "RestartSec=10"
     "RestartSteps=5"
     "RestartMaxDelaySec=300"
-    "ReadWritePaths=-/var/run/cm-agent -%h/.cm-agent"
+    "ReadWritePaths=-/var/run/cm-agent -%h/.cm-agent -%h/.contextmatrix"
 )
 
 cmd_install() {

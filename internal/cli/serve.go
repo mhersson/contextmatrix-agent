@@ -21,6 +21,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/callback"
 	"github.com/mhersson/contextmatrix-agent/internal/config"
 	"github.com/mhersson/contextmatrix-agent/internal/executor"
+	"github.com/mhersson/contextmatrix-agent/internal/filelog"
 	"github.com/mhersson/contextmatrix-agent/internal/logbridge"
 	"github.com/mhersson/contextmatrix-agent/internal/metrics"
 	"github.com/mhersson/contextmatrix-agent/internal/secrets"
@@ -95,6 +96,10 @@ func runServe(ctx context.Context, configPath string) error {
 	// fail-closed rejected by the webhook launch guards.
 	credentials := secrets.NewRunCredentials(cfg.SecretsDir, cfg.ContextMatrixURL, cfg.APIKey, logger)
 
+	// Per-card container-output logs. Empty cfg.LogDir disables the feature; the
+	// returned logger no-ops every call, so wiring below stays unconditional.
+	files := filelog.New(cfg.LogDir, logger)
+
 	docker, err := executor.NewClient()
 	if err != nil {
 		return fmt.Errorf("docker client: %w", err)
@@ -115,10 +120,17 @@ func runServe(ctx context.Context, configPath string) error {
 		ContainerTimeout: cfg.ContainerTimeout,
 		IdleTimeout:      cfg.IdleOutputTimeout,
 		PollInterval:     cfg.IdleWatchdogInterval,
-		OnLog:            bridge.BridgeLine,
-		OnExit:           onContainerExit(cbClient, credentials, logger),
-		Logger:           logger,
-		Metrics:          mx,
+		OnStart:          files.Begin,
+		OnLog: func(project, cardID string, line []byte, stderr bool) {
+			// Bridge to the live /logs SSE stream first so the interactive
+			// stream is never gated on the durable-log disk write. BridgeLine
+			// does not mutate line and Write copies it, so the order is safe.
+			bridge.BridgeLine(project, cardID, line, stderr)
+			files.Write(project, cardID, line, stderr)
+		},
+		OnExit:  onContainerExit(cbClient, credentials, files, logger),
+		Logger:  logger,
+		Metrics: mx,
 	})
 
 	// Force-remove any agent-labeled containers left by a previous process before
@@ -280,19 +292,23 @@ func gracefulShutdown(
 // waitAndCleanup is the single funnel every container exits through, so this is
 // the teardown seam for the per-run refresh loop.
 //
-// Ordering invariant: this exit-path Teardown runs BEFORE the exit status
-// callback below, and that callback is what gates CM's re-triggers (CM learns
-// the run finished only from it). So under the normal flow the tracker.Remove →
-// Teardown window is already closed before CM can re-trigger, and it cannot be
-// hit. A re-trigger racing in out of band inside that microsecond window would
-// at worst lose its own fresh provisioning to this Teardown — a loud,
-// self-inflicted failure — never a leaked or cross-run token.
+// Ordering invariant: both files.End and this exit-path Teardown run BEFORE the
+// exit status callback below, and that callback is what gates CM's re-triggers
+// (CM learns the run finished only from it). files.End footers and closes the
+// per-card log first, so the log is closed before the status callback can let CM
+// admit a new run for the same card. Likewise for Teardown: under the normal
+// flow the tracker.Remove → Teardown window is already closed before CM can
+// re-trigger, and it cannot be hit. A re-trigger racing in out of band inside
+// that microsecond window would at worst lose its own fresh provisioning to this
+// Teardown — a loud, self-inflicted failure — never a leaked or cross-run token.
 func onContainerExit(
 	reporter webhook.StatusReporter,
 	credentials *secrets.RunCredentials,
+	files *filelog.Logger,
 	logger *slog.Logger,
 ) func(project, cardID string, exitCode int64) {
 	return func(project, cardID string, exitCode int64) {
+		files.End(project, cardID, exitCode)
 		credentials.Teardown(project, cardID)
 
 		status, message := exitStatus(exitCode)
