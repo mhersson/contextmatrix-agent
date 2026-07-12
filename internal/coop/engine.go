@@ -106,10 +106,27 @@ func (e *Engine) Discuss(ctx context.Context, t Topic) (Outcome, error) {
 				continue
 			}
 
+			text := strings.TrimSpace(results[i].text)
+			if text == "" {
+				// The seat ran out of budget before producing a position.
+				// Money was spent and the round content was delivered into
+				// its task history, so cost and cursor advance — but a blank
+				// utterance is not a response: it must not count toward
+				// quorum, enter the transcript, or reach the live stream as
+				// an empty bubble.
+				totalCost += s.h.lastCost
+				s.lastSeen = preLen
+
+				e.cfg.Emit("moderator", "", round,
+					fmt.Sprintf("%s produced no position this round (budget exhausted before an answer)", s.h.name))
+
+				continue
+			}
+
 			responded++
 			totalCost += s.h.lastCost
 
-			en := Entry{Author: s.h.name, Lens: s.h.lens, Round: round, Content: results[i].text}
+			en := Entry{Author: s.h.name, Lens: s.h.lens, Round: round, Content: text}
 			entries = append(entries, en)
 			e.cfg.Emit(en.Author, en.Lens, en.Round, en.Content)
 
