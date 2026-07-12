@@ -1,4 +1,4 @@
-package coop
+package mob
 
 import (
 	"context"
@@ -220,7 +220,7 @@ func (e *Engine) Discuss(ctx context.Context, t Topic) (Outcome, error) {
 
 	if err != nil {
 		return Outcome{Transcript: entries, CostUSD: totalCost},
-			fmt.Errorf("coop: synthesis: %w", err)
+			fmt.Errorf("mob: synthesis: %w", err)
 	}
 
 	e.cfg.Emit("moderator", "", -1, synth)
@@ -265,7 +265,7 @@ func (e *Engine) open(ctx context.Context) []*liveSeat {
 		if err != nil {
 			// Name only in the transcript — the URL (and any error detail) would
 			// otherwise reach the browser stream; keep the full error in the log.
-			slog.Warn("coop: guest dial failed", "guest", g.Name, "error", err)
+			slog.Warn("mob: guest dial failed", "guest", g.Name, "error", err)
 			e.cfg.Emit("moderator", "", -1, fmt.Sprintf("guest %s unreachable", g.Name))
 
 			h = &seatHandle{name: "guest-" + g.Name, guest: true, dead: true, absent: true}

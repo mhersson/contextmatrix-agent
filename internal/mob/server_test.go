@@ -1,4 +1,4 @@
-package coop
+package mob
 
 import (
 	"context"
@@ -133,7 +133,7 @@ func TestSeatAgentCardResolvable(t *testing.T) {
 		agentcard.WithRequestHeader("Authorization", "Bearer "+testBearer))
 	require.NoError(t, err)
 
-	assert.Equal(t, "cm-coop-seat-1", card.Name)
+	assert.Equal(t, "cm-mob-seat-1", card.Name)
 	assert.Equal(t, "1", card.Version)
 	require.Len(t, card.SupportedInterfaces, 1)
 	assert.Equal(t, srv.SeatEndpoint("seat-1"), card.SupportedInterfaces[0].URL)
@@ -147,7 +147,7 @@ func TestSeatAgentCardResolvable(t *testing.T) {
 		agentcard.WithPath("/seats/seat-2"+a2asrv.WellKnownAgentCardPath),
 		agentcard.WithRequestHeader("Authorization", "Bearer "+testBearer))
 	require.NoError(t, err)
-	assert.Equal(t, "cm-coop-seat-2", card2.Name)
+	assert.Equal(t, "cm-mob-seat-2", card2.Name)
 }
 
 func TestBearerMiddlewareRejects(t *testing.T) {

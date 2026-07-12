@@ -63,11 +63,12 @@ type EndpointSecrets struct {
 	APIKey  string
 	BaseURL string
 	Type    string
-	// CoopGuests is the compact JSON guest-spec list ([]protocol.GuestSpec on
-	// the wire) for co-op discussions. Guests carry bearer tokens, so they
-	// ride the secrets file — and living here (not a one-off append) they
-	// survive every token-refresh rewrite. Empty = no guests; key omitted.
-	CoopGuests string
+	// MobGuests is the compact JSON guest-spec list ([]protocol.GuestSpec on
+	// the wire) for mob session discussions. Guests carry bearer tokens, so
+	// they ride the secrets file — and living here (not a one-off append)
+	// they survive every token-refresh rewrite. Empty = no guests; key
+	// omitted.
+	MobGuests string
 }
 
 // endpointVals assembles the worker env map from a git token and the (optional)
@@ -88,8 +89,8 @@ func endpointVals(token string, e EndpointSecrets) map[string]string {
 		vals["LLM_TYPE"] = e.Type
 	}
 
-	if e.CoopGuests != "" {
-		vals["CM_COOP_GUESTS"] = e.CoopGuests
+	if e.MobGuests != "" {
+		vals["CM_MOB_GUESTS"] = e.MobGuests
 	}
 
 	return vals

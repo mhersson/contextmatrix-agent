@@ -11,7 +11,7 @@ import (
 	"testing"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
-	"github.com/mhersson/contextmatrix-agent/internal/coop"
+	"github.com/mhersson/contextmatrix-agent/internal/mob"
 	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/mhersson/contextmatrix-harness/harness"
 	"github.com/mhersson/contextmatrix-harness/llm"
@@ -20,19 +20,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// scriptedEngine stubs run.coopEngine: it records every EngineConfig+Topic it
+// scriptedEngine stubs run.mobEngine: it records every EngineConfig+Topic it
 // received and pops queued (Outcome, error) results in order. Shared by the
-// plan and review co-op tests.
+// plan and review mob session tests.
 type scriptedEngine struct {
 	mu       sync.Mutex
-	cfgs     []coop.EngineConfig
-	topics   []coop.Topic
-	outcomes []coop.Outcome
+	cfgs     []mob.EngineConfig
+	topics   []mob.Topic
+	outcomes []mob.Outcome
 	errs     []error
 	i        int
 }
 
-func (s *scriptedEngine) run(_ context.Context, cfg coop.EngineConfig, t coop.Topic) (coop.Outcome, error) {
+func (s *scriptedEngine) run(_ context.Context, cfg mob.EngineConfig, t mob.Topic) (mob.Outcome, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -40,7 +40,7 @@ func (s *scriptedEngine) run(_ context.Context, cfg coop.EngineConfig, t coop.To
 	s.topics = append(s.topics, t)
 
 	if s.i >= len(s.outcomes) {
-		return coop.Outcome{}, errors.New("scriptedEngine: no outcome queued")
+		return mob.Outcome{}, errors.New("scriptedEngine: no outcome queued")
 	}
 
 	out := s.outcomes[s.i]
@@ -55,9 +55,9 @@ func (s *scriptedEngine) run(_ context.Context, cfg coop.EngineConfig, t coop.To
 	return out, err
 }
 
-// coopTestRun builds a run with the reviewer-qualifying registry (seat
-// selection needs reviewer priors) and the given co-op config.
-func coopTestRun(ops *fakeOps, coopCfg CoopConfig, maxCost float64) *run {
+// mobTestRun builds a run with the reviewer-qualifying registry (seat
+// selection needs reviewer priors) and the given mob session config.
+func mobTestRun(ops *fakeOps, mobCfg MobConfig, maxCost float64) *run {
 	d := Deps{
 		Ops:       ops,
 		Git:       &fakeGit{},
@@ -68,14 +68,14 @@ func coopTestRun(ops *fakeOps, coopCfg CoopConfig, maxCost float64) *run {
 		Cfg: Config{
 			Project: "proj", CardID: "CARD-1",
 			PayloadModel: "payload/model", DefaultModel: "default/model",
-			MaxTurns: 20, MaxCardCost: maxCost, Coop: coopCfg,
+			MaxTurns: 20, MaxCardCost: maxCost, Mob: mobCfg,
 		},
 	}
 
 	return newRun(d, cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body"})
 }
 
-func TestCoopConfigEnabled(t *testing.T) {
+func TestMobConfigEnabled(t *testing.T) {
 	tests := []struct {
 		participants int
 		want         bool
@@ -87,19 +87,19 @@ func TestCoopConfigEnabled(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		assert.Equal(t, tt.want, CoopConfig{Participants: tt.participants}.enabled(),
+		assert.Equal(t, tt.want, MobConfig{Participants: tt.participants}.enabled(),
 			"participants=%d", tt.participants)
 	}
 }
 
 func TestBuildEngineConfigPlanTopic(t *testing.T) {
 	ops := &fakeOps{}
-	o := coopTestRun(ops, CoopConfig{
+	o := mobTestRun(ops, MobConfig{
 		Participants: 3, Plan: true, Rounds: 2, BudgetFactor: 0.75,
-		Guests: []CoopGuest{{Name: "laptop", URL: "http://10.0.0.5:8484", Token: "tok"}},
+		Guests: []MobGuest{{Name: "laptop", URL: "http://10.0.0.5:8484", Token: "tok"}},
 	}, 2.0)
 
-	topic := coop.Topic{Kind: "plan", Lenses: planLenses[:3], Rounds: 2, Blind: true}
+	topic := mob.Topic{Kind: "plan", Lenses: planLenses[:3], Rounds: 2, Blind: true}
 
 	cfg := buildEngineConfig(o, topic, "test-bearer")
 
@@ -116,7 +116,7 @@ func TestBuildEngineConfigPlanTopic(t *testing.T) {
 	}
 
 	require.Len(t, cfg.Guests, 1)
-	assert.Equal(t, coop.GuestSeat{Name: "laptop", URL: "http://10.0.0.5:8484", Token: "tok"}, cfg.Guests[0])
+	assert.Equal(t, mob.GuestSeat{Name: "laptop", URL: "http://10.0.0.5:8484", Token: "tok"}, cfg.Guests[0])
 
 	assert.InDelta(t, 1.5, cfg.BudgetUSD, 1e-9, "budget = factor x MaxCardCost")
 	assert.Equal(t, "test-bearer", cfg.Bearer)
@@ -128,10 +128,10 @@ func TestBuildEngineConfigPlanTopic(t *testing.T) {
 
 func TestBuildEngineConfigReviewExcludesCoderModels(t *testing.T) {
 	ops := &fakeOps{}
-	o := coopTestRun(ops, CoopConfig{Participants: 3, Review: true, Rounds: 2, BudgetFactor: 0.75}, 2.0)
+	o := mobTestRun(ops, MobConfig{Participants: 3, Review: true, Rounds: 2, BudgetFactor: 0.75}, 2.0)
 	o.coderModels = map[string]bool{"rev/alpha": true}
 
-	topic := coop.Topic{Kind: "review", Lenses: reviewLenses[:3], Rounds: 1, Blind: true}
+	topic := mob.Topic{Kind: "review", Lenses: reviewLenses[:3], Rounds: 1, Blind: true}
 
 	cfg := buildEngineConfig(o, topic, "b")
 
@@ -144,24 +144,24 @@ func TestBuildEngineConfigReviewExcludesCoderModels(t *testing.T) {
 
 func TestBuildEngineConfigZeroCostDisablesBudget(t *testing.T) {
 	ops := &fakeOps{}
-	o := coopTestRun(ops, CoopConfig{Participants: 2, Plan: true, Rounds: 2, BudgetFactor: 0.75}, 0)
+	o := mobTestRun(ops, MobConfig{Participants: 2, Plan: true, Rounds: 2, BudgetFactor: 0.75}, 0)
 
-	cfg := buildEngineConfig(o, coop.Topic{Kind: "plan", Lenses: planLenses[:2], Rounds: 2}, "b")
+	cfg := buildEngineConfig(o, mob.Topic{Kind: "plan", Lenses: planLenses[:2], Rounds: 2}, "b")
 
-	assert.Zero(t, cfg.BudgetUSD, "MaxCardCost 0 disables the co-op budget term")
+	assert.Zero(t, cfg.BudgetUSD, "MaxCardCost 0 disables the mob session budget term")
 }
 
-func TestCoopDiscussQuorumFallback(t *testing.T) {
+func TestMobDiscussQuorumFallback(t *testing.T) {
 	ops := &fakeOps{}
-	o := coopTestRun(ops, CoopConfig{Participants: 2, Plan: true, Rounds: 2, BudgetFactor: 0.75}, 2.0)
+	o := mobTestRun(ops, MobConfig{Participants: 2, Plan: true, Rounds: 2, BudgetFactor: 0.75}, 2.0)
 
 	eng := &scriptedEngine{
-		outcomes: []coop.Outcome{{}},
-		errs:     []error{coop.ErrNoQuorum},
+		outcomes: []mob.Outcome{{}},
+		errs:     []error{mob.ErrNoQuorum},
 	}
-	o.coopEngine = eng.run
+	o.mobEngine = eng.run
 
-	out, ok := o.coopDiscuss(context.Background(), coop.Topic{
+	out, ok := o.mobDiscuss(context.Background(), mob.Topic{
 		Kind: "plan", Lenses: planLenses[:2], Rounds: 2, Blind: true, Briefing: "b",
 	})
 
@@ -174,21 +174,21 @@ func TestCoopDiscussQuorumFallback(t *testing.T) {
 	assert.Contains(t, joined, "continuing solo", "the fallback is recorded on the card")
 }
 
-func TestCoopDiscussBudgetExhaustedRunsSolo(t *testing.T) {
+func TestMobDiscussBudgetExhaustedRunsSolo(t *testing.T) {
 	ops := &fakeOps{}
-	o := coopTestRun(ops, CoopConfig{Participants: 2, Plan: true, Rounds: 2, BudgetFactor: 0.75}, 2.0)
+	o := mobTestRun(ops, MobConfig{Participants: 2, Plan: true, Rounds: 2, BudgetFactor: 0.75}, 2.0)
 
-	// Pre-spend the run ledger up to the whole co-op envelope: no headroom left.
+	// Pre-spend the run ledger up to the whole mob session envelope: no headroom left.
 	o.ledger.Spend(effectiveCeiling(o.d.Cfg))
 
-	eng := &scriptedEngine{outcomes: []coop.Outcome{{Synthesis: "SHOULD-NOT-RUN"}}}
-	o.coopEngine = eng.run
+	eng := &scriptedEngine{outcomes: []mob.Outcome{{Synthesis: "SHOULD-NOT-RUN"}}}
+	o.mobEngine = eng.run
 
-	out, ok := o.coopDiscuss(context.Background(), coop.Topic{
+	out, ok := o.mobDiscuss(context.Background(), mob.Topic{
 		Kind: "plan", Lenses: planLenses[:2], Rounds: 2, Blind: true, Briefing: "b",
 	})
 
-	assert.False(t, ok, "an exhausted co-op budget must degrade to solo")
+	assert.False(t, ok, "an exhausted mob session budget must degrade to solo")
 	assert.Empty(t, out.Synthesis)
 	assert.Empty(t, eng.cfgs, "the engine must not be invoked once the budget is exhausted")
 
@@ -197,19 +197,19 @@ func TestCoopDiscussBudgetExhaustedRunsSolo(t *testing.T) {
 	assert.Contains(t, joined, "exhausted")
 }
 
-func TestCoopDiscussClampsBudgetToHeadroom(t *testing.T) {
+func TestMobDiscussClampsBudgetToHeadroom(t *testing.T) {
 	ops := &fakeOps{}
-	o := coopTestRun(ops, CoopConfig{Participants: 2, Plan: true, Rounds: 2, BudgetFactor: 0.75}, 2.0)
+	o := mobTestRun(ops, MobConfig{Participants: 2, Plan: true, Rounds: 2, BudgetFactor: 0.75}, 2.0)
 
 	// effectiveCeiling = MaxCardCost + BudgetFactor*MaxCardCost = 2.0 + 1.5 = 3.5.
-	// Pre-spend 2.5 → headroom 1.0, below the full co-op term (1.5): the engine
-	// gets the clamped 1.0.
+	// Pre-spend 2.5 → headroom 1.0, below the full mob session term (1.5): the
+	// engine gets the clamped 1.0.
 	o.ledger.Spend(2.5)
 
-	eng := &scriptedEngine{outcomes: []coop.Outcome{{Synthesis: "SYNTH"}}}
-	o.coopEngine = eng.run
+	eng := &scriptedEngine{outcomes: []mob.Outcome{{Synthesis: "SYNTH"}}}
+	o.mobEngine = eng.run
 
-	out, ok := o.coopDiscuss(context.Background(), coop.Topic{
+	out, ok := o.mobDiscuss(context.Background(), mob.Topic{
 		Kind: "plan", Lenses: planLenses[:2], Rounds: 2, Blind: true, Briefing: "b",
 	})
 
@@ -217,43 +217,44 @@ func TestCoopDiscussClampsBudgetToHeadroom(t *testing.T) {
 	assert.Equal(t, "SYNTH", out.Synthesis)
 	require.Len(t, eng.cfgs, 1)
 	assert.InDelta(t, 1.0, eng.cfgs[0].BudgetUSD, 1e-9,
-		"budget clamped to remaining co-op headroom, not the full term")
+		"budget clamped to remaining mob session headroom, not the full term")
 }
 
-func TestCoopDiscussUnlimitedCeilingKeepsUnbounded(t *testing.T) {
+func TestMobDiscussUnlimitedCeilingKeepsUnbounded(t *testing.T) {
 	ops := &fakeOps{}
-	o := coopTestRun(ops, CoopConfig{Participants: 2, Plan: true, Rounds: 2, BudgetFactor: 0.75}, 0)
+	o := mobTestRun(ops, MobConfig{Participants: 2, Plan: true, Rounds: 2, BudgetFactor: 0.75}, 0)
 
-	// Even with prior spend, MaxCardCost 0 means an unlimited ceiling: the co-op
-	// term stays unbounded (0) and the discussion is never treated as exhausted.
+	// Even with prior spend, MaxCardCost 0 means an unlimited ceiling: the mob
+	// session term stays unbounded (0) and the discussion is never treated as
+	// exhausted.
 	o.ledger.Spend(10.0)
 
-	eng := &scriptedEngine{outcomes: []coop.Outcome{{Synthesis: "SYNTH"}}}
-	o.coopEngine = eng.run
+	eng := &scriptedEngine{outcomes: []mob.Outcome{{Synthesis: "SYNTH"}}}
+	o.mobEngine = eng.run
 
-	out, ok := o.coopDiscuss(context.Background(), coop.Topic{
+	out, ok := o.mobDiscuss(context.Background(), mob.Topic{
 		Kind: "plan", Lenses: planLenses[:2], Rounds: 2, Blind: true, Briefing: "b",
 	})
 
 	require.True(t, ok)
 	assert.Equal(t, "SYNTH", out.Synthesis)
 	require.Len(t, eng.cfgs, 1)
-	assert.Zero(t, eng.cfgs[0].BudgetUSD, "unlimited ceiling keeps the co-op budget unbounded")
+	assert.Zero(t, eng.cfgs[0].BudgetUSD, "unlimited ceiling keeps the mob session budget unbounded")
 }
 
 func TestSeatConfigCapsToolOutput(t *testing.T) {
 	base := harness.Config{ToolOutputMaxBytes: 131072, MaxTurns: 45}
-	cfg := seatConfig(base, coop.SeatConfig{Name: "seat-1", Lens: "risk"}, 0.10, nil)
+	cfg := seatConfig(base, mob.SeatConfig{Name: "seat-1", Lens: "risk"}, 0.10, nil)
 
-	assert.Equal(t, coopSeatToolOutputMaxBytes, cfg.ToolOutputMaxBytes)
-	assert.Equal(t, coopSeatMaxTurns, cfg.MaxTurns)
+	assert.Equal(t, mobSeatToolOutputMaxBytes, cfg.ToolOutputMaxBytes)
+	assert.Equal(t, mobSeatMaxTurns, cfg.MaxTurns)
 	assert.InDelta(t, 0.10, cfg.MaxCostUSD, 1e-9)
 }
 
 func TestSeatConfigSetsWrapUpNudge(t *testing.T) {
-	cfg := seatConfig(harness.Config{}, coop.SeatConfig{Name: "seat-1", Lens: "risk"}, 0.25, nil)
+	cfg := seatConfig(harness.Config{}, mob.SeatConfig{Name: "seat-1", Lens: "risk"}, 0.25, nil)
 
-	assert.Equal(t, coopSeatWrapUpTurns, cfg.WrapUpTurns)
+	assert.Equal(t, mobSeatWrapUpTurns, cfg.WrapUpTurns)
 	assert.Equal(t, seatWrapUpMessage, cfg.WrapUpMessage)
 }
 
@@ -283,12 +284,12 @@ func TestSeatDebugWriterPassesNonJSONThrough(t *testing.T) {
 	assert.Equal(t, "plain log line\n", buf.String())
 }
 
-func TestCoopModeratorRunnerIsToolless(t *testing.T) {
+func TestMobModeratorRunnerIsToolless(t *testing.T) {
 	client := &planLLM{responses: []llm.Response{stopResp("VERDICT", 0.01)}}
-	o := coopTestRun(&fakeOps{}, CoopConfig{Participants: 2}, 10)
+	o := mobTestRun(&fakeOps{}, MobConfig{Participants: 2}, 10)
 	o.d.Client = client
 
-	runner := o.coopModeratorRunner(&seatDebugSink{w: io.Discard})
+	runner := o.mobModeratorRunner(&seatDebugSink{w: io.Discard})
 
 	out, cost, err := runner(t.Context(), "synthesize this")
 	require.NoError(t, err)
@@ -300,16 +301,16 @@ func TestCoopModeratorRunnerIsToolless(t *testing.T) {
 	}
 }
 
-func TestCoopSeatRunnerPersistsContextAcrossRounds(t *testing.T) {
+func TestMobSeatRunnerPersistsContextAcrossRounds(t *testing.T) {
 	client := &planLLM{responses: []llm.Response{
 		stopResp("position A", 0.01),
 		stopResp("critique B", 0.01),
 	}}
-	o := coopTestRun(&fakeOps{}, CoopConfig{Participants: 2}, 10)
+	o := mobTestRun(&fakeOps{}, MobConfig{Participants: 2}, 10)
 	o.d.Client = client
 
-	runner := o.coopSeatRunner(&seatDebugSink{w: io.Discard}, 0)
-	seat := coop.SeatConfig{Name: "seat-1", Lens: "risk", Model: "m/1"}
+	runner := o.mobSeatRunner(&seatDebugSink{w: io.Discard}, 0)
+	seat := mob.SeatConfig{Name: "seat-1", Lens: "risk", Model: "m/1"}
 
 	out1, _, err := runner(t.Context(), seat, nil, "round 0 briefing")
 	require.NoError(t, err)
@@ -347,7 +348,7 @@ func TestCoopSeatRunnerPersistsContextAcrossRounds(t *testing.T) {
 	assert.True(t, sawPosition)
 }
 
-func TestCoopSeatRunnerForcesFinalAnswerOnEmptyOutput(t *testing.T) {
+func TestMobSeatRunnerForcesFinalAnswerOnEmptyOutput(t *testing.T) {
 	// The first turn tool-calls at a cost above the per-turn cap, so the
 	// run stops max_cost with empty output (deterministic — the cap is
 	// checked at the top of the next turn). The backstop call must then
@@ -361,12 +362,12 @@ func TestCoopSeatRunnerForcesFinalAnswerOnEmptyOutput(t *testing.T) {
 		}},
 	}
 	client := &planLLM{responses: []llm.Response{burn, stopResp("forced position", 0.01)}}
-	o := coopTestRun(&fakeOps{}, CoopConfig{Participants: 2}, 10)
+	o := mobTestRun(&fakeOps{}, MobConfig{Participants: 2}, 10)
 	o.d.Client = client
 
-	runner := o.coopSeatRunner(&seatDebugSink{w: io.Discard}, 0.25)
+	runner := o.mobSeatRunner(&seatDebugSink{w: io.Discard}, 0.25)
 
-	out, _, err := runner(t.Context(), coop.SeatConfig{Name: "seat-1", Lens: "risk", Model: "m/1"}, nil, "briefing")
+	out, _, err := runner(t.Context(), mob.SeatConfig{Name: "seat-1", Lens: "risk", Model: "m/1"}, nil, "briefing")
 	require.NoError(t, err)
 	assert.Equal(t, "forced position", out)
 
@@ -375,13 +376,13 @@ func TestCoopSeatRunnerForcesFinalAnswerOnEmptyOutput(t *testing.T) {
 	assert.Zero(t, counts[len(counts)-1], "backstop call must offer no tools")
 }
 
-// TestCoopSeatRunnerBackstopFailureFallsBackToAbsence drives the ferr != nil
+// TestMobSeatRunnerBackstopFailureFallsBackToAbsence drives the ferr != nil
 // branch of the empty-output backstop: same primary shape as
-// TestCoopSeatRunnerForcesFinalAnswerOnEmptyOutput (stops max_cost with
+// TestMobSeatRunnerForcesFinalAnswerOnEmptyOutput (stops max_cost with
 // empty output), but this time the backstop call itself errors (e.g. a
 // transport failure). The runner must still degrade to an absent position
 // rather than failing the whole discussion.
-func TestCoopSeatRunnerBackstopFailureFallsBackToAbsence(t *testing.T) {
+func TestMobSeatRunnerBackstopFailureFallsBackToAbsence(t *testing.T) {
 	burn := llm.Response{
 		FinishReason: "tool_calls",
 		Usage:        llm.Usage{Cost: 0.30},
@@ -393,12 +394,12 @@ func TestCoopSeatRunnerBackstopFailureFallsBackToAbsence(t *testing.T) {
 	// Only the primary turn is scripted; errAfter: 2 makes the second call
 	// (the backstop) return errPlanLLM instead of a response.
 	client := &planLLM{responses: []llm.Response{burn}, errAfter: 2}
-	o := coopTestRun(&fakeOps{}, CoopConfig{Participants: 2}, 10)
+	o := mobTestRun(&fakeOps{}, MobConfig{Participants: 2}, 10)
 	o.d.Client = client
 
-	runner := o.coopSeatRunner(&seatDebugSink{w: io.Discard}, 0.25)
+	runner := o.mobSeatRunner(&seatDebugSink{w: io.Discard}, 0.25)
 
-	out, cost, err := runner(t.Context(), coop.SeatConfig{Name: "seat-1", Lens: "risk", Model: "m/1"}, nil, "briefing")
+	out, cost, err := runner(t.Context(), mob.SeatConfig{Name: "seat-1", Lens: "risk", Model: "m/1"}, nil, "briefing")
 	require.NoError(t, err, "a failed backstop must degrade to absence, not fail the discussion")
 	assert.Empty(t, out)
 

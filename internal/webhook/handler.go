@@ -487,12 +487,12 @@ func (s *Server) admitAndLaunch(ctx context.Context, spec executor.LaunchSpec, p
 	return ""
 }
 
-// runEndpoint maps the payload's llm_endpoint — plus the co-op guest specs,
-// which carry bearer tokens and therefore ride the secrets file — into the
-// per-run credential file's shape. Guests are set regardless of the LLM
+// runEndpoint maps the payload's llm_endpoint — plus the mob session guest
+// specs, which carry bearer tokens and therefore ride the secrets file — into
+// the per-run credential file's shape. Guests are set regardless of the LLM
 // endpoint so an endpoint-less payload still delivers them.
 func (s *Server) runEndpoint(p protocol.TriggerPayload) secrets.EndpointSecrets {
-	e := secrets.EndpointSecrets{CoopGuests: s.coopGuestsJSON(p)}
+	e := secrets.EndpointSecrets{MobGuests: s.mobGuestsJSON(p)}
 
 	if p.LLMEndpoint == nil {
 		return e
@@ -505,17 +505,17 @@ func (s *Server) runEndpoint(p protocol.TriggerPayload) secrets.EndpointSecrets 
 	return e
 }
 
-// coopGuestsJSON compact-encodes the payload's guest specs for the per-run
+// mobGuestsJSON compact-encodes the payload's guest specs for the per-run
 // secrets file. Empty or unmarshalable guests yield "" so the key is omitted
 // — a delivery problem degrades to a guestless discussion, never a failed run.
-func (s *Server) coopGuestsJSON(p protocol.TriggerPayload) string {
-	if p.Coop == nil || len(p.Coop.Guests) == 0 {
+func (s *Server) mobGuestsJSON(p protocol.TriggerPayload) string {
+	if p.Mob == nil || len(p.Mob.Guests) == 0 {
 		return ""
 	}
 
-	b, err := json.Marshal(p.Coop.Guests)
+	b, err := json.Marshal(p.Mob.Guests)
 	if err != nil {
-		s.logger.Warn("failed to marshal coop guests; discussion runs without guests",
+		s.logger.Warn("failed to marshal mob guests; discussion runs without guests",
 			"project", p.Project, "card_id", p.CardID, "error", err)
 
 		return ""
@@ -554,19 +554,19 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 		env = append(env, "CM_BEST_OF_N="+strconv.Itoa(p.BestOfN))
 	}
 
-	if p.Coop != nil && p.Coop.Participants >= 2 {
-		env = append(env, "CM_COOP_PARTICIPANTS="+strconv.Itoa(p.Coop.Participants))
+	if p.Mob != nil && p.Mob.Participants >= 2 {
+		env = append(env, "CM_MOB_PARTICIPANTS="+strconv.Itoa(p.Mob.Participants))
 
-		if len(p.Coop.Phases) > 0 {
-			env = append(env, "CM_COOP_PHASES="+strings.Join(p.Coop.Phases, ","))
+		if len(p.Mob.Phases) > 0 {
+			env = append(env, "CM_MOB_PHASES="+strings.Join(p.Mob.Phases, ","))
 		}
 
-		if p.Coop.Rounds > 0 {
-			env = append(env, "CM_COOP_ROUNDS="+strconv.Itoa(p.Coop.Rounds))
+		if p.Mob.Rounds > 0 {
+			env = append(env, "CM_MOB_ROUNDS="+strconv.Itoa(p.Mob.Rounds))
 		}
 
-		if p.Coop.BudgetFactor > 0 {
-			env = append(env, "CM_COOP_BUDGET_FACTOR="+formatFloat(p.Coop.BudgetFactor))
+		if p.Mob.BudgetFactor > 0 {
+			env = append(env, "CM_MOB_BUDGET_FACTOR="+formatFloat(p.Mob.BudgetFactor))
 		}
 	}
 

@@ -1,4 +1,4 @@
-package coop
+package mob
 
 import (
 	"context"
@@ -14,7 +14,7 @@ import (
 
 // errTurnTimeout marks one seat turn exceeding its deadline. The seat is
 // absent for the round and rejoins the next one on a replacement task.
-var errTurnTimeout = errors.New("coop: turn deadline exceeded")
+var errTurnTimeout = errors.New("mob: turn deadline exceeded")
 
 // cancelBudget bounds the best-effort CancelTask issued after a timeout.
 const cancelBudget = 2 * time.Second
@@ -52,7 +52,7 @@ func dialSeat(ctx context.Context, name, lens, endpoint, bearer string) (*seatHa
 		a2a.NewAgentInterface(endpoint, a2a.TransportProtocolJSONRPC),
 	}, a2aclient.WithJSONRPCTransport(http.DefaultClient))
 	if err != nil {
-		return nil, fmt.Errorf("coop: dial seat %s: %w", name, err)
+		return nil, fmt.Errorf("mob: dial seat %s: %w", name, err)
 	}
 
 	return &seatHandle{
@@ -75,12 +75,12 @@ func dialGuest(ctx context.Context, g GuestSeat) (*seatHandle, error) {
 
 	card, err := agentcard.NewResolver(http.DefaultClient).Resolve(ctx, g.URL, opts...)
 	if err != nil {
-		return nil, fmt.Errorf("coop: resolve guest %s card: %w", g.Name, err)
+		return nil, fmt.Errorf("mob: resolve guest %s card: %w", g.Name, err)
 	}
 
 	client, err := a2aclient.NewFromCard(ctx, card, a2aclient.WithJSONRPCTransport(http.DefaultClient))
 	if err != nil {
-		return nil, fmt.Errorf("coop: dial guest %s: %w", g.Name, err)
+		return nil, fmt.Errorf("mob: dial guest %s: %w", g.Name, err)
 	}
 
 	return &seatHandle{
@@ -136,14 +136,14 @@ func (h *seatHandle) sendTurn(ctx context.Context, round int, body string) (stri
 
 		h.absent = true
 
-		return "", fmt.Errorf("coop: send turn to %s: %w", h.name, err)
+		return "", fmt.Errorf("mob: send turn to %s: %w", h.name, err)
 	}
 
 	task, ok := result.(*a2a.Task)
 	if !ok {
 		h.absent = true
 
-		return "", fmt.Errorf("coop: seat %s returned %T, want *a2a.Task", h.name, result)
+		return "", fmt.Errorf("mob: seat %s returned %T, want *a2a.Task", h.name, result)
 	}
 
 	if task.Status.State.Terminal() {
@@ -151,13 +151,13 @@ func (h *seatHandle) sendTurn(ctx context.Context, round int, body string) (stri
 		h.taskID = ""
 		h.absent = true
 
-		return "", fmt.Errorf("coop: seat %s task ended in state %s", h.name, task.Status.State)
+		return "", fmt.Errorf("mob: seat %s task ended in state %s", h.name, task.Status.State)
 	}
 
 	if task.Status.Message == nil {
 		h.absent = true
 
-		return "", fmt.Errorf("coop: seat %s returned no utterance", h.name)
+		return "", fmt.Errorf("mob: seat %s returned no utterance", h.name)
 	}
 
 	h.taskID = task.ID

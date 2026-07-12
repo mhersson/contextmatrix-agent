@@ -84,8 +84,8 @@ func newWorkCmd() *cobra.Command {
 
 			// Guest specs carry bearer tokens, so they ride the secrets file —
 			// same delivery as the git token, never plain container env.
-			if spec.Coop != nil {
-				spec.Coop.Guests = coopGuestsFromSecrets(src)
+			if spec.Mob != nil {
+				spec.Mob.Guests = mobGuestsFromSecrets(src)
 			}
 
 			// human off (io.Discard), JSONL → stdout for the service log bridge.
@@ -201,34 +201,34 @@ func specFromEnv() (worker.RunSpec, error) {
 		return worker.RunSpec{}, err
 	}
 
-	coopParticipants, err := envInt("CM_COOP_PARTICIPANTS", 0)
+	mobParticipants, err := envInt("CM_MOB_PARTICIPANTS", 0)
 	if err != nil {
 		return worker.RunSpec{}, err
 	}
 
-	coopRounds, err := envInt("CM_COOP_ROUNDS", 0)
+	mobRounds, err := envInt("CM_MOB_ROUNDS", 0)
 	if err != nil {
 		return worker.RunSpec{}, err
 	}
 
-	coopBudgetFactor, err := envFloat("CM_COOP_BUDGET_FACTOR", 0)
+	mobBudgetFactor, err := envFloat("CM_MOB_BUDGET_FACTOR", 0)
 	if err != nil {
 		return worker.RunSpec{}, err
 	}
 
 	// Guests are NOT read here: they carry bearer tokens and ride the mounted
 	// secrets file, resolved in RunE next to the LLM key.
-	var coopSpec *protocol.CoopSpec
+	var mobSpec *protocol.MobSpec
 
-	if coopParticipants >= 2 {
-		coopSpec = &protocol.CoopSpec{
-			Participants: coopParticipants,
-			Rounds:       coopRounds,
-			BudgetFactor: coopBudgetFactor,
+	if mobParticipants >= 2 {
+		mobSpec = &protocol.MobSpec{
+			Participants: mobParticipants,
+			Rounds:       mobRounds,
+			BudgetFactor: mobBudgetFactor,
 		}
 
-		if v := os.Getenv("CM_COOP_PHASES"); v != "" {
-			coopSpec.Phases = strings.Split(v, ",")
+		if v := os.Getenv("CM_MOB_PHASES"); v != "" {
+			mobSpec.Phases = strings.Split(v, ",")
 		}
 	}
 
@@ -294,7 +294,7 @@ func specFromEnv() (worker.RunSpec, error) {
 		Model:                     os.Getenv("CM_MODEL"),
 		Interactive:               os.Getenv("CM_INTERACTIVE") == "true",
 		BestOfN:                   bestOfN,
-		Coop:                      coopSpec,
+		Mob:                       mobSpec,
 		BashTimeoutMax:            bashTimeoutMax,
 		ToolOutputMax:             toolOutputMax,
 		MaxTurns:                  maxTurns,
@@ -408,19 +408,19 @@ func dialectFromType(s string) llm.Dialect {
 	return llm.DialectOpenRouter
 }
 
-// coopGuestsFromSecrets parses the CM_COOP_GUESTS JSON ([]protocol.GuestSpec)
+// mobGuestsFromSecrets parses the CM_MOB_GUESTS JSON ([]protocol.GuestSpec)
 // from the mounted secrets file. Guests carry bearer tokens, so they ride the
 // secrets mount, never plain container env. A parse failure degrades to no
 // guests — a discussion must never fail the run.
-func coopGuestsFromSecrets(src *secrets.Source) []protocol.GuestSpec {
-	raw := src.Get("CM_COOP_GUESTS")
+func mobGuestsFromSecrets(src *secrets.Source) []protocol.GuestSpec {
+	raw := src.Get("CM_MOB_GUESTS")
 	if raw == "" {
 		return nil
 	}
 
 	var guests []protocol.GuestSpec
 	if err := json.Unmarshal([]byte(raw), &guests); err != nil {
-		slog.Warn("CM_COOP_GUESTS parse failed; discussion runs without guests", "error", err)
+		slog.Warn("CM_MOB_GUESTS parse failed; discussion runs without guests", "error", err)
 
 		return nil
 	}

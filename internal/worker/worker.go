@@ -52,10 +52,10 @@ type RunSpec struct {
 	BestOfN     int    // CM_BEST_OF_N; >= 2 races N candidate implementations (0 = normal run)
 	Model       string // CM_MODEL (optional; honored if catalog-resolvable)
 
-	// Coop configures co-op discussions for this run: scalar knobs from
-	// CM_COOP_* env, guest specs (bearer tokens inside) from the mounted
-	// secrets file. nil = co-op off.
-	Coop *protocol.CoopSpec
+	// Mob configures mob session discussions for this run: scalar knobs from
+	// CM_MOB_* env, guest specs (bearer tokens inside) from the mounted
+	// secrets file. nil = mob session off.
+	Mob *protocol.MobSpec
 
 	MCPURL    string // CM_MCP_URL (required)
 	MCPAPIKey string // CM_MCP_API_KEY (required)
@@ -313,7 +313,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 	// Guest bearer tokens are known at worker start, so they join the
 	// immutable redactor alongside the endpoint credentials.
 	red := redact.New(append([]string{a.spec.LLMKey, a.spec.MCPAPIKey, a.spec.GitToken},
-		coopGuestTokens(a.spec.Coop)...))
+		mobGuestTokens(a.spec.Mob)...))
 
 	hitl := a.spec.Interactive && !a.tcx.Autonomous
 
@@ -376,7 +376,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 			ReviewAttemptsCap: reviewAttemptsCap,
 			Interactive:       hitl,
 			BestOfN:           a.spec.BestOfN,
-			Coop:              coopConfig(a.spec.Coop),
+			Mob:               mobConfig(a.spec.Mob),
 			Compaction: orchestrator.Compaction{
 				Enabled:         a.spec.CompactionEnabled,
 				Threshold:       a.spec.CompactionThreshold,
@@ -646,18 +646,18 @@ func withDefaults(spec RunSpec) RunSpec {
 	return spec
 }
 
-// coopConfig maps the payload co-op spec onto the orchestrator's config: the
-// phase list becomes per-phase booleans and the spec-level defaults (2
+// mobConfig maps the payload mob session spec onto the orchestrator's config:
+// the phase list becomes per-phase booleans and the spec-level defaults (2
 // critique rounds, budget factor 0.75, phases plan+review) fill zero values
 // so the orchestrator never sees an ambiguous zero. Execute checkpoints are
 // a later slice: "execute" is accepted on the wire but not mapped. nil or
 // participants < 2 = off (zero value).
-func coopConfig(spec *protocol.CoopSpec) orchestrator.CoopConfig {
+func mobConfig(spec *protocol.MobSpec) orchestrator.MobConfig {
 	if spec == nil || spec.Participants < 2 {
-		return orchestrator.CoopConfig{}
+		return orchestrator.MobConfig{}
 	}
 
-	c := orchestrator.CoopConfig{
+	c := orchestrator.MobConfig{
 		Participants: spec.Participants,
 		Rounds:       spec.Rounds,
 		BudgetFactor: spec.BudgetFactor,
@@ -685,15 +685,15 @@ func coopConfig(spec *protocol.CoopSpec) orchestrator.CoopConfig {
 	}
 
 	for _, g := range spec.Guests {
-		c.Guests = append(c.Guests, orchestrator.CoopGuest{Name: g.Name, URL: g.URL, Token: g.Token})
+		c.Guests = append(c.Guests, orchestrator.MobGuest{Name: g.Name, URL: g.URL, Token: g.Token})
 	}
 
 	return c
 }
 
-// coopGuestTokens extracts the non-empty guest bearer tokens for redactor
+// mobGuestTokens extracts the non-empty guest bearer tokens for redactor
 // registration.
-func coopGuestTokens(spec *protocol.CoopSpec) []string {
+func mobGuestTokens(spec *protocol.MobSpec) []string {
 	if spec == nil {
 		return nil
 	}

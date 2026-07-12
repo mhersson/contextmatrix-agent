@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
-	"github.com/mhersson/contextmatrix-agent/internal/coop"
+	"github.com/mhersson/contextmatrix-agent/internal/mob"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/mhersson/contextmatrix-harness/harness"
@@ -664,9 +664,9 @@ func TestRunPlanHITLDesignReachesPlanner(t *testing.T) {
 		"planner prompt must contain the brainstormed design text")
 }
 
-// coopPlanRun builds an autonomous run with co-op plan enabled and a
+// mobPlanRun builds an autonomous run with mob session plan enabled and a
 // scripted engine.
-func coopPlanRun(ops *fakeOps, client llm.LLM, eng *scriptedEngine) *run {
+func mobPlanRun(ops *fakeOps, client llm.LLM, eng *scriptedEngine) *run {
 	d := Deps{
 		Ops:       ops,
 		Git:       &fakeGit{},
@@ -678,7 +678,7 @@ func coopPlanRun(ops *fakeOps, client llm.LLM, eng *scriptedEngine) *run {
 			Project: "proj", CardID: "CARD-1",
 			PayloadModel: "payload/model", DefaultModel: "default/model",
 			MaxTurns: 20, MaxCardCost: 2.0,
-			Coop: CoopConfig{Participants: 3, Plan: true, Rounds: 2, BudgetFactor: 0.75},
+			Mob: MobConfig{Participants: 3, Plan: true, Rounds: 2, BudgetFactor: 0.75},
 		},
 	}
 
@@ -688,16 +688,16 @@ func coopPlanRun(ops *fakeOps, client llm.LLM, eng *scriptedEngine) *run {
 	}
 
 	o := newRun(d, tc)
-	o.coopEngine = eng.run
+	o.mobEngine = eng.run
 
 	return o
 }
 
-func TestRunPlanCoopCreatesSubtasksFromSynthesis(t *testing.T) {
+func TestRunPlanMobCreatesSubtasksFromSynthesis(t *testing.T) {
 	ops := &fakeOps{createdIDs: []string{"SUB-1", "SUB-2"}}
 	llmFake := &planLLM{}
-	eng := &scriptedEngine{outcomes: []coop.Outcome{{
-		Transcript: []coop.Entry{
+	eng := &scriptedEngine{outcomes: []mob.Outcome{{
+		Transcript: []mob.Entry{
 			{Author: "seat-1", Lens: "feasibility/simplicity", Round: 0, Content: "proposal A"},
 			{Author: "seat-2", Lens: "architecture/extensibility", Round: 1, Content: "critique"},
 		},
@@ -706,7 +706,7 @@ func TestRunPlanCoopCreatesSubtasksFromSynthesis(t *testing.T) {
 		CostUSD:   0.10,
 	}}}
 
-	o := coopPlanRun(ops, llmFake, eng)
+	o := mobPlanRun(ops, llmFake, eng)
 	require.NoError(t, runPlan(context.Background(), o))
 
 	// Subtasks come from the synthesized JSON, through the normal parser.
@@ -735,13 +735,13 @@ func TestRunPlanCoopCreatesSubtasksFromSynthesis(t *testing.T) {
 	assert.Contains(t, joined, "consensus")
 }
 
-func TestRunPlanCoopRepairSucceeds(t *testing.T) {
+func TestRunPlanMobRepairSucceeds(t *testing.T) {
 	ops := &fakeOps{createdIDs: []string{"SUB-1", "SUB-2"}}
 	// The moderator repair call is the only LLM call: it returns valid JSON.
 	llmFake := &planLLM{responses: []llm.Response{stopResp(goodPlanJSON, 0.02)}}
-	eng := &scriptedEngine{outcomes: []coop.Outcome{{Synthesis: "sorry, prose only", Consensus: true}}}
+	eng := &scriptedEngine{outcomes: []mob.Outcome{{Synthesis: "sorry, prose only", Consensus: true}}}
 
-	o := coopPlanRun(ops, llmFake, eng)
+	o := mobPlanRun(ops, llmFake, eng)
 	require.NoError(t, runPlan(context.Background(), o))
 
 	require.Len(t, ops.createCardArgs, 2, "subtasks created from the repaired synthesis")
@@ -749,16 +749,16 @@ func TestRunPlanCoopRepairSucceeds(t *testing.T) {
 	assert.Contains(t, llmFake.tasks[0], "COULD NOT BE PARSED", "the repair prompt names the parse failure")
 }
 
-func TestRunPlanCoopParseFailureFallsBackToDraftPlan(t *testing.T) {
+func TestRunPlanMobParseFailureFallsBackToDraftPlan(t *testing.T) {
 	ops := &fakeOps{createdIDs: []string{"SUB-1", "SUB-2"}}
 	// Call 1: moderator repair — still junk. Call 2: solo draftPlan — good.
 	llmFake := &planLLM{responses: []llm.Response{
 		stopResp("still not json", 0.01),
 		stopResp(goodPlanJSON, 0.01),
 	}}
-	eng := &scriptedEngine{outcomes: []coop.Outcome{{Synthesis: "prose"}}}
+	eng := &scriptedEngine{outcomes: []mob.Outcome{{Synthesis: "prose"}}}
 
-	o := coopPlanRun(ops, llmFake, eng)
+	o := mobPlanRun(ops, llmFake, eng)
 	require.NoError(t, runPlan(context.Background(), o))
 
 	require.Len(t, ops.createCardArgs, 2, "the solo fallback produced the plan")
@@ -768,19 +768,19 @@ func TestRunPlanCoopParseFailureFallsBackToDraftPlan(t *testing.T) {
 	assert.NotContains(t, joined, "## Discussion", "no discussion record when the discussion was abandoned")
 }
 
-func TestRunPlanCoopEngineFailureFallsBackToDraftPlan(t *testing.T) {
+func TestRunPlanMobEngineFailureFallsBackToDraftPlan(t *testing.T) {
 	ops := &fakeOps{createdIDs: []string{"SUB-1", "SUB-2"}}
 	llmFake := &planLLM{responses: []llm.Response{stopResp(goodPlanJSON, 0.01)}}
-	eng := &scriptedEngine{outcomes: []coop.Outcome{{}}, errs: []error{coop.ErrNoQuorum}}
+	eng := &scriptedEngine{outcomes: []mob.Outcome{{}}, errs: []error{mob.ErrNoQuorum}}
 
-	o := coopPlanRun(ops, llmFake, eng)
+	o := mobPlanRun(ops, llmFake, eng)
 	require.NoError(t, runPlan(context.Background(), o))
 
 	require.Len(t, ops.createCardArgs, 2, "quorum failure degrades to the solo path")
 	assert.Len(t, llmFake.tasks, 1, "exactly the solo planner call")
 }
 
-func TestRunPlanCoopHITLAdjustReopensDiscussion(t *testing.T) {
+func TestRunPlanMobHITLAdjustReopensDiscussion(t *testing.T) {
 	ops := &fakeOps{createdIDs: []string{"SUB-1", "SUB-2"}}
 	inbox := &fakeInbox{msgs: []harness.UserMessage{
 		{Content: "make it two subtasks"},
@@ -791,20 +791,20 @@ func TestRunPlanCoopHITLAdjustReopensDiscussion(t *testing.T) {
 		stopResp(`{"verdict":"adjust","feedback":"two subtasks"}`, 0.001),
 		stopResp(`{"verdict":"approve","feedback":""}`, 0.001),
 	}}
-	eng := &scriptedEngine{outcomes: []coop.Outcome{
+	eng := &scriptedEngine{outcomes: []mob.Outcome{
 		{
-			Transcript: []coop.Entry{{Author: "seat-1", Lens: "feasibility/simplicity", Round: 0, Content: "proposal"}},
+			Transcript: []mob.Entry{{Author: "seat-1", Lens: "feasibility/simplicity", Round: 0, Content: "proposal"}},
 			Synthesis:  goodPlanJSON,
 			Consensus:  true,
 		},
 		{
-			Transcript: []coop.Entry{{Author: "seat-1", Lens: "feasibility/simplicity", Round: 1, Content: "revised"}},
+			Transcript: []mob.Entry{{Author: "seat-1", Lens: "feasibility/simplicity", Round: 1, Content: "revised"}},
 			Synthesis:  goodPlanJSON,
 			Consensus:  true,
 		},
 	}}
 
-	o := coopPlanRun(ops, llmFake, eng)
+	o := mobPlanRun(ops, llmFake, eng)
 	o.d.Cfg.Interactive = true
 	o.d.Human = inbox
 	// Pre-existing design section on the accumulated card body (what

@@ -1,11 +1,13 @@
-// Package coop implements the A2A co-op discussion engine: N internal seats
-// (one AgentExecutor each behind a loopback JSON-RPC server) plus optional
-// operator-registered guests discuss a topic under a code-driven moderator.
-// The engine is phase-agnostic: callers set the briefing, lenses, rounds, and
-// synthesis instruction; the engine owns rounds, quorum, convergence, budget,
-// and transcript wiring. Wire and behavior spec:
-// docs/superpowers/specs/2026-07-10-a2a-coop-design.md (contextmatrix repo).
-package coop
+// Package mob implements the A2A mob session discussion engine: N internal
+// seats (one AgentExecutor each behind a loopback JSON-RPC server) plus
+// optional operator-registered guests discuss a topic under a code-driven
+// moderator. The engine is phase-agnostic: callers set the briefing, lenses,
+// rounds, and synthesis instruction; the engine owns rounds, quorum,
+// convergence, budget, and transcript wiring. Wire and behavior spec:
+// docs/superpowers/specs/2026-07-10-a2a-coop-design.md (contextmatrix repo);
+// naming rename spec: docs/superpowers/specs/2026-07-12-mob-session-rename-design.md
+// (contextmatrix repo).
+package mob
 
 import (
 	"context"
@@ -36,7 +38,7 @@ const (
 // ErrNoQuorum marks a quorum failure — fewer than two seats responded in the
 // first live round. Callers treat it (like any Discuss error) as a signal to
 // fall back to the existing solo path; a discussion never fails the card.
-var ErrNoQuorum = errors.New("coop: no quorum")
+var ErrNoQuorum = errors.New("mob: no quorum")
 
 // Topic is one discussion request. The engine never branches on Kind — it is
 // labeling/telemetry only; Rounds/Blind/Lenses are the control knobs.
@@ -110,7 +112,7 @@ type EngineConfig struct {
 	Moderate  ModeratorRunner
 	Emit      EmitFn        // never nil
 	Inbox     harness.Inbox // human interjections; nil = none
-	BudgetUSD float64       // co-op budget term; 0 = unlimited
+	BudgetUSD float64       // mob session budget term; 0 = unlimited
 
 	// SeatEndpoint maps an internal seat name to its loopback A2A endpoint —
 	// wired to (*Server).SeatEndpoint by the caller, which owns the server
@@ -126,7 +128,7 @@ type EngineConfig struct {
 	GuestDeadline    time.Duration // 300 * time.Second
 }
 
-// Engine runs co-op discussions. Construct with NewEngine; the Discuss
+// Engine runs mob sessions. Construct with NewEngine; the Discuss
 // implementation lives in engine.go.
 type Engine struct {
 	cfg EngineConfig

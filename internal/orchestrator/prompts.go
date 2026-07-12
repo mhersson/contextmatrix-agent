@@ -691,8 +691,8 @@ func priorFindingsBlock(findings string) string {
 }
 
 // fencedDiff wraps a git diff in a ```diff code fence so markdown surfaces —
-// the co-op briefing relayed to the board chat in particular — render it as
-// one code block instead of interpreting -/+ lines as bullet lists. The fence
+// the mob session briefing relayed to the board chat in particular — render
+// it as one code block instead of interpreting -/+ lines as bullet lists. The fence
 // is extended past the longest backtick run inside the diff so embedded
 // fences cannot break out.
 func fencedDiff(diff string) string {
@@ -733,12 +733,12 @@ var (
 
 	planWrapUpMessage = fmt.Sprintf("%d turns remain. Stop investigating now and output your final answer: ONLY the JSON plan object described above, built from the analysis you already have. Make no further tool calls, no prose, no code fences.", wrapUpTurns)
 
-	seatWrapUpMessage = fmt.Sprintf("%d turns remain in this round. Stop exploring and state your position now, built only from what you have already read — plain text, no further tool calls.", coopSeatWrapUpTurns)
+	seatWrapUpMessage = fmt.Sprintf("%d turns remain in this round. Stop exploring and state your position now, built only from what you have already read — plain text, no further tool calls.", mobSeatWrapUpTurns)
 
 	seatForcedFinalPrompt = "Your exploration budget for this round is exhausted. State your position now, built only from what you have already read — plain text, concise. If you could not form a position, say in one sentence what you were missing."
 )
 
-// seatSystemPrompt is the per-seat co-op discussion persona. The two %s slots
+// seatSystemPrompt is the per-seat mob session discussion persona. The two %s slots
 // are the seat name ("seat-1"..) and its assigned lens.
 const seatSystemPrompt = `You are %s, one seat in a structured discussion between software agents
 working the same task. Your assigned lens: %s. Argue from this lens; do not

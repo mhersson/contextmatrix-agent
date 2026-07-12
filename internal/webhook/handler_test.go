@@ -1732,10 +1732,10 @@ func TestTrigger_RejectsAndReportsFailedWhenNoCredentialSourceAtAll(t *testing.T
 	assert.Empty(t, h.exec.launchedSpecs(), "no container launch when the payload provisions nothing")
 }
 
-// TestBuildLaunchSpec_Coop pins the CM_COOP_* env emission, mirroring the
+// TestBuildLaunchSpec_Mob pins the CM_MOB_* env emission, mirroring the
 // Best-of-N pattern: scalar knobs ride plain env; guest specs (bearer tokens
 // inside) never do — they travel only via the per-run secrets file.
-func TestBuildLaunchSpec_Coop(t *testing.T) {
+func TestBuildLaunchSpec_Mob(t *testing.T) {
 	newServer := func() *Server {
 		return NewServer(Config{
 			APIKey:    "k",
@@ -1745,12 +1745,12 @@ func TestBuildLaunchSpec_Coop(t *testing.T) {
 		})
 	}
 
-	t.Run("emits scalar env when coop is on", func(t *testing.T) {
+	t.Run("emits scalar env when mob is on", func(t *testing.T) {
 		s := newServer()
 
 		spec := s.buildLaunchSpec(protocol.TriggerPayload{
 			CardID: "C1", Project: "p",
-			Coop: &protocol.CoopSpec{
+			Mob: &protocol.MobSpec{
 				Participants: 3,
 				Phases:       []string{"plan", "review"},
 				Rounds:       2,
@@ -1759,45 +1759,45 @@ func TestBuildLaunchSpec_Coop(t *testing.T) {
 			},
 		}, "corr", "")
 
-		assert.Contains(t, spec.Env, "CM_COOP_PARTICIPANTS=3")
-		assert.Contains(t, spec.Env, "CM_COOP_PHASES=plan,review")
-		assert.Contains(t, spec.Env, "CM_COOP_ROUNDS=2")
-		assert.Contains(t, spec.Env, "CM_COOP_BUDGET_FACTOR=0.75")
+		assert.Contains(t, spec.Env, "CM_MOB_PARTICIPANTS=3")
+		assert.Contains(t, spec.Env, "CM_MOB_PHASES=plan,review")
+		assert.Contains(t, spec.Env, "CM_MOB_ROUNDS=2")
+		assert.Contains(t, spec.Env, "CM_MOB_BUDGET_FACTOR=0.75")
 
 		for _, e := range spec.Env {
 			assert.NotContains(t, e, "guest-secret", "guest tokens must never ride plain container env")
-			assert.NotContains(t, e, "CM_COOP_GUESTS", "guest specs must never ride plain container env")
+			assert.NotContains(t, e, "CM_MOB_GUESTS", "guest specs must never ride plain container env")
 		}
 	})
 
-	t.Run("omits all coop env when absent", func(t *testing.T) {
+	t.Run("omits all mob env when absent", func(t *testing.T) {
 		s := newServer()
 
 		spec := s.buildLaunchSpec(protocol.TriggerPayload{CardID: "C1", Project: "p"}, "corr", "")
 
 		for _, e := range spec.Env {
-			assert.NotContains(t, e, "CM_COOP", "no coop env for a non-coop run")
+			assert.NotContains(t, e, "CM_MOB", "no mob env for a non-mob run")
 		}
 	})
 
-	t.Run("omits coop env when participants below two", func(t *testing.T) {
+	t.Run("omits mob env when participants below two", func(t *testing.T) {
 		s := newServer()
 
 		spec := s.buildLaunchSpec(protocol.TriggerPayload{
 			CardID: "C1", Project: "p",
-			Coop: &protocol.CoopSpec{Participants: 1},
+			Mob: &protocol.MobSpec{Participants: 1},
 		}, "corr", "")
 
 		for _, e := range spec.Env {
-			assert.NotContains(t, e, "CM_COOP", "participants < 2 is off")
+			assert.NotContains(t, e, "CM_MOB", "participants < 2 is off")
 		}
 	})
 }
 
-// TestRunEndpointCarriesCoopGuests pins the guest delivery seam: guest specs
-// land in EndpointSecrets.CoopGuests so the per-run secrets writer (initial
-// Provision AND every refresh rewrite) emits the CM_COOP_GUESTS line.
-func TestRunEndpointCarriesCoopGuests(t *testing.T) {
+// TestRunEndpointCarriesMobGuests pins the guest delivery seam: guest specs
+// land in EndpointSecrets.MobGuests so the per-run secrets writer (initial
+// Provision AND every refresh rewrite) emits the CM_MOB_GUESTS line.
+func TestRunEndpointCarriesMobGuests(t *testing.T) {
 	s := NewServer(Config{
 		APIKey:    "k",
 		Executor:  &fakeExecutor{},
@@ -1808,7 +1808,7 @@ func TestRunEndpointCarriesCoopGuests(t *testing.T) {
 	t.Run("guests marshal alongside the llm endpoint", func(t *testing.T) {
 		e := s.runEndpoint(protocol.TriggerPayload{
 			LLMEndpoint: &protocol.LLMEndpoint{Type: "openai", BaseURL: "https://llm.example/v1", APIKey: "key"},
-			Coop: &protocol.CoopSpec{
+			Mob: &protocol.MobSpec{
 				Participants: 3,
 				Guests:       []protocol.GuestSpec{{Name: "laptop", URL: "http://10.0.0.5:8484", Token: "guest-secret"}},
 			},
@@ -1817,23 +1817,23 @@ func TestRunEndpointCarriesCoopGuests(t *testing.T) {
 		assert.Equal(t, "key", e.APIKey)
 		assert.JSONEq(t,
 			`[{"name":"laptop","url":"http://10.0.0.5:8484","token":"guest-secret"}]`,
-			e.CoopGuests)
+			e.MobGuests)
 	})
 
 	t.Run("guests survive a nil llm endpoint", func(t *testing.T) {
 		e := s.runEndpoint(protocol.TriggerPayload{
-			Coop: &protocol.CoopSpec{
+			Mob: &protocol.MobSpec{
 				Participants: 2,
 				Guests:       []protocol.GuestSpec{{Name: "laptop", URL: "http://10.0.0.5:8484"}},
 			},
 		})
 
 		assert.Empty(t, e.APIKey)
-		assert.NotEmpty(t, e.CoopGuests)
+		assert.NotEmpty(t, e.MobGuests)
 	})
 
 	t.Run("no guests yields empty string", func(t *testing.T) {
-		e := s.runEndpoint(protocol.TriggerPayload{Coop: &protocol.CoopSpec{Participants: 3}})
-		assert.Empty(t, e.CoopGuests)
+		e := s.runEndpoint(protocol.TriggerPayload{Mob: &protocol.MobSpec{Participants: 3}})
+		assert.Empty(t, e.MobGuests)
 	})
 }

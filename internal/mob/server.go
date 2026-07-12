@@ -1,4 +1,4 @@
-package coop
+package mob
 
 import (
 	"context"
@@ -36,22 +36,22 @@ type Server struct {
 // Close when the discussion ends.
 func StartServer(seats []SeatConfig, runner SeatRunner, bearer string) (*Server, error) {
 	if len(seats) == 0 {
-		return nil, errors.New("coop: start server: no seats")
+		return nil, errors.New("mob: start server: no seats")
 	}
 
 	if bearer == "" {
-		return nil, errors.New("coop: start server: empty bearer token")
+		return nil, errors.New("mob: start server: empty bearer token")
 	}
 
 	if runner == nil {
-		return nil, errors.New("coop: start server: nil seat runner")
+		return nil, errors.New("mob: start server: nil seat runner")
 	}
 
 	var lc net.ListenConfig
 
 	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
-		return nil, fmt.Errorf("coop: listen loopback: %w", err)
+		return nil, fmt.Errorf("mob: listen loopback: %w", err)
 	}
 
 	base := "http://" + ln.Addr().String()
@@ -62,14 +62,14 @@ func StartServer(seats []SeatConfig, runner SeatRunner, bearer string) (*Server,
 		if seat.Name == "" || seen[seat.Name] {
 			_ = ln.Close() //nolint:errcheck // best-effort cleanup on the error path
 
-			return nil, fmt.Errorf("coop: start server: empty or duplicate seat name %q", seat.Name)
+			return nil, fmt.Errorf("mob: start server: empty or duplicate seat name %q", seat.Name)
 		}
 
 		seen[seat.Name] = true
 		endpoint := base + "/seats/" + seat.Name
 
 		card := &a2a.AgentCard{
-			Name:    "cm-coop-" + seat.Name,
+			Name:    "cm-mob-" + seat.Name,
 			Version: "1",
 			SupportedInterfaces: []*a2a.AgentInterface{
 				a2a.NewAgentInterface(endpoint, a2a.TransportProtocolJSONRPC),

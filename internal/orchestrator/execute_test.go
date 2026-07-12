@@ -811,7 +811,7 @@ func TestNoSalvageOnEarlierSubtask(t *testing.T) {
 }
 
 // TestSoloTurnCapSalvagedWhenVerifyPasses proves the single-solver (parent /
-// co-op) rescue: a capped subtask whose committed work passes the authoritative
+// mob session) rescue: a capped subtask whose committed work passes the authoritative
 // verify completes exactly like a finish-terminated run — pushed and marked
 // done — instead of parking. The single solver has no judge, so the verify runs
 // inline and is the completion authority.

@@ -1,4 +1,4 @@
-package coop
+package mob
 
 import (
 	"encoding/json"
@@ -6,32 +6,32 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 )
 
-// metadataKey is the A2A Message.Metadata key carrying co-op control data —
+// metadataKey is the A2A Message.Metadata key carrying mob session control data —
 // the wire convention shared with the guest shim.
-const metadataKey = "cm_coop"
+const metadataKey = "cm_mob"
 
 // costKey carries an internal seat's per-turn USD cost back to the moderator
 // on the utterance message. Engine-internal: guests never set it (their
 // compute is their own), so a missing key reads as 0.
-const costKey = "cm_coop_cost_usd"
+const costKey = "cm_mob_cost_usd"
 
 const (
 	controlRound = "round"
 	controlClose = "close"
 )
 
-// control is the decoded cm_coop metadata of one moderator->seat message.
+// control is the decoded cm_mob metadata of one moderator->seat message.
 type control struct {
 	Kind  string // "round" | "close"
 	Round int
 }
 
-// setControl attaches c to m under the cm_coop key.
+// setControl attaches c to m under the cm_mob key.
 func setControl(m *a2a.Message, c control) {
 	m.SetMeta(metadataKey, map[string]any{"control": c.Kind, "round": c.Round})
 }
 
-// parseControl decodes the cm_coop metadata of m. Missing or malformed
+// parseControl decodes the cm_mob metadata of m. Missing or malformed
 // metadata means {Kind: "round"} — executors and the shim treat unknown
 // control data as an ordinary round message.
 func parseControl(m *a2a.Message) control {

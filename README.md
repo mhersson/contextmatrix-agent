@@ -77,12 +77,12 @@ card fields set in ContextMatrix:
   eligible pool allows, wrapping around when it is smaller than N); a judge
   phase picks the winner, which is adopted onto the main clone and pushed.
   Losing candidates never push and are removed.
-- **Co-op discussions** (`coop_participants` ≥ 2) — the plan and review phases
+- **Mob session** (`mob_participants` ≥ 2) — the plan and review phases
   convene a moderated multi-seat discussion over the A2A protocol (loopback
   JSON-RPC seats plus optional registered guest agents); the decision model
   synthesizes the group's answer into the phase's normal output, and the live
   transcript streams to the card's chat tab on the board. Discussions degrade
-  to the solo path rather than failing the run, and co-op composes freely with
+  to the solo path rather than failing the run, and mob session composes freely with
   a Best-of-N execute race.
 
 The inner loop lives in the standalone `github.com/mhersson/contextmatrix-harness`

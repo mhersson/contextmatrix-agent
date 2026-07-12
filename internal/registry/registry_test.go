@@ -340,7 +340,7 @@ func TestFavoritesConsideredFirst(t *testing.T) {
 	}
 }
 
-// TestSelectDiscussionPanel pins the co-op seat-selection seam: it must give
+// TestSelectDiscussionPanel pins the mob session seat-selection seam: it must give
 // distinct models first, honor the caller's exclusions (review discussions
 // exclude the models that coded the card), and wrap around on scarcity
 // instead of shrinking the panel — the SelectReviewPanel walk, by name.

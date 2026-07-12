@@ -8,7 +8,7 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/mhersson/contextmatrix-agent/internal/coop"
+	"github.com/mhersson/contextmatrix-agent/internal/mob"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-harness/harness"
 	"github.com/mhersson/contextmatrix-harness/tools"
@@ -313,12 +313,12 @@ func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, autho
 	}
 
 	// Gate passed, skipped, or absent — the gate is a cheap pre-filter, not a
-	// substitute for review, so specialists always run. With co-op review on,
-	// a panel discussion replaces the specialist pass for non-authoritative
-	// rounds (the authoritative pass keeps the proven solo machinery); a
-	// failed discussion degrades to the fan-out below.
-	if o.d.Cfg.Coop.enabled() && o.d.Cfg.Coop.Review && !authoritative {
-		if v, ok := o.coopReviewVerdict(ctx); ok {
+	// substitute for review, so specialists always run. With mob session
+	// review on, a panel discussion replaces the specialist pass for
+	// non-authoritative rounds (the authoritative pass keeps the proven solo
+	// machinery); a failed discussion degrades to the fan-out below.
+	if o.d.Cfg.Mob.enabled() && o.d.Cfg.Mob.Review && !authoritative {
+		if v, ok := o.mobReviewVerdict(ctx); ok {
 			if v.Approved {
 				return v.Summary, v.FixTier, true, vres, nil
 			}
@@ -516,24 +516,24 @@ func (o *run) reviewExclusions() map[string]bool {
 	return excl
 }
 
-// coopReviewVerdict convenes the review discussion and parses its synthesis
+// mobReviewVerdict convenes the review discussion and parses its synthesis
 // into the existing verdict shape, with ONE moderator repair on a parse
 // failure (mirroring synthesize's repair turn). ok=false on any failure —
 // the caller falls back to the specialist fan-out. On success it records the
 // review snapshot head, exactly like runSpecialists, so later rounds stay
 // delta-scoped.
-func (o *run) coopReviewVerdict(ctx context.Context) (verdict, bool) {
-	briefing, err := o.coopReviewBriefing(ctx)
+func (o *run) mobReviewVerdict(ctx context.Context) (verdict, bool) {
+	briefing, err := o.mobReviewBriefing(ctx)
 	if err != nil {
-		slog.Warn("coop review: briefing failed; solo fallback",
+		slog.Warn("mob review: briefing failed; solo fallback",
 			"card_id", o.d.Cfg.CardID, "error", err)
 
 		return verdict{}, false
 	}
 
-	seats := min(o.d.Cfg.Coop.Participants, len(reviewLenses))
+	seats := min(o.d.Cfg.Mob.Participants, len(reviewLenses))
 
-	t := coop.Topic{
+	t := mob.Topic{
 		Kind:     "review",
 		Briefing: briefing,
 		Lenses:   reviewLenses[:seats],
@@ -543,16 +543,16 @@ func (o *run) coopReviewVerdict(ctx context.Context) (verdict, bool) {
 			o.grounding, o.tc.Title, o.tc.Description),
 	}
 
-	out, ok := o.coopDiscuss(ctx, t)
+	out, ok := o.mobDiscuss(ctx, t)
 	if !ok {
 		return verdict{}, false
 	}
 
 	v, perr := parseVerdict(out.Synthesis)
 	if perr != nil {
-		repaired, rerr := o.coopResynthesize(ctx, t, out, perr.Error())
+		repaired, rerr := o.mobResynthesize(ctx, t, out, perr.Error())
 		if rerr != nil {
-			slog.Warn("coop review: repair synthesis failed; solo fallback",
+			slog.Warn("mob review: repair synthesis failed; solo fallback",
 				"card_id", o.d.Cfg.CardID, "error", rerr)
 
 			return verdict{}, false
@@ -560,7 +560,7 @@ func (o *run) coopReviewVerdict(ctx context.Context) (verdict, bool) {
 
 		v, perr = parseVerdict(repaired)
 		if perr != nil {
-			slog.Warn("coop review: verdict parse failed after repair; solo fallback",
+			slog.Warn("mob review: verdict parse failed after repair; solo fallback",
 				"card_id", o.d.Cfg.CardID, "error", perr)
 
 			return verdict{}, false
@@ -576,11 +576,11 @@ func (o *run) coopReviewVerdict(ctx context.Context) (verdict, bool) {
 	return v, true
 }
 
-// coopReviewBriefing assembles the discussion briefing from the SAME scope
+// mobReviewBriefing assembles the discussion briefing from the SAME scope
 // the specialist fan-out reviews: the branch diff against the delta base
 // (lastReviewBase when a prior round snapshotted, else the base branch) plus
 // the prior round's findings.
-func (o *run) coopReviewBriefing(ctx context.Context) (string, error) {
+func (o *run) mobReviewBriefing(ctx context.Context) (string, error) {
 	base := o.lastReviewBase
 	if base == "" {
 		base = o.d.Cfg.BaseBranch

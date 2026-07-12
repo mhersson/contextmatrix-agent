@@ -588,7 +588,7 @@ func TestHubSubscribers(t *testing.T) {
 	})
 }
 
-// TestDiscussionMapping pins the co-op live-transcript bridging: kind
+// TestDiscussionMapping pins the mob session live-transcript bridging: kind
 // "discussion" maps to a text entry carrying the speaker in Agent, while the
 // seat-debug kind is never bridged.
 func TestDiscussionMapping(t *testing.T) {
