@@ -112,7 +112,7 @@ type EngineConfig struct {
 	Moderate  ModeratorRunner
 	Emit      EmitFn        // never nil
 	Inbox     harness.Inbox // human interjections; nil = none
-	BudgetUSD float64       // co-op budget term; 0 = unlimited
+	BudgetUSD float64       // mob session budget term; 0 = unlimited
 
 	// SeatEndpoint maps an internal seat name to its loopback A2A endpoint —
 	// wired to (*Server).SeatEndpoint by the caller, which owns the server
@@ -128,7 +128,7 @@ type EngineConfig struct {
 	GuestDeadline    time.Duration // 300 * time.Second
 }
 
-// Engine runs co-op discussions. Construct with NewEngine; the Discuss
+// Engine runs mob sessions. Construct with NewEngine; the Discuss
 // implementation lives in engine.go.
 type Engine struct {
 	cfg EngineConfig
