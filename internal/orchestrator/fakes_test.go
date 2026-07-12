@@ -571,6 +571,10 @@ type planLLM struct {
 	// inherit the parent routing.
 	providers  []json.RawMessage
 	reasonings []json.RawMessage
+
+	// toolCounts captures len(req.Tools) for every call, index-aligned with
+	// models, so tests can assert a caller offered no tools.
+	toolCounts []int
 }
 
 func (p *planLLM) Send(_ context.Context, req llm.Request) (llm.Response, error) {
@@ -588,6 +592,7 @@ func (p *planLLM) next(req llm.Request) llm.Response {
 	p.models = append(p.models, req.Model)
 	p.providers = append(p.providers, req.Provider)
 	p.reasonings = append(p.reasonings, req.Reasoning)
+	p.toolCounts = append(p.toolCounts, len(req.Tools))
 
 	// Capture the last user message — the phase task prompt.
 	for j := len(req.Messages) - 1; j >= 0; j-- {
@@ -606,6 +611,13 @@ func (p *planLLM) next(req llm.Request) llm.Response {
 	p.i++
 
 	return r
+}
+
+func (p *planLLM) toolCountsSeen() []int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return append([]int(nil), p.toolCounts...)
 }
 
 // stopResp wraps final assistant text as a no-tool-call (done) turn.

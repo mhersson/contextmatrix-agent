@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"sync"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/coop"
 	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/mhersson/contextmatrix-harness/harness"
+	"github.com/mhersson/contextmatrix-harness/llm"
 	"github.com/mhersson/contextmatrix-harness/tools"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -279,4 +281,21 @@ func TestSeatDebugWriterPassesNonJSONThrough(t *testing.T) {
 	_, err := w.Write([]byte("plain log line\n"))
 	require.NoError(t, err)
 	assert.Equal(t, "plain log line\n", buf.String())
+}
+
+func TestCoopModeratorRunnerIsToolless(t *testing.T) {
+	client := &planLLM{responses: []llm.Response{stopResp("VERDICT", 0.01)}}
+	o := coopTestRun(&fakeOps{}, CoopConfig{Participants: 2}, 10)
+	o.d.Client = client
+
+	runner := o.coopModeratorRunner(&seatDebugSink{w: io.Discard})
+
+	out, cost, err := runner(t.Context(), "synthesize this")
+	require.NoError(t, err)
+	assert.Equal(t, "VERDICT", out)
+	assert.InDelta(t, 0.01, cost, 1e-9)
+
+	for _, n := range client.toolCountsSeen() {
+		assert.Zero(t, n, "moderator calls must offer no tools")
+	}
 }

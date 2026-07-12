@@ -16,6 +16,7 @@ import (
 	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/mhersson/contextmatrix-harness/harness"
 	"github.com/mhersson/contextmatrix-harness/llm"
+	"github.com/mhersson/contextmatrix-harness/tools"
 )
 
 // CoopGuest is one operator-registered external A2A participant, delivered
@@ -46,8 +47,12 @@ var reviewLenses = []string{"correctness", "security", "design", "performance", 
 // the engine-side maxSeatTurns — both are fixed by the design, not config).
 const coopSeatMaxTurns = 8
 
-// coopModeratorMaxTurns caps a moderator call. Convergence classification and
-// synthesis are read-and-answer work; a handful of turns is generous.
+// coopModeratorMaxTurns caps a moderator call. Moderator calls run
+// TOOLLESS: convergence classification and synthesis transform the
+// transcript they are handed. Run 2 showed a tooled moderator burning its
+// whole budget exploring the repo instead of synthesizing (empty output →
+// solo fallback). With no tools a call normally completes in one turn; the
+// cap is a backstop.
 const coopModeratorMaxTurns = 4
 
 // coopSeatToolOutputMaxBytes caps one tool result in a seat's context. Seats
@@ -265,7 +270,7 @@ func (o *run) coopModeratorRunner(sink *seatDebugSink) coop.ModeratorRunner {
 		cfg := o.harnessConfig(model)
 		cfg.MaxTurns = coopModeratorMaxTurns
 
-		res, err := harness.Run(ctx, o.d.Client, o.d.ReadTools, emit, prompt, cfg)
+		res, err := harness.Run(ctx, o.d.Client, tools.NewRegistry(), emit, prompt, cfg)
 
 		o.ledger.Spend(res.TotalCostUSD)
 
