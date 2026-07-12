@@ -68,6 +68,23 @@ flowchart LR
   read-only review subagents, commits and pushes incrementally, and finalizes
   with an autosquash + force-push.
 
+Two per-card execution strategies layer on top of the FSM, both switched on by
+card fields set in ContextMatrix:
+
+- **Best-of-N** (`best_of_n` ≥ 2) — after planning, the worker races N
+  candidate implementations in parallel git worktrees, each with its own
+  budget ledger and an auto-selected coder model (distinct models where the
+  eligible pool allows, wrapping around when it is smaller than N); a judge
+  phase picks the winner, which is adopted onto the main clone and pushed.
+  Losing candidates never push and are removed.
+- **Co-op discussions** (`coop_participants` ≥ 2) — the plan and review phases
+  convene a moderated multi-seat discussion over the A2A protocol (loopback
+  JSON-RPC seats plus optional registered guest agents); the decision model
+  synthesizes the group's answer into the phase's normal output, and the live
+  transcript streams to the card's chat tab on the board. Discussions degrade
+  to the solo path rather than failing the run, and co-op composes freely with
+  a Best-of-N execute race.
+
 The inner loop lives in the standalone `github.com/mhersson/contextmatrix-harness`
 module (`events`, `llm`, `tools`, `harness`, `redact`) — FSM-free and
 dependency-free, shared with a planned chat backend. This service wraps it with

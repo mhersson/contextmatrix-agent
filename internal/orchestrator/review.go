@@ -593,7 +593,7 @@ func (o *run) coopReviewBriefing(ctx context.Context) (string, error) {
 
 	prior := priorFindingsBlock(o.lastFindings)
 
-	return fmt.Sprintf(reviewBriefing, o.tc.Title, o.tc.Description, diff, prior), nil
+	return fmt.Sprintf(reviewBriefing, o.tc.Title, o.tc.Description, fencedDiff(diff), prior), nil
 }
 
 // synthesize runs ONE orchestrator-model call that reads the three specialists'
