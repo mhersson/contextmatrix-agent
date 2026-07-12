@@ -498,8 +498,12 @@ func (e *DockerExecutor) runIdleWatchdog(project, cardID, containerID string, do
 	}
 }
 
-// Kill sends SIGKILL to the tracked container for project/cardID. Removal is
-// handled by waitAndCleanup. Returns ErrNotFound when no run is tracked.
+// Kill stops the tracked container for project/cardID. It first waits up to
+// killGraceTimeout for the container to exit on its own; if it does, Kill
+// returns nil without sending SIGKILL and without recording a kill reason.
+// Only when the grace window elapses without a self-exit does Kill record
+// the kill reason and send SIGKILL. Removal is handled by waitAndCleanup.
+// Returns ErrNotFound when no run is tracked.
 func (e *DockerExecutor) Kill(ctx context.Context, project, cardID string) error {
 	run, ok := e.tracker.Get(project, cardID)
 	if !ok {
@@ -529,7 +533,10 @@ func (e *DockerExecutor) List(_ context.Context) ([]*Run, error) {
 // StopAll kills every tracked run, filtered to project when non-empty (empty
 // project means all), and returns a per-card outcome for every run attempted.
 // Failures are included in the results (Err != nil) rather than swallowed, so
-// the caller can surface partial failures to the CM operator.
+// the caller can surface partial failures to the CM operator. Runs are killed
+// serially and each Kill inherits the self-exit grace window, so stopping N
+// still-running containers can block up to N x killGraceTimeout — accepted,
+// since N is small and this is the operator bulk-stop path, not a hot path.
 func (e *DockerExecutor) StopAll(ctx context.Context, project string) ([]StopResult, error) {
 	var results []StopResult
 
