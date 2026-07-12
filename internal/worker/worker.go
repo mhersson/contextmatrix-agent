@@ -376,7 +376,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 			ReviewAttemptsCap: reviewAttemptsCap,
 			Interactive:       hitl,
 			BestOfN:           a.spec.BestOfN,
-			Coop:              coopConfig(a.spec.Coop),
+			Mob:               coopConfig(a.spec.Coop),
 			Compaction: orchestrator.Compaction{
 				Enabled:         a.spec.CompactionEnabled,
 				Threshold:       a.spec.CompactionThreshold,
@@ -652,12 +652,12 @@ func withDefaults(spec RunSpec) RunSpec {
 // so the orchestrator never sees an ambiguous zero. Execute checkpoints are
 // a later slice: "execute" is accepted on the wire but not mapped. nil or
 // participants < 2 = off (zero value).
-func coopConfig(spec *protocol.CoopSpec) orchestrator.CoopConfig {
+func coopConfig(spec *protocol.CoopSpec) orchestrator.MobConfig {
 	if spec == nil || spec.Participants < 2 {
-		return orchestrator.CoopConfig{}
+		return orchestrator.MobConfig{}
 	}
 
-	c := orchestrator.CoopConfig{
+	c := orchestrator.MobConfig{
 		Participants: spec.Participants,
 		Rounds:       spec.Rounds,
 		BudgetFactor: spec.BudgetFactor,
@@ -685,7 +685,7 @@ func coopConfig(spec *protocol.CoopSpec) orchestrator.CoopConfig {
 	}
 
 	for _, g := range spec.Guests {
-		c.Guests = append(c.Guests, orchestrator.CoopGuest{Name: g.Name, URL: g.URL, Token: g.Token})
+		c.Guests = append(c.Guests, orchestrator.MobGuest{Name: g.Name, URL: g.URL, Token: g.Token})
 	}
 
 	return c

@@ -1127,34 +1127,34 @@ func countCall(calls []string, name string) int {
 	return n
 }
 
-// coopReviewRun builds a review run with co-op review enabled and a scripted
-// engine.
-func coopReviewRun(t *testing.T, ops *fakeOps, git *fakeGit, client llm.LLM, eng *scriptedEngine) *run {
+// mobReviewRun builds a review run with mob session review enabled and a
+// scripted engine.
+func mobReviewRun(t *testing.T, ops *fakeOps, git *fakeGit, client llm.LLM, eng *scriptedEngine) *run {
 	t.Helper()
 
 	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
-	d.Cfg.Coop = CoopConfig{Participants: 3, Review: true, Rounds: 2, BudgetFactor: 0.75}
+	d.Cfg.Mob = MobConfig{Participants: 3, Review: true, Rounds: 2, BudgetFactor: 0.75}
 
 	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body", State: "in_progress"}
 	o := newReviewRun(d, tc, 0)
-	o.coopEngine = eng.run
+	o.mobEngine = eng.run
 
 	return o
 }
 
-const coopApprovedVerdict = `{"approved":true,"summary":"clean","fix_tier":"","fixes":[]}`
+const mobApprovedVerdict = `{"approved":true,"summary":"clean","fix_tier":"","fixes":[]}`
 
-func TestReviewCoopApprovedFirstPass(t *testing.T) {
+func TestReviewMobApprovedFirstPass(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{}
 	llmFake := &planLLM{}
-	eng := &scriptedEngine{outcomes: []mob.Outcome{{Synthesis: coopApprovedVerdict, Consensus: true}}}
+	eng := &scriptedEngine{outcomes: []mob.Outcome{{Synthesis: mobApprovedVerdict, Consensus: true}}}
 
-	o := coopReviewRun(t, ops, git, llmFake, eng)
+	o := mobReviewRun(t, ops, git, llmFake, eng)
 	require.NoError(t, runReview(context.Background(), o))
 
 	// The discussion replaced the whole specialist pass: zero LLM calls.
-	assert.Empty(t, llmFake.tasks, "no specialist or synthesis model calls on the co-op path")
+	assert.Empty(t, llmFake.tasks, "no specialist or synthesis model calls on the mob session path")
 	assert.Equal(t, "clean", o.reviewSummary)
 	assert.Equal(t, -1, indexOfCall(ops.recorded(), "IncrementReviewAttempts:CARD-1"))
 
@@ -1168,7 +1168,7 @@ func TestReviewCoopApprovedFirstPass(t *testing.T) {
 	assert.Contains(t, topic.SynthesisPrompt, `"approved"`)
 }
 
-func TestReviewCoopRejectWithFixesRunsFixLoop(t *testing.T) {
+func TestReviewMobRejectWithFixesRunsFixLoop(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
 	// Only LLM call: the fix coder run between the two discussion rounds.
@@ -1178,10 +1178,10 @@ func TestReviewCoopRejectWithFixesRunsFixLoop(t *testing.T) {
 	eng := &scriptedEngine{outcomes: []mob.Outcome{
 		{Synthesis: `{"approved":false,"summary":"fix it","fix_tier":"simple",` +
 			`"fixes":[{"file":"a.go","issue":"bug","suggestion":"patch"}]}`},
-		{Synthesis: coopApprovedVerdict, Consensus: true},
+		{Synthesis: mobApprovedVerdict, Consensus: true},
 	}}
 
-	o := coopReviewRun(t, ops, git, llmFake, eng)
+	o := mobReviewRun(t, ops, git, llmFake, eng)
 	require.NoError(t, runReview(context.Background(), o))
 
 	require.Len(t, eng.topics, 2, "round 2 re-convenes the discussion")
@@ -1198,7 +1198,7 @@ func TestReviewCoopRejectWithFixesRunsFixLoop(t *testing.T) {
 	assert.GreaterOrEqual(t, indexOfPrefix(git.recorded(), "CommitFixup:"), 0, "the fix landed as a fixup")
 }
 
-func TestReviewCoopFallsBackToSpecialists(t *testing.T) {
+func TestReviewMobFallsBackToSpecialists(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{}
 	// Solo fallback path: 3 specialists + 1 synthesis.
@@ -1210,19 +1210,19 @@ func TestReviewCoopFallsBackToSpecialists(t *testing.T) {
 	}}
 	eng := &scriptedEngine{outcomes: []mob.Outcome{{}}, errs: []error{mob.ErrNoQuorum}}
 
-	o := coopReviewRun(t, ops, git, llmFake, eng)
+	o := mobReviewRun(t, ops, git, llmFake, eng)
 	require.NoError(t, runReview(context.Background(), o))
 
 	assert.Len(t, llmFake.tasks, 4, "the specialist pass ran after the discussion degraded")
 }
 
-func TestReviewCoopPassesExclusionsAndDeltaScope(t *testing.T) {
+func TestReviewMobPassesExclusionsAndDeltaScope(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{}
 	llmFake := &planLLM{}
-	eng := &scriptedEngine{outcomes: []mob.Outcome{{Synthesis: coopApprovedVerdict, Consensus: true}}}
+	eng := &scriptedEngine{outcomes: []mob.Outcome{{Synthesis: mobApprovedVerdict, Consensus: true}}}
 
-	o := coopReviewRun(t, ops, git, llmFake, eng)
+	o := mobReviewRun(t, ops, git, llmFake, eng)
 	o.coderModels = map[string]bool{"rev/alpha": true}
 	o.lastReviewBase = "snapshot-sha"
 	o.lastFindings = "prior finding about a.go"

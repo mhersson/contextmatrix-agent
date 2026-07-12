@@ -391,25 +391,25 @@ func (o *run) draftPlan(ctx context.Context, model, diagnosis, design, feedback 
 	return plan{}, fmt.Errorf("plan parse failed after repair: %w", lastErr)
 }
 
-// coopAdjustTailEntries bounds the transcript tail replayed when a HITL
+// mobAdjustTailEntries bounds the transcript tail replayed when a HITL
 // adjust re-opens a discussion.
-const coopAdjustTailEntries = 12
+const mobAdjustTailEntries = 12
 
-// coopDraftPlan convenes a plan discussion and parses the synthesis into a
+// mobDraftPlan convenes a plan discussion and parses the synthesis into a
 // plan, with ONE moderator repair on a parse failure (mirroring draftPlan's
 // single repair turn). prior, when non-nil, re-opens the previous discussion
 // for one non-blind feedback round (HITL adjust): the briefing is the prior
 // transcript tail plus the human's feedback as a human-authored entry.
 // ok=false on any failure — the caller falls back to the solo draftPlan path.
-func (o *run) coopDraftPlan(ctx context.Context, diagnosis, design, feedback string, prior *mob.Outcome) (plan, *mob.Outcome, bool) {
-	seats := min(o.d.Cfg.Coop.Participants, len(planLenses))
+func (o *run) mobDraftPlan(ctx context.Context, diagnosis, design, feedback string, prior *mob.Outcome) (plan, *mob.Outcome, bool) {
+	seats := min(o.d.Cfg.Mob.Participants, len(planLenses))
 
 	t := mob.Topic{
 		Kind:     "plan",
 		Lenses:   planLenses[:seats],
-		Rounds:   o.d.Cfg.Coop.Rounds,
+		Rounds:   o.d.Cfg.Mob.Rounds,
 		Blind:    true,
-		Briefing: o.coopPlanBriefing(diagnosis, design),
+		Briefing: o.mobPlanBriefing(diagnosis, design),
 		SynthesisPrompt: fmt.Sprintf(planSynthesisPrompt,
 			o.grounding, o.d.Cfg.Workspace, o.tc.Title, o.tc.Description),
 	}
@@ -417,19 +417,19 @@ func (o *run) coopDraftPlan(ctx context.Context, diagnosis, design, feedback str
 	if prior != nil {
 		t.Rounds = 1
 		t.Blind = false
-		t.Briefing = coopAdjustBriefing(*prior, feedback)
+		t.Briefing = mobAdjustBriefing(*prior, feedback)
 	}
 
-	out, ok := o.coopDiscuss(ctx, t)
+	out, ok := o.mobDiscuss(ctx, t)
 	if !ok {
 		return plan{}, nil, false
 	}
 
 	p, perr := parsePlan(out.Synthesis)
 	if perr != nil {
-		repaired, rerr := o.coopResynthesize(ctx, t, out, perr.Error())
+		repaired, rerr := o.mobResynthesize(ctx, t, out, perr.Error())
 		if rerr != nil {
-			slog.Warn("coop plan: repair synthesis failed; solo fallback",
+			slog.Warn("mob plan: repair synthesis failed; solo fallback",
 				"card_id", o.d.Cfg.CardID, "error", rerr)
 
 			return plan{}, nil, false
@@ -437,7 +437,7 @@ func (o *run) coopDraftPlan(ctx context.Context, diagnosis, design, feedback str
 
 		p, perr = parsePlan(repaired)
 		if perr != nil {
-			slog.Warn("coop plan: parse failed after repair; solo fallback",
+			slog.Warn("mob plan: parse failed after repair; solo fallback",
 				"card_id", o.d.Cfg.CardID, "error", perr)
 
 			return plan{}, nil, false
@@ -449,11 +449,11 @@ func (o *run) coopDraftPlan(ctx context.Context, diagnosis, design, feedback str
 	return p, &out, true
 }
 
-// coopPlanBriefing assembles the plan-discussion briefing from the SAME
+// mobPlanBriefing assembles the plan-discussion briefing from the SAME
 // content blocks draftPlan feeds the solo planner: grounding, workspace,
 // title, description, diagnosis (bug-like cards), design (creative HITL
 // cards), and the resume-subtasks block.
-func (o *run) coopPlanBriefing(diagnosis, design string) string {
+func (o *run) mobPlanBriefing(diagnosis, design string) string {
 	var existingTitles []string
 	for _, sub := range o.subtasks {
 		existingTitles = append(existingTitles, sub.Title)
@@ -467,13 +467,13 @@ func (o *run) coopPlanBriefing(diagnosis, design string) string {
 		diagBlock, dsnBlock, resume)
 }
 
-// coopAdjustBriefing re-opens a discussion after a HITL adjust: the tail of
+// mobAdjustBriefing re-opens a discussion after a HITL adjust: the tail of
 // the prior transcript restores shared context and the human's feedback
 // arrives as a human-authored line per the wire conventions.
-func coopAdjustBriefing(prior mob.Outcome, feedback string) string {
+func mobAdjustBriefing(prior mob.Outcome, feedback string) string {
 	entries := prior.Transcript
-	if len(entries) > coopAdjustTailEntries {
-		entries = entries[len(entries)-coopAdjustTailEntries:]
+	if len(entries) > mobAdjustTailEntries {
+		entries = entries[len(entries)-mobAdjustTailEntries:]
 	}
 
 	return "The group previously discussed this plan. Recent transcript:\n\n" +
@@ -482,16 +482,16 @@ func coopAdjustBriefing(prior mob.Outcome, feedback string) string {
 		"\n\nRevise the plan to address the human's feedback."
 }
 
-// coopResynthesize runs ONE moderator repair call after a synthesis parse
+// mobResynthesize runs ONE moderator repair call after a synthesis parse
 // failure: the topic's synthesis instruction, the rendered transcript, and
 // the repair block naming the parse error. Shared by the plan and review
-// co-op paths (the moderator equivalent of draftPlan's repair turn).
-func (o *run) coopResynthesize(ctx context.Context, t mob.Topic, out mob.Outcome, parseErr string) (string, error) {
+// mob session paths (the moderator equivalent of draftPlan's repair turn).
+func (o *run) mobResynthesize(ctx context.Context, t mob.Topic, out mob.Outcome, parseErr string) (string, error) {
 	prompt := t.SynthesisPrompt +
 		"\n\nDISCUSSION TRANSCRIPT\n" + formatDiscussionEntries(out.Transcript) +
 		"\n" + repairBlock(parseErr)
 
-	moderate := o.coopModeratorRunner(&seatDebugSink{w: o.seatDebug})
+	moderate := o.mobModeratorRunner(&seatDebugSink{w: o.seatDebug})
 
 	text, _, err := moderate(ctx, prompt)
 
@@ -507,11 +507,11 @@ func (o *run) recordDiscussion(ctx context.Context, out *mob.Outcome) {
 
 	b.WriteString("## Discussion\n\nSeats:\n")
 
-	for _, s := range o.coopSeats {
+	for _, s := range o.mobSeats {
 		fmt.Fprintf(&b, "- %s (%s): %s\n", s.Name, s.Lens, s.Model)
 	}
 
-	for _, g := range o.d.Cfg.Coop.Guests {
+	for _, g := range o.d.Cfg.Mob.Guests {
 		fmt.Fprintf(&b, "- guest-%s\n", g.Name)
 	}
 
@@ -535,8 +535,8 @@ func (o *run) recordDiscussion(ctx context.Context, out *mob.Outcome) {
 
 	o.recordSection(ctx, "Discussion", b.String())
 	_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, //nolint:errcheck // advisory record
-		fmt.Sprintf("co-op discussion recorded (%d seats, %d rounds, consensus=%t)",
-			len(o.coopSeats), rounds, out.Consensus))
+		fmt.Sprintf("mob discussion recorded (%d seats, %d rounds, consensus=%t)",
+			len(o.mobSeats), rounds, out.Consensus))
 }
 
 // runPlan is the plan phase: one read-only planner run on the
@@ -595,14 +595,14 @@ func runPlan(ctx context.Context, o *run) error {
 		}
 	}
 
-	coopPlan := cfg.Coop.enabled() && cfg.Coop.Plan
+	mobPlan := cfg.Mob.enabled() && cfg.Mob.Plan
 
-	// Autonomous: draft once and create the subtasks. With co-op on, the
-	// draft comes from a panel discussion; any discussion failure degrades to
-	// the solo draftPlan path, byte-identical to before.
+	// Autonomous: draft once and create the subtasks. With the mob session on,
+	// the draft comes from a panel discussion; any discussion failure degrades
+	// to the solo draftPlan path, byte-identical to before.
 	if !cfg.Interactive {
-		if coopPlan {
-			if p, out, ok := o.coopDraftPlan(ctx, diagnosis, "", "", nil); ok {
+		if mobPlan {
+			if p, out, ok := o.mobDraftPlan(ctx, diagnosis, "", "", nil); ok {
 				if err := o.createSubtasks(ctx, p); err != nil {
 					return err
 				}
@@ -623,32 +623,32 @@ func runPlan(ctx context.Context, o *run) error {
 
 	// HITL: draft -> present -> gate; on adjust, re-draft with the feedback.
 	// Subtasks are created only after approval, so an adjust never orphans
-	// cards. With co-op on, drafts come from discussions and an adjust
-	// re-opens the discussion for one feedback round; once a discussion
+	// cards. With the mob session on, drafts come from discussions and an
+	// adjust re-opens the discussion for one feedback round; once a discussion
 	// fails, the rest of the phase stays on the solo path.
 	feedback := ""
 
 	var lastOut *mob.Outcome
 
-	coopSolo := false
+	mobSolo := false
 
 	for range maxPlanDrafts {
 		var p plan
 
 		drafted := false
 
-		if coopPlan && !coopSolo {
+		if mobPlan && !mobSolo {
 			var (
 				out *mob.Outcome
 				ok  bool
 			)
 
-			p, out, ok = o.coopDraftPlan(ctx, diagnosis, design, feedback, lastOut)
+			p, out, ok = o.mobDraftPlan(ctx, diagnosis, design, feedback, lastOut)
 			if ok {
 				drafted = true
 				lastOut = out
 			} else {
-				coopSolo = true
+				mobSolo = true
 			}
 		}
 

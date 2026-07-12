@@ -117,8 +117,8 @@ type Config struct {
 	// judged before document. 0/1 = normal single-solver run.
 	BestOfN int
 
-	// Coop configures co-op discussions (spec 2026-07-10). Zero value = off.
-	Coop CoopConfig
+	// Mob configures mob session discussions (spec 2026-07-10). Zero value = off.
+	Mob MobConfig
 
 	// Compaction configures optional in-window context compaction for phase
 	// model runs. Disabled (the zero value) preserves the hard context_limit
@@ -184,7 +184,7 @@ type Deps struct {
 	// Cfg.Interactive, never from Human != nil (the nil-concrete footgun).
 	Human harness.Inbox
 
-	// SeatDebugWriter receives the JSONL event lines of co-op seat sub-runs,
+	// SeatDebugWriter receives the JSONL event lines of mob session seat sub-runs,
 	// kind-rewritten to "seat_debug" so the service log bridge (which skips
 	// unknown kinds) keeps them off the live card stream while they stay in
 	// the container stdout for debugging. The worker points it at process
@@ -340,17 +340,17 @@ type run struct {
 	// the subprocess; the default is verifyexec.Exec.
 	runVerify verifyRunner
 
-	// seatDebug is where co-op seat sub-run events go (kind-rewritten JSONL);
-	// io.Discard when the worker supplied no writer. Set once in newRun.
+	// seatDebug is where mob session seat sub-run events go (kind-rewritten
+	// JSONL); io.Discard when the worker supplied no writer. Set once in newRun.
 	seatDebug io.Writer
 
-	// coopSeats records the seat lineup of the most recent discussion so the
+	// mobSeats records the seat lineup of the most recent discussion so the
 	// ## Discussion card record can name seats and models.
-	coopSeats []mob.SeatConfig
+	mobSeats []mob.SeatConfig
 
-	// coopEngine is the discussion-engine seam: tests script (Outcome, error)
+	// mobEngine is the discussion-engine seam: tests script (Outcome, error)
 	// here. nil = the real engine (mob.NewEngine(cfg).Discuss).
-	coopEngine func(ctx context.Context, cfg mob.EngineConfig, t mob.Topic) (mob.Outcome, error)
+	mobEngine func(ctx context.Context, cfg mob.EngineConfig, t mob.Topic) (mob.Outcome, error)
 
 	planFn      phaseFn
 	executeFn   phaseFn

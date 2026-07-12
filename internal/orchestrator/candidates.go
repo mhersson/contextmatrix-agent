@@ -37,10 +37,10 @@ type candidate struct {
 }
 
 // effectiveCeiling scales the run's budget ceiling for Best-of-N (N execute
-// allowances plus one for the shared phases) and adds the co-op discussion
-// term (BudgetFactor x MaxCardCost — discussions are read-only talk, far
-// cheaper than implementations). Deterministic from the card fields, so
-// resumes recompute it. With neither feature on it degenerates to
+// allowances plus one for the shared phases) and adds the mob session
+// discussion term (BudgetFactor x MaxCardCost — discussions are read-only
+// talk, far cheaper than implementations). Deterministic from the card
+// fields, so resumes recompute it. With neither feature on it degenerates to
 // MaxCardCost, keeping single-solver runs byte-identical.
 func effectiveCeiling(cfg Config) float64 {
 	if cfg.MaxCardCost <= 0 {
@@ -53,8 +53,8 @@ func effectiveCeiling(cfg Config) float64 {
 		base = cfg.MaxCardCost * float64(cfg.BestOfN+1)
 	}
 
-	if cfg.Coop.enabled() {
-		base += cfg.MaxCardCost * cfg.Coop.BudgetFactor
+	if cfg.Mob.enabled() {
+		base += cfg.MaxCardCost * cfg.Mob.BudgetFactor
 	}
 
 	return base

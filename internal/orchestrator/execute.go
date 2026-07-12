@@ -473,7 +473,7 @@ func (o *run) salvageCapped(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 	return true
 }
 
-// salvageSoloCapped rescues a single-solver (parent / co-op) subtask that hit
+// salvageSoloCapped rescues a single-solver (parent / mob session) subtask that hit
 // the turn cap — the run-1 failure mode: the work is complete and verified
 // in-run, but no turn is left for the finish call. Unlike the Best-of-N variant
 // (whose judge verifies every candidate later), the single solver has no judge,

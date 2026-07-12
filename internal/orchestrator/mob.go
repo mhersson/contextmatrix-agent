@@ -19,23 +19,23 @@ import (
 	"github.com/mhersson/contextmatrix-harness/tools"
 )
 
-// CoopGuest is one operator-registered external A2A participant, delivered
+// MobGuest is one operator-registered external A2A participant, delivered
 // via the trigger payload (orchestrator-local so this package never imports
 // protocol).
-type CoopGuest struct{ Name, URL, Token string }
+type MobGuest struct{ Name, URL, Token string }
 
-// CoopConfig is the orchestrator's view of co-op mode for one run. The worker
-// maps the payload spec onto it; the zero value is off.
-type CoopConfig struct {
+// MobConfig is the orchestrator's view of mob session mode for one run. The
+// worker maps the payload spec onto it; the zero value is off.
+type MobConfig struct {
 	Participants int  // 0 = off; >= 2 = on
 	Plan         bool // phases contain "plan"
 	Review       bool // phases contain "review"
 	Rounds       int  // critique rounds (CM-clamped; default 2)
 	BudgetFactor float64
-	Guests       []CoopGuest
+	Guests       []MobGuest
 }
 
-func (c CoopConfig) enabled() bool { return c.Participants >= 2 }
+func (c MobConfig) enabled() bool { return c.Participants >= 2 }
 
 // Lens priority tables (spec § Seats and selection): callers slice [:seats]
 // so any seat count 2..5 is well-defined.
@@ -43,75 +43,75 @@ var planLenses = []string{"feasibility/simplicity", "architecture/extensibility"
 
 var reviewLenses = []string{"correctness", "security", "design", "performance", "developer-experience"}
 
-// coopSeatMaxTurns caps one seat turn's harness run (spec constant; mirrors
+// mobSeatMaxTurns caps one seat turn's harness run (spec constant; mirrors
 // the engine-side maxSeatTurns — both are fixed by the design, not config).
-const coopSeatMaxTurns = 8
+const mobSeatMaxTurns = 8
 
-// coopModeratorMaxTurns caps a moderator call. Moderator calls run
+// mobModeratorMaxTurns caps a moderator call. Moderator calls run
 // TOOLLESS: convergence classification and synthesis transform the
 // transcript they are handed. Run 2 showed a tooled moderator burning its
 // whole budget exploring the repo instead of synthesizing (empty output →
 // solo fallback). With no tools a call normally completes in one turn; the
 // cap is a backstop.
-const coopModeratorMaxTurns = 4
+const mobModeratorMaxTurns = 4
 
-// coopSeatToolOutputMaxBytes caps one tool result in a seat's context. Seats
+// mobSeatToolOutputMaxBytes caps one tool result in a seat's context. Seats
 // argue positions from read-only lookups; the coder-sized cap (128 KB) let a
 // single broad grep inflate a seat prompt ~17x in the first live run.
-const coopSeatToolOutputMaxBytes = 16 * 1024
+const mobSeatToolOutputMaxBytes = 16 * 1024
 
-// coopSeatWrapUpTurns is the remaining-turn threshold at which a seat run
+// mobSeatWrapUpTurns is the remaining-turn threshold at which a seat run
 // gets the harness wrap-up nudge. Run 2 showed seats burning all 8 turns on
 // exploration and returning empty utterances; the nudge forces a position
 // while turns remain.
-const coopSeatWrapUpTurns = 2
+const mobSeatWrapUpTurns = 2
 
-// coopDiscuss convenes one discussion: it mints the per-discussion bearer,
+// mobDiscuss convenes one discussion: it mints the per-discussion bearer,
 // starts the loopback seat server, builds the engine config, runs Discuss,
 // and closes the server. It NEVER fails the card: any error — bearer, server
 // start, quorum, engine — logs, leaves an advisory card-log entry, and
 // returns ok=false so the caller falls back to its solo path.
-func (o *run) coopDiscuss(ctx context.Context, t mob.Topic) (mob.Outcome, bool) {
-	bearer, err := coopBearer()
+func (o *run) mobDiscuss(ctx context.Context, t mob.Topic) (mob.Outcome, bool) {
+	bearer, err := mobBearer()
 	if err != nil {
-		slog.Warn("coop: bearer generation failed", "card_id", o.d.Cfg.CardID, "error", err)
+		slog.Warn("mob: bearer generation failed", "card_id", o.d.Cfg.CardID, "error", err)
 
 		return mob.Outcome{}, false
 	}
 
-	// Bound this discussion by what remains of the run's single co-op budget
-	// term. effectiveCeiling adds exactly one BudgetFactor x MaxCardCost term on
-	// top of the card ceiling, so every discussion (plan draft, each review
-	// round, each HITL re-open) draws from that shared headroom rather than a
-	// fresh term each time. An unlimited ceiling (MaxCardCost <= 0) keeps the
-	// unbounded co-op sizing and never exhausts.
+	// Bound this discussion by what remains of the run's single mob session
+	// budget term. effectiveCeiling adds exactly one BudgetFactor x MaxCardCost
+	// term on top of the card ceiling, so every discussion (plan draft, each
+	// review round, each HITL re-open) draws from that shared headroom rather
+	// than a fresh term each time. An unlimited ceiling (MaxCardCost <= 0)
+	// keeps the unbounded mob session sizing and never exhausts.
 	bounded := o.d.Cfg.MaxCardCost > 0
 
 	headroom := 0.0
 	if bounded {
 		headroom = effectiveCeiling(o.d.Cfg) - o.ledger.Spent()
 		if headroom <= 0 {
-			slog.Warn("coop: budget exhausted; continuing solo", "card_id", o.d.Cfg.CardID, "kind", t.Kind)
+			slog.Warn("mob: budget exhausted; continuing solo", "card_id", o.d.Cfg.CardID, "kind", t.Kind)
 			_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, //nolint:errcheck // advisory degrade record
-				fmt.Sprintf("co-op budget exhausted (%s) — continuing solo", t.Kind))
+				fmt.Sprintf("mob budget exhausted (%s) — continuing solo", t.Kind))
 
 			return mob.Outcome{}, false
 		}
 	}
 
 	cfg := buildEngineConfig(o, t, bearer)
-	o.coopSeats = cfg.Seats
+	o.mobSeats = cfg.Seats
 
-	// Clamp the co-op term to the remaining headroom (min keeps whichever binds).
+	// Clamp the mob session term to the remaining headroom (min keeps whichever binds).
 	if bounded {
 		cfg.BudgetUSD = min(cfg.BudgetUSD, headroom)
 	}
 
 	server, err := mob.StartServer(cfg.Seats, cfg.Runner, bearer)
 	if err != nil {
-		slog.Warn("coop: loopback server failed to start", "card_id", o.d.Cfg.CardID, "error", err)
+		slog.Warn("mob: loopback server failed to start", "card_id", o.d.Cfg.CardID, "error", err)
 		_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, //nolint:errcheck // advisory degrade record
-			fmt.Sprintf("co-op discussion unavailable (%s): %v — continuing solo", t.Kind, err))
+			fmt.Sprintf("mob discussion unavailable (%s): %v — continuing solo", t.Kind, err))
 
 		return mob.Outcome{}, false
 	}
@@ -119,7 +119,7 @@ func (o *run) coopDiscuss(ctx context.Context, t mob.Topic) (mob.Outcome, bool) 
 
 	cfg.SeatEndpoint = server.SeatEndpoint
 
-	engine := o.coopEngine
+	engine := o.mobEngine
 	if engine == nil {
 		engine = func(ctx context.Context, cfg mob.EngineConfig, t mob.Topic) (mob.Outcome, error) {
 			return mob.NewEngine(cfg).Discuss(ctx, t)
@@ -128,9 +128,9 @@ func (o *run) coopDiscuss(ctx context.Context, t mob.Topic) (mob.Outcome, bool) 
 
 	out, err := engine(ctx, cfg, t)
 	if err != nil {
-		slog.Warn("coop: discussion failed", "card_id", o.d.Cfg.CardID, "kind", t.Kind, "error", err)
+		slog.Warn("mob: discussion failed", "card_id", o.d.Cfg.CardID, "kind", t.Kind, "error", err)
 		_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, //nolint:errcheck // advisory degrade record
-			fmt.Sprintf("co-op discussion failed (%s): %v — continuing solo", t.Kind, err))
+			fmt.Sprintf("mob discussion failed (%s): %v — continuing solo", t.Kind, err))
 
 		return out, false
 	}
@@ -142,9 +142,9 @@ func (o *run) coopDiscuss(ctx context.Context, t mob.Topic) (mob.Outcome, bool) 
 // topic: registry-selected seat models (review topics exclude the models that
 // coded the card), operator guests, the harness-backed seat runner, the
 // decision-model moderator, live "discussion" events, the human inbox, and
-// the co-op budget term. SeatEndpoint is NOT set here — the caller wires it
-// once the loopback server has started (the server is built from this
-// config's Seats/Runner, so it cannot exist before this call returns).
+// the mob session budget term. SeatEndpoint is NOT set here — the caller
+// wires it once the loopback server has started (the server is built from
+// this config's Seats/Runner, so it cannot exist before this call returns).
 func buildEngineConfig(o *run, t mob.Topic, bearer string) mob.EngineConfig {
 	var exclude map[string]bool
 	if t.Kind == "review" {
@@ -166,17 +166,18 @@ func buildEngineConfig(o *run, t mob.Topic, bearer string) mob.EngineConfig {
 		}
 	}
 
-	guests := make([]mob.GuestSeat, 0, len(o.d.Cfg.Coop.Guests))
-	for _, g := range o.d.Cfg.Coop.Guests {
+	guests := make([]mob.GuestSeat, 0, len(o.d.Cfg.Mob.Guests))
+	for _, g := range o.d.Cfg.Mob.Guests {
 		guests = append(guests, mob.GuestSeat{Name: g.Name, URL: g.URL, Token: g.Token})
 	}
 
-	// coopBudget = BudgetFactor x MaxCardCost; a disabled card budget disables
-	// the co-op term too. Per-turn seat cap: coopBudget / (seats x (Rounds+2))
-	// — Rounds critique rounds plus the blind round plus synthesis headroom.
+	// mobBudget = BudgetFactor x MaxCardCost; a disabled card budget disables
+	// the mob session term too. Per-turn seat cap: mobBudget / (seats x
+	// (Rounds+2)) — Rounds critique rounds plus the blind round plus synthesis
+	// headroom.
 	budget := 0.0
 	if o.d.Cfg.MaxCardCost > 0 {
-		budget = o.d.Cfg.Coop.BudgetFactor * o.d.Cfg.MaxCardCost
+		budget = o.d.Cfg.Mob.BudgetFactor * o.d.Cfg.MaxCardCost
 	}
 
 	perTurn := 0.0
@@ -189,8 +190,8 @@ func buildEngineConfig(o *run, t mob.Topic, bearer string) mob.EngineConfig {
 	return mob.EngineConfig{
 		Seats:    seats,
 		Guests:   guests,
-		Runner:   o.coopSeatRunner(sink, perTurn),
-		Moderate: o.coopModeratorRunner(sink),
+		Runner:   o.mobSeatRunner(sink, perTurn),
+		Moderate: o.mobModeratorRunner(sink),
 		Emit: func(author, lens string, round int, content string) {
 			o.d.Emit.Emit(events.Kind("discussion"), map[string]any{
 				"agent":   author,
@@ -241,7 +242,7 @@ func trimSeatContext(msgs []llm.Message) []llm.Message {
 	return msgs
 }
 
-// coopSeatRunner returns the SeatRunner: each turn is a fresh harness run on
+// mobSeatRunner returns the SeatRunner: each turn is a fresh harness run on
 // the seat's model with read-only tools, the seat persona system prompt, and
 // the per-turn cost cap. sessions carries each seat's full message
 // transcript (tool calls and results included) across rounds of one
@@ -250,7 +251,7 @@ func trimSeatContext(msgs []llm.Message) []llm.Message {
 // for the first round and for replacement tasks. Events go to the
 // seat-debug emitter so seat tool chatter stays off the live stream. Usage
 // is spent against the run ledger and reported to CM per turn.
-func (o *run) coopSeatRunner(sink *seatDebugSink, perTurnCap float64) mob.SeatRunner {
+func (o *run) mobSeatRunner(sink *seatDebugSink, perTurnCap float64) mob.SeatRunner {
 	var (
 		mu       sync.Mutex
 		sessions = map[string][]llm.Message{}
@@ -262,7 +263,7 @@ func (o *run) coopSeatRunner(sink *seatDebugSink, perTurnCap float64) mob.SeatRu
 		mu.Unlock()
 
 		if seeded == nil {
-			seeded = coopHistory(history)
+			seeded = mobHistory(history)
 		}
 
 		cfg := seatConfig(o.harnessConfig(seat.Model), seat, perTurnCap, seeded)
@@ -280,7 +281,7 @@ func (o *run) coopSeatRunner(sink *seatDebugSink, perTurnCap float64) mob.SeatRu
 
 		if reportErr := o.d.Ops.ReportUsage(ctx, o.d.Cfg.CardID, used,
 			res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
-			slog.Warn("coop: report seat usage failed",
+			slog.Warn("mob: report seat usage failed",
 				"card_id", o.d.Cfg.CardID, "seat", seat.Name, "error", reportErr)
 		}
 
@@ -310,7 +311,7 @@ func (o *run) coopSeatRunner(sink *seatDebugSink, perTurnCap float64) mob.SeatRu
 
 			if reportErr := o.d.Ops.ReportUsage(ctx, o.d.Cfg.CardID, used,
 				fres.PromptTokens, fres.CompletionTokens, fres.TotalCostUSD); reportErr != nil {
-				slog.Warn("coop: report seat usage failed",
+				slog.Warn("mob: report seat usage failed",
 					"card_id", o.d.Cfg.CardID, "seat", seat.Name, "call", "backstop", "error", reportErr)
 			}
 
@@ -335,22 +336,22 @@ func (o *run) coopSeatRunner(sink *seatDebugSink, perTurnCap float64) mob.SeatRu
 // seatConfig derives one seat turn's harness config from the run-wide base.
 func seatConfig(base harness.Config, seat mob.SeatConfig, perTurnCap float64, history []llm.Message) harness.Config {
 	base.SystemPrompt = fmt.Sprintf(seatSystemPrompt, seat.Name, seat.Lens)
-	base.MaxTurns = coopSeatMaxTurns
+	base.MaxTurns = mobSeatMaxTurns
 	base.MaxCostUSD = perTurnCap
-	base.ToolOutputMaxBytes = coopSeatToolOutputMaxBytes
+	base.ToolOutputMaxBytes = mobSeatToolOutputMaxBytes
 	base.History = history
-	base.WrapUpTurns = coopSeatWrapUpTurns
+	base.WrapUpTurns = mobSeatWrapUpTurns
 	base.WrapUpMessage = seatWrapUpMessage
 
 	return base
 }
 
-// coopModeratorRunner returns the ModeratorRunner: one-shot decision-model
+// mobModeratorRunner returns the ModeratorRunner: one-shot decision-model
 // calls (convergence classification, synthesis, repair re-synthesis). The
 // model resolves lazily on first use — resolveDecisionModel does advisory
 // card-log I/O and needs a ctx — and the engine calls Moderate sequentially,
 // so the lazy init is race-free.
-func (o *run) coopModeratorRunner(sink *seatDebugSink) mob.ModeratorRunner {
+func (o *run) mobModeratorRunner(sink *seatDebugSink) mob.ModeratorRunner {
 	model := ""
 	emit := events.NewEmitter(io.Discard, sink.named("moderator"))
 
@@ -361,7 +362,7 @@ func (o *run) coopModeratorRunner(sink *seatDebugSink) mob.ModeratorRunner {
 		}
 
 		cfg := o.harnessConfig(model)
-		cfg.MaxTurns = coopModeratorMaxTurns
+		cfg.MaxTurns = mobModeratorMaxTurns
 
 		res, err := harness.Run(ctx, o.d.Client, tools.NewRegistry(), emit, prompt, cfg)
 
@@ -374,7 +375,7 @@ func (o *run) coopModeratorRunner(sink *seatDebugSink) mob.ModeratorRunner {
 
 		if reportErr := o.d.Ops.ReportUsage(ctx, o.d.Cfg.CardID, used,
 			res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
-			slog.Warn("coop: report moderator usage failed", "card_id", o.d.Cfg.CardID, "error", reportErr)
+			slog.Warn("mob: report moderator usage failed", "card_id", o.d.Cfg.CardID, "error", reportErr)
 		}
 
 		if err != nil {
@@ -385,8 +386,8 @@ func (o *run) coopModeratorRunner(sink *seatDebugSink) mob.ModeratorRunner {
 	}
 }
 
-// coopHistory maps role-tagged discussion turns to seeded harness history.
-func coopHistory(turns []mob.Turn) []llm.Message {
+// mobHistory maps role-tagged discussion turns to seeded harness history.
+func mobHistory(turns []mob.Turn) []llm.Message {
 	if len(turns) == 0 {
 		return nil
 	}
@@ -399,12 +400,12 @@ func coopHistory(turns []mob.Turn) []llm.Message {
 	return msgs
 }
 
-// coopBearer mints the per-discussion loopback bearer: 32 hex chars from
+// mobBearer mints the per-discussion loopback bearer: 32 hex chars from
 // crypto/rand (cheap, uniform with guest bearer auth).
-func coopBearer() (string, error) {
+func mobBearer() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		return "", fmt.Errorf("coop bearer: %w", err)
+		return "", fmt.Errorf("mob bearer: %w", err)
 	}
 
 	return hex.EncodeToString(b[:]), nil

@@ -12,10 +12,10 @@ func TestCoopConfigMapping(t *testing.T) {
 	tests := []struct {
 		name string
 		spec *protocol.CoopSpec
-		want orchestrator.CoopConfig
+		want orchestrator.MobConfig
 	}{
-		{"nil spec is off", nil, orchestrator.CoopConfig{}},
-		{"participants below two is off", &protocol.CoopSpec{Participants: 1}, orchestrator.CoopConfig{}},
+		{"nil spec is off", nil, orchestrator.MobConfig{}},
+		{"participants below two is off", &protocol.CoopSpec{Participants: 1}, orchestrator.MobConfig{}},
 		{
 			"full spec maps phases and guests",
 			&protocol.CoopSpec{
@@ -25,25 +25,25 @@ func TestCoopConfigMapping(t *testing.T) {
 				BudgetFactor: 0.5,
 				Guests:       []protocol.GuestSpec{{Name: "laptop", URL: "http://g:1", Token: "tok"}},
 			},
-			orchestrator.CoopConfig{
+			orchestrator.MobConfig{
 				Participants: 3, Plan: true, Review: true, Rounds: 3, BudgetFactor: 0.5,
-				Guests: []orchestrator.CoopGuest{{Name: "laptop", URL: "http://g:1", Token: "tok"}},
+				Guests: []orchestrator.MobGuest{{Name: "laptop", URL: "http://g:1", Token: "tok"}},
 			},
 		},
 		{
 			"zero rounds and factor take spec defaults",
 			&protocol.CoopSpec{Participants: 2, Phases: []string{"plan"}},
-			orchestrator.CoopConfig{Participants: 2, Plan: true, Rounds: 2, BudgetFactor: 0.75},
+			orchestrator.MobConfig{Participants: 2, Plan: true, Rounds: 2, BudgetFactor: 0.75},
 		},
 		{
 			"empty phases default to plan plus review",
 			&protocol.CoopSpec{Participants: 2, Rounds: 1, BudgetFactor: 0.6},
-			orchestrator.CoopConfig{Participants: 2, Plan: true, Review: true, Rounds: 1, BudgetFactor: 0.6},
+			orchestrator.MobConfig{Participants: 2, Plan: true, Review: true, Rounds: 1, BudgetFactor: 0.6},
 		},
 		{
 			"unknown phases ignored, execute not mapped in this plan",
 			&protocol.CoopSpec{Participants: 2, Phases: []string{"review", "execute", "bogus"}, Rounds: 1, BudgetFactor: 0.6},
-			orchestrator.CoopConfig{Participants: 2, Review: true, Rounds: 1, BudgetFactor: 0.6},
+			orchestrator.MobConfig{Participants: 2, Review: true, Rounds: 1, BudgetFactor: 0.6},
 		},
 	}
 
