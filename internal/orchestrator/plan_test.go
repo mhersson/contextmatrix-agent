@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
-	"github.com/mhersson/contextmatrix-agent/internal/coop"
+	"github.com/mhersson/contextmatrix-agent/internal/mob"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/mhersson/contextmatrix-harness/harness"
@@ -696,8 +696,8 @@ func coopPlanRun(ops *fakeOps, client llm.LLM, eng *scriptedEngine) *run {
 func TestRunPlanCoopCreatesSubtasksFromSynthesis(t *testing.T) {
 	ops := &fakeOps{createdIDs: []string{"SUB-1", "SUB-2"}}
 	llmFake := &planLLM{}
-	eng := &scriptedEngine{outcomes: []coop.Outcome{{
-		Transcript: []coop.Entry{
+	eng := &scriptedEngine{outcomes: []mob.Outcome{{
+		Transcript: []mob.Entry{
 			{Author: "seat-1", Lens: "feasibility/simplicity", Round: 0, Content: "proposal A"},
 			{Author: "seat-2", Lens: "architecture/extensibility", Round: 1, Content: "critique"},
 		},
@@ -739,7 +739,7 @@ func TestRunPlanCoopRepairSucceeds(t *testing.T) {
 	ops := &fakeOps{createdIDs: []string{"SUB-1", "SUB-2"}}
 	// The moderator repair call is the only LLM call: it returns valid JSON.
 	llmFake := &planLLM{responses: []llm.Response{stopResp(goodPlanJSON, 0.02)}}
-	eng := &scriptedEngine{outcomes: []coop.Outcome{{Synthesis: "sorry, prose only", Consensus: true}}}
+	eng := &scriptedEngine{outcomes: []mob.Outcome{{Synthesis: "sorry, prose only", Consensus: true}}}
 
 	o := coopPlanRun(ops, llmFake, eng)
 	require.NoError(t, runPlan(context.Background(), o))
@@ -756,7 +756,7 @@ func TestRunPlanCoopParseFailureFallsBackToDraftPlan(t *testing.T) {
 		stopResp("still not json", 0.01),
 		stopResp(goodPlanJSON, 0.01),
 	}}
-	eng := &scriptedEngine{outcomes: []coop.Outcome{{Synthesis: "prose"}}}
+	eng := &scriptedEngine{outcomes: []mob.Outcome{{Synthesis: "prose"}}}
 
 	o := coopPlanRun(ops, llmFake, eng)
 	require.NoError(t, runPlan(context.Background(), o))
@@ -771,7 +771,7 @@ func TestRunPlanCoopParseFailureFallsBackToDraftPlan(t *testing.T) {
 func TestRunPlanCoopEngineFailureFallsBackToDraftPlan(t *testing.T) {
 	ops := &fakeOps{createdIDs: []string{"SUB-1", "SUB-2"}}
 	llmFake := &planLLM{responses: []llm.Response{stopResp(goodPlanJSON, 0.01)}}
-	eng := &scriptedEngine{outcomes: []coop.Outcome{{}}, errs: []error{coop.ErrNoQuorum}}
+	eng := &scriptedEngine{outcomes: []mob.Outcome{{}}, errs: []error{mob.ErrNoQuorum}}
 
 	o := coopPlanRun(ops, llmFake, eng)
 	require.NoError(t, runPlan(context.Background(), o))
@@ -791,14 +791,14 @@ func TestRunPlanCoopHITLAdjustReopensDiscussion(t *testing.T) {
 		stopResp(`{"verdict":"adjust","feedback":"two subtasks"}`, 0.001),
 		stopResp(`{"verdict":"approve","feedback":""}`, 0.001),
 	}}
-	eng := &scriptedEngine{outcomes: []coop.Outcome{
+	eng := &scriptedEngine{outcomes: []mob.Outcome{
 		{
-			Transcript: []coop.Entry{{Author: "seat-1", Lens: "feasibility/simplicity", Round: 0, Content: "proposal"}},
+			Transcript: []mob.Entry{{Author: "seat-1", Lens: "feasibility/simplicity", Round: 0, Content: "proposal"}},
 			Synthesis:  goodPlanJSON,
 			Consensus:  true,
 		},
 		{
-			Transcript: []coop.Entry{{Author: "seat-1", Lens: "feasibility/simplicity", Round: 1, Content: "revised"}},
+			Transcript: []mob.Entry{{Author: "seat-1", Lens: "feasibility/simplicity", Round: 1, Content: "revised"}},
 			Synthesis:  goodPlanJSON,
 			Consensus:  true,
 		},

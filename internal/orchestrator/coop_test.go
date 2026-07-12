@@ -11,7 +11,7 @@ import (
 	"testing"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
-	"github.com/mhersson/contextmatrix-agent/internal/coop"
+	"github.com/mhersson/contextmatrix-agent/internal/mob"
 	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/mhersson/contextmatrix-harness/harness"
 	"github.com/mhersson/contextmatrix-harness/llm"
@@ -25,14 +25,14 @@ import (
 // plan and review co-op tests.
 type scriptedEngine struct {
 	mu       sync.Mutex
-	cfgs     []coop.EngineConfig
-	topics   []coop.Topic
-	outcomes []coop.Outcome
+	cfgs     []mob.EngineConfig
+	topics   []mob.Topic
+	outcomes []mob.Outcome
 	errs     []error
 	i        int
 }
 
-func (s *scriptedEngine) run(_ context.Context, cfg coop.EngineConfig, t coop.Topic) (coop.Outcome, error) {
+func (s *scriptedEngine) run(_ context.Context, cfg mob.EngineConfig, t mob.Topic) (mob.Outcome, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -40,7 +40,7 @@ func (s *scriptedEngine) run(_ context.Context, cfg coop.EngineConfig, t coop.To
 	s.topics = append(s.topics, t)
 
 	if s.i >= len(s.outcomes) {
-		return coop.Outcome{}, errors.New("scriptedEngine: no outcome queued")
+		return mob.Outcome{}, errors.New("scriptedEngine: no outcome queued")
 	}
 
 	out := s.outcomes[s.i]
@@ -99,7 +99,7 @@ func TestBuildEngineConfigPlanTopic(t *testing.T) {
 		Guests: []CoopGuest{{Name: "laptop", URL: "http://10.0.0.5:8484", Token: "tok"}},
 	}, 2.0)
 
-	topic := coop.Topic{Kind: "plan", Lenses: planLenses[:3], Rounds: 2, Blind: true}
+	topic := mob.Topic{Kind: "plan", Lenses: planLenses[:3], Rounds: 2, Blind: true}
 
 	cfg := buildEngineConfig(o, topic, "test-bearer")
 
@@ -116,7 +116,7 @@ func TestBuildEngineConfigPlanTopic(t *testing.T) {
 	}
 
 	require.Len(t, cfg.Guests, 1)
-	assert.Equal(t, coop.GuestSeat{Name: "laptop", URL: "http://10.0.0.5:8484", Token: "tok"}, cfg.Guests[0])
+	assert.Equal(t, mob.GuestSeat{Name: "laptop", URL: "http://10.0.0.5:8484", Token: "tok"}, cfg.Guests[0])
 
 	assert.InDelta(t, 1.5, cfg.BudgetUSD, 1e-9, "budget = factor x MaxCardCost")
 	assert.Equal(t, "test-bearer", cfg.Bearer)
@@ -131,7 +131,7 @@ func TestBuildEngineConfigReviewExcludesCoderModels(t *testing.T) {
 	o := coopTestRun(ops, CoopConfig{Participants: 3, Review: true, Rounds: 2, BudgetFactor: 0.75}, 2.0)
 	o.coderModels = map[string]bool{"rev/alpha": true}
 
-	topic := coop.Topic{Kind: "review", Lenses: reviewLenses[:3], Rounds: 1, Blind: true}
+	topic := mob.Topic{Kind: "review", Lenses: reviewLenses[:3], Rounds: 1, Blind: true}
 
 	cfg := buildEngineConfig(o, topic, "b")
 
@@ -146,7 +146,7 @@ func TestBuildEngineConfigZeroCostDisablesBudget(t *testing.T) {
 	ops := &fakeOps{}
 	o := coopTestRun(ops, CoopConfig{Participants: 2, Plan: true, Rounds: 2, BudgetFactor: 0.75}, 0)
 
-	cfg := buildEngineConfig(o, coop.Topic{Kind: "plan", Lenses: planLenses[:2], Rounds: 2}, "b")
+	cfg := buildEngineConfig(o, mob.Topic{Kind: "plan", Lenses: planLenses[:2], Rounds: 2}, "b")
 
 	assert.Zero(t, cfg.BudgetUSD, "MaxCardCost 0 disables the co-op budget term")
 }
@@ -156,12 +156,12 @@ func TestCoopDiscussQuorumFallback(t *testing.T) {
 	o := coopTestRun(ops, CoopConfig{Participants: 2, Plan: true, Rounds: 2, BudgetFactor: 0.75}, 2.0)
 
 	eng := &scriptedEngine{
-		outcomes: []coop.Outcome{{}},
-		errs:     []error{coop.ErrNoQuorum},
+		outcomes: []mob.Outcome{{}},
+		errs:     []error{mob.ErrNoQuorum},
 	}
 	o.coopEngine = eng.run
 
-	out, ok := o.coopDiscuss(context.Background(), coop.Topic{
+	out, ok := o.coopDiscuss(context.Background(), mob.Topic{
 		Kind: "plan", Lenses: planLenses[:2], Rounds: 2, Blind: true, Briefing: "b",
 	})
 
@@ -181,10 +181,10 @@ func TestCoopDiscussBudgetExhaustedRunsSolo(t *testing.T) {
 	// Pre-spend the run ledger up to the whole co-op envelope: no headroom left.
 	o.ledger.Spend(effectiveCeiling(o.d.Cfg))
 
-	eng := &scriptedEngine{outcomes: []coop.Outcome{{Synthesis: "SHOULD-NOT-RUN"}}}
+	eng := &scriptedEngine{outcomes: []mob.Outcome{{Synthesis: "SHOULD-NOT-RUN"}}}
 	o.coopEngine = eng.run
 
-	out, ok := o.coopDiscuss(context.Background(), coop.Topic{
+	out, ok := o.coopDiscuss(context.Background(), mob.Topic{
 		Kind: "plan", Lenses: planLenses[:2], Rounds: 2, Blind: true, Briefing: "b",
 	})
 
@@ -206,10 +206,10 @@ func TestCoopDiscussClampsBudgetToHeadroom(t *testing.T) {
 	// gets the clamped 1.0.
 	o.ledger.Spend(2.5)
 
-	eng := &scriptedEngine{outcomes: []coop.Outcome{{Synthesis: "SYNTH"}}}
+	eng := &scriptedEngine{outcomes: []mob.Outcome{{Synthesis: "SYNTH"}}}
 	o.coopEngine = eng.run
 
-	out, ok := o.coopDiscuss(context.Background(), coop.Topic{
+	out, ok := o.coopDiscuss(context.Background(), mob.Topic{
 		Kind: "plan", Lenses: planLenses[:2], Rounds: 2, Blind: true, Briefing: "b",
 	})
 
@@ -228,10 +228,10 @@ func TestCoopDiscussUnlimitedCeilingKeepsUnbounded(t *testing.T) {
 	// term stays unbounded (0) and the discussion is never treated as exhausted.
 	o.ledger.Spend(10.0)
 
-	eng := &scriptedEngine{outcomes: []coop.Outcome{{Synthesis: "SYNTH"}}}
+	eng := &scriptedEngine{outcomes: []mob.Outcome{{Synthesis: "SYNTH"}}}
 	o.coopEngine = eng.run
 
-	out, ok := o.coopDiscuss(context.Background(), coop.Topic{
+	out, ok := o.coopDiscuss(context.Background(), mob.Topic{
 		Kind: "plan", Lenses: planLenses[:2], Rounds: 2, Blind: true, Briefing: "b",
 	})
 
@@ -243,7 +243,7 @@ func TestCoopDiscussUnlimitedCeilingKeepsUnbounded(t *testing.T) {
 
 func TestSeatConfigCapsToolOutput(t *testing.T) {
 	base := harness.Config{ToolOutputMaxBytes: 131072, MaxTurns: 45}
-	cfg := seatConfig(base, coop.SeatConfig{Name: "seat-1", Lens: "risk"}, 0.10, nil)
+	cfg := seatConfig(base, mob.SeatConfig{Name: "seat-1", Lens: "risk"}, 0.10, nil)
 
 	assert.Equal(t, coopSeatToolOutputMaxBytes, cfg.ToolOutputMaxBytes)
 	assert.Equal(t, coopSeatMaxTurns, cfg.MaxTurns)
@@ -251,7 +251,7 @@ func TestSeatConfigCapsToolOutput(t *testing.T) {
 }
 
 func TestSeatConfigSetsWrapUpNudge(t *testing.T) {
-	cfg := seatConfig(harness.Config{}, coop.SeatConfig{Name: "seat-1", Lens: "risk"}, 0.25, nil)
+	cfg := seatConfig(harness.Config{}, mob.SeatConfig{Name: "seat-1", Lens: "risk"}, 0.25, nil)
 
 	assert.Equal(t, coopSeatWrapUpTurns, cfg.WrapUpTurns)
 	assert.Equal(t, seatWrapUpMessage, cfg.WrapUpMessage)
@@ -309,7 +309,7 @@ func TestCoopSeatRunnerPersistsContextAcrossRounds(t *testing.T) {
 	o.d.Client = client
 
 	runner := o.coopSeatRunner(&seatDebugSink{w: io.Discard}, 0)
-	seat := coop.SeatConfig{Name: "seat-1", Lens: "risk", Model: "m/1"}
+	seat := mob.SeatConfig{Name: "seat-1", Lens: "risk", Model: "m/1"}
 
 	out1, _, err := runner(t.Context(), seat, nil, "round 0 briefing")
 	require.NoError(t, err)
@@ -366,7 +366,7 @@ func TestCoopSeatRunnerForcesFinalAnswerOnEmptyOutput(t *testing.T) {
 
 	runner := o.coopSeatRunner(&seatDebugSink{w: io.Discard}, 0.25)
 
-	out, _, err := runner(t.Context(), coop.SeatConfig{Name: "seat-1", Lens: "risk", Model: "m/1"}, nil, "briefing")
+	out, _, err := runner(t.Context(), mob.SeatConfig{Name: "seat-1", Lens: "risk", Model: "m/1"}, nil, "briefing")
 	require.NoError(t, err)
 	assert.Equal(t, "forced position", out)
 
@@ -398,7 +398,7 @@ func TestCoopSeatRunnerBackstopFailureFallsBackToAbsence(t *testing.T) {
 
 	runner := o.coopSeatRunner(&seatDebugSink{w: io.Discard}, 0.25)
 
-	out, cost, err := runner(t.Context(), coop.SeatConfig{Name: "seat-1", Lens: "risk", Model: "m/1"}, nil, "briefing")
+	out, cost, err := runner(t.Context(), mob.SeatConfig{Name: "seat-1", Lens: "risk", Model: "m/1"}, nil, "briefing")
 	require.NoError(t, err, "a failed backstop must degrade to absence, not fail the discussion")
 	assert.Empty(t, out)
 

@@ -20,7 +20,7 @@ import (
 	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
-	"github.com/mhersson/contextmatrix-agent/internal/coop"
+	"github.com/mhersson/contextmatrix-agent/internal/mob"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-agent/internal/verifyexec"
 	"github.com/mhersson/contextmatrix-harness/events"
@@ -346,11 +346,11 @@ type run struct {
 
 	// coopSeats records the seat lineup of the most recent discussion so the
 	// ## Discussion card record can name seats and models.
-	coopSeats []coop.SeatConfig
+	coopSeats []mob.SeatConfig
 
 	// coopEngine is the discussion-engine seam: tests script (Outcome, error)
-	// here. nil = the real engine (coop.NewEngine(cfg).Discuss).
-	coopEngine func(ctx context.Context, cfg coop.EngineConfig, t coop.Topic) (coop.Outcome, error)
+	// here. nil = the real engine (mob.NewEngine(cfg).Discuss).
+	coopEngine func(ctx context.Context, cfg mob.EngineConfig, t mob.Topic) (mob.Outcome, error)
 
 	planFn      phaseFn
 	executeFn   phaseFn

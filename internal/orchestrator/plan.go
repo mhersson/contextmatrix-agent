@@ -8,7 +8,7 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/mhersson/contextmatrix-agent/internal/coop"
+	"github.com/mhersson/contextmatrix-agent/internal/mob"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-harness/events"
 )
@@ -401,10 +401,10 @@ const coopAdjustTailEntries = 12
 // for one non-blind feedback round (HITL adjust): the briefing is the prior
 // transcript tail plus the human's feedback as a human-authored entry.
 // ok=false on any failure — the caller falls back to the solo draftPlan path.
-func (o *run) coopDraftPlan(ctx context.Context, diagnosis, design, feedback string, prior *coop.Outcome) (plan, *coop.Outcome, bool) {
+func (o *run) coopDraftPlan(ctx context.Context, diagnosis, design, feedback string, prior *mob.Outcome) (plan, *mob.Outcome, bool) {
 	seats := min(o.d.Cfg.Coop.Participants, len(planLenses))
 
-	t := coop.Topic{
+	t := mob.Topic{
 		Kind:     "plan",
 		Lenses:   planLenses[:seats],
 		Rounds:   o.d.Cfg.Coop.Rounds,
@@ -470,7 +470,7 @@ func (o *run) coopPlanBriefing(diagnosis, design string) string {
 // coopAdjustBriefing re-opens a discussion after a HITL adjust: the tail of
 // the prior transcript restores shared context and the human's feedback
 // arrives as a human-authored line per the wire conventions.
-func coopAdjustBriefing(prior coop.Outcome, feedback string) string {
+func coopAdjustBriefing(prior mob.Outcome, feedback string) string {
 	entries := prior.Transcript
 	if len(entries) > coopAdjustTailEntries {
 		entries = entries[len(entries)-coopAdjustTailEntries:]
@@ -486,7 +486,7 @@ func coopAdjustBriefing(prior coop.Outcome, feedback string) string {
 // failure: the topic's synthesis instruction, the rendered transcript, and
 // the repair block naming the parse error. Shared by the plan and review
 // co-op paths (the moderator equivalent of draftPlan's repair turn).
-func (o *run) coopResynthesize(ctx context.Context, t coop.Topic, out coop.Outcome, parseErr string) (string, error) {
+func (o *run) coopResynthesize(ctx context.Context, t mob.Topic, out mob.Outcome, parseErr string) (string, error) {
 	prompt := t.SynthesisPrompt +
 		"\n\nDISCUSSION TRANSCRIPT\n" + formatDiscussionEntries(out.Transcript) +
 		"\n" + repairBlock(parseErr)
@@ -502,7 +502,7 @@ func (o *run) coopResynthesize(ctx context.Context, t coop.Topic, out coop.Outco
 // the discussion's output was accepted: seats and models, guests, round
 // count, consensus or carried dissent, and cost. Best-effort, like every
 // card-body record.
-func (o *run) recordDiscussion(ctx context.Context, out *coop.Outcome) {
+func (o *run) recordDiscussion(ctx context.Context, out *mob.Outcome) {
 	var b strings.Builder
 
 	b.WriteString("## Discussion\n\nSeats:\n")
@@ -628,7 +628,7 @@ func runPlan(ctx context.Context, o *run) error {
 	// fails, the rest of the phase stays on the solo path.
 	feedback := ""
 
-	var lastOut *coop.Outcome
+	var lastOut *mob.Outcome
 
 	coopSolo := false
 
@@ -639,7 +639,7 @@ func runPlan(ctx context.Context, o *run) error {
 
 		if coopPlan && !coopSolo {
 			var (
-				out *coop.Outcome
+				out *mob.Outcome
 				ok  bool
 			)
 

@@ -1,4 +1,4 @@
-package coop
+package mob
 
 import (
 	"strings"

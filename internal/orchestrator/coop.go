@@ -11,7 +11,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/mhersson/contextmatrix-agent/internal/coop"
+	"github.com/mhersson/contextmatrix-agent/internal/mob"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/mhersson/contextmatrix-harness/harness"
@@ -71,12 +71,12 @@ const coopSeatWrapUpTurns = 2
 // and closes the server. It NEVER fails the card: any error — bearer, server
 // start, quorum, engine — logs, leaves an advisory card-log entry, and
 // returns ok=false so the caller falls back to its solo path.
-func (o *run) coopDiscuss(ctx context.Context, t coop.Topic) (coop.Outcome, bool) {
+func (o *run) coopDiscuss(ctx context.Context, t mob.Topic) (mob.Outcome, bool) {
 	bearer, err := coopBearer()
 	if err != nil {
 		slog.Warn("coop: bearer generation failed", "card_id", o.d.Cfg.CardID, "error", err)
 
-		return coop.Outcome{}, false
+		return mob.Outcome{}, false
 	}
 
 	// Bound this discussion by what remains of the run's single co-op budget
@@ -95,7 +95,7 @@ func (o *run) coopDiscuss(ctx context.Context, t coop.Topic) (coop.Outcome, bool
 			_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, //nolint:errcheck // advisory degrade record
 				fmt.Sprintf("co-op budget exhausted (%s) — continuing solo", t.Kind))
 
-			return coop.Outcome{}, false
+			return mob.Outcome{}, false
 		}
 	}
 
@@ -107,13 +107,13 @@ func (o *run) coopDiscuss(ctx context.Context, t coop.Topic) (coop.Outcome, bool
 		cfg.BudgetUSD = min(cfg.BudgetUSD, headroom)
 	}
 
-	server, err := coop.StartServer(cfg.Seats, cfg.Runner, bearer)
+	server, err := mob.StartServer(cfg.Seats, cfg.Runner, bearer)
 	if err != nil {
 		slog.Warn("coop: loopback server failed to start", "card_id", o.d.Cfg.CardID, "error", err)
 		_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, //nolint:errcheck // advisory degrade record
 			fmt.Sprintf("co-op discussion unavailable (%s): %v — continuing solo", t.Kind, err))
 
-		return coop.Outcome{}, false
+		return mob.Outcome{}, false
 	}
 	defer server.Close() //nolint:errcheck
 
@@ -121,8 +121,8 @@ func (o *run) coopDiscuss(ctx context.Context, t coop.Topic) (coop.Outcome, bool
 
 	engine := o.coopEngine
 	if engine == nil {
-		engine = func(ctx context.Context, cfg coop.EngineConfig, t coop.Topic) (coop.Outcome, error) {
-			return coop.NewEngine(cfg).Discuss(ctx, t)
+		engine = func(ctx context.Context, cfg mob.EngineConfig, t mob.Topic) (mob.Outcome, error) {
+			return mob.NewEngine(cfg).Discuss(ctx, t)
 		}
 	}
 
@@ -145,7 +145,7 @@ func (o *run) coopDiscuss(ctx context.Context, t coop.Topic) (coop.Outcome, bool
 // the co-op budget term. SeatEndpoint is NOT set here — the caller wires it
 // once the loopback server has started (the server is built from this
 // config's Seats/Runner, so it cannot exist before this call returns).
-func buildEngineConfig(o *run, t coop.Topic, bearer string) coop.EngineConfig {
+func buildEngineConfig(o *run, t mob.Topic, bearer string) mob.EngineConfig {
 	var exclude map[string]bool
 	if t.Kind == "review" {
 		exclude = o.reviewExclusions()
@@ -157,18 +157,18 @@ func buildEngineConfig(o *run, t coop.Topic, bearer string) coop.EngineConfig {
 		Exclude: exclude,
 	}, len(t.Lenses))
 
-	seats := make([]coop.SeatConfig, len(t.Lenses))
+	seats := make([]mob.SeatConfig, len(t.Lenses))
 	for i, lens := range t.Lenses {
-		seats[i] = coop.SeatConfig{
+		seats[i] = mob.SeatConfig{
 			Name:  fmt.Sprintf("seat-%d", i+1),
 			Lens:  lens,
 			Model: panel[i].Model,
 		}
 	}
 
-	guests := make([]coop.GuestSeat, 0, len(o.d.Cfg.Coop.Guests))
+	guests := make([]mob.GuestSeat, 0, len(o.d.Cfg.Coop.Guests))
 	for _, g := range o.d.Cfg.Coop.Guests {
-		guests = append(guests, coop.GuestSeat{Name: g.Name, URL: g.URL, Token: g.Token})
+		guests = append(guests, mob.GuestSeat{Name: g.Name, URL: g.URL, Token: g.Token})
 	}
 
 	// coopBudget = BudgetFactor x MaxCardCost; a disabled card budget disables
@@ -186,7 +186,7 @@ func buildEngineConfig(o *run, t coop.Topic, bearer string) coop.EngineConfig {
 
 	sink := &seatDebugSink{w: o.seatDebug}
 
-	return coop.EngineConfig{
+	return mob.EngineConfig{
 		Seats:    seats,
 		Guests:   guests,
 		Runner:   o.coopSeatRunner(sink, perTurn),
@@ -250,13 +250,13 @@ func trimSeatContext(msgs []llm.Message) []llm.Message {
 // for the first round and for replacement tasks. Events go to the
 // seat-debug emitter so seat tool chatter stays off the live stream. Usage
 // is spent against the run ledger and reported to CM per turn.
-func (o *run) coopSeatRunner(sink *seatDebugSink, perTurnCap float64) coop.SeatRunner {
+func (o *run) coopSeatRunner(sink *seatDebugSink, perTurnCap float64) mob.SeatRunner {
 	var (
 		mu       sync.Mutex
 		sessions = map[string][]llm.Message{}
 	)
 
-	return func(ctx context.Context, seat coop.SeatConfig, history []coop.Turn, prompt string) (string, float64, error) {
+	return func(ctx context.Context, seat mob.SeatConfig, history []mob.Turn, prompt string) (string, float64, error) {
 		mu.Lock()
 		seeded := sessions[seat.Name]
 		mu.Unlock()
@@ -333,7 +333,7 @@ func (o *run) coopSeatRunner(sink *seatDebugSink, perTurnCap float64) coop.SeatR
 }
 
 // seatConfig derives one seat turn's harness config from the run-wide base.
-func seatConfig(base harness.Config, seat coop.SeatConfig, perTurnCap float64, history []llm.Message) harness.Config {
+func seatConfig(base harness.Config, seat mob.SeatConfig, perTurnCap float64, history []llm.Message) harness.Config {
 	base.SystemPrompt = fmt.Sprintf(seatSystemPrompt, seat.Name, seat.Lens)
 	base.MaxTurns = coopSeatMaxTurns
 	base.MaxCostUSD = perTurnCap
@@ -350,7 +350,7 @@ func seatConfig(base harness.Config, seat coop.SeatConfig, perTurnCap float64, h
 // model resolves lazily on first use — resolveDecisionModel does advisory
 // card-log I/O and needs a ctx — and the engine calls Moderate sequentially,
 // so the lazy init is race-free.
-func (o *run) coopModeratorRunner(sink *seatDebugSink) coop.ModeratorRunner {
+func (o *run) coopModeratorRunner(sink *seatDebugSink) mob.ModeratorRunner {
 	model := ""
 	emit := events.NewEmitter(io.Discard, sink.named("moderator"))
 
@@ -386,7 +386,7 @@ func (o *run) coopModeratorRunner(sink *seatDebugSink) coop.ModeratorRunner {
 }
 
 // coopHistory maps role-tagged discussion turns to seeded harness history.
-func coopHistory(turns []coop.Turn) []llm.Message {
+func coopHistory(turns []mob.Turn) []llm.Message {
 	if len(turns) == 0 {
 		return nil
 	}
@@ -413,7 +413,7 @@ func coopBearer() (string, error) {
 // formatDiscussionEntries renders transcript entries in the wire convention
 // ("[round N] author (lens): text"), one blank line between entries. Used
 // for repair re-synthesis and HITL re-open briefings.
-func formatDiscussionEntries(entries []coop.Entry) string {
+func formatDiscussionEntries(entries []mob.Entry) string {
 	lines := make([]string, 0, len(entries))
 
 	for _, e := range entries {

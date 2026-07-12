@@ -8,7 +8,7 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/mhersson/contextmatrix-agent/internal/coop"
+	"github.com/mhersson/contextmatrix-agent/internal/mob"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-harness/harness"
 	"github.com/mhersson/contextmatrix-harness/tools"
@@ -533,7 +533,7 @@ func (o *run) coopReviewVerdict(ctx context.Context) (verdict, bool) {
 
 	seats := min(o.d.Cfg.Coop.Participants, len(reviewLenses))
 
-	t := coop.Topic{
+	t := mob.Topic{
 		Kind:     "review",
 		Briefing: briefing,
 		Lenses:   reviewLenses[:seats],

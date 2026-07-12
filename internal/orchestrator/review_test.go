@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
-	"github.com/mhersson/contextmatrix-agent/internal/coop"
+	"github.com/mhersson/contextmatrix-agent/internal/mob"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-agent/internal/verifyexec"
 	"github.com/mhersson/contextmatrix-harness/events"
@@ -1148,7 +1148,7 @@ func TestReviewCoopApprovedFirstPass(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{}
 	llmFake := &planLLM{}
-	eng := &scriptedEngine{outcomes: []coop.Outcome{{Synthesis: coopApprovedVerdict, Consensus: true}}}
+	eng := &scriptedEngine{outcomes: []mob.Outcome{{Synthesis: coopApprovedVerdict, Consensus: true}}}
 
 	o := coopReviewRun(t, ops, git, llmFake, eng)
 	require.NoError(t, runReview(context.Background(), o))
@@ -1175,7 +1175,7 @@ func TestReviewCoopRejectWithFixesRunsFixLoop(t *testing.T) {
 	llmFake := &planLLM{responses: []llm.Response{
 		stopResp("coder: fixed the bug", 0.05),
 	}}
-	eng := &scriptedEngine{outcomes: []coop.Outcome{
+	eng := &scriptedEngine{outcomes: []mob.Outcome{
 		{Synthesis: `{"approved":false,"summary":"fix it","fix_tier":"simple",` +
 			`"fixes":[{"file":"a.go","issue":"bug","suggestion":"patch"}]}`},
 		{Synthesis: coopApprovedVerdict, Consensus: true},
@@ -1208,7 +1208,7 @@ func TestReviewCoopFallsBackToSpecialists(t *testing.T) {
 		stopResp("Security: looks fine", 0.01),
 		stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.02),
 	}}
-	eng := &scriptedEngine{outcomes: []coop.Outcome{{}}, errs: []error{coop.ErrNoQuorum}}
+	eng := &scriptedEngine{outcomes: []mob.Outcome{{}}, errs: []error{mob.ErrNoQuorum}}
 
 	o := coopReviewRun(t, ops, git, llmFake, eng)
 	require.NoError(t, runReview(context.Background(), o))
@@ -1220,7 +1220,7 @@ func TestReviewCoopPassesExclusionsAndDeltaScope(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{}
 	llmFake := &planLLM{}
-	eng := &scriptedEngine{outcomes: []coop.Outcome{{Synthesis: coopApprovedVerdict, Consensus: true}}}
+	eng := &scriptedEngine{outcomes: []mob.Outcome{{Synthesis: coopApprovedVerdict, Consensus: true}}}
 
 	o := coopReviewRun(t, ops, git, llmFake, eng)
 	o.coderModels = map[string]bool{"rev/alpha": true}
