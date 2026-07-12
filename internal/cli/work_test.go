@@ -511,3 +511,29 @@ func TestCoopGuestsFromSecrets(t *testing.T) {
 		assert.Nil(t, coopGuestsFromSecrets(src), "a broken guest list must never fail the run")
 	})
 }
+
+type blockingCloser struct{ release chan struct{} }
+
+func (b *blockingCloser) Close() error {
+	<-b.release
+
+	return nil
+}
+
+func TestCloseBoundedReturnsOnHang(t *testing.T) {
+	c := &blockingCloser{release: make(chan struct{})}
+	defer close(c.release)
+
+	start := time.Now()
+
+	closeBounded(c, 20*time.Millisecond)
+
+	assert.Less(t, time.Since(start), time.Second, "a hung Close must not block the worker exit")
+}
+
+func TestCloseBoundedWaitsForFastClose(t *testing.T) {
+	c := &blockingCloser{release: make(chan struct{})}
+	close(c.release)
+
+	closeBounded(c, time.Second) // returns immediately, no panic, no leak
+}

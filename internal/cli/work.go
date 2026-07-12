@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/config"
@@ -32,6 +33,28 @@ const cmEnvFile = "/run/cm-secrets/env"
 // leading dashes) out of the push path entirely instead of relying on git's
 // refspec parser to reject them.
 var cardIDPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9-]*-[0-9]+$`)
+
+// mcpCloseTimeout bounds the MCP client teardown: a slow or dead tunnel
+// must not keep a finished worker alive past the backend's kill grace —
+// the process exit code is the run's success signal.
+const mcpCloseTimeout = 2 * time.Second
+
+// closeBounded closes c but gives up after d, logging instead of hanging.
+func closeBounded(c io.Closer, d time.Duration) {
+	done := make(chan struct{})
+
+	go func() {
+		_ = c.Close() //nolint:errcheck // best-effort teardown
+
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(d):
+		slog.Warn("mcp client close timed out; exiting anyway", "timeout", d)
+	}
+}
 
 func newWorkCmd() *cobra.Command {
 	return &cobra.Command{
@@ -89,7 +112,7 @@ func newWorkCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("connect mcp: %w", err)
 			}
-			defer ops.Close() //nolint:errcheck
+			defer closeBounded(ops, mcpCloseTimeout)
 
 			res, err := worker.Run(cmd.Context(), spec, ops, client, emit, cmd.InOrStdin())
 			if err != nil {
