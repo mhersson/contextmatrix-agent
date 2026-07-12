@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"strings"
 	"sync"
 	"testing"
@@ -259,26 +258,25 @@ func TestSeatConfigSetsWrapUpNudge(t *testing.T) {
 func TestSeatDebugWriterRewritesKinds(t *testing.T) {
 	var buf bytes.Buffer
 
-	w := &seatDebugWriter{w: &buf}
+	sink := &seatDebugSink{w: &buf}
+	w := sink.named("seat-2")
 
-	emit := events.NewEmitter(io.Discard, w)
-	emit.Emit(events.ToolCallKind, map[string]any{"name": "read"})
-
-	var got map[string]any
-	require.NoError(t, json.Unmarshal(buf.Bytes(), &got))
-	assert.Equal(t, "seat_debug", got["kind"], "bridged kinds must be rewritten off the live stream")
-	assert.Equal(t, "tool_call", got["seat_kind"], "the original kind is preserved for debugging")
-
-	data, isMap := got["data"].(map[string]any)
-	require.True(t, isMap)
-	assert.Equal(t, "read", data["name"], "event payload passes through untouched")
-
-	// Non-JSON lines pass through verbatim (defensive; the emitter only
-	// writes JSON lines).
-	buf.Reset()
-
-	n, err := w.Write([]byte("not json\n"))
+	_, err := w.Write([]byte(`{"kind":"tool_call","data":{"name":"read"}}` + "\n"))
 	require.NoError(t, err)
-	assert.Equal(t, len("not json\n"), n)
-	assert.Equal(t, "not json\n", buf.String())
+
+	var m map[string]any
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &m))
+	assert.Equal(t, "seat_debug", m["kind"])
+	assert.Equal(t, "tool_call", m["seat_kind"])
+	assert.Equal(t, "seat-2", m["seat"])
+}
+
+func TestSeatDebugWriterPassesNonJSONThrough(t *testing.T) {
+	var buf bytes.Buffer
+
+	w := (&seatDebugSink{w: &buf}).named("moderator")
+
+	_, err := w.Write([]byte("plain log line\n"))
+	require.NoError(t, err)
+	assert.Equal(t, "plain log line\n", buf.String())
 }

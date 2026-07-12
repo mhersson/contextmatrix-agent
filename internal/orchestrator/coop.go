@@ -179,13 +179,13 @@ func buildEngineConfig(o *run, t coop.Topic, bearer string) coop.EngineConfig {
 		perTurn = budget / (float64(len(seats)) * float64(t.Rounds+2))
 	}
 
-	debugEmit := events.NewEmitter(io.Discard, &seatDebugWriter{w: o.seatDebug})
+	sink := &seatDebugSink{w: o.seatDebug}
 
 	return coop.EngineConfig{
 		Seats:    seats,
 		Guests:   guests,
-		Runner:   o.coopSeatRunner(debugEmit, perTurn),
-		Moderate: o.coopModeratorRunner(debugEmit),
+		Runner:   o.coopSeatRunner(sink, perTurn),
+		Moderate: o.coopModeratorRunner(sink),
 		Emit: func(author, lens string, round int, content string) {
 			o.d.Emit.Emit(events.Kind("discussion"), map[string]any{
 				"agent":   author,
@@ -205,9 +205,11 @@ func buildEngineConfig(o *run, t coop.Topic, bearer string) coop.EngineConfig {
 // seat's prior turns seeded as history, and the per-turn cost cap. Events go
 // to the seat-debug emitter so seat tool chatter stays off the live stream.
 // Usage is spent against the run ledger and reported to CM per turn.
-func (o *run) coopSeatRunner(emit *events.Emitter, perTurnCap float64) coop.SeatRunner {
+func (o *run) coopSeatRunner(sink *seatDebugSink, perTurnCap float64) coop.SeatRunner {
 	return func(ctx context.Context, seat coop.SeatConfig, history []coop.Turn, prompt string) (string, float64, error) {
 		cfg := seatConfig(o.harnessConfig(seat.Model), seat, perTurnCap, coopHistory(history))
+
+		emit := events.NewEmitter(io.Discard, sink.named(seat.Name))
 
 		res, err := harness.Run(ctx, o.d.Client, o.d.ReadTools, emit, prompt, cfg)
 
@@ -250,8 +252,9 @@ func seatConfig(base harness.Config, seat coop.SeatConfig, perTurnCap float64, h
 // model resolves lazily on first use — resolveDecisionModel does advisory
 // card-log I/O and needs a ctx — and the engine calls Moderate sequentially,
 // so the lazy init is race-free.
-func (o *run) coopModeratorRunner(emit *events.Emitter) coop.ModeratorRunner {
+func (o *run) coopModeratorRunner(sink *seatDebugSink) coop.ModeratorRunner {
 	model := ""
+	emit := events.NewEmitter(io.Discard, sink.named("moderator"))
 
 	return func(ctx context.Context, prompt string) (string, float64, error) {
 		if model == "" {
@@ -326,32 +329,42 @@ func formatDiscussionEntries(entries []coop.Entry) string {
 	return strings.Join(lines, "\n\n")
 }
 
-// seatDebugWriter rewrites worker JSONL event lines from co-op seat sub-runs
-// so the service log bridge keeps them OFF the live card stream: each line's
-// kind becomes "seat_debug" (the bridge skips unknown kinds) and the original
-// kind is preserved under "seat_kind" for offline debugging. Non-JSON lines
-// pass through verbatim. Writes are mutex-serialized so parallel seats
-// sharing one writer emit whole lines.
-type seatDebugWriter struct {
+// seatDebugSink serializes seat_debug writes from parallel seat runs onto
+// the run's shared debug writer. named hands each seat (and the moderator)
+// its own stamping writer; run 2's log could not attribute interleaved
+// events because all seats shared one anonymous stream.
+type seatDebugSink struct {
 	mu sync.Mutex
 	w  io.Writer
 }
 
-func (s *seatDebugWriter) Write(p []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// named returns an io.Writer that rewrites worker JSONL event lines to
+// kind "seat_debug", stamps the author under "seat", and funnels them
+// through the shared sink.
+func (s *seatDebugSink) named(seat string) io.Writer {
+	return &seatDebugWriter{sink: s, seat: seat}
+}
 
-	if _, err := s.w.Write(rewriteSeatDebugLine(p)); err != nil {
+type seatDebugWriter struct {
+	sink *seatDebugSink
+	seat string
+}
+
+func (w *seatDebugWriter) Write(p []byte) (int, error) {
+	w.sink.mu.Lock()
+	defer w.sink.mu.Unlock()
+
+	if _, err := w.sink.w.Write(rewriteSeatDebugLine(p, w.seat)); err != nil {
 		return 0, err
 	}
 
 	return len(p), nil
 }
 
-// rewriteSeatDebugLine rewrites one JSONL event line's kind to "seat_debug",
-// preserving the original under "seat_kind". Unparsable input is returned
-// unchanged.
-func rewriteSeatDebugLine(p []byte) []byte {
+// rewriteSeatDebugLine rewrites one JSONL event line's kind to
+// "seat_debug", preserving the original under "seat_kind" and stamping the
+// authoring seat under "seat". Unparsable input is returned unchanged.
+func rewriteSeatDebugLine(p []byte, seat string) []byte {
 	var m map[string]any
 	if err := json.Unmarshal(p, &m); err != nil {
 		return p
@@ -362,6 +375,7 @@ func rewriteSeatDebugLine(p []byte) []byte {
 	}
 
 	m["kind"] = "seat_debug"
+	m["seat"] = seat
 
 	out, err := json.Marshal(m)
 	if err != nil {
