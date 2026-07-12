@@ -55,6 +55,12 @@ const coopModeratorMaxTurns = 4
 // single broad grep inflate a seat prompt ~17x in the first live run.
 const coopSeatToolOutputMaxBytes = 16 * 1024
 
+// coopSeatWrapUpTurns is the remaining-turn threshold at which a seat run
+// gets the harness wrap-up nudge. Run 2 showed seats burning all 8 turns on
+// exploration and returning empty utterances; the nudge forces a position
+// while turns remain.
+const coopSeatWrapUpTurns = 2
+
 // coopDiscuss convenes one discussion: it mints the per-discussion bearer,
 // starts the loopback seat server, builds the engine config, runs Discuss,
 // and closes the server. It NEVER fails the card: any error — bearer, server
@@ -233,6 +239,8 @@ func seatConfig(base harness.Config, seat coop.SeatConfig, perTurnCap float64, h
 	base.MaxCostUSD = perTurnCap
 	base.ToolOutputMaxBytes = coopSeatToolOutputMaxBytes
 	base.History = history
+	base.WrapUpTurns = coopSeatWrapUpTurns
+	base.WrapUpMessage = seatWrapUpMessage
 
 	return base
 }

@@ -249,6 +249,13 @@ func TestSeatConfigCapsToolOutput(t *testing.T) {
 	assert.InDelta(t, 0.10, cfg.MaxCostUSD, 1e-9)
 }
 
+func TestSeatConfigSetsWrapUpNudge(t *testing.T) {
+	cfg := seatConfig(harness.Config{}, coop.SeatConfig{Name: "seat-1", Lens: "risk"}, 0.25, nil)
+
+	assert.Equal(t, coopSeatWrapUpTurns, cfg.WrapUpTurns)
+	assert.Equal(t, seatWrapUpMessage, cfg.WrapUpMessage)
+}
+
 func TestSeatDebugWriterRewritesKinds(t *testing.T) {
 	var buf bytes.Buffer
 
