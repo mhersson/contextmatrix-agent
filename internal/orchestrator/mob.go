@@ -30,9 +30,19 @@ type MobConfig struct {
 	Participants int  // 0 = off; >= 2 = on
 	Plan         bool // phases contain "plan"
 	Review       bool // phases contain "review"
-	Rounds       int  // critique rounds (CM-clamped; default 2)
-	BudgetFactor float64
-	Guests       []MobGuest
+	// Execute enables post-subtask checkpoint discussions: phases contain
+	// "execute" AND the payload's execute_checkpoints server flag rode along.
+	Execute bool
+	// CheckpointMinTier is the minimum subtask tier that convenes a
+	// checkpoint: simple|moderate|complex|critical. Worker-defaulted to
+	// "simple" when Execute is on.
+	CheckpointMinTier string
+	// CheckpointRounds is the critique-round count for checkpoint
+	// discussions (plan/review keep Rounds). Worker-defaulted to 3.
+	CheckpointRounds int
+	Rounds           int // critique rounds (CM-clamped; default 2)
+	BudgetFactor     float64
+	Guests           []MobGuest
 }
 
 func (c MobConfig) enabled() bool { return c.Participants >= 2 }
