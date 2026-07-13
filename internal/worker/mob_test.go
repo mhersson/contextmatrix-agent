@@ -67,3 +67,61 @@ func TestMobGuestTokens(t *testing.T) {
 	}
 	assert.Equal(t, []string{"tok-a", "tok-c"}, mobGuestTokens(spec))
 }
+
+func TestMobConfigExecuteMapping(t *testing.T) {
+	tests := []struct {
+		name string
+		spec *protocol.MobSpec
+		want orchestrator.MobConfig
+	}{
+		{
+			name: "execute live with server flag, explicit knobs",
+			spec: &protocol.MobSpec{
+				Participants: 3, Phases: []string{"plan", "execute"},
+				ExecuteCheckpoints: true, CheckpointMinTier: "moderate", CheckpointRounds: 4,
+			},
+			want: orchestrator.MobConfig{
+				Participants: 3, Plan: true, Execute: true,
+				CheckpointMinTier: "moderate", CheckpointRounds: 4,
+				Rounds: 2, BudgetFactor: 0.75,
+			},
+		},
+		{
+			name: "execute inert without the server flag",
+			spec: &protocol.MobSpec{Participants: 3, Phases: []string{"plan", "execute"}},
+			want: orchestrator.MobConfig{Participants: 3, Plan: true, Rounds: 2, BudgetFactor: 0.75},
+		},
+		{
+			name: "checkpoint defaults fill: tier simple, rounds 3",
+			spec: &protocol.MobSpec{
+				Participants: 2, Phases: []string{"execute"}, ExecuteCheckpoints: true,
+			},
+			want: orchestrator.MobConfig{
+				Participants: 2, Execute: true,
+				CheckpointMinTier: "simple", CheckpointRounds: 3,
+				Rounds: 2, BudgetFactor: 0.75,
+			},
+		},
+		{
+			name: "empty phases still default plan+review only",
+			spec: &protocol.MobSpec{Participants: 2, ExecuteCheckpoints: true},
+			want: orchestrator.MobConfig{
+				Participants: 2, Plan: true, Review: true, Rounds: 2, BudgetFactor: 0.75,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, mobConfig(tt.spec))
+		})
+	}
+}
+
+func TestResolveBestOfN(t *testing.T) {
+	live := orchestrator.MobConfig{Participants: 3, Execute: true}
+
+	assert.Equal(t, 0, resolveBestOfN(3, live), "mob coding takes priority")
+	assert.Equal(t, 3, resolveBestOfN(3, orchestrator.MobConfig{Participants: 3}), "no execute, BoN untouched")
+	assert.Equal(t, 0, resolveBestOfN(0, live), "no BoN, nothing to zero")
+}
