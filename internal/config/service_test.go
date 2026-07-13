@@ -590,6 +590,73 @@ base_image: img@sha256:abc
 	require.NoError(t, cfg.Validate())
 }
 
+func TestLoadService_ImageListFiltersDefault(t *testing.T) {
+	path := writeServeYAML(t, `
+contextmatrix_url: http://cm:8080
+api_key: 0123456789abcdef0123456789abcdef
+base_image: img:dev
+`)
+
+	cfg, err := LoadService(path)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"contextmatrix-agent"}, cfg.ImageListFilters)
+}
+
+func TestLoadService_ImageListFiltersFromYAML(t *testing.T) {
+	path := writeServeYAML(t, `
+contextmatrix_url: http://cm:8080
+api_key: 0123456789abcdef0123456789abcdef
+base_image: img:dev
+image_list_filters:
+  - contextmatrix-agent
+  - ghcr.io/you/my-worker
+`)
+
+	cfg, err := LoadService(path)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"contextmatrix-agent", "ghcr.io/you/my-worker"}, cfg.ImageListFilters)
+}
+
+func TestLoadService_ImageListFiltersEmptyFallsBackToDefault(t *testing.T) {
+	path := writeServeYAML(t, `
+contextmatrix_url: http://cm:8080
+api_key: 0123456789abcdef0123456789abcdef
+base_image: img:dev
+image_list_filters: []
+`)
+
+	cfg, err := LoadService(path)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"contextmatrix-agent"}, cfg.ImageListFilters)
+}
+
+func TestValidate_ImageListFiltersBlankEntryRejected(t *testing.T) {
+	path := writeServeYAML(t, `
+contextmatrix_url: http://cm:8080
+api_key: 0123456789abcdef0123456789abcdef
+base_image: img:dev
+image_list_filters:
+  - "  "
+`)
+
+	cfg, err := LoadService(path)
+	require.NoError(t, err)
+
+	err = cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "image_list_filters")
+}
+
+// writeServeYAML writes body to a temp serve.yaml and returns its path.
+func writeServeYAML(t *testing.T, body string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "serve.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+
+	return path
+}
+
 // clearServiceEnv unsets any CMX_* vars that could leak into a default/file
 // test from the developer's shell. t.Setenv restores them after the test.
 func clearServiceEnv(t *testing.T) {

@@ -69,6 +69,13 @@ log_level: info
 # CMX_IMAGE_PULL_POLICY
 image_pull_policy: if-not-present
 
+# Substring filters for GET /images (the ContextMatrix settings dropdown).
+# An image tag is listed when it contains any of these substrings; images with
+# no matching tag are omitted. Default: [contextmatrix-agent]. YAML only — the
+# CMX_ env layer cannot express list values.
+# image_list_filters:
+#   - contextmatrix-agent
+
 # Maximum number of concurrent worker containers. Default: 5.
 # CMX_MAX_CONCURRENT
 max_concurrent: 5
