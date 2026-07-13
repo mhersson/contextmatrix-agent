@@ -59,6 +59,12 @@ type SkillsResolver interface {
 	Resolve(ctx context.Context) (hostDir string, err error)
 }
 
+// ImageLister lists the tagged images present in the node's local image
+// store. *executor.DockerExecutor satisfies it; tests supply a fake.
+type ImageLister interface {
+	ListImages(ctx context.Context) ([]executor.ImageSummary, error)
+}
+
 // CredentialProvisioner stages a per-run credential file (the payload git token
 // plus LLM endpoint values) and refreshes the git token from ContextMatrix until
 // the run is torn down. *secrets.RunCredentials satisfies it; tests supply a
@@ -150,6 +156,15 @@ type Config struct {
 	SkillsResolver SkillsResolver
 	Credentials    CredentialProvisioner
 
+	// Images lists the node's tagged images for GET /images. Nil disables the
+	// endpoint (500 internal).
+	Images ImageLister
+
+	// ImageListFilters are the per-tag substring filters applied to GET
+	// /images responses. The serve layer always supplies at least the family
+	// default; an empty slice yields an empty list, never "everything".
+	ImageListFilters []string
+
 	LaunchEnv LaunchEnv
 
 	Replay *ReplayCache
@@ -182,6 +197,9 @@ type Server struct {
 	verifier       AutonomousVerifier
 	skillsResolver SkillsResolver
 	credentials    CredentialProvisioner
+
+	images           ImageLister
+	imageListFilters []string
 
 	launchEnv LaunchEnv
 
@@ -260,6 +278,8 @@ func NewServer(cfg Config) *Server {
 		verifier:          cfg.Verifier,
 		skillsResolver:    cfg.SkillsResolver,
 		credentials:       cfg.Credentials,
+		images:            cfg.Images,
+		imageListFilters:  cfg.ImageListFilters,
 		launchEnv:         cfg.LaunchEnv,
 		replay:            replay,
 		dedup:             dedup,
@@ -279,8 +299,8 @@ func (s *Server) CloseSSE() {
 
 // Routes returns the mux with every webhook route mounted. The mutating
 // lifecycle routes are gated on drain; /kill, /stop-all, /logs, /containers,
-// /health, /readyz stay reachable during shutdown so operators can read state
-// and stop work.
+// /images, /health, /readyz stay reachable during shutdown so operators can
+// read state and stop work.
 func (s *Server) Routes() *http.ServeMux {
 	mux := http.NewServeMux()
 
@@ -291,6 +311,7 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("POST /promote", s.recordMetrics(s.auth(s.drainGate(s.handlePromote))))
 	mux.HandleFunc("POST /end-session", s.recordMetrics(s.auth(s.drainGate(s.handleEndSession))))
 	mux.HandleFunc("GET /containers", s.recordMetrics(s.auth(s.handleContainers)))
+	mux.HandleFunc("GET /images", s.recordMetrics(s.auth(s.handleImages)))
 	mux.HandleFunc("GET /logs", s.recordMetrics(s.auth(s.handleLogs)))
 	mux.HandleFunc("GET /health", s.recordMetrics(s.handleHealth))
 	mux.HandleFunc("GET /readyz", s.recordMetrics(s.handleReadyz))
@@ -921,6 +942,59 @@ func (s *Server) handleContainers(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, protocol.ListContainersResponse{OK: true, Containers: items})
+}
+
+// ---- images -----------------------------------------------------------------
+
+func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
+	if s.images == nil {
+		writeError(w, http.StatusInternalServerError, protocol.CodeInternal, "image lister not wired")
+
+		return
+	}
+
+	summaries, err := s.images.ListImages(r.Context())
+	if err != nil {
+		s.logger.Error("image list failed", "error", err)
+		writeError(w, http.StatusBadGateway, protocol.CodeUpstreamFailure, "image list failed")
+
+		return
+	}
+
+	items := make([]protocol.ImageListItem, 0, len(summaries))
+
+	for _, sum := range summaries {
+		tags := matchingTags(sum.Tags, s.imageListFilters)
+		if len(tags) == 0 {
+			continue
+		}
+
+		items = append(items, protocol.ImageListItem{
+			Tags:    tags,
+			Digests: sum.Digests,
+			Created: sum.CreatedAt,
+			Size:    sum.SizeBytes,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, protocol.ListImagesResponse{OK: true, Images: items})
+}
+
+// matchingTags returns the tags containing any of the filter substrings.
+func matchingTags(tags, filters []string) []string {
+	out := make([]string, 0, len(tags))
+
+	for _, tag := range tags {
+		for _, f := range filters {
+			if strings.Contains(tag, f) {
+				out = append(out, tag)
+
+				break
+			}
+		}
+	}
+
+	return out
 }
 
 // ---- health / readyz --------------------------------------------------------
