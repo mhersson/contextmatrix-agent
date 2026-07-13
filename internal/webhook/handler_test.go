@@ -210,6 +210,17 @@ func (f *fakeCredentials) teardownCalls() [][2]string {
 	return out
 }
 
+// fakeImageLister returns a fixed set of image summaries or an error. It
+// satisfies ImageLister.
+type fakeImageLister struct {
+	summaries []executor.ImageSummary
+	err       error
+}
+
+func (f *fakeImageLister) ListImages(_ context.Context) ([]executor.ImageSummary, error) {
+	return f.summaries, f.err
+}
+
 // nopWriteCloser captures stdin frame writes for assertions.
 type nopWriteCloser struct {
 	mu  sync.Mutex
@@ -251,6 +262,7 @@ type harness struct {
 	reporter *fakeReporter
 	verifier *fakeVerifier
 	hub      *logbridge.Hub
+	images   *fakeImageLister
 }
 
 func newHarness(t *testing.T, maxConcurrent int) *harness {
@@ -261,6 +273,7 @@ func newHarness(t *testing.T, maxConcurrent int) *harness {
 	reporter := &fakeReporter{}
 	verifier := &fakeVerifier{autonomous: true}
 	hub := logbridge.NewHub()
+	images := &fakeImageLister{}
 
 	server := NewServer(Config{
 		APIKey:        testAPIKey,
@@ -276,6 +289,8 @@ func newHarness(t *testing.T, maxConcurrent int) *harness {
 			MCPURL:    "http://cm:8080/mcp",
 			MCPAPIKey: "cfg-mcp-key",
 		},
+		Images:           images,
+		ImageListFilters: []string{"contextmatrix-agent"},
 	})
 
 	return &harness{
@@ -285,6 +300,7 @@ func newHarness(t *testing.T, maxConcurrent int) *harness {
 		reporter: reporter,
 		verifier: verifier,
 		hub:      hub,
+		images:   images,
 	}
 }
 
@@ -858,6 +874,72 @@ func TestContainers_ListsTrackedRuns(t *testing.T) {
 
 	_, err := time.Parse(time.RFC3339, item.StartedAt)
 	assert.NoError(t, err, "StartedAt must be RFC3339")
+}
+
+// ---- images -----------------------------------------------------------------
+
+func TestImages_FiltersPerTagAndMaps(t *testing.T) {
+	h := newHarness(t, 4)
+	h.images.summaries = []executor.ImageSummary{
+		{
+			Tags:      []string{"contextmatrix-agent-worker:go-node"},
+			Digests:   []string{"contextmatrix-agent-worker@sha256:abc"},
+			CreatedAt: 1750000000,
+			SizeBytes: 2_560_000_000,
+		},
+		{Tags: []string{"harbor.example/apps/contextmatrix:latest"}}, // no matching tag: dropped
+		{Tags: []string{"contextmatrix-agent-worker:dev", "unrelated:tag"}},
+	}
+
+	w := h.do(t, http.MethodGet, "/images", nil)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp protocol.ListImagesResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+
+	assert.True(t, resp.OK)
+	require.Len(t, resp.Images, 2)
+	assert.Equal(t, []string{"contextmatrix-agent-worker:go-node"}, resp.Images[0].Tags)
+	assert.Equal(t, []string{"contextmatrix-agent-worker@sha256:abc"}, resp.Images[0].Digests)
+	assert.Equal(t, int64(1750000000), resp.Images[0].Created)
+	assert.Equal(t, int64(2_560_000_000), resp.Images[0].Size)
+	// Non-matching tag pruned from the mixed image.
+	assert.Equal(t, []string{"contextmatrix-agent-worker:dev"}, resp.Images[1].Tags)
+}
+
+func TestImages_DockerErrorReturns502Generic(t *testing.T) {
+	h := newHarness(t, 4)
+	h.images.err = errors.New("daemon exploded: secret detail")
+
+	w := h.do(t, http.MethodGet, "/images", nil)
+	require.Equal(t, http.StatusBadGateway, w.Code)
+
+	var resp protocol.ErrorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, protocol.CodeUpstreamFailure, resp.Code)
+	assert.NotContains(t, resp.Message, "secret detail")
+}
+
+func TestImages_RequiresSignature(t *testing.T) {
+	h := newHarness(t, 4)
+
+	r := httptest.NewRequest(http.MethodGet, "/images", nil)
+	w := httptest.NewRecorder()
+	h.server.Routes().ServeHTTP(w, r)
+
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
+func TestImages_NilListerReturns500(t *testing.T) {
+	server := NewServer(Config{APIKey: testAPIKey})
+
+	r := httptest.NewRequest(http.MethodGet, "/images", nil)
+	signReq(t, r, testAPIKey, nil, nowTS())
+
+	w := httptest.NewRecorder()
+	server.Routes().ServeHTTP(w, r)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
 }
 
 // ---- health / readyz --------------------------------------------------------

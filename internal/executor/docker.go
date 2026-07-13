@@ -592,6 +592,57 @@ func (e *DockerExecutor) CleanupOrphans(ctx context.Context) error {
 	return nil
 }
 
+// ImageSummary is one tagged image in the node's local image store, in
+// executor-neutral form. Name filtering is the webhook layer's policy; the
+// executor reports everything tagged.
+type ImageSummary struct {
+	Tags      []string
+	Digests   []string
+	CreatedAt int64
+	SizeBytes int64
+}
+
+// ListImages returns the tagged images present in the node's local image
+// store. Dangling images (no repo tags) are skipped.
+func (e *DockerExecutor) ListImages(ctx context.Context) ([]ImageSummary, error) {
+	summaries, err := e.docker.ImageList(ctx, image.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("image list: %w", err)
+	}
+
+	return imageSummaries(summaries), nil
+}
+
+// imageSummaries maps Docker image summaries to ImageSummary, dropping
+// dangling images and the "<none>:<none>" placeholder tag Docker reports for
+// them.
+func imageSummaries(in []image.Summary) []ImageSummary {
+	out := make([]ImageSummary, 0, len(in))
+
+	for _, s := range in {
+		tags := make([]string, 0, len(s.RepoTags))
+
+		for _, tag := range s.RepoTags {
+			if tag != "<none>:<none>" {
+				tags = append(tags, tag)
+			}
+		}
+
+		if len(tags) == 0 {
+			continue
+		}
+
+		out = append(out, ImageSummary{
+			Tags:      tags,
+			Digests:   s.RepoDigests,
+			CreatedAt: s.Created,
+			SizeBytes: s.Size,
+		})
+	}
+
+	return out
+}
+
 // pull applies the executor's image pull policy: never skips, if-not-present
 // pulls only when the image is absent locally, always pulls unconditionally.
 func (e *DockerExecutor) pull(ctx context.Context, img string, log *slog.Logger) error {

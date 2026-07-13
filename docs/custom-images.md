@@ -64,3 +64,10 @@ docker buildx imagetools inspect ghcr.io/you/my-worker:jdk   # copy the index di
 Then set the project's `remote_execution.worker_image` on its board to
 `ghcr.io/you/my-worker@sha256:<digest>`. Cards for that project launch in your
 custom image; every other project keeps using the published default.
+
+A custom image only appears in the ContextMatrix settings dropdown when one of
+the backend's `image_list_filters` substrings matches one of its tags (see
+`serve.yaml.example`; the default is `[contextmatrix-agent]`). If you tag and
+push under your own name — `ghcr.io/you/my-worker` — add a matching substring
+(e.g. `my-worker`) to `image_list_filters` in `serve.yaml`, or the dropdown
+will not list it even though `worker_image` still works when set directly.
