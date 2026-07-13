@@ -1919,3 +1919,33 @@ func TestRunEndpointCarriesMobGuests(t *testing.T) {
 		assert.Empty(t, e.MobGuests)
 	})
 }
+
+func TestBuildLaunchSpecMobCheckpointEnv(t *testing.T) {
+	s := newSkillsTestServer(fakeSkillsResolver{})
+
+	spec := s.buildLaunchSpec(protocol.TriggerPayload{
+		CardID: "C1", Project: "p",
+		Mob: &protocol.MobSpec{
+			Participants: 3, Phases: []string{"plan", "execute"},
+			ExecuteCheckpoints: true, CheckpointMinTier: "simple", CheckpointRounds: 3,
+		},
+	}, "corr", "")
+
+	assert.Contains(t, spec.Env, "CM_MOB_EXECUTE_CHECKPOINTS=true")
+	assert.Contains(t, spec.Env, "CM_MOB_CHECKPOINT_MIN_TIER=simple")
+	assert.Contains(t, spec.Env, "CM_MOB_CHECKPOINT_ROUNDS=3")
+}
+
+func TestBuildLaunchSpecMobCheckpointEnvAbsentWhenOff(t *testing.T) {
+	s := newSkillsTestServer(fakeSkillsResolver{})
+
+	spec := s.buildLaunchSpec(protocol.TriggerPayload{
+		CardID: "C1", Project: "p",
+		Mob: &protocol.MobSpec{Participants: 3, Phases: []string{"plan"}},
+	}, "corr", "")
+
+	for _, e := range spec.Env {
+		assert.NotContains(t, e, "CM_MOB_EXECUTE_CHECKPOINTS")
+		assert.NotContains(t, e, "CM_MOB_CHECKPOINT_")
+	}
+}

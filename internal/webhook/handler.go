@@ -589,6 +589,18 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 		if p.Mob.BudgetFactor > 0 {
 			env = append(env, "CM_MOB_BUDGET_FACTOR="+formatFloat(p.Mob.BudgetFactor))
 		}
+
+		if p.Mob.ExecuteCheckpoints {
+			env = append(env, "CM_MOB_EXECUTE_CHECKPOINTS=true")
+
+			if p.Mob.CheckpointMinTier != "" {
+				env = append(env, "CM_MOB_CHECKPOINT_MIN_TIER="+p.Mob.CheckpointMinTier)
+			}
+
+			if p.Mob.CheckpointRounds > 0 {
+				env = append(env, "CM_MOB_CHECKPOINT_ROUNDS="+strconv.Itoa(p.Mob.CheckpointRounds))
+			}
+		}
 	}
 
 	// CM-provisioned credentials (git token + LLM values) travel via a per-run
