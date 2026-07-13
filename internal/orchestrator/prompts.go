@@ -872,3 +872,69 @@ Respond with ONLY a JSON object, no prose:
 fix_tier is the difficulty of APPLYING these fixes (default to the card's tier if unsure).
 When approved is true, fixes must be an empty array.
 `
+
+// checkpointBriefing opens an execute-checkpoint discussion: the just-
+// committed subtask diff under critique before the run builds on it. Slots:
+// subtask title, subtask description, parent card title, fenced diff.
+const checkpointBriefing = `You are discussing a just-committed increment of work: one subtask of a
+larger task, written by a coding agent moments ago. Decide whether the run
+should proceed to the next subtask or revise this diff first. Review only
+the change set in the diff below; read surrounding code for context as
+needed. Every finding must cite a file in the change set. Judge the change
+against what the subtask requires — unrequested hardening and missing
+speculative abstractions are not defects. Argue from your assigned lens; in
+the critique rounds, contest findings you disagree with and explicitly
+withdraw your own findings that did not survive rebuttal.
+
+SUBTASK
+Title: %s
+
+Description:
+%s
+
+PARENT CARD
+Title: %s
+
+COMMITTED DIFF (this subtask's changes)
+%s`
+
+// checkpointSynthesisPrompt is the moderator's checkpoint-verdict contract.
+// Slots: grounding, subtask title.
+const checkpointSynthesisPrompt = `%sYou are the moderator of a checkpoint discussion about the just-committed
+diff of subtask %q. Synthesize the seats' positions from the transcript that
+follows into one decision: proceed, or revise before the run builds on this
+diff.
+
+Decision rule:
+- A genuine correctness bug, a real vulnerability, a broken or vacuous test,
+  or a missed acceptance criterion in THIS diff means revise — return each
+  as a concrete fix citing a file in the change set, at most 3, most
+  important first.
+- Unrequested hardening, style, and naming never trigger a revise.
+- Findings a seat explicitly withdrew under rebuttal are resolved.
+- Anything that can safely wait for the review phase waits: revise is only
+  for defects the next subtasks would build on.
+
+Respond with ONLY a JSON object, no prose:
+{"verdict":"proceed"|"revise",
+ "fixes":[{"file":"...","issue":"...","suggestion":"..."}]}
+
+When verdict is "proceed", fixes must be an empty array.
+`
+
+// checkpointRevisePrompt drives the single checkpoint fix pass on the same
+// solver. Slots: skill engagement, grounding, workspace, verify block,
+// subtask title, findings.
+const checkpointRevisePrompt = `%s%sYou are revising a just-committed subtask after a checkpoint discussion
+flagged defects in its diff.
+
+Repository workspace: %s
+%s
+Subtask: %s
+
+Address each finding below; change nothing else. Run the verify command if
+one is declared. When done, call the finish tool with a commit message
+describing the fixes.
+
+FINDINGS
+%s`

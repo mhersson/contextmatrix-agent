@@ -157,7 +157,9 @@ func (o *run) mobDiscuss(ctx context.Context, t mob.Topic) (mob.Outcome, bool) {
 // this config's Seats/Runner, so it cannot exist before this call returns).
 func buildEngineConfig(o *run, t mob.Topic, bearer string) mob.EngineConfig {
 	var exclude map[string]bool
-	if t.Kind == "review" {
+	// Review and checkpoint topics judge code this run wrote: exclude the
+	// models that coded it (and the per-card incapable set).
+	if t.Kind == "review" || t.Kind == "checkpoint" {
 		exclude = o.reviewExclusions()
 	}
 

@@ -1,8 +1,11 @@
 package orchestrator
 
 import (
+	"context"
+	"strings"
 	"testing"
 
+	"github.com/mhersson/contextmatrix-agent/internal/mob"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -81,4 +84,66 @@ func TestParseCheckpointVerdict(t *testing.T) {
 		_, err := parseCheckpointVerdict("looks fine to me")
 		require.Error(t, err)
 	})
+}
+
+func TestMobCheckpointProceed(t *testing.T) {
+	ops := &fakeOps{}
+	o := mobTestRun(ops, MobConfig{
+		Participants: 2, Execute: true, CheckpointMinTier: "simple", CheckpointRounds: 3,
+		BudgetFactor: 0.75,
+	}, 0)
+
+	eng := &scriptedEngine{outcomes: []mob.Outcome{{Synthesis: `{"verdict":"proceed","fixes":[]}`}}}
+	o.mobEngine = eng.run
+
+	// fakeGit.Diff always returns "" (fakes_test.go:485); diffGit (the wrapper
+	// judge_test.go already uses for the same purpose) overrides it with a
+	// scripted return so the checkpoint briefing has content.
+	o.solver.git = &diffGit{fakeGit: &fakeGit{}, diff: "diff --git a/a.go b/a.go\n+lgtm\n"}
+
+	o.mobCheckpoint(context.Background(), o.solver, subtaskRef{ID: "SUB-1", Title: "add thing", Tier: "simple"}, "abc123")
+
+	require.Len(t, eng.topics, 1)
+	assert.Equal(t, "checkpoint", eng.topics[0].Kind)
+	assert.False(t, eng.topics[0].Blind)
+	assert.Equal(t, 3, eng.topics[0].Rounds)
+	assert.Equal(t, []string{"correctness", "diff-hygiene/simplicity"}, eng.topics[0].Lenses)
+	assert.Contains(t, strings.Join(ops.logs, "\n"), "mob checkpoint (SUB-1): proceed")
+}
+
+func TestMobCheckpointEmptyDiffSkips(t *testing.T) {
+	ops := &fakeOps{}
+	o := mobTestRun(ops, MobConfig{
+		Participants: 2, Execute: true, CheckpointMinTier: "simple", CheckpointRounds: 3,
+	}, 0)
+
+	eng := &scriptedEngine{}
+	o.mobEngine = eng.run
+	o.solver.git = &diffGit{fakeGit: &fakeGit{}, diff: ""}
+
+	o.mobCheckpoint(context.Background(), o.solver, subtaskRef{ID: "SUB-1", Title: "t", Tier: "simple"}, "abc123")
+
+	assert.Empty(t, eng.topics, "no discussion without a diff")
+}
+
+func TestMobCheckpointUnparsableVerdictProceeds(t *testing.T) {
+	ops := &fakeOps{}
+	o := mobTestRun(ops, MobConfig{
+		Participants: 2, Execute: true, CheckpointMinTier: "simple", CheckpointRounds: 3,
+	}, 0)
+
+	// Discussion synthesis is garbage; the repair path needs a moderator run,
+	// which mobTestRun's fake LLM serves — accept either outcome shape by
+	// asserting only the terminal advisory.
+	eng := &scriptedEngine{outcomes: []mob.Outcome{{Synthesis: "not json at all"}}}
+	o.mobEngine = eng.run
+	o.solver.git = &diffGit{fakeGit: &fakeGit{}, diff: "diff --git a/a.go b/a.go\n+x\n"}
+
+	o.mobCheckpoint(context.Background(), o.solver, subtaskRef{ID: "SUB-1", Title: "t", Tier: "simple"}, "abc123")
+
+	joined := strings.Join(ops.logs, "\n")
+	assert.True(t,
+		strings.Contains(joined, "mob checkpoint (SUB-1): verdict unparsable — proceeding") ||
+			strings.Contains(joined, "mob checkpoint (SUB-1): proceed"),
+		"checkpoint must terminate in a proceed either way: %s", joined)
 }
