@@ -237,6 +237,16 @@ memory. For each change verify:
 - Every exit path is correct: each early return and error branch releases what it acquired and stops where it should — no fall-through after writing an error response.
 Fix anything you find before finishing.`
 
+// coderGroundingRule tells the coder to treat the subtask's concrete specifics
+// as hints to verify, not guarantees — so a stale line number or a claimed
+// site/symbol the code lacks cannot send it chasing a phantom to the turn cap.
+const coderGroundingRule = `Treat concrete specifics in the subtask description — line numbers, exact
+counts ("all N sites"), symbol/file/token names — as hints to verify, not guarantees.
+If the code contradicts one (a named symbol or site does not exist, or there are
+fewer than claimed), trust the code: satisfy the requirement's intent, note the
+discrepancy in your finish message, and stop — a confirmed absence discharges a
+"find all N" criterion. Do not keep searching to prove a negative.`
+
 // coderPrompt is the per-subtask coder instruction block. The coder runs with
 // the FULL write toolset rooted at the shared workspace and implements exactly
 // one subtask on the current branch, where prior subtasks' commits are already
@@ -258,6 +268,8 @@ repo root.
 Batch independent tool calls: issue several reads/greps/globs in ONE turn
 instead of one per turn — your turn budget is finite and single-call turns
 waste it.
+
+` + coderGroundingRule + `
 
 Work happens on the current branch. Prior subtasks have already been committed
 and their changes are visible in the working tree; build on them, do not redo
