@@ -226,3 +226,21 @@ func TestFencedDiff(t *testing.T) {
 
 	assert.Equal(t, "```diff\n\n```", fencedDiff(""), "empty diff still yields a well-formed block")
 }
+
+func TestPlannerGroundingRuleInPlanPrompts(t *testing.T) {
+	for name, p := range map[string]string{
+		"planPrompt":          planPrompt,
+		"planSynthesisPrompt": planSynthesisPrompt,
+		"planBriefing":        planBriefing,
+	} {
+		assert.Contains(t, p, "Do not put unverified specifics",
+			"%s must include the planner grounding rule", name)
+	}
+}
+
+func TestCoderGroundingRuleInCoderPrompt(t *testing.T) {
+	assert.Contains(t, coderPrompt, "hints to verify, not guarantees",
+		"coderPrompt must include the coder grounding rule")
+	assert.NotContains(t, fixPrompt, "hints to verify, not guarantees",
+		"the coder grounding rule is coder-only, not spliced into fixPrompt")
+}

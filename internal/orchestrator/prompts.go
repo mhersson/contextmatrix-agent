@@ -63,6 +63,19 @@ func (o *run) skillEngage() string {
 	return skillEngageBlock(menu)
 }
 
+// plannerGroundingRule forbids unverified specifics from becoming acceptance
+// criteria. Shared by planPrompt, planBriefing, and planSynthesisPrompt so the
+// three cannot drift.
+const plannerGroundingRule = `Do not put unverified specifics in the plan. A subtask description or
+acceptance criterion may name an exact line number, an exact count ("all N
+sites"), or a specific symbol/file/token/variable ONLY when its existence has
+been confirmed by a read/grep — your own, or (when synthesizing) one shown in
+the discussion. Otherwise state the requirement by its observable behavior and
+how to check it (e.g. "update every path that serializes the event; confirm by
+grep that none is missed") rather than naming the unverified specific. Never
+promote an inferred or approximate count into an exact criterion, and never
+manufacture precision you have not grounded.`
+
 // planPrompt is the read-only planner's instruction block. It is adapted from
 // the create-plan workflow skill's task-decomposition guidance: the same
 // rules for splitting work, dependency thinking, and right-sizing apply, but
@@ -132,6 +145,8 @@ Decompose the task into subtasks following these rules:
 - Acceptance criteria must be verifiable from the working tree and test
   runs. Never write criteria about git metadata or history shape (tags,
   commit counts, commit messages, git show output).
+
+` + plannerGroundingRule + `
 
 Also assign an overall card_tier reflecting the whole task's complexity, and a
 per-subtask tier. Tiers: "simple" (mechanical, low-risk), "moderate"
@@ -222,6 +237,16 @@ memory. For each change verify:
 - Every exit path is correct: each early return and error branch releases what it acquired and stops where it should — no fall-through after writing an error response.
 Fix anything you find before finishing.`
 
+// coderGroundingRule tells the coder to treat the subtask's concrete specifics
+// as hints to verify, not guarantees — so a stale line number or a claimed
+// site/symbol the code lacks cannot send it chasing a phantom to the turn cap.
+const coderGroundingRule = `Treat concrete specifics in the subtask description — line numbers, exact
+counts ("all N sites"), symbol/file/token names — as hints to verify, not guarantees.
+If the code contradicts one (a named symbol or site does not exist, or there are
+fewer than claimed), trust the code: satisfy the requirement's intent, note the
+discrepancy in your finish message, and stop — a confirmed absence discharges a
+"find all N" criterion. Do not keep searching to prove a negative.`
+
 // coderPrompt is the per-subtask coder instruction block. The coder runs with
 // the FULL write toolset rooted at the shared workspace and implements exactly
 // one subtask on the current branch, where prior subtasks' commits are already
@@ -243,6 +268,8 @@ repo root.
 Batch independent tool calls: issue several reads/greps/globs in ONE turn
 instead of one per turn — your turn budget is finite and single-call turns
 waste it.
+
+` + coderGroundingRule + `
 
 Work happens on the current branch. Prior subtasks have already been committed
 and their changes are visible in the working tree; build on them, do not redo
@@ -772,6 +799,8 @@ subtask should be completable by a single agent in one focused session,
 include its own tests, and touch a bounded set of files. Argue from your
 assigned lens.
 
+` + plannerGroundingRule + `
+
 PARENT CARD
 Title: %s
 
@@ -802,6 +831,8 @@ The plan must follow these rules:
   ("Files:" line), and acceptance criteria — no placeholders.
 - Assign an overall card_tier and a per-subtask tier: "simple", "moderate",
   "complex", or "critical".
+
+` + plannerGroundingRule + `
 
 PARENT CARD
 Title: %s
