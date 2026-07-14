@@ -63,6 +63,19 @@ func (o *run) skillEngage() string {
 	return skillEngageBlock(menu)
 }
 
+// plannerGroundingRule forbids unverified specifics from becoming acceptance
+// criteria. Shared by planPrompt, planBriefing, and planSynthesisPrompt so the
+// three cannot drift.
+const plannerGroundingRule = `Do not put unverified specifics in the plan. A subtask description or
+acceptance criterion may name an exact line number, an exact count ("all N
+sites"), or a specific symbol/file/token/variable ONLY when its existence has
+been confirmed by a read/grep — your own, or (when synthesizing) one shown in
+the discussion. Otherwise state the requirement by its observable behavior and
+how to check it (e.g. "update every path that serializes the event; confirm by
+grep that none is missed") rather than naming the unverified specific. Never
+promote an inferred or approximate count into an exact criterion, and never
+manufacture precision you have not grounded.`
+
 // planPrompt is the read-only planner's instruction block. It is adapted from
 // the create-plan workflow skill's task-decomposition guidance: the same
 // rules for splitting work, dependency thinking, and right-sizing apply, but
@@ -132,6 +145,8 @@ Decompose the task into subtasks following these rules:
 - Acceptance criteria must be verifiable from the working tree and test
   runs. Never write criteria about git metadata or history shape (tags,
   commit counts, commit messages, git show output).
+
+` + plannerGroundingRule + `
 
 Also assign an overall card_tier reflecting the whole task's complexity, and a
 per-subtask tier. Tiers: "simple" (mechanical, low-risk), "moderate"
@@ -772,6 +787,8 @@ subtask should be completable by a single agent in one focused session,
 include its own tests, and touch a bounded set of files. Argue from your
 assigned lens.
 
+` + plannerGroundingRule + `
+
 PARENT CARD
 Title: %s
 
@@ -802,6 +819,8 @@ The plan must follow these rules:
   ("Files:" line), and acceptance criteria — no placeholders.
 - Assign an overall card_tier and a per-subtask tier: "simple", "moderate",
   "complex", or "critical".
+
+` + plannerGroundingRule + `
 
 PARENT CARD
 Title: %s
