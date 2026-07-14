@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -179,4 +180,64 @@ func TestMobCheckpointUnparsableVerdictProceeds(t *testing.T) {
 		strings.Contains(joined, "mob checkpoint (SUB-1): verdict unparsable — proceeding") ||
 			strings.Contains(joined, "mob checkpoint (SUB-1): proceed"),
 		"checkpoint must terminate in a proceed either way: %s", joined)
+}
+
+func TestMobCheckpointBriefingCarriesEnvironment(t *testing.T) {
+	ops := &fakeOps{}
+	o := mobTestRun(ops, MobConfig{
+		Participants: 2, Execute: true, CheckpointMinTier: "simple", CheckpointRounds: 3,
+	}, 0)
+
+	eng := &scriptedEngine{outcomes: []mob.Outcome{{Synthesis: `{"verdict":"proceed","fixes":[]}`}}}
+	o.mobEngine = eng.run
+	o.solver.git = &diffGit{fakeGit: &fakeGit{}, diff: "diff --git a/a.go b/a.go\n+lgtm\n"}
+
+	o.mobCheckpoint(context.Background(), o.solver, subtaskRef{ID: "SUB-1", Title: "t", Tier: "simple"}, "abc123")
+
+	require.Len(t, eng.topics, 1)
+	assert.Contains(t, eng.topics[0].Briefing,
+		"ENVIRONMENT (authoritative; verified on this container — do not dispute from memory)")
+	assert.Contains(t, eng.topics[0].Briefing, "Date: ")
+	assert.NotEmpty(t, o.envFacts, "env facts cached on the run after first checkpoint")
+}
+
+func TestCommitReviseSurfacesFullDecline(t *testing.T) {
+	tests := []struct {
+		name      string
+		committed bool
+		commitErr error
+		wantLog   string // "" = no revise-made-no-changes entry expected
+	}{
+		{
+			name:      "clean tree logs the decline with the finish message head",
+			committed: false,
+			wantLog:   "mob checkpoint (SUB-1): revise made no changes — declined: premise contradicted",
+		},
+		{
+			name:      "applied fixes log nothing extra",
+			committed: true,
+		},
+		{
+			name:      "commit error stays a warn, no activity entry",
+			commitErr: errors.New("index locked"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			o := mobTestRun(ops, MobConfig{Participants: 2, Execute: true}, 0)
+			o.solver.git = &fakeGit{committed: tt.committed, commitErr: tt.commitErr}
+
+			o.commitRevise(context.Background(), o.solver, subtaskRef{ID: "SUB-1"},
+				"declined: premise contradicted\n\ndetail body")
+
+			joined := strings.Join(ops.logs, "\n")
+			if tt.wantLog == "" {
+				assert.NotContains(t, joined, "revise made no changes")
+			} else {
+				assert.Contains(t, joined, tt.wantLog)
+			}
+		})
+	}
 }
