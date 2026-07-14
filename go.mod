@@ -10,7 +10,7 @@ require (
 	github.com/knadh/koanf/providers/posflag v1.0.1
 	github.com/knadh/koanf/providers/structs v1.0.0
 	github.com/knadh/koanf/v2 v2.3.5
-	github.com/mhersson/contextmatrix-protocol v0.11.1-0.20260713205329-d9ed63e09722
+	github.com/mhersson/contextmatrix-protocol v0.12.0
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/prometheus/client_golang v1.23.2
