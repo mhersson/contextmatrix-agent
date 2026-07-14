@@ -150,6 +150,9 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 	if sc.boardOps && o.checkpointEligible(sub) {
 		if head, herr := sc.git.Head(ctx); herr == nil {
 			checkpointBase = head
+		} else {
+			slog.Warn("mob checkpoint: head read failed; skipping this checkpoint",
+				"card_id", o.d.Cfg.CardID, "subtask_id", sub.ID, "error", herr)
 		}
 	}
 

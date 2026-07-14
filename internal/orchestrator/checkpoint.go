@@ -79,7 +79,8 @@ func parseCheckpointVerdict(s string) (checkpointVerdict, error) {
 func (o *run) mobCheckpoint(ctx context.Context, sc *solverCtx, sub subtaskRef, startHead string) {
 	diff, err := sc.git.Diff(ctx, startHead)
 	if err != nil || strings.TrimSpace(diff) == "" {
-		slog.Warn("mob checkpoint: no diff to discuss; skipping", "card_id", sub.ID, "error", err)
+		slog.Warn("mob checkpoint: no diff to discuss; skipping",
+			"card_id", o.d.Cfg.CardID, "subtask_id", sub.ID, "error", err)
 
 		return
 	}
@@ -155,7 +156,15 @@ func (o *run) mobCheckpoint(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 	res, rerr := o.runCoderWith(ctx, sc, sub, prompt)
 	if rerr != nil {
 		slog.Warn("mob checkpoint: revise run failed; proceeding on the committed diff",
-			"card_id", sub.ID, "error", rerr)
+			"card_id", o.d.Cfg.CardID, "subtask_id", sub.ID, "error", rerr)
+
+		// Discard the failed pass's partial edits so the next subtask's
+		// commit cannot sweep them in. Best-effort: untracked files survive
+		// a hard reset, and a reset failure only dirties attribution.
+		if herr := sc.git.HardReset(ctx, "HEAD"); herr != nil {
+			slog.Warn("mob checkpoint: failed to discard partial revise edits",
+				"card_id", o.d.Cfg.CardID, "subtask_id", sub.ID, "error", herr)
+		}
 
 		return
 	}
@@ -166,6 +175,6 @@ func (o *run) mobCheckpoint(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 	}
 
 	if _, cerr := sc.git.CommitWithMessage(ctx, msg); cerr != nil {
-		slog.Warn("mob checkpoint: revise commit failed", "card_id", sub.ID, "error", cerr)
+		slog.Warn("mob checkpoint: revise commit failed", "card_id", o.d.Cfg.CardID, "subtask_id", sub.ID, "error", cerr)
 	}
 }

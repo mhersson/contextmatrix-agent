@@ -126,6 +126,39 @@ func TestMobCheckpointEmptyDiffSkips(t *testing.T) {
 	assert.Empty(t, eng.topics, "no discussion without a diff")
 }
 
+func TestMobCheckpointReviseSkippedOnBudget(t *testing.T) {
+	ops := &fakeOps{}
+	// effectiveCeiling = MaxCardCost + BudgetFactor*MaxCardCost = 1.0 + 0.75 = 1.75.
+	// Pre-spend 1.0 leaves discussion headroom (0.75), so the checkpoint convenes;
+	// the engine wrapper then spends what a real seat/moderator run would (0.8),
+	// crossing the ceiling by the time the revise fix-pass budget gate runs.
+	o := mobTestRun(ops, MobConfig{
+		Participants: 2, Execute: true, CheckpointMinTier: "simple",
+		CheckpointRounds: 3, BudgetFactor: 0.75,
+	}, 1.0)
+	o.ledger.Spend(1.0)
+
+	eng := &scriptedEngine{outcomes: []mob.Outcome{{Synthesis: `{"verdict":"revise","fixes":[` +
+		`{"file":"a.go","issue":"1"},{"file":"b.go","issue":"2"},{"file":"c.go","issue":"3"},` +
+		`{"file":"d.go","issue":"4"},{"file":"e.go","issue":"5"}]}`}}}
+	o.mobEngine = func(ctx context.Context, cfg mob.EngineConfig, top mob.Topic) (mob.Outcome, error) {
+		out, err := eng.run(ctx, cfg, top)
+
+		o.ledger.Spend(0.8) // discussion cost a real engine would spend via seat/moderator runs
+
+		return out, err
+	}
+	o.solver.git = &diffGit{fakeGit: &fakeGit{}, diff: "diff --git a/a.go b/a.go\n+lgtm\n"}
+
+	o.mobCheckpoint(context.Background(), o.solver, subtaskRef{ID: "SUB-1", Title: "t", Tier: "simple"}, "abc123")
+
+	require.Len(t, eng.topics, 1, "the discussion must run: headroom was positive before the engine call")
+
+	joined := strings.Join(ops.logs, "\n")
+	assert.Contains(t, joined, "mob checkpoint (SUB-1): revise — 3 fixes") // truncated from 5 to 3
+	assert.Contains(t, joined, "mob checkpoint (SUB-1): revise skipped — budget exhausted")
+}
+
 func TestMobCheckpointUnparsableVerdictProceeds(t *testing.T) {
 	ops := &fakeOps{}
 	o := mobTestRun(ops, MobConfig{

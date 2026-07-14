@@ -41,7 +41,7 @@ func TestMobConfigMapping(t *testing.T) {
 			orchestrator.MobConfig{Participants: 2, Plan: true, Review: true, Rounds: 1, BudgetFactor: 0.6},
 		},
 		{
-			"unknown phases ignored, execute not mapped in this plan",
+			"unknown phases ignored, execute inert without the server flag",
 			&protocol.MobSpec{Participants: 2, Phases: []string{"review", "execute", "bogus"}, Rounds: 1, BudgetFactor: 0.6},
 			orchestrator.MobConfig{Participants: 2, Review: true, Rounds: 1, BudgetFactor: 0.6},
 		},
