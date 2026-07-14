@@ -70,3 +70,14 @@ func TestEnvironmentFacts(t *testing.T) {
 		assert.NotContains(t, got, "extra noise")
 	})
 }
+
+func TestEnvironmentFactsProbesRunInWorkspace(t *testing.T) {
+	ws, bin := t.TempDir(), t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "go.mod"), []byte("module x\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "go"),
+		[]byte("#!/bin/sh\npwd\n"), 0o755))
+	t.Setenv("PATH", bin)
+
+	got := environmentFacts(ws)
+	assert.Contains(t, got, ws, "probe must run with the workspace as its working directory")
+}

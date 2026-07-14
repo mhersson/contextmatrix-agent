@@ -948,7 +948,7 @@ describing the fixes.
 If concrete evidence in the repository or environment contradicts a
 finding's premise (for example, the toolchain reports exactly the version
 the finding claims does not exist), do NOT apply that fix. Skip it and
-explain why in your finish message, prefixing each skipped item with
+explain why in the finish tool's commit_message, prefixing each skipped item with
 "declined:".
 
 FINDINGS

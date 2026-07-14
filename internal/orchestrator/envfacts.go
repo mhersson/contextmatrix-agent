@@ -53,7 +53,16 @@ func environmentFacts(workspace string) string {
 		probed[p.argv[0]] = true
 
 		ctx, cancel := context.WithTimeout(context.Background(), envProbeTimeout)
-		out, err := exec.CommandContext(ctx, p.argv[0], p.argv[1:]...).Output() //nolint:gosec // G204: argv values are hardcoded in envProbes list
+		cmd := exec.CommandContext(ctx, p.argv[0], p.argv[1:]...) //nolint:gosec // G204: argv values are hardcoded in envProbes list
+		// Probes must observe the workspace's own toolchain selection
+		// (go toolchain directives, rustup/pyenv shims are cwd-sensitive).
+		cmd.Dir = workspace
+		// The go command re-execs the selected toolchain as a child sharing
+		// stdout; the context kill only hits the parent, so without a wait
+		// delay Output() could block on the orphan's pipe past the timeout.
+		cmd.WaitDelay = 2 * time.Second
+
+		out, err := cmd.Output()
 
 		cancel()
 
