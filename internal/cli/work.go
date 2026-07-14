@@ -216,15 +216,23 @@ func specFromEnv() (worker.RunSpec, error) {
 		return worker.RunSpec{}, err
 	}
 
+	mobCheckpointRounds, err := envInt("CM_MOB_CHECKPOINT_ROUNDS", 0)
+	if err != nil {
+		return worker.RunSpec{}, err
+	}
+
 	// Guests are NOT read here: they carry bearer tokens and ride the mounted
 	// secrets file, resolved in RunE next to the LLM key.
 	var mobSpec *protocol.MobSpec
 
 	if mobParticipants >= 2 {
 		mobSpec = &protocol.MobSpec{
-			Participants: mobParticipants,
-			Rounds:       mobRounds,
-			BudgetFactor: mobBudgetFactor,
+			Participants:       mobParticipants,
+			Rounds:             mobRounds,
+			BudgetFactor:       mobBudgetFactor,
+			ExecuteCheckpoints: os.Getenv("CM_MOB_EXECUTE_CHECKPOINTS") == "true",
+			CheckpointMinTier:  os.Getenv("CM_MOB_CHECKPOINT_MIN_TIER"),
+			CheckpointRounds:   mobCheckpointRounds,
 		}
 
 		if v := os.Getenv("CM_MOB_PHASES"); v != "" {

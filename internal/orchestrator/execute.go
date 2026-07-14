@@ -142,6 +142,20 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 		defer stopHeartbeat()
 	}
 
+	// Capture the pre-run head when this subtask will checkpoint, so the
+	// discussion sees exactly the diff this subtask introduced. Solo path
+	// only — candidates never checkpoint (race isolation).
+	var checkpointBase string
+
+	if sc.boardOps && o.checkpointEligible(sub) {
+		if head, herr := sc.git.Head(ctx); herr == nil {
+			checkpointBase = head
+		} else {
+			slog.Warn("mob checkpoint: head read failed; skipping this checkpoint",
+				"card_id", o.d.Cfg.CardID, "subtask_id", sub.ID, "error", herr)
+		}
+	}
+
 	prompt := fmt.Sprintf(coderPrompt, o.skillEngage(), o.grounding, sc.workspace,
 		verifyCommandBlock(o.resolvedVerifyPlan()), sub.Title, subtaskBody(sub), o.tc.Title, o.tc.Description)
 
@@ -166,6 +180,13 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 	committed, err := sc.git.CommitWithMessage(ctx, commitMsg)
 	if err != nil {
 		return fmt.Errorf("commit subtask %s: %w", sub.ID, err)
+	}
+
+	// Execute checkpoint: the mob critiques the committed diff (and may run
+	// one revise pass) BEFORE the push, so a revise commit rides the same
+	// push and the next subtask builds on the revised base.
+	if committed && checkpointBase != "" {
+		o.mobCheckpoint(ctx, sc, sub, checkpointBase)
 	}
 
 	// Push after every subtask so each unit of work is durable and the next

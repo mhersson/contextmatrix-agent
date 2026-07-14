@@ -331,6 +331,8 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 		wt = append(wt, skillTool)
 	}
 
+	mob := mobConfig(a.spec.Mob)
+
 	d := orchestrator.Deps{
 		Ops: ops2orchestrator(a.ops),
 		Git: a.git,
@@ -375,8 +377,8 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 			ToolOutputMax:     a.spec.ToolOutputMax,
 			ReviewAttemptsCap: reviewAttemptsCap,
 			Interactive:       hitl,
-			BestOfN:           a.spec.BestOfN,
-			Mob:               mobConfig(a.spec.Mob),
+			BestOfN:           resolveBestOfN(a.spec.BestOfN, mob),
+			Mob:               mob,
 			Compaction: orchestrator.Compaction{
 				Enabled:         a.spec.CompactionEnabled,
 				Threshold:       a.spec.CompactionThreshold,
@@ -648,9 +650,10 @@ func withDefaults(spec RunSpec) RunSpec {
 
 // mobConfig maps the payload mob session spec onto the orchestrator's config:
 // the phase list becomes per-phase booleans and the spec-level defaults (2
-// critique rounds, budget factor 0.75, phases plan+review) fill zero values
-// so the orchestrator never sees an ambiguous zero. Execute checkpoints are
-// a later slice: "execute" is accepted on the wire but not mapped. nil or
+// critique rounds, budget factor 0.75, phases plan+review, checkpoint tier
+// "simple" / 3 rounds) fill zero values so the orchestrator never sees an
+// ambiguous zero. "execute" is live only when the payload's server flag rode
+// along — a bare phase value from a stale CM stays inert. nil or
 // participants < 2 = off (zero value).
 func mobConfig(spec *protocol.MobSpec) orchestrator.MobConfig {
 	if spec == nil || spec.Participants < 2 {
@@ -669,6 +672,8 @@ func mobConfig(spec *protocol.MobSpec) orchestrator.MobConfig {
 			c.Plan = true
 		case "review":
 			c.Review = true
+		case "execute":
+			c.Execute = spec.ExecuteCheckpoints
 		}
 	}
 
@@ -684,11 +689,37 @@ func mobConfig(spec *protocol.MobSpec) orchestrator.MobConfig {
 		c.BudgetFactor = 0.75
 	}
 
+	if c.Execute {
+		c.CheckpointMinTier = spec.CheckpointMinTier
+		if c.CheckpointMinTier == "" {
+			c.CheckpointMinTier = "simple"
+		}
+
+		c.CheckpointRounds = spec.CheckpointRounds
+		if c.CheckpointRounds <= 0 {
+			c.CheckpointRounds = 3
+		}
+	}
+
 	for _, g := range spec.Guests {
 		c.Guests = append(c.Guests, orchestrator.MobGuest{Name: g.Name, URL: g.URL, Token: g.Token})
 	}
 
 	return c
+}
+
+// resolveBestOfN applies the mob-coding priority rule: a live execute
+// checkpoint config zeroes the candidate race. CM already arbitrates this at
+// trigger time; the mirror keeps a stale CM from racing candidates and
+// checkpointing at once.
+func resolveBestOfN(bestOfN int, mob orchestrator.MobConfig) int {
+	if bestOfN >= 2 && mob.Execute {
+		slog.Warn("best_of_n ignored: mob coding takes priority", "best_of_n", bestOfN)
+
+		return 0
+	}
+
+	return bestOfN
 }
 
 // mobGuestTokens extracts the non-empty guest bearer tokens for redactor

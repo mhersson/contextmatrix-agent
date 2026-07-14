@@ -476,6 +476,25 @@ func TestSpecFromEnv_Mob(t *testing.T) {
 	})
 }
 
+func TestWorkSpecMobCheckpointEnv(t *testing.T) {
+	// Same setup as the CM_BEST_OF_N test above: required envs + the same
+	// spec-construction call. Only the mob envs differ.
+	setRequired(t)
+	t.Setenv("CM_MOB_PARTICIPANTS", "3")
+	t.Setenv("CM_MOB_PHASES", "plan,execute")
+	t.Setenv("CM_MOB_EXECUTE_CHECKPOINTS", "true")
+	t.Setenv("CM_MOB_CHECKPOINT_MIN_TIER", "simple")
+	t.Setenv("CM_MOB_CHECKPOINT_ROUNDS", "3")
+
+	spec, err := specFromEnv()
+	require.NoError(t, err)
+	require.NotNil(t, spec.Mob)
+	assert.True(t, spec.Mob.ExecuteCheckpoints)
+	assert.Equal(t, "simple", spec.Mob.CheckpointMinTier)
+	assert.Equal(t, 3, spec.Mob.CheckpointRounds)
+	assert.Equal(t, []string{"plan", "execute"}, spec.Mob.Phases)
+}
+
 func TestMobGuestsFromSecrets(t *testing.T) {
 	openSource := func(t *testing.T, content string) *secrets.Source {
 		t.Helper()

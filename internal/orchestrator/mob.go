@@ -30,9 +30,19 @@ type MobConfig struct {
 	Participants int  // 0 = off; >= 2 = on
 	Plan         bool // phases contain "plan"
 	Review       bool // phases contain "review"
-	Rounds       int  // critique rounds (CM-clamped; default 2)
-	BudgetFactor float64
-	Guests       []MobGuest
+	// Execute enables post-subtask checkpoint discussions: phases contain
+	// "execute" AND the payload's execute_checkpoints server flag rode along.
+	Execute bool
+	// CheckpointMinTier is the minimum subtask tier that convenes a
+	// checkpoint: simple|moderate|complex|critical. Worker-defaulted to
+	// "simple" when Execute is on.
+	CheckpointMinTier string
+	// CheckpointRounds is the critique-round count for checkpoint
+	// discussions (plan/review keep Rounds). Worker-defaulted to 3.
+	CheckpointRounds int
+	Rounds           int // critique rounds (CM-clamped; default 2)
+	BudgetFactor     float64
+	Guests           []MobGuest
 }
 
 func (c MobConfig) enabled() bool { return c.Participants >= 2 }
@@ -147,7 +157,9 @@ func (o *run) mobDiscuss(ctx context.Context, t mob.Topic) (mob.Outcome, bool) {
 // this config's Seats/Runner, so it cannot exist before this call returns).
 func buildEngineConfig(o *run, t mob.Topic, bearer string) mob.EngineConfig {
 	var exclude map[string]bool
-	if t.Kind == "review" {
+	// Review and checkpoint topics judge code this run wrote: exclude the
+	// models that coded it (and the per-card incapable set).
+	if t.Kind == "review" || t.Kind == "checkpoint" {
 		exclude = o.reviewExclusions()
 	}
 
