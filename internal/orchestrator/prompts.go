@@ -875,12 +875,15 @@ When approved is true, fixes must be an empty array.
 
 // checkpointBriefing opens an execute-checkpoint discussion: the just-
 // committed subtask diff under critique before the run builds on it. Slots:
-// subtask title, subtask description, parent card title, fenced diff.
+// subtask title, subtask description, parent card title, environment block,
+// fenced diff.
 const checkpointBriefing = `You are discussing a just-committed increment of work: one subtask of a
 larger task, written by a coding agent moments ago. Decide whether the run
 should proceed to the next subtask or revise this diff first. Review only
 the change set in the diff below; read surrounding code for context as
-needed. Every finding must cite a file in the change set. Judge the change
+needed. Every finding must cite a file in the change set and rest on evidence from
+the diff, the repository, or the ENVIRONMENT block below — never on
+background knowledge alone. Judge the change
 against what the subtask requires — unrequested hardening and missing
 speculative abstractions are not defects. Argue from your assigned lens; in
 the critique rounds, contest findings you disagree with and explicitly
@@ -894,6 +897,8 @@ Description:
 
 PARENT CARD
 Title: %s
+
+%s
 
 COMMITTED DIFF (this subtask's changes)
 %s`
@@ -912,6 +917,10 @@ Decision rule:
   important first.
 - Unrequested hardening, style, and naming never trigger a revise.
 - Findings a seat explicitly withdrew under rebuttal are resolved.
+- A finding that rests only on background knowledge of the outside world
+  (whether a release exists, version currency, API availability) and cites
+  no evidence from the diff, the repository, or the ENVIRONMENT block is
+  not a defect — exclude it.
 - Anything that can safely wait for the review phase waits: revise is only
   for defects the next subtasks would build on.
 
@@ -935,6 +944,12 @@ Subtask: %s
 Address each finding below; change nothing else. Run the verify command if
 one is declared. When done, call the finish tool with a commit message
 describing the fixes.
+
+If concrete evidence in the repository or environment contradicts a
+finding's premise (for example, the toolchain reports exactly the version
+the finding claims does not exist), do NOT apply that fix. Skip it and
+explain why in your finish message, prefixing each skipped item with
+"declined:".
 
 FINDINGS
 %s`

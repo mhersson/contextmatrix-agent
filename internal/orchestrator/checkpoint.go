@@ -95,11 +95,16 @@ func (o *run) mobCheckpoint(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 		}
 	}
 
+	if o.envFacts == "" {
+		o.envFacts = environmentFacts(o.d.Cfg.Workspace)
+	}
+
 	seats := min(o.d.Cfg.Mob.Participants, len(checkpointLenses))
 
 	t := mob.Topic{
-		Kind:            "checkpoint",
-		Briefing:        fmt.Sprintf(checkpointBriefing, sub.Title, subtaskBody(sub), o.tc.Title, fencedDiff(diff)),
+		Kind: "checkpoint",
+		Briefing: fmt.Sprintf(checkpointBriefing, sub.Title, subtaskBody(sub), o.tc.Title,
+			o.envFacts, fencedDiff(diff)),
 		Lenses:          checkpointLenses[:seats],
 		Rounds:          o.d.Cfg.Mob.CheckpointRounds,
 		Blind:           false,
@@ -174,7 +179,25 @@ func (o *run) mobCheckpoint(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 		msg = "fix: address checkpoint findings"
 	}
 
-	if _, cerr := sc.git.CommitWithMessage(ctx, msg); cerr != nil {
-		slog.Warn("mob checkpoint: revise commit failed", "card_id", o.d.Cfg.CardID, "subtask_id", sub.ID, "error", cerr)
+	o.commitRevise(ctx, sc, sub, msg)
+}
+
+// commitRevise commits the revise pass's changes and surfaces a full
+// decline (clean tree — the fixer applied nothing) on the card's activity
+// log, so a "declined:" finish message is visible instead of vanishing.
+// Best-effort like the rest of the checkpoint path.
+func (o *run) commitRevise(ctx context.Context, sc *solverCtx, sub subtaskRef, msg string) {
+	committed, cerr := sc.git.CommitWithMessage(ctx, msg)
+	if cerr != nil {
+		slog.Warn("mob checkpoint: revise commit failed",
+			"card_id", o.d.Cfg.CardID, "subtask_id", sub.ID, "error", cerr)
+
+		return
+	}
+
+	if !committed {
+		first, _, _ := strings.Cut(msg, "\n")
+		_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, //nolint:errcheck // advisory record
+			fmt.Sprintf("mob checkpoint (%s): revise made no changes — %s", sub.ID, first))
 	}
 }

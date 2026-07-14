@@ -348,6 +348,11 @@ type run struct {
 	// ## Discussion card record can name seats and models.
 	mobSeats []mob.SeatConfig
 
+	// envFacts caches the checkpoint briefings' environment block; computed
+	// lazily on the first checkpoint so runs without execute checkpoints
+	// never probe.
+	envFacts string
+
 	// mobEngine is the discussion-engine seam: tests script (Outcome, error)
 	// here. nil = the real engine (mob.NewEngine(cfg).Discuss).
 	mobEngine func(ctx context.Context, cfg mob.EngineConfig, t mob.Topic) (mob.Outcome, error)
