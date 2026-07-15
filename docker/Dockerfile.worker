@@ -38,7 +38,7 @@ FROM ghcr.io/astral-sh/uv:0.11.28@sha256:0f36cb9361a3346885ca3677e3767016687b5a1
 # base — the shared runtime layer: apt baseline CLIs + GitHub CLI. Every worker
 # variant builds on this; Node and the language toolchains layer on top.
 # ---------------------------------------------------------------------------
-FROM debian@sha256:d07d1b51c39f51188e60be9b64e6bf769fa94e187f092bc32b91305cfa34ba5a AS base
+FROM debian@sha256:fac46bff2e02f51425b6e33b0e1169f55dfb053d83511ca28aa50c09fd5ed7a4 AS base
 # ^ debian:bookworm-slim resolved on 2026-04-21. Refresh intentionally via
 #   `docker pull debian:bookworm-slim && docker inspect --format='{{index .RepoDigests 0}}' debian:bookworm-slim`.
 
