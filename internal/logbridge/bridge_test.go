@@ -589,12 +589,12 @@ func TestHubSubscribers(t *testing.T) {
 }
 
 // TestDiscussionMapping pins the mob session live-transcript bridging: kind
-// "discussion" maps to a text entry carrying the speaker in Agent, while the
-// seat-debug kind is never bridged.
+// "discussion" maps to a text entry carrying the speaker in Agent and the
+// speaker's LLM slug in Model, while the seat-debug kind is never bridged.
 func TestDiscussionMapping(t *testing.T) {
 	t.Parallel()
 
-	t.Run("discussion → text with agent", func(t *testing.T) {
+	t.Run("discussion → text with agent and model", func(t *testing.T) {
 		t.Parallel()
 
 		hub := logbridge.NewHub()
@@ -604,6 +604,7 @@ func TestDiscussionMapping(t *testing.T) {
 		bridge.BridgeLine(testProject, testCard, makeEvent("discussion", map[string]any{
 			"agent":   "seat-2",
 			"lens":    "security",
+			"model":   "z-ai/glm-5.2",
 			"round":   float64(1),
 			"content": "the token comparison is not constant-time",
 		}), false)
@@ -617,7 +618,32 @@ func TestDiscussionMapping(t *testing.T) {
 
 		assert.Equal(t, "text", got.Type)
 		assert.Equal(t, "seat-2", got.Agent)
+		assert.Equal(t, "z-ai/glm-5.2", got.Model)
 		assert.Equal(t, "the token comparison is not constant-time", got.Content)
+	})
+
+	t.Run("discussion without model → Model stays empty", func(t *testing.T) {
+		t.Parallel()
+
+		hub := logbridge.NewHub()
+		_, ch := hub.Subscribe("")
+		bridge := logbridge.New(hub, nil, func(string, string, bool) {})
+
+		bridge.BridgeLine(testProject, testCard, makeEvent("discussion", map[string]any{
+			"agent":   "human",
+			"round":   float64(2),
+			"content": "human interjection",
+		}), false)
+
+		var got protocol.LogEntry
+		select {
+		case got = <-ch:
+		case <-time.After(100 * time.Millisecond):
+			t.Fatal("expected a bridged discussion entry (timeout)")
+		}
+
+		assert.Equal(t, "human", got.Agent)
+		assert.Empty(t, got.Model)
 	})
 
 	t.Run("seat_debug → skipped", func(t *testing.T) {

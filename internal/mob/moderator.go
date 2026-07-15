@@ -26,6 +26,7 @@ const closeBudget = 5 * time.Second
 type seatHandle struct {
 	name     string
 	lens     string
+	model    string // seat's registry-selected LLM slug; "" for guests (external)
 	guest    bool
 	client   *a2aclient.Client
 	taskID   a2a.TaskID

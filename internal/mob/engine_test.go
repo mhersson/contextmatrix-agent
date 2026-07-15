@@ -22,6 +22,7 @@ const engineBearer = "engine-test-bearer"
 type emitRecord struct {
 	author  string
 	lens    string
+	model   string
 	round   int
 	content string
 }
@@ -33,9 +34,9 @@ type emitLog struct {
 }
 
 func (l *emitLog) fn() EmitFn {
-	return func(author, lens string, round int, content string) {
+	return func(author, lens, model string, round int, content string) {
 		l.mu.Lock()
-		l.recs = append(l.recs, emitRecord{author: author, lens: lens, round: round, content: content})
+		l.recs = append(l.recs, emitRecord{author: author, lens: lens, model: model, round: round, content: content})
 		l.mu.Unlock()
 	}
 }
@@ -77,15 +78,16 @@ func (s *seatScript) promptsFor(name string) []string {
 }
 
 // modScript is a scripted ModeratorRunner: replies are consumed in order
-// (the last one repeats); every call costs cost.
+// (the last one repeats); every call costs cost and reports running on model.
 type modScript struct {
 	mu      sync.Mutex
 	prompts []string
 	replies []string
+	model   string
 	cost    float64
 }
 
-func (m *modScript) run(_ context.Context, prompt string) (string, float64, error) {
+func (m *modScript) run(_ context.Context, prompt string) (string, string, float64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -97,10 +99,10 @@ func (m *modScript) run(_ context.Context, prompt string) (string, float64, erro
 	}
 
 	if i < 0 {
-		return "", m.cost, errors.New("modScript: no replies configured")
+		return "", "", m.cost, errors.New("modScript: no replies configured")
 	}
 
-	return m.replies[i], m.cost, nil
+	return m.replies[i], m.model, m.cost, nil
 }
 
 func (m *modScript) calls() []string {
@@ -257,6 +259,62 @@ func TestDiscussBlindRoundThenCritiqueDeltas(t *testing.T) {
 	assert.True(t, strings.HasPrefix(calls[1], "Synthesize the plan."), calls[1])
 	assert.Contains(t, calls[1], "position-seat-1-round-0")
 	assert.Contains(t, calls[1], "position-seat-3-round-1")
+}
+
+// TestDiscussEmitsSeatAndModeratorModels pins the model attribution on live
+// transcript events: each seat utterance carries that seat's own model, the
+// moderator's synthesis carries the decision model it ran on, and the briefing
+// (engine-generated framing, not a model output) carries no model.
+func TestDiscussEmitsSeatAndModeratorModels(t *testing.T) {
+	seats := []SeatConfig{
+		{Name: "seat-1", Lens: "feasibility", Model: "vendor/model-a"},
+		{Name: "seat-2", Lens: "risk", Model: "vendor/model-b"},
+	}
+	script := &seatScript{reply: func(seat string, call int) (string, float64, error) {
+		return fmt.Sprintf("position-%s-%d", seat, call), 0.01, nil
+	}}
+	mod := &modScript{replies: []string{"productive_disagreement", "SYNTH"}, model: "vendor/decision-model"}
+
+	eng, log := startEngine(t, seats, script.run, mod.run, nil)
+
+	_, err := eng.Discuss(t.Context(), Topic{
+		Kind:            "review",
+		Briefing:        "BRIEF",
+		Lenses:          []string{"feasibility", "risk"},
+		Rounds:          1,
+		Blind:           true,
+		SynthesisPrompt: "Synthesize.",
+	})
+	require.NoError(t, err)
+
+	var seat1, seat2, briefings, synths int
+
+	for _, r := range log.snapshot() {
+		switch {
+		case r.author == "seat-1":
+			seat1++
+
+			assert.Equal(t, "vendor/model-a", r.model, "seat-1 utterance must carry its own model")
+		case r.author == "seat-2":
+			seat2++
+
+			assert.Equal(t, "vendor/model-b", r.model, "seat-2 utterance must carry its own model")
+		case r.content == "BRIEF":
+			briefings++
+
+			assert.Empty(t, r.model, "the briefing carries no model pill")
+		case r.content == "SYNTH":
+			synths++
+
+			assert.Equal(t, "vendor/decision-model", r.model, "synthesis must carry the moderator's decision model")
+		}
+	}
+
+	// Guard against a vacuous pass: every attributed kind must have been seen.
+	assert.Positive(t, seat1, "expected seat-1 utterances")
+	assert.Positive(t, seat2, "expected seat-2 utterances")
+	assert.Equal(t, 1, briefings, "expected exactly one briefing")
+	assert.Equal(t, 1, synths, "expected exactly one synthesis")
 }
 
 func TestDiscussConvergenceStops(t *testing.T) {
@@ -527,10 +585,10 @@ func TestClassifyRendersOnlyCurrentRound(t *testing.T) {
 	var gotPrompt string
 
 	e := NewEngine(EngineConfig{
-		Moderate: func(_ context.Context, prompt string) (string, float64, error) {
+		Moderate: func(_ context.Context, prompt string) (string, string, float64, error) {
 			gotPrompt = prompt
 
-			return "productive_disagreement", 0, nil
+			return "productive_disagreement", "", 0, nil
 		},
 	})
 

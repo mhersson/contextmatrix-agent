@@ -98,12 +98,15 @@ type GuestSeat struct {
 type SeatRunner func(ctx context.Context, seat SeatConfig, history []Turn, prompt string) (string, float64, error)
 
 // ModeratorRunner executes one moderator model call (convergence classify,
-// synthesis) on the decision model. Returns output text and USD cost.
-type ModeratorRunner func(ctx context.Context, prompt string) (string, float64, error)
+// synthesis) on the decision model. Returns the output text, the resolved
+// model slug the call ran on, and USD cost.
+type ModeratorRunner func(ctx context.Context, prompt string) (text, model string, cost float64, err error)
 
 // EmitFn publishes one live transcript event (kind "discussion") — wired to
-// the orchestrator's emitter. round may be -1 for non-round notices.
-type EmitFn func(author, lens string, round int, content string)
+// the orchestrator's emitter. round may be -1 for non-round notices. model is
+// the speaker's LLM slug ("" for engine-generated notices, the briefing, and
+// human interjections — which carry no model pill).
+type EmitFn func(author, lens, model string, round int, content string)
 
 type EngineConfig struct {
 	Seats     []SeatConfig
@@ -147,7 +150,7 @@ func NewEngine(cfg EngineConfig) *Engine {
 	}
 
 	if cfg.Emit == nil {
-		cfg.Emit = func(string, string, int, string) {}
+		cfg.Emit = func(string, string, string, int, string) {}
 	}
 
 	return &Engine{cfg: cfg}

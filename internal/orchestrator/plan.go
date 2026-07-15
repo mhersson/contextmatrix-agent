@@ -493,7 +493,7 @@ func (o *run) mobResynthesize(ctx context.Context, t mob.Topic, out mob.Outcome,
 
 	moderate := o.mobModeratorRunner(&seatDebugSink{w: o.seatDebug})
 
-	text, _, err := moderate(ctx, prompt)
+	text, _, _, err := moderate(ctx, prompt)
 
 	return text, err
 }

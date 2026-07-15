@@ -49,7 +49,7 @@ func (e *Engine) Discuss(ctx context.Context, t Topic) (Outcome, error) {
 	seats := e.open(ctx)
 	defer e.closeAll(seats)
 
-	e.cfg.Emit("moderator", "", -1, t.Briefing)
+	e.cfg.Emit("moderator", "", "", -1, t.Briefing)
 
 	// The briefing is transcript entry 0: replacement-task snapshots
 	// (rendered from index 0) and the synthesis transcript carry it, while
@@ -100,7 +100,7 @@ func (e *Engine) Discuss(ctx context.Context, t Topic) (Outcome, error) {
 			}
 
 			if results[i].err != nil {
-				e.cfg.Emit("moderator", "", round,
+				e.cfg.Emit("moderator", "", "", round,
 					fmt.Sprintf("%s absent this round: %v", s.h.name, results[i].err))
 
 				continue
@@ -117,7 +117,7 @@ func (e *Engine) Discuss(ctx context.Context, t Topic) (Outcome, error) {
 				totalCost += s.h.lastCost
 				s.lastSeen = preLen
 
-				e.cfg.Emit("moderator", "", round,
+				e.cfg.Emit("moderator", "", "", round,
 					fmt.Sprintf("%s produced no position this round (budget exhausted before an answer)", s.h.name))
 
 				continue
@@ -128,7 +128,7 @@ func (e *Engine) Discuss(ctx context.Context, t Topic) (Outcome, error) {
 
 			en := Entry{Author: s.h.name, Lens: s.h.lens, Round: round, Content: text}
 			entries = append(entries, en)
-			e.cfg.Emit(en.Author, en.Lens, en.Round, en.Content)
+			e.cfg.Emit(en.Author, en.Lens, s.h.model, en.Round, en.Content)
 
 			s.lastSeen = preLen
 		}
@@ -163,12 +163,12 @@ func (e *Engine) Discuss(ctx context.Context, t Topic) (Outcome, error) {
 
 				en := Entry{Author: "human", Round: r, Content: content}
 				entries = append(entries, en)
-				e.cfg.Emit(en.Author, "", en.Round, en.Content)
+				e.cfg.Emit(en.Author, "", "", en.Round, en.Content)
 			}
 		}
 
 		if e.cfg.BudgetUSD > 0 && totalCost >= e.cfg.BudgetUSD {
-			e.cfg.Emit("moderator", "", r, "discussion budget exhausted — synthesizing early")
+			e.cfg.Emit("moderator", "", "", r, "discussion budget exhausted — synthesizing early")
 
 			break
 		}
@@ -214,7 +214,7 @@ func (e *Engine) Discuss(ctx context.Context, t Topic) (Outcome, error) {
 		}
 	}
 
-	synth, cost, err := e.cfg.Moderate(ctx,
+	synth, synthModel, cost, err := e.cfg.Moderate(ctx,
 		t.SynthesisPrompt+"\n\nFULL TRANSCRIPT\n\n"+renderDelta(entries, 0, "", ""))
 	totalCost += cost
 
@@ -223,7 +223,7 @@ func (e *Engine) Discuss(ctx context.Context, t Topic) (Outcome, error) {
 			fmt.Errorf("mob: synthesis: %w", err)
 	}
 
-	e.cfg.Emit("moderator", "", -1, synth)
+	e.cfg.Emit("moderator", "", synthModel, -1, synth)
 
 	return Outcome{
 		Transcript: entries,
@@ -242,11 +242,12 @@ func (e *Engine) open(ctx context.Context) []*liveSeat {
 	for _, sc := range e.cfg.Seats {
 		h, err := dialSeat(ctx, sc.Name, sc.Lens, e.cfg.SeatEndpoint(sc.Name), e.cfg.Bearer)
 		if err != nil {
-			e.cfg.Emit("moderator", "", -1, fmt.Sprintf("seat %s failed to open: %v", sc.Name, err))
+			e.cfg.Emit("moderator", "", "", -1, fmt.Sprintf("seat %s failed to open: %v", sc.Name, err))
 
 			h = &seatHandle{name: sc.Name, lens: sc.Lens, dead: true, absent: true}
 		}
 
+		h.model = sc.Model
 		h.deadline = e.cfg.InternalDeadline
 		seats = append(seats, &liveSeat{h: h})
 	}
@@ -266,7 +267,7 @@ func (e *Engine) open(ctx context.Context) []*liveSeat {
 			// Name only in the transcript — the URL (and any error detail) would
 			// otherwise reach the browser stream; keep the full error in the log.
 			slog.Warn("mob: guest dial failed", "guest", g.Name, "error", err)
-			e.cfg.Emit("moderator", "", -1, fmt.Sprintf("guest %s unreachable", g.Name))
+			e.cfg.Emit("moderator", "", "", -1, fmt.Sprintf("guest %s unreachable", g.Name))
 
 			h = &seatHandle{name: "guest-" + g.Name, guest: true, dead: true, absent: true}
 		}
@@ -283,7 +284,7 @@ func (e *Engine) open(ctx context.Context) []*liveSeat {
 // to the current round's positions — the convergence model does not need
 // earlier rounds re-sent.
 func (e *Engine) classify(ctx context.Context, entries []Entry, from int) (string, float64, error) {
-	out, cost, err := e.cfg.Moderate(ctx, fmt.Sprintf(convergencePrompt, renderDelta(entries, from, "", "")))
+	out, _, cost, err := e.cfg.Moderate(ctx, fmt.Sprintf(convergencePrompt, renderDelta(entries, from, "", "")))
 	if err != nil {
 		return "", cost, err
 	}

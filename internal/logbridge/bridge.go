@@ -250,6 +250,7 @@ func (b *Bridge) mapEvent(kind string, data map[string]any) (entry protocol.LogE
 			Type:    "text",
 			Content: strField(data, "content"),
 			Agent:   strField(data, "agent"),
+			Model:   strField(data, "model"),
 		}, false, false
 
 	// Transcript-only kinds — not bridged.
