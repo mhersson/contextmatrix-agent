@@ -204,10 +204,11 @@ func buildEngineConfig(o *run, t mob.Topic, bearer string) mob.EngineConfig {
 		Guests:   guests,
 		Runner:   o.mobSeatRunner(sink, perTurn),
 		Moderate: o.mobModeratorRunner(sink),
-		Emit: func(author, lens string, round int, content string) {
+		Emit: func(author, lens, model string, round int, content string) {
 			o.d.Emit.Emit(events.Kind("discussion"), map[string]any{
 				"agent":   author,
 				"lens":    lens,
+				"model":   model,
 				"round":   round,
 				"content": content,
 			})
@@ -367,7 +368,7 @@ func (o *run) mobModeratorRunner(sink *seatDebugSink) mob.ModeratorRunner {
 	model := ""
 	emit := events.NewEmitter(io.Discard, sink.named("moderator"))
 
-	return func(ctx context.Context, prompt string) (string, float64, error) {
+	return func(ctx context.Context, prompt string) (string, string, float64, error) {
 		if model == "" {
 			model = resolveDecisionModel(ctx, o.d.Registry, o.d.Emit, o.d.Ops, o.d.Cfg.CardID,
 				o.tc.ModelOrchestrator, o.d.Cfg.PayloadModel, o.d.Cfg.DefaultModel)
@@ -391,10 +392,10 @@ func (o *run) mobModeratorRunner(sink *seatDebugSink) mob.ModeratorRunner {
 		}
 
 		if err != nil {
-			return "", res.TotalCostUSD, fmt.Errorf("moderator run: %w", err)
+			return "", used, res.TotalCostUSD, fmt.Errorf("moderator run: %w", err)
 		}
 
-		return res.Output, res.TotalCostUSD, nil
+		return res.Output, used, res.TotalCostUSD, nil
 	}
 }
 

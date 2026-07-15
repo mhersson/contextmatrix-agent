@@ -22,7 +22,7 @@ func TestNewEngineDefaults(t *testing.T) {
 	assert.Equal(t, 240*time.Second, e.cfg.InternalDeadline)
 	assert.Equal(t, 300*time.Second, e.cfg.GuestDeadline)
 	require.NotNil(t, e.cfg.Emit)
-	e.cfg.Emit("moderator", "", -1, "must not panic")
+	e.cfg.Emit("moderator", "", "", -1, "must not panic")
 }
 
 func TestNewEngineKeepsCustomDeadlines(t *testing.T) {

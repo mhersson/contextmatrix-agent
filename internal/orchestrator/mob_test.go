@@ -291,9 +291,10 @@ func TestMobModeratorRunnerIsToolless(t *testing.T) {
 
 	runner := o.mobModeratorRunner(&seatDebugSink{w: io.Discard})
 
-	out, cost, err := runner(t.Context(), "synthesize this")
+	out, model, cost, err := runner(t.Context(), "synthesize this")
 	require.NoError(t, err)
 	assert.Equal(t, "VERDICT", out)
+	assert.NotEmpty(t, model, "runner reports the resolved decision model it ran on")
 	assert.InDelta(t, 0.01, cost, 1e-9)
 
 	for _, n := range client.toolCountsSeen() {
