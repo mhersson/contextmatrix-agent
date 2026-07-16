@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/mob"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -255,4 +256,89 @@ func TestCommitReviseSurfacesFullDecline(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRecordCheckpointDiscussion(t *testing.T) {
+	newRunWithSeats := func(ops *fakeOps) *run {
+		o := mobTestRun(ops, MobConfig{Participants: 2, Execute: true}, 0)
+		o.mobSeats = []mob.SeatConfig{
+			{Name: "seat-1", Lens: "correctness", Model: "model-x"},
+			{Name: "seat-2", Lens: "risk/regressions", Model: "model-y"},
+		}
+
+		return o
+	}
+
+	proceed := mob.Outcome{Transcript: []mob.Entry{{Round: 1}, {Round: 2}}, CostUSD: 0.0123}
+
+	t.Run("proceed writes both cards and preserves the fetched subtask body", func(t *testing.T) {
+		ops := &fakeOps{taskContexts: map[string]cmclient.TaskContext{
+			"SUB-1": {CardID: "SUB-1", Description: "Original subtask description."},
+		}}
+		o := newRunWithSeats(ops)
+
+		// sub.Body is empty (the resume-path shape); the record must read the
+		// live body via GetTaskContext, not clobber the card with sub.Body.
+		o.recordCheckpointDiscussion(context.Background(),
+			subtaskRef{ID: "SUB-1", Title: "add thing"}, proceed,
+			checkpointVerdict{Verdict: "proceed", Summary: "Correct and covered.\nNo blockers."})
+
+		sub := ops.bodyFor("SUB-1")
+		assert.Contains(t, sub, "Original subtask description.") // preserved (resume-clobber guard)
+		assert.Contains(t, sub, "## Discussion")
+		assert.Contains(t, sub, "Correct and covered.\nNo blockers.")
+		assert.Contains(t, sub, "Seats:\n- seat-1 (correctness): model-x\n- seat-2 (risk/regressions): model-y")
+		assert.Contains(t, sub, "Critique rounds: 2")
+		assert.Contains(t, sub, "Outcome: proceed")
+		assert.Contains(t, sub, "Cost: $0.0123")
+
+		parent := ops.bodyFor("CARD-1")
+		assert.Contains(t, parent, "## Execute Discussions")
+		assert.Contains(t, parent, "### SUB-1 — add thing")
+		assert.Contains(t, parent, "Seats: seat-1 (correctness): model-x · seat-2 (risk/regressions): model-y")
+		assert.Contains(t, parent, "Rounds: 2 · Outcome: proceed · Cost: $0.0123")
+	})
+
+	t.Run("revise outcome names the fix count", func(t *testing.T) {
+		ops := &fakeOps{}
+		o := newRunWithSeats(ops)
+
+		o.recordCheckpointDiscussion(context.Background(),
+			subtaskRef{ID: "SUB-1", Title: "t"}, proceed,
+			checkpointVerdict{
+				Verdict: "revise", Summary: "s",
+				Fixes: []fix{{File: "a.go", Issue: "1"}, {File: "b.go", Issue: "2"}},
+			})
+
+		assert.Contains(t, ops.bodyFor("SUB-1"), "Outcome: revise — 2 fixes")
+		assert.Contains(t, ops.bodyFor("CARD-1"), "Outcome: revise — 2 fixes")
+	})
+
+	t.Run("empty summary still writes the mechanical block", func(t *testing.T) {
+		ops := &fakeOps{}
+		o := newRunWithSeats(ops)
+
+		o.recordCheckpointDiscussion(context.Background(),
+			subtaskRef{ID: "SUB-1", Title: "t"}, proceed,
+			checkpointVerdict{Verdict: "proceed", Summary: ""})
+
+		assert.Contains(t, ops.bodyFor("SUB-1"), "## Discussion\n\nSeats:")
+	})
+
+	t.Run("second subtask appends to the parent log", func(t *testing.T) {
+		ops := &fakeOps{}
+		o := newRunWithSeats(ops)
+
+		o.recordCheckpointDiscussion(context.Background(),
+			subtaskRef{ID: "SUB-1", Title: "first"}, proceed,
+			checkpointVerdict{Verdict: "proceed", Summary: "a"})
+		o.recordCheckpointDiscussion(context.Background(),
+			subtaskRef{ID: "SUB-2", Title: "second"}, proceed,
+			checkpointVerdict{Verdict: "proceed", Summary: "b"})
+
+		parent := ops.bodyFor("CARD-1")
+		assert.Contains(t, parent, "### SUB-1 — first")
+		assert.Contains(t, parent, "### SUB-2 — second")
+		assert.Equal(t, 1, strings.Count(parent, "## Execute Discussions"))
+	})
 }

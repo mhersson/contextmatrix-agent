@@ -184,6 +184,113 @@ func (o *run) mobCheckpoint(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 	o.commitRevise(ctx, sc, sub, msg)
 }
 
+// recordCheckpointDiscussion writes the checkpoint discussion summary to two
+// places: a full "## Discussion" section on the subtask card, and a compact
+// entry appended to a running "## Execute Discussions" log on the parent card.
+// Best-effort throughout (the mob contract): any card-write failure logs and
+// returns without aborting the run. It must be called before any later
+// discussion overwrites o.mobSeats — the checkpoint path runs none after this.
+func (o *run) recordCheckpointDiscussion(ctx context.Context, sub subtaskRef, out mob.Outcome, v checkpointVerdict) {
+	rounds := 0
+	for _, e := range out.Transcript {
+		if e.Round > rounds {
+			rounds = e.Round
+		}
+	}
+
+	outcome := "proceed"
+	if v.Verdict == "revise" {
+		outcome = fmt.Sprintf("revise — %d fixes", len(v.Fixes))
+	}
+
+	o.recordCheckpointOnSubtask(ctx, sub, o.checkpointSubtaskSection(v.Summary, rounds, outcome, out.CostUSD))
+	o.recordCheckpointOnParent(ctx, sub, v.Summary, rounds, outcome, out.CostUSD)
+}
+
+// checkpointSubtaskSection renders the full "## Discussion" block for a subtask
+// card: narrative (when present), the seat/guest lineup, critique rounds,
+// outcome, and cost — matching the planning discussion record's shape.
+func (o *run) checkpointSubtaskSection(summary string, rounds int, outcome string, cost float64) string {
+	var b strings.Builder
+
+	b.WriteString("## Discussion\n\n")
+
+	if s := strings.TrimSpace(summary); s != "" {
+		b.WriteString(s)
+		b.WriteString("\n\n")
+	}
+
+	b.WriteString("Seats:\n")
+
+	for _, s := range o.mobSeats {
+		fmt.Fprintf(&b, "- %s (%s): %s\n", s.Name, s.Lens, s.Model)
+	}
+
+	for _, g := range o.d.Cfg.Mob.Guests {
+		fmt.Fprintf(&b, "- guest-%s\n", g.Name)
+	}
+
+	fmt.Fprintf(&b, "\nCritique rounds: %d\n", rounds)
+	fmt.Fprintf(&b, "Outcome: %s\n", outcome)
+	fmt.Fprintf(&b, "Cost: $%.4f", cost)
+
+	return b.String()
+}
+
+// recordCheckpointOnSubtask fetches the subtask's live card body (never the
+// possibly-empty in-memory subtaskRef.Body, which is unpopulated on the resume
+// path), upserts the "## Discussion" section, and writes it back. Best-effort.
+func (o *run) recordCheckpointOnSubtask(ctx context.Context, sub subtaskRef, section string) {
+	tc, err := o.d.Ops.GetTaskContext(ctx, sub.ID, false)
+	if err != nil {
+		slog.Warn("checkpoint discussion: subtask body fetch failed; skipping subtask record",
+			"card_id", o.d.Cfg.CardID, "subtask_id", sub.ID, "error", err)
+
+		return
+	}
+
+	body := upsertSection(tc.Description, "Discussion", section)
+	if uerr := o.d.Ops.UpdateCardBody(ctx, sub.ID, body); uerr != nil {
+		slog.Warn("checkpoint discussion: subtask body update failed",
+			"card_id", o.d.Cfg.CardID, "subtask_id", sub.ID, "error", uerr)
+	}
+}
+
+// recordCheckpointOnParent appends a compact per-subtask block to the parent's
+// running "## Execute Discussions" section. It reads the existing block out of
+// the in-memory parent body (loaded from the card at run start, so it survives
+// a resume) and re-upserts the whole section, keeping prior entries. Best-effort
+// via recordSection.
+func (o *run) recordCheckpointOnParent(ctx context.Context, sub subtaskRef, summary string, rounds int, outcome string, cost float64) {
+	var blk strings.Builder
+
+	fmt.Fprintf(&blk, "### %s — %s\n", sub.ID, sub.Title)
+
+	if s := strings.TrimSpace(summary); s != "" {
+		blk.WriteString(s)
+		blk.WriteString("\n")
+	}
+
+	lineup := make([]string, 0, len(o.mobSeats)+len(o.d.Cfg.Mob.Guests))
+	for _, s := range o.mobSeats {
+		lineup = append(lineup, fmt.Sprintf("%s (%s): %s", s.Name, s.Lens, s.Model))
+	}
+
+	for _, g := range o.d.Cfg.Mob.Guests {
+		lineup = append(lineup, "guest-"+g.Name)
+	}
+
+	fmt.Fprintf(&blk, "Seats: %s\n", strings.Join(lineup, " · "))
+	fmt.Fprintf(&blk, "Rounds: %d · Outcome: %s · Cost: $%.4f", rounds, outcome, cost)
+
+	section := "## Execute Discussions\n\n" + blk.String()
+	if existing := extractSection(o.body, "Execute Discussions"); existing != "" {
+		section = existing + "\n\n" + blk.String()
+	}
+
+	o.recordSection(ctx, "Execute Discussions", section)
+}
+
 // commitRevise commits the revise pass's changes and surfaces a full
 // decline (clean tree — the fixer applied nothing) on the card's activity
 // log, so a "declined:" finish message is visible instead of vanishing.

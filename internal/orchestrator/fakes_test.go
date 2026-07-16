@@ -51,6 +51,10 @@ type fakeOps struct {
 	// can assert the parent card accumulated the expected sections.
 	bodyUpdates []string
 
+	// bodyByCard holds the most recent UpdateCardBody body per card ID, so
+	// tests can assert subtask vs parent bodies independently.
+	bodyByCard map[string]string
+
 	// IncrementReviewAttempts scripting: reviewAttempts seeds the counter; each
 	// call increments it and returns the new running total, mirroring the server
 	// semantics (the card's persisted review_attempts plus this increment).
@@ -164,7 +168,13 @@ func (f *fakeOps) SetPhase(_ context.Context, cardID, phase string) error {
 
 func (f *fakeOps) UpdateCardBody(_ context.Context, cardID, body string) error {
 	f.mu.Lock()
+
 	f.bodyUpdates = append(f.bodyUpdates, body)
+	if f.bodyByCard == nil {
+		f.bodyByCard = map[string]string{}
+	}
+
+	f.bodyByCard[cardID] = body
 	f.mu.Unlock()
 
 	f.record("UpdateCardBody:" + cardID)
@@ -182,6 +192,15 @@ func (f *fakeOps) lastBody() string {
 	}
 
 	return f.bodyUpdates[len(f.bodyUpdates)-1]
+}
+
+// bodyFor returns the most recent UpdateCardBody body written for cardID, or ""
+// if none.
+func (f *fakeOps) bodyFor(cardID string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.bodyByCard[cardID]
 }
 
 func (f *fakeOps) TransitionCard(_ context.Context, cardID, state string) error {
