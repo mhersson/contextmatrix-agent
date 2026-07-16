@@ -110,8 +110,12 @@ func TestMobCheckpointProceed(t *testing.T) {
 		BudgetFactor: 0.75,
 	}, 0)
 
-	eng := &scriptedEngine{outcomes: []mob.Outcome{{Synthesis: `{"verdict":"proceed","fixes":[]}`}}}
+	eng := &scriptedEngine{outcomes: []mob.Outcome{{
+		Synthesis:  `{"verdict":"proceed","fixes":[],"summary":"looks good"}`,
+		Transcript: []mob.Entry{{Round: 1}, {Round: 2}},
+	}}}
 	o.mobEngine = eng.run
+	ops.taskContexts = map[string]cmclient.TaskContext{"SUB-1": {Description: "sub body"}}
 
 	// fakeGit.Diff always returns "" (fakes_test.go:485); diffGit (the wrapper
 	// judge_test.go already uses for the same purpose) overrides it with a
@@ -126,6 +130,35 @@ func TestMobCheckpointProceed(t *testing.T) {
 	assert.Equal(t, 3, eng.topics[0].Rounds)
 	assert.Equal(t, []string{"correctness", "diff-hygiene/simplicity"}, eng.topics[0].Lenses)
 	assert.Contains(t, strings.Join(ops.logs, "\n"), "mob checkpoint (SUB-1): proceed")
+
+	sub := ops.bodyFor("SUB-1")
+	assert.Contains(t, sub, "sub body") // live description preserved
+	assert.Contains(t, sub, "## Discussion")
+	assert.Contains(t, sub, "looks good")
+	assert.Contains(t, sub, "Outcome: proceed")
+
+	parent := ops.bodyFor("CARD-1")
+	assert.Contains(t, parent, "## Execute Discussions")
+	assert.Contains(t, parent, "### SUB-1 — add thing")
+}
+
+func TestMobCheckpointDegradedWritesNoRecord(t *testing.T) {
+	ops := &fakeOps{}
+	o := mobTestRun(ops, MobConfig{
+		Participants: 2, Execute: true, CheckpointMinTier: "simple", CheckpointRounds: 3,
+	}, 0)
+
+	// Engine errors → mobDiscuss returns ok=false → checkpoint continues solo,
+	// so nothing is discussed and no summary is recorded.
+	eng := &scriptedEngine{outcomes: []mob.Outcome{{}}, errs: []error{errors.New("engine boom")}}
+	o.mobEngine = eng.run
+	o.solver.git = &diffGit{fakeGit: &fakeGit{}, diff: "diff --git a/a.go b/a.go\n+x\n"}
+
+	o.mobCheckpoint(context.Background(), o.solver, subtaskRef{ID: "SUB-1", Title: "t", Tier: "simple"}, "abc123")
+
+	require.Len(t, eng.topics, 1)
+	assert.Empty(t, ops.bodyFor("SUB-1"), "no subtask record when the discussion degraded")
+	assert.NotContains(t, strings.Join(ops.recorded(), "\n"), "UpdateCardBody:SUB-1")
 }
 
 func TestMobCheckpointEmptyDiffSkips(t *testing.T) {

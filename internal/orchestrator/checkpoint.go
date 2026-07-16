@@ -133,6 +133,11 @@ func (o *run) mobCheckpoint(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 		}
 	}
 
+	// Record the discussion summary on both cards for every synthesized
+	// verdict — proceed and revise alike. Best-effort; must run before the
+	// proceed/revise branches so a proceed still leaves a record.
+	o.recordCheckpointDiscussion(ctx, sub, out, v)
+
 	if v.Verdict != "revise" || len(v.Fixes) == 0 {
 		_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, //nolint:errcheck // advisory record
 			fmt.Sprintf("mob checkpoint (%s): proceed", sub.ID))
