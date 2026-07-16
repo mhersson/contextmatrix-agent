@@ -43,10 +43,12 @@ func (o *run) checkpointEligible(sub subtaskRef) bool {
 }
 
 // checkpointVerdict is the moderator's synthesis decision for one execute
-// checkpoint: proceed, or revise with concrete fixes.
+// checkpoint: proceed, or revise with concrete fixes, plus a short prose
+// summary for the card record.
 type checkpointVerdict struct {
 	Verdict string `json:"verdict"` // "proceed" | "revise"
 	Fixes   []fix  `json:"fixes"`
+	Summary string `json:"summary"` // 4-5 line narrative; best-effort, never gates the verdict
 }
 
 // parseCheckpointVerdict extracts and validates the checkpoint synthesis
@@ -131,6 +133,11 @@ func (o *run) mobCheckpoint(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 		}
 	}
 
+	// Record the discussion summary on both cards for every synthesized
+	// verdict — proceed and revise alike. Best-effort; must run before the
+	// proceed/revise branches so a proceed still leaves a record.
+	o.recordCheckpointDiscussion(ctx, sub, out, v)
+
 	if v.Verdict != "revise" || len(v.Fixes) == 0 {
 		_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, //nolint:errcheck // advisory record
 			fmt.Sprintf("mob checkpoint (%s): proceed", sub.ID))
@@ -180,6 +187,132 @@ func (o *run) mobCheckpoint(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 	}
 
 	o.commitRevise(ctx, sc, sub, msg)
+}
+
+// recordCheckpointDiscussion writes the checkpoint discussion summary to two
+// places: a full "## Discussion" section on the subtask card, and a compact
+// entry appended to a running "## Execute Discussions" log on the parent card.
+// Best-effort throughout (the mob contract): any card-write failure logs and
+// returns without aborting the run. It must be called before any later
+// discussion overwrites o.mobSeats — the checkpoint path runs none after this.
+func (o *run) recordCheckpointDiscussion(ctx context.Context, sub subtaskRef, out mob.Outcome, v checkpointVerdict) {
+	rounds := 0
+	for _, e := range out.Transcript {
+		if e.Round > rounds {
+			rounds = e.Round
+		}
+	}
+
+	outcome := "proceed"
+	if v.Verdict == "revise" {
+		outcome = fmt.Sprintf("revise — %d fixes", len(v.Fixes))
+	}
+
+	summary := sanitizeSummary(v.Summary)
+
+	o.recordCheckpointOnSubtask(ctx, sub, o.checkpointSubtaskSection(summary, rounds, outcome, out.CostUSD))
+	o.recordCheckpointOnParent(ctx, sub, summary, rounds, outcome, out.CostUSD)
+}
+
+// sanitizeSummary neutralizes markdown headings in the model-provided
+// narrative: a summary line starting with "#" (after indentation) would
+// otherwise terminate the ## boundary scan in upsertSection/extractSection
+// and garble the card record. Escaping the leading "#" defends both the
+// TrimSpace start-scan and the HasPrefix end-scan, and renders as a literal
+// "#" in markdown.
+func sanitizeSummary(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		if t := strings.TrimLeft(l, " \t"); strings.HasPrefix(t, "#") {
+			lines[i] = "\\" + t
+		}
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+// checkpointSubtaskSection renders the full "## Discussion" block for a subtask
+// card: narrative (when present), the seat/guest lineup, critique rounds,
+// outcome, and cost — matching the planning discussion record's shape.
+func (o *run) checkpointSubtaskSection(summary string, rounds int, outcome string, cost float64) string {
+	var b strings.Builder
+
+	b.WriteString("## Discussion\n\n")
+
+	if s := strings.TrimSpace(summary); s != "" {
+		b.WriteString(s)
+		b.WriteString("\n\n")
+	}
+
+	b.WriteString("Seats:\n")
+
+	for _, s := range o.mobSeats {
+		fmt.Fprintf(&b, "- %s (%s): %s\n", s.Name, s.Lens, s.Model)
+	}
+
+	for _, g := range o.d.Cfg.Mob.Guests {
+		fmt.Fprintf(&b, "- guest-%s\n", g.Name)
+	}
+
+	fmt.Fprintf(&b, "\nCritique rounds: %d\n", rounds)
+	fmt.Fprintf(&b, "Outcome: %s\n", outcome)
+	fmt.Fprintf(&b, "Cost: $%.4f", cost)
+
+	return b.String()
+}
+
+// recordCheckpointOnSubtask fetches the subtask's live card body (never the
+// possibly-empty in-memory subtaskRef.Body, which is unpopulated on the resume
+// path), upserts the "## Discussion" section, and writes it back. Best-effort.
+func (o *run) recordCheckpointOnSubtask(ctx context.Context, sub subtaskRef, section string) {
+	tc, err := o.d.Ops.GetTaskContext(ctx, sub.ID, false)
+	if err != nil {
+		slog.Warn("checkpoint discussion: subtask body fetch failed; skipping subtask record",
+			"card_id", o.d.Cfg.CardID, "subtask_id", sub.ID, "error", err)
+
+		return
+	}
+
+	body := upsertSection(tc.Description, "Discussion", section)
+	if uerr := o.d.Ops.UpdateCardBody(ctx, sub.ID, body); uerr != nil {
+		slog.Warn("checkpoint discussion: subtask body update failed",
+			"card_id", o.d.Cfg.CardID, "subtask_id", sub.ID, "error", uerr)
+	}
+}
+
+// recordCheckpointOnParent appends a compact per-subtask block to the parent's
+// running "## Execute Discussions" section. It reads the existing block out of
+// the in-memory parent body (loaded from the card at run start, so it survives
+// a resume) and re-upserts the whole section, keeping prior entries. Best-effort
+// via recordSection.
+func (o *run) recordCheckpointOnParent(ctx context.Context, sub subtaskRef, summary string, rounds int, outcome string, cost float64) {
+	var blk strings.Builder
+
+	fmt.Fprintf(&blk, "### %s — %s\n", sub.ID, sub.Title)
+
+	if s := strings.TrimSpace(summary); s != "" {
+		blk.WriteString(s)
+		blk.WriteString("\n")
+	}
+
+	lineup := make([]string, 0, len(o.mobSeats)+len(o.d.Cfg.Mob.Guests))
+	for _, s := range o.mobSeats {
+		lineup = append(lineup, fmt.Sprintf("%s (%s): %s", s.Name, s.Lens, s.Model))
+	}
+
+	for _, g := range o.d.Cfg.Mob.Guests {
+		lineup = append(lineup, "guest-"+g.Name)
+	}
+
+	fmt.Fprintf(&blk, "Seats: %s\n", strings.Join(lineup, " · "))
+	fmt.Fprintf(&blk, "Rounds: %d · Outcome: %s · Cost: $%.4f", rounds, outcome, cost)
+
+	section := "## Execute Discussions\n\n" + blk.String()
+	if existing := extractSection(o.body, "Execute Discussions"); existing != "" {
+		section = existing + "\n\n" + blk.String()
+	}
+
+	o.recordSection(ctx, "Execute Discussions", section)
 }
 
 // commitRevise commits the revise pass's changes and surfaces a full

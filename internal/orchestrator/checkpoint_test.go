@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/mob"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -85,6 +86,21 @@ func TestParseCheckpointVerdict(t *testing.T) {
 		_, err := parseCheckpointVerdict("looks fine to me")
 		require.Error(t, err)
 	})
+
+	t.Run("summary is captured", func(t *testing.T) {
+		v, err := parseCheckpointVerdict(
+			`{"verdict":"proceed","fixes":[],"summary":"Correct and covered.\nNo blockers."}`)
+		require.NoError(t, err)
+		assert.Equal(t, "proceed", v.Verdict)
+		assert.Equal(t, "Correct and covered.\nNo blockers.", v.Summary)
+	})
+
+	t.Run("absent summary parses with empty string, verdict unaffected", func(t *testing.T) {
+		v, err := parseCheckpointVerdict(`{"verdict":"revise","fixes":[{"file":"a.go","issue":"x"}]}`)
+		require.NoError(t, err)
+		assert.Equal(t, "revise", v.Verdict)
+		assert.Empty(t, v.Summary)
+	})
 }
 
 func TestMobCheckpointProceed(t *testing.T) {
@@ -94,8 +110,12 @@ func TestMobCheckpointProceed(t *testing.T) {
 		BudgetFactor: 0.75,
 	}, 0)
 
-	eng := &scriptedEngine{outcomes: []mob.Outcome{{Synthesis: `{"verdict":"proceed","fixes":[]}`}}}
+	eng := &scriptedEngine{outcomes: []mob.Outcome{{
+		Synthesis:  `{"verdict":"proceed","fixes":[],"summary":"looks good"}`,
+		Transcript: []mob.Entry{{Round: 1}, {Round: 2}},
+	}}}
 	o.mobEngine = eng.run
+	ops.taskContexts = map[string]cmclient.TaskContext{"SUB-1": {Description: "sub body"}}
 
 	// fakeGit.Diff always returns "" (fakes_test.go:485); diffGit (the wrapper
 	// judge_test.go already uses for the same purpose) overrides it with a
@@ -110,6 +130,35 @@ func TestMobCheckpointProceed(t *testing.T) {
 	assert.Equal(t, 3, eng.topics[0].Rounds)
 	assert.Equal(t, []string{"correctness", "diff-hygiene/simplicity"}, eng.topics[0].Lenses)
 	assert.Contains(t, strings.Join(ops.logs, "\n"), "mob checkpoint (SUB-1): proceed")
+
+	sub := ops.bodyFor("SUB-1")
+	assert.Contains(t, sub, "sub body") // live description preserved
+	assert.Contains(t, sub, "## Discussion")
+	assert.Contains(t, sub, "looks good")
+	assert.Contains(t, sub, "Outcome: proceed")
+
+	parent := ops.bodyFor("CARD-1")
+	assert.Contains(t, parent, "## Execute Discussions")
+	assert.Contains(t, parent, "### SUB-1 — add thing")
+}
+
+func TestMobCheckpointDegradedWritesNoRecord(t *testing.T) {
+	ops := &fakeOps{}
+	o := mobTestRun(ops, MobConfig{
+		Participants: 2, Execute: true, CheckpointMinTier: "simple", CheckpointRounds: 3,
+	}, 0)
+
+	// Engine errors → mobDiscuss returns ok=false → checkpoint continues solo,
+	// so nothing is discussed and no summary is recorded.
+	eng := &scriptedEngine{outcomes: []mob.Outcome{{}}, errs: []error{errors.New("engine boom")}}
+	o.mobEngine = eng.run
+	o.solver.git = &diffGit{fakeGit: &fakeGit{}, diff: "diff --git a/a.go b/a.go\n+x\n"}
+
+	o.mobCheckpoint(context.Background(), o.solver, subtaskRef{ID: "SUB-1", Title: "t", Tier: "simple"}, "abc123")
+
+	require.Len(t, eng.topics, 1)
+	assert.Empty(t, ops.bodyFor("SUB-1"), "no subtask record when the discussion degraded")
+	assert.NotContains(t, strings.Join(ops.recorded(), "\n"), "UpdateCardBody:SUB-1")
 }
 
 func TestMobCheckpointEmptyDiffSkips(t *testing.T) {
@@ -240,4 +289,113 @@ func TestCommitReviseSurfacesFullDecline(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRecordCheckpointDiscussion(t *testing.T) {
+	newRunWithSeats := func(ops *fakeOps) *run {
+		o := mobTestRun(ops, MobConfig{Participants: 2, Execute: true}, 0)
+		o.mobSeats = []mob.SeatConfig{
+			{Name: "seat-1", Lens: "correctness", Model: "model-x"},
+			{Name: "seat-2", Lens: "risk/regressions", Model: "model-y"},
+		}
+
+		return o
+	}
+
+	proceed := mob.Outcome{Transcript: []mob.Entry{{Round: 1}, {Round: 2}}, CostUSD: 0.0123}
+
+	t.Run("proceed writes both cards and preserves the fetched subtask body", func(t *testing.T) {
+		ops := &fakeOps{taskContexts: map[string]cmclient.TaskContext{
+			"SUB-1": {CardID: "SUB-1", Description: "Original subtask description."},
+		}}
+		o := newRunWithSeats(ops)
+
+		// sub.Body is empty (the resume-path shape); the record must read the
+		// live body via GetTaskContext, not clobber the card with sub.Body.
+		o.recordCheckpointDiscussion(context.Background(),
+			subtaskRef{ID: "SUB-1", Title: "add thing"}, proceed,
+			checkpointVerdict{Verdict: "proceed", Summary: "Correct and covered.\nNo blockers."})
+
+		sub := ops.bodyFor("SUB-1")
+		assert.Contains(t, sub, "Original subtask description.") // preserved (resume-clobber guard)
+		assert.Contains(t, sub, "## Discussion")
+		assert.Contains(t, sub, "Correct and covered.\nNo blockers.")
+		assert.Contains(t, sub, "Seats:\n- seat-1 (correctness): model-x\n- seat-2 (risk/regressions): model-y")
+		assert.Contains(t, sub, "Critique rounds: 2")
+		assert.Contains(t, sub, "Outcome: proceed")
+		assert.Contains(t, sub, "Cost: $0.0123")
+
+		parent := ops.bodyFor("CARD-1")
+		assert.Contains(t, parent, "## Execute Discussions")
+		assert.Contains(t, parent, "### SUB-1 — add thing")
+		assert.Contains(t, parent, "Seats: seat-1 (correctness): model-x · seat-2 (risk/regressions): model-y")
+		assert.Contains(t, parent, "Rounds: 2 · Outcome: proceed · Cost: $0.0123")
+	})
+
+	t.Run("revise outcome names the fix count", func(t *testing.T) {
+		ops := &fakeOps{}
+		o := newRunWithSeats(ops)
+
+		o.recordCheckpointDiscussion(context.Background(),
+			subtaskRef{ID: "SUB-1", Title: "t"}, proceed,
+			checkpointVerdict{
+				Verdict: "revise", Summary: "s",
+				Fixes: []fix{{File: "a.go", Issue: "1"}, {File: "b.go", Issue: "2"}},
+			})
+
+		assert.Contains(t, ops.bodyFor("SUB-1"), "Outcome: revise — 2 fixes")
+		assert.Contains(t, ops.bodyFor("CARD-1"), "Outcome: revise — 2 fixes")
+	})
+
+	t.Run("empty summary still writes the mechanical block", func(t *testing.T) {
+		ops := &fakeOps{}
+		o := newRunWithSeats(ops)
+
+		o.recordCheckpointDiscussion(context.Background(),
+			subtaskRef{ID: "SUB-1", Title: "t"}, proceed,
+			checkpointVerdict{Verdict: "proceed", Summary: ""})
+
+		assert.Contains(t, ops.bodyFor("SUB-1"), "## Discussion\n\nSeats:")
+	})
+
+	t.Run("second subtask appends to the parent log", func(t *testing.T) {
+		ops := &fakeOps{}
+		o := newRunWithSeats(ops)
+
+		o.recordCheckpointDiscussion(context.Background(),
+			subtaskRef{ID: "SUB-1", Title: "first"}, proceed,
+			checkpointVerdict{Verdict: "proceed", Summary: "a"})
+		o.recordCheckpointDiscussion(context.Background(),
+			subtaskRef{ID: "SUB-2", Title: "second"}, proceed,
+			checkpointVerdict{Verdict: "proceed", Summary: "b"})
+
+		parent := ops.bodyFor("CARD-1")
+		assert.Contains(t, parent, "### SUB-1 — first")
+		assert.Contains(t, parent, "### SUB-2 — second")
+		assert.Equal(t, 1, strings.Count(parent, "## Execute Discussions"))
+	})
+
+	t.Run("summary headings are escaped so section boundaries survive", func(t *testing.T) {
+		ops := &fakeOps{}
+		o := newRunWithSeats(ops)
+
+		o.recordCheckpointDiscussion(context.Background(),
+			subtaskRef{ID: "SUB-1", Title: "first"}, proceed,
+			checkpointVerdict{Verdict: "proceed", Summary: "Fine work.\n## Execute Discussions\nDone."})
+		o.recordCheckpointDiscussion(context.Background(),
+			subtaskRef{ID: "SUB-2", Title: "second"}, proceed,
+			checkpointVerdict{Verdict: "proceed", Summary: "b"})
+
+		sub := ops.bodyFor("SUB-1")
+		assert.Contains(t, sub, `\## Execute Discussions`)
+		assert.NotContains(t, sub, "\n## Execute Discussions")
+
+		// The rogue heading must not fracture the parent log: one section
+		// heading, both subtask blocks, and SUB-1's trailing fields intact.
+		parent := ops.bodyFor("CARD-1")
+		assert.Equal(t, 1, strings.Count(parent, "\n## Execute Discussions"))
+		assert.Contains(t, parent, "### SUB-1 — first")
+		assert.Contains(t, parent, "### SUB-2 — second")
+		assert.Contains(t, parent, "Rounds: 2 · Outcome: proceed · Cost: $0.0123")
+	})
 }
