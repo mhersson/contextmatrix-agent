@@ -3,8 +3,7 @@
 .envrc
 
 # Local point-in-time artifacts — never committed. Results docs and
-# capability sweeps go stale the moment models or fixtures change;
-# the tracked capabilities.json baseline is the one durable artifact.
+# capability sweeps go stale the moment models or fixtures change.
 transcripts/
 eval-out/
 *-RESULTS.md

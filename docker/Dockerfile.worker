@@ -30,7 +30,7 @@ RUN CGO_ENABLED=0 go build -trimpath -o /out/contextmatrix-agent ./cmd/contextma
 # uv — source image for the uv/uvx binaries copied into the Python toolchain.
 # Digest-pinned like the debian base below; refresh intentionally via
 #   docker buildx imagetools inspect ghcr.io/astral-sh/uv:<version>
-# uv 0.11.28 multi-arch index digest resolved 2026-07-09.
+# uv 0.11.29 multi-arch index digest resolved 2026-07-16.
 # ---------------------------------------------------------------------------
 FROM ghcr.io/astral-sh/uv:0.11.29@sha256:eb2843a1e56fd9e30c7276ce1a52cba86e64c7b385f5e3279a0e08e02dd058fc AS uv
 

@@ -675,7 +675,7 @@ func stopResp(content string, cost float64) llm.Response {
 }
 
 // finishResp is a coder/document turn that ends the run by calling the finish
-// tool with the given commit message (replaces the old stopResp COMMIT: prose).
+// tool with the given commit message.
 func finishResp(commitMessage string, cost float64) llm.Response {
 	args, _ := json.Marshal(map[string]string{"commit_message": commitMessage})
 
@@ -706,7 +706,7 @@ func planTestCatalog() llm.Catalog {
 }
 
 func planTestRegistry() *registry.Registry {
-	return registry.NewRegistry(nil, "default/model", planTestCatalog())
+	return registry.NewRegistry("default/model", planTestCatalog())
 }
 
 // isolateVerify pins a run's verify plan to a resolved skip and marks the

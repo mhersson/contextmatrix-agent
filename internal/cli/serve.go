@@ -87,13 +87,14 @@ func runServe(ctx context.Context, configPath string) error {
 	mx := metrics.New()
 
 	skillsCache := filepath.Join(cfg.SecretsDir, "task-skills-cache")
-	skillsResolver := taskskills.NewResolver(cfg.ContextMatrixURL, cfg.APIKey, skillsCache, logger)
+	skillsResolver := taskskills.NewResolver(cfg.ContextMatrixURL, cfg.APIKey, skillsCache)
 
 	// Per-run credentials: every admitted trigger carries a CM-provisioned git
-	// token; its credentials are staged into <secrets_dir>/runs/<card_id>/env
-	// and refreshed from CM until the run is torn down. There is no local
-	// credential source — a payload without CM-provisioned credentials is
-	// fail-closed rejected by the webhook launch guards.
+	// token; its credentials are staged into
+	// <secrets_dir>/runs/<project>/<card_id>/env and refreshed from CM until
+	// the run is torn down. There is no local credential source — a payload
+	// without CM-provisioned credentials is fail-closed rejected by the
+	// webhook launch guards.
 	credentials := secrets.NewRunCredentials(cfg.SecretsDir, cfg.ContextMatrixURL, cfg.APIKey, logger)
 
 	// Per-card container-output logs. Empty cfg.LogDir disables the feature; the

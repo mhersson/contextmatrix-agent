@@ -1,8 +1,9 @@
 # serve.yaml — contextmatrix-agent service configuration
 #
 # Copy to ~/.config/contextmatrix-agent/serve.yaml (the XDG default location)
-# and edit before starting the service. Every field can also be set or
-# overridden with a CMX_* environment variable (see each field below).
+# and edit before starting the service. Every scalar field can also be set or
+# overridden with a CMX_* environment variable; list/map fields are YAML-only
+# or use the nested CMX_…__KEY form (see each field below).
 
 # --- ContextMatrix connectivity -----------------------------------------------
 
@@ -53,8 +54,9 @@ log_level: info
 # containing the raw container output (as `docker logs -f` would show it). Files
 # are 0600 and MAY contain unredacted secrets from model/tool output. Empty (the
 # default) disables file logging. Logs are kept indefinitely; use an external
-# logrotate for retention. If this path is outside /var/run/cm-agent or
-# ~/.cm-agent, add it to ReadWritePaths in the systemd unit (see svc.sh).
+# logrotate for retention. If this path is outside /var/run/cm-agent,
+# ~/.cm-agent, or ~/.contextmatrix, add it to ReadWritePaths in the systemd
+# unit (see svc.sh).
 # CMX_LOG_DIR
 # log_dir: ~/.contextmatrix/agent/logs
 
@@ -106,8 +108,8 @@ idle_watchdog_interval: 30s
 
 # Host directory holding per-run credential files, each bind-mounted read-only
 # into its container at /run/cm-secrets. The agent stages the CM-provisioned
-# git token and LLM endpoint key into <secrets_dir>/runs/<card_id>/env and
-# refreshes the token from ContextMatrix until the run is torn down.
+# git token and LLM endpoint key into <secrets_dir>/runs/<project>/<card_id>/env
+# and refreshes the token from ContextMatrix until the run is torn down.
 # Default: /var/run/cm-agent/secrets.
 # CMX_SECRETS_DIR
 secrets_dir: /var/run/cm-agent/secrets
@@ -195,3 +197,21 @@ bash_timeout_max_seconds: 600
 # Default: 131072.
 # CMX_TOOL_OUTPUT_MAX_BYTES
 tool_output_max_bytes: 131072
+
+# --- Context compaction ---------------------------------------------------------
+
+# Opt-in in-window compaction in the worker loop. When disabled (the default),
+# nearing the context window emits a context_limit event and the subtask
+# returns incomplete — never a silent truncation. Default: false.
+# CMX_COMPACTION_ENABLED
+# compaction_enabled: false
+
+# Fraction of the context window at which compaction triggers. Must be in
+# (0, 1] when compaction is enabled. Default: 0.85.
+# CMX_COMPACTION_THRESHOLD
+# compaction_threshold: 0.85
+
+# Number of most-recent turns kept verbatim when compacting. Must be >= 1 when
+# compaction is enabled. Default: 6.
+# CMX_COMPACTION_KEEP_RECENT_TURNS
+# compaction_keep_recent_turns: 6

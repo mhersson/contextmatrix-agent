@@ -157,7 +157,6 @@ func Run(ctx context.Context, spec RunSpec, ops CardOps, client llm.LLM, emit *e
 
 	branchName := "cm/" + strings.ToLower(spec.CardID)
 
-	// 1-2: workspace + clone + branch.
 	ws := filepath.Join(spec.Workspace, strings.ToLower(spec.CardID))
 
 	git := NewGit(ws, secretsPathForAuth(spec), hostFromRepoURL(spec.RepoURL), spec.CACertFile)
@@ -173,7 +172,6 @@ func Run(ctx context.Context, spec RunSpec, ops CardOps, client llm.LLM, emit *e
 	// `git merge-base "" HEAD` fail).
 	spec.BaseBranch = resolvedBase
 
-	// 3: claim + context.
 	if err := ops.ClaimCard(ctx, spec.CardID); err != nil {
 		return releaseWithError(ctx, ops, spec.CardID, fmt.Errorf("claim card: %w", err))
 	}
@@ -185,7 +183,7 @@ func Run(ctx context.Context, spec RunSpec, ops CardOps, client llm.LLM, emit *e
 		return releaseWithError(ctx, ops, spec.CardID, fmt.Errorf("get task context: %w", err))
 	}
 
-	// 4: heartbeat goroutine for the whole run, including human waits.
+	// Heartbeat goroutine for the whole run, including human waits.
 	stopHeartbeat := startHeartbeat(runCtx, ops, spec.CardID)
 	defer stopHeartbeat()
 

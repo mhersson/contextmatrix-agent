@@ -281,7 +281,7 @@ func TestSpecFromEnv_DefaultModelFallback(t *testing.T) {
 		spec, err := specFromEnv()
 		require.NoError(t, err)
 		// Mirrors how specFromEnv derives the fallback: config's capable default.
-		assert.Equal(t, derefStr(config.Defaults().CapableModel), spec.DefaultModel)
+		assert.Equal(t, config.DefaultCapableModel, spec.DefaultModel)
 	})
 
 	t.Run("uses_env_override", func(t *testing.T) {

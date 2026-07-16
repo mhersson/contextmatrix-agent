@@ -136,7 +136,7 @@ func TestTierStringToRegistryTier(t *testing.T) {
 
 func TestPlanPhaseCreatesSubtasks(t *testing.T) {
 	ops := &fakeOps{
-		taskContext: cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body"},
+		taskContext: cmclient.TaskContext{Title: "Parent", Description: "body"},
 		createdIDs:  []string{"SUB-1", "SUB-2"},
 	}
 	llmFake := &planLLM{responses: []llm.Response{stopResp(goodPlanJSON, 0.01)}}
@@ -176,7 +176,7 @@ func TestPlanPhaseCreatesSubtasks(t *testing.T) {
 
 func TestPlanPhaseRepairLoop(t *testing.T) {
 	ops := &fakeOps{
-		taskContext: cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body"},
+		taskContext: cmclient.TaskContext{Title: "Parent", Description: "body"},
 		createdIDs:  []string{"SUB-1"},
 	}
 	// First response is junk (no JSON); second is a valid one-subtask plan.
@@ -206,7 +206,7 @@ func TestPlanPhaseRepairLoop(t *testing.T) {
 
 func TestPlanPhaseRepairExhausted(t *testing.T) {
 	ops := &fakeOps{
-		taskContext: cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body"},
+		taskContext: cmclient.TaskContext{Title: "Parent", Description: "body"},
 	}
 	// Both responses are junk: original + one repair both fail → hard error.
 	llmFake := &planLLM{responses: []llm.Response{
@@ -228,7 +228,7 @@ func TestPlanPhaseRepairExhausted(t *testing.T) {
 
 func TestPlanPhaseResume(t *testing.T) {
 	ops := &fakeOps{
-		taskContext: cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body"},
+		taskContext: cmclient.TaskContext{Title: "Parent", Description: "body"},
 		createdIDs:  []string{"SUB-1", "SUB-2"},
 	}
 	llmFake := &planLLM{responses: []llm.Response{stopResp(goodPlanJSON, 0.01)}}
@@ -258,7 +258,7 @@ func TestPlanPhaseResume(t *testing.T) {
 func TestPlanPhaseDiagnosesBugLikeCard(t *testing.T) {
 	ops := &fakeOps{
 		taskContext: cmclient.TaskContext{
-			CardID: "CARD-1", Title: "Fix the broken parser", Description: "it throws on empty input",
+			Title: "Fix the broken parser", Description: "it throws on empty input",
 		},
 		createdIDs: []string{"SUB-1", "SUB-2"},
 	}
@@ -291,7 +291,7 @@ func TestPlanPhaseDiagnosesBugLikeCard(t *testing.T) {
 func TestPlanPhaseSkipsDiagnoseForFeatureCard(t *testing.T) {
 	ops := &fakeOps{
 		taskContext: cmclient.TaskContext{
-			CardID: "CARD-1", Title: "Add a health endpoint", Description: "expose /healthz", Type: "task",
+			Title: "Add a health endpoint", Description: "expose /healthz", Type: "task",
 		},
 		createdIDs: []string{"SUB-1", "SUB-2"},
 	}
@@ -498,7 +498,7 @@ func hitlPlanRun(ops *fakeOps, inbox *fakeInbox, client llm.LLM) *run {
 	}
 
 	tc := cmclient.TaskContext{
-		CardID: "CARD-1", Title: "Add a palette",
+		Title:       "Add a palette",
 		Description: "## Design\n\nA palette config.", // present -> brainstorm skipped
 	}
 
@@ -538,7 +538,7 @@ func autoPlanRun(ops *fakeOps, client llm.LLM, maxTurns int) *run {
 	}
 
 	tc := cmclient.TaskContext{
-		CardID: "CARD-1", Title: "Add a config flag",
+		Title:       "Add a config flag",
 		Description: "Add a config flag to toggle the feature.",
 	}
 
@@ -615,7 +615,7 @@ func creativePlanRun(ops *fakeOps, inbox *fakeInbox, client llm.LLM) *run {
 	}
 
 	tc := cmclient.TaskContext{
-		CardID: "CARD-1", Title: "Add a palette",
+		Title:       "Add a palette",
 		Description: "Add colour-scheme support.", // no ## Design → brainstorm runs
 	}
 
@@ -683,7 +683,7 @@ func mobPlanRun(ops *fakeOps, client llm.LLM, eng *scriptedEngine) *run {
 	}
 
 	tc := cmclient.TaskContext{
-		CardID: "CARD-1", Title: "Add a config flag",
+		Title:       "Add a config flag",
 		Description: "Add a config flag to toggle the feature.",
 	}
 

@@ -47,20 +47,6 @@ func TestSectionFrom(t *testing.T) {
 	assert.Equal(t, "## Diagnosis\nalready", sectionFrom("Diagnosis", "  ## Diagnosis\nalready  "))
 }
 
-func TestFormatPlan(t *testing.T) {
-	subs := []subtaskRef{
-		{ID: "C-1", Title: "First", Body: "do A", Tier: "moderate"},
-		{ID: "C-2", Title: "Second", Body: "do B", Tier: "simple", DependsOnIDs: []string{"C-1"}},
-	}
-
-	got := formatPlan(subs)
-
-	assert.Contains(t, got, "### 1. C-1 — First")
-	assert.Contains(t, got, "_Tier: moderate · Depends on: none_")
-	assert.Contains(t, got, "### 2. C-2 — Second")
-	assert.Contains(t, got, "Depends on: C-1")
-}
-
 func TestFormatPlanReadable(t *testing.T) {
 	subs := []subtaskRef{
 		{ID: "X-2", Title: "Sysinfo pkg", Tier: "simple", Body: "Create go.mod and a sysinfo package.\n\nFiles: go.mod, sysinfo/sysinfo.go"},

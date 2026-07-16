@@ -163,13 +163,11 @@ func TestE2EHITLFullFlow(t *testing.T) {
 	// e2e_orchestrator_test.go (it satisfies CardOps + orchestrator.Ops).
 	ops := newStubOps()
 	ops.tcx = cmclient.TaskContext{
-		CardID:      "CMX-001",
 		Title:       "Add a configurable palette",
 		Description: "Let users configure the widget palette.",
 		State:       "in_progress",
 		Phase:       "",
 		Autonomous:  false,
-		BaseBranch:  "main",
 		CreatePR:    false,
 	}
 

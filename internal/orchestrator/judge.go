@@ -38,7 +38,6 @@ Respond with ONLY a JSON object:
 // judgeVerdict is the judge model's structured decision over the pool.
 type judgeVerdict struct {
 	Winner    int         `json:"winner"`
-	Ranking   []int       `json:"ranking"`
 	Rationale string      `json:"rationale"`
 	Notes     []judgeNote `json:"notes"`
 }
@@ -299,9 +298,8 @@ func survivingCandidates(cs []*candidate) []*candidate {
 
 // verifyingCandidates returns the subset whose verify PASSED, preserving order.
 // A verifyPassed status implies a command actually ran — an empty or skipped
-// gate never passes — so this single condition subsumes the old vacuous-green
-// guard: capped work is admissible only on a genuine pass, and uncapped work on
-// a pass keeps today's behavior. It is the strengthened salvage gate.
+// gate never passes — so capped work is admissible only on a genuine pass.
+// This is the salvage gate.
 func verifyingCandidates(cs []*candidate) []*candidate {
 	var out []*candidate
 

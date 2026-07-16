@@ -306,7 +306,7 @@ func TestRecordCheckpointDiscussion(t *testing.T) {
 
 	t.Run("proceed writes both cards and preserves the fetched subtask body", func(t *testing.T) {
 		ops := &fakeOps{taskContexts: map[string]cmclient.TaskContext{
-			"SUB-1": {CardID: "SUB-1", Description: "Original subtask description."},
+			"SUB-1": {Description: "Original subtask description."},
 		}}
 		o := newRunWithSeats(ops)
 

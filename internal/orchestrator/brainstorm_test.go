@@ -59,7 +59,7 @@ func brainstormRun(ops *fakeOps, inbox *fakeInbox, client llm.LLM, maxCost, repo
 		},
 	}
 
-	return newRun(d, cmclient.TaskContext{CardID: "CARD-1", Title: "Add a palette", Description: "body", ReportedCostUSD: reported})
+	return newRun(d, cmclient.TaskContext{Title: "Add a palette", Description: "body", ReportedCostUSD: reported})
 }
 
 func TestBrainstormRecordsDesignOnMarker(t *testing.T) {

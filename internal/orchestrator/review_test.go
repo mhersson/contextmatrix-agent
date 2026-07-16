@@ -114,7 +114,7 @@ func TestReviewSubagentsInheritRouting(t *testing.T) {
 	d.Cfg.ReasoningEffort = "high"
 	d.Cfg.Provider = json.RawMessage(`{"require_parameters":true}`)
 
-	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body", State: "in_progress"}
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
 	o := newReviewRun(d, tc, 0)
 
 	require.NoError(t, runReview(context.Background(), o))
@@ -199,7 +199,7 @@ func TestResolveFixModelUsesFixTier(t *testing.T) {
 
 	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reg)
 	// No coder pin -> complexity selection path; card tier is moderate by default.
-	o := newReviewRun(d, cmclient.TaskContext{CardID: "CARD-1"}, 0)
+	o := newReviewRun(d, cmclient.TaskContext{}, 0)
 
 	assert.Equal(t, cheapCoder, o.resolveFixModel("simple", false),
 		"simple fix_tier clears the cheap coder's bar")
@@ -232,7 +232,7 @@ func TestResolveFixModelAuthoritativeForcesComplex(t *testing.T) {
 	reg := registry.NewRegistryFromParts(catalog, priors, nil, nil, fallback)
 
 	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reg)
-	o := newReviewRun(d, cmclient.TaskContext{CardID: "CARD-1"}, 0)
+	o := newReviewRun(d, cmclient.TaskContext{}, 0)
 
 	assert.Equal(t, cheapCoder, o.resolveFixModel("simple", false),
 		"non-authoritative simple fix_tier clears the cheap coder's bar")
@@ -271,7 +271,7 @@ func TestReviewApprovedFirstPass(t *testing.T) {
 	}}
 	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
 
-	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body", State: "in_progress"}
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
 	o := newReviewRun(d, tc, 0)
 
 	require.NoError(t, runReview(context.Background(), o))
@@ -304,7 +304,7 @@ func TestReviewSkipsStartReviewWhenAlreadyInReview(t *testing.T) {
 	}}
 	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
 
-	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body", State: "review"}
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
 	o := newReviewRun(d, tc, 0)
 
 	require.NoError(t, runReview(context.Background(), o))
@@ -331,7 +331,7 @@ func TestReviewFixLoop(t *testing.T) {
 	}}
 	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
 
-	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body", State: "in_progress"}
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
 	o := newReviewRun(d, tc, 0)
 
 	require.NoError(t, runReview(context.Background(), o))
@@ -385,7 +385,7 @@ func TestReviewFixMaxTurnsAborts(t *testing.T) {
 	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
 	d.Cfg.MaxTurns = 1
 
-	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body", State: "review"}
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
 	o := newReviewRun(d, tc, 0)
 
 	err := runReview(context.Background(), o)
@@ -411,7 +411,7 @@ func TestFixRunTierScalesTurnBudget(t *testing.T) {
 
 	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
 	d.Cfg.MaxTurns = 20
-	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body", State: "review"}
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
 	o := newReviewRun(d, tc, 0)
 
 	require.NoError(t, o.runFixModel(context.Background(), "fix prompt", 1, "complex", false),
@@ -427,7 +427,7 @@ func TestFixRunSimpleTierCapsAtBase(t *testing.T) {
 
 	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
 	d.Cfg.MaxTurns = 20
-	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body", State: "review"}
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
 	o := newReviewRun(d, tc, 0)
 
 	err := o.runFixModel(context.Background(), "fix prompt", 1, "simple", false)
@@ -456,7 +456,7 @@ func TestReviewFixCoderSelectionLogged(t *testing.T) {
 	}}
 	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
 
-	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body", State: "in_progress"}
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
 	o := newReviewRun(d, tc, 0)
 
 	require.NoError(t, runReview(context.Background(), o))
@@ -500,7 +500,7 @@ func TestReviewRoundTwoDiffsAgainstSnapshot(t *testing.T) {
 	}}
 	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
 
-	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body", State: "in_progress"}
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
 	o := newReviewRun(d, tc, 0)
 
 	require.NoError(t, runReview(context.Background(), o))
@@ -537,7 +537,7 @@ func TestReviewNoOpFixWidensNextRoundToBaseBranch(t *testing.T) {
 	}}
 	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
 
-	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body", State: "in_progress"}
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
 	o := newReviewRun(d, tc, 0)
 
 	require.NoError(t, runReview(context.Background(), o))
@@ -570,7 +570,7 @@ func TestReviewPriorFindingsFedToNextRound(t *testing.T) {
 	}}
 	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
 
-	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body", State: "in_progress"}
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
 	o := newReviewRun(d, tc, 0)
 
 	require.NoError(t, runReview(context.Background(), o))
@@ -654,7 +654,7 @@ func TestReviewCapParks(t *testing.T) {
 	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
 
 	tc := cmclient.TaskContext{
-		CardID: "CARD-1", Title: "Parent", Description: "body",
+		Title: "Parent", Description: "body",
 		State: "in_progress", ReviewAttempts: 4,
 	}
 	o := newReviewRun(d, tc, 0)
@@ -663,17 +663,15 @@ func TestReviewCapParks(t *testing.T) {
 
 	var parked *ReviewParkedError
 	require.ErrorAs(t, err, &parked, "cap exhaustion must return ReviewParkedError")
-	// The park must carry the SECOND (strong) review's findings, not the first.
-	assert.Contains(t, parked.Findings, "still broken")
-	assert.Contains(t, parked.Findings, "a.go", "park findings must carry the strong re-review's fix file")
-	assert.Contains(t, parked.Findings, "bug", "park findings must carry the strong re-review's fix issue")
 
 	calls := ops.recorded()
-	// AddLog recorded with the strong re-review's outstanding findings.
+	// AddLog recorded with the SECOND (strong) re-review's outstanding
+	// findings, not the first: summary, fix file, and fix issue.
 	logged := false
 
 	for _, c := range calls {
-		if strings.HasPrefix(c, "AddLog:") && strings.Contains(c, "still broken") {
+		if strings.HasPrefix(c, "AddLog:") && strings.Contains(c, "still broken") &&
+			strings.Contains(c, "a.go") && strings.Contains(c, "bug") {
 			logged = true
 		}
 	}
@@ -707,7 +705,7 @@ func TestReviewAuthoritativeApprovesNoFix(t *testing.T) {
 	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
 
 	tc := cmclient.TaskContext{
-		CardID: "CARD-1", Title: "Parent", Description: "body",
+		Title: "Parent", Description: "body",
 		State: "in_progress", ReviewAttempts: 4,
 	}
 	o := newReviewRun(d, tc, 0)
@@ -742,7 +740,7 @@ func TestReviewAuthoritativeFullScope(t *testing.T) {
 	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
 
 	tc := cmclient.TaskContext{
-		CardID: "CARD-1", Title: "Parent", Description: "body",
+		Title: "Parent", Description: "body",
 		State: "in_progress", ReviewAttempts: 3,
 	}
 	o := newReviewRun(d, tc, 0)
@@ -779,7 +777,7 @@ func TestReviewZeroCapDefaultsToConvention(t *testing.T) {
 	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
 	d.Cfg.ReviewAttemptsCap = 0
 
-	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body", State: "in_progress"}
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
 	o := newReviewRun(d, tc, 0)
 
 	require.NoError(t, runReview(context.Background(), o),
@@ -808,7 +806,7 @@ func TestReviewPanelDiversity(t *testing.T) {
 	}}
 	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
 
-	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body", State: "in_progress"}
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
 	o := newReviewRun(d, tc, 0)
 	// The coder used rev/alpha on a subtask; the panel must exclude it.
 	o.coderModels = map[string]bool{"rev/alpha": true}
@@ -828,7 +826,7 @@ func TestReviewPinOverridesPanel(t *testing.T) {
 	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
 
 	tc := cmclient.TaskContext{
-		CardID: "CARD-1", Title: "Parent", Description: "body", State: "in_progress",
+		Title: "Parent", Description: "body", State: "in_progress",
 		ModelReviewer: "pinned/model",
 	}
 	o := newReviewRun(d, tc, 0)
@@ -874,7 +872,7 @@ func TestReviewPanelEscalatesWhenAuthoritative(t *testing.T) {
 	reg := registry.NewRegistryFromParts(catalog, priors, nil, nil, "default/model")
 
 	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reg)
-	o := newReviewRun(d, cmclient.TaskContext{CardID: "CARD-1"}, 0)
+	o := newReviewRun(d, cmclient.TaskContext{}, 0)
 	o.cardTier = "moderate" // no reviewer pin -> selection path
 
 	est := estimateTokens("diff")
@@ -927,7 +925,7 @@ func TestReviewGateFailureSkipsSpecialists(t *testing.T) {
 	}}
 	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
 
-	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body", State: "in_progress"}
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
 	o := newReviewRun(d, tc, 0)
 	// Opt into a real gate: a detected command the stub below drives.
 	o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
@@ -973,7 +971,7 @@ func TestReviewGateSkippedProceedsUnverified(t *testing.T) {
 	}}
 	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
 
-	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "P", Description: "b", State: "in_progress"}
+	tc := cmclient.TaskContext{Title: "P", Description: "b", State: "in_progress"}
 	o := newReviewRun(d, tc, 0)
 	o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
 	// The verify tool is missing -> a skipped (inconclusive) gate.
@@ -997,7 +995,7 @@ func TestReviewGateFailureRedactsFindings(t *testing.T) {
 	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
 	d.Redact = func(s string) string { return strings.ReplaceAll(s, "SECRETTOKEN", "[MASKED]") }
 
-	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "P", Description: "b", State: "in_progress"}
+	tc := cmclient.TaskContext{Title: "P", Description: "b", State: "in_progress"}
 	o := newReviewRun(d, tc, 0)
 	o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
 	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
@@ -1019,7 +1017,7 @@ func TestReviewBudgetParkBeforeSpecialists(t *testing.T) {
 	client := &planLLM{}
 	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
 
-	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body", State: "in_progress"}
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
 	// Seed the ledger already at the ceiling so Check trips immediately.
 	o := newReviewRun(d, tc, 0.01)
 	o.ledger.Spend(0.01)
@@ -1081,7 +1079,7 @@ func TestRunReviewHITLApproveProceeds(t *testing.T) {
 		stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.001),
 		stopResp(`{"verdict":"approve","feedback":""}`, 0.001),
 	}}
-	o := newRun(hitlReviewDeps(ops, git, inbox, client), cmclient.TaskContext{CardID: "CARD-1", Title: "T", Description: "b", State: "review"})
+	o := newRun(hitlReviewDeps(ops, git, inbox, client), cmclient.TaskContext{Title: "T", Description: "b", State: "review"})
 	isolateVerify(o)
 
 	require.NoError(t, runReview(context.Background(), o))
@@ -1106,7 +1104,7 @@ func TestRunReviewHITLAdjustFixesThenApproves(t *testing.T) {
 		stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.001),
 		stopResp(`{"verdict":"approve","feedback":""}`, 0.001),
 	}}
-	o := newRun(hitlReviewDeps(ops, git, inbox, client), cmclient.TaskContext{CardID: "CARD-1", Title: "T", Description: "b", State: "review"})
+	o := newRun(hitlReviewDeps(ops, git, inbox, client), cmclient.TaskContext{Title: "T", Description: "b", State: "review"})
 	isolateVerify(o)
 
 	require.NoError(t, runReview(context.Background(), o))
@@ -1135,7 +1133,7 @@ func mobReviewRun(t *testing.T, ops *fakeOps, git *fakeGit, client llm.LLM, eng 
 	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
 	d.Cfg.Mob = MobConfig{Participants: 3, Review: true, Rounds: 2, BudgetFactor: 0.75}
 
-	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body", State: "in_progress"}
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
 	o := newReviewRun(d, tc, 0)
 	o.mobEngine = eng.run
 

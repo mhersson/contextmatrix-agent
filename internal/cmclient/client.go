@@ -177,7 +177,6 @@ type ImageBlob struct {
 // intentionally ignored.
 type TaskContext struct {
 	// Base fields — populated for all cards.
-	CardID      string
 	Title       string
 	Description string
 	State       string
@@ -193,7 +192,6 @@ type TaskContext struct {
 	Phase             string
 	Autonomous        bool
 	CreatePR          bool
-	BaseBranch        string
 	ReviewAttempts    int
 	ModelOrchestrator string
 	ModelCoder        string
@@ -331,7 +329,6 @@ func (c *Client) GetTaskContext(ctx context.Context, cardID string, includeImage
 	// config}. Only the card is parsed; parent/siblings/config are ignored.
 	var payload struct {
 		Card struct {
-			ID                string   `json:"id"`
 			Title             string   `json:"title"`
 			Body              string   `json:"body"`
 			State             string   `json:"state"`
@@ -340,7 +337,6 @@ func (c *Client) GetTaskContext(ctx context.Context, cardID string, includeImage
 			Phase             string   `json:"phase"`
 			Autonomous        bool     `json:"autonomous"`
 			CreatePR          bool     `json:"create_pr"`
-			BaseBranch        string   `json:"base_branch"`
 			ReviewAttempts    int      `json:"review_attempts"`
 			ModelOrchestrator string   `json:"model_orchestrator"`
 			ModelCoder        string   `json:"model_coder"`
@@ -355,7 +351,6 @@ func (c *Client) GetTaskContext(ctx context.Context, cardID string, includeImage
 	}
 
 	tc := TaskContext{
-		CardID:            payload.Card.ID,
 		Title:             payload.Card.Title,
 		Description:       payload.Card.Body,
 		State:             payload.Card.State,
@@ -364,7 +359,6 @@ func (c *Client) GetTaskContext(ctx context.Context, cardID string, includeImage
 		Phase:             payload.Card.Phase,
 		Autonomous:        payload.Card.Autonomous,
 		CreatePR:          payload.Card.CreatePR,
-		BaseBranch:        payload.Card.BaseBranch,
 		ReviewAttempts:    payload.Card.ReviewAttempts,
 		ModelOrchestrator: payload.Card.ModelOrchestrator,
 		ModelCoder:        payload.Card.ModelCoder,

@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -33,7 +32,6 @@ type Resolver struct {
 	apiKey   string
 	cacheDir string
 	http     *http.Client
-	logger   *slog.Logger
 
 	// cloner is the clone implementation; overridable in tests. Production uses
 	// gitClone (a shallow git fetch+checkout with the CM-provisioned token).
@@ -46,17 +44,12 @@ type Resolver struct {
 // NewResolver builds a Resolver. cmURL is ContextMatrix's base URL, apiKey the
 // agent backend HMAC key, cacheDir a host directory the clone lands in (and the
 // executor binds).
-func NewResolver(cmURL, apiKey, cacheDir string, logger *slog.Logger) *Resolver {
-	if logger == nil {
-		logger = slog.Default()
-	}
-
+func NewResolver(cmURL, apiKey, cacheDir string) *Resolver {
 	r := &Resolver{
 		cmURL:    strings.TrimRight(cmURL, "/"),
 		apiKey:   apiKey,
 		cacheDir: cacheDir,
 		http:     &http.Client{Timeout: requestTimeout},
-		logger:   logger,
 	}
 	r.cloner = r.gitClone
 

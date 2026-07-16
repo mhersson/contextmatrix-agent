@@ -3,8 +3,6 @@ package taskskills
 import (
 	"context"
 	"encoding/json"
-	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -13,12 +11,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// discardLogger returns a logger that swallows output, for tests that only
-// care about Resolve's return values.
-func discardLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
 
 func TestResolveFetchesPointerClonesAndCaches(t *testing.T) {
 	var hits int32
@@ -44,7 +36,7 @@ func TestResolveFetchesPointerClonesAndCaches(t *testing.T) {
 		return nil
 	}
 
-	r := NewResolver(srv.URL, "key", t.TempDir(), discardLogger())
+	r := NewResolver(srv.URL, "key", t.TempDir())
 	r.cloner = cloner
 
 	dir, err := r.Resolve(context.Background())
@@ -68,7 +60,7 @@ func TestResolveEmptyPointerYieldsNoSkills(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	r := NewResolver(srv.URL, "key", t.TempDir(), nil)
+	r := NewResolver(srv.URL, "key", t.TempDir())
 	r.cloner = func(context.Context, string, string, string, string) error { return nil }
 
 	_, err := r.Resolve(context.Background())
@@ -88,7 +80,7 @@ func TestGitCloneRejectsDashLeadingRef(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		r := NewResolver(srv.URL, "key", t.TempDir(), nil)
+		r := NewResolver(srv.URL, "key", t.TempDir())
 		r.cloner = func(_ context.Context, _, _, _, _ string) error {
 			t.Fatal("cloner must not be called with a dash-leading ref")
 
@@ -108,7 +100,7 @@ func TestGitCloneRejectsDashLeadingRef(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		r := NewResolver(srv.URL, "key", t.TempDir(), nil)
+		r := NewResolver(srv.URL, "key", t.TempDir())
 		r.cloner = func(_ context.Context, _, _, _, _ string) error {
 			t.Fatal("cloner must not be called with a dash-leading URL")
 
@@ -139,7 +131,7 @@ func TestResolveDoesNotCacheFailure(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	r := NewResolver(srv.URL, "key", t.TempDir(), discardLogger())
+	r := NewResolver(srv.URL, "key", t.TempDir())
 	r.cloner = func(context.Context, string, string, string, string) error { return nil }
 
 	_, err := r.Resolve(context.Background())
@@ -166,7 +158,7 @@ func TestResolveUsesCMProvisionedTokenWhenPresent(t *testing.T) {
 
 	var gotTok string
 
-	r := NewResolver(srv.URL, "key", t.TempDir(), nil)
+	r := NewResolver(srv.URL, "key", t.TempDir())
 	r.cloner = func(_ context.Context, _, _, _, token string) error {
 		gotTok = token
 
@@ -190,7 +182,7 @@ func TestResolveErrorsWhenTokenAbsent(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	r := NewResolver(srv.URL, "key", t.TempDir(), discardLogger())
+	r := NewResolver(srv.URL, "key", t.TempDir())
 	r.cloner = func(context.Context, string, string, string, string) error {
 		t.Fatal("cloner must not be called without a clone token")
 
@@ -238,7 +230,7 @@ func TestResolveTokenExpiresAtAbsentMalformed(t *testing.T) {
 
 			var gotTok string
 
-			r := NewResolver(srv.URL, "key", t.TempDir(), discardLogger())
+			r := NewResolver(srv.URL, "key", t.TempDir())
 			r.cloner = func(_ context.Context, _, _, _, token string) error {
 				gotTok = token
 

@@ -11,7 +11,6 @@ import (
 func TestSpecFixedConstants(t *testing.T) {
 	assert.Equal(t, 16*1024, utteranceCap)
 	assert.Equal(t, "\n[truncated by moderator]", truncationMarker)
-	assert.Equal(t, 8, maxSeatTurns)
 	assert.Equal(t, 240*time.Second, internalTurnDeadline)
 	assert.Equal(t, 300*time.Second, guestTurnDeadline)
 }

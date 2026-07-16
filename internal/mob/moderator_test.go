@@ -68,12 +68,10 @@ func TestSendTurnHappyPathPersistsTask(t *testing.T) {
 	t.Cleanup(func() { h.closeSeat(context.Background()) })
 
 	assert.Equal(t, internalTurnDeadline, h.deadline)
-	assert.False(t, h.guest)
 
 	u1, err := h.sendTurn(t.Context(), 0, "body-0")
 	require.NoError(t, err)
 	assert.Equal(t, "reply-1", u1)
-	assert.False(t, h.absent)
 	assert.InDelta(t, 0.01, h.lastCost, 1e-12)
 	require.NotEmpty(t, h.taskID)
 
@@ -136,7 +134,6 @@ func TestSendTurnTimeoutReplacesTask(t *testing.T) {
 
 	_, err = h.sendTurn(t.Context(), 1, "body-1")
 	require.ErrorIs(t, err, errTurnTimeout)
-	assert.True(t, h.absent)
 	assert.Empty(t, h.taskID, "timed-out task must be cleared for replacement")
 
 	select {
@@ -152,7 +149,6 @@ func TestSendTurnTimeoutReplacesTask(t *testing.T) {
 	u3, err := h.sendTurn(t.Context(), 2, "full snapshot body")
 	require.NoError(t, err)
 	assert.Equal(t, "reply-3", u3)
-	assert.False(t, h.absent)
 	require.NotEmpty(t, h.taskID)
 	assert.NotEqual(t, tid, h.taskID, "replacement must be a new task")
 	assert.Empty(t, rec.get(2), "fresh task starts with empty history")
@@ -229,7 +225,6 @@ func TestDialGuestResolvesCardAndTalks(t *testing.T) {
 	t.Cleanup(func() { h.closeSeat(context.Background()) })
 
 	assert.Equal(t, "guest-laptop", h.name)
-	assert.True(t, h.guest)
 	assert.Equal(t, guestTurnDeadline, h.deadline)
 
 	u, err := h.sendTurn(t.Context(), 0, "briefing")

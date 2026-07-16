@@ -26,8 +26,8 @@ func TestPriorsForRole(t *testing.T) {
 
 func TestPriorsForRoleOmittedVsExplicitZero(t *testing.T) {
 	// A model entry that sets only coder has NO reviewer prior (ok == false) —
-	// the selector must fall back to measured scores, not treat it as a prior
-	// of zero. An explicit 0 is a deliberate curator statement: (0, true).
+	// the selector must not treat it as a prior of zero. An explicit 0 is a
+	// deliberate curator statement: (0, true).
 	onlyCoder, zeroCoder, zeroReviewer := 0.88, 0.70, 0.0
 	p := Priors{Models: map[string]PriorEntry{
 		"only/coder":    {Coder: &onlyCoder},

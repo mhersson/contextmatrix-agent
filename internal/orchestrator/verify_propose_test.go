@@ -86,7 +86,7 @@ func newProposeRun(t *testing.T, ops *fakeOps, client llm.LLM, workspace string)
 	d := planTestDeps(ops, client)
 	d.Cfg.Workspace = workspace
 
-	return newRun(d, cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body"})
+	return newRun(d, cmclient.TaskContext{Title: "Parent", Description: "body"})
 }
 
 func TestProposeVerifyAcceptedAndCached(t *testing.T) {

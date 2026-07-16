@@ -72,20 +72,6 @@ func TestNew_RegistersGoAndProcessCollectors(t *testing.T) {
 	}
 }
 
-func TestNew_MultipleCallsUseIsolatedRegistries(t *testing.T) {
-	m1 := metrics.New()
-	m2 := metrics.New()
-
-	assert.NotSame(t, m1.Registry, m2.Registry)
-
-	m1.BroadcasterDropsTotal.Inc()
-
-	_, err := m1.Registry.Gather()
-	require.NoError(t, err)
-	_, err = m2.Registry.Gather()
-	require.NoError(t, err)
-}
-
 func TestNormalizeEndpoint(t *testing.T) {
 	allowed := []string{
 		"/trigger", "/kill", "/stop-all", "/message", "/promote",

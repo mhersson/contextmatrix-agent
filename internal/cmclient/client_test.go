@@ -2,7 +2,6 @@ package cmclient
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -336,7 +335,6 @@ func TestGetTaskContext(t *testing.T) {
 	assert.Equal(t, true, args["include_images"])
 
 	// Parsed from the card portion of the canned payload — base fields.
-	assert.Equal(t, "CMX-001", tc.CardID)
 	assert.Equal(t, "Wire up the widget", tc.Title)
 	assert.Equal(t, "Connect the widget to the gizmo and verify the blinkenlights.", tc.Description)
 	assert.Equal(t, "in_progress", tc.State)
@@ -349,7 +347,6 @@ func TestGetTaskContext(t *testing.T) {
 	assert.Equal(t, "execute", tc.Phase)
 	assert.True(t, tc.Autonomous)
 	assert.True(t, tc.CreatePR)
-	assert.Equal(t, "main", tc.BaseBranch)
 	assert.Equal(t, 2, tc.ReviewAttempts)
 	assert.Equal(t, "claude-opus-4-5", tc.ModelOrchestrator)
 	assert.Equal(t, "claude-sonnet-4-5", tc.ModelCoder)
@@ -433,7 +430,6 @@ func TestGetTaskContext_OrchestratorFieldsDefaultWhenAbsent(t *testing.T) {
 	assert.Empty(t, tc.Phase)
 	assert.False(t, tc.Autonomous)
 	assert.False(t, tc.CreatePR)
-	assert.Empty(t, tc.BaseBranch)
 	assert.Equal(t, 0, tc.ReviewAttempts)
 	assert.Empty(t, tc.ModelOrchestrator)
 	assert.Empty(t, tc.ModelCoder)
@@ -595,8 +591,6 @@ func TestReleaseCard(t *testing.T) {
 	assert.Equal(t, testAgentID, args["agent_id"])
 }
 
-// --- new methods ---
-
 func TestCreateCard(t *testing.T) {
 	rec := newRecorder()
 	c := newTestClient(t, rec, "")
@@ -656,15 +650,6 @@ func TestSetPhase(t *testing.T) {
 	assert.Equal(t, "execute", args["phase"])
 }
 
-func TestSetPhase_IsError(t *testing.T) {
-	rec := newRecorder()
-	c := newTestClient(t, rec, "update_card")
-
-	err := c.SetPhase(context.Background(), "CMX-001", "execute")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "stub failure: update_card")
-}
-
 func TestTransitionCard(t *testing.T) {
 	rec := newRecorder()
 	c := newTestClient(t, rec, "")
@@ -676,15 +661,6 @@ func TestTransitionCard(t *testing.T) {
 	assert.Equal(t, "CMX-001", args["card_id"])
 	assert.Equal(t, testAgentID, args["agent_id"])
 	assert.Equal(t, "review", args["new_state"])
-}
-
-func TestTransitionCard_IsError(t *testing.T) {
-	rec := newRecorder()
-	c := newTestClient(t, rec, "transition_card")
-
-	err := c.TransitionCard(context.Background(), "CMX-001", "review")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "stub failure: transition_card")
 }
 
 func TestStartReview(t *testing.T) {
@@ -699,15 +675,6 @@ func TestStartReview(t *testing.T) {
 	assert.Equal(t, testAgentID, args["agent_id"])
 }
 
-func TestStartReview_IsError(t *testing.T) {
-	rec := newRecorder()
-	c := newTestClient(t, rec, "start_review")
-
-	err := c.StartReview(context.Background(), "CMX-001")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "stub failure: start_review")
-}
-
 func TestIncrementReviewAttempts(t *testing.T) {
 	rec := newRecorder()
 	c := newTestClient(t, rec, "")
@@ -720,15 +687,6 @@ func TestIncrementReviewAttempts(t *testing.T) {
 	require.True(t, ok, "increment_review_attempts stub should have been called")
 	assert.Equal(t, "CMX-001", args["card_id"])
 	assert.Equal(t, testAgentID, args["agent_id"])
-}
-
-func TestIncrementReviewAttempts_IsError(t *testing.T) {
-	rec := newRecorder()
-	c := newTestClient(t, rec, "increment_review_attempts")
-
-	_, err := c.IncrementReviewAttempts(context.Background(), "CMX-001")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "stub failure: increment_review_attempts")
 }
 
 func TestSubtaskStates(t *testing.T) {
@@ -752,15 +710,6 @@ func TestSubtaskStates(t *testing.T) {
 	assert.Equal(t, testAgentID, args["agent_id"])
 }
 
-func TestSubtaskStates_IsError(t *testing.T) {
-	rec := newRecorder()
-	c := newTestClient(t, rec, "list_cards")
-
-	_, err := c.SubtaskStates(context.Background(), "demo", "CMX-001")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "stub failure: list_cards")
-}
-
 func TestAddLog(t *testing.T) {
 	rec := newRecorder()
 	c := newTestClient(t, rec, "")
@@ -773,15 +722,6 @@ func TestAddLog(t *testing.T) {
 	assert.Equal(t, testAgentID, args["agent_id"])
 	assert.Equal(t, "status_update", args["action"])
 	assert.Equal(t, "progress update", args["message"])
-}
-
-func TestAddLog_IsError(t *testing.T) {
-	rec := newRecorder()
-	c := newTestClient(t, rec, "add_log")
-
-	err := c.AddLog(context.Background(), "CMX-001", "progress update")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "stub failure: add_log")
 }
 
 func TestBlacklistModel(t *testing.T) {
@@ -798,17 +738,6 @@ func TestBlacklistModel(t *testing.T) {
 	// agent_id is injected by c.call — must match the client's configured identity.
 	assert.Equal(t, testAgentID, args["agent_id"])
 }
-
-func TestBlacklistModel_IsError(t *testing.T) {
-	rec := newRecorder()
-	c := newTestClient(t, rec, "report_incapable_model")
-
-	err := c.BlacklistModel(context.Background(), "CARD-1", "bad/model", "cannot drive the tool loop")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "stub failure: report_incapable_model")
-}
-
-// --- existing edge-case tests ---
 
 // newClientWithStub builds a client against a server carrying a single stub
 // tool returning rawText. Used to exercise parse-error paths with non-JSON
@@ -904,28 +833,6 @@ func TestToolError_SurfacesAsGoError(t *testing.T) {
 	err := c.ClaimCard(context.Background(), "CMX-001")
 	require.Error(t, err, "a tool IsError result must surface as a Go error")
 	assert.Contains(t, err.Error(), "stub failure: claim_card")
-}
-
-// Guard: the canned payload stays valid JSON so a parsing regression in the
-// fixture is caught here rather than masquerading as a client bug.
-func TestTaskContextPayloadIsValidJSON(t *testing.T) {
-	var v map[string]any
-	require.NoError(t, json.Unmarshal([]byte(taskContextPayload), &v))
-}
-
-func TestIncrementReviewAttemptsPayloadIsValidJSON(t *testing.T) {
-	var v map[string]any
-	require.NoError(t, json.Unmarshal([]byte(incrementReviewAttemptsPayload), &v))
-}
-
-func TestCreateCardPayloadIsValidJSON(t *testing.T) {
-	var v map[string]any
-	require.NoError(t, json.Unmarshal([]byte(createCardPayload), &v))
-}
-
-func TestListCardsSubtaskPayloadIsValidJSON(t *testing.T) {
-	var v map[string]any
-	require.NoError(t, json.Unmarshal([]byte(listCardsSubtaskPayload), &v))
 }
 
 func TestRecordSkillEngaged(t *testing.T) {

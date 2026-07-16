@@ -6,11 +6,10 @@
 > at the current stage.
 
 A custom Go agent harness with a configurable LLM endpoint that runs as a ContextMatrix
-**task backend**. It replaces Claude Code headless as the in-container agent:
-ContextMatrix dispatches a card, this service launches a Docker worker container,
-and the worker drives a hand-built model-in-the-loop harness — claiming the card,
-working the code in a target repository, and reporting progress back to the board
-over MCP.
+**task backend**: ContextMatrix dispatches a card, this service launches a Docker
+worker container, and the worker drives a hand-built model-in-the-loop harness —
+claiming the card, working the code in a target repository, and reporting
+progress back to the board over MCP.
 
 It is for operators who run [ContextMatrix](https://github.com/mhersson/contextmatrix)
 and want model-flexible, cost-optimized autonomous execution: any
@@ -43,7 +42,7 @@ flowchart LR
 
     subgraph serve["contextmatrix-agent serve · host service"]
         direction TB
-        S["Hosts CM lifecycle webhooks<br/>Launches one Docker worker per card<br/>Mints GitHub tokens · stages secrets<br/>Streams /logs · drains on SIGTERM"]
+        S["Hosts CM lifecycle webhooks<br/>Launches one Docker worker per card<br/>Stages + refreshes CM-provisioned secrets<br/>Streams /logs · drains on SIGTERM"]
     end
 
     subgraph work["contextmatrix-agent work · one Docker container per card"]
@@ -79,16 +78,21 @@ card fields set in ContextMatrix:
   Losing candidates never push and are removed.
 - **Mob session** (`mob_participants` ≥ 2) — the plan and review phases
   convene a moderated multi-seat discussion over the A2A protocol (loopback
-  JSON-RPC seats plus optional registered guest agents); the decision model
-  synthesizes the group's answer into the phase's normal output, and the live
-  transcript streams to the card's chat tab on the board. Discussions degrade
-  to the solo path rather than failing the run, and mob session composes freely with
-  a Best-of-N execute race.
+  JSON-RPC seats plus optional registered guest agents); when the card's
+  execute-checkpoints flag is set, the execute phase additionally convenes a
+  per-subtask checkpoint discussion ending in a proceed/revise verdict,
+  tier-gated via the checkpoint min-tier. The decision model synthesizes each
+  group's answer into the phase's normal output, and the live transcript
+  streams to the card's chat tab on the board. Discussions degrade to the solo
+  path rather than failing the run, and mob session composes freely with a
+  Best-of-N execute race.
 
 The inner loop lives in the standalone `github.com/mhersson/contextmatrix-harness`
 module (`events`, `llm`, `tools`, `harness`, `redact`) — FSM-free and
-dependency-free, shared with a planned chat backend. This service wraps it with
-the task FSM (`orchestrator`/`worker`) to execute board cards.
+dependency-free, shared with the
+[contextmatrix-chat](https://github.com/mhersson/contextmatrix-chat) backend.
+This service wraps it with the task FSM (`orchestrator`/`worker`) to execute
+board cards.
 
 ## Requirements
 
@@ -96,8 +100,9 @@ the task FSM (`orchestrator`/`worker`) to execute board cards.
 - **Docker** on the host running `serve` (the worker runtime).
 - An **LLM endpoint API key** with access to the models you route to.
 - A reachable **ContextMatrix** instance (API + MCP) and its MCP API key.
-- **GitHub auth** — a GitHub App (App ID + installation ID + private key) or a
-  fine-grained PAT — for cloning and pushing target repositories.
+- **GitHub auth configured in ContextMatrix** (a GitHub App or a fine-grained
+  PAT) — ContextMatrix mints per-run tokens for cloning and pushing target
+  repositories; the agent itself carries no GitHub credentials.
 
 ## Quick start: the harness, standalone
 
@@ -124,40 +129,38 @@ export LLM_API_KEY=<your-api-key>
 ## Running as a ContextMatrix backend
 
 1. **Build the worker image.** The worker image bundles the agent binary plus
-   the CLIs the harness expects. The default (`full`) image carries `git`, `rg`,
-   `fd`, `gh`, `node`, and the **Go, Python, and Rust** toolchains: the Go
-   toolchain with `golangci-lint` and `gofumpt`; Python via `uv`/`uvx` (a managed
-   CPython) with `ty` and `ruff`; and Rust via `rustup`/`cargo` with `clippy` and
-   `rustfmt`. Toolchain versions are pinned and SHA256-verified.
+   the CLIs the harness expects; toolchain versions are pinned and
+   SHA256-verified.
 
    ```bash
    make docker-worker          # tags contextmatrix-agent-worker:dev (full)
    ```
 
-   The image also ships slimmer single-language variants, selectable per project
-   via the board's `remote_execution.worker_image`:
+   The image ships in four variants, selectable per project via the board's
+   `remote_execution.worker_image`:
 
-   | Variant   | Toolchains                                             |
-   | --------- | ------------------------------------------------------ |
-   | `full`    | Everything below — the default (`:dev` / `:latest`).   |
-   | `go-node` | Go (+ golangci-lint, gofumpt) + Node.                  |
-   | `python`  | Node + uv/uvx + CPython + ty + ruff.                   |
-   | `rust`    | rustup/cargo (+ clippy, rustfmt). No Node.             |
+   | Variant   | Toolchains                                                             |
+   | --------- | ---------------------------------------------------------------------- |
+   | `full`    | Go, Node, Python, Rust toolchains — the default (`:dev` / `:latest`).  |
+   | `go-node` | Go (+ golangci-lint, gofumpt) + Node.                                  |
+   | `python`  | Node + uv/uvx + CPython + ty + ruff.                                   |
+   | `rust`    | rustup/cargo (+ clippy, rustfmt). No Node.                             |
 
    Every variant also carries the baseline CLIs (`git`, `gh`, `rg`, `fd`). Build
    the slim variants with `make docker-worker-variants` (tags
    `contextmatrix-agent-worker:go-node`, `:python`, `:rust`).
 
-   The default (`full`) image covers Go, Node, Python, and Rust; **any other
-   ecosystem ⇒ set the project's `remote_execution.worker_image` to a custom
-   image** (see `docs/custom-images.md`).
+   **Any other ecosystem ⇒ set the project's `remote_execution.worker_image` to
+   a custom image** — see `docs/custom-images.md`.
 
    For deployment, publish a digest-pinned image (for example
    `ghcr.io/mhersson/contextmatrix-agent@sha256:...`) and reference it from
    `base_image`.
 
-2. **Write the service config.** Copy the template and edit it. Every field also
-   has a `CMX_*` environment override (e.g. `CMX_BASE_IMAGE`).
+2. **Write the service config.** Copy the template and edit it. Every scalar
+   field also has a `CMX_*` environment override (e.g. `CMX_BASE_IMAGE`);
+   list/map fields are YAML-only or use the nested `CMX_…__KEY` form — see each
+   field's note in the template.
 
    ```bash
    mkdir -p ~/.config/contextmatrix-agent
@@ -184,10 +187,11 @@ export LLM_API_KEY=<your-api-key>
    and validates it on startup. To inspect effective harness config with secrets
    redacted, use `run --print-config`.
 
-4. **Point ContextMatrix at it.** Register this service as the task backend in
-   ContextMatrix's `backends` config (URL + shared `api_key` + callback path
-   `/api/agent/*`) and flip `default_backend` to it. A backend switch needs a
-   ContextMatrix restart: drain running jobs → switch → restart.
+4. **Point ContextMatrix at it.** Enable the `backends.agent` entry in
+   ContextMatrix's config (URL + shared `api_key` + `enabled: true`); the
+   callback paths (`/api/agent/*`) are fixed by the protocol, not configured.
+   A backend switch needs a ContextMatrix restart: drain running jobs → switch
+   → restart.
 
 ### Service management
 
@@ -228,8 +232,9 @@ worker images (full + variants), pin the new full-image digest into
 ## Model selection
 
 The agent never asks a model to name a model. During planning, a fixed capable
-model emits a **complexity tier per role** — simple / moderate / complex /
-critical; deterministic code then maps each tier to the cost-optimal model. A
+model emits a **complexity tier per subtask** (plus an overall card tier) —
+simple / moderate / complex / critical; deterministic code then maps each tier
+to the cost-optimal model. A
 candidate must be tool-capable, not blacklisted, fit the work's context window,
 and carry an external quality **prior** for the role that clears the tier's bar
 (the bar rises with the tier, from 0.65 for simple up to 0.90 for critical).

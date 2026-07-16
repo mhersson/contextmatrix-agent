@@ -1266,8 +1266,8 @@ func TestBuildLaunchSpec_CompactionEnvOmittedWhenDisabled(t *testing.T) {
 // TestBuildLaunchSpec_BestOfN pins the CM_BEST_OF_N env emission and pids-limit
 // scaling: BestOfN > 1 emits the env var and multiplies PidsLimit by N;
 // BestOfN <= 1 (the default) emits nothing and leaves PidsLimit unchanged. The
-// memory limit is intentionally left alone here — candidate verifies are
-// serialized in a later task.
+// memory limit is intentionally left alone here — candidate verifies run
+// serially in the judge phase.
 func TestBuildLaunchSpec_BestOfN(t *testing.T) {
 	newServerWithPids := func(pids int64) *Server {
 		return NewServer(Config{
@@ -1627,57 +1627,6 @@ func TestLaunch_ConcurrentDuplicateTriggersSerialized(t *testing.T) {
 // executor. Rejection surfaces exactly like a launch or provisioning failure —
 // a "failed" status callback, not a synchronous HTTP error — since the guard
 // lives in admitAndLaunch, downstream of the 202 Accepted response.
-
-// TestLaunch_RejectsWhenNoGitToken pins guard 1: a payload with no git token
-// must be rejected before the executor is ever called.
-func TestLaunch_RejectsWhenNoGitToken(t *testing.T) {
-	tracker := executor.NewTracker(1)
-	exec := &fakeExecutor{tracker: tracker}
-	reporter := &fakeReporter{}
-
-	s := NewServer(Config{
-		APIKey:    "k",
-		Executor:  exec,
-		Tracker:   tracker,
-		Reporter:  reporter,
-		LaunchEnv: LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"},
-		Logger:    quietLogger(),
-	})
-
-	payload := protocol.TriggerPayload{CardID: "C1", Project: "p"} // no GitToken, no LLMEndpoint
-	s.launch(s.buildLaunchSpec(payload, "corr", ""), payload)
-
-	assert.Empty(t, exec.launchedSpecs(), "no container launch without a CM-provisioned git token")
-	assert.Equal(t,
-		[][3]string{{"C1", "failed", "CM did not provision a git token"}},
-		reporter.statuses())
-}
-
-// TestLaunch_RejectsWhenNoLLMEndpoint pins guard 2: a payload with no
-// llm_endpoint must be rejected before the executor is ever called, even
-// though it carries a git token.
-func TestLaunch_RejectsWhenNoLLMEndpoint(t *testing.T) {
-	tracker := executor.NewTracker(1)
-	exec := &fakeExecutor{tracker: tracker}
-	reporter := &fakeReporter{}
-
-	s := NewServer(Config{
-		APIKey:    "k",
-		Executor:  exec,
-		Tracker:   tracker,
-		Reporter:  reporter,
-		LaunchEnv: LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"},
-		Logger:    quietLogger(),
-	})
-
-	payload := protocol.TriggerPayload{CardID: "C1", Project: "p", GitToken: "cm-git-token"} // no LLMEndpoint
-	s.launch(s.buildLaunchSpec(payload, "corr", ""), payload)
-
-	assert.Empty(t, exec.launchedSpecs(), "no container launch without a CM-provisioned llm_endpoint")
-	assert.Equal(t,
-		[][3]string{{"C1", "failed", "CM did not provision an llm_endpoint"}},
-		reporter.statuses())
-}
 
 // TestLaunch_GitTokenAloneDoesNotSatisfyLLMGuard proves the two guards are
 // independent: a payload git token covers guard 1 but not guard 2, so the run

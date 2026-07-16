@@ -98,7 +98,6 @@ type fakeOps struct {
 
 func newFakeOps() *fakeOps {
 	return &fakeOps{tcx: cmclient.TaskContext{
-		CardID:      "CMX-001",
 		Title:       "Add the widget",
 		Description: "Implement the widget as described.",
 		State:       "in_progress",
@@ -226,8 +225,6 @@ func remoteHasBranch(t *testing.T, remote, branch string) bool {
 	return strings.Contains(string(out), branch)
 }
 
-// --- Test 1: autonomous plumbing -> FSM -------------------------------------
-
 // TestRunAutonomousPlumbing verifies the shared setup runs before the FSM for an
 // autonomous card: clone + branch + claim + context, in order, then hand-off to
 // the orchestrator. The FSM owns completion (done phase), so on a nil return the
@@ -292,8 +289,6 @@ func TestRunWorkerGetTaskContextNoImages(t *testing.T) {
 	assert.False(t, got, "worker bootstrap must call GetTaskContext with includeImages=false")
 }
 
-// --- Test 3: FSM generic error ----------------------------------------------
-
 // TestRunFSMGenericError: a non-sentinel FSM error releases the claim and
 // surfaces as a non-zero exit, without completing the card.
 func TestRunFSMGenericError(t *testing.T) {
@@ -315,8 +310,6 @@ func TestRunFSMGenericError(t *testing.T) {
 	assert.Equal(t, 1, ops.count("ReleaseCard"))
 	assert.Equal(t, 0, ops.count("CompleteTask"))
 }
-
-// --- Test 5: heartbeats ----------------------------------------------------
 
 func TestRunHeartbeats(t *testing.T) {
 	// Mutates package-level heartbeatInterval; cannot run in parallel.
@@ -344,8 +337,6 @@ func TestRunHeartbeats(t *testing.T) {
 
 	assert.GreaterOrEqual(t, ops.count("Heartbeat"), 2, "expected at least two heartbeats during a slow run")
 }
-
-// --- Test 6: clean tree on FSM completion -----------------------------------
 
 // TestRunCleanTree: the FSM completes with no working-tree changes (nil return,
 // clean tree). The worker reports completed and does not push or complete —
@@ -641,7 +632,7 @@ func TestReviewParkedMapsToCompleted(t *testing.T) {
 	ops := newFakeOps()
 
 	swapRunOrchestrator(t, func(_ context.Context, _ orchestrator.Deps) error {
-		return &orchestrator.ReviewParkedError{Findings: "outstanding nits"}
+		return &orchestrator.ReviewParkedError{}
 	})
 
 	llmClient := &scriptedLLM{}

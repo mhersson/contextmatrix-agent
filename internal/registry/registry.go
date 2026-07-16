@@ -38,8 +38,7 @@ func DefaultTierBars() map[Tier]float64 {
 // ModelSpec is what the caller feeds into harness.Config for a given role.
 type ModelSpec struct {
 	Model         string
-	Models        []string // OpenRouter native failover order (optional)
-	ContextWindow int      // from the catalog; 0 if unknown
+	ContextWindow int // from the catalog; 0 if unknown
 }
 
 // favKey indexes operator-pinned favorites by complexity tier and (optionally)
@@ -51,7 +50,6 @@ type favKey struct {
 
 // Registry maps roles to models, backed by the live catalog for window/price.
 type Registry struct {
-	pins      map[Role]string
 	capable   string
 	catalog   llm.Catalog
 	priors    Priors
@@ -61,10 +59,9 @@ type Registry struct {
 }
 
 // Selection configures the best-value selector. Zero value is valid: headroom
-// defaults to 1.5 and TierBars falls back to DefaultTierBars().
+// defaults to 1.5.
 type Selection struct {
-	PriceHeadroom float64          // <= 0 -> defaultPriceHeadroom
-	TierBars      map[Tier]float64 // config-driven bars; nil -> DefaultTierBars()
+	PriceHeadroom float64 // <= 0 -> defaultPriceHeadroom
 }
 
 const defaultPriceHeadroom = 1.5
@@ -87,7 +84,7 @@ func NewRegistryFromParts(cat llm.Catalog, pr Priors, blacklist map[string]bool,
 		priors:    pr,
 		blacklist: blacklist,
 		favorites: favorites,
-		sel:       Selection{TierBars: DefaultTierBars(), PriceHeadroom: defaultPriceHeadroom},
+		sel:       Selection{PriceHeadroom: defaultPriceHeadroom},
 	}
 }
 
@@ -99,16 +96,11 @@ type SelectInput struct {
 	Exclude   map[string]bool // diversity: models to avoid if alternatives exist
 }
 
-// NewRegistry builds a priors-only registry with the given role pins and capable
-// default. Selection is payload-driven: with no priors injected, SelectByComplexity
+// NewRegistry builds a priors-only registry with the given capable default.
+// Selection is payload-driven: with no priors injected, SelectByComplexity
 // always falls back to the capable default.
-func NewRegistry(pins map[Role]string, capableDefault string, catalog llm.Catalog) *Registry {
-	r := NewRegistryFromParts(catalog, Priors{}, nil, nil, capableDefault)
-	if pins != nil {
-		r.pins = pins
-	}
-
-	return r
+func NewRegistry(capableDefault string, catalog llm.Catalog) *Registry {
+	return NewRegistryFromParts(catalog, Priors{}, nil, nil, capableDefault)
 }
 
 // Has reports whether model is present in the live catalog. The orchestrator
@@ -354,14 +346,7 @@ func (r *Registry) specFor(id string) ModelSpec {
 	return spec
 }
 
-// tierBar returns the quality bar for a tier: the config-driven TierBars when
-// present, else DefaultTierBars().
+// tierBar returns the quality bar for a tier per DefaultTierBars().
 func (r *Registry) tierBar(t Tier) float64 {
-	if r.sel.TierBars != nil {
-		if v, ok := r.sel.TierBars[t]; ok {
-			return v
-		}
-	}
-
 	return DefaultTierBars()[t]
 }
