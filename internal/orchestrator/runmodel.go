@@ -46,7 +46,7 @@ func (e *MaxTurnsError) Error() string {
 
 // IncapableError marks a phase stopping because the model cannot drive the tool
 // loop — it emitted tool calls every turn but none parsed valid arguments. The
-// recovery path (a later task) catches this to blacklist the model and re-select.
+// recovery path (recoverIncapable) catches this to blacklist the model and re-select.
 type IncapableError struct {
 	Model  string
 	Reason string

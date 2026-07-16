@@ -14,10 +14,9 @@ type Priors struct {
 }
 
 // ForRole returns the prior score for the given model and role, and whether one
-// exists. A role omitted from the model's JSON entry has no prior — (0, false)
-// — so callers fall back to measured scores; an explicit 0 in the file is a
-// real prior and returns (0, true). Only RoleCoder and RoleReviewer are
-// tracked in priors; other roles return (0, false).
+// exists. A role omitted from the model's JSON entry has no prior — (0, false);
+// an explicit 0 in the file is a real prior and returns (0, true). Only
+// RoleCoder and RoleReviewer are tracked in priors; other roles return (0, false).
 func (p Priors) ForRole(model string, role Role) (float64, bool) {
 	entry, ok := p.Models[model]
 	if !ok {

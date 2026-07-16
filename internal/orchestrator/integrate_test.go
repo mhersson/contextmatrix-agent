@@ -79,7 +79,7 @@ func TestIntegrateHappyPath(t *testing.T) {
 	pr := &fakePR{}
 	d := integrateTestDeps(ops, git, pr, &planLLM{})
 
-	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent card", Description: "body", CreatePR: false}
+	tc := cmclient.TaskContext{Title: "Parent card", Description: "body", CreatePR: false}
 	o := newIntegrateRun(d, tc, 0)
 
 	require.NoError(t, runIntegrate(context.Background(), o))
@@ -112,7 +112,7 @@ func TestIntegrateConflictFallback(t *testing.T) {
 	pr := &fakePR{}
 	d := integrateTestDeps(ops, git, pr, &planLLM{})
 
-	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Add the thing", Description: "body"}
+	tc := cmclient.TaskContext{Title: "Add the thing", Description: "body"}
 	o := newIntegrateRun(d, tc, 0)
 
 	require.NoError(t, runIntegrate(context.Background(), o))
@@ -159,7 +159,7 @@ func TestIntegratePRCreation(t *testing.T) {
 		}}
 		d := integrateTestDeps(ops, git, pr, llmFake)
 
-		tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Add the thing", Description: "body", CreatePR: true}
+		tc := cmclient.TaskContext{Title: "Add the thing", Description: "body", CreatePR: true}
 		o := newIntegrateRun(d, tc, 0)
 		o.subtasks = []subtaskRef{{ID: "SUB-1", Title: "First step"}, {ID: "SUB-2", Title: "Second step"}}
 
@@ -190,7 +190,7 @@ func TestIntegratePRCreation(t *testing.T) {
 		llmFake := &planLLM{}
 		d := integrateTestDeps(ops, git, pr, llmFake)
 
-		tc := cmclient.TaskContext{CardID: "CARD-1", Title: "No PR card", CreatePR: false}
+		tc := cmclient.TaskContext{Title: "No PR card", CreatePR: false}
 		o := newIntegrateRun(d, tc, 0)
 
 		require.NoError(t, runIntegrate(context.Background(), o))
@@ -210,7 +210,7 @@ func TestIntegratePRCreation(t *testing.T) {
 		llmFake := &planLLM{responses: []llm.Response{stopResp("body", 0.01)}}
 		d := integrateTestDeps(ops, git, pr, llmFake)
 
-		tc := cmclient.TaskContext{CardID: "CARD-1", Title: "PR fails", CreatePR: true}
+		tc := cmclient.TaskContext{Title: "PR fails", CreatePR: true}
 		o := newIntegrateRun(d, tc, 0)
 
 		// PR failure does NOT fail the run — the push already landed.
@@ -233,7 +233,7 @@ func TestIntegrateBudgetGate(t *testing.T) {
 	d := integrateTestDeps(ops, git, pr, llmFake)
 
 	// Already over budget: the PR-body model call must be gated.
-	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Over budget", CreatePR: true, ReportedCostUSD: 2.0}
+	tc := cmclient.TaskContext{Title: "Over budget", CreatePR: true, ReportedCostUSD: 2.0}
 	o := newIntegrateRun(d, tc, 1.0)
 
 	err := runIntegrate(context.Background(), o)
@@ -261,7 +261,7 @@ func TestIntegrateIdempotentResume(t *testing.T) {
 	pr := &fakePR{}
 	d := integrateTestDeps(ops, git, pr, &planLLM{})
 
-	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Resume", CreatePR: false}
+	tc := cmclient.TaskContext{Title: "Resume", CreatePR: false}
 	o := newIntegrateRun(d, tc, 0)
 
 	require.NoError(t, runIntegrate(context.Background(), o))
@@ -279,7 +279,7 @@ func TestIntegrateNoRemoteBranch(t *testing.T) {
 	pr := &fakePR{}
 	d := integrateTestDeps(ops, git, pr, &planLLM{})
 
-	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "First push", CreatePR: false}
+	tc := cmclient.TaskContext{Title: "First push", CreatePR: false}
 	o := newIntegrateRun(d, tc, 0)
 
 	require.NoError(t, runIntegrate(context.Background(), o))
@@ -310,7 +310,7 @@ func TestWritePRBodyAppendsVerificationTrailer(t *testing.T) {
 			ops := &fakeOps{}
 			client := &planLLM{responses: []llm.Response{stopResp("## What\nDid the work.\n", 0.01)}}
 			d := integrateTestDeps(ops, &fakeGit{}, &fakePR{}, client)
-			o := newIntegrateRun(d, cmclient.TaskContext{CardID: "CARD-1", Title: "T", Description: "b"}, 0)
+			o := newIntegrateRun(d, cmclient.TaskContext{Title: "T", Description: "b"}, 0)
 			o.lastVerify = tc.vres
 			o.verify = &tc.plan
 
@@ -339,7 +339,7 @@ func TestReviewOutcomeVerifyCaveat(t *testing.T) {
 func TestDonePhase(t *testing.T) {
 	ops := &fakeOps{}
 	d := Deps{Ops: ops, Cfg: Config{CardID: "CARD-1"}}
-	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "All done"}
+	tc := cmclient.TaskContext{Title: "All done"}
 	o := newRun(d, tc)
 
 	require.NoError(t, runDone(context.Background(), o))
@@ -367,7 +367,7 @@ func TestRunDoneToleratesReleaseError(t *testing.T) {
 	t.Run("ErrCardNotClaimed is swallowed silently", func(t *testing.T) {
 		ops := &fakeOps{releaseCardErr: cmclient.ErrCardNotClaimed}
 		d := Deps{Ops: ops, Cfg: Config{CardID: "CARD-1"}}
-		tc := cmclient.TaskContext{CardID: "CARD-1", Title: "All done"}
+		tc := cmclient.TaskContext{Title: "All done"}
 		o := newRun(d, tc)
 
 		err := runDone(context.Background(), o)
@@ -390,7 +390,7 @@ func TestRunDoneToleratesReleaseError(t *testing.T) {
 	t.Run("transient error is warned and swallowed", func(t *testing.T) {
 		ops := &fakeOps{releaseCardErr: errors.New("network timeout")}
 		d := Deps{Ops: ops, Cfg: Config{CardID: "CARD-1"}}
-		tc := cmclient.TaskContext{CardID: "CARD-1", Title: "All done"}
+		tc := cmclient.TaskContext{Title: "All done"}
 		o := newRun(d, tc)
 
 		err := runDone(context.Background(), o)
@@ -440,7 +440,7 @@ func (o ctxHonoringOps) AddLog(ctx context.Context, cardID, message string) erro
 func TestRunDoneReleasesUnderCanceledContext(t *testing.T) {
 	ops := &fakeOps{}
 	d := Deps{Ops: ctxHonoringOps{ops}, Cfg: Config{CardID: "CARD-1"}}
-	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "All done"}
+	tc := cmclient.TaskContext{Title: "All done"}
 	o := newRun(d, tc)
 
 	ctx, cancel := context.WithCancel(context.Background())

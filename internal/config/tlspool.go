@@ -8,34 +8,16 @@ import (
 	"os"
 )
 
-// HTTPClientWithCA returns an *http.Client whose TLS trust anchors are the
-// system roots PLUS the extra CA certificates in the PEM file at path. An empty
-// path returns a plain default client (system trust only). A missing file or a
-// PEM with no usable certificate is an error.
-//
-// This is the in-process trust used by the worker's own outbound TLS (the
-// harness LLM client via llm.WithHTTPClient). It APPENDS to the system pool, so
-// public endpoints keep working alongside a private/interception CA.
-func HTTPClientWithCA(path string) (*http.Client, error) {
-	if path == "" {
-		return &http.Client{}, nil
-	}
-
-	tr, err := CATransport(path)
-	if err != nil {
-		return nil, err
-	}
-
-	return &http.Client{Transport: tr}, nil
-}
-
 // CATransport returns an *http.Transport cloned from http.DefaultTransport with
-// its TLS trust extended by the extra CA certs in the PEM at path. Cloning
-// preserves proxy and timeout behaviour — corporate TLS interception usually
-// implies an HTTP(S) proxy too — while overriding only the trust store. An
-// empty path returns a nil transport so callers keep their default
-// RoundTripper. It is the seam the cmclient/MCP wiring uses to share the same
-// trust store as the LLM client.
+// its TLS trust extended by the extra CA certs in the PEM at path — the system
+// roots PLUS the private/interception CA, so public endpoints keep working
+// alongside it. Cloning preserves proxy and timeout behaviour — corporate TLS
+// interception usually implies an HTTP(S) proxy too — while overriding only
+// the trust store. An empty path returns a nil transport so callers keep their
+// default RoundTripper. A missing file or a PEM with no usable certificate is
+// an error. It backs both the worker's harness LLM client (via
+// llm.WithHTTPClient) and the cmclient/MCP wiring, so they share the same
+// trust.
 func CATransport(path string) (*http.Transport, error) {
 	if path == "" {
 		return nil, nil

@@ -24,11 +24,6 @@ const (
 	// truncationMarker is appended when an utterance is cut at utteranceCap.
 	truncationMarker = "\n[truncated by moderator]"
 
-	// maxSeatTurns is the spec-fixed harness turn cap for one internal seat
-	// turn. The orchestrator glue mirrors this value when it builds the seat
-	// runner's harness config.
-	maxSeatTurns = 8
-
 	// internalTurnDeadline and guestTurnDeadline are the spec-fixed per-turn
 	// deadlines, measured from SendMessage to utterance.
 	internalTurnDeadline = 240 * time.Second

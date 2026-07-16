@@ -231,7 +231,7 @@ func TestReviewRecoversFromIncapableFixCoder(t *testing.T) {
 
 	d := reviewTestDeps(t, ops, git, client, reviewFixRegistry())
 
-	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body", State: "in_progress"}
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
 	o := newReviewRun(d, tc, 0)
 
 	require.NoError(t, runReview(context.Background(), o),
@@ -266,7 +266,7 @@ func modelsUsed(m *modelAwareLLM, model string) bool {
 func TestRecoverIncapableCapsAtThree(t *testing.T) {
 	ops := &fakeOps{}
 	d := execTestDeps(ops, &fakeGit{}, &planLLM{})
-	o := newRun(d, cmclient.TaskContext{CardID: "CARD-1"})
+	o := newRun(d, cmclient.TaskContext{})
 
 	for i := 1; i <= 3; i++ {
 		err := o.recoverIncapable(context.Background(), &IncapableError{Model: "m", Reason: "cannot drive the tool loop"})

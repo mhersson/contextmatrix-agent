@@ -23,8 +23,8 @@ func skillEngageBlock(menu string) string {
 }
 
 // verifyCommandBlock names the resolved verify command for the coder prompt when
-// one resolved, or "" (today's generic wording, unchanged) when the gate is a
-// skip. The command text is runtime data, so the template stays language-neutral.
+// one resolved, or "" when the gate is a skip. The command text is runtime
+// data, so the template stays language-neutral.
 func verifyCommandBlock(p verifyPlan) string {
 	if len(p.Argv) == 0 || p.Display == "" {
 		return ""
@@ -33,8 +33,8 @@ func verifyCommandBlock(p verifyPlan) string {
 	return fmt.Sprintf("\n\nThe project's verify command is `%s` (%s). Run it before finishing and make it pass.", p.Display, p.Source)
 }
 
-// fixVerifyLine is the fix prompt's verify instruction: the resolved command when
-// one resolved, else today's generic wording (with the stray line break mended).
+// fixVerifyLine is the fix prompt's verify instruction: the resolved command
+// when one resolved, else a generic run-the-tests line.
 func fixVerifyLine(p verifyPlan) string {
 	if len(p.Argv) == 0 || p.Display == "" {
 		return "Run the project's tests after your changes to confirm they pass."

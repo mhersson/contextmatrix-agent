@@ -63,7 +63,6 @@ func TestDiscoverGrounding(t *testing.T) {
 		doc, nested := discoverGrounding(root)
 		require.NotNil(t, doc)
 		assert.Equal(t, "AGENTS.md", doc.name)
-		assert.Equal(t, ".", doc.relDir)
 		assert.Contains(t, doc.content, "# agents")
 		assert.Empty(t, nested)
 	})
@@ -210,7 +209,7 @@ func TestGroundingTruncationIsRuneSafe(t *testing.T) {
 func TestGroundingBlock(t *testing.T) {
 	assert.Empty(t, groundingBlock(nil, nil))
 
-	root := &groundingDoc{relDir: ".", name: "CLAUDE.md", content: "# root rules"}
+	root := &groundingDoc{name: "CLAUDE.md", content: "# root rules"}
 	nested := []string{"web/CLAUDE.md", "internal/api/AGENTS.md"}
 	block := groundingBlock(root, nested)
 

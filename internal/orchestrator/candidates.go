@@ -15,7 +15,7 @@ import (
 
 // candidate is one Best-of-N implementation of the shared plan: a model working
 // in its own container-local worktree, off the board and never pushed. The judge
-// phase (a later task) fills the verify/diff fields and picks a winner; a non-nil
+// phase fills the verify/diff fields and picks a winner; a non-nil
 // err means the candidate was dropped before judging.
 type candidate struct {
 	idx       int // 1-based

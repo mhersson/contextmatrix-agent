@@ -67,7 +67,7 @@ func TestDocumentNoOpWhenNoDocsNeeded(t *testing.T) {
 	llmFake := &planLLM{responses: []llm.Response{stopResp("No external documentation is needed for this internal refactor.", 0.01)}}
 	d := documentTestDeps(ops, git, llmFake)
 
-	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Refactor internals", Description: "body"}
+	tc := cmclient.TaskContext{Title: "Refactor internals", Description: "body"}
 	o := newDocumentRun(d, tc, 0)
 
 	require.NoError(t, runDocument(context.Background(), o))
@@ -85,7 +85,7 @@ func TestDocumentWritesAndPushesDocs(t *testing.T) {
 	}}
 	d := documentTestDeps(ops, git, llmFake)
 
-	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Add health endpoint", Description: "body"}
+	tc := cmclient.TaskContext{Title: "Add health endpoint", Description: "body"}
 	o := newDocumentRun(d, tc, 0)
 
 	require.NoError(t, runDocument(context.Background(), o))
@@ -103,7 +103,7 @@ func TestDocumentCommitMessageFallback(t *testing.T) {
 	llmFake := &planLLM{responses: []llm.Response{stopResp("Wrote docs but omitted the commit line.", 0.02)}}
 	d := documentTestDeps(ops, git, llmFake)
 
-	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Docs", Description: "body"}
+	tc := cmclient.TaskContext{Title: "Docs", Description: "body"}
 	o := newDocumentRun(d, tc, 0)
 
 	require.NoError(t, runDocument(context.Background(), o))
@@ -121,7 +121,7 @@ func TestDocumentBudgetGate(t *testing.T) {
 	d := documentTestDeps(ops, git, llmFake)
 
 	// Already over budget: the gate must park before any model call.
-	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Over budget", Description: "body", ReportedCostUSD: 2.0}
+	tc := cmclient.TaskContext{Title: "Over budget", Description: "body", ReportedCostUSD: 2.0}
 	o := newDocumentRun(d, tc, 1.0)
 
 	err := runDocument(context.Background(), o)
@@ -141,7 +141,7 @@ func TestDocumentBestEffortOnModelError(t *testing.T) {
 		git := &fakeGit{committed: true} // would commit if reached; the model-error path must not reach it
 		d := documentTestDeps(ops, git, &errLLM{err: errors.New("connection reset")})
 
-		tc := cmclient.TaskContext{CardID: "CARD-1", Title: "T", Description: "body"}
+		tc := cmclient.TaskContext{Title: "T", Description: "body"}
 		o := newDocumentRun(d, tc, 0)
 
 		require.NoError(t, runDocument(context.Background(), o), "a model error never fails the run")
@@ -162,7 +162,7 @@ func TestDocumentBestEffortOnModelError(t *testing.T) {
 		resp := llm.Response{Content: "partial", FinishReason: "stop", Usage: llm.Usage{PromptTokens: tripAt, Cost: 0.01}}
 		d := documentTestDeps(ops, git, &planLLM{responses: []llm.Response{resp}})
 
-		tc := cmclient.TaskContext{CardID: "CARD-1", Title: "T", Description: "body"}
+		tc := cmclient.TaskContext{Title: "T", Description: "body"}
 		o := newDocumentRun(d, tc, 0)
 
 		// NoError proves the *ContextLimitError did not propagate.
@@ -177,7 +177,7 @@ func TestDocumentBestEffortOnCommitFailure(t *testing.T) {
 	llmFake := &planLLM{responses: []llm.Response{finishResp("docs: x", 0.02)}}
 	d := documentTestDeps(ops, git, llmFake)
 
-	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "T", Description: "body"}
+	tc := cmclient.TaskContext{Title: "T", Description: "body"}
 	o := newDocumentRun(d, tc, 0)
 
 	require.NoError(t, runDocument(context.Background(), o), "a commit failure never fails the run")
@@ -191,7 +191,7 @@ func TestDocumentBestEffortOnPushFailure(t *testing.T) {
 	llmFake := &planLLM{responses: []llm.Response{finishResp("docs: update", 0.02)}}
 	d := documentTestDeps(ops, git, llmFake)
 
-	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "T", Description: "body"}
+	tc := cmclient.TaskContext{Title: "T", Description: "body"}
 	o := newDocumentRun(d, tc, 0)
 
 	require.NoError(t, runDocument(context.Background(), o), "phase invariant: a push failure never fails the run")
@@ -206,7 +206,7 @@ func TestDocumentReportsUsage(t *testing.T) {
 	llmFake := &planLLM{responses: []llm.Response{finishResp("docs: x", 0.05)}}
 	d := documentTestDeps(ops, git, llmFake)
 
-	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "T", Description: "body"}
+	tc := cmclient.TaskContext{Title: "T", Description: "body"}
 	o := newDocumentRun(d, tc, 0)
 
 	require.NoError(t, runDocument(context.Background(), o))
@@ -220,7 +220,7 @@ func TestDocumentPromptContent(t *testing.T) {
 	llmFake := &planLLM{responses: []llm.Response{stopResp("No docs needed.", 0.01)}}
 	d := documentTestDeps(ops, git, llmFake)
 
-	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Add the health endpoint", Description: "body"}
+	tc := cmclient.TaskContext{Title: "Add the health endpoint", Description: "body"}
 	o := newDocumentRun(d, tc, 0)
 	o.subtasks = []subtaskRef{{ID: "SUB-1", Title: "Wire the route"}}
 

@@ -22,13 +22,12 @@ const envPrefix = "CMX_"
 // as keys) match — e.g. --max-turns ⇒ key "max-turns" ⇒ this tag. Env vars map
 // via the two-step transform in Load (CMX_MAX_TURNS ⇒ "max-turns").
 type Config struct {
-	Model        *string          `koanf:"model"`
-	Models       []string         `koanf:"models"`
-	MaxTurns     *int             `koanf:"max-turns"`
-	MaxCostUSD   *float64         `koanf:"max-cost"`
-	CapableModel *string          `koanf:"capable-model"`
-	Provider     *ProviderConfig  `koanf:"provider"`
-	Reasoning    *ReasoningConfig `koanf:"reasoning"`
+	Model      *string          `koanf:"model"`
+	Models     []string         `koanf:"models"`
+	MaxTurns   *int             `koanf:"max-turns"`
+	MaxCostUSD *float64         `koanf:"max-cost"`
+	Provider   *ProviderConfig  `koanf:"provider"`
+	Reasoning  *ReasoningConfig `koanf:"reasoning"`
 }
 
 type ProviderConfig struct {
@@ -43,13 +42,16 @@ type ReasoningConfig struct {
 	Exclude   *bool   `koanf:"exclude"`
 }
 
+// DefaultCapableModel is the fallback worker model when CMX_DEFAULT_MODEL is
+// unset.
+const DefaultCapableModel = "deepseek/deepseek-v4-flash"
+
 // Defaults is the lowest-precedence layer.
 func Defaults() Config {
 	mt := 45
 	mc := 0.50
-	capable := "deepseek/deepseek-v4-flash"
 
-	return Config{MaxTurns: &mt, MaxCostUSD: &mc, CapableModel: &capable}
+	return Config{MaxTurns: &mt, MaxCostUSD: &mc}
 }
 
 // Validate checks invariants after merging.
@@ -109,13 +111,12 @@ func Load(flags *pflag.FlagSet, configFile string) (Config, error) {
 // would flag them, so each carries //nolint:errcheck). Labels are hyphenated
 // to match the koanf keys users write in YAML.
 func PrintRedacted(w io.Writer, c Config) {
-	fmt.Fprintln(w, "# effective configuration (secrets redacted)")                               //nolint:errcheck
-	fmt.Fprintf(w, "llm-endpoint-api-key: %s\n", "<redacted; set via CMX_LLM_ENDPOINT__API_KEY>") //nolint:errcheck
-	fmt.Fprintf(w, "model: %s\n", strDeref(c.Model))                                              //nolint:errcheck
-	fmt.Fprintf(w, "models: %v\n", c.Models)                                                      //nolint:errcheck
-	fmt.Fprintf(w, "max-turns: %s\n", intDeref(c.MaxTurns))                                       //nolint:errcheck
-	fmt.Fprintf(w, "max-cost: %s\n", floatDeref(c.MaxCostUSD))                                    //nolint:errcheck
-	fmt.Fprintf(w, "capable-model: %s\n", strDeref(c.CapableModel))                               //nolint:errcheck
+	fmt.Fprintln(w, "# effective configuration (secrets redacted)")                 //nolint:errcheck
+	fmt.Fprintf(w, "llm-endpoint-api-key: %s\n", "<redacted; set via LLM_API_KEY>") //nolint:errcheck
+	fmt.Fprintf(w, "model: %s\n", strDeref(c.Model))                                //nolint:errcheck
+	fmt.Fprintf(w, "models: %v\n", c.Models)                                        //nolint:errcheck
+	fmt.Fprintf(w, "max-turns: %s\n", intDeref(c.MaxTurns))                         //nolint:errcheck
+	fmt.Fprintf(w, "max-cost: %s\n", floatDeref(c.MaxCostUSD))                      //nolint:errcheck
 
 	if c.Provider != nil {
 		fmt.Fprintf(w, "provider: {require-parameters:%s order:%v sort:%s}\n", //nolint:errcheck

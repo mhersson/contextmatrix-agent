@@ -51,7 +51,7 @@ type fix struct {
 // ReviewParkedError marks the review cap being exhausted without approval. The
 // worker maps it to the park path: exit 0, completed callback, card left in
 // review. Parked is not failed — a human picks the card up from review.
-type ReviewParkedError struct{ Findings string }
+type ReviewParkedError struct{}
 
 func (e *ReviewParkedError) Error() string {
 	return "review parked: attempts cap exhausted without approval"
@@ -85,8 +85,6 @@ func runReview(ctx context.Context, o *run) error {
 	if cfg.Interactive {
 		return o.runReviewHITL(ctx, plan)
 	}
-
-	// ===== autonomous loop (UNCHANGED below this line) =====
 
 	// Guard a mis-wired worker: a zero or negative cap would make the cliff trip
 	// on the FIRST round and park (via the authoritative pass) every card
@@ -269,7 +267,7 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 	_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory; park must surface
 		fmt.Sprintf("review parked after %d attempts (authoritative pass) — outstanding findings:\n%s", n, findings2))
 
-	return &ReviewParkedError{Findings: findings2}
+	return &ReviewParkedError{}
 }
 
 // reviewRound runs one review pass and returns the outstanding findings text,

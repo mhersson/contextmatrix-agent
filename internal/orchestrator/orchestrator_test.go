@@ -36,7 +36,7 @@ func countCalls(calls []string, name string) int {
 
 func TestRunPersistsPhaseBeforeWork(t *testing.T) {
 	ops := &fakeOps{
-		taskContext: cmclient.TaskContext{CardID: "CARD-1"},
+		taskContext: cmclient.TaskContext{},
 	}
 	d := Deps{Ops: ops, Git: &fakeGit{}, Cfg: Config{CardID: "CARD-1"}}
 
@@ -57,7 +57,7 @@ func TestRunPersistsPhaseBeforeWork(t *testing.T) {
 
 func TestRunUnknownPhaseReturnsError(t *testing.T) {
 	ops := &fakeOps{
-		taskContext: cmclient.TaskContext{CardID: "CARD-1", Phase: "shipping"},
+		taskContext: cmclient.TaskContext{Phase: "shipping"},
 	}
 	d := Deps{Ops: ops, Cfg: Config{CardID: "CARD-1"}}
 
@@ -75,7 +75,7 @@ func TestRunUnknownPhaseReturnsError(t *testing.T) {
 
 func TestRunSetPhaseFailureSkipsWork(t *testing.T) {
 	ops := &fakeOps{
-		taskContext: cmclient.TaskContext{CardID: "CARD-1"},
+		taskContext: cmclient.TaskContext{},
 		setPhaseErr: errors.New("cm unreachable"),
 	}
 	d := Deps{Ops: ops, Git: &fakeGit{}, Cfg: Config{CardID: "CARD-1"}}
@@ -100,7 +100,7 @@ func TestRunSetPhaseFailureSkipsWork(t *testing.T) {
 
 func TestRunEntersAtPersistedPhase(t *testing.T) {
 	ops := &fakeOps{
-		taskContext: cmclient.TaskContext{CardID: "CARD-1", Phase: "review"},
+		taskContext: cmclient.TaskContext{Phase: "review"},
 	}
 	d := Deps{Ops: ops, Git: &fakeGit{}, Cfg: Config{CardID: "CARD-1"}}
 
@@ -141,7 +141,7 @@ func TestRunEntersAtPersistedPhase(t *testing.T) {
 
 func TestRunBudgetBreachParks(t *testing.T) {
 	ops := &fakeOps{
-		taskContext: cmclient.TaskContext{CardID: "CARD-1"},
+		taskContext: cmclient.TaskContext{},
 	}
 	d := Deps{Ops: ops, Git: &fakeGit{}, Cfg: Config{CardID: "CARD-1", MaxCardCost: 1.00}}
 
@@ -170,7 +170,7 @@ func TestRunBudgetBreachParks(t *testing.T) {
 
 func TestRunContextLimitParks(t *testing.T) {
 	ops := &fakeOps{
-		taskContext: cmclient.TaskContext{CardID: "CARD-1"},
+		taskContext: cmclient.TaskContext{},
 	}
 	d := Deps{Ops: ops, Git: &fakeGit{}, Cfg: Config{CardID: "CARD-1"}}
 
@@ -200,7 +200,7 @@ func TestPhaseOrderPlacesDocumentBetweenExecuteAndReview(t *testing.T) {
 }
 
 func TestRunWalksDocumentBetweenExecuteAndReview(t *testing.T) {
-	ops := &fakeOps{taskContext: cmclient.TaskContext{CardID: "CARD-1"}}
+	ops := &fakeOps{taskContext: cmclient.TaskContext{}}
 	d := Deps{Ops: ops, Git: &fakeGit{}, Cfg: Config{CardID: "CARD-1"}}
 	o := newRun(d, ops.taskContext)
 
@@ -228,7 +228,7 @@ func TestRunWalksDocumentBetweenExecuteAndReview(t *testing.T) {
 
 func TestRunSeedsLedgerFromReportedCost(t *testing.T) {
 	ops := &fakeOps{
-		taskContext: cmclient.TaskContext{CardID: "CARD-1", ReportedCostUSD: 0.90},
+		taskContext: cmclient.TaskContext{ReportedCostUSD: 0.90},
 	}
 	d := Deps{Ops: ops, Git: &fakeGit{}, Cfg: Config{CardID: "CARD-1", MaxCardCost: 1.00}}
 

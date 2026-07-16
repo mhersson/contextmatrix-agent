@@ -27,11 +27,9 @@ type seatHandle struct {
 	name     string
 	lens     string
 	model    string // seat's registry-selected LLM slug; "" for guests (external)
-	guest    bool
 	client   *a2aclient.Client
 	taskID   a2a.TaskID
 	deadline time.Duration
-	absent   bool // absent this round (timeout/error); may rejoin next round
 	// dead marks a seat permanently gone (open failed). A failed dial never
 	// returns a handle from dialSeat/dialGuest; the engine constructs the
 	// dead placeholder itself and reads it when skipping the seat across
@@ -86,7 +84,6 @@ func dialGuest(ctx context.Context, g GuestSeat) (*seatHandle, error) {
 
 	return &seatHandle{
 		name:     "guest-" + g.Name,
-		guest:    true,
 		client:   client,
 		deadline: guestTurnDeadline,
 		bearer:   g.Token,
@@ -110,7 +107,7 @@ func (h *seatHandle) authCtx(ctx context.Context) context.Context {
 // On success the handle's taskID is recorded/refreshed and the truncated
 // utterance returned. On the deadline expiring: best-effort CancelTask
 // (detached context, 2 s budget), clear the task so the seat rejoins next
-// round on a replacement task, mark absent, return errTurnTimeout.
+// round on a replacement task, return errTurnTimeout.
 func (h *seatHandle) sendTurn(ctx context.Context, round int, body string) (string, error) {
 	callCtx, cancel := context.WithTimeout(ctx, h.deadline)
 	defer cancel()
@@ -130,40 +127,31 @@ func (h *seatHandle) sendTurn(ctx context.Context, round int, body string) (stri
 			// it stops burning tokens.
 			h.cancelInFlight()
 			h.taskID = ""
-			h.absent = true
 
 			return "", errTurnTimeout
 		}
-
-		h.absent = true
 
 		return "", fmt.Errorf("mob: send turn to %s: %w", h.name, err)
 	}
 
 	task, ok := result.(*a2a.Task)
 	if !ok {
-		h.absent = true
-
 		return "", fmt.Errorf("mob: seat %s returned %T, want *a2a.Task", h.name, result)
 	}
 
 	if task.Status.State.Terminal() {
 		// failed/canceled/rejected: the task can carry no further messages.
 		h.taskID = ""
-		h.absent = true
 
 		return "", fmt.Errorf("mob: seat %s task ended in state %s", h.name, task.Status.State)
 	}
 
 	if task.Status.Message == nil {
-		h.absent = true
-
 		return "", fmt.Errorf("mob: seat %s returned no utterance", h.name)
 	}
 
 	h.taskID = task.ID
 	h.lastCost = costFrom(task.Status.Message)
-	h.absent = false
 
 	return truncateUtterance(messageText(task.Status.Message)), nil
 }

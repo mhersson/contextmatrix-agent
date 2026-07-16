@@ -23,7 +23,7 @@ func reconcileTestRun(ops *fakeOps, git *fakeGit, phase string) *run {
 			BaseBranch: "main",
 		},
 	}
-	tc := cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body", Phase: phase}
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", Phase: phase}
 
 	return newRun(d, tc)
 }
@@ -353,7 +353,7 @@ func TestExecuteCalledFromExecuteDriver(t *testing.T) {
 	// The phase-loop driver calls reconcile BEFORE the loop: a fresh run records
 	// the stale tip even though no SubtaskStates load happens.
 	ops := &fakeOps{
-		taskContext: cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body"},
+		taskContext: cmclient.TaskContext{Title: "Parent", Description: "body"},
 	}
 	git := &fakeGit{remoteTip: "deadbeef"}
 	d := Deps{
@@ -383,7 +383,7 @@ func TestReconcileRestoresTierAndBody(t *testing.T) {
 	ops := &fakeOps{}
 	ops.subtaskStates = []cmclient.SubtaskState{{CardID: "SUB-2", Title: "impl", State: "todo"}}
 	ops.taskContexts = map[string]cmclient.TaskContext{
-		"SUB-2": {CardID: "SUB-2", Title: "impl", Description: withTierMarker("planner body", "complex")},
+		"SUB-2": {Title: "impl", Description: withTierMarker("planner body", "complex")},
 	}
 	git := &fakeGit{remoteTip: "abc123"}
 
@@ -402,7 +402,7 @@ func TestReconcileTierFallbackWithoutMarker(t *testing.T) {
 	ops := &fakeOps{}
 	ops.subtaskStates = []cmclient.SubtaskState{{CardID: "SUB-2", Title: "impl", State: "todo"}}
 	ops.taskContexts = map[string]cmclient.TaskContext{
-		"SUB-2": {CardID: "SUB-2", Title: "impl", Description: "planner body, no marker"},
+		"SUB-2": {Title: "impl", Description: "planner body, no marker"},
 	}
 	git := &fakeGit{remoteTip: "abc123"}
 

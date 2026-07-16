@@ -110,7 +110,6 @@ func (t *Tracker) List() []*Run {
 	return out
 }
 
-// Count returns the number of tracked runs.
 func (t *Tracker) Count() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()

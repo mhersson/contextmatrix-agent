@@ -359,13 +359,11 @@ type pushRecord struct {
 func newStubOps() *stubOps {
 	return &stubOps{
 		tcx: cmclient.TaskContext{
-			CardID:      "CMX-001",
 			Title:       "Build the widget",
 			Description: "Implement the widget across two files.",
 			State:       "in_progress",
 			Phase:       "", // fresh autonomous run -> the FSM starts at plan
 			Autonomous:  true,
-			BaseBranch:  "main",
 			CreatePR:    false,
 		},
 	}

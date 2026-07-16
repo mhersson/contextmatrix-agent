@@ -17,7 +17,7 @@ func testCatalog() llm.Catalog {
 }
 
 func TestFitsWindow(t *testing.T) {
-	r := NewRegistry(nil, "x", testCatalog())
+	r := NewRegistry("x", testCatalog())
 	assert.True(t, r.fitsWindow("deepseek/deepseek-v4-flash", 100000))
 	assert.False(t, r.fitsWindow("cheap/small", 100000))
 	assert.True(t, r.fitsWindow("unknown/model", 100000)) // fail-open
@@ -26,7 +26,7 @@ func TestFitsWindow(t *testing.T) {
 func TestSelectByComplexityPrefersCheapestCapableToolModel(t *testing.T) {
 	// NewRegistry injects no priors, so no catalog model carries a prior for the
 	// role: selection always falls back to the capable default.
-	r := NewRegistry(nil, "deepseek/deepseek-v4-flash", testCatalog())
+	r := NewRegistry("deepseek/deepseek-v4-flash", testCatalog())
 	spec := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierComplex})
 	assert.Equal(t, "deepseek/deepseek-v4-flash", spec.Model)
 }
@@ -39,7 +39,7 @@ func TestSelectByComplexityFallsBackToCapable(t *testing.T) {
 		{ID: "unseeded/a", ContextLength: 8192, SupportedParameters: []string{"tools"}},
 		{ID: "unseeded/b", ContextLength: 8192, SupportedParameters: []string{"tools"}},
 	}
-	r := NewRegistry(nil, "capable/default", cat)
+	r := NewRegistry("capable/default", cat)
 	spec := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierSimple})
 	assert.Equal(t, "capable/default", spec.Model)
 }
@@ -159,7 +159,7 @@ func TestSelectReviewPanel(t *testing.T) {
 }
 
 func TestTierBarsIncludeCritical(t *testing.T) {
-	r := &Registry{sel: Selection{TierBars: DefaultTierBars()}}
+	r := &Registry{}
 	if got := r.tierBar(TierCritical); got != 0.90 {
 		t.Errorf("critical bar = %v, want 0.90", got)
 	}
@@ -170,7 +170,7 @@ func TestTierBarsIncludeCritical(t *testing.T) {
 }
 
 func TestRegistryContextWindow(t *testing.T) {
-	r := NewRegistry(nil, "x", testCatalog())
+	r := NewRegistry("x", testCatalog())
 
 	assert.Equal(t, 131072, r.ContextWindow("deepseek/deepseek-v4-flash"))
 	assert.Equal(t, 8192, r.ContextWindow("cheap/small"))
@@ -315,7 +315,7 @@ func TestSelectCandidateModelsPinMergesExcludeWithoutMutatingCaller(t *testing.T
 }
 
 func TestSelectCandidateModelsZeroOrNegativeNReturnsNil(t *testing.T) {
-	r := NewRegistry(nil, "capable-default", testCatalog())
+	r := NewRegistry("capable-default", testCatalog())
 	in := SelectInput{Role: RoleCoder, Tier: TierSimple}
 
 	assert.Nil(t, r.SelectCandidateModels(in, 0, ""))

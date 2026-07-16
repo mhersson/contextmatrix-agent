@@ -38,6 +38,8 @@ internal/registry/   → model selector: SelectByComplexity, SelectReviewPanel; 
 
 # Autonomous executor — the FSM and its container lifecycle
 internal/orchestrator/ → hand-written FSM plan → execute → judge → document → review → integrate → done; phase persistence; git finalize
+internal/mob/          → A2A mob-session engine: seats, moderator, loopback JSON-RPC server, transcripts — discussions for plan/review/execute checkpoints
+internal/verifyexec/   → verify-command probing + bounded exec; used by cli run and the orchestrator verify gate
 internal/worker/       → the `work` lifecycle: clone, claim, run the FSM (HITL-gated or autonomous), commit/push, PR; wires the orchestrator deps
 internal/executor/     → Executor interface + DockerExecutor; Tracker (concurrency + awaiting-human gate); watchdogs
 internal/secrets/      → Source (static env file) + RunCredentials (stages per-run CM-provisioned credentials)
@@ -48,6 +50,7 @@ internal/webhook/    → HTTP server for lifecycle webhooks; HMAC verify; replay
 internal/callback/   → status callbacks to /api/agent/status; VerifyAutonomous (fail-closed)
 internal/cmclient/   → MCP client for CM card operations (one agent identity per card)
 internal/logbridge/  → worker JSONL events → protocol.LogEntry; fan-out to /logs SSE; redaction; awaiting-human signal
+internal/filelog/    → per-card raw container-output file logs (<log_dir>/<project>/<card_id>.log; empty log_dir no-ops)
 internal/frames/     → stdin control protocol (user_message | promote | end_session)
 internal/metrics/    → Prometheus registry + cm_agent_* collectors; NormalizeEndpoint label allowlist
 
@@ -138,8 +141,8 @@ from a zero value, separate `Defaults()`/`Validate()`, and a `PrintRedacted`
 that keeps secrets out of `--print-config`. The serve `ServiceConfig` layers
 **defaults < file < env** only (no flags), with value-typed fields. Env keys are
 tag-driven under the `CMX_*` prefix; nested keys use `__`
-(`CMX_GITHUB__AUTH_MODE`). Secrets arrive via env or a mounted file only — never
-via flags or committed YAML.
+(`CMX_PROVIDER__SORT` → `provider.sort`). Secrets arrive via env or a mounted
+file only — never via flags or committed YAML.
 
 ### Documentation
 
@@ -199,7 +202,7 @@ via flags or committed YAML.
    5.0) spans the orchestrator and every subagent. A breach parks the card — WIP
    pushed, card released, failed callback — it does not kill mid-turn.
 8. **Secrets.** `serve` stages each run's CM-provisioned credentials into
-   `<secrets_dir>/runs/<card_id>/env`, refreshed from ContextMatrix ahead of
+   `<secrets_dir>/runs/<project>/<card_id>/env`, refreshed from ContextMatrix ahead of
    each git-token expiry and bind-mounted read-only at `/run/cm-secrets/env`;
    the per-run dir is torn down with the run. The worker reads the LLM
    endpoint key and `CM_GIT_TOKEN` from it. Tool

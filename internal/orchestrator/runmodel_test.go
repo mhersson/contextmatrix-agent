@@ -17,7 +17,7 @@ import (
 // window (resolved from the registry). A future phase that forgets the
 // hardening is impossible because every phase routes through this builder.
 func TestHarnessConfigPopulatesTriad(t *testing.T) {
-	ops := &fakeOps{taskContext: cmclient.TaskContext{CardID: "CARD-1"}}
+	ops := &fakeOps{taskContext: cmclient.TaskContext{}}
 	d := planTestDeps(ops, &planLLM{})
 	d.Cfg.ToolOutputMax = 65536
 
@@ -55,7 +55,7 @@ func TestHarnessConfigPopulatesTriad(t *testing.T) {
 // catalog yields ContextWindow 0 (the harness treats 0 as "no context-limit
 // check"), so an unknown slug never trips a spurious limit.
 func TestHarnessConfigUnknownModelZeroWindow(t *testing.T) {
-	ops := &fakeOps{taskContext: cmclient.TaskContext{CardID: "CARD-1"}}
+	ops := &fakeOps{taskContext: cmclient.TaskContext{}}
 	d := planTestDeps(ops, &planLLM{})
 
 	o := newRun(d, ops.taskContext)
@@ -69,7 +69,7 @@ func TestHarnessConfigUnknownModelZeroWindow(t *testing.T) {
 // Compaction non-nil with the configured threshold/keep-recent; disabled -> nil
 // (the hard context_limit stop, the agent's default behavior).
 func TestHarnessConfigCompactionGate(t *testing.T) {
-	ops := &fakeOps{taskContext: cmclient.TaskContext{CardID: "CARD-1"}}
+	ops := &fakeOps{taskContext: cmclient.TaskContext{}}
 
 	t.Run("enabled yields non-nil Compaction", func(t *testing.T) {
 		d := planTestDeps(ops, &planLLM{})
@@ -122,7 +122,7 @@ func TestRunModelNormalizesContextLimit(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ops := &fakeOps{taskContext: cmclient.TaskContext{CardID: "CARD-1"}}
+			ops := &fakeOps{taskContext: cmclient.TaskContext{}}
 			resp := llm.Response{
 				Content:      "partial",
 				FinishReason: "stop",
@@ -163,7 +163,7 @@ func TestRunModelNormalizesContextLimit(t *testing.T) {
 // unparseable tool call (bad JSON → harness never marks turnHadCapableTool) so
 // after IncapableThreshold turns the harness sets Reason = ReasonIncapable.
 func TestRunModelNormalizesIncapable(t *testing.T) {
-	ops := &fakeOps{taskContext: cmclient.TaskContext{CardID: "CARD-1"}}
+	ops := &fakeOps{taskContext: cmclient.TaskContext{}}
 
 	// Each response carries a single tool call with invalid JSON arguments.
 	// The harness trips incapability after IncapableThreshold (default 3)
@@ -200,7 +200,7 @@ func TestRunModelNormalizesIncapable(t *testing.T) {
 // (Reason "max_turns", Completed=false, err==nil from the harness) surfaces as
 // a *MaxTurnsError, so no phase can treat truncated work as success.
 func TestRunModelNormalizesMaxTurns(t *testing.T) {
-	ops := &fakeOps{taskContext: cmclient.TaskContext{CardID: "CARD-1"}}
+	ops := &fakeOps{taskContext: cmclient.TaskContext{}}
 
 	// One valid-JSON tool call keeps the loop alive without tripping the
 	// incapable detector (threshold 3); MaxTurns=1 stops after turn one.
@@ -270,7 +270,7 @@ func TestCoderMaxTurns(t *testing.T) {
 // TestRunModelPassesThroughNormalResult pins that a normal (done) run is NOT
 // turned into an error by runModel — only context_limit is normalized.
 func TestRunModelPassesThroughNormalResult(t *testing.T) {
-	ops := &fakeOps{taskContext: cmclient.TaskContext{CardID: "CARD-1"}}
+	ops := &fakeOps{taskContext: cmclient.TaskContext{}}
 	llmFake := &planLLM{responses: []llm.Response{stopResp("all good", 0.02)}}
 	d := planTestDeps(ops, llmFake)
 

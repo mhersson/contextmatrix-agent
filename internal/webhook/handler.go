@@ -482,7 +482,8 @@ func (s *Server) admitAndLaunch(ctx context.Context, spec executor.LaunchSpec, p
 
 	provisioned := false
 
-	if s.credentials != nil && p.GitToken != "" {
+	// The fail-closed guard above already rejected empty-GitToken payloads.
+	if s.credentials != nil {
 		if err := s.credentials.Provision(project, cardID, p.GitToken, p.GitTokenExpiresAt, s.runEndpoint(p)); err != nil {
 			s.logger.Error("provision per-run credentials failed",
 				"project", project, "card_id", cardID, "error", err)
@@ -678,8 +679,8 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 
 	// Best-of-N races N candidate implementations concurrently, so the pids
 	// cap (a per-container ceiling) scales with N; the memory limit is
-	// intentionally left alone here — candidate verifies are serialized in a
-	// later task.
+	// intentionally left alone here — candidate verifies run serially in the
+	// judge phase.
 	pids := s.launchEnv.PidsLimit
 	if p.BestOfN > 1 && pids > 0 {
 		pids *= int64(p.BestOfN)

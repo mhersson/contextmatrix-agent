@@ -239,24 +239,18 @@ func (g *Git) isDirty(ctx context.Context) (bool, error) {
 	return strings.TrimSpace(out) != "", nil
 }
 
-// isLikelyBuildArtifact reports whether the untracked file at absPath looks like
-// a compiled build output that must not be committed. It is deliberately
-// language-agnostic: the target repo's own .gitignore is the source of truth for
-// "don't commit this" (git status --untracked-files=all already honours it), so
-// this guard adds only a content-based net for stray native binaries the
-// .gitignore missed — a native executable magic number (ELF, Mach-O, PE). It
-// carries NO filename, extension, or ecosystem-directory heuristic: those encode
-// language knowledge and, worse, a directory-name match like "target" or
-// "build" silently drops first-party source that merely lives under that name.
-// Read errors are treated as "not an artifact" — the guard never blocks on its
-// own failure, only on positive evidence.
-func isLikelyBuildArtifact(absPath string) bool {
-	return hasExecutableMagic(absPath)
-}
-
 // hasExecutableMagic reports whether the file begins with a known native
 // executable magic number (ELF, Mach-O, or PE/COFF) — a compiled binary the
-// agent never legitimately authors as source.
+// agent never legitimately authors as source, so an untracked file carrying
+// one must not be committed. The guard is deliberately language-agnostic: the
+// target repo's own .gitignore is the source of truth for "don't commit this"
+// (git status --untracked-files=all already honours it), so this adds only a
+// content-based net for stray native binaries the .gitignore missed. It
+// carries NO filename, extension, or ecosystem-directory heuristic: those
+// encode language knowledge and, worse, a directory-name match like "target"
+// or "build" silently drops first-party source that merely lives under that
+// name. Read errors are treated as "not an artifact" — the guard never blocks
+// on its own failure, only on positive evidence.
 func hasExecutableMagic(absPath string) bool {
 	f, err := os.Open(absPath) //nolint:gosec // path is a workspace-relative entry from git status
 	if err != nil {
@@ -331,7 +325,7 @@ func (g *Git) stageForCommit(ctx context.Context) error {
 			continue
 		}
 
-		if isLikelyBuildArtifact(filepath.Join(g.dir, rel)) {
+		if hasExecutableMagic(filepath.Join(g.dir, rel)) {
 			slog.Warn("refusing to stage likely native binary", "path", rel)
 
 			continue

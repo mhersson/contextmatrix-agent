@@ -110,7 +110,7 @@ func newJudgeRun(t *testing.T, ops *fakeOps, mainGit *fakeGit, client llm.LLM, c
 	d.Cfg.BaseBranch = "main"
 	d.Cfg.Workspace = t.TempDir()
 
-	o := newRun(d, cmclient.TaskContext{CardID: "CARD-1", Title: "Parent", Description: "body"})
+	o := newRun(d, cmclient.TaskContext{Title: "Parent", Description: "body"})
 	o.cardTier = "moderate"
 	o.candidates = cands
 	// Pre-resolve a non-empty plan so runVerifyPlan invokes the stub on each
@@ -127,23 +127,13 @@ func newJudgeRun(t *testing.T, ops *fakeOps, mainGit *fakeGit, client llm.LLM, c
 	return o
 }
 
-func TestPhaseOrderContainsJudge(t *testing.T) {
-	require.Equal(t, "judge", phaseOrder[2], "judge sits between execute and document")
-
-	ops := &fakeOps{taskContext: cmclient.TaskContext{CardID: "CARD-1"}}
-	d := Deps{Ops: ops, Git: &fakeGit{}, Cfg: Config{CardID: "CARD-1"}}
-	o := newRun(d, ops.taskContext)
-
-	assert.NotNil(t, o.phaseFnFor("judge"), "phaseFnFor must resolve the judge phase")
-}
-
 func TestJudgeNoopWhenOff(t *testing.T) {
 	ops := &fakeOps{}
 	client := &planLLM{}
 	d := planTestDeps(ops, client)
 	d.Git = &fakeGit{}
 	// BestOfN unset (0): the judge is a strict no-op.
-	o := newRun(d, cmclient.TaskContext{CardID: "CARD-1", Title: "P", Description: "b"})
+	o := newRun(d, cmclient.TaskContext{Title: "P", Description: "b"})
 
 	require.NoError(t, runJudge(context.Background(), o))
 	assert.Nil(t, o.winner, "no winner picked when best-of-n is off")
@@ -214,7 +204,7 @@ func TestJudgeOutcomeLabels(t *testing.T) {
 }
 
 func TestJudgeResumeRemap(t *testing.T) {
-	ops := &fakeOps{taskContext: cmclient.TaskContext{CardID: "CARD-1", Phase: "judge"}}
+	ops := &fakeOps{taskContext: cmclient.TaskContext{Phase: "judge"}}
 	d := Deps{Ops: ops, Git: &fakeGit{}, Cfg: Config{CardID: "CARD-1", Branch: "cm/card-1", BaseBranch: "main"}}
 	o := newRun(d, ops.taskContext)
 

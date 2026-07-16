@@ -33,7 +33,7 @@ func gateRun(ops *fakeOps, inbox *fakeInbox, interactive bool, client llm.LLM, t
 		},
 	}
 
-	return newRun(d, cmclient.TaskContext{CardID: "CARD-1", Title: "T", Description: "body", ReportedCostUSD: reported})
+	return newRun(d, cmclient.TaskContext{Title: "T", Description: "body", ReportedCostUSD: reported})
 }
 
 func TestGateAutonomousPassesThrough(t *testing.T) {

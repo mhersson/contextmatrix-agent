@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"regexp"
 	"strconv"
@@ -244,7 +245,7 @@ func specFromEnv() (worker.RunSpec, error) {
 
 	defaultModel := os.Getenv("CMX_DEFAULT_MODEL")
 	if defaultModel == "" {
-		defaultModel = derefStr(defaults.CapableModel)
+		defaultModel = config.DefaultCapableModel
 	}
 
 	workspace := os.Getenv("CMX_WORKSPACE")
@@ -392,15 +393,14 @@ func caInjections(certPath string) ([]llm.Option, []cmclient.Option, error) {
 		return nil, nil, nil
 	}
 
-	httpClient, err := config.HTTPClientWithCA(certPath)
-	if err != nil {
-		return nil, nil, fmt.Errorf("build ca http client: %w", err)
-	}
-
 	transport, err := config.CATransport(certPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("build ca transport: %w", err)
 	}
+
+	// Each client gets its own transport (sharing the read-only CA pool) so
+	// connection pools stay separate.
+	httpClient := &http.Client{Transport: transport.Clone()}
 
 	return []llm.Option{llm.WithHTTPClient(httpClient)}, []cmclient.Option{cmclient.WithBaseTransport(transport)}, nil
 }

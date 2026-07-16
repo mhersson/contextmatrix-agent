@@ -91,12 +91,11 @@ func leafCertOrNil(der []byte) *x509.Certificate {
 	return c
 }
 
-func TestHTTPClientWithCA(t *testing.T) {
-	t.Run("empty path returns a usable default client", func(t *testing.T) {
-		c, err := HTTPClientWithCA("")
+func TestCATransport(t *testing.T) {
+	t.Run("empty path returns a nil transport", func(t *testing.T) {
+		tr, err := CATransport("")
 		require.NoError(t, err)
-		require.NotNil(t, c)
-		assert.Nil(t, c.Transport, "empty path keeps the stdlib default transport")
+		assert.Nil(t, tr, "empty path lets callers keep their default RoundTripper")
 	})
 
 	t.Run("valid PEM yields a client that trusts the CA-signed server", func(t *testing.T) {
@@ -114,11 +113,11 @@ func TestHTTPClientWithCA(t *testing.T) {
 		_, err := (&http.Client{}).Get(srv.URL)
 		require.Error(t, err, "default client must not trust the private CA")
 
-		// The CA client must accept it.
-		c, err := HTTPClientWithCA(fx.caPEMPath)
+		// A client on the CA transport must accept it.
+		tr, err := CATransport(fx.caPEMPath)
 		require.NoError(t, err)
 
-		resp, err := c.Get(srv.URL)
+		resp, err := (&http.Client{Transport: tr}).Get(srv.URL)
 		require.NoError(t, err, "CA client must trust the CA-signed server")
 
 		_ = resp.Body.Close()
@@ -126,23 +125,8 @@ func TestHTTPClientWithCA(t *testing.T) {
 	})
 
 	t.Run("missing file returns an error", func(t *testing.T) {
-		_, err := HTTPClientWithCA(filepath.Join(t.TempDir(), "nope.pem"))
+		_, err := CATransport(filepath.Join(t.TempDir(), "nope.pem"))
 		require.Error(t, err)
-	})
-
-	t.Run("non-PEM content returns an error", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), "bad.pem")
-		require.NoError(t, os.WriteFile(path, []byte("not a certificate"), 0o600))
-		_, err := HTTPClientWithCA(path)
-		require.Error(t, err)
-	})
-}
-
-func TestCATransport(t *testing.T) {
-	t.Run("empty path returns a nil transport", func(t *testing.T) {
-		tr, err := CATransport("")
-		require.NoError(t, err)
-		assert.Nil(t, tr, "empty path lets callers keep their default RoundTripper")
 	})
 
 	t.Run("valid PEM yields a transport with the CA pool and TLS 1.2 floor", func(t *testing.T) {

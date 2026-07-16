@@ -6,7 +6,7 @@
 // Boundary rule: this package imports harness, llm, registry, tools, events,
 // and cmclient — never internal/worker. The git surface the FSM needs is
 // declared here as the GitOps interface (consuming-package convention);
-// *worker.Git satisfies it via the worker wiring task.
+// *worker.Git satisfies it.
 package orchestrator
 
 import (
@@ -30,7 +30,7 @@ import (
 )
 
 // Ops is the card-operation surface the FSM needs. It is satisfied by
-// *cmclient.Client; the compile-time assertion lands in the worker wiring task
+// *cmclient.Client; the compile-time assertion lives in internal/worker
 // (which is allowed to import both packages).
 type Ops interface {
 	ClaimCard(ctx context.Context, cardID string) error
@@ -203,7 +203,7 @@ var phaseOrder = []string{"plan", "execute", "judge", "document", "review", "int
 type phaseFn func(context.Context) error
 
 // run is the live FSM state for one card. The phase functions are stored as
-// fields so tests can replace them and later tasks can wire in real bodies.
+// fields so tests can replace them.
 type run struct {
 	d      Deps
 	tc     cmclient.TaskContext
@@ -390,8 +390,7 @@ func dataURLs(blobs []cmclient.ImageBlob) []llm.ImageURL {
 }
 
 // newRun builds a run seeded from the task context, with the budget ledger
-// pre-loaded from the card's already-reported cost and the phase functions
-// defaulting to the not-yet-implemented stubs.
+// pre-loaded from the card's already-reported cost.
 func newRun(d Deps, tc cmclient.TaskContext) *run {
 	o := &run{
 		d:  d,

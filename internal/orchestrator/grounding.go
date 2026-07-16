@@ -16,7 +16,6 @@ import (
 // as fallback) with its capped content. Only the root doc is ever read into the
 // grounding block; nested files are enumerated as paths, never as content.
 type groundingDoc struct {
-	relDir  string // "." — the root doc always sits at the workspace root
 	name    string // "AGENTS.md" or "CLAUDE.md"
 	content string
 }
@@ -49,7 +48,7 @@ func discoverGrounding(root string) (*groundingDoc, []string) {
 
 	var rootDoc *groundingDoc
 
-	if doc, ok := readGroundingDir(root, root); ok {
+	if doc, ok := readGroundingDir(root); ok {
 		rootDoc = &doc
 	}
 
@@ -207,22 +206,17 @@ func sortNested(paths []string) {
 	})
 }
 
-// readGroundingDir returns the chosen instruction file for dir, AGENTS.md
-// preferred over CLAUDE.md. ok is false when neither exists (or the candidate
-// escapes the workspace / is not a regular file). Only ever called for the root.
-func readGroundingDir(root, dir string) (groundingDoc, bool) {
+// readGroundingDir returns the chosen instruction file for the workspace root,
+// AGENTS.md preferred over CLAUDE.md. ok is false when neither exists (or the
+// candidate escapes the workspace / is not a regular file).
+func readGroundingDir(root string) (groundingDoc, bool) {
 	for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
-		content, ok := readGroundingFile(root, filepath.Join(dir, name))
+		content, ok := readGroundingFile(root, filepath.Join(root, name))
 		if !ok {
 			continue
 		}
 
-		rel, err := filepath.Rel(root, dir)
-		if err != nil {
-			rel = "."
-		}
-
-		return groundingDoc{relDir: rel, name: name, content: content}, true
+		return groundingDoc{name: name, content: content}, true
 	}
 
 	return groundingDoc{}, false

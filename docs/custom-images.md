@@ -18,8 +18,9 @@ unchanged — then `apt-get install` (or otherwise add) what your project needs.
 # language toolchains your project uses; use full if you need several.
 FROM ghcr.io/mhersson/contextmatrix-agent:go-node
 
-# Everything below runs as root; the base image switches back to USER user via
-# its ENTRYPOINT, so do not re-declare USER/ENTRYPOINT unless you must.
+# Everything below runs as root. USER is image metadata, not a runtime switch:
+# end your Dockerfile on `USER user` yourself (and do not re-declare
+# ENTRYPOINT).
 USER root
 
 # Temurin (Adoptium) JDK from the Adoptium apt repo.

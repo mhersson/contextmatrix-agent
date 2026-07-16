@@ -53,8 +53,8 @@ var planLenses = []string{"feasibility/simplicity", "architecture/extensibility"
 
 var reviewLenses = []string{"correctness", "security", "design", "performance", "developer-experience"}
 
-// mobSeatMaxTurns caps one seat turn's harness run (spec constant; mirrors
-// the engine-side maxSeatTurns — both are fixed by the design, not config).
+// mobSeatMaxTurns caps one seat turn's harness run (spec constant — fixed by
+// the design, not config).
 const mobSeatMaxTurns = 8
 
 // mobModeratorMaxTurns caps a moderator call. Moderator calls run

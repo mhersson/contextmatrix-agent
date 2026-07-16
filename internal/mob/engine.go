@@ -244,7 +244,7 @@ func (e *Engine) open(ctx context.Context) []*liveSeat {
 		if err != nil {
 			e.cfg.Emit("moderator", "", "", -1, fmt.Sprintf("seat %s failed to open: %v", sc.Name, err))
 
-			h = &seatHandle{name: sc.Name, lens: sc.Lens, dead: true, absent: true}
+			h = &seatHandle{name: sc.Name, lens: sc.Lens, dead: true}
 		}
 
 		h.model = sc.Model
@@ -269,7 +269,7 @@ func (e *Engine) open(ctx context.Context) []*liveSeat {
 			slog.Warn("mob: guest dial failed", "guest", g.Name, "error", err)
 			e.cfg.Emit("moderator", "", "", -1, fmt.Sprintf("guest %s unreachable", g.Name))
 
-			h = &seatHandle{name: "guest-" + g.Name, guest: true, dead: true, absent: true}
+			h = &seatHandle{name: "guest-" + g.Name, dead: true}
 		}
 
 		h.deadline = e.cfg.GuestDeadline
