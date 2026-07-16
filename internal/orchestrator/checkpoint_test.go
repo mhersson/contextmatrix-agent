@@ -374,4 +374,28 @@ func TestRecordCheckpointDiscussion(t *testing.T) {
 		assert.Contains(t, parent, "### SUB-2 — second")
 		assert.Equal(t, 1, strings.Count(parent, "## Execute Discussions"))
 	})
+
+	t.Run("summary headings are escaped so section boundaries survive", func(t *testing.T) {
+		ops := &fakeOps{}
+		o := newRunWithSeats(ops)
+
+		o.recordCheckpointDiscussion(context.Background(),
+			subtaskRef{ID: "SUB-1", Title: "first"}, proceed,
+			checkpointVerdict{Verdict: "proceed", Summary: "Fine work.\n## Execute Discussions\nDone."})
+		o.recordCheckpointDiscussion(context.Background(),
+			subtaskRef{ID: "SUB-2", Title: "second"}, proceed,
+			checkpointVerdict{Verdict: "proceed", Summary: "b"})
+
+		sub := ops.bodyFor("SUB-1")
+		assert.Contains(t, sub, `\## Execute Discussions`)
+		assert.NotContains(t, sub, "\n## Execute Discussions")
+
+		// The rogue heading must not fracture the parent log: one section
+		// heading, both subtask blocks, and SUB-1's trailing fields intact.
+		parent := ops.bodyFor("CARD-1")
+		assert.Equal(t, 1, strings.Count(parent, "\n## Execute Discussions"))
+		assert.Contains(t, parent, "### SUB-1 — first")
+		assert.Contains(t, parent, "### SUB-2 — second")
+		assert.Contains(t, parent, "Rounds: 2 · Outcome: proceed · Cost: $0.0123")
+	})
 }

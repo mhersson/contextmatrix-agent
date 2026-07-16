@@ -208,8 +208,27 @@ func (o *run) recordCheckpointDiscussion(ctx context.Context, sub subtaskRef, ou
 		outcome = fmt.Sprintf("revise — %d fixes", len(v.Fixes))
 	}
 
-	o.recordCheckpointOnSubtask(ctx, sub, o.checkpointSubtaskSection(v.Summary, rounds, outcome, out.CostUSD))
-	o.recordCheckpointOnParent(ctx, sub, v.Summary, rounds, outcome, out.CostUSD)
+	summary := sanitizeSummary(v.Summary)
+
+	o.recordCheckpointOnSubtask(ctx, sub, o.checkpointSubtaskSection(summary, rounds, outcome, out.CostUSD))
+	o.recordCheckpointOnParent(ctx, sub, summary, rounds, outcome, out.CostUSD)
+}
+
+// sanitizeSummary neutralizes markdown headings in the model-provided
+// narrative: a summary line starting with "#" (after indentation) would
+// otherwise terminate the ## boundary scan in upsertSection/extractSection
+// and garble the card record. Escaping the leading "#" defends both the
+// TrimSpace start-scan and the HasPrefix end-scan, and renders as a literal
+// "#" in markdown.
+func sanitizeSummary(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		if t := strings.TrimLeft(l, " \t"); strings.HasPrefix(t, "#") {
+			lines[i] = "\\" + t
+		}
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 // checkpointSubtaskSection renders the full "## Discussion" block for a subtask
