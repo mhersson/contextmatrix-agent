@@ -43,10 +43,12 @@ func (o *run) checkpointEligible(sub subtaskRef) bool {
 }
 
 // checkpointVerdict is the moderator's synthesis decision for one execute
-// checkpoint: proceed, or revise with concrete fixes.
+// checkpoint: proceed, or revise with concrete fixes, plus a short prose
+// summary for the card record.
 type checkpointVerdict struct {
 	Verdict string `json:"verdict"` // "proceed" | "revise"
 	Fixes   []fix  `json:"fixes"`
+	Summary string `json:"summary"` // 4-5 line narrative; best-effort, never gates the verdict
 }
 
 // parseCheckpointVerdict extracts and validates the checkpoint synthesis

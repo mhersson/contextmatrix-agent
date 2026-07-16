@@ -957,9 +957,15 @@ Decision rule:
 
 Respond with ONLY a JSON object, no prose:
 {"verdict":"proceed"|"revise",
- "fixes":[{"file":"...","issue":"...","suggestion":"..."}]}
+ "fixes":[{"file":"...","issue":"...","suggestion":"..."}],
+ "summary":"..."}
 
 When verdict is "proceed", fixes must be an empty array.
+
+"summary" is 4-5 lines of plain prose for a human reading the card later:
+what the seats found, what was contested and how it resolved, and the
+resulting decision. Plain sentences only — no markdown headings, no bullet
+lists.
 `
 
 // checkpointRevisePrompt drives the single checkpoint fix pass on the same

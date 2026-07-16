@@ -85,6 +85,21 @@ func TestParseCheckpointVerdict(t *testing.T) {
 		_, err := parseCheckpointVerdict("looks fine to me")
 		require.Error(t, err)
 	})
+
+	t.Run("summary is captured", func(t *testing.T) {
+		v, err := parseCheckpointVerdict(
+			`{"verdict":"proceed","fixes":[],"summary":"Correct and covered.\nNo blockers."}`)
+		require.NoError(t, err)
+		assert.Equal(t, "proceed", v.Verdict)
+		assert.Equal(t, "Correct and covered.\nNo blockers.", v.Summary)
+	})
+
+	t.Run("absent summary parses with empty string, verdict unaffected", func(t *testing.T) {
+		v, err := parseCheckpointVerdict(`{"verdict":"revise","fixes":[{"file":"a.go","issue":"x"}]}`)
+		require.NoError(t, err)
+		assert.Equal(t, "revise", v.Verdict)
+		assert.Empty(t, v.Summary)
+	})
 }
 
 func TestMobCheckpointProceed(t *testing.T) {
