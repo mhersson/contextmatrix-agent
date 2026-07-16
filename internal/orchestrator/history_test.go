@@ -95,3 +95,21 @@ func TestRecordReview_RoundHeadingsAndVerdict(t *testing.T) {
 	assert.Contains(t, body, "**Verify:** PASSED")
 	assert.Contains(t, body, "**Verify:** SKIPPED — tool missing")
 }
+
+func TestExtractSection_ReturnsBlockOrEmpty(t *testing.T) {
+	body := "Desc.\n\n## Execute Discussions\n\n### SUB-1 — a\nx\n\n## Plan\n\n1. y"
+
+	got := extractSection(body, "Execute Discussions")
+
+	assert.Equal(t, "## Execute Discussions\n\n### SUB-1 — a\nx", got)
+	assert.Empty(t, extractSection(body, "Nope"))
+	assert.Empty(t, extractSection("", "Execute Discussions"))
+}
+
+func TestExtractSection_RunsToEndWhenLast(t *testing.T) {
+	body := "Desc.\n\n## Execute Discussions\n\n### SUB-1 — a\nx\n"
+
+	got := extractSection(body, "Execute Discussions")
+
+	assert.Equal(t, "## Execute Discussions\n\n### SUB-1 — a\nx", got)
+}

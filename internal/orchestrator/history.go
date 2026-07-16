@@ -215,3 +215,41 @@ func upsertSection(body, heading, section string) string {
 
 	return b.String()
 }
+
+// extractSection returns the "## <heading>" block in body, from that heading
+// line through the line before the next "## " heading (or the end of the body),
+// trimmed of trailing newlines. It returns "" when the heading is absent. The
+// returned block includes its "## <heading>" line, so it is a complete section
+// ready to hand back to upsertSection. Heading matching is exact, mirroring
+// upsertSection.
+func extractSection(body, heading string) string {
+	marker := "## " + heading
+
+	lines := strings.Split(body, "\n")
+
+	start := -1
+
+	for i, l := range lines {
+		if strings.TrimSpace(l) == marker {
+			start = i
+
+			break
+		}
+	}
+
+	if start < 0 {
+		return ""
+	}
+
+	end := len(lines)
+
+	for i := start + 1; i < len(lines); i++ {
+		if strings.HasPrefix(lines[i], "## ") {
+			end = i
+
+			break
+		}
+	}
+
+	return strings.TrimRight(strings.Join(lines[start:end], "\n"), "\n")
+}
