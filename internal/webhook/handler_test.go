@@ -15,9 +15,9 @@ import (
 	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/executor"
-	"github.com/mhersson/contextmatrix-agent/internal/logbridge"
 	"github.com/mhersson/contextmatrix-agent/internal/secrets"
 	"github.com/mhersson/contextmatrix-backendkit/frames"
+	"github.com/mhersson/contextmatrix-backendkit/logbridge"
 	protocol "github.com/mhersson/contextmatrix-protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -272,7 +272,7 @@ func newHarness(t *testing.T, maxConcurrent int) *harness {
 	exec := &fakeExecutor{tracker: tracker}
 	reporter := &fakeReporter{}
 	verifier := &fakeVerifier{autonomous: true}
-	hub := logbridge.NewHub()
+	hub := logbridge.NewHub(func(e protocol.LogEntry) string { return e.Project }, nil)
 	images := &fakeImageLister{}
 
 	server := NewServer(Config{
@@ -1004,7 +1004,7 @@ func newHarnessWithBudget(t *testing.T, maxCardCost, headroom float64) *harness 
 	exec := &fakeExecutor{tracker: tracker}
 	reporter := &fakeReporter{}
 	verifier := &fakeVerifier{autonomous: true}
-	hub := logbridge.NewHub()
+	hub := logbridge.NewHub(func(e protocol.LogEntry) string { return e.Project }, nil)
 
 	server := NewServer(Config{
 		APIKey:        testAPIKey,
@@ -1723,7 +1723,7 @@ func TestTrigger_RejectsAndReportsFailedWhenNoCredentialSourceAtAll(t *testing.T
 	tracker := executor.NewTracker(4)
 	exec := &fakeExecutor{tracker: tracker}
 	reporter := &fakeReporter{}
-	hub := logbridge.NewHub()
+	hub := logbridge.NewHub(func(e protocol.LogEntry) string { return e.Project }, nil)
 
 	server := NewServer(Config{
 		APIKey:        testAPIKey,

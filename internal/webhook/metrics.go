@@ -4,8 +4,6 @@ import (
 	"net/http"
 	"strconv"
 	"time"
-
-	"github.com/mhersson/contextmatrix-agent/internal/metrics"
 )
 
 // statusRecorder wraps a ResponseWriter to capture the written HTTP status so
@@ -48,8 +46,9 @@ func (sr *statusRecorder) Unwrap() http.ResponseWriter {
 
 // recordMetrics wraps a handler and records request count + duration on the
 // server's metrics bundle. A nil bundle makes it a pass-through. The endpoint
-// label is normalised through metrics.NormalizeEndpoint (unknown paths collapse
-// to "other") with the leading slash stripped so the label reads "trigger".
+// label is normalised through the bundle's NormalizeEndpoint (unknown paths
+// collapse to "other") with the leading slash stripped so the label reads
+// "trigger".
 // code is a coarse success / error / rate_limited bucket from the HTTP status.
 func (s *Server) recordMetrics(next http.HandlerFunc) http.HandlerFunc {
 	if s.metrics == nil {
@@ -62,7 +61,7 @@ func (s *Server) recordMetrics(next http.HandlerFunc) http.HandlerFunc {
 
 		next(sr, r)
 
-		endpoint := metrics.NormalizeEndpoint(r.URL.Path)
+		endpoint := s.metrics.NormalizeEndpoint(r.URL.Path)
 		if len(endpoint) > 0 && endpoint[0] == '/' {
 			endpoint = endpoint[1:]
 		}

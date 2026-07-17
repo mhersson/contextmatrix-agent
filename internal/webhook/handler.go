@@ -15,10 +15,10 @@ import (
 	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/executor"
-	"github.com/mhersson/contextmatrix-agent/internal/logbridge"
 	"github.com/mhersson/contextmatrix-agent/internal/metrics"
 	"github.com/mhersson/contextmatrix-agent/internal/secrets"
 	"github.com/mhersson/contextmatrix-backendkit/frames"
+	"github.com/mhersson/contextmatrix-backendkit/logbridge"
 	protocol "github.com/mhersson/contextmatrix-protocol"
 )
 
@@ -838,7 +838,7 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 
 	// Delivered: publish to the chat stream and record the message_id so a retry
 	// is deduped, then clear the awaiting flag and touch the run.
-	s.hub.PublishUser(payload.Project, payload.CardID, payload.Content)
+	publishUser(s.hub, payload.Project, payload.CardID, payload.Content)
 	s.dedup.Record(payload.Project, payload.CardID, payload.MessageID)
 	s.tracker.SetAwaiting(payload.Project, payload.CardID, false)
 	s.tracker.Touch(payload.Project, payload.CardID)
@@ -846,6 +846,18 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, protocol.SuccessResponse{
 		OK:        true,
 		MessageID: payload.MessageID,
+	})
+}
+
+// publishUser emits a "user"-type log entry directly to the hub. It is NOT
+// redacted - user content comes from the human and is displayed verbatim.
+func publishUser(hub *logbridge.Hub, project, cardID, content string) {
+	hub.Publish(protocol.LogEntry{
+		Timestamp: time.Now(),
+		Project:   project,
+		CardID:    cardID,
+		Type:      "user",
+		Content:   content,
 	})
 }
 
