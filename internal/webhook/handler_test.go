@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,10 +19,30 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/secrets"
 	"github.com/mhersson/contextmatrix-backendkit/frames"
 	"github.com/mhersson/contextmatrix-backendkit/logbridge"
+	"github.com/mhersson/contextmatrix-backendkit/webhookcore"
 	protocol "github.com/mhersson/contextmatrix-protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// ---- signing helpers --------------------------------------------------------
+
+const testAPIKey = "test-secret-key"
+
+// signReq stamps r with a valid HMAC signature for the given key over
+// METHOD\nURI\nTS.BODY using the supplied timestamp.
+func signReq(t *testing.T, r *http.Request, key string, body []byte, ts string) {
+	t.Helper()
+
+	sig := protocol.SignPayloadWithTimestamp(key, r.Method, r.URL.RequestURI(), body, ts)
+	r.Header.Set(protocol.SignatureHeader, "sha256="+sig)
+	r.Header.Set(protocol.TimestampHeader, ts)
+}
+
+// nowTS returns the current Unix second as a string.
+func nowTS() string {
+	return strconv.FormatInt(time.Now().Unix(), 10)
+}
 
 // ---- fakes ------------------------------------------------------------------
 
@@ -211,13 +232,13 @@ func (f *fakeCredentials) teardownCalls() [][2]string {
 }
 
 // fakeImageLister returns a fixed set of image summaries or an error. It
-// satisfies ImageLister.
+// satisfies webhookcore.ImageLister.
 type fakeImageLister struct {
-	summaries []executor.ImageSummary
+	summaries []webhookcore.ImageSummary
 	err       error
 }
 
-func (f *fakeImageLister) ListImages(_ context.Context) ([]executor.ImageSummary, error) {
+func (f *fakeImageLister) ListImages(_ context.Context) ([]webhookcore.ImageSummary, error) {
 	return f.summaries, f.err
 }
 
@@ -263,6 +284,7 @@ type harness struct {
 	verifier *fakeVerifier
 	hub      *logbridge.Hub
 	images   *fakeImageLister
+	draining *atomic.Bool
 }
 
 func newHarness(t *testing.T, maxConcurrent int) *harness {
@@ -274,6 +296,7 @@ func newHarness(t *testing.T, maxConcurrent int) *harness {
 	verifier := &fakeVerifier{autonomous: true}
 	hub := logbridge.NewHub(func(e protocol.LogEntry) string { return e.Project }, nil)
 	images := &fakeImageLister{}
+	draining := &atomic.Bool{}
 
 	server := NewServer(Config{
 		APIKey:        testAPIKey,
@@ -291,6 +314,7 @@ func newHarness(t *testing.T, maxConcurrent int) *harness {
 		},
 		Images:           images,
 		ImageListFilters: []string{"contextmatrix-agent"},
+		Draining:         draining,
 	})
 
 	return &harness{
@@ -301,6 +325,7 @@ func newHarness(t *testing.T, maxConcurrent int) *harness {
 		verifier: verifier,
 		hub:      hub,
 		images:   images,
+		draining: draining,
 	}
 }
 
@@ -880,7 +905,7 @@ func TestContainers_ListsTrackedRuns(t *testing.T) {
 
 func TestImages_FiltersPerTagAndMaps(t *testing.T) {
 	h := newHarness(t, 4)
-	h.images.summaries = []executor.ImageSummary{
+	h.images.summaries = []webhookcore.ImageSummary{
 		{
 			Tags:      []string{"contextmatrix-agent-worker:go-node"},
 			Digests:   []string{"contextmatrix-agent-worker@sha256:abc"},
@@ -971,7 +996,7 @@ func TestReadyz_OKAndDraining(t *testing.T) {
 	h.server.Routes().ServeHTTP(w1, r1)
 	require.Equal(t, http.StatusOK, w1.Code)
 
-	h.server.draining.Store(true)
+	h.draining.Store(true)
 
 	r2 := httptest.NewRequest(http.MethodGet, "/readyz", nil)
 	w2 := httptest.NewRecorder()
@@ -984,7 +1009,7 @@ func TestReadyz_OKAndDraining(t *testing.T) {
 
 func TestDrainGate_TriggerRefusedWhileDraining(t *testing.T) {
 	h := newHarness(t, 4)
-	h.server.draining.Store(true)
+	h.draining.Store(true)
 
 	w := h.do(t, http.MethodPost, "/trigger",
 		protocol.TriggerPayload{CardID: "PROJ-001", Project: "proj", RepoURL: "r"})

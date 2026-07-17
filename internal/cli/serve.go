@@ -24,9 +24,10 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/filelog"
 	"github.com/mhersson/contextmatrix-agent/internal/metrics"
 	"github.com/mhersson/contextmatrix-agent/internal/secrets"
-	"github.com/mhersson/contextmatrix-agent/internal/taskskills"
 	"github.com/mhersson/contextmatrix-agent/internal/webhook"
 	"github.com/mhersson/contextmatrix-backendkit/logbridge"
+	"github.com/mhersson/contextmatrix-backendkit/taskskills"
+	"github.com/mhersson/contextmatrix-backendkit/webhookcore"
 	"github.com/mhersson/contextmatrix-harness/redact"
 	protocol "github.com/mhersson/contextmatrix-protocol"
 )
@@ -88,7 +89,7 @@ func runServe(ctx context.Context, configPath string) error {
 	mx := metrics.New()
 
 	skillsCache := filepath.Join(cfg.SecretsDir, "task-skills-cache")
-	skillsResolver := taskskills.NewResolver(cfg.ContextMatrixURL, cfg.APIKey, skillsCache)
+	skillsResolver := taskskills.NewResolver(cfg.ContextMatrixURL, cfg.APIKey, skillsCache, "/api/agent/task-skills-source")
 
 	// Per-run credentials: every admitted trigger carries a CM-provisioned git
 	// token; its credentials are staged into
@@ -155,7 +156,7 @@ func runServe(ctx context.Context, configPath string) error {
 
 	var draining atomic.Bool
 
-	replay := webhook.NewReplayCache(cfg.ReplaySkew, cfg.ReplayCacheSize)
+	replay := webhookcore.NewReplayCache(cfg.ReplaySkew, cfg.ReplayCacheSize)
 	dedup := webhook.NewDedupCache(cfg.MessageDedupTTL, cfg.MessageDedupCacheSize)
 
 	srv := webhook.NewServer(webhook.Config{
@@ -191,7 +192,7 @@ func runServe(ctx context.Context, configPath string) error {
 
 	// Unblock in-flight /logs SSE streams when Shutdown starts; otherwise
 	// http.Server.Shutdown waits the full httpShutdownTimeout on a stream that
-	// never goes idle. (Mirror this in contextmatrix-chat's handleLogs.)
+	// never goes idle.
 	httpServer.RegisterOnShutdown(srv.CloseSSE)
 
 	adminSrv := buildAdminServer(cfg, srv, mx, logger)
