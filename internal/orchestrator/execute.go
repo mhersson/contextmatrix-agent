@@ -210,44 +210,16 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 }
 
 // startSubtaskHeartbeat ticks ops.Heartbeat for cardID on
-// subtaskHeartbeatInterval until the returned stop func is called. Unlike the
-// worker's parent-card startHeartbeat (which only cancels and does not wait),
-// stop here BLOCKS until the goroutine has actually exited: executeClaimedWith
-// must never return while the goroutine could still be running, or a package
-// var read (subtaskHeartbeatInterval) could outlive the caller's stack frame.
+// subtaskHeartbeatInterval until the returned stop func is called. Failures
+// are logged, never fatal - a transient MCP hiccup must not abort a healthy
+// run. Stop BLOCKS until the goroutine has exited: executeClaimedWith must
+// never return while a tick could still fire for a completed subtask.
 func startSubtaskHeartbeat(ctx context.Context, ops Ops, cardID string) func() {
-	hbCtx, cancel := context.WithCancel(ctx)
-	done := make(chan struct{})
-
-	go func() {
-		defer close(done)
-
-		heartbeatLoop(hbCtx, ops, cardID)
-	}()
-
-	return func() {
-		cancel()
-		<-done
-	}
-}
-
-// heartbeatLoop ticks ops.Heartbeat for cardID on subtaskHeartbeatInterval
-// until ctx is canceled. Mirrors the worker's parent-card heartbeat: failures
-// are logged, never fatal - a transient MCP hiccup must not abort a healthy run.
-func heartbeatLoop(ctx context.Context, ops Ops, cardID string) {
-	ticker := time.NewTicker(subtaskHeartbeatInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if err := ops.Heartbeat(ctx, cardID); err != nil {
-				slog.Warn("subtask heartbeat failed", "card_id", cardID, "error", err)
-			}
+	return StartTicker(ctx, subtaskHeartbeatInterval, func(ctx context.Context) {
+		if err := ops.Heartbeat(ctx, cardID); err != nil {
+			slog.Warn("subtask heartbeat failed", "card_id", cardID, "error", err)
 		}
-	}
+	})
 }
 
 // releaseSubtask best-effort releases a claimed subtask on an error exit.

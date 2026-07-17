@@ -234,44 +234,16 @@ func prepareWorkspace(ctx context.Context, git *Git, spec RunSpec, branch string
 }
 
 // startHeartbeat ticks ops.Heartbeat on heartbeatInterval until the returned
-// stop func is called. Heartbeat failures are logged, not fatal: a transient
-// MCP hiccup must not abort an otherwise healthy run.
+// stop func is called. Failures are logged, not fatal: a transient MCP hiccup
+// must not abort an otherwise healthy run. Stop joins the goroutine: Run must
+// not return while a tick could still touch a card it has already released or
+// completed.
 func startHeartbeat(ctx context.Context, ops CardOps, cardID string) func() {
-	done := make(chan struct{})
-	stopped := make(chan struct{})
-
-	go func() {
-		defer close(stopped)
-
-		ticker := time.NewTicker(heartbeatInterval)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-done:
-				return
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if err := ops.Heartbeat(ctx, cardID); err != nil {
-					slog.Warn("heartbeat failed", "card", cardID, "error", err)
-				}
-			}
+	return orchestrator.StartTicker(ctx, heartbeatInterval, func(ctx context.Context) {
+		if err := ops.Heartbeat(ctx, cardID); err != nil {
+			slog.Warn("heartbeat failed", "card", cardID, "error", err)
 		}
-	}()
-
-	var once atomic.Bool
-
-	// The stop func joins the goroutine, not just signals it: Run must not
-	// return while its heartbeat goroutine can still tick a card it has
-	// already released or completed.
-	return func() {
-		if once.CompareAndSwap(false, true) {
-			close(done)
-		}
-
-		<-stopped
-	}
+	})
 }
 
 // fsmArgs bundles what runFSM needs. ctx is the PARENT context (used for the

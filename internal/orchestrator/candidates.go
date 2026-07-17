@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-harness/harness"
@@ -303,33 +302,13 @@ func (o *run) claimedSubIDs() []string {
 // subtask on subtaskHeartbeatInterval until the returned stop func is called.
 // Like startSubtaskHeartbeat, stop BLOCKS until the goroutine has exited.
 func (o *run) startFanoutHeartbeat(ctx context.Context) func() {
-	hbCtx, cancel := context.WithCancel(ctx)
-	done := make(chan struct{})
-
-	go func() {
-		defer close(done)
-
-		ticker := time.NewTicker(subtaskHeartbeatInterval)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-hbCtx.Done():
-				return
-			case <-ticker.C:
-				for _, id := range o.claimedSubIDs() {
-					if err := o.d.Ops.Heartbeat(hbCtx, id); err != nil {
-						slog.Warn("best-of-n: subtask heartbeat failed", "card_id", id, "error", err)
-					}
-				}
+	return StartTicker(ctx, subtaskHeartbeatInterval, func(ctx context.Context) {
+		for _, id := range o.claimedSubIDs() {
+			if err := o.d.Ops.Heartbeat(ctx, id); err != nil {
+				slog.Warn("best-of-n: subtask heartbeat failed", "card_id", id, "error", err)
 			}
 		}
-	}()
-
-	return func() {
-		cancel()
-		<-done
-	}
+	})
 }
 
 // stopFanoutHeartbeat stops the fan-out heartbeater if one is running.
