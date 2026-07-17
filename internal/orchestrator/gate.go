@@ -59,8 +59,7 @@ func (o *run) gate(ctx context.Context, kind gateKind, model, presentation strin
 
 	switch {
 	case errors.Is(err, harness.ErrInboxClosed):
-		_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, //nolint:errcheck // advisory
-			fmt.Sprintf("%s gate: promoted mid-run; proceeding autonomously", kind))
+		o.d.logCard(ctx, "%s gate: promoted mid-run; proceeding autonomously", kind)
 
 		return gateApprove, "", nil
 	case err != nil:
@@ -75,7 +74,7 @@ func (o *run) gate(ctx context.Context, kind gateKind, model, presentation strin
 // classifyVerdict runs one cheap model call mapping the human's freeform reply to
 // an approve/adjust verdict plus the feedback to fold into the next round. A
 // parse failure or any non-"approve" verdict is treated as adjust with the raw
-// reply as feedback — adjust is the fail-safe default, never an accidental
+// reply as feedback - adjust is the fail-safe default, never an accidental
 // approval. A budget breach returns the *BudgetExceededError so execute() parks.
 func (o *run) classifyVerdict(ctx context.Context, kind gateKind, model, reply string) (gateOutcome, string, error) {
 	if err := o.ledger.Check(); err != nil {
@@ -86,17 +85,7 @@ func (o *run) classifyVerdict(ctx context.Context, kind gateKind, model, reply s
 
 	res, err := o.runModel(ctx, o.d.ReadTools, task, model)
 
-	o.ledger.Spend(res.TotalCostUSD)
-
-	used := res.ModelUsed
-	if used == "" {
-		used = model
-	}
-
-	if reportErr := o.d.Ops.ReportUsage(ctx, o.d.Cfg.CardID, used,
-		res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
-		slog.Warn("gate: report classification usage failed", "card_id", o.d.Cfg.CardID, "error", reportErr)
-	}
+	o.spendAndReport(ctx, o.ledger, o.d.Cfg.CardID, "gate: report classification usage failed", res, model)
 
 	if err != nil {
 		// A classification model error must not silently approve.

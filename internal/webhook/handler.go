@@ -46,7 +46,7 @@ type StatusReporter interface {
 }
 
 // AutonomousVerifier confirms a card's autonomous flag before /promote writes
-// the control frame — fail closed. *callback.Client satisfies it; tests supply
+// the control frame - fail closed. *callback.Client satisfies it; tests supply
 // a fake.
 type AutonomousVerifier interface {
 	VerifyAutonomous(ctx context.Context, project, cardID string) (bool, error)
@@ -68,7 +68,7 @@ type ImageLister interface {
 // CredentialProvisioner stages a per-run credential file (the payload git token
 // plus LLM endpoint values) and refreshes the git token from ContextMatrix until
 // the run is torn down. *secrets.RunCredentials satisfies it; tests supply a
-// fake. Nil disables per-run provisioning — the run then mounts the shared
+// fake. Nil disables per-run provisioning - the run then mounts the shared
 // secrets file (the fallback path).
 type CredentialProvisioner interface {
 	// HostDir is the per-run directory bind-mounted read-only at /run/cm-secrets.
@@ -226,7 +226,7 @@ type Server struct {
 	// launchMu serializes per-card admission (credential provisioning + executor
 	// launch). /trigger has no request dedup, so two concurrent triggers for one
 	// card can both reach launch; without serialization the loser's provisioning
-	// and launch-failure teardown interleave with — and clobber — the winner's
+	// and launch-failure teardown interleave with - and clobber - the winner's
 	// per-run credentials. Keyed like stdinMu; entries are likewise never
 	// reclaimed (one bare mutex per card ever seen).
 	launchMu sync.Map // map[string]*sync.Mutex
@@ -321,7 +321,7 @@ func (s *Server) Routes() *http.ServeMux {
 
 // AdminAuth exposes the HMAC verifier for the admin /metrics endpoint, which
 // the serve layer mounts on a separate loopback listener. It reuses the same
-// signed-GET verification, replay cache, and skew as the webhook routes — the
+// signed-GET verification, replay cache, and skew as the webhook routes - the
 // agent-backend signed-GET HMAC is real auth, preserved here.
 func (s *Server) AdminAuth(next http.HandlerFunc) http.HandlerFunc {
 	return s.auth(next)
@@ -439,16 +439,16 @@ func (s *Server) launch(spec executor.LaunchSpec, p protocol.TriggerPayload) {
 // duplicate-trigger window: two concurrent triggers for one card both reach
 // admission (no request dedup, and the capacity pre-check does not serialize
 // same-card admission), but under the lock the winner is admitted first and the
-// loser sees the card already tracked and fails closed HERE — before it can
+// loser sees the card already tracked and fails closed HERE - before it can
 // provision or reach the executor. Proceeding to the executor on a tracked card
 // would race the asynchronous tracker.Remove on the old run's exit: if Remove
-// lands between the check and Launch, the executor would admit the duplicate — a
+// lands between the check and Launch, the executor would admit the duplicate - a
 // container mounting a per-run dir nothing provisioned, which the old run's
 // Teardown then deletes. Rejecting up front is the only race-free outcome; the
 // winner's refresh loop and mounted run dir stay intact.
 //
 // Credential-availability guards: ContextMatrix provisions both credentials
-// per run — there is no local fallback. A payload missing the git token or the
+// per run - there is no local fallback. A payload missing the git token or the
 // llm_endpoint is fail-closed rejected here, before any provisioning or
 // executor call, rather than launched with a dud mount or an empty LLM
 // endpoint.
@@ -509,8 +509,8 @@ func (s *Server) admitAndLaunch(ctx context.Context, spec executor.LaunchSpec, p
 	return ""
 }
 
-// runEndpoint maps the payload's llm_endpoint — plus the mob session guest
-// specs, which carry bearer tokens and therefore ride the secrets file — into
+// runEndpoint maps the payload's llm_endpoint - plus the mob session guest
+// specs, which carry bearer tokens and therefore ride the secrets file - into
 // the per-run credential file's shape. Guests are set regardless of the LLM
 // endpoint so an endpoint-less payload still delivers them.
 func (s *Server) runEndpoint(p protocol.TriggerPayload) secrets.EndpointSecrets {
@@ -529,7 +529,7 @@ func (s *Server) runEndpoint(p protocol.TriggerPayload) secrets.EndpointSecrets 
 
 // mobGuestsJSON compact-encodes the payload's guest specs for the per-run
 // secrets file. Empty or unmarshalable guests yield "" so the key is omitted
-// — a delivery problem degrades to a guestless discussion, never a failed run.
+// - a delivery problem degrades to a guestless discussion, never a failed run.
 func (s *Server) mobGuestsJSON(p protocol.TriggerPayload) string {
 	if p.Mob == nil || len(p.Mob.Guests) == 0 {
 		return ""
@@ -606,7 +606,7 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 
 	// CM-provisioned credentials (git token + LLM values) travel via a per-run
 	// secrets FILE (written and refreshed by the credential provisioner, mounted
-	// at /run/cm-secrets), never plain container env — the worker reads them
+	// at /run/cm-secrets), never plain container env - the worker reads them
 	// only from that file, and plain env would go stale as the refresh loop
 	// rewrites the token. A spec built for a payload without a git token keeps
 	// the static SecretsHostDir fallback, but admitAndLaunch rejects such
@@ -679,7 +679,7 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 
 	// Best-of-N races N candidate implementations concurrently, so the pids
 	// cap (a per-container ceiling) scales with N; the memory limit is
-	// intentionally left alone here — candidate verifies run serially in the
+	// intentionally left alone here - candidate verifies run serially in the
 	// judge phase.
 	pids := s.launchEnv.PidsLimit
 	if p.BestOfN > 1 && pids > 0 {
@@ -792,7 +792,7 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 
 	// Retried request whose first attempt already DELIVERED: return a cached ack
 	// without re-writing the user frame to stdin. The record happens only after a
-	// successful write below, so a 404 or a failed write never poisons the cache —
+	// successful write below, so a 404 or a failed write never poisons the cache -
 	// a retry then re-attempts delivery instead of getting a false duplicate ack.
 	if s.dedup.Contains(payload.Project, payload.CardID, payload.MessageID) {
 		writeJSON(w, http.StatusOK, protocol.SuccessResponse{

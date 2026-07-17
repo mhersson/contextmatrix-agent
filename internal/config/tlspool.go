@@ -9,10 +9,10 @@ import (
 )
 
 // CATransport returns an *http.Transport cloned from http.DefaultTransport with
-// its TLS trust extended by the extra CA certs in the PEM at path — the system
+// its TLS trust extended by the extra CA certs in the PEM at path - the system
 // roots PLUS the private/interception CA, so public endpoints keep working
-// alongside it. Cloning preserves proxy and timeout behaviour — corporate TLS
-// interception usually implies an HTTP(S) proxy too — while overriding only
+// alongside it. Cloning preserves proxy and timeout behaviour - corporate TLS
+// interception usually implies an HTTP(S) proxy too - while overriding only
 // the trust store. An empty path returns a nil transport so callers keep their
 // default RoundTripper. A missing file or a PEM with no usable certificate is
 // an error. It backs both the worker's harness LLM client (via

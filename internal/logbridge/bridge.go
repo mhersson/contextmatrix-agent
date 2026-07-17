@@ -94,7 +94,7 @@ func (h *Hub) Publish(e protocol.LogEntry) {
 	}
 }
 
-// PublishUser emits a "user"-type entry directly. It is NOT redacted —
+// PublishUser emits a "user"-type entry directly. It is NOT redacted -
 // user content comes from the human and is displayed verbatim.
 func (h *Hub) PublishUser(project, cardID, content string) {
 	h.Publish(protocol.LogEntry{
@@ -138,7 +138,7 @@ func (b *Bridge) BridgeLine(project, cardID string, line []byte, isStderr bool) 
 		Data map[string]any `json:"data"`
 	}
 	if err := json.Unmarshal(line, &ev); err != nil {
-		// Unparsable (e.g. panic stack trace) — surface as stderr.
+		// Unparsable (e.g. panic stack trace) - surface as stderr.
 		b.publish(protocol.LogEntry{
 			Timestamp: time.Now(),
 			Project:   project,
@@ -171,7 +171,7 @@ func (b *Bridge) mapEvent(kind string, data map[string]any) (entry protocol.LogE
 	case "model_response":
 		content := strField(data, "content")
 		if strings.TrimSpace(content) == "" {
-			// Pure tool-call turn — no text to show; skip the empty frame.
+			// Pure tool-call turn - no text to show; skip the empty frame.
 			return protocol.LogEntry{}, false, true
 		}
 
@@ -243,7 +243,7 @@ func (b *Bridge) mapEvent(kind string, data map[string]any) (entry protocol.LogE
 
 	case "discussion":
 		// Mob session live transcript: briefing, round utterances, moderator
-		// notices, synthesis — speaker-labeled via Agent. Seat sub-run
+		// notices, synthesis - speaker-labeled via Agent. Seat sub-run
 		// events arrive as "seat_debug" and fall through to the default
 		// skip, keeping them off the live stream by construction.
 		return protocol.LogEntry{
@@ -253,7 +253,7 @@ func (b *Bridge) mapEvent(kind string, data map[string]any) (entry protocol.LogE
 			Model:   strField(data, "model"),
 		}, false, false
 
-	// Transcript-only kinds — not bridged.
+	// Transcript-only kinds - not bridged.
 	case "model_request", "tool_result", "tool_repair", "user_input", "verification":
 		return protocol.LogEntry{}, false, true
 

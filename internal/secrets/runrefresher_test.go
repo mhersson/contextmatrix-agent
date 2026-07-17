@@ -33,7 +33,7 @@ type stubCM struct {
 	apiKey string
 
 	// respExpiry is how far in the future the minted token's expiry lies. Zero
-	// means 10s — comfortably beyond the test window, so the loop does not fire
+	// means 10s - comfortably beyond the test window, so the loop does not fire
 	// again. The leak test sets it short so every live loop keeps calling.
 	respExpiry time.Duration
 
@@ -76,7 +76,7 @@ func (s *stubCM) handler(t *testing.T) http.HandlerFunc {
 		}
 
 		// Response keys match CM's documented git-credentials shape
-		// ({token, expires_at}) — deliberately NOT TriggerPayload's names.
+		// ({token, expires_at}) - deliberately NOT TriggerPayload's names.
 		resp := map[string]string{
 			"token":      "refreshed-token-" + strconv.Itoa(n),
 			"expires_at": time.Now().Add(expiry).UTC().Format(time.RFC3339),
@@ -339,7 +339,7 @@ func TestRunCredentialsCleanupOrphans(t *testing.T) {
 // the new handle must be one atomic step under the manager lock. Before the
 // fix, Provision released the lock between starting the goroutine and storing
 // the handle, so an interleaved Provision could overwrite a handle whose
-// goroutine was never joined — a leaked refresh loop that kept hitting CM
+// goroutine was never joined - a leaked refresh loop that kept hitting CM
 // after Teardown. The stub mints short-lived tokens, so every live loop keeps
 // calling CM on the minSleep floor: after Teardown the call count must freeze,
 // which a leaked loop violates.

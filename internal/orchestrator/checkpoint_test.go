@@ -139,7 +139,7 @@ func TestMobCheckpointProceed(t *testing.T) {
 
 	parent := ops.bodyFor("CARD-1")
 	assert.Contains(t, parent, "## Execute Discussions")
-	assert.Contains(t, parent, "### SUB-1 — add thing")
+	assert.Contains(t, parent, "### SUB-1 - add thing")
 }
 
 func TestMobCheckpointDegradedWritesNoRecord(t *testing.T) {
@@ -205,8 +205,8 @@ func TestMobCheckpointReviseSkippedOnBudget(t *testing.T) {
 	require.Len(t, eng.topics, 1, "the discussion must run: headroom was positive before the engine call")
 
 	joined := strings.Join(ops.logs, "\n")
-	assert.Contains(t, joined, "mob checkpoint (SUB-1): revise — 3 fixes") // truncated from 5 to 3
-	assert.Contains(t, joined, "mob checkpoint (SUB-1): revise skipped — budget exhausted")
+	assert.Contains(t, joined, "mob checkpoint (SUB-1): revise - 3 fixes") // truncated from 5 to 3
+	assert.Contains(t, joined, "mob checkpoint (SUB-1): revise skipped - budget exhausted")
 }
 
 func TestMobCheckpointUnparsableVerdictProceeds(t *testing.T) {
@@ -216,7 +216,7 @@ func TestMobCheckpointUnparsableVerdictProceeds(t *testing.T) {
 	}, 0)
 
 	// Discussion synthesis is garbage; the repair path needs a moderator run,
-	// which mobTestRun's fake LLM serves — accept either outcome shape by
+	// which mobTestRun's fake LLM serves - accept either outcome shape by
 	// asserting only the terminal advisory.
 	eng := &scriptedEngine{outcomes: []mob.Outcome{{Synthesis: "not json at all"}}}
 	o.mobEngine = eng.run
@@ -226,7 +226,7 @@ func TestMobCheckpointUnparsableVerdictProceeds(t *testing.T) {
 
 	joined := strings.Join(ops.logs, "\n")
 	assert.True(t,
-		strings.Contains(joined, "mob checkpoint (SUB-1): verdict unparsable — proceeding") ||
+		strings.Contains(joined, "mob checkpoint (SUB-1): verdict unparsable - proceeding") ||
 			strings.Contains(joined, "mob checkpoint (SUB-1): proceed"),
 		"checkpoint must terminate in a proceed either way: %s", joined)
 }
@@ -245,7 +245,7 @@ func TestMobCheckpointBriefingCarriesEnvironment(t *testing.T) {
 
 	require.Len(t, eng.topics, 1)
 	assert.Contains(t, eng.topics[0].Briefing,
-		"ENVIRONMENT (authoritative; verified on this container — do not dispute from memory)")
+		"ENVIRONMENT (authoritative; verified on this container - do not dispute from memory)")
 	assert.Contains(t, eng.topics[0].Briefing, "Date: ")
 	assert.NotEmpty(t, o.envFacts, "env facts cached on the run after first checkpoint")
 }
@@ -260,7 +260,7 @@ func TestCommitReviseSurfacesFullDecline(t *testing.T) {
 		{
 			name:      "clean tree logs the decline with the finish message head",
 			committed: false,
-			wantLog:   "mob checkpoint (SUB-1): revise made no changes — declined: premise contradicted",
+			wantLog:   "mob checkpoint (SUB-1): revise made no changes - declined: premise contradicted",
 		},
 		{
 			name:      "applied fixes log nothing extra",
@@ -327,7 +327,7 @@ func TestRecordCheckpointDiscussion(t *testing.T) {
 
 		parent := ops.bodyFor("CARD-1")
 		assert.Contains(t, parent, "## Execute Discussions")
-		assert.Contains(t, parent, "### SUB-1 — add thing")
+		assert.Contains(t, parent, "### SUB-1 - add thing")
 		assert.Contains(t, parent, "Seats: seat-1 (correctness): model-x · seat-2 (risk/regressions): model-y")
 		assert.Contains(t, parent, "Rounds: 2 · Outcome: proceed · Cost: $0.0123")
 	})
@@ -343,8 +343,8 @@ func TestRecordCheckpointDiscussion(t *testing.T) {
 				Fixes: []fix{{File: "a.go", Issue: "1"}, {File: "b.go", Issue: "2"}},
 			})
 
-		assert.Contains(t, ops.bodyFor("SUB-1"), "Outcome: revise — 2 fixes")
-		assert.Contains(t, ops.bodyFor("CARD-1"), "Outcome: revise — 2 fixes")
+		assert.Contains(t, ops.bodyFor("SUB-1"), "Outcome: revise - 2 fixes")
+		assert.Contains(t, ops.bodyFor("CARD-1"), "Outcome: revise - 2 fixes")
 	})
 
 	t.Run("empty summary still writes the mechanical block", func(t *testing.T) {
@@ -370,8 +370,8 @@ func TestRecordCheckpointDiscussion(t *testing.T) {
 			checkpointVerdict{Verdict: "proceed", Summary: "b"})
 
 		parent := ops.bodyFor("CARD-1")
-		assert.Contains(t, parent, "### SUB-1 — first")
-		assert.Contains(t, parent, "### SUB-2 — second")
+		assert.Contains(t, parent, "### SUB-1 - first")
+		assert.Contains(t, parent, "### SUB-2 - second")
 		assert.Equal(t, 1, strings.Count(parent, "## Execute Discussions"))
 	})
 
@@ -394,8 +394,8 @@ func TestRecordCheckpointDiscussion(t *testing.T) {
 		// heading, both subtask blocks, and SUB-1's trailing fields intact.
 		parent := ops.bodyFor("CARD-1")
 		assert.Equal(t, 1, strings.Count(parent, "\n## Execute Discussions"))
-		assert.Contains(t, parent, "### SUB-1 — first")
-		assert.Contains(t, parent, "### SUB-2 — second")
+		assert.Contains(t, parent, "### SUB-1 - first")
+		assert.Contains(t, parent, "### SUB-2 - second")
 		assert.Contains(t, parent, "Rounds: 2 · Outcome: proceed · Cost: $0.0123")
 	})
 }

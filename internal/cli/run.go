@@ -197,8 +197,8 @@ func runSpike(ctx context.Context, client llm.LLM, o runOpts) (harness.Result, e
 	return harness.Run(ctx, client, reg, emit, o.task, cfg)
 }
 
-// runVerifyTimeout bounds a standalone `run --verify` command. Generous — a slow
-// local suite must complete, not be cut off — while still bounding a hang.
+// runVerifyTimeout bounds a standalone `run --verify` command. Generous - a slow
+// local suite must complete, not be cut off - while still bounding a hang.
 const runVerifyTimeout = time.Hour
 
 // commandCheck builds a harness.Check that runs a shell command in root with the

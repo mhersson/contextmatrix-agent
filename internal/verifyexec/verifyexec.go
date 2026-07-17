@@ -42,7 +42,7 @@ type Outcome struct {
 // survive.
 const captureCapBytes = 1 << 16 // 64 KiB
 
-// toolMissingPatterns are anchored stderr signatures of a missing tool — the
+// toolMissingPatterns are anchored stderr signatures of a missing tool - the
 // backstop for a make/just/task wrapper that shells out to a toolchain binary
 // that is not installed and exits non-127. They match the shapes GNU make and
 // the POSIX shells actually emit (empirically): the shell may prefix its own
@@ -64,7 +64,7 @@ var toolMissingPatterns = []*regexp.Regexp{
 }
 
 // LooksToolMissing reports whether output carries an anchored "tool not found"
-// signature — the backstop for a wrapper (make/just/task) that shells out to a
+// signature - the backstop for a wrapper (make/just/task) that shells out to a
 // toolchain binary that is not installed and exits non-127.
 func LooksToolMissing(output string) bool {
 	for _, re := range toolMissingPatterns {
@@ -94,7 +94,7 @@ func Probe(workspace string, argv []string) error {
 // operators (| && || ; newline), strips leading FOO=bar env assignments from
 // each segment, and probes the first real token. Shell keywords/builtins are
 // skipped (they always resolve); tokens carrying a shell expansion ($, backtick,
-// (), globs) are skipped as unparseable — the runtime 127 hint is the backstop
+// (), globs) are skipped as unparseable - the runtime 127 hint is the backstop
 // for those. Any first token that resolves to neither a builtin nor a runnable
 // program makes ProbeShell fail.
 func ProbeShell(workspace, cmd string) error {
@@ -235,7 +235,7 @@ var envNameRe = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
 // FilterEnvNames returns the subset of names safe to pass through to a verify
 // subprocess: a conventional UPPER_SNAKE env name that is neither an agent
 // control-plane variable nor a credential-looking one. It is an agent-side
-// re-filter of the CM-validated list — the verify command may be model-proposed,
+// re-filter of the CM-validated list - the verify command may be model-proposed,
 // so re-filtering here is load-bearing defense-in-depth.
 func FilterEnvNames(names []string) []string {
 	var out []string
@@ -288,7 +288,7 @@ var shellSegmentReplacer = strings.NewReplacer(
 
 // splitShellSegments splits a shell command into the segments separated by the
 // pipeline/list operators. It does NOT descend into subshells or command
-// substitutions — those are handled by skipping expansion tokens in ProbeShell.
+// substitutions - those are handled by skipping expansion tokens in ProbeShell.
 func splitShellSegments(cmd string) []string {
 	return strings.Split(shellSegmentReplacer.Replace(cmd), "\x00")
 }
@@ -320,7 +320,7 @@ func isEnvAssignment(f string) bool {
 
 // shellBuiltins are the keywords and builtins that never name an external
 // program, so probing them would spuriously fail. It is a deliberately small,
-// common set — an unknown token is treated as a program and probed.
+// common set - an unknown token is treated as a program and probed.
 var shellBuiltins = map[string]bool{
 	"if": true, "then": true, "else": true, "elif": true, "fi": true,
 	"for": true, "while": true, "until": true, "do": true, "done": true,
@@ -338,7 +338,7 @@ func isShellBuiltin(tok string) bool { return shellBuiltins[tok] }
 // hasShellExpansion reports whether tok carries a shell metacharacter that makes
 // its resolved program name undecidable statically (variable/command
 // substitution, subshells, globs). Such tokens are skipped rather than
-// false-rejected — the runtime 127 hint is their backstop.
+// false-rejected - the runtime 127 hint is their backstop.
 func hasShellExpansion(tok string) bool {
 	return strings.ContainsAny(tok, "$`(){}*?<>&")
 }

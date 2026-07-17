@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"strings"
 
 	"github.com/mhersson/contextmatrix-harness/events"
@@ -88,17 +87,7 @@ func (o *run) runBrainstorm(ctx context.Context, model string) (string, error) {
 
 		res, err := o.runModel(ctx, d.ReadTools, task, model)
 
-		o.ledger.Spend(res.TotalCostUSD)
-
-		used := res.ModelUsed
-		if used == "" {
-			used = model
-		}
-
-		if reportErr := d.Ops.ReportUsage(ctx, cfg.CardID, used,
-			res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
-			slog.Warn("brainstorm: report usage failed", "card_id", cfg.CardID, "error", reportErr)
-		}
+		o.spendAndReport(ctx, o.ledger, cfg.CardID, "brainstorm: report usage failed", res, model)
 
 		if err != nil {
 			return "", fmt.Errorf("brainstorm run: %w", err)
@@ -118,8 +107,7 @@ func (o *run) runBrainstorm(ctx context.Context, model string) (string, error) {
 
 		switch {
 		case errors.Is(werr, harness.ErrInboxClosed):
-			_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory
-				"brainstorm: promoted mid-dialogue; proceeding to planning")
+			d.logCard(ctx, "brainstorm: promoted mid-dialogue; proceeding to planning")
 
 			return "", nil
 		case werr != nil:
@@ -132,8 +120,7 @@ func (o *run) runBrainstorm(ctx context.Context, model string) (string, error) {
 			"\n\nUSER:\n" + strings.TrimSpace(msg.Content)
 	}
 
-	_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory
-		"brainstorm: turn cap reached without a confirmed design; proceeding to planning")
+	d.logCard(ctx, "brainstorm: turn cap reached without a confirmed design; proceeding to planning")
 
 	return "", nil
 }
@@ -142,7 +129,7 @@ func (o *run) runBrainstorm(ctx context.Context, model string) (string, error) {
 // first-turn placeholder when empty.
 func convoBlock(convo string) string {
 	if strings.TrimSpace(convo) == "" {
-		return "(no messages yet — open the dialogue with the user)"
+		return "(no messages yet - open the dialogue with the user)"
 	}
 
 	return convo

@@ -6,7 +6,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 )
 
-// metadataKey is the A2A Message.Metadata key carrying mob session control data —
+// metadataKey is the A2A Message.Metadata key carrying mob session control data -
 // the wire convention shared with the guest shim.
 const metadataKey = "cm_mob"
 
@@ -32,7 +32,7 @@ func setControl(m *a2a.Message, c control) {
 }
 
 // parseControl decodes the cm_mob metadata of m. Missing or malformed
-// metadata means {Kind: "round"} — executors and the shim treat unknown
+// metadata means {Kind: "round"} - executors and the shim treat unknown
 // control data as an ordinary round message.
 func parseControl(m *a2a.Message) control {
 	c := control{Kind: controlRound}
@@ -64,7 +64,7 @@ func parseControl(m *a2a.Message) control {
 }
 
 // setCost attaches a per-turn USD cost to an utterance message. Zero cost is
-// not written — absence already reads as 0.
+// not written - absence already reads as 0.
 func setCost(m *a2a.Message, usd float64) {
 	if usd == 0 {
 		return

@@ -106,11 +106,11 @@ func parsePlan(s string) (plan, error) {
 }
 
 // extractJSON returns the JSON object the model intended as its answer. A
-// whole-output bare object is returned as-is — fence markers inside its string
+// whole-output bare object is returned as-is - fence markers inside its string
 // values must never trigger fence-stripping, which is not string-aware and
 // would mangle the payload. Otherwise it prefers a fenced ```json block
 // (models wrap the verdict in one and surround it with prose that contains
-// stray braces), and finally returns the LAST balanced top-level object —
+// stray braces), and finally returns the LAST balanced top-level object -
 // robust to prose/code braces appearing before it.
 func extractJSON(s string) (string, bool) {
 	if t := strings.TrimSpace(s); strings.HasPrefix(t, "{") && json.Valid([]byte(t)) {
@@ -202,7 +202,7 @@ func resolvePin(reg *registry.Registry, pin string) bool {
 //  3. payload (CM's default_model from the trigger), if set;
 //  4. else the serve-config default.
 //
-// A best-effort card-log failure is swallowed — the warning is advisory.
+// A best-effort card-log failure is swallowed - the warning is advisory.
 func resolveOrchestratorModel(
 	ctx context.Context,
 	reg *registry.Registry,
@@ -232,7 +232,7 @@ func resolveOrchestratorModel(
 		}
 
 		_ = ops.AddLog(ctx, cardID, //nolint:errcheck // advisory note; failure must not abort planning
-			fmt.Sprintf("orchestrator model pin %q not in catalog — using %q", pinned, target))
+			fmt.Sprintf("orchestrator model pin %q not in catalog - using %q", pinned, target))
 	}
 
 	if payload != "" {
@@ -244,12 +244,12 @@ func resolveOrchestratorModel(
 
 // resolveDecisionModel resolves the model an orchestrator DECISION phase runs on
 // (plan decomposition, review synthesis). These phases are reasoning- and
-// calibration-sensitive — a weak model emits malformed plans and mis-calibrated
-// verdicts — so, unlike the low-stakes docs phase, they are floored to a capable
+// calibration-sensitive - a weak model emits malformed plans and mis-calibrated
+// verdicts - so, unlike the low-stakes docs phase, they are floored to a capable
 // judgment model. A catalog-resolvable ModelOrchestrator pin still wins (operator
 // override; an unresolvable pin already warned inside resolveOrchestratorModel).
 // Otherwise the floor is the same best-value selection the authoritative review
-// panel uses — RoleReviewer @ TierComplex — the measured proxy for orchestrator-
+// panel uses - RoleReviewer @ TierComplex - the measured proxy for orchestrator-
 // level judgment (the live catalog measures only coder/reviewer; reviewer is the
 // closer fit for both decomposing and judging). Fixed at TierComplex for EVERY
 // call: decision quality does not scale with task complexity, so even a trivial
@@ -264,7 +264,7 @@ func resolveDecisionModel(
 ) string {
 	base := resolveOrchestratorModel(ctx, reg, emit, ops, cardID, pinned, payload, fallback)
 
-	// A resolvable operator pin is authoritative — never floor over it.
+	// A resolvable operator pin is authoritative - never floor over it.
 	if resolvePin(reg, pinned) || reg == nil {
 		return base
 	}
@@ -304,17 +304,7 @@ func (o *run) runDiagnose(ctx context.Context, model string) (string, error) {
 
 	res, err := o.runModelImages(ctx, d.ReadTools, task, model, o.taskImages)
 
-	o.ledger.Spend(res.TotalCostUSD)
-
-	used := res.ModelUsed
-	if used == "" {
-		used = model
-	}
-
-	if reportErr := d.Ops.ReportUsage(ctx, cfg.CardID, used,
-		res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
-		slog.Warn("plan: report diagnose usage failed", "card_id", cfg.CardID, "error", reportErr)
-	}
+	o.spendAndReport(ctx, o.ledger, cfg.CardID, "plan: report diagnose usage failed", res, model)
 
 	if err != nil {
 		return "", fmt.Errorf("diagnose run: %w", err)
@@ -364,17 +354,7 @@ func (o *run) draftPlan(ctx context.Context, model, diagnosis, design, feedback 
 
 		res, err := o.runModelPlan(ctx, d.ReadTools, task, model, o.taskImages, attempt > 0)
 
-		o.ledger.Spend(res.TotalCostUSD)
-
-		used := res.ModelUsed
-		if used == "" {
-			used = model
-		}
-
-		if reportErr := d.Ops.ReportUsage(ctx, cfg.CardID, used,
-			res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
-			slog.Warn("plan: report usage failed", "card_id", cfg.CardID, "error", reportErr)
-		}
+		o.spendAndReport(ctx, o.ledger, cfg.CardID, "plan: report usage failed", res, model)
 
 		if err != nil {
 			return plan{}, fmt.Errorf("planner run: %w", err)
@@ -400,7 +380,7 @@ const mobAdjustTailEntries = 12
 // single repair turn). prior, when non-nil, re-opens the previous discussion
 // for one non-blind feedback round (HITL adjust): the briefing is the prior
 // transcript tail plus the human's feedback as a human-authored entry.
-// ok=false on any failure — the caller falls back to the solo draftPlan path.
+// ok=false on any failure - the caller falls back to the solo draftPlan path.
 func (o *run) mobDraftPlan(ctx context.Context, diagnosis, design, feedback string, prior *mob.Outcome) (plan, *mob.Outcome, bool) {
 	seats := min(o.d.Cfg.Mob.Participants, len(planLenses))
 
@@ -528,15 +508,14 @@ func (o *run) recordDiscussion(ctx context.Context, out *mob.Outcome) {
 	if out.Consensus {
 		b.WriteString("Outcome: consensus\n")
 	} else {
-		b.WriteString("Outcome: unresolved dissent — carried into the output as risk notes\n")
+		b.WriteString("Outcome: unresolved dissent - carried into the output as risk notes\n")
 	}
 
 	fmt.Fprintf(&b, "Cost: $%.4f", out.CostUSD)
 
 	o.recordSection(ctx, "Discussion", b.String())
-	_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, //nolint:errcheck // advisory record
-		fmt.Sprintf("mob discussion recorded (%d seats, %d rounds, consensus=%t)",
-			len(o.mobSeats), rounds, out.Consensus))
+	o.d.logCard(ctx, "mob discussion recorded (%d seats, %d rounds, consensus=%t)",
+		len(o.mobSeats), rounds, out.Consensus)
 }
 
 // runPlan is the plan phase: one read-only planner run on the
@@ -553,7 +532,7 @@ func runPlan(ctx context.Context, o *run) error {
 	model := resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
 		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel)
 
-	_ = d.Ops.AddLog(ctx, cfg.CardID, "orchestrator model: "+model) //nolint:errcheck // advisory selection record
+	d.logCard(ctx, "orchestrator model: %s", model)
 
 	// Creative HITL cards get a design dialogue before planning (create-plan
 	// Phase 0 Branch C). Skipped in autonomous, for non-creative cards, and when
@@ -576,7 +555,7 @@ func runPlan(ctx context.Context, o *run) error {
 	diagnosis := ""
 
 	if isBugLike(o.tc) {
-		_ = d.Ops.AddLog(ctx, cfg.CardID, "running root-cause investigation (bug-like card)") //nolint:errcheck
+		d.logCard(ctx, "running root-cause investigation (bug-like card)")
 
 		diag, derr := o.runDiagnose(ctx, model)
 		switch {

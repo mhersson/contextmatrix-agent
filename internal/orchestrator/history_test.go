@@ -53,9 +53,9 @@ func TestFormatPlanReadable(t *testing.T) {
 		{ID: "X-3", Title: "HTTP server", Tier: "simple", DependsOnIDs: []string{"X-2"}, Body: "Add main.go serving GET /."},
 	}
 	got := formatPlan(subs)
-	assert.Contains(t, got, "### 1. X-2 — Sysinfo pkg")
+	assert.Contains(t, got, "### 1. X-2 - Sysinfo pkg")
 	assert.Contains(t, got, "_Tier: simple · Depends on: none_")
-	assert.Contains(t, got, "### 2. X-3 — HTTP server")
+	assert.Contains(t, got, "### 2. X-3 - HTTP server")
 	assert.Contains(t, got, "_Tier: simple · Depends on: X-2_")
 	// Body is its own block, not crammed onto a "Body:" line.
 	assert.NotContains(t, got, "Body:")
@@ -79,23 +79,23 @@ func TestRecordReview_RoundHeadingsAndVerdict(t *testing.T) {
 	assert.Contains(t, body, "### Recommendation\n\napprove")
 	// Each round leads with its verify status, recorded by code.
 	assert.Contains(t, body, "**Verify:** PASSED")
-	assert.Contains(t, body, "**Verify:** SKIPPED — tool missing")
+	assert.Contains(t, body, "**Verify:** SKIPPED - tool missing")
 }
 
 func TestExtractSection_ReturnsBlockOrEmpty(t *testing.T) {
-	body := "Desc.\n\n## Execute Discussions\n\n### SUB-1 — a\nx\n\n## Plan\n\n1. y"
+	body := "Desc.\n\n## Execute Discussions\n\n### SUB-1 - a\nx\n\n## Plan\n\n1. y"
 
 	got := extractSection(body, "Execute Discussions")
 
-	assert.Equal(t, "## Execute Discussions\n\n### SUB-1 — a\nx", got)
+	assert.Equal(t, "## Execute Discussions\n\n### SUB-1 - a\nx", got)
 	assert.Empty(t, extractSection(body, "Nope"))
 	assert.Empty(t, extractSection("", "Execute Discussions"))
 }
 
 func TestExtractSection_RunsToEndWhenLast(t *testing.T) {
-	body := "Desc.\n\n## Execute Discussions\n\n### SUB-1 — a\nx\n"
+	body := "Desc.\n\n## Execute Discussions\n\n### SUB-1 - a\nx\n"
 
 	got := extractSection(body, "Execute Discussions")
 
-	assert.Equal(t, "## Execute Discussions\n\n### SUB-1 — a\nx", got)
+	assert.Equal(t, "## Execute Discussions\n\n### SUB-1 - a\nx", got)
 }

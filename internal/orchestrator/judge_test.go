@@ -97,8 +97,8 @@ func judgeCandidate(idx int, model, dir, diff string) *candidate {
 
 // newJudgeRun wires a run for the judge phase: BestOfN=2, a scripted verify stub
 // keyed by candidate dir, and the given candidates pre-populated. mainGit is the
-// run's main (superproject) git handle — distinct from each candidate's own
-// worktree-rooted git — so adoption tests can assert the hard-reset/push/
+// run's main (superproject) git handle - distinct from each candidate's own
+// worktree-rooted git - so adoption tests can assert the hard-reset/push/
 // cleanup calls landed on the right handle.
 func newJudgeRun(t *testing.T, ops *fakeOps, mainGit *fakeGit, client llm.LLM, cands []*candidate, verify map[string]bool) *run {
 	t.Helper()
@@ -158,11 +158,11 @@ func TestJudgePhaseStartAndVerifyProgressLogged(t *testing.T) {
 
 	require.NoError(t, runJudge(context.Background(), o))
 
-	assert.True(t, ops.loggedContains("best-of-n: judge phase started — verifying 2 candidate(s) before comparison"),
+	assert.True(t, ops.loggedContains("best-of-n: judge phase started - verifying 2 candidate(s) before comparison"),
 		"the judge announces itself before verifying; logs=%v", ops.logs)
-	assert.True(t, ops.loggedContains("best-of-n: verifying candidate 1 (coder/one) — 1 of 2"),
+	assert.True(t, ops.loggedContains("best-of-n: verifying candidate 1 (coder/one) - 1 of 2"),
 		"per-candidate verify progress is logged; logs=%v", ops.logs)
-	assert.True(t, ops.loggedContains("best-of-n: verifying candidate 2 (coder/two) — 2 of 2"),
+	assert.True(t, ops.loggedContains("best-of-n: verifying candidate 2 (coder/two) - 2 of 2"),
 		"per-candidate verify progress is logged; logs=%v", ops.logs)
 }
 
@@ -342,7 +342,7 @@ func TestJudgeExcludesCandidateModels(t *testing.T) {
 	require.NoError(t, runJudge(context.Background(), o))
 
 	// alpha/coder is the highest-prior reviewer, but it coded a candidate. With both
-	// candidate models excluded the only model left is the capable default — so the
+	// candidate models excluded the only model left is the capable default - so the
 	// judge is NOT alpha/coder (which excluding only o.excluded would have picked).
 	assert.NotEqual(t, "alpha/coder", o.judgeModel, "the judge must not run a candidate's own coder model")
 	assert.NotEqual(t, "beta/coder", o.judgeModel, "the judge must not run a candidate's own coder model")
@@ -406,7 +406,7 @@ func TestJudgeReportUnverifiedWinnerFooter(t *testing.T) {
 		o.recordJudgeReport(context.Background(), nil)
 
 		body := ops.lastBody()
-		assert.Contains(t, body, "Winner adopted without a passing verify — tool missing")
+		assert.Contains(t, body, "Winner adopted without a passing verify - tool missing")
 	})
 
 	t.Run("verified winner has no footer", func(t *testing.T) {
@@ -554,7 +554,7 @@ func TestAdoptionOutcomeReportBestEffort(t *testing.T) {
 // TestAdoptionNilCandidateSkipped proves cleanup and outcome reporting are
 // nil-safe: a partially-populated fan-out slice (a candidate slot whose
 // worktree build aborted before the struct was created) must not panic, and
-// its nil slot must not count toward NCandidates — only candidates that
+// its nil slot must not count toward NCandidates - only candidates that
 // actually raced do.
 func TestAdoptionNilCandidateSkipped(t *testing.T) {
 	ops := &fakeOps{}

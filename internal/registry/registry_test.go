@@ -179,7 +179,7 @@ func TestRegistryContextWindow(t *testing.T) {
 
 func TestSelectReviewPanelDryFromStart(t *testing.T) {
 	// Zero qualifying candidates (no model carries a prior for the role): the
-	// panel must still be n non-empty specs — all the capable default, never
+	// panel must still be n non-empty specs - all the capable default, never
 	// ModelSpec{}.
 	catalog := llm.Catalog{
 		entry("alpha", 0.7, 1.4, 200000),
@@ -343,7 +343,7 @@ func TestFavoritesConsideredFirst(t *testing.T) {
 // TestSelectDiscussionPanel pins the mob session seat-selection seam: it must give
 // distinct models first, honor the caller's exclusions (review discussions
 // exclude the models that coded the card), and wrap around on scarcity
-// instead of shrinking the panel — the SelectReviewPanel walk, by name.
+// instead of shrinking the panel - the SelectReviewPanel walk, by name.
 func TestSelectDiscussionPanel(t *testing.T) {
 	// Four qualifying reviewers at the complex bar (0.82) with distinct prices.
 	catalog := llm.Catalog{

@@ -145,7 +145,7 @@ func Run(ctx context.Context, spec RunSpec, ops CardOps, client llm.LLM, emit *e
 		func() {
 			// Uniform across modes: the host holds the container's stdin
 			// attach open for the container's whole life, so end_session or
-			// EOF always means "session over" — finalize without completing.
+			// EOF always means "session over" - finalize without completing.
 			// Canceling runCtx wakes a parked Wait (the liveness contract)
 			// and aborts an in-flight autonomous turn alike.
 			endSession.Store(true)
@@ -188,7 +188,7 @@ func Run(ctx context.Context, spec RunSpec, ops CardOps, client llm.LLM, emit *e
 	defer stopHeartbeat()
 
 	// Every card runs the FSM. HITL (interactive && !autonomous) runs it in HITL
-	// mode — sign-off gates wait on the inbox and creative cards brainstorm;
+	// mode - sign-off gates wait on the inbox and creative cards brainstorm;
 	// autonomous/non-interactive runs it with gates auto-passed and brainstorming
 	// skipped. The freeform linear path is retired.
 	return runFSM(ctx, runCtx, fsmArgs{
@@ -229,54 +229,26 @@ func prepareWorkspace(ctx context.Context, git *Git, spec RunSpec, branch string
 	git.SetBranchPolicy(branch, baseBranch, remoteDefault)
 
 	// Return the resolved base so the FSM's review diff / integrate rebase
-	// target a real ref — an empty base makes `git merge-base "" HEAD` fail.
+	// target a real ref - an empty base makes `git merge-base "" HEAD` fail.
 	return baseBranch, nil
 }
 
 // startHeartbeat ticks ops.Heartbeat on heartbeatInterval until the returned
-// stop func is called. Heartbeat failures are logged, not fatal: a transient
-// MCP hiccup must not abort an otherwise healthy run.
+// stop func is called. Failures are logged, not fatal: a transient MCP hiccup
+// must not abort an otherwise healthy run. Stop joins the goroutine: Run must
+// not return while a tick could still touch a card it has already released or
+// completed.
 func startHeartbeat(ctx context.Context, ops CardOps, cardID string) func() {
-	done := make(chan struct{})
-	stopped := make(chan struct{})
-
-	go func() {
-		defer close(stopped)
-
-		ticker := time.NewTicker(heartbeatInterval)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-done:
-				return
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if err := ops.Heartbeat(ctx, cardID); err != nil {
-					slog.Warn("heartbeat failed", "card", cardID, "error", err)
-				}
-			}
+	return orchestrator.StartTicker(ctx, heartbeatInterval, func(ctx context.Context) {
+		if err := ops.Heartbeat(ctx, cardID); err != nil {
+			slog.Warn("heartbeat failed", "card", cardID, "error", err)
 		}
-	}()
-
-	var once atomic.Bool
-
-	// The stop func joins the goroutine, not just signals it: Run must not
-	// return while its heartbeat goroutine can still tick a card it has
-	// already released or completed.
-	return func() {
-		if once.CompareAndSwap(false, true) {
-			close(done)
-		}
-
-		<-stopped
-	}
+	})
 }
 
 // fsmArgs bundles what runFSM needs. ctx is the PARENT context (used for the
 // graceful finalize after a canceled run); runCtx is the run-scoped context an
-// end_session frame cancels — the FSM runs under it.
+// end_session frame cancels - the FSM runs under it.
 type fsmArgs struct {
 	ops        CardOps
 	git        *Git
@@ -299,12 +271,12 @@ type fsmArgs struct {
 //   - nil: the FSM completed the card (it called CompleteTask itself in done) ->
 //     graceful "completed", no extra CompleteTask here.
 //   - ReviewParkedError: graceful "completed", card left in review, NO
-//     CompleteTask and NO release — a human picks it up from review.
+//     CompleteTask and NO release - a human picks it up from review.
 //   - BudgetExceededError: push WIP, release the claim, return the error
 //     (non-zero exit; serve emits the failed callback).
-//   - ContextLimitError: identical to the budget park — push WIP, release the
-//     claim, return the error — so in-flight work survives a context-window stop.
-//   - ctx.Err() (end_session/kill): graceful path — push WIP, release,
+//   - ContextLimitError: identical to the budget park - push WIP, release the
+//     claim, return the error - so in-flight work survives a context-window stop.
+//   - ctx.Err() (end_session/kill): graceful path - push WIP, release,
 //     exit 0; the persisted phase stays for a later resume.
 //   - any other error: release the claim and return it.
 func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, error) {
@@ -343,7 +315,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 		Registry:   buildRegistry(a.spec),
 		WriteTools: tools.NewRegistry(wt...),
 		WriteToolsForDir: func(dir string) *tools.Registry {
-			// Candidates get the same skill tool as the main solver — the
+			// Candidates get the same skill tool as the main solver - the
 			// skills mount is a fixed path, not workspace-relative, so the
 			// shared instance is safe across worktrees.
 			wts := writeToolsFor(dir, a.spec.BashTimeoutMax)
@@ -429,7 +401,7 @@ func mapFSMResult(ctx context.Context, a fsmArgs, err error) (Result, error) {
 	case isMaxTurns(err):
 		// Turn-cap park: the harness stopped mid-task, so the tree may hold
 		// half-done work that must NEVER be completed. Same shape as the
-		// context-limit park — push WIP so resume can pick it up, release the
+		// context-limit park - push WIP so resume can pick it up, release the
 		// claim, surface the error so serve emits the failed callback.
 		pushWIP(ctx, a)
 		releaseQuietly(ctx, a.ops, a.spec.CardID)
@@ -489,7 +461,7 @@ func errorsIsCanceled(err error) bool {
 }
 
 // pushWIP commits any dirty tree and pushes the card branch on the PARENT ctx
-// (runCtx may already be canceled). Best-effort: a failure is logged, not fatal —
+// (runCtx may already be canceled). Best-effort: a failure is logged, not fatal -
 // the park/fail outcome must still surface.
 func pushWIP(ctx context.Context, a fsmArgs) {
 	dirty, err := a.git.CommitIfDirty(ctx, a.tcx.Title, a.spec.CardID)
@@ -516,7 +488,7 @@ func pushWIP(ctx context.Context, a fsmArgs) {
 
 // releaseQuietly releases the claim, logging a real failure rather than masking
 // the run outcome. An already-unclaimed card (ErrCardNotClaimed) is a benign
-// no-op — the done phase released it first — so it is not logged.
+// no-op - the done phase released it first - so it is not logged.
 func releaseQuietly(ctx context.Context, ops CardOps, cardID string) {
 	if err := ops.ReleaseCard(ctx, cardID); err != nil && !errors.Is(err, cmclient.ErrCardNotClaimed) {
 		slog.Warn("release card failed", "card", cardID, "error", err)
@@ -537,8 +509,8 @@ func ops2orchestrator(ops CardOps) orchestrator.Ops {
 
 // writeToolsFor is the full model-facing toolset rooted at dir, matching the
 // linear path's registry so the FSM coder has the same capabilities. It is
-// parameterized only by the root dir — every other argument is fixed for the
-// run — so it is the one source of truth behind both the main workspace's
+// parameterized only by the root dir - every other argument is fixed for the
+// run - so it is the one source of truth behind both the main workspace's
 // WriteTools registry and Best-of-N's per-candidate WriteToolsForDir factory.
 func writeToolsFor(dir string, bashTimeoutMax int) []tools.Tool {
 	return []tools.Tool{
@@ -584,7 +556,7 @@ func buildSkillTool(spec RunSpec, ops CardOps) tools.Tool {
 
 // buildRegistry assembles the model registry the FSM selects from. When a
 // SelectionContext is present on the spec (injected by CM at trigger time), it
-// is the authoritative source — the registry is built entirely from the
+// is the authoritative source - the registry is built entirely from the
 // payload-injected catalog, priors, favorites, and blacklist. No live catalog
 // fetch or embedded baseline is consulted.
 func buildRegistry(spec RunSpec) *registry.Registry {
@@ -617,7 +589,7 @@ func releaseWithError(ctx context.Context, ops CardOps, cardID string, err error
 }
 
 // secretsPathForAuth returns the secrets env file path when the run started with
-// a git token — so git and gh re-read the current token per operation — or ""
+// a git token - so git and gh re-read the current token per operation - or ""
 // when the run has no git auth (public or file:// remotes), which disables
 // credential injection. Auth PRESENCE is fixed at startup (GitToken); only the
 // token VALUE rotates and is read fresh from this path per operation.
@@ -651,7 +623,7 @@ func withDefaults(spec RunSpec) RunSpec {
 // critique rounds, budget factor 0.75, phases plan+review, checkpoint tier
 // "simple" / 3 rounds) fill zero values so the orchestrator never sees an
 // ambiguous zero. "execute" is live only when the payload's server flag rode
-// along — a bare phase value from a stale CM stays inert. nil or
+// along - a bare phase value from a stale CM stays inert. nil or
 // participants < 2 = off (zero value).
 func mobConfig(spec *protocol.MobSpec) orchestrator.MobConfig {
 	if spec == nil || spec.Participants < 2 {

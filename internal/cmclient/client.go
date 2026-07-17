@@ -1,6 +1,6 @@
 // Package cmclient is the worker's card-operations client: a minimal MCP
 // client over Streamable HTTP against ContextMatrix's /mcp endpoint. Card
-// progress stays on MCP by design — the webhook channel is lifecycle-only.
+// progress stays on MCP by design - the webhook channel is lifecycle-only.
 package cmclient
 
 import (
@@ -70,7 +70,7 @@ func WithBaseTransport(rt http.RoundTripper) Option {
 
 // newTransport builds the streamable transport. DisableStandaloneSSE: the
 // worker registers no server->client handlers (NewClient gets nil options), so
-// the standalone GET stream carries nothing — while its SDK-side retry counter
+// the standalone GET stream carries nothing - while its SDK-side retry counter
 // only resets on event-ID progress, meaning any 6 idle closes over the session
 // lifetime (proxy idle timeouts, CM redeploys, blips) would otherwise
 // deterministically poison the whole session.
@@ -176,7 +176,7 @@ type ImageBlob struct {
 // need. Parent, siblings, and project config from the server response are
 // intentionally ignored.
 type TaskContext struct {
-	// Base fields — populated for all cards.
+	// Base fields - populated for all cards.
 	Title       string
 	Description string
 	State       string
@@ -187,7 +187,7 @@ type TaskContext struct {
 	Type   string
 	Labels []string
 
-	// Orchestrator fields — populated for autonomous cards; zero-valued when the
+	// Orchestrator fields - populated for autonomous cards; zero-valued when the
 	// card JSON omits them.
 	Phase             string
 	Autonomous        bool
@@ -535,7 +535,7 @@ func (c *Client) SetPhase(ctx context.Context, cardID, phase string) error {
 // UpdateCardBody replaces the card body via update_card. The orchestrator uses
 // it to record the run's history (diagnosis, plan, review rounds) on the parent
 // card. Only the body field is sent, so a concurrent phase update is not
-// clobbered — CM patches only the provided fields.
+// clobbered - CM patches only the provided fields.
 func (c *Client) UpdateCardBody(ctx context.Context, cardID, body string) error {
 	_, err := c.call(ctx, "update_card", map[string]any{
 		"card_id": cardID,
@@ -556,7 +556,7 @@ func (c *Client) TransitionCard(ctx context.Context, cardID, state string) error
 }
 
 // StartReview atomically transitions the card to review via start_review. The
-// skill payload the server returns is intentionally not surfaced — the
+// skill payload the server returns is intentionally not surfaced - the
 // orchestrator drives its own review flow.
 func (c *Client) StartReview(ctx context.Context, cardID string) error {
 	_, err := c.call(ctx, "start_review", map[string]any{"card_id": cardID})
@@ -648,7 +648,7 @@ func (c *Client) AddLog(ctx context.Context, cardID, message string) error {
 // RecordSkillEngaged appends a "skill_engaged" activity log entry via the MCP
 // add_log tool. ContextMatrix records it as a deduped skill_engaged entry
 // (RecordSkillEngaged/skillNameOf parse "engaged <skill>" from the message) and
-// publishes card.log_added for the dashboard — the agent's report path, distinct
+// publishes card.log_added for the dashboard - the agent's report path, distinct
 // from AddLog's status_update. The call helper injects agent_id.
 func (c *Client) RecordSkillEngaged(ctx context.Context, cardID, skillName string) error {
 	_, err := c.call(ctx, "add_log", map[string]any{

@@ -26,12 +26,12 @@ var ErrRebaseConflict = orchestrator.ErrRebaseConflict
 // Git runs code-driven git operations for one card's workspace. Credentials
 // reach git through a credential helper that re-reads the token from the secrets
 // file on every git auth, so a token the host rotates on disk mid-run is picked
-// up on the next operation — the token value never lands in on-disk config, the
+// up on the next operation - the token value never lands in on-disk config, the
 // injected env, or the model-facing tool env; only the path to the helper does.
 //
 // The branch-policy fields (cardBranch, baseBranch, remoteDefault) gate every
 // push through guardPush. They are a hard safety invariant: no config or env
-// can loosen them, and the zero value (cardBranch == "") is fail-closed — a Git
+// can loosen them, and the zero value (cardBranch == "") is fail-closed - a Git
 // whose policy was never set refuses every push.
 type Git struct {
 	dir string
@@ -44,7 +44,7 @@ type Git struct {
 	host           string
 
 	// caCertFile is an optional in-container path to an extra CA PEM. When set,
-	// git subprocesses trust it via GIT_SSL_CAINFO — needed for TLS interception
+	// git subprocesses trust it via GIT_SSL_CAINFO - needed for TLS interception
 	// or a private-CA GitHub Enterprise. The container env is scrubbed for
 	// subprocesses, so this must be injected here rather than inherited.
 	caCertFile string
@@ -87,8 +87,8 @@ func (g *Git) SetBranchPolicy(cardBranch, baseBranch, remoteDefault string) {
 }
 
 // credEnv builds the env for git subprocesses: the scrubbed allowlist base plus
-// fixed identity variables, an optional extra-CA path, and — when a secrets file
-// is configured — a git credential helper that re-reads CM_GIT_TOKEN from that
+// fixed identity variables, an optional extra-CA path, and - when a secrets file
+// is configured - a git credential helper that re-reads CM_GIT_TOKEN from that
 // file on every git auth. The token value is never baked into git config or the
 // env; only the path to the helper (which reads the file) is, so a token the
 // host rotates on disk is picked up on the next git operation.
@@ -240,7 +240,7 @@ func (g *Git) isDirty(ctx context.Context) (bool, error) {
 }
 
 // hasExecutableMagic reports whether the file begins with a known native
-// executable magic number (ELF, Mach-O, or PE/COFF) — a compiled binary the
+// executable magic number (ELF, Mach-O, or PE/COFF) - a compiled binary the
 // agent never legitimately authors as source, so an untracked file carrying
 // one must not be committed. The guard is deliberately language-agnostic: the
 // target repo's own .gitignore is the source of truth for "don't commit this"
@@ -249,7 +249,7 @@ func (g *Git) isDirty(ctx context.Context) (bool, error) {
 // carries NO filename, extension, or ecosystem-directory heuristic: those
 // encode language knowledge and, worse, a directory-name match like "target"
 // or "build" silently drops first-party source that merely lives under that
-// name. Read errors are treated as "not an artifact" — the guard never blocks
+// name. Read errors are treated as "not an artifact" - the guard never blocks
 // on its own failure, only on positive evidence.
 func hasExecutableMagic(absPath string) bool {
 	f, err := os.Open(absPath) //nolint:gosec // path is a workspace-relative entry from git status
@@ -286,7 +286,7 @@ func hasExecutableMagic(absPath string) bool {
 // warning. This replaces a blanket `git add -A`: a compiled binary the target
 // repo's .gitignore failed to cover can no longer sneak into the commit. The
 // repo's own .gitignore (honoured by `git status --untracked-files=all`) remains
-// the language-agnostic source of truth for everything else — no extension or
+// the language-agnostic source of truth for everything else - no extension or
 // directory-name denylist that would encode language knowledge or drop
 // first-party source under a name like build/ or target/.
 func (g *Git) stageForCommit(ctx context.Context) error {
@@ -297,7 +297,7 @@ func (g *Git) stageForCommit(ctx context.Context) error {
 	// -z NUL-delimits records and disables path quoting, so filenames with
 	// spaces or non-ASCII bytes reach `git add` verbatim. Without it git
 	// C-quotes such paths and the quoted string fails to match, aborting the
-	// whole commit — a regression from the blanket `git add -A` this replaced.
+	// whole commit - a regression from the blanket `git add -A` this replaced.
 	out, err := g.run(ctx, "status", "--porcelain", "-z", "--untracked-files=all")
 	if err != nil {
 		return fmt.Errorf("list untracked: %w", err)
@@ -388,7 +388,7 @@ func (g *Git) CommitIfDirty(ctx context.Context, title, cardID string) (bool, er
 	}
 
 	if !staged {
-		// The tree was dirty only with skipped artifacts — nothing to commit.
+		// The tree was dirty only with skipped artifacts - nothing to commit.
 		return false, nil
 	}
 
@@ -414,13 +414,13 @@ func (g *Git) RemoteDefaultBranch(ctx context.Context) string {
 }
 
 // guardPush is the single hard-safety chokepoint every push must pass before
-// any network call. The rules are hardcoded — no config or env may loosen
+// any network call. The rules are hardcoded - no config or env may loosen
 // them, and the zero value is fail-closed:
 //
 //  1. Only the run's own card branch may be pushed at all (force or not). The
 //     zero-value cardBranch ("") makes this refuse every push.
 //  2. A force push is additionally refused to the base branch, main, master,
-//     or the remote default — protected refs that must never be rewritten.
+//     or the remote default - protected refs that must never be rewritten.
 //  3. A force push is refused to anything outside the cm/ namespace.
 func (g *Git) guardPush(branch string, force bool) error {
 	if g.cardBranch == "" {
@@ -446,7 +446,7 @@ func (g *Git) guardPush(branch string, force bool) error {
 	return nil
 }
 
-// Push pushes branch to origin via an explicit refspec — never a bare
+// Push pushes branch to origin via an explicit refspec - never a bare
 // git push, so no push.default, upstream config, or "matching" can redirect
 // it. Guarded by guardPush. A diverged pre-existing remote branch fails by
 // design; force pushes go through ForcePushWithLease.
@@ -461,7 +461,7 @@ func (g *Git) Push(ctx context.Context, branch string) error {
 }
 
 // ForcePushWithLease force-pushes the card branch, guarded, with an explicit
-// expected remote tip — never bare --force, never valueless --force-with-lease.
+// expected remote tip - never bare --force, never valueless --force-with-lease.
 func (g *Git) ForcePushWithLease(ctx context.Context, branch, expectedTip string) error {
 	if expectedTip == "" {
 		return errors.New("force-with-lease: expected tip required")
@@ -536,8 +536,8 @@ func (g *Git) CommitWithMessage(ctx context.Context, message string) (bool, erro
 }
 
 // CommitFixup stages tracked changes plus non-artifact untracked files via
-// stageForCommit (see its doc) — fix runs can legitimately create new source
-// files — and creates a "fixup! <subject>" commit targeting target (the hash of
+// stageForCommit (see its doc) - fix runs can legitimately create new source
+// files - and creates a "fixup! <subject>" commit targeting target (the hash of
 // the commit to fix up). It reports whether a commit was made. A clean tree
 // returns (false, nil).
 func (g *Git) CommitFixup(ctx context.Context, target string) (bool, error) {
@@ -596,7 +596,7 @@ func (g *Git) RebaseAutosquash(ctx context.Context, onto string) error {
 		return nil
 	}
 
-	// Rebase failed — abort to leave the repo clean.
+	// Rebase failed - abort to leave the repo clean.
 	_, abortErr := g.run(ctx, "rebase", "--abort")
 	if abortErr != nil {
 		return fmt.Errorf("rebase abort after conflict: %w (original: %s)", abortErr, strings.TrimSpace(string(out)))
@@ -655,7 +655,7 @@ func (g *Git) AddWorktree(ctx context.Context, path, branch, startRef string) er
 	return err
 }
 
-// RemoveWorktree force-removes a linked worktree (dirty trees included —
+// RemoveWorktree force-removes a linked worktree (dirty trees included -
 // losing candidates are discarded wholesale).
 func (g *Git) RemoveWorktree(ctx context.Context, path string) error {
 	_, err := g.run(ctx, "worktree", "remove", "--force", path)
@@ -740,7 +740,7 @@ func (g *Git) AddInfoExclude(ctx context.Context, pattern string) error {
 	if existing, err := os.ReadFile(excludePath); err == nil {
 		for line := range strings.SplitSeq(string(existing), "\n") {
 			if strings.TrimSpace(line) == pattern {
-				return nil // already excluded — idempotent no-op
+				return nil // already excluded - idempotent no-op
 			}
 		}
 	}

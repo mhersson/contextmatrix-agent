@@ -25,7 +25,7 @@ import (
 // plan -> execute -> document -> review -> integrate -> done. The only stubbed boundaries
 // are OpenRouter (a content-aware httptest SSE server) and the CM card-ops
 // surface (an in-process recorder satisfying both worker.CardOps and the wider
-// orchestrator.Ops). Git is REAL — a temp clone against a local bare origin —
+// orchestrator.Ops). Git is REAL - a temp clone against a local bare origin -
 // and so is the SSE wire client, the harness loop, the registry/selector, and
 // the verify-command subprocess. runOrchestrator is NOT swapped here: the true
 // orchestrator.Run executes, so this is the real-stack "autonomous completes a
@@ -40,7 +40,7 @@ import (
 // scriptedBackend serves /chat/completions by inspecting each request's prompt
 // and conversation state, returning the SSE body the relevant phase expects.
 // Matching on CONTENT (not call order) is required because the three review
-// specialists run as PARALLEL subagents — an order-keyed stub would race, and a
+// specialists run as PARALLEL subagents - an order-keyed stub would race, and a
 // specialist could steal the synthesis body. Every served reply carries a
 // scripted usage cost so the budget ledger and report_usage assertions have
 // real numbers to sum.
@@ -152,7 +152,7 @@ func (b *scriptedBackend) reply(req chatRequest) string {
 
 	case strings.Contains(firstUser, "You are the coding agent addressing review feedback"):
 		// The fix coder edits the cited file then stops; no finish call is required
-		// here — the orchestrator lands it as a fixup regardless of what the model
+		// here - the orchestrator lands it as a fixup regardless of what the model
 		// outputs.
 		if hasToolResult {
 			b.totalCost += b.fixCost
@@ -164,7 +164,7 @@ func (b *scriptedBackend) reply(req chatRequest) string {
 
 	case strings.Contains(firstUser, "You are the documentation agent"):
 		// Conservative no-op: the agent writes nothing (no tool call), so the tree
-		// stays clean and the phase commits/pushes nothing — the common case for a
+		// stays clean and the phase commits/pushes nothing - the common case for a
 		// change that needs no external docs. It still reports a costed usage so the
 		// ledger/usage assertions account for the document model call.
 		b.totalCost += b.documentCost
@@ -178,7 +178,7 @@ func (b *scriptedBackend) reply(req chatRequest) string {
 
 	default:
 		// An unrecognised prompt must fail loudly, not hang on the natural-stop
-		// fallback — a silent extra turn would mask a real wiring break.
+		// fallback - a silent extra turn would mask a real wiring break.
 		return sseStop("UNEXPECTED PROMPT", 0)
 	}
 }
@@ -223,7 +223,7 @@ func sseWriteTool(callID, args string, cost float64) string {
 }
 
 // sseFinish is a turn emitting one streamed `finish` tool call (id+name, then
-// the JSON commit_message argument) plus a tool_calls finish — mirrors
+// the JSON commit_message argument) plus a tool_calls finish - mirrors
 // sseWriteTool's exact SSE delta framing with the tool name and args swapped.
 func sseFinish(commitMsg string, cost float64) string {
 	args, _ := json.Marshal(map[string]string{"commit_message": commitMsg})
@@ -281,7 +281,7 @@ func writeArgsFor(prompt string) string {
 
 // coderCommitFor returns the conventional commit message for the subtask the
 // prompt is about. The messages carry a scope ("app") so they diverge from
-// sanitizeTitle's scopeless "feat: <lowercased title>" fallback — if the
+// sanitizeTitle's scopeless "feat: <lowercased title>" fallback - if the
 // streamed finish commit_message argument were ever dropped, resolution would
 // fall through to that fallback and the git-log assertions below would fail
 // instead of passing vacuously.
@@ -690,7 +690,7 @@ func TestOrchestratorEndToEndHappyPath(t *testing.T) {
 
 	// --- the card was driven to done and released, never CompleteTask'd ----
 	// (the parent transitions to done in integrate; the worker does not call
-	// CompleteTask on the FSM happy path — done releases the claim).
+	// CompleteTask on the FSM happy path - done releases the claim).
 	assert.Equal(t, 1, ops.count("TransitionCard"), "parent transitions to done once")
 	assert.GreaterOrEqual(t, ops.count("ReleaseCard"), 1, "done releases the parent claim")
 
@@ -729,7 +729,7 @@ func TestOrchestratorEndToEndHappyPath(t *testing.T) {
 // succeeds) and a single review fix loop: synthesis rejects once with a fix
 // citing feature_b.txt, the coder lands a fixup, the gate passes again, and the
 // second synthesis approves. After integrate, origin's history must show NO
-// "fixup!" subjects — autosquash collapsed the fixup into its target.
+// "fixup!" subjects - autosquash collapsed the fixup into its target.
 func TestOrchestratorEndToEndFixLoop(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in-process orchestrator e2e in -short mode")
@@ -739,7 +739,7 @@ func TestOrchestratorEndToEndFixLoop(t *testing.T) {
 
 	// A self-contained, dependency-free module so the gate's `go test ./...`
 	// runs fully offline. The passing test means the gate never short-circuits
-	// to a fix on its own — only the scripted synthesis verdict does.
+	// to a fix on its own - only the scripted synthesis verdict does.
 	remote := setupBareRemoteWithFiles(t, map[string]string{
 		"go.mod":       "module e2eworkspace\n\ngo 1.26\n",
 		"keep_test.go": "package e2eworkspace\n\nimport \"testing\"\n\nfunc TestKeep(t *testing.T) {}\n",
@@ -834,7 +834,7 @@ func TestOrchestratorEndToEndFixLoop(t *testing.T) {
 
 // compile-time proof the recorder satisfies BOTH surfaces: the worker's narrow
 // CardOps (what Run consumes) and the wider orchestrator.Ops the FSM drives via
-// ops2orchestrator. The wide fit is load-bearing — a nil Ops would panic the
+// ops2orchestrator. The wide fit is load-bearing - a nil Ops would panic the
 // real FSM this test exercises.
 var (
 	_ CardOps          = (*stubOps)(nil)

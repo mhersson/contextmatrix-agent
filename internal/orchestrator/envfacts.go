@@ -29,14 +29,14 @@ const envProbeTimeout = 5 * time.Second
 // environmentFacts renders the authoritative environment block for
 // checkpoint briefings: the current UTC date plus the first output line of
 // each toolchain probe whose marker file exists in the workspace.
-// Best-effort by contract — a missing binary, probe error, or timeout
+// Best-effort by contract - a missing binary, probe error, or timeout
 // silently omits that line; the header and date always render. It exists to
 // ground discussion seats against knowledge-cutoff hallucinations ("version
 // X does not exist") with facts verified on this container.
 func environmentFacts(workspace string) string {
 	var b strings.Builder
 
-	b.WriteString("ENVIRONMENT (authoritative; verified on this container — do not dispute from memory)\n")
+	b.WriteString("ENVIRONMENT (authoritative; verified on this container - do not dispute from memory)\n")
 	b.WriteString("Date: " + time.Now().UTC().Format("2006-01-02"))
 
 	probed := map[string]bool{}

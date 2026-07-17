@@ -10,7 +10,7 @@ import (
 // request has already been DELIVERED, so a retry returns a cached ack instead
 // of writing the user frame to the worker's stdin a second time. The check
 // (Contains) and the record (Record) are deliberately split so a caller records
-// only after a successful delivery — a failed write or an untracked run must not
+// only after a successful delivery - a failed write or an untracked run must not
 // poison the cache, or ContextMatrix's retry would get a false duplicate ack and
 // silently drop the human's message. It is TTL- and capacity-bounded; an empty
 // messageID NEVER dedups (the client opted out of at-most-once delivery). All
@@ -67,7 +67,7 @@ func dedupKey(project, cardID, messageID string) string {
 }
 
 // Contains reports whether the (project, cardID, messageID) tuple has already
-// been recorded inside the TTL window. It is a pure read — nothing is recorded.
+// been recorded inside the TTL window. It is a pure read - nothing is recorded.
 // An empty messageID always returns false: dedup requires the client to supply
 // an idempotency key. A TTL-expired entry is reaped here so it does not linger.
 func (c *DedupCache) Contains(project, cardID, messageID string) bool {

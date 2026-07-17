@@ -118,7 +118,7 @@ func (b *hitlBackend) reply(req chatRequest) string {
 		// Turn 1 (no tool result yet) writes the file; turn 2 calls finish to end the run.
 		// The message carries a scope ("ui") so it diverges from sanitizeTitle's
 		// scopeless "feat: add palette config" fallback for the "Add palette
-		// config" subtask title — see coderCommitFor's doc comment in
+		// config" subtask title - see coderCommitFor's doc comment in
 		// e2e_orchestrator_test.go for why that divergence matters.
 		if hasToolResult {
 			return sseCoderCommit("feat(ui): add palette config", b.cost)

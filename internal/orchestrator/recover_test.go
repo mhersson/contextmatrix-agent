@@ -15,7 +15,7 @@ import (
 
 // modelAwareLLM is a scripted llm.LLM that branches on the request model: any
 // model in incapable returns a single bad-JSON tool call every turn, which the
-// harness counts as unproductive and — after IncapableThreshold turns — reports
+// harness counts as unproductive and - after IncapableThreshold turns - reports
 // as Reason "incapable" (the signal runModel turns into *IncapableError). An
 // incapable call does NOT consume the response queue, so the script stays aligned
 // to the CAPABLE calls only.
@@ -50,7 +50,7 @@ func (m *modelAwareLLM) next(req llm.Request) llm.Response {
 	if m.incapable[req.Model] {
 		// Unparseable tool-call arguments: the harness never marks the turn
 		// capable, so consecutive turns drive it to ReasonIncapable. No queue
-		// consumption — the script tracks only capable calls.
+		// consumption - the script tracks only capable calls.
 		return llm.Response{ToolCalls: []llm.ToolCall{{
 			ID:       "bad-1",
 			Type:     "function",
@@ -87,7 +87,7 @@ func (m *modelAwareLLM) recordedModels() []string {
 // equal price and distinct quality (alpha > beta), so SelectByComplexity picks
 // alpha first; excluding alpha forces beta. capableDefault is a third, distinct
 // model that is NOT a scored candidate, so it is only reached when every
-// candidate is excluded (the cap path) — letting the cap test starve the loop.
+// candidate is excluded (the cap path) - letting the cap test starve the loop.
 func twoCoderRegistry() *registry.Registry {
 	catalog := llm.Catalog{
 		{ID: "alpha/coder", ContextLength: 200000, SupportedParameters: []string{"tools"}, PromptPricePerTok: 1e-6, CompletionPricePerTok: 1e-6},
@@ -151,7 +151,7 @@ func TestExecuteIncapableCapParks(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true}
 	// Every model the selector can return is incapable, so no re-selection ever
-	// yields a working model — the cap is the only thing that stops the loop.
+	// yields a working model - the cap is the only thing that stops the loop.
 	llmFake := &modelAwareLLM{incapable: map[string]bool{
 		"alpha/coder":     true,
 		"beta/coder":      true,

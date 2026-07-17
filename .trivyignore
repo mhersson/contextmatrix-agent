@@ -8,7 +8,7 @@
 # --- The bundled npm CLI ships tinyglobby -> picomatch 4.0.3
 # (/usr/lib/node_modules/npm/node_modules/tinyglobby/node_modules/picomatch);
 # 4.0.4 fixes the ReDoS. This is npm's own transitive dependency, so it clears
-# only when an npm upgrade pulls in the fixed tinyglobby/picomatch — no Go
+# only when an npm upgrade pulls in the fixed tinyglobby/picomatch - no Go
 # change here affects it. The worker container is single-tenant and only parses
 # globs it generates itself, so the ReDoS is not reachable from a prompt
 # attacker.
@@ -17,7 +17,7 @@ CVE-2026-33671
 # --- The agent binary embeds the Docker SDK (github.com/docker/docker
 # v28.5.2+incompatible); CVE-2026-34040 is a Moby *daemon* authorization-bypass,
 # fixed in v29.3.1. The agent uses only the Docker *client*, against a trusted
-# local daemon, so the daemon-side authz path is not reachable — govulncheck
+# local daemon, so the daemon-side authz path is not reachable - govulncheck
 # (which is call-graph aware) reports no finding for it. The v28 -> v29 fix is a
 # major SDK bump; Dependabot will raise it as a reviewable PR. Accepted until
 # then.
@@ -27,7 +27,7 @@ CVE-2026-34040
 # prebuilt upstream binary compiled with Go 1.26.4; CVE-2026-39822 is an
 # os.Root symlink-following traversal in that embedded stdlib, fixed in Go
 # 1.26.5. Everything this repo compiles is already on 1.26.5 (builder image,
-# in-image toolchain, agent binary — all scan clean); only GitHub's release
+# in-image toolchain, agent binary - all scan clean); only GitHub's release
 # pipeline can rebuild gh. Inside the worker container repo-controlled code
 # already executes arbitrary bash, so gh's traversal adds no marginal attack
 # surface. Clears when apt pulls a gh release built on Go >= 1.26.5.
@@ -37,6 +37,6 @@ CVE-2026-39822
 # (/usr/lib/node_modules/npm/node_modules/sigstore); CVE-2026-48815 means its
 # certificateOIDs verification constraints are silently dropped and never
 # enforced, fixed in 4.1.1. npm's own transitive dependency, exercised only
-# when npm verifies registry attestations inside the single-tenant worker —
+# when npm verifies registry attestations inside the single-tenant worker -
 # clears when an npm upgrade pulls in the fixed sigstore.
 CVE-2026-48815

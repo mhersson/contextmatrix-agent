@@ -9,11 +9,11 @@ import (
 
 // recordSection upserts a "## <heading>" markdown section into the parent card
 // body and pushes the updated body to CM, so the parent accumulates the run's
-// history (diagnosis, plan, review rounds) for a complete record — mirroring
+// history (diagnosis, plan, review rounds) for a complete record - mirroring
 // CM's workflow-skills, which write these sections onto the card. section
 // must be the COMPLETE block, starting with its "## <heading>" line.
 //
-// Best-effort: a failure is logged, not fatal — the body is a human-facing
+// Best-effort: a failure is logged, not fatal - the body is a human-facing
 // record, never control state, and must not fail a phase.
 func (o *run) recordSection(ctx context.Context, heading, section string) {
 	o.body = upsertSection(o.body, heading, section)
@@ -30,7 +30,7 @@ func (o *run) recordSection(ctx context.Context, heading, section string) {
 // preserved (the per-round heading makes the upsert effectively an append),
 // while a re-run of the same round on resume replaces rather than duplicates.
 // Every round leads with the round's verify result, so a human reading the card
-// sees whether the change was verified — never inferring it from silence.
+// sees whether the change was verified - never inferring it from silence.
 func (o *run) recordReview(ctx context.Context, round int, findings string, approved bool, vres verifyResult) {
 	heading := "Review Findings"
 	if round > 1 {
@@ -69,10 +69,10 @@ func verifyRoundLine(vres verifyResult, plan verifyPlan) string {
 		}
 
 		if plan.Source == verifySourceNone {
-			return "**Verify:** SKIPPED — " + note
+			return "**Verify:** SKIPPED - " + note
 		}
 
-		return fmt.Sprintf("**Verify:** SKIPPED — %s _(source: %s)_", note, plan.Source)
+		return fmt.Sprintf("**Verify:** SKIPPED - %s _(source: %s)_", note, plan.Source)
 	}
 }
 
@@ -103,7 +103,7 @@ func formatPlan(subs []subtaskRef) string {
 			deps = strings.Join(s.DependsOnIDs, ", ")
 		}
 
-		fmt.Fprintf(&b, "### %d. %s — %s\n", i+1, s.ID, s.Title)
+		fmt.Fprintf(&b, "### %d. %s - %s\n", i+1, s.ID, s.Title)
 		fmt.Fprintf(&b, "_Tier: %s · Depends on: %s_\n", s.Tier, deps)
 
 		if body := strings.TrimSpace(s.Body); body != "" {

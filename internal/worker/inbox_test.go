@@ -200,7 +200,7 @@ func TestStdinEOFTriggersEndSession(t *testing.T) {
 
 	time.Sleep(10 * time.Millisecond)
 
-	// Close the pipe — EOF on the reader side.
+	// Close the pipe - EOF on the reader side.
 	pw.Close()
 
 	require.Eventually(t, func() bool { return ends.Load() == 1 }, time.Second, 5*time.Millisecond)

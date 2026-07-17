@@ -40,7 +40,7 @@ func TestNewTransportDisablesStandaloneSSE(t *testing.T) {
 const testAgentID = "cmx-agent-cmx-001"
 
 // recorder captures the arguments every stub tool received, keyed by tool
-// name. Only the LAST call per tool is kept — fine here, where every test
+// name. Only the LAST call per tool is kept - fine here, where every test
 // invokes each tool at most once.
 type recorder struct {
 	mu    sync.Mutex
@@ -334,7 +334,7 @@ func TestGetTaskContext(t *testing.T) {
 	require.Contains(t, args, "include_images")
 	assert.Equal(t, true, args["include_images"])
 
-	// Parsed from the card portion of the canned payload — base fields.
+	// Parsed from the card portion of the canned payload - base fields.
 	assert.Equal(t, "Wire up the widget", tc.Title)
 	assert.Equal(t, "Connect the widget to the gizmo and verify the blinkenlights.", tc.Description)
 	assert.Equal(t, "in_progress", tc.State)
@@ -704,7 +704,7 @@ func TestSubtaskStates(t *testing.T) {
 	args, ok := rec.get("list_cards")
 	require.True(t, ok, "list_cards stub should have been called")
 	// list_cards declares project as a required schema field (no card-ID
-	// resolution fallback) — it must always be on the wire.
+	// resolution fallback) - it must always be on the wire.
 	assert.Equal(t, "demo", args["project"])
 	assert.Equal(t, "CMX-001", args["parent"])
 	assert.Equal(t, testAgentID, args["agent_id"])
@@ -735,7 +735,7 @@ func TestBlacklistModel(t *testing.T) {
 	assert.Equal(t, "bad/model", args["model_slug"])
 	assert.Equal(t, "cannot drive the tool loop", args["reason"])
 	assert.Equal(t, "CARD-1", args["sample_card_id"])
-	// agent_id is injected by c.call — must match the client's configured identity.
+	// agent_id is injected by c.call - must match the client's configured identity.
 	assert.Equal(t, testAgentID, args["agent_id"])
 }
 
@@ -790,7 +790,7 @@ func TestSubtaskStates_MalformedJSON(t *testing.T) {
 
 // Pins the test harness itself: a stub registered with a required key must
 // reject calls missing it, the way the real server's JSON-schema validation
-// does. This is what makes the wire-arg assertions trustworthy — a refactor
+// does. This is what makes the wire-arg assertions trustworthy - a refactor
 // that drops a required arg fails loudly instead of silently returning the
 // canned payload.
 func TestAddStub_RejectsMissingRequiredKey(t *testing.T) {

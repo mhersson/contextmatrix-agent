@@ -1,6 +1,6 @@
 // Package frames defines the JSON Lines control protocol written to a worker
 // container's stdin by the host service and read by the work command. It is
-// internal to this repo — both ends are our code — so it is NOT part of
+// internal to this repo - both ends are our code - so it is NOT part of
 // contextmatrix-protocol. Unknown frame types are skipped for forward
 // compatibility.
 package frames
@@ -66,7 +66,7 @@ func NewReader(r io.Reader) *Reader {
 
 // Next returns the next known frame, skipping malformed lines and unknown
 // types. io.EOF when the stream ends. A line exceeding MaxLine fails the
-// scanner and returns a non-EOF error — a hard stop, unlike shorter
+// scanner and returns a non-EOF error - a hard stop, unlike shorter
 // malformed lines which are skipped.
 func (r *Reader) Next() (Frame, error) {
 	for r.sc.Scan() {

@@ -54,7 +54,7 @@ func renderDelta(entries []Entry, from int, forAuthor, instruction string) strin
 }
 
 // truncateUtterance enforces utteranceCap bytes with a rune-safe cut and the
-// truncation marker. The seat is not penalized — the moderator just bounds
+// truncation marker. The seat is not penalized - the moderator just bounds
 // what enters the transcript.
 func truncateUtterance(s string) string {
 	if len(s) <= utteranceCap {

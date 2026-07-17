@@ -55,7 +55,7 @@ func TestPRCreatorCommand(t *testing.T) {
 	require.NoError(t, readErr)
 	assert.Equal(t, "the body\nwith detail", string(body))
 
-	// Env carries GH_TOKEN exactly once and the scrubbed allowlist — no secrets
+	// Env carries GH_TOKEN exactly once and the scrubbed allowlist - no secrets
 	// leak from the parent process.
 	var ghToken string
 
@@ -79,7 +79,7 @@ func TestPRCreatorCommand(t *testing.T) {
 
 // TestPRCreatorTokenRotation pins that the PR path resolves GH_TOKEN fresh from
 // the secrets file at call time: after the file is rewritten, the next buildCmd
-// carries the NEW token — an end-of-run PR uses the current token, not one
+// carries the NEW token - an end-of-run PR uses the current token, not one
 // cached at startup.
 func TestPRCreatorTokenRotation(t *testing.T) {
 	t.Parallel()

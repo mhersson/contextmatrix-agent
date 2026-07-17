@@ -53,7 +53,7 @@ var planLenses = []string{"feasibility/simplicity", "architecture/extensibility"
 
 var reviewLenses = []string{"correctness", "security", "design", "performance", "developer-experience"}
 
-// mobSeatMaxTurns caps one seat turn's harness run (spec constant — fixed by
+// mobSeatMaxTurns caps one seat turn's harness run (spec constant - fixed by
 // the design, not config).
 const mobSeatMaxTurns = 8
 
@@ -78,8 +78,8 @@ const mobSeatWrapUpTurns = 2
 
 // mobDiscuss convenes one discussion: it mints the per-discussion bearer,
 // starts the loopback seat server, builds the engine config, runs Discuss,
-// and closes the server. It NEVER fails the card: any error — bearer, server
-// start, quorum, engine — logs, leaves an advisory card-log entry, and
+// and closes the server. It NEVER fails the card: any error - bearer, server
+// start, quorum, engine - logs, leaves an advisory card-log entry, and
 // returns ok=false so the caller falls back to its solo path.
 func (o *run) mobDiscuss(ctx context.Context, t mob.Topic) (mob.Outcome, bool) {
 	bearer, err := mobBearer()
@@ -102,8 +102,7 @@ func (o *run) mobDiscuss(ctx context.Context, t mob.Topic) (mob.Outcome, bool) {
 		headroom = effectiveCeiling(o.d.Cfg) - o.ledger.Spent()
 		if headroom <= 0 {
 			slog.Warn("mob: budget exhausted; continuing solo", "card_id", o.d.Cfg.CardID, "kind", t.Kind)
-			_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, //nolint:errcheck // advisory degrade record
-				fmt.Sprintf("mob budget exhausted (%s) — continuing solo", t.Kind))
+			o.d.logCard(ctx, "mob budget exhausted (%s) - continuing solo", t.Kind)
 
 			return mob.Outcome{}, false
 		}
@@ -120,8 +119,7 @@ func (o *run) mobDiscuss(ctx context.Context, t mob.Topic) (mob.Outcome, bool) {
 	server, err := mob.StartServer(cfg.Seats, cfg.Runner, bearer)
 	if err != nil {
 		slog.Warn("mob: loopback server failed to start", "card_id", o.d.Cfg.CardID, "error", err)
-		_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, //nolint:errcheck // advisory degrade record
-			fmt.Sprintf("mob discussion unavailable (%s): %v — continuing solo", t.Kind, err))
+		o.d.logCard(ctx, "mob discussion unavailable (%s): %v - continuing solo", t.Kind, err)
 
 		return mob.Outcome{}, false
 	}
@@ -139,8 +137,7 @@ func (o *run) mobDiscuss(ctx context.Context, t mob.Topic) (mob.Outcome, bool) {
 	out, err := engine(ctx, cfg, t)
 	if err != nil {
 		slog.Warn("mob: discussion failed", "card_id", o.d.Cfg.CardID, "kind", t.Kind, "error", err)
-		_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, //nolint:errcheck // advisory degrade record
-			fmt.Sprintf("mob discussion failed (%s): %v — continuing solo", t.Kind, err))
+		o.d.logCard(ctx, "mob discussion failed (%s): %v - continuing solo", t.Kind, err)
 
 		return out, false
 	}
@@ -152,7 +149,7 @@ func (o *run) mobDiscuss(ctx context.Context, t mob.Topic) (mob.Outcome, bool) {
 // topic: registry-selected seat models (review topics exclude the models that
 // coded the card), operator guests, the harness-backed seat runner, the
 // decision-model moderator, live "discussion" events, the human inbox, and
-// the mob session budget term. SeatEndpoint is NOT set here — the caller
+// the mob session budget term. SeatEndpoint is NOT set here - the caller
 // wires it once the loopback server has started (the server is built from
 // this config's Seats/Runner, so it cannot exist before this call returns).
 func buildEngineConfig(o *run, t mob.Topic, bearer string) mob.EngineConfig {
@@ -185,7 +182,7 @@ func buildEngineConfig(o *run, t mob.Topic, bearer string) mob.EngineConfig {
 
 	// mobBudget = BudgetFactor x MaxCardCost; a disabled card budget disables
 	// the mob session term too. Per-turn seat cap: mobBudget / (seats x
-	// (Rounds+2)) — Rounds critique rounds plus the blind round plus synthesis
+	// (Rounds+2)) - Rounds critique rounds plus the blind round plus synthesis
 	// headroom.
 	budget := 0.0
 	if o.d.Cfg.MaxCardCost > 0 {
@@ -222,12 +219,12 @@ func buildEngineConfig(o *run, t mob.Topic, bearer string) mob.EngineConfig {
 // seatContextMaxBytes bounds the accumulated seat conversation carried
 // between rounds. Positions and round prompts are never dropped; oldest
 // tool outputs are blanked first. At the spec round counts (blind + <=2
-// critique rounds x 8 turns x 16 KB tool cap) the bound is rarely hit — it
+// critique rounds x 8 turns x 16 KB tool cap) the bound is rarely hit - it
 // is insurance against pathological accumulation, not compaction.
 const seatContextMaxBytes = 384 * 1024
 
 // trimmedToolMarker replaces a tool output dropped by trimSeatContext.
-const trimmedToolMarker = "[tool output dropped to bound seat context — re-read the file if needed]"
+const trimmedToolMarker = "[tool output dropped to bound seat context - re-read the file if needed]"
 
 // trimSeatContext prepares a finished seat run's messages for reuse as the
 // next round's history: it drops the leading system message (seatConfig
@@ -285,18 +282,8 @@ func (o *run) mobSeatRunner(sink *seatDebugSink, perTurnCap float64) mob.SeatRun
 
 		res, err := harness.Run(ctx, o.d.Client, o.d.ReadTools, emit, prompt, cfg)
 
-		o.ledger.Spend(res.TotalCostUSD)
-
-		used := res.ModelUsed
-		if used == "" {
-			used = seat.Model
-		}
-
-		if reportErr := o.d.Ops.ReportUsage(ctx, o.d.Cfg.CardID, used,
-			res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
-			slog.Warn("mob: report seat usage failed",
-				"card_id", o.d.Cfg.CardID, "seat", seat.Name, "error", reportErr)
-		}
+		used := o.spendAndReport(ctx, o.ledger, o.d.Cfg.CardID, "mob: report seat usage failed",
+			res, seat.Model, "seat", seat.Name)
 
 		if err != nil {
 			return "", res.TotalCostUSD, fmt.Errorf("seat %s run: %w", seat.Name, err)
@@ -320,13 +307,11 @@ func (o *run) mobSeatRunner(sink *seatDebugSink, perTurnCap float64) mob.SeatRun
 
 			fres, ferr := harness.Run(ctx, o.d.Client, tools.NewRegistry(), emit, seatForcedFinalPrompt, finalCfg)
 
-			o.ledger.Spend(fres.TotalCostUSD)
-
-			if reportErr := o.d.Ops.ReportUsage(ctx, o.d.Cfg.CardID, used,
-				fres.PromptTokens, fres.CompletionTokens, fres.TotalCostUSD); reportErr != nil {
-				slog.Warn("mob: report seat usage failed",
-					"card_id", o.d.Cfg.CardID, "seat", seat.Name, "call", "backstop", "error", reportErr)
-			}
+			// Report on the first call's resolved model: clearing ModelUsed keeps
+			// the backstop from re-falling-back to a different slug.
+			fres.ModelUsed = ""
+			o.spendAndReport(ctx, o.ledger, o.d.Cfg.CardID, "mob: report seat usage failed",
+				fres, used, "seat", seat.Name, "call", "backstop")
 
 			if ferr == nil {
 				out = fres.Output
@@ -361,8 +346,8 @@ func seatConfig(base harness.Config, seat mob.SeatConfig, perTurnCap float64, hi
 
 // mobModeratorRunner returns the ModeratorRunner: one-shot decision-model
 // calls (convergence classification, synthesis, repair re-synthesis). The
-// model resolves lazily on first use — resolveDecisionModel does advisory
-// card-log I/O and needs a ctx — and the engine calls Moderate sequentially,
+// model resolves lazily on first use - resolveDecisionModel does advisory
+// card-log I/O and needs a ctx - and the engine calls Moderate sequentially,
 // so the lazy init is race-free.
 func (o *run) mobModeratorRunner(sink *seatDebugSink) mob.ModeratorRunner {
 	model := ""
@@ -379,17 +364,7 @@ func (o *run) mobModeratorRunner(sink *seatDebugSink) mob.ModeratorRunner {
 
 		res, err := harness.Run(ctx, o.d.Client, tools.NewRegistry(), emit, prompt, cfg)
 
-		o.ledger.Spend(res.TotalCostUSD)
-
-		used := res.ModelUsed
-		if used == "" {
-			used = model
-		}
-
-		if reportErr := o.d.Ops.ReportUsage(ctx, o.d.Cfg.CardID, used,
-			res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
-			slog.Warn("mob: report moderator usage failed", "card_id", o.d.Cfg.CardID, "error", reportErr)
-		}
+		used := o.spendAndReport(ctx, o.ledger, o.d.Cfg.CardID, "mob: report moderator usage failed", res, model)
 
 		if err != nil {
 			return "", used, res.TotalCostUSD, fmt.Errorf("moderator run: %w", err)

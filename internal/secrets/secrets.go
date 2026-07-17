@@ -65,7 +65,7 @@ type EndpointSecrets struct {
 	Type    string
 	// MobGuests is the compact JSON guest-spec list ([]protocol.GuestSpec on
 	// the wire) for mob session discussions. Guests carry bearer tokens, so
-	// they ride the secrets file — and living here (not a one-off append)
+	// they ride the secrets file - and living here (not a one-off append)
 	// they survive every token-refresh rewrite. Empty = no guests; key
 	// omitted.
 	MobGuests string
@@ -99,7 +99,7 @@ func endpointVals(token string, e EndpointSecrets) map[string]string {
 // WriteEnvFile writes vals to path atomically (write-tmp + rename).
 // The directory is created with mode 0700; the file is written with mode 0600.
 // Lines are written in deterministic order: LLM_API_KEY, LLM_BASE_URL, LLM_TYPE,
-// CM_GIT_TOKEN first, then any extra keys in sorted order — output is
+// CM_GIT_TOKEN first, then any extra keys in sorted order - output is
 // byte-identical across rewrites.
 func WriteEnvFile(path string, vals map[string]string) error {
 	dir := filepath.Dir(path)
@@ -119,7 +119,7 @@ func WriteEnvFile(path string, vals map[string]string) error {
 		}
 	}
 
-	// Any other keys in sorted order — map iteration is randomized, and the
+	// Any other keys in sorted order - map iteration is randomized, and the
 	// output must be byte-identical across rewrites.
 	known := map[string]bool{"LLM_API_KEY": true, "LLM_BASE_URL": true, "LLM_TYPE": true, "CM_GIT_TOKEN": true}
 	for _, k := range slices.Sorted(maps.Keys(vals)) {

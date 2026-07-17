@@ -120,7 +120,7 @@ func (m *RunCredentials) HostDir(project, cardID string) string {
 // The whole provision runs under the manager lock: displacing the previous
 // handle, joining its goroutine, writing the file, and storing the new handle
 // are one atomic step. Releasing the lock mid-way would let a concurrent
-// Provision overwrite a handle whose goroutine is then never joined — a leaked
+// Provision overwrite a handle whose goroutine is then never joined - a leaked
 // refresh loop no Teardown can reach. The refresh loop takes no locks, so
 // holding the lock across the join cannot deadlock, and the join is prompt
 // (cancel aborts the loop's in-flight CM request).
@@ -253,7 +253,7 @@ func (m *RunCredentials) refreshLoop(
 			"project", project, "card_id", cardID, "expires_at", expiry)
 
 		// A refreshed token with no expiry (CM switched the binding to a PAT) has
-		// nothing left to refresh — stop rather than busy-poll on the minSleep floor.
+		// nothing left to refresh - stop rather than busy-poll on the minSleep floor.
 		if expiry.IsZero() {
 			m.logger.Info("refreshed token has no expiry; stopping refresh loop",
 				"project", project, "card_id", cardID)
@@ -268,7 +268,7 @@ func (m *RunCredentials) refreshLoop(
 // gitCredentials is the decode target for CM's git-credentials response:
 // {"token": "...", "expires_at": "..."} per docs/api-reference.md in the CM
 // repo. Note the keys deliberately differ from TriggerPayload's git_token /
-// git_token_expires_at — different endpoint, different shape; expires_at is
+// git_token_expires_at - different endpoint, different shape; expires_at is
 // absent for PAT-backed credentials (no refresh needed).
 type gitCredentials struct {
 	Token     string `json:"token"`
@@ -333,7 +333,7 @@ func runKey(project, cardID string) string {
 
 // parseExpiry parses an RFC3339 expiry (CM's tokenExpiryString format). It
 // returns ok=false for an empty, unparseable, or sentinel (year 9999, the PAT
-// convention) timestamp — those all mean "no expiry", so no refresh loop.
+// convention) timestamp - those all mean "no expiry", so no refresh loop.
 // Sub-second precision still parses: Go's time.Parse accepts a fractional
 // second on input even though the RFC3339 layout carries none.
 func parseExpiry(s string) (time.Time, bool) {

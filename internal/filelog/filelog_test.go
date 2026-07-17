@@ -68,7 +68,7 @@ func TestBeginSupersedesUnclosedRun(t *testing.T) {
 
 	l.Begin("p", "C-1", "run-one")
 	l.Write("p", "C-1", []byte("first run line"), false)
-	// No End for the first run — its entry is still open.
+	// No End for the first run - its entry is still open.
 	l.Begin("p", "C-1", "run-two")
 	l.Write("p", "C-1", []byte("second run line"), false)
 	l.End("p", "C-1", 0)

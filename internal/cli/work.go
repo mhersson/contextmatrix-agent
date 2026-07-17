@@ -28,7 +28,7 @@ const cmEnvFile = "/run/cm-secrets/env"
 // cardIDPattern matches ContextMatrix card IDs (PREFIX-NNN, accepting upper-
 // and lower-case letters): a letter-led prefix of letters, digits, and dashes
 // (CM only requires the project prefix to be non-empty, so MY-PROJ-001 is a
-// legitimate ID), ending in a dash and a numeric suffix — exactly what CM's
+// legitimate ID), ending in a dash and a numeric suffix - exactly what CM's
 // server-side ID generator produces. The card ID becomes the cm/<id> work branch name, so this
 // conservative shape keeps crafted refs (colons, slashes, dots, spaces,
 // leading dashes) out of the push path entirely instead of relying on git's
@@ -36,7 +36,7 @@ const cmEnvFile = "/run/cm-secrets/env"
 var cardIDPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9-]*-[0-9]+$`)
 
 // mcpCloseTimeout bounds the MCP client teardown: a slow or dead tunnel
-// must not keep a finished worker alive past the backend's kill grace —
+// must not keep a finished worker alive past the backend's kill grace -
 // the process exit code is the run's success signal.
 const mcpCloseTimeout = 2 * time.Second
 
@@ -76,14 +76,14 @@ func newWorkCmd() *cobra.Command {
 			// LLM values resolve env-first-then-file: the llm-only-payload delivery
 			// sets LLM_* as container env, which wins (set-but-empty counts as set),
 			// falling back to the mounted file otherwise. The git token is NOT
-			// resolved from env — the credential helper re-reads CM_GIT_TOKEN from the
+			// resolved from env - the credential helper re-reads CM_GIT_TOKEN from the
 			// file per git op so host-side rotation reaches a long-running worker.
 			spec.LLMKey = resolveLLMValue("LLM_API_KEY", src)
 			spec.LLMBaseURL = resolveLLMValue("LLM_BASE_URL", src)
 			spec.LLMType = resolveLLMValue("LLM_TYPE", src)
 			spec.GitToken = src.Get("CM_GIT_TOKEN")
 
-			// Guest specs carry bearer tokens, so they ride the secrets file —
+			// Guest specs carry bearer tokens, so they ride the secrets file -
 			// same delivery as the git token, never plain container env.
 			if spec.Mob != nil {
 				spec.Mob.Guests = mobGuestsFromSecrets(src)
@@ -328,7 +328,7 @@ func specFromEnv() (worker.RunSpec, error) {
 
 // resolveLLMValue resolves an LLM endpoint value env-first-then-file: a
 // container env var set by the llm-only-payload delivery wins (os.LookupEnv, so
-// set-but-empty counts as set — an empty LLM_BASE_URL means "the type's
+// set-but-empty counts as set - an empty LLM_BASE_URL means "the type's
 // canonical default"), falling back to the mounted secrets file when the var is
 // unset. Used only for the LLM_* values; the git token stays file-only so the
 // credential helper picks up host-side rotation.
@@ -385,7 +385,7 @@ func envFloat(name string, defaultVal float64) (float64, error) {
 // caInjections builds the extra-CA injections for the worker's in-container
 // clients from certPath (the in-container CA PEM path): an llm option so the
 // harness LLM client trusts the CA, and a cmclient option so the MCP connection
-// shares that trust. An empty certPath yields no options — the clients keep
+// shares that trust. An empty certPath yields no options - the clients keep
 // their defaults. The git/gh subprocesses get the CA separately, via RunSpec
 // threaded to NewGit / NewPRCreator (their env is scrubbed by the harness).
 func caInjections(certPath string) ([]llm.Option, []cmclient.Option, error) {
@@ -419,7 +419,7 @@ func dialectFromType(s string) llm.Dialect {
 // mobGuestsFromSecrets parses the CM_MOB_GUESTS JSON ([]protocol.GuestSpec)
 // from the mounted secrets file. Guests carry bearer tokens, so they ride the
 // secrets mount, never plain container env. A parse failure degrades to no
-// guests — a discussion must never fail the run.
+// guests - a discussion must never fail the run.
 func mobGuestsFromSecrets(src *secrets.Source) []protocol.GuestSpec {
 	raw := src.Get("CM_MOB_GUESTS")
 	if raw == "" {

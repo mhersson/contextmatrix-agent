@@ -52,7 +52,7 @@ func NewPRCreator(workspace, secretsEnvPath, caCertFile, repoURL string) *PRCrea
 
 // gitToken reads CM_GIT_TOKEN fresh from the secrets file so each gh invocation
 // authenticates with the current token, not one cached at startup. It returns
-// ("", nil) when no secrets file is configured (public/file:// remotes — no
+// ("", nil) when no secrets file is configured (public/file:// remotes - no
 // auth needed); an unreadable file is an error so the caller surfaces a clear
 // authentication-setup failure instead of a generic unauthenticated gh one.
 func (p *PRCreator) gitToken() (string, error) {
@@ -87,7 +87,7 @@ func hostFromRepoURL(repoURL string) string {
 // buildCmd constructs the gh invocation without running it: argv, workspace
 // dir, body on stdin, and the scrubbed env carrying GH_TOKEN. Split out so tests
 // assert command construction without shelling out to gh. An unreadable
-// secrets file is an error — gh must not run unauthenticated on a stale or
+// secrets file is an error - gh must not run unauthenticated on a stale or
 // broken credential mount.
 func (p *PRCreator) buildCmd(ctx context.Context, title, body, base, head string) (*exec.Cmd, error) {
 	cmd := exec.CommandContext(ctx, "gh", "pr", "create",

@@ -10,7 +10,7 @@ import (
 // reconcileTierDefault is the fallback tier assigned to a reconciled subtask
 // ref when its persisted tier cannot be recovered. Tiers ARE persisted on
 // subtask cards via an invisible marker in the body (see tiermarker.go),
-// written at creation and restored below via GetTaskContext — but
+// written at creation and restored below via GetTaskContext - but
 // SubtaskStates itself carries only id/title/state, and the per-subtask
 // restore is advisory: an absent marker (e.g. a pre-existing card) or a failed
 // fetch falls back here. "moderate" is the safe middle: under-selecting a
@@ -26,7 +26,7 @@ const reconcileTierDefault = "moderate"
 // Branch handling (spec §5.1):
 //   - Fresh (phase == ""): the run owns its card branch. Probe the remote tip
 //     best-effort and record it on o.staleRemoteTip; a non-empty tip means a
-//     stale branch from an abandoned run exists, so log the planned overwrite —
+//     stale branch from an abandoned run exists, so log the planned overwrite -
 //     the execute phase's FIRST push carries the force-with-lease against this
 //     tip. We do NOT fetch/checkout: we start from base on the freshly-created
 //     local branch.
@@ -56,7 +56,7 @@ func (o *run) reconcile(ctx context.Context) error {
 		tip, err := o.d.Git.RemoteTip(ctx, cfg.Branch)
 		if err != nil {
 			// Best-effort: a missing/unreachable remote branch is the common fresh
-			// case. Treat it as "no stale branch" — a plain push will run later.
+			// case. Treat it as "no stale branch" - a plain push will run later.
 			slog.Warn("reconcile: remote tip probe failed; assuming no stale branch",
 				"card_id", cfg.CardID, "branch", cfg.Branch, "error", err)
 
@@ -67,9 +67,8 @@ func (o *run) reconcile(ctx context.Context) error {
 
 		if tip != "" {
 			// Spec §5.1: the planned overwrite of the stale branch is activity-logged.
-			_ = o.d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory note; failure must not abort the run
-				fmt.Sprintf("resume: stale remote branch %s detected (tip %s); first push will overwrite it with --force-with-lease",
-					cfg.Branch, tip))
+			o.d.logCard(ctx, "resume: stale remote branch %s detected (tip %s); first push will overwrite it with --force-with-lease",
+				cfg.Branch, tip)
 		}
 
 		return nil
@@ -78,9 +77,9 @@ func (o *run) reconcile(ctx context.Context) error {
 	// RESUME run (phase != ""): the fetched card branch IS the state.
 	//
 	// Probe the remote FIRST: the probe is the only signal that distinguishes
-	// "crashed before the first push" (branch genuinely absent — continuing on
+	// "crashed before the first push" (branch genuinely absent - continuing on
 	// the freshly-created local branch is safe) from "branch exists but
-	// fetch/checkout hit a transient failure" (NOT safe — silently rebuilding
+	// fetch/checkout hit a transient failure" (NOT safe - silently rebuilding
 	// from base would drop the pushed work, and once every subtask reads "done"
 	// the run would sail into integrate and lease-overwrite the genuine remote
 	// branch with the incomplete tree).
@@ -113,7 +112,7 @@ func (o *run) reconcile(ctx context.Context) error {
 
 		// prepareWorkspace already created a LOCAL branch of this name at base HEAD
 		// (git checkout -b), so the Checkout above merely switches to that
-		// base-pointing branch — git checkout does NOT fast-forward a pre-existing
+		// base-pointing branch - git checkout does NOT fast-forward a pre-existing
 		// local branch to the fetched tip. Reset hard onto the probed remote tip so
 		// the local branch, index, and working tree all carry the pushed WIP.
 		// Without this the resume silently restarts from base: it redoes finished
@@ -128,7 +127,7 @@ func (o *run) reconcile(ctx context.Context) error {
 
 	// Load subtask state for every resume row (plan/execute use it for
 	// scheduling; review/integrate/done carry it only for context). On the plan
-	// row these reconciled refs ARE the planner's reuse list — runPlan consumes
+	// row these reconciled refs ARE the planner's reuse list - runPlan consumes
 	// o.subtasks, it does not re-call SubtaskStates.
 	states, err := o.d.Ops.SubtaskStates(ctx, cfg.Project, cfg.CardID)
 	if err != nil {
@@ -140,7 +139,7 @@ func (o *run) reconcile(ctx context.Context) error {
 		ref := subtaskRef{ID: st.CardID, Title: st.Title, State: st.State, Tier: reconcileTierDefault}
 
 		// Pending refs get their persisted tier and planner body back from the
-		// card itself (done refs are never re-run — skip the fetch). A fetch
+		// card itself (done refs are never re-run - skip the fetch). A fetch
 		// failure degrades to today's conservative defaults; resume must not
 		// become fragile over an advisory enrichment.
 		if st.State != "done" {

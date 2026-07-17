@@ -91,7 +91,7 @@ func (o *run) executeSubtaskWith(ctx context.Context, sc *solverCtx, sub subtask
 		return err
 	}
 
-	// Claim conflicts mean another agent owns the subtask — abort the run rather
+	// Claim conflicts mean another agent owns the subtask - abort the run rather
 	// than skip, because the workspace is shared and we cannot safely proceed
 	// without ownership of the card we are about to build on. A candidate solver
 	// (boardOps false) never claims per-candidate; instead the RUN claims each
@@ -127,12 +127,12 @@ func (o *run) executeSubtaskWith(ctx context.Context, sc *solverCtx, sub subtask
 var subtaskHeartbeatInterval = 5 * time.Minute
 
 // executeClaimedWith is the owned span of a subtask: coder run, commit, push,
-// complete. When sc.boardOps a heartbeat goroutine covers the whole span — CM's
+// complete. When sc.boardOps a heartbeat goroutine covers the whole span - CM's
 // stall sweep reclaims ANY claimed card whose last_heartbeat exceeds the
 // timeout, the parent-card heartbeat does not cover subtask claims, and a coder
 // run is wall-clock unbounded. The deferred stop cancels the goroutine AND waits
 // for it to actually exit on every exit path (complete, error, park), so it can
-// never outlive the claim — or this function's return. A candidate solver
+// never outlive the claim - or this function's return. A candidate solver
 // (boardOps false) holds no claim, so it runs no heartbeat and no complete.
 func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtaskRef) error {
 	d := o.d
@@ -144,7 +144,7 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 
 	// Capture the pre-run head when this subtask will checkpoint, so the
 	// discussion sees exactly the diff this subtask introduced. Solo path
-	// only — candidates never checkpoint (race isolation).
+	// only - candidates never checkpoint (race isolation).
 	var checkpointBase string
 
 	if sc.boardOps && o.checkpointEligible(sub) {
@@ -191,7 +191,7 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 
 	// Push after every subtask so each unit of work is durable and the next
 	// subtask builds on a pushed base. A clean tree (nothing committed) skips the
-	// push but still completes the card. A push failure aborts the run — the
+	// push but still completes the card. A push failure aborts the run - the
 	// spend has already been reported, so retry/resume must not double-charge.
 	// A candidate solver (sc.push false) never pushes: its work is judged in place.
 	if committed && sc.push {
@@ -210,44 +210,16 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 }
 
 // startSubtaskHeartbeat ticks ops.Heartbeat for cardID on
-// subtaskHeartbeatInterval until the returned stop func is called. Unlike the
-// worker's parent-card startHeartbeat (which only cancels and does not wait),
-// stop here BLOCKS until the goroutine has actually exited: executeClaimedWith
-// must never return while the goroutine could still be running, or a package
-// var read (subtaskHeartbeatInterval) could outlive the caller's stack frame.
+// subtaskHeartbeatInterval until the returned stop func is called. Failures
+// are logged, never fatal - a transient MCP hiccup must not abort a healthy
+// run. Stop BLOCKS until the goroutine has exited: executeClaimedWith must
+// never return while a tick could still fire for a completed subtask.
 func startSubtaskHeartbeat(ctx context.Context, ops Ops, cardID string) func() {
-	hbCtx, cancel := context.WithCancel(ctx)
-	done := make(chan struct{})
-
-	go func() {
-		defer close(done)
-
-		heartbeatLoop(hbCtx, ops, cardID)
-	}()
-
-	return func() {
-		cancel()
-		<-done
-	}
-}
-
-// heartbeatLoop ticks ops.Heartbeat for cardID on subtaskHeartbeatInterval
-// until ctx is canceled. Mirrors the worker's parent-card heartbeat: failures
-// are logged, never fatal — a transient MCP hiccup must not abort a healthy run.
-func heartbeatLoop(ctx context.Context, ops Ops, cardID string) {
-	ticker := time.NewTicker(subtaskHeartbeatInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if err := ops.Heartbeat(ctx, cardID); err != nil {
-				slog.Warn("subtask heartbeat failed", "card_id", cardID, "error", err)
-			}
+	return StartTicker(ctx, subtaskHeartbeatInterval, func(ctx context.Context) {
+		if err := ops.Heartbeat(ctx, cardID); err != nil {
+			slog.Warn("subtask heartbeat failed", "card_id", cardID, "error", err)
 		}
-	}
+	})
 }
 
 // releaseSubtask best-effort releases a claimed subtask on an error exit.
@@ -267,7 +239,7 @@ func (o *run) releaseSubtask(ctx context.Context, cardID string) {
 // runs the harness on sc.tools, and accounts for spend on sc.ledger for every
 // attempt. If the model proves incapable (*IncapableError) it
 // blacklists/excludes it via recoverIncapable and RE-SELECTS the next-best model
-// for the SAME subtask — the incapable model wrote nothing, so re-running is
+// for the SAME subtask - the incapable model wrote nothing, so re-running is
 // clean (no git reset). The loop is bounded by recoverIncapable's per-card cap:
 // once exhausted it returns the wrapped park error. Any non-incapable run error
 // (transport, context limit, budget) is returned immediately, unwrapped of the
@@ -298,25 +270,14 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 			logMsg = sc.tag + ": " + logMsg
 		}
 
-		_ = d.Ops.AddLog(ctx, cfg.CardID, logMsg) //nolint:errcheck // advisory selection record
+		d.logCard(ctx, "%s", logMsg)
 
 		res, err := o.runModelCoder(ctx, sc.tools, prompt, model, coderWrapUpMessage, tierOf(sub))
-
-		// Account for spend even on a transport error / partial run, then report
-		// the model actually used (falling back to the resolved slug when the
-		// provider did not echo one). The incapable attempt is charged too — it
-		// burned tokens before tripping.
-		sc.ledger.Spend(res.TotalCostUSD)
-
-		usedModel := res.ModelUsed
-		if usedModel == "" {
-			usedModel = model
-		}
 
 		// Record the resolved coder slug so the review panel excludes it: a capable
 		// model must not review its own code. This runs BEFORE the incapable check
 		// below, so an incapable model (which produced no code) is also recorded
-		// here — harmless, and it keeps that model out of its own review via this
+		// here - harmless, and it keeps that model out of its own review via this
 		// set plus o.excluded. Keyed on the slug we configured, which is what
 		// SelectReviewPanel's Exclude set compares against. newRun initializes the
 		// map unconditionally. selMu guards it: Best-of-N candidates write here in
@@ -335,15 +296,13 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 			target = cfg.CardID
 		}
 
-		if reportErr := d.Ops.ReportUsage(ctx, target, usedModel,
-			res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
-			slog.Warn("execute: report usage failed", "card_id", target, "error", reportErr)
-		}
+		// The incapable attempt is charged too - it burned tokens before tripping.
+		o.spendAndReport(ctx, sc.ledger, target, "execute: report usage failed", res, model)
 
 		var ie *IncapableError
 		if errors.As(err, &ie) {
 			// recoverIncapable blacklists + excludes the model and returns an error
-			// only when the per-card re-selection cap is exhausted — park then.
+			// only when the per-card re-selection cap is exhausted - park then.
 			if rerr := o.recoverIncapable(ctx, ie); rerr != nil {
 				return res, rerr
 			}
@@ -367,7 +326,7 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 
 // pushBranch pushes the card branch after a commit. On a FRESH run that found a
 // stale remote branch (o.staleRemoteTip != ""), the FIRST push overwrites it
-// with a force-with-lease against the recorded tip — per spec §5.1, a fresh run
+// with a force-with-lease against the recorded tip - per spec §5.1, a fresh run
 // owns its card branch and reclaims a stale one at first push. Every push after
 // that (firstPushDone) is plain, because the branch is now ours and a plain push
 // fast-forwards. A run with no stale branch (staleRemoteTip == "", the normal
@@ -403,7 +362,7 @@ func (o *run) resolveCoderModel(sub subtaskRef, prompt string) string {
 		// A pinned model is returned even if it is in o.excluded: we never override
 		// an explicit operator pin with an auto-selected substitute. A pinned model
 		// that is harness-incapable therefore keeps being re-selected, exhausts the
-		// re-selection cap, and parks — the blacklist still records it.
+		// re-selection cap, and parks - the blacklist still records it.
 		return o.tc.ModelCoder
 	}
 
@@ -420,7 +379,7 @@ func (o *run) resolveCoderModel(sub subtaskRef, prompt string) string {
 // subtaskBody returns the description text for a subtask: the planner's
 // description (file lists, acceptance criteria) on the fresh-plan path. The
 // title fallback exists for resume-loaded refs, which legitimately lack bodies
-// (SubtaskStates carries no body field) — it is not the primary path.
+// (SubtaskStates carries no body field) - it is not the primary path.
 func subtaskBody(sub subtaskRef) string {
 	if sub.Body != "" {
 		return sub.Body
@@ -448,22 +407,22 @@ func tierOf(sub subtaskRef) registry.Tier {
 // salvageCapped rescues a Best-of-N candidate that hit the turn cap on its
 // FINAL subtask: the work may well be complete (the observed failure mode is
 // turns burned on post-green re-verification, not missing work), and the judge
-// verifies every candidate in place — so the project's verify command, not the
+// verifies every candidate in place - so the project's verify command, not the
 // model's self-report, is the completion authority. The tree is committed with
-// the sanitized-title fallback message — a capped run by definition never
+// the sanitized-title fallback message - a capped run by definition never
 // completed via a successful finish call (that would have ended the run before
-// the cap could trip), so res.CompletionArgs is always empty here — and the
+// the cap could trip), so res.CompletionArgs is always empty here - and the
 // solver marked capped, but ONLY when the commit actually captures a change: a
-// clean tree (nothing to commit) has no diff — the only completion evidence a
-// capped run has — so it is NOT salvaged and the candidate drops exactly as it
+// clean tree (nothing to commit) has no diff - the only completion evidence a
+// capped run has - so it is NOT salvaged and the candidate drops exactly as it
 // would without this rescue path. runJudge admits a capped candidate only when
-// its verify passes. A cap on an EARLIER subtask is never salvaged — whole
-// subtasks are missing, which a green verify cannot expose — and the
+// its verify passes. A cap on an EARLIER subtask is never salvaged - whole
+// subtasks are missing, which a green verify cannot expose - and the
 // parent/single-solver (boardOps) keeps its park-and-resume path.
 //
 // Turn-budget decision: the coder budget is tier-scaled (complex 1.5x / critical
 // 2x the configured base via coderMaxTurns) with deliberately NO separate
-// candidate cap — candidates run the same tier-sized coder budget. The wrap-up
+// candidate cap - candidates run the same tier-sized coder budget. The wrap-up
 // nudge removes post-green dithering and this salvage removes the cliff, so the
 // extra headroom is spent only on genuinely productive work; a flat candidate
 // bump would only fund waste (see the turn-waste design spec).
@@ -481,30 +440,29 @@ func (o *run) salvageCapped(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 	committed, cerr := sc.git.CommitWithMessage(ctx, commitMsg)
 	if cerr != nil || !committed {
 		// No commit (error or clean tree), no salvage: the diff is the only
-		// completion evidence a capped run has — an empty tree has none.
+		// completion evidence a capped run has - an empty tree has none.
 		// The candidate drops exactly as before.
 		return false
 	}
 
 	sc.capped = true
 
-	_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, fmt.Sprintf( //nolint:errcheck // advisory record
-		"%s: turn cap on final subtask %s — work committed; the judge's verify decides", sc.tag, sub.ID))
+	o.d.logCard(ctx, "%s: turn cap on final subtask %s - work committed; the judge's verify decides", sc.tag, sub.ID)
 
 	return true
 }
 
 // salvageSoloCapped rescues a single-solver (parent / mob session) subtask that hit
-// the turn cap — the run-1 failure mode: the work is complete and verified
+// the turn cap - the run-1 failure mode: the work is complete and verified
 // in-run, but no turn is left for the finish call. Unlike the Best-of-N variant
 // (whose judge verifies every candidate later), the single solver has no judge,
 // so the authoritative verify runs HERE and gates the rescue: committed &&
-// verify actually ran && verify passed — the turn-waste campaign's contract,
+// verify actually ran && verify passed - the turn-waste campaign's contract,
 // never weakened. A skipped or unresolved verify plan is NOT a pass. On a pass
 // the subtask completes exactly like a finish-terminated run (push when sc.push,
 // then CompleteTask); on any other outcome the run parks unchanged and the
 // commit stays as WIP evidence for resume. Only the single-solver (boardOps)
-// path is eligible — a candidate solver is handled by salvageCapped.
+// path is eligible - a candidate solver is handled by salvageCapped.
 func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskRef, res harness.Result, err error) bool {
 	var mte *MaxTurnsError
 	if !sc.boardOps || !errors.As(err, &mte) {
@@ -524,8 +482,8 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 		return false
 	}
 
-	// The authoritative verify: with no judge, the project's verify command — not
-	// the model's self-report — is the completion authority. A budget park during
+	// The authoritative verify: with no judge, the project's verify command - not
+	// the model's self-report - is the completion authority. A budget park during
 	// resolution or a skip (no command resolved) leaves the work unverified, which
 	// is NOT a pass: park with the commit standing as WIP evidence.
 	plan, verr := o.ensureVerify(ctx)
@@ -561,8 +519,7 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 		return false
 	}
 
-	_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, fmt.Sprintf( //nolint:errcheck // advisory record
-		"turn cap on subtask %s — committed work passed the authoritative verify; salvaged as complete", sub.ID))
+	o.d.logCard(ctx, "turn cap on subtask %s - committed work passed the authoritative verify; salvaged as complete", sub.ID)
 
 	return true
 }
@@ -571,13 +528,12 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 // committed work but could not be salvaged (verify unresolved, skipped, or not
 // passing): the run parks and the commit stands as WIP evidence for resume.
 func (o *run) logSoloCapPark(ctx context.Context, subID, reason string) {
-	_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, fmt.Sprintf( //nolint:errcheck // advisory record
-		"turn cap on subtask %s — work committed but %s; parking for resume", subID, reason))
+	o.d.logCard(ctx, "turn cap on subtask %s - work committed but %s; parking for resume", subID, reason)
 }
 
 // sanitizeTitle builds the fallback commit message from a subtask title when the
 // coder's finish call carries no usable commit message. Format: lowercase
-// "feat: <title>" — a sane, conventional-ish default. A blank title yields
+// "feat: <title>" - a sane, conventional-ish default. A blank title yields
 // "feat: untitled".
 func sanitizeTitle(title string) string {
 	t := strings.ToLower(strings.TrimSpace(title))
@@ -591,7 +547,7 @@ func sanitizeTitle(title string) string {
 // topoOrder returns the subtasks in dependency order via Kahn's algorithm:
 // dependencies precede dependents, and among nodes that are simultaneously ready
 // the original creation order is preserved (deterministic). A dependency cycle
-// returns an error — the planner forbids cycles, but a resume-loaded set might
+// returns an error - the planner forbids cycles, but a resume-loaded set might
 // not, so the guard is defensive. Dependency IDs not present in the set are
 // ignored (already-done prerequisites from a prior run do not block scheduling).
 func topoOrder(subs []subtaskRef) ([]subtaskRef, error) {

@@ -14,8 +14,8 @@ const fallbackDocCommitMessage = "docs: update documentation"
 // whether external documentation is warranted and, if so, writes it, then code
 // commits and pushes the result. It is modelled on writePRBody but with a
 // best-effort invariant: the ONLY failure that fails the run is a budget park
-// (o.ledger.Check at the top). Every other failure — model run, branch diff,
-// commit, push — is logged and the run proceeds to review. Most cards correctly
+// (o.ledger.Check at the top). Every other failure - model run, branch diff,
+// commit, push - is logged and the run proceeds to review. Most cards correctly
 // write nothing: the agent leaves a clean tree, CommitWithMessage reports
 // committed == false, and the phase is a no-op.
 //
@@ -50,20 +50,10 @@ func runDocument(ctx context.Context, o *run) error {
 
 	res, err := o.runModelWrapUp(ctx, d.WriteTools, task, model, documentWrapUpMessage)
 
-	o.ledger.Spend(res.TotalCostUSD)
-
-	used := res.ModelUsed
-	if used == "" {
-		used = model
-	}
-
-	if reportErr := d.Ops.ReportUsage(ctx, cfg.CardID, used,
-		res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
-		slog.Warn("document: report usage failed", "card_id", cfg.CardID, "error", reportErr)
-	}
+	o.spendAndReport(ctx, o.ledger, cfg.CardID, "document: report usage failed", res, model)
 
 	// Best-effort on any model error (transport, context-limit, incapable). A
-	// *ContextLimitError is deliberately caught HERE, not propagated — otherwise
+	// *ContextLimitError is deliberately caught HERE, not propagated - otherwise
 	// the execute() FSM loop would park an otherwise-good run on a doc overflow.
 	// Budget was gated above and a mid-call overspend is caught by the next phase's
 	// ledger.Check, so no model error reaching this arm is ever a budget park.
@@ -71,8 +61,7 @@ func runDocument(ctx context.Context, o *run) error {
 		slog.Warn("document: model run failed; continuing without docs",
 			"card_id", cfg.CardID, "error", err)
 
-		_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory; docs are optional
-			"document: model run failed, continuing without docs: "+err.Error())
+		d.logCard(ctx, "document: model run failed, continuing without docs: %s", err.Error())
 
 		return nil
 	}
@@ -91,15 +80,13 @@ func runDocument(ctx context.Context, o *run) error {
 	if cerr != nil {
 		slog.Warn("document: commit failed; continuing", "card_id", cfg.CardID, "error", cerr)
 
-		_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory; docs are optional
-			"document: committing docs failed, continuing: "+cerr.Error())
+		d.logCard(ctx, "document: committing docs failed, continuing: %s", cerr.Error())
 
 		return nil
 	}
 
 	if !committed {
-		_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory outcome note
-			"document: no external docs needed")
+		d.logCard(ctx, "document: no external docs needed")
 
 		return nil
 	}
@@ -111,14 +98,12 @@ func runDocument(ctx context.Context, o *run) error {
 		slog.Warn("document: push failed; docs committed locally, integrate will re-push",
 			"card_id", cfg.CardID, "error", perr)
 
-		_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory; integrate re-pushes
-			"document: pushing docs failed, continuing (integrate will re-push): "+perr.Error())
+		d.logCard(ctx, "document: pushing docs failed, continuing (integrate will re-push): %s", perr.Error())
 
 		return nil
 	}
 
-	_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory outcome note
-		"document: wrote and pushed documentation ("+msg+")")
+	d.logCard(ctx, "document: wrote and pushed documentation (%s)", msg)
 
 	return nil
 }

@@ -20,14 +20,14 @@ type hostResolver interface {
 
 // buildExtraHosts returns the extra /etc/hosts entries for a worker container.
 // It always maps host.docker.internal to the host gateway. When the MCP URL
-// carries a DNS name that resolves on the host — e.g. via the host's own
-// /etc/hosts — that name is pinned to its resolved address so the container,
+// carries a DNS name that resolves on the host - e.g. via the host's own
+// /etc/hosts - that name is pinned to its resolved address so the container,
 // which does not inherit the host's /etc/hosts, can reach the MCP server too.
 // This is what lets a worker connect to an MCP endpoint like
 // https://cm.lan.example/mcp that only resolves through the host's /etc/hosts.
 //
 // The lookup is bounded by dnsLookupTimeout. Any failure (parse error, IP host,
-// timeout, NXDOMAIN, zero addresses) returns the default entry alone — the
+// timeout, NXDOMAIN, zero addresses) returns the default entry alone - the
 // container can still reach MCP if in-container DNS resolves the name itself.
 func buildExtraHosts(resolver hostResolver, mcpURL string, log *slog.Logger) []string {
 	hosts := []string{"host.docker.internal:host-gateway"}

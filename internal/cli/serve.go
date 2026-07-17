@@ -92,7 +92,7 @@ func runServe(ctx context.Context, configPath string) error {
 	// Per-run credentials: every admitted trigger carries a CM-provisioned git
 	// token; its credentials are staged into
 	// <secrets_dir>/runs/<project>/<card_id>/env and refreshed from CM until
-	// the run is torn down. There is no local credential source — a payload
+	// the run is torn down. There is no local credential source - a payload
 	// without CM-provisioned credentials is fail-closed rejected by the
 	// webhook launch guards.
 	credentials := secrets.NewRunCredentials(cfg.SecretsDir, cfg.ContextMatrixURL, cfg.APIKey, logger)
@@ -135,7 +135,7 @@ func runServe(ctx context.Context, configPath string) error {
 	})
 
 	// Force-remove any agent-labeled containers left by a previous process before
-	// we start serving — a labeled container in a fresh process is an orphan.
+	// we start serving - a labeled container in a fresh process is an orphan.
 	if err := exec.CleanupOrphans(ctx); err != nil {
 		logger.Warn("orphan cleanup failed", "error", err)
 	}
@@ -305,7 +305,7 @@ func gracefulShutdown(
 // flow the tracker.Remove → Teardown window is already closed before CM can
 // re-trigger, and it cannot be hit. A re-trigger racing in out of band inside
 // that microsecond window would at worst lose its own fresh provisioning to this
-// Teardown — a loud, self-inflicted failure — never a leaked or cross-run token.
+// Teardown - a loud, self-inflicted failure - never a leaked or cross-run token.
 func onContainerExit(
 	reporter webhook.StatusReporter,
 	credentials *secrets.RunCredentials,

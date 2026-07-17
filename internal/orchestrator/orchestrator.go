@@ -4,7 +4,7 @@
 // stored phase always reads "in progress or interrupted".
 //
 // Boundary rule: this package imports harness, llm, registry, tools, events,
-// and cmclient — never internal/worker. The git surface the FSM needs is
+// and cmclient - never internal/worker. The git surface the FSM needs is
 // declared here as the GitOps interface (consuming-package convention);
 // *worker.Git satisfies it.
 package orchestrator
@@ -133,7 +133,7 @@ type Config struct {
 	Provider json.RawMessage
 
 	// Verify is the operator-declared verify gate (CM's card-over-project
-	// resolution), delivered via CMX_VERIFY. nil means nothing declared — the
+	// resolution), delivered via CMX_VERIFY. nil means nothing declared - the
 	// gate falls back to repo-convention detection and then a model proposal.
 	// It is an orchestrator-local type so the package need not import protocol.
 	Verify *DeclaredVerify
@@ -163,7 +163,7 @@ type Compaction struct {
 type Deps struct {
 	Ops Ops
 	Git GitOps
-	// GitForDir returns a GitOps rooted at dir with NO branch policy set —
+	// GitForDir returns a GitOps rooted at dir with NO branch policy set -
 	// guardPush fails closed, so candidate handles structurally cannot push.
 	// Used by Best-of-N to hand each candidate worktree its own git handle.
 	GitForDir  func(dir string) GitOps
@@ -188,7 +188,7 @@ type Deps struct {
 	// kind-rewritten to "seat_debug" so the service log bridge (which skips
 	// unknown kinds) keeps them off the live card stream while they stay in
 	// the container stdout for debugging. The worker points it at process
-	// stdout — the same stream the work command's transcript emitter writes.
+	// stdout - the same stream the work command's transcript emitter writes.
 	// nil = io.Discard (tests, standalone runs).
 	SeatDebugWriter io.Writer
 }
@@ -227,8 +227,8 @@ type run struct {
 	judgeModel string     // the model the judge phase ran on ("" for an auto-win or fallback).
 	notes      *userNotes
 
-	// First-arrival subtask claims (Best-of-N only). The run — not any single
-	// candidate — claims each subtask once, when the first candidate reaches
+	// First-arrival subtask claims (Best-of-N only). The run - not any single
+	// candidate - claims each subtask once, when the first candidate reaches
 	// it, so the board shows in_progress while the race runs (and CM's parent
 	// auto-transition fires on the first claim). subClaimMu guards claimedSubs;
 	// stopSubHB stops the fan-out heartbeater that keeps those claims alive
@@ -238,8 +238,8 @@ type run struct {
 	claimedSubs map[string]bool
 	stopSubHB   func()
 
-	// Plan-phase outputs, consumed by later phases. Set by runPlan, or — on
-	// resume — pre-loaded by reconcile from SubtaskStates before any phase runs.
+	// Plan-phase outputs, consumed by later phases. Set by runPlan, or - on
+	// resume - pre-loaded by reconcile from SubtaskStates before any phase runs.
 	subtasks []subtaskRef
 	cardTier string
 
@@ -255,7 +255,7 @@ type run struct {
 	// branch from a prior, abandoned run exists: per spec §5.1 the fresh run owns
 	// the branch and overwrites it at its first push with a force-with-lease
 	// against this tip. Empty means the branch is absent (plain push). It is NOT
-	// recorded on resume — resume continues the fetched branch, which is the state.
+	// recorded on resume - resume continues the fetched branch, which is the state.
 	staleRemoteTip string
 
 	// firstPushDone guards the one-time stale-branch overwrite: the execute phase's
@@ -269,8 +269,8 @@ type run struct {
 	reviewSummary string
 
 	// selMu guards the shared model-selection state (coderModels, reselects,
-	// excluded) so the Best-of-N fan-out's parallel candidate goroutines — which
-	// all run through runCoderWith and recoverIncapable — never race on it. The
+	// excluded) so the Best-of-N fan-out's parallel candidate goroutines - which
+	// all run through runCoderWith and recoverIncapable - never race on it. The
 	// single-threaded parent execute path acquires it uncontended (a no-op).
 	selMu sync.Mutex
 
@@ -282,7 +282,7 @@ type run struct {
 
 	// reselects counts in-run model re-selections triggered by a harness-incapable
 	// model (one per recoverIncapable). It is capped at 3 per card across BOTH the
-	// execute (coder) and review (synthesis/fix) recovery paths — a shared budget,
+	// execute (coder) and review (synthesis/fix) recovery paths - a shared budget,
 	// so a card that keeps drawing dud models parks rather than burning re-selections
 	// forever.
 	reselects int
@@ -330,7 +330,7 @@ type run struct {
 
 	// lastVerify is the run's most recent gate result, updated each review round
 	// (and left the zero skipped value when no gate ran). It feeds the honest
-	// verify trailers on the PR body and the completion note — the run-level
+	// verify trailers on the PR body and the completion note - the run-level
 	// answer to "was this change verified?".
 	lastVerify verifyResult
 
@@ -425,7 +425,7 @@ func newRun(d Deps, tc cmclient.TaskContext) *run {
 		// The seed prompt is NOT covered by the harness redactor (it masks only
 		// tool output/events), so a secret reaching the grounding block would go to
 		// the LLM endpoint unmasked. Redact here, mirroring the tool-output contract
-		// — defense-in-depth behind readGroundingFile's containment guard.
+		// - defense-in-depth behind readGroundingFile's containment guard.
 		grounding = d.Redact(grounding)
 	}
 
@@ -490,7 +490,7 @@ func (o *run) execute(ctx context.Context) error {
 
 	// Judge state is container-local (candidate worktrees, verify results, the
 	// raced diffs) and never persisted, so a run that crashed in judge cannot be
-	// resumed there — re-enter at execute to re-race the fan-out.
+	// resumed there - re-enter at execute to re-race the fan-out.
 	if start == "judge" {
 		start = "execute"
 	}
@@ -517,23 +517,23 @@ func (o *run) execute(ctx context.Context) error {
 			var be *BudgetExceededError
 			if errors.As(err, &be) {
 				// Park: record the numbers, then stop without entering the
-				// next phase. Log failure is best-effort — the budget error is
+				// next phase. Log failure is best-effort - the budget error is
 				// the one that must surface to the worker.
-				_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, budgetLogMessage(be)) //nolint:errcheck
+				o.d.logCard(ctx, "%s", budgetLogMessage(be))
 			}
 
 			var cle *ContextLimitError
 			if errors.As(err, &cle) {
-				// Context-window park: same shape as the budget arm — log the
+				// Context-window park: same shape as the budget arm - log the
 				// numbers best-effort, then stop without entering the next phase.
-				_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, contextLimitLogMessage(cle)) //nolint:errcheck
+				o.d.logCard(ctx, "%s", contextLimitLogMessage(cle))
 			}
 
 			var mte *MaxTurnsError
 			if errors.As(err, &mte) {
-				// Turn-cap park: same shape as the budget/context arms — log
+				// Turn-cap park: same shape as the budget/context arms - log
 				// best-effort, then stop without entering the next phase.
-				_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, maxTurnsLogMessage(mte)) //nolint:errcheck
+				o.d.logCard(ctx, "%s", maxTurnsLogMessage(mte))
 			}
 
 			return err
@@ -545,17 +545,17 @@ func (o *run) execute(ctx context.Context) error {
 
 // budgetLogMessage is the canonical card-log line for a budget park.
 func budgetLogMessage(be *BudgetExceededError) string {
-	return fmt.Sprintf("budget ceiling reached: spent $%.4f of $%.4f — parking work", be.Spent, be.Max)
+	return fmt.Sprintf("budget ceiling reached: spent $%.4f of $%.4f - parking work", be.Spent, be.Max)
 }
 
 // contextLimitLogMessage is the canonical card-log line for a context-window park.
 func contextLimitLogMessage(cle *ContextLimitError) string {
-	return fmt.Sprintf("context window reached on model %q (%d tokens) — parking work; split the subtask or pin a larger-window model", cle.Model, cle.ContextWindow)
+	return fmt.Sprintf("context window reached on model %q (%d tokens) - parking work; split the subtask or pin a larger-window model", cle.Model, cle.ContextWindow)
 }
 
 // maxTurnsLogMessage is the canonical card-log line for a turn-cap park.
 func maxTurnsLogMessage(mte *MaxTurnsError) string {
-	return fmt.Sprintf("turn cap reached on model %q after %d turns — parking work; raise CMX_MAX_TURNS or split the subtask", mte.Model, mte.Turns)
+	return fmt.Sprintf("turn cap reached on model %q after %d turns - parking work; raise CMX_MAX_TURNS or split the subtask", mte.Model, mte.Turns)
 }
 
 // reselectCap bounds in-run model re-selections per card. A model that emits
@@ -566,8 +566,8 @@ const reselectCap = 3
 
 // recoverIncapable handles a harness-incapable model encountered mid-phase: it
 // blacklists the model on CM (best-effort), records the exclusion so the next
-// selection skips it, and logs the swap. It returns an error — wrapping the
-// IncapableError — once the per-card re-selection cap is exhausted, which the
+// selection skips it, and logs the swap. It returns an error - wrapping the
+// IncapableError - once the per-card re-selection cap is exhausted, which the
 // caller propagates to park the run. The incapable model executed no tools, so
 // the caller can simply re-select and re-run the same unit; no git reset is
 // needed.
@@ -598,8 +598,7 @@ func (o *run) recoverIncapable(ctx context.Context, ie *IncapableError) error {
 	// Best-effort: the recovery proceeds (re-select + re-run) regardless of a
 	// reporting failure; the blacklist is an advisory hint to CM and future runs.
 	_ = o.d.Ops.BlacklistModel(ctx, o.d.Cfg.CardID, ie.Model, ie.Reason) //nolint:errcheck
-	_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID,                              //nolint:errcheck
-		fmt.Sprintf("model %q harness-incapable; blacklisted and re-selecting (attempt %d/%d)", ie.Model, attempt, reselectCap))
+	o.d.logCard(ctx, "model %q harness-incapable; blacklisted and re-selecting (attempt %d/%d)", ie.Model, attempt, reselectCap)
 
 	return nil
 }

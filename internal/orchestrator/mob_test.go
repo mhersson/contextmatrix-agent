@@ -351,7 +351,7 @@ func TestMobSeatRunnerPersistsContextAcrossRounds(t *testing.T) {
 
 func TestMobSeatRunnerForcesFinalAnswerOnEmptyOutput(t *testing.T) {
 	// The first turn tool-calls at a cost above the per-turn cap, so the
-	// run stops max_cost with empty output (deterministic — the cap is
+	// run stops max_cost with empty output (deterministic - the cap is
 	// checked at the top of the next turn). The backstop call must then
 	// produce the position, toolless, despite the exhausted cap.
 	burn := llm.Response{
@@ -406,7 +406,7 @@ func TestMobSeatRunnerBackstopFailureFallsBackToAbsence(t *testing.T) {
 
 	// The harness only adds Usage.Cost on a successful response (see
 	// harness.Run), so an erroring call can never carry cost through
-	// fres.TotalCostUSD — the returned discussion cost is exactly the
+	// fres.TotalCostUSD - the returned discussion cost is exactly the
 	// primary run's billed spend either way. Fix 1's unconditional
 	// `res.TotalCostUSD += fres.TotalCostUSD` is validated by inspection
 	// and the other cost-carrying paths; this test's essential assertions

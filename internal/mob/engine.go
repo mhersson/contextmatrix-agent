@@ -17,7 +17,7 @@ const quorumMin = 2
 const closeAllBudget = 10 * time.Second
 
 // critiqueInstruction closes every critique-round delta.
-const critiqueInstruction = "Critique round %d: review the positions above. Critique, defend, revise, or concede — then state your current position. The repository has not changed since the discussion started — do not re-run discovery; use tools only to check claims that are new this round."
+const critiqueInstruction = "Critique round %d: review the positions above. Critique, defend, revise, or concede - then state your current position. The repository has not changed since the discussion started - do not re-run discovery; use tools only to check claims that are new this round."
 
 // convergencePrompt classifies one round's state on the decision model.
 const convergencePrompt = `You are moderating a multi-agent technical discussion. Classify its current state from the transcript below. Respond with EXACTLY one word and nothing else:
@@ -40,7 +40,7 @@ type liveSeat struct {
 // Discuss runs one discussion: open, optional blind round, critique rounds
 // with interjections/budget/convergence, synthesis, close. Any returned
 // error (including ErrNoQuorum) means the caller falls back to the solo
-// path — a discussion never fails the card.
+// path - a discussion never fails the card.
 func (e *Engine) Discuss(ctx context.Context, t Topic) (Outcome, error) {
 	if t.Rounds < 1 {
 		t.Rounds = 1
@@ -53,7 +53,7 @@ func (e *Engine) Discuss(ctx context.Context, t Topic) (Outcome, error) {
 
 	// The briefing is transcript entry 0: replacement-task snapshots
 	// (rendered from index 0) and the synthesis transcript carry it, while
-	// established tasks — whose deltas start past it — never see it twice.
+	// established tasks - whose deltas start past it - never see it twice.
 	entries := []Entry{{Author: "moderator", Round: 0, Content: t.Briefing}}
 
 	var totalCost float64
@@ -110,7 +110,7 @@ func (e *Engine) Discuss(ctx context.Context, t Topic) (Outcome, error) {
 			if text == "" {
 				// The seat ran out of budget before producing a position.
 				// Money was spent and the round content was delivered into
-				// its task history, so cost and cursor advance — but a blank
+				// its task history, so cost and cursor advance - but a blank
 				// utterance is not a response: it must not count toward
 				// quorum, enter the transcript, or reach the live stream as
 				// an empty bubble.
@@ -168,7 +168,7 @@ func (e *Engine) Discuss(ctx context.Context, t Topic) (Outcome, error) {
 		}
 
 		if e.cfg.BudgetUSD > 0 && totalCost >= e.cfg.BudgetUSD {
-			e.cfg.Emit("moderator", "", "", r, "discussion budget exhausted — synthesizing early")
+			e.cfg.Emit("moderator", "", "", r, "discussion budget exhausted - synthesizing early")
 
 			break
 		}
@@ -199,7 +199,7 @@ func (e *Engine) Discuss(ctx context.Context, t Topic) (Outcome, error) {
 
 		if err != nil {
 			// Classification is advisory; a failed classify never ends the
-			// discussion — the round cap still bounds it.
+			// discussion - the round cap still bounds it.
 			continue
 		}
 
@@ -234,7 +234,7 @@ func (e *Engine) Discuss(ctx context.Context, t Topic) (Outcome, error) {
 }
 
 // open dials every internal seat and guest. A failed dial yields a dead
-// placeholder handle (absent forever), surfaced via Emit with round -1 —
+// placeholder handle (absent forever), surfaced via Emit with round -1 -
 // the discussion proceeds on quorum.
 func (e *Engine) open(ctx context.Context) []*liveSeat {
 	seats := make([]*liveSeat, 0, len(e.cfg.Seats)+len(e.cfg.Guests))
@@ -255,7 +255,7 @@ func (e *Engine) open(ctx context.Context) []*liveSeat {
 	for _, g := range e.cfg.Guests {
 		// Bound the dial by the guest deadline: a registered endpoint that
 		// accepts the connection but never answers must degrade to a dead seat,
-		// not hang the whole run. dialGuest's signature stays untouched — the
+		// not hang the whole run. dialGuest's signature stays untouched - the
 		// timeout rides its ctx. The client does not retain this ctx past
 		// construction, so cancelling it here is safe.
 		dialCtx, cancel := context.WithTimeout(ctx, e.cfg.GuestDeadline)
@@ -264,7 +264,7 @@ func (e *Engine) open(ctx context.Context) []*liveSeat {
 		cancel()
 
 		if err != nil {
-			// Name only in the transcript — the URL (and any error detail) would
+			// Name only in the transcript - the URL (and any error detail) would
 			// otherwise reach the browser stream; keep the full error in the log.
 			slog.Warn("mob: guest dial failed", "guest", g.Name, "error", err)
 			e.cfg.Emit("moderator", "", "", -1, fmt.Sprintf("guest %s unreachable", g.Name))
@@ -281,7 +281,7 @@ func (e *Engine) open(ctx context.Context) []*liveSeat {
 
 // classify runs the convergence check and normalizes the verdict to one of
 // consensus / stalled / productive_disagreement. from bounds the transcript
-// to the current round's positions — the convergence model does not need
+// to the current round's positions - the convergence model does not need
 // earlier rounds re-sent.
 func (e *Engine) classify(ctx context.Context, entries []Entry, from int) (string, float64, error) {
 	out, _, cost, err := e.cfg.Moderate(ctx, fmt.Sprintf(convergencePrompt, renderDelta(entries, from, "", "")))
@@ -302,7 +302,7 @@ func (e *Engine) classify(ctx context.Context, entries []Entry, from int) (strin
 	}
 }
 
-// closeAll closes every live handle on a detached context — the engine's ctx
+// closeAll closes every live handle on a detached context - the engine's ctx
 // may already be canceled, but parked tasks should still be completed.
 func (e *Engine) closeAll(seats []*liveSeat) {
 	ctx, cancel := context.WithTimeout(context.Background(), closeAllBudget)

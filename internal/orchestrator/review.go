@@ -50,7 +50,7 @@ type fix struct {
 
 // ReviewParkedError marks the review cap being exhausted without approval. The
 // worker maps it to the park path: exit 0, completed callback, card left in
-// review. Parked is not failed — a human picks the card up from review.
+// review. Parked is not failed - a human picks the card up from review.
 type ReviewParkedError struct{}
 
 func (e *ReviewParkedError) Error() string {
@@ -64,7 +64,7 @@ func (e *ReviewParkedError) Error() string {
 // approve-or-fix. Approval exits nil; each non-approval increments the card's
 // review attempts and runs a fix. At the cliff (the round that would otherwise
 // park) the gated authoritative pass takes over instead of parking on a cheap
-// verdict — it is the sole park gate. The budget ledger is checked before every
+// verdict - it is the sole park gate. The budget ledger is checked before every
 // model-bearing step.
 func runReview(ctx context.Context, o *run) error {
 	d := o.d
@@ -100,7 +100,7 @@ func runReview(ctx context.Context, o *run) error {
 		round := o.tc.ReviewAttempts + iter + 1
 
 		// At the cliff (the round that would otherwise park), run the gated
-		// authoritative pass instead of another cheap round — never park on a
+		// authoritative pass instead of another cheap round - never park on a
 		// cheap verdict. It is terminal: returns nil (finished) or parks.
 		if round >= attemptsCap {
 			return o.authoritativeReview(ctx, plan, round)
@@ -235,7 +235,7 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 		return fmt.Errorf("increment review attempts: %w", err)
 	}
 
-	// Gated strong fix — runs only because the authoritative review confirmed
+	// Gated strong fix - runs only because the authoritative review confirmed
 	// real issues.
 	if err := o.runFix(ctx, findings, round, fixTier, true); err != nil {
 		return err
@@ -264,8 +264,7 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 		return fmt.Errorf("increment review attempts: %w", err)
 	}
 
-	_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory; park must surface
-		fmt.Sprintf("review parked after %d attempts (authoritative pass) — outstanding findings:\n%s", n, findings2))
+	d.logCard(ctx, "review parked after %d attempts (authoritative pass) - outstanding findings:\n%s", n, findings2)
 
 	return &ReviewParkedError{}
 }
@@ -279,7 +278,7 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 // (or no command) proceeds. On any gate outcome that reaches them, the three
 // specialists fan out and the synthesis verdict decides.
 func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, authoritative bool) (findings string, fixTier string, approved bool, vres verifyResult, err error) {
-	// Budget gate before the verify subprocess too — the gate may be cheap, but
+	// Budget gate before the verify subprocess too - the gate may be cheap, but
 	// the fix run it can trigger is not, and we park before doing any work.
 	if err := o.ledger.Check(); err != nil {
 		return "", "", false, verifyResult{}, err
@@ -303,14 +302,13 @@ func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, autho
 		case verifySkipped:
 			// A missing or timed-out gate is inconclusive, not a defect: log it
 			// loudly and proceed to the specialists without a fix loop.
-			_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, //nolint:errcheck // advisory skip record
-				fmt.Sprintf("verify skipped (%s) — review round %d proceeds unverified", res.Note, round))
+			o.d.logCard(ctx, "verify skipped (%s) - review round %d proceeds unverified", res.Note, round)
 		case verifyPassed:
 			// Proceed to the specialist panel.
 		}
 	}
 
-	// Gate passed, skipped, or absent — the gate is a cheap pre-filter, not a
+	// Gate passed, skipped, or absent - the gate is a cheap pre-filter, not a
 	// substitute for review, so specialists always run. With mob session
 	// review on, a panel discussion replaces the specialist pass for
 	// non-authoritative rounds (the authoritative pass keeps the proven solo
@@ -368,8 +366,7 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 
 	panel := o.reviewPanel(estimateTokens(diff), authoritative)
 
-	_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory selection record
-		fmt.Sprintf("review panel models: %s, %s, %s", panel[0].Model, panel[1].Model, panel[2].Model))
+	d.logCard(ctx, "review panel models: %s, %s, %s", panel[0].Model, panel[1].Model, panel[2].Model)
 
 	lenses := []struct{ role, prompt string }{
 		{"correctness", correctnessPrompt},
@@ -420,19 +417,8 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 	var b strings.Builder
 
 	for i, res := range results {
-		// Account for spend even on a child transport error / partial run, then
-		// report the model actually used (falling back to the configured slug).
-		o.ledger.Spend(res.Result.TotalCostUSD)
-
-		used := res.Result.ModelUsed
-		if used == "" {
-			used = specs[i].Model
-		}
-
-		if reportErr := d.Ops.ReportUsage(ctx, cfg.CardID, used,
-			res.Result.PromptTokens, res.Result.CompletionTokens, res.Result.TotalCostUSD); reportErr != nil {
-			slog.Warn("review: report specialist usage failed", "card_id", cfg.CardID, "role", res.Role, "error", reportErr)
-		}
+		o.spendAndReport(ctx, o.ledger, cfg.CardID, "review: report specialist usage failed",
+			res.Result, specs[i].Model, "role", res.Role)
 
 		b.WriteString("## ")
 		b.WriteString(res.Role)
@@ -454,8 +440,7 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 	// on crash-resume lastReviewBase starts empty and the next round re-runs full.
 	if sha, herr := d.Git.Head(ctx); herr == nil && sha != "" {
 		o.lastReviewBase = sha
-		_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory snapshot record
-			fmt.Sprintf("review snapshot %s", sha))
+		d.logCard(ctx, "review snapshot %s", sha)
 	}
 
 	return b.String(), nil
@@ -516,7 +501,7 @@ func (o *run) reviewExclusions() map[string]bool {
 
 // mobReviewVerdict convenes the review discussion and parses its synthesis
 // into the existing verdict shape, with ONE moderator repair on a parse
-// failure (mirroring synthesize's repair turn). ok=false on any failure —
+// failure (mirroring synthesize's repair turn). ok=false on any failure -
 // the caller falls back to the specialist fan-out. On success it records the
 // review snapshot head, exactly like runSpecialists, so later rounds stay
 // delta-scoped.
@@ -567,8 +552,7 @@ func (o *run) mobReviewVerdict(ctx context.Context) (verdict, bool) {
 
 	if sha, herr := o.d.Git.Head(ctx); herr == nil && sha != "" {
 		o.lastReviewBase = sha
-		_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, //nolint:errcheck // advisory snapshot record
-			fmt.Sprintf("review snapshot %s", sha))
+		o.d.logCard(ctx, "review snapshot %s", sha)
 	}
 
 	return v, true
@@ -630,17 +614,7 @@ func (o *run) synthesize(ctx context.Context, findings string, authoritative boo
 
 		res, err := o.runModel(ctx, d.ReadTools, task, model)
 
-		o.ledger.Spend(res.TotalCostUSD)
-
-		used := res.ModelUsed
-		if used == "" {
-			used = model
-		}
-
-		if reportErr := d.Ops.ReportUsage(ctx, cfg.CardID, used,
-			res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
-			slog.Warn("review: report synthesis usage failed", "card_id", cfg.CardID, "error", reportErr)
-		}
+		o.spendAndReport(ctx, o.ledger, cfg.CardID, "review: report synthesis usage failed", res, model)
 
 		if err != nil {
 			return verdict{}, fmt.Errorf("synthesis run: %w", err)
@@ -674,22 +648,11 @@ func (o *run) runFixModel(ctx context.Context, prompt string, round int, fixTier
 	for attempt := 0; attempt <= reselectCap; attempt++ {
 		model := o.resolveFixModel(fixTier, authoritative)
 
-		_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory selection record
-			fmt.Sprintf("fix coder %s selected for round %d fixes (tier=%s)", model, round, tier))
+		d.logCard(ctx, "fix coder %s selected for round %d fixes (tier=%s)", model, round, tier)
 
 		res, err := o.runModelCoder(ctx, d.WriteTools, prompt, model, fixWrapUpMessage, tier)
 
-		o.ledger.Spend(res.TotalCostUSD)
-
-		used := res.ModelUsed
-		if used == "" {
-			used = model
-		}
-
-		if reportErr := d.Ops.ReportUsage(ctx, cfg.CardID, used,
-			res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
-			slog.Warn("review: report fix usage failed", "card_id", cfg.CardID, "error", reportErr)
-		}
+		o.spendAndReport(ctx, o.ledger, cfg.CardID, "review: report fix usage failed", res, model)
 
 		var ie *IncapableError
 		if errors.As(err, &ie) {
@@ -769,7 +732,7 @@ func (o *run) resolveFixModel(fixTier string, authoritative bool) string {
 		// A pinned model is returned even if it is in o.excluded: we never override
 		// an explicit operator pin with an auto-selected substitute. A pinned model
 		// that is harness-incapable therefore keeps being re-selected, exhausts the
-		// re-selection cap, and parks — the blacklist still records it.
+		// re-selection cap, and parks - the blacklist still records it.
 		return o.tc.ModelCoder
 	}
 
@@ -805,7 +768,7 @@ func (o *run) fixTierFor(fixTier string, authoritative bool) registry.Tier {
 }
 
 // reviewFindingsHistory returns every "## Review Findings" section recorded on
-// the parent body, concatenated — the full prior-findings context for the
+// the parent body, concatenated - the full prior-findings context for the
 // authoritative pass. Empty when none have been recorded yet.
 func reviewFindingsHistory(body string) string {
 	var b strings.Builder
@@ -846,7 +809,7 @@ func parseVerdict(s string) (verdict, error) {
 // formatFixes renders a verdict's fix list as the findings text carried into the
 // fix run and (on cap exhaustion) the activity log. The "- <file>: <issue>" line
 // shape is a contract with fixFiles, which parses the paths back out for fixup
-// targeting — keep the two in sync.
+// targeting - keep the two in sync.
 func formatFixes(v verdict) string {
 	var b strings.Builder
 
@@ -862,7 +825,7 @@ func formatFixes(v verdict) string {
 		b.WriteString(f.Issue)
 
 		if f.Suggestion != "" {
-			b.WriteString(" — ")
+			b.WriteString(" - ")
 			b.WriteString(f.Suggestion)
 		}
 
@@ -874,7 +837,7 @@ func formatFixes(v verdict) string {
 
 // fixFiles extracts the file paths referenced in the findings text so the fixup
 // can target the commit that last touched them. It parses the "- <file>: ..."
-// line shape formatFixes emits (mirror — keep the two in sync); lines without a
+// line shape formatFixes emits (mirror - keep the two in sync); lines without a
 // leading path are ignored.
 func fixFiles(findings string) []string {
 	var (

@@ -64,7 +64,7 @@ func TestReportStatus_Success(t *testing.T) {
 			return
 		}
 
-		// Verify signature using the protocol helper — strip the "sha256=" prefix.
+		// Verify signature using the protocol helper - strip the "sha256=" prefix.
 		sig := strings.TrimPrefix(receivedSig, "sha256=")
 		ok := protocol.VerifySignatureWithTimestamp(
 			apiKey, r.Method, r.URL.RequestURI(),
@@ -93,7 +93,7 @@ func TestReportStatus_Success(t *testing.T) {
 
 // TestReportStatus_WorkerStatusWireTag pins the on-the-wire JSON tag: the status
 // field must serialize as "worker_status" (protocol v0.8.0), not the pre-rename
-// "runner_status". Asserting on the raw body — not a re-unmarshal — is the point:
+// "runner_status". Asserting on the raw body - not a re-unmarshal - is the point:
 // a shared-struct round-trip would pass either way, so it cannot catch a wire drift.
 func TestReportStatus_WorkerStatusWireTag(t *testing.T) {
 	apiKey := "test-secret-key-that-is-long-enough"
@@ -258,7 +258,7 @@ func TestReportStatus_CountsRetries(t *testing.T) {
 
 // TestReportStatus_TerminalBackgroundRetry verifies that a terminal
 // (completed/failed) status callback which exhausts the fast synchronous
-// retries falls back to a persistent background retry — the only mechanism
+// retries falls back to a persistent background retry - the only mechanism
 // that clears the parent claim and worker_status in ContextMatrix, so it
 // must not be silently dropped by a brief CM outage.
 func TestReportStatus_TerminalBackgroundRetry(t *testing.T) {
@@ -291,7 +291,7 @@ func TestReportStatus_TerminalBackgroundRetry(t *testing.T) {
 
 		// Deliberately NO hits==3 assertion here: with backgroundDelay=0 the
 		// background goroutine (spawned before ReportStatus returns) can land
-		// attempt #4 at any moment — there is no synchronization point where
+		// attempt #4 at any moment - there is no synchronization point where
 		// exactly-3 holds. The fast-attempt count is pinned by
 		// TestReportStatus_CountsRetries; the <-attempted + hits==4 pair below
 		// proves the background attempt reached the server.
@@ -363,7 +363,7 @@ func TestReportStatus_TerminalBackgroundRetry(t *testing.T) {
 		select {
 		case <-done:
 		case <-time.After(2 * time.Second):
-			t.Fatal("Close did not return — background retry goroutine leaked")
+			t.Fatal("Close did not return - background retry goroutine leaked")
 		}
 
 		assert.EqualValues(t, 3, hits.Load(), "Close must cancel before another attempt lands")

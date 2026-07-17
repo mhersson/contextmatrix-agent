@@ -17,7 +17,7 @@ import (
 // Server hosts every internal seat behind one loopback JSON-RPC listener.
 // The port lives inside the worker container's network namespace and is
 // never published; a static bearer guards it anyway (cheap, uniform with
-// guests). Task state is a2asrv's default in-memory store — discussions are
+// guests). Task state is a2asrv's default in-memory store - discussions are
 // ephemeral by design.
 type Server struct {
 	base string
@@ -29,8 +29,8 @@ type Server struct {
 
 // StartServer binds 127.0.0.1:0 and mounts, per seat:
 //
-//	/seats/<name>                             — a2a JSON-RPC endpoint
-//	/seats/<name>/.well-known/agent-card.json — static agent card
+//	/seats/<name>                             - a2a JSON-RPC endpoint
+//	/seats/<name>/.well-known/agent-card.json - static agent card
 //
 // wrapped in constant-time bearer middleware. The caller owns the lifecycle:
 // Close when the discussion ends.
@@ -103,7 +103,7 @@ func (s *Server) SeatEndpoint(name string) string {
 	return s.base + "/seats/" + name
 }
 
-// Close shuts the listener down. Idempotent — repeated calls return the
+// Close shuts the listener down. Idempotent - repeated calls return the
 // first result.
 func (s *Server) Close() error {
 	s.once.Do(func() {

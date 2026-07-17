@@ -35,7 +35,7 @@ func gitInit(t *testing.T, dir string) {
 	require.NoError(t, exec.Command("git", "-C", dir, "config", "core.excludesFile", "/dev/null").Run())
 }
 
-// gitAddAll stages the whole tree so the nested files become tracked — the
+// gitAddAll stages the whole tree so the nested files become tracked - the
 // listing is built from git's tracked index, so a file must be added (not merely
 // present) to appear.
 func gitAddAll(t *testing.T, dir string) {
@@ -80,13 +80,13 @@ func TestDiscoverGrounding(t *testing.T) {
 		root := t.TempDir()
 		gitInit(t, root)
 		// The repo's own .gitignore is the agnostic source of truth for which trees
-		// to exclude — grounding names no ecosystem directory.
+		// to exclude - grounding names no ecosystem directory.
 		writeNestedFile(t, root, ".gitignore", "node_modules/\n")
 		writeNestedFile(t, root, "CLAUDE.md", "# root rules")
 		writeNestedFile(t, root, "internal/api/AGENTS.md", "# api rules")
 		writeNestedFile(t, root, "web/CLAUDE.md", "# web rules")
 		// Gitignored: `git add -A` refuses it, so it never enters the tracked index
-		// and cannot reach the listing — no name-based knowledge of "node_modules".
+		// and cannot reach the listing - no name-based knowledge of "node_modules".
 		writeNestedFile(t, root, "node_modules/pkg/CLAUDE.md", "# vendored")
 		gitAddAll(t, root)
 
@@ -108,7 +108,7 @@ func TestDiscoverGrounding(t *testing.T) {
 	t.Run("committed third-party tree is listed, its content never injected", func(t *testing.T) {
 		// REGRESSION PIN. A repo that COMMITS its dependency tree (Go vendor/, a
 		// checked-in node_modules) carries third-party AGENTS.md/CLAUDE.md files that
-		// are TRACKED, not gitignored — a gitignore-only prune would walk them and
+		// are TRACKED, not gitignored - a gitignore-only prune would walk them and
 		// inject a foreign library's instructions as if they were the target repo's
 		// own rules. The trade this pins: a committed third-party instruction file
 		// appears at most as a PATH in the listing; its content is never injected
@@ -164,7 +164,7 @@ func TestDiscoverGrounding(t *testing.T) {
 func TestReadGroundingDirRejectsOutOfTreeSymlink(t *testing.T) {
 	// A repo-committed root instruction file symlinked OUT of the workspace (in
 	// production: /proc/self/environ, /run/cm-secrets/env) must not be read into
-	// the grounding block — that would smuggle secrets, unredacted, into every
+	// the grounding block - that would smuggle secrets, unredacted, into every
 	// model prompt.
 	root := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "secret.env")
@@ -217,7 +217,7 @@ func TestGroundingBlock(t *testing.T) {
 	assert.Contains(t, block, "=== ./CLAUDE.md ===")
 	assert.Contains(t, block, "# root rules")
 
-	// Nested files are named as PATHS with a read-on-demand instruction — their
+	// Nested files are named as PATHS with a read-on-demand instruction - their
 	// content is NOT part of the block.
 	assert.Contains(t, block, "web/CLAUDE.md")
 	assert.Contains(t, block, "internal/api/AGENTS.md")

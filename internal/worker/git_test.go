@@ -83,13 +83,13 @@ func TestStageForCommit_SkipsNativeBinariesAndHonoursGitignore(t *testing.T) {
 	g.SetBranchPolicy("cm/cmx-001", "main", "main")
 
 	// Isolate from the developer's global gitignore so the repo's own .gitignore
-	// (below) is the only ignore rule in effect — that repo file is the
+	// (below) is the only ignore rule in effect - that repo file is the
 	// language-agnostic source of truth for "don't commit this".
 	runGit(t, ws, "config", "core.excludesFile", "/dev/null")
 
 	// The repo declares what to ignore; git status honours it, so it never
 	// reaches our staging loop. This is how ANY ecosystem's artifacts are
-	// excluded — no language-specific denylist in the agent.
+	// excluded - no language-specific denylist in the agent.
 	writeFile(t, ws, ".gitignore", []byte("*.pyc\ndist/\n"), 0o644)
 
 	// A legitimate source edit (tracked: the seeded README).
@@ -113,7 +113,7 @@ func TestStageForCommit_SkipsNativeBinariesAndHonoursGitignore(t *testing.T) {
 	writeFile(t, ws, "golden.out", []byte("expected output\n"), 0o644)
 	// An untracked TEXT artifact the repo forgot to .gitignore. It IS staged: the
 	// content guard blocks only NATIVE BINARIES (executable magic), so a text build
-	// log rides along. This is the accepted trade of the content-based guard — the
+	// log rides along. This is the accepted trade of the content-based guard - the
 	// repo's own .gitignore is the ONLY defense against committed text artifacts;
 	// the agent adds no name-based denylist that would also drop first-party source.
 	writeFile(t, ws, "build.log", []byte("compiling...\nok\n"), 0o644)
@@ -192,7 +192,7 @@ func TestCommitWithMessage_OnlyArtifactsIsNoOp(t *testing.T) {
 
 // TestAddInfoExcludeHidesWorktrees proves the clone-local exclude keeps a
 // candidate-worktree path out of `git status` (and thus out of any staging
-// path), and that a re-run is idempotent — the pattern is appended exactly once.
+// path), and that a re-run is idempotent - the pattern is appended exactly once.
 func TestAddInfoExcludeHidesWorktrees(t *testing.T) {
 	remote := setupBareRemote(t)
 	ws := t.TempDir()
@@ -216,7 +216,7 @@ func TestAddInfoExcludeHidesWorktrees(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, status, ".worktrees", "the excluded worktree dir must not appear in status")
 
-	// Idempotent: a second call is a no-op — the pattern is present exactly once.
+	// Idempotent: a second call is a no-op - the pattern is present exactly once.
 	require.NoError(t, g.AddInfoExclude(context.Background(), ".worktrees/"))
 
 	data, err := os.ReadFile(filepath.Join(ws, ".git", "info", "exclude"))
@@ -239,7 +239,7 @@ func TestStageForCommit_SkipsCandidateWorktrees(t *testing.T) {
 
 	runGit(t, ws, "config", "core.excludesFile", "/dev/null")
 
-	// Cut a real candidate worktree (the fan-out shape). NO AddInfoExclude here —
+	// Cut a real candidate worktree (the fan-out shape). NO AddInfoExclude here -
 	// this exercises the stageForCommit prefix skip directly.
 	wt := filepath.Join(ws, ".worktrees", "c1")
 	require.NoError(t, g.AddWorktree(context.Background(), wt, "cm/cmx-001-c1", "cm/cmx-001"))
@@ -333,7 +333,7 @@ func TestCredEnvShape(t *testing.T) {
 
 	joined := strings.Join(env, "\n")
 
-	// The token VALUE never lands in the env — only the path to the helper does.
+	// The token VALUE never lands in the env - only the path to the helper does.
 	assert.NotContains(t, joined, "ghs_tok123456")
 	assert.NotContains(t, joined, "http.extraheader")
 	assert.NotContains(t, joined, "LLM_API_KEY")
@@ -380,7 +380,7 @@ func TestCredEnvCACert(t *testing.T) {
 
 // TestGitCredentialHelperScriptEchoesToken pins that the credential-helper script
 // credEnv installs echoes the CM_GIT_TOKEN it reads from the secrets file on
-// every `get` call, and re-reads a rotated file — the direct analog of the chat
+// every `get` call, and re-reads a rotated file - the direct analog of the chat
 // backend's credhelper test.
 func TestGitCredentialHelperScriptEchoesToken(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
@@ -425,7 +425,7 @@ func TestGitCredentialHelperScriptEchoesToken(t *testing.T) {
 // real credential subsystem (`git credential fill`) with the env credEnv builds,
 // so the injected helper resolves the token exactly as a clone/fetch/push would.
 // It rewrites the secrets file between two fills and asserts the SECOND fill
-// returned the NEW token — proving a git op after rotation uses the current
+// returned the NEW token - proving a git op after rotation uses the current
 // token, not the one present when the worker started.
 func TestGitCredentialRotation(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
@@ -467,7 +467,7 @@ func TestGitCredentialRotation(t *testing.T) {
 	// The host rewrites the secrets file ~10m before expiry.
 	require.NoError(t, os.WriteFile(secretsPath, []byte("CM_GIT_TOKEN=tok-rotated\n"), 0o600))
 
-	// The SECOND git op must observe the rotated token — the bug this fixes.
+	// The SECOND git op must observe the rotated token - the bug this fixes.
 	second := fill(t)
 	assert.Contains(t, second, "password=tok-rotated")
 	assert.NotContains(t, second, "password=tok-initial")
@@ -556,7 +556,7 @@ func TestForcePushRequiresLeaseTip(t *testing.T) {
 }
 
 // TestGuardZeroValueFailClosed pins the fail-closed posture: with no branch
-// policy set (zero-value Git), EVERY push must refuse — including a push to a
+// policy set (zero-value Git), EVERY push must refuse - including a push to a
 // cm/ branch that would otherwise be legal.
 func TestGuardZeroValueFailClosed(t *testing.T) {
 	t.Parallel()
@@ -594,7 +594,7 @@ func setupClonedRepo(t *testing.T) (string, string, string) {
 }
 
 // pushFileToBranch commits filename in a fresh clone of bare and pushes the
-// result to branch on the remote — simulating work that lands after our clone.
+// result to branch on the remote - simulating work that lands after our clone.
 func pushFileToBranch(t *testing.T, bare, filename, branch string) {
 	t.Helper()
 
@@ -690,7 +690,7 @@ func TestCommitFixup(t *testing.T) {
 
 	target := strings.TrimSpace(out)
 
-	// Make a change to fixup, plus a brand-new untracked file — fix runs can
+	// Make a change to fixup, plus a brand-new untracked file - fix runs can
 	// legitimately create files (e.g. a missing test).
 	require.NoError(t, os.WriteFile(filepath.Join(ws, "foo.txt"), []byte("fixed\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(ws, "foo_test.txt"), []byte("new test\n"), 0o644))
@@ -815,7 +815,7 @@ func TestRebaseAutosquash(t *testing.T) {
 		err = g.RebaseAutosquash(ctx, onto)
 		require.ErrorIs(t, err, ErrRebaseConflict)
 
-		// Repo must be clean — no .git/rebase-merge leftover.
+		// Repo must be clean - no .git/rebase-merge leftover.
 		_, statErr := os.Stat(filepath.Join(ws, ".git", "rebase-merge"))
 		assert.True(t, os.IsNotExist(statErr), "rebase-merge dir should not exist after abort")
 	})
@@ -980,12 +980,12 @@ func TestCheckout(t *testing.T) {
 // bug. Unlike TestCheckout (no local branch, so `git checkout` DWIMs a tracking
 // branch from origin), a real resume runs prepareWorkspace FIRST, which cuts a
 // LOCAL card branch from base HEAD. `git checkout <branch>` then merely switches
-// to that base-pointing branch and does NOT fast-forward it to the pushed WIP —
+// to that base-pointing branch and does NOT fast-forward it to the pushed WIP -
 // so the orchestrator's reconcile must hard-reset onto the probed remote tip.
 // This drives the real *worker.Git through the exact prepareWorkspace + reconcile
 // git sequence and proves the pushed WIP is adopted and a follow-up WIP push
 // fast-forwards. Without the HardReset, the NoFileExists assertion would instead
-// hold through the end and the final Push would be rejected non-fast-forward —
+// hold through the end and the final Push would be rejected non-fast-forward -
 // the failure the orchestrator's fake-git unit tests structurally cannot see.
 func TestResumeAdoptsRemoteWIPTree(t *testing.T) {
 	t.Parallel()
@@ -1038,7 +1038,7 @@ func TestResumeAdoptsRemoteWIPTree(t *testing.T) {
 	assert.Equal(t, tip, head, "local branch must sit on the adopted remote tip")
 
 	// A follow-up WIP push must fast-forward: the resumed run builds on the
-	// adopted tip instead of diverging from base — the non-fast-forward reject
+	// adopted tip instead of diverging from base - the non-fast-forward reject
 	// this whole path exists to prevent.
 	require.NoError(t, os.WriteFile(filepath.Join(ws, "resumed_work.txt"), []byte("more\n"), 0o644))
 
@@ -1151,7 +1151,7 @@ func TestWorktreeLifecycle(t *testing.T) {
 }
 
 // TestDeleteBranchGuards pins DeleteBranch's two refusals: anything outside
-// the cm/ namespace, and — once a branch policy is set — the run's own card
+// the cm/ namespace, and - once a branch policy is set - the run's own card
 // branch, which must survive even though it IS cm/-namespaced.
 func TestDeleteBranchGuards(t *testing.T) {
 	t.Parallel()
@@ -1174,8 +1174,8 @@ func TestDeleteBranchGuards(t *testing.T) {
 }
 
 // TestCandidateGitCannotPush pins the structural safety property GitForDir
-// relies on: a Git handle whose SetBranchPolicy was never called — exactly
-// what a candidate worktree handle looks like — refuses every push, even to a
+// relies on: a Git handle whose SetBranchPolicy was never called - exactly
+// what a candidate worktree handle looks like - refuses every push, even to a
 // cm/-namespaced branch, because guardPush is fail-closed on the zero value.
 func TestCandidateGitCannotPush(t *testing.T) {
 	t.Parallel()

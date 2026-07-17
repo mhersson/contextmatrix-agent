@@ -1,6 +1,6 @@
 // Package metrics defines the Prometheus metric set exposed by the agent
 // service. All metrics live on a dedicated prometheus.Registry (not the global
-// default) so tests stay hermetic — each test constructs its own *Metrics.
+// default) so tests stay hermetic - each test constructs its own *Metrics.
 //
 // Label cardinality is bounded on purpose: no card_id / project labels;
 // endpoint labels pass through NormalizeEndpoint; container outcome is a fixed
@@ -69,7 +69,7 @@ type Metrics struct {
 // New registers every agent metric on a fresh registry and returns the bundle.
 // The dedicated registry also carries the standard Go runtime + Process
 // collectors so /metrics exposes go_* / process_* alongside the cm_agent_*
-// series — the dedicated-registry shape would otherwise drop them.
+// series - the dedicated-registry shape would otherwise drop them.
 func New() *Metrics {
 	reg := prometheus.NewRegistry()
 	factory := promauto.With(reg)

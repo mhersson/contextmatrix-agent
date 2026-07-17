@@ -2,10 +2,12 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
+	"github.com/mhersson/contextmatrix-harness/harness"
 	"github.com/mhersson/contextmatrix-harness/llm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -22,7 +24,7 @@ func TestHarnessConfigPopulatesTriad(t *testing.T) {
 	d.Cfg.ToolOutputMax = 65536
 
 	// A non-identity redactor with a recognisable mapping, so the test pins the
-	// redactor's BEHAVIOR — not just that the field is non-nil. A mis-wired but
+	// redactor's BEHAVIOR - not just that the field is non-nil. A mis-wired but
 	// non-nil func (e.g. the wrong field) would fail the behavioral assert below.
 	const (
 		sentinel = "tok=SECRET"
@@ -97,14 +99,14 @@ func TestHarnessConfigCompactionGate(t *testing.T) {
 // TestRunModelNormalizesContextLimit pins the 0.85 threshold tightly: exactly
 // int(0.85*window) prompt tokens trips context_limit (surfaced by runModel as an
 // error so a phase never proceeds on truncated output), and one token below does
-// NOT. A boundary-precise pair catches a drifted threshold constant — a loose
+// NOT. A boundary-precise pair catches a drifted threshold constant - a loose
 // "well over the limit" prompt would still pass against e.g. 0.95.
 func TestRunModelNormalizesContextLimit(t *testing.T) {
 	// "default/model" is in planTestCatalog with ContextLength 131072. The harness
 	// trips when prompt_tokens >= int(contextLimitThreshold * window); mirror that
 	// exact arithmetic here so the test pins the documented 0.85 constant.
 	// threshold is a var (not a const) so the conversion truncates at runtime,
-	// exactly as the harness does — a const expression would be a compile error.
+	// exactly as the harness does - a const expression would be a compile error.
 	const window = 131072
 
 	threshold := 0.85
@@ -267,8 +269,53 @@ func TestCoderMaxTurns(t *testing.T) {
 	}
 }
 
+// TestSpendAndReport pins the shared accounting tail of every model call: the
+// spend lands on the GIVEN ledger, the reported model is res.ModelUsed with a
+// fallback to the configured slug only when the provider echoed none, the
+// report targets the given card, and a report failure is advisory (the used
+// model still returns, nothing propagates).
+func TestSpendAndReport(t *testing.T) {
+	tests := []struct {
+		name      string
+		modelUsed string
+		reportErr error
+		want      string
+	}{
+		{"echoed model reported as-is", "provider/echoed", nil, "provider/echoed"},
+		{"empty echo falls back to configured", "", nil, "configured/model"},
+		{"report failure is advisory", "provider/echoed", errors.New("report boom"), "provider/echoed"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{taskContext: cmclient.TaskContext{}, reportUsageErr: tt.reportErr}
+			d := planTestDeps(ops, &planLLM{})
+
+			o := newRun(d, ops.taskContext)
+
+			res := harness.Result{
+				ModelUsed:        tt.modelUsed,
+				PromptTokens:     10,
+				CompletionTokens: 5,
+				TotalCostUSD:     0.25,
+			}
+
+			before := o.ledger.Spent()
+
+			used := o.spendAndReport(context.Background(), o.ledger, "TARGET-1",
+				"test: report usage failed", res, "configured/model")
+
+			assert.Equal(t, tt.want, used)
+			assert.InDelta(t, 0.25, o.ledger.Spent()-before, 1e-9, "spend lands on the given ledger")
+			assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "ReportUsage:TARGET-1"), 0,
+				"usage reported on the given target card")
+			assert.Equal(t, tt.want, ops.lastUsageModel(), "reported model matches the returned one")
+		})
+	}
+}
+
 // TestRunModelPassesThroughNormalResult pins that a normal (done) run is NOT
-// turned into an error by runModel — only context_limit is normalized.
+// turned into an error by runModel - only context_limit is normalized.
 func TestRunModelPassesThroughNormalResult(t *testing.T) {
 	ops := &fakeOps{taskContext: cmclient.TaskContext{}}
 	llmFake := &planLLM{responses: []llm.Response{stopResp("all good", 0.02)}}
