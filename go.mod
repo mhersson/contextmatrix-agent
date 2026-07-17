@@ -10,7 +10,8 @@ require (
 	github.com/knadh/koanf/providers/posflag v1.0.1
 	github.com/knadh/koanf/providers/structs v1.0.0
 	github.com/knadh/koanf/v2 v2.3.5
-	github.com/mhersson/contextmatrix-protocol v0.13.0
+	github.com/mhersson/contextmatrix-backendkit v0.1.0
+	github.com/mhersson/contextmatrix-protocol v0.14.0
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/prometheus/client_golang v1.23.2
@@ -50,7 +51,7 @@ require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/knadh/koanf/maps v0.1.2 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
-	github.com/mhersson/contextmatrix-harness v0.13.0
+	github.com/mhersson/contextmatrix-harness v0.14.0
 	github.com/mitchellh/copystructure v1.2.0 // indirect
 	github.com/mitchellh/reflectwalk v1.0.2 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect

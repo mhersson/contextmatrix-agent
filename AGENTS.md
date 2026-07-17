@@ -51,7 +51,6 @@ internal/callback/   → status callbacks to /api/agent/status; VerifyAutonomous
 internal/cmclient/   → MCP client for CM card operations (one agent identity per card)
 internal/logbridge/  → worker JSONL events → protocol.LogEntry; fan-out to /logs SSE; redaction; awaiting-human signal
 internal/filelog/    → per-card raw container-output file logs (<log_dir>/<project>/<card_id>.log; empty log_dir no-ops)
-internal/frames/     → stdin control protocol (user_message | promote | end_session)
 internal/metrics/    → Prometheus registry + cm_agent_* collectors; NormalizeEndpoint label allowlist
 
 internal/kata/       → embedded throwaway kata fixture used by tests

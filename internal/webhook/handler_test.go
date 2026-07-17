@@ -15,9 +15,9 @@ import (
 	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/executor"
-	"github.com/mhersson/contextmatrix-agent/internal/frames"
 	"github.com/mhersson/contextmatrix-agent/internal/logbridge"
 	"github.com/mhersson/contextmatrix-agent/internal/secrets"
+	"github.com/mhersson/contextmatrix-backendkit/frames"
 	protocol "github.com/mhersson/contextmatrix-protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

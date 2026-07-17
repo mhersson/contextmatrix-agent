@@ -18,6 +18,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/worker"
 	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/mhersson/contextmatrix-harness/llm"
+	"github.com/mhersson/contextmatrix-harness/tlsca"
 	protocol "github.com/mhersson/contextmatrix-protocol"
 	"github.com/spf13/cobra"
 )
@@ -393,7 +394,7 @@ func caInjections(certPath string) ([]llm.Option, []cmclient.Option, error) {
 		return nil, nil, nil
 	}
 
-	transport, err := config.CATransport(certPath)
+	transport, err := tlsca.CATransport(certPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("build ca transport: %w", err)
 	}

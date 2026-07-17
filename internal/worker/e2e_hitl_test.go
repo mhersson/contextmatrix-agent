@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
-	"github.com/mhersson/contextmatrix-agent/internal/frames"
+	"github.com/mhersson/contextmatrix-backendkit/frames"
 	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/mhersson/contextmatrix-harness/llm"
 	"github.com/stretchr/testify/assert"
