@@ -43,15 +43,13 @@ internal/verifyexec/   → verify-command probing + bounded exec; used by cli ru
 internal/worker/       → the `work` lifecycle: clone, claim, run the FSM (HITL-gated or autonomous), commit/push, PR; wires the orchestrator deps
 internal/executor/     → Executor interface + DockerExecutor; Tracker (concurrency + awaiting-human gate); watchdogs
 internal/secrets/      → Source (static env file) + RunCredentials (stages per-run CM-provisioned credentials)
-internal/taskskills/   → fetches the {git_remote_url, ref} task-skills pointer from CM and shallow-clones it for read-only mount
 
 # serve plumbing
-internal/webhook/    → HTTP server for lifecycle webhooks; HMAC verify; replay cache + message dedup
+internal/webhook/    → HTTP server for lifecycle webhooks; embeds backendkit's webhookcore.Core (HMAC auth, drain gate, request metrics, SSE /logs, health/readyz/images) and adds the agent-only lifecycle handlers plus message dedup
 internal/callback/   → status callbacks to /api/agent/status; VerifyAutonomous (fail-closed)
 internal/cmclient/   → MCP client for CM card operations (one agent identity per card)
-internal/logbridge/  → worker JSONL events → protocol.LogEntry; fan-out to /logs SSE; redaction; awaiting-human signal
 internal/filelog/    → per-card raw container-output file logs (<log_dir>/<project>/<card_id>.log; empty log_dir no-ops)
-internal/metrics/    → Prometheus registry + cm_agent_* collectors; NormalizeEndpoint label allowlist
+internal/metrics/    → thin wrapper over backendkit's shared metrics bundle (cm_agent_* collectors, NormalizeEndpoint label allowlist); keeps the agent-only callback-retries counter
 
 internal/kata/       → embedded throwaway kata fixture used by tests
 
@@ -61,6 +59,11 @@ docker/Dockerfile.worker → multi-target worker image family (agent binary + gi
 # (events, llm, tools, harness, redact): the FSM-free loop, the LLM client, the
 # jailed tool registry (including the Skill tool), the event stream, and secret
 # redaction. This repo depends on it; it takes no dependency on this repo.
+
+# Shared serve plumbing - the external github.com/mhersson/contextmatrix-backendkit
+# module (frames, webhookcore, logbridge, metrics, taskskills): the transport
+# core (HMAC auth, drain gate, SSE /logs), the shared metrics bundle, the log
+# bridge, and the task-skills resolver, shared with contextmatrix-chat.
 ```
 
 ## Boundary discipline (the load-bearing invariant)
@@ -226,11 +229,11 @@ file only - never via flags or committed YAML.
     description and loads a chosen `SKILL.md` on demand, filtered to the
     per-card `task_skills` subset. Delivery is config-free on the agent: `serve`
     fetches a `{git_remote_url, ref}` pointer from CM
-    (`GET /api/agent/task-skills-source`), shallow-clones it once
-    (`internal/taskskills`), and read-only-mounts it at `/run/cm-skills`.
-    Engagement is reported over MCP (`cmclient.RecordSkillEngaged` →
-    `add_log action=skill_engaged`). Distinct from `workflow-skills` and the MCP
-    `get_skill` tool.
+    (`GET /api/agent/task-skills-source`), shallow-clones it once via the
+    backendkit `taskskills.Resolver`, and read-only-mounts it at
+    `/run/cm-skills`. Engagement is reported over MCP
+    (`cmclient.RecordSkillEngaged` → `add_log action=skill_engaged`). Distinct
+    from `workflow-skills` and the MCP `get_skill` tool.
 
 ## Repo grounding
 
