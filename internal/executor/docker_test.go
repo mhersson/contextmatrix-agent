@@ -8,6 +8,7 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
+	"github.com/mhersson/contextmatrix-backendkit/webhookcore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -336,7 +337,7 @@ func TestImageSummaries_SkipsDanglingAndMapsFields(t *testing.T) {
 	got := imageSummaries(in)
 
 	require.Len(t, got, 2)
-	assert.Equal(t, ImageSummary{
+	assert.Equal(t, webhookcore.ImageSummary{
 		Tags:      []string{"contextmatrix-agent-worker:go-node"},
 		Digests:   []string{"contextmatrix-agent-worker@sha256:abc"},
 		CreatedAt: 1750000000,

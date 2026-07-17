@@ -22,6 +22,7 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	"github.com/mhersson/contextmatrix-agent/internal/metrics"
+	"github.com/mhersson/contextmatrix-backendkit/webhookcore"
 )
 
 // Container labels. The agent label marks every container this executor owns so
@@ -592,19 +593,11 @@ func (e *DockerExecutor) CleanupOrphans(ctx context.Context) error {
 	return nil
 }
 
-// ImageSummary is one tagged image in the node's local image store, in
-// executor-neutral form. Name filtering is the webhook layer's policy; the
-// executor reports everything tagged.
-type ImageSummary struct {
-	Tags      []string
-	Digests   []string
-	CreatedAt int64
-	SizeBytes int64
-}
-
 // ListImages returns the tagged images present in the node's local image
-// store. Dangling images (no repo tags) are skipped.
-func (e *DockerExecutor) ListImages(ctx context.Context) ([]ImageSummary, error) {
+// store. Dangling images (no repo tags) are skipped. The executor-neutral
+// webhookcore.ImageSummary is the wire-shape the webhook layer filters and
+// maps.
+func (e *DockerExecutor) ListImages(ctx context.Context) ([]webhookcore.ImageSummary, error) {
 	summaries, err := e.docker.ImageList(ctx, image.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("image list: %w", err)
@@ -613,11 +606,11 @@ func (e *DockerExecutor) ListImages(ctx context.Context) ([]ImageSummary, error)
 	return imageSummaries(summaries), nil
 }
 
-// imageSummaries maps Docker image summaries to ImageSummary, dropping
-// dangling images and the "<none>:<none>" placeholder tag Docker reports for
-// them.
-func imageSummaries(in []image.Summary) []ImageSummary {
-	out := make([]ImageSummary, 0, len(in))
+// imageSummaries maps Docker image summaries to webhookcore.ImageSummary,
+// dropping dangling images and the "<none>:<none>" placeholder tag Docker
+// reports for them.
+func imageSummaries(in []image.Summary) []webhookcore.ImageSummary {
+	out := make([]webhookcore.ImageSummary, 0, len(in))
 
 	for _, s := range in {
 		tags := make([]string, 0, len(s.RepoTags))
@@ -632,7 +625,7 @@ func imageSummaries(in []image.Summary) []ImageSummary {
 			continue
 		}
 
-		out = append(out, ImageSummary{
+		out = append(out, webhookcore.ImageSummary{
 			Tags:      tags,
 			Digests:   s.RepoDigests,
 			CreatedAt: s.Created,

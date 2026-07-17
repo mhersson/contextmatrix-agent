@@ -73,16 +73,18 @@ func TestNew_RegistersGoAndProcessCollectors(t *testing.T) {
 }
 
 func TestNormalizeEndpoint(t *testing.T) {
+	m := metrics.New()
+
 	allowed := []string{
 		"/trigger", "/kill", "/stop-all", "/message", "/promote",
 		"/end-session", "/containers", "/logs", "/health", "/readyz", "/metrics",
 	}
 	for _, p := range allowed {
-		assert.Equal(t, p, metrics.NormalizeEndpoint(p), "allowlisted path %q must round-trip", p)
+		assert.Equal(t, p, m.NormalizeEndpoint(p), "allowlisted path %q must round-trip", p)
 	}
 
 	unknown := []string{"/nonexistent", "/trigger/extra", "", "/", "/TRIGGER"}
 	for _, p := range unknown {
-		assert.Equal(t, "other", metrics.NormalizeEndpoint(p), "unknown path %q must collapse", p)
+		assert.Equal(t, "other", m.NormalizeEndpoint(p), "unknown path %q must collapse", p)
 	}
 }

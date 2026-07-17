@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mhersson/contextmatrix-agent/internal/frames"
+	"github.com/mhersson/contextmatrix-backendkit/frames"
 	"github.com/mhersson/contextmatrix-harness/harness"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

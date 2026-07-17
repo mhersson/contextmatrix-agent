@@ -22,12 +22,14 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/config"
 	"github.com/mhersson/contextmatrix-agent/internal/executor"
 	"github.com/mhersson/contextmatrix-agent/internal/filelog"
-	"github.com/mhersson/contextmatrix-agent/internal/logbridge"
 	"github.com/mhersson/contextmatrix-agent/internal/metrics"
 	"github.com/mhersson/contextmatrix-agent/internal/secrets"
-	"github.com/mhersson/contextmatrix-agent/internal/taskskills"
 	"github.com/mhersson/contextmatrix-agent/internal/webhook"
+	"github.com/mhersson/contextmatrix-backendkit/logbridge"
+	"github.com/mhersson/contextmatrix-backendkit/taskskills"
+	"github.com/mhersson/contextmatrix-backendkit/webhookcore"
 	"github.com/mhersson/contextmatrix-harness/redact"
+	protocol "github.com/mhersson/contextmatrix-protocol"
 )
 
 const (
@@ -87,7 +89,7 @@ func runServe(ctx context.Context, configPath string) error {
 	mx := metrics.New()
 
 	skillsCache := filepath.Join(cfg.SecretsDir, "task-skills-cache")
-	skillsResolver := taskskills.NewResolver(cfg.ContextMatrixURL, cfg.APIKey, skillsCache)
+	skillsResolver := taskskills.NewResolver(cfg.ContextMatrixURL, cfg.APIKey, skillsCache, "/api/agent/task-skills-source")
 
 	// Per-run credentials: every admitted trigger carries a CM-provisioned git
 	// token; its credentials are staged into
@@ -107,12 +109,18 @@ func runServe(ctx context.Context, configPath string) error {
 	}
 
 	tracker := executor.NewTracker(cfg.MaxConcurrent)
-	hub := logbridge.NewHubWithDropObserver(dropAdapter{mx: mx})
+	hub := logbridge.NewHub(func(e protocol.LogEntry) string { return e.Project }, dropAdapter{mx: mx})
 	redactor := redact.New([]string{cfg.MCPAPIKey, cfg.APIKey})
 
 	cbClient := callback.New(cfg.ContextMatrixURL, cfg.APIKey, logger).WithMetrics(mx)
 
-	bridge := logbridge.New(hub, redactor, tracker.SetAwaiting)
+	bridge := logbridge.NewBridge(logbridge.BridgeConfig{
+		Hub:                  hub,
+		Redactor:             redactor,
+		OnAwaiting:           func(k logbridge.Key, v bool) { tracker.SetAwaiting(k.Project, k.CardID, v) },
+		SurfaceAwaitingHuman: true,
+		MapExtra:             discussionMapExtra,
+	})
 
 	exec := executor.NewDockerExecutor(executor.Config{
 		Docker:           docker,
@@ -126,7 +134,7 @@ func runServe(ctx context.Context, configPath string) error {
 			// Bridge to the live /logs SSE stream first so the interactive
 			// stream is never gated on the durable-log disk write. BridgeLine
 			// does not mutate line and Write copies it, so the order is safe.
-			bridge.BridgeLine(project, cardID, line, stderr)
+			bridge.BridgeLine(logbridge.Key{Project: project, CardID: cardID}, line, stderr)
 			files.Write(project, cardID, line, stderr)
 		},
 		OnExit:  onContainerExit(cbClient, credentials, files, logger),
@@ -148,7 +156,7 @@ func runServe(ctx context.Context, configPath string) error {
 
 	var draining atomic.Bool
 
-	replay := webhook.NewReplayCache(cfg.ReplaySkew, cfg.ReplayCacheSize)
+	replay := webhookcore.NewReplayCache(cfg.ReplaySkew, cfg.ReplayCacheSize)
 	dedup := webhook.NewDedupCache(cfg.MessageDedupTTL, cfg.MessageDedupCacheSize)
 
 	srv := webhook.NewServer(webhook.Config{
@@ -184,7 +192,7 @@ func runServe(ctx context.Context, configPath string) error {
 
 	// Unblock in-flight /logs SSE streams when Shutdown starts; otherwise
 	// http.Server.Shutdown waits the full httpShutdownTimeout on a stream that
-	// never goes idle. (Mirror this in contextmatrix-chat's handleLogs.)
+	// never goes idle.
 	httpServer.RegisterOnShutdown(srv.CloseSSE)
 
 	adminSrv := buildAdminServer(cfg, srv, mx, logger)
@@ -421,6 +429,31 @@ func (a dropAdapter) ObserveDrop() {
 	}
 
 	a.mx.BroadcasterDropsTotal.Inc()
+}
+
+// discussionMapExtra is the agent's mob-session "discussion" arm, supplied to
+// the log bridge as its MapExtra hook: it maps a discussion event to a
+// speaker-labeled text entry carrying the briefing, round utterances, moderator
+// notices, or synthesis. Non-discussion kinds return ok=false so they fall
+// through to the shared default skip - seat sub-run events ("seat_debug")
+// included, keeping them off the live stream by construction.
+func discussionMapExtra(kind string, data map[string]any) (protocol.LogEntry, bool, bool) {
+	if kind != "discussion" {
+		return protocol.LogEntry{}, false, false
+	}
+
+	str := func(k string) string {
+		s, _ := data[k].(string)
+
+		return s
+	}
+
+	return protocol.LogEntry{
+		Type:    "text",
+		Content: str("content"),
+		Agent:   str("agent"),
+		Model:   str("model"),
+	}, false, true
 }
 
 // buildAdminServer returns the loopback admin HTTP server serving Prometheus

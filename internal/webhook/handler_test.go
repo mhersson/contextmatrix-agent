@@ -11,17 +11,38 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/executor"
-	"github.com/mhersson/contextmatrix-agent/internal/frames"
-	"github.com/mhersson/contextmatrix-agent/internal/logbridge"
 	"github.com/mhersson/contextmatrix-agent/internal/secrets"
+	"github.com/mhersson/contextmatrix-backendkit/frames"
+	"github.com/mhersson/contextmatrix-backendkit/logbridge"
+	"github.com/mhersson/contextmatrix-backendkit/webhookcore"
 	protocol "github.com/mhersson/contextmatrix-protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// ---- signing helpers --------------------------------------------------------
+
+const testAPIKey = "test-secret-key"
+
+// signReq stamps r with a valid HMAC signature for the given key over
+// METHOD\nURI\nTS.BODY using the supplied timestamp.
+func signReq(t *testing.T, r *http.Request, key string, body []byte, ts string) {
+	t.Helper()
+
+	sig := protocol.SignPayloadWithTimestamp(key, r.Method, r.URL.RequestURI(), body, ts)
+	r.Header.Set(protocol.SignatureHeader, "sha256="+sig)
+	r.Header.Set(protocol.TimestampHeader, ts)
+}
+
+// nowTS returns the current Unix second as a string.
+func nowTS() string {
+	return strconv.FormatInt(time.Now().Unix(), 10)
+}
 
 // ---- fakes ------------------------------------------------------------------
 
@@ -211,13 +232,13 @@ func (f *fakeCredentials) teardownCalls() [][2]string {
 }
 
 // fakeImageLister returns a fixed set of image summaries or an error. It
-// satisfies ImageLister.
+// satisfies webhookcore.ImageLister.
 type fakeImageLister struct {
-	summaries []executor.ImageSummary
+	summaries []webhookcore.ImageSummary
 	err       error
 }
 
-func (f *fakeImageLister) ListImages(_ context.Context) ([]executor.ImageSummary, error) {
+func (f *fakeImageLister) ListImages(_ context.Context) ([]webhookcore.ImageSummary, error) {
 	return f.summaries, f.err
 }
 
@@ -263,6 +284,7 @@ type harness struct {
 	verifier *fakeVerifier
 	hub      *logbridge.Hub
 	images   *fakeImageLister
+	draining *atomic.Bool
 }
 
 func newHarness(t *testing.T, maxConcurrent int) *harness {
@@ -272,8 +294,9 @@ func newHarness(t *testing.T, maxConcurrent int) *harness {
 	exec := &fakeExecutor{tracker: tracker}
 	reporter := &fakeReporter{}
 	verifier := &fakeVerifier{autonomous: true}
-	hub := logbridge.NewHub()
+	hub := logbridge.NewHub(func(e protocol.LogEntry) string { return e.Project }, nil)
 	images := &fakeImageLister{}
+	draining := &atomic.Bool{}
 
 	server := NewServer(Config{
 		APIKey:        testAPIKey,
@@ -291,6 +314,7 @@ func newHarness(t *testing.T, maxConcurrent int) *harness {
 		},
 		Images:           images,
 		ImageListFilters: []string{"contextmatrix-agent"},
+		Draining:         draining,
 	})
 
 	return &harness{
@@ -301,6 +325,7 @@ func newHarness(t *testing.T, maxConcurrent int) *harness {
 		verifier: verifier,
 		hub:      hub,
 		images:   images,
+		draining: draining,
 	}
 }
 
@@ -642,6 +667,40 @@ func TestMessage_WritesFrameAnd202(t *testing.T) {
 	assert.False(t, h.tracker.Awaiting("proj", "PROJ-001"), "awaiting cleared after message")
 }
 
+// TestMessage_PublishesUnredactedUserEntry pins publishUser's only remaining
+// coverage: a delivered message publishes a Type "user" LogEntry to the hub
+// carrying the payload's project/card/content verbatim - including content
+// that looks like a secret, since user-authored content is never redacted
+// (only worker-emitted content passes through the redactor).
+func TestMessage_PublishesUnredactedUserEntry(t *testing.T) {
+	h := newHarness(t, 4)
+	h.addRun("PROJ-001", "proj")
+
+	_, ch := h.hub.Subscribe("")
+
+	const secretLooking = "here is my token: sk-live-abc123def456, do not redact it"
+
+	payload := protocol.MessagePayload{
+		CardID:    "PROJ-001",
+		Project:   "proj",
+		Content:   secretLooking,
+		MessageID: "m1",
+	}
+
+	w := h.do(t, http.MethodPost, "/message", payload)
+	require.Equal(t, http.StatusAccepted, w.Code)
+
+	select {
+	case entry := <-ch:
+		assert.Equal(t, "user", entry.Type)
+		assert.Equal(t, "proj", entry.Project)
+		assert.Equal(t, "PROJ-001", entry.CardID)
+		assert.Equal(t, secretLooking, entry.Content, "user content must be published verbatim, never redacted")
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the published user log entry")
+	}
+}
+
 func TestMessage_DuplicateReturnsCachedAck(t *testing.T) {
 	h := newHarness(t, 4)
 	stdin := h.addRun("PROJ-001", "proj")
@@ -880,7 +939,7 @@ func TestContainers_ListsTrackedRuns(t *testing.T) {
 
 func TestImages_FiltersPerTagAndMaps(t *testing.T) {
 	h := newHarness(t, 4)
-	h.images.summaries = []executor.ImageSummary{
+	h.images.summaries = []webhookcore.ImageSummary{
 		{
 			Tags:      []string{"contextmatrix-agent-worker:go-node"},
 			Digests:   []string{"contextmatrix-agent-worker@sha256:abc"},
@@ -971,7 +1030,7 @@ func TestReadyz_OKAndDraining(t *testing.T) {
 	h.server.Routes().ServeHTTP(w1, r1)
 	require.Equal(t, http.StatusOK, w1.Code)
 
-	h.server.draining.Store(true)
+	h.draining.Store(true)
 
 	r2 := httptest.NewRequest(http.MethodGet, "/readyz", nil)
 	w2 := httptest.NewRecorder()
@@ -984,7 +1043,7 @@ func TestReadyz_OKAndDraining(t *testing.T) {
 
 func TestDrainGate_TriggerRefusedWhileDraining(t *testing.T) {
 	h := newHarness(t, 4)
-	h.server.draining.Store(true)
+	h.draining.Store(true)
 
 	w := h.do(t, http.MethodPost, "/trigger",
 		protocol.TriggerPayload{CardID: "PROJ-001", Project: "proj", RepoURL: "r"})
@@ -1004,7 +1063,7 @@ func newHarnessWithBudget(t *testing.T, maxCardCost, headroom float64) *harness 
 	exec := &fakeExecutor{tracker: tracker}
 	reporter := &fakeReporter{}
 	verifier := &fakeVerifier{autonomous: true}
-	hub := logbridge.NewHub()
+	hub := logbridge.NewHub(func(e protocol.LogEntry) string { return e.Project }, nil)
 
 	server := NewServer(Config{
 		APIKey:        testAPIKey,
@@ -1723,7 +1782,7 @@ func TestTrigger_RejectsAndReportsFailedWhenNoCredentialSourceAtAll(t *testing.T
 	tracker := executor.NewTracker(4)
 	exec := &fakeExecutor{tracker: tracker}
 	reporter := &fakeReporter{}
-	hub := logbridge.NewHub()
+	hub := logbridge.NewHub(func(e protocol.LogEntry) string { return e.Project }, nil)
 
 	server := NewServer(Config{
 		APIKey:        testAPIKey,
@@ -1897,4 +1956,52 @@ func TestBuildLaunchSpecMobCheckpointEnvAbsentWhenOff(t *testing.T) {
 		assert.NotContains(t, e, "CM_MOB_EXECUTE_CHECKPOINTS")
 		assert.NotContains(t, e, "CM_MOB_CHECKPOINT_")
 	}
+}
+
+// ---- logs --------------------------------------------------------------
+
+// TestLogs_MountAndAuth is a smoke test for the /logs route as mounted through
+// the real Routes() mux: the backendkit suite pins the SSE mechanics
+// (keepalive, filtering, ...) in isolation, but only this repo's own mux and
+// middleware chain can prove /logs is actually wired behind Auth here. A
+// signed GET streams the SSE preamble over a real connection (a
+// ResponseRecorder cannot observe a still-streaming handler, so this needs
+// httptest.NewServer); an unsigned GET is rejected outright.
+func TestLogs_MountAndAuth(t *testing.T) {
+	h := newHarness(t, 4)
+
+	ts := httptest.NewServer(h.server.Routes())
+	defer ts.Close()
+	defer h.server.CloseSSE()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/logs", nil)
+	require.NoError(t, err)
+
+	sigTS := nowTS()
+	sig := protocol.SignPayloadWithTimestamp(testAPIKey, http.MethodGet, "/logs", nil, sigTS)
+	req.Header.Set(protocol.SignatureHeader, "sha256="+sig)
+	req.Header.Set(protocol.TimestampHeader, sigTS)
+
+	resp, err := http.DefaultClient.Do(req) //nolint:bodyclose // unblocked via ctx cancel below
+	require.NoError(t, err)
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "text/event-stream", resp.Header.Get("Content-Type"))
+
+	buf := make([]byte, len(": connected\n\n"))
+	_, err = io.ReadFull(resp.Body, buf)
+	require.NoError(t, err)
+	assert.Equal(t, ": connected\n\n", string(buf), "body must start with the SSE connected preamble")
+
+	cancel() // unblock the still-streaming handler so the test exits promptly
+
+	unsigned := httptest.NewRequest(http.MethodGet, "/logs", nil)
+	w := httptest.NewRecorder()
+	h.server.Routes().ServeHTTP(w, unsigned)
+	assert.Equal(t, http.StatusUnauthorized, w.Code, "unsigned GET /logs must be rejected by Auth")
 }

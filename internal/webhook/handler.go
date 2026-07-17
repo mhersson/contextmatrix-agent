@@ -15,19 +15,15 @@ import (
 	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/executor"
-	"github.com/mhersson/contextmatrix-agent/internal/frames"
-	"github.com/mhersson/contextmatrix-agent/internal/logbridge"
 	"github.com/mhersson/contextmatrix-agent/internal/metrics"
 	"github.com/mhersson/contextmatrix-agent/internal/secrets"
+	"github.com/mhersson/contextmatrix-backendkit/frames"
+	"github.com/mhersson/contextmatrix-backendkit/logbridge"
+	"github.com/mhersson/contextmatrix-backendkit/webhookcore"
 	protocol "github.com/mhersson/contextmatrix-protocol"
 )
 
 const (
-	// maxRequestBodyBytes caps the body the auth middleware reads before HMAC
-	// verification. ContextMatrix caps /message content well under this; a
-	// larger body is a misbehaving or hostile client.
-	maxRequestBodyBytes = 1 << 20 // 1 MiB
-
 	// correlationHeader carries the client's trace ID. The agent backend reads
 	// it on /trigger and threads it into executor.LaunchSpec.CorrelationID (the
 	// container label) so host and worker logs stitch to the same CM trace.
@@ -57,12 +53,6 @@ type AutonomousVerifier interface {
 // Resolve is best-effort: a non-nil error means "no skills this run".
 type SkillsResolver interface {
 	Resolve(ctx context.Context) (hostDir string, err error)
-}
-
-// ImageLister lists the tagged images present in the node's local image
-// store. *executor.DockerExecutor satisfies it; tests supply a fake.
-type ImageLister interface {
-	ListImages(ctx context.Context) ([]executor.ImageSummary, error)
 }
 
 // CredentialProvisioner stages a per-run credential file (the payload git token
@@ -158,7 +148,7 @@ type Config struct {
 
 	// Images lists the node's tagged images for GET /images. Nil disables the
 	// endpoint (500 internal).
-	Images ImageLister
+	Images webhookcore.ImageLister
 
 	// ImageListFilters are the per-tag substring filters applied to GET
 	// /images responses. The serve layer always supplies at least the family
@@ -167,7 +157,7 @@ type Config struct {
 
 	LaunchEnv LaunchEnv
 
-	Replay *ReplayCache
+	Replay *webhookcore.ReplayCache
 	Dedup  *DedupCache
 
 	Draining *atomic.Bool
@@ -182,12 +172,15 @@ type Config struct {
 	Logger *slog.Logger
 }
 
-// Server is the agent backend's HTTP surface. It owns no goroutines beyond the
-// per-trigger launch goroutines it spawns; the replay janitor and the executor
-// supervision live in their respective owners.
+// Server is the agent backend's HTTP surface. The embedded *webhookcore.Core
+// provides the shared transport surface (HMAC auth, the drain gate, request
+// metrics, the SSE /logs stream, and the health/readiness/images probes); the
+// Server adds the agent-specific lifecycle handlers. It owns no goroutines
+// beyond the per-trigger launch goroutines it spawns; the replay janitor and
+// the executor supervision live in their respective owners.
 type Server struct {
-	apiKey        string
-	skew          time.Duration
+	*webhookcore.Core
+
 	maxConcurrent int
 
 	executor       executor.Executor
@@ -198,21 +191,9 @@ type Server struct {
 	skillsResolver SkillsResolver
 	credentials    CredentialProvisioner
 
-	images           ImageLister
-	imageListFilters []string
-
 	launchEnv LaunchEnv
 
-	replay *ReplayCache
-	dedup  *DedupCache
-
-	draining *atomic.Bool
-
-	// keepaliveInterval is the SSE comment heartbeat period. Zero means the
-	// package default. Tests shrink it; production leaves it unset.
-	keepaliveInterval time.Duration
-
-	metrics *metrics.Metrics
+	dedup *DedupCache
 
 	logger *slog.Logger
 
@@ -230,31 +211,36 @@ type Server struct {
 	// per-run credentials. Keyed like stdinMu; entries are likewise never
 	// reclaimed (one bare mutex per card ever seen).
 	launchMu sync.Map // map[string]*sync.Mutex
-
-	// sseShutdown is closed by CloseSSE at drain so every in-flight /logs handler
-	// returns promptly (an SSE stream never idles, so http.Server.Shutdown would
-	// otherwise block the full timeout). Guarded by sseShutdownOnce for idempotency.
-	sseShutdown     chan struct{}
-	sseShutdownOnce sync.Once
 }
 
-// NewServer wires a Server from its dependencies. The replay cache, dedup
-// cache, and draining flag are created if the caller leaves them nil so a bare
-// Config still yields a usable server (tests rely on this).
+// NewServer wires a Server from its dependencies. It builds the transport Core
+// first (which defaults the skew, replay cache, and draining flag when the
+// caller leaves them nil) then wires the agent-specific fields. The dedup cache
+// is defaulted here so a bare Config still yields a usable server (tests rely on
+// this).
 func NewServer(cfg Config) *Server {
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.Default()
 	}
 
-	skew := cfg.Skew
-	if skew == 0 {
-		skew = protocol.DefaultMaxClockSkew
+	coreCfg := webhookcore.CoreConfig{
+		APIKey:            cfg.APIKey,
+		Skew:              cfg.Skew,
+		Replay:            cfg.Replay,
+		Draining:          cfg.Draining,
+		KeepaliveInterval: cfg.KeepaliveInterval,
+		Logger:            logger,
+		Hub:               cfg.Hub,
+		LogsFilterParam:   "project",
+		LogsFilterAttr:    "project_filter",
+		Tracker:           cfg.Tracker,
+		MaxConcurrent:     cfg.MaxConcurrent,
+		Images:            cfg.Images,
+		ImageListFilters:  cfg.ImageListFilters,
 	}
-
-	replay := cfg.Replay
-	if replay == nil {
-		replay = NewReplayCache(skew, 4096)
+	if cfg.Metrics != nil {
+		coreCfg.Metrics = cfg.Metrics.Metrics
 	}
 
 	dedup := cfg.Dedup
@@ -262,69 +248,43 @@ func NewServer(cfg Config) *Server {
 		dedup = NewDedupCache(10*time.Minute, 4096)
 	}
 
-	draining := cfg.Draining
-	if draining == nil {
-		draining = &atomic.Bool{}
-	}
-
 	return &Server{
-		apiKey:            cfg.APIKey,
-		skew:              skew,
-		maxConcurrent:     cfg.MaxConcurrent,
-		executor:          cfg.Executor,
-		tracker:           cfg.Tracker,
-		hub:               cfg.Hub,
-		reporter:          cfg.Reporter,
-		verifier:          cfg.Verifier,
-		skillsResolver:    cfg.SkillsResolver,
-		credentials:       cfg.Credentials,
-		images:            cfg.Images,
-		imageListFilters:  cfg.ImageListFilters,
-		launchEnv:         cfg.LaunchEnv,
-		replay:            replay,
-		dedup:             dedup,
-		draining:          draining,
-		keepaliveInterval: cfg.KeepaliveInterval,
-		metrics:           cfg.Metrics,
-		logger:            logger,
-		sseShutdown:       make(chan struct{}),
+		Core:           webhookcore.NewCore(coreCfg),
+		maxConcurrent:  cfg.MaxConcurrent,
+		executor:       cfg.Executor,
+		tracker:        cfg.Tracker,
+		hub:            cfg.Hub,
+		reporter:       cfg.Reporter,
+		verifier:       cfg.Verifier,
+		skillsResolver: cfg.SkillsResolver,
+		credentials:    cfg.Credentials,
+		launchEnv:      cfg.LaunchEnv,
+		dedup:          dedup,
+		logger:         logger,
 	}
-}
-
-// CloseSSE unblocks every in-flight /logs SSE handler. Wire it via
-// httpServer.RegisterOnShutdown so SIGTERM drain returns promptly. Idempotent.
-func (s *Server) CloseSSE() {
-	s.sseShutdownOnce.Do(func() { close(s.sseShutdown) })
 }
 
 // Routes returns the mux with every webhook route mounted. The mutating
 // lifecycle routes are gated on drain; /kill, /stop-all, /logs, /containers,
 // /images, /health, /readyz stay reachable during shutdown so operators can
-// read state and stop work.
+// read state and stop work. The transport middlewares and the
+// health/readiness/images/logs handlers are promoted from the embedded Core.
 func (s *Server) Routes() *http.ServeMux {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("POST /trigger", s.recordMetrics(s.auth(s.drainGate(s.handleTrigger))))
-	mux.HandleFunc("POST /kill", s.recordMetrics(s.auth(s.handleKill)))
-	mux.HandleFunc("POST /stop-all", s.recordMetrics(s.auth(s.handleStopAll)))
-	mux.HandleFunc("POST /message", s.recordMetrics(s.auth(s.drainGate(s.handleMessage))))
-	mux.HandleFunc("POST /promote", s.recordMetrics(s.auth(s.drainGate(s.handlePromote))))
-	mux.HandleFunc("POST /end-session", s.recordMetrics(s.auth(s.drainGate(s.handleEndSession))))
-	mux.HandleFunc("GET /containers", s.recordMetrics(s.auth(s.handleContainers)))
-	mux.HandleFunc("GET /images", s.recordMetrics(s.auth(s.handleImages)))
-	mux.HandleFunc("GET /logs", s.recordMetrics(s.auth(s.handleLogs)))
-	mux.HandleFunc("GET /health", s.recordMetrics(s.handleHealth))
-	mux.HandleFunc("GET /readyz", s.recordMetrics(s.handleReadyz))
+	mux.HandleFunc("POST /trigger", s.RecordMetrics(s.Auth(s.DrainGate(s.handleTrigger))))
+	mux.HandleFunc("POST /kill", s.RecordMetrics(s.Auth(s.handleKill)))
+	mux.HandleFunc("POST /stop-all", s.RecordMetrics(s.Auth(s.handleStopAll)))
+	mux.HandleFunc("POST /message", s.RecordMetrics(s.Auth(s.DrainGate(s.handleMessage))))
+	mux.HandleFunc("POST /promote", s.RecordMetrics(s.Auth(s.DrainGate(s.handlePromote))))
+	mux.HandleFunc("POST /end-session", s.RecordMetrics(s.Auth(s.DrainGate(s.handleEndSession))))
+	mux.HandleFunc("GET /containers", s.RecordMetrics(s.Auth(s.handleContainers)))
+	mux.HandleFunc("GET /images", s.RecordMetrics(s.Auth(s.HandleImages)))
+	mux.HandleFunc("GET /logs", s.RecordMetrics(s.Auth(s.HandleLogs)))
+	mux.HandleFunc("GET /health", s.RecordMetrics(s.HandleHealth))
+	mux.HandleFunc("GET /readyz", s.RecordMetrics(s.HandleReadyz))
 
 	return mux
-}
-
-// AdminAuth exposes the HMAC verifier for the admin /metrics endpoint, which
-// the serve layer mounts on a separate loopback listener. It reuses the same
-// signed-GET verification, replay cache, and skew as the webhook routes - the
-// agent-backend signed-GET HMAC is real auth, preserved here.
-func (s *Server) AdminAuth(next http.HandlerFunc) http.HandlerFunc {
-	return s.auth(next)
 }
 
 // stdinLock returns the per-run mutex for project/cardID, creating it on first
@@ -352,7 +312,7 @@ func (s *Server) launchLock(project, cardID string) *sync.Mutex {
 
 func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 	var payload protocol.TriggerPayload
-	if !s.decode(w, r, &payload) {
+	if !webhookcore.Decode(w, r, &payload) {
 		return
 	}
 
@@ -362,7 +322,7 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 	if s.maxConcurrent > 0 && s.tracker.Count() >= s.maxConcurrent {
 		s.logger.Warn("trigger rejected: at capacity",
 			"project", payload.Project, "card_id", payload.CardID, "limit", s.maxConcurrent)
-		writeError(w, http.StatusTooManyRequests, protocol.CodeLimitReached, "concurrency limit reached")
+		webhookcore.WriteError(w, http.StatusTooManyRequests, protocol.CodeLimitReached, "concurrency limit reached")
 
 		return
 	}
@@ -371,7 +331,7 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 		if err := validateTaskSkills(*payload.TaskSkills); err != nil {
 			s.logger.Warn("trigger rejected: invalid task_skills",
 				"project", payload.Project, "card_id", payload.CardID, "error", err)
-			writeError(w, http.StatusBadRequest, protocol.CodeInvalidField, "invalid task_skills")
+			webhookcore.WriteError(w, http.StatusBadRequest, protocol.CodeInvalidField, "invalid task_skills")
 
 			return
 		}
@@ -402,7 +362,7 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 
 	// Respond 202 first, then launch asynchronously: /trigger must return fast,
 	// and the eventual outcome is carried by the running/failed status callback.
-	writeJSON(w, http.StatusAccepted, protocol.SuccessResponse{OK: true})
+	webhookcore.WriteJSON(w, http.StatusAccepted, protocol.SuccessResponse{OK: true})
 
 	go s.launch(spec, payload) //nolint:gosec // G118: launch is fire-and-forget and outlives the request; a request-scoped context would cancel the worker
 }
@@ -705,44 +665,44 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 
 func (s *Server) handleKill(w http.ResponseWriter, r *http.Request) {
 	var payload protocol.KillPayload
-	if !s.decode(w, r, &payload) {
+	if !webhookcore.Decode(w, r, &payload) {
 		return
 	}
 
 	if _, ok := s.tracker.Get(payload.Project, payload.CardID); !ok {
-		writeError(w, http.StatusNotFound, protocol.CodeNotFound, "no tracked container")
+		webhookcore.WriteError(w, http.StatusNotFound, protocol.CodeNotFound, "no tracked container")
 
 		return
 	}
 
 	if err := s.executor.Kill(r.Context(), payload.Project, payload.CardID); err != nil {
 		if errors.Is(err, executor.ErrNotFound) {
-			writeError(w, http.StatusNotFound, protocol.CodeNotFound, "no tracked container")
+			webhookcore.WriteError(w, http.StatusNotFound, protocol.CodeNotFound, "no tracked container")
 
 			return
 		}
 
 		s.logger.Error("kill failed", "project", payload.Project, "card_id", payload.CardID, "error", err)
-		writeError(w, http.StatusInternalServerError, protocol.CodeInternal, "kill failed")
+		webhookcore.WriteError(w, http.StatusInternalServerError, protocol.CodeInternal, "kill failed")
 
 		return
 	}
 
-	writeJSON(w, http.StatusOK, protocol.SuccessResponse{OK: true})
+	webhookcore.WriteJSON(w, http.StatusOK, protocol.SuccessResponse{OK: true})
 }
 
 // ---- stop-all ---------------------------------------------------------------
 
 func (s *Server) handleStopAll(w http.ResponseWriter, r *http.Request) {
 	var payload protocol.StopAllPayload
-	if !s.decode(w, r, &payload) {
+	if !webhookcore.Decode(w, r, &payload) {
 		return
 	}
 
 	stopResults, err := s.executor.StopAll(r.Context(), payload.Project)
 	if err != nil {
 		s.logger.Error("stop-all failed", "project", payload.Project, "error", err)
-		writeError(w, http.StatusInternalServerError, protocol.CodeInternal, "stop-all failed")
+		webhookcore.WriteError(w, http.StatusInternalServerError, protocol.CodeInternal, "stop-all failed")
 
 		return
 	}
@@ -773,7 +733,7 @@ func (s *Server) handleStopAll(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusMultiStatus
 	}
 
-	writeJSON(w, status, protocol.StopAllResponse{
+	webhookcore.WriteJSON(w, status, protocol.StopAllResponse{
 		OK:      failed == 0,
 		Total:   len(stopResults),
 		Stopped: stopped,
@@ -786,7 +746,7 @@ func (s *Server) handleStopAll(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 	var payload protocol.MessagePayload
-	if !s.decode(w, r, &payload) {
+	if !webhookcore.Decode(w, r, &payload) {
 		return
 	}
 
@@ -795,7 +755,7 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 	// successful write below, so a 404 or a failed write never poisons the cache -
 	// a retry then re-attempts delivery instead of getting a false duplicate ack.
 	if s.dedup.Contains(payload.Project, payload.CardID, payload.MessageID) {
-		writeJSON(w, http.StatusOK, protocol.SuccessResponse{
+		webhookcore.WriteJSON(w, http.StatusOK, protocol.SuccessResponse{
 			OK:        true,
 			Message:   "duplicate message acknowledged",
 			MessageID: payload.MessageID,
@@ -806,7 +766,7 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 
 	run, ok := s.tracker.Get(payload.Project, payload.CardID)
 	if !ok {
-		writeError(w, http.StatusNotFound, protocol.CodeNotFound, "no tracked container")
+		webhookcore.WriteError(w, http.StatusNotFound, protocol.CodeNotFound, "no tracked container")
 
 		return
 	}
@@ -824,28 +784,40 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, frames.ErrFrameTooLarge) {
 			s.logger.Warn("message rejected: frame too large",
 				"project", payload.Project, "card_id", payload.CardID)
-			writeError(w, http.StatusRequestEntityTooLarge, protocol.CodeTooLarge, "message content too large")
+			webhookcore.WriteError(w, http.StatusRequestEntityTooLarge, protocol.CodeTooLarge, "message content too large")
 
 			return
 		}
 
 		s.logger.Error("message stdin write failed",
 			"project", payload.Project, "card_id", payload.CardID, "error", err)
-		writeError(w, http.StatusInternalServerError, protocol.CodeInternal, "write failed")
+		webhookcore.WriteError(w, http.StatusInternalServerError, protocol.CodeInternal, "write failed")
 
 		return
 	}
 
 	// Delivered: publish to the chat stream and record the message_id so a retry
 	// is deduped, then clear the awaiting flag and touch the run.
-	s.hub.PublishUser(payload.Project, payload.CardID, payload.Content)
+	publishUser(s.hub, payload.Project, payload.CardID, payload.Content)
 	s.dedup.Record(payload.Project, payload.CardID, payload.MessageID)
 	s.tracker.SetAwaiting(payload.Project, payload.CardID, false)
 	s.tracker.Touch(payload.Project, payload.CardID)
 
-	writeJSON(w, http.StatusAccepted, protocol.SuccessResponse{
+	webhookcore.WriteJSON(w, http.StatusAccepted, protocol.SuccessResponse{
 		OK:        true,
 		MessageID: payload.MessageID,
+	})
+}
+
+// publishUser emits a "user"-type log entry directly to the hub. It is NOT
+// redacted - user content comes from the human and is displayed verbatim.
+func publishUser(hub *logbridge.Hub, project, cardID, content string) {
+	hub.Publish(protocol.LogEntry{
+		Timestamp: time.Now(),
+		Project:   project,
+		CardID:    cardID,
+		Type:      "user",
+		Content:   content,
 	})
 }
 
@@ -853,13 +825,13 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handlePromote(w http.ResponseWriter, r *http.Request) {
 	var payload protocol.PromotePayload
-	if !s.decode(w, r, &payload) {
+	if !webhookcore.Decode(w, r, &payload) {
 		return
 	}
 
 	run, ok := s.tracker.Get(payload.Project, payload.CardID)
 	if !ok {
-		writeError(w, http.StatusNotFound, protocol.CodeNotFound, "no tracked container")
+		webhookcore.WriteError(w, http.StatusNotFound, protocol.CodeNotFound, "no tracked container")
 
 		return
 	}
@@ -870,13 +842,13 @@ func (s *Server) handlePromote(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.logger.Error("verify-autonomous failed",
 			"project", payload.Project, "card_id", payload.CardID, "error", err)
-		writeError(w, http.StatusBadGateway, protocol.CodeUpstreamFailure, "upstream verification failed")
+		webhookcore.WriteError(w, http.StatusBadGateway, protocol.CodeUpstreamFailure, "upstream verification failed")
 
 		return
 	}
 
 	if !autonomous {
-		writeError(w, http.StatusConflict, protocol.CodeConflict, "card is not autonomous")
+		webhookcore.WriteError(w, http.StatusConflict, protocol.CodeConflict, "card is not autonomous")
 
 		return
 	}
@@ -889,7 +861,7 @@ func (s *Server) handlePromote(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.logger.Error("promote stdin write failed",
 			"project", payload.Project, "card_id", payload.CardID, "error", err)
-		writeError(w, http.StatusInternalServerError, protocol.CodeInternal, "write failed")
+		webhookcore.WriteError(w, http.StatusInternalServerError, protocol.CodeInternal, "write failed")
 
 		return
 	}
@@ -902,21 +874,21 @@ func (s *Server) handlePromote(w http.ResponseWriter, r *http.Request) {
 		Content:   "promoted to autonomous mode",
 	})
 
-	writeJSON(w, http.StatusAccepted, protocol.SuccessResponse{OK: true})
+	webhookcore.WriteJSON(w, http.StatusAccepted, protocol.SuccessResponse{OK: true})
 }
 
 // ---- end-session ------------------------------------------------------------
 
 func (s *Server) handleEndSession(w http.ResponseWriter, r *http.Request) {
 	var payload protocol.EndSessionPayload
-	if !s.decode(w, r, &payload) {
+	if !webhookcore.Decode(w, r, &payload) {
 		return
 	}
 
 	run, ok := s.tracker.Get(payload.Project, payload.CardID)
 	if !ok {
 		// Idempotent: nothing to end is a success, not a 404.
-		writeJSON(w, http.StatusOK, protocol.SuccessResponse{OK: true})
+		webhookcore.WriteJSON(w, http.StatusOK, protocol.SuccessResponse{OK: true})
 
 		return
 	}
@@ -929,12 +901,12 @@ func (s *Server) handleEndSession(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.logger.Error("end-session stdin write failed",
 			"project", payload.Project, "card_id", payload.CardID, "error", err)
-		writeError(w, http.StatusInternalServerError, protocol.CodeInternal, "write failed")
+		webhookcore.WriteError(w, http.StatusInternalServerError, protocol.CodeInternal, "write failed")
 
 		return
 	}
 
-	writeJSON(w, http.StatusAccepted, protocol.SuccessResponse{OK: true})
+	webhookcore.WriteJSON(w, http.StatusAccepted, protocol.SuccessResponse{OK: true})
 }
 
 // ---- containers -------------------------------------------------------------
@@ -954,127 +926,7 @@ func (s *Server) handleContainers(w http.ResponseWriter, _ *http.Request) {
 		})
 	}
 
-	writeJSON(w, http.StatusOK, protocol.ListContainersResponse{OK: true, Containers: items})
-}
-
-// ---- images -----------------------------------------------------------------
-
-func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
-	if s.images == nil {
-		writeError(w, http.StatusInternalServerError, protocol.CodeInternal, "image lister not wired")
-
-		return
-	}
-
-	summaries, err := s.images.ListImages(r.Context())
-	if err != nil {
-		s.logger.Error("image list failed", "error", err)
-		writeError(w, http.StatusBadGateway, protocol.CodeUpstreamFailure, "image list failed")
-
-		return
-	}
-
-	items := make([]protocol.ImageListItem, 0, len(summaries))
-
-	for _, sum := range summaries {
-		tags := matchingTags(sum.Tags, s.imageListFilters)
-		if len(tags) == 0 {
-			continue
-		}
-
-		items = append(items, protocol.ImageListItem{
-			Tags:    tags,
-			Digests: sum.Digests,
-			Created: sum.CreatedAt,
-			Size:    sum.SizeBytes,
-		})
-	}
-
-	writeJSON(w, http.StatusOK, protocol.ListImagesResponse{OK: true, Images: items})
-}
-
-// matchingTags returns the tags containing any of the filter substrings.
-func matchingTags(tags, filters []string) []string {
-	out := make([]string, 0, len(tags))
-
-	for _, tag := range tags {
-		for _, f := range filters {
-			if strings.Contains(tag, f) {
-				out = append(out, tag)
-
-				break
-			}
-		}
-	}
-
-	return out
-}
-
-// ---- health / readyz --------------------------------------------------------
-
-func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, protocol.HealthResponse{
-		OK:                true,
-		RunningContainers: s.tracker.Count(),
-		MaxConcurrent:     s.maxConcurrent,
-	})
-}
-
-// readyResponse is the /readyz body. It is a custom shape (not ErrorResponse)
-// so the readiness probe stays self-describing for orchestrators.
-type readyResponse struct {
-	OK     bool   `json:"ok"`
-	Reason string `json:"reason,omitempty"`
-}
-
-func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
-	if s.draining.Load() {
-		writeJSON(w, http.StatusServiceUnavailable, readyResponse{OK: false, Reason: "draining"})
-
-		return
-	}
-
-	writeJSON(w, http.StatusOK, readyResponse{OK: true})
-}
-
-// ---- decode + write helpers -------------------------------------------------
-
-// decode unmarshals the (already auth-verified) request body into v. The body
-// was re-injected by the auth middleware, so a normal read suffices. On a JSON
-// error it writes a 400 and returns false.
-func (s *Server) decode(w http.ResponseWriter, r *http.Request, v any) bool {
-	dec := json.NewDecoder(r.Body)
-	if err := dec.Decode(v); err != nil {
-		writeError(w, http.StatusBadRequest, protocol.CodeInvalidJSON, "invalid JSON")
-
-		return false
-	}
-
-	return true
-}
-
-// writeJSON marshals v and writes it with the given status. A marshal failure
-// falls back to a fixed internal-error body so the client always gets
-// well-formed JSON.
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-
-	body, err := json.Marshal(v)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(`{"ok":false,"code":"internal","message":"response marshal failed"}`))
-
-		return
-	}
-
-	w.WriteHeader(status)
-	_, _ = w.Write(body)
-}
-
-// writeError serialises a protocol.ErrorResponse. msg must be a fixed,
-// client-safe string, never raw err.Error() text.
-func writeError(w http.ResponseWriter, status int, code, msg string) {
-	writeJSON(w, status, protocol.ErrorResponse{OK: false, Code: code, Message: msg})
+	webhookcore.WriteJSON(w, http.StatusOK, protocol.ListContainersResponse{OK: true, Containers: items})
 }
 
 // boolEnv renders a bool as the worker's "true"/"" env convention
