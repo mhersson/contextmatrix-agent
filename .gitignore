@@ -2,7 +2,7 @@
 *.test
 .envrc
 
-# Local point-in-time artifacts — never committed. Results docs and
+# Local point-in-time artifacts - never committed. Results docs and
 # capability sweeps go stale the moment models or fixtures change.
 transcripts/
 eval-out/

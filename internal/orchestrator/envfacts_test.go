@@ -23,7 +23,7 @@ func TestEnvironmentFacts(t *testing.T) {
 
 	t.Run("no markers yields header and date only", func(t *testing.T) {
 		got := environmentFacts(t.TempDir())
-		assert.Contains(t, got, "ENVIRONMENT (authoritative; verified on this container — do not dispute from memory)")
+		assert.Contains(t, got, "ENVIRONMENT (authoritative; verified on this container - do not dispute from memory)")
 		assert.Contains(t, got, today)
 		assert.Len(t, strings.Split(got, "\n"), 2)
 	})

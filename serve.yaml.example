@@ -1,4 +1,4 @@
-# serve.yaml — contextmatrix-agent service configuration
+# serve.yaml - contextmatrix-agent service configuration
 #
 # Copy to ~/.config/contextmatrix-agent/serve.yaml (the XDG default location)
 # and edit before starting the service. Every scalar field can also be set or
@@ -73,7 +73,7 @@ image_pull_policy: if-not-present
 
 # Substring filters for GET /images (the ContextMatrix settings dropdown).
 # An image tag is listed when it contains any of these substrings; images with
-# no matching tag are omitted. Default: [contextmatrix-agent]. YAML only — the
+# no matching tag are omitted. Default: [contextmatrix-agent]. YAML only - the
 # CMX_ env layer cannot express list values.
 # image_list_filters:
 #   - contextmatrix-agent
@@ -117,7 +117,7 @@ secrets_dir: /var/run/cm-agent/secrets
 # Optional host path to a PEM file of extra CA certificates (corporate TLS
 # interception / Zscaler, or a private-CA GitHub Enterprise). Container-only:
 # it is bind-mounted read-only into each worker at /run/cm-ca/ca.crt and the
-# worker trusts it for its OWN outbound TLS — the harness LLM client, the
+# worker trusts it for its OWN outbound TLS - the harness LLM client, the
 # MCP/cmclient connection, and the git/gh subprocesses. It does NOT cover
 # model-invoked bash tools (curl/pip/npm), whose env the harness scrubs;
 # covering those needs a harness change. The serve host itself uses the OS
@@ -138,7 +138,7 @@ secrets_dir: /var/run/cm-agent/secrets
 
 # Reasoning effort for every worker phase: "" (off) | low | medium | high |
 # provider-specific tiers (e.g. xhigh). CMX_REASONING_EFFORT
-# Sent to every selected model — the endpoint must accept reasoning_effort on
+# Sent to every selected model - the endpoint must accept reasoning_effort on
 # ALL served models, or leave this empty. (Per-model gating is a follow-up.)
 # Non-canonical values (anything outside low|medium|high|"") are forwarded to
 # the provider as-is; the agent logs a startup warning so a typo doesn't go
@@ -150,7 +150,7 @@ secrets_dir: /var/run/cm-agent/secrets
 # Cumulative USD ceiling per card. Workers receive this as CMX_MAX_CARD_COST.
 # The orchestrator enforces this ceiling and aborts the card when exceeded.
 # 0 disables the ceiling. Note: koanf cannot distinguish an absent key from
-# an explicit 0 — if the key is absent the default (5.0) applies; an explicit
+# an explicit 0 - if the key is absent the default (5.0) applies; an explicit
 # 0 in YAML or via env disables the ceiling.
 # Default: 5.0
 # CMX_MAX_CARD_COST
@@ -202,7 +202,7 @@ tool_output_max_bytes: 131072
 
 # Opt-in in-window compaction in the worker loop. When disabled (the default),
 # nearing the context window emits a context_limit event and the subtask
-# returns incomplete — never a silent truncation. Default: false.
+# returns incomplete - never a silent truncation. Default: false.
 # CMX_COMPACTION_ENABLED
 # compaction_enabled: false
 

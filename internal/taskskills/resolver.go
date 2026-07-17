@@ -1,7 +1,7 @@
 // Package taskskills resolves ContextMatrix's task-skills onto the serve host:
 // it fetches a {git_remote_url, ref} pointer from CM and shallow-clones it once
 // into a cache dir the executor binds read-only into worker containers. The
-// agent carries no task-skills config — CM is the single source of truth.
+// agent carries no task-skills config - CM is the single source of truth.
 package taskskills
 
 import (
@@ -25,7 +25,7 @@ const requestTimeout = 15 * time.Second
 
 // Resolver fetches the task-skills pointer from CM and clones it once, caching
 // the resolved host dir for the process. The clone authenticates with the
-// CM-provisioned token carried on the pointer — there is no local token
+// CM-provisioned token carried on the pointer - there is no local token
 // source. Safe for concurrent use.
 type Resolver struct {
 	cmURL    string

@@ -75,8 +75,8 @@ func parseCheckpointVerdict(s string) (checkpointVerdict, error) {
 
 // mobCheckpoint convenes the post-subtask checkpoint discussion on the diff
 // committed since startHead and, on a revise verdict, runs ONE fix pass on
-// the same solver. Best-effort throughout (the mob contract): any failure —
-// diff, quorum, engine, parse, fix run — logs and returns so the run
+// the same solver. Best-effort throughout (the mob contract): any failure -
+// diff, quorum, engine, parse, fix run - logs and returns so the run
 // continues on the committed diff. The revised diff is never re-checkpointed.
 func (o *run) mobCheckpoint(ctx context.Context, sc *solverCtx, sub subtaskRef, startHead string) {
 	diff, err := sc.git.Diff(ctx, startHead)
@@ -127,14 +127,14 @@ func (o *run) mobCheckpoint(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 
 		if perr != nil {
 			_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, //nolint:errcheck // advisory record
-				fmt.Sprintf("mob checkpoint (%s): verdict unparsable — proceeding", sub.ID))
+				fmt.Sprintf("mob checkpoint (%s): verdict unparsable - proceeding", sub.ID))
 
 			return
 		}
 	}
 
 	// Record the discussion summary on both cards for every synthesized
-	// verdict — proceed and revise alike. Best-effort; must run before the
+	// verdict - proceed and revise alike. Best-effort; must run before the
 	// proceed/revise branches so a proceed still leaves a record.
 	o.recordCheckpointDiscussion(ctx, sub, out, v)
 
@@ -150,13 +150,13 @@ func (o *run) mobCheckpoint(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 	}
 
 	_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, //nolint:errcheck // advisory record
-		fmt.Sprintf("mob checkpoint (%s): revise — %d fixes", sub.ID, len(v.Fixes)))
+		fmt.Sprintf("mob checkpoint (%s): revise - %d fixes", sub.ID, len(v.Fixes)))
 
 	// One fix pass, budget permitting. A ledger already at the card ceiling
 	// declines the revise here; the next subtask's budget gate owns parking.
 	if lerr := sc.ledger.Check(); lerr != nil {
 		_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, //nolint:errcheck // advisory record
-			fmt.Sprintf("mob checkpoint (%s): revise skipped — budget exhausted", sub.ID))
+			fmt.Sprintf("mob checkpoint (%s): revise skipped - budget exhausted", sub.ID))
 
 		return
 	}
@@ -194,7 +194,7 @@ func (o *run) mobCheckpoint(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 // entry appended to a running "## Execute Discussions" log on the parent card.
 // Best-effort throughout (the mob contract): any card-write failure logs and
 // returns without aborting the run. It must be called before any later
-// discussion overwrites o.mobSeats — the checkpoint path runs none after this.
+// discussion overwrites o.mobSeats - the checkpoint path runs none after this.
 func (o *run) recordCheckpointDiscussion(ctx context.Context, sub subtaskRef, out mob.Outcome, v checkpointVerdict) {
 	rounds := 0
 	for _, e := range out.Transcript {
@@ -205,7 +205,7 @@ func (o *run) recordCheckpointDiscussion(ctx context.Context, sub subtaskRef, ou
 
 	outcome := "proceed"
 	if v.Verdict == "revise" {
-		outcome = fmt.Sprintf("revise — %d fixes", len(v.Fixes))
+		outcome = fmt.Sprintf("revise - %d fixes", len(v.Fixes))
 	}
 
 	summary := sanitizeSummary(v.Summary)
@@ -233,7 +233,7 @@ func sanitizeSummary(s string) string {
 
 // checkpointSubtaskSection renders the full "## Discussion" block for a subtask
 // card: narrative (when present), the seat/guest lineup, critique rounds,
-// outcome, and cost — matching the planning discussion record's shape.
+// outcome, and cost - matching the planning discussion record's shape.
 func (o *run) checkpointSubtaskSection(summary string, rounds int, outcome string, cost float64) string {
 	var b strings.Builder
 
@@ -288,7 +288,7 @@ func (o *run) recordCheckpointOnSubtask(ctx context.Context, sub subtaskRef, sec
 func (o *run) recordCheckpointOnParent(ctx context.Context, sub subtaskRef, summary string, rounds int, outcome string, cost float64) {
 	var blk strings.Builder
 
-	fmt.Fprintf(&blk, "### %s — %s\n", sub.ID, sub.Title)
+	fmt.Fprintf(&blk, "### %s - %s\n", sub.ID, sub.Title)
 
 	if s := strings.TrimSpace(summary); s != "" {
 		blk.WriteString(s)
@@ -316,7 +316,7 @@ func (o *run) recordCheckpointOnParent(ctx context.Context, sub subtaskRef, summ
 }
 
 // commitRevise commits the revise pass's changes and surfaces a full
-// decline (clean tree — the fixer applied nothing) on the card's activity
+// decline (clean tree - the fixer applied nothing) on the card's activity
 // log, so a "declined:" finish message is visible instead of vanishing.
 // Best-effort like the rest of the checkpoint path.
 func (o *run) commitRevise(ctx context.Context, sc *solverCtx, sub subtaskRef, msg string) {
@@ -331,6 +331,6 @@ func (o *run) commitRevise(ctx context.Context, sc *solverCtx, sub subtaskRef, m
 	if !committed {
 		first, _, _ := strings.Cut(msg, "\n")
 		_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, //nolint:errcheck // advisory record
-			fmt.Sprintf("mob checkpoint (%s): revise made no changes — %s", sub.ID, first))
+			fmt.Sprintf("mob checkpoint (%s): revise made no changes - %s", sub.ID, first))
 	}
 }

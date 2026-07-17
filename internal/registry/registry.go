@@ -228,8 +228,8 @@ func (r *Registry) candidates(in SelectInput) []candidate {
 	return cands
 }
 
-// favoriteFor returns the first operator favorite for (tier, role) — then
-// (tier, any role) — that is a live candidate (clears the bar, not blacklisted,
+// favoriteFor returns the first operator favorite for (tier, role) - then
+// (tier, any role) - that is a live candidate (clears the bar, not blacklisted,
 // fits the window). An empty string means no eligible favorite.
 func (r *Registry) favoriteFor(in SelectInput) string {
 	if len(r.favorites) == 0 {
@@ -277,7 +277,7 @@ func (r *Registry) SelectReviewPanel(in SelectInput, n int) []ModelSpec {
 		// Probe the candidate pool directly: an empty pool means no distinct
 		// model remains, so reuse the last real pick rather than escalating to
 		// the (pricier) capable default. The probe duplicates the filter work
-		// SelectByComplexity does internally — accepted for clarity at catalog
+		// SelectByComplexity does internally - accepted for clarity at catalog
 		// sizes.
 		if len(r.candidates(next)) == 0 {
 			if len(panel) == 0 {
@@ -301,8 +301,8 @@ func (r *Registry) SelectReviewPanel(in SelectInput, n int) []ModelSpec {
 }
 
 // SelectDiscussionPanel returns n distinct models for mob session discussion seats.
-// It is the review-panel diversity walk by construction — distinct-first with
-// wrap-around when the pool runs dry — honoring the caller's exclusions
+// It is the review-panel diversity walk by construction - distinct-first with
+// wrap-around when the pool runs dry - honoring the caller's exclusions
 // (review discussions exclude the models that coded the card). It exists as a
 // named seam so discussion selection can diverge from review selection
 // without touching call sites.
@@ -313,7 +313,7 @@ func (r *Registry) SelectDiscussionPanel(in SelectInput, n int) []ModelSpec {
 // SelectCandidateModels picks n coder models for a Best-of-N fan-out. pin, if
 // non-empty, occupies slot 1 (excluded from the auto picks); the remaining
 // slots are distinct-first with wrap-around when the pool is smaller than n
-// (SelectReviewPanel semantics) — model scarcity never shrinks n.
+// (SelectReviewPanel semantics) - model scarcity never shrinks n.
 func (r *Registry) SelectCandidateModels(in SelectInput, n int, pin string) []ModelSpec {
 	if n <= 0 {
 		return nil

@@ -24,8 +24,8 @@ func newSeatExecutor(seat SeatConfig, runner SeatRunner) a2asrv.AgentExecutor {
 
 // Execute handles one moderator message. A close control completes the task
 // (close is only ever sent on an existing task); a round message runs the
-// seat runner and parks the task in input-required — A2A's native "your
-// move" state — with the utterance as the status message.
+// seat runner and parks the task in input-required - A2A's native "your
+// move" state - with the utterance as the status message.
 func (e *seatExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 	return func(yield func(a2a.Event, error) bool) {
 		if parseControl(execCtx.Message).Kind == controlClose {

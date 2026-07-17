@@ -1,7 +1,7 @@
 # CI pipeline for contextmatrix-agent.
 #
 # Gates every pull_request on the full quality bar. Pushes to main skip the
-# checks (already validated on the PR) — branch protection requires the check
+# checks (already validated on the PR) - branch protection requires the check
 # jobs to pass before merge.
 #
 # GitHub Actions are pinned to exact release tags; Dependabot
@@ -156,6 +156,6 @@ jobs:
           vuln-type: os,library
           # Only run the vulnerability scanner. The default secret scanner
           # flags gosec regex literals (shipped with golangci-lint) as
-          # hardcoded credentials — false positives.
+          # hardcoded credentials - false positives.
           scanners: vuln
           trivyignores: .trivyignore

@@ -7,7 +7,7 @@
 
 A custom Go agent harness with a configurable LLM endpoint that runs as a ContextMatrix
 **task backend**: ContextMatrix dispatches a card, this service launches a Docker
-worker container, and the worker drives a hand-built model-in-the-loop harness —
+worker container, and the worker drives a hand-built model-in-the-loop harness -
 claiming the card, working the code in a target repository, and reporting
 progress back to the board over MCP.
 
@@ -48,7 +48,7 @@ flowchart LR
     subgraph work["contextmatrix-agent work · one Docker container per card"]
         direction TB
         W["Clone repo on cm/&lt;card-id&gt; · claim the card"]
-        FSM["Orchestrator FSM — mode-gated on Cfg.Interactive<br/>plan → execute → judge → document → review → integrate → done"]
+        FSM["Orchestrator FSM - mode-gated on Cfg.Interactive<br/>plan → execute → judge → document → review → integrate → done"]
         HITL["HITL: brainstorming for creative cards,<br/>plus plan-approval &amp; review-decision human gates"]
         AUTO["Autonomous: gates auto-passed, brainstorming skipped"]
         W --> FSM
@@ -70,13 +70,13 @@ flowchart LR
 Two per-card execution strategies layer on top of the FSM, both switched on by
 card fields set in ContextMatrix:
 
-- **Best-of-N** (`best_of_n` ≥ 2) — after planning, the worker races N
+- **Best-of-N** (`best_of_n` ≥ 2) - after planning, the worker races N
   candidate implementations in parallel git worktrees, each with its own
   budget ledger and an auto-selected coder model (distinct models where the
   eligible pool allows, wrapping around when it is smaller than N); a judge
   phase picks the winner, which is adopted onto the main clone and pushed.
   Losing candidates never push and are removed.
-- **Mob session** (`mob_participants` ≥ 2) — the plan and review phases
+- **Mob session** (`mob_participants` ≥ 2) - the plan and review phases
   convene a moderated multi-seat discussion over the A2A protocol (loopback
   JSON-RPC seats plus optional registered guest agents); when the card's
   execute-checkpoints flag is set, the execute phase additionally convenes a
@@ -88,7 +88,7 @@ card fields set in ContextMatrix:
   Best-of-N execute race.
 
 The inner loop lives in the standalone `github.com/mhersson/contextmatrix-harness`
-module (`events`, `llm`, `tools`, `harness`, `redact`) — FSM-free and
+module (`events`, `llm`, `tools`, `harness`, `redact`) - FSM-free and
 dependency-free, shared with the
 [contextmatrix-chat](https://github.com/mhersson/contextmatrix-chat) backend.
 This service wraps it with the task FSM (`orchestrator`/`worker`) to execute
@@ -101,7 +101,7 @@ board cards.
 - An **LLM endpoint API key** with access to the models you route to.
 - A reachable **ContextMatrix** instance (API + MCP) and its MCP API key.
 - **GitHub auth configured in ContextMatrix** (a GitHub App or a fine-grained
-  PAT) — ContextMatrix mints per-run tokens for cloning and pushing target
+  PAT) - ContextMatrix mints per-run tokens for cloning and pushing target
   repositories; the agent itself carries no GitHub credentials.
 
 ## Quick start: the harness, standalone
@@ -141,7 +141,7 @@ export LLM_API_KEY=<your-api-key>
 
    | Variant   | Toolchains                                                             |
    | --------- | ---------------------------------------------------------------------- |
-   | `full`    | Go, Node, Python, Rust toolchains — the default (`:dev` / `:latest`).  |
+   | `full`    | Go, Node, Python, Rust toolchains - the default (`:dev` / `:latest`).  |
    | `go-node` | Go (+ golangci-lint, gofumpt) + Node.                                  |
    | `python`  | Node + uv/uvx + CPython + ty + ruff.                                   |
    | `rust`    | rustup/cargo (+ clippy, rustfmt). No Node.                             |
@@ -151,7 +151,7 @@ export LLM_API_KEY=<your-api-key>
    `contextmatrix-agent-worker:go-node`, `:python`, `:rust`).
 
    **Any other ecosystem ⇒ set the project's `remote_execution.worker_image` to
-   a custom image** — see `docs/custom-images.md`.
+   a custom image** - see `docs/custom-images.md`.
 
    For deployment, publish a digest-pinned image (for example
    `ghcr.io/mhersson/contextmatrix-agent@sha256:...`) and reference it from
@@ -159,7 +159,7 @@ export LLM_API_KEY=<your-api-key>
 
 2. **Write the service config.** Copy the template and edit it. Every scalar
    field also has a `CMX_*` environment override (e.g. `CMX_BASE_IMAGE`);
-   list/map fields are YAML-only or use the nested `CMX_…__KEY` form — see each
+   list/map fields are YAML-only or use the nested `CMX_…__KEY` form - see each
    field's note in the template.
 
    ```bash
@@ -169,10 +169,10 @@ export LLM_API_KEY=<your-api-key>
    ```
 
    ContextMatrix provisions the git token and the LLM endpoint per run over
-   the trigger payload — the agent carries no local credential config, and a
+   the trigger payload - the agent carries no local credential config, and a
    trigger without CM-provisioned credentials is rejected.
 
-   `container_contextmatrix_url` is required in practice — workers resolve their
+   `container_contextmatrix_url` is required in practice - workers resolve their
    MCP URL from it; without it they point at their own localhost and fail to
    connect. For Docker bridge networking it is typically the bridge gateway
    (`http://172.17.0.1:8080`).
@@ -207,7 +207,7 @@ make build                    # build the contextmatrix-agent binary
 The generated unit is sandboxed (read-only home, restricted syscalls, resource
 caps) and runs `serve --config ${XDG_CONFIG_HOME:-~/.config}/contextmatrix-agent/serve.yaml`.
 
-`redeploy.sh` updates a running install in place — rebuild the binary and all
+`redeploy.sh` updates a running install in place - rebuild the binary and all
 worker images (full + variants), pin the new full-image digest into
 `serve.yaml`, and restart the service:
 
@@ -217,7 +217,7 @@ worker images (full + variants), pin the new full-image digest into
 
 > **Writable runtime dir.** The agent writes secrets under `secrets_dir`
 > (default `/var/run/cm-agent/secrets`). `/var/run` is root-owned and not created
-> for a user service — either pre-create `/var/run/cm-agent` and `chown` it to
+> for a user service - either pre-create `/var/run/cm-agent` and `chown` it to
 > your user, or set `secrets_dir` to a path under your home (e.g.
 > `~/.cm-agent/secrets`); the unit whitelists both.
 
@@ -232,7 +232,7 @@ worker images (full + variants), pin the new full-image digest into
 ## Model selection
 
 The agent never asks a model to name a model. During planning, a fixed capable
-model emits a **complexity tier per subtask** (plus an overall card tier) —
+model emits a **complexity tier per subtask** (plus an overall card tier) -
 simple / moderate / complex / critical; deterministic code then maps each tier
 to the cost-optimal model. A
 candidate must be tool-capable, not blacklisted, fit the work's context window,
@@ -240,7 +240,7 @@ and carry an external quality **prior** for the role that clears the tier's bar
 (the bar rises with the tier, from 0.65 for simple up to 0.90 for critical).
 Among those, an eligible operator favorite wins outright; otherwise the selector
 picks the most capable candidate whose blended price is within a headroom band of
-the cheapest. Selection is **priors-only — there is no measured-capability
+the cheapest. Selection is **priors-only - there is no measured-capability
 gate.** An explicit model pin on the card always overrides.
 
 The selector's inputs are supplied by ContextMatrix, not embedded in the binary.
@@ -272,10 +272,10 @@ working **on** this codebase live in [`AGENTS.md`](AGENTS.md).
 
 ## Further reading
 
-- [`AGENTS.md`](AGENTS.md) — orientation for contributors and agents.
-- [`serve.yaml.example`](serve.yaml.example) — every service config field, documented.
-- [ContextMatrix](https://github.com/mhersson/contextmatrix) — the control plane.
+- [`AGENTS.md`](AGENTS.md) - orientation for contributors and agents.
+- [`serve.yaml.example`](serve.yaml.example) - every service config field, documented.
+- [ContextMatrix](https://github.com/mhersson/contextmatrix) - the control plane.
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+MIT - see [`LICENSE`](LICENSE).

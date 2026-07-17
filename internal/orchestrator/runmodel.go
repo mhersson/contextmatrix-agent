@@ -13,7 +13,7 @@ import (
 )
 
 // ContextLimitError marks a phase stopping because the model neared its context
-// window. The worker maps it like the budget park: push WIP, release, fail — so
+// window. The worker maps it like the budget park: push WIP, release, fail - so
 // in-flight work survives and a human can split the subtask or pin a larger-window model.
 type ContextLimitError struct {
 	Model         string
@@ -28,7 +28,7 @@ func (e *ContextLimitError) Error() string {
 // cap (Reason "max_turns", Completed=false, err==nil). It is normalized to a
 // typed error at the runModelCfg choke point so NO phase treats truncated work
 // as success. Park-on-cap is no longer unconditional: two salvage paths rescue a
-// capped subtask whose committed work passes an authoritative verify — a
+// capped subtask whose committed work passes an authoritative verify - a
 // Best-of-N candidate capped on its FINAL subtask, deferred to the judge's
 // verify gate (see salvageCapped), and a single-solver (parent / mob session)
 // subtask, which has no judge and so runs the verify inline before completing (see
@@ -45,7 +45,7 @@ func (e *MaxTurnsError) Error() string {
 }
 
 // IncapableError marks a phase stopping because the model cannot drive the tool
-// loop — it emitted tool calls every turn but none parsed valid arguments. The
+// loop - it emitted tool calls every turn but none parsed valid arguments. The
 // recovery path (recoverIncapable) catches this to blacklist the model and re-select.
 type IncapableError struct {
 	Model  string
@@ -138,12 +138,12 @@ func (o *run) runModelCfg(ctx context.Context, reg *tools.Registry, prompt, mode
 // wrapUpTurns is the remaining-turn threshold at which coder-family runs get
 // the harness wrap-up nudge: late enough to matter, early enough that a model
 // can ignore it once, run one final check, and still land its closing message.
-// An orchestrator constant on purpose — not an operator knob.
+// An orchestrator constant on purpose - not an operator knob.
 const wrapUpTurns = 5
 
 // planRepairMaxTurns caps the planner's single repair turn. The first attempt
 // already ran a full exploration pass; the repair must re-emit a valid plan,
-// not restart the investigation — so it gets a tight budget (min'd with the
+// not restart the investigation - so it gets a tight budget (min'd with the
 // configured cap so a smaller MaxTurns is never raised). Kept comfortably above
 // wrapUpTurns so the wrap-up nudge still lands.
 const planRepairMaxTurns = 12
@@ -190,7 +190,7 @@ func (o *run) runModelWrapUp(ctx context.Context, reg *tools.Registry, prompt, m
 // single unsplittable cross-cutting subtask can land its source changes AND the
 // tests those changes break in one session instead of turn-capping mid-way;
 // simple/moderate keep the base. Used by the execute-phase coder and the
-// review-phase fix run — both tier-sized coder work. document.go keeps
+// review-phase fix run - both tier-sized coder work. document.go keeps
 // runModelWrapUp: its work carries no tier.
 func (o *run) runModelCoder(ctx context.Context, reg *tools.Registry, prompt, model, msg string, tier registry.Tier) (harness.Result, error) {
 	cfg := o.harnessConfig(model)

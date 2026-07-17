@@ -15,7 +15,7 @@ CONFIG="${AGENT_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/contextmatrix-agent/se
 WORKER_IMAGE="${AGENT_WORKER_IMAGE:-contextmatrix-agent-worker:dev}"
 SERVICE="${AGENT_SERVICE:-contextmatrix-agent}"
 
-# Repo portion of the image ref (strip the trailing :tag) — used to match
+# Repo portion of the image ref (strip the trailing :tag) - used to match
 # the RepoDigest emitted by `docker image inspect`.
 WORKER_REPO="${WORKER_IMAGE%:*}"
 
@@ -48,7 +48,7 @@ echo "==> make docker-worker"
 make docker-worker
 
 # A ContextMatrix project can pin a variant tag via its worker_image
-# override, which bypasses the digest-pinned base_image below — a stale
+# override, which bypasses the digest-pinned base_image below - a stale
 # variant would then run an old worker binary. Rebuild them all.
 echo "==> make docker-worker-variants"
 make docker-worker-variants
@@ -59,7 +59,7 @@ digest=$(docker image inspect "$WORKER_IMAGE" \
   | grep "^${WORKER_REPO}@sha256:" | head -n 1)
 if [ -z "$digest" ]; then
   echo "ERROR: no ${WORKER_REPO}@sha256 RepoDigest on ${WORKER_IMAGE}" >&2
-  echo "       rebuild produced an image without a digest — push to a registry or retag" >&2
+  echo "       rebuild produced an image without a digest - push to a registry or retag" >&2
   exit 1
 fi
 echo "    ${digest}"

@@ -75,7 +75,7 @@ func (o *run) gate(ctx context.Context, kind gateKind, model, presentation strin
 // classifyVerdict runs one cheap model call mapping the human's freeform reply to
 // an approve/adjust verdict plus the feedback to fold into the next round. A
 // parse failure or any non-"approve" verdict is treated as adjust with the raw
-// reply as feedback — adjust is the fail-safe default, never an accidental
+// reply as feedback - adjust is the fail-safe default, never an accidental
 // approval. A budget breach returns the *BudgetExceededError so execute() parks.
 func (o *run) classifyVerdict(ctx context.Context, kind gateKind, model, reply string) (gateOutcome, string, error) {
 	if err := o.ledger.Check(); err != nil {

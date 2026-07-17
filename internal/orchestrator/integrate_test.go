@@ -213,7 +213,7 @@ func TestIntegratePRCreation(t *testing.T) {
 		tc := cmclient.TaskContext{Title: "PR fails", CreatePR: true}
 		o := newIntegrateRun(d, tc, 0)
 
-		// PR failure does NOT fail the run — the push already landed.
+		// PR failure does NOT fail the run - the push already landed.
 		require.NoError(t, runIntegrate(context.Background(), o))
 
 		calls := ops.recorded()
@@ -255,7 +255,7 @@ func TestIntegrateBudgetGate(t *testing.T) {
 func TestIntegrateIdempotentResume(t *testing.T) {
 	ops := &fakeOps{}
 	// Resume after a prior successful push: the remote tip is non-empty, so the
-	// lease path is taken — the lease push is still issued (a no-op server-side
+	// lease path is taken - the lease push is still issued (a no-op server-side
 	// when the remote already matches) and the flow completes.
 	git := &fakeGit{remoteTip: "samehash"}
 	pr := &fakePR{}
@@ -300,9 +300,9 @@ func TestWritePRBodyAppendsVerificationTrailer(t *testing.T) {
 		plan verifyPlan
 		want string
 	}{
-		{"passed", verifyResult{Status: verifyPassed}, verifyPlan{Argv: []string{"x"}, Display: "go test ./...", Source: verifySourceDetected}, "PASSED — `go test ./...` (detected)"},
-		{"failed", verifyResult{Status: verifyFailed}, verifyPlan{Argv: []string{"x"}, Display: "cargo test", Source: verifySourceDeclared}, "FAILED — `cargo test` (declared)"},
-		{"skipped", verifyResult{Status: verifySkipped, Note: "tool missing"}, verifyPlan{}, "NOT VERIFIED — tool missing"},
+		{"passed", verifyResult{Status: verifyPassed}, verifyPlan{Argv: []string{"x"}, Display: "go test ./...", Source: verifySourceDetected}, "PASSED - `go test ./...` (detected)"},
+		{"failed", verifyResult{Status: verifyFailed}, verifyPlan{Argv: []string{"x"}, Display: "cargo test", Source: verifySourceDeclared}, "FAILED - `cargo test` (declared)"},
+		{"skipped", verifyResult{Status: verifySkipped, Note: "tool missing"}, verifyPlan{}, "NOT VERIFIED - tool missing"},
 	}
 
 	for _, tc := range cases {
@@ -361,7 +361,7 @@ func TestDonePhase(t *testing.T) {
 
 // TestRunDoneToleratesReleaseError: runDone must not fail the run when
 // ReleaseCard returns ErrCardNotClaimed (already released by another path) or a
-// transient error — in both cases it should warn and continue, leaving the
+// transient error - in both cases it should warn and continue, leaving the
 // completion log entry still written.
 func TestRunDoneToleratesReleaseError(t *testing.T) {
 	t.Run("ErrCardNotClaimed is swallowed silently", func(t *testing.T) {
@@ -413,7 +413,7 @@ func TestRunDoneToleratesReleaseError(t *testing.T) {
 
 // ctxHonoringOps wraps fakeOps so ReleaseCard and AddLog fail on a canceled
 // context, the way the real cmclient does (each issues an HTTP call that
-// respects ctx). It proves runDone's cleanup survives a canceled run context —
+// respects ctx). It proves runDone's cleanup survives a canceled run context -
 // the exact race where end_session/EOF cancels runCtx as the FSM reaches done.
 type ctxHonoringOps struct{ *fakeOps }
 
@@ -435,7 +435,7 @@ func (o ctxHonoringOps) AddLog(ctx context.Context, cardID, message string) erro
 
 // TestRunDoneReleasesUnderCanceledContext: the done phase runs as the FSM winds
 // up, exactly when end_session/EOF may have canceled the run context. runDone
-// must still release the parent claim and write the completion log — it shields
+// must still release the parent claim and write the completion log - it shields
 // both with context.WithoutCancel, so a dead run context does not drop them.
 func TestRunDoneReleasesUnderCanceledContext(t *testing.T) {
 	ops := &fakeOps{}

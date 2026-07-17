@@ -367,8 +367,8 @@ func TestStderrStream(t *testing.T) {
 	assert.Contains(t, got.Content, "[REDACTED]")
 }
 
-// TestStderrDoesNotClearAwaiting proves that stderr output — raw stderr, the
-// error-kind mapping, and unparsable lines — leaves the awaiting-human flag
+// TestStderrDoesNotClearAwaiting proves that stderr output - raw stderr, the
+// error-kind mapping, and unparsable lines - leaves the awaiting-human flag
 // untouched, while a real agent-progress entry clears it. A parked HITL worker
 // keeps logging to stderr; clearing awaiting on those lines would let the idle
 // watchdog reap a container that is legitimately waiting for a human.

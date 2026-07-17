@@ -21,7 +21,7 @@ type candidate struct {
 	idx       int // 1-based
 	model     string
 	branch    string // cm/<cardid>-cK, container-local only
-	dir       string // <workspace>/.worktrees/cK — NOTE: workspace IS the clone dir
+	dir       string // <workspace>/.worktrees/cK - NOTE: workspace IS the clone dir
 	git       GitOps
 	ledger    *Ledger
 	completed []subtaskRef
@@ -38,7 +38,7 @@ type candidate struct {
 
 // effectiveCeiling scales the run's budget ceiling for Best-of-N (N execute
 // allowances plus one for the shared phases) and adds the mob session
-// discussion term (BudgetFactor x MaxCardCost — discussions are read-only
+// discussion term (BudgetFactor x MaxCardCost - discussions are read-only
 // talk, far cheaper than implementations). Deterministic from the card
 // fields, so resumes recompute it. With neither feature on it degenerates to
 // MaxCardCost, keeping single-solver runs byte-identical.
@@ -77,7 +77,7 @@ func degradeN(cfg Config, reported float64) int {
 
 // runFanout races nEff candidate implementations of the shared plan, each in its
 // own worktree on a container-local branch, and fills o.candidates. Candidates
-// make no subtask board writes and never push — their work is judged in place.
+// make no subtask board writes and never push - their work is judged in place.
 // It returns an error only when EVERY candidate dropped out; a single survivor is
 // enough for the judge phase to proceed.
 func (o *run) runFanout(ctx context.Context) (retErr error) {
@@ -221,7 +221,7 @@ func (o *run) runFanout(ctx context.Context) (retErr error) {
 	// (judge/document/review/integrate) budget against the true remaining envelope
 	// rather than a pre-fan-out one. Candidates ran on their own separate ledgers,
 	// so none of this spend touched o.ledger during the race. Failed candidates
-	// burned real tokens too — spend is spend — so their spend counts. This keeps
+	// burned real tokens too - spend is spend - so their spend counts. This keeps
 	// the run under the (N+1)x effectiveCeiling: ~Nx for candidates plus plan,
 	// leaving ~1x for the shared tail.
 	for _, c := range o.candidates {
@@ -264,7 +264,7 @@ func (o *run) runFanout(ctx context.Context) (retErr error) {
 // it, flipping the board card to in_progress for the duration of the race (the
 // MCP claim_card auto-transitions, and CM flips the parent on the first subtask
 // claim). Exactly one claim per subtask regardless of how many candidates race;
-// best-effort — board visibility must never kill a healthy race. The winner
+// best-effort - board visibility must never kill a healthy race. The winner
 // replay later re-claims idempotently (same agent identity) and completes.
 func (o *run) claimSubtaskOnce(ctx context.Context, sub subtaskRef) {
 	o.subClaimMu.Lock()
@@ -345,7 +345,7 @@ func (o *run) stopFanoutHeartbeat() {
 }
 
 // allSubtasksDone reports whether every subtask is already in the terminal
-// "done" state — the same skip-if-done signal executeSubtaskWith applies per
+// "done" state - the same skip-if-done signal executeSubtaskWith applies per
 // subtask. An empty set is not "done": there is nothing completed to resume, so
 // the normal (degenerate) path handles it unchanged.
 func allSubtasksDone(subs []subtaskRef) bool {
@@ -413,15 +413,15 @@ func lastSubtaskID(subs []subtaskRef) string {
 // Unlike the fan-out's one-shot selection, it is consulted before EVERY coder
 // attempt: while c's current model is viable it is returned unchanged, but once
 // recoverIncapable has excluded it (o.excluded) the resolver re-picks the
-// next-best coder model for the card tier — mirroring the fan-out selection with
-// every dropped model merged into the exclude set — and updates c.model, so a
+// next-best coder model for the card tier - mirroring the fan-out selection with
+// every dropped model merged into the exclude set - and updates c.model, so a
 // candidate that drew a dud model continues on a different one instead of
 // hot-looping the same slug and burning the shared reselect cap. c.model
 // therefore always reflects the LAST model the candidate ran (what logs and
 // outcome rows report). An explicit operator coder pin is never overridden
 // (mirroring resolveCoderModel): the pinned candidate keeps the pin, exhausts the
-// shared cap, and parks. When the pool is exhausted — the registry can only offer
-// an already-excluded model (its capable-default fallback) — it returns "", the
+// shared cap, and parks. When the pool is exhausted - the registry can only offer
+// an already-excluded model (its capable-default fallback) - it returns "", the
 // pool-exhausted sentinel runCoderWith turns into a clean candidate drop.
 func (o *run) candidateCoderModel(c *candidate) func(subtaskRef, string) string {
 	return func(_ subtaskRef, prompt string) string {

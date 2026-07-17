@@ -73,7 +73,7 @@ type ServiceConfig struct {
 	// card, <log_dir>/<project>/<card_id>.log, holding everything the container
 	// printed (as `docker logs -f` shows it). Files are 0600 and MAY contain
 	// unredacted secrets from model/tool output. Empty (the default) disables
-	// the feature. Logs are kept indefinitely — use an external logrotate.
+	// the feature. Logs are kept indefinitely - use an external logrotate.
 	LogDir string
 
 	// CACertFile is an optional path (on the serve host) to a PEM file of extra
@@ -86,7 +86,7 @@ type ServiceConfig struct {
 
 	// MaxCardCost is the cumulative USD ceiling per card. Workers receive it as
 	// CMX_MAX_CARD_COST. Zero disables the ceiling; the default (5.0) applies
-	// when the key is absent from config and env — koanf cannot distinguish
+	// when the key is absent from config and env - koanf cannot distinguish
 	// absent-vs-zero, so an explicit 0 in YAML or env also disables the ceiling.
 	MaxCardCost float64
 
@@ -347,7 +347,7 @@ func (c *ServiceConfig) Validate() error {
 	if c.MaxConcurrent < 1 {
 		return fmt.Errorf(
 			"max_concurrent must be >= 1, got %d: 0 disables the webhook capacity pre-check "+
-				"while the tracker refuses every launch — triggers would be accepted then all fail",
+				"while the tracker refuses every launch - triggers would be accepted then all fail",
 			c.MaxConcurrent)
 	}
 

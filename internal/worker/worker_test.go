@@ -257,8 +257,8 @@ func TestRunAutonomousPlumbing(t *testing.T) {
 	// The branch was cut and the workspace clone exists, wired into the Deps.
 	assert.Equal(t, filepath.Join(wsParent, "cmx-001"), seenWorkspace)
 
-	// The worker does not complete the card on the FSM happy path — the done
-	// phase does — and does not release a successful run.
+	// The worker does not complete the card on the FSM happy path - the done
+	// phase does - and does not release a successful run.
 	assert.Equal(t, 0, ops.count("CompleteTask"))
 	assert.Equal(t, 0, ops.count("ReleaseCard"))
 }
@@ -339,7 +339,7 @@ func TestRunHeartbeats(t *testing.T) {
 }
 
 // TestRunCleanTree: the FSM completes with no working-tree changes (nil return,
-// clean tree). The worker reports completed and does not push or complete —
+// clean tree). The worker reports completed and does not push or complete -
 // pushes and completion are the FSM's responsibility.
 func TestRunCleanTree(t *testing.T) {
 	remote := setupBareRemote(t)
@@ -363,7 +363,7 @@ func TestRunCleanTree(t *testing.T) {
 // openStdin yields a stdin held open for the test's duration, mirroring the
 // production attach: the host service keeps the container's stdin open for
 // its whole life, so EOF legitimately means "session over" in every mode.
-// The write end closes in cleanup — after Run has returned — which also lets
+// The write end closes in cleanup - after Run has returned - which also lets
 // the pump goroutine exit.
 func openStdin(t *testing.T) io.Reader {
 	t.Helper()
@@ -421,7 +421,7 @@ func TestAutonomousEntersOrchestrator(t *testing.T) {
 }
 
 // A card the server marks autonomous must enter the FSM even if a stale/forced
-// interactive flag arrives — the agent self-corrects on tcx.Autonomous.
+// interactive flag arrives - the agent self-corrects on tcx.Autonomous.
 func TestAutonomousFlagOverridesInteractive(t *testing.T) {
 	remote := setupBareRemote(t)
 	wsParent := t.TempDir()
@@ -491,7 +491,7 @@ func toolNames(t *testing.T, r *tools.Registry) []string {
 // GitForDir must hand back a git handle that structurally cannot push (no
 // branch policy was set on it), and Deps.WriteToolsForDir must build the same
 // tool composition as the main Deps.WriteTools registry when pointed at the
-// same directory — proving writeToolsFor is the one source of truth behind
+// same directory - proving writeToolsFor is the one source of truth behind
 // both the main call site and the per-candidate factory.
 func TestRunFSMWiresPerDirFactories(t *testing.T) {
 	remote := setupBareRemote(t)
@@ -544,7 +544,7 @@ func TestRunFSMWiresPerDirFactories(t *testing.T) {
 
 // TestRunFSMWiresSkillToolIntoCandidateRegistries: when a skills dir is
 // mounted, WriteToolsForDir must include the same Skill tool the main
-// WriteTools registry gets — Best-of-N candidates race with full tool parity
+// WriteTools registry gets - Best-of-N candidates race with full tool parity
 // instead of a skill-less write set. Swaps runOrchestrator, so it must not
 // run in parallel.
 func TestRunFSMWiresSkillToolIntoCandidateRegistries(t *testing.T) {
@@ -625,7 +625,7 @@ func TestHITLEntersOrchestrator(t *testing.T) {
 }
 
 // TestReviewParkedMapsToCompleted: a ReviewParkedError from the FSM is a
-// graceful completion — exit-0 path, completed reason, no CompleteTask call.
+// graceful completion - exit-0 path, completed reason, no CompleteTask call.
 func TestReviewParkedMapsToCompleted(t *testing.T) {
 	remote := setupBareRemote(t)
 	wsParent := t.TempDir()
@@ -679,7 +679,7 @@ func TestBudgetMapsToFailed(t *testing.T) {
 }
 
 // TestContextLimitMapsToFailed: a ContextLimitError (raw or wrapped) pushes WIP,
-// releases the claim, and surfaces a non-nil error — the budget-park shape — so
+// releases the claim, and surfaces a non-nil error - the budget-park shape - so
 // in-flight work survives a context-window stop. The wrapped case proves
 // errors.As traverses the wrap so a phase that wraps the sentinel still maps.
 func TestContextLimitMapsToFailed(t *testing.T) {
@@ -734,8 +734,8 @@ func TestContextLimitMapsToFailed(t *testing.T) {
 }
 
 // TestMaxTurnsMapsToFailed: a MaxTurnsError (wrapped, as the coder path wraps
-// it) pushes WIP, releases the claim, and surfaces a non-nil error — the
-// context-limit park shape — so truncated work survives for resume but is
+// it) pushes WIP, releases the claim, and surfaces a non-nil error - the
+// context-limit park shape - so truncated work survives for resume but is
 // never completed.
 func TestMaxTurnsMapsToFailed(t *testing.T) {
 	remote := setupBareRemote(t)
@@ -771,7 +771,7 @@ func TestEndSessionMidFSM(t *testing.T) {
 
 	swapRunOrchestrator(t, func(ctx context.Context, d orchestrator.Deps) error {
 		// Block until the end_session cancels the run context, then return its
-		// error — exactly what the real FSM does when its ctx is canceled.
+		// error - exactly what the real FSM does when its ctx is canceled.
 		require.NoError(t, os.WriteFile(filepath.Join(d.Cfg.Workspace, "wip.txt"), []byte("partial\n"), 0o644))
 		<-ctx.Done()
 

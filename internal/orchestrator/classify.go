@@ -29,7 +29,7 @@ var bugTitleVerbs = map[string]bool{
 }
 
 // bugBodyMarkers are defect-report phrases (create-plan Branch B body test).
-// Each must be specific enough to stand alone — vague words like "should"
+// Each must be specific enough to stand alone - vague words like "should"
 // are excluded, as they false-positive on ordinary feature acceptance criteria
 // and would trigger a needless paid diagnose pass.
 var bugBodyMarkers = []string{

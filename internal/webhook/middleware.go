@@ -14,7 +14,7 @@ import (
 //
 // The signed value is exactly what protocol.SignPayloadWithTimestamp produces:
 // the method, the full request-target (r.URL.RequestURI(), query included), the
-// timestamp, and the body. GETs sign with an empty body but the same URI — so a
+// timestamp, and the body. GETs sign with an empty body but the same URI - so a
 // signed GET /logs?project=x must include the query in the base string.
 //
 // On any verification failure (missing headers, bad signature, stale or future

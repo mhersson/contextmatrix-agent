@@ -14,8 +14,8 @@ const fallbackDocCommitMessage = "docs: update documentation"
 // whether external documentation is warranted and, if so, writes it, then code
 // commits and pushes the result. It is modelled on writePRBody but with a
 // best-effort invariant: the ONLY failure that fails the run is a budget park
-// (o.ledger.Check at the top). Every other failure — model run, branch diff,
-// commit, push — is logged and the run proceeds to review. Most cards correctly
+// (o.ledger.Check at the top). Every other failure - model run, branch diff,
+// commit, push - is logged and the run proceeds to review. Most cards correctly
 // write nothing: the agent leaves a clean tree, CommitWithMessage reports
 // committed == false, and the phase is a no-op.
 //
@@ -63,7 +63,7 @@ func runDocument(ctx context.Context, o *run) error {
 	}
 
 	// Best-effort on any model error (transport, context-limit, incapable). A
-	// *ContextLimitError is deliberately caught HERE, not propagated — otherwise
+	// *ContextLimitError is deliberately caught HERE, not propagated - otherwise
 	// the execute() FSM loop would park an otherwise-good run on a doc overflow.
 	// Budget was gated above and a mid-call overspend is caught by the next phase's
 	// ledger.Check, so no model error reaching this arm is ever a budget park.

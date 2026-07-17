@@ -37,7 +37,7 @@ func TestReplayCache_CapacityEvictsOldest(t *testing.T) {
 
 	require.False(t, c.CheckAndInsert("1", "a")) // [a]
 	require.False(t, c.CheckAndInsert("2", "b")) // [a b]
-	require.False(t, c.CheckAndInsert("3", "c")) // [b c] — a evicted (oldest)
+	require.False(t, c.CheckAndInsert("3", "c")) // [b c] - a evicted (oldest)
 
 	// "a" was evicted, so it is admitted again (no longer a duplicate).
 	assert.False(t, c.CheckAndInsert("1", "a"))

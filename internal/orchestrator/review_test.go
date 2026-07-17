@@ -515,7 +515,7 @@ func TestReviewRoundTwoDiffsAgainstSnapshot(t *testing.T) {
 
 func TestReviewNoOpFixWidensNextRoundToBaseBranch(t *testing.T) {
 	// A fix round that commits nothing (the cheap coder made no edits) must not
-	// leave the stale reviewed-head snapshot as the next round's diff base — that
+	// leave the stale reviewed-head snapshot as the next round's diff base - that
 	// makes round 2 diff HEAD...HEAD (empty), hiding the unresolved finding and
 	// letting an empty-delta panel spuriously approve. The next round must
 	// re-widen to the full base-branch diff.
@@ -551,8 +551,8 @@ func TestReviewNoOpFixWidensNextRoundToBaseBranch(t *testing.T) {
 func TestReviewPriorFindingsFedToNextRound(t *testing.T) {
 	// Round 1 is not approved with a recognizable finding (delta.go / nil deref);
 	// round 2 approves. The round-2 specialist panel must receive the round-1
-	// findings as a PRIOR FINDINGS block (cross-round memory), and round 1 — with
-	// no prior — must not carry that block.
+	// findings as a PRIOR FINDINGS block (cross-round memory), and round 1 - with
+	// no prior - must not carry that block.
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
 	client := &planLLM{responses: []llm.Response{
@@ -845,7 +845,7 @@ func TestReviewPinOverridesPanel(t *testing.T) {
 // reviewers clear the moderate bar (0.6) but not the complex bar (0.8); one
 // expensive strong reviewer clears both. At moderate the cheap trio fills the
 // three slots (the strong model is priced out of the band), so it never appears.
-// At complex the weak trio is gated out, forcing the strong model in — a model
+// At complex the weak trio is gated out, forcing the strong model in - a model
 // the moderate panel does not select.
 func TestReviewPanelEscalatesWhenAuthoritative(t *testing.T) {
 	const strong = "strong/reviewer"
@@ -893,7 +893,7 @@ func TestReviewPanelEscalatesWhenAuthoritative(t *testing.T) {
 		"moderate panel must be filled by the cheap trio; panel=%v", moderatePanel)
 
 	// The complex escalation must select at least one model the moderate panel did
-	// not — here the strong model, which only clears the complex bar.
+	// not - here the strong model, which only clears the complex bar.
 	escalated := false
 
 	for _, s := range complexPanel {

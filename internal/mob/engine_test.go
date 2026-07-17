@@ -421,7 +421,7 @@ func TestDiscussBudgetExhaustionSynthesizesEarly(t *testing.T) {
 	assert.Len(t, script.promptsFor("seat-1"), 1, "no critique round after budget break")
 	assert.Len(t, script.promptsFor("seat-2"), 1)
 
-	require.Len(t, mod.calls(), 1, "synthesis only — no classify")
+	require.Len(t, mod.calls(), 1, "synthesis only - no classify")
 	assert.Equal(t, "SYNTH-B", out.Synthesis)
 	assert.False(t, out.Consensus)
 	assert.InDelta(t, 0.101, out.CostUSD, 1e-9)
@@ -490,7 +490,7 @@ func TestDiscussInboxInterjections(t *testing.T) {
 func TestDiscussGuestDialBoundedByDeadline(t *testing.T) {
 	// A guest endpoint that accepts the connection but never answers must not
 	// hang the discussion: open() bounds the dial by GuestDeadline, the guest
-	// is surfaced as unreachable (name only — never the URL), and the internal
+	// is surfaced as unreachable (name only - never the URL), and the internal
 	// seats discuss through to synthesis.
 	release := make(chan struct{})
 	guestSrv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
@@ -624,7 +624,7 @@ func TestDiscussAllEmptyBlindRoundFailsQuorum(t *testing.T) {
 	})
 
 	require.ErrorIs(t, err, ErrNoQuorum)
-	require.Len(t, out.Transcript, 1, "briefing only — no empty entries")
+	require.Len(t, out.Transcript, 1, "briefing only - no empty entries")
 	assert.Empty(t, mod.calls(), "no classify or synthesis after quorum failure")
 
 	var notices int

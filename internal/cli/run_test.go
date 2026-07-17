@@ -16,7 +16,7 @@ import (
 )
 
 // solverLLM scripts a model that rewrites rle.go with the correct Encode via
-// edit, runs the tests, then stops — exercising the whole wiring offline.
+// edit, runs the tests, then stops - exercising the whole wiring offline.
 type solverLLM struct {
 	root string
 	step int
@@ -94,7 +94,7 @@ func mustJSON(m map[string]any) string {
 }
 
 // TestToolOutputMaxDefaultIs131072 asserts that the --tool-output-max-bytes flag
-// defaults to 131072 (128 KB) — matching the FSM / RunSpec default so local runs
+// defaults to 131072 (128 KB) - matching the FSM / RunSpec default so local runs
 // and autonomous runs cap tool output identically.
 func TestToolOutputMaxDefaultIs131072(t *testing.T) {
 	cmd := newRunCmd()
@@ -137,7 +137,7 @@ func TestCommandCheckUnrunnableErrors(t *testing.T) {
 
 func TestCommandCheckInheritsEnv(t *testing.T) {
 	// The standalone `run --verify` runs OUTSIDE the container trust boundary, so
-	// it inherits the developer's full environment — a scrubbed allowlist would
+	// it inherits the developer's full environment - a scrubbed allowlist would
 	// silently drop DATABASE_URL etc. and break integration-style verify commands.
 	t.Setenv("VERIFY_SMOKE_VAR", "inherited-value")
 

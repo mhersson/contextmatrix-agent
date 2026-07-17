@@ -64,7 +64,7 @@ func dialSeat(ctx context.Context, name, lens, endpoint, bearer string) (*seatHa
 }
 
 // dialGuest resolves {url}/.well-known/agent-card.json and connects from the
-// card. A registered-but-unreachable guest fails here — the engine records
+// card. A registered-but-unreachable guest fails here - the engine records
 // it as a dead seat and the discussion proceeds on quorum.
 func dialGuest(ctx context.Context, g GuestSeat) (*seatHandle, error) {
 	var opts []agentcard.ResolveOption
@@ -90,7 +90,7 @@ func dialGuest(ctx context.Context, g GuestSeat) (*seatHandle, error) {
 	}, nil
 }
 
-// authCtx attaches the handle's bearer as an Authorization service param —
+// authCtx attaches the handle's bearer as an Authorization service param -
 // the JSON-RPC transport sends it as an HTTP header.
 func (h *seatHandle) authCtx(ctx context.Context) context.Context {
 	if h.bearer == "" {
@@ -158,7 +158,7 @@ func (h *seatHandle) sendTurn(ctx context.Context, round int, body string) (stri
 
 // cancelInFlight issues a best-effort CancelTask for the current task on a
 // detached context. A first-turn timeout has no task ID yet (the blocking
-// SendMessage never returned one) — that orphaned run is bounded by the seat
+// SendMessage never returned one) - that orphaned run is bounded by the seat
 // harness's MaxTurns and MaxCostUSD instead.
 func (h *seatHandle) cancelInFlight() {
 	if h.taskID == "" {
@@ -172,7 +172,7 @@ func (h *seatHandle) cancelInFlight() {
 }
 
 // closeSeat sends the close control message on the handle's task (errors
-// ignored — close is a courtesy) and destroys the client.
+// ignored - close is a courtesy) and destroys the client.
 func (h *seatHandle) closeSeat(ctx context.Context) {
 	if h.client == nil {
 		return

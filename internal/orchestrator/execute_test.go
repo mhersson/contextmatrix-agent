@@ -70,7 +70,7 @@ func newExecRun(d Deps, subs []subtaskRef, maxCost float64) *run {
 	tc := cmclient.TaskContext{Title: "Parent card", Description: "parent body"}
 	o := newRun(d, tc)
 	o.subtasks = subs
-	// Pre-resolve a skip plan so runExecute's ensureVerify is a cached no-op —
+	// Pre-resolve a skip plan so runExecute's ensureVerify is a cached no-op -
 	// execute tests exercise the coder loop, not verify resolution.
 	isolateVerify(o)
 
@@ -79,7 +79,7 @@ func newExecRun(d Deps, subs []subtaskRef, maxCost float64) *run {
 
 func TestTopoOrder(t *testing.T) {
 	t.Run("dependencies run first", func(t *testing.T) {
-		// C depends on B, B depends on A — declared out of creation order to prove
+		// C depends on B, B depends on A - declared out of creation order to prove
 		// the sort orders by dependency, then by original creation order.
 		subs := []subtaskRef{
 			{ID: "A", Title: "a", DependsOnIDs: nil},
@@ -197,7 +197,7 @@ func TestExecuteSubtaskHeartbeatsClaim(t *testing.T) {
 }
 
 // blockingHeartbeatOps wraps fakeOps and makes Heartbeat block until ctx is
-// canceled, then return ctx.Err() — mirroring a well-behaved Ops transport.
+// canceled, then return ctx.Err() - mirroring a well-behaved Ops transport.
 // entered is closed the instant Heartbeat is invoked, so a test can wait for a
 // tick to be genuinely in flight (inside the blocking call) before exercising
 // the stop func.
@@ -218,7 +218,7 @@ func (b *blockingHeartbeatOps) Heartbeat(ctx context.Context, cardID string) err
 
 // TestSubtaskHeartbeatStopUnblocksBlockedHeartbeat pins that
 // startSubtaskHeartbeat's stop func returns promptly even while a heartbeat
-// tick is blocked mid-call — but only because the Ops implementation honors
+// tick is blocked mid-call - but only because the Ops implementation honors
 // context cancellation. The blocking stop func in executeClaimed's defer
 // depends entirely on that contract: if a future Ops implementation or
 // transport ignored ctx, stop would hang forever and every subtask completion
@@ -281,7 +281,7 @@ func TestExecuteSubtaskErrorReleasesClaim(t *testing.T) {
 // gate cannot confirm the work: a coder run truncated at the turn cap with an
 // UNRESOLVED verify (isolateVerify's skip plan) is NOT pushed or marked done,
 // and the claim is returned (the error-path release). The salvage gate requires
-// a passing verify — a skip is not a pass — so the run parks; the WIP is still
+// a passing verify - a skip is not a pass - so the run parks; the WIP is still
 // committed as resume evidence.
 func TestExecuteSubtaskMaxTurnsNeverCompletes(t *testing.T) {
 	ops := &fakeOps{}
@@ -537,7 +537,7 @@ func TestExecuteBudget(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true}
 	// Subtask 1 spends 0.60; cap is 1.00 but seeded at 0.50 already, so after
-	// subtask 1 the ledger is at 1.10 — subtask 2's pre-claim Check trips.
+	// subtask 1 the ledger is at 1.10 - subtask 2's pre-claim Check trips.
 	llmFake := &planLLM{responses: []llm.Response{
 		finishResp("feat: one", 0.60),
 		finishResp("feat: two", 0.60),
@@ -685,7 +685,7 @@ func TestCoderRunSimpleTierCapsAtBase(t *testing.T) {
 // TestSalvageCappedFinalSubtask proves a turn-capped final subtask is still
 // committed and the solver marked capped, not dropped. A genuinely capped run
 // never calls finish (a successful finish call would end the run cleanly
-// before the cap ever trips), so res.CompletionArgs is always empty here —
+// before the cap ever trips), so res.CompletionArgs is always empty here -
 // the salvage commit message is the sanitized-title fallback, proving the
 // salvage path no longer scrapes free text for a commit message.
 func TestSalvageCappedFinalSubtask(t *testing.T) {
@@ -812,8 +812,8 @@ func TestNoSalvageOnEarlierSubtask(t *testing.T) {
 
 // TestSoloTurnCapSalvagedWhenVerifyPasses proves the single-solver (parent /
 // mob session) rescue: a capped subtask whose committed work passes the authoritative
-// verify completes exactly like a finish-terminated run — pushed and marked
-// done — instead of parking. The single solver has no judge, so the verify runs
+// verify completes exactly like a finish-terminated run - pushed and marked
+// done - instead of parking. The single solver has no judge, so the verify runs
 // inline and is the completion authority.
 func TestSoloTurnCapSalvagedWhenVerifyPasses(t *testing.T) {
 	ops := &fakeOps{}
@@ -848,8 +848,8 @@ func TestSoloTurnCapSalvagedWhenVerifyPasses(t *testing.T) {
 // TestCoderGraceTurnFinishes proves the grace turn is the first net at the cap:
 // a coder that dithers past the wrap-up nudge to the turn cap but is actually
 // done lands `finish` in the harness's terminal-only grace call, completing the
-// subtask through the NORMAL finish path — pushed and marked done via the finish
-// commit message — WITHOUT touching the verify-gated salvage path. No verify is
+// subtask through the NORMAL finish path - pushed and marked done via the finish
+// commit message - WITHOUT touching the verify-gated salvage path. No verify is
 // stubbed here: the grace finish never consults it.
 func TestCoderGraceTurnFinishes(t *testing.T) {
 	ops := &fakeOps{}
@@ -877,8 +877,8 @@ func TestCoderGraceTurnFinishes(t *testing.T) {
 	require.NotEmpty(t, git.pushBranches, "grace-finished work is pushed")
 	assert.Equal(t, "cm/card-1", git.pushBranches[0])
 
-	// The commit carries the grace finish's own message — not the sanitized-title
-	// fallback the salvage path uses — proving completion ran through finish.
+	// The commit carries the grace finish's own message - not the sanitized-title
+	// fallback the salvage path uses - proving completion ran through finish.
 	require.NotEmpty(t, git.commitMsgs)
 	assert.Equal(t, "feat: done", git.commitMsgs[len(git.commitMsgs)-1])
 
@@ -892,7 +892,7 @@ func TestCoderGraceTurnFinishes(t *testing.T) {
 
 // TestSoloTurnCapStillParksWhenVerifyFails proves the gate is inviolable: a
 // capped subtask whose committed work FAILS the authoritative verify parks
-// (MaxTurnsError) — it is not completed and not pushed — and the commit stays as
+// (MaxTurnsError) - it is not completed and not pushed - and the commit stays as
 // WIP evidence for resume.
 func TestSoloTurnCapStillParksWhenVerifyFails(t *testing.T) {
 	ops := &fakeOps{}
@@ -921,8 +921,8 @@ func TestSoloTurnCapStillParksWhenVerifyFails(t *testing.T) {
 }
 
 // TestSoloTurnCapStillParksOnCleanTree proves a clean tree is never salvaged:
-// CommitWithMessage reporting (false, nil) means there is no diff — the only
-// completion evidence a capped run has — so even a passing verify cannot rescue
+// CommitWithMessage reporting (false, nil) means there is no diff - the only
+// completion evidence a capped run has - so even a passing verify cannot rescue
 // it and the run parks.
 func TestSoloTurnCapStillParksOnCleanTree(t *testing.T) {
 	ops := &fakeOps{}

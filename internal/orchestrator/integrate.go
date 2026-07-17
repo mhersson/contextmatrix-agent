@@ -16,7 +16,7 @@ import (
 // recorded BEFORE the rebase. On a rebase conflict with the base it falls back
 // (§5.6): abort (done by the helper), soft-reset to the merge-base, and recommit
 // as ONE squashed commit whose content is byte-identical to what review
-// approved — never auto-resolving, deferring the conflict to merge/PR time for a
+// approved - never auto-resolving, deferring the conflict to merge/PR time for a
 // human. It optionally opens a PR (body written by the orchestrator model),
 // reports the push, and transitions the parent to done.
 func runIntegrate(ctx context.Context, o *run) error {
@@ -46,7 +46,7 @@ func runIntegrate(ctx context.Context, o *run) error {
 	if rerr := d.Git.RebaseAutosquash(ctx, onto); errors.Is(rerr, ErrRebaseConflict) {
 		// Conflict fallback: the helper already aborted, restoring the pre-rebase
 		// HEAD and working tree. Soft-reset to the merge-base and recommit as one
-		// squashed commit — content identical to what review approved. We never
+		// squashed commit - content identical to what review approved. We never
 		// auto-resolve; the conflict is deferred to merge/PR time for a human.
 		mb, mberr := d.Git.MergeBase(ctx, onto, "HEAD")
 		if mberr != nil {
@@ -85,7 +85,7 @@ func runIntegrate(ctx context.Context, o *run) error {
 		url, err := o.openPR(ctx)
 		if err != nil {
 			// Budget parks must surface so the worker can park the run; any other PR
-			// failure is non-fatal — the push already landed, so the work is safe.
+			// failure is non-fatal - the push already landed, so the work is safe.
 			var be *BudgetExceededError
 			if errors.As(err, &be) {
 				return err
@@ -95,7 +95,7 @@ func runIntegrate(ctx context.Context, o *run) error {
 				"card_id", cfg.CardID, "error", err)
 
 			_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory; the push already landed
-				"integrate: pull request creation failed — branch is pushed; open the PR manually: "+err.Error())
+				"integrate: pull request creation failed - branch is pushed; open the PR manually: "+err.Error())
 		} else {
 			prURL = url
 		}
@@ -191,7 +191,7 @@ func (o *run) planOverview() string {
 
 // reviewOutcome returns the captured review summary, or a neutral note when the
 // review phase was skipped on resume (no summary recorded). The fallback must
-// never read as verified when the run's verify did not pass — otherwise a
+// never read as verified when the run's verify did not pass - otherwise a
 // summary-less, unverified run would feed the PR-body model "review approved" and
 // invite a false "tests pass" claim.
 func (o *run) reviewOutcome() string {
@@ -213,14 +213,14 @@ func squashMessage(title string) string { return sanitizeTitle(title) }
 
 // runDone is the done phase: bookkeeping only. It releases the parent's claim
 // and logs a completion summary. Both are best-effort on the log; the release is
-// also best-effort — the branch is pushed and the card is done, so a transient
+// also best-effort - the branch is pushed and the card is done, so a transient
 // release error (including ErrCardNotClaimed when the claim lapsed) must not
 // fail the run and trigger a false FAILED status.
 //
 // WithoutCancel on both: done runs as the FSM winds up, exactly when an
 // end_session/EOF frame may have canceled the run context. The release and the
 // completion note must still go out even when the run context is the thing that
-// died — mirroring releaseSubtask (execute.go).
+// died - mirroring releaseSubtask (execute.go).
 func runDone(ctx context.Context, o *run) error {
 	d := o.d
 	cfg := d.Cfg

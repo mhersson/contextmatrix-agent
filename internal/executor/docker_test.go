@@ -78,7 +78,7 @@ func TestContainerConfig_CACertMountAndEnv(t *testing.T) {
 	assert.Contains(t, cfg.Env, "CMX_CA_CERT_FILE=/run/cm-ca/ca.crt")
 	assert.Contains(t, cfg.Env, "FOO=bar", "pre-existing env is preserved")
 
-	// The git/gh CA vars are deliberately NOT set at the container level — the
+	// The git/gh CA vars are deliberately NOT set at the container level - the
 	// harness scrubs subprocess env, so they would be dead and misleading. git/gh
 	// get them on their explicit subprocess env instead.
 	for _, e := range cfg.Env {

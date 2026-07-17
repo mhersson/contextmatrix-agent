@@ -80,7 +80,7 @@ type containerWaiter interface {
 
 // waitForSelfExit reports whether the container left the running state on
 // its own within grace. Wait errors and the grace timeout both report
-// false — the caller then kills.
+// false - the caller then kills.
 func waitForSelfExit(ctx context.Context, docker containerWaiter, containerID string, grace time.Duration) bool {
 	waitCtx, cancel := context.WithTimeout(ctx, grace)
 	defer cancel()
@@ -194,7 +194,7 @@ func containerConfig(spec LaunchSpec) (*container.Config, *container.HostConfig)
 
 	if spec.CACertHostFile != "" {
 		// Mount the operator's extra CA read-only and point the worker at it via
-		// CMX_CA_CERT_FILE — the only CA var set at the container level. The
+		// CMX_CA_CERT_FILE - the only CA var set at the container level. The
 		// worker reads it for its own outbound TLS (LLM, MCP) and threads the path
 		// onto its git/gh subprocesses explicitly. GIT_SSL_CAINFO / GH_CA_BUNDLE /
 		// SSL_CERT_FILE are deliberately NOT set here: the harness scrubs
@@ -535,7 +535,7 @@ func (e *DockerExecutor) List(_ context.Context) ([]*Run, error) {
 // Failures are included in the results (Err != nil) rather than swallowed, so
 // the caller can surface partial failures to the CM operator. Runs are killed
 // serially and each Kill inherits the self-exit grace window, so stopping N
-// still-running containers can block up to N x killGraceTimeout — accepted,
+// still-running containers can block up to N x killGraceTimeout - accepted,
 // since N is small and this is the operator bulk-stop path, not a hot path.
 func (e *DockerExecutor) StopAll(ctx context.Context, project string) ([]StopResult, error) {
 	var results []StopResult
@@ -562,7 +562,7 @@ func (e *DockerExecutor) StopAll(ctx context.Context, project string) ([]StopRes
 }
 
 // CleanupOrphans force-removes every agent-labeled container found at boot.
-// Anything matching is orphaned by definition — the tracker is empty in a fresh
+// Anything matching is orphaned by definition - the tracker is empty in a fresh
 // process, so a labeled container is a leftover from a previous run. This
 // assumes exclusive ownership of contextmatrix.agent-labeled containers on the
 // daemon; a second executor process sharing the Docker daemon would have its

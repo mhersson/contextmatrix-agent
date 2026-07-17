@@ -31,7 +31,7 @@ const (
 // the relative paths of nested instruction files (ENUMERATED only, never read).
 // The split closes a poisoning vector: a repo that COMMITS a dependency tree (Go
 // vendor/, a checked-in node_modules) carries third-party AGENTS.md/CLAUDE.md
-// files that are tracked, not gitignored — injecting their content would present
+// files that are tracked, not gitignored - injecting their content would present
 // a foreign library's instructions to every phase as "the target repo's own
 // rules". Listing a nested doc's path lets the model read it on demand without
 // that masquerade. Best-effort: a missing or non-directory root yields nils and
@@ -64,7 +64,7 @@ func discoverGrounding(root string) (*groundingDoc, []string) {
 }
 
 // gitTrackedNested enumerates the workspace's nested instruction files from git's
-// tracked index in a single `git ls-files` — the pathspecs require a leading
+// tracked index in a single `git ls-files` - the pathspecs require a leading
 // directory so the root doc is excluded (it is discovered separately). ok is
 // false when root is not a git repo or git is unavailable (ls-files exits
 // non-zero), signalling the caller to fall back to a filesystem walk. Returned
@@ -295,7 +295,7 @@ func groundingDepth(root, path string) int {
 
 // groundingBlock renders the root instruction file plus the nested-file listing
 // as a prompt block. The root doc's content is injected verbatim; nested files
-// are named as PATHS with an instruction to read them on demand — never their
+// are named as PATHS with an instruction to read them on demand - never their
 // content, so a committed third-party doc cannot pose as the repo's own rules.
 // No root doc and an empty listing yields "" so phases inject nothing.
 func groundingBlock(root *groundingDoc, nested []string) string {
@@ -305,7 +305,7 @@ func groundingBlock(root *groundingDoc, nested []string) string {
 
 	var b strings.Builder
 
-	b.WriteString("REPO GROUNDING — the target repository's own instructions; " +
+	b.WriteString("REPO GROUNDING - the target repository's own instructions; " +
 		"follow them, they override generic defaults.\n")
 
 	if root != nil {

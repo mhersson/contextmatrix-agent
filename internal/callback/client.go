@@ -28,7 +28,7 @@ const (
 	// backgroundBaseDelay and backgroundMaxDelay bound the exponential
 	// backoff a TERMINAL (completed/failed) status callback falls back to
 	// once the fast synchronous attempts above are exhausted: 5s, 10s, 20s,
-	// 40s, 80s, then capped at 2m — retried indefinitely until it succeeds,
+	// 40s, 80s, then capped at 2m - retried indefinitely until it succeeds,
 	// is rejected with a non-retryable 4xx, or the client is Closed (process
 	// shutdown). A terminal callback is the only signal that clears a card's
 	// parent claim / worker_status in ContextMatrix, so it must not be
@@ -50,7 +50,7 @@ var defaultDelays = [maxAttempts]time.Duration{
 // Client sends HMAC-signed callbacks to ContextMatrix.
 type Client struct {
 	baseURL string // no trailing slash
-	apiKey  string // HMAC key — the agent backend entry's api_key
+	apiKey  string // HMAC key - the agent backend entry's api_key
 	http    *http.Client
 	logger  *slog.Logger
 
@@ -78,7 +78,7 @@ type Client struct {
 	backgroundDelay func(attempt int) time.Duration
 
 	// bgAttempted, if non-nil, is signaled once per background retry attempt
-	// — a test synchronization hook, never set in production.
+	// - a test synchronization hook, never set in production.
 	bgAttempted chan struct{}
 }
 
@@ -130,7 +130,7 @@ func defaultBackgroundDelay(attempt int) time.Duration {
 }
 
 // isTerminalStatus reports whether status is a terminal worker-status
-// (completed/failed) — the only callbacks that clear a card's parent claim
+// (completed/failed) - the only callbacks that clear a card's parent claim
 // and worker_status in ContextMatrix. "running" is superseded by the next
 // status update, so it keeps the fast, bounded retry only.
 func isTerminalStatus(status string) bool {
@@ -205,8 +205,8 @@ func (c *Client) ReportStatus(ctx context.Context, cardID, project, status, mess
 
 // sendStatusOnce executes a single signed POST attempt for the status
 // payload. A fresh timestamp (and therefore a fresh signature) is generated
-// on every call so the receiver's replay cache treats every attempt —
-// synchronous or background — as distinct.
+// on every call so the receiver's replay cache treats every attempt -
+// synchronous or background - as distinct.
 func (c *Client) sendStatusOnce(ctx context.Context, uri, path string, body []byte) error {
 	sig, ts := protocol.SignRequestHeaders(c.apiKey, http.MethodPost, uri, body)
 
@@ -284,7 +284,7 @@ func (c *Client) scheduleBackgroundRetry(cardID, project, status, uri, path stri
 }
 
 // VerifyAutonomous confirms the card's autonomous flag before a promote
-// frame is written — fail closed: any error means "do not promote".
+// frame is written - fail closed: any error means "do not promote".
 // The GET is signed with an empty body.
 func (c *Client) VerifyAutonomous(ctx context.Context, project, cardID string) (bool, error) {
 	path := fmt.Sprintf("/api/v1/cards/%s/%s/autonomous",

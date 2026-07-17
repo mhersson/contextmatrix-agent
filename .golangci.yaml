@@ -43,7 +43,7 @@ linters:
     - linters: [gosec]
       text: "G104"
     # G301/G302/G306: files written into agent workspaces are repo source files,
-    # not secrets — git checkouts use 0644/0755 and the worked code must keep
+    # not secrets - git checkouts use 0644/0755 and the worked code must keep
     # standard modes. Secrets never go through these write paths.
     - linters: [gosec]
       text: "G301|G302|G306"

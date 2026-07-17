@@ -27,7 +27,7 @@ func TestLogs_SSEStream(t *testing.T) {
 	ts := httptest.NewServer(srv.Routes())
 	defer ts.Close()
 
-	// Signed GET WITH the query string — the query is part of the base string.
+	// Signed GET WITH the query string - the query is part of the base string.
 	target := ts.URL + "/logs?project=proj"
 
 	req, err := http.NewRequest(http.MethodGet, target, nil)

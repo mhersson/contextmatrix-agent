@@ -21,7 +21,7 @@ import (
 )
 
 // writeSelfSignedCA writes a self-signed CA PEM to a temp file and returns its
-// path — enough for the CA helpers to parse and trust.
+// path - enough for the CA helpers to parse and trust.
 func writeSelfSignedCA(t *testing.T) string {
 	t.Helper()
 
@@ -424,7 +424,7 @@ func TestSpecFromEnv_Verify(t *testing.T) {
 		setRequired(t)
 		t.Setenv("CMX_VERIFY", "{not json")
 
-		// Mirrors CMX_SELECTION: a malformed value is a warning, not an error —
+		// Mirrors CMX_SELECTION: a malformed value is a warning, not an error -
 		// the run proceeds and falls back to detection.
 		spec, err := specFromEnv()
 		require.NoError(t, err)

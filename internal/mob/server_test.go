@@ -18,7 +18,7 @@ import (
 const testBearer = "server-test-bearer"
 
 // bearerCtx attaches the Authorization service param the way the moderator
-// does — the JSON-RPC transport turns it into an HTTP header.
+// does - the JSON-RPC transport turns it into an HTTP header.
 func bearerCtx(ctx context.Context, token string) context.Context {
 	return a2aclient.AttachServiceParams(ctx, a2aclient.ServiceParams{
 		"Authorization": {"Bearer " + token},
@@ -26,7 +26,7 @@ func bearerCtx(ctx context.Context, token string) context.Context {
 }
 
 // dialEndpoint connects a raw a2a client to one seat endpoint. It returns the
-// dial error rather than asserting on it directly — callers may invoke it
+// dial error rather than asserting on it directly - callers may invoke it
 // from a spawned goroutine, where require/assert.FailNow-style calls are
 // unsafe.
 func dialEndpoint(t *testing.T, endpoint string) (*a2aclient.Client, error) {

@@ -28,7 +28,7 @@ func coderPrior(v float64) registry.PriorEntry {
 // assertions stay isolated. get lazily creates a committing fake for an unseen
 // dir (the happy path); set pre-scripts a dir with a failing/panicking handle.
 // GitForDir is called sequentially from runFanout's main loop, so the map is
-// never touched concurrently — the mutex is belt-and-braces.
+// never touched concurrently - the mutex is belt-and-braces.
 type perDirGit struct {
 	mu sync.Mutex
 	m  map[string]GitOps
@@ -186,7 +186,7 @@ func TestFanoutHappyPath(t *testing.T) {
 	// First-arrival claims: the RUN claims each subtask exactly once when the
 	// first candidate reaches it, so the board shows in_progress during the
 	// race (and CM's parent auto-transition fires). Candidates themselves never
-	// claim — three racers, one claim per subtask. Completions still wait for
+	// claim - three racers, one claim per subtask. Completions still wait for
 	// the winner replay.
 	opCalls := ops.recorded()
 	assert.Equal(t, 1, countCalls(opCalls, "ClaimCard:SUB-1"), "each subtask claimed exactly once, not per candidate")
@@ -311,7 +311,7 @@ func TestFanoutAllFailed(t *testing.T) {
 }
 
 // TestFanoutFirstArrivalClaimBestEffort: the first-arrival claim is board
-// cosmetics, not a correctness gate — a claim failure must not kill the race.
+// cosmetics, not a correctness gate - a claim failure must not kill the race.
 func TestFanoutFirstArrivalClaimBestEffort(t *testing.T) {
 	ops := &fakeOps{claimErr: errors.New("cm unreachable")}
 	mainGit := &fakeGit{}
@@ -365,8 +365,8 @@ func TestFanoutHeartbeatStopBlocksAndCovers(t *testing.T) {
 // model is harness-incapable, so each candidate drives the shared recovery state
 // (o.reselects / o.excluded) and re-picks concurrently. Run under -race, it proves
 // the selMu discipline serializes those mutations. With no capable model anywhere,
-// every candidate fails — some via the shared re-selection cap, some via a drained
-// pool (the empty-model sentinel) — so the fan-out fails.
+// every candidate fails - some via the shared re-selection cap, some via a drained
+// pool (the empty-model sentinel) - so the fan-out fails.
 func TestFanoutIncapableRecoveryRaceSafe(t *testing.T) {
 	ops := &fakeOps{}
 	mainGit := &fakeGit{}
@@ -476,8 +476,8 @@ func TestFanoutCandidateReselectsOnIncapable(t *testing.T) {
 
 // TestFanoutCandidateDropsWhenPoolExhausted proves a candidate whose model pool
 // drains (every viable model excluded) drops cleanly via the empty-model
-// sentinel, while a sibling candidate on a pinned, prior-less model — invisible to
-// auto-selection, so the drained candidate cannot steal it — is unaffected.
+// sentinel, while a sibling candidate on a pinned, prior-less model - invisible to
+// auto-selection, so the drained candidate cannot steal it - is unaffected.
 func TestFanoutCandidateDropsWhenPoolExhausted(t *testing.T) {
 	ops := &fakeOps{}
 	mainGit := &fakeGit{}
@@ -486,7 +486,7 @@ func TestFanoutCandidateDropsWhenPoolExhausted(t *testing.T) {
 	d, pdg, _ := fanoutDeps(t, ops, mainGit, client, 2)
 	d.Registry = registry.NewRegistryFromParts(
 		llm.Catalog{
-			// pinned/coder has NO prior, so it is reachable only via the pin — the
+			// pinned/coder has NO prior, so it is reachable only via the pin - the
 			// drained candidate's auto re-pick can never land on it.
 			{ID: "pinned/coder", ContextLength: 200000, SupportedParameters: []string{"tools"}},
 			{ID: "bad1/coder", ContextLength: 200000, SupportedParameters: []string{"tools"}, PromptPricePerTok: 1e-6},
@@ -611,7 +611,7 @@ func TestFanoutSalvagesCappedCandidates(t *testing.T) {
 	d, pdg, ws := fanoutDeps(t, ops, mainGit, &planLLM{responses: responses}, 2)
 	// fanoutDeps builds on execTestDeps, which defaults MaxTurns to 20; this
 	// test needs each candidate's coder run to cap after 5 scripted burn
-	// turns — set BEFORE newFanoutRun, or 12 responses against MaxTurns=20
+	// turns - set BEFORE newFanoutRun, or 12 responses against MaxTurns=20
 	// exhaust into a clean stop and nothing caps.
 	d.Cfg.MaxTurns = 5
 	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)

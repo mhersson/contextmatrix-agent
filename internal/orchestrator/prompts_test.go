@@ -65,7 +65,7 @@ func TestBuildArtifactHygieneInBothCodingPrompts(t *testing.T) {
 	for name, p := range map[string]string{"coder": coderPrompt, "fix": fixPrompt} {
 		assert.Contains(t, p, "do not leave its output",
 			"%s prompt must include the build-hygiene note", name)
-		// The hygiene note must name no build tool — it applies to every language.
+		// The hygiene note must name no build tool - it applies to every language.
 		assert.NotContains(t, p, "go build",
 			"%s prompt build-hygiene note must stay language-neutral", name)
 	}

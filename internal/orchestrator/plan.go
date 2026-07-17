@@ -106,11 +106,11 @@ func parsePlan(s string) (plan, error) {
 }
 
 // extractJSON returns the JSON object the model intended as its answer. A
-// whole-output bare object is returned as-is — fence markers inside its string
+// whole-output bare object is returned as-is - fence markers inside its string
 // values must never trigger fence-stripping, which is not string-aware and
 // would mangle the payload. Otherwise it prefers a fenced ```json block
 // (models wrap the verdict in one and surround it with prose that contains
-// stray braces), and finally returns the LAST balanced top-level object —
+// stray braces), and finally returns the LAST balanced top-level object -
 // robust to prose/code braces appearing before it.
 func extractJSON(s string) (string, bool) {
 	if t := strings.TrimSpace(s); strings.HasPrefix(t, "{") && json.Valid([]byte(t)) {
@@ -202,7 +202,7 @@ func resolvePin(reg *registry.Registry, pin string) bool {
 //  3. payload (CM's default_model from the trigger), if set;
 //  4. else the serve-config default.
 //
-// A best-effort card-log failure is swallowed — the warning is advisory.
+// A best-effort card-log failure is swallowed - the warning is advisory.
 func resolveOrchestratorModel(
 	ctx context.Context,
 	reg *registry.Registry,
@@ -232,7 +232,7 @@ func resolveOrchestratorModel(
 		}
 
 		_ = ops.AddLog(ctx, cardID, //nolint:errcheck // advisory note; failure must not abort planning
-			fmt.Sprintf("orchestrator model pin %q not in catalog — using %q", pinned, target))
+			fmt.Sprintf("orchestrator model pin %q not in catalog - using %q", pinned, target))
 	}
 
 	if payload != "" {
@@ -244,12 +244,12 @@ func resolveOrchestratorModel(
 
 // resolveDecisionModel resolves the model an orchestrator DECISION phase runs on
 // (plan decomposition, review synthesis). These phases are reasoning- and
-// calibration-sensitive — a weak model emits malformed plans and mis-calibrated
-// verdicts — so, unlike the low-stakes docs phase, they are floored to a capable
+// calibration-sensitive - a weak model emits malformed plans and mis-calibrated
+// verdicts - so, unlike the low-stakes docs phase, they are floored to a capable
 // judgment model. A catalog-resolvable ModelOrchestrator pin still wins (operator
 // override; an unresolvable pin already warned inside resolveOrchestratorModel).
 // Otherwise the floor is the same best-value selection the authoritative review
-// panel uses — RoleReviewer @ TierComplex — the measured proxy for orchestrator-
+// panel uses - RoleReviewer @ TierComplex - the measured proxy for orchestrator-
 // level judgment (the live catalog measures only coder/reviewer; reviewer is the
 // closer fit for both decomposing and judging). Fixed at TierComplex for EVERY
 // call: decision quality does not scale with task complexity, so even a trivial
@@ -264,7 +264,7 @@ func resolveDecisionModel(
 ) string {
 	base := resolveOrchestratorModel(ctx, reg, emit, ops, cardID, pinned, payload, fallback)
 
-	// A resolvable operator pin is authoritative — never floor over it.
+	// A resolvable operator pin is authoritative - never floor over it.
 	if resolvePin(reg, pinned) || reg == nil {
 		return base
 	}
@@ -400,7 +400,7 @@ const mobAdjustTailEntries = 12
 // single repair turn). prior, when non-nil, re-opens the previous discussion
 // for one non-blind feedback round (HITL adjust): the briefing is the prior
 // transcript tail plus the human's feedback as a human-authored entry.
-// ok=false on any failure — the caller falls back to the solo draftPlan path.
+// ok=false on any failure - the caller falls back to the solo draftPlan path.
 func (o *run) mobDraftPlan(ctx context.Context, diagnosis, design, feedback string, prior *mob.Outcome) (plan, *mob.Outcome, bool) {
 	seats := min(o.d.Cfg.Mob.Participants, len(planLenses))
 
@@ -528,7 +528,7 @@ func (o *run) recordDiscussion(ctx context.Context, out *mob.Outcome) {
 	if out.Consensus {
 		b.WriteString("Outcome: consensus\n")
 	} else {
-		b.WriteString("Outcome: unresolved dissent — carried into the output as risk notes\n")
+		b.WriteString("Outcome: unresolved dissent - carried into the output as risk notes\n")
 	}
 
 	fmt.Fprintf(&b, "Cost: $%.4f", out.CostUSD)

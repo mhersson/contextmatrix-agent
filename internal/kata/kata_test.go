@@ -26,7 +26,7 @@ func TestCopyProducesFailingThenPassingKata(t *testing.T) {
 	cmd.Dir = dest
 	require.Error(t, cmd.Run(), "skeleton kata should fail")
 
-	// A correct implementation must PASS — proves the kata is well-formed.
+	// A correct implementation must PASS - proves the kata is well-formed.
 	good := `package kata
 import "strconv"
 func Encode(s string) string {

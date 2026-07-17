@@ -15,7 +15,7 @@ import (
 // ID; Stdin is the attached stdin stream (control frames flow over it for the
 // container's whole life) and is nil in unit tests that exercise the tracker
 // without Docker. Stdin is single-writer: callers must serialize writes per
-// run — concurrent writers (e.g. webhook handlers on separate HTTP goroutines)
+// run - concurrent writers (e.g. webhook handlers on separate HTTP goroutines)
 // would interleave frame bytes on the wire.
 type Run struct {
 	ContainerID string
@@ -97,7 +97,7 @@ func (t *Tracker) Remove(project, cardID string) {
 
 // List returns a snapshot slice of the tracked runs. Mutating the slice does
 // not affect the tracker, but the *Run elements are shared pointers, not deep
-// copies — mutating a Run's fields is visible to every other holder.
+// copies - mutating a Run's fields is visible to every other holder.
 func (t *Tracker) List() []*Run {
 	t.mu.Lock()
 	defer t.mu.Unlock()

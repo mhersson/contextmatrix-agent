@@ -30,12 +30,12 @@ const (
 	guestTurnDeadline    = 300 * time.Second
 )
 
-// ErrNoQuorum marks a quorum failure — fewer than two seats responded in the
+// ErrNoQuorum marks a quorum failure - fewer than two seats responded in the
 // first live round. Callers treat it (like any Discuss error) as a signal to
 // fall back to the existing solo path; a discussion never fails the card.
 var ErrNoQuorum = errors.New("mob: no quorum")
 
-// Topic is one discussion request. The engine never branches on Kind — it is
+// Topic is one discussion request. The engine never branches on Kind - it is
 // labeling/telemetry only; Rounds/Blind/Lenses are the control knobs.
 type Topic struct {
 	Kind     string // "plan" | "review" | "checkpoint"
@@ -97,10 +97,10 @@ type SeatRunner func(ctx context.Context, seat SeatConfig, history []Turn, promp
 // model slug the call ran on, and USD cost.
 type ModeratorRunner func(ctx context.Context, prompt string) (text, model string, cost float64, err error)
 
-// EmitFn publishes one live transcript event (kind "discussion") — wired to
+// EmitFn publishes one live transcript event (kind "discussion") - wired to
 // the orchestrator's emitter. round may be -1 for non-round notices. model is
 // the speaker's LLM slug ("" for engine-generated notices, the briefing, and
-// human interjections — which carry no model pill).
+// human interjections - which carry no model pill).
 type EmitFn func(author, lens, model string, round int, content string)
 
 type EngineConfig struct {
@@ -112,7 +112,7 @@ type EngineConfig struct {
 	Inbox     harness.Inbox // human interjections; nil = none
 	BudgetUSD float64       // mob session budget term; 0 = unlimited
 
-	// SeatEndpoint maps an internal seat name to its loopback A2A endpoint —
+	// SeatEndpoint maps an internal seat name to its loopback A2A endpoint -
 	// wired to (*Server).SeatEndpoint by the caller, which owns the server
 	// lifecycle (StartServer/Close). Bearer authenticates every internal-seat
 	// call. Runner above is not invoked by the engine directly: the caller

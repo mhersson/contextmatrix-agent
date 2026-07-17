@@ -601,7 +601,7 @@ type planLLM struct {
 
 	// errAfter, if > 0, makes the call at this 1-indexed position (and any
 	// later call) return errPlanLLM instead of a scripted/default response.
-	// 0 (default) disables — every call succeeds.
+	// 0 (default) disables - every call succeeds.
 	errAfter int
 }
 
@@ -628,7 +628,7 @@ func (p *planLLM) next(req llm.Request) (llm.Response, error) {
 	p.toolCounts = append(p.toolCounts, len(req.Tools))
 	p.msgsPerCall = append(p.msgsPerCall, append([]llm.Message(nil), req.Messages...))
 
-	// Capture the last user message — the phase task prompt.
+	// Capture the last user message - the phase task prompt.
 	for j := len(req.Messages) - 1; j >= 0; j-- {
 		if req.Messages[j].Role == "user" {
 			p.tasks = append(p.tasks, req.Messages[j].Content)

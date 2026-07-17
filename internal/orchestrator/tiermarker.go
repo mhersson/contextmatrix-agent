@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// The tier marker persists the planner's tier on the subtask card body — CM
+// The tier marker persists the planner's tier on the subtask card body - CM
 // cards are the ONLY persistence a resumed run can read, and list_cards carries
 // just id/title/state. An HTML comment renders invisibly in the UI's markdown.
 var tierMarkerRe = regexp.MustCompile(`(?m)^\s*<!-- cm:tier=(simple|moderate|complex|critical) -->\s*$`)

@@ -22,7 +22,7 @@ var snapshotManifests = []string{"go.mod", "package.json", "Makefile", "pyprojec
 
 // repoSnapshot renders a bounded picture of the workspace for planning
 // discussions: the tracked file list (capped), the README head, and which
-// build manifests exist — so planners and seats spend zero turns discovering
+// build manifests exist - so planners and seats spend zero turns discovering
 // repo shape, and a greenfield repo is stated outright instead of being
 // triple-discovered by every seat. Returns "" when the root is empty or not a
 // git repo (the briefing then simply omits the block, no worse than before).
@@ -41,7 +41,7 @@ func repoSnapshot(root string) string {
 	b.WriteString("REPO SNAPSHOT (authoritative; do not spend turns re-verifying this)\n")
 
 	if len(files) <= snapshotGreenfieldMax {
-		fmt.Fprintf(&b, "This repository is effectively EMPTY — tracked files: %s. Treat the task as greenfield; do not explore for existing structure.\n",
+		fmt.Fprintf(&b, "This repository is effectively EMPTY - tracked files: %s. Treat the task as greenfield; do not explore for existing structure.\n",
 			strings.Join(files, ", "))
 	} else {
 		fmt.Fprintf(&b, "Tracked files (%d):\n", len(files))
@@ -72,7 +72,7 @@ func repoSnapshot(root string) string {
 // repoSnapshotBlock is the prompt-ready snapshot for this run's workspace,
 // redacted the same way newRun redacts the grounding block (defense-in-depth:
 // the README head reaches the LLM endpoint, so a secret in it must be scrubbed
-// before it leaves the worker). "" when the workspace is not a git repo — the
+// before it leaves the worker). "" when the workspace is not a git repo - the
 // briefing then omits the block. Non-empty results are wrapped in surrounding
 // blank lines so the block sits apart from the grounding above and the task
 // text below.

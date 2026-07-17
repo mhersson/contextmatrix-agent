@@ -445,7 +445,7 @@ func TestTrigger_ImageAndMCPKeyOverride(t *testing.T) {
 // TestTrigger_WorkerImageWireTag pins the decode side of the protocol v0.8.0
 // rename: a raw trigger body carrying "worker_image" (not the pre-rename
 // "runner_image") must drive the launch spec's image. Building the body from a
-// raw JSON string rather than marshalling a TriggerPayload is the point — it
+// raw JSON string rather than marshalling a TriggerPayload is the point - it
 // exercises the actual wire tag, which a shared-struct round-trip cannot.
 func TestTrigger_WorkerImageWireTag(t *testing.T) {
 	h := newHarness(t, 4)
@@ -724,7 +724,7 @@ func TestMessage_WriteFailureRetryDelivers(t *testing.T) {
 	h.tracker.Remove("proj", "PROJ-001")
 	healthy := h.addRun("PROJ-001", "proj")
 
-	// Retry with the SAME message_id: must NOT be deduped — it must deliver.
+	// Retry with the SAME message_id: must NOT be deduped - it must deliver.
 	w2 := h.doAt(t, http.MethodPost, "/message", payload, t2)
 	require.Equal(t, http.StatusAccepted, w2.Code, "retry after failed write must deliver, not false-ack")
 
@@ -948,7 +948,7 @@ func TestHealth_Unauthenticated(t *testing.T) {
 	h := newHarness(t, 7)
 	h.addRun("PROJ-001", "proj")
 
-	// No signing — /health is unauthenticated.
+	// No signing - /health is unauthenticated.
 	r := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
 	h.server.Routes().ServeHTTP(w, r)
@@ -1248,7 +1248,7 @@ func TestBuildLaunchSpecEmitsReasoningEffort(t *testing.T) {
 
 func TestBuildLaunchSpec_CompactionEnvOmittedWhenDisabled(t *testing.T) {
 	// Disabled compaction (the default) emits no CMX_COMPACTION_* vars, so the
-	// worker keeps the hard context_limit stop — behavior-neutral.
+	// worker keeps the hard context_limit stop - behavior-neutral.
 	s := NewServer(Config{
 		APIKey:    "k",
 		Executor:  &fakeExecutor{},
@@ -1266,7 +1266,7 @@ func TestBuildLaunchSpec_CompactionEnvOmittedWhenDisabled(t *testing.T) {
 // TestBuildLaunchSpec_BestOfN pins the CM_BEST_OF_N env emission and pids-limit
 // scaling: BestOfN > 1 emits the env var and multiplies PidsLimit by N;
 // BestOfN <= 1 (the default) emits nothing and leaves PidsLimit unchanged. The
-// memory limit is intentionally left alone here — candidate verifies run
+// memory limit is intentionally left alone here - candidate verifies run
 // serially in the judge phase.
 func TestBuildLaunchSpec_BestOfN(t *testing.T) {
 	newServerWithPids := func(pids int64) *Server {
@@ -1521,7 +1521,7 @@ func TestLaunch_ProvisionFailureReportsFailedWithoutLaunching(t *testing.T) {
 // pre-check does not serialize same-card admission, so two launches for one
 // card can both reach admission. The loser must be rejected up front (the card
 // is already tracked) WITHOUT provisioning, launching, or touching the winner's
-// per-run credentials — before this fix the loser skipped provisioning but
+// per-run credentials - before this fix the loser skipped provisioning but
 // still reached the executor, and a tracker.Remove landing in that window could
 // admit it against an unprovisioned run dir the winner's Teardown then deleted.
 func TestLaunch_DuplicateTriggerDoesNotClobberWinnerCredentials(t *testing.T) {
@@ -1624,8 +1624,8 @@ func TestLaunch_ConcurrentDuplicateTriggersSerialized(t *testing.T) {
 //
 // These pin the fail-closed behavior: ContextMatrix provisions both
 // credentials per run, and a trigger missing either must never reach the
-// executor. Rejection surfaces exactly like a launch or provisioning failure —
-// a "failed" status callback, not a synchronous HTTP error — since the guard
+// executor. Rejection surfaces exactly like a launch or provisioning failure -
+// a "failed" status callback, not a synchronous HTTP error - since the guard
 // lives in admitAndLaunch, downstream of the 202 Accepted response.
 
 // TestLaunch_GitTokenAloneDoesNotSatisfyLLMGuard proves the two guards are
@@ -1717,8 +1717,8 @@ func TestLaunch_GuardsDoNotFireWhenPayloadProvisionsBoth(t *testing.T) {
 
 // TestTrigger_RejectsAndReportsFailedWhenNoCredentialSourceAtAll drives the
 // guard through the full HTTP /trigger endpoint (not just s.launch directly):
-// the response is still 202 Accepted — rejection surfaces only via the async
-// status callback — and no container is ever launched.
+// the response is still 202 Accepted - rejection surfaces only via the async
+// status callback - and no container is ever launched.
 func TestTrigger_RejectsAndReportsFailedWhenNoCredentialSourceAtAll(t *testing.T) {
 	tracker := executor.NewTracker(4)
 	exec := &fakeExecutor{tracker: tracker}
@@ -1765,7 +1765,7 @@ func TestTrigger_RejectsAndReportsFailedWhenNoCredentialSourceAtAll(t *testing.T
 
 // TestBuildLaunchSpec_Mob pins the CM_MOB_* env emission, mirroring the
 // Best-of-N pattern: scalar knobs ride plain env; guest specs (bearer tokens
-// inside) never do — they travel only via the per-run secrets file.
+// inside) never do - they travel only via the per-run secrets file.
 func TestBuildLaunchSpec_Mob(t *testing.T) {
 	newServer := func() *Server {
 		return NewServer(Config{

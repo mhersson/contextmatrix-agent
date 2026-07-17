@@ -77,7 +77,7 @@ func TestParsePlan(t *testing.T) {
 	})
 
 	t.Run("forward-only dep rejected", func(t *testing.T) {
-		// Subtask 0 depends on subtask 1 (a later index) — forbidden.
+		// Subtask 0 depends on subtask 1 (a later index) - forbidden.
 		bad := `{"card_tier":"simple","subtasks":[` +
 			`{"title":"A","description":"d","depends_on":[1],"tier":"simple"},` +
 			`{"title":"B","description":"d","depends_on":[],"tier":"simple"}]}`
@@ -160,7 +160,7 @@ func TestPlanPhaseCreatesSubtasks(t *testing.T) {
 	assert.Equal(t, []string{"SUB-1"}, ops.createCardArgs[1].dependsOn)
 
 	// Run struct carries the resolved subtask refs and the card tier. Body holds
-	// the planner's description — the execute phase feeds it to the coder.
+	// the planner's description - the execute phase feeds it to the coder.
 	require.Len(t, o.subtasks, 2)
 	assert.Equal(t, "SUB-1", o.subtasks[0].ID)
 	assert.Equal(t, "SUB-2", o.subtasks[1].ID)
@@ -219,7 +219,7 @@ func TestPlanPhaseRepairExhausted(t *testing.T) {
 	err := runPlan(context.Background(), o)
 	require.Error(t, err)
 
-	// Exactly two model calls — no third attempt.
+	// Exactly two model calls - no third attempt.
 	assert.Len(t, llmFake.tasks, 2)
 
 	// No cards created on hard failure.
@@ -249,7 +249,7 @@ func TestPlanPhaseResume(t *testing.T) {
 	assert.Contains(t, prompt, "Existing subtask alpha", "resume prompt must list existing subtask titles")
 	assert.Contains(t, prompt, "Existing subtask beta")
 
-	// runPlan must NOT call SubtaskStates itself — the reconciled list is the
+	// runPlan must NOT call SubtaskStates itself - the reconciled list is the
 	// source of truth for the reuse block.
 	assert.Equal(t, -1, indexOfCall(ops.recorded(), "SubtaskStates:proj/CARD-1"),
 		"runPlan must consume the reconciled refs, not re-call SubtaskStates")
@@ -326,7 +326,7 @@ func TestResolveOrchestratorModel(t *testing.T) {
 			"ghost/model", "payload/model", "default/model")
 		assert.Equal(t, "payload/model", got)
 
-		// A warning note must be logged to the card — specifically an AddLog
+		// A warning note must be logged to the card - specifically an AddLog
 		// entry naming the unresolvable pin.
 		var addLogs []string
 
@@ -751,7 +751,7 @@ func TestRunPlanMobRepairSucceeds(t *testing.T) {
 
 func TestRunPlanMobParseFailureFallsBackToDraftPlan(t *testing.T) {
 	ops := &fakeOps{createdIDs: []string{"SUB-1", "SUB-2"}}
-	// Call 1: moderator repair — still junk. Call 2: solo draftPlan — good.
+	// Call 1: moderator repair - still junk. Call 2: solo draftPlan - good.
 	llmFake := &planLLM{responses: []llm.Response{
 		stopResp("still not json", 0.01),
 		stopResp(goodPlanJSON, 0.01),

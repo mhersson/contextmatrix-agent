@@ -39,7 +39,7 @@ const (
 // verifyPlan is the run's resolved verify command, cached once by ensureVerify.
 // An empty Argv means "nothing to run" (the skip tier): the gate proceeds
 // unverified. Timeout and Env apply regardless of which tier produced the
-// command — an operator's declared timeout/env bind a detected or proposed
+// command - an operator's declared timeout/env bind a detected or proposed
 // command too.
 type verifyPlan struct {
 	Argv    []string
@@ -75,7 +75,7 @@ const (
 )
 
 // resolvedVerifyPlan returns the run's resolved verify plan, or a zero (skip)
-// plan when resolution has not run — so prompt/render helpers can read it
+// plan when resolution has not run - so prompt/render helpers can read it
 // unconditionally.
 func (o *run) resolvedVerifyPlan() verifyPlan {
 	if o.verify == nil {
@@ -101,7 +101,7 @@ func verifyStatusWord(s verifyStatus) string {
 // verifyDocContext is the advisory verify line handed to the document phase:
 // the winner's judged result for a Best-of-N run, else the resolved command the
 // review gate will run (the single-solver gate has not run yet at document time).
-// It is context only — the document model's prose is not a guaranteed surface.
+// It is context only - the document model's prose is not a guaranteed surface.
 func (o *run) verifyDocContext() string {
 	if o.winner != nil {
 		return verifyStatusLine(o.winner.verify, o.resolvedVerifyPlan())
@@ -123,13 +123,13 @@ func verifyStatusLine(vres verifyResult, plan verifyPlan) string {
 	switch vres.Status {
 	case verifyPassed:
 		if plan.Display != "" {
-			return fmt.Sprintf("PASSED — `%s` (%s)", plan.Display, plan.Source)
+			return fmt.Sprintf("PASSED - `%s` (%s)", plan.Display, plan.Source)
 		}
 
 		return "PASSED"
 	case verifyFailed:
 		if plan.Display != "" {
-			return fmt.Sprintf("FAILED — `%s` (%s)", plan.Display, plan.Source)
+			return fmt.Sprintf("FAILED - `%s` (%s)", plan.Display, plan.Source)
 		}
 
 		return "FAILED"
@@ -139,7 +139,7 @@ func verifyStatusLine(vres verifyResult, plan verifyPlan) string {
 			note = "no verify command resolved"
 		}
 
-		return "NOT VERIFIED — " + note
+		return "NOT VERIFIED - " + note
 	}
 }
 
@@ -155,7 +155,7 @@ func verifyProvenance(p *verifyPlan) string {
 
 // classifyVerify maps a raw execution Outcome to the tri-state result. It is
 // pure so the whole decision table is unit-tested without a subprocess. Parent-
-// context cancellation is NOT an outcome here — runVerifyPlan checks ctx.Err()
+// context cancellation is NOT an outcome here - runVerifyPlan checks ctx.Err()
 // and propagates the abort before classifying.
 func classifyVerify(plan verifyPlan, out verifyexec.Outcome) verifyResult {
 	switch {
@@ -165,7 +165,7 @@ func classifyVerify(plan verifyPlan, out verifyexec.Outcome) verifyResult {
 		return verifyResult{
 			Status: verifySkipped,
 			Output: out.Output,
-			Note:   fmt.Sprintf("verify timed out after %s — inconclusive, treated as unverified", plan.Timeout),
+			Note:   fmt.Sprintf("verify timed out after %s - inconclusive, treated as unverified", plan.Timeout),
 		}
 	case out.StartErr || out.ExitCode == 127 || (plan.Wrapper && verifyexec.LooksToolMissing(out.Output)):
 		// The tool-missing heuristic is consulted ONLY for a detected wrapper, which
@@ -174,7 +174,7 @@ func classifyVerify(plan verifyPlan, out verifyexec.Outcome) verifyResult {
 		return verifyResult{
 			Status: verifySkipped,
 			Output: out.Output,
-			Note:   "verify tool missing — the command could not run, treated as unverified",
+			Note:   "verify tool missing - the command could not run, treated as unverified",
 		}
 	default:
 		return verifyResult{Status: verifyFailed, Output: out.Output}
@@ -182,7 +182,7 @@ func classifyVerify(plan verifyPlan, out verifyexec.Outcome) verifyResult {
 }
 
 // ensureVerify resolves the verify plan for the phase that reached the gate. A
-// resolved COMMAND is stable and reused from cache; a prior SKIP is NOT final —
+// resolved COMMAND is stable and reused from cache; a prior SKIP is NOT final -
 // a phase (e.g. a bootstrap task that adds go.mod and tests) can make a command
 // resolvable, so a cached skip is re-resolved on re-entry (cheap: only the
 // declared/detection tiers re-run; the proposal fires at most once per run). A
@@ -203,7 +203,7 @@ func (o *run) ensureVerify(ctx context.Context) (verifyPlan, error) {
 	o.verify = &p
 
 	// Log the first resolution, and any later re-resolve that UPGRADED a prior
-	// skip to a real command — but not a skip re-confirmed as a skip each phase.
+	// skip to a real command - but not a skip re-confirmed as a skip each phase.
 	if firstResolve || len(p.Argv) > 0 {
 		o.logVerifyResolution(ctx, p)
 	}
@@ -213,7 +213,7 @@ func (o *run) ensureVerify(ctx context.Context) (verifyPlan, error) {
 
 // resolveVerify runs the resolution ladder: declared command (probed) beats
 // repo-convention detection beats a model proposal beats skip. A declared
-// command that cannot run does NOT disable the gate — it records a note and
+// command that cannot run does NOT disable the gate - it records a note and
 // falls through, so a typo cannot silently drop verification. A budget park from
 // the proposal tier propagates; every other failure degrades toward skip.
 func (o *run) resolveVerify(ctx context.Context) (verifyPlan, error) {
@@ -256,7 +256,7 @@ func (o *run) resolveVerify(ctx context.Context) (verifyPlan, error) {
 		}, nil
 	}
 
-	// Tier 3: model proposal — ONCE per run (a code-executed command, never
+	// Tier 3: model proposal - ONCE per run (a code-executed command, never
 	// persisted). A skip re-resolved at a later phase re-runs only the cheap tiers
 	// above; it does not fire a second proposal model call.
 	if !o.proposeAttempted {
@@ -349,12 +349,12 @@ func (o *run) logVerifyResolution(ctx context.Context, p verifyPlan) {
 		}
 
 		if len(p.Notes) > 0 {
-			msg += " — " + strings.Join(p.Notes, "; ")
+			msg += " - " + strings.Join(p.Notes, "; ")
 		}
 	case len(p.Notes) > 0:
-		msg = strings.Join(p.Notes, "; ") + " — no fallback found; work will proceed UNVERIFIED"
+		msg = strings.Join(p.Notes, "; ") + " - no fallback found; work will proceed UNVERIFIED"
 	default:
-		msg = "no verify command declared, detected, or proposed — work will proceed UNVERIFIED"
+		msg = "no verify command declared, detected, or proposed - work will proceed UNVERIFIED"
 	}
 
 	_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, msg) //nolint:errcheck // advisory resolution record
@@ -364,12 +364,12 @@ func (o *run) logVerifyResolution(ctx context.Context, p verifyPlan) {
 
 // detectVerifyCommand best-effort resolves the project's verify command from
 // workspace markers, target-language-agnostic. A wrapper (make/just/task test)
-// wins first UNLESS the repo declares a toolchain whose tools are all absent —
+// wins first UNLESS the repo declares a toolchain whose tools are all absent -
 // then the wrapper would shell out to a missing binary and false-fail, so it is
 // skipped. Otherwise the marker table is walked in priority order and the first
 // toolchain whose tool actually resolves is used. Returns (nil, "") when nothing
 // runnable is found. wrapper reports whether the returned command is a
-// test-wrapper (make/just/task) — the caller uses it to scope the tool-missing
+// test-wrapper (make/just/task) - the caller uses it to scope the tool-missing
 // heuristic to exactly that case.
 func detectVerifyCommand(workspace string) (argv []string, display string, wrapper bool) {
 	if a := detectWrapper(workspace); a != nil {
@@ -553,8 +553,8 @@ func hasDotnetProject(workspace string) bool {
 // hasPytestMarker reports a project that EXPLICITLY configures pytest: a
 // pytest.ini, a pyproject.toml declaring a [tool.pytest...] table, or a setup.cfg
 // declaring a [tool:pytest] section. A BARE pyproject.toml (poetry/hatch metadata
-// with no pytest config) is deliberately NOT a marker — running `pytest -q` on a
-// project with no collectable tests exits 5 and reads as a false failure — so it
+// with no pytest config) is deliberately NOT a marker - running `pytest -q` on a
+// project with no collectable tests exits 5 and reads as a false failure - so it
 // falls through to the model-proposal tier, the sanctioned language-aware
 // fallback. (The classifier stays command-neutral; no pytest-exit-5 special case.)
 func hasPytestMarker(workspace string) bool {
@@ -652,7 +652,7 @@ func hasRealNPMTestScript(workspace string) bool {
 }
 
 // verifyMarkerByteCap bounds reads of repo-controlled build-metadata files. A
-// committed multi-GB file — or one symlinked to /dev/zero — must not OOM the
+// committed multi-GB file - or one symlinked to /dev/zero - must not OOM the
 // worker before the marker check runs. 1 MiB holds any real marker file.
 const verifyMarkerByteCap = 1 << 20
 
@@ -671,7 +671,7 @@ func readVerifyMarker(path string) ([]byte, error) {
 
 // makefileHasTestTarget reports whether path is a readable Makefile declaring a
 // "test:" target. Make targets are declared at column 0, so the match is
-// deliberately untrimmed — indented lines (recipes, comments) never match.
+// deliberately untrimmed - indented lines (recipes, comments) never match.
 func makefileHasTestTarget(path string) bool {
 	data, err := readVerifyMarker(path)
 	if err != nil {
@@ -695,7 +695,7 @@ func fileExists(path string) bool {
 }
 
 // execFileExists reports whether path is a readable, executable, non-directory
-// file — the gradlew/mvnw wrapper check.
+// file - the gradlew/mvnw wrapper check.
 func execFileExists(path string) bool {
 	info, err := os.Stat(path)
 

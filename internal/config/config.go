@@ -19,7 +19,7 @@ import (
 const envPrefix = "CMX_"
 
 // Note: koanf keys are hyphenated so CLI flag names (which posflag uses verbatim
-// as keys) match — e.g. --max-turns ⇒ key "max-turns" ⇒ this tag. Env vars map
+// as keys) match - e.g. --max-turns ⇒ key "max-turns" ⇒ this tag. Env vars map
 // via the two-step transform in Load (CMX_MAX_TURNS ⇒ "max-turns").
 type Config struct {
 	Model      *string          `koanf:"model"`

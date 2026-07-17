@@ -156,7 +156,7 @@ func TestDocumentBestEffortOnModelError(t *testing.T) {
 		git := &fakeGit{committed: true}
 		// PromptTokens >= int(0.85*131072) trips context_limit on payload/model,
 		// which runModel surfaces as *ContextLimitError. document MUST catch it
-		// (return nil) — propagating would make execute() park an otherwise-good run.
+		// (return nil) - propagating would make execute() park an otherwise-good run.
 		const tripAt = 111411 // int(0.85 * 131072)
 
 		resp := llm.Response{Content: "partial", FinishReason: "stop", Usage: llm.Usage{PromptTokens: tripAt, Cost: 0.01}}

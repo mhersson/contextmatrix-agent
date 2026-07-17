@@ -44,7 +44,7 @@ func TestReconcileFreshRecordsStaleTip(t *testing.T) {
 	assert.Equal(t, -1, indexOfCall(gitCalls, "Fetch:cm/card-1"), "fresh run must not fetch the card branch")
 	assert.Equal(t, -1, indexOfCall(gitCalls, "Checkout:cm/card-1"), "fresh run stays on the freshly-created branch")
 
-	// No SubtaskStates call on a fresh run — nothing to reconcile.
+	// No SubtaskStates call on a fresh run - nothing to reconcile.
 	assert.Equal(t, -1, indexOfCall(ops.recorded(), "SubtaskStates:proj/CARD-1"))
 
 	// The planned overwrite is activity-logged.
@@ -77,7 +77,7 @@ func TestReconcileFreshNoRemoteBranch(t *testing.T) {
 }
 
 func TestReconcileFreshProbeFailure(t *testing.T) {
-	// phase "" (fresh) + RemoteTip error: NOT fatal — the fresh probe is
+	// phase "" (fresh) + RemoteTip error: NOT fatal - the fresh probe is
 	// best-effort, and staleRemoteTip stays "" (plain push later). The asymmetry
 	// with the resume path is deliberate: a wrong "no stale branch" guess here
 	// only costs a rejected non-fast-forward plain push (run aborts at push,
@@ -90,7 +90,7 @@ func TestReconcileFreshProbeFailure(t *testing.T) {
 
 	assert.Empty(t, o.staleRemoteTip, "failed probe must leave the stale tip empty")
 
-	// No overwrite log, no subtask load — the fresh row stays side-effect free.
+	// No overwrite log, no subtask load - the fresh row stays side-effect free.
 	for _, c := range ops.recorded() {
 		assert.NotContains(t, c, "AddLog:", "no overwrite log on a failed probe")
 		assert.NotContains(t, c, "SubtaskStates:", "fresh run never loads subtask states")
@@ -121,7 +121,7 @@ func TestReconcilePlanLoadsExistingTitles(t *testing.T) {
 	assert.Equal(t, "in_progress", o.subtasks[0].State)
 	assert.Equal(t, "beta", o.subtasks[1].Title)
 
-	// Branch fetched + checked out — the fetched branch IS the state.
+	// Branch fetched + checked out - the fetched branch IS the state.
 	git.assertOrder(t, "Fetch:cm/card-1", "Checkout:cm/card-1")
 }
 
@@ -173,7 +173,7 @@ func TestReconcileSortsSubtasksByCardID(t *testing.T) {
 }
 
 func TestReconcileTierRecoveryDefaultsModerate(t *testing.T) {
-	// Tier recovery: reconciled refs (no in-memory tier — tiers aren't persisted
+	// Tier recovery: reconciled refs (no in-memory tier - tiers aren't persisted
 	// on subtask cards) get the conservative "moderate" default.
 	ops := &fakeOps{
 		subtaskStates: []cmclient.SubtaskState{
@@ -222,7 +222,7 @@ func TestReconcileContextPhasesNoSideEffects(t *testing.T) {
 
 func TestReconcileResumeBranchGenuinelyAbsent(t *testing.T) {
 	// Edge: phase set but the run crashed before its first push, so the remote
-	// branch never existed. The RemoteTip probe returns "" — the ONLY case where
+	// branch never existed. The RemoteTip probe returns "" - the ONLY case where
 	// continuing on the freshly-created local branch is safe. Fetch/Checkout are
 	// skipped entirely (not attempted-and-tolerated), and the subtask list loads.
 	ops := &fakeOps{
@@ -268,7 +268,7 @@ func TestReconcileResumeProbeFailureFatal(t *testing.T) {
 }
 
 func TestReconcileResumeFetchFailureFatal(t *testing.T) {
-	// The branch EXISTS (probe returned a tip) but Fetch fails — a transient
+	// The branch EXISTS (probe returned a tip) but Fetch fails - a transient
 	// blip, not a missing branch. FATAL: silently proceeding on a fresh-from-base
 	// tree would drop the pushed work and later overwrite the genuine branch.
 	ops := &fakeOps{}
@@ -306,7 +306,7 @@ func TestReconcileResumeCheckoutFailureFatal(t *testing.T) {
 
 func TestReconcileResumeAdoptsRemoteTip(t *testing.T) {
 	// The core resume contract: an existing remote branch is fetched, checked
-	// out, AND hard-reset onto the probed tip. The reset is load-bearing — the
+	// out, AND hard-reset onto the probed tip. The reset is load-bearing - the
 	// worker's prepareWorkspace already created a local branch of this name at
 	// base HEAD, so `git checkout <branch>` alone leaves the local branch at base
 	// (git does not fast-forward a pre-existing local branch to the fetched tip).

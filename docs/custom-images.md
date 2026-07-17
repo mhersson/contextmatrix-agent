@@ -3,15 +3,15 @@
 The published worker image ships four variants (see the README): the default
 `full` (Go, Node, Python, Rust) and the slim `go-node`, `python`, and `rust`
 variants. Together they cover the toolchains ContextMatrix builds and tests
-against directly. **Any other ecosystem — a JVM, Ruby, .NET, a system library a
-crate links against — needs a custom image that carries that toolchain.**
+against directly. **Any other ecosystem - a JVM, Ruby, .NET, a system library a
+crate links against - needs a custom image that carries that toolchain.**
 
 A custom image is the published worker image plus your toolchain. Build `FROM`
 one of the published variants so the agent binary, entrypoint, unprivileged
 `user` (UID 1000), and baseline CLIs (`git`, `gh`, `rg`, `fd`) are inherited
-unchanged — then `apt-get install` (or otherwise add) what your project needs.
+unchanged - then `apt-get install` (or otherwise add) what your project needs.
 
-## Worked example — add a JDK
+## Worked example - add a JDK
 
 ```dockerfile
 # Start from a published variant. Pick the slimmest one that still carries the
@@ -38,13 +38,13 @@ RUN curl -fsSL https://packages.adoptium.net/artifactory/api/gpg/key/public \
 USER user
 ```
 
-The same shape works for any apt-installable toolchain — for example Ruby is a
+The same shape works for any apt-installable toolchain - for example Ruby is a
 one-liner (`apt-get install -y --no-install-recommends ruby-full`) in place of
 the Temurin block.
 
 ## Keep these intact
 
-- **Do not** override `ENTRYPOINT` — the base image runs `contextmatrix-agent
+- **Do not** override `ENTRYPOINT` - the base image runs `contextmatrix-agent
   work`, which is what ContextMatrix launches.
 - **Do not** remove or relocate `/usr/local/bin/contextmatrix-agent`.
 - **Do not** change UID 1000 / the `user` account, or the harness loses its
@@ -69,6 +69,6 @@ custom image; every other project keeps using the published default.
 A custom image only appears in the ContextMatrix settings dropdown when one of
 the backend's `image_list_filters` substrings matches one of its tags (see
 `serve.yaml.example`; the default is `[contextmatrix-agent]`). If you tag and
-push under your own name — `ghcr.io/you/my-worker` — add a matching substring
+push under your own name - `ghcr.io/you/my-worker` - add a matching substring
 (e.g. `my-worker`) to `image_list_filters` in `serve.yaml`, or the dropdown
 will not list it even though `worker_image` still works when set directly.

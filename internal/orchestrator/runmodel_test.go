@@ -22,7 +22,7 @@ func TestHarnessConfigPopulatesTriad(t *testing.T) {
 	d.Cfg.ToolOutputMax = 65536
 
 	// A non-identity redactor with a recognisable mapping, so the test pins the
-	// redactor's BEHAVIOR — not just that the field is non-nil. A mis-wired but
+	// redactor's BEHAVIOR - not just that the field is non-nil. A mis-wired but
 	// non-nil func (e.g. the wrong field) would fail the behavioral assert below.
 	const (
 		sentinel = "tok=SECRET"
@@ -97,14 +97,14 @@ func TestHarnessConfigCompactionGate(t *testing.T) {
 // TestRunModelNormalizesContextLimit pins the 0.85 threshold tightly: exactly
 // int(0.85*window) prompt tokens trips context_limit (surfaced by runModel as an
 // error so a phase never proceeds on truncated output), and one token below does
-// NOT. A boundary-precise pair catches a drifted threshold constant — a loose
+// NOT. A boundary-precise pair catches a drifted threshold constant - a loose
 // "well over the limit" prompt would still pass against e.g. 0.95.
 func TestRunModelNormalizesContextLimit(t *testing.T) {
 	// "default/model" is in planTestCatalog with ContextLength 131072. The harness
 	// trips when prompt_tokens >= int(contextLimitThreshold * window); mirror that
 	// exact arithmetic here so the test pins the documented 0.85 constant.
 	// threshold is a var (not a const) so the conversion truncates at runtime,
-	// exactly as the harness does — a const expression would be a compile error.
+	// exactly as the harness does - a const expression would be a compile error.
 	const window = 131072
 
 	threshold := 0.85
@@ -268,7 +268,7 @@ func TestCoderMaxTurns(t *testing.T) {
 }
 
 // TestRunModelPassesThroughNormalResult pins that a normal (done) run is NOT
-// turned into an error by runModel — only context_limit is normalized.
+// turned into an error by runModel - only context_limit is normalized.
 func TestRunModelPassesThroughNormalResult(t *testing.T) {
 	ops := &fakeOps{taskContext: cmclient.TaskContext{}}
 	llmFake := &planLLM{responses: []llm.Response{stopResp("all good", 0.02)}}

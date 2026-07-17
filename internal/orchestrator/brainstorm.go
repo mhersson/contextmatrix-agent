@@ -142,7 +142,7 @@ func (o *run) runBrainstorm(ctx context.Context, model string) (string, error) {
 // first-turn placeholder when empty.
 func convoBlock(convo string) string {
 	if strings.TrimSpace(convo) == "" {
-		return "(no messages yet — open the dialogue with the user)"
+		return "(no messages yet - open the dialogue with the user)"
 	}
 
 	return convo

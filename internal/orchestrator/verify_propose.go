@@ -36,7 +36,7 @@ var proposeLeadDeny = map[string]bool{
 }
 
 // proposedForbidden are the characters a model-proposed command may not contain.
-// A proposed command is executed as PLAIN ARGV — never through a shell — so any
+// A proposed command is executed as PLAIN ARGV - never through a shell - so any
 // shell metacharacter (substitution, pipeline, list, redirection, glob, quoting)
 // is an arbitrary-code-execution vector from attacker-influenced convention docs
 // and rejects the whole proposal. Operator-DECLARED commands keep full shell
@@ -50,16 +50,16 @@ const proposedForbidden = "$`();|&<>{}*?\\\"'\n\r\t"
 const verifyProposePrompt = `%sYou are selecting the command an autonomous agent should run to execute this
 repository's automated tests, so it can verify its own work before finishing.
 
-Repo root: %s — paths are relative to it.
+Repo root: %s - paths are relative to it.
 
-Use your read-only tools to inspect the repository's OWN convention files — its
-build/test configuration, task runner, CI workflow, and contributor docs — and
+Use your read-only tools to inspect the repository's OWN convention files - its
+build/test configuration, task runner, CI workflow, and contributor docs - and
 determine the single command a developer runs from the repo root to execute the
 test suite.
 
 Rules:
 - Output a SINGLE plain command: one program and its arguments, on ONE line, with
-  NO shell operators — no pipes (|), no "&&"/";"/"||", no redirection (< >), no
+  NO shell operators - no pipes (|), no "&&"/";"/"||", no redirection (< >), no
   command substitution ($(...) or backticks), no globs (* ?), no quoting. A
   command that needs shell operators will be rejected.
 - Name the project's own aggregate test command, not an ad-hoc inspection command.
@@ -119,7 +119,7 @@ func (o *run) proposeVerify(ctx context.Context) (verifyPlan, error) {
 
 	if err != nil {
 		// A budget overspend during the call parks; any other model error (transport,
-		// context limit, incapable) degrades to skip — an unproposed gate is safe.
+		// context limit, incapable) degrades to skip - an unproposed gate is safe.
 		if isBudgetError(err) {
 			return verifyPlan{}, err
 		}
@@ -134,7 +134,7 @@ func (o *run) proposeVerify(ctx context.Context) (verifyPlan, error) {
 		return verifyPlan{}, nil
 	}
 
-	// A proposed command is metachar-free and runs as PLAIN ARGV, never a shell —
+	// A proposed command is metachar-free and runs as PLAIN ARGV, never a shell -
 	// so a substitution/pipeline from attacker-influenced convention docs cannot
 	// reach bash -c. Probe argv[0] directly.
 	argv, ok := acceptProposedCommand(cmd)
@@ -147,11 +147,11 @@ func (o *run) proposeVerify(ctx context.Context) (verifyPlan, error) {
 	}
 
 	_ = d.Ops.AddLog(ctx, cfg.CardID, fmt.Sprintf( //nolint:errcheck // advisory provenance record
-		"model-proposed verify command: %s (proposed by %s) — promote it to the project's verify config to make it durable", cmd, used))
+		"model-proposed verify command: %s (proposed by %s) - promote it to the project's verify config to make it durable", cmd, used))
 	o.recordSection(ctx, "Verify Command", verifyCommandSection(cmd, used))
 
 	return verifyPlan{
-		Argv:    argv, // plain argv — executed WITHOUT a shell
+		Argv:    argv, // plain argv - executed WITHOUT a shell
 		Display: cmd,
 		Source:  verifySourceProposed,
 		Timeout: o.verifyTimeout(),

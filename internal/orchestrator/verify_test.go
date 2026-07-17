@@ -43,7 +43,7 @@ func TestClassifyVerify(t *testing.T) {
 		{"start-err-skip", verifyexec.Outcome{StartErr: true, ExitCode: -1}, verifySkipped, true},
 		{"timeout-skip", verifyexec.Outcome{TimedOut: true, ExitCode: -1}, verifySkipped, true},
 		// A non-wrapper command whose output prints a not-found line is a REAL
-		// failure — the tool-missing heuristic is not consulted for it.
+		// failure - the tool-missing heuristic is not consulted for it.
 		{"non-wrapper-not-found-stays-fail", verifyexec.Outcome{ExitCode: 2, Output: "make: cargo: command not found"}, verifyFailed, false},
 		{"printed-not-found-stays-fail", verifyexec.Outcome{ExitCode: 1, Output: "FAIL: asserted 'command not found'"}, verifyFailed, false},
 	}
@@ -61,7 +61,7 @@ func TestClassifyVerify(t *testing.T) {
 // is consulted ONLY for a detected wrapper: a plain-argv command that fails while
 // printing an anchored not-found line (its suite shells to a missing helper)
 // stays FAILED, so a real failure is never downgraded to skipped; the same output
-// under a make/just/task wrapper — which masks the inner 127 as a plain exit — is
+// under a make/just/task wrapper - which masks the inner 127 as a plain exit - is
 // SKIPPED.
 func TestClassifyVerifyWrapperScopedToolMissing(t *testing.T) {
 	out := verifyexec.Outcome{ExitCode: 1, Output: "/bin/sh: 1: helper: not found\n--- FAIL: TestX"}
@@ -351,7 +351,7 @@ func TestEnsureVerifyCachesAndLogs(t *testing.T) {
 }
 
 // TestEnsureVerifyReresolvesSkip pins finding 4: a skip resolved at execute entry
-// (pre-code) is NOT final — a phase that adds the project's tooling makes the
+// (pre-code) is NOT final - a phase that adds the project's tooling makes the
 // command detectable, and the later gate must run it rather than ship unverified.
 func TestEnsureVerifyReresolvesSkip(t *testing.T) {
 	if runtime.GOOS == "windows" {

@@ -28,7 +28,7 @@ const judgePrompt = `You are judging %d candidate implementations of the same pl
 
 For each candidate you get: the coder model, the verify result (passed, failed, or skipped when no gate could run), the verify output tail on failure, and the full diff (or a --stat summary when too large).
 
-Pick the implementation that should ship: correctness first (verify result, plan coverage), then code quality and coherence, then parsimony (prefer the smaller diff when quality is equal). A skipped verify is inconclusive, not a pass — judge such candidates on the diff and plan coverage.
+Pick the implementation that should ship: correctness first (verify result, plan coverage), then code quality and coherence, then parsimony (prefer the smaller diff when quality is equal). A skipped verify is inconclusive, not a pass - judge such candidates on the diff and plan coverage.
 
 %s
 
@@ -78,7 +78,7 @@ func runJudge(ctx context.Context, o *run) error {
 	// reads as a hang on the card activity log.
 	if len(survivors) > 0 {
 		_ = d.Ops.AddLog(ctx, cfg.CardID, fmt.Sprintf( //nolint:errcheck // advisory record
-			"best-of-n: judge phase started — verifying %d candidate(s) before comparison", len(survivors)))
+			"best-of-n: judge phase started - verifying %d candidate(s) before comparison", len(survivors)))
 	}
 
 	// Resolve the verify plan once (first caller wins) and run it per candidate on
@@ -92,12 +92,12 @@ func runJudge(ctx context.Context, o *run) error {
 	// Verify each survivor SERIALLY (the fan-out already peaked memory; parallel
 	// verify subprocesses on top would risk the container cap). Capture the diff
 	// BEFORE running verify: adoptWinner hard-resets to the winner's COMMIT, so any
-	// verify-time working-tree mutation never ships — the diff was the only artifact
+	// verify-time working-tree mutation never ships - the diff was the only artifact
 	// a mutating verify could pollute, so snapshot it first. A diff over the cap is
 	// summarized as a --stat.
 	for i, c := range survivors {
 		_ = d.Ops.AddLog(ctx, cfg.CardID, fmt.Sprintf( //nolint:errcheck // advisory record
-			"best-of-n: verifying candidate %d (%s) — %d of %d", c.idx, c.model, i+1, len(survivors)))
+			"best-of-n: verifying candidate %d (%s) - %d of %d", c.idx, c.model, i+1, len(survivors)))
 
 		c.diff, _ = c.git.Diff(ctx, cfg.BaseBranch)
 		if len(c.diff) > judgeDiffCap {
@@ -118,7 +118,7 @@ func runJudge(ctx context.Context, o *run) error {
 	// Verify failures are eliminated only when at least one candidate passes;
 	// when none pass, every UNCAPPED survivor stays in so the judge still picks
 	// the least broken one. A capped candidate may enter the pool ONLY through
-	// a passing verify — its coder run never confirmed completion, so
+	// a passing verify - its coder run never confirmed completion, so
 	// unverified capped work must never be adoptable, not even as "least
 	// broken".
 	pool := verifyingCandidates(survivors)
@@ -146,7 +146,7 @@ func runJudge(ctx context.Context, o *run) error {
 		o.judgeModel = ""
 
 		_ = d.Ops.AddLog(ctx, cfg.CardID, fmt.Sprintf( //nolint:errcheck // advisory record
-			"best-of-n: auto-win — candidate %d (%s) is the only viable implementation", pool[0].idx, pool[0].model))
+			"best-of-n: auto-win - candidate %d (%s) is the only viable implementation", pool[0].idx, pool[0].model))
 		o.logUnverifiedWinner(ctx)
 
 		o.recordJudgeReport(ctx, nil)
@@ -166,7 +166,7 @@ func runJudge(ctx context.Context, o *run) error {
 		Tier:      registry.TierComplex,
 		EstTokens: estimateTokens(prompt),
 		// The judge reviews the candidates, so exclude every candidate's coder model
-		// (a model must not judge its own work) plus the per-card incapable set —
+		// (a model must not judge its own work) plus the per-card incapable set -
 		// exactly the authoritative-review exclusions. Candidates register their
 		// models in o.coderModels before judging.
 		Exclude: o.reviewExclusions(),
@@ -179,7 +179,7 @@ func runJudge(ctx context.Context, o *run) error {
 
 	if !ok {
 		// Two unparsable verdicts: fall back to the first verifying candidate
-		// rather than fail the whole run. No judge model is recorded — no model
+		// rather than fail the whole run. No judge model is recorded - no model
 		// actually produced a usable decision.
 		o.winner = pool[0]
 
@@ -196,7 +196,7 @@ func runJudge(ctx context.Context, o *run) error {
 	o.judgeModel = model
 
 	_ = d.Ops.AddLog(ctx, cfg.CardID, fmt.Sprintf( //nolint:errcheck // advisory record
-		"best-of-n: judge (%s) selected candidate %d (%s) — %s", model, o.winner.idx, o.winner.model, rationaleHead(v.Rationale)))
+		"best-of-n: judge (%s) selected candidate %d (%s) - %s", model, o.winner.idx, o.winner.model, rationaleHead(v.Rationale)))
 	o.logUnverifiedWinner(ctx)
 
 	o.recordJudgeReport(ctx, &v)
@@ -297,8 +297,8 @@ func survivingCandidates(cs []*candidate) []*candidate {
 }
 
 // verifyingCandidates returns the subset whose verify PASSED, preserving order.
-// A verifyPassed status implies a command actually ran — an empty or skipped
-// gate never passes — so capped work is admissible only on a genuine pass.
+// A verifyPassed status implies a command actually ran - an empty or skipped
+// gate never passes - so capped work is admissible only on a genuine pass.
 // This is the salvage gate.
 func verifyingCandidates(cs []*candidate) []*candidate {
 	var out []*candidate
@@ -340,14 +340,14 @@ func (o *run) judgeSections(pool []*candidate) string {
 		fmt.Fprintf(&b, "- Coder model: %s\n", c.model)
 
 		if c.capped {
-			b.WriteString("- Note: hit the turn cap during the final subtask's wrap-up; the orchestrator committed the work — weigh the verify result and diff.\n")
+			b.WriteString("- Note: hit the turn cap during the final subtask's wrap-up; the orchestrator committed the work - weigh the verify result and diff.\n")
 		}
 
 		switch c.verify.Status {
 		case verifyPassed:
 			fmt.Fprintf(&b, "- Verify: PASSED (%s)\n", verifyProvenance(o.verify))
 		case verifySkipped:
-			fmt.Fprintf(&b, "- Verify: SKIPPED — %s\n", c.verify.Note)
+			fmt.Fprintf(&b, "- Verify: SKIPPED - %s\n", c.verify.Note)
 		case verifyFailed:
 			fmt.Fprintf(&b, "- Verify: FAILED (%s)\n", verifyProvenance(o.verify))
 
@@ -401,7 +401,7 @@ func (o *run) recordJudgeReport(ctx context.Context, v *judgeVerdict) {
 
 	// Per-candidate assessments from the verdict. The judge numbers candidates by
 	// pool position (matching the winner index), which is NOT the table's candidate
-	// index once the pool is filtered — the clarifier keeps that unambiguous.
+	// index once the pool is filtered - the clarifier keeps that unambiguous.
 	if v != nil {
 		if rows := renderJudgeNotes(v.Notes); rows != "" {
 			b.WriteString("\n### Assessments\n\n")
@@ -418,12 +418,12 @@ func (o *run) recordJudgeReport(ctx context.Context, v *judgeVerdict) {
 			note = "verify did not pass"
 		}
 
-		fmt.Fprintf(&b, "\n**⚠ Winner adopted without a passing verify — %s**\n", note)
+		fmt.Fprintf(&b, "\n**⚠ Winner adopted without a passing verify - %s**\n", note)
 	}
 
 	judge := o.judgeModel
 	if judge == "" {
-		judge = "— (no model verdict)"
+		judge = "- (no model verdict)"
 	}
 
 	fmt.Fprintf(&b, "\n_Judge model: %s_\n", judge)
@@ -454,7 +454,7 @@ func renderJudgeNotes(notes []judgeNote) string {
 // tick nor a cross.
 func judgeVerifyCell(c *candidate) string {
 	if c.err != nil {
-		return "—"
+		return " - "
 	}
 
 	switch c.verify.Status {
@@ -472,7 +472,7 @@ func judgeVerifyCell(c *candidate) string {
 // diff.
 func judgeDiffCell(c *candidate) string {
 	if c.err != nil {
-		return "—"
+		return " - "
 	}
 
 	if c.diffStat != "" {
@@ -521,7 +521,7 @@ func (o *run) judgeOutcome(c *candidate) string {
 }
 
 // logUnverifiedWinner records a loud card note when the adopted winner did not
-// pass verify — the all-failed fallback pool can still surface a winner whose
+// pass verify - the all-failed fallback pool can still surface a winner whose
 // verify skipped or failed, and a human must see that Best-of-N shipped
 // unverified work. A passing winner logs nothing.
 func (o *run) logUnverifiedWinner(ctx context.Context) {
@@ -535,7 +535,7 @@ func (o *run) logUnverifiedWinner(ctx context.Context) {
 	}
 
 	_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, fmt.Sprintf( //nolint:errcheck // advisory honesty record
-		"best-of-n: winner (candidate %d) adopted WITHOUT a passing verify — %s", o.winner.idx, note))
+		"best-of-n: winner (candidate %d) adopted WITHOUT a passing verify - %s", o.winner.idx, note))
 }
 
 // lastChars returns the last n characters of s (the tail), or all of s when it
@@ -571,8 +571,8 @@ func rationaleHead(s string) string {
 // unparsable-verdict fallback all share this tail).
 //
 // The adopt-and-push sequence is fatal: the run cannot continue without the
-// winner's work actually on the card branch. Everything after it — subtask
-// replay, candidate cleanup, and outcome reporting — is best-effort: the code
+// winner's work actually on the card branch. Everything after it - subtask
+// replay, candidate cleanup, and outcome reporting - is best-effort: the code
 // is already safely on the branch, so a failure there is logged, not fatal.
 func (o *run) adoptWinner(ctx context.Context) error {
 	head, err := o.winner.git.Head(ctx)
@@ -592,7 +592,7 @@ func (o *run) adoptWinner(ctx context.Context) error {
 	}
 
 	// Stop heartbeating the first-arrival claims before the replay completes
-	// them — heartbeats against just-completed (released) cards are noise.
+	// them - heartbeats against just-completed (released) cards are noise.
 	// Replay itself takes seconds, nowhere near the stall timeout.
 	o.stopFanoutHeartbeat()
 
@@ -607,7 +607,7 @@ func (o *run) adoptWinner(ctx context.Context) error {
 // the board: a candidate runs entirely off-board (Best-of-N disables
 // boardOps), so nothing about its subtasks exists in CM until this replay.
 // Best-effort per subtask: a claim or complete failure is logged (warn plus a
-// card activity entry), not fatal — the winner's code is already on the card
+// card activity entry), not fatal - the winner's code is already on the card
 // branch, so board state is cosmetic by comparison.
 func (o *run) replayWinnerSubtasks(ctx context.Context) {
 	cfg := o.d.Cfg
@@ -628,7 +628,7 @@ func (o *run) replayWinnerSubtasks(ctx context.Context) {
 	}
 }
 
-// cleanupCandidates removes every candidate's worktree and branch — the winner
+// cleanupCandidates removes every candidate's worktree and branch - the winner
 // included, since its work now lives on the card branch, not its container-
 // local one. This MUST go through the main o.d.Git handle: a candidate's
 // GitForDir handle has no cardBranch set (guardPush fails closed on it), so its
@@ -658,9 +658,9 @@ func (o *run) cleanupCandidates(ctx context.Context) {
 }
 
 // reportCandidateOutcomes builds one cmclient.ModelOutcome per non-nil
-// candidate — the winner "win"; a candidate that dropped out before judging
+// candidate - the winner "win"; a candidate that dropped out before judging
 // ("err != nil"), or capped work whose verify failed (it never entered the
-// judge pool either), reports "failed"; every other survivor "loss" — and
+// judge pool either), reports "failed"; every other survivor "loss" - and
 // reports them to CM in a single call. NCandidates counts only non-nil
 // entries: a nil slot means no candidate ever started (a fan-out that aborted
 // before that worktree was built), so it never raced and must not inflate the
@@ -690,7 +690,7 @@ func (o *run) reportCandidateOutcomes(ctx context.Context) {
 		case c == o.winner:
 			result = "win"
 		case c.err != nil, c.capped && c.verify.Status != verifyPassed:
-			// Dropped before judging, or capped work whose verify did not pass — it
+			// Dropped before judging, or capped work whose verify did not pass - it
 			// never entered the pool, so it raced and failed.
 			result = "failed"
 		}
