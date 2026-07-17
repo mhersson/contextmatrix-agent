@@ -59,8 +59,7 @@ func (o *run) gate(ctx context.Context, kind gateKind, model, presentation strin
 
 	switch {
 	case errors.Is(err, harness.ErrInboxClosed):
-		_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, //nolint:errcheck // advisory
-			fmt.Sprintf("%s gate: promoted mid-run; proceeding autonomously", kind))
+		o.d.logCard(ctx, "%s gate: promoted mid-run; proceeding autonomously", kind)
 
 		return gateApprove, "", nil
 	case err != nil:

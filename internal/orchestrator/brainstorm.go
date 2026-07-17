@@ -107,8 +107,7 @@ func (o *run) runBrainstorm(ctx context.Context, model string) (string, error) {
 
 		switch {
 		case errors.Is(werr, harness.ErrInboxClosed):
-			_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory
-				"brainstorm: promoted mid-dialogue; proceeding to planning")
+			d.logCard(ctx, "brainstorm: promoted mid-dialogue; proceeding to planning")
 
 			return "", nil
 		case werr != nil:
@@ -121,8 +120,7 @@ func (o *run) runBrainstorm(ctx context.Context, model string) (string, error) {
 			"\n\nUSER:\n" + strings.TrimSpace(msg.Content)
 	}
 
-	_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory
-		"brainstorm: turn cap reached without a confirmed design; proceeding to planning")
+	d.logCard(ctx, "brainstorm: turn cap reached without a confirmed design; proceeding to planning")
 
 	return "", nil
 }

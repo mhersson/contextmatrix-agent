@@ -136,8 +136,7 @@ func (o *run) proposeVerify(ctx context.Context) (verifyPlan, error) {
 		return verifyPlan{}, nil
 	}
 
-	_ = d.Ops.AddLog(ctx, cfg.CardID, fmt.Sprintf( //nolint:errcheck // advisory provenance record
-		"model-proposed verify command: %s (proposed by %s) - promote it to the project's verify config to make it durable", cmd, used))
+	d.logCard(ctx, "model-proposed verify command: %s (proposed by %s) - promote it to the project's verify config to make it durable", cmd, used)
 	o.recordSection(ctx, "Verify Command", verifyCommandSection(cmd, used))
 
 	return verifyPlan{

@@ -102,8 +102,7 @@ func (o *run) mobDiscuss(ctx context.Context, t mob.Topic) (mob.Outcome, bool) {
 		headroom = effectiveCeiling(o.d.Cfg) - o.ledger.Spent()
 		if headroom <= 0 {
 			slog.Warn("mob: budget exhausted; continuing solo", "card_id", o.d.Cfg.CardID, "kind", t.Kind)
-			_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, //nolint:errcheck // advisory degrade record
-				fmt.Sprintf("mob budget exhausted (%s) - continuing solo", t.Kind))
+			o.d.logCard(ctx, "mob budget exhausted (%s) - continuing solo", t.Kind)
 
 			return mob.Outcome{}, false
 		}
@@ -120,8 +119,7 @@ func (o *run) mobDiscuss(ctx context.Context, t mob.Topic) (mob.Outcome, bool) {
 	server, err := mob.StartServer(cfg.Seats, cfg.Runner, bearer)
 	if err != nil {
 		slog.Warn("mob: loopback server failed to start", "card_id", o.d.Cfg.CardID, "error", err)
-		_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, //nolint:errcheck // advisory degrade record
-			fmt.Sprintf("mob discussion unavailable (%s): %v - continuing solo", t.Kind, err))
+		o.d.logCard(ctx, "mob discussion unavailable (%s): %v - continuing solo", t.Kind, err)
 
 		return mob.Outcome{}, false
 	}
@@ -139,8 +137,7 @@ func (o *run) mobDiscuss(ctx context.Context, t mob.Topic) (mob.Outcome, bool) {
 	out, err := engine(ctx, cfg, t)
 	if err != nil {
 		slog.Warn("mob: discussion failed", "card_id", o.d.Cfg.CardID, "kind", t.Kind, "error", err)
-		_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, //nolint:errcheck // advisory degrade record
-			fmt.Sprintf("mob discussion failed (%s): %v - continuing solo", t.Kind, err))
+		o.d.logCard(ctx, "mob discussion failed (%s): %v - continuing solo", t.Kind, err)
 
 		return out, false
 	}

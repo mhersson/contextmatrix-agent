@@ -61,8 +61,7 @@ func runIntegrate(ctx context.Context, o *run) error {
 			return fmt.Errorf("squash commit on conflict fallback: %w", err)
 		}
 
-		_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory; the push is what must surface
-			"integrate: rebase conflict with base; squashed onto merge-base, conflict deferred to merge")
+		d.logCard(ctx, "integrate: rebase conflict with base; squashed onto merge-base, conflict deferred to merge")
 	} else if rerr != nil {
 		return fmt.Errorf("rebase autosquash onto %q: %w", onto, rerr)
 	}
@@ -94,8 +93,7 @@ func runIntegrate(ctx context.Context, o *run) error {
 			slog.Warn("integrate: PR creation failed; work is pushed, continuing without a PR",
 				"card_id", cfg.CardID, "error", err)
 
-			_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory; the push already landed
-				"integrate: pull request creation failed - branch is pushed; open the PR manually: "+err.Error())
+			d.logCard(ctx, "integrate: pull request creation failed - branch is pushed; open the PR manually: %s", err.Error())
 		} else {
 			prURL = url
 		}
@@ -222,9 +220,8 @@ func runDone(ctx context.Context, o *run) error {
 		}
 	}
 
-	_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory completion note
-		fmt.Sprintf("run complete: %q integrated and pushed on %s; total spend $%.4f; verify: %s",
-			o.tc.Title, cfg.Branch, o.ledger.Spent(), verifyStatusLine(o.lastVerify, o.resolvedVerifyPlan())))
+	d.logCard(ctx, "run complete: %q integrated and pushed on %s; total spend $%.4f; verify: %s",
+		o.tc.Title, cfg.Branch, o.ledger.Spent(), verifyStatusLine(o.lastVerify, o.resolvedVerifyPlan()))
 
 	return nil
 }

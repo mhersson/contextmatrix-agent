@@ -264,8 +264,7 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 		return fmt.Errorf("increment review attempts: %w", err)
 	}
 
-	_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory; park must surface
-		fmt.Sprintf("review parked after %d attempts (authoritative pass) - outstanding findings:\n%s", n, findings2))
+	d.logCard(ctx, "review parked after %d attempts (authoritative pass) - outstanding findings:\n%s", n, findings2)
 
 	return &ReviewParkedError{}
 }
@@ -303,8 +302,7 @@ func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, autho
 		case verifySkipped:
 			// A missing or timed-out gate is inconclusive, not a defect: log it
 			// loudly and proceed to the specialists without a fix loop.
-			_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, //nolint:errcheck // advisory skip record
-				fmt.Sprintf("verify skipped (%s) - review round %d proceeds unverified", res.Note, round))
+			o.d.logCard(ctx, "verify skipped (%s) - review round %d proceeds unverified", res.Note, round)
 		case verifyPassed:
 			// Proceed to the specialist panel.
 		}
@@ -368,8 +366,7 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 
 	panel := o.reviewPanel(estimateTokens(diff), authoritative)
 
-	_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory selection record
-		fmt.Sprintf("review panel models: %s, %s, %s", panel[0].Model, panel[1].Model, panel[2].Model))
+	d.logCard(ctx, "review panel models: %s, %s, %s", panel[0].Model, panel[1].Model, panel[2].Model)
 
 	lenses := []struct{ role, prompt string }{
 		{"correctness", correctnessPrompt},
@@ -443,8 +440,7 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 	// on crash-resume lastReviewBase starts empty and the next round re-runs full.
 	if sha, herr := d.Git.Head(ctx); herr == nil && sha != "" {
 		o.lastReviewBase = sha
-		_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory snapshot record
-			fmt.Sprintf("review snapshot %s", sha))
+		d.logCard(ctx, "review snapshot %s", sha)
 	}
 
 	return b.String(), nil
@@ -556,8 +552,7 @@ func (o *run) mobReviewVerdict(ctx context.Context) (verdict, bool) {
 
 	if sha, herr := o.d.Git.Head(ctx); herr == nil && sha != "" {
 		o.lastReviewBase = sha
-		_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, //nolint:errcheck // advisory snapshot record
-			fmt.Sprintf("review snapshot %s", sha))
+		o.d.logCard(ctx, "review snapshot %s", sha)
 	}
 
 	return v, true
@@ -653,8 +648,7 @@ func (o *run) runFixModel(ctx context.Context, prompt string, round int, fixTier
 	for attempt := 0; attempt <= reselectCap; attempt++ {
 		model := o.resolveFixModel(fixTier, authoritative)
 
-		_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory selection record
-			fmt.Sprintf("fix coder %s selected for round %d fixes (tier=%s)", model, round, tier))
+		d.logCard(ctx, "fix coder %s selected for round %d fixes (tier=%s)", model, round, tier)
 
 		res, err := o.runModelCoder(ctx, d.WriteTools, prompt, model, fixWrapUpMessage, tier)
 

@@ -77,8 +77,7 @@ func runJudge(ctx context.Context, o *run) error {
 	// wall-clock unbounded and otherwise emit nothing until the verdict, which
 	// reads as a hang on the card activity log.
 	if len(survivors) > 0 {
-		_ = d.Ops.AddLog(ctx, cfg.CardID, fmt.Sprintf( //nolint:errcheck // advisory record
-			"best-of-n: judge phase started - verifying %d candidate(s) before comparison", len(survivors)))
+		d.logCard(ctx, "best-of-n: judge phase started - verifying %d candidate(s) before comparison", len(survivors))
 	}
 
 	// Resolve the verify plan once (first caller wins) and run it per candidate on
@@ -96,8 +95,7 @@ func runJudge(ctx context.Context, o *run) error {
 	// a mutating verify could pollute, so snapshot it first. A diff over the cap is
 	// summarized as a --stat.
 	for i, c := range survivors {
-		_ = d.Ops.AddLog(ctx, cfg.CardID, fmt.Sprintf( //nolint:errcheck // advisory record
-			"best-of-n: verifying candidate %d (%s) - %d of %d", c.idx, c.model, i+1, len(survivors)))
+		d.logCard(ctx, "best-of-n: verifying candidate %d (%s) - %d of %d", c.idx, c.model, i+1, len(survivors))
 
 		c.diff, _ = c.git.Diff(ctx, cfg.BaseBranch)
 		if len(c.diff) > judgeDiffCap {
@@ -111,8 +109,7 @@ func runJudge(ctx context.Context, o *run) error {
 
 		c.verify = res
 
-		_ = d.Ops.AddLog(ctx, cfg.CardID, fmt.Sprintf( //nolint:errcheck // advisory per-candidate result
-			"best-of-n: candidate %d (%s) verify %s", c.idx, c.model, verifyStatusWord(res.Status)))
+		d.logCard(ctx, "best-of-n: candidate %d (%s) verify %s", c.idx, c.model, verifyStatusWord(res.Status))
 	}
 
 	// Verify failures are eliminated only when at least one candidate passes;
@@ -145,8 +142,7 @@ func runJudge(ctx context.Context, o *run) error {
 		o.winner = pool[0]
 		o.judgeModel = ""
 
-		_ = d.Ops.AddLog(ctx, cfg.CardID, fmt.Sprintf( //nolint:errcheck // advisory record
-			"best-of-n: auto-win - candidate %d (%s) is the only viable implementation", pool[0].idx, pool[0].model))
+		d.logCard(ctx, "best-of-n: auto-win - candidate %d (%s) is the only viable implementation", pool[0].idx, pool[0].model)
 		o.logUnverifiedWinner(ctx)
 
 		o.recordJudgeReport(ctx, nil)
@@ -183,8 +179,7 @@ func runJudge(ctx context.Context, o *run) error {
 		// actually produced a usable decision.
 		o.winner = pool[0]
 
-		_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory record
-			"best-of-n: judge verdict unparsable; falling back to first verifying candidate")
+		d.logCard(ctx, "best-of-n: judge verdict unparsable; falling back to first verifying candidate")
 		o.logUnverifiedWinner(ctx)
 
 		o.recordJudgeReport(ctx, nil)
@@ -195,8 +190,7 @@ func runJudge(ctx context.Context, o *run) error {
 	o.winner = pool[v.Winner-1]
 	o.judgeModel = model
 
-	_ = d.Ops.AddLog(ctx, cfg.CardID, fmt.Sprintf( //nolint:errcheck // advisory record
-		"best-of-n: judge (%s) selected candidate %d (%s) - %s", model, o.winner.idx, o.winner.model, rationaleHead(v.Rationale)))
+	d.logCard(ctx, "best-of-n: judge (%s) selected candidate %d (%s) - %s", model, o.winner.idx, o.winner.model, rationaleHead(v.Rationale))
 	o.logUnverifiedWinner(ctx)
 
 	o.recordJudgeReport(ctx, &v)
@@ -524,8 +518,7 @@ func (o *run) logUnverifiedWinner(ctx context.Context) {
 		note = "verify did not pass"
 	}
 
-	_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, fmt.Sprintf( //nolint:errcheck // advisory honesty record
-		"best-of-n: winner (candidate %d) adopted WITHOUT a passing verify - %s", o.winner.idx, note))
+	o.d.logCard(ctx, "best-of-n: winner (candidate %d) adopted WITHOUT a passing verify - %s", o.winner.idx, note)
 }
 
 // lastChars returns the last n characters of s (the tail), or all of s when it
@@ -606,14 +599,12 @@ func (o *run) replayWinnerSubtasks(ctx context.Context) {
 	for _, sub := range o.winner.completed {
 		if err := o.d.Ops.ClaimCard(ctx, sub.ID); err != nil {
 			slog.Warn("adopt: replay claim failed", "card_id", cfg.CardID, "subtask_id", sub.ID, "error", err)
-			_ = o.d.Ops.AddLog(ctx, cfg.CardID, fmt.Sprintf( //nolint:errcheck // advisory record
-				"best-of-n: replay claim failed for subtask %s: %v", sub.ID, err))
+			o.d.logCard(ctx, "best-of-n: replay claim failed for subtask %s: %v", sub.ID, err)
 		}
 
 		if err := o.d.Ops.CompleteTask(ctx, sub.ID, summary); err != nil {
 			slog.Warn("adopt: replay complete failed", "card_id", cfg.CardID, "subtask_id", sub.ID, "error", err)
-			_ = o.d.Ops.AddLog(ctx, cfg.CardID, fmt.Sprintf( //nolint:errcheck // advisory record
-				"best-of-n: replay complete failed for subtask %s: %v", sub.ID, err))
+			o.d.logCard(ctx, "best-of-n: replay complete failed for subtask %s: %v", sub.ID, err)
 		}
 	}
 }

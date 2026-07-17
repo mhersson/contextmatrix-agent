@@ -61,8 +61,7 @@ func runDocument(ctx context.Context, o *run) error {
 		slog.Warn("document: model run failed; continuing without docs",
 			"card_id", cfg.CardID, "error", err)
 
-		_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory; docs are optional
-			"document: model run failed, continuing without docs: "+err.Error())
+		d.logCard(ctx, "document: model run failed, continuing without docs: %s", err.Error())
 
 		return nil
 	}
@@ -81,15 +80,13 @@ func runDocument(ctx context.Context, o *run) error {
 	if cerr != nil {
 		slog.Warn("document: commit failed; continuing", "card_id", cfg.CardID, "error", cerr)
 
-		_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory; docs are optional
-			"document: committing docs failed, continuing: "+cerr.Error())
+		d.logCard(ctx, "document: committing docs failed, continuing: %s", cerr.Error())
 
 		return nil
 	}
 
 	if !committed {
-		_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory outcome note
-			"document: no external docs needed")
+		d.logCard(ctx, "document: no external docs needed")
 
 		return nil
 	}
@@ -101,14 +98,12 @@ func runDocument(ctx context.Context, o *run) error {
 		slog.Warn("document: push failed; docs committed locally, integrate will re-push",
 			"card_id", cfg.CardID, "error", perr)
 
-		_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory; integrate re-pushes
-			"document: pushing docs failed, continuing (integrate will re-push): "+perr.Error())
+		d.logCard(ctx, "document: pushing docs failed, continuing (integrate will re-push): %s", perr.Error())
 
 		return nil
 	}
 
-	_ = d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory outcome note
-		"document: wrote and pushed documentation ("+msg+")")
+	d.logCard(ctx, "document: wrote and pushed documentation (%s)", msg)
 
 	return nil
 }

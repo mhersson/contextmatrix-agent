@@ -126,8 +126,7 @@ func (o *run) mobCheckpoint(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 		}
 
 		if perr != nil {
-			_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, //nolint:errcheck // advisory record
-				fmt.Sprintf("mob checkpoint (%s): verdict unparsable - proceeding", sub.ID))
+			o.d.logCard(ctx, "mob checkpoint (%s): verdict unparsable - proceeding", sub.ID)
 
 			return
 		}
@@ -139,8 +138,7 @@ func (o *run) mobCheckpoint(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 	o.recordCheckpointDiscussion(ctx, sub, out, v)
 
 	if v.Verdict != "revise" || len(v.Fixes) == 0 {
-		_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, //nolint:errcheck // advisory record
-			fmt.Sprintf("mob checkpoint (%s): proceed", sub.ID))
+		o.d.logCard(ctx, "mob checkpoint (%s): proceed", sub.ID)
 
 		return
 	}
@@ -149,14 +147,12 @@ func (o *run) mobCheckpoint(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 		v.Fixes = v.Fixes[:checkpointMaxFixes]
 	}
 
-	_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, //nolint:errcheck // advisory record
-		fmt.Sprintf("mob checkpoint (%s): revise - %d fixes", sub.ID, len(v.Fixes)))
+	o.d.logCard(ctx, "mob checkpoint (%s): revise - %d fixes", sub.ID, len(v.Fixes))
 
 	// One fix pass, budget permitting. A ledger already at the card ceiling
 	// declines the revise here; the next subtask's budget gate owns parking.
 	if lerr := sc.ledger.Check(); lerr != nil {
-		_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, //nolint:errcheck // advisory record
-			fmt.Sprintf("mob checkpoint (%s): revise skipped - budget exhausted", sub.ID))
+		o.d.logCard(ctx, "mob checkpoint (%s): revise skipped - budget exhausted", sub.ID)
 
 		return
 	}
@@ -330,7 +326,6 @@ func (o *run) commitRevise(ctx context.Context, sc *solverCtx, sub subtaskRef, m
 
 	if !committed {
 		first, _, _ := strings.Cut(msg, "\n")
-		_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, //nolint:errcheck // advisory record
-			fmt.Sprintf("mob checkpoint (%s): revise made no changes - %s", sub.ID, first))
+		o.d.logCard(ctx, "mob checkpoint (%s): revise made no changes - %s", sub.ID, first)
 	}
 }

@@ -514,9 +514,8 @@ func (o *run) recordDiscussion(ctx context.Context, out *mob.Outcome) {
 	fmt.Fprintf(&b, "Cost: $%.4f", out.CostUSD)
 
 	o.recordSection(ctx, "Discussion", b.String())
-	_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, //nolint:errcheck // advisory record
-		fmt.Sprintf("mob discussion recorded (%d seats, %d rounds, consensus=%t)",
-			len(o.mobSeats), rounds, out.Consensus))
+	o.d.logCard(ctx, "mob discussion recorded (%d seats, %d rounds, consensus=%t)",
+		len(o.mobSeats), rounds, out.Consensus)
 }
 
 // runPlan is the plan phase: one read-only planner run on the
@@ -533,7 +532,7 @@ func runPlan(ctx context.Context, o *run) error {
 	model := resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
 		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel)
 
-	_ = d.Ops.AddLog(ctx, cfg.CardID, "orchestrator model: "+model) //nolint:errcheck // advisory selection record
+	d.logCard(ctx, "orchestrator model: %s", model)
 
 	// Creative HITL cards get a design dialogue before planning (create-plan
 	// Phase 0 Branch C). Skipped in autonomous, for non-creative cards, and when
@@ -556,7 +555,7 @@ func runPlan(ctx context.Context, o *run) error {
 	diagnosis := ""
 
 	if isBugLike(o.tc) {
-		_ = d.Ops.AddLog(ctx, cfg.CardID, "running root-cause investigation (bug-like card)") //nolint:errcheck
+		d.logCard(ctx, "running root-cause investigation (bug-like card)")
 
 		diag, derr := o.runDiagnose(ctx, model)
 		switch {

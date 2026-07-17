@@ -105,16 +105,15 @@ func (o *run) runFanout(ctx context.Context) (retErr error) {
 	// (runJudge's len(candidates)==0 no-op then flows straight to document) before
 	// cutting any worktree.
 	if allSubtasksDone(ordered) {
-		_ = o.d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck
-			"best-of-n: every subtask already complete; skipping fan-out (resume after adoption)")
+		o.d.logCard(ctx, "best-of-n: every subtask already complete; skipping fan-out (resume after adoption)")
 
 		return nil
 	}
 
 	nEff := degradeN(cfg, o.tc.ReportedCostUSD)
 	if nEff < cfg.BestOfN {
-		_ = o.d.Ops.AddLog(ctx, cfg.CardID, fmt.Sprintf( //nolint:errcheck
-			"best-of-n: remaining budget funds %d candidate(s); reduced to %d from %d", nEff, nEff, cfg.BestOfN))
+		o.d.logCard(ctx,
+			"best-of-n: remaining budget funds %d candidate(s); reduced to %d from %d", nEff, nEff, cfg.BestOfN)
 	}
 
 	if err := o.d.Git.DisableAutoGC(ctx); err != nil {
@@ -174,8 +173,7 @@ func (o *run) runFanout(ctx context.Context) (retErr error) {
 			ledger: NewLedger(cfg.MaxCardCost, 0),
 		}
 
-		_ = o.d.Ops.AddLog(ctx, cfg.CardID, fmt.Sprintf( //nolint:errcheck
-			"best-of-n: candidate %d/%d starting (model %s)", idx, nEff, o.candidates[i].model))
+		o.d.logCard(ctx, "best-of-n: candidate %d/%d starting (model %s)", idx, nEff, o.candidates[i].model)
 	}
 
 	// HITL: a collector drains mid-run human turns into o.notes and broadcasts
@@ -236,8 +234,7 @@ func (o *run) runFanout(ctx context.Context) (retErr error) {
 	// long after the user watched the fan-out apparently hang on it.
 	for _, c := range o.candidates {
 		if c != nil && c.err != nil {
-			_ = o.d.Ops.AddLog(ctx, cfg.CardID, fmt.Sprintf( //nolint:errcheck
-				"best-of-n: candidate %d/%d (%s) dropped: %v", c.idx, len(o.candidates), c.model, c.err))
+			o.d.logCard(ctx, "best-of-n: candidate %d/%d (%s) dropped: %v", c.idx, len(o.candidates), c.model, c.err)
 		}
 	}
 
@@ -389,8 +386,7 @@ func (o *run) runCandidate(ctx context.Context, c *candidate, ordered []subtaskR
 			return err
 		}
 
-		_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, fmt.Sprintf( //nolint:errcheck
-			"best-of-n: candidate %d/%d (%s): subtask %d/%d done", c.idx, nEff, c.model, si+1, len(ordered)))
+		o.d.logCard(ctx, "best-of-n: candidate %d/%d (%s): subtask %d/%d done", c.idx, nEff, c.model, si+1, len(ordered))
 	}
 
 	c.completed = sc.completed

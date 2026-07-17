@@ -357,7 +357,7 @@ func (o *run) logVerifyResolution(ctx context.Context, p verifyPlan) {
 		msg = "no verify command declared, detected, or proposed - work will proceed UNVERIFIED"
 	}
 
-	_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, msg) //nolint:errcheck // advisory resolution record
+	o.d.logCard(ctx, "%s", msg)
 }
 
 // ---- repo-convention detection ---------------------------------------------

@@ -67,9 +67,8 @@ func (o *run) reconcile(ctx context.Context) error {
 
 		if tip != "" {
 			// Spec §5.1: the planned overwrite of the stale branch is activity-logged.
-			_ = o.d.Ops.AddLog(ctx, cfg.CardID, //nolint:errcheck // advisory note; failure must not abort the run
-				fmt.Sprintf("resume: stale remote branch %s detected (tip %s); first push will overwrite it with --force-with-lease",
-					cfg.Branch, tip))
+			o.d.logCard(ctx, "resume: stale remote branch %s detected (tip %s); first push will overwrite it with --force-with-lease",
+				cfg.Branch, tip)
 		}
 
 		return nil

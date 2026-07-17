@@ -298,7 +298,7 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 			logMsg = sc.tag + ": " + logMsg
 		}
 
-		_ = d.Ops.AddLog(ctx, cfg.CardID, logMsg) //nolint:errcheck // advisory selection record
+		d.logCard(ctx, "%s", logMsg)
 
 		res, err := o.runModelCoder(ctx, sc.tools, prompt, model, coderWrapUpMessage, tierOf(sub))
 
@@ -475,8 +475,7 @@ func (o *run) salvageCapped(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 
 	sc.capped = true
 
-	_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, fmt.Sprintf( //nolint:errcheck // advisory record
-		"%s: turn cap on final subtask %s - work committed; the judge's verify decides", sc.tag, sub.ID))
+	o.d.logCard(ctx, "%s: turn cap on final subtask %s - work committed; the judge's verify decides", sc.tag, sub.ID)
 
 	return true
 }
@@ -548,8 +547,7 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 		return false
 	}
 
-	_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, fmt.Sprintf( //nolint:errcheck // advisory record
-		"turn cap on subtask %s - committed work passed the authoritative verify; salvaged as complete", sub.ID))
+	o.d.logCard(ctx, "turn cap on subtask %s - committed work passed the authoritative verify; salvaged as complete", sub.ID)
 
 	return true
 }
@@ -558,8 +556,7 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 // committed work but could not be salvaged (verify unresolved, skipped, or not
 // passing): the run parks and the commit stands as WIP evidence for resume.
 func (o *run) logSoloCapPark(ctx context.Context, subID, reason string) {
-	_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, fmt.Sprintf( //nolint:errcheck // advisory record
-		"turn cap on subtask %s - work committed but %s; parking for resume", subID, reason))
+	o.d.logCard(ctx, "turn cap on subtask %s - work committed but %s; parking for resume", subID, reason)
 }
 
 // sanitizeTitle builds the fallback commit message from a subtask title when the

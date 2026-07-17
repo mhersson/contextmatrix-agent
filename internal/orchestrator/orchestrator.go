@@ -519,21 +519,21 @@ func (o *run) execute(ctx context.Context) error {
 				// Park: record the numbers, then stop without entering the
 				// next phase. Log failure is best-effort - the budget error is
 				// the one that must surface to the worker.
-				_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, budgetLogMessage(be)) //nolint:errcheck
+				o.d.logCard(ctx, "%s", budgetLogMessage(be))
 			}
 
 			var cle *ContextLimitError
 			if errors.As(err, &cle) {
 				// Context-window park: same shape as the budget arm - log the
 				// numbers best-effort, then stop without entering the next phase.
-				_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, contextLimitLogMessage(cle)) //nolint:errcheck
+				o.d.logCard(ctx, "%s", contextLimitLogMessage(cle))
 			}
 
 			var mte *MaxTurnsError
 			if errors.As(err, &mte) {
 				// Turn-cap park: same shape as the budget/context arms - log
 				// best-effort, then stop without entering the next phase.
-				_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID, maxTurnsLogMessage(mte)) //nolint:errcheck
+				o.d.logCard(ctx, "%s", maxTurnsLogMessage(mte))
 			}
 
 			return err
@@ -598,8 +598,7 @@ func (o *run) recoverIncapable(ctx context.Context, ie *IncapableError) error {
 	// Best-effort: the recovery proceeds (re-select + re-run) regardless of a
 	// reporting failure; the blacklist is an advisory hint to CM and future runs.
 	_ = o.d.Ops.BlacklistModel(ctx, o.d.Cfg.CardID, ie.Model, ie.Reason) //nolint:errcheck
-	_ = o.d.Ops.AddLog(ctx, o.d.Cfg.CardID,                              //nolint:errcheck
-		fmt.Sprintf("model %q harness-incapable; blacklisted and re-selecting (attempt %d/%d)", ie.Model, attempt, reselectCap))
+	o.d.logCard(ctx, "model %q harness-incapable; blacklisted and re-selecting (attempt %d/%d)", ie.Model, attempt, reselectCap)
 
 	return nil
 }
