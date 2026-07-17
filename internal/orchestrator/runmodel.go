@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math"
 
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
@@ -133,6 +134,35 @@ func (o *run) runModelCfg(ctx context.Context, reg *tools.Registry, prompt, mode
 	}
 
 	return res, err
+}
+
+// spendAndReport is the shared accounting tail of every model call: it charges
+// the result against ledger EVEN when the call errored (a failed or partial run
+// burned tokens too), reports the usage to CM on targetCardID, and returns the
+// model actually used - res.ModelUsed when the provider echoed one, else
+// configuredModel. A report failure is advisory: warned as warnMsg with
+// card_id, any extraAttrs, and the error - never propagated.
+func (o *run) spendAndReport(ctx context.Context, ledger *Ledger, targetCardID, warnMsg string,
+	res harness.Result, configuredModel string, extraAttrs ...any,
+) string {
+	ledger.Spend(res.TotalCostUSD)
+
+	used := res.ModelUsed
+	if used == "" {
+		used = configuredModel
+	}
+
+	if reportErr := o.d.Ops.ReportUsage(ctx, targetCardID, used,
+		res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
+		attrs := make([]any, 0, len(extraAttrs)+4)
+		attrs = append(attrs, "card_id", targetCardID)
+		attrs = append(attrs, extraAttrs...)
+		attrs = append(attrs, "error", reportErr)
+
+		slog.Warn(warnMsg, attrs...)
+	}
+
+	return used
 }
 
 // wrapUpTurns is the remaining-turn threshold at which coder-family runs get

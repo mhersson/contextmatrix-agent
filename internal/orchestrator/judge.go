@@ -231,17 +231,7 @@ func (o *run) runJudgeVerdict(ctx context.Context, model, prompt string, poolLen
 
 		res, err := o.runModel(ctx, d.ReadTools, task, model)
 
-		o.ledger.Spend(res.TotalCostUSD)
-
-		used := res.ModelUsed
-		if used == "" {
-			used = model
-		}
-
-		if reportErr := d.Ops.ReportUsage(ctx, cfg.CardID, used,
-			res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
-			slog.Warn("judge: report usage failed", "card_id", cfg.CardID, "error", reportErr)
-		}
+		o.spendAndReport(ctx, o.ledger, cfg.CardID, "judge: report usage failed", res, model)
 
 		if err != nil {
 			return judgeVerdict{}, false, fmt.Errorf("judge run: %w", err)

@@ -304,17 +304,7 @@ func (o *run) runDiagnose(ctx context.Context, model string) (string, error) {
 
 	res, err := o.runModelImages(ctx, d.ReadTools, task, model, o.taskImages)
 
-	o.ledger.Spend(res.TotalCostUSD)
-
-	used := res.ModelUsed
-	if used == "" {
-		used = model
-	}
-
-	if reportErr := d.Ops.ReportUsage(ctx, cfg.CardID, used,
-		res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
-		slog.Warn("plan: report diagnose usage failed", "card_id", cfg.CardID, "error", reportErr)
-	}
+	o.spendAndReport(ctx, o.ledger, cfg.CardID, "plan: report diagnose usage failed", res, model)
 
 	if err != nil {
 		return "", fmt.Errorf("diagnose run: %w", err)
@@ -364,17 +354,7 @@ func (o *run) draftPlan(ctx context.Context, model, diagnosis, design, feedback 
 
 		res, err := o.runModelPlan(ctx, d.ReadTools, task, model, o.taskImages, attempt > 0)
 
-		o.ledger.Spend(res.TotalCostUSD)
-
-		used := res.ModelUsed
-		if used == "" {
-			used = model
-		}
-
-		if reportErr := d.Ops.ReportUsage(ctx, cfg.CardID, used,
-			res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
-			slog.Warn("plan: report usage failed", "card_id", cfg.CardID, "error", reportErr)
-		}
+		o.spendAndReport(ctx, o.ledger, cfg.CardID, "plan: report usage failed", res, model)
 
 		if err != nil {
 			return plan{}, fmt.Errorf("planner run: %w", err)

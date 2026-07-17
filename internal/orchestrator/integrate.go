@@ -146,17 +146,7 @@ func (o *run) writePRBody(ctx context.Context) (string, error) {
 
 	res, err := o.runModel(ctx, d.ReadTools, task, model)
 
-	o.ledger.Spend(res.TotalCostUSD)
-
-	used := res.ModelUsed
-	if used == "" {
-		used = model
-	}
-
-	if reportErr := d.Ops.ReportUsage(ctx, cfg.CardID, used,
-		res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
-		slog.Warn("integrate: report PR-body usage failed", "card_id", cfg.CardID, "error", reportErr)
-	}
+	o.spendAndReport(ctx, o.ledger, cfg.CardID, "integrate: report PR-body usage failed", res, model)
 
 	if err != nil {
 		return "", fmt.Errorf("PR-body run: %w", err)

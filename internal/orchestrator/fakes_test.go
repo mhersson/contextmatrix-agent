@@ -80,6 +80,11 @@ type fakeOps struct {
 	// rows (index-aligned to call order); reportOutcomesErr fails every call.
 	reportOutcomes    [][]cmclient.ModelOutcome
 	reportOutcomesErr error
+
+	// ReportUsage scripting: usageModels captures the model passed on each call
+	// so tests can assert the used-model fallback; reportUsageErr fails every call.
+	usageModels    []string
+	reportUsageErr error
 }
 
 // createCardCall is a recorded CreateCard invocation.
@@ -257,9 +262,25 @@ func (f *fakeOps) loggedContains(sub string) bool {
 }
 
 func (f *fakeOps) ReportUsage(_ context.Context, cardID, model string, promptTokens, completionTokens int64, actualCostUSD float64) error {
+	f.mu.Lock()
+	f.usageModels = append(f.usageModels, model)
+	f.mu.Unlock()
+
 	f.record("ReportUsage:" + cardID)
 
-	return nil
+	return f.reportUsageErr
+}
+
+// lastUsageModel returns the model passed on the most recent ReportUsage call.
+func (f *fakeOps) lastUsageModel() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if len(f.usageModels) == 0 {
+		return ""
+	}
+
+	return f.usageModels[len(f.usageModels)-1]
 }
 
 func (f *fakeOps) ReportPush(_ context.Context, cardID, branch, prURL string) error {

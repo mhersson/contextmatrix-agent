@@ -86,17 +86,7 @@ func (o *run) classifyVerdict(ctx context.Context, kind gateKind, model, reply s
 
 	res, err := o.runModel(ctx, o.d.ReadTools, task, model)
 
-	o.ledger.Spend(res.TotalCostUSD)
-
-	used := res.ModelUsed
-	if used == "" {
-		used = model
-	}
-
-	if reportErr := o.d.Ops.ReportUsage(ctx, o.d.Cfg.CardID, used,
-		res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
-		slog.Warn("gate: report classification usage failed", "card_id", o.d.Cfg.CardID, "error", reportErr)
-	}
+	o.spendAndReport(ctx, o.ledger, o.d.Cfg.CardID, "gate: report classification usage failed", res, model)
 
 	if err != nil {
 		// A classification model error must not silently approve.

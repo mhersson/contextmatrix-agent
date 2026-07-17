@@ -105,17 +105,7 @@ func (o *run) proposeVerify(ctx context.Context) (verifyPlan, error) {
 
 	res, err := o.runModelCfg(ctx, d.ReadTools, task, model, hc)
 
-	o.ledger.Spend(res.TotalCostUSD)
-
-	used := res.ModelUsed
-	if used == "" {
-		used = model
-	}
-
-	if reportErr := d.Ops.ReportUsage(ctx, cfg.CardID, used,
-		res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
-		slog.Warn("verify: report propose usage failed", "card_id", cfg.CardID, "error", reportErr)
-	}
+	used := o.spendAndReport(ctx, o.ledger, cfg.CardID, "verify: report propose usage failed", res, model)
 
 	if err != nil {
 		// A budget overspend during the call parks; any other model error (transport,

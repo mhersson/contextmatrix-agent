@@ -50,17 +50,7 @@ func runDocument(ctx context.Context, o *run) error {
 
 	res, err := o.runModelWrapUp(ctx, d.WriteTools, task, model, documentWrapUpMessage)
 
-	o.ledger.Spend(res.TotalCostUSD)
-
-	used := res.ModelUsed
-	if used == "" {
-		used = model
-	}
-
-	if reportErr := d.Ops.ReportUsage(ctx, cfg.CardID, used,
-		res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
-		slog.Warn("document: report usage failed", "card_id", cfg.CardID, "error", reportErr)
-	}
+	o.spendAndReport(ctx, o.ledger, cfg.CardID, "document: report usage failed", res, model)
 
 	// Best-effort on any model error (transport, context-limit, incapable). A
 	// *ContextLimitError is deliberately caught HERE, not propagated - otherwise

@@ -2,10 +2,12 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
+	"github.com/mhersson/contextmatrix-harness/harness"
 	"github.com/mhersson/contextmatrix-harness/llm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -263,6 +265,51 @@ func TestCoderMaxTurns(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, coderMaxTurns(tt.base, tt.tier))
+		})
+	}
+}
+
+// TestSpendAndReport pins the shared accounting tail of every model call: the
+// spend lands on the GIVEN ledger, the reported model is res.ModelUsed with a
+// fallback to the configured slug only when the provider echoed none, the
+// report targets the given card, and a report failure is advisory (the used
+// model still returns, nothing propagates).
+func TestSpendAndReport(t *testing.T) {
+	tests := []struct {
+		name      string
+		modelUsed string
+		reportErr error
+		want      string
+	}{
+		{"echoed model reported as-is", "provider/echoed", nil, "provider/echoed"},
+		{"empty echo falls back to configured", "", nil, "configured/model"},
+		{"report failure is advisory", "provider/echoed", errors.New("report boom"), "provider/echoed"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{taskContext: cmclient.TaskContext{}, reportUsageErr: tt.reportErr}
+			d := planTestDeps(ops, &planLLM{})
+
+			o := newRun(d, ops.taskContext)
+
+			res := harness.Result{
+				ModelUsed:        tt.modelUsed,
+				PromptTokens:     10,
+				CompletionTokens: 5,
+				TotalCostUSD:     0.25,
+			}
+
+			before := o.ledger.Spent()
+
+			used := o.spendAndReport(context.Background(), o.ledger, "TARGET-1",
+				"test: report usage failed", res, "configured/model")
+
+			assert.Equal(t, tt.want, used)
+			assert.InDelta(t, 0.25, o.ledger.Spent()-before, 1e-9, "spend lands on the given ledger")
+			assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "ReportUsage:TARGET-1"), 0,
+				"usage reported on the given target card")
+			assert.Equal(t, tt.want, ops.lastUsageModel(), "reported model matches the returned one")
 		})
 	}
 }

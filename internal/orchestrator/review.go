@@ -420,19 +420,8 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 	var b strings.Builder
 
 	for i, res := range results {
-		// Account for spend even on a child transport error / partial run, then
-		// report the model actually used (falling back to the configured slug).
-		o.ledger.Spend(res.Result.TotalCostUSD)
-
-		used := res.Result.ModelUsed
-		if used == "" {
-			used = specs[i].Model
-		}
-
-		if reportErr := d.Ops.ReportUsage(ctx, cfg.CardID, used,
-			res.Result.PromptTokens, res.Result.CompletionTokens, res.Result.TotalCostUSD); reportErr != nil {
-			slog.Warn("review: report specialist usage failed", "card_id", cfg.CardID, "role", res.Role, "error", reportErr)
-		}
+		o.spendAndReport(ctx, o.ledger, cfg.CardID, "review: report specialist usage failed",
+			res.Result, specs[i].Model, "role", res.Role)
 
 		b.WriteString("## ")
 		b.WriteString(res.Role)
@@ -630,17 +619,7 @@ func (o *run) synthesize(ctx context.Context, findings string, authoritative boo
 
 		res, err := o.runModel(ctx, d.ReadTools, task, model)
 
-		o.ledger.Spend(res.TotalCostUSD)
-
-		used := res.ModelUsed
-		if used == "" {
-			used = model
-		}
-
-		if reportErr := d.Ops.ReportUsage(ctx, cfg.CardID, used,
-			res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
-			slog.Warn("review: report synthesis usage failed", "card_id", cfg.CardID, "error", reportErr)
-		}
+		o.spendAndReport(ctx, o.ledger, cfg.CardID, "review: report synthesis usage failed", res, model)
 
 		if err != nil {
 			return verdict{}, fmt.Errorf("synthesis run: %w", err)
@@ -679,17 +658,7 @@ func (o *run) runFixModel(ctx context.Context, prompt string, round int, fixTier
 
 		res, err := o.runModelCoder(ctx, d.WriteTools, prompt, model, fixWrapUpMessage, tier)
 
-		o.ledger.Spend(res.TotalCostUSD)
-
-		used := res.ModelUsed
-		if used == "" {
-			used = model
-		}
-
-		if reportErr := d.Ops.ReportUsage(ctx, cfg.CardID, used,
-			res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
-			slog.Warn("review: report fix usage failed", "card_id", cfg.CardID, "error", reportErr)
-		}
+		o.spendAndReport(ctx, o.ledger, cfg.CardID, "review: report fix usage failed", res, model)
 
 		var ie *IncapableError
 		if errors.As(err, &ie) {

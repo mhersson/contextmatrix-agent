@@ -302,17 +302,6 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 
 		res, err := o.runModelCoder(ctx, sc.tools, prompt, model, coderWrapUpMessage, tierOf(sub))
 
-		// Account for spend even on a transport error / partial run, then report
-		// the model actually used (falling back to the resolved slug when the
-		// provider did not echo one). The incapable attempt is charged too - it
-		// burned tokens before tripping.
-		sc.ledger.Spend(res.TotalCostUSD)
-
-		usedModel := res.ModelUsed
-		if usedModel == "" {
-			usedModel = model
-		}
-
 		// Record the resolved coder slug so the review panel excludes it: a capable
 		// model must not review its own code. This runs BEFORE the incapable check
 		// below, so an incapable model (which produced no code) is also recorded
@@ -335,10 +324,8 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 			target = cfg.CardID
 		}
 
-		if reportErr := d.Ops.ReportUsage(ctx, target, usedModel,
-			res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
-			slog.Warn("execute: report usage failed", "card_id", target, "error", reportErr)
-		}
+		// The incapable attempt is charged too - it burned tokens before tripping.
+		o.spendAndReport(ctx, sc.ledger, target, "execute: report usage failed", res, model)
 
 		var ie *IncapableError
 		if errors.As(err, &ie) {

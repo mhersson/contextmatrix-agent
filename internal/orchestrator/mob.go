@@ -285,18 +285,8 @@ func (o *run) mobSeatRunner(sink *seatDebugSink, perTurnCap float64) mob.SeatRun
 
 		res, err := harness.Run(ctx, o.d.Client, o.d.ReadTools, emit, prompt, cfg)
 
-		o.ledger.Spend(res.TotalCostUSD)
-
-		used := res.ModelUsed
-		if used == "" {
-			used = seat.Model
-		}
-
-		if reportErr := o.d.Ops.ReportUsage(ctx, o.d.Cfg.CardID, used,
-			res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
-			slog.Warn("mob: report seat usage failed",
-				"card_id", o.d.Cfg.CardID, "seat", seat.Name, "error", reportErr)
-		}
+		used := o.spendAndReport(ctx, o.ledger, o.d.Cfg.CardID, "mob: report seat usage failed",
+			res, seat.Model, "seat", seat.Name)
 
 		if err != nil {
 			return "", res.TotalCostUSD, fmt.Errorf("seat %s run: %w", seat.Name, err)
@@ -320,13 +310,11 @@ func (o *run) mobSeatRunner(sink *seatDebugSink, perTurnCap float64) mob.SeatRun
 
 			fres, ferr := harness.Run(ctx, o.d.Client, tools.NewRegistry(), emit, seatForcedFinalPrompt, finalCfg)
 
-			o.ledger.Spend(fres.TotalCostUSD)
-
-			if reportErr := o.d.Ops.ReportUsage(ctx, o.d.Cfg.CardID, used,
-				fres.PromptTokens, fres.CompletionTokens, fres.TotalCostUSD); reportErr != nil {
-				slog.Warn("mob: report seat usage failed",
-					"card_id", o.d.Cfg.CardID, "seat", seat.Name, "call", "backstop", "error", reportErr)
-			}
+			// Report on the first call's resolved model: clearing ModelUsed keeps
+			// the backstop from re-falling-back to a different slug.
+			fres.ModelUsed = ""
+			o.spendAndReport(ctx, o.ledger, o.d.Cfg.CardID, "mob: report seat usage failed",
+				fres, used, "seat", seat.Name, "call", "backstop")
 
 			if ferr == nil {
 				out = fres.Output
@@ -379,17 +367,7 @@ func (o *run) mobModeratorRunner(sink *seatDebugSink) mob.ModeratorRunner {
 
 		res, err := harness.Run(ctx, o.d.Client, tools.NewRegistry(), emit, prompt, cfg)
 
-		o.ledger.Spend(res.TotalCostUSD)
-
-		used := res.ModelUsed
-		if used == "" {
-			used = model
-		}
-
-		if reportErr := o.d.Ops.ReportUsage(ctx, o.d.Cfg.CardID, used,
-			res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
-			slog.Warn("mob: report moderator usage failed", "card_id", o.d.Cfg.CardID, "error", reportErr)
-		}
+		used := o.spendAndReport(ctx, o.ledger, o.d.Cfg.CardID, "mob: report moderator usage failed", res, model)
 
 		if err != nil {
 			return "", used, res.TotalCostUSD, fmt.Errorf("moderator run: %w", err)

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"strings"
 
 	"github.com/mhersson/contextmatrix-harness/events"
@@ -88,17 +87,7 @@ func (o *run) runBrainstorm(ctx context.Context, model string) (string, error) {
 
 		res, err := o.runModel(ctx, d.ReadTools, task, model)
 
-		o.ledger.Spend(res.TotalCostUSD)
-
-		used := res.ModelUsed
-		if used == "" {
-			used = model
-		}
-
-		if reportErr := d.Ops.ReportUsage(ctx, cfg.CardID, used,
-			res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
-			slog.Warn("brainstorm: report usage failed", "card_id", cfg.CardID, "error", reportErr)
-		}
+		o.spendAndReport(ctx, o.ledger, cfg.CardID, "brainstorm: report usage failed", res, model)
 
 		if err != nil {
 			return "", fmt.Errorf("brainstorm run: %w", err)
