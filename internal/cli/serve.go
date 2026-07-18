@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -161,6 +163,7 @@ func runServe(ctx context.Context, configPath string) error {
 
 	srv := webhook.NewServer(webhook.Config{
 		APIKey:           cfg.APIKey,
+		MetricsToken:     cfg.MetricsToken,
 		Skew:             cfg.ReplaySkew,
 		MaxConcurrent:    cfg.MaxConcurrent,
 		Executor:         exec,
@@ -456,9 +459,10 @@ func discussionMapExtra(kind string, data map[string]any) (protocol.LogEntry, bo
 	}, false, true
 }
 
-// buildAdminServer returns the loopback admin HTTP server serving Prometheus
-// /metrics behind HMAC, or nil when admin_port is 0. Bound to 127.0.0.1 so the
-// metrics surface is never exposed on a public interface.
+// buildAdminServer returns the admin HTTP server serving Prometheus /metrics
+// behind HMAC (plus an optional static bearer token), or nil when admin_port
+// is 0. Binds to admin_bind_addr, loopback by default; a non-loopback bind is
+// allowed for external scrapers and logged as a warning.
 func buildAdminServer(
 	cfg *config.ServiceConfig,
 	srv *webhook.Server,
@@ -471,14 +475,29 @@ func buildAdminServer(
 		return nil
 	}
 
+	bind := cfg.AdminBindAddr
+	if bind == "" {
+		bind = "127.0.0.1"
+	}
+
+	if bind != "127.0.0.1" && bind != "localhost" && bind != "::1" {
+		logger.Warn("admin server bound to non-loopback address - metrics exposed; restrict via firewall",
+			"addr", bind, "port", cfg.AdminPort)
+	}
+
 	mux := http.NewServeMux()
 	metricsHandler := promhttp.HandlerFor(mx.Registry, promhttp.HandlerOpts{})
 	mux.HandleFunc("GET /metrics", srv.AdminAuth(metricsHandler.ServeHTTP))
 
-	logger.Info("admin endpoints registered", "port", cfg.AdminPort, "metrics_auth", "hmac")
+	metricsAuth := "hmac"
+	if cfg.MetricsToken != "" {
+		metricsAuth = "hmac+bearer"
+	}
+
+	logger.Info("admin endpoints registered", "port", cfg.AdminPort, "metrics_auth", metricsAuth)
 
 	return &http.Server{
-		Addr:              fmt.Sprintf("127.0.0.1:%d", cfg.AdminPort),
+		Addr:              net.JoinHostPort(bind, strconv.Itoa(cfg.AdminPort)),
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,

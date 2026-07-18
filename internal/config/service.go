@@ -96,10 +96,20 @@ type ServiceConfig struct {
 	// (1.5) applies when the key is absent from config and env.
 	SelectorPriceHeadroom float64
 
-	// AdminPort is the loopback-only admin listener that serves Prometheus
-	// /metrics behind HMAC. Zero disables it (the default). Workers never see
-	// it; it is host-side only.
+	// AdminPort is the admin listener that serves Prometheus /metrics. Zero
+	// disables it (the default). Workers never see it; it is host-side only.
 	AdminPort int
+
+	// AdminBindAddr is the address the admin listener binds to. Default
+	// 127.0.0.1 (loopback-only); set a LAN address to let an external
+	// Prometheus scrape /metrics. Restrict access with a firewall when
+	// binding beyond loopback.
+	AdminBindAddr string
+
+	// MetricsToken is the static bearer token accepted on GET /metrics as an
+	// alternative to the signed-GET HMAC, for scrapers that cannot sign
+	// requests. Empty keeps /metrics HMAC-only.
+	MetricsToken string
 
 	// Compaction configures optional in-window context compaction in the worker
 	// harness loop. Disabled by default (behavior-neutral): the agent keeps its
@@ -119,6 +129,8 @@ type serviceRaw struct {
 	MCPAPIKey                 string            `koanf:"mcp_api_key"`
 	Port                      int               `koanf:"port"`
 	AdminPort                 int               `koanf:"admin_port"`
+	AdminBindAddr             string            `koanf:"admin_bind_addr"`
+	MetricsToken              string            `koanf:"metrics_token"`
 	BaseImage                 string            `koanf:"base_image"`
 	ImagePullPolicy           string            `koanf:"image_pull_policy"`
 	ImageListFilters          []string          `koanf:"image_list_filters"`
@@ -154,6 +166,7 @@ type serviceRaw struct {
 func serviceDefaults() serviceRaw {
 	return serviceRaw{
 		Port:                   9092,
+		AdminBindAddr:          "127.0.0.1",
 		ImagePullPolicy:        "if-not-present",
 		MaxConcurrent:          5,
 		ContainerTimeout:       "2h30m",
@@ -245,6 +258,8 @@ func (r serviceRaw) toConfig() (*ServiceConfig, error) {
 		MCPAPIKey:                 r.MCPAPIKey,
 		Port:                      r.Port,
 		AdminPort:                 r.AdminPort,
+		AdminBindAddr:             r.AdminBindAddr,
+		MetricsToken:              r.MetricsToken,
 		BaseImage:                 r.BaseImage,
 		ImagePullPolicy:           r.ImagePullPolicy,
 		ImageListFilters:          imageListFilters,
@@ -361,6 +376,10 @@ func (c *ServiceConfig) Validate() error {
 
 	if c.AdminPort != 0 && c.AdminPort == c.Port {
 		return fmt.Errorf("admin_port must differ from port (both set to %d)", c.Port)
+	}
+
+	if c.AdminBindAddr == "" {
+		c.AdminBindAddr = "127.0.0.1"
 	}
 
 	if c.ContainerTimeout > reconcileCap {

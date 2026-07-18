@@ -134,7 +134,13 @@ type LaunchEnv struct {
 // Config carries the dependencies NewServer needs. Pointers may be shared with
 // the serve layer; the server does not take ownership of their lifecycles.
 type Config struct {
-	APIKey        string
+	APIKey string
+
+	// MetricsToken is the static bearer token AdminAuth accepts on the admin
+	// /metrics route as an alternative to the signed-GET HMAC. Empty keeps
+	// the route HMAC-only.
+	MetricsToken string
+
 	Skew          time.Duration
 	MaxConcurrent int
 
@@ -226,6 +232,7 @@ func NewServer(cfg Config) *Server {
 
 	coreCfg := webhookcore.CoreConfig{
 		APIKey:            cfg.APIKey,
+		MetricsToken:      cfg.MetricsToken,
 		Skew:              cfg.Skew,
 		Replay:            cfg.Replay,
 		Draining:          cfg.Draining,
