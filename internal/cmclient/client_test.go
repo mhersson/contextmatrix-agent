@@ -453,7 +453,9 @@ func TestReportUsage(t *testing.T) {
 	rec := newRecorder()
 	c := newTestClient(t, rec, "")
 
-	require.NoError(t, c.ReportUsage(context.Background(), "CMX-001", "some/model", 100, 50, 0.0))
+	require.NoError(t, c.ReportUsage(context.Background(), "CMX-001", UsageReport{
+		Model: "some/model", PromptTokens: 100, CompletionTokens: 50,
+	}))
 
 	args, ok := rec.get("report_usage")
 	require.True(t, ok, "report_usage stub should have been called")
@@ -466,13 +468,19 @@ func TestReportUsage(t *testing.T) {
 	assert.EqualValues(t, 50, args["completion_tokens"])
 	// Zero actual cost must be omitted from the wire.
 	assert.NotContains(t, args, "actual_cost_usd", "zero cost must be omitted")
+	// Empty phase/step and non-positive duration must be omitted too.
+	assert.NotContains(t, args, "phase", "empty phase must be omitted")
+	assert.NotContains(t, args, "step", "empty step must be omitted")
+	assert.NotContains(t, args, "duration_ms", "zero duration must be omitted")
 }
 
 func TestReportUsage_ActualCostSentWhenNonZero(t *testing.T) {
 	rec := newRecorder()
 	c := newTestClient(t, rec, "")
 
-	require.NoError(t, c.ReportUsage(context.Background(), "CMX-001", "some/model", 100, 50, 0.0123))
+	require.NoError(t, c.ReportUsage(context.Background(), "CMX-001", UsageReport{
+		Model: "some/model", PromptTokens: 100, CompletionTokens: 50, ActualCostUSD: 0.0123,
+	}))
 
 	args, ok := rec.get("report_usage")
 	require.True(t, ok)
@@ -484,11 +492,30 @@ func TestReportUsage_OmitsEmptyModel(t *testing.T) {
 	rec := newRecorder()
 	c := newTestClient(t, rec, "")
 
-	require.NoError(t, c.ReportUsage(context.Background(), "CMX-001", "", 1, 2, 0))
+	require.NoError(t, c.ReportUsage(context.Background(), "CMX-001", UsageReport{
+		PromptTokens: 1, CompletionTokens: 2,
+	}))
 
 	args, ok := rec.get("report_usage")
 	require.True(t, ok)
 	assert.NotContains(t, args, "model", "empty model should be omitted")
+}
+
+func TestReportUsage_TelemetrySentWhenSet(t *testing.T) {
+	rec := newRecorder()
+	c := newTestClient(t, rec, "")
+
+	require.NoError(t, c.ReportUsage(context.Background(), "CMX-001", UsageReport{
+		Model: "some/model", PromptTokens: 1, CompletionTokens: 2,
+		Phase: "execute", Step: "main", DurationMS: 1234,
+	}))
+
+	args, ok := rec.get("report_usage")
+	require.True(t, ok)
+	assert.Equal(t, "execute", args["phase"], "non-empty phase must be sent")
+	assert.Equal(t, "main", args["step"], "non-empty step must be sent")
+	// duration_ms crosses the wire as a JSON number.
+	assert.EqualValues(t, 1234, args["duration_ms"], "positive duration must be sent")
 }
 
 func TestReportPush(t *testing.T) {

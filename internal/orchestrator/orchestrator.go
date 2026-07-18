@@ -44,7 +44,7 @@ type Ops interface {
 	IncrementReviewAttempts(ctx context.Context, cardID string) (int, error)
 	SubtaskStates(ctx context.Context, project, parentID string) ([]cmclient.SubtaskState, error)
 	AddLog(ctx context.Context, cardID, message string) error
-	ReportUsage(ctx context.Context, cardID, model string, promptTokens, completionTokens int64, actualCostUSD float64) error
+	ReportUsage(ctx context.Context, cardID string, u cmclient.UsageReport) error
 	ReportPush(ctx context.Context, cardID, branch, prURL string) error
 	ReportModelOutcomes(ctx context.Context, cardID string, outcomes []cmclient.ModelOutcome) error
 	BlacklistModel(ctx context.Context, cardID, model, reason string) error
@@ -242,6 +242,13 @@ type run struct {
 	// resume - pre-loaded by reconcile from SubtaskStates before any phase runs.
 	subtasks []subtaskRef
 	cardTier string
+
+	// curPhase is the phase currently executing, set by the sequential FSM loop
+	// in execute BEFORE each phase runs and read by spendAndReport to tag usage
+	// reports. Written only by that loop (never by a concurrent candidate or
+	// mob seat), so it needs no synchronization: the fan-out reads it while the
+	// loop is blocked inside the phase.
+	curPhase string
 
 	// body is the live parent-card body the FSM accumulates run history into
 	// (## Diagnosis, ## Plan, ## Review Findings ...). Seeded from the task
@@ -509,6 +516,8 @@ func (o *run) execute(ctx context.Context) error {
 	}
 
 	for _, phase := range phaseOrder[from:] {
+		o.curPhase = phase
+
 		if err := o.d.Ops.SetPhase(ctx, o.d.Cfg.CardID, phase); err != nil {
 			return fmt.Errorf("persist phase %s: %w", phase, err)
 		}

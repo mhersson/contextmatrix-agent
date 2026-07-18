@@ -302,9 +302,9 @@ func (o *run) runDiagnose(ctx context.Context, model string) (string, error) {
 
 	task := fmt.Sprintf(diagnosePrompt, o.grounding, cfg.Workspace, o.tc.Title, o.tc.Description)
 
-	res, err := o.runModelImages(ctx, d.ReadTools, task, model, o.taskImages)
+	res, dur, err := o.runModelImages(ctx, d.ReadTools, task, model, o.taskImages)
 
-	o.spendAndReport(ctx, o.ledger, cfg.CardID, "plan: report diagnose usage failed", res, model)
+	o.spendAndReport(ctx, o.ledger, cfg.CardID, "plan: report diagnose usage failed", res, model, "main", dur)
 
 	if err != nil {
 		return "", fmt.Errorf("diagnose run: %w", err)
@@ -352,9 +352,9 @@ func (o *run) draftPlan(ctx context.Context, model, diagnosis, design, feedback 
 		task := fmt.Sprintf(planPrompt, o.grounding, snapshot, cfg.Workspace, o.tc.Title, o.tc.Description,
 			diagBlock, dsnBlock, resume, fbBlock, repair)
 
-		res, err := o.runModelPlan(ctx, d.ReadTools, task, model, o.taskImages, attempt > 0)
+		res, dur, err := o.runModelPlan(ctx, d.ReadTools, task, model, o.taskImages, attempt > 0)
 
-		o.spendAndReport(ctx, o.ledger, cfg.CardID, "plan: report usage failed", res, model)
+		o.spendAndReport(ctx, o.ledger, cfg.CardID, "plan: report usage failed", res, model, "main", dur)
 
 		if err != nil {
 			return plan{}, fmt.Errorf("planner run: %w", err)
@@ -471,7 +471,7 @@ func (o *run) mobResynthesize(ctx context.Context, t mob.Topic, out mob.Outcome,
 		"\n\nDISCUSSION TRANSCRIPT\n" + formatDiscussionEntries(out.Transcript) +
 		"\n" + repairBlock(parseErr)
 
-	moderate := o.mobModeratorRunner(&seatDebugSink{w: o.seatDebug})
+	moderate := o.mobModeratorRunner(&seatDebugSink{w: o.seatDebug}, mobModeratorStep(t.Kind))
 
 	text, _, _, err := moderate(ctx, prompt)
 

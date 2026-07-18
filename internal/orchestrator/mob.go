@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/mob"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
@@ -46,6 +47,28 @@ type MobConfig struct {
 }
 
 func (c MobConfig) enabled() bool { return c.Participants >= 2 }
+
+// mobSeatStep maps a discussion topic kind to the report_usage step tag for its
+// seat runs: checkpoint discussions report as "checkpoint"; plan and review
+// discussions report as "mob_seat".
+func mobSeatStep(kind string) string {
+	if kind == "checkpoint" {
+		return "checkpoint"
+	}
+
+	return "mob_seat"
+}
+
+// mobModeratorStep maps a discussion topic kind to the report_usage step tag for
+// its moderator runs: checkpoint discussions report as "checkpoint"; plan and
+// review discussions report as "mob_moderator".
+func mobModeratorStep(kind string) string {
+	if kind == "checkpoint" {
+		return "checkpoint"
+	}
+
+	return "mob_moderator"
+}
 
 // Lens priority tables (spec § Seats and selection): callers slice [:seats]
 // so any seat count 2..5 is well-defined.
@@ -199,8 +222,8 @@ func buildEngineConfig(o *run, t mob.Topic, bearer string) mob.EngineConfig {
 	return mob.EngineConfig{
 		Seats:    seats,
 		Guests:   guests,
-		Runner:   o.mobSeatRunner(sink, perTurn),
-		Moderate: o.mobModeratorRunner(sink),
+		Runner:   o.mobSeatRunner(sink, perTurn, mobSeatStep(t.Kind)),
+		Moderate: o.mobModeratorRunner(sink, mobModeratorStep(t.Kind)),
 		Emit: func(author, lens, model string, round int, content string) {
 			o.d.Emit.Emit(events.Kind("discussion"), map[string]any{
 				"agent":   author,
@@ -261,7 +284,7 @@ func trimSeatContext(msgs []llm.Message) []llm.Message {
 // for the first round and for replacement tasks. Events go to the
 // seat-debug emitter so seat tool chatter stays off the live stream. Usage
 // is spent against the run ledger and reported to CM per turn.
-func (o *run) mobSeatRunner(sink *seatDebugSink, perTurnCap float64) mob.SeatRunner {
+func (o *run) mobSeatRunner(sink *seatDebugSink, perTurnCap float64, step string) mob.SeatRunner {
 	var (
 		mu       sync.Mutex
 		sessions = map[string][]llm.Message{}
@@ -280,10 +303,15 @@ func (o *run) mobSeatRunner(sink *seatDebugSink, perTurnCap float64) mob.SeatRun
 
 		emit := events.NewEmitter(io.Discard, sink.named(seat.Name))
 
+		// Seats bypass runModelCfg and call harness.Run directly, so time the
+		// call locally; the duration travels by value here because seats fan out
+		// concurrently under the loopback server.
+		start := time.Now()
 		res, err := harness.Run(ctx, o.d.Client, o.d.ReadTools, emit, prompt, cfg)
+		dur := time.Since(start)
 
 		used := o.spendAndReport(ctx, o.ledger, o.d.Cfg.CardID, "mob: report seat usage failed",
-			res, seat.Model, "seat", seat.Name)
+			res, seat.Model, step, dur, "seat", seat.Name)
 
 		if err != nil {
 			return "", res.TotalCostUSD, fmt.Errorf("seat %s run: %w", seat.Name, err)
@@ -305,13 +333,15 @@ func (o *run) mobSeatRunner(sink *seatDebugSink, perTurnCap float64) mob.SeatRun
 			finalCfg.WrapUpTurns = 0
 			finalCfg.WrapUpMessage = ""
 
+			bstart := time.Now()
 			fres, ferr := harness.Run(ctx, o.d.Client, tools.NewRegistry(), emit, seatForcedFinalPrompt, finalCfg)
+			bdur := time.Since(bstart)
 
 			// Report on the first call's resolved model: clearing ModelUsed keeps
 			// the backstop from re-falling-back to a different slug.
 			fres.ModelUsed = ""
 			o.spendAndReport(ctx, o.ledger, o.d.Cfg.CardID, "mob: report seat usage failed",
-				fres, used, "seat", seat.Name, "call", "backstop")
+				fres, used, step, bdur, "seat", seat.Name, "call", "backstop")
 
 			if ferr == nil {
 				out = fres.Output
@@ -349,7 +379,7 @@ func seatConfig(base harness.Config, seat mob.SeatConfig, perTurnCap float64, hi
 // model resolves lazily on first use - resolveDecisionModel does advisory
 // card-log I/O and needs a ctx - and the engine calls Moderate sequentially,
 // so the lazy init is race-free.
-func (o *run) mobModeratorRunner(sink *seatDebugSink) mob.ModeratorRunner {
+func (o *run) mobModeratorRunner(sink *seatDebugSink, step string) mob.ModeratorRunner {
 	model := ""
 	emit := events.NewEmitter(io.Discard, sink.named("moderator"))
 
@@ -362,9 +392,13 @@ func (o *run) mobModeratorRunner(sink *seatDebugSink) mob.ModeratorRunner {
 		cfg := o.harnessConfig(model)
 		cfg.MaxTurns = mobModeratorMaxTurns
 
+		// The moderator bypasses runModelCfg (toolless harness.Run), so time it
+		// locally and thread the duration to the usage report by value.
+		start := time.Now()
 		res, err := harness.Run(ctx, o.d.Client, tools.NewRegistry(), emit, prompt, cfg)
+		dur := time.Since(start)
 
-		used := o.spendAndReport(ctx, o.ledger, o.d.Cfg.CardID, "mob: report moderator usage failed", res, model)
+		used := o.spendAndReport(ctx, o.ledger, o.d.Cfg.CardID, "mob: report moderator usage failed", res, model, step, dur)
 
 		if err != nil {
 			return "", used, res.TotalCostUSD, fmt.Errorf("moderator run: %w", err)

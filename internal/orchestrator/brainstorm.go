@@ -85,9 +85,9 @@ func (o *run) runBrainstorm(ctx context.Context, model string) (string, error) {
 
 		task := fmt.Sprintf(brainstormPrompt, o.grounding, o.tc.Title, o.tc.Description, convoBlock(convo))
 
-		res, err := o.runModel(ctx, d.ReadTools, task, model)
+		res, dur, err := o.runModel(ctx, d.ReadTools, task, model)
 
-		o.spendAndReport(ctx, o.ledger, cfg.CardID, "brainstorm: report usage failed", res, model)
+		o.spendAndReport(ctx, o.ledger, cfg.CardID, "brainstorm: report usage failed", res, model, "brainstorm", dur)
 
 		if err != nil {
 			return "", fmt.Errorf("brainstorm run: %w", err)

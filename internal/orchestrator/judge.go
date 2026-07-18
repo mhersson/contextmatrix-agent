@@ -223,9 +223,9 @@ func (o *run) runJudgeVerdict(ctx context.Context, model, prompt string, poolLen
 			task += repairBlock(lastErr.Error())
 		}
 
-		res, err := o.runModel(ctx, d.ReadTools, task, model)
+		res, dur, err := o.runModel(ctx, d.ReadTools, task, model)
 
-		o.spendAndReport(ctx, o.ledger, cfg.CardID, "judge: report usage failed", res, model)
+		o.spendAndReport(ctx, o.ledger, cfg.CardID, "judge: report usage failed", res, model, "judge", dur)
 
 		if err != nil {
 			return judgeVerdict{}, false, fmt.Errorf("judge run: %w", err)

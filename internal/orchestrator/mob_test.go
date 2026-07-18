@@ -289,7 +289,7 @@ func TestMobModeratorRunnerIsToolless(t *testing.T) {
 	o := mobTestRun(&fakeOps{}, MobConfig{Participants: 2}, 10)
 	o.d.Client = client
 
-	runner := o.mobModeratorRunner(&seatDebugSink{w: io.Discard})
+	runner := o.mobModeratorRunner(&seatDebugSink{w: io.Discard}, "mob_moderator")
 
 	out, model, cost, err := runner(t.Context(), "synthesize this")
 	require.NoError(t, err)
@@ -310,7 +310,7 @@ func TestMobSeatRunnerPersistsContextAcrossRounds(t *testing.T) {
 	o := mobTestRun(&fakeOps{}, MobConfig{Participants: 2}, 10)
 	o.d.Client = client
 
-	runner := o.mobSeatRunner(&seatDebugSink{w: io.Discard}, 0)
+	runner := o.mobSeatRunner(&seatDebugSink{w: io.Discard}, 0, "mob_seat")
 	seat := mob.SeatConfig{Name: "seat-1", Lens: "risk", Model: "m/1"}
 
 	out1, _, err := runner(t.Context(), seat, nil, "round 0 briefing")
@@ -366,7 +366,7 @@ func TestMobSeatRunnerForcesFinalAnswerOnEmptyOutput(t *testing.T) {
 	o := mobTestRun(&fakeOps{}, MobConfig{Participants: 2}, 10)
 	o.d.Client = client
 
-	runner := o.mobSeatRunner(&seatDebugSink{w: io.Discard}, 0.25)
+	runner := o.mobSeatRunner(&seatDebugSink{w: io.Discard}, 0.25, "mob_seat")
 
 	out, _, err := runner(t.Context(), mob.SeatConfig{Name: "seat-1", Lens: "risk", Model: "m/1"}, nil, "briefing")
 	require.NoError(t, err)
@@ -398,7 +398,7 @@ func TestMobSeatRunnerBackstopFailureFallsBackToAbsence(t *testing.T) {
 	o := mobTestRun(&fakeOps{}, MobConfig{Participants: 2}, 10)
 	o.d.Client = client
 
-	runner := o.mobSeatRunner(&seatDebugSink{w: io.Discard}, 0.25)
+	runner := o.mobSeatRunner(&seatDebugSink{w: io.Discard}, 0.25, "mob_seat")
 
 	out, cost, err := runner(t.Context(), mob.SeatConfig{Name: "seat-1", Lens: "risk", Model: "m/1"}, nil, "briefing")
 	require.NoError(t, err, "a failed backstop must degrade to absence, not fail the discussion")

@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"time"
 
+	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-harness/harness"
 	"github.com/mhersson/contextmatrix-harness/llm"
@@ -105,45 +107,56 @@ func reasoningRaw(effort string) json.RawMessage {
 }
 
 // runModel routes a phase model-call through the centralized config and
-// normalizes a context_limit/incapable result into a typed error.
-func (o *run) runModel(ctx context.Context, reg *tools.Registry, prompt, model string) (harness.Result, error) {
+// normalizes a context_limit/incapable result into a typed error. The returned
+// duration is the wall time of the harness step, threaded to spendAndReport.
+func (o *run) runModel(ctx context.Context, reg *tools.Registry, prompt, model string) (harness.Result, time.Duration, error) {
 	return o.runModelCfg(ctx, reg, prompt, model, o.harnessConfig(model))
 }
 
 // runModelImages is runModel with the card's images attached to the seed
 // message. Used by the planning phase only.
-func (o *run) runModelImages(ctx context.Context, reg *tools.Registry, prompt, model string, images []llm.ImageURL) (harness.Result, error) {
+func (o *run) runModelImages(ctx context.Context, reg *tools.Registry, prompt, model string, images []llm.ImageURL) (harness.Result, time.Duration, error) {
 	cfg := o.harnessConfig(model)
 	cfg.TaskImages = images
 
 	return o.runModelCfg(ctx, reg, prompt, model, cfg)
 }
 
-func (o *run) runModelCfg(ctx context.Context, reg *tools.Registry, prompt, model string, cfg harness.Config) (harness.Result, error) {
+// runModelCfg is the single choke point wrapping harness.Run. It times the
+// call and returns the wall-clock duration alongside the result so every caller
+// can report it to CM by return value - never via a shared field on run, which
+// concurrent Best-of-N candidates and mob seats would race on.
+func (o *run) runModelCfg(ctx context.Context, reg *tools.Registry, prompt, model string, cfg harness.Config) (harness.Result, time.Duration, error) {
+	start := time.Now()
 	res, err := harness.Run(ctx, o.d.Client, reg, o.d.Emit, prompt, cfg)
+	dur := time.Since(start)
+
 	if err == nil && res.Reason == "context_limit" {
-		return res, &ContextLimitError{Model: model, ContextWindow: o.d.Registry.ContextWindow(model)}
+		return res, dur, &ContextLimitError{Model: model, ContextWindow: o.d.Registry.ContextWindow(model)}
 	}
 
 	if err == nil && res.Reason == harness.ReasonIncapable {
-		return res, &IncapableError{Model: model, Reason: "cannot drive the tool loop"}
+		return res, dur, &IncapableError{Model: model, Reason: "cannot drive the tool loop"}
 	}
 
 	if err == nil && res.Reason == "max_turns" {
-		return res, &MaxTurnsError{Model: model, Turns: res.Turns}
+		return res, dur, &MaxTurnsError{Model: model, Turns: res.Turns}
 	}
 
-	return res, err
+	return res, dur, err
 }
 
 // spendAndReport is the shared accounting tail of every model call: it charges
 // the result against ledger EVEN when the call errored (a failed or partial run
 // burned tokens too), reports the usage to CM on targetCardID, and returns the
 // model actually used - res.ModelUsed when the provider echoed one, else
-// configuredModel. A report failure is advisory: warned as warnMsg with
-// card_id, any extraAttrs, and the error - never propagated.
+// configuredModel. step tags the call kind (main, gate, checkpoint, ...) and
+// dur is the harness step's wall time; both ride the usage report as
+// observability telemetry (o.curPhase supplies the phase). A report failure is
+// advisory: warned as warnMsg with card_id, any extraAttrs, and the error -
+// never propagated.
 func (o *run) spendAndReport(ctx context.Context, ledger *Ledger, targetCardID, warnMsg string,
-	res harness.Result, configuredModel string, extraAttrs ...any,
+	res harness.Result, configuredModel, step string, dur time.Duration, extraAttrs ...any,
 ) string {
 	ledger.Spend(res.TotalCostUSD)
 
@@ -152,8 +165,15 @@ func (o *run) spendAndReport(ctx context.Context, ledger *Ledger, targetCardID, 
 		used = configuredModel
 	}
 
-	if reportErr := o.d.Ops.ReportUsage(ctx, targetCardID, used,
-		res.PromptTokens, res.CompletionTokens, res.TotalCostUSD); reportErr != nil {
+	if reportErr := o.d.Ops.ReportUsage(ctx, targetCardID, cmclient.UsageReport{
+		Model:            used,
+		PromptTokens:     res.PromptTokens,
+		CompletionTokens: res.CompletionTokens,
+		ActualCostUSD:    res.TotalCostUSD,
+		Phase:            o.curPhase,
+		Step:             step,
+		DurationMS:       dur.Milliseconds(),
+	}); reportErr != nil {
 		attrs := make([]any, 0, len(extraAttrs)+4)
 		attrs = append(attrs, "card_id", targetCardID)
 		attrs = append(attrs, extraAttrs...)
@@ -207,7 +227,7 @@ func coderMaxTurns(base int, tier registry.Tier) int {
 // wrapUpTurns turns remain before the cap, the harness injects msg once as a
 // fresh user message. Used by the document run; the coder and fix runs use
 // runModelCoder, which layers a tier-scaled turn budget on the same nudge.
-func (o *run) runModelWrapUp(ctx context.Context, reg *tools.Registry, prompt, model, msg string) (harness.Result, error) {
+func (o *run) runModelWrapUp(ctx context.Context, reg *tools.Registry, prompt, model, msg string) (harness.Result, time.Duration, error) {
 	cfg := o.harnessConfig(model)
 	cfg.WrapUpTurns = wrapUpTurns
 	cfg.WrapUpMessage = msg
@@ -222,7 +242,7 @@ func (o *run) runModelWrapUp(ctx context.Context, reg *tools.Registry, prompt, m
 // simple/moderate keep the base. Used by the execute-phase coder and the
 // review-phase fix run - both tier-sized coder work. document.go keeps
 // runModelWrapUp: its work carries no tier.
-func (o *run) runModelCoder(ctx context.Context, reg *tools.Registry, prompt, model, msg string, tier registry.Tier) (harness.Result, error) {
+func (o *run) runModelCoder(ctx context.Context, reg *tools.Registry, prompt, model, msg string, tier registry.Tier) (harness.Result, time.Duration, error) {
 	cfg := o.harnessConfig(model)
 	cfg.WrapUpTurns = wrapUpTurns
 	cfg.WrapUpMessage = msg
@@ -241,7 +261,7 @@ func (o *run) runModelCoder(ctx context.Context, reg *tools.Registry, prompt, mo
 // the turn cap instead of letting the model explore straight into it. On the
 // repair turn (repair=true) the turn budget is capped tight: the model already
 // had a full exploration pass and must re-emit a valid plan, not start over.
-func (o *run) runModelPlan(ctx context.Context, reg *tools.Registry, prompt, model string, images []llm.ImageURL, repair bool) (harness.Result, error) {
+func (o *run) runModelPlan(ctx context.Context, reg *tools.Registry, prompt, model string, images []llm.ImageURL, repair bool) (harness.Result, time.Duration, error) {
 	cfg := o.harnessConfig(model)
 	cfg.TaskImages = images
 	cfg.WrapUpTurns = wrapUpTurns

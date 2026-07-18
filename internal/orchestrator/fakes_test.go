@@ -81,9 +81,10 @@ type fakeOps struct {
 	reportOutcomes    [][]cmclient.ModelOutcome
 	reportOutcomesErr error
 
-	// ReportUsage scripting: usageModels captures the model passed on each call
-	// so tests can assert the used-model fallback; reportUsageErr fails every call.
-	usageModels    []string
+	// ReportUsage scripting: usageReports captures the full report on each call
+	// so tests can assert the used-model fallback and the phase/step/duration
+	// telemetry; reportUsageErr fails every call.
+	usageReports   []cmclient.UsageReport
 	reportUsageErr error
 }
 
@@ -261,9 +262,9 @@ func (f *fakeOps) loggedContains(sub string) bool {
 	return false
 }
 
-func (f *fakeOps) ReportUsage(_ context.Context, cardID, model string, promptTokens, completionTokens int64, actualCostUSD float64) error {
+func (f *fakeOps) ReportUsage(_ context.Context, cardID string, u cmclient.UsageReport) error {
 	f.mu.Lock()
-	f.usageModels = append(f.usageModels, model)
+	f.usageReports = append(f.usageReports, u)
 	f.mu.Unlock()
 
 	f.record("ReportUsage:" + cardID)
@@ -271,16 +272,18 @@ func (f *fakeOps) ReportUsage(_ context.Context, cardID, model string, promptTok
 	return f.reportUsageErr
 }
 
-// lastUsageModel returns the model passed on the most recent ReportUsage call.
-func (f *fakeOps) lastUsageModel() string {
+// lastUsageReport returns the most recent ReportUsage payload (zero value when
+// none), so tests can assert the reported model and phase/step/duration
+// telemetry.
+func (f *fakeOps) lastUsageReport() cmclient.UsageReport {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	if len(f.usageModels) == 0 {
-		return ""
+	if len(f.usageReports) == 0 {
+		return cmclient.UsageReport{}
 	}
 
-	return f.usageModels[len(f.usageModels)-1]
+	return f.usageReports[len(f.usageReports)-1]
 }
 
 func (f *fakeOps) ReportPush(_ context.Context, cardID, branch, prURL string) error {

@@ -417,8 +417,11 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 	var b strings.Builder
 
 	for i, res := range results {
+		// The read-only specialist panel runs via harness.SpawnSubagents, which
+		// exposes no per-subagent wall time, so duration is 0 (omitted on the
+		// wire); phase and step still ride the report.
 		o.spendAndReport(ctx, o.ledger, cfg.CardID, "review: report specialist usage failed",
-			res.Result, specs[i].Model, "role", res.Role)
+			res.Result, specs[i].Model, "main", 0, "role", res.Role)
 
 		b.WriteString("## ")
 		b.WriteString(res.Role)
@@ -612,9 +615,9 @@ func (o *run) synthesize(ctx context.Context, findings string, authoritative boo
 
 		task := fmt.Sprintf(synthesisPrompt, o.grounding, o.tc.Title, o.tc.Description, prior, findings, repair)
 
-		res, err := o.runModel(ctx, d.ReadTools, task, model)
+		res, dur, err := o.runModel(ctx, d.ReadTools, task, model)
 
-		o.spendAndReport(ctx, o.ledger, cfg.CardID, "review: report synthesis usage failed", res, model)
+		o.spendAndReport(ctx, o.ledger, cfg.CardID, "review: report synthesis usage failed", res, model, "main", dur)
 
 		if err != nil {
 			return verdict{}, fmt.Errorf("synthesis run: %w", err)
@@ -650,9 +653,9 @@ func (o *run) runFixModel(ctx context.Context, prompt string, round int, fixTier
 
 		d.logCard(ctx, "fix coder %s selected for round %d fixes (tier=%s)", model, round, tier)
 
-		res, err := o.runModelCoder(ctx, d.WriteTools, prompt, model, fixWrapUpMessage, tier)
+		res, dur, err := o.runModelCoder(ctx, d.WriteTools, prompt, model, fixWrapUpMessage, tier)
 
-		o.spendAndReport(ctx, o.ledger, cfg.CardID, "review: report fix usage failed", res, model)
+		o.spendAndReport(ctx, o.ledger, cfg.CardID, "review: report fix usage failed", res, model, "main", dur)
 
 		var ie *IncapableError
 		if errors.As(err, &ie) {

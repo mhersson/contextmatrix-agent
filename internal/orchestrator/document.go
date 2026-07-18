@@ -48,9 +48,9 @@ func runDocument(ctx context.Context, o *run) error {
 	task := fmt.Sprintf(documentPrompt, o.skillEngage(), o.grounding, cfg.Workspace,
 		o.tc.Title, o.tc.Description, o.planOverview(), diff, o.verifyDocContext())
 
-	res, err := o.runModelWrapUp(ctx, d.WriteTools, task, model, documentWrapUpMessage)
+	res, dur, err := o.runModelWrapUp(ctx, d.WriteTools, task, model, documentWrapUpMessage)
 
-	o.spendAndReport(ctx, o.ledger, cfg.CardID, "document: report usage failed", res, model)
+	o.spendAndReport(ctx, o.ledger, cfg.CardID, "document: report usage failed", res, model, "main", dur)
 
 	// Best-effort on any model error (transport, context-limit, incapable). A
 	// *ContextLimitError is deliberately caught HERE, not propagated - otherwise
