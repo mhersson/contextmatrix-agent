@@ -379,22 +379,51 @@ func (c *Client) Heartbeat(ctx context.Context, cardID string) error {
 	return err
 }
 
-// ReportUsage records token usage for cost tracking. model may be empty, in
-// which case it is omitted and the server applies its default. actualCostUSD
-// is the authoritative provider-reported cost; it is omitted when zero so
-// the server uses its rate table.
-func (c *Client) ReportUsage(ctx context.Context, cardID, model string, promptTokens, completionTokens int64, actualCostUSD float64) error {
+// UsageReport is one report_usage delta for a card. Model may be empty (the
+// server applies its default) and ActualCostUSD may be zero (the server uses
+// its rate table); both are omitted from the wire when unset.
+//
+// Phase, Step, and DurationMS are observability-only telemetry and require a CM
+// deployment that accepts them: the go-sdk MCP tool schemas are
+// additionalProperties:false, so an older CM rejects any call carrying unknown
+// fields. CM therefore deploys before the agent; the failure mode is a warn in
+// the caller (spendAndReport), never fatal. Phase and Step are omitted when
+// empty; DurationMS is omitted when non-positive.
+type UsageReport struct {
+	Model            string
+	PromptTokens     int64
+	CompletionTokens int64
+	ActualCostUSD    float64
+	Phase            string // current FSM phase (plan, execute, review, ...)
+	Step             string // bounded call kind (main, gate, checkpoint, ...)
+	DurationMS       int64  // wall time of the harness step in milliseconds
+}
+
+// ReportUsage records token usage for cost tracking against a card.
+func (c *Client) ReportUsage(ctx context.Context, cardID string, u UsageReport) error {
 	args := map[string]any{
 		"card_id":           cardID,
-		"prompt_tokens":     promptTokens,
-		"completion_tokens": completionTokens,
+		"prompt_tokens":     u.PromptTokens,
+		"completion_tokens": u.CompletionTokens,
 	}
-	if model != "" {
-		args["model"] = model
+	if u.Model != "" {
+		args["model"] = u.Model
 	}
 
-	if actualCostUSD != 0 {
-		args["actual_cost_usd"] = actualCostUSD
+	if u.ActualCostUSD != 0 {
+		args["actual_cost_usd"] = u.ActualCostUSD
+	}
+
+	if u.Phase != "" {
+		args["phase"] = u.Phase
+	}
+
+	if u.Step != "" {
+		args["step"] = u.Step
+	}
+
+	if u.DurationMS > 0 {
+		args["duration_ms"] = u.DurationMS
 	}
 
 	_, err := c.call(ctx, "report_usage", args)

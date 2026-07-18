@@ -160,8 +160,8 @@ func (f *fakeOps) Heartbeat(_ context.Context, cardID string) error {
 	return nil
 }
 
-func (f *fakeOps) ReportUsage(_ context.Context, cardID, model string, prompt, completion int64, actualCostUSD float64) error {
-	f.record("ReportUsage", cardID, model, prompt, completion, actualCostUSD)
+func (f *fakeOps) ReportUsage(_ context.Context, cardID string, u cmclient.UsageReport) error {
+	f.record("ReportUsage", cardID, u.Model, u.PromptTokens, u.CompletionTokens, u.ActualCostUSD)
 
 	return nil
 }

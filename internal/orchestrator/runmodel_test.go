@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
@@ -135,7 +136,7 @@ func TestRunModelNormalizesContextLimit(t *testing.T) {
 
 			o := newRun(d, ops.taskContext)
 
-			res, err := o.runModel(context.Background(), d.ReadTools, "do the thing", "default/model")
+			res, _, err := o.runModel(context.Background(), d.ReadTools, "do the thing", "default/model")
 
 			if tt.wantTrip {
 				require.Error(t, err, "context_limit must surface as an error")
@@ -185,7 +186,7 @@ func TestRunModelNormalizesIncapable(t *testing.T) {
 
 	o := newRun(d, ops.taskContext)
 
-	res, err := o.runModel(context.Background(), d.ReadTools, "do the thing", "default/model")
+	res, _, err := o.runModel(context.Background(), d.ReadTools, "do the thing", "default/model")
 
 	require.Error(t, err, "incapable must surface as an error")
 
@@ -217,7 +218,7 @@ func TestRunModelNormalizesMaxTurns(t *testing.T) {
 
 	o := newRun(d, ops.taskContext)
 
-	res, err := o.runModel(context.Background(), d.ReadTools, "do the thing", "default/model")
+	res, _, err := o.runModel(context.Background(), d.ReadTools, "do the thing", "default/model")
 
 	require.Error(t, err, "max_turns must surface as an error")
 
@@ -272,8 +273,9 @@ func TestCoderMaxTurns(t *testing.T) {
 // TestSpendAndReport pins the shared accounting tail of every model call: the
 // spend lands on the GIVEN ledger, the reported model is res.ModelUsed with a
 // fallback to the configured slug only when the provider echoed none, the
-// report targets the given card, and a report failure is advisory (the used
-// model still returns, nothing propagates).
+// report targets the given card, the current phase / step / duration telemetry
+// rides the report, and a report failure is advisory (the used model still
+// returns, nothing propagates).
 func TestSpendAndReport(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -292,6 +294,7 @@ func TestSpendAndReport(t *testing.T) {
 			d := planTestDeps(ops, &planLLM{})
 
 			o := newRun(d, ops.taskContext)
+			o.curPhase = "review"
 
 			res := harness.Result{
 				ModelUsed:        tt.modelUsed,
@@ -303,13 +306,18 @@ func TestSpendAndReport(t *testing.T) {
 			before := o.ledger.Spent()
 
 			used := o.spendAndReport(context.Background(), o.ledger, "TARGET-1",
-				"test: report usage failed", res, "configured/model")
+				"test: report usage failed", res, "configured/model", "gate", 1234*time.Millisecond)
 
 			assert.Equal(t, tt.want, used)
 			assert.InDelta(t, 0.25, o.ledger.Spent()-before, 1e-9, "spend lands on the given ledger")
 			assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "ReportUsage:TARGET-1"), 0,
 				"usage reported on the given target card")
-			assert.Equal(t, tt.want, ops.lastUsageModel(), "reported model matches the returned one")
+
+			report := ops.lastUsageReport()
+			assert.Equal(t, tt.want, report.Model, "reported model matches the returned one")
+			assert.Equal(t, "review", report.Phase, "current phase rides the report")
+			assert.Equal(t, "gate", report.Step, "step tag rides the report")
+			assert.Equal(t, int64(1234), report.DurationMS, "duration rides the report in milliseconds")
 		})
 	}
 }
@@ -323,7 +331,7 @@ func TestRunModelPassesThroughNormalResult(t *testing.T) {
 
 	o := newRun(d, ops.taskContext)
 
-	res, err := o.runModel(context.Background(), d.ReadTools, "do the thing", "default/model")
+	res, _, err := o.runModel(context.Background(), d.ReadTools, "do the thing", "default/model")
 	require.NoError(t, err)
 	assert.Equal(t, "all good", res.Output)
 }

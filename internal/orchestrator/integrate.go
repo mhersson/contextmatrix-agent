@@ -142,9 +142,9 @@ func (o *run) writePRBody(ctx context.Context) (string, error) {
 
 	task := fmt.Sprintf(prBodyPrompt, o.tc.Title, o.tc.Description, o.planOverview(), o.reviewOutcome())
 
-	res, err := o.runModel(ctx, d.ReadTools, task, model)
+	res, dur, err := o.runModel(ctx, d.ReadTools, task, model)
 
-	o.spendAndReport(ctx, o.ledger, cfg.CardID, "integrate: report PR-body usage failed", res, model)
+	o.spendAndReport(ctx, o.ledger, cfg.CardID, "integrate: report PR-body usage failed", res, model, "main", dur)
 
 	if err != nil {
 		return "", fmt.Errorf("PR-body run: %w", err)

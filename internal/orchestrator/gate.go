@@ -83,9 +83,9 @@ func (o *run) classifyVerdict(ctx context.Context, kind gateKind, model, reply s
 
 	task := fmt.Sprintf(gateClassifyPrompt, kind, reply)
 
-	res, err := o.runModel(ctx, o.d.ReadTools, task, model)
+	res, dur, err := o.runModel(ctx, o.d.ReadTools, task, model)
 
-	o.spendAndReport(ctx, o.ledger, o.d.Cfg.CardID, "gate: report classification usage failed", res, model)
+	o.spendAndReport(ctx, o.ledger, o.d.Cfg.CardID, "gate: report classification usage failed", res, model, "gate", dur)
 
 	if err != nil {
 		// A classification model error must not silently approve.

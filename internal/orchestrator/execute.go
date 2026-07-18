@@ -272,7 +272,7 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 
 		d.logCard(ctx, "%s", logMsg)
 
-		res, err := o.runModelCoder(ctx, sc.tools, prompt, model, coderWrapUpMessage, tierOf(sub))
+		res, dur, err := o.runModelCoder(ctx, sc.tools, prompt, model, coderWrapUpMessage, tierOf(sub))
 
 		// Record the resolved coder slug so the review panel excludes it: a capable
 		// model must not review its own code. This runs BEFORE the incapable check
@@ -297,7 +297,7 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 		}
 
 		// The incapable attempt is charged too - it burned tokens before tripping.
-		o.spendAndReport(ctx, sc.ledger, target, "execute: report usage failed", res, model)
+		o.spendAndReport(ctx, sc.ledger, target, "execute: report usage failed", res, model, "main", dur)
 
 		var ie *IncapableError
 		if errors.As(err, &ie) {

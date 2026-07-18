@@ -104,7 +104,7 @@ type CardOps interface {
 	ClaimCard(ctx context.Context, cardID string) error
 	GetTaskContext(ctx context.Context, cardID string, includeImages bool) (cmclient.TaskContext, error)
 	Heartbeat(ctx context.Context, cardID string) error
-	ReportUsage(ctx context.Context, cardID, model string, promptTokens, completionTokens int64, actualCostUSD float64) error
+	ReportUsage(ctx context.Context, cardID string, u cmclient.UsageReport) error
 	ReportPush(ctx context.Context, cardID, branch, prURL string) error
 	CompleteTask(ctx context.Context, cardID, summary string) error
 	ReleaseCard(ctx context.Context, cardID string) error
