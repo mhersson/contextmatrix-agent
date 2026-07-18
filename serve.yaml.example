@@ -39,11 +39,23 @@ mcp_api_key: ""
 # CMX_PORT
 port: 9092
 
-# Loopback-only admin listener serving Prometheus /metrics behind the same HMAC
-# signed-GET scheme as the webhook routes. 0 disables it (the default); a
+# Admin listener serving Prometheus /metrics. 0 disables it (the default); a
 # typical enabled value is 9093. Must differ from port when set.
 # CMX_ADMIN_PORT
 # admin_port: 0
+
+# Address the admin listener binds to. Default 127.0.0.1 (loopback-only). Set
+# a LAN address (or 0.0.0.0) to let an external Prometheus scrape /metrics;
+# restrict access with a firewall when binding beyond loopback.
+# CMX_ADMIN_BIND_ADDR
+# admin_bind_addr: "127.0.0.1"
+
+# Static bearer token accepted on GET /metrics as an alternative to the
+# HMAC-signed request scheme, for scrapers that cannot sign requests. Use it
+# as the `authorization.credentials` value in a Prometheus scrape config.
+# Generate with e.g. `openssl rand -hex 32`. Empty keeps /metrics HMAC-only.
+# CMX_METRICS_TOKEN
+# metrics_token: ""
 
 # Log level: debug | info | warn | error. Default: info.
 # CMX_LOG_LEVEL

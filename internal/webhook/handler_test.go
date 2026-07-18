@@ -2005,3 +2005,24 @@ func TestLogs_MountAndAuth(t *testing.T) {
 	h.server.Routes().ServeHTTP(w, unsigned)
 	assert.Equal(t, http.StatusUnauthorized, w.Code, "unsigned GET /logs must be rejected by Auth")
 }
+
+func TestAdminAuth_BearerTokenFromConfig(t *testing.T) {
+	srv := NewServer(Config{APIKey: testAPIKey, MetricsToken: "scrape-token"})
+
+	var ran bool
+
+	h := srv.AdminAuth(func(w http.ResponseWriter, _ *http.Request) {
+		ran = true
+
+		w.WriteHeader(http.StatusOK)
+	})
+
+	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	r.Header.Set("Authorization", "Bearer scrape-token")
+
+	w := httptest.NewRecorder()
+	h(w, r)
+
+	assert.True(t, ran)
+	assert.Equal(t, http.StatusOK, w.Code)
+}

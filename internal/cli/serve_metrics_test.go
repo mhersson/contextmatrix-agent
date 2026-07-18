@@ -33,7 +33,16 @@ func TestBuildAdminServer_LoopbackAddr(t *testing.T) {
 
 	admin := buildAdminServer(cfg, srv, metrics.New(), testLogger())
 	require.NotNil(t, admin)
-	assert.Equal(t, "127.0.0.1:9093", admin.Addr)
+	assert.Equal(t, "127.0.0.1:9093", admin.Addr, "empty bind addr defaults to loopback")
+}
+
+func TestBuildAdminServer_CustomBindAddr(t *testing.T) {
+	cfg := &config.ServiceConfig{AdminPort: 9093, AdminBindAddr: "0.0.0.0"}
+	srv := webhook.NewServer(webhook.Config{APIKey: "k"})
+
+	admin := buildAdminServer(cfg, srv, metrics.New(), testLogger())
+	require.NotNil(t, admin)
+	assert.Equal(t, "0.0.0.0:9093", admin.Addr)
 }
 
 func TestStartRunningContainersGauge_TracksCount(t *testing.T) {
