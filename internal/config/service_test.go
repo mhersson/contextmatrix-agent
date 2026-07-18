@@ -668,7 +668,7 @@ func clearServiceEnv(t *testing.T) {
 		"CMX_CA_CERT_FILE",
 		"CMX_LOG_DIR",
 		"CMX_MAX_CARD_COST", "CMX_SELECTOR_PRICE_HEADROOM",
-		"CMX_ADMIN_PORT",
+		"CMX_ADMIN_PORT", "CMX_ADMIN_BIND_ADDR", "CMX_METRICS_TOKEN",
 		"CMX_COMPACTION_ENABLED", "CMX_COMPACTION_THRESHOLD",
 		"CMX_COMPACTION_KEEP_RECENT_TURNS",
 	} {
@@ -677,4 +677,45 @@ func clearServiceEnv(t *testing.T) {
 			require.NoError(t, os.Unsetenv(e))
 		}
 	}
+}
+
+func TestServiceAdminBindAddr_DefaultLoopback(t *testing.T) {
+	clearServiceEnv(t)
+
+	cfg, err := LoadService(filepath.Join(t.TempDir(), "nope.yaml"))
+	require.NoError(t, err)
+	assert.Equal(t, "127.0.0.1", cfg.AdminBindAddr, "admin_bind_addr defaults to loopback")
+}
+
+func TestServiceAdminBindAddr_FromEnv(t *testing.T) {
+	clearServiceEnv(t)
+	t.Setenv("CMX_ADMIN_BIND_ADDR", "0.0.0.0")
+
+	cfg, err := LoadService(filepath.Join(t.TempDir(), "nope.yaml"))
+	require.NoError(t, err)
+	assert.Equal(t, "0.0.0.0", cfg.AdminBindAddr)
+}
+
+func TestServiceAdminBindAddr_ValidateResetsEmpty(t *testing.T) {
+	c := validServiceConfig()
+	c.AdminBindAddr = ""
+	require.NoError(t, c.Validate())
+	assert.Equal(t, "127.0.0.1", c.AdminBindAddr)
+}
+
+func TestServiceMetricsToken_DefaultEmpty(t *testing.T) {
+	clearServiceEnv(t)
+
+	cfg, err := LoadService(filepath.Join(t.TempDir(), "nope.yaml"))
+	require.NoError(t, err)
+	assert.Empty(t, cfg.MetricsToken)
+}
+
+func TestServiceMetricsToken_FromEnv(t *testing.T) {
+	clearServiceEnv(t)
+	t.Setenv("CMX_METRICS_TOKEN", "scrape-token")
+
+	cfg, err := LoadService(filepath.Join(t.TempDir(), "nope.yaml"))
+	require.NoError(t, err)
+	assert.Equal(t, "scrape-token", cfg.MetricsToken)
 }
