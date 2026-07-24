@@ -6,6 +6,8 @@
 package registry
 
 import (
+	"strings"
+
 	"github.com/mhersson/contextmatrix-harness/llm"
 )
 
@@ -55,7 +57,8 @@ type Registry struct {
 	priors    Priors
 	blacklist map[string]bool
 	favorites map[favKey][]string
-	sel       Selection // selection config (price headroom, tier bars)
+	creators  map[string]string // slug -> creator, behind the vendor-diversity preference
+	sel       Selection         // selection config (price headroom, tier bars)
 }
 
 // Selection configures the best-value selector. Zero value is valid: headroom
@@ -94,6 +97,9 @@ type SelectInput struct {
 	Tier      Tier
 	EstTokens int             // window-fit estimate; 0 skips the window check
 	Exclude   map[string]bool // diversity: models to avoid if alternatives exist
+	// ExcludeVendors is a hard filter in candidates(); the panel walk applies
+	// it softly (vendor-filtered attempt first, retry without on an empty pool).
+	ExcludeVendors map[string]bool
 }
 
 // NewRegistry builds a priors-only registry with the given capable default.
@@ -101,6 +107,31 @@ type SelectInput struct {
 // always falls back to the capable default.
 func NewRegistry(capableDefault string, catalog llm.Catalog) *Registry {
 	return NewRegistryFromParts(catalog, Priors{}, nil, nil, capableDefault)
+}
+
+// WithCreators attaches the slug -> creator map behind the vendor-diversity
+// preference. nil disables vendor tracking. Returns r for chaining.
+func (r *Registry) WithCreators(creators map[string]string) *Registry {
+	r.creators = creators
+
+	return r
+}
+
+// vendorOf resolves a model's vendor: the CM-supplied creator first, else the
+// namespace prefix of a namespaced slug (OpenRouter-leg fallback for CMs that
+// predate CandidateModel.Creator), else "". The two vocabularies (AA creator
+// slugs like "zai" vs OR prefixes like "z-ai") never mix within one run: the
+// fallback only fires when CM sent no creator for the slug.
+func (r *Registry) vendorOf(id string) string {
+	if v := r.creators[id]; v != "" {
+		return v
+	}
+
+	if vendor, _, ok := strings.Cut(id, "/"); ok && vendor != "" {
+		return vendor
+	}
+
+	return ""
 }
 
 // Has reports whether model is present in the live catalog. The orchestrator
@@ -209,6 +240,13 @@ func (r *Registry) candidates(in SelectInput) []candidate {
 			continue
 		}
 
+		if len(in.ExcludeVendors) > 0 {
+			// Models with no resolvable vendor are never vendor-filtered.
+			if v := r.vendorOf(e.ID); v != "" && in.ExcludeVendors[v] {
+				continue
+			}
+		}
+
 		quality, ok := r.priors.ForRole(e.ID, in.Role)
 		if !ok || quality < bar {
 			continue
@@ -232,6 +270,10 @@ func (r *Registry) candidates(in SelectInput) []candidate {
 // (tier, any role) - that is a live candidate (clears the bar, not blacklisted,
 // fits the window). An empty string means no eligible favorite.
 func (r *Registry) favoriteFor(in SelectInput) string {
+	// Favorites bypass the vendor-diversity preference: explicit operator
+	// intent beats the emergent heuristic (in is a value copy).
+	in.ExcludeVendors = nil
+
 	if len(r.favorites) == 0 {
 		return ""
 	}
@@ -253,9 +295,11 @@ func (r *Registry) favoriteFor(in SelectInput) string {
 }
 
 // SelectReviewPanel returns n specs for the review specialists: distinct models
-// chosen by repeated SelectByComplexity with a growing Exclude set. When the
-// pool runs dry, the last pick is reused to fill remaining slots rather than
-// escalating price.
+// chosen by repeated SelectByComplexity with a growing Exclude set. Each seat
+// softly prefers vendors not yet on the panel: the pick runs vendor-filtered
+// when that still leaves a qualifying candidate, vendor-blind otherwise. When
+// the pool runs dry, the last pick is reused to fill remaining slots rather
+// than escalating price.
 func (r *Registry) SelectReviewPanel(in SelectInput, n int) []ModelSpec {
 	if n <= 0 {
 		return nil
@@ -266,6 +310,11 @@ func (r *Registry) SelectReviewPanel(in SelectInput, n int) []ModelSpec {
 		exclude[id] = true
 	}
 
+	usedVendors := map[string]bool{}
+	for v := range in.ExcludeVendors {
+		usedVendors[v] = true // e.g. a Best-of-N pin's vendor
+	}
+
 	panel := make([]ModelSpec, 0, n)
 
 	var last ModelSpec
@@ -273,6 +322,7 @@ func (r *Registry) SelectReviewPanel(in SelectInput, n int) []ModelSpec {
 	for len(panel) < n {
 		next := in
 		next.Exclude = exclude
+		next.ExcludeVendors = nil // the dry probe and the fallback are vendor-blind
 
 		// Probe the candidate pool directly: an empty pool means no distinct
 		// model remains, so reuse the last real pick rather than escalating to
@@ -291,10 +341,27 @@ func (r *Registry) SelectReviewPanel(in SelectInput, n int) []ModelSpec {
 			continue
 		}
 
+		// Soft vendor preference: restrict to unseated vendors only when that
+		// still leaves a qualifying candidate. The price band re-anchors on the
+		// filtered subset, so a diverse seat may cost more than the
+		// vendor-blind pick would have - accepted, diversity is the point.
+		if len(usedVendors) > 0 {
+			filtered := next
+			filtered.ExcludeVendors = usedVendors
+
+			if len(r.candidates(filtered)) > 0 {
+				next = filtered
+			}
+		}
+
 		spec := r.SelectByComplexity(next)
 		panel = append(panel, spec)
 		last = spec
 		exclude[spec.Model] = true
+
+		if v := r.vendorOf(spec.Model); v != "" {
+			usedVendors[v] = true
+		}
 	}
 
 	return panel
@@ -328,6 +395,15 @@ func (r *Registry) SelectCandidateModels(in SelectInput, n int, pin string) []Mo
 
 	for id := range in.Exclude {
 		next.Exclude[id] = true
+	}
+
+	// The pin occupies a seat, so its vendor counts as seated for the
+	// auto-picked slots (fresh map; the caller's is never mutated).
+	if v := r.vendorOf(pin); v != "" {
+		next.ExcludeVendors = map[string]bool{v: true}
+		for u := range in.ExcludeVendors {
+			next.ExcludeVendors[u] = true
+		}
 	}
 
 	out := make([]ModelSpec, 0, n)

@@ -441,3 +441,232 @@ func TestSelectDiscussionPanel(t *testing.T) {
 		})
 	}
 }
+
+// TestSelectReviewPanelSpansVendors reproduces the reported incident: an
+// OpenAI-compatible gateway (bare slugs, creators supplied by CM) whose top
+// reviewer priors all belong to one vendor. Without vendor awareness the
+// panel came out gpt/gpt/gpt even though a qualifying model from another
+// vendor was available.
+func TestSelectReviewPanelSpansVendors(t *testing.T) {
+	// Blended $/Mtok: gpt-a 2.1, gpt-b 2.7, gpt-c 3.0, claude-x 3.6. All
+	// clear the complex bar (0.82).
+	catalog := llm.Catalog{
+		entry("gpt-a", 0.7, 1.4, 200000),
+		entry("gpt-b", 0.9, 1.8, 200000),
+		entry("gpt-c", 1.0, 2.0, 200000),
+		entry("claude-x", 1.2, 2.4, 200000),
+	}
+	priors := Priors{Models: map[string]PriorEntry{
+		"gpt-a": {Reviewer: new(0.95)}, "gpt-b": {Reviewer: new(0.90)},
+		"gpt-c": {Reviewer: new(0.88)}, "claude-x": {Reviewer: new(0.85)},
+	}}
+	r := NewRegistryFromParts(catalog, priors, nil, nil, "capable-default").
+		WithCreators(map[string]string{
+			"gpt-a": "openai", "gpt-b": "openai", "gpt-c": "openai",
+			"claude-x": "anthropic",
+		})
+
+	in := SelectInput{Role: RoleReviewer, Tier: TierComplex, EstTokens: 50000}
+	panel := r.SelectReviewPanel(in, 3)
+	require.Len(t, panel, 3)
+
+	// Seat 1 is unchanged from the vendor-blind walk: band 2.1*1.5=3.15 holds
+	// gpt-a/b/c; top quality gpt-a. Seat 2 prefers the unseated vendor:
+	// claude-x (band re-anchors on the filtered subset). Seat 3 has no unseated
+	// vendor left and falls back to the vendor-blind pick: gpt-b.
+	assert.Equal(t, "gpt-a", panel[0].Model)
+	assert.Equal(t, "claude-x", panel[1].Model)
+	assert.Equal(t, "gpt-b", panel[2].Model)
+}
+
+// TestSelectReviewPanelFavoriteBypassesVendorFilter pins config precedence:
+// an operator favorite wins its seat even when its vendor is already on the
+// panel - the vendor preference is an emergent heuristic and must never
+// override explicit favorites. The seated favorite's vendor still counts as
+// used for later seats.
+func TestSelectReviewPanelFavoriteBypassesVendorFilter(t *testing.T) {
+	catalog := llm.Catalog{
+		entry("v1-fav", 1.0, 2.0, 200000),
+		entry("v1-fav2", 1.0, 2.0, 200000),
+		entry("v2-b", 1.0, 2.0, 200000),
+	}
+	priors := Priors{Models: map[string]PriorEntry{
+		"v1-fav": {Reviewer: new(0.90)}, "v1-fav2": {Reviewer: new(0.85)},
+		"v2-b": {Reviewer: new(0.95)},
+	}}
+	favs := map[favKey][]string{{Tier: TierComplex}: {"v1-fav", "v1-fav2"}}
+	r := NewRegistryFromParts(catalog, priors, nil, favs, "capable-default").
+		WithCreators(map[string]string{
+			"v1-fav": "openai", "v1-fav2": "openai", "v2-b": "anthropic",
+		})
+
+	in := SelectInput{Role: RoleReviewer, Tier: TierComplex, EstTokens: 50000}
+	panel := r.SelectReviewPanel(in, 3)
+	require.Len(t, panel, 3)
+
+	// Seat 1: first favorite. Seat 2: the second favorite must win despite
+	// openai already being seated (bypass), beating the unseated-vendor v2-b.
+	// Seat 3: both favorites consumed; v2-b remains.
+	assert.Equal(t, "v1-fav", panel[0].Model)
+	assert.Equal(t, "v1-fav2", panel[1].Model)
+	assert.Equal(t, "v2-b", panel[2].Model)
+}
+
+// TestSelectCandidateModelsPinSeedsVendor pins that a Best-of-N pin counts as
+// a seated vendor: the auto-filled slots steer toward other vendors first.
+func TestSelectCandidateModelsPinSeedsVendor(t *testing.T) {
+	catalog := llm.Catalog{
+		entry("gpt-pin", 1.0, 2.0, 200000),
+		entry("gpt-d", 1.0, 2.0, 200000),
+		entry("claude-y", 1.0, 2.0, 200000),
+	}
+	priors := Priors{Models: map[string]PriorEntry{
+		"gpt-pin": {Coder: new(0.90)}, "gpt-d": {Coder: new(0.95)},
+		"claude-y": {Coder: new(0.85)},
+	}}
+	r := NewRegistryFromParts(catalog, priors, nil, nil, "capable-default").
+		WithCreators(map[string]string{
+			"gpt-pin": "openai", "gpt-d": "openai", "claude-y": "anthropic",
+		})
+
+	in := SelectInput{Role: RoleCoder, Tier: TierComplex, EstTokens: 50000}
+	specs := r.SelectCandidateModels(in, 3, "gpt-pin")
+	require.Len(t, specs, 3)
+	assert.Equal(t, "gpt-pin", specs[0].Model)
+	// Slot 2 prefers the unseated vendor over the higher-prior gpt-d.
+	assert.Equal(t, "claude-y", specs[1].Model)
+	assert.Equal(t, "gpt-d", specs[2].Model)
+
+	// A pin with no resolvable vendor (absent from the catalog, bare slug)
+	// seeds nothing and must not panic.
+	specs = r.SelectCandidateModels(in, 2, "mystery")
+	require.Len(t, specs, 2)
+	assert.Equal(t, "mystery", specs[0].Model)
+	assert.Equal(t, "gpt-d", specs[1].Model, "no vendor seed: slot 2 stays the vendor-blind pick")
+}
+
+// TestSelectReviewPanelVendorEdgeCases pins the soft-preference semantics:
+// the vendor filter never downgrades quality below the tier bar, never
+// touches models without a resolvable vendor, re-anchors the price band on
+// the filtered subset, degrades to the vendor-blind walk on single-vendor
+// pools, and keeps wrap-around scarcity semantics.
+func TestSelectReviewPanelVendorEdgeCases(t *testing.T) {
+	in := SelectInput{Role: RoleReviewer, Tier: TierComplex, EstTokens: 50000}
+
+	t.Run("soft fallback when the only unseated vendor misses the bar", func(t *testing.T) {
+		catalog := llm.Catalog{
+			entry("gpt-a", 1.0, 2.0, 200000),
+			entry("gpt-b", 1.0, 2.0, 200000),
+			entry("claude-weak", 1.0, 2.0, 200000),
+		}
+		priors := Priors{Models: map[string]PriorEntry{
+			"gpt-a": {Reviewer: new(0.95)}, "gpt-b": {Reviewer: new(0.90)},
+			"claude-weak": {Reviewer: new(0.80)}, // below the complex bar 0.82
+		}}
+		r := NewRegistryFromParts(catalog, priors, nil, nil, "capable-default").
+			WithCreators(map[string]string{"gpt-a": "openai", "gpt-b": "openai", "claude-weak": "anthropic"})
+
+		panel := r.SelectReviewPanel(in, 2)
+		require.Len(t, panel, 2)
+		assert.Equal(t, "gpt-a", panel[0].Model)
+		assert.Equal(t, "gpt-b", panel[1].Model, "diversity must never seat a below-bar model")
+	})
+
+	t.Run("diverse seat may cost above the vendor-blind band", func(t *testing.T) {
+		catalog := llm.Catalog{
+			entry("gpt-a", 0.7, 1.4, 200000),        // $2.1
+			entry("gpt-b", 0.9, 1.8, 200000),        // $2.7
+			entry("claude-exp", 10.0, 20.0, 200000), // $30, far outside 2.7*1.5
+		}
+		priors := Priors{Models: map[string]PriorEntry{
+			"gpt-a": {Reviewer: new(0.95)}, "gpt-b": {Reviewer: new(0.90)},
+			"claude-exp": {Reviewer: new(0.93)},
+		}}
+		r := NewRegistryFromParts(catalog, priors, nil, nil, "capable-default").
+			WithCreators(map[string]string{"gpt-a": "openai", "gpt-b": "openai", "claude-exp": "anthropic"})
+
+		panel := r.SelectReviewPanel(in, 2)
+		require.Len(t, panel, 2)
+		assert.Equal(t, "gpt-a", panel[0].Model)
+		assert.Equal(t, "claude-exp", panel[1].Model,
+			"the band re-anchors on the vendor-filtered subset (documented cost of diversity)")
+	})
+
+	t.Run("models without a resolvable vendor pass every vendor filter", func(t *testing.T) {
+		catalog := llm.Catalog{
+			entry("gpt-a", 1.0, 2.0, 200000),
+			entry("gpt-b", 1.0, 2.0, 200000),
+			entry("bare-n", 1.0, 2.0, 200000), // no creator, no slug prefix
+		}
+		priors := Priors{Models: map[string]PriorEntry{
+			"gpt-a": {Reviewer: new(0.95)}, "gpt-b": {Reviewer: new(0.93)},
+			"bare-n": {Reviewer: new(0.85)},
+		}}
+		r := NewRegistryFromParts(catalog, priors, nil, nil, "capable-default").
+			WithCreators(map[string]string{"gpt-a": "openai", "gpt-b": "openai"})
+
+		panel := r.SelectReviewPanel(in, 3)
+		require.Len(t, panel, 3)
+		assert.Equal(t, "gpt-a", panel[0].Model)
+		assert.Equal(t, "bare-n", panel[1].Model,
+			"vendor-less models stay selectable during a vendor-filtered attempt")
+		assert.Equal(t, "gpt-b", panel[2].Model)
+	})
+
+	t.Run("single-vendor pool matches the vendor-blind walk", func(t *testing.T) {
+		catalog := llm.Catalog{
+			entry("gpt-a", 0.7, 1.4, 200000),
+			entry("gpt-b", 0.9, 1.8, 200000),
+			entry("gpt-c", 1.0, 2.0, 200000),
+		}
+		priors := Priors{Models: map[string]PriorEntry{
+			"gpt-a": {Reviewer: new(0.95)}, "gpt-b": {Reviewer: new(0.90)}, "gpt-c": {Reviewer: new(0.88)},
+		}}
+		creators := map[string]string{"gpt-a": "openai", "gpt-b": "openai", "gpt-c": "openai"}
+
+		blind := NewRegistryFromParts(catalog, priors, nil, nil, "capable-default").SelectReviewPanel(in, 3)
+		aware := NewRegistryFromParts(catalog, priors, nil, nil, "capable-default").
+			WithCreators(creators).SelectReviewPanel(in, 3)
+		assert.Equal(t, blind, aware)
+	})
+
+	t.Run("wrap-around scarcity keeps reusing the last pick", func(t *testing.T) {
+		catalog := llm.Catalog{
+			entry("gpt-a", 1.0, 2.0, 200000),
+			entry("claude-x", 1.0, 2.0, 200000),
+		}
+		priors := Priors{Models: map[string]PriorEntry{
+			"gpt-a": {Reviewer: new(0.95)}, "claude-x": {Reviewer: new(0.90)},
+		}}
+		r := NewRegistryFromParts(catalog, priors, nil, nil, "capable-default").
+			WithCreators(map[string]string{"gpt-a": "openai", "claude-x": "anthropic"})
+
+		panel := r.SelectReviewPanel(in, 4)
+		require.Len(t, panel, 4)
+		assert.Equal(t, "gpt-a", panel[0].Model)
+		assert.Equal(t, "claude-x", panel[1].Model)
+		assert.Equal(t, "claude-x", panel[2].Model, "dry pool wraps on the last real pick")
+		assert.Equal(t, "claude-x", panel[3].Model)
+	})
+
+	t.Run("namespaced slugs diversify without a creators map", func(t *testing.T) {
+		// Old-CM OpenRouter leg: no creators shipped, vendors recovered from
+		// the slug prefix.
+		catalog := llm.Catalog{
+			entry("openai/one", 1.0, 2.0, 200000),
+			entry("openai/two", 1.0, 2.0, 200000),
+			entry("anthropic/x", 1.0, 2.0, 200000),
+		}
+		priors := Priors{Models: map[string]PriorEntry{
+			"openai/one": {Reviewer: new(0.95)}, "openai/two": {Reviewer: new(0.90)},
+			"anthropic/x": {Reviewer: new(0.85)},
+		}}
+		r := NewRegistryFromParts(catalog, priors, nil, nil, "capable-default")
+
+		panel := r.SelectReviewPanel(in, 3)
+		require.Len(t, panel, 3)
+		assert.Equal(t, "openai/one", panel[0].Model)
+		assert.Equal(t, "anthropic/x", panel[1].Model)
+		assert.Equal(t, "openai/two", panel[2].Model)
+	})
+}
