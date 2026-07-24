@@ -191,8 +191,13 @@ file only - never via flags or committed YAML.
    (`DefaultTierBars`: simple 0.65, moderate 0.76, complex 0.82, critical 0.90);
    there is **no measured-capability gate**. An eligible operator favorite wins
    outright; otherwise the most capable candidate within a price headroom
-   (default 1.5×) of the cheapest is chosen. Pins override, precedence card pin
-   → payload default → serve-config default. Priors, favorites, and the
+   (default 1.5×) of the cheapest is chosen. Multi-seat picks (review panels,
+   mob discussions, Best-of-N) add a soft vendor-diversity preference: each
+   seat first considers only vendors not yet seated, with the price band
+   re-anchored on that subset - so a diverse seat may cost more than the
+   vendor-blind pick; when no unseated-vendor candidate qualifies, the seat is
+   picked vendor-blind. Favorites bypass the preference. Pins override,
+   precedence card pin → payload default → serve-config default. Priors, favorites, and the
    blacklist are injected at run start from CM's `SelectionContext` payload
    (`registry.FromSelection`) - nothing is embedded. The blacklist is
    self-learning: a model that proves harness-incapable mid-run is reported back
