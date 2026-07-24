@@ -520,6 +520,23 @@ func TestRunPlanHITLApproveCreatesSubtasks(t *testing.T) {
 	assert.Len(t, ops.createCardArgs, 1, "subtasks created after approval")
 }
 
+// TestRunPlanHITLPromoteContinuesAsApprove pins that a promotion at the
+// plan-approval gate creates the subtasks and moves on - autonomous runs never
+// gate the plan. The script has no gate classification response: a promotion
+// consumes no human turn and no model call.
+func TestRunPlanHITLPromoteContinuesAsApprove(t *testing.T) {
+	ops := &fakeOps{}
+	inbox := &fakeInbox{} // empty, non-blocking -> the gate Wait reports ErrInboxClosed
+	client := &planLLM{responses: []llm.Response{
+		stopResp(onePlanJSON, 0.01), // draft only
+	}}
+	o := hitlPlanRun(ops, inbox, client)
+
+	require.NoError(t, runPlan(context.Background(), o))
+	assert.Len(t, ops.createCardArgs, 1, "a promoted plan gate creates the subtasks")
+	assert.True(t, ops.loggedContains("promoted"), "promote logged; logs=%v", ops.logs)
+}
+
 // autoPlanRun builds an autonomous (non-interactive) *run for planner tests: a
 // plain, non-bug-like card so runPlan goes straight to draft → createSubtasks
 // with no brainstorm or diagnose detour consuming a scripted response.

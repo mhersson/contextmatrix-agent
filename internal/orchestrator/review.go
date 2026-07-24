@@ -58,14 +58,11 @@ func (e *ReviewParkedError) Error() string {
 }
 
 // runReview is the review phase. The parent enters review (idempotent on
-// resume), then loops cheap incremental rounds: a detected verify gate runs first
-// and short-circuits to the fix run on failure; otherwise three read-only
+// resume), then hands off to reviewLoop (autonomous) or runReviewHITL: cheap
+// incremental rounds where a detected verify gate runs first and
+// short-circuits to the fix run on failure; otherwise three read-only
 // specialists fan out on diverse models and one synthesis call decides
-// approve-or-fix. Approval exits nil; each non-approval increments the card's
-// review attempts and runs a fix. At the cliff (the round that would otherwise
-// park) the gated authoritative pass takes over instead of parking on a cheap
-// verdict - it is the sole park gate. The budget ledger is checked before every
-// model-bearing step.
+// approve-or-fix.
 func runReview(ctx context.Context, o *run) error {
 	d := o.d
 	cfg := d.Cfg
@@ -86,6 +83,25 @@ func runReview(ctx context.Context, o *run) error {
 		return o.runReviewHITL(ctx, plan)
 	}
 
+	return o.reviewLoop(ctx, plan, 0)
+}
+
+// reviewLoop is the autonomous review loop. Approval exits nil; each
+// non-approval increments the card's review attempts and runs a fix. At the
+// cliff (the round that would otherwise park) the gated authoritative pass
+// takes over instead of parking on a cheap verdict - it is the sole park gate.
+// The budget ledger is checked before every model-bearing step.
+//
+// consumed is the number of review rounds already run in-process this run: 0
+// when this loop owns the whole phase, >0 when runReviewHITL hands over after
+// a mid-run promotion. o.tc is a run-start snapshot; every in-process round
+// that did not approve also incremented the server counter, so
+// o.tc.ReviewAttempts + consumed mirrors the persisted count and round
+// numbering stays resume-stable.
+func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) error {
+	d := o.d
+	cfg := d.Cfg
+
 	// Guard a mis-wired worker: a zero or negative cap would make the cliff trip
 	// on the FIRST round and park (via the authoritative pass) every card
 	// immediately. Fall back to CM's convention instead.
@@ -97,7 +113,7 @@ func runReview(ctx context.Context, o *run) error {
 	for iter := range hardReviewIterationCap {
 		// Round number continues across resumes: review_attempts persists the
 		// count of prior rounds, so round N is stable for the body record.
-		round := o.tc.ReviewAttempts + iter + 1
+		round := o.tc.ReviewAttempts + consumed + iter + 1
 
 		// At the cliff (the round that would otherwise park), run the gated
 		// authoritative pass instead of another cheap round - never park on a
@@ -142,7 +158,11 @@ func runReview(ctx context.Context, o *run) error {
 // the human, who decides. Approve -> proceed to integrate; adjust -> apply the
 // findings plus the human's feedback as a fix, then re-review. The human is the
 // decision-maker, so there is no authoritative pass or auto-park; the hard
-// iteration cap is only a runaway guard.
+// iteration cap is only a runaway guard. On a mid-run promotion the loop falls
+// back to autonomous decision semantics instead: the promoted round's verdict
+// decides, and a rejection lands one fix and hands the remainder to reviewLoop,
+// so the attempts cap, authoritative cliff, and park-not-approve semantics all
+// apply.
 func (o *run) runReviewHITL(ctx context.Context, plan verifyPlan) error {
 	d := o.d
 	cfg := d.Cfg
@@ -165,10 +185,41 @@ func (o *run) runReviewHITL(ctx context.Context, plan verifyPlan) error {
 			return gerr
 		}
 
-		if outcome == gateApprove {
+		switch outcome {
+		case gateApprove:
 			o.reviewSummary = findings
+			if !autoApproved {
+				o.reviewSummary = approvedDespiteFindings(findings)
+			}
 
 			return nil
+
+		case gatePromoted:
+			// No human decided anything - fall back to the autonomous decision
+			// for the verdict already in hand (never re-run the round).
+			if autoApproved {
+				o.reviewSummary = findings
+
+				return nil
+			}
+
+			o.lastFindings = findings
+
+			if _, err := d.Ops.IncrementReviewAttempts(ctx, cfg.CardID); err != nil {
+				return fmt.Errorf("increment review attempts: %w", err)
+			}
+
+			if err := o.runFix(ctx, findings, round, fixTier, false); err != nil {
+				return err
+			}
+
+			d.logCard(ctx, "review: promoted mid-run with outstanding findings - continuing autonomously from round %d", round+1)
+
+			// The inbox stays closed, so every later gate would return
+			// gatePromoted instantly: hand the remainder to the autonomous loop
+			// (attempts cap, authoritative cliff, park) and never re-enter this
+			// one. iter+1 rounds ran in-process, each counted server-side.
+			return o.reviewLoop(ctx, plan, iter+1)
 		}
 
 		o.lastFindings = findings
@@ -196,6 +247,14 @@ func presentFindings(findings string, autoApproved bool) string {
 
 	return "Review findings (automated recommendation: " + rec + "):\n\n" + findings +
 		"\n\nApprove to integrate, or tell me what you'd like changed."
+}
+
+// approvedDespiteFindings frames the review summary for the PR body when the
+// human approved integration while the automated verdict still had open
+// findings, so the PR model cannot narrate them as fixed. Any future path that
+// lets an approval coexist with open findings must reuse this helper.
+func approvedDespiteFindings(findings string) string {
+	return "The human reviewer approved integration despite these outstanding review findings (they were presented to the reviewer but not fixed):\n\n" + findings
 }
 
 // mergeFeedback folds the human's adjust feedback into the synthesized findings
