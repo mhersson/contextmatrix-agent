@@ -848,25 +848,27 @@ func TestReviewPinOverridesPanel(t *testing.T) {
 // At complex the weak trio is gated out, forcing the strong model in - a model
 // the moderate panel does not select.
 func TestReviewPanelEscalatesWhenAuthoritative(t *testing.T) {
-	const strong = "strong/reviewer"
+	const strong = "acme/strong-reviewer"
 
 	catalog := llm.Catalog{
-		{ID: "weak/one", ContextLength: 200000, PromptPricePerTok: 0.0000004, CompletionPricePerTok: 0.0000006, SupportedParameters: []string{"tools"}},
-		{ID: "weak/two", ContextLength: 200000, PromptPricePerTok: 0.00000045, CompletionPricePerTok: 0.00000065, SupportedParameters: []string{"tools"}},
-		{ID: "weak/three", ContextLength: 200000, PromptPricePerTok: 0.0000005, CompletionPricePerTok: 0.0000007, SupportedParameters: []string{"tools"}},
+		{ID: "acme/weak-one", ContextLength: 200000, PromptPricePerTok: 0.0000004, CompletionPricePerTok: 0.0000006, SupportedParameters: []string{"tools"}},
+		{ID: "acme/weak-two", ContextLength: 200000, PromptPricePerTok: 0.00000045, CompletionPricePerTok: 0.00000065, SupportedParameters: []string{"tools"}},
+		{ID: "acme/weak-three", ContextLength: 200000, PromptPricePerTok: 0.0000005, CompletionPricePerTok: 0.0000007, SupportedParameters: []string{"tools"}},
 		{ID: strong, ContextLength: 200000, PromptPricePerTok: 0.000005, CompletionPricePerTok: 0.000005, SupportedParameters: []string{"tools"}},
 		{ID: "default/model", ContextLength: 131072, SupportedParameters: []string{"tools"}},
 	}
 	// The weak trio clears the default moderate bar (0.76) but not complex (0.82);
 	// the strong model clears complex (0.82). So the moderate panel is the cheap
-	// trio and the complex escalation forces the strong model in.
+	// trio and the complex escalation forces the strong model in. A single
+	// vendor prefix keeps the vendor-diversity preference out of the picture -
+	// this test isolates tier escalation.
 	w1, w2, w3, st := 0.77, 0.78, 0.79, 0.90
 	priors := registry.Priors{
 		Models: map[string]registry.PriorEntry{
-			"weak/one":   {Reviewer: &w1},
-			"weak/two":   {Reviewer: &w2},
-			"weak/three": {Reviewer: &w3},
-			strong:       {Reviewer: &st},
+			"acme/weak-one":   {Reviewer: &w1},
+			"acme/weak-two":   {Reviewer: &w2},
+			"acme/weak-three": {Reviewer: &w3},
+			strong:            {Reviewer: &st},
 		},
 	}
 	reg := registry.NewRegistryFromParts(catalog, priors, nil, nil, "default/model")

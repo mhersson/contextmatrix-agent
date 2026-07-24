@@ -13,6 +13,7 @@ import (
 func FromSelection(sc *protocol.SelectionContext, capable string, priceHeadroom float64) *Registry {
 	cat := make(llm.Catalog, 0)
 	priors := Priors{Models: map[string]PriorEntry{}}
+	creators := map[string]string{}
 
 	if sc != nil {
 		for _, c := range sc.Candidates {
@@ -30,6 +31,10 @@ func FromSelection(sc *protocol.SelectionContext, capable string, priceHeadroom 
 			}
 
 			priors.Models[c.Slug] = PriorEntry{Coder: &coder, Reviewer: &rev}
+
+			if c.Creator != "" {
+				creators[c.Slug] = c.Creator
+			}
 		}
 	}
 
@@ -46,7 +51,7 @@ func FromSelection(sc *protocol.SelectionContext, capable string, priceHeadroom 
 		}
 	}
 
-	r := NewRegistryFromParts(cat, priors, blacklist, favorites, capable)
+	r := NewRegistryFromParts(cat, priors, blacklist, favorites, capable).WithCreators(creators)
 	if priceHeadroom > 0 {
 		// Honor the operator's selector_price_headroom; 0 means "use the worker
 		// default", which NewRegistryFromParts already set to defaultPriceHeadroom.

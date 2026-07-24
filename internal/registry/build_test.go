@@ -165,3 +165,37 @@ func TestOutcomeBiasFactorClamps(t *testing.T) {
 		})
 	}
 }
+
+func TestFromSelectionThreadsCreators(t *testing.T) {
+	// The incident scenario end-to-end: an OpenAI-endpoint payload (bare
+	// slugs, creators supplied by CM) must come out of FromSelection with the
+	// vendor-diversity preference live in the discussion panel.
+	sc := &protocol.SelectionContext{
+		Candidates: []protocol.CandidateModel{
+			{Slug: "gpt-a", PromptPricePerTok: 1e-6, CompletionPricePerTok: 2e-6, ContextWindow: 200000, ReviewerPrior: 0.95, Creator: "openai"},
+			{Slug: "gpt-b", PromptPricePerTok: 1e-6, CompletionPricePerTok: 2e-6, ContextWindow: 200000, ReviewerPrior: 0.90, Creator: "openai"},
+			{Slug: "gpt-c", PromptPricePerTok: 1e-6, CompletionPricePerTok: 2e-6, ContextWindow: 200000, ReviewerPrior: 0.88, Creator: "openai"},
+			{Slug: "claude-x", PromptPricePerTok: 1e-6, CompletionPricePerTok: 2e-6, ContextWindow: 200000, ReviewerPrior: 0.85, Creator: "anthropic"},
+		},
+	}
+	r := FromSelection(sc, "capable-default", 0)
+
+	panel := r.SelectDiscussionPanel(SelectInput{Role: RoleReviewer, Tier: TierComplex, EstTokens: 50000}, 3)
+	require.Len(t, panel, 3)
+	assert.Equal(t, "gpt-a", panel[0].Model)
+	assert.Equal(t, "claude-x", panel[1].Model, "creators from the payload must drive vendor diversity")
+	assert.Equal(t, "gpt-b", panel[2].Model)
+
+	// Without creators (older CM, bare slugs) the walk stays vendor-blind.
+	for i := range sc.Candidates {
+		sc.Candidates[i].Creator = ""
+	}
+
+	rBlind := FromSelection(sc, "capable-default", 0)
+
+	panel = rBlind.SelectDiscussionPanel(SelectInput{Role: RoleReviewer, Tier: TierComplex, EstTokens: 50000}, 3)
+	require.Len(t, panel, 3)
+	assert.Equal(t, "gpt-a", panel[0].Model)
+	assert.Equal(t, "gpt-b", panel[1].Model)
+	assert.Equal(t, "gpt-c", panel[2].Model)
+}
