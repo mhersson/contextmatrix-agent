@@ -72,14 +72,14 @@ func TestGateHITLAdjustCarriesFeedback(t *testing.T) {
 	assert.Equal(t, "split subtask 2 into two", fb)
 }
 
-func TestGateHITLPromoteApprovesAndLogs(t *testing.T) {
+func TestGateHITLPromoteReturnsPromoted(t *testing.T) {
 	ops := &fakeOps{}
 	inbox := &fakeInbox{} // no messages, not blocking -> Wait returns ErrInboxClosed (promote)
 	o := gateRun(ops, inbox, true, &planLLM{}, nil, 0, 0)
 
 	outcome, _, err := o.gate(context.Background(), gatePlanApproval, "payload/model", "plan?")
 	require.NoError(t, err)
-	assert.Equal(t, gateApprove, outcome, "a promoted card passes the gate")
+	assert.Equal(t, gatePromoted, outcome, "promotion is passthrough, not approval")
 	assert.True(t, ops.loggedContains("promoted"), "promote logged; logs=%v", ops.logs)
 }
 

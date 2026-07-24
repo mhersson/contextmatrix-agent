@@ -235,6 +235,97 @@ func TestE2EHITLFullFlow(t *testing.T) {
 	assert.Equal(t, "palette\n", branchFile(t, remote, "cm/cmx-001", "palette.txt"))
 }
 
+// TestE2EHITLPromoteMidRunCompletesAutonomously drives a HITL card through the
+// real FSM and promotes it at the plan-approval gate: park 1 (brainstorm
+// question) gets a human reply, park 2 (plan-approval gate) gets a promote
+// frame, and nothing else ever arrives on stdin. The closed inbox must carry
+// the run through the plan gate AND the review-decision gate to completion -
+// the wiring seam behind the promoted-mid-run incident.
+func TestE2EHITLPromoteMidRunCompletesAutonomously(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping HITL e2e in -short mode")
+	}
+
+	remote := setupBareRemote(t)
+	backend := &hitlBackend{cost: 0.001}
+
+	srv := httptest.NewServer(backend.handler())
+	t.Cleanup(srv.Close)
+
+	client := llm.NewClient("test-key", llm.WithBaseURL(srv.URL))
+
+	ops := newStubOps()
+	ops.tcx = cmclient.TaskContext{
+		Title:       "Add a configurable palette",
+		Description: "Let users configure the widget palette.",
+		State:       "in_progress",
+		Phase:       "",
+		Autonomous:  false,
+		CreatePR:    false,
+	}
+
+	spec := baseSpec(t, remote, t.TempDir())
+	spec.Interactive = true // HITL until the promote frame lands
+	spec.MaxCardCost = 0
+	spec.MaxTurns = 6
+
+	var transcript syncBuffer
+
+	emit := events.NewEmitter(io.Discard, &transcript)
+
+	pr, pw := io.Pipe()
+
+	t.Cleanup(func() { _ = pw.Close() })
+
+	// Frame driver: answer the brainstorm question, then promote at the
+	// plan-approval gate. No further frames - the review-decision gate must
+	// pass through on the closed inbox without a human turn.
+	go func() {
+		waitForAwaiting(t, &transcript, 1)
+
+		_ = frames.Write(pw, frames.Frame{
+			Type: frames.TypeUserMessage, Content: "grid layout, please", MessageID: "m1",
+		})
+
+		waitForAwaiting(t, &transcript, 2)
+
+		_ = frames.Write(pw, frames.Frame{Type: frames.TypePromote})
+	}()
+
+	type result struct {
+		res Result
+		err error
+	}
+
+	done := make(chan result, 1)
+
+	go func() {
+		res, err := Run(context.Background(), spec, ops, client, emit, pr)
+		done <- result{res, err}
+	}()
+
+	var got result
+	select {
+	case got = <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("promoted HITL run did not complete; transcript so far:\n%s", transcript.String())
+	}
+
+	require.NoError(t, got.err)
+	assert.Equal(t, "completed", got.res.Reason)
+
+	tx := transcript.String()
+	// Brainstorm and plan gate parked; the promote consumed no human turn, so
+	// only the brainstorm reply registers as user input.
+	assert.GreaterOrEqual(t, strings.Count(tx, `"state":"awaiting_human"`), 2,
+		"brainstorm and plan-approval gate both park")
+	assert.Equal(t, 1, strings.Count(tx, `"kind":"user_input"`),
+		"only the brainstorm reply is a human turn - promotion is not")
+
+	assert.True(t, remoteHasBranch(t, remote, "cm/cmx-001"), "the promoted run pushed the card branch")
+	assert.Equal(t, "palette\n", branchFile(t, remote, "cm/cmx-001", "palette.txt"))
+}
+
 // waitForAwaiting blocks until the transcript shows at least n awaiting-human
 // states, failing the test on timeout.
 func waitForAwaiting(t *testing.T, transcript *syncBuffer, n int) {

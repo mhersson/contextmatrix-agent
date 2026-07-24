@@ -649,7 +649,9 @@ func runPlan(ctx context.Context, o *run) error {
 			return gerr
 		}
 
-		if outcome == gateApprove {
+		// A promotion passes the plan gate: autonomous runs create subtasks
+		// without a sign-off, so passthrough matches autonomous semantics here.
+		if outcome == gateApprove || outcome == gatePromoted {
 			if err := o.createSubtasks(ctx, p); err != nil {
 				return err
 			}

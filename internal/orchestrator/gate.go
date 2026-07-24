@@ -15,11 +15,17 @@ import (
 // gateOutcome is the human's decision at a sign-off gate. There is no hard
 // reject: anything that is not an approval is an adjustment that loops with the
 // human's feedback. A human ends a run for good with an end_session frame.
+// gatePromoted is the exception: no decision was made at all - the inbox closed
+// because the card was promoted to autonomous mid-run.
 type gateOutcome int
 
 const (
 	gateApprove gateOutcome = iota
 	gateAdjust
+	// gatePromoted means the inbox closed under an interactive config: the card
+	// was promoted to autonomous mid-run. It is NOT a human approval - each
+	// caller falls back to autonomous decision semantics for its gate.
+	gatePromoted
 )
 
 // gateKind names the gate for the classification prompt and activity log.
@@ -39,9 +45,9 @@ const (
 // HITL emits the presentation (a model_response event -> chat) and the
 // awaiting-human signal, then blocks on the inbox:
 //   - a human turn   -> classify into approve/adjust (one cheap model call);
-//   - ErrInboxClosed -> the card was promoted mid-run: return gateApprove so the
-//     run finishes autonomously (the inbox stays closed, so every later gate
-//     passes through too);
+//   - ErrInboxClosed -> the card was promoted mid-run: return gatePromoted; the
+//     caller falls back to autonomous decision semantics for its gate (the inbox
+//     stays closed, so every later gate returns gatePromoted instantly);
 //   - ctx error      -> end_session/kill: return the error; the worker maps it to
 //     the graceful WIP-push park.
 //
@@ -61,7 +67,7 @@ func (o *run) gate(ctx context.Context, kind gateKind, model, presentation strin
 	case errors.Is(err, harness.ErrInboxClosed):
 		o.d.logCard(ctx, "%s gate: promoted mid-run; proceeding autonomously", kind)
 
-		return gateApprove, "", nil
+		return gatePromoted, "", nil
 	case err != nil:
 		return gateApprove, "", err
 	}

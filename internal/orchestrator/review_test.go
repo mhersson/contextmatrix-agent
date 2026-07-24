@@ -1114,12 +1114,152 @@ func TestRunReviewHITLAdjustFixesThenApproves(t *testing.T) {
 	assert.NotEmpty(t, git.pushBranches, "the fix round pushed a fixup")
 }
 
+// TestRunReviewHITLPromotedRejectFixesThenApproves pins the incident
+// regression: a card promoted to autonomous mid-run must not have a rejecting
+// verdict silently approved at the review-decision gate. The promoted round's
+// findings drive a fix, and the remaining rounds run with autonomous semantics.
+func TestRunReviewHITLPromotedRejectFixesThenApproves(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+	// Empty, non-blocking inbox: the first gate Wait reports ErrInboxClosed,
+	// exactly what a promote frame produces.
+	inbox := &fakeInbox{}
+	client := &planLLM{responses: []llm.Response{
+		// Round 1: specialists + synthesis (rejected). No gate classification -
+		// promotion consumes no human turn and no model call.
+		stopResp("Correctness: bug", 0.001), stopResp("Design: ok", 0.001), stopResp("Security: ok", 0.001),
+		stopResp(`{"approved":false,"summary":"fix it","fixes":[{"file":"a.go","issue":"bug","suggestion":"patch"}]}`, 0.001),
+		stopResp("Fixed.", 0.001), // fix coder
+		// Round 2 (delegated autonomous loop): specialists + synthesis approve.
+		stopResp("Correctness: ok now", 0.001), stopResp("Design: ok", 0.001), stopResp("Security: ok", 0.001),
+		stopResp(`{"approved":true,"summary":"clean now","fixes":[]}`, 0.001),
+	}}
+	o := newRun(hitlReviewDeps(ops, git, inbox, client), cmclient.TaskContext{Title: "T", Description: "b", State: "review"})
+	isolateVerify(o)
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	assert.Equal(t, 1, countCall(ops.recorded(), "IncrementReviewAttempts:CARD-1"),
+		"the promoted rejecting round increments attempts and runs a fix; calls=%v", ops.recorded())
+
+	gitCalls := git.recorded()
+	fixupIdx := indexOfPrefix(gitCalls, "CommitFixup:")
+	pushIdx := indexOfCall(gitCalls, "Push:cm/card-1")
+	require.GreaterOrEqual(t, fixupIdx, 0, "the promoted round's fix must be fixup-committed; git=%v", gitCalls)
+	require.GreaterOrEqual(t, pushIdx, 0, "the fixup must be pushed; git=%v", gitCalls)
+	assert.Less(t, fixupIdx, pushIdx, "fixup before push")
+
+	assert.Equal(t, "clean now", o.reviewSummary, "an approved delegated round keeps the plain verdict summary")
+
+	body := ops.lastBody()
+	assert.Contains(t, body, "## Review Findings", "round 1 recorded")
+	assert.Contains(t, body, "## Review Findings (Round 2)", "delegated round numbering continues from the HITL round")
+}
+
+// TestRunReviewHITLPromotedRejectPersistsParks pins the cliff via delegation: a
+// promoted run whose findings persist must reach the authoritative pass and
+// park - never approve. Seeding review_attempts=1 puts the HITL round at 2, so
+// the delegated loop lands directly on the cliff (round 3 >= cap 3).
+func TestRunReviewHITLPromotedRejectPersistsParks(t *testing.T) {
+	ops := &fakeOps{reviewAttempts: 1}
+	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+	inbox := &fakeInbox{}
+	reject := `{"approved":false,"summary":"still broken","fixes":[{"file":"a.go","issue":"bug","suggestion":"patch"}]}`
+	client := &planLLM{responses: []llm.Response{
+		// HITL round 2: specialists + synthesis reject, then the promoted fix.
+		stopResp("Correctness: bug", 0.001), stopResp("Design: ok", 0.001), stopResp("Security: ok", 0.001),
+		stopResp(reject, 0.001),
+		stopResp("Fixed.", 0.001),
+		// Authoritative round 3: specialists + synthesis reject, then the strong fix.
+		stopResp("Correctness: still bug", 0.001), stopResp("Design: ok", 0.001), stopResp("Security: ok", 0.001),
+		stopResp(reject, 0.001),
+		stopResp("Fixed again.", 0.001),
+		// Strong re-review round 4: specialists + synthesis reject -> park.
+		stopResp("Correctness: STILL bug", 0.001), stopResp("Design: ok", 0.001), stopResp("Security: ok", 0.001),
+		stopResp(reject, 0.001),
+	}}
+	o := newRun(hitlReviewDeps(ops, git, inbox, client),
+		cmclient.TaskContext{Title: "T", Description: "b", State: "review", ReviewAttempts: 1})
+	isolateVerify(o)
+
+	err := runReview(context.Background(), o)
+
+	var parked *ReviewParkedError
+
+	require.ErrorAs(t, err, &parked, "persistent findings on a promoted run must park, never approve")
+	assert.Equal(t, 3, countCall(ops.recorded(), "IncrementReviewAttempts:CARD-1"),
+		"promoted round + authoritative fix + park each increment; calls=%v", ops.recorded())
+	assert.Equal(t, 2, countPrefix(git.recorded(), "CommitFixup:"),
+		"the promoted fix and the strong fix each land a fixup; git=%v", git.recorded())
+	assert.True(t, ops.loggedContains("review parked"), "park logged; logs=%v", ops.logs)
+
+	body := ops.lastBody()
+	assert.Contains(t, body, "## Review Findings (Round 3)", "authoritative round numbering continues")
+	assert.Contains(t, body, "## Review Findings (Round 4)", "strong re-review recorded")
+}
+
+// TestRunReviewHITLPromotedAutoApproveNoFix pins that a promotion with an
+// approving verdict integrates without a fix round - the legitimate passthrough.
+func TestRunReviewHITLPromotedAutoApproveNoFix(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{}
+	inbox := &fakeInbox{}
+	client := &planLLM{responses: []llm.Response{
+		stopResp("No concerns.", 0.001), stopResp("No concerns.", 0.001), stopResp("No concerns.", 0.001),
+		stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.001),
+	}}
+	o := newRun(hitlReviewDeps(ops, git, inbox, client), cmclient.TaskContext{Title: "T", Description: "b", State: "review"})
+	isolateVerify(o)
+
+	require.NoError(t, runReview(context.Background(), o))
+	assert.Equal(t, 0, countCall(ops.recorded(), "IncrementReviewAttempts:CARD-1"), "no fix round on an approving verdict")
+	assert.Equal(t, -1, indexOfPrefix(git.recorded(), "CommitFixup:"), "no fixup; git=%v", git.recorded())
+	assert.Equal(t, "clean", o.reviewSummary, "a genuine auto-approval keeps the plain verdict summary")
+}
+
+// TestRunReviewHITLHumanApproveDespiteFindingsFramesSummary pins the PR-body
+// honesty contract: when the human approves while the automated verdict still
+// has open findings, the review summary must say so instead of posing as an
+// approved summary the PR model could narrate as fixed.
+func TestRunReviewHITLHumanApproveDespiteFindingsFramesSummary(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{}
+	inbox := &fakeInbox{msgs: []harness.UserMessage{{Content: "approve anyway"}}}
+	client := &planLLM{responses: []llm.Response{
+		stopResp("Correctness: bug", 0.001), stopResp("Design: ok", 0.001), stopResp("Security: ok", 0.001),
+		stopResp(`{"approved":false,"summary":"needs work","fixes":[{"file":"a.go","issue":"bug","suggestion":"patch"}]}`, 0.001),
+		stopResp(`{"verdict":"approve","feedback":""}`, 0.001), // the human overrides the revise recommendation
+	}}
+	o := newRun(hitlReviewDeps(ops, git, inbox, client), cmclient.TaskContext{Title: "T", Description: "b", State: "review"})
+	isolateVerify(o)
+
+	require.NoError(t, runReview(context.Background(), o))
+	assert.Equal(t, 0, countCall(ops.recorded(), "IncrementReviewAttempts:CARD-1"), "a human approval does not increment attempts")
+	assert.Equal(t, -1, indexOfPrefix(git.recorded(), "CommitFixup:"), "no fix ran; git=%v", git.recorded())
+	assert.Contains(t, o.reviewSummary, "approved integration despite", "the summary is framed as an override")
+	assert.Contains(t, o.reviewSummary, "a.go", "the outstanding finding rides the summary")
+	assert.Contains(t, o.reviewSummary, "bug", "the finding text rides the summary")
+}
+
 // countCall counts how many entries in calls equal name.
 func countCall(calls []string, name string) int {
 	n := 0
 
 	for _, c := range calls {
 		if c == name {
+			n++
+		}
+	}
+
+	return n
+}
+
+// countPrefix counts how many entries in calls start with prefix.
+func countPrefix(calls []string, prefix string) int {
+	n := 0
+
+	for _, c := range calls {
+		if strings.HasPrefix(c, prefix) {
 			n++
 		}
 	}
