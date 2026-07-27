@@ -211,7 +211,23 @@ file only - never via flags or committed YAML.
 7. **Per-card budget.** One cumulative USD ceiling (`CMX_MAX_CARD_COST`, default
    5.0) spans the orchestrator and every subagent. A breach parks the card - WIP
    pushed, card released, failed callback - it does not kill mid-turn.
-8. **Secrets.** `serve` stages each run's CM-provisioned credentials into
+8. **Verify resolution can park as blocked.** The verify-resolution ladder
+   (declared command, then repo-convention detection, then a model proposal,
+   then skip - `internal/orchestrator/verify.go`) gives every tier a chance
+   before giving up. If nothing resolves and a declared command failed its
+   probe, or a detected toolchain marker (e.g. `pom.xml`) never resolved to a
+   runnable command at any tier, resolution returns `ToolchainMissingError`
+   instead of the silent skip; a workspace with no declared command and no
+   recognized marker (a pure docs repo) still resolves to skip, unverified,
+   exactly as before. `execute()` logs the tier, the command or marker, and
+   the probe failure, then stops the run like the other park sentinels
+   (Budget/Context/MaxTurns). Unlike those, `mapFSMResult` also transitions
+   the card to the board's `blocked` state before releasing the claim, so the
+   park is visible on the board, not just in the log; a project whose
+   `.board.yaml` lacks `in_progress -> blocked` degrades to the same silent
+   WIP-push-and-release park as the others. This is an environmental park, not
+   a model failure - no outcome/blacklist reporting.
+9. **Secrets.** `serve` stages each run's CM-provisioned credentials into
    `<secrets_dir>/runs/<project>/<card_id>/env`, refreshed from ContextMatrix ahead of
    each git-token expiry and bind-mounted read-only at `/run/cm-secrets/env`;
    the per-run dir is torn down with the run. The worker reads the LLM
@@ -219,15 +235,15 @@ file only - never via flags or committed YAML.
    subprocesses get an allowlisted `cmd.Env` (`tools.ScrubbedEnv`) - secrets are
    not inheritable by model-driven commands - and known secret values are
    redacted from events and transcripts.
-9. **HITL gates + promote.** HITL cards run the same FSM as autonomous,
-   mode-gated on `Config.Interactive`: a brainstorming dialogue for creative
-   cards plus plan-approval and review-decision gates that wait on the inbox.
-   Autonomous is the same FSM with the gates auto-passed and brainstorming
-   skipped. A `promote` frame closes the inbox, so every later gate passes
-   through and the run finishes autonomously at the persisted phase.
-   Awaiting-human is **live**, not stalled - the idle watchdog suspends for a
-   parked gate so a human-blocked container is not reaped.
-10. **Task-skills.** Coder, fix-coder, the review panel, and the document phase
+10. **HITL gates + promote.** HITL cards run the same FSM as autonomous,
+    mode-gated on `Config.Interactive`: a brainstorming dialogue for creative
+    cards plus plan-approval and review-decision gates that wait on the inbox.
+    Autonomous is the same FSM with the gates auto-passed and brainstorming
+    skipped. A `promote` frame closes the inbox, so every later gate passes
+    through and the run finishes autonomously at the persisted phase.
+    Awaiting-human is **live**, not stalled - the idle watchdog suspends for a
+    parked gate so a human-blocked container is not reaped.
+11. **Task-skills.** Coder, fix-coder, the review panel, and the document phase
     can engage ContextMatrix task-skills (`go-development`, `code-review`, …)
     via the model-driven `Skill` tool (in the external harness module,
     constructed as `tools.NewSkillTool`): it lists the available skills by
