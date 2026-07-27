@@ -90,10 +90,12 @@ func TestDetectVerifyCommand(t *testing.T) {
 		dir := t.TempDir()
 		writeFile(t, dir, "go.mod", "module example.com/x\n")
 
-		argv, display, wrapper := detectVerifyCommand(dir)
+		argv, display, wrapper, marker, reason := detectVerifyCommand(dir)
 		assert.Equal(t, []string{"go", "test", "./..."}, argv)
 		assert.Equal(t, "go test ./...", display)
 		assert.False(t, wrapper, "a marker-table command is not a wrapper")
+		assert.Empty(t, marker, "a resolved command carries no diagnostic marker")
+		assert.Empty(t, reason)
 	})
 
 	t.Run("cargo project", func(t *testing.T) {
@@ -102,7 +104,7 @@ func TestDetectVerifyCommand(t *testing.T) {
 		dir := t.TempDir()
 		writeFile(t, dir, "Cargo.toml", "[package]\nname=\"x\"\n")
 
-		argv, _, _ := detectVerifyCommand(dir)
+		argv, _, _, _, _ := detectVerifyCommand(dir)
 		assert.Equal(t, []string{"cargo", "test"}, argv)
 	})
 
@@ -113,7 +115,7 @@ func TestDetectVerifyCommand(t *testing.T) {
 		writeFile(t, dir, "Makefile", "build:\n\tgo build ./...\ntest:\n\tgo test ./...\n")
 		writeFile(t, dir, "go.mod", "module example.com/x\n")
 
-		argv, _, wrapper := detectVerifyCommand(dir)
+		argv, _, wrapper, _, _ := detectVerifyCommand(dir)
 		assert.Equal(t, []string{"make", "test"}, argv)
 		assert.True(t, wrapper, "a make wrapper is flagged for the tool-missing heuristic")
 	})
@@ -124,7 +126,7 @@ func TestDetectVerifyCommand(t *testing.T) {
 		dir := t.TempDir()
 		writeFile(t, dir, "Makefile", "test:\n\t./run-tests.sh\n")
 
-		argv, _, wrapper := detectVerifyCommand(dir)
+		argv, _, wrapper, _, _ := detectVerifyCommand(dir)
 		assert.Equal(t, []string{"make", "test"}, argv)
 		assert.True(t, wrapper)
 	})
@@ -139,8 +141,10 @@ func TestDetectVerifyCommand(t *testing.T) {
 		writeFile(t, dir, "Makefile", "test:\n\tcargo test\n")
 		writeFile(t, dir, "Cargo.toml", "[package]\nname=\"x\"\n")
 
-		argv, _, _ := detectVerifyCommand(dir)
+		argv, _, _, marker, reason := detectVerifyCommand(dir)
 		assert.Nil(t, argv, "make must be skipped when the declared toolchain is absent")
+		assert.Equal(t, "Cargo.toml", marker, "the diagnostic walk tracks the unresolved cargo row")
+		assert.Contains(t, reason, "cargo")
 	})
 
 	t.Run("npm placeholder not detected", func(t *testing.T) {
@@ -149,7 +153,7 @@ func TestDetectVerifyCommand(t *testing.T) {
 		dir := t.TempDir()
 		writeFile(t, dir, "package.json", `{"name":"x","scripts":{"test":"echo \"Error: no test specified\" && exit 1"}}`)
 
-		argv, _, _ := detectVerifyCommand(dir)
+		argv, _, _, _, _ := detectVerifyCommand(dir)
 		assert.Nil(t, argv, "the npm-init placeholder test script is not a real command")
 	})
 
@@ -159,7 +163,7 @@ func TestDetectVerifyCommand(t *testing.T) {
 		dir := t.TempDir()
 		writeFile(t, dir, "package.json", `{"name":"x","scripts":{"test":"vitest run"}}`)
 
-		argv, _, _ := detectVerifyCommand(dir)
+		argv, _, _, _, _ := detectVerifyCommand(dir)
 		assert.Equal(t, []string{"npm", "test"}, argv)
 	})
 
@@ -169,7 +173,7 @@ func TestDetectVerifyCommand(t *testing.T) {
 		dir := t.TempDir()
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "gradlew"), []byte("#!/bin/sh\n"), 0o644))
 
-		argv, _, _ := detectVerifyCommand(dir)
+		argv, _, _, _, _ := detectVerifyCommand(dir)
 		assert.Nil(t, argv, "a non-executable gradlew and no system gradle resolves nothing")
 	})
 
@@ -178,9 +182,11 @@ func TestDetectVerifyCommand(t *testing.T) {
 
 		dir := t.TempDir()
 
-		argv, display, _ := detectVerifyCommand(dir)
+		argv, display, _, marker, reason := detectVerifyCommand(dir)
 		assert.Nil(t, argv)
 		assert.Empty(t, display)
+		assert.Empty(t, marker, "no recognised marker present at all - a pure docs repo keeps the silent skip")
+		assert.Empty(t, reason)
 	})
 }
 
@@ -330,6 +336,236 @@ func TestResolveVerifySkipWhenNothingResolves(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, verifySourceNone, plan.Source)
 	assert.Empty(t, plan.Argv)
+}
+
+// TestResolveVerifyDeclaredProbeFailsSentinel pins the toolchain-missing park:
+// a declared verify command that cannot run, with no detected marker to fall
+// back to, must raise ToolchainMissingError at the final fall-through rather
+// than silently skip.
+func TestResolveVerifyDeclaredProbeFailsSentinel(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX-only")
+	}
+
+	stubTools(t) // nothing on PATH: pytest cannot probe
+
+	o := &run{d: Deps{Cfg: Config{
+		Workspace: t.TempDir(),
+		Verify:    &DeclaredVerify{Command: "pytest -q"},
+	}}}
+
+	plan, err := o.resolveVerify(context.Background())
+	require.Error(t, err)
+
+	var tme *ToolchainMissingError
+	require.ErrorAs(t, err, &tme)
+	assert.Equal(t, "declared", tme.Tier)
+	assert.Equal(t, "pytest -q", tme.Subject)
+	assert.NotEmpty(t, tme.Reason)
+	assert.Empty(t, plan.Argv, "an errored resolution returns a zero plan")
+}
+
+// TestResolveVerifyDetectedMarkerUnresolvedSentinel pins the toolchain-missing
+// park for Tier 2: a pom.xml is present, mvn resolves but java does not, and no
+// other marker is present - resolution must raise the sentinel rather than
+// silently skip.
+func TestResolveVerifyDetectedMarkerUnresolvedSentinel(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX-only")
+	}
+
+	stubTools(t, "mvn") // mvn resolves, java does not
+
+	dir := t.TempDir()
+	writeFile(t, dir, "pom.xml", "<project></project>\n")
+
+	o := &run{d: Deps{Cfg: Config{Workspace: dir}}}
+
+	plan, err := o.resolveVerify(context.Background())
+	require.Error(t, err)
+
+	var tme *ToolchainMissingError
+	require.ErrorAs(t, err, &tme)
+	assert.Equal(t, "detected", tme.Tier)
+	assert.Equal(t, "maven project", tme.Subject, "the generic marker name, not the specific pom.xml/mvnw file that happened to trigger it")
+	assert.Contains(t, tme.Reason, "java")
+	assert.Empty(t, plan.Argv, "an errored resolution returns a zero plan")
+}
+
+// TestResolveVerifyGradleMarkerUnresolvedSentinel pins the toolchain-missing
+// park for a gradle marker: a build.gradle is present, gradle resolves but java
+// does not, and no other marker is present - resolution must raise the sentinel
+// with an accurate reason. Closes the zero-coverage gap on the former
+// gradleReason ladder.
+func TestResolveVerifyGradleMarkerUnresolvedSentinel(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX-only")
+	}
+
+	stubTools(t, "gradle") // gradle resolves, java does not
+
+	dir := t.TempDir()
+	writeFile(t, dir, "build.gradle", "// gradle build\n")
+
+	o := &run{d: Deps{Cfg: Config{Workspace: dir}}}
+
+	plan, err := o.resolveVerify(context.Background())
+	require.Error(t, err)
+
+	var tme *ToolchainMissingError
+	require.ErrorAs(t, err, &tme)
+	assert.Equal(t, "detected", tme.Tier)
+	assert.Equal(t, "gradle project", tme.Subject)
+	assert.Contains(t, tme.Reason, "java")
+	assert.Empty(t, plan.Argv, "an errored resolution returns a zero plan")
+}
+
+// TestResolveVerifyPythonMarkerUnresolvedSentinel pins the toolchain-missing
+// park for a pytest marker: a pytest.ini declares pytest config, but neither
+// pytest nor python3 resolve - resolution must raise the sentinel with an
+// accurate reason. Closes the zero-coverage gap on the former pythonReason
+// ladder.
+func TestResolveVerifyPythonMarkerUnresolvedSentinel(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX-only")
+	}
+
+	stubTools(t) // neither pytest nor python3 on PATH
+
+	dir := t.TempDir()
+	writeFile(t, dir, "pytest.ini", "[pytest]\n")
+
+	o := &run{d: Deps{Cfg: Config{Workspace: dir}}}
+
+	plan, err := o.resolveVerify(context.Background())
+	require.Error(t, err)
+
+	var tme *ToolchainMissingError
+	require.ErrorAs(t, err, &tme)
+	assert.Equal(t, "detected", tme.Tier)
+	assert.Equal(t, "pytest config", tme.Subject)
+	assert.Contains(t, tme.Reason, "python3")
+	assert.Empty(t, plan.Argv, "an errored resolution returns a zero plan")
+}
+
+// TestResolveVerifyCanceledContextDoesNotPark pins the cancellation fix: a
+// canceled Tier-3 model call is inconclusive, not proof of a missing toolchain
+// (it never got a real chance to rescue), so the Tier-4 trigger must not read
+// the pre-Tier-3 declared/detected state as a sentinel when the context is
+// already canceled - it returns the ctx error instead.
+func TestResolveVerifyCanceledContextDoesNotPark(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX-only")
+	}
+
+	stubTools(t, "mvn") // mvn resolves, java does not - would sentinel if not canceled
+
+	dir := t.TempDir()
+	writeFile(t, dir, "pom.xml", "<project></project>\n")
+
+	o := &run{d: Deps{Cfg: Config{Workspace: dir}}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	plan, err := o.resolveVerify(ctx)
+	require.Error(t, err)
+
+	var tme *ToolchainMissingError
+	assert.NotErrorAs(t, err, &tme, "a canceled context must not produce the toolchain sentinel")
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Empty(t, plan.Argv, "an errored resolution returns a zero plan")
+}
+
+// TestResolveVerifyCanceledContextDeclaredDoesNotPark pins the same
+// cancellation guard for the declared trigger: a declared command whose probe
+// fails, with the context already canceled, returns the ctx error - never the
+// sentinel.
+func TestResolveVerifyCanceledContextDeclaredDoesNotPark(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX-only")
+	}
+
+	stubTools(t) // nothing on PATH: the declared pytest cannot probe - would sentinel if not canceled
+
+	o := &run{d: Deps{Cfg: Config{
+		Workspace: t.TempDir(),
+		Verify:    &DeclaredVerify{Command: "pytest -q"},
+	}}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	plan, err := o.resolveVerify(ctx)
+	require.Error(t, err)
+
+	var tme *ToolchainMissingError
+	assert.NotErrorAs(t, err, &tme, "a canceled context must not produce the toolchain sentinel")
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Empty(t, plan.Argv, "an errored resolution returns a zero plan")
+}
+
+// TestResolveVerifyDocsRepoSkipUnchanged pins that a repo with no declared
+// command and no recognised toolchain marker keeps today's silent skip - the
+// sentinel must never fire when nothing implicates a toolchain at all.
+func TestResolveVerifyDocsRepoSkipUnchanged(t *testing.T) {
+	stubTools(t)
+
+	dir := t.TempDir()
+	writeFile(t, dir, "README.md", "# docs only\n")
+
+	o := &run{d: Deps{Cfg: Config{Workspace: dir}}}
+
+	plan, err := o.resolveVerify(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, verifySourceNone, plan.Source)
+	assert.Empty(t, plan.Argv)
+}
+
+// TestResolveVerifyOnlyGoModResolvesUnchanged pins that a normal resolving
+// repo is untouched by the toolchain-missing tracking: go.mod present and go
+// resolves must still resolve exactly as before, with no error.
+func TestResolveVerifyOnlyGoModResolvesUnchanged(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX-only")
+	}
+
+	stubTools(t, "go")
+
+	dir := t.TempDir()
+	writeFile(t, dir, "go.mod", "module example.com/x\n")
+
+	o := &run{d: Deps{Cfg: Config{Workspace: dir}}}
+
+	plan, err := o.resolveVerify(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, verifySourceDetected, plan.Source)
+	assert.Equal(t, []string{"go", "test", "./..."}, plan.Argv)
+}
+
+// TestResolveVerifyMixedRepoNpmWinsNoPark pins that mixed-repo masking is
+// intentionally out of scope for this fix: detectVerifyCommand's fixed
+// priority table returns the npm test script and never even looks at the
+// broken pom.xml row, so no toolchain-missing park fires. Closing this gap
+// (surfacing a broken toolchain when a HIGHER-priority one resolves fine) is a
+// deliberate non-goal - see the parent card's Risk/scope notes.
+func TestResolveVerifyMixedRepoNpmWinsNoPark(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX-only")
+	}
+
+	stubTools(t, "npm") // no mvn, no java
+
+	dir := t.TempDir()
+	writeFile(t, dir, "package.json", `{"name":"x","scripts":{"test":"vitest run"}}`)
+	writeFile(t, dir, "pom.xml", "<project></project>\n")
+
+	o := &run{d: Deps{Cfg: Config{Workspace: dir}}}
+
+	plan, err := o.resolveVerify(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, verifySourceDetected, plan.Source)
+	assert.Equal(t, []string{"npm", "test"}, plan.Argv)
 }
 
 func TestEnsureVerifyCachesAndLogs(t *testing.T) {

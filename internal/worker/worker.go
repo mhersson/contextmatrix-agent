@@ -108,6 +108,7 @@ type CardOps interface {
 	ReportPush(ctx context.Context, cardID, branch, prURL string) error
 	CompleteTask(ctx context.Context, cardID, summary string) error
 	ReleaseCard(ctx context.Context, cardID string) error
+	TransitionCard(ctx context.Context, cardID, state string) error
 	RecordSkillEngaged(ctx context.Context, cardID, skillName string) error
 }
 
@@ -277,7 +278,18 @@ type fsmArgs struct {
 //   - ContextLimitError: identical to the budget park - push WIP, release the
 //     claim, return the error - so in-flight work survives a context-window stop.
 //   - ctx.Err() (end_session/kill): graceful path - push WIP, release,
-//     exit 0; the persisted phase stays for a later resume.
+//     exit 0; the persisted phase stays for a later resume. Checked BEFORE
+//     ToolchainMissingError below: a context-canceled Tier-3 model call can
+//     still surface the toolchain sentinel, and an operator-initiated kill
+//     must win that race rather than being reported as an environmental
+//     blocked-park.
+//   - ToolchainMissingError: same push-WIP/release/error shape as
+//     Budget/Context above, plus the genuinely new step - transition the card
+//     to blocked (before the release, since ownership may be required) so a
+//     human sees the environmental park on the board instead of a silently
+//     released claim. A failed transition (blocked is project-configurable)
+//     is logged and degrades to the same silent park as the other arms -
+//     never fatal.
 //   - any other error: release the claim and return it.
 func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, error) {
 	// Guest bearer tokens are known at worker start, so they join the
@@ -409,14 +421,38 @@ func mapFSMResult(ctx context.Context, a fsmArgs, err error) (Result, error) {
 		return Result{Reason: "error"}, fmt.Errorf("orchestrator: %w", err)
 
 	case a.endSession.Load() || ctx.Err() != nil || errorsIsCanceled(err):
-		// end_session / kill mid-FSM: the graceful park. Push whatever WIP
-		// exists, release the claim, exit 0. Usage was already reported per-phase
-		// by the orchestrator; the persisted phase stays so a later run resumes
-		// from it.
+		// end_session / kill mid-FSM: the graceful park. Checked BEFORE the
+		// toolchain arm below - a context-canceled Tier-3 model call can still
+		// surface a ToolchainMissingError (an inconclusive proposal, not a real
+		// resolution), and an operator-initiated kill must never be reported as
+		// an environmental blocked-park. Push whatever WIP exists, release the
+		// claim, exit 0. Usage was already reported per-phase by the
+		// orchestrator; the persisted phase stays so a later run resumes from it.
 		pushWIP(ctx, a)
 		releaseQuietly(ctx, a.ops, a.spec.CardID)
 
 		return Result{Reason: "end_session"}, nil
+
+	case isToolchainMissing(err):
+		// Toolchain-missing park: an environmental failure, not a model
+		// failure - no ReportModelOutcomes/BlacklistModel call belongs here,
+		// mirroring the Budget/Context/MaxTurns arms above. The genuinely new
+		// step: transition the card to blocked BEFORE releasing the claim,
+		// since ownership may be required for the transition. blocked is
+		// project-configurable (not every .board.yaml declares
+		// in_progress -> blocked), so a failure here is logged and the park
+		// still completes exactly like the other arms - never fatal. The
+		// orchestrator already wrote the blocker reason to the card log; this
+		// path does not duplicate it.
+		if terr := a.ops.TransitionCard(ctx, a.spec.CardID, "blocked"); terr != nil {
+			slog.Warn("transition to blocked failed; leaving card state as-is",
+				"card", a.spec.CardID, "error", terr)
+		}
+
+		pushWIP(ctx, a)
+		releaseQuietly(ctx, a.ops, a.spec.CardID)
+
+		return Result{Reason: "error"}, fmt.Errorf("orchestrator: %w", err)
 
 	default:
 		releaseQuietly(ctx, a.ops, a.spec.CardID)
@@ -452,6 +488,14 @@ func isMaxTurns(err error) bool {
 	var mte *orchestrator.MaxTurnsError
 
 	return errors.As(err, &mte)
+}
+
+// isToolchainMissing reports whether err is (or wraps) the orchestrator's
+// toolchain-missing sentinel.
+func isToolchainMissing(err error) bool {
+	var tme *orchestrator.ToolchainMissingError
+
+	return errors.As(err, &tme)
 }
 
 // errorsIsCanceled reports whether err is (or wraps) context cancellation, which

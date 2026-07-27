@@ -213,15 +213,27 @@ func (o *run) ensureVerify(ctx context.Context) (verifyPlan, error) {
 
 // resolveVerify runs the resolution ladder: declared command (probed) beats
 // repo-convention detection beats a model proposal beats skip. A declared
-// command that cannot run does NOT disable the gate - it records a note and
-// falls through, so a typo cannot silently drop verification. A budget park from
-// the proposal tier propagates; every other failure degrades toward skip.
+// command that cannot run does NOT stop resolution right there - it records a
+// note and falls through to detection/proposal, so a typo cannot silently drop
+// verification before a lower tier gets its chance. A budget park from the
+// proposal tier propagates. If nothing resolves, the final fall-through raises
+// ToolchainMissingError instead of the silent skip when Tier 1 or Tier 2
+// implicated a toolchain that never became runnable at any tier; otherwise
+// (nothing ever implicated a toolchain, e.g. a pure docs repo) it degrades to
+// the skip exactly as before. A canceled context at the fall-through is
+// inconclusive rather than a sentinel-worthy signal - see the Tier 4 comment.
 func (o *run) resolveVerify(ctx context.Context) (verifyPlan, error) {
 	cfg := o.d.Cfg
 	timeout := o.verifyTimeout()
 	env := o.verifyEnv()
 
 	var notes []string
+
+	var (
+		declaredFailed bool
+		declaredCmd    string
+		declaredReason string
+	)
 
 	// Tier 1: operator-declared command.
 	if d := cfg.Verify; d != nil && strings.TrimSpace(d.Command) != "" {
@@ -241,10 +253,17 @@ func (o *run) resolveVerify(ctx context.Context) (verifyPlan, error) {
 		// A declared command that cannot run does not disable the gate: note it and
 		// fall through, so a typo cannot silently drop verification.
 		notes = append(notes, fmt.Sprintf("declared verify command cannot run: %s (missing: %v)", cmd, err))
+
+		declaredFailed = true
+		declaredCmd = cmd
+		declaredReason = err.Error()
 	}
 
-	// Tier 2: repo-convention detection.
-	if argv, display, wrapper := detectVerifyCommand(cfg.Workspace); len(argv) > 0 {
+	// Tier 2: repo-convention detection. The same walk also tracks the first
+	// present-but-unresolved marker/reason for the Tier-4 sentinel below, so
+	// detectRows is walked exactly once on this path (see detectVerifyCommand).
+	argv, display, wrapper, detectedMarker, detectedReason := detectVerifyCommand(cfg.Workspace)
+	if len(argv) > 0 {
 		return verifyPlan{
 			Argv:    argv,
 			Display: display,
@@ -274,8 +293,30 @@ func (o *run) resolveVerify(ctx context.Context) (verifyPlan, error) {
 		}
 	}
 
-	// Tier 4: skip. The gate proceeds unverified; the resolution log says so.
-	return verifyPlan{Source: verifySourceNone, Timeout: timeout, Env: env, Notes: notes}, nil
+	// Tier 4: a declared command or a detected marker implicated a toolchain
+	// that never became runnable at any tier - park instead of silently
+	// shipping unverified. Prefer the declared command in the error when both
+	// implicate a toolchain: it is explicit operator intent. Otherwise nothing
+	// implicated a toolchain at all (e.g. a pure docs repo): the gate proceeds
+	// unverified, and the resolution log says so.
+	//
+	// A canceled context is checked FIRST: a canceled Tier 3 model call above
+	// degrades to an ordinary "nothing proposed" (proposeVerify swallows any
+	// non-budget error, including cancellation, into a clean skip), so by the
+	// time execution reaches here Tier 3 never got a real chance to rescue.
+	// Reading declaredFailed/detectedMarker as proof of a missing toolchain in
+	// that case would park on operator-initiated cancellation; propagate the
+	// cancellation instead.
+	switch {
+	case ctx.Err() != nil:
+		return verifyPlan{}, ctx.Err()
+	case declaredFailed:
+		return verifyPlan{}, &ToolchainMissingError{Tier: "declared", Subject: declaredCmd, Reason: declaredReason}
+	case detectedMarker != "":
+		return verifyPlan{}, &ToolchainMissingError{Tier: "detected", Subject: detectedMarker, Reason: detectedReason}
+	default:
+		return verifyPlan{Source: verifySourceNone, Timeout: timeout, Env: env, Notes: notes}, nil
+	}
 }
 
 // runVerifyPlan executes the resolved plan in dir and returns the classified
@@ -367,24 +408,38 @@ func (o *run) logVerifyResolution(ctx context.Context, p verifyPlan) {
 // wins first UNLESS the repo declares a toolchain whose tools are all absent -
 // then the wrapper would shell out to a missing binary and false-fail, so it is
 // skipped. Otherwise the marker table is walked in priority order and the first
-// toolchain whose tool actually resolves is used. Returns (nil, "") when nothing
-// runnable is found. wrapper reports whether the returned command is a
+// toolchain whose tool actually resolves is used. Returns a nil argv when
+// nothing runnable is found. wrapper reports whether the returned command is a
 // test-wrapper (make/just/task) - the caller uses it to scope the tool-missing
 // heuristic to exactly that case.
-func detectVerifyCommand(workspace string) (argv []string, display string, wrapper bool) {
+//
+// The SAME walk also tracks marker/reason: the first present-but-unresolved
+// row's marker and probe-failure reason, for the caller's toolchain-missing
+// diagnostic. Both are empty when a command resolved or no recognised marker is
+// present at all (e.g. a pure docs repo, which must keep the silent skip). This
+// is diagnostic only - it never changes which command Tier 2 resolves - and it
+// costs nothing extra: detectRows is walked exactly once either way.
+func detectVerifyCommand(workspace string) (argv []string, display string, wrapper bool, marker, reason string) {
 	if a := detectWrapper(workspace); a != nil {
-		return a, strings.Join(a, " "), true
+		return a, strings.Join(a, " "), true, "", ""
 	}
 
 	for _, row := range detectRows {
-		if row.present(workspace) {
-			if a := row.resolve(workspace); a != nil {
-				return a, strings.Join(a, " "), false
-			}
+		if !row.present(workspace) {
+			continue
+		}
+
+		a, r := row.resolve(workspace)
+		if a != nil {
+			return a, strings.Join(a, " "), false, "", ""
+		}
+
+		if marker == "" {
+			marker, reason = row.marker, r
 		}
 	}
 
-	return nil, "", false
+	return nil, "", false, marker, reason
 }
 
 // detectWrapper applies the wrapper rule: a test wrapper is used when its binary
@@ -428,25 +483,29 @@ func wrapperArgv(workspace string) []string {
 	}
 }
 
-// detectRow is one recognised toolchain: present reports whether its marker is in
-// the workspace; resolve returns the runnable argv (its tool present, JVM
-// wrappers with a java runtime) or nil when the marker is there but the tool is
-// not installed.
+// detectRow is one recognised toolchain: present reports whether its marker is
+// in the workspace; resolve returns the runnable argv (its tool present, JVM
+// wrappers with a java runtime) and an empty reason, or a nil argv with the
+// probe-failure reason when the marker is there but the tool is not installed.
+// marker and a nil-argv reason are diagnostic-only, surfaced by
+// detectVerifyCommand's walk to build the toolchain-missing sentinel - they
+// never change what Tier 2 resolves.
 type detectRow struct {
 	present func(workspace string) bool
-	resolve func(workspace string) []string
+	resolve func(workspace string) (argv []string, reason string)
+	marker  string
 }
 
 // detectRows is the marker table in priority order. Detected commands stay argv
 // (no shell); the timeout/env from the declared config still bind them.
 var detectRows = []detectRow{
-	{present: hasFile("go.mod"), resolve: probeArgv("go", "test", "./...")},
-	{present: hasFile("Cargo.toml"), resolve: probeArgv("cargo", "test")},
-	{present: hasRealNPMTestScript, resolve: probeArgv("npm", "test")},
-	{present: hasPytestMarker, resolve: resolvePython},
-	{present: hasGradleProject, resolve: resolveGradle},
-	{present: hasMavenProject, resolve: resolveMaven},
-	{present: hasDotnetProject, resolve: probeArgv("dotnet", "test")},
+	{marker: "go.mod", present: hasFile("go.mod"), resolve: probeArgvReason("go", "test", "./...")},
+	{marker: "Cargo.toml", present: hasFile("Cargo.toml"), resolve: probeArgvReason("cargo", "test")},
+	{marker: "package.json", present: hasRealNPMTestScript, resolve: probeArgvReason("npm", "test")},
+	{marker: "pytest config", present: hasPytestMarker, resolve: resolvePython},
+	{marker: "gradle project", present: hasGradleProject, resolve: resolveGradle},
+	{marker: "maven project", present: hasMavenProject, resolve: resolveMaven},
+	{marker: ".NET project file", present: hasDotnetProject, resolve: probeArgvReason("dotnet", "test")},
 }
 
 // anyMarkerPresent reports whether any recognised toolchain marker is present.
@@ -464,7 +523,11 @@ func anyMarkerPresent(workspace string) bool {
 // actually resolves in the workspace.
 func anyToolchainResolves(workspace string) bool {
 	for _, row := range detectRows {
-		if row.present(workspace) && row.resolve(workspace) != nil {
+		if !row.present(workspace) {
+			continue
+		}
+
+		if argv, _ := row.resolve(workspace); argv != nil {
 			return true
 		}
 	}
@@ -479,30 +542,33 @@ func hasFile(name string) func(string) bool {
 	}
 }
 
-// probeArgv returns a resolve-func that yields argv when its program probes
-// runnable in the workspace, else nil.
-func probeArgv(argv ...string) func(string) []string {
-	return func(workspace string) []string {
-		if verifyexec.Probe(workspace, argv) == nil {
-			return argv
+// probeArgvReason returns a resolve-func that yields argv when its program
+// probes runnable in the workspace, else a nil argv with the probe-failure
+// reason - the single source for both what Tier 2 runs and why a present
+// marker did not resolve.
+func probeArgvReason(argv ...string) func(workspace string) ([]string, string) {
+	return func(workspace string) ([]string, string) {
+		if err := verifyexec.Probe(workspace, argv); err != nil {
+			return nil, err.Error()
 		}
 
-		return nil
+		return argv, ""
 	}
 }
 
 // resolvePython prefers pytest, falling back to `python3 -m pytest` when pytest
-// is not installed but a python runtime is.
-func resolvePython(workspace string) []string {
+// is not installed but a python runtime is; the reason mirrors the fallback,
+// reporting the final probe's failure.
+func resolvePython(workspace string) ([]string, string) {
 	if verifyexec.Probe(workspace, []string{"pytest", "-q"}) == nil {
-		return []string{"pytest", "-q"}
+		return []string{"pytest", "-q"}, ""
 	}
 
-	if verifyexec.Probe(workspace, []string{"python3", "-m", "pytest"}) == nil {
-		return []string{"python3", "-m", "pytest"}
+	if err := verifyexec.Probe(workspace, []string{"python3", "-m", "pytest"}); err != nil {
+		return nil, err.Error()
 	}
 
-	return nil
+	return []string{"python3", "-m", "pytest"}, ""
 }
 
 // hasGradleProject reports a Gradle project: an executable gradlew wrapper or a
@@ -515,12 +581,12 @@ func hasGradleProject(workspace string) bool {
 
 // resolveGradle prefers the executable wrapper, else the system gradle; both
 // require a java runtime (enforced by Probe).
-func resolveGradle(workspace string) []string {
+func resolveGradle(workspace string) ([]string, string) {
 	if execFileExists(filepath.Join(workspace, "gradlew")) {
-		return probeArgv("./gradlew", "test")(workspace)
+		return probeArgvReason("./gradlew", "test")(workspace)
 	}
 
-	return probeArgv("gradle", "test")(workspace)
+	return probeArgvReason("gradle", "test")(workspace)
 }
 
 // hasMavenProject reports a Maven project: an executable mvnw wrapper or a pom.
@@ -531,12 +597,12 @@ func hasMavenProject(workspace string) bool {
 
 // resolveMaven prefers the executable wrapper, else system maven; both require a
 // java runtime (enforced by Probe).
-func resolveMaven(workspace string) []string {
+func resolveMaven(workspace string) ([]string, string) {
 	if execFileExists(filepath.Join(workspace, "mvnw")) {
-		return probeArgv("./mvnw", "-q", "test")(workspace)
+		return probeArgvReason("./mvnw", "-q", "test")(workspace)
 	}
 
-	return probeArgv("mvn", "-q", "test")(workspace)
+	return probeArgvReason("mvn", "-q", "test")(workspace)
 }
 
 // hasDotnetProject reports a top-level .NET solution or project file.

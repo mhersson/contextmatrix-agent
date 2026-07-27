@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -948,6 +949,95 @@ func TestSoloTurnCapStillParksOnCleanTree(t *testing.T) {
 	assert.Equal(t, -1, indexOfCall(calls, "CompleteTask:SUB-1"), "a clean tree must not complete")
 	assert.Empty(t, git.pushBranches, "a clean tree must not push")
 	assert.GreaterOrEqual(t, indexOfCall(calls, "ReleaseCard:SUB-1"), 0, "the parked claim is released")
+}
+
+// markerMidRunLLM wraps a scripted LLM and writes a toolchain marker file into
+// dir the first time it is called, simulating a coder run that introduces
+// project scaffolding (e.g. a pom.xml) mid-run: the run's FIRST verify
+// resolution (before the coder loop starts) sees nothing, but a SECOND
+// resolution after that point sees the marker.
+type markerMidRunLLM struct {
+	inner   llm.LLM
+	t       *testing.T
+	dir     string
+	written bool
+}
+
+func (m *markerMidRunLLM) writeMarkerOnce() {
+	if m.written {
+		return
+	}
+
+	m.written = true
+
+	writeFile(m.t, m.dir, "pom.xml", "<project></project>\n")
+}
+
+func (m *markerMidRunLLM) Send(ctx context.Context, req llm.Request) (llm.Response, error) {
+	m.writeMarkerOnce()
+
+	return m.inner.Send(ctx, req)
+}
+
+func (m *markerMidRunLLM) SendStream(ctx context.Context, req llm.Request, onDelta func(llm.Delta)) (llm.Response, error) {
+	m.writeMarkerOnce()
+
+	return m.inner.SendStream(ctx, req, onDelta)
+}
+
+// TestSoloTurnCapPropagatesToolchainSentinel proves the salvage path's second
+// ensureVerify call does not swallow a *ToolchainMissingError into a generic
+// solo-cap park: when a toolchain marker is introduced mid-run (present only by
+// the time salvage re-resolves verify, absent at runExecute's pre-loop
+// resolution), the error escaping the execute phase is the toolchain sentinel -
+// not MaxTurnsError - so it reaches execute()'s dedicated toolchain arm and the
+// card-log line it writes.
+func TestSoloTurnCapPropagatesToolchainSentinel(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("exec-bit probing is POSIX-only")
+	}
+
+	stubTools(t) // nothing on PATH: mvn cannot resolve
+
+	dir := t.TempDir()
+
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true} // a dirty tree the salvage commit captures
+	inner := &planLLM{responses: burnResps(5)}
+	client := &markerMidRunLLM{inner: inner, t: t, dir: dir}
+	d := execTestDeps(ops, git, client)
+	d.Cfg.MaxTurns = 5
+	d.Cfg.Workspace = dir
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+	// Drive the full execute()-FSM, not just the execute phase in isolation: the
+	// card-log line this test asserts on is written by execute()'s dedicated
+	// errors.As arm, not by runExecute itself. The plan phase already ran
+	// (newExecRun pre-seeds o.subtasks), so it is stubbed to a no-op success.
+	o.planFn = func(context.Context) error { return nil }
+
+	err := o.execute(context.Background())
+	require.Error(t, err, "an unresolvable mid-run toolchain must still park")
+
+	var tme *ToolchainMissingError
+	require.ErrorAs(t, err, &tme, "the toolchain sentinel, not MaxTurnsError, must escape the execute phase")
+	assert.Equal(t, "detected", tme.Tier)
+	assert.Equal(t, "maven project", tme.Subject)
+
+	var mte *MaxTurnsError
+	assert.NotErrorAs(t, err, &mte, "MaxTurnsError must not be the type observed by the caller")
+
+	calls := ops.recorded()
+	assert.Equal(t, -1, indexOfCall(calls, "CompleteTask:SUB-1"), "an unresolvable toolchain must not complete the subtask")
+	assert.Empty(t, git.pushBranches, "an unresolvable toolchain must not push")
+	assert.GreaterOrEqual(t, indexOfCall(calls, "ReleaseCard:SUB-1"), 0, "the parked claim is released")
+
+	// execute()'s dedicated toolchain arm writes this line - confirms the
+	// sentinel actually reached it rather than being logged generically by
+	// logSoloCapPark ("verify could not be resolved").
+	assert.True(t, ops.loggedContains("parking card as blocked"),
+		"the toolchain-missing park must be activity-logged via execute()'s dedicated arm; logs=%v", ops.logs)
+	assert.False(t, ops.loggedContains("verify could not be resolved"),
+		"a toolchain sentinel must not be logged as a generic unresolved-verify park; logs=%v", ops.logs)
 }
 
 // The former TestNoSalvageForParentSolver asserted the single-solver path always
