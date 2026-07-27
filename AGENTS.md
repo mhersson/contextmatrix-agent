@@ -215,9 +215,10 @@ file only - never via flags or committed YAML.
    (declared command, then repo-convention detection, then a model proposal,
    then skip - `internal/orchestrator/verify.go`) gives every tier a chance
    before giving up. If nothing resolves and a declared command failed its
-   probe, or a detected toolchain marker (e.g. `pom.xml`) never resolved to a
-   runnable command at any tier, resolution returns `ToolchainMissingError`
-   instead of the silent skip; a workspace with no declared command and no
+   probe, or a detected toolchain marker (e.g. `maven project`, matching a
+   `pom.xml` or an `mvnw`-only workspace) never resolved to a runnable
+   command at any tier, resolution returns `ToolchainMissingError` instead of
+   the silent skip; a workspace with no declared command and no
    recognized marker (a pure docs repo) still resolves to skip, unverified,
    exactly as before. `execute()` logs the tier, the command or marker, and
    the probe failure, then stops the run like the other park sentinels
