@@ -165,8 +165,17 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 			return nil
 		}
 
-		if o.salvageSoloCapped(ctx, sc, sub, res, err) {
+		salvaged, serr := o.salvageSoloCapped(ctx, sc, sub, res, err)
+		if salvaged {
 			return nil
+		}
+
+		// serr is set only when verify resolution itself raised a sentinel
+		// (currently *ToolchainMissingError): that supersedes the original
+		// MaxTurnsError so it reaches execute()'s dedicated park arm instead of
+		// parking as a plain turn-cap.
+		if serr != nil {
+			return serr
 		}
 
 		return err
@@ -463,10 +472,19 @@ func (o *run) salvageCapped(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 // then CompleteTask); on any other outcome the run parks unchanged and the
 // commit stays as WIP evidence for resume. Only the single-solver (boardOps)
 // path is eligible - a candidate solver is handled by salvageCapped.
-func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskRef, res harness.Result, err error) bool {
+//
+// Return contract: (true, nil) means salvaged - the caller returns nil. (false,
+// nil) means not salvaged - the caller returns the original MaxTurnsError
+// unchanged, today's park. (false, err) means not salvaged AND err must replace
+// the original error on the caller's return path: this is the
+// *ToolchainMissingError case below, where verify resolution itself (not the
+// coder run) is what's parking the card, and the sentinel must reach execute()'s
+// dedicated toolchain arm - and from there the worker's blocked-transition arm -
+// instead of surfacing as a plain turn-cap.
+func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskRef, res harness.Result, err error) (bool, error) {
 	var mte *MaxTurnsError
 	if !sc.boardOps || !errors.As(err, &mte) {
-		return false
+		return false, nil
 	}
 
 	commitMsg := finishCommitMessage(res.CompletionArgs)
@@ -479,7 +497,7 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 	// parks exactly as it would without this path.
 	committed, cerr := sc.git.CommitWithMessage(ctx, commitMsg)
 	if cerr != nil || !committed {
-		return false
+		return false, nil
 	}
 
 	// The authoritative verify: with no judge, the project's verify command - not
@@ -488,22 +506,31 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 	// is NOT a pass: park with the commit standing as WIP evidence.
 	plan, verr := o.ensureVerify(ctx)
 	if verr != nil {
+		// A toolchain that implicated itself mid-run (e.g. a marker file the
+		// coder added) is not a generic unresolvable-verify park: propagate it
+		// unlogged here so execute()'s dedicated arm writes the toolchain card-log
+		// line and the run parks as blocked, not as a plain turn cap.
+		var tme *ToolchainMissingError
+		if errors.As(verr, &tme) {
+			return false, verr
+		}
+
 		o.logSoloCapPark(ctx, sub.ID, "verify could not be resolved")
 
-		return false
+		return false, nil
 	}
 
 	if len(plan.Argv) == 0 {
 		o.logSoloCapPark(ctx, sub.ID, "no verify command resolved to confirm it")
 
-		return false
+		return false, nil
 	}
 
 	vres, rerr := o.runVerifyPlan(ctx, sc.workspace, plan)
 	if rerr != nil || vres.Status != verifyPassed {
 		o.logSoloCapPark(ctx, sub.ID, "verify did not pass")
 
-		return false
+		return false, nil
 	}
 
 	// Verified: complete exactly like a finish-terminated run. A push failure
@@ -511,17 +538,17 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 	// resume must not double-charge.
 	if sc.push {
 		if perr := o.pushBranch(ctx); perr != nil {
-			return false
+			return false, nil
 		}
 	}
 
 	if cerr := o.d.Ops.CompleteTask(ctx, sub.ID, commitMsg); cerr != nil {
-		return false
+		return false, nil
 	}
 
 	o.d.logCard(ctx, "turn cap on subtask %s - committed work passed the authoritative verify; salvaged as complete", sub.ID)
 
-	return true
+	return true, nil
 }
 
 // logSoloCapPark records the advisory when a capped single-solver subtask

@@ -545,6 +545,13 @@ func (o *run) execute(ctx context.Context) error {
 				o.d.logCard(ctx, "%s", maxTurnsLogMessage(mte))
 			}
 
+			var tme *ToolchainMissingError
+			if errors.As(err, &tme) {
+				// Toolchain-missing park: same shape as the other arms - log
+				// best-effort, then stop without entering the next phase.
+				o.d.logCard(ctx, "%s", toolchainLogMessage(tme))
+			}
+
 			return err
 		}
 	}
@@ -565,6 +572,11 @@ func contextLimitLogMessage(cle *ContextLimitError) string {
 // maxTurnsLogMessage is the canonical card-log line for a turn-cap park.
 func maxTurnsLogMessage(mte *MaxTurnsError) string {
 	return fmt.Sprintf("turn cap reached on model %q after %d turns - parking work; raise CMX_MAX_TURNS or split the subtask", mte.Model, mte.Turns)
+}
+
+// toolchainLogMessage is the canonical card-log line for a toolchain-missing park.
+func toolchainLogMessage(tme *ToolchainMissingError) string {
+	return fmt.Sprintf("verify toolchain cannot run here (%s: %s - %s); parking card as blocked", tme.Tier, tme.Subject, tme.Reason)
 }
 
 // reselectCap bounds in-run model re-selections per card. A model that emits

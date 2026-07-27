@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -93,7 +94,8 @@ type fakeOps struct {
 	mu                       sync.Mutex
 	calls                    []opCall
 	tcx                      cmclient.TaskContext
-	lastGetTaskContextImages bool // captured from GetTaskContext's includeImages arg
+	lastGetTaskContextImages bool  // captured from GetTaskContext's includeImages arg
+	transitionCardErr        error // returned by TransitionCard when set
 }
 
 func newFakeOps() *fakeOps {
@@ -136,6 +138,21 @@ func (f *fakeOps) count(op string) int {
 	}
 
 	return n
+}
+
+// argsOf returns the args of the first recorded call matching op, or nil if
+// op was never called.
+func (f *fakeOps) argsOf(op string) []any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	for _, c := range f.calls {
+		if c.op == op {
+			return c.args
+		}
+	}
+
+	return nil
 }
 
 func (f *fakeOps) ClaimCard(_ context.Context, cardID string) error {
@@ -182,6 +199,12 @@ func (f *fakeOps) ReleaseCard(_ context.Context, cardID string) error {
 	f.record("ReleaseCard", cardID)
 
 	return nil
+}
+
+func (f *fakeOps) TransitionCard(_ context.Context, cardID, state string) error {
+	f.record("TransitionCard", cardID, state)
+
+	return f.transitionCardErr
 }
 
 func (f *fakeOps) RecordSkillEngaged(_ context.Context, cardID, skillName string) error {
@@ -758,6 +781,132 @@ func TestMaxTurnsMapsToFailed(t *testing.T) {
 	assert.True(t, remoteHasBranch(t, remote, "cm/cmx-001"), "turn-cap park pushes WIP")
 	assert.GreaterOrEqual(t, ops.count("ReportPush"), 1, "WIP push reported")
 	assert.Equal(t, 1, ops.count("ReleaseCard"), "claim released on turn-cap park")
+	assert.Equal(t, 0, ops.count("CompleteTask"))
+}
+
+// TestToolchainMissingMapsToBlocked: a ToolchainMissingError transitions the
+// card to blocked BEFORE releasing the claim, pushes WIP, and surfaces a
+// non-nil error - so a human sees the environmental park on the board, not
+// just a released claim. No model-outcome/blacklist call is made: the arm
+// touches only TransitionCard, the WIP push, and the release, exactly like
+// the Budget/Context/MaxTurns arms it mirrors.
+func TestToolchainMissingMapsToBlocked(t *testing.T) {
+	remote := setupBareRemote(t)
+	wsParent := t.TempDir()
+	ops := newFakeOps()
+
+	swapRunOrchestrator(t, func(_ context.Context, d orchestrator.Deps) error {
+		// Dirty the tree so the WIP commit/push path has something to push.
+		require.NoError(t, os.WriteFile(filepath.Join(d.Cfg.Workspace, "wip.txt"), []byte("partial\n"), 0o644))
+
+		return &orchestrator.ToolchainMissingError{Tier: "detected", Subject: "pom.xml", Reason: "java not on PATH"}
+	})
+
+	llmClient := &scriptedLLM{}
+
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	res, err := Run(context.Background(), baseSpec(t, remote, wsParent), ops, llmClient, emit, openStdin(t))
+	require.Error(t, err)
+	assert.Equal(t, "error", res.Reason)
+
+	assert.True(t, remoteHasBranch(t, remote, "cm/cmx-001"), "toolchain-missing park pushes WIP")
+	assert.GreaterOrEqual(t, ops.count("ReportPush"), 1, "WIP push reported")
+	assert.Equal(t, 1, ops.count("TransitionCard"), "card transitioned to blocked")
+	assert.Equal(t, 1, ops.count("ReleaseCard"), "claim released on toolchain-missing park")
+	assert.Equal(t, 0, ops.count("CompleteTask"))
+
+	calls := ops.ops()
+	transitionIdx := slices.Index(calls, "TransitionCard")
+	releaseIdx := slices.Index(calls, "ReleaseCard")
+
+	require.GreaterOrEqual(t, transitionIdx, 0)
+	require.GreaterOrEqual(t, releaseIdx, 0)
+	assert.Less(t, transitionIdx, releaseIdx, "TransitionCard must happen before ReleaseCard: ownership may be required")
+
+	// No model-outcome/blacklist call is recorded for this arm - CardOps
+	// exposes no such method for the worker to call in the first place, so the
+	// full call list mirrors the other park arms exactly.
+	assert.ElementsMatch(t, []string{"ClaimCard", "GetTaskContext", "ReportPush", "TransitionCard", "ReleaseCard"}, calls)
+
+	args := ops.argsOf("TransitionCard")
+	require.Len(t, args, 2)
+	assert.Equal(t, "blocked", args[1])
+}
+
+// TestToolchainMissingTransitionFailureDegradesGracefully: when TransitionCard
+// fails (e.g. the project's board has no in_progress -> blocked transition),
+// the park must still complete exactly like the other park arms - push WIP,
+// release the claim, surface the error - never fatal.
+func TestToolchainMissingTransitionFailureDegradesGracefully(t *testing.T) {
+	remote := setupBareRemote(t)
+	wsParent := t.TempDir()
+	ops := newFakeOps()
+	ops.transitionCardErr = fmt.Errorf("call transition_card: invalid state transition")
+
+	swapRunOrchestrator(t, func(_ context.Context, d orchestrator.Deps) error {
+		require.NoError(t, os.WriteFile(filepath.Join(d.Cfg.Workspace, "wip.txt"), []byte("partial\n"), 0o644))
+
+		return &orchestrator.ToolchainMissingError{Tier: "declared", Subject: "./mvnw test", Reason: "exec: \"java\": not found"}
+	})
+
+	llmClient := &scriptedLLM{}
+
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	res, err := Run(context.Background(), baseSpec(t, remote, wsParent), ops, llmClient, emit, openStdin(t))
+	require.Error(t, err, "the park must still surface the underlying error despite the failed transition")
+	assert.Equal(t, "error", res.Reason)
+
+	assert.True(t, remoteHasBranch(t, remote, "cm/cmx-001"), "toolchain-missing park still pushes WIP on a transition failure")
+	assert.Equal(t, 1, ops.count("TransitionCard"), "transition was attempted")
+	assert.Equal(t, 1, ops.count("ReleaseCard"), "claim still released despite the transition failure")
+	assert.Equal(t, 0, ops.count("CompleteTask"))
+}
+
+// TestToolchainMissingDuringEndSessionMapsToEndSession: an end_session frame
+// arrives while the orchestrator is mid-toolchain-check, but a context-canceled
+// Tier-3 call can still surface a ToolchainMissingError instead of the ctx
+// error (the race the finding describes; the Tier-4 trigger side is covered by
+// CTXAGENT-022 in internal/orchestrator). mapFSMResult must let the
+// end-session/cancel arm win over the toolchain arm: no TransitionCard("blocked"),
+// no failure return - the graceful pause wins.
+func TestToolchainMissingDuringEndSessionMapsToEndSession(t *testing.T) {
+	remote := setupBareRemote(t)
+	wsParent := t.TempDir()
+	ops := newFakeOps()
+
+	swapRunOrchestrator(t, func(ctx context.Context, d orchestrator.Deps) error {
+		// Block until the end_session cancels the run context, then return the
+		// toolchain sentinel - exactly what a canceled Tier-3 call can still
+		// surface per the finding, even though end_session has already fired.
+		require.NoError(t, os.WriteFile(filepath.Join(d.Cfg.Workspace, "wip.txt"), []byte("partial\n"), 0o644))
+		<-ctx.Done()
+
+		return &orchestrator.ToolchainMissingError{Tier: "detected", Subject: "pom.xml", Reason: "java not on PATH"}
+	})
+
+	llmClient := &scriptedLLM{}
+
+	pr, pw := io.Pipe()
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+
+		_ = frames.Write(pw, frames.Frame{Type: frames.TypeEndSession})
+	}()
+
+	t.Cleanup(func() { _ = pw.Close() })
+
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	res, err := Run(context.Background(), baseSpec(t, remote, wsParent), ops, llmClient, emit, pr)
+	require.NoError(t, err, "end-session/cancel must win the race: no failure return")
+	assert.Equal(t, "end_session", res.Reason)
+
+	assert.True(t, remoteHasBranch(t, remote, "cm/cmx-001"), "WIP still pushed on the graceful pause")
+	assert.Equal(t, 0, ops.count("TransitionCard"), "end-session/cancel must win: no blocked transition")
+	assert.Equal(t, 1, ops.count("ReleaseCard"))
 	assert.Equal(t, 0, ops.count("CompleteTask"))
 }
 

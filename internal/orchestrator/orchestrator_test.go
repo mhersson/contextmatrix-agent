@@ -195,6 +195,33 @@ func TestRunContextLimitParks(t *testing.T) {
 	assert.Equal(t, -1, indexOfCall(calls, "SetPhase:execute"))
 }
 
+func TestRunToolchainMissingParks(t *testing.T) {
+	ops := &fakeOps{
+		taskContext: cmclient.TaskContext{},
+	}
+	d := Deps{Ops: ops, Git: &fakeGit{}, Cfg: Config{CardID: "CARD-1"}}
+
+	o := newRun(d, ops.taskContext)
+	// Execute stops because verify resolution found a toolchain that cannot run.
+	o.planFn = func(context.Context) error {
+		return &ToolchainMissingError{Tier: "detected", Subject: "pom.xml", Reason: "java: not found"}
+	}
+
+	err := o.execute(context.Background())
+
+	var tme *ToolchainMissingError
+	require.ErrorAs(t, err, &tme)
+	assert.Equal(t, "detected", tme.Tier)
+	assert.Equal(t, "pom.xml", tme.Subject)
+
+	calls := ops.recorded()
+	// AddLog must be recorded on the toolchain-missing park.
+	assert.GreaterOrEqual(t, indexOfCall(calls, "AddLog:"+toolchainLogMessage(tme)), 0,
+		"toolchain-missing park must AddLog the reason; calls=%v", calls)
+	// No further phase entered after the park.
+	assert.Equal(t, -1, indexOfCall(calls, "SetPhase:execute"))
+}
+
 func TestPhaseOrderPlacesDocumentBetweenExecuteAndReview(t *testing.T) {
 	assert.Equal(t, []string{"plan", "execute", "judge", "document", "review", "integrate", "done"}, phaseOrder)
 }
