@@ -335,3 +335,56 @@ func TestRunModelPassesThroughNormalResult(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "all good", res.Output)
 }
+
+// TestSpendAndReportSyncsRunLedger pins the CTXAGENT-017 fix: a cost-less
+// gateway call (TotalCostUSD 0) still lands CM's server-priced total on the
+// run ledger via the report_usage response.
+func TestSpendAndReportSyncsRunLedger(t *testing.T) {
+	ops := &fakeOps{taskContext: cmclient.TaskContext{}, reportUsageTotal: 3.5}
+	d := planTestDeps(ops, &planLLM{})
+	o := newRun(d, ops.taskContext)
+
+	res := harness.Result{PromptTokens: 10, CompletionTokens: 5, TotalCostUSD: 0}
+
+	o.spendAndReport(context.Background(), o.ledger, "TARGET-1",
+		"test: report usage failed", res, "configured/model", "main", time.Second)
+
+	assert.InDelta(t, 3.5, o.ledger.Spent(), 1e-9,
+		"the server-priced total enforces despite a $0 local charge")
+}
+
+// TestSpendAndReportCandidateLedgerRouting pins the routing rule: a candidate
+// charges its own sub-ledger locally, but the parent-card server total syncs
+// into the RUN ledger only - candidates must not absorb their siblings' spend.
+func TestSpendAndReportCandidateLedgerRouting(t *testing.T) {
+	ops := &fakeOps{taskContext: cmclient.TaskContext{}, reportUsageTotal: 3.5}
+	d := planTestDeps(ops, &planLLM{})
+	o := newRun(d, ops.taskContext)
+
+	cand := NewLedger(2.0, 0)
+	res := harness.Result{PromptTokens: 10, CompletionTokens: 5, TotalCostUSD: 0.25}
+
+	o.spendAndReport(context.Background(), cand, "PARENT-1",
+		"test: report usage failed", res, "configured/model", "main", time.Second)
+
+	assert.InDelta(t, 0.25, cand.Spent(), 1e-9, "candidate ledger takes only its local charge")
+	assert.InDelta(t, 3.5, o.ledger.Spent(), 1e-9, "the server total lands on the run ledger only")
+}
+
+// TestSpendAndReportNoSyncOnReportFailure pins that a failed report leaves the
+// ledger on local accounting alone - no stale zero overwrites, no phantom sync.
+func TestSpendAndReportNoSyncOnReportFailure(t *testing.T) {
+	ops := &fakeOps{
+		taskContext: cmclient.TaskContext{}, reportUsageTotal: 3.5,
+		reportUsageErr: errors.New("report boom"),
+	}
+	d := planTestDeps(ops, &planLLM{})
+	o := newRun(d, ops.taskContext)
+
+	res := harness.Result{TotalCostUSD: 0.25}
+
+	o.spendAndReport(context.Background(), o.ledger, "TARGET-1",
+		"test: report usage failed", res, "configured/model", "main", time.Second)
+
+	assert.InDelta(t, 0.25, o.ledger.Spent(), 1e-9, "a failed report leaves only the local charge")
+}

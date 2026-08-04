@@ -154,7 +154,12 @@ func (o *run) runModelCfg(ctx context.Context, reg *tools.Registry, prompt, mode
 // dur is the harness step's wall time; both ride the usage report as
 // observability telemetry (o.curPhase supplies the phase). A report failure is
 // advisory: warned as warnMsg with card_id, any extraAttrs, and the error -
-// never propagated.
+// never propagated. On success, the response's server-priced card total is
+// synced into the RUN ledger (o.ledger, deliberately not the ledger parameter:
+// Best-of-N candidates charge their own sub-ledgers locally but all report
+// against the shared parent card, and syncing that total into one candidate
+// would bill it for its siblings). This is what keeps the ceiling enforcing
+// when a gateway reports no per-call cost.
 func (o *run) spendAndReport(ctx context.Context, ledger *Ledger, targetCardID, warnMsg string,
 	res harness.Result, configuredModel, step string, dur time.Duration, extraAttrs ...any,
 ) string {
@@ -165,7 +170,7 @@ func (o *run) spendAndReport(ctx context.Context, ledger *Ledger, targetCardID, 
 		used = configuredModel
 	}
 
-	if _, reportErr := o.d.Ops.ReportUsage(ctx, targetCardID, cmclient.UsageReport{
+	total, reportErr := o.d.Ops.ReportUsage(ctx, targetCardID, cmclient.UsageReport{
 		Model:            used,
 		PromptTokens:     res.PromptTokens,
 		CompletionTokens: res.CompletionTokens,
@@ -173,13 +178,16 @@ func (o *run) spendAndReport(ctx context.Context, ledger *Ledger, targetCardID, 
 		Phase:            o.curPhase,
 		Step:             step,
 		DurationMS:       dur.Milliseconds(),
-	}); reportErr != nil {
+	})
+	if reportErr != nil {
 		attrs := make([]any, 0, len(extraAttrs)+4)
 		attrs = append(attrs, "card_id", targetCardID)
 		attrs = append(attrs, extraAttrs...)
 		attrs = append(attrs, "error", reportErr)
 
 		slog.Warn(warnMsg, attrs...)
+	} else {
+		o.ledger.SyncServerTotal(targetCardID, total)
 	}
 
 	return used
