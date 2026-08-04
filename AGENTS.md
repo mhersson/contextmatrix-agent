@@ -153,6 +153,7 @@ file only - never via flags or committed YAML.
 - Do not write doc comments on simple functions - if what it does is
   straightforward, the code itself is the documentation.
 - Never use em-dashes; use hyphens (-).
+- Never reference plan phases, task numbers, or private card IDs in doc comments.
 
 ## Key domain rules
 
