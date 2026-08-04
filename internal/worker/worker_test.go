@@ -177,10 +177,10 @@ func (f *fakeOps) Heartbeat(_ context.Context, cardID string) error {
 	return nil
 }
 
-func (f *fakeOps) ReportUsage(_ context.Context, cardID string, u cmclient.UsageReport) error {
+func (f *fakeOps) ReportUsage(_ context.Context, cardID string, u cmclient.UsageReport) (float64, error) {
 	f.record("ReportUsage", cardID, u.Model, u.PromptTokens, u.CompletionTokens, u.ActualCostUSD)
 
-	return nil
+	return 0, nil
 }
 
 func (f *fakeOps) ReportPush(_ context.Context, cardID, branch, prURL string) error {

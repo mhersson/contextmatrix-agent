@@ -399,8 +399,12 @@ type UsageReport struct {
 	DurationMS       int64  // wall time of the harness step in milliseconds
 }
 
-// ReportUsage records token usage for cost tracking against a card.
-func (c *Client) ReportUsage(ctx context.Context, cardID string, u UsageReport) error {
+// ReportUsage records token usage for cost tracking against a card. It returns
+// the card's updated server-priced cumulative cost (token_usage
+// .estimated_cost_usd from the response card), 0 when the response carries
+// none. The budget ledger syncs on this total so the per-card ceiling enforces
+// even when the gateway reports no per-call cost.
+func (c *Client) ReportUsage(ctx context.Context, cardID string, u UsageReport) (float64, error) {
 	args := map[string]any{
 		"card_id":           cardID,
 		"prompt_tokens":     u.PromptTokens,
@@ -426,9 +430,29 @@ func (c *Client) ReportUsage(ctx context.Context, cardID string, u UsageReport) 
 		args["duration_ms"] = u.DurationMS
 	}
 
-	_, err := c.call(ctx, "report_usage", args)
+	text, err := c.call(ctx, "report_usage", args)
+	if err != nil {
+		return 0, err
+	}
 
-	return err
+	return usageTotal(text), nil
+}
+
+// usageTotal parses report_usage's response (the updated card JSON) and returns
+// token_usage.estimated_cost_usd. Zero on any parse miss: the total is advisory
+// input to the budget ledger, never worth failing a successful report over.
+func usageTotal(text string) float64 {
+	var payload struct {
+		TokenUsage *struct {
+			EstimatedCostUSD float64 `json:"estimated_cost_usd"`
+		} `json:"token_usage"`
+	}
+
+	if err := json.Unmarshal([]byte(text), &payload); err != nil || payload.TokenUsage == nil {
+		return 0
+	}
+
+	return payload.TokenUsage.EstimatedCostUSD
 }
 
 // ReportPush records that work was pushed to the given git branch. prURL may

@@ -165,7 +165,7 @@ func (o *run) spendAndReport(ctx context.Context, ledger *Ledger, targetCardID, 
 		used = configuredModel
 	}
 
-	if reportErr := o.d.Ops.ReportUsage(ctx, targetCardID, cmclient.UsageReport{
+	if _, reportErr := o.d.Ops.ReportUsage(ctx, targetCardID, cmclient.UsageReport{
 		Model:            used,
 		PromptTokens:     res.PromptTokens,
 		CompletionTokens: res.CompletionTokens,

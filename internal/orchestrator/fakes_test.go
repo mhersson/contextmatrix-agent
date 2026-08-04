@@ -83,9 +83,11 @@ type fakeOps struct {
 
 	// ReportUsage scripting: usageReports captures the full report on each call
 	// so tests can assert the used-model fallback and the phase/step/duration
-	// telemetry; reportUsageErr fails every call.
-	usageReports   []cmclient.UsageReport
-	reportUsageErr error
+	// telemetry; reportUsageErr fails every call; reportUsageTotal is returned
+	// on success.
+	usageReports     []cmclient.UsageReport
+	reportUsageErr   error
+	reportUsageTotal float64
 }
 
 // createCardCall is a recorded CreateCard invocation.
@@ -262,14 +264,14 @@ func (f *fakeOps) loggedContains(sub string) bool {
 	return false
 }
 
-func (f *fakeOps) ReportUsage(_ context.Context, cardID string, u cmclient.UsageReport) error {
+func (f *fakeOps) ReportUsage(_ context.Context, cardID string, u cmclient.UsageReport) (float64, error) {
 	f.mu.Lock()
 	f.usageReports = append(f.usageReports, u)
 	f.mu.Unlock()
 
 	f.record("ReportUsage:" + cardID)
 
-	return f.reportUsageErr
+	return f.reportUsageTotal, f.reportUsageErr
 }
 
 // lastUsageReport returns the most recent ReportUsage payload (zero value when
