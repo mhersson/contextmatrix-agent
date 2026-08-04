@@ -336,7 +336,7 @@ func TestRunModelPassesThroughNormalResult(t *testing.T) {
 	assert.Equal(t, "all good", res.Output)
 }
 
-// TestSpendAndReportSyncsRunLedger pins the CTXAGENT-017 fix: a cost-less
+// TestSpendAndReportSyncsRunLedger pins the server-floor fix: a cost-less
 // gateway call (TotalCostUSD 0) still lands CM's server-priced total on the
 // run ledger via the report_usage response.
 func TestSpendAndReportSyncsRunLedger(t *testing.T) {

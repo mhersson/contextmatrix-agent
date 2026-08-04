@@ -77,7 +77,7 @@ func TestLedgerServerFloor(t *testing.T) {
 	assert.InDelta(t, 7.5, l.Spent(), 1e-9, "a stale lower total is ignored")
 }
 
-// TestLedgerCheckUsesServerFloor pins the CTXAGENT-017 incident shape: local
+// TestLedgerCheckUsesServerFloor pins the cost-less-gateway incident shape: local
 // charges of $0 (cost-less gateway) with a server-priced floor over the ceiling
 // must trip Check.
 func TestLedgerCheckUsesServerFloor(t *testing.T) {
