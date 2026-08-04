@@ -44,7 +44,7 @@ type Ops interface {
 	IncrementReviewAttempts(ctx context.Context, cardID string) (int, error)
 	SubtaskStates(ctx context.Context, project, parentID string) ([]cmclient.SubtaskState, error)
 	AddLog(ctx context.Context, cardID, message string) error
-	ReportUsage(ctx context.Context, cardID string, u cmclient.UsageReport) error
+	ReportUsage(ctx context.Context, cardID string, u cmclient.UsageReport) (float64, error)
 	ReportPush(ctx context.Context, cardID, branch, prURL string) error
 	ReportModelOutcomes(ctx context.Context, cardID string, outcomes []cmclient.ModelOutcome) error
 	BlacklistModel(ctx context.Context, cardID, model, reason string) error

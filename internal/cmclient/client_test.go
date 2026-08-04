@@ -163,6 +163,11 @@ const listCardsSubtaskPayload = `{
   ]
 }`
 
+// reportUsagePayload mirrors the updated card report_usage returns; the client
+// parses token_usage.estimated_cost_usd out of it.
+const reportUsagePayload = `{"id":"CMX-001","state":"in_progress",` +
+	`"token_usage":{"prompt_tokens":100,"completion_tokens":50,"estimated_cost_usd":1.23}}`
+
 // serveBearer serves an MCP server over the SDK's streamable HTTP handler
 // behind a bearer gate. A missing or wrong token must 401, which proves the
 // client sends Authorization on every request (connect would otherwise fail).
@@ -200,7 +205,7 @@ func startStubServer(t *testing.T, rec *recorder, failTool string) *httptest.Ser
 	addStub(server, rec, "claim_card", `{"ok": true}`, failTool == "claim_card")
 	addStub(server, rec, "get_task_context", taskContextPayload, failTool == "get_task_context")
 	addStub(server, rec, "heartbeat", `{"ok": true}`, failTool == "heartbeat")
-	addStub(server, rec, "report_usage", `{"ok": true}`, failTool == "report_usage")
+	addStub(server, rec, "report_usage", reportUsagePayload, failTool == "report_usage")
 	addStub(server, rec, "report_push", `{"ok": true}`, failTool == "report_push")
 	addStub(server, rec, "complete_task", `{"ok": true}`, failTool == "complete_task")
 	addStub(server, rec, "release_card", `{"ok": true}`, failTool == "release_card")
@@ -453,9 +458,11 @@ func TestReportUsage(t *testing.T) {
 	rec := newRecorder()
 	c := newTestClient(t, rec, "")
 
-	require.NoError(t, c.ReportUsage(context.Background(), "CMX-001", UsageReport{
+	total, err := c.ReportUsage(context.Background(), "CMX-001", UsageReport{
 		Model: "some/model", PromptTokens: 100, CompletionTokens: 50,
-	}))
+	})
+	require.NoError(t, err)
+	assert.InDelta(t, 1.23, total, 1e-9, "server-priced total parsed from the response card")
 
 	args, ok := rec.get("report_usage")
 	require.True(t, ok, "report_usage stub should have been called")
@@ -478,9 +485,10 @@ func TestReportUsage_ActualCostSentWhenNonZero(t *testing.T) {
 	rec := newRecorder()
 	c := newTestClient(t, rec, "")
 
-	require.NoError(t, c.ReportUsage(context.Background(), "CMX-001", UsageReport{
+	_, err := c.ReportUsage(context.Background(), "CMX-001", UsageReport{
 		Model: "some/model", PromptTokens: 100, CompletionTokens: 50, ActualCostUSD: 0.0123,
-	}))
+	})
+	require.NoError(t, err)
 
 	args, ok := rec.get("report_usage")
 	require.True(t, ok)
@@ -492,9 +500,10 @@ func TestReportUsage_OmitsEmptyModel(t *testing.T) {
 	rec := newRecorder()
 	c := newTestClient(t, rec, "")
 
-	require.NoError(t, c.ReportUsage(context.Background(), "CMX-001", UsageReport{
+	_, err := c.ReportUsage(context.Background(), "CMX-001", UsageReport{
 		PromptTokens: 1, CompletionTokens: 2,
-	}))
+	})
+	require.NoError(t, err)
 
 	args, ok := rec.get("report_usage")
 	require.True(t, ok)
@@ -505,10 +514,11 @@ func TestReportUsage_TelemetrySentWhenSet(t *testing.T) {
 	rec := newRecorder()
 	c := newTestClient(t, rec, "")
 
-	require.NoError(t, c.ReportUsage(context.Background(), "CMX-001", UsageReport{
+	_, err := c.ReportUsage(context.Background(), "CMX-001", UsageReport{
 		Model: "some/model", PromptTokens: 1, CompletionTokens: 2,
 		Phase: "execute", Step: "main", DurationMS: 1234,
-	}))
+	})
+	require.NoError(t, err)
 
 	args, ok := rec.get("report_usage")
 	require.True(t, ok)
@@ -874,4 +884,26 @@ func TestRecordSkillEngaged(t *testing.T) {
 	assert.Equal(t, "skill_engaged", args["action"], "action must be skill_engaged so CM records a skill_engaged entry")
 	assert.Equal(t, "engaged go-development", args["message"], "message must be 'engaged <skill>' so skillNameOf parses it")
 	assert.Equal(t, testAgentID, args["agent_id"], "the call helper injects the per-card agent identity")
+}
+
+// TestUsageTotal pins the advisory parse of report_usage's response: the card's
+// cumulative estimated cost when present, 0 on any miss - a malformed response
+// must never fail a report.
+func TestUsageTotal(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want float64
+	}{
+		{"card with totals", `{"id":"X-1","token_usage":{"estimated_cost_usd":41.07}}`, 41.07},
+		{"card without token_usage", `{"ok": true}`, 0},
+		{"malformed json", `not json`, 0},
+		{"empty", ``, 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.InDelta(t, tt.want, usageTotal("X-1", tt.text), 1e-9)
+		})
+	}
 }

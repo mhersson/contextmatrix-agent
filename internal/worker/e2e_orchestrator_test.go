@@ -483,14 +483,14 @@ func (s *stubOps) AddLog(_ context.Context, cardID, message string) error {
 	return nil
 }
 
-func (s *stubOps) ReportUsage(_ context.Context, cardID string, u cmclient.UsageReport) error {
+func (s *stubOps) ReportUsage(_ context.Context, cardID string, u cmclient.UsageReport) (float64, error) {
 	s.mu.Lock()
 	s.usageCalls = append(s.usageCalls, usageRecord{cardID: cardID, model: u.Model, actualCostUSD: u.ActualCostUSD})
 	s.mu.Unlock()
 
 	s.record("ReportUsage", cardID, u.Model, u.ActualCostUSD)
 
-	return nil
+	return 0, nil
 }
 
 func (s *stubOps) ReportPush(_ context.Context, cardID, branch, prURL string) error {

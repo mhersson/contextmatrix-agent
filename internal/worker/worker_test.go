@@ -177,10 +177,10 @@ func (f *fakeOps) Heartbeat(_ context.Context, cardID string) error {
 	return nil
 }
 
-func (f *fakeOps) ReportUsage(_ context.Context, cardID string, u cmclient.UsageReport) error {
+func (f *fakeOps) ReportUsage(_ context.Context, cardID string, u cmclient.UsageReport) (float64, error) {
 	f.record("ReportUsage", cardID, u.Model, u.PromptTokens, u.CompletionTokens, u.ActualCostUSD)
 
-	return nil
+	return 0, nil
 }
 
 func (f *fakeOps) ReportPush(_ context.Context, cardID, branch, prURL string) error {
@@ -867,8 +867,8 @@ func TestToolchainMissingTransitionFailureDegradesGracefully(t *testing.T) {
 // TestToolchainMissingDuringEndSessionMapsToEndSession: an end_session frame
 // arrives while the orchestrator is mid-toolchain-check, but a context-canceled
 // Tier-3 call can still surface a ToolchainMissingError instead of the ctx
-// error (the race the finding describes; the Tier-4 trigger side is covered by
-// CTXAGENT-022 in internal/orchestrator). mapFSMResult must let the
+// error (the race the finding describes; the Tier-4 trigger side is an
+// orchestrator-side concern, not covered here). mapFSMResult must let the
 // end-session/cancel arm win over the toolchain arm: no TransitionCard("blocked"),
 // no failure return - the graceful pause wins.
 func TestToolchainMissingDuringEndSessionMapsToEndSession(t *testing.T) {

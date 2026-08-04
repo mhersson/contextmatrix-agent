@@ -153,6 +153,7 @@ file only - never via flags or committed YAML.
 - Do not write doc comments on simple functions - if what it does is
   straightforward, the code itself is the documentation.
 - Never use em-dashes; use hyphens (-).
+- Never reference plan phases, task numbers, or private card IDs in doc comments.
 
 ## Key domain rules
 
@@ -211,6 +212,9 @@ file only - never via flags or committed YAML.
 7. **Per-card budget.** One cumulative USD ceiling (`CMX_MAX_CARD_COST`, default
    5.0) spans the orchestrator and every subagent. A breach parks the card - WIP
    pushed, card released, failed callback - it does not kill mid-turn.
+   The ledger's floor is CM's server-priced card totals, synced from every
+   `report_usage` response - the ceiling holds even when the gateway reports
+   no per-call cost.
 8. **Verify resolution can park as blocked.** The verify-resolution ladder
    (declared command, then repo-convention detection, then a model proposal,
    then skip - `internal/orchestrator/verify.go`) gives every tier a chance

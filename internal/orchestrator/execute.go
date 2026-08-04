@@ -86,9 +86,18 @@ func (o *run) executeSubtaskWith(ctx context.Context, sc *solverCtx, sub subtask
 		return nil
 	}
 
-	// Budget gate BEFORE claiming, so a parked subtask is never owned.
+	// Budget gate BEFORE claiming, so a parked subtask is never owned. A
+	// candidate solver checks its own sub-ledger AND the run ledger:
+	// server-priced totals sync only into the run ledger, so a run-wide breach
+	// must park the fan-out here rather than at the next phase boundary.
 	if err := sc.ledger.Check(); err != nil {
 		return err
+	}
+
+	if sc.ledger != o.ledger {
+		if err := o.ledger.Check(); err != nil {
+			return err
+		}
 	}
 
 	// Claim conflicts mean another agent owns the subtask - abort the run rather

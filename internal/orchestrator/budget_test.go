@@ -57,3 +57,59 @@ func TestBudgetLedger(t *testing.T) {
 		assert.InDelta(t, 1.0, l.Spent(), 1e-9)
 	})
 }
+
+// TestLedgerServerFloor pins the two-lower-bounds model: effective spend is the
+// max of the local scalar and the summed per-card server totals, and a card's
+// server total is max-monotonic (a stale response never lowers the floor).
+func TestLedgerServerFloor(t *testing.T) {
+	l := NewLedger(10, 1.0)
+
+	l.SyncServerTotal("CARD-1", 4.0)
+	assert.InDelta(t, 4.0, l.Spent(), 1e-9, "server floor wins when above the local scalar")
+
+	l.Spend(5.0) // local now 6.0
+	assert.InDelta(t, 6.0, l.Spent(), 1e-9, "local wins when above the floor")
+
+	l.SyncServerTotal("SUB-1", 3.5)
+	assert.InDelta(t, 7.5, l.Spent(), 1e-9, "per-card server totals sum")
+
+	l.SyncServerTotal("CARD-1", 2.0)
+	assert.InDelta(t, 7.5, l.Spent(), 1e-9, "a stale lower total is ignored")
+}
+
+// TestLedgerCheckUsesServerFloor pins the cost-less-gateway incident shape: local
+// charges of $0 (cost-less gateway) with a server-priced floor over the ceiling
+// must trip Check.
+func TestLedgerCheckUsesServerFloor(t *testing.T) {
+	l := NewLedger(8.75, 0)
+
+	require.NoError(t, l.Check())
+
+	l.SyncServerTotal("CARD-1", 41.07)
+
+	err := l.Check()
+
+	var bee *BudgetExceededError
+
+	require.ErrorAs(t, err, &bee)
+	assert.InDelta(t, 41.07, bee.Spent, 1e-9)
+	assert.InDelta(t, 8.75, bee.Max, 1e-9)
+}
+
+// TestLedgerServerFloorConcurrency exercises Spend and SyncServerTotal racing
+// from fan-out goroutines; run under -race via make test-race.
+func TestLedgerServerFloorConcurrency(t *testing.T) {
+	l := NewLedger(0, 0)
+
+	var wg sync.WaitGroup
+	for i := range 50 {
+		wg.Go(func() {
+			l.Spend(0.01)
+			l.SyncServerTotal("CARD-1", float64(i))
+		})
+	}
+
+	wg.Wait()
+
+	assert.InDelta(t, 49.0, l.Spent(), 1e-9, "highest synced total wins over the 0.50 local sum")
+}
