@@ -867,8 +867,8 @@ func TestToolchainMissingTransitionFailureDegradesGracefully(t *testing.T) {
 // TestToolchainMissingDuringEndSessionMapsToEndSession: an end_session frame
 // arrives while the orchestrator is mid-toolchain-check, but a context-canceled
 // Tier-3 call can still surface a ToolchainMissingError instead of the ctx
-// error (the race the finding describes; the Tier-4 trigger side is covered by
-// CTXAGENT-022 in internal/orchestrator). mapFSMResult must let the
+// error (the race the finding describes; the Tier-4 trigger side is an
+// orchestrator-side concern, not covered here). mapFSMResult must let the
 // end-session/cancel arm win over the toolchain arm: no TransitionCard("blocked"),
 // no failure return - the graceful pause wins.
 func TestToolchainMissingDuringEndSessionMapsToEndSession(t *testing.T) {
