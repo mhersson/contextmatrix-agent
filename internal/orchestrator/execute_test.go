@@ -1047,3 +1047,29 @@ func TestSoloTurnCapPropagatesToolchainSentinel(t *testing.T) {
 // TestSoloTurnCapSalvagedWhenVerifyPasses / ...StillParksWhenVerifyFails /
 // ...StillParksOnCleanTree, plus TestExecuteSubtaskMaxTurnsNeverCompletes for the
 // unresolved-verify park.
+
+// TestCandidateSubtaskParksOnRunLedgerBreach pins the fan-out window close: a
+// candidate whose own sub-ledger is clean still parks when the RUN ledger -
+// the only ledger server-priced totals sync into - is over the ceiling.
+func TestCandidateSubtaskParksOnRunLedgerBreach(t *testing.T) {
+	ops := &fakeOps{}
+	d := execTestDeps(ops, &fakeGit{committed: true}, &planLLM{})
+	o := newExecRun(d, nil, 0)
+
+	o.ledger = NewLedger(8.75, 0)
+	o.ledger.SyncServerTotal("PARENT-1", 41.07)
+
+	sc := &solverCtx{
+		git: &fakeGit{committed: true}, ledger: NewLedger(0, 0), tools: d.WriteTools,
+		workspace: "ws", coderModel: o.resolveCoderModel,
+		boardOps: false, push: false, tag: "candidate 1/1",
+	}
+
+	err := o.executeSubtaskWith(context.Background(), sc,
+		subtaskRef{ID: "SUB-1", Title: "Work", Tier: "simple"})
+
+	var bee *BudgetExceededError
+
+	require.ErrorAs(t, err, &bee, "a run-ledger breach parks the candidate")
+	assert.Empty(t, ops.recorded(), "parked before any board op or model call")
+}
