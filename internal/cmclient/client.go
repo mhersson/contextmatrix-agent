@@ -435,20 +435,30 @@ func (c *Client) ReportUsage(ctx context.Context, cardID string, u UsageReport) 
 		return 0, err
 	}
 
-	return usageTotal(text), nil
+	return usageTotal(cardID, text), nil
 }
 
 // usageTotal parses report_usage's response (the updated card JSON) and returns
 // token_usage.estimated_cost_usd. Zero on any parse miss: the total is advisory
 // input to the budget ledger, never worth failing a successful report over.
-func usageTotal(text string) float64 {
+// A present token_usage with estimated_cost_usd of 0 is legitimate (free models)
+// and does not warn - only unmarshal errors or missing token_usage sections warn.
+func usageTotal(cardID, text string) float64 {
 	var payload struct {
 		TokenUsage *struct {
 			EstimatedCostUSD float64 `json:"estimated_cost_usd"`
 		} `json:"token_usage"`
 	}
 
-	if err := json.Unmarshal([]byte(text), &payload); err != nil || payload.TokenUsage == nil {
+	if err := json.Unmarshal([]byte(text), &payload); err != nil {
+		slog.Warn("report_usage response: unmarshal failed", "card_id", cardID, "error", err)
+
+		return 0
+	}
+
+	if payload.TokenUsage == nil {
+		slog.Warn("report_usage response: no token_usage in response", "card_id", cardID)
+
 		return 0
 	}
 

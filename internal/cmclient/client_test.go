@@ -903,7 +903,7 @@ func TestUsageTotal(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.InDelta(t, tt.want, usageTotal(tt.text), 1e-9)
+			assert.InDelta(t, tt.want, usageTotal("X-1", tt.text), 1e-9)
 		})
 	}
 }
