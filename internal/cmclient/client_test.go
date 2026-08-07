@@ -163,8 +163,8 @@ const listCardsSubtaskPayload = `{
   ]
 }`
 
-// reportUsagePayload mirrors the updated card report_usage returns; the client
-// parses token_usage.estimated_cost_usd out of it.
+// reportUsagePayload mirrors the card summary report_usage returns (no body
+// or activity_log); the client parses token_usage.estimated_cost_usd out of it.
 const reportUsagePayload = `{"id":"CMX-001","state":"in_progress",` +
 	`"token_usage":{"prompt_tokens":100,"completion_tokens":50,"estimated_cost_usd":1.23}}`
 
