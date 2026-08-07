@@ -438,8 +438,9 @@ func (c *Client) ReportUsage(ctx context.Context, cardID string, u UsageReport) 
 	return usageTotal(cardID, text), nil
 }
 
-// usageTotal parses report_usage's response (the updated card JSON) and returns
-// token_usage.estimated_cost_usd. Zero on any parse miss: the total is advisory
+// usageTotal parses report_usage's response (a card summary without body or
+// activity_log) and returns token_usage.estimated_cost_usd. Zero on any
+// parse miss: the total is advisory
 // input to the budget ledger, never worth failing a successful report over.
 // A present token_usage with estimated_cost_usd of 0 is legitimate (free models)
 // and does not warn - only unmarshal errors or missing token_usage sections warn.
@@ -574,7 +575,7 @@ func (c *Client) CreateCard(ctx context.Context, project, parent, title, body st
 		return "", err
 	}
 
-	// create_card returns the full board.Card JSON; extract the id field.
+	// create_card returns a card summary (no body/activity_log); extract the id field.
 	var card struct {
 		ID string `json:"id"`
 	}
