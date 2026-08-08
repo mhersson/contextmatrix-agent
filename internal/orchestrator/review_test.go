@@ -1382,3 +1382,31 @@ func TestReviewMobPassesExclusionsAndDeltaScope(t *testing.T) {
 		"the briefing diff uses lastReviewBase; bases=%v", git.diffBases)
 	assert.Contains(t, eng.topics[0].Briefing, "prior finding about a.go")
 }
+
+func TestReviewPromptsUseFilteredDescriptionAndSeededFindings(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{}
+	client := &planLLM{responses: []llm.Response{
+		stopResp("Correctness: ok", 0.01),
+		stopResp("Design: ok", 0.01),
+		stopResp("Security: ok", 0.01),
+		stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.02),
+	}}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: grownDescription, State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	specialist := client.tasks[0]
+	assert.Contains(t, specialist, "Add a config flag to toggle the feature.")
+	assert.NotContains(t, specialist, "1. SUBTASK: Add the flag", "plan stripped from the description slot")
+	assert.NotContains(t, specialist, "Use a palette config", "design stripped from the description slot")
+	assert.Contains(t, specialist, "PRIOR FINDINGS", "resumed findings arrive through the prior-findings framing")
+	assert.Equal(t, 1, strings.Count(specialist, "naming could improve"),
+		"the finding text rides the prior block exactly once, not the description too")
+
+	synthesis := client.tasks[3]
+	assert.NotContains(t, synthesis, "1. SUBTASK: Add the flag", "plan not re-imported into synthesis")
+}

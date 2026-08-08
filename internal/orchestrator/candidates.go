@@ -146,7 +146,7 @@ func (o *run) runFanout(ctx context.Context) (retErr error) {
 	specs := o.d.Registry.SelectCandidateModels(registry.SelectInput{
 		Role:      registry.RoleCoder,
 		Tier:      tierFromString(o.cardTier),
-		EstTokens: estimateTokens(o.tc.Description),
+		EstTokens: estimateTokens(o.taskDescription),
 		Exclude:   o.excluded,
 	}, nEff, pin)
 

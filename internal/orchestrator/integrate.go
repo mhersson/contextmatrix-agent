@@ -140,7 +140,7 @@ func (o *run) writePRBody(ctx context.Context) (string, error) {
 	model := resolveOrchestratorModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
 		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel)
 
-	task := fmt.Sprintf(prBodyPrompt, o.tc.Title, o.tc.Description, o.planOverview(), o.reviewOutcome())
+	task := fmt.Sprintf(prBodyPrompt, o.tc.Title, o.taskDescription, o.planOverview(), o.reviewOutcome())
 
 	res, dur, err := o.runModel(ctx, d.ReadTools, task, model)
 

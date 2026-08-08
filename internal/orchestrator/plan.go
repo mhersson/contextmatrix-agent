@@ -300,7 +300,7 @@ func (o *run) runDiagnose(ctx context.Context, model string) (string, error) {
 		return "", err
 	}
 
-	task := fmt.Sprintf(diagnosePrompt, o.grounding, cfg.Workspace, o.tc.Title, o.tc.Description)
+	task := fmt.Sprintf(diagnosePrompt, o.grounding, cfg.Workspace, o.tc.Title, o.taskDescription)
 
 	res, dur, err := o.runModelImages(ctx, d.ReadTools, task, model, o.taskImages)
 
@@ -349,7 +349,7 @@ func (o *run) draftPlan(ctx context.Context, model, diagnosis, design, feedback 
 			repair = repairBlock(lastErr.Error())
 		}
 
-		task := fmt.Sprintf(planPrompt, o.grounding, snapshot, cfg.Workspace, o.tc.Title, o.tc.Description,
+		task := fmt.Sprintf(planPrompt, o.grounding, snapshot, cfg.Workspace, o.tc.Title, o.plannerDescription(),
 			diagBlock, dsnBlock, resume, fbBlock, repair)
 
 		res, dur, err := o.runModelPlan(ctx, d.ReadTools, task, model, o.taskImages, attempt > 0)
@@ -391,7 +391,7 @@ func (o *run) mobDraftPlan(ctx context.Context, diagnosis, design, feedback stri
 		Blind:    true,
 		Briefing: o.mobPlanBriefing(diagnosis, design),
 		SynthesisPrompt: fmt.Sprintf(planSynthesisPrompt,
-			o.grounding, o.d.Cfg.Workspace, o.tc.Title, o.tc.Description),
+			o.grounding, o.d.Cfg.Workspace, o.tc.Title, o.plannerDescription()),
 	}
 
 	if prior != nil {
@@ -443,7 +443,7 @@ func (o *run) mobPlanBriefing(diagnosis, design string) string {
 	diagBlock := diagnosisBlock(diagnosis)
 	dsnBlock := designBlock(design)
 
-	return fmt.Sprintf(planBriefing, o.grounding, o.repoSnapshotBlock(), o.d.Cfg.Workspace, o.tc.Title, o.tc.Description,
+	return fmt.Sprintf(planBriefing, o.grounding, o.repoSnapshotBlock(), o.d.Cfg.Workspace, o.tc.Title, o.plannerDescription(),
 		diagBlock, dsnBlock, resume)
 }
 
@@ -536,11 +536,14 @@ func runPlan(ctx context.Context, o *run) error {
 
 	// Creative HITL cards get a design dialogue before planning (create-plan
 	// Phase 0 Branch C). Skipped in autonomous, for non-creative cards, and when
-	// a design already exists. Branch C and the bug Branch B are mutually
-	// exclusive (isCreative excludes bug-like cards).
-	design := ""
+	// a design already exists on the claim-time body - a prior brainstorm's
+	// record or a human-authored one - which is recovered here so it reaches
+	// the planner through the same AGREED DESIGN channel a fresh brainstorm
+	// uses. Branch C and the bug Branch B are mutually exclusive (isCreative
+	// excludes bug-like cards).
+	design := recordedDesign(o.tc.Description)
 
-	if cfg.Interactive && isCreative(o.tc) && !hasDesignSection(o.body) {
+	if cfg.Interactive && isCreative(o.tc) && design == "" {
 		d, err := o.runBrainstorm(ctx, model)
 		if err != nil {
 			return err
@@ -581,7 +584,7 @@ func runPlan(ctx context.Context, o *run) error {
 	// to the solo draftPlan path, byte-identical to before.
 	if !cfg.Interactive {
 		if mobPlan {
-			if p, out, ok := o.mobDraftPlan(ctx, diagnosis, "", "", nil); ok {
+			if p, out, ok := o.mobDraftPlan(ctx, diagnosis, design, "", nil); ok {
 				if err := o.createSubtasks(ctx, p); err != nil {
 					return err
 				}
@@ -592,7 +595,7 @@ func runPlan(ctx context.Context, o *run) error {
 			}
 		}
 
-		p, err := o.draftPlan(ctx, model, diagnosis, "", "")
+		p, err := o.draftPlan(ctx, model, diagnosis, design, "")
 		if err != nil {
 			return err
 		}
@@ -722,4 +725,30 @@ func (o *run) createSubtasks(ctx context.Context, p plan) error {
 	o.recordSection(ctx, "Plan", sectionFrom("Plan", formatPlan(o.subtasks)))
 
 	return nil
+}
+
+// recordedDesign returns the content of a "## Design" section already present
+// on the claim-time body - a prior brainstorm's record or a human-authored
+// design - without the heading line, matching what runBrainstorm returns.
+func recordedDesign(description string) string {
+	sec := extractSection(description, "Design")
+	if sec == "" {
+		return ""
+	}
+
+	return strings.TrimSpace(strings.TrimPrefix(sec, "## Design"))
+}
+
+// plannerDescription is the description slot for the planner prompts: the
+// stripped description plus the prior run's recorded "## Plan". The prior plan
+// has no other resume channel - resumeBlock carries subtask titles only. Reads
+// the immutable claim-time snapshot, not the live body, so a fresh run's
+// adjust loop never sees its own in-flight draft.
+func (o *run) plannerDescription() string {
+	prior := extractSection(o.tc.Description, "Plan")
+	if prior == "" {
+		return o.taskDescription
+	}
+
+	return o.taskDescription + "\n\n" + prior
 }

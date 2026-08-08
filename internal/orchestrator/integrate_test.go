@@ -480,3 +480,22 @@ func TestPRBodyPromptShape(t *testing.T) {
 	assert.Contains(t, low, "plan overview")
 	assert.Contains(t, low, "review")
 }
+
+func TestPRBodyPromptOmitsRecordedHistory(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{remoteTip: "deadbeef"}
+	pr := &fakePR{url: "https://example.test/pr/8"}
+	llmFake := &planLLM{responses: []llm.Response{stopResp("## What\nAdded the flag", 0.03)}}
+	d := integrateTestDeps(ops, git, pr, llmFake)
+
+	tc := cmclient.TaskContext{Title: "Add a config flag", Description: grownDescription, CreatePR: true}
+	o := newIntegrateRun(d, tc, 0)
+	o.subtasks = []subtaskRef{{ID: "SUB-1", Title: "First step"}}
+
+	require.NoError(t, runIntegrate(context.Background(), o))
+
+	require.NotEmpty(t, llmFake.tasks)
+	assert.Contains(t, llmFake.tasks[0], "Add a config flag to toggle the feature.")
+	assert.NotContains(t, llmFake.tasks[0], "naming could improve")
+	assert.NotContains(t, llmFake.tasks[0], "1. SUBTASK: Add the flag")
+}

@@ -237,3 +237,20 @@ func TestDocumentPromptContent(t *testing.T) {
 
 	assert.Contains(t, git.diffBases, "main", "branch diff requested against the base; bases=%v", git.diffBases)
 }
+
+func TestDocumentPromptOmitsRecordedHistory(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: false}
+	llmFake := &planLLM{responses: []llm.Response{stopResp("No external documentation is needed.", 0.01)}}
+	d := documentTestDeps(ops, git, llmFake)
+
+	tc := cmclient.TaskContext{Title: "Add a config flag", Description: grownDescription}
+	o := newDocumentRun(d, tc, 0)
+
+	require.NoError(t, runDocument(context.Background(), o))
+
+	require.NotEmpty(t, llmFake.tasks)
+	assert.Contains(t, llmFake.tasks[0], "Add a config flag to toggle the feature.")
+	assert.NotContains(t, llmFake.tasks[0], "naming could improve")
+	assert.NotContains(t, llmFake.tasks[0], "1. SUBTASK: Add the flag")
+}
