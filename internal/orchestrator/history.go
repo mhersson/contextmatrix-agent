@@ -253,3 +253,101 @@ func extractSection(body, heading string) string {
 
 	return strings.TrimRight(strings.Join(lines[start:end], "\n"), "\n")
 }
+
+// agentSectionHeadings is the canonical list of run-history headings the FSM
+// records onto the parent card body - every recordSection caller writes one of
+// these. "Review Findings" is matched as a prefix so the numbered
+// "(Round N)" variants are covered, mirroring reviewFindingsHistory.
+var agentSectionHeadings = []string{
+	"Diagnosis",
+	"Design",
+	"Plan",
+	"Discussion",
+	"Execute Discussions",
+	"Best-of-N Report",
+	"Verify Command",
+	"Review Findings",
+}
+
+// isAgentHeading reports whether the trimmed line opens a recorded run-history
+// section: exact match for every heading, prefix match for "Review Findings".
+func isAgentHeading(trimmed string) bool {
+	title, ok := strings.CutPrefix(trimmed, "## ")
+	if !ok {
+		return false
+	}
+
+	title = strings.TrimSpace(title)
+
+	for _, h := range agentSectionHeadings {
+		if h == "Review Findings" {
+			if strings.HasPrefix(title, h) {
+				return true
+			}
+
+			continue
+		}
+
+		if title == h {
+			return true
+		}
+	}
+
+	return false
+}
+
+// stripAgentSections returns body with every recorded run-history section
+// removed, keeping the human-written content - the pre-heading intro and any
+// heading not in agentSectionHeadings. Prompt sites read the stripped view so
+// resumed runs do not re-absorb the accumulated history; o.body stays raw
+// because it is the sole recordSection write-back source.
+//
+// Boundary semantics deliberately match upsertSection/extractSection: a
+// section starts at a line whose trimmed text is a recorded heading and ends
+// at the next column-0 "## " line. Fences are not tracked - the writer has
+// the same limitation, and a filter with different boundary rules could keep
+// text the writer considers inside a section.
+//
+// Returns the input byte-identical when no recorded heading is present, so
+// fresh-run prompts cannot churn.
+func stripAgentSections(body string) string {
+	if body == "" {
+		return body
+	}
+
+	lines := strings.Split(body, "\n")
+
+	var (
+		kept     []string
+		skipping bool
+		stripped bool
+	)
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		switch {
+		case strings.HasPrefix(line, "## "):
+			// Column-0 heading: block boundary per the writer's end scan.
+			skipping = isAgentHeading(trimmed)
+		case !skipping && isAgentHeading(trimmed):
+			// Indented recorded heading still starts a section per the
+			// writer's TrimSpace start scan.
+			skipping = true
+		}
+
+		if skipping {
+			stripped = true
+
+			continue
+		}
+
+		kept = append(kept, line)
+	}
+
+	if !stripped {
+		return body
+	}
+
+	return strings.TrimSpace(strings.Join(kept, "\n"))
+}

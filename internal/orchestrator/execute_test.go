@@ -1073,3 +1073,21 @@ func TestCandidateSubtaskParksOnRunLedgerBreach(t *testing.T) {
 	require.ErrorAs(t, err, &bee, "a run-ledger breach parks the candidate")
 	assert.Empty(t, ops.recorded(), "parked before any board op or model call")
 }
+
+func TestCoderPromptParentSlotOmitsRecordedHistory(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	llmFake := &planLLM{responses: []llm.Response{finishResp("feat: x", 0.01)}}
+	d := execTestDeps(ops, git, llmFake)
+
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Add flag", Body: "Files: b.go", Tier: "simple"}}, 0)
+	o.tc.Description = grownDescription
+	o.taskDescription = stripAgentSections(grownDescription)
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	require.NotEmpty(t, llmFake.tasks)
+	assert.Contains(t, llmFake.tasks[0], "Add a config flag to toggle the feature.", "human intro in the parent slot")
+	assert.NotContains(t, llmFake.tasks[0], "naming could improve", "review history stays out of the coder prompt")
+	assert.NotContains(t, llmFake.tasks[0], "1. SUBTASK: Add the flag", "parent plan not re-imported per subtask")
+}

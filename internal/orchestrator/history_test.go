@@ -99,3 +99,83 @@ func TestExtractSection_RunsToEndWhenLast(t *testing.T) {
 
 	assert.Equal(t, "## Execute Discussions\n\n### SUB-1 - a\nx", got)
 }
+
+func TestStripAgentSections(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "strips every recorded heading",
+			body: "Intro.\n\n## Diagnosis\n\nd\n\n## Design\n\nds\n\n## Plan\n\np\n\n## Discussion\n\ndc\n\n## Execute Discussions\n\ned\n\n## Best-of-N Report\n\nb\n\n## Verify Command\n\nv\n\n## Review Findings\n\nr\n",
+			want: "Intro.",
+		},
+		{
+			name: "strips numbered review rounds via prefix",
+			body: "Intro.\n\n## Review Findings (Round 2)\n\nr2\n\n## Review Findings (Round 10)\n\nr10\n",
+			want: "Intro.",
+		},
+		{
+			name: "keeps human heading that extends an exact-match name",
+			body: "Intro.\n\n## Planning notes\n\nhuman notes\n\n## Plan\n\nagent plan\n",
+			want: "Intro.\n\n## Planning notes\n\nhuman notes",
+		},
+		{
+			name: "prefix match strips any review findings variant",
+			body: "Intro.\n\n## Review Findings from QA\n\nqa notes\n",
+			want: "Intro.",
+		},
+		{
+			name: "section at body start",
+			body: "## Plan\n\np\n\n## Context\n\nhuman context\n",
+			want: "## Context\n\nhuman context",
+		},
+		{
+			name: "whole body is agent sections",
+			body: "## Plan\n\np\n\n## Review Findings\n\nr\n",
+			want: "",
+		},
+		{
+			name: "interleaved human sections survive",
+			body: "Intro.\n\n## Requirements\n\nreq\n\n## Plan\n\np\n\n## Acceptance\n\nacc\n",
+			want: "Intro.\n\n## Requirements\n\nreq\n\n## Acceptance\n\nacc",
+		},
+		{
+			name: "consecutive agent sections",
+			body: "Intro.\n\n## Diagnosis\n\nd\n\n## Plan\n\np\n\n## Follow-up\n\nf\n",
+			want: "Intro.\n\n## Follow-up\n\nf",
+		},
+		{
+			name: "h3 heading does not end a stripped block",
+			body: "Intro.\n\n## Plan\n\n### Detail\n\nx\n\n## Keep\n\nk\n",
+			want: "Intro.\n\n## Keep\n\nk",
+		},
+		{
+			name: "indented agent heading starts a strip",
+			body: "Intro.\n\n  ## Plan\n\np\n\n## Keep\n\nk\n",
+			want: "Intro.\n\n## Keep\n\nk",
+		},
+		{
+			name: "no agent sections returns input byte identical",
+			body: "Intro.\n\n\n## Human\n\n\nweird   spacing\n\n\n",
+			want: "Intro.\n\n\n## Human\n\n\nweird   spacing\n\n\n",
+		},
+		{
+			name: "empty body",
+			body: "",
+			want: "",
+		},
+		{
+			name: "fenced agent heading is stripped like the writer would",
+			body: "Intro.\n\n## Keep\n\n```markdown\n## Plan\n\ninside\n```\n\ntail\n",
+			want: "Intro.\n\n## Keep\n\n```markdown",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, stripAgentSections(tt.body))
+		})
+	}
+}

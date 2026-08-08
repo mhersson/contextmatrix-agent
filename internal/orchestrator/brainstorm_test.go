@@ -114,3 +114,22 @@ func TestBrainstormBudgetParks(t *testing.T) {
 	var be *BudgetExceededError
 	require.ErrorAs(t, err, &be, "an over-budget brainstorm parks before any model call")
 }
+
+func TestBrainstormPromptOmitsRecordedHistory(t *testing.T) {
+	ops := &fakeOps{}
+	inbox := &fakeInbox{msgs: []harness.UserMessage{{Content: "sounds good"}}}
+	client := &planLLM{responses: []llm.Response{
+		stopResp("Which approach?", 0.01),
+		stopResp("## Design\n\nApproach A.\n\nDESIGN_COMPLETE", 0.01),
+	}}
+	o := brainstormRun(ops, inbox, client, 0, 0)
+	o.tc.Description = "Add a palette.\n\n## Plan\n\n1. SUBTASK: old\n\n## Review Findings\n\n- old note\n"
+	o.taskDescription = stripAgentSections(o.tc.Description)
+
+	_, err := o.runBrainstorm(context.Background(), "payload/model")
+	require.NoError(t, err)
+
+	require.NotEmpty(t, client.tasks)
+	assert.Contains(t, client.tasks[0], "Add a palette.")
+	assert.NotContains(t, client.tasks[0], "old note", "recorded history stays out of the dialogue prompt")
+}

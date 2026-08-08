@@ -447,7 +447,7 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 	for i, l := range lenses {
 		specs[i] = harness.SubagentSpec{
 			Role:          l.role,
-			Prompt:        fmt.Sprintf(specialistPrompt, o.skillEngage(), o.grounding, l.prompt, o.tc.Title, o.tc.Description, diff, prior),
+			Prompt:        fmt.Sprintf(specialistPrompt, o.skillEngage(), o.grounding, l.prompt, o.tc.Title, o.taskDescription, diff, prior),
 			Model:         panel[i].Model,
 			MaxTurns:      cfg.MaxTurns,
 			ContextWindow: panel[i].ContextWindow,
@@ -585,7 +585,7 @@ func (o *run) mobReviewVerdict(ctx context.Context) (verdict, bool) {
 		Rounds:   1,
 		Blind:    true,
 		SynthesisPrompt: fmt.Sprintf(reviewSynthesisPrompt,
-			o.grounding, o.tc.Title, o.tc.Description),
+			o.grounding, o.tc.Title, o.taskDescription),
 	}
 
 	out, ok := o.mobDiscuss(ctx, t)
@@ -637,7 +637,7 @@ func (o *run) mobReviewBriefing(ctx context.Context) (string, error) {
 
 	prior := priorFindingsBlock(o.lastFindings)
 
-	return fmt.Sprintf(reviewBriefing, o.tc.Title, o.tc.Description, fencedDiff(diff), prior), nil
+	return fmt.Sprintf(reviewBriefing, o.tc.Title, o.taskDescription, fencedDiff(diff), prior), nil
 }
 
 // synthesize runs ONE orchestrator-model call that reads the three specialists'
@@ -672,7 +672,7 @@ func (o *run) synthesize(ctx context.Context, findings string, authoritative boo
 
 		prior := priorFindingsBlock(priorText)
 
-		task := fmt.Sprintf(synthesisPrompt, o.grounding, o.tc.Title, o.tc.Description, prior, findings, repair)
+		task := fmt.Sprintf(synthesisPrompt, o.grounding, o.tc.Title, o.taskDescription, prior, findings, repair)
 
 		res, dur, err := o.runModel(ctx, d.ReadTools, task, model)
 
@@ -748,7 +748,7 @@ func (o *run) runFix(ctx context.Context, findings string, round int, fixTier st
 	}
 
 	prompt := fmt.Sprintf(fixPrompt, o.skillEngage(), o.grounding, cfg.Workspace,
-		fixVerifyLine(o.resolvedVerifyPlan()), o.tc.Title, o.tc.Description, findings)
+		fixVerifyLine(o.resolvedVerifyPlan()), o.tc.Title, o.taskDescription, findings)
 
 	if err := o.runFixModel(ctx, prompt, round, fixTier, authoritative); err != nil {
 		return err

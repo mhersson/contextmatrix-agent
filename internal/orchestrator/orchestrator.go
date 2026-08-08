@@ -257,6 +257,16 @@ type run struct {
 	// are preserved and re-recorded sections replace rather than duplicate.
 	body string
 
+	// taskDescription is the prompt-facing view of the parent description:
+	// tc.Description with the recorded run-history sections stripped. On fresh
+	// runs it equals the raw description; on resume it restores fresh-run
+	// prompt shape instead of re-absorbing the accumulated history at every
+	// site. Phases that need prior state re-supply it explicitly (planner:
+	// design and prior plan; review: lastFindings). A human-authored section
+	// named like a recorded one is stripped too - accepted cost, mitigated by
+	// the planner re-supply baking it into subtask bodies.
+	taskDescription string
+
 	// staleRemoteTip is the remote tip of this run's card branch as observed at
 	// reconcile time on a FRESH run (phase == ""). A non-empty value means a stale
 	// branch from a prior, abandoned run exists: per spec §5.1 the fresh run owns
@@ -312,7 +322,9 @@ type run struct {
 
 	// lastFindings is the previous review round's findings text, fed to the next
 	// round's panel and synthesizer so they verify resolution without re-raising
-	// it as new scope (cross-round memory). Empty on round 1 and on resume.
+	// it as new scope (cross-round memory). Empty on a fresh run's round 1; on
+	// resume it is seeded from the recorded review history so prior findings
+	// reach the panel through this framing rather than as raw description text.
 	lastFindings string
 
 	// grounding is the prebuilt REPO GROUNDING block (root + nested
@@ -412,6 +424,8 @@ func newRun(d Deps, tc cmclient.TaskContext) *run {
 	o.coderModels = map[string]bool{}
 	o.excluded = map[string]bool{}
 	o.body = tc.Description
+	o.taskDescription = stripAgentSections(tc.Description)
+	o.lastFindings = reviewFindingsHistory(tc.Description)
 	o.taskImages = dataURLs(tc.Images)
 
 	// The parent solver binds the execute seam to today's exact collaborators:

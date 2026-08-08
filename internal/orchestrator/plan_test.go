@@ -824,10 +824,10 @@ func TestRunPlanMobHITLAdjustReopensDiscussion(t *testing.T) {
 	o := mobPlanRun(ops, llmFake, eng)
 	o.d.Cfg.Interactive = true
 	o.d.Human = inbox
-	// Pre-existing design section on the accumulated card body (what
-	// hasDesignSection actually checks) so the creative brainstorm is
-	// skipped and both scripted inbox messages reach the plan gate.
-	o.body = "## Design\n\nA config flag."
+	// Pre-existing design section on the claim-time body (what recordedDesign
+	// reads) so the creative brainstorm is skipped and both scripted inbox
+	// messages reach the plan gate.
+	o.tc.Description = "## Design\n\nA config flag."
 
 	require.NoError(t, runPlan(context.Background(), o))
 
@@ -840,4 +840,102 @@ func TestRunPlanMobHITLAdjustReopensDiscussion(t *testing.T) {
 	assert.Contains(t, reopen.Briefing, "proposal", "the prior transcript tail restores context")
 
 	assert.Len(t, ops.createCardArgs, 2, "subtasks created only after the final approval")
+}
+
+// grownDescription is a resumed card's body as GetTaskContext returns it after
+// a park: the human task plus the prior run's recorded history. The findings
+// text stays free of bug markers so isBugLike does not flip on it.
+const grownDescription = "Add a config flag to toggle the feature.\n\n" +
+	"## Design\n\nUse a palette config keyed by name.\n\n" +
+	"## Plan\n\n1. SUBTASK: Add the flag\n   Files: a.go\n\n" +
+	"## Review Findings\n\n- a.go: naming could improve\n\n### Recommendation\n\nrevise\n"
+
+func resumedAutoPlanRun(ops *fakeOps, client llm.LLM) *run {
+	d := Deps{
+		Ops:       ops,
+		Client:    client,
+		Emit:      events.NewEmitter(nil, nil),
+		Registry:  planTestRegistry(),
+		ReadTools: tools.NewRegistry(tools.NewReadTool(".")),
+		Cfg: Config{
+			Project: "proj", CardID: "CARD-1",
+			PayloadModel: "payload/model", DefaultModel: "default/model",
+			MaxTurns: 20, Interactive: false,
+		},
+	}
+
+	tc := cmclient.TaskContext{Title: "Add a config flag", Description: grownDescription}
+
+	return newRun(d, tc)
+}
+
+func TestRunPlanResumeCarriesPlanAndDesignNotHistory(t *testing.T) {
+	ops := &fakeOps{}
+	client := &planLLM{responses: []llm.Response{stopResp(onePlanJSON, 0.01)}}
+	o := resumedAutoPlanRun(ops, client)
+
+	require.NoError(t, runPlan(context.Background(), o))
+
+	task := client.tasks[0]
+	assert.Contains(t, task, "Add a config flag to toggle the feature.", "human intro kept")
+	assert.Contains(t, task, "AGREED DESIGN", "recovered design flows via the design block")
+	assert.Contains(t, task, "Use a palette config keyed by name.")
+	assert.Contains(t, task, "1. SUBTASK: Add the flag", "prior plan re-supplied")
+	assert.NotContains(t, task, "naming could improve", "review history stripped")
+}
+
+func TestRunPlanFreshPromptHasNoResupplyBlocks(t *testing.T) {
+	ops := &fakeOps{}
+	client := &planLLM{responses: []llm.Response{stopResp(onePlanJSON, 0.01)}}
+	o := autoPlanRun(ops, client, 20)
+
+	require.NoError(t, runPlan(context.Background(), o))
+
+	task := client.tasks[0]
+	assert.Contains(t, task, "Add a config flag to toggle the feature.")
+	assert.NotContains(t, task, "AGREED DESIGN")
+}
+
+func TestRunPlanHumanDesignReachesPlannerViaDesignBlock(t *testing.T) {
+	ops := &fakeOps{}
+	inbox := &fakeInbox{msgs: []harness.UserMessage{{Content: "approve"}}}
+	client := &planLLM{responses: []llm.Response{
+		stopResp(onePlanJSON, 0.01),
+		stopResp(`{"verdict":"approve","feedback":""}`, 0.001),
+	}}
+	o := hitlPlanRun(ops, inbox, client)
+
+	require.NoError(t, runPlan(context.Background(), o))
+	assert.Contains(t, client.tasks[0], "AGREED DESIGN")
+	assert.Contains(t, client.tasks[0], "A palette config.")
+}
+
+func TestRunDiagnosePromptOmitsRecordedHistory(t *testing.T) {
+	ops := &fakeOps{}
+	client := &planLLM{responses: []llm.Response{
+		stopResp("The flag parsing skips empty values.", 0.01), // diagnose
+		stopResp(onePlanJSON, 0.01),                            // plan draft
+	}}
+	o := resumedAutoPlanRun(ops, client)
+	o.tc.Type = "bug"
+
+	require.NoError(t, runPlan(context.Background(), o))
+
+	diagnoseTask := client.tasks[0]
+	assert.Contains(t, diagnoseTask, "Add a config flag to toggle the feature.")
+	assert.NotContains(t, diagnoseTask, "naming could improve", "history stripped from diagnose")
+}
+
+func TestPlannerDescription(t *testing.T) {
+	o := &run{
+		tc:              cmclient.TaskContext{Description: grownDescription},
+		taskDescription: stripAgentSections(grownDescription),
+	}
+
+	got := o.plannerDescription()
+
+	assert.Contains(t, got, "Add a config flag to toggle the feature.")
+	assert.Contains(t, got, "## Plan\n\n1. SUBTASK: Add the flag")
+	assert.NotContains(t, got, "Review Findings")
+	assert.NotContains(t, got, "## Design", "design flows via the design block, not the description")
 }
