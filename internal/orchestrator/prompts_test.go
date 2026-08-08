@@ -71,6 +71,14 @@ func TestBuildArtifactHygieneInBothCodingPrompts(t *testing.T) {
 	}
 }
 
+func TestProcessTeardownInBothCodingPrompts(t *testing.T) {
+	for name, p := range map[string]string{"coder": coderPrompt, "fix": fixPrompt} {
+		assert.Contains(t, p, "Shut down any long-running process you start for verification",
+			"%s prompt must include the process-teardown note", name)
+		assert.Contains(t, p, `"still running" checks in later phases of this run`, name)
+	}
+}
+
 // guard: the document prompt must carry the conservative gate, the docs-only
 // restriction, the no-git instruction, and the finish-tool docs(...) convention.
 func TestDocumentPromptShape(t *testing.T) {
@@ -156,21 +164,22 @@ func TestPlanPromptForbidsTestOnlySubtasks(t *testing.T) {
 // a readable name for failure messages. The neutrality sweep runs over all of
 // them so a language-specific token cannot slip back into any single prompt.
 var allPhasePrompts = map[string]string{
-	"plan":         planPrompt,
-	"diagnose":     diagnosePrompt,
-	"buildHygiene": buildHygieneNote,
-	"selfReview":   selfReviewBlock,
-	"coder":        coderPrompt,
-	"specialist":   specialistPrompt,
-	"correctness":  correctnessPrompt,
-	"design":       designPrompt,
-	"security":     securityPrompt,
-	"synthesis":    synthesisPrompt,
-	"fix":          fixPrompt,
-	"prBody":       prBodyPrompt,
-	"document":     documentPrompt,
-	"gateClassify": gateClassifyPrompt,
-	"brainstorm":   brainstormPrompt,
+	"plan":            planPrompt,
+	"diagnose":        diagnosePrompt,
+	"buildHygiene":    buildHygieneNote,
+	"processTeardown": processTeardownNote,
+	"selfReview":      selfReviewBlock,
+	"coder":           coderPrompt,
+	"specialist":      specialistPrompt,
+	"correctness":     correctnessPrompt,
+	"design":          designPrompt,
+	"security":        securityPrompt,
+	"synthesis":       synthesisPrompt,
+	"fix":             fixPrompt,
+	"prBody":          prBodyPrompt,
+	"document":        documentPrompt,
+	"gateClassify":    gateClassifyPrompt,
+	"brainstorm":      brainstormPrompt,
 }
 
 // TestPromptsAreLanguageNeutral sweeps every phase prompt for target-language and
