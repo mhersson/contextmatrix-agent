@@ -76,6 +76,18 @@ grep that none is missed") rather than naming the unverified specific. Never
 promote an inferred or approximate count into an exact criterion, and never
 manufacture precision you have not grounded.`
 
+// sweepRule tells the synthesizer (and its fixers) to include a repo-wide sweep
+// instruction when a finding asserts a specific statement is incorrect. Shared by
+// synthesisPrompt, reviewSynthesisPrompt, and checkpointSynthesisPrompt so the
+// three cannot drift.
+const sweepRule = `When a finding asserts that a specific statement (a doc line, code comment, or
+error message) is incorrect, the fix entry's suggestion MUST instruct a
+repo-wide search using the harness grep tool for the same claim INCLUDING close
+paraphrases, and require fixing every occurrence - not just the one in the
+change set. The fix entry's File field stays the single canonical path (the
+primary occurrence); the sweep instruction goes in Suggestion so the line-shape
+contract between formatFixes and fixFiles is not broken.`
+
 // planPrompt is the read-only planner's instruction block. It is adapted from
 // the create-plan workflow skill's task-decomposition guidance: the same
 // rules for splitting work, dependency thinking, and right-sizing apply, but
@@ -438,6 +450,8 @@ Be specific and actionable. Every fix must cite a file in the change set and
 give a concrete suggestion - no vague hand-waves. Commit status is never an
 issue.
 
+` + sweepRule + `
+
 PARENT CARD
 Title: %s
 
@@ -470,6 +484,10 @@ You have the full write toolset (read, grep, glob, edit, write, bash) rooted at
 the workspace. Apply fixes for EXACTLY the findings below - apply only the literal
 fix, add no new abstractions, middleware, interfaces, or dependencies. If a finding
 demands new architecture, flag it, don't build it.
+One exception: if a finding's suggestion instructs a repo-wide sweep for an
+incorrect claim (a doc line, code comment, or error message), you MUST search the
+whole repo using the harness grep tool and fix every occurrence, not just the
+cited file.
 
 Repo root: %s - bash commands already execute there; use paths relative to the
 repo root.
@@ -932,6 +950,8 @@ Decision rule:
   remove it.
 - Only Minor concerns, Nits, or no concerns → approved.
 
+` + sweepRule + `
+
 PARENT CARD
 Title: %s
 
@@ -999,6 +1019,8 @@ Decision rule:
 - Anything that can safely wait for the review phase waits: revise is only
   for defects the next subtasks would build on.
 
+` + sweepRule + `
+
 Respond with ONLY a JSON object, no prose:
 {"verdict":"proceed"|"revise",
  "fixes":[{"file":"...","issue":"...","suggestion":"..."}],
@@ -1022,7 +1044,10 @@ Repository workspace: %s
 %s
 Subtask: %s
 
-Address each finding below; change nothing else. Run the verify command if
+Address each finding below; change nothing else. One exception: if a
+finding's suggestion instructs a repo-wide sweep for an incorrect claim (a doc
+line, code comment, or error message), you MUST search the whole repo using the
+harness grep tool and fix every occurrence, not just the cited file. Run the verify command if
 one is declared. When done, call the finish tool with a commit message
 describing the fixes.
 
