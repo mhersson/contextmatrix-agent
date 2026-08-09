@@ -1062,6 +1062,40 @@ func TestSalvageDeclineCriticalTierStaysCritical(t *testing.T) {
 		"the escalation still logs even at the ceiling; logs=%v", ops.logs)
 }
 
+// TestSalvageDeclineAfterVerifyPassKeepsTier proves the escalation is
+// asymmetric: once the authoritative verify has already passed, the model's
+// work is proven correct within the cap, so a park caused by a downstream
+// infrastructure failure (here, the push) must NOT escalate the tier - a
+// resume at the SAME tier is the right economics, not a bigger model.
+func TestSalvageDeclineAfterVerifyPassKeepsTier(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, pushErr: errors.New("push boom")}
+	client := &planLLM{responses: burnResps(5)}
+	d := execTestDeps(ops, git, client)
+	d.Cfg.MaxTurns = 5
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "moderate"}}, 0)
+	ops.taskContext = cmclient.TaskContext{
+		Description: withTierMarker("Implement the thing.", "moderate"),
+	}
+
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 0} // pass
+	}
+
+	err := runExecute(context.Background(), o)
+	require.Error(t, err, "a push failure after a passing verify still parks")
+
+	var mte *MaxTurnsError
+	require.ErrorAs(t, err, &mte)
+
+	assert.Equal(t, -1, indexOfCall(ops.recorded(), "UpdateCardBody:SUB-1"),
+		"a park after a passing verify must not touch the subtask body at all")
+	assert.Empty(t, ops.bodyFor("SUB-1"), "no tier-marker write on a post-verify-pass park")
+	assert.False(t, ops.loggedContains("escalating subtask tier"),
+		"a post-verify-pass park must not log a tier escalation; logs=%v", ops.logs)
+}
+
 // markerMidRunLLM wraps a scripted LLM and writes a toolchain marker file into
 // dir the first time it is called, simulating a coder run that introduces
 // project scaffolding (e.g. a pom.xml) mid-run: the run's FIRST verify

@@ -559,18 +559,18 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 
 	// Verified: complete exactly like a finish-terminated run. A push failure
 	// declines the salvage (the run parks); the spend was already reported, so a
-	// resume must not double-charge.
+	// resume must not double-charge. No tier escalation below this point: the
+	// authoritative verify already confirmed the model's work is correct, so the
+	// park cause here is infrastructure (a push or a board-write hiccup), not a
+	// capability gap - resuming at the SAME tier is the right economics, not a
+	// bigger model.
 	if sc.push {
 		if perr := o.pushBranch(ctx); perr != nil {
-			o.escalateSubtaskTier(ctx, sub)
-
 			return false, nil
 		}
 	}
 
 	if cerr := o.d.Ops.CompleteTask(ctx, sub.ID, commitMsg); cerr != nil {
-		o.escalateSubtaskTier(ctx, sub)
-
 		return false, nil
 	}
 
