@@ -316,6 +316,13 @@ type run struct {
 	// Initialized in newRun.
 	excluded map[string]bool
 
+	// coderPinWarned and reviewerPinWarned guard the once-per-run advisory
+	// warning when a non-empty pin fails resolvePin on the coder/reviewer
+	// selector paths. Zero-initialized (false) by Go, so newRun needs no
+	// explicit init.
+	coderPinWarned    bool
+	reviewerPinWarned bool
+
 	// lastReviewBase is the HEAD SHA captured at the end of the previous round's
 	// specialist review (mirrors CM's review-task workflow skill, which records
 	// review_completed head=<sha>). The
