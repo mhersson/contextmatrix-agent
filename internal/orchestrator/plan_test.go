@@ -1326,3 +1326,41 @@ func TestPlannerDescription(t *testing.T) {
 	assert.NotContains(t, got, "Review Findings")
 	assert.NotContains(t, got, "## Design", "design flows via the design block, not the description")
 }
+
+func TestDraftPlanUsesPlanToolsOncePerCall(t *testing.T) {
+	ops := &fakeOps{createdIDs: []string{"SUB-1", "SUB-2"}}
+	// Attempt 1 is unparsable so draftPlan takes its repair attempt; attempt 2
+	// parses. Both must share one findings list, so the factory runs once.
+	llmFake := &planLLM{responses: []llm.Response{
+		stopResp("not json", 0.01),
+		stopResp(goodPlanJSON, 0.01),
+	}}
+
+	o := autoPlanRun(ops, llmFake, 20)
+
+	called := 0
+	reg := tools.NewRegistry(tools.NewReadTool("."), NewFindingsTool())
+	o.d.PlanTools = func() *tools.Registry {
+		called++
+
+		return reg
+	}
+
+	require.NoError(t, runPlan(context.Background(), o))
+
+	assert.Len(t, llmFake.tasks, 2, "one failed attempt, then the repair")
+	assert.Equal(t, 1, called,
+		"the factory runs once per draftPlan so the repair inherits the first attempt's findings")
+}
+
+func TestDraftPlanFallsBackToReadToolsWhenPlanToolsNil(t *testing.T) {
+	ops := &fakeOps{createdIDs: []string{"SUB-1", "SUB-2"}}
+	llmFake := &planLLM{responses: []llm.Response{stopResp(goodPlanJSON, 0.01)}}
+
+	o := autoPlanRun(ops, llmFake, 20)
+	o.d.PlanTools = nil
+
+	require.NoError(t, runPlan(context.Background(), o),
+		"a nil PlanTools must degrade to ReadTools, not panic")
+	require.Len(t, ops.createCardArgs, 2)
+}

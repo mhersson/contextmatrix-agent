@@ -523,6 +523,13 @@ func (o *run) draftPlan(ctx context.Context, model, diagnosis, design, feedback 
 	fbBlock := feedbackBlock(feedback)
 	snapshot := o.repoSnapshotBlock()
 
+	// Resolved once so both the first attempt and its repair share one findings
+	// list: the repair must re-emit a plan from analysis it already has.
+	reg := d.ReadTools
+	if d.PlanTools != nil {
+		reg = d.PlanTools()
+	}
+
 	var (
 		p       plan
 		lastErr error
@@ -541,7 +548,7 @@ func (o *run) draftPlan(ctx context.Context, model, diagnosis, design, feedback 
 		task := fmt.Sprintf(planPrompt, o.grounding, snapshot, cfg.Workspace, o.tc.Title, o.plannerDescription(),
 			diagBlock, dsnBlock, resume, fbBlock, repair)
 
-		res, dur, err := o.runModelPlan(ctx, d.ReadTools, task, model, o.taskImages, attempt > 0)
+		res, dur, err := o.runModelPlan(ctx, reg, task, model, o.taskImages, attempt > 0)
 
 		o.spendAndReport(ctx, o.ledger, cfg.CardID, "plan: report usage failed", res, model, "main", dur)
 

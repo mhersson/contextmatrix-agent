@@ -176,9 +176,15 @@ type Deps struct {
 	// Best-of-N to give each candidate worktree its own jailed tool registry.
 	WriteToolsForDir func(dir string) *tools.Registry
 	ReadTools        *tools.Registry // read-only subset for planner/reviewers
-	SkillTool        tools.Tool      // optional; engaged by coder/review/document subagents (nil when no task-skills)
-	Cfg              Config
-	Redact           func(string) string // nil = identity; scrubs tool output in phase runs (wired by the worker)
+	// PlanTools builds the plan phase's own registry: the read-only subset plus
+	// the findings tool. A factory, not a registry, because the findings tool is
+	// stateful - one instance per draftPlan call, so the repair attempt inherits
+	// the first attempt's list while separate drafts start clean. Nil falls back
+	// to ReadTools.
+	PlanTools func() *tools.Registry
+	SkillTool tools.Tool // optional; engaged by coder/review/document subagents (nil when no task-skills)
+	Cfg       Config
+	Redact    func(string) string // nil = identity; scrubs tool output in phase runs (wired by the worker)
 	// Human is the HITL ask-and-wait channel, satisfied by the worker's live
 	// Inbox. It is a genuine nil for autonomous runs; mode is read from
 	// Cfg.Interactive, never from Human != nil (the nil-concrete footgun).
