@@ -347,6 +347,9 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 			return tools.NewRegistry(wts...)
 		},
 		ReadTools: tools.NewReadOnlyRegistry(a.ws),
+		PlanTools: func() *tools.Registry {
+			return tools.NewRegistry(append(tools.ReadOnlyTools(a.ws), orchestrator.NewFindingsTool())...)
+		},
 		SkillTool: skillTool,
 		Redact:    red.Apply,
 		Human:     human,

@@ -222,6 +222,28 @@ func TestRunToolchainMissingParks(t *testing.T) {
 	assert.Equal(t, -1, indexOfCall(calls, "SetPhase:execute"))
 }
 
+// TestMaxTurnsLogMessagePhaseAware proves the turn-cap park message names a
+// remedy that actually works for the phase it fires in: the plan phase's
+// budget is capped at the fixed planMaxTurns constant regardless of
+// CMX_MAX_TURNS, and the plan phase is what creates subtasks, so neither
+// "raise CMX_MAX_TURNS" nor "split the subtask" holds any advice there. Every
+// other phase keeps the original wording verbatim.
+func TestMaxTurnsLogMessagePhaseAware(t *testing.T) {
+	mte := &MaxTurnsError{Model: "anthropic/claude-x", Turns: 25}
+
+	planMsg := maxTurnsLogMessage("plan", mte)
+	assert.Equal(t,
+		`turn cap reached on model "anthropic/claude-x" after 25 turns - parking work; narrow the card's scope`,
+		planMsg)
+
+	for _, phase := range []string{"execute", "judge", "document", "review", "integrate"} {
+		msg := maxTurnsLogMessage(phase, mte)
+		assert.Equal(t,
+			`turn cap reached on model "anthropic/claude-x" after 25 turns - parking work; raise CMX_MAX_TURNS or split the subtask`,
+			msg, "phase %q must keep the original wording verbatim", phase)
+	}
+}
+
 func TestPhaseOrderPlacesDocumentBetweenExecuteAndReview(t *testing.T) {
 	assert.Equal(t, []string{"plan", "execute", "judge", "document", "review", "integrate", "done"}, phaseOrder)
 }

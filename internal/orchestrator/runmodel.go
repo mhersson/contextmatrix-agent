@@ -206,6 +206,24 @@ const wrapUpTurns = 5
 // wrapUpTurns so the wrap-up nudge still lands.
 const planRepairMaxTurns = 12
 
+// planMaxTurns caps the planner's first attempt. The plan phase is the one
+// model run with no terminal tool and no tier scaling, so without a cap of its
+// own it inherits the flat configured budget and the wrap-up nudge can sit
+// beyond any turn the planner actually reaches - leaving the phase unguarded.
+// Chosen to sit well above where a planner has converged in practice, so the
+// cap is a backstop rather than the primary control.
+const planMaxTurns = 25
+
+// planTurnCap is the plan run's turn budget. Both cases are min'd with base so
+// a smaller configured cap is never raised.
+func planTurnCap(base int, repair bool) int {
+	if repair {
+		return min(base, planRepairMaxTurns)
+	}
+
+	return min(base, planMaxTurns)
+}
+
 // complexTurnFactor and criticalTurnFactor scale a coder run's turn budget above
 // the configured base for the two heaviest tiers, so a single unsplittable
 // cross-cutting subtask can land its source changes AND the tests those changes
@@ -266,18 +284,16 @@ func (o *run) runModelCoder(ctx context.Context, reg *tools.Registry, prompt, mo
 // runModelPlan is the planner's model call. Unlike the coder phases, the planner
 // finishes by emitting a JSON plan as its final message (there is no finish
 // tool), so it gets a plan-specific wrap-up nudge that forces the emit before
-// the turn cap instead of letting the model explore straight into it. On the
-// repair turn (repair=true) the turn budget is capped tight: the model already
-// had a full exploration pass and must re-emit a valid plan, not start over.
+// the turn cap instead of letting the model explore straight into it. Both the
+// first attempt and the repair turn get a bounded budget (planTurnCap): the
+// repair is tighter still, because the model already had a full exploration
+// pass and must re-emit a valid plan, not start over.
 func (o *run) runModelPlan(ctx context.Context, reg *tools.Registry, prompt, model string, images []llm.ImageURL, repair bool) (harness.Result, time.Duration, error) {
 	cfg := o.harnessConfig(model)
 	cfg.TaskImages = images
 	cfg.WrapUpTurns = wrapUpTurns
 	cfg.WrapUpMessage = planWrapUpMessage
-
-	if repair {
-		cfg.MaxTurns = min(cfg.MaxTurns, planRepairMaxTurns)
-	}
+	cfg.MaxTurns = planTurnCap(cfg.MaxTurns, repair)
 
 	return o.runModelCfg(ctx, reg, prompt, model, cfg)
 }

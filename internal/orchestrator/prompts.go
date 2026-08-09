@@ -104,8 +104,9 @@ contract between formatFixes and fixFiles is not broken.`
 // optional repair block (the previous parse error). Empty optional blocks
 // collapse to nothing.
 const planPrompt = `%s%sYou are the planning agent for a software task. You have read-only
-tools (read, grep, glob) to inspect the codebase. You do NOT create or modify
-cards or files - you only read code and output a plan as JSON.
+tools (read, grep, glob, git) to inspect the codebase, plus record_finding to
+save durable notes as you go. You do NOT create or modify cards or files - you
+only read code and output a plan as JSON.
 
 Repo root: %s - paths are relative to it.
 
@@ -167,6 +168,15 @@ per-subtask tier. Tiers: "simple" (mechanical, low-risk), "moderate"
 
 Read the relevant code first to ground the plan in the real structure, then
 respond.
+
+As you work, call record_finding the moment you establish something you will
+rely on: a confirmed location, a decision about how to split the work, a
+constraint you have ruled out. State the fact so it is useful without re-reading
+the source. Every call returns your full list - read that list before you
+re-open a file you have already inspected.
+
+An anchor in your recorded findings counts as confirmed. Do not re-read or
+re-grep to re-confirm something you already recorded.
 
 PARENT CARD
 Title: %s

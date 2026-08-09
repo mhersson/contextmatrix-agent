@@ -176,9 +176,15 @@ type Deps struct {
 	// Best-of-N to give each candidate worktree its own jailed tool registry.
 	WriteToolsForDir func(dir string) *tools.Registry
 	ReadTools        *tools.Registry // read-only subset for planner/reviewers
-	SkillTool        tools.Tool      // optional; engaged by coder/review/document subagents (nil when no task-skills)
-	Cfg              Config
-	Redact           func(string) string // nil = identity; scrubs tool output in phase runs (wired by the worker)
+	// PlanTools builds the plan phase's own registry: the read-only subset plus
+	// the findings tool. A factory, not a registry, because the findings tool is
+	// stateful - one instance per draftPlan call, so the repair attempt inherits
+	// the first attempt's list while separate drafts start clean. Nil falls back
+	// to ReadTools.
+	PlanTools func() *tools.Registry
+	SkillTool tools.Tool // optional; engaged by coder/review/document subagents (nil when no task-skills)
+	Cfg       Config
+	Redact    func(string) string // nil = identity; scrubs tool output in phase runs (wired by the worker)
 	// Human is the HITL ask-and-wait channel, satisfied by the worker's live
 	// Inbox. It is a genuine nil for autonomous runs; mode is read from
 	// Cfg.Interactive, never from Human != nil (the nil-concrete footgun).
@@ -556,7 +562,7 @@ func (o *run) execute(ctx context.Context) error {
 			if errors.As(err, &mte) {
 				// Turn-cap park: same shape as the budget/context arms - log
 				// best-effort, then stop without entering the next phase.
-				o.d.logCard(ctx, "%s", maxTurnsLogMessage(mte))
+				o.d.logCard(ctx, "%s", maxTurnsLogMessage(phase, mte))
 			}
 
 			var tme *ToolchainMissingError
@@ -583,8 +589,17 @@ func contextLimitLogMessage(cle *ContextLimitError) string {
 	return fmt.Sprintf("context window reached on model %q (%d tokens) - parking work; split the subtask or pin a larger-window model", cle.Model, cle.ContextWindow)
 }
 
-// maxTurnsLogMessage is the canonical card-log line for a turn-cap park.
-func maxTurnsLogMessage(mte *MaxTurnsError) string {
+// maxTurnsLogMessage is the canonical card-log line for a turn-cap park. The
+// remedy differs by phase: the plan phase's budget is capped at planMaxTurns
+// (see runmodel.go), an unexported constant with no config field, env var, or
+// flag - an operator cannot raise it - and it is the phase that creates
+// subtasks, so "raise CMX_MAX_TURNS" or "split the subtask" would both be
+// no-ops there. Every other phase keeps the original wording.
+func maxTurnsLogMessage(phase string, mte *MaxTurnsError) string {
+	if phase == "plan" {
+		return fmt.Sprintf("turn cap reached on model %q after %d turns - parking work; narrow the card's scope", mte.Model, mte.Turns)
+	}
+
 	return fmt.Sprintf("turn cap reached on model %q after %d turns - parking work; raise CMX_MAX_TURNS or split the subtask", mte.Model, mte.Turns)
 }
 

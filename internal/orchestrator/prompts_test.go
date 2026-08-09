@@ -251,6 +251,31 @@ func TestPlannerGroundingRuleInPlanPrompts(t *testing.T) {
 	}
 }
 
+func TestPlanPromptCarriesFindingsClauses(t *testing.T) {
+	t.Parallel()
+
+	assert.Contains(t, planPrompt, "record_finding",
+		"planPrompt must name the tool the plan registry provides")
+	assert.Contains(t, planPrompt, "counts as confirmed",
+		"planPrompt must let a recorded anchor satisfy the grounding rule")
+}
+
+// The findings clauses are plan-only. planBriefing and planSynthesisPrompt run
+// in mob planning, where the tool is not registered, so neither may reference it
+// and the shared grounding rule must stay clean.
+func TestFindingsClausesAreNotInSharedPlanPrompts(t *testing.T) {
+	t.Parallel()
+
+	for name, p := range map[string]string{
+		"plannerGroundingRule": plannerGroundingRule,
+		"planBriefing":         planBriefing,
+		"planSynthesisPrompt":  planSynthesisPrompt,
+	} {
+		assert.NotContains(t, p, "record_finding",
+			"%s must not promise a tool that is not registered for it", name)
+	}
+}
+
 func TestSweepRuleInSynthesisPrompts(t *testing.T) {
 	for name, p := range map[string]string{
 		"synthesisPrompt":           synthesisPrompt,
