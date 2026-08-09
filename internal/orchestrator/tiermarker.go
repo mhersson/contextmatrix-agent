@@ -29,3 +29,21 @@ func parseTierMarker(body string) (string, string) {
 
 	return m[1], clean
 }
+
+// nextTier returns the tier one step up the escalation ladder: simple ->
+// moderate -> complex -> critical. Critical is the ceiling - there is no
+// stronger tier to escalate into, so it maps to itself. An absent or
+// unparseable marker ("") is treated as the moderate default (parseTierMarker's
+// contract) and so escalates to complex.
+func nextTier(tier string) string {
+	switch tier {
+	case "simple":
+		return "moderate"
+	case "moderate", "":
+		return "complex"
+	case "complex":
+		return "critical"
+	default:
+		return "critical"
+	}
+}

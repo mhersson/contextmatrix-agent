@@ -977,6 +977,91 @@ func TestSoloTurnCapStillParksOnCleanTree(t *testing.T) {
 	assert.GreaterOrEqual(t, indexOfCall(calls, "ReleaseCard:SUB-1"), 0, "the parked claim is released")
 }
 
+// TestSalvageDeclineEscalatesSubtaskTier proves a solo turn-cap park that fails
+// the authoritative verify (never salvaged) bumps the subtask's persisted tier
+// marker one step, so a resumed run selects a stronger model against a bigger
+// cap - the system cannot repeat the same losing attempt forever.
+func TestSalvageDeclineEscalatesSubtaskTier(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: burnResps(5)}
+	d := execTestDeps(ops, git, client)
+	d.Cfg.MaxTurns = 5
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "moderate"}}, 0)
+	ops.taskContext = cmclient.TaskContext{
+		Description: withTierMarker("Implement the thing.", "moderate"),
+	}
+
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 1, Output: "FAIL"} // fail
+	}
+
+	err := runExecute(context.Background(), o)
+	require.Error(t, err, "a capped subtask whose committed work fails verify parks")
+
+	body := ops.bodyFor("SUB-1")
+	assert.Contains(t, body, "<!-- cm:tier=complex -->", "the park escalates the marker one step")
+	assert.Contains(t, body, "Implement the thing.", "the marker escalation leaves the rest of the body unchanged")
+	assert.True(t, ops.loggedContains("escalating subtask tier moderate -> complex"),
+		"the escalation is activity-logged; logs=%v", ops.logs)
+}
+
+// TestSalvageDeclineOnCleanTreeEscalatesSubtaskTier proves the escalation fires
+// even on the earliest decline branch, where a capped subtask committed
+// nothing at all: the cap happened regardless of whether there was anything to
+// salvage-commit, so resume must still get a bigger cap and a higher bar.
+func TestSalvageDeclineOnCleanTreeEscalatesSubtaskTier(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: false} // clean tree: nothing committed
+	client := &planLLM{responses: burnResps(5)}
+	d := execTestDeps(ops, git, client)
+	d.Cfg.MaxTurns = 5
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+	ops.taskContext = cmclient.TaskContext{
+		Description: withTierMarker("Implement the thing.", "simple"),
+	}
+
+	err := runExecute(context.Background(), o)
+	require.Error(t, err, "a clean tree carries no completion evidence, so the cap parks")
+
+	body := ops.bodyFor("SUB-1")
+	assert.Contains(t, body, "<!-- cm:tier=moderate -->", "the clean-tree decline still escalates the marker")
+	assert.True(t, ops.loggedContains("escalating subtask tier simple -> moderate"),
+		"the escalation is activity-logged; logs=%v", ops.logs)
+}
+
+// TestSalvageDeclineCriticalTierStaysCritical proves critical is the ceiling:
+// the escalation still runs and still writes the marker (a no-op value change),
+// and the original park advisory still logs unchanged.
+func TestSalvageDeclineCriticalTierStaysCritical(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	// Critical scales coderMaxTurns to 2x the base (10), so it takes 10 burn
+	// turns - not the base 5 - to trip the cap.
+	client := &planLLM{responses: burnResps(10)}
+	d := execTestDeps(ops, git, client)
+	d.Cfg.MaxTurns = 5
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "critical"}}, 0)
+	ops.taskContext = cmclient.TaskContext{
+		Description: withTierMarker("Implement the thing.", "critical"),
+	}
+
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 1, Output: "FAIL"} // fail
+	}
+
+	err := runExecute(context.Background(), o)
+	require.Error(t, err, "a capped subtask whose committed work fails verify parks")
+
+	body := ops.bodyFor("SUB-1")
+	assert.Contains(t, body, "<!-- cm:tier=critical -->", "critical is the escalation ceiling")
+	assert.True(t, ops.loggedContains("verify did not pass"), "the original park advisory still logs; logs=%v", ops.logs)
+	assert.True(t, ops.loggedContains("escalating subtask tier critical -> critical"),
+		"the escalation still logs even at the ceiling; logs=%v", ops.logs)
+}
+
 // markerMidRunLLM wraps a scripted LLM and writes a toolchain marker file into
 // dir the first time it is called, simulating a coder run that introduces
 // project scaffolding (e.g. a pom.xml) mid-run: the run's FIRST verify

@@ -506,6 +506,10 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 	// parks exactly as it would without this path.
 	committed, cerr := sc.git.CommitWithMessage(ctx, commitMsg)
 	if cerr != nil || !committed {
+		// The cap happened regardless of whether there was anything to
+		// salvage-commit - escalate so resume does not repeat it at the same tier.
+		o.escalateSubtaskTier(ctx, sub)
+
 		return false, nil
 	}
 
@@ -525,12 +529,14 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 		}
 
 		o.logSoloCapPark(ctx, sub.ID, "verify could not be resolved")
+		o.escalateSubtaskTier(ctx, sub)
 
 		return false, nil
 	}
 
 	if len(plan.Argv) == 0 {
 		o.logSoloCapPark(ctx, sub.ID, "no verify command resolved to confirm it")
+		o.escalateSubtaskTier(ctx, sub)
 
 		return false, nil
 	}
@@ -546,6 +552,7 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 		}
 
 		o.logSoloCapPark(ctx, sub.ID, reason)
+		o.escalateSubtaskTier(ctx, sub)
 
 		return false, nil
 	}
@@ -555,11 +562,15 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 	// resume must not double-charge.
 	if sc.push {
 		if perr := o.pushBranch(ctx); perr != nil {
+			o.escalateSubtaskTier(ctx, sub)
+
 			return false, nil
 		}
 	}
 
 	if cerr := o.d.Ops.CompleteTask(ctx, sub.ID, commitMsg); cerr != nil {
+		o.escalateSubtaskTier(ctx, sub)
+
 		return false, nil
 	}
 
@@ -573,6 +584,42 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 // passing): the run parks and the commit stands as WIP evidence for resume.
 func (o *run) logSoloCapPark(ctx context.Context, subID, reason string) {
 	o.d.logCard(ctx, "turn cap on subtask %s - work committed but %s; parking for resume", subID, reason)
+}
+
+// escalateSubtaskTier bumps the persisted tier marker on sub's card body one
+// step (nextTier) so a resumed run selects a stronger model against a bigger
+// turn cap - a park at the same tier would otherwise repeat the same losing
+// attempt indefinitely. It fetches the subtask's live card body (never the
+// possibly-empty in-memory subtaskRef.Body) and writes it back, mirroring
+// recordCheckpointOnSubtask. Best-effort: a fetch or write failure only
+// warns - the run is parking either way, and a stale marker just means resume
+// retries at the prior tier instead of escalating. Does not mutate sub.Tier -
+// this run is ending; the marker is read back only on the NEXT run.
+func (o *run) escalateSubtaskTier(ctx context.Context, sub subtaskRef) {
+	tc, err := o.d.Ops.GetTaskContext(ctx, sub.ID, false)
+	if err != nil {
+		slog.Warn("turn cap: subtask body fetch failed; skipping tier escalation",
+			"card_id", o.d.Cfg.CardID, "subtask_id", sub.ID, "error", err)
+
+		return
+	}
+
+	tier, clean := parseTierMarker(tc.Description)
+	next := nextTier(tier)
+
+	if uerr := o.d.Ops.UpdateCardBody(ctx, sub.ID, withTierMarker(clean, next)); uerr != nil {
+		slog.Warn("turn cap: subtask tier escalation write failed",
+			"card_id", o.d.Cfg.CardID, "subtask_id", sub.ID, "error", uerr)
+
+		return
+	}
+
+	from := tier
+	if from == "" {
+		from = reconcileTierDefault
+	}
+
+	o.d.logCard(ctx, "turn cap: escalating subtask tier %s -> %s for the next attempt", from, next)
 }
 
 // sanitizeTitle builds the fallback commit message from a subtask title when the
