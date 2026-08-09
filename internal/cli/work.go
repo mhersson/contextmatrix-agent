@@ -303,6 +303,7 @@ func specFromEnv() (worker.RunSpec, error) {
 		BaseBranch:                os.Getenv("CM_BASE_BRANCH"),
 		Model:                     os.Getenv("CM_MODEL"),
 		Interactive:               os.Getenv("CM_INTERACTIVE") == "true",
+		MaxCapability:             os.Getenv("CM_MAX_CAPABILITY") == "true",
 		BestOfN:                   bestOfN,
 		Mob:                       mobSpec,
 		BashTimeoutMax:            bashTimeoutMax,

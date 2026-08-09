@@ -539,6 +539,10 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 		"CM_MCP_API_KEY=" + mcpKey,
 	}
 
+	if p.MaxCapability {
+		env = append(env, "CM_MAX_CAPABILITY=true")
+	}
+
 	if p.BestOfN > 1 {
 		env = append(env, "CM_BEST_OF_N="+strconv.Itoa(p.BestOfN))
 	}
