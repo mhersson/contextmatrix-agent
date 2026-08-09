@@ -126,6 +126,9 @@ func TestContainerConfig_HostConfigResourcesAndHardening(t *testing.T) {
 	require.NotNil(t, host.PidsLimit)
 	assert.Equal(t, pids, *host.PidsLimit)
 
+	require.NotNil(t, host.Init)
+	assert.True(t, *host.Init, "docker-init must be PID 1 so orphaned children are reaped")
+
 	assert.Equal(t, []string{"ALL"}, []string(host.CapDrop))
 	assert.Equal(t, []string{"no-new-privileges"}, host.SecurityOpt)
 	assert.Equal(t, []string{"/srv/cm/secrets/demo:/run/cm-secrets:ro"}, host.Binds)

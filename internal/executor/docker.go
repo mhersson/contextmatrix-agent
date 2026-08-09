@@ -175,10 +175,16 @@ func containerConfig(spec LaunchSpec) (*container.Config, *container.HostConfig)
 	}
 
 	pidsLimit := spec.PidsLimit
+	initProcess := true
 
 	host := &container.HostConfig{
 		CapDrop:     []string{"ALL"},
 		SecurityOpt: []string{"no-new-privileges"},
+		// docker-init as PID 1: the worker binary never reaps orphaned
+		// children, and zombies count against the pids cgroup - without a
+		// reaper one abandoned subprocess tree pins the container at its
+		// pids limit and every later fork fails.
+		Init: &initProcess,
 		Resources: container.Resources{
 			Memory:    spec.MemoryBytes,
 			PidsLimit: &pidsLimit,

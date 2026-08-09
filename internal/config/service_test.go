@@ -46,7 +46,7 @@ func TestServiceDefaults(t *testing.T) {
 	assert.Equal(t, 5, cfg.MaxConcurrent)
 	assert.Equal(t, 2*time.Hour+30*time.Minute, cfg.ContainerTimeout)
 	assert.Equal(t, int64(8*1024*1024*1024), cfg.ContainerMemoryBytes)
-	assert.Equal(t, int64(512), cfg.ContainerPidsLimit)
+	assert.Equal(t, int64(2048), cfg.ContainerPidsLimit)
 	assert.Equal(t, 30*time.Minute, cfg.IdleOutputTimeout)
 	assert.Equal(t, 30*time.Second, cfg.IdleWatchdogInterval)
 	assert.Equal(t, "/var/run/cm-agent/secrets", cfg.SecretsDir)
