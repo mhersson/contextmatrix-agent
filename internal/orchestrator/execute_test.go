@@ -1612,3 +1612,41 @@ func TestCoderPromptParentSlotOmitsRecordedHistory(t *testing.T) {
 	assert.NotContains(t, llmFake.tasks[0], "naming could improve", "review history stays out of the coder prompt")
 	assert.NotContains(t, llmFake.tasks[0], "1. SUBTASK: Add the flag", "parent plan not re-imported per subtask")
 }
+
+// TestResolveCoderModelPinMissingAdvisory proves that a non-empty but
+// unresolvable coder pin emits exactly one card-log advisory across multiple
+// resolveCoderModel calls (the once-per-run guard), and does not change the
+// model actually selected.
+func TestResolveCoderModelPinMissingAdvisory(t *testing.T) {
+	ops := &fakeOps{}
+	d := execTestDeps(ops, &fakeGit{}, &planLLM{})
+	o := newExecRun(d, nil, 5)
+	ctx := context.Background()
+
+	o.tc.ModelCoder = "pinned/missing" // not in planTestCatalog
+
+	// Multiple calls across different subtasks.
+	o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-1", Title: "First", Tier: "simple"}, "prompt1")
+	o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-2", Title: "Second", Tier: "moderate"}, "prompt2")
+
+	// Exactly one advisory log entry (once-per-run guard).
+	require.Len(t, ops.logs, 1, "exactly one advisory log for the missing pin")
+	assert.Contains(t, ops.logs[0], "pinned/missing")
+}
+
+// TestResolveCoderModelPinResolvableNoAdvisory proves that a resolvable coder
+// pin produces zero advisory log entries.
+func TestResolveCoderModelPinResolvableNoAdvisory(t *testing.T) {
+	ops := &fakeOps{}
+	d := execTestDeps(ops, &fakeGit{}, &planLLM{})
+	o := newExecRun(d, nil, 5)
+	ctx := context.Background()
+
+	o.tc.ModelCoder = "pinned/model" // IS in planTestCatalog
+
+	o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-1", Title: "First", Tier: "simple"}, "prompt1")
+	o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-2", Title: "Second", Tier: "moderate"}, "prompt2")
+
+	// No advisory logs because the pin is resolvable.
+	assert.Empty(t, ops.logs, "resolvable pin produces no advisory logs")
+}
