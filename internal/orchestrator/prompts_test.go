@@ -164,22 +164,26 @@ func TestPlanPromptForbidsTestOnlySubtasks(t *testing.T) {
 // a readable name for failure messages. The neutrality sweep runs over all of
 // them so a language-specific token cannot slip back into any single prompt.
 var allPhasePrompts = map[string]string{
-	"plan":            planPrompt,
-	"diagnose":        diagnosePrompt,
-	"buildHygiene":    buildHygieneNote,
-	"processTeardown": processTeardownNote,
-	"selfReview":      selfReviewBlock,
-	"coder":           coderPrompt,
-	"specialist":      specialistPrompt,
-	"correctness":     correctnessPrompt,
-	"design":          designPrompt,
-	"security":        securityPrompt,
-	"synthesis":       synthesisPrompt,
-	"fix":             fixPrompt,
-	"prBody":          prBodyPrompt,
-	"document":        documentPrompt,
-	"gateClassify":    gateClassifyPrompt,
-	"brainstorm":      brainstormPrompt,
+	"plan":                planPrompt,
+	"diagnose":            diagnosePrompt,
+	"buildHygiene":        buildHygieneNote,
+	"processTeardown":     processTeardownNote,
+	"selfReview":          selfReviewBlock,
+	"coder":               coderPrompt,
+	"specialist":          specialistPrompt,
+	"correctness":         correctnessPrompt,
+	"design":              designPrompt,
+	"security":            securityPrompt,
+	"synthesis":           synthesisPrompt,
+	"fix":                 fixPrompt,
+	"prBody":              prBodyPrompt,
+	"document":            documentPrompt,
+	"gateClassify":        gateClassifyPrompt,
+	"brainstorm":          brainstormPrompt,
+	"sweepRule":           sweepRule,
+	"reviewSynthesis":     reviewSynthesisPrompt,
+	"checkpointSynthesis": checkpointSynthesisPrompt,
+	"checkpointRevise":    checkpointRevisePrompt,
 }
 
 // TestPromptsAreLanguageNeutral sweeps every phase prompt for target-language and
@@ -244,6 +248,17 @@ func TestPlannerGroundingRuleInPlanPrompts(t *testing.T) {
 	} {
 		assert.Contains(t, p, "Do not put unverified specifics",
 			"%s must include the planner grounding rule", name)
+	}
+}
+
+func TestSweepRuleInSynthesisPrompts(t *testing.T) {
+	for name, p := range map[string]string{
+		"synthesisPrompt":           synthesisPrompt,
+		"reviewSynthesisPrompt":     reviewSynthesisPrompt,
+		"checkpointSynthesisPrompt": checkpointSynthesisPrompt,
+	} {
+		assert.Contains(t, p, "When a finding asserts that a specific statement",
+			"%s must splice the sweepRule", name)
 	}
 }
 
