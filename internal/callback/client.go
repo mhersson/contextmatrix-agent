@@ -189,7 +189,8 @@ func (c *Client) ReportStatus(ctx context.Context, cardID, project, status, mess
 			return lastErr
 		}
 
-		c.logger.Warn("status callback failed, retrying",
+		c.logger.Warn(
+			"status callback failed, retrying",
 			"attempt", attempt+1,
 			"card_id", cardID,
 			"error", lastErr,
@@ -287,7 +288,8 @@ func (c *Client) scheduleBackgroundRetry(cardID, project, status, uri, path stri
 // frame is written - fail closed: any error means "do not promote".
 // The GET is signed with an empty body.
 func (c *Client) VerifyAutonomous(ctx context.Context, project, cardID string) (bool, error) {
-	path := fmt.Sprintf("/api/v1/cards/%s/%s/autonomous",
+	path := fmt.Sprintf(
+		"/api/v1/cards/%s/%s/autonomous",
 		url.PathEscape(project),
 		url.PathEscape(cardID),
 	)
@@ -334,7 +336,8 @@ func (c *Client) VerifyAutonomous(ctx context.Context, project, cardID string) (
 			return false, err
 		}
 
-		c.logger.Warn("verify-autonomous callback failed, retrying",
+		c.logger.Warn(
+			"verify-autonomous callback failed, retrying",
 			"attempt", attempt+1,
 			"project", project,
 			"card_id", cardID,

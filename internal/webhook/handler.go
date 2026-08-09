@@ -608,7 +608,8 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 	}
 
 	if s.launchEnv.CompactionEnabled {
-		env = append(env,
+		env = append(
+			env,
 			"CMX_COMPACTION_ENABLED=true",
 			"CMX_COMPACTION_THRESHOLD="+formatFloat(s.launchEnv.CompactionThreshold),
 			"CMX_COMPACTION_KEEP_RECENT_TURNS="+strconv.Itoa(s.launchEnv.CompactionKeepRecentTurns),
