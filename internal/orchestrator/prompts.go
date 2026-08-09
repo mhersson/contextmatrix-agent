@@ -271,7 +271,9 @@ discrepancy in your finish message, and stop - a confirmed absence discharges a
 const coderPrompt = `%s%sYou are the coding agent for one subtask of a larger task. You have the full
 write toolset (read, grep, glob, edit, write, bash) rooted at the workspace.
 Implement EXACTLY this subtask - nothing from sibling subtasks, nothing
-speculative.
+speculative. The parent card's description and acceptance criteria may cover
+work assigned to other subtasks - do only what YOUR subtask's description
+assigns, even when the parent lists more.
 
 Repo root: %s - bash commands already execute there; use paths relative to the
 repo root.
