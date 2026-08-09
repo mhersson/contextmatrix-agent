@@ -161,7 +161,7 @@ func (o *run) mobCheckpoint(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 	prompt := fmt.Sprintf(checkpointRevisePrompt, o.skillEngage(), o.grounding, sc.workspace,
 		verifyCommandBlock(o.resolvedVerifyPlan()), sub.Title, findings)
 
-	res, rerr := o.runCoderWith(ctx, sc, sub, prompt)
+	res, _, rerr := o.runCoderWith(ctx, sc, sub, prompt)
 	if rerr != nil {
 		slog.Warn("mob checkpoint: revise run failed; proceeding on the committed diff",
 			"card_id", o.d.Cfg.CardID, "subtask_id", sub.ID, "error", rerr)

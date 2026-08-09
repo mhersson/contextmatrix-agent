@@ -1228,6 +1228,238 @@ func TestSoloTurnCapPropagatesToolchainSentinel(t *testing.T) {
 // ...StillParksOnCleanTree, plus TestExecuteSubtaskMaxTurnsNeverCompletes for the
 // unresolved-verify park.
 
+// TestExecuteSubtaskFlowReportsSoloWinOutcome proves a plain finish-terminated
+// solo completion reports a "win" model outcome keyed on the SUBTASK card (not
+// the parent) - the ReportUsage solo precedent, deliberately unlike the
+// Best-of-N judge's parent rollup. VerifyPass is false: no authoritative verify
+// ran on this path, so it is informational, not a signal.
+func TestExecuteSubtaskFlowReportsSoloWinOutcome(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	llmFake := &planLLM{responses: []llm.Response{finishResp("feat(x): add y", 0.10)}}
+	d := execTestDeps(ops, git, llmFake)
+
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
+	require.NoError(t, runExecute(context.Background(), o))
+
+	calls := ops.recorded()
+	complete := indexOfCall(calls, "CompleteTask:SUB-1")
+	report := indexOfCall(calls, "ReportModelOutcomes:SUB-1")
+	require.GreaterOrEqual(t, complete, 0, "calls=%v", calls)
+	require.GreaterOrEqual(t, report, 0, "calls=%v", calls)
+	assert.Less(t, complete, report, "the outcome reports after completion")
+
+	require.Len(t, ops.reportOutcomes, 1)
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 1)
+
+	assert.Equal(t, "win", rows[0].Result)
+	assert.False(t, rows[0].VerifyPass, "no authoritative verify ran on the plain completion path")
+	assert.Equal(t, 1, rows[0].NCandidates, "a solo report is never scaled by candidate count")
+	assert.Empty(t, rows[0].JudgeModel, "there is no judge on the solo path")
+	assert.Equal(t, ops.lastUsageReport().Model, rows[0].Model,
+		"the reported model must be the one actually billed via ReportUsage")
+	assert.InDelta(t, 0.10, rows[0].CostUSD, 1e-9)
+}
+
+// TestSoloTurnCapSalvageReportsWinOutcome proves the salvage-success path
+// (a capped subtask whose committed work passes the authoritative verify)
+// reports a "win" with VerifyPass true - the verify actually confirmed the
+// work, unlike the plain completion path.
+func TestSoloTurnCapSalvageReportsWinOutcome(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: burnResps(5)}
+	d := execTestDeps(ops, git, client)
+	d.Cfg.MaxTurns = 5
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 0} // pass
+	}
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	require.Len(t, ops.reportOutcomes, 1)
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 1)
+
+	assert.Equal(t, "win", rows[0].Result)
+	assert.True(t, rows[0].VerifyPass, "the authoritative verify passed before the salvage")
+	assert.Equal(t, 1, rows[0].NCandidates)
+	assert.NotEmpty(t, rows[0].Model)
+}
+
+// TestSalvageDeclineReportsFailedOutcome proves a solo turn-cap park that fails
+// the authoritative verify reports "failed" with VerifyPass false - the run
+// did not complete, and the verify never confirmed the work.
+func TestSalvageDeclineReportsFailedOutcome(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: burnResps(5)}
+	d := execTestDeps(ops, git, client)
+	d.Cfg.MaxTurns = 5
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 1, Output: "FAIL"} // fail
+	}
+
+	err := runExecute(context.Background(), o)
+	require.Error(t, err)
+
+	require.Len(t, ops.reportOutcomes, 1)
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 1)
+
+	assert.Equal(t, "failed", rows[0].Result)
+	assert.False(t, rows[0].VerifyPass)
+	assert.Equal(t, 1, rows[0].NCandidates)
+}
+
+// TestSalvageDeclineOnCleanTreeReportsFailedOutcome proves the earliest decline
+// branch (nothing to salvage-commit) still reports "failed": the run did not
+// complete regardless of whether there was any diff to judge.
+func TestSalvageDeclineOnCleanTreeReportsFailedOutcome(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: false} // clean tree: nothing committed
+	client := &planLLM{responses: burnResps(5)}
+	d := execTestDeps(ops, git, client)
+	d.Cfg.MaxTurns = 5
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 0}
+	}
+
+	err := runExecute(context.Background(), o)
+	require.Error(t, err)
+
+	require.Len(t, ops.reportOutcomes, 1)
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 1)
+
+	assert.Equal(t, "failed", rows[0].Result)
+	assert.False(t, rows[0].VerifyPass, "verify was never reached on a clean tree")
+}
+
+// TestSalvageDeclineAfterVerifyPassReportsFailedWithVerifyPassTrue proves the
+// two post-verify-pass keep-tier parks (push/CompleteTask failure) still
+// report "failed" - the run did not complete - but with VerifyPass true,
+// honestly distinguishing an infrastructure park from a capability gap.
+func TestSalvageDeclineAfterVerifyPassReportsFailedWithVerifyPassTrue(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, pushErr: errors.New("push boom")}
+	client := &planLLM{responses: burnResps(5)}
+	d := execTestDeps(ops, git, client)
+	d.Cfg.MaxTurns = 5
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "moderate"}}, 0)
+
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 0} // pass
+	}
+
+	err := runExecute(context.Background(), o)
+	require.Error(t, err)
+
+	require.Len(t, ops.reportOutcomes, 1)
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 1)
+
+	assert.Equal(t, "failed", rows[0].Result, "a push failure after a passing verify is still a park")
+	assert.True(t, rows[0].VerifyPass, "the verify already confirmed the work before the push failed")
+}
+
+// TestSalvageDeclineAfterCompleteTaskFailReportsFailedWithVerifyPassTrue is the
+// sibling of TestSalvageDeclineAfterVerifyPassReportsFailedWithVerifyPassTrue
+// for the OTHER post-verify-pass park cause: the push succeeds but CompleteTask
+// fails.
+func TestSalvageDeclineAfterCompleteTaskFailReportsFailedWithVerifyPassTrue(t *testing.T) {
+	ops := &fakeOps{completeTaskErr: errors.New("complete task boom")}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: burnResps(5)}
+	d := execTestDeps(ops, git, client)
+	d.Cfg.MaxTurns = 5
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "moderate"}}, 0)
+
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 0} // pass
+	}
+
+	err := runExecute(context.Background(), o)
+	require.Error(t, err)
+
+	require.Len(t, ops.reportOutcomes, 1)
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 1)
+
+	assert.Equal(t, "failed", rows[0].Result, "a CompleteTask failure after a passing verify is still a park")
+	assert.True(t, rows[0].VerifyPass, "the verify already confirmed the work before CompleteTask failed")
+}
+
+// TestSoloTurnCapToolchainSentinelReportsNoOutcome proves the toolchain-missing
+// park (a distinct sentinel that supersedes the plain turn-cap) does not report
+// a model outcome: a missing toolchain is an environment problem, not evidence
+// about the model, and this park is left unlogged on the card for the same
+// reason (see execute()'s dedicated arm).
+func TestSoloTurnCapToolchainSentinelReportsNoOutcome(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("exec-bit probing is POSIX-only")
+	}
+
+	stubTools(t) // nothing on PATH: mvn cannot resolve
+
+	dir := t.TempDir()
+
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	inner := &planLLM{responses: burnResps(5)}
+	client := &markerMidRunLLM{inner: inner, t: t, dir: dir}
+	d := execTestDeps(ops, git, client)
+	d.Cfg.MaxTurns = 5
+	d.Cfg.Workspace = dir
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+	o.planFn = func(context.Context) error { return nil }
+
+	err := o.execute(context.Background())
+	require.Error(t, err)
+
+	var tme *ToolchainMissingError
+	require.ErrorAs(t, err, &tme)
+
+	assert.Empty(t, ops.reportOutcomes, "a toolchain-missing park must not report a model outcome")
+}
+
+// TestCandidateCompletionDoesNotReportSoloOutcome proves the solo-outcome
+// report stays board-ops only: a Best-of-N candidate (boardOps false) that
+// finishes a subtask normally must not emit any ReportModelOutcomes call -
+// candidate outcomes are reported once, in aggregate, by the judge's adoption
+// tail (reportCandidateOutcomes), never per-subtask. Pins that this task's
+// change leaves the Best-of-N reporting path untouched.
+func TestCandidateCompletionDoesNotReportSoloOutcome(t *testing.T) {
+	ops := &fakeOps{}
+	client := &planLLM{responses: []llm.Response{finishResp("feat: x", 0.02)}}
+	d := execTestDeps(ops, &fakeGit{committed: true}, client)
+	o := newExecRun(d, nil, 0)
+
+	cg := &fakeGit{committed: true}
+	sc := &solverCtx{
+		git: cg, ledger: NewLedger(0, 0), tools: d.WriteTools,
+		workspace: "ws", coderModel: o.resolveCoderModel,
+		boardOps: false, push: false, tag: "candidate 1/1",
+	}
+
+	require.NoError(t, o.executeSubtaskWith(context.Background(), sc,
+		subtaskRef{ID: "SUB-1", Title: "Work", Tier: "simple"}))
+
+	assert.Empty(t, ops.reportOutcomes, "a candidate's per-subtask completion must not report a solo model outcome")
+}
+
 // TestCandidateSubtaskParksOnRunLedgerBreach pins the fan-out window close: a
 // candidate whose own sub-ledger is clean still parks when the RUN ledger -
 // the only ledger server-priced totals sync into - is over the ceiling.

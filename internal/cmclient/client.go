@@ -482,8 +482,11 @@ func (c *Client) ReportPush(ctx context.Context, cardID, branch, prURL string) e
 	return err
 }
 
-// ModelOutcome is one Best-of-N candidate's result, reported on the parent
-// card via ReportModelOutcomes.
+// ModelOutcome is one model's terminal result on a card, reported via
+// ReportModelOutcomes: one row per Best-of-N candidate (win/loss/failed,
+// NCandidates > 1, JudgeModel set, keyed on the parent card), or a single row
+// for a solo run's completion or turn-cap outcome (win/failed, NCandidates
+// always 1, JudgeModel empty, keyed on the subtask card).
 type ModelOutcome struct {
 	Model       string  `json:"model"`
 	Result      string  `json:"result"` // win | loss | failed
@@ -493,8 +496,9 @@ type ModelOutcome struct {
 	JudgeModel  string  `json:"judge_model,omitempty"`
 }
 
-// ReportModelOutcomes records per-candidate Best-of-N results on the parent
-// card via the report_model_outcome tool.
+// ReportModelOutcomes records model results on cardID via the
+// report_model_outcome tool - a Best-of-N judge's per-candidate rollup on the
+// parent card, or a solo run's single terminal outcome on the subtask card.
 func (c *Client) ReportModelOutcomes(ctx context.Context, cardID string, outcomes []ModelOutcome) error {
 	rows := make([]map[string]any, 0, len(outcomes))
 	for _, o := range outcomes {

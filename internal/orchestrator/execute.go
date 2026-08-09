@@ -168,13 +168,13 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 	prompt := fmt.Sprintf(coderPrompt, o.skillEngage(), o.grounding, sc.workspace,
 		verifyCommandBlock(o.resolvedVerifyPlan()), sub.Title, subtaskBody(sub), o.tc.Title, o.taskDescription)
 
-	res, err := o.runCoderWith(ctx, sc, sub, prompt)
+	res, model, err := o.runCoderWith(ctx, sc, sub, prompt)
 	if err != nil {
 		if o.salvageCapped(ctx, sc, sub, res, err) {
 			return nil
 		}
 
-		salvaged, serr := o.salvageSoloCapped(ctx, sc, sub, res, err)
+		salvaged, serr := o.salvageSoloCapped(ctx, sc, sub, model, res, err)
 		if salvaged {
 			return nil
 		}
@@ -222,6 +222,12 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 		if err := d.Ops.CompleteTask(ctx, sub.ID, commitMsg); err != nil {
 			return fmt.Errorf("complete subtask %s: %w", sub.ID, err)
 		}
+
+		// The normal (non-salvage) completion path: report a win keyed on the
+		// subtask itself. VerifyPass is false here - no authoritative verify ran
+		// on this path, so it is simply unknown, not a failure signal; the field
+		// stays informational for a plain finish-terminated completion.
+		o.reportSoloOutcome(ctx, sub.ID, model, "win", false, sc.ledger.Spent())
 	}
 
 	return nil
@@ -261,8 +267,11 @@ func (o *run) releaseSubtask(ctx context.Context, cardID string) {
 // clean (no git reset). The loop is bounded by recoverIncapable's per-card cap:
 // once exhausted it returns the wrapped park error. Any non-incapable run error
 // (transport, context limit, budget) is returned immediately, unwrapped of the
-// recovery loop. Returns the successful run's result.
-func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, prompt string) (harness.Result, error) {
+// recovery loop. Returns the successful run's result, alongside the model that
+// actually produced it (spendAndReport's res.ModelUsed-or-configured fallback) -
+// the same value reported to CM via ReportUsage, so a caller reporting a model
+// outcome names exactly the model that was billed.
+func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, prompt string) (harness.Result, string, error) {
 	d := o.d
 	cfg := d.Cfg
 
@@ -278,7 +287,7 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 		// resolver never returns "" (it falls back to the capable default), so this
 		// is candidate-only in practice.
 		if model == "" {
-			return harness.Result{}, fmt.Errorf("coder for %s: candidate model pool exhausted", sub.ID)
+			return harness.Result{}, "", fmt.Errorf("coder for %s: candidate model pool exhausted", sub.ID)
 		}
 
 		logMsg := fmt.Sprintf("coder model %s selected for subtask %q (tier=%s)", model, sub.Title, tierOf(sub))
@@ -315,14 +324,14 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 		}
 
 		// The incapable attempt is charged too - it burned tokens before tripping.
-		o.spendAndReport(ctx, sc.ledger, target, "execute: report usage failed", res, model, "main", dur)
+		used := o.spendAndReport(ctx, sc.ledger, target, "execute: report usage failed", res, model, "main", dur)
 
 		var ie *IncapableError
 		if errors.As(err, &ie) {
 			// recoverIncapable blacklists + excludes the model and returns an error
 			// only when the per-card re-selection cap is exhausted - park then.
 			if rerr := o.recoverIncapable(ctx, ie); rerr != nil {
-				return res, rerr
+				return res, used, rerr
 			}
 
 			// Re-select (the failed model is now excluded) and re-run the SAME
@@ -331,15 +340,15 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 		}
 
 		if err != nil {
-			return res, fmt.Errorf("coder run for %s: %w", sub.ID, err)
+			return res, used, fmt.Errorf("coder run for %s: %w", sub.ID, err)
 		}
 
-		return res, nil
+		return res, used, nil
 	}
 
 	// Unreachable in practice: recoverIncapable errors at the cap before the loop
 	// can exhaust its iterations. Defensive guard against an infinite loop.
-	return harness.Result{}, fmt.Errorf("coder for %s: re-selection loop exhausted", sub.ID)
+	return harness.Result{}, "", fmt.Errorf("coder for %s: re-selection loop exhausted", sub.ID)
 }
 
 // pushBranch pushes the card branch after a commit. On a FRESH run that found a
@@ -490,7 +499,16 @@ func (o *run) salvageCapped(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 // coder run) is what's parking the card, and the sentinel must reach execute()'s
 // dedicated toolchain arm - and from there the worker's blocked-transition arm -
 // instead of surfacing as a plain turn-cap.
-func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskRef, res harness.Result, err error) (bool, error) {
+//
+// Every (false, nil) exit reports a "failed" model outcome - the run did not
+// complete, regardless of cause - except the *ToolchainMissingError branch,
+// which is an environment problem (a missing tool), not evidence about the
+// model, and is left unreported like its unlogged card-log line. The two
+// exits below the authoritative verify (push/CompleteTask failure) report
+// VerifyPass true: the model's work was already proven correct, so the park
+// is infrastructure, not a capability gap - distinguishing them from the
+// VerifyPass false reports above, where the verify never confirmed anything.
+func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskRef, model string, res harness.Result, err error) (bool, error) {
 	var mte *MaxTurnsError
 	if !sc.boardOps || !errors.As(err, &mte) {
 		return false, nil
@@ -509,6 +527,7 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 		// The cap happened regardless of whether there was anything to
 		// salvage-commit - escalate so resume does not repeat it at the same tier.
 		o.escalateSubtaskTier(ctx, sub)
+		o.reportSoloOutcome(ctx, sub.ID, model, "failed", false, sc.ledger.Spent())
 
 		return false, nil
 	}
@@ -522,7 +541,9 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 		// A toolchain that implicated itself mid-run (e.g. a marker file the
 		// coder added) is not a generic unresolvable-verify park: propagate it
 		// unlogged here so execute()'s dedicated arm writes the toolchain card-log
-		// line and the run parks as blocked, not as a plain turn cap.
+		// line and the run parks as blocked, not as a plain turn cap. It is also
+		// left unreported to the leaderboard for the same reason - a missing
+		// toolchain is not evidence about the model.
 		var tme *ToolchainMissingError
 		if errors.As(verr, &tme) {
 			return false, verr
@@ -530,6 +551,7 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 
 		o.logSoloCapPark(ctx, sub.ID, "verify could not be resolved")
 		o.escalateSubtaskTier(ctx, sub)
+		o.reportSoloOutcome(ctx, sub.ID, model, "failed", false, sc.ledger.Spent())
 
 		return false, nil
 	}
@@ -537,6 +559,7 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 	if len(plan.Argv) == 0 {
 		o.logSoloCapPark(ctx, sub.ID, "no verify command resolved to confirm it")
 		o.escalateSubtaskTier(ctx, sub)
+		o.reportSoloOutcome(ctx, sub.ID, model, "failed", false, sc.ledger.Spent())
 
 		return false, nil
 	}
@@ -553,6 +576,7 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 
 		o.logSoloCapPark(ctx, sub.ID, reason)
 		o.escalateSubtaskTier(ctx, sub)
+		o.reportSoloOutcome(ctx, sub.ID, model, "failed", false, sc.ledger.Spent())
 
 		return false, nil
 	}
@@ -566,15 +590,20 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 	// bigger model.
 	if sc.push {
 		if perr := o.pushBranch(ctx); perr != nil {
+			o.reportSoloOutcome(ctx, sub.ID, model, "failed", true, sc.ledger.Spent())
+
 			return false, nil
 		}
 	}
 
 	if cerr := o.d.Ops.CompleteTask(ctx, sub.ID, commitMsg); cerr != nil {
+		o.reportSoloOutcome(ctx, sub.ID, model, "failed", true, sc.ledger.Spent())
+
 		return false, nil
 	}
 
 	o.d.logCard(ctx, "turn cap on subtask %s - committed work passed the authoritative verify; salvaged as complete", sub.ID)
+	o.reportSoloOutcome(ctx, sub.ID, model, "win", true, sc.ledger.Spent())
 
 	return true, nil
 }
@@ -584,6 +613,38 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 // passing): the run parks and the commit stands as WIP evidence for resume.
 func (o *run) logSoloCapPark(ctx context.Context, subID, reason string) {
 	o.d.logCard(ctx, "turn cap on subtask %s - work committed but %s; parking for resume", subID, reason)
+}
+
+// reportSoloOutcome reports one solo (boardOps) run's terminal model outcome
+// to CM's leaderboard, keyed on the subtask card itself - not the parent,
+// deliberately unlike the Best-of-N judge's parent rollup - mirroring the
+// existing ReportUsage solo precedent. NCandidates is always 1 and JudgeModel
+// is always empty: there is no judge on the solo path. Best-effort: a report
+// failure only warns, mirroring every other board write on this path.
+//
+// Bias-math note: a Best-of-N judge samples N candidates, so a model's win
+// rate over many judged runs settles below 100% and the leaderboard's
+// calibration factor is built to track that spread. A solo run is a sample of
+// exactly one candidate, so its expected win rate is already 1.0 - an
+// unbroken string of solo wins is therefore neutral, not inflationary: it
+// cannot push a model's calibration factor above the parity a single BoN win
+// already implies. Only a solo failure moves the needle, and only downward
+// toward the calibration floor. Solo reporting can widen the gap between a
+// reliable and an unreliable model; it can never manufacture a prior a model
+// has not earned.
+func (o *run) reportSoloOutcome(ctx context.Context, cardID, model, result string, verifyPass bool, costUSD float64) {
+	outcome := cmclient.ModelOutcome{
+		Model:       model,
+		Result:      result,
+		VerifyPass:  verifyPass,
+		CostUSD:     costUSD,
+		NCandidates: 1,
+	}
+
+	if err := o.d.Ops.ReportModelOutcomes(ctx, cardID, []cmclient.ModelOutcome{outcome}); err != nil {
+		slog.Warn("execute: report solo model outcome failed",
+			"card_id", cardID, "model", model, "result", result, "error", err)
+	}
 }
 
 // escalateSubtaskTier bumps the persisted tier marker on sub's card body one
