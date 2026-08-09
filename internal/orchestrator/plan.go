@@ -118,10 +118,11 @@ var (
 )
 
 // filePathSuffixRe matches a path's final segment when it looks like a
-// filename with an extension (a word-char run, a dot, another word-char
-// run) - the shape that lets filePathTokens tell a real path apart from
-// prose that merely contains a slash.
-var filePathSuffixRe = regexp.MustCompile(`^[\w-]+\.[\w-]+$`)
+// filename with an extension: a word-char run followed by one or more
+// dot-separated word-char runs, so multi-dot names (auth.test.ts) match
+// alongside plain ones (auth.ts) - the shape that lets filePathTokens tell a
+// real path apart from prose that merely contains a slash.
+var filePathSuffixRe = regexp.MustCompile(`^[\w-]+(?:\.[\w-]+)+$`)
 
 // testFileSuffixRe matches a Go-style "_test." suffix immediately before the
 // extension. testFileInfixRe matches a JS/TS-style ".test." or ".spec."
@@ -153,15 +154,54 @@ func titleLooksTestOnly(title string) bool {
 	return testsLoc[0] > verbLoc[0]
 }
 
-// filePathTokens extracts path-like tokens from a subtask description: each
-// whitespace-separated token, punctuation-trimmed, that contains a '/' and
-// whose final segment looks like a filename with an extension. The planner
-// prompt mandates a "Files:" line per subtask, so a well-formed description
-// yields its real file list here.
-func filePathTokens(description string) []string {
+// filesLabelRe matches a description line that opens the planner-mandated
+// file list: an optional list bullet, then a "Files:" label. labelLineRe
+// matches a prose "Label:" header (letters, then word chars, spaces, hyphens,
+// or parens, then a colon - "Non-goals:", "Acceptance criteria (v2):"; a path
+// line never matches, its slashes and dots do not fit), which is where a
+// Files: section ends.
+var (
+	filesLabelRe = regexp.MustCompile(`(?i)^\s*(?:[-*]\s*)?files?\s*:`)
+	labelLineRe  = regexp.MustCompile(`^[A-Za-z][\w ()-]*:`)
+)
+
+// filesSection extracts the planner-mandated "Files:" portion of a subtask
+// description: each Files: label line plus its continuation lines, ending at
+// a blank line or the next "Label:" header (e.g. "Acceptance criteria:").
+// Empty when the description carries no Files: label, which tells
+// isTestOnlySubtask to fall back to scanning the whole description.
+func filesSection(description string) string {
+	var b strings.Builder
+
+	inSection := false
+
+	for line := range strings.Lines(description) {
+		trimmed := strings.TrimSpace(line)
+
+		switch {
+		case filesLabelRe.MatchString(line):
+			inSection = true
+		case !inSection:
+			continue
+		case trimmed == "" || labelLineRe.MatchString(trimmed):
+			inSection = false
+
+			continue
+		}
+
+		b.WriteString(line)
+	}
+
+	return b.String()
+}
+
+// filePathTokens extracts path-like tokens from text: each whitespace-
+// separated token, punctuation-trimmed, that contains a '/' and whose final
+// segment looks like a filename with an extension.
+func filePathTokens(text string) []string {
 	var paths []string
 
-	for tok := range strings.FieldsSeq(description) {
+	for tok := range strings.FieldsSeq(text) {
 		tok = strings.Trim(tok, ",.;:()[]{}\"'`")
 
 		idx := strings.LastIndex(tok, "/")
@@ -198,18 +238,30 @@ func isTestFilePath(path string) bool {
 // isTestOnlySubtask reports whether the subtask named title, with description
 // desc, is one whose deliverable is testing another subtask's code rather
 // than shipping it. File evidence is authoritative when present - the
-// planner prompt mandates a "Files:" line, so a well-formed description
-// grounds the call in what the subtask actually touches: ANY extracted path
-// that is not a test file clears the subtask (a title matching the verb+tests
-// shape is not itself a violation - "Create the login endpoint and write its
-// handler tests" both implements and tests in one subtask), while paths found
-// and ALL of them test files confirm it, regardless of title. Only when the
-// description carries no path evidence at all does the title heuristic
-// (titleLooksTestOnly) decide alone - a residual gap, expected to be rare
-// since the prompt mandates file lists, where a title in the verb+tests shape
-// can still false-positive with nothing to ground it.
+// planner prompt mandates a "Files:" line, and the evidence is read from that
+// section alone when it names any files (prose elsewhere in the description
+// routinely NAMES the code under test, e.g. "write tests for plan.go", and
+// must not clear the subtask), falling back to the whole description when the
+// section yields no paths. ANY extracted path that is not a test file
+// clears the subtask (a title matching the verb+tests shape is not itself a
+// violation - "Create the login endpoint and write its handler tests" both
+// implements and tests in one subtask), while paths found and ALL of them
+// test files confirm it, regardless of title. Only when no path evidence
+// exists at all does the title heuristic (titleLooksTestOnly) decide alone -
+// a residual gap, expected to be rare since the prompt mandates file lists,
+// where a title in the verb+tests shape can still false-positive with
+// nothing to ground it.
 func isTestOnlySubtask(title, desc string) bool {
-	paths := filePathTokens(desc)
+	// A Files: section that yields no paths (label omitted, or a markdown
+	// shape the section walk does not capture, e.g. a blank line between the
+	// label and its bullets) falls back to whole-description scanning - the
+	// section is only trusted over the description when it actually names
+	// files.
+	paths := filePathTokens(filesSection(desc))
+	if len(paths) == 0 {
+		paths = filePathTokens(desc)
+	}
+
 	if len(paths) == 0 {
 		return titleLooksTestOnly(title)
 	}
@@ -541,8 +593,17 @@ func (o *run) reviseTestSplit(
 		return p, nil
 	}
 
+	// The revision run is stateless - without the previous plan in the prompt,
+	// "fold its work into the subtask it depends on" would name structure the
+	// model cannot see. MarshalIndent on this plain struct cannot fail; the
+	// guard keeps the revision usable (title-only) if that ever changes.
+	prev, merr := json.MarshalIndent(p, "", "  ")
+	if merr != nil {
+		prev = []byte("(previous plan unavailable)")
+	}
+
 	task := fmt.Sprintf(planPrompt, o.grounding, snapshot, cfg.Workspace, o.tc.Title, o.plannerDescription(),
-		diagBlock, dsnBlock, resume, fbBlock, testSplitRevisionBlock(title))
+		diagBlock, dsnBlock, resume, fbBlock, testSplitRevisionBlock(title, prev))
 
 	res, dur, err := o.runModelPlan(ctx, d.ReadTools, task, model, o.taskImages, true)
 
@@ -573,6 +634,41 @@ func (o *run) reviseTestSplit(
 	}
 
 	return revised, nil
+}
+
+// reviseMobTestSplit is reviseTestSplit's counterpart for mob-drafted plans:
+// on a testSplitViolation it re-opens the discussion for ONE feedback round
+// (the same non-blind adjust mechanism a HITL reviewer uses, so the panel
+// sees its own plan and the finding) and re-checks. Same never-fail
+// contract: a failed round or a persisting violation warns and keeps the
+// original plan and outcome - both already paid for.
+func (o *run) reviseMobTestSplit(ctx context.Context, diagnosis, design string, p plan, out *mob.Outcome) (plan, *mob.Outcome) {
+	title, violated := testSplitViolation(p)
+	if !violated {
+		return p, out
+	}
+
+	o.d.logCard(ctx, "plan validation: subtask %q splits its tests into a dependent subtask - requesting a revision", title)
+
+	revised, rout, ok := o.mobDraftPlan(ctx, diagnosis, design, testSplitMobFeedback(title), out)
+	if !ok {
+		slog.Warn("plan: mob test-split revision round failed; proceeding with the original plan",
+			"card_id", o.d.Cfg.CardID)
+		o.d.logCard(ctx, "plan validation: revision request failed - proceeding with the original plan")
+
+		return p, out
+	}
+
+	if _, still := testSplitViolation(revised); still {
+		slog.Warn("plan: test-split violation persists after one revision attempt; proceeding with the original plan",
+			"card_id", o.d.Cfg.CardID, "subtask_title", title)
+		o.d.logCard(ctx, "plan validation: subtask %q still splits its tests after one revision attempt - "+
+			"proceeding with the original plan", title)
+
+		return p, out
+	}
+
+	return revised, rout
 }
 
 // mobAdjustTailEntries bounds the transcript tail replayed when a HITL
@@ -789,6 +885,8 @@ func runPlan(ctx context.Context, o *run) error {
 	if !cfg.Interactive {
 		if mobPlan {
 			if p, out, ok := o.mobDraftPlan(ctx, diagnosis, design, "", nil); ok {
+				p, out = o.reviseMobTestSplit(ctx, diagnosis, design, p, out)
+
 				if err := o.createSubtasks(ctx, p); err != nil {
 					return err
 				}
@@ -831,6 +929,7 @@ func runPlan(ctx context.Context, o *run) error {
 
 			p, out, ok = o.mobDraftPlan(ctx, diagnosis, design, feedback, lastOut)
 			if ok {
+				p, out = o.reviseMobTestSplit(ctx, diagnosis, design, p, out)
 				drafted = true
 				lastOut = out
 			} else {

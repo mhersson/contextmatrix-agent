@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -185,6 +186,65 @@ func TestIsTestOnlySubtask(t *testing.T) {
 		{
 			name:  "second combined code+tests title, no path evidence: title verdict stands",
 			title: "Extend retry backoff and add jitter tests",
+			want:  true,
+		},
+		// Multi-dot filenames: JS/TS test conventions must register as file
+		// evidence - a title the verb list never matches still confirms on a
+		// Files: line of nothing but .test./.spec. files.
+		{
+			name:  "JS test file alone confirms despite a non-matching title",
+			title: "Cover the auth flow",
+			desc:  "Files: src/auth.test.ts",
+			want:  true,
+		},
+		{
+			name:  "JS spec file plus its code file clears",
+			title: "Create the auth flow and write its spec",
+			desc:  "Files: src/auth.spec.ts, src/auth.ts",
+			want:  false,
+		},
+		// Files:-line scoping: prose routinely NAMES the code under test; only
+		// the Files: section is evidence when the label exists.
+		{
+			name:  "prose mention of the code file does not clear a test-only Files: line",
+			title: "Write tests for the parser",
+			desc:  "Write tests for the parser in internal/orchestrator/plan.go.\nFiles: internal/orchestrator/plan_test.go",
+			want:  true,
+		},
+		{
+			name:  "bulleted Files: section is read across its continuation lines",
+			title: "Cover the retry path",
+			desc:  "Cover every branch.\nFiles:\n- internal/retry/backoff_test.go\n- internal/retry/jitter_test.go",
+			want:  true,
+		},
+		{
+			name:  "Files: section ends at the next label; criteria prose does not clear",
+			title: "Write tests for the widget",
+			desc:  "Files: internal/widget/widget_test.go\nAcceptance criteria: the behavior in internal/widget/widget.go is fully covered",
+			want:  true,
+		},
+		{
+			name:  "code file inside the Files: section still clears",
+			title: "Extend the widget and add rendering tests",
+			desc:  "Files:\n- internal/widget/widget.go\n- internal/widget/widget_test.go",
+			want:  false,
+		},
+		{
+			name:  "blank line after the Files: label falls back to whole-description evidence",
+			title: "Extend the widget and add rendering tests",
+			desc:  "Files:\n\n- internal/widget/widget.go\n- internal/widget/widget_test.go",
+			want:  false,
+		},
+		{
+			name:  "hyphenated label header ends the Files: section",
+			title: "Write tests for the widget",
+			desc:  "Files: internal/widget/widget_test.go\nNon-goals: do not touch internal/widget/widget.go here",
+			want:  true,
+		},
+		{
+			name:  "parenthesized label header ends the Files: section",
+			title: "Write tests for the widget",
+			desc:  "Files: internal/widget/widget_test.go\nAcceptance criteria (v2): behavior in internal/widget/widget.go is covered",
 			want:  true,
 		},
 	}
@@ -377,10 +437,15 @@ func TestPlanPhaseTestSplitRevisionSucceeds(t *testing.T) {
 	// Exactly one revision round: the original draft plus one re-prompt.
 	require.Len(t, llmFake.tasks, 2, "expected exactly two model calls (draft + one revision)")
 
-	// The revision prompt names the offending subtask and instructs folding its
-	// work into the subtask it depends on, resubmitting the full plan.
+	// The revision prompt names the offending subtask, carries the FULL
+	// previous plan (the revision run is stateless - without it, "fold its
+	// work into the subtask it depends on" names structure the model cannot
+	// see), and instructs resubmitting the full plan.
 	revisionPrompt := llmFake.tasks[1]
 	assert.Contains(t, revisionPrompt, offendingTitle)
+	assert.Contains(t, revisionPrompt, "Your previous plan")
+	assert.Contains(t, revisionPrompt, "Change fakeOps to a per-state map",
+		"the whole previous plan rides in the prompt, not just the offending subtask")
 	assert.Contains(t, revisionPrompt, "fold its work into the subtask it depends on")
 	assert.Contains(t, revisionPrompt, "resubmit the full corrected plan")
 
@@ -456,6 +521,96 @@ func TestReviseTestSplitBudgetCheckFailureKeepsOriginalPlan(t *testing.T) {
 	assert.Equal(t, p, revised, "the paid-for original plan is kept, not discarded")
 	assert.True(t, ops.loggedContains("revision budget check failed"),
 		"the fallback is status-logged; logs=%v", ops.logs)
+}
+
+// TestReviseMobTestSplit proves mob-drafted plans get the same test-split
+// validation as solo drafts, through the mob's own channel: one re-opened
+// feedback round (non-blind, the panel sees its own plan and the finding),
+// the revised plan adopted when clean, and the original kept when the
+// violation persists or the round fails.
+func TestReviseMobTestSplit(t *testing.T) {
+	violating := plan{CardTier: "simple", Subtasks: []planSubtask{
+		{Title: "Change fakeOps to a per-state map", Description: "d", Tier: "simple"},
+		{Title: offendingTitle, Description: "d", DependsOn: []int{0}, Tier: "simple"},
+	}}
+	cleanJSON := `{"card_tier":"simple","subtasks":[` +
+		`{"title":"Change fakeOps to a per-state map with its own tests","description":"d","depends_on":[],"tier":"simple"}]}`
+
+	t.Run("revision round fixes the split", func(t *testing.T) {
+		ops := &fakeOps{}
+		o := mobTestRun(ops, MobConfig{Participants: 2, Plan: true, Rounds: 2, BudgetFactor: 0.75}, 2.0)
+		eng := &scriptedEngine{outcomes: []mob.Outcome{{Synthesis: cleanJSON}}}
+		o.mobEngine = eng.run
+
+		prior := &mob.Outcome{Synthesis: "prior synthesis"}
+
+		revised, rout := o.reviseMobTestSplit(context.Background(), "", "", violating, prior)
+
+		require.Len(t, eng.topics, 1, "exactly one revision round")
+		assert.Equal(t, 1, eng.topics[0].Rounds, "the revision reuses the one-round adjust mechanism")
+		assert.False(t, eng.topics[0].Blind, "the panel must see its own plan and the finding")
+		assert.Contains(t, eng.topics[0].Briefing, "tests-ship-with-code",
+			"the briefing carries the validation finding")
+		assert.Contains(t, eng.topics[0].Briefing, offendingTitle)
+
+		require.Len(t, revised.Subtasks, 1, "the revised plan is adopted")
+		assert.Equal(t, "Change fakeOps to a per-state map with its own tests", revised.Subtasks[0].Title)
+		require.NotNil(t, rout)
+		assert.JSONEq(t, cleanJSON, rout.Synthesis, "the revised outcome replaces the prior one")
+	})
+
+	t.Run("clean plan passes through with no engine call", func(t *testing.T) {
+		ops := &fakeOps{}
+		o := mobTestRun(ops, MobConfig{Participants: 2, Plan: true, Rounds: 2, BudgetFactor: 0.75}, 2.0)
+		eng := &scriptedEngine{}
+		o.mobEngine = eng.run
+
+		clean := plan{Subtasks: []planSubtask{{Title: "Add the flag with its tests", Description: "d"}}}
+		prior := &mob.Outcome{Synthesis: "prior synthesis"}
+
+		got, rout := o.reviseMobTestSplit(context.Background(), "", "", clean, prior)
+
+		assert.Empty(t, eng.topics, "no violation, no revision round")
+		assert.Equal(t, clean, got)
+		assert.Same(t, prior, rout)
+	})
+
+	t.Run("persisting violation keeps the original plan", func(t *testing.T) {
+		ops := &fakeOps{}
+		o := mobTestRun(ops, MobConfig{Participants: 2, Plan: true, Rounds: 2, BudgetFactor: 0.75}, 2.0)
+
+		stillViolating := `{"card_tier":"simple","subtasks":[` +
+			`{"title":"Change the widget renderer","description":"d","depends_on":[],"tier":"simple"},` +
+			`{"title":"Extend the widget renderer and add rendering tests","description":"d","depends_on":[0],"tier":"simple"}]}`
+		eng := &scriptedEngine{outcomes: []mob.Outcome{{Synthesis: stillViolating}}}
+		o.mobEngine = eng.run
+
+		prior := &mob.Outcome{Synthesis: "prior synthesis"}
+
+		got, rout := o.reviseMobTestSplit(context.Background(), "", "", violating, prior)
+
+		require.Len(t, eng.topics, 1, "one revision attempt, then give up")
+		assert.Equal(t, violating, got, "the original plan is kept, not the still-violating revision")
+		assert.Same(t, prior, rout, "the original outcome is kept with the original plan")
+		assert.True(t, ops.loggedContains("proceeding with the original plan"),
+			"the fallback is status-logged; logs=%v", ops.logs)
+	})
+
+	t.Run("failed revision round keeps the original plan", func(t *testing.T) {
+		ops := &fakeOps{}
+		o := mobTestRun(ops, MobConfig{Participants: 2, Plan: true, Rounds: 2, BudgetFactor: 0.75}, 2.0)
+		eng := &scriptedEngine{outcomes: []mob.Outcome{{}}, errs: []error{errors.New("engine boom")}}
+		o.mobEngine = eng.run
+
+		prior := &mob.Outcome{Synthesis: "prior synthesis"}
+
+		got, rout := o.reviseMobTestSplit(context.Background(), "", "", violating, prior)
+
+		assert.Equal(t, violating, got)
+		assert.Same(t, prior, rout)
+		assert.True(t, ops.loggedContains("proceeding with the original plan"),
+			"the fallback is status-logged; logs=%v", ops.logs)
+	})
 }
 
 func TestPlanPhaseResume(t *testing.T) {

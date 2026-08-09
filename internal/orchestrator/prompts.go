@@ -703,17 +703,29 @@ func repairBlock(parseErr string) string {
 
 // testSplitRevisionBlock renders the post-parse validation feedback inserted
 // into the planner prompt on the single test-split revision round: title
-// names the subtask flagged by the test-only-subtask heuristic (a listed verb
-// followed by a tests token, and a non-empty depends_on) - the forbidden
-// split the planner prompt already forbids in prose but which a planner can
-// still emit. Language-neutral: no toolchain or build command is named. Same
-// non-empty-only contract as repairBlock's role in the prompt, but distinct
-// wording since this is a validation finding, not a parse failure.
-func testSplitRevisionBlock(title string) string {
+// names the subtask flagged by the test-only-subtask heuristic and previous
+// is the flagged plan's JSON - the revision run is stateless, so the plan
+// must ride in the prompt for "fold its work into the subtask it depends on"
+// to name structure the model can actually see. Language-neutral: no
+// toolchain or build command is named. Same non-empty-only contract as
+// repairBlock's role in the prompt, but distinct wording since this is a
+// validation finding, not a parse failure.
+func testSplitRevisionBlock(title string, previous []byte) string {
 	return fmt.Sprintf("\nYOUR PREVIOUS PLAN NEEDS ONE REVISION: subtask %q violates the "+
-		"tests-ship-with-code rule - fold its work into the subtask it depends on and resubmit "+
-		"the full corrected plan. Respond again with ONLY the JSON object described below - no "+
-		"prose, no code fences.\n", title)
+		"tests-ship-with-code rule - fold its work into the subtask it depends on, keep the "+
+		"rest of the plan intact, and resubmit the full corrected plan. Your previous plan:\n"+
+		"%s\nRespond again with ONLY the corrected JSON object described below - no prose, no "+
+		"code fences.\n", title, previous)
+}
+
+// testSplitMobFeedback is testSplitRevisionBlock's counterpart for a
+// mob-drafted plan: the same validation finding phrased as the feedback entry
+// of a re-opened discussion round, where the panel already sees its own plan
+// in the replayed transcript tail.
+func testSplitMobFeedback(title string) string {
+	return fmt.Sprintf("Plan validation: subtask %q violates the tests-ship-with-code rule - "+
+		"the subtask that writes the code writes and runs its own tests. Fold its work into "+
+		"the subtask it depends on and keep the rest of the plan intact.", title)
 }
 
 // feedbackBlock renders a HITL reviewer's requested changes inserted into the
