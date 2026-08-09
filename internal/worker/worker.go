@@ -184,9 +184,11 @@ func Run(ctx context.Context, spec RunSpec, ops CardOps, client llm.LLM, emit *e
 		return releaseWithError(ctx, ops, spec.CardID, fmt.Errorf("get task context: %w", err))
 	}
 
-	// Stalled-card recovery: when the card is in "stalled" state (e.g. a mid-run
-	// MCP outage cleared the claim but left the process running), attempt to
-	// recover it to "in_progress" before the FSM starts.
+	// Stalled-card recovery: the server's heartbeat-timeout sweep sets a card
+	// to "stalled" and clears its claim (e.g. after a mid-run MCP outage
+	// suppressed heartbeats while the previous run kept working). The
+	// ClaimCard above has already re-acquired the claim - claiming has no
+	// state gate - so only the state is left to recover before the FSM starts.
 	if tcx.State == "stalled" {
 		tcx = recoverStalledCard(ctx, ops, spec, tcx)
 	}
@@ -527,8 +529,9 @@ func isTransitionRejected(err error) bool {
 }
 
 // recoverStalledCard attempts to recover a stalled card back to "in_progress"
-// before the FSM starts. When the card is stalled (mid-run MCP outage cleared
-// the claim), it tries:
+// before the FSM starts. The caller has already re-claimed the card (the
+// server's stall sweep cleared the previous claim when it set the state), so
+// only the state needs fixing. It tries:
 //
 //  1. Direct TransitionCard(cardID, "in_progress").
 //  2. If that fails with a transition rejection (cannot transition from):
@@ -589,8 +592,12 @@ func recoverStalledCard(ctx context.Context, ops CardOps, spec RunSpec, original
 			return tcx
 		}
 	} else if err != nil {
-		// Non-rejection error (transient MCP/network issue) - log and continue.
-		// Do NOT attempt the fallback: a transient error should not retry blindly.
+		// Non-rejection error: anything from a transient MCP/network failure
+		// to a permanent server-side gate whose text differs from the
+		// state-machine rejection (e.g. "blocked by dependencies"). The todo
+		// fallback only helps when the direct edge is missing from the board
+		// config, so skip it and let the verify re-fetch below report the
+		// outcome.
 		slog.Warn("direct in_progress transition failed with non-rejection error; skipping fallback",
 			"card", spec.CardID, "error", err)
 	}
