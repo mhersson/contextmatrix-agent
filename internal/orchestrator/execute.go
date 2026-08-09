@@ -28,7 +28,7 @@ type solverCtx struct {
 	ledger     *Ledger
 	tools      *tools.Registry
 	workspace  string
-	coderModel func(sub subtaskRef, prompt string) string
+	coderModel func(ctx context.Context, sub subtaskRef, prompt string) string
 	boardOps   bool         // false: no subtask claim/heartbeat/complete (candidate mode)
 	push       bool         // false: never push (candidate mode)
 	tag        string       // "" parent; "candidate 2/3 (slug)" for candidate log lines
@@ -294,7 +294,7 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 	// is the authoritative bound (it errors at the cap), the +1 is a belt-and-braces
 	// ceiling so a logic slip can never spin.
 	for attempt := 0; attempt <= reselectCap; attempt++ {
-		model := sc.coderModel(sub, prompt)
+		model := sc.coderModel(ctx, sub, prompt)
 
 		// A candidate's reselection-aware resolver returns "" when its model pool is
 		// exhausted (every viable model excluded this run). Drop the candidate
@@ -399,13 +399,17 @@ func (o *run) pushBranch(ctx context.Context) error {
 // resolveCoderModel picks the coder model for a subtask: the card's coder pin
 // when it is catalog-resolvable, else the best-value complexity selection for
 // the subtask's tier and a real window estimate of the coder prompt.
-func (o *run) resolveCoderModel(sub subtaskRef, prompt string) string {
+func (o *run) resolveCoderModel(ctx context.Context, sub subtaskRef, prompt string) string {
 	if resolvePin(o.d.Registry, o.tc.ModelCoder) {
 		// A pinned model is returned even if it is in o.excluded: we never override
 		// an explicit operator pin with an auto-selected substitute. A pinned model
 		// that is harness-incapable therefore keeps being re-selected, exhausts the
 		// re-selection cap, and parks - the blacklist still records it.
 		return o.tc.ModelCoder
+	}
+
+	if o.tc.ModelCoder != "" {
+		o.warnUnresolvablePin(ctx, "coder", o.tc.ModelCoder)
 	}
 
 	spec := o.d.Registry.SelectByComplexity(registry.SelectInput{

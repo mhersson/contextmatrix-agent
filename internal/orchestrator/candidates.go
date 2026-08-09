@@ -141,6 +141,8 @@ func (o *run) runFanout(ctx context.Context) (retErr error) {
 	pin := ""
 	if resolvePin(o.d.Registry, o.tc.ModelCoder) {
 		pin = o.tc.ModelCoder
+	} else if o.tc.ModelCoder != "" {
+		o.warnUnresolvablePin(ctx, "coder", o.tc.ModelCoder)
 	}
 
 	specs := o.d.Registry.SelectCandidateModels(registry.SelectInput{
@@ -398,8 +400,8 @@ func lastSubtaskID(subs []subtaskRef) string {
 // shared cap, and parks. When the pool is exhausted - the registry can only offer
 // an already-excluded model (its capable-default fallback) - it returns "", the
 // pool-exhausted sentinel runCoderWith turns into a clean candidate drop.
-func (o *run) candidateCoderModel(c *candidate) func(subtaskRef, string) string {
-	return func(_ subtaskRef, prompt string) string {
+func (o *run) candidateCoderModel(c *candidate) func(context.Context, subtaskRef, string) string {
+	return func(_ context.Context, _ subtaskRef, prompt string) string {
 		o.selMu.Lock()
 		defer o.selMu.Unlock()
 
