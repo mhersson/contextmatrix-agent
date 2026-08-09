@@ -17,7 +17,7 @@ func TestFromSelectionBuildsCatalogPriorsAndFavorites(t *testing.T) {
 		Favorites: []protocol.FavoriteRule{{Tier: "complex", Models: []string{"z-ai/glm-5.2"}}},
 		Blacklist: []string{"bad/model"},
 	}
-	r := FromSelection(sc, "capable/default", 0)
+	r := FromSelection(sc, "capable/default", 0, false)
 
 	got := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierComplex})
 	if got.Model != "z-ai/glm-5.2" {
@@ -30,7 +30,7 @@ func TestFromSelectionBuildsCatalogPriorsAndFavorites(t *testing.T) {
 }
 
 func TestFromSelectionNilReturnsCapableDefault(t *testing.T) {
-	r := FromSelection(nil, "capable/default", 0)
+	r := FromSelection(nil, "capable/default", 0, false)
 
 	got := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierComplex})
 	if got.Model != "capable/default" {
@@ -49,12 +49,32 @@ func TestFromSelectionThreadsPriceHeadroom(t *testing.T) {
 	}
 	in := SelectInput{Role: RoleCoder, Tier: TierModerate}
 
-	rDefault := FromSelection(sc, "capable/default", 0) // 0 -> worker default (1.5)
+	rDefault := FromSelection(sc, "capable/default", 0, false) // 0 -> worker default (1.5)
 	assert.Equal(t, "cheap/model", rDefault.SelectByComplexity(in).Model)
 
-	rWide := FromSelection(sc, "capable/default", 3.0)
+	rWide := FromSelection(sc, "capable/default", 3.0, false)
 	assert.Equal(t, "premium/model", rWide.SelectByComplexity(in).Model,
 		"a non-default headroom must widen the best-value band")
+}
+
+func TestFromSelectionThreadsMaxCapability(t *testing.T) {
+	// With the default headroom (1.5x) cheap wins. With maxCapability=true,
+	// the expensive high-quality model wins regardless of price.
+	sc := &protocol.SelectionContext{
+		Candidates: []protocol.CandidateModel{
+			{Slug: "cheap/model", PromptPricePerTok: 1, CompletionPricePerTok: 1, ContextWindow: 200000, CoderPrior: 0.80, ReviewerPrior: 0.80},
+			{Slug: "premium/model", PromptPricePerTok: 2, CompletionPricePerTok: 2.5, ContextWindow: 200000, CoderPrior: 0.95, ReviewerPrior: 0.95},
+		},
+	}
+	in := SelectInput{Role: RoleCoder, Tier: TierModerate}
+
+	rDefault := FromSelection(sc, "capable/default", 0, false)
+	assert.Equal(t, "cheap/model", rDefault.SelectByComplexity(in).Model,
+		"default must pick the cheaper model")
+
+	rMax := FromSelection(sc, "capable/default", 0, true)
+	assert.Equal(t, "premium/model", rMax.SelectByComplexity(in).Model,
+		"maxCapability=true must pick the premium (more capable) model regardless of price")
 }
 
 func TestOutcomeBias(t *testing.T) {
@@ -77,7 +97,7 @@ func TestOutcomeBias(t *testing.T) {
 
 	t.Run("floor cleared: coder prior biased, A picked over B", func(t *testing.T) {
 		sc := &protocol.SelectionContext{Candidates: candidates, OutcomeFloor: 20}
-		r := FromSelection(sc, "fallback/capable", 0)
+		r := FromSelection(sc, "fallback/capable", 0, false)
 
 		a, ok := r.priors.ForRole("model/a", RoleCoder)
 		require.True(t, ok)
@@ -93,7 +113,7 @@ func TestOutcomeBias(t *testing.T) {
 
 	t.Run("below floor: both unbiased, deterministic tie-break unchanged", func(t *testing.T) {
 		sc := &protocol.SelectionContext{Candidates: candidates, OutcomeFloor: 40}
-		r := FromSelection(sc, "fallback/capable", 0)
+		r := FromSelection(sc, "fallback/capable", 0, false)
 
 		a, ok := r.priors.ForRole("model/a", RoleCoder)
 		require.True(t, ok)
@@ -109,7 +129,7 @@ func TestOutcomeBias(t *testing.T) {
 
 	t.Run("floor zero disables biasing entirely", func(t *testing.T) {
 		sc := &protocol.SelectionContext{Candidates: candidates, OutcomeFloor: 0}
-		r := FromSelection(sc, "fallback/capable", 0)
+		r := FromSelection(sc, "fallback/capable", 0, false)
 
 		a, ok := r.priors.ForRole("model/a", RoleCoder)
 		require.True(t, ok)
@@ -123,7 +143,7 @@ func TestOutcomeBias(t *testing.T) {
 			},
 			OutcomeFloor: 1,
 		}
-		r := FromSelection(sc, "fallback/capable", 0)
+		r := FromSelection(sc, "fallback/capable", 0, false)
 
 		c, ok := r.priors.ForRole("model/c", RoleCoder)
 		require.True(t, ok)
@@ -132,7 +152,7 @@ func TestOutcomeBias(t *testing.T) {
 
 	t.Run("reviewer prior never biased", func(t *testing.T) {
 		sc := &protocol.SelectionContext{Candidates: candidates, OutcomeFloor: 20}
-		r := FromSelection(sc, "fallback/capable", 0)
+		r := FromSelection(sc, "fallback/capable", 0, false)
 
 		a, ok := r.priors.ForRole("model/a", RoleReviewer)
 		require.True(t, ok)
@@ -178,7 +198,7 @@ func TestFromSelectionThreadsCreators(t *testing.T) {
 			{Slug: "claude-x", PromptPricePerTok: 1e-6, CompletionPricePerTok: 2e-6, ContextWindow: 200000, ReviewerPrior: 0.85, Creator: "anthropic"},
 		},
 	}
-	r := FromSelection(sc, "capable-default", 0)
+	r := FromSelection(sc, "capable-default", 0, false)
 
 	panel := r.SelectDiscussionPanel(SelectInput{Role: RoleReviewer, Tier: TierComplex, EstTokens: 50000}, 3)
 	require.Len(t, panel, 3)
@@ -191,7 +211,7 @@ func TestFromSelectionThreadsCreators(t *testing.T) {
 		sc.Candidates[i].Creator = ""
 	}
 
-	rBlind := FromSelection(sc, "capable-default", 0)
+	rBlind := FromSelection(sc, "capable-default", 0, false)
 
 	panel = rBlind.SelectDiscussionPanel(SelectInput{Role: RoleReviewer, Tier: TierComplex, EstTokens: 50000}, 3)
 	require.Len(t, panel, 3)
