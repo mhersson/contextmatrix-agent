@@ -79,6 +79,27 @@ func TestClassifyVerifyTimeoutNote(t *testing.T) {
 	assert.Contains(t, res.Note, "timed out after 1m30s")
 }
 
+// TestClassifyVerifyResourceExhaustionNote pins the note for a spawn that died
+// of container resource pressure: the operator must read exhaustion, not a
+// "tool missing" hunt for a toolchain that is present. A start-error WITHOUT
+// the signature keeps the tool-missing note.
+func TestClassifyVerifyResourceExhaustionNote(t *testing.T) {
+	exhausted := classifyVerify(verifyPlan{}, verifyexec.Outcome{
+		StartErr: true, ExitCode: -1,
+		Output: "fork/exec /usr/bin/x: resource temporarily unavailable",
+	})
+	assert.Equal(t, verifySkipped, exhausted.Status)
+	assert.Contains(t, exhausted.Note, "resource exhaustion")
+	assert.NotContains(t, exhausted.Note, "tool missing")
+
+	plain := classifyVerify(verifyPlan{}, verifyexec.Outcome{
+		StartErr: true, ExitCode: -1,
+		Output: "fork/exec /usr/bin/x: no such file or directory",
+	})
+	assert.Equal(t, verifySkipped, plain.Status)
+	assert.Contains(t, plain.Note, "tool missing")
+}
+
 func TestDetectVerifyCommand(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("exec-bit probing is POSIX-only")
@@ -703,6 +724,33 @@ func TestRunVerifyPlanRetriesOnStartErrResourceExhaustion(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, verifyPassed, res.Status)
 	assert.Equal(t, 2, calls, "a start-error carrying the exhaustion signature in its text retries once")
+}
+
+// TestRunVerifyPlanStartErrExhaustionOnBothAttempts pins the postmortem's
+// literal terminal state: both spawns die of resource pressure. The result is
+// skipped (environmental, exempt from outcome reporting) with the
+// exhaustion note - not a misleading "tool missing" - and no third attempt.
+func TestRunVerifyPlanStartErrExhaustionOnBothAttempts(t *testing.T) {
+	withFastVerifyRetryWait(t)
+
+	o := &run{d: Deps{Cfg: Config{Workspace: t.TempDir()}}}
+
+	calls := 0
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		calls++
+
+		return verifyexec.Outcome{
+			ExitCode: -1,
+			StartErr: true,
+			Output:   "fork/exec /usr/bin/x: resource temporarily unavailable",
+		}
+	}
+
+	res, err := o.runVerifyPlan(context.Background(), "dir", verifyPlan{Argv: []string{"x"}, Timeout: time.Minute})
+	require.NoError(t, err)
+	assert.Equal(t, verifySkipped, res.Status)
+	assert.Contains(t, res.Note, "resource exhaustion")
+	assert.Equal(t, 2, calls, "exactly one retry, then the terminal classification stands")
 }
 
 func TestRunVerifyPlanDoesNotRetryPlainFailure(t *testing.T) {

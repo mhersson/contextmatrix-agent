@@ -323,10 +323,10 @@ func (f *fakeOps) ReleaseCard(_ context.Context, cardID string) error {
 // assembles a malformed row fails the test right here instead of the fake
 // silently accepting it: model must be non-empty, result one of
 // win/loss/failed, n_candidates >= 1. A violation is returned as an error
-// (the fake's owner asserts on it, or a caller that swallows it best-effort
-// still leaves it recorded for its own scripted-error tests to override) and
-// the batch is not recorded, matching the real store's all-or-nothing
-// transaction.
+// WITHOUT recording the batch, matching the real store's all-or-nothing
+// transaction - so even a best-effort caller that only warns on the error
+// leaves no row behind for reportOutcomes assertions to see, and the test
+// fails on the missing row.
 func (f *fakeOps) ReportModelOutcomes(_ context.Context, cardID string, outcomes []cmclient.ModelOutcome) error {
 	for i, o := range outcomes {
 		if o.Model == "" {

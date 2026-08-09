@@ -10,6 +10,7 @@ import (
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
+	"github.com/mhersson/contextmatrix-agent/internal/verifyexec"
 	"github.com/mhersson/contextmatrix-harness/harness"
 	"github.com/mhersson/contextmatrix-harness/tools"
 )
@@ -150,7 +151,10 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 	// outcome report below carries only THIS subtask's cost delta - not the
 	// run's cumulative total, which would inflate every later subtask's row
 	// with every earlier subtask's spend (and, on a resumed run, with whole
-	// prior sessions' spend too).
+	// prior sessions' spend too). Known limit: Spent() reconciles local and
+	// server-reported totals via max(), not an additive meter, so against a
+	// cost-less gateway a resumed run's deltas can under-report (down to 0).
+	// Accepted: the result is the signal selection needs; CostUSD is advisory.
 	spendBefore := sc.ledger.Spent()
 
 	if sc.boardOps {
@@ -226,18 +230,12 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 	}
 
 	if sc.boardOps {
-		// Report the win BEFORE CompleteTask, not after: CM's
-		// report_model_outcome handler is claim-gated (requireActiveClaim), and
-		// a successful complete_task atomically transitions the card and
-		// releases the claim - report_usage is NOT the transferable precedent
-		// here (usage reporting carries no claim gate). Reporting after a
-		// successful CompleteTask would silently vanish for every real win. The
-		// normal (non-salvage) completion path: keyed on the subtask itself.
-		// VerifyPass is false here - no authoritative verify ran on this path,
-		// so it is simply unknown, not a failure signal; the field stays
-		// informational for a plain finish-terminated completion. The model
-		// finished, committed, and pushed successfully, so the win is real
-		// regardless of what the board bookkeeping below does with it.
+		// Report the win BEFORE CompleteTask (claim-gating rationale on
+		// reportSoloOutcome - a report after complete_task releases the claim
+		// would silently vanish). VerifyPass false means unknown here, not
+		// failure: no authoritative verify runs on a finish-terminated
+		// completion. The model finished, committed, and pushed, so the win is
+		// real regardless of what the board bookkeeping below does with it.
 		o.reportSoloOutcome(ctx, sub.ID, model, "win", false, sc.ledger.Spent()-spendBefore)
 
 		if err := d.Ops.CompleteTask(ctx, sub.ID, commitMsg); err != nil {
@@ -282,10 +280,12 @@ func (o *run) releaseSubtask(ctx context.Context, cardID string) {
 // clean (no git reset). The loop is bounded by recoverIncapable's per-card cap:
 // once exhausted it returns the wrapped park error. Any non-incapable run error
 // (transport, context limit, budget) is returned immediately, unwrapped of the
-// recovery loop. Returns the successful run's result, alongside the model that
-// actually produced it (spendAndReport's res.ModelUsed-or-configured fallback) -
-// the same value reported to CM via ReportUsage, so a caller reporting a model
-// outcome names exactly the model that was billed.
+// recovery loop. Returns the successful run's result, alongside the SELECTED
+// catalog slug for that attempt - not the gateway-echoed ModelUsed - because a
+// caller reporting a model outcome must key the row the way Best-of-N rows are
+// keyed (candidates.go's c.model = spec.Model): CM attaches outcome stats back
+// onto candidates by that slug, so a row keyed on a gateway's echoed name would
+// never rejoin selection.
 func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, prompt string) (harness.Result, string, error) {
 	d := o.d
 	cfg := d.Cfg
@@ -339,14 +339,14 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 		}
 
 		// The incapable attempt is charged too - it burned tokens before tripping.
-		used := o.spendAndReport(ctx, sc.ledger, target, "execute: report usage failed", res, model, "main", dur)
+		o.spendAndReport(ctx, sc.ledger, target, "execute: report usage failed", res, model, "main", dur)
 
 		var ie *IncapableError
 		if errors.As(err, &ie) {
 			// recoverIncapable blacklists + excludes the model and returns an error
 			// only when the per-card re-selection cap is exhausted - park then.
 			if rerr := o.recoverIncapable(ctx, ie); rerr != nil {
-				return res, used, rerr
+				return res, model, rerr
 			}
 
 			// Re-select (the failed model is now excluded) and re-run the SAME
@@ -355,10 +355,10 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 		}
 
 		if err != nil {
-			return res, used, fmt.Errorf("coder run for %s: %w", sub.ID, err)
+			return res, model, fmt.Errorf("coder run for %s: %w", sub.ID, err)
 		}
 
-		return res, used, nil
+		return res, model, nil
 	}
 
 	// Unreachable in practice: recoverIncapable errors at the cap before the loop
@@ -516,18 +516,18 @@ func (o *run) salvageCapped(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 // instead of surfacing as a plain turn-cap.
 //
 // Every exit that has not yet reached a verified win reports a "failed" model
-// outcome - the run did not complete, regardless of cause - except two
-// environment-caused exits, neither of which is evidence about the model: the
+// outcome - the run did not complete, regardless of cause - except the
+// environment-caused exits, none of which is evidence about the model: the
 // *ToolchainMissingError branch (a missing tool during verify resolution,
-// left unreported like its unlogged card-log line), and a verifySkipped
-// result from the authoritative run itself (a timeout or a missing tool
-// discovered at execution time rather than resolution time). The
-// push-failure exit below the authoritative verify reports VerifyPass true:
-// the model's work was already proven correct, so the park is
-// infrastructure, not a capability gap - distinguishing it from the
-// VerifyPass false reports above, where the verify never confirmed anything.
-// The win report fires BEFORE CompleteTask
-// (see reportSoloOutcome) - once it fires, a subsequent CompleteTask failure
+// left unreported like its unlogged card-log line), a verifySkipped result
+// from the authoritative run itself (a timeout or a missing tool discovered
+// at execution time rather than resolution time), a verify that ran but died
+// of container resource pressure on both attempts (LooksResourceExhausted on
+// the final output), and the push-failure exit below a PASSING verify - the
+// model's work was already proven correct there, so the park is
+// infrastructure, not a capability gap, and it earns no row in either
+// direction. The win report fires BEFORE CompleteTask (claim-gating rationale
+// on reportSoloOutcome) - once it fires, a subsequent CompleteTask failure
 // gets no report of its own: the model's work already earned its win, and a
 // board-write hiccup afterward is not a second, contradictory outcome.
 // spendBefore is the run ledger's total at this subtask's start (captured by
@@ -591,14 +591,29 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 
 	vres, rerr := o.runVerifyPlan(ctx, sc.workspace, plan)
 	if rerr != nil || vres.Status != verifyPassed {
+		// A verify that ran and failed can still be environmental: under a pids
+		// limit `go test` compiles, then its inner fork/exec dies with EAGAIN and
+		// go exits 1 - classified failed, surviving the single retry when the
+		// pressure persists. The signature check keeps that shape off the
+		// leaderboard below; a genuine failure whose output happens to print an
+		// exhaustion string loses one row - bounded, and the park itself still
+		// stands either way.
+		exhausted := vres.Status != verifySkipped && verifyexec.LooksResourceExhausted(vres.Output)
+
 		// Name the classification when there is one (e.g. a timeout or a missing
 		// tool) so a park caused by the environment reads differently on the card
 		// log from a real failure, which carries no note. The note already states
 		// its own verdict, so use it alone rather than wrapping it in a second
-		// "verify did not pass" that repeats the same thing.
+		// "verify did not pass" that repeats the same thing. The exhausted-failure
+		// shape carries no note of its own, so name it here - the card log must
+		// agree with the reporting exemption below about the cause.
 		reason := "verify did not pass"
-		if vres.Note != "" {
+
+		switch {
+		case vres.Note != "":
 			reason = vres.Note
+		case exhausted:
+			reason = "verify failed under container resource exhaustion - treated as environmental"
 		}
 
 		o.logSoloCapPark(ctx, sub.ID, reason)
@@ -606,9 +621,9 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 
 		// A skipped verify (timeout or missing tool - rerr != nil takes the same
 		// zero-value Status) is an environment problem, not evidence about the
-		// model - the same exemption the ToolchainMissingError branch above gets.
-		// Only a verify that actually ran and failed is reported.
-		if vres.Status != verifySkipped {
+		// model - the same exemption the ToolchainMissingError branch above gets,
+		// extended to the exhausted-failure shape.
+		if vres.Status != verifySkipped && !exhausted {
 			o.reportSoloOutcome(ctx, sub.ID, model, "failed", false, sc.ledger.Spent()-spendBefore)
 		}
 
@@ -617,26 +632,21 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 
 	// Verified: complete exactly like a finish-terminated run. A push failure
 	// declines the salvage (the run parks); the spend was already reported, so a
-	// resume must not double-charge. No tier escalation below this point: the
-	// authoritative verify already confirmed the model's work is correct, so the
-	// park cause here is infrastructure (a push or a board-write hiccup), not a
-	// capability gap - resuming at the SAME tier is the right economics, not a
-	// bigger model.
+	// resume must not double-charge. No tier escalation and no outcome row below
+	// this point on a decline: the authoritative verify already confirmed the
+	// model's work is correct, so a park here is infrastructure (a push or a
+	// board-write hiccup), not a capability gap - a "failed" row would penalize
+	// the model at full weight for a fault that is not its own.
 	if sc.push {
 		if perr := o.pushBranch(ctx); perr != nil {
-			o.reportSoloOutcome(ctx, sub.ID, model, "failed", true, sc.ledger.Spent()-spendBefore)
-
 			return false, nil
 		}
 	}
 
-	// The win report fires BEFORE CompleteTask, not after (see the
-	// server-side rationale on reportSoloOutcome): the verify already
-	// confirmed the work is correct at this point, so the win is real
-	// regardless of what CompleteTask does next. A subsequent CompleteTask
-	// failure below therefore gets no report of its own - the outcome was
-	// already truthfully reported, and a second, contradictory row would be
-	// wrong.
+	// The win report fires BEFORE CompleteTask, not after (claim-gating
+	// rationale on reportSoloOutcome): the verify already confirmed the work,
+	// so the win is real regardless of what CompleteTask does next - a
+	// CompleteTask failure below gets no second, contradictory row.
 	o.reportSoloOutcome(ctx, sub.ID, model, "win", true, sc.ledger.Spent()-spendBefore)
 
 	if cerr := o.d.Ops.CompleteTask(ctx, sub.ID, commitMsg); cerr != nil {

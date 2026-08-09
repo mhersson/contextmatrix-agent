@@ -174,6 +174,16 @@ func classifyVerify(plan verifyPlan, out verifyexec.Outcome) verifyResult {
 			Output: out.Output,
 			Note:   fmt.Sprintf("verify timed out after %s - inconclusive, treated as unverified", plan.Timeout),
 		}
+	case out.StartErr && verifyexec.LooksResourceExhausted(out.Output):
+		// A spawn that died with an exhaustion signature (fork/exec EAGAIN under
+		// container pressure) is not a missing tool: the note must not send the
+		// operator hunting for a toolchain that is present. Same skipped status,
+		// so everything keyed on verifySkipped is unaffected.
+		return verifyResult{
+			Status: verifySkipped,
+			Output: out.Output,
+			Note:   "verify could not run - container resource exhaustion, treated as unverified",
+		}
 	case out.StartErr || out.ExitCode == 127 || (plan.Wrapper && verifyexec.LooksToolMissing(out.Output)):
 		// The tool-missing heuristic is consulted ONLY for a detected wrapper, which
 		// swallows an inner tool's 127 into a plain exit code. For every other
