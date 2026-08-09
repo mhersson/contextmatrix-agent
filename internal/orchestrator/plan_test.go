@@ -1406,4 +1406,17 @@ func TestDraftPlanFallsBackToReadToolsWhenPlanToolsNil(t *testing.T) {
 	require.NoError(t, runPlan(context.Background(), o),
 		"a nil PlanTools must degrade to ReadTools, not panic")
 	require.Len(t, ops.createCardArgs, 2)
+
+	// The would-be plan registry (what a wired PlanTools would build) carries
+	// the findings tool on top of the read-only set, so it differs in size
+	// from d.ReadTools - a sanity check that the equality assertion below is
+	// not vacuously true.
+	planReg := tools.NewRegistry(append(tools.ReadOnlyTools("."), NewFindingsTool())...)
+	require.NotEqual(t, len(planReg.All()), len(o.d.ReadTools.All()),
+		"sanity: the plan registry and ReadTools differ in size, or this test proves nothing")
+
+	toolCounts := llmFake.toolCountsSeen()
+	require.Len(t, toolCounts, 1)
+	assert.Equal(t, len(o.d.ReadTools.All()), toolCounts[0],
+		"nil PlanTools must fall back to exactly d.ReadTools, not some other registry")
 }

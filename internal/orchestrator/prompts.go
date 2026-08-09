@@ -104,8 +104,9 @@ contract between formatFixes and fixFiles is not broken.`
 // optional repair block (the previous parse error). Empty optional blocks
 // collapse to nothing.
 const planPrompt = `%s%sYou are the planning agent for a software task. You have read-only
-tools (read, grep, glob) to inspect the codebase. You do NOT create or modify
-cards or files - you only read code and output a plan as JSON.
+tools (read, grep, glob, git) to inspect the codebase, plus record_finding to
+save durable notes as you go. You do NOT create or modify cards or files - you
+only read code and output a plan as JSON.
 
 Repo root: %s - paths are relative to it.
 

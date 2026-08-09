@@ -562,7 +562,7 @@ func (o *run) execute(ctx context.Context) error {
 			if errors.As(err, &mte) {
 				// Turn-cap park: same shape as the budget/context arms - log
 				// best-effort, then stop without entering the next phase.
-				o.d.logCard(ctx, "%s", maxTurnsLogMessage(mte))
+				o.d.logCard(ctx, "%s", maxTurnsLogMessage(phase, mte))
 			}
 
 			var tme *ToolchainMissingError
@@ -589,8 +589,16 @@ func contextLimitLogMessage(cle *ContextLimitError) string {
 	return fmt.Sprintf("context window reached on model %q (%d tokens) - parking work; split the subtask or pin a larger-window model", cle.Model, cle.ContextWindow)
 }
 
-// maxTurnsLogMessage is the canonical card-log line for a turn-cap park.
-func maxTurnsLogMessage(mte *MaxTurnsError) string {
+// maxTurnsLogMessage is the canonical card-log line for a turn-cap park. The
+// remedy differs by phase: the plan phase's budget is capped at planMaxTurns
+// (see runmodel.go) regardless of CMX_MAX_TURNS, and it is the phase that
+// creates subtasks, so "raise CMX_MAX_TURNS" or "split the subtask" would
+// both be no-ops there. Every other phase keeps the original wording.
+func maxTurnsLogMessage(phase string, mte *MaxTurnsError) string {
+	if phase == "plan" {
+		return fmt.Sprintf("turn cap reached on model %q after %d turns - parking work; narrow the card's scope or raise planMaxTurns", mte.Model, mte.Turns)
+	}
+
 	return fmt.Sprintf("turn cap reached on model %q after %d turns - parking work; raise CMX_MAX_TURNS or split the subtask", mte.Model, mte.Turns)
 }
 
