@@ -270,6 +270,38 @@ func TestCoderMaxTurns(t *testing.T) {
 	}
 }
 
+func TestPlanTurnCap(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		base   int
+		repair bool
+		want   int
+	}{
+		"first attempt caps at the plan cap":      {base: 45, repair: false, want: planMaxTurns},
+		"repair caps tighter":                     {base: 45, repair: true, want: planRepairMaxTurns},
+		"a smaller configured base is not raised": {base: 8, repair: false, want: 8},
+		"a smaller base wins over the repair cap": {base: 8, repair: true, want: 8},
+		"base equal to the cap is unchanged":      {base: planMaxTurns, repair: false, want: planMaxTurns},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, planTurnCap(tc.base, tc.repair))
+		})
+	}
+}
+
+// The nudge must land inside the capped budget or the cap silently removes the
+// only forcing function the plan phase has.
+func TestPlanCapLeavesRoomForTheWrapUpNudge(t *testing.T) {
+	t.Parallel()
+
+	assert.Greater(t, planMaxTurns, wrapUpTurns,
+		"planMaxTurns must exceed wrapUpTurns so the wrap-up nudge still fires")
+	assert.Greater(t, planRepairMaxTurns, wrapUpTurns,
+		"the repair budget must also leave room for the nudge")
+}
+
 // TestSpendAndReport pins the shared accounting tail of every model call: the
 // spend lands on the GIVEN ledger, the reported model is res.ModelUsed with a
 // fallback to the configured slug only when the provider echoed none, the
