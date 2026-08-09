@@ -168,6 +168,15 @@ per-subtask tier. Tiers: "simple" (mechanical, low-risk), "moderate"
 Read the relevant code first to ground the plan in the real structure, then
 respond.
 
+As you work, call record_finding the moment you establish something you will
+rely on: a confirmed location, a decision about how to split the work, a
+constraint you have ruled out. State the fact so it is useful without re-reading
+the source. Every call returns your full list - read that list before you
+re-open a file you have already inspected.
+
+An anchor in your recorded findings counts as confirmed. Do not re-read or
+re-grep to re-confirm something you already recorded.
+
 PARENT CARD
 Title: %s
 
