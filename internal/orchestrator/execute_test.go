@@ -1000,9 +1000,8 @@ func TestSalvageDeclineEscalatesSubtaskTier(t *testing.T) {
 	err := runExecute(context.Background(), o)
 	require.Error(t, err, "a capped subtask whose committed work fails verify parks")
 
-	body := ops.bodyFor("SUB-1")
-	assert.Contains(t, body, "<!-- cm:tier=complex -->", "the park escalates the marker one step")
-	assert.Contains(t, body, "Implement the thing.", "the marker escalation leaves the rest of the body unchanged")
+	assert.Equal(t, "Implement the thing.\n\n<!-- cm:tier=complex -->", ops.bodyFor("SUB-1"),
+		"the park escalates the marker one step, leaving the rest of the body unchanged")
 	assert.True(t, ops.loggedContains("escalating subtask tier moderate -> complex"),
 		"the escalation is activity-logged; logs=%v", ops.logs)
 }
@@ -1025,15 +1024,16 @@ func TestSalvageDeclineOnCleanTreeEscalatesSubtaskTier(t *testing.T) {
 	err := runExecute(context.Background(), o)
 	require.Error(t, err, "a clean tree carries no completion evidence, so the cap parks")
 
-	body := ops.bodyFor("SUB-1")
-	assert.Contains(t, body, "<!-- cm:tier=moderate -->", "the clean-tree decline still escalates the marker")
+	assert.Equal(t, "Implement the thing.\n\n<!-- cm:tier=moderate -->", ops.bodyFor("SUB-1"),
+		"the clean-tree decline still escalates the marker, leaving the rest of the body unchanged")
 	assert.True(t, ops.loggedContains("escalating subtask tier simple -> moderate"),
 		"the escalation is activity-logged; logs=%v", ops.logs)
 }
 
 // TestSalvageDeclineCriticalTierStaysCritical proves critical is the ceiling:
-// the escalation still runs and still writes the marker (a no-op value change),
-// and the original park advisory still logs unchanged.
+// there is nowhere left to escalate to, so the board write is skipped
+// entirely (nothing to persist, nothing to announce), while the original park
+// advisory still logs exactly as it would for any other tier.
 func TestSalvageDeclineCriticalTierStaysCritical(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true}
@@ -1055,11 +1055,12 @@ func TestSalvageDeclineCriticalTierStaysCritical(t *testing.T) {
 	err := runExecute(context.Background(), o)
 	require.Error(t, err, "a capped subtask whose committed work fails verify parks")
 
-	body := ops.bodyFor("SUB-1")
-	assert.Contains(t, body, "<!-- cm:tier=critical -->", "critical is the escalation ceiling")
+	assert.Equal(t, -1, indexOfCall(ops.recorded(), "UpdateCardBody:SUB-1"),
+		"critical is already the ceiling; no board write is needed")
+	assert.Empty(t, ops.bodyFor("SUB-1"), "no marker write when the tier cannot escalate further")
 	assert.True(t, ops.loggedContains("verify did not pass"), "the original park advisory still logs; logs=%v", ops.logs)
-	assert.True(t, ops.loggedContains("escalating subtask tier critical -> critical"),
-		"the escalation still logs even at the ceiling; logs=%v", ops.logs)
+	assert.False(t, ops.loggedContains("escalating subtask tier"),
+		"no escalation announcement when nothing escalated; logs=%v", ops.logs)
 }
 
 // TestSalvageDeclineAfterVerifyPassKeepsTier proves the escalation is
@@ -1085,6 +1086,40 @@ func TestSalvageDeclineAfterVerifyPassKeepsTier(t *testing.T) {
 
 	err := runExecute(context.Background(), o)
 	require.Error(t, err, "a push failure after a passing verify still parks")
+
+	var mte *MaxTurnsError
+	require.ErrorAs(t, err, &mte)
+
+	assert.Equal(t, -1, indexOfCall(ops.recorded(), "UpdateCardBody:SUB-1"),
+		"a park after a passing verify must not touch the subtask body at all")
+	assert.Empty(t, ops.bodyFor("SUB-1"), "no tier-marker write on a post-verify-pass park")
+	assert.False(t, ops.loggedContains("escalating subtask tier"),
+		"a post-verify-pass park must not log a tier escalation; logs=%v", ops.logs)
+}
+
+// TestSalvageDeclineAfterCompleteTaskFailKeepsTier is the sibling of
+// TestSalvageDeclineAfterVerifyPassKeepsTier for the OTHER post-verify-pass
+// park cause: the push succeeds but the board's CompleteTask call fails. Same
+// contract - the model's work is proven correct, so this is an infrastructure
+// park, not a capability gap, and must not touch the tier marker.
+func TestSalvageDeclineAfterCompleteTaskFailKeepsTier(t *testing.T) {
+	ops := &fakeOps{completeTaskErr: errors.New("complete task boom")}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: burnResps(5)}
+	d := execTestDeps(ops, git, client)
+	d.Cfg.MaxTurns = 5
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "moderate"}}, 0)
+	ops.taskContext = cmclient.TaskContext{
+		Description: withTierMarker("Implement the thing.", "moderate"),
+	}
+
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 0} // pass
+	}
+
+	err := runExecute(context.Background(), o)
+	require.Error(t, err, "a CompleteTask failure after a passing verify still parks")
 
 	var mte *MaxTurnsError
 	require.ErrorAs(t, err, &mte)

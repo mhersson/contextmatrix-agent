@@ -37,11 +37,12 @@ type fakeOps struct {
 	// the single-value taskContext/taskCtxErr behaviour above.
 	taskContexts map[string]cmclient.TaskContext
 
-	setPhaseErr    error
-	addLogErr      error
-	claimErr       error
-	updateBodyErr  error
-	releaseCardErr error
+	setPhaseErr     error
+	addLogErr       error
+	claimErr        error
+	updateBodyErr   error
+	releaseCardErr  error
+	completeTaskErr error
 
 	// logs captures every AddLog message (verbatim) so model-selection tests can
 	// assert the activity feed received the expected entry.
@@ -307,7 +308,7 @@ func (f *fakeOps) BlacklistModel(_ context.Context, cardID, model, reason string
 func (f *fakeOps) CompleteTask(_ context.Context, cardID, summary string) error {
 	f.record("CompleteTask:" + cardID)
 
-	return nil
+	return f.completeTaskErr
 }
 
 func (f *fakeOps) ReleaseCard(_ context.Context, cardID string) error {

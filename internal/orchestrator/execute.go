@@ -594,7 +594,9 @@ func (o *run) logSoloCapPark(ctx context.Context, subID, reason string) {
 // recordCheckpointOnSubtask. Best-effort: a fetch or write failure only
 // warns - the run is parking either way, and a stale marker just means resume
 // retries at the prior tier instead of escalating. Does not mutate sub.Tier -
-// this run is ending; the marker is read back only on the NEXT run.
+// this run is ending; the marker is read back only on the NEXT run. Critical
+// is already the ceiling (nextTier maps it to itself), so that case skips the
+// board write entirely - there is nothing to persist.
 func (o *run) escalateSubtaskTier(ctx context.Context, sub subtaskRef) {
 	tc, err := o.d.Ops.GetTaskContext(ctx, sub.ID, false)
 	if err != nil {
@@ -606,6 +608,10 @@ func (o *run) escalateSubtaskTier(ctx context.Context, sub subtaskRef) {
 
 	tier, clean := parseTierMarker(tc.Description)
 	next := nextTier(tier)
+
+	if next == tier {
+		return
+	}
 
 	if uerr := o.d.Ops.UpdateCardBody(ctx, sub.ID, withTierMarker(clean, next)); uerr != nil {
 		slog.Warn("turn cap: subtask tier escalation write failed",
