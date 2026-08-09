@@ -537,7 +537,15 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 
 	vres, rerr := o.runVerifyPlan(ctx, sc.workspace, plan)
 	if rerr != nil || vres.Status != verifyPassed {
-		o.logSoloCapPark(ctx, sub.ID, "verify did not pass")
+		// Name the classification when there is one (e.g. a timeout or a missing
+		// tool) so a park caused by the environment reads differently on the card
+		// log from a real failure, which carries no note.
+		reason := "verify did not pass"
+		if vres.Note != "" {
+			reason = fmt.Sprintf("verify did not pass (%s)", vres.Note)
+		}
+
+		o.logSoloCapPark(ctx, sub.ID, reason)
 
 		return false, nil
 	}

@@ -638,6 +638,79 @@ func TestRunVerifyPlanRedactsAndSkipsEmpty(t *testing.T) {
 	assert.Equal(t, "[REDACTED]", res.Output)
 }
 
+// withFastVerifyRetryWait shrinks the package-level retry wait for the
+// duration of a test, following the same save/restore pattern as
+// subtaskHeartbeatInterval in execute_test.go. Mutates package state; the
+// caller's test cannot run in parallel.
+func withFastVerifyRetryWait(t *testing.T) {
+	t.Helper()
+
+	prev := verifyRetryWait
+	verifyRetryWait = time.Millisecond
+
+	t.Cleanup(func() { verifyRetryWait = prev })
+}
+
+func TestRunVerifyPlanRetriesOnResourceExhaustion(t *testing.T) {
+	withFastVerifyRetryWait(t)
+
+	o := &run{d: Deps{Cfg: Config{Workspace: t.TempDir()}}}
+
+	calls := 0
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		calls++
+		if calls == 1 {
+			return verifyexec.Outcome{
+				ExitCode: 2,
+				Output:   "fork/exec /usr/bin/x: resource temporarily unavailable",
+			}
+		}
+
+		return verifyexec.Outcome{ExitCode: 0}
+	}
+
+	res, err := o.runVerifyPlan(context.Background(), "dir", verifyPlan{Argv: []string{"x"}, Timeout: time.Minute})
+	require.NoError(t, err)
+	assert.Equal(t, verifyPassed, res.Status)
+	assert.Equal(t, 2, calls, "an exhausted first run retries once")
+}
+
+func TestRunVerifyPlanDoesNotRetryPlainFailure(t *testing.T) {
+	withFastVerifyRetryWait(t)
+
+	o := &run{d: Deps{Cfg: Config{Workspace: t.TempDir()}}}
+
+	calls := 0
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		calls++
+
+		return verifyexec.Outcome{ExitCode: 1, Output: "--- FAIL: TestFoo\n2 tests failed"}
+	}
+
+	res, err := o.runVerifyPlan(context.Background(), "dir", verifyPlan{Argv: []string{"x"}, Timeout: time.Minute})
+	require.NoError(t, err)
+	assert.Equal(t, verifyFailed, res.Status)
+	assert.Equal(t, 1, calls, "a plain failure is never retried")
+}
+
+func TestRunVerifyPlanRetryExhaustedAgainStaysFailed(t *testing.T) {
+	withFastVerifyRetryWait(t)
+
+	o := &run{d: Deps{Cfg: Config{Workspace: t.TempDir()}}}
+
+	calls := 0
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		calls++
+
+		return verifyexec.Outcome{ExitCode: 2, Output: "cannot allocate memory"}
+	}
+
+	res, err := o.runVerifyPlan(context.Background(), "dir", verifyPlan{Argv: []string{"x"}, Timeout: time.Minute})
+	require.NoError(t, err)
+	assert.Equal(t, verifyFailed, res.Status)
+	assert.Equal(t, 2, calls, "exhaustion on the retry itself is not retried a second time")
+}
+
 func TestRunVerifyPlanPropagatesParentCancel(t *testing.T) {
 	o := &run{d: Deps{Cfg: Config{Workspace: t.TempDir()}}}
 	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {

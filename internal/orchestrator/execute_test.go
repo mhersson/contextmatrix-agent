@@ -921,6 +921,32 @@ func TestSoloTurnCapStillParksWhenVerifyFails(t *testing.T) {
 	assert.True(t, ops.loggedContains("verify did not pass"), "the park is activity-logged; logs=%v", ops.logs)
 }
 
+// TestSoloTurnCapParkNamesClassification proves the park reason distinguishes a
+// skip-classified verify (here, a timeout - environmental, not a code defect)
+// from a plain failure by naming the classification note on the card log.
+func TestSoloTurnCapParkNamesClassification(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: burnResps(5)}
+	d := execTestDeps(ops, git, client)
+	d.Cfg.MaxTurns = 5
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		return verifyexec.Outcome{TimedOut: true, ExitCode: -1}
+	}
+
+	err := runExecute(context.Background(), o)
+	require.Error(t, err, "a timed-out verify still parks the capped subtask")
+
+	var mte *MaxTurnsError
+	require.ErrorAs(t, err, &mte)
+
+	assert.True(t, ops.loggedContains("verify did not pass (verify timed out"),
+		"the park reason names the timeout classification; logs=%v", ops.logs)
+}
+
 // TestSoloTurnCapStillParksOnCleanTree proves a clean tree is never salvaged:
 // CommitWithMessage reporting (false, nil) means there is no diff - the only
 // completion evidence a capped run has - so even a passing verify cannot rescue

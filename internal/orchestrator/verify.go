@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -73,6 +74,12 @@ const (
 	minVerifyTimeout = 30 * time.Second
 	maxVerifyTimeout = 2 * time.Hour
 )
+
+// verifyRetryWait is how long runVerifyPlan waits before its one retry of a
+// resource-exhausted verify run, giving the prior run's processes time to be
+// reaped. A package var (not a const) so tests can shrink it - see
+// subtaskHeartbeatInterval in execute.go for the same pattern.
+var verifyRetryWait = 5 * time.Second
 
 // resolvedVerifyPlan returns the run's resolved verify plan, or a zero (skip)
 // plan when resolution has not run - so prompt/render helpers can read it
@@ -322,7 +329,10 @@ func (o *run) resolveVerify(ctx context.Context) (verifyPlan, error) {
 // runVerifyPlan executes the resolved plan in dir and returns the classified
 // result. It is the single capture point: it redacts the output and
 // disambiguates a parent-context cancel (returned as an error to propagate the
-// abort) from a real verify outcome. An empty plan is a skip, never a run.
+// abort) from a real verify outcome. An empty plan is a skip, never a run. A
+// non-pass whose output looks resource-exhausted (container pressure, not a
+// real defect) gets exactly one retry after a short wait; a plain failure is
+// never retried.
 func (o *run) runVerifyPlan(ctx context.Context, dir string, plan verifyPlan) (verifyResult, error) {
 	if len(plan.Argv) == 0 {
 		return verifyResult{Status: verifySkipped, Note: "no verify command resolved"}, nil
@@ -335,6 +345,28 @@ func (o *run) runVerifyPlan(ctx context.Context, dir string, plan verifyPlan) (v
 	}
 
 	res := classifyVerify(plan, out)
+
+	if res.Status != verifyPassed && verifyexec.LooksResourceExhausted(res.Output) {
+		// One retry: spawn failures under container resource pressure are
+		// transient once the previous run's processes are reaped. Never retry a
+		// plain failure - that is a real defect and rerunning it funds nothing.
+		slog.Warn("verify output looks resource-exhausted; retrying once", "card_id", o.d.Cfg.CardID)
+
+		select {
+		case <-ctx.Done():
+			return verifyResult{}, ctx.Err()
+		case <-time.After(verifyRetryWait):
+		}
+
+		out = o.runVerify(ctx, dir, plan.Argv, plan.Timeout, plan.Env)
+
+		if err := ctx.Err(); err != nil {
+			return verifyResult{}, err
+		}
+
+		res = classifyVerify(plan, out)
+	}
+
 	if o.d.Redact != nil {
 		res.Output = o.d.Redact(res.Output)
 	}

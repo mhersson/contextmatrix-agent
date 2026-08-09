@@ -196,6 +196,36 @@ func TestLooksToolMissing(t *testing.T) {
 	}
 }
 
+func TestLooksResourceExhausted(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{
+			"fork-exec-resource-unavailable",
+			"fork/exec /usr/bin/x: resource temporarily unavailable", true,
+		},
+		{
+			"cannot-allocate-memory",
+			"runtime: out of memory\ncannot allocate memory", true,
+		},
+		{"too-many-open-files", "dial tcp: socket: too many open files", true},
+		{
+			"case-insensitive-mid-output",
+			"--- FAIL\nfork/exec /bin/sh: Resource Temporarily Unavailable\nexit status 1", true,
+		},
+		{"ordinary-failure", "--- FAIL: TestFoo\n2 tests failed", false},
+		{"empty", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, LooksResourceExhausted(tt.output))
+		})
+	}
+}
+
 func TestExecExitCodes(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

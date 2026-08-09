@@ -76,6 +76,29 @@ func LooksToolMissing(output string) bool {
 	return false
 }
 
+// resourceExhaustionSignatures are substrings of process-spawn failures caused
+// by container resource pressure (pids/memory limits), not by the code under
+// test. Matched case-insensitively anywhere in the combined output.
+var resourceExhaustionSignatures = []string{
+	"resource temporarily unavailable",
+	"cannot allocate memory",
+	"too many open files",
+}
+
+// LooksResourceExhausted reports whether a verify failure looks environmental -
+// the run died of resource pressure rather than a failing check.
+func LooksResourceExhausted(output string) bool {
+	lower := strings.ToLower(output)
+
+	for _, sig := range resourceExhaustionSignatures {
+		if strings.Contains(lower, sig) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // Probe reports whether argv's leading program can run in workspace WITHOUT
 // running it. A program named by a path (contains a slash, e.g. ./gradlew) must
 // exist and be executable relative to workspace; a bare program name must be on
