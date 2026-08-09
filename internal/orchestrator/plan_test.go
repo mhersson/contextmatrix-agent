@@ -109,11 +109,20 @@ func TestIsTestOnlySubtask(t *testing.T) {
 	tests := []struct {
 		name  string
 		title string
+		desc  string
 		want  bool
 	}{
 		{
-			name:  "production violation: a listed verb then a tests token later",
+			name:  "production violation: a listed verb then a tests token later, no path evidence",
 			title: "Extend fakeOps transitionCardErr to a per-state map and add stalled-recovery tests",
+			want:  true,
+		},
+		{
+			// Re-checked with the production subtask's real description fragment -
+			// a single test-file path confirms the title verdict.
+			name:  "production violation: confirmed by its real Files: line",
+			title: "Extend fakeOps transitionCardErr to a per-state map and add stalled-recovery tests",
+			desc:  "Files: internal/worker/worker_test.go",
 			want:  true,
 		},
 		{
@@ -141,11 +150,48 @@ func TestIsTestOnlySubtask(t *testing.T) {
 			title: "Tests scaffolding for the retry path; extend coverage",
 			want:  false,
 		},
+		// File-evidence cases: a title in the verb+tests shape names a single
+		// subtask that both implements and tests its own deliverable - a listed
+		// non-test file in the description clears it regardless of the title.
+		{
+			name:  "combined code+tests title, description lists the code file too: negative",
+			title: "Create the login endpoint and write its handler tests",
+			desc:  "Files: internal/api/login.go, internal/api/login_test.go",
+			want:  false,
+		},
+		{
+			name:  "combined code+tests title, description lists ONLY the test file: confirmed positive",
+			title: "Create the login endpoint and write its handler tests",
+			desc:  "Files: internal/api/login_test.go",
+			want:  true,
+		},
+		{
+			name:  "combined code+tests title, no path evidence: title verdict stands",
+			title: "Create the login endpoint and write its handler tests",
+			want:  true,
+		},
+		{
+			name:  "second combined code+tests title, description lists the code file too: negative",
+			title: "Extend retry backoff and add jitter tests",
+			desc:  "Files: internal/retry/backoff.go, internal/retry/backoff_test.go",
+			want:  false,
+		},
+		{
+			name:  "second combined code+tests title, description lists ONLY the test file: confirmed positive",
+			title: "Extend retry backoff and add jitter tests",
+			desc:  "Files: internal/retry/backoff_test.go",
+			want:  true,
+		},
+		{
+			name:  "second combined code+tests title, no path evidence: title verdict stands",
+			title: "Extend retry backoff and add jitter tests",
+			want:  true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, isTestOnlySubtask(tt.title))
+			assert.Equal(t, tt.want, isTestOnlySubtask(tt.title, tt.desc))
 		})
 	}
 }

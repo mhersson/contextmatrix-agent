@@ -110,23 +110,36 @@ func parsePlan(s string) (plan, error) {
 // deliverable ("add X", "write X", "pin X") rather than an edit to existing
 // code - the shape a test-only subtask title takes. testSplitTestsRe matches
 // the tests-token itself. Both are used only in combination by
-// isTestOnlySubtask, never alone - a matching verb with no tests token (or
+// titleLooksTestOnly, never alone - a matching verb with no tests token (or
 // vice versa) is not a violation.
 var (
 	testSplitVerbRe  = regexp.MustCompile(`(?i)\b(add|write|extend|create|pin)\b`)
 	testSplitTestsRe = regexp.MustCompile(`(?i)\btests?\b`)
 )
 
-// isTestOnlySubtask reports whether title has the shape of a subtask whose
+// filePathSuffixRe matches a path's final segment when it looks like a
+// filename with an extension (a word-char run, a dot, another word-char
+// run) - the shape that lets filePathTokens tell a real path apart from
+// prose that merely contains a slash.
+var filePathSuffixRe = regexp.MustCompile(`^[\w-]+\.[\w-]+$`)
+
+// testFileSuffixRe matches a Go-style "_test." suffix immediately before the
+// extension. testFileInfixRe matches a JS/TS-style ".test." or ".spec."
+// infix. Both are used by isTestFilePath alongside a bare "test"/"tests"
+// path segment check.
+var (
+	testFileSuffixRe = regexp.MustCompile(`_test\.\w+$`)
+	testFileInfixRe  = regexp.MustCompile(`\.(?:test|spec)\.\w+$`)
+)
+
+// titleLooksTestOnly reports whether title has the shape of a subtask whose
 // deliverable is testing another subtask's code rather than shipping it: a
 // listed verb (add, write, extend, create, pin) followed LATER in the title
 // by a tests token. Order matters - a title that mentions tests before the
 // verb (e.g. discussing test infrastructure a later clause extends) does not
-// match. Deliberately conservative: it is a title heuristic, not a semantic
-// read of the subtask, so it undercalls rather than overcalls - a missed
-// violation just leaves the prompt rule's prose as the only defense, while a
-// false positive would send a legitimate plan through a needless revision.
-func isTestOnlySubtask(title string) bool {
+// match. This is the title-only signal isTestOnlySubtask falls back to when
+// the subtask's description carries no file evidence to ground the call.
+func titleLooksTestOnly(title string) bool {
 	verbLoc := testSplitVerbRe.FindStringIndex(title)
 	if verbLoc == nil {
 		return false
@@ -140,17 +153,87 @@ func isTestOnlySubtask(title string) bool {
 	return testsLoc[0] > verbLoc[0]
 }
 
-// testSplitViolation returns the title of the first subtask in p whose title
-// matches isTestOnlySubtask AND which depends on an earlier subtask - the
-// forbidden split the planner prompt already forbids ("the subtask that
-// writes the code writes and runs its own tests"): a dependent subtask whose
-// own deliverable is testing its dependency's code. A matching title with no
-// dependency is not this violation - it is presumably a legitimate,
-// self-contained subtask that happens to mention tests. ok is false when p
-// has no such subtask.
+// filePathTokens extracts path-like tokens from a subtask description: each
+// whitespace-separated token, punctuation-trimmed, that contains a '/' and
+// whose final segment looks like a filename with an extension. The planner
+// prompt mandates a "Files:" line per subtask, so a well-formed description
+// yields its real file list here.
+func filePathTokens(description string) []string {
+	var paths []string
+
+	for tok := range strings.FieldsSeq(description) {
+		tok = strings.Trim(tok, ",.;:()[]{}\"'`")
+
+		idx := strings.LastIndex(tok, "/")
+		if idx < 0 {
+			continue
+		}
+
+		if filePathSuffixRe.MatchString(tok[idx+1:]) {
+			paths = append(paths, tok)
+		}
+	}
+
+	return paths
+}
+
+// isTestFilePath reports whether path matches a common test-file naming
+// convention: a "_test." suffix before the extension (Go-style), a
+// ".test." or ".spec." infix (JS/TS-style), or a whole "test"/"tests" path
+// segment (so "latest/foo.go" does not match on a substring).
+func isTestFilePath(path string) bool {
+	if testFileSuffixRe.MatchString(path) || testFileInfixRe.MatchString(path) {
+		return true
+	}
+
+	for seg := range strings.SplitSeq(path, "/") {
+		if seg == "test" || seg == "tests" {
+			return true
+		}
+	}
+
+	return false
+}
+
+// isTestOnlySubtask reports whether the subtask named title, with description
+// desc, is one whose deliverable is testing another subtask's code rather
+// than shipping it. File evidence is authoritative when present - the
+// planner prompt mandates a "Files:" line, so a well-formed description
+// grounds the call in what the subtask actually touches: ANY extracted path
+// that is not a test file clears the subtask (a title matching the verb+tests
+// shape is not itself a violation - "Create the login endpoint and write its
+// handler tests" both implements and tests in one subtask), while paths found
+// and ALL of them test files confirm it, regardless of title. Only when the
+// description carries no path evidence at all does the title heuristic
+// (titleLooksTestOnly) decide alone - a residual gap, expected to be rare
+// since the prompt mandates file lists, where a title in the verb+tests shape
+// can still false-positive with nothing to ground it.
+func isTestOnlySubtask(title, desc string) bool {
+	paths := filePathTokens(desc)
+	if len(paths) == 0 {
+		return titleLooksTestOnly(title)
+	}
+
+	for _, p := range paths {
+		if !isTestFilePath(p) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// testSplitViolation returns the title of the first subtask in p whose
+// title/description matches isTestOnlySubtask AND which depends on an
+// earlier subtask - the forbidden split the planner prompt already forbids
+// ("the subtask that writes the code writes and runs its own tests"): a
+// dependent subtask whose own deliverable is testing its dependency's code.
+// A matching subtask with no dependency is not this violation - it is
+// presumably a legitimate, self-contained subtask that happens to mention
+// tests. ok is false when p has no such subtask.
 func testSplitViolation(p plan) (title string, ok bool) {
 	for _, st := range p.Subtasks {
-		if len(st.DependsOn) > 0 && isTestOnlySubtask(st.Title) {
+		if len(st.DependsOn) > 0 && isTestOnlySubtask(st.Title, st.Description) {
 			return st.Title, true
 		}
 	}
@@ -476,6 +559,8 @@ func (o *run) reviseTestSplit(
 	}
 
 	if _, stillViolated := testSplitViolation(revised); stillViolated {
+		slog.Warn("plan: test-split violation persists after one revision attempt; proceeding with the original plan",
+			"card_id", cfg.CardID, "subtask_title", title)
 		d.logCard(ctx, "plan validation: subtask %q still splits its tests after one revision attempt - "+
 			"proceeding with the original plan", title)
 
