@@ -289,6 +289,43 @@ func TestCloneBranchCommitPush(t *testing.T) {
 	assert.Contains(t, string(out), "cm/cmx-001")
 }
 
+// TestUnpushedCount pins the rev-list contract: zero with no local commits
+// beyond origin, one after a local commit, back to zero once that commit is
+// pushed and the remote-tracking ref reflects it.
+func TestUnpushedCount(t *testing.T) {
+	t.Parallel()
+
+	remote := setupBareRemote(t)
+	ws := filepath.Join(t.TempDir(), "ws")
+
+	g := NewGit(ws, "", "", "")
+	ctx := context.Background()
+
+	require.NoError(t, g.Clone(ctx, remote, "main"))
+	require.NoError(t, g.CreateBranch(ctx, "cm/cmx-003"))
+	g.SetBranchPolicy("cm/cmx-003", "main", "main")
+
+	n, err := g.UnpushedCount(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 0, n, "no local commits beyond what origin already has")
+
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "wip.txt"), []byte("wip\n"), 0o644))
+
+	committed, err := g.CommitWithMessage(ctx, "WIP: partial work")
+	require.NoError(t, err)
+	require.True(t, committed)
+
+	n, err = g.UnpushedCount(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n, "one commit reachable from HEAD but on no origin remote-tracking ref")
+
+	require.NoError(t, g.Push(ctx, "cm/cmx-003"))
+
+	n, err = g.UnpushedCount(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 0, n, "the pushed commit is now reachable from origin/cm/cmx-003")
+}
+
 func TestCommitIfDirtyCleanTree(t *testing.T) {
 	t.Parallel()
 

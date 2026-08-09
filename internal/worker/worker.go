@@ -516,7 +516,19 @@ func pushWIP(ctx context.Context, a fsmArgs) {
 	}
 
 	if !dirty {
-		return
+		// A clean tree can still hold work: the turn-cap salvage path commits
+		// before its verify gate, and a declined salvage leaves that commit
+		// stranded locally unless it is pushed here.
+		n, cerr := a.git.UnpushedCount(ctx)
+		if cerr != nil {
+			slog.Warn("WIP unpushed-count failed", "card", a.spec.CardID, "error", cerr)
+
+			return
+		}
+
+		if n == 0 {
+			return
+		}
 	}
 
 	if err := a.git.Push(ctx, a.branch); err != nil {
