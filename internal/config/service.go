@@ -171,7 +171,7 @@ func serviceDefaults() serviceRaw {
 		MaxConcurrent:          5,
 		ContainerTimeout:       "2h30m",
 		ContainerMemoryLimit:   8 * 1024 * 1024 * 1024, // 8 GiB
-		ContainerPidsLimit:     512,
+		ContainerPidsLimit:     2048,
 		IdleOutputTimeout:      "30m",
 		IdleWatchdogInterval:   "30s",
 		SecretsDir:             defaultSecretsDir,
