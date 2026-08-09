@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -102,6 +103,188 @@ func TestParsePlan(t *testing.T) {
 	t.Run("no JSON at all", func(t *testing.T) {
 		_, err := parsePlan("I could not produce a plan, sorry.")
 		require.Error(t, err)
+	})
+}
+
+func TestIsTestOnlySubtask(t *testing.T) {
+	tests := []struct {
+		name  string
+		title string
+		desc  string
+		want  bool
+	}{
+		{
+			name:  "production violation: a listed verb then a tests token later, no path evidence",
+			title: "Extend fakeOps transitionCardErr to a per-state map and add stalled-recovery tests",
+			want:  true,
+		},
+		{
+			// Re-checked with the production subtask's real description fragment -
+			// a single test-file path confirms the title verdict.
+			name:  "production violation: confirmed by its real Files: line",
+			title: "Extend fakeOps transitionCardErr to a per-state map and add stalled-recovery tests",
+			desc:  "Files: internal/worker/worker_test.go",
+			want:  true,
+		},
+		{
+			name:  "singular test token still counts",
+			title: "Add a regression test for the retry path",
+			want:  true,
+		},
+		{
+			name:  "verb present but no tests token",
+			title: "Add stalled-state recovery to worker.Run",
+			want:  false,
+		},
+		{
+			name:  "no listed verb at all",
+			title: "Fix flaky suite timeouts",
+			want:  false,
+		},
+		{
+			name:  "code-with-tests title using an unlisted verb",
+			title: "Implement stalled-state recovery and its tests",
+			want:  false,
+		},
+		{
+			name:  "standalone test-infrastructure work: tests token precedes the verb",
+			title: "Tests scaffolding for the retry path; extend coverage",
+			want:  false,
+		},
+		// File-evidence cases: a title in the verb+tests shape names a single
+		// subtask that both implements and tests its own deliverable - a listed
+		// non-test file in the description clears it regardless of the title.
+		{
+			name:  "combined code+tests title, description lists the code file too: negative",
+			title: "Create the login endpoint and write its handler tests",
+			desc:  "Files: internal/api/login.go, internal/api/login_test.go",
+			want:  false,
+		},
+		{
+			name:  "combined code+tests title, description lists ONLY the test file: confirmed positive",
+			title: "Create the login endpoint and write its handler tests",
+			desc:  "Files: internal/api/login_test.go",
+			want:  true,
+		},
+		{
+			name:  "combined code+tests title, no path evidence: title verdict stands",
+			title: "Create the login endpoint and write its handler tests",
+			want:  true,
+		},
+		{
+			name:  "second combined code+tests title, description lists the code file too: negative",
+			title: "Extend retry backoff and add jitter tests",
+			desc:  "Files: internal/retry/backoff.go, internal/retry/backoff_test.go",
+			want:  false,
+		},
+		{
+			name:  "second combined code+tests title, description lists ONLY the test file: confirmed positive",
+			title: "Extend retry backoff and add jitter tests",
+			desc:  "Files: internal/retry/backoff_test.go",
+			want:  true,
+		},
+		{
+			name:  "second combined code+tests title, no path evidence: title verdict stands",
+			title: "Extend retry backoff and add jitter tests",
+			want:  true,
+		},
+		// Multi-dot filenames: JS/TS test conventions must register as file
+		// evidence - a title the verb list never matches still confirms on a
+		// Files: line of nothing but .test./.spec. files.
+		{
+			name:  "JS test file alone confirms despite a non-matching title",
+			title: "Cover the auth flow",
+			desc:  "Files: src/auth.test.ts",
+			want:  true,
+		},
+		{
+			name:  "JS spec file plus its code file clears",
+			title: "Create the auth flow and write its spec",
+			desc:  "Files: src/auth.spec.ts, src/auth.ts",
+			want:  false,
+		},
+		// Files:-line scoping: prose routinely NAMES the code under test; only
+		// the Files: section is evidence when the label exists.
+		{
+			name:  "prose mention of the code file does not clear a test-only Files: line",
+			title: "Write tests for the parser",
+			desc:  "Write tests for the parser in internal/orchestrator/plan.go.\nFiles: internal/orchestrator/plan_test.go",
+			want:  true,
+		},
+		{
+			name:  "bulleted Files: section is read across its continuation lines",
+			title: "Cover the retry path",
+			desc:  "Cover every branch.\nFiles:\n- internal/retry/backoff_test.go\n- internal/retry/jitter_test.go",
+			want:  true,
+		},
+		{
+			name:  "Files: section ends at the next label; criteria prose does not clear",
+			title: "Write tests for the widget",
+			desc:  "Files: internal/widget/widget_test.go\nAcceptance criteria: the behavior in internal/widget/widget.go is fully covered",
+			want:  true,
+		},
+		{
+			name:  "code file inside the Files: section still clears",
+			title: "Extend the widget and add rendering tests",
+			desc:  "Files:\n- internal/widget/widget.go\n- internal/widget/widget_test.go",
+			want:  false,
+		},
+		{
+			name:  "blank line after the Files: label falls back to whole-description evidence",
+			title: "Extend the widget and add rendering tests",
+			desc:  "Files:\n\n- internal/widget/widget.go\n- internal/widget/widget_test.go",
+			want:  false,
+		},
+		{
+			name:  "hyphenated label header ends the Files: section",
+			title: "Write tests for the widget",
+			desc:  "Files: internal/widget/widget_test.go\nNon-goals: do not touch internal/widget/widget.go here",
+			want:  true,
+		},
+		{
+			name:  "parenthesized label header ends the Files: section",
+			title: "Write tests for the widget",
+			desc:  "Files: internal/widget/widget_test.go\nAcceptance criteria (v2): behavior in internal/widget/widget.go is covered",
+			want:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isTestOnlySubtask(tt.title, tt.desc))
+		})
+	}
+}
+
+func TestTestSplitViolation(t *testing.T) {
+	t.Run("flags a dependent test-only subtask", func(t *testing.T) {
+		p := plan{Subtasks: []planSubtask{
+			{Title: "Change fakeOps to a per-state map", DependsOn: nil},
+			{
+				Title:     "Extend fakeOps transitionCardErr to a per-state map and add stalled-recovery tests",
+				DependsOn: []int{0},
+			},
+		}}
+		title, ok := testSplitViolation(p)
+		require.True(t, ok)
+		assert.Equal(t, "Extend fakeOps transitionCardErr to a per-state map and add stalled-recovery tests", title)
+	})
+
+	t.Run("empty depends_on never triggers even with a matching title", func(t *testing.T) {
+		p := plan{Subtasks: []planSubtask{
+			{Title: "Add stalled-recovery tests", DependsOn: nil},
+		}}
+		_, ok := testSplitViolation(p)
+		assert.False(t, ok, "a standalone (non-dependent) subtask is not the forbidden split")
+	})
+
+	t.Run("clean plan reports no violation", func(t *testing.T) {
+		p := plan{Subtasks: []planSubtask{
+			{Title: "Add the flag with its tests", DependsOn: nil},
+			{Title: "Wire the flag into the handler", DependsOn: []int{0}},
+		}}
+		_, ok := testSplitViolation(p)
+		assert.False(t, ok)
 	})
 }
 
@@ -224,6 +407,210 @@ func TestPlanPhaseRepairExhausted(t *testing.T) {
 
 	// No cards created on hard failure.
 	assert.Empty(t, ops.createCardArgs)
+}
+
+// offendingTitle is the production title that triggered this validation: a
+// planner split a dependent tests-only subtask off its coder subtask despite
+// the prompt's absolute rule against it.
+const offendingTitle = "Extend fakeOps transitionCardErr to a per-state map and add stalled-recovery tests"
+
+func TestPlanPhaseTestSplitRevisionSucceeds(t *testing.T) {
+	ops := &fakeOps{
+		taskContext: cmclient.TaskContext{Title: "Parent", Description: "body"},
+		createdIDs:  []string{"SUB-1"},
+	}
+	violating := `{"card_tier":"simple","subtasks":[` +
+		`{"title":"Change fakeOps to a per-state map","description":"d","depends_on":[],"tier":"simple"},` +
+		`{"title":"` + offendingTitle + `","description":"d","depends_on":[0],"tier":"simple"}]}`
+	clean := `{"card_tier":"simple","subtasks":[` +
+		`{"title":"Change fakeOps to a per-state map with its own tests","description":"d","depends_on":[],"tier":"simple"}]}`
+
+	llmFake := &planLLM{responses: []llm.Response{
+		stopResp(violating, 0.02),
+		stopResp(clean, 0.01),
+	}}
+	d := planTestDeps(ops, llmFake)
+
+	o := newRun(d, ops.taskContext)
+	require.NoError(t, runPlan(context.Background(), o))
+
+	// Exactly one revision round: the original draft plus one re-prompt.
+	require.Len(t, llmFake.tasks, 2, "expected exactly two model calls (draft + one revision)")
+
+	// The revision prompt names the offending subtask, carries the FULL
+	// previous plan (the revision run is stateless - without it, "fold its
+	// work into the subtask it depends on" names structure the model cannot
+	// see), and instructs resubmitting the full plan.
+	revisionPrompt := llmFake.tasks[1]
+	assert.Contains(t, revisionPrompt, offendingTitle)
+	assert.Contains(t, revisionPrompt, "Your previous plan")
+	assert.Contains(t, revisionPrompt, "Change fakeOps to a per-state map",
+		"the whole previous plan rides in the prompt, not just the offending subtask")
+	assert.Contains(t, revisionPrompt, "fold its work into the subtask it depends on")
+	assert.Contains(t, revisionPrompt, "resubmit the full corrected plan")
+
+	// The revised (clean) plan is what actually got created - not the violating draft.
+	require.Len(t, ops.createCardArgs, 1)
+	assert.Equal(t, "Change fakeOps to a per-state map with its own tests", ops.createCardArgs[0].title)
+
+	// The revision request is status-logged, naming the offending subtask.
+	assert.True(t, ops.loggedContains(offendingTitle), "revision request logged; logs=%v", ops.logs)
+}
+
+func TestPlanPhaseTestSplitRevisionWarnsAndProceedsOnRepeatViolation(t *testing.T) {
+	ops := &fakeOps{
+		taskContext: cmclient.TaskContext{Title: "Parent", Description: "body"},
+		createdIDs:  []string{"SUB-1", "SUB-2"},
+	}
+	violating1 := `{"card_tier":"simple","subtasks":[` +
+		`{"title":"Change fakeOps to a per-state map","description":"d","depends_on":[],"tier":"simple"},` +
+		`{"title":"` + offendingTitle + `","description":"d","depends_on":[0],"tier":"simple"}]}`
+	// A different offending plan on the revision turn - still a violation, so the
+	// run must give up on revising and keep the ORIGINAL draft, not this one.
+	violating2 := `{"card_tier":"simple","subtasks":[` +
+		`{"title":"Change the widget renderer","description":"d","depends_on":[],"tier":"simple"},` +
+		`{"title":"Extend the widget renderer and add rendering tests","description":"d","depends_on":[0],"tier":"simple"}]}`
+
+	llmFake := &planLLM{responses: []llm.Response{
+		stopResp(violating1, 0.02),
+		stopResp(violating2, 0.02),
+	}}
+	d := planTestDeps(ops, llmFake)
+
+	o := newRun(d, ops.taskContext)
+	require.NoError(t, runPlan(context.Background(), o), "a repeat heuristic violation must never fail the run")
+
+	// No third model call - one revision attempt, then give up.
+	require.Len(t, llmFake.tasks, 2)
+
+	// The ORIGINAL plan (first draft) is what actually got created, not the
+	// still-violating revision.
+	require.Len(t, ops.createCardArgs, 2)
+	assert.Equal(t, "Change fakeOps to a per-state map", ops.createCardArgs[0].title)
+	assert.Equal(t, offendingTitle, ops.createCardArgs[1].title)
+
+	// Both the revision request and the warn-and-proceed are status-logged.
+	assert.True(t, ops.loggedContains(offendingTitle), "revision request logged; logs=%v", ops.logs)
+	assert.True(t, ops.loggedContains("proceeding with the original plan"),
+		"warn-and-proceed logged; logs=%v", ops.logs)
+}
+
+// TestReviseTestSplitBudgetCheckFailureKeepsOriginalPlan proves a budget
+// ceiling that blocks the revision call does not discard the already-parsed
+// original plan p: reviseTestSplit's every OTHER failure mode (a failed
+// revision call, an unparseable revision, a repeat violation) warns and falls
+// back to p, and the budget check is no exception - p is paid for, and
+// execute's own ledger check at its first subtask parks the run anyway if the
+// budget is genuinely exhausted.
+func TestReviseTestSplitBudgetCheckFailureKeepsOriginalPlan(t *testing.T) {
+	ops := &fakeOps{
+		taskContext: cmclient.TaskContext{Title: "Parent", Description: "body"},
+	}
+	d := planTestDeps(ops, &planLLM{})
+	o := newRun(d, ops.taskContext)
+	// Seed the ledger already at its ceiling so the revision call's pre-check parks.
+	o.ledger = NewLedger(0.01, 0.02)
+
+	p := plan{CardTier: "simple", Subtasks: []planSubtask{
+		{Title: "Change fakeOps to a per-state map", Description: "d", DependsOn: nil, Tier: "simple"},
+		{Title: offendingTitle, Description: "d", DependsOn: []int{0}, Tier: "simple"},
+	}}
+
+	revised, err := o.reviseTestSplit(context.Background(), "model", "", "", "", "", "", p)
+	require.NoError(t, err, "a budget check that blocks the revision call must not fail the run")
+	assert.Equal(t, p, revised, "the paid-for original plan is kept, not discarded")
+	assert.True(t, ops.loggedContains("revision budget check failed"),
+		"the fallback is status-logged; logs=%v", ops.logs)
+}
+
+// TestReviseMobTestSplit proves mob-drafted plans get the same test-split
+// validation as solo drafts, through the mob's own channel: one re-opened
+// feedback round (non-blind, the panel sees its own plan and the finding),
+// the revised plan adopted when clean, and the original kept when the
+// violation persists or the round fails.
+func TestReviseMobTestSplit(t *testing.T) {
+	violating := plan{CardTier: "simple", Subtasks: []planSubtask{
+		{Title: "Change fakeOps to a per-state map", Description: "d", Tier: "simple"},
+		{Title: offendingTitle, Description: "d", DependsOn: []int{0}, Tier: "simple"},
+	}}
+	cleanJSON := `{"card_tier":"simple","subtasks":[` +
+		`{"title":"Change fakeOps to a per-state map with its own tests","description":"d","depends_on":[],"tier":"simple"}]}`
+
+	t.Run("revision round fixes the split", func(t *testing.T) {
+		ops := &fakeOps{}
+		o := mobTestRun(ops, MobConfig{Participants: 2, Plan: true, Rounds: 2, BudgetFactor: 0.75}, 2.0)
+		eng := &scriptedEngine{outcomes: []mob.Outcome{{Synthesis: cleanJSON}}}
+		o.mobEngine = eng.run
+
+		prior := &mob.Outcome{Synthesis: "prior synthesis"}
+
+		revised, rout := o.reviseMobTestSplit(context.Background(), "", "", violating, prior)
+
+		require.Len(t, eng.topics, 1, "exactly one revision round")
+		assert.Equal(t, 1, eng.topics[0].Rounds, "the revision reuses the one-round adjust mechanism")
+		assert.False(t, eng.topics[0].Blind, "the panel must see its own plan and the finding")
+		assert.Contains(t, eng.topics[0].Briefing, "tests-ship-with-code",
+			"the briefing carries the validation finding")
+		assert.Contains(t, eng.topics[0].Briefing, offendingTitle)
+
+		require.Len(t, revised.Subtasks, 1, "the revised plan is adopted")
+		assert.Equal(t, "Change fakeOps to a per-state map with its own tests", revised.Subtasks[0].Title)
+		require.NotNil(t, rout)
+		assert.JSONEq(t, cleanJSON, rout.Synthesis, "the revised outcome replaces the prior one")
+	})
+
+	t.Run("clean plan passes through with no engine call", func(t *testing.T) {
+		ops := &fakeOps{}
+		o := mobTestRun(ops, MobConfig{Participants: 2, Plan: true, Rounds: 2, BudgetFactor: 0.75}, 2.0)
+		eng := &scriptedEngine{}
+		o.mobEngine = eng.run
+
+		clean := plan{Subtasks: []planSubtask{{Title: "Add the flag with its tests", Description: "d"}}}
+		prior := &mob.Outcome{Synthesis: "prior synthesis"}
+
+		got, rout := o.reviseMobTestSplit(context.Background(), "", "", clean, prior)
+
+		assert.Empty(t, eng.topics, "no violation, no revision round")
+		assert.Equal(t, clean, got)
+		assert.Same(t, prior, rout)
+	})
+
+	t.Run("persisting violation keeps the original plan", func(t *testing.T) {
+		ops := &fakeOps{}
+		o := mobTestRun(ops, MobConfig{Participants: 2, Plan: true, Rounds: 2, BudgetFactor: 0.75}, 2.0)
+
+		stillViolating := `{"card_tier":"simple","subtasks":[` +
+			`{"title":"Change the widget renderer","description":"d","depends_on":[],"tier":"simple"},` +
+			`{"title":"Extend the widget renderer and add rendering tests","description":"d","depends_on":[0],"tier":"simple"}]}`
+		eng := &scriptedEngine{outcomes: []mob.Outcome{{Synthesis: stillViolating}}}
+		o.mobEngine = eng.run
+
+		prior := &mob.Outcome{Synthesis: "prior synthesis"}
+
+		got, rout := o.reviseMobTestSplit(context.Background(), "", "", violating, prior)
+
+		require.Len(t, eng.topics, 1, "one revision attempt, then give up")
+		assert.Equal(t, violating, got, "the original plan is kept, not the still-violating revision")
+		assert.Same(t, prior, rout, "the original outcome is kept with the original plan")
+		assert.True(t, ops.loggedContains("proceeding with the original plan"),
+			"the fallback is status-logged; logs=%v", ops.logs)
+	})
+
+	t.Run("failed revision round keeps the original plan", func(t *testing.T) {
+		ops := &fakeOps{}
+		o := mobTestRun(ops, MobConfig{Participants: 2, Plan: true, Rounds: 2, BudgetFactor: 0.75}, 2.0)
+		eng := &scriptedEngine{outcomes: []mob.Outcome{{}}, errs: []error{errors.New("engine boom")}}
+		o.mobEngine = eng.run
+
+		prior := &mob.Outcome{Synthesis: "prior synthesis"}
+
+		got, rout := o.reviseMobTestSplit(context.Background(), "", "", violating, prior)
+
+		assert.Equal(t, violating, got)
+		assert.Same(t, prior, rout)
+		assert.True(t, ops.loggedContains("proceeding with the original plan"),
+			"the fallback is status-logged; logs=%v", ops.logs)
+	})
 }
 
 func TestPlanPhaseResume(t *testing.T) {

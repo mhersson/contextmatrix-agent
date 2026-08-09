@@ -6,6 +6,7 @@
 ARG GO_VERSION=1.26.5
 ARG GO_SHA256_AMD64=5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053
 ARG GO_SHA256_ARM64=fe4789e92b1f33358680864bbe8704289e7bb5fc207d80623c308935bd696d49
+ARG NPM_VERSION=11.19.0
 ARG GOLANGCI_LINT_VERSION=v2.12.2
 ARG GOFUMPT_VERSION=v0.10.0
 ARG RUST_VERSION=1.97.0
@@ -71,11 +72,19 @@ FROM base AS node
 # SHELL is re-declared per stage: hadolint (DL4006) does not track the base
 # stage's pipefail shell across FROM boundaries even though Docker inherits it.
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-# Node 25. NodeSource's setup_25.x script adds a signed apt repo.
+ARG NPM_VERSION
+# Node 25. NodeSource's setup_25.x script adds a signed apt repo. npm is then
+# raised to a pinned release: the nodesource bundle ships npm with a
+# vulnerable bundled tar, and npm 12 does not support Node 25, so the 11 line
+# is the ceiling. The residual CVEs npm 11 still bundles are suppressed with
+# rationale in .trivyignore.
 # hadolint ignore=DL3008
 RUN curl -fsSL https://deb.nodesource.com/setup_25.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install -g "npm@${NPM_VERSION}" \
+    && npm cache clean --force \
+    && rm -rf /root/.npm
 
 # ---------------------------------------------------------------------------
 # go-node-toolchain - node + the Go toolchain, golangci-lint, and gofumpt.
@@ -185,7 +194,7 @@ RUN set -eux; \
 FROM go-node-toolchain AS go-node
 COPY --from=build /out/contextmatrix-agent /usr/local/bin/contextmatrix-agent
 RUN useradd -m -u 1000 -s /bin/bash user
-USER user
+USER 1000:1000
 WORKDIR /home/user
 RUN mkdir -p /home/user/workspace
 HEALTHCHECK NONE
@@ -197,7 +206,7 @@ ENTRYPOINT ["contextmatrix-agent", "work"]
 FROM rust-toolchain AS rust
 COPY --from=build /out/contextmatrix-agent /usr/local/bin/contextmatrix-agent
 RUN useradd -m -u 1000 -s /bin/bash user
-USER user
+USER 1000:1000
 WORKDIR /home/user
 RUN mkdir -p /home/user/workspace
 HEALTHCHECK NONE
@@ -209,7 +218,7 @@ ENTRYPOINT ["contextmatrix-agent", "work"]
 FROM python-toolchain AS python
 COPY --from=build /out/contextmatrix-agent /usr/local/bin/contextmatrix-agent
 RUN useradd -m -u 1000 -s /bin/bash user
-USER user
+USER 1000:1000
 WORKDIR /home/user
 RUN mkdir -p /home/user/workspace
 HEALTHCHECK NONE
@@ -241,7 +250,7 @@ COPY --chmod=0777 --from=rust-toolchain /usr/local/cargo /usr/local/cargo
 
 COPY --from=build /out/contextmatrix-agent /usr/local/bin/contextmatrix-agent
 RUN useradd -m -u 1000 -s /bin/bash user
-USER user
+USER 1000:1000
 WORKDIR /home/user
 RUN mkdir -p /home/user/workspace
 HEALTHCHECK NONE

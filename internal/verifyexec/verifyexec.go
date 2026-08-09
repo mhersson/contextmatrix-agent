@@ -76,6 +76,29 @@ func LooksToolMissing(output string) bool {
 	return false
 }
 
+// resourceExhaustionSignatures are substrings of process-spawn failures caused
+// by container resource pressure (pids/memory limits), not by the code under
+// test. Matched case-insensitively anywhere in the combined output.
+var resourceExhaustionSignatures = []string{
+	"resource temporarily unavailable",
+	"cannot allocate memory",
+	"too many open files",
+}
+
+// LooksResourceExhausted reports whether a verify failure looks environmental -
+// the run died of resource pressure rather than a failing check.
+func LooksResourceExhausted(output string) bool {
+	lower := strings.ToLower(output)
+
+	for _, sig := range resourceExhaustionSignatures {
+		if strings.Contains(lower, sig) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // Probe reports whether argv's leading program can run in workspace WITHOUT
 // running it. A program named by a path (contains a slash, e.g. ./gradlew) must
 // exist and be executable relative to workspace; a bare program name must be on
@@ -179,6 +202,16 @@ func ExecInherit(ctx context.Context, dir string, argv []string, timeout time.Du
 	return execWithEnv(ctx, dir, argv, timeout, os.Environ())
 }
 
+// appendOutput adds extra to captured, separated by a newline when captured is
+// non-empty.
+func appendOutput(captured, extra string) string {
+	if captured == "" {
+		return extra
+	}
+
+	return captured + "\n" + extra
+}
+
 // execWithEnv is the shared core: it runs argv in dir with its own timeout
 // context and the given process environment, capturing combined output. It
 // disambiguates its own timeout (TimedOut) from a parent-context cancellation:
@@ -214,8 +247,13 @@ func execWithEnv(ctx context.Context, dir string, argv []string, timeout time.Du
 		if errors.As(err, &ee) {
 			o.ExitCode = ee.ExitCode()
 		} else {
+			// The process never started, so CombinedOutput captured nothing - the
+			// spawn error itself (e.g. "fork/exec ...: resource temporarily
+			// unavailable") is the only signal available, and callers like
+			// LooksResourceExhausted read it from Output.
 			o.StartErr = true
 			o.ExitCode = -1
+			o.Output = appendOutput(o.Output, err.Error())
 		}
 	}
 

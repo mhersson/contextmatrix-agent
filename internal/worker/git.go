@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -399,6 +400,24 @@ func (g *Git) CommitIfDirty(ctx context.Context, title, cardID string) (bool, er
 	}
 
 	return true, nil
+}
+
+// UnpushedCount reports how many commits HEAD carries that exist on no origin
+// remote-tracking ref. Remote-tracking refs reflect clone/fetch time, which
+// only ever overcounts - an unnecessary push of already-present commits is a
+// no-op, while undercounting would strand work.
+func (g *Git) UnpushedCount(ctx context.Context) (int, error) {
+	out, err := g.run(ctx, "rev-list", "--count", "HEAD", "--not", "--remotes=origin")
+	if err != nil {
+		return 0, err
+	}
+
+	n, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil {
+		return 0, fmt.Errorf("parse rev-list count %q: %w", out, err)
+	}
+
+	return n, nil
 }
 
 // RemoteDefaultBranch returns the remote's default branch short name (from

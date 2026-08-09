@@ -921,6 +921,34 @@ func TestSoloTurnCapStillParksWhenVerifyFails(t *testing.T) {
 	assert.True(t, ops.loggedContains("verify did not pass"), "the park is activity-logged; logs=%v", ops.logs)
 }
 
+// TestSoloTurnCapParkNamesClassification proves the park reason distinguishes a
+// skip-classified verify (here, a timeout - environmental, not a code defect)
+// from a plain failure by naming the classification note on the card log.
+func TestSoloTurnCapParkNamesClassification(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: burnResps(5)}
+	d := execTestDeps(ops, git, client)
+	d.Cfg.MaxTurns = 5
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		return verifyexec.Outcome{TimedOut: true, ExitCode: -1}
+	}
+
+	err := runExecute(context.Background(), o)
+	require.Error(t, err, "a timed-out verify still parks the capped subtask")
+
+	var mte *MaxTurnsError
+	require.ErrorAs(t, err, &mte)
+
+	assert.True(t, ops.loggedContains("verify timed out"),
+		"the park reason names the timeout classification; logs=%v", ops.logs)
+	assert.False(t, ops.loggedContains("verify did not pass (verify timed out"),
+		"the note already states its own verdict; wrapping it in \"verify did not pass (...)\" would say it twice; logs=%v", ops.logs)
+}
+
 // TestSoloTurnCapStillParksOnCleanTree proves a clean tree is never salvaged:
 // CommitWithMessage reporting (false, nil) means there is no diff - the only
 // completion evidence a capped run has - so even a passing verify cannot rescue
@@ -949,6 +977,191 @@ func TestSoloTurnCapStillParksOnCleanTree(t *testing.T) {
 	assert.Equal(t, -1, indexOfCall(calls, "CompleteTask:SUB-1"), "a clean tree must not complete")
 	assert.Empty(t, git.pushBranches, "a clean tree must not push")
 	assert.GreaterOrEqual(t, indexOfCall(calls, "ReleaseCard:SUB-1"), 0, "the parked claim is released")
+}
+
+// TestSalvageDeclineEscalatesTierAndReportsFailed proves a solo turn-cap park
+// that fails the authoritative verify (never salvaged) bumps the subtask's
+// persisted tier marker one step - so a resumed run selects a stronger model
+// against a bigger cap instead of repeating the same losing attempt - and
+// reports a "failed" outcome with VerifyPass false: the run did not complete,
+// and the verify never confirmed the work.
+func TestSalvageDeclineEscalatesTierAndReportsFailed(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: burnResps(5)}
+	d := execTestDeps(ops, git, client)
+	d.Cfg.MaxTurns = 5
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "moderate"}}, 0)
+	ops.taskContext = cmclient.TaskContext{
+		Description: withTierMarker("Implement the thing.", "moderate"),
+	}
+
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 1, Output: "FAIL"} // fail
+	}
+
+	err := runExecute(context.Background(), o)
+	require.Error(t, err, "a capped subtask whose committed work fails verify parks")
+
+	assert.Equal(t, "Implement the thing.\n\n<!-- cm:tier=complex -->", ops.bodyFor("SUB-1"),
+		"the park escalates the marker one step, leaving the rest of the body unchanged")
+	assert.True(t, ops.loggedContains("escalating subtask tier moderate -> complex"),
+		"the escalation is activity-logged; logs=%v", ops.logs)
+
+	require.Len(t, ops.reportOutcomes, 1)
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 1)
+	assert.Equal(t, "failed", rows[0].Result)
+	assert.False(t, rows[0].VerifyPass)
+	assert.Equal(t, 1, rows[0].NCandidates)
+}
+
+// TestSalvageDeclineOnCleanTreeEscalatesTierAndReportsFailed proves the
+// earliest decline branch, where a capped subtask committed nothing at all,
+// carries the full park consequences too: the cap happened regardless of
+// whether there was anything to salvage-commit, so resume still gets a bigger
+// cap and a higher bar, and the leaderboard still gets the "failed" row.
+func TestSalvageDeclineOnCleanTreeEscalatesTierAndReportsFailed(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: false} // clean tree: nothing committed
+	client := &planLLM{responses: burnResps(5)}
+	d := execTestDeps(ops, git, client)
+	d.Cfg.MaxTurns = 5
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+	ops.taskContext = cmclient.TaskContext{
+		Description: withTierMarker("Implement the thing.", "simple"),
+	}
+
+	err := runExecute(context.Background(), o)
+	require.Error(t, err, "a clean tree carries no completion evidence, so the cap parks")
+
+	assert.Equal(t, "Implement the thing.\n\n<!-- cm:tier=moderate -->", ops.bodyFor("SUB-1"),
+		"the clean-tree decline still escalates the marker, leaving the rest of the body unchanged")
+	assert.True(t, ops.loggedContains("escalating subtask tier simple -> moderate"),
+		"the escalation is activity-logged; logs=%v", ops.logs)
+
+	require.Len(t, ops.reportOutcomes, 1)
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 1)
+	assert.Equal(t, "failed", rows[0].Result)
+	assert.False(t, rows[0].VerifyPass, "verify was never reached on a clean tree")
+}
+
+// TestSalvageDeclineCriticalTierStaysCritical proves critical is the ceiling:
+// there is nowhere left to escalate to, so the board write is skipped
+// entirely (nothing to persist, nothing to announce), while the original park
+// advisory still logs exactly as it would for any other tier.
+func TestSalvageDeclineCriticalTierStaysCritical(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	// Critical scales coderMaxTurns to 2x the base (10), so it takes 10 burn
+	// turns - not the base 5 - to trip the cap.
+	client := &planLLM{responses: burnResps(10)}
+	d := execTestDeps(ops, git, client)
+	d.Cfg.MaxTurns = 5
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "critical"}}, 0)
+	ops.taskContext = cmclient.TaskContext{
+		Description: withTierMarker("Implement the thing.", "critical"),
+	}
+
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 1, Output: "FAIL"} // fail
+	}
+
+	err := runExecute(context.Background(), o)
+	require.Error(t, err, "a capped subtask whose committed work fails verify parks")
+
+	assert.Equal(t, -1, indexOfCall(ops.recorded(), "UpdateCardBody:SUB-1"),
+		"critical is already the ceiling; no board write is needed")
+	assert.Empty(t, ops.bodyFor("SUB-1"), "no marker write when the tier cannot escalate further")
+	assert.True(t, ops.loggedContains("verify did not pass"), "the original park advisory still logs; logs=%v", ops.logs)
+	assert.False(t, ops.loggedContains("escalating subtask tier"),
+		"no escalation announcement when nothing escalated; logs=%v", ops.logs)
+}
+
+// TestSalvageDeclineAfterVerifyPassKeepsTierAndReportsNoOutcome proves the
+// park consequences are asymmetric: once the authoritative verify has already
+// passed, the model's work is proven correct within the cap, so a park caused
+// by a downstream infrastructure failure (here, the push) must NOT escalate
+// the tier - a resume at the SAME tier is the right economics, not a bigger
+// model - and must NOT report an outcome either: a "failed" row would
+// penalize the model at full weight for a fault that is not its own, the
+// same environmental exemption a skipped verify gets.
+func TestSalvageDeclineAfterVerifyPassKeepsTierAndReportsNoOutcome(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, pushErr: errors.New("push boom")}
+	client := &planLLM{responses: burnResps(5)}
+	d := execTestDeps(ops, git, client)
+	d.Cfg.MaxTurns = 5
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "moderate"}}, 0)
+	ops.taskContext = cmclient.TaskContext{
+		Description: withTierMarker("Implement the thing.", "moderate"),
+	}
+
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 0} // pass
+	}
+
+	err := runExecute(context.Background(), o)
+	require.Error(t, err, "a push failure after a passing verify still parks")
+
+	var mte *MaxTurnsError
+	require.ErrorAs(t, err, &mte)
+
+	assert.Equal(t, -1, indexOfCall(ops.recorded(), "UpdateCardBody:SUB-1"),
+		"a park after a passing verify must not touch the subtask body at all")
+	assert.Empty(t, ops.bodyFor("SUB-1"), "no tier-marker write on a post-verify-pass park")
+	assert.False(t, ops.loggedContains("escalating subtask tier"),
+		"a post-verify-pass park must not log a tier escalation; logs=%v", ops.logs)
+	assert.Empty(t, ops.reportOutcomes,
+		"an infrastructure park after a passing verify is not evidence about the model")
+}
+
+// TestSalvageDeclineAfterCompleteTaskFailKeepsTierAndWinRow is the sibling of
+// TestSalvageDeclineAfterVerifyPassKeepsTierAndReportsNoOutcome for the OTHER
+// post-verify-pass park cause: the push succeeds but the board's CompleteTask
+// call fails. Same tier contract - the model's work is proven correct, so
+// this is an infrastructure park that must not touch the tier marker. The
+// outcome differs from the push case only because the win report fires
+// BEFORE the doomed CompleteTask attempt (claim-gating requires it): exactly
+// one "win" row stands, and the CompleteTask failure gets no second,
+// contradictory report of its own.
+func TestSalvageDeclineAfterCompleteTaskFailKeepsTierAndWinRow(t *testing.T) {
+	ops := &fakeOps{completeTaskErr: errors.New("complete task boom")}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: burnResps(5)}
+	d := execTestDeps(ops, git, client)
+	d.Cfg.MaxTurns = 5
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "moderate"}}, 0)
+	ops.taskContext = cmclient.TaskContext{
+		Description: withTierMarker("Implement the thing.", "moderate"),
+	}
+
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 0} // pass
+	}
+
+	err := runExecute(context.Background(), o)
+	require.Error(t, err, "a CompleteTask failure after a passing verify still parks")
+
+	var mte *MaxTurnsError
+	require.ErrorAs(t, err, &mte)
+
+	assert.Equal(t, -1, indexOfCall(ops.recorded(), "UpdateCardBody:SUB-1"),
+		"a park after a passing verify must not touch the subtask body at all")
+	assert.Empty(t, ops.bodyFor("SUB-1"), "no tier-marker write on a post-verify-pass park")
+	assert.False(t, ops.loggedContains("escalating subtask tier"),
+		"a post-verify-pass park must not log a tier escalation; logs=%v", ops.logs)
+
+	require.Len(t, ops.reportOutcomes, 1, "exactly one outcome row - no duplicate report on the CompleteTask failure")
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 1)
+	assert.Equal(t, "win", rows[0].Result, "the verify already proved the work correct before CompleteTask failed")
+	assert.True(t, rows[0].VerifyPass)
 }
 
 // markerMidRunLLM wraps a scripted LLM and writes a toolchain marker file into
@@ -1040,6 +1253,42 @@ func TestSoloTurnCapPropagatesToolchainSentinel(t *testing.T) {
 		"a toolchain sentinel must not be logged as a generic unresolved-verify park; logs=%v", ops.logs)
 }
 
+// TestFakeOpsReportModelOutcomesEnforcesContract proves fakeOps validates
+// every row against CM's actual admission contract (relaxed to n_candidates
+// >= 1 by the solo-outcome fix) rather than accepting anything: a caller that
+// ever assembles a malformed row - here exercised directly rather than
+// through the orchestrator - gets an error back and the batch is not
+// recorded, the same all-or-nothing behavior as the real store's validated
+// transaction.
+func TestFakeOpsReportModelOutcomesEnforcesContract(t *testing.T) {
+	cases := []struct {
+		name string
+		row  cmclient.ModelOutcome
+	}{
+		{"zero n_candidates rejected", cmclient.ModelOutcome{Model: "a/b", Result: "win", NCandidates: 0}},
+		{"empty model rejected", cmclient.ModelOutcome{Model: "", Result: "win", NCandidates: 1}},
+		{"unknown result rejected", cmclient.ModelOutcome{Model: "a/b", Result: "meh", NCandidates: 1}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ops := &fakeOps{}
+
+			err := ops.ReportModelOutcomes(context.Background(), "SUB-1", []cmclient.ModelOutcome{tc.row})
+			require.Error(t, err)
+			assert.Empty(t, ops.reportOutcomes, "an invalid batch must not be recorded")
+		})
+	}
+
+	// A solo row (n_candidates == 1) is exactly the shape the relaxation
+	// admits - it must still be accepted, not just tolerated at n_candidates
+	// >= 2.
+	ops := &fakeOps{}
+	require.NoError(t, ops.ReportModelOutcomes(context.Background(), "SUB-1",
+		[]cmclient.ModelOutcome{{Model: "a/b", Result: "win", NCandidates: 1}}))
+	assert.Len(t, ops.reportOutcomes, 1)
+}
+
 // The former TestNoSalvageForParentSolver asserted the single-solver path always
 // parked on the cap with no commit. That is no longer the contract: a capped
 // single-solver subtask now commits its WIP and salvages it when the
@@ -1047,6 +1296,278 @@ func TestSoloTurnCapPropagatesToolchainSentinel(t *testing.T) {
 // TestSoloTurnCapSalvagedWhenVerifyPasses / ...StillParksWhenVerifyFails /
 // ...StillParksOnCleanTree, plus TestExecuteSubtaskMaxTurnsNeverCompletes for the
 // unresolved-verify park.
+
+// TestExecuteSubtaskFlowReportsSoloWinOutcome proves a plain finish-terminated
+// solo completion reports a "win" model outcome keyed on the SUBTASK card (not
+// the parent) - the ReportUsage solo precedent, deliberately unlike the
+// Best-of-N judge's parent rollup. VerifyPass is false: no authoritative verify
+// ran on this path, so it is informational, not a signal.
+func TestExecuteSubtaskFlowReportsSoloWinOutcome(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	llmFake := &planLLM{responses: []llm.Response{finishResp("feat(x): add y", 0.10)}}
+	d := execTestDeps(ops, git, llmFake)
+
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
+	require.NoError(t, runExecute(context.Background(), o))
+
+	// The outcome report MUST fire before CompleteTask: report_model_outcome is
+	// claim-gated, and a successful CompleteTask atomically releases the claim -
+	// reporting afterward would silently vanish against an already-released claim.
+	calls := ops.recorded()
+	complete := indexOfCall(calls, "CompleteTask:SUB-1")
+	report := indexOfCall(calls, "ReportModelOutcomes:SUB-1")
+	require.GreaterOrEqual(t, complete, 0, "calls=%v", calls)
+	require.GreaterOrEqual(t, report, 0, "calls=%v", calls)
+	assert.Less(t, report, complete, "the outcome reports before completion, while the claim is still held")
+
+	require.Len(t, ops.reportOutcomes, 1)
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 1)
+
+	assert.Equal(t, "win", rows[0].Result)
+	assert.False(t, rows[0].VerifyPass, "no authoritative verify ran on the plain completion path")
+	assert.Equal(t, 1, rows[0].NCandidates, "a solo report is never scaled by candidate count")
+	assert.Empty(t, rows[0].JudgeModel, "there is no judge on the solo path")
+	assert.Equal(t, ops.lastUsageReport().Model, rows[0].Model,
+		"with no gateway echo, the row's selected slug and the billed model coincide"+
+			" (TestSoloOutcomeKeyedOnSelectedSlug pins the divergent case)")
+	assert.InDelta(t, 0.10, rows[0].CostUSD, 1e-9)
+}
+
+// TestSoloTurnCapSalvageReportsWinOutcome proves the salvage-success path
+// (a capped subtask whose committed work passes the authoritative verify)
+// reports a "win" with VerifyPass true - the verify actually confirmed the
+// work, unlike the plain completion path.
+func TestSoloTurnCapSalvageReportsWinOutcome(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: burnResps(5)}
+	d := execTestDeps(ops, git, client)
+	d.Cfg.MaxTurns = 5
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 0} // pass
+	}
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	// Same claim-gating requirement as the plain completion path: the report
+	// must fire before CompleteTask releases the claim.
+	calls := ops.recorded()
+	complete := indexOfCall(calls, "CompleteTask:SUB-1")
+	report := indexOfCall(calls, "ReportModelOutcomes:SUB-1")
+	require.GreaterOrEqual(t, complete, 0, "calls=%v", calls)
+	require.GreaterOrEqual(t, report, 0, "calls=%v", calls)
+	assert.Less(t, report, complete, "the outcome reports before completion, while the claim is still held")
+
+	require.Len(t, ops.reportOutcomes, 1)
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 1)
+
+	assert.Equal(t, "win", rows[0].Result)
+	assert.True(t, rows[0].VerifyPass, "the authoritative verify passed before the salvage")
+	assert.Equal(t, 1, rows[0].NCandidates)
+	assert.NotEmpty(t, rows[0].Model)
+}
+
+// TestSalvageDeclineExhaustedVerifyFailureReportsNoOutcome proves the
+// environmental exemption extends to a verify that RAN and failed when its
+// output carries a resource-exhaustion signature on both attempts: under a
+// pids limit `go test` compiles, then its inner fork/exec dies with EAGAIN
+// and go exits 1 - classified failed, surviving the single retry - yet that
+// is container pressure, not evidence about the model. The park and the tier
+// escalation still stand; only the leaderboard row is withheld.
+func TestSalvageDeclineExhaustedVerifyFailureReportsNoOutcome(t *testing.T) {
+	withFastVerifyRetryWait(t)
+
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: burnResps(5)}
+	d := execTestDeps(ops, git, client)
+	d.Cfg.MaxTurns = 5
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "moderate"}}, 0)
+	ops.taskContext = cmclient.TaskContext{
+		Description: withTierMarker("Implement the thing.", "moderate"),
+	}
+
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		return verifyexec.Outcome{
+			ExitCode: 1,
+			Output:   "fork/exec /tmp/go-build/test.bin: resource temporarily unavailable",
+		}
+	}
+
+	err := runExecute(context.Background(), o)
+	require.Error(t, err, "the exhausted verify still declines the salvage and parks")
+
+	assert.Empty(t, ops.reportOutcomes,
+		"a verify killed by container pressure is an environment problem, not evidence about the model")
+	assert.Equal(t, "Implement the thing.\n\n<!-- cm:tier=complex -->", ops.bodyFor("SUB-1"),
+		"the tier still escalates even though the outcome goes unreported")
+	assert.True(t, ops.loggedContains("resource exhaustion"),
+		"the card log names the environmental cause the reporting exemption acted on; logs=%v", ops.logs)
+}
+
+// TestSalvageDeclineSkippedVerifyReportsNoOutcome proves a skip-classified
+// authoritative verify (here, a timeout - environmental, not a code defect)
+// gets the same exemption as the *ToolchainMissingError branch: the park still
+// escalates the subtask tier and logs the classification, but no
+// ReportModelOutcomes call fires, because a skipped verify is not evidence
+// about the model. Its sibling, TestSalvageDeclineEscalatesTierAndReportsFailed,
+// proves a genuine (ran-and-failed) verify keeps reporting unchanged.
+func TestSalvageDeclineSkippedVerifyReportsNoOutcome(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: burnResps(5)}
+	d := execTestDeps(ops, git, client)
+	d.Cfg.MaxTurns = 5
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "moderate"}}, 0)
+	ops.taskContext = cmclient.TaskContext{
+		Description: withTierMarker("Implement the thing.", "moderate"),
+	}
+
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		return verifyexec.Outcome{TimedOut: true, ExitCode: -1}
+	}
+
+	err := runExecute(context.Background(), o)
+	require.Error(t, err, "a timed-out verify still parks the capped subtask")
+
+	assert.Empty(t, ops.reportOutcomes, "a skipped verify is an environment problem, not evidence about the model")
+	assert.Equal(t, "Implement the thing.\n\n<!-- cm:tier=complex -->", ops.bodyFor("SUB-1"),
+		"the tier still escalates even though the outcome goes unreported")
+	assert.True(t, ops.loggedContains("verify timed out"),
+		"the park is still activity-logged; logs=%v", ops.logs)
+}
+
+// TestSoloOutcomeKeyedOnSelectedSlug proves the outcome row is keyed on the
+// SELECTED catalog slug, not the gateway-echoed model name: CM attaches
+// outcome stats back onto candidates by the slug selection knows (the same
+// keying as Best-of-N rows), so a row keyed on a gateway's echoed alias would
+// never rejoin selection and the whole solo-learning loop would silently go
+// dark. Usage reporting deliberately differs - it bills the echoed name.
+func TestSoloOutcomeKeyedOnSelectedSlug(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+
+	resp := finishResp("feat(x): add y", 0.10)
+	resp.Model = "gateway/echoed-alias" // the gateway reports its own name for the model
+	llmFake := &planLLM{responses: []llm.Response{resp}}
+	d := execTestDeps(ops, git, llmFake)
+
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
+	require.NoError(t, runExecute(context.Background(), o))
+
+	require.Len(t, ops.reportOutcomes, 1)
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 1)
+
+	assert.Equal(t, "gateway/echoed-alias", ops.lastUsageReport().Model,
+		"usage bills the model the gateway says it served")
+	assert.NotEqual(t, "gateway/echoed-alias", rows[0].Model,
+		"the outcome row must not key on the gateway echo")
+	assert.NotEmpty(t, rows[0].Model)
+}
+
+// TestSoloTurnCapToolchainSentinelReportsNoOutcome proves the toolchain-missing
+// park (a distinct sentinel that supersedes the plain turn-cap) does not report
+// a model outcome: a missing toolchain is an environment problem, not evidence
+// about the model, and this park is left unlogged on the card for the same
+// reason (see execute()'s dedicated arm).
+func TestSoloTurnCapToolchainSentinelReportsNoOutcome(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("exec-bit probing is POSIX-only")
+	}
+
+	stubTools(t) // nothing on PATH: mvn cannot resolve
+
+	dir := t.TempDir()
+
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	inner := &planLLM{responses: burnResps(5)}
+	client := &markerMidRunLLM{inner: inner, t: t, dir: dir}
+	d := execTestDeps(ops, git, client)
+	d.Cfg.MaxTurns = 5
+	d.Cfg.Workspace = dir
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+	o.planFn = func(context.Context) error { return nil }
+
+	err := o.execute(context.Background())
+	require.Error(t, err)
+
+	var tme *ToolchainMissingError
+	require.ErrorAs(t, err, &tme)
+
+	assert.Empty(t, ops.reportOutcomes, "a toolchain-missing park must not report a model outcome")
+}
+
+// TestCandidateCompletionDoesNotReportSoloOutcome proves the solo-outcome
+// report stays board-ops only: a Best-of-N candidate (boardOps false) that
+// finishes a subtask normally must not emit any ReportModelOutcomes call -
+// candidate outcomes are reported once, in aggregate, by the judge's adoption
+// tail (reportCandidateOutcomes), never per-subtask. Pins that this task's
+// change leaves the Best-of-N reporting path untouched.
+func TestCandidateCompletionDoesNotReportSoloOutcome(t *testing.T) {
+	ops := &fakeOps{}
+	client := &planLLM{responses: []llm.Response{finishResp("feat: x", 0.02)}}
+	d := execTestDeps(ops, &fakeGit{committed: true}, client)
+	o := newExecRun(d, nil, 0)
+
+	cg := &fakeGit{committed: true}
+	sc := &solverCtx{
+		git: cg, ledger: NewLedger(0, 0), tools: d.WriteTools,
+		workspace: "ws", coderModel: o.resolveCoderModel,
+		boardOps: false, push: false, tag: "candidate 1/1",
+	}
+
+	require.NoError(t, o.executeSubtaskWith(context.Background(), sc,
+		subtaskRef{ID: "SUB-1", Title: "Work", Tier: "simple"}))
+
+	assert.Empty(t, ops.reportOutcomes, "a candidate's per-subtask completion must not report a solo model outcome")
+}
+
+// TestSequentialSoloSubtasksReportPerSubtaskCostDelta proves CostUSD on each
+// solo outcome row is the SUBTASK's own ledger delta, not the run's
+// cumulative total: the second subtask's win report must carry only its own
+// spend, not its own spend plus the first subtask's - which the run ledger's
+// running total would otherwise silently fold in (and which would compound
+// further on a resumed run carrying whole prior sessions' spend).
+func TestSequentialSoloSubtasksReportPerSubtaskCostDelta(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	llmFake := &planLLM{responses: []llm.Response{
+		finishResp("feat: one", 0.10),
+		finishResp("feat: two", 0.25),
+	}}
+	d := execTestDeps(ops, git, llmFake)
+
+	o := newExecRun(d, []subtaskRef{
+		{ID: "SUB-1", Title: "First", Tier: "simple"},
+		{ID: "SUB-2", Title: "Second", Tier: "simple"},
+	}, 0)
+	require.NoError(t, runExecute(context.Background(), o))
+
+	require.Len(t, ops.reportOutcomes, 2, "one outcome report per subtask")
+
+	row1 := ops.reportOutcomes[0]
+	require.Len(t, row1, 1)
+	assert.InDelta(t, 0.10, row1[0].CostUSD, 1e-9, "SUB-1's own cost only")
+
+	row2 := ops.reportOutcomes[1]
+	require.Len(t, row2, 1)
+	assert.InDelta(t, 0.25, row2[0].CostUSD, 1e-9,
+		"SUB-2's own cost only - not cumulative with SUB-1's 0.10")
+
+	// The run ledger itself stays cumulative (it enforces the whole-run
+	// ceiling); only the per-subtask REPORT is a delta.
+	assert.InDelta(t, 0.35, o.ledger.Spent(), 1e-9)
+}
 
 // TestCandidateSubtaskParksOnRunLedgerBreach pins the fan-out window close: a
 // candidate whose own sub-ledger is clean still parks when the RUN ledger -

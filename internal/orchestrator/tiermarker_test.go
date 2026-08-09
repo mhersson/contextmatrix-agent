@@ -23,3 +23,22 @@ func TestParseTierMarkerAbsentAndInvalid(t *testing.T) {
 	tier, _ = parseTierMarker("body\n<!-- cm:tier=galactic -->")
 	assert.Empty(t, tier, "unknown tiers are rejected, caller falls back")
 }
+
+func TestNextTier(t *testing.T) {
+	tests := []struct {
+		tier string
+		want string
+	}{
+		{"simple", "moderate"},
+		{"moderate", "complex"},
+		{"complex", "critical"},
+		{"critical", "critical"},
+		{"", "complex"}, // absent marker parses as the moderate default
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.tier, func(t *testing.T) {
+			assert.Equal(t, tt.want, nextTier(tt.tier))
+		})
+	}
+}

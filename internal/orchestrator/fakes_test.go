@@ -37,11 +37,12 @@ type fakeOps struct {
 	// the single-value taskContext/taskCtxErr behaviour above.
 	taskContexts map[string]cmclient.TaskContext
 
-	setPhaseErr    error
-	addLogErr      error
-	claimErr       error
-	updateBodyErr  error
-	releaseCardErr error
+	setPhaseErr     error
+	addLogErr       error
+	claimErr        error
+	updateBodyErr   error
+	releaseCardErr  error
+	completeTaskErr error
 
 	// logs captures every AddLog message (verbatim) so model-selection tests can
 	// assert the activity feed received the expected entry.
@@ -307,7 +308,7 @@ func (f *fakeOps) BlacklistModel(_ context.Context, cardID, model, reason string
 func (f *fakeOps) CompleteTask(_ context.Context, cardID, summary string) error {
 	f.record("CompleteTask:" + cardID)
 
-	return nil
+	return f.completeTaskErr
 }
 
 func (f *fakeOps) ReleaseCard(_ context.Context, cardID string) error {
@@ -316,7 +317,31 @@ func (f *fakeOps) ReleaseCard(_ context.Context, cardID string) error {
 	return f.releaseCardErr
 }
 
+// ReportModelOutcomes enforces CM's row contract (mirroring
+// internal/opstore/sqlite/outcomes.go's RecordModelOutcomes validation, post
+// the solo-outcome relaxation to n_candidates >= 1) so a caller that ever
+// assembles a malformed row fails the test right here instead of the fake
+// silently accepting it: model must be non-empty, result one of
+// win/loss/failed, n_candidates >= 1. A violation is returned as an error
+// WITHOUT recording the batch, matching the real store's all-or-nothing
+// transaction - so even a best-effort caller that only warns on the error
+// leaves no row behind for reportOutcomes assertions to see, and the test
+// fails on the missing row.
 func (f *fakeOps) ReportModelOutcomes(_ context.Context, cardID string, outcomes []cmclient.ModelOutcome) error {
+	for i, o := range outcomes {
+		if o.Model == "" {
+			return fmt.Errorf("fakeOps.ReportModelOutcomes: row %d: model required", i)
+		}
+
+		if o.Result != "win" && o.Result != "loss" && o.Result != "failed" {
+			return fmt.Errorf("fakeOps.ReportModelOutcomes: row %d: invalid result %q", i, o.Result)
+		}
+
+		if o.NCandidates < 1 {
+			return fmt.Errorf("fakeOps.ReportModelOutcomes: row %d: n_candidates must be >= 1, got %d", i, o.NCandidates)
+		}
+	}
+
 	f.mu.Lock()
 	f.reportOutcomes = append(f.reportOutcomes, outcomes)
 	f.mu.Unlock()

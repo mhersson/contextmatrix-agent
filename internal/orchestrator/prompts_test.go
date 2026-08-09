@@ -253,3 +253,14 @@ func TestCoderGroundingRuleInCoderPrompt(t *testing.T) {
 	assert.NotContains(t, fixPrompt, "hints to verify, not guarantees",
 		"the coder grounding rule is coder-only, not spliced into fixPrompt")
 }
+
+// guard: a production coder finished its subtask with turns to spare, then
+// spent them implementing work the parent card's description and acceptance
+// criteria described but the plan had assigned to a sibling subtask. The
+// scope rule already forbade sibling-subtask work; this pins the added
+// clause that the parent card itself is not a second source of scope.
+func TestCoderPromptScopedAgainstParentCriteria(t *testing.T) {
+	low := strings.ToLower(coderPrompt)
+	assert.Contains(t, low, "nothing from sibling subtasks")
+	assert.Contains(t, low, "the parent card's description and acceptance criteria may cover")
+}

@@ -5,15 +5,6 @@
 # review on each worker-image / Go-dependency bump and delete entries whose fix
 # has shipped. Dependabot (.github/dependabot.yml) tracks the underlying bumps.
 
-# --- The bundled npm CLI ships tinyglobby -> picomatch 4.0.3
-# (/usr/lib/node_modules/npm/node_modules/tinyglobby/node_modules/picomatch);
-# 4.0.4 fixes the ReDoS. This is npm's own transitive dependency, so it clears
-# only when an npm upgrade pulls in the fixed tinyglobby/picomatch - no Go
-# change here affects it. The worker container is single-tenant and only parses
-# globs it generates itself, so the ReDoS is not reachable from a prompt
-# attacker.
-CVE-2026-33671
-
 # --- The agent binary embeds the Docker SDK (github.com/docker/docker
 # v28.5.2+incompatible); CVE-2026-34040 is a Moby *daemon* authorization-bypass,
 # fixed in v29.3.1. The agent uses only the Docker *client*, against a trusted
@@ -33,10 +24,26 @@ CVE-2026-34040
 # surface. Clears when apt pulls a gh release built on Go >= 1.26.5.
 CVE-2026-39822
 
-# --- The bundled npm CLI ships sigstore 4.1.0
-# (/usr/lib/node_modules/npm/node_modules/sigstore); CVE-2026-48815 means its
-# certificateOIDs verification constraints are silently dropped and never
-# enforced, fixed in 4.1.1. npm's own transitive dependency, exercised only
-# when npm verifies registry attestations inside the single-tenant worker -
-# clears when an npm upgrade pulls in the fixed sigstore.
-CVE-2026-48815
+# --- The bundled npm CLI ships brace-expansion 5.0.7
+# (/usr/lib/node_modules/npm/node_modules/brace-expansion); the fixes land in
+# 5.0.8 and 5.0.9. DoS via glob brace expansion inside the npm CLI - the
+# single-tenant worker only expands globs npm generates itself. npm's own
+# transitive dependency: 11.19.0 (the newest npm that supports Node 25) still
+# bundles 5.0.7 - clears when an npm upgrade pulls in >= 5.0.9.
+CVE-2026-14257
+CVE-2026-69152
+
+# --- The bundled npm CLI ships ip-address 10.2.0
+# (/usr/lib/node_modules/npm/node_modules/ip-address); the fix is 10.3.1.
+# SSRF-shaped parse inconsistency on npm's socks-proxy path, which the worker
+# does not configure. npm's own transitive dependency: 11.19.0 still bundles
+# 10.2.0 - clears when an npm upgrade pulls in >= 10.3.1.
+CVE-2026-69192
+
+# --- golang.org/x/text v0.36.0 inside the golangci-lint binary
+# (/usr/local/bin/golangci-lint); the fix is v0.39.0. DoS on invalid UTF-8
+# input to a lint binary running repo-controlled code that can already execute
+# arbitrary bash. The latest golangci-lint release (v2.12.2) pins v0.36.0 and
+# `go install pkg@version` cannot raise a module's own dependency pins -
+# clears when a golangci-lint release requires x/text >= v0.39.0.
+CVE-2026-56852

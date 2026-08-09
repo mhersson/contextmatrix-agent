@@ -958,6 +958,82 @@ func TestReviewAttemptsCapIsThree(t *testing.T) {
 	assert.Equal(t, 3, reviewAttemptsCap)
 }
 
+// --- pushWIP direct tests ---------------------------------------------------
+
+// TestPushWIPPushesStrandedCleanTreeCommit is the direct regression for the
+// turn-cap salvage exposure: the salvage path commits the coder's work before
+// its verify gate, so a declined salvage leaves a real commit sitting on an
+// otherwise CLEAN tree. pushWIP's old `if !dirty { return }` short-circuit
+// skipped the push entirely in that case, stranding the commit with the
+// container. This simulates the salvage path directly - CommitWithMessage
+// leaves the tree clean - then calls pushWIP and asserts the commit still
+// reaches the remote.
+func TestPushWIPPushesStrandedCleanTreeCommit(t *testing.T) {
+	t.Parallel()
+
+	remote := setupBareRemote(t)
+	ws := filepath.Join(t.TempDir(), "ws")
+
+	g := NewGit(ws, "", "", "")
+	ctx := context.Background()
+
+	require.NoError(t, g.Clone(ctx, remote, "main"))
+	require.NoError(t, g.CreateBranch(ctx, "cm/cmx-001"))
+	g.SetBranchPolicy("cm/cmx-001", "main", "main")
+
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "salvage.txt"), []byte("committed by salvage\n"), 0o644))
+
+	committed, err := g.CommitWithMessage(ctx, "salvage: partial work")
+	require.NoError(t, err)
+	require.True(t, committed)
+
+	ops := newFakeOps()
+
+	a := fsmArgs{
+		ops:    ops,
+		git:    g,
+		spec:   RunSpec{CardID: "CMX-001"},
+		tcx:    cmclient.TaskContext{Title: "Add the widget"},
+		branch: "cm/cmx-001",
+	}
+
+	pushWIP(ctx, a)
+
+	assert.True(t, remoteHasBranch(t, remote, "cm/cmx-001"), "the stranded commit must reach the remote")
+	assert.Equal(t, 1, ops.count("ReportPush"), "the push must be reported")
+}
+
+// TestPushWIPCleanTreeNoUnpushedCommitsIsNoOp is the regression guard: a clean
+// tree with zero commits beyond what origin already has must not push at all.
+func TestPushWIPCleanTreeNoUnpushedCommitsIsNoOp(t *testing.T) {
+	t.Parallel()
+
+	remote := setupBareRemote(t)
+	ws := filepath.Join(t.TempDir(), "ws")
+
+	g := NewGit(ws, "", "", "")
+	ctx := context.Background()
+
+	require.NoError(t, g.Clone(ctx, remote, "main"))
+	require.NoError(t, g.CreateBranch(ctx, "cm/cmx-001"))
+	g.SetBranchPolicy("cm/cmx-001", "main", "main")
+
+	ops := newFakeOps()
+
+	a := fsmArgs{
+		ops:    ops,
+		git:    g,
+		spec:   RunSpec{CardID: "CMX-001"},
+		tcx:    cmclient.TaskContext{Title: "Add the widget"},
+		branch: "cm/cmx-001",
+	}
+
+	pushWIP(ctx, a)
+
+	assert.False(t, remoteHasBranch(t, remote, "cm/cmx-001"), "no commits to push means no branch created")
+	assert.Equal(t, 0, ops.count("ReportPush"), "no push means no report")
+}
+
 func TestBuildSkillToolPresentAndAbsent(t *testing.T) {
 	root := t.TempDir()
 	skillsDir := filepath.Join(root, "skills")
