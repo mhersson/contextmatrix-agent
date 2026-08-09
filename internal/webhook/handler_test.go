@@ -1322,6 +1322,48 @@ func TestBuildLaunchSpec_CompactionEnvOmittedWhenDisabled(t *testing.T) {
 	}
 }
 
+// ---- MaxCapability env threading -------------------------------------------
+
+func TestBuildLaunchSpec_MaxCapabilityEnvEmitted(t *testing.T) {
+	// A TriggerPayload with MaxCapability=true must produce CM_MAX_CAPABILITY=true
+	// in the container env.
+	s := NewServer(Config{
+		APIKey:    "k",
+		Executor:  &fakeExecutor{},
+		Tracker:   executor.NewTracker(1),
+		LaunchEnv: LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"},
+	})
+
+	spec := s.buildLaunchSpec(protocol.TriggerPayload{
+		CardID:        "C1",
+		Project:       "p",
+		MaxCapability: true,
+	}, "corr", "")
+
+	assert.Contains(t, spec.Env, "CM_MAX_CAPABILITY=true")
+}
+
+func TestBuildLaunchSpec_MaxCapabilityEnvAbsentWhenFalse(t *testing.T) {
+	// When MaxCapability is false (default), no CM_MAX_CAPABILITY= env var
+	// should appear - the worker defaults to false.
+	s := NewServer(Config{
+		APIKey:    "k",
+		Executor:  &fakeExecutor{},
+		Tracker:   executor.NewTracker(1),
+		LaunchEnv: LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"},
+	})
+
+	spec := s.buildLaunchSpec(protocol.TriggerPayload{
+		CardID:  "C1",
+		Project: "p",
+		// MaxCapability defaults to false
+	}, "corr", "")
+
+	for _, e := range spec.Env {
+		assert.NotContains(t, e, "CM_MAX_CAPABILITY=")
+	}
+}
+
 // TestBuildLaunchSpec_BestOfN pins the CM_BEST_OF_N env emission and pids-limit
 // scaling: BestOfN > 1 emits the env var and multiplies PidsLimit by N;
 // BestOfN <= 1 (the default) emits nothing and leaves PidsLimit unchanged. The

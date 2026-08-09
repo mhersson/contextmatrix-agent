@@ -76,6 +76,8 @@ type RunSpec struct {
 	MaxCardCost           float64 // CMX_MAX_CARD_COST; 0 disables
 	SelectorPriceHeadroom float64 // CMX_SELECTOR_PRICE_HEADROOM; 0 uses worker default
 
+	MaxCapability bool // CM_MAX_CAPABILITY; every pick chooses the most capable model in the tier regardless of price
+
 	CompactionEnabled         bool    // CMX_COMPACTION_ENABLED; false (default) keeps the hard context_limit stop
 	CompactionThreshold       float64 // CMX_COMPACTION_THRESHOLD; fraction of the context window (default 0.85)
 	CompactionKeepRecentTurns int     // CMX_COMPACTION_KEEP_RECENT_TURNS; recent turns kept verbatim (default 6)
@@ -735,7 +737,7 @@ func buildSkillTool(spec RunSpec, ops CardOps) tools.Tool {
 // payload-injected catalog, priors, favorites, and blacklist. No live catalog
 // fetch or embedded baseline is consulted.
 func buildRegistry(spec RunSpec) *registry.Registry {
-	return registry.FromSelection(spec.Selection, spec.DefaultModel, spec.SelectorPriceHeadroom)
+	return registry.FromSelection(spec.Selection, spec.DefaultModel, spec.SelectorPriceHeadroom, spec.MaxCapability)
 }
 
 // declaredVerify maps the protocol verify config onto the orchestrator-local

@@ -197,7 +197,13 @@ file only - never via flags or committed YAML.
    seat first considers only vendors not yet seated, with the price band
    re-anchored on that subset - so a diverse seat may cost more than the
    vendor-blind pick; when no unseated-vendor candidate qualifies, the seat is
-   picked vendor-blind. Favorites bypass the preference. Pins override,
+   picked vendor-blind. Favorites bypass the preference. A per-card
+   `max_capability` flag (trigger payload, exposed as `registry.Selection.
+   MaxCapability`) overrides both: every pick chooses the most capable
+   candidate in the tier regardless of price - it bypasses operator favorites
+   and the price band, and keeps the tier bar, blacklist, in-run exclude set,
+   window fit, and vendor-diversity preference intact; equal quality still
+   tie-breaks to the cheaper model. Pins override,
    precedence card pin → payload default → serve-config default. Priors, favorites, and the
    blacklist are injected at run start from CM's `SelectionContext` payload
    (`registry.FromSelection`) - nothing is embedded. The blacklist is

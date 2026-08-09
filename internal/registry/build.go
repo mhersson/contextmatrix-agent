@@ -10,7 +10,7 @@ import (
 // FromSelection builds a payload-driven Registry from CM's SelectionContext.
 // All candidates are tool-capable by construction (CM filtered on it), so the
 // synthesized catalog marks them so.
-func FromSelection(sc *protocol.SelectionContext, capable string, priceHeadroom float64) *Registry {
+func FromSelection(sc *protocol.SelectionContext, capable string, priceHeadroom float64, maxCapability bool) *Registry {
 	cat := make(llm.Catalog, 0)
 	priors := Priors{Models: map[string]PriorEntry{}}
 	creators := map[string]string{}
@@ -57,6 +57,8 @@ func FromSelection(sc *protocol.SelectionContext, capable string, priceHeadroom 
 		// default", which NewRegistryFromParts already set to defaultPriceHeadroom.
 		r.sel.PriceHeadroom = priceHeadroom
 	}
+
+	r.sel.MaxCapability = maxCapability
 
 	return r
 }

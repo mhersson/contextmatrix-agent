@@ -6,6 +6,7 @@
 package registry
 
 import (
+	"math"
 	"strings"
 
 	"github.com/mhersson/contextmatrix-harness/llm"
@@ -65,6 +66,11 @@ type Registry struct {
 // defaults to 1.5.
 type Selection struct {
 	PriceHeadroom float64 // <= 0 -> defaultPriceHeadroom
+
+	// MaxCapability makes every pick choose the most capable candidate in the
+	// tier regardless of price, and bypass operator favorites. Per-card, from
+	// the trigger payload.
+	MaxCapability bool
 }
 
 const defaultPriceHeadroom = 1.5
@@ -182,8 +188,10 @@ type candidate struct {
 // cheapest candidate; quality tie breaks to the cheaper model. Nothing passes
 // -> capable default.
 func (r *Registry) SelectByComplexity(in SelectInput) ModelSpec {
-	if fav := r.favoriteFor(in); fav != "" {
-		return r.specFor(fav)
+	if !r.sel.MaxCapability {
+		if fav := r.favoriteFor(in); fav != "" {
+			return r.specFor(fav)
+		}
 	}
 
 	cands := r.candidates(in)
@@ -203,7 +211,10 @@ func (r *Registry) SelectByComplexity(in SelectInput) ModelSpec {
 		headroom = defaultPriceHeadroom
 	}
 
-	band := cheapest * headroom
+	band := math.Inf(1)
+	if !r.sel.MaxCapability {
+		band = cheapest * headroom
+	}
 
 	best := candidate{}
 	have := false

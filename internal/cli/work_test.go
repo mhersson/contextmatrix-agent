@@ -210,6 +210,43 @@ func TestSpecFromEnv_BoolParsing(t *testing.T) {
 	}
 }
 
+func TestSpecFromEnv_MaxCapability(t *testing.T) {
+	t.Run("true", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("CM_MAX_CAPABILITY", "true")
+
+		spec, err := specFromEnv()
+		require.NoError(t, err)
+		assert.True(t, spec.MaxCapability)
+	})
+
+	t.Run("false", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("CM_MAX_CAPABILITY", "false")
+
+		spec, err := specFromEnv()
+		require.NoError(t, err)
+		assert.False(t, spec.MaxCapability)
+	})
+
+	t.Run("absent", func(t *testing.T) {
+		setRequired(t)
+
+		spec, err := specFromEnv()
+		require.NoError(t, err)
+		assert.False(t, spec.MaxCapability)
+	})
+
+	t.Run("non-true", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("CM_MAX_CAPABILITY", "yes")
+
+		spec, err := specFromEnv()
+		require.NoError(t, err)
+		assert.False(t, spec.MaxCapability)
+	})
+}
+
 func TestSpecFromEnv_IntParsing(t *testing.T) {
 	t.Run("defaults", func(t *testing.T) {
 		setRequired(t)
