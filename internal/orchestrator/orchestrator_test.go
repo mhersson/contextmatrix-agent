@@ -233,7 +233,7 @@ func TestMaxTurnsLogMessagePhaseAware(t *testing.T) {
 
 	planMsg := maxTurnsLogMessage("plan", mte)
 	assert.Equal(t,
-		`turn cap reached on model "anthropic/claude-x" after 25 turns - parking work; narrow the card's scope or raise planMaxTurns`,
+		`turn cap reached on model "anthropic/claude-x" after 25 turns - parking work; narrow the card's scope`,
 		planMsg)
 
 	for _, phase := range []string{"execute", "judge", "document", "review", "integrate"} {

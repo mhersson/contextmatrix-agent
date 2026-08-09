@@ -591,12 +591,13 @@ func contextLimitLogMessage(cle *ContextLimitError) string {
 
 // maxTurnsLogMessage is the canonical card-log line for a turn-cap park. The
 // remedy differs by phase: the plan phase's budget is capped at planMaxTurns
-// (see runmodel.go) regardless of CMX_MAX_TURNS, and it is the phase that
-// creates subtasks, so "raise CMX_MAX_TURNS" or "split the subtask" would
-// both be no-ops there. Every other phase keeps the original wording.
+// (see runmodel.go), an unexported constant with no config field, env var, or
+// flag - an operator cannot raise it - and it is the phase that creates
+// subtasks, so "raise CMX_MAX_TURNS" or "split the subtask" would both be
+// no-ops there. Every other phase keeps the original wording.
 func maxTurnsLogMessage(phase string, mte *MaxTurnsError) string {
 	if phase == "plan" {
-		return fmt.Sprintf("turn cap reached on model %q after %d turns - parking work; narrow the card's scope or raise planMaxTurns", mte.Model, mte.Turns)
+		return fmt.Sprintf("turn cap reached on model %q after %d turns - parking work; narrow the card's scope", mte.Model, mte.Turns)
 	}
 
 	return fmt.Sprintf("turn cap reached on model %q after %d turns - parking work; raise CMX_MAX_TURNS or split the subtask", mte.Model, mte.Turns)
