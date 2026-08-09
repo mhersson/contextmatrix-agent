@@ -226,6 +226,17 @@ const buildHygieneNote = `If you run a build or compile step only to check it, d
 behind - write it to a throwaway path or delete it before you finish. Leftover
 build artifacts clutter the workspace the reviewers read.`
 
+// processTeardownNote tells the coder/fixer to shut down any long-running
+// process it started for verification (a dev server, a watcher) before
+// finishing. The harness bash tool only SIGKILLs the process group on
+// timeout/cancel, so a process left running survives into later phases of the
+// same run, causing port conflicts and false "still running" checks. Shared by
+// coderPrompt and fixPrompt so the two cannot drift (same pattern as
+// buildHygieneNote and selfReviewBlock).
+const processTeardownNote = `Shut down any long-running process you start for verification (dev server,
+watcher) before finishing - leftovers cause port conflicts and false
+"still running" checks in later phases of this run.`
+
 // selfReviewBlock is the coder/fixer self-review gate, shared by coderPrompt and
 // fixPrompt so the two cannot drift. Hygiene only - it must not invite scope
 // expansion. Adapted from CM's execute-task workflow skill (Step 5).
@@ -280,6 +291,8 @@ Write tests alongside the code and run them. Once the acceptance criteria
 pass, finish immediately - do not repeat verification that already passed.%s
 
 ` + buildHygieneNote + `
+
+` + processTeardownNote + `
 
 ` + selfReviewBlock + `
 
@@ -467,6 +480,8 @@ commits your changes as a fixup and pushes after you finish.
 %s
 
 ` + buildHygieneNote + `
+
+` + processTeardownNote + `
 
 When you have addressed the findings and the tests pass, call the finish tool
 with a short conventional-commit message summarizing the fixes, then make no
