@@ -1242,12 +1242,15 @@ func TestExecuteSubtaskFlowReportsSoloWinOutcome(t *testing.T) {
 	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
 	require.NoError(t, runExecute(context.Background(), o))
 
+	// The outcome report MUST fire before CompleteTask: report_model_outcome is
+	// claim-gated, and a successful CompleteTask atomically releases the claim -
+	// reporting afterward would silently vanish against an already-released claim.
 	calls := ops.recorded()
 	complete := indexOfCall(calls, "CompleteTask:SUB-1")
 	report := indexOfCall(calls, "ReportModelOutcomes:SUB-1")
 	require.GreaterOrEqual(t, complete, 0, "calls=%v", calls)
 	require.GreaterOrEqual(t, report, 0, "calls=%v", calls)
-	assert.Less(t, complete, report, "the outcome reports after completion")
+	assert.Less(t, report, complete, "the outcome reports before completion, while the claim is still held")
 
 	require.Len(t, ops.reportOutcomes, 1)
 	rows := ops.reportOutcomes[0]
@@ -1280,6 +1283,15 @@ func TestSoloTurnCapSalvageReportsWinOutcome(t *testing.T) {
 	}
 
 	require.NoError(t, runExecute(context.Background(), o))
+
+	// Same claim-gating requirement as the plain completion path: the report
+	// must fire before CompleteTask releases the claim.
+	calls := ops.recorded()
+	complete := indexOfCall(calls, "CompleteTask:SUB-1")
+	report := indexOfCall(calls, "ReportModelOutcomes:SUB-1")
+	require.GreaterOrEqual(t, complete, 0, "calls=%v", calls)
+	require.GreaterOrEqual(t, report, 0, "calls=%v", calls)
+	assert.Less(t, report, complete, "the outcome reports before completion, while the claim is still held")
 
 	require.Len(t, ops.reportOutcomes, 1)
 	rows := ops.reportOutcomes[0]
@@ -1347,9 +1359,13 @@ func TestSalvageDeclineOnCleanTreeReportsFailedOutcome(t *testing.T) {
 }
 
 // TestSalvageDeclineAfterVerifyPassReportsFailedWithVerifyPassTrue proves the
-// two post-verify-pass keep-tier parks (push/CompleteTask failure) still
-// report "failed" - the run did not complete - but with VerifyPass true,
-// honestly distinguishing an infrastructure park from a capability gap.
+// push-failure keep-tier park (the one post-verify-pass exit that reports
+// BEFORE attempting CompleteTask, so there is no win report to conflict
+// with) reports "failed" - the run did not complete - but with VerifyPass
+// true, honestly distinguishing an infrastructure park from a capability
+// gap. Its sibling, a CompleteTask failure AFTER a passing verify, is
+// TestSalvageWinReportSurvivesCompleteTaskFailure: that one reports "win"
+// because the win report already fired before the doomed CompleteTask call.
 func TestSalvageDeclineAfterVerifyPassReportsFailedWithVerifyPassTrue(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true, pushErr: errors.New("push boom")}
@@ -1374,11 +1390,15 @@ func TestSalvageDeclineAfterVerifyPassReportsFailedWithVerifyPassTrue(t *testing
 	assert.True(t, rows[0].VerifyPass, "the verify already confirmed the work before the push failed")
 }
 
-// TestSalvageDeclineAfterCompleteTaskFailReportsFailedWithVerifyPassTrue is the
-// sibling of TestSalvageDeclineAfterVerifyPassReportsFailedWithVerifyPassTrue
-// for the OTHER post-verify-pass park cause: the push succeeds but CompleteTask
-// fails.
-func TestSalvageDeclineAfterCompleteTaskFailReportsFailedWithVerifyPassTrue(t *testing.T) {
+// TestSalvageWinReportSurvivesCompleteTaskFailure is the sibling of
+// TestSalvageDeclineAfterVerifyPassReportsFailedWithVerifyPassTrue for the
+// OTHER post-verify-pass park cause: the push succeeds but CompleteTask
+// fails. Unlike the push-failure case, the win report here fires BEFORE the
+// doomed CompleteTask attempt (claim-gating requires it), so the reported
+// outcome is "win", not "failed" - the verify already proved the work
+// correct, and CompleteTask's own failure is a board-write hiccup that gets
+// no second, contradictory report of its own.
+func TestSalvageWinReportSurvivesCompleteTaskFailure(t *testing.T) {
 	ops := &fakeOps{completeTaskErr: errors.New("complete task boom")}
 	git := &fakeGit{committed: true}
 	client := &planLLM{responses: burnResps(5)}
@@ -1392,14 +1412,14 @@ func TestSalvageDeclineAfterCompleteTaskFailReportsFailedWithVerifyPassTrue(t *t
 	}
 
 	err := runExecute(context.Background(), o)
-	require.Error(t, err)
+	require.Error(t, err, "a CompleteTask failure after a passing verify still parks the run")
 
-	require.Len(t, ops.reportOutcomes, 1)
+	require.Len(t, ops.reportOutcomes, 1, "exactly one outcome row - no duplicate report on the CompleteTask failure")
 	rows := ops.reportOutcomes[0]
 	require.Len(t, rows, 1)
 
-	assert.Equal(t, "failed", rows[0].Result, "a CompleteTask failure after a passing verify is still a park")
-	assert.True(t, rows[0].VerifyPass, "the verify already confirmed the work before CompleteTask failed")
+	assert.Equal(t, "win", rows[0].Result, "the verify already proved the work correct before CompleteTask failed")
+	assert.True(t, rows[0].VerifyPass)
 }
 
 // TestSoloTurnCapToolchainSentinelReportsNoOutcome proves the toolchain-missing
@@ -1458,6 +1478,43 @@ func TestCandidateCompletionDoesNotReportSoloOutcome(t *testing.T) {
 		subtaskRef{ID: "SUB-1", Title: "Work", Tier: "simple"}))
 
 	assert.Empty(t, ops.reportOutcomes, "a candidate's per-subtask completion must not report a solo model outcome")
+}
+
+// TestSequentialSoloSubtasksReportPerSubtaskCostDelta proves CostUSD on each
+// solo outcome row is the SUBTASK's own ledger delta, not the run's
+// cumulative total: the second subtask's win report must carry only its own
+// spend, not its own spend plus the first subtask's - which the run ledger's
+// running total would otherwise silently fold in (and which would compound
+// further on a resumed run carrying whole prior sessions' spend).
+func TestSequentialSoloSubtasksReportPerSubtaskCostDelta(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	llmFake := &planLLM{responses: []llm.Response{
+		finishResp("feat: one", 0.10),
+		finishResp("feat: two", 0.25),
+	}}
+	d := execTestDeps(ops, git, llmFake)
+
+	o := newExecRun(d, []subtaskRef{
+		{ID: "SUB-1", Title: "First", Tier: "simple"},
+		{ID: "SUB-2", Title: "Second", Tier: "simple"},
+	}, 0)
+	require.NoError(t, runExecute(context.Background(), o))
+
+	require.Len(t, ops.reportOutcomes, 2, "one outcome report per subtask")
+
+	row1 := ops.reportOutcomes[0]
+	require.Len(t, row1, 1)
+	assert.InDelta(t, 0.10, row1[0].CostUSD, 1e-9, "SUB-1's own cost only")
+
+	row2 := ops.reportOutcomes[1]
+	require.Len(t, row2, 1)
+	assert.InDelta(t, 0.25, row2[0].CostUSD, 1e-9,
+		"SUB-2's own cost only - not cumulative with SUB-1's 0.10")
+
+	// The run ledger itself stays cumulative (it enforces the whole-run
+	// ceiling); only the per-subtask REPORT is a delta.
+	assert.InDelta(t, 0.35, o.ledger.Spent(), 1e-9)
 }
 
 // TestCandidateSubtaskParksOnRunLedgerBreach pins the fan-out window close: a

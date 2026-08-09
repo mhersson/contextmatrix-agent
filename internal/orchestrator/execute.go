@@ -146,6 +146,13 @@ var subtaskHeartbeatInterval = 5 * time.Minute
 func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtaskRef) error {
 	d := o.d
 
+	// Snapshot the ledger before this subtask's own spend, so every solo
+	// outcome report below carries only THIS subtask's cost delta - not the
+	// run's cumulative total, which would inflate every later subtask's row
+	// with every earlier subtask's spend (and, on a resumed run, with whole
+	// prior sessions' spend too).
+	spendBefore := sc.ledger.Spent()
+
 	if sc.boardOps {
 		stopHeartbeat := startSubtaskHeartbeat(ctx, d.Ops, sub.ID)
 		defer stopHeartbeat()
@@ -174,7 +181,7 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 			return nil
 		}
 
-		salvaged, serr := o.salvageSoloCapped(ctx, sc, sub, model, res, err)
+		salvaged, serr := o.salvageSoloCapped(ctx, sc, sub, model, spendBefore, res, err)
 		if salvaged {
 			return nil
 		}
@@ -219,15 +226,23 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 	}
 
 	if sc.boardOps {
+		// Report the win BEFORE CompleteTask, not after: CM's
+		// report_model_outcome handler is claim-gated (requireActiveClaim), and
+		// a successful complete_task atomically transitions the card and
+		// releases the claim - report_usage is NOT the transferable precedent
+		// here (usage reporting carries no claim gate). Reporting after a
+		// successful CompleteTask would silently vanish for every real win. The
+		// normal (non-salvage) completion path: keyed on the subtask itself.
+		// VerifyPass is false here - no authoritative verify ran on this path,
+		// so it is simply unknown, not a failure signal; the field stays
+		// informational for a plain finish-terminated completion. The model
+		// finished, committed, and pushed successfully, so the win is real
+		// regardless of what the board bookkeeping below does with it.
+		o.reportSoloOutcome(ctx, sub.ID, model, "win", false, sc.ledger.Spent()-spendBefore)
+
 		if err := d.Ops.CompleteTask(ctx, sub.ID, commitMsg); err != nil {
 			return fmt.Errorf("complete subtask %s: %w", sub.ID, err)
 		}
-
-		// The normal (non-salvage) completion path: report a win keyed on the
-		// subtask itself. VerifyPass is false here - no authoritative verify ran
-		// on this path, so it is simply unknown, not a failure signal; the field
-		// stays informational for a plain finish-terminated completion.
-		o.reportSoloOutcome(ctx, sub.ID, model, "win", false, sc.ledger.Spent())
 	}
 
 	return nil
@@ -500,15 +515,22 @@ func (o *run) salvageCapped(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 // dedicated toolchain arm - and from there the worker's blocked-transition arm -
 // instead of surfacing as a plain turn-cap.
 //
-// Every (false, nil) exit reports a "failed" model outcome - the run did not
-// complete, regardless of cause - except the *ToolchainMissingError branch,
-// which is an environment problem (a missing tool), not evidence about the
-// model, and is left unreported like its unlogged card-log line. The two
-// exits below the authoritative verify (push/CompleteTask failure) report
-// VerifyPass true: the model's work was already proven correct, so the park
-// is infrastructure, not a capability gap - distinguishing them from the
-// VerifyPass false reports above, where the verify never confirmed anything.
-func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskRef, model string, res harness.Result, err error) (bool, error) {
+// Every exit that has not yet reached a verified win reports a "failed" model
+// outcome - the run did not complete, regardless of cause - except the
+// *ToolchainMissingError branch, which is an environment problem (a missing
+// tool), not evidence about the model, and is left unreported like its
+// unlogged card-log line. The push-failure exit below the authoritative
+// verify reports VerifyPass true: the model's work was already proven
+// correct, so the park is infrastructure, not a capability gap -
+// distinguishing it from the VerifyPass false reports above, where the
+// verify never confirmed anything. The win report fires BEFORE CompleteTask
+// (see reportSoloOutcome) - once it fires, a subsequent CompleteTask failure
+// gets no report of its own: the model's work already earned its win, and a
+// board-write hiccup afterward is not a second, contradictory outcome.
+// spendBefore is the run ledger's total at this subtask's start (captured by
+// the caller before the coder run), so every report below carries this
+// subtask's own cost delta, not the run's cumulative spend.
+func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskRef, model string, spendBefore float64, res harness.Result, err error) (bool, error) {
 	var mte *MaxTurnsError
 	if !sc.boardOps || !errors.As(err, &mte) {
 		return false, nil
@@ -527,7 +549,7 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 		// The cap happened regardless of whether there was anything to
 		// salvage-commit - escalate so resume does not repeat it at the same tier.
 		o.escalateSubtaskTier(ctx, sub)
-		o.reportSoloOutcome(ctx, sub.ID, model, "failed", false, sc.ledger.Spent())
+		o.reportSoloOutcome(ctx, sub.ID, model, "failed", false, sc.ledger.Spent()-spendBefore)
 
 		return false, nil
 	}
@@ -551,7 +573,7 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 
 		o.logSoloCapPark(ctx, sub.ID, "verify could not be resolved")
 		o.escalateSubtaskTier(ctx, sub)
-		o.reportSoloOutcome(ctx, sub.ID, model, "failed", false, sc.ledger.Spent())
+		o.reportSoloOutcome(ctx, sub.ID, model, "failed", false, sc.ledger.Spent()-spendBefore)
 
 		return false, nil
 	}
@@ -559,7 +581,7 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 	if len(plan.Argv) == 0 {
 		o.logSoloCapPark(ctx, sub.ID, "no verify command resolved to confirm it")
 		o.escalateSubtaskTier(ctx, sub)
-		o.reportSoloOutcome(ctx, sub.ID, model, "failed", false, sc.ledger.Spent())
+		o.reportSoloOutcome(ctx, sub.ID, model, "failed", false, sc.ledger.Spent()-spendBefore)
 
 		return false, nil
 	}
@@ -576,7 +598,7 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 
 		o.logSoloCapPark(ctx, sub.ID, reason)
 		o.escalateSubtaskTier(ctx, sub)
-		o.reportSoloOutcome(ctx, sub.ID, model, "failed", false, sc.ledger.Spent())
+		o.reportSoloOutcome(ctx, sub.ID, model, "failed", false, sc.ledger.Spent()-spendBefore)
 
 		return false, nil
 	}
@@ -590,20 +612,26 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 	// bigger model.
 	if sc.push {
 		if perr := o.pushBranch(ctx); perr != nil {
-			o.reportSoloOutcome(ctx, sub.ID, model, "failed", true, sc.ledger.Spent())
+			o.reportSoloOutcome(ctx, sub.ID, model, "failed", true, sc.ledger.Spent()-spendBefore)
 
 			return false, nil
 		}
 	}
 
-	if cerr := o.d.Ops.CompleteTask(ctx, sub.ID, commitMsg); cerr != nil {
-		o.reportSoloOutcome(ctx, sub.ID, model, "failed", true, sc.ledger.Spent())
+	// The win report fires BEFORE CompleteTask, not after (see the
+	// server-side rationale on reportSoloOutcome): the verify already
+	// confirmed the work is correct at this point, so the win is real
+	// regardless of what CompleteTask does next. A subsequent CompleteTask
+	// failure below therefore gets no report of its own - the outcome was
+	// already truthfully reported, and a second, contradictory row would be
+	// wrong.
+	o.reportSoloOutcome(ctx, sub.ID, model, "win", true, sc.ledger.Spent()-spendBefore)
 
+	if cerr := o.d.Ops.CompleteTask(ctx, sub.ID, commitMsg); cerr != nil {
 		return false, nil
 	}
 
 	o.d.logCard(ctx, "turn cap on subtask %s - committed work passed the authoritative verify; salvaged as complete", sub.ID)
-	o.reportSoloOutcome(ctx, sub.ID, model, "win", true, sc.ledger.Spent())
 
 	return true, nil
 }
@@ -621,6 +649,13 @@ func (o *run) logSoloCapPark(ctx context.Context, subID, reason string) {
 // existing ReportUsage solo precedent. NCandidates is always 1 and JudgeModel
 // is always empty: there is no judge on the solo path. Best-effort: a report
 // failure only warns, mirroring every other board write on this path.
+//
+// Claim-gating: CM's report_model_outcome handler requires an active claim on
+// cardID, and complete_task atomically releases that claim on success -
+// report_usage is NOT the transferable precedent here (usage reporting
+// carries no claim gate). Every caller MUST report while the claim is still
+// held, i.e. before CompleteTask/ReleaseCard - reporting after either would
+// silently fail against an already-released claim.
 //
 // Bias-math note: a Best-of-N judge samples N candidates, so a model's win
 // rate over many judged runs settles below 100% and the leaderboard's
