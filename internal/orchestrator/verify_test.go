@@ -675,6 +675,36 @@ func TestRunVerifyPlanRetriesOnResourceExhaustion(t *testing.T) {
 	assert.Equal(t, 2, calls, "an exhausted first run retries once")
 }
 
+// TestRunVerifyPlanRetriesOnStartErrResourceExhaustion covers the actual
+// process-spawn-failure shape (StartErr, no exit code): execWithEnv folds the
+// spawn error's own text - e.g. "fork/exec ...: resource temporarily
+// unavailable" - into Output, and that text is what LooksResourceExhausted
+// reads to trigger the retry.
+func TestRunVerifyPlanRetriesOnStartErrResourceExhaustion(t *testing.T) {
+	withFastVerifyRetryWait(t)
+
+	o := &run{d: Deps{Cfg: Config{Workspace: t.TempDir()}}}
+
+	calls := 0
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		calls++
+		if calls == 1 {
+			return verifyexec.Outcome{
+				ExitCode: -1,
+				StartErr: true,
+				Output:   "fork/exec /usr/bin/x: resource temporarily unavailable",
+			}
+		}
+
+		return verifyexec.Outcome{ExitCode: 0}
+	}
+
+	res, err := o.runVerifyPlan(context.Background(), "dir", verifyPlan{Argv: []string{"x"}, Timeout: time.Minute})
+	require.NoError(t, err)
+	assert.Equal(t, verifyPassed, res.Status)
+	assert.Equal(t, 2, calls, "a start-error carrying the exhaustion signature in its text retries once")
+}
+
 func TestRunVerifyPlanDoesNotRetryPlainFailure(t *testing.T) {
 	withFastVerifyRetryWait(t)
 

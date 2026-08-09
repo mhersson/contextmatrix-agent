@@ -202,6 +202,16 @@ func ExecInherit(ctx context.Context, dir string, argv []string, timeout time.Du
 	return execWithEnv(ctx, dir, argv, timeout, os.Environ())
 }
 
+// appendOutput adds extra to captured, separated by a newline when captured is
+// non-empty.
+func appendOutput(captured, extra string) string {
+	if captured == "" {
+		return extra
+	}
+
+	return captured + "\n" + extra
+}
+
 // execWithEnv is the shared core: it runs argv in dir with its own timeout
 // context and the given process environment, capturing combined output. It
 // disambiguates its own timeout (TimedOut) from a parent-context cancellation:
@@ -237,8 +247,13 @@ func execWithEnv(ctx context.Context, dir string, argv []string, timeout time.Du
 		if errors.As(err, &ee) {
 			o.ExitCode = ee.ExitCode()
 		} else {
+			// The process never started, so CombinedOutput captured nothing - the
+			// spawn error itself (e.g. "fork/exec ...: resource temporarily
+			// unavailable") is the only signal available, and callers like
+			// LooksResourceExhausted read it from Output.
 			o.StartErr = true
 			o.ExitCode = -1
+			o.Output = appendOutput(o.Output, err.Error())
 		}
 	}
 

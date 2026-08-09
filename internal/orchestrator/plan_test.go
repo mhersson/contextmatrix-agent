@@ -430,6 +430,34 @@ func TestPlanPhaseTestSplitRevisionWarnsAndProceedsOnRepeatViolation(t *testing.
 		"warn-and-proceed logged; logs=%v", ops.logs)
 }
 
+// TestReviseTestSplitBudgetCheckFailureKeepsOriginalPlan proves a budget
+// ceiling that blocks the revision call does not discard the already-parsed
+// original plan p: reviseTestSplit's every OTHER failure mode (a failed
+// revision call, an unparseable revision, a repeat violation) warns and falls
+// back to p, and the budget check is no exception - p is paid for, and
+// execute's own ledger check at its first subtask parks the run anyway if the
+// budget is genuinely exhausted.
+func TestReviseTestSplitBudgetCheckFailureKeepsOriginalPlan(t *testing.T) {
+	ops := &fakeOps{
+		taskContext: cmclient.TaskContext{Title: "Parent", Description: "body"},
+	}
+	d := planTestDeps(ops, &planLLM{})
+	o := newRun(d, ops.taskContext)
+	// Seed the ledger already at its ceiling so the revision call's pre-check parks.
+	o.ledger = NewLedger(0.01, 0.02)
+
+	p := plan{CardTier: "simple", Subtasks: []planSubtask{
+		{Title: "Change fakeOps to a per-state map", Description: "d", DependsOn: nil, Tier: "simple"},
+		{Title: offendingTitle, Description: "d", DependsOn: []int{0}, Tier: "simple"},
+	}}
+
+	revised, err := o.reviseTestSplit(context.Background(), "model", "", "", "", "", "", p)
+	require.NoError(t, err, "a budget check that blocks the revision call must not fail the run")
+	assert.Equal(t, p, revised, "the paid-for original plan is kept, not discarded")
+	assert.True(t, ops.loggedContains("revision budget check failed"),
+		"the fallback is status-logged; logs=%v", ops.logs)
+}
+
 func TestPlanPhaseResume(t *testing.T) {
 	ops := &fakeOps{
 		taskContext: cmclient.TaskContext{Title: "Parent", Description: "body"},

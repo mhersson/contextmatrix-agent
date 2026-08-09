@@ -943,8 +943,10 @@ func TestSoloTurnCapParkNamesClassification(t *testing.T) {
 	var mte *MaxTurnsError
 	require.ErrorAs(t, err, &mte)
 
-	assert.True(t, ops.loggedContains("verify did not pass (verify timed out"),
+	assert.True(t, ops.loggedContains("verify timed out"),
 		"the park reason names the timeout classification; logs=%v", ops.logs)
+	assert.False(t, ops.loggedContains("verify did not pass (verify timed out"),
+		"the note already states its own verdict; wrapping it in \"verify did not pass (...)\" would say it twice; logs=%v", ops.logs)
 }
 
 // TestSoloTurnCapStillParksOnCleanTree proves a clean tree is never salvaged:
@@ -1220,6 +1222,42 @@ func TestSoloTurnCapPropagatesToolchainSentinel(t *testing.T) {
 		"a toolchain sentinel must not be logged as a generic unresolved-verify park; logs=%v", ops.logs)
 }
 
+// TestFakeOpsReportModelOutcomesEnforcesContract proves fakeOps validates
+// every row against CM's actual admission contract (relaxed to n_candidates
+// >= 1 by the solo-outcome fix) rather than accepting anything: a caller that
+// ever assembles a malformed row - here exercised directly rather than
+// through the orchestrator - gets an error back and the batch is not
+// recorded, the same all-or-nothing behavior as the real store's validated
+// transaction.
+func TestFakeOpsReportModelOutcomesEnforcesContract(t *testing.T) {
+	cases := []struct {
+		name string
+		row  cmclient.ModelOutcome
+	}{
+		{"zero n_candidates rejected", cmclient.ModelOutcome{Model: "a/b", Result: "win", NCandidates: 0}},
+		{"empty model rejected", cmclient.ModelOutcome{Model: "", Result: "win", NCandidates: 1}},
+		{"unknown result rejected", cmclient.ModelOutcome{Model: "a/b", Result: "meh", NCandidates: 1}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ops := &fakeOps{}
+
+			err := ops.ReportModelOutcomes(context.Background(), "SUB-1", []cmclient.ModelOutcome{tc.row})
+			require.Error(t, err)
+			assert.Empty(t, ops.reportOutcomes, "an invalid batch must not be recorded")
+		})
+	}
+
+	// A solo row (n_candidates == 1) is exactly the shape the relaxation
+	// admits - it must still be accepted, not just tolerated at n_candidates
+	// >= 2.
+	ops := &fakeOps{}
+	require.NoError(t, ops.ReportModelOutcomes(context.Background(), "SUB-1",
+		[]cmclient.ModelOutcome{{Model: "a/b", Result: "win", NCandidates: 1}}))
+	assert.Len(t, ops.reportOutcomes, 1)
+}
+
 // The former TestNoSalvageForParentSolver asserted the single-solver path always
 // parked on the cap with no commit. That is no longer the contract: a capped
 // single-solver subtask now commits its WIP and salvages it when the
@@ -1329,6 +1367,39 @@ func TestSalvageDeclineReportsFailedOutcome(t *testing.T) {
 	assert.Equal(t, "failed", rows[0].Result)
 	assert.False(t, rows[0].VerifyPass)
 	assert.Equal(t, 1, rows[0].NCandidates)
+}
+
+// TestSalvageDeclineSkippedVerifyReportsNoOutcome proves a skip-classified
+// authoritative verify (here, a timeout - environmental, not a code defect)
+// gets the same exemption as the *ToolchainMissingError branch: the park still
+// escalates the subtask tier and logs the classification, but no
+// ReportModelOutcomes call fires, because a skipped verify is not evidence
+// about the model. Its sibling, TestSalvageDeclineReportsFailedOutcome, proves
+// a genuine (ran-and-failed) verify keeps reporting unchanged.
+func TestSalvageDeclineSkippedVerifyReportsNoOutcome(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: burnResps(5)}
+	d := execTestDeps(ops, git, client)
+	d.Cfg.MaxTurns = 5
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "moderate"}}, 0)
+	ops.taskContext = cmclient.TaskContext{
+		Description: withTierMarker("Implement the thing.", "moderate"),
+	}
+
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		return verifyexec.Outcome{TimedOut: true, ExitCode: -1}
+	}
+
+	err := runExecute(context.Background(), o)
+	require.Error(t, err, "a timed-out verify still parks the capped subtask")
+
+	assert.Empty(t, ops.reportOutcomes, "a skipped verify is an environment problem, not evidence about the model")
+	assert.Equal(t, "Implement the thing.\n\n<!-- cm:tier=complex -->", ops.bodyFor("SUB-1"),
+		"the tier still escalates even though the outcome goes unreported")
+	assert.True(t, ops.loggedContains("verify timed out"),
+		"the park is still activity-logged; logs=%v", ops.logs)
 }
 
 // TestSalvageDeclineOnCleanTreeReportsFailedOutcome proves the earliest decline

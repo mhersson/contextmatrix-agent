@@ -317,7 +317,31 @@ func (f *fakeOps) ReleaseCard(_ context.Context, cardID string) error {
 	return f.releaseCardErr
 }
 
+// ReportModelOutcomes enforces CM's row contract (mirroring
+// internal/opstore/sqlite/outcomes.go's RecordModelOutcomes validation, post
+// the solo-outcome relaxation to n_candidates >= 1) so a caller that ever
+// assembles a malformed row fails the test right here instead of the fake
+// silently accepting it: model must be non-empty, result one of
+// win/loss/failed, n_candidates >= 1. A violation is returned as an error
+// (the fake's owner asserts on it, or a caller that swallows it best-effort
+// still leaves it recorded for its own scripted-error tests to override) and
+// the batch is not recorded, matching the real store's all-or-nothing
+// transaction.
 func (f *fakeOps) ReportModelOutcomes(_ context.Context, cardID string, outcomes []cmclient.ModelOutcome) error {
+	for i, o := range outcomes {
+		if o.Model == "" {
+			return fmt.Errorf("fakeOps.ReportModelOutcomes: row %d: model required", i)
+		}
+
+		if o.Result != "win" && o.Result != "loss" && o.Result != "failed" {
+			return fmt.Errorf("fakeOps.ReportModelOutcomes: row %d: invalid result %q", i, o.Result)
+		}
+
+		if o.NCandidates < 1 {
+			return fmt.Errorf("fakeOps.ReportModelOutcomes: row %d: n_candidates must be >= 1, got %d", i, o.NCandidates)
+		}
+	}
+
 	f.mu.Lock()
 	f.reportOutcomes = append(f.reportOutcomes, outcomes)
 	f.mu.Unlock()

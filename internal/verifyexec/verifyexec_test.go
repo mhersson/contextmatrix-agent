@@ -246,6 +246,8 @@ func TestExecExitCodes(t *testing.T) {
 	out = Exec(ctx, dir, []string{"definitely-not-a-real-binary-xyz"}, time.Minute, nil)
 	assert.True(t, out.StartErr)
 	assert.Equal(t, -1, out.ExitCode)
+	assert.Contains(t, out.Output, "definitely-not-a-real-binary-xyz",
+		"the spawn error's own text is the only signal a StartErr has - it must reach Output")
 
 	out = Exec(ctx, dir, nil, time.Minute, nil)
 	assert.True(t, out.StartErr)

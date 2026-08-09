@@ -513,12 +513,13 @@ func (o *run) draftPlan(ctx context.Context, model, diagnosis, design, feedback 
 // violation, re-prompts the planner ONCE with feedback naming the offending
 // subtask and asking for the full corrected plan back. This is a code-side
 // backstop for a prompt rule real planners have violated in practice - a
-// heuristic, so it never fails the run: a second violation, a failed
-// revision call, or an unparseable revision all warn via the card log and
-// fall back to the ORIGINAL plan p. The budget ledger is still checked
-// before the revision call - a genuine budget-ceiling stop is a real
-// constraint, not a heuristic failure, and propagates like any other model
-// call in this phase.
+// heuristic, so it never fails the run: a budget check that would block the
+// revision call, a failed revision call, a failed revision parse, or a
+// second violation all warn via the card log and fall back to the ORIGINAL
+// plan p, the same as every other failure here. p is already paid for -
+// discarding it on the budget check alone would waste it for no reason,
+// since execute's own ledger check at its first subtask parks the run anyway
+// if the budget is genuinely exhausted.
 func (o *run) reviseTestSplit(
 	ctx context.Context, model, snapshot, diagBlock, dsnBlock, resume, fbBlock string, p plan,
 ) (plan, error) {
@@ -533,7 +534,11 @@ func (o *run) reviseTestSplit(
 	d.logCard(ctx, "plan validation: subtask %q splits its tests into a dependent subtask - requesting a revision", title)
 
 	if err := o.ledger.Check(); err != nil {
-		return plan{}, err
+		slog.Warn("plan: test-split revision budget check failed; proceeding with the original plan",
+			"card_id", cfg.CardID, "error", err)
+		d.logCard(ctx, "plan validation: revision budget check failed - proceeding with the original plan")
+
+		return p, nil
 	}
 
 	task := fmt.Sprintf(planPrompt, o.grounding, snapshot, cfg.Workspace, o.tc.Title, o.plannerDescription(),

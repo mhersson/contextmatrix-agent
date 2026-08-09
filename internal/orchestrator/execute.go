@@ -516,14 +516,17 @@ func (o *run) salvageCapped(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 // instead of surfacing as a plain turn-cap.
 //
 // Every exit that has not yet reached a verified win reports a "failed" model
-// outcome - the run did not complete, regardless of cause - except the
-// *ToolchainMissingError branch, which is an environment problem (a missing
-// tool), not evidence about the model, and is left unreported like its
-// unlogged card-log line. The push-failure exit below the authoritative
-// verify reports VerifyPass true: the model's work was already proven
-// correct, so the park is infrastructure, not a capability gap -
-// distinguishing it from the VerifyPass false reports above, where the
-// verify never confirmed anything. The win report fires BEFORE CompleteTask
+// outcome - the run did not complete, regardless of cause - except two
+// environment-caused exits, neither of which is evidence about the model: the
+// *ToolchainMissingError branch (a missing tool during verify resolution,
+// left unreported like its unlogged card-log line), and a verifySkipped
+// result from the authoritative run itself (a timeout or a missing tool
+// discovered at execution time rather than resolution time). The
+// push-failure exit below the authoritative verify reports VerifyPass true:
+// the model's work was already proven correct, so the park is
+// infrastructure, not a capability gap - distinguishing it from the
+// VerifyPass false reports above, where the verify never confirmed anything.
+// The win report fires BEFORE CompleteTask
 // (see reportSoloOutcome) - once it fires, a subsequent CompleteTask failure
 // gets no report of its own: the model's work already earned its win, and a
 // board-write hiccup afterward is not a second, contradictory outcome.
@@ -590,15 +593,24 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 	if rerr != nil || vres.Status != verifyPassed {
 		// Name the classification when there is one (e.g. a timeout or a missing
 		// tool) so a park caused by the environment reads differently on the card
-		// log from a real failure, which carries no note.
+		// log from a real failure, which carries no note. The note already states
+		// its own verdict, so use it alone rather than wrapping it in a second
+		// "verify did not pass" that repeats the same thing.
 		reason := "verify did not pass"
 		if vres.Note != "" {
-			reason = fmt.Sprintf("verify did not pass (%s)", vres.Note)
+			reason = vres.Note
 		}
 
 		o.logSoloCapPark(ctx, sub.ID, reason)
 		o.escalateSubtaskTier(ctx, sub)
-		o.reportSoloOutcome(ctx, sub.ID, model, "failed", false, sc.ledger.Spent()-spendBefore)
+
+		// A skipped verify (timeout or missing tool - rerr != nil takes the same
+		// zero-value Status) is an environment problem, not evidence about the
+		// model - the same exemption the ToolchainMissingError branch above gets.
+		// Only a verify that actually ran and failed is reported.
+		if vres.Status != verifySkipped {
+			o.reportSoloOutcome(ctx, sub.ID, model, "failed", false, sc.ledger.Spent()-spendBefore)
+		}
 
 		return false, nil
 	}
