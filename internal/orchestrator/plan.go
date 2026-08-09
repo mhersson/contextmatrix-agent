@@ -12,6 +12,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/mob"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-harness/events"
+	"github.com/mhersson/contextmatrix-harness/tools"
 )
 
 // validTiers is the closed set of complexity tiers the planner may emit, for
@@ -558,7 +559,7 @@ func (o *run) draftPlan(ctx context.Context, model, diagnosis, design, feedback 
 
 		p, lastErr = parsePlan(res.Output)
 		if lastErr == nil {
-			return o.reviseTestSplit(ctx, model, snapshot, diagBlock, dsnBlock, resume, fbBlock, p)
+			return o.reviseTestSplit(ctx, reg, model, snapshot, diagBlock, dsnBlock, resume, fbBlock, p)
 		}
 
 		slog.Warn("plan: parse failed", "card_id", cfg.CardID, "attempt", attempt, "error", lastErr)
@@ -580,7 +581,7 @@ func (o *run) draftPlan(ctx context.Context, model, diagnosis, design, feedback 
 // since execute's own ledger check at its first subtask parks the run anyway
 // if the budget is genuinely exhausted.
 func (o *run) reviseTestSplit(
-	ctx context.Context, model, snapshot, diagBlock, dsnBlock, resume, fbBlock string, p plan,
+	ctx context.Context, reg *tools.Registry, model, snapshot, diagBlock, dsnBlock, resume, fbBlock string, p plan,
 ) (plan, error) {
 	d := o.d
 	cfg := d.Cfg
@@ -612,7 +613,7 @@ func (o *run) reviseTestSplit(
 	task := fmt.Sprintf(planPrompt, o.grounding, snapshot, cfg.Workspace, o.tc.Title, o.plannerDescription(),
 		diagBlock, dsnBlock, resume, fbBlock, testSplitRevisionBlock(title, prev))
 
-	res, dur, err := o.runModelPlan(ctx, d.ReadTools, task, model, o.taskImages, true)
+	res, dur, err := o.runModelPlan(ctx, reg, task, model, o.taskImages, true)
 
 	o.spendAndReport(ctx, o.ledger, cfg.CardID, "plan: report usage failed", res, model, "main", dur)
 

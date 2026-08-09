@@ -457,6 +457,49 @@ func TestPlanPhaseTestSplitRevisionSucceeds(t *testing.T) {
 	assert.True(t, ops.loggedContains(offendingTitle), "revision request logged; logs=%v", ops.logs)
 }
 
+// TestReviseTestSplitUsesDraftPlanRegistry proves the test-split revision
+// call - reviseTestSplit's own runModelPlan call - reuses the exact registry
+// draftPlan resolved for the first attempt, not d.ReadTools. It asserts on
+// req.Tools' length via planLLM.toolCountsSeen for both calls: the plan
+// registry here carries one more tool than ReadTools (the findings tool), so
+// a regression that reverts reviseTestSplit's model call back to d.ReadTools
+// changes the revision call's observed tool count and fails this test - a
+// counting factory alone cannot catch that, since the factory still runs
+// exactly once either way.
+func TestReviseTestSplitUsesDraftPlanRegistry(t *testing.T) {
+	ops := &fakeOps{
+		taskContext: cmclient.TaskContext{Title: "Parent", Description: "body"},
+		createdIDs:  []string{"SUB-1"},
+	}
+	violating := `{"card_tier":"simple","subtasks":[` +
+		`{"title":"Change fakeOps to a per-state map","description":"d","depends_on":[],"tier":"simple"},` +
+		`{"title":"` + offendingTitle + `","description":"d","depends_on":[0],"tier":"simple"}]}`
+	clean := `{"card_tier":"simple","subtasks":[` +
+		`{"title":"Change fakeOps to a per-state map with its own tests","description":"d","depends_on":[],"tier":"simple"}]}`
+
+	llmFake := &planLLM{responses: []llm.Response{
+		stopResp(violating, 0.02),
+		stopResp(clean, 0.01),
+	}}
+	d := planTestDeps(ops, llmFake)
+
+	planReg := tools.NewRegistry(tools.NewReadTool("."), NewFindingsTool())
+	d.PlanTools = func() *tools.Registry { return planReg }
+
+	o := newRun(d, ops.taskContext)
+	require.NoError(t, runPlan(context.Background(), o))
+
+	require.Len(t, llmFake.tasks, 2, "draft + one revision")
+
+	toolCounts := llmFake.toolCountsSeen()
+	require.Len(t, toolCounts, 2)
+	assert.Equal(t, len(planReg.All()), toolCounts[0], "the draft call uses the plan registry")
+	assert.Equal(t, len(planReg.All()), toolCounts[1],
+		"the revision call must reuse the SAME plan registry as the draft, not fall back to d.ReadTools")
+	assert.NotEqual(t, len(d.ReadTools.All()), toolCounts[1],
+		"sanity: ReadTools and the plan registry differ in size, or this test proves nothing")
+}
+
 func TestPlanPhaseTestSplitRevisionWarnsAndProceedsOnRepeatViolation(t *testing.T) {
 	ops := &fakeOps{
 		taskContext: cmclient.TaskContext{Title: "Parent", Description: "body"},
@@ -516,7 +559,7 @@ func TestReviseTestSplitBudgetCheckFailureKeepsOriginalPlan(t *testing.T) {
 		{Title: offendingTitle, Description: "d", DependsOn: []int{0}, Tier: "simple"},
 	}}
 
-	revised, err := o.reviseTestSplit(context.Background(), "model", "", "", "", "", "", p)
+	revised, err := o.reviseTestSplit(context.Background(), d.ReadTools, "model", "", "", "", "", "", p)
 	require.NoError(t, err, "a budget check that blocks the revision call must not fail the run")
 	assert.Equal(t, p, revised, "the paid-for original plan is kept, not discarded")
 	assert.True(t, ops.loggedContains("revision budget check failed"),
