@@ -670,3 +670,159 @@ func TestSelectReviewPanelVendorEdgeCases(t *testing.T) {
 		assert.Equal(t, "openai/two", panel[2].Model)
 	})
 }
+
+// --- MaxCapability tests ---
+
+func TestMaxCapabilityBypassesFavorites(t *testing.T) {
+	cat := llm.Catalog{
+		{ID: "cheap/win", PromptPricePerTok: 1e-8, CompletionPricePerTok: 1e-8, ContextLength: 200000, SupportedParameters: []string{"tools"}},
+		{ID: "fav/pick", PromptPricePerTok: 1e-6, CompletionPricePerTok: 1e-6, ContextLength: 200000, SupportedParameters: []string{"tools"}},
+	}
+	pr := Priors{Models: map[string]PriorEntry{
+		"cheap/win": {Coder: new(0.90)}, "fav/pick": {Coder: new(0.90)},
+	}}
+	favs := map[favKey][]string{{Tier: TierComplex}: {"fav/pick"}}
+
+	t.Run("favorite honored by default", func(t *testing.T) {
+		r := NewRegistryFromParts(cat, pr, nil, favs, "capable/default")
+		got := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierComplex})
+		assert.Equal(t, "fav/pick", got.Model)
+	})
+
+	t.Run("favorite bypassed with MaxCapability", func(t *testing.T) {
+		r := NewRegistryFromParts(cat, pr, nil, favs, "capable/default")
+		r.sel.MaxCapability = true
+		got := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierComplex})
+		// cheap/win is cheaper and same quality; tie breaks to cheaper.
+		assert.Equal(t, "cheap/win", got.Model)
+	})
+}
+
+func TestMaxCapabilitySelectsMostExpensiveQualifying(t *testing.T) {
+	// Reuse the TestSelectByComplexityPriorsOnly catalog. frontier is the most
+	// expensive ($18, q0.95) and star is cheapest ($1.2, q0.99). Excluding star
+	// makes frontier the highest-quality remaining candidate.
+	catalog := llm.Catalog{
+		entry("cheap-weak", 0.5, 1.0, 200000),
+		entry("cheap-good", 0.7, 1.4, 200000),
+		entry("mid-better", 0.9, 1.8, 200000),
+		entry("frontier", 6.0, 12.0, 200000),
+		entry("star", 0.4, 0.8, 200000),
+		entry("small-window", 0.6, 1.2, 8000),
+	}
+	priors := Priors{Models: map[string]PriorEntry{
+		"cheap-weak": {Coder: new(0.50)}, "cheap-good": {Coder: new(0.70)},
+		"mid-better": {Coder: new(0.85)}, "frontier": {Coder: new(0.95)},
+		"star": {Coder: new(0.99)}, "small-window": {Coder: new(0.85)},
+	}}
+	// TierSimple (bar 0.65): cheap-weak (0.50 < 0.65) out; small-window (8k<50k) out.
+	// star excluded; remaining: cheap-good, mid-better, frontier.
+	in := SelectInput{Role: RoleCoder, Tier: TierSimple, EstTokens: 50000, Exclude: map[string]bool{"star": true}}
+
+	t.Run("default picks best value (mid-better)", func(t *testing.T) {
+		r := NewRegistryFromParts(catalog, priors, nil, nil, "capable-default")
+		got := r.SelectByComplexity(in)
+		// cheapest $2.1 -> band $3.15; cheap-good, mid-better in; frontier out; highest in band: mid-better.
+		assert.Equal(t, "mid-better", got.Model)
+	})
+
+	t.Run("MaxCapability picks most capable regardless of price (frontier)", func(t *testing.T) {
+		r := NewRegistryFromParts(catalog, priors, nil, nil, "capable-default")
+		r.sel.MaxCapability = true
+		got := r.SelectByComplexity(in)
+		// band = +Inf; frontier has highest quality (0.95).
+		assert.Equal(t, "frontier", got.Model)
+	})
+}
+
+func TestMaxCapabilityRespectsTierBar(t *testing.T) {
+	catalog := llm.Catalog{
+		entry("below-bar", 0.5, 1.0, 200000),
+		entry("above-bar", 1.0, 2.0, 200000),
+	}
+	priors := Priors{Models: map[string]PriorEntry{
+		"below-bar": {Coder: new(0.50)}, // below simple bar 0.65
+		"above-bar": {Coder: new(0.80)}, // passes simple bar
+	}}
+	r := NewRegistryFromParts(catalog, priors, nil, nil, "capable-default")
+	r.sel.MaxCapability = true
+
+	got := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierSimple, EstTokens: 50000})
+	assert.Equal(t, "above-bar", got.Model, "below-bar model must never be selected even with MaxCapability")
+}
+
+func TestMaxCapabilityRespectsBlacklist(t *testing.T) {
+	catalog := llm.Catalog{
+		entry("good/model", 1.0, 2.0, 200000),
+		entry("black/listed", 0.5, 1.0, 200000),
+	}
+	priors := Priors{Models: map[string]PriorEntry{
+		"good/model":   {Coder: new(0.80)},
+		"black/listed": {Coder: new(0.95)},
+	}}
+	blacklist := map[string]bool{"black/listed": true}
+	r := NewRegistryFromParts(catalog, priors, blacklist, nil, "capable-default")
+	r.sel.MaxCapability = true
+
+	got := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierSimple, EstTokens: 50000})
+	assert.Equal(t, "good/model", got.Model, "blacklisted model must never be selected even with MaxCapability")
+}
+
+func TestMaxCapabilityEqualQualityTieBreaksToCheaper(t *testing.T) {
+	catalog := llm.Catalog{
+		entry("cheap/model", 1.0, 2.0, 200000),       // $3
+		entry("expensive/model", 10.0, 20.0, 200000), // $30
+	}
+	priors := Priors{Models: map[string]PriorEntry{
+		"cheap/model":     {Coder: new(0.90)},
+		"expensive/model": {Coder: new(0.90)},
+	}}
+	r := NewRegistryFromParts(catalog, priors, nil, nil, "capable-default")
+	r.sel.MaxCapability = true
+
+	got := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierSimple, EstTokens: 50000})
+	assert.Equal(t, "cheap/model", got.Model, "equal quality must tie-break to cheaper model")
+}
+
+func TestMaxCapabilityEmptyPoolFallsBack(t *testing.T) {
+	// No model carries a prior; pool is empty.
+	catalog := llm.Catalog{entry("any/model", 1.0, 2.0, 200000)}
+	r := NewRegistryFromParts(catalog, Priors{}, nil, nil, "capable-default")
+	r.sel.MaxCapability = true
+
+	got := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierSimple, EstTokens: 50000})
+	assert.Equal(t, "capable-default", got.Model)
+}
+
+func TestMaxCapabilityReviewPanelSpansVendors(t *testing.T) {
+	// Reuse the TestSelectReviewPanelSpansVendors scenario with MaxCapability set.
+	// With band = +Inf the vendor-diversity preference still applies because it
+	// is driven by ExcludeVendors filtering, not price.
+	catalog := llm.Catalog{
+		entry("gpt-a", 0.7, 1.4, 200000),
+		entry("gpt-b", 0.9, 1.8, 200000),
+		entry("gpt-c", 1.0, 2.0, 200000),
+		entry("claude-x", 1.2, 2.4, 200000),
+	}
+	priors := Priors{Models: map[string]PriorEntry{
+		"gpt-a": {Reviewer: new(0.95)}, "gpt-b": {Reviewer: new(0.90)},
+		"gpt-c": {Reviewer: new(0.88)}, "claude-x": {Reviewer: new(0.85)},
+	}}
+	r := NewRegistryFromParts(catalog, priors, nil, nil, "capable-default").
+		WithCreators(map[string]string{
+			"gpt-a": "openai", "gpt-b": "openai", "gpt-c": "openai",
+			"claude-x": "anthropic",
+		})
+	r.sel.MaxCapability = true
+
+	in := SelectInput{Role: RoleReviewer, Tier: TierComplex, EstTokens: 50000}
+	panel := r.SelectReviewPanel(in, 3)
+	require.Len(t, panel, 3)
+
+	// Seat 1: all candidates; highest quality gpt-a (0.95). Seat 2: prefers
+	// unseated vendor claude-x (0.85). Seat 3: no unseated vendor left,
+	// vendor-blind pick gpt-b (0.90).
+	assert.Equal(t, "gpt-a", panel[0].Model)
+	assert.Equal(t, "claude-x", panel[1].Model)
+	assert.Equal(t, "gpt-b", panel[2].Model)
+}
