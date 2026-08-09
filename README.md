@@ -243,6 +243,12 @@ picks the most capable candidate whose blended price is within a headroom band o
 the cheapest. Selection is **priors-only - there is no measured-capability
 gate.** An explicit model pin on the card always overrides.
 
+The card's `max_capability` flag flips the selector to choose the most capable
+candidate in the tier regardless of price: it ignores the headroom band, bypasses
+operator favorites, and keeps the tier bar, blacklist, in-run exclusion, vendor
+diversity, and window fit intact. Equal quality still tie-breaks to the cheaper
+model. Use it for cards where the outcome matters more than cost.
+
 The selector's inputs are supplied by ContextMatrix, not embedded in the binary.
 Each trigger payload carries a `SelectionContext` with the candidate set, their
 per-role priors, the operator favorites, and a self-learning blacklist;
