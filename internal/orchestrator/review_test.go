@@ -201,11 +201,11 @@ func TestResolveFixModelUsesFixTier(t *testing.T) {
 	// No coder pin -> complexity selection path; card tier is moderate by default.
 	o := newReviewRun(d, cmclient.TaskContext{}, 0)
 
-	assert.Equal(t, cheapCoder, o.resolveFixModel("simple", false),
+	assert.Equal(t, cheapCoder, o.resolveFixModel(context.Background(), "simple", false),
 		"simple fix_tier clears the cheap coder's bar")
-	assert.Equal(t, fallback, o.resolveFixModel("complex", false),
+	assert.Equal(t, fallback, o.resolveFixModel(context.Background(), "complex", false),
 		"complex fix_tier excludes the cheap coder -> capable fallback")
-	assert.NotEqual(t, cheapCoder, o.resolveFixModel("complex", false))
+	assert.NotEqual(t, cheapCoder, o.resolveFixModel(context.Background(), "complex", false))
 }
 
 // TestResolveFixModelAuthoritativeForcesComplex proves the authoritative pass
@@ -234,11 +234,11 @@ func TestResolveFixModelAuthoritativeForcesComplex(t *testing.T) {
 	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reg)
 	o := newReviewRun(d, cmclient.TaskContext{}, 0)
 
-	assert.Equal(t, cheapCoder, o.resolveFixModel("simple", false),
+	assert.Equal(t, cheapCoder, o.resolveFixModel(context.Background(), "simple", false),
 		"non-authoritative simple fix_tier clears the cheap coder's bar")
-	assert.Equal(t, fallback, o.resolveFixModel("simple", true),
+	assert.Equal(t, fallback, o.resolveFixModel(context.Background(), "simple", true),
 		"authoritative pass forces complex -> cheap coder excluded -> capable fallback")
-	assert.NotEqual(t, cheapCoder, o.resolveFixModel("simple", true))
+	assert.NotEqual(t, cheapCoder, o.resolveFixModel(context.Background(), "simple", true))
 }
 
 // TestFormatFixesFixFilesRoundTrip pins the line-shape contract between
@@ -811,7 +811,7 @@ func TestReviewPanelDiversity(t *testing.T) {
 	// The coder used rev/alpha on a subtask; the panel must exclude it.
 	o.coderModels = map[string]bool{"rev/alpha": true}
 
-	specs := o.reviewPanel(estimateTokens("diff"), false)
+	specs := o.reviewPanel(context.Background(), estimateTokens("diff"), false)
 	require.Len(t, specs, 3)
 
 	for _, s := range specs {
@@ -832,12 +832,103 @@ func TestReviewPinOverridesPanel(t *testing.T) {
 	o := newReviewRun(d, tc, 0)
 	o.coderModels = map[string]bool{"rev/alpha": true}
 
-	specs := o.reviewPanel(estimateTokens("diff"), false)
+	specs := o.reviewPanel(context.Background(), estimateTokens("diff"), false)
 	require.Len(t, specs, 3)
 
 	for _, s := range specs {
 		assert.Equal(t, "pinned/model", s.Model, "reviewer pin must override the whole panel")
 	}
+}
+
+func TestReviewUnresolvableReviewerPinEmitsAdvisory(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{}
+	client := &planLLM{}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{
+		Title: "Parent", Description: "body", State: "in_progress",
+		ModelReviewer: "pinned/missing",
+	}
+	o := newReviewRun(d, tc, 0)
+
+	_ = o.reviewPanel(context.Background(), estimateTokens("diff"), false)
+
+	// Exactly one log entry for the unresolvable pin.
+	require.Len(t, ops.logs, 1, "unresolvable reviewer pin must produce exactly one advisory")
+	assert.Contains(t, ops.logs[0], "pinned/missing")
+}
+
+func TestReviewResolvableReviewerPinNoAdvisory(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{}
+	client := &planLLM{}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{
+		Title: "Parent", Description: "body", State: "in_progress",
+		ModelReviewer: "pinned/model",
+	}
+	o := newReviewRun(d, tc, 0)
+
+	_ = o.reviewPanel(context.Background(), estimateTokens("diff"), false)
+
+	assert.Empty(t, ops.logs, "resolvable reviewer pin must produce no advisory")
+}
+
+func TestResolveFixModelUnresolvablePinEmitsAdvisory(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{}
+	d := reviewTestDeps(t, ops, git, &planLLM{}, reviewerRegistry())
+
+	tc := cmclient.TaskContext{
+		Title: "Parent", Description: "body", State: "in_progress",
+		ModelCoder: "pinned/missing",
+	}
+	o := newReviewRun(d, tc, 0)
+
+	_ = o.resolveFixModel(context.Background(), "simple", false)
+
+	require.Len(t, ops.logs, 1, "unresolvable coder pin must produce exactly one advisory")
+	assert.Contains(t, ops.logs[0], "pinned/missing")
+}
+
+func TestResolveFixModelResolvablePinNoAdvisory(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{}
+	d := reviewTestDeps(t, ops, git, &planLLM{}, reviewerRegistry())
+
+	tc := cmclient.TaskContext{
+		Title: "Parent", Description: "body", State: "in_progress",
+		ModelCoder: "pinned/model",
+	}
+	o := newReviewRun(d, tc, 0)
+
+	_ = o.resolveFixModel(context.Background(), "simple", false)
+
+	assert.Empty(t, ops.logs, "resolvable coder pin must produce no advisory")
+}
+
+func TestResolveFixModelUnresolvablePinDeduplicates(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{}
+	d := reviewTestDeps(t, ops, git, &planLLM{}, reviewerRegistry())
+
+	tc := cmclient.TaskContext{
+		Title: "Parent", Description: "body", State: "in_progress",
+		ModelCoder: "pinned/missing",
+	}
+	o := newReviewRun(d, tc, 0)
+
+	// First call warns.
+	_ = o.resolveFixModel(context.Background(), "simple", false)
+
+	require.Len(t, ops.logs, 1)
+
+	// Second call with the same pin must NOT produce another entry (once-per-run).
+	_ = o.resolveFixModel(context.Background(), "simple", false)
+
+	require.Len(t, ops.logs, 1, "resolvedFixModel must deduplicate with the coderPinWarned guard")
 }
 
 // TestReviewPanelEscalatesWhenAuthoritative proves the authoritative pass sizes
@@ -879,10 +970,10 @@ func TestReviewPanelEscalatesWhenAuthoritative(t *testing.T) {
 
 	est := estimateTokens("diff")
 
-	moderatePanel := o.reviewPanel(est, false)
+	moderatePanel := o.reviewPanel(context.Background(), est, false)
 	require.Len(t, moderatePanel, 3)
 
-	complexPanel := o.reviewPanel(est, true)
+	complexPanel := o.reviewPanel(context.Background(), est, true)
 	require.Len(t, complexPanel, 3)
 
 	moderateModels := map[string]bool{}

@@ -423,7 +423,7 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 		return "", fmt.Errorf("review diff: %w", err)
 	}
 
-	panel := o.reviewPanel(estimateTokens(diff), authoritative)
+	panel := o.reviewPanel(ctx, estimateTokens(diff), authoritative)
 
 	d.logCard(ctx, "review panel models: %s, %s, %s", panel[0].Model, panel[1].Model, panel[2].Model)
 
@@ -512,7 +512,7 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 // catalog-resolvable reviewer pin overrides the entire panel (all three run on
 // the pinned model). Otherwise the registry selects a diverse panel for the
 // card tier, excluding every model that coded a subtask on this run.
-func (o *run) reviewPanel(estTokens int, authoritative bool) []registry.ModelSpec {
+func (o *run) reviewPanel(ctx context.Context, estTokens int, authoritative bool) []registry.ModelSpec {
 	if resolvePin(o.d.Registry, o.tc.ModelReviewer) {
 		spec := registry.ModelSpec{
 			Model:         o.tc.ModelReviewer,
@@ -525,6 +525,10 @@ func (o *run) reviewPanel(estTokens int, authoritative bool) []registry.ModelSpe
 		}
 
 		return panel
+	}
+
+	if o.tc.ModelReviewer != "" {
+		o.warnUnresolvablePin(ctx, "reviewer", o.tc.ModelReviewer)
 	}
 
 	// The authoritative pass escalates the panel to the complex tier so the
@@ -708,7 +712,7 @@ func (o *run) runFixModel(ctx context.Context, prompt string, round int, fixTier
 	tier := o.fixTierFor(fixTier, authoritative)
 
 	for attempt := 0; attempt <= reselectCap; attempt++ {
-		model := o.resolveFixModel(fixTier, authoritative)
+		model := o.resolveFixModel(ctx, fixTier, authoritative)
 
 		d.logCard(ctx, "fix coder %s selected for round %d fixes (tier=%s)", model, round, tier)
 
@@ -789,13 +793,17 @@ func (o *run) runFix(ctx context.Context, findings string, round int, fixTier st
 // resolveFixModel picks the coder model for the fix run: the card's coder pin
 // when catalog-resolvable, else the best-value coder selection for the effective
 // fix tier (the synthesizer's fix_tier, falling back to the card tier).
-func (o *run) resolveFixModel(fixTier string, authoritative bool) string {
+func (o *run) resolveFixModel(ctx context.Context, fixTier string, authoritative bool) string {
 	if resolvePin(o.d.Registry, o.tc.ModelCoder) {
 		// A pinned model is returned even if it is in o.excluded: we never override
 		// an explicit operator pin with an auto-selected substitute. A pinned model
 		// that is harness-incapable therefore keeps being re-selected, exhausts the
 		// re-selection cap, and parks - the blacklist still records it.
 		return o.tc.ModelCoder
+	}
+
+	if o.tc.ModelCoder != "" {
+		o.warnUnresolvablePin(ctx, "coder", o.tc.ModelCoder)
 	}
 
 	spec := o.d.Registry.SelectByComplexity(registry.SelectInput{

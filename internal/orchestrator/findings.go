@@ -73,11 +73,13 @@ func (t *FindingsTool) Execute(_ context.Context, args map[string]any) (tools.Re
 		case len(t.entries) >= maxFindings:
 			return tools.Result{Text: fmt.Sprintf(
 				"cap reached: %d findings already recorded, this one was not added. %s",
-				maxFindings, t.render())}, nil
+				maxFindings, t.render(),
+			)}, nil
 		case t.nbytes+len(entry) > maxFindingsBytes:
 			return tools.Result{Text: fmt.Sprintf(
 				"cap reached: recorded findings would exceed %d bytes, this one was not added. %s",
-				maxFindingsBytes, t.render())}, nil
+				maxFindingsBytes, t.render(),
+			)}, nil
 		default:
 			t.seen[key] = true
 			t.entries = append(t.entries, entry)
