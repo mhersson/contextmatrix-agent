@@ -701,6 +701,21 @@ func repairBlock(parseErr string) string {
 		"below - no prose, no code fences. Read a file only if strictly necessary.\n"
 }
 
+// testSplitRevisionBlock renders the post-parse validation feedback inserted
+// into the planner prompt on the single test-split revision round: title
+// names the subtask flagged by the test-only-subtask heuristic (a listed verb
+// followed by a tests token, and a non-empty depends_on) - the forbidden
+// split the planner prompt already forbids in prose but which a planner can
+// still emit. Language-neutral: no toolchain or build command is named. Same
+// non-empty-only contract as repairBlock's role in the prompt, but distinct
+// wording since this is a validation finding, not a parse failure.
+func testSplitRevisionBlock(title string) string {
+	return fmt.Sprintf("\nYOUR PREVIOUS PLAN NEEDS ONE REVISION: subtask %q violates the "+
+		"tests-ship-with-code rule - fold its work into the subtask it depends on and resubmit "+
+		"the full corrected plan. Respond again with ONLY the JSON object described below - no "+
+		"prose, no code fences.\n", title)
+}
+
 // feedbackBlock renders a HITL reviewer's requested changes inserted into the
 // planner prompt on a re-draft. Empty feedback collapses to nothing.
 func feedbackBlock(feedback string) string {

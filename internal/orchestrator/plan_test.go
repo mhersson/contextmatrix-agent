@@ -105,6 +105,83 @@ func TestParsePlan(t *testing.T) {
 	})
 }
 
+func TestIsTestOnlySubtask(t *testing.T) {
+	tests := []struct {
+		name  string
+		title string
+		want  bool
+	}{
+		{
+			name:  "production violation: a listed verb then a tests token later",
+			title: "Extend fakeOps transitionCardErr to a per-state map and add stalled-recovery tests",
+			want:  true,
+		},
+		{
+			name:  "singular test token still counts",
+			title: "Add a regression test for the retry path",
+			want:  true,
+		},
+		{
+			name:  "verb present but no tests token",
+			title: "Add stalled-state recovery to worker.Run",
+			want:  false,
+		},
+		{
+			name:  "no listed verb at all",
+			title: "Fix flaky suite timeouts",
+			want:  false,
+		},
+		{
+			name:  "code-with-tests title using an unlisted verb",
+			title: "Implement stalled-state recovery and its tests",
+			want:  false,
+		},
+		{
+			name:  "standalone test-infrastructure work: tests token precedes the verb",
+			title: "Tests scaffolding for the retry path; extend coverage",
+			want:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isTestOnlySubtask(tt.title))
+		})
+	}
+}
+
+func TestTestSplitViolation(t *testing.T) {
+	t.Run("flags a dependent test-only subtask", func(t *testing.T) {
+		p := plan{Subtasks: []planSubtask{
+			{Title: "Change fakeOps to a per-state map", DependsOn: nil},
+			{
+				Title:     "Extend fakeOps transitionCardErr to a per-state map and add stalled-recovery tests",
+				DependsOn: []int{0},
+			},
+		}}
+		title, ok := testSplitViolation(p)
+		require.True(t, ok)
+		assert.Equal(t, "Extend fakeOps transitionCardErr to a per-state map and add stalled-recovery tests", title)
+	})
+
+	t.Run("empty depends_on never triggers even with a matching title", func(t *testing.T) {
+		p := plan{Subtasks: []planSubtask{
+			{Title: "Add stalled-recovery tests", DependsOn: nil},
+		}}
+		_, ok := testSplitViolation(p)
+		assert.False(t, ok, "a standalone (non-dependent) subtask is not the forbidden split")
+	})
+
+	t.Run("clean plan reports no violation", func(t *testing.T) {
+		p := plan{Subtasks: []planSubtask{
+			{Title: "Add the flag with its tests", DependsOn: nil},
+			{Title: "Wire the flag into the handler", DependsOn: []int{0}},
+		}}
+		_, ok := testSplitViolation(p)
+		assert.False(t, ok)
+	})
+}
+
 func TestTierStringToRegistryTier(t *testing.T) {
 	// Lock the end-to-end mapping: the planner tier strings parsePlan accepts
 	// must convert to the matching registry.Tier at selection time. "critical"
@@ -224,6 +301,87 @@ func TestPlanPhaseRepairExhausted(t *testing.T) {
 
 	// No cards created on hard failure.
 	assert.Empty(t, ops.createCardArgs)
+}
+
+// offendingTitle is the production title that triggered this validation: a
+// planner split a dependent tests-only subtask off its coder subtask despite
+// the prompt's absolute rule against it.
+const offendingTitle = "Extend fakeOps transitionCardErr to a per-state map and add stalled-recovery tests"
+
+func TestPlanPhaseTestSplitRevisionSucceeds(t *testing.T) {
+	ops := &fakeOps{
+		taskContext: cmclient.TaskContext{Title: "Parent", Description: "body"},
+		createdIDs:  []string{"SUB-1"},
+	}
+	violating := `{"card_tier":"simple","subtasks":[` +
+		`{"title":"Change fakeOps to a per-state map","description":"d","depends_on":[],"tier":"simple"},` +
+		`{"title":"` + offendingTitle + `","description":"d","depends_on":[0],"tier":"simple"}]}`
+	clean := `{"card_tier":"simple","subtasks":[` +
+		`{"title":"Change fakeOps to a per-state map with its own tests","description":"d","depends_on":[],"tier":"simple"}]}`
+
+	llmFake := &planLLM{responses: []llm.Response{
+		stopResp(violating, 0.02),
+		stopResp(clean, 0.01),
+	}}
+	d := planTestDeps(ops, llmFake)
+
+	o := newRun(d, ops.taskContext)
+	require.NoError(t, runPlan(context.Background(), o))
+
+	// Exactly one revision round: the original draft plus one re-prompt.
+	require.Len(t, llmFake.tasks, 2, "expected exactly two model calls (draft + one revision)")
+
+	// The revision prompt names the offending subtask and instructs folding its
+	// work into the subtask it depends on, resubmitting the full plan.
+	revisionPrompt := llmFake.tasks[1]
+	assert.Contains(t, revisionPrompt, offendingTitle)
+	assert.Contains(t, revisionPrompt, "fold its work into the subtask it depends on")
+	assert.Contains(t, revisionPrompt, "resubmit the full corrected plan")
+
+	// The revised (clean) plan is what actually got created - not the violating draft.
+	require.Len(t, ops.createCardArgs, 1)
+	assert.Equal(t, "Change fakeOps to a per-state map with its own tests", ops.createCardArgs[0].title)
+
+	// The revision request is status-logged, naming the offending subtask.
+	assert.True(t, ops.loggedContains(offendingTitle), "revision request logged; logs=%v", ops.logs)
+}
+
+func TestPlanPhaseTestSplitRevisionWarnsAndProceedsOnRepeatViolation(t *testing.T) {
+	ops := &fakeOps{
+		taskContext: cmclient.TaskContext{Title: "Parent", Description: "body"},
+		createdIDs:  []string{"SUB-1", "SUB-2"},
+	}
+	violating1 := `{"card_tier":"simple","subtasks":[` +
+		`{"title":"Change fakeOps to a per-state map","description":"d","depends_on":[],"tier":"simple"},` +
+		`{"title":"` + offendingTitle + `","description":"d","depends_on":[0],"tier":"simple"}]}`
+	// A different offending plan on the revision turn - still a violation, so the
+	// run must give up on revising and keep the ORIGINAL draft, not this one.
+	violating2 := `{"card_tier":"simple","subtasks":[` +
+		`{"title":"Change the widget renderer","description":"d","depends_on":[],"tier":"simple"},` +
+		`{"title":"Extend the widget renderer and add rendering tests","description":"d","depends_on":[0],"tier":"simple"}]}`
+
+	llmFake := &planLLM{responses: []llm.Response{
+		stopResp(violating1, 0.02),
+		stopResp(violating2, 0.02),
+	}}
+	d := planTestDeps(ops, llmFake)
+
+	o := newRun(d, ops.taskContext)
+	require.NoError(t, runPlan(context.Background(), o), "a repeat heuristic violation must never fail the run")
+
+	// No third model call - one revision attempt, then give up.
+	require.Len(t, llmFake.tasks, 2)
+
+	// The ORIGINAL plan (first draft) is what actually got created, not the
+	// still-violating revision.
+	require.Len(t, ops.createCardArgs, 2)
+	assert.Equal(t, "Change fakeOps to a per-state map", ops.createCardArgs[0].title)
+	assert.Equal(t, offendingTitle, ops.createCardArgs[1].title)
+
+	// Both the revision request and the warn-and-proceed are status-logged.
+	assert.True(t, ops.loggedContains(offendingTitle), "revision request logged; logs=%v", ops.logs)
+	assert.True(t, ops.loggedContains("proceeding with the original plan"),
+		"warn-and-proceed logged; logs=%v", ops.logs)
 }
 
 func TestPlanPhaseResume(t *testing.T) {

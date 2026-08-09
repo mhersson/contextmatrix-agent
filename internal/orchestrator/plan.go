@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 
 	"github.com/mhersson/contextmatrix-agent/internal/mob"
@@ -103,6 +104,58 @@ func parsePlan(s string) (plan, error) {
 	}
 
 	return p, nil
+}
+
+// testSplitVerbRe matches the verbs whose object is commonly a whole
+// deliverable ("add X", "write X", "pin X") rather than an edit to existing
+// code - the shape a test-only subtask title takes. testSplitTestsRe matches
+// the tests-token itself. Both are used only in combination by
+// isTestOnlySubtask, never alone - a matching verb with no tests token (or
+// vice versa) is not a violation.
+var (
+	testSplitVerbRe  = regexp.MustCompile(`(?i)\b(add|write|extend|create|pin)\b`)
+	testSplitTestsRe = regexp.MustCompile(`(?i)\btests?\b`)
+)
+
+// isTestOnlySubtask reports whether title has the shape of a subtask whose
+// deliverable is testing another subtask's code rather than shipping it: a
+// listed verb (add, write, extend, create, pin) followed LATER in the title
+// by a tests token. Order matters - a title that mentions tests before the
+// verb (e.g. discussing test infrastructure a later clause extends) does not
+// match. Deliberately conservative: it is a title heuristic, not a semantic
+// read of the subtask, so it undercalls rather than overcalls - a missed
+// violation just leaves the prompt rule's prose as the only defense, while a
+// false positive would send a legitimate plan through a needless revision.
+func isTestOnlySubtask(title string) bool {
+	verbLoc := testSplitVerbRe.FindStringIndex(title)
+	if verbLoc == nil {
+		return false
+	}
+
+	testsLoc := testSplitTestsRe.FindStringIndex(title)
+	if testsLoc == nil {
+		return false
+	}
+
+	return testsLoc[0] > verbLoc[0]
+}
+
+// testSplitViolation returns the title of the first subtask in p whose title
+// matches isTestOnlySubtask AND which depends on an earlier subtask - the
+// forbidden split the planner prompt already forbids ("the subtask that
+// writes the code writes and runs its own tests"): a dependent subtask whose
+// own deliverable is testing its dependency's code. A matching title with no
+// dependency is not this violation - it is presumably a legitimate,
+// self-contained subtask that happens to mention tests. ok is false when p
+// has no such subtask.
+func testSplitViolation(p plan) (title string, ok bool) {
+	for _, st := range p.Subtasks {
+		if len(st.DependsOn) > 0 && isTestOnlySubtask(st.Title) {
+			return st.Title, true
+		}
+	}
+
+	return "", false
 }
 
 // extractJSON returns the JSON object the model intended as its answer. A
@@ -314,11 +367,12 @@ func (o *run) runDiagnose(ctx context.Context, model string) (string, error) {
 }
 
 // draftPlan runs the read-only planner (initial attempt + at most one repair
-// turn) and returns the parsed plan. diagnosis grounds bug-like cards; design
-// carries the brainstormed agreed design for creative HITL cards; feedback
-// carries a HITL reviewer's requested changes on a re-draft; all collapse to
-// nothing when empty. The budget ledger is checked before every model call and
-// every call's usage is spent + reported.
+// turn) and returns the parsed plan, after one test-split validation pass
+// (see reviseTestSplit). diagnosis grounds bug-like cards; design carries the
+// brainstormed agreed design for creative HITL cards; feedback carries a
+// HITL reviewer's requested changes on a re-draft; all collapse to nothing
+// when empty. The budget ledger is checked before every model call and every
+// call's usage is spent + reported.
 func (o *run) draftPlan(ctx context.Context, model, diagnosis, design, feedback string) (plan, error) {
 	d := o.d
 	cfg := d.Cfg
@@ -362,13 +416,73 @@ func (o *run) draftPlan(ctx context.Context, model, diagnosis, design, feedback 
 
 		p, lastErr = parsePlan(res.Output)
 		if lastErr == nil {
-			return p, nil
+			return o.reviseTestSplit(ctx, model, snapshot, diagBlock, dsnBlock, resume, fbBlock, p)
 		}
 
 		slog.Warn("plan: parse failed", "card_id", cfg.CardID, "attempt", attempt, "error", lastErr)
 	}
 
 	return plan{}, fmt.Errorf("plan parse failed after repair: %w", lastErr)
+}
+
+// reviseTestSplit checks a freshly parsed plan p for the forbidden
+// tests-in-a-dependent-subtask split (testSplitViolation) and, on a
+// violation, re-prompts the planner ONCE with feedback naming the offending
+// subtask and asking for the full corrected plan back. This is a code-side
+// backstop for a prompt rule real planners have violated in practice - a
+// heuristic, so it never fails the run: a second violation, a failed
+// revision call, or an unparseable revision all warn via the card log and
+// fall back to the ORIGINAL plan p. The budget ledger is still checked
+// before the revision call - a genuine budget-ceiling stop is a real
+// constraint, not a heuristic failure, and propagates like any other model
+// call in this phase.
+func (o *run) reviseTestSplit(
+	ctx context.Context, model, snapshot, diagBlock, dsnBlock, resume, fbBlock string, p plan,
+) (plan, error) {
+	d := o.d
+	cfg := d.Cfg
+
+	title, violated := testSplitViolation(p)
+	if !violated {
+		return p, nil
+	}
+
+	d.logCard(ctx, "plan validation: subtask %q splits its tests into a dependent subtask - requesting a revision", title)
+
+	if err := o.ledger.Check(); err != nil {
+		return plan{}, err
+	}
+
+	task := fmt.Sprintf(planPrompt, o.grounding, snapshot, cfg.Workspace, o.tc.Title, o.plannerDescription(),
+		diagBlock, dsnBlock, resume, fbBlock, testSplitRevisionBlock(title))
+
+	res, dur, err := o.runModelPlan(ctx, d.ReadTools, task, model, o.taskImages, true)
+
+	o.spendAndReport(ctx, o.ledger, cfg.CardID, "plan: report usage failed", res, model, "main", dur)
+
+	if err != nil {
+		slog.Warn("plan: test-split revision run failed; proceeding with the original plan", "card_id", cfg.CardID, "error", err)
+		d.logCard(ctx, "plan validation: revision request failed - proceeding with the original plan")
+
+		return p, nil
+	}
+
+	revised, perr := parsePlan(res.Output)
+	if perr != nil {
+		slog.Warn("plan: test-split revision parse failed; proceeding with the original plan", "card_id", cfg.CardID, "error", perr)
+		d.logCard(ctx, "plan validation: revised plan could not be parsed - proceeding with the original plan")
+
+		return p, nil
+	}
+
+	if _, stillViolated := testSplitViolation(revised); stillViolated {
+		d.logCard(ctx, "plan validation: subtask %q still splits its tests after one revision attempt - "+
+			"proceeding with the original plan", title)
+
+		return p, nil
+	}
+
+	return revised, nil
 }
 
 // mobAdjustTailEntries bounds the transcript tail replayed when a HITL
