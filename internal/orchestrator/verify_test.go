@@ -711,6 +711,87 @@ func TestRunVerifyPlanRetryExhaustedAgainStaysFailed(t *testing.T) {
 	assert.Equal(t, 2, calls, "exhaustion on the retry itself is not retried a second time")
 }
 
+// TestRunVerifyPlanDoesNotRetryTimedOutOutcome proves a timed-out run is never
+// retried even when its partial output carries an exhaustion signature:
+// retrying would double a run already at the wall-clock ceiling, and a rerun
+// would not fit the same timeout anyway.
+func TestRunVerifyPlanDoesNotRetryTimedOutOutcome(t *testing.T) {
+	withFastVerifyRetryWait(t)
+
+	o := &run{d: Deps{Cfg: Config{Workspace: t.TempDir()}}}
+
+	calls := 0
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		calls++
+
+		return verifyexec.Outcome{TimedOut: true, ExitCode: -1, Output: "too many open files"}
+	}
+
+	res, err := o.runVerifyPlan(context.Background(), "dir", verifyPlan{Argv: []string{"x"}, Timeout: time.Minute})
+	require.NoError(t, err)
+	assert.Equal(t, verifySkipped, res.Status)
+	assert.Contains(t, res.Note, "verify timed out")
+	assert.Equal(t, 1, calls, "a timed-out outcome is never retried regardless of its output")
+}
+
+// TestRunVerifyPlanCancelDuringRetryWaitPropagates proves a parent-context
+// cancellation that lands during the retry wait aborts the run rather than
+// letting the retry fire.
+func TestRunVerifyPlanCancelDuringRetryWaitPropagates(t *testing.T) {
+	prev := verifyRetryWait
+	verifyRetryWait = 300 * time.Millisecond
+
+	t.Cleanup(func() { verifyRetryWait = prev })
+
+	o := &run{d: Deps{Cfg: Config{Workspace: t.TempDir()}}}
+
+	calls := 0
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		calls++
+
+		return verifyexec.Outcome{ExitCode: 2, Output: "resource temporarily unavailable"}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		cancel()
+	}()
+
+	_, err := o.runVerifyPlan(ctx, "dir", verifyPlan{Argv: []string{"x"}, Timeout: time.Minute})
+	require.Error(t, err, "a parent cancel during the retry wait propagates the abort, not a verify outcome")
+	assert.Equal(t, 1, calls, "the retry never runs once cancellation interrupts the wait")
+}
+
+// TestRunVerifyPlanRedactsRetriedResult proves redaction applies to the FINAL
+// (retried) output, not the first attempt's - so a retried run's output is
+// never returned unredacted.
+func TestRunVerifyPlanRedactsRetriedResult(t *testing.T) {
+	withFastVerifyRetryWait(t)
+
+	o := &run{d: Deps{
+		Redact: func(s string) string { return "[REDACTED]" },
+		Cfg:    Config{Workspace: t.TempDir()},
+	}}
+
+	calls := 0
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		calls++
+		if calls == 1 {
+			return verifyexec.Outcome{ExitCode: 2, Output: "token=hunter2: resource temporarily unavailable"}
+		}
+
+		return verifyexec.Outcome{ExitCode: 1, Output: "token=hunter2: still failing"}
+	}
+
+	res, err := o.runVerifyPlan(context.Background(), "dir", verifyPlan{Argv: []string{"x"}, Timeout: time.Minute})
+	require.NoError(t, err)
+	assert.Equal(t, verifyFailed, res.Status)
+	assert.Equal(t, "[REDACTED]", res.Output, "the retried result's output is redacted, not the first attempt's")
+	assert.Equal(t, 2, calls)
+}
+
 func TestRunVerifyPlanPropagatesParentCancel(t *testing.T) {
 	o := &run{d: Deps{Cfg: Config{Workspace: t.TempDir()}}}
 	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {

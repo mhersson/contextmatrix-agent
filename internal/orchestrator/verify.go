@@ -332,7 +332,7 @@ func (o *run) resolveVerify(ctx context.Context) (verifyPlan, error) {
 // abort) from a real verify outcome. An empty plan is a skip, never a run. A
 // non-pass whose output looks resource-exhausted (container pressure, not a
 // real defect) gets exactly one retry after a short wait; a plain failure is
-// never retried.
+// never retried, and neither is a run that hit its own timeout.
 func (o *run) runVerifyPlan(ctx context.Context, dir string, plan verifyPlan) (verifyResult, error) {
 	if len(plan.Argv) == 0 {
 		return verifyResult{Status: verifySkipped, Note: "no verify command resolved"}, nil
@@ -346,11 +346,17 @@ func (o *run) runVerifyPlan(ctx context.Context, dir string, plan verifyPlan) (v
 
 	res := classifyVerify(plan, out)
 
-	if res.Status != verifyPassed && verifyexec.LooksResourceExhausted(res.Output) {
+	if res.Status != verifyPassed && !out.TimedOut && verifyexec.LooksResourceExhausted(res.Output) {
 		// One retry: spawn failures under container resource pressure are
 		// transient once the previous run's processes are reaped. Never retry a
 		// plain failure - that is a real defect and rerunning it funds nothing.
-		slog.Warn("verify output looks resource-exhausted; retrying once", "card_id", o.d.Cfg.CardID)
+		// A timed-out run is excluded even when its partial output carries a
+		// signature: retrying would double a run already at the wall-clock
+		// ceiling, and a rerun would not fit the same timeout anyway. A genuine
+		// defect whose output happens to say e.g. "too many open files" is an
+		// accepted false positive here - one bounded duplicate run, and
+		// classification is unaffected since a failure stays a failure either way.
+		slog.Warn("verify: output looks resource-exhausted; retrying once", "card_id", o.d.Cfg.CardID)
 
 		select {
 		case <-ctx.Done():
