@@ -128,7 +128,8 @@ func (g *Git) credEnv() ([]string, error) {
 	// applies only to the worker's own code-driven git, never the model's tools.
 	scope := "credential.https://" + g.host
 
-	return append(env,
+	return append(
+		env,
 		"GIT_CONFIG_COUNT=2",
 		"GIT_CONFIG_KEY_0="+scope+".helper",
 		"GIT_CONFIG_VALUE_0="+scriptPath,

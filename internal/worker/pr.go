@@ -90,7 +90,8 @@ func hostFromRepoURL(repoURL string) string {
 // secrets file is an error - gh must not run unauthenticated on a stale or
 // broken credential mount.
 func (p *PRCreator) buildCmd(ctx context.Context, title, body, base, head string) (*exec.Cmd, error) {
-	cmd := exec.CommandContext(ctx, "gh", "pr", "create",
+	cmd := exec.CommandContext(
+		ctx, "gh", "pr", "create",
 		"--title", title,
 		"--body-file", "-",
 		"--base", base,

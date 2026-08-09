@@ -363,7 +363,8 @@ func (c *ServiceConfig) Validate() error {
 		return fmt.Errorf(
 			"max_concurrent must be >= 1, got %d: 0 disables the webhook capacity pre-check "+
 				"while the tracker refuses every launch - triggers would be accepted then all fail",
-			c.MaxConcurrent)
+			c.MaxConcurrent,
+		)
 	}
 
 	if c.Port < 1 || c.Port > 65535 {
@@ -386,7 +387,8 @@ func (c *ServiceConfig) Validate() error {
 		return fmt.Errorf(
 			"container_timeout %s exceeds the 150m reconcile cap: ContextMatrix force-kills "+
 				"containers older than 150m externally, so the agent's own watchdog must fire first",
-			c.ContainerTimeout)
+			c.ContainerTimeout,
+		)
 	}
 
 	if c.MaxCardCost < 0 {
@@ -396,7 +398,8 @@ func (c *ServiceConfig) Validate() error {
 	if c.SelectorPriceHeadroom < 0 || (c.SelectorPriceHeadroom > 0 && c.SelectorPriceHeadroom < 1) {
 		return fmt.Errorf(
 			"selector_price_headroom must be 0 (use worker default) or >= 1 (band multiplier), got %g",
-			c.SelectorPriceHeadroom)
+			c.SelectorPriceHeadroom,
+		)
 	}
 
 	if c.CACertFile != "" {
@@ -423,12 +426,14 @@ func (c *ServiceConfig) Validate() error {
 	if c.Compaction.Enabled {
 		if c.Compaction.Threshold <= 0 || c.Compaction.Threshold > 1 {
 			return fmt.Errorf(
-				"compaction_threshold must be in (0,1] when compaction is enabled, got %g", c.Compaction.Threshold)
+				"compaction_threshold must be in (0,1] when compaction is enabled, got %g", c.Compaction.Threshold,
+			)
 		}
 
 		if c.Compaction.KeepRecentTurns < 1 {
 			return fmt.Errorf(
-				"compaction_keep_recent_turns must be >= 1 when compaction is enabled, got %d", c.Compaction.KeepRecentTurns)
+				"compaction_keep_recent_turns must be >= 1 when compaction is enabled, got %d", c.Compaction.KeepRecentTurns,
+			)
 		}
 	}
 

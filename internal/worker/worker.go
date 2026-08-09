@@ -184,6 +184,15 @@ func Run(ctx context.Context, spec RunSpec, ops CardOps, client llm.LLM, emit *e
 		return releaseWithError(ctx, ops, spec.CardID, fmt.Errorf("get task context: %w", err))
 	}
 
+	// Stalled-card recovery: the server's heartbeat-timeout sweep sets a card
+	// to "stalled" and clears its claim (e.g. after a mid-run MCP outage
+	// suppressed heartbeats while the previous run kept working). The
+	// ClaimCard above has already re-acquired the claim - claiming has no
+	// state gate - so only the state is left to recover before the FSM starts.
+	if tcx.State == "stalled" {
+		tcx = recoverStalledCard(ctx, ops, spec, tcx)
+	}
+
 	// Heartbeat goroutine for the whole run, including human waits.
 	stopHeartbeat := startHeartbeat(runCtx, ops, spec.CardID)
 	defer stopHeartbeat()
@@ -502,6 +511,113 @@ func isToolchainMissing(err error) bool {
 // is what the FSM returns when an end_session frame cancels its run context.
 func errorsIsCanceled(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+// isTransitionRejected reports whether err is a state-transition rejection
+// from ContextMatrix: the wire error contains "cannot transition from", which
+// is the actual ValidationError text reachable on the client (the
+// transition_card tool description's "invalid state transition" sentinel
+// never reaches the client). This is used to distinguish a genuine transition
+// rejection from a transient MCP/network error, so the fallback is only
+// triggered by a board-configuration rejection.
+func isTransitionRejected(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	return strings.Contains(err.Error(), "cannot transition from")
+}
+
+// recoverStalledCard attempts to recover a stalled card back to "in_progress"
+// before the FSM starts. The caller has already re-claimed the card (the
+// server's stall sweep cleared the previous claim when it set the state), so
+// only the state needs fixing. It tries:
+//
+//  1. Direct TransitionCard(cardID, "in_progress").
+//  2. If that fails with a transition rejection (cannot transition from):
+//     TransitionCard(cardID, "todo") + ClaimCard (which auto-transitions
+//     todo to in_progress).
+//  3. Re-fetch task context and verify state is "in_progress".
+//  4. If both transitions fail (board with stalled: [] is legal config):
+//     warn and continue - the run will later hard-fail at start_review,
+//     but this is the documented degrade path.
+//
+// Returns the updated TaskContext. If recovery fails the returned context
+// still carries whatever state the last GetTaskContext returned.
+func recoverStalledCard(ctx context.Context, ops CardOps, spec RunSpec, original cmclient.TaskContext) cmclient.TaskContext {
+	slog.Info("card is stalled; attempting recovery", "card", spec.CardID)
+
+	// Attempt 1: direct transition to in_progress.
+	err := ops.TransitionCard(ctx, spec.CardID, "in_progress")
+	if err != nil && isTransitionRejected(err) {
+		// Fallback: transition to "todo", then re-claim. Claim_card
+		// auto-transitions todo to in_progress, so no trailing transition
+		// is needed.
+		slog.Info("direct in_progress transition rejected; falling back to todo+reclaim",
+			"card", spec.CardID, "error", err)
+
+		if terr := ops.TransitionCard(ctx, spec.CardID, "todo"); terr != nil {
+			if isTransitionRejected(terr) {
+				slog.Warn("stalled card could not be recovered; both transitions failed",
+					"card", spec.CardID, "direct_error", err, "fallback_error", terr)
+			} else {
+				slog.Warn("todo transition failed with non-rejection error; cannot recover",
+					"card", spec.CardID, "error", terr)
+			}
+
+			// Both transitions failed. Re-fetch to see current state and return,
+			// falling through to the degrade path.
+			tcx, tErr := ops.GetTaskContext(ctx, spec.CardID, false)
+			if tErr != nil {
+				slog.Warn("re-fetch after recovery failure failed", "card", spec.CardID, "error", tErr)
+
+				return original
+			}
+
+			return tcx
+		}
+
+		// todo transition succeeded. Re-claim, which auto-transitions to in_progress.
+		if cErr := ops.ClaimCard(ctx, spec.CardID); cErr != nil {
+			slog.Warn("re-claim after todo transition failed", "card", spec.CardID, "error", cErr)
+
+			// Claim failed; re-fetch to see current state and degrade.
+			tcx, tErr := ops.GetTaskContext(ctx, spec.CardID, false)
+			if tErr != nil {
+				slog.Warn("re-fetch after failed re-claim failed", "card", spec.CardID, "error", tErr)
+
+				return original
+			}
+
+			return tcx
+		}
+	} else if err != nil {
+		// Non-rejection error: anything from a transient MCP/network failure
+		// to a permanent server-side gate whose text differs from the
+		// state-machine rejection (e.g. "blocked by dependencies"). The todo
+		// fallback only helps when the direct edge is missing from the board
+		// config, so skip it and let the verify re-fetch below report the
+		// outcome.
+		slog.Warn("direct in_progress transition failed with non-rejection error; skipping fallback",
+			"card", spec.CardID, "error", err)
+	}
+
+	// Re-fetch context and verify the state was recovered.
+	tcx, tErr := ops.GetTaskContext(ctx, spec.CardID, false)
+	if tErr != nil {
+		slog.Warn("re-fetch after stalled recovery failed", "card", spec.CardID, "error", tErr)
+
+		return original
+	}
+
+	if tcx.State != "in_progress" {
+		slog.Warn("stalled card recovery did not produce in_progress state",
+			"card", spec.CardID, "state", tcx.State)
+	} else {
+		slog.Info("stalled card recovered", "card", spec.CardID)
+	}
+
+	return tcx
 }
 
 // pushWIP commits any dirty tree and pushes the card branch on the PARENT ctx

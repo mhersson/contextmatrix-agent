@@ -89,7 +89,8 @@ func TestParseCheckpointVerdict(t *testing.T) {
 
 	t.Run("summary is captured", func(t *testing.T) {
 		v, err := parseCheckpointVerdict(
-			`{"verdict":"proceed","fixes":[],"summary":"Correct and covered.\nNo blockers."}`)
+			`{"verdict":"proceed","fixes":[],"summary":"Correct and covered.\nNo blockers."}`,
+		)
 		require.NoError(t, err)
 		assert.Equal(t, "proceed", v.Verdict)
 		assert.Equal(t, "Correct and covered.\nNo blockers.", v.Summary)

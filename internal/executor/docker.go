@@ -493,7 +493,8 @@ func (e *DockerExecutor) runIdleWatchdog(project, cardID, containerID string, do
 				continue
 			}
 
-			log.Warn("container hit idle timeout, killing",
+			log.Warn(
+				"container hit idle timeout, killing",
 				"idle_timeout", e.idleTimeout,
 				"last_activity", last.Format(time.RFC3339Nano),
 			)

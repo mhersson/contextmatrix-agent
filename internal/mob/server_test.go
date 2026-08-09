@@ -59,7 +59,8 @@ func startTestServer(t *testing.T, seats ...SeatConfig) *Server {
 }
 
 func TestStartServerServesTwoSeatsConcurrently(t *testing.T) {
-	srv := startTestServer(t,
+	srv := startTestServer(
+		t,
 		SeatConfig{Name: "seat-1", Lens: "feasibility"},
 		SeatConfig{Name: "seat-2", Lens: "risk"},
 	)

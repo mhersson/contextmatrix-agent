@@ -94,8 +94,8 @@ type fakeOps struct {
 	mu                       sync.Mutex
 	calls                    []opCall
 	tcx                      cmclient.TaskContext
-	lastGetTaskContextImages bool  // captured from GetTaskContext's includeImages arg
-	transitionCardErr        error // returned by TransitionCard when set
+	lastGetTaskContextImages bool             // captured from GetTaskContext's includeImages arg
+	transitionCardErr        map[string]error // keyed by target state; returned by TransitionCard when set
 }
 
 func newFakeOps() *fakeOps {
@@ -155,18 +155,50 @@ func (f *fakeOps) argsOf(op string) []any {
 	return nil
 }
 
+// allArgsOf returns the args of every recorded call matching op, in order.
+func (f *fakeOps) allArgsOf(op string) [][]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	var out [][]any
+
+	for _, c := range f.calls {
+		if c.op == op {
+			out = append(out, c.args)
+		}
+	}
+
+	return out
+}
+
+// state returns the fake's current card state.
+func (f *fakeOps) state() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.tcx.State
+}
+
 func (f *fakeOps) ClaimCard(_ context.Context, cardID string) error {
 	f.record("ClaimCard", cardID)
+
+	// CM auto-transitions todo to in_progress on claim.
+	f.mu.Lock()
+	if f.tcx.State == "todo" {
+		f.tcx.State = "in_progress"
+	}
+	f.mu.Unlock()
 
 	return nil
 }
 
 func (f *fakeOps) GetTaskContext(_ context.Context, cardID string, includeImages bool) (cmclient.TaskContext, error) {
-	f.mu.Lock()
-	f.lastGetTaskContextImages = includeImages
-	f.mu.Unlock()
-
 	f.record("GetTaskContext", cardID)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.lastGetTaskContextImages = includeImages
 
 	return f.tcx, nil
 }
@@ -204,7 +236,18 @@ func (f *fakeOps) ReleaseCard(_ context.Context, cardID string) error {
 func (f *fakeOps) TransitionCard(_ context.Context, cardID, state string) error {
 	f.record("TransitionCard", cardID, state)
 
-	return f.transitionCardErr
+	if f.transitionCardErr != nil {
+		if err, ok := f.transitionCardErr[state]; ok {
+			return err
+		}
+	}
+
+	// A successful transition updates the canned state.
+	f.mu.Lock()
+	f.tcx.State = state
+	f.mu.Unlock()
+
+	return nil
 }
 
 func (f *fakeOps) RecordSkillEngaged(_ context.Context, cardID, skillName string) error {
@@ -246,6 +289,179 @@ func remoteHasBranch(t *testing.T, remote, branch string) bool {
 	require.NoError(t, err)
 
 	return strings.Contains(string(out), branch)
+}
+
+// TestRunStalledCardRecoversDirectInProgress: a run whose GetTaskContext returns
+// State=="stalled" recovers via TransitionCard(cardID,"in_progress"), then
+// re-fetches context and proceeds into the FSM with state=="in_progress".
+func TestRunStalledCardRecoversDirectInProgress(t *testing.T) {
+	remote := setupBareRemote(t)
+	wsParent := t.TempDir()
+	ops := newFakeOps()
+	ops.tcx.State = "stalled"
+
+	swapRunOrchestrator(t, func(_ context.Context, d orchestrator.Deps) error {
+		_ = d
+
+		return nil
+	})
+
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	res, err := Run(context.Background(), baseSpec(t, remote, wsParent), ops, &scriptedLLM{}, emit, openStdin(t))
+	require.NoError(t, err)
+	assert.Equal(t, "completed", res.Reason)
+
+	// Call order: ClaimCard, GetTaskContext (sees stalled), TransitionCard("in_progress"),
+	// GetTaskContext (re-fetch), then the usual FSM path (no extra calls).
+	calls := ops.ops()
+	require.GreaterOrEqual(t, len(calls), 4)
+	assert.Equal(t, "ClaimCard", calls[0])
+	assert.Equal(t, "GetTaskContext", calls[1])
+	assert.Equal(t, "TransitionCard", calls[2])
+	assert.Equal(t, "GetTaskContext", calls[3])
+
+	// Confirm that only one TransitionCard was called, targeting "in_progress".
+	assert.Equal(t, [][]any{{"CMX-001", "in_progress"}}, ops.allArgsOf("TransitionCard"))
+	// Verify the second GetTaskContext was called (the re-fetch).
+	assert.Equal(t, 2, ops.count("GetTaskContext"))
+	// Behavior anchor: the card ended in_progress.
+	assert.Equal(t, "in_progress", ops.state())
+}
+
+// TestRunStalledCardFallbackOnRejectedInProgress: direct TransitionCard to
+// "in_progress" is rejected (error contains "cannot transition from"), so
+// the fallback transitions to "todo" and re-claims, then re-fetches context.
+func TestRunStalledCardFallbackOnRejectedInProgress(t *testing.T) {
+	remote := setupBareRemote(t)
+	wsParent := t.TempDir()
+	ops := newFakeOps()
+	ops.tcx.State = "stalled"
+	// Exact wire text for a board with transitions stalled: [todo] - pins
+	// isTransitionRejected against the real %q-quoted server format.
+	ops.transitionCardErr = map[string]error{
+		"in_progress": fmt.Errorf(`call transition_card: transition card CMX-001 to in_progress: validate transition: cannot transition from "stalled" to "in_progress"; valid targets: [todo]`),
+	}
+
+	swapRunOrchestrator(t, func(_ context.Context, _ orchestrator.Deps) error {
+		return nil
+	})
+
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	res, err := Run(context.Background(), baseSpec(t, remote, wsParent), ops, &scriptedLLM{}, emit, openStdin(t))
+	require.NoError(t, err)
+	assert.Equal(t, "completed", res.Reason)
+
+	// Call order: ClaimCard, GetTaskContext, TransitionCard("in_progress") [fails],
+	// TransitionCard("todo"), ClaimCard, GetTaskContext.
+	calls := ops.ops()
+	require.GreaterOrEqual(t, len(calls), 6)
+	assert.Equal(t, "ClaimCard", calls[0])
+	assert.Equal(t, "GetTaskContext", calls[1])
+	assert.Equal(t, "TransitionCard", calls[2])
+	assert.Equal(t, "TransitionCard", calls[3])
+	assert.Equal(t, "ClaimCard", calls[4])
+	assert.Equal(t, "GetTaskContext", calls[5])
+	// No trailing transition needed: claim_card auto-transitions todo to in_progress.
+	assert.Equal(t, [][]any{{"CMX-001", "in_progress"}, {"CMX-001", "todo"}}, ops.allArgsOf("TransitionCard"))
+	assert.Equal(t, 2, ops.count("ClaimCard"))
+	assert.Equal(t, 2, ops.count("GetTaskContext"))
+	// Behavior anchor: the fallback ended with the card in_progress.
+	assert.Equal(t, "in_progress", ops.state())
+}
+
+// TestRunStalledCardBothTransitionsFailDegrades: both the direct in_progress
+// transition AND the todo+reclaim fallback fail. The run logs a warning and
+// continues - it does NOT return an error for the recovery step itself. The
+// FSM runs with whatever tcx.State was last fetched (still "stalled").
+func TestRunStalledCardBothTransitionsFailDegrades(t *testing.T) {
+	remote := setupBareRemote(t)
+	wsParent := t.TempDir()
+	ops := newFakeOps()
+	ops.tcx.State = "stalled"
+	// Both transitions rejected, exact wire text for a board with
+	// transitions stalled: [] (legal config - the key only has to exist).
+	ops.transitionCardErr = map[string]error{
+		"in_progress": fmt.Errorf(`call transition_card: transition card CMX-001 to in_progress: validate transition: cannot transition from "stalled" to "in_progress"; valid targets: []`),
+		"todo":        fmt.Errorf(`call transition_card: transition card CMX-001 to todo: validate transition: cannot transition from "stalled" to "todo"; valid targets: []`),
+	}
+
+	var fsmRan bool
+
+	swapRunOrchestrator(t, func(_ context.Context, _ orchestrator.Deps) error {
+		fsmRan = true
+
+		return nil
+	})
+
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	res, err := Run(context.Background(), baseSpec(t, remote, wsParent), ops, &scriptedLLM{}, emit, openStdin(t))
+	require.NoError(t, err, "both transitions failing must not cause Run to return an error")
+	assert.Equal(t, "completed", res.Reason)
+	assert.True(t, fsmRan, "FSM must still run even when both recovery transitions fail")
+
+	// Both transitions were attempted, plus a re-fetch.
+	calls := ops.ops()
+	require.GreaterOrEqual(t, len(calls), 5)
+	assert.Equal(t, "ClaimCard", calls[0])
+	assert.Equal(t, "GetTaskContext", calls[1])
+	assert.Equal(t, "TransitionCard", calls[2]) // in_progress
+	assert.Equal(t, "TransitionCard", calls[3]) // todo
+	assert.Equal(t, "GetTaskContext", calls[4]) // re-fetch (fails or returns stalled)
+	assert.Equal(t, [][]any{{"CMX-001", "in_progress"}, {"CMX-001", "todo"}}, ops.allArgsOf("TransitionCard"))
+	assert.Equal(t, 2, ops.count("GetTaskContext"))
+	// Behavior anchor: the card is still stalled - the degrade path changed nothing.
+	assert.Equal(t, "stalled", ops.state())
+}
+
+// TestRunStalledCardTransientErrorSkipsFallback: the direct in_progress
+// transition fails with a non-rejection (transport-shaped) error. Recovery
+// must NOT run the todo+reclaim fallback - blindly retrying through todo on a
+// transient failure could double-transition the card - and the run still
+// proceeds into the FSM after the verify re-fetch reports the card is still
+// stalled.
+func TestRunStalledCardTransientErrorSkipsFallback(t *testing.T) {
+	remote := setupBareRemote(t)
+	wsParent := t.TempDir()
+	ops := newFakeOps()
+	ops.tcx.State = "stalled"
+	// No "cannot transition from" needle: classified as non-rejection.
+	ops.transitionCardErr = map[string]error{
+		"in_progress": fmt.Errorf("call transition_card: connection refused"),
+	}
+
+	var fsmRan bool
+
+	swapRunOrchestrator(t, func(_ context.Context, _ orchestrator.Deps) error {
+		fsmRan = true
+
+		return nil
+	})
+
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	res, err := Run(context.Background(), baseSpec(t, remote, wsParent), ops, &scriptedLLM{}, emit, openStdin(t))
+	require.NoError(t, err, "a transient recovery failure must not cause Run to return an error")
+	assert.Equal(t, "completed", res.Reason)
+	assert.True(t, fsmRan, "FSM must still run after a transient recovery failure")
+
+	// Call order: ClaimCard, GetTaskContext, TransitionCard("in_progress")
+	// [transient failure], GetTaskContext (verify re-fetch). No fallback: no
+	// todo transition, no re-claim.
+	calls := ops.ops()
+	require.GreaterOrEqual(t, len(calls), 4)
+	assert.Equal(t, "ClaimCard", calls[0])
+	assert.Equal(t, "GetTaskContext", calls[1])
+	assert.Equal(t, "TransitionCard", calls[2])
+	assert.Equal(t, "GetTaskContext", calls[3])
+	assert.Equal(t, [][]any{{"CMX-001", "in_progress"}}, ops.allArgsOf("TransitionCard"),
+		"transient error must not trigger the todo fallback")
+	assert.Equal(t, 1, ops.count("ClaimCard"), "transient error must not trigger a re-claim")
+	assert.Equal(t, 2, ops.count("GetTaskContext"))
+	// Behavior anchor: the card is still stalled.
+	assert.Equal(t, "stalled", ops.state())
 }
 
 // TestRunAutonomousPlumbing verifies the shared setup runs before the FSM for an
@@ -842,7 +1058,7 @@ func TestToolchainMissingTransitionFailureDegradesGracefully(t *testing.T) {
 	remote := setupBareRemote(t)
 	wsParent := t.TempDir()
 	ops := newFakeOps()
-	ops.transitionCardErr = fmt.Errorf("call transition_card: invalid state transition")
+	ops.transitionCardErr = map[string]error{"blocked": fmt.Errorf("call transition_card: invalid state transition")}
 
 	swapRunOrchestrator(t, func(_ context.Context, d orchestrator.Deps) error {
 		require.NoError(t, os.WriteFile(filepath.Join(d.Cfg.Workspace, "wip.txt"), []byte("partial\n"), 0o644))
