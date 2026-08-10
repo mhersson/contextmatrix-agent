@@ -19,9 +19,10 @@ func mkModule(t *testing.T, ws, dir, name, content string) {
 }
 
 const (
-	pomXML = "<project></project>\n"
-	npmPkg = `{"name":"x","scripts":{"test":"vitest run"}}`
-	goMod  = "module example.com/x\n"
+	pomXML      = "<project></project>\n"
+	npmPkg      = `{"name":"x","scripts":{"test":"vitest run"}}`
+	goMod       = "module example.com/x\n"
+	gradleBuild = "plugins {}\n"
 )
 
 func TestDetectNested(t *testing.T) {
@@ -108,6 +109,42 @@ func TestDetectNested(t *testing.T) {
 		assert.Empty(t, det.Marker, "nested Gradle falls through to the model-proposal tier without a build script")
 	})
 
+	t.Run("system gradle preferred over wrapper", func(t *testing.T) {
+		stubTools(t, "gradle", "java")
+
+		ws := t.TempDir()
+		mkModule(t, ws, "svc", "build.gradle", gradleBuild)
+		require.NoError(t, os.WriteFile(filepath.Join(ws, "svc", "gradlew"), []byte("#!/bin/sh\n"), 0o755))
+
+		det := detectNested(ws)
+		assert.Equal(t, []string{"gradle", "-p", "svc", "test"}, det.Argv,
+			"the wrapper bootstraps its own distribution and dies on minimal images; a runnable system gradle wins")
+	})
+
+	t.Run("gradle wrapper fallback when no system gradle", func(t *testing.T) {
+		stubTools(t, "java") // no gradle on PATH
+
+		ws := t.TempDir()
+		mkModule(t, ws, "svc", "build.gradle", gradleBuild)
+		require.NoError(t, os.WriteFile(filepath.Join(ws, "svc", "gradlew"), []byte("#!/bin/sh\n"), 0o755))
+
+		det := detectNested(ws)
+		assert.Equal(t, []string{"svc/gradlew", "-p", "svc", "test"}, det.Argv)
+	})
+
+	t.Run("unresolved gradle module carries the park marker", func(t *testing.T) {
+		// build.gradle.kts pins the other half of hasGradleBuildFile's OR.
+		stubTools(t, "gradle") // java missing: the JVM probe fails
+
+		ws := t.TempDir()
+		mkModule(t, ws, "svc", "build.gradle.kts", gradleBuild)
+
+		det := detectNested(ws)
+		assert.Nil(t, det.Argv)
+		assert.Equal(t, "gradle project (in svc/)", det.Marker)
+		assert.Contains(t, det.Reason, "java")
+	})
+
 	t.Run("unresolved lone module carries the park marker", func(t *testing.T) {
 		stubTools(t, "mvn") // java missing: the JVM probe fails
 
@@ -133,6 +170,23 @@ func TestDetectNested(t *testing.T) {
 		require.Len(t, det.Notes, 1)
 		assert.Contains(t, det.Notes[0], "backend/")
 		assert.Contains(t, det.Notes[0], "NOT covered")
+	})
+
+	t.Run("exactly the cap still composes", func(t *testing.T) {
+		// The composing side of the boundary: nestedModuleCap modules are AT the
+		// cap, not over it, so an off-by-one in the decline arm is visible here.
+		stubTools(t, "go", "bash")
+
+		ws := t.TempDir()
+		for _, d := range []string{"a", "b", "c", "d"} {
+			mkModule(t, ws, d, "go.mod", goMod)
+		}
+
+		det := detectNested(ws)
+		assert.Equal(t,
+			"go test -C a ./... && go test -C b ./... && go test -C c ./... && go test -C d ./...",
+			det.Display)
+		assert.Empty(t, det.Marker)
 	})
 
 	t.Run("module cap declines with a diagnostic", func(t *testing.T) {
@@ -169,6 +223,21 @@ func TestDetectNested(t *testing.T) {
 
 		det := detectNested(ws)
 		assert.Equal(t, []string{"go", "test", "-C", "svc", "./..."}, det.Argv)
+	})
+
+	t.Run("nested module with no toolchain carries the park marker", func(t *testing.T) {
+		// nestedProbe's failure return - the path every go/cargo/npm/dotnet row
+		// takes. Maven and Gradle have their own resolvers, so without this the
+		// park-instead-of-proceed rule is pinned for JVM modules only.
+		stubTools(t) // empty PATH: go does not resolve
+
+		ws := t.TempDir()
+		mkModule(t, ws, "svc", "go.mod", goMod)
+
+		det := detectNested(ws)
+		assert.Nil(t, det.Argv)
+		assert.Equal(t, "go.mod (in svc/)", det.Marker)
+		assert.Contains(t, det.Reason, "go")
 	})
 
 	t.Run("nested pytest deliberately not detected", func(t *testing.T) {

@@ -106,7 +106,11 @@ func TestProposeVerifyAcceptedAndCached(t *testing.T) {
 	assert.Equal(t, "cargo test", plan.Display)
 	assert.Equal(t, []string{"cargo", "test"}, plan.Argv, "a proposed command runs as plain argv, never through a shell")
 	assert.True(t, ops.loggedContains("model-proposed verify command: cargo test"), "provenance is logged; logs=%v", ops.logs)
+	// Keyed on wording unique to the PROPOSAL section, not the heading:
+	// logVerifyResolution writes its own section under the same heading and is
+	// gated off for a proposed plan precisely so this guidance survives.
 	assert.Contains(t, o.body, "## Verify Command", "the proposal is recorded on the card for a human to make durable")
+	assert.Contains(t, o.body, "make this durable", "the resolution section must not clobber the promote-to-config guidance")
 
 	// A second resolution reuses the cache: no second model call.
 	callsAfterFirst := len(client.models)
