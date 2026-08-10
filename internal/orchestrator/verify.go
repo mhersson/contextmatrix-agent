@@ -450,6 +450,37 @@ func (o *run) logVerifyResolution(ctx context.Context, p verifyPlan) {
 	}
 
 	o.d.logCard(ctx, "%s", msg)
+
+	// The card body must carry the same truth as the log: a run whose gate will
+	// execute nothing has that fact upserted as a section, and a later upgrade
+	// to a real command replaces it (recordSection upserts by heading). A
+	// model-proposed command is excluded - proposeVerify records its own
+	// section with promote-to-config guidance under the same heading.
+	if p.Source != verifySourceProposed {
+		o.recordSection(ctx, "Verify Command", verifyResolutionSection(p))
+	}
+}
+
+// verifyResolutionSection renders the "## Verify Command" card section for a
+// code-resolved (or unresolved) verify plan. The UNVERIFIED variant is the
+// loud counterpart of the activity-log line: a run whose gate will compile and
+// test nothing must say so on the card body, never only in a log line.
+func verifyResolutionSection(p verifyPlan) string {
+	var s string
+
+	if len(p.Argv) == 0 {
+		s = "## Verify Command\n\n**NONE - this run is UNVERIFIED.** No verify command was declared, " +
+			"detected, or proposed: the review gate will compile and test nothing. Declare a verify " +
+			"command in the project's agent settings to close this gap."
+	} else {
+		s = fmt.Sprintf("## Verify Command\n\nThe verify gate runs `%s` (%s).", p.Display, p.Source)
+	}
+
+	if len(p.Notes) > 0 {
+		s += "\n\n" + strings.Join(p.Notes, "\n")
+	}
+
+	return s
 }
 
 // ---- repo-convention detection ---------------------------------------------

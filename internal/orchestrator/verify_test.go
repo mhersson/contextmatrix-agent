@@ -959,3 +959,50 @@ func TestResolveVerifyDeclaredCdCommandResolves(t *testing.T) {
 	assert.Equal(t, verifySourceDeclared, plan.Source)
 	assert.Equal(t, "cd backend && ./mvnw -q test", plan.Display)
 }
+
+// TestLogVerifyResolutionRecordsUnverifiedSection pins that the quietest
+// possible outcome - nothing declared, detected, or proposed - is recorded on
+// the card body, not only as one activity-log line.
+func TestLogVerifyResolutionRecordsUnverifiedSection(t *testing.T) {
+	ops := &fakeOps{}
+	o := &run{d: Deps{Ops: ops, Cfg: Config{CardID: "CARD-1", Workspace: t.TempDir()}}}
+
+	p, err := o.resolveVerify(context.Background())
+	require.NoError(t, err)
+	require.Empty(t, p.Argv)
+
+	o.logVerifyResolution(context.Background(), p)
+
+	body := ops.lastBody()
+	assert.Contains(t, body, "## Verify Command")
+	assert.Contains(t, body, "UNVERIFIED")
+}
+
+// TestLogVerifyResolutionUpgradeReplacesUnverifiedSection pins the re-resolve
+// path: a run that starts unverified and later gains a detectable marker must
+// end with a section naming the command, not a stale UNVERIFIED warning.
+func TestLogVerifyResolutionUpgradeReplacesUnverifiedSection(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX-only")
+	}
+
+	stubTools(t, "go")
+
+	dir := t.TempDir()
+	ops := &fakeOps{}
+	o := &run{d: Deps{Ops: ops, Cfg: Config{CardID: "CARD-1", Workspace: dir}}}
+
+	_, err := o.ensureVerify(context.Background())
+	require.NoError(t, err)
+	require.Contains(t, ops.lastBody(), "UNVERIFIED")
+
+	writeFile(t, dir, "go.mod", "module example.com/x\n")
+
+	p, err := o.ensureVerify(context.Background())
+	require.NoError(t, err)
+	require.NotEmpty(t, p.Argv)
+
+	body := ops.lastBody()
+	assert.Contains(t, body, "go test ./...")
+	assert.NotContains(t, body, "UNVERIFIED", "the upsert must replace the stale warning")
+}
