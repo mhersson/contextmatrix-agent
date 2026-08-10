@@ -224,20 +224,37 @@ file only - never via flags or committed YAML.
 8. **Verify resolution can park as blocked.** The verify-resolution ladder
    (declared command, then repo-convention detection, then a model proposal,
    then skip - `internal/orchestrator/verify.go`) gives every tier a chance
-   before giving up. If nothing resolves and a declared command failed its
-   probe, or a detected toolchain marker (e.g. `maven project`, matching a
-   `pom.xml` or an `mvnw`-only workspace) never resolved to a runnable
-   command at any tier, resolution returns `ToolchainMissingError` instead of
-   the silent skip; a workspace with no declared command and no
-   recognized marker (a pure docs repo) still resolves to skip, unverified,
-   exactly as before. `execute()` logs the tier, the command or marker, and
-   the probe failure, then stops the run like the other park sentinels
+   before giving up. Detection reads the workspace root; when the root
+   resolves no test wrapper (make/just/task) and declares no marker at all, a
+   one-level nested scan takes over
+   (`internal/orchestrator/verify_nested.go`) and emits workspace-rooted
+   scoped commands for first-level modules (`mvn -q -f backend/pom.xml test`,
+   `npm --prefix frontend test`, `go test -C svc ./...`), composing up to four
+   of them with `&&`. If nothing resolves and a declared command failed its
+   probe, or a detected toolchain marker never resolved to a runnable command
+   at any tier, resolution returns `ToolchainMissingError` instead of the
+   silent skip. The marker names where it was found: `maven project` at the
+   root (matching a `pom.xml` or an `mvnw`-only workspace), `maven project
+   (in backend/)` one level down (where the nested row needs the pom itself -
+   the emitted command references it), or `nested modules` when more than four
+   marker-bearing subdirectories make a composed command a guess rather than a
+   convention. The silent skip survives when neither walk implicates a
+   toolchain: no root marker, and nothing the nested table recognizes. That
+   table is deliberately narrower than the root's - it carries no pytest row,
+   and it skips dependency/output directories - so a nested Python module
+   falls through to the model proposal rather than to a park. A pure docs
+   repo still resolves to skip, unverified, exactly as before.
+   `execute()` logs the tier, the command or marker, and the probe failure,
+   then stops the run like the other park sentinels
    (Budget/Context/MaxTurns). Unlike those, `mapFSMResult` also transitions
    the card to the board's `blocked` state before releasing the claim, so the
    park is visible on the board, not just in the log; a project whose
    `.board.yaml` lacks `in_progress -> blocked` degrades to the same silent
    WIP-push-and-release park as the others. This is an environmental park, not
-   a model failure - no outcome/blacklist reporting.
+   a model failure - no outcome/blacklist reporting. Every code-resolved
+   outcome - a command, the unverified skip, or the park - is also upserted as
+   a `## Verify Command` section on the card body, so the card and the
+   activity log carry the same truth.
 9. **Secrets.** `serve` stages each run's CM-provisioned credentials into
    `<secrets_dir>/runs/<project>/<card_id>/env`, refreshed from ContextMatrix ahead of
    each git-token expiry and bind-mounted read-only at `/run/cm-secrets/env`;

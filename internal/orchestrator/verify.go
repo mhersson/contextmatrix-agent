@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -214,6 +215,18 @@ func (o *run) ensureVerify(ctx context.Context) (verifyPlan, error) {
 
 	p, err := o.resolveVerify(ctx)
 	if err != nil {
+		// A toolchain park must correct the card body on its way out. An earlier
+		// phase may have recorded the UNVERIFIED variant, whose "declare a verify
+		// command" remedy is wrong here - a command WAS implicated, it just cannot
+		// run in this container - and the worker is about to transition the card
+		// to blocked for a human to read. Every other resolution error (budget,
+		// cancellation) leaves the section alone: those park without implicating
+		// the verify command at all.
+		var tme *ToolchainMissingError
+		if errors.As(err, &tme) {
+			o.recordSection(ctx, "Verify Command", verifyToolchainSection(tme))
+		}
+
 		return verifyPlan{}, err
 	}
 
@@ -278,17 +291,20 @@ func (o *run) resolveVerify(ctx context.Context) (verifyPlan, error) {
 
 	// Tier 2: repo-convention detection. The same walk also tracks the first
 	// present-but-unresolved marker/reason for the Tier-4 sentinel below, so
-	// detectRows is walked exactly once on this path (see detectVerifyCommand).
-	argv, display, wrapper, detectedMarker, detectedReason := detectVerifyCommand(cfg.Workspace)
-	if len(argv) > 0 {
+	// the walk runs exactly once on this path (see detectVerifyCommand).
+	det := detectVerifyCommand(cfg.Workspace)
+
+	notes = append(notes, det.Notes...)
+
+	if len(det.Argv) > 0 {
 		return verifyPlan{
-			Argv:    argv,
-			Display: display,
+			Argv:    det.Argv,
+			Display: det.Display,
 			Source:  verifySourceDetected,
 			Timeout: timeout,
 			Env:     env,
-			Notes:   notes, // carry a declared-cannot-run note onto the resolved plan
-			Wrapper: wrapper,
+			Notes:   notes, // carry declared-cannot-run and coverage notes onto the plan
+			Wrapper: det.Wrapper,
 		}, nil
 	}
 
@@ -321,7 +337,7 @@ func (o *run) resolveVerify(ctx context.Context) (verifyPlan, error) {
 	// degrades to an ordinary "nothing proposed" (proposeVerify swallows any
 	// non-budget error, including cancellation, into a clean skip), so by the
 	// time execution reaches here Tier 3 never got a real chance to rescue.
-	// Reading declaredFailed/detectedMarker as proof of a missing toolchain in
+	// Reading declaredFailed/det.Marker as proof of a missing toolchain in
 	// that case would park on operator-initiated cancellation; propagate the
 	// cancellation instead.
 	switch {
@@ -329,8 +345,8 @@ func (o *run) resolveVerify(ctx context.Context) (verifyPlan, error) {
 		return verifyPlan{}, ctx.Err()
 	case declaredFailed:
 		return verifyPlan{}, &ToolchainMissingError{Tier: "declared", Subject: declaredCmd, Reason: declaredReason}
-	case detectedMarker != "":
-		return verifyPlan{}, &ToolchainMissingError{Tier: "detected", Subject: detectedMarker, Reason: detectedReason}
+	case det.Marker != "":
+		return verifyPlan{}, &ToolchainMissingError{Tier: "detected", Subject: det.Marker, Reason: det.Reason}
 	default:
 		return verifyPlan{Source: verifySourceNone, Timeout: timeout, Env: env, Notes: notes}, nil
 	}
@@ -447,30 +463,105 @@ func (o *run) logVerifyResolution(ctx context.Context, p verifyPlan) {
 	}
 
 	o.d.logCard(ctx, "%s", msg)
+
+	// The card body must carry the same truth as the log: a run whose gate will
+	// execute nothing has that fact upserted as a section, and a later upgrade
+	// to a real command replaces it (recordSection upserts by heading). A
+	// model-proposed command is excluded - proposeVerify records its own
+	// section with promote-to-config guidance under the same heading.
+	if p.Source != verifySourceProposed {
+		o.recordSection(ctx, "Verify Command", verifyResolutionSection(p))
+	}
+}
+
+// verifyResolutionSection renders the "## Verify Command" card section for a
+// code-resolved (or unresolved) verify plan. The UNVERIFIED variant is the
+// loud counterpart of the activity-log line: a run whose gate will compile and
+// test nothing must say so on the card body, never only in a log line.
+func verifyResolutionSection(p verifyPlan) string {
+	var s string
+
+	if len(p.Argv) == 0 {
+		s = "## Verify Command\n\n**NONE - this run is UNVERIFIED.** No verify command was declared, " +
+			"detected, or proposed: the review gate will compile and test nothing. Declare a verify " +
+			"command in the project's agent settings to close this gap."
+	} else {
+		s = fmt.Sprintf("## Verify Command\n\nThe verify gate runs `%s` (%s).", p.Display, p.Source)
+	}
+
+	// A bullet per note: markdown folds consecutive single-newline lines into one
+	// paragraph, which would run several uncovered-module warnings together into
+	// a single unreadable sentence on the card.
+	if len(p.Notes) > 0 {
+		s += "\n\n- " + strings.Join(p.Notes, "\n- ")
+	}
+
+	return s
+}
+
+// verifyToolchainSection renders the "## Verify Command" card section for a
+// toolchain park. It is the third variant of the same heading (alongside the
+// resolved and UNVERIFIED ones), so the upsert replaces whatever a prior phase
+// recorded - the card a human opens in `blocked` must name the remedy the park
+// actually needs, not the one a stale UNVERIFIED section prescribes.
+func verifyToolchainSection(tme *ToolchainMissingError) string {
+	headline := "**NONE - this run PARKED: the verify toolchain cannot run here.**"
+	remedy := "Install the toolchain in the worker image, or declare a verify command that runs with what the image provides."
+
+	// The nested-module cap is the one park where nothing is missing: detection
+	// declined to guess a composed command over a sprawling repo. Telling the
+	// operator to install a toolchain would send them after a tool that is
+	// already installed and working.
+	if tme.Subject == nestedModulesMarker {
+		headline = "**NONE - this run PARKED: no verify command could be resolved.**"
+		remedy = "Declare a verify command for the project that covers the modules it should build and test."
+	}
+
+	return fmt.Sprintf("## Verify Command\n\n%s\n\n- tier: %s\n- subject: `%s`\n- reason: %s\n\n%s",
+		headline, tme.Tier, tme.Subject, tme.Reason, remedy)
 }
 
 // ---- repo-convention detection ---------------------------------------------
+
+// detection is the outcome of Tier-2 repo-convention detection: a runnable
+// command (Argv non-nil), or the diagnostic Marker/Reason naming the first
+// present-but-unresolved toolchain for the Tier-4 sentinel. Notes carry
+// human-facing caveats onto the resolved plan (e.g. a nested module the
+// detected command does not cover).
+type detection struct {
+	Argv    []string
+	Display string
+	Wrapper bool
+	Marker  string
+	Reason  string
+	Notes   []string
+}
 
 // detectVerifyCommand best-effort resolves the project's verify command from
 // workspace markers, target-language-agnostic. A wrapper (make/just/task test)
 // wins first UNLESS the repo declares a toolchain whose tools are all absent -
 // then the wrapper would shell out to a missing binary and false-fail, so it is
 // skipped. Otherwise the marker table is walked in priority order and the first
-// toolchain whose tool actually resolves is used. Returns a nil argv when
-// nothing runnable is found. wrapper reports whether the returned command is a
-// test-wrapper (make/just/task) - the caller uses it to scope the tool-missing
-// heuristic to exactly that case.
+// toolchain whose tool actually resolves is used. Returns a detection with nil
+// Argv when nothing runnable is found. Wrapper reports whether the returned
+// command is a test-wrapper (make/just/task) - the caller uses it to scope the
+// tool-missing heuristic to exactly that case.
 //
-// The SAME walk also tracks marker/reason: the first present-but-unresolved
+// The SAME walk also tracks Marker/Reason: the first present-but-unresolved
 // row's marker and probe-failure reason, for the caller's toolchain-missing
 // diagnostic. Both are empty when a command resolved or no recognised marker is
 // present at all (e.g. a pure docs repo, which must keep the silent skip). This
 // is diagnostic only - it never changes which command Tier 2 resolves - and it
 // costs nothing extra: detectRows is walked exactly once either way.
-func detectVerifyCommand(workspace string) (argv []string, display string, wrapper bool, marker, reason string) {
+//
+// When the root declares no marker at all, a one-level nested scan takes over
+// (see verify_nested.go).
+func detectVerifyCommand(workspace string) detection {
 	if a := detectWrapper(workspace); a != nil {
-		return a, strings.Join(a, " "), true, "", ""
+		return detection{Argv: a, Display: strings.Join(a, " "), Wrapper: true}
 	}
+
+	var marker, reason string
 
 	for _, row := range detectRows {
 		if !row.present(workspace) {
@@ -479,7 +570,7 @@ func detectVerifyCommand(workspace string) (argv []string, display string, wrapp
 
 		a, r := row.resolve(workspace)
 		if a != nil {
-			return a, strings.Join(a, " "), false, "", ""
+			return detection{Argv: a, Display: strings.Join(a, " ")}
 		}
 
 		if marker == "" {
@@ -487,7 +578,14 @@ func detectVerifyCommand(workspace string) (argv []string, display string, wrapp
 		}
 	}
 
-	return nil, "", false, marker, reason
+	if marker == "" {
+		// Nothing at the root at all: fall back to a one-level nested scan
+		// before giving up (see verify_nested.go). A root marker that failed to
+		// resolve keeps its park - nested coverage must not paper over it.
+		return detectNested(workspace)
+	}
+
+	return detection{Marker: marker, Reason: reason}
 }
 
 // detectWrapper applies the wrapper rule: a test wrapper is used when its binary

@@ -111,12 +111,12 @@ func TestDetectVerifyCommand(t *testing.T) {
 		dir := t.TempDir()
 		writeFile(t, dir, "go.mod", "module example.com/x\n")
 
-		argv, display, wrapper, marker, reason := detectVerifyCommand(dir)
-		assert.Equal(t, []string{"go", "test", "./..."}, argv)
-		assert.Equal(t, "go test ./...", display)
-		assert.False(t, wrapper, "a marker-table command is not a wrapper")
-		assert.Empty(t, marker, "a resolved command carries no diagnostic marker")
-		assert.Empty(t, reason)
+		det := detectVerifyCommand(dir)
+		assert.Equal(t, []string{"go", "test", "./..."}, det.Argv)
+		assert.Equal(t, "go test ./...", det.Display)
+		assert.False(t, det.Wrapper, "a marker-table command is not a wrapper")
+		assert.Empty(t, det.Marker, "a resolved command carries no diagnostic marker")
+		assert.Empty(t, det.Reason)
 	})
 
 	t.Run("cargo project", func(t *testing.T) {
@@ -125,8 +125,8 @@ func TestDetectVerifyCommand(t *testing.T) {
 		dir := t.TempDir()
 		writeFile(t, dir, "Cargo.toml", "[package]\nname=\"x\"\n")
 
-		argv, _, _, _, _ := detectVerifyCommand(dir)
-		assert.Equal(t, []string{"cargo", "test"}, argv)
+		det := detectVerifyCommand(dir)
+		assert.Equal(t, []string{"cargo", "test"}, det.Argv)
 	})
 
 	t.Run("Go repo with Makefile+go uses make", func(t *testing.T) {
@@ -136,9 +136,9 @@ func TestDetectVerifyCommand(t *testing.T) {
 		writeFile(t, dir, "Makefile", "build:\n\tgo build ./...\ntest:\n\tgo test ./...\n")
 		writeFile(t, dir, "go.mod", "module example.com/x\n")
 
-		argv, _, wrapper, _, _ := detectVerifyCommand(dir)
-		assert.Equal(t, []string{"make", "test"}, argv)
-		assert.True(t, wrapper, "a make wrapper is flagged for the tool-missing heuristic")
+		det := detectVerifyCommand(dir)
+		assert.Equal(t, []string{"make", "test"}, det.Argv)
+		assert.True(t, det.Wrapper, "a make wrapper is flagged for the tool-missing heuristic")
 	})
 
 	t.Run("pure-make repo uses make", func(t *testing.T) {
@@ -147,9 +147,9 @@ func TestDetectVerifyCommand(t *testing.T) {
 		dir := t.TempDir()
 		writeFile(t, dir, "Makefile", "test:\n\t./run-tests.sh\n")
 
-		argv, _, wrapper, _, _ := detectVerifyCommand(dir)
-		assert.Equal(t, []string{"make", "test"}, argv)
-		assert.True(t, wrapper)
+		det := detectVerifyCommand(dir)
+		assert.Equal(t, []string{"make", "test"}, det.Argv)
+		assert.True(t, det.Wrapper)
 	})
 
 	t.Run("Rust Makefile without cargo skips the wrapper", func(t *testing.T) {
@@ -162,10 +162,10 @@ func TestDetectVerifyCommand(t *testing.T) {
 		writeFile(t, dir, "Makefile", "test:\n\tcargo test\n")
 		writeFile(t, dir, "Cargo.toml", "[package]\nname=\"x\"\n")
 
-		argv, _, _, marker, reason := detectVerifyCommand(dir)
-		assert.Nil(t, argv, "make must be skipped when the declared toolchain is absent")
-		assert.Equal(t, "Cargo.toml", marker, "the diagnostic walk tracks the unresolved cargo row")
-		assert.Contains(t, reason, "cargo")
+		det := detectVerifyCommand(dir)
+		assert.Nil(t, det.Argv, "make must be skipped when the declared toolchain is absent")
+		assert.Equal(t, "Cargo.toml", det.Marker, "the diagnostic walk tracks the unresolved cargo row")
+		assert.Contains(t, det.Reason, "cargo")
 	})
 
 	t.Run("npm placeholder not detected", func(t *testing.T) {
@@ -174,8 +174,8 @@ func TestDetectVerifyCommand(t *testing.T) {
 		dir := t.TempDir()
 		writeFile(t, dir, "package.json", `{"name":"x","scripts":{"test":"echo \"Error: no test specified\" && exit 1"}}`)
 
-		argv, _, _, _, _ := detectVerifyCommand(dir)
-		assert.Nil(t, argv, "the npm-init placeholder test script is not a real command")
+		det := detectVerifyCommand(dir)
+		assert.Nil(t, det.Argv, "the npm-init placeholder test script is not a real command")
 	})
 
 	t.Run("real npm test detected", func(t *testing.T) {
@@ -184,8 +184,8 @@ func TestDetectVerifyCommand(t *testing.T) {
 		dir := t.TempDir()
 		writeFile(t, dir, "package.json", `{"name":"x","scripts":{"test":"vitest run"}}`)
 
-		argv, _, _, _, _ := detectVerifyCommand(dir)
-		assert.Equal(t, []string{"npm", "test"}, argv)
+		det := detectVerifyCommand(dir)
+		assert.Equal(t, []string{"npm", "test"}, det.Argv)
 	})
 
 	t.Run("gradlew without exec bit not chosen", func(t *testing.T) {
@@ -194,8 +194,8 @@ func TestDetectVerifyCommand(t *testing.T) {
 		dir := t.TempDir()
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "gradlew"), []byte("#!/bin/sh\n"), 0o644))
 
-		argv, _, _, _, _ := detectVerifyCommand(dir)
-		assert.Nil(t, argv, "a non-executable gradlew and no system gradle resolves nothing")
+		det := detectVerifyCommand(dir)
+		assert.Nil(t, det.Argv, "a non-executable gradlew and no system gradle resolves nothing")
 	})
 
 	t.Run("no markers resolves nothing", func(t *testing.T) {
@@ -203,11 +203,11 @@ func TestDetectVerifyCommand(t *testing.T) {
 
 		dir := t.TempDir()
 
-		argv, display, _, marker, reason := detectVerifyCommand(dir)
-		assert.Nil(t, argv)
-		assert.Empty(t, display)
-		assert.Empty(t, marker, "no recognised marker present at all - a pure docs repo keeps the silent skip")
-		assert.Empty(t, reason)
+		det := detectVerifyCommand(dir)
+		assert.Nil(t, det.Argv)
+		assert.Empty(t, det.Display)
+		assert.Empty(t, det.Marker, "no recognised marker present at all - a pure docs repo keeps the silent skip")
+		assert.Empty(t, det.Reason)
 	})
 }
 
@@ -881,4 +881,221 @@ func TestRunVerifyPlanPropagatesParentCancel(t *testing.T) {
 
 	_, err := o.runVerifyPlan(ctx, "dir", verifyPlan{Argv: []string{"x"}, Timeout: time.Minute})
 	require.Error(t, err, "a cancelled parent context propagates the abort, not a verify outcome")
+}
+
+// TestResolveVerifyNestedMonorepoDetected pins the headline fix: a monorepo
+// with only nested markers previously resolved NOTHING and review ran blind;
+// it must now resolve a composed, detected command.
+func TestResolveVerifyNestedMonorepoDetected(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX-only")
+	}
+
+	stubTools(t, "mvn", "java", "npm", "bash")
+
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "backend"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "frontend"), 0o755))
+	writeFile(t, filepath.Join(dir, "backend"), "pom.xml", "<project></project>\n")
+	writeFile(t, filepath.Join(dir, "frontend"), "package.json", `{"name":"x","scripts":{"test":"vitest run"}}`)
+
+	o := &run{d: Deps{Cfg: Config{Workspace: dir}}}
+
+	plan, err := o.resolveVerify(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, verifySourceDetected, plan.Source)
+	assert.Equal(t, "mvn -q -f backend/pom.xml test && npm --prefix frontend test", plan.Display)
+	assert.False(t, plan.Wrapper)
+}
+
+// TestResolveVerifyNestedMarkerParksSentinel pins the stock-image outcome: a
+// nested pom.xml whose toolchain cannot run must PARK with the detected-tier
+// sentinel instead of silently proceeding unverified.
+func TestResolveVerifyNestedMarkerParksSentinel(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX-only")
+	}
+
+	stubTools(t, "mvn") // java missing
+
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "backend"), 0o755))
+	writeFile(t, filepath.Join(dir, "backend"), "pom.xml", "<project></project>\n")
+
+	o := &run{d: Deps{Cfg: Config{Workspace: dir}}}
+
+	plan, err := o.resolveVerify(context.Background())
+	require.Error(t, err)
+
+	var tme *ToolchainMissingError
+	require.ErrorAs(t, err, &tme)
+	assert.Equal(t, "detected", tme.Tier)
+	assert.Equal(t, "maven project (in backend/)", tme.Subject)
+	assert.Contains(t, tme.Reason, "java")
+	assert.Empty(t, plan.Argv)
+}
+
+// TestResolveVerifyDeclaredCdCommandResolves pins the declared-tier fix: the
+// operator's natural monorepo command probes correctly with cd tracking and
+// resolves at Tier 1 instead of parking as toolchain-missing.
+func TestResolveVerifyDeclaredCdCommandResolves(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX-only")
+	}
+
+	stubTools(t, "java", "bash")
+
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "backend"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "backend", "mvnw"), []byte("#!/bin/sh\n"), 0o755))
+
+	o := &run{d: Deps{Cfg: Config{
+		Workspace: dir,
+		Verify:    &DeclaredVerify{Command: "cd backend && ./mvnw -q test"},
+	}}}
+
+	plan, err := o.resolveVerify(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, verifySourceDeclared, plan.Source)
+	assert.Equal(t, "cd backend && ./mvnw -q test", plan.Display)
+}
+
+// TestLogVerifyResolutionRecordsUnverifiedSection pins that the quietest
+// possible outcome - nothing declared, detected, or proposed - is recorded on
+// the card body, not only as one activity-log line.
+func TestLogVerifyResolutionRecordsUnverifiedSection(t *testing.T) {
+	ops := &fakeOps{}
+	o := &run{d: Deps{Ops: ops, Cfg: Config{CardID: "CARD-1", Workspace: t.TempDir()}}}
+
+	p, err := o.resolveVerify(context.Background())
+	require.NoError(t, err)
+	require.Empty(t, p.Argv)
+
+	o.logVerifyResolution(context.Background(), p)
+
+	body := ops.lastBody()
+	assert.Contains(t, body, "## Verify Command")
+	assert.Contains(t, body, "UNVERIFIED")
+}
+
+// TestLogVerifyResolutionUpgradeReplacesUnverifiedSection pins the re-resolve
+// path: a run that starts unverified and later gains a detectable marker must
+// end with a section naming the command, not a stale UNVERIFIED warning.
+func TestLogVerifyResolutionUpgradeReplacesUnverifiedSection(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX-only")
+	}
+
+	stubTools(t, "go")
+
+	dir := t.TempDir()
+	ops := &fakeOps{}
+	o := &run{d: Deps{Ops: ops, Cfg: Config{CardID: "CARD-1", Workspace: dir}}}
+
+	_, err := o.ensureVerify(context.Background())
+	require.NoError(t, err)
+	require.Contains(t, ops.lastBody(), "UNVERIFIED")
+
+	writeFile(t, dir, "go.mod", "module example.com/x\n")
+
+	p, err := o.ensureVerify(context.Background())
+	require.NoError(t, err)
+	require.NotEmpty(t, p.Argv)
+
+	body := ops.lastBody()
+	assert.Contains(t, body, "go test ./...")
+	assert.NotContains(t, body, "UNVERIFIED", "the upsert must replace the stale warning")
+}
+
+// TestResolveVerifyNestedPartialCoverageReachesTheCard pins the note plumbing
+// end to end: a nested module whose toolchain cannot run must surface on the
+// resolved PLAN and on the card body, not only inside detectNested's return
+// value. Partial coverage nobody can see is the silence this PR exists to end.
+func TestResolveVerifyNestedPartialCoverageReachesTheCard(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX-only")
+	}
+
+	stubTools(t, "npm") // no mvn, no java: the backend cannot resolve
+
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "backend"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "frontend"), 0o755))
+	writeFile(t, filepath.Join(dir, "backend"), "pom.xml", "<project></project>\n")
+	writeFile(t, filepath.Join(dir, "frontend"), "package.json", `{"name":"x","scripts":{"test":"vitest run"}}`)
+
+	ops := &fakeOps{}
+	o := &run{d: Deps{Ops: ops, Cfg: Config{CardID: "CARD-1", Workspace: dir}}}
+
+	p, err := o.ensureVerify(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, verifySourceDetected, p.Source)
+	require.Len(t, p.Notes, 1, "the uncovered module's note must reach the resolved plan")
+
+	body := ops.lastBody()
+	assert.Contains(t, body, "npm --prefix frontend test")
+	assert.Contains(t, body, "NOT covered")
+	assert.Contains(t, body, "\n- nested module backend/",
+		"notes render as list items; markdown folds newline-separated lines into one paragraph")
+}
+
+// TestEnsureVerifyToolchainParkReplacesUnverifiedSection pins the park's card
+// record: a run that first recorded the UNVERIFIED section and then parks on a
+// detected-but-unrunnable toolchain must end with the park's own remedy on the
+// body. The stale "declare a verify command" advice is wrong for this park - a
+// command WAS detected - and the card is about to be transitioned to blocked
+// for a human to read.
+func TestEnsureVerifyToolchainParkReplacesUnverifiedSection(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX-only")
+	}
+
+	stubTools(t, "mvn") // java missing: a nested pom cannot resolve
+
+	dir := t.TempDir()
+	ops := &fakeOps{}
+	o := &run{d: Deps{Ops: ops, Cfg: Config{CardID: "CARD-1", Workspace: dir}}}
+
+	_, err := o.ensureVerify(context.Background())
+	require.NoError(t, err)
+	require.Contains(t, ops.lastBody(), "UNVERIFIED")
+
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "backend"), 0o755))
+	writeFile(t, filepath.Join(dir, "backend"), "pom.xml", "<project></project>\n")
+
+	_, err = o.ensureVerify(context.Background())
+
+	var tme *ToolchainMissingError
+	require.ErrorAs(t, err, &tme)
+
+	body := ops.lastBody()
+	assert.Contains(t, body, "PARKED")
+	assert.Contains(t, body, "maven project (in backend/)")
+	assert.NotContains(t, body, "No verify command was declared",
+		"the park must replace the stale UNVERIFIED remedy, not sit under it")
+}
+
+// TestVerifyToolchainSectionRemedyMatchesThePark pins the two park shapes apart:
+// the nested-module cap is the one ToolchainMissingError where every toolchain
+// runs fine and detection merely declined to guess, so its card must not send
+// the operator hunting for a tool that is already installed.
+func TestVerifyToolchainSectionRemedyMatchesThePark(t *testing.T) {
+	capPark := verifyToolchainSection(&ToolchainMissingError{
+		Tier:    "detected",
+		Subject: nestedModulesMarker,
+		Reason:  "5 nested modules detected - declare a verify command that covers them",
+	})
+	assert.Contains(t, capPark, "Declare a verify command")
+	assert.NotContains(t, capPark, "Install the toolchain",
+		"nothing is missing on the cap park; the install remedy would misdirect")
+	assert.NotContains(t, capPark, "toolchain cannot run here")
+
+	missingPark := verifyToolchainSection(&ToolchainMissingError{
+		Tier:    "detected",
+		Subject: "maven project (in backend/)",
+		Reason:  `java: exec: "java": executable file not found in $PATH`,
+	})
+	assert.Contains(t, missingPark, "toolchain cannot run here")
+	assert.Contains(t, missingPark, "Install the toolchain")
+	assert.Contains(t, missingPark, "java")
 }
