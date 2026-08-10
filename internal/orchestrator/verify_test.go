@@ -111,12 +111,12 @@ func TestDetectVerifyCommand(t *testing.T) {
 		dir := t.TempDir()
 		writeFile(t, dir, "go.mod", "module example.com/x\n")
 
-		argv, display, wrapper, marker, reason := detectVerifyCommand(dir)
-		assert.Equal(t, []string{"go", "test", "./..."}, argv)
-		assert.Equal(t, "go test ./...", display)
-		assert.False(t, wrapper, "a marker-table command is not a wrapper")
-		assert.Empty(t, marker, "a resolved command carries no diagnostic marker")
-		assert.Empty(t, reason)
+		det := detectVerifyCommand(dir)
+		assert.Equal(t, []string{"go", "test", "./..."}, det.Argv)
+		assert.Equal(t, "go test ./...", det.Display)
+		assert.False(t, det.Wrapper, "a marker-table command is not a wrapper")
+		assert.Empty(t, det.Marker, "a resolved command carries no diagnostic marker")
+		assert.Empty(t, det.Reason)
 	})
 
 	t.Run("cargo project", func(t *testing.T) {
@@ -125,8 +125,8 @@ func TestDetectVerifyCommand(t *testing.T) {
 		dir := t.TempDir()
 		writeFile(t, dir, "Cargo.toml", "[package]\nname=\"x\"\n")
 
-		argv, _, _, _, _ := detectVerifyCommand(dir)
-		assert.Equal(t, []string{"cargo", "test"}, argv)
+		det := detectVerifyCommand(dir)
+		assert.Equal(t, []string{"cargo", "test"}, det.Argv)
 	})
 
 	t.Run("Go repo with Makefile+go uses make", func(t *testing.T) {
@@ -136,9 +136,9 @@ func TestDetectVerifyCommand(t *testing.T) {
 		writeFile(t, dir, "Makefile", "build:\n\tgo build ./...\ntest:\n\tgo test ./...\n")
 		writeFile(t, dir, "go.mod", "module example.com/x\n")
 
-		argv, _, wrapper, _, _ := detectVerifyCommand(dir)
-		assert.Equal(t, []string{"make", "test"}, argv)
-		assert.True(t, wrapper, "a make wrapper is flagged for the tool-missing heuristic")
+		det := detectVerifyCommand(dir)
+		assert.Equal(t, []string{"make", "test"}, det.Argv)
+		assert.True(t, det.Wrapper, "a make wrapper is flagged for the tool-missing heuristic")
 	})
 
 	t.Run("pure-make repo uses make", func(t *testing.T) {
@@ -147,9 +147,9 @@ func TestDetectVerifyCommand(t *testing.T) {
 		dir := t.TempDir()
 		writeFile(t, dir, "Makefile", "test:\n\t./run-tests.sh\n")
 
-		argv, _, wrapper, _, _ := detectVerifyCommand(dir)
-		assert.Equal(t, []string{"make", "test"}, argv)
-		assert.True(t, wrapper)
+		det := detectVerifyCommand(dir)
+		assert.Equal(t, []string{"make", "test"}, det.Argv)
+		assert.True(t, det.Wrapper)
 	})
 
 	t.Run("Rust Makefile without cargo skips the wrapper", func(t *testing.T) {
@@ -162,10 +162,10 @@ func TestDetectVerifyCommand(t *testing.T) {
 		writeFile(t, dir, "Makefile", "test:\n\tcargo test\n")
 		writeFile(t, dir, "Cargo.toml", "[package]\nname=\"x\"\n")
 
-		argv, _, _, marker, reason := detectVerifyCommand(dir)
-		assert.Nil(t, argv, "make must be skipped when the declared toolchain is absent")
-		assert.Equal(t, "Cargo.toml", marker, "the diagnostic walk tracks the unresolved cargo row")
-		assert.Contains(t, reason, "cargo")
+		det := detectVerifyCommand(dir)
+		assert.Nil(t, det.Argv, "make must be skipped when the declared toolchain is absent")
+		assert.Equal(t, "Cargo.toml", det.Marker, "the diagnostic walk tracks the unresolved cargo row")
+		assert.Contains(t, det.Reason, "cargo")
 	})
 
 	t.Run("npm placeholder not detected", func(t *testing.T) {
@@ -174,8 +174,8 @@ func TestDetectVerifyCommand(t *testing.T) {
 		dir := t.TempDir()
 		writeFile(t, dir, "package.json", `{"name":"x","scripts":{"test":"echo \"Error: no test specified\" && exit 1"}}`)
 
-		argv, _, _, _, _ := detectVerifyCommand(dir)
-		assert.Nil(t, argv, "the npm-init placeholder test script is not a real command")
+		det := detectVerifyCommand(dir)
+		assert.Nil(t, det.Argv, "the npm-init placeholder test script is not a real command")
 	})
 
 	t.Run("real npm test detected", func(t *testing.T) {
@@ -184,8 +184,8 @@ func TestDetectVerifyCommand(t *testing.T) {
 		dir := t.TempDir()
 		writeFile(t, dir, "package.json", `{"name":"x","scripts":{"test":"vitest run"}}`)
 
-		argv, _, _, _, _ := detectVerifyCommand(dir)
-		assert.Equal(t, []string{"npm", "test"}, argv)
+		det := detectVerifyCommand(dir)
+		assert.Equal(t, []string{"npm", "test"}, det.Argv)
 	})
 
 	t.Run("gradlew without exec bit not chosen", func(t *testing.T) {
@@ -194,8 +194,8 @@ func TestDetectVerifyCommand(t *testing.T) {
 		dir := t.TempDir()
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "gradlew"), []byte("#!/bin/sh\n"), 0o644))
 
-		argv, _, _, _, _ := detectVerifyCommand(dir)
-		assert.Nil(t, argv, "a non-executable gradlew and no system gradle resolves nothing")
+		det := detectVerifyCommand(dir)
+		assert.Nil(t, det.Argv, "a non-executable gradlew and no system gradle resolves nothing")
 	})
 
 	t.Run("no markers resolves nothing", func(t *testing.T) {
@@ -203,11 +203,11 @@ func TestDetectVerifyCommand(t *testing.T) {
 
 		dir := t.TempDir()
 
-		argv, display, _, marker, reason := detectVerifyCommand(dir)
-		assert.Nil(t, argv)
-		assert.Empty(t, display)
-		assert.Empty(t, marker, "no recognised marker present at all - a pure docs repo keeps the silent skip")
-		assert.Empty(t, reason)
+		det := detectVerifyCommand(dir)
+		assert.Nil(t, det.Argv)
+		assert.Empty(t, det.Display)
+		assert.Empty(t, det.Marker, "no recognised marker present at all - a pure docs repo keeps the silent skip")
+		assert.Empty(t, det.Reason)
 	})
 }
 

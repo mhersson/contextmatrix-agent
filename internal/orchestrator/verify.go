@@ -278,17 +278,20 @@ func (o *run) resolveVerify(ctx context.Context) (verifyPlan, error) {
 
 	// Tier 2: repo-convention detection. The same walk also tracks the first
 	// present-but-unresolved marker/reason for the Tier-4 sentinel below, so
-	// detectRows is walked exactly once on this path (see detectVerifyCommand).
-	argv, display, wrapper, detectedMarker, detectedReason := detectVerifyCommand(cfg.Workspace)
-	if len(argv) > 0 {
+	// the walk runs exactly once on this path (see detectVerifyCommand).
+	det := detectVerifyCommand(cfg.Workspace)
+
+	notes = append(notes, det.Notes...)
+
+	if len(det.Argv) > 0 {
 		return verifyPlan{
-			Argv:    argv,
-			Display: display,
+			Argv:    det.Argv,
+			Display: det.Display,
 			Source:  verifySourceDetected,
 			Timeout: timeout,
 			Env:     env,
-			Notes:   notes, // carry a declared-cannot-run note onto the resolved plan
-			Wrapper: wrapper,
+			Notes:   notes, // carry declared-cannot-run and coverage notes onto the plan
+			Wrapper: det.Wrapper,
 		}, nil
 	}
 
@@ -321,7 +324,7 @@ func (o *run) resolveVerify(ctx context.Context) (verifyPlan, error) {
 	// degrades to an ordinary "nothing proposed" (proposeVerify swallows any
 	// non-budget error, including cancellation, into a clean skip), so by the
 	// time execution reaches here Tier 3 never got a real chance to rescue.
-	// Reading declaredFailed/detectedMarker as proof of a missing toolchain in
+	// Reading declaredFailed/det.Marker as proof of a missing toolchain in
 	// that case would park on operator-initiated cancellation; propagate the
 	// cancellation instead.
 	switch {
@@ -329,8 +332,8 @@ func (o *run) resolveVerify(ctx context.Context) (verifyPlan, error) {
 		return verifyPlan{}, ctx.Err()
 	case declaredFailed:
 		return verifyPlan{}, &ToolchainMissingError{Tier: "declared", Subject: declaredCmd, Reason: declaredReason}
-	case detectedMarker != "":
-		return verifyPlan{}, &ToolchainMissingError{Tier: "detected", Subject: detectedMarker, Reason: detectedReason}
+	case det.Marker != "":
+		return verifyPlan{}, &ToolchainMissingError{Tier: "detected", Subject: det.Marker, Reason: det.Reason}
 	default:
 		return verifyPlan{Source: verifySourceNone, Timeout: timeout, Env: env, Notes: notes}, nil
 	}
@@ -451,26 +454,42 @@ func (o *run) logVerifyResolution(ctx context.Context, p verifyPlan) {
 
 // ---- repo-convention detection ---------------------------------------------
 
+// detection is the outcome of Tier-2 repo-convention detection: a runnable
+// command (Argv non-nil), or the diagnostic Marker/Reason naming the first
+// present-but-unresolved toolchain for the Tier-4 sentinel. Notes carry
+// human-facing caveats onto the resolved plan (e.g. a nested module the
+// detected command does not cover).
+type detection struct {
+	Argv    []string
+	Display string
+	Wrapper bool
+	Marker  string
+	Reason  string
+	Notes   []string
+}
+
 // detectVerifyCommand best-effort resolves the project's verify command from
 // workspace markers, target-language-agnostic. A wrapper (make/just/task test)
 // wins first UNLESS the repo declares a toolchain whose tools are all absent -
 // then the wrapper would shell out to a missing binary and false-fail, so it is
 // skipped. Otherwise the marker table is walked in priority order and the first
-// toolchain whose tool actually resolves is used. Returns a nil argv when
-// nothing runnable is found. wrapper reports whether the returned command is a
-// test-wrapper (make/just/task) - the caller uses it to scope the tool-missing
-// heuristic to exactly that case.
+// toolchain whose tool actually resolves is used. Returns a detection with nil
+// Argv when nothing runnable is found. Wrapper reports whether the returned
+// command is a test-wrapper (make/just/task) - the caller uses it to scope the
+// tool-missing heuristic to exactly that case.
 //
-// The SAME walk also tracks marker/reason: the first present-but-unresolved
+// The SAME walk also tracks Marker/Reason: the first present-but-unresolved
 // row's marker and probe-failure reason, for the caller's toolchain-missing
 // diagnostic. Both are empty when a command resolved or no recognised marker is
 // present at all (e.g. a pure docs repo, which must keep the silent skip). This
 // is diagnostic only - it never changes which command Tier 2 resolves - and it
 // costs nothing extra: detectRows is walked exactly once either way.
-func detectVerifyCommand(workspace string) (argv []string, display string, wrapper bool, marker, reason string) {
+func detectVerifyCommand(workspace string) detection {
 	if a := detectWrapper(workspace); a != nil {
-		return a, strings.Join(a, " "), true, "", ""
+		return detection{Argv: a, Display: strings.Join(a, " "), Wrapper: true}
 	}
+
+	var marker, reason string
 
 	for _, row := range detectRows {
 		if !row.present(workspace) {
@@ -479,7 +498,7 @@ func detectVerifyCommand(workspace string) (argv []string, display string, wrapp
 
 		a, r := row.resolve(workspace)
 		if a != nil {
-			return a, strings.Join(a, " "), false, "", ""
+			return detection{Argv: a, Display: strings.Join(a, " ")}
 		}
 
 		if marker == "" {
@@ -487,7 +506,7 @@ func detectVerifyCommand(workspace string) (argv []string, display string, wrapp
 		}
 	}
 
-	return nil, "", false, marker, reason
+	return detection{Marker: marker, Reason: reason}
 }
 
 // detectWrapper applies the wrapper rule: a test wrapper is used when its binary
