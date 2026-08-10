@@ -120,19 +120,93 @@ func Probe(workspace string, argv []string) error {
 // (), globs) are skipped as unparseable - the runtime 127 hint is the backstop
 // for those. Any first token that resolves to neither a builtin nor a runnable
 // program makes ProbeShell fail.
+//
+// A literal cd/pushd target is tracked across segments so a later path token
+// resolves against the directory the command will actually run in: a declared
+// "cd backend && ./mvnw test" probes backend/mvnw, not workspace/mvnw. When a
+// target cannot be resolved statically (popd, bare cd, cd -, $VAR, ~, flags,
+// or a directory that does not exist yet, e.g. created by an earlier mkdir),
+// tracking degrades fail-open: path tokens are skipped as unprobeable while
+// bare tokens are still PATH-probed, PATH lookup being cwd-independent.
 func ProbeShell(workspace, cmd string) error {
+	base, known := workspace, true
+
 	for _, seg := range splitShellSegments(cmd) {
 		tok := leadToken(seg)
+
+		if tok == "cd" || tok == "pushd" || tok == "popd" {
+			base, known = trackDirChange(base, known, tok, seg)
+
+			continue
+		}
+
 		if tok == "" || isShellBuiltin(tok) || hasShellExpansion(tok) {
 			continue
 		}
 
-		if err := probeToken(workspace, tok); err != nil {
+		if strings.ContainsRune(tok, '/') && !known {
+			// resolution dir is statically unknown; runtime 127 is the backstop
+			continue
+		}
+
+		if err := probeToken(base, tok); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+// trackDirChange applies a cd/pushd/popd segment to the probe's directory
+// state. Only a literal target naming an EXISTING directory keeps tracking
+// precise; everything else marks the base unknown so later path probes fail
+// open instead of probing against the wrong root.
+func trackDirChange(base string, known bool, tok, seg string) (string, bool) {
+	if tok == "popd" {
+		return base, false
+	}
+
+	target, ok := dirChangeTarget(seg)
+	if !ok || !known {
+		return base, false
+	}
+
+	p := target
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(base, target)
+	}
+
+	if info, err := os.Stat(p); err != nil || !info.IsDir() {
+		return base, false
+	}
+
+	return p, true
+}
+
+// dirChangeTarget extracts the literal directory argument of a cd/pushd
+// segment: exactly one argument after the builtin, no flag dash, no tilde,
+// no shell expansion.
+func dirChangeTarget(seg string) (string, bool) {
+	var fields []string
+
+	for f := range strings.FieldsSeq(seg) {
+		if len(fields) == 0 && isEnvAssignment(f) {
+			continue
+		}
+
+		fields = append(fields, f)
+	}
+
+	if len(fields) != 2 {
+		return "", false
+	}
+
+	t := fields[1]
+	if strings.HasPrefix(t, "-") || strings.HasPrefix(t, "~") || hasShellExpansion(t) {
+		return "", false
+	}
+
+	return t, true
 }
 
 // probeToken resolves a single program token relative to workspace.

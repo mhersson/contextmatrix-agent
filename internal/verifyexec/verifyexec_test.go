@@ -281,3 +281,49 @@ func TestExecPassesExtraEnv(t *testing.T) {
 	out := Exec(context.Background(), dir, []string{"sh", "-c", "echo $JAVA_HOME"}, time.Minute, []string{"JAVA_HOME=/opt/jdk"})
 	assert.Contains(t, out.Output, "/opt/jdk")
 }
+
+func TestProbeShellTracksDirChanges(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("exec-bit probing is POSIX-only")
+	}
+
+	stubBin(t, "java", "mkdir", "cmake")
+
+	ws := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "backend"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "backend", "mvnw"), []byte("#!/bin/sh\n"), 0o755))
+
+	tests := []struct {
+		name string
+		cmd  string
+		ok   bool
+	}{
+		// The monorepo defect: the wrapper must resolve under the cd target.
+		{"cd-then-wrapper", "cd backend && ./mvnw -q test", true},
+		{"cd-then-wrapper-semicolon", "cd backend; ./mvnw -q test", true},
+		{"pushd-then-wrapper", "pushd backend && ./mvnw -q test", true},
+		// Fail-closed inside a known directory: a missing wrapper still rejects.
+		{"cd-then-missing-path", "cd backend && ./gradlew test", false},
+		// cd .. walks back up to the workspace root.
+		{"cd-up-then-missing", "cd backend && cd .. && ./missing.sh", false},
+		// Unknown-base fail-open: an unresolvable or not-yet-existing target
+		// skips later PATH-relative probes; bare tokens stay PATH-probed.
+		{"cd-nonexistent", "cd not-there && ./mvnw -q test", true},
+		{"mkdir-then-cd", "mkdir build && cd build && cmake ..", true},
+		{"cd-expansion", "cd $DIR && ./mvnw -q test", true},
+		{"popd-invalidates", "pushd backend && popd && ./anything.sh", true},
+		// Bare tokens keep failing closed regardless of directory state.
+		{"cd-then-missing-bare", "cd backend && not-a-real-tool", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ProbeShell(ws, tt.cmd)
+			if tt.ok {
+				assert.NoError(t, err, "cmd=%q", tt.cmd)
+			} else {
+				assert.Error(t, err, "cmd=%q", tt.cmd)
+			}
+		})
+	}
+}
