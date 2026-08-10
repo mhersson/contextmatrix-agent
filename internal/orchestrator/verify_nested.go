@@ -21,6 +21,11 @@ import (
 // multi-module repo needs an operator-declared command, not a guessed one.
 const nestedModuleCap = 4
 
+// nestedModulesMarker is the diagnostic marker for the cap decline. It is the
+// one toolchain park where nothing is actually missing, so the card-section
+// renderer keys on it to give the right remedy (see verifyToolchainSection).
+const nestedModulesMarker = "nested modules"
+
 // nestedDirNameRe gates scanned directory names. It doubles as the injection
 // guard: a composed command is executed via bash -c, and a name matching this
 // pattern cannot carry shell metacharacters, spaces, or a leading dash or dot,
@@ -199,7 +204,7 @@ func detectNested(workspace string) detection {
 	switch {
 	case modules > nestedModuleCap:
 		return detection{
-			Marker: "nested modules",
+			Marker: nestedModulesMarker,
 			Reason: fmt.Sprintf("%d nested modules detected - declare a verify command that covers them", modules),
 		}
 	case len(displays) == 0:

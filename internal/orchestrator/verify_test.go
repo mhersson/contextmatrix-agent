@@ -1006,3 +1006,96 @@ func TestLogVerifyResolutionUpgradeReplacesUnverifiedSection(t *testing.T) {
 	assert.Contains(t, body, "go test ./...")
 	assert.NotContains(t, body, "UNVERIFIED", "the upsert must replace the stale warning")
 }
+
+// TestResolveVerifyNestedPartialCoverageReachesTheCard pins the note plumbing
+// end to end: a nested module whose toolchain cannot run must surface on the
+// resolved PLAN and on the card body, not only inside detectNested's return
+// value. Partial coverage nobody can see is the silence this PR exists to end.
+func TestResolveVerifyNestedPartialCoverageReachesTheCard(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX-only")
+	}
+
+	stubTools(t, "npm") // no mvn, no java: the backend cannot resolve
+
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "backend"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "frontend"), 0o755))
+	writeFile(t, filepath.Join(dir, "backend"), "pom.xml", "<project></project>\n")
+	writeFile(t, filepath.Join(dir, "frontend"), "package.json", `{"name":"x","scripts":{"test":"vitest run"}}`)
+
+	ops := &fakeOps{}
+	o := &run{d: Deps{Ops: ops, Cfg: Config{CardID: "CARD-1", Workspace: dir}}}
+
+	p, err := o.ensureVerify(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, verifySourceDetected, p.Source)
+	require.Len(t, p.Notes, 1, "the uncovered module's note must reach the resolved plan")
+
+	body := ops.lastBody()
+	assert.Contains(t, body, "npm --prefix frontend test")
+	assert.Contains(t, body, "NOT covered")
+	assert.Contains(t, body, "\n- nested module backend/",
+		"notes render as list items; markdown folds newline-separated lines into one paragraph")
+}
+
+// TestEnsureVerifyToolchainParkReplacesUnverifiedSection pins the park's card
+// record: a run that first recorded the UNVERIFIED section and then parks on a
+// detected-but-unrunnable toolchain must end with the park's own remedy on the
+// body. The stale "declare a verify command" advice is wrong for this park - a
+// command WAS detected - and the card is about to be transitioned to blocked
+// for a human to read.
+func TestEnsureVerifyToolchainParkReplacesUnverifiedSection(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX-only")
+	}
+
+	stubTools(t, "mvn") // java missing: a nested pom cannot resolve
+
+	dir := t.TempDir()
+	ops := &fakeOps{}
+	o := &run{d: Deps{Ops: ops, Cfg: Config{CardID: "CARD-1", Workspace: dir}}}
+
+	_, err := o.ensureVerify(context.Background())
+	require.NoError(t, err)
+	require.Contains(t, ops.lastBody(), "UNVERIFIED")
+
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "backend"), 0o755))
+	writeFile(t, filepath.Join(dir, "backend"), "pom.xml", "<project></project>\n")
+
+	_, err = o.ensureVerify(context.Background())
+
+	var tme *ToolchainMissingError
+	require.ErrorAs(t, err, &tme)
+
+	body := ops.lastBody()
+	assert.Contains(t, body, "PARKED")
+	assert.Contains(t, body, "maven project (in backend/)")
+	assert.NotContains(t, body, "No verify command was declared",
+		"the park must replace the stale UNVERIFIED remedy, not sit under it")
+}
+
+// TestVerifyToolchainSectionRemedyMatchesThePark pins the two park shapes apart:
+// the nested-module cap is the one ToolchainMissingError where every toolchain
+// runs fine and detection merely declined to guess, so its card must not send
+// the operator hunting for a tool that is already installed.
+func TestVerifyToolchainSectionRemedyMatchesThePark(t *testing.T) {
+	capPark := verifyToolchainSection(&ToolchainMissingError{
+		Tier:    "detected",
+		Subject: nestedModulesMarker,
+		Reason:  "5 nested modules detected - declare a verify command that covers them",
+	})
+	assert.Contains(t, capPark, "Declare a verify command")
+	assert.NotContains(t, capPark, "Install the toolchain",
+		"nothing is missing on the cap park; the install remedy would misdirect")
+	assert.NotContains(t, capPark, "toolchain cannot run here")
+
+	missingPark := verifyToolchainSection(&ToolchainMissingError{
+		Tier:    "detected",
+		Subject: "maven project (in backend/)",
+		Reason:  `java: exec: "java": executable file not found in $PATH`,
+	})
+	assert.Contains(t, missingPark, "toolchain cannot run here")
+	assert.Contains(t, missingPark, "Install the toolchain")
+	assert.Contains(t, missingPark, "java")
+}

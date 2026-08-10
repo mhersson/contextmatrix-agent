@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -214,6 +215,18 @@ func (o *run) ensureVerify(ctx context.Context) (verifyPlan, error) {
 
 	p, err := o.resolveVerify(ctx)
 	if err != nil {
+		// A toolchain park must correct the card body on its way out. An earlier
+		// phase may have recorded the UNVERIFIED variant, whose "declare a verify
+		// command" remedy is wrong here - a command WAS implicated, it just cannot
+		// run in this container - and the worker is about to transition the card
+		// to blocked for a human to read. Every other resolution error (budget,
+		// cancellation) leaves the section alone: those park without implicating
+		// the verify command at all.
+		var tme *ToolchainMissingError
+		if errors.As(err, &tme) {
+			o.recordSection(ctx, "Verify Command", verifyToolchainSection(tme))
+		}
+
 		return verifyPlan{}, err
 	}
 
@@ -476,11 +489,36 @@ func verifyResolutionSection(p verifyPlan) string {
 		s = fmt.Sprintf("## Verify Command\n\nThe verify gate runs `%s` (%s).", p.Display, p.Source)
 	}
 
+	// A bullet per note: markdown folds consecutive single-newline lines into one
+	// paragraph, which would run several uncovered-module warnings together into
+	// a single unreadable sentence on the card.
 	if len(p.Notes) > 0 {
-		s += "\n\n" + strings.Join(p.Notes, "\n")
+		s += "\n\n- " + strings.Join(p.Notes, "\n- ")
 	}
 
 	return s
+}
+
+// verifyToolchainSection renders the "## Verify Command" card section for a
+// toolchain park. It is the third variant of the same heading (alongside the
+// resolved and UNVERIFIED ones), so the upsert replaces whatever a prior phase
+// recorded - the card a human opens in `blocked` must name the remedy the park
+// actually needs, not the one a stale UNVERIFIED section prescribes.
+func verifyToolchainSection(tme *ToolchainMissingError) string {
+	headline := "**NONE - this run PARKED: the verify toolchain cannot run here.**"
+	remedy := "Install the toolchain in the worker image, or declare a verify command that runs with what the image provides."
+
+	// The nested-module cap is the one park where nothing is missing: detection
+	// declined to guess a composed command over a sprawling repo. Telling the
+	// operator to install a toolchain would send them after a tool that is
+	// already installed and working.
+	if tme.Subject == nestedModulesMarker {
+		headline = "**NONE - this run PARKED: no verify command could be resolved.**"
+		remedy = "Declare a verify command for the project that covers the modules it should build and test."
+	}
+
+	return fmt.Sprintf("## Verify Command\n\n%s\n\n- tier: %s\n- subject: `%s`\n- reason: %s\n\n%s",
+		headline, tme.Tier, tme.Subject, tme.Reason, remedy)
 }
 
 // ---- repo-convention detection ---------------------------------------------
