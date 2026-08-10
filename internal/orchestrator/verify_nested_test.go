@@ -78,6 +78,36 @@ func TestDetectNested(t *testing.T) {
 		assert.Equal(t, []string{"backend/mvnw", "-q", "-f", "backend/pom.xml", "test"}, det.Argv)
 	})
 
+	t.Run("mvnw without pom.xml resolves nothing", func(t *testing.T) {
+		// The emitted command references the pom (-f rel/pom.xml); a wrapper-only
+		// module would probe-pass and then false-fail at runtime, so the maven
+		// row requires the pom itself and this module falls through undetected.
+		stubTools(t, "mvn", "java")
+
+		ws := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(ws, "backend"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(ws, "backend", "mvnw"), []byte("#!/bin/sh\n"), 0o755))
+
+		det := detectNested(ws)
+		assert.Nil(t, det.Argv)
+		assert.Empty(t, det.Marker, "nested Maven falls through to the model-proposal tier without a pom")
+	})
+
+	t.Run("gradlew without build script resolves nothing", func(t *testing.T) {
+		// The emitted command references the build file (-p rel); a wrapper-only
+		// module would probe-pass and then false-fail at runtime, so the gradle
+		// row requires build.gradle(.kts) and this module falls through undetected.
+		stubTools(t, "gradle", "java")
+
+		ws := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(ws, "svc"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(ws, "svc", "gradlew"), []byte("#!/bin/sh\n"), 0o755))
+
+		det := detectNested(ws)
+		assert.Nil(t, det.Argv)
+		assert.Empty(t, det.Marker, "nested Gradle falls through to the model-proposal tier without a build script")
+	})
+
 	t.Run("unresolved lone module carries the park marker", func(t *testing.T) {
 		stubTools(t, "mvn") // java missing: the JVM probe fails
 

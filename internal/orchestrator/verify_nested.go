@@ -59,8 +59,14 @@ var nestedRows = []nestedRow{
 	{marker: "package.json", present: hasRealNPMTestScript, resolve: nestedProbe(func(rel string) []string {
 		return []string{"npm", "--prefix", rel, "test"}
 	})},
-	{marker: "gradle project", present: hasGradleProject, resolve: resolveNestedGradle},
-	{marker: "maven project", present: hasMavenProject, resolve: resolveNestedMaven},
+	// The nested command references the build file (-p rel), so a wrapper-only
+	// module with no build.gradle(.kts) falls through to the model-proposal
+	// tier instead of probe-passing and then false-failing at runtime.
+	{marker: "gradle project", present: hasGradleBuildFile, resolve: resolveNestedGradle},
+	// The nested command references the pom (-f rel/pom.xml), so a
+	// wrapper-only module with no pom.xml falls through to the model-proposal
+	// tier instead of probe-passing and then false-failing at runtime.
+	{marker: "maven project", present: hasFile("pom.xml"), resolve: resolveNestedMaven},
 	{marker: ".NET project file", present: hasDotnetProject, resolve: nestedProbe(func(rel string) []string {
 		return []string{"dotnet", "test", rel}
 	})},
@@ -124,6 +130,16 @@ func resolveNestedGradle(ws, rel string) ([]string, string) {
 	}
 
 	return wargv, ""
+}
+
+// hasGradleBuildFile reports whether dir declares a Gradle build script -
+// build.gradle or build.gradle.kts. Unlike the root-level hasGradleProject, an
+// executable gradlew alone does not qualify here: the nested command
+// references the build file (-p dir), so a wrapper-only module would
+// otherwise probe-pass and then false-fail at runtime pointing at a
+// nonexistent build script.
+func hasGradleBuildFile(dir string) bool {
+	return fileExists(filepath.Join(dir, "build.gradle")) || fileExists(filepath.Join(dir, "build.gradle.kts"))
 }
 
 // detectNested is the one-level fallback walk, called only when the root walk
