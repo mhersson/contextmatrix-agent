@@ -484,6 +484,9 @@ type detection struct {
 // present at all (e.g. a pure docs repo, which must keep the silent skip). This
 // is diagnostic only - it never changes which command Tier 2 resolves - and it
 // costs nothing extra: detectRows is walked exactly once either way.
+//
+// When the root declares no marker at all, a one-level nested scan takes over
+// (see verify_nested.go).
 func detectVerifyCommand(workspace string) detection {
 	if a := detectWrapper(workspace); a != nil {
 		return detection{Argv: a, Display: strings.Join(a, " "), Wrapper: true}
@@ -504,6 +507,13 @@ func detectVerifyCommand(workspace string) detection {
 		if marker == "" {
 			marker, reason = row.marker, r
 		}
+	}
+
+	if marker == "" {
+		// Nothing at the root at all: fall back to a one-level nested scan
+		// before giving up (see verify_nested.go). A root marker that failed to
+		// resolve keeps its park - nested coverage must not paper over it.
+		return detectNested(workspace)
 	}
 
 	return detection{Marker: marker, Reason: reason}

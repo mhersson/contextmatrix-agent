@@ -882,3 +882,80 @@ func TestRunVerifyPlanPropagatesParentCancel(t *testing.T) {
 	_, err := o.runVerifyPlan(ctx, "dir", verifyPlan{Argv: []string{"x"}, Timeout: time.Minute})
 	require.Error(t, err, "a cancelled parent context propagates the abort, not a verify outcome")
 }
+
+// TestResolveVerifyNestedMonorepoDetected pins the headline fix: a monorepo
+// with only nested markers previously resolved NOTHING and review ran blind;
+// it must now resolve a composed, detected command.
+func TestResolveVerifyNestedMonorepoDetected(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX-only")
+	}
+
+	stubTools(t, "mvn", "java", "npm", "bash")
+
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "backend"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "frontend"), 0o755))
+	writeFile(t, filepath.Join(dir, "backend"), "pom.xml", "<project></project>\n")
+	writeFile(t, filepath.Join(dir, "frontend"), "package.json", `{"name":"x","scripts":{"test":"vitest run"}}`)
+
+	o := &run{d: Deps{Cfg: Config{Workspace: dir}}}
+
+	plan, err := o.resolveVerify(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, verifySourceDetected, plan.Source)
+	assert.Equal(t, "mvn -q -f backend/pom.xml test && npm --prefix frontend test", plan.Display)
+	assert.False(t, plan.Wrapper)
+}
+
+// TestResolveVerifyNestedMarkerParksSentinel pins the stock-image outcome: a
+// nested pom.xml whose toolchain cannot run must PARK with the detected-tier
+// sentinel instead of silently proceeding unverified.
+func TestResolveVerifyNestedMarkerParksSentinel(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX-only")
+	}
+
+	stubTools(t, "mvn") // java missing
+
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "backend"), 0o755))
+	writeFile(t, filepath.Join(dir, "backend"), "pom.xml", "<project></project>\n")
+
+	o := &run{d: Deps{Cfg: Config{Workspace: dir}}}
+
+	plan, err := o.resolveVerify(context.Background())
+	require.Error(t, err)
+
+	var tme *ToolchainMissingError
+	require.ErrorAs(t, err, &tme)
+	assert.Equal(t, "detected", tme.Tier)
+	assert.Equal(t, "maven project (in backend/)", tme.Subject)
+	assert.Contains(t, tme.Reason, "java")
+	assert.Empty(t, plan.Argv)
+}
+
+// TestResolveVerifyDeclaredCdCommandResolves pins the declared-tier fix: the
+// operator's natural monorepo command probes correctly with cd tracking and
+// resolves at Tier 1 instead of parking as toolchain-missing.
+func TestResolveVerifyDeclaredCdCommandResolves(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX-only")
+	}
+
+	stubTools(t, "java", "bash")
+
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "backend"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "backend", "mvnw"), []byte("#!/bin/sh\n"), 0o755))
+
+	o := &run{d: Deps{Cfg: Config{
+		Workspace: dir,
+		Verify:    &DeclaredVerify{Command: "cd backend && ./mvnw -q test"},
+	}}}
+
+	plan, err := o.resolveVerify(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, verifySourceDeclared, plan.Source)
+	assert.Equal(t, "cd backend && ./mvnw -q test", plan.Display)
+}
