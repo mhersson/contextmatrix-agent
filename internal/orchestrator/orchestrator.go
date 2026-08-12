@@ -137,6 +137,13 @@ type Config struct {
 	// gate falls back to repo-convention detection and then a model proposal.
 	// It is an orchestrator-local type so the package need not import protocol.
 	Verify *DeclaredVerify
+
+	// VerifyConfigError is set when the worker received a CMX_VERIFY it could
+	// not use (bad JSON, or a clean decode to an all-zero config). Verify is nil
+	// in that case, but this is NOT "nothing declared": the ladder treats it as
+	// declared-tier intent we failed to honour, so it notes the problem and
+	// parks rather than shipping under a silently weaker gate.
+	VerifyConfigError string
 }
 
 // DeclaredVerify is the operator-declared verify configuration for a run, mapped

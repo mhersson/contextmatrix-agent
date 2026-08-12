@@ -286,6 +286,18 @@ func (o *run) resolveVerify(ctx context.Context) (verifyPlan, error) {
 		declaredReason string
 	)
 
+	// A CMX_VERIFY we could not read is operator intent we failed to honour, not
+	// an absent declaration. Seed the declared-tier failure so the run notes it,
+	// still falls through to detection and proposal, and parks at Tier 4 if
+	// nothing else resolves.
+	if e := cfg.VerifyConfigError; e != "" {
+		notes = append(notes, e)
+
+		declaredFailed = true
+		declaredCmd = "CMX_VERIFY (unreadable)"
+		declaredReason = e
+	}
+
 	// Tier 1: operator-declared command.
 	if d := cfg.Verify; d != nil && strings.TrimSpace(d.Command) != "" {
 		cmd := strings.TrimSpace(d.Command)

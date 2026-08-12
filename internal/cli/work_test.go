@@ -457,15 +457,44 @@ func TestSpecFromEnv_Verify(t *testing.T) {
 		assert.Equal(t, []string{"JAVA_HOME"}, spec.Verify.Env)
 	})
 
-	t.Run("malformed_degrades_to_nil", func(t *testing.T) {
+	t.Run("malformed records a config error and leaves Verify nil", func(t *testing.T) {
 		setRequired(t)
 		t.Setenv("CMX_VERIFY", "{not json")
 
-		// Mirrors CMX_SELECTION: a malformed value is a warning, not an error -
-		// the run proceeds and falls back to detection.
+		// Mirrors CMX_SELECTION: a malformed value is a warning, not a fatal
+		// error - specFromEnv runs before the MCP client exists, so an early
+		// return could not tell the card anything. The run proceeds and the
+		// recorded error drives the verify ladder to note and park instead.
 		spec, err := specFromEnv()
 		require.NoError(t, err)
 		assert.Nil(t, spec.Verify)
+		assert.Contains(t, spec.VerifyConfigError, "could not be parsed")
+	})
+
+	t.Run("unknown fields decode to an all-zero config and are a config error", func(t *testing.T) {
+		setRequired(t)
+		// json.Unmarshal ignores unknown fields, so a misspelled key parses
+		// cleanly into a zero value and would otherwise skip Tier 1 silently.
+		t.Setenv("CMX_VERIFY", `{"cmd":"make test"}`)
+
+		spec, err := specFromEnv()
+		require.NoError(t, err)
+		assert.Nil(t, spec.Verify)
+		assert.Contains(t, spec.VerifyConfigError, "empty verify config")
+	})
+
+	t.Run("a command-less config is legitimate and is kept", func(t *testing.T) {
+		setRequired(t)
+		// CM's ResolveVerify returns a non-nil config when ANY field is set, so a
+		// project that declares only a timeout is a real, supported setting: the
+		// command comes from detection and the timeout still applies.
+		t.Setenv("CMX_VERIFY", `{"timeout_seconds":900}`)
+
+		spec, err := specFromEnv()
+		require.NoError(t, err)
+		require.NotNil(t, spec.Verify)
+		assert.Equal(t, 900, spec.Verify.TimeoutSeconds)
+		assert.Empty(t, spec.VerifyConfigError)
 	})
 }
 

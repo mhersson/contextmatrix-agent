@@ -1194,3 +1194,29 @@ func TestLogVerifyRound(t *testing.T) {
 		})
 	}
 }
+
+// TestResolveVerifyParksOnUnreadableConfig: an operator declared a gate and we
+// could not read it. That is not "nothing declared" - the ladder must note it,
+// still try detection, and park rather than ship unverified when nothing else
+// resolves.
+func TestResolveVerifyParksOnUnreadableConfig(t *testing.T) {
+	ws := t.TempDir() // empty workspace: no marker, so detection finds nothing
+
+	ops := &fakeOps{}
+	o := &run{d: Deps{
+		Ops: ops,
+		Cfg: Config{
+			CardID:            "CARD-1",
+			Workspace:         ws,
+			VerifyConfigError: "CMX_VERIFY could not be parsed: unexpected end of JSON input",
+		},
+	}}
+	o.proposeAttempted = true // skip Tier 3; no model in this test
+
+	_, err := o.resolveVerify(context.Background())
+
+	var missing *ToolchainMissingError
+	require.ErrorAs(t, err, &missing, "an unreadable declared config must park, not proceed unverified")
+	assert.Equal(t, "declared", missing.Tier)
+	assert.Contains(t, missing.Reason, "could not be parsed")
+}
