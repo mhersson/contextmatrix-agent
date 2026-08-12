@@ -1,14 +1,17 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/verifyexec"
+	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -883,6 +886,80 @@ func TestRunVerifyPlanPropagatesParentCancel(t *testing.T) {
 	require.Error(t, err, "a cancelled parent context propagates the abort, not a verify outcome")
 }
 
+// TestRunVerifyPlanParksOnMissingContainerCLI pins the first wrong outcome the
+// problem statement names: no Docker CLI in the worker image. A detected
+// Makefile wrapper shells out to `docker`, the shell reports it missing, and
+// make's own exit-127 summary follows - the exact shape that, before this
+// park existed, satisfied the tool-missing heuristic for a Wrapper plan and
+// classified SKIPPED, letting the card ship with a NOT VERIFIED trailer. It
+// must now come back as a *ToolchainMissingError instead of a verifyResult.
+func TestRunVerifyPlanParksOnMissingContainerCLI(t *testing.T) {
+	o := &run{d: Deps{Cfg: Config{Workspace: t.TempDir()}}}
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		return verifyexec.Outcome{
+			ExitCode: 2,
+			Output:   "make: docker: command not found\nmake: *** [Makefile:3: test] Error 127",
+		}
+	}
+
+	res, err := o.runVerifyPlan(context.Background(), "dir",
+		verifyPlan{Argv: []string{"make", "test"}, Timeout: time.Minute, Wrapper: true})
+	require.Error(t, err, "a container-runtime park must come back as an error, not a verifyResult")
+	assert.Equal(t, verifyResult{}, res)
+
+	var tme *ToolchainMissingError
+	require.ErrorAs(t, err, &tme)
+	assert.Equal(t, "runtime", tme.Tier)
+	assert.Equal(t, containerRuntimeUnavailableMarker, tme.Subject)
+}
+
+// TestRunVerifyPlanParksOnUnreachableDockerDaemon pins the second wrong
+// outcome the problem statement names: the Docker CLI is installed (an
+// operator-built image) but there is no daemon at the other end of the
+// socket. No tool-missing pattern matches this shape, so before this park
+// existed it classified FAILED and short-circuited into the fix loop against
+// a non-defect. It must now converge on the same park as the missing-CLI
+// shape above.
+func TestRunVerifyPlanParksOnUnreachableDockerDaemon(t *testing.T) {
+	o := &run{d: Deps{Cfg: Config{Workspace: t.TempDir()}}}
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		return verifyexec.Outcome{
+			ExitCode: 1,
+			Output:   "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+		}
+	}
+
+	res, err := o.runVerifyPlan(context.Background(), "dir",
+		verifyPlan{Argv: []string{"docker", "compose", "up"}, Timeout: time.Minute})
+	require.Error(t, err, "a container-runtime park must come back as an error, not a verifyResult")
+	assert.Equal(t, verifyResult{}, res)
+
+	var tme *ToolchainMissingError
+	require.ErrorAs(t, err, &tme)
+	assert.Equal(t, "runtime", tme.Tier)
+	assert.Equal(t, containerRuntimeUnavailableMarker, tme.Subject)
+	assert.NotContains(t, tme.Reason, "unix:///var/run/docker.sock",
+		"the fixed reason never carries the verify command's raw output")
+}
+
+// TestRunVerifyPlanContainerSignatureInPassingOutputDoesNotPark proves the
+// park is gated on a NON-pass result: a suite that happens to print one of
+// the container-runtime strings (e.g. a test asserting on that exact message)
+// while still exiting zero is a genuine pass, not a park.
+func TestRunVerifyPlanContainerSignatureInPassingOutputDoesNotPark(t *testing.T) {
+	o := &run{d: Deps{Cfg: Config{Workspace: t.TempDir()}}}
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		return verifyexec.Outcome{
+			ExitCode: 0,
+			Output:   "--- PASS: TestDockerErrorMessage\nCannot connect to the Docker daemon\nok\tpkg\t0.01s",
+		}
+	}
+
+	res, err := o.runVerifyPlan(context.Background(), "dir", verifyPlan{Argv: []string{"go", "test", "./..."}, Timeout: time.Minute})
+	require.NoError(t, err)
+	assert.Equal(t, verifyPassed, res.Status)
+}
+
 // TestResolveVerifyNestedMonorepoDetected pins the headline fix: a monorepo
 // with only nested markers previously resolved NOTHING and review ran blind;
 // it must now resolve a composed, detected command.
@@ -1098,4 +1175,228 @@ func TestVerifyToolchainSectionRemedyMatchesThePark(t *testing.T) {
 	assert.Contains(t, missingPark, "toolchain cannot run here")
 	assert.Contains(t, missingPark, "Install the toolchain")
 	assert.Contains(t, missingPark, "java")
+
+	configErrorPark := verifyToolchainSection(&ToolchainMissingError{
+		Tier:    "declared",
+		Subject: verifyConfigErrorMarker,
+		Reason:  "CMX_VERIFY could not be parsed: unexpected end of JSON input",
+	})
+	assert.Contains(t, configErrorPark, "declared verify config could not be read")
+	assert.Contains(t, configErrorPark, "verify")
+	assert.Contains(t, configErrorPark, "worker_extra_env")
+	assert.NotContains(t, configErrorPark, "Install the toolchain",
+		"no toolchain is missing on a config-read failure; the install remedy would misdirect")
+	assert.NotContains(t, configErrorPark, "toolchain cannot run here")
+
+	containerPark := verifyToolchainSection(&ToolchainMissingError{
+		Tier:    "runtime",
+		Subject: containerRuntimeUnavailableMarker,
+		Reason:  "the verify command needs a container runtime, and the worker has none by design",
+	})
+	assert.Contains(t, containerPark, "no container runtime")
+	assert.Contains(t, containerPark, "verify.env")
+	assert.NotContains(t, containerPark, "Install the toolchain",
+		"there is no toolchain to install here; the worker has no container runtime by design")
+	assert.NotContains(t, containerPark, "toolchain cannot run here")
+}
+
+// TestToolchainLogMessageConfigErrorDiffersFromMissingToolchain pins the
+// activity-log line for a seeded verify-config error apart from a genuine
+// missing-toolchain park: the log line is the other human-facing surface
+// verifyToolchainSection matches, and it must not send the operator after an
+// image rebuild for a config problem.
+func TestToolchainLogMessageConfigErrorDiffersFromMissingToolchain(t *testing.T) {
+	configError := toolchainLogMessage(&ToolchainMissingError{
+		Tier:    "declared",
+		Subject: verifyConfigErrorMarker,
+		Reason:  "CMX_VERIFY could not be parsed: unexpected end of JSON input",
+	})
+	assert.Contains(t, configError, "declared verify config could not be read")
+	assert.NotContains(t, configError, "toolchain cannot run here")
+
+	missingToolchain := toolchainLogMessage(&ToolchainMissingError{
+		Tier:    "detected",
+		Subject: "maven project (in backend/)",
+		Reason:  `java: exec: "java": executable file not found in $PATH`,
+	})
+	assert.Contains(t, missingToolchain, "toolchain cannot run here")
+
+	containerRuntime := toolchainLogMessage(&ToolchainMissingError{
+		Tier:    "runtime",
+		Subject: containerRuntimeUnavailableMarker,
+		Reason:  "the verify command needs a container runtime, and the worker has none by design",
+	})
+	assert.Contains(t, containerRuntime, "container runtime")
+	assert.NotContains(t, containerRuntime, "toolchain cannot run here")
+}
+
+// TestRunVerifyPlanEmitsVerification: the gate is a subprocess, not a tool call,
+// so without this event a passed or skipped gate leaves no output on any
+// channel. The transcript is the only post-mortem surface for it.
+func TestRunVerifyPlanEmitsVerification(t *testing.T) {
+	var transcript bytes.Buffer
+
+	ops := &fakeOps{}
+	o := &run{d: Deps{
+		Ops:  ops,
+		Cfg:  Config{CardID: "CARD-1", Workspace: t.TempDir()},
+		Emit: events.NewEmitter(nil, &transcript),
+	}}
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 0, Output: "Tests run: 25, Failures: 0\nBUILD SUCCESS\n"}
+	}
+
+	res, err := o.runVerifyPlan(context.Background(), "dir", verifyPlan{
+		Argv:    []string{"mvn", "-q", "verify"},
+		Display: "mvn -q verify",
+		Source:  verifySourceDetected,
+		Timeout: time.Minute,
+	})
+	require.NoError(t, err)
+	require.Equal(t, verifyPassed, res.Status)
+
+	line := transcript.String()
+	require.Contains(t, line, `"kind":"verification"`, "a verification event is emitted; transcript=%s", line)
+	assert.Contains(t, line, `"ok":true`)
+	assert.Contains(t, line, `"status":"passed"`)
+	assert.Contains(t, line, "mvn -q verify", "the command is named in the event")
+	assert.Contains(t, line, "BUILD SUCCESS", "the gate output is carried, not just its length")
+}
+
+// TestRunVerifyPlanEmitNilSafe: Deps.Emit is nil on several construction paths
+// and events.Emitter.Emit has no nil-receiver guard, so the emit must be
+// guarded the way pinwarn.go does it.
+func TestRunVerifyPlanEmitNilSafe(t *testing.T) {
+	o := &run{d: Deps{Cfg: Config{Workspace: t.TempDir()}}}
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 0, Output: "ok"}
+	}
+
+	assert.NotPanics(t, func() {
+		res, err := o.runVerifyPlan(context.Background(), "dir",
+			verifyPlan{Argv: []string{"x"}, Display: "x", Timeout: time.Minute})
+		require.NoError(t, err)
+		assert.Equal(t, verifyPassed, res.Status)
+	})
+}
+
+func TestLogVerifyRound(t *testing.T) {
+	// realTimeoutSkip is a note classifyVerify actually emits, not a prettified
+	// stand-in - it already ends in "treated as unverified", which is exactly
+	// what let the redundant " - proceeding unverified" suffix hide in
+	// production: a fixture note that didn't say so masked the double-up.
+	realTimeoutSkip := classifyVerify(
+		verifyPlan{Timeout: 10 * time.Minute},
+		verifyexec.Outcome{TimedOut: true},
+	)
+
+	tests := []struct {
+		name  string
+		res   verifyResult
+		round int
+		want  string
+	}{
+		{
+			name:  "passed",
+			res:   verifyResult{Status: verifyPassed},
+			round: 1,
+			want:  "verify passed - review round 1",
+		},
+		{
+			name:  "failed",
+			res:   verifyResult{Status: verifyFailed},
+			round: 2,
+			want:  "verify failed - review round 2",
+		},
+		{
+			name:  "skipped with a real classifyVerify note does not double up on unverified",
+			res:   realTimeoutSkip,
+			round: 3,
+			want:  "verify skipped (" + realTimeoutSkip.Note + ") - review round 3",
+		},
+		{
+			name:  "skipped without a note still says it proceeds unverified",
+			res:   verifyResult{Status: verifySkipped},
+			round: 1,
+			want:  "verify skipped - review round 1 - proceeding unverified",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			o := &run{d: Deps{Ops: ops, Cfg: Config{CardID: "CARD-1"}}}
+
+			o.logVerifyRound(context.Background(), tt.res, tt.round)
+
+			require.Len(t, ops.logs, 1, "exactly one line per round; logs=%v", ops.logs)
+			assert.Equal(t, tt.want, ops.logs[0])
+			assert.LessOrEqual(t, strings.Count(ops.logs[0], "unverified"), 1,
+				"the word must never appear twice; logs=%v", ops.logs)
+		})
+	}
+}
+
+// TestResolveVerifyParksOnUnreadableConfig: an operator declared a gate and we
+// could not read it. That is not "nothing declared" - the ladder must note it,
+// still try detection, and park rather than ship unverified when nothing else
+// resolves.
+func TestResolveVerifyParksOnUnreadableConfig(t *testing.T) {
+	ws := t.TempDir() // empty workspace: no marker, so detection finds nothing
+
+	ops := &fakeOps{}
+	o := &run{d: Deps{
+		Ops: ops,
+		Cfg: Config{
+			CardID:            "CARD-1",
+			Workspace:         ws,
+			VerifyConfigError: "CMX_VERIFY could not be parsed: unexpected end of JSON input",
+		},
+	}}
+	o.proposeAttempted = true // skip Tier 3; no model in this test
+
+	_, err := o.resolveVerify(context.Background())
+
+	var missing *ToolchainMissingError
+	require.ErrorAs(t, err, &missing, "an unreadable declared config must park, not proceed unverified")
+	assert.Equal(t, "declared", missing.Tier)
+	assert.Contains(t, missing.Reason, "could not be parsed")
+}
+
+// TestResolveVerifyUnreadableConfigKeepsDetectionReason pins the terminal
+// switch's precedence: when BOTH a seeded verify-config error AND a
+// detected-but-unresolved marker fire, the config error correctly wins tier
+// and outranks detection as the actionable root cause - but det.Reason must
+// not be lost off the error entirely, or the operator needs a second round
+// trip to learn what detection found too.
+func TestResolveVerifyUnreadableConfigKeepsDetectionReason(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX-only")
+	}
+
+	stubTools(t, "mvn") // mvn resolves, java does not
+
+	dir := t.TempDir()
+	writeFile(t, dir, "pom.xml", "<project></project>\n")
+
+	ops := &fakeOps{}
+	o := &run{d: Deps{
+		Ops: ops,
+		Cfg: Config{
+			CardID:            "CARD-1",
+			Workspace:         dir,
+			VerifyConfigError: "CMX_VERIFY could not be parsed: unexpected end of JSON input",
+		},
+	}}
+	o.proposeAttempted = true // skip Tier 3; no model in this test
+
+	_, err := o.resolveVerify(context.Background())
+
+	var missing *ToolchainMissingError
+	require.ErrorAs(t, err, &missing, "the config error must still win the park")
+	assert.Equal(t, "declared", missing.Tier, "the config error outranks detection as the actionable root cause")
+	assert.Equal(t, verifyConfigErrorMarker, missing.Subject)
+	assert.Contains(t, missing.Reason, "could not be parsed", "the config error stays the headline reason")
+	assert.Contains(t, missing.Reason, "maven project", "detection's finding must still reach the operator")
+	assert.Contains(t, missing.Reason, "java", "detection's probe-failure detail must still reach the operator")
 }

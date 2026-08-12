@@ -226,6 +226,40 @@ func TestLooksResourceExhausted(t *testing.T) {
 	}
 }
 
+func TestLooksContainerRuntimeUnavailable(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{"docker-daemon-unreachable", "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?", true},
+		{"docker-daemon-unreachable-prefixed", "docker: Cannot connect to the Docker daemon at tcp://1.2.3.4:2375. Is the docker daemon running?", true},
+		{"testcontainers-no-environment", "Could not find a valid Docker environment. Please check configuration.", true},
+		{"docker-error-during-connect", `error during connect: Get "http://%2Fvar%2Frun%2Fdocker.sock/v1.24/version": dial unix /var/run/docker.sock: connect: no such file or directory`, true},
+		{"docker-error-during-connect-prefixed", "docker: error during connect: Get \"http://docker-host:2375/v1.24/version\": dial tcp: lookup docker-host: no such host", true},
+		{"make-docker-not-found", "make: docker: command not found", true},
+		{"make-sublevel-docker-compose-not-found", "make[1]: docker-compose: not found", true},
+		{"sh-docker-compose-not-found", "/bin/sh: 1: docker-compose: not found", true},
+		{"bash-podman-command-not-found", "bash: podman: command not found", true},
+		{"make-error-127", "make: *** [Makefile:3: test] Error 127", false}, // generic, not container-specific
+		// A verify run whose TEST OUTPUT merely prints one of these strings must
+		// not be misread as an unreachable runtime.
+		{"indented-log-line", "    16:32:10.123 [main] ERROR - Could not find a valid Docker environment.", false},
+		{"indented-daemon-message", "  Cannot connect to the Docker daemon at unix:///var/run/docker.sock", false},
+		{"mid-line-assertion", `--- FAIL: TestX: expected "Cannot connect to the Docker daemon" in error`, false},
+		{"printed-not-found-mid-output", "FAIL: test asserted 'docker-compose: command not found' message", false},
+		{"ordinary-failure", "--- FAIL: TestFoo\n2 tests failed", false},
+		{"unrelated-tool-not-found", "make: cargo: command not found", false},
+		{"empty", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, LooksContainerRuntimeUnavailable(tt.output))
+		})
+	}
+}
+
 func TestExecExitCodes(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

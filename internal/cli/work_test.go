@@ -10,12 +10,14 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/config"
 	"github.com/mhersson/contextmatrix-agent/internal/secrets"
 	"github.com/mhersson/contextmatrix-harness/llm"
+	protocol "github.com/mhersson/contextmatrix-protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -457,16 +459,62 @@ func TestSpecFromEnv_Verify(t *testing.T) {
 		assert.Equal(t, []string{"JAVA_HOME"}, spec.Verify.Env)
 	})
 
-	t.Run("malformed_degrades_to_nil", func(t *testing.T) {
+	t.Run("malformed records a config error and leaves Verify nil", func(t *testing.T) {
 		setRequired(t)
 		t.Setenv("CMX_VERIFY", "{not json")
 
-		// Mirrors CMX_SELECTION: a malformed value is a warning, not an error -
-		// the run proceeds and falls back to detection.
+		// Mirrors CMX_SELECTION: a malformed value is a warning, not a fatal
+		// error - specFromEnv runs before the MCP client exists, so an early
+		// return could not tell the card anything. The run proceeds and the
+		// recorded error drives the verify ladder to note and park instead.
 		spec, err := specFromEnv()
 		require.NoError(t, err)
 		assert.Nil(t, spec.Verify)
+		assert.Contains(t, spec.VerifyConfigError, "could not be parsed")
 	})
+
+	t.Run("unknown fields decode to an all-zero config and are a config error", func(t *testing.T) {
+		setRequired(t)
+		// json.Unmarshal ignores unknown fields, so a misspelled key parses
+		// cleanly into a zero value and would otherwise skip Tier 1 silently.
+		t.Setenv("CMX_VERIFY", `{"cmd":"make test"}`)
+
+		spec, err := specFromEnv()
+		require.NoError(t, err)
+		assert.Nil(t, spec.Verify)
+		assert.Contains(t, spec.VerifyConfigError, "empty verify config")
+	})
+
+	t.Run("a command-less config is legitimate and is kept", func(t *testing.T) {
+		setRequired(t)
+		// CM's ResolveVerify returns a non-nil config when ANY field is set, so a
+		// project that declares only a timeout is a real, supported setting: the
+		// command comes from detection and the timeout still applies.
+		t.Setenv("CMX_VERIFY", `{"timeout_seconds":900}`)
+
+		spec, err := specFromEnv()
+		require.NoError(t, err)
+		require.NotNil(t, spec.Verify)
+		assert.Equal(t, 900, spec.Verify.TimeoutSeconds)
+		assert.Empty(t, spec.VerifyConfigError)
+	})
+}
+
+// TestVerifyConfigAllZeroPredicateCoversEveryField guards the all-zero decode
+// check in specFromEnv (the `vc.Command == "" && vc.TimeoutSeconds == 0 &&
+// len(vc.Env) == 0` predicate), which lists protocol.VerifyConfig's fields by
+// name rather than reflecting over them. If the struct gains a fourth field
+// and a server sends a config carrying only it, an agent still on this
+// predicate decodes all-zero and parks the card as blocked instead of
+// degrading quietly to detection - worker images routinely lag server
+// upgrades, so that mismatch is a real deployment scenario, not a hypothetical.
+// This test does not change protocol.VerifyConfig; it fails loudly the day
+// someone else does, pointing at the predicate that must be updated with it.
+func TestVerifyConfigAllZeroPredicateCoversEveryField(t *testing.T) {
+	got := reflect.TypeFor[protocol.VerifyConfig]().NumField()
+	require.Equal(t, 3, got,
+		"protocol.VerifyConfig gained or lost a field (now %d): update the all-zero "+
+			"check in specFromEnv (internal/cli/work.go) to cover it, then update this constant", got)
 }
 
 func TestSpecFromEnv_Mob(t *testing.T) {

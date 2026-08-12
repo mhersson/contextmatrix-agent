@@ -513,17 +513,19 @@ func (o *run) salvageCapped(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 // Return contract: (true, nil) means salvaged - the caller returns nil. (false,
 // nil) means not salvaged - the caller returns the original MaxTurnsError
 // unchanged, today's park. (false, err) means not salvaged AND err must replace
-// the original error on the caller's return path: this is the
-// *ToolchainMissingError case below, where verify resolution itself (not the
-// coder run) is what's parking the card, and the sentinel must reach execute()'s
+// the original error on the caller's return path: these are the
+// *ToolchainMissingError cases below, whether raised while RESOLVING the plan
+// (ensureVerify) or while RUNNING it (runVerifyPlan, e.g. a container runtime
+// the worker does not have) - either way it is the environment, not the coder
+// run, that's parking the card, and the sentinel must reach execute()'s
 // dedicated toolchain arm - and from there the worker's blocked-transition arm -
 // instead of surfacing as a plain turn-cap.
 //
 // Every exit that has not yet reached a verified win reports a "failed" model
 // outcome - the run did not complete, regardless of cause - except the
 // environment-caused exits, none of which is evidence about the model: the
-// *ToolchainMissingError branch (a missing tool during verify resolution,
-// left unreported like its unlogged card-log line), a verifySkipped result
+// *ToolchainMissingError branches (a missing tool or unreachable container
+// runtime, left unreported like their unlogged card-log line), a verifySkipped result
 // from the authoritative run itself (a timeout or a missing tool discovered
 // at execution time rather than resolution time), a verify that ran but died
 // of container resource pressure on both attempts (LooksResourceExhausted on
@@ -594,6 +596,18 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 	}
 
 	vres, rerr := o.runVerifyPlan(ctx, sc.workspace, plan)
+	if rerr != nil {
+		// The container-runtime park (or any other sentinel runVerifyPlan
+		// raises) discovered during the authoritative verify itself is the
+		// same shape as the ensureVerify arm above: propagate it unlogged so
+		// it supersedes the turn cap and reaches execute()'s dedicated
+		// toolchain arm instead of being read as a plain "did not pass".
+		var tme *ToolchainMissingError
+		if errors.As(rerr, &tme) {
+			return false, rerr
+		}
+	}
+
 	if rerr != nil || vres.Status != verifyPassed {
 		// A verify that ran and failed can still be environmental: under a pids
 		// limit `go test` compiles, then its inner fork/exec dies with EAGAIN and

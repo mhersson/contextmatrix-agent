@@ -95,6 +95,14 @@ type RunSpec struct {
 	// absent (nothing declared, or an old CM). Delivered via CMX_VERIFY.
 	Verify *protocol.VerifyConfig
 
+	// VerifyConfigError is set when CMX_VERIFY was present but unusable: bad
+	// JSON, or a clean decode to an all-zero config (json.Unmarshal ignores
+	// unknown fields, so a misspelled key lands here). Empty means the value was
+	// read cleanly. It reaches the verify ladder as declared-tier intent we
+	// failed to honour, so the run notes it and parks rather than quietly
+	// shipping under a weaker gate.
+	VerifyConfigError string
+
 	TaskSkillsDir string   // in-container skills mount path (CMX_TASK_SKILLS_DIR); empty = no skills
 	TaskSkills    []string // per-card subset (CM_TASK_SKILLS)
 	TaskSkillsSet bool     // whether the subset was set (CM_TASK_SKILLS_SET)
@@ -380,7 +388,8 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 				Threshold:       a.spec.CompactionThreshold,
 				KeepRecentTurns: a.spec.CompactionKeepRecentTurns,
 			},
-			Verify: declaredVerify(a.spec.Verify),
+			Verify:            declaredVerify(a.spec.Verify),
+			VerifyConfigError: a.spec.VerifyConfigError,
 		},
 	}
 

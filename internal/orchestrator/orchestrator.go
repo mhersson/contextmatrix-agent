@@ -137,6 +137,13 @@ type Config struct {
 	// gate falls back to repo-convention detection and then a model proposal.
 	// It is an orchestrator-local type so the package need not import protocol.
 	Verify *DeclaredVerify
+
+	// VerifyConfigError is set when the worker received a CMX_VERIFY it could
+	// not use (bad JSON, or a clean decode to an all-zero config). Verify is nil
+	// in that case, but this is NOT "nothing declared": the ladder treats it as
+	// declared-tier intent we failed to honour, so it notes the problem and
+	// parks rather than shipping under a silently weaker gate.
+	VerifyConfigError string
 }
 
 // DeclaredVerify is the operator-declared verify configuration for a run, mapped
@@ -610,8 +617,21 @@ func maxTurnsLogMessage(phase string, mte *MaxTurnsError) string {
 	return fmt.Sprintf("turn cap reached on model %q after %d turns - parking work; raise CMX_MAX_TURNS or split the subtask", mte.Model, mte.Turns)
 }
 
-// toolchainLogMessage is the canonical card-log line for a toolchain-missing park.
+// toolchainLogMessage is the canonical card-log line for a toolchain-missing
+// park. A seeded verify-config error (see verifyConfigErrorMarker) and a
+// container-runtime park (see containerRuntimeUnavailableMarker) each get
+// their own wording, matching verifyToolchainSection: neither implicates a
+// missing toolchain, so "verify toolchain cannot run here" would misdirect -
+// rebuilding the worker image for a config problem, or installing a toolchain
+// that was never the issue.
 func toolchainLogMessage(tme *ToolchainMissingError) string {
+	switch tme.Subject {
+	case verifyConfigErrorMarker:
+		return fmt.Sprintf("declared verify config could not be read (%s); parking card as blocked", tme.Reason)
+	case containerRuntimeUnavailableMarker:
+		return fmt.Sprintf("verify needs a container runtime the worker does not have (%s); parking card as blocked", tme.Reason)
+	}
+
 	return fmt.Sprintf("verify toolchain cannot run here (%s: %s - %s); parking card as blocked", tme.Tier, tme.Subject, tme.Reason)
 }
 

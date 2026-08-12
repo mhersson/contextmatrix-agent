@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/verifyexec"
+	"github.com/mhersson/contextmatrix-harness/events"
 	"gopkg.in/yaml.v3"
 )
 
@@ -104,6 +105,31 @@ func verifyStatusWord(s verifyStatus) string {
 	default:
 		return "skipped"
 	}
+}
+
+// logVerifyRound records one review round's gate outcome on the card. Without
+// it the board carries only the resolution line, so a gate that failed and a
+// gate that never ran read identically to a human reviewing the activity log.
+// A skip names its reason and says out loud that the round proceeds unverified
+// - unless the reason already says so: every skip note classifyVerify actually
+// emits already ends in "treated as unverified", and appending the suffix on
+// top of one reads as "unverified" and "verify" twice in the same line. Only a
+// noteless skip (the "no verify command resolved" case) needs the suffix
+// spelled out.
+func (o *run) logVerifyRound(ctx context.Context, res verifyResult, round int) {
+	msg := fmt.Sprintf("verify %s", verifyStatusWord(res.Status))
+
+	if res.Note != "" {
+		msg += " (" + res.Note + ")"
+	}
+
+	msg += fmt.Sprintf(" - review round %d", round)
+
+	if res.Status == verifySkipped && res.Note == "" {
+		msg += " - proceeding unverified"
+	}
+
+	o.d.logCard(ctx, "%s", msg)
 }
 
 // verifyDocContext is the advisory verify line handed to the document phase:
@@ -241,17 +267,36 @@ func (o *run) ensureVerify(ctx context.Context) (verifyPlan, error) {
 	return p, nil
 }
 
+// verifyConfigErrorMarker is the declared-tier subject when the operator's
+// CMX_VERIFY could not be read at all (bad JSON, or a clean decode to an
+// all-zero config). It is the one declared-tier park where no toolchain is
+// implicated, so the card-section and log-line renderers key on it to give
+// the right remedy (see verifyToolchainSection and toolchainLogMessage)
+// instead of the generic "install the toolchain" one.
+const verifyConfigErrorMarker = "CMX_VERIFY (unreadable)"
+
+// containerRuntimeUnavailableMarker is the runtime-tier subject when a verify
+// command failed because it needed a container runtime the worker does not
+// have: no Docker socket bind, CapDrop: ALL, no-new-privileges, uid 1000, and
+// no Docker CLI in the worker image, all by design. Unlike the declared/
+// detected tiers above, this is discovered at EXECUTION time - runVerifyPlan
+// reading the failed output - not at resolution time, so the card-section and
+// log-line renderers key on it for the "no containers here" remedy instead of
+// "install the toolchain" (see verifyToolchainSection and toolchainLogMessage).
+const containerRuntimeUnavailableMarker = "container runtime (unavailable)"
+
 // resolveVerify runs the resolution ladder: declared command (probed) beats
 // repo-convention detection beats a model proposal beats skip. A declared
 // command that cannot run does NOT stop resolution right there - it records a
 // note and falls through to detection/proposal, so a typo cannot silently drop
 // verification before a lower tier gets its chance. A budget park from the
 // proposal tier propagates. If nothing resolves, the final fall-through raises
-// ToolchainMissingError instead of the silent skip when Tier 1 or Tier 2
-// implicated a toolchain that never became runnable at any tier; otherwise
-// (nothing ever implicated a toolchain, e.g. a pure docs repo) it degrades to
-// the skip exactly as before. A canceled context at the fall-through is
-// inconclusive rather than a sentinel-worthy signal - see the Tier 4 comment.
+// ToolchainMissingError instead of the silent skip when Tier 1 or Tier 2 - or
+// the seeded verify-config error above - implicated a toolchain that never
+// became runnable at any tier; otherwise (nothing ever implicated a toolchain,
+// e.g. a pure docs repo) it degrades to the skip exactly as before. A canceled
+// context at the fall-through is inconclusive rather than a sentinel-worthy
+// signal - see the Tier 4 comment.
 func (o *run) resolveVerify(ctx context.Context) (verifyPlan, error) {
 	cfg := o.d.Cfg
 	timeout := o.verifyTimeout()
@@ -264,6 +309,18 @@ func (o *run) resolveVerify(ctx context.Context) (verifyPlan, error) {
 		declaredCmd    string
 		declaredReason string
 	)
+
+	// A CMX_VERIFY we could not read is operator intent we failed to honour, not
+	// an absent declaration. Seed the declared-tier failure so the run notes it,
+	// still falls through to detection and proposal, and parks at Tier 4 if
+	// nothing else resolves.
+	if e := cfg.VerifyConfigError; e != "" {
+		notes = append(notes, e)
+
+		declaredFailed = true
+		declaredCmd = verifyConfigErrorMarker
+		declaredReason = e
+	}
 
 	// Tier 1: operator-declared command.
 	if d := cfg.Verify; d != nil && strings.TrimSpace(d.Command) != "" {
@@ -344,7 +401,17 @@ func (o *run) resolveVerify(ctx context.Context) (verifyPlan, error) {
 	case ctx.Err() != nil:
 		return verifyPlan{}, ctx.Err()
 	case declaredFailed:
-		return verifyPlan{}, &ToolchainMissingError{Tier: "declared", Subject: declaredCmd, Reason: declaredReason}
+		reason := declaredReason
+
+		if det.Marker != "" {
+			// Both fired: the declared error outranks detection as the actionable
+			// root cause, but det.Reason must not be lost - without it the
+			// operator would need a second round trip to learn what detection
+			// found too.
+			reason = fmt.Sprintf("%s (detection also found %s: %s)", declaredReason, det.Marker, det.Reason)
+		}
+
+		return verifyPlan{}, &ToolchainMissingError{Tier: "declared", Subject: declaredCmd, Reason: reason}
 	case det.Marker != "":
 		return verifyPlan{}, &ToolchainMissingError{Tier: "detected", Subject: det.Marker, Reason: det.Reason}
 	default:
@@ -358,7 +425,10 @@ func (o *run) resolveVerify(ctx context.Context) (verifyPlan, error) {
 // abort) from a real verify outcome. An empty plan is a skip, never a run. A
 // non-pass whose output looks resource-exhausted (container pressure, not a
 // real defect) gets exactly one retry after a short wait; a plain failure is
-// never retried, and neither is a run that hit its own timeout.
+// never retried, and neither is a run that hit its own timeout. A non-pass
+// whose output looks like an unreachable container runtime takes precedence
+// over the skipped/failed classification and returns a *ToolchainMissingError
+// instead of a verifyResult - see the check below.
 func (o *run) runVerifyPlan(ctx context.Context, dir string, plan verifyPlan) (verifyResult, error) {
 	if len(plan.Argv) == 0 {
 		return verifyResult{Status: verifySkipped, Note: "no verify command resolved"}, nil
@@ -401,6 +471,48 @@ func (o *run) runVerifyPlan(ctx context.Context, dir string, plan verifyPlan) (v
 
 	if o.d.Redact != nil {
 		res.Output = o.d.Redact(res.Output)
+	}
+
+	// A non-pass whose output carries an unreachable-container-runtime
+	// signature is neither a code defect (verifyFailed, which would burn a fix
+	// round on a coder that cannot do anything about a socket that is not
+	// there) nor an ordinary skip (verifySkipped, which would let the card ship
+	// with a NOT VERIFIED trailer and no explanation): park instead, with the
+	// honest remedy. This check runs BEFORE the classification below is
+	// returned to any caller, so it takes precedence over both shapes the
+	// classification could have produced - a wrapper masking the daemon's exit
+	// as a plain 127 (would classify skipped) and a wrapper with the CLI
+	// installed but no daemon (would classify failed) - and both converge on
+	// the same park. The command output is deliberately NOT threaded into the
+	// error: the park reason is fixed, so it cannot leak whatever the verify
+	// command printed.
+	if res.Status != verifyPassed && verifyexec.LooksContainerRuntimeUnavailable(res.Output) {
+		return verifyResult{}, &ToolchainMissingError{
+			Tier:    "runtime",
+			Subject: containerRuntimeUnavailableMarker,
+			Reason:  "the verify command needs a container runtime, and the worker has none by design",
+		}
+	}
+
+	// The gate is a subprocess, not a tool call, so nothing else records what it
+	// printed: a FAILED gate reaches the card body as review findings, but a
+	// PASSED or SKIPPED one would leave no output on any channel. res.Output is
+	// already redacted above by the agent's own redactor - which scrubs its own
+	// credentials (LLM key, MCP key, git token, mob guest tokens), not arbitrary
+	// secrets a chatty build could print via the verify.env passthrough - and
+	// already bounded at 64 KiB by verifyexec, so this carries a hard ceiling
+	// with no cap of its own. Guarded: Emit is nil on several construction paths
+	// and events.Emitter.Emit does not nil-check.
+	if o.d.Emit != nil {
+		o.d.Emit.Emit(events.Verification, map[string]any{
+			// ok collapses to false for both FAILED and SKIPPED; status
+			// disambiguates them, so read ok:false alongside status, never alone -
+			// a SKIPPED gate is not a defect the way a FAILED one is.
+			"ok":      res.Status == verifyPassed,
+			"status":  verifyStatusWord(res.Status),
+			"command": plan.Display,
+			"detail":  res.Output,
+		})
 	}
 
 	return res, nil
@@ -508,13 +620,28 @@ func verifyToolchainSection(tme *ToolchainMissingError) string {
 	headline := "**NONE - this run PARKED: the verify toolchain cannot run here.**"
 	remedy := "Install the toolchain in the worker image, or declare a verify command that runs with what the image provides."
 
-	// The nested-module cap is the one park where nothing is missing: detection
-	// declined to guess a composed command over a sprawling repo. Telling the
-	// operator to install a toolchain would send them after a tool that is
-	// already installed and working.
-	if tme.Subject == nestedModulesMarker {
+	switch tme.Subject {
+	case nestedModulesMarker:
+		// The nested-module cap is the one park where nothing is missing: detection
+		// declined to guess a composed command over a sprawling repo. Telling the
+		// operator to install a toolchain would send them after a tool that is
+		// already installed and working.
 		headline = "**NONE - this run PARKED: no verify command could be resolved.**"
 		remedy = "Declare a verify command for the project that covers the modules it should build and test."
+	case verifyConfigErrorMarker:
+		// The declared verify config itself could not be read: no toolchain is
+		// missing, so the install remedy would send the operator rebuilding the
+		// worker image for a problem that lives in the project or card config.
+		headline = "**NONE - this run PARKED: the declared verify config could not be read.**"
+		remedy = "Fix the project or card `verify` block, or remove a hand-set CMX_VERIFY from worker_extra_env."
+	case containerRuntimeUnavailableMarker:
+		// The verify command needs a container runtime; the worker has none by
+		// design (no Docker socket, no Docker CLI, CapDrop: ALL). Neither the
+		// install remedy above (there is no toolchain to install) nor the
+		// nested-module one applies.
+		headline = "**NONE - this run PARKED: the worker has no container runtime.**"
+		remedy = "Declare a verify command with no container dependency, or give the worker a reachable " +
+			"Docker endpoint through the project's `verify.env`."
 	}
 
 	return fmt.Sprintf("## Verify Command\n\n%s\n\n- tier: %s\n- subject: `%s`\n- reason: %s\n\n%s",

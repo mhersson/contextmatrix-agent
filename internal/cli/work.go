@@ -266,14 +266,32 @@ func specFromEnv() (worker.RunSpec, error) {
 		}
 	}
 
-	var verify *protocol.VerifyConfig
+	var (
+		verify    *protocol.VerifyConfig
+		verifyErr string
+	)
 
 	if raw := os.Getenv("CMX_VERIFY"); raw != "" {
 		var vc protocol.VerifyConfig
-		if err := json.Unmarshal([]byte(raw), &vc); err != nil {
-			slog.Warn("CMX_VERIFY parse failed; will detect the verify command",
+
+		err := json.Unmarshal([]byte(raw), &vc)
+
+		switch {
+		case err != nil:
+			verifyErr = "CMX_VERIFY could not be parsed: " + err.Error()
+
+			slog.Warn("CMX_VERIFY parse failed; the verify gate falls back to detection",
 				"card_id", cardID, "project", project, "error", err)
-		} else {
+		case vc.Command == "" && vc.TimeoutSeconds == 0 && len(vc.Env) == 0:
+			// CM's ResolveVerify returns nil rather than an all-zero config, so a
+			// non-empty CMX_VERIFY that decodes to one did not come from the board.
+			// json.Unmarshal ignores unknown fields, so a misspelled key ({"cmd":...})
+			// lands here looking perfectly valid.
+			verifyErr = "CMX_VERIFY decoded to an empty verify config; unknown or misspelled fields are ignored"
+
+			slog.Warn("CMX_VERIFY decoded to an empty config; the verify gate falls back to detection",
+				"card_id", cardID, "project", project, "raw_len", len(raw))
+		default:
 			verify = &vc
 		}
 	}
@@ -320,6 +338,7 @@ func specFromEnv() (worker.RunSpec, error) {
 		CACertFile:                os.Getenv("CMX_CA_CERT_FILE"),
 		Selection:                 selection,
 		Verify:                    verify,
+		VerifyConfigError:         verifyErr,
 		TaskSkillsDir:             taskSkillsDir,
 		TaskSkills:                taskSkills,
 		TaskSkillsSet:             taskSkillsSet,

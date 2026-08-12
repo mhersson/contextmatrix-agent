@@ -1501,3 +1501,42 @@ func TestReviewPromptsUseFilteredDescriptionAndSeededFindings(t *testing.T) {
 	synthesis := client.tasks[3]
 	assert.NotContains(t, synthesis, "1. SUBTASK: Add the flag", "plan not re-imported into synthesis")
 }
+
+// TestReviewGateFailureFindingsKeepTheTail: a failing build's diagnostics sit at
+// the END of its output. The finding handed to the fix coder must be the tail,
+// not a head-weighted slice whose 2666-byte head lands in the build tool's
+// banner and whose 1334-byte tail clips the top of the error block.
+func TestReviewGateFailureFindingsKeepTheTail(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{}
+	client := &planLLM{}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	// ~10 KB of banner, then a ~2.5 KB error block: bigger than HeadTail's
+	// 1334-byte tail, so a head-weighted slice clips the block's first lines -
+	// exactly the lines naming the failing test.
+	banner := strings.Repeat("[INFO] downloading a dependency\n", 320)
+	failures := "[ERROR] Failures:\n[ERROR]   WidgetIT.shouldPersist:42 expected true\n" +
+		strings.Repeat("[ERROR]   at com.example.Widget.persist(Widget.java:88)\n", 45)
+	out := banner + failures + "\nBUILD FAILURE\n"
+
+	require.Greater(t, len(failures), verifyOutputTail/3,
+		"the error block must exceed HeadTail's tail share or this test proves nothing")
+
+	tc := cmclient.TaskContext{Title: "P", Description: "b", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+	o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "mvn -q verify", Source: verifySourceDetected, Timeout: time.Minute}
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 1, Output: out}
+	}
+
+	findings, _, approved, vres, err := o.reviewRound(context.Background(), *o.verify, 1, false)
+	require.NoError(t, err)
+	require.False(t, approved)
+	require.Equal(t, verifyFailed, vres.Status)
+
+	assert.Contains(t, findings, "WidgetIT.shouldPersist",
+		"the failing test name must reach the fix coder; it sits at the TOP of the error block")
+	assert.Contains(t, findings, "BUILD FAILURE", "the final line of the build must survive")
+	assert.Empty(t, client.tasks, "a gate failure short-circuits before any reviewer model call")
+}

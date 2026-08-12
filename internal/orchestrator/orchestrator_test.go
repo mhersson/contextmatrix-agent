@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
@@ -14,6 +15,19 @@ import (
 func indexOfCall(calls []string, name string) int {
 	for i, c := range calls {
 		if c == name {
+			return i
+		}
+	}
+
+	return -1
+}
+
+// indexOfCallPrefix returns the position of the first call starting with
+// prefix, or -1. AddLog records the full message, so ordering assertions
+// against it need a prefix match rather than indexOfCall's equality.
+func indexOfCallPrefix(calls []string, prefix string) int {
+	for i, c := range calls {
+		if strings.HasPrefix(c, prefix) {
 			return i
 		}
 	}

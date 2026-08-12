@@ -337,7 +337,9 @@ func TestReviewOutcomeVerifyCaveat(t *testing.T) {
 }
 
 func TestDonePhase(t *testing.T) {
-	ops := &fakeOps{}
+	// rejectLogAfterRelease mirrors CM's add_log claim gate: the completion note
+	// must be written while the claim is still held or the board never gets it.
+	ops := &fakeOps{rejectLogAfterRelease: true}
 	d := Deps{Ops: ops, Cfg: Config{CardID: "CARD-1"}}
 	tc := cmclient.TaskContext{Title: "All done"}
 	o := newRun(d, tc)
@@ -345,18 +347,17 @@ func TestDonePhase(t *testing.T) {
 	require.NoError(t, runDone(context.Background(), o))
 
 	calls := ops.recorded()
-	require.GreaterOrEqual(t, indexOfCall(calls, "ReleaseCard:CARD-1"), 0, "claim released; calls=%v", calls)
-	assert.True(t, ops.loggedContains("verify: NOT VERIFIED"), "the completion note carries the verify trailer; logs=%v", ops.logs)
 
-	var logged bool
+	relIdx := indexOfCall(calls, "ReleaseCard:CARD-1")
+	require.GreaterOrEqual(t, relIdx, 0, "claim released; calls=%v", calls)
 
-	for _, c := range calls {
-		if strings.HasPrefix(c, "AddLog:") {
-			logged = true
-		}
-	}
+	logIdx := indexOfCallPrefix(calls, "AddLog:run complete:")
+	require.GreaterOrEqual(t, logIdx, 0, "a completion summary is logged; calls=%v", calls)
 
-	assert.True(t, logged, "a completion summary is logged; calls=%v", calls)
+	assert.Less(t, logIdx, relIdx,
+		"the completion note must be logged BEFORE the claim is released; calls=%v", calls)
+	assert.True(t, ops.loggedContains("verify: NOT VERIFIED"),
+		"the completion note must reach the board, not be rejected as unclaimed; logs=%v", ops.logs)
 }
 
 // TestRunDoneToleratesReleaseError: runDone must not fail the run when
