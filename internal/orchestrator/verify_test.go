@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/verifyexec"
+	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1098,6 +1100,56 @@ func TestVerifyToolchainSectionRemedyMatchesThePark(t *testing.T) {
 	assert.Contains(t, missingPark, "toolchain cannot run here")
 	assert.Contains(t, missingPark, "Install the toolchain")
 	assert.Contains(t, missingPark, "java")
+}
+
+// TestRunVerifyPlanEmitsVerification: the gate is a subprocess, not a tool call,
+// so without this event a passed or skipped gate leaves no output on any
+// channel. The transcript is the only post-mortem surface for it.
+func TestRunVerifyPlanEmitsVerification(t *testing.T) {
+	var transcript bytes.Buffer
+
+	ops := &fakeOps{}
+	o := &run{d: Deps{
+		Ops:  ops,
+		Cfg:  Config{CardID: "CARD-1", Workspace: t.TempDir()},
+		Emit: events.NewEmitter(nil, &transcript),
+	}}
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 0, Output: "Tests run: 25, Failures: 0\nBUILD SUCCESS\n"}
+	}
+
+	res, err := o.runVerifyPlan(context.Background(), "dir", verifyPlan{
+		Argv:    []string{"mvn", "-q", "verify"},
+		Display: "mvn -q verify",
+		Source:  verifySourceDetected,
+		Timeout: time.Minute,
+	})
+	require.NoError(t, err)
+	require.Equal(t, verifyPassed, res.Status)
+
+	line := transcript.String()
+	require.Contains(t, line, `"kind":"verification"`, "a verification event is emitted; transcript=%s", line)
+	assert.Contains(t, line, `"ok":true`)
+	assert.Contains(t, line, `"status":"passed"`)
+	assert.Contains(t, line, "mvn -q verify", "the command is named in the event")
+	assert.Contains(t, line, "BUILD SUCCESS", "the gate output is carried, not just its length")
+}
+
+// TestRunVerifyPlanEmitNilSafe: Deps.Emit is nil on several construction paths
+// and events.Emitter.Emit has no nil-receiver guard, so the emit must be
+// guarded the way pinwarn.go does it.
+func TestRunVerifyPlanEmitNilSafe(t *testing.T) {
+	o := &run{d: Deps{Cfg: Config{Workspace: t.TempDir()}}}
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 0, Output: "ok"}
+	}
+
+	assert.NotPanics(t, func() {
+		res, err := o.runVerifyPlan(context.Background(), "dir",
+			verifyPlan{Argv: []string{"x"}, Display: "x", Timeout: time.Minute})
+		require.NoError(t, err)
+		assert.Equal(t, verifyPassed, res.Status)
+	})
 }
 
 func TestLogVerifyRound(t *testing.T) {

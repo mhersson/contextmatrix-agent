@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/verifyexec"
+	"github.com/mhersson/contextmatrix-harness/events"
 	"gopkg.in/yaml.v3"
 )
 
@@ -421,6 +422,21 @@ func (o *run) runVerifyPlan(ctx context.Context, dir string, plan verifyPlan) (v
 
 	if o.d.Redact != nil {
 		res.Output = o.d.Redact(res.Output)
+	}
+
+	// The gate is a subprocess, not a tool call, so nothing else records what it
+	// printed: a FAILED gate reaches the card body as review findings, but a
+	// PASSED or SKIPPED one would leave no output on any channel. res.Output is
+	// already redacted above and already bounded at 64 KiB by verifyexec, so this
+	// carries a hard ceiling with no cap of its own. Guarded: Emit is nil on
+	// several construction paths and events.Emitter.Emit does not nil-check.
+	if o.d.Emit != nil {
+		o.d.Emit.Emit(events.Verification, map[string]any{
+			"ok":      res.Status == verifyPassed,
+			"status":  verifyStatusWord(res.Status),
+			"command": plan.Display,
+			"detail":  res.Output,
+		})
 	}
 
 	return res, nil
