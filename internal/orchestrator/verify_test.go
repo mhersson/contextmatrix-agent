@@ -886,6 +886,80 @@ func TestRunVerifyPlanPropagatesParentCancel(t *testing.T) {
 	require.Error(t, err, "a cancelled parent context propagates the abort, not a verify outcome")
 }
 
+// TestRunVerifyPlanParksOnMissingContainerCLI pins the first wrong outcome the
+// problem statement names: no Docker CLI in the worker image. A detected
+// Makefile wrapper shells out to `docker`, the shell reports it missing, and
+// make's own exit-127 summary follows - the exact shape that, before this
+// park existed, satisfied the tool-missing heuristic for a Wrapper plan and
+// classified SKIPPED, letting the card ship with a NOT VERIFIED trailer. It
+// must now come back as a *ToolchainMissingError instead of a verifyResult.
+func TestRunVerifyPlanParksOnMissingContainerCLI(t *testing.T) {
+	o := &run{d: Deps{Cfg: Config{Workspace: t.TempDir()}}}
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		return verifyexec.Outcome{
+			ExitCode: 2,
+			Output:   "make: docker: command not found\nmake: *** [Makefile:3: test] Error 127",
+		}
+	}
+
+	res, err := o.runVerifyPlan(context.Background(), "dir",
+		verifyPlan{Argv: []string{"make", "test"}, Timeout: time.Minute, Wrapper: true})
+	require.Error(t, err, "a container-runtime park must come back as an error, not a verifyResult")
+	assert.Equal(t, verifyResult{}, res)
+
+	var tme *ToolchainMissingError
+	require.ErrorAs(t, err, &tme)
+	assert.Equal(t, "runtime", tme.Tier)
+	assert.Equal(t, containerRuntimeUnavailableMarker, tme.Subject)
+}
+
+// TestRunVerifyPlanParksOnUnreachableDockerDaemon pins the second wrong
+// outcome the problem statement names: the Docker CLI is installed (an
+// operator-built image) but there is no daemon at the other end of the
+// socket. No tool-missing pattern matches this shape, so before this park
+// existed it classified FAILED and short-circuited into the fix loop against
+// a non-defect. It must now converge on the same park as the missing-CLI
+// shape above.
+func TestRunVerifyPlanParksOnUnreachableDockerDaemon(t *testing.T) {
+	o := &run{d: Deps{Cfg: Config{Workspace: t.TempDir()}}}
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		return verifyexec.Outcome{
+			ExitCode: 1,
+			Output:   "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+		}
+	}
+
+	res, err := o.runVerifyPlan(context.Background(), "dir",
+		verifyPlan{Argv: []string{"docker", "compose", "up"}, Timeout: time.Minute})
+	require.Error(t, err, "a container-runtime park must come back as an error, not a verifyResult")
+	assert.Equal(t, verifyResult{}, res)
+
+	var tme *ToolchainMissingError
+	require.ErrorAs(t, err, &tme)
+	assert.Equal(t, "runtime", tme.Tier)
+	assert.Equal(t, containerRuntimeUnavailableMarker, tme.Subject)
+	assert.NotContains(t, tme.Reason, "unix:///var/run/docker.sock",
+		"the fixed reason never carries the verify command's raw output")
+}
+
+// TestRunVerifyPlanContainerSignatureInPassingOutputDoesNotPark proves the
+// park is gated on a NON-pass result: a suite that happens to print one of
+// the container-runtime strings (e.g. a test asserting on that exact message)
+// while still exiting zero is a genuine pass, not a park.
+func TestRunVerifyPlanContainerSignatureInPassingOutputDoesNotPark(t *testing.T) {
+	o := &run{d: Deps{Cfg: Config{Workspace: t.TempDir()}}}
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		return verifyexec.Outcome{
+			ExitCode: 0,
+			Output:   "--- PASS: TestDockerErrorMessage\nCannot connect to the Docker daemon\nok\tpkg\t0.01s",
+		}
+	}
+
+	res, err := o.runVerifyPlan(context.Background(), "dir", verifyPlan{Argv: []string{"go", "test", "./..."}, Timeout: time.Minute})
+	require.NoError(t, err)
+	assert.Equal(t, verifyPassed, res.Status)
+}
+
 // TestResolveVerifyNestedMonorepoDetected pins the headline fix: a monorepo
 // with only nested markers previously resolved NOTHING and review ran blind;
 // it must now resolve a composed, detected command.
@@ -1113,6 +1187,17 @@ func TestVerifyToolchainSectionRemedyMatchesThePark(t *testing.T) {
 	assert.NotContains(t, configErrorPark, "Install the toolchain",
 		"no toolchain is missing on a config-read failure; the install remedy would misdirect")
 	assert.NotContains(t, configErrorPark, "toolchain cannot run here")
+
+	containerPark := verifyToolchainSection(&ToolchainMissingError{
+		Tier:    "runtime",
+		Subject: containerRuntimeUnavailableMarker,
+		Reason:  "the verify command needs a container runtime, and the worker has none by design",
+	})
+	assert.Contains(t, containerPark, "no container runtime")
+	assert.Contains(t, containerPark, "verify.env")
+	assert.NotContains(t, containerPark, "Install the toolchain",
+		"there is no toolchain to install here; the worker has no container runtime by design")
+	assert.NotContains(t, containerPark, "toolchain cannot run here")
 }
 
 // TestToolchainLogMessageConfigErrorDiffersFromMissingToolchain pins the
@@ -1135,6 +1220,14 @@ func TestToolchainLogMessageConfigErrorDiffersFromMissingToolchain(t *testing.T)
 		Reason:  `java: exec: "java": executable file not found in $PATH`,
 	})
 	assert.Contains(t, missingToolchain, "toolchain cannot run here")
+
+	containerRuntime := toolchainLogMessage(&ToolchainMissingError{
+		Tier:    "runtime",
+		Subject: containerRuntimeUnavailableMarker,
+		Reason:  "the verify command needs a container runtime, and the worker has none by design",
+	})
+	assert.Contains(t, containerRuntime, "container runtime")
+	assert.NotContains(t, containerRuntime, "toolchain cannot run here")
 }
 
 // TestRunVerifyPlanEmitsVerification: the gate is a subprocess, not a tool call,

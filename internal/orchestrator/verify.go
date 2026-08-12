@@ -275,6 +275,16 @@ func (o *run) ensureVerify(ctx context.Context) (verifyPlan, error) {
 // instead of the generic "install the toolchain" one.
 const verifyConfigErrorMarker = "CMX_VERIFY (unreadable)"
 
+// containerRuntimeUnavailableMarker is the runtime-tier subject when a verify
+// command failed because it needed a container runtime the worker does not
+// have: no Docker socket bind, CapDrop: ALL, no-new-privileges, uid 1000, and
+// no Docker CLI in the worker image, all by design. Unlike the declared/
+// detected tiers above, this is discovered at EXECUTION time - runVerifyPlan
+// reading the failed output - not at resolution time, so the card-section and
+// log-line renderers key on it for the "no containers here" remedy instead of
+// "install the toolchain" (see verifyToolchainSection and toolchainLogMessage).
+const containerRuntimeUnavailableMarker = "container runtime (unavailable)"
+
 // resolveVerify runs the resolution ladder: declared command (probed) beats
 // repo-convention detection beats a model proposal beats skip. A declared
 // command that cannot run does NOT stop resolution right there - it records a
@@ -415,7 +425,10 @@ func (o *run) resolveVerify(ctx context.Context) (verifyPlan, error) {
 // abort) from a real verify outcome. An empty plan is a skip, never a run. A
 // non-pass whose output looks resource-exhausted (container pressure, not a
 // real defect) gets exactly one retry after a short wait; a plain failure is
-// never retried, and neither is a run that hit its own timeout.
+// never retried, and neither is a run that hit its own timeout. A non-pass
+// whose output looks like an unreachable container runtime takes precedence
+// over the skipped/failed classification and returns a *ToolchainMissingError
+// instead of a verifyResult - see the check below.
 func (o *run) runVerifyPlan(ctx context.Context, dir string, plan verifyPlan) (verifyResult, error) {
 	if len(plan.Argv) == 0 {
 		return verifyResult{Status: verifySkipped, Note: "no verify command resolved"}, nil
@@ -458,6 +471,27 @@ func (o *run) runVerifyPlan(ctx context.Context, dir string, plan verifyPlan) (v
 
 	if o.d.Redact != nil {
 		res.Output = o.d.Redact(res.Output)
+	}
+
+	// A non-pass whose output carries an unreachable-container-runtime
+	// signature is neither a code defect (verifyFailed, which would burn a fix
+	// round on a coder that cannot do anything about a socket that is not
+	// there) nor an ordinary skip (verifySkipped, which would let the card ship
+	// with a NOT VERIFIED trailer and no explanation): park instead, with the
+	// honest remedy. This check runs BEFORE the classification below is
+	// returned to any caller, so it takes precedence over both shapes the
+	// classification could have produced - a wrapper masking the daemon's exit
+	// as a plain 127 (would classify skipped) and a wrapper with the CLI
+	// installed but no daemon (would classify failed) - and both converge on
+	// the same park. The command output is deliberately NOT threaded into the
+	// error: the park reason is fixed, so it cannot leak whatever the verify
+	// command printed.
+	if res.Status != verifyPassed && verifyexec.LooksContainerRuntimeUnavailable(res.Output) {
+		return verifyResult{}, &ToolchainMissingError{
+			Tier:    "runtime",
+			Subject: containerRuntimeUnavailableMarker,
+			Reason:  "the verify command needs a container runtime, and the worker has none by design",
+		}
 	}
 
 	// The gate is a subprocess, not a tool call, so nothing else records what it
@@ -600,6 +634,14 @@ func verifyToolchainSection(tme *ToolchainMissingError) string {
 		// worker image for a problem that lives in the project or card config.
 		headline = "**NONE - this run PARKED: the declared verify config could not be read.**"
 		remedy = "Fix the project or card `verify` block, or remove a hand-set CMX_VERIFY from worker_extra_env."
+	case containerRuntimeUnavailableMarker:
+		// The verify command needs a container runtime; the worker has none by
+		// design (no Docker socket, no Docker CLI, CapDrop: ALL). Neither the
+		// install remedy above (there is no toolchain to install) nor the
+		// nested-module one applies.
+		headline = "**NONE - this run PARKED: the worker has no container runtime.**"
+		remedy = "Declare a verify command with no container dependency, or give the worker a reachable " +
+			"Docker endpoint through the project's `verify.env`."
 	}
 
 	return fmt.Sprintf("## Verify Command\n\n%s\n\n- tier: %s\n- subject: `%s`\n- reason: %s\n\n%s",

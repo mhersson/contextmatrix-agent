@@ -1253,6 +1253,55 @@ func TestSoloTurnCapPropagatesToolchainSentinel(t *testing.T) {
 		"a toolchain sentinel must not be logged as a generic unresolved-verify park; logs=%v", ops.logs)
 }
 
+// TestSoloTurnCapPropagatesContainerRuntimeSentinel proves the salvage path's
+// authoritative runVerifyPlan call does not swallow a container-runtime park
+// into a generic "did not pass": when the verify command's own output carries
+// an unreachable-container-runtime signature, the error escaping the execute
+// phase is the toolchain sentinel with the runtime-tier marker - not
+// MaxTurnsError - so it reaches execute()'s dedicated toolchain arm and the
+// card-log line it writes, exactly like the verify-resolution-time sentinel
+// above.
+func TestSoloTurnCapPropagatesContainerRuntimeSentinel(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true} // a dirty tree the salvage commit captures
+	client := &planLLM{responses: burnResps(5)}
+	d := execTestDeps(ops, git, client)
+	d.Cfg.MaxTurns = 5
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+	// Drive the full execute()-FSM: the card-log line asserted below is written
+	// by execute()'s dedicated errors.As arm, not by runExecute itself.
+	o.planFn = func(context.Context) error { return nil }
+
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
+		return verifyexec.Outcome{
+			ExitCode: 1,
+			Output:   "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+		}
+	}
+
+	err := o.execute(context.Background())
+	require.Error(t, err, "an unreachable container runtime discovered during the authoritative verify must still park")
+
+	var tme *ToolchainMissingError
+	require.ErrorAs(t, err, &tme, "the toolchain sentinel, not MaxTurnsError, must escape the execute phase")
+	assert.Equal(t, "runtime", tme.Tier)
+	assert.Equal(t, containerRuntimeUnavailableMarker, tme.Subject)
+
+	var mte *MaxTurnsError
+	assert.NotErrorAs(t, err, &mte, "MaxTurnsError must not be the type observed by the caller")
+
+	calls := ops.recorded()
+	assert.Equal(t, -1, indexOfCall(calls, "CompleteTask:SUB-1"), "an unreachable container runtime must not complete the subtask")
+	assert.Empty(t, git.pushBranches, "an unreachable container runtime must not push")
+	assert.GreaterOrEqual(t, indexOfCall(calls, "ReleaseCard:SUB-1"), 0, "the parked claim is released")
+
+	assert.True(t, ops.loggedContains("container runtime"),
+		"the container-runtime park must be activity-logged via execute()'s dedicated arm; logs=%v", ops.logs)
+	assert.False(t, ops.loggedContains("verify did not pass"),
+		"a container-runtime sentinel must not be logged as a generic did-not-pass park; logs=%v", ops.logs)
+}
+
 // TestFakeOpsReportModelOutcomesEnforcesContract proves fakeOps validates
 // every row against CM's actual admission contract (relaxed to n_candidates
 // >= 1 by the solo-outcome fix) rather than accepting anything: a caller that

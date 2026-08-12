@@ -76,6 +76,56 @@ func LooksToolMissing(output string) bool {
 	return false
 }
 
+// containerRuntimeUnavailablePatterns are anchored signatures of an unreachable
+// container runtime: the worker's verify container deliberately has no Docker
+// socket, no Docker CLI, CapDrop: ALL, and runs as uid 1000, so a verify
+// command that needs containers (a compose-based make test, a Testcontainers
+// suite) fails this way rather than with a genuine defect. Every pattern is
+// anchored to the START of a line, exactly like toolMissingPatterns, so a
+// verify run whose TEST OUTPUT merely prints one of these strings (an
+// assertion on a Docker error message, an indented framework log line) cannot
+// be misread as an unreachable runtime and reclassify a real failure as a park.
+var containerRuntimeUnavailablePatterns = []*regexp.Regexp{
+	// docker CLI with no daemon at the other end of the socket, with or
+	// without a "docker: " prefix some wrappers add: "Cannot connect to the
+	// Docker daemon at unix:///var/run/docker.sock. Is the docker daemon
+	// running?".
+	regexp.MustCompile(`(?m)^(docker: )?Cannot connect to the Docker daemon`),
+	// Testcontainers exhausting every strategy it knows and finding none:
+	// "Could not find a valid Docker environment. Please check configuration."
+	regexp.MustCompile(`(?m)^Could not find a valid Docker environment`),
+	// docker CLI against an unreachable DOCKER_HOST (the shape newer client
+	// versions emit instead of the "Cannot connect" message above): "error
+	// during connect: Get \"http://...\": dial unix ... connect: no such
+	// file or directory".
+	regexp.MustCompile(`(?m)^(docker: )?error during connect:`),
+	// make reporting one of the container tools missing specifically - scoped
+	// to docker/docker-compose/podman so this does not just duplicate
+	// toolMissingPatterns for every binary: "make: docker: command not
+	// found", "make[1]: docker-compose: not found".
+	regexp.MustCompile(`(?mi)^make(\[\d+\])?: (docker|docker-compose|podman): (command not found|not found|no such file or directory)`),
+	// sh/bash reporting the same, with an optional leading interpreter path
+	// and line-number infix: "/bin/sh: 1: docker-compose: not found".
+	regexp.MustCompile(`(?mi)^(/\S+/)?(ba)?sh: ((line )?\d+: )?(docker|docker-compose|podman): (command not found|not found)`),
+}
+
+// LooksContainerRuntimeUnavailable reports whether output carries an anchored
+// signature of an unreachable container runtime - the worker's verify
+// container has no Docker access by design, so a verify command needing one
+// fails this way rather than with a real defect. Distinct from
+// LooksToolMissing: that heuristic is only consulted for a detected wrapper
+// and covers any toolchain binary, while this one applies regardless of
+// wrapper status and is scoped to the container tools specifically.
+func LooksContainerRuntimeUnavailable(output string) bool {
+	for _, re := range containerRuntimeUnavailablePatterns {
+		if re.MatchString(output) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // resourceExhaustionSignatures are substrings of process-spawn failures caused
 // by container resource pressure (pids/memory limits), not by the code under
 // test. Matched case-insensitively anywhere in the combined output.
