@@ -44,6 +44,14 @@ type fakeOps struct {
 	releaseCardErr  error
 	completeTaskErr error
 
+	// rejectLogAfterRelease mirrors CM's add_log claim gate: the server rejects
+	// a log write against an unclaimed card, so a note written after
+	// ReleaseCard never reaches the board. Opt in and AddLog fails - and does
+	// NOT append to logs - once ReleaseCard has run, so a test can prove a line
+	// actually landed rather than merely that AddLog was called.
+	rejectLogAfterRelease bool
+	released              bool
+
 	// logs captures every AddLog message (verbatim) so model-selection tests can
 	// assert the activity feed received the expected entry.
 	logs []string
@@ -242,11 +250,19 @@ func (f *fakeOps) SubtaskStates(_ context.Context, project, parentID string) ([]
 }
 
 func (f *fakeOps) AddLog(_ context.Context, cardID, message string) error {
+	f.record("AddLog:" + message)
+
 	f.mu.Lock()
-	f.logs = append(f.logs, message)
+	rejected := f.rejectLogAfterRelease && f.released
+
+	if !rejected {
+		f.logs = append(f.logs, message)
+	}
 	f.mu.Unlock()
 
-	f.record("AddLog:" + message)
+	if rejected {
+		return fmt.Errorf("add_log: card %s is not claimed; add_log requires an active claim", cardID)
+	}
 
 	return f.addLogErr
 }
@@ -313,6 +329,10 @@ func (f *fakeOps) CompleteTask(_ context.Context, cardID, summary string) error 
 
 func (f *fakeOps) ReleaseCard(_ context.Context, cardID string) error {
 	f.record("ReleaseCard:" + cardID)
+
+	f.mu.Lock()
+	f.released = true
+	f.mu.Unlock()
 
 	return f.releaseCardErr
 }

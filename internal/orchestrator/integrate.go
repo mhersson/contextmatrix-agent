@@ -199,29 +199,34 @@ func (o *run) reviewOutcome() string {
 // title yields "feat: untitled".
 func squashMessage(title string) string { return sanitizeTitle(title) }
 
-// runDone is the done phase: bookkeeping only. It releases the parent's claim
-// and logs a completion summary. Both are best-effort on the log; the release is
-// also best-effort - the branch is pushed and the card is done, so a transient
+// runDone is the done phase: bookkeeping only. It logs a completion summary and
+// then releases the parent's claim. The log is best-effort; the release is also
+// best-effort - the branch is pushed and the card is done, so a transient
 // release error (including ErrCardNotClaimed when the claim lapsed) must not
 // fail the run and trigger a false FAILED status.
 //
+// ORDER MATTERS: the note goes out BEFORE the release. CM's add_log requires an
+// active claim, so a note written after ReleaseCard is rejected server-side and
+// swallowed by logCard - taking the verify status, the branch and the total
+// spend off the board with it. Same trap as the subtask report in execute.go.
+//
 // WithoutCancel on both: done runs as the FSM winds up, exactly when an
-// end_session/EOF frame may have canceled the run context. The release and the
-// completion note must still go out even when the run context is the thing that
+// end_session/EOF frame may have canceled the run context. The completion note
+// and the release must still go out even when the run context is the thing that
 // died - mirroring releaseSubtask (execute.go).
 func runDone(ctx context.Context, o *run) error {
 	d := o.d
 	cfg := d.Cfg
 	ctx = context.WithoutCancel(ctx)
 
+	d.logCard(ctx, "run complete: %q integrated and pushed on %s; total spend $%.4f; verify: %s",
+		o.tc.Title, cfg.Branch, o.ledger.Spent(), verifyStatusLine(o.lastVerify, o.resolvedVerifyPlan()))
+
 	if err := d.Ops.ReleaseCard(ctx, cfg.CardID); err != nil {
 		if !errors.Is(err, cmclient.ErrCardNotClaimed) {
 			slog.Warn("release card in done phase failed", "card", cfg.CardID, "error", err)
 		}
 	}
-
-	d.logCard(ctx, "run complete: %q integrated and pushed on %s; total spend $%.4f; verify: %s",
-		o.tc.Title, cfg.Branch, o.ledger.Spent(), verifyStatusLine(o.lastVerify, o.resolvedVerifyPlan()))
 
 	return nil
 }
