@@ -358,9 +358,11 @@ func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, autho
 		switch res.Status {
 		case verifyFailed:
 			// Gate failure goes STRAIGHT to the fix loop without burning reviewer
-			// tokens. The redacted output tail is the finding the coder fixes. No
-			// verdict ran, so the fix run falls back to the card tier (empty fixTier).
-			return "verify command failed: " + plan.Display + "\n" +
+			// tokens. The redacted output tail is the finding the coder fixes - the
+			// "(tail)" label matches judge.go's identical evidence, so the coder
+			// knows the block starts mid-output rather than at the command's start.
+			// No verdict ran, so the fix run falls back to the card tier (empty fixTier).
+			return "verify command failed: " + plan.Display + "\n\nVerify output (tail):\n\n" +
 				lastChars(res.Output, verifyOutputTail), "", false, vres, nil
 		case verifySkipped:
 			// A missing or timed-out gate is inconclusive, not a defect: proceed to
