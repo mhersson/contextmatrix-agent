@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -1100,6 +1101,40 @@ func TestVerifyToolchainSectionRemedyMatchesThePark(t *testing.T) {
 	assert.Contains(t, missingPark, "toolchain cannot run here")
 	assert.Contains(t, missingPark, "Install the toolchain")
 	assert.Contains(t, missingPark, "java")
+
+	configErrorPark := verifyToolchainSection(&ToolchainMissingError{
+		Tier:    "declared",
+		Subject: verifyConfigErrorMarker,
+		Reason:  "CMX_VERIFY could not be parsed: unexpected end of JSON input",
+	})
+	assert.Contains(t, configErrorPark, "declared verify config could not be read")
+	assert.Contains(t, configErrorPark, "verify")
+	assert.Contains(t, configErrorPark, "worker_extra_env")
+	assert.NotContains(t, configErrorPark, "Install the toolchain",
+		"no toolchain is missing on a config-read failure; the install remedy would misdirect")
+	assert.NotContains(t, configErrorPark, "toolchain cannot run here")
+}
+
+// TestToolchainLogMessageConfigErrorDiffersFromMissingToolchain pins the
+// activity-log line for a seeded verify-config error apart from a genuine
+// missing-toolchain park: the log line is the other human-facing surface
+// verifyToolchainSection matches, and it must not send the operator after an
+// image rebuild for a config problem.
+func TestToolchainLogMessageConfigErrorDiffersFromMissingToolchain(t *testing.T) {
+	configError := toolchainLogMessage(&ToolchainMissingError{
+		Tier:    "declared",
+		Subject: verifyConfigErrorMarker,
+		Reason:  "CMX_VERIFY could not be parsed: unexpected end of JSON input",
+	})
+	assert.Contains(t, configError, "declared verify config could not be read")
+	assert.NotContains(t, configError, "toolchain cannot run here")
+
+	missingToolchain := toolchainLogMessage(&ToolchainMissingError{
+		Tier:    "detected",
+		Subject: "maven project (in backend/)",
+		Reason:  `java: exec: "java": executable file not found in $PATH`,
+	})
+	assert.Contains(t, missingToolchain, "toolchain cannot run here")
 }
 
 // TestRunVerifyPlanEmitsVerification: the gate is a subprocess, not a tool call,
@@ -1153,44 +1188,58 @@ func TestRunVerifyPlanEmitNilSafe(t *testing.T) {
 }
 
 func TestLogVerifyRound(t *testing.T) {
+	// realTimeoutSkip is a note classifyVerify actually emits, not a prettified
+	// stand-in - it already ends in "treated as unverified", which is exactly
+	// what let the redundant " - proceeding unverified" suffix hide in
+	// production: a fixture note that didn't say so masked the double-up.
+	realTimeoutSkip := classifyVerify(
+		verifyPlan{Timeout: 10 * time.Minute},
+		verifyexec.Outcome{TimedOut: true},
+	)
+
 	tests := []struct {
-		name string
-		res  verifyResult
-		want string
+		name  string
+		res   verifyResult
+		round int
+		want  string
 	}{
 		{
-			name: "passed",
-			res:  verifyResult{Status: verifyPassed},
-			want: "verify passed - review round 1",
+			name:  "passed",
+			res:   verifyResult{Status: verifyPassed},
+			round: 1,
+			want:  "verify passed - review round 1",
 		},
 		{
-			name: "failed",
-			res:  verifyResult{Status: verifyFailed},
-			want: "verify failed - review round 2",
+			name:  "failed",
+			res:   verifyResult{Status: verifyFailed},
+			round: 2,
+			want:  "verify failed - review round 2",
 		},
 		{
-			name: "skipped names the reason and says it proceeds unverified",
-			res:  verifyResult{Status: verifySkipped, Note: "timed out after 10m0s"},
-			want: "verify skipped (timed out after 10m0s) - review round 3 - proceeding unverified",
+			name:  "skipped with a real classifyVerify note does not double up on unverified",
+			res:   realTimeoutSkip,
+			round: 3,
+			want:  "verify skipped (" + realTimeoutSkip.Note + ") - review round 3",
 		},
 		{
-			name: "skipped without a note still says it proceeds unverified",
-			res:  verifyResult{Status: verifySkipped},
-			want: "verify skipped - review round 1 - proceeding unverified",
+			name:  "skipped without a note still says it proceeds unverified",
+			res:   verifyResult{Status: verifySkipped},
+			round: 1,
+			want:  "verify skipped - review round 1 - proceeding unverified",
 		},
 	}
 
-	rounds := []int{1, 2, 3, 1}
-
-	for i, tt := range tests {
+	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ops := &fakeOps{}
 			o := &run{d: Deps{Ops: ops, Cfg: Config{CardID: "CARD-1"}}}
 
-			o.logVerifyRound(context.Background(), tt.res, rounds[i])
+			o.logVerifyRound(context.Background(), tt.res, tt.round)
 
 			require.Len(t, ops.logs, 1, "exactly one line per round; logs=%v", ops.logs)
 			assert.Equal(t, tt.want, ops.logs[0])
+			assert.LessOrEqual(t, strings.Count(ops.logs[0], "unverified"), 1,
+				"the word must never appear twice; logs=%v", ops.logs)
 		})
 	}
 }
@@ -1219,4 +1268,42 @@ func TestResolveVerifyParksOnUnreadableConfig(t *testing.T) {
 	require.ErrorAs(t, err, &missing, "an unreadable declared config must park, not proceed unverified")
 	assert.Equal(t, "declared", missing.Tier)
 	assert.Contains(t, missing.Reason, "could not be parsed")
+}
+
+// TestResolveVerifyUnreadableConfigKeepsDetectionReason pins the terminal
+// switch's precedence: when BOTH a seeded verify-config error AND a
+// detected-but-unresolved marker fire, the config error correctly wins tier
+// and outranks detection as the actionable root cause - but det.Reason must
+// not be lost off the error entirely, or the operator needs a second round
+// trip to learn what detection found too.
+func TestResolveVerifyUnreadableConfigKeepsDetectionReason(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX-only")
+	}
+
+	stubTools(t, "mvn") // mvn resolves, java does not
+
+	dir := t.TempDir()
+	writeFile(t, dir, "pom.xml", "<project></project>\n")
+
+	ops := &fakeOps{}
+	o := &run{d: Deps{
+		Ops: ops,
+		Cfg: Config{
+			CardID:            "CARD-1",
+			Workspace:         dir,
+			VerifyConfigError: "CMX_VERIFY could not be parsed: unexpected end of JSON input",
+		},
+	}}
+	o.proposeAttempted = true // skip Tier 3; no model in this test
+
+	_, err := o.resolveVerify(context.Background())
+
+	var missing *ToolchainMissingError
+	require.ErrorAs(t, err, &missing, "the config error must still win the park")
+	assert.Equal(t, "declared", missing.Tier, "the config error outranks detection as the actionable root cause")
+	assert.Equal(t, verifyConfigErrorMarker, missing.Subject)
+	assert.Contains(t, missing.Reason, "could not be parsed", "the config error stays the headline reason")
+	assert.Contains(t, missing.Reason, "maven project", "detection's finding must still reach the operator")
+	assert.Contains(t, missing.Reason, "java", "detection's probe-failure detail must still reach the operator")
 }

@@ -617,8 +617,16 @@ func maxTurnsLogMessage(phase string, mte *MaxTurnsError) string {
 	return fmt.Sprintf("turn cap reached on model %q after %d turns - parking work; raise CMX_MAX_TURNS or split the subtask", mte.Model, mte.Turns)
 }
 
-// toolchainLogMessage is the canonical card-log line for a toolchain-missing park.
+// toolchainLogMessage is the canonical card-log line for a toolchain-missing
+// park. A seeded verify-config error (see verifyConfigErrorMarker) gets its
+// own wording, matching verifyToolchainSection: no toolchain is missing there,
+// so "verify toolchain cannot run here" would send the operator rebuilding
+// the worker image for a config problem instead of fixing it.
 func toolchainLogMessage(tme *ToolchainMissingError) string {
+	if tme.Subject == verifyConfigErrorMarker {
+		return fmt.Sprintf("declared verify config could not be read (%s); parking card as blocked", tme.Reason)
+	}
+
 	return fmt.Sprintf("verify toolchain cannot run here (%s: %s - %s); parking card as blocked", tme.Tier, tme.Subject, tme.Reason)
 }
 
