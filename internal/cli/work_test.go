@@ -10,12 +10,14 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/config"
 	"github.com/mhersson/contextmatrix-agent/internal/secrets"
 	"github.com/mhersson/contextmatrix-harness/llm"
+	protocol "github.com/mhersson/contextmatrix-protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -496,6 +498,23 @@ func TestSpecFromEnv_Verify(t *testing.T) {
 		assert.Equal(t, 900, spec.Verify.TimeoutSeconds)
 		assert.Empty(t, spec.VerifyConfigError)
 	})
+}
+
+// TestVerifyConfigAllZeroPredicateCoversEveryField guards the all-zero decode
+// check in specFromEnv (the `vc.Command == "" && vc.TimeoutSeconds == 0 &&
+// len(vc.Env) == 0` predicate), which lists protocol.VerifyConfig's fields by
+// name rather than reflecting over them. If the struct gains a fourth field
+// and a server sends a config carrying only it, an agent still on this
+// predicate decodes all-zero and parks the card as blocked instead of
+// degrading quietly to detection - worker images routinely lag server
+// upgrades, so that mismatch is a real deployment scenario, not a hypothetical.
+// This test does not change protocol.VerifyConfig; it fails loudly the day
+// someone else does, pointing at the predicate that must be updated with it.
+func TestVerifyConfigAllZeroPredicateCoversEveryField(t *testing.T) {
+	got := reflect.TypeFor[protocol.VerifyConfig]().NumField()
+	require.Equal(t, 3, got,
+		"protocol.VerifyConfig gained or lost a field (now %d): update the all-zero "+
+			"check in specFromEnv (internal/cli/work.go) to cover it, then update this constant", got)
 }
 
 func TestSpecFromEnv_Mob(t *testing.T) {
