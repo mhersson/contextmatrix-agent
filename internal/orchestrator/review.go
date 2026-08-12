@@ -351,6 +351,8 @@ func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, autho
 
 		vres = res
 
+		o.logVerifyRound(ctx, res, round)
+
 		switch res.Status {
 		case verifyFailed:
 			// Gate failure goes STRAIGHT to the fix loop without burning reviewer
@@ -359,9 +361,8 @@ func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, autho
 			return "verify command failed: " + plan.Display + "\n" +
 				tools.HeadTail(res.Output, verifyOutputTail), "", false, vres, nil
 		case verifySkipped:
-			// A missing or timed-out gate is inconclusive, not a defect: log it
-			// loudly and proceed to the specialists without a fix loop.
-			o.d.logCard(ctx, "verify skipped (%s) - review round %d proceeds unverified", res.Note, round)
+			// A missing or timed-out gate is inconclusive, not a defect: proceed to
+			// the specialists without a fix loop. logVerifyRound already said so.
 		case verifyPassed:
 			// Proceed to the specialist panel.
 		}

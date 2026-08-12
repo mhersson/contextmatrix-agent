@@ -1099,3 +1099,46 @@ func TestVerifyToolchainSectionRemedyMatchesThePark(t *testing.T) {
 	assert.Contains(t, missingPark, "Install the toolchain")
 	assert.Contains(t, missingPark, "java")
 }
+
+func TestLogVerifyRound(t *testing.T) {
+	tests := []struct {
+		name string
+		res  verifyResult
+		want string
+	}{
+		{
+			name: "passed",
+			res:  verifyResult{Status: verifyPassed},
+			want: "verify passed - review round 1",
+		},
+		{
+			name: "failed",
+			res:  verifyResult{Status: verifyFailed},
+			want: "verify failed - review round 2",
+		},
+		{
+			name: "skipped names the reason and says it proceeds unverified",
+			res:  verifyResult{Status: verifySkipped, Note: "timed out after 10m0s"},
+			want: "verify skipped (timed out after 10m0s) - review round 3 - proceeding unverified",
+		},
+		{
+			name: "skipped without a note still says it proceeds unverified",
+			res:  verifyResult{Status: verifySkipped},
+			want: "verify skipped - review round 1 - proceeding unverified",
+		},
+	}
+
+	rounds := []int{1, 2, 3, 1}
+
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			o := &run{d: Deps{Ops: ops, Cfg: Config{CardID: "CARD-1"}}}
+
+			o.logVerifyRound(context.Background(), tt.res, rounds[i])
+
+			require.Len(t, ops.logs, 1, "exactly one line per round; logs=%v", ops.logs)
+			assert.Equal(t, tt.want, ops.logs[0])
+		})
+	}
+}

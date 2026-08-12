@@ -106,6 +106,26 @@ func verifyStatusWord(s verifyStatus) string {
 	}
 }
 
+// logVerifyRound records one review round's gate outcome on the card. Without
+// it the board carries only the resolution line, so a gate that failed and a
+// gate that never ran read identically to a human reviewing the activity log.
+// A skip names its reason and says out loud that the round proceeds unverified.
+func (o *run) logVerifyRound(ctx context.Context, res verifyResult, round int) {
+	msg := fmt.Sprintf("verify %s", verifyStatusWord(res.Status))
+
+	if res.Note != "" {
+		msg += " (" + res.Note + ")"
+	}
+
+	msg += fmt.Sprintf(" - review round %d", round)
+
+	if res.Status == verifySkipped {
+		msg += " - proceeding unverified"
+	}
+
+	o.d.logCard(ctx, "%s", msg)
+}
+
 // verifyDocContext is the advisory verify line handed to the document phase:
 // the winner's judged result for a Best-of-N run, else the resolved command the
 // review gate will run (the single-solver gate has not run yet at document time).
