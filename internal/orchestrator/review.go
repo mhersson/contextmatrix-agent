@@ -29,7 +29,9 @@ const hardReviewIterationCap = 50
 const defaultReviewAttemptsCap = 3
 
 // verifyOutputTail caps the verify-command output carried into findings, so a
-// noisy failing suite does not swamp the fix prompt.
+// noisy failing suite does not swamp the fix prompt. It is a TAIL: a build
+// tool's diagnostics are concentrated in its last bytes, and res.Output is
+// already bounded at 64 KiB by verifyexec, so nothing upstream is lost.
 const verifyOutputTail = 4000
 
 // verdict is the synthesis model's structured decision: approve outright or
@@ -359,7 +361,7 @@ func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, autho
 			// tokens. The redacted output tail is the finding the coder fixes. No
 			// verdict ran, so the fix run falls back to the card tier (empty fixTier).
 			return "verify command failed: " + plan.Display + "\n" +
-				tools.HeadTail(res.Output, verifyOutputTail), "", false, vres, nil
+				lastChars(res.Output, verifyOutputTail), "", false, vres, nil
 		case verifySkipped:
 			// A missing or timed-out gate is inconclusive, not a defect: proceed to
 			// the specialists without a fix loop. logVerifyRound already said so.
