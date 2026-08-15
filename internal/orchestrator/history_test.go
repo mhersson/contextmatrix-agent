@@ -108,7 +108,7 @@ func TestStripAgentSections(t *testing.T) {
 	}{
 		{
 			name: "strips every recorded heading",
-			body: "Intro.\n\n## Diagnosis\n\nd\n\n## Design\n\nds\n\n## Plan\n\np\n\n## Discussion\n\ndc\n\n## Execute Discussions\n\ned\n\n## Best-of-N Report\n\nb\n\n## Verify Command\n\nv\n\n## Review Findings\n\nr\n",
+			body: "Intro.\n\n## Diagnosis\n\nd\n\n## Design\n\nds\n\n## Plan\n\np\n\n## Discussion\n\ndc\n\n## Execute Discussions\n\ned\n\n## Best-of-N Report\n\nb\n\n## Verify Command\n\nv\n\n## Review Findings\n\nr\n\n## PR Gates\n\ng\n",
 			want: "Intro.",
 		},
 		{

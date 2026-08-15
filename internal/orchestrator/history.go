@@ -267,6 +267,7 @@ var agentSectionHeadings = []string{
 	"Best-of-N Report",
 	"Verify Command",
 	"Review Findings",
+	"PR Gates",
 }
 
 // isAgentHeading reports whether the trimmed line opens a recorded run-history
