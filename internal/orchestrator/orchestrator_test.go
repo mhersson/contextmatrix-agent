@@ -259,7 +259,7 @@ func TestMaxTurnsLogMessagePhaseAware(t *testing.T) {
 }
 
 func TestPhaseOrderPlacesDocumentBetweenExecuteAndReview(t *testing.T) {
-	assert.Equal(t, []string{"plan", "execute", "judge", "document", "review", "integrate", "done"}, phaseOrder)
+	assert.Equal(t, []string{"plan", "execute", "judge", "document", "review", "integrate", "pr_gates", "done"}, phaseOrder)
 }
 
 func TestRunWalksDocumentBetweenExecuteAndReview(t *testing.T) {
@@ -282,10 +282,11 @@ func TestRunWalksDocumentBetweenExecuteAndReview(t *testing.T) {
 	o.documentFn = mk("document")
 	o.reviewFn = mk("review")
 	o.integrateFn = mk("integrate")
+	o.prGatesFn = mk("pr_gates")
 	o.doneFn = mk("done")
 
 	require.NoError(t, o.execute(context.Background()))
-	assert.Equal(t, []string{"plan", "execute", "document", "review", "integrate", "done"}, order,
+	assert.Equal(t, []string{"plan", "execute", "document", "review", "integrate", "pr_gates", "done"}, order,
 		"document runs immediately after execute and before review")
 }
 

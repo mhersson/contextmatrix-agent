@@ -22,7 +22,7 @@ import (
 )
 
 // This file drives the REAL autonomous orchestrator FSM end-to-end in-process:
-// plan -> execute -> document -> review -> integrate -> done. The only stubbed boundaries
+// plan -> execute -> document -> review -> integrate -> pr_gates -> done. The only stubbed boundaries
 // are OpenRouter (a content-aware httptest SSE server) and the CM card-ops
 // surface (an in-process recorder satisfying both worker.CardOps and the wider
 // orchestrator.Ops). Git is REAL - a temp clone against a local bare origin -
@@ -652,9 +652,10 @@ func TestOrchestratorEndToEndHappyPath(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "completed", res.Reason)
 
-	// --- phase order: plan, execute, judge, document, review, integrate, done, in order -----
-	// judge is persisted like every phase even on a normal run, where its body is a no-op.
-	assert.Equal(t, []string{"plan", "execute", "judge", "document", "review", "integrate", "done"}, ops.phases,
+	// --- phase order: plan, execute, judge, document, review, integrate, pr_gates, done -----
+	// judge is persisted like every phase even on a normal run, where its body is a no-op;
+	// so is pr_gates, whose body is a pass-through when the card carries no gate flags.
+	assert.Equal(t, []string{"plan", "execute", "judge", "document", "review", "integrate", "pr_gates", "done"}, ops.phases,
 		"phases must be persisted in forward order exactly once each")
 
 	// --- subtask wiring: two create_card calls with parent + the dep edge ---
@@ -689,7 +690,7 @@ func TestOrchestratorEndToEndHappyPath(t *testing.T) {
 	assert.Equal(t, 1, ops.count("StartReview"))
 
 	// --- the card was driven to done and released, never CompleteTask'd ----
-	// (the parent transitions to done in integrate; the worker does not call
+	// (the parent transitions to done in pr_gates; the worker does not call
 	// CompleteTask on the FSM happy path - done releases the claim).
 	assert.Equal(t, 1, ops.count("TransitionCard"), "parent transitions to done once")
 	assert.GreaterOrEqual(t, ops.count("ReleaseCard"), 1, "done releases the parent claim")
@@ -771,8 +772,9 @@ func TestOrchestratorEndToEndFixLoop(t *testing.T) {
 	assert.Equal(t, 1, ops.count("IncrementReviewAttempts"),
 		"the single rejection increments review attempts once")
 
-	// The run still reached integrate and done (judge is a persisted no-op on a normal run).
-	assert.Equal(t, []string{"plan", "execute", "judge", "document", "review", "integrate", "done"}, ops.phases)
+	// The run still reached integrate and done (judge and pr_gates are persisted
+	// no-ops on a normal, ungated run).
+	assert.Equal(t, []string{"plan", "execute", "judge", "document", "review", "integrate", "pr_gates", "done"}, ops.phases)
 	assert.Equal(t, 1, ops.count("TransitionCard"), "parent transitions to done")
 
 	// --- origin's integrated history is autosquashed: NO fixup! subjects ----

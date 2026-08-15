@@ -97,7 +97,9 @@ max_concurrent: 5
 # Maximum lifetime of a worker container before the agent's own watchdog kills
 # it. Must not exceed 150m (ContextMatrix force-kills containers older than
 # 150m externally; the agent must fire first so cleanup happens properly).
-# Default: 2h30m.
+# Relayed into the worker as CMX_CONTAINER_TIMEOUT_SECONDS so the pr_gates
+# phase can park about 10 minutes ahead of the kill instead of being cut off
+# mid-wait. Default: 2h30m.
 # CMX_CONTAINER_TIMEOUT
 container_timeout: 2h30m
 
@@ -228,3 +230,24 @@ tool_output_max_bytes: 131072
 # compaction is enabled. Default: 6.
 # CMX_COMPACTION_KEEP_RECENT_TURNS
 # compaction_keep_recent_turns: 6
+
+# --- PR gates -------------------------------------------------------------------
+
+# The pr_gates phase (between integrate and done) polls a PR's Copilot review
+# and CI status when the card requests them. These three vars are read
+# directly by the worker container with built-in defaults - there is no
+# serve config field for them, so override per-deployment via
+# worker_extra_env.
+
+# How often the gate re-polls CI checks and the Copilot review. Default: 30.
+# CMX_GATES_POLL_INTERVAL_SECONDS
+
+# How long the CI gate waits for checks to settle before parking. A value
+# below roughly 300 (the fix-round reserve a coder run, its push, and a fresh
+# CI cycle need) means the gate parks on the first red poll instead of ever
+# attempting a fix round. Default: 2700.
+# CMX_GATES_CI_WAIT_TIMEOUT_SECONDS
+
+# How long the Copilot gate waits for a review to land before proceeding
+# without one - it never parks on this timeout. Default: 600.
+# CMX_GATES_COPILOT_WAIT_TIMEOUT_SECONDS

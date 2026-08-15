@@ -313,6 +313,66 @@ func TestSpecFromEnv_IntParsing(t *testing.T) {
 	})
 }
 
+func TestSpecFromEnv_GateKnobs(t *testing.T) {
+	t.Run("defaults", func(t *testing.T) {
+		setRequired(t)
+
+		spec, err := specFromEnv()
+		require.NoError(t, err)
+		assert.Equal(t, time.Duration(0), spec.ContainerTimeout, "CMX_CONTAINER_TIMEOUT_SECONDS unset must default to 0 (unknown)")
+		assert.Equal(t, 30*time.Second, spec.GatesPollInterval)
+		assert.Equal(t, 45*time.Minute, spec.GatesCIWaitTimeout)
+		assert.Equal(t, 10*time.Minute, spec.GatesCopilotWaitTimeout)
+	})
+
+	t.Run("valid_override", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("CMX_CONTAINER_TIMEOUT_SECONDS", "5400")
+		t.Setenv("CMX_GATES_CI_WAIT_TIMEOUT_SECONDS", "600")
+
+		spec, err := specFromEnv()
+		require.NoError(t, err)
+		assert.Equal(t, 90*time.Minute, spec.ContainerTimeout)
+		assert.Equal(t, 10*time.Minute, spec.GatesCIWaitTimeout)
+	})
+
+	t.Run("garbage_container_timeout", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("CMX_CONTAINER_TIMEOUT_SECONDS", "not-a-number")
+
+		_, err := specFromEnv()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "CMX_CONTAINER_TIMEOUT_SECONDS")
+	})
+
+	t.Run("garbage_gates_poll_interval", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("CMX_GATES_POLL_INTERVAL_SECONDS", "not-a-number")
+
+		_, err := specFromEnv()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "CMX_GATES_POLL_INTERVAL_SECONDS")
+	})
+
+	t.Run("garbage_gates_ci_wait_timeout", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("CMX_GATES_CI_WAIT_TIMEOUT_SECONDS", "not-a-number")
+
+		_, err := specFromEnv()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "CMX_GATES_CI_WAIT_TIMEOUT_SECONDS")
+	})
+
+	t.Run("garbage_gates_copilot_wait_timeout", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("CMX_GATES_COPILOT_WAIT_TIMEOUT_SECONDS", "not-a-number")
+
+		_, err := specFromEnv()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "CMX_GATES_COPILOT_WAIT_TIMEOUT_SECONDS")
+	})
+}
+
 func TestSpecFromEnv_DefaultModelFallback(t *testing.T) {
 	t.Run("uses_capable_default_when_unset", func(t *testing.T) {
 		setRequired(t)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 )
 
@@ -255,9 +256,8 @@ func extractSection(body, heading string) string {
 }
 
 // agentSectionHeadings is the canonical list of run-history headings the FSM
-// records onto the parent card body - every recordSection caller writes one of
-// these. "Review Findings" is matched as a prefix so the numbered
-// "(Round N)" variants are covered, mirroring reviewFindingsHistory.
+// records onto the parent card body once per run - every recordSection caller
+// writes one of these or one of agentRoundSectionHeadings.
 var agentSectionHeadings = []string{
 	"Diagnosis",
 	"Design",
@@ -266,11 +266,22 @@ var agentSectionHeadings = []string{
 	"Execute Discussions",
 	"Best-of-N Report",
 	"Verify Command",
+	"PR Gates",
+}
+
+// agentRoundSectionHeadings is the canonical list of run-history headings the
+// FSM records once PER ROUND, suffixing later rounds with "(Round N)". They are
+// matched as prefixes so every numbered variant is covered, mirroring
+// sectionsWithPrefix. A heading belongs here, not above, as soon as any
+// recordSection caller numbers it.
+var agentRoundSectionHeadings = []string{
 	"Review Findings",
+	"Copilot Review",
 }
 
 // isAgentHeading reports whether the trimmed line opens a recorded run-history
-// section: exact match for every heading, prefix match for "Review Findings".
+// section: an exact match on a once-per-run heading, or a prefix match on a
+// per-round one.
 func isAgentHeading(trimmed string) bool {
 	title, ok := strings.CutPrefix(trimmed, "## ")
 	if !ok {
@@ -279,16 +290,12 @@ func isAgentHeading(trimmed string) bool {
 
 	title = strings.TrimSpace(title)
 
-	for _, h := range agentSectionHeadings {
-		if h == "Review Findings" {
-			if strings.HasPrefix(title, h) {
-				return true
-			}
+	if slices.Contains(agentSectionHeadings, title) {
+		return true
+	}
 
-			continue
-		}
-
-		if title == h {
+	for _, h := range agentRoundSectionHeadings {
+		if strings.HasPrefix(title, h) {
 			return true
 		}
 	}
@@ -296,11 +303,37 @@ func isAgentHeading(trimmed string) bool {
 	return false
 }
 
+// sectionsWithPrefix returns every "## <heading>..." section recorded on the
+// body, concatenated in body order - the whole recorded history of a per-round
+// heading, whose later rounds carry a "(Round N)" suffix. Empty when none have
+// been recorded yet.
+func sectionsWithPrefix(body, heading string) string {
+	var b strings.Builder
+
+	marker := "## " + heading
+	in := false
+
+	for line := range strings.SplitSeq(body, "\n") {
+		if strings.HasPrefix(line, "## ") {
+			in = strings.HasPrefix(line, marker)
+		}
+
+		if in {
+			b.WriteString(line)
+			b.WriteByte('\n')
+		}
+	}
+
+	return b.String()
+}
+
 // stripAgentSections returns body with every recorded run-history section
 // removed, keeping the human-written content - the pre-heading intro and any
-// heading not in agentSectionHeadings. Prompt sites read the stripped view so
-// resumed runs do not re-absorb the accumulated history; o.body stays raw
-// because it is the sole recordSection write-back source.
+// heading isAgentHeading does not recognize, i.e. not an exact match in
+// agentSectionHeadings and not a prefix match on agentRoundSectionHeadings.
+// Prompt sites read the stripped view so resumed runs do not re-absorb the
+// accumulated history; o.body stays raw because it is the sole recordSection
+// write-back source.
 //
 // Boundary semantics deliberately match upsertSection/extractSection: a
 // section starts at a line whose trimmed text is a recorded heading and ends

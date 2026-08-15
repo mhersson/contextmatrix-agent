@@ -102,6 +102,12 @@ type LaunchEnv struct {
 	MemoryBytes int64
 	PidsLimit   int64
 
+	// ContainerTimeoutSeconds is the service config's container_timeout,
+	// passed to the worker as CMX_CONTAINER_TIMEOUT_SECONDS so a phase that
+	// must park before serve's hard kill knows its deadline. Zero is omitted
+	// (the worker treats absence as "unknown").
+	ContainerTimeoutSeconds int
+
 	// BashTimeoutMaxSeconds, ToolOutputMaxBytes, DefaultModel, and
 	// ReasoningEffort are the CMX_* worker knobs. Zero/empty values are omitted
 	// so the worker applies its own defaults.
@@ -618,6 +624,10 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 			"CMX_COMPACTION_THRESHOLD="+formatFloat(s.launchEnv.CompactionThreshold),
 			"CMX_COMPACTION_KEEP_RECENT_TURNS="+strconv.Itoa(s.launchEnv.CompactionKeepRecentTurns),
 		)
+	}
+
+	if s.launchEnv.ContainerTimeoutSeconds > 0 {
+		env = append(env, "CMX_CONTAINER_TIMEOUT_SECONDS="+strconv.Itoa(s.launchEnv.ContainerTimeoutSeconds))
 	}
 
 	if p.Selection != nil {

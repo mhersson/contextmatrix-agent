@@ -41,6 +41,13 @@ var runOrchestrator = orchestrator.Run
 // rounds are enough.
 const reviewAttemptsCap = 3
 
+// gatesFinalizeMargin is how much of the container's lifetime the pr_gates
+// deadline leaves unspent, so a gate that runs out of patience still has room to
+// write its park note and exit cleanly before serve kills the container. A
+// gates park pushes no WIP - the work was already pushed by integrate - and
+// releases no claim - CM clears it when it sees the completed callback.
+const gatesFinalizeMargin = 10 * time.Minute
+
 // RunSpec is the container-side contract: populated from CM_* env by the
 // work command.
 type RunSpec struct {
@@ -75,6 +82,25 @@ type RunSpec struct {
 	MaxTurns              int     // CMX_MAX_TURNS
 	MaxCardCost           float64 // CMX_MAX_CARD_COST; 0 disables
 	SelectorPriceHeadroom float64 // CMX_SELECTOR_PRICE_HEADROOM; 0 uses worker default
+
+	// ContainerTimeout is serve's hard kill ceiling for this run's container
+	// (CMX_CONTAINER_TIMEOUT_SECONDS). 0 = unknown - an older serve, or a host
+	// that never configured it - so a phase that must park before the kill
+	// has no deadline to respect.
+	ContainerTimeout time.Duration
+
+	// GatesPollInterval is how often the pr_gates phase polls CI and Copilot
+	// review status. CMX_GATES_POLL_INTERVAL_SECONDS; default 30s.
+	GatesPollInterval time.Duration
+
+	// GatesCIWaitTimeout bounds how long the pr_gates phase waits for CI to
+	// finish before parking. CMX_GATES_CI_WAIT_TIMEOUT_SECONDS; default 45m.
+	GatesCIWaitTimeout time.Duration
+
+	// GatesCopilotWaitTimeout bounds how long the pr_gates phase waits for the
+	// requested Copilot review before parking.
+	// CMX_GATES_COPILOT_WAIT_TIMEOUT_SECONDS; default 10m.
+	GatesCopilotWaitTimeout time.Duration
 
 	MaxCapability bool // CM_MAX_CAPABILITY; every pick chooses the most capable model in the tier regardless of price
 
@@ -292,6 +318,8 @@ type fsmArgs struct {
 //     graceful "completed", no extra CompleteTask here.
 //   - ReviewParkedError: graceful "completed", card left in review, NO
 //     CompleteTask and NO release - a human picks it up from review.
+//   - GatesParkedError: identical shape - the pr_gates phase could not clear a
+//     PR gate, so the card waits in review with its ## PR Gates note.
 //   - BudgetExceededError: push WIP, release the claim, return the error
 //     (non-zero exit; serve emits the failed callback).
 //   - ContextLimitError: identical to the budget park - push WIP, release the
@@ -334,13 +362,26 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 
 	mob := mobConfig(a.spec.Mob)
 
+	// One gh handle serves both PR roles: integrate opens the pull request
+	// through it, pr_gates polls the same PR's checks and reviews.
+	pr := NewPRCreator(a.ws, secretsPathForAuth(a.spec), a.spec.CACertFile, a.spec.RepoURL)
+
+	// The gates must stop waiting before serve kills the container, leaving room
+	// for the FSM to finalize (park note, WIP push, release). An unknown
+	// container timeout leaves the deadline zero - the gates' own waits bound them.
+	var deadline time.Time
+	if a.spec.ContainerTimeout > 0 {
+		deadline = time.Now().Add(a.spec.ContainerTimeout - gatesFinalizeMargin)
+	}
+
 	d := orchestrator.Deps{
 		Ops: ops2orchestrator(a.ops),
 		Git: a.git,
 		GitForDir: func(dir string) orchestrator.GitOps {
 			return NewGit(dir, secretsPathForAuth(a.spec), hostFromRepoURL(a.spec.RepoURL), a.spec.CACertFile)
 		},
-		PR:         NewPRCreator(a.ws, secretsPathForAuth(a.spec), a.spec.CACertFile, a.spec.RepoURL),
+		PR:         pr,
+		PRGates:    pr,
 		Client:     a.client,
 		Emit:       a.emit,
 		Registry:   buildRegistry(a.spec),
@@ -388,8 +429,12 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 				Threshold:       a.spec.CompactionThreshold,
 				KeepRecentTurns: a.spec.CompactionKeepRecentTurns,
 			},
-			Verify:            declaredVerify(a.spec.Verify),
-			VerifyConfigError: a.spec.VerifyConfigError,
+			Verify:                  declaredVerify(a.spec.Verify),
+			VerifyConfigError:       a.spec.VerifyConfigError,
+			Deadline:                deadline,
+			GatesPollInterval:       a.spec.GatesPollInterval,
+			GatesCIWaitTimeout:      a.spec.GatesCIWaitTimeout,
+			GatesCopilotWaitTimeout: a.spec.GatesCopilotWaitTimeout,
 		},
 	}
 
@@ -410,6 +455,13 @@ func mapFSMResult(ctx context.Context, a fsmArgs, err error) (Result, error) {
 		// Parked, not failed: the card stays in review for a human. No
 		// CompleteTask, no release.
 		slog.Info("review parked; leaving card in review", "card", a.spec.CardID)
+
+		return Result{Reason: "completed"}, nil
+
+	case isGatesParked(err):
+		// Parked, not failed: the card stays in review with a ## PR Gates
+		// note. No CompleteTask, no release - same shape as review parking.
+		slog.Info("pr gates parked; leaving card in review", "card", a.spec.CardID)
 
 		return Result{Reason: "completed"}, nil
 
@@ -489,6 +541,13 @@ func isReviewParked(err error) bool {
 	var rp *orchestrator.ReviewParkedError
 
 	return errors.As(err, &rp)
+}
+
+// isGatesParked reports whether err is the orchestrator's pr-gates park sentinel.
+func isGatesParked(err error) bool {
+	var gp *orchestrator.GatesParkedError
+
+	return errors.As(err, &gp)
 }
 
 // isBudgetExceeded reports whether err is the orchestrator's budget-ceiling sentinel.

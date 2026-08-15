@@ -308,9 +308,10 @@ func newHarness(t *testing.T, maxConcurrent int) *harness {
 		Reporter:      reporter,
 		Verifier:      verifier,
 		LaunchEnv: LaunchEnv{
-			BaseImage: "base:image",
-			MCPURL:    "http://cm:8080/mcp",
-			MCPAPIKey: "cfg-mcp-key",
+			BaseImage:               "base:image",
+			MCPURL:                  "http://cm:8080/mcp",
+			MCPAPIKey:               "cfg-mcp-key",
+			ContainerTimeoutSeconds: 9000, // mirrors config.Defaults()'s 2h30m container_timeout
 		},
 		Images:           images,
 		ImageListFilters: []string{"contextmatrix-agent"},
@@ -435,6 +436,7 @@ func TestTrigger_AcceptsAndLaunches(t *testing.T) {
 	assert.Contains(t, spec.Env, "CM_MODEL=some-model")
 	assert.Contains(t, spec.Env, "CM_MCP_URL=http://cm:8080/mcp")
 	assert.Contains(t, spec.Env, "CM_MCP_API_KEY=cfg-mcp-key")
+	assert.Contains(t, spec.Env, "CMX_CONTAINER_TIMEOUT_SECONDS=9000")
 
 	// running callback after successful launch.
 	require.Eventually(t, func() bool {

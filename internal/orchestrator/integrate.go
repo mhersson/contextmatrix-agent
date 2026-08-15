@@ -17,8 +17,9 @@ import (
 // (§5.6): abort (done by the helper), soft-reset to the merge-base, and recommit
 // as ONE squashed commit whose content is byte-identical to what review
 // approved - never auto-resolving, deferring the conflict to merge/PR time for a
-// human. It optionally opens a PR (body written by the orchestrator model),
-// reports the push, and transitions the parent to done.
+// human. It optionally opens a PR (body written by the orchestrator model) and
+// reports the push. The pr_gates phase that follows owns the transition to done,
+// so a gated card is held in review until its PR gates pass.
 func runIntegrate(ctx context.Context, o *run) error {
 	d := o.d
 	cfg := d.Cfg
@@ -99,12 +100,12 @@ func runIntegrate(ctx context.Context, o *run) error {
 		}
 	}
 
+	// The pr_gates phase reads this to know what to gate on; a resumed run that
+	// enters at pr_gates falls back to the PR URL report_push recorded here.
+	o.prURL = prURL
+
 	if err := d.Ops.ReportPush(ctx, cfg.CardID, cfg.Branch, prURL); err != nil {
 		return fmt.Errorf("report push: %w", err)
-	}
-
-	if err := d.Ops.TransitionCard(ctx, cfg.CardID, "done"); err != nil {
-		return fmt.Errorf("transition parent to done: %w", err)
 	}
 
 	return nil

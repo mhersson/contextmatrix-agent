@@ -108,12 +108,22 @@ func TestStripAgentSections(t *testing.T) {
 	}{
 		{
 			name: "strips every recorded heading",
-			body: "Intro.\n\n## Diagnosis\n\nd\n\n## Design\n\nds\n\n## Plan\n\np\n\n## Discussion\n\ndc\n\n## Execute Discussions\n\ned\n\n## Best-of-N Report\n\nb\n\n## Verify Command\n\nv\n\n## Review Findings\n\nr\n",
+			body: "Intro.\n\n## Diagnosis\n\nd\n\n## Design\n\nds\n\n## Plan\n\np\n\n## Discussion\n\ndc\n\n## Execute Discussions\n\ned\n\n## Best-of-N Report\n\nb\n\n## Verify Command\n\nv\n\n## Review Findings\n\nr\n\n## PR Gates\n\ng\n",
 			want: "Intro.",
 		},
 		{
 			name: "strips numbered review rounds via prefix",
 			body: "Intro.\n\n## Review Findings (Round 2)\n\nr2\n\n## Review Findings (Round 10)\n\nr10\n",
+			want: "Intro.",
+		},
+		{
+			name: "strips the bare copilot review heading",
+			body: "Intro.\n\n## Copilot Review\n\nc1\n",
+			want: "Intro.",
+		},
+		{
+			name: "strips numbered copilot rounds via prefix",
+			body: "Intro.\n\n## Copilot Review (Round 2)\n\nc2\n\n## Copilot Review (Round 10)\n\nc10\n",
 			want: "Intro.",
 		},
 		{

@@ -886,6 +886,91 @@ func TestReviewParkedMapsToCompleted(t *testing.T) {
 	assert.Equal(t, 0, ops.count("ReleaseCard"), "review park leaves the card in review")
 }
 
+// TestMapFSMResult_GatesParked: a GatesParkedError is the same graceful shape as
+// a review park - exit-0, completed reason, card left in review for a human, and
+// no release (the pr_gates park note is already on the card).
+func TestMapFSMResult_GatesParked(t *testing.T) {
+	remote := setupBareRemote(t)
+	wsParent := t.TempDir()
+	ops := newFakeOps()
+
+	swapRunOrchestrator(t, func(_ context.Context, _ orchestrator.Deps) error {
+		return &orchestrator.GatesParkedError{Reason: "PR creation failed - nothing to gate on"}
+	})
+
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	res, err := Run(context.Background(), baseSpec(t, remote, wsParent), ops, &scriptedLLM{}, emit, openStdin(t))
+	require.NoError(t, err)
+	assert.Equal(t, "completed", res.Reason)
+
+	assert.Equal(t, 0, ops.count("CompleteTask"), "a gates park must NOT complete the card")
+	assert.Equal(t, 0, ops.count("ReleaseCard"), "a gates park leaves the card in review")
+}
+
+// TestFSMDepsCarryGateWiring: the worker hands the FSM the gh gates seam and the
+// container deadline the pr_gates phase waits against. The deadline is the
+// container's own kill ceiling minus a finalize margin, and it stays zero
+// (unbounded) when serve did not tell the worker its timeout.
+func TestFSMDepsCarryGateWiring(t *testing.T) {
+	t.Run("container timeout set: deadline is the kill ceiling minus the finalize margin", func(t *testing.T) {
+		remote := setupBareRemote(t)
+		wsParent := t.TempDir()
+		ops := newFakeOps()
+
+		var got orchestrator.Deps
+
+		swapRunOrchestrator(t, func(_ context.Context, d orchestrator.Deps) error {
+			got = d
+
+			return nil
+		})
+
+		spec := baseSpec(t, remote, wsParent)
+		spec.ContainerTimeout = 90 * time.Minute
+		spec.GatesPollInterval = 15 * time.Second
+		spec.GatesCIWaitTimeout = 20 * time.Minute
+		spec.GatesCopilotWaitTimeout = 5 * time.Minute
+
+		start := time.Now()
+
+		emit := events.NewEmitter(io.Discard, io.Discard)
+
+		_, err := Run(context.Background(), spec, ops, &scriptedLLM{}, emit, openStdin(t))
+		require.NoError(t, err)
+
+		require.NotNil(t, got.PRGates, "the pr_gates phase needs the gh seam")
+		assert.WithinDuration(t, start.Add(80*time.Minute), got.Cfg.Deadline, time.Minute,
+			"the gates deadline leaves a 10m finalize margin before the container is killed")
+		assert.Equal(t, 15*time.Second, got.Cfg.GatesPollInterval)
+		assert.Equal(t, 20*time.Minute, got.Cfg.GatesCIWaitTimeout)
+		assert.Equal(t, 5*time.Minute, got.Cfg.GatesCopilotWaitTimeout)
+	})
+
+	t.Run("container timeout unknown: no deadline", func(t *testing.T) {
+		remote := setupBareRemote(t)
+		wsParent := t.TempDir()
+		ops := newFakeOps()
+
+		var got orchestrator.Deps
+
+		swapRunOrchestrator(t, func(_ context.Context, d orchestrator.Deps) error {
+			got = d
+
+			return nil
+		})
+
+		spec := baseSpec(t, remote, wsParent) // ContainerTimeout stays 0
+
+		emit := events.NewEmitter(io.Discard, io.Discard)
+
+		_, err := Run(context.Background(), spec, ops, &scriptedLLM{}, emit, openStdin(t))
+		require.NoError(t, err)
+
+		assert.True(t, got.Cfg.Deadline.IsZero(), "an unknown container timeout leaves the gates unbounded")
+	})
+}
+
 // TestBudgetMapsToFailed: a BudgetExceededError pushes WIP, releases the claim,
 // and surfaces a non-nil error (serve maps the error to the failed callback).
 func TestBudgetMapsToFailed(t *testing.T) {

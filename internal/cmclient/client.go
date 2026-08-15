@@ -189,9 +189,16 @@ type TaskContext struct {
 
 	// Orchestrator fields - populated for autonomous cards; zero-valued when the
 	// card JSON omits them.
-	Phase             string
-	Autonomous        bool
-	CreatePR          bool
+	Phase      string
+	Autonomous bool
+	CreatePR   bool
+	// PR-gate flags: hold the done transition on the PR's CI / a Copilot
+	// review. Read by the pr_gates phase.
+	AwaitCI            bool
+	AwaitCopilotReview bool
+	// PRUrl is the PR recorded by an earlier run's report_push; a resumed
+	// pr_gates phase re-reads it instead of re-creating the PR.
+	PRUrl             string
 	ReviewAttempts    int
 	ModelOrchestrator string
 	ModelCoder        string
@@ -329,19 +336,22 @@ func (c *Client) GetTaskContext(ctx context.Context, cardID string, includeImage
 	// config}. Only the card is parsed; parent/siblings/config are ignored.
 	var payload struct {
 		Card struct {
-			Title             string   `json:"title"`
-			Body              string   `json:"body"`
-			State             string   `json:"state"`
-			Type              string   `json:"type"`
-			Labels            []string `json:"labels"`
-			Phase             string   `json:"phase"`
-			Autonomous        bool     `json:"autonomous"`
-			CreatePR          bool     `json:"create_pr"`
-			ReviewAttempts    int      `json:"review_attempts"`
-			ModelOrchestrator string   `json:"model_orchestrator"`
-			ModelCoder        string   `json:"model_coder"`
-			ModelReviewer     string   `json:"model_reviewer"`
-			TokenUsage        *struct {
+			Title              string   `json:"title"`
+			Body               string   `json:"body"`
+			State              string   `json:"state"`
+			Type               string   `json:"type"`
+			Labels             []string `json:"labels"`
+			Phase              string   `json:"phase"`
+			Autonomous         bool     `json:"autonomous"`
+			CreatePR           bool     `json:"create_pr"`
+			AwaitCI            bool     `json:"await_ci"`
+			AwaitCopilotReview bool     `json:"await_copilot_review"`
+			PRUrl              string   `json:"pr_url"`
+			ReviewAttempts     int      `json:"review_attempts"`
+			ModelOrchestrator  string   `json:"model_orchestrator"`
+			ModelCoder         string   `json:"model_coder"`
+			ModelReviewer      string   `json:"model_reviewer"`
+			TokenUsage         *struct {
 				EstimatedCostUSD float64 `json:"estimated_cost_usd"`
 			} `json:"token_usage"`
 		} `json:"card"`
@@ -351,19 +361,22 @@ func (c *Client) GetTaskContext(ctx context.Context, cardID string, includeImage
 	}
 
 	tc := TaskContext{
-		Title:             payload.Card.Title,
-		Description:       payload.Card.Body,
-		State:             payload.Card.State,
-		Type:              payload.Card.Type,
-		Labels:            payload.Card.Labels,
-		Phase:             payload.Card.Phase,
-		Autonomous:        payload.Card.Autonomous,
-		CreatePR:          payload.Card.CreatePR,
-		ReviewAttempts:    payload.Card.ReviewAttempts,
-		ModelOrchestrator: payload.Card.ModelOrchestrator,
-		ModelCoder:        payload.Card.ModelCoder,
-		ModelReviewer:     payload.Card.ModelReviewer,
-		Images:            cardImages(result),
+		Title:              payload.Card.Title,
+		Description:        payload.Card.Body,
+		State:              payload.Card.State,
+		Type:               payload.Card.Type,
+		Labels:             payload.Card.Labels,
+		Phase:              payload.Card.Phase,
+		Autonomous:         payload.Card.Autonomous,
+		CreatePR:           payload.Card.CreatePR,
+		AwaitCI:            payload.Card.AwaitCI,
+		AwaitCopilotReview: payload.Card.AwaitCopilotReview,
+		PRUrl:              payload.Card.PRUrl,
+		ReviewAttempts:     payload.Card.ReviewAttempts,
+		ModelOrchestrator:  payload.Card.ModelOrchestrator,
+		ModelCoder:         payload.Card.ModelCoder,
+		ModelReviewer:      payload.Card.ModelReviewer,
+		Images:             cardImages(result),
 	}
 	if payload.Card.TokenUsage != nil {
 		tc.ReportedCostUSD = payload.Card.TokenUsage.EstimatedCostUSD

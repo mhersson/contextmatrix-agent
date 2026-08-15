@@ -846,22 +846,7 @@ func (o *run) fixTierFor(fixTier string, authoritative bool) registry.Tier {
 // the parent body, concatenated - the full prior-findings context for the
 // authoritative pass. Empty when none have been recorded yet.
 func reviewFindingsHistory(body string) string {
-	var b strings.Builder
-
-	in := false
-
-	for line := range strings.SplitSeq(body, "\n") {
-		if strings.HasPrefix(line, "## ") {
-			in = strings.HasPrefix(line, "## Review Findings")
-		}
-
-		if in {
-			b.WriteString(line)
-			b.WriteByte('\n')
-		}
-	}
-
-	return strings.TrimSpace(b.String())
+	return strings.TrimSpace(sectionsWithPrefix(body, "Review Findings"))
 }
 
 // parseVerdict extracts the synthesis verdict JSON (tolerating prose / code

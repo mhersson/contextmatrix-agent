@@ -171,6 +171,26 @@ func specFromEnv() (worker.RunSpec, error) {
 		return worker.RunSpec{}, err
 	}
 
+	containerTimeoutSeconds, err := envInt("CMX_CONTAINER_TIMEOUT_SECONDS", 0)
+	if err != nil {
+		return worker.RunSpec{}, err
+	}
+
+	gatesPollSeconds, err := envInt("CMX_GATES_POLL_INTERVAL_SECONDS", 30)
+	if err != nil {
+		return worker.RunSpec{}, err
+	}
+
+	gatesCIWaitSeconds, err := envInt("CMX_GATES_CI_WAIT_TIMEOUT_SECONDS", 2700)
+	if err != nil {
+		return worker.RunSpec{}, err
+	}
+
+	gatesCopilotWaitSeconds, err := envInt("CMX_GATES_COPILOT_WAIT_TIMEOUT_SECONDS", 600)
+	if err != nil {
+		return worker.RunSpec{}, err
+	}
+
 	defaults := config.Defaults()
 
 	maxTurns, err := envInt("CMX_MAX_TURNS", derefInt(defaults.MaxTurns))
@@ -329,6 +349,10 @@ func specFromEnv() (worker.RunSpec, error) {
 		MaxTurns:                  maxTurns,
 		MaxCardCost:               maxCardCost,
 		SelectorPriceHeadroom:     selectorPriceHeadroom,
+		ContainerTimeout:          time.Duration(containerTimeoutSeconds) * time.Second,
+		GatesPollInterval:         time.Duration(gatesPollSeconds) * time.Second,
+		GatesCIWaitTimeout:        time.Duration(gatesCIWaitSeconds) * time.Second,
+		GatesCopilotWaitTimeout:   time.Duration(gatesCopilotWaitSeconds) * time.Second,
 		CompactionEnabled:         compactionEnabled,
 		CompactionThreshold:       compactionThreshold,
 		CompactionKeepRecentTurns: compactionKeepRecentTurns,
