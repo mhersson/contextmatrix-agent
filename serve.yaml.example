@@ -239,6 +239,10 @@ tool_output_max_bytes: 131072
 # serve config field for them, so override per-deployment via
 # worker_extra_env.
 
+# Under fine-grained PAT auth the CI gate automatically polls the Actions
+# runs API instead of the Checks API (which GitHub grants to Apps only);
+# the PAT needs Actions: read and Commit statuses: read.
+
 # How often the gate re-polls CI checks and the Copilot review. Default: 30.
 # CMX_GATES_POLL_INTERVAL_SECONDS
 

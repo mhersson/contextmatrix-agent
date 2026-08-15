@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os/exec"
 	"regexp"
@@ -35,6 +36,13 @@ var runIDPattern = regexp.MustCompile(`/actions/runs/(\d+)`)
 // matching the error text covers the whole failure (non-zero exit with a
 // non-JSON report - a JSON report would not have errored at all).
 var noChecksReportedPattern = regexp.MustCompile(`(?i)no checks reported`)
+
+// checksInaccessiblePattern matches the refusal GitHub returns when the
+// token cannot read the Checks API. Fine-grained PATs can never carry the
+// Checks permission (GitHub grants it to Apps only), so on a private repo
+// this failure is deterministic for the whole run - Checks flips to the
+// Actions-runs fallback on first sight of it.
+var checksInaccessiblePattern = regexp.MustCompile(`(?i)resource not accessible by personal access token`)
 
 // noPRForBranchPattern matches gh pr view's "no pull requests found for
 // branch 'X'" failure - the expected outcome when probing a branch that has
@@ -67,6 +75,11 @@ type PRCreator struct {
 
 	caCertFile string // optional in-container extra CA PEM path; empty disables it
 	host       string // repo host for GH_HOST (e.g. acme.ghe.com); empty leaves gh on its github.com default
+
+	// checksFallback, once set, routes every subsequent Checks poll through
+	// the Actions-runs + commit-status APIs: the rollup read failed with the
+	// fine-grained-PAT Checks refusal, which never heals within a run.
+	checksFallback bool
 }
 
 var _ orchestrator.PRGates = (*PRCreator)(nil)
@@ -312,6 +325,23 @@ func headSHAArgs(prURL string) []string {
 	return []string{"pr", "view", prURL, "--json", "headRefOid"}
 }
 
+// runListArgs builds the gh run list invocation for the head SHA's workflow
+// runs, requesting exactly the JSON fields parseRunList reads. --limit
+// bounds a pathological rerun pile-up; 100 is far above any real per-commit
+// run count.
+func runListArgs(owner, repo, sha string) []string {
+	return []string{
+		"run", "list", "-R", owner + "/" + repo, "--commit", sha,
+		"--limit", "100", "--json", "name,event,status,conclusion,databaseId,workflowDatabaseId,url",
+	}
+}
+
+// combinedStatusArgs builds the gh api invocation for the legacy combined
+// commit status - the surface non-Actions CI systems report to.
+func combinedStatusArgs(owner, repo, sha string) []string {
+	return []string{"api", fmt.Sprintf("repos/%s/%s/commits/%s/status", owner, repo, sha)}
+}
+
 // reviewRequestsArgs builds the gh pr view invocation that reports pending
 // review requests.
 func reviewRequestsArgs(prURL string) []string {
@@ -528,16 +558,40 @@ func joinFailureDigest(sections []string, totalCap int) string {
 	return strings.Join(kept, "\n\n")
 }
 
-// Checks runs gh pr checks and returns the CI check results. jsonTolerant is
-// set: gh exits non-zero when any check fails or is pending, while still
-// printing the JSON report on stdout.
+// Checks returns the PR's CI results. It reads gh pr checks' rollup first -
+// the richest view, covering check runs and commit statuses alike - and,
+// when the token cannot read the Checks API (fine-grained PATs on private
+// repos; GitHub offers the Checks permission to Apps only), falls back for
+// the rest of the run to the Actions-runs and commit-status APIs, which the
+// gate's documented PAT permission set (Actions: read, Commit statuses:
+// read) covers. Fallback mode loses third-party Checks-API-only
+// integrations; GitHub Actions and status-API CI are fully visible.
+func (p *PRCreator) Checks(ctx context.Context, prURL string) ([]orchestrator.CheckResult, error) {
+	if !p.checksFallback {
+		checks, err := p.checksViaRollup(ctx, prURL)
+		if err == nil || !checksInaccessiblePattern.MatchString(err.Error()) {
+			return checks, err
+		}
+
+		p.checksFallback = true
+
+		slog.Info("pr_gates: checks API inaccessible to this token; polling the Actions runs API instead",
+			"pr_url", prURL)
+	}
+
+	return p.checksViaRuns(ctx, prURL)
+}
+
+// checksViaRollup runs gh pr checks and returns the CI check results.
+// jsonTolerant is set: gh exits non-zero when any check fails or is pending,
+// while still printing the JSON report on stdout.
 //
 // A head commit with no checks at all is gh's one non-JSON failure mode: it
 // exits non-zero and writes "no checks reported" to stderr instead of printing
 // an empty array. That is a real, empty answer, not a failed poll, so it is
 // translated into an empty result - callers distinguish "this repo has no CI"
 // from "the poll failed" only by the error being nil.
-func (p *PRCreator) Checks(ctx context.Context, prURL string) ([]orchestrator.CheckResult, error) {
+func (p *PRCreator) checksViaRollup(ctx context.Context, prURL string) ([]orchestrator.CheckResult, error) {
 	out, err := p.runGH(ctx, "", true, checksArgs(prURL)...)
 	if err != nil {
 		if noChecksReportedPattern.MatchString(err.Error()) {
@@ -553,6 +607,161 @@ func (p *PRCreator) Checks(ctx context.Context, prURL string) ([]orchestrator.Ch
 	}
 
 	return checks, nil
+}
+
+// checksViaRuns polls CI without the Checks API: workflow runs for the PR's
+// current head SHA plus legacy commit statuses, mapped into the same bucket
+// vocabulary classifyChecks reads. The head SHA is re-resolved every poll
+// because fix rounds push new commits. Both sources empty means the same
+// thing as gh's "no checks reported": an empty result with a nil error.
+func (p *PRCreator) checksViaRuns(ctx context.Context, prURL string) ([]orchestrator.CheckResult, error) {
+	owner, repo, _, err := parsePRPath(prURL)
+	if err != nil {
+		return nil, fmt.Errorf("checks via runs: %w", err)
+	}
+
+	sha, err := p.HeadSHA(ctx, prURL)
+	if err != nil {
+		return nil, fmt.Errorf("checks via runs: %w", err)
+	}
+
+	runsOut, err := p.runGH(ctx, "", false, runListArgs(owner, repo, sha)...)
+	if err != nil {
+		return nil, fmt.Errorf("gh run list: %w", err)
+	}
+
+	checks, err := parseRunList(runsOut)
+	if err != nil {
+		return nil, fmt.Errorf("gh run list: %w", err)
+	}
+
+	statusOut, err := p.runGH(ctx, "", false, combinedStatusArgs(owner, repo, sha)...)
+	if err != nil {
+		return nil, fmt.Errorf("gh api commit status: %w", err)
+	}
+
+	statuses, err := parseCombinedStatus(statusOut)
+	if err != nil {
+		return nil, fmt.Errorf("gh api commit status: %w", err)
+	}
+
+	return append(checks, statuses...), nil
+}
+
+// parseRunList maps gh run list --json output into CheckResults, keeping
+// only the newest run (highest databaseId) per (workflow, event), where
+// workflow identity is the workflow's database id, not its display name:
+// a rerun supersedes its predecessor, the same workflow triggered by
+// different events (push and pull_request) stays two results, and two
+// distinct workflow files that happen to share a display name stay
+// distinct - same-named workflow files never mask each other's runs.
+func parseRunList(out string) ([]orchestrator.CheckResult, error) {
+	var runs []struct {
+		Name               string `json:"name"`
+		Event              string `json:"event"`
+		Status             string `json:"status"`
+		Conclusion         string `json:"conclusion"`
+		DatabaseID         int64  `json:"databaseId"`
+		WorkflowDatabaseID int64  `json:"workflowDatabaseId"`
+		URL                string `json:"url"`
+	}
+
+	if err := json.Unmarshal([]byte(out), &runs); err != nil {
+		return nil, fmt.Errorf("parse run list: %w", err)
+	}
+
+	type key struct {
+		workflowID int64
+		event      string
+	}
+
+	newest := map[key]int{}
+
+	for i, r := range runs {
+		k := key{r.WorkflowDatabaseID, r.Event}
+		if j, ok := newest[k]; !ok || r.DatabaseID > runs[j].DatabaseID {
+			newest[k] = i
+		}
+	}
+
+	checks := make([]orchestrator.CheckResult, 0, len(newest))
+
+	for _, i := range newest {
+		r := runs[i]
+		checks = append(checks, orchestrator.CheckResult{
+			Name:   r.Name,
+			Bucket: runBucket(r.Status, r.Conclusion),
+			Link:   r.URL,
+		})
+	}
+
+	return checks, nil
+}
+
+// runBucket maps an Actions run's status/conclusion pair onto gh's
+// statusCheckRollup bucket vocabulary, mirroring gh's own mapping so
+// classifyChecks treats both poll paths identically. Anything unsettled or
+// unrecognized is pending - the orchestrator's conservative default.
+func runBucket(status, conclusion string) string {
+	if status != "completed" {
+		return "pending"
+	}
+
+	switch conclusion {
+	case "success":
+		return "pass"
+	case "failure", "timed_out":
+		return "fail"
+	case "cancelled":
+		return "cancel"
+	case "skipped", "neutral":
+		return "skipping"
+	default: // action_required, stale, future states
+		return "pending"
+	}
+}
+
+// parseCombinedStatus maps the legacy combined-status document's contexts
+// into CheckResults. GitHub Actions never reports here; these are
+// third-party status-API integrations.
+func parseCombinedStatus(out string) ([]orchestrator.CheckResult, error) {
+	var doc struct {
+		Statuses []struct {
+			Context     string `json:"context"`
+			State       string `json:"state"`
+			TargetURL   string `json:"target_url"`
+			Description string `json:"description"`
+		} `json:"statuses"`
+	}
+
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		return nil, fmt.Errorf("parse combined status: %w", err)
+	}
+
+	checks := make([]orchestrator.CheckResult, 0, len(doc.Statuses))
+
+	for _, s := range doc.Statuses {
+		checks = append(checks, orchestrator.CheckResult{
+			Name:        s.Context,
+			Bucket:      statusBucket(s.State),
+			Link:        s.TargetURL,
+			Description: s.Description,
+		})
+	}
+
+	return checks, nil
+}
+
+// statusBucket maps a commit-status state onto the bucket vocabulary.
+func statusBucket(state string) string {
+	switch state {
+	case "success":
+		return "pass"
+	case "failure", "error":
+		return "fail"
+	default: // pending, future states
+		return "pending"
+	}
 }
 
 // HeadSHA returns the PR's current head commit SHA.

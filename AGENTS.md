@@ -290,23 +290,28 @@ file only - never via flags or committed YAML.
     `await_ci` and `await_copilot_review` the trigger's `TaskContext` carries,
     running the Copilot gate first, then the CI gate. Each spends up to 3 fix
     rounds (`gatesRoundsCap`) on what it finds before parking the card in
-    review. A gate runs whenever a PR URL exists and its flag is set - a stale
-    `pr_url` on a card whose `create_pr` was later disabled still gates, on
-    the rule that a PR exists so the gate runs on it; a gated card whose PR
-    was never created (`create_pr` true, no URL) parks fail-closed instead of
-    completing - but first probes the branch for an existing OPEN PR and
-    adopts it (re-reported through `report_push`) when found, since an
-    earlier run's `report_push` may not have landed, or `gh pr create` may
-    have failed because one already exists; no OPEN PR, or a probe failure,
-    still parks. The Copilot gate never parks on unavailability - a request
-    that fails, times out, or a reviewer that never appears all record the
-    reason verbatim on the card's activity log (the only diagnostic channel
-    for an external tester's Copilot setup) and let the gate pass. An
-    addressed Copilot review persists a satisfied marker in the `## PR Gates`
-    section, so a re-trigger skips the paid re-review and goes straight to
-    the CI gate; the unavailability skips above never write it, so those stay
-    retryable. Every triage round records a VALID/INVALID verdict per finding
-    under a `## Copilot Review (Round N)` card section.
+    review. The CI gate's poll reads `gh pr checks` and, when the token cannot
+    read the Checks API (fine-grained PATs on private repos), falls back for
+    the rest of the run to `gh run list --commit <head-sha>` plus the legacy
+    commit-status API - covered by Actions: read and Commit statuses: read.
+    Fallback mode cannot see third-party Checks-API-only integrations. A gate
+    runs whenever a PR URL exists and its flag is set - a stale `pr_url` on a
+    card whose `create_pr` was later disabled still gates, on the rule that a
+    PR exists so the gate runs on it; a gated card whose PR was never created
+    (`create_pr` true, no URL) parks fail-closed instead of completing - but
+    first probes the branch for an existing OPEN PR and adopts it (re-reported
+    through `report_push`) when found, since an earlier run's `report_push` may
+    not have landed, or `gh pr create` may have failed because one already
+    exists; no OPEN PR, or a probe failure, still parks. The Copilot gate never
+    parks on unavailability - a request that fails, times out, or a reviewer
+    that never appears all record the reason verbatim on the card's activity
+    log (the only diagnostic channel for an external tester's Copilot setup)
+    and let the gate pass. An addressed Copilot review persists a satisfied
+    marker in the `## PR Gates` section, so a re-trigger skips the paid
+    re-review and goes straight to the CI gate; the unavailability skips above
+    never write it, so those stay retryable. Every triage round records a
+    VALID/INVALID verdict per finding under a `## Copilot Review (Round N)`
+    card section.
 
 ## Repo grounding
 
