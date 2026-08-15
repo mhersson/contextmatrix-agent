@@ -403,13 +403,15 @@ func (c *Client) Heartbeat(ctx context.Context, cardID string) error {
 // the caller (spendAndReport), never fatal. Phase and Step are omitted when
 // empty; DurationMS is omitted when non-positive.
 type UsageReport struct {
-	Model            string
-	PromptTokens     int64
-	CompletionTokens int64
-	ActualCostUSD    float64
-	Phase            string // current FSM phase (plan, execute, review, ...)
-	Step             string // bounded call kind (main, gate, checkpoint, ...)
-	DurationMS       int64  // wall time of the harness step in milliseconds
+	Model               string
+	PromptTokens        int64
+	CompletionTokens    int64
+	CacheReadTokens     int64
+	CacheCreationTokens int64
+	ActualCostUSD       float64
+	Phase               string // current FSM phase (plan, execute, review, ...)
+	Step                string // bounded call kind (main, gate, checkpoint, ...)
+	DurationMS          int64  // wall time of the harness step in milliseconds
 }
 
 // ReportUsage records token usage for cost tracking against a card. It returns
@@ -425,6 +427,14 @@ func (c *Client) ReportUsage(ctx context.Context, cardID string, u UsageReport) 
 	}
 	if u.Model != "" {
 		args["model"] = u.Model
+	}
+
+	if u.CacheReadTokens > 0 {
+		args["cache_read_tokens"] = u.CacheReadTokens
+	}
+
+	if u.CacheCreationTokens > 0 {
+		args["cache_creation_tokens"] = u.CacheCreationTokens
 	}
 
 	if u.ActualCostUSD != 0 {
