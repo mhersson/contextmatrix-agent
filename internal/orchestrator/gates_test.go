@@ -986,6 +986,57 @@ func TestCopilotGate_CleanPassWritesSatisfiedMarker(t *testing.T) {
 	assert.Contains(t, gatesSection, "- Copilot gate: satisfied", "gatesSection=%q", gatesSection)
 }
 
+// cancelingGates wraps a fakeGates and cancels the run's context right after
+// its first Checks call - reproducing the routine container-teardown
+// cancellation ciGate's poll loop can hit while checks are still pending (see
+// sleepGate's doc comment).
+type cancelingGates struct {
+	*fakeGates
+
+	cancel context.CancelFunc
+	once   sync.Once
+}
+
+func (g *cancelingGates) Checks(ctx context.Context, prURL string) ([]CheckResult, error) {
+	checks, err := g.fakeGates.Checks(ctx, prURL)
+	g.once.Do(g.cancel)
+
+	return checks, err
+}
+
+// TestCopilotGate_SatisfiedMarkerSurvivesCIGateCancellation: the Copilot gate's
+// pass must be durable the instant it happens, not only once the whole
+// pr_gates phase finishes - a context cancellation while the CI gate is still
+// polling pending checks must not cost the satisfied marker its only write.
+func TestCopilotGate_SatisfiedMarkerSurvivesCIGateCancellation(t *testing.T) {
+	ops := &fakeOps{}
+	base := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		reviews:   []*CopilotReview{copilotReviewOnHead("LGTM")},
+		checks:    [][]CheckResult{{{Name: "build", Bucket: "pending"}}},
+	}
+	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
+
+	tc := copilotGateContext("Clean then torn down", "body")
+	tc.AwaitCI = true
+
+	o := prGateRun(ops, base, &fakeGit{}, client, tc, 0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	o.d.PRGates = &cancelingGates{fakeGates: base, cancel: cancel}
+
+	err := runPRGates(ctx, o)
+
+	require.ErrorIs(t, err, context.Canceled,
+		"a torn-down container's ciGate returns the raw context error, never a park")
+
+	assert.Contains(t, ops.lastBody(), "- Copilot gate: satisfied",
+		"the Copilot gate's pass must survive a CI-gate cancellation; body=%q", ops.lastBody())
+}
+
 // TestCopilotGate_RequestsWhenAbsent: with no review in flight the gate asks for
 // one BEFORE it starts waiting - otherwise it would wait out the timeout on a
 // review nobody requested.

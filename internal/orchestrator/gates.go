@@ -167,6 +167,17 @@ func runPRGates(ctx context.Context, o *run) error {
 			if err := o.copilotGate(ctx, prURL, &st); err != nil {
 				return err
 			}
+
+			// Persist here, before the CI gate runs: a context cancellation
+			// during ciGate's poll wait is routine container teardown (see
+			// sleepGate's doc comment), and it returns straight out of
+			// runPRGates without ever reaching the "passed" write below. A
+			// CopilotSatisfied set only in memory by copilotGate's pass exits
+			// would then be lost, and the next resume would re-request a paid
+			// Copilot review this run already got and addressed. Harmless on
+			// the already-satisfied and skip-path exits too: recordSection is
+			// an idempotent upsert, and the skip paths leave the marker false.
+			o.recordGates(ctx, st)
 		}
 
 		if o.tc.AwaitCI {
@@ -1014,9 +1025,9 @@ func (o *run) recordGates(ctx context.Context, st gatesState) {
 	o.recordSection(ctx, gatesSectionHeading, b.String())
 }
 
-// gatesRoundsRe matches the "rounds used" counters and the satisfied marker
-// recordGates writes, so a resumed run recovers them from the card body. Keep
-// in sync with recordGates.
+// copilotRoundsRe, ciRoundsRe and copilotSatisfiedRe match the "rounds used"
+// counters and the satisfied marker recordGates writes, so a resumed run
+// recovers them from the card body. Keep in sync with recordGates.
 var (
 	copilotRoundsRe    = regexp.MustCompile(`(?m)^- Copilot rounds used: (\d+)/`)
 	ciRoundsRe         = regexp.MustCompile(`(?m)^- CI rounds used: (\d+)/`)
