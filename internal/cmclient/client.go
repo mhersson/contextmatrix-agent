@@ -412,6 +412,12 @@ type UsageReport struct {
 	Phase               string // current FSM phase (plan, execute, review, ...)
 	Step                string // bounded call kind (main, gate, checkpoint, ...)
 	DurationMS          int64  // wall time of the harness step in milliseconds
+	// Source marks who produced the token counts. The orchestrator always
+	// sends "collector": every count comes from gateway usage frames, never
+	// estimation. Requires a CM deployment whose report_usage schema has the
+	// source field (additionalProperties:false rejects it otherwise) - CM
+	// deploys first, same contract as Phase/Step/DurationMS.
+	Source string
 }
 
 // ReportUsage records token usage for cost tracking against a card. It returns
@@ -451,6 +457,10 @@ func (c *Client) ReportUsage(ctx context.Context, cardID string, u UsageReport) 
 
 	if u.DurationMS > 0 {
 		args["duration_ms"] = u.DurationMS
+	}
+
+	if u.Source != "" {
+		args["source"] = u.Source
 	}
 
 	text, err := c.call(ctx, "report_usage", args)

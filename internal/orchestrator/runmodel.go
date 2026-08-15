@@ -180,6 +180,7 @@ func (o *run) spendAndReport(ctx context.Context, ledger *Ledger, targetCardID, 
 		Phase:               o.curPhase,
 		Step:                step,
 		DurationMS:          dur.Milliseconds(),
+		Source:              "collector",
 	})
 	if reportErr != nil {
 		attrs := make([]any, 0, len(extraAttrs)+4)
