@@ -30,6 +30,12 @@ var prPathPattern = regexp.MustCompile(`^https?://[^/]+/([^/]+)/([^/]+)/pull/(\d
 // runIDPattern extracts the numeric run ID from an Actions job/run link.
 var runIDPattern = regexp.MustCompile(`/actions/runs/(\d+)`)
 
+// noChecksReportedPattern matches gh pr checks' "no checks reported on the 'X'
+// branch" failure. runGH embeds stdout and stderr in the error it builds, so
+// matching the error text covers the whole failure (non-zero exit with a
+// non-JSON report - a JSON report would not have errored at all).
+var noChecksReportedPattern = regexp.MustCompile(`(?i)no checks reported`)
+
 // copilotReviewerLogin is the GitHub login gh adds as a reviewer and the login
 // GitHub's REST API reports as the author of a Copilot review.
 const copilotReviewerLogin = "copilot-pull-request-reviewer[bot]"
@@ -487,9 +493,19 @@ func joinFailureDigest(sections []string, totalCap int) string {
 // Checks runs gh pr checks and returns the CI check results. jsonTolerant is
 // set: gh exits non-zero when any check fails or is pending, while still
 // printing the JSON report on stdout.
+//
+// A head commit with no checks at all is gh's one non-JSON failure mode: it
+// exits non-zero and writes "no checks reported" to stderr instead of printing
+// an empty array. That is a real, empty answer, not a failed poll, so it is
+// translated into an empty result - callers distinguish "this repo has no CI"
+// from "the poll failed" only by the error being nil.
 func (p *PRCreator) Checks(ctx context.Context, prURL string) ([]orchestrator.CheckResult, error) {
 	out, err := p.runGH(ctx, "", true, checksArgs(prURL)...)
 	if err != nil {
+		if noChecksReportedPattern.MatchString(err.Error()) {
+			return nil, nil
+		}
+
 		return nil, fmt.Errorf("gh pr checks: %w", err)
 	}
 

@@ -550,3 +550,38 @@ exit 1
 	assert.Contains(t, digest, "real-check")
 	assert.Contains(t, digest, "log line for run 222")
 }
+
+// TestChecksTreatsNoChecksReportedAsEmpty pins the seam translation for a repo
+// without CI: gh pr checks exits non-zero and prints "no checks reported" on
+// stderr rather than an empty JSON array, and Checks must render that as an
+// explicit empty result. The CI gate's "this repo has no CI" conclusion is
+// reachable only through this translation - an error there just means "keep
+// waiting", so without it a CI-less repo would wait out the full gate.
+func TestChecksTreatsNoChecksReportedAsEmpty(t *testing.T) {
+	stubGH(t, `
+echo "no checks reported on the 'cm/card-1' branch" 1>&2
+exit 1
+`)
+
+	pc := NewPRCreator(t.TempDir(), "", "", "")
+
+	checks, err := pc.Checks(t.Context(), "https://github.com/org/repo/pull/1")
+	require.NoError(t, err, "no checks reported is an empty result, not a failure")
+	assert.Empty(t, checks)
+}
+
+// TestChecksReportsRealFailures: any other gh failure stays an error - the gate
+// must not read a broken gh (auth, network, rate limit) as "this repo has no CI"
+// and pass a PR whose checks it never saw.
+func TestChecksReportsRealFailures(t *testing.T) {
+	stubGH(t, `
+echo "gh: authentication required" 1>&2
+exit 4
+`)
+
+	pc := NewPRCreator(t.TempDir(), "", "", "")
+
+	_, err := pc.Checks(t.Context(), "https://github.com/org/repo/pull/1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "authentication required")
+}

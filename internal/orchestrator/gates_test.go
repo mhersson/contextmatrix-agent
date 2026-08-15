@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -304,6 +305,17 @@ func shrinkNoChecksGrace(t *testing.T, d time.Duration) {
 	t.Cleanup(func() { gatesNoChecksGrace = prev })
 }
 
+// shrinkFixRoundReserve shortens the wait a fix round must have left for one
+// test, so a millisecond-scale gate still funds its rounds.
+func shrinkFixRoundReserve(t *testing.T, d time.Duration) {
+	t.Helper()
+
+	prev := gatesFixRoundReserve
+	gatesFixRoundReserve = d
+
+	t.Cleanup(func() { gatesFixRoundReserve = prev })
+}
+
 // failingCheck is a red check with the run link the failure-log fetch parses.
 func failingCheck() CheckResult {
 	return CheckResult{
@@ -501,4 +513,178 @@ func TestCIGate_ResumeCountsPersistedRounds(t *testing.T) {
 	require.ErrorAs(t, err, &parked)
 	assert.Equal(t, 1, modelCallCount(client), "two rounds were already spent; only one is left")
 	assert.Contains(t, ops.lastBody(), "- CI rounds used: 3/3")
+}
+
+// TestCIGate_EmptyPollAfterAFixIsNeverNoCI: once any check has been seen, an
+// empty poll means the new head's run has not registered yet - never "this repo
+// has no CI". Without that memory a fix round's immediate re-poll could pass a PR
+// that was red one poll earlier. The grace window is zeroed here so only the
+// checks-were-seen memory can hold the gate.
+func TestCIGate_EmptyPollAfterAFixIsNeverNoCI(t *testing.T) {
+	shrinkNoChecksGrace(t, 0)
+
+	ops := &fakeOps{}
+	gates := &fakeGates{checks: [][]CheckResult{
+		{failingCheck()},                  // red: funds one fix round
+		{},                                // the pushed head's run has not registered
+		{},                                // still not registered
+		{{Name: "build", Bucket: "pass"}}, // it registers, and it is green
+	}}
+	client := &planLLM{responses: []llm.Response{stopResp("coder: fixed it", 0.01)}}
+
+	o := ciGateRun(ops, gates, &fakeGit{committed: true}, client, ciGateContext("Re-poll", "body"), 0)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	assert.False(t, ops.loggedContains("no CI checks"),
+		"a PR whose checks were already seen can never be read as a repo without CI")
+	assert.True(t, ops.loggedContains("CI green"), "the gate waited for the new head's run")
+	assert.Equal(t, 1, modelCallCount(client))
+}
+
+// TestCIGate_WaitsAPollIntervalAfterAFixRound: the gate lets the pushed head
+// register with CI before re-polling, rather than re-reading the superseded run.
+func TestCIGate_WaitsAPollIntervalAfterAFixRound(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{checks: [][]CheckResult{
+		{failingCheck()},
+		{{Name: "build", Bucket: "pass"}},
+	}}
+	client := &planLLM{responses: []llm.Response{stopResp("coder: fixed it", 0.01)}}
+
+	o := ciGateRun(ops, gates, &fakeGit{committed: true}, client, ciGateContext("Settle", "body"), 0)
+	o.d.Cfg.GatesPollInterval = 25 * time.Millisecond
+
+	start := time.Now()
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	assert.GreaterOrEqual(t, time.Since(start), 25*time.Millisecond,
+		"the re-poll after a fix waits one poll interval")
+}
+
+// TestCIGate_DeadlineParkNamesTheOutage: a gate that spent its wait on failing
+// polls must not park blaming checks it never managed to read.
+func TestCIGate_DeadlineParkNamesTheOutage(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{checksErr: errors.New("gh: API rate limit exceeded")}
+	client := &planLLM{}
+
+	o := ciGateRun(ops, gates, &fakeGit{}, client, ciGateContext("gh down", "body"), 0)
+	o.d.Cfg.GatesCIWaitTimeout = 10 * time.Millisecond
+
+	err := runPRGates(context.Background(), o)
+
+	var parked *GatesParkedError
+
+	require.ErrorAs(t, err, &parked)
+	assert.Contains(t, parked.Reason, "could not be read")
+	assert.NotContains(t, parked.Reason, "pending",
+		"the checks were never read, so the card must not claim they were pending")
+	assert.Zero(t, modelCallCount(client))
+}
+
+// TestCIGate_PendingParkDropsStaleFailureDetail: the park note describes the poll
+// that parked, not a red round the fixes already addressed.
+func TestCIGate_PendingParkDropsStaleFailureDetail(t *testing.T) {
+	shrinkFixRoundReserve(t, 0) // a millisecond-scale gate still funds its round
+
+	ops := &fakeOps{}
+	gates := &fakeGates{checks: [][]CheckResult{
+		{failingCheck()},                     // red: one fix round, Detail records the check
+		{{Name: "build", Bucket: "pending"}}, // the new run never settles
+	}}
+	client := &planLLM{responses: []llm.Response{stopResp("coder: fixed it", 0.01)}}
+
+	o := ciGateRun(ops, gates, &fakeGit{committed: true}, client, ciGateContext("Never settles", "body"), 0)
+	o.d.Cfg.GatesCIWaitTimeout = 30 * time.Millisecond
+
+	err := runPRGates(context.Background(), o)
+
+	var parked *GatesParkedError
+
+	require.ErrorAs(t, err, &parked)
+
+	body := ops.lastBody()
+	assert.NotContains(t, body, "https://github.test/acme/repo/actions/runs/42/job/7",
+		"the fixed round's failing check must not be listed as current; body=%q", body)
+	assert.Contains(t, body, "at the deadline", "the park note describes the final poll; body=%q", body)
+}
+
+// TestCIGate_RedWithNoWaitLeftSkipsTheFixRound: a fix round is a multi-minute
+// coder run plus a fresh CI cycle. With no wait left the gate parks on the red
+// checks instead of spending a round it cannot see through.
+func TestCIGate_RedWithNoWaitLeftSkipsTheFixRound(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{checks: [][]CheckResult{{failingCheck()}}}
+	client := &planLLM{}
+
+	o := ciGateRun(ops, gates, &fakeGit{committed: true}, client, ciGateContext("No time", "body"), 0)
+	o.d.Cfg.GatesCIWaitTimeout = 10 * time.Millisecond
+
+	err := runPRGates(context.Background(), o)
+
+	var parked *GatesParkedError
+
+	require.ErrorAs(t, err, &parked)
+	assert.Contains(t, parked.Reason, "fix round")
+	assert.Zero(t, modelCallCount(client), "no doomed coder run")
+	assert.Contains(t, ops.lastBody(), "- CI rounds used: 0/3", "an unspent round is not counted")
+	assert.Contains(t, ops.lastBody(), "- build: https://github.test/acme/repo/actions/runs/42/job/7",
+		"the human still gets the failing check and its link")
+}
+
+// TestClassifyChecks covers the bucket mapping, including the two arms no gate
+// test exercises: a canceled check is a failure, and a bucket gh has not taught us
+// yet counts as pending rather than as a pass.
+func TestClassifyChecks(t *testing.T) {
+	cases := []struct {
+		name        string
+		checks      []CheckResult
+		wantFailed  []string
+		wantPending int
+		wantPassing int
+	}{
+		{name: "empty"},
+		{
+			name:        "pass and skipping both count as passing",
+			checks:      []CheckResult{{Name: "build", Bucket: "pass"}, {Name: "codeql", Bucket: "skipping"}},
+			wantPassing: 2,
+		},
+		{
+			name:       "fail and cancel both count as failed",
+			checks:     []CheckResult{{Name: "build", Bucket: "fail"}, {Name: "e2e", Bucket: "cancel"}},
+			wantFailed: []string{"build", "e2e"},
+		},
+		{
+			name:        "an unknown bucket is pending, never a pass",
+			checks:      []CheckResult{{Name: "build", Bucket: "pending"}, {Name: "new", Bucket: "quarantined"}},
+			wantPending: 2,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := classifyChecks(tc.checks)
+
+			names := make([]string, 0, len(b.failed))
+			for _, c := range b.failed {
+				names = append(names, c.Name)
+			}
+
+			assert.Equal(t, tc.wantFailed, nonEmpty(names))
+			assert.Equal(t, tc.wantPending, b.pending)
+			assert.Equal(t, tc.wantPassing, b.passing)
+		})
+	}
+}
+
+// nonEmpty normalizes an empty slice to nil so table cases can leave the want
+// field unset.
+func nonEmpty(s []string) []string {
+	if len(s) == 0 {
+		return nil
+	}
+
+	return s
 }

@@ -40,6 +40,12 @@ const (
 // before concluding the repo has no CI. A var so tests can shrink it.
 var gatesNoChecksGrace = 3 * time.Minute
 
+// gatesFixRoundReserve is the wait a CI fix round must have left on the clock to
+// be worth starting: the coder run, its push, and a fresh CI cycle all have to
+// fit before the gate gives up, or the round only burns tokens on the way to a
+// park. A var so tests can shrink it.
+var gatesFixRoundReserve = 5 * time.Minute
+
 // GatesParkedError parks the card in review from the pr_gates phase. Reason
 // is a short human phrase already recorded on the card.
 type GatesParkedError struct{ Reason string }
@@ -150,14 +156,27 @@ func classifyChecks(checks []CheckResult) ciBuckets {
 func (o *run) ciGate(ctx context.Context, prURL string, st *gatesState) error {
 	deadline := o.gateDeadline(o.ciWait())
 	start := time.Now()
+	sawChecks := false
 
 	for {
-		checks, err := o.d.PRGates.Checks(ctx, prURL)
-		if err != nil {
+		checks, pollErr := o.d.PRGates.Checks(ctx, prURL)
+		if pollErr != nil {
 			// A gh hiccup is not a verdict. Keep waiting - the deadline still
 			// bounds the gate - rather than failing a run whose work is pushed.
+			// A CI-less repo does NOT land here: the worker seam translates gh's
+			// "no checks reported" exit into an empty result with a nil error.
 			slog.Warn("pr_gates: CI checks poll failed; retrying",
-				"card_id", o.d.Cfg.CardID, "pr_url", prURL, "error", err)
+				"card_id", o.d.Cfg.CardID, "pr_url", prURL, "error", pollErr)
+		}
+
+		if len(checks) > 0 {
+			// Whether this PR has CI at all is settled by the first check ever
+			// seen. After that an empty rollup means the current head's run has
+			// not registered yet, never "this repo has no CI". Every push the gate
+			// makes follows an observed failure, so this also covers the empty
+			// re-poll right after a fix round - which would otherwise pass a PR
+			// that was red one poll earlier.
+			sawChecks = true
 		}
 
 		b := classifyChecks(checks)
@@ -168,9 +187,9 @@ func (o *run) ciGate(ctx context.Context, prURL string, st *gatesState) error {
 			"passing", b.passing, "pending", b.pending, "failed", len(b.failed))
 
 		switch {
-		case err == nil && len(checks) == 0:
-			// No check has appeared at all. Past the grace window that means the
-			// repo has no CI, not that CI is slow to register.
+		case pollErr == nil && len(checks) == 0 && !sawChecks:
+			// No check has ever appeared on this PR. Past the grace window that
+			// means the repo has no CI, not that CI is slow to register.
 			if time.Since(start) >= gatesNoChecksGrace {
 				st.Detail = ""
 
@@ -180,13 +199,22 @@ func (o *run) ciGate(ctx context.Context, prURL string, st *gatesState) error {
 			}
 
 		case len(b.failed) > 0:
+			if time.Now().Add(gatesFixRoundReserve).After(deadline) {
+				// Not enough wait left for a coder run, a push, and a fresh CI
+				// cycle. Park on the red checks instead of spending a round whose
+				// result the gate would never see.
+				st.Detail = failedChecksDetail(b.failed)
+
+				return o.parkGates(ctx, st, "CI red with too little gate wait left for another fix round")
+			}
+
 			if ferr := o.ciFixRound(ctx, prURL, st, b.failed); ferr != nil {
 				return ferr
 			}
 
-			// The fix pushed a new head; re-poll immediately so the next checks
-			// call reads that head's run rather than the one just superseded.
-			continue
+			// The fix pushed a new head. Fall through to the poll-interval wait:
+			// GitHub needs a moment to register the new run, and an immediate
+			// re-poll reads the superseded one (or an empty rollup).
 
 		case b.pending == 0 && b.passing > 0:
 			// Every check settled and none failed. The passing>0 guard keeps a
@@ -199,12 +227,36 @@ func (o *run) ciGate(ctx context.Context, prURL string, st *gatesState) error {
 		}
 
 		if time.Now().After(deadline) {
-			return o.parkGates(ctx, st, "CI still pending at the wait deadline")
+			return o.ciDeadlinePark(ctx, st, b, pollErr)
 		}
 
 		if werr := o.sleepPoll(ctx); werr != nil {
 			return werr
 		}
+	}
+}
+
+// ciDeadlinePark parks a gate that used up its wait, naming what it was actually
+// waiting on - unread checks read differently from checks that never settled, and
+// the card must not claim the wrong one. The detail is rebuilt from the poll that
+// parked, so the note never re-lists failures an earlier fix round addressed.
+func (o *run) ciDeadlinePark(ctx context.Context, st *gatesState, b ciBuckets, pollErr error) error {
+	switch {
+	case pollErr != nil:
+		st.Detail = "- the PR's check status could not be read on the last poll\n"
+
+		return o.parkGates(ctx, st, "CI status could not be read before the wait deadline")
+
+	case len(b.failed) > 0:
+		st.Detail = failedChecksDetail(b.failed)
+
+		return o.parkGates(ctx, st, "CI still red at the wait deadline")
+
+	default:
+		st.Detail = fmt.Sprintf("- at the deadline: %d check(s) still pending, %d passing\n",
+			b.pending, b.passing)
+
+		return o.parkGates(ctx, st, "CI still pending at the wait deadline")
 	}
 }
 
