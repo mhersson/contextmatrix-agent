@@ -76,6 +76,25 @@ type RunSpec struct {
 	MaxCardCost           float64 // CMX_MAX_CARD_COST; 0 disables
 	SelectorPriceHeadroom float64 // CMX_SELECTOR_PRICE_HEADROOM; 0 uses worker default
 
+	// ContainerTimeout is serve's hard kill ceiling for this run's container
+	// (CMX_CONTAINER_TIMEOUT_SECONDS). 0 = unknown - an older serve, or a host
+	// that never configured it - so a phase that must park before the kill
+	// has no deadline to respect.
+	ContainerTimeout time.Duration
+
+	// GatesPollInterval is how often the pr_gates phase polls CI and Copilot
+	// review status. CMX_GATES_POLL_INTERVAL_SECONDS; default 30s.
+	GatesPollInterval time.Duration
+
+	// GatesCIWaitTimeout bounds how long the pr_gates phase waits for CI to
+	// finish before parking. CMX_GATES_CI_WAIT_TIMEOUT_SECONDS; default 45m.
+	GatesCIWaitTimeout time.Duration
+
+	// GatesCopilotWaitTimeout bounds how long the pr_gates phase waits for the
+	// requested Copilot review before parking.
+	// CMX_GATES_COPILOT_WAIT_TIMEOUT_SECONDS; default 10m.
+	GatesCopilotWaitTimeout time.Duration
+
 	MaxCapability bool // CM_MAX_CAPABILITY; every pick chooses the most capable model in the tier regardless of price
 
 	CompactionEnabled         bool    // CMX_COMPACTION_ENABLED; false (default) keeps the hard context_limit stop

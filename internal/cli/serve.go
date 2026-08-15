@@ -368,6 +368,7 @@ func launchEnv(cfg *config.ServiceConfig, secretsHostDir string) webhook.LaunchE
 		CACertFile:                cfg.CACertFile,
 		MemoryBytes:               cfg.ContainerMemoryBytes,
 		PidsLimit:                 cfg.ContainerPidsLimit,
+		ContainerTimeoutSeconds:   int(cfg.ContainerTimeout.Seconds()),
 		BashTimeoutMaxSeconds:     cfg.BashTimeoutMaxSeconds,
 		ToolOutputMaxBytes:        cfg.ToolOutputMaxBytes,
 		DefaultModel:              cfg.DefaultModel,
