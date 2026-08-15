@@ -221,7 +221,7 @@ func TestGatesArgBuilders(t *testing.T) {
 	assert.Equal(t, []string{"pr", "edit", prURL, "--add-reviewer", "copilot-pull-request-reviewer[bot]"}, addCopilotReviewerArgs(prURL))
 	assert.Equal(t, []string{
 		"run", "list", "-R", "org/repo", "--commit", "abc123",
-		"--limit", "100", "--json", "name,event,status,conclusion,databaseId,url",
+		"--limit", "100", "--json", "name,event,status,conclusion,databaseId,workflowDatabaseId,url",
 	}, runListArgs("org", "repo", "abc123"))
 	assert.Equal(t, []string{"api", "repos/org/repo/commits/abc123/status"}, combinedStatusArgs("org", "repo", "abc123"))
 }
@@ -318,28 +318,37 @@ func TestRunBucket(t *testing.T) {
 	}
 }
 
-// TestParseRunListDedupesReruns pins parseRunList's newest-run-wins-per-event
-// dedupe: a rerun supersedes its predecessor, while the same workflow
-// triggered by different events stays two results.
+// TestParseRunListDedupesReruns pins parseRunList's newest-run-wins-per
+// (workflow, event) dedupe: a rerun of the same workflow file supersedes its
+// predecessor, the same workflow triggered by different events stays two
+// results, and two distinct workflow files that merely share a display name
+// stay two results too - the failing one must not be masked by the
+// same-named passing one.
 func TestParseRunListDedupesReruns(t *testing.T) {
 	t.Parallel()
 
 	out := `[
-	 {"name":"ci","event":"pull_request","status":"completed","conclusion":"failure","databaseId":1,"url":"https://github.com/o/r/actions/runs/1"},
-	 {"name":"ci","event":"pull_request","status":"completed","conclusion":"success","databaseId":2,"url":"https://github.com/o/r/actions/runs/2"},
-	 {"name":"ci","event":"push","status":"in_progress","conclusion":"","databaseId":3,"url":"https://github.com/o/r/actions/runs/3"}
+	 {"name":"ci","event":"pull_request","status":"completed","conclusion":"failure","databaseId":1,"workflowDatabaseId":100,"url":"https://github.com/o/r/actions/runs/1"},
+	 {"name":"ci","event":"pull_request","status":"completed","conclusion":"success","databaseId":2,"workflowDatabaseId":100,"url":"https://github.com/o/r/actions/runs/2"},
+	 {"name":"ci","event":"push","status":"in_progress","conclusion":"","databaseId":3,"workflowDatabaseId":100,"url":"https://github.com/o/r/actions/runs/3"},
+	 {"name":"ci","event":"pull_request","status":"completed","conclusion":"failure","databaseId":4,"workflowDatabaseId":500,"url":"https://github.com/o/r/actions/runs/4"},
+	 {"name":"ci","event":"pull_request","status":"completed","conclusion":"success","databaseId":5,"workflowDatabaseId":600,"url":"https://github.com/o/r/actions/runs/5"}
 	]`
 	checks, err := parseRunList(out)
 	require.NoError(t, err)
-	require.Len(t, checks, 2, "newest run wins per (name, event); distinct events both kept")
+	require.Len(t, checks, 4,
+		"newest run wins per (workflow, event); distinct events and distinct same-named workflows all kept")
 	// order-independent asserts: find by link
 	byLink := map[string]orchestrator.CheckResult{}
 	for _, c := range checks {
 		byLink[c.Link] = c
 	}
 
-	assert.Equal(t, "pass", byLink["https://github.com/o/r/actions/runs/2"].Bucket)
-	assert.Equal(t, "pending", byLink["https://github.com/o/r/actions/runs/3"].Bucket)
+	assert.Equal(t, "pass", byLink["https://github.com/o/r/actions/runs/2"].Bucket, "rerun collapse keeps the newer run")
+	assert.Equal(t, "pending", byLink["https://github.com/o/r/actions/runs/3"].Bucket, "different event stays separate")
+	assert.Equal(t, "fail", byLink["https://github.com/o/r/actions/runs/4"].Bucket,
+		"a same-named workflow's red run must not vanish behind another workflow's green run")
+	assert.Equal(t, "pass", byLink["https://github.com/o/r/actions/runs/5"].Bucket, "the other same-named workflow's run also survives")
 }
 
 // TestParseCombinedStatus unmarshals the legacy combined-status document's

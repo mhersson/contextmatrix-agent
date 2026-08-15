@@ -332,7 +332,7 @@ func headSHAArgs(prURL string) []string {
 func runListArgs(owner, repo, sha string) []string {
 	return []string{
 		"run", "list", "-R", owner + "/" + repo, "--commit", sha,
-		"--limit", "100", "--json", "name,event,status,conclusion,databaseId,url",
+		"--limit", "100", "--json", "name,event,status,conclusion,databaseId,workflowDatabaseId,url",
 	}
 }
 
@@ -649,29 +649,36 @@ func (p *PRCreator) checksViaRuns(ctx context.Context, prURL string) ([]orchestr
 }
 
 // parseRunList maps gh run list --json output into CheckResults, keeping
-// only the newest run (highest databaseId) per (workflow name, event): a
-// rerun supersedes its predecessor, while the same workflow triggered by
-// different events (push and pull_request) stays two results.
+// only the newest run (highest databaseId) per (workflow, event), where
+// workflow identity is the workflow's database id, not its display name:
+// a rerun supersedes its predecessor, the same workflow triggered by
+// different events (push and pull_request) stays two results, and two
+// distinct workflow files that happen to share a display name stay
+// distinct - same-named workflow files never mask each other's runs.
 func parseRunList(out string) ([]orchestrator.CheckResult, error) {
 	var runs []struct {
-		Name       string `json:"name"`
-		Event      string `json:"event"`
-		Status     string `json:"status"`
-		Conclusion string `json:"conclusion"`
-		DatabaseID int64  `json:"databaseId"`
-		URL        string `json:"url"`
+		Name               string `json:"name"`
+		Event              string `json:"event"`
+		Status             string `json:"status"`
+		Conclusion         string `json:"conclusion"`
+		DatabaseID         int64  `json:"databaseId"`
+		WorkflowDatabaseID int64  `json:"workflowDatabaseId"`
+		URL                string `json:"url"`
 	}
 
 	if err := json.Unmarshal([]byte(out), &runs); err != nil {
 		return nil, fmt.Errorf("parse run list: %w", err)
 	}
 
-	type key struct{ name, event string }
+	type key struct {
+		workflowID int64
+		event      string
+	}
 
 	newest := map[key]int{}
 
 	for i, r := range runs {
-		k := key{r.Name, r.Event}
+		k := key{r.WorkflowDatabaseID, r.Event}
 		if j, ok := newest[k]; !ok || r.DatabaseID > runs[j].DatabaseID {
 			newest[k] = i
 		}
