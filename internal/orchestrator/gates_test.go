@@ -360,6 +360,37 @@ func TestGatesStateRoundTrips(t *testing.T) {
 	assert.Equal(t, gatesState{}, fresh.loadGatesState())
 }
 
+// TestGatesState_SatisfiedMarkerRoundTrips: a satisfied Copilot gate persists as
+// a literal marker line alongside the round counters, and an unsatisfied one
+// writes no such line at all - a resumed run must be able to tell "never
+// addressed" apart from "addressed, do not ask again".
+func TestGatesState_SatisfiedMarkerRoundTrips(t *testing.T) {
+	ctx := context.Background()
+	ops := &fakeOps{}
+	o := gatesTestRun(ops, &fakeGates{}, cmclient.TaskContext{Description: "Original body."})
+
+	o.recordGates(ctx, gatesState{
+		CopilotRounds:    1,
+		CIRounds:         2,
+		CopilotSatisfied: true,
+		Status:           "passed",
+	})
+
+	assert.Contains(t, o.body, "- Copilot gate: satisfied")
+
+	st := o.loadGatesState()
+	assert.True(t, st.CopilotSatisfied)
+	assert.Equal(t, 1, st.CopilotRounds)
+	assert.Equal(t, 2, st.CIRounds)
+
+	unsatisfied := gatesTestRun(&fakeOps{}, &fakeGates{}, cmclient.TaskContext{Description: "Original body."})
+	unsatisfied.recordGates(ctx, gatesState{CopilotRounds: 1, CIRounds: 1, Status: "waiting for CI"})
+
+	assert.NotContains(t, unsatisfied.body, "Copilot gate:",
+		"an unsatisfied gate must write no marker line; body=%q", unsatisfied.body)
+	assert.False(t, unsatisfied.loadGatesState().CopilotSatisfied)
+}
+
 // TestGatesKnobDefaults: a Deps built directly (tests, standalone runs) leaves
 // the knobs zero, so each effective-knob helper falls back to its default.
 func TestGatesKnobDefaults(t *testing.T) {
@@ -934,6 +965,27 @@ func TestCopilotGate_AlreadyRequestedWaitsAndPassesOnCleanReview(t *testing.T) {
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
 }
 
+// TestCopilotGate_CleanPassWritesSatisfiedMarker: the zero-valid-findings pass
+// exit is one of the two addressed exits that must persist the satisfied
+// marker, so a re-trigger never re-requests a review this run already got and
+// judged clean.
+func TestCopilotGate_CleanPassWritesSatisfiedMarker(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		reviews:   []*CopilotReview{copilotReviewOnHead("LGTM")},
+	}
+	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, copilotGateContext("Clean", "body"), 0)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	gatesSection := extractSection(ops.lastBody(), gatesSectionHeading)
+	assert.Contains(t, gatesSection, "- Copilot gate: satisfied", "gatesSection=%q", gatesSection)
+}
+
 // TestCopilotGate_RequestsWhenAbsent: with no review in flight the gate asks for
 // one BEFORE it starts waiting - otherwise it would wait out the timeout on a
 // review nobody requested.
@@ -985,6 +1037,29 @@ func TestCopilotGate_RequestFailsSkipsWithNote(t *testing.T) {
 		"a skipped Copilot gate must not skip the CI gate; calls=%v", gates.recorded())
 	assert.Zero(t, modelCallCount(client), "nothing to triage")
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+}
+
+// TestCopilotGate_SkipPathsDoNotWriteSatisfiedMarker: a request failure is
+// Copilot unavailability, not an addressed review - the marker must stay
+// unwritten so a re-trigger retries the request instead of skipping straight
+// to CI.
+func TestCopilotGate_SkipPathsDoNotWriteSatisfiedMarker(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requestErr: errors.New("gh: HTTP 422: Copilot isn't available for this repository"),
+		checks:     [][]CheckResult{{{Name: "build", Bucket: "pass"}}},
+	}
+	client := &planLLM{}
+
+	tc := copilotGateContext("No Copilot here", "body")
+	tc.AwaitCI = true
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, tc, 0)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	assert.NotContains(t, ops.lastBody(), "- Copilot gate: satisfied",
+		"an unavailable reviewer must remain retryable; body=%q", ops.lastBody())
 }
 
 // TestCopilotGate_ReviewerNeverAppearsSkipsWithNote: the request API can return
@@ -1162,6 +1237,49 @@ func TestCopilotGate_DedupeSurvivesResume(t *testing.T) {
 		"a comment triaged before the park is never triaged again")
 	assert.True(t, ops.loggedContains("already triaged"),
 		"the card says why the resumed gate passed; logs=%v", ops.recorded())
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+}
+
+// TestCopilotGate_SatisfiedMarkerSkipsOnResume: a resumed card whose body
+// already carries the satisfied marker skips the Copilot gate entirely - no
+// reviewer check, no request, no wait - and goes straight to the CI gate. The
+// seeded body is written by recordGates itself, the same write-then-read
+// discipline TestCopilotGate_DedupeSurvivesResume uses.
+func TestCopilotGate_SatisfiedMarkerSkipsOnResume(t *testing.T) {
+	seed := &fakeOps{}
+	recorder := prGateRun(seed, &fakeGates{}, &fakeGit{}, &planLLM{},
+		copilotGateContext("Earlier run", "Task body."), 0)
+
+	recorder.recordGates(context.Background(), gatesState{CopilotSatisfied: true, Status: "passed"})
+
+	body := seed.lastBody()
+	require.Contains(t, body, "- Copilot gate: satisfied",
+		"the seeded body records the earlier addressed review; body=%q", body)
+
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		checks: [][]CheckResult{{{Name: "build", Bucket: "pass"}}},
+	}
+	client := &planLLM{}
+
+	tc := copilotGateContext("Resumed", body)
+	tc.AwaitCI = true
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, tc, 0)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	calls := gates.recorded()
+	assert.Equal(t, -1, indexOfCall(calls, "CopilotRequested:"+gatePRURL),
+		"no reviewer check on a resumed, satisfied gate; calls=%v", calls)
+	assert.Equal(t, -1, indexOfCall(calls, "RequestCopilotReview:"+gatePRURL),
+		"no re-request on a resumed, satisfied gate; calls=%v", calls)
+	assert.Equal(t, -1, indexOfCall(calls, "CopilotReview:"+gatePRURL),
+		"no wait on a resumed, satisfied gate; calls=%v", calls)
+	assert.Contains(t, calls, "Checks:"+gatePRURL, "the CI gate still runs; calls=%v", calls)
+	assert.Zero(t, modelCallCount(client), "nothing to triage on a satisfied gate")
+	assert.True(t, ops.loggedContains("addressed in an earlier run"),
+		"a card log line mentions the earlier run; logs=%v", ops.recorded())
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
 }
 

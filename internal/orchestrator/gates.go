@@ -101,8 +101,16 @@ func (e *GatesParkedError) Error() string {
 type gatesState struct {
 	CopilotRounds int
 	CIRounds      int
-	Status        string
-	Detail        string // human-facing lines: failing checks, park reasons
+
+	// CopilotSatisfied records that a Copilot review was obtained and
+	// addressed in this or an earlier run; a resumed gate skips straight to
+	// CI instead of requesting (and paying for) another review. Skip-path
+	// outcomes (Copilot unavailable, wait timeout) deliberately do NOT set
+	// it - a re-trigger retries those.
+	CopilotSatisfied bool
+
+	Status string
+	Detail string // human-facing lines: failing checks, park reasons
 }
 
 // runPRGates is the pr_gates phase: after integrate has pushed and (optionally)
@@ -190,6 +198,12 @@ func runPRGates(ctx context.Context, o *run) error {
 // must not strand every gated card in review. The gate parks only on findings it
 // could not get fixed, or on running out of budget or turns while fixing them.
 func (o *run) copilotGate(ctx context.Context, prURL string, st *gatesState) error {
+	if st.CopilotSatisfied {
+		o.d.logCard(ctx, "pr_gates: Copilot review was addressed in an earlier run; gate already satisfied")
+
+		return nil
+	}
+
 	reason, err := o.ensureCopilotReviewer(ctx, prURL)
 	if err != nil {
 		return err
@@ -220,6 +234,7 @@ func (o *run) copilotGate(ctx context.Context, prURL string, st *gatesState) err
 		// spend a round undoing work an earlier round already did.
 		if len(review.Comments) > 0 && len(fresh) == 0 {
 			st.Detail = ""
+			st.CopilotSatisfied = true
 
 			o.d.logCard(ctx, "pr_gates: Copilot repeated only comments already triaged; gate passes")
 
@@ -238,6 +253,7 @@ func (o *run) copilotGate(ctx context.Context, prURL string, st *gatesState) err
 		valid := validCopilotFindings(findings)
 		if len(valid) == 0 {
 			st.Detail = ""
+			st.CopilotSatisfied = true
 
 			o.d.logCard(ctx, "pr_gates: Copilot review addressed")
 
@@ -983,6 +999,10 @@ func (o *run) recordGates(ctx context.Context, st gatesState) {
 	fmt.Fprintf(&b, "- Copilot rounds used: %d/%d\n", st.CopilotRounds, gatesRoundsCap)
 	fmt.Fprintf(&b, "- CI rounds used: %d/%d\n", st.CIRounds, gatesRoundsCap)
 
+	if st.CopilotSatisfied {
+		b.WriteString("- Copilot gate: satisfied\n")
+	}
+
 	if st.Status != "" {
 		fmt.Fprintf(&b, "- Status: %s\n", st.Status)
 	}
@@ -994,11 +1014,13 @@ func (o *run) recordGates(ctx context.Context, st gatesState) {
 	o.recordSection(ctx, gatesSectionHeading, b.String())
 }
 
-// gatesRoundsRe matches the two "rounds used" counters recordGates writes, so a
-// resumed run recovers them from the card body. Keep in sync with recordGates.
+// gatesRoundsRe matches the "rounds used" counters and the satisfied marker
+// recordGates writes, so a resumed run recovers them from the card body. Keep
+// in sync with recordGates.
 var (
-	copilotRoundsRe = regexp.MustCompile(`(?m)^- Copilot rounds used: (\d+)/`)
-	ciRoundsRe      = regexp.MustCompile(`(?m)^- CI rounds used: (\d+)/`)
+	copilotRoundsRe    = regexp.MustCompile(`(?m)^- Copilot rounds used: (\d+)/`)
+	ciRoundsRe         = regexp.MustCompile(`(?m)^- CI rounds used: (\d+)/`)
+	copilotSatisfiedRe = regexp.MustCompile(`(?m)^- Copilot gate: satisfied$`)
 )
 
 // loadGatesState reads the persisted round counters back out of the card body.
@@ -1011,8 +1033,9 @@ func (o *run) loadGatesState() gatesState {
 	}
 
 	return gatesState{
-		CopilotRounds: firstSubmatchInt(copilotRoundsRe, section),
-		CIRounds:      firstSubmatchInt(ciRoundsRe, section),
+		CopilotRounds:    firstSubmatchInt(copilotRoundsRe, section),
+		CIRounds:         firstSubmatchInt(ciRoundsRe, section),
+		CopilotSatisfied: copilotSatisfiedRe.MatchString(section),
 	}
 }
 
