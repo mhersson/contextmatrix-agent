@@ -127,7 +127,7 @@ func runPRGates(ctx context.Context, o *run) error {
 	if gated && o.tc.CreatePR && prURL == "" {
 		st := o.loadGatesState()
 
-		return o.parkGates(ctx, &st, "PR creation failed - nothing to gate on; open the PR manually and re-trigger")
+		return o.parkGates(ctx, &st, "PR creation failed - nothing to gate on; disable the PR-gate flags and re-trigger to complete without gating")
 	}
 
 	if gated && prURL != "" {
@@ -197,6 +197,8 @@ func (o *run) copilotGate(ctx context.Context, prURL string, st *gatesState) err
 		// round that carries nothing new is nothing to fix - re-triaging it would
 		// spend a round undoing work an earlier round already did.
 		if len(review.Comments) > 0 && len(fresh) == 0 {
+			st.Detail = ""
+
 			o.d.logCard(ctx, "pr_gates: Copilot repeated only comments already triaged; gate passes")
 
 			return nil
@@ -362,13 +364,24 @@ func (o *run) triageCopilot(
 
 	findings, perr := parseCopilotTriage(res.Output)
 
+	// A body-only review (zero line comments) with an unreadable verdict leaves
+	// findings empty for a reason distinct from a genuinely clean, readable
+	// round - recordCopilotRound needs to know which one happened so it never
+	// claims the reviewer raised nothing when nothing was actually judged.
+	unreadableWithNoComments := perr != nil && len(comments) == 0
+
 	// A comment the triage did not actually judge must never ship past the gate:
 	// take it at face value instead. A fix round spent on a nit costs less than a
 	// real defect waved through, and the card records which of the two happened.
 	switch {
 	case perr != nil:
-		o.d.logCard(ctx, "pr_gates: Copilot triage verdict could not be read (%s); treating all %d comment(s) as findings",
-			perr.Error(), len(comments))
+		if len(comments) == 0 {
+			o.d.logCard(ctx, "pr_gates: Copilot triage verdict could not be read (%s); the review left no line comments to take at face value",
+				perr.Error())
+		} else {
+			o.d.logCard(ctx, "pr_gates: Copilot triage verdict could not be read (%s); treating all %d comment(s) as findings",
+				perr.Error(), len(comments))
+		}
 
 		findings = commentsAsFindings(comments, copilotUnreadableReason)
 
@@ -382,7 +395,7 @@ func (o *run) triageCopilot(
 		findings = commentsAsFindings(comments, copilotUnjudgedReason)
 	}
 
-	o.recordCopilotRound(ctx, round, comments, findings)
+	o.recordCopilotRound(ctx, round, comments, findings, unreadableWithNoComments)
 
 	return findings, nil
 }
@@ -435,7 +448,9 @@ func (o *run) skipCopilot(ctx context.Context, st *gatesState, line string) erro
 // written BY CODE from the review itself - it is both the human's record of what
 // Copilot actually said and the dedupe key the next round reads back, so a
 // re-triggered run never fixes the same comment twice.
-func (o *run) recordCopilotRound(ctx context.Context, round int, comments []ReviewComment, findings []copilotFinding) {
+func (o *run) recordCopilotRound(
+	ctx context.Context, round int, comments []ReviewComment, findings []copilotFinding, triageUnreadable bool,
+) {
 	heading := copilotSectionHeading
 	if round > 1 {
 		heading = fmt.Sprintf("%s (Round %d)", copilotSectionHeading, round)
@@ -446,7 +461,12 @@ func (o *run) recordCopilotRound(ctx context.Context, round int, comments []Revi
 	b.WriteString("## " + heading + "\n\n")
 
 	if len(findings) == 0 {
-		b.WriteString("The reviewer raised nothing to address.\n")
+		if triageUnreadable {
+			b.WriteString("The triage verdict could not be read and the review left no line " +
+				"comments to take at face value; nothing was judged.\n")
+		} else {
+			b.WriteString("The reviewer raised nothing to address.\n")
+		}
 	}
 
 	for _, f := range findings {

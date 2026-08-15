@@ -329,9 +329,11 @@ func sectionsWithPrefix(body, heading string) string {
 
 // stripAgentSections returns body with every recorded run-history section
 // removed, keeping the human-written content - the pre-heading intro and any
-// heading not in agentSectionHeadings. Prompt sites read the stripped view so
-// resumed runs do not re-absorb the accumulated history; o.body stays raw
-// because it is the sole recordSection write-back source.
+// heading isAgentHeading does not recognize, i.e. not an exact match in
+// agentSectionHeadings and not a prefix match on agentRoundSectionHeadings.
+// Prompt sites read the stripped view so resumed runs do not re-absorb the
+// accumulated history; o.body stays raw because it is the sole recordSection
+// write-back source.
 //
 // Boundary semantics deliberately match upsertSection/extractSection: a
 // section starts at a line whose trimmed text is a recorded heading and ends

@@ -1023,6 +1023,11 @@ func TestCopilotGate_DedupesRepeatedComments(t *testing.T) {
 		"the card says why the second review passed; logs=%v", ops.recorded())
 	assert.Contains(t, ops.lastBody(), "- Copilot rounds used: 1/3", "exactly one round was spent")
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+
+	gatesSection := extractSection(ops.lastBody(), gatesSectionHeading)
+	assert.Contains(t, gatesSection, "Status: passed")
+	assert.NotContains(t, gatesSection, "the write error is dropped",
+		"round 1's findings must not linger under a passed status; section=%q", gatesSection)
 }
 
 // TestCopilotGate_DedupeSurvivesResume: the dedupe keys live on the card, so a
@@ -1045,7 +1050,7 @@ func TestCopilotGate_DedupeSurvivesResume(t *testing.T) {
 		[]copilotFinding{{
 			File: "internal/api/handler.go", Issue: "the write error is dropped",
 			Valid: true, Reason: "the caller cannot tell the write failed",
-		}})
+		}}, false)
 
 	body := seed.lastBody()
 	require.Contains(t, body, "### Comments triaged", "the parked run recorded its dedupe keys; body=%q", body)
@@ -1183,6 +1188,39 @@ func TestCopilotGate_UnreadableVerdictTakesCommentsAtFaceValue(t *testing.T) {
 	assert.Contains(t, ops.lastBody(), "- Copilot rounds used: 1/3")
 	assert.Contains(t, ops.lastBody(), "- VALID internal/api/handler.go:",
 		"the untriaged comment is recorded as taken at face value; body=%q", ops.lastBody())
+}
+
+// TestCopilotGate_UnreadableVerdictWithNoComments: a body-only review (zero
+// line comments) paired with an unreadable triage verdict must not be
+// recorded as "the reviewer raised nothing to address" - that phrasing
+// claims a clean, judged review, but nothing here was actually judged. The
+// gate still passes: there is nothing to fix regardless of why.
+func TestCopilotGate_UnreadableVerdictWithNoComments(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		reviews:   []*CopilotReview{copilotReviewOnHead("LGTM overall")},
+	}
+	client := &planLLM{responses: []llm.Response{
+		stopResp("garbage, not JSON", 0.01),
+	}}
+
+	o := prGateRun(ops, gates, &fakeGit{committed: true}, client, copilotGateContext("Body-only review", "body"), 0)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	assert.True(t, ops.loggedContains("could not be read"),
+		"the card records the unreadable verdict; logs=%v", ops.recorded())
+	assert.False(t, ops.loggedContains("treating all 0 comment(s) as findings"),
+		"there is nothing to treat as a finding when there are no comments; logs=%v", ops.recorded())
+	assert.Contains(t, ops.lastBody(),
+		"The triage verdict could not be read and the review left no line comments to take at face value; nothing was judged.",
+		"body=%q", ops.lastBody())
+	assert.NotContains(t, ops.lastBody(), "The reviewer raised nothing to address.",
+		"body=%q", ops.lastBody())
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0,
+		"a body-only review with an unreadable verdict has nothing to fix, so the gate passes")
 }
 
 // TestCopilotGate_EmptyVerdictWithCommentsTakesThemAtFaceValue: a verdict that

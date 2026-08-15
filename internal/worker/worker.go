@@ -43,8 +43,9 @@ const reviewAttemptsCap = 3
 
 // gatesFinalizeMargin is how much of the container's lifetime the pr_gates
 // deadline leaves unspent, so a gate that runs out of patience still has room to
-// write its park note, push WIP, and release the claim before serve kills the
-// container.
+// write its park note and exit cleanly before serve kills the container. A
+// gates park pushes no WIP - the work was already pushed by integrate - and
+// releases no claim - CM clears it when it sees the completed callback.
 const gatesFinalizeMargin = 10 * time.Minute
 
 // RunSpec is the container-side contract: populated from CM_* env by the
