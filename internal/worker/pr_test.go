@@ -585,3 +585,86 @@ exit 4
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "authentication required")
 }
+
+// TestPRViewURLArgs pins the exact argv for the branch-PR probe: url and
+// state, so parsePRViewURL can reject a non-OPEN result.
+func TestPRViewURLArgs(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, []string{"pr", "view", "--json", "url,state"}, prViewURLArgs())
+}
+
+// TestParsePRViewURL unmarshals gh pr view's --json url,state output,
+// returning the URL only for an OPEN PR - gh pr view falls back to the
+// branch's most recent CLOSED or MERGED PR when none is open, so the state
+// check is what keeps this read to "open PR" rather than "any PR that ever
+// existed on the branch" - and errors on unparsable output.
+func TestParsePRViewURL(t *testing.T) {
+	t.Parallel()
+
+	url, err := parsePRViewURL(`{"url": "https://github.com/org/repo/pull/7", "state": "OPEN"}`)
+	require.NoError(t, err)
+	assert.Equal(t, "https://github.com/org/repo/pull/7", url)
+
+	url, err = parsePRViewURL(`{"url": "https://github.com/org/repo/pull/3", "state": "MERGED"}`)
+	require.NoError(t, err)
+	assert.Empty(t, url, "a merged PR must not be read as the branch's open PR")
+
+	url, err = parsePRViewURL(`{"url": "https://github.com/org/repo/pull/5", "state": "CLOSED"}`)
+	require.NoError(t, err)
+	assert.Empty(t, url, "a closed PR must not be read as the branch's open PR")
+
+	_, err = parsePRViewURL("not json")
+	require.Error(t, err)
+}
+
+// TestFindPRURLTranslatesNoPRToEmpty pins the seam translation for a branch
+// with no open PR: gh pr view exits non-zero with "no pull requests found",
+// and FindPRURL must render that as an empty result, not an error - it is the
+// expected outcome of a recovery probe, not a broken gh.
+func TestFindPRURLTranslatesNoPRToEmpty(t *testing.T) {
+	stubGH(t, `
+echo "no pull requests found for branch \"cm/card-1\"" 1>&2
+exit 1
+`)
+
+	pc := NewPRCreator(t.TempDir(), "", "", "")
+
+	url, err := pc.FindPRURL(t.Context())
+	require.NoError(t, err, "no PR on the branch is an empty result, not a failure")
+	assert.Empty(t, url)
+}
+
+// TestFindPRURLKeepsRealErrors: any other gh failure stays an error - a broken
+// gh (auth, network, rate limit) must never read as "no PR exists".
+func TestFindPRURLKeepsRealErrors(t *testing.T) {
+	stubGH(t, `
+echo "HTTP 401: Bad credentials" 1>&2
+exit 1
+`)
+
+	pc := NewPRCreator(t.TempDir(), "", "", "")
+
+	_, err := pc.FindPRURL(t.Context())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "401")
+}
+
+// TestFindPRURLRejectsNonOpenPR pins the fix for the probe's most important
+// defect: gh pr view exits zero and falls back to the branch's most recent
+// CLOSED or MERGED PR when it has no open one, rather than erroring like the
+// no-PR case does. FindPRURL must not adopt that PR - e.g. one a human closed
+// to reject the work - as if it were the open PR the fail-closed park is
+// recovering.
+func TestFindPRURLRejectsNonOpenPR(t *testing.T) {
+	stubGH(t, `
+echo '{"url": "https://github.com/org/repo/pull/3", "state": "MERGED"}'
+exit 0
+`)
+
+	pc := NewPRCreator(t.TempDir(), "", "", "")
+
+	url, err := pc.FindPRURL(t.Context())
+	require.NoError(t, err)
+	assert.Empty(t, url, "a merged PR must not be recovered as the branch's open PR")
+}

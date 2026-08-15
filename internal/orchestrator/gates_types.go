@@ -32,4 +32,9 @@ type PRGates interface {
 	RequestCopilotReview(ctx context.Context, prURL string) error
 	CopilotReview(ctx context.Context, prURL string) (*CopilotReview, error)
 	FailureLogs(ctx context.Context, prURL string, failed []CheckResult) (string, error)
+
+	// FindPRURL returns the URL of the open PR for the workspace's current
+	// branch, or "" when the branch has none. Recovery probe for a gated card
+	// whose recorded PR creation failed - a PR may exist anyway.
+	FindPRURL(ctx context.Context) (string, error)
 }

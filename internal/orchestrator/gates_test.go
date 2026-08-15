@@ -41,6 +41,10 @@ type fakeGates struct {
 
 	logs string
 
+	// FindPRURL scripting: the recovery probe's result for a fail-closed gate.
+	findPRURL    string
+	findPRURLErr error
+
 	calls []string
 	i     int
 	r     int
@@ -134,6 +138,15 @@ func (f *fakeGates) FailureLogs(_ context.Context, prURL string, _ []CheckResult
 	return f.logs, nil
 }
 
+func (f *fakeGates) FindPRURL(_ context.Context) (string, error) {
+	f.record("FindPRURL")
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.findPRURL, f.findPRURLErr
+}
+
 // compile-time assertion that the fake satisfies the consumer interface.
 var _ PRGates = (*fakeGates)(nil)
 
@@ -204,7 +217,85 @@ func TestPRGates_FailClosedWhenPRCreationFailed(t *testing.T) {
 	require.NotEmpty(t, ops.bodyUpdates, "the park reason is recorded on the card")
 	assert.Contains(t, ops.lastBody(), "## PR Gates")
 	assert.Contains(t, ops.lastBody(), "parked:")
-	assert.Empty(t, gates.recorded(), "no URL means nothing to poll")
+	assert.Equal(t, []string{"FindPRURL"}, gates.recorded(),
+		"the recovery probe runs before parking; no other gh seam call is reachable with no PR")
+}
+
+// TestPRGates_RecoversBranchPRWhenCreateFailed: a gated card whose recorded PR
+// creation failed but whose branch already has an open PR (an earlier run's
+// report_push never landed, or `gh pr create` failed with "a pull request
+// already exists") recovers instead of parking: the found URL flows into the
+// gates, is card-logged, and is re-reported through the same ReportPush call
+// integrate makes - so a later park/resume reads it back without re-probing.
+func TestPRGates_RecoversBranchPRWhenCreateFailed(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		findPRURL: "https://example.test/pr/9",
+		checks:    [][]CheckResult{{{Name: "build", Bucket: "pass"}}},
+	}
+
+	o := gatesTestRun(ops, gates, cmclient.TaskContext{Title: "Gated", CreatePR: true, AwaitCI: true})
+	require.Empty(t, o.prURL)
+	require.Empty(t, o.tc.PRUrl)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	calls := gates.recorded()
+	assert.Contains(t, calls, "FindPRURL")
+	assert.Contains(t, calls, "Checks:https://example.test/pr/9",
+		"the recovered URL flows into the gate; calls=%v", calls)
+
+	opsCalls := ops.recorded()
+	assert.GreaterOrEqual(t, indexOfCall(opsCalls, "TransitionCard:done"), 0,
+		"a recovered PR gates normally through to done; calls=%v", opsCalls)
+	assert.Contains(t, ops.reportPushURLs, "https://example.test/pr/9",
+		"the recovery is made durable via ReportPush")
+	assert.True(t, ops.loggedContains("recovered"), "a card log line records the recovery")
+}
+
+// TestPRGates_StillParksWhenNoBranchPRExists: the recovery probe runs, but the
+// branch genuinely has no PR - the gate parks exactly as before, with the same
+// recovery note.
+func TestPRGates_StillParksWhenNoBranchPRExists(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{findPRURL: ""}
+
+	o := gatesTestRun(ops, gates, cmclient.TaskContext{Title: "Gated", CreatePR: true, AwaitCI: true})
+	require.Empty(t, o.prURL)
+	require.Empty(t, o.tc.PRUrl)
+
+	err := runPRGates(context.Background(), o)
+
+	var parked *GatesParkedError
+
+	require.ErrorAs(t, err, &parked, "no recovered PR must still park")
+
+	calls := ops.recorded()
+	assert.Equal(t, -1, indexOfCall(calls, "TransitionCard:done"),
+		"a parked card must NOT reach done; calls=%v", calls)
+	assert.Contains(t, gates.recorded(), "FindPRURL", "the probe must run before parking")
+	assert.Contains(t, ops.lastBody(), "disable the PR-gate flags", "the park note is unchanged")
+}
+
+// TestPRGates_ProbeErrorFallsBackToPark: the recovery probe itself fails (an
+// auth failure, say) - the probe failure never crashes the phase, it just
+// degrades to the same park as no PR found.
+func TestPRGates_ProbeErrorFallsBackToPark(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{findPRURLErr: errors.New("gh pr view: HTTP 401: Bad credentials")}
+
+	o := gatesTestRun(ops, gates, cmclient.TaskContext{Title: "Gated", CreatePR: true, AwaitCI: true})
+
+	err := runPRGates(context.Background(), o)
+
+	var parked *GatesParkedError
+
+	require.ErrorAs(t, err, &parked, "a probe failure must still park, not crash the phase")
+
+	calls := ops.recorded()
+	assert.Equal(t, -1, indexOfCall(calls, "TransitionCard:done"),
+		"a parked card must NOT reach done; calls=%v", calls)
+	assert.Contains(t, gates.recorded(), "FindPRURL")
 }
 
 // TestPRGates_ResumeReadsPRUrlFromTaskContext: a fresh container resuming at
@@ -267,6 +358,37 @@ func TestGatesStateRoundTrips(t *testing.T) {
 	// A resumed run whose card never reached the gates starts from zero.
 	fresh := gatesTestRun(ops, &fakeGates{}, cmclient.TaskContext{Description: "no gate section here"})
 	assert.Equal(t, gatesState{}, fresh.loadGatesState())
+}
+
+// TestGatesState_SatisfiedMarkerRoundTrips: a satisfied Copilot gate persists as
+// a literal marker line alongside the round counters, and an unsatisfied one
+// writes no such line at all - a resumed run must be able to tell "never
+// addressed" apart from "addressed, do not ask again".
+func TestGatesState_SatisfiedMarkerRoundTrips(t *testing.T) {
+	ctx := context.Background()
+	ops := &fakeOps{}
+	o := gatesTestRun(ops, &fakeGates{}, cmclient.TaskContext{Description: "Original body."})
+
+	o.recordGates(ctx, gatesState{
+		CopilotRounds:    1,
+		CIRounds:         2,
+		CopilotSatisfied: true,
+		Status:           "passed",
+	})
+
+	assert.Contains(t, o.body, "- Copilot gate: satisfied")
+
+	st := o.loadGatesState()
+	assert.True(t, st.CopilotSatisfied)
+	assert.Equal(t, 1, st.CopilotRounds)
+	assert.Equal(t, 2, st.CIRounds)
+
+	unsatisfied := gatesTestRun(&fakeOps{}, &fakeGates{}, cmclient.TaskContext{Description: "Original body."})
+	unsatisfied.recordGates(ctx, gatesState{CopilotRounds: 1, CIRounds: 1, Status: "waiting for CI"})
+
+	assert.NotContains(t, unsatisfied.body, "Copilot gate:",
+		"an unsatisfied gate must write no marker line; body=%q", unsatisfied.body)
+	assert.False(t, unsatisfied.loadGatesState().CopilotSatisfied)
 }
 
 // TestGatesKnobDefaults: a Deps built directly (tests, standalone runs) leaves
@@ -843,6 +965,78 @@ func TestCopilotGate_AlreadyRequestedWaitsAndPassesOnCleanReview(t *testing.T) {
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
 }
 
+// TestCopilotGate_CleanPassWritesSatisfiedMarker: the zero-valid-findings pass
+// exit is one of the two addressed exits that must persist the satisfied
+// marker, so a re-trigger never re-requests a review this run already got and
+// judged clean.
+func TestCopilotGate_CleanPassWritesSatisfiedMarker(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		reviews:   []*CopilotReview{copilotReviewOnHead("LGTM")},
+	}
+	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, copilotGateContext("Clean", "body"), 0)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	gatesSection := extractSection(ops.lastBody(), gatesSectionHeading)
+	assert.Contains(t, gatesSection, "- Copilot gate: satisfied", "gatesSection=%q", gatesSection)
+}
+
+// cancelingGates wraps a fakeGates and cancels the run's context right after
+// its first Checks call - reproducing the routine container-teardown
+// cancellation ciGate's poll loop can hit while checks are still pending (see
+// sleepGate's doc comment).
+type cancelingGates struct {
+	*fakeGates
+
+	cancel context.CancelFunc
+	once   sync.Once
+}
+
+func (g *cancelingGates) Checks(ctx context.Context, prURL string) ([]CheckResult, error) {
+	checks, err := g.fakeGates.Checks(ctx, prURL)
+	g.once.Do(g.cancel)
+
+	return checks, err
+}
+
+// TestCopilotGate_SatisfiedMarkerSurvivesCIGateCancellation: the Copilot gate's
+// pass must be durable the instant it happens, not only once the whole
+// pr_gates phase finishes - a context cancellation while the CI gate is still
+// polling pending checks must not cost the satisfied marker its only write.
+func TestCopilotGate_SatisfiedMarkerSurvivesCIGateCancellation(t *testing.T) {
+	ops := &fakeOps{}
+	base := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		reviews:   []*CopilotReview{copilotReviewOnHead("LGTM")},
+		checks:    [][]CheckResult{{{Name: "build", Bucket: "pending"}}},
+	}
+	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
+
+	tc := copilotGateContext("Clean then torn down", "body")
+	tc.AwaitCI = true
+
+	o := prGateRun(ops, base, &fakeGit{}, client, tc, 0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	o.d.PRGates = &cancelingGates{fakeGates: base, cancel: cancel}
+
+	err := runPRGates(ctx, o)
+
+	require.ErrorIs(t, err, context.Canceled,
+		"a torn-down container's ciGate returns the raw context error, never a park")
+
+	assert.Contains(t, ops.lastBody(), "- Copilot gate: satisfied",
+		"the Copilot gate's pass must survive a CI-gate cancellation; body=%q", ops.lastBody())
+}
+
 // TestCopilotGate_RequestsWhenAbsent: with no review in flight the gate asks for
 // one BEFORE it starts waiting - otherwise it would wait out the timeout on a
 // review nobody requested.
@@ -894,6 +1088,29 @@ func TestCopilotGate_RequestFailsSkipsWithNote(t *testing.T) {
 		"a skipped Copilot gate must not skip the CI gate; calls=%v", gates.recorded())
 	assert.Zero(t, modelCallCount(client), "nothing to triage")
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+}
+
+// TestCopilotGate_SkipPathsDoNotWriteSatisfiedMarker: a request failure is
+// Copilot unavailability, not an addressed review - the marker must stay
+// unwritten so a re-trigger retries the request instead of skipping straight
+// to CI.
+func TestCopilotGate_SkipPathsDoNotWriteSatisfiedMarker(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requestErr: errors.New("gh: HTTP 422: Copilot isn't available for this repository"),
+		checks:     [][]CheckResult{{{Name: "build", Bucket: "pass"}}},
+	}
+	client := &planLLM{}
+
+	tc := copilotGateContext("No Copilot here", "body")
+	tc.AwaitCI = true
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, tc, 0)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	assert.NotContains(t, ops.lastBody(), "- Copilot gate: satisfied",
+		"an unavailable reviewer must remain retryable; body=%q", ops.lastBody())
 }
 
 // TestCopilotGate_ReviewerNeverAppearsSkipsWithNote: the request API can return
@@ -1071,6 +1288,49 @@ func TestCopilotGate_DedupeSurvivesResume(t *testing.T) {
 		"a comment triaged before the park is never triaged again")
 	assert.True(t, ops.loggedContains("already triaged"),
 		"the card says why the resumed gate passed; logs=%v", ops.recorded())
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+}
+
+// TestCopilotGate_SatisfiedMarkerSkipsOnResume: a resumed card whose body
+// already carries the satisfied marker skips the Copilot gate entirely - no
+// reviewer check, no request, no wait - and goes straight to the CI gate. The
+// seeded body is written by recordGates itself, the same write-then-read
+// discipline TestCopilotGate_DedupeSurvivesResume uses.
+func TestCopilotGate_SatisfiedMarkerSkipsOnResume(t *testing.T) {
+	seed := &fakeOps{}
+	recorder := prGateRun(seed, &fakeGates{}, &fakeGit{}, &planLLM{},
+		copilotGateContext("Earlier run", "Task body."), 0)
+
+	recorder.recordGates(context.Background(), gatesState{CopilotSatisfied: true, Status: "passed"})
+
+	body := seed.lastBody()
+	require.Contains(t, body, "- Copilot gate: satisfied",
+		"the seeded body records the earlier addressed review; body=%q", body)
+
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		checks: [][]CheckResult{{{Name: "build", Bucket: "pass"}}},
+	}
+	client := &planLLM{}
+
+	tc := copilotGateContext("Resumed", body)
+	tc.AwaitCI = true
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, tc, 0)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	calls := gates.recorded()
+	assert.Equal(t, -1, indexOfCall(calls, "CopilotRequested:"+gatePRURL),
+		"no reviewer check on a resumed, satisfied gate; calls=%v", calls)
+	assert.Equal(t, -1, indexOfCall(calls, "RequestCopilotReview:"+gatePRURL),
+		"no re-request on a resumed, satisfied gate; calls=%v", calls)
+	assert.Equal(t, -1, indexOfCall(calls, "CopilotReview:"+gatePRURL),
+		"no wait on a resumed, satisfied gate; calls=%v", calls)
+	assert.Contains(t, calls, "Checks:"+gatePRURL, "the CI gate still runs; calls=%v", calls)
+	assert.Zero(t, modelCallCount(client), "nothing to triage on a satisfied gate")
+	assert.True(t, ops.loggedContains("addressed in an earlier run"),
+		"a card log line mentions the earlier run; logs=%v", ops.recorded())
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
 }
 

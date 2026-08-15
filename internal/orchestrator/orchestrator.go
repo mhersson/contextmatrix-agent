@@ -1,5 +1,5 @@
 // Package orchestrator drives an autonomous card through plan -> execute ->
-// document -> review -> integrate -> done. Code owns all sequencing; models run
+// judge -> document -> review -> integrate -> pr_gates -> done. Code owns all
 // inside phases. Each phase persists itself to the card BEFORE doing work, so the
 // stored phase always reads "in progress or interrupted".
 //
