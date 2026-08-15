@@ -563,6 +563,54 @@ REVIEW OUTCOME
 Respond with ONLY the Markdown PR body - no surrounding prose, no code fences.
 `
 
+// copilotTriagePrompt is the orchestrator-model instruction for triaging the
+// Copilot review on the pull request. Copilot reads the diff without the task's
+// context, so a large share of its comments are style preferences, restatements
+// of deliberate choices, or simply wrong about the code - the model has read-only
+// tools and is told to check each comment against the files before calling it
+// real. Only a genuine defect is valid; every rejection is recorded with its
+// reason, so the card shows what the agent decided to ignore.
+//
+// The trailing %s slots are filled by triageCopilot: the grounding block, the
+// parent card title, the parent card description, the review summary, and the
+// numbered comment list.
+const copilotTriagePrompt = `%sYou are triaging an automated code review left by GitHub Copilot on the pull
+request for the task below. You have read-only tools (read, grep, glob) - open
+the cited files and check each comment against the actual code before judging it.
+
+A comment is VALID only when it names a genuine defect in this change: a
+correctness bug, a real vulnerability, a broken or vacuous test, or a failure to
+meet the task's stated acceptance criteria.
+
+A comment is INVALID when it is a style or naming preference, a restatement of a
+deliberate choice the task called for, unrequested hardening (defensive checks,
+extra validation, error handling the task did not ask for), a suggestion to add
+abstractions or dependencies, wrong about what the code does, or already
+addressed in the change.
+
+Judge each comment on its own evidence. Do not invent findings the reviewer did
+not raise, and do not merge two comments into one.
+
+PARENT CARD
+Title: %s
+
+Description:
+%s
+
+COPILOT REVIEW SUMMARY
+%s
+
+COPILOT COMMENTS
+%s
+
+Respond with ONLY a JSON object, no prose:
+{"findings":[{"file":"...","issue":"...","valid":true|false,"reason":"..."}]}
+
+One entry per comment, in the order given. file is the path the comment is on,
+issue is the defect in one line (what the coder must fix when it is valid), and
+reason is why you judged it valid or invalid.
+`
+
 // documentPrompt is the document-phase instruction, a faithful port of the
 // document-task workflow skill adapted to a Go phase. The agent runs with the
 // FULL write toolset so it can read existing docs and edit/create doc files, but

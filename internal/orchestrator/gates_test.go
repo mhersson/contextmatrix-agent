@@ -2,7 +2,9 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -23,16 +25,25 @@ import (
 type fakeGates struct {
 	mu sync.Mutex
 
-	checks     [][]CheckResult
-	checksErr  error
-	headSHA    string
-	requested  bool
-	requestErr error
-	review     *CopilotReview
-	logs       string
+	checks    [][]CheckResult
+	checksErr error
+	headSHA   string
+
+	// Copilot scripting: requested is the reviewer-present answer, flipped to
+	// true by a successful RequestCopilotReview unless requestSilentlyNoOps
+	// reproduces the API failure mode where the request succeeds but no reviewer
+	// is ever added. reviews pops the successive scripted reviews (nil until the
+	// queue is seeded, and the last one sticks once it is exhausted).
+	requested            bool
+	requestErr           error
+	requestSilentlyNoOps bool
+	reviews              []*CopilotReview
+
+	logs string
 
 	calls []string
 	i     int
+	r     int
 }
 
 func (f *fakeGates) record(call string) {
@@ -78,19 +89,43 @@ func (f *fakeGates) HeadSHA(_ context.Context, prURL string) (string, error) {
 func (f *fakeGates) CopilotRequested(_ context.Context, prURL string) (bool, error) {
 	f.record("CopilotRequested:" + prURL)
 
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
 	return f.requested, nil
 }
 
 func (f *fakeGates) RequestCopilotReview(_ context.Context, prURL string) error {
 	f.record("RequestCopilotReview:" + prURL)
 
-	return f.requestErr
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.requestErr != nil {
+		return f.requestErr
+	}
+
+	if !f.requestSilentlyNoOps {
+		f.requested = true
+	}
+
+	return nil
 }
 
 func (f *fakeGates) CopilotReview(_ context.Context, prURL string) (*CopilotReview, error) {
 	f.record("CopilotReview:" + prURL)
 
-	return f.review, nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if len(f.reviews) == 0 {
+		return nil, nil
+	}
+
+	idx := min(f.r, len(f.reviews)-1)
+	f.r++
+
+	return f.reviews[idx], nil
 }
 
 func (f *fakeGates) FailureLogs(_ context.Context, prURL string, _ []CheckResult) (string, error) {
@@ -269,12 +304,12 @@ func TestGateDeadlineClampsToContainerDeadline(t *testing.T) {
 		"a later container deadline leaves the gate's wait intact")
 }
 
-// ciGatePRURL is the open PR every CI-gate test polls.
-const ciGatePRURL = "https://example.test/pr/1"
+// gatePRURL is the open PR every gate test polls.
+const gatePRURL = "https://example.test/pr/1"
 
-// ciGateRun builds a run wired for the CI gate: the scripted gh seam plus a
-// millisecond poll interval, so the waiting loop runs at test speed.
-func ciGateRun(ops *fakeOps, gates PRGates, git *fakeGit, client llm.LLM, tc cmclient.TaskContext, maxCost float64) *run {
+// prGateRun builds a run wired for one of the PR gates: the scripted gh seam plus
+// a millisecond poll interval, so the waiting loops run at test speed.
+func prGateRun(ops *fakeOps, gates PRGates, git *fakeGit, client llm.LLM, tc cmclient.TaskContext, maxCost float64) *run {
 	d := integrateTestDeps(ops, git, &fakePR{}, client)
 	d.PRGates = gates
 	d.Cfg.GatesPollInterval = time.Millisecond
@@ -290,7 +325,7 @@ func ciGateContext(title, body string) cmclient.TaskContext {
 		Phase:       "pr_gates",
 		CreatePR:    true,
 		AwaitCI:     true,
-		PRUrl:       ciGatePRURL,
+		PRUrl:       gatePRURL,
 	}
 }
 
@@ -326,6 +361,20 @@ func failingCheck() CheckResult {
 	}
 }
 
+// promptOfCall joins every message of one scripted call: a coder run appends its
+// wrap-up nudge as the last user message, so the seed prompt a gate fed it is not
+// the one planLLM captures in tasks.
+func promptOfCall(c *planLLM, call int) string {
+	var b strings.Builder
+
+	for _, m := range c.messagesOf(call) {
+		b.WriteString(m.Content)
+		b.WriteByte('\n')
+	}
+
+	return b.String()
+}
+
 // modelCallCount is how many LLM calls the scripted client saw.
 func modelCallCount(c *planLLM) int {
 	c.mu.Lock()
@@ -344,7 +393,7 @@ func TestCIGate_GreenImmediately(t *testing.T) {
 	}}}
 	client := &planLLM{}
 
-	o := ciGateRun(ops, gates, &fakeGit{}, client, ciGateContext("Green", "body"), 0)
+	o := prGateRun(ops, gates, &fakeGit{}, client, ciGateContext("Green", "body"), 0)
 
 	require.NoError(t, runPRGates(context.Background(), o))
 
@@ -352,7 +401,7 @@ func TestCIGate_GreenImmediately(t *testing.T) {
 	assert.GreaterOrEqual(t, indexOfCall(calls, "TransitionCard:done"), 0,
 		"a green gate completes the card; calls=%v", calls)
 	assert.Contains(t, ops.lastBody(), "- Status: passed")
-	assert.Equal(t, []string{"Checks:" + ciGatePRURL}, gates.recorded(),
+	assert.Equal(t, []string{"Checks:" + gatePRURL}, gates.recorded(),
 		"green on the first poll needs exactly one Checks call")
 	assert.Zero(t, modelCallCount(client), "a green gate spends nothing")
 }
@@ -367,7 +416,7 @@ func TestCIGate_NoChecksGraceThenPass(t *testing.T) {
 	gates := &fakeGates{checks: [][]CheckResult{{}, {}, {}}}
 	client := &planLLM{}
 
-	o := ciGateRun(ops, gates, &fakeGit{}, client, ciGateContext("No CI", "body"), 0)
+	o := prGateRun(ops, gates, &fakeGit{}, client, ciGateContext("No CI", "body"), 0)
 
 	require.NoError(t, runPRGates(context.Background(), o))
 
@@ -393,11 +442,11 @@ func TestCIGate_RedFixGreen(t *testing.T) {
 	git := &fakeGit{committed: true}
 	client := &planLLM{responses: []llm.Response{stopResp("coder: fixed the build", 0.05)}}
 
-	o := ciGateRun(ops, gates, git, client, ciGateContext("Red then green", "body"), 0)
+	o := prGateRun(ops, gates, git, client, ciGateContext("Red then green", "body"), 0)
 
 	require.NoError(t, runPRGates(context.Background(), o))
 
-	assert.Contains(t, gates.recorded(), "FailureLogs:"+ciGatePRURL,
+	assert.Contains(t, gates.recorded(), "FailureLogs:"+gatePRURL,
 		"the fix round is fed the real failure digest; calls=%v", gates.recorded())
 	assert.Equal(t, 1, modelCallCount(client), "exactly one fix round ran")
 	assert.Contains(t, git.recorded(), "Push:cm/card-1", "the fixup is pushed; calls=%v", git.recorded())
@@ -422,7 +471,7 @@ func TestCIGate_ThreeRoundsThenPark(t *testing.T) {
 		stopResp("coder: attempt 3", 0.01),
 	}}
 
-	o := ciGateRun(ops, gates, git, client, ciGateContext("Stays red", "body"), 0)
+	o := prGateRun(ops, gates, git, client, ciGateContext("Stays red", "body"), 0)
 
 	err := runPRGates(context.Background(), o)
 
@@ -448,7 +497,7 @@ func TestCIGate_PendingPastDeadlineParks(t *testing.T) {
 	gates := &fakeGates{checks: [][]CheckResult{{{Name: "build", Bucket: "pending"}}}}
 	client := &planLLM{}
 
-	o := ciGateRun(ops, gates, &fakeGit{}, client, ciGateContext("Pending forever", "body"), 0)
+	o := prGateRun(ops, gates, &fakeGit{}, client, ciGateContext("Pending forever", "body"), 0)
 	o.d.Cfg.GatesCIWaitTimeout = 10 * time.Millisecond
 
 	err := runPRGates(context.Background(), o)
@@ -473,7 +522,7 @@ func TestCIGate_BudgetParkDuringFix(t *testing.T) {
 	tc := ciGateContext("Broke", "body")
 	tc.ReportedCostUSD = 5.0
 
-	o := ciGateRun(ops, gates, &fakeGit{committed: true}, client, tc, 1.0)
+	o := prGateRun(ops, gates, &fakeGit{committed: true}, client, tc, 1.0)
 
 	err := runPRGates(context.Background(), o)
 
@@ -503,7 +552,7 @@ func TestCIGate_ResumeCountsPersistedRounds(t *testing.T) {
 	git := &fakeGit{committed: true}
 	client := &planLLM{responses: []llm.Response{stopResp("coder: last attempt", 0.01)}}
 
-	o := ciGateRun(ops, gates, git, client, ciGateContext("Resumed", body), 0)
+	o := prGateRun(ops, gates, git, client, ciGateContext("Resumed", body), 0)
 	require.Equal(t, 2, o.loadGatesState().CIRounds, "the seeded body carries two used rounds")
 
 	err := runPRGates(context.Background(), o)
@@ -532,7 +581,7 @@ func TestCIGate_EmptyPollAfterAFixIsNeverNoCI(t *testing.T) {
 	}}
 	client := &planLLM{responses: []llm.Response{stopResp("coder: fixed it", 0.01)}}
 
-	o := ciGateRun(ops, gates, &fakeGit{committed: true}, client, ciGateContext("Re-poll", "body"), 0)
+	o := prGateRun(ops, gates, &fakeGit{committed: true}, client, ciGateContext("Re-poll", "body"), 0)
 
 	require.NoError(t, runPRGates(context.Background(), o))
 
@@ -540,6 +589,34 @@ func TestCIGate_EmptyPollAfterAFixIsNeverNoCI(t *testing.T) {
 		"a PR whose checks were already seen can never be read as a repo without CI")
 	assert.True(t, ops.loggedContains("CI green"), "the gate waited for the new head's run")
 	assert.Equal(t, 1, modelCallCount(client))
+}
+
+// TestCIGate_ResumeNeverReopensNoCI: the checks-were-seen memory has to survive
+// a park/re-trigger too. A resumed gate whose persisted section records fix
+// rounds ran CI in an earlier container, so an empty first poll is the new head's
+// run registering - never "this repo has no CI".
+func TestCIGate_ResumeNeverReopensNoCI(t *testing.T) {
+	shrinkNoChecksGrace(t, 0) // only the persisted-rounds memory can hold the gate
+
+	body := "Task body.\n\n## PR Gates\n\n" +
+		"- Copilot rounds used: 0/3\n- CI rounds used: 1/3\n- Status: parked: CI still red\n"
+
+	ops := &fakeOps{}
+	gates := &fakeGates{checks: [][]CheckResult{
+		{},                                // the resumed head's run has not registered yet
+		{{Name: "build", Bucket: "pass"}}, // it registers, and it is green
+	}}
+	client := &planLLM{}
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, ciGateContext("Resumed", body), 0)
+	require.Equal(t, 1, o.loadGatesState().CIRounds, "the seeded body carries a used round")
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	assert.False(t, ops.loggedContains("no CI checks"),
+		"a gate that already ran CI rounds must never re-open the no-CI conclusion; logs=%v", ops.recorded())
+	assert.True(t, ops.loggedContains("CI green"), "the gate waited for the resumed head's run")
+	assert.Zero(t, modelCallCount(client), "green needs no fix round")
 }
 
 // TestCIGate_WaitsAPollIntervalAfterAFixRound: the gate lets the pushed head
@@ -552,7 +629,7 @@ func TestCIGate_WaitsAPollIntervalAfterAFixRound(t *testing.T) {
 	}}
 	client := &planLLM{responses: []llm.Response{stopResp("coder: fixed it", 0.01)}}
 
-	o := ciGateRun(ops, gates, &fakeGit{committed: true}, client, ciGateContext("Settle", "body"), 0)
+	o := prGateRun(ops, gates, &fakeGit{committed: true}, client, ciGateContext("Settle", "body"), 0)
 	o.d.Cfg.GatesPollInterval = 25 * time.Millisecond
 
 	start := time.Now()
@@ -570,7 +647,7 @@ func TestCIGate_DeadlineParkNamesTheOutage(t *testing.T) {
 	gates := &fakeGates{checksErr: errors.New("gh: API rate limit exceeded")}
 	client := &planLLM{}
 
-	o := ciGateRun(ops, gates, &fakeGit{}, client, ciGateContext("gh down", "body"), 0)
+	o := prGateRun(ops, gates, &fakeGit{}, client, ciGateContext("gh down", "body"), 0)
 	o.d.Cfg.GatesCIWaitTimeout = 10 * time.Millisecond
 
 	err := runPRGates(context.Background(), o)
@@ -596,7 +673,7 @@ func TestCIGate_PendingParkDropsStaleFailureDetail(t *testing.T) {
 	}}
 	client := &planLLM{responses: []llm.Response{stopResp("coder: fixed it", 0.01)}}
 
-	o := ciGateRun(ops, gates, &fakeGit{committed: true}, client, ciGateContext("Never settles", "body"), 0)
+	o := prGateRun(ops, gates, &fakeGit{committed: true}, client, ciGateContext("Never settles", "body"), 0)
 	o.d.Cfg.GatesCIWaitTimeout = 30 * time.Millisecond
 
 	err := runPRGates(context.Background(), o)
@@ -619,7 +696,7 @@ func TestCIGate_RedWithNoWaitLeftSkipsTheFixRound(t *testing.T) {
 	gates := &fakeGates{checks: [][]CheckResult{{failingCheck()}}}
 	client := &planLLM{}
 
-	o := ciGateRun(ops, gates, &fakeGit{committed: true}, client, ciGateContext("No time", "body"), 0)
+	o := prGateRun(ops, gates, &fakeGit{committed: true}, client, ciGateContext("No time", "body"), 0)
 	o.d.Cfg.GatesCIWaitTimeout = 10 * time.Millisecond
 
 	err := runPRGates(context.Background(), o)
@@ -677,6 +754,465 @@ func TestClassifyChecks(t *testing.T) {
 			assert.Equal(t, tc.wantPassing, b.passing)
 		})
 	}
+}
+
+// copilotGateContext is the task context of a Copilot-gated card whose PR is
+// already open.
+func copilotGateContext(title, body string) cmclient.TaskContext {
+	return cmclient.TaskContext{
+		Title:              title,
+		Description:        body,
+		Phase:              "pr_gates",
+		CreatePR:           true,
+		AwaitCopilotReview: true,
+		PRUrl:              gatePRURL,
+	}
+}
+
+// shrinkCopilotRecheck shortens the pause between requesting a Copilot review
+// and re-checking that the reviewer appeared, so the silent-no-op branch is
+// reached in milliseconds.
+func shrinkCopilotRecheck(t *testing.T, d time.Duration) {
+	t.Helper()
+
+	prev := gatesCopilotRecheck
+	gatesCopilotRecheck = d
+
+	t.Cleanup(func() { gatesCopilotRecheck = prev })
+}
+
+// copilotVerdict scripts one triage response: the strict JSON the gate asks for.
+func copilotVerdict(findings ...copilotFinding) llm.Response {
+	raw, err := json.Marshal(copilotTriage{Findings: findings})
+	if err != nil {
+		panic(err)
+	}
+
+	return stopResp(string(raw), 0.01)
+}
+
+// copilotReviewOnHead is a completed review on the head SHA every Copilot gate
+// test pins.
+func copilotReviewOnHead(body string, comments ...ReviewComment) *CopilotReview {
+	return &CopilotReview{CommitID: copilotHeadSHA, Body: body, Comments: comments}
+}
+
+// copilotHeadSHA is the PR head every Copilot gate test scripts, so a review
+// carrying this CommitID is a review of the code the gate is holding.
+const copilotHeadSHA = "head-sha"
+
+// swallowedErrorComment is a Copilot comment on a real defect; renamingComment
+// is the style nit the triage model rejects.
+var (
+	swallowedErrorComment = ReviewComment{
+		Path: "internal/api/handler.go",
+		Body: "This error is swallowed - the caller can never see it.",
+	}
+	renamingComment = ReviewComment{
+		Path: "README.md",
+		Body: "Consider rewording this sentence.",
+	}
+)
+
+// TestCopilotGate_AlreadyRequestedWaitsAndPassesOnCleanReview: a review that is
+// already requested is never re-requested, and a clean one passes the gate after
+// a single triage call.
+func TestCopilotGate_AlreadyRequestedWaitsAndPassesOnCleanReview(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		reviews:   []*CopilotReview{copilotReviewOnHead("LGTM")},
+	}
+	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, copilotGateContext("Clean", "body"), 0)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	calls := gates.recorded()
+	assert.Equal(t, -1, indexOfCall(calls, "RequestCopilotReview:"+gatePRURL),
+		"a review already requested must not be re-requested; calls=%v", calls)
+	assert.Equal(t, 1, modelCallCount(client), "one triage call, no fix round")
+	assert.True(t, ops.loggedContains("Copilot review addressed"),
+		"the card records why the gate passed; logs=%v", ops.recorded())
+
+	body := ops.lastBody()
+	assert.Contains(t, body, "## Copilot Review", "the triage round is recorded on the card; body=%q", body)
+	assert.Contains(t, body, "- Copilot rounds used: 0/3", "a clean review spends no fix round")
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+}
+
+// TestCopilotGate_RequestsWhenAbsent: with no review in flight the gate asks for
+// one BEFORE it starts waiting - otherwise it would wait out the timeout on a
+// review nobody requested.
+func TestCopilotGate_RequestsWhenAbsent(t *testing.T) {
+	shrinkCopilotRecheck(t, time.Millisecond)
+
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		headSHA: copilotHeadSHA,
+		reviews: []*CopilotReview{copilotReviewOnHead("LGTM")},
+	}
+	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, copilotGateContext("Not requested", "body"), 0)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	calls := gates.recorded()
+	request := indexOfCall(calls, "RequestCopilotReview:"+gatePRURL)
+	wait := indexOfCall(calls, "CopilotReview:"+gatePRURL)
+
+	require.GreaterOrEqual(t, request, 0, "the gate requests the missing review; calls=%v", calls)
+	require.GreaterOrEqual(t, wait, 0, "the gate then waits for it; calls=%v", calls)
+	assert.Less(t, request, wait, "the request must precede the wait; calls=%v", calls)
+}
+
+// TestCopilotGate_RequestFailsSkipsWithNote: Copilot being unavailable is not the
+// card's fault - the gate records the VERBATIM gh error and proceeds, and the CI
+// gate still runs. That log line is the only diagnostic an operator whose account
+// has no Copilot access ever gets.
+func TestCopilotGate_RequestFailsSkipsWithNote(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requestErr: errors.New("gh: HTTP 422: Copilot isn't available for this repository"),
+		checks:     [][]CheckResult{{{Name: "build", Bucket: "pass"}}},
+	}
+	client := &planLLM{}
+
+	tc := copilotGateContext("No Copilot here", "body")
+	tc.AwaitCI = true
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, tc, 0)
+
+	require.NoError(t, runPRGates(context.Background(), o), "an unavailable reviewer never parks the card")
+
+	assert.True(t, ops.loggedContains("gh: HTTP 422: Copilot isn't available for this repository"),
+		"the verbatim gh error is the post-ship debugging channel; logs=%v", ops.recorded())
+	assert.Contains(t, gates.recorded(), "Checks:"+gatePRURL,
+		"a skipped Copilot gate must not skip the CI gate; calls=%v", gates.recorded())
+	assert.Zero(t, modelCallCount(client), "nothing to triage")
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+}
+
+// TestCopilotGate_ReviewerNeverAppearsSkipsWithNote: the request API can return
+// success without adding the reviewer. The gate re-checks, says so on the card,
+// and proceeds instead of waiting out the full timeout on a review that is never
+// coming.
+func TestCopilotGate_ReviewerNeverAppearsSkipsWithNote(t *testing.T) {
+	shrinkCopilotRecheck(t, time.Millisecond)
+
+	ops := &fakeOps{}
+	gates := &fakeGates{requestSilentlyNoOps: true}
+	client := &planLLM{}
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, copilotGateContext("Silent no-op", "body"), 0)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	assert.True(t, ops.loggedContains("not added as a reviewer"),
+		"the card names the silent failure; logs=%v", ops.recorded())
+	assert.Equal(t, -1, indexOfCall(gates.recorded(), "CopilotReview:"+gatePRURL),
+		"no wait loop runs when the reviewer never appeared; calls=%v", gates.recorded())
+	assert.Zero(t, modelCallCount(client))
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+}
+
+// TestCopilotGate_TimeoutProceeds: a review that never lands proceeds at the wait
+// deadline. This gate never parks on a missing review - only on findings it could
+// not get fixed.
+func TestCopilotGate_TimeoutProceeds(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{requested: true, headSHA: copilotHeadSHA}
+	client := &planLLM{}
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, copilotGateContext("Never arrives", "body"), 0)
+	o.d.Cfg.GatesCopilotWaitTimeout = 10 * time.Millisecond
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	assert.True(t, ops.loggedContains("did not arrive in time"),
+		"the card records the timeout; logs=%v", ops.recorded())
+	assert.GreaterOrEqual(t, len(gates.recorded()), 2, "the gate polled while it waited")
+	assert.Zero(t, modelCallCount(client), "no review means nothing to triage")
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+}
+
+// TestCopilotGate_ValidFindingsFixedThenClean: the triage verdict decides which
+// comments are real - the valid one funds a fix round and a re-request, the nit
+// is recorded and dropped - and the next review comes back clean.
+func TestCopilotGate_ValidFindingsFixedThenClean(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		reviews: []*CopilotReview{
+			copilotReviewOnHead("2 suggestions", swallowedErrorComment, renamingComment),
+			copilotReviewOnHead("LGTM"),
+		},
+	}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: []llm.Response{
+		copilotVerdict(
+			copilotFinding{
+				File: "internal/api/handler.go", Issue: "the write error is dropped",
+				Valid: true, Reason: "the caller cannot tell the write failed",
+			},
+			copilotFinding{
+				File: "README.md", Issue: "wording could be clearer",
+				Valid: false, Reason: "style preference, not a defect",
+			},
+		),
+		stopResp("coder: returned the write error", 0.02),
+		copilotVerdict(),
+	}}
+
+	o := prGateRun(ops, gates, git, client, copilotGateContext("Two comments", "body"), 0)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	require.Equal(t, 3, modelCallCount(client), "triage, one fix, and the re-triage of the clean review")
+	assert.Contains(t, git.recorded(), "Push:cm/card-1", "the fix is pushed; git=%v", git.recorded())
+
+	fixPrompt := promptOfCall(client, 1)
+
+	assert.Contains(t, fixPrompt, "internal/api/handler.go", "the fix run is fed the valid finding")
+	assert.NotContains(t, fixPrompt, "wording could be clearer",
+		"an invalid finding must never reach the coder")
+	assert.Contains(t, gates.recorded(), "RequestCopilotReview:"+gatePRURL,
+		"the fixed head is sent back for re-review; calls=%v", gates.recorded())
+
+	body := ops.lastBody()
+	assert.Contains(t, body, "## Copilot Review", "round 1 uses the bare heading")
+	assert.Contains(t, body, "- VALID internal/api/handler.go: the write error is dropped")
+	assert.Contains(t, body, "- INVALID README.md: wording could be clearer")
+	assert.Contains(t, body, "## Copilot Review (Round 2)", "later rounds are numbered; body=%q", body)
+	assert.Contains(t, body, "- Copilot rounds used: 1/3")
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+}
+
+// TestCopilotGate_DedupesRepeatedComments: Copilot re-posts comments it already
+// made. A repeat is filtered before triage, so an already-fixed finding never
+// buys a second fix round.
+func TestCopilotGate_DedupesRepeatedComments(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		reviews: []*CopilotReview{
+			copilotReviewOnHead("one suggestion", swallowedErrorComment),
+			copilotReviewOnHead("one suggestion", swallowedErrorComment),
+		},
+	}
+	client := &planLLM{responses: []llm.Response{
+		copilotVerdict(copilotFinding{
+			File: "internal/api/handler.go", Issue: "the write error is dropped",
+			Valid: true, Reason: "the caller cannot tell the write failed",
+		}),
+		stopResp("coder: returned the write error", 0.02),
+	}}
+
+	o := prGateRun(ops, gates, &fakeGit{committed: true}, client, copilotGateContext("Repeat", "body"), 0)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	assert.Equal(t, 2, modelCallCount(client),
+		"one triage and one fix: the repeated comment is filtered before a second triage")
+	assert.True(t, ops.loggedContains("already triaged"),
+		"the card says why the second review passed; logs=%v", ops.recorded())
+	assert.Contains(t, ops.lastBody(), "- Copilot rounds used: 1/3", "exactly one round was spent")
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+}
+
+// TestCopilotGate_DedupeSurvivesResume: the dedupe keys live on the card, so a
+// re-triggered run in a fresh container does not re-triage - or re-fix - a
+// comment an earlier run already handled. The seeded body is written by
+// recordCopilotRound itself, so the recorded line shape and the key read back out
+// of it cannot drift apart. The comment is deliberately multi-line and longer
+// than the key: flattening and truncation have to round-trip too.
+func TestCopilotGate_DedupeSurvivesResume(t *testing.T) {
+	wrapped := ReviewComment{
+		Path: "internal/api/handler.go",
+		Body: "This error is swallowed - the caller\ncan never see it, and the write is\nreported as a success.",
+	}
+
+	seed := &fakeOps{}
+	recorder := prGateRun(seed, &fakeGates{}, &fakeGit{}, &planLLM{},
+		copilotGateContext("Parked", "Task body."), 0)
+
+	recorder.recordCopilotRound(context.Background(), 1, []ReviewComment{wrapped},
+		[]copilotFinding{{
+			File: "internal/api/handler.go", Issue: "the write error is dropped",
+			Valid: true, Reason: "the caller cannot tell the write failed",
+		}})
+
+	body := seed.lastBody()
+	require.Contains(t, body, "### Comments triaged", "the parked run recorded its dedupe keys; body=%q", body)
+
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		reviews:   []*CopilotReview{copilotReviewOnHead("one suggestion", wrapped)},
+	}
+	client := &planLLM{}
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, copilotGateContext("Resumed", body), 0)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	assert.Zero(t, modelCallCount(client),
+		"a comment triaged before the park is never triaged again")
+	assert.True(t, ops.loggedContains("already triaged"),
+		"the card says why the resumed gate passed; logs=%v", ops.recorded())
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+}
+
+// TestCopilotGate_ThreeRoundsThenPark: a reviewer that keeps finding new real
+// defects outlives the fix budget - three rounds, then the card parks in review
+// with the open findings named.
+func TestCopilotGate_ThreeRoundsThenPark(t *testing.T) {
+	freshReview := func(n int) *CopilotReview {
+		return copilotReviewOnHead(fmt.Sprintf("round %d", n), ReviewComment{
+			Path: fmt.Sprintf("internal/pkg/file%d.go", n),
+			Body: fmt.Sprintf("Defect number %d: this branch cannot be reached.", n),
+		})
+	}
+
+	freshVerdict := func(n int) llm.Response {
+		return copilotVerdict(copilotFinding{
+			File: fmt.Sprintf("internal/pkg/file%d.go", n), Issue: fmt.Sprintf("unreachable branch %d", n),
+			Valid: true, Reason: "the guard above already returns",
+		})
+	}
+
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		reviews:   []*CopilotReview{freshReview(1), freshReview(2), freshReview(3), freshReview(4)},
+	}
+	client := &planLLM{responses: []llm.Response{
+		freshVerdict(1), stopResp("coder: round 1", 0.01),
+		freshVerdict(2), stopResp("coder: round 2", 0.01),
+		freshVerdict(3), stopResp("coder: round 3", 0.01),
+		freshVerdict(4),
+	}}
+
+	o := prGateRun(ops, gates, &fakeGit{committed: true}, client, copilotGateContext("Endless", "body"), 0)
+
+	err := runPRGates(context.Background(), o)
+
+	var parked *GatesParkedError
+
+	require.ErrorAs(t, err, &parked)
+	assert.Contains(t, parked.Reason, "3 rounds")
+	assert.Equal(t, 7, modelCallCount(client), "four triages and three fixes - the cap is 3, not 4")
+
+	body := ops.lastBody()
+	assert.Contains(t, body, "- Copilot rounds used: 3/3")
+	assert.Contains(t, body, "- Status: parked:")
+	assert.Contains(t, body, "internal/pkg/file4.go",
+		"the human needs the findings that are still open; body=%q", body)
+	assert.Equal(t, -1, indexOfCall(ops.recorded(), "TransitionCard:done"),
+		"a parked card must NOT reach done")
+}
+
+// TestCopilotGate_BudgetParkDuringTriage: a budget that runs out before the
+// triage call parks the card in review rather than failing the run - the work is
+// pushed and the PR stands as the human finds it.
+func TestCopilotGate_BudgetParkDuringTriage(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		reviews:   []*CopilotReview{copilotReviewOnHead("one suggestion", swallowedErrorComment)},
+	}
+	client := &planLLM{}
+
+	tc := copilotGateContext("Broke", "body")
+	tc.ReportedCostUSD = 5.0
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, tc, 1.0)
+
+	err := runPRGates(context.Background(), o)
+
+	var parked *GatesParkedError
+
+	require.ErrorAs(t, err, &parked)
+
+	var budget *BudgetExceededError
+
+	require.NotErrorAs(t, err, &budget,
+		"gate-phase budget exhaustion parks in review; it never surfaces as the budget error")
+
+	assert.Contains(t, parked.Reason, "budget")
+	assert.Contains(t, parked.Reason, "Copilot", "the park reason names the gate that ran out")
+	assert.Zero(t, modelCallCount(client), "the budget is checked before the triage model runs")
+	assert.Equal(t, -1, indexOfCall(ops.recorded(), "TransitionCard:done"))
+}
+
+// TestCopilotGate_UnreadableVerdictTakesCommentsAtFaceValue: a triage response
+// that is not the JSON we asked for must never ship past the review. The gate
+// says so verbatim on the card and treats every comment as a finding - the
+// conservative reading, since a wasted fix round costs less than a missed defect.
+func TestCopilotGate_UnreadableVerdictTakesCommentsAtFaceValue(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		reviews: []*CopilotReview{
+			copilotReviewOnHead("one suggestion", swallowedErrorComment),
+			copilotReviewOnHead("LGTM"),
+		},
+	}
+	client := &planLLM{responses: []llm.Response{
+		stopResp("Looks mostly fine to me, though I did not check the handler.", 0.01),
+		stopResp("coder: returned the write error", 0.02),
+		copilotVerdict(),
+	}}
+
+	o := prGateRun(ops, gates, &fakeGit{committed: true}, client, copilotGateContext("Junk verdict", "body"), 0)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	assert.True(t, ops.loggedContains("could not be read"),
+		"the card records the unreadable verdict; logs=%v", ops.recorded())
+	assert.Equal(t, 3, modelCallCount(client), "the unreadable verdict still funds the fix round")
+	assert.Contains(t, ops.lastBody(), "- Copilot rounds used: 1/3")
+	assert.Contains(t, ops.lastBody(), "- VALID internal/api/handler.go:",
+		"the untriaged comment is recorded as taken at face value; body=%q", ops.lastBody())
+}
+
+// TestCopilotGate_EmptyVerdictWithCommentsTakesThemAtFaceValue: a verdict that
+// parses but judges nothing is not a verdict of "no defects" - the prompt asks
+// for one entry per comment, invalid ones included. The comments stand rather
+// than shipping past the gate unjudged.
+func TestCopilotGate_EmptyVerdictWithCommentsTakesThemAtFaceValue(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		reviews: []*CopilotReview{
+			copilotReviewOnHead("one suggestion", swallowedErrorComment),
+			copilotReviewOnHead("LGTM"),
+		},
+	}
+	client := &planLLM{responses: []llm.Response{
+		copilotVerdict(), // parses cleanly, judges nothing
+		stopResp("coder: returned the write error", 0.02),
+		copilotVerdict(),
+	}}
+
+	o := prGateRun(ops, gates, &fakeGit{committed: true}, client, copilotGateContext("Silent verdict", "body"), 0)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	assert.True(t, ops.loggedContains("judged none of the 1 comment"),
+		"the card says the comment was never judged; logs=%v", ops.recorded())
+	assert.Equal(t, 3, modelCallCount(client), "the unjudged comment still funds the fix round")
+	assert.Contains(t, ops.lastBody(), "- Copilot rounds used: 1/3")
 }
 
 // nonEmpty normalizes an empty slice to nil so table cases can leave the want

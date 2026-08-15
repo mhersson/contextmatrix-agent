@@ -117,6 +117,16 @@ func TestStripAgentSections(t *testing.T) {
 			want: "Intro.",
 		},
 		{
+			name: "strips the bare copilot review heading",
+			body: "Intro.\n\n## Copilot Review\n\nc1\n",
+			want: "Intro.",
+		},
+		{
+			name: "strips numbered copilot rounds via prefix",
+			body: "Intro.\n\n## Copilot Review (Round 2)\n\nc2\n\n## Copilot Review (Round 10)\n\nc10\n",
+			want: "Intro.",
+		},
+		{
 			name: "keeps human heading that extends an exact-match name",
 			body: "Intro.\n\n## Planning notes\n\nhuman notes\n\n## Plan\n\nagent plan\n",
 			want: "Intro.\n\n## Planning notes\n\nhuman notes",

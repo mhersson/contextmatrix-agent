@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -28,12 +29,34 @@ const (
 // gatesSectionHeading is the card-body section the pr_gates phase owns.
 const gatesSectionHeading = "PR Gates"
 
+// copilotSectionHeading is the card-body section one Copilot triage round owns,
+// numbered "(Round N)" from round 2 on. copilotCommentsHeading labels the
+// verbatim comment list inside it.
+const (
+	copilotSectionHeading  = "Copilot Review"
+	copilotCommentsHeading = "Comments triaged"
+)
+
+// copilotKeyBodyChars is how much of a comment body identifies it for dedupe:
+// enough to tell two comments on one file apart, short enough that a re-post
+// whose tail moved (line numbers shift as the branch grows) still matches.
+const copilotKeyBodyChars = 80
+
+// copilotCommentLineRe matches the "- <path>: <digest>" lines recordCopilotRound
+// writes under its comments heading. Keep the two in sync: they are the write and
+// read halves of the dedupe key.
+var copilotCommentLineRe = regexp.MustCompile(`^- (.+?): (.*)$`)
+
 // Park reasons for a gate that ran out of the resources its fix rounds need.
 // Both park the card in review rather than failing the run: the work is already
 // pushed, so there is nothing to WIP-push and the PR stands as the human finds it.
 const (
 	gatesBudgetParkReason  = "budget exhausted during CI fixes"
 	gatesTurnCapParkReason = "CI fix run hit its turn cap"
+
+	gatesCopilotTriageBudgetParkReason = "budget exhausted during Copilot triage"
+	gatesCopilotFixBudgetParkReason    = "budget exhausted during Copilot fixes"
+	gatesCopilotTurnCapParkReason      = "Copilot fix run hit its turn cap"
 )
 
 // gatesNoChecksGrace is how long the CI gate waits for the first check to appear
@@ -45,6 +68,25 @@ var gatesNoChecksGrace = 3 * time.Minute
 // fit before the gate gives up, or the round only burns tokens on the way to a
 // park. A var so tests can shrink it.
 var gatesFixRoundReserve = 5 * time.Minute
+
+// gatesCopilotRecheck is the pause between requesting a Copilot review and
+// re-checking that the reviewer actually appeared (the request API can silently
+// no-op on an account without Copilot review access). A var so tests can shrink it.
+var gatesCopilotRecheck = 10 * time.Second
+
+// copilotFinding is one triaged Copilot comment: the orchestrator model's
+// judgement on whether it names a real defect worth a fix round.
+type copilotFinding struct {
+	File   string `json:"file"`
+	Issue  string `json:"issue"`
+	Valid  bool   `json:"valid"`
+	Reason string `json:"reason"`
+}
+
+// copilotTriage is the strict-JSON verdict the triage call returns.
+type copilotTriage struct {
+	Findings []copilotFinding `json:"findings"`
+}
 
 // GatesParkedError parks the card in review from the pr_gates phase. Reason
 // is a short human phrase already recorded on the card.
@@ -114,10 +156,509 @@ func runPRGates(ctx context.Context, o *run) error {
 	return nil
 }
 
-// copilotGate holds the card until the Copilot review on the PR is addressed.
-// PLACEHOLDER: the Copilot-gate task replaces this body wholesale.
-func (o *run) copilotGate(_ context.Context, _ string, _ *gatesState) error {
+// copilotGate holds the card until the Copilot review on the PR is addressed: it
+// makes sure a review is actually requested, waits for one on the PR's current
+// head, triages its comments with one model call, and spends up to gatesRoundsCap
+// fix rounds on the findings it judges real.
+//
+// Copilot being unavailable NEVER parks the card. A request that fails, a
+// reviewer that never appears, and a review that never arrives all record the
+// verbatim reason on the card and pass the gate: the flag asks for a second
+// opinion, it does not promise one, and an account without Copilot review access
+// must not strand every gated card in review. The gate parks only on findings it
+// could not get fixed, or on running out of budget or turns while fixing them.
+func (o *run) copilotGate(ctx context.Context, prURL string, st *gatesState) error {
+	reason, err := o.ensureCopilotReviewer(ctx, prURL)
+	if err != nil {
+		return err
+	}
+
+	if reason != "" {
+		return o.skipCopilot(ctx, st, "pr_gates: Copilot review unavailable: "+reason+"; gate skipped")
+	}
+
+	// Seeded from the card body so the dedupe survives a park/re-trigger, then
+	// grown in memory as this run triages further rounds.
+	seen := copilotSeenComments(o.body)
+
+	for {
+		review, werr := o.awaitCopilotReview(ctx, prURL)
+		if werr != nil {
+			return werr
+		}
+
+		if review == nil {
+			return o.skipCopilot(ctx, st, "pr_gates: Copilot review did not arrive in time; proceeding")
+		}
+
+		fresh := unseenComments(review.Comments, seen)
+
+		// Copilot re-posts the comments it already made on every re-review. A
+		// round that carries nothing new is nothing to fix - re-triaging it would
+		// spend a round undoing work an earlier round already did.
+		if len(review.Comments) > 0 && len(fresh) == 0 {
+			o.d.logCard(ctx, "pr_gates: Copilot repeated only comments already triaged; gate passes")
+
+			return nil
+		}
+
+		findings, terr := o.triageCopilot(ctx, st, review, fresh)
+		if terr != nil {
+			return terr
+		}
+
+		for _, c := range fresh {
+			seen[copilotCommentKey(c.Path, c.Body)] = true
+		}
+
+		valid := validCopilotFindings(findings)
+		if len(valid) == 0 {
+			st.Detail = ""
+
+			o.d.logCard(ctx, "pr_gates: Copilot review addressed")
+
+			return nil
+		}
+
+		if ferr := o.copilotFixRound(ctx, st, valid); ferr != nil {
+			return ferr
+		}
+
+		if rerr := o.d.PRGates.RequestCopilotReview(ctx, prURL); rerr != nil {
+			return o.skipCopilot(ctx, st, "pr_gates: Copilot re-review could not be requested: "+
+				rerr.Error()+"; gate passes with the fixes already pushed")
+		}
+	}
+}
+
+// ensureCopilotReviewer makes sure Copilot is on the PR as a reviewer, requesting
+// it when it is not. It returns a non-empty reason when it could not be put
+// there: the request failed, or it reported success without adding the reviewer
+// (the API silently no-ops on an account without Copilot review access). That
+// reason is the gh error VERBATIM - where Copilot cannot run, the line it puts on
+// the card is the only diagnostic anyone gets. A non-nil error is the run context
+// ending, and is fatal.
+func (o *run) ensureCopilotReviewer(ctx context.Context, prURL string) (string, error) {
+	requested, err := o.d.PRGates.CopilotRequested(ctx, prURL)
+	if err != nil {
+		return err.Error(), nil
+	}
+
+	if requested {
+		return "", nil
+	}
+
+	if err := o.d.PRGates.RequestCopilotReview(ctx, prURL); err != nil {
+		return err.Error(), nil
+	}
+
+	// Re-check instead of trusting the request: a reviewer that was never added
+	// would otherwise burn the gate's entire wait on a review nobody is writing.
+	if err := o.sleepGate(ctx, gatesCopilotRecheck); err != nil {
+		return "", err
+	}
+
+	requested, err = o.d.PRGates.CopilotRequested(ctx, prURL)
+	if err != nil {
+		return err.Error(), nil
+	}
+
+	if !requested {
+		return "the request succeeded but Copilot was not added as a reviewer", nil
+	}
+
+	return "", nil
+}
+
+// awaitCopilotReview waits for a completed Copilot review of the PR's CURRENT
+// head: a review of a superseded head was written against code the fix round that
+// superseded it already changed. It returns a nil review (never an error) once
+// the wait deadline passes - this gate proceeds on a missing review, it never
+// parks on one. The deadline is per wait, so every re-requested review gets a
+// full one, and gateDeadline still clamps each to the container's own deadline.
+func (o *run) awaitCopilotReview(ctx context.Context, prURL string) (*CopilotReview, error) {
+	deadline := o.gateDeadline(o.copilotWait())
+
+	for {
+		review, reviewErr := o.d.PRGates.CopilotReview(ctx, prURL)
+		if reviewErr != nil {
+			// A gh hiccup is not a verdict. Keep waiting - the deadline still
+			// bounds the gate - rather than skipping a review one poll away.
+			slog.Warn("pr_gates: Copilot review poll failed; retrying",
+				"card_id", o.d.Cfg.CardID, "pr_url", prURL, "error", reviewErr)
+		}
+
+		var (
+			head    string
+			headErr error
+		)
+
+		if review != nil && reviewErr == nil {
+			// Only read the head when there is a review to match against it: most
+			// polls have no review, and a gh call each time buys rate limit for
+			// nothing.
+			head, headErr = o.d.PRGates.HeadSHA(ctx, prURL)
+			if headErr != nil {
+				slog.Warn("pr_gates: PR head SHA unreadable; retrying",
+					"card_id", o.d.Cfg.CardID, "pr_url", prURL, "error", headErr)
+			}
+		}
+
+		onHead := review != nil && reviewErr == nil && headErr == nil &&
+			head != "" && review.CommitID == head
+
+		// One line per poll: the serve-side idle watchdog reads this as proof the
+		// container is alive while the gate waits.
+		slog.Info("pr_gates: Copilot review polled", "card_id", o.d.Cfg.CardID, "pr_url", prURL,
+			"have_review", review != nil, "on_head", onHead, "head_sha", head)
+
+		if onHead {
+			return review, nil
+		}
+
+		if time.Now().After(deadline) {
+			return nil, nil
+		}
+
+		if werr := o.sleepPoll(ctx); werr != nil {
+			return nil, werr
+		}
+	}
+}
+
+// triageCopilot judges which of the review's comments name real defects: ONE
+// orchestrator-model call returning a strict JSON verdict. It records the round
+// on the card - every comment with its verdict and the reason for it - so a human
+// can see what the agent chose to ignore, and why.
+func (o *run) triageCopilot(
+	ctx context.Context, st *gatesState, review *CopilotReview, comments []ReviewComment,
+) ([]copilotFinding, error) {
+	d := o.d
+	cfg := d.Cfg
+	round := st.CopilotRounds + 1
+
+	if err := o.ledger.Check(); err != nil {
+		return nil, o.parkGates(ctx, st, gatesCopilotTriageBudgetParkReason)
+	}
+
+	model := resolveOrchestratorModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
+		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel)
+
+	task := fmt.Sprintf(copilotTriagePrompt, o.grounding, o.tc.Title, o.taskDescription,
+		copilotReviewSummary(review), formatCopilotComments(comments))
+
+	res, dur, err := o.runModel(ctx, d.ReadTools, task, model)
+
+	o.spendAndReport(ctx, o.ledger, cfg.CardID, "pr_gates: report Copilot triage usage failed",
+		res, model, "main", dur)
+
+	if err != nil {
+		if reason := gateResourcePark(err, gatesCopilotTriageBudgetParkReason, gatesCopilotTurnCapParkReason); reason != "" {
+			return nil, o.parkGates(ctx, st, reason)
+		}
+
+		return nil, fmt.Errorf("copilot triage run: %w", err)
+	}
+
+	findings, perr := parseCopilotTriage(res.Output)
+
+	// A comment the triage did not actually judge must never ship past the gate:
+	// take it at face value instead. A fix round spent on a nit costs less than a
+	// real defect waved through, and the card records which of the two happened.
+	switch {
+	case perr != nil:
+		o.d.logCard(ctx, "pr_gates: Copilot triage verdict could not be read (%s); treating all %d comment(s) as findings",
+			perr.Error(), len(comments))
+
+		findings = commentsAsFindings(comments, copilotUnreadableReason)
+
+	case len(comments) > 0 && len(findings) == 0:
+		// The verdict parsed but returned nothing. Silence is not a verdict of
+		// "no defects" - the prompt asks for one entry per comment, invalid ones
+		// included - so the comments stand until something judges them.
+		o.d.logCard(ctx, "pr_gates: Copilot triage judged none of the %d comment(s); treating them as findings",
+			len(comments))
+
+		findings = commentsAsFindings(comments, copilotUnjudgedReason)
+	}
+
+	o.recordCopilotRound(ctx, round, comments, findings)
+
+	return findings, nil
+}
+
+// copilotFixRound spends one Copilot fix round on the findings triaged as valid.
+// The round is counted and persisted BEFORE any work, so a crash mid-fix cannot
+// buy a free retry on resume. It returns a park error when the rounds cap is
+// spent or the fix runs out of budget or turns, and nil once the fix is pushed.
+func (o *run) copilotFixRound(ctx context.Context, st *gatesState, findings []copilotFinding) error {
+	st.Detail = copilotFindingLines(findings)
+
+	if st.CopilotRounds >= gatesRoundsCap {
+		return o.parkGates(ctx, st,
+			fmt.Sprintf("Copilot findings still open after %d rounds", gatesRoundsCap))
+	}
+
+	st.CopilotRounds++
+	st.Status = fmt.Sprintf("fixing Copilot findings (round %d/%d)", st.CopilotRounds, gatesRoundsCap)
+	o.recordGates(ctx, *st)
+
+	o.d.logCard(ctx, "pr_gates: Copilot review - fix round %d/%d on %d finding(s)",
+		st.CopilotRounds, gatesRoundsCap, len(findings))
+
+	if err := o.runFix(ctx, copilotFixFindings(findings), st.CopilotRounds, "", false); err != nil {
+		if reason := gateResourcePark(err, gatesCopilotFixBudgetParkReason, gatesCopilotTurnCapParkReason); reason != "" {
+			return o.parkGates(ctx, st, reason)
+		}
+
+		return fmt.Errorf("copilot gate fix round %d: %w", st.CopilotRounds, err)
+	}
+
 	return nil
+}
+
+// skipCopilot records why the Copilot gate is not holding the card and passes it.
+// Every branch that could not get a review lands here: the line is card-logged
+// verbatim and kept on the gates section, because it is the whole diagnostic
+// channel for a Copilot setup the agent cannot see into.
+func (o *run) skipCopilot(ctx context.Context, st *gatesState, line string) error {
+	st.Detail = "- " + line + "\n"
+	o.recordGates(ctx, *st)
+	o.d.logCard(ctx, "%s", line)
+
+	return nil
+}
+
+// recordCopilotRound records one triage round on the parent card body, matching
+// recordReview's convention: round 1 uses the bare "## Copilot Review" heading,
+// later rounds "## Copilot Review (Round N)". The comment list under it is
+// written BY CODE from the review itself - it is both the human's record of what
+// Copilot actually said and the dedupe key the next round reads back, so a
+// re-triggered run never fixes the same comment twice.
+func (o *run) recordCopilotRound(ctx context.Context, round int, comments []ReviewComment, findings []copilotFinding) {
+	heading := copilotSectionHeading
+	if round > 1 {
+		heading = fmt.Sprintf("%s (Round %d)", copilotSectionHeading, round)
+	}
+
+	var b strings.Builder
+
+	b.WriteString("## " + heading + "\n\n")
+
+	if len(findings) == 0 {
+		b.WriteString("The reviewer raised nothing to address.\n")
+	}
+
+	for _, f := range findings {
+		verdict := "INVALID"
+		if f.Valid {
+			verdict = "VALID"
+		}
+
+		fmt.Fprintf(&b, "- %s %s: %s\n", verdict, f.file(), f.Issue)
+
+		if reason := strings.TrimSpace(f.Reason); reason != "" {
+			fmt.Fprintf(&b, "  - %s\n", reason)
+		}
+	}
+
+	if len(comments) > 0 {
+		b.WriteString("\n### " + copilotCommentsHeading + "\n\n")
+
+		for _, c := range comments {
+			fmt.Fprintf(&b, "- %s: %s\n", c.Path, copilotCommentDigest(c.Body))
+		}
+	}
+
+	o.recordSection(ctx, heading, b.String())
+}
+
+// parseCopilotTriage extracts the triage verdict JSON with the same extractor the
+// review synthesis verdict uses, so a fenced or prose-wrapped answer still parses.
+func parseCopilotTriage(s string) ([]copilotFinding, error) {
+	raw, ok := extractJSON(s)
+	if !ok {
+		return nil, errors.New("no JSON object found in the triage output")
+	}
+
+	var t copilotTriage
+	if err := json.Unmarshal([]byte(raw), &t); err != nil {
+		return nil, fmt.Errorf("unmarshal triage JSON: %w", err)
+	}
+
+	return t.Findings, nil
+}
+
+// Why a comment stands unjudged, recorded as its finding's reason so the card
+// never presents a face-value fix as a triage decision.
+const (
+	copilotUnreadableReason = "the triage verdict could not be read - the comment is taken at face value"
+	copilotUnjudgedReason   = "the triage returned no verdict for this comment - it is taken at face value"
+)
+
+// commentsAsFindings is the conservative reading of a review the triage did not
+// judge: every comment stands as a finding, labelled with why nothing judged it.
+func commentsAsFindings(comments []ReviewComment, reason string) []copilotFinding {
+	findings := make([]copilotFinding, 0, len(comments))
+
+	for _, c := range comments {
+		findings = append(findings, copilotFinding{
+			File:   c.Path,
+			Issue:  flattenComment(c.Body),
+			Valid:  true,
+			Reason: reason,
+		})
+	}
+
+	return findings
+}
+
+// validCopilotFindings keeps the findings the triage judged real - the only ones
+// that fund a fix round.
+func validCopilotFindings(findings []copilotFinding) []copilotFinding {
+	valid := make([]copilotFinding, 0, len(findings))
+
+	for _, f := range findings {
+		if f.Valid {
+			valid = append(valid, f)
+		}
+	}
+
+	return valid
+}
+
+// copilotFindingLines renders findings in the "- <file>: <issue>" line shape
+// fixFiles parses the paths back out of for fixup targeting (formatFixes'
+// contract - keep the three in sync).
+func copilotFindingLines(findings []copilotFinding) string {
+	var b strings.Builder
+
+	for _, f := range findings {
+		fmt.Fprintf(&b, "- %s: %s", f.file(), f.Issue)
+
+		if reason := strings.TrimSpace(f.Reason); reason != "" {
+			fmt.Fprintf(&b, " - %s", reason)
+		}
+
+		b.WriteByte('\n')
+	}
+
+	return b.String()
+}
+
+// copilotFixFindings frames the valid findings as the fix coder's brief. Only
+// valid ones are here: an invalid finding reaching the coder would have it
+// "fixing" something the triage just judged to be no defect at all.
+func copilotFixFindings(findings []copilotFinding) string {
+	return "The Copilot reviewer raised these findings on the pull request, and they were triaged as real:\n" +
+		copilotFindingLines(findings)
+}
+
+// copilotReviewSummary is the reviewer's own summary for the triage prompt.
+func copilotReviewSummary(review *CopilotReview) string {
+	if body := strings.TrimSpace(review.Body); body != "" {
+		return body
+	}
+
+	return "(the reviewer left no summary)"
+}
+
+// formatCopilotComments lays the review's line comments out for the triage
+// prompt, numbered so a verdict entry can be matched back to the comment it
+// judged.
+func formatCopilotComments(comments []ReviewComment) string {
+	if len(comments) == 0 {
+		return "(no line comments - judge the review summary alone)"
+	}
+
+	var b strings.Builder
+
+	for i, c := range comments {
+		fmt.Fprintf(&b, "%d. %s\n%s\n\n", i+1, c.Path, strings.TrimSpace(c.Body))
+	}
+
+	return b.String()
+}
+
+// copilotSeenComments rebuilds the set of comments already triaged from every
+// Copilot round recorded on the card body. It is what makes the dedupe survive a
+// park/re-trigger: a fresh container re-reads the rounds an earlier one wrote.
+func copilotSeenComments(body string) map[string]bool {
+	seen := make(map[string]bool)
+	collecting := false
+
+	for line := range strings.SplitSeq(sectionsWithPrefix(body, copilotSectionHeading), "\n") {
+		if strings.HasPrefix(line, "#") {
+			collecting = strings.TrimSpace(line) == "### "+copilotCommentsHeading
+
+			continue
+		}
+
+		if !collecting {
+			continue
+		}
+
+		if m := copilotCommentLineRe.FindStringSubmatch(line); m != nil {
+			seen[copilotCommentKey(m[1], m[2])] = true
+		}
+	}
+
+	return seen
+}
+
+// unseenComments drops the comments a previous round already triaged.
+func unseenComments(comments []ReviewComment, seen map[string]bool) []ReviewComment {
+	fresh := make([]ReviewComment, 0, len(comments))
+
+	for _, c := range comments {
+		if seen[copilotCommentKey(c.Path, c.Body)] {
+			continue
+		}
+
+		fresh = append(fresh, c)
+	}
+
+	return fresh
+}
+
+// copilotCommentKey identifies a review comment for dedupe: its path plus the
+// bounded, single-line head of its body. The recorded line and the live comment
+// go through the same digest, so what a human reads on the card is exactly what
+// the next round compares against.
+func copilotCommentKey(path, body string) string {
+	return path + "\x00" + copilotCommentDigest(body)
+}
+
+// copilotCommentDigest is the single-line, bounded form of a comment body: one
+// card line per comment, and the dedupe key.
+func copilotCommentDigest(body string) string {
+	return truncateRunes(flattenComment(body), copilotKeyBodyChars)
+}
+
+// flattenComment collapses a comment body's whitespace onto one line, so a
+// multi-line comment cannot break the recorded line shape it is read back from.
+func flattenComment(body string) string {
+	return strings.Join(strings.Fields(body), " ")
+}
+
+// truncateRunes caps s at n characters without splitting a rune.
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+
+	return string(r[:n])
+}
+
+// file is the finding's path, or a placeholder when the triage model omitted it,
+// so the recorded and fix-run lines keep their "- <file>: <issue>" shape.
+func (f copilotFinding) file() string {
+	if strings.TrimSpace(f.File) == "" {
+		return "(file not named)"
+	}
+
+	return f.File
 }
 
 // ciBuckets is one checks poll classified into the three outcomes the CI gate
@@ -156,7 +697,12 @@ func classifyChecks(checks []CheckResult) ciBuckets {
 func (o *run) ciGate(ctx context.Context, prURL string, st *gatesState) error {
 	deadline := o.gateDeadline(o.ciWait())
 	start := time.Now()
-	sawChecks := false
+
+	// The checks-were-seen memory spans containers: a gate whose persisted
+	// section already records fix rounds ran CI in an earlier run, so its first
+	// empty poll here is the resumed head's run registering - never "this repo
+	// has no CI".
+	sawChecks := st.CIRounds > 0
 
 	for {
 		checks, pollErr := o.d.PRGates.Checks(ctx, prURL)
@@ -298,22 +844,35 @@ func (o *run) ciFixRound(ctx context.Context, prURL string, st *gatesState, fail
 	if err := o.runFix(ctx, ciFixFindings(digest), st.CIRounds, "", false); err != nil {
 		// A fix that ran out of budget or turns takes the same park arm as the
 		// ledger check above - only the reason on the card differs.
-		var (
-			budget   *BudgetExceededError
-			maxTurns *MaxTurnsError
-		)
-
-		switch {
-		case errors.As(err, &budget):
-			return o.parkGates(ctx, st, gatesBudgetParkReason)
-		case errors.As(err, &maxTurns):
-			return o.parkGates(ctx, st, gatesTurnCapParkReason)
+		if reason := gateResourcePark(err, gatesBudgetParkReason, gatesTurnCapParkReason); reason != "" {
+			return o.parkGates(ctx, st, reason)
 		}
 
 		return fmt.Errorf("ci gate fix round %d: %w", st.CIRounds, err)
 	}
 
 	return nil
+}
+
+// gateResourcePark maps a model-run failure to the park reason a gate records
+// for it, or "" when the failure is not a resource the gate parks on. Budget and
+// turn-cap exhaustion inside a gate park in review rather than failing the run:
+// the work is already pushed, so there is nothing to WIP-push and the PR a human
+// picks up is the one the gate was waiting on.
+func gateResourcePark(err error, budgetReason, turnCapReason string) string {
+	var (
+		budget   *BudgetExceededError
+		maxTurns *MaxTurnsError
+	)
+
+	switch {
+	case errors.As(err, &budget):
+		return budgetReason
+	case errors.As(err, &maxTurns):
+		return turnCapReason
+	}
+
+	return ""
 }
 
 // ciFixFindings frames the failure digest as findings for the fix coder.
@@ -356,14 +915,18 @@ func (o *run) parkGates(ctx context.Context, st *gatesState, reason string) erro
 	return &GatesParkedError{Reason: reason}
 }
 
-// sleepPoll waits one poll interval before the next gate poll, aborting early
-// when the run's context is canceled so a container teardown is never delayed by
-// a sleeping gate.
+// sleepPoll waits one poll interval before the next gate poll.
 func (o *run) sleepPoll(ctx context.Context) error {
+	return o.sleepGate(ctx, o.gatesPoll())
+}
+
+// sleepGate waits d inside a gate, aborting early when the run's context is
+// canceled so a container teardown is never delayed by a sleeping gate.
+func (o *run) sleepGate(ctx context.Context, d time.Duration) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-time.After(o.gatesPoll()):
+	case <-time.After(d):
 		return nil
 	}
 }
