@@ -277,14 +277,24 @@ func parsePRURL(out string) string {
 	return prURLPattern.FindString(out)
 }
 
-// parsePRViewURL unmarshals gh pr view --json url output.
+// parsePRViewURL unmarshals gh pr view --json url,state output, returning the
+// URL only when the PR is OPEN. gh pr view falls back to the branch's most
+// recent CLOSED or MERGED PR when it has none open, exiting zero rather than
+// erroring the way it does for a branch with no PR at all - so the state
+// check, not the caller's error handling, is what keeps this a probe for an
+// open PR.
 func parsePRViewURL(out string) (string, error) {
 	var payload struct {
-		URL string `json:"url"`
+		URL   string `json:"url"`
+		State string `json:"state"`
 	}
 
 	if err := json.Unmarshal([]byte(out), &payload); err != nil {
 		return "", fmt.Errorf("parse gh pr view output: %w", err)
+	}
+
+	if payload.State != "OPEN" {
+		return "", nil
 	}
 
 	return payload.URL, nil
@@ -314,12 +324,14 @@ func addCopilotReviewerArgs(prURL string) []string {
 	return []string{"pr", "edit", prURL, "--add-reviewer", copilotReviewerLogin}
 }
 
-// prViewURLArgs builds the gh pr view invocation that resolves the open PR of
-// the workspace's current branch. No selector: gh's own repo/branch inference
-// from the workspace cwd is what makes this a branch probe rather than a
-// lookup by URL or number.
+// prViewURLArgs builds the gh pr view invocation that resolves the branch's
+// PR. No selector: gh's own repo/branch inference from the workspace cwd is
+// what makes this a branch probe rather than a lookup by URL or number. state
+// rides along with url because gh pr view resolves to the branch's most
+// recent PR whether or not it is open - parsePRViewURL reads state to keep
+// this a probe for an OPEN PR.
 func prViewURLArgs() []string {
-	return []string{"pr", "view", "--json", "url"}
+	return []string{"pr", "view", "--json", "url,state"}
 }
 
 // parsePRPath extracts owner, repo, and PR number from a PR URL. Works for
