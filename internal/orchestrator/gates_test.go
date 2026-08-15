@@ -41,6 +41,10 @@ type fakeGates struct {
 
 	logs string
 
+	// FindPRURL scripting: the recovery probe's result for a fail-closed gate.
+	findPRURL    string
+	findPRURLErr error
+
 	calls []string
 	i     int
 	r     int
@@ -134,6 +138,15 @@ func (f *fakeGates) FailureLogs(_ context.Context, prURL string, _ []CheckResult
 	return f.logs, nil
 }
 
+func (f *fakeGates) FindPRURL(_ context.Context) (string, error) {
+	f.record("FindPRURL")
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.findPRURL, f.findPRURLErr
+}
+
 // compile-time assertion that the fake satisfies the consumer interface.
 var _ PRGates = (*fakeGates)(nil)
 
@@ -204,7 +217,85 @@ func TestPRGates_FailClosedWhenPRCreationFailed(t *testing.T) {
 	require.NotEmpty(t, ops.bodyUpdates, "the park reason is recorded on the card")
 	assert.Contains(t, ops.lastBody(), "## PR Gates")
 	assert.Contains(t, ops.lastBody(), "parked:")
-	assert.Empty(t, gates.recorded(), "no URL means nothing to poll")
+	assert.Equal(t, []string{"FindPRURL"}, gates.recorded(),
+		"the recovery probe runs before parking; no other gh seam call is reachable with no PR")
+}
+
+// TestPRGates_RecoversBranchPRWhenCreateFailed: a gated card whose recorded PR
+// creation failed but whose branch already has an open PR (an earlier run's
+// report_push never landed, or `gh pr create` failed with "a pull request
+// already exists") recovers instead of parking: the found URL flows into the
+// gates, is card-logged, and is re-reported through the same ReportPush call
+// integrate makes - so a later park/resume reads it back without re-probing.
+func TestPRGates_RecoversBranchPRWhenCreateFailed(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		findPRURL: "https://example.test/pr/9",
+		checks:    [][]CheckResult{{{Name: "build", Bucket: "pass"}}},
+	}
+
+	o := gatesTestRun(ops, gates, cmclient.TaskContext{Title: "Gated", CreatePR: true, AwaitCI: true})
+	require.Empty(t, o.prURL)
+	require.Empty(t, o.tc.PRUrl)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	calls := gates.recorded()
+	assert.Contains(t, calls, "FindPRURL")
+	assert.Contains(t, calls, "Checks:https://example.test/pr/9",
+		"the recovered URL flows into the gate; calls=%v", calls)
+
+	opsCalls := ops.recorded()
+	assert.GreaterOrEqual(t, indexOfCall(opsCalls, "TransitionCard:done"), 0,
+		"a recovered PR gates normally through to done; calls=%v", opsCalls)
+	assert.Contains(t, ops.reportPushURLs, "https://example.test/pr/9",
+		"the recovery is made durable via ReportPush")
+	assert.True(t, ops.loggedContains("recovered"), "a card log line records the recovery")
+}
+
+// TestPRGates_StillParksWhenNoBranchPRExists: the recovery probe runs, but the
+// branch genuinely has no PR - the gate parks exactly as before, with the same
+// recovery note.
+func TestPRGates_StillParksWhenNoBranchPRExists(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{findPRURL: ""}
+
+	o := gatesTestRun(ops, gates, cmclient.TaskContext{Title: "Gated", CreatePR: true, AwaitCI: true})
+	require.Empty(t, o.prURL)
+	require.Empty(t, o.tc.PRUrl)
+
+	err := runPRGates(context.Background(), o)
+
+	var parked *GatesParkedError
+
+	require.ErrorAs(t, err, &parked, "no recovered PR must still park")
+
+	calls := ops.recorded()
+	assert.Equal(t, -1, indexOfCall(calls, "TransitionCard:done"),
+		"a parked card must NOT reach done; calls=%v", calls)
+	assert.Contains(t, gates.recorded(), "FindPRURL", "the probe must run before parking")
+	assert.Contains(t, ops.lastBody(), "disable the PR-gate flags", "the park note is unchanged")
+}
+
+// TestPRGates_ProbeErrorFallsBackToPark: the recovery probe itself fails (an
+// auth failure, say) - the probe failure never crashes the phase, it just
+// degrades to the same park as no PR found.
+func TestPRGates_ProbeErrorFallsBackToPark(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{findPRURLErr: errors.New("gh pr view: HTTP 401: Bad credentials")}
+
+	o := gatesTestRun(ops, gates, cmclient.TaskContext{Title: "Gated", CreatePR: true, AwaitCI: true})
+
+	err := runPRGates(context.Background(), o)
+
+	var parked *GatesParkedError
+
+	require.ErrorAs(t, err, &parked, "a probe failure must still park, not crash the phase")
+
+	calls := ops.recorded()
+	assert.Equal(t, -1, indexOfCall(calls, "TransitionCard:done"),
+		"a parked card must NOT reach done; calls=%v", calls)
+	assert.Contains(t, gates.recorded(), "FindPRURL")
 }
 
 // TestPRGates_ResumeReadsPRUrlFromTaskContext: a fresh container resuming at

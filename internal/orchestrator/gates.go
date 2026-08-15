@@ -127,7 +127,29 @@ func runPRGates(ctx context.Context, o *run) error {
 	if gated && o.tc.CreatePR && prURL == "" {
 		st := o.loadGatesState()
 
-		return o.parkGates(ctx, &st, "PR creation failed - nothing to gate on; disable the PR-gate flags and re-trigger to complete without gating")
+		// The recorded creation failed, but a PR may exist anyway - opened by
+		// an earlier run whose report_push never landed, or left behind when
+		// gh pr create failed with "a pull request already exists". Probe the
+		// branch before giving up.
+		found, ferr := d.PRGates.FindPRURL(ctx)
+		if ferr != nil {
+			slog.Warn("pr_gates: PR probe failed", "error", ferr)
+		}
+
+		if found == "" {
+			return o.parkGates(ctx, &st, "PR creation failed - nothing to gate on; disable the PR-gate flags and re-trigger to complete without gating")
+		}
+
+		prURL = found
+
+		o.d.logCard(ctx, "pr_gates: recovered the branch's existing PR: %s", prURL)
+
+		// Make the recovery durable: record the URL the way integrate's
+		// report_push would have, so a later park/resume reads it from the
+		// task context instead of re-probing. Best-effort.
+		if rerr := d.Ops.ReportPush(ctx, cfg.CardID, cfg.Branch, prURL); rerr != nil {
+			slog.Warn("pr_gates: could not report the recovered PR", "error", rerr)
+		}
 	}
 
 	if gated && prURL != "" {

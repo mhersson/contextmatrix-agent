@@ -36,6 +36,11 @@ var runIDPattern = regexp.MustCompile(`/actions/runs/(\d+)`)
 // non-JSON report - a JSON report would not have errored at all).
 var noChecksReportedPattern = regexp.MustCompile(`(?i)no checks reported`)
 
+// noPRForBranchPattern matches gh pr view's "no pull requests found for
+// branch 'X'" failure - the expected outcome when probing a branch that has
+// no PR, not an error.
+var noPRForBranchPattern = regexp.MustCompile(`(?i)no pull requests? found`)
+
 // copilotReviewerLogin is the GitHub login gh adds as a reviewer and the login
 // GitHub's REST API reports as the author of a Copilot review.
 const copilotReviewerLogin = "copilot-pull-request-reviewer[bot]"
@@ -272,6 +277,19 @@ func parsePRURL(out string) string {
 	return prURLPattern.FindString(out)
 }
 
+// parsePRViewURL unmarshals gh pr view --json url output.
+func parsePRViewURL(out string) (string, error) {
+	var payload struct {
+		URL string `json:"url"`
+	}
+
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		return "", fmt.Errorf("parse gh pr view output: %w", err)
+	}
+
+	return payload.URL, nil
+}
+
 // checksArgs builds the gh pr checks invocation, requesting exactly the JSON
 // fields parseChecks reads.
 func checksArgs(prURL string) []string {
@@ -294,6 +312,14 @@ func reviewRequestsArgs(prURL string) []string {
 // Copilot review.
 func addCopilotReviewerArgs(prURL string) []string {
 	return []string{"pr", "edit", prURL, "--add-reviewer", copilotReviewerLogin}
+}
+
+// prViewURLArgs builds the gh pr view invocation that resolves the open PR of
+// the workspace's current branch. No selector: gh's own repo/branch inference
+// from the workspace cwd is what makes this a branch probe rather than a
+// lookup by URL or number.
+func prViewURLArgs() []string {
+	return []string{"pr", "view", "--json", "url"}
 }
 
 // parsePRPath extracts owner, repo, and PR number from a PR URL. Works for
@@ -630,4 +656,18 @@ func (p *PRCreator) FailureLogs(ctx context.Context, _ string, failed []orchestr
 	}
 
 	return joinFailureDigest(sections, failureLogTotalCap), nil
+}
+
+// FindPRURL probes for an open PR on the workspace's current branch.
+func (p *PRCreator) FindPRURL(ctx context.Context) (string, error) {
+	out, err := p.runGH(ctx, "", false, prViewURLArgs()...)
+	if err != nil {
+		if noPRForBranchPattern.MatchString(err.Error()) {
+			return "", nil
+		}
+
+		return "", fmt.Errorf("gh pr view: %w", err)
+	}
+
+	return parsePRViewURL(out)
 }

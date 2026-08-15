@@ -585,3 +585,55 @@ exit 4
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "authentication required")
 }
+
+// TestPRViewURLArgs pins the exact argv for the branch-PR probe.
+func TestPRViewURLArgs(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, []string{"pr", "view", "--json", "url"}, prViewURLArgs())
+}
+
+// TestParsePRViewURL unmarshals gh pr view's --json url output, and errors on
+// unparsable output.
+func TestParsePRViewURL(t *testing.T) {
+	t.Parallel()
+
+	url, err := parsePRViewURL(`{"url": "https://github.com/org/repo/pull/7"}`)
+	require.NoError(t, err)
+	assert.Equal(t, "https://github.com/org/repo/pull/7", url)
+
+	_, err = parsePRViewURL("not json")
+	require.Error(t, err)
+}
+
+// TestFindPRURLTranslatesNoPRToEmpty pins the seam translation for a branch
+// with no open PR: gh pr view exits non-zero with "no pull requests found",
+// and FindPRURL must render that as an empty result, not an error - it is the
+// expected outcome of a recovery probe, not a broken gh.
+func TestFindPRURLTranslatesNoPRToEmpty(t *testing.T) {
+	stubGH(t, `
+echo "no pull requests found for branch \"cm/card-1\"" 1>&2
+exit 1
+`)
+
+	pc := NewPRCreator(t.TempDir(), "", "", "")
+
+	url, err := pc.FindPRURL(t.Context())
+	require.NoError(t, err, "no PR on the branch is an empty result, not a failure")
+	assert.Empty(t, url)
+}
+
+// TestFindPRURLKeepsRealErrors: any other gh failure stays an error - a broken
+// gh (auth, network, rate limit) must never read as "no PR exists".
+func TestFindPRURLKeepsRealErrors(t *testing.T) {
+	stubGH(t, `
+echo "HTTP 401: Bad credentials" 1>&2
+exit 1
+`)
+
+	pc := NewPRCreator(t.TempDir(), "", "", "")
+
+	_, err := pc.FindPRURL(t.Context())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "401")
+}
