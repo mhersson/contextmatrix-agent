@@ -87,14 +87,12 @@ func TestIntegrateHappyPath(t *testing.T) {
 	// Pins the full git sequence, including RemoteTip recorded BEFORE the rebase.
 	git.assertOrder(t, "Fetch:main", "RemoteTip:cm/card-1", "RebaseAutosquash:origin/main", "ForcePushWithLease:cm/card-1")
 
-	// Lease push (tip known), report push, transition to done.
+	// Lease push (tip known) and report push. The done transition belongs to the
+	// pr_gates phase (see TestPRGates_PassThroughWhenNoFlags).
 	calls := ops.recorded()
 	require.GreaterOrEqual(t, indexOfCall(calls, "ReportPush:CARD-1"), 0, "ReportPush recorded; calls=%v", calls)
-	require.GreaterOrEqual(t, indexOfCall(calls, "TransitionCard:done"), 0)
-	assert.Less(t, indexOfCall(calls, "ReportPush:CARD-1"), indexOfCall(calls, "TransitionCard:done"),
-		"report push before the parent transitions to done")
 
-	// Parent done via transition, NOT CompleteTask.
+	// Parent done via transition in pr_gates, NOT CompleteTask.
 	assert.Equal(t, -1, indexOfCall(calls, "CompleteTask:CARD-1"), "parent must reach done via transition, not CompleteTask")
 
 	// No PR when CreatePR is false.
@@ -217,7 +215,7 @@ func TestIntegratePRCreation(t *testing.T) {
 		require.NoError(t, runIntegrate(context.Background(), o))
 
 		calls := ops.recorded()
-		require.GreaterOrEqual(t, indexOfCall(calls, "TransitionCard:done"), 0, "run completes despite PR failure")
+		require.GreaterOrEqual(t, indexOfCall(calls, "ReportPush:CARD-1"), 0, "integrate finishes despite PR failure")
 
 		// Reported push carries no URL (PR failed).
 		require.NotEmpty(t, ops.reportPushURLs)
@@ -269,7 +267,7 @@ func TestIntegrateIdempotentResume(t *testing.T) {
 	gc := git.recorded()
 	assert.GreaterOrEqual(t, indexOfCall(gc, "ForcePushWithLease:cm/card-1"), 0,
 		"lease push still issued even when the remote already matches; git=%v", gc)
-	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "ReportPush:CARD-1"), 0)
 }
 
 func TestIntegrateNoRemoteBranch(t *testing.T) {
@@ -287,7 +285,31 @@ func TestIntegrateNoRemoteBranch(t *testing.T) {
 	gc := git.recorded()
 	assert.GreaterOrEqual(t, indexOfCall(gc, "Push:cm/card-1"), 0, "plain push when no remote tip; git=%v", gc)
 	assert.Equal(t, -1, indexOfCall(gc, "ForcePushWithLease:cm/card-1"), "no lease push when no remote tip; git=%v", gc)
-	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "ReportPush:CARD-1"), 0)
+}
+
+// TestIntegrate_NoLongerTransitionsToDone: the done transition moved to the
+// pr_gates phase, which holds a gated card in review until its gates pass.
+// Integrate must stop after reporting the push.
+func TestIntegrate_NoLongerTransitionsToDone(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{remoteTip: "deadbeef"}
+	pr := &fakePR{url: "https://example.test/pr/3"}
+	llmFake := &planLLM{responses: []llm.Response{stopResp("## What\nDid it", 0.01)}}
+	d := integrateTestDeps(ops, git, pr, llmFake)
+
+	tc := cmclient.TaskContext{Title: "Gated card", CreatePR: true}
+	o := newIntegrateRun(d, tc, 0)
+
+	require.NoError(t, runIntegrate(context.Background(), o))
+
+	calls := ops.recorded()
+	require.GreaterOrEqual(t, indexOfCall(calls, "ReportPush:CARD-1"), 0, "integrate still reports the push; calls=%v", calls)
+	assert.Equal(t, -1, indexOfCall(calls, "TransitionCard:done"),
+		"the done transition belongs to pr_gates, not integrate; calls=%v", calls)
+
+	assert.Equal(t, "https://example.test/pr/3", o.prURL,
+		"integrate records the PR URL for the pr_gates phase")
 }
 
 // TestWritePRBodyAppendsVerificationTrailer proves the verify trailer is added

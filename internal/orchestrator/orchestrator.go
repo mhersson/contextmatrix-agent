@@ -144,6 +144,24 @@ type Config struct {
 	// declared-tier intent we failed to honour, so it notes the problem and
 	// parks rather than shipping under a silently weaker gate.
 	VerifyConfigError string
+
+	// Deadline is the wall-clock instant the pr_gates phase must be finished
+	// waiting by - the container's own kill ceiling minus a finalize margin. The
+	// zero value means the worker was not told its timeout, leaving the gates
+	// bounded only by their own wait knobs.
+	Deadline time.Time
+
+	// GatesPollInterval is how often the pr_gates phase re-checks CI and Copilot.
+	// Zero falls back to the package default.
+	GatesPollInterval time.Duration
+
+	// GatesCIWaitTimeout bounds how long the CI gate waits for checks to settle.
+	// Zero falls back to the package default.
+	GatesCIWaitTimeout time.Duration
+
+	// GatesCopilotWaitTimeout bounds how long the Copilot gate waits for a
+	// review to land. Zero falls back to the package default.
+	GatesCopilotWaitTimeout time.Duration
 }
 
 // DeclaredVerify is the operator-declared verify configuration for a run, mapped
@@ -175,6 +193,7 @@ type Deps struct {
 	// Used by Best-of-N to hand each candidate worktree its own git handle.
 	GitForDir  func(dir string) GitOps
 	PR         PRCreator // opens the pull request in the integrate phase (gh CLI seam)
+	PRGates    PRGates   // checks/review polling in the pr_gates phase (gh CLI seam)
 	Client     llm.LLM
 	Emit       *events.Emitter
 	Registry   *registry.Registry
@@ -209,8 +228,10 @@ type Deps struct {
 // phaseOrder is the fixed forward sequence of phases. Run enters at the card's
 // persisted phase and never moves backward through this slice. The judge phase
 // is a no-op for normal single-solver runs (Cfg.BestOfN < 2); it races and picks
-// the Best-of-N winner between execute and document.
-var phaseOrder = []string{"plan", "execute", "judge", "document", "review", "integrate", "done"}
+// the Best-of-N winner between execute and document. The pr_gates phase is a
+// pass-through for a card with no gate flags; when gated it holds the card in
+// review until the PR's gates pass, and it owns the transition to done.
+var phaseOrder = []string{"plan", "execute", "judge", "document", "review", "integrate", "pr_gates", "done"}
 
 // phaseFn is a single phase's body.
 type phaseFn func(context.Context) error
@@ -292,6 +313,12 @@ type run struct {
 	// FIRST push uses ForcePushWithLease(branch, staleRemoteTip) when a stale tip
 	// was recorded, and every push after that is plain (the branch is now ours).
 	firstPushDone bool
+
+	// prURL is the pull request the integrate phase opened this run, handed to
+	// the pr_gates phase. Empty when no PR was opened - and on a resumed run
+	// entering at pr_gates, where the gate falls back to tc.PRUrl (the URL the
+	// earlier run reported through report_push).
+	prURL string
 
 	// reviewSummary is the synthesis verdict's one-line summary captured on
 	// approval, carried into the integrate phase's PR body. Empty when review was
@@ -402,6 +429,7 @@ type run struct {
 	documentFn  phaseFn
 	reviewFn    phaseFn
 	integrateFn phaseFn
+	prGatesFn   phaseFn
 	doneFn      phaseFn
 }
 
@@ -486,6 +514,7 @@ func newRun(d Deps, tc cmclient.TaskContext) *run {
 	o.documentFn = func(ctx context.Context) error { return runDocument(ctx, o) }
 	o.reviewFn = func(ctx context.Context) error { return runReview(ctx, o) }
 	o.integrateFn = func(ctx context.Context) error { return runIntegrate(ctx, o) }
+	o.prGatesFn = func(ctx context.Context) error { return runPRGates(ctx, o) }
 	o.doneFn = func(ctx context.Context) error { return runDone(ctx, o) }
 
 	return o
@@ -506,6 +535,8 @@ func (o *run) phaseFnFor(phase string) phaseFn {
 		return o.reviewFn
 	case "integrate":
 		return o.integrateFn
+	case "pr_gates":
+		return o.prGatesFn
 	case "done":
 		return o.doneFn
 	default:
