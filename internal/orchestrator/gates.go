@@ -2,7 +2,9 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strconv"
 	"strings"
@@ -25,6 +27,18 @@ const (
 
 // gatesSectionHeading is the card-body section the pr_gates phase owns.
 const gatesSectionHeading = "PR Gates"
+
+// Park reasons for a gate that ran out of the resources its fix rounds need.
+// Both park the card in review rather than failing the run: the work is already
+// pushed, so there is nothing to WIP-push and the PR stands as the human finds it.
+const (
+	gatesBudgetParkReason  = "budget exhausted during CI fixes"
+	gatesTurnCapParkReason = "CI fix run hit its turn cap"
+)
+
+// gatesNoChecksGrace is how long the CI gate waits for the first check to appear
+// before concluding the repo has no CI. A var so tests can shrink it.
+var gatesNoChecksGrace = 3 * time.Minute
 
 // GatesParkedError parks the card in review from the pr_gates phase. Reason
 // is a short human phrase already recorded on the card.
@@ -63,10 +77,9 @@ func runPRGates(ctx context.Context, o *run) error {
 	}
 
 	if gated && o.tc.CreatePR && prURL == "" {
-		reason := "PR creation failed - nothing to gate on; open the PR manually and re-trigger"
-		o.recordGates(ctx, gatesState{Status: "parked: " + reason})
+		st := o.loadGatesState()
 
-		return &GatesParkedError{Reason: reason}
+		return o.parkGates(ctx, &st, "PR creation failed - nothing to gate on; open the PR manually and re-trigger")
 	}
 
 	if gated && prURL != "" {
@@ -101,14 +114,206 @@ func (o *run) copilotGate(_ context.Context, _ string, _ *gatesState) error {
 	return nil
 }
 
-// ciGate holds the card until the PR's CI checks are green.
-// PLACEHOLDER: the CI-gate task replaces this body wholesale. It polls the
-// checks once (ignoring the result) so the phase's URL plumbing is exercised
-// end to end while the real waiting loop is still to come.
-func (o *run) ciGate(ctx context.Context, prURL string, _ *gatesState) error {
-	_, _ = o.d.PRGates.Checks(ctx, prURL)
+// ciBuckets is one checks poll classified into the three outcomes the CI gate
+// acts on.
+type ciBuckets struct {
+	failed  []CheckResult
+	pending int
+	passing int
+}
+
+// classifyChecks splits a checks poll by gh's statusCheckRollup bucket. A
+// skipped check counts as passing (a filtered workflow is not a failure), and
+// any bucket we do not recognize counts as pending: gh grows new states over
+// time, and waiting on an unknown one is safer than reading it as a pass (ships
+// past a real failure) or as a failure (burns a fix round on nothing).
+func classifyChecks(checks []CheckResult) ciBuckets {
+	var b ciBuckets
+
+	for _, c := range checks {
+		switch c.Bucket {
+		case "fail", "cancel":
+			b.failed = append(b.failed, c)
+		case "pass", "skipping":
+			b.passing++
+		default:
+			b.pending++
+		}
+	}
+
+	return b
+}
+
+// ciGate holds the card until the PR's CI checks are green: it polls the rollup,
+// spends up to gatesRoundsCap fix rounds on failures, and parks the card in
+// review when the checks stay red, never settle, or the budget runs out.
+func (o *run) ciGate(ctx context.Context, prURL string, st *gatesState) error {
+	deadline := o.gateDeadline(o.ciWait())
+	start := time.Now()
+
+	for {
+		checks, err := o.d.PRGates.Checks(ctx, prURL)
+		if err != nil {
+			// A gh hiccup is not a verdict. Keep waiting - the deadline still
+			// bounds the gate - rather than failing a run whose work is pushed.
+			slog.Warn("pr_gates: CI checks poll failed; retrying",
+				"card_id", o.d.Cfg.CardID, "pr_url", prURL, "error", err)
+		}
+
+		b := classifyChecks(checks)
+
+		// One line per poll: the serve-side idle watchdog reads this as proof the
+		// container is alive while the gate waits.
+		slog.Info("pr_gates: CI checks polled", "card_id", o.d.Cfg.CardID, "pr_url", prURL,
+			"passing", b.passing, "pending", b.pending, "failed", len(b.failed))
+
+		switch {
+		case err == nil && len(checks) == 0:
+			// No check has appeared at all. Past the grace window that means the
+			// repo has no CI, not that CI is slow to register.
+			if time.Since(start) >= gatesNoChecksGrace {
+				st.Detail = ""
+
+				o.d.logCard(ctx, "pr_gates: no CI checks on the PR; gate passes")
+
+				return nil
+			}
+
+		case len(b.failed) > 0:
+			if ferr := o.ciFixRound(ctx, prURL, st, b.failed); ferr != nil {
+				return ferr
+			}
+
+			// The fix pushed a new head; re-poll immediately so the next checks
+			// call reads that head's run rather than the one just superseded.
+			continue
+
+		case b.pending == 0 && b.passing > 0:
+			// Every check settled and none failed. The passing>0 guard keeps a
+			// failed poll (nil checks) out of this arm.
+			st.Detail = ""
+
+			o.d.logCard(ctx, "pr_gates: CI green")
+
+			return nil
+		}
+
+		if time.Now().After(deadline) {
+			return o.parkGates(ctx, st, "CI still pending at the wait deadline")
+		}
+
+		if werr := o.sleepPoll(ctx); werr != nil {
+			return werr
+		}
+	}
+}
+
+// ciFixRound spends one CI fix round on the failing checks. The round is counted
+// and persisted BEFORE any work, so a crash mid-fix cannot buy a free retry on
+// resume. It returns a park error when the rounds cap is spent or the budget runs
+// out, and nil once the fix has been committed and pushed.
+func (o *run) ciFixRound(ctx context.Context, prURL string, st *gatesState, failed []CheckResult) error {
+	st.Detail = failedChecksDetail(failed)
+
+	if st.CIRounds >= gatesRoundsCap {
+		return o.parkGates(ctx, st, fmt.Sprintf("CI still red after %d fix rounds", gatesRoundsCap))
+	}
+
+	st.CIRounds++
+	st.Status = fmt.Sprintf("fixing CI failures (round %d/%d)", st.CIRounds, gatesRoundsCap)
+	o.recordGates(ctx, *st)
+
+	o.d.logCard(ctx, "pr_gates: CI red - fix round %d/%d on %d failing check(s)",
+		st.CIRounds, gatesRoundsCap, len(failed))
+
+	digest, err := o.d.PRGates.FailureLogs(ctx, prURL, failed)
+	if err != nil {
+		// Never block a round on the log fetch: gh's own per-check descriptions
+		// are a thinner but still actionable finding.
+		slog.Warn("pr_gates: CI failure logs unavailable; using the check descriptions",
+			"card_id", o.d.Cfg.CardID, "error", err)
+
+		digest = failedChecksSummary(failed)
+	}
+
+	// Budget exhaustion inside a gate parks in review instead of returning the
+	// budget error: the work is already pushed, so there is nothing to WIP-push,
+	// and the PR a human picks up is the one the gate was waiting on.
+	if err := o.ledger.Check(); err != nil {
+		return o.parkGates(ctx, st, gatesBudgetParkReason)
+	}
+
+	if err := o.runFix(ctx, ciFixFindings(digest), st.CIRounds, "", false); err != nil {
+		// A fix that ran out of budget or turns takes the same park arm as the
+		// ledger check above - only the reason on the card differs.
+		var (
+			budget   *BudgetExceededError
+			maxTurns *MaxTurnsError
+		)
+
+		switch {
+		case errors.As(err, &budget):
+			return o.parkGates(ctx, st, gatesBudgetParkReason)
+		case errors.As(err, &maxTurns):
+			return o.parkGates(ctx, st, gatesTurnCapParkReason)
+		}
+
+		return fmt.Errorf("ci gate fix round %d: %w", st.CIRounds, err)
+	}
 
 	return nil
+}
+
+// ciFixFindings frames the failure digest as findings for the fix coder.
+func ciFixFindings(digest string) string {
+	return "CI checks failed on the PR. Failure digest:\n" + digest
+}
+
+// failedChecksDetail lists the failing checks for the card section: the name a
+// human recognizes plus the link they can open.
+func failedChecksDetail(failed []CheckResult) string {
+	var b strings.Builder
+
+	for _, c := range failed {
+		fmt.Fprintf(&b, "- %s: %s\n", c.Name, c.Link)
+	}
+
+	return b.String()
+}
+
+// failedChecksSummary is the fix-round finding when the failure logs could not be
+// fetched: gh's own one-line description per failing check.
+func failedChecksSummary(failed []CheckResult) string {
+	var b strings.Builder
+
+	for _, c := range failed {
+		fmt.Fprintf(&b, "- %s: %s\n", c.Name, c.Description)
+	}
+
+	return b.String()
+}
+
+// parkGates parks the card in review from a gate: it carries the in-hand state
+// (never a zero value - the round counters must survive the park), records the
+// reason on the card body and in the activity log, and returns the park error.
+func (o *run) parkGates(ctx context.Context, st *gatesState, reason string) error {
+	st.Status = "parked: " + reason
+	o.recordGates(ctx, *st)
+	o.d.logCard(ctx, "pr_gates: parked - %s", reason)
+
+	return &GatesParkedError{Reason: reason}
+}
+
+// sleepPoll waits one poll interval before the next gate poll, aborting early
+// when the run's context is canceled so a container teardown is never delayed by
+// a sleeping gate.
+func (o *run) sleepPoll(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(o.gatesPoll()):
+		return nil
+	}
 }
 
 // recordGates writes the run's gate progress to the "## PR Gates" card section,
@@ -120,7 +325,10 @@ func (o *run) recordGates(ctx context.Context, st gatesState) {
 	b.WriteString("## " + gatesSectionHeading + "\n\n")
 	fmt.Fprintf(&b, "- Copilot rounds used: %d/%d\n", st.CopilotRounds, gatesRoundsCap)
 	fmt.Fprintf(&b, "- CI rounds used: %d/%d\n", st.CIRounds, gatesRoundsCap)
-	fmt.Fprintf(&b, "- Status: %s\n", st.Status)
+
+	if st.Status != "" {
+		fmt.Fprintf(&b, "- Status: %s\n", st.Status)
+	}
 
 	if detail := strings.TrimSpace(st.Detail); detail != "" {
 		b.WriteString("\n" + detail + "\n")
