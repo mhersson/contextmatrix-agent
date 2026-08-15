@@ -171,13 +171,16 @@ func (o *run) spendAndReport(ctx context.Context, ledger *Ledger, targetCardID, 
 	}
 
 	total, reportErr := o.d.Ops.ReportUsage(ctx, targetCardID, cmclient.UsageReport{
-		Model:            used,
-		PromptTokens:     res.PromptTokens,
-		CompletionTokens: res.CompletionTokens,
-		ActualCostUSD:    res.TotalCostUSD,
-		Phase:            o.curPhase,
-		Step:             step,
-		DurationMS:       dur.Milliseconds(),
+		Model:               used,
+		PromptTokens:        res.PromptTokens,
+		CompletionTokens:    res.CompletionTokens,
+		CacheReadTokens:     res.CacheReadTokens,
+		CacheCreationTokens: res.CacheCreationTokens,
+		ActualCostUSD:       res.TotalCostUSD,
+		Phase:               o.curPhase,
+		Step:                step,
+		DurationMS:          dur.Milliseconds(),
+		Source:              "collector",
 	})
 	if reportErr != nil {
 		attrs := make([]any, 0, len(extraAttrs)+4)

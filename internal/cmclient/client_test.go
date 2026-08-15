@@ -516,6 +516,66 @@ func TestReportUsage_OmitsEmptyModel(t *testing.T) {
 	assert.NotContains(t, args, "model", "empty model should be omitted")
 }
 
+func TestReportUsage_CacheTokensSentWhenNonZero(t *testing.T) {
+	rec := newRecorder()
+	c := newTestClient(t, rec, "")
+
+	_, err := c.ReportUsage(context.Background(), "CMX-001", UsageReport{
+		PromptTokens: 5, CompletionTokens: 3, CacheReadTokens: 100, CacheCreationTokens: 40,
+	})
+	require.NoError(t, err)
+
+	args, ok := rec.get("report_usage")
+	require.True(t, ok)
+	require.Contains(t, args, "cache_read_tokens", "non-zero cache read tokens must be sent")
+	assert.EqualValues(t, 100, args["cache_read_tokens"])
+	require.Contains(t, args, "cache_creation_tokens", "non-zero cache creation tokens must be sent")
+	assert.EqualValues(t, 40, args["cache_creation_tokens"])
+}
+
+func TestReportUsage_OmitsZeroCacheTokens(t *testing.T) {
+	rec := newRecorder()
+	c := newTestClient(t, rec, "")
+
+	_, err := c.ReportUsage(context.Background(), "CMX-001", UsageReport{
+		PromptTokens: 5, CompletionTokens: 3,
+	})
+	require.NoError(t, err)
+
+	args, ok := rec.get("report_usage")
+	require.True(t, ok)
+	assert.NotContains(t, args, "cache_read_tokens", "zero cache read tokens must be omitted")
+	assert.NotContains(t, args, "cache_creation_tokens", "zero cache creation tokens must be omitted")
+}
+
+func TestReportUsage_SourceSentWhenSet(t *testing.T) {
+	rec := newRecorder()
+	c := newTestClient(t, rec, "")
+
+	_, err := c.ReportUsage(context.Background(), "CMX-001", UsageReport{
+		PromptTokens: 5, CompletionTokens: 3, Source: "collector",
+	})
+	require.NoError(t, err)
+
+	args, ok := rec.get("report_usage")
+	require.True(t, ok)
+	assert.Equal(t, "collector", args["source"], "non-empty source must be sent")
+}
+
+func TestReportUsage_OmitsEmptySource(t *testing.T) {
+	rec := newRecorder()
+	c := newTestClient(t, rec, "")
+
+	_, err := c.ReportUsage(context.Background(), "CMX-001", UsageReport{
+		PromptTokens: 5, CompletionTokens: 3,
+	})
+	require.NoError(t, err)
+
+	args, ok := rec.get("report_usage")
+	require.True(t, ok)
+	assert.NotContains(t, args, "source", "empty source must be omitted")
+}
+
 func TestReportUsage_TelemetrySentWhenSet(t *testing.T) {
 	rec := newRecorder()
 	c := newTestClient(t, rec, "")
