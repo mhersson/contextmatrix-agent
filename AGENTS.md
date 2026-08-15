@@ -37,7 +37,7 @@ internal/config/     → koanf config; Config (harness) and ServiceConfig (serve
 internal/registry/   → model selector: SelectByComplexity, SelectReviewPanel; priors-only, payload-driven (FromSelection) - agent-side policy, not mechanism
 
 # Autonomous executor - the FSM and its container lifecycle
-internal/orchestrator/ → hand-written FSM plan → execute → judge → document → review → integrate → done; phase persistence; git finalize
+internal/orchestrator/ → hand-written FSM plan → execute → judge → document → review → integrate → pr_gates → done; phase persistence; git finalize
 internal/mob/          → A2A mob-session engine: seats, moderator, loopback JSON-RPC server, transcripts - discussions for plan/review/execute checkpoints
 internal/verifyexec/   → verify-command probing + bounded exec; used by cli run and the orchestrator verify gate
 internal/worker/       → the `work` lifecycle: clone, claim, run the FSM (HITL-gated or autonomous), commit/push, PR; wires the orchestrator deps
@@ -158,13 +158,16 @@ file only - never via flags or committed YAML.
 ## Key domain rules
 
 1. **Orchestrator phases.**
-   `plan → execute → judge → document → review → integrate → done`, in
-   `phaseOrder`. `judge` picks the Best-of-N winner and is a no-op for normal
-   single-solver runs. The current phase is **persisted to the card via MCP**
-   before each phase, orthogonal to board state. Persisted phase + an
-   incrementally pushed branch give crash-resume: a fresh container re-clones
-   and re-enters at the stored phase (a run parked at `judge` re-enters at
-   `execute`, since judge state is container-local).
+   `plan → execute → judge → document → review → integrate → pr_gates → done`,
+   in `phaseOrder`. `judge` picks the Best-of-N winner and is a no-op for
+   normal single-solver runs. `pr_gates` holds a gated card in review until
+   the PR's Copilot review is addressed and/or CI is green, then transitions
+   it to done; it parks the card in review (clean exit, claim released by CM)
+   on round exhaustion or wait-deadline. The current phase is **persisted to
+   the card via MCP** before each phase, orthogonal to board state. Persisted
+   phase + an incrementally pushed branch give crash-resume: a fresh container
+   re-clones and re-enters at the stored phase (a run parked at `judge`
+   re-enters at `execute`, since judge state is container-local).
 2. **Git workflow.** Commit incrementally (one commit per subtask) and **push
    after every subtask and every review round** - `git commit` alone does not
    survive an ephemeral container. Review fixes land as
@@ -283,6 +286,20 @@ file only - never via flags or committed YAML.
     `/run/cm-skills`. Engagement is reported over MCP
     (`cmclient.RecordSkillEngaged` → `add_log action=skill_engaged`). Distinct
     from `workflow-skills` and the MCP `get_skill` tool.
+12. **PR gates.** The `pr_gates` phase gates on whichever combination of
+    `await_ci` and `await_copilot_review` the trigger's `TaskContext` carries,
+    running the Copilot gate first, then the CI gate. Each spends up to 3 fix
+    rounds (`gatesRoundsCap`) on what it finds before parking the card in
+    review. A gate runs whenever a PR URL exists and its flag is set - a stale
+    `pr_url` on a card whose `create_pr` was later disabled still gates, on
+    the rule that a PR exists so the gate runs on it; a gated card whose PR
+    was never created (`create_pr` true, no URL) parks fail-closed instead of
+    completing. The Copilot gate never parks on unavailability - a request
+    that fails, times out, or a reviewer that never appears all record the
+    reason verbatim on the card's activity log (the only diagnostic channel
+    for an external tester's Copilot setup) and let the gate pass. Every
+    triage round records a VALID/INVALID verdict per finding under a
+    `## Copilot Review (Round N)` card section.
 
 ## Repo grounding
 
