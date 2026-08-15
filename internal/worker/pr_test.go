@@ -498,3 +498,55 @@ func TestGatesCmdEnvStdin(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "review body", string(body))
 }
+
+// stubGH writes an executable fake `gh` into a fresh bin dir with the given
+// shell script body and points PATH at it, so gh-invoking methods truly shell
+// out to a controlled fake instead of the real CLI. Uses t.Setenv, so callers
+// cannot run in parallel.
+func stubGH(t *testing.T, script string) {
+	t.Helper()
+
+	bin := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "gh"), []byte("#!/bin/sh\n"+script), 0o755))
+	t.Setenv("PATH", bin)
+}
+
+// TestFailureLogsDegradesOnLogFetchError pins the fix for a per-check log
+// fetch failure: it must not discard the digest sections already built for
+// the other failed checks. One check's "gh run view --log-failed" errors,
+// the other succeeds; the resulting digest must contain both - the errored
+// check in its no-run-link fallback form, noting the fetch failure.
+func TestFailureLogsDegradesOnLogFetchError(t *testing.T) {
+	stubGH(t, `
+if [ "$1" = "run" ] && [ "$2" = "view" ]; then
+	if [ "$3" = "111" ]; then
+		echo "transient failure" 1>&2
+		exit 1
+	fi
+	echo "log line for run $3"
+	exit 0
+fi
+exit 1
+`)
+
+	pc := NewPRCreator(t.TempDir(), "", "", "")
+
+	failed := []orchestrator.CheckResult{
+		{
+			Name: "flaky-check", Bucket: "fail",
+			Link: "https://github.com/org/repo/actions/runs/111/job/1", Description: "exit status 1",
+		},
+		{
+			Name: "real-check", Bucket: "fail",
+			Link: "https://github.com/org/repo/actions/runs/222/job/2", Description: "exit status 2",
+		},
+	}
+
+	digest, err := pc.FailureLogs(t.Context(), "https://github.com/org/repo/pull/1", failed)
+	require.NoError(t, err)
+
+	assert.Contains(t, digest, "flaky-check")
+	assert.Contains(t, digest, "log fetch failed")
+	assert.Contains(t, digest, "real-check")
+	assert.Contains(t, digest, "log line for run 222")
+}

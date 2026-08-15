@@ -589,25 +589,28 @@ func (p *PRCreator) CopilotReview(ctx context.Context, prURL string) (*orchestra
 // or "name: description" for checks with no run link, capped per check and in
 // total so a noisy CI run cannot blow the prompt budget. prURL is part of the
 // PRGates interface but unused here - each check's own Link carries the
-// Actions run to read.
+// Actions run to read. A per-check log fetch failure (transient gh/API error,
+// rate limit, expired logs) degrades that check to the no-run-link fallback
+// instead of aborting the whole digest - one bad fetch must not discard the
+// sections already built for the other failed checks, exactly when the
+// pr_gates fix loop most needs whatever failure context is available.
 func (p *PRCreator) FailureLogs(ctx context.Context, _ string, failed []orchestrator.CheckResult) (string, error) {
 	sections := make([]string, 0, len(failed))
 
 	for _, check := range failed {
-		runID := parseRunID(check.Link)
+		description := check.Description
+		logBody := ""
 
-		var logBody string
-
-		if runID != "" {
+		if runID := parseRunID(check.Link); runID != "" {
 			out, err := p.runGH(ctx, "", false, "run", "view", runID, "--log-failed")
 			if err != nil {
-				return "", fmt.Errorf("gh run view %s: %w", runID, err)
+				description += " (log fetch failed: " + err.Error() + ")"
+			} else {
+				logBody = out
 			}
-
-			logBody = out
 		}
 
-		sections = append(sections, buildFailureSection(check.Name, check.Description, logBody, failureLogPerCheckCap))
+		sections = append(sections, buildFailureSection(check.Name, description, logBody, failureLogPerCheckCap))
 	}
 
 	return joinFailureDigest(sections, failureLogTotalCap), nil
