@@ -2,13 +2,17 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
 	"os/exec"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 
+	"github.com/mhersson/contextmatrix-agent/internal/orchestrator"
 	"github.com/mhersson/contextmatrix-agent/internal/secrets"
 	"github.com/mhersson/contextmatrix-harness/tools"
 )
@@ -18,11 +22,30 @@ import (
 // first URL anywhere in stdout.
 var prURLPattern = regexp.MustCompile(`https?://\S+`)
 
+// prPathPattern extracts owner, repo, and PR number from a PR URL. Matching
+// only the path after the host works for github.com and a GitHub Enterprise
+// host alike.
+var prPathPattern = regexp.MustCompile(`^https?://[^/]+/([^/]+)/([^/]+)/pull/(\d+)`)
+
+// runIDPattern extracts the numeric run ID from an Actions job/run link.
+var runIDPattern = regexp.MustCompile(`/actions/runs/(\d+)`)
+
+// copilotReviewerLogin is the GitHub login gh adds as a reviewer and the login
+// GitHub's REST API reports as the author of a Copilot review.
+const copilotReviewerLogin = "copilot-pull-request-reviewer[bot]"
+
+// Failure-log digest caps: bounded so a noisy CI run cannot blow the prompt
+// budget of the pr_gates phase that consumes FailureLogs' output.
+const (
+	failureLogPerCheckCap = 8 * 1024
+	failureLogTotalCap    = 24 * 1024
+)
+
 // PRCreator opens a pull request via the gh CLI. It satisfies
-// orchestrator.PRCreator. GH_TOKEN is resolved fresh from the secrets file at
-// call time and injected over a scrubbed env so gh authenticates to GitHub
-// without inheriting any other secret from the process; gh runs in the workspace
-// so it resolves the repo from origin.
+// orchestrator.PRCreator and orchestrator.PRGates. GH_TOKEN is resolved fresh
+// from the secrets file at call time and injected over a scrubbed env so gh
+// authenticates to GitHub without inheriting any other secret from the
+// process; gh runs in the workspace so it resolves the repo from origin.
 type PRCreator struct {
 	workspace string
 
@@ -34,6 +57,8 @@ type PRCreator struct {
 	caCertFile string // optional in-container extra CA PEM path; empty disables it
 	host       string // repo host for GH_HOST (e.g. acme.ghe.com); empty leaves gh on its github.com default
 }
+
+var _ orchestrator.PRGates = (*PRCreator)(nil)
 
 // NewPRCreator builds a PRCreator for the given workspace. secretsEnvPath is the
 // secrets file gh re-reads CM_GIT_TOKEN from per invocation (empty disables
@@ -84,22 +109,11 @@ func hostFromRepoURL(repoURL string) string {
 	return u.Host
 }
 
-// buildCmd constructs the gh invocation without running it: argv, workspace
-// dir, body on stdin, and the scrubbed env carrying GH_TOKEN. Split out so tests
-// assert command construction without shelling out to gh. An unreadable
-// secrets file is an error - gh must not run unauthenticated on a stale or
-// broken credential mount.
-func (p *PRCreator) buildCmd(ctx context.Context, title, body, base, head string) (*exec.Cmd, error) {
-	cmd := exec.CommandContext(
-		ctx, "gh", "pr", "create",
-		"--title", title,
-		"--body-file", "-",
-		"--base", base,
-		"--head", head,
-	)
-	cmd.Dir = p.workspace
-	cmd.Stdin = strings.NewReader(body)
-
+// ghEnv assembles the extra "KEY=VALUE" environment entries every gh
+// invocation carries: a fresh GH_TOKEN read from the secrets file, GH_HOST for
+// a GitHub Enterprise remote, and CA overrides when configured. Shared by
+// buildCmd and ghCmd so every gh invocation authenticates identically.
+func (p *PRCreator) ghEnv() ([]string, error) {
 	var extra []string
 
 	token, err := p.gitToken()
@@ -128,9 +142,95 @@ func (p *PRCreator) buildCmd(ctx context.Context, title, body, base, head string
 		extra = append(extra, "SSL_CERT_FILE="+p.caCertFile, "GH_CA_BUNDLE="+p.caCertFile)
 	}
 
+	return extra, nil
+}
+
+// buildCmd constructs the gh pr create invocation without running it: argv,
+// workspace dir, body on stdin, and the scrubbed env carrying GH_TOKEN. Split
+// out so tests assert command construction without shelling out to gh. An
+// unreadable secrets file is an error - gh must not run unauthenticated on a
+// stale or broken credential mount.
+func (p *PRCreator) buildCmd(ctx context.Context, title, body, base, head string) (*exec.Cmd, error) {
+	cmd := exec.CommandContext(
+		ctx, "gh", "pr", "create",
+		"--title", title,
+		"--body-file", "-",
+		"--base", base,
+		"--head", head,
+	)
+	cmd.Dir = p.workspace
+	cmd.Stdin = strings.NewReader(body)
+
+	extra, err := p.ghEnv()
+	if err != nil {
+		return nil, err
+	}
+
 	cmd.Env = tools.ScrubbedEnv(extra)
 
 	return cmd, nil
+}
+
+// ghCmd builds a gh invocation with the same auth/CA/host env as buildCmd:
+// scrubbed env + fresh GH_TOKEN, GH_HOST, CA overrides; runs in the workspace.
+// A non-empty stdin is fed to the command; an empty stdin leaves cmd.Stdin nil.
+func (p *PRCreator) ghCmd(ctx context.Context, stdin string, args ...string) (*exec.Cmd, error) {
+	cmd := exec.CommandContext(ctx, "gh", args...)
+	cmd.Dir = p.workspace
+
+	if stdin != "" {
+		cmd.Stdin = strings.NewReader(stdin)
+	}
+
+	extra, err := p.ghEnv()
+	if err != nil {
+		return nil, err
+	}
+
+	cmd.Env = tools.ScrubbedEnv(extra)
+
+	return cmd, nil
+}
+
+// ghSucceeded reports whether a gh invocation should be treated as
+// successful: a nil error always is; jsonTolerant also accepts a non-nil
+// error when stdout parses as JSON - gh pr checks exits 1 on failing checks
+// and 8 on pending while still printing the JSON report.
+func ghSucceeded(err error, stdout string, jsonTolerant bool) bool {
+	if err == nil {
+		return true
+	}
+
+	return jsonTolerant && json.Valid([]byte(stdout))
+}
+
+// runGH executes a gh invocation and returns trimmed stdout. Exit errors carry
+// stderr in the message. jsonTolerant, when true, returns stdout despite a
+// non-zero exit if stdout parses as JSON - gh pr checks exits 1 on failing
+// checks and 8 on pending while still printing the JSON report. stdin mirrors
+// ghCmd's parameter for callers that need to feed a request body; no current
+// PRGates call needs one.
+func (p *PRCreator) runGH(ctx context.Context, stdin string, jsonTolerant bool, args ...string) (string, error) { //nolint:unparam // seam signature; see doc comment
+	cmd, err := p.ghCmd(ctx, stdin, args...)
+	if err != nil {
+		return "", err
+	}
+
+	out, runErr := cmd.Output()
+	trimmed := strings.TrimSpace(string(out))
+
+	if ghSucceeded(runErr, trimmed, jsonTolerant) {
+		return trimmed, nil
+	}
+
+	detail := trimmed
+
+	var ee *exec.ExitError
+	if errors.As(runErr, &ee) {
+		detail = strings.TrimSpace(trimmed + "\n" + string(ee.Stderr))
+	}
+
+	return "", fmt.Errorf("gh %s: %w: %s", strings.Join(args, " "), runErr, detail)
 }
 
 // Create opens the pull request and returns its URL. It feeds the body on stdin
@@ -164,4 +264,351 @@ func (p *PRCreator) Create(ctx context.Context, title, body, base, head string) 
 // parsePRURL returns the first http(s) URL in gh's stdout, or "" if none.
 func parsePRURL(out string) string {
 	return prURLPattern.FindString(out)
+}
+
+// checksArgs builds the gh pr checks invocation, requesting exactly the JSON
+// fields parseChecks reads.
+func checksArgs(prURL string) []string {
+	return []string{"pr", "checks", prURL, "--json", "name,bucket,link,description"}
+}
+
+// headSHAArgs builds the gh pr view invocation that reports the PR's current
+// head commit SHA.
+func headSHAArgs(prURL string) []string {
+	return []string{"pr", "view", prURL, "--json", "headRefOid"}
+}
+
+// reviewRequestsArgs builds the gh pr view invocation that reports pending
+// review requests.
+func reviewRequestsArgs(prURL string) []string {
+	return []string{"pr", "view", prURL, "--json", "reviewRequests"}
+}
+
+// addCopilotReviewerArgs builds the gh pr edit invocation that requests a
+// Copilot review.
+func addCopilotReviewerArgs(prURL string) []string {
+	return []string{"pr", "edit", prURL, "--add-reviewer", copilotReviewerLogin}
+}
+
+// parsePRPath extracts owner, repo, and PR number from a PR URL. Works for
+// github.com and GitHub Enterprise hosts alike, since only the path after the
+// host is matched.
+func parsePRPath(prURL string) (owner, repo string, number int, err error) {
+	m := prPathPattern.FindStringSubmatch(prURL)
+	if m == nil {
+		return "", "", 0, fmt.Errorf("parse PR path: not a PR URL: %s", prURL)
+	}
+
+	number, err = strconv.Atoi(m[3])
+	if err != nil {
+		return "", "", 0, fmt.Errorf("parse PR path: %w", err)
+	}
+
+	return m[1], m[2], number, nil
+}
+
+// parseChecks unmarshals gh pr checks --json output into CheckResults.
+func parseChecks(out string) ([]orchestrator.CheckResult, error) {
+	var checks []orchestrator.CheckResult
+	if err := json.Unmarshal([]byte(out), &checks); err != nil {
+		return nil, fmt.Errorf("parse checks: %w", err)
+	}
+
+	return checks, nil
+}
+
+// parseReviewRequests reports whether any reviewer request in a gh pr view
+// --json reviewRequests document names Copilot's PR review bot. gh's schema
+// nests review-request logins differently for users, teams, and bots, so this
+// walks the decoded JSON for any "login" value rather than binding to one
+// fixed shape.
+func parseReviewRequests(out string) (bool, error) {
+	var doc any
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		return false, fmt.Errorf("parse review requests: %w", err)
+	}
+
+	return containsCopilotLogin(doc), nil
+}
+
+// containsCopilotLogin recursively searches a decoded JSON value for any
+// "login" field whose value contains "copilot", case-insensitively.
+func containsCopilotLogin(v any) bool {
+	switch val := v.(type) {
+	case map[string]any:
+		if login, ok := val["login"].(string); ok && strings.Contains(strings.ToLower(login), "copilot") {
+			return true
+		}
+
+		for _, child := range val {
+			if containsCopilotLogin(child) {
+				return true
+			}
+		}
+	case []any:
+		if slices.ContainsFunc(val, containsCopilotLogin) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// ghReview is one entry of a GitHub REST /pulls/{n}/reviews response.
+type ghReview struct {
+	User struct {
+		Login string `json:"login"`
+	} `json:"user"`
+	Body        string `json:"body"`
+	CommitID    string `json:"commit_id"`
+	SubmittedAt string `json:"submitted_at"`
+	ID          int64  `json:"id"`
+}
+
+// parseCopilotReview picks the latest review (by submitted_at) authored by
+// Copilot's PR review bot out of a GitHub REST /pulls/{n}/reviews array. It
+// also returns the review's ID, used to fetch that review's line comments; nil
+// and a zero ID when no bot review exists.
+func parseCopilotReview(out string) (*orchestrator.CopilotReview, int64, error) {
+	var reviews []ghReview
+	if err := json.Unmarshal([]byte(out), &reviews); err != nil {
+		return nil, 0, fmt.Errorf("parse copilot review: %w", err)
+	}
+
+	var latest *ghReview
+
+	for i := range reviews {
+		r := &reviews[i]
+		if r.User.Login != copilotReviewerLogin {
+			continue
+		}
+
+		if latest == nil || r.SubmittedAt > latest.SubmittedAt {
+			latest = r
+		}
+	}
+
+	if latest == nil {
+		return nil, 0, nil
+	}
+
+	return &orchestrator.CopilotReview{
+		CommitID: latest.CommitID,
+		Body:     latest.Body,
+	}, latest.ID, nil
+}
+
+// ghReviewComment is one entry of a GitHub REST /pulls/{n}/comments response.
+type ghReviewComment struct {
+	Path                string `json:"path"`
+	Body                string `json:"body"`
+	PullRequestReviewID int64  `json:"pull_request_review_id"`
+}
+
+// parseReviewComments filters a GitHub REST /pulls/{n}/comments array down to
+// the line comments attached to one review ID.
+func parseReviewComments(out string, reviewID int64) ([]orchestrator.ReviewComment, error) {
+	var raw []ghReviewComment
+	if err := json.Unmarshal([]byte(out), &raw); err != nil {
+		return nil, fmt.Errorf("parse review comments: %w", err)
+	}
+
+	var comments []orchestrator.ReviewComment
+
+	for _, c := range raw {
+		if c.PullRequestReviewID != reviewID {
+			continue
+		}
+
+		comments = append(comments, orchestrator.ReviewComment{Path: c.Path, Body: c.Body})
+	}
+
+	return comments, nil
+}
+
+// parseRunID extracts the numeric run ID from an Actions job/run link, or ""
+// when the link isn't an Actions URL.
+func parseRunID(link string) string {
+	m := runIDPattern.FindStringSubmatch(link)
+	if m == nil {
+		return ""
+	}
+
+	return m[1]
+}
+
+// truncateTail keeps at most max bytes from the end of s, so a capped section
+// preserves the most relevant (final) log lines instead of the earliest ones.
+func truncateTail(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+
+	return s[len(s)-maxLen:]
+}
+
+// buildFailureSection formats one failed check's contribution to the failure
+// digest: the tail of its run log capped at perCheckCap when logBody is
+// non-empty, or "name: description" when there is no run log to show.
+func buildFailureSection(name, description, logBody string, perCheckCap int) string {
+	if logBody == "" {
+		return name + ": " + description
+	}
+
+	return name + ":\n" + truncateTail(logBody, perCheckCap)
+}
+
+// joinFailureDigest joins failure sections into one digest, truncating the
+// last section that would cross totalCap and dropping any sections after it -
+// so the digest never exceeds totalCap even when a caller passes uncapped
+// sections.
+func joinFailureDigest(sections []string, totalCap int) string {
+	var (
+		kept  []string
+		total int
+	)
+
+	for _, s := range sections {
+		if total >= totalCap {
+			break
+		}
+
+		if remaining := totalCap - total; len(s) > remaining {
+			s = truncateTail(s, remaining)
+		}
+
+		kept = append(kept, s)
+		total += len(s)
+	}
+
+	return strings.Join(kept, "\n\n")
+}
+
+// Checks runs gh pr checks and returns the CI check results. jsonTolerant is
+// set: gh exits non-zero when any check fails or is pending, while still
+// printing the JSON report on stdout.
+func (p *PRCreator) Checks(ctx context.Context, prURL string) ([]orchestrator.CheckResult, error) {
+	out, err := p.runGH(ctx, "", true, checksArgs(prURL)...)
+	if err != nil {
+		return nil, fmt.Errorf("gh pr checks: %w", err)
+	}
+
+	checks, err := parseChecks(out)
+	if err != nil {
+		return nil, fmt.Errorf("gh pr checks: %w", err)
+	}
+
+	return checks, nil
+}
+
+// HeadSHA returns the PR's current head commit SHA.
+func (p *PRCreator) HeadSHA(ctx context.Context, prURL string) (string, error) {
+	out, err := p.runGH(ctx, "", false, headSHAArgs(prURL)...)
+	if err != nil {
+		return "", fmt.Errorf("gh pr view head sha: %w", err)
+	}
+
+	var doc struct {
+		HeadRefOid string `json:"headRefOid"`
+	}
+
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		return "", fmt.Errorf("gh pr view head sha: parse: %w", err)
+	}
+
+	return doc.HeadRefOid, nil
+}
+
+// CopilotRequested reports whether Copilot's PR review bot is among the
+// pending review requests.
+func (p *PRCreator) CopilotRequested(ctx context.Context, prURL string) (bool, error) {
+	out, err := p.runGH(ctx, "", false, reviewRequestsArgs(prURL)...)
+	if err != nil {
+		return false, fmt.Errorf("gh pr view review requests: %w", err)
+	}
+
+	requested, err := parseReviewRequests(out)
+	if err != nil {
+		return false, fmt.Errorf("gh pr view review requests: %w", err)
+	}
+
+	return requested, nil
+}
+
+// RequestCopilotReview adds Copilot's PR review bot as a reviewer. The error,
+// when non-nil, is returned verbatim - the orchestrator logs it on the card.
+func (p *PRCreator) RequestCopilotReview(ctx context.Context, prURL string) error {
+	if _, err := p.runGH(ctx, "", false, addCopilotReviewerArgs(prURL)...); err != nil {
+		return fmt.Errorf("gh pr edit add copilot reviewer: %w", err)
+	}
+
+	return nil
+}
+
+// CopilotReview returns the latest completed Copilot review on the PR,
+// including its line comments, or nil when Copilot has not reviewed it yet.
+func (p *PRCreator) CopilotReview(ctx context.Context, prURL string) (*orchestrator.CopilotReview, error) {
+	owner, repo, number, err := parsePRPath(prURL)
+	if err != nil {
+		return nil, fmt.Errorf("copilot review: %w", err)
+	}
+
+	base := "repos/" + owner + "/" + repo + "/pulls/" + strconv.Itoa(number)
+
+	out, err := p.runGH(ctx, "", false, "api", base+"/reviews")
+	if err != nil {
+		return nil, fmt.Errorf("copilot review: %w", err)
+	}
+
+	review, reviewID, err := parseCopilotReview(out)
+	if err != nil {
+		return nil, fmt.Errorf("copilot review: %w", err)
+	}
+
+	if review == nil {
+		return nil, nil
+	}
+
+	commentsOut, err := p.runGH(ctx, "", false, "api", base+"/comments")
+	if err != nil {
+		return nil, fmt.Errorf("copilot review comments: %w", err)
+	}
+
+	comments, err := parseReviewComments(commentsOut, reviewID)
+	if err != nil {
+		return nil, fmt.Errorf("copilot review comments: %w", err)
+	}
+
+	review.Comments = comments
+
+	return review, nil
+}
+
+// FailureLogs builds a digest of failure output for the given failed checks:
+// the tail of gh run view --log-failed for checks with an Actions run link,
+// or "name: description" for checks with no run link, capped per check and in
+// total so a noisy CI run cannot blow the prompt budget. prURL is part of the
+// PRGates interface but unused here - each check's own Link carries the
+// Actions run to read.
+func (p *PRCreator) FailureLogs(ctx context.Context, _ string, failed []orchestrator.CheckResult) (string, error) {
+	sections := make([]string, 0, len(failed))
+
+	for _, check := range failed {
+		runID := parseRunID(check.Link)
+
+		var logBody string
+
+		if runID != "" {
+			out, err := p.runGH(ctx, "", false, "run", "view", runID, "--log-failed")
+			if err != nil {
+				return "", fmt.Errorf("gh run view %s: %w", runID, err)
+			}
+
+			logBody = out
+		}
+
+		sections = append(sections, buildFailureSection(check.Name, check.Description, logBody, failureLogPerCheckCap))
+	}
+
+	return joinFailureDigest(sections, failureLogTotalCap), nil
 }
