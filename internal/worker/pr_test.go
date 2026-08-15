@@ -219,6 +219,11 @@ func TestGatesArgBuilders(t *testing.T) {
 	assert.Equal(t, []string{"pr", "view", prURL, "--json", "headRefOid"}, headSHAArgs(prURL))
 	assert.Equal(t, []string{"pr", "view", prURL, "--json", "reviewRequests"}, reviewRequestsArgs(prURL))
 	assert.Equal(t, []string{"pr", "edit", prURL, "--add-reviewer", "copilot-pull-request-reviewer[bot]"}, addCopilotReviewerArgs(prURL))
+	assert.Equal(t, []string{
+		"run", "list", "-R", "org/repo", "--commit", "abc123",
+		"--limit", "100", "--json", "name,event,status,conclusion,databaseId,url",
+	}, runListArgs("org", "repo", "abc123"))
+	assert.Equal(t, []string{"api", "repos/org/repo/commits/abc123/status"}, combinedStatusArgs("org", "repo", "abc123"))
 }
 
 // TestParsePRPath pulls owner, repo, and PR number out of a PR URL, on both
@@ -284,6 +289,75 @@ func TestParseChecks(t *testing.T) {
 	assert.Equal(t, orchestrator.CheckResult{
 		Name: "lint", Bucket: "pending", Link: "", Description: "",
 	}, got[2])
+}
+
+// TestRunBucket maps an Actions run's status/conclusion pair onto gh's
+// statusCheckRollup bucket vocabulary.
+func TestRunBucket(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		status, conclusion, want string
+	}{
+		{"queued", "", "pending"},
+		{"in_progress", "", "pending"},
+		{"waiting", "", "pending"},
+		{"completed", "success", "pass"},
+		{"completed", "failure", "fail"},
+		{"completed", "timed_out", "fail"},
+		{"completed", "cancelled", "cancel"},
+		{"completed", "skipped", "skipping"},
+		{"completed", "neutral", "skipping"},
+		{"completed", "action_required", "pending"},
+		{"completed", "stale", "pending"},
+		{"completed", "somethingnew", "pending"},
+	}
+	for _, tt := range tests {
+		assert.Equal(t, tt.want, runBucket(tt.status, tt.conclusion),
+			"status=%s conclusion=%s", tt.status, tt.conclusion)
+	}
+}
+
+// TestParseRunListDedupesReruns pins parseRunList's newest-run-wins-per-event
+// dedupe: a rerun supersedes its predecessor, while the same workflow
+// triggered by different events stays two results.
+func TestParseRunListDedupesReruns(t *testing.T) {
+	t.Parallel()
+
+	out := `[
+	 {"name":"ci","event":"pull_request","status":"completed","conclusion":"failure","databaseId":1,"url":"https://github.com/o/r/actions/runs/1"},
+	 {"name":"ci","event":"pull_request","status":"completed","conclusion":"success","databaseId":2,"url":"https://github.com/o/r/actions/runs/2"},
+	 {"name":"ci","event":"push","status":"in_progress","conclusion":"","databaseId":3,"url":"https://github.com/o/r/actions/runs/3"}
+	]`
+	checks, err := parseRunList(out)
+	require.NoError(t, err)
+	require.Len(t, checks, 2, "newest run wins per (name, event); distinct events both kept")
+	// order-independent asserts: find by link
+	byLink := map[string]orchestrator.CheckResult{}
+	for _, c := range checks {
+		byLink[c.Link] = c
+	}
+
+	assert.Equal(t, "pass", byLink["https://github.com/o/r/actions/runs/2"].Bucket)
+	assert.Equal(t, "pending", byLink["https://github.com/o/r/actions/runs/3"].Bucket)
+}
+
+// TestParseCombinedStatus unmarshals the legacy combined-status document's
+// contexts into CheckResults.
+func TestParseCombinedStatus(t *testing.T) {
+	t.Parallel()
+
+	out := `{"state":"failure","statuses":[
+	 {"context":"jenkins/build","state":"success","target_url":"https://ci.example/1","description":"ok"},
+	 {"context":"jenkins/deploy","state":"error","target_url":"https://ci.example/2","description":"boom"},
+	 {"context":"jenkins/lint","state":"pending","target_url":"","description":""}
+	]}`
+	checks, err := parseCombinedStatus(out)
+	require.NoError(t, err)
+	require.Len(t, checks, 3)
+	assert.Equal(t, orchestrator.CheckResult{Name: "jenkins/build", Bucket: "pass", Link: "https://ci.example/1", Description: "ok"}, checks[0])
+	assert.Equal(t, "fail", checks[1].Bucket)
+	assert.Equal(t, "pending", checks[2].Bucket)
 }
 
 // TestParseReviewRequests detects a Copilot reviewer request in a gh pr view
@@ -584,6 +658,106 @@ exit 4
 	_, err := pc.Checks(t.Context(), "https://github.com/org/repo/pull/1")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "authentication required")
+}
+
+// TestChecksFallsBackOnInaccessibleChecksAPI pins the sticky fallback: the
+// first poll hits gh pr checks, gets the fine-grained-PAT refusal, and the
+// same call transparently answers from gh run list + the commit-status API;
+// the second poll never invokes gh pr checks again.
+func TestChecksFallsBackOnInaccessibleChecksAPI(t *testing.T) {
+	stubGH(t, `
+echo "$1 $2" >> gh.log
+if [ "$1" = "pr" ] && [ "$2" = "checks" ]; then
+	echo "Resource not accessible by personal access token" 1>&2
+	exit 1
+fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+	echo '{"headRefOid":"abc123"}'
+	exit 0
+fi
+if [ "$1" = "run" ] && [ "$2" = "list" ]; then
+	echo '[{"name":"ci","event":"pull_request","status":"completed","conclusion":"success","databaseId":9,"url":"https://github.com/o/r/actions/runs/9"}]'
+	exit 0
+fi
+if [ "$1" = "api" ]; then
+	echo '{"state":"success","statuses":[]}'
+	exit 0
+fi
+exit 1
+`)
+
+	workspace := t.TempDir()
+	pc := NewPRCreator(workspace, "", "", "")
+	prURL := "https://github.com/org/repo/pull/1"
+
+	checks, err := pc.Checks(t.Context(), prURL)
+	require.NoError(t, err)
+	require.Len(t, checks, 1)
+	assert.Equal(t, "pass", checks[0].Bucket)
+	assert.True(t, pc.checksFallback, "fallback armed after the inaccessible-Checks-API refusal")
+
+	_, err = pc.Checks(t.Context(), prURL)
+	require.NoError(t, err)
+
+	log, readErr := os.ReadFile(filepath.Join(workspace, "gh.log"))
+	require.NoError(t, readErr)
+	assert.Equal(t, 1, strings.Count(string(log), "pr checks\n"),
+		"pr checks invoked exactly once across both polls")
+}
+
+// TestChecksDoesNotFallBackOnOtherErrors pins that a non-permission failure
+// (network hiccup, rate limit) surfaces as an error and does NOT arm the
+// fallback: the next poll tries gh pr checks again.
+func TestChecksDoesNotFallBackOnOtherErrors(t *testing.T) {
+	stubGH(t, `
+echo "$1 $2" >> gh.log
+echo "connect: connection refused" 1>&2
+exit 1
+`)
+
+	workspace := t.TempDir()
+	pc := NewPRCreator(workspace, "", "", "")
+	prURL := "https://github.com/org/repo/pull/1"
+
+	_, err := pc.Checks(t.Context(), prURL)
+	require.Error(t, err)
+	assert.False(t, pc.checksFallback, "a non-permission failure must not arm the fallback")
+
+	_, err = pc.Checks(t.Context(), prURL)
+	require.Error(t, err)
+
+	log, readErr := os.ReadFile(filepath.Join(workspace, "gh.log"))
+	require.NoError(t, readErr)
+	assert.Equal(t, 2, strings.Count(string(log), "pr checks\n"),
+		"pr checks retried on the next poll since the fallback never armed")
+}
+
+// TestChecksViaRunsEmptyMeansNoCI pins the fallback path's own no-CI
+// contract: no Actions runs and no commit statuses map to an empty result and
+// a nil error - the same "this repo has no CI" semantics gh pr checks' own
+// no-checks-reported failure translates to on the rollup path.
+func TestChecksViaRunsEmptyMeansNoCI(t *testing.T) {
+	stubGH(t, `
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+	echo '{"headRefOid":"abc123"}'
+	exit 0
+fi
+if [ "$1" = "run" ] && [ "$2" = "list" ]; then
+	echo '[]'
+	exit 0
+fi
+if [ "$1" = "api" ]; then
+	echo '{"state":"pending","statuses":[]}'
+	exit 0
+fi
+exit 1
+`)
+
+	pc := NewPRCreator(t.TempDir(), "", "", "")
+
+	checks, err := pc.checksViaRuns(t.Context(), "https://github.com/org/repo/pull/1")
+	require.NoError(t, err)
+	assert.Empty(t, checks)
 }
 
 // TestPRViewURLArgs pins the exact argv for the branch-PR probe: url and

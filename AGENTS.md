@@ -307,6 +307,11 @@ file only - never via flags or committed YAML.
     the CI gate; the unavailability skips above never write it, so those stay
     retryable. Every triage round records a VALID/INVALID verdict per finding
     under a `## Copilot Review (Round N)` card section.
+    The CI gate's poll reads `gh pr checks` and, when the token cannot read
+    the Checks API (fine-grained PATs on private repos), falls back for the
+    rest of the run to `gh run list --commit <head-sha>` plus the legacy
+    commit-status API - covered by Actions: read and Commit statuses: read.
+    Fallback mode cannot see third-party Checks-API-only integrations.
 
 ## Repo grounding
 
