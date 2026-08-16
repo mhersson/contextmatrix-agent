@@ -243,7 +243,7 @@ tool_output_max_bytes: 131072
 # runs API instead of the Checks API (which GitHub grants to Apps only);
 # the PAT needs Actions: read and Commit statuses: read.
 
-# How often the gate re-polls CI checks and the Copilot review. Default: 30.
+# How often the gate re-polls CI checks and the Copilot review. Default: 60.
 # CMX_GATES_POLL_INTERVAL_SECONDS
 
 # How long the CI gate waits for checks to settle before parking. A value

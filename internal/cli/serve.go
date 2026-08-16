@@ -121,7 +121,7 @@ func runServe(ctx context.Context, configPath string) error {
 		Redactor:             redactor,
 		OnAwaiting:           func(k logbridge.Key, v bool) { tracker.SetAwaiting(k.Project, k.CardID, v) },
 		SurfaceAwaitingHuman: true,
-		MapExtra:             discussionMapExtra,
+		MapExtra:             agentMapExtra,
 	})
 
 	exec := executor.NewDockerExecutor(executor.Config{
@@ -435,29 +435,60 @@ func (a dropAdapter) ObserveDrop() {
 	a.mx.BroadcasterDropsTotal.Inc()
 }
 
-// discussionMapExtra is the agent's mob-session "discussion" arm, supplied to
-// the log bridge as its MapExtra hook: it maps a discussion event to a
-// speaker-labeled text entry carrying the briefing, round utterances, moderator
-// notices, or synthesis. Non-discussion kinds return ok=false so they fall
-// through to the shared default skip - seat sub-run events ("seat_debug")
-// included, keeping them off the live stream by construction.
-func discussionMapExtra(kind string, data map[string]any) (protocol.LogEntry, bool, bool) {
-	if kind != "discussion" {
+// agentMapExtra is the agent's MapExtra hook for the log bridge: the arms for
+// the event kinds the agent emits that the shared bridge does not know. A kind
+// no arm claims returns ok=false so it falls through to the shared default
+// skip - seat sub-run events ("seat_debug") included, keeping them off the live
+// stream by construction.
+func agentMapExtra(kind string, data map[string]any) (protocol.LogEntry, bool, bool) {
+	switch kind {
+	case "discussion":
+		return discussionMapExtra(data)
+	case "gate_progress":
+		return gateProgressMapExtra(data)
+	default:
+		return protocol.LogEntry{}, false, false
+	}
+}
+
+// discussionMapExtra maps a mob-session discussion event to a speaker-labeled
+// text entry carrying the briefing, round utterances, moderator notices, or
+// synthesis.
+func discussionMapExtra(data map[string]any) (protocol.LogEntry, bool, bool) {
+	return protocol.LogEntry{
+		Type:    "text",
+		Content: mapStr(data, "content"),
+		Agent:   mapStr(data, "agent"),
+		Model:   mapStr(data, "model"),
+	}, false, true
+}
+
+// gateProgressMapExtra maps one pr_gates poll to a system entry.
+//
+// A poll marked repeat=true is dropped - returned unclaimed, which the bridge's
+// default arm turns into a skip. The gate emits on EVERY poll so the
+// serve-side idle watchdog keeps seeing output while it waits, but a status
+// identical to the one already on screen is not worth a transcript row: a
+// gate can sit on the same counts for many minutes, and printing them each
+// time buries the polls that actually moved. The dropped polls are still in
+// the durable run log, which records the worker's raw output.
+func gateProgressMapExtra(data map[string]any) (protocol.LogEntry, bool, bool) {
+	if repeat, _ := data["repeat"].(bool); repeat {
 		return protocol.LogEntry{}, false, false
 	}
 
-	str := func(k string) string {
-		s, _ := data[k].(string)
-
-		return s
-	}
-
 	return protocol.LogEntry{
-		Type:    "text",
-		Content: str("content"),
-		Agent:   str("agent"),
-		Model:   str("model"),
+		Type:    "system",
+		Content: mapStr(data, "status"),
 	}, false, true
+}
+
+// mapStr reads a string field out of an event's data payload, returning "" when
+// it is absent or not a string.
+func mapStr(data map[string]any, key string) string {
+	s, _ := data[key].(string)
+
+	return s
 }
 
 // buildAdminServer returns the admin HTTP server serving Prometheus /metrics
