@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
+	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/mhersson/contextmatrix-harness/llm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -395,7 +397,7 @@ func TestGatesState_SatisfiedMarkerRoundTrips(t *testing.T) {
 // the knobs zero, so each effective-knob helper falls back to its default.
 func TestGatesKnobDefaults(t *testing.T) {
 	zero := &run{}
-	assert.Equal(t, 30*time.Second, zero.gatesPoll())
+	assert.Equal(t, 60*time.Second, zero.gatesPoll())
 	assert.Equal(t, 45*time.Minute, zero.ciWait())
 	assert.Equal(t, 10*time.Minute, zero.copilotWait())
 
@@ -407,6 +409,91 @@ func TestGatesKnobDefaults(t *testing.T) {
 	assert.Equal(t, 5*time.Second, set.gatesPoll())
 	assert.Equal(t, time.Minute, set.ciWait())
 	assert.Equal(t, 2*time.Minute, set.copilotWait())
+}
+
+// TestGatePoller_EmitsEveryPollButShowsOnlyChanges pins the split the gate
+// progress depends on: every poll emits, because the serve-side idle watchdog
+// reads the worker's output as proof the container is alive, but only a status
+// that MOVED is marked for the transcript. A gate can sit on the same counts
+// for many minutes, and showing each of those polls buries the ones that
+// mattered.
+func TestGatePoller_EmitsEveryPollButShowsOnlyChanges(t *testing.T) {
+	shrinkGateProgressHeartbeat(t, time.Hour)
+
+	var transcript bytes.Buffer
+
+	emit := events.NewEmitter(nil, &transcript)
+	p := &gatePoller{gate: "ci"}
+
+	p.poll(emit, "CI checks: 0 passed, 7 pending, 0 failed", nil)
+	p.poll(emit, "CI checks: 0 passed, 7 pending, 0 failed", nil)
+	p.poll(emit, "CI checks: 0 passed, 7 pending, 0 failed", nil)
+	p.poll(emit, "CI checks: 3 passed, 4 pending, 0 failed", nil)
+
+	assert.Equal(t, 4, strings.Count(strings.TrimSpace(transcript.String()), "\n")+1,
+		"every poll emits, so the idle watchdog keeps seeing output")
+	assert.Equal(t, []string{
+		"CI checks: 0 passed, 7 pending, 0 failed",
+		"CI checks: 3 passed, 4 pending, 0 failed",
+	}, gateProgressStatuses(t, &transcript), "only the polls that moved are shown")
+}
+
+// TestGatePoller_HeartbeatShowsAnUnchangedStatusAgain: a gate that waits past
+// the heartbeat window shows its status again, so a long quiet wait reads as
+// alive rather than hung.
+func TestGatePoller_HeartbeatShowsAnUnchangedStatusAgain(t *testing.T) {
+	shrinkGateProgressHeartbeat(t, time.Nanosecond)
+
+	var transcript bytes.Buffer
+
+	emit := events.NewEmitter(nil, &transcript)
+	p := &gatePoller{gate: "ci"}
+
+	p.poll(emit, "CI checks: 0 passed, 7 pending, 0 failed", nil)
+	p.poll(emit, "CI checks: 0 passed, 7 pending, 0 failed", nil)
+
+	assert.Len(t, gateProgressStatuses(t, &transcript), 2,
+		"past the heartbeat window an unchanged status is shown again")
+}
+
+// TestCopilotPollStatus: a review that is not on the current head reads
+// differently from no review at all - the former is a review of code a fix
+// round already superseded.
+func TestCopilotPollStatus(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, "Copilot review: received", copilotPollStatus(true, true))
+	assert.Equal(t, "Copilot review: waiting - the review on file is for an older commit",
+		copilotPollStatus(true, false))
+	assert.Equal(t, "Copilot review: waiting", copilotPollStatus(false, false))
+}
+
+// TestCIGate_ShowsOnlyThePollsThatMoved is the gate-level half of
+// TestGatePoller_EmitsEveryPollButShowsOnlyChanges: the CI gate's own polls go
+// through the poller, so a run that waits on the same counts contributes one
+// transcript row, not one per poll.
+func TestCIGate_ShowsOnlyThePollsThatMoved(t *testing.T) {
+	shrinkGateProgressHeartbeat(t, time.Hour)
+
+	var transcript bytes.Buffer
+
+	ops := &fakeOps{}
+	gates := &fakeGates{checks: [][]CheckResult{
+		{{Name: "build", Bucket: "pending"}},
+		{{Name: "build", Bucket: "pending"}},
+		{{Name: "build", Bucket: "pending"}},
+		{{Name: "build", Bucket: "pass"}},
+	}}
+
+	o := prGateRun(ops, gates, &fakeGit{}, &planLLM{}, ciGateContext("Quiet wait", "body"), 0)
+	o.d.Emit = events.NewEmitter(nil, &transcript)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	assert.Equal(t, []string{
+		"CI checks: 0 passed, 1 pending, 0 failed",
+		"CI checks: 1 passed, 0 pending, 0 failed",
+	}, gateProgressStatuses(t, &transcript))
 }
 
 // TestGateDeadlineClampsToContainerDeadline: a gate never waits past the
@@ -449,6 +536,46 @@ func ciGateContext(title, body string) cmclient.TaskContext {
 		AwaitCI:     true,
 		PRUrl:       gatePRURL,
 	}
+}
+
+// gateProgressStatuses decodes the statuses of every gate_progress event the
+// emitter wrote, keeping only the ones the log bridge would SHOW (repeat=false).
+func gateProgressStatuses(t *testing.T, transcript *bytes.Buffer) []string {
+	t.Helper()
+
+	var shown []string
+
+	for line := range strings.SplitSeq(strings.TrimSpace(transcript.String()), "\n") {
+		if line == "" {
+			continue
+		}
+
+		var ev struct {
+			Kind string `json:"kind"`
+			Data struct {
+				Status string `json:"status"`
+				Repeat bool   `json:"repeat"`
+			} `json:"data"`
+		}
+
+		require.NoError(t, json.Unmarshal([]byte(line), &ev))
+
+		if ev.Kind == gateProgressKind && !ev.Data.Repeat {
+			shown = append(shown, ev.Data.Status)
+		}
+	}
+
+	return shown
+}
+
+// shrinkGateProgressHeartbeat shortens the gate heartbeat for one test.
+func shrinkGateProgressHeartbeat(t *testing.T, d time.Duration) {
+	t.Helper()
+
+	prev := gateProgressHeartbeat
+	gateProgressHeartbeat = d
+
+	t.Cleanup(func() { gateProgressHeartbeat = prev })
 }
 
 // shrinkNoChecksGrace shortens the no-CI grace window for one test, so the

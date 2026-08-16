@@ -6,10 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mhersson/contextmatrix-harness/events"
 )
 
 // gatesRoundsCap bounds how many times each gate may push a fix round before it
@@ -21,7 +24,7 @@ const gatesRoundsCap = 3
 // A Deps built directly (tests, standalone runs) carries no knobs, so the gates
 // must never derive a zero poll interval or a zero wait from it.
 const (
-	defaultGatesPollInterval       = 30 * time.Second
+	defaultGatesPollInterval       = 60 * time.Second
 	defaultGatesCIWaitTimeout      = 45 * time.Minute
 	defaultGatesCopilotWaitTimeout = 10 * time.Minute
 )
@@ -73,6 +76,50 @@ var gatesFixRoundReserve = 5 * time.Minute
 // re-checking that the reviewer actually appeared (the request API can silently
 // no-op on an account without Copilot review access). A var so tests can shrink it.
 var gatesCopilotRecheck = 10 * time.Second
+
+// gateProgressKind is the event a gate emits once per poll. It is not a
+// harness kind - the log bridge picks it up through the agent's MapExtra hook,
+// the same way mob discussion events are carried.
+const gateProgressKind = "gate_progress"
+
+// gateProgressHeartbeat is how long an unchanging gate may stay off the
+// transcript before it shows its status again, so a long quiet wait still
+// reads as alive rather than hung. A var so tests can shrink it.
+var gateProgressHeartbeat = 5 * time.Minute
+
+// gatePoller renders one gate's per-poll progress.
+//
+// EVERY poll emits, and that is load-bearing: the worker's output is what the
+// serve-side idle watchdog reads as proof the container is alive, and a gate
+// can legitimately wait tens of minutes without its status changing. What
+// varies is only whether the poll is worth SHOWING. An unchanged status inside
+// the heartbeat window is marked repeat=true and the log bridge drops it, so a
+// waiting gate stays quiet on screen while the watchdog keeps seeing output
+// and the durable run log keeps every poll.
+type gatePoller struct {
+	gate  string
+	last  string
+	shown time.Time
+}
+
+// poll emits one poll's status, marking it a repeat unless the status changed
+// or the heartbeat came due. fields carries the gate's structured counts for
+// the run log; they never affect the repeat decision, which is made on the
+// rendered status alone.
+func (p *gatePoller) poll(emit *events.Emitter, status string, fields map[string]any) {
+	now := time.Now()
+	repeat := status == p.last && now.Sub(p.shown) < gateProgressHeartbeat
+
+	if !repeat {
+		p.last = status
+		p.shown = now
+	}
+
+	data := map[string]any{"gate": p.gate, "status": status, "repeat": repeat}
+	maps.Copy(data, fields)
+
+	emit.Emit(events.Kind(gateProgressKind), data)
+}
 
 // copilotFinding is one triaged Copilot comment: the orchestrator model's
 // judgement on whether it names a real defect worth a fix round.
@@ -329,6 +376,7 @@ func (o *run) ensureCopilotReviewer(ctx context.Context, prURL string) (string, 
 // full one, and gateDeadline still clamps each to the container's own deadline.
 func (o *run) awaitCopilotReview(ctx context.Context, prURL string) (*CopilotReview, error) {
 	deadline := o.gateDeadline(o.copilotWait())
+	poller := &gatePoller{gate: "copilot"}
 
 	for {
 		review, reviewErr := o.d.PRGates.CopilotReview(ctx, prURL)
@@ -358,10 +406,8 @@ func (o *run) awaitCopilotReview(ctx context.Context, prURL string) (*CopilotRev
 		onHead := review != nil && reviewErr == nil && headErr == nil &&
 			head != "" && review.CommitID == head
 
-		// One line per poll: the serve-side idle watchdog reads this as proof the
-		// container is alive while the gate waits.
-		slog.Info("pr_gates: Copilot review polled", "card_id", o.d.Cfg.CardID, "pr_url", prURL,
-			"have_review", review != nil, "on_head", onHead, "head_sha", head)
+		poller.poll(o.d.Emit, copilotPollStatus(review != nil, onHead),
+			map[string]any{"have_review": review != nil, "on_head": onHead, "head_sha": head})
 
 		if onHead {
 			return review, nil
@@ -374,6 +420,21 @@ func (o *run) awaitCopilotReview(ctx context.Context, prURL string) (*CopilotRev
 		if werr := o.sleepPoll(ctx); werr != nil {
 			return nil, werr
 		}
+	}
+}
+
+// copilotPollStatus renders one Copilot poll for the transcript. A review that
+// is not on the current head reads differently from no review at all: the
+// former is a review of code a fix round has already superseded, and a human
+// watching the gate wait needs to see which of the two it is waiting through.
+func copilotPollStatus(haveReview, onHead bool) string {
+	switch {
+	case onHead:
+		return "Copilot review: received"
+	case haveReview:
+		return "Copilot review: waiting - the review on file is for an older commit"
+	default:
+		return "Copilot review: waiting"
 	}
 }
 
@@ -766,6 +827,7 @@ func classifyChecks(checks []CheckResult) ciBuckets {
 func (o *run) ciGate(ctx context.Context, prURL string, st *gatesState) error {
 	deadline := o.gateDeadline(o.ciWait())
 	start := time.Now()
+	poller := &gatePoller{gate: "ci"}
 
 	// The checks-were-seen memory spans containers: a gate whose persisted
 	// section already records fix rounds ran CI in an earlier run, so its first
@@ -796,10 +858,9 @@ func (o *run) ciGate(ctx context.Context, prURL string, st *gatesState) error {
 
 		b := classifyChecks(checks)
 
-		// One line per poll: the serve-side idle watchdog reads this as proof the
-		// container is alive while the gate waits.
-		slog.Info("pr_gates: CI checks polled", "card_id", o.d.Cfg.CardID, "pr_url", prURL,
-			"passing", b.passing, "pending", b.pending, "failed", len(b.failed))
+		poller.poll(o.d.Emit,
+			fmt.Sprintf("CI checks: %d passed, %d pending, %d failed", b.passing, b.pending, len(b.failed)),
+			map[string]any{"passing": b.passing, "pending": b.pending, "failed": len(b.failed)})
 
 		switch {
 		case pollErr == nil && len(checks) == 0 && !sawChecks:

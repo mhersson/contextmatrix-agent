@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestDiscussionMapExtra(t *testing.T) {
+func TestAgentMapExtra(t *testing.T) {
 	tests := []struct {
 		name      string
 		kind      string
@@ -37,6 +37,21 @@ func TestDiscussionMapExtra(t *testing.T) {
 			wantOK:    true,
 		},
 		{
+			name:      "a gate poll that moved becomes a system entry",
+			kind:      "gate_progress",
+			data:      map[string]any{"status": "CI checks: 2 passed, 5 pending, 0 failed", "repeat": false},
+			wantEntry: protocol.LogEntry{Type: "system", Content: "CI checks: 2 passed, 5 pending, 0 failed"},
+			wantOK:    true,
+		},
+		{
+			// The gate emits on every poll to keep the idle watchdog fed; an
+			// unchanged status must not reach the transcript.
+			name:   "a repeated gate poll is dropped",
+			kind:   "gate_progress",
+			data:   map[string]any{"status": "CI checks: 2 passed, 5 pending, 0 failed", "repeat": true},
+			wantOK: false,
+		},
+		{
 			name:   "seat_debug kind is not mapped",
 			kind:   "seat_debug",
 			data:   map[string]any{"content": "hello"},
@@ -52,9 +67,9 @@ func TestDiscussionMapExtra(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			entry, awaiting, ok := discussionMapExtra(tc.kind, tc.data)
+			entry, awaiting, ok := agentMapExtra(tc.kind, tc.data)
 			assert.Equal(t, tc.wantOK, ok)
-			assert.False(t, awaiting, "discussionMapExtra never signals awaiting-human")
+			assert.False(t, awaiting, "agentMapExtra never signals awaiting-human")
 
 			if tc.wantOK {
 				assert.Equal(t, tc.wantEntry, entry)
