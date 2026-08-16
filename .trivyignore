@@ -40,6 +40,19 @@ CVE-2026-69152
 # 10.2.0 - clears when an npm upgrade pulls in >= 10.3.1.
 CVE-2026-69192
 
+# --- The uv-managed CPython (/opt/python) bundles pip, whose _vendor tree pins
+# msgpack==1.1.2 and setuptools==70.3.0 (pip/_vendor/vendor.txt - Trivy reads
+# the pins as installed packages). GHSA-6v7p-g79w-8964 (msgpack Unpacker-reuse
+# out-of-bounds read, fixed in 1.2.1) touches only pip's deserialization of its
+# own local HTTP cache. CVE-2025-47273 (setuptools PackageIndex path traversal,
+# fixed in 78.1.1) lives in package_index.py, which pip's vendored copy does not
+# ship - only the pkg_resources subset of setuptools is vendored. The pins
+# cannot be raised independently of pip, and the latest pip (26.2) still carries
+# both - clears when a pip release re-vendors msgpack >= 1.2.1 and setuptools
+# >= 78.1.1.
+GHSA-6v7p-g79w-8964
+CVE-2025-47273
+
 # --- golang.org/x/text v0.36.0 inside the golangci-lint binary
 # (/usr/local/bin/golangci-lint); the fix is v0.39.0. DoS on invalid UTF-8
 # input to a lint binary running repo-controlled code that can already execute
