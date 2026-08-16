@@ -248,6 +248,25 @@ const buildHygieneNote = `If you run a build or compile step only to check it, d
 behind - write it to a throwaway path or delete it before you finish. Leftover
 build artifacts clutter the workspace the reviewers read.`
 
+// ciFailureNote heads the CI gate's fix-round findings. It exists because the
+// fix coder is otherwise told only the run's verify command, and CI runs more
+// than that: a lint or format failure reproduces under NEITHER the verify
+// command nor a re-reading of the diff, so a coder that trusts a green verify
+// spends its whole turn budget hunting a defect that is not in the logic at
+// all. The second paragraph covers the digest that names no failure - a check
+// whose log could not be fetched, or one whose description GitHub leaves empty.
+// Deliberately language-neutral: it names no build tool or linter.
+const ciFailureNote = `These findings come from the project's CI, which runs a broader check suite
+than this run's verify command - formatters, linters, and build or scan steps
+the verify command does not cover. A passing verify command is therefore not
+evidence that the failure is gone.
+
+If the digest below names no concrete failure - only a check name, or a note
+that the log could not be fetched - do not try to deduce the cause by
+re-reading the diff. Find the project's own check commands (its build file,
+task runner, CI workflow, or contributor docs), run them until one reproduces
+a failure, and fix that.`
+
 // processTeardownNote tells the coder/fixer to shut down any long-running
 // process it started for verification (a dev server, a watcher) before
 // finishing. The harness bash tool only SIGKILLs the process group on
