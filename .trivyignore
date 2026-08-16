@@ -14,15 +14,23 @@
 # then.
 CVE-2026-34040
 
-# --- The apt-installed GitHub CLI (/usr/bin/gh, latest release v2.96.0) is a
-# prebuilt upstream binary compiled with Go 1.26.4; CVE-2026-39822 is an
-# os.Root symlink-following traversal in that embedded stdlib, fixed in Go
-# 1.26.5. Everything this repo compiles is already on 1.26.6 (builder image,
-# in-image toolchain, agent binary - all scan clean); only GitHub's release
-# pipeline can rebuild gh. Inside the worker container repo-controlled code
-# already executes arbitrary bash, so gh's traversal adds no marginal attack
-# surface. Clears when apt pulls a gh release built on Go >= 1.26.5.
-CVE-2026-39822
+# --- The apt-installed GitHub CLI (/usr/bin/gh, latest release v2.97.0) is a
+# prebuilt upstream binary compiled with Go 1.26.5; these are stdlib and
+# vendored x/net findings in that embedded toolchain, fixed in Go 1.26.6.
+# Everything this repo compiles is already on 1.26.6 (builder image, in-image
+# toolchain, agent binary - all scan clean); only GitHub's release pipeline can
+# rebuild gh. Inside the worker container repo-controlled code already executes
+# arbitrary bash, so these DoS/parsing issues add no marginal attack surface.
+# Clears when apt pulls a gh release built on Go >= 1.26.6. (The previous entry
+# here, CVE-2026-39822 against a Go 1.26.4 gh, cleared when v2.97.0 shipped.)
+CVE-2026-33818
+CVE-2026-39821
+CVE-2026-46600
+CVE-2026-56853
+CVE-2026-56858
+CVE-2026-56859
+CVE-2026-56860
+CVE-2026-56862
 
 # --- The bundled npm CLI ships brace-expansion 5.0.7
 # (/usr/lib/node_modules/npm/node_modules/brace-expansion); the fixes land in
@@ -39,6 +47,19 @@ CVE-2026-69152
 # does not configure. npm's own transitive dependency: 11.19.0 still bundles
 # 10.2.0 - clears when an npm upgrade pulls in >= 10.3.1.
 CVE-2026-69192
+
+# --- The uv-managed CPython (/opt/python) bundles pip, whose _vendor tree pins
+# msgpack==1.1.2 and setuptools==70.3.0 (pip/_vendor/vendor.txt - Trivy reads
+# the pins as installed packages). GHSA-6v7p-g79w-8964 (msgpack Unpacker-reuse
+# out-of-bounds read, fixed in 1.2.1) touches only pip's deserialization of its
+# own local HTTP cache. CVE-2025-47273 (setuptools PackageIndex path traversal,
+# fixed in 78.1.1) lives in package_index.py, which pip's vendored copy does not
+# ship - only the pkg_resources subset of setuptools is vendored. The pins
+# cannot be raised independently of pip, and the latest pip (26.2) still carries
+# both - clears when a pip release re-vendors msgpack >= 1.2.1 and setuptools
+# >= 78.1.1.
+GHSA-6v7p-g79w-8964
+CVE-2025-47273
 
 # --- golang.org/x/text v0.36.0 inside the golangci-lint binary
 # (/usr/local/bin/golangci-lint); the fix is v0.39.0. DoS on invalid UTF-8
