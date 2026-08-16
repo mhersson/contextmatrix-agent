@@ -875,6 +875,24 @@ func (o *run) ciGate(ctx context.Context, prURL string, st *gatesState) error {
 			}
 
 		case len(b.failed) > 0:
+			if b.pending > 0 {
+				// Red, but the run is still going. Wait for it to finish, however
+				// long that takes. gh reads a check's failure log from the RUN's
+				// log archive, which GitHub publishes only once EVERY job in the
+				// run has finished, so a fix round started here gets a digest with
+				// no failure output in it at all. There is no deadline worth
+				// cutting the wait short for either: a run that never finishes is
+				// a run whose log never becomes readable, so the fix round the
+				// gate would buy by giving up early is precisely the blind one
+				// this wait exists to prevent - better to let the gate's own
+				// deadline park the card for a human.
+				//
+				// Waiting also means a sibling that fails a minute from now is
+				// covered by the same pass, instead of costing a second round out
+				// of three to fix what this one could have fixed.
+				break
+			}
+
 			if time.Now().Add(gatesFixRoundReserve).After(deadline) {
 				// Not enough wait left for a coder run, a push, and a fresh CI
 				// cycle. Park on the red checks instead of spending a round whose
@@ -1005,9 +1023,11 @@ func gateResourcePark(err error, budgetReason, turnCapReason string) string {
 	return ""
 }
 
-// ciFixFindings frames the failure digest as findings for the fix coder.
+// ciFixFindings frames the failure digest as findings for the fix coder, led by
+// ciFailureNote so a coder whose verify command passes does not read that as
+// the failure being gone.
 func ciFixFindings(digest string) string {
-	return "CI checks failed on the PR. Failure digest:\n" + digest
+	return ciFailureNote + "\n\nCI checks failed on the PR. Failure digest:\n" + digest
 }
 
 // failedChecksDetail lists the failing checks for the card section: the name a
