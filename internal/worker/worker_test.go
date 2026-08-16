@@ -1368,3 +1368,70 @@ func TestPlanToolsRegistryCarriesFindingsTool(t *testing.T) {
 
 	assert.Len(t, plan.All(), len(tools.ReadOnlyTools(ws))+1)
 }
+
+func TestWriteToolsForThreadsExtraEnv(t *testing.T) {
+	t.Parallel()
+
+	wt := writeToolsFor(t.TempDir(), 60, []string{"TEST_EXTRA_VAR=hello-from-extra"})
+
+	var bash tools.Tool
+
+	for _, tl := range wt {
+		if tl.Name() == "bash" {
+			bash = tl
+		}
+	}
+
+	require.NotNil(t, bash, "writeToolsFor must include the bash tool")
+
+	res, err := bash.Execute(context.Background(), map[string]any{"command": `printf '%s' "$TEST_EXTRA_VAR"`})
+	require.NoError(t, err)
+	assert.Equal(t, "hello-from-extra", res.Text, "extra env entries must reach the bash subprocess")
+}
+
+func TestRunFSMPassesVerifyEnvToWriteTools(t *testing.T) {
+	t.Setenv("TEST_PASSTHROUGH_VAR", "resolved-value")
+	t.Setenv("GITHUB_TOKEN", "denied-secret")
+
+	remote := setupBareRemote(t)
+	wsParent := t.TempDir()
+	ops := newFakeOps()
+
+	var mainWriteTools *tools.Registry
+
+	var writeToolsForDir func(string) *tools.Registry
+
+	swapRunOrchestrator(t, func(_ context.Context, d orchestrator.Deps) error {
+		mainWriteTools = d.WriteTools
+		writeToolsForDir = d.WriteToolsForDir
+
+		return nil
+	})
+
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	spec := baseSpec(t, remote, wsParent)
+	spec.Verify.Env = []string{"TEST_PASSTHROUGH_VAR", "GITHUB_TOKEN"}
+
+	res, err := Run(context.Background(), spec, ops, &scriptedLLM{}, emit, openStdin(t))
+	require.NoError(t, err)
+	assert.Equal(t, "completed", res.Reason)
+
+	require.NotNil(t, mainWriteTools)
+	require.NotNil(t, writeToolsForDir)
+
+	probe := `printf '%s|%s' "$TEST_PASSTHROUGH_VAR" "${GITHUB_TOKEN:-unset}"`
+
+	for name, reg := range map[string]*tools.Registry{
+		"main workspace": mainWriteTools,
+		"candidate dir":  writeToolsForDir(t.TempDir()),
+	} {
+		bash, ok := reg.Get("bash")
+		require.True(t, ok, name)
+
+		out, err := bash.Execute(context.Background(), map[string]any{"command": probe})
+		require.NoError(t, err, name)
+		assert.Equal(t, "resolved-value|unset", out.Text,
+			"%s: declared allowed name must resolve, denied name must stay absent", name)
+	}
+}
