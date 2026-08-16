@@ -281,6 +281,39 @@ func TestVerifyEnvFiltersAndResolves(t *testing.T) {
 	assert.Equal(t, []string{"JAVA_HOME=/opt/jdk"}, got, "denied names dropped, unset names skipped")
 }
 
+func TestResolveVerifyEnv(t *testing.T) {
+	t.Setenv("JAVA_HOME", "/opt/jdk")
+	t.Setenv("GITHUB_TOKEN", "secret") // denied by prefix
+	t.Setenv("EMPTY_VAR", "")
+
+	tests := []struct {
+		name    string
+		declare *DeclaredVerify
+		want    []string
+	}{
+		{"nil config", nil, nil},
+		{"empty list", &DeclaredVerify{}, nil},
+		{
+			"filters and resolves",
+			&DeclaredVerify{Env: []string{"JAVA_HOME", "GITHUB_TOKEN", "MISSING_VAR"}},
+			[]string{"JAVA_HOME=/opt/jdk"},
+		},
+		{
+			// LookupEnv, not Getenv: set-but-empty passes through as NAME=,
+			// which the child shell distinguishes from unset.
+			"set but empty",
+			&DeclaredVerify{Env: []string{"EMPTY_VAR"}},
+			[]string{"EMPTY_VAR="},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, ResolveVerifyEnv(tt.declare))
+		})
+	}
+}
+
 func TestResolveVerifyDeclaredRunnable(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX-only")

@@ -529,11 +529,17 @@ func (o *run) verifyTimeout() time.Duration {
 	return min(max(t, minVerifyTimeout), maxVerifyTimeout)
 }
 
-// verifyEnv resolves the operator's declared env pass-throughs to KEY=VALUE
-// entries: it re-filters the names agent-side (the command may be model-proposed)
-// and reads each surviving name from the container environment.
+// verifyEnv resolves the operator's declared env pass-throughs for the gate.
 func (o *run) verifyEnv() []string {
-	d := o.d.Cfg.Verify
+	return ResolveVerifyEnv(o.d.Cfg.Verify)
+}
+
+// ResolveVerifyEnv resolves the operator's declared env pass-throughs to
+// KEY=VALUE entries: it re-filters the names agent-side (the command may be
+// model-proposed) and reads each surviving name from the container environment.
+// Shared by the gate and the worker's bash-tool construction so the model's
+// shell and the verify subprocess resolve the identical set.
+func ResolveVerifyEnv(d *DeclaredVerify) []string {
 	if d == nil || len(d.Env) == 0 {
 		return nil
 	}

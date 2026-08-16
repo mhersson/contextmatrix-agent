@@ -354,7 +354,9 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 	}
 
 	skillTool := buildSkillTool(a.spec, a.ops)
-	wt := writeToolsFor(a.ws, a.spec.BashTimeoutMax)
+	dv := declaredVerify(a.spec.Verify)
+	verifyEnv := orchestrator.ResolveVerifyEnv(dv)
+	wt := writeToolsFor(a.ws, a.spec.BashTimeoutMax, verifyEnv)
 
 	if skillTool != nil {
 		wt = append(wt, skillTool)
@@ -390,7 +392,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 			// Candidates get the same skill tool as the main solver - the
 			// skills mount is a fixed path, not workspace-relative, so the
 			// shared instance is safe across worktrees.
-			wts := writeToolsFor(dir, a.spec.BashTimeoutMax)
+			wts := writeToolsFor(dir, a.spec.BashTimeoutMax, verifyEnv)
 			if skillTool != nil {
 				wts = append(wts, skillTool)
 			}
@@ -429,7 +431,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 				Threshold:       a.spec.CompactionThreshold,
 				KeepRecentTurns: a.spec.CompactionKeepRecentTurns,
 			},
-			Verify:                  declaredVerify(a.spec.Verify),
+			Verify:                  dv,
 			VerifyConfigError:       a.spec.VerifyConfigError,
 			Deadline:                deadline,
 			GatesPollInterval:       a.spec.GatesPollInterval,
@@ -757,7 +759,10 @@ func ops2orchestrator(ops CardOps) orchestrator.Ops {
 // parameterized only by the root dir - every other argument is fixed for the
 // run - so it is the one source of truth behind both the main workspace's
 // WriteTools registry and Best-of-N's per-candidate WriteToolsForDir factory.
-func writeToolsFor(dir string, bashTimeoutMax int) []tools.Tool {
+// extraEnv carries the resolved verify.env pass-throughs into the bash tool's
+// scrubbed environment, so the model's shell resolves the same set as the
+// verify gate and can reproduce it.
+func writeToolsFor(dir string, bashTimeoutMax int, extraEnv []string) []tools.Tool {
 	return []tools.Tool{
 		tools.NewReadTool(dir),
 		tools.NewEditTool(dir),
@@ -765,7 +770,7 @@ func writeToolsFor(dir string, bashTimeoutMax int) []tools.Tool {
 		tools.NewGrepTool(dir),
 		tools.NewGlobTool(dir),
 		tools.NewGitTool(dir),
-		tools.NewBashTool(dir).WithMaxTimeout(bashTimeoutMax),
+		tools.NewBashTool(dir).WithMaxTimeout(bashTimeoutMax).WithExtraEnv(extraEnv),
 		orchestrator.NewFinishTool(),
 	}
 }

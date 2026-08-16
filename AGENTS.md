@@ -265,7 +265,16 @@ file only - never via flags or committed YAML.
    endpoint key and `CM_GIT_TOKEN` from it. Tool
    subprocesses get an allowlisted `cmd.Env` (`tools.ScrubbedEnv`) - secrets are
    not inheritable by model-driven commands - and known secret values are
-   redacted from events and transcripts.
+   redacted from events and transcripts. The one addition on top of the
+   allowlist: operator-declared `verify.env` pass-throughs, resolved by one
+   shared routine (`orchestrator.ResolveVerifyEnv`, filtered + read from the
+   container env) and appended for both the verify gate and the model's bash
+   tool, so the model can reproduce the gate it is told to satisfy. The name
+   filter is the only guard: a declared value is readable by model-run
+   commands (`env`, `echo $NAME`) and lands unredacted in events and session
+   transcripts sent to the LLM provider - operators must not declare names
+   whose values embed credentials (e.g. `PGPASSWORD`, a `DATABASE_URL` with
+   userinfo).
 10. **HITL gates + promote.** HITL cards run the same FSM as autonomous,
     mode-gated on `Config.Interactive`: a brainstorming dialogue for creative
     cards plus plan-approval and review-decision gates that wait on the inbox.

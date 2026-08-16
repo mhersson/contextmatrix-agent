@@ -385,8 +385,9 @@ func execWithEnv(ctx context.Context, dir string, argv []string, timeout time.Du
 }
 
 // deniedEnvPrefixes and deniedEnvSuffixes name environment variables that must
-// never reach a verify subprocess even when an operator lists them: the agent's
-// own control-plane variables and anything that reads like a credential.
+// never reach a verify subprocess or the model's bash tool even when an
+// operator lists them: the agent's own control-plane variables and anything
+// that reads like a credential.
 var (
 	deniedEnvPrefixes = []string{"CM_", "CMX_", "LLM_", "GITHUB_"}
 	deniedEnvSuffixes = []string{"_TOKEN", "_KEY", "_SECRET", "_PASSWORD"}
@@ -395,10 +396,11 @@ var (
 var envNameRe = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
 
 // FilterEnvNames returns the subset of names safe to pass through to a verify
-// subprocess: a conventional UPPER_SNAKE env name that is neither an agent
-// control-plane variable nor a credential-looking one. It is an agent-side
-// re-filter of the CM-validated list - the verify command may be model-proposed,
-// so re-filtering here is load-bearing defense-in-depth.
+// subprocess or the model's bash tool: a conventional UPPER_SNAKE env name that
+// is neither an agent control-plane variable nor a credential-looking one. It
+// is an agent-side re-filter of the CM-validated list - the verify command may
+// be model-proposed and the bash tool runs arbitrary model commands, so
+// re-filtering here is load-bearing defense-in-depth.
 func FilterEnvNames(names []string) []string {
 	var out []string
 
