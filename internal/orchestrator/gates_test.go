@@ -579,6 +579,89 @@ func TestCIGate_RedFixGreen(t *testing.T) {
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
 }
 
+// TestCIGate_WaitsForTheRunToSettleBeforeFixing: a check that fails while its
+// siblings are still running must NOT open a fix round yet. gh reads the
+// failure log from the run's log archive, which GitHub publishes only once
+// every job in the run has finished, so a round started here gets a digest with
+// no failure output in it - and a sibling that fails a minute later would cost
+// a second round to fix what this one could have covered in the same pass.
+func TestCIGate_WaitsForTheRunToSettleBeforeFixing(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		checks: [][]CheckResult{
+			{failingCheck(), {Name: "slow", Bucket: "pending"}},
+			{failingCheck(), {Name: "slow", Bucket: "pending"}},
+			{failingCheck(), {Name: "slow", Bucket: "pass"}},
+			{{Name: "build", Bucket: "pass"}, {Name: "slow", Bucket: "pass"}},
+		},
+		logs: "build failed: undefined: helper",
+	}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: []llm.Response{stopResp("coder: fixed the build", 0.05)}}
+
+	o := prGateRun(ops, gates, git, client, ciGateContext("Red while pending", "body"), 0)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	assert.Equal(t, 1, modelCallCount(client),
+		"exactly one fix round ran, and only once the run had settled")
+	assert.Contains(t, gates.recorded(), "FailureLogs:"+gatePRURL)
+}
+
+// TestCIGate_RunThatNeverSettlesParksInsteadOfFixing: the settle wait has no
+// escape hatch on purpose. A run that never finishes is a run whose log never
+// becomes readable, so the fix round the gate would buy by giving up early is
+// exactly the blind one the wait exists to prevent. It parks for a human
+// instead, and spends no rounds getting there.
+func TestCIGate_RunThatNeverSettlesParksInsteadOfFixing(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{checks: [][]CheckResult{
+		{failingCheck(), {Name: "hung", Bucket: "pending"}},
+	}}
+	client := &planLLM{}
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, ciGateContext("Hung sibling", "body"), 0)
+	o.d.Cfg.GatesCIWaitTimeout = 10 * time.Millisecond
+
+	var parked *GatesParkedError
+
+	require.ErrorAs(t, runPRGates(context.Background(), o), &parked)
+	assert.Equal(t, "CI still red at the wait deadline", parked.Reason)
+	assert.Equal(t, 0, modelCallCount(client), "no round is spent on a digest that cannot be read")
+
+	body := ops.lastBody()
+	assert.Contains(t, body, "- CI rounds used: 0/3")
+}
+
+// TestCIGate_FixRoundCarriesTheCIFailureNote: the fix coder is otherwise told
+// only the run's verify command, so a lint or format failure sends it hunting a
+// defect in logic that is not there. Its prompt must carry both the digest and
+// the note that CI runs a broader suite than verify.
+func TestCIGate_FixRoundCarriesTheCIFailureNote(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		checks: [][]CheckResult{
+			{failingCheck()},
+			{{Name: "build", Bucket: "pass"}},
+		},
+		logs: "tools_test.go:166:1: File is not properly formatted (goimports)",
+	}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: []llm.Response{stopResp("coder: fixed the formatting", 0.05)}}
+
+	o := prGateRun(ops, gates, git, client, ciGateContext("Lint red", "body"), 0)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+	require.Equal(t, 1, modelCallCount(client), "exactly one fix round ran")
+
+	prompt := promptOfCall(client, 0)
+	assert.Contains(t, prompt, "tools_test.go:166:1", "the digest reaches the fix coder")
+	assert.Contains(t, prompt, "broader check suite",
+		"the fix coder is told CI runs more than the verify command")
+	assert.Contains(t, prompt, "the log could not be fetched",
+		"the fix coder is told what to do with a digest that names no failure")
+}
+
 // TestCIGate_ThreeRoundsThenPark: CI that stays red outlives its fix budget -
 // three rounds, then the card parks in review with the failing checks named.
 func TestCIGate_ThreeRoundsThenPark(t *testing.T) {
