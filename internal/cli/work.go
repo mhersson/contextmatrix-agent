@@ -176,7 +176,7 @@ func specFromEnv() (worker.RunSpec, error) {
 		return worker.RunSpec{}, err
 	}
 
-	gatesPollSeconds, err := envInt("CMX_GATES_POLL_INTERVAL_SECONDS", 30)
+	gatesPollSeconds, err := envInt("CMX_GATES_POLL_INTERVAL_SECONDS", 60)
 	if err != nil {
 		return worker.RunSpec{}, err
 	}
