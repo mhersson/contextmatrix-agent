@@ -218,7 +218,34 @@ func TestGatesArgBuilders(t *testing.T) {
 	assert.Equal(t, []string{"pr", "checks", prURL, "--json", "name,bucket,link,description"}, checksArgs(prURL))
 	assert.Equal(t, []string{"pr", "view", prURL, "--json", "headRefOid"}, headSHAArgs(prURL))
 	assert.Equal(t, []string{"pr", "view", prURL, "--json", "reviewRequests"}, reviewRequestsArgs(prURL))
-	assert.Equal(t, []string{"pr", "edit", prURL, "--add-reviewer", "copilot-pull-request-reviewer[bot]"}, addCopilotReviewerArgs(prURL))
+
+	// addCopilotReviewerArgs now issues a REST API request to the
+	// requested_reviewers endpoint, bypassing gh pr edit's GraphQL login
+	// resolution which cannot handle the [bot] suffix. The reviewers field uses
+	// the [] array suffix because the REST endpoint expects an array.
+	args, err := addCopilotReviewerArgs(prURL)
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"api", "repos/org/repo/pulls/7/requested_reviewers",
+		"--method", "POST",
+		"-f", "reviewers[]=" + copilotReviewerLogin,
+	}, args)
+
+	// A GitHub Enterprise URL also derives the correct path.
+	gheURL := "https://acme.ghe.com/team/project/pull/42"
+	args, err = addCopilotReviewerArgs(gheURL)
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"api", "repos/team/project/pulls/42/requested_reviewers",
+		"--method", "POST",
+		"-f", "reviewers[]=" + copilotReviewerLogin,
+	}, args)
+
+	// An invalid URL returns an error.
+	_, err = addCopilotReviewerArgs("https://github.com/org/repo/issues/7")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "add copilot reviewer")
+
 	assert.Equal(t, []string{
 		"run", "list", "-R", "org/repo", "--commit", "abc123",
 		"--limit", "100", "--json", "name,event,status,conclusion,databaseId,workflowDatabaseId,url",
@@ -850,4 +877,46 @@ exit 0
 	url, err := pc.FindPRURL(t.Context())
 	require.NoError(t, err)
 	assert.Empty(t, url, "a merged PR must not be recovered as the branch's open PR")
+}
+
+// TestRequestCopilotReviewIssuesRESTRequest pins the fix for the Copilot
+// reviewer request: it calls the REST requested_reviewers endpoint via gh api
+// (with the bot login and POST method) instead of gh pr edit --add-reviewer,
+// which cannot resolve the bot login through GraphQL.
+func TestRequestCopilotReviewIssuesRESTRequest(t *testing.T) {
+	stubGH(t, `
+echo "$@" > args.log
+echo "{}"
+exit 0
+`)
+
+	workspace := t.TempDir()
+	pc := NewPRCreator(workspace, "", "", "")
+
+	prURL := "https://github.com/org/repo/pull/7"
+	err := pc.RequestCopilotReview(t.Context(), prURL)
+	require.NoError(t, err)
+
+	log, err := os.ReadFile(filepath.Join(workspace, "args.log"))
+	require.NoError(t, err)
+	assert.Equal(t, "api repos/org/repo/pulls/7/requested_reviewers --method POST -f reviewers[]=copilot-pull-request-reviewer[bot]",
+		strings.TrimSpace(string(log)))
+}
+
+// TestRequestCopilotReviewErrorSurfacesWrappedError verifies that a non-zero
+// gh exit from the REST endpoint returns the wrapped error, so the
+// orchestrator can log it verbatim on the card.
+func TestRequestCopilotReviewErrorSurfacesWrappedError(t *testing.T) {
+	stubGH(t, `
+echo "HTTP 422: Unprocessable Entity" 1>&2
+exit 1
+`)
+
+	pc := NewPRCreator(t.TempDir(), "", "", "")
+
+	prURL := "https://github.com/org/repo/pull/7"
+	err := pc.RequestCopilotReview(t.Context(), prURL)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "gh api request copilot reviewer")
+	assert.Contains(t, err.Error(), "HTTP 422")
 }

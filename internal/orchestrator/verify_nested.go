@@ -194,7 +194,8 @@ func detectNested(workspace string) detection {
 
 				det.Notes = append(det.Notes, fmt.Sprintf(
 					"nested module %s/ declares a %s but its toolchain cannot run (%s) - it is NOT covered by the verify gate",
-					name, row.marker, reason))
+					name, row.marker, reason,
+				))
 			}
 
 			break // first matching row decides the module, as at the root
