@@ -362,7 +362,7 @@ func addCopilotReviewerArgs(prURL string) ([]string, error) {
 		"api",
 		fmt.Sprintf("repos/%s/%s/pulls/%d/requested_reviewers", owner, repo, number),
 		"--method", "POST",
-		"-f", "reviewers=" + copilotReviewerLogin,
+		"-f", "reviewers[]=" + copilotReviewerLogin,
 	}, nil
 }
 
@@ -815,11 +815,11 @@ func (p *PRCreator) CopilotRequested(ctx context.Context, prURL string) (bool, e
 func (p *PRCreator) RequestCopilotReview(ctx context.Context, prURL string) error {
 	args, err := addCopilotReviewerArgs(prURL)
 	if err != nil {
-		return fmt.Errorf("gh pr edit add copilot reviewer: %w", err)
+		return fmt.Errorf("gh api request copilot reviewer: %w", err)
 	}
 
 	if _, err := p.runGH(ctx, "", false, args...); err != nil {
-		return fmt.Errorf("gh pr edit add copilot reviewer: %w", err)
+		return fmt.Errorf("gh api request copilot reviewer: %w", err)
 	}
 
 	return nil

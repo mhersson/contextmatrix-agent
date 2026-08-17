@@ -221,13 +221,14 @@ func TestGatesArgBuilders(t *testing.T) {
 
 	// addCopilotReviewerArgs now issues a REST API request to the
 	// requested_reviewers endpoint, bypassing gh pr edit's GraphQL login
-	// resolution which cannot handle the [bot] suffix.
+	// resolution which cannot handle the [bot] suffix. The reviewers field uses
+	// the [] array suffix because the REST endpoint expects an array.
 	args, err := addCopilotReviewerArgs(prURL)
 	require.NoError(t, err)
 	assert.Equal(t, []string{
 		"api", "repos/org/repo/pulls/7/requested_reviewers",
 		"--method", "POST",
-		"-f", "reviewers=" + copilotReviewerLogin,
+		"-f", "reviewers[]=" + copilotReviewerLogin,
 	}, args)
 
 	// A GitHub Enterprise URL also derives the correct path.
@@ -237,7 +238,7 @@ func TestGatesArgBuilders(t *testing.T) {
 	assert.Equal(t, []string{
 		"api", "repos/team/project/pulls/42/requested_reviewers",
 		"--method", "POST",
-		"-f", "reviewers=" + copilotReviewerLogin,
+		"-f", "reviewers[]=" + copilotReviewerLogin,
 	}, args)
 
 	// An invalid URL returns an error.
@@ -898,7 +899,7 @@ exit 0
 
 	log, err := os.ReadFile(filepath.Join(workspace, "args.log"))
 	require.NoError(t, err)
-	assert.Equal(t, "api repos/org/repo/pulls/7/requested_reviewers --method POST -f reviewers=copilot-pull-request-reviewer[bot]",
+	assert.Equal(t, "api repos/org/repo/pulls/7/requested_reviewers --method POST -f reviewers[]=copilot-pull-request-reviewer[bot]",
 		strings.TrimSpace(string(log)))
 }
 
@@ -916,6 +917,6 @@ exit 1
 	prURL := "https://github.com/org/repo/pull/7"
 	err := pc.RequestCopilotReview(t.Context(), prURL)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "gh pr edit add copilot reviewer")
+	assert.Contains(t, err.Error(), "gh api request copilot reviewer")
 	assert.Contains(t, err.Error(), "HTTP 422")
 }

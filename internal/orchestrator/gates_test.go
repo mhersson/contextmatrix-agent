@@ -1300,6 +1300,95 @@ func TestCopilotGate_RequestFailsSkipsWithNote(t *testing.T) {
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
 }
 
+// TestCopilotGate_RequestFailsStillWaits: a generic request failure (e.g. the
+// GraphQL login-resolution error gh hits when the reviewer login cannot be
+// resolved) does NOT prove Copilot cannot review - the repo may use automatic
+// review assignment, so a review is coming anyway. The gate must still enter the
+// wait loop, pick up the repo-automated review, triage it, and pass - and it
+// must not record the 'unavailable ... gate skipped' line the old code wrote on
+// every request failure.
+func TestCopilotGate_RequestFailsStillWaits(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requestErr: errors.New("gh: GraphQL: Could not resolve user with login 'copilot-pull-request-reviewer[bot]'. (requestReviewsByLogin)"),
+		headSHA:    copilotHeadSHA,
+		reviews:    []*CopilotReview{copilotReviewOnHead("LGTM")},
+	}
+	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, copilotGateContext("Auto-review", "body"), 0)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	calls := gates.recorded()
+	assert.GreaterOrEqual(t, indexOfCall(calls, "CopilotReview:"+gatePRURL), 0,
+		"a failed request must not skip the wait - the gate still polls for a repo-automated review; calls=%v", calls)
+	assert.Equal(t, 1, modelCallCount(client), "the arrived review is triaged")
+	assert.True(t, ops.loggedContains("Copilot review addressed"),
+		"the clean review passes the gate; logs=%v", ops.recorded())
+	assert.False(t, ops.loggedContains("unavailable"),
+		"a generic request failure must not read as Copilot unavailability; logs=%v", ops.recorded())
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+}
+
+// TestCopilotGate_RequestFailsStillWaits_422FromMalformedRequest: a bare 422
+// (e.g. from a malformed requested_reviewers payload) must NOT be treated as
+// proven Copilot unavailability, because the message may be a request-format
+// error rather than a "Copilot cannot review" response. The gate must still
+// enter the wait loop and pick up a repo-automated review.
+func TestCopilotGate_RequestFailsStillWaits_422FromMalformedRequest(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		// A 422 error that does not say "Copilot isn't available" - e.g. the
+		// REST endpoint's response to a malformed request body.
+		requestErr: errors.New("gh: HTTP 422: Unprocessable Entity: reviewers field is invalid"),
+		headSHA:    copilotHeadSHA,
+		reviews:    []*CopilotReview{copilotReviewOnHead("LGTM")},
+	}
+	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, copilotGateContext("Auto-review", "body"), 0)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	calls := gates.recorded()
+	assert.GreaterOrEqual(t, indexOfCall(calls, "CopilotReview:"+gatePRURL), 0,
+		"a bare 422 must not skip the wait - the gate still polls for a repo-automated review; calls=%v", calls)
+	assert.Equal(t, 1, modelCallCount(client), "the arrived review is triaged")
+	assert.True(t, ops.loggedContains("Copilot review addressed"),
+		"the clean review passes the gate; logs=%v", ops.recorded())
+	assert.False(t, ops.loggedContains("unavailable"),
+		"a bare 422 must not read as Copilot unavailability; logs=%v", ops.recorded())
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+}
+
+// TestCopilotGate_RequestFailsStillWaitsOutTimeout: with a generic request
+// failure and no repo-automated review to pick up, the gate waits out its
+// deadline and proceeds via the existing 'did not arrive in time' skip -
+// proving a request failure still never parks. The skip writes no satisfied
+// marker, so a re-trigger retries the request.
+func TestCopilotGate_RequestFailsStillWaitsOutTimeout(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requestErr: errors.New("gh: GraphQL: Could not resolve user with login 'copilot-pull-request-reviewer[bot]'. (requestReviewsByLogin)"),
+	}
+	client := &planLLM{}
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, copilotGateContext("Auto-review", "body"), 0)
+	o.d.Cfg.GatesCopilotWaitTimeout = 10 * time.Millisecond
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	assert.True(t, ops.loggedContains("did not arrive in time"),
+		"the gate waits out the deadline and proceeds; logs=%v", ops.recorded())
+	assert.GreaterOrEqual(t, len(gates.recorded()), 2,
+		"the gate polled while it waited; calls=%v", gates.recorded())
+	assert.NotContains(t, ops.lastBody(), "- Copilot gate: satisfied",
+		"a skipped gate stays retryable; body=%q", ops.lastBody())
+	assert.Zero(t, modelCallCount(client), "no review means nothing to triage")
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+}
+
 // TestCopilotGate_SkipPathsDoNotWriteSatisfiedMarker: a request failure is
 // Copilot unavailability, not an addressed review - the marker must stay
 // unwritten so a re-trigger retries the request instead of skipping straight
