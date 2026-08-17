@@ -312,15 +312,22 @@ file only - never via flags or committed YAML.
     through `report_push`) when found, since an earlier run's `report_push` may
     not have landed, or `gh pr create` may have failed because one already
     exists; no OPEN PR, or a probe failure, still parks. The Copilot gate never
-    parks on unavailability - a request that fails, times out, or a reviewer
-    that never appears all record the reason verbatim on the card's activity
-    log (the only diagnostic channel for an external tester's Copilot setup)
-    and let the gate pass. An addressed Copilot review persists a satisfied
-    marker in the `## PR Gates` section, so a re-trigger skips the paid
-    re-review and goes straight to the CI gate; the unavailability skips above
-    never write it, so those stay retryable. Every triage round records a
-    VALID/INVALID verdict per finding under a `## Copilot Review (Round N)`
-    card section.
+    parks on proven unavailability - a 422 "Copilot isn't available for this
+    repository" request response, or a request that succeeded without adding the
+    reviewer, records the reason verbatim on the card's activity log (the only
+    diagnostic channel for an external tester's Copilot setup) and lets the gate
+    pass. A generic request failure (for example the GraphQL login-resolution
+    error `gh` hits on `gh pr edit --add-reviewer`, or a check that cannot be
+    read) is not treated as unavailability - the gate still enters the wait loop,
+    because a repo-automated Copilot review may arrive regardless; a review that
+    never arrives is recorded and passed at the wait deadline. It requests the
+    reviewer through the REST `requested_reviewers` endpoint (`gh api`), which
+    accepts the bot login directly where `gh pr edit --add-reviewer`'s GraphQL
+    resolution cannot. An addressed Copilot review persists a satisfied marker in
+    the `## PR Gates` section, so a re-trigger skips the paid re-review and goes
+    straight to the CI gate; the unavailability skips above never write it, so
+    those stay retryable. Every triage round records a VALID/INVALID verdict per
+    finding under a `## Copilot Review (Round N)` card section.
 
 ## Repo grounding
 
