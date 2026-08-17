@@ -348,10 +348,22 @@ func reviewRequestsArgs(prURL string) []string {
 	return []string{"pr", "view", prURL, "--json", "reviewRequests"}
 }
 
-// addCopilotReviewerArgs builds the gh pr edit invocation that requests a
-// Copilot review.
-func addCopilotReviewerArgs(prURL string) []string {
-	return []string{"pr", "edit", prURL, "--add-reviewer", copilotReviewerLogin}
+// addCopilotReviewerArgs builds the gh api invocation that requests a Copilot
+// review via the REST requested_reviewers endpoint. The REST endpoint accepts
+// the bot login directly, unlike gh pr edit --add-reviewer which resolves
+// through GraphQL's requestReviewsByLogin and cannot resolve the [bot] suffix.
+func addCopilotReviewerArgs(prURL string) ([]string, error) {
+	owner, repo, number, err := parsePRPath(prURL)
+	if err != nil {
+		return nil, fmt.Errorf("add copilot reviewer: %w", err)
+	}
+
+	return []string{
+		"api",
+		fmt.Sprintf("repos/%s/%s/pulls/%d/requested_reviewers", owner, repo, number),
+		"--method", "POST",
+		"-f", "reviewers=" + copilotReviewerLogin,
+	}, nil
 }
 
 // prViewURLArgs builds the gh pr view invocation that resolves the branch's
@@ -801,7 +813,12 @@ func (p *PRCreator) CopilotRequested(ctx context.Context, prURL string) (bool, e
 // RequestCopilotReview adds Copilot's PR review bot as a reviewer. The error,
 // when non-nil, is returned verbatim - the orchestrator logs it on the card.
 func (p *PRCreator) RequestCopilotReview(ctx context.Context, prURL string) error {
-	if _, err := p.runGH(ctx, "", false, addCopilotReviewerArgs(prURL)...); err != nil {
+	args, err := addCopilotReviewerArgs(prURL)
+	if err != nil {
+		return fmt.Errorf("gh pr edit add copilot reviewer: %w", err)
+	}
+
+	if _, err := p.runGH(ctx, "", false, args...); err != nil {
 		return fmt.Errorf("gh pr edit add copilot reviewer: %w", err)
 	}
 
