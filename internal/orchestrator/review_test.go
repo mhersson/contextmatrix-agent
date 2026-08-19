@@ -3,6 +3,8 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -1734,4 +1736,53 @@ func TestRunReviewHITLResetsExhaustedCounter(t *testing.T) {
 	body := ops.lastBody()
 	assert.Contains(t, body, "## Review Findings", "HITL must record the findings")
 	assert.NotContains(t, body, "(Round 4)", "reset counter starts at round 1, not 4; body=%q", body)
+}
+
+// TestIncrementAuthoritativeAttempt covers the park-vs-fail split on the
+// authoritative pass. The ceiling rejection is the one error the review loop
+// must absorb: a resumed card already at ContextMatrix's review_attempts
+// ceiling has to park cleanly instead of hard-failing mid-review.
+func TestIncrementAuthoritativeAttempt(t *testing.T) {
+	t.Parallel()
+
+	newRun := func(incErr error) (*run, *fakeOps) {
+		ops := &fakeOps{incrementErr: incErr}
+
+		return &run{d: Deps{Ops: ops, Cfg: Config{CardID: "CARD-1"}}}, ops
+	}
+
+	t.Run("success returns nil", func(t *testing.T) {
+		t.Parallel()
+
+		o, ops := newRun(nil)
+		require.NoError(t, o.incrementAuthoritativeAttempt(t.Context(), "findings"))
+		assert.Equal(t, 1, ops.reviewAttempts)
+	})
+
+	t.Run("ceiling rejection parks", func(t *testing.T) {
+		t.Parallel()
+
+		capped := fmt.Errorf("increment review attempts: review attempts capped at 7: %w",
+			cmclient.ErrReviewAttemptsCapped)
+
+		o, _ := newRun(capped)
+
+		var parked *ReviewParkedError
+
+		require.ErrorAs(t, o.incrementAuthoritativeAttempt(t.Context(), "findings"), &parked)
+	})
+
+	t.Run("unrelated error fails the run", func(t *testing.T) {
+		t.Parallel()
+
+		o, _ := newRun(errors.New("connection refused"))
+
+		err := o.incrementAuthoritativeAttempt(t.Context(), "findings")
+		require.Error(t, err)
+
+		var parked *ReviewParkedError
+
+		require.NotErrorAs(t, err, &parked, "a transport failure must not be mistaken for a park")
+		assert.Contains(t, err.Error(), "increment review attempts")
+	})
 }

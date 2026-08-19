@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
+	"github.com/mhersson/contextmatrix-agent/internal/config"
 	"github.com/mhersson/contextmatrix-agent/internal/mob"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-harness/harness"
@@ -22,11 +24,6 @@ const reviewPanelSize = 3
 // of the configured attempts cap, so a misbehaving IncrementReviewAttempts (or
 // a zero cap) can never loop forever.
 const hardReviewIterationCap = 50
-
-// defaultReviewAttemptsCap is CM's review-attempts convention, used when the
-// configured cap is missing or invalid. With the convergence safeguards in
-// place, three rounds are enough.
-const defaultReviewAttemptsCap = 3
 
 // verifyOutputTail caps the verify-command output carried into findings, so a
 // noisy failing suite does not swamp the fix prompt. It is a TAIL: a build
@@ -85,7 +82,7 @@ func runReview(ctx context.Context, o *run) error {
 	// where it left off.
 	attemptsCap := cfg.ReviewAttemptsCap
 	if attemptsCap <= 0 {
-		attemptsCap = defaultReviewAttemptsCap
+		attemptsCap = config.DefaultReviewAttemptsCap
 	}
 
 	if o.tc.ReviewAttempts >= attemptsCap && o.tc.State != "review" {
@@ -125,7 +122,7 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 	// immediately. Fall back to CM's convention instead.
 	attemptsCap := cfg.ReviewAttemptsCap
 	if attemptsCap <= 0 {
-		attemptsCap = defaultReviewAttemptsCap
+		attemptsCap = config.DefaultReviewAttemptsCap
 	}
 
 	for iter := range hardReviewIterationCap {
@@ -291,7 +288,6 @@ func mergeFeedback(findings, feedback string) string {
 // strong re-review; still failing → park with the strong findings. It never loops.
 func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round int) error {
 	d := o.d
-	cfg := d.Cfg
 
 	findings, fixTier, approved, vres, err := o.reviewRound(ctx, plan, round, true)
 	if err != nil {
@@ -308,8 +304,8 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 
 	o.lastFindings = findings
 
-	if _, err := d.Ops.IncrementReviewAttempts(ctx, cfg.CardID); err != nil {
-		return fmt.Errorf("increment review attempts: %w", err)
+	if err := o.incrementAuthoritativeAttempt(ctx, findings); err != nil {
+		return err
 	}
 
 	// Gated strong fix - runs only because the authoritative review confirmed
@@ -336,14 +332,34 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 
 	o.lastFindings = findings2
 
-	n, err := d.Ops.IncrementReviewAttempts(ctx, cfg.CardID)
-	if err != nil {
-		return fmt.Errorf("increment review attempts: %w", err)
+	if err := o.incrementAuthoritativeAttempt(ctx, findings2); err != nil {
+		return err
 	}
 
-	d.logCard(ctx, "review parked after %d attempts (authoritative pass) - outstanding findings:\n%s", n, findings2)
+	// Both increments succeeded, so the counter is now 2 past where it was.
+	// Park with the strong findings.
+	d.logCard(ctx, "review parked after authoritative pass - outstanding findings:\n%s", findings2)
 
 	return &ReviewParkedError{}
+}
+
+// incrementAuthoritativeAttempt calls IncrementReviewAttempts and treats
+// ContextMatrix's ceiling rejection as an implicit park (ReviewParkedError)
+// instead of a hard failure, so a resumed card whose counter already sits at
+// the ceiling parks gracefully rather than erroring out mid-review.
+func (o *run) incrementAuthoritativeAttempt(ctx context.Context, findings string) error {
+	_, err := o.d.Ops.IncrementReviewAttempts(ctx, o.d.Cfg.CardID)
+	if err == nil {
+		return nil
+	}
+
+	if errors.Is(err, cmclient.ErrReviewAttemptsCapped) {
+		o.d.logCard(ctx, "review parked at server cap (authoritative pass) - outstanding findings:\n%s", findings)
+
+		return &ReviewParkedError{}
+	}
+
+	return fmt.Errorf("increment review attempts: %w", err)
 }
 
 // reviewRound runs one review pass and returns the outstanding findings text,

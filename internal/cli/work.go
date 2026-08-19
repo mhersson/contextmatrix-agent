@@ -191,6 +191,11 @@ func specFromEnv() (worker.RunSpec, error) {
 		return worker.RunSpec{}, err
 	}
 
+	reviewAttemptsCap, err := envInt("CMX_REVIEW_ATTEMPTS_CAP", config.DefaultReviewAttemptsCap)
+	if err != nil {
+		return worker.RunSpec{}, err
+	}
+
 	defaults := config.Defaults()
 
 	maxTurns, err := envInt("CMX_MAX_TURNS", derefInt(defaults.MaxTurns))
@@ -363,6 +368,7 @@ func specFromEnv() (worker.RunSpec, error) {
 		Selection:                 selection,
 		Verify:                    verify,
 		VerifyConfigError:         verifyErr,
+		ReviewAttemptsCap:         reviewAttemptsCap,
 		TaskSkillsDir:             taskSkillsDir,
 		TaskSkills:                taskSkills,
 		TaskSkillsSet:             taskSkillsSet,

@@ -185,8 +185,11 @@ file only - never via flags or committed YAML.
 4. **Review = 3 specialists.** Correctness, Design & Maintainability, Security &
    Performance - parallel, read-only, behind a spec/test gate that
    short-circuits to the fix loop before spending reviewer tokens; the
-   orchestrator synthesizes the report. Loops to the `review_attempts` cap
-   (default 3).
+   orchestrator synthesizes the report. Loops to the `review_attempts` cap -
+   default 3, set per deployment via `review_attempts_cap` in `serve.yaml` or
+   `CMX_REVIEW_ATTEMPTS_CAP`. Valid range 1-6; 6 is the ceiling because the
+   loop leaves the server's `review_attempts` counter at cap+1 and CM caps it
+   at 7.
 5. **Model selection is priors-only.** The planner (a fixed capable model) emits
    a complexity tier per subtask - simple / moderate / complex / critical;
    deterministic code maps the tier to a cost-optimal model per role. The LLM

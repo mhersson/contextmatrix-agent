@@ -30,6 +30,25 @@ func TestClassifyReleaseError(t *testing.T) {
 	assert.Equal(t, other, got2, "unrelated errors pass through unchanged")
 }
 
+// TestClassifyIncrementError pins the cross-repo error-text contract that makes
+// a graceful park possible: ContextMatrix's service sentinel text is what an MCP
+// caller sees when the review_attempts ceiling rejects an increment, so the
+// literal is asserted here rather than only at the orchestrator's use site.
+func TestClassifyIncrementError(t *testing.T) {
+	require.NoError(t, classifyIncrementError(nil))
+
+	capped := fmt.Errorf("call increment_review_attempts: increment review attempts: review attempts capped at 7: %s",
+		ErrReviewAttemptsCapped.Error())
+	got := classifyIncrementError(capped)
+	require.ErrorIs(t, got, ErrReviewAttemptsCapped)
+	assert.Contains(t, got.Error(), "capped at 7", "original message is preserved in the chain")
+
+	other := errors.New("call increment_review_attempts: connection refused")
+	got2 := classifyIncrementError(other)
+	require.NotErrorIs(t, got2, ErrReviewAttemptsCapped, "unrelated errors are not the sentinel")
+	assert.Equal(t, other, got2, "unrelated errors pass through unchanged")
+}
+
 func TestNewTransportDisablesStandaloneSSE(t *testing.T) {
 	tr := newTransport("http://cm:8080/mcp", &http.Client{})
 	assert.True(t, tr.DisableStandaloneSSE,

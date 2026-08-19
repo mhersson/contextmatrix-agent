@@ -69,6 +69,10 @@ type fakeOps struct {
 	// semantics (the card's persisted review_attempts plus this increment).
 	reviewAttempts int
 
+	// incrementErr, when non-nil, fails every IncrementReviewAttempts call -
+	// used to drive the server-ceiling rejection path.
+	incrementErr error
+
 	// CreateCard scripting: createdIDs supplies the returned card ID per call
 	// (index-aligned to call order); when exhausted, IDs fall back to NEW-<n>.
 	// createCardArgs captures every CreateCard invocation for dependency-edge
@@ -237,6 +241,10 @@ func (f *fakeOps) IncrementReviewAttempts(_ context.Context, cardID string) (int
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	if f.incrementErr != nil {
+		return 0, f.incrementErr
+	}
 
 	f.reviewAttempts++
 

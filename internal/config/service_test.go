@@ -399,6 +399,71 @@ selector_price_headroom: 0
 	assert.InDelta(t, 0.0, cfg.SelectorPriceHeadroom, 1e-9)
 }
 
+// TestServiceReviewAttemptsCap covers the two layers the operator actually
+// uses - serve.yaml and the CMX_ env override - plus the bounds check that
+// keeps an out-of-range cap from turning into a mid-review server rejection.
+func TestServiceReviewAttemptsCap(t *testing.T) {
+	t.Run("unset defaults to zero so the worker picks the default", func(t *testing.T) {
+		clearServiceEnv(t)
+
+		cfg, err := LoadService(filepath.Join(t.TempDir(), "does-not-exist.yaml"))
+		require.NoError(t, err)
+
+		assert.Equal(t, 0, cfg.ReviewAttemptsCap)
+	})
+
+	t.Run("from file", func(t *testing.T) {
+		clearServiceEnv(t)
+
+		path := filepath.Join(t.TempDir(), "serve.yaml")
+		require.NoError(t, os.WriteFile(path, []byte("review_attempts_cap: 5\n"), 0o600))
+
+		cfg, err := LoadService(path)
+		require.NoError(t, err)
+
+		assert.Equal(t, 5, cfg.ReviewAttemptsCap)
+	})
+
+	t.Run("env overrides file", func(t *testing.T) {
+		clearServiceEnv(t)
+		t.Setenv("CMX_REVIEW_ATTEMPTS_CAP", "2")
+
+		path := filepath.Join(t.TempDir(), "serve.yaml")
+		require.NoError(t, os.WriteFile(path, []byte("review_attempts_cap: 5\n"), 0o600))
+
+		cfg, err := LoadService(path)
+		require.NoError(t, err)
+
+		assert.Equal(t, 2, cfg.ReviewAttemptsCap)
+	})
+
+	t.Run("in-range values validate", func(t *testing.T) {
+		for _, v := range []int{0, 1, DefaultReviewAttemptsCap, MaxReviewAttemptsCap} {
+			cfg := validServiceConfig()
+			cfg.ReviewAttemptsCap = v
+			require.NoError(t, cfg.Validate(), "cap %d must be accepted", v)
+		}
+	})
+
+	t.Run("above the maximum errors", func(t *testing.T) {
+		cfg := validServiceConfig()
+		cfg.ReviewAttemptsCap = MaxReviewAttemptsCap + 1
+
+		err := cfg.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "review_attempts_cap")
+	})
+
+	t.Run("negative errors", func(t *testing.T) {
+		cfg := validServiceConfig()
+		cfg.ReviewAttemptsCap = -1
+
+		err := cfg.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "review_attempts_cap")
+	})
+}
+
 func TestServiceAdminPort_DefaultZero(t *testing.T) {
 	clearServiceEnv(t)
 

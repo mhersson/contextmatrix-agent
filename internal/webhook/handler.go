@@ -132,6 +132,12 @@ type LaunchEnv struct {
 	CompactionThreshold       float64
 	CompactionKeepRecentTurns int
 
+	// ReviewAttemptsCap is the configured review-round budget forwarded to
+	// workers as CMX_REVIEW_ATTEMPTS_CAP. Zero means unset and is omitted, so
+	// the worker applies config.DefaultReviewAttemptsCap. The serve config
+	// validates the range, so anything non-zero reaching here is in bounds.
+	ReviewAttemptsCap int
+
 	// WorkerExtraEnv is appended verbatim to every container's environment
 	// (KEY=VALUE strings). Used for operator-supplied passthrough.
 	WorkerExtraEnv []string
@@ -624,6 +630,10 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 			"CMX_COMPACTION_THRESHOLD="+formatFloat(s.launchEnv.CompactionThreshold),
 			"CMX_COMPACTION_KEEP_RECENT_TURNS="+strconv.Itoa(s.launchEnv.CompactionKeepRecentTurns),
 		)
+	}
+
+	if s.launchEnv.ReviewAttemptsCap > 0 {
+		env = append(env, "CMX_REVIEW_ATTEMPTS_CAP="+strconv.Itoa(s.launchEnv.ReviewAttemptsCap))
 	}
 
 	if s.launchEnv.ContainerTimeoutSeconds > 0 {

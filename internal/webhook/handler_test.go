@@ -1326,6 +1326,39 @@ func TestBuildLaunchSpec_CompactionEnvOmittedWhenDisabled(t *testing.T) {
 
 // ---- MaxCapability env threading -------------------------------------------
 
+func TestBuildLaunchSpec_ReviewAttemptsCapEnv(t *testing.T) {
+	// The configured cap must reach the container as CMX_REVIEW_ATTEMPTS_CAP -
+	// this forwarding hop is the only path from serve.yaml to the review loop.
+	// Zero means unset and must be omitted so the worker applies its default
+	// rather than receiving a cap of 0.
+	newServer := func(attemptsCap int) *Server {
+		return NewServer(Config{
+			APIKey:   "k",
+			Executor: &fakeExecutor{},
+			Tracker:  executor.NewTracker(1),
+			LaunchEnv: LaunchEnv{
+				BaseImage:         "img",
+				MCPURL:            "http://mcp",
+				ReviewAttemptsCap: attemptsCap,
+			},
+		})
+	}
+
+	t.Run("configured value is forwarded", func(t *testing.T) {
+		spec := newServer(5).buildLaunchSpec(protocol.TriggerPayload{CardID: "C1", Project: "p"}, "corr", "")
+
+		assert.Contains(t, spec.Env, "CMX_REVIEW_ATTEMPTS_CAP=5")
+	})
+
+	t.Run("zero is omitted", func(t *testing.T) {
+		spec := newServer(0).buildLaunchSpec(protocol.TriggerPayload{CardID: "C1", Project: "p"}, "corr", "")
+
+		for _, e := range spec.Env {
+			assert.NotContains(t, e, "CMX_REVIEW_ATTEMPTS_CAP")
+		}
+	})
+}
+
 func TestBuildLaunchSpec_MaxCapabilityEnvEmitted(t *testing.T) {
 	// A TriggerPayload with MaxCapability=true must produce CM_MAX_CAPABILITY=true
 	// in the container env.

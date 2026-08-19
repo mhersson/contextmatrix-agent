@@ -213,6 +213,19 @@ bash_timeout_max_seconds: 600
 # CMX_TOOL_OUTPUT_MAX_BYTES
 tool_output_max_bytes: 131072
 
+# How many review rounds a card gets before it parks in review. Valid range is
+# 1-6; anything outside it is a startup error. Omit the key (or leave it 0) to
+# use the default of 3. Workers receive the value as CMX_REVIEW_ATTEMPTS_CAP.
+#
+# 6 is the ceiling because ContextMatrix caps a card's review_attempts counter
+# at 7: with cap N the worker runs N-1 cheap rounds, each incrementing the
+# counter once, and the authoritative pass increments twice more before parking
+# - so the counter ends at N+1, and N=6 lands it exactly on 7.
+#
+# A cap of 1 parks on the authoritative pass immediately, with no cheap rounds.
+# CMX_REVIEW_ATTEMPTS_CAP
+# review_attempts_cap: 3
+
 # --- Context compaction ---------------------------------------------------------
 
 # Opt-in in-window compaction in the worker loop. When disabled (the default),

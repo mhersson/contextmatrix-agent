@@ -18,6 +18,12 @@ import (
 
 const envPrefix = "CMX_"
 
+// Config is the `run` command's configuration - the standalone free-form
+// harness spike. It drives a single harness.Run, not the card FSM, so
+// card-lifecycle knobs (the review-attempts budget, verify gates, callbacks)
+// have no home here; those live in ServiceConfig and reach the worker as CMX_*
+// container env.
+//
 // Note: koanf keys are hyphenated so CLI flag names (which posflag uses verbatim
 // as keys) match - e.g. --max-turns ⇒ key "max-turns" ⇒ this tag. Env vars map
 // via the two-step transform in Load (CMX_MAX_TURNS ⇒ "max-turns").

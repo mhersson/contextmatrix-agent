@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
+	"github.com/mhersson/contextmatrix-agent/internal/config"
 	"github.com/mhersson/contextmatrix-agent/internal/orchestrator"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-harness/events"
@@ -35,11 +36,6 @@ var (
 // tests swap this var to observe the Deps the worker built and script the FSM's
 // outcome without spinning up the real phase loop.
 var runOrchestrator = orchestrator.Run
-
-// reviewAttemptsCap is CM's convention: a card parks after this many review
-// rounds without approval. With the convergence safeguards in place, three
-// rounds are enough.
-const reviewAttemptsCap = 3
 
 // gatesFinalizeMargin is how much of the container's lifetime the pr_gates
 // deadline leaves unspent, so a gate that runs out of patience still has room to
@@ -103,6 +99,12 @@ type RunSpec struct {
 	GatesCopilotWaitTimeout time.Duration
 
 	MaxCapability bool // CM_MAX_CAPABILITY; every pick chooses the most capable model in the tier regardless of price
+
+	// ReviewAttemptsCap is the number of review rounds before the card parks in
+	// review. Zero or negative means unset and resolves to
+	// config.DefaultReviewAttemptsCap; values above config.MaxReviewAttemptsCap
+	// are lowered to it.
+	ReviewAttemptsCap int // CMX_REVIEW_ATTEMPTS_CAP
 
 	CompactionEnabled         bool    // CMX_COMPACTION_ENABLED; false (default) keeps the hard context_limit stop
 	CompactionThreshold       float64 // CMX_COMPACTION_THRESHOLD; fraction of the context window (default 0.85)
@@ -422,7 +424,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 			ReasoningEffort:   a.spec.ReasoningEffort,
 			MaxTurns:          a.spec.MaxTurns,
 			ToolOutputMax:     a.spec.ToolOutputMax,
-			ReviewAttemptsCap: reviewAttemptsCap,
+			ReviewAttemptsCap: a.spec.ReviewAttemptsCap,
 			Interactive:       hitl,
 			BestOfN:           resolveBestOfN(a.spec.BestOfN, mob),
 			Mob:               mob,
@@ -863,6 +865,21 @@ func withDefaults(spec RunSpec) RunSpec {
 
 	if spec.Workspace == "" {
 		spec.Workspace = defaultWorkspace
+	}
+
+	// Zero or negative means unset - serve omits the env var in that case, so
+	// resolve it to the same default the orchestrator's review loop falls back
+	// to rather than inventing a third answer. Serve rejects an out-of-range
+	// cap at startup; lowering it here only catches a hand-run container that
+	// sets CMX_REVIEW_ATTEMPTS_CAP directly.
+	switch {
+	case spec.ReviewAttemptsCap <= 0:
+		spec.ReviewAttemptsCap = config.DefaultReviewAttemptsCap
+	case spec.ReviewAttemptsCap > config.MaxReviewAttemptsCap:
+		slog.Warn("review_attempts_cap above the safe maximum; using the maximum",
+			"requested", spec.ReviewAttemptsCap, "using", config.MaxReviewAttemptsCap)
+
+		spec.ReviewAttemptsCap = config.MaxReviewAttemptsCap
 	}
 
 	return spec
