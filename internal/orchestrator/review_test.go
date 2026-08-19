@@ -1540,3 +1540,198 @@ func TestReviewGateFailureFindingsKeepTheTail(t *testing.T) {
 	assert.Contains(t, findings, "BUILD FAILURE", "the final line of the build must survive")
 	assert.Empty(t, client.tasks, "a gate failure short-circuits before any reviewer model call")
 }
+
+// TestRunReviewResetsExhaustedCounterApprove proves that a card whose persisted
+// ReviewAttempts exceeds the cap (cap+1, from a prior parked run) gets the
+// counter reset to zero at the start of runReview. The first review round uses
+// the normal cheap path (round 1, not authoritative) and, on approval, does not
+// call IncrementReviewAttempts.
+func TestRunReviewResetsExhaustedCounterApprove(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{}
+	client := &planLLM{responses: []llm.Response{
+		stopResp("Correctness: looks fine", 0.01),
+		stopResp("Design: looks fine", 0.01),
+		stopResp("Security: looks fine", 0.01),
+		stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.02),
+	}}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+	// cap is 5; seed ReviewAttempts at cap+1 (6) to simulate a card that
+	// actually parked (authoritative pass increments past the cap).
+	tc := cmclient.TaskContext{
+		Title: "Parent", Description: "body",
+		State: "in_progress", ReviewAttempts: 6,
+	}
+	o := newReviewRun(d, tc, 0)
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	// The counter was reset, so the first round is a normal cheap round, not
+	// authoritative. On approval, IncrementReviewAttempts is never called.
+	assert.Equal(t, -1, indexOfCall(ops.recorded(), "IncrementReviewAttempts:CARD-1"),
+		"exhausted counter reset: approval must not increment; calls=%v", ops.recorded())
+	// The round 1 specialist prompt should NOT carry the authoritative marker.
+	require.NotEmpty(t, client.tasks)
+	assert.NotContains(t, client.tasks[0], "full scope",
+		"round 1 must be a normal cheap round, not authoritative; task=%q", client.tasks[0])
+}
+
+// TestRunReviewResetsExhaustedCounterFixThenApprove proves that an exhausted
+// counter (cap+1, from a prior parked run) reset followed by a reject-and-fix
+// cycle correctly increments attempts from 1 (not 7) and the second round uses
+// normal numbering.
+func TestRunReviewResetsExhaustedCounterFixThenApprove(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+	client := &planLLM{responses: []llm.Response{
+		// Round 1: specialists + synthesis (rejects).
+		stopResp("Correctness: bug", 0.01),
+		stopResp("Design: ok", 0.01),
+		stopResp("Security: ok", 0.01),
+		stopResp(`{"approved":false,"summary":"fix it","fixes":[{"file":"a.go","issue":"bug","suggestion":"patch"}]}`, 0.02),
+		// Fix coder run.
+		stopResp("coder: fixed the bug", 0.05),
+		// Round 2: specialists + synthesis (approves).
+		stopResp("Correctness: ok now", 0.01),
+		stopResp("Design: ok", 0.01),
+		stopResp("Security: ok", 0.01),
+		stopResp(`{"approved":true,"summary":"clean now","fixes":[]}`, 0.02),
+	}}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+	tc := cmclient.TaskContext{
+		Title: "Parent", Description: "body",
+		State: "in_progress", ReviewAttempts: 6,
+	}
+	o := newReviewRun(d, tc, 0)
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	// Exactly one fix round: IncrementReviewAttempts called once.
+	incCount := 0
+
+	for _, c := range ops.recorded() {
+		if c == "IncrementReviewAttempts:CARD-1" {
+			incCount++
+		}
+	}
+
+	assert.Equal(t, 1, incCount, "exhausted counter reset: exactly one fix round; calls=%v", ops.recorded())
+
+	// The fix round committed and pushed.
+	gitCalls := git.recorded()
+	fixupIdx := indexOfPrefix(gitCalls, "CommitFixup:")
+	pushIdx := indexOfCall(gitCalls, "Push:cm/card-1")
+	require.GreaterOrEqual(t, fixupIdx, 0, "fixup committed; git=%v", gitCalls)
+	require.GreaterOrEqual(t, pushIdx, 0, "fixup pushed; git=%v", gitCalls)
+	assert.Less(t, fixupIdx, pushIdx, "fixup before push")
+}
+
+// TestRunReviewDoesNotResetOnInterruptedAuthoritative proves that a card
+// whose ReviewAttempts is exactly at the cap (5) with State "review" (an
+// interrupted authoritative pass) is NOT reset: the counter stays at the cap,
+// round numbering continues from where it left off, and the authoritative pass
+// runs (round 6). This distinguishes crash-resume from a fresh rerun from todo.
+func TestRunReviewDoesNotResetOnInterruptedAuthoritative(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{}
+	client := &planLLM{responses: []llm.Response{
+		// Authoritative review: 3 specialists + synthesis (approves).
+		stopResp("Correctness: clean", 0.01),
+		stopResp("Design: clean", 0.01),
+		stopResp("Security: clean", 0.01),
+		stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.02),
+	}}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+	// cap is 5; seed ReviewAttempts at the cap (5) with State "review" to
+	// simulate an interrupted authoritative pass.
+	tc := cmclient.TaskContext{
+		Title: "Parent", Description: "body",
+		State: "review", ReviewAttempts: 5,
+	}
+	o := newReviewRun(d, tc, 0)
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	// StartReview must NOT be called (already in review).
+	assert.Equal(t, -1, indexOfCall(ops.recorded(), "StartReview:CARD-1"),
+		"interrupted authoritative: StartReview must be skipped; calls=%v", ops.recorded())
+
+	// The counter was NOT reset, so the round goes to authoritative (round 6).
+	// On approval, no IncrementReviewAttempts is called.
+	assert.Equal(t, -1, indexOfCall(ops.recorded(), "IncrementReviewAttempts:CARD-1"),
+		"interrupted authoritative: approval must not increment; calls=%v", ops.recorded())
+
+	// The round 6 heading must be recorded (not round 1).
+	body := ops.lastBody()
+	assert.Contains(t, body, "## Review Findings (Round 6)", "interrupted authoritative at counter 5 must record round 6; body=%q", body)
+}
+
+// TestRunReviewPreservesCrashResumeCounter proves that a card whose review
+// counter is below the cap (e.g. 1 of 5) is NOT reset: the round numbering
+// continues from where it left off, so a crash-resume at round 2 (counter 1)
+// starts the review at round 2.
+func TestRunReviewPreservesCrashResumeCounter(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{}
+	client := &planLLM{responses: []llm.Response{
+		stopResp("Correctness: looks fine", 0.01),
+		stopResp("Design: looks fine", 0.01),
+		stopResp("Security: looks fine", 0.01),
+		stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.02),
+	}}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+	// Counter at 1 means one prior round already ran; cap is 5, so no reset.
+	// The first round should be numbered 2.
+	tc := cmclient.TaskContext{
+		Title: "Parent", Description: "body",
+		State: "in_progress", ReviewAttempts: 1,
+	}
+	o := newReviewRun(d, tc, 0)
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	// No IncrementReviewAttempts calls on approval.
+	assert.Equal(t, -1, indexOfCall(ops.recorded(), "IncrementReviewAttempts:CARD-1"),
+		"crash-resume: approval must not increment; calls=%v", ops.recorded())
+
+	// The round 2 heading must be recorded (not round 1).
+	body := ops.lastBody()
+	assert.Contains(t, body, "## Review Findings (Round 2)", "crash-resume at counter 1 must record round 2; body=%q", body)
+}
+
+// TestRunReviewHITLResetsExhaustedCounter proves that a HITL card with an
+// exhausted review counter gets the counter reset, so the HITL round starts at
+// round 1. On approval, no IncrementReviewAttempts is called.
+func TestRunReviewHITLResetsExhaustedCounter(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{}
+	inbox := &fakeInbox{msgs: []harness.UserMessage{{Content: "approve"}}}
+	client := &planLLM{responses: []llm.Response{
+		stopResp("No concerns.", 0.001),
+		stopResp("No concerns.", 0.001),
+		stopResp("No concerns.", 0.001),
+		stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.001),
+		stopResp(`{"verdict":"approve","feedback":""}`, 0.001),
+	}}
+	d := hitlReviewDeps(ops, git, inbox, client)
+	// hitlReviewDeps sets ReviewAttemptsCap: 3 and Interactive: true.
+	// Seed at cap+1 (4) with State "in_progress" to simulate a card that
+	// actually parked on a prior run and was moved back to an active state.
+	tc := cmclient.TaskContext{
+		Title: "T", Description: "b",
+		State: "in_progress", ReviewAttempts: 4,
+	}
+	o := newRun(d, tc)
+	isolateVerify(o)
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	// No fix round, so no IncrementReviewAttempts.
+	assert.Equal(t, 0, countCall(ops.recorded(), "IncrementReviewAttempts:CARD-1"),
+		"HITL exhausted counter reset: approval must not increment; calls=%v", ops.recorded())
+
+	// Round 1 (not round 4) was recorded.
+	body := ops.lastBody()
+	assert.Contains(t, body, "## Review Findings", "HITL must record the findings")
+	assert.NotContains(t, body, "(Round 4)", "reset counter starts at round 1, not 4; body=%q", body)
+}

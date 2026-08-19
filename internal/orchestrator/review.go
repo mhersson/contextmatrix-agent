@@ -76,6 +76,22 @@ func runReview(ctx context.Context, o *run) error {
 		}
 	}
 
+	// Resolve the effective attempts cap. When the persisted counter already
+	// meets or exceeds the cap AND the card is entering review from a non-review
+	// state (e.g., moved back to todo), the card was parked on a prior run with
+	// the counter left at the cap. Reset it to zero so the fresh run starts with
+	// a full budget. Cards still in review (crash-resume from an interrupted
+	// authoritative pass) keep their counter so round numbering continues from
+	// where it left off.
+	attemptsCap := cfg.ReviewAttemptsCap
+	if attemptsCap <= 0 {
+		attemptsCap = defaultReviewAttemptsCap
+	}
+
+	if o.tc.ReviewAttempts >= attemptsCap && o.tc.State != "review" {
+		o.tc.ReviewAttempts = 0
+	}
+
 	plan, err := o.ensureVerify(ctx)
 	if err != nil {
 		return err
