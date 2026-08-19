@@ -37,8 +37,12 @@ func TestClassifyReleaseError(t *testing.T) {
 func TestClassifyIncrementError(t *testing.T) {
 	require.NoError(t, classifyIncrementError(nil))
 
-	capped := fmt.Errorf("call increment_review_attempts: increment review attempts: review attempts capped at 7: %s",
-		ErrReviewAttemptsCapped.Error())
+	// The literal is intentional: this is the text ContextMatrix's service layer
+	// returns (its ErrReviewAttemptsCapped), wrapped by the MCP tool handler and
+	// surfaced verbatim to an MCP caller. Interpolating our own sentinel here
+	// would make the test pass no matter what the other repo says.
+	capped := errors.New("call increment_review_attempts: increment review attempts: " +
+		"review attempts capped at 7: review attempts limit reached")
 	got := classifyIncrementError(capped)
 	require.ErrorIs(t, got, ErrReviewAttemptsCapped)
 	assert.Contains(t, got.Error(), "capped at 7", "original message is preserved in the chain")
