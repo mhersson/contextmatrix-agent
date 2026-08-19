@@ -68,3 +68,15 @@ CVE-2025-47273
 # `go install pkg@version` cannot raise a module's own dependency pins -
 # clears when a golangci-lint release requires x/text >= v0.39.0.
 CVE-2026-56852
+
+# --- golang.org/x/mod v0.35.0 inside the golangci-lint binary
+# (/usr/local/bin/golangci-lint); the fix is v0.40.0. Both CVEs are
+# sumdb-related module-content forgery (CVE-2026-56864: malicious GOSUMDB
+# serves arbitrary module content; CVE-2026-56865: malicious GOPROXY forges
+# up to two sumdb entries). The linter runs repo-controlled code that can
+# already execute arbitrary bash, so these add no marginal attack surface.
+# The latest golangci-lint release (v2.12.2) pins v0.35.0 and `go install
+# pkg@version` cannot raise a module's own dependency pins - clears when a
+# golangci-lint release requires x/mod >= v0.40.0.
+CVE-2026-56864
+CVE-2026-56865
