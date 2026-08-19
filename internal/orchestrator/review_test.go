@@ -1738,11 +1738,11 @@ func TestRunReviewHITLResetsExhaustedCounter(t *testing.T) {
 	assert.NotContains(t, body, "(Round 4)", "reset counter starts at round 1, not 4; body=%q", body)
 }
 
-// TestIncrementAuthoritativeAttempt covers the park-vs-fail split on the
-// authoritative pass. The ceiling rejection is the one error the review loop
-// must absorb: a resumed card already at ContextMatrix's review_attempts
-// ceiling has to park cleanly instead of hard-failing mid-review.
-func TestIncrementAuthoritativeAttempt(t *testing.T) {
+// TestIncrementReviewAttempt covers the park-vs-fail split on the shared
+// increment helper. The ceiling rejection is the one error the review loop must
+// absorb: a card already at ContextMatrix's review_attempts ceiling has to park
+// cleanly instead of hard-failing mid-review.
+func TestIncrementReviewAttempt(t *testing.T) {
 	t.Parallel()
 
 	newRun := func(incErr error) (*run, *fakeOps) {
@@ -1751,11 +1751,14 @@ func TestIncrementAuthoritativeAttempt(t *testing.T) {
 		return &run{d: Deps{Ops: ops, Cfg: Config{CardID: "CARD-1"}}}, ops
 	}
 
-	t.Run("success returns nil", func(t *testing.T) {
+	t.Run("success returns the running total", func(t *testing.T) {
 		t.Parallel()
 
 		o, ops := newRun(nil)
-		require.NoError(t, o.incrementAuthoritativeAttempt(t.Context(), "findings"))
+
+		n, err := o.incrementReviewAttempt(t.Context(), "findings")
+		require.NoError(t, err)
+		assert.Equal(t, 1, n)
 		assert.Equal(t, 1, ops.reviewAttempts)
 	})
 
@@ -1767,9 +1770,11 @@ func TestIncrementAuthoritativeAttempt(t *testing.T) {
 
 		o, _ := newRun(capped)
 
+		_, err := o.incrementReviewAttempt(t.Context(), "findings")
+
 		var parked *ReviewParkedError
 
-		require.ErrorAs(t, o.incrementAuthoritativeAttempt(t.Context(), "findings"), &parked)
+		require.ErrorAs(t, err, &parked)
 	})
 
 	t.Run("unrelated error fails the run", func(t *testing.T) {
@@ -1777,7 +1782,7 @@ func TestIncrementAuthoritativeAttempt(t *testing.T) {
 
 		o, _ := newRun(errors.New("connection refused"))
 
-		err := o.incrementAuthoritativeAttempt(t.Context(), "findings")
+		_, err := o.incrementReviewAttempt(t.Context(), "findings")
 		require.Error(t, err)
 
 		var parked *ReviewParkedError
@@ -1785,4 +1790,109 @@ func TestIncrementAuthoritativeAttempt(t *testing.T) {
 		require.NotErrorAs(t, err, &parked, "a transport failure must not be mistaken for a park")
 		assert.Contains(t, err.Error(), "increment review attempts")
 	})
+}
+
+// TestReviewCheapRoundParksAtServerCap pins that ContextMatrix's review_attempts
+// ceiling rejection is absorbed as a park in the cheap review loop, not only on
+// the authoritative pass. CM's counter is monotonic for the card's lifetime
+// while runReview resets only its local snapshot for round numbering, so a card
+// resumed at the ceiling re-enters at round 1 and the cheap increment is the
+// first call that can be rejected.
+func TestReviewCheapRoundParksAtServerCap(t *testing.T) {
+	capped := fmt.Errorf("increment review attempts: review attempts capped at 7: %w",
+		cmclient.ErrReviewAttemptsCapped)
+	ops := &fakeOps{incrementErr: capped}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: []llm.Response{
+		stopResp("Correctness: bug", 0.01),
+		stopResp("Design: ok", 0.01),
+		stopResp("Security: ok", 0.01),
+		stopResp(`{"approved":false,"summary":"needs fix","fixes":[{"file":"a.go","issue":"bug","suggestion":"patch"}]}`, 0.02),
+	}}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	// Cap 5 with a zero starting counter puts round 1 well below the cliff, so
+	// this is a cheap round, not the authoritative pass.
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+
+	err := runReview(context.Background(), o)
+	require.Error(t, err)
+
+	var parked *ReviewParkedError
+
+	require.ErrorAs(t, err, &parked,
+		"a cheap-round ceiling rejection must park, not hard-fail; got %v", err)
+}
+
+// TestReviewAuthoritativeFirstIncrementParksAtServerCap guards the wiring of the
+// FIRST authoritative increment. Cap 1 sends round 1 straight to the
+// authoritative pass, so the first increment call is the one inside
+// authoritativeReview.
+func TestReviewAuthoritativeFirstIncrementParksAtServerCap(t *testing.T) {
+	capped := fmt.Errorf("increment review attempts: review attempts capped at 7: %w",
+		cmclient.ErrReviewAttemptsCapped)
+	ops := &fakeOps{incrementErr: capped}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: []llm.Response{
+		stopResp("Correctness: bug", 0.01),
+		stopResp("Design: ok", 0.01),
+		stopResp("Security: ok", 0.01),
+		stopResp(`{"approved":false,"summary":"fix it","fixes":[{"file":"x.go","issue":"first","suggestion":"patch"}]}`, 0.02),
+	}}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+	d.Cfg.ReviewAttemptsCap = 1
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+
+	err := runReview(context.Background(), o)
+	require.Error(t, err)
+
+	var parked *ReviewParkedError
+
+	require.ErrorAs(t, err, &parked,
+		"the authoritative pass's first increment must park on the ceiling; got %v", err)
+}
+
+// TestReviewAuthoritativeSecondIncrementParksAtServerCap guards the wiring of the
+// SECOND authoritative increment, the one immediately before the park. The first
+// increment succeeds and the strong fix plus re-review run, so only the final
+// call meets the ceiling.
+func TestReviewAuthoritativeSecondIncrementParksAtServerCap(t *testing.T) {
+	capped := fmt.Errorf("increment review attempts: review attempts capped at 7: %w",
+		cmclient.ErrReviewAttemptsCapped)
+	ops := &fakeOps{reviewAttempts: 4, incrementErr: capped, incrementErrAfter: 1}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: []llm.Response{
+		// Authoritative review 1: 3 specialists + synthesis (rejects).
+		stopResp("Correctness: bug", 0.01),
+		stopResp("Design: ok", 0.01),
+		stopResp("Security: ok", 0.01),
+		stopResp(`{"approved":false,"summary":"fix it","fixes":[{"file":"x.go","issue":"first","suggestion":"patch"}]}`, 0.02),
+		// Gated strong fix run.
+		stopResp("coder: attempted fix", 0.05),
+		// Authoritative re-review: 3 specialists + synthesis (still rejects).
+		stopResp("Correctness: still bug", 0.01),
+		stopResp("Design: ok", 0.01),
+		stopResp("Security: ok", 0.01),
+		stopResp(`{"approved":false,"summary":"still broken","fixes":[{"file":"a.go","issue":"bug","suggestion":"patch"}]}`, 0.02),
+	}}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	// Seed the snapshot at cap-1 (default cap is 5) so iter 0 is the cliff.
+	tc := cmclient.TaskContext{
+		Title: "Parent", Description: "body",
+		State: "in_progress", ReviewAttempts: 4,
+	}
+	o := newReviewRun(d, tc, 0)
+
+	err := runReview(context.Background(), o)
+	require.Error(t, err)
+
+	var parked *ReviewParkedError
+
+	require.ErrorAs(t, err, &parked,
+		"the authoritative pass's second increment must park on the ceiling; got %v", err)
+	assert.Equal(t, 2, ops.incrementCalls, "the first increment must have succeeded")
 }

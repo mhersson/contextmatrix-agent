@@ -156,8 +156,8 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 		// their resolution without importing new scope (cross-round memory).
 		o.lastFindings = findings
 
-		if _, err := d.Ops.IncrementReviewAttempts(ctx, cfg.CardID); err != nil {
-			return fmt.Errorf("increment review attempts: %w", err)
+		if _, err := o.incrementReviewAttempt(ctx, findings); err != nil {
+			return err
 		}
 
 		if err := o.runFix(ctx, findings, round, fixTier, false); err != nil {
@@ -304,7 +304,7 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 
 	o.lastFindings = findings
 
-	if err := o.incrementAuthoritativeAttempt(ctx, findings); err != nil {
+	if _, err := o.incrementReviewAttempt(ctx, findings); err != nil {
 		return err
 	}
 
@@ -332,34 +332,38 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 
 	o.lastFindings = findings2
 
-	if err := o.incrementAuthoritativeAttempt(ctx, findings2); err != nil {
+	n, err := o.incrementReviewAttempt(ctx, findings2)
+	if err != nil {
 		return err
 	}
 
-	// Both increments succeeded, so the counter is now 2 past where it was.
-	// Park with the strong findings.
-	d.logCard(ctx, "review parked after authoritative pass - outstanding findings:\n%s", findings2)
+	// Park with the strong findings. n is the persisted counter after both
+	// increments, and is the card's only visible record of how many rounds the
+	// configured cap actually bought.
+	d.logCard(ctx, "review parked after %d attempts (authoritative pass) - outstanding findings:\n%s", n, findings2)
 
 	return &ReviewParkedError{}
 }
 
-// incrementAuthoritativeAttempt calls IncrementReviewAttempts and treats
+// incrementReviewAttempt calls IncrementReviewAttempts and treats
 // ContextMatrix's ceiling rejection as an implicit park (ReviewParkedError)
-// instead of a hard failure, so a resumed card whose counter already sits at
-// the ceiling parks gracefully rather than erroring out mid-review.
-func (o *run) incrementAuthoritativeAttempt(ctx context.Context, findings string) error {
-	_, err := o.d.Ops.IncrementReviewAttempts(ctx, o.d.Cfg.CardID)
+// instead of a hard failure, so a card whose persisted counter already sits at
+// the ceiling parks gracefully rather than erroring out mid-review. CM's counter
+// is monotonic for the card's lifetime, so every increment site can hit it, not
+// just the authoritative pass. Returns the new running total on success.
+func (o *run) incrementReviewAttempt(ctx context.Context, findings string) (int, error) {
+	n, err := o.d.Ops.IncrementReviewAttempts(ctx, o.d.Cfg.CardID)
 	if err == nil {
-		return nil
+		return n, nil
 	}
 
 	if errors.Is(err, cmclient.ErrReviewAttemptsCapped) {
-		o.d.logCard(ctx, "review parked at server cap (authoritative pass) - outstanding findings:\n%s", findings)
+		o.d.logCard(ctx, "review parked at server cap - outstanding findings:\n%s", findings)
 
-		return &ReviewParkedError{}
+		return 0, &ReviewParkedError{}
 	}
 
-	return fmt.Errorf("increment review attempts: %w", err)
+	return 0, fmt.Errorf("increment review attempts: %w", err)
 }
 
 // reviewRound runs one review pass and returns the outstanding findings text,
