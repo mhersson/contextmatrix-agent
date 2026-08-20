@@ -33,6 +33,11 @@ const DefaultReviewAttemptsCap = 3
 // authoritative pass then increments twice more before parking, so the counter
 // ends at N+1. N=6 lands it exactly on 7; anything higher is rejected mid-loop
 // by the server.
+//
+// The arithmetic assumes a counter starting at 0. ContextMatrix never resets
+// review_attempts, so at N=6 one run consumes the card's entire lifetime
+// allowance: a later run on the same card parks immediately instead of
+// reviewing.
 const MaxReviewAttemptsCap = 6
 
 // defaultSecretsDir is a filesystem PATH, not a credential. Naming it via a

@@ -22,7 +22,8 @@ const envPrefix = "CMX_"
 // harness spike. It drives a single harness.Run, not the card FSM, so
 // card-lifecycle knobs (the review-attempts budget, verify gates, callbacks)
 // have no home here; those live in ServiceConfig and reach the worker as CMX_*
-// container env.
+// container env. Defaults() is also read by `work` for the knobs the two share
+// (max turns, tool output caps), so this struct is not private to `run`.
 //
 // Note: koanf keys are hyphenated so CLI flag names (which posflag uses verbatim
 // as keys) match - e.g. --max-turns ⇒ key "max-turns" ⇒ this tag. Env vars map

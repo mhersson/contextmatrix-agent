@@ -869,9 +869,10 @@ func withDefaults(spec RunSpec) RunSpec {
 
 	// Zero or negative means unset - serve omits the env var in that case, so
 	// resolve it to the same default the orchestrator's review loop falls back
-	// to rather than inventing a third answer. Serve rejects an out-of-range
-	// cap at startup; lowering it here only catches a hand-run container that
-	// sets CMX_REVIEW_ATTEMPTS_CAP directly.
+	// to rather than inventing a third answer. Serve rejects an out-of-range cap
+	// at startup, but this clamp is still load-bearing: worker_extra_env is
+	// appended after the validated value and wins under last-wins env semantics,
+	// so an operator passthrough (or a hand-run container) can set any value.
 	switch {
 	case spec.ReviewAttemptsCap <= 0:
 		spec.ReviewAttemptsCap = config.DefaultReviewAttemptsCap
