@@ -514,8 +514,11 @@ func (o *run) draftPlan(ctx context.Context, model, diagnosis, design, feedback 
 	cfg := d.Cfg
 
 	var existingTitles []string
+
 	for _, sub := range o.subtasks {
-		existingTitles = append(existingTitles, sub.Title)
+		if sub.State != "not_planned" {
+			existingTitles = append(existingTitles, sub.Title)
+		}
 	}
 
 	resume := resumeBlock(existingTitles)
@@ -743,8 +746,11 @@ func (o *run) mobDraftPlan(ctx context.Context, diagnosis, design, feedback stri
 // cards), and the resume-subtasks block.
 func (o *run) mobPlanBriefing(diagnosis, design string) string {
 	var existingTitles []string
+
 	for _, sub := range o.subtasks {
-		existingTitles = append(existingTitles, sub.Title)
+		if sub.State != "not_planned" {
+			existingTitles = append(existingTitles, sub.Title)
+		}
 	}
 
 	resume := resumeBlock(existingTitles)

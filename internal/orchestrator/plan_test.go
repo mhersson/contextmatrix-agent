@@ -1420,3 +1420,82 @@ func TestDraftPlanFallsBackToReadToolsWhenPlanToolsNil(t *testing.T) {
 	assert.Equal(t, len(o.d.ReadTools.All()), toolCounts[0],
 		"nil PlanTools must fall back to exactly d.ReadTools, not some other registry")
 }
+
+// TestPlanReuseListExcludesCancelled proves that cancelled (not_planned)
+// subtasks are filtered from the existingTitles slice fed to resumeBlock, so
+// CM's duplicate-subtask guard never resurrects the old cancelled card ID when
+// a new plan names a matching title.
+func TestPlanReuseListExcludesCancelled(t *testing.T) {
+	t.Run("draftPlan excludes not_planned from the reuse list", func(t *testing.T) {
+		ops := &fakeOps{createdIDs: []string{"SUB-1"}}
+		llmFake := &planLLM{responses: []llm.Response{stopResp(onePlanJSON, 0.01)}}
+		d := planTestDeps(ops, llmFake)
+
+		o := newRun(d, ops.taskContext)
+		o.subtasks = []subtaskRef{
+			{ID: "SUB-CANCELLED", Title: "Cancelled subtask", State: "not_planned", Tier: "simple"},
+			{ID: "SUB-ACTIVE", Title: "Active subtask", State: "in_progress", Tier: "simple"},
+		}
+
+		require.NoError(t, runPlan(context.Background(), o))
+
+		require.NotEmpty(t, llmFake.tasks)
+		prompt := llmFake.tasks[0]
+
+		assert.Contains(t, prompt, "Active subtask",
+			"the active subtask must appear in the reuse list")
+		assert.NotContains(t, prompt, "Cancelled subtask",
+			"the cancelled subtask must NOT appear in the reuse list")
+	})
+
+	t.Run("mobPlanBriefing excludes not_planned from the reuse list", func(t *testing.T) {
+		ops := &fakeOps{createdIDs: []string{"SUB-1", "SUB-2"}}
+		llmFake := &planLLM{}
+		eng := &scriptedEngine{outcomes: []mob.Outcome{{
+			Transcript: []mob.Entry{
+				{Author: "seat-1", Lens: "feasibility/simplicity", Round: 0, Content: "proposal"},
+			},
+			Synthesis: onePlanJSON,
+			Consensus: true,
+			CostUSD:   0.10,
+		}}}
+
+		o := mobPlanRun(ops, llmFake, eng)
+		o.subtasks = []subtaskRef{
+			{ID: "SUB-CANCELLED", Title: "Cancelled subtask", State: "not_planned", Tier: "simple"},
+			{ID: "SUB-ACTIVE", Title: "Active subtask", State: "todo", Tier: "simple"},
+		}
+
+		require.NoError(t, runPlan(context.Background(), o))
+
+		require.Len(t, eng.topics, 1)
+		briefing := eng.topics[0].Briefing
+
+		assert.Contains(t, briefing, "Active subtask",
+			"the active subtask must appear in the mob briefing reuse list")
+		assert.NotContains(t, briefing, "Cancelled subtask",
+			"the cancelled subtask must NOT appear in the mob briefing reuse list")
+	})
+
+	t.Run("done subtask included in reuse list (regression check)", func(t *testing.T) {
+		ops := &fakeOps{createdIDs: []string{"SUB-1"}}
+		llmFake := &planLLM{responses: []llm.Response{stopResp(onePlanJSON, 0.01)}}
+		d := planTestDeps(ops, llmFake)
+
+		o := newRun(d, ops.taskContext)
+		o.subtasks = []subtaskRef{
+			{ID: "SUB-DONE", Title: "Done subtask", State: "done", Tier: "simple"},
+			{ID: "SUB-ACTIVE", Title: "Active subtask", State: "in_progress", Tier: "simple"},
+		}
+
+		require.NoError(t, runPlan(context.Background(), o))
+
+		require.NotEmpty(t, llmFake.tasks)
+		prompt := llmFake.tasks[0]
+
+		assert.Contains(t, prompt, "Active subtask",
+			"the active subtask must appear in the reuse list")
+		assert.Contains(t, prompt, "Done subtask",
+			"the done subtask must appear in the reuse list so the planner sees it")
+	})
+}

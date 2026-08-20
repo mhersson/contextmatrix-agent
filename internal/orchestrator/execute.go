@@ -80,9 +80,13 @@ func runExecute(ctx context.Context, o *run) error {
 func (o *run) executeSubtaskWith(ctx context.Context, sc *solverCtx, sub subtaskRef) error {
 	d := o.d
 
-	// Resume: a subtask already completed in a prior run is not re-run.
-	if sub.State == "done" {
-		slog.Info("execute: skipping completed subtask", "card_id", sub.ID)
+	// Resume: a terminal subtask (done or not_planned) is not re-run.
+	if isTerminal(sub.State) {
+		if sub.State == "not_planned" {
+			slog.Info("execute: cancelled subtask, not re-run", "card_id", sub.ID)
+		} else {
+			slog.Info("execute: skipping completed subtask", "card_id", sub.ID)
+		}
 
 		return nil
 	}

@@ -126,13 +126,16 @@ func TestReconcilePlanLoadsExistingTitles(t *testing.T) {
 }
 
 func TestReconcileExecuteQueuesUnfinished(t *testing.T) {
-	// phase "execute": SubtaskStates loaded -> done marked done in subtaskRefs;
-	// in_progress/todo queued; Fetch(branch) + Checkout(branch) recorded.
+	// phase "execute": SubtaskStates loaded -> done/not_planned marked done in
+	// subtaskRefs; in_progress/todo queued; Fetch(branch) + Checkout(branch)
+	// recorded. A not_planned row is terminal and must not trigger a
+	// GetTaskContext enrichment.
 	ops := &fakeOps{
 		subtaskStates: []cmclient.SubtaskState{
 			{CardID: "SUB-1", Title: "done one", State: "done"},
 			{CardID: "SUB-2", Title: "in progress", State: "in_progress"},
 			{CardID: "SUB-3", Title: "queued", State: "todo"},
+			{CardID: "SUB-4", Title: "cancelled", State: "not_planned"},
 		},
 	}
 	git := &fakeGit{remoteTip: "tip-1"} // the remote branch exists: it IS the state
@@ -140,10 +143,25 @@ func TestReconcileExecuteQueuesUnfinished(t *testing.T) {
 
 	require.NoError(t, o.reconcile(context.Background()))
 
-	require.Len(t, o.subtasks, 3)
+	require.Len(t, o.subtasks, 4)
 	assert.Equal(t, "done", o.subtasks[0].State, "done subtask stays done (skipped on re-run)")
 	assert.Equal(t, "in_progress", o.subtasks[1].State)
 	assert.Equal(t, "todo", o.subtasks[2].State)
+	assert.Equal(t, "not_planned", o.subtasks[3].State, "not_planned subtask stays not_planned")
+
+	// The terminal refs (done, not_planned) must not trigger GetTaskContext.
+	calls := ops.recorded()
+	assert.Equal(t, -1, indexOfCall(calls, "GetTaskContext:SUB-1"),
+		"done subtask must not trigger GetTaskContext")
+	assert.Equal(t, -1, indexOfCall(calls, "GetTaskContext:SUB-4"),
+		"not_planned subtask must not trigger GetTaskContext")
+
+	// The non-terminal ref (in_progress, todo) may trigger GetTaskContext for
+	// tier/body enrichment.
+	assert.GreaterOrEqual(t, indexOfCall(calls, "GetTaskContext:SUB-2"), 0,
+		"in_progress subtask should trigger GetTaskContext")
+	assert.GreaterOrEqual(t, indexOfCall(calls, "GetTaskContext:SUB-3"), 0,
+		"todo subtask should trigger GetTaskContext")
 
 	git.assertOrder(t, "Fetch:cm/card-1", "Checkout:cm/card-1")
 }

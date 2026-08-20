@@ -388,6 +388,41 @@ func TestFanoutIncapableRecoveryRaceSafe(t *testing.T) {
 	}
 }
 
+func TestAllSubtasksDoneWithNotPlanned(t *testing.T) {
+	t.Parallel()
+
+	// A mix of done and not_planned returns true.
+	assert.True(t, allSubtasksDone([]subtaskRef{
+		{ID: "SUB-1", State: "done"},
+		{ID: "SUB-2", State: "not_planned"},
+	}))
+}
+
+func TestAllSubtasksDoneMixed(t *testing.T) {
+	t.Parallel()
+
+	// A mix of terminal and non-terminal returns false.
+	assert.False(t, allSubtasksDone([]subtaskRef{
+		{ID: "SUB-1", State: "done"},
+		{ID: "SUB-2", State: "not_planned"},
+		{ID: "SUB-3", State: "todo"},
+	}))
+}
+
+func TestAllSubtasksDoneOnlyDone(t *testing.T) {
+	t.Parallel()
+
+	// done-only sets still return true (unchanged behaviour).
+	assert.True(t, allSubtasksDone([]subtaskRef{
+		{ID: "SUB-1", State: "done"},
+		{ID: "SUB-2", State: "done"},
+	}))
+
+	// Empty set returns false (unchanged behaviour).
+	assert.False(t, allSubtasksDone(nil))
+	assert.False(t, allSubtasksDone([]subtaskRef{}))
+}
+
 // TestFanoutSkipsWhenAllSubtasksDone proves the crash-window guard: a resume that
 // finds every subtask already board-done returns without cutting worktrees or
 // creating candidates, so the run cannot re-race and double-report outcomes.
