@@ -76,10 +76,11 @@ func runReview(ctx context.Context, o *run) error {
 	// Resolve the effective attempts cap. When the persisted counter already
 	// meets or exceeds the cap AND the card is entering review from a non-review
 	// state (e.g., moved back to todo), the card was parked on a prior run with
-	// the counter left at the cap. Reset it to zero so the fresh run starts with
-	// a full budget. Cards still in review (crash-resume from an interrupted
-	// authoritative pass) keep their counter so round numbering continues from
-	// where it left off.
+	// the counter left at the cap. Reset it to zero so round numbering in the
+	// fresh run restarts at 1 - a local reset only; the server's review_attempts
+	// counter is monotonic and unaffected. Cards still in review (crash-resume
+	// from an interrupted authoritative pass) keep their counter so round
+	// numbering continues from where it left off.
 	attemptsCap := cfg.ReviewAttemptsCap
 	if attemptsCap <= 0 {
 		attemptsCap = config.DefaultReviewAttemptsCap
@@ -104,7 +105,8 @@ func runReview(ctx context.Context, o *run) error {
 // reviewLoop is the autonomous review loop. Approval exits nil; each
 // non-approval increments the card's review attempts and runs a fix. At the
 // cliff (the round that would otherwise park) the gated authoritative pass
-// takes over instead of parking on a cheap verdict - it is the sole park gate.
+// takes over instead of parking on a cheap verdict - it is the sole park gate,
+// except when the server's own ceiling refuses a cheap round's increment.
 // The budget ledger is checked before every model-bearing step.
 //
 // consumed is the number of review rounds already run in-process this run: 0
@@ -131,8 +133,9 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 		round := o.tc.ReviewAttempts + consumed + iter + 1
 
 		// At the cliff (the round that would otherwise park), run the gated
-		// authoritative pass instead of another cheap round - never park on a
-		// cheap verdict. It is terminal: returns nil (finished) or parks.
+		// authoritative pass instead of another cheap round - never park on a cheap
+		// verdict here, except when the server's own ceiling refuses this round's
+		// increment. It is terminal: returns nil (finished) or parks.
 		if round >= attemptsCap {
 			return o.authoritativeReview(ctx, plan, round)
 		}

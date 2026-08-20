@@ -223,12 +223,15 @@ tool_output_max_bytes: 131072
 # - so the counter ends at N+1, and N=6 lands it exactly on 7.
 #
 # ContextMatrix never resets that counter, so the budget is per card, not per
-# run. At cap 6 one run spends it all and any later run on the same card parks
-# without reviewing.
+# run. At cap 6 one run spends it all, but a later run on the same card still
+# gets one full review round - it can approve and finish - and parks as soon as
+# ContextMatrix refuses the next increment, rather than running the full
+# configured budget.
 #
-# A cap of 1 parks on the authoritative pass immediately, with no cheap rounds.
-# That is the MOST expensive setting per card, not the cheapest: round 1 goes
-# straight to the strong review, strong fix, and strong re-review.
+# A cap of 1 enters the authoritative pass immediately, with no cheap rounds -
+# if that strong review approves, nothing parks. It has the highest MINIMUM cost
+# per card, not the most expensive overall: every card pays for a strong panel,
+# with no chance of a cheap round settling it first.
 #
 # This knob is read inside the worker container, so it takes effect only after
 # the worker image is rebuilt. An older image silently keeps its built-in 3.

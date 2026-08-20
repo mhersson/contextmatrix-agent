@@ -1880,7 +1880,7 @@ func TestReviewAuthoritativeSecondIncrementParksAtServerCap(t *testing.T) {
 	}}
 	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
 
-	// Seed the snapshot at cap-1 (default cap is 5) so iter 0 is the cliff.
+	// Seed the snapshot at cap-1 (the test helper's cap is 5) so iter 0 is the cliff.
 	tc := cmclient.TaskContext{
 		Title: "Parent", Description: "body",
 		State: "in_progress", ReviewAttempts: 4,

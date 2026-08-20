@@ -31,13 +31,15 @@ const DefaultReviewAttemptsCap = 3
 // tripping ContextMatrix's server-side ceiling of 7. With cap N the loop runs
 // N-1 cheap rounds - each incrementing review_attempts once - and the
 // authoritative pass then increments twice more before parking, so the counter
-// ends at N+1. N=6 lands it exactly on 7; anything higher is rejected mid-loop
-// by the server.
+// ends at N+1. N=6 lands it exactly on 7. N=7 would still park cleanly - its
+// final increment lands right at 7, the point it would park anyway - but N>=8
+// is rejected genuinely mid-loop, before the authoritative pass finishes.
 //
 // The arithmetic assumes a counter starting at 0. ContextMatrix never resets
 // review_attempts, so at N=6 one run consumes the card's entire lifetime
-// allowance: a later run on the same card parks immediately instead of
-// reviewing.
+// allowance: a later run on the same card still gets one full review round and
+// can approve and finish, but parks as soon as ContextMatrix refuses the next
+// increment rather than running its configured budget.
 const MaxReviewAttemptsCap = 6
 
 // defaultSecretsDir is a filesystem PATH, not a credential. Naming it via a
