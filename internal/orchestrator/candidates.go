@@ -322,17 +322,17 @@ func (o *run) stopFanoutHeartbeat() {
 	}
 }
 
-// allSubtasksDone reports whether every subtask is already in the terminal
-// "done" state - the same skip-if-done signal executeSubtaskWith applies per
-// subtask. An empty set is not "done": there is nothing completed to resume, so
-// the normal (degenerate) path handles it unchanged.
+// allSubtasksDone reports whether every subtask is already in a terminal state
+// (done or not_planned) - the same skip-if-done / skip-if-not-planned signal
+// executeSubtaskWith applies per subtask. An empty set is not terminal: there is
+// nothing completed to resume, so the normal (degenerate) path handles it unchanged.
 func allSubtasksDone(subs []subtaskRef) bool {
 	if len(subs) == 0 {
 		return false
 	}
 
 	for _, s := range subs {
-		if s.State != "done" {
+		if !isTerminal(s.State) {
 			return false
 		}
 	}

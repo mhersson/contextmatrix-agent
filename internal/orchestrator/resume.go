@@ -142,7 +142,7 @@ func (o *run) reconcile(ctx context.Context) error {
 		// card itself (done refs are never re-run - skip the fetch). A fetch
 		// failure degrades to today's conservative defaults; resume must not
 		// become fragile over an advisory enrichment.
-		if st.State != "done" {
+		if !isTerminal(st.State) {
 			tc, err := o.d.Ops.GetTaskContext(ctx, st.CardID, false)
 			if err != nil {
 				slog.Warn("reconcile: subtask context fetch failed; using defaults",

@@ -711,6 +711,24 @@ func (o *run) recoverIncapable(ctx context.Context, ie *IncapableError) error {
 	return nil
 }
 
+// isTerminal reports whether a subtask state counts as already finished and
+// must not be re-run. The terminal set currently holds "done" (completed by a
+// prior run) and "not_planned" (deliberately cancelled); future additions are
+// added to this map in one place.
+func isTerminal(state string) bool {
+	_, ok := terminalStates[state]
+
+	return ok
+}
+
+// terminalStates is the set of subtask states that must never be re-executed.
+// A map[string]struct{} is used for O(1) lookup and the zero-value false
+// semantics - no initializer needed.
+var terminalStates = map[string]struct{}{
+	"done":        {},
+	"not_planned": {},
+}
+
 // indexOf returns the position of v in s, or -1 if absent.
 func indexOf(s []string, v string) int {
 	for i := range s {

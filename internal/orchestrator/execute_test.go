@@ -501,6 +501,28 @@ func TestExecuteSkipsDone(t *testing.T) {
 	assert.GreaterOrEqual(t, indexOfCall(calls, "CompleteTask:SUB-2"), 0)
 }
 
+func TestExecuteSkipsNotPlanned(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	llmFake := &planLLM{responses: []llm.Response{finishResp("feat: x", 0.01)}}
+	d := execTestDeps(ops, git, llmFake)
+
+	// SUB-1 is not_planned (cancelled); SUB-2 is fresh and must run.
+	o := newExecRun(d, []subtaskRef{
+		{ID: "SUB-1", Title: "Cancelled task", Tier: "simple", State: "not_planned"},
+		{ID: "SUB-2", Title: "Fresh task", Tier: "simple", State: "todo"},
+	}, 0)
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	calls := ops.recorded()
+	assert.Equal(t, -1, indexOfCall(calls, "ClaimCard:SUB-1"), "not_planned subtask must not be claimed")
+	assert.Equal(t, -1, indexOfCall(calls, "ReportUsage:SUB-1"), "not_planned subtask must not be executed")
+	assert.Equal(t, -1, indexOfCall(calls, "CompleteTask:SUB-1"), "not_planned subtask must not be completed")
+	assert.GreaterOrEqual(t, indexOfCall(calls, "ClaimCard:SUB-2"), 0, "fresh subtask must run")
+	assert.GreaterOrEqual(t, indexOfCall(calls, "CompleteTask:SUB-2"), 0)
+}
+
 func TestExecuteCommitMessage(t *testing.T) {
 	t.Run("commit message resolved from finish call", func(t *testing.T) {
 		ops := &fakeOps{}
