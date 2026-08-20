@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
+	"github.com/mhersson/contextmatrix-agent/internal/config"
 	"github.com/mhersson/contextmatrix-agent/internal/orchestrator"
 	"github.com/mhersson/contextmatrix-backendkit/frames"
 	"github.com/mhersson/contextmatrix-harness/events"
@@ -1251,12 +1252,60 @@ func TestEndSessionMidFSM(t *testing.T) {
 	assert.Equal(t, 0, ops.count("CompleteTask"), "no completion on a parked session")
 }
 
-// TestReviewAttemptsCapIsThree pins the worker's review-attempts cap to three:
-// with the convergence safeguards in place, three rounds suffice.
-func TestReviewAttemptsCapIsThree(t *testing.T) {
+// TestReviewAttemptsCapNormalization covers withDefaults' resolution policy:
+// an unset (zero or negative) cap resolves to the shared default rather than a
+// worker-local third answer, an in-range value passes through, and a value
+// above the safe maximum is lowered to it.
+func TestReviewAttemptsCapNormalization(t *testing.T) {
 	t.Parallel()
 
-	assert.Equal(t, 3, reviewAttemptsCap)
+	cases := []struct {
+		name string
+		in   int
+		want int
+	}{
+		{"unset resolves to the shared default", 0, config.DefaultReviewAttemptsCap},
+		{"negative resolves to the shared default", -5, config.DefaultReviewAttemptsCap},
+		{"in-range value passes through", 5, 5},
+		{"the maximum passes through", config.MaxReviewAttemptsCap, config.MaxReviewAttemptsCap},
+		{"above the maximum is lowered", 10, config.MaxReviewAttemptsCap},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			spec := baseSpec(t, setupBareRemote(t), t.TempDir())
+			spec.ReviewAttemptsCap = tc.in
+
+			assert.Equal(t, tc.want, withDefaults(spec).ReviewAttemptsCap)
+		})
+	}
+}
+
+// TestReviewAttemptsCapReachesOrchestrator proves the RunSpec field is what the
+// review loop actually reads: the const it replaced is gone, so a wiring
+// regression would otherwise be invisible until a live run.
+func TestReviewAttemptsCapReachesOrchestrator(t *testing.T) {
+	remote := setupBareRemote(t)
+	wsParent := t.TempDir()
+
+	spec := baseSpec(t, remote, wsParent)
+	spec.ReviewAttemptsCap = 5
+
+	var got int
+
+	swapRunOrchestrator(t, func(_ context.Context, d orchestrator.Deps) error {
+		got = d.Cfg.ReviewAttemptsCap
+
+		return nil
+	})
+
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	_, err := Run(context.Background(), spec, newFakeOps(), &scriptedLLM{}, emit, openStdin(t))
+	require.NoError(t, err)
+	assert.Equal(t, 5, got, "the configured cap must reach orchestrator.Config")
 }
 
 // --- pushWIP direct tests ---------------------------------------------------

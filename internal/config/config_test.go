@@ -64,5 +64,6 @@ func TestPrintRedacted(t *testing.T) {
 	PrintRedacted(&buf, Defaults())
 	out := buf.String()
 	assert.Contains(t, out, "redacted")
+	assert.Contains(t, out, "max-turns")
 	assert.NotContains(t, out, "sk-")
 }

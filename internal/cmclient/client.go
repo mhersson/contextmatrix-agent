@@ -22,6 +22,17 @@ import (
 // treat it as a benign no-op: the card is already in the desired released state.
 var ErrCardNotClaimed = errors.New("card is not claimed")
 
+// ErrReviewAttemptsCapped is returned by IncrementReviewAttempts when
+// ContextMatrix refuses the increment because the card's review_attempts
+// counter already sits at the server-side ceiling. The orchestrator treats it
+// as an implicit park instead of a hard failure, so a resumed card that is
+// already at the ceiling still exits cleanly.
+//
+// The text mirrors ContextMatrix's service-layer sentinel, which is what
+// reaches an MCP caller - the REST-only REVIEW_ATTEMPTS_CAPPED error code never
+// appears in an MCP tool error.
+var ErrReviewAttemptsCapped = errors.New("review attempts limit reached")
+
 // Client is a card-operations client bound to one agent identity. Every method
 // is a typed wrapper over a single MCP tool call; all calls carry the agent ID.
 type Client struct {
@@ -670,7 +681,7 @@ func (c *Client) StartReview(ctx context.Context, cardID string) error {
 func (c *Client) IncrementReviewAttempts(ctx context.Context, cardID string) (int, error) {
 	text, err := c.call(ctx, "increment_review_attempts", map[string]any{"card_id": cardID})
 	if err != nil {
-		return 0, err
+		return 0, classifyIncrementError(err)
 	}
 
 	// increment_review_attempts returns {card: <board.Card>}.
@@ -684,6 +695,21 @@ func (c *Client) IncrementReviewAttempts(ctx context.Context, cardID string) (in
 	}
 
 	return payload.Card.ReviewAttempts, nil
+}
+
+// classifyIncrementError maps ContextMatrix's review-attempts ceiling rejection
+// to the typed ErrReviewAttemptsCapped sentinel, preserving the original
+// message in the chain. Other errors pass through unchanged; nil stays nil.
+func classifyIncrementError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	if strings.Contains(err.Error(), ErrReviewAttemptsCapped.Error()) {
+		return fmt.Errorf("%w: %w", ErrReviewAttemptsCapped, err)
+	}
+
+	return err
 }
 
 // SubtaskStates returns the per-card state for every subtask of the given

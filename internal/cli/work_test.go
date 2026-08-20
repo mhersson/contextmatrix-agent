@@ -249,6 +249,36 @@ func TestSpecFromEnv_MaxCapability(t *testing.T) {
 	})
 }
 
+// TestSpecFromEnv_ReviewAttemptsCap covers the env hop this knob depends on:
+// serve forwards the operator's serve.yaml value as CMX_REVIEW_ATTEMPTS_CAP,
+// and specFromEnv is the only place the worker reads it.
+func TestSpecFromEnv_ReviewAttemptsCap(t *testing.T) {
+	t.Run("absent uses the shared default", func(t *testing.T) {
+		setRequired(t)
+
+		spec, err := specFromEnv()
+		require.NoError(t, err)
+		assert.Equal(t, config.DefaultReviewAttemptsCap, spec.ReviewAttemptsCap)
+	})
+
+	t.Run("set value is carried into the spec", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("CMX_REVIEW_ATTEMPTS_CAP", "5")
+
+		spec, err := specFromEnv()
+		require.NoError(t, err)
+		assert.Equal(t, 5, spec.ReviewAttemptsCap)
+	})
+
+	t.Run("unparseable value is an error", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("CMX_REVIEW_ATTEMPTS_CAP", "many")
+
+		_, err := specFromEnv()
+		require.Error(t, err)
+	})
+}
+
 func TestSpecFromEnv_IntParsing(t *testing.T) {
 	t.Run("defaults", func(t *testing.T) {
 		setRequired(t)

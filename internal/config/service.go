@@ -21,6 +21,27 @@ import (
 // loses.
 const reconcileCap = 150 * time.Minute
 
+// DefaultReviewAttemptsCap is CM's review-attempts convention and the value
+// every layer resolves an unset (zero or negative) cap to: the serve config
+// omits the env var, the worker normalizes the RunSpec field, and the
+// orchestrator's review loop falls back to it.
+const DefaultReviewAttemptsCap = 3
+
+// MaxReviewAttemptsCap is the highest cap the review loop can carry without
+// tripping ContextMatrix's server-side ceiling of 7. With cap N the loop runs
+// N-1 cheap rounds - each incrementing review_attempts once - and the
+// authoritative pass then increments twice more before parking, so the counter
+// ends at N+1. N=6 lands it exactly on 7. N=7 would still park cleanly - its
+// final increment lands right at 7, the point it would park anyway - but N>=8
+// is rejected genuinely mid-loop, before the authoritative pass finishes.
+//
+// The arithmetic assumes a counter starting at 0. ContextMatrix never resets
+// review_attempts, so at N=6 one run consumes the card's entire lifetime
+// allowance: a later run on the same card still gets one full review round and
+// can approve and finish, but parks as soon as ContextMatrix refuses the next
+// increment rather than running its configured budget.
+const MaxReviewAttemptsCap = 6
+
 // defaultSecretsDir is a filesystem PATH, not a credential. Naming it via a
 // const avoids the gosec G101 false-positive that fires on the path literal
 // inside the defaults struct.
@@ -75,6 +96,13 @@ type ServiceConfig struct {
 	// unredacted secrets from model/tool output. Empty (the default) disables
 	// the feature. Logs are kept indefinitely - use an external logrotate.
 	LogDir string
+
+	// ReviewAttemptsCap is the number of review rounds the worker runs before
+	// parking the card in review. Workers receive it as
+	// CMX_REVIEW_ATTEMPTS_CAP. Valid range is 1..MaxReviewAttemptsCap; Validate
+	// rejects anything else. Zero means unset: the env var is omitted and the
+	// worker applies DefaultReviewAttemptsCap.
+	ReviewAttemptsCap int
 
 	// CACertFile is an optional path (on the serve host) to a PEM file of extra
 	// CA certificates for corporate TLS interception / a private-CA GitHub
@@ -158,6 +186,7 @@ type serviceRaw struct {
 	CompactionEnabled         bool              `koanf:"compaction_enabled"`
 	CompactionThreshold       float64           `koanf:"compaction_threshold"`
 	CompactionKeepRecentTurns int               `koanf:"compaction_keep_recent_turns"`
+	ReviewAttemptsCap         int               `koanf:"review_attempts_cap"`
 }
 
 // serviceDefaults is the lowest-precedence layer. Durations are wire-form
@@ -284,6 +313,7 @@ func (r serviceRaw) toConfig() (*ServiceConfig, error) {
 		LogLevel:                  r.LogLevel,
 		MaxCardCost:               r.MaxCardCost,
 		SelectorPriceHeadroom:     r.SelectorPriceHeadroom,
+		ReviewAttemptsCap:         r.ReviewAttemptsCap,
 		Compaction: CompactionConfig{
 			Enabled:         r.CompactionEnabled,
 			Threshold:       r.CompactionThreshold,
@@ -389,6 +419,19 @@ func (c *ServiceConfig) Validate() error {
 				"containers older than 150m externally, so the agent's own watchdog must fire first",
 			c.ContainerTimeout,
 		)
+	}
+
+	if c.ReviewAttemptsCap < 0 {
+		return fmt.Errorf("review_attempts_cap must be >= 0 (0 leaves the default of %d), got %d",
+			DefaultReviewAttemptsCap, c.ReviewAttemptsCap)
+	}
+
+	if c.ReviewAttemptsCap > MaxReviewAttemptsCap {
+		return fmt.Errorf(
+			"review_attempts_cap must be at most %d (0 leaves the default of %d), got %d: "+
+				"a higher cap makes the authoritative review pass push the card's "+
+				"review_attempts past ContextMatrix's server-side ceiling of 7 mid-loop",
+			MaxReviewAttemptsCap, DefaultReviewAttemptsCap, c.ReviewAttemptsCap)
 	}
 
 	if c.MaxCardCost < 0 {
