@@ -73,8 +73,8 @@ The harness core lives in the standalone `contextmatrix-harness` module; its own
 `tools` and the module free of any `contextmatrix-*` dependency. In this repo:
 
 - `internal/orchestrator` imports the harness module (`harness`, `llm`, `tools`,
-  `events`) plus `registry`, `cmclient`, and `config` (a leaf: stdlib and koanf
-  only, so it adds no edges of its own). It **never** imports `worker`; the
+  `events`) plus `registry`, `cmclient`, `config`, `mob`, and `verifyexec`. It **never**
+  imports `worker`; the
   git and card-ops surfaces are injected as interfaces (`Ops`, `GitOps`,
   `PRCreator`) declared in the orchestrator package.
 - `internal/worker` is the only place that wires the full stack together.
