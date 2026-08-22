@@ -217,7 +217,13 @@ func TestGatesArgBuilders(t *testing.T) {
 
 	assert.Equal(t, []string{"pr", "checks", prURL, "--json", "name,bucket,link,description"}, checksArgs(prURL))
 	assert.Equal(t, []string{"pr", "view", prURL, "--json", "headRefOid"}, headSHAArgs(prURL))
-	assert.Equal(t, []string{"pr", "view", prURL, "--json", "reviewRequests"}, reviewRequestsArgs(prURL))
+
+	// Copilot is a Bot-typed reviewer. gh's `pr view --json reviewRequests`
+	// exporter emits only User and Team nodes, so the pre-check reads the REST
+	// requested_reviewers endpoint, which lists the bot under users[].
+	got, err := reviewRequestsArgs("https://github.com/org/repo/pull/7")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"api", "repos/org/repo/pulls/7/requested_reviewers"}, got)
 
 	// addCopilotReviewerArgs now issues a REST API request to the
 	// requested_reviewers endpoint, bypassing gh pr edit's GraphQL login
@@ -396,8 +402,8 @@ func TestParseCombinedStatus(t *testing.T) {
 	assert.Equal(t, "pending", checks[2].Bucket)
 }
 
-// TestParseReviewRequests detects a Copilot reviewer request in a gh pr view
-// --json reviewRequests document, case-insensitively and regardless of where
+// TestParseReviewRequests detects a Copilot reviewer request in a REST
+// requested_reviewers document, case-insensitively and regardless of where
 // the login appears in the document shape.
 func TestParseReviewRequests(t *testing.T) {
 	t.Parallel()
@@ -407,9 +413,10 @@ func TestParseReviewRequests(t *testing.T) {
 		json string
 		want bool
 	}{
-		{"copilot bot requested", `{"reviewRequests":[{"login":"copilot-pull-request-reviewer[bot]"}]}`, true},
-		{"human requested", `{"reviewRequests":[{"login":"alice"}]}`, false},
-		{"bare copilot login", `{"login":"Copilot"}`, true},
+		{"copilot bot in users", `{"users":[{"login":"copilot-pull-request-reviewer[bot]","type":"Bot"}],"teams":[]}`, true},
+		{"human only", `{"users":[{"login":"alice","type":"User"}],"teams":[]}`, false},
+		{"empty", `{"users":[],"teams":[]}`, false},
+		{"bare copilot login", `{"users":[{"login":"Copilot"}]}`, true},
 	}
 
 	for _, tc := range tests {
@@ -901,6 +908,28 @@ exit 0
 	require.NoError(t, err)
 	assert.Equal(t, "api repos/org/repo/pulls/7/requested_reviewers --method POST -f reviewers[]=copilot-pull-request-reviewer[bot]",
 		strings.TrimSpace(string(log)))
+}
+
+// TestCopilotRequestedUsesRESTEndpoint pins the pre-check's data source: the
+// REST requested_reviewers endpoint, not gh pr view --json reviewRequests,
+// whose JSON exporter drops Bot-typed reviewers on every gh version.
+func TestCopilotRequestedUsesRESTEndpoint(t *testing.T) {
+	stubGH(t, `
+echo "$@" > args.log
+echo '{"users":[{"login":"copilot-pull-request-reviewer[bot]","type":"Bot"}],"teams":[]}'
+exit 0
+`)
+
+	workspace := t.TempDir()
+	pc := NewPRCreator(workspace, "", "", "")
+
+	requested, err := pc.CopilotRequested(t.Context(), "https://github.com/org/repo/pull/7")
+	require.NoError(t, err)
+	assert.True(t, requested)
+
+	log, err := os.ReadFile(filepath.Join(workspace, "args.log"))
+	require.NoError(t, err)
+	assert.Equal(t, "api repos/org/repo/pulls/7/requested_reviewers", strings.TrimSpace(string(log)))
 }
 
 // TestRequestCopilotReviewErrorSurfacesWrappedError verifies that a non-zero

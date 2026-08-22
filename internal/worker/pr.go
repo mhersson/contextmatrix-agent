@@ -342,10 +342,18 @@ func combinedStatusArgs(owner, repo, sha string) []string {
 	return []string{"api", fmt.Sprintf("repos/%s/%s/commits/%s/status", owner, repo, sha)}
 }
 
-// reviewRequestsArgs builds the gh pr view invocation that reports pending
-// review requests.
-func reviewRequestsArgs(prURL string) []string {
-	return []string{"pr", "view", prURL, "--json", "reviewRequests"}
+// reviewRequestsArgs builds the gh api invocation that lists the PR's pending
+// review requests through the REST requested_reviewers endpoint. gh's own
+// `pr view --json reviewRequests` is NOT usable here: its JSON exporter emits
+// only User and Team nodes and silently drops Bot-typed reviewers, and
+// Copilot's reviewer is a Bot - the pre-check would never see it.
+func reviewRequestsArgs(prURL string) ([]string, error) {
+	owner, repo, number, err := parsePRPath(prURL)
+	if err != nil {
+		return nil, fmt.Errorf("review requests: %w", err)
+	}
+
+	return []string{"api", fmt.Sprintf("repos/%s/%s/pulls/%d/requested_reviewers", owner, repo, number)}, nil
 }
 
 // addCopilotReviewerArgs builds the gh api invocation that requests a Copilot
@@ -403,8 +411,8 @@ func parseChecks(out string) ([]orchestrator.CheckResult, error) {
 	return checks, nil
 }
 
-// parseReviewRequests reports whether any reviewer request in a gh pr view
-// --json reviewRequests document names Copilot's PR review bot. gh's schema
+// parseReviewRequests reports whether any reviewer request in a REST
+// requested_reviewers document names Copilot's PR review bot. gh's schema
 // nests review-request logins differently for users, teams, and bots, so this
 // walks the decoded JSON for any "login" value rather than binding to one
 // fixed shape.
@@ -795,16 +803,21 @@ func (p *PRCreator) HeadSHA(ctx context.Context, prURL string) (string, error) {
 }
 
 // CopilotRequested reports whether Copilot's PR review bot is among the
-// pending review requests.
+// pending review requests (REST requested_reviewers: users[] + teams[]).
 func (p *PRCreator) CopilotRequested(ctx context.Context, prURL string) (bool, error) {
-	out, err := p.runGH(ctx, "", false, reviewRequestsArgs(prURL)...)
+	args, err := reviewRequestsArgs(prURL)
 	if err != nil {
-		return false, fmt.Errorf("gh pr view review requests: %w", err)
+		return false, fmt.Errorf("gh api review requests: %w", err)
+	}
+
+	out, err := p.runGH(ctx, "", false, args...)
+	if err != nil {
+		return false, fmt.Errorf("gh api review requests: %w", err)
 	}
 
 	requested, err := parseReviewRequests(out)
 	if err != nil {
-		return false, fmt.Errorf("gh pr view review requests: %w", err)
+		return false, fmt.Errorf("gh api review requests: %w", err)
 	}
 
 	return requested, nil
