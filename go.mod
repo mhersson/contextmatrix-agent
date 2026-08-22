@@ -11,15 +11,15 @@ require (
 	github.com/knadh/koanf/providers/posflag v1.0.2
 	github.com/knadh/koanf/providers/structs v1.0.1
 	github.com/knadh/koanf/v2 v2.3.6
-	github.com/mhersson/contextmatrix-backendkit v0.3.0
-	github.com/mhersson/contextmatrix-harness v0.16.0
+	github.com/mhersson/contextmatrix-backendkit v0.4.0
+	github.com/mhersson/contextmatrix-harness v0.17.0
 	github.com/mhersson/contextmatrix-protocol v0.16.0
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/prometheus/client_golang v1.24.1
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
-	github.com/stretchr/testify v1.12.0
+	github.com/stretchr/testify v1.12.1
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -65,7 +65,7 @@ require (
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.44.0 // indirect
 	go.opentelemetry.io/otel/metric v1.44.0 // indirect
 	go.opentelemetry.io/otel/trace v1.44.0 // indirect
-	go.yaml.in/yaml/v3 v3.0.4 // indirect
+	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/mod v0.40.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.21.0 // indirect

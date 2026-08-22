@@ -48,8 +48,11 @@ func (e *MaxTurnsError) Error() string {
 }
 
 // IncapableError marks a phase stopping because the model cannot drive the tool
-// loop - it emitted tool calls every turn but none parsed valid arguments. The
-// recovery path (recoverIncapable) catches this to blacklist the model and re-select.
+// loop - it emitted tool calls every turn but none parsed valid arguments.
+// Reason is the harness's own IncapableDetail sentence when the failure pattern
+// was classified (e.g. a suspected upstream gateway defect), or the generic
+// fallback otherwise. The recovery path (recoverIncapable) catches this to
+// blacklist the model and re-select.
 type IncapableError struct {
 	Model  string
 	Reason string
@@ -136,7 +139,12 @@ func (o *run) runModelCfg(ctx context.Context, reg *tools.Registry, prompt, mode
 	}
 
 	if err == nil && res.Reason == harness.ReasonIncapable {
-		return res, dur, &IncapableError{Model: model, Reason: "cannot drive the tool loop"}
+		reason := res.IncapableDetail
+		if reason == "" {
+			reason = "cannot drive the tool loop"
+		}
+
+		return res, dur, &IncapableError{Model: model, Reason: reason}
 	}
 
 	if err == nil && res.Reason == "max_turns" {

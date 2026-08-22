@@ -107,6 +107,11 @@ type fakeOps struct {
 	usageReports     []cmclient.UsageReport
 	reportUsageErr   error
 	reportUsageTotal float64
+
+	// blacklistedReasons captures the reason passed on each BlacklistModel call
+	// (index-aligned to call order) so tests can assert the reason reaching CM,
+	// not just that a call happened.
+	blacklistedReasons []string
 }
 
 // createCardCall is a recorded CreateCard invocation.
@@ -334,7 +339,23 @@ func (f *fakeOps) ReportPush(_ context.Context, cardID, branch, prURL string) er
 func (f *fakeOps) BlacklistModel(_ context.Context, cardID, model, reason string) error {
 	f.record(fmt.Sprintf("BlacklistModel:%s/%s", cardID, model))
 
+	f.mu.Lock()
+	f.blacklistedReasons = append(f.blacklistedReasons, reason)
+	f.mu.Unlock()
+
 	return nil
+}
+
+// blacklistReasons returns a copy of the reasons passed to every BlacklistModel
+// call, in call order.
+func (f *fakeOps) blacklistReasons() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	out := make([]string, len(f.blacklistedReasons))
+	copy(out, f.blacklistedReasons)
+
+	return out
 }
 
 func (f *fakeOps) CompleteTask(_ context.Context, cardID, summary string) error {

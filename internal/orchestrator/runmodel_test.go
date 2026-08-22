@@ -161,10 +161,14 @@ func TestRunModelNormalizesContextLimit(t *testing.T) {
 
 // TestRunModelNormalizesIncapable pins that when the harness returns
 // Reason == "incapable" (model emits tool calls every turn but none parse),
-// runModel surfaces it as an *IncapableError carrying the model name. It mirrors
-// the context-limit test: inject a fake LLM whose every response contains an
+// runModel surfaces it as an *IncapableError carrying the model name and, when
+// the harness classified the failure pattern, the harness's own IncapableDetail
+// sentence as the Reason (rather than the generic fallback). It mirrors the
+// context-limit test: inject a fake LLM whose every response contains the same
 // unparseable tool call (bad JSON → harness never marks turnHadCapableTool) so
-// after IncapableThreshold turns the harness sets Reason = ReasonIncapable.
+// after IncapableThreshold turns the harness sets Reason = ReasonIncapable and,
+// because every failed payload is identical, classifies it as a suspected
+// upstream gateway defect.
 func TestRunModelNormalizesIncapable(t *testing.T) {
 	ops := &fakeOps{taskContext: cmclient.TaskContext{}}
 
@@ -197,6 +201,46 @@ func TestRunModelNormalizesIncapable(t *testing.T) {
 	// The result is returned alongside the error so the caller's
 	// Spend/ReportUsage pattern still works.
 	assert.Equal(t, "incapable", res.Reason)
+
+	// Identical payloads on every turn are classified: the harness's own
+	// detail sentence is carried through as the error's Reason, not pinned
+	// verbatim - only that it is non-empty and passed through unchanged.
+	require.NotEmpty(t, res.IncapableDetail, "the identical-payload pattern must classify")
+	assert.Equal(t, res.IncapableDetail, ie.Reason, "the harness detail is carried through as the error reason")
+	assert.Contains(t, ie.Reason, "suspected upstream gateway defect")
+}
+
+// TestRunModelNormalizesIncapableEmptyDetail pins the fallback: when the
+// harness cannot classify the failure pattern (distinct malformed payloads
+// each turn, so classifyIncapable finds no evidence of a transport defect),
+// Result.IncapableDetail is empty and runModel falls back to the original
+// generic reason rather than surfacing an empty string.
+func TestRunModelNormalizesIncapableEmptyDetail(t *testing.T) {
+	ops := &fakeOps{taskContext: cmclient.TaskContext{}}
+
+	resp := func(args string) llm.Response {
+		return llm.Response{ToolCalls: []llm.ToolCall{{
+			ID:       "bad-1",
+			Type:     "function",
+			Function: llm.FunctionCall{Name: "read", Arguments: args},
+		}}}
+	}
+	llmFake := &planLLM{responses: []llm.Response{
+		resp(`{ bad 1`), resp(`{ bad 2`), resp(`{ bad 3`), resp(`{ bad 4`), resp(`{ bad 5`),
+	}}
+	d := planTestDeps(ops, llmFake)
+
+	o := newRun(d, ops.taskContext)
+
+	res, _, err := o.runModel(context.Background(), d.ReadTools, "do the thing", "default/model")
+
+	require.Error(t, err, "incapable must surface as an error")
+
+	var ie *IncapableError
+	require.ErrorAs(t, err, &ie)
+	assert.Equal(t, "incapable", res.Reason)
+	assert.Empty(t, res.IncapableDetail, "distinct payloads give the classifier no evidence")
+	assert.Equal(t, "cannot drive the tool loop", ie.Reason)
 }
 
 // TestRunModelNormalizesMaxTurns pins that a run stopping at the turn cap
