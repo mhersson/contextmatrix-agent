@@ -522,6 +522,41 @@ func TestCIGate_ShowsOnlyThePollsThatMoved(t *testing.T) {
 	}, gateProgressStatuses(t, &transcript))
 }
 
+// TestPRGates_DecisionsAreEmittedAsGateProgressEvents: gate verdicts used to
+// reach only the card activity log, so a worker run log said nothing about
+// which gates ran or how the Copilot gate exited. Every decision now rides the
+// gate_progress channel (repeat=false, so the serve transcript shows it) and
+// the durable run log carries it. Decisions carry decision=true, which
+// gateProgressStatuses filters out - the poll-only assertions elsewhere stay
+// exact - so this test reads them through gateDecisionStatuses.
+func TestPRGates_DecisionsAreEmittedAsGateProgressEvents(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		reviews:   []*CopilotReview{copilotReviewOnHead("LGTM")},
+		checks:    [][]CheckResult{{{Name: "ci", Bucket: "pass"}}},
+	}
+	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
+
+	tc := copilotGateContext("Events", "body")
+	tc.AwaitCI = true
+
+	var transcript bytes.Buffer
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, tc, 0)
+	o.d.Emit = events.NewEmitter(nil, &transcript)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	shown := strings.Join(gateDecisionStatuses(t, &transcript), "\n")
+	assert.Contains(t, shown, "pr_gates: entering - await_ci=true await_copilot_review=true")
+	assert.Contains(t, shown, "pr_url="+gatePRURL)
+	assert.Contains(t, shown, "pr_gates: Copilot review addressed")
+	assert.Contains(t, shown, "pr_gates: CI green")
+	assert.Contains(t, shown, "pr_gates: passed")
+}
+
 // TestGateDeadlineClampsToContainerDeadline: a gate never waits past the
 // container's own deadline, and an unset (zero) deadline leaves it unbounded.
 func TestGateDeadlineClampsToContainerDeadline(t *testing.T) {
@@ -564,9 +599,25 @@ func ciGateContext(title, body string) cmclient.TaskContext {
 	}
 }
 
-// gateProgressStatuses decodes the statuses of every gate_progress event the
+// gateProgressStatuses decodes the statuses of every gate_progress POLL the
 // emitter wrote, keeping only the ones the log bridge would SHOW (repeat=false).
+// Decisions (decision=true) ride the same event kind but are not polls, so they
+// are filtered out here and read through gateDecisionStatuses instead.
 func gateProgressStatuses(t *testing.T, transcript *bytes.Buffer) []string {
+	t.Helper()
+
+	return gateProgressLines(t, transcript, false)
+}
+
+// gateDecisionStatuses decodes the statuses of every gate_progress DECISION the
+// emitter wrote - the gateNote lines, not the poll heartbeat.
+func gateDecisionStatuses(t *testing.T, transcript *bytes.Buffer) []string {
+	t.Helper()
+
+	return gateProgressLines(t, transcript, true)
+}
+
+func gateProgressLines(t *testing.T, transcript *bytes.Buffer, decisions bool) []string {
 	t.Helper()
 
 	var shown []string
@@ -579,14 +630,15 @@ func gateProgressStatuses(t *testing.T, transcript *bytes.Buffer) []string {
 		var ev struct {
 			Kind string `json:"kind"`
 			Data struct {
-				Status string `json:"status"`
-				Repeat bool   `json:"repeat"`
+				Status   string `json:"status"`
+				Repeat   bool   `json:"repeat"`
+				Decision bool   `json:"decision"`
 			} `json:"data"`
 		}
 
 		require.NoError(t, json.Unmarshal([]byte(line), &ev))
 
-		if ev.Kind == gateProgressKind && !ev.Data.Repeat {
+		if ev.Kind == gateProgressKind && !ev.Data.Repeat && ev.Data.Decision == decisions {
 			shown = append(shown, ev.Data.Status)
 		}
 	}

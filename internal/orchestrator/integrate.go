@@ -97,6 +97,9 @@ func runIntegrate(ctx context.Context, o *run) error {
 			d.logCard(ctx, "integrate: pull request creation failed - branch is pushed; open the PR manually: %s", err.Error())
 		} else {
 			prURL = url
+
+			slog.Info("integrate: pull request opened", "card_id", cfg.CardID, "pr_url", prURL)
+			d.logCard(ctx, "integrate: pull request opened: %s", prURL)
 		}
 	}
 
@@ -107,6 +110,8 @@ func runIntegrate(ctx context.Context, o *run) error {
 	if err := d.Ops.ReportPush(ctx, cfg.CardID, cfg.Branch, prURL); err != nil {
 		return fmt.Errorf("report push: %w", err)
 	}
+
+	slog.Info("integrate: push reported", "card_id", cfg.CardID, "branch", cfg.Branch, "pr_url", prURL)
 
 	return nil
 }
