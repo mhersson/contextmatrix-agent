@@ -739,6 +739,48 @@ func TestPlanPhaseSkipsDiagnoseForFeatureCard(t *testing.T) {
 		"feature card plan prompt must not carry an injected diagnosis block")
 }
 
+// TestPlanPhaseDiagnoseIncapableModelIsRecovered: a model that cannot drive
+// the tool loop in the diagnose step is blacklisted and excluded right there,
+// and the plan does not proceed on the same model - the run that motivated
+// this re-used such a model as seat, moderator and first coder.
+func TestPlanPhaseDiagnoseIncapableModelIsRecovered(t *testing.T) {
+	ops := &fakeOps{
+		taskContext: cmclient.TaskContext{
+			Title: "Fix the broken parser", Description: "it throws on empty input",
+		},
+		createdIDs: []string{"SUB-1", "SUB-2"},
+	}
+	d := planTestDeps(ops, nil)
+	// planTestRegistry carries no priors, so every decision pick degrades to the
+	// capable default and excluding it cannot change the answer. The reviewer
+	// registry scores four reviewer-tier models, so the re-selection lands on a
+	// different one and the "not the incapable model" assertion is not vacuous.
+	d.Registry = reviewerRegistry()
+
+	// The decision model the registry resolves first is incapable; the
+	// registry's next pick must answer the plan.
+	first := resolveDecisionModel(context.Background(), d.Registry, d.Emit, ops, "CARD-1",
+		"", d.Cfg.PayloadModel, d.Cfg.DefaultModel, nil)
+	llmFake := &modelAwareLLM{
+		incapable: map[string]bool{first: true},
+		responses: []llm.Response{stopResp(goodPlanJSON, 0.03)},
+	}
+	d.Client = llmFake
+
+	o := newRun(d, ops.taskContext)
+	require.NoError(t, runPlan(context.Background(), o))
+
+	assert.Contains(t, ops.recorded(), "BlacklistModel:CARD-1/"+first,
+		"the diagnose-incapable model is blacklisted; calls=%v", ops.recorded())
+	assert.True(t, o.excluded[first], "and excluded for the rest of the run")
+
+	models := llmFake.recordedModels()
+	require.NotEmpty(t, models)
+	assert.NotEqual(t, first, models[len(models)-1],
+		"the plan did not run on the incapable model; models=%v", models)
+	assert.True(t, ops.loggedContains("planning without a diagnosis"), "logs=%v", ops.recorded())
+}
+
 func TestResolveOrchestratorModel(t *testing.T) {
 	reg := planTestRegistry()
 	emit := events.NewEmitter(nil, nil)
@@ -792,7 +834,7 @@ func TestResolveDecisionModelFloorsWeakPayload(t *testing.T) {
 	ops := &fakeOps{}
 
 	got := resolveDecisionModel(context.Background(), reg, emit, ops, "CARD-1",
-		"", "payload/model", "default/model")
+		"", "payload/model", "default/model", nil)
 
 	assert.Equal(t, "rev/alpha", got)
 	assert.NotEqual(t, "payload/model", got)
@@ -805,7 +847,7 @@ func TestResolveDecisionModelHonorsPin(t *testing.T) {
 	ops := &fakeOps{}
 
 	got := resolveDecisionModel(context.Background(), reg, emit, ops, "CARD-1",
-		"pinned/model", "payload/model", "default/model")
+		"pinned/model", "payload/model", "default/model", nil)
 
 	assert.Equal(t, "pinned/model", got)
 }
@@ -816,7 +858,7 @@ func TestResolveDecisionModelUnresolvablePinFloorsAndWarns(t *testing.T) {
 	ops := &fakeOps{}
 
 	got := resolveDecisionModel(context.Background(), reg, emit, ops, "CARD-1",
-		"ghost/model", "payload/model", "default/model")
+		"ghost/model", "payload/model", "default/model", nil)
 
 	assert.Equal(t, "rev/alpha", got)
 
@@ -837,7 +879,7 @@ func TestResolveDecisionModelNilRegistryFallsBack(t *testing.T) {
 	ops := &fakeOps{}
 
 	got := resolveDecisionModel(context.Background(), nil, emit, ops, "CARD-1",
-		"", "payload/model", "default/model")
+		"", "payload/model", "default/model", nil)
 
 	assert.Equal(t, "payload/model", got)
 }
@@ -848,7 +890,7 @@ func TestResolveDecisionModelEmptyPoolReturnsCapableDefault(t *testing.T) {
 	ops := &fakeOps{}
 
 	got := resolveDecisionModel(context.Background(), reg, emit, ops, "CARD-1",
-		"", "payload/model", "default/model")
+		"", "payload/model", "default/model", nil)
 
 	assert.Equal(t, "default/model", got)
 }

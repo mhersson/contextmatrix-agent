@@ -386,7 +386,7 @@ func (o *run) mobModeratorRunner(sink *seatDebugSink, step string) mob.Moderator
 	return func(ctx context.Context, prompt string) (string, string, float64, error) {
 		if model == "" {
 			model = resolveDecisionModel(ctx, o.d.Registry, o.d.Emit, o.d.Ops, o.d.Cfg.CardID,
-				o.tc.ModelOrchestrator, o.d.Cfg.PayloadModel, o.d.Cfg.DefaultModel)
+				o.tc.ModelOrchestrator, o.d.Cfg.PayloadModel, o.d.Cfg.DefaultModel, o.excludedModels())
 		}
 
 		cfg := o.harnessConfig(model)

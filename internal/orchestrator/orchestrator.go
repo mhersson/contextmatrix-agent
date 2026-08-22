@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"sync"
 	"time"
 
@@ -720,6 +721,15 @@ func (o *run) recoverIncapable(ctx context.Context, ie *IncapableError) error {
 	o.d.logCard(ctx, "model %q harness-incapable; blacklisted and re-selecting (attempt %d/%d)", ie.Model, attempt, reselectCap)
 
 	return nil
+}
+
+// excludedModels returns a copy of the run's exclusion set, safe to hand to a
+// selector while Best-of-N candidates may be growing the original.
+func (o *run) excludedModels() map[string]bool {
+	o.selMu.Lock()
+	defer o.selMu.Unlock()
+
+	return maps.Clone(o.excluded)
 }
 
 // isTerminal reports whether a subtask state counts as already finished and
