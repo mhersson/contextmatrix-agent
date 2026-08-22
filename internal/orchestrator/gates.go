@@ -47,10 +47,12 @@ const (
 // whose tail moved (line numbers shift as the branch grows) still matches.
 const copilotKeyBodyChars = 80
 
-// copilotCommentLineRe matches the "- <path>: <digest>" lines recordCopilotRound
-// writes under its comments heading. Keep the two in sync: they are the write and
-// read halves of the dedupe key.
-var copilotCommentLineRe = regexp.MustCompile(`^- (.+?): (.*)$`)
+// copilotCommentLineRe matches the "- [VALID|INVALID ]<path>: <digest>" lines
+// recordCopilotRound writes under its comments heading. The verdict group is
+// optional so a line written before verdicts were recorded still parses. Keep
+// the two in sync: they are the write and read halves of the dedupe key and,
+// with the verdict, of the triage record.
+var copilotCommentLineRe = regexp.MustCompile(`^- (?:(VALID|INVALID) )?(.+?): (.*)$`)
 
 // Park reasons for a gate that ran out of the resources its fix rounds need.
 // Both park the card in review rather than failing the run: the work is already
@@ -334,7 +336,7 @@ func (o *run) copilotGate(ctx context.Context, prURL string, st *gatesState) err
 
 	// Seeded from the card body so the dedupe survives a park/re-trigger, then
 	// grown in memory as this run triages further rounds.
-	seen := copilotSeenComments(o.body)
+	triaged := copilotTriagedComments(o.body)
 
 	// A review may already be on the head - a re-trigger after a park, or a
 	// ruleset review that landed while integrate was finishing. Reading it is
@@ -342,7 +344,7 @@ func (o *run) copilotGate(ctx context.Context, prURL string, st *gatesState) err
 	if review := o.copilotReviewOnHead(ctx, prURL); review != nil {
 		o.gateNote(ctx, "copilot", "pr_gates: Copilot review already on the PR head; triaging it", nil)
 
-		satisfied, err := o.copilotReviewCycle(ctx, prURL, st, seen, review)
+		satisfied, err := o.copilotReviewCycle(ctx, prURL, st, triaged, review)
 		if err != nil || satisfied {
 			return err
 		}
@@ -377,7 +379,7 @@ func (o *run) copilotGate(ctx context.Context, prURL string, st *gatesState) err
 			return o.skipCopilot(ctx, st, "pr_gates: Copilot review did not arrive in time; proceeding")
 		}
 
-		satisfied, err := o.copilotReviewCycle(ctx, prURL, st, seen, review)
+		satisfied, err := o.copilotReviewCycle(ctx, prURL, st, triaged, review)
 		if err != nil || satisfied {
 			return err
 		}
@@ -400,7 +402,7 @@ func (o *run) copilotLateCheck(ctx context.Context, prURL string, st *gatesState
 
 	o.gateNote(ctx, "copilot", "pr_gates: late Copilot review found on the PR head; triaging it", nil)
 
-	satisfied, err := o.copilotReviewCycle(ctx, prURL, st, copilotSeenComments(o.body), review)
+	satisfied, err := o.copilotReviewCycle(ctx, prURL, st, copilotTriagedComments(o.body), review)
 	if err != nil {
 		return false, err
 	}
@@ -443,35 +445,57 @@ func (o *run) copilotReviewOnHead(ctx context.Context, prURL string) *CopilotRev
 // copilotReviewCycle handles one arrived review: dedupes against what earlier
 // rounds triaged, triages the fresh comments, and either passes the gate
 // (satisfied=true) or spends a fix round and re-requests the review
-// (satisfied=false - the caller waits for the re-review of the new head).
+// (satisfied=false - the caller waits for the re-review of the new head). A
+// comment an earlier round triaged VALID counts as still open when Copilot
+// repeats it verbatim - the fix round did not actually resolve it - and it
+// funds a fix round of its own, folded in with anything freshly triaged VALID
+// this round.
 func (o *run) copilotReviewCycle(
-	ctx context.Context, prURL string, st *gatesState, seen map[string]bool, review *CopilotReview,
+	ctx context.Context, prURL string, st *gatesState, triaged map[string]bool, review *CopilotReview,
 ) (bool, error) {
-	fresh := unseenComments(review.Comments, seen)
+	fresh := unseenComments(review.Comments, triaged)
+	reopened := repeatedValidComments(review.Comments, triaged)
 
 	// Copilot re-posts the comments it already made on every re-review. A
-	// round that carries nothing new is nothing to fix - re-triaging it would
-	// spend a round undoing work an earlier round already did.
-	if len(review.Comments) > 0 && len(fresh) == 0 {
-		st.CopilotDetail = "- pr_gates: Copilot repeated only comments already triaged; gate passes\n"
+	// round that carries nothing new AND nothing still open is nothing to
+	// act on - re-triaging it would spend a round undoing work an earlier
+	// round already did.
+	if len(review.Comments) > 0 && len(fresh) == 0 && len(reopened) == 0 {
+		st.CopilotDetail = "- pr_gates: Copilot repeated only comments already triaged as invalid; gate passes\n"
 		st.CopilotSatisfied = true
 
-		o.gateNote(ctx, "copilot", "pr_gates: Copilot repeated only comments already triaged; gate passes", nil)
+		o.gateNote(ctx, "copilot", "pr_gates: Copilot repeated only comments already triaged as invalid; gate passes", nil)
 
 		return true, nil
 	}
 
-	findings, terr := o.triageCopilot(ctx, st, review, fresh)
-	if terr != nil {
-		return false, terr
+	var findings []copilotFinding
+
+	// A round with nothing fresh to judge - only a comment a previous round
+	// already triaged VALID, still open - has nothing left for the triage
+	// model to say, so it skips the call and goes straight to the reopened
+	// finding below. A body-only review (no line comments at all) never sets
+	// skipTriage, since reopened is empty then too, and still triages as usual.
+	skipTriage := len(fresh) == 0 && len(reopened) > 0
+
+	if !skipTriage {
+		var terr error
+
+		findings, terr = o.triageCopilot(ctx, st, review, fresh)
+		if terr != nil {
+			return false, terr
+		}
+
+		verdicts := copilotCommentVerdicts(fresh, findings)
+		for i, c := range fresh {
+			triaged[copilotCommentKey(c.Path, c.Body)] = verdicts[i]
+		}
 	}
 
-	for _, c := range fresh {
-		seen[copilotCommentKey(c.Path, c.Body)] = true
-	}
+	stillOpen := commentsAsFindings(reopened, copilotRepeatedReason)
+	stillOpen = append(stillOpen, validCopilotFindings(findings)...)
 
-	valid := validCopilotFindings(findings)
-	if len(valid) == 0 {
+	if len(stillOpen) == 0 {
 		st.CopilotDetail = "- pr_gates: Copilot review addressed\n"
 		st.CopilotSatisfied = true
 
@@ -480,7 +504,13 @@ func (o *run) copilotReviewCycle(
 		return true, nil
 	}
 
-	if ferr := o.copilotFixRound(ctx, st, valid); ferr != nil {
+	if len(reopened) > 0 {
+		o.gateNote(ctx, "copilot", fmt.Sprintf(
+			"pr_gates: Copilot repeated %d finding(s) an earlier fix round did not resolve; fixing again", len(reopened)),
+			map[string]any{"reopened": len(reopened)})
+	}
+
+	if ferr := o.copilotFixRound(ctx, st, stillOpen); ferr != nil {
 		return false, ferr
 	}
 
@@ -815,12 +845,56 @@ func (o *run) recordCopilotRound(
 	if len(comments) > 0 {
 		b.WriteString("\n### " + copilotCommentsHeading + "\n\n")
 
-		for _, c := range comments {
-			fmt.Fprintf(&b, "- %s: %s\n", c.Path, copilotCommentDigest(c.Body))
+		verdicts := copilotCommentVerdicts(comments, findings)
+		for i, c := range comments {
+			verdict := "INVALID"
+			if verdicts[i] {
+				verdict = "VALID"
+			}
+
+			fmt.Fprintf(&b, "- %s %s: %s\n", verdict, flattenComment(c.Path), copilotCommentDigest(c.Body))
 		}
 	}
 
 	o.recordSection(ctx, heading, b.String())
+}
+
+// copilotCommentVerdicts pairs each comment with the triage verdict it
+// received, for recordCopilotRound to write and copilotTriagedComments to read
+// back. The triage prompt asks for one finding entry per comment, in the order
+// given, so when the counts match the pairing is by index. A triage response
+// that omits or duplicates an entry breaks that alignment, so the fallback ORs
+// the Valid flag over every finding naming the comment's path instead; a
+// comment no finding names at all was never judged and reads VALID, since an
+// unjudged comment must never be recorded as safe to ignore.
+func copilotCommentVerdicts(comments []ReviewComment, findings []copilotFinding) []bool {
+	verdicts := make([]bool, len(comments))
+
+	if len(findings) == len(comments) {
+		for i, f := range findings {
+			verdicts[i] = f.Valid
+		}
+
+		return verdicts
+	}
+
+	for i, c := range comments {
+		var (
+			matched bool
+			valid   bool
+		)
+
+		for _, f := range findings {
+			if f.File == c.Path {
+				matched = true
+				valid = valid || f.Valid
+			}
+		}
+
+		verdicts[i] = valid || !matched
+	}
+
+	return verdicts
 }
 
 // parseCopilotTriage extracts the triage verdict JSON with the same extractor the
@@ -839,11 +913,14 @@ func parseCopilotTriage(s string) ([]copilotFinding, error) {
 	return t.Findings, nil
 }
 
-// Why a comment stands unjudged, recorded as its finding's reason so the card
-// never presents a face-value fix as a triage decision.
+// Why a comment stands as a finding without this round's triage judging it
+// fresh: unreadable or missing verdict, or already judged real and still open
+// after a fix round. Recorded as the finding's reason so the card never
+// presents any of these as a fresh triage decision.
 const (
 	copilotUnreadableReason = "the triage verdict could not be read - the comment is taken at face value"
 	copilotUnjudgedReason   = "the triage returned no verdict for this comment - it is taken at face value"
+	copilotRepeatedReason   = "Copilot repeated this finding after a fix round - it was triaged as a real defect and is still open"
 )
 
 // commentsAsFindings is the conservative reading of a review the triage did not
@@ -930,11 +1007,16 @@ func formatCopilotComments(comments []ReviewComment) string {
 	return b.String()
 }
 
-// copilotSeenComments rebuilds the set of comments already triaged from every
-// Copilot round recorded on the card body. It is what makes the dedupe survive a
-// park/re-trigger: a fresh container re-reads the rounds an earlier one wrote.
-func copilotSeenComments(body string) map[string]bool {
-	seen := make(map[string]bool)
+// copilotTriagedComments rebuilds the comments already triaged from every
+// Copilot round recorded on the card body, keyed by copilotCommentKey with the
+// recorded verdict as the value (true = triaged VALID). It is what makes the
+// dedupe survive a park/re-trigger: a fresh container re-reads the rounds an
+// earlier one wrote. A line recorded before verdicts were tracked carries none
+// and reads as VALID - the conservative reading. Read the map with the comma-ok
+// form, never a bare index: an INVALID verdict stores false, so a bare read
+// cannot tell "triaged INVALID" from "never triaged".
+func copilotTriagedComments(body string) map[string]bool {
+	triaged := make(map[string]bool)
 	collecting := false
 
 	for line := range strings.SplitSeq(sectionsWithPrefix(body, copilotSectionHeading), "\n") {
@@ -949,19 +1031,23 @@ func copilotSeenComments(body string) map[string]bool {
 		}
 
 		if m := copilotCommentLineRe.FindStringSubmatch(line); m != nil {
-			seen[copilotCommentKey(m[1], m[2])] = true
+			verdict, path, digest := m[1], m[2], m[3]
+			triaged[copilotCommentKey(path, digest)] = verdict != "INVALID"
 		}
 	}
 
-	return seen
+	return triaged
 }
 
-// unseenComments drops the comments a previous round already triaged.
-func unseenComments(comments []ReviewComment, seen map[string]bool) []ReviewComment {
+// unseenComments drops the comments a previous round already triaged. It is a
+// membership test, not a value test: an INVALID verdict stores false in
+// triaged, and that comment must still be filtered as already triaged rather
+// than read as "not seen".
+func unseenComments(comments []ReviewComment, triaged map[string]bool) []ReviewComment {
 	fresh := make([]ReviewComment, 0, len(comments))
 
 	for _, c := range comments {
-		if seen[copilotCommentKey(c.Path, c.Body)] {
+		if _, ok := triaged[copilotCommentKey(c.Path, c.Body)]; ok {
 			continue
 		}
 
@@ -971,12 +1057,29 @@ func unseenComments(comments []ReviewComment, seen map[string]bool) []ReviewComm
 	return fresh
 }
 
-// copilotCommentKey identifies a review comment for dedupe: its path plus the
-// bounded, single-line head of its body. The recorded line and the live comment
-// go through the same digest, so what a human reads on the card is exactly what
-// the next round compares against.
+// repeatedValidComments returns the review comments Copilot re-posted that an
+// earlier round triaged VALID: the fix round spent on them did not resolve the
+// finding, so it is still open and must not pass the gate as already triaged.
+func repeatedValidComments(comments []ReviewComment, triaged map[string]bool) []ReviewComment {
+	reopened := make([]ReviewComment, 0, len(comments))
+
+	for _, c := range comments {
+		if valid, ok := triaged[copilotCommentKey(c.Path, c.Body)]; ok && valid {
+			reopened = append(reopened, c)
+		}
+	}
+
+	return reopened
+}
+
+// copilotCommentKey identifies a review comment for dedupe: its flattened path
+// plus the bounded, single-line head of its body. The recorded line and the
+// live comment go through the same flattening and digest, so what a human reads
+// on the card is exactly what the next round compares against - and a path
+// carrying a newline cannot break the recorded line shape any more than a body
+// can.
 func copilotCommentKey(path, body string) string {
-	return path + "\x00" + copilotCommentDigest(body)
+	return flattenComment(path) + "\x00" + copilotCommentDigest(body)
 }
 
 // copilotCommentDigest is the single-line, bounded form of a comment body: one
