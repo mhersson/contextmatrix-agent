@@ -425,7 +425,7 @@ func TestGatesKnobDefaults(t *testing.T) {
 	zero := &run{}
 	assert.Equal(t, 60*time.Second, zero.gatesPoll())
 	assert.Equal(t, 45*time.Minute, zero.ciWait())
-	assert.Equal(t, 10*time.Minute, zero.copilotWait())
+	assert.Equal(t, 20*time.Minute, zero.copilotWait())
 
 	set := &run{d: Deps{Cfg: Config{
 		GatesPollInterval:       5 * time.Second,

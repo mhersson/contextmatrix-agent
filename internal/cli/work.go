@@ -186,7 +186,7 @@ func specFromEnv() (worker.RunSpec, error) {
 		return worker.RunSpec{}, err
 	}
 
-	gatesCopilotWaitSeconds, err := envInt("CMX_GATES_COPILOT_WAIT_TIMEOUT_SECONDS", 600)
+	gatesCopilotWaitSeconds, err := envInt("CMX_GATES_COPILOT_WAIT_TIMEOUT_SECONDS", 1200)
 	if err != nil {
 		return worker.RunSpec{}, err
 	}
