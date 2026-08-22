@@ -1412,26 +1412,34 @@ func TestCopilotGate_SkipPathsDoNotWriteSatisfiedMarker(t *testing.T) {
 		"an unavailable reviewer must remain retryable; body=%q", ops.lastBody())
 }
 
-// TestCopilotGate_ReviewerNeverAppearsSkipsWithNote: the request API can return
-// success without adding the reviewer. The gate re-checks, says so on the card,
-// and proceeds instead of waiting out the full timeout on a review that is never
-// coming.
-func TestCopilotGate_ReviewerNeverAppearsSkipsWithNote(t *testing.T) {
+// TestCopilotGate_ReviewerNotListedStillWaits: a request that succeeds without
+// the reviewer showing up in the PR's pending requests is NOT proof Copilot
+// cannot review - rulesets add the reviewer asynchronously and the listing
+// lags - so the gate records the observation and still waits for the review.
+func TestCopilotGate_ReviewerNotListedStillWaits(t *testing.T) {
 	shrinkCopilotRecheck(t, time.Millisecond)
 
 	ops := &fakeOps{}
-	gates := &fakeGates{requestSilentlyNoOps: true}
-	client := &planLLM{}
+	gates := &fakeGates{
+		requestSilentlyNoOps: true,
+		headSHA:              copilotHeadSHA,
+		reviews:              []*CopilotReview{copilotReviewOnHead("LGTM")},
+	}
+	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
 
 	o := prGateRun(ops, gates, &fakeGit{}, client, copilotGateContext("Silent no-op", "body"), 0)
 
 	require.NoError(t, runPRGates(context.Background(), o))
 
-	assert.True(t, ops.loggedContains("not added as a reviewer"),
-		"the card names the silent failure; logs=%v", ops.recorded())
-	assert.Equal(t, -1, indexOfCall(gates.recorded(), "CopilotReview:"+gatePRURL),
-		"no wait loop runs when the reviewer never appeared; calls=%v", gates.recorded())
-	assert.Zero(t, modelCallCount(client))
+	calls := gates.recorded()
+	assert.GreaterOrEqual(t, indexOfCall(calls, "CopilotReview:"+gatePRURL), 0,
+		"the gate must enter the wait loop; calls=%v", calls)
+	assert.True(t, ops.loggedContains("not listed as a reviewer"),
+		"the observation is recorded verbatim; logs=%v", ops.recorded())
+	assert.False(t, ops.loggedContains("unavailable"),
+		"an unlisted reviewer must not read as Copilot unavailability; logs=%v", ops.recorded())
+	assert.Equal(t, 1, modelCallCount(client), "the arrived review is triaged")
+	assert.True(t, ops.loggedContains("Copilot review addressed"))
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
 }
 

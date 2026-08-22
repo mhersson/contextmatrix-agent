@@ -250,14 +250,16 @@ func runPRGates(ctx context.Context, o *run) error {
 // fix rounds on the findings it judges real.
 //
 // Copilot being unavailable NEVER parks the card. A proven "cannot review"
-// response - a 422 "Copilot isn't available for this repository", or a request
-// that succeeded without adding the reviewer - records the verbatim reason on
-// the card and passes the gate. A generic request failure (e.g. a GraphQL
-// login-resolution error) is NOT treated as unavailability: the gate still
-// enters the wait loop, because a repo-automated Copilot review may arrive
-// regardless, and a review that never arrives is recorded and passed at the
-// wait deadline. The gate parks only on findings it could not get fixed, or on
-// running out of budget or turns while fixing them.
+// response - a 422 "Copilot isn't available for this repository" - records the
+// verbatim reason on the card and passes the gate. A generic request failure
+// (e.g. a GraphQL login-resolution error) is NOT treated as unavailability: the
+// gate still enters the wait loop, because a repo-automated Copilot review may
+// arrive regardless, and a review that never arrives is recorded and passed at
+// the wait deadline. A request that succeeds without the bot showing up in the
+// pending reviewer list is recorded and waited through, not skipped - rulesets
+// add Copilot asynchronously and gh cannot be trusted to list bots. The gate
+// parks only on findings it could not get fixed, or on running out of budget or
+// turns while fixing them.
 func (o *run) copilotGate(ctx context.Context, prURL string, st *gatesState) error {
 	if st.CopilotSatisfied {
 		o.d.logCard(ctx, "pr_gates: Copilot review was addressed in an earlier run; gate already satisfied")
@@ -344,16 +346,16 @@ func (o *run) copilotGate(ctx context.Context, prURL string, st *gatesState) err
 
 // ensureCopilotReviewer makes sure Copilot is on the PR as a reviewer, requesting
 // it when it is not. It reports how a failure to put it there should be read:
-// unavailable=true means Copilot is proven unable to review this repo (the
-// request failed with a 422 "Copilot isn't available for this repository", or it
-// reported success without adding the reviewer - the API silently no-ops on an
-// account without Copilot review access) and the gate may skip. unavailable=false
-// with a non-empty reason means the request failed for a generic reason (e.g. a
-// GraphQL login-resolution error) that does NOT prove Copilot cannot review, so
-// the caller should still wait for a repo-automated review. A non-nil error is
-// the run context ending, and is fatal. The reason, when set, is the gh error
-// VERBATIM - where Copilot cannot run, the line it puts on the card is the only
-// diagnostic anyone gets.
+// unavailable=true means Copilot is proven unable to review this repo - the
+// request failed with a 422 "Copilot isn't available for this repository" - and
+// the gate may skip. unavailable=false with a non-empty reason covers every other
+// outcome: a check failure, a generic request failure (e.g. a GraphQL
+// login-resolution error), or a request that succeeded without the reviewer
+// showing up on re-check. None of those prove Copilot cannot review, so the
+// caller records the reason and still waits for a repo-automated review. A
+// non-nil error is the run context ending, and is fatal. The reason, when set, is
+// the gh error VERBATIM - where Copilot cannot run, the line it puts on the card
+// is the only diagnostic anyone gets.
 func (o *run) ensureCopilotReviewer(ctx context.Context, prURL string) (reason string, unavailable bool, err error) {
 	requested, err := o.d.PRGates.CopilotRequested(ctx, prURL)
 	if err != nil {
@@ -397,7 +399,12 @@ func (o *run) ensureCopilotReviewer(ctx context.Context, prURL string) (reason s
 	}
 
 	if !requested {
-		return "the request succeeded but Copilot was not added as a reviewer", true, nil
+		// Not proof of unavailability either: a ruleset adds the reviewer
+		// asynchronously, the listing can lag the request, and the API is known
+		// to accept the request without listing the bot. Record the observation
+		// and let the caller wait - a review that never arrives passes at the
+		// wait deadline; a silent skip here loses a review that does arrive.
+		return "the request succeeded but Copilot is not listed as a reviewer yet", false, nil
 	}
 
 	return "", false, nil

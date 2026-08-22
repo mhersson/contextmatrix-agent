@@ -317,14 +317,16 @@ file only - never via flags or committed YAML.
     not have landed, or `gh pr create` may have failed because one already
     exists; no OPEN PR, or a probe failure, still parks. The Copilot gate never
     parks on proven unavailability - a 422 "Copilot isn't available for this
-    repository" request response, or a request that succeeded without adding the
-    reviewer, records the reason verbatim on the card's activity log (the only
-    diagnostic channel for an external tester's Copilot setup) and lets the gate
-    pass. A generic request failure (for example the GraphQL login-resolution
-    error `gh` hits on `gh pr edit --add-reviewer`, or a check that cannot be
-    read) is not treated as unavailability - the gate still enters the wait loop,
-    because a repo-automated Copilot review may arrive regardless; a review that
-    never arrives is recorded and passed at the wait deadline. It requests the
+    repository" request response records the reason verbatim on the card's
+    activity log (the only diagnostic channel for an external tester's Copilot
+    setup) and lets the gate pass. A generic request failure (for example the
+    GraphQL login-resolution error `gh` hits on `gh pr edit --add-reviewer`, or a
+    check that cannot be read) is not treated as unavailability - the gate still
+    enters the wait loop, because a repo-automated Copilot review may arrive
+    regardless; a review that never arrives is recorded and passed at the wait
+    deadline. A request that succeeds without the bot showing up in the pending
+    reviewer list is recorded and waited through, not skipped - rulesets add
+    Copilot asynchronously and gh cannot be trusted to list bots. It requests the
     reviewer through the REST `requested_reviewers` endpoint (`gh api`), which
     accepts the bot login directly where `gh pr edit --add-reviewer`'s GraphQL
     resolution cannot. An addressed Copilot review persists a satisfied marker in
