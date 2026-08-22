@@ -50,6 +50,12 @@ var checksInaccessiblePattern = regexp.MustCompile(`(?i)resource not accessible 
 // no PR, not an error.
 var noPRForBranchPattern = regexp.MustCompile(`(?i)no pull requests? found`)
 
+// unknownFlagPattern matches gh structural failures where the CLI does not
+// recognize a flag - a deterministic, run-spanning failure on an incompatible
+// gh version. runListArgs passes --commit and --json fields older gh versions
+// do not support.
+var unknownFlagPattern = regexp.MustCompile(`(?i)unknown flag`)
+
 // copilotReviewerLogin is the GitHub login gh adds as a reviewer and the login
 // GitHub's REST API reports as the author of a Copilot review.
 const copilotReviewerLogin = "copilot-pull-request-reviewer[bot]"
@@ -81,6 +87,11 @@ type PRCreator struct {
 	// the Actions-runs + commit-status APIs: the rollup read failed with the
 	// fine-grained-PAT Checks refusal, which never heals within a run.
 	checksFallback bool
+
+	// statusFallback, once set, routes every subsequent checksViaRuns poll to
+	// skip the combined-status API call: it returned 403 (resource not
+	// accessible), and the permission gap never heals within a run.
+	statusFallback bool
 }
 
 var _ orchestrator.PRGates = (*PRCreator)(nil)
@@ -665,6 +676,12 @@ func (p *PRCreator) checksViaRollup(ctx context.Context, prURL string) ([]orches
 // vocabulary classifyChecks reads. The head SHA is re-resolved every poll
 // because fix rounds push new commits. Both sources empty means the same
 // thing as gh's "no checks reported": an empty result with a nil error.
+//
+// Permanent errors are classified and returned as PermanentPollError:
+//   - 'unknown flag' on runListArgs (structural gh version mismatch)
+//   - 403 on the combined-status API (resource not accessible) degrades to
+//     runs-only by skipping the combined-status call for the rest of the run
+//     instead of failing the whole poll.
 func (p *PRCreator) checksViaRuns(ctx context.Context, prURL string) ([]orchestrator.CheckResult, error) {
 	owner, repo, _, err := parsePRPath(prURL)
 	if err != nil {
@@ -678,6 +695,10 @@ func (p *PRCreator) checksViaRuns(ctx context.Context, prURL string) ([]orchestr
 
 	runsOut, err := p.runGH(ctx, "", false, runListArgs(owner, repo, sha)...)
 	if err != nil {
+		if unknownFlagPattern.MatchString(err.Error()) {
+			return nil, &orchestrator.PermanentPollError{Err: err.Error()}
+		}
+
 		return nil, fmt.Errorf("gh run list: %w", err)
 	}
 
@@ -686,17 +707,28 @@ func (p *PRCreator) checksViaRuns(ctx context.Context, prURL string) ([]orchestr
 		return nil, fmt.Errorf("gh run list: %w", err)
 	}
 
-	statusOut, err := p.runGH(ctx, "", false, combinedStatusArgs(owner, repo, sha)...)
-	if err != nil {
-		return nil, fmt.Errorf("gh api commit status: %w", err)
+	if !p.statusFallback {
+		statusOut, err := p.runGH(ctx, "", false, combinedStatusArgs(owner, repo, sha)...)
+		if err != nil {
+			if checksInaccessiblePattern.MatchString(err.Error()) {
+				p.statusFallback = true
+
+				slog.Info("pr_gates: combined-status API inaccessible; degrading to runs-only",
+					"pr_url", prURL)
+			} else {
+				return nil, fmt.Errorf("gh api commit status: %w", err)
+			}
+		} else {
+			statuses, perr := parseCombinedStatus(statusOut)
+			if perr != nil {
+				return nil, fmt.Errorf("gh api commit status: %w", perr)
+			}
+
+			checks = append(checks, statuses...)
+		}
 	}
 
-	statuses, err := parseCombinedStatus(statusOut)
-	if err != nil {
-		return nil, fmt.Errorf("gh api commit status: %w", err)
-	}
-
-	return append(checks, statuses...), nil
+	return checks, nil
 }
 
 // parseRunList maps gh run list --json output into CheckResults, keeping

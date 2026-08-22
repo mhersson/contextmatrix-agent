@@ -31,6 +31,12 @@ type fakeGates struct {
 	checksErr error
 	headSHA   string
 
+	// checksPermanentErr, when set, causes every Checks call to return a
+	// PermanentPollError instead of checksErrs or the checks queue. It is
+	// checked first so a test can script an immediate permanent park without
+	// needing to cycle through a queue.
+	checksPermanentErr string
+
 	// Copilot scripting: requested is the reviewer-present answer, flipped to
 	// true by a successful RequestCopilotReview unless requestSilentlyNoOps
 	// reproduces the API failure mode where the request succeeds but no reviewer
@@ -89,6 +95,10 @@ func (f *fakeGates) Checks(_ context.Context, prURL string) ([]CheckResult, erro
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	if f.checksPermanentErr != "" {
+		return nil, &PermanentPollError{Err: f.checksPermanentErr}
+	}
 
 	f.checksPolled = true
 
@@ -613,6 +623,60 @@ func TestGateDeadlineClampsToContainerDeadline(t *testing.T) {
 	roomy := &run{d: Deps{Cfg: Config{Deadline: time.Now().Add(2 * time.Hour)}}}
 	assert.WithinDuration(t, time.Now().Add(time.Hour), roomy.gateDeadline(time.Hour), time.Minute,
 		"a later container deadline leaves the gate's wait intact")
+}
+
+// TestCIGate_PermanentPollErrorParksImmediately: a PermanentPollError from the
+// gh seam parks the gate on the first poll with the verbatim error text, never
+// looping to the wait deadline or burning a fix round.
+func TestCIGate_PermanentPollErrorParksImmediately(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{checksPermanentErr: "gh: unknown flag: --commit"}
+	client := &planLLM{}
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, ciGateContext("Permanent error", "body"), 0)
+	o.d.Cfg.GatesCIWaitTimeout = 45 * time.Minute // long deadline - park must happen before it
+
+	err := runPRGates(context.Background(), o)
+
+	var parked *GatesParkedError
+
+	require.ErrorAs(t, err, &parked)
+
+	assert.Contains(t, parked.Reason, "permanent error")
+	assert.Contains(t, parked.Reason, "unknown flag")
+	assert.Zero(t, modelCallCount(client), "a permanent park spends no model calls")
+
+	body := ops.lastBody()
+	assert.Contains(t, body, "- CI rounds used: 0/3", "no rounds counted for a permanent park")
+	assert.Contains(t, body, "unknown flag", "the verbatim gh error is in the card detail")
+
+	assert.Equal(t, []string{"Checks:" + gatePRURL}, gates.recorded(),
+		"exactly one Checks call, no second poll")
+}
+
+// TestCIGate_TransientPollErrorParksWithErrorText: a transient (non-permanent)
+// poll error at deadline carries the last error text in the detail so the human
+// sees what went wrong, instead of a fixed generic message.
+func TestCIGate_TransientPollErrorParksWithErrorText(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{checksErr: errors.New("gh: connection reset by peer")}
+	client := &planLLM{}
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, ciGateContext("Transient error", "body"), 0)
+	o.d.Cfg.GatesCIWaitTimeout = 10 * time.Millisecond
+
+	err := runPRGates(context.Background(), o)
+
+	var parked *GatesParkedError
+
+	require.ErrorAs(t, err, &parked)
+	assert.Contains(t, parked.Reason, "could not be read")
+
+	body := ops.lastBody()
+	assert.Contains(t, body, "connection reset by peer",
+		"the last transient poll error text is in the card detail")
+	assert.NotContains(t, body, "the PR's check status could not be read on the last poll",
+		"the old generic text is replaced by the actual error")
 }
 
 // gatePRURL is the open PR every gate test polls.

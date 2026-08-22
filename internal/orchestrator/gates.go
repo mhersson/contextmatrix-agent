@@ -220,7 +220,8 @@ func runPRGates(ctx context.Context, o *run) error {
 		o.gateNote(ctx, "pr_gates", fmt.Sprintf(
 			"pr_gates: entering - await_ci=%t await_copilot_review=%t create_pr=%t pr_url=%s copilot_wait=%s ci_wait=%s poll=%s copilot_satisfied=%t",
 			o.tc.AwaitCI, o.tc.AwaitCopilotReview, o.tc.CreatePR, prURL,
-			o.copilotWait(), o.ciWait(), o.gatesPoll(), st.CopilotSatisfied),
+			o.copilotWait(), o.ciWait(), o.gatesPoll(), st.CopilotSatisfied,
+		),
 			map[string]any{"await_ci": o.tc.AwaitCI, "await_copilot_review": o.tc.AwaitCopilotReview, "pr_url": prURL})
 	}
 
@@ -506,7 +507,8 @@ func (o *run) copilotReviewCycle(
 
 	if len(reopened) > 0 {
 		o.gateNote(ctx, "copilot", fmt.Sprintf(
-			"pr_gates: Copilot repeated %d finding(s) an earlier fix round did not resolve; fixing again", len(reopened)),
+			"pr_gates: Copilot repeated %d finding(s) an earlier fix round did not resolve; fixing again", len(reopened),
+		),
 			map[string]any{"reopened": len(reopened)})
 	}
 
@@ -525,7 +527,8 @@ func (o *run) copilotReviewCycle(
 		st.CopilotDetail = "- pr_gates: Copilot re-review could not be requested (" + rerr.Error() + "); waiting for the review of the fixed head\n"
 		o.recordGates(ctx, *st)
 		o.gateNote(ctx, "copilot", fmt.Sprintf(
-			"pr_gates: Copilot re-review could not be requested (%s); waiting for the review of the fixed head", rerr.Error()), nil)
+			"pr_gates: Copilot re-review could not be requested (%s); waiting for the review of the fixed head", rerr.Error(),
+		), nil)
 	}
 
 	return false, nil
@@ -1146,11 +1149,14 @@ func classifyChecks(checks []CheckResult) ciBuckets {
 
 // ciGate holds the card until the PR's CI checks are green: it polls the rollup,
 // spends up to gatesRoundsCap fix rounds on failures, and parks the card in
-// review when the checks stay red, never settle, or the budget runs out.
+// review when the checks stay red, never settle, or the budget runs out. A
+// PermanentPollError parks immediately with the verbatim gh error text instead
+// of looping to the wait deadline.
 func (o *run) ciGate(ctx context.Context, prURL string, st *gatesState) error {
 	deadline := o.gateDeadline(o.ciWait())
 	start := time.Now()
 	poller := &gatePoller{gate: "ci"}
+	var lastPollErr error
 
 	// The checks-were-seen memory spans containers: a gate whose persisted
 	// section already records fix rounds ran CI in an earlier run, so its first
@@ -1162,10 +1168,19 @@ func (o *run) ciGate(ctx context.Context, prURL string, st *gatesState) error {
 	for {
 		checks, pollErr := o.d.PRGates.Checks(ctx, prURL)
 		if pollErr != nil {
+			var permanent *PermanentPollError
+			if errors.As(pollErr, &permanent) {
+				st.Detail = "- " + permanent.Err + "\n"
+
+				return o.parkGates(ctx, st, "CI check polling has a permanent error: "+permanent.Err)
+			}
+
 			// A gh hiccup is not a verdict. Keep waiting - the deadline still
 			// bounds the gate - rather than failing a run whose work is pushed.
 			// A CI-less repo does NOT land here: the worker seam translates gh's
 			// "no checks reported" exit into an empty result with a nil error.
+			lastPollErr = pollErr
+
 			slog.Warn("pr_gates: CI checks poll failed; retrying",
 				"card_id", o.d.Cfg.CardID, "pr_url", prURL, "error", pollErr)
 		}
@@ -1246,7 +1261,7 @@ func (o *run) ciGate(ctx context.Context, prURL string, st *gatesState) error {
 		}
 
 		if time.Now().After(deadline) {
-			return o.ciDeadlinePark(ctx, st, b, pollErr)
+			return o.ciDeadlinePark(ctx, st, b, lastPollErr)
 		}
 
 		if werr := o.sleepPoll(ctx); werr != nil {
@@ -1258,11 +1273,13 @@ func (o *run) ciGate(ctx context.Context, prURL string, st *gatesState) error {
 // ciDeadlinePark parks a gate that used up its wait, naming what it was actually
 // waiting on - unread checks read differently from checks that never settled, and
 // the card must not claim the wrong one. The detail is rebuilt from the poll that
-// parked, so the note never re-lists failures an earlier fix round addressed.
-func (o *run) ciDeadlinePark(ctx context.Context, st *gatesState, b ciBuckets, pollErr error) error {
+// parked, so the note never re-lists failures an earlier fix round addressed. A
+// transient poll error is carried as the detail text so the human sees what went
+// wrong.
+func (o *run) ciDeadlinePark(ctx context.Context, st *gatesState, b ciBuckets, lastPollErr error) error {
 	switch {
-	case pollErr != nil:
-		st.Detail = "- the PR's check status could not be read on the last poll\n"
+	case lastPollErr != nil:
+		st.Detail = "- " + lastPollErr.Error() + "\n"
 
 		return o.parkGates(ctx, st, "CI status could not be read before the wait deadline")
 

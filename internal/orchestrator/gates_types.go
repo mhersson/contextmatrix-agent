@@ -23,6 +23,17 @@ type CopilotReview struct {
 	Comments []ReviewComment
 }
 
+// PermanentPollError is a poll failure that will never heal within a run. A
+// gate receiving this should park immediately instead of looping to the
+// deadline, since retrying consumes time without changing the outcome.
+type PermanentPollError struct {
+	Err string
+}
+
+func (e *PermanentPollError) Error() string {
+	return "permanent poll error: " + e.Err
+}
+
 // PRGates is the gh seam for the pr_gates phase. The worker implements it on
 // PRCreator; tests inject a fake.
 type PRGates interface {

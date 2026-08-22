@@ -801,6 +801,129 @@ exit 1
 		"pr checks retried on the next poll since the fallback never armed")
 }
 
+// TestChecksViaRunsStatusAPIDegradesOn403: the combined-status API may return
+// 403 just like the Checks API (e.g. on Commit statuses: read permission
+// gaps with fine-grained PATs). A 403 must degrade to runs-only instead of
+// failing the whole poll, and the degradation is sticky for the rest of the
+// run so every later poll skips the combined-status call.
+func TestChecksViaRunsStatusAPIDegradesOn403(t *testing.T) {
+	stubGH(t, `
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+	echo '{"headRefOid":"abc123"}'
+	exit 0
+fi
+if [ "$1" = "run" ] && [ "$2" = "list" ]; then
+	echo '[{"name":"ci","event":"pull_request","status":"completed","conclusion":"success","databaseId":1,"workflowDatabaseId":100,"url":"https://github.com/o/r/actions/runs/1"}]'
+	exit 0
+fi
+if [ "$1" = "api" ]; then
+	echo "Resource not accessible by personal access token" 1>&2
+	exit 1
+fi
+exit 1
+`)
+
+	pc := NewPRCreator(t.TempDir(), "", "", "")
+
+	checks, err := pc.checksViaRuns(t.Context(), "https://github.com/org/repo/pull/1")
+	require.NoError(t, err)
+	require.Len(t, checks, 1, "the runs result survives the status-API 403; checks=%v", checks)
+	assert.Equal(t, "pass", checks[0].Bucket)
+	assert.True(t, pc.statusFallback, "statusFallback armed after the 403")
+}
+
+// TestChecksFallbackThenStatusDegradationPreservesBothFallbacks: a run where
+// the Checks API is inaccessible AND the combined-status API is also
+// inaccessible arms both fallbacks and returns only the workflow-run results.
+func TestChecksFallbackThenStatusDegradationPreservesBothFallbacks(t *testing.T) {
+	stubGH(t, `
+echo "$1 $2" >> gh.log
+if [ "$1" = "pr" ] && [ "$2" = "checks" ]; then
+	echo "Resource not accessible by personal access token" 1>&2
+	exit 1
+fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+	echo '{"headRefOid":"abc123"}'
+	exit 0
+fi
+if [ "$1" = "run" ] && [ "$2" = "list" ]; then
+	echo '[{"name":"ci","event":"pull_request","status":"completed","conclusion":"success","databaseId":1,"workflowDatabaseId":100,"url":"https://github.com/o/r/actions/runs/1"}]'
+	exit 0
+fi
+if [ "$1" = "api" ]; then
+	echo "Resource not accessible by personal access token" 1>&2
+	exit 1
+fi
+exit 1
+`)
+
+	workspace := t.TempDir()
+	pc := NewPRCreator(workspace, "", "", "")
+
+	checks, err := pc.Checks(t.Context(), "https://github.com/org/repo/pull/1")
+	require.NoError(t, err)
+	require.Len(t, checks, 1, "only the runs result survives; checks=%v", checks)
+	assert.Equal(t, "pass", checks[0].Bucket)
+	assert.True(t, pc.checksFallback, "checksFallback armed")
+	assert.True(t, pc.statusFallback, "statusFallback armed")
+
+	// Second poll: both fallbacks are sticky, no gh pr checks call is made.
+	checks, err = pc.Checks(t.Context(), "https://github.com/org/repo/pull/1")
+	require.NoError(t, err)
+	require.Len(t, checks, 1, "second poll also returns only runs")
+
+	log, readErr := os.ReadFile(filepath.Join(workspace, "gh.log"))
+	require.NoError(t, readErr)
+	assert.Equal(t, 1, strings.Count(string(log), "pr checks\n"),
+		"pr checks invoked exactly once despite two Checks calls")
+}
+
+// TestChecksViaRunsUnknownFlagIsPermanent: an 'unknown flag' error on
+// runListArgs is a structural gh version mismatch that will never heal within
+// a run. checksViaRuns must return it as a PermanentPollError so the CI gate
+// parks immediately.
+func TestChecksViaRunsUnknownFlagIsPermanent(t *testing.T) {
+	stubGH(t, `
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+	echo '{"headRefOid":"abc123"}'
+	exit 0
+fi
+echo "unknown flag: --commit" 1>&2
+exit 1
+`)
+
+	pc := NewPRCreator(t.TempDir(), "", "", "")
+
+	_, err := pc.checksViaRuns(t.Context(), "https://github.com/org/repo/pull/1")
+
+	var permanent *orchestrator.PermanentPollError
+	require.ErrorAs(t, err, &permanent)
+	assert.Contains(t, permanent.Err, "unknown flag")
+}
+
+// TestChecksViaRunsNonUnknownFlagIsNotPermanent: a non-unknown-flag error on
+// runListArgs (network hiccup, rate limit) returns as a plain error, not a
+// PermanentPollError, so the gate keeps polling.
+func TestChecksViaRunsNonUnknownFlagIsNotPermanent(t *testing.T) {
+	stubGH(t, `
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+	echo '{"headRefOid":"abc123"}'
+	exit 0
+fi
+echo "HTTP 504: Gateway Timeout" 1>&2
+exit 1
+`)
+
+	pc := NewPRCreator(t.TempDir(), "", "", "")
+
+	_, err := pc.checksViaRuns(t.Context(), "https://github.com/org/repo/pull/1")
+
+	var permanent *orchestrator.PermanentPollError
+	require.NotErrorAs(t, err, &permanent, "a 504 is transient, not permanent")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "gh run list")
+}
+
 // TestChecksViaRunsEmptyMeansNoCI pins the fallback path's own no-CI
 // contract: no Actions runs and no commit statuses map to an empty result and
 // a nil error - the same "this repo has no CI" semantics gh pr checks' own
