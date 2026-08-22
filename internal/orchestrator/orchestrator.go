@@ -714,12 +714,12 @@ func (o *run) recoverIncapable(ctx context.Context, ie *IncapableError) error {
 	_ = o.d.Ops.BlacklistModel(ctx, o.d.Cfg.CardID, ie.Model, ie.Reason) //nolint:errcheck
 
 	if exhausted {
-		o.d.logCard(ctx, "model %q harness-incapable; blacklisted - re-selection cap (%d) exhausted", ie.Model, reselectCap)
+		o.d.logCard(ctx, "model %q harness-incapable; blacklisted - re-selection cap (%d) exhausted: %s", ie.Model, reselectCap, ie.Reason)
 
 		return fmt.Errorf("re-selection cap (%d) exhausted after model %q: %w", reselectCap, ie.Model, ie)
 	}
 
-	o.d.logCard(ctx, "model %q harness-incapable; blacklisted and re-selecting (attempt %d/%d)", ie.Model, attempt, reselectCap)
+	o.d.logCard(ctx, "model %q harness-incapable; blacklisted and re-selecting (attempt %d/%d): %s", ie.Model, attempt, reselectCap, ie.Reason)
 
 	return nil
 }

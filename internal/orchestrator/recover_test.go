@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -293,4 +294,45 @@ func TestRecoverIncapableCapsAtThree(t *testing.T) {
 
 	assert.Equal(t, 4, blacklisted, "the model that exhausts the cap is blacklisted like the others; calls=%v", ops.recorded())
 	assert.True(t, o.excluded["m"], "and excluded for the rest of the run")
+}
+
+// TestRecoverIncapableLogsReason pins that both card-log lines recoverIncapable
+// writes name the IncapableError's Reason (the harness's detail sentence when
+// present, or the generic fallback), not just the blacklist entry: one for the
+// re-selecting path and one for the cap-exhausted path. Each line is checked
+// individually (not merely "the reason appears somewhere in the logs") so the
+// cap-exhausted assertion can't pass on the strength of the earlier
+// re-selecting line alone.
+func TestRecoverIncapableLogsReason(t *testing.T) {
+	const reason = "suspected upstream gateway defect: identical tool-call arguments arrived on every turn"
+
+	ops := &fakeOps{}
+	d := execTestDeps(ops, &fakeGit{}, &planLLM{})
+	o := newRun(d, cmclient.TaskContext{})
+
+	err := o.recoverIncapable(context.Background(), &IncapableError{Model: "m", Reason: reason})
+	require.NoError(t, err, "recovery within the cap must succeed")
+	require.Len(t, ops.logs, 1)
+	assert.Contains(t, ops.logs[0], "blacklisted and re-selecting")
+	assert.Contains(t, ops.logs[0], reason, "the re-selecting log must name the reason")
+
+	for i := 2; i <= reselectCap; i++ {
+		require.NoError(t, o.recoverIncapable(context.Background(), &IncapableError{Model: "m", Reason: reason}))
+	}
+
+	// Cap-exhausting recovery.
+	err = o.recoverIncapable(context.Background(), &IncapableError{Model: "m", Reason: reason})
+	require.Error(t, err, "the cap-exhausting recovery must error")
+	require.Len(t, ops.logs, reselectCap+1)
+
+	last := ops.logs[len(ops.logs)-1]
+	assert.Contains(t, last, fmt.Sprintf("cap (%d) exhausted", reselectCap))
+	assert.Contains(t, last, reason, "the cap-exhausted log must also name the reason")
+
+	blacklisted := ops.blacklistReasons()
+	require.Len(t, blacklisted, reselectCap+1)
+
+	for _, r := range blacklisted {
+		assert.Equal(t, reason, r, "BlacklistModel receives the same reason on every call, including the cap-exhausting one")
+	}
 }
