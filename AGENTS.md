@@ -346,12 +346,21 @@ file only - never via flags or committed YAML.
     arrives is recorded and passed at the wait deadline, 20 minutes by default
     (`CMX_GATES_COPILOT_WAIT_TIMEOUT_SECONDS`). Every triage round records a
     VALID/INVALID verdict per finding under a `## Copilot Review (Round N)`
-    card section; the outcome is kept in its own detail line under
-    `## PR Gates`, separate from the CI gate's, so a later CI pass never
-    erases it. An addressed Copilot review persists a satisfied marker in the
-    `## PR Gates` section, so a re-trigger skips the paid re-review and goes
-    straight to the CI gate; the unavailability and timeout skips above never
-    write it, so those stay retryable. After the enabled gates have run, the
+    card section, and the same verdict per comment under its
+    `### Comments triaged` subsection; a line recorded before verdicts were
+    tracked carries none and reads as VALID, the conservative default. Copilot
+    re-posts every open comment on each re-review: one carrying only comments
+    an earlier round triaged INVALID passes the gate as already triaged,
+    unreviewed further, while a comment an earlier round triaged VALID that
+    the fix round failed to resolve counts as still open - it is fed back
+    through another fix round rather than waved through, bounded by the same
+    3-round cap as any other Copilot finding. The outcome is kept in its own
+    detail line under `## PR Gates`, separate from the CI gate's, so a later
+    CI pass never erases it. An addressed Copilot review persists a satisfied
+    marker in the `## PR Gates` section, so a re-trigger skips the paid
+    re-review and goes straight to the CI gate; the unavailability and
+    timeout skips above never write it, so those stay retryable. After the
+    enabled gates have run, the
     phase probes once more for a Copilot review that arrived meanwhile -
     during a CI wait, or after any wait or skip that left the gate unreviewed,
     so a review sitting on the head is never left unread; if that triage
