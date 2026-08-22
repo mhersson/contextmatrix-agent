@@ -169,16 +169,18 @@ func (o *run) mobDiscuss(ctx context.Context, t mob.Topic) (mob.Outcome, bool) {
 }
 
 // buildEngineConfig assembles the discussion engine's configuration for one
-// topic: registry-selected seat models (review topics exclude the models that
-// coded the card), operator guests, the harness-backed seat runner, the
-// decision-model moderator, live "discussion" events, the human inbox, and
-// the mob session budget term. SeatEndpoint is NOT set here - the caller
+// topic: registry-selected seat models (every topic excludes the run's
+// incapable models; review topics also exclude the models that coded the
+// card), operator guests, the harness-backed seat runner, the decision-model
+// moderator, live "discussion" events, the human inbox, and the mob session
+// budget term. SeatEndpoint is NOT set here - the caller
 // wires it once the loopback server has started (the server is built from
 // this config's Seats/Runner, so it cannot exist before this call returns).
 func buildEngineConfig(o *run, t mob.Topic, bearer string) mob.EngineConfig {
-	var exclude map[string]bool
-	// Review and checkpoint topics judge code this run wrote: exclude the
-	// models that coded it (and the per-card incapable set).
+	// No topic may seat a model proven harness-incapable this run. Review and
+	// checkpoint topics judge code this run wrote, so they exclude the models
+	// that coded it as well (reviewExclusions folds in the incapable set).
+	exclude := o.excludedModels()
 	if t.Kind == "review" || t.Kind == "checkpoint" {
 		exclude = o.reviewExclusions()
 	}
@@ -386,7 +388,7 @@ func (o *run) mobModeratorRunner(sink *seatDebugSink, step string) mob.Moderator
 	return func(ctx context.Context, prompt string) (string, string, float64, error) {
 		if model == "" {
 			model = resolveDecisionModel(ctx, o.d.Registry, o.d.Emit, o.d.Ops, o.d.Cfg.CardID,
-				o.tc.ModelOrchestrator, o.d.Cfg.PayloadModel, o.d.Cfg.DefaultModel)
+				o.tc.ModelOrchestrator, o.d.Cfg.PayloadModel, o.d.Cfg.DefaultModel, o.excludedModels())
 		}
 
 		cfg := o.harnessConfig(model)

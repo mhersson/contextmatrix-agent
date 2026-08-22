@@ -450,6 +450,7 @@ func resolveDecisionModel(
 	emit *events.Emitter,
 	ops Ops,
 	cardID, pinned, payload, fallback string,
+	exclude map[string]bool,
 ) string {
 	base := resolveOrchestratorModel(ctx, reg, emit, ops, cardID, pinned, payload, fallback)
 
@@ -459,8 +460,9 @@ func resolveDecisionModel(
 	}
 
 	floor := reg.SelectByComplexity(registry.SelectInput{
-		Role: registry.RoleReviewer,
-		Tier: registry.TierComplex,
+		Role:    registry.RoleReviewer,
+		Tier:    registry.TierComplex,
+		Exclude: exclude,
 	}).Model
 	if floor == "" {
 		return base // defensive; SelectByComplexity does not return empty today
@@ -844,7 +846,7 @@ func runPlan(ctx context.Context, o *run) error {
 	cfg := d.Cfg
 
 	model := resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
-		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel)
+		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels())
 
 	d.logCard(ctx, "orchestrator model: %s", model)
 
@@ -886,8 +888,26 @@ func runPlan(ctx context.Context, o *run) error {
 		case isBudgetError(derr):
 			return derr // park: the FSM's execute() maps this to the budget log
 		default:
+			var ie *IncapableError
+			if errors.As(derr, &ie) {
+				// The model could not drive the tool loop. Blacklist and exclude
+				// it now so the planner, the mob seats and the first coder pick
+				// do not land on it again this run; the re-selection cap error
+				// is advisory here - planning continues without a diagnosis.
+				if rerr := o.recoverIncapable(ctx, ie); rerr != nil {
+					slog.Warn("plan: diagnose model incapable and re-selection cap exhausted",
+						"card_id", cfg.CardID, "error", rerr)
+				}
+
+				model = resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
+					o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels())
+
+				d.logCard(ctx, "orchestrator model: %s (re-selected after diagnose)", model)
+			}
+
 			slog.Warn("plan: diagnose step failed; planning without a diagnosis",
 				"card_id", cfg.CardID, "error", derr)
+			d.logCard(ctx, "plan: diagnose step failed; planning without a diagnosis (%s)", derr.Error())
 		}
 	}
 

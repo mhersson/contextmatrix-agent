@@ -278,5 +278,5 @@ tool_output_max_bytes: 131072
 # CMX_GATES_CI_WAIT_TIMEOUT_SECONDS
 
 # How long the Copilot gate waits for a review to land before proceeding
-# without one - it never parks on this timeout. Default: 600.
+# without one - it never parks on this timeout. Default: 1200.
 # CMX_GATES_COPILOT_WAIT_TIMEOUT_SECONDS

@@ -35,11 +35,25 @@ type fakeGates struct {
 	// true by a successful RequestCopilotReview unless requestSilentlyNoOps
 	// reproduces the API failure mode where the request succeeds but no reviewer
 	// is ever added. reviews pops the successive scripted reviews (nil until the
-	// queue is seeded, and the last one sticks once it is exhausted).
+	// queue is seeded, and the last one sticks once it is exhausted); a nil
+	// entry is a read that found no review, which is how a test scripts the
+	// gate's head probe coming back empty. reRequestErr, counted against
+	// requests, scripts a failure on the SECOND and later RequestCopilotReview
+	// calls only - the re-request after a fix round - independent of
+	// requestErr, which always applies to the first.
 	requested            bool
 	requestErr           error
+	reRequestErr         error
 	requestSilentlyNoOps bool
 	reviews              []*CopilotReview
+	requests             int
+
+	// holdReviewsUntilChecks reproduces a review that lands DURING the CI wait:
+	// while it is set and Checks has never been polled, CopilotReview reads as
+	// "no review yet" without consuming the queue, so the Copilot wait times out
+	// and the first scripted review only becomes visible once the CI gate ran.
+	holdReviewsUntilChecks bool
+	checksPolled           bool
 
 	logs string
 
@@ -76,6 +90,8 @@ func (f *fakeGates) Checks(_ context.Context, prURL string) ([]CheckResult, erro
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
+	f.checksPolled = true
+
 	if len(f.checks) == 0 {
 		return nil, f.checksErr
 	}
@@ -107,8 +123,14 @@ func (f *fakeGates) RequestCopilotReview(_ context.Context, prURL string) error 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
+	f.requests++
+
 	if f.requestErr != nil {
 		return f.requestErr
+	}
+
+	if f.requests > 1 && f.reRequestErr != nil {
+		return f.reRequestErr
 	}
 
 	if !f.requestSilentlyNoOps {
@@ -123,6 +145,10 @@ func (f *fakeGates) CopilotReview(_ context.Context, prURL string) (*CopilotRevi
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	if f.holdReviewsUntilChecks && !f.checksPolled {
+		return nil, nil
+	}
 
 	if len(f.reviews) == 0 {
 		return nil, nil
@@ -399,7 +425,7 @@ func TestGatesKnobDefaults(t *testing.T) {
 	zero := &run{}
 	assert.Equal(t, 60*time.Second, zero.gatesPoll())
 	assert.Equal(t, 45*time.Minute, zero.ciWait())
-	assert.Equal(t, 10*time.Minute, zero.copilotWait())
+	assert.Equal(t, 20*time.Minute, zero.copilotWait())
 
 	set := &run{d: Deps{Cfg: Config{
 		GatesPollInterval:       5 * time.Second,
@@ -496,6 +522,82 @@ func TestCIGate_ShowsOnlyThePollsThatMoved(t *testing.T) {
 	}, gateProgressStatuses(t, &transcript))
 }
 
+// TestPRGates_DecisionsAreEmittedAsGateProgressEvents: gate verdicts used to
+// reach only the card activity log, so a worker run log said nothing about
+// which gates ran or how the Copilot gate exited. Every decision now rides the
+// gate_progress channel (repeat=false, so the serve transcript shows it) and
+// the durable run log carries it. Decisions carry decision=true, which
+// gateProgressStatuses filters out - the poll-only assertions elsewhere stay
+// exact - so this test reads them through gateDecisionStatuses.
+func TestPRGates_DecisionsAreEmittedAsGateProgressEvents(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		reviews:   []*CopilotReview{copilotReviewOnHead("LGTM")},
+		checks:    [][]CheckResult{{{Name: "ci", Bucket: "pass"}}},
+	}
+	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
+
+	tc := copilotGateContext("Events", "body")
+	tc.AwaitCI = true
+
+	var transcript bytes.Buffer
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, tc, 0)
+	o.d.Emit = events.NewEmitter(nil, &transcript)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	shown := strings.Join(gateDecisionStatuses(t, &transcript), "\n")
+	assert.Contains(t, shown, "pr_gates: entering - await_ci=true await_copilot_review=true")
+	assert.Contains(t, shown, "pr_url="+gatePRURL)
+	assert.Contains(t, shown, "pr_gates: Copilot review addressed")
+	assert.Contains(t, shown, "pr_gates: CI green")
+	assert.Contains(t, shown, "pr_gates: passed")
+}
+
+// TestGateNoteReservedKeysWinOverFields: every gate_progress consumer keys off
+// gate/status/repeat/decision, so a caller's context fields ride alongside them
+// and can never redefine them.
+func TestGateNoteReservedKeysWinOverFields(t *testing.T) {
+	var transcript bytes.Buffer
+
+	o := &run{d: Deps{
+		Ops:  &fakeOps{},
+		Emit: events.NewEmitter(nil, &transcript),
+		Cfg:  Config{CardID: "CARD-1"},
+	}}
+
+	o.gateNote(context.Background(), "ci", "pr_gates: CI green", map[string]any{
+		"gate":     "spoofed",
+		"status":   "spoofed",
+		"repeat":   true,
+		"decision": false,
+		"reason":   "kept",
+	})
+
+	var ev struct {
+		Kind string `json:"kind"`
+		Data struct {
+			Gate     string `json:"gate"`
+			Status   string `json:"status"`
+			Repeat   bool   `json:"repeat"`
+			Decision bool   `json:"decision"`
+			Reason   string `json:"reason"`
+		} `json:"data"`
+	}
+
+	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(transcript.String())), &ev))
+
+	assert.Equal(t, gateProgressKind, ev.Kind)
+	assert.Equal(t, "ci", ev.Data.Gate)
+	assert.Equal(t, "pr_gates: CI green", ev.Data.Status)
+	assert.False(t, ev.Data.Repeat, "a decision is never a repeat")
+	assert.True(t, ev.Data.Decision, "a decision is never demoted to a poll")
+	assert.Equal(t, "kept", ev.Data.Reason, "non-reserved fields still ride along")
+}
+
 // TestGateDeadlineClampsToContainerDeadline: a gate never waits past the
 // container's own deadline, and an unset (zero) deadline leaves it unbounded.
 func TestGateDeadlineClampsToContainerDeadline(t *testing.T) {
@@ -538,9 +640,25 @@ func ciGateContext(title, body string) cmclient.TaskContext {
 	}
 }
 
-// gateProgressStatuses decodes the statuses of every gate_progress event the
+// gateProgressStatuses decodes the statuses of every gate_progress POLL the
 // emitter wrote, keeping only the ones the log bridge would SHOW (repeat=false).
+// Decisions (decision=true) ride the same event kind but are not polls, so they
+// are filtered out here and read through gateDecisionStatuses instead.
 func gateProgressStatuses(t *testing.T, transcript *bytes.Buffer) []string {
+	t.Helper()
+
+	return gateProgressLines(t, transcript, false)
+}
+
+// gateDecisionStatuses decodes the statuses of every gate_progress DECISION the
+// emitter wrote - the gateNote lines, not the poll heartbeat.
+func gateDecisionStatuses(t *testing.T, transcript *bytes.Buffer) []string {
+	t.Helper()
+
+	return gateProgressLines(t, transcript, true)
+}
+
+func gateProgressLines(t *testing.T, transcript *bytes.Buffer, decisions bool) []string {
 	t.Helper()
 
 	var shown []string
@@ -553,14 +671,15 @@ func gateProgressStatuses(t *testing.T, transcript *bytes.Buffer) []string {
 		var ev struct {
 			Kind string `json:"kind"`
 			Data struct {
-				Status string `json:"status"`
-				Repeat bool   `json:"repeat"`
+				Status   string `json:"status"`
+				Repeat   bool   `json:"repeat"`
+				Decision bool   `json:"decision"`
 			} `json:"data"`
 		}
 
 		require.NoError(t, json.Unmarshal([]byte(line), &ev))
 
-		if ev.Kind == gateProgressKind && !ev.Data.Repeat {
+		if ev.Kind == gateProgressKind && !ev.Data.Repeat && ev.Data.Decision == decisions {
 			shown = append(shown, ev.Data.Status)
 		}
 	}
@@ -1146,6 +1265,31 @@ var (
 	}
 )
 
+// TestCopilotGate_ExistingReviewOnHeadSkipsTheRequest: a re-trigger or a slow
+// earlier run finds Copilot's review already on the PR head. The gate must
+// read it, never re-request (a paid duplicate), and never wait for a review it
+// already has.
+func TestCopilotGate_ExistingReviewOnHeadSkipsTheRequest(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: false,
+		headSHA:   copilotHeadSHA,
+		reviews:   []*CopilotReview{copilotReviewOnHead("LGTM")},
+	}
+	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, copilotGateContext("Already reviewed", "body"), 0)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	calls := gates.recorded()
+	assert.Equal(t, -1, indexOfCall(calls, "RequestCopilotReview:"+gatePRURL),
+		"an existing review on the head must not be re-requested; calls=%v", calls)
+	assert.Equal(t, 1, modelCallCount(client), "the existing review is triaged once")
+	assert.True(t, ops.loggedContains("Copilot review addressed"), "logs=%v", ops.recorded())
+	assert.Contains(t, ops.lastBody(), "- Copilot gate: satisfied")
+}
+
 // TestCopilotGate_AlreadyRequestedWaitsAndPassesOnCleanReview: a review that is
 // already requested is never re-requested, and a clean one passes the gate after
 // a single triage call.
@@ -1154,7 +1298,9 @@ func TestCopilotGate_AlreadyRequestedWaitsAndPassesOnCleanReview(t *testing.T) {
 	gates := &fakeGates{
 		requested: true,
 		headSHA:   copilotHeadSHA,
-		reviews:   []*CopilotReview{copilotReviewOnHead("LGTM")},
+		// Empty on the probe, so this test still covers the already-requested
+		// wait path rather than the probe shortcut.
+		reviews: []*CopilotReview{nil, copilotReviewOnHead("LGTM")},
 	}
 	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
 
@@ -1256,7 +1402,10 @@ func TestCopilotGate_RequestsWhenAbsent(t *testing.T) {
 	ops := &fakeOps{}
 	gates := &fakeGates{
 		headSHA: copilotHeadSHA,
-		reviews: []*CopilotReview{copilotReviewOnHead("LGTM")},
+		// The gate probes for a review already on the head before it requests
+		// one, so "no review in flight" is a nil first read; the review the
+		// gate then waits for is the second.
+		reviews: []*CopilotReview{nil, copilotReviewOnHead("LGTM")},
 	}
 	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
 
@@ -1265,12 +1414,14 @@ func TestCopilotGate_RequestsWhenAbsent(t *testing.T) {
 	require.NoError(t, runPRGates(context.Background(), o))
 
 	calls := gates.recorded()
+	probe := indexOfCall(calls, "CopilotReview:"+gatePRURL)
 	request := indexOfCall(calls, "RequestCopilotReview:"+gatePRURL)
-	wait := indexOfCall(calls, "CopilotReview:"+gatePRURL)
 
 	require.GreaterOrEqual(t, request, 0, "the gate requests the missing review; calls=%v", calls)
-	require.GreaterOrEqual(t, wait, 0, "the gate then waits for it; calls=%v", calls)
-	assert.Less(t, request, wait, "the request must precede the wait; calls=%v", calls)
+	require.GreaterOrEqual(t, probe, 0, "the gate probes the head before requesting; calls=%v", calls)
+	assert.Less(t, probe, request, "the probe must precede the request; calls=%v", calls)
+	assert.Greater(t, countCalls(calls, "CopilotReview:"+gatePRURL), 1,
+		"the gate then waits for the review it requested; calls=%v", calls)
 }
 
 // TestCopilotGate_RequestFailsSkipsWithNote: Copilot being unavailable is not the
@@ -1312,7 +1463,9 @@ func TestCopilotGate_RequestFailsStillWaits(t *testing.T) {
 	gates := &fakeGates{
 		requestErr: errors.New("gh: GraphQL: Could not resolve user with login 'copilot-pull-request-reviewer[bot]'. (requestReviewsByLogin)"),
 		headSHA:    copilotHeadSHA,
-		reviews:    []*CopilotReview{copilotReviewOnHead("LGTM")},
+		// Nothing on the head when the gate probes, so the failing request is
+		// the path under test.
+		reviews: []*CopilotReview{nil, copilotReviewOnHead("LGTM")},
 	}
 	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
 
@@ -1343,7 +1496,9 @@ func TestCopilotGate_RequestFailsStillWaits_422FromMalformedRequest(t *testing.T
 		// REST endpoint's response to a malformed request body.
 		requestErr: errors.New("gh: HTTP 422: Unprocessable Entity: reviewers field is invalid"),
 		headSHA:    copilotHeadSHA,
-		reviews:    []*CopilotReview{copilotReviewOnHead("LGTM")},
+		// Nothing on the head when the gate probes, so the failing request is
+		// the path under test.
+		reviews: []*CopilotReview{nil, copilotReviewOnHead("LGTM")},
 	}
 	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
 
@@ -1412,26 +1567,36 @@ func TestCopilotGate_SkipPathsDoNotWriteSatisfiedMarker(t *testing.T) {
 		"an unavailable reviewer must remain retryable; body=%q", ops.lastBody())
 }
 
-// TestCopilotGate_ReviewerNeverAppearsSkipsWithNote: the request API can return
-// success without adding the reviewer. The gate re-checks, says so on the card,
-// and proceeds instead of waiting out the full timeout on a review that is never
-// coming.
-func TestCopilotGate_ReviewerNeverAppearsSkipsWithNote(t *testing.T) {
+// TestCopilotGate_ReviewerNotListedStillWaits: a request that succeeds without
+// the reviewer showing up in the PR's pending requests is NOT proof Copilot
+// cannot review - rulesets add the reviewer asynchronously and the listing
+// lags - so the gate records the observation and still waits for the review.
+func TestCopilotGate_ReviewerNotListedStillWaits(t *testing.T) {
 	shrinkCopilotRecheck(t, time.Millisecond)
 
 	ops := &fakeOps{}
-	gates := &fakeGates{requestSilentlyNoOps: true}
-	client := &planLLM{}
+	gates := &fakeGates{
+		requestSilentlyNoOps: true,
+		headSHA:              copilotHeadSHA,
+		// Nothing on the head when the gate probes: the request path this test
+		// is about only runs when the probe comes back empty.
+		reviews: []*CopilotReview{nil, copilotReviewOnHead("LGTM")},
+	}
+	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
 
 	o := prGateRun(ops, gates, &fakeGit{}, client, copilotGateContext("Silent no-op", "body"), 0)
 
 	require.NoError(t, runPRGates(context.Background(), o))
 
-	assert.True(t, ops.loggedContains("not added as a reviewer"),
-		"the card names the silent failure; logs=%v", ops.recorded())
-	assert.Equal(t, -1, indexOfCall(gates.recorded(), "CopilotReview:"+gatePRURL),
-		"no wait loop runs when the reviewer never appeared; calls=%v", gates.recorded())
-	assert.Zero(t, modelCallCount(client))
+	calls := gates.recorded()
+	assert.GreaterOrEqual(t, indexOfCall(calls, "CopilotReview:"+gatePRURL), 0,
+		"the gate must enter the wait loop; calls=%v", calls)
+	assert.True(t, ops.loggedContains("not listed as a reviewer"),
+		"the observation is recorded verbatim; logs=%v", ops.recorded())
+	assert.False(t, ops.loggedContains("unavailable"),
+		"an unlisted reviewer must not read as Copilot unavailability; logs=%v", ops.recorded())
+	assert.Equal(t, 1, modelCallCount(client), "the arrived review is triaged")
+	assert.True(t, ops.loggedContains("Copilot review addressed"))
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
 }
 
@@ -1453,6 +1618,33 @@ func TestCopilotGate_TimeoutProceeds(t *testing.T) {
 	assert.GreaterOrEqual(t, len(gates.recorded()), 2, "the gate polled while it waited")
 	assert.Zero(t, modelCallCount(client), "no review means nothing to triage")
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+}
+
+// TestPRGates_CIGreenKeepsTheCopilotOutcome: the CI gate's green exit must not
+// erase the Copilot gate's recorded outcome from the PR Gates section - that
+// line is the only place on the card body that says what happened to the
+// Copilot review.
+func TestPRGates_CIGreenKeepsTheCopilotOutcome(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		checks:    [][]CheckResult{{{Name: "ci", Bucket: "pass"}}},
+	}
+	client := &planLLM{}
+
+	tc := copilotGateContext("Timeout then green", "body")
+	tc.AwaitCI = true
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, tc, 0)
+	o.d.Cfg.GatesCopilotWaitTimeout = 5 * time.Millisecond
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	body := ops.lastBody()
+	assert.Contains(t, body, "- Status: passed")
+	assert.Contains(t, body, "Copilot review did not arrive in time",
+		"the Copilot outcome survives the CI green write; body=%q", body)
 }
 
 // TestCopilotGate_ValidFindingsFixedThenClean: the triage verdict decides which
@@ -1506,6 +1698,46 @@ func TestCopilotGate_ValidFindingsFixedThenClean(t *testing.T) {
 	assert.Contains(t, body, "## Copilot Review (Round 2)", "later rounds are numbered; body=%q", body)
 	assert.Contains(t, body, "- Copilot rounds used: 1/3")
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+}
+
+// TestCopilotGate_ReRequestFailureStillWaitsForTheAutoReview: on a ruleset
+// repo Copilot re-reviews every push by itself and the explicit re-request is
+// the fragile step. A generic re-request failure must not pass the gate with
+// the fix unreviewed - it records the error and waits, exactly like a failed
+// first request does.
+func TestCopilotGate_ReRequestFailureStillWaitsForTheAutoReview(t *testing.T) {
+	shrinkCopilotRecheck(t, time.Millisecond)
+
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested:    false,
+		headSHA:      copilotHeadSHA,
+		reRequestErr: errors.New("HTTP 422: Reviews may only be requested from collaborators"),
+		// Nothing on the head when the gate probes, so the first
+		// RequestCopilotReview call is the initial request (which succeeds);
+		// the second - after the fix round - is the one reRequestErr targets.
+		reviews: []*CopilotReview{
+			nil,
+			copilotReviewOnHead("1 suggestion", swallowedErrorComment),
+			copilotReviewOnHead("LGTM"),
+		},
+	}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: []llm.Response{
+		copilotVerdict(copilotFinding{File: "internal/api/handler.go", Issue: "dropped error", Valid: true, Reason: "real"}),
+		stopResp("coder: fixed", 0.02),
+		copilotVerdict(),
+	}}
+
+	o := prGateRun(ops, gates, git, client, copilotGateContext("Re-request fails", "body"), 0)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	assert.Equal(t, 3, modelCallCount(client), "triage, fix, and the re-triage of the auto re-review")
+	assert.True(t, ops.loggedContains("re-review could not be requested"), "logs=%v", ops.recorded())
+	assert.False(t, ops.loggedContains("gate passes with the fixes already pushed"),
+		"a generic re-request failure must not pass the gate unreviewed; logs=%v", ops.recorded())
+	assert.Contains(t, ops.lastBody(), "- Copilot gate: satisfied")
 }
 
 // TestCopilotGate_DedupesRepeatedComments: Copilot re-posts comments it already
@@ -1810,6 +2042,126 @@ func TestCopilotGate_EmptyVerdictWithCommentsTakesThemAtFaceValue(t *testing.T) 
 		"the card says the comment was never judged; logs=%v", ops.recorded())
 	assert.Equal(t, 3, modelCallCount(client), "the unjudged comment still funds the fix round")
 	assert.Contains(t, ops.lastBody(), "- Copilot rounds used: 1/3")
+}
+
+// TestPRGates_LateCopilotReviewIsTriagedAfterCI: the Copilot wait timed out,
+// CI then took long enough for the review to land. The gate must not finish
+// with an unread review on the head - one probe after CI catches it.
+func TestPRGates_LateCopilotReviewIsTriagedAfterCI(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested:              true,
+		headSHA:                copilotHeadSHA,
+		holdReviewsUntilChecks: true,
+		reviews:                []*CopilotReview{copilotReviewOnHead("LGTM")},
+		checks:                 [][]CheckResult{{{Name: "ci", Bucket: "pass"}}},
+	}
+	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
+
+	tc := copilotGateContext("Late review", "body")
+	tc.AwaitCI = true
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, tc, 0)
+	o.d.Cfg.GatesCopilotWaitTimeout = 5 * time.Millisecond
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	assert.True(t, ops.loggedContains("did not arrive in time"), "the wait timed out first; logs=%v", ops.recorded())
+	assert.True(t, ops.loggedContains("late Copilot review"), "the late check found it; logs=%v", ops.recorded())
+	assert.Equal(t, 1, modelCallCount(client), "the late review is triaged")
+	assert.Contains(t, ops.lastBody(), "- Copilot gate: satisfied")
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+}
+
+// TestPRGates_LateReviewFixRoundReRunsBothGates: a late review with a real
+// finding funds a fix round, and the second pass re-runs both gates before the
+// card completes - the Copilot gate (served by its head probe here, since the
+// fake's head SHA does not move) and the CI gate.
+func TestPRGates_LateReviewFixRoundReRunsBothGates(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested:              true,
+		headSHA:                copilotHeadSHA,
+		holdReviewsUntilChecks: true,
+		reviews: []*CopilotReview{
+			copilotReviewOnHead("1 suggestion", swallowedErrorComment),
+			copilotReviewOnHead("LGTM"),
+		},
+		checks: [][]CheckResult{{{Name: "ci", Bucket: "pass"}}},
+	}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: []llm.Response{
+		copilotVerdict(copilotFinding{File: "internal/api/handler.go", Issue: "dropped error", Valid: true, Reason: "real"}),
+		stopResp("coder: fixed", 0.02),
+		copilotVerdict(),
+	}}
+
+	tc := copilotGateContext("Late review with finding", "body")
+	tc.AwaitCI = true
+
+	o := prGateRun(ops, gates, git, client, tc, 0)
+	o.d.Cfg.GatesCopilotWaitTimeout = 5 * time.Millisecond
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	assert.Equal(t, 3, modelCallCount(client), "triage, fix, re-triage")
+	assert.Contains(t, git.recorded(), "Push:cm/card-1")
+	assert.GreaterOrEqual(t, strings.Count(strings.Join(gates.recorded(), " "), "Checks:"), 2,
+		"CI is polled again after the fix push; calls=%v", gates.recorded())
+	assert.Contains(t, ops.lastBody(), "- Copilot rounds used: 1/3")
+	assert.Contains(t, ops.lastBody(), "- Copilot gate: satisfied")
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+}
+
+// TestPRGates_ReEnteredCIGateRemembersEarlierChecks: the checks-were-seen memory
+// also has to span a re-entry within one run. A late-review fix round pushes a
+// new head and sends the gates round again, and the new head's run has not
+// registered with CI yet - so the re-entered gate's first poll is empty. Without
+// the run-level memory (st.CIRounds is still 0: the round the late check spent
+// was a Copilot round) that empty poll reads as "this repo has no CI" and
+// completes the card on a head nothing ever checked. The grace window is zeroed
+// so only that memory can hold the gate.
+func TestPRGates_ReEnteredCIGateRemembersEarlierChecks(t *testing.T) {
+	shrinkNoChecksGrace(t, 0)
+
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested:              true,
+		headSHA:                copilotHeadSHA,
+		holdReviewsUntilChecks: true,
+		reviews: []*CopilotReview{
+			copilotReviewOnHead("1 suggestion", swallowedErrorComment),
+			copilotReviewOnHead("LGTM"),
+		},
+		checks: [][]CheckResult{
+			{{Name: "ci", Bucket: "pass"}}, // the first head is green
+			{},                             // the fixed head's run has not registered
+			{{Name: "ci", Bucket: "pass"}}, // it registers, and it is green
+		},
+	}
+	client := &planLLM{responses: []llm.Response{
+		copilotVerdict(copilotFinding{File: "internal/api/handler.go", Issue: "dropped error", Valid: true, Reason: "real"}),
+		stopResp("coder: fixed", 0.02),
+		copilotVerdict(),
+	}}
+
+	tc := copilotGateContext("Late review then an unregistered head", "body")
+	tc.AwaitCI = true
+
+	git := &fakeGit{committed: true}
+
+	o := prGateRun(ops, gates, git, client, tc, 0)
+	o.d.Cfg.GatesCopilotWaitTimeout = 5 * time.Millisecond
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	assert.Contains(t, git.recorded(), "Push:cm/card-1", "the late fix round pushed a new head")
+	assert.False(t, ops.loggedContains("no CI checks on the PR"),
+		"a run that already saw CI must never re-open the no-CI conclusion; logs=%v", ops.recorded())
+	assert.GreaterOrEqual(t, strings.Count(strings.Join(gates.recorded(), " "), "Checks:"), 3,
+		"the re-entered gate waited through the empty poll; calls=%v", gates.recorded())
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0,
+		"the card still completes once the fixed head goes green")
 }
 
 // nonEmpty normalizes an empty slice to nil so table cases can leave the want

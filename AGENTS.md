@@ -303,35 +303,60 @@ file only - never via flags or committed YAML.
     `await_ci` and `await_copilot_review` the trigger's `TaskContext` carries,
     running the Copilot gate first, then the CI gate. Each spends up to 3 fix
     rounds (`gatesRoundsCap`) on what it finds before parking the card in
-    review. The CI gate's poll reads `gh pr checks` and, when the token cannot
-    read the Checks API (fine-grained PATs on private repos), falls back for
-    the rest of the run to `gh run list --commit <head-sha>` plus the legacy
-    commit-status API - covered by Actions: read and Commit statuses: read.
-    Fallback mode cannot see third-party Checks-API-only integrations. A gate
-    runs whenever a PR URL exists and its flag is set - a stale `pr_url` on a
-    card whose `create_pr` was later disabled still gates, on the rule that a
-    PR exists so the gate runs on it; a gated card whose PR was never created
+    review. Entering the phase writes a `pr_gates: entering ...` line naming
+    both flags, `create_pr`, the PR URL, and the effective Copilot/CI/poll
+    waits; every gate decision after that - a pass, a skip, a fix round, a
+    park - goes out through the same path, a `gate_progress` event plus a
+    slog line plus a card log entry, so the run log carries the full decision
+    sequence and not just the polls. The CI gate's poll reads `gh pr checks`
+    and, when the token cannot read the Checks API (fine-grained PATs on
+    private repos), falls back for the rest of the run to
+    `gh run list --commit <head-sha>` plus the legacy commit-status API -
+    covered by Actions: read and Commit statuses: read. Fallback mode cannot
+    see third-party Checks-API-only integrations. A gate runs whenever a PR
+    URL exists and its flag is set - a stale `pr_url` on a card whose
+    `create_pr` was later disabled still gates, on the rule that a PR exists
+    so the gate runs on it; a gated card whose PR was never created
     (`create_pr` true, no URL) parks fail-closed instead of completing - but
     first probes the branch for an existing OPEN PR and adopts it (re-reported
     through `report_push`) when found, since an earlier run's `report_push` may
     not have landed, or `gh pr create` may have failed because one already
-    exists; no OPEN PR, or a probe failure, still parks. The Copilot gate never
+    exists; no OPEN PR, or a probe failure, still parks. The Copilot gate
+    first probes the PR's current head for a review already on it - a
+    re-trigger after a park, or a ruleset review that landed while integrate
+    was finishing - and triages that instead of requesting one, so a
+    re-trigger never pays for a duplicate request and wait. Otherwise it
+    reads the PR's pending reviewers through the REST `requested_reviewers`
+    endpoint (`gh api`) rather than `gh pr view --json reviewRequests`, whose
+    JSON exporter drops Bot-typed reviewers and would never see Copilot; if
+    Copilot is not already listed, it requests the review through that same
+    REST endpoint, which accepts the bot login directly where
+    `gh pr edit --add-reviewer`'s GraphQL resolution cannot. The gate never
     parks on proven unavailability - a 422 "Copilot isn't available for this
-    repository" request response, or a request that succeeded without adding the
-    reviewer, records the reason verbatim on the card's activity log (the only
-    diagnostic channel for an external tester's Copilot setup) and lets the gate
-    pass. A generic request failure (for example the GraphQL login-resolution
-    error `gh` hits on `gh pr edit --add-reviewer`, or a check that cannot be
-    read) is not treated as unavailability - the gate still enters the wait loop,
-    because a repo-automated Copilot review may arrive regardless; a review that
-    never arrives is recorded and passed at the wait deadline. It requests the
-    reviewer through the REST `requested_reviewers` endpoint (`gh api`), which
-    accepts the bot login directly where `gh pr edit --add-reviewer`'s GraphQL
-    resolution cannot. An addressed Copilot review persists a satisfied marker in
-    the `## PR Gates` section, so a re-trigger skips the paid re-review and goes
-    straight to the CI gate; the unavailability skips above never write it, so
-    those stay retryable. Every triage round records a VALID/INVALID verdict per
-    finding under a `## Copilot Review (Round N)` card section.
+    repository" response records the reason verbatim on the card's activity
+    log (the only diagnostic channel for an external tester's Copilot setup)
+    and lets the gate pass. Any other request failure is not treated as
+    unavailability - the gate still enters the wait loop, because a
+    repo-automated Copilot review may arrive regardless, and the same holds
+    for a re-request that fails after a fix round: it waits for the automatic
+    re-review rather than passing the gate unreviewed. A request that
+    succeeds without the bot showing up in the pending reviewer list is
+    recorded and waited through, not skipped - rulesets add Copilot
+    asynchronously and gh cannot be trusted to list bots. A review that never
+    arrives is recorded and passed at the wait deadline, 20 minutes by default
+    (`CMX_GATES_COPILOT_WAIT_TIMEOUT_SECONDS`). Every triage round records a
+    VALID/INVALID verdict per finding under a `## Copilot Review (Round N)`
+    card section; the outcome is kept in its own detail line under
+    `## PR Gates`, separate from the CI gate's, so a later CI pass never
+    erases it. An addressed Copilot review persists a satisfied marker in the
+    `## PR Gates` section, so a re-trigger skips the paid re-review and goes
+    straight to the CI gate; the unavailability and timeout skips above never
+    write it, so those stay retryable. After the enabled gates have run, the
+    phase probes once more for a Copilot review that arrived meanwhile -
+    during a CI wait, or after any wait or skip that left the gate unreviewed,
+    so a review sitting on the head is never left unread; if that triage
+    spends a fix round, the enabled gates run again, still bounded by the
+    3-round cap per gate.
 
 ## Repo grounding
 

@@ -352,7 +352,7 @@ func TestSpecFromEnv_GateKnobs(t *testing.T) {
 		assert.Equal(t, time.Duration(0), spec.ContainerTimeout, "CMX_CONTAINER_TIMEOUT_SECONDS unset must default to 0 (unknown)")
 		assert.Equal(t, 60*time.Second, spec.GatesPollInterval)
 		assert.Equal(t, 45*time.Minute, spec.GatesCIWaitTimeout)
-		assert.Equal(t, 10*time.Minute, spec.GatesCopilotWaitTimeout)
+		assert.Equal(t, 20*time.Minute, spec.GatesCopilotWaitTimeout)
 	})
 
 	t.Run("valid_override", func(t *testing.T) {

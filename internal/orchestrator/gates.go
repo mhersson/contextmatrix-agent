@@ -24,9 +24,11 @@ const gatesRoundsCap = 3
 // A Deps built directly (tests, standalone runs) carries no knobs, so the gates
 // must never derive a zero poll interval or a zero wait from it.
 const (
-	defaultGatesPollInterval       = 60 * time.Second
-	defaultGatesCIWaitTimeout      = 45 * time.Minute
-	defaultGatesCopilotWaitTimeout = 10 * time.Minute
+	defaultGatesPollInterval  = 60 * time.Second
+	defaultGatesCIWaitTimeout = 45 * time.Minute
+	// Copilot typically posts 5-10 minutes after the request on a mid-size PR;
+	// 10 minutes left reviews at the top of that range unread.
+	defaultGatesCopilotWaitTimeout = 20 * time.Minute
 )
 
 // gatesSectionHeading is the card-body section the pr_gates phase owns.
@@ -121,6 +123,30 @@ func (p *gatePoller) poll(emit *events.Emitter, status string, fields map[string
 	emit.Emit(events.Kind(gateProgressKind), data)
 }
 
+// gateNote records one gate decision on every channel a reader might hold: the
+// worker's slog (durable run log), a gate_progress event with repeat=false (the
+// serve transcript and the run log's JSONL), and the card activity log. The
+// poll heartbeat covers waiting; this covers what the gate decided and why.
+// The event's gate, status, repeat and decision keys are reserved: fields adds
+// context around them and can never overwrite them.
+func (o *run) gateNote(ctx context.Context, gate, line string, fields map[string]any) {
+	slog.Info(line, "card_id", o.d.Cfg.CardID, "gate", gate)
+
+	if o.d.Emit != nil {
+		data := make(map[string]any, len(fields)+4)
+		maps.Copy(data, fields)
+
+		data["gate"] = gate
+		data["status"] = line
+		data["repeat"] = false
+		data["decision"] = true
+
+		o.d.Emit.Emit(events.Kind(gateProgressKind), data)
+	}
+
+	o.d.logCard(ctx, "%s", line)
+}
+
 // copilotFinding is one triaged Copilot comment: the orchestrator model's
 // judgement on whether it names a real defect worth a fix round.
 type copilotFinding struct {
@@ -158,6 +184,11 @@ type gatesState struct {
 
 	Status string
 	Detail string // human-facing lines: failing checks, park reasons
+
+	// CopilotDetail is the Copilot gate's recorded outcome (skip reason,
+	// unconfirmed request, pass note). Kept apart from Detail so the CI gate's
+	// writes never erase it.
+	CopilotDetail string
 }
 
 // runPRGates is the pr_gates phase: after integrate has pushed and (optionally)
@@ -177,6 +208,18 @@ func runPRGates(ctx context.Context, o *run) error {
 	prURL := o.prURL
 	if prURL == "" {
 		prURL = o.tc.PRUrl
+	}
+
+	// One line naming what this phase is about to hold the card on: without it a
+	// run log shows only the polls, and a gate that never ran is indistinguishable
+	// from one that passed instantly.
+	if gated {
+		st := o.loadGatesState()
+		o.gateNote(ctx, "pr_gates", fmt.Sprintf(
+			"pr_gates: entering - await_ci=%t await_copilot_review=%t create_pr=%t pr_url=%s copilot_wait=%s ci_wait=%s poll=%s copilot_satisfied=%t",
+			o.tc.AwaitCI, o.tc.AwaitCopilotReview, o.tc.CreatePR, prURL,
+			o.copilotWait(), o.ciWait(), o.gatesPoll(), st.CopilotSatisfied),
+			map[string]any{"await_ci": o.tc.AwaitCI, "await_copilot_review": o.tc.AwaitCopilotReview, "pr_url": prURL})
 	}
 
 	if gated && o.tc.CreatePR && prURL == "" {
@@ -210,31 +253,52 @@ func runPRGates(ctx context.Context, o *run) error {
 	if gated && prURL != "" {
 		st := o.loadGatesState()
 
-		if o.tc.AwaitCopilotReview {
-			if err := o.copilotGate(ctx, prURL, &st); err != nil {
+		for {
+			if o.tc.AwaitCopilotReview {
+				if err := o.copilotGate(ctx, prURL, &st); err != nil {
+					return err
+				}
+
+				// Persist here, before the CI gate runs: a context cancellation
+				// during ciGate's poll wait is routine container teardown (see
+				// sleepGate's doc comment), and it returns straight out of
+				// runPRGates without ever reaching the "passed" write below. A
+				// CopilotSatisfied set only in memory by copilotGate's pass exits
+				// would then be lost, and the next resume would re-request a paid
+				// Copilot review this run already got and addressed. Harmless on
+				// the already-satisfied and skip-path exits too: recordSection is
+				// an idempotent upsert, and the skip paths leave the marker false.
+				o.recordGates(ctx, st)
+			}
+
+			if o.tc.AwaitCI {
+				if err := o.ciGate(ctx, prURL, &st); err != nil {
+					return err
+				}
+			}
+
+			if !o.tc.AwaitCopilotReview || st.CopilotSatisfied {
+				break
+			}
+
+			// The Copilot gate passed without a review (a timed-out wait, an
+			// unconfirmed request). CI may have taken long enough for one to
+			// land since: one probe before completing, so a review on the head
+			// is never left unread. A fix round pushes a new head, so both
+			// gates run again on it.
+			pushed, err := o.copilotLateCheck(ctx, prURL, &st)
+			if err != nil {
 				return err
 			}
 
-			// Persist here, before the CI gate runs: a context cancellation
-			// during ciGate's poll wait is routine container teardown (see
-			// sleepGate's doc comment), and it returns straight out of
-			// runPRGates without ever reaching the "passed" write below. A
-			// CopilotSatisfied set only in memory by copilotGate's pass exits
-			// would then be lost, and the next resume would re-request a paid
-			// Copilot review this run already got and addressed. Harmless on
-			// the already-satisfied and skip-path exits too: recordSection is
-			// an idempotent upsert, and the skip paths leave the marker false.
-			o.recordGates(ctx, st)
-		}
-
-		if o.tc.AwaitCI {
-			if err := o.ciGate(ctx, prURL, &st); err != nil {
-				return err
+			if !pushed {
+				break
 			}
 		}
 
 		st.Status = "passed"
 		o.recordGates(ctx, st)
+		o.gateNote(ctx, "pr_gates", "pr_gates: passed", nil)
 	}
 
 	if err := d.Ops.TransitionCard(ctx, cfg.CardID, "done"); err != nil {
@@ -245,48 +309,63 @@ func runPRGates(ctx context.Context, o *run) error {
 }
 
 // copilotGate holds the card until the Copilot review on the PR is addressed: it
-// makes sure a review is actually requested, waits for one on the PR's current
-// head, triages its comments with one model call, and spends up to gatesRoundsCap
-// fix rounds on the findings it judges real.
+// takes a review already on the PR's current head when there is one, otherwise
+// makes sure a review is actually requested and waits for one on that head, then
+// triages its comments with one model call and spends up to gatesRoundsCap fix
+// rounds on the findings it judges real.
 //
 // Copilot being unavailable NEVER parks the card. A proven "cannot review"
-// response - a 422 "Copilot isn't available for this repository", or a request
-// that succeeded without adding the reviewer - records the verbatim reason on
-// the card and passes the gate. A generic request failure (e.g. a GraphQL
-// login-resolution error) is NOT treated as unavailability: the gate still
-// enters the wait loop, because a repo-automated Copilot review may arrive
-// regardless, and a review that never arrives is recorded and passed at the
-// wait deadline. The gate parks only on findings it could not get fixed, or on
-// running out of budget or turns while fixing them.
+// response - a 422 "Copilot isn't available for this repository" - records the
+// verbatim reason on the card and passes the gate. A generic request failure
+// (e.g. a GraphQL login-resolution error) is NOT treated as unavailability: the
+// gate still enters the wait loop, because a repo-automated Copilot review may
+// arrive regardless, and a review that never arrives is recorded and passed at
+// the wait deadline. A request that succeeds without the bot showing up in the
+// pending reviewer list is recorded and waited through, not skipped - rulesets
+// add Copilot asynchronously and gh cannot be trusted to list bots. The gate
+// parks only on findings it could not get fixed, or on running out of budget or
+// turns while fixing them.
 func (o *run) copilotGate(ctx context.Context, prURL string, st *gatesState) error {
 	if st.CopilotSatisfied {
-		o.d.logCard(ctx, "pr_gates: Copilot review was addressed in an earlier run; gate already satisfied")
+		o.gateNote(ctx, "copilot", "pr_gates: Copilot review was addressed in an earlier run; gate already satisfied", nil)
 
 		return nil
-	}
-
-	reason, unavailable, err := o.ensureCopilotReviewer(ctx, prURL)
-	if err != nil {
-		return err
-	}
-
-	if reason != "" {
-		if unavailable {
-			return o.skipCopilot(ctx, st, "pr_gates: Copilot review unavailable: "+reason+"; gate skipped")
-		}
-
-		// Generic request failure (e.g. a GraphQL login-resolution error) does
-		// not prove Copilot cannot review - the repo may use automatic review
-		// assignment. Record the verbatim error and enter the wait loop; the
-		// pass exits clear it again, and a pass-by-timeout records its own line.
-		st.Detail = "- pr_gates: Copilot review could not be requested (" + reason + "); waiting for an automatic review\n"
-		o.recordGates(ctx, *st)
-		o.d.logCard(ctx, "pr_gates: Copilot review could not be requested (%s); waiting for an automatic review", reason)
 	}
 
 	// Seeded from the card body so the dedupe survives a park/re-trigger, then
 	// grown in memory as this run triages further rounds.
 	seen := copilotSeenComments(o.body)
+
+	// A review may already be on the head - a re-trigger after a park, or a
+	// ruleset review that landed while integrate was finishing. Reading it is
+	// two gh calls; requesting another is a paid duplicate and a full wait.
+	if review := o.copilotReviewOnHead(ctx, prURL); review != nil {
+		o.gateNote(ctx, "copilot", "pr_gates: Copilot review already on the PR head; triaging it", nil)
+
+		satisfied, err := o.copilotReviewCycle(ctx, prURL, st, seen, review)
+		if err != nil || satisfied {
+			return err
+		}
+	} else {
+		reason, unavailable, err := o.ensureCopilotReviewer(ctx, prURL)
+		if err != nil {
+			return err
+		}
+
+		if reason != "" {
+			if unavailable {
+				return o.skipCopilot(ctx, st, "pr_gates: Copilot review unavailable: "+reason+"; gate skipped")
+			}
+
+			// Not proof Copilot cannot review - the repo may assign the reviewer
+			// itself. Record the verbatim reason and wait; a pass exit or a
+			// pass-by-timeout overwrites CopilotDetail with its own line.
+			st.CopilotDetail = "- pr_gates: Copilot review could not be confirmed (" + reason + "); waiting for the review\n"
+			o.recordGates(ctx, *st)
+			o.gateNote(ctx, "copilot",
+				fmt.Sprintf("pr_gates: Copilot review could not be confirmed (%s); waiting for the review", reason), nil)
+		}
+	}
 
 	for {
 		review, werr := o.awaitCopilotReview(ctx, prURL)
@@ -298,71 +377,155 @@ func (o *run) copilotGate(ctx context.Context, prURL string, st *gatesState) err
 			return o.skipCopilot(ctx, st, "pr_gates: Copilot review did not arrive in time; proceeding")
 		}
 
-		fresh := unseenComments(review.Comments, seen)
-
-		// Copilot re-posts the comments it already made on every re-review. A
-		// round that carries nothing new is nothing to fix - re-triaging it would
-		// spend a round undoing work an earlier round already did.
-		if len(review.Comments) > 0 && len(fresh) == 0 {
-			st.Detail = ""
-			st.CopilotSatisfied = true
-
-			o.d.logCard(ctx, "pr_gates: Copilot repeated only comments already triaged; gate passes")
-
-			return nil
-		}
-
-		findings, terr := o.triageCopilot(ctx, st, review, fresh)
-		if terr != nil {
-			return terr
-		}
-
-		for _, c := range fresh {
-			seen[copilotCommentKey(c.Path, c.Body)] = true
-		}
-
-		valid := validCopilotFindings(findings)
-		if len(valid) == 0 {
-			st.Detail = ""
-			st.CopilotSatisfied = true
-
-			o.d.logCard(ctx, "pr_gates: Copilot review addressed")
-
-			return nil
-		}
-
-		if ferr := o.copilotFixRound(ctx, st, valid); ferr != nil {
-			return ferr
-		}
-
-		if rerr := o.d.PRGates.RequestCopilotReview(ctx, prURL); rerr != nil {
-			return o.skipCopilot(ctx, st, "pr_gates: Copilot re-review could not be requested: "+
-				rerr.Error()+"; gate passes with the fixes already pushed")
+		satisfied, err := o.copilotReviewCycle(ctx, prURL, st, seen, review)
+		if err != nil || satisfied {
+			return err
 		}
 	}
 }
 
+// copilotLateCheck probes once for a Copilot review on the current head after
+// the other gates ran. It reports whether the triage spent a fix round (which
+// normally pushes a new head, and the caller then re-runs the gates) and
+// returns the review-cycle errors verbatim.
+//
+// The loop it feeds is bounded: every pushed=true answer came out of
+// copilotFixRound, which increments the persisted round counter and parks the
+// card once it reaches gatesRoundsCap.
+func (o *run) copilotLateCheck(ctx context.Context, prURL string, st *gatesState) (bool, error) {
+	review := o.copilotReviewOnHead(ctx, prURL)
+	if review == nil {
+		return false, nil
+	}
+
+	o.gateNote(ctx, "copilot", "pr_gates: late Copilot review found on the PR head; triaging it", nil)
+
+	satisfied, err := o.copilotReviewCycle(ctx, prURL, st, copilotSeenComments(o.body), review)
+	if err != nil {
+		return false, err
+	}
+
+	o.recordGates(ctx, *st)
+
+	return !satisfied, nil
+}
+
+// copilotReviewOnHead returns the PR's latest Copilot review when it is a review
+// of the CURRENT head, nil otherwise. Read failures are logged and read as
+// "none": this is a probe, and the request/wait path behind it re-reads anyway.
+func (o *run) copilotReviewOnHead(ctx context.Context, prURL string) *CopilotReview {
+	review, err := o.d.PRGates.CopilotReview(ctx, prURL)
+	if err != nil {
+		slog.Warn("pr_gates: Copilot review probe failed", "card_id", o.d.Cfg.CardID, "pr_url", prURL, "error", err)
+
+		return nil
+	}
+
+	if review == nil {
+		return nil
+	}
+
+	head, err := o.d.PRGates.HeadSHA(ctx, prURL)
+	if err != nil {
+		slog.Warn("pr_gates: PR head SHA unreadable during review probe",
+			"card_id", o.d.Cfg.CardID, "pr_url", prURL, "error", err)
+
+		return nil
+	}
+
+	if head == "" || review.CommitID != head {
+		return nil
+	}
+
+	return review
+}
+
+// copilotReviewCycle handles one arrived review: dedupes against what earlier
+// rounds triaged, triages the fresh comments, and either passes the gate
+// (satisfied=true) or spends a fix round and re-requests the review
+// (satisfied=false - the caller waits for the re-review of the new head).
+func (o *run) copilotReviewCycle(
+	ctx context.Context, prURL string, st *gatesState, seen map[string]bool, review *CopilotReview,
+) (bool, error) {
+	fresh := unseenComments(review.Comments, seen)
+
+	// Copilot re-posts the comments it already made on every re-review. A
+	// round that carries nothing new is nothing to fix - re-triaging it would
+	// spend a round undoing work an earlier round already did.
+	if len(review.Comments) > 0 && len(fresh) == 0 {
+		st.CopilotDetail = "- pr_gates: Copilot repeated only comments already triaged; gate passes\n"
+		st.CopilotSatisfied = true
+
+		o.gateNote(ctx, "copilot", "pr_gates: Copilot repeated only comments already triaged; gate passes", nil)
+
+		return true, nil
+	}
+
+	findings, terr := o.triageCopilot(ctx, st, review, fresh)
+	if terr != nil {
+		return false, terr
+	}
+
+	for _, c := range fresh {
+		seen[copilotCommentKey(c.Path, c.Body)] = true
+	}
+
+	valid := validCopilotFindings(findings)
+	if len(valid) == 0 {
+		st.CopilotDetail = "- pr_gates: Copilot review addressed\n"
+		st.CopilotSatisfied = true
+
+		o.gateNote(ctx, "copilot", "pr_gates: Copilot review addressed", nil)
+
+		return true, nil
+	}
+
+	if ferr := o.copilotFixRound(ctx, st, valid); ferr != nil {
+		return false, ferr
+	}
+
+	if rerr := o.d.PRGates.RequestCopilotReview(ctx, prURL); rerr != nil {
+		if strings.Contains(rerr.Error(), "Copilot isn't available for this repository") {
+			return true, o.skipCopilot(ctx, st, "pr_gates: Copilot re-review unavailable: "+
+				rerr.Error()+"; gate passes with the fixes already pushed")
+		}
+
+		// Same rule as the first request: a generic failure does not prove
+		// Copilot will not review the new head (rulesets re-review every push).
+		st.CopilotDetail = "- pr_gates: Copilot re-review could not be requested (" + rerr.Error() + "); waiting for the review of the fixed head\n"
+		o.recordGates(ctx, *st)
+		o.gateNote(ctx, "copilot", fmt.Sprintf(
+			"pr_gates: Copilot re-review could not be requested (%s); waiting for the review of the fixed head", rerr.Error()), nil)
+	}
+
+	return false, nil
+}
+
 // ensureCopilotReviewer makes sure Copilot is on the PR as a reviewer, requesting
 // it when it is not. It reports how a failure to put it there should be read:
-// unavailable=true means Copilot is proven unable to review this repo (the
-// request failed with a 422 "Copilot isn't available for this repository", or it
-// reported success without adding the reviewer - the API silently no-ops on an
-// account without Copilot review access) and the gate may skip. unavailable=false
-// with a non-empty reason means the request failed for a generic reason (e.g. a
-// GraphQL login-resolution error) that does NOT prove Copilot cannot review, so
-// the caller should still wait for a repo-automated review. A non-nil error is
-// the run context ending, and is fatal. The reason, when set, is the gh error
-// VERBATIM - where Copilot cannot run, the line it puts on the card is the only
-// diagnostic anyone gets.
+// unavailable=true means Copilot is proven unable to review this repo - the
+// request failed with a 422 "Copilot isn't available for this repository" - and
+// the gate may skip. unavailable=false with a non-empty reason covers every other
+// outcome: a check failure, a generic request failure (e.g. a GraphQL
+// login-resolution error), or a request that succeeded without the reviewer
+// showing up on re-check. None of those prove Copilot cannot review, so the
+// caller records the reason and still waits for a repo-automated review. A
+// non-nil error is the run context ending, and is fatal. The reason, when set, is
+// the gh error VERBATIM - where Copilot cannot run, the line it puts on the card
+// is the only diagnostic anyone gets.
 func (o *run) ensureCopilotReviewer(ctx context.Context, prURL string) (reason string, unavailable bool, err error) {
 	requested, err := o.d.PRGates.CopilotRequested(ctx, prURL)
 	if err != nil {
+		slog.Info("pr_gates: Copilot reviewer check failed", "card_id", o.d.Cfg.CardID, "pr_url", prURL, "reason", err.Error())
+
 		// A check failure is not proof of unavailability - the caller should
 		// still wait for a repo-automated review.
 		return err.Error(), false, nil
 	}
 
 	if requested {
+		slog.Info("pr_gates: Copilot is already a requested reviewer", "card_id", o.d.Cfg.CardID, "pr_url", prURL)
+
 		return "", false, nil
 	}
 
@@ -376,13 +539,21 @@ func (o *run) ensureCopilotReviewer(ctx context.Context, prURL string) (reason s
 		errText := err.Error()
 
 		if strings.Contains(errText, "Copilot isn't available for this repository") {
+			slog.Info("pr_gates: Copilot is unavailable for this repository",
+				"card_id", o.d.Cfg.CardID, "pr_url", prURL, "reason", errText)
+
 			return errText, true, nil
 		}
+
+		slog.Info("pr_gates: Copilot review request failed",
+			"card_id", o.d.Cfg.CardID, "pr_url", prURL, "reason", errText)
 
 		// Generic request failure - return the error as a non-fatal signal so
 		// the caller can log it and still enter the wait loop.
 		return errText, false, nil
 	}
+
+	slog.Info("pr_gates: Copilot review requested", "card_id", o.d.Cfg.CardID, "pr_url", prURL)
 
 	// Re-check instead of trusting the request: a reviewer that was never added
 	// would otherwise burn the gate's entire wait on a review nobody is writing.
@@ -392,13 +563,26 @@ func (o *run) ensureCopilotReviewer(ctx context.Context, prURL string) (reason s
 
 	requested, err = o.d.PRGates.CopilotRequested(ctx, prURL)
 	if err != nil {
+		slog.Info("pr_gates: Copilot reviewer re-check failed",
+			"card_id", o.d.Cfg.CardID, "pr_url", prURL, "reason", err.Error())
+
 		// A re-check failure is not proof of unavailability.
 		return err.Error(), false, nil
 	}
 
 	if !requested {
-		return "the request succeeded but Copilot was not added as a reviewer", true, nil
+		slog.Info("pr_gates: Copilot is not listed as a reviewer after the request",
+			"card_id", o.d.Cfg.CardID, "pr_url", prURL)
+
+		// Not proof of unavailability either: a ruleset adds the reviewer
+		// asynchronously, the listing can lag the request, and the API is known
+		// to accept the request without listing the bot. Record the observation
+		// and let the caller wait - a review that never arrives passes at the
+		// wait deadline; a silent skip here loses a review that does arrive.
+		return "the request succeeded but Copilot is not listed as a reviewer yet", false, nil
 	}
+
+	slog.Info("pr_gates: Copilot is on the PR as a reviewer", "card_id", o.d.Cfg.CardID, "pr_url", prURL)
 
 	return "", false, nil
 }
@@ -550,7 +734,7 @@ func (o *run) triageCopilot(
 // buy a free retry on resume. It returns a park error when the rounds cap is
 // spent or the fix runs out of budget or turns, and nil once the fix is pushed.
 func (o *run) copilotFixRound(ctx context.Context, st *gatesState, findings []copilotFinding) error {
-	st.Detail = copilotFindingLines(findings)
+	st.CopilotDetail = copilotFindingLines(findings)
 
 	if st.CopilotRounds >= gatesRoundsCap {
 		return o.parkGates(ctx, st,
@@ -561,8 +745,9 @@ func (o *run) copilotFixRound(ctx context.Context, st *gatesState, findings []co
 	st.Status = fmt.Sprintf("fixing Copilot findings (round %d/%d)", st.CopilotRounds, gatesRoundsCap)
 	o.recordGates(ctx, *st)
 
-	o.d.logCard(ctx, "pr_gates: Copilot review - fix round %d/%d on %d finding(s)",
-		st.CopilotRounds, gatesRoundsCap, len(findings))
+	o.gateNote(ctx, "copilot", fmt.Sprintf("pr_gates: Copilot review - fix round %d/%d on %d finding(s)",
+		st.CopilotRounds, gatesRoundsCap, len(findings)),
+		map[string]any{"round": st.CopilotRounds, "cap": gatesRoundsCap, "findings": len(findings)})
 
 	if err := o.runFix(ctx, copilotFixFindings(findings), st.CopilotRounds, "", false); err != nil {
 		if reason := gateResourcePark(err, gatesCopilotFixBudgetParkReason, gatesCopilotTurnCapParkReason); reason != "" {
@@ -580,9 +765,9 @@ func (o *run) copilotFixRound(ctx context.Context, st *gatesState, findings []co
 // verbatim and kept on the gates section, because it is the whole diagnostic
 // channel for a Copilot setup the agent cannot see into.
 func (o *run) skipCopilot(ctx context.Context, st *gatesState, line string) error {
-	st.Detail = "- " + line + "\n"
+	st.CopilotDetail = "- " + line + "\n"
 	o.recordGates(ctx, *st)
-	o.d.logCard(ctx, "%s", line)
+	o.gateNote(ctx, "copilot", line, nil)
 
 	return nil
 }
@@ -867,8 +1052,9 @@ func (o *run) ciGate(ctx context.Context, prURL string, st *gatesState) error {
 	// The checks-were-seen memory spans containers: a gate whose persisted
 	// section already records fix rounds ran CI in an earlier run, so its first
 	// empty poll here is the resumed head's run registering - never "this repo
-	// has no CI".
-	sawChecks := st.CIRounds > 0
+	// has no CI". It also spans re-entries within this run: a Copilot fix push
+	// sends the gate round again, and the new head's run has not registered yet.
+	sawChecks := st.CIRounds > 0 || o.ciSawChecks
 
 	for {
 		checks, pollErr := o.d.PRGates.Checks(ctx, prURL)
@@ -889,6 +1075,7 @@ func (o *run) ciGate(ctx context.Context, prURL string, st *gatesState) error {
 			// re-poll right after a fix round - which would otherwise pass a PR
 			// that was red one poll earlier.
 			sawChecks = true
+			o.ciSawChecks = true
 		}
 
 		b := classifyChecks(checks)
@@ -904,7 +1091,7 @@ func (o *run) ciGate(ctx context.Context, prURL string, st *gatesState) error {
 			if time.Since(start) >= gatesNoChecksGrace {
 				st.Detail = ""
 
-				o.d.logCard(ctx, "pr_gates: no CI checks on the PR; gate passes")
+				o.gateNote(ctx, "ci", "pr_gates: no CI checks on the PR; gate passes", nil)
 
 				return nil
 			}
@@ -950,7 +1137,7 @@ func (o *run) ciGate(ctx context.Context, prURL string, st *gatesState) error {
 			// failed poll (nil checks) out of this arm.
 			st.Detail = ""
 
-			o.d.logCard(ctx, "pr_gates: CI green")
+			o.gateNote(ctx, "ci", "pr_gates: CI green", nil)
 
 			return nil
 		}
@@ -1004,8 +1191,9 @@ func (o *run) ciFixRound(ctx context.Context, prURL string, st *gatesState, fail
 	st.Status = fmt.Sprintf("fixing CI failures (round %d/%d)", st.CIRounds, gatesRoundsCap)
 	o.recordGates(ctx, *st)
 
-	o.d.logCard(ctx, "pr_gates: CI red - fix round %d/%d on %d failing check(s)",
-		st.CIRounds, gatesRoundsCap, len(failed))
+	o.gateNote(ctx, "ci", fmt.Sprintf("pr_gates: CI red - fix round %d/%d on %d failing check(s)",
+		st.CIRounds, gatesRoundsCap, len(failed)),
+		map[string]any{"round": st.CIRounds, "cap": gatesRoundsCap, "failed": len(failed)})
 
 	digest, err := o.d.PRGates.FailureLogs(ctx, prURL, failed)
 	if err != nil {
@@ -1095,7 +1283,7 @@ func failedChecksSummary(failed []CheckResult) string {
 func (o *run) parkGates(ctx context.Context, st *gatesState, reason string) error {
 	st.Status = "parked: " + reason
 	o.recordGates(ctx, *st)
-	o.d.logCard(ctx, "pr_gates: parked - %s", reason)
+	o.gateNote(ctx, "pr_gates", "pr_gates: parked - "+reason, map[string]any{"reason": reason})
 
 	return &GatesParkedError{Reason: reason}
 }
@@ -1132,6 +1320,10 @@ func (o *run) recordGates(ctx context.Context, st gatesState) {
 
 	if st.Status != "" {
 		fmt.Fprintf(&b, "- Status: %s\n", st.Status)
+	}
+
+	if detail := strings.TrimSpace(st.CopilotDetail); detail != "" {
+		b.WriteString("\n" + detail + "\n")
 	}
 
 	if detail := strings.TrimSpace(st.Detail); detail != "" {

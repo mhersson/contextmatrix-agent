@@ -186,7 +186,7 @@ func (o *run) runReviewHITL(ctx context.Context, plan verifyPlan) error {
 	cfg := d.Cfg
 
 	model := resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
-		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel)
+		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels())
 
 	for iter := range hardReviewIterationCap {
 		round := o.tc.ReviewAttempts + iter + 1
@@ -696,7 +696,7 @@ func (o *run) synthesize(ctx context.Context, findings string, authoritative boo
 	cfg := d.Cfg
 
 	model := resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
-		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel)
+		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels())
 
 	var (
 		v       verdict

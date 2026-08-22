@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
 	"os/exec"
@@ -342,10 +343,18 @@ func combinedStatusArgs(owner, repo, sha string) []string {
 	return []string{"api", fmt.Sprintf("repos/%s/%s/commits/%s/status", owner, repo, sha)}
 }
 
-// reviewRequestsArgs builds the gh pr view invocation that reports pending
-// review requests.
-func reviewRequestsArgs(prURL string) []string {
-	return []string{"pr", "view", prURL, "--json", "reviewRequests"}
+// reviewRequestsArgs builds the gh api invocation that lists the PR's pending
+// review requests through the REST requested_reviewers endpoint. gh's own
+// `pr view --json reviewRequests` is NOT usable here: its JSON exporter emits
+// only User and Team nodes and silently drops Bot-typed reviewers, and
+// Copilot's reviewer is a Bot - the pre-check would never see it.
+func reviewRequestsArgs(prURL string) ([]string, error) {
+	owner, repo, number, err := parsePRPath(prURL)
+	if err != nil {
+		return nil, fmt.Errorf("review requests: %w", err)
+	}
+
+	return []string{"api", fmt.Sprintf("repos/%s/%s/pulls/%d/requested_reviewers", owner, repo, number)}, nil
 }
 
 // addCopilotReviewerArgs builds the gh api invocation that requests a Copilot
@@ -403,8 +412,38 @@ func parseChecks(out string) ([]orchestrator.CheckResult, error) {
 	return checks, nil
 }
 
-// parseReviewRequests reports whether any reviewer request in a gh pr view
-// --json reviewRequests document names Copilot's PR review bot. gh's schema
+// decodeJSONArrays decodes one or more JSON arrays printed back to back - the
+// shape `gh api --paginate` produces for array endpoints - into one slice. A
+// single array and empty input both decode cleanly.
+func decodeJSONArrays[T any](out string) ([]T, error) {
+	var all []T
+
+	dec := json.NewDecoder(strings.NewReader(out))
+
+	for {
+		var page []T
+
+		err := dec.Decode(&page)
+		if errors.Is(err, io.EOF) {
+			return all, nil
+		}
+
+		if err != nil {
+			return nil, fmt.Errorf("decode JSON array page: %w", err)
+		}
+
+		all = append(all, page...)
+	}
+}
+
+// paginatedGetArgs builds a gh api GET that follows pagination with 100-item
+// pages; --method GET keeps gh from flipping to POST when a field is given.
+func paginatedGetArgs(path string) []string {
+	return []string{"api", "--method", "GET", "--paginate", "-f", "per_page=100", path}
+}
+
+// parseReviewRequests reports whether any reviewer request in a REST
+// requested_reviewers document names Copilot's PR review bot. gh's schema
 // nests review-request logins differently for users, teams, and bots, so this
 // walks the decoded JSON for any "login" value rather than binding to one
 // fixed shape.
@@ -456,8 +495,8 @@ type ghReview struct {
 // also returns the review's ID, used to fetch that review's line comments; nil
 // and a zero ID when no bot review exists.
 func parseCopilotReview(out string) (*orchestrator.CopilotReview, int64, error) {
-	var reviews []ghReview
-	if err := json.Unmarshal([]byte(out), &reviews); err != nil {
+	reviews, err := decodeJSONArrays[ghReview](out)
+	if err != nil {
 		return nil, 0, fmt.Errorf("parse copilot review: %w", err)
 	}
 
@@ -494,8 +533,8 @@ type ghReviewComment struct {
 // parseReviewComments filters a GitHub REST /pulls/{n}/comments array down to
 // the line comments attached to one review ID.
 func parseReviewComments(out string, reviewID int64) ([]orchestrator.ReviewComment, error) {
-	var raw []ghReviewComment
-	if err := json.Unmarshal([]byte(out), &raw); err != nil {
+	raw, err := decodeJSONArrays[ghReviewComment](out)
+	if err != nil {
 		return nil, fmt.Errorf("parse review comments: %w", err)
 	}
 
@@ -795,16 +834,21 @@ func (p *PRCreator) HeadSHA(ctx context.Context, prURL string) (string, error) {
 }
 
 // CopilotRequested reports whether Copilot's PR review bot is among the
-// pending review requests.
+// pending review requests (REST requested_reviewers: users[] + teams[]).
 func (p *PRCreator) CopilotRequested(ctx context.Context, prURL string) (bool, error) {
-	out, err := p.runGH(ctx, "", false, reviewRequestsArgs(prURL)...)
+	args, err := reviewRequestsArgs(prURL)
 	if err != nil {
-		return false, fmt.Errorf("gh pr view review requests: %w", err)
+		return false, fmt.Errorf("gh api review requests: %w", err)
+	}
+
+	out, err := p.runGH(ctx, "", false, args...)
+	if err != nil {
+		return false, fmt.Errorf("gh api review requests: %w", err)
 	}
 
 	requested, err := parseReviewRequests(out)
 	if err != nil {
-		return false, fmt.Errorf("gh pr view review requests: %w", err)
+		return false, fmt.Errorf("gh api review requests: %w", err)
 	}
 
 	return requested, nil
@@ -835,7 +879,7 @@ func (p *PRCreator) CopilotReview(ctx context.Context, prURL string) (*orchestra
 
 	base := "repos/" + owner + "/" + repo + "/pulls/" + strconv.Itoa(number)
 
-	out, err := p.runGH(ctx, "", false, "api", base+"/reviews")
+	out, err := p.runGH(ctx, "", false, paginatedGetArgs(base+"/reviews")...)
 	if err != nil {
 		return nil, fmt.Errorf("copilot review: %w", err)
 	}
@@ -849,7 +893,8 @@ func (p *PRCreator) CopilotReview(ctx context.Context, prURL string) (*orchestra
 		return nil, nil
 	}
 
-	commentsOut, err := p.runGH(ctx, "", false, "api", base+"/comments")
+	commentsOut, err := p.runGH(ctx, "", false,
+		paginatedGetArgs(base+"/reviews/"+strconv.FormatInt(reviewID, 10)+"/comments")...)
 	if err != nil {
 		return nil, fmt.Errorf("copilot review comments: %w", err)
 	}
