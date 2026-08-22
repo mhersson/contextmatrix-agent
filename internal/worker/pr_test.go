@@ -221,7 +221,7 @@ func TestGatesArgBuilders(t *testing.T) {
 	// Copilot is a Bot-typed reviewer. gh's `pr view --json reviewRequests`
 	// exporter emits only User and Team nodes, so the pre-check reads the REST
 	// requested_reviewers endpoint, which lists the bot under users[].
-	got, err := reviewRequestsArgs("https://github.com/org/repo/pull/7")
+	got, err := reviewRequestsArgs(prURL)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"api", "repos/org/repo/pulls/7/requested_reviewers"}, got)
 

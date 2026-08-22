@@ -557,6 +557,47 @@ func TestPRGates_DecisionsAreEmittedAsGateProgressEvents(t *testing.T) {
 	assert.Contains(t, shown, "pr_gates: passed")
 }
 
+// TestGateNoteReservedKeysWinOverFields: every gate_progress consumer keys off
+// gate/status/repeat/decision, so a caller's context fields ride alongside them
+// and can never redefine them.
+func TestGateNoteReservedKeysWinOverFields(t *testing.T) {
+	var transcript bytes.Buffer
+
+	o := &run{d: Deps{
+		Ops:  &fakeOps{},
+		Emit: events.NewEmitter(nil, &transcript),
+		Cfg:  Config{CardID: "CARD-1"},
+	}}
+
+	o.gateNote(context.Background(), "ci", "pr_gates: CI green", map[string]any{
+		"gate":     "spoofed",
+		"status":   "spoofed",
+		"repeat":   true,
+		"decision": false,
+		"reason":   "kept",
+	})
+
+	var ev struct {
+		Kind string `json:"kind"`
+		Data struct {
+			Gate     string `json:"gate"`
+			Status   string `json:"status"`
+			Repeat   bool   `json:"repeat"`
+			Decision bool   `json:"decision"`
+			Reason   string `json:"reason"`
+		} `json:"data"`
+	}
+
+	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(transcript.String())), &ev))
+
+	assert.Equal(t, gateProgressKind, ev.Kind)
+	assert.Equal(t, "ci", ev.Data.Gate)
+	assert.Equal(t, "pr_gates: CI green", ev.Data.Status)
+	assert.False(t, ev.Data.Repeat, "a decision is never a repeat")
+	assert.True(t, ev.Data.Decision, "a decision is never demoted to a poll")
+	assert.Equal(t, "kept", ev.Data.Reason, "non-reserved fields still ride along")
+}
+
 // TestGateDeadlineClampsToContainerDeadline: a gate never waits past the
 // container's own deadline, and an unset (zero) deadline leaves it unbounded.
 func TestGateDeadlineClampsToContainerDeadline(t *testing.T) {
@@ -2033,8 +2074,9 @@ func TestPRGates_LateCopilotReviewIsTriagedAfterCI(t *testing.T) {
 }
 
 // TestPRGates_LateReviewFixRoundReRunsBothGates: a late review with a real
-// finding funds a fix round; the push changes the head, so the Copilot wait
-// and the CI gate both run again on the new head before the card completes.
+// finding funds a fix round, and the second pass re-runs both gates before the
+// card completes - the Copilot gate (served by its head probe here, since the
+// fake's head SHA does not move) and the CI gate.
 func TestPRGates_LateReviewFixRoundReRunsBothGates(t *testing.T) {
 	ops := &fakeOps{}
 	gates := &fakeGates{

@@ -127,12 +127,19 @@ func (p *gatePoller) poll(emit *events.Emitter, status string, fields map[string
 // worker's slog (durable run log), a gate_progress event with repeat=false (the
 // serve transcript and the run log's JSONL), and the card activity log. The
 // poll heartbeat covers waiting; this covers what the gate decided and why.
+// The event's gate, status, repeat and decision keys are reserved: fields adds
+// context around them and can never overwrite them.
 func (o *run) gateNote(ctx context.Context, gate, line string, fields map[string]any) {
 	slog.Info(line, "card_id", o.d.Cfg.CardID, "gate", gate)
 
 	if o.d.Emit != nil {
-		data := map[string]any{"gate": gate, "status": line, "repeat": false, "decision": true}
+		data := make(map[string]any, len(fields)+4)
 		maps.Copy(data, fields)
+
+		data["gate"] = gate
+		data["status"] = line
+		data["repeat"] = false
+		data["decision"] = true
 
 		o.d.Emit.Emit(events.Kind(gateProgressKind), data)
 	}
@@ -378,8 +385,9 @@ func (o *run) copilotGate(ctx context.Context, prURL string, st *gatesState) err
 }
 
 // copilotLateCheck probes once for a Copilot review on the current head after
-// the other gates ran. It reports whether a fix round pushed a new head (the
-// caller then re-runs the gates) and returns the review-cycle errors verbatim.
+// the other gates ran. It reports whether the triage spent a fix round (which
+// normally pushes a new head, and the caller then re-runs the gates) and
+// returns the review-cycle errors verbatim.
 //
 // The loop it feeds is bounded: every pushed=true answer came out of
 // copilotFixRound, which increments the persisted round counter and parks the
