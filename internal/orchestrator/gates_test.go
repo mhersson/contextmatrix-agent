@@ -1527,6 +1527,33 @@ func TestCopilotGate_TimeoutProceeds(t *testing.T) {
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
 }
 
+// TestPRGates_CIGreenKeepsTheCopilotOutcome: the CI gate's green exit must not
+// erase the Copilot gate's recorded outcome from the PR Gates section - that
+// line is the only place on the card body that says what happened to the
+// Copilot review.
+func TestPRGates_CIGreenKeepsTheCopilotOutcome(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		checks:    [][]CheckResult{{{Name: "ci", Bucket: "pass"}}},
+	}
+	client := &planLLM{}
+
+	tc := copilotGateContext("Timeout then green", "body")
+	tc.AwaitCI = true
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, tc, 0)
+	o.d.Cfg.GatesCopilotWaitTimeout = 5 * time.Millisecond
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	body := ops.lastBody()
+	assert.Contains(t, body, "- Status: passed")
+	assert.Contains(t, body, "Copilot review did not arrive in time",
+		"the Copilot outcome survives the CI green write; body=%q", body)
+}
+
 // TestCopilotGate_ValidFindingsFixedThenClean: the triage verdict decides which
 // comments are real - the valid one funds a fix round and a re-request, the nit
 // is recorded and dropped - and the next review comes back clean.

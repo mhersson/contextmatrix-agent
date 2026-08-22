@@ -158,6 +158,11 @@ type gatesState struct {
 
 	Status string
 	Detail string // human-facing lines: failing checks, park reasons
+
+	// CopilotDetail is the Copilot gate's recorded outcome (skip reason,
+	// unconfirmed request, pass note). Kept apart from Detail so the CI gate's
+	// writes never erase it.
+	CopilotDetail string
 }
 
 // runPRGates is the pr_gates phase: after integrate has pushed and (optionally)
@@ -314,9 +319,9 @@ func (o *run) copilotGate(ctx context.Context, prURL string, st *gatesState) err
 			}
 
 			// Not proof Copilot cannot review - the repo may assign the reviewer
-			// itself. Record the verbatim reason and wait; the pass exits clear
-			// it, and a pass-by-timeout records its own line.
-			st.Detail = "- pr_gates: Copilot review could not be confirmed (" + reason + "); waiting for the review\n"
+			// itself. Record the verbatim reason and wait; a pass exit or a
+			// pass-by-timeout overwrites CopilotDetail with its own line.
+			st.CopilotDetail = "- pr_gates: Copilot review could not be confirmed (" + reason + "); waiting for the review\n"
 			o.recordGates(ctx, *st)
 			o.d.logCard(ctx, "pr_gates: Copilot review could not be confirmed (%s); waiting for the review", reason)
 		}
@@ -407,7 +412,7 @@ func (o *run) copilotReviewCycle(
 	// round that carries nothing new is nothing to fix - re-triaging it would
 	// spend a round undoing work an earlier round already did.
 	if len(review.Comments) > 0 && len(fresh) == 0 {
-		st.Detail = ""
+		st.CopilotDetail = "- pr_gates: Copilot repeated only comments already triaged; gate passes\n"
 		st.CopilotSatisfied = true
 
 		o.d.logCard(ctx, "pr_gates: Copilot repeated only comments already triaged; gate passes")
@@ -426,7 +431,7 @@ func (o *run) copilotReviewCycle(
 
 	valid := validCopilotFindings(findings)
 	if len(valid) == 0 {
-		st.Detail = ""
+		st.CopilotDetail = "- pr_gates: Copilot review addressed\n"
 		st.CopilotSatisfied = true
 
 		o.d.logCard(ctx, "pr_gates: Copilot review addressed")
@@ -446,7 +451,7 @@ func (o *run) copilotReviewCycle(
 
 		// Same rule as the first request: a generic failure does not prove
 		// Copilot will not review the new head (rulesets re-review every push).
-		st.Detail = "- pr_gates: Copilot re-review could not be requested (" + rerr.Error() + "); waiting for the review of the fixed head\n"
+		st.CopilotDetail = "- pr_gates: Copilot re-review could not be requested (" + rerr.Error() + "); waiting for the review of the fixed head\n"
 		o.recordGates(ctx, *st)
 		o.d.logCard(ctx, "pr_gates: Copilot re-review could not be requested (%s); waiting for the review of the fixed head", rerr.Error())
 	}
@@ -667,7 +672,7 @@ func (o *run) triageCopilot(
 // buy a free retry on resume. It returns a park error when the rounds cap is
 // spent or the fix runs out of budget or turns, and nil once the fix is pushed.
 func (o *run) copilotFixRound(ctx context.Context, st *gatesState, findings []copilotFinding) error {
-	st.Detail = copilotFindingLines(findings)
+	st.CopilotDetail = copilotFindingLines(findings)
 
 	if st.CopilotRounds >= gatesRoundsCap {
 		return o.parkGates(ctx, st,
@@ -697,7 +702,7 @@ func (o *run) copilotFixRound(ctx context.Context, st *gatesState, findings []co
 // verbatim and kept on the gates section, because it is the whole diagnostic
 // channel for a Copilot setup the agent cannot see into.
 func (o *run) skipCopilot(ctx context.Context, st *gatesState, line string) error {
-	st.Detail = "- " + line + "\n"
+	st.CopilotDetail = "- " + line + "\n"
 	o.recordGates(ctx, *st)
 	o.d.logCard(ctx, "%s", line)
 
@@ -1251,6 +1256,10 @@ func (o *run) recordGates(ctx context.Context, st gatesState) {
 
 	if st.Status != "" {
 		fmt.Fprintf(&b, "- Status: %s\n", st.Status)
+	}
+
+	if detail := strings.TrimSpace(st.CopilotDetail); detail != "" {
+		b.WriteString("\n" + detail + "\n")
 	}
 
 	if detail := strings.TrimSpace(st.Detail); detail != "" {
