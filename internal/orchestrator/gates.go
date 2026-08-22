@@ -210,26 +210,46 @@ func runPRGates(ctx context.Context, o *run) error {
 	if gated && prURL != "" {
 		st := o.loadGatesState()
 
-		if o.tc.AwaitCopilotReview {
-			if err := o.copilotGate(ctx, prURL, &st); err != nil {
+		for {
+			if o.tc.AwaitCopilotReview {
+				if err := o.copilotGate(ctx, prURL, &st); err != nil {
+					return err
+				}
+
+				// Persist here, before the CI gate runs: a context cancellation
+				// during ciGate's poll wait is routine container teardown (see
+				// sleepGate's doc comment), and it returns straight out of
+				// runPRGates without ever reaching the "passed" write below. A
+				// CopilotSatisfied set only in memory by copilotGate's pass exits
+				// would then be lost, and the next resume would re-request a paid
+				// Copilot review this run already got and addressed. Harmless on
+				// the already-satisfied and skip-path exits too: recordSection is
+				// an idempotent upsert, and the skip paths leave the marker false.
+				o.recordGates(ctx, st)
+			}
+
+			if o.tc.AwaitCI {
+				if err := o.ciGate(ctx, prURL, &st); err != nil {
+					return err
+				}
+			}
+
+			if !o.tc.AwaitCopilotReview || st.CopilotSatisfied {
+				break
+			}
+
+			// The Copilot gate passed without a review (a timed-out wait, an
+			// unconfirmed request). CI may have taken long enough for one to
+			// land since: one probe before completing, so a review on the head
+			// is never left unread. A fix round pushes a new head, so both
+			// gates run again on it.
+			pushed, err := o.copilotLateCheck(ctx, prURL, &st)
+			if err != nil {
 				return err
 			}
 
-			// Persist here, before the CI gate runs: a context cancellation
-			// during ciGate's poll wait is routine container teardown (see
-			// sleepGate's doc comment), and it returns straight out of
-			// runPRGates without ever reaching the "passed" write below. A
-			// CopilotSatisfied set only in memory by copilotGate's pass exits
-			// would then be lost, and the next resume would re-request a paid
-			// Copilot review this run already got and addressed. Harmless on
-			// the already-satisfied and skip-path exits too: recordSection is
-			// an idempotent upsert, and the skip paths leave the marker false.
-			o.recordGates(ctx, st)
-		}
-
-		if o.tc.AwaitCI {
-			if err := o.ciGate(ctx, prURL, &st); err != nil {
-				return err
+			if !pushed {
+				break
 			}
 		}
 
@@ -317,6 +337,31 @@ func (o *run) copilotGate(ctx context.Context, prURL string, st *gatesState) err
 			return err
 		}
 	}
+}
+
+// copilotLateCheck probes once for a Copilot review on the current head after
+// the other gates ran. It reports whether a fix round pushed a new head (the
+// caller then re-runs the gates) and returns the review-cycle errors verbatim.
+//
+// The loop it feeds is bounded: every pushed=true answer came out of
+// copilotFixRound, which increments the persisted round counter and parks the
+// card once it reaches gatesRoundsCap.
+func (o *run) copilotLateCheck(ctx context.Context, prURL string, st *gatesState) (bool, error) {
+	review := o.copilotReviewOnHead(ctx, prURL)
+	if review == nil {
+		return false, nil
+	}
+
+	o.d.logCard(ctx, "pr_gates: late Copilot review found on the PR head; triaging it")
+
+	satisfied, err := o.copilotReviewCycle(ctx, prURL, st, copilotSeenComments(o.body), review)
+	if err != nil {
+		return false, err
+	}
+
+	o.recordGates(ctx, *st)
+
+	return !satisfied, nil
 }
 
 // copilotReviewOnHead returns the PR's latest Copilot review when it is a review
@@ -939,8 +984,9 @@ func (o *run) ciGate(ctx context.Context, prURL string, st *gatesState) error {
 	// The checks-were-seen memory spans containers: a gate whose persisted
 	// section already records fix rounds ran CI in an earlier run, so its first
 	// empty poll here is the resumed head's run registering - never "this repo
-	// has no CI".
-	sawChecks := st.CIRounds > 0
+	// has no CI". It also spans re-entries within this run: a Copilot fix push
+	// sends the gate round again, and the new head's run has not registered yet.
+	sawChecks := st.CIRounds > 0 || o.ciSawChecks
 
 	for {
 		checks, pollErr := o.d.PRGates.Checks(ctx, prURL)
@@ -961,6 +1007,7 @@ func (o *run) ciGate(ctx context.Context, prURL string, st *gatesState) error {
 			// re-poll right after a fix round - which would otherwise pass a PR
 			// that was red one poll earlier.
 			sawChecks = true
+			o.ciSawChecks = true
 		}
 
 		b := classifyChecks(checks)

@@ -48,6 +48,13 @@ type fakeGates struct {
 	reviews              []*CopilotReview
 	requests             int
 
+	// holdReviewsUntilChecks reproduces a review that lands DURING the CI wait:
+	// while it is set and Checks has never been polled, CopilotReview reads as
+	// "no review yet" without consuming the queue, so the Copilot wait times out
+	// and the first scripted review only becomes visible once the CI gate ran.
+	holdReviewsUntilChecks bool
+	checksPolled           bool
+
 	logs string
 
 	// FindPRURL scripting: the recovery probe's result for a fail-closed gate.
@@ -82,6 +89,8 @@ func (f *fakeGates) Checks(_ context.Context, prURL string) ([]CheckResult, erro
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	f.checksPolled = true
 
 	if len(f.checks) == 0 {
 		return nil, f.checksErr
@@ -136,6 +145,10 @@ func (f *fakeGates) CopilotReview(_ context.Context, prURL string) (*CopilotRevi
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	if f.holdReviewsUntilChecks && !f.checksPolled {
+		return nil, nil
+	}
 
 	if len(f.reviews) == 0 {
 		return nil, nil
@@ -1909,6 +1922,74 @@ func TestCopilotGate_EmptyVerdictWithCommentsTakesThemAtFaceValue(t *testing.T) 
 		"the card says the comment was never judged; logs=%v", ops.recorded())
 	assert.Equal(t, 3, modelCallCount(client), "the unjudged comment still funds the fix round")
 	assert.Contains(t, ops.lastBody(), "- Copilot rounds used: 1/3")
+}
+
+// TestPRGates_LateCopilotReviewIsTriagedAfterCI: the Copilot wait timed out,
+// CI then took long enough for the review to land. The gate must not finish
+// with an unread review on the head - one probe after CI catches it.
+func TestPRGates_LateCopilotReviewIsTriagedAfterCI(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested:              true,
+		headSHA:                copilotHeadSHA,
+		holdReviewsUntilChecks: true,
+		reviews:                []*CopilotReview{copilotReviewOnHead("LGTM")},
+		checks:                 [][]CheckResult{{{Name: "ci", Bucket: "pass"}}},
+	}
+	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
+
+	tc := copilotGateContext("Late review", "body")
+	tc.AwaitCI = true
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, tc, 0)
+	o.d.Cfg.GatesCopilotWaitTimeout = 5 * time.Millisecond
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	assert.True(t, ops.loggedContains("did not arrive in time"), "the wait timed out first; logs=%v", ops.recorded())
+	assert.True(t, ops.loggedContains("late Copilot review"), "the late check found it; logs=%v", ops.recorded())
+	assert.Equal(t, 1, modelCallCount(client), "the late review is triaged")
+	assert.Contains(t, ops.lastBody(), "- Copilot gate: satisfied")
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+}
+
+// TestPRGates_LateReviewFixRoundReRunsBothGates: a late review with a real
+// finding funds a fix round; the push changes the head, so the Copilot wait
+// and the CI gate both run again on the new head before the card completes.
+func TestPRGates_LateReviewFixRoundReRunsBothGates(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested:              true,
+		headSHA:                copilotHeadSHA,
+		holdReviewsUntilChecks: true,
+		reviews: []*CopilotReview{
+			copilotReviewOnHead("1 suggestion", swallowedErrorComment),
+			copilotReviewOnHead("LGTM"),
+		},
+		checks: [][]CheckResult{{{Name: "ci", Bucket: "pass"}}},
+	}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: []llm.Response{
+		copilotVerdict(copilotFinding{File: "internal/api/handler.go", Issue: "dropped error", Valid: true, Reason: "real"}),
+		stopResp("coder: fixed", 0.02),
+		copilotVerdict(),
+	}}
+
+	tc := copilotGateContext("Late review with finding", "body")
+	tc.AwaitCI = true
+
+	o := prGateRun(ops, gates, git, client, tc, 0)
+	o.d.Cfg.GatesCopilotWaitTimeout = 5 * time.Millisecond
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	assert.Equal(t, 3, modelCallCount(client), "triage, fix, re-triage")
+	assert.Contains(t, git.recorded(), "Push:cm/card-1")
+	assert.GreaterOrEqual(t, strings.Count(strings.Join(gates.recorded(), " "), "Checks:"), 2,
+		"CI is polled again after the fix push; calls=%v", gates.recorded())
+	assert.Contains(t, ops.lastBody(), "- Copilot rounds used: 1/3")
+	assert.Contains(t, ops.lastBody(), "- Copilot gate: satisfied")
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
 }
 
 // nonEmpty normalizes an empty slice to nil so table cases can leave the want

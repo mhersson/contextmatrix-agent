@@ -320,6 +320,11 @@ type run struct {
 	// earlier run reported through report_push).
 	prURL string
 
+	// ciSawChecks is set once any CI check was observed this run, so a CI gate
+	// re-entered after a Copilot fix push never reads an empty first poll as
+	// "no CI".
+	ciSawChecks bool
+
 	// reviewSummary is the synthesis verdict's one-line summary captured on
 	// approval, carried into the integrate phase's PR body. Empty when review was
 	// skipped (resume entering at integrate) or the summary was blank.
