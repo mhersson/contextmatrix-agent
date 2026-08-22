@@ -779,6 +779,47 @@ func TestPlanPhaseDiagnoseIncapableModelIsRecovered(t *testing.T) {
 	assert.NotEqual(t, first, models[len(models)-1],
 		"the plan did not run on the incapable model; models=%v", models)
 	assert.True(t, ops.loggedContains("planning without a diagnosis"), "logs=%v", ops.recorded())
+	assert.True(t, ops.loggedContains("re-selected after diagnose"),
+		"the new model differs from the first, so the re-selection path is logged; logs=%v", ops.logs)
+}
+
+// TestPlanPhaseDiagnoseIncapableModelNoAlternative: when every candidate is
+// excluded yet the registry falls back to the same capable default, the log
+// says "no alternative" instead of claiming a re-selection.
+func TestPlanPhaseDiagnoseIncapableModelNoAlternative(t *testing.T) {
+	ops := &fakeOps{
+		taskContext: cmclient.TaskContext{
+			Title: "Fix the broken parser", Description: "it throws on empty input",
+		},
+		createdIDs: []string{"SUB-1", "SUB-2"},
+	}
+	d := planTestDeps(ops, nil)
+	// planTestRegistry carries no priors; SelectByComplexity returns the capable
+	// default even when that default is the excluded model.
+	d.Registry = planTestRegistry()
+
+	// The decision model the registry resolves first is "default/model" (the
+	// capable default, since no priors). Make it incapable so the diagnose step
+	// triggers recovery, which excludes it, but the re-resolve returns the same
+	// capable default.
+	first := resolveDecisionModel(context.Background(), d.Registry, d.Emit, ops, "CARD-1",
+		"", d.Cfg.PayloadModel, d.Cfg.DefaultModel, nil)
+	llmFake := &modelAwareLLM{
+		incapable: map[string]bool{first: true},
+		responses: []llm.Response{stopResp(goodPlanJSON, 0.03)},
+	}
+	d.Client = llmFake
+
+	o := newRun(d, ops.taskContext)
+	require.NoError(t, runPlan(context.Background(), o))
+
+	assert.Contains(t, ops.recorded(), "BlacklistModel:CARD-1/"+first,
+		"the diagnose-incapable model is blacklisted; calls=%v", ops.recorded())
+	assert.True(t, ops.loggedContains("no alternative decision model available"),
+		"the unchanged-model fallback message is logged; logs=%v", ops.logs)
+	assert.False(t, ops.loggedContains("re-selected after diagnose"),
+		"the re-selection message must NOT appear when the model did not change; logs=%v", ops.logs)
+	assert.True(t, ops.loggedContains("planning without a diagnosis"), "logs=%v", ops.recorded())
 }
 
 func TestResolveOrchestratorModel(t *testing.T) {
