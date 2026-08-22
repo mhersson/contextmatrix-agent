@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -281,4 +282,15 @@ func TestRecoverIncapableCapsAtThree(t *testing.T) {
 	var ie *IncapableError
 	require.ErrorAs(t, err, &ie)
 	assert.Equal(t, 3, o.reselects, "the counter must not advance past the cap")
+
+	blacklisted := 0
+
+	for _, c := range ops.recorded() {
+		if strings.HasPrefix(c, "BlacklistModel:") {
+			blacklisted++
+		}
+	}
+
+	assert.Equal(t, 4, blacklisted, "the model that exhausts the cap is blacklisted like the others; calls=%v", ops.recorded())
+	assert.True(t, o.excluded["m"], "and excluded for the rest of the run")
 }

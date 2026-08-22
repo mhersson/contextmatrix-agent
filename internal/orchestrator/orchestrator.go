@@ -685,20 +685,11 @@ const reselectCap = 3
 // the caller can simply re-select and re-run the same unit; no git reset is
 // needed.
 func (o *run) recoverIncapable(ctx context.Context, ie *IncapableError) error {
-	// The cap check + increment + exclusion must be atomic: under a Best-of-N
-	// fan-out, parallel candidates share o.reselects and o.excluded, and the cap
-	// is a single shared budget. Hold selMu across the whole mutation, capture the
-	// attempt number, then release before the advisory I/O.
+	// Exclusion and the cap check must be atomic: under a Best-of-N fan-out,
+	// parallel candidates share o.reselects and o.excluded, and the cap is a
+	// single shared budget. Hold selMu across the whole mutation, then release
+	// before the advisory I/O.
 	o.selMu.Lock()
-
-	if o.reselects >= reselectCap {
-		o.selMu.Unlock()
-
-		return fmt.Errorf("re-selection cap (%d) exhausted after model %q: %w", reselectCap, ie.Model, ie)
-	}
-
-	o.reselects++
-	attempt := o.reselects
 
 	if o.excluded == nil {
 		o.excluded = map[string]bool{}
@@ -706,11 +697,26 @@ func (o *run) recoverIncapable(ctx context.Context, ie *IncapableError) error {
 
 	o.excluded[ie.Model] = true
 
+	exhausted := o.reselects >= reselectCap
+	if !exhausted {
+		o.reselects++
+	}
+
+	attempt := o.reselects
+
 	o.selMu.Unlock()
 
-	// Best-effort: the recovery proceeds (re-select + re-run) regardless of a
-	// reporting failure; the blacklist is an advisory hint to CM and future runs.
+	// Best-effort, and done for the cap-exhausting model too: a proven
+	// incapable model must not be the first pick of the next run just because
+	// it happened to be the one that spent the last re-selection.
 	_ = o.d.Ops.BlacklistModel(ctx, o.d.Cfg.CardID, ie.Model, ie.Reason) //nolint:errcheck
+
+	if exhausted {
+		o.d.logCard(ctx, "model %q harness-incapable; blacklisted - re-selection cap (%d) exhausted", ie.Model, reselectCap)
+
+		return fmt.Errorf("re-selection cap (%d) exhausted after model %q: %w", reselectCap, ie.Model, ie)
+	}
+
 	o.d.logCard(ctx, "model %q harness-incapable; blacklisted and re-selecting (attempt %d/%d)", ie.Model, attempt, reselectCap)
 
 	return nil
