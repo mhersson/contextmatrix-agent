@@ -698,12 +698,13 @@ func (o *run) recoverIncapable(ctx context.Context, ie *IncapableError) error {
 
 	o.excluded[ie.Model] = true
 
+	attempt := 0
+
 	exhausted := o.reselects >= reselectCap
 	if !exhausted {
 		o.reselects++
+		attempt = o.reselects
 	}
-
-	attempt := o.reselects
 
 	o.selMu.Unlock()
 
