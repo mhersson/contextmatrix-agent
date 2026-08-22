@@ -284,10 +284,10 @@ func runPRGates(ctx context.Context, o *run) error {
 			}
 
 			// The Copilot gate passed without a review (a timed-out wait, an
-			// unconfirmed request). CI may have taken long enough for one to
-			// land since: one probe before completing, so a review on the head
-			// is never left unread. A fix round pushes a new head, so both
-			// gates run again on it.
+			// unconfirmed request). The late probe runs after the enabled
+			// gates: one read before completing, so a review on the head is
+			// never left unread. A fix round normally pushes a new head, so
+			// both gates run again on it.
 			pushed, err := o.copilotLateCheck(ctx, prURL, &st)
 			if err != nil {
 				return err
