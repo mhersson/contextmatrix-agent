@@ -339,11 +339,11 @@ file only - never via flags or committed YAML.
     unavailability - the gate still enters the wait loop, because a
     repo-automated Copilot review may arrive regardless, and the same holds
     for a re-request that fails after a fix round: it waits for the automatic
-    re-review rather than parking. A request that succeeds without the bot
-    showing up in the pending reviewer list is recorded and waited through,
-    not skipped - rulesets add Copilot asynchronously and gh cannot be
-    trusted to list bots. A review that never arrives is recorded and passed
-    at the wait deadline, 20 minutes by default
+    re-review rather than passing the gate unreviewed. A request that
+    succeeds without the bot showing up in the pending reviewer list is
+    recorded and waited through, not skipped - rulesets add Copilot
+    asynchronously and gh cannot be trusted to list bots. A review that never
+    arrives is recorded and passed at the wait deadline, 20 minutes by default
     (`CMX_GATES_COPILOT_WAIT_TIMEOUT_SECONDS`). Every triage round records a
     VALID/INVALID verdict per finding under a `## Copilot Review (Round N)`
     card section; the outcome is kept in its own detail line under
@@ -351,10 +351,12 @@ file only - never via flags or committed YAML.
     erases it. An addressed Copilot review persists a satisfied marker in the
     `## PR Gates` section, so a re-trigger skips the paid re-review and goes
     straight to the CI gate; the unavailability and timeout skips above never
-    write it, so those stay retryable. Once the CI gate finishes, the phase
-    probes once more for a Copilot review that arrived while CI was running;
-    if that triage pushes a fix round, both gates run again on the new head,
-    still bounded by the 3-round cap per gate.
+    write it, so those stay retryable. After the enabled gates have run, the
+    phase probes once more for a Copilot review that arrived meanwhile -
+    during a CI wait, or after any wait or skip that left the gate unreviewed,
+    so a review sitting on the head is never left unread; if that triage
+    spends a fix round, the enabled gates run again, still bounded by the
+    3-round cap per gate.
 
 ## Repo grounding
 
