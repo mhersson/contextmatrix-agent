@@ -360,12 +360,11 @@ file only - never via flags or committed YAML.
     marker in the `## PR Gates` section, so a re-trigger skips the paid
     re-review and goes straight to the CI gate; the unavailability and
     timeout skips above never write it, so those stay retryable. After the
-    enabled gates have run, the
-    phase probes once more for a Copilot review that arrived meanwhile -
-    during a CI wait, or after any wait or skip that left the gate unreviewed,
-    so a review sitting on the head is never left unread; if that triage
-    spends a fix round, the enabled gates run again, still bounded by the
-    3-round cap per gate.
+    enabled gates have run, the phase probes once more for a Copilot review
+    that arrived meanwhile - during a CI wait, or after any wait or skip that
+    left the gate unreviewed, so a review sitting on the head is never left
+    unread; if that triage spends a fix round, the enabled gates run again,
+    still bounded by the 3-round cap per gate.
 
 ## Repo grounding
 
