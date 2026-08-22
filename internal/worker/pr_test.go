@@ -430,6 +430,32 @@ func TestParseReviewRequests(t *testing.T) {
 	}
 }
 
+// TestDecodeJSONArraysConcatenatesPages: gh api --paginate prints one JSON
+// array per page back to back; the decoder must flatten them and still accept
+// a single array.
+func TestDecodeJSONArraysConcatenatesPages(t *testing.T) {
+	t.Parallel()
+
+	type item struct {
+		ID int64 `json:"id"`
+	}
+
+	got, err := decodeJSONArrays[item]("[{\"id\":1},{\"id\":2}]\n[{\"id\":3}]")
+	require.NoError(t, err)
+	assert.Equal(t, []item{{1}, {2}, {3}}, got)
+
+	single, err := decodeJSONArrays[item](`[{"id":9}]`)
+	require.NoError(t, err)
+	assert.Equal(t, []item{{9}}, single)
+
+	empty, err := decodeJSONArrays[item]("")
+	require.NoError(t, err)
+	assert.Empty(t, empty)
+
+	_, err = decodeJSONArrays[item](`{"not":"an array"}`)
+	require.Error(t, err)
+}
+
 // TestParseCopilotReview picks the Copilot bot's review out of a GitHub REST
 // /pulls/{n}/reviews fixture, and returns nil when no bot review exists.
 func TestParseCopilotReview(t *testing.T) {
@@ -930,6 +956,41 @@ exit 0
 	log, err := os.ReadFile(filepath.Join(workspace, "args.log"))
 	require.NoError(t, err)
 	assert.Equal(t, "api repos/org/repo/pulls/7/requested_reviewers", strings.TrimSpace(string(log)))
+}
+
+// TestCopilotReviewReadsPaginatedPerReviewComments pins the two gh api calls
+// CopilotReview makes: a paginated reviews list, then the selected review's
+// own comments endpoint (never the PR-wide comments list, which grows with
+// every human thread and every Copilot round and would push the latest
+// review's comments past page one).
+func TestCopilotReviewReadsPaginatedPerReviewComments(t *testing.T) {
+	stubGH(t, `
+echo "$@" >> args.log
+case "$*" in
+  *"/reviews "*|*"/reviews") echo '[{"id":11,"user":{"login":"copilot-pull-request-reviewer[bot]"},"body":"LGTM-ish","commit_id":"abc","submitted_at":"2026-08-22T14:15:00Z"}]' ;;
+  *"/reviews/11/comments"*) echo '[{"path":"a.go","body":"nit","pull_request_review_id":11}]' ;;
+  *) echo '[]' ;;
+esac
+exit 0
+`)
+
+	workspace := t.TempDir()
+	pc := NewPRCreator(workspace, "", "", "")
+
+	review, err := pc.CopilotReview(t.Context(), "https://github.com/org/repo/pull/7")
+	require.NoError(t, err)
+	require.NotNil(t, review)
+	assert.Equal(t, "abc", review.CommitID)
+	require.Len(t, review.Comments, 1)
+	assert.Equal(t, "a.go", review.Comments[0].Path)
+
+	log, err := os.ReadFile(filepath.Join(workspace, "args.log"))
+	require.NoError(t, err)
+
+	lines := strings.Split(strings.TrimSpace(string(log)), "\n")
+	require.Len(t, lines, 2)
+	assert.Equal(t, "api --method GET --paginate -f per_page=100 repos/org/repo/pulls/7/reviews", lines[0])
+	assert.Equal(t, "api --method GET --paginate -f per_page=100 repos/org/repo/pulls/7/reviews/11/comments", lines[1])
 }
 
 // TestRequestCopilotReviewErrorSurfacesWrappedError verifies that a non-zero
