@@ -394,8 +394,16 @@ func (o *run) copilotReviewCycle(
 	}
 
 	if rerr := o.d.PRGates.RequestCopilotReview(ctx, prURL); rerr != nil {
-		return true, o.skipCopilot(ctx, st, "pr_gates: Copilot re-review could not be requested: "+
-			rerr.Error()+"; gate passes with the fixes already pushed")
+		if strings.Contains(rerr.Error(), "Copilot isn't available for this repository") {
+			return true, o.skipCopilot(ctx, st, "pr_gates: Copilot re-review unavailable: "+
+				rerr.Error()+"; gate passes with the fixes already pushed")
+		}
+
+		// Same rule as the first request: a generic failure does not prove
+		// Copilot will not review the new head (rulesets re-review every push).
+		st.Detail = "- pr_gates: Copilot re-review could not be requested (" + rerr.Error() + "); waiting for the review of the fixed head\n"
+		o.recordGates(ctx, *st)
+		o.d.logCard(ctx, "pr_gates: Copilot re-review could not be requested (%s); waiting for the review of the fixed head", rerr.Error())
 	}
 
 	return false, nil

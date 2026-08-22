@@ -37,11 +37,16 @@ type fakeGates struct {
 	// is ever added. reviews pops the successive scripted reviews (nil until the
 	// queue is seeded, and the last one sticks once it is exhausted); a nil
 	// entry is a read that found no review, which is how a test scripts the
-	// gate's head probe coming back empty.
+	// gate's head probe coming back empty. reRequestErr, counted against
+	// requests, scripts a failure on the SECOND and later RequestCopilotReview
+	// calls only - the re-request after a fix round - independent of
+	// requestErr, which always applies to the first.
 	requested            bool
 	requestErr           error
+	reRequestErr         error
 	requestSilentlyNoOps bool
 	reviews              []*CopilotReview
+	requests             int
 
 	logs string
 
@@ -109,8 +114,14 @@ func (f *fakeGates) RequestCopilotReview(_ context.Context, prURL string) error 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
+	f.requests++
+
 	if f.requestErr != nil {
 		return f.requestErr
+	}
+
+	if f.requests > 1 && f.reRequestErr != nil {
+		return f.reRequestErr
 	}
 
 	if !f.requestSilentlyNoOps {
@@ -1554,6 +1565,46 @@ func TestCopilotGate_ValidFindingsFixedThenClean(t *testing.T) {
 	assert.Contains(t, body, "## Copilot Review (Round 2)", "later rounds are numbered; body=%q", body)
 	assert.Contains(t, body, "- Copilot rounds used: 1/3")
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+}
+
+// TestCopilotGate_ReRequestFailureStillWaitsForTheAutoReview: on a ruleset
+// repo Copilot re-reviews every push by itself and the explicit re-request is
+// the fragile step. A generic re-request failure must not pass the gate with
+// the fix unreviewed - it records the error and waits, exactly like a failed
+// first request does.
+func TestCopilotGate_ReRequestFailureStillWaitsForTheAutoReview(t *testing.T) {
+	shrinkCopilotRecheck(t, time.Millisecond)
+
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested:    false,
+		headSHA:      copilotHeadSHA,
+		reRequestErr: errors.New("HTTP 422: Reviews may only be requested from collaborators"),
+		// Nothing on the head when the gate probes, so the first
+		// RequestCopilotReview call is the initial request (which succeeds);
+		// the second - after the fix round - is the one reRequestErr targets.
+		reviews: []*CopilotReview{
+			nil,
+			copilotReviewOnHead("1 suggestion", swallowedErrorComment),
+			copilotReviewOnHead("LGTM"),
+		},
+	}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: []llm.Response{
+		copilotVerdict(copilotFinding{File: "internal/api/handler.go", Issue: "dropped error", Valid: true, Reason: "real"}),
+		stopResp("coder: fixed", 0.02),
+		copilotVerdict(),
+	}}
+
+	o := prGateRun(ops, gates, git, client, copilotGateContext("Re-request fails", "body"), 0)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	assert.Equal(t, 3, modelCallCount(client), "triage, fix, and the re-triage of the auto re-review")
+	assert.True(t, ops.loggedContains("re-review could not be requested"), "logs=%v", ops.recorded())
+	assert.False(t, ops.loggedContains("gate passes with the fixes already pushed"),
+		"a generic re-request failure must not pass the gate unreviewed; logs=%v", ops.recorded())
+	assert.Contains(t, ops.lastBody(), "- Copilot gate: satisfied")
 }
 
 // TestCopilotGate_DedupesRepeatedComments: Copilot re-posts comments it already
