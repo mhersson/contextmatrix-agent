@@ -1992,6 +1992,57 @@ func TestPRGates_LateReviewFixRoundReRunsBothGates(t *testing.T) {
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
 }
 
+// TestPRGates_ReEnteredCIGateRemembersEarlierChecks: the checks-were-seen memory
+// also has to span a re-entry within one run. A late-review fix round pushes a
+// new head and sends the gates round again, and the new head's run has not
+// registered with CI yet - so the re-entered gate's first poll is empty. Without
+// the run-level memory (st.CIRounds is still 0: the round the late check spent
+// was a Copilot round) that empty poll reads as "this repo has no CI" and
+// completes the card on a head nothing ever checked. The grace window is zeroed
+// so only that memory can hold the gate.
+func TestPRGates_ReEnteredCIGateRemembersEarlierChecks(t *testing.T) {
+	shrinkNoChecksGrace(t, 0)
+
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested:              true,
+		headSHA:                copilotHeadSHA,
+		holdReviewsUntilChecks: true,
+		reviews: []*CopilotReview{
+			copilotReviewOnHead("1 suggestion", swallowedErrorComment),
+			copilotReviewOnHead("LGTM"),
+		},
+		checks: [][]CheckResult{
+			{{Name: "ci", Bucket: "pass"}}, // the first head is green
+			{},                             // the fixed head's run has not registered
+			{{Name: "ci", Bucket: "pass"}}, // it registers, and it is green
+		},
+	}
+	client := &planLLM{responses: []llm.Response{
+		copilotVerdict(copilotFinding{File: "internal/api/handler.go", Issue: "dropped error", Valid: true, Reason: "real"}),
+		stopResp("coder: fixed", 0.02),
+		copilotVerdict(),
+	}}
+
+	tc := copilotGateContext("Late review then an unregistered head", "body")
+	tc.AwaitCI = true
+
+	git := &fakeGit{committed: true}
+
+	o := prGateRun(ops, gates, git, client, tc, 0)
+	o.d.Cfg.GatesCopilotWaitTimeout = 5 * time.Millisecond
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	assert.Contains(t, git.recorded(), "Push:cm/card-1", "the late fix round pushed a new head")
+	assert.False(t, ops.loggedContains("no CI checks on the PR"),
+		"a run that already saw CI must never re-open the no-CI conclusion; logs=%v", ops.recorded())
+	assert.GreaterOrEqual(t, strings.Count(strings.Join(gates.recorded(), " "), "Checks:"), 3,
+		"the re-entered gate waited through the empty poll; calls=%v", gates.recorded())
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0,
+		"the card still completes once the fixed head goes green")
+}
+
 // nonEmpty normalizes an empty slice to nil so table cases can leave the want
 // field unset.
 func nonEmpty(s []string) []string {
