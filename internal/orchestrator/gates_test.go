@@ -35,7 +35,9 @@ type fakeGates struct {
 	// true by a successful RequestCopilotReview unless requestSilentlyNoOps
 	// reproduces the API failure mode where the request succeeds but no reviewer
 	// is ever added. reviews pops the successive scripted reviews (nil until the
-	// queue is seeded, and the last one sticks once it is exhausted).
+	// queue is seeded, and the last one sticks once it is exhausted); a nil
+	// entry is a read that found no review, which is how a test scripts the
+	// gate's head probe coming back empty.
 	requested            bool
 	requestErr           error
 	requestSilentlyNoOps bool
@@ -1146,6 +1148,31 @@ var (
 	}
 )
 
+// TestCopilotGate_ExistingReviewOnHeadSkipsTheRequest: a re-trigger or a slow
+// earlier run finds Copilot's review already on the PR head. The gate must
+// read it, never re-request (a paid duplicate), and never wait for a review it
+// already has.
+func TestCopilotGate_ExistingReviewOnHeadSkipsTheRequest(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: false,
+		headSHA:   copilotHeadSHA,
+		reviews:   []*CopilotReview{copilotReviewOnHead("LGTM")},
+	}
+	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, copilotGateContext("Already reviewed", "body"), 0)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	calls := gates.recorded()
+	assert.Equal(t, -1, indexOfCall(calls, "RequestCopilotReview:"+gatePRURL),
+		"an existing review on the head must not be re-requested; calls=%v", calls)
+	assert.Equal(t, 1, modelCallCount(client), "the existing review is triaged once")
+	assert.True(t, ops.loggedContains("Copilot review addressed"), "logs=%v", ops.recorded())
+	assert.Contains(t, ops.lastBody(), "- Copilot gate: satisfied")
+}
+
 // TestCopilotGate_AlreadyRequestedWaitsAndPassesOnCleanReview: a review that is
 // already requested is never re-requested, and a clean one passes the gate after
 // a single triage call.
@@ -1154,7 +1181,9 @@ func TestCopilotGate_AlreadyRequestedWaitsAndPassesOnCleanReview(t *testing.T) {
 	gates := &fakeGates{
 		requested: true,
 		headSHA:   copilotHeadSHA,
-		reviews:   []*CopilotReview{copilotReviewOnHead("LGTM")},
+		// Empty on the probe, so this test still covers the already-requested
+		// wait path rather than the probe shortcut.
+		reviews: []*CopilotReview{nil, copilotReviewOnHead("LGTM")},
 	}
 	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
 
@@ -1256,7 +1285,10 @@ func TestCopilotGate_RequestsWhenAbsent(t *testing.T) {
 	ops := &fakeOps{}
 	gates := &fakeGates{
 		headSHA: copilotHeadSHA,
-		reviews: []*CopilotReview{copilotReviewOnHead("LGTM")},
+		// The gate probes for a review already on the head before it requests
+		// one, so "no review in flight" is a nil first read; the review the
+		// gate then waits for is the second.
+		reviews: []*CopilotReview{nil, copilotReviewOnHead("LGTM")},
 	}
 	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
 
@@ -1265,12 +1297,14 @@ func TestCopilotGate_RequestsWhenAbsent(t *testing.T) {
 	require.NoError(t, runPRGates(context.Background(), o))
 
 	calls := gates.recorded()
+	probe := indexOfCall(calls, "CopilotReview:"+gatePRURL)
 	request := indexOfCall(calls, "RequestCopilotReview:"+gatePRURL)
-	wait := indexOfCall(calls, "CopilotReview:"+gatePRURL)
 
 	require.GreaterOrEqual(t, request, 0, "the gate requests the missing review; calls=%v", calls)
-	require.GreaterOrEqual(t, wait, 0, "the gate then waits for it; calls=%v", calls)
-	assert.Less(t, request, wait, "the request must precede the wait; calls=%v", calls)
+	require.GreaterOrEqual(t, probe, 0, "the gate probes the head before requesting; calls=%v", calls)
+	assert.Less(t, probe, request, "the probe must precede the request; calls=%v", calls)
+	assert.Greater(t, countCalls(calls, "CopilotReview:"+gatePRURL), 1,
+		"the gate then waits for the review it requested; calls=%v", calls)
 }
 
 // TestCopilotGate_RequestFailsSkipsWithNote: Copilot being unavailable is not the
@@ -1312,7 +1346,9 @@ func TestCopilotGate_RequestFailsStillWaits(t *testing.T) {
 	gates := &fakeGates{
 		requestErr: errors.New("gh: GraphQL: Could not resolve user with login 'copilot-pull-request-reviewer[bot]'. (requestReviewsByLogin)"),
 		headSHA:    copilotHeadSHA,
-		reviews:    []*CopilotReview{copilotReviewOnHead("LGTM")},
+		// Nothing on the head when the gate probes, so the failing request is
+		// the path under test.
+		reviews: []*CopilotReview{nil, copilotReviewOnHead("LGTM")},
 	}
 	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
 
@@ -1343,7 +1379,9 @@ func TestCopilotGate_RequestFailsStillWaits_422FromMalformedRequest(t *testing.T
 		// REST endpoint's response to a malformed request body.
 		requestErr: errors.New("gh: HTTP 422: Unprocessable Entity: reviewers field is invalid"),
 		headSHA:    copilotHeadSHA,
-		reviews:    []*CopilotReview{copilotReviewOnHead("LGTM")},
+		// Nothing on the head when the gate probes, so the failing request is
+		// the path under test.
+		reviews: []*CopilotReview{nil, copilotReviewOnHead("LGTM")},
 	}
 	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
 
@@ -1423,7 +1461,9 @@ func TestCopilotGate_ReviewerNotListedStillWaits(t *testing.T) {
 	gates := &fakeGates{
 		requestSilentlyNoOps: true,
 		headSHA:              copilotHeadSHA,
-		reviews:              []*CopilotReview{copilotReviewOnHead("LGTM")},
+		// Nothing on the head when the gate probes: the request path this test
+		// is about only runs when the probe comes back empty.
+		reviews: []*CopilotReview{nil, copilotReviewOnHead("LGTM")},
 	}
 	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
 

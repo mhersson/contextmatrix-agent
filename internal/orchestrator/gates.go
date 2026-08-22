@@ -245,9 +245,10 @@ func runPRGates(ctx context.Context, o *run) error {
 }
 
 // copilotGate holds the card until the Copilot review on the PR is addressed: it
-// makes sure a review is actually requested, waits for one on the PR's current
-// head, triages its comments with one model call, and spends up to gatesRoundsCap
-// fix rounds on the findings it judges real.
+// takes a review already on the PR's current head when there is one, otherwise
+// makes sure a review is actually requested and waits for one on that head, then
+// triages its comments with one model call and spends up to gatesRoundsCap fix
+// rounds on the findings it judges real.
 //
 // Copilot being unavailable NEVER parks the card. A proven "cannot review"
 // response - a 422 "Copilot isn't available for this repository" - records the
@@ -267,28 +268,39 @@ func (o *run) copilotGate(ctx context.Context, prURL string, st *gatesState) err
 		return nil
 	}
 
-	reason, unavailable, err := o.ensureCopilotReviewer(ctx, prURL)
-	if err != nil {
-		return err
-	}
-
-	if reason != "" {
-		if unavailable {
-			return o.skipCopilot(ctx, st, "pr_gates: Copilot review unavailable: "+reason+"; gate skipped")
-		}
-
-		// Generic request failure (e.g. a GraphQL login-resolution error) does
-		// not prove Copilot cannot review - the repo may use automatic review
-		// assignment. Record the verbatim error and enter the wait loop; the
-		// pass exits clear it again, and a pass-by-timeout records its own line.
-		st.Detail = "- pr_gates: Copilot review could not be requested (" + reason + "); waiting for an automatic review\n"
-		o.recordGates(ctx, *st)
-		o.d.logCard(ctx, "pr_gates: Copilot review could not be requested (%s); waiting for an automatic review", reason)
-	}
-
 	// Seeded from the card body so the dedupe survives a park/re-trigger, then
 	// grown in memory as this run triages further rounds.
 	seen := copilotSeenComments(o.body)
+
+	// A review may already be on the head - a re-trigger after a park, or a
+	// ruleset review that landed while integrate was finishing. Reading it is
+	// two gh calls; requesting another is a paid duplicate and a full wait.
+	if review := o.copilotReviewOnHead(ctx, prURL); review != nil {
+		o.d.logCard(ctx, "pr_gates: Copilot review already on the PR head; triaging it")
+
+		satisfied, err := o.copilotReviewCycle(ctx, prURL, st, seen, review)
+		if err != nil || satisfied {
+			return err
+		}
+	} else {
+		reason, unavailable, err := o.ensureCopilotReviewer(ctx, prURL)
+		if err != nil {
+			return err
+		}
+
+		if reason != "" {
+			if unavailable {
+				return o.skipCopilot(ctx, st, "pr_gates: Copilot review unavailable: "+reason+"; gate skipped")
+			}
+
+			// Not proof Copilot cannot review - the repo may assign the reviewer
+			// itself. Record the verbatim reason and wait; the pass exits clear
+			// it, and a pass-by-timeout records its own line.
+			st.Detail = "- pr_gates: Copilot review could not be confirmed (" + reason + "); waiting for the review\n"
+			o.recordGates(ctx, *st)
+			o.d.logCard(ctx, "pr_gates: Copilot review could not be confirmed (%s); waiting for the review", reason)
+		}
+	}
 
 	for {
 		review, werr := o.awaitCopilotReview(ctx, prURL)
@@ -300,48 +312,93 @@ func (o *run) copilotGate(ctx context.Context, prURL string, st *gatesState) err
 			return o.skipCopilot(ctx, st, "pr_gates: Copilot review did not arrive in time; proceeding")
 		}
 
-		fresh := unseenComments(review.Comments, seen)
-
-		// Copilot re-posts the comments it already made on every re-review. A
-		// round that carries nothing new is nothing to fix - re-triaging it would
-		// spend a round undoing work an earlier round already did.
-		if len(review.Comments) > 0 && len(fresh) == 0 {
-			st.Detail = ""
-			st.CopilotSatisfied = true
-
-			o.d.logCard(ctx, "pr_gates: Copilot repeated only comments already triaged; gate passes")
-
-			return nil
-		}
-
-		findings, terr := o.triageCopilot(ctx, st, review, fresh)
-		if terr != nil {
-			return terr
-		}
-
-		for _, c := range fresh {
-			seen[copilotCommentKey(c.Path, c.Body)] = true
-		}
-
-		valid := validCopilotFindings(findings)
-		if len(valid) == 0 {
-			st.Detail = ""
-			st.CopilotSatisfied = true
-
-			o.d.logCard(ctx, "pr_gates: Copilot review addressed")
-
-			return nil
-		}
-
-		if ferr := o.copilotFixRound(ctx, st, valid); ferr != nil {
-			return ferr
-		}
-
-		if rerr := o.d.PRGates.RequestCopilotReview(ctx, prURL); rerr != nil {
-			return o.skipCopilot(ctx, st, "pr_gates: Copilot re-review could not be requested: "+
-				rerr.Error()+"; gate passes with the fixes already pushed")
+		satisfied, err := o.copilotReviewCycle(ctx, prURL, st, seen, review)
+		if err != nil || satisfied {
+			return err
 		}
 	}
+}
+
+// copilotReviewOnHead returns the PR's latest Copilot review when it is a review
+// of the CURRENT head, nil otherwise. Read failures are logged and read as
+// "none": this is a probe, and the request/wait path behind it re-reads anyway.
+func (o *run) copilotReviewOnHead(ctx context.Context, prURL string) *CopilotReview {
+	review, err := o.d.PRGates.CopilotReview(ctx, prURL)
+	if err != nil {
+		slog.Warn("pr_gates: Copilot review probe failed", "card_id", o.d.Cfg.CardID, "pr_url", prURL, "error", err)
+
+		return nil
+	}
+
+	if review == nil {
+		return nil
+	}
+
+	head, err := o.d.PRGates.HeadSHA(ctx, prURL)
+	if err != nil {
+		slog.Warn("pr_gates: PR head SHA unreadable during review probe",
+			"card_id", o.d.Cfg.CardID, "pr_url", prURL, "error", err)
+
+		return nil
+	}
+
+	if head == "" || review.CommitID != head {
+		return nil
+	}
+
+	return review
+}
+
+// copilotReviewCycle handles one arrived review: dedupes against what earlier
+// rounds triaged, triages the fresh comments, and either passes the gate
+// (satisfied=true) or spends a fix round and re-requests the review
+// (satisfied=false - the caller waits for the re-review of the new head).
+func (o *run) copilotReviewCycle(
+	ctx context.Context, prURL string, st *gatesState, seen map[string]bool, review *CopilotReview,
+) (bool, error) {
+	fresh := unseenComments(review.Comments, seen)
+
+	// Copilot re-posts the comments it already made on every re-review. A
+	// round that carries nothing new is nothing to fix - re-triaging it would
+	// spend a round undoing work an earlier round already did.
+	if len(review.Comments) > 0 && len(fresh) == 0 {
+		st.Detail = ""
+		st.CopilotSatisfied = true
+
+		o.d.logCard(ctx, "pr_gates: Copilot repeated only comments already triaged; gate passes")
+
+		return true, nil
+	}
+
+	findings, terr := o.triageCopilot(ctx, st, review, fresh)
+	if terr != nil {
+		return false, terr
+	}
+
+	for _, c := range fresh {
+		seen[copilotCommentKey(c.Path, c.Body)] = true
+	}
+
+	valid := validCopilotFindings(findings)
+	if len(valid) == 0 {
+		st.Detail = ""
+		st.CopilotSatisfied = true
+
+		o.d.logCard(ctx, "pr_gates: Copilot review addressed")
+
+		return true, nil
+	}
+
+	if ferr := o.copilotFixRound(ctx, st, valid); ferr != nil {
+		return false, ferr
+	}
+
+	if rerr := o.d.PRGates.RequestCopilotReview(ctx, prURL); rerr != nil {
+		return true, o.skipCopilot(ctx, st, "pr_gates: Copilot re-review could not be requested: "+
+			rerr.Error()+"; gate passes with the fixes already pushed")
+	}
+
+	return false, nil
 }
 
 // ensureCopilotReviewer makes sure Copilot is on the PR as a reviewer, requesting
