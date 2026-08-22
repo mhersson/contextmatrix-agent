@@ -142,6 +142,24 @@ func TestBuildEngineConfigReviewExcludesCoderModels(t *testing.T) {
 	}
 }
 
+func TestBuildEngineConfigPlanExcludesIncapableModels(t *testing.T) {
+	ops := &fakeOps{}
+	o := mobTestRun(ops, MobConfig{Participants: 3, Plan: true, Rounds: 2, BudgetFactor: 0.75}, 2.0)
+	// recoverIncapable records the model that could not drive the tool loop; no
+	// phase of the run may seat it again, plan discussions included.
+	o.excluded = map[string]bool{"rev/alpha": true}
+
+	topic := mob.Topic{Kind: "plan", Lenses: planLenses[:3], Rounds: 2, Blind: true}
+
+	cfg := buildEngineConfig(o, topic, "b")
+
+	require.Len(t, cfg.Seats, 3)
+
+	for _, s := range cfg.Seats {
+		assert.NotEqual(t, "rev/alpha", s.Model, "plan seats must exclude the run's incapable models")
+	}
+}
+
 func TestBuildEngineConfigZeroCostDisablesBudget(t *testing.T) {
 	ops := &fakeOps{}
 	o := mobTestRun(ops, MobConfig{Participants: 2, Plan: true, Rounds: 2, BudgetFactor: 0.75}, 0)
