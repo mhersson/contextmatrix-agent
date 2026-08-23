@@ -45,6 +45,11 @@ var noChecksReportedPattern = regexp.MustCompile(`(?i)no checks reported`)
 // Actions-runs fallback on first sight of it.
 var checksInaccessiblePattern = regexp.MustCompile(`(?i)resource not accessible by personal access token`)
 
+// unknownFlagPattern matches gh rejecting a flag it does not know - a gh too
+// old for the fallback poll's run list arguments. The same gh answers the same
+// way on every poll.
+var unknownFlagPattern = regexp.MustCompile(`(?i)unknown flag`)
+
 // noPRForBranchPattern matches gh pr view's "no pull requests found for
 // branch 'X'" failure - the expected outcome when probing a branch that has
 // no PR, not an error.
@@ -678,6 +683,12 @@ func (p *PRCreator) checksViaRuns(ctx context.Context, prURL string) ([]orchestr
 
 	runsOut, err := p.runGH(ctx, "", false, runListArgs(owner, repo, sha)...)
 	if err != nil {
+		// A gh without the run list flags, or a token without Actions: read,
+		// fails this way on every poll: tell the gate to stop waiting.
+		if unknownFlagPattern.MatchString(err.Error()) || checksInaccessiblePattern.MatchString(err.Error()) {
+			return nil, &orchestrator.PermanentPollError{Err: err.Error()}
+		}
+
 		return nil, fmt.Errorf("gh run list: %w", err)
 	}
 
@@ -688,6 +699,14 @@ func (p *PRCreator) checksViaRuns(ctx context.Context, prURL string) ([]orchestr
 
 	statusOut, err := p.runGH(ctx, "", false, combinedStatusArgs(owner, repo, sha)...)
 	if err != nil {
+		// Commit statuses: read is missing and there is nothing left to fall
+		// back to. Say so now rather than on every poll until the deadline - and
+		// never let the Actions runs alone stand in for checks the token cannot
+		// see, which would read a status-only CI as "no CI".
+		if checksInaccessiblePattern.MatchString(err.Error()) {
+			return nil, &orchestrator.PermanentPollError{Err: err.Error()}
+		}
+
 		return nil, fmt.Errorf("gh api commit status: %w", err)
 	}
 

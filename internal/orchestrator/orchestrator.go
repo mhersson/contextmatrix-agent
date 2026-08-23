@@ -326,6 +326,11 @@ type run struct {
 	// "no CI".
 	ciSawChecks bool
 
+	// ciObservedSettle is how long the CI gate waited from its start to the
+	// first settled poll after its first read - one observed CI cycle. Zero
+	// until a cycle has been watched. Sizes the fix-round reserve.
+	ciObservedSettle time.Duration
+
 	// reviewSummary is the synthesis verdict's one-line summary captured on
 	// approval, carried into the integrate phase's PR body. Empty when review was
 	// skipped (resume entering at integrate) or the summary was blank.
