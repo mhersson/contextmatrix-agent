@@ -355,6 +355,17 @@ type run struct {
 	// forever.
 	reselects int
 
+	// fixFailed is the set of fix-coder models whose review fix round failed
+	// this run - it landed no commit, or the next round's verify was still red.
+	// Every later fix pick excludes them; while fixEscalate is set the pick also
+	// climbs one tier and prefers a vendor that has not failed. fixFailReason is
+	// the last failure's wording for the card log; lastFixModel is the model the
+	// most recent fix round ran on.
+	fixFailed     map[string]bool
+	fixEscalate   bool
+	fixFailReason string
+	lastFixModel  string
+
 	// excluded is the per-card set of models proven harness-incapable on this run.
 	// It is threaded into every SelectInput.Exclude (coder selection and the review
 	// panel) so a model that could not drive the tool loop is never re-picked.

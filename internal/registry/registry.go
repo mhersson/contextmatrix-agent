@@ -123,6 +123,12 @@ func (r *Registry) WithCreators(creators map[string]string) *Registry {
 	return r
 }
 
+// Vendor is the model's vendor as the diversity preference sees it: the
+// CM-supplied creator when known, else the slug prefix; "" when neither resolves.
+func (r *Registry) Vendor(id string) string {
+	return r.vendorOf(id)
+}
+
 // vendorOf resolves a model's vendor: the CM-supplied creator first, else the
 // namespace prefix of a namespaced slug (OpenRouter-leg fallback for CMs that
 // predate CandidateModel.Creator), else "". The two vocabularies (AA creator

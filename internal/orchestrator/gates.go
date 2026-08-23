@@ -795,7 +795,7 @@ func (o *run) copilotFixRound(ctx context.Context, st *gatesState, findings []co
 		st.CopilotRounds, gatesRoundsCap, len(findings)),
 		map[string]any{"round": st.CopilotRounds, "cap": gatesRoundsCap, "findings": len(findings)})
 
-	if err := o.runFix(ctx, copilotFixFindings(findings), st.CopilotRounds, "", false); err != nil {
+	if _, err := o.runFix(ctx, copilotFixFindings(findings), st.CopilotRounds, "", false); err != nil {
 		if reason := gateResourcePark(err, gatesCopilotFixBudgetParkReason, gatesCopilotTurnCapParkReason); reason != "" {
 			return o.parkGates(ctx, st, reason)
 		}
@@ -1369,7 +1369,7 @@ func (o *run) ciFixRound(ctx context.Context, prURL string, st *gatesState, fail
 		return o.parkGates(ctx, st, gatesBudgetParkReason)
 	}
 
-	if err := o.runFix(ctx, ciFixFindings(digest), st.CIRounds, "", false); err != nil {
+	if _, err := o.runFix(ctx, ciFixFindings(digest), st.CIRounds, "", false); err != nil {
 		// A fix that ran out of budget or turns takes the same park arm as the
 		// ledger check above - only the reason on the card differs.
 		if reason := gateResourcePark(err, gatesBudgetParkReason, gatesTurnCapParkReason); reason != "" {
