@@ -417,6 +417,7 @@ func TestParseReviewRequests(t *testing.T) {
 		{"human only", `{"users":[{"login":"alice","type":"User"}],"teams":[]}`, false},
 		{"empty", `{"users":[],"teams":[]}`, false},
 		{"bare copilot login", `{"users":[{"login":"Copilot"}]}`, true},
+		{"login nested under teams", `{"users":[],"teams":[{"slug":"reviewers","members":[{"login":"Copilot"}]}]}`, true},
 	}
 
 	for _, tc := range tests {
