@@ -17,7 +17,7 @@ CVE-2026-34040
 # --- The apt-installed GitHub CLI (/usr/bin/gh, latest release v2.97.0) is a
 # prebuilt upstream binary compiled with Go 1.26.5; these are stdlib and
 # vendored x/net findings in that embedded toolchain, fixed in Go 1.26.6.
-# Everything this repo compiles is already on 1.26.6 (builder image, in-image
+# Everything this repo compiles is already on 1.26.7 (builder image, in-image
 # toolchain, agent binary - all scan clean); only GitHub's release pipeline can
 # rebuild gh. Inside the worker container repo-controlled code already executes
 # arbitrary bash, so these DoS/parsing issues add no marginal attack surface.
