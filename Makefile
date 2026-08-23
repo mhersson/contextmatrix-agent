@@ -5,9 +5,9 @@
 #   make docker-worker GO_VERSION=1.26.4
 # These values are passed into the Dockerfile as --build-args so the build is
 # reproducible from CI and local shells alike.
-GO_VERSION            ?= 1.26.6
-GO_SHA256_AMD64       ?= 708effb774be8237570d0add163225abbdfaf4fca28b2611df167beba4feef89
-GO_SHA256_ARM64       ?= d0507e9e9d7fe012aae570108cbd76c15de879e17130ab8cb90d4d7445cb1f2e
+GO_VERSION            ?= 1.26.7
+GO_SHA256_AMD64       ?= ffb5f8de10c62550dfddab66b36b57030721e0a44a3218e9e1181d7b59f121ca
+GO_SHA256_ARM64       ?= 5a4ec883379d51ee9ce1040d5e87f8d35e20387574dd8c947feb01eabc3c1b37
 NPM_VERSION           ?= 11.19.0
 GOLANGCI_LINT_VERSION ?= v2.12.2
 GOFUMPT_VERSION       ?= v0.11.0
