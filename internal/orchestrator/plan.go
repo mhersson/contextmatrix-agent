@@ -899,10 +899,15 @@ func runPlan(ctx context.Context, o *run) error {
 						"card_id", cfg.CardID, "error", rerr)
 				}
 
+				prev := model
 				model = resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
 					o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels())
 
-				d.logCard(ctx, "orchestrator model: %s (re-selected after diagnose)", model)
+				if model != prev {
+					d.logCard(ctx, "orchestrator model: %s (re-selected after diagnose)", model)
+				} else {
+					d.logCard(ctx, "no alternative decision model available; continuing on %s", model)
+				}
 			}
 
 			slog.Warn("plan: diagnose step failed; planning without a diagnosis",
