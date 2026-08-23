@@ -119,8 +119,12 @@ func (p *gatePoller) poll(emit *events.Emitter, status string, fields map[string
 		p.shown = now
 	}
 
-	data := map[string]any{"gate": p.gate, "status": status, "repeat": repeat}
+	data := make(map[string]any, len(fields)+3)
 	maps.Copy(data, fields)
+
+	data["gate"] = p.gate
+	data["status"] = status
+	data["repeat"] = repeat
 
 	emit.Emit(events.Kind(gateProgressKind), data)
 }
@@ -220,7 +224,8 @@ func runPRGates(ctx context.Context, o *run) error {
 		o.gateNote(ctx, "pr_gates", fmt.Sprintf(
 			"pr_gates: entering - await_ci=%t await_copilot_review=%t create_pr=%t pr_url=%s copilot_wait=%s ci_wait=%s poll=%s copilot_satisfied=%t",
 			o.tc.AwaitCI, o.tc.AwaitCopilotReview, o.tc.CreatePR, prURL,
-			o.copilotWait(), o.ciWait(), o.gatesPoll(), st.CopilotSatisfied),
+			o.copilotWait(), o.ciWait(), o.gatesPoll(), st.CopilotSatisfied,
+		),
 			map[string]any{"await_ci": o.tc.AwaitCI, "await_copilot_review": o.tc.AwaitCopilotReview, "pr_url": prURL})
 	}
 
@@ -283,11 +288,15 @@ func runPRGates(ctx context.Context, o *run) error {
 				break
 			}
 
-			// The Copilot gate passed without a review (a timed-out wait, an
-			// unconfirmed request). CI may have taken long enough for one to
-			// land since: one probe before completing, so a review on the head
-			// is never left unread. A fix round pushes a new head, so both
-			// gates run again on it.
+			// The late probe runs after the enabled gates: one probe before
+			// completing, so a review on the head is never left unread. A fix
+			// round normally pushes a new head, so both gates run again on it.
+			// A repo that refused the review (a proven 422) cannot have one on
+			// the head, so the probe is skipped there.
+			if strings.Contains(st.CopilotDetail, "Copilot isn't available for this repository") {
+				break
+			}
+
 			pushed, err := o.copilotLateCheck(ctx, prURL, &st)
 			if err != nil {
 				return err
@@ -506,7 +515,8 @@ func (o *run) copilotReviewCycle(
 
 	if len(reopened) > 0 {
 		o.gateNote(ctx, "copilot", fmt.Sprintf(
-			"pr_gates: Copilot repeated %d finding(s) an earlier fix round did not resolve; fixing again", len(reopened)),
+			"pr_gates: Copilot repeated %d finding(s) an earlier fix round did not resolve; fixing again", len(reopened),
+		),
 			map[string]any{"reopened": len(reopened)})
 	}
 
@@ -525,7 +535,8 @@ func (o *run) copilotReviewCycle(
 		st.CopilotDetail = "- pr_gates: Copilot re-review could not be requested (" + rerr.Error() + "); waiting for the review of the fixed head\n"
 		o.recordGates(ctx, *st)
 		o.gateNote(ctx, "copilot", fmt.Sprintf(
-			"pr_gates: Copilot re-review could not be requested (%s); waiting for the review of the fixed head", rerr.Error()), nil)
+			"pr_gates: Copilot re-review could not be requested (%s); waiting for the review of the fixed head", rerr.Error(),
+		), nil)
 	}
 
 	return false, nil

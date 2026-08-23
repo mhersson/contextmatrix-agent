@@ -464,6 +464,42 @@ func TestGatePoller_EmitsEveryPollButShowsOnlyChanges(t *testing.T) {
 	}, gateProgressStatuses(t, &transcript), "only the polls that moved are shown")
 }
 
+// TestGatePoller_ReservedKeysWinOverFields: a caller's fields must never
+// overwrite the poller's reserved keys (gate, status, repeat). Copy fields
+// first, set reserved keys afterward - matching gateNote's convention.
+func TestGatePoller_ReservedKeysWinOverFields(t *testing.T) {
+	var transcript bytes.Buffer
+
+	emit := events.NewEmitter(nil, &transcript)
+	p := &gatePoller{gate: "ci"}
+
+	p.poll(emit, "CI checks: 1 passed, 0 pending, 0 failed", map[string]any{
+		"gate":   "spoofed-ci",
+		"status": "spoofed-status",
+		"repeat": true,
+		"reason": "kept",
+	})
+
+	var ev struct {
+		Kind string `json:"kind"`
+		Data struct {
+			Gate   string `json:"gate"`
+			Status string `json:"status"`
+			Repeat bool   `json:"repeat"`
+			Reason string `json:"reason"`
+		} `json:"data"`
+	}
+
+	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(transcript.String())), &ev))
+
+	assert.Equal(t, gateProgressKind, ev.Kind)
+	assert.Equal(t, "ci", ev.Data.Gate, "reserved key 'gate' must win over caller fields")
+	assert.Equal(t, "CI checks: 1 passed, 0 pending, 0 failed", ev.Data.Status,
+		"reserved key 'status' must win over caller fields")
+	assert.False(t, ev.Data.Repeat, "reserved key 'repeat' must win over caller fields (no heartbeat history)")
+	assert.Equal(t, "kept", ev.Data.Reason, "non-reserved fields still ride along")
+}
+
 // TestGatePoller_HeartbeatShowsAnUnchangedStatusAgain: a gate that waits past
 // the heartbeat window shows its status again, so a long quiet wait reads as
 // alive rather than hung.
@@ -1448,6 +1484,8 @@ func TestCopilotGate_RequestFailsSkipsWithNote(t *testing.T) {
 	assert.Contains(t, gates.recorded(), "Checks:"+gatePRURL,
 		"a skipped Copilot gate must not skip the CI gate; calls=%v", gates.recorded())
 	assert.Zero(t, modelCallCount(client), "nothing to triage")
+	assert.Equal(t, 1, countCalls(gates.recorded(), "CopilotReview:"+gatePRURL),
+		"proven unavailability skips the late probe after CI - only the pre-request probe reads the PR; calls=%v", gates.recorded())
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
 }
 
