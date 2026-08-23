@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -1432,4 +1433,87 @@ func TestResolveVerifyUnreadableConfigKeepsDetectionReason(t *testing.T) {
 	assert.Contains(t, missing.Reason, "could not be parsed", "the config error stays the headline reason")
 	assert.Contains(t, missing.Reason, "maven project", "detection's finding must still reach the operator")
 	assert.Contains(t, missing.Reason, "java", "detection's probe-failure detail must still reach the operator")
+}
+
+// TestVerifyFailureExcerpt pins the four documented behaviors of the
+// verify-failed finding: a Go FAIL block buried before a long tail of log
+// noise is named rather than lost, a pytest-style FAILED line is kept, a
+// marker-free output keeps today's plain-tail behavior unchanged, and a
+// pathological number of FAIL blocks cannot blow the excerpt past its cap.
+func TestVerifyFailureExcerpt(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		check  func(t *testing.T, output, got string)
+	}{
+		{
+			name: "go test FAIL block buried before a long tail names the test and ends with the tail",
+			output: func() string {
+				failBlock := "--- FAIL: TestX (0.00s)\n" +
+					"    x_test.go:42: \n" +
+					"        Error:      Not equal: \n" +
+					"                    expected: 1\n" +
+					"                    actual  : 2\n" +
+					"        Messages:   values differ\n" +
+					"FAIL\n" +
+					"FAIL\texample.com/pkg\t0.012s\n"
+				tail := strings.Repeat("2026-08-23T04:00:00Z INFO heartbeat, nothing unusual to report\n", 150)
+
+				return failBlock + tail
+			}(),
+			check: func(t *testing.T, output, got string) {
+				t.Helper()
+
+				require.NotContains(t, lastChars(output, verifyOutputTail), "TestX",
+					"the plain tail must not already contain the test name, or this case proves nothing")
+				assert.Contains(t, got, "TestX")
+				assert.Contains(t, got, "Error:")
+				assert.True(t, strings.HasSuffix(got, lastChars(output, 1500)),
+					"the excerpt must end with the last 1500 bytes of the raw output")
+			},
+		},
+		{
+			name:   "pytest-style FAILED line is kept",
+			output: "============================= FAILURES ==============================\n" + "FAILED tests/test_a.py::test_b - AssertionError: assert 1 == 2\n" + "1 failed in 0.02s\n",
+			check: func(t *testing.T, output, got string) {
+				t.Helper()
+
+				assert.Contains(t, got, "FAILED tests/test_a.py::test_b - AssertionError")
+			},
+		},
+		{
+			name:   "no marker falls back to the plain tail unchanged",
+			output: strings.Repeat("2026-08-23T04:00:00Z build log noise, nothing unusual here\n", 100),
+			check: func(t *testing.T, output, got string) {
+				t.Helper()
+
+				require.Greater(t, len(output), verifyOutputTail,
+					"the fixture must exceed verifyOutputTail or the equality below is trivial")
+				assert.Equal(t, lastChars(output, verifyOutputTail), got)
+			},
+		},
+		{
+			name: "200 FAIL blocks cannot blow the excerpt past its cap",
+			output: func() string {
+				var b strings.Builder
+				for i := 0; i < 200; i++ {
+					fmt.Fprintf(&b, "--- FAIL: Test%d (0.00s)\n    reason %d\n", i, i)
+				}
+
+				return b.String()
+			}(),
+			check: func(t *testing.T, output, got string) {
+				t.Helper()
+
+				assert.LessOrEqual(t, len(got), verifyOutputTail+1500+20)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := verifyFailureExcerpt(tt.output)
+			tt.check(t, tt.output, got)
+		})
+	}
 }

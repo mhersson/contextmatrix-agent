@@ -425,7 +425,7 @@ func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, autho
 			// knows the block starts mid-output rather than at the command's start.
 			// No verdict ran, so the fix run falls back to the card tier (empty fixTier).
 			return verifyFailedPrefix + plan.Display + "\n\nVerify output (tail):\n\n" +
-				lastChars(res.Output, verifyOutputTail), "", false, vres, nil
+				verifyFailureExcerpt(res.Output), "", false, vres, nil
 		case verifySkipped:
 			// A missing or timed-out gate is inconclusive, not a defect: proceed to
 			// the specialists without a fix loop. logVerifyRound already said so.
