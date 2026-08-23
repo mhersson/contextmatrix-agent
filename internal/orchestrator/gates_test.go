@@ -57,6 +57,10 @@ type fakeGates struct {
 
 	logs string
 
+	// logsDelay holds every FailureLogs call, so a test can make a fix round
+	// outlast the gate deadline.
+	logsDelay time.Duration
+
 	// FindPRURL scripting: the recovery probe's result for a fail-closed gate.
 	findPRURL    string
 	findPRURLErr error
@@ -162,6 +166,8 @@ func (f *fakeGates) CopilotReview(_ context.Context, prURL string) (*CopilotRevi
 
 func (f *fakeGates) FailureLogs(_ context.Context, prURL string, _ []CheckResult) (string, error) {
 	f.record("FailureLogs:" + prURL)
+
+	time.Sleep(f.logsDelay)
 
 	return f.logs, nil
 }
@@ -613,6 +619,91 @@ func TestGateDeadlineClampsToContainerDeadline(t *testing.T) {
 	roomy := &run{d: Deps{Cfg: Config{Deadline: time.Now().Add(2 * time.Hour)}}}
 	assert.WithinDuration(t, time.Now().Add(time.Hour), roomy.gateDeadline(time.Hour), time.Minute,
 		"a later container deadline leaves the gate's wait intact")
+}
+
+// TestCIGate_PermanentPollErrorParksImmediately: a poll failure the seam marks
+// permanent parks the gate on that very poll with the verbatim gh text, instead
+// of looping to the wait deadline and parking blind.
+func TestCIGate_PermanentPollErrorParksImmediately(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{checksErr: &PermanentPollError{Err: "gh run list: exit status 1: unknown flag: --commit"}}
+	client := &planLLM{}
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, ciGateContext("Old gh", "body"), 0)
+	o.d.Cfg.GatesCIWaitTimeout = 45 * time.Minute // the park must not wait for this
+
+	err := runPRGates(context.Background(), o)
+
+	var parked *GatesParkedError
+
+	require.ErrorAs(t, err, &parked)
+	assert.Contains(t, parked.Reason, "could not be read")
+	assert.Contains(t, ops.lastBody(), "unknown flag: --commit", "the card detail names the gh failure verbatim")
+	assert.Equal(t, []string{"Checks:" + gatePRURL}, gates.recorded(), "one poll, no retry loop")
+	assert.Zero(t, modelCallCount(client))
+	assert.Equal(t, -1, indexOfCall(ops.recorded(), "TransitionCard:done"))
+}
+
+// TestCIGate_FixRoundReserveFollowsTheObservedCycle: once the gate has watched
+// one CI cycle settle, a fix round needs that cycle plus a coder allowance left
+// on the clock - the fixed 5-minute floor alone would start a round a 9-minute
+// CI can never finish inside the wait.
+func TestCIGate_FixRoundReserveFollowsTheObservedCycle(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{checks: [][]CheckResult{{failingCheck()}}}
+	client := &planLLM{}
+
+	o := prGateRun(ops, gates, &fakeGit{committed: true}, client, ciGateContext("Slow CI", "body"), 0)
+	o.d.Cfg.GatesCIWaitTimeout = 10 * time.Minute // above the 5-minute floor, below 9m + allowance
+	o.ciObservedSettle = 9 * time.Minute
+
+	err := runPRGates(context.Background(), o)
+
+	var parked *GatesParkedError
+
+	require.ErrorAs(t, err, &parked)
+	assert.Contains(t, parked.Reason, "fix round")
+	assert.Zero(t, modelCallCount(client), "no coder run whose CI cycle cannot fit in the wait")
+	assert.Contains(t, ops.lastBody(), "- CI rounds used: 0/3")
+}
+
+// TestCIGate_ObservesTheSettleCycleAfterTheFirstPoll: the cycle is measured
+// from gate start to the first settled poll AFTER the first read - the first
+// poll reflects state from before the gate started, not a cycle it waited out.
+func TestCIGate_ObservesTheSettleCycleAfterTheFirstPoll(t *testing.T) {
+	cases := []struct {
+		name     string
+		checks   [][]CheckResult
+		observed bool
+	}{
+		{
+			name: "a run that settles while the gate watches is measured",
+			checks: [][]CheckResult{
+				{failingCheck(), {Name: "slow", Bucket: "pending"}}, // red, still running
+				{failingCheck(), {Name: "slow", Bucket: "pass"}},    // settled: one cycle observed
+				{{Name: "build", Bucket: "pass"}, {Name: "slow", Bucket: "pass"}},
+			},
+			observed: true,
+		},
+		{
+			name:     "checks already settled on the first poll are not a cycle the gate waited through",
+			checks:   [][]CheckResult{{{Name: "build", Bucket: "pass"}}},
+			observed: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			gates := &fakeGates{checks: tc.checks}
+			client := &planLLM{responses: []llm.Response{stopResp("coder: fixed", 0.01)}}
+
+			o := prGateRun(ops, gates, &fakeGit{committed: true}, client, ciGateContext("Cycle", "body"), 0)
+
+			require.NoError(t, runPRGates(context.Background(), o))
+			assert.Equal(t, tc.observed, o.ciObservedSettle > 0, "observed=%v", o.ciObservedSettle)
+		})
+	}
 }
 
 // gatePRURL is the open PR every gate test polls.
@@ -1110,6 +1201,8 @@ func TestCIGate_DeadlineParkNamesTheOutage(t *testing.T) {
 	assert.NotContains(t, parked.Reason, "pending",
 		"the checks were never read, so the card must not claim they were pending")
 	assert.Zero(t, modelCallCount(client))
+	assert.Contains(t, ops.lastBody(), "API rate limit exceeded",
+		"the last poll error is the only diagnostic the human gets; body=%q", ops.lastBody())
 }
 
 // TestCIGate_PendingParkDropsStaleFailureDetail: the park note describes the poll
@@ -1137,6 +1230,48 @@ func TestCIGate_PendingParkDropsStaleFailureDetail(t *testing.T) {
 	assert.NotContains(t, body, "https://github.test/acme/repo/actions/runs/42/job/7",
 		"the fixed round's failing check must not be listed as current; body=%q", body)
 	assert.Contains(t, body, "at the deadline", "the park note describes the final poll; body=%q", body)
+}
+
+// TestCIGate_FixRoundPastDeadlineRepollsBeforeParking: a fix round that outlasts
+// the wait deadline must not park on the buckets it was started from - the
+// failures the fix just addressed. The gate re-polls the new head first and
+// parks on what that poll says: the new run pending, or not registered yet.
+func TestCIGate_FixRoundPastDeadlineRepollsBeforeParking(t *testing.T) {
+	cases := []struct {
+		name       string
+		postFix    []CheckResult
+		wantReason string
+	}{
+		{"new run pending", []CheckResult{{Name: "build", Bucket: "pending"}}, "CI still pending at the wait deadline"},
+		{"new run not registered yet", nil, "no checks had registered on the current head at the wait deadline"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			shrinkFixRoundReserve(t, 0) // a millisecond-scale gate still funds its round
+
+			ops := &fakeOps{}
+			gates := &fakeGates{
+				checks:    [][]CheckResult{{failingCheck()}, tc.postFix}, // red: one fix round; then the new head
+				logsDelay: 40 * time.Millisecond,                         // the round outlasts the 20ms deadline
+			}
+			client := &planLLM{responses: []llm.Response{stopResp("coder: fixed it", 0.01)}}
+
+			o := prGateRun(ops, gates, &fakeGit{committed: true}, client, ciGateContext("Slow fix", "body"), 0)
+			o.d.Cfg.GatesCIWaitTimeout = 20 * time.Millisecond
+
+			err := runPRGates(context.Background(), o)
+
+			var parked *GatesParkedError
+
+			require.ErrorAs(t, err, &parked)
+			assert.Equal(t, 1, modelCallCount(client), "the fix round ran")
+			assert.Equal(t, tc.wantReason, parked.Reason,
+				"the verdict reads the post-fix poll, not the red one the fix was started from")
+			assert.NotContains(t, ops.lastBody(), "https://github.test/acme/repo/actions/runs/42/job/7",
+				"the fixed round's failing check must not be listed as current; body=%q", ops.lastBody())
+		})
+	}
 }
 
 // TestCIGate_RedWithNoWaitLeftSkipsTheFixRound: a fix round is a multi-minute

@@ -23,6 +23,19 @@ type CopilotReview struct {
 	Comments []ReviewComment
 }
 
+// PermanentPollError is a CI poll failure that will repeat on every poll for the
+// rest of the run - a gh without the flags the fallback poll needs, a token
+// without the permission it needs. The CI gate parks on it at once instead of
+// looping to the wait deadline; Err is the gh text verbatim, the only
+// diagnostic the card can offer.
+type PermanentPollError struct {
+	Err string
+}
+
+func (e *PermanentPollError) Error() string {
+	return "permanent poll error: " + e.Err
+}
+
 // PRGates is the gh seam for the pr_gates phase. The worker implements it on
 // PRCreator; tests inject a fake.
 type PRGates interface {

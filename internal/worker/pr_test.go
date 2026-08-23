@@ -801,6 +801,78 @@ exit 1
 		"pr checks retried on the next poll since the fallback never armed")
 }
 
+// TestChecksViaRunsClassifiesPollErrors: a gh run list failure that repeats on
+// every poll - a gh without the fallback flags, a token without Actions: read -
+// comes back as a PermanentPollError so the gate parks at once; anything else
+// stays a plain error the gate retries, including the 403 GitHub uses for rate
+// limits.
+func TestChecksViaRunsClassifiesPollErrors(t *testing.T) {
+	cases := []struct {
+		name      string
+		stderr    string
+		permanent bool
+	}{
+		{"unknown flag on an old gh", "unknown flag: --commit", true},
+		{"token cannot read Actions runs", "Resource not accessible by personal access token (HTTP 403)", true},
+		{"gateway timeout", "HTTP 504: Gateway Timeout", false},
+		{"rate limit", "HTTP 403: API rate limit exceeded for user ID 1 (https://api.github.com/...)", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stubGH(t, `
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+	echo '{"headRefOid":"abc123"}'
+	exit 0
+fi
+echo "`+tc.stderr+`" 1>&2
+exit 1
+`)
+
+			pc := NewPRCreator(t.TempDir(), "", "", "")
+
+			_, err := pc.checksViaRuns(t.Context(), "https://github.com/org/repo/pull/1")
+			require.Error(t, err)
+
+			var permanent *orchestrator.PermanentPollError
+
+			assert.Equal(t, tc.permanent, errors.As(err, &permanent), "err=%v", err)
+			assert.Contains(t, err.Error(), tc.stderr, "the gh text survives verbatim")
+		})
+	}
+}
+
+// TestChecksViaRunsInaccessibleStatusIsPermanent: a token without Commit
+// statuses: read gets the same "resource not accessible" refusal on the
+// combined-status API that the Checks API gives. Unlike the Checks refusal
+// there is nothing left to fall back to, and the gap never heals within a run,
+// so the poll reports it as permanent - the gate parks at once with the gh text
+// instead of looping to its deadline, and never reads "no statuses" as "no CI".
+func TestChecksViaRunsInaccessibleStatusIsPermanent(t *testing.T) {
+	stubGH(t, `
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+	echo '{"headRefOid":"abc123"}'
+	exit 0
+fi
+if [ "$1" = "run" ] && [ "$2" = "list" ]; then
+	echo '[]'
+	exit 0
+fi
+echo "Resource not accessible by personal access token (HTTP 403)" 1>&2
+exit 1
+`)
+
+	pc := NewPRCreator(t.TempDir(), "", "", "")
+
+	_, err := pc.checksViaRuns(t.Context(), "https://github.com/org/repo/pull/1")
+
+	var permanent *orchestrator.PermanentPollError
+
+	require.ErrorAs(t, err, &permanent, "err=%v", err)
+	assert.Contains(t, permanent.Err, "Resource not accessible by personal access token")
+	assert.Contains(t, permanent.Err, "commits/abc123/status", "the detail names the call that was refused")
+}
+
 // TestChecksViaRunsEmptyMeansNoCI pins the fallback path's own no-CI
 // contract: no Actions runs and no commit statuses map to an empty result and
 // a nil error - the same "this repo has no CI" semantics gh pr checks' own
