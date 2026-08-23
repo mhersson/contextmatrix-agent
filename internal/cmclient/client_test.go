@@ -845,7 +845,7 @@ func TestTruncateBytesUTF8(t *testing.T) {
 		name  string
 		input string
 		limit int
-		want  string // empty means only assert utf8.ValidString
+		want  string
 	}{
 		{
 			name:  "short string passes through",
@@ -895,10 +895,7 @@ func TestTruncateBytesUTF8(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got := truncateBytesUTF8(tt.input, tt.limit)
 			assert.True(t, utf8.ValidString(got), "truncateBytesUTF8 must produce valid UTF-8")
-
-			if tt.want != "" {
-				assert.Equal(t, tt.want, got)
-			}
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }
