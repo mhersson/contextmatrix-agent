@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mhersson/contextmatrix-agent/internal/verifyexec"
 	"github.com/mhersson/contextmatrix-harness/events"
@@ -1045,4 +1046,135 @@ func execFileExists(path string) bool {
 	info, err := os.Stat(path)
 
 	return err == nil && !info.IsDir() && info.Mode()&0o111 != 0
+}
+
+// ---- verify-failed finding excerpt -----------------------------------------
+
+// verifyFailBlockWindow bounds how many lines follow a "--- FAIL" marker that
+// verifyFailureExcerpt keeps for context - typically the Error:/Messages:
+// detail beneath the failing test's name.
+const verifyFailBlockWindow = 12
+
+// verifyFailureMarkers are the language-neutral, line-anchored substrings
+// (besides "--- FAIL", handled separately below for its context window, and
+// the two-part Rust "thread '...' panicked" rule) that flag a line of verify
+// output as part of a failure.
+var verifyFailureMarkers = []string{
+	"FAIL",
+	"panic:",
+	"FAILED",
+	"ERROR",
+	"Error:",
+	"error[",
+	"Traceback",
+	"AssertionError",
+	"not ok",
+	"npm ERR!",
+	"failures:",
+	"✗",
+	"✕",
+	"●",
+}
+
+// isVerifyFailureLine reports whether trimmed - a line already stripped of
+// leading whitespace - starts with a recognised failure marker.
+func isVerifyFailureLine(trimmed string) bool {
+	for _, m := range verifyFailureMarkers {
+		if strings.HasPrefix(trimmed, m) {
+			return true
+		}
+	}
+
+	return strings.HasPrefix(trimmed, "thread '") && strings.Contains(trimmed, "panicked")
+}
+
+// isVerifyStopLine reports whether trimmed closes a "--- FAIL" context
+// window: the start of a new test result or the suite's own pass/fail
+// summary.
+func isVerifyStopLine(trimmed string) bool {
+	for _, p := range []string{"--- ", "=== ", "FAIL", "ok", "PASS"} {
+		if strings.HasPrefix(trimmed, p) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// appendFailBlock writes lines[i] - a "--- FAIL" line - and up to
+// verifyFailBlockWindow following lines to excerpt, stopping early at the
+// next line that closes the window (see isVerifyStopLine). It returns how
+// many lines were consumed, so the caller can skip past them rather than
+// re-processing a context line that is itself a marker.
+func appendFailBlock(excerpt *strings.Builder, lines []string, i int) int {
+	excerpt.WriteString(lines[i])
+	excerpt.WriteByte('\n')
+
+	consumed := 1
+
+	for j := i + 1; j < len(lines) && j <= i+verifyFailBlockWindow; j++ {
+		if isVerifyStopLine(strings.TrimLeft(lines[j], " \t")) {
+			break
+		}
+
+		excerpt.WriteString(lines[j])
+		excerpt.WriteByte('\n')
+
+		consumed++
+	}
+
+	return consumed
+}
+
+// verifyFailureExcerpt scans a verify command's captured output for
+// language-neutral failure markers and returns the lines around them - a
+// noisy suite that keeps logging after the failure leaves a plain
+// verifyOutputTail-byte tail ending in "FAIL <pkg>" with no test name at all,
+// and the fix coder has to re-run the whole suite just to learn what broke.
+// Each matching line is kept, with a "--- FAIL" line also keeping up to
+// verifyFailBlockWindow following lines of context. The collected excerpt is
+// capped at verifyOutputTail bytes (keeping the first matches), followed by
+// the plain tail of the last 1500 bytes. When no marker matches at all, it
+// returns lastChars(output, verifyOutputTail) exactly as before.
+func verifyFailureExcerpt(output string) string {
+	lines := strings.Split(output, "\n")
+
+	var excerpt strings.Builder
+
+	for i := 0; i < len(lines); i++ {
+		trimmed := strings.TrimLeft(lines[i], " \t")
+
+		switch {
+		case strings.HasPrefix(trimmed, "--- FAIL"):
+			// -1 because the loop's own i++ also advances past the block.
+			i += appendFailBlock(&excerpt, lines, i) - 1
+		case isVerifyFailureLine(trimmed):
+			excerpt.WriteString(lines[i])
+			excerpt.WriteByte('\n')
+		}
+
+		// Early exit only - a fail block can overshoot; the hard cap is
+		// enforced below.
+		if excerpt.Len() >= verifyOutputTail {
+			break
+		}
+	}
+
+	if excerpt.Len() == 0 {
+		return lastChars(output, verifyOutputTail)
+	}
+
+	result := strings.TrimRight(excerpt.String(), "\n")
+	if len(result) > verifyOutputTail {
+		// Back off to a rune boundary so a multi-byte marker (✗, ✕, ●) at
+		// the cut is dropped whole rather than split into invalid UTF-8.
+		cut := verifyOutputTail
+		for cut > 0 && !utf8.RuneStart(result[cut]) {
+			cut--
+		}
+
+		result = result[:cut]
+	}
+
+	return result + "\n\nOutput tail:\n" + lastChars(output, 1500)
 }
