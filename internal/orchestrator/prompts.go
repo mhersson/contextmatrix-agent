@@ -149,6 +149,16 @@ Decompose the task into subtasks following these rules:
   vague hand-waves like "implement appropriately".
 - Do not over-engineer: solve the problem at hand, no speculative
   abstractions or premature generalization.
+- When the card offers alternatives ("A or B", "optionally C"), choose exactly
+  one and say why in the subtask description; never plan both. "Optionally"
+  means omit unless it is a one-line addition.
+- Tests: each subtask tests what the card names for that item and nothing
+  more - one behavioural test per item by default, never one per code path,
+  and never a new test for a branch or path the card does not name. When the
+  card names a specific test or assertion to add, the subtask is exactly that.
+- Small batched items ("a few lines each", "batch them") become the fewest
+  subtasks that keep files disjoint - group by file - not one subtask per
+  bullet.
 - Do not include documentation subtasks - documentation is handled
   separately after execution.
 - Do not create subtasks for release mechanics - tagging, versioning,
