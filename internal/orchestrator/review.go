@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
@@ -127,6 +129,8 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 		attemptsCap = config.DefaultReviewAttemptsCap
 	}
 
+	fixRan := false
+
 	for iter := range hardReviewIterationCap {
 		// Round number continues across resumes: review_attempts persists the
 		// count of prior rounds, so round N is stable for the body record.
@@ -151,8 +155,16 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 
 		if approved {
 			o.reviewSummary = findings // synthesis verdict summary, for the PR body
+			o.fixEscalate = false
 
 			return nil
+		}
+
+		// A fix round that committed but left this round's verify red failed as
+		// surely as one that landed nothing: the next fix escalates. Round 1's
+		// red verify has no fix behind it and escalates nothing.
+		if fixRan && vres.Status == verifyFailed {
+			o.markFixFailed("left the verify red")
 		}
 
 		// Carry this round's findings into the next round so the panel verifies
@@ -163,8 +175,15 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 			return err
 		}
 
-		if err := o.runFix(ctx, findings, round, fixTier, false); err != nil {
+		committed, err := o.runFix(ctx, findings, round, fixTier, false)
+		if err != nil {
 			return err
+		}
+
+		fixRan = true
+
+		if !committed {
+			o.markFixFailed("produced no change")
 		}
 	}
 
@@ -227,7 +246,7 @@ func (o *run) runReviewHITL(ctx context.Context, plan verifyPlan) error {
 				return fmt.Errorf("increment review attempts: %w", err)
 			}
 
-			if err := o.runFix(ctx, findings, round, fixTier, false); err != nil {
+			if _, err := o.runFix(ctx, findings, round, fixTier, false); err != nil {
 				return err
 			}
 
@@ -246,7 +265,7 @@ func (o *run) runReviewHITL(ctx context.Context, plan verifyPlan) error {
 			return fmt.Errorf("increment review attempts: %w", err)
 		}
 
-		if err := o.runFix(ctx, mergeFeedback(findings, fb), round, fixTier, false); err != nil {
+		if _, err := o.runFix(ctx, mergeFeedback(findings, fb), round, fixTier, false); err != nil {
 			return err
 		}
 	}
@@ -313,7 +332,7 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 
 	// Gated strong fix - runs only because the authoritative review confirmed
 	// real issues.
-	if err := o.runFix(ctx, findings, round, fixTier, true); err != nil {
+	if _, err := o.runFix(ctx, findings, round, fixTier, true); err != nil {
 		return err
 	}
 
@@ -749,16 +768,21 @@ func (o *run) synthesize(ctx context.Context, findings string, authoritative boo
 // o.reselects) parks the run when exhausted. A non-incapable run error returns
 // immediately. The successful run's output is consumed inside the harness loop
 // (the fixup targets files parsed from the findings, not the model output), so
-// only the error is returned.
-func (o *run) runFixModel(ctx context.Context, prompt string, round int, fixTier string, authoritative bool) error {
+// it returns only the model that ran and the error.
+func (o *run) runFixModel(ctx context.Context, prompt string, round int, fixTier string, authoritative bool) (string, error) {
 	d := o.d
 	cfg := d.Cfg
-	tier := o.fixTierFor(fixTier, authoritative)
+	tier := o.fixTierEffective(fixTier, authoritative)
 
 	for attempt := 0; attempt <= reselectCap; attempt++ {
 		model := o.resolveFixModel(ctx, fixTier, authoritative)
 
-		d.logCard(ctx, "fix coder %s selected for round %d fixes (tier=%s)", model, round, tier)
+		if o.fixEscalate {
+			d.logCard(ctx, "fix coder %s selected for round %d fixes (tier=%s) - escalated after a fix round that %s",
+				model, round, tier, o.fixFailReason)
+		} else {
+			d.logCard(ctx, "fix coder %s selected for round %d fixes (tier=%s)", model, round, tier)
+		}
 
 		res, dur, err := o.runModelCoder(ctx, d.WriteTools, prompt, model, fixWrapUpMessage, tier)
 
@@ -767,40 +791,55 @@ func (o *run) runFixModel(ctx context.Context, prompt string, round int, fixTier
 		var ie *IncapableError
 		if errors.As(err, &ie) {
 			if rerr := o.recoverIncapable(ctx, ie); rerr != nil {
-				return rerr
+				return "", rerr
 			}
 
 			continue
 		}
 
 		if err != nil {
-			return fmt.Errorf("review fix run: %w", err)
+			return "", fmt.Errorf("review fix run: %w", err)
 		}
 
-		return nil
+		return model, nil
 	}
 
 	// Unreachable: recoverIncapable errors at the cap before the loop exhausts.
-	return fmt.Errorf("review fix (card=%s): re-selection loop exhausted", o.d.Cfg.CardID)
+	return "", fmt.Errorf("review fix (card=%s): re-selection loop exhausted", o.d.Cfg.CardID)
 }
 
 // runFix runs one coder fix pass against the outstanding findings, lands the
 // changes as a fixup onto the commit that last touched the fixed files (HEAD
-// fallback), and pushes. Budget is checked before the model call.
-func (o *run) runFix(ctx context.Context, findings string, round int, fixTier string, authoritative bool) error {
+// fallback), and pushes. Budget is checked before the model call. It reports
+// whether the fix landed a commit - a round that landed nothing is a failed
+// round to the review loop. After a failed round it parks instead of running
+// when no fix model other than the ones that failed is available.
+func (o *run) runFix(ctx context.Context, findings string, round int, fixTier string, authoritative bool) (bool, error) {
 	d := o.d
 	cfg := d.Cfg
 
+	if o.fixEscalate {
+		if model := o.resolveFixModel(ctx, fixTier, authoritative); o.fixFailed[model] {
+			d.logCard(ctx, "review parked: the previous fix round %s and no other fix model is available (tried: %s) - outstanding findings:\n%s",
+				o.fixFailReason, strings.Join(sortedKeys(o.fixFailed), ", "), findings)
+
+			return false, &ReviewParkedError{}
+		}
+	}
+
 	if err := o.ledger.Check(); err != nil {
-		return err
+		return false, err
 	}
 
 	prompt := fmt.Sprintf(fixPrompt, o.skillEngage(), o.grounding, cfg.Workspace,
 		fixVerifyLine(o.resolvedVerifyPlan()), o.tc.Title, o.taskDescription, findings)
 
-	if err := o.runFixModel(ctx, prompt, round, fixTier, authoritative); err != nil {
-		return err
+	model, err := o.runFixModel(ctx, prompt, round, fixTier, authoritative)
+	if err != nil {
+		return false, err
 	}
+
+	o.lastFixModel = model
 
 	// Target the commit that last touched the fixed files so the fixup autosquashes
 	// onto the right change; HEAD is the fallback when the path lookup yields
@@ -812,7 +851,7 @@ func (o *run) runFix(ctx context.Context, findings string, round int, fixTier st
 
 	committed, err := d.Git.CommitFixup(ctx, target)
 	if err != nil {
-		return fmt.Errorf("commit review fixup: %w", err)
+		return false, fmt.Errorf("commit review fixup: %w", err)
 	}
 
 	if !committed {
@@ -824,14 +863,62 @@ func (o *run) runFix(ctx context.Context, findings string, round int, fixTier st
 		// the full base-branch diff and actually re-examines the outstanding work.
 		o.lastReviewBase = ""
 
-		return nil
+		return false, nil
 	}
 
 	if err := d.Git.Push(ctx, cfg.Branch); err != nil {
-		return fmt.Errorf("push review fixup: %w", err)
+		return false, fmt.Errorf("push review fixup: %w", err)
 	}
 
-	return nil
+	return true, nil
+}
+
+// markFixFailed records that the most recent fix round failed for the given
+// reason: its model is excluded from every later fix pick, and the next pick
+// escalates.
+func (o *run) markFixFailed(reason string) {
+	if o.fixFailed == nil {
+		o.fixFailed = map[string]bool{}
+	}
+
+	if o.lastFixModel != "" {
+		o.fixFailed[o.lastFixModel] = true
+	}
+
+	o.fixEscalate = true
+	o.fixFailReason = reason
+}
+
+// fixExclusions is the fix pick's exclusion set: models proven incapable this
+// run plus models whose fix round failed.
+func (o *run) fixExclusions() map[string]bool {
+	out := make(map[string]bool, len(o.excluded)+len(o.fixFailed))
+	maps.Copy(out, o.excluded)
+	maps.Copy(out, o.fixFailed)
+
+	return out
+}
+
+// fixFailedVendors is the set of vendors behind the failed fix models, for the
+// escalated pick's vendor preference.
+func (o *run) fixFailedVendors() map[string]bool {
+	out := map[string]bool{}
+
+	for model := range o.fixFailed {
+		if v := o.d.Registry.Vendor(model); v != "" {
+			out[v] = true
+		}
+	}
+
+	return out
+}
+
+// sortedKeys lists a set's members in a stable order for log lines.
+func sortedKeys(set map[string]bool) []string {
+	keys := slices.Collect(maps.Keys(set))
+	slices.Sort(keys)
+
+	return keys
 }
 
 // resolveFixModel picks the coder model for the fix run: the card's coder pin
@@ -850,13 +937,49 @@ func (o *run) resolveFixModel(ctx context.Context, fixTier string, authoritative
 		o.warnUnresolvablePin(ctx, "coder", o.tc.ModelCoder)
 	}
 
-	spec := o.d.Registry.SelectByComplexity(registry.SelectInput{
+	in := registry.SelectInput{
 		Role:    registry.RoleCoder,
-		Tier:    o.fixTierFor(fixTier, authoritative),
-		Exclude: o.excluded,
-	})
+		Tier:    o.fixTierEffective(fixTier, authoritative),
+		Exclude: o.fixExclusions(),
+	}
 
-	return spec.Model
+	if !o.fixEscalate {
+		return o.d.Registry.SelectByComplexity(in).Model
+	}
+
+	// Escalating after a failed round: prefer a vendor that has not failed this
+	// card, and fall back to any vendor when that leaves only a failed model.
+	in.ExcludeVendors = o.fixFailedVendors()
+	if spec := o.d.Registry.SelectByComplexity(in); !o.fixFailed[spec.Model] {
+		return spec.Model
+	}
+
+	in.ExcludeVendors = nil
+
+	return o.d.Registry.SelectByComplexity(in).Model
+}
+
+// fixTierEffective is the tier the fix coder is sized and selected on: fixTierFor,
+// climbed one tier after a failed fix round.
+func (o *run) fixTierEffective(fixTier string, authoritative bool) registry.Tier {
+	tier := o.fixTierFor(fixTier, authoritative)
+	if o.fixEscalate {
+		return escalateTier(tier)
+	}
+
+	return tier
+}
+
+// escalateTier is one tier up; critical stays critical.
+func escalateTier(t registry.Tier) registry.Tier {
+	switch t {
+	case registry.TierSimple:
+		return registry.TierModerate
+	case registry.TierModerate:
+		return registry.TierComplex
+	default:
+		return registry.TierCritical
+	}
 }
 
 // effectiveFixTier is the tier the fix run sizes on: the synthesizer's fix_tier

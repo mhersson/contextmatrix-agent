@@ -416,8 +416,8 @@ func TestFixRunTierScalesTurnBudget(t *testing.T) {
 	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
 	o := newReviewRun(d, tc, 0)
 
-	require.NoError(t, o.runFixModel(context.Background(), "fix prompt", 1, "complex", false),
-		"a complex fix tier scales the budget above the base, so 25 turns do not cap")
+	_, err := o.runFixModel(context.Background(), "fix prompt", 1, "complex", false)
+	require.NoError(t, err, "a complex fix tier scales the budget above the base, so 25 turns do not cap")
 }
 
 // TestFixRunSimpleTierCapsAtBase proves a simple fix tier is NOT scaled: the
@@ -432,7 +432,7 @@ func TestFixRunSimpleTierCapsAtBase(t *testing.T) {
 	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
 	o := newReviewRun(d, tc, 0)
 
-	err := o.runFixModel(context.Background(), "fix prompt", 1, "simple", false)
+	_, err := o.runFixModel(context.Background(), "fix prompt", 1, "simple", false)
 	require.Error(t, err, "a simple fix tier keeps the flat base, so 25 turns cap")
 
 	var mte *MaxTurnsError
@@ -1895,4 +1895,162 @@ func TestReviewAuthoritativeSecondIncrementParksAtServerCap(t *testing.T) {
 	require.ErrorAs(t, err, &parked,
 		"the authoritative pass's second increment must park on the ceiling; got %v", err)
 	assert.Equal(t, 2, ops.incrementCalls, "the first increment must have succeeded")
+}
+
+// escalationRegistry seeds three coder candidates across two vendors at equal
+// price: every one clears the moderate bar (0.76) and alpha/coder wins on
+// quality; only alpha/second and beta/coder clear the complex bar (0.82), so an
+// escalated pick that avoids vendor alpha lands on beta/coder.
+func escalationRegistry() *registry.Registry {
+	catalog := llm.Catalog{
+		{ID: "alpha/coder", ContextLength: 200000, SupportedParameters: []string{"tools"}, PromptPricePerTok: 1e-6, CompletionPricePerTok: 1e-6},
+		{ID: "alpha/second", ContextLength: 200000, SupportedParameters: []string{"tools"}, PromptPricePerTok: 1e-6, CompletionPricePerTok: 1e-6},
+		{ID: "beta/coder", ContextLength: 200000, SupportedParameters: []string{"tools"}, PromptPricePerTok: 1e-6, CompletionPricePerTok: 1e-6},
+		{ID: "capable/default", ContextLength: 200000, SupportedParameters: []string{"tools"}},
+	}
+
+	alpha, second, beta := 0.90, 0.88, 0.85
+	priors := registry.Priors{
+		Models: map[string]registry.PriorEntry{
+			"alpha/coder":  {Coder: &alpha},
+			"alpha/second": {Coder: &second},
+			"beta/coder":   {Coder: &beta},
+		},
+	}
+
+	return registry.NewRegistryFromParts(catalog, priors, nil, nil, "capable/default")
+}
+
+// panelRejects scripts one specialist round (three specialists + synthesis)
+// that returns a single fix; panelApproves one that approves.
+func panelRejects(issue string) []llm.Response {
+	return []llm.Response{
+		stopResp("Correctness: "+issue, 0.01),
+		stopResp("Design: ok", 0.01),
+		stopResp("Security: ok", 0.01),
+		stopResp(`{"approved":false,"summary":"fix it","fixes":[{"file":"a.go","issue":"`+issue+`","suggestion":"patch"}]}`, 0.02),
+	}
+}
+
+func panelApproves() []llm.Response {
+	return []llm.Response{
+		stopResp("Correctness: ok", 0.01),
+		stopResp("Design: ok", 0.01),
+		stopResp("Security: ok", 0.01),
+		stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.02),
+	}
+}
+
+// TestReviewFixZeroEditRoundEscalatesModel: a fix round that lands no commit is
+// a failed round - the next fix runs on a different model, one tier up,
+// preferring another vendor, and the failed model is excluded.
+func TestReviewFixZeroEditRoundEscalatesModel(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: false} // every fix round lands nothing
+
+	var responses []llm.Response
+
+	responses = append(responses, panelRejects("bug")...)
+	responses = append(responses, stopResp("coder: tried", 0.05))
+	responses = append(responses, panelRejects("still bug")...)
+	responses = append(responses, stopResp("coder: tried again", 0.05))
+	responses = append(responses, panelApproves()...)
+
+	client := &planLLM{responses: responses}
+	d := reviewTestDeps(t, ops, git, client, escalationRegistry())
+	o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}, 0)
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	// Call order per round: three specialists, synthesis, fix coder.
+	require.GreaterOrEqual(t, len(client.models), 10, "models=%v", client.models)
+	assert.Equal(t, "alpha/coder", client.models[4], "the first fix runs on the card-tier pick; models=%v", client.models)
+	assert.Equal(t, "beta/coder", client.models[9],
+		"a zero-edit round escalates: one tier up, another vendor, the failed model excluded; models=%v", client.models)
+	assert.True(t, ops.loggedContains("escalated"), "the escalation is card-logged; logs=%v", ops.recorded())
+}
+
+// TestReviewFixRedVerifyAfterFixEscalatesModel: a fix round that committed but
+// left the next round's verify red failed just as surely - the next fix
+// escalates. Round 1's red verify, with no fix run yet, does not: the first fix
+// runs on the card-tier pick.
+func TestReviewFixRedVerifyAfterFixEscalatesModel(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+
+	var responses []llm.Response
+
+	responses = append(responses, stopResp("coder: fix one", 0.05))
+	responses = append(responses, stopResp("coder: fix two", 0.05))
+	responses = append(responses, panelApproves()...)
+
+	client := &planLLM{responses: responses}
+	d := reviewTestDeps(t, ops, git, client, escalationRegistry())
+	o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}, 0)
+	o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
+
+	round := 0
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		round++
+		if round <= 2 {
+			return verifyexec.Outcome{ExitCode: 1, Output: "--- FAIL: TestX\nexit status 1"}
+		}
+
+		return verifyexec.Outcome{ExitCode: 0}
+	}
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	require.GreaterOrEqual(t, len(client.models), 2, "models=%v", client.models)
+	assert.Equal(t, "alpha/coder", client.models[0], "round 1's red verify does not escalate; models=%v", client.models)
+	assert.Equal(t, "beta/coder", client.models[1],
+		"a fix that left the verify red escalates the next fix; models=%v", client.models)
+}
+
+// TestReviewFixNoAlternativeModelParks: after a failed fix round, when the
+// escalated pick is the model that just failed - a single-model registry or an
+// operator coder pin - the loop parks at once with the model named, instead of
+// replaying the same fix round.
+func TestReviewFixNoAlternativeModelParks(t *testing.T) {
+	only := 0.90
+	single := registry.NewRegistryFromParts(
+		llm.Catalog{{ID: "only/coder", ContextLength: 200000, SupportedParameters: []string{"tools"}}},
+		registry.Priors{Models: map[string]registry.PriorEntry{"only/coder": {Coder: &only}}},
+		nil, nil, "only/coder")
+
+	cases := []struct {
+		name  string
+		reg   *registry.Registry
+		pin   string
+		model string
+	}{
+		{"single-model registry", single, "", "only/coder"},
+		{"operator coder pin", reviewerRegistry(), "pinned/model", "pinned/model"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			git := &fakeGit{committed: false}
+
+			var responses []llm.Response
+
+			responses = append(responses, panelRejects("bug")...)
+			responses = append(responses, stopResp("coder: tried", 0.05))
+			responses = append(responses, panelRejects("still bug")...)
+
+			client := &planLLM{responses: responses}
+			d := reviewTestDeps(t, ops, git, client, tc.reg)
+			o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress", ModelCoder: tc.pin}, 0)
+
+			err := runReview(context.Background(), o)
+
+			var parked *ReviewParkedError
+
+			require.ErrorAs(t, err, &parked, "no alternative fix model parks; err=%v", err)
+			assert.Equal(t, 1, countPrefix(git.recorded(), "CommitFixup:"), "exactly one fix round ran; git=%v", git.recorded())
+			assert.True(t, ops.loggedContains("no other fix model"), "the park names the cause; logs=%v", ops.recorded())
+			assert.True(t, ops.loggedContains(tc.model), "the park names the model that failed; logs=%v", ops.recorded())
+		})
+	}
 }
