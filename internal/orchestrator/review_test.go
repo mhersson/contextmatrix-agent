@@ -1056,6 +1056,67 @@ func TestReviewGateFailureSkipsSpecialists(t *testing.T) {
 	assert.Equal(t, 1, incCount, "gate failure increments the attempt counter via the fix path")
 }
 
+// TestRunFixRoutesByFindingsOrigin proves runFix picks verifyFixPrompt (title-only
+// parent, explicit SCOPE) when the findings came from a failed verify gate, and
+// keeps using the full fixPrompt (with the parent description) for panel-round
+// findings.
+func TestRunFixRoutesByFindingsOrigin(t *testing.T) {
+	t.Run("verify-failed round", func(t *testing.T) {
+		ops := &fakeOps{}
+		git := &fakeGit{committed: true}
+		client := &planLLM{responses: []llm.Response{
+			stopResp("coder: fixed", 0.05),
+		}}
+		d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+		tc := cmclient.TaskContext{Title: "Parent", Description: "the distinctive parent description", State: "in_progress"}
+		o := newReviewRun(d, tc, 0)
+		o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
+		o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+			return verifyexec.Outcome{ExitCode: 1, Output: "FAIL: tests broke"}
+		}
+
+		findings, fixTier, approved, _, err := o.reviewRound(context.Background(), *o.verify, 1, false)
+		require.NoError(t, err)
+		assert.False(t, approved)
+
+		committed, err := o.runFix(context.Background(), findings, 1, fixTier, false)
+		require.NoError(t, err)
+		assert.True(t, committed)
+
+		prompt := promptOfCall(client, 0)
+		assert.Contains(t, prompt, "The ONLY item in scope is the failure below")
+		assert.NotContains(t, prompt, "the distinctive parent description")
+	})
+
+	t.Run("panel round", func(t *testing.T) {
+		ops := &fakeOps{}
+		git := &fakeGit{committed: true}
+		client := &planLLM{responses: []llm.Response{
+			stopResp("Correctness: bug", 0.01),
+			stopResp("Design: ok", 0.01),
+			stopResp("Security: ok", 0.01),
+			stopResp(`{"approved":false,"summary":"fix it","fixes":[{"file":"a.go","issue":"bug","suggestion":"patch"}]}`, 0.02),
+			stopResp("coder: fixed", 0.05),
+		}}
+		d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+		tc := cmclient.TaskContext{Title: "Parent", Description: "the distinctive parent description", State: "in_progress"}
+		o := newReviewRun(d, tc, 0)
+
+		findings, fixTier, approved, _, err := o.reviewRound(context.Background(), verifyPlan{}, 1, false)
+		require.NoError(t, err)
+		assert.False(t, approved)
+
+		committed, err := o.runFix(context.Background(), findings, 1, fixTier, false)
+		require.NoError(t, err)
+		assert.True(t, committed)
+
+		prompt := promptOfCall(client, 4)
+		assert.Contains(t, prompt, "the distinctive parent description")
+	})
+}
+
 func TestReviewGateSkippedProceedsUnverified(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{}

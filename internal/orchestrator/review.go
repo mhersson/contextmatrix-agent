@@ -33,6 +33,10 @@ const hardReviewIterationCap = 50
 // already bounded at 64 KiB by verifyexec, so nothing upstream is lost.
 const verifyOutputTail = 4000
 
+// verifyFailedPrefix marks findings that came from a failed verify gate rather
+// than the specialist panel, so runFix can route them to verifyFixPrompt.
+const verifyFailedPrefix = "verify command failed: "
+
 // verdict is the synthesis model's structured decision: approve outright or
 // return a concrete fix list for the coder.
 type verdict struct {
@@ -420,7 +424,7 @@ func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, autho
 			// "(tail)" label matches judge.go's identical evidence, so the coder
 			// knows the block starts mid-output rather than at the command's start.
 			// No verdict ran, so the fix run falls back to the card tier (empty fixTier).
-			return "verify command failed: " + plan.Display + "\n\nVerify output (tail):\n\n" +
+			return verifyFailedPrefix + plan.Display + "\n\nVerify output (tail):\n\n" +
 				lastChars(res.Output, verifyOutputTail), "", false, vres, nil
 		case verifySkipped:
 			// A missing or timed-out gate is inconclusive, not a defect: proceed to
@@ -831,8 +835,17 @@ func (o *run) runFix(ctx context.Context, findings string, round int, fixTier st
 		return false, err
 	}
 
-	prompt := fmt.Sprintf(fixPrompt, o.skillEngage(), o.grounding, cfg.Workspace,
-		fixVerifyLine(o.resolvedVerifyPlan()), o.tc.Title, o.taskDescription, findings)
+	var prompt string
+	if strings.HasPrefix(findings, verifyFailedPrefix) {
+		// No reviewer ran: the finding is the one failing command, not a critique
+		// of the whole card, so the parent card goes in title-only with an
+		// explicit scope block instead of the full description.
+		prompt = fmt.Sprintf(verifyFixPrompt, o.skillEngage(), o.grounding, cfg.Workspace,
+			fixVerifyLine(o.resolvedVerifyPlan()), o.tc.Title, findings)
+	} else {
+		prompt = fmt.Sprintf(fixPrompt, o.skillEngage(), o.grounding, cfg.Workspace,
+			fixVerifyLine(o.resolvedVerifyPlan()), o.tc.Title, o.taskDescription, findings)
+	}
 
 	model, err := o.runFixModel(ctx, prompt, round, fixTier, authoritative)
 	if err != nil {
