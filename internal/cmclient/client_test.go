@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
@@ -834,6 +836,159 @@ func TestSubtaskStates(t *testing.T) {
 	assert.Equal(t, "demo", args["project"])
 	assert.Equal(t, "CMX-001", args["parent"])
 	assert.Equal(t, testAgentID, args["agent_id"])
+}
+
+func TestTruncateBytesUTF8(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+		limit int
+		want  string // empty means only assert utf8.ValidString
+	}{
+		{
+			name:  "short string passes through",
+			input: "hello",
+			limit: 2000,
+			want:  "hello",
+		},
+		{
+			name:  "empty string",
+			input: "",
+			limit: 2000,
+			want:  "",
+		},
+		{
+			name:  "zero limit returns empty",
+			input: "hello",
+			limit: 0,
+			want:  "",
+		},
+		{
+			name:  "exact ASCII boundary",
+			input: "abcdefghij",
+			limit: 5,
+			want:  "abcde",
+		},
+		{
+			name:  "boundary splits 3-byte rune",
+			input: "ab€cd",
+			limit: 3,
+			want:  "ab",
+		},
+		{
+			name:  "boundary splits 2-byte rune",
+			input: "a\u00e9cd",
+			limit: 2,
+			want:  "a",
+		},
+		{
+			name:  "all continuation bytes backed off to zero",
+			input: "€€",
+			limit: 1,
+			want:  "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := truncateBytesUTF8(tt.input, tt.limit)
+			assert.True(t, utf8.ValidString(got), "truncateBytesUTF8 must produce valid UTF-8")
+
+			if tt.want != "" {
+				assert.Equal(t, tt.want, got)
+			}
+		})
+	}
+}
+
+func TestTruncateBytesUTF8_LongerThanLimit(t *testing.T) {
+	t.Parallel()
+
+	input := strings.Repeat("x", 3000)
+
+	got := truncateBytesUTF8(input, 2000)
+	assert.True(t, utf8.ValidString(got), "truncated output must be valid UTF-8")
+	assert.Len(t, got, 2000, "truncated output must be at most 2000 bytes")
+
+	// 1998 ASCII bytes + a 3-byte € (total 2001) - cut must back off.
+	input2 := strings.Repeat("x", 1998) + "€ab"
+	got2 := truncateBytesUTF8(input2, 2000)
+	assert.True(t, utf8.ValidString(got2), "truncated output must be valid UTF-8 when cut mid-rune")
+	assert.Len(t, got2, 1998, "must back off the 3-byte €, keeping only the 1998 ASCII bytes")
+}
+
+func TestCompleteTask_ClampsSummary(t *testing.T) {
+	rec := newRecorder()
+	c := newTestClient(t, rec, "")
+
+	// A short summary passes through unmodified.
+	short := "did the thing"
+	require.NoError(t, c.CompleteTask(context.Background(), "CMX-001", short))
+
+	args, ok := rec.get("complete_task")
+	require.True(t, ok)
+	assert.Equal(t, short, args["summary"], "short summary must pass through unmodified")
+
+	// A summary longer than 2000 bytes is clamped.
+	long := strings.Repeat("x", 3000)
+	require.NoError(t, c.CompleteTask(context.Background(), "CMX-002", long))
+
+	args2, ok := rec.get("complete_task")
+	require.True(t, ok)
+	clamped, ok := args2["summary"].(string)
+	require.True(t, ok, "summary must be a string")
+	assert.True(t, utf8.ValidString(clamped), "clamped summary must be valid UTF-8")
+	assert.LessOrEqual(t, len(clamped), 2000, "clamped summary must be at most 2000 bytes")
+
+	// A summary that splits a multi-byte rune at the boundary backs off.
+	midRune := strings.Repeat("x", 1998) + "€trailing"
+	require.NoError(t, c.CompleteTask(context.Background(), "CMX-003", midRune))
+
+	args3, ok := rec.get("complete_task")
+	require.True(t, ok)
+	clamped3, ok := args3["summary"].(string)
+	require.True(t, ok, "summary must be a string")
+	assert.True(t, utf8.ValidString(clamped3), "clamped summary must be valid UTF-8 when cut mid-rune")
+	assert.LessOrEqual(t, len(clamped3), 2000, "clamped summary must be at most 2000 bytes")
+	assert.Len(t, clamped3, 1998, "must back off the 3-byte € to 1998 ASCII bytes")
+}
+
+func TestAddLog_ClampsMessage(t *testing.T) {
+	rec := newRecorder()
+	c := newTestClient(t, rec, "")
+
+	// A short message passes through unmodified.
+	short := "progress update"
+	require.NoError(t, c.AddLog(context.Background(), "CMX-001", short))
+
+	args, ok := rec.get("add_log")
+	require.True(t, ok)
+	assert.Equal(t, short, args["message"], "short message must pass through unmodified")
+
+	// A message longer than 2000 bytes is clamped.
+	long := strings.Repeat("x", 3000)
+	require.NoError(t, c.AddLog(context.Background(), "CMX-002", long))
+
+	args2, ok := rec.get("add_log")
+	require.True(t, ok)
+	clamped, ok := args2["message"].(string)
+	require.True(t, ok, "message must be a string")
+	assert.True(t, utf8.ValidString(clamped), "clamped message must be valid UTF-8")
+	assert.LessOrEqual(t, len(clamped), 2000, "clamped message must be at most 2000 bytes")
+
+	// A message that splits a multi-byte rune at the boundary backs off.
+	midRune := strings.Repeat("x", 1998) + "€trailing"
+	require.NoError(t, c.AddLog(context.Background(), "CMX-003", midRune))
+
+	args3, ok := rec.get("add_log")
+	require.True(t, ok)
+	clamped3, ok := args3["message"].(string)
+	require.True(t, ok, "message must be a string")
+	assert.True(t, utf8.ValidString(clamped3), "clamped message must be valid UTF-8 when cut mid-rune")
+	assert.LessOrEqual(t, len(clamped3), 2000, "clamped message must be at most 2000 bytes")
+	assert.Len(t, clamped3, 1998, "must back off the 3-byte € to 1998 ASCII bytes")
 }
 
 func TestAddLog(t *testing.T) {

@@ -568,11 +568,33 @@ func (c *Client) ReportModelOutcomes(ctx context.Context, cardID string, outcome
 	return err
 }
 
-// CompleteTask marks the card done with the given summary.
+// activityLogByteCap mirrors the server's activity-log field limit of 2000
+// bytes. The server counts bytes, not runes, so truncation must not split a
+// multi-byte UTF-8 character.
+const activityLogByteCap = 2000
+
+// truncateBytesUTF8 returns a prefix of s that is at most limit bytes long and
+// is always valid UTF-8. When limit falls in the middle of a multi-byte rune,
+// it backs off to the preceding rune boundary.
+func truncateBytesUTF8(s string, limit int) string {
+	if limit >= len(s) {
+		return s
+	}
+
+	for limit > 0 && s[limit]&0xC0 == 0x80 {
+		limit--
+	}
+
+	return s[:limit]
+}
+
+// CompleteTask marks the card done with the given summary. The summary is
+// clamped to activityLogByteCap before being sent, so a long model-authored
+// string cannot exceed the server's activity-log field limit.
 func (c *Client) CompleteTask(ctx context.Context, cardID, summary string) error {
 	_, err := c.call(ctx, "complete_task", map[string]any{
 		"card_id": cardID,
-		"summary": summary,
+		"summary": truncateBytesUTF8(summary, activityLogByteCap),
 	})
 
 	return err
@@ -761,12 +783,14 @@ func (c *Client) BlacklistModel(ctx context.Context, cardID, model, reason strin
 	return err
 }
 
-// AddLog appends a status_update activity log entry to the card.
+// AddLog appends a status_update activity log entry to the card. The message is
+// clamped to activityLogByteCap before being sent, so a long error string or
+// model-authored message cannot exceed the server's activity-log field limit.
 func (c *Client) AddLog(ctx context.Context, cardID, message string) error {
 	_, err := c.call(ctx, "add_log", map[string]any{
 		"card_id": cardID,
 		"action":  "status_update",
-		"message": message,
+		"message": truncateBytesUTF8(message, activityLogByteCap),
 	})
 
 	return err
