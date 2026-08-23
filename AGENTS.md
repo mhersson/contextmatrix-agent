@@ -313,8 +313,19 @@ file only - never via flags or committed YAML.
     private repos), falls back for the rest of the run to
     `gh run list --commit <head-sha>` plus the legacy commit-status API -
     covered by Actions: read and Commit statuses: read. Fallback mode cannot
-    see third-party Checks-API-only integrations. A gate runs whenever a PR
-    URL exists and its flag is set - a stale `pr_url` on a card whose
+    see third-party Checks-API-only integrations. A poll failure that repeats
+    on every poll - an `unknown flag` from a gh too old for the fallback poll,
+    a token refused by the Actions-runs or commit-status API - parks the gate
+    at once with the verbatim gh text in the card detail instead of looping to
+    the wait deadline; a transient poll failure keeps looping and, if the wait
+    runs out, its last error text is the park detail. A fix round is started
+    only with enough wait left for the coder run, the push, and a fresh CI
+    cycle: at least 5 minutes and, once the gate has watched one cycle settle,
+    that cycle plus a 2-minute coder allowance - so a repo whose CI takes
+    longer than the floor never burns a coder run it cannot see through. After
+    a fix round the gate re-polls the new head before any deadline verdict, so
+    a park never re-lists the failures the fix addressed. A gate runs whenever
+    a PR URL exists and its flag is set - a stale `pr_url` on a card whose
     `create_pr` was later disabled still gates, on the rule that a PR exists
     so the gate runs on it; a gated card whose PR was never created
     (`create_pr` true, no URL) parks fail-closed instead of completing - but
