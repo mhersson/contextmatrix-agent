@@ -546,6 +546,54 @@ REVIEW FINDINGS TO FIX
 %s
 `
 
+// verifyFixPrompt is the coder fix-run instruction for a review round whose
+// findings came from a failed verify gate instead of the specialist panel: one
+// failing command, not a critique of the whole card. Unlike fixPrompt, the
+// parent card goes in title-only - no description - with an explicit SCOPE
+// block in its place, so the coder fixes the failure instead of re-auditing
+// everything the card's description lists as done.
+//
+// The trailing %s slots are filled by runFix: workspace root, the verify
+// instruction line, parent card title, and the verify failure text.
+const verifyFixPrompt = `%s%sYou are the coding agent addressing review feedback on the current branch.
+You have the full write toolset (read, grep, glob, edit, write, bash) rooted at
+the workspace. Apply fixes for EXACTLY the findings below - apply only the literal
+fix, add no new abstractions, middleware, interfaces, or dependencies. If a finding
+demands new architecture, flag it, don't build it.
+One exception: if a finding's suggestion instructs a repo-wide sweep for an
+incorrect claim (a doc line, code comment, or error message), you MUST search the
+whole repo using the harness grep tool and fix every occurrence, not just the
+cited file.
+
+Repo root: %s - bash commands already execute there; use paths relative to the
+repo root.
+
+Do NOT run git yourself (no commit, no push, no branch) - the orchestrator
+commits your changes as a fixup and pushes after you finish.
+
+` + selfReviewBlock + `
+
+%s
+
+` + buildHygieneNote + `
+
+` + processTeardownNote + `
+
+When you have addressed the findings and the tests pass, call the finish tool
+with a short conventional-commit message summarizing the fixes, then make no
+further tool calls.
+
+PARENT CARD (context)
+Title: %s
+
+SCOPE
+The card's work is already on the branch.
+The ONLY item in scope is the failure below - do not re-audit or re-implement other card items. If the failing test was added on this branch and its expectation is wrong, fix the expectation or delete the test; if the failure is in code the branch changed, fix the code. Make the smallest edit that turns the verify command green, run it, then finish.
+
+VERIFY FAILURE TO FIX
+%s
+`
+
 // prBodyPrompt is the orchestrator-model instruction for writing the pull
 // request body in the integrate phase. The model has read-only tools to inspect
 // the merged branch but writes prose only - no card tools, no git. The body is a

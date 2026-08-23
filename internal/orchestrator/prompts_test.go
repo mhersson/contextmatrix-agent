@@ -9,7 +9,7 @@ import (
 )
 
 func TestSelfReviewInBothCodingPrompts(t *testing.T) {
-	for name, p := range map[string]string{"coder": coderPrompt, "fix": fixPrompt} {
+	for name, p := range map[string]string{"coder": coderPrompt, "fix": fixPrompt, "verify-fix": verifyFixPrompt} {
 		assert.Contains(t, p, "self-review", "%s prompt must include the self-review block", name)
 		assert.Contains(t, p, "Re-read every file you changed", name)
 		assert.Contains(t, p, "no fall-through after writing an error response", name)
@@ -61,8 +61,13 @@ func TestFixPromptForbidsNewArchitecture(t *testing.T) {
 	assert.Contains(t, fixPrompt, "flag it, don't build it")
 }
 
+func TestVerifyFixPromptIsTitleOnly(t *testing.T) {
+	assert.Contains(t, verifyFixPrompt, "VERIFY FAILURE TO FIX")
+	assert.NotContains(t, verifyFixPrompt, "Description:")
+}
+
 func TestBuildArtifactHygieneInBothCodingPrompts(t *testing.T) {
-	for name, p := range map[string]string{"coder": coderPrompt, "fix": fixPrompt} {
+	for name, p := range map[string]string{"coder": coderPrompt, "fix": fixPrompt, "verify-fix": verifyFixPrompt} {
 		assert.Contains(t, p, "do not leave its output",
 			"%s prompt must include the build-hygiene note", name)
 		// The hygiene note must name no build tool - it applies to every language.
@@ -72,7 +77,7 @@ func TestBuildArtifactHygieneInBothCodingPrompts(t *testing.T) {
 }
 
 func TestProcessTeardownInBothCodingPrompts(t *testing.T) {
-	for name, p := range map[string]string{"coder": coderPrompt, "fix": fixPrompt} {
+	for name, p := range map[string]string{"coder": coderPrompt, "fix": fixPrompt, "verify-fix": verifyFixPrompt} {
 		assert.Contains(t, p, "Shut down any long-running process you start for verification",
 			"%s prompt must include the process-teardown note", name)
 		assert.Contains(t, p, `"still running" checks in later phases of this run`, name)
