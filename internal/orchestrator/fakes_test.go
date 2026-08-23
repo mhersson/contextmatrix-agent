@@ -37,12 +37,13 @@ type fakeOps struct {
 	// the single-value taskContext/taskCtxErr behaviour above.
 	taskContexts map[string]cmclient.TaskContext
 
-	setPhaseErr     error
-	addLogErr       error
-	claimErr        error
-	updateBodyErr   error
-	releaseCardErr  error
-	completeTaskErr error
+	setPhaseErr           error
+	addLogErr             error
+	claimErr              error
+	updateBodyErr         error
+	releaseCardErr        error
+	completeTaskErr       error
+	completeTaskSummaries []string
 
 	// rejectLogAfterRelease mirrors CM's add_log claim gate: the server rejects
 	// a log write against an unclaimed card, so a note written after
@@ -360,6 +361,10 @@ func (f *fakeOps) blacklistReasons() []string {
 
 func (f *fakeOps) CompleteTask(_ context.Context, cardID, summary string) error {
 	f.record("CompleteTask:" + cardID)
+
+	f.mu.Lock()
+	f.completeTaskSummaries = append(f.completeTaskSummaries, summary)
+	f.mu.Unlock()
 
 	return f.completeTaskErr
 }

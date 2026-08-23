@@ -622,6 +622,80 @@ func TestSanitizeTitle(t *testing.T) {
 	assert.Equal(t, "feat: untitled", sanitizeTitle("   "))
 }
 
+func TestCommitSubject(t *testing.T) {
+	t.Run("multi-line returns first line", func(t *testing.T) {
+		got := commitSubject("feat(x): summary\n\nbody details", "Fallback")
+		assert.Equal(t, "feat(x): summary", got)
+	})
+
+	t.Run("blank message falls back to sanitized title", func(t *testing.T) {
+		got := commitSubject("", "Add the Thing")
+		assert.Equal(t, "feat: add the thing", got)
+	})
+
+	t.Run("whitespace-only message falls back to sanitized title", func(t *testing.T) {
+		got := commitSubject("   \n  ", "Add the Thing")
+		assert.Equal(t, "feat: add the thing", got)
+	})
+
+	t.Run("windows line endings produce correct first line", func(t *testing.T) {
+		got := commitSubject("feat(x): summary\r\n\r\nbody details", "Fallback")
+		assert.Equal(t, "feat(x): summary", got)
+	})
+
+	t.Run("single-line message returns itself trimmed", func(t *testing.T) {
+		got := commitSubject("  fix: a quick fix  ", "Fallback")
+		assert.Equal(t, "fix: a quick fix", got)
+	})
+
+	t.Run("empty fallback title yields feat: untitled", func(t *testing.T) {
+		got := commitSubject("", "")
+		assert.Equal(t, "feat: untitled", got)
+	})
+}
+
+// TestExecuteCommitMessageLongFinish proves a finish message with a very long
+// first line (or a long multi-line message) does not trigger a length error
+// from CompleteTask: the commit subject is the first line only, so an
+// arbitrarily long commit message in git does not become a board write of the
+// same length.
+func TestExecuteCommitMessageLongFinish(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	// A >2000-byte commit message: the first line is ~3014 bytes (well over
+	// the server's cap), but commitSubject extracts only the subject line so
+	// the argument to CompleteTask stays short; the full message still reaches
+	// git (trimmed of trailing whitespace by finishCommitMessage).
+	longLine := "feat(api): " + strings.Repeat("a", 3000)
+	body := strings.Repeat("long line\n", 500)
+	msg := longLine + "\n\n" + body[:len(body)-1] // no trailing newline so TrimSpace is a no-op on the body
+	llmFake := &planLLM{responses: []llm.Response{
+		finishResp(msg, 0.01),
+	}}
+	d := execTestDeps(ops, git, llmFake)
+
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Add health endpoint", Tier: "simple"}}, 0)
+	require.NoError(t, runExecute(context.Background(), o),
+		"a very long commit message must not cause a length error from CompleteTask")
+
+	// The full message reaches git (CommitWithMessage).
+	require.NotEmpty(t, git.commitMsgs)
+	assert.Equal(t, msg, git.commitMsgs[0],
+		"the full commit message must still reach git unchanged")
+
+	// The subject passed to CompleteTask is the first line only.
+	calls := ops.recorded()
+	require.GreaterOrEqual(t, indexOfCall(calls, "CompleteTask:SUB-1"), 0,
+		"the subtask must complete; calls=%v", calls)
+
+	summaries := ops.completeTaskSummaries
+	require.GreaterOrEqual(t, len(summaries), 1, "CompleteTask must have been called at least once")
+	assert.Equal(t, longLine, summaries[0],
+		"CompleteTask must receive the commit subject (first line), not the full message")
+	assert.NotContains(t, summaries[0], "\n",
+		"CompleteTask summary must not contain a newline; only the first line is the subject")
+}
+
 // guard: the coder prompt template must reference the branch-state note and
 // instruct the model to end the subtask by calling the finish tool.
 func TestCoderPromptShape(t *testing.T) {

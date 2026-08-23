@@ -242,7 +242,7 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 		// real regardless of what the board bookkeeping below does with it.
 		o.reportSoloOutcome(ctx, sub.ID, model, "win", false, sc.ledger.Spent()-spendBefore)
 
-		if err := d.Ops.CompleteTask(ctx, sub.ID, commitMsg); err != nil {
+		if err := d.Ops.CompleteTask(ctx, sub.ID, commitSubject(commitMsg, sub.Title)); err != nil {
 			return fmt.Errorf("complete subtask %s: %w", sub.ID, err)
 		}
 	}
@@ -671,7 +671,7 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 	// CompleteTask failure below gets no second, contradictory row.
 	o.reportSoloOutcome(ctx, sub.ID, model, "win", true, sc.ledger.Spent()-spendBefore)
 
-	if cerr := o.d.Ops.CompleteTask(ctx, sub.ID, commitMsg); cerr != nil {
+	if cerr := o.d.Ops.CompleteTask(ctx, sub.ID, commitSubject(commitMsg, sub.Title)); cerr != nil {
 		return false, nil
 	}
 
@@ -779,6 +779,22 @@ func sanitizeTitle(title string) string {
 	}
 
 	return "feat: " + t
+}
+
+// commitSubject returns the first line of a commit message, trimmed of
+// surrounding whitespace (including Windows \r line endings). When the message
+// is empty or blank it falls back to sanitizeTitle(title). This is used for the
+// one-line summary sent to CompleteTask; the full message still reaches
+// CommitWithMessage and git.
+func commitSubject(msg, title string) string {
+	line, _, _ := strings.Cut(msg, "\n")
+
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return sanitizeTitle(title)
+	}
+
+	return line
 }
 
 // topoOrder returns the subtasks in dependency order via Kahn's algorithm:
