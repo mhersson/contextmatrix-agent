@@ -470,6 +470,42 @@ func TestGatePoller_EmitsEveryPollButShowsOnlyChanges(t *testing.T) {
 	}, gateProgressStatuses(t, &transcript), "only the polls that moved are shown")
 }
 
+// TestGatePoller_ReservedKeysWinOverFields: a caller's fields must never
+// overwrite the poller's reserved keys (gate, status, repeat). Copy fields
+// first, set reserved keys afterward - matching gateNote's convention.
+func TestGatePoller_ReservedKeysWinOverFields(t *testing.T) {
+	var transcript bytes.Buffer
+
+	emit := events.NewEmitter(nil, &transcript)
+	p := &gatePoller{gate: "ci"}
+
+	p.poll(emit, "CI checks: 1 passed, 0 pending, 0 failed", map[string]any{
+		"gate":   "spoofed-ci",
+		"status": "spoofed-status",
+		"repeat": true,
+		"reason": "kept",
+	})
+
+	var ev struct {
+		Kind string `json:"kind"`
+		Data struct {
+			Gate   string `json:"gate"`
+			Status string `json:"status"`
+			Repeat bool   `json:"repeat"`
+			Reason string `json:"reason"`
+		} `json:"data"`
+	}
+
+	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(transcript.String())), &ev))
+
+	assert.Equal(t, gateProgressKind, ev.Kind)
+	assert.Equal(t, "ci", ev.Data.Gate, "reserved key 'gate' must win over caller fields")
+	assert.Equal(t, "CI checks: 1 passed, 0 pending, 0 failed", ev.Data.Status,
+		"reserved key 'status' must win over caller fields")
+	assert.False(t, ev.Data.Repeat, "reserved key 'repeat' must win over caller fields (no heartbeat history)")
+	assert.Equal(t, "kept", ev.Data.Reason, "non-reserved fields still ride along")
+}
+
 // TestGatePoller_HeartbeatShowsAnUnchangedStatusAgain: a gate that waits past
 // the heartbeat window shows its status again, so a long quiet wait reads as
 // alive rather than hung.
@@ -540,7 +576,7 @@ func TestPRGates_DecisionsAreEmittedAsGateProgressEvents(t *testing.T) {
 	gates := &fakeGates{
 		requested: true,
 		headSHA:   copilotHeadSHA,
-		reviews:   []*CopilotReview{copilotReviewOnHead("LGTM")},
+		reviews:   []*CopilotReview{reviewOnHead("LGTM")},
 		checks:    [][]CheckResult{{{Name: "ci", Bucket: "pass"}}},
 	}
 	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
@@ -1377,9 +1413,9 @@ func copilotVerdict(findings ...copilotFinding) llm.Response {
 	return stopResp(string(raw), 0.01)
 }
 
-// copilotReviewOnHead is a completed review on the head SHA every Copilot gate
+// reviewOnHead is a completed review on the head SHA every Copilot gate
 // test pins.
-func copilotReviewOnHead(body string, comments ...ReviewComment) *CopilotReview {
+func reviewOnHead(body string, comments ...ReviewComment) *CopilotReview {
 	return &CopilotReview{CommitID: copilotHeadSHA, Body: body, Comments: comments}
 }
 
@@ -1409,7 +1445,7 @@ func TestCopilotGate_ExistingReviewOnHeadSkipsTheRequest(t *testing.T) {
 	gates := &fakeGates{
 		requested: false,
 		headSHA:   copilotHeadSHA,
-		reviews:   []*CopilotReview{copilotReviewOnHead("LGTM")},
+		reviews:   []*CopilotReview{reviewOnHead("LGTM")},
 	}
 	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
 
@@ -1435,7 +1471,7 @@ func TestCopilotGate_AlreadyRequestedWaitsAndPassesOnCleanReview(t *testing.T) {
 		headSHA:   copilotHeadSHA,
 		// Empty on the probe, so this test still covers the already-requested
 		// wait path rather than the probe shortcut.
-		reviews: []*CopilotReview{nil, copilotReviewOnHead("LGTM")},
+		reviews: []*CopilotReview{nil, reviewOnHead("LGTM")},
 	}
 	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
 
@@ -1465,7 +1501,7 @@ func TestCopilotGate_CleanPassWritesSatisfiedMarker(t *testing.T) {
 	gates := &fakeGates{
 		requested: true,
 		headSHA:   copilotHeadSHA,
-		reviews:   []*CopilotReview{copilotReviewOnHead("LGTM")},
+		reviews:   []*CopilotReview{reviewOnHead("LGTM")},
 	}
 	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
 
@@ -1504,7 +1540,7 @@ func TestCopilotGate_SatisfiedMarkerSurvivesCIGateCancellation(t *testing.T) {
 	base := &fakeGates{
 		requested: true,
 		headSHA:   copilotHeadSHA,
-		reviews:   []*CopilotReview{copilotReviewOnHead("LGTM")},
+		reviews:   []*CopilotReview{reviewOnHead("LGTM")},
 		checks:    [][]CheckResult{{{Name: "build", Bucket: "pending"}}},
 	}
 	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
@@ -1540,7 +1576,7 @@ func TestCopilotGate_RequestsWhenAbsent(t *testing.T) {
 		// The gate probes for a review already on the head before it requests
 		// one, so "no review in flight" is a nil first read; the review the
 		// gate then waits for is the second.
-		reviews: []*CopilotReview{nil, copilotReviewOnHead("LGTM")},
+		reviews: []*CopilotReview{nil, reviewOnHead("LGTM")},
 	}
 	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
 
@@ -1583,6 +1619,8 @@ func TestCopilotGate_RequestFailsSkipsWithNote(t *testing.T) {
 	assert.Contains(t, gates.recorded(), "Checks:"+gatePRURL,
 		"a skipped Copilot gate must not skip the CI gate; calls=%v", gates.recorded())
 	assert.Zero(t, modelCallCount(client), "nothing to triage")
+	assert.Equal(t, 1, countCalls(gates.recorded(), "CopilotReview:"+gatePRURL),
+		"proven unavailability skips the late probe after CI - only the pre-request probe reads the PR; calls=%v", gates.recorded())
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
 }
 
@@ -1600,7 +1638,7 @@ func TestCopilotGate_RequestFailsStillWaits(t *testing.T) {
 		headSHA:    copilotHeadSHA,
 		// Nothing on the head when the gate probes, so the failing request is
 		// the path under test.
-		reviews: []*CopilotReview{nil, copilotReviewOnHead("LGTM")},
+		reviews: []*CopilotReview{nil, reviewOnHead("LGTM")},
 	}
 	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
 
@@ -1609,7 +1647,7 @@ func TestCopilotGate_RequestFailsStillWaits(t *testing.T) {
 	require.NoError(t, runPRGates(context.Background(), o))
 
 	calls := gates.recorded()
-	assert.GreaterOrEqual(t, indexOfCall(calls, "CopilotReview:"+gatePRURL), 0,
+	assert.Greater(t, countCalls(calls, "CopilotReview:"+gatePRURL), 1,
 		"a failed request must not skip the wait - the gate still polls for a repo-automated review; calls=%v", calls)
 	assert.Equal(t, 1, modelCallCount(client), "the arrived review is triaged")
 	assert.True(t, ops.loggedContains("Copilot review addressed"),
@@ -1633,7 +1671,7 @@ func TestCopilotGate_RequestFailsStillWaits_422FromMalformedRequest(t *testing.T
 		headSHA:    copilotHeadSHA,
 		// Nothing on the head when the gate probes, so the failing request is
 		// the path under test.
-		reviews: []*CopilotReview{nil, copilotReviewOnHead("LGTM")},
+		reviews: []*CopilotReview{nil, reviewOnHead("LGTM")},
 	}
 	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
 
@@ -1642,7 +1680,7 @@ func TestCopilotGate_RequestFailsStillWaits_422FromMalformedRequest(t *testing.T
 	require.NoError(t, runPRGates(context.Background(), o))
 
 	calls := gates.recorded()
-	assert.GreaterOrEqual(t, indexOfCall(calls, "CopilotReview:"+gatePRURL), 0,
+	assert.Greater(t, countCalls(calls, "CopilotReview:"+gatePRURL), 1,
 		"a bare 422 must not skip the wait - the gate still polls for a repo-automated review; calls=%v", calls)
 	assert.Equal(t, 1, modelCallCount(client), "the arrived review is triaged")
 	assert.True(t, ops.loggedContains("Copilot review addressed"),
@@ -1715,7 +1753,7 @@ func TestCopilotGate_ReviewerNotListedStillWaits(t *testing.T) {
 		headSHA:              copilotHeadSHA,
 		// Nothing on the head when the gate probes: the request path this test
 		// is about only runs when the probe comes back empty.
-		reviews: []*CopilotReview{nil, copilotReviewOnHead("LGTM")},
+		reviews: []*CopilotReview{nil, reviewOnHead("LGTM")},
 	}
 	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
 
@@ -1724,7 +1762,7 @@ func TestCopilotGate_ReviewerNotListedStillWaits(t *testing.T) {
 	require.NoError(t, runPRGates(context.Background(), o))
 
 	calls := gates.recorded()
-	assert.GreaterOrEqual(t, indexOfCall(calls, "CopilotReview:"+gatePRURL), 0,
+	assert.Greater(t, countCalls(calls, "CopilotReview:"+gatePRURL), 1,
 		"the gate must enter the wait loop; calls=%v", calls)
 	assert.True(t, ops.loggedContains("not listed as a reviewer"),
 		"the observation is recorded verbatim; logs=%v", ops.recorded())
@@ -1791,8 +1829,8 @@ func TestCopilotGate_ValidFindingsFixedThenClean(t *testing.T) {
 		requested: true,
 		headSHA:   copilotHeadSHA,
 		reviews: []*CopilotReview{
-			copilotReviewOnHead("2 suggestions", swallowedErrorComment, renamingComment),
-			copilotReviewOnHead("LGTM"),
+			reviewOnHead("2 suggestions", swallowedErrorComment, renamingComment),
+			reviewOnHead("LGTM"),
 		},
 	}
 	git := &fakeGit{committed: true}
@@ -1853,8 +1891,8 @@ func TestCopilotGate_ReRequestFailureStillWaitsForTheAutoReview(t *testing.T) {
 		// the second - after the fix round - is the one reRequestErr targets.
 		reviews: []*CopilotReview{
 			nil,
-			copilotReviewOnHead("1 suggestion", swallowedErrorComment),
-			copilotReviewOnHead("LGTM"),
+			reviewOnHead("1 suggestion", swallowedErrorComment),
+			reviewOnHead("LGTM"),
 		},
 	}
 	git := &fakeGit{committed: true}
@@ -1885,9 +1923,9 @@ func TestCopilotGate_DedupesRepeatedComments(t *testing.T) {
 		requested: true,
 		headSHA:   copilotHeadSHA,
 		reviews: []*CopilotReview{
-			copilotReviewOnHead("one suggestion", swallowedErrorComment),
-			copilotReviewOnHead("one suggestion", swallowedErrorComment),
-			copilotReviewOnHead("LGTM"),
+			reviewOnHead("one suggestion", swallowedErrorComment),
+			reviewOnHead("one suggestion", swallowedErrorComment),
+			reviewOnHead("LGTM"),
 		},
 	}
 	client := &planLLM{responses: []llm.Response{
@@ -1928,8 +1966,8 @@ func TestCopilotGate_DedupesRepeatedInvalidComments(t *testing.T) {
 		requested: true,
 		headSHA:   copilotHeadSHA,
 		reviews: []*CopilotReview{
-			copilotReviewOnHead("2 suggestions", swallowedErrorComment, renamingComment),
-			copilotReviewOnHead("1 suggestion", renamingComment),
+			reviewOnHead("2 suggestions", swallowedErrorComment, renamingComment),
+			reviewOnHead("1 suggestion", renamingComment),
 		},
 	}
 	client := &planLLM{responses: []llm.Response{
@@ -1970,9 +2008,9 @@ func TestCopilotGate_RepeatedValidFindingBuysAnotherFixRound(t *testing.T) {
 		requested: true,
 		headSHA:   copilotHeadSHA,
 		reviews: []*CopilotReview{
-			copilotReviewOnHead("2 suggestions", swallowedErrorComment, renamingComment),
-			copilotReviewOnHead("2 suggestions", swallowedErrorComment, renamingComment),
-			copilotReviewOnHead("LGTM"),
+			reviewOnHead("2 suggestions", swallowedErrorComment, renamingComment),
+			reviewOnHead("2 suggestions", swallowedErrorComment, renamingComment),
+			reviewOnHead("LGTM"),
 		},
 	}
 	client := &planLLM{responses: []llm.Response{
@@ -2024,9 +2062,9 @@ func TestCopilotGate_RepeatedValidFindingParksAtRoundsCap(t *testing.T) {
 		requested: true,
 		headSHA:   copilotHeadSHA,
 		reviews: []*CopilotReview{
-			copilotReviewOnHead("one suggestion", swallowedErrorComment),
-			copilotReviewOnHead("one suggestion", swallowedErrorComment),
-			copilotReviewOnHead("one suggestion", swallowedErrorComment),
+			reviewOnHead("one suggestion", swallowedErrorComment),
+			reviewOnHead("one suggestion", swallowedErrorComment),
+			reviewOnHead("one suggestion", swallowedErrorComment),
 		},
 	}
 	client := &planLLM{responses: []llm.Response{
@@ -2087,7 +2125,7 @@ func TestCopilotGate_DedupeSurvivesResume(t *testing.T) {
 	gates := &fakeGates{
 		requested: true,
 		headSHA:   copilotHeadSHA,
-		reviews:   []*CopilotReview{copilotReviewOnHead("one suggestion", wrapped)},
+		reviews:   []*CopilotReview{reviewOnHead("one suggestion", wrapped)},
 	}
 	client := &planLLM{}
 
@@ -2131,8 +2169,8 @@ func TestCopilotGate_ResumedValidFindingBuysFixRound(t *testing.T) {
 		requested: true,
 		headSHA:   copilotHeadSHA,
 		reviews: []*CopilotReview{
-			copilotReviewOnHead("one suggestion", wrapped),
-			copilotReviewOnHead("LGTM"),
+			reviewOnHead("one suggestion", wrapped),
+			reviewOnHead("LGTM"),
 		},
 	}
 	client := &planLLM{responses: []llm.Response{
@@ -2364,7 +2402,7 @@ func TestCopilotGate_SatisfiedMarkerSkipsOnResume(t *testing.T) {
 // with the open findings named.
 func TestCopilotGate_ThreeRoundsThenPark(t *testing.T) {
 	freshReview := func(n int) *CopilotReview {
-		return copilotReviewOnHead(fmt.Sprintf("round %d", n), ReviewComment{
+		return reviewOnHead(fmt.Sprintf("round %d", n), ReviewComment{
 			Path: fmt.Sprintf("internal/pkg/file%d.go", n),
 			Body: fmt.Sprintf("Defect number %d: this branch cannot be reached.", n),
 		})
@@ -2417,7 +2455,7 @@ func TestCopilotGate_BudgetParkDuringTriage(t *testing.T) {
 	gates := &fakeGates{
 		requested: true,
 		headSHA:   copilotHeadSHA,
-		reviews:   []*CopilotReview{copilotReviewOnHead("one suggestion", swallowedErrorComment)},
+		reviews:   []*CopilotReview{reviewOnHead("one suggestion", swallowedErrorComment)},
 	}
 	client := &planLLM{}
 
@@ -2453,8 +2491,8 @@ func TestCopilotGate_UnreadableVerdictTakesCommentsAtFaceValue(t *testing.T) {
 		requested: true,
 		headSHA:   copilotHeadSHA,
 		reviews: []*CopilotReview{
-			copilotReviewOnHead("one suggestion", swallowedErrorComment),
-			copilotReviewOnHead("LGTM"),
+			reviewOnHead("one suggestion", swallowedErrorComment),
+			reviewOnHead("LGTM"),
 		},
 	}
 	client := &planLLM{responses: []llm.Response{
@@ -2485,7 +2523,7 @@ func TestCopilotGate_UnreadableVerdictWithNoComments(t *testing.T) {
 	gates := &fakeGates{
 		requested: true,
 		headSHA:   copilotHeadSHA,
-		reviews:   []*CopilotReview{copilotReviewOnHead("LGTM overall")},
+		reviews:   []*CopilotReview{reviewOnHead("LGTM overall")},
 	}
 	client := &planLLM{responses: []llm.Response{
 		stopResp("garbage, not JSON", 0.01),
@@ -2518,8 +2556,8 @@ func TestCopilotGate_EmptyVerdictWithCommentsTakesThemAtFaceValue(t *testing.T) 
 		requested: true,
 		headSHA:   copilotHeadSHA,
 		reviews: []*CopilotReview{
-			copilotReviewOnHead("one suggestion", swallowedErrorComment),
-			copilotReviewOnHead("LGTM"),
+			reviewOnHead("one suggestion", swallowedErrorComment),
+			reviewOnHead("LGTM"),
 		},
 	}
 	client := &planLLM{responses: []llm.Response{
@@ -2547,7 +2585,7 @@ func TestPRGates_LateCopilotReviewIsTriagedAfterCI(t *testing.T) {
 		requested:              true,
 		headSHA:                copilotHeadSHA,
 		holdReviewsUntilChecks: true,
-		reviews:                []*CopilotReview{copilotReviewOnHead("LGTM")},
+		reviews:                []*CopilotReview{reviewOnHead("LGTM")},
 		checks:                 [][]CheckResult{{{Name: "ci", Bucket: "pass"}}},
 	}
 	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
@@ -2578,8 +2616,8 @@ func TestPRGates_LateReviewFixRoundReRunsBothGates(t *testing.T) {
 		headSHA:                copilotHeadSHA,
 		holdReviewsUntilChecks: true,
 		reviews: []*CopilotReview{
-			copilotReviewOnHead("1 suggestion", swallowedErrorComment),
-			copilotReviewOnHead("LGTM"),
+			reviewOnHead("1 suggestion", swallowedErrorComment),
+			reviewOnHead("LGTM"),
 		},
 		checks: [][]CheckResult{{{Name: "ci", Bucket: "pass"}}},
 	}
@@ -2624,8 +2662,8 @@ func TestPRGates_ReEnteredCIGateRemembersEarlierChecks(t *testing.T) {
 		headSHA:                copilotHeadSHA,
 		holdReviewsUntilChecks: true,
 		reviews: []*CopilotReview{
-			copilotReviewOnHead("1 suggestion", swallowedErrorComment),
-			copilotReviewOnHead("LGTM"),
+			reviewOnHead("1 suggestion", swallowedErrorComment),
+			reviewOnHead("LGTM"),
 		},
 		checks: [][]CheckResult{
 			{{Name: "ci", Bucket: "pass"}}, // the first head is green

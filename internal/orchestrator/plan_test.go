@@ -779,6 +779,8 @@ func TestPlanPhaseDiagnoseIncapableModelIsRecovered(t *testing.T) {
 	assert.NotEqual(t, first, models[len(models)-1],
 		"the plan did not run on the incapable model; models=%v", models)
 	assert.True(t, ops.loggedContains("planning without a diagnosis"), "logs=%v", ops.recorded())
+	assert.True(t, ops.loggedContains("re-selected after diagnose"),
+		"the new model differs from the first, so the re-selection path is logged; logs=%v", ops.recorded())
 }
 
 func TestResolveOrchestratorModel(t *testing.T) {

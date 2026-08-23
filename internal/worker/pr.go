@@ -425,7 +425,11 @@ func decodeJSONArrays[T any](out string) ([]T, error) {
 
 	dec := json.NewDecoder(strings.NewReader(out))
 
+	var pageNum int
+
 	for {
+		pageNum++
+
 		var page []T
 
 		err := dec.Decode(&page)
@@ -434,7 +438,7 @@ func decodeJSONArrays[T any](out string) ([]T, error) {
 		}
 
 		if err != nil {
-			return nil, fmt.Errorf("decode JSON array page: %w", err)
+			return nil, fmt.Errorf("decode JSON array page %d: %w", pageNum, err)
 		}
 
 		all = append(all, page...)

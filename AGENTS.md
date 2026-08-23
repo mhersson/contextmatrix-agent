@@ -375,7 +375,10 @@ file only - never via flags or committed YAML.
     that arrived meanwhile - during a CI wait, or after any wait or skip that
     left the gate unreviewed, so a review sitting on the head is never left
     unread; if that triage spends a fix round, the enabled gates run again,
-    still bounded by the 3-round cap per gate.
+    still bounded by the 3-round cap per gate. The one exception: when the
+    Copilot gate recorded proven unavailability this run, the probe is
+    skipped - a repo that refused a review cannot have one sitting on the
+    head, so the extra probe would only read an empty result.
 
 ## Repo grounding
 
