@@ -48,6 +48,15 @@ CVE-2026-69152
 # 10.2.0 - clears when an npm upgrade pulls in >= 10.3.1.
 CVE-2026-69192
 
+# --- The bundled npm CLI ships tar 7.5.19
+# (/usr/lib/node_modules/npm/node_modules/tar); the fix is 7.5.21. DoS via a
+# crafted long-path tar archive - inside the npm CLI the only archives tar
+# reads are registry tarballs npm fetches itself on the single-tenant worker.
+# npm's own transitive dependency: 11.19.0 (the newest npm that supports
+# Node 25) and 12.0.2 both still bundle 7.5.19 - clears when an npm release
+# pulls in >= 7.5.21.
+CVE-2026-73566
+
 # --- The uv-managed CPython (/opt/python) bundles pip, whose _vendor tree pins
 # msgpack==1.1.2 and setuptools==70.3.0 (pip/_vendor/vendor.txt - Trivy reads
 # the pins as installed packages). GHSA-6v7p-g79w-8964 (msgpack Unpacker-reuse
