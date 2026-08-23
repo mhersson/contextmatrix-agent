@@ -190,7 +190,10 @@ file only - never via flags or committed YAML.
    default 3, set per deployment via `review_attempts_cap` in `serve.yaml` or
    `CMX_REVIEW_ATTEMPTS_CAP`. Valid range 1-6; 6 is the ceiling because the
    loop leaves the server's `review_attempts` counter at cap+1 and CM caps it
-   at 7.
+   at 7. Also parks - independent of the cap - when less than 20 minutes of
+   container time remain before a round would start, since a verify run, a
+   panel, and a fix round need that much to finish without being killed
+   mid-work; a re-trigger resumes at the same round.
 5. **Model selection is priors-only.** The planner (a fixed capable model) emits
    a complexity tier per subtask - simple / moderate / complex / critical;
    deterministic code maps the tier to a cost-optimal model per role. The LLM

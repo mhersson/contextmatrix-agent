@@ -692,6 +692,69 @@ func TestReviewCapParks(t *testing.T) {
 	assert.Equal(t, 1, fixupCount, "exactly one gated fix run before park; git=%v", git.recorded())
 }
 
+// TestReviewLoopParksOnLowDeadline proves reviewLoop checks the container
+// deadline before spending any review round: a deadline inside the reserve
+// parks before any model call and names the reserve and the resume round in
+// the card log, while a deadline outside the reserve - or unset - lets the
+// round run to completion.
+func TestReviewLoopParksOnLowDeadline(t *testing.T) {
+	tests := []struct {
+		name     string
+		deadline time.Time
+		wantPark bool
+	}{
+		{
+			name:     "deadline inside the reserve parks before any model call",
+			deadline: time.Now().Add(5 * time.Minute),
+			wantPark: true,
+		},
+		{
+			name:     "deadline outside the reserve runs the round",
+			deadline: time.Now().Add(time.Hour),
+			wantPark: false,
+		},
+		{
+			name:     "zero deadline runs the round",
+			deadline: time.Time{},
+			wantPark: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			git := &fakeGit{committed: true}
+			client := &planLLM{responses: []llm.Response{
+				stopResp("Correctness: fine", 0.01),
+				stopResp("Design: fine", 0.01),
+				stopResp("Security: fine", 0.01),
+				stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.02),
+			}}
+			d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+			d.Cfg.Deadline = tt.deadline
+
+			tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+			o := newReviewRun(d, tc, 0)
+
+			err := runReview(context.Background(), o)
+
+			if tt.wantPark {
+				var parked *ReviewParkedError
+
+				require.ErrorAs(t, err, &parked, "a short deadline must park before any model call")
+				assert.Zero(t, modelCallCount(client), "no model call before the park")
+				assert.True(t, ops.loggedContains("20m0s"), "log names the reserve; logs=%v", ops.logs)
+				assert.True(t, ops.loggedContains("resumes at round 1"), "log names the resume round; logs=%v", ops.logs)
+
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, 4, modelCallCount(client), "3 specialists + 1 synthesis")
+		})
+	}
+}
+
 func TestReviewAuthoritativeApprovesNoFix(t *testing.T) {
 	// At the cliff the authoritative pass runs and APPROVES on the first strong
 	// review: runReview finishes nil and NO fix runs (the gated fix is reserved for

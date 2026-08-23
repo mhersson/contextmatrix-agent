@@ -9,6 +9,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/config"
@@ -37,6 +38,11 @@ const verifyOutputTail = 4000
 // than the specialist panel, so runFix can route them to verifyFixPrompt.
 const verifyFailedPrefix = "verify command failed: "
 
+// reviewRoundReserve is the least container time a verify run, a specialist
+// panel, and a fix round need to complete without being killed mid-work. A var
+// so tests can shrink it.
+var reviewRoundReserve = 20 * time.Minute
+
 // verdict is the synthesis model's structured decision: approve outright or
 // return a concrete fix list for the coder.
 type verdict struct {
@@ -60,6 +66,32 @@ type ReviewParkedError struct{}
 
 func (e *ReviewParkedError) Error() string {
 	return "review parked: attempts cap exhausted without approval"
+}
+
+// reviewTimeLeft parks the review when less than reviewRoundReserve remains on
+// the container deadline, before a verify run, panel, or fix round can be
+// started that has no chance of finishing. round names the round a re-trigger
+// resumes at in the card log.
+func (o *run) reviewTimeLeft(ctx context.Context, round int) error {
+	d := o.d
+	dl := d.Cfg.Deadline
+
+	if dl.IsZero() {
+		return nil
+	}
+
+	remaining := time.Until(dl)
+	if remaining >= reviewRoundReserve {
+		return nil
+	}
+
+	// A deadline already behind us reads as "0s left", not a negative span.
+	remaining = max(remaining, 0)
+
+	d.logCard(ctx, "review parked: %s of container time left, less than the %s a review round needs - a re-trigger resumes at round %d",
+		remaining, reviewRoundReserve, round)
+
+	return &ReviewParkedError{}
 }
 
 // runReview is the review phase. The parent enters review (idempotent on
@@ -139,6 +171,10 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 		// Round number continues across resumes: review_attempts persists the
 		// count of prior rounds, so round N is stable for the body record.
 		round := o.tc.ReviewAttempts + consumed + iter + 1
+
+		if err := o.reviewTimeLeft(ctx, round); err != nil {
+			return err
+		}
 
 		// At the cliff (the round that would otherwise park), run the gated
 		// authoritative pass instead of another cheap round - never park on a cheap
@@ -314,6 +350,13 @@ func mergeFeedback(findings, feedback string) string {
 // strong re-review; still failing → park with the strong findings. It never loops.
 func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round int) error {
 	d := o.d
+
+	// reviewLoop checked this at the top of the iteration that reached the
+	// cliff; checked again here so authoritativeReview keeps its own entry
+	// contract for any caller other than that cliff.
+	if err := o.reviewTimeLeft(ctx, round); err != nil {
+		return err
+	}
 
 	findings, fixTier, approved, vres, err := o.reviewRound(ctx, plan, round, true)
 	if err != nil {
