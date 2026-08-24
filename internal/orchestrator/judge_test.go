@@ -81,6 +81,37 @@ func (g *diffGit) Diff(ctx context.Context, base string) (string, error) {
 	return g.diff, nil
 }
 
+// errDiffGit is a fakeGit whose Diff returns a preset error, so tests can assert
+// the unavailable-diff-marker path in the judge.
+type errDiffGit struct {
+	*fakeGit
+}
+
+func (g *errDiffGit) Diff(_ context.Context, _ string) (string, error) {
+	g.record("Diff")
+
+	return "", assertErr("diff failed: no such commit")
+}
+
+// errDiffStatGit is a fakeGit whose Diff succeeds with a large diff and then
+// DiffStat returns an error, so tests can assert the diffstat-failure path.
+type errDiffStatGit struct {
+	*fakeGit
+}
+
+func (g *errDiffStatGit) Diff(_ context.Context, base string) (string, error) {
+	g.record("Diff")
+
+	// Return a diff exceeding judgeDiffCap so the code path triggers DiffStat.
+	return string(make([]byte, judgeDiffCap+1)), nil
+}
+
+func (g *errDiffStatGit) DiffStat(_ context.Context, _ string) (string, error) {
+	g.record("DiffStat")
+
+	return "", assertErr("diffstat failed: stat error")
+}
+
 // judgeCandidate builds a survivor candidate (err == nil) with a diff-returning
 // git handle, a distinct worktree dir the verify stub keys on, and a ledger
 // pre-loaded with zero spend (the adoption tail reads c.ledger.Spent() for
@@ -702,4 +733,97 @@ func TestReportCandidateOutcomesCappedRedIsFailed(t *testing.T) {
 	require.Len(t, rows, 2)
 	assert.Equal(t, "failed", rows[0].Result, "capped + red verify reports failed")
 	assert.Equal(t, "win", rows[1].Result)
+}
+
+// TestJudgeDiffErrorRecordsMarker proves that when a candidate's git.Diff
+// returns an error, the diff field is set to the unavailable marker string,
+// not left empty - so the judge sees "could not read the changes" rather than
+// "changed nothing".
+func TestJudgeDiffErrorRecordsMarker(t *testing.T) {
+	ops := &fakeOps{}
+	client := &planLLM{responses: []llm.Response{
+		stopResp(`{"winner": 1, "ranking": [1], "rationale": "c1 only survivor.", "notes": []}`, 0.01),
+	}}
+	// errDiffGit returns errors from Diff; the judge must record the marker.
+	c1 := &candidate{
+		idx:    1,
+		model:  "coder/one",
+		dir:    "dir-c1",
+		git:    &errDiffGit{fakeGit: &fakeGit{}},
+		ledger: NewLedger(0, 0),
+	}
+	c2 := &candidate{
+		idx:    2,
+		model:  "coder/two",
+		dir:    "dir-c2",
+		git:    &diffGit{fakeGit: &fakeGit{}, diff: "DIFF_TWO"},
+		ledger: NewLedger(0, 0),
+	}
+	// Both verify pass so the pool has two entries, triggering a real judge call.
+	verify := map[string]bool{"dir-c1": true, "dir-c2": true}
+	o := newJudgeRun(t, ops, &fakeGit{}, client, []*candidate{c1, c2}, verify)
+
+	require.NoError(t, runJudge(context.Background(), o))
+
+	// c1's diff must be the marker, not empty.
+	assert.Equal(t, "(diff unavailable - could not read changes)", c1.diff,
+		"a failed diff must produce the unavailable marker, not an empty string")
+	assert.Equal(t, "DIFF_TWO", c2.diff, "the other candidate's diff is intact")
+
+	// The judge logs the diff failure.
+	assert.True(t, ops.loggedContains("diff failed for candidate 1"),
+		"the card log must contain the diff failure warning; logs=%v", ops.logs)
+}
+
+// TestJudgeDiffStatFailureLeavesStatEmpty proves that when Diff succeeds with
+// content > judgeDiffCap and DiffStat errors, diffStat stays empty and the
+// judge renders the full diff instead of a --stat summary. The card log records
+// the DiffStat failure.
+func TestJudgeDiffStatFailureLeavesStatEmpty(t *testing.T) {
+	ops := &fakeOps{}
+	client := &planLLM{responses: []llm.Response{
+		stopResp(`{"winner": 1, "ranking": [1], "rationale": "c1 only.", "notes": []}`, 0.01),
+	}}
+	c1 := &candidate{
+		idx:    1,
+		model:  "coder/one",
+		dir:    "dir-c1",
+		git:    &errDiffStatGit{fakeGit: &fakeGit{}},
+		ledger: NewLedger(0, 0),
+	}
+	c2 := &candidate{
+		idx:    2,
+		model:  "coder/two",
+		dir:    "dir-c2",
+		git:    &diffGit{fakeGit: &fakeGit{}, diff: "DIFF_TWO"},
+		ledger: NewLedger(0, 0),
+	}
+	verify := map[string]bool{"dir-c1": true, "dir-c2": true}
+	o := newJudgeRun(t, ops, &fakeGit{}, client, []*candidate{c1, c2}, verify)
+
+	require.NoError(t, runJudge(context.Background(), o))
+
+	// c1's diff is large (judgeDiffCap+1 bytes) and DiffStat errored; stat must
+	// be empty so judgeSections falls through to the full-diff branch.
+	assert.Empty(t, c1.diffStat, "diffStat must stay empty when DiffStat fails")
+	assert.Len(t, c1.diff, judgeDiffCap+1, "diff must be large enough to trigger the DiffStat path")
+	assert.Empty(t, c2.diffStat, "c2's diffStat is empty too (never exceeded cap)")
+
+	// The judge prompt should contain the full diff (not --stat summary) for c1.
+	require.Len(t, client.tasks, 1, "the judge makes one model call")
+	prompt := client.tasks[0]
+	// Since diffStat is empty, judgeSections falls through to the full diff branch,
+	// rendering the actual diff content (all zero bytes) under ```diff.
+	assert.Contains(t, prompt, "```diff\n", "stats-empty renders the full diff, not a stat summary")
+	// Candidate 1's section must show "- Diff:" (full diff branch), not
+	// "- Diff too large; --stat summary:" (the judgePrompt boilerplate naturally
+	// mentions stat-summary, but the per-candidate entry must not).
+	assert.Contains(t, prompt, "- Coder model: coder/one\n- Verify: PASSED (detected)\n- Diff:\n\n```diff\n",
+		"candidate 1's section uses the full diff branch since diffStat is empty")
+	assert.NotContains(t, prompt, "- Coder model: coder/one\n- Verify: PASSED (detected)\n- Diff too large",
+		"candidate 1 must not show the Diff too large / --stat summary branch")
+
+	// The card log records the DiffStat failure.
+	assert.True(t, ops.loggedContains("diffstat failed for candidate 1"),
+		"the card log must contain the diffstat failure warning; logs=%v", ops.logs)
 }

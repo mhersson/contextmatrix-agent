@@ -97,9 +97,25 @@ func runJudge(ctx context.Context, o *run) error {
 	for i, c := range survivors {
 		d.logCard(ctx, "best-of-n: verifying candidate %d (%s) - %d of %d", c.idx, c.model, i+1, len(survivors))
 
-		c.diff, _ = c.git.Diff(ctx, cfg.BaseBranch)
+		diff, diffErr := c.git.Diff(ctx, cfg.BaseBranch)
+		if diffErr != nil {
+			slog.Warn("judge: diff failed",
+				"card_id", cfg.CardID, "candidate", c.idx, "model", c.model, "error", diffErr)
+			d.logCard(ctx, "best-of-n: diff failed for candidate %d (%s) - %v", c.idx, c.model, diffErr)
+			c.diff = "(diff unavailable - could not read changes)"
+		} else {
+			c.diff = diff
+		}
+
 		if len(c.diff) > judgeDiffCap {
-			c.diffStat, _ = c.git.DiffStat(ctx, cfg.BaseBranch)
+			stat, statErr := c.git.DiffStat(ctx, cfg.BaseBranch)
+			if statErr != nil {
+				slog.Warn("judge: diffstat failed",
+					"card_id", cfg.CardID, "candidate", c.idx, "model", c.model, "error", statErr)
+				d.logCard(ctx, "best-of-n: diffstat failed for candidate %d (%s) - %v", c.idx, c.model, statErr)
+			} else {
+				c.diffStat = stat
+			}
 		}
 
 		res, verr := o.runVerifyPlan(ctx, c.dir, plan)
