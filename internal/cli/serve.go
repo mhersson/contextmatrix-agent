@@ -30,7 +30,6 @@ import (
 	"github.com/mhersson/contextmatrix-backendkit/logbridge"
 	"github.com/mhersson/contextmatrix-backendkit/taskskills"
 	"github.com/mhersson/contextmatrix-backendkit/webhookcore"
-	"github.com/mhersson/contextmatrix-harness/redact"
 	protocol "github.com/mhersson/contextmatrix-protocol"
 )
 
@@ -43,6 +42,12 @@ const (
 	// onExitTimeout bounds the detached status callback fired when a container
 	// exits. The supervision goroutine that calls it has no request context.
 	onExitTimeout = 30 * time.Second
+
+	// staticSecretsID is the reserved pseudo-session id under which
+	// process-lifetime config-level secrets (MCP API key, agent API key) are
+	// registered with the session secret registry. Nothing ever removes them,
+	// so they survive every per-run add and remove.
+	staticSecretsID = "__static__"
 )
 
 func newServeCmd() *cobra.Command {
@@ -112,17 +117,31 @@ func runServe(ctx context.Context, configPath string) error {
 
 	tracker := executor.NewTracker(cfg.MaxConcurrent)
 	hub := logbridge.NewHub(func(e protocol.LogEntry) string { return e.Project }, dropAdapter{mx: mx})
-	redactor := redact.New([]string{cfg.MCPAPIKey, cfg.APIKey})
 
 	cbClient := callback.New(cfg.ContextMatrixURL, cfg.APIKey, logger).WithMetrics(mx)
 
 	bridge := logbridge.NewBridge(logbridge.BridgeConfig{
 		Hub:                  hub,
-		Redactor:             redactor,
+		Redactor:             nil, // set dynamically via RedactorRegistry below
 		OnAwaiting:           func(k logbridge.Key, v bool) { tracker.SetAwaiting(k.Project, k.CardID, v) },
 		SurfaceAwaitingHuman: true,
 		MapExtra:             agentMapExtra,
 	})
+
+	// RedactorRegistry composes the bridge's redactor from all registered
+	// per-session keys and atomically swaps it on every mutation. Register
+	// the process-lifetime config-level secrets first under a reserved id
+	// so they survive every per-run add and remove (the trap fix).
+	registry := logbridge.NewRedactorRegistry(bridge)
+	registry.AddSessionKey(staticSecretsID, cfg.MCPAPIKey)
+	registry.AddSessionKey(staticSecretsID, cfg.APIKey)
+
+	// Wire the token-refresh hook so every rotated git token is added to the
+	// redactor set. Appending is correct - both the original and the rotated
+	// token can appear in output.
+	credentials.OnTokenRefresh = func(project, cardID, token string) {
+		registry.AddSessionKey(project+"/"+cardID, token)
+	}
 
 	exec := executor.NewDockerExecutor(executor.Config{
 		Docker:           docker,
@@ -139,7 +158,7 @@ func runServe(ctx context.Context, configPath string) error {
 			bridge.BridgeLine(logbridge.Key{Project: project, CardID: cardID}, line, stderr)
 			files.Write(project, cardID, line, stderr)
 		},
-		OnExit:  onContainerExit(cbClient, credentials, files, logger),
+		OnExit:  onContainerExit(cbClient, credentials, files, registry, logger),
 		Logger:  logger,
 		Metrics: mx,
 	})
@@ -173,6 +192,7 @@ func runServe(ctx context.Context, configPath string) error {
 		Verifier:         cbClient,
 		SkillsResolver:   skillsResolver,
 		Credentials:      credentials,
+		SessionSecrets:   registry,
 		Images:           exec,
 		ImageListFilters: cfg.ImageListFilters,
 		LaunchEnv:        launchEnv(cfg, filepath.Join(cfg.SecretsDir, "shared")),
@@ -321,11 +341,16 @@ func onContainerExit(
 	reporter webhook.StatusReporter,
 	credentials *secrets.RunCredentials,
 	files *filelog.Logger,
+	registry *logbridge.RedactorRegistry,
 	logger *slog.Logger,
 ) func(project, cardID string, exitCode int64) {
 	return func(project, cardID string, exitCode int64) {
 		files.End(project, cardID, exitCode)
 		credentials.Teardown(project, cardID)
+
+		// Remove the session secrets after credential teardown but before
+		// the status callback so a re-trigger does not inherit stale keys.
+		registry.RemoveSessionKey(project + "/" + cardID)
 
 		status, message := exitStatus(exitCode)
 

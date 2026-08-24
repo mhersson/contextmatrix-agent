@@ -57,6 +57,16 @@ const scannerBufferMax = 1 << 20 // 1 MiB
 // successful run and labels its duration metric "killed".
 const killGraceTimeout = 3 * time.Second
 
+// pumpDrainTimeout bounds how long waitAndCleanup waits for the output pump to
+// flush before firing onExit. The bound is not optional: the pump only returns
+// once the attach stream ends, and the attach connection is closed by
+// waitAndCleanup's own deferred Close - which cannot run while it is waiting.
+// A daemon that leaves the hijacked connection open (a force-remove that
+// failed, a daemon restart, a proxied socket) would otherwise wedge the
+// supervision goroutine forever, and with it the exit callback, the credential
+// teardown and the session-secret cleanup.
+const pumpDrainTimeout = 5 * time.Second
+
 // Image pull policies.
 const (
 	PullNever        = "never"
@@ -363,15 +373,16 @@ func (e *DockerExecutor) Launch(ctx context.Context, spec LaunchSpec) error {
 	}
 
 	done := make(chan struct{})
+	pumpDone := make(chan struct{})
 
-	go e.pump(spec.Project, spec.CardID, attach.Reader, log)
+	go e.pump(spec.Project, spec.CardID, attach.Reader, pumpDone, log)
 	go e.runIdleWatchdog(spec.Project, spec.CardID, resp.ID, done, log)
 	// waitAndCleanup deliberately runs on a detached context: the container's
 	// supervision must outlive the request ctx that triggered Launch, otherwise
 	// a returned webhook handler would cancel a still-running container's wait
 	// and cleanup. The container timeout is the bound.
 	//nolint:gosec // G118: detached ctx is intentional; container outlives the request
-	go e.waitAndCleanup(spec.Project, spec.CardID, resp.ID, run.StartedAt, attach, done, log)
+	go e.waitAndCleanup(spec.Project, spec.CardID, resp.ID, run.StartedAt, attach, done, pumpDone, log)
 
 	log.Info("container launched", "container_id", truncateID(resp.ID), "name", name)
 
@@ -379,8 +390,12 @@ func (e *DockerExecutor) Launch(ctx context.Context, spec LaunchSpec) error {
 }
 
 // pump demultiplexes the attach reader into stdout/stderr line streams, calling
-// onLog and tracker.Touch for every completed line.
-func (e *DockerExecutor) pump(project, cardID string, r io.Reader, log *slog.Logger) {
+// onLog and tracker.Touch for every completed line. It closes pumpDone when
+// both stream flushes are complete so waitAndCleanup can synchronize on it
+// before firing onExit.
+func (e *DockerExecutor) pump(project, cardID string, r io.Reader, pumpDone chan struct{}, log *slog.Logger) {
+	defer close(pumpDone)
+
 	stdoutW := newLineWriter(func(line []byte) {
 		e.tracker.Touch(project, cardID)
 
@@ -408,12 +423,13 @@ func (e *DockerExecutor) pump(project, cardID string, r io.Reader, log *slog.Log
 // waitAndCleanup blocks on ContainerWait under the container timeout, kills on
 // timeout, force-removes the container, observes its duration by outcome,
 // clears the tracker entry, closes the attach connection, signals the watchdog
-// via done, and fires onExit.
+// via done, waits for the pump to finish flushing output, and fires onExit.
 func (e *DockerExecutor) waitAndCleanup(
 	project, cardID, containerID string,
 	startedAt time.Time,
 	attach types.HijackedResponse,
 	done chan struct{},
+	pumpDone chan struct{},
 	log *slog.Logger,
 ) {
 	defer close(done)
@@ -463,8 +479,31 @@ func (e *DockerExecutor) waitAndCleanup(
 
 	log.Info("container exited", "exit_code", exitCode)
 
+	// Wait for the output pump to finish flushing before firing onExit, so the
+	// session secret registry still covers trailing stderr lines that arrive
+	// after the container exits but before the pump drains the attach stream.
+	// Bounded: a pump that never drains must not strand the exit callback.
+	if !waitForPumpDrain(pumpDone, pumpDrainTimeout) {
+		log.Warn("output pump did not drain before exit callback; trailing output may be unredacted",
+			"drain_timeout", pumpDrainTimeout)
+	}
+
 	if e.onExit != nil {
 		e.onExit(project, cardID, exitCode)
+	}
+}
+
+// waitForPumpDrain blocks until the output pump signals it has flushed, or
+// until timeout elapses, and reports whether the pump drained in time.
+func waitForPumpDrain(pumpDone <-chan struct{}, timeout time.Duration) bool {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case <-pumpDone:
+		return true
+	case <-timer.C:
+		return false
 	}
 }
 

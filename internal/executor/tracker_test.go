@@ -168,3 +168,18 @@ func cardName(n int) string {
 
 	return "card-" + string(b)
 }
+
+// TestTracker_Touch_UntrackedRunIsNoop covers the trailing output the pump
+// flushes after waitAndCleanup has already removed the run: the write must not
+// resurrect a lastActivity entry that Remove will never run again to clear.
+func TestTracker_Touch_UntrackedRunIsNoop(t *testing.T) {
+	tr := NewTracker(5)
+	require.True(t, tr.AddIfUnderLimit(&Run{Project: "p", CardID: "A"}))
+
+	tr.Remove("p", "A")
+	tr.Touch("p", "A")
+	tr.Touch("p", "never-existed")
+
+	assert.True(t, tr.LastActivity("p", "A").IsZero())
+	assert.True(t, tr.LastActivity("p", "never-existed").IsZero())
+}

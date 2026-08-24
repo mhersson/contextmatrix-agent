@@ -15,6 +15,8 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/config"
 	"github.com/mhersson/contextmatrix-agent/internal/filelog"
 	"github.com/mhersson/contextmatrix-agent/internal/secrets"
+	"github.com/mhersson/contextmatrix-backendkit/logbridge"
+	protocol "github.com/mhersson/contextmatrix-protocol"
 )
 
 func TestComposeMCPURL(t *testing.T) {
@@ -145,7 +147,12 @@ func TestOnContainerExitClosesLogFile(t *testing.T) {
 	creds := secrets.NewRunCredentials(t.TempDir(), "http://cm", "key", logger)
 	rep := &stubReporter{}
 
-	onExit := onContainerExit(rep, creds, files, logger)
+	// A minimal bridge + registry so onContainerExit compiles.
+	hub := logbridge.NewHub(func(e protocol.LogEntry) string { return e.Project }, nil)
+	bridge := logbridge.NewBridge(logbridge.BridgeConfig{Hub: hub})
+	registry := logbridge.NewRedactorRegistry(bridge)
+
+	onExit := onContainerExit(rep, creds, files, registry, logger)
 	onExit("proj", "CARD-1", 0)
 
 	data, err := os.ReadFile(filepath.Join(dir, "proj", "card-1.log"))

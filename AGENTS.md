@@ -288,6 +288,12 @@ file only - never via flags or committed YAML.
    transcripts sent to the LLM provider - operators must not declare names
    whose values embed credentials (e.g. `PGPASSWORD`, a `DATABASE_URL` with
    userinfo).
+
+   The in-worker redactor never sees container stderr, so worker stderr and
+   unparsable stdout are masked host-side by the log bridge alone: every
+   CM-provisioned secret a run receives MUST be registered with the bridge's
+   `logbridge.RedactorRegistry` before launch and unregistered when the run
+   ends. Mechanics in the `serve.go` and `admitAndLaunch` doc comments.
 10. **HITL gates + promote.** HITL cards run the same FSM as autonomous,
     mode-gated on `Config.Interactive`: a brainstorming dialogue for creative
     cards plus plan-approval and review-decision gates that wait on the inbox.
