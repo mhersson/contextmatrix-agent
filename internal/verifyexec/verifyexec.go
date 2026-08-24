@@ -353,6 +353,13 @@ func execWithEnv(ctx context.Context, dir string, argv []string, timeout time.Du
 	cmd.Dir = dir
 	cmd.Env = env
 
+	cmd.WaitDelay = 2 * time.Second
+
+	// Process group so we can kill the whole tree on timeout: Plain
+	// CommandContext kills only the direct child, leaving grandchildren
+	// holding the output pipe.
+	setupProcessGroup(cmd)
+
 	out, err := cmd.CombinedOutput()
 
 	o := Outcome{Output: tools.HeadTail(string(out), captureCapBytes)}
