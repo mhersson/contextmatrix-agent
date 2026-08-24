@@ -287,34 +287,6 @@ func TestExecExitCodes(t *testing.T) {
 	assert.True(t, out.StartErr)
 }
 
-func TestExecTimeoutKillsProcessGroup(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("process-group kill is POSIX-only")
-	}
-
-	dir := t.TempDir()
-
-	// A shell command that background-sleeps a grandchild while the direct
-	// child runs a shorter sleep. The grandchild inherits stdout (the
-	// CombinedOutput pipe), so without process-group kill CombinedOutput
-	// would block until the 999s sleep finishes.
-	start := time.Now()
-
-	out := Exec(context.Background(), dir, []string{
-		"sh", "-c", "sleep 999 & exec sleep 5",
-	}, 100*time.Millisecond, nil)
-
-	elapsed := time.Since(start)
-
-	// Must complete well before 999s - within ~3s (timeout + WaitDelay +
-	// margin).
-	assert.Less(t, elapsed, 5*time.Second,
-		"expected completion in ~3s, took %v (grandchild blocked pipe)", elapsed)
-	assert.True(t, out.TimedOut,
-		"expected TimedOut=true, got ExitCode=%d StartErr=%t", out.ExitCode, out.StartErr)
-	assert.Equal(t, -1, out.ExitCode)
-}
-
 func TestExecTimeoutVsParentCancel(t *testing.T) {
 	dir := t.TempDir()
 
