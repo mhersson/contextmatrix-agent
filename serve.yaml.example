@@ -13,15 +13,15 @@
 contextmatrix_url: http://localhost:8080
 
 # URL of the ContextMatrix API as seen from inside worker containers.
-# Required in practice: workers resolve CM_MCP_URL from this value;
-# without it they point at their own localhost and fail at MCP connect.
-# For Docker bridge networking, use the bridge gateway (typically the
-# host's Docker bridge address):
-#   container_contextmatrix_url: http://172.17.0.1:8080
-# For host-network containers or a named Docker network, use the
-# service hostname or IP reachable from containers.
+# Required whenever contextmatrix_url above is a loopback host: workers
+# resolve CM_MCP_URL from this value, and without it they would point at
+# their own localhost and fail at MCP connect. Startup refuses that
+# combination rather than letting every card run die inside its container.
+# The value below is the Docker bridge gateway (typically the host's Docker
+# bridge address). For host-network containers or a named Docker network,
+# use the service hostname or IP reachable from containers instead.
 # CMX_CONTAINER_CONTEXTMATRIX_URL
-# container_contextmatrix_url: http://172.17.0.1:8080
+container_contextmatrix_url: http://172.17.0.1:8080
 
 # Shared secret between ContextMatrix and the agent service.
 # Must be at least 32 characters. Required.
