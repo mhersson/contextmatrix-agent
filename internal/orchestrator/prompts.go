@@ -1043,11 +1043,11 @@ Respond with ONLY a JSON object, no prose:
 `
 
 // reviewBriefing is the review-discussion problem statement: the SAME
-// diff-and-prior-findings scope the specialist fan-out reviews. Slots: title,
-// description, branch diff (pre-wrapped by fencedDiff - the briefing is
-// relayed to the board chat, where a bare diff renders as bullet soup),
-// prior-findings block.
-const reviewBriefing = `You are discussing a code review. Review only the change set in the diff
+// diff-and-prior-findings scope the specialist fan-out reviews. Slots:
+// grounding, title, description, branch diff (pre-wrapped by fencedDiff - the
+// briefing is relayed to the board chat, where a bare diff renders as bullet
+// soup), prior-findings block.
+const reviewBriefing = `%sYou are discussing a code review. Review only the change set in the diff
 below; read surrounding code for context as needed. Every finding must cite a
 file in the change set. Commit status is never a review concern. Judge the
 change against what the task requires - unrequested hardening and missing
@@ -1105,9 +1105,9 @@ When approved is true, fixes must be an empty array.
 
 // checkpointBriefing opens an execute-checkpoint discussion: the just-
 // committed subtask diff under critique before the run builds on it. Slots:
-// subtask title, subtask description, parent card title, environment block,
-// fenced diff.
-const checkpointBriefing = `You are discussing a just-committed increment of work: one subtask of a
+// grounding, subtask title, subtask description, parent card title,
+// environment block, fenced diff.
+const checkpointBriefing = `%sYou are discussing a just-committed increment of work: one subtask of a
 larger task, written by a coding agent moments ago. Decide whether the run
 should proceed to the next subtask or revise this diff first. Review only
 the change set in the diff below; read surrounding code for context as
