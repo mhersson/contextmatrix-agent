@@ -349,3 +349,22 @@ func TestImageSummaries_SkipsDanglingAndMapsFields(t *testing.T) {
 	assert.Equal(t, []string{"other:latest"}, got[1].Tags)
 	assert.Equal(t, int64(42), got[1].SizeBytes)
 }
+
+func TestWaitForPumpDrain_ReturnsWhenPumpCloses(t *testing.T) {
+	pumpDone := make(chan struct{})
+	close(pumpDone)
+
+	assert.True(t, waitForPumpDrain(pumpDone, time.Second))
+}
+
+// TestWaitForPumpDrain_TimesOut pins the bound that keeps a pump which never
+// drains - a hijacked attach connection the daemon leaves open - from stranding
+// the exit callback, the credential teardown and the session-secret cleanup.
+func TestWaitForPumpDrain_TimesOut(t *testing.T) {
+	pumpDone := make(chan struct{}) // never closed
+
+	start := time.Now()
+
+	assert.False(t, waitForPumpDrain(pumpDone, 20*time.Millisecond))
+	assert.Less(t, time.Since(start), time.Second, "the wait must be bounded, not blocked")
+}

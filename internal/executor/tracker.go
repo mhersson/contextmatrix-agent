@@ -137,11 +137,19 @@ func (t *Tracker) Awaiting(project, cardID string) bool {
 }
 
 // Touch records output activity for project/cardID, resetting the idle timer.
+// It no-ops for an untracked run, like SetReason: waitAndCleanup removes the
+// run before the output pump has finished draining, and an unguarded write
+// would resurrect a lastActivity entry that nothing reclaims.
 func (t *Tracker) Touch(project, cardID string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	t.lastActivity[key(project, cardID)] = time.Now()
+	k := key(project, cardID)
+	if _, ok := t.byKey[k]; !ok {
+		return
+	}
+
+	t.lastActivity[k] = time.Now()
 }
 
 // LastActivity returns the time of the last recorded output for project/cardID,

@@ -57,6 +57,16 @@ const scannerBufferMax = 1 << 20 // 1 MiB
 // successful run and labels its duration metric "killed".
 const killGraceTimeout = 3 * time.Second
 
+// pumpDrainTimeout bounds how long waitAndCleanup waits for the output pump to
+// flush before firing onExit. The bound is not optional: the pump only returns
+// once the attach stream ends, and the attach connection is closed by
+// waitAndCleanup's own deferred Close - which cannot run while it is waiting.
+// A daemon that leaves the hijacked connection open (a force-remove that
+// failed, a daemon restart, a proxied socket) would otherwise wedge the
+// supervision goroutine forever, and with it the exit callback, the credential
+// teardown and the session-secret cleanup.
+const pumpDrainTimeout = 5 * time.Second
+
 // Image pull policies.
 const (
 	PullNever        = "never"
@@ -472,10 +482,28 @@ func (e *DockerExecutor) waitAndCleanup(
 	// Wait for the output pump to finish flushing before firing onExit, so the
 	// session secret registry still covers trailing stderr lines that arrive
 	// after the container exits but before the pump drains the attach stream.
-	<-pumpDone
+	// Bounded: a pump that never drains must not strand the exit callback.
+	if !waitForPumpDrain(pumpDone, pumpDrainTimeout) {
+		log.Warn("output pump did not drain before exit callback; trailing output may be unredacted",
+			"drain_timeout", pumpDrainTimeout)
+	}
 
 	if e.onExit != nil {
 		e.onExit(project, cardID, exitCode)
+	}
+}
+
+// waitForPumpDrain blocks until the output pump signals it has flushed, or
+// until timeout elapses, and reports whether the pump drained in time.
+func waitForPumpDrain(pumpDone <-chan struct{}, timeout time.Duration) bool {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case <-pumpDone:
+		return true
+	case <-timer.C:
+		return false
 	}
 }
 
