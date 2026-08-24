@@ -213,8 +213,14 @@ file only - never via flags or committed YAML.
    candidate in the tier regardless of price - it bypasses operator favorites
    and the price band, and keeps the tier bar, blacklist, in-run exclude set,
    window fit, and vendor-diversity preference intact; equal quality still
-   tie-breaks to the cheaper model. Pins override,
-   precedence card pin → payload default → serve-config default. Priors, favorites, and the
+   tie-breaks to the cheaper model. When no candidate survives - nothing clears
+   the tier bar, the pool is empty, or no `SelectionContext` catalog arrives -
+   the selector returns the capable default, which resolves with precedence:
+   payload (the trigger's `default_model`) first, then the serve-config default
+   (`CMX_DEFAULT_MODEL`), then the compiled-in `config.DefaultCapableModel`.
+   Pins are consulted separately in the orchestrator and always override the
+   catalog path; the fallback precedence is
+   card pin → payload default → serve-config default. Priors, favorites, and the
    blacklist are injected at run start from CM's `SelectionContext` payload
    (`registry.FromSelection`) - nothing is embedded. The blacklist is
    self-learning: a model that proves harness-incapable mid-run is reported back
