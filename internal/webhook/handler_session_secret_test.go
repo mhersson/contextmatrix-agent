@@ -107,7 +107,7 @@ func TestAddSessionSecrets_FullyProvisionedTrigger(t *testing.T) {
 	s.addSessionSecrets("p", "C1", payload)
 
 	got := registry.keys("p/C1")
-	require.Len(t, got, 4, "four secrets: git token, llm key, mcp key, and two guest tokens (one entry each)")
+	require.Len(t, got, 5, "five entries: git token, llm key, mcp key, and two guest tokens (one entry each)")
 
 	// Check each class is present (order is append-order from addSessionSecrets)
 	assert.Contains(t, got, "cm-git-token", "git token must be registered")
@@ -227,7 +227,7 @@ func TestRemoveSessionSecrets(t *testing.T) {
 	}
 
 	s.addSessionSecrets("p", "C1", payload)
-	require.Len(t, registry.keys("p/C1"), 2, "secrets registered")
+	require.Len(t, registry.keys("p/C1"), 3, "secrets registered")
 
 	s.removeSessionSecrets("p", "C1")
 
@@ -245,6 +245,7 @@ func TestFailedLaunchRemovesSessionSecrets(t *testing.T) {
 		Executor:       &fakeExecutor{launchErr: assert.AnError},
 		Tracker:        executor.NewTracker(1),
 		Credentials:    &fakeCredentials{},
+		Reporter:       &fakeReporter{},
 		SessionSecrets: registry,
 		LaunchEnv: LaunchEnv{
 			BaseImage: "img",

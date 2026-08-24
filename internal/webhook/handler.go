@@ -284,19 +284,19 @@ func NewServer(cfg Config) *Server {
 	}
 
 	return &Server{
-		Core:           webhookcore.NewCore(coreCfg),
-		maxConcurrent:  cfg.MaxConcurrent,
-		executor:       cfg.Executor,
-		tracker:        cfg.Tracker,
-		hub:            cfg.Hub,
-		reporter:       cfg.Reporter,
-		verifier:       cfg.Verifier,
-		skillsResolver: cfg.SkillsResolver,
-		credentials:    cfg.Credentials,
+		Core:            webhookcore.NewCore(coreCfg),
+		maxConcurrent:   cfg.MaxConcurrent,
+		executor:        cfg.Executor,
+		tracker:         cfg.Tracker,
+		hub:             cfg.Hub,
+		reporter:        cfg.Reporter,
+		verifier:        cfg.Verifier,
+		skillsResolver:  cfg.SkillsResolver,
+		credentials:     cfg.Credentials,
 		sessionRegistry: cfg.SessionSecrets,
-		launchEnv:      cfg.LaunchEnv,
-		dedup:          dedup,
-		logger:         logger,
+		launchEnv:       cfg.LaunchEnv,
+		dedup:           dedup,
+		logger:          logger,
 	}
 }
 
@@ -529,6 +529,7 @@ func (s *Server) addSessionSecrets(project, cardID string, p protocol.TriggerPay
 	if p.MCPAPIKey != "" {
 		mcpKey = p.MCPAPIKey
 	}
+
 	s.sessionRegistry.AddSessionKey(id, mcpKey)
 
 	if p.Mob != nil {

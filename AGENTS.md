@@ -288,6 +288,20 @@ file only - never via flags or committed YAML.
    transcripts sent to the LLM provider - operators must not declare names
    whose values embed credentials (e.g. `PGPASSWORD`, a `DATABASE_URL` with
    userinfo).
+
+   The in-worker redactor covers harness events and tool output only - it
+   never sees container stderr. On the host, worker stderr and unparsable
+   stdout reach the `/logs` SSE stream through the log bridge, whose redactor
+   is a `logbridge.RedactorRegistry` rather than a static set. `serve`
+   registers the process-lifetime config keys (the MCP API key and the agent
+   API key) once at startup under a reserved id that nothing removes, then
+   registers each run's CM-provisioned secrets - the git token, the LLM
+   endpoint key, the resolved MCP API key (the trigger's `mcp_api_key`
+   override, else the config value), and every mob guest bearer token - under
+   `project + "/" + cardID` before launch, and appends each rotated git token
+   when the refresh fires (append-only: the original and the rotated value
+   both stay live). The run's id is removed on container exit and on a failed
+   launch, so a re-trigger never inherits stale keys.
 10. **HITL gates + promote.** HITL cards run the same FSM as autonomous,
     mode-gated on `Config.Interactive`: a brainstorming dialogue for creative
     cards plus plan-approval and review-decision gates that wait on the inbox.

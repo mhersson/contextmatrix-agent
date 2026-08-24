@@ -363,15 +363,16 @@ func (e *DockerExecutor) Launch(ctx context.Context, spec LaunchSpec) error {
 	}
 
 	done := make(chan struct{})
+	pumpDone := make(chan struct{})
 
-	go e.pump(spec.Project, spec.CardID, attach.Reader, log)
+	go e.pump(spec.Project, spec.CardID, attach.Reader, pumpDone, log)
 	go e.runIdleWatchdog(spec.Project, spec.CardID, resp.ID, done, log)
 	// waitAndCleanup deliberately runs on a detached context: the container's
 	// supervision must outlive the request ctx that triggered Launch, otherwise
 	// a returned webhook handler would cancel a still-running container's wait
 	// and cleanup. The container timeout is the bound.
 	//nolint:gosec // G118: detached ctx is intentional; container outlives the request
-	go e.waitAndCleanup(spec.Project, spec.CardID, resp.ID, run.StartedAt, attach, done, log)
+	go e.waitAndCleanup(spec.Project, spec.CardID, resp.ID, run.StartedAt, attach, done, pumpDone, log)
 
 	log.Info("container launched", "container_id", truncateID(resp.ID), "name", name)
 
@@ -379,8 +380,12 @@ func (e *DockerExecutor) Launch(ctx context.Context, spec LaunchSpec) error {
 }
 
 // pump demultiplexes the attach reader into stdout/stderr line streams, calling
-// onLog and tracker.Touch for every completed line.
-func (e *DockerExecutor) pump(project, cardID string, r io.Reader, log *slog.Logger) {
+// onLog and tracker.Touch for every completed line. It closes pumpDone when
+// both stream flushes are complete so waitAndCleanup can synchronize on it
+// before firing onExit.
+func (e *DockerExecutor) pump(project, cardID string, r io.Reader, pumpDone chan struct{}, log *slog.Logger) {
+	defer close(pumpDone)
+
 	stdoutW := newLineWriter(func(line []byte) {
 		e.tracker.Touch(project, cardID)
 
@@ -408,12 +413,13 @@ func (e *DockerExecutor) pump(project, cardID string, r io.Reader, log *slog.Log
 // waitAndCleanup blocks on ContainerWait under the container timeout, kills on
 // timeout, force-removes the container, observes its duration by outcome,
 // clears the tracker entry, closes the attach connection, signals the watchdog
-// via done, and fires onExit.
+// via done, waits for the pump to finish flushing output, and fires onExit.
 func (e *DockerExecutor) waitAndCleanup(
 	project, cardID, containerID string,
 	startedAt time.Time,
 	attach types.HijackedResponse,
 	done chan struct{},
+	pumpDone chan struct{},
 	log *slog.Logger,
 ) {
 	defer close(done)
@@ -462,6 +468,11 @@ func (e *DockerExecutor) waitAndCleanup(
 	e.tracker.Remove(project, cardID)
 
 	log.Info("container exited", "exit_code", exitCode)
+
+	// Wait for the output pump to finish flushing before firing onExit, so the
+	// session secret registry still covers trailing stderr lines that arrive
+	// after the container exits but before the pump drains the attach stream.
+	<-pumpDone
 
 	if e.onExit != nil {
 		e.onExit(project, cardID, exitCode)
