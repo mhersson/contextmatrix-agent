@@ -147,7 +147,10 @@ secrets_dir: /var/run/cm-agent/secrets
 #   NO_PROXY: localhost,127.0.0.1
 
 # Default model slug used when a trigger does not specify a model or
-# the requested model is unresolvable. Optional.
+# the requested model is unresolvable. Also the selector's second-choice
+# capable default: when the candidate pool is empty the selector falls back
+# to the trigger's default_model first, then this, then the compiled-in
+# deepseek/deepseek-v4-flash. Optional.
 # CMX_DEFAULT_MODEL
 # default_model: deepseek/deepseek-v4-flash
 

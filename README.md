@@ -243,6 +243,12 @@ picks the most capable candidate whose blended price is within a headroom band o
 the cheapest. Selection is **priors-only - there is no measured-capability
 gate.** An explicit model pin on the card always overrides.
 
+When no candidate survives - nothing clears the tier bar, the candidate pool is
+empty, or no `SelectionContext` catalog arrives - the selector returns the
+**capable default**. That default resolves with precedence: the trigger's
+`default_model` first, then the service's `default_model`
+(`CMX_DEFAULT_MODEL`), then the compiled-in `deepseek/deepseek-v4-flash`.
+
 The card's `max_capability` flag flips the selector to choose the most capable
 candidate in the tier regardless of price: it ignores the headroom band, bypasses
 operator favorites, and keeps the tier bar, blacklist, in-run exclusion, vendor

@@ -53,7 +53,7 @@ type RunSpec struct {
 	BaseBranch  string // CM_BASE_BRANCH (optional)
 	Interactive bool   // CM_INTERACTIVE ("true")
 	BestOfN     int    // CM_BEST_OF_N; >= 2 races N candidate implementations (0 = normal run)
-	Model       string // CM_MODEL (optional; honored if catalog-resolvable)
+	Model       string // CM_MODEL (optional; honored if catalog-resolvable; also the first-choice selector fallback in buildRegistry)
 
 	// Mob configures mob session discussions for this run: scalar knobs from
 	// CM_MOB_* env, guest specs (bearer tokens inside) from the mounted
@@ -811,8 +811,23 @@ func buildSkillTool(spec RunSpec, ops CardOps) tools.Tool {
 // is the authoritative source - the registry is built entirely from the
 // payload-injected catalog, priors, favorites, and blacklist. No live catalog
 // fetch or embedded baseline is consulted.
+//
+// The capable default (the fallback when the candidate pool is empty) resolves
+// with precedence: (1) spec.Model (the trigger's default_model), when non-empty;
+// (2) spec.DefaultModel (the serve-config default); (3) config.DefaultCapableModel
+// (a compiled-in guard).
 func buildRegistry(spec RunSpec) *registry.Registry {
-	return registry.FromSelection(spec.Selection, spec.DefaultModel, spec.SelectorPriceHeadroom, spec.MaxCapability)
+	capable := spec.Model
+
+	if capable == "" {
+		capable = spec.DefaultModel
+	}
+
+	if capable == "" {
+		capable = config.DefaultCapableModel
+	}
+
+	return registry.FromSelection(spec.Selection, capable, spec.SelectorPriceHeadroom, spec.MaxCapability)
 }
 
 // declaredVerify maps the protocol verify config onto the orchestrator-local
