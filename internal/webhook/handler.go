@@ -41,6 +41,17 @@ type StatusReporter interface {
 	ReportStatus(ctx context.Context, cardID, project, status, message string) error
 }
 
+// SessionSecretRegistry manages per-session secrets registered with the log
+// bridge redactor so CM-provisioned credentials appearing on worker stderr or
+// unparsable stdout are masked on the /logs SSE stream. AddSessionKey must
+// ignore empty keys so callers may register unconditionally.
+//
+// *logbridge.RedactorRegistry satisfies it; tests supply a fake.
+type SessionSecretRegistry interface {
+	AddSessionKey(id, key string)
+	RemoveSessionKey(id string)
+}
+
 // AutonomousVerifier confirms a card's autonomous flag before /promote writes
 // the control frame - fail closed. *callback.Client satisfies it; tests supply
 // a fake.
@@ -163,6 +174,7 @@ type Config struct {
 	Verifier       AutonomousVerifier
 	SkillsResolver SkillsResolver
 	Credentials    CredentialProvisioner
+	SessionSecrets SessionSecretRegistry
 
 	// Images lists the node's tagged images for GET /images. Nil disables the
 	// endpoint (500 internal).
@@ -229,6 +241,10 @@ type Server struct {
 	// per-run credentials. Keyed like stdinMu; entries are likewise never
 	// reclaimed (one bare mutex per card ever seen).
 	launchMu sync.Map // map[string]*sync.Mutex
+
+	// sessionRegistry manages per-session secrets registered with the log bridge
+	// redactor. Nil-tolerant: a nil value makes all calls a no-op.
+	sessionRegistry SessionSecretRegistry
 }
 
 // NewServer wires a Server from its dependencies. It builds the transport Core
@@ -277,6 +293,7 @@ func NewServer(cfg Config) *Server {
 		verifier:       cfg.Verifier,
 		skillsResolver: cfg.SkillsResolver,
 		credentials:    cfg.Credentials,
+		sessionRegistry: cfg.SessionSecrets,
 		launchEnv:      cfg.LaunchEnv,
 		dedup:          dedup,
 		logger:         logger,
@@ -473,6 +490,8 @@ func (s *Server) admitAndLaunch(ctx context.Context, spec executor.LaunchSpec, p
 		provisioned = true
 	}
 
+	s.addSessionSecrets(project, cardID, p)
+
 	if err := s.executor.Launch(ctx, spec); err != nil {
 		// Tear down only what THIS launch provisioned: a duplicate that skipped
 		// provisioning must not touch the winner's credentials.
@@ -480,12 +499,53 @@ func (s *Server) admitAndLaunch(ctx context.Context, spec executor.LaunchSpec, p
 			s.credentials.Teardown(project, cardID)
 		}
 
+		s.removeSessionSecrets(project, cardID)
+
 		s.logger.Error("launch failed", "project", project, "card_id", cardID, "error", err)
 
 		return "launch failed"
 	}
 
 	return ""
+}
+
+// addSessionSecrets registers every CM-provisioned secret in the session
+// secret registry under the id project+"/"+cardID. It is nil-safe against a
+// nil registry, a nil endpoint, and a nil mob, so callers never nil-guard.
+func (s *Server) addSessionSecrets(project, cardID string, p protocol.TriggerPayload) {
+	if s.sessionRegistry == nil {
+		return
+	}
+
+	id := project + "/" + cardID
+
+	s.sessionRegistry.AddSessionKey(id, p.GitToken)
+
+	if p.LLMEndpoint != nil {
+		s.sessionRegistry.AddSessionKey(id, p.LLMEndpoint.APIKey)
+	}
+
+	mcpKey := s.launchEnv.MCPAPIKey
+	if p.MCPAPIKey != "" {
+		mcpKey = p.MCPAPIKey
+	}
+	s.sessionRegistry.AddSessionKey(id, mcpKey)
+
+	if p.Mob != nil {
+		for _, guest := range p.Mob.Guests {
+			s.sessionRegistry.AddSessionKey(id, guest.Token)
+		}
+	}
+}
+
+// removeSessionSecrets unregisters the session id from the secret registry.
+// Nil-tolerant: a nil registry makes this a no-op.
+func (s *Server) removeSessionSecrets(project, cardID string) {
+	if s.sessionRegistry == nil {
+		return
+	}
+
+	s.sessionRegistry.RemoveSessionKey(project + "/" + cardID)
 }
 
 // runEndpoint maps the payload's llm_endpoint - plus the mob session guest
