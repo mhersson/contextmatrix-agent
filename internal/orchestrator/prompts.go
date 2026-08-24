@@ -206,8 +206,9 @@ Respond with ONLY a JSON object, no prose:
 // the plan. The trailing %s slots are filled by runDiagnose: workspace root,
 // card title, body.
 const diagnosePrompt = `%sYou are a read-only debugging investigator for a task that looks like a bug.
-You have read-only tools (read, grep, glob) to inspect the codebase. You do NOT
-modify files, run git, or create cards. Find the ROOT CAUSE - a fix is planned
+You have read-only tools (read, grep, glob, git) to inspect the codebase. Git is
+available read-only (status, diff, log, show, branch). You do NOT modify files or
+create cards. Find the ROOT CAUSE - a fix is planned
 separately, after you finish.
 
 Repo root: %s - paths are relative to it.
@@ -380,9 +381,9 @@ Description:
 // three below), parent card title, parent card description, the full branch diff
 // against base, and an optional prior-findings block (the previous round's
 // findings on delta rounds). The empty prior-findings block collapses to nothing.
-const specialistPrompt = `%s%sYou are a code-review specialist. You have read-only tools (read, grep, glob)
-to inspect the codebase. You do NOT create or modify cards or files, and you do
-NOT run git. Produce a findings report as TEXT - another agent synthesizes the
+const specialistPrompt = `%s%sYou are a code-review specialist. You have read-only tools (read, grep, glob, git)
+to inspect the codebase. Git is available read-only (status, diff, log, show,
+branch). You do NOT create or modify cards or files. Produce a findings report as TEXT - another agent synthesizes the
 three specialist reports into a single verdict.
 
 %s
@@ -613,8 +614,9 @@ VERIFY FAILURE TO FIX
 // The trailing %s slots are filled by writePRBody: parent card title, parent
 // card description, the plan overview (subtask titles), and the review outcome.
 const prBodyPrompt = `You are writing the pull request description for completed, reviewed work. You
-have read-only tools (read, grep, glob) to inspect the branch. Write the PR body
-as Markdown prose - do NOT run git, do NOT modify files.
+have read-only tools (read, grep, glob, git) to inspect the branch. Git is
+available read-only (status, diff, log, show, branch). Write the PR body
+as Markdown prose - do NOT modify files.
 
 Structure the body with these sections:
 - "## What" - a concise summary of what this change does.
@@ -652,7 +654,7 @@ Respond with ONLY the Markdown PR body - no surrounding prose, no code fences.
 // parent card title, the parent card description, the review summary, and the
 // numbered comment list.
 const copilotTriagePrompt = `%sYou are triaging an automated code review left by GitHub Copilot on the pull
-request for the task below. You have read-only tools (read, grep, glob) - open
+request for the task below. You have read-only tools (read, grep, glob, git) - open
 the cited files and check each comment against the actual code before judging it.
 
 A comment is VALID only when it names a genuine defect in this change: a
@@ -787,9 +789,9 @@ Respond with ONLY a JSON object, no prose:
 // runBrainstorm: card title, card
 // description, and the conversation-so-far block.
 const brainstormPrompt = `%sYou are a design facilitator turning a card's stated intent into a fully-formed
-design through dialogue with a human teammate. You have read-only tools (read,
-grep, glob) to explore the codebase. You do NOT write files or run git - the
-agreed design is captured from your final message.
+design through dialogue with a human teammate. You have read-only tools (read, grep, glob, git) to explore the codebase. Git is
+available read-only (status, diff, log, show, branch). You do NOT write files -
+the agreed design is captured from your final message.
 
 Process:
 - Understand the intent. Read the card and the files it references; explore the
@@ -969,10 +971,11 @@ working the same task. Your assigned lens: %s. Argue from this lens; do not
 restate points other seats already made.
 
 Rules:
-- You have read-only tools (read, grep, glob) on the repo. Verify NEW claims
+- You have read-only tools (read, grep, glob, git) on the repo. Verify NEW claims
   you introduce against the code; do not re-verify facts already established
-  in the discussion. Batch independent lookups in one turn. You never modify
-  files, cards, or git state.
+  in the discussion. Batch independent lookups in one turn. Git is available
+  read-only (status, diff, log, show, branch). You never modify files, cards,
+  or git state.
 - When asked to propose (round 0), give your independent position.
 - In critique rounds: critique, defend, revise, or concede - say which,
   explicitly. Conceding to a better argument is good work, not failure.

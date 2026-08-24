@@ -310,6 +310,40 @@ func TestCoderPromptScopedAgainstParentCriteria(t *testing.T) {
 	assert.Contains(t, low, "the parent card's description and acceptance criteria may cover")
 }
 
+// TestReadOnlyPromptsMentionGit asserts that the six read-only prompt
+// constants enumerate git among their tools and none forbids running git.
+// planPrompt is asserted as already correct (unchanged).
+func TestReadOnlyPromptsMentionGit(t *testing.T) {
+	readOnly := map[string]string{
+		"diagnose":      diagnosePrompt,
+		"specialist":    specialistPrompt,
+		"prBody":        prBodyPrompt,
+		"copilotTriage": copilotTriagePrompt,
+		"brainstorm":    brainstormPrompt,
+		"seatSystem":    seatSystemPrompt,
+	}
+
+	prohibitions := []string{
+		"do not run git",
+		"do NOT run git",
+		"never run git",
+	}
+
+	for name, p := range readOnly {
+		t.Run(name, func(t *testing.T) {
+			assert.Contains(t, p, "git", "%s must mention git", name)
+
+			for _, phrase := range prohibitions {
+				assert.NotContains(t, p, phrase,
+					"%s must not forbid running git", name)
+			}
+		})
+	}
+
+	// planPrompt is not part of this change - it already has git and must stay that way.
+	assert.Contains(t, planPrompt, "git")
+}
+
 // TestReviewBriefingRendersGrounding asserts that the review briefing template
 // accepts and embeds a non-empty repo-grounding value without producing a
 // %! formatting artifact (placeholder/argument count mismatch).
