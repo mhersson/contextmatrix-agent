@@ -314,6 +314,54 @@ func TestServiceValidate(t *testing.T) {
 		cfg.Compaction = CompactionConfig{Enabled: false, Threshold: 9, KeepRecentTurns: -1}
 		require.NoError(t, cfg.Validate())
 	})
+
+	t.Run("loopback contextmatrix_url + empty container_contextmatrix_url rejects", func(t *testing.T) {
+		cfg := validServiceConfig()
+		cfg.ContextMatrixURL = "http://localhost:8080"
+		cfg.ContainerContextMatrixURL = ""
+		err := cfg.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "container_contextmatrix_url")
+	})
+
+	t.Run("loopback contextmatrix_url + set container_contextmatrix_url accepts", func(t *testing.T) {
+		cfg := validServiceConfig()
+		cfg.ContextMatrixURL = "http://localhost:8080"
+		cfg.ContainerContextMatrixURL = "http://cm-internal:8080"
+		require.NoError(t, cfg.Validate())
+	})
+
+	t.Run("routable host contextmatrix_url + empty container_contextmatrix_url accepts", func(t *testing.T) {
+		cfg := validServiceConfig()
+		cfg.ContextMatrixURL = "http://cm.example:8080"
+		cfg.ContainerContextMatrixURL = ""
+		require.NoError(t, cfg.Validate())
+	})
+
+	t.Run("127.0.0.1 loopback + empty container URL rejects", func(t *testing.T) {
+		cfg := validServiceConfig()
+		cfg.ContextMatrixURL = "http://127.0.0.1:8080"
+		cfg.ContainerContextMatrixURL = ""
+		err := cfg.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "container_contextmatrix_url")
+	})
+
+	t.Run("::1 loopback + empty container URL rejects", func(t *testing.T) {
+		cfg := validServiceConfig()
+		cfg.ContextMatrixURL = "http://[::1]:8080"
+		cfg.ContainerContextMatrixURL = ""
+		err := cfg.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "container_contextmatrix_url")
+	})
+
+	t.Run("host.docker.internal + empty container URL accepts", func(t *testing.T) {
+		cfg := validServiceConfig()
+		cfg.ContextMatrixURL = "http://host.docker.internal:8080"
+		cfg.ContainerContextMatrixURL = ""
+		require.NoError(t, cfg.Validate())
+	})
 }
 
 func TestServiceValidate_ReasoningEffort(t *testing.T) {
@@ -594,6 +642,7 @@ func TestCACertFileFromEnv(t *testing.T) {
 	path := filepath.Join(dir, "serve.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(`
 contextmatrix_url: http://localhost:8080
+container_contextmatrix_url: http://cm-internal:8080
 api_key: 0123456789012345678901234567890123456789
 base_image: img@sha256:abc
 `), 0o600))
@@ -643,6 +692,7 @@ func TestLogDirFromEnv(t *testing.T) {
 	path := filepath.Join(dir, "serve.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(`
 contextmatrix_url: http://localhost:8080
+container_contextmatrix_url: http://cm-internal:8080
 api_key: 0123456789012345678901234567890123456789
 base_image: img@sha256:abc
 `), 0o600))

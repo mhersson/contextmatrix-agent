@@ -1496,7 +1496,7 @@ func TestVerifyFailureExcerpt(t *testing.T) {
 			name: "200 FAIL blocks cannot blow the excerpt past its cap",
 			output: func() string {
 				var b strings.Builder
-				for i := 0; i < 200; i++ {
+				for i := range 200 {
 					fmt.Fprintf(&b, "--- FAIL: Test%d (0.00s)\n    reason %d\n", i, i)
 				}
 
