@@ -302,8 +302,8 @@ func TestRebuildTrap_StaticKeyStillMaskedAfterRunRegisters(t *testing.T) {
 	// registry calls) and then BridgeLine calls b.redactor.Load().Apply().
 	// To verify the effect, publish a test line through BridgeLine and capture
 	// the hub output.
-	ch := hub.Subscribe(protocol.LogEntry{Project: "p", CardID: "C1", SessionID: ""})
-	defer hub.Unsubscribe(ch)
+	subID, ch := hub.Subscribe("p")
+	defer hub.Unsubscribe(subID)
 
 	bridge.BridgeLine(
 		logbridge.Key{Project: "p", CardID: "C1"},
