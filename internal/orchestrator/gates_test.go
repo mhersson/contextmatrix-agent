@@ -2696,6 +2696,76 @@ func TestPRGates_ReEnteredCIGateRemembersEarlierChecks(t *testing.T) {
 		"the card still completes once the fixed head goes green")
 }
 
+// TestCopilotGate_FixRoundNoChangeParks: a Copilot fix round whose fix commits
+// nothing parks with the no-change reason instead of cycling to the rounds cap.
+// The fakeGit defaults to committed=false, producing a no-change outcome.
+func TestCopilotGate_FixRoundNoChangeParks(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		reviews:   []*CopilotReview{reviewOnHead("1 suggestion", swallowedErrorComment)},
+	}
+	client := &planLLM{responses: []llm.Response{
+		copilotVerdict(copilotFinding{
+			File: "internal/api/handler.go", Issue: "the write error is dropped",
+			Valid: true, Reason: "the caller cannot tell the write failed",
+		}),
+		stopResp("coder: no-op fix", 0.01),
+	}}
+
+	// committed defaults to false -> runFix returns committed=false, err=nil
+	o := prGateRun(ops, gates, &fakeGit{}, client, copilotGateContext("No change fix", "body"), 0)
+
+	err := runPRGates(context.Background(), o)
+
+	var parked *GatesParkedError
+
+	require.ErrorAs(t, err, &parked)
+	assert.Contains(t, parked.Reason, "Copilot fix produced no change",
+		"the park reason names the no-change outcome; reason=%q", parked.Reason)
+
+	calls := gates.recorded()
+	assert.Equal(t, -1, indexOfCall(calls, "RequestCopilotReview:"+gatePRURL),
+		"a no-change fix must not re-request a review; calls=%v", calls)
+	assert.Equal(t, 2, modelCallCount(client),
+		"one triage call and one fix model call; client.calls=%v", client.models)
+	assert.Equal(t, -1, indexOfCall(ops.recorded(), "TransitionCard:done"),
+		"a parked card must NOT reach done")
+}
+
+// TestCIGate_FixRoundNoChangeParks: a CI fix round whose fix commits nothing
+// parks with the no-change reason instead of cycling to the rounds cap.
+func TestCIGate_FixRoundNoChangeParks(t *testing.T) {
+	shrinkFixRoundReserve(t, 0) // a millisecond-scale gate still funds its round
+
+	ops := &fakeOps{}
+	gates := &fakeGates{checks: [][]CheckResult{{failingCheck()}}}
+	client := &planLLM{responses: []llm.Response{
+		stopResp("coder: no-op fix", 0.01),
+	}}
+
+	// committed defaults to false -> runFix returns committed=false, err=nil
+	o := prGateRun(ops, gates, &fakeGit{}, client, ciGateContext("No change CI fix", "body"), 0)
+
+	err := runPRGates(context.Background(), o)
+
+	var parked *GatesParkedError
+
+	require.ErrorAs(t, err, &parked)
+	assert.Contains(t, parked.Reason, "CI fix produced no change",
+		"the park reason names the no-change outcome; reason=%q", parked.Reason)
+
+	// The fix round fetches failure logs, runs the fix model, then parks - no re-poll.
+	calls := gates.recorded()
+	assert.Equal(t, []string{"Checks:" + gatePRURL}, calls[:1],
+		"only the initial poll; no re-poll after the fix; calls=%v", calls)
+	assert.Equal(t, 1, modelCallCount(client),
+		"one fix model call; the CI gate has no triage phase")
+	assert.Equal(t, -1, indexOfCall(ops.recorded(), "TransitionCard:done"),
+		"a parked card must NOT reach done")
+}
+
 // nonEmpty normalizes an empty slice to nil so table cases can leave the want
 // field unset.
 func nonEmpty(s []string) []string {
