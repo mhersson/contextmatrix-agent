@@ -17,6 +17,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/config"
 	"github.com/mhersson/contextmatrix-agent/internal/orchestrator"
+	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-backendkit/frames"
 	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/mhersson/contextmatrix-harness/llm"
@@ -1482,5 +1483,50 @@ func TestRunFSMPassesVerifyEnvToWriteTools(t *testing.T) {
 		require.NoError(t, err, name)
 		assert.Equal(t, "resolved-value|unset", out.Text,
 			"%s: declared allowed name must resolve, denied name must stay absent", name)
+	}
+}
+
+// TestBuildRegistryFallbackPrecedence verifies that buildRegistry resolves the
+// capable default with the correct precedence: spec.Model (trigger default_model)
+// first, then spec.DefaultModel (serve-config), then config.DefaultCapableModel
+// (compiled-in guard). With a nil Selection, the registry has an empty candidate
+// pool so SelectByComplexity returns the capable default directly.
+func TestBuildRegistryFallbackPrecedence(t *testing.T) {
+	tests := []struct {
+		name string
+		spec RunSpec
+		want string
+	}{
+		{
+			name: "trigger default_model only",
+			spec: RunSpec{Model: "payload/model"},
+			want: "payload/model",
+		},
+		{
+			name: "serve-config default only",
+			spec: RunSpec{DefaultModel: "serve/default"},
+			want: "serve/default",
+		},
+		{
+			name: "trigger wins over serve-config",
+			spec: RunSpec{Model: "payload/model", DefaultModel: "serve/default"},
+			want: "payload/model",
+		},
+		{
+			name: "empty spec falls back to compiled-in default",
+			spec: RunSpec{},
+			want: config.DefaultCapableModel,
+		},
+	}
+
+	in := registry.SelectInput{Role: registry.RoleCoder, Tier: registry.TierSimple}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := buildRegistry(tt.spec)
+			got := r.SelectByComplexity(in)
+			assert.Equal(t, tt.want, got.Model,
+				"buildRegistry capable default: want %q, got %q", tt.want, got.Model)
+		})
 	}
 }
