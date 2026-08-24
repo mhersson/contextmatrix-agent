@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -344,6 +346,28 @@ func isNotExist(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "no such file or directory")
 }
 
+// isLoopbackURL reports whether the given URL's hostname resolves to a
+// loopback address. It mirrors the classification in buildExtraHosts
+// (internal/executor/hosts.go): "localhost", any address in 127.0.0.0/8, or
+// ::1. host.docker.internal is NOT loopback.
+func isLoopbackURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Hostname() == "" {
+		return false
+	}
+
+	hostname := u.Hostname()
+	if hostname == "localhost" {
+		return true
+	}
+
+	if ip := net.ParseIP(hostname); ip != nil {
+		return ip.IsLoopback()
+	}
+
+	return false
+}
+
 // Validate checks the service config invariants after merging. A non-digest
 // BaseImage and a non-canonical ReasoningEffort tier are both permitted but
 // warn via slog so operators notice tag drift or provider-specific values.
@@ -378,6 +402,15 @@ func (c *ServiceConfig) Validate() error {
 	for _, f := range c.ImageListFilters {
 		if strings.TrimSpace(f) == "" {
 			return fmt.Errorf("image_list_filters entries must be non-empty")
+		}
+	}
+
+	if c.ContainerContextMatrixURL == "" {
+		if isLoopbackURL(c.ContextMatrixURL) {
+			return fmt.Errorf(
+				"container_contextmatrix_url is empty and contextmatrix_url resolves to a loopback " +
+					"host: workers would point at their own loopback and fail at MCP connect",
+			)
 		}
 	}
 
