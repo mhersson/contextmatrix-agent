@@ -309,3 +309,23 @@ func TestCoderPromptScopedAgainstParentCriteria(t *testing.T) {
 	assert.Contains(t, low, "nothing from sibling subtasks")
 	assert.Contains(t, low, "the parent card's description and acceptance criteria may cover")
 }
+
+// TestReviewBriefingRendersGrounding asserts that the review briefing template
+// accepts and embeds a non-empty repo-grounding value without producing a
+// %! formatting artifact (placeholder/argument count mismatch).
+func TestReviewBriefingRendersGrounding(t *testing.T) {
+	g := "REPO GROUNDING\nFollow the repo conventions.\n"
+	out := fmt.Sprintf(reviewBriefing, g, "My Title", "My Description", fencedDiff("diff - old +new"), "previous findings")
+	assert.Contains(t, out, g, "review briefing must embed the grounding value")
+	assert.NotContains(t, out, "%!", "review briefing must have no formatting artifact")
+}
+
+// TestCheckpointBriefingRendersGrounding asserts that the checkpoint briefing
+// template accepts and embeds a non-empty repo-grounding value without
+// producing a %! formatting artifact.
+func TestCheckpointBriefingRendersGrounding(t *testing.T) {
+	g := "REPO GROUNDING\nCheck the CLAUDE.md.\n"
+	out := fmt.Sprintf(checkpointBriefing, g, "Subtask Title", "Subtask description", "Parent Card Title", "ENV go 1.22", fencedDiff("diff - old +new"))
+	assert.Contains(t, out, g, "checkpoint briefing must embed the grounding value")
+	assert.NotContains(t, out, "%!", "checkpoint briefing must have no formatting artifact")
+}
