@@ -64,6 +64,9 @@ const (
 	gatesCopilotTriageBudgetParkReason = "budget exhausted during Copilot triage"
 	gatesCopilotFixBudgetParkReason    = "budget exhausted during Copilot fixes"
 	gatesCopilotTurnCapParkReason      = "Copilot fix run hit its turn cap"
+
+	gatesCopilotFixNoChangeParkReason = "Copilot fix produced no change"
+	gatesCIFixNoChangeParkReason      = "CI fix produced no change"
 )
 
 // gatesNoChecksGrace is how long the CI gate waits for the first check to appear
@@ -795,12 +798,17 @@ func (o *run) copilotFixRound(ctx context.Context, st *gatesState, findings []co
 		st.CopilotRounds, gatesRoundsCap, len(findings)),
 		map[string]any{"round": st.CopilotRounds, "cap": gatesRoundsCap, "findings": len(findings)})
 
-	if _, err := o.runFix(ctx, copilotFixFindings(findings), st.CopilotRounds, "", false); err != nil {
+	committed, err := o.runFix(ctx, copilotFixFindings(findings), st.CopilotRounds, "", false)
+	if err != nil {
 		if reason := gateResourcePark(err, gatesCopilotFixBudgetParkReason, gatesCopilotTurnCapParkReason); reason != "" {
 			return o.parkGates(ctx, st, reason)
 		}
 
 		return fmt.Errorf("copilot gate fix round %d: %w", st.CopilotRounds, err)
+	}
+
+	if !committed {
+		return o.parkGates(ctx, st, gatesCopilotFixNoChangeParkReason)
 	}
 
 	return nil
@@ -1271,7 +1279,7 @@ func (o *run) ciGate(ctx context.Context, prURL string, st *gatesState) error {
 				return ferr
 			}
 
-			// The fix pushed a new head. Wait one poll interval - GitHub needs a
+			// When the fix committed, wait one poll interval - GitHub needs a
 			// moment to register the new run - then go straight to a fresh poll:
 			// the deadline verdict below must never read the buckets this round
 			// was started from, or a park would list the failures it just fixed.
@@ -1369,7 +1377,8 @@ func (o *run) ciFixRound(ctx context.Context, prURL string, st *gatesState, fail
 		return o.parkGates(ctx, st, gatesBudgetParkReason)
 	}
 
-	if _, err := o.runFix(ctx, ciFixFindings(digest), st.CIRounds, "", false); err != nil {
+	committed, err := o.runFix(ctx, ciFixFindings(digest), st.CIRounds, "", false)
+	if err != nil {
 		// A fix that ran out of budget or turns takes the same park arm as the
 		// ledger check above - only the reason on the card differs.
 		if reason := gateResourcePark(err, gatesBudgetParkReason, gatesTurnCapParkReason); reason != "" {
@@ -1377,6 +1386,10 @@ func (o *run) ciFixRound(ctx context.Context, prURL string, st *gatesState, fail
 		}
 
 		return fmt.Errorf("ci gate fix round %d: %w", st.CIRounds, err)
+	}
+
+	if !committed {
+		return o.parkGates(ctx, st, gatesCIFixNoChangeParkReason)
 	}
 
 	return nil
