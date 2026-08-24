@@ -442,3 +442,82 @@ func TestParseExpiry(t *testing.T) {
 		})
 	}
 }
+
+// TestOnTokenRefreshFiresForExpiringToken verifies that the optional hook
+// receives the rotated token with the correct project and card ID after a
+// successful refresh. A sync.Once-style channel avoids a race between the
+// async refresh loop and the assertion.
+func TestOnTokenRefreshFiresForExpiringToken(t *testing.T) {
+	t.Parallel()
+
+	stub := &stubCM{apiKey: "test-key"}
+	srv := httptest.NewServer(stub.handler(t))
+	t.Cleanup(srv.Close)
+
+	m := newTestManager(t, srv.URL, "test-key")
+
+	// Channel closed once the hook fires, a once-style guard.
+	var (
+		mu          sync.Mutex
+		hookProject string
+		hookCardID  string
+		hookToken   string
+		hookFired   bool
+	)
+
+	m.OnTokenRefresh = func(project, cardID, token string) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if !hookFired {
+			hookProject = project
+			hookCardID = cardID
+			hookToken = token
+			hookFired = true
+		}
+	}
+
+	expiry := time.Now().Add(40 * time.Millisecond).UTC().Format(time.RFC3339)
+	require.NoError(t, m.Provision("proj", "CARD-1", "payload-token", expiry, EndpointSecrets{}))
+	t.Cleanup(func() { m.Teardown("proj", "CARD-1") })
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+
+		return hookFired
+	}, 5*time.Second, 10*time.Millisecond, "expected the token refresh hook to fire")
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	assert.Equal(t, "proj", hookProject)
+	assert.Equal(t, "CARD-1", hookCardID)
+	assert.Equal(t, "refreshed-token-1", hookToken, "the hook must receive the first rotated token")
+}
+
+// TestOnTokenRefreshNeverFiresForPAT verifies that a PAT-style token (no
+// expiry) never triggers the refresh hook.
+func TestOnTokenRefreshNeverFiresForPAT(t *testing.T) {
+	t.Parallel()
+
+	stub := &stubCM{apiKey: "test-key"}
+	srv := httptest.NewServer(stub.handler(t))
+	t.Cleanup(srv.Close)
+
+	m := newTestManager(t, srv.URL, "test-key")
+
+	fireCount := &atomic.Int32{}
+
+	m.OnTokenRefresh = func(_, _, _ string) {
+		fireCount.Add(1)
+	}
+
+	require.NoError(t, m.Provision("proj", "CARD-1", "pat-token", "", EndpointSecrets{}))
+	t.Cleanup(func() { m.Teardown("proj", "CARD-1") })
+
+	time.Sleep(100 * time.Millisecond)
+
+	assert.Zero(t, fireCount.Load(), "a PAT token must never fire the refresh hook")
+	assert.Zero(t, stub.callCount(), "a PAT token must not trigger a CM call")
+}

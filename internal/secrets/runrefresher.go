@@ -55,6 +55,12 @@ type RunCredentials struct {
 	minSleep      time.Duration // floor on the sleep between refreshes
 	retryBackoff  time.Duration // fast retry after a transient failure
 
+	// OnTokenRefresh is an optional hook fired after every successful git
+	// token refresh (i.e. after WriteEnvFile completes), before the refresh
+	// log line, with the rotated token. It is never called for a PAT-style
+	// token (no expiry) since those never enter the refresh loop. Nil-safe.
+	OnTokenRefresh func(project, cardID, token string)
+
 	mu   sync.Mutex
 	runs map[string]*runHandle // keyed by project/cardID
 }
@@ -247,6 +253,10 @@ func (m *RunCredentials) refreshLoop(
 			}
 
 			continue
+		}
+
+		if m.OnTokenRefresh != nil {
+			m.OnTokenRefresh(project, cardID, token)
 		}
 
 		m.logger.Info("per-run env file refreshed",
