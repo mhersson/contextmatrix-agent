@@ -149,8 +149,8 @@ func TestAddSessionSecrets_UsesConfigMCPKey(t *testing.T) {
 	assert.Contains(t, got, "cfg-mcp-key", "config-level MCP key must be registered when no payload override")
 }
 
-// TestAddSessionSecrets_NilEndpointAndMobHandles gracefully handles nil LLM
-// endpoint and nil mob without panicking and without registering bogus keys.
+// TestAddSessionSecrets_NilEndpointAndMob handles a nil LLM endpoint and a nil
+// mob without panicking and without registering bogus keys.
 func TestAddSessionSecrets_NilEndpointAndMob(t *testing.T) {
 	registry := newFakeSessionSecretRegistry()
 
@@ -277,8 +277,8 @@ func TestFailedLaunchRemovesSessionSecrets(t *testing.T) {
 // reserved id, and then per-run secrets are added - the static keys must
 // survive the rebuild.
 //
-// The test uses a Bridge to host the redactor but reads the masked output
-// through the redactor directly (BridgeLine requires a running SSE subscriber).
+// The assertion runs through the real path: a hub subscriber receives the entry
+// BridgeLine publishes, so it pins the masking the /logs stream actually gets.
 func TestRebuildTrap_StaticKeyStillMaskedAfterRunRegisters(t *testing.T) {
 	hub := logbridge.NewHub(func(e protocol.LogEntry) string { return e.Project }, nil)
 	bridge := logbridge.NewBridge(logbridge.BridgeConfig{
@@ -297,12 +297,9 @@ func TestRebuildTrap_StaticKeyStillMaskedAfterRunRegisters(t *testing.T) {
 	// Now register a per-run secret (simulating what addSessionSecrets does).
 	registry.AddSessionKey("p/C1", "run-secret-123")
 
-	// The bridge's redactor must have ALL three keys after the per-run add.
-	// We grab the redactor from the bridge and call Apply directly.
-	// There's no exported getter, but the Bridge uses SetRedactor (which the
-	// registry calls) and then BridgeLine calls b.redactor.Load().Apply().
-	// To verify the effect, publish a test line through BridgeLine and capture
-	// the hub output.
+	// The bridge's redactor must carry all three keys after the per-run add.
+	// The Bridge exposes no redactor getter, so assert the effect: publish a
+	// line through BridgeLine and read what the hub subscriber receives.
 	subID, ch := hub.Subscribe("p")
 	defer hub.Unsubscribe(subID)
 

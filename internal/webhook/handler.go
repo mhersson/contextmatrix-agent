@@ -510,8 +510,22 @@ func (s *Server) admitAndLaunch(ctx context.Context, spec executor.LaunchSpec, p
 }
 
 // addSessionSecrets registers every CM-provisioned secret in the session
-// secret registry under the id project+"/"+cardID. It is nil-safe against a
-// nil registry, a nil endpoint, and a nil mob, so callers never nil-guard.
+// secret registry under the id project+"/"+cardID: the git token, the LLM
+// endpoint key, the resolved MCP API key (the payload override, else the
+// configured one - the same expression buildLaunchSpec uses, so the key the
+// worker actually sends is the key that gets masked), and every mob guest
+// bearer token. Registration happens before Launch so no container output can
+// precede it; removeSessionSecrets unregisters on container exit and on a
+// failed launch, so a re-trigger never inherits stale keys. It is nil-safe
+// against a nil registry, a nil endpoint, and a nil mob, so callers never
+// nil-guard, and AddSessionKey ignores empty values.
+//
+// Operator-supplied worker_extra_env is deliberately not registered. Those
+// values are appended verbatim to the container environment and AGENTS.md
+// already declares them readable by model-run commands and unredacted in
+// transcripts, so masking only the /logs copy would be a false assurance.
+// (The chat backend does register its worker_extra_env LLM_API_KEY, which is
+// why the two backends differ here.)
 func (s *Server) addSessionSecrets(project, cardID string, p protocol.TriggerPayload) {
 	if s.sessionRegistry == nil {
 		return
