@@ -1214,6 +1214,8 @@ func TestSalvageDeclineAfterVerifyPassKeepsTierAndReportsNoOutcome(t *testing.T)
 		"a post-verify-pass park must not log a tier escalation; logs=%v", ops.logs)
 	assert.Empty(t, ops.reportOutcomes,
 		"an infrastructure park after a passing verify is not evidence about the model")
+	assert.True(t, ops.loggedContains("push"),
+		"the push error must be recorded on the card log; logs=%v", ops.logs)
 }
 
 // TestSalvageDeclineAfterCompleteTaskFailKeepsTierAndWinRow is the sibling of
@@ -1258,6 +1260,8 @@ func TestSalvageDeclineAfterCompleteTaskFailKeepsTierAndWinRow(t *testing.T) {
 	require.Len(t, rows, 1)
 	assert.Equal(t, "win", rows[0].Result, "the verify already proved the work correct before CompleteTask failed")
 	assert.True(t, rows[0].VerifyPass)
+	assert.True(t, ops.loggedContains("CompleteTask"),
+		"the CompleteTask error must be recorded on the card log; logs=%v", ops.logs)
 }
 
 // markerMidRunLLM wraps a scripted LLM and writes a toolchain marker file into

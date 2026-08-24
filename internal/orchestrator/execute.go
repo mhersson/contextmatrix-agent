@@ -661,6 +661,10 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 	// the model at full weight for a fault that is not its own.
 	if sc.push {
 		if perr := o.pushBranch(ctx); perr != nil {
+			slog.Warn("salvage: push failed after passing verify",
+				"card_id", o.d.Cfg.CardID, "subtask_id", sub.ID, "error", perr, "step", "push")
+			o.d.logCard(ctx, "turn cap on subtask %s - work passed verify but push failed: %s; parking for resume", sub.ID, perr)
+
 			return false, nil
 		}
 	}
@@ -672,6 +676,10 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 	o.reportSoloOutcome(ctx, sub.ID, model, "win", true, sc.ledger.Spent()-spendBefore)
 
 	if cerr := o.d.Ops.CompleteTask(ctx, sub.ID, commitSubject(commitMsg, sub.Title)); cerr != nil {
+		slog.Warn("salvage: CompleteTask failed after passing verify",
+			"card_id", o.d.Cfg.CardID, "subtask_id", sub.ID, "error", cerr, "step", "complete_task")
+		o.d.logCard(ctx, "turn cap on subtask %s - work passed verify but CompleteTask failed: %s; parking for resume", sub.ID, cerr)
+
 		return false, nil
 	}
 
