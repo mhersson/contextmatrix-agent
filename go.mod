@@ -11,8 +11,8 @@ require (
 	github.com/knadh/koanf/providers/posflag v1.0.2
 	github.com/knadh/koanf/providers/structs v1.0.1
 	github.com/knadh/koanf/v2 v2.3.6
-	github.com/mhersson/contextmatrix-backendkit v0.4.1
-	github.com/mhersson/contextmatrix-harness v0.17.0
+	github.com/mhersson/contextmatrix-backendkit v0.4.2
+	github.com/mhersson/contextmatrix-harness v0.18.0
 	github.com/mhersson/contextmatrix-protocol v0.16.0
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/opencontainers/image-spec v1.1.1
