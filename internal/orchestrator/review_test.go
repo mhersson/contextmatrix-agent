@@ -396,6 +396,9 @@ func TestReviewApprovedFixCleanupNoOpDoesNotEscalate(t *testing.T) {
 
 	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
 	o := newReviewRun(d, tc, 0)
+	// Enter already escalated, so the assertion below proves the reset at the top
+	// of the approval branch rather than the zero value it would report anyway.
+	o.fixEscalate = true
 
 	require.NoError(t, runReview(context.Background(), o))
 
@@ -2521,8 +2524,10 @@ func TestRunReviewHITLAutoApprovedWithFindingsFramesSummary(t *testing.T) {
 	require.NoError(t, runReview(context.Background(), o))
 
 	assert.Equal(t, -1, indexOfPrefix(git.recorded(), "CommitFixup:"), "no fix ran; git=%v", git.recorded())
-	assert.Contains(t, o.reviewSummary, "not fixed",
-		"an approval carrying open findings must say they were not fixed")
+	// The distinctive prefix, not "not fixed": approvedWithOpenFindings ends
+	// "were not fixed" too, so a swapped helper would be invisible here.
+	assert.Contains(t, o.reviewSummary, "The human reviewer approved integration despite",
+		"the human saw these findings and approved anyway - that is what the PR body must say")
 	assert.Contains(t, o.reviewSummary, "a.go", "the outstanding finding rides the summary")
 }
 
@@ -2558,4 +2563,70 @@ func TestMobReviewBriefingAlwaysDiffsBaseBranch(t *testing.T) {
 
 	assert.Equal(t, []string{"main"}, git.diffBases,
 		"the briefing diffs the base branch even with a snapshot recorded")
+}
+
+// TestReviewApprovedCleanupPassPropagatesParks pins that the cleanup pass on an
+// approved verdict propagates every park sentinel execute special-cases, not
+// only the budget one. A swallowed park returns nil, the run advances to
+// integrate with the coder's partial edits uncommitted, the rebase fails on the
+// dirty tree, and the worker exits without pushing the WIP - so the half-done
+// work dies with the container.
+func TestReviewApprovedCleanupPassPropagatesParks(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+	call := llm.ToolCall{
+		ID:       "c1",
+		Type:     "function",
+		Function: llm.FunctionCall{Name: "read", Arguments: `{"path":"no-such-file.txt"}`},
+	}
+	client := &planLLM{responses: []llm.Response{
+		stopResp("Correctness: minor", 0.01),
+		stopResp("Design: ok", 0.01),
+		stopResp("Security: ok", 0.01),
+		stopResp(`{"approved":true,"summary":"clean","fixes":[{"file":"a.go","issue":"bug","suggestion":"patch","severity":"minor"}]}`, 0.02),
+		{ToolCalls: []llm.ToolCall{call}}, // the cleanup coder burns its single turn
+	}}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+	d.Cfg.MaxTurns = 1
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+
+	err := runReview(context.Background(), o)
+	require.Error(t, err, "a turn-cap park in the cleanup pass must reach the worker")
+
+	var mte *MaxTurnsError
+	assert.ErrorAs(t, err, &mte, "the worker parks on this sentinel and pushes the WIP; nil would integrate a dirty tree")
+}
+
+// TestReviewAuthoritativeApprovedWithFindingsFramesSummary covers the honesty
+// contract on the cliff path, which had none: the authoritative pass
+// deliberately runs no cleanup, so an approving verdict that still carries
+// findings must reach the PR body framed as unfixed.
+func TestReviewAuthoritativeApprovedWithFindingsFramesSummary(t *testing.T) {
+	ops := &fakeOps{reviewAttempts: 4}
+	git := &fakeGit{committed: true, headSHA: "snap1"}
+	client := &planLLM{responses: []llm.Response{
+		stopResp("Correctness: minor", 0.01),
+		stopResp("Design: ok", 0.01),
+		stopResp("Security: ok", 0.01),
+		stopResp(`{"approved":true,"summary":"clean","fixes":[{"file":"a.go","issue":"bug","suggestion":"patch","severity":"minor"}]}`, 0.02),
+	}}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	// Seed ReviewAttempts = cap-1 (the deps set the cap to 5) so the first round
+	// is the authoritative one.
+	tc := cmclient.TaskContext{
+		Title: "Parent", Description: "body",
+		State: "in_progress", ReviewAttempts: 4,
+	}
+	o := newReviewRun(d, tc, 0)
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	assert.Equal(t, -1, indexOfPrefix(git.recorded(), "CommitFixup:"),
+		"the cliff runs no cleanup pass; git=%v", git.recorded())
+	assert.Contains(t, o.reviewSummary, "were not fixed",
+		"findings surviving an approval at the cliff must not read as addressed")
+	assert.Contains(t, o.reviewSummary, "a.go", "the finding rides the summary")
 }

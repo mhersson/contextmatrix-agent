@@ -201,11 +201,12 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 			// Findings survived the critique round despite approval: run exactly
 			// one non-escalating cleanup pass and finish either way. This is not
 			// another review round - it never increments review attempts, never
-			// loops back into the panel, and a non-budget error or a no-op commit
-			// can never un-approve a verdict that already cleared review. A budget
-			// error is the one exception: it is not an opinion about the change,
-			// it is the single point at which the worker learns the run must
-			// stop, so it propagates instead of being swallowed here.
+			// loops back into the panel, and a transport error or a no-op commit
+			// can never un-approve a verdict that already cleared review. A PARK
+			// is the exception: budget, context limit, turn cap and missing
+			// toolchain are not opinions about the change, they are the points at
+			// which the worker learns the run must stop and push its WIP, so they
+			// propagate instead of being swallowed here.
 			if len(fixes) > 0 {
 				// Findings reach the PR body framed as open until a pass lands
 				// them: an approval carrying raw findings text lets the PR model
@@ -220,8 +221,8 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 
 				committed, ferr := o.runFix(ctx, findings, round, fixTier, false)
 				if ferr != nil {
-					if isBudgetError(ferr) {
-						d.logCard(ctx, "review: approved with %d surviving finding(s), but the cleanup fix pass hit the budget ceiling - parking: %s",
+					if isParkError(ferr) {
+						d.logCard(ctx, "review: approved with %d surviving finding(s), but the cleanup fix pass parked - stopping: %s",
 							len(fixes), ferr)
 
 						return ferr
