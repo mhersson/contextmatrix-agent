@@ -260,6 +260,28 @@ func coderMaxTurns(base int, tier registry.Tier) int {
 	}
 }
 
+// coderBatchNudgeTurns arms the harness batching nudge for the coder family:
+// after this many consecutive turns that each spend a whole model call on one
+// read-only lookup, the harness injects a single message suggesting the model
+// group independent lookups. It suggests only - it never groups anything itself,
+// so a model whose next lookup depends on this one can ignore it.
+//
+// Three is deliberate. It is the length at which the measured waste starts (37
+// stretches of three or more consecutive single read-only turns across the
+// recorded runs, one reaching six), and it is short enough that lookups remain
+// to group when it lands. Two would fire on the ordinary dependent pair: grep,
+// then read what it found.
+//
+// Scoped to the coder because that is the measured offender - 1.32 calls per
+// turn, 79% of its turns making exactly one, despite being the only phase whose
+// prompt already asks it to batch. Planning and diagnosis already batch at 2.39
+// and 2.10 calls per turn; nudging them would spend the one-shot injection on a
+// phase doing it right.
+//
+// The message is left empty on purpose: the harness default names the count,
+// and no phase-specific wording improves on that.
+const coderBatchNudgeTurns = 3
+
 // runModelWrapUp is runModel with the wrap-up nudge configured: when
 // wrapUpTurns turns remain before the cap, the harness injects msg once as a
 // fresh user message. Used by the document run; the coder and fix runs use
@@ -272,18 +294,25 @@ func (o *run) runModelWrapUp(ctx context.Context, reg *tools.Registry, prompt, m
 	return o.runModelCfg(ctx, reg, prompt, model, cfg)
 }
 
-// runModelCoder is runModelWrapUp with a tier-scaled turn budget: complex and
-// critical work gets more turns than the flat base (via coderMaxTurns) so a
-// single unsplittable cross-cutting subtask can land its source changes AND the
-// tests those changes break in one session instead of turn-capping mid-way;
-// simple/moderate keep the base. Used by the execute-phase coder and the
-// review-phase fix run - both tier-sized coder work. document.go keeps
-// runModelWrapUp: its work carries no tier.
+// runModelCoder is runModelWrapUp with a tier-scaled turn budget and the
+// batching nudge armed. The budget: complex and critical work gets more turns
+// than the flat base (via coderMaxTurns) so a single unsplittable cross-cutting
+// subtask can land its source changes AND the tests those changes break in one
+// session instead of turn-capping mid-way; simple/moderate keep the base. The
+// nudge: the coder is the phase measured spending whole model calls on one
+// lookup at a time (see coderBatchNudgeTurns). Used by the execute-phase coder
+// and the review-phase fix run - both tier-sized coder work. document.go keeps
+// runModelWrapUp: its work carries no tier and is not read-heavy.
 func (o *run) runModelCoder(ctx context.Context, reg *tools.Registry, prompt, model, msg string, tier registry.Tier) (harness.Result, time.Duration, error) {
 	cfg := o.harnessConfig(model)
 	cfg.WrapUpTurns = wrapUpTurns
 	cfg.WrapUpMessage = msg
 	cfg.MaxTurns = coderMaxTurns(cfg.MaxTurns, tier)
+	// Message left empty: the harness default names the count of single-lookup
+	// turns that triggered it, which is the useful part. Never both nudges: the
+	// wrap-up above suppresses this one for the rest of the run, because telling
+	// a model to batch its lookups while telling it to finish is contradictory.
+	cfg.BatchNudgeTurns = coderBatchNudgeTurns
 	// One terminal-only grace call at the cap: a coder whose work is done but
 	// that dithered past the wrap-up nudge can still land finish (a run-1 failure
 	// mode). This is the first net; the verify-gated salvage remains the second.

@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -18,6 +19,7 @@ import (
 	"github.com/mhersson/contextmatrix-harness/harness"
 	"github.com/mhersson/contextmatrix-harness/llm"
 	"github.com/mhersson/contextmatrix-harness/tools"
+	"github.com/stretchr/testify/require"
 )
 
 // fakeOps is a scripted implementation of the Ops interface. It records every
@@ -915,3 +917,35 @@ func (f *fakeInbox) Wait(ctx context.Context) (harness.UserMessage, error) {
 }
 
 var _ harness.Inbox = (*fakeInbox)(nil)
+
+// batchNudgeCounts decodes every batch_nudge event the emitter wrote, returning
+// each one's single_call_turns in emission order. Tests use it to assert both
+// that a phase earns the harness batching nudge and that a phase deliberately
+// left unnudged never does.
+func batchNudgeCounts(t *testing.T, transcript *bytes.Buffer) []int {
+	t.Helper()
+
+	var counts []int
+
+	for line := range strings.SplitSeq(strings.TrimSpace(transcript.String()), "\n") {
+		if line == "" {
+			continue
+		}
+
+		var ev struct {
+			Kind string `json:"kind"`
+			Data struct {
+				Event           string `json:"event"`
+				SingleCallTurns int    `json:"single_call_turns"`
+			} `json:"data"`
+		}
+
+		require.NoError(t, json.Unmarshal([]byte(line), &ev))
+
+		if ev.Kind == string(events.StateChange) && ev.Data.Event == "batch_nudge" {
+			counts = append(counts, ev.Data.SingleCallTurns)
+		}
+	}
+
+	return counts
+}

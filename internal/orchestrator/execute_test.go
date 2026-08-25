@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"runtime"
@@ -743,6 +744,55 @@ func TestCoderRunGetsWrapUpNudge(t *testing.T) {
 	joined := strings.Join(client.tasks, "\n")
 	assert.Contains(t, joined, coderWrapUpMessage,
 		"the wrap-up nudge reaches the coder conversation as a user message")
+}
+
+// TestCoderRunGetsBatchNudge proves the coder phase actually arms the harness
+// batching nudge: three consecutive turns that each spend a whole model call on
+// one read-only lookup earn exactly one nudge, naming the three turns that
+// triggered it. The mechanism ships in the harness disabled - a zero threshold
+// counts nothing - so this fails whenever the coder config stops setting one,
+// which is the state the phase was in before this test existed.
+func TestCoderRunGetsBatchNudge(t *testing.T) {
+	var transcript bytes.Buffer
+
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	// Three single-read turns arm the nudge; the fourth call falls through to
+	// the fake's default stop response, ending the run after the injection.
+	client := &planLLM{responses: burnResps(3)}
+
+	d := execTestDeps(ops, git, client)
+	d.Emit = events.NewEmitter(nil, &transcript)
+	// The base MaxTurns of 20 keeps the wrap-up nudge (which fires at 20-5=15
+	// turns) well clear: a run already told to finish suppresses the batching
+	// nudge for the rest of the run.
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	assert.Equal(t, []int{3}, batchNudgeCounts(t, &transcript),
+		"the coder is nudged once, after three consecutive single-lookup turns")
+}
+
+// TestCoderRunNoBatchNudgeBelowThreshold pins the configured threshold itself:
+// two consecutive single-lookup turns are one short, so nothing fires. Paired
+// with TestCoderRunGetsBatchNudge it brackets the value from both sides, making
+// any later change to it a visible decision rather than silent drift.
+func TestCoderRunNoBatchNudgeBelowThreshold(t *testing.T) {
+	var transcript bytes.Buffer
+
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: burnResps(2)}
+
+	d := execTestDeps(ops, git, client)
+	d.Emit = events.NewEmitter(nil, &transcript)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	assert.Empty(t, batchNudgeCounts(t, &transcript),
+		"two single-lookup turns are below the threshold and earn no nudge")
 }
 
 // TestCoderRunTierScalesTurnBudget proves a complex subtask lifts the coder turn

@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -315,6 +316,29 @@ func TestTierStringToRegistryTier(t *testing.T) {
 		assert.Equal(t, registry.TierModerate, tierFromString("gigantic"))
 		assert.Equal(t, registry.TierModerate, tierFromString(""))
 	})
+}
+
+// TestPlanRunGetsNoBatchNudge proves the batching nudge is scoped to the coder
+// family rather than stamped on the shared per-phase config: the planner
+// already groups its lookups, and a nudge there would spend the one-shot
+// injection on a phase doing it right. Four consecutive single-read turns - one
+// more than the coder needs to earn its nudge - leave the planner unnudged.
+func TestPlanRunGetsNoBatchNudge(t *testing.T) {
+	var transcript bytes.Buffer
+
+	ops := &fakeOps{
+		taskContext: cmclient.TaskContext{Title: "Parent", Description: "body"},
+		createdIDs:  []string{"SUB-1", "SUB-2"},
+	}
+	llmFake := &planLLM{responses: append(burnResps(4), stopResp(goodPlanJSON, 0.01))}
+	d := planTestDeps(ops, llmFake)
+	d.Emit = events.NewEmitter(nil, &transcript)
+
+	o := newRun(d, ops.taskContext)
+	require.NoError(t, runPlan(context.Background(), o))
+
+	assert.Empty(t, batchNudgeCounts(t, &transcript),
+		"the planner is deliberately left unnudged")
 }
 
 func TestPlanPhaseCreatesSubtasks(t *testing.T) {
