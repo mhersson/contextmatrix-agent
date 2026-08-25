@@ -331,9 +331,12 @@ type run struct {
 	// until a cycle has been watched. Sizes the fix-round reserve.
 	ciObservedSettle time.Duration
 
-	// reviewSummary is the synthesis verdict's one-line summary captured on
-	// approval, carried into the integrate phase's PR body. Empty when review was
-	// skipped (resume entering at integrate) or the summary was blank.
+	// reviewSummary is the review outcome captured on approval and carried into
+	// the integrate phase's PR body: the synthesis verdict's one-line summary
+	// alone when nothing survived the critique round, otherwise that summary
+	// plus the surviving findings, framed by whether anything fixed them (see
+	// approvedDespiteFindings and its siblings). Empty when review was skipped
+	// (resume entering at integrate) or the summary was blank.
 	reviewSummary string
 
 	// selMu guards the shared model-selection state (coderModels, reselects,
