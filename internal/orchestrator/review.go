@@ -57,6 +57,7 @@ type fix struct {
 	File       string `json:"file"`
 	Issue      string `json:"issue"`
 	Suggestion string `json:"suggestion"`
+	Severity   string `json:"severity"`
 }
 
 // ReviewParkedError marks the review cap being exhausted without approval. The
@@ -184,7 +185,7 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 			return o.authoritativeReview(ctx, plan, round)
 		}
 
-		findings, fixTier, approved, vres, err := o.reviewRound(ctx, plan, round, false)
+		findings, fixTier, approved, vres, fixes, err := o.reviewRound(ctx, plan, round, false)
 		if err != nil {
 			return err
 		}
@@ -194,8 +195,39 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 		o.recordReview(ctx, round, findings, approved, vres)
 
 		if approved {
-			o.reviewSummary = findings // synthesis verdict summary, for the PR body
+			o.reviewSummary = findings // synthesis verdict summary (plus any surviving fixes), for the PR body
 			o.fixEscalate = false
+
+			// Findings survived the critique round despite approval: run exactly
+			// one non-escalating cleanup pass and finish either way. This is not
+			// another review round - it never increments review attempts, never
+			// loops back into the panel, and a non-budget error or a no-op commit
+			// can never un-approve a verdict that already cleared review. A budget
+			// error is the one exception: it is not an opinion about the change,
+			// it is the single point at which the worker learns the run must
+			// stop, so it propagates instead of being swallowed here.
+			if len(fixes) > 0 {
+				committed, ferr := o.runFix(ctx, findings, round, fixTier, false)
+				if ferr != nil {
+					if isBudgetError(ferr) {
+						d.logCard(ctx, "review: approved with %d surviving finding(s), but the cleanup fix pass hit the budget ceiling - parking: %s",
+							len(fixes), ferr)
+
+						return ferr
+					}
+
+					d.logCard(ctx, "review: approved with %d surviving finding(s), but the cleanup fix pass failed - proceeding approved: %s",
+						len(fixes), ferr)
+
+					return nil
+				}
+
+				if committed {
+					d.logCard(ctx, "review: approved with %d surviving finding(s) - applied a non-escalating cleanup fix pass", len(fixes))
+				} else {
+					d.logCard(ctx, "review: approved with %d surviving finding(s), but the cleanup fix pass produced no change", len(fixes))
+				}
+			}
 
 			return nil
 		}
@@ -250,7 +282,7 @@ func (o *run) runReviewHITL(ctx context.Context, plan verifyPlan) error {
 	for iter := range hardReviewIterationCap {
 		round := o.tc.ReviewAttempts + iter + 1
 
-		findings, fixTier, autoApproved, vres, err := o.reviewRound(ctx, plan, round, false)
+		findings, fixTier, autoApproved, vres, _, err := o.reviewRound(ctx, plan, round, false)
 		if err != nil {
 			return err
 		}
@@ -358,7 +390,7 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 		return err
 	}
 
-	findings, fixTier, approved, vres, err := o.reviewRound(ctx, plan, round, true)
+	findings, fixTier, approved, vres, _, err := o.reviewRound(ctx, plan, round, true)
 	if err != nil {
 		return err
 	}
@@ -366,6 +398,10 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 	o.recordReview(ctx, round, findings, approved, vres)
 
 	if approved {
+		// Deliberately no cleanup pass here, unlike reviewLoop's approval branch:
+		// this IS the cliff, so any surviving findings are simply surfaced
+		// through reviewSummary (and the PR body) rather than spending another
+		// strong-tier fix run right before a park.
 		o.reviewSummary = findings
 
 		return nil
@@ -386,7 +422,7 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 	// One strong re-review of the full change.
 	round2 := round + 1
 
-	findings2, _, approved2, vres2, err := o.reviewRound(ctx, plan, round2, true)
+	findings2, _, approved2, vres2, _, err := o.reviewRound(ctx, plan, round2, true)
 	if err != nil {
 		return err
 	}
@@ -436,24 +472,29 @@ func (o *run) incrementReviewAttempt(ctx context.Context, findings string) (int,
 }
 
 // reviewRound runs one review pass and returns the outstanding findings text,
-// whether the work is approved, the round's verify result, and any fatal error
-// (budget park, transport). The tri-state verify gate runs first: FAILED
-// short-circuits to the fix loop (redacted output tail as the finding) WITHOUT
-// spending reviewer tokens; SKIPPED logs loudly and proceeds to the specialists
-// WITHOUT the fix loop (a missing/timed-out gate is not a defect to fix); PASSED
-// (or no command) proceeds. On any gate outcome that reaches them, the three
-// specialists fan out and the synthesis verdict decides.
-func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, authoritative bool) (findings string, fixTier string, approved bool, vres verifyResult, err error) {
+// whether the work is approved, the round's verify result, the verdict's raw
+// fix list, and any fatal error (budget park, transport). fixes is nil when
+// no verdict ran (the verify-failed short-circuit) and carries v.Fixes -
+// possibly non-empty even when approved - from whichever verdict path
+// produced it otherwise; it lets the caller act on findings that survived
+// approval without re-parsing the rendered findings text. The tri-state
+// verify gate runs first: FAILED short-circuits to the fix loop (redacted
+// output tail as the finding) WITHOUT spending reviewer tokens; SKIPPED logs
+// loudly and proceeds to the specialists WITHOUT the fix loop (a
+// missing/timed-out gate is not a defect to fix); PASSED (or no command)
+// proceeds. On any gate outcome that reaches them, the three specialists fan
+// out and the synthesis verdict decides.
+func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, authoritative bool) (findings string, fixTier string, approved bool, vres verifyResult, fixes []fix, err error) {
 	// Budget gate before the verify subprocess too - the gate may be cheap, but
 	// the fix run it can trigger is not, and we park before doing any work.
 	if err := o.ledger.Check(); err != nil {
-		return "", "", false, verifyResult{}, err
+		return "", "", false, verifyResult{}, nil, err
 	}
 
 	if len(plan.Argv) > 0 {
 		res, verr := o.runVerifyPlan(ctx, o.d.Cfg.Workspace, plan)
 		if verr != nil {
-			return "", "", false, verifyResult{}, verr
+			return "", "", false, verifyResult{}, nil, verr
 		}
 
 		vres = res
@@ -468,7 +509,7 @@ func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, autho
 			// knows the block starts mid-output rather than at the command's start.
 			// No verdict ran, so the fix run falls back to the card tier (empty fixTier).
 			return verifyFailedPrefix + plan.Display + "\n\nVerify output (tail):\n\n" +
-				verifyFailureExcerpt(res.Output), "", false, vres, nil
+				verifyFailureExcerpt(res.Output), "", false, vres, nil, nil
 		case verifySkipped:
 			// A missing or timed-out gate is inconclusive, not a defect: proceed to
 			// the specialists without a fix loop. logVerifyRound already said so.
@@ -485,32 +526,32 @@ func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, autho
 	if o.d.Cfg.Mob.enabled() && o.d.Cfg.Mob.Review && !authoritative {
 		if v, ok := o.mobReviewVerdict(ctx); ok {
 			if v.Approved {
-				return v.Summary, v.FixTier, true, vres, nil
+				return strings.TrimSpace(formatFixes(v)), v.FixTier, true, vres, v.Fixes, nil
 			}
 
-			return formatFixes(v), v.FixTier, false, vres, nil
+			return strings.TrimSpace(formatFixes(v)), v.FixTier, false, vres, v.Fixes, nil
 		}
 	}
 
 	specialistFindings, err := o.runSpecialists(ctx, authoritative)
 	if err != nil {
-		return "", "", false, vres, err
+		return "", "", false, vres, nil, err
 	}
 
 	if err := o.ledger.Check(); err != nil {
-		return "", "", false, vres, err
+		return "", "", false, vres, nil, err
 	}
 
 	v, err := o.synthesize(ctx, specialistFindings, authoritative)
 	if err != nil {
-		return "", "", false, vres, err
+		return "", "", false, vres, nil, err
 	}
 
 	if v.Approved {
-		return v.Summary, v.FixTier, true, vres, nil
+		return strings.TrimSpace(formatFixes(v)), v.FixTier, true, vres, v.Fixes, nil
 	}
 
-	return formatFixes(v), v.FixTier, false, vres, nil
+	return strings.TrimSpace(formatFixes(v)), v.FixTier, false, vres, v.Fixes, nil
 }
 
 // runSpecialists fans the three review lenses out as parallel read-only child
@@ -1067,9 +1108,40 @@ func reviewFindingsHistory(body string) string {
 	return strings.TrimSpace(sectionsWithPrefix(body, "Review Findings"))
 }
 
+// validSeverities is the vocabulary the synthesis prompts ask for (see
+// specialistPrompt and synthesisPrompt/reviewSynthesisPrompt in prompts.go).
+var validSeverities = map[string]bool{
+	"critical":  true,
+	"important": true,
+	"minor":     true,
+	"nit":       true,
+}
+
+// normalizeSeverity lower-cases and trims s, returning "" for anything outside
+// validSeverities. Severity is free text from model JSON that formatFixes
+// interpolates verbatim into findings text which fixFiles re-parses
+// line-by-line (cutting at the first colon) and which also reaches
+// o.reviewSummary and, from there, the PR body (integrate.go): an unvalidated
+// severity containing a newline could inject a synthetic fix line that
+// fixFiles would treat as a real file path.
+func normalizeSeverity(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if !validSeverities[s] {
+		return ""
+	}
+
+	return s
+}
+
 // parseVerdict extracts the synthesis verdict JSON (tolerating prose / code
 // fences) and unmarshals it. A missing object or malformed JSON is an error so
-// the synthesis caller can take its single repair turn.
+// the synthesis caller can take its single repair turn. It is the single choke
+// point for the verdict type - mobReviewVerdict and synthesize both route
+// through it - so normalizing Severity here covers both the mob and solo
+// review paths with one call site. parseCheckpointVerdict (checkpoint.go) is
+// deliberately NOT covered: its fixes reach neither fixFiles nor the PR body,
+// and its File/Issue/Suggestion are equally unvalidated, so validating only
+// its severity would be inconsistent.
 func parseVerdict(s string) (verdict, error) {
 	raw, ok := extractJSON(s)
 	if !ok {
@@ -1081,13 +1153,18 @@ func parseVerdict(s string) (verdict, error) {
 		return verdict{}, fmt.Errorf("unmarshal verdict JSON: %w", err)
 	}
 
+	for i := range v.Fixes {
+		v.Fixes[i].Severity = normalizeSeverity(v.Fixes[i].Severity)
+	}
+
 	return v, nil
 }
 
 // formatFixes renders a verdict's fix list as the findings text carried into the
-// fix run and (on cap exhaustion) the activity log. The "- <file>: <issue>" line
-// shape is a contract with fixFiles, which parses the paths back out for fixup
-// targeting - keep the two in sync.
+// fix run and (on cap exhaustion) the activity log. The
+// "- <file>: [<severity>] <issue> - <suggestion>" line shape - severity's
+// bracket is omitted entirely when empty - is a contract with fixFiles, which
+// parses the file path back out for fixup targeting - keep the two in sync.
 func formatFixes(v verdict) string {
 	var b strings.Builder
 
@@ -1100,6 +1177,13 @@ func formatFixes(v verdict) string {
 		b.WriteString("- ")
 		b.WriteString(f.File)
 		b.WriteString(": ")
+
+		if f.Severity != "" {
+			b.WriteString("[")
+			b.WriteString(f.Severity)
+			b.WriteString("] ")
+		}
+
 		b.WriteString(f.Issue)
 
 		if f.Suggestion != "" {

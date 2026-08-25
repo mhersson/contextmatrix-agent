@@ -454,7 +454,10 @@ Stay strictly within security and performance; do not opine outside it.`
 // sets each finding's severity itself - a specialist's label and the number of
 // specialists raising it are inputs, not the verdict - and blocks only on a real
 // bug, a real vulnerability, a broken test, or a missed acceptance criterion;
-// unrequested hardening is Minor. Only Minor/Nit/none → approved.
+// unrequested hardening is Minor. approved governs merge eligibility only - it
+// never gates whether a finding is reported: fixes carries every finding that
+// survived the critique round, tagged with its own severity, regardless of
+// approved.
 //
 // The trailing %s slots are filled by synthesize: parent card title, parent
 // card description, an optional prior-findings block (the previous round's
@@ -484,7 +487,10 @@ Decision rule:
   (incomplete) → not approved. If it ADDED things outside the task's scope (new
   abstractions, middleware, caching, hardening the task didn't ask for) → not
   approved, and the fix is to remove them.
-- Only Minor concerns, Nits, or no concerns → approved.
+- approved governs ONLY whether the change may merge: any blocker above forces
+  approved:false.
+- Minor concerns and Nits never block - approved stays true - but they still go
+  in fixes.
 
 Be specific and actionable. Every fix must cite a file in the change set and
 give a concrete suggestion - no vague hand-waves. Commit status is never an
@@ -505,10 +511,12 @@ Respond with ONLY a JSON object, no prose:
 {"approved":true|false,
  "summary":"<one-line overall verdict>",
  "fix_tier":"simple|moderate|complex",
- "fixes":[{"file":"...","issue":"...","suggestion":"..."}]}
+ "fixes":[{"file":"...","issue":"...","suggestion":"...","severity":"critical|important|minor|nit"}]}
 
 fix_tier is the difficulty of APPLYING these fixes (default to the card's tier if unsure).
-When approved is true, fixes must be an empty array.
+fixes is independent of approved: it carries every finding a seat raised and did
+not withdraw, whatever its severity. An approved verdict with an empty fixes
+array asserts that nothing survived the critique round - never a default.
 `
 
 // fixPrompt is the coder fix-run instruction for a review round that returned
@@ -1086,7 +1094,10 @@ Decision rule:
 - Unrequested hardening, style, and naming are Minor at most and never block.
 - Work added outside the task's scope means not approved, and the fix is to
   remove it.
-- Only Minor concerns, Nits, or no concerns → approved.
+- approved governs ONLY whether the change may merge: any blocker above forces
+  approved:false.
+- Minor concerns and Nits never block - approved stays true - but they still go
+  in fixes.
 
 ` + sweepRule + `
 
@@ -1100,10 +1111,12 @@ Respond with ONLY a JSON object, no prose:
 {"approved":true|false,
  "summary":"<one-line overall verdict>",
  "fix_tier":"simple|moderate|complex",
- "fixes":[{"file":"...","issue":"...","suggestion":"..."}]}
+ "fixes":[{"file":"...","issue":"...","suggestion":"...","severity":"critical|important|minor|nit"}]}
 
 fix_tier is the difficulty of APPLYING these fixes (default to the card's tier if unsure).
-When approved is true, fixes must be an empty array.
+fixes is independent of approved: it carries every finding a seat raised and did
+not withdraw, whatever its severity. An approved verdict with an empty fixes
+array asserts that nothing survived the critique round - never a default.
 `
 
 // checkpointBriefing opens an execute-checkpoint discussion: the just-
@@ -1138,6 +1151,11 @@ COMMITTED DIFF (this subtask's changes)
 
 // checkpointSynthesisPrompt is the moderator's checkpoint-verdict contract.
 // Slots: grounding, subtask title.
+//
+// Unlike synthesisPrompt and reviewSynthesisPrompt, this one keeps the
+// fixes-must-be-empty-on-proceed rule: its own decision rule already defers
+// every non-blocking finding to the review phase instead of surfacing it
+// here, so a proceed verdict never has anything left to report.
 const checkpointSynthesisPrompt = `%sYou are the moderator of a checkpoint discussion about the just-committed
 diff of subtask %q. Synthesize the seats' positions from the transcript that
 follows into one decision: proceed, or revise before the run builds on this

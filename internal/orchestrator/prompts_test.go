@@ -292,6 +292,25 @@ func TestSweepRuleInSynthesisPrompts(t *testing.T) {
 	}
 }
 
+func TestSeverityFieldInSynthesisPrompts(t *testing.T) {
+	for name, p := range map[string]string{
+		"synthesisPrompt":       synthesisPrompt,
+		"reviewSynthesisPrompt": reviewSynthesisPrompt,
+	} {
+		assert.Contains(t, p, `"severity"`,
+			"%s must request a severity field on each fix", name)
+
+		// normalizeSeverity drops anything outside validSeverities, so a tag the
+		// prompt never offers would silently render as no tag at all. Assert
+		// against the map itself rather than a copy of its values, so adding a
+		// severity in one place fails here until the other follows.
+		for sev := range validSeverities {
+			assert.Contains(t, p, sev,
+				"%s must offer the %q severity that normalizeSeverity accepts", name, sev)
+		}
+	}
+}
+
 func TestCoderGroundingRuleInCoderPrompt(t *testing.T) {
 	assert.Contains(t, coderPrompt, "hints to verify, not guarantees",
 		"coderPrompt must include the coder grounding rule")
