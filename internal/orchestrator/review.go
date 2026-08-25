@@ -185,7 +185,7 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 			return o.authoritativeReview(ctx, plan, round)
 		}
 
-		findings, fixTier, approved, vres, fixes, err := o.reviewRound(ctx, plan, round, false, fixRan)
+		findings, fixTier, approved, vres, fixes, err := o.reviewRound(ctx, plan, round, false)
 		if err != nil {
 			return err
 		}
@@ -295,7 +295,7 @@ func (o *run) runReviewHITL(ctx context.Context, plan verifyPlan) error {
 	for iter := range hardReviewIterationCap {
 		round := o.tc.ReviewAttempts + iter + 1
 
-		findings, fixTier, autoApproved, vres, fixes, err := o.reviewRound(ctx, plan, round, false, false)
+		findings, fixTier, autoApproved, vres, fixes, err := o.reviewRound(ctx, plan, round, false)
 		if err != nil {
 			return err
 		}
@@ -425,7 +425,7 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 		return err
 	}
 
-	findings, fixTier, approved, vres, fixes, err := o.reviewRound(ctx, plan, round, true, false)
+	findings, fixTier, approved, vres, fixes, err := o.reviewRound(ctx, plan, round, true)
 	if err != nil {
 		return err
 	}
@@ -461,7 +461,7 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 	// One strong re-review of the full change.
 	round2 := round + 1
 
-	findings2, _, approved2, vres2, fixes2, err := o.reviewRound(ctx, plan, round2, true, false)
+	findings2, _, approved2, vres2, fixes2, err := o.reviewRound(ctx, plan, round2, true)
 	if err != nil {
 		return err
 	}
@@ -526,11 +526,7 @@ func (o *run) incrementReviewAttempt(ctx context.Context, findings string) (int,
 // missing/timed-out gate is not a defect to fix); PASSED (or no command)
 // proceeds. On any gate outcome that reaches them, the three specialists fan
 // out and the synthesis verdict decides.
-//
-// The two bools are independent and must not be transposed: authoritative
-// selects the strong solo pass (tier escalation, full findings history, no mob
-// branch), while fullScope only widens the mob briefing's diff base.
-func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, authoritative, fullScope bool) (findings string, fixTier string, approved bool, vres verifyResult, fixes []fix, err error) {
+func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, authoritative bool) (findings string, fixTier string, approved bool, vres verifyResult, fixes []fix, err error) {
 	// Budget gate before the verify subprocess too - the gate may be cheap, but
 	// the fix run it can trigger is not, and we park before doing any work.
 	if err := o.ledger.Check(); err != nil {
@@ -570,7 +566,7 @@ func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, autho
 	// non-authoritative rounds (the authoritative pass keeps the proven solo
 	// machinery); a failed discussion degrades to the fan-out below.
 	if o.d.Cfg.Mob.enabled() && o.d.Cfg.Mob.Review && !authoritative {
-		if v, ok := o.mobReviewVerdict(ctx, fullScope); ok {
+		if v, ok := o.mobReviewVerdict(ctx); ok {
 			if v.Approved {
 				return strings.TrimSpace(formatFixes(v)), v.FixTier, true, vres, v.Fixes, nil
 			}
@@ -765,16 +761,29 @@ func (o *run) reviewExclusions() map[string]bool {
 // mobReviewVerdict convenes the review discussion and parses its synthesis
 // into the existing verdict shape, with ONE moderator repair on a parse
 // failure (mirroring synthesize's repair turn). ok=false on any failure -
-// the caller falls back to the specialist fan-out. On success it records the
-// review snapshot head, exactly like runSpecialists, so later rounds stay
-// delta-scoped.
-func (o *run) mobReviewVerdict(ctx context.Context, fullScope bool) (verdict, bool) {
-	briefing, err := o.mobReviewBriefing(ctx, fullScope)
+// mobFallback records a mob-review degradation and returns the no-verdict
+// result that sends the round to the solo fan-out. It logs to the card, not
+// just the transcript: a review that quietly changed shape otherwise looks
+// identical to one that did not.
+func (o *run) mobFallback(ctx context.Context, reason string, err error) (verdict, bool) {
 	if err != nil {
-		slog.Warn("mob review: briefing failed; solo fallback",
-			"card_id", o.d.Cfg.CardID, "error", err)
+		slog.Warn("mob review: "+reason+"; solo fallback", "card_id", o.d.Cfg.CardID, "error", err)
+	} else {
+		slog.Warn("mob review: "+reason+"; solo fallback", "card_id", o.d.Cfg.CardID)
+	}
 
-		return verdict{}, false
+	o.d.logCard(ctx, "review: mob discussion unavailable (%s) - falling back to the solo specialist panel", reason)
+
+	return verdict{}, false
+}
+
+// the caller falls back to the specialist fan-out. On success it records the
+// review snapshot head, exactly like runSpecialists - the mob briefing itself
+// never uses it, but a later round that falls back to the solo fan-out does.
+func (o *run) mobReviewVerdict(ctx context.Context) (verdict, bool) {
+	briefing, err := o.mobReviewBriefing(ctx)
+	if err != nil {
+		return o.mobFallback(ctx, "briefing failed", err)
 	}
 
 	seats := min(o.d.Cfg.Mob.Participants, len(reviewLenses))
@@ -791,25 +800,19 @@ func (o *run) mobReviewVerdict(ctx context.Context, fullScope bool) (verdict, bo
 
 	out, ok := o.mobDiscuss(ctx, t)
 	if !ok {
-		return verdict{}, false
+		return o.mobFallback(ctx, "discussion failed", nil)
 	}
 
 	v, perr := parseVerdict(out.Synthesis)
 	if perr != nil {
 		repaired, rerr := o.mobResynthesize(ctx, t, out, perr.Error())
 		if rerr != nil {
-			slog.Warn("mob review: repair synthesis failed; solo fallback",
-				"card_id", o.d.Cfg.CardID, "error", rerr)
-
-			return verdict{}, false
+			return o.mobFallback(ctx, "repair synthesis failed", rerr)
 		}
 
 		v, perr = parseVerdict(repaired)
 		if perr != nil {
-			slog.Warn("mob review: verdict parse failed after repair; solo fallback",
-				"card_id", o.d.Cfg.CardID, "error", perr)
-
-			return verdict{}, false
+			return o.mobFallback(ctx, "verdict parse failed after repair", perr)
 		}
 	}
 
@@ -822,20 +825,17 @@ func (o *run) mobReviewVerdict(ctx context.Context, fullScope bool) (verdict, bo
 }
 
 // mobReviewBriefing assembles the discussion briefing: the branch diff against
-// the delta base (lastReviewBase when a prior round snapshotted, else the base
-// branch) plus the prior round's findings. fullScope forces the base-branch
-// diff even when a snapshot exists, because a fix can land code outside the
-// delta it targeted. reviewLoop sources it from fixRan, which it never clears,
-// so once any fix has run every remaining round stays full scope. The solo
-// fan-out deliberately does not widen this way, so on those rounds the two
-// paths review different scopes.
-func (o *run) mobReviewBriefing(ctx context.Context, fullScope bool) (string, error) {
-	base := o.lastReviewBase
-	if base == "" || fullScope {
-		base = o.d.Cfg.BaseBranch
-	}
-
-	diff, err := o.d.Git.Diff(ctx, base)
+// the base branch plus the prior round's findings.
+//
+// The diff is never scoped to a review snapshot. A fix can land code outside
+// the delta it targeted, and every mob round after the first follows a fix, so
+// a snapshot-scoped briefing would hide exactly the code the round exists to
+// re-examine - a seat reported this at runtime, saying the findings cited
+// symbols absent from its diff. The solo fan-out still scopes to the snapshot
+// on those rounds (it re-widens only on the authoritative pass and after a
+// no-op fix), so it carries the same gap; closing it there is separate work.
+func (o *run) mobReviewBriefing(ctx context.Context) (string, error) {
+	diff, err := o.d.Git.Diff(ctx, o.d.Cfg.BaseBranch)
 	if err != nil {
 		return "", fmt.Errorf("review diff: %w", err)
 	}

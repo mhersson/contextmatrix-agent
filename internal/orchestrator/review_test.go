@@ -1325,7 +1325,7 @@ func TestRunFixRoutesByFindingsOrigin(t *testing.T) {
 			return verifyexec.Outcome{ExitCode: 1, Output: "FAIL: tests broke"}
 		}
 
-		findings, fixTier, approved, _, _, err := o.reviewRound(context.Background(), *o.verify, 1, false, false)
+		findings, fixTier, approved, _, _, err := o.reviewRound(context.Background(), *o.verify, 1, false)
 		require.NoError(t, err)
 		assert.False(t, approved)
 
@@ -1353,7 +1353,7 @@ func TestRunFixRoutesByFindingsOrigin(t *testing.T) {
 		tc := cmclient.TaskContext{Title: "Parent", Description: "the distinctive parent description", State: "in_progress"}
 		o := newReviewRun(d, tc, 0)
 
-		findings, fixTier, approved, _, _, err := o.reviewRound(context.Background(), verifyPlan{}, 1, false, false)
+		findings, fixTier, approved, _, _, err := o.reviewRound(context.Background(), verifyPlan{}, 1, false)
 		require.NoError(t, err)
 		assert.False(t, approved)
 
@@ -1384,7 +1384,7 @@ func TestReviewGateSkippedProceedsUnverified(t *testing.T) {
 		return verifyexec.Outcome{StartErr: true, ExitCode: -1}
 	}
 
-	findings, _, approved, vres, _, err := o.reviewRound(context.Background(), *o.verify, 1, false, false)
+	findings, _, approved, vres, _, err := o.reviewRound(context.Background(), *o.verify, 1, false)
 	require.NoError(t, err)
 	assert.Equal(t, verifySkipped, vres.Status)
 	assert.True(t, approved, "a skipped gate proceeds to the specialists, which approve")
@@ -1407,7 +1407,7 @@ func TestReviewGateFailureRedactsFindings(t *testing.T) {
 		return verifyexec.Outcome{ExitCode: 1, Output: "auth error: SECRETTOKEN leaked in the log"}
 	}
 
-	findings, _, approved, vres, _, err := o.reviewRound(context.Background(), *o.verify, 1, false, false)
+	findings, _, approved, vres, _, err := o.reviewRound(context.Background(), *o.verify, 1, false)
 	require.NoError(t, err)
 	assert.False(t, approved)
 	assert.Equal(t, verifyFailed, vres.Status)
@@ -1785,7 +1785,11 @@ func TestReviewMobFallsBackToSpecialists(t *testing.T) {
 	assert.Len(t, llmFake.tasks, 4, "the specialist pass ran after the discussion degraded")
 }
 
-func TestReviewMobPassesExclusionsAndDeltaScope(t *testing.T) {
+// TestReviewMobPassesExclusionsAndPriorFindings keeps the two properties the
+// old delta-scope test really covered. Its snapshot assertion went with the
+// scoping: it set lastReviewBase by hand, a state round 1 cannot reach, and
+// mobReviewBriefing no longer reads the field at all.
+func TestReviewMobPassesExclusionsAndPriorFindings(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{}
 	llmFake := &planLLM{}
@@ -1793,7 +1797,6 @@ func TestReviewMobPassesExclusionsAndDeltaScope(t *testing.T) {
 
 	o := mobReviewRun(t, ops, git, llmFake, eng)
 	o.coderModels = map[string]bool{"rev/alpha": true}
-	o.lastReviewBase = "snapshot-sha"
 	o.lastFindings = "prior finding about a.go"
 
 	require.NoError(t, runReview(context.Background(), o))
@@ -1805,10 +1808,7 @@ func TestReviewMobPassesExclusionsAndDeltaScope(t *testing.T) {
 		assert.NotEqual(t, "rev/alpha", s.Model, "review seats must exclude the coder's model")
 	}
 
-	// Delta scoping feeds the briefing unchanged: diff against the snapshot,
-	// prior findings included. fakeGit captures diff bases in diffBases.
-	assert.Contains(t, git.diffBases, "snapshot-sha",
-		"the briefing diff uses lastReviewBase; bases=%v", git.diffBases)
+	assert.Equal(t, []string{"main"}, git.diffBases, "the briefing diffs the base branch")
 	assert.Contains(t, eng.topics[0].Briefing, "prior finding about a.go")
 }
 
@@ -1900,7 +1900,7 @@ func TestReviewGateFailureFindingsKeepTheTail(t *testing.T) {
 		return verifyexec.Outcome{ExitCode: 1, Output: out}
 	}
 
-	findings, _, approved, vres, _, err := o.reviewRound(context.Background(), *o.verify, 1, false, false)
+	findings, _, approved, vres, _, err := o.reviewRound(context.Background(), *o.verify, 1, false)
 	require.NoError(t, err)
 	require.False(t, approved)
 	require.Equal(t, verifyFailed, vres.Status)
@@ -2539,4 +2539,23 @@ func TestParseVerdictCollapsesNewlinesInFixText(t *testing.T) {
 
 	assert.Equal(t, []string{"a.go"}, fixFiles(formatFixes(v)),
 		"only the real file survives the round trip through the rendered findings")
+}
+
+// TestMobReviewBriefingAlwaysDiffsBaseBranch pins the invariant that a mob
+// briefing is never scoped to a snapshot: a fix can land code outside the delta
+// it targeted, and every mob round after the first follows a fix, so a
+// snapshot-scoped briefing would hide exactly the code the round exists to
+// re-examine.
+func TestMobReviewBriefingAlwaysDiffsBaseBranch(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{}
+	o := mobReviewRun(t, ops, git, &planLLM{}, &scriptedEngine{})
+
+	o.lastReviewBase = "snap1"
+
+	_, err := o.mobReviewBriefing(context.Background())
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"main"}, git.diffBases,
+		"the briefing diffs the base branch even with a snapshot recorded")
 }
