@@ -207,6 +207,17 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 			// it is the single point at which the worker learns the run must
 			// stop, so it propagates instead of being swallowed here.
 			if len(fixes) > 0 {
+				// Findings reach the PR body framed as open until a pass lands
+				// them: an approval carrying raw findings text lets the PR model
+				// narrate them as fixed (see approvedDespiteFindings).
+				o.reviewSummary = approvedWithOpenFindings(findings)
+
+				if !worthCleanupPass(fixes) {
+					d.logCard(ctx, "review: approved with %d surviving nit-only finding(s) - reported, no cleanup pass", len(fixes))
+
+					return nil
+				}
+
 				committed, ferr := o.runFix(ctx, findings, round, fixTier, false)
 				if ferr != nil {
 					if isBudgetError(ferr) {
@@ -223,6 +234,8 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 				}
 
 				if committed {
+					o.reviewSummary = approvedWithFixesApplied(findings)
+
 					d.logCard(ctx, "review: approved with %d surviving finding(s) - applied a non-escalating cleanup fix pass", len(fixes))
 				} else {
 					d.logCard(ctx, "review: approved with %d surviving finding(s), but the cleanup fix pass produced no change", len(fixes))
@@ -282,7 +295,7 @@ func (o *run) runReviewHITL(ctx context.Context, plan verifyPlan) error {
 	for iter := range hardReviewIterationCap {
 		round := o.tc.ReviewAttempts + iter + 1
 
-		findings, fixTier, autoApproved, vres, _, err := o.reviewRound(ctx, plan, round, false)
+		findings, fixTier, autoApproved, vres, fixes, err := o.reviewRound(ctx, plan, round, false)
 		if err != nil {
 			return err
 		}
@@ -297,7 +310,10 @@ func (o *run) runReviewHITL(ctx context.Context, plan verifyPlan) error {
 		switch outcome {
 		case gateApprove:
 			o.reviewSummary = findings
-			if !autoApproved {
+			// An approving verdict can now carry surviving findings, and nothing
+			// on this path fixes them: the human saw them and approved anyway,
+			// which is what the helper says.
+			if !autoApproved || len(fixes) > 0 {
 				o.reviewSummary = approvedDespiteFindings(findings)
 			}
 
@@ -308,6 +324,9 @@ func (o *run) runReviewHITL(ctx context.Context, plan verifyPlan) error {
 			// for the verdict already in hand (never re-run the round).
 			if autoApproved {
 				o.reviewSummary = findings
+				if len(fixes) > 0 {
+					o.reviewSummary = approvedWithOpenFindings(findings)
+				}
 
 				return nil
 			}
@@ -360,10 +379,26 @@ func presentFindings(findings string, autoApproved bool) string {
 
 // approvedDespiteFindings frames the review summary for the PR body when the
 // human approved integration while the automated verdict still had open
-// findings, so the PR model cannot narrate them as fixed. Any future path that
-// lets an approval coexist with open findings must reuse this helper.
+// findings, so the PR model cannot narrate them as fixed. Any path that lets an
+// approval coexist with open findings must frame the summary through this
+// helper or one of its two autonomous siblings below - never assign the raw
+// findings text.
 func approvedDespiteFindings(findings string) string {
 	return "The human reviewer approved integration despite these outstanding review findings (they were presented to the reviewer but not fixed):\n\n" + findings
+}
+
+// approvedWithOpenFindings is the autonomous sibling of approvedDespiteFindings:
+// the verdict approved the change while findings survived the critique round
+// and nothing fixed them.
+func approvedWithOpenFindings(findings string) string {
+	return "The review approved the change, but these findings survived the critique round and were not fixed:\n\n" + findings
+}
+
+// approvedWithFixesApplied frames the summary when the cleanup pass landed the
+// surviving findings as a fixup, so the PR model reads them as addressed rather
+// than open.
+func approvedWithFixesApplied(findings string) string {
+	return "The review approved the change. These findings survived the critique round and were applied in a follow-up cleanup pass:\n\n" + findings
 }
 
 // mergeFeedback folds the human's adjust feedback into the synthesized findings
@@ -390,7 +425,7 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 		return err
 	}
 
-	findings, fixTier, approved, vres, _, err := o.reviewRound(ctx, plan, round, true)
+	findings, fixTier, approved, vres, fixes, err := o.reviewRound(ctx, plan, round, true)
 	if err != nil {
 		return err
 	}
@@ -401,8 +436,12 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 		// Deliberately no cleanup pass here, unlike reviewLoop's approval branch:
 		// this IS the cliff, so any surviving findings are simply surfaced
 		// through reviewSummary (and the PR body) rather than spending another
-		// strong-tier fix run right before a park.
+		// strong-tier fix run right before a park. They still reach the PR body
+		// framed as open, never as raw findings text.
 		o.reviewSummary = findings
+		if len(fixes) > 0 {
+			o.reviewSummary = approvedWithOpenFindings(findings)
+		}
 
 		return nil
 	}
@@ -422,7 +461,7 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 	// One strong re-review of the full change.
 	round2 := round + 1
 
-	findings2, _, approved2, vres2, _, err := o.reviewRound(ctx, plan, round2, true)
+	findings2, _, approved2, vres2, fixes2, err := o.reviewRound(ctx, plan, round2, true)
 	if err != nil {
 		return err
 	}
@@ -431,6 +470,9 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 
 	if approved2 {
 		o.reviewSummary = findings2
+		if len(fixes2) > 0 {
+			o.reviewSummary = approvedWithOpenFindings(findings2)
+		}
 
 		return nil
 	}
@@ -1108,22 +1150,37 @@ func reviewFindingsHistory(body string) string {
 	return strings.TrimSpace(sectionsWithPrefix(body, "Review Findings"))
 }
 
+// severityNit is the one severity that does not earn a cleanup fix pass.
+const severityNit = "nit"
+
 // validSeverities is the vocabulary the synthesis prompts ask for (see
 // specialistPrompt and synthesisPrompt/reviewSynthesisPrompt in prompts.go).
 var validSeverities = map[string]bool{
 	"critical":  true,
 	"important": true,
 	"minor":     true,
-	"nit":       true,
+	severityNit: true,
+}
+
+// worthCleanupPass reports whether a surviving fix list earns a fix-coder run,
+// a fixup commit and a push on a change that already cleared review. A verdict
+// carrying nothing but nits does not - they are reported in the summary and
+// left alone. An unlabelled finding counts as actionable: a model that omits
+// severity must not have its findings silently demoted into the discard this
+// field exists to end.
+func worthCleanupPass(fixes []fix) bool {
+	for _, f := range fixes {
+		if f.Severity != severityNit {
+			return true
+		}
+	}
+
+	return false
 }
 
 // normalizeSeverity lower-cases and trims s, returning "" for anything outside
-// validSeverities. Severity is free text from model JSON that formatFixes
-// interpolates verbatim into findings text which fixFiles re-parses
-// line-by-line (cutting at the first colon) and which also reaches
-// o.reviewSummary and, from there, the PR body (integrate.go): an unvalidated
-// severity containing a newline could inject a synthetic fix line that
-// fixFiles would treat as a real file path.
+// validSeverities, so the rendered tag is always one of four known words and
+// worthCleanupPass can decide on it.
 func normalizeSeverity(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	if !validSeverities[s] {
@@ -1131,6 +1188,15 @@ func normalizeSeverity(s string) string {
 	}
 
 	return s
+}
+
+// collapseLines folds newlines in model-authored fix text into spaces. Every
+// field on a fix reaches findings text that formatFixes renders one line per
+// finding and fixFiles re-parses line-by-line, cutting at the first colon: an
+// embedded newline in any of them would inject a synthetic fix line naming a
+// file no reviewer raised, which the fix run would then target.
+func collapseLines(s string) string {
+	return strings.TrimSpace(strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(s))
 }
 
 // parseVerdict extracts the synthesis verdict JSON (tolerating prose / code
@@ -1155,6 +1221,9 @@ func parseVerdict(s string) (verdict, error) {
 
 	for i := range v.Fixes {
 		v.Fixes[i].Severity = normalizeSeverity(v.Fixes[i].Severity)
+		v.Fixes[i].File = collapseLines(v.Fixes[i].File)
+		v.Fixes[i].Issue = collapseLines(v.Fixes[i].Issue)
+		v.Fixes[i].Suggestion = collapseLines(v.Fixes[i].Suggestion)
 	}
 
 	return v, nil

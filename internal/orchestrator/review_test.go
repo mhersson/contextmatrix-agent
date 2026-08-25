@@ -372,6 +372,9 @@ func TestReviewApprovedWithFixesRunsOneFixPass(t *testing.T) {
 		"the surviving finding must land as a fixup; git=%v", git.recorded())
 	assert.Equal(t, -1, indexOfCall(ops.recorded(), "IncrementReviewAttempts:CARD-1"),
 		"a non-escalating cleanup pass on an approved round must not increment attempts; calls=%v", ops.recorded())
+	assert.Contains(t, o.reviewSummary, "were applied in a follow-up cleanup pass",
+		"the PR body must say the surviving findings were fixed, not leave them reading as open")
+	assert.Contains(t, o.reviewSummary, "a.go", "the finding rides the summary")
 }
 
 // TestReviewApprovedFixCleanupNoOpDoesNotEscalate proves that when the
@@ -400,6 +403,8 @@ func TestReviewApprovedFixCleanupNoOpDoesNotEscalate(t *testing.T) {
 		"three specialists, one synthesis, and the cleanup pass's fix-coder call; tasks=%v", client.tasks)
 	assert.Contains(t, client.tasks[4], "a.go",
 		"the cleanup pass's fix prompt must be built from the surviving finding")
+	assert.Contains(t, o.reviewSummary, "were not fixed",
+		"a cleanup pass that landed nothing must not leave the PR model free to narrate the findings as fixed")
 	assert.True(t, ops.loggedContains("produced no change"),
 		"the no-op cleanup pass must be logged; logs=%v", ops.logs)
 
@@ -2384,4 +2389,122 @@ func TestReviewFixNoAlternativeModelParks(t *testing.T) {
 			assert.True(t, ops.loggedContains(tc.model), "the park names the model that failed; logs=%v", ops.recorded())
 		})
 	}
+}
+
+// TestReviewApprovedNitOnlyFindingsSkipCleanupPass pins that severity is a
+// decision, not decoration: an approved verdict carrying nothing but nits is
+// not worth a fix-coder run, a fixup commit and a push. Exactly four responses
+// are queued, so a cleanup pass would show up as a fifth call.
+func TestReviewApprovedNitOnlyFindingsSkipCleanupPass(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+	client := &planLLM{responses: []llm.Response{
+		stopResp("Correctness: nothing blocking", 0.01),
+		stopResp("Design: naming nit", 0.01),
+		stopResp("Security: looks fine", 0.01),
+		stopResp(`{"approved":true,"summary":"clean","fixes":[`+
+			`{"file":"a.go","issue":"name could be shorter","suggestion":"rename","severity":"nit"},`+
+			`{"file":"b.go","issue":"stray blank line","suggestion":"drop it","severity":"nit"}]}`, 0.02),
+	}}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	require.Len(t, client.tasks, 4, "three specialists and one synthesis - no fix coder; tasks=%v", client.tasks)
+	assert.Equal(t, -1, indexOfPrefix(git.recorded(), "CommitFixup:"),
+		"nit-only findings must not buy a fixup commit; git=%v", git.recorded())
+	assert.Contains(t, o.reviewSummary, "were not fixed",
+		"the nits still reach the PR body, framed as unfixed")
+	assert.Contains(t, o.reviewSummary, "a.go", "the nits ride the summary rather than being discarded")
+}
+
+// TestReviewApprovedNonNitFindingRunsCleanupPass is the other half of the nit
+// gate: one finding above nit is enough to earn the pass, even alongside nits.
+func TestReviewApprovedNonNitFindingRunsCleanupPass(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+	client := &planLLM{responses: []llm.Response{
+		stopResp("Correctness: off-by-one", 0.01),
+		stopResp("Design: naming nit", 0.01),
+		stopResp("Security: looks fine", 0.01),
+		stopResp(`{"approved":true,"summary":"clean","fixes":[`+
+			`{"file":"a.go","issue":"name could be shorter","suggestion":"rename","severity":"nit"},`+
+			`{"file":"b.go","issue":"off-by-one in the loop bound","suggestion":"use <=","severity":"minor"}]}`, 0.02),
+		stopResp("coder: fixed", 0.05),
+	}}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	require.Len(t, client.tasks, 5, "the cleanup pass runs; tasks=%v", client.tasks)
+	assert.GreaterOrEqual(t, indexOfPrefix(git.recorded(), "CommitFixup:"), 0,
+		"the fix must land as a fixup; git=%v", git.recorded())
+}
+
+// TestReviewApprovedUnlabelledFindingRunsCleanupPass pins the fail-open half of
+// the gate: a model that omits severity must not have its findings silently
+// demoted to nits and skipped - that is the discard this card exists to end.
+func TestReviewApprovedUnlabelledFindingRunsCleanupPass(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+	client := &planLLM{responses: []llm.Response{
+		stopResp("Correctness: bug", 0.01),
+		stopResp("Design: ok", 0.01),
+		stopResp("Security: ok", 0.01),
+		stopResp(`{"approved":true,"summary":"clean","fixes":[{"file":"a.go","issue":"bug","suggestion":"patch"}]}`, 0.02),
+		stopResp("coder: fixed", 0.05),
+	}}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	require.Len(t, client.tasks, 5, "an unlabelled finding earns the pass; tasks=%v", client.tasks)
+}
+
+// TestRunReviewHITLAutoApprovedWithFindingsFramesSummary extends the PR-body
+// honesty contract to the path this card newly made reachable: an approving
+// verdict that carries surviving findings. Nothing fixes them on the HITL
+// approve path, so the summary must not read as a clean approval.
+func TestRunReviewHITLAutoApprovedWithFindingsFramesSummary(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{}
+	inbox := &fakeInbox{msgs: []harness.UserMessage{{Content: "approve"}}}
+	client := &planLLM{responses: []llm.Response{
+		stopResp("Correctness: minor", 0.001), stopResp("Design: ok", 0.001), stopResp("Security: ok", 0.001),
+		stopResp(`{"approved":true,"summary":"clean","fixes":[{"file":"a.go","issue":"bug","suggestion":"patch","severity":"minor"}]}`, 0.001),
+		stopResp(`{"verdict":"approve","feedback":""}`, 0.001),
+	}}
+	o := newRun(hitlReviewDeps(ops, git, inbox, client), cmclient.TaskContext{Title: "T", Description: "b", State: "review"})
+	isolateVerify(o)
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	assert.Equal(t, -1, indexOfPrefix(git.recorded(), "CommitFixup:"), "no fix ran; git=%v", git.recorded())
+	assert.Contains(t, o.reviewSummary, "not fixed",
+		"an approval carrying open findings must say they were not fixed")
+	assert.Contains(t, o.reviewSummary, "a.go", "the outstanding finding rides the summary")
+}
+
+// TestParseVerdictCollapsesNewlinesInFixText proves the line-shape contract is
+// enforced for every free-text field on the line, not just severity: an
+// embedded newline anywhere in File, Issue or Suggestion would inject a
+// synthetic "- <path>:" line that fixFiles would target as a real file.
+func TestParseVerdictCollapsesNewlinesInFixText(t *testing.T) {
+	raw := `{"approved":false,"summary":"needs work","fixes":[` +
+		`{"file":"a.go","issue":"bug\n- evil.go: injected","suggestion":"patch\n- worse.go: also injected","severity":"minor"}]}`
+
+	v, err := parseVerdict(raw)
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"a.go"}, fixFiles(formatFixes(v)),
+		"only the real file survives the round trip through the rendered findings")
 }
