@@ -1325,7 +1325,7 @@ func TestRunFixRoutesByFindingsOrigin(t *testing.T) {
 			return verifyexec.Outcome{ExitCode: 1, Output: "FAIL: tests broke"}
 		}
 
-		findings, fixTier, approved, _, _, err := o.reviewRound(context.Background(), *o.verify, 1, false)
+		findings, fixTier, approved, _, _, err := o.reviewRound(context.Background(), *o.verify, 1, false, false)
 		require.NoError(t, err)
 		assert.False(t, approved)
 
@@ -1353,7 +1353,7 @@ func TestRunFixRoutesByFindingsOrigin(t *testing.T) {
 		tc := cmclient.TaskContext{Title: "Parent", Description: "the distinctive parent description", State: "in_progress"}
 		o := newReviewRun(d, tc, 0)
 
-		findings, fixTier, approved, _, _, err := o.reviewRound(context.Background(), verifyPlan{}, 1, false)
+		findings, fixTier, approved, _, _, err := o.reviewRound(context.Background(), verifyPlan{}, 1, false, false)
 		require.NoError(t, err)
 		assert.False(t, approved)
 
@@ -1384,7 +1384,7 @@ func TestReviewGateSkippedProceedsUnverified(t *testing.T) {
 		return verifyexec.Outcome{StartErr: true, ExitCode: -1}
 	}
 
-	findings, _, approved, vres, _, err := o.reviewRound(context.Background(), *o.verify, 1, false)
+	findings, _, approved, vres, _, err := o.reviewRound(context.Background(), *o.verify, 1, false, false)
 	require.NoError(t, err)
 	assert.Equal(t, verifySkipped, vres.Status)
 	assert.True(t, approved, "a skipped gate proceeds to the specialists, which approve")
@@ -1407,7 +1407,7 @@ func TestReviewGateFailureRedactsFindings(t *testing.T) {
 		return verifyexec.Outcome{ExitCode: 1, Output: "auth error: SECRETTOKEN leaked in the log"}
 	}
 
-	findings, _, approved, vres, _, err := o.reviewRound(context.Background(), *o.verify, 1, false)
+	findings, _, approved, vres, _, err := o.reviewRound(context.Background(), *o.verify, 1, false, false)
 	require.NoError(t, err)
 	assert.False(t, approved)
 	assert.Equal(t, verifyFailed, vres.Status)
@@ -1812,6 +1812,38 @@ func TestReviewMobPassesExclusionsAndDeltaScope(t *testing.T) {
 	assert.Contains(t, eng.topics[0].Briefing, "prior finding about a.go")
 }
 
+// TestReviewMobPostFixRoundFullScope proves the mob path re-widens its
+// briefing diff to the base branch on a round that follows a fix, even
+// though a snapshot from round 1 would otherwise scope it down: a fix can
+// land code outside the delta it targeted, and a delta-scoped round would
+// never examine that code.
+func TestReviewMobPostFixRoundFullScope(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, lastCommitTarget: "abc123", headSHA: "snap1"}
+	// Only LLM call: the fix coder run between the two discussion rounds.
+	llmFake := &planLLM{responses: []llm.Response{
+		stopResp("coder: fixed", 0.05),
+	}}
+	eng := &scriptedEngine{outcomes: []mob.Outcome{
+		{Synthesis: `{"approved":false,"summary":"fix it","fix_tier":"simple",` +
+			`"fixes":[{"file":"a.go","issue":"bug","suggestion":"patch"}]}`},
+		{Synthesis: mobApprovedVerdict, Consensus: true},
+	}}
+
+	o := mobReviewRun(t, ops, git, llmFake, eng)
+	require.NoError(t, runReview(context.Background(), o))
+
+	require.Len(t, git.diffBases, 2, "one briefing diff per round, no specialist fan-out")
+	assert.Equal(t, "main", git.diffBases[0],
+		"round 1 has no snapshot yet, so it already diffs the base branch")
+	assert.Equal(t, "main", git.diffBases[1],
+		"round 2 follows a fix, so it re-widens despite lastReviewBase==snap1")
+
+	require.Len(t, eng.topics, 2, "the flag adds no rounds")
+	assert.Equal(t, reviewLenses[:3], eng.topics[0].Lenses, "the flag adds no seats")
+	assert.Equal(t, reviewLenses[:3], eng.topics[1].Lenses, "the flag adds no seats")
+}
+
 func TestReviewPromptsUseFilteredDescriptionAndSeededFindings(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{}
@@ -1868,7 +1900,7 @@ func TestReviewGateFailureFindingsKeepTheTail(t *testing.T) {
 		return verifyexec.Outcome{ExitCode: 1, Output: out}
 	}
 
-	findings, _, approved, vres, _, err := o.reviewRound(context.Background(), *o.verify, 1, false)
+	findings, _, approved, vres, _, err := o.reviewRound(context.Background(), *o.verify, 1, false, false)
 	require.NoError(t, err)
 	require.False(t, approved)
 	require.Equal(t, verifyFailed, vres.Status)
