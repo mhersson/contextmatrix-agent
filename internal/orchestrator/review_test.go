@@ -1785,7 +1785,11 @@ func TestReviewMobFallsBackToSpecialists(t *testing.T) {
 	assert.Len(t, llmFake.tasks, 4, "the specialist pass ran after the discussion degraded")
 }
 
-func TestReviewMobPassesExclusionsAndDeltaScope(t *testing.T) {
+// TestReviewMobPassesExclusionsAndPriorFindings keeps the two properties the
+// old delta-scope test really covered. Its snapshot assertion went with the
+// scoping: it set lastReviewBase by hand, a state round 1 cannot reach, and
+// mobReviewBriefing no longer reads the field at all.
+func TestReviewMobPassesExclusionsAndPriorFindings(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{}
 	llmFake := &planLLM{}
@@ -1793,7 +1797,6 @@ func TestReviewMobPassesExclusionsAndDeltaScope(t *testing.T) {
 
 	o := mobReviewRun(t, ops, git, llmFake, eng)
 	o.coderModels = map[string]bool{"rev/alpha": true}
-	o.lastReviewBase = "snapshot-sha"
 	o.lastFindings = "prior finding about a.go"
 
 	require.NoError(t, runReview(context.Background(), o))
@@ -1805,11 +1808,40 @@ func TestReviewMobPassesExclusionsAndDeltaScope(t *testing.T) {
 		assert.NotEqual(t, "rev/alpha", s.Model, "review seats must exclude the coder's model")
 	}
 
-	// Delta scoping feeds the briefing unchanged: diff against the snapshot,
-	// prior findings included. fakeGit captures diff bases in diffBases.
-	assert.Contains(t, git.diffBases, "snapshot-sha",
-		"the briefing diff uses lastReviewBase; bases=%v", git.diffBases)
+	assert.Equal(t, []string{"main"}, git.diffBases, "the briefing diffs the base branch")
 	assert.Contains(t, eng.topics[0].Briefing, "prior finding about a.go")
+}
+
+// TestReviewMobPostFixRoundFullScope proves the mob path re-widens its
+// briefing diff to the base branch on a round that follows a fix, even
+// though a snapshot from round 1 would otherwise scope it down: a fix can
+// land code outside the delta it targeted, and a delta-scoped round would
+// never examine that code.
+func TestReviewMobPostFixRoundFullScope(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, lastCommitTarget: "abc123", headSHA: "snap1"}
+	// Only LLM call: the fix coder run between the two discussion rounds.
+	llmFake := &planLLM{responses: []llm.Response{
+		stopResp("coder: fixed", 0.05),
+	}}
+	eng := &scriptedEngine{outcomes: []mob.Outcome{
+		{Synthesis: `{"approved":false,"summary":"fix it","fix_tier":"simple",` +
+			`"fixes":[{"file":"a.go","issue":"bug","suggestion":"patch"}]}`},
+		{Synthesis: mobApprovedVerdict, Consensus: true},
+	}}
+
+	o := mobReviewRun(t, ops, git, llmFake, eng)
+	require.NoError(t, runReview(context.Background(), o))
+
+	require.Len(t, git.diffBases, 2, "one briefing diff per round, no specialist fan-out")
+	assert.Equal(t, "main", git.diffBases[0],
+		"round 1 has no snapshot yet, so it already diffs the base branch")
+	assert.Equal(t, "main", git.diffBases[1],
+		"round 2 follows a fix, so it re-widens despite lastReviewBase==snap1")
+
+	require.Len(t, eng.topics, 2, "the flag adds no rounds")
+	assert.Equal(t, reviewLenses[:3], eng.topics[0].Lenses, "the flag adds no seats")
+	assert.Equal(t, reviewLenses[:3], eng.topics[1].Lenses, "the flag adds no seats")
 }
 
 func TestReviewPromptsUseFilteredDescriptionAndSeededFindings(t *testing.T) {
@@ -2507,4 +2539,23 @@ func TestParseVerdictCollapsesNewlinesInFixText(t *testing.T) {
 
 	assert.Equal(t, []string{"a.go"}, fixFiles(formatFixes(v)),
 		"only the real file survives the round trip through the rendered findings")
+}
+
+// TestMobReviewBriefingAlwaysDiffsBaseBranch pins the invariant that a mob
+// briefing is never scoped to a snapshot: a fix can land code outside the delta
+// it targeted, and every mob round after the first follows a fix, so a
+// snapshot-scoped briefing would hide exactly the code the round exists to
+// re-examine.
+func TestMobReviewBriefingAlwaysDiffsBaseBranch(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{}
+	o := mobReviewRun(t, ops, git, &planLLM{}, &scriptedEngine{})
+
+	o.lastReviewBase = "snap1"
+
+	_, err := o.mobReviewBriefing(context.Background())
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"main"}, git.diffBases,
+		"the briefing diffs the base branch even with a snapshot recorded")
 }

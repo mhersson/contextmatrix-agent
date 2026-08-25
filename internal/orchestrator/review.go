@@ -761,16 +761,29 @@ func (o *run) reviewExclusions() map[string]bool {
 // mobReviewVerdict convenes the review discussion and parses its synthesis
 // into the existing verdict shape, with ONE moderator repair on a parse
 // failure (mirroring synthesize's repair turn). ok=false on any failure -
+// mobFallback records a mob-review degradation and returns the no-verdict
+// result that sends the round to the solo fan-out. It logs to the card, not
+// just the transcript: a review that quietly changed shape otherwise looks
+// identical to one that did not.
+func (o *run) mobFallback(ctx context.Context, reason string, err error) (verdict, bool) {
+	if err != nil {
+		slog.Warn("mob review: "+reason+"; solo fallback", "card_id", o.d.Cfg.CardID, "error", err)
+	} else {
+		slog.Warn("mob review: "+reason+"; solo fallback", "card_id", o.d.Cfg.CardID)
+	}
+
+	o.d.logCard(ctx, "review: mob discussion unavailable (%s) - falling back to the solo specialist panel", reason)
+
+	return verdict{}, false
+}
+
 // the caller falls back to the specialist fan-out. On success it records the
-// review snapshot head, exactly like runSpecialists, so later rounds stay
-// delta-scoped.
+// review snapshot head, exactly like runSpecialists - the mob briefing itself
+// never uses it, but a later round that falls back to the solo fan-out does.
 func (o *run) mobReviewVerdict(ctx context.Context) (verdict, bool) {
 	briefing, err := o.mobReviewBriefing(ctx)
 	if err != nil {
-		slog.Warn("mob review: briefing failed; solo fallback",
-			"card_id", o.d.Cfg.CardID, "error", err)
-
-		return verdict{}, false
+		return o.mobFallback(ctx, "briefing failed", err)
 	}
 
 	seats := min(o.d.Cfg.Mob.Participants, len(reviewLenses))
@@ -787,25 +800,19 @@ func (o *run) mobReviewVerdict(ctx context.Context) (verdict, bool) {
 
 	out, ok := o.mobDiscuss(ctx, t)
 	if !ok {
-		return verdict{}, false
+		return o.mobFallback(ctx, "discussion failed", nil)
 	}
 
 	v, perr := parseVerdict(out.Synthesis)
 	if perr != nil {
 		repaired, rerr := o.mobResynthesize(ctx, t, out, perr.Error())
 		if rerr != nil {
-			slog.Warn("mob review: repair synthesis failed; solo fallback",
-				"card_id", o.d.Cfg.CardID, "error", rerr)
-
-			return verdict{}, false
+			return o.mobFallback(ctx, "repair synthesis failed", rerr)
 		}
 
 		v, perr = parseVerdict(repaired)
 		if perr != nil {
-			slog.Warn("mob review: verdict parse failed after repair; solo fallback",
-				"card_id", o.d.Cfg.CardID, "error", perr)
-
-			return verdict{}, false
+			return o.mobFallback(ctx, "verdict parse failed after repair", perr)
 		}
 	}
 
@@ -817,17 +824,18 @@ func (o *run) mobReviewVerdict(ctx context.Context) (verdict, bool) {
 	return v, true
 }
 
-// mobReviewBriefing assembles the discussion briefing from the SAME scope
-// the specialist fan-out reviews: the branch diff against the delta base
-// (lastReviewBase when a prior round snapshotted, else the base branch) plus
-// the prior round's findings.
+// mobReviewBriefing assembles the discussion briefing: the branch diff against
+// the base branch plus the prior round's findings.
+//
+// The diff is never scoped to a review snapshot. A fix can land code outside
+// the delta it targeted, and every mob round after the first follows a fix, so
+// a snapshot-scoped briefing would hide exactly the code the round exists to
+// re-examine - a seat reported this at runtime, saying the findings cited
+// symbols absent from its diff. The solo fan-out still scopes to the snapshot
+// on those rounds (it re-widens only on the authoritative pass and after a
+// no-op fix), so it carries the same gap; closing it there is separate work.
 func (o *run) mobReviewBriefing(ctx context.Context) (string, error) {
-	base := o.lastReviewBase
-	if base == "" {
-		base = o.d.Cfg.BaseBranch
-	}
-
-	diff, err := o.d.Git.Diff(ctx, base)
+	diff, err := o.d.Git.Diff(ctx, o.d.Cfg.BaseBranch)
 	if err != nil {
 		return "", fmt.Errorf("review diff: %w", err)
 	}
