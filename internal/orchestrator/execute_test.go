@@ -1825,8 +1825,8 @@ func TestResolveCoderModelPinMissingAdvisory(t *testing.T) {
 	o.tc.ModelCoder = "pinned/missing" // not in planTestCatalog
 
 	// Multiple calls across different subtasks.
-	o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-1", Title: "First", Tier: "simple"}, "prompt1")
-	o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-2", Title: "Second", Tier: "moderate"}, "prompt2")
+	_, _ = o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-1", Title: "First", Tier: "simple"}, "prompt1")
+	_, _ = o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-2", Title: "Second", Tier: "moderate"}, "prompt2")
 
 	// Exactly one advisory log entry (once-per-run guard).
 	require.Len(t, ops.logs, 1, "exactly one advisory log for the missing pin")
@@ -1843,8 +1843,8 @@ func TestResolveCoderModelPinResolvableNoAdvisory(t *testing.T) {
 
 	o.tc.ModelCoder = "pinned/model" // IS in planTestCatalog
 
-	o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-1", Title: "First", Tier: "simple"}, "prompt1")
-	o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-2", Title: "Second", Tier: "moderate"}, "prompt2")
+	_, _ = o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-1", Title: "First", Tier: "simple"}, "prompt1")
+	_, _ = o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-2", Title: "Second", Tier: "moderate"}, "prompt2")
 
 	// No advisory logs because the pin is resolvable.
 	assert.Empty(t, ops.logs, "resolvable pin produces no advisory logs")

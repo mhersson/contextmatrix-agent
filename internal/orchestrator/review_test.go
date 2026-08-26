@@ -2707,7 +2707,7 @@ func TestRefusalSentinelsDifferByPhase(t *testing.T) {
 
 		var rp *ReviewParkedError
 
-		assert.False(t, errors.As(err, &rp),
+		assert.NotErrorAs(t, err, &rp,
 			"there is no work without a coder, so this must not be a review park")
 	})
 
@@ -2723,7 +2723,7 @@ func TestRefusalSentinelsDifferByPhase(t *testing.T) {
 
 		var nme *NoModelError
 
-		assert.False(t, errors.As(err, &nme),
+		assert.NotErrorAs(t, err, &nme,
 			"the code is written and pushed, so a human takes it from review, not from blocked")
 	})
 }
