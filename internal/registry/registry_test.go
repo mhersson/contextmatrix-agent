@@ -3,6 +3,7 @@ package registry
 import (
 	"fmt"
 	"maps"
+	"math"
 	"testing"
 
 	"github.com/mhersson/contextmatrix-harness/llm"
@@ -1429,6 +1430,15 @@ func TestTierBarsFromStrings(t *testing.T) {
 		{name: "bar above one rejected", in: map[string]float64{"simple": 1.5}, wantErr: true},
 		{name: "negative bar rejected", in: map[string]float64{"simple": -0.1}, wantErr: true},
 		{
+			// NaN fails both bar<0 and bar>1, so it must be checked explicitly:
+			// without the check it would pass range and monotone validation and
+			// then fail to marshal into CMX_SELECTOR_TIER_BARS, discarding the
+			// operator's entire ladder.
+			name:    "NaN bar rejected",
+			in:      map[string]float64{"simple": math.NaN()},
+			wantErr: true,
+		},
+		{
 			// Passes names and range; makes critical the weakest rung with no
 			// descent, so escalating would silently downgrade.
 			name:    "inverted ladder rejected",
@@ -1497,8 +1507,22 @@ func TestOperatorLadderDrivesTheWalk(t *testing.T) {
 	assert.InDelta(t, 0.95, got.RequestedBar, 1e-9)
 	assert.Equal(t, "mid/one", got.Model)
 
-	// And the descent order follows the new table, not a hardcoded ordering.
+	// And the descent order follows the configured table.
 	assert.Equal(t,
 		[]Tier{TierCritical, TierComplex, TierModerate, TierSimple},
 		r.descent(TierCritical))
+}
+
+// TestDescentCollapsesTiedAdjacentBars pins the tie-collapse case descent's
+// doc comment describes: this ladder is not order-isomorphic to the default
+// one, since the default has four distinct bars and this one ties complex
+// and critical, so only a genuinely-threaded ladder can produce this order.
+func TestDescentCollapsesTiedAdjacentBars(t *testing.T) {
+	r := NewRegistry("", nil).WithTierBars(map[Tier]float64{
+		TierSimple: 0.50, TierModerate: 0.60, TierComplex: 0.70, TierCritical: 0.70,
+	})
+
+	// complex ties critical's bar rather than falling strictly below it, so
+	// the walk skips it: three rungs, not four.
+	assert.Equal(t, []Tier{TierCritical, TierModerate, TierSimple}, r.descent(TierCritical))
 }

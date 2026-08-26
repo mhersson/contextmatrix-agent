@@ -32,14 +32,30 @@ const (
 	TierCritical Tier = "critical"
 )
 
+// tierRung pairs a tier with its default quality bar. tierLadder is the
+// single ordered source both DefaultTierBars and the monotone check in
+// TierBarsFromStrings are built from, so a tier added here is automatically
+// present and ordered in both.
+type tierRung struct {
+	tier Tier
+	bar  float64
+}
+
+var tierLadder = []tierRung{
+	{TierSimple, 0.65},
+	{TierModerate, 0.76},
+	{TierComplex, 0.82},
+	{TierCritical, 0.90},
+}
+
 // DefaultTierBars are the normalized-prior thresholds per complexity tier.
 func DefaultTierBars() map[Tier]float64 {
-	return map[Tier]float64{
-		TierSimple:   0.65,
-		TierModerate: 0.76,
-		TierComplex:  0.82,
-		TierCritical: 0.90,
+	out := make(map[Tier]float64, len(tierLadder))
+	for _, rung := range tierLadder {
+		out[rung.tier] = rung.bar
 	}
+
+	return out
 }
 
 // TierBarsFromStrings converts an operator ladder to the typed map. It
@@ -68,18 +84,18 @@ func TierBarsFromStrings(in map[string]float64) (map[Tier]float64, error) {
 				name, slices.Sorted(maps.Keys(DefaultTierBars())))
 		}
 
-		if bar < 0 || bar > 1 {
+		if math.IsNaN(bar) || bar < 0 || bar > 1 {
 			return nil, fmt.Errorf("tier bars: %s must be in [0,1], got %g", name, bar)
 		}
 
 		out[t] = bar
 	}
 
-	ladder := []Tier{TierSimple, TierModerate, TierComplex, TierCritical}
-	for i := 1; i < len(ladder); i++ {
-		if out[ladder[i]] < out[ladder[i-1]] {
+	for i := 1; i < len(tierLadder); i++ {
+		hi, lo := tierLadder[i].tier, tierLadder[i-1].tier
+		if out[hi] < out[lo] {
 			return nil, fmt.Errorf("tier bars: ladder must not decrease: %s %g is below %s %g",
-				ladder[i], out[ladder[i]], ladder[i-1], out[ladder[i-1]])
+				hi, out[hi], lo, out[lo])
 		}
 	}
 
