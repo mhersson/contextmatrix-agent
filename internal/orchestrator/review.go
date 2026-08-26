@@ -38,6 +38,16 @@ const verifyOutputTail = 4000
 // than the specialist panel, so runFix can route them to verifyFixPrompt.
 const verifyFailedPrefix = "verify command failed: "
 
+// verifyFailedFindings is the finding text a failed verify gate hands its fix
+// run: the command that failed, then the redacted excerpt of what it printed.
+// The "(tail)" label matches judge.go's identical evidence, so the coder knows
+// the block starts mid-output rather than at the command's start. Shared by
+// both gates that can fail - the review round and the pre-commit gate - so the
+// coder sees one framing whichever one caught the failure.
+func verifyFailedFindings(plan verifyPlan, output string) string {
+	return verifyFailedPrefix + plan.Display + "\n\nVerify output (tail):\n\n" + verifyFailureExcerpt(output)
+}
+
 // reviewRoundReserve is the least container time a verify run, a specialist
 // panel, and a fix round need to complete without being killed mid-work. A var
 // so tests can shrink it.
@@ -571,12 +581,9 @@ func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, autho
 		switch res.Status {
 		case verifyFailed:
 			// Gate failure goes STRAIGHT to the fix loop without burning reviewer
-			// tokens. The redacted output tail is the finding the coder fixes - the
-			// "(tail)" label matches judge.go's identical evidence, so the coder
-			// knows the block starts mid-output rather than at the command's start.
+			// tokens. The redacted output tail is the finding the coder fixes.
 			// No verdict ran, so the fix run falls back to the card tier (empty fixTier).
-			return verifyFailedPrefix + plan.Display + "\n\nVerify output (tail):\n\n" +
-				verifyFailureExcerpt(res.Output), "", false, vres, nil, nil
+			return verifyFailedFindings(plan, res.Output), "", false, vres, nil, nil
 		case verifySkipped:
 			// A missing or timed-out gate is inconclusive, not a defect: proceed to
 			// the specialists without a fix loop. logVerifyRound already said so.

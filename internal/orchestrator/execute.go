@@ -140,6 +140,106 @@ func (o *run) executeSubtaskWith(ctx context.Context, sc *solverCtx, sub subtask
 // CM's default 30m heartbeat_timeout). A var so tests can shrink it.
 var subtaskHeartbeatInterval = 5 * time.Minute
 
+// preCommitVerify runs the run's resolved verify command against the coder's
+// uncommitted work and gates the commit on the result. Returning nil means the
+// commit may proceed: the command passed, no command resolved (the skip tier),
+// or the run was inconclusive - a timeout or a missing tool, which is not
+// evidence of a defect, so the commit proceeds unverified exactly as it did
+// before this gate existed. That mirrors the review round's own handling of a
+// skip. A genuine failure gets ONE fix pass through the review phase's fix path
+// and one re-run; still red, and the error parks the subtask with the work
+// uncommitted, so a broken tree is never completed as a finished subtask. One
+// pass, never a loop - the review phase's fix loop is the multi-round mechanism.
+//
+// The plan comes from ensureVerify and the execution from runVerifyPlan, the
+// same two calls the review-round gate makes, so the two cannot drift into
+// different commands, timeouts or environments. Nothing here knows what a check
+// command looks like; the resolved plan is the only source. Whether that command
+// measures the working tree rather than a cache is a property of what the
+// project declares, not something this gate can or should patch.
+//
+// Solo solvers only. A Best-of-N candidate is gated by the judge phase's
+// authoritative verify over every candidate worktree, and candidates race in
+// parallel over one shared run: resolving per candidate would race the run's
+// cached plan, and a per-candidate fix pass would charge the run ledger during
+// the fan-out, which the candidate sub-ledgers exist to keep separate.
+func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef) error {
+	if !sc.boardOps {
+		return nil
+	}
+
+	plan, err := o.ensureVerify(ctx)
+	if err != nil {
+		return err
+	}
+
+	if len(plan.Argv) == 0 {
+		return nil
+	}
+
+	vres, rerr := o.runVerifyPlan(ctx, sc.workspace, plan)
+	if rerr != nil {
+		return rerr
+	}
+
+	o.logVerifySubtask(ctx, vres, sub.ID)
+
+	if vres.Status != verifyFailed {
+		return nil
+	}
+
+	// Budget gate before the fix run: the subprocess above costs no tokens, the
+	// model call does, so a park happens before the spend rather than after.
+	if err := o.ledger.Check(); err != nil {
+		return err
+	}
+
+	o.d.logCard(ctx, "subtask %s: verify failed before the commit - running one fix pass", sub.ID)
+
+	// The subtask's own tier sizes the fix, the way it sized the coder that wrote
+	// the work; an unset tier falls back to the card tier inside the fix path.
+	prompt := fmt.Sprintf(verifyFixPrompt, o.skillEngage(), o.grounding, sc.workspace,
+		fixVerifyLine(plan), o.tc.Title, verifyFailedFindings(plan, vres.Output))
+
+	if _, ferr := o.runFixModel(ctx, prompt, 0, sub.Tier, false); ferr != nil {
+		return ferr
+	}
+
+	vres, rerr = o.runVerifyPlan(ctx, sc.workspace, plan)
+	if rerr != nil {
+		return rerr
+	}
+
+	o.logVerifySubtask(ctx, vres, sub.ID)
+
+	if vres.Status == verifyFailed {
+		return fmt.Errorf("subtask %s: `%s` still fails after one fix pass", sub.ID, plan.Display)
+	}
+
+	return nil
+}
+
+// logVerifySubtask records one pre-commit gate outcome on the card. Without it
+// a gate that failed and a gate that never ran read identically in the activity
+// log. It mirrors logVerifyRound: the status, the classification note when
+// there is one, and - for a noteless skip alone - that the commit proceeds
+// unverified, since every note classifyVerify emits already says so itself.
+func (o *run) logVerifySubtask(ctx context.Context, res verifyResult, subID string) {
+	msg := fmt.Sprintf("verify %s", verifyStatusWord(res.Status))
+
+	if res.Note != "" {
+		msg += " (" + res.Note + ")"
+	}
+
+	msg += fmt.Sprintf(" - subtask %s, before commit", subID)
+
+	if res.Status == verifySkipped && res.Note == "" {
+		msg += " - proceeding unverified"
+	}
+
+	o.d.logCard(ctx, "%s", msg)
+}
+
 // executeClaimedWith is the owned span of a subtask: coder run, commit, push,
 // complete. When sc.boardOps a heartbeat goroutine covers the whole span - CM's
 // stall sweep reclaims ANY claimed card whose last_heartbeat exceeds the
@@ -208,6 +308,10 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 	commitMsg := finishCommitMessage(res.CompletionArgs)
 	if commitMsg == "" {
 		commitMsg = sanitizeTitle(sub.Title)
+	}
+
+	if verr := o.preCommitVerify(ctx, sc, sub); verr != nil {
+		return verr
 	}
 
 	committed, err := sc.git.CommitWithMessage(ctx, commitMsg)
