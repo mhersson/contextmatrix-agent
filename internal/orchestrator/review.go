@@ -721,10 +721,13 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 	return b.String(), nil
 }
 
-// reviewPanel returns the three specialist model specs. An explicit,
-// catalog-resolvable reviewer pin overrides the entire panel (all three run on
-// the pinned model). Otherwise the registry selects a diverse panel for the
-// card tier, excluding every model that coded a subtask on this run.
+// reviewPanel returns the three specialist seats. An explicit,
+// catalog-resolvable reviewer pin overrides the entire panel: all three run on
+// the pinned model, and every seat after the first is flagged as a repeat so
+// one model's opinion cannot read as three agreeing ones. Otherwise the
+// registry selects a diverse panel for the card tier, excluding every model
+// that coded a subtask on this run, and any seat that could not be served at
+// that tier reports its shortfall.
 func (o *run) reviewPanel(ctx context.Context, estTokens int, authoritative bool) []registry.Pick {
 	// The authoritative pass escalates the panel to the complex tier so the
 	// strongest models judge the change before parking.
@@ -959,6 +962,13 @@ func (o *run) runFixModel(ctx context.Context, prompt string, round int, fixTier
 
 		o.noteShortfall(ctx, "fix coder", p)
 
+		if o.fixEscalate {
+			d.logCard(ctx, "fix coder %s selected for round %d fixes (tier=%s) - escalated after a fix round that %s",
+				model, round, tier, o.fixFailReason)
+		} else {
+			d.logCard(ctx, "fix coder %s selected for round %d fixes (tier=%s)", model, round, tier)
+		}
+
 		// The escalated round exists to reach a STRONGER model after a failure.
 		// When the climb does not clear the bar it climbed to, it bought
 		// nothing; the round still runs on a pick that is at least fresh, but
@@ -967,13 +977,6 @@ func (o *run) runFixModel(ctx context.Context, prompt string, round int, fixTier
 			o.firstNote("fix-escalation-noop/"+string(tier)+"/"+model) {
 			d.logCard(ctx, "fix escalation to %s bought nothing - %s does not clear it (prior %.2f); running anyway",
 				tier, model, p.Prior)
-		}
-
-		if o.fixEscalate {
-			d.logCard(ctx, "fix coder %s selected for round %d fixes (tier=%s) - escalated after a fix round that %s",
-				model, round, tier, o.fixFailReason)
-		} else {
-			d.logCard(ctx, "fix coder %s selected for round %d fixes (tier=%s)", model, round, tier)
 		}
 
 		res, dur, err := o.runModelCoder(ctx, d.WriteTools, prompt, model, fixWrapUpMessage, tier)
