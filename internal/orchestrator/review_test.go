@@ -3559,18 +3559,29 @@ func TestFixRoundReportsTheCorrectionItActuallyMade(t *testing.T) {
 	}
 }
 
-// A round truncated at its turn cap is the likeliest of all to leave the verify
-// red - it ran out of turns mid-work, and runFix committed the partial result.
-// That red verify is the cap showing through, already charged on the budget
-// axis, so it must not ALSO climb the bar and exclude the fixer: a turn cap is
-// zero evidence about capability, and every exclusion shrinks the pool toward
-// the exhausted-fixers park.
+// One fix round produces one outcome and is charged for it exactly once. The
+// carrier is fixRan, which is true only when the IMMEDIATELY PRECEDING round
+// both ran and committed, so a round the next iteration finds behind a red
+// verify is one that has not already been judged.
 //
-// Both rows matter because the flag that carries this is per-round, not
-// per-run. Omitting the write on the cap path is enough only when the cap is
-// the FIRST fix round; once any earlier round has completed, the flag is
-// already true and the cap must actively clear it.
-func TestACappedRoundIsNotBlamedForTheVerifyItLeftRed(t *testing.T) {
+// Three shapes, all of which charged twice or on the wrong axis at some point:
+//
+//   - A round truncated at its turn cap is the likeliest of all to leave the
+//     verify red - it ran out of turns mid-work, and runFix committed the
+//     partial result. That red verify is the cap showing through, already
+//     charged on the budget axis, and a turn cap is zero evidence about
+//     capability.
+//   - The flag is per-round, not per-run, so omitting the write on the cap path
+//     covers only a FIRST-round cap; once an earlier round has completed, the
+//     cap must actively clear it.
+//   - A round that committed nothing is charged on the spot. Its HEAD is
+//     unchanged, so the next round's verify is the same subprocess against the
+//     same tree and carries no new information - charging that too would jump
+//     the bar two rungs on the evidence of one round.
+//
+// Every exclusion shrinks the pool toward the exhausted-fixers park, which the
+// third row reaches for real.
+func TestOneFixRoundOutcomeIsChargedOnce(t *testing.T) {
 	panelRejects := func() []llm.Response {
 		return []llm.Response{
 			stopResp("Correctness: broken", 0.01),
@@ -3594,18 +3605,27 @@ func TestACappedRoundIsNotBlamedForTheVerifyItLeftRed(t *testing.T) {
 	tests := []struct {
 		name string
 		// script is the model conversation; redGate is the gate run that fails;
-		// wantGates is how many rounds ran in total.
+		// wantGates is how many rounds ran before the loop ended.
 		script    []llm.Response
 		redGate   int
 		wantGates int
+		// committed is what every fixup in the row lands. wantParked marks the
+		// row that ends on the exhausted-fixers park instead of an approval.
+		committed   bool
+		wantParked  bool
+		wantBar     int
+		wantBudget  int
+		wantFailers int
 	}{
 		{
 			name: "the cap is the first fix round",
 			// pass/reject/cap, red/fix, pass/approve.
 			script: slices.Concat(panelRejects(), burnResps(5),
 				[]llm.Response{fixCompletes}, panelApproves()),
-			redGate:   2,
-			wantGates: 3,
+			redGate:    2,
+			wantGates:  3,
+			committed:  true,
+			wantBudget: 1,
 		},
 		{
 			name: "a completed fix round precedes the cap",
@@ -3615,15 +3635,30 @@ func TestACappedRoundIsNotBlamedForTheVerifyItLeftRed(t *testing.T) {
 			script: slices.Concat(panelRejects(), []llm.Response{fixCompletes},
 				panelRejects(), burnResps(5),
 				[]llm.Response{fixCompletes}, panelApproves()),
-			redGate:   3,
-			wantGates: 4,
+			redGate:    3,
+			wantGates:  4,
+			committed:  true,
+			wantBudget: 1,
+		},
+		{
+			name: "the round before the red verify committed nothing",
+			// pass/reject/no-op fix, red. The no-op is charged on the spot, so
+			// the red verify behind it adds nothing; round 2's escalated pick
+			// then finds the pool empty and parks, which is where the run ends.
+			script:      slices.Concat(panelRejects(), []llm.Response{fixCompletes}),
+			redGate:     2,
+			wantGates:   2,
+			committed:   false,
+			wantParked:  true,
+			wantBar:     1,
+			wantFailers: 1,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ops := &fakeOps{}
-			git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+			git := &fakeGit{committed: tt.committed, lastCommitTarget: "abc123"}
 
 			d := reviewTestDeps(t, ops, git, &planLLM{responses: tt.script}, reviewerRegistry())
 			d.Cfg.MaxTurns = 5
@@ -3641,12 +3676,22 @@ func TestACappedRoundIsNotBlamedForTheVerifyItLeftRed(t *testing.T) {
 				return verifyexec.Outcome{ExitCode: 0}
 			}
 
-			require.NoError(t, runReview(context.Background(), o),
-				"the capped fixer must still be selectable for the round that follows it")
+			err := runReview(context.Background(), o)
 
-			assert.Zero(t, o.fixBarSteps, "the red verify a cap left is charged on the budget axis, not the bar")
-			assert.Empty(t, o.fixFailed, "the truncated fixer stays eligible; fixFailed=%v", o.fixFailed)
-			assert.Equal(t, 1, o.fixBudgetSteps, "the cap was charged once, and on the budget axis")
+			// Asserted first: a double charge derails the run in ways that would
+			// otherwise mask the count this test exists for.
+			assert.Equal(t, tt.wantBar, o.fixBarSteps, "one round, one charge on the bar axis")
+			assert.Equal(t, tt.wantBudget, o.fixBudgetSteps, "one round, one charge on the budget axis")
+			assert.Len(t, o.fixFailed, tt.wantFailers,
+				"only a round judged too weak excludes its fixer; fixFailed=%v", o.fixFailed)
+
+			if tt.wantParked {
+				var parked *ReviewParkedError
+				require.ErrorAs(t, err, &parked, "the row ends on the exhausted-fixers park")
+			} else {
+				require.NoError(t, err, "the fixer must still be selectable for the round that follows")
+			}
+
 			assert.Equal(t, tt.wantGates, gateRuns, "every scripted round ran")
 		})
 	}

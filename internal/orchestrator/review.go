@@ -200,9 +200,10 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 		attemptsCap = config.DefaultReviewAttemptsCap
 	}
 
-	// fixRan is whether the IMMEDIATELY PRECEDING fix round completed. Not
-	// sticky: a capped round clears it, so the red verify a truncation leaves
-	// behind is never read as the finished round's failure.
+	// fixRan is whether the IMMEDIATELY PRECEDING fix round both ran and
+	// committed. Not sticky, and false for a round that landed nothing: a red
+	// verify is charged to the round behind it only when that round has not
+	// already been judged.
 	fixRan := false
 
 	for iter := range hardReviewIterationCap {
@@ -331,7 +332,12 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 			return err
 		}
 
-		fixRan = true
+		// Only a round that COMMITTED is handed forward. A round that landed
+		// nothing is judged on the spot, and its HEAD is unchanged, so the next
+		// round's verify is the same subprocess against the same tree and
+		// carries no new information - charging it again would jump the bar two
+		// rungs on the evidence of one round.
+		fixRan = committed
 
 		if !committed {
 			o.markFixFailed("produced no change")
