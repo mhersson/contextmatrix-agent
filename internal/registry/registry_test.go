@@ -253,15 +253,15 @@ func TestSelectCandidateModelsNoPinWrapsAround(t *testing.T) {
 	assert.Equal(t, "m1", specs[0].Model)
 	assert.Equal(t, "m2", specs[1].Model)
 	assert.Equal(t, "m3", specs[2].Model)
-	// The wrapped seat repeats the 3rd pick's model and window, and says so.
-	// Duplication and provenance are two independent facts: the repeat keeps
-	// the source it wrapped and carries the flag on top, so a caller can count
-	// the panel's real models without losing where each seat came from.
-	assert.Equal(t, specs[2].Model, specs[3].Model, "4th slot must wrap and repeat the 3rd pick")
-	assert.Equal(t, specs[2].ContextWindow, specs[3].ContextWindow)
-	assert.Equal(t, specs[2].Source, specs[3].Source)
+	// Duplication and provenance are two independent facts. The wrapped seat is
+	// the seat it wrapped in every measured field - model, window, source,
+	// prior, requested and met tier - and carries the flag on top, so a caller
+	// can count the panel's real models without losing what any seat is worth.
+	want := specs[2]
+	want.Duplicate = true
+
 	assert.False(t, specs[2].Duplicate, "the last real pick is not a repeat")
-	assert.True(t, specs[3].Duplicate, "a repeated seat must be countable as one")
+	assert.Equal(t, want, specs[3], "a repeated seat is the seat it wrapped, flagged")
 }
 
 func TestSelectCandidateModelsSingleModelPoolRepeatsThroughout(t *testing.T) {

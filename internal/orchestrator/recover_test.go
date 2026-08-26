@@ -179,7 +179,7 @@ func TestExecuteParksWhenIncapableModelsDrainTheCatalog(t *testing.T) {
 	assert.Equal(t, 3, nme.Excluded, "all three models were excluded before the refusal")
 	assert.False(t, nme.WindowLimited, "the pool emptied on exclusions, not on window fit")
 
-	assert.Equal(t, 3, o.reselects, "each incapable model spent one re-selection")
+	assert.Equal(t, reselectCap, o.reselects, "each incapable model spent one re-selection")
 
 	for _, m := range []string{"alpha/coder", "beta/coder", "capable/default"} {
 		assert.Contains(t, ops.recorded(), "BlacklistModel:CARD-1/"+m,
@@ -228,6 +228,11 @@ func TestExecutePinnedIncapableModelExhaustsTheCap(t *testing.T) {
 	}
 
 	assert.False(t, modelsUsed(llmFake, "beta/coder"), "an auto-selected substitute must never replace a pin")
+
+	// The model that spent the last attempt is reported to CM like any other:
+	// the blacklist call happens before the cap decision.
+	assert.Contains(t, ops.recorded(), "BlacklistModel:CARD-1/"+pin,
+		"the cap-exhausting model must still be reported to CM")
 
 	assert.NotContains(t, ops.recorded(), "CompleteTask:SUB-1")
 }
