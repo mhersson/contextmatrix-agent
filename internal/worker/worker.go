@@ -392,8 +392,11 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 		return Result{Reason: "error"}, err
 	}
 
+	orchOps := ops2orchestrator(a.ops)
+	logReachability(ctx, reg, orchOps, a.spec.CardID)
+
 	d := orchestrator.Deps{
-		Ops: ops2orchestrator(a.ops),
+		Ops: orchOps,
 		Git: a.git,
 		GitForDir: func(dir string) orchestrator.GitOps {
 			return NewGit(dir, secretsPathForAuth(a.spec), hostFromRepoURL(a.spec.RepoURL), a.spec.CACertFile)
@@ -852,6 +855,36 @@ func buildRegistry(spec RunSpec) (*registry.Registry, error) {
 
 	return registry.FromSelection(spec.Selection, capable, spec.SelectorPriceHeadroom, spec.MaxCapability).
 		WithTierBars(bars), nil
+}
+
+// logReachability reports structural tier unreachability BEFORE the first
+// model call. It never gates the run: refusing to start because `critical`
+// is unreachable would block every `simple` card too. ops is nil in tests
+// that only implement the worker's narrower CardOps (see ops2orchestrator);
+// the card-log line is then simply skipped.
+func logReachability(ctx context.Context, reg *registry.Registry, ops orchestrator.Ops, cardID string) {
+	var unreachable []string
+
+	for _, tr := range reg.Reachability() {
+		slog.Info("selector: tier reachability",
+			"card_id", cardID, "role", string(tr.Role), "tier", string(tr.Tier),
+			"bar", tr.Bar, "candidates", tr.Count, "best_available", tr.Best)
+
+		if tr.Count == 0 {
+			unreachable = append(unreachable,
+				fmt.Sprintf("%s/%s bar %.2f (best available %.2f)", tr.Role, tr.Tier, tr.Bar, tr.Best))
+		}
+	}
+
+	for _, t := range reg.OrphanFavoriteTiers() {
+		slog.Warn("selector: favorite configured for an unknown tier; it can never be consulted",
+			"card_id", cardID, "tier", string(t))
+	}
+
+	if len(unreachable) > 0 && ops != nil {
+		_ = ops.AddLog(ctx, cardID, //nolint:errcheck // advisory
+			"model catalog cannot reach every tier: "+strings.Join(unreachable, ", "))
+	}
 }
 
 // declaredVerify maps the protocol verify config onto the orchestrator-local

@@ -1603,3 +1603,40 @@ func TestRunReleasesClaimOnInvalidTierLadder(t *testing.T) {
 	assert.Equal(t, 1, strings.Count(msg, "build registry:"),
 		"the error must be wrapped with context exactly once, not doubled on the way out of runFSM")
 }
+
+// TestLogReachabilityLogsCardOnlyWhenSomeTierIsUnreachable pins the worker-side
+// gate on top of registry.Reachability: a catalog that clears every configured
+// tier logs no card line at all, and a catalog that cannot reach any tier
+// (nothing injected, so every request falls to the capable default) logs
+// exactly one.
+func TestLogReachabilityLogsCardOnlyWhenSomeTierIsUnreachable(t *testing.T) {
+	catalog := llm.Catalog{
+		{ID: "top/one", ContextLength: 200000, SupportedParameters: []string{"tools"}},
+	}
+	prior := new(0.95)
+	priors := registry.Priors{Models: map[string]registry.PriorEntry{
+		"top/one": {Coder: prior, Reviewer: prior},
+	}}
+
+	reachable := registry.NewRegistryFromParts(catalog, priors, nil, nil, "top/one")
+
+	ops := newStubOps()
+	logReachability(context.Background(), reachable, ops, "CMX-001")
+	assert.Equal(t, 0, ops.count("AddLog"), "every tier reachable means no card log")
+
+	unreachable := registry.NewRegistry("top/one", nil)
+
+	ops2 := newStubOps()
+	logReachability(context.Background(), unreachable, ops2, "CMX-001")
+	assert.Equal(t, 1, ops2.count("AddLog"), "an unreachable tier logs exactly one card line")
+}
+
+// TestLogReachabilityToleratesNilOps proves the worker-side call is safe when
+// ops2orchestrator hands back nil, which it does for a test fake that only
+// implements CardOps: such tests swap runOrchestrator and never touch
+// Deps.Ops, but logReachability runs before that swap takes effect.
+func TestLogReachabilityToleratesNilOps(t *testing.T) {
+	assert.NotPanics(t, func() {
+		logReachability(context.Background(), registry.NewRegistry("top/one", nil), nil, "CMX-001")
+	})
+}
