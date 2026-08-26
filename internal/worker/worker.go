@@ -550,6 +550,26 @@ func mapFSMResult(ctx context.Context, a fsmArgs, err error) (Result, error) {
 
 		return Result{Reason: "error"}, fmt.Errorf("orchestrator: %w", err)
 
+	case isNoModel(err):
+		// Model-selection park: no catalogued model clears any configured bar
+		// for the role and the operator's capable default is barred too, so
+		// there is nothing to run the work on. Environmental like the
+		// toolchain arm above, and mapped identically - transition to blocked
+		// BEFORE releasing the claim (ownership may be required for the
+		// transition), push the WIP, then fail. blocked is
+		// project-configurable, so a failed transition is logged and the park
+		// still completes. The orchestrator already wrote the reason to the
+		// card log.
+		if terr := a.ops.TransitionCard(ctx, a.spec.CardID, "blocked"); terr != nil {
+			slog.Warn("transition to blocked failed; leaving card state as-is",
+				"card", a.spec.CardID, "error", terr)
+		}
+
+		pushWIP(ctx, a)
+		releaseQuietly(ctx, a.ops, a.spec.CardID)
+
+		return Result{Reason: "error"}, fmt.Errorf("orchestrator: %w", err)
+
 	default:
 		releaseQuietly(ctx, a.ops, a.spec.CardID)
 
@@ -591,6 +611,14 @@ func isMaxTurns(err error) bool {
 	var mte *orchestrator.MaxTurnsError
 
 	return errors.As(err, &mte)
+}
+
+// isNoModel reports whether err is (or wraps) the orchestrator's
+// model-selection sentinel.
+func isNoModel(err error) bool {
+	var nme *orchestrator.NoModelError
+
+	return errors.As(err, &nme)
 }
 
 // isToolchainMissing reports whether err is (or wraps) the orchestrator's

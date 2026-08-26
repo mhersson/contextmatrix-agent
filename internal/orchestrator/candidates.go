@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -403,19 +404,19 @@ func lastSubtaskID(subs []subtaskRef) string {
 // shared cap, and parks. When the pool is exhausted - the registry can only offer
 // an already-excluded model (its capable-default fallback) - it returns "", the
 // pool-exhausted sentinel runCoderWith turns into a clean candidate drop.
-func (o *run) candidateCoderModel(c *candidate) func(context.Context, subtaskRef, string) string {
-	return func(_ context.Context, _ subtaskRef, prompt string) string {
+func (o *run) candidateCoderModel(c *candidate) func(context.Context, subtaskRef, string) (string, error) {
+	return func(_ context.Context, _ subtaskRef, prompt string) (string, error) {
 		o.selMu.Lock()
 		defer o.selMu.Unlock()
 
 		// Never override an explicit operator coder pin (the fan-out assigns it to a
 		// single candidate); let a pinned-but-incapable model park via the cap.
 		if c.model == o.tc.ModelCoder && resolvePin(o.d.Registry, o.tc.ModelCoder) {
-			return c.model
+			return c.model, nil
 		}
 
 		if !o.excluded[c.model] {
-			return c.model
+			return c.model, nil
 		}
 
 		spec := o.d.Registry.SelectByComplexity(registry.SelectInput{
@@ -429,14 +430,18 @@ func (o *run) candidateCoderModel(c *candidate) func(context.Context, subtaskRef
 		// (its capable-default fallback fired), so this candidate has no viable model
 		// left. Signal the drop with the empty sentinel.
 		if spec.Model == "" || o.excluded[spec.Model] {
-			return ""
+			return "", errCandidatePoolExhausted
 		}
 
 		c.model = spec.Model
 
-		return c.model
+		return c.model, nil
 	}
 }
+
+// errCandidatePoolExhausted drops one Best-of-N candidate cleanly: every model
+// it could run on is excluded this run, and the other candidates carry on.
+var errCandidatePoolExhausted = errors.New("candidate model pool exhausted")
 
 // userNotes fans mid-run human turns out to the live Best-of-N candidates. In
 // HITL mode collect drains the inbox into a shared, mutex-guarded buffer; each

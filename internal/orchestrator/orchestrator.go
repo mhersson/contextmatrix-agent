@@ -382,6 +382,14 @@ type run struct {
 	coderPinWarned    bool
 	reviewerPinWarned bool
 
+	// shortfallWarned guards the once-per-run advisory for a selection that
+	// could not be served at the tier it asked for, keyed per phase, role and
+	// the requested -> met bar pair. shortfallMu guards it and NOTHING else:
+	// the Best-of-N candidate resolver holds selMu across a selection, so an
+	// advisory raised from there must not reach for selMu.
+	shortfallMu     sync.Mutex
+	shortfallWarned map[string]bool
+
 	// lastReviewBase is the HEAD SHA captured at the end of the previous round's
 	// specialist review (mirrors CM's review-task workflow skill, which records
 	// review_completed head=<sha>). The
@@ -640,6 +648,13 @@ func (o *run) execute(ctx context.Context) error {
 				// Toolchain-missing park: same shape as the other arms - log
 				// best-effort, then stop without entering the next phase.
 				o.d.logCard(ctx, "%s", toolchainLogMessage(tme))
+			}
+
+			var nme *NoModelError
+			if errors.As(err, &nme) {
+				// Model-selection park: same shape as the other arms - log
+				// best-effort, then stop without entering the next phase.
+				o.d.logCard(ctx, "%s", noModelLogMessage(nme))
 			}
 
 			return err

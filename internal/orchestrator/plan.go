@@ -487,7 +487,7 @@ func isBudgetError(err error) bool {
 }
 
 // isParkError reports whether err is one of the sentinels execute stops the run
-// on rather than advancing to the next phase (orchestrator.go's four park arms).
+// on rather than advancing to the next phase (orchestrator.go's park arms).
 // A caller that swallows one of these returns nil, so the run walks into the
 // next phase carrying whatever half-done state the parked phase left behind -
 // and the worker never gets to push the WIP it exists to preserve.
@@ -497,9 +497,11 @@ func isParkError(err error) bool {
 		cle *ContextLimitError
 		mte *MaxTurnsError
 		tme *ToolchainMissingError
+		nme *NoModelError
 	)
 
-	return errors.As(err, &be) || errors.As(err, &cle) || errors.As(err, &mte) || errors.As(err, &tme)
+	return errors.As(err, &be) || errors.As(err, &cle) || errors.As(err, &mte) ||
+		errors.As(err, &tme) || errors.As(err, &nme)
 }
 
 // runDiagnose runs one read-only investigation pass on the orchestrator model

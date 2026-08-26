@@ -1137,6 +1137,49 @@ func TestToolchainMissingMapsToBlocked(t *testing.T) {
 	assert.Equal(t, "blocked", args[1])
 }
 
+// TestNoModelMapsToBlocked: a NoModelError is an environmental park like the
+// toolchain one - the role has no employable model at all - so it takes the
+// identical path: transition the card to blocked BEFORE releasing the claim,
+// push the WIP, surface a non-nil error. Without this arm the run would land
+// in the default arm, which releases the claim and leaves the card in
+// in_progress with no visible cause.
+func TestNoModelMapsToBlocked(t *testing.T) {
+	remote := setupBareRemote(t)
+	wsParent := t.TempDir()
+	ops := newFakeOps()
+
+	swapRunOrchestrator(t, func(_ context.Context, d orchestrator.Deps) error {
+		require.NoError(t, os.WriteFile(filepath.Join(d.Cfg.Workspace, "wip.txt"), []byte("partial\n"), 0o644))
+
+		return &orchestrator.NoModelError{Role: "coder", Tier: "moderate", RequestedBar: 0.76, LowestBar: 0.65, Excluded: 3}
+	})
+
+	llmClient := &scriptedLLM{}
+
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	res, err := Run(context.Background(), baseSpec(t, remote, wsParent), ops, llmClient, emit, openStdin(t))
+	require.Error(t, err)
+	assert.Equal(t, "error", res.Reason)
+
+	assert.True(t, remoteHasBranch(t, remote, "cm/cmx-001"), "the model-selection park pushes WIP")
+	assert.Equal(t, 1, ops.count("TransitionCard"), "card transitioned to blocked")
+	assert.Equal(t, 1, ops.count("ReleaseCard"), "claim released on the model-selection park")
+	assert.Equal(t, 0, ops.count("CompleteTask"))
+
+	calls := ops.ops()
+	transitionIdx := slices.Index(calls, "TransitionCard")
+	releaseIdx := slices.Index(calls, "ReleaseCard")
+
+	require.GreaterOrEqual(t, transitionIdx, 0)
+	require.GreaterOrEqual(t, releaseIdx, 0)
+	assert.Less(t, transitionIdx, releaseIdx, "TransitionCard must happen before ReleaseCard: ownership may be required")
+
+	args := ops.argsOf("TransitionCard")
+	require.Len(t, args, 2)
+	assert.Equal(t, "blocked", args[1])
+}
+
 // TestToolchainMissingTransitionFailureDegradesGracefully: when TransitionCard
 // fails (e.g. the project's board has no in_progress -> blocked transition),
 // the park must still complete exactly like the other park arms - push WIP,
