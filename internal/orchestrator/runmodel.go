@@ -116,15 +116,6 @@ func (o *run) runModel(ctx context.Context, reg *tools.Registry, prompt, model s
 	return o.runModelCfg(ctx, reg, prompt, model, o.harnessConfig(model))
 }
 
-// runModelImages is runModel with the card's images attached to the seed
-// message. Used by the planning phase only.
-func (o *run) runModelImages(ctx context.Context, reg *tools.Registry, prompt, model string, images []llm.ImageURL) (harness.Result, time.Duration, error) {
-	cfg := o.harnessConfig(model)
-	cfg.TaskImages = images
-
-	return o.runModelCfg(ctx, reg, prompt, model, cfg)
-}
-
 // runModelCfg is the single choke point wrapping harness.Run. It times the
 // call and returns the wall-clock duration alongside the result so every caller
 // can report it to CM by return value - never via a shared field on run, which
@@ -235,6 +226,21 @@ func planTurnCap(base int, repair bool) int {
 	return min(base, planMaxTurns)
 }
 
+// diagnoseMaxTurns caps the diagnosis phase. Like the planner it is a
+// read-only investigation with no terminal tool and no tier scaling, so
+// without a cap of its own it inherits the flat configured budget and the
+// wrap-up nudge can sit beyond any turn it actually reaches. Set to the
+// planner's value: the two phases explore comparable breadth, and the
+// guarded planner never reached 25 across a recorded batch of 16 runs while
+// an unguarded diagnosis run reached 28.
+const diagnoseMaxTurns = 25
+
+// diagnoseTurnCap is the diagnosis run's turn budget, min'd with base so a
+// smaller configured cap is never raised - mirrors planTurnCap.
+func diagnoseTurnCap(base int) int {
+	return min(base, diagnoseMaxTurns)
+}
+
 // complexTurnFactor and criticalTurnFactor scale a coder run's turn budget above
 // the configured base for the two heaviest tiers, so a single unsplittable
 // cross-cutting subtask can land its source changes AND the tests those changes
@@ -334,6 +340,24 @@ func (o *run) runModelPlan(ctx context.Context, reg *tools.Registry, prompt, mod
 	cfg.WrapUpTurns = wrapUpTurns
 	cfg.WrapUpMessage = planWrapUpMessage
 	cfg.MaxTurns = planTurnCap(cfg.MaxTurns, repair)
+
+	return o.runModelCfg(ctx, reg, prompt, model, cfg)
+}
+
+// runModelDiagnose is the diagnosis phase's model call. Like the planner it
+// gets the wrap-up nudge and a phase cap of its own instead of the flat
+// configured budget. GraceTurn is deliberately NOT set: the harness only
+// grants the grace call when the registry carries a Terminal tool (see the
+// harness's graceFinish), and the diagnosis investigator runs on d.ReadTools,
+// which is read-only and registers none - exactly like the planner's
+// registry, which omits the field for the same reason. Setting it here would
+// be inert configuration, not an extra guard.
+func (o *run) runModelDiagnose(ctx context.Context, reg *tools.Registry, prompt, model string, images []llm.ImageURL) (harness.Result, time.Duration, error) {
+	cfg := o.harnessConfig(model)
+	cfg.TaskImages = images
+	cfg.WrapUpTurns = wrapUpTurns
+	cfg.WrapUpMessage = diagnoseWrapUpMessage
+	cfg.MaxTurns = diagnoseTurnCap(cfg.MaxTurns)
 
 	return o.runModelCfg(ctx, reg, prompt, model, cfg)
 }

@@ -520,7 +520,7 @@ func (o *run) runDiagnose(ctx context.Context, model string) (string, error) {
 	task := fmt.Sprintf(diagnosePrompt, o.grounding, cfg.Workspace, readRootsBlock(d.ReadRoots),
 		o.tc.Title, o.taskDescription)
 
-	res, dur, err := o.runModelImages(ctx, d.ReadTools, task, model, o.taskImages)
+	res, dur, err := o.runModelDiagnose(ctx, d.ReadTools, task, model, o.taskImages)
 
 	o.spendAndReport(ctx, o.ledger, cfg.CardID, "plan: report diagnose usage failed", res, model, "main", dur)
 

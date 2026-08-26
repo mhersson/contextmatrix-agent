@@ -975,13 +975,14 @@ func designBlock(design string) string {
 }
 
 // Wrap-up nudge messages, injected by the harness when wrapUpTurns turns
-// remain (runModelWrapUp / runModelPlan). Built from the shared constant so the
-// stated count can never drift from the threshold. The coder, fix, and document
-// phases wrap up by driving the model to call the finish tool (document always
-// calls it, even with no doc changes, since the orchestrator only commits when
-// files actually changed). The planner has no finish tool: it wraps up by
-// emitting its JSON plan as the final message, so its nudge forces that emit
-// rather than a tool call.
+// remain (runModelWrapUp / runModelPlan / runModelDiagnose). Built from the
+// shared constant so the stated count can never drift from the threshold. The
+// coder, fix, and document phases wrap up by driving the model to call the
+// finish tool (document always calls it, even with no doc changes, since the
+// orchestrator only commits when files actually changed). The planner and the
+// diagnosis investigator have no finish tool: each wraps up by emitting its
+// final text (the JSON plan, or the "## Diagnosis" block) as the last message,
+// so their nudges force that emit rather than a tool call.
 var (
 	coderWrapUpMessage = fmt.Sprintf("%d turns remain. If the acceptance criteria pass, call the finish tool now with your commit message and make no further tool calls. Do not re-run checks that already passed.", wrapUpTurns)
 
@@ -990,6 +991,8 @@ var (
 	documentWrapUpMessage = fmt.Sprintf("%d turns remain. Call the finish tool now with your docs commit message (whether or not you wrote documentation) and make no further tool calls.", wrapUpTurns)
 
 	planWrapUpMessage = fmt.Sprintf("%d turns remain. Stop investigating now and output your final answer: ONLY the JSON plan object described above, built from the analysis you already have. Make no further tool calls, no prose, no code fences.", wrapUpTurns)
+
+	diagnoseWrapUpMessage = fmt.Sprintf("%d turns remain. Stop investigating now and output your final answer: the \"## Diagnosis\" section in exactly the shape described above, built from the evidence you already have. Make no further tool calls.", wrapUpTurns)
 
 	seatWrapUpMessage = fmt.Sprintf("%d turns remain in this round. Stop exploring and state your position now, built only from what you have already read - plain text, no further tool calls.", mobSeatWrapUpTurns)
 
