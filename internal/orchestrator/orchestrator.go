@@ -92,6 +92,11 @@ type GitOps interface {
 	DiffStat(ctx context.Context, base string) (string, error)
 	DisableAutoGC(ctx context.Context) error
 	AddInfoExclude(ctx context.Context, pattern string) error
+	// WorktreeState is an opaque fingerprint of everything uncommitted in the
+	// worktree, built from the repository's own ignore rules so that artifacts a
+	// check command produces do not move it. Equal fingerprints mean nothing was
+	// written in between.
+	WorktreeState(ctx context.Context) (string, error)
 }
 
 // Config carries the per-run parameters the FSM needs.
@@ -199,9 +204,12 @@ type Deps struct {
 	Emit       *events.Emitter
 	Registry   *registry.Registry
 	WriteTools *tools.Registry // full toolset rooted at the workspace
-	// WriteToolsForDir builds the full write toolset rooted at dir. Used by
-	// Best-of-N to give each candidate worktree its own jailed tool registry.
-	WriteToolsForDir func(dir string) *tools.Registry
+	// WriteToolsForDir builds the full write toolset rooted at dir, plus the
+	// caller's verify tool when it has one (a genuine nil interface when the run
+	// resolved no verify command). Used by Best-of-N to give each candidate
+	// worktree its own jailed tool registry, and by the execute phase to bind the
+	// solo solver's registry once the verify plan has resolved.
+	WriteToolsForDir func(dir string, verify tools.Tool) *tools.Registry
 	ReadTools        *tools.Registry // read-only subset for planner/reviewers
 	// PlanTools builds the plan phase's own registry: the read-only subset plus
 	// the findings tool. A factory, not a registry, because the findings tool is

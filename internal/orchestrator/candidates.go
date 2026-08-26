@@ -352,10 +352,14 @@ func allSubtasksDone(subs []subtaskRef) bool {
 // each subtask body before it runs. It records the executed subtasks on the
 // candidate and returns the first subtask error, which drops the candidate.
 func (o *run) runCandidate(ctx context.Context, c *candidate, ordered []subtaskRef, nEff int) error {
+	// One verify tool per candidate, rooted at that candidate's own worktree and
+	// git handle. Candidates write concurrently, so a shared instance would let
+	// one candidate's write invalidate another's cache - or report a pass one
+	// candidate earned as if it were another's.
 	sc := &solverCtx{
 		git:        c.git,
 		ledger:     c.ledger,
-		tools:      o.d.WriteToolsForDir(c.dir),
+		tools:      o.d.WriteToolsForDir(c.dir, verifyToolFor(c.git, c.dir, o.resolvedVerifyPlan())),
 		workspace:  c.dir,
 		coderModel: o.candidateCoderModel(c),
 		boardOps:   false,

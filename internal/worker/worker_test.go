@@ -741,7 +741,7 @@ func TestRunFSMWiresPerDirFactories(t *testing.T) {
 
 	var gitForDir func(string) orchestrator.GitOps
 
-	var writeToolsForDir func(string) *tools.Registry
+	var writeToolsForDir func(string, tools.Tool) *tools.Registry
 
 	var mainWriteTools *tools.Registry
 
@@ -778,7 +778,7 @@ func TestRunFSMWiresPerDirFactories(t *testing.T) {
 
 	// WriteToolsForDir(ws) must build the identical toolset as the main
 	// WriteTools registry built for the same ws.
-	forDirRegistry := writeToolsForDir(ws)
+	forDirRegistry := writeToolsForDir(ws, nil)
 	require.NotNil(t, forDirRegistry)
 	assert.ElementsMatch(t, toolNames(t, mainWriteTools), toolNames(t, forDirRegistry))
 }
@@ -798,7 +798,7 @@ func TestRunFSMWiresSkillToolIntoCandidateRegistries(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(skillsDir, "go-development", "SKILL.md"),
 		[]byte("---\nname: go-development\ndescription: Use for Go.\n---\nbody"), 0o644))
 
-	var writeToolsForDir func(string) *tools.Registry
+	var writeToolsForDir func(string, tools.Tool) *tools.Registry
 
 	var mainWriteTools *tools.Registry
 
@@ -822,7 +822,7 @@ func TestRunFSMWiresSkillToolIntoCandidateRegistries(t *testing.T) {
 	require.NotNil(t, mainWriteTools)
 
 	ws := filepath.Join(wsParent, "cmx-001")
-	forDirRegistry := writeToolsForDir(filepath.Join(ws, ".worktrees", "c1"))
+	forDirRegistry := writeToolsForDir(filepath.Join(ws, ".worktrees", "c1"), nil)
 	require.NotNil(t, forDirRegistry)
 
 	require.Contains(t, toolNames(t, mainWriteTools), "skill",
@@ -1465,7 +1465,7 @@ func TestPlanToolsRegistryCarriesFindingsTool(t *testing.T) {
 func TestWriteToolsForThreadsExtraEnv(t *testing.T) {
 	t.Parallel()
 
-	wt := writeToolsFor(t.TempDir(), 60, []string{"TEST_EXTRA_VAR=hello-from-extra"})
+	wt := writeToolsFor(t.TempDir(), 60, []string{"TEST_EXTRA_VAR=hello-from-extra"}, nil)
 
 	var bash tools.Tool
 
@@ -1492,7 +1492,7 @@ func TestRunFSMPassesVerifyEnvToWriteTools(t *testing.T) {
 
 	var mainWriteTools *tools.Registry
 
-	var writeToolsForDir func(string) *tools.Registry
+	var writeToolsForDir func(string, tools.Tool) *tools.Registry
 
 	swapRunOrchestrator(t, func(_ context.Context, d orchestrator.Deps) error {
 		mainWriteTools = d.WriteTools
@@ -1517,7 +1517,7 @@ func TestRunFSMPassesVerifyEnvToWriteTools(t *testing.T) {
 
 	for name, reg := range map[string]*tools.Registry{
 		"main workspace": mainWriteTools,
-		"candidate dir":  writeToolsForDir(t.TempDir()),
+		"candidate dir":  writeToolsForDir(t.TempDir(), nil),
 	} {
 		bash, ok := reg.Get("bash")
 		require.True(t, ok, name)
@@ -1682,4 +1682,43 @@ func TestLogReachabilityToleratesNilOps(t *testing.T) {
 	assert.NotPanics(t, func() {
 		logReachability(context.Background(), registry.NewRegistry("top/one", nil), nil, "CMX-001")
 	})
+}
+
+// stubVerifyTool stands in for the orchestrator's verify tool. writeToolsFor
+// must place whatever it is handed into the registry without knowing anything
+// about it.
+type stubVerifyTool struct{}
+
+func (stubVerifyTool) Name() string { return "verify" }
+
+func (stubVerifyTool) Schema() llm.Tool {
+	return llm.Tool{Type: "function", Function: llm.ToolFunction{Name: "verify"}}
+}
+
+func (stubVerifyTool) Execute(context.Context, map[string]any) (tools.Result, error) {
+	return tools.Result{}, nil
+}
+
+// The coder's registry offers the verify tool when a command resolved, and does
+// not when none did.
+func TestWriteToolsRegisterVerifyToolWhenResolved(t *testing.T) {
+	t.Parallel()
+
+	var names []string
+	for _, tl := range writeToolsFor(t.TempDir(), 60, nil, stubVerifyTool{}) {
+		names = append(names, tl.Name())
+	}
+
+	assert.Contains(t, names, "verify", "a resolved verify command must reach the coder as a tool")
+}
+
+func TestWriteToolsOmitVerifyToolWhenUnresolved(t *testing.T) {
+	t.Parallel()
+
+	var names []string
+	for _, tl := range writeToolsFor(t.TempDir(), 60, nil, nil) {
+		names = append(names, tl.Name())
+	}
+
+	assert.NotContains(t, names, "verify", "a run with no resolvable verify command must offer no verify tool")
 }

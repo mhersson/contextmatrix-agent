@@ -2,6 +2,8 @@ package worker
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -239,6 +241,73 @@ func (g *Git) isDirty(ctx context.Context) (bool, error) {
 	}
 
 	return strings.TrimSpace(out) != "", nil
+}
+
+// WorktreeState is an opaque fingerprint of everything uncommitted in the
+// worktree: the porcelain status, the diff of every tracked change, and the
+// content of every untracked file the status names. Equal fingerprints mean
+// nothing was written in between.
+//
+// It reads the tree through git rather than by walking it so the repository's
+// own ignore rules apply: a build artifact tree a check command produced is
+// invisible here, while everything the coder authored is not.
+func (g *Git) WorktreeState(ctx context.Context) (string, error) {
+	status, err := g.run(ctx, "status", "--porcelain=v1", "--untracked-files=all", "-z")
+	if err != nil {
+		return "", fmt.Errorf("worktree state: %w", err)
+	}
+
+	diff, err := g.run(ctx, "diff", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("worktree state: %w", err)
+	}
+
+	h := sha256.New()
+	h.Write([]byte(status))
+	h.Write([]byte(diff))
+
+	// Untracked content appears in neither of the two above - status names the
+	// file, the diff covers tracked paths only - so an edit to a file the coder
+	// had just created would otherwise read as nothing written.
+	for _, rel := range untrackedPaths(status) {
+		h.Write([]byte(rel))
+		hashFile(h, filepath.Join(g.dir, rel))
+	}
+
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// untrackedPaths pulls the untracked entries out of NUL-delimited porcelain v1
+// status output. -z leaves paths unquoted and verbatim, so a name with spaces or
+// non-ASCII bytes survives; a rename's second field is a bare path and matches
+// no status prefix, so it is skipped.
+func untrackedPaths(status string) []string {
+	var out []string
+
+	for _, rec := range strings.Split(status, "\x00") {
+		if rel, ok := strings.CutPrefix(rec, "?? "); ok && rel != "" {
+			out = append(out, rel)
+		}
+	}
+
+	return out
+}
+
+// hashFile folds a file's content into h. An unreadable file contributes its
+// error text instead, which keeps the fingerprint defined without pretending
+// the file is empty.
+func hashFile(h io.Writer, absPath string) {
+	f, err := os.Open(absPath) //nolint:gosec // path is a workspace-relative entry from git status
+	if err != nil {
+		fmt.Fprint(h, err.Error())
+
+		return
+	}
+	defer f.Close() //nolint:errcheck // read-only
+
+	if _, err := io.Copy(h, f); err != nil {
+		fmt.Fprint(h, err.Error())
+	}
 }
 
 // hasExecutableMagic reports whether the file begins with a known native

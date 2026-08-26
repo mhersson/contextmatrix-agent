@@ -426,6 +426,11 @@ type fakeGit struct {
 	mu    sync.Mutex
 	calls []string
 
+	// WorktreeState scripting: successive fingerprints, the last one repeating;
+	// worktreeStateErr fails the read.
+	worktreeStates   []string
+	worktreeStateErr error
+
 	// CommitWithMessage scripting: committed is the returned "something was
 	// committed" flag; commitErr fails the call. commitMsgs captures each
 	// message passed so tests can assert the extracted commit line.
@@ -672,6 +677,31 @@ func (g *fakeGit) DisableAutoGC(_ context.Context) error {
 	g.record("DisableAutoGC")
 
 	return nil
+}
+
+// WorktreeState returns the scripted fingerprints in order, repeating the last
+// one once the script is exhausted, so a test can say "nothing was written" by
+// leaving it alone. It deliberately does not record a call: tests assert on the
+// recorded call sequence, and a fingerprint read is not a git operation the run
+// performs.
+func (g *fakeGit) WorktreeState(context.Context) (string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if g.worktreeStateErr != nil {
+		return "", g.worktreeStateErr
+	}
+
+	if len(g.worktreeStates) == 0 {
+		return "unchanged", nil
+	}
+
+	state := g.worktreeStates[0]
+	if len(g.worktreeStates) > 1 {
+		g.worktreeStates = g.worktreeStates[1:]
+	}
+
+	return state, nil
 }
 
 func (g *fakeGit) AddInfoExclude(_ context.Context, pattern string) error {

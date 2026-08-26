@@ -1241,3 +1241,49 @@ func TestCandidateGitCannotPush(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "branch policy not set")
 }
+
+// WorktreeState must move for everything the coder writes and stay put for the
+// build artifacts a check command leaves behind - the distinction the verify
+// tool's already-passed report rests on.
+func TestWorktreeStateTracksWritesAndIgnoresArtifacts(t *testing.T) {
+	t.Parallel()
+
+	remote := setupBareRemote(t)
+	ws := filepath.Join(t.TempDir(), "ws")
+	g := NewGit(ws, "", "", "")
+	ctx := context.Background()
+
+	require.NoError(t, g.Clone(ctx, remote, "main"))
+
+	state := func() string {
+		s, err := g.WorktreeState(ctx)
+		require.NoError(t, err)
+
+		return s
+	}
+
+	clean := state()
+	assert.Equal(t, clean, state(), "an unchanged worktree must fingerprint the same twice")
+
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "README.md"), []byte("edited\n"), 0o644))
+
+	tracked := state()
+	assert.NotEqual(t, clean, tracked, "an edit to a tracked file must move the fingerprint")
+
+	created := filepath.Join(ws, "new.txt")
+	require.NoError(t, os.WriteFile(created, []byte("one\n"), 0o644))
+
+	added := state()
+	assert.NotEqual(t, tracked, added, "a new untracked file must move the fingerprint")
+
+	require.NoError(t, os.WriteFile(created, []byte("two\n"), 0o644))
+	assert.NotEqual(t, added, state(), "an edit to an untracked file must move the fingerprint")
+
+	require.NoError(t, os.WriteFile(filepath.Join(ws, ".gitignore"), []byte("artifacts/\n"), 0o644))
+
+	ignoring := state()
+
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "artifacts"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "artifacts", "out"), []byte("build output\n"), 0o644))
+	assert.Equal(t, ignoring, state(), "an ignored build artifact must not read as a write")
+}

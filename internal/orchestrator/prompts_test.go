@@ -21,8 +21,10 @@ func TestVerifyCommandBlock(t *testing.T) {
 	assert.Empty(t, verifyCommandBlock(verifyPlan{Source: verifySourceNone}), "a skip plan yields no block")
 
 	out := verifyCommandBlock(verifyPlan{Argv: []string{"go", "test", "./..."}, Display: "go test ./...", Source: verifySourceDetected})
-	assert.Contains(t, out, "The project's verify command is `go test ./...` (detected)")
-	assert.Contains(t, out, "make it pass")
+	assert.Contains(t, out, "`verify` tool", "the coder must be sent to the tool, not to a bare command string")
+	assert.Contains(t, out, "`go test ./...` (detected)")
+	assert.Contains(t, out, "Do not run the checks yourself with bash")
+	assert.Contains(t, out, "Make it pass")
 }
 
 func TestFixVerifyLine(t *testing.T) {

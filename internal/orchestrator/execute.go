@@ -47,16 +47,20 @@ func runExecute(ctx context.Context, o *run) error {
 	// Resolve the verify plan once at execute entry (the first phase to reach the
 	// gate on a fresh run), so the resolution log fires early and the coder prompt
 	// can name the command. A budget park during the proposal tier propagates.
-	if _, err := o.ensureVerify(ctx); err != nil {
+	plan, err := o.ensureVerify(ctx)
+	if err != nil {
 		return err
 	}
 
 	// Best-of-N replaces the single-solver execute with a candidate fan-out: N
 	// implementations of the shared plan race in isolated worktrees, off the board
-	// and never pushing, and a later phase judges them.
+	// and never pushing, and a later phase judges them. Each candidate binds its
+	// own verify tool, rooted at its own worktree.
 	if o.d.Cfg.BestOfN >= 2 {
 		return o.runFanout(ctx)
 	}
+
+	o.bindVerifyTool(o.solver, plan)
 
 	ordered, err := topoOrder(o.subtasks)
 	if err != nil {
@@ -70,6 +74,30 @@ func runExecute(ctx context.Context, o *run) error {
 	}
 
 	return nil
+}
+
+// bindVerifyTool rebuilds the solver's registry with the run's verify tool, so
+// the coder calls the resolved command instead of guessing shell commands for
+// it. It binds here rather than in newRun because the plan resolves at this
+// point, not at construction. A run with no resolvable command leaves the
+// registry exactly as it was.
+//
+// Ordering, since this mutates solver state mid-run: it runs after the plan has
+// resolved and before the first coder harness starts, on the goroutine that
+// drives the phase. Nothing reads sc.tools in between. A Best-of-N fan-out
+// cannot observe it at all - that branch returns above, o.solver is untouched by
+// the fan-out, and each candidate binds its own tool inside runCandidate.
+func (o *run) bindVerifyTool(sc *solverCtx, plan verifyPlan) {
+	if o.d.WriteToolsForDir == nil {
+		return
+	}
+
+	vt := verifyToolFor(sc.git, sc.workspace, plan)
+	if vt == nil {
+		return
+	}
+
+	sc.tools = o.d.WriteToolsForDir(sc.workspace, vt)
 }
 
 // executeSubtaskWith runs one subtask end to end through the given solver:

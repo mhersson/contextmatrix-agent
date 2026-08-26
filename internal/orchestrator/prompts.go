@@ -22,15 +22,16 @@ func skillEngageBlock(menu string) string {
 		"\n"
 }
 
-// verifyCommandBlock names the resolved verify command for the coder prompt when
-// one resolved, or "" when the gate is a skip. The command text is runtime
-// data, so the template stays language-neutral.
+// verifyCommandBlock points the coder at the verify tool, which runs the
+// resolved command, or returns "" when the gate is a skip and no tool is
+// registered. The command text is runtime data, so the template stays
+// language-neutral.
 func verifyCommandBlock(p verifyPlan) string {
 	if len(p.Argv) == 0 || p.Display == "" {
 		return ""
 	}
 
-	return fmt.Sprintf("\n\nThe project's verify command is `%s` (%s). Run it before finishing and make it pass.", p.Display, p.Source)
+	return fmt.Sprintf("\n\nRun the project's checks by calling the `verify` tool - it runs `%s` (%s) and returns the combined result. Do not run the checks yourself with bash. Call it once your changes are complete, and again only after you have written something since the last call. Make it pass before you finish.", p.Display, p.Source)
 }
 
 // fixVerifyLine is the fix prompt's verify instruction: the resolved command

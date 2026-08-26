@@ -362,7 +362,10 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 	skillTool := buildSkillTool(a.spec, a.ops)
 	dv := declaredVerify(a.spec.Verify)
 	verifyEnv := orchestrator.ResolveVerifyEnv(dv)
-	wt := writeToolsFor(a.ws, a.spec.BashTimeoutMax, verifyEnv)
+	// The main workspace registry is built before the run resolves its verify
+	// command; the execute phase rebinds the solver's registry through
+	// WriteToolsForDir once it has one.
+	wt := writeToolsFor(a.ws, a.spec.BashTimeoutMax, verifyEnv, nil)
 
 	if skillTool != nil {
 		wt = append(wt, skillTool)
@@ -407,11 +410,11 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 		Emit:       a.emit,
 		Registry:   reg,
 		WriteTools: tools.NewRegistry(wt...),
-		WriteToolsForDir: func(dir string) *tools.Registry {
+		WriteToolsForDir: func(dir string, verify tools.Tool) *tools.Registry {
 			// Candidates get the same skill tool as the main solver - the
 			// skills mount is a fixed path, not workspace-relative, so the
 			// shared instance is safe across worktrees.
-			wts := writeToolsFor(dir, a.spec.BashTimeoutMax, verifyEnv)
+			wts := writeToolsFor(dir, a.spec.BashTimeoutMax, verifyEnv, verify)
 			if skillTool != nil {
 				wts = append(wts, skillTool)
 			}
@@ -802,15 +805,17 @@ func ops2orchestrator(ops CardOps) orchestrator.Ops {
 }
 
 // writeToolsFor is the full model-facing toolset rooted at dir, matching the
-// linear path's registry so the FSM coder has the same capabilities. It is
-// parameterized only by the root dir - every other argument is fixed for the
-// run - so it is the one source of truth behind both the main workspace's
-// WriteTools registry and Best-of-N's per-candidate WriteToolsForDir factory.
+// linear path's registry so the FSM coder has the same capabilities. It is the
+// one source of truth behind both the main workspace's WriteTools registry and
+// Best-of-N's per-candidate WriteToolsForDir factory: the root dir and the
+// verify tool vary per call site, every other argument is fixed for the run.
 // extraEnv carries the resolved verify.env pass-throughs into the bash tool's
 // scrubbed environment, so the model's shell resolves the same set as the
-// verify gate and can reproduce it.
-func writeToolsFor(dir string, bashTimeoutMax int, extraEnv []string) []tools.Tool {
-	return []tools.Tool{
+// verify gate and can reproduce it. verify is the orchestrator's verify tool
+// for this dir, nil when the run resolved no verify command - registering it
+// here is what keeps both registries from drifting apart on it.
+func writeToolsFor(dir string, bashTimeoutMax int, extraEnv []string, verify tools.Tool) []tools.Tool {
+	wt := []tools.Tool{
 		tools.NewReadTool(dir),
 		tools.NewEditTool(dir),
 		tools.NewWriteTool(dir),
@@ -820,6 +825,12 @@ func writeToolsFor(dir string, bashTimeoutMax int, extraEnv []string) []tools.To
 		tools.NewBashTool(dir).WithMaxTimeout(bashTimeoutMax).WithExtraEnv(extraEnv),
 		orchestrator.NewFinishTool(),
 	}
+
+	if verify != nil {
+		wt = append(wt, verify)
+	}
+
+	return wt
 }
 
 // buildSkillTool constructs the per-run Skill tool from the mounted skills dir
