@@ -239,3 +239,17 @@ func stripMeta(body string) string {
 
 	return strings.TrimSpace(body)
 }
+
+// budgetLabel renders a budget step for a human: the factor of the operator's
+// configured base that rung buys. The step index means nothing to a reader of
+// the card; the factor does.
+func budgetLabel(step int) string {
+	step = min(max(step, 0), maxBudgetStep)
+
+	f := turnBudgetLadder[step]
+	if f == 1 {
+		return "base"
+	}
+
+	return strconv.FormatFloat(f, 'g', -1, 64) + "x base"
+}

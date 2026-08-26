@@ -290,7 +290,14 @@ type run struct {
 	// Plan-phase outputs, consumed by later phases. Set by runPlan, or - on
 	// resume - pre-loaded by reconcile from SubtaskStates before any phase runs.
 	subtasks []subtaskRef
-	cardTier string
+	// cardSizing is the card-level bar and budget, seeded from the planner's
+	// card_tier and persisted on the parent body so a resumed run restores it.
+	// Before it was persisted it had one writer and no reader on resume, so
+	// every resumed run sized its review panel and its Best-of-N pool at the
+	// moderate default no matter what the planner said. cardPlannerBar is the
+	// planner's own word, kept for the same reason as subtaskRef.PlannerBar.
+	cardSizing     sizing
+	cardPlannerBar string
 
 	// curPhase is the phase currently executing, set by the sequential FSM loop
 	// in execute BEFORE each phase runs and read by spendAndReport to tag usage
@@ -518,8 +525,13 @@ func newRun(d Deps, tc cmclient.TaskContext) *run {
 
 	o.coderModels = map[string]bool{}
 	o.excluded = map[string]bool{}
+	kv, s := readMeta(tc.Description)
+	o.cardSizing = s
+	o.cardPlannerBar = kv["seed"]
+	// o.body keeps the marker: it is the persisted body, and dropping it here
+	// would delete the marker on the next recordSection push.
 	o.body = tc.Description
-	o.taskDescription = stripAgentSections(tc.Description)
+	o.taskDescription = stripAgentSections(stripMeta(tc.Description))
 	o.lastFindings = reviewFindingsHistory(tc.Description)
 	o.taskImages = dataURLs(tc.Images)
 

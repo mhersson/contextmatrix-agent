@@ -137,7 +137,7 @@ func TestExecuteSubtaskFlow(t *testing.T) {
 	}}
 	d := execTestDeps(ops, git, llmFake)
 
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")}}, 0)
 	require.NoError(t, runExecute(context.Background(), o))
 
 	// Per-subtask ordered op sequence.
@@ -186,7 +186,7 @@ func TestExecuteSubtaskHeartbeatsClaim(t *testing.T) {
 	}
 	d := execTestDeps(ops, git, client)
 
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")}}, 0)
 	require.NoError(t, runExecute(context.Background(), o))
 
 	beats := countCalls(ops.recorded(), "Heartbeat:SUB-1")
@@ -265,7 +265,7 @@ func TestExecuteSubtaskErrorReleasesClaim(t *testing.T) {
 	llmFake := &planLLM{responses: []llm.Response{finishResp("feat: x", 0.01)}}
 	d := execTestDeps(ops, git, llmFake)
 
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")}}, 0)
 	err := runExecute(context.Background(), o)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "commit subtask SUB-1")
@@ -299,7 +299,7 @@ func TestExecuteSubtaskMaxTurnsNeverCompletes(t *testing.T) {
 
 	// newExecRun's isolateVerify leaves the verify plan a skip (empty Argv), so
 	// the salvage gate cannot confirm the work and the run parks.
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")}}, 0)
 	err := runExecute(context.Background(), o)
 	require.Error(t, err)
 
@@ -324,10 +324,10 @@ func TestExecuteCoderPromptBody(t *testing.T) {
 		d := execTestDeps(ops, git, llmFake)
 
 		o := newExecRun(d, []subtaskRef{{
-			ID:    "SUB-1",
-			Title: "Add health endpoint",
-			Body:  "Files: internal/api/health.go\nAcceptance: GET /healthz returns 200",
-			Tier:  "simple",
+			ID:     "SUB-1",
+			Title:  "Add health endpoint",
+			Body:   "Files: internal/api/health.go\nAcceptance: GET /healthz returns 200",
+			Sizing: seedSizing("simple"),
 		}}, 0)
 		require.NoError(t, runExecute(context.Background(), o))
 
@@ -344,7 +344,7 @@ func TestExecuteCoderPromptBody(t *testing.T) {
 		d := execTestDeps(ops, git, llmFake)
 
 		// Resume-loaded refs lack bodies; the title stands in as the description.
-		o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Add health endpoint", Tier: "simple"}}, 0)
+		o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Add health endpoint", Sizing: seedSizing("simple")}}, 0)
 		require.NoError(t, runExecute(context.Background(), o))
 
 		require.NotEmpty(t, llmFake.tasks)
@@ -366,8 +366,8 @@ func TestExecuteFirstPushLeasesStaleBranch(t *testing.T) {
 	d := execTestDeps(ops, git, llmFake)
 
 	o := newExecRun(d, []subtaskRef{
-		{ID: "SUB-1", Title: "First", Tier: "simple"},
-		{ID: "SUB-2", Title: "Second", Tier: "simple"},
+		{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")},
+		{ID: "SUB-2", Title: "Second", Sizing: seedSizing("simple")},
 	}, 0)
 	// Simulate what reconcile records on a fresh run with a stale remote branch.
 	o.staleRemoteTip = "stale-tip"
@@ -395,7 +395,7 @@ func TestExecutePlainPushWhenNoStaleTip(t *testing.T) {
 	llmFake := &planLLM{responses: []llm.Response{finishResp("feat: x", 0.01)}}
 	d := execTestDeps(ops, git, llmFake)
 
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")}}, 0)
 
 	require.NoError(t, runExecute(context.Background(), o))
 
@@ -412,7 +412,7 @@ func TestExecuteCleanTreeSkipsPush(t *testing.T) {
 	}}
 	d := execTestDeps(ops, git, llmFake)
 
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")}}, 0)
 	require.NoError(t, runExecute(context.Background(), o))
 
 	gitCalls := git.recorded()
@@ -433,7 +433,7 @@ func TestExecuteModelSelectionPin(t *testing.T) {
 	d.Cfg.MaxCardCost = 0
 	o := newRun(d, tc)
 	isolateVerify(o)
-	o.subtasks = []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "complex"}}
+	o.subtasks = []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("complex")}}
 
 	require.NoError(t, runExecute(context.Background(), o))
 
@@ -466,7 +466,7 @@ func TestExecuteModelSelectionByComplexity(t *testing.T) {
 	d.Cfg.MaxCardCost = 0
 	o := newRun(d, tc)
 	isolateVerify(o)
-	o.subtasks = []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "moderate"}}
+	o.subtasks = []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("moderate")}}
 
 	require.NoError(t, runExecute(context.Background(), o))
 
@@ -490,8 +490,8 @@ func TestExecuteSkipsDone(t *testing.T) {
 
 	// SUB-1 is already done (resume); SUB-2 is fresh and must run.
 	o := newExecRun(d, []subtaskRef{
-		{ID: "SUB-1", Title: "Done one", Tier: "simple", State: "done"},
-		{ID: "SUB-2", Title: "Fresh one", Tier: "simple", State: "todo"},
+		{ID: "SUB-1", Title: "Done one", Sizing: seedSizing("simple"), State: "done"},
+		{ID: "SUB-2", Title: "Fresh one", Sizing: seedSizing("simple"), State: "todo"},
 	}, 0)
 
 	require.NoError(t, runExecute(context.Background(), o))
@@ -510,8 +510,8 @@ func TestExecuteSkipsNotPlanned(t *testing.T) {
 
 	// SUB-1 is not_planned (cancelled); SUB-2 is fresh and must run.
 	o := newExecRun(d, []subtaskRef{
-		{ID: "SUB-1", Title: "Cancelled task", Tier: "simple", State: "not_planned"},
-		{ID: "SUB-2", Title: "Fresh task", Tier: "simple", State: "todo"},
+		{ID: "SUB-1", Title: "Cancelled task", Sizing: seedSizing("simple"), State: "not_planned"},
+		{ID: "SUB-2", Title: "Fresh task", Sizing: seedSizing("simple"), State: "todo"},
 	}, 0)
 
 	require.NoError(t, runExecute(context.Background(), o))
@@ -533,7 +533,7 @@ func TestExecuteCommitMessage(t *testing.T) {
 		}}
 		d := execTestDeps(ops, git, llmFake)
 
-		o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Add health endpoint", Tier: "simple"}}, 0)
+		o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Add health endpoint", Sizing: seedSizing("simple")}}, 0)
 		require.NoError(t, runExecute(context.Background(), o))
 
 		require.NotEmpty(t, git.commitMsgs)
@@ -548,7 +548,7 @@ func TestExecuteCommitMessage(t *testing.T) {
 		}}
 		d := execTestDeps(ops, git, llmFake)
 
-		o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Add Health Endpoint", Tier: "simple"}}, 0)
+		o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Add Health Endpoint", Sizing: seedSizing("simple")}}, 0)
 		require.NoError(t, runExecute(context.Background(), o))
 
 		require.NotEmpty(t, git.commitMsgs)
@@ -572,8 +572,8 @@ func TestExecuteBudget(t *testing.T) {
 	o := newRun(d, tc)
 	isolateVerify(o)
 	o.subtasks = []subtaskRef{
-		{ID: "SUB-1", Title: "One", Tier: "simple"},
-		{ID: "SUB-2", Title: "Two", Tier: "simple"},
+		{ID: "SUB-1", Title: "One", Sizing: seedSizing("simple")},
+		{ID: "SUB-2", Title: "Two", Sizing: seedSizing("simple")},
 	}
 
 	err := runExecute(context.Background(), o)
@@ -592,7 +592,7 @@ func TestExecuteClaimFailureAborts(t *testing.T) {
 	llmFake := &planLLM{responses: []llm.Response{finishResp("feat: x", 0.01)}}
 	d := execTestDeps(ops, git, llmFake)
 
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")}}, 0)
 	err := runExecute(context.Background(), o)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "claim")
@@ -607,7 +607,7 @@ func TestExecutePushFailureAborts(t *testing.T) {
 	llmFake := &planLLM{responses: []llm.Response{finishResp("feat: x", 0.01)}}
 	d := execTestDeps(ops, git, llmFake)
 
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")}}, 0)
 	err := runExecute(context.Background(), o)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "push")
@@ -675,7 +675,7 @@ func TestExecuteCommitMessageLongFinish(t *testing.T) {
 	}}
 	d := execTestDeps(ops, git, llmFake)
 
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Add health endpoint", Tier: "simple"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Add health endpoint", Sizing: seedSizing("simple")}}, 0)
 	require.NoError(t, runExecute(context.Background(), o),
 		"a very long commit message must not cause a length error from CompleteTask")
 
@@ -737,7 +737,7 @@ func TestCoderRunGetsWrapUpNudge(t *testing.T) {
 
 	d := execTestDeps(ops, git, client)
 	d.Cfg.MaxTurns = 8
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
 
 	require.NoError(t, runExecute(context.Background(), o))
 
@@ -766,7 +766,7 @@ func TestCoderLadderWidensTheWindowAndSaysSo(t *testing.T) {
 
 	d := execTestDeps(ops, git, client)
 	d.Cfg.MaxTurns = 10
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "complex"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("complex")}}, 0)
 
 	require.NoError(t, runExecute(context.Background(), o))
 
@@ -797,7 +797,7 @@ func TestCoderRunGetsBatchNudge(t *testing.T) {
 	// The base MaxTurns of 20 keeps the wrap-up nudge (which fires at 20-5=15
 	// turns) well clear: a run already told to finish suppresses the batching
 	// nudge for the rest of the run.
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
 
 	require.NoError(t, runExecute(context.Background(), o))
 
@@ -818,7 +818,7 @@ func TestCoderRunNoBatchNudgeBelowThreshold(t *testing.T) {
 
 	d := execTestDeps(ops, git, client)
 	d.Emit = events.NewEmitter(nil, &transcript)
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
 
 	require.NoError(t, runExecute(context.Background(), o))
 
@@ -836,7 +836,7 @@ func TestCoderRunTierScalesTurnBudget(t *testing.T) {
 
 	d := execTestDeps(ops, git, client)
 	d.Cfg.MaxTurns = 20
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "complex"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("complex")}}, 0)
 
 	require.NoError(t, runExecute(context.Background(), o),
 		"a complex subtask scales the coder budget above the base, so 25 turns do not cap")
@@ -851,7 +851,7 @@ func TestCoderRunSimpleTierCapsAtBase(t *testing.T) {
 
 	d := execTestDeps(ops, git, client)
 	d.Cfg.MaxTurns = 20
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
 
 	err := runExecute(context.Background(), o)
 	require.Error(t, err, "a simple subtask keeps the flat base, so 25 turns cap")
@@ -889,7 +889,7 @@ func TestSalvageCappedFinalSubtask(t *testing.T) {
 		lastSubID: "SUB-2",
 	}
 
-	sub := subtaskRef{ID: "SUB-2", Title: "Final", Tier: "simple"}
+	sub := subtaskRef{ID: "SUB-2", Title: "Final", Sizing: seedSizing("simple")}
 	require.NoError(t, o.executeSubtaskWith(context.Background(), sc, sub),
 		"a cap on the final subtask is salvaged, not dropped")
 
@@ -925,7 +925,7 @@ func TestNoSalvageOnCleanTree(t *testing.T) {
 		lastSubID: "SUB-2",
 	}
 
-	sub := subtaskRef{ID: "SUB-2", Title: "Final", Tier: "simple"}
+	sub := subtaskRef{ID: "SUB-2", Title: "Final", Sizing: seedSizing("simple")}
 	err := o.executeSubtaskWith(context.Background(), sc, sub)
 	require.Error(t, err, "a clean tree on the final subtask must not be salvaged")
 
@@ -955,7 +955,7 @@ func TestSalvageFallsBackToTitleCommitMessage(t *testing.T) {
 	}
 
 	require.NoError(t, o.executeSubtaskWith(context.Background(), sc,
-		subtaskRef{ID: "SUB-2", Title: "Final", Tier: "simple"}))
+		subtaskRef{ID: "SUB-2", Title: "Final", Sizing: seedSizing("simple")}))
 	require.NotEmpty(t, cg.commitMsgs)
 	assert.Equal(t, "feat: final", cg.commitMsgs[len(cg.commitMsgs)-1])
 }
@@ -979,7 +979,7 @@ func TestNoSalvageOnEarlierSubtask(t *testing.T) {
 		lastSubID: "SUB-9", // the capped subtask is NOT the final one
 	}
 
-	err := o.executeSubtaskWith(context.Background(), sc, subtaskRef{ID: "SUB-2", Title: "Mid", Tier: "simple"})
+	err := o.executeSubtaskWith(context.Background(), sc, subtaskRef{ID: "SUB-2", Title: "Mid", Sizing: seedSizing("simple")})
 	require.Error(t, err, "a cap on an earlier subtask still drops the candidate")
 
 	var mte *MaxTurnsError
@@ -1000,7 +1000,7 @@ func TestSoloTurnCapSalvagedWhenVerifyPasses(t *testing.T) {
 	client := &planLLM{responses: burnResps(5)}
 	d := execTestDeps(ops, git, client)
 	d.Cfg.MaxTurns = 5
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
 
 	// A non-empty resolved plan (so the gate is not vacuous) whose authoritative
 	// verify passes.
@@ -1039,7 +1039,7 @@ func TestCoderGraceTurnFinishes(t *testing.T) {
 	d.Cfg.MaxTurns = 5
 	// A simple tier keeps the ladder at the flat base (5), so the cap trips on
 	// the fifth burn and the grace call fires on the sixth response.
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
 
 	// Deliberately NO seedResolvedVerifyPlan / o.runVerify stub: a grace finish
 	// completes without the salvage path's authoritative verify.
@@ -1078,7 +1078,7 @@ func TestSoloTurnCapStillParksWhenVerifyFails(t *testing.T) {
 	client := &planLLM{responses: burnResps(5)}
 	d := execTestDeps(ops, git, client)
 	d.Cfg.MaxTurns = 5
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
 
 	seedResolvedVerifyPlan(o)
 	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
@@ -1107,7 +1107,7 @@ func TestSoloTurnCapParkNamesClassification(t *testing.T) {
 	client := &planLLM{responses: burnResps(5)}
 	d := execTestDeps(ops, git, client)
 	d.Cfg.MaxTurns = 5
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
 
 	seedResolvedVerifyPlan(o)
 	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
@@ -1136,7 +1136,7 @@ func TestSoloTurnCapStillParksOnCleanTree(t *testing.T) {
 	client := &planLLM{responses: burnResps(5)}
 	d := execTestDeps(ops, git, client)
 	d.Cfg.MaxTurns = 5
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
 
 	// Even a passing verify cannot rescue a clean tree: nothing was committed.
 	seedResolvedVerifyPlan(o)
@@ -1158,7 +1158,7 @@ func TestSoloTurnCapStillParksOnCleanTree(t *testing.T) {
 
 // TestSalvageDeclineEscalatesTierAndReportsFailed proves a solo turn-cap park
 // that fails the authoritative verify (never salvaged) bumps the subtask's
-// persisted tier marker one step - so a resumed run selects a stronger model
+// persisted bar one rung - so a resumed run selects a stronger model
 // against a bigger cap instead of repeating the same losing attempt - and
 // reports a "failed" outcome with VerifyPass false: the run did not complete,
 // and the verify never confirmed the work.
@@ -1168,9 +1168,9 @@ func TestSalvageDeclineEscalatesTierAndReportsFailed(t *testing.T) {
 	client := &planLLM{responses: burnResps(5)}
 	d := execTestDeps(ops, git, client)
 	d.Cfg.MaxTurns = 5
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "moderate"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("moderate")}}, 0)
 	ops.taskContext = cmclient.TaskContext{
-		Description: withTierMarker("Implement the thing.", "moderate"),
+		Description: legacyTierMarker("Implement the thing.", "moderate"),
 	}
 
 	seedResolvedVerifyPlan(o)
@@ -1181,8 +1181,10 @@ func TestSalvageDeclineEscalatesTierAndReportsFailed(t *testing.T) {
 	err := runExecute(context.Background(), o)
 	require.Error(t, err, "a capped subtask whose committed work fails verify parks")
 
-	assert.Equal(t, "Implement the thing.\n\n<!-- cm:tier=complex -->", ops.bodyFor("SUB-1"),
-		"the park escalates the marker one step, leaving the rest of the body unchanged")
+	_, got := readMeta(ops.bodyFor("SUB-1"))
+	assert.Equal(t, registry.TierComplex, got.Bar, "the park escalates the bar one rung")
+	assert.Equal(t, "Implement the thing.", stripMeta(ops.bodyFor("SUB-1")),
+		"the rest of the body is unchanged")
 	assert.True(t, ops.loggedContains("escalating subtask tier moderate -> complex"),
 		"the escalation is activity-logged; logs=%v", ops.logs)
 
@@ -1205,16 +1207,18 @@ func TestSalvageDeclineOnCleanTreeEscalatesTierAndReportsFailed(t *testing.T) {
 	client := &planLLM{responses: burnResps(5)}
 	d := execTestDeps(ops, git, client)
 	d.Cfg.MaxTurns = 5
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
 	ops.taskContext = cmclient.TaskContext{
-		Description: withTierMarker("Implement the thing.", "simple"),
+		Description: legacyTierMarker("Implement the thing.", "simple"),
 	}
 
 	err := runExecute(context.Background(), o)
 	require.Error(t, err, "a clean tree carries no completion evidence, so the cap parks")
 
-	assert.Equal(t, "Implement the thing.\n\n<!-- cm:tier=moderate -->", ops.bodyFor("SUB-1"),
-		"the clean-tree decline still escalates the marker, leaving the rest of the body unchanged")
+	_, got := readMeta(ops.bodyFor("SUB-1"))
+	assert.Equal(t, registry.TierModerate, got.Bar, "the clean-tree decline still escalates the bar")
+	assert.Equal(t, "Implement the thing.", stripMeta(ops.bodyFor("SUB-1")),
+		"the rest of the body is unchanged")
 	assert.True(t, ops.loggedContains("escalating subtask tier simple -> moderate"),
 		"the escalation is activity-logged; logs=%v", ops.logs)
 
@@ -1237,9 +1241,9 @@ func TestSalvageDeclineCriticalTierStaysCritical(t *testing.T) {
 	client := &planLLM{responses: burnResps(10)}
 	d := execTestDeps(ops, git, client)
 	d.Cfg.MaxTurns = 5
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "critical"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("critical")}}, 0)
 	ops.taskContext = cmclient.TaskContext{
-		Description: withTierMarker("Implement the thing.", "critical"),
+		Description: legacyTierMarker("Implement the thing.", "critical"),
 	}
 
 	seedResolvedVerifyPlan(o)
@@ -1272,9 +1276,9 @@ func TestSalvageDeclineAfterVerifyPassKeepsTierAndReportsNoOutcome(t *testing.T)
 	client := &planLLM{responses: burnResps(5)}
 	d := execTestDeps(ops, git, client)
 	d.Cfg.MaxTurns = 5
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "moderate"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("moderate")}}, 0)
 	ops.taskContext = cmclient.TaskContext{
-		Description: withTierMarker("Implement the thing.", "moderate"),
+		Description: legacyTierMarker("Implement the thing.", "moderate"),
 	}
 
 	seedResolvedVerifyPlan(o)
@@ -1303,7 +1307,7 @@ func TestSalvageDeclineAfterVerifyPassKeepsTierAndReportsNoOutcome(t *testing.T)
 // TestSalvageDeclineAfterVerifyPassKeepsTierAndReportsNoOutcome for the OTHER
 // post-verify-pass park cause: the push succeeds but the board's CompleteTask
 // call fails. Same tier contract - the model's work is proven correct, so
-// this is an infrastructure park that must not touch the tier marker. The
+// this is an infrastructure park that must not touch the marker. The
 // outcome differs from the push case only because the win report fires
 // BEFORE the doomed CompleteTask attempt (claim-gating requires it): exactly
 // one "win" row stands, and the CompleteTask failure gets no second,
@@ -1314,9 +1318,9 @@ func TestSalvageDeclineAfterCompleteTaskFailKeepsTierAndWinRow(t *testing.T) {
 	client := &planLLM{responses: burnResps(5)}
 	d := execTestDeps(ops, git, client)
 	d.Cfg.MaxTurns = 5
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "moderate"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("moderate")}}, 0)
 	ops.taskContext = cmclient.TaskContext{
-		Description: withTierMarker("Implement the thing.", "moderate"),
+		Description: legacyTierMarker("Implement the thing.", "moderate"),
 	}
 
 	seedResolvedVerifyPlan(o)
@@ -1402,7 +1406,7 @@ func TestSoloTurnCapPropagatesToolchainSentinel(t *testing.T) {
 	d := execTestDeps(ops, git, client)
 	d.Cfg.MaxTurns = 5
 	d.Cfg.Workspace = dir
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
 	// Drive the full execute()-FSM, not just the execute phase in isolation: the
 	// card-log line this test asserts on is written by execute()'s dedicated
 	// errors.As arm, not by runExecute itself. The plan phase already ran
@@ -1448,7 +1452,7 @@ func TestSoloTurnCapPropagatesContainerRuntimeSentinel(t *testing.T) {
 	client := &planLLM{responses: burnResps(5)}
 	d := execTestDeps(ops, git, client)
 	d.Cfg.MaxTurns = 5
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
 	// Drive the full execute()-FSM: the card-log line asserted below is written
 	// by execute()'s dedicated errors.As arm, not by runExecute itself.
 	o.planFn = func(context.Context) error { return nil }
@@ -1538,7 +1542,7 @@ func TestExecuteSubtaskFlowReportsSoloWinOutcome(t *testing.T) {
 	llmFake := &planLLM{responses: []llm.Response{finishResp("feat(x): add y", 0.10)}}
 	d := execTestDeps(ops, git, llmFake)
 
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")}}, 0)
 	require.NoError(t, runExecute(context.Background(), o))
 
 	// The outcome report MUST fire before CompleteTask: report_model_outcome is
@@ -1575,7 +1579,7 @@ func TestSoloTurnCapSalvageReportsWinOutcome(t *testing.T) {
 	client := &planLLM{responses: burnResps(5)}
 	d := execTestDeps(ops, git, client)
 	d.Cfg.MaxTurns = 5
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
 
 	seedResolvedVerifyPlan(o)
 	o.runVerify = func(_ context.Context, _ string, _ []string, _ time.Duration, _ []string) verifyexec.Outcome {
@@ -1618,9 +1622,9 @@ func TestSalvageDeclineExhaustedVerifyFailureReportsNoOutcome(t *testing.T) {
 	client := &planLLM{responses: burnResps(5)}
 	d := execTestDeps(ops, git, client)
 	d.Cfg.MaxTurns = 5
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "moderate"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("moderate")}}, 0)
 	ops.taskContext = cmclient.TaskContext{
-		Description: withTierMarker("Implement the thing.", "moderate"),
+		Description: legacyTierMarker("Implement the thing.", "moderate"),
 	}
 
 	seedResolvedVerifyPlan(o)
@@ -1636,8 +1640,11 @@ func TestSalvageDeclineExhaustedVerifyFailureReportsNoOutcome(t *testing.T) {
 
 	assert.Empty(t, ops.reportOutcomes,
 		"a verify killed by container pressure is an environment problem, not evidence about the model")
-	assert.Equal(t, "Implement the thing.\n\n<!-- cm:tier=complex -->", ops.bodyFor("SUB-1"),
-		"the tier still escalates even though the outcome goes unreported")
+	_, got := readMeta(ops.bodyFor("SUB-1"))
+	assert.Equal(t, registry.TierComplex, got.Bar,
+		"the bar still escalates even though the outcome goes unreported")
+	assert.Equal(t, "Implement the thing.", stripMeta(ops.bodyFor("SUB-1")),
+		"the rest of the body is unchanged")
 	assert.True(t, ops.loggedContains("resource exhaustion"),
 		"the card log names the environmental cause the reporting exemption acted on; logs=%v", ops.logs)
 }
@@ -1655,9 +1662,9 @@ func TestSalvageDeclineSkippedVerifyReportsNoOutcome(t *testing.T) {
 	client := &planLLM{responses: burnResps(5)}
 	d := execTestDeps(ops, git, client)
 	d.Cfg.MaxTurns = 5
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "moderate"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("moderate")}}, 0)
 	ops.taskContext = cmclient.TaskContext{
-		Description: withTierMarker("Implement the thing.", "moderate"),
+		Description: legacyTierMarker("Implement the thing.", "moderate"),
 	}
 
 	seedResolvedVerifyPlan(o)
@@ -1669,8 +1676,11 @@ func TestSalvageDeclineSkippedVerifyReportsNoOutcome(t *testing.T) {
 	require.Error(t, err, "a timed-out verify still parks the capped subtask")
 
 	assert.Empty(t, ops.reportOutcomes, "a skipped verify is an environment problem, not evidence about the model")
-	assert.Equal(t, "Implement the thing.\n\n<!-- cm:tier=complex -->", ops.bodyFor("SUB-1"),
-		"the tier still escalates even though the outcome goes unreported")
+	_, got := readMeta(ops.bodyFor("SUB-1"))
+	assert.Equal(t, registry.TierComplex, got.Bar,
+		"the bar still escalates even though the outcome goes unreported")
+	assert.Equal(t, "Implement the thing.", stripMeta(ops.bodyFor("SUB-1")),
+		"the rest of the body is unchanged")
 	assert.True(t, ops.loggedContains("verify timed out"),
 		"the park is still activity-logged; logs=%v", ops.logs)
 }
@@ -1690,7 +1700,7 @@ func TestSoloOutcomeKeyedOnSelectedSlug(t *testing.T) {
 	llmFake := &planLLM{responses: []llm.Response{resp}}
 	d := execTestDeps(ops, git, llmFake)
 
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")}}, 0)
 	require.NoError(t, runExecute(context.Background(), o))
 
 	require.Len(t, ops.reportOutcomes, 1)
@@ -1725,7 +1735,7 @@ func TestSoloTurnCapToolchainSentinelReportsNoOutcome(t *testing.T) {
 	d := execTestDeps(ops, git, client)
 	d.Cfg.MaxTurns = 5
 	d.Cfg.Workspace = dir
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
 	o.planFn = func(context.Context) error { return nil }
 
 	err := o.execute(context.Background())
@@ -1757,7 +1767,7 @@ func TestCandidateCompletionDoesNotReportSoloOutcome(t *testing.T) {
 	}
 
 	require.NoError(t, o.executeSubtaskWith(context.Background(), sc,
-		subtaskRef{ID: "SUB-1", Title: "Work", Tier: "simple"}))
+		subtaskRef{ID: "SUB-1", Title: "Work", Sizing: seedSizing("simple")}))
 
 	assert.Empty(t, ops.reportOutcomes, "a candidate's per-subtask completion must not report a solo model outcome")
 }
@@ -1778,8 +1788,8 @@ func TestSequentialSoloSubtasksReportPerSubtaskCostDelta(t *testing.T) {
 	d := execTestDeps(ops, git, llmFake)
 
 	o := newExecRun(d, []subtaskRef{
-		{ID: "SUB-1", Title: "First", Tier: "simple"},
-		{ID: "SUB-2", Title: "Second", Tier: "simple"},
+		{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")},
+		{ID: "SUB-2", Title: "Second", Sizing: seedSizing("simple")},
 	}, 0)
 	require.NoError(t, runExecute(context.Background(), o))
 
@@ -1817,7 +1827,7 @@ func TestCandidateSubtaskParksOnRunLedgerBreach(t *testing.T) {
 	}
 
 	err := o.executeSubtaskWith(context.Background(), sc,
-		subtaskRef{ID: "SUB-1", Title: "Work", Tier: "simple"})
+		subtaskRef{ID: "SUB-1", Title: "Work", Sizing: seedSizing("simple")})
 
 	var bee *BudgetExceededError
 
@@ -1831,7 +1841,7 @@ func TestCoderPromptParentSlotOmitsRecordedHistory(t *testing.T) {
 	llmFake := &planLLM{responses: []llm.Response{finishResp("feat: x", 0.01)}}
 	d := execTestDeps(ops, git, llmFake)
 
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Add flag", Body: "Files: b.go", Tier: "simple"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Add flag", Body: "Files: b.go", Sizing: seedSizing("simple")}}, 0)
 	o.tc.Description = grownDescription
 	o.taskDescription = stripAgentSections(grownDescription)
 
@@ -1862,10 +1872,10 @@ func TestResolveCoderModelPinMissingAdvisory(t *testing.T) {
 	o.tc.ModelCoder = missingPin
 
 	// Multiple calls across different subtasks.
-	first, err := o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-1", Title: "First", Tier: "simple"}, "prompt1")
+	first, err := o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")}, "prompt1")
 	require.NoError(t, err)
 
-	second, err := o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-2", Title: "Second", Tier: "moderate"}, "prompt2")
+	second, err := o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-2", Title: "Second", Sizing: seedSizing("moderate")}, "prompt2")
 	require.NoError(t, err)
 
 	assert.NotEqual(t, missingPin, first.Model, "an unresolvable pin never becomes the selected model")
@@ -1892,8 +1902,8 @@ func TestResolveCoderModelPinResolvableNoAdvisory(t *testing.T) {
 
 	o.tc.ModelCoder = "pinned/model" // IS in planTestCatalog
 
-	_, _ = o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-1", Title: "First", Tier: "simple"}, "prompt1")
-	_, _ = o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-2", Title: "Second", Tier: "moderate"}, "prompt2")
+	_, _ = o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")}, "prompt1")
+	_, _ = o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-2", Title: "Second", Sizing: seedSizing("moderate")}, "prompt2")
 
 	// No advisory logs because the pin is resolvable.
 	assert.Empty(t, ops.logs, "resolvable pin produces no advisory logs")
@@ -1913,7 +1923,7 @@ func subFloorCoderRegistry() *registry.Registry {
 // refusal: a sub-floor catalog still runs on the operator's default, and the
 // run parks only when that default is itself barred this run.
 func TestResolveCoderModelParksOnlyWhenEvenTheDefaultIsBarred(t *testing.T) {
-	sub := subtaskRef{ID: "SUB-1", Title: "First", Tier: "moderate"}
+	sub := subtaskRef{ID: "SUB-1", Title: "First", Sizing: seedSizing("moderate")}
 
 	t.Run("sub-floor catalog falls to the operator default", func(t *testing.T) {
 		d := execTestDeps(&fakeOps{}, &fakeGit{}, &planLLM{})
@@ -2003,7 +2013,7 @@ func TestShortfallAdvisoryIsOncePerPhaseRoleAndTier(t *testing.T) {
 		ctx := context.Background()
 
 		for _, id := range []string{"SUB-1", "SUB-2", "SUB-3"} {
-			pick, err := o.resolveCoderModel(ctx, subtaskRef{ID: id, Title: id, Tier: "complex"}, "prompt")
+			pick, err := o.resolveCoderModel(ctx, subtaskRef{ID: id, Title: id, Sizing: seedSizing("complex")}, "prompt")
 			require.NoError(t, err)
 			assert.Equal(t, "mid/model", pick.Model, "the clamped pick is still a measured model")
 		}
@@ -2018,10 +2028,10 @@ func TestShortfallAdvisoryIsOncePerPhaseRoleAndTier(t *testing.T) {
 		o := newExecRun(midTierCoderDeps(ops), nil, 5)
 		ctx := context.Background()
 
-		_, err := o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-1", Title: "First", Tier: "complex"}, "prompt")
+		_, err := o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-1", Title: "First", Sizing: seedSizing("complex")}, "prompt")
 		require.NoError(t, err)
 
-		_, err = o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-2", Title: "Second", Tier: "critical"}, "prompt")
+		_, err = o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-2", Title: "Second", Sizing: seedSizing("critical")}, "prompt")
 		require.NoError(t, err)
 
 		require.Len(t, ops.logs, 2,
@@ -2085,7 +2095,7 @@ func TestCoderTierIsAlwaysDerivedFromTheWork(t *testing.T) {
 				o := newExecRun(d, nil, 0)
 
 				pick, err := o.resolveCoderModel(context.Background(),
-					subtaskRef{ID: "SUB-1", Title: "First", Tier: tt.tier}, "prompt")
+					subtaskRef{ID: "SUB-1", Title: "First", Sizing: seedSizing(tt.tier)}, "prompt")
 				require.NoError(t, err)
 				assert.Equal(t, tt.wantModel, pick.Model,
 					"the coder tier must be the subtask's, not a constant")
@@ -2099,8 +2109,8 @@ func TestCoderTierIsAlwaysDerivedFromTheWork(t *testing.T) {
 				d, _, _ := fanoutDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, 2)
 				d.Registry = tierNamingRegistry()
 
-				o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
-				o.cardTier = tt.tier
+				o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")}}, 0)
+				o.cardSizing = seedSizing(tt.tier)
 
 				require.NoError(t, o.runFanout(context.Background()))
 				require.NotEmpty(t, o.candidates)
@@ -2117,7 +2127,7 @@ func TestCoderTierIsAlwaysDerivedFromTheWork(t *testing.T) {
 				d.Registry = tierNamingRegistry()
 
 				o := newExecRun(d, nil, 0)
-				o.cardTier = tt.tier
+				o.cardSizing = seedSizing(tt.tier)
 				o.excluded = map[string]bool{"dropped/model": true}
 
 				c := &candidate{idx: 1, model: "dropped/model"}
@@ -2178,7 +2188,7 @@ func TestUnmeasuredPickReportsNoPriorRatherThanZero(t *testing.T) {
 	o := newExecRun(execTestDeps(ops, &fakeGit{}, &planLLM{}), nil, 5)
 
 	pick, err := o.resolveCoderModel(context.Background(),
-		subtaskRef{ID: "SUB-1", Title: "First", Tier: "moderate"}, "prompt")
+		subtaskRef{ID: "SUB-1", Title: "First", Sizing: seedSizing("moderate")}, "prompt")
 	require.NoError(t, err)
 	require.Equal(t, "default/model", pick.Model)
 
@@ -2225,7 +2235,7 @@ func TestPreCommitVerifyFailureBlocksCommitAndRoutesToFix(t *testing.T) {
 		stopResp("coder: attempted the fix", 0.02), // the one fix pass
 	}}
 	d := execTestDeps(ops, git, client)
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
 
 	seedResolvedVerifyPlan(o)
 	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
@@ -2255,7 +2265,7 @@ func TestPreCommitVerifyFailureThenFixPassCommits(t *testing.T) {
 		stopResp("coder: fixed the failing test", 0.02),
 	}}
 	d := execTestDeps(ops, git, client)
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
 
 	seedResolvedVerifyPlan(o)
 
@@ -2286,7 +2296,7 @@ func TestPreCommitVerifyPassCommitsAsToday(t *testing.T) {
 	git := &fakeGit{committed: true}
 	client := &planLLM{responses: []llm.Response{finishResp("feat: subtask done", 0.01)}}
 	d := execTestDeps(ops, git, client)
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
 
 	seedResolvedVerifyPlan(o)
 	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
@@ -2311,7 +2321,7 @@ func TestPreCommitVerifySkippedCommitsAsToday(t *testing.T) {
 	git := &fakeGit{committed: true}
 	client := &planLLM{responses: []llm.Response{finishResp("feat: subtask done", 0.01)}}
 	d := execTestDeps(ops, git, client)
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
 
 	seedResolvedVerifyPlan(o)
 	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
@@ -2337,7 +2347,7 @@ func TestNoResolvableVerifyCommitsAsToday(t *testing.T) {
 	client := &planLLM{responses: []llm.Response{finishResp("feat: subtask done", 0.01)}}
 	d := execTestDeps(ops, git, client)
 	// newExecRun's isolateVerify leaves the plan at the skip tier (empty Argv).
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
 
 	ran := false
 	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
@@ -2388,7 +2398,7 @@ func TestPreCommitGateAndReviewGateResolveIdentically(t *testing.T) {
 	require.NotEqual(t, o.verifyTimeout(), o.verify.Timeout,
 		"the plan's timeout must differ from the run default, or this test cannot see the drift")
 
-	sub := subtaskRef{ID: "SUB-1", Title: "Only", Tier: "simple"}
+	sub := subtaskRef{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}
 	require.Error(t, o.preCommitVerify(context.Background(), o.solver, sub))
 	require.NotEmpty(t, seen, "the pre-commit gate ran the command")
 

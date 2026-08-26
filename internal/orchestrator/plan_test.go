@@ -290,21 +290,9 @@ func TestTestSplitViolation(t *testing.T) {
 }
 
 func TestTierStringToRegistryTier(t *testing.T) {
-	// Lock the end-to-end mapping: the planner tier strings parsePlan accepts
+	// Lock the card-level mapping: the planner tier strings parsePlan accepts
 	// must convert to the matching registry.Tier at selection time. "critical"
 	// must reach registry.TierCritical (the 0.90 bar), not the moderate default.
-	t.Run("tierOf maps each subtask tier string", func(t *testing.T) {
-		assert.Equal(t, registry.TierSimple, tierOf(subtaskRef{Tier: "simple"}))
-		assert.Equal(t, registry.TierModerate, tierOf(subtaskRef{Tier: "moderate"}))
-		assert.Equal(t, registry.TierComplex, tierOf(subtaskRef{Tier: "complex"}))
-		assert.Equal(t, registry.TierCritical, tierOf(subtaskRef{Tier: "critical"}))
-	})
-
-	t.Run("tierOf unknown/empty defaults to moderate", func(t *testing.T) {
-		assert.Equal(t, registry.TierModerate, tierOf(subtaskRef{Tier: "epic"}))
-		assert.Equal(t, registry.TierModerate, tierOf(subtaskRef{Tier: ""}))
-	})
-
 	t.Run("tierFromString maps each card tier string", func(t *testing.T) {
 		assert.Equal(t, registry.TierSimple, tierFromString("simple"))
 		assert.Equal(t, registry.TierModerate, tierFromString("moderate"))
@@ -374,7 +362,7 @@ func TestPlanPhaseCreatesSubtasks(t *testing.T) {
 	assert.Equal(t, "do first", o.subtasks[0].Body)
 	assert.Equal(t, "do second", o.subtasks[1].Body)
 	assert.Equal(t, []string{"SUB-1"}, o.subtasks[1].DependsOnIDs)
-	assert.Equal(t, "moderate", o.cardTier)
+	assert.Equal(t, seedSizing("moderate"), o.cardSizing)
 
 	// Usage was reported and budget spent.
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "ReportUsage:CARD-1"), 0)
@@ -692,8 +680,8 @@ func TestPlanPhaseResume(t *testing.T) {
 	// The planner reuse list is fed from the RECONCILED refs (set by reconcile in
 	// the plan-resume case), NOT a fresh SubtaskStates call inside runPlan.
 	o.subtasks = []subtaskRef{
-		{ID: "SUB-OLD-1", Title: "Existing subtask alpha", State: "in_progress", Tier: "moderate"},
-		{ID: "SUB-OLD-2", Title: "Existing subtask beta", State: "todo", Tier: "moderate"},
+		{ID: "SUB-OLD-1", Title: "Existing subtask alpha", State: "in_progress", Sizing: seedSizing("moderate")},
+		{ID: "SUB-OLD-2", Title: "Existing subtask beta", State: "todo", Sizing: seedSizing("moderate")},
 	}
 
 	require.NoError(t, runPlan(context.Background(), o))
@@ -1246,7 +1234,7 @@ func TestRunPlanMobCreatesSubtasksFromSynthesis(t *testing.T) {
 	require.Len(t, ops.createCardArgs, 2)
 	assert.Equal(t, "First task", ops.createCardArgs[0].title)
 	assert.Equal(t, "Second task", ops.createCardArgs[1].title)
-	assert.Equal(t, "moderate", o.cardTier)
+	assert.Equal(t, seedSizing("moderate"), o.cardSizing)
 
 	// The topic carried the plan knobs and the briefing content.
 	require.Len(t, eng.topics, 1)
@@ -1519,8 +1507,8 @@ func TestPlanReuseListExcludesCancelled(t *testing.T) {
 
 		o := newRun(d, ops.taskContext)
 		o.subtasks = []subtaskRef{
-			{ID: "SUB-CANCELLED", Title: "Cancelled subtask", State: "not_planned", Tier: "simple"},
-			{ID: "SUB-ACTIVE", Title: "Active subtask", State: "in_progress", Tier: "simple"},
+			{ID: "SUB-CANCELLED", Title: "Cancelled subtask", State: "not_planned", Sizing: seedSizing("simple")},
+			{ID: "SUB-ACTIVE", Title: "Active subtask", State: "in_progress", Sizing: seedSizing("simple")},
 		}
 
 		require.NoError(t, runPlan(context.Background(), o))
@@ -1548,8 +1536,8 @@ func TestPlanReuseListExcludesCancelled(t *testing.T) {
 
 		o := mobPlanRun(ops, llmFake, eng)
 		o.subtasks = []subtaskRef{
-			{ID: "SUB-CANCELLED", Title: "Cancelled subtask", State: "not_planned", Tier: "simple"},
-			{ID: "SUB-ACTIVE", Title: "Active subtask", State: "todo", Tier: "simple"},
+			{ID: "SUB-CANCELLED", Title: "Cancelled subtask", State: "not_planned", Sizing: seedSizing("simple")},
+			{ID: "SUB-ACTIVE", Title: "Active subtask", State: "todo", Sizing: seedSizing("simple")},
 		}
 
 		require.NoError(t, runPlan(context.Background(), o))
@@ -1570,8 +1558,8 @@ func TestPlanReuseListExcludesCancelled(t *testing.T) {
 
 		o := newRun(d, ops.taskContext)
 		o.subtasks = []subtaskRef{
-			{ID: "SUB-DONE", Title: "Done subtask", State: "done", Tier: "simple"},
-			{ID: "SUB-ACTIVE", Title: "Active subtask", State: "in_progress", Tier: "simple"},
+			{ID: "SUB-DONE", Title: "Done subtask", State: "done", Sizing: seedSizing("simple")},
+			{ID: "SUB-ACTIVE", Title: "Active subtask", State: "in_progress", Sizing: seedSizing("simple")},
 		}
 
 		require.NoError(t, runPlan(context.Background(), o))
@@ -1661,4 +1649,72 @@ func TestReadRootsReachThePlanningPrompts(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The card-level bar and budget are persisted on the parent card body, which is
+// the only persistence a resumed run can read. Without that marker there is no
+// restore path at all, and EVERY run resumed at execute/review/judge/integrate
+// silently reviews, fixes and fans out at the moderate default - even on a card
+// the planner called critical.
+func TestCardSizingSurvivesResume(t *testing.T) {
+	ops := &fakeOps{}
+	first := newRun(planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Description: "parent body"})
+
+	require.NoError(t, first.createSubtasks(context.Background(), plan{
+		CardTier: "critical",
+		Subtasks: []planSubtask{{Title: "Do it", Description: "Files:\n- internal/api/router.go", Tier: "complex"}},
+	}))
+
+	// A later container starts from the persisted parent body alone.
+	parentBody := ops.bodyFor("CARD-1")
+	require.NotEmpty(t, parentBody, "createSubtasks must push a parent body carrying the marker")
+
+	resumed := newRun(planTestDeps(ops, &planLLM{}),
+		cmclient.TaskContext{Title: "Parent", Description: parentBody})
+
+	assert.Equal(t, registry.TierCritical, resumed.cardSizing.Bar,
+		"the review panel and the Best-of-N pool must not drop to moderate on resume")
+	assert.Equal(t, 2, resumed.cardSizing.Budget)
+	assert.Equal(t, "critical", resumed.cardPlannerBar, "the planner's own word stays recoverable")
+	assert.NotContains(t, resumed.taskDescription, "cm:meta", "the marker must never reach a model prompt")
+}
+
+// Every subtask card carries both axes plus the write-once planner estimate,
+// and the persisted budget must reproduce the pre-split turn cap.
+func TestCreateSubtasksPersistsBothAxes(t *testing.T) {
+	ops := &fakeOps{}
+	o := newRun(planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Description: "parent body"})
+
+	require.NoError(t, o.createSubtasks(context.Background(), plan{
+		CardTier: "moderate",
+		Subtasks: []planSubtask{{Title: "A", Description: "do a", Tier: "critical"}},
+	}))
+
+	require.Len(t, ops.createCardArgs, 1)
+	body := ops.createCardArgs[0].body
+
+	kv, s := readMeta(body)
+	assert.Equal(t, registry.TierCritical, s.Bar)
+	assert.Equal(t, 90, turnBudget(45, s.Budget), "a critical subtask still opens at 2x base")
+	assert.Equal(t, "critical", kv["seed"])
+	assert.Equal(t, "do a", stripMeta(body), "the marker never leaks into the card text")
+
+	require.Len(t, o.subtasks, 1)
+	assert.Equal(t, sizing{registry.TierCritical, 2}, o.subtasks[0].Sizing)
+	assert.Equal(t, "critical", o.subtasks[0].PlannerBar)
+}
+
+// The plan JSON wire contract is deliberately untouched, so parsePlan keeps
+// rejecting an unrecognised bar. The bar is the SILENT axis: one repair turn on
+// the loud channel is the price of protecting the axis with no other defence.
+func TestParsePlanStillRejectsAnUnknownTier(t *testing.T) {
+	_, err := parsePlan(`{"card_tier":"galactic","subtasks":[{"title":"a","tier":"simple"}]}`)
+	require.Error(t, err)
+
+	_, err = parsePlan(`{"card_tier":"simple","subtasks":[{"title":"a","tier":"galactic"}]}`)
+	require.Error(t, err)
+
+	p, err := parsePlan(`{"card_tier":"complex","subtasks":[{"title":"a","tier":"simple"}]}`)
+	require.NoError(t, err)
+	assert.Equal(t, "complex", p.CardTier, "the wire names must not have changed")
 }

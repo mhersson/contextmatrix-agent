@@ -979,3 +979,11 @@ func batchNudgeCounts(t *testing.T, transcript *bytes.Buffer) []int {
 
 	return counts
 }
+
+// legacyTierMarker builds the pre-split single-axis marker exactly as it is
+// written on every subtask card created before the two-axis split. Live cards
+// carry this form forever, so the fixtures that stand in for them must keep
+// producing it after the writer that made it is gone.
+func legacyTierMarker(body, tier string) string {
+	return strings.TrimRight(body, "\n") + "\n\n<!-- cm:tier=" + tier + " -->"
+}

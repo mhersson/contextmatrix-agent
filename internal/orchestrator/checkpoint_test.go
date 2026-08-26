@@ -54,7 +54,7 @@ func TestCheckpointEligible(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			o := mobTestRun(&fakeOps{}, tt.mob, 0)
-			got := o.checkpointEligible(subtaskRef{ID: "SUB-1", Tier: tt.tier})
+			got := o.checkpointEligible(subtaskRef{ID: "SUB-1", Sizing: seedSizing(tt.tier)})
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -123,7 +123,7 @@ func TestMobCheckpointProceed(t *testing.T) {
 	// scripted return so the checkpoint briefing has content.
 	o.solver.git = &diffGit{fakeGit: &fakeGit{}, diff: "diff --git a/a.go b/a.go\n+lgtm\n"}
 
-	o.mobCheckpoint(context.Background(), o.solver, subtaskRef{ID: "SUB-1", Title: "add thing", Tier: "simple"}, "abc123")
+	o.mobCheckpoint(context.Background(), o.solver, subtaskRef{ID: "SUB-1", Title: "add thing", Sizing: seedSizing("simple")}, "abc123")
 
 	require.Len(t, eng.topics, 1)
 	assert.Equal(t, "checkpoint", eng.topics[0].Kind)
@@ -155,7 +155,7 @@ func TestMobCheckpointDegradedWritesNoRecord(t *testing.T) {
 	o.mobEngine = eng.run
 	o.solver.git = &diffGit{fakeGit: &fakeGit{}, diff: "diff --git a/a.go b/a.go\n+x\n"}
 
-	o.mobCheckpoint(context.Background(), o.solver, subtaskRef{ID: "SUB-1", Title: "t", Tier: "simple"}, "abc123")
+	o.mobCheckpoint(context.Background(), o.solver, subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("simple")}, "abc123")
 
 	require.Len(t, eng.topics, 1)
 	assert.Empty(t, ops.bodyFor("SUB-1"), "no subtask record when the discussion degraded")
@@ -172,7 +172,7 @@ func TestMobCheckpointEmptyDiffSkips(t *testing.T) {
 	o.mobEngine = eng.run
 	o.solver.git = &diffGit{fakeGit: &fakeGit{}, diff: ""}
 
-	o.mobCheckpoint(context.Background(), o.solver, subtaskRef{ID: "SUB-1", Title: "t", Tier: "simple"}, "abc123")
+	o.mobCheckpoint(context.Background(), o.solver, subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("simple")}, "abc123")
 
 	assert.Empty(t, eng.topics, "no discussion without a diff")
 }
@@ -201,7 +201,7 @@ func TestMobCheckpointReviseSkippedOnBudget(t *testing.T) {
 	}
 	o.solver.git = &diffGit{fakeGit: &fakeGit{}, diff: "diff --git a/a.go b/a.go\n+lgtm\n"}
 
-	o.mobCheckpoint(context.Background(), o.solver, subtaskRef{ID: "SUB-1", Title: "t", Tier: "simple"}, "abc123")
+	o.mobCheckpoint(context.Background(), o.solver, subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("simple")}, "abc123")
 
 	require.Len(t, eng.topics, 1, "the discussion must run: headroom was positive before the engine call")
 
@@ -223,7 +223,7 @@ func TestMobCheckpointUnparsableVerdictProceeds(t *testing.T) {
 	o.mobEngine = eng.run
 	o.solver.git = &diffGit{fakeGit: &fakeGit{}, diff: "diff --git a/a.go b/a.go\n+x\n"}
 
-	o.mobCheckpoint(context.Background(), o.solver, subtaskRef{ID: "SUB-1", Title: "t", Tier: "simple"}, "abc123")
+	o.mobCheckpoint(context.Background(), o.solver, subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("simple")}, "abc123")
 
 	joined := strings.Join(ops.logs, "\n")
 	assert.True(t,
@@ -242,7 +242,7 @@ func TestMobCheckpointBriefingCarriesEnvironment(t *testing.T) {
 	o.mobEngine = eng.run
 	o.solver.git = &diffGit{fakeGit: &fakeGit{}, diff: "diff --git a/a.go b/a.go\n+lgtm\n"}
 
-	o.mobCheckpoint(context.Background(), o.solver, subtaskRef{ID: "SUB-1", Title: "t", Tier: "simple"}, "abc123")
+	o.mobCheckpoint(context.Background(), o.solver, subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("simple")}, "abc123")
 
 	require.Len(t, eng.topics, 1)
 	assert.Contains(t, eng.topics[0].Briefing,

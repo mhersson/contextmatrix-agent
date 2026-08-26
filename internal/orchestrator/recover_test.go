@@ -120,7 +120,7 @@ func TestExecuteRecoversFromIncapableCoder(t *testing.T) {
 	d := execTestDeps(ops, git, llmFake)
 	d.Registry = twoCoderRegistry()
 
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "moderate"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("moderate")}}, 0)
 	require.NoError(t, runExecute(context.Background(), o),
 		"the run must recover via the second model, not error out")
 
@@ -168,7 +168,7 @@ func TestExecuteParksWhenIncapableModelsDrainTheCatalog(t *testing.T) {
 	d := execTestDeps(ops, git, llmFake)
 	d.Registry = twoCoderRegistry()
 
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "moderate"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("moderate")}}, 0)
 	err := runExecute(context.Background(), o)
 
 	require.Error(t, err, "an always-incapable catalog must park")
@@ -206,7 +206,7 @@ func TestExecutePinnedIncapableModelExhaustsTheCap(t *testing.T) {
 	d := execTestDeps(ops, git, llmFake)
 	d.Registry = twoCoderRegistry()
 
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "moderate"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("moderate")}}, 0)
 	o.tc.ModelCoder = pin
 
 	err := runExecute(context.Background(), o)

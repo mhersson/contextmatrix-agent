@@ -500,7 +500,7 @@ func TestGuardedPhasesUnchanged(t *testing.T) {
 		client := &planLLM{responses: append(burnResps(5), finishResp("feat: done", 0.01))}
 		d := execTestDeps(ops, git, client)
 		d.Cfg.MaxTurns = 5
-		o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+		o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
 
 		require.NoError(t, runExecute(context.Background(), o))
 

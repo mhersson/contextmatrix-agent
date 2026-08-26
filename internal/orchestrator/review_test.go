@@ -65,7 +65,7 @@ func reviewTestDeps(t *testing.T, ops *fakeOps, git *fakeGit, client llm.LLM, re
 func newReviewRun(d Deps, tc cmclient.TaskContext, maxCost float64) *run {
 	d.Cfg.MaxCardCost = maxCost
 	o := newRun(d, tc)
-	o.cardTier = "moderate"
+	o.cardSizing = seedSizing("moderate")
 	// Default: pre-resolved skip, so ensureVerify is a cached no-op and no gate runs.
 	isolateVerify(o)
 	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
@@ -1277,7 +1277,7 @@ func TestReviewPanelEscalatesWhenAuthoritative(t *testing.T) {
 
 	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reg)
 	o := newReviewRun(d, cmclient.TaskContext{}, 0)
-	o.cardTier = "moderate" // no reviewer pin -> selection path
+	o.cardSizing = seedSizing("moderate") // no reviewer pin -> selection path
 
 	est := estimateTokens("diff")
 
@@ -2740,7 +2740,7 @@ func TestRefusalSentinelsDifferByPhase(t *testing.T) {
 		o := newExecRun(d, nil, 5)
 
 		_, err := o.resolveCoderModel(context.Background(),
-			subtaskRef{ID: "SUB-1", Tier: "moderate"}, "prompt")
+			subtaskRef{ID: "SUB-1", Sizing: seedSizing("moderate")}, "prompt")
 
 		var nme *NoModelError
 

@@ -93,8 +93,9 @@ func sectionFrom(heading, content string) string {
 
 // formatPlan renders the subtask decomposition as the "## Plan" body, so the
 // parent card shows the whole plan, not just scattered subtask cards. Each
-// subtask is a numbered heading plus an italic tier/deps line and its own body
-// block, keeping multi-line bodies readable rather than crammed onto one line.
+// subtask is a numbered heading plus an italic bar/turns/deps line and its own
+// body block, keeping multi-line bodies readable rather than crammed onto one
+// line.
 func formatPlan(subs []subtaskRef) string {
 	var b strings.Builder
 
@@ -105,7 +106,7 @@ func formatPlan(subs []subtaskRef) string {
 		}
 
 		fmt.Fprintf(&b, "### %d. %s - %s\n", i+1, s.ID, s.Title)
-		fmt.Fprintf(&b, "_Tier: %s · Depends on: %s_\n", s.Tier, deps)
+		fmt.Fprintf(&b, "_Bar: %s · Turns: %s · Depends on: %s_\n", s.Sizing.Bar, budgetLabel(s.Sizing.Budget), deps)
 
 		if body := strings.TrimSpace(s.Body); body != "" {
 			b.WriteString("\n")
@@ -120,12 +121,14 @@ func formatPlan(subs []subtaskRef) string {
 }
 
 // formatPlannedPlan renders a parsed (not-yet-created) plan for the HITL
-// plan-approval gate: numbered subtasks with tier and depends-on-by-index, so
-// the human sees the decomposition before any subtask card exists.
+// plan-approval gate: numbered subtasks with the planner's bar and
+// depends-on-by-index, so the human sees the decomposition before any subtask
+// card exists. No turn budget here: a not-yet-created plan has no persisted
+// ladder step.
 func formatPlannedPlan(p plan) string {
 	var b strings.Builder
 
-	fmt.Fprintf(&b, "Overall tier: %s\n\n", p.CardTier)
+	fmt.Fprintf(&b, "Overall bar: %s\n\n", p.CardTier)
 
 	for i, st := range p.Subtasks {
 		deps := "none"
@@ -140,7 +143,7 @@ func formatPlannedPlan(p plan) string {
 		}
 
 		fmt.Fprintf(&b, "### %d. %s\n", i+1, st.Title)
-		fmt.Fprintf(&b, "_Tier: %s · Depends on: %s_\n", st.Tier, deps)
+		fmt.Fprintf(&b, "_Bar: %s · Depends on: %s_\n", st.Tier, deps)
 
 		if body := strings.TrimSpace(st.Description); body != "" {
 			b.WriteString("\n")

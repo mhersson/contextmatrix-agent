@@ -236,7 +236,7 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 		fixVerifyLine(plan), o.tc.Title, verifyFailedFindings(plan, vres.Output))
 
 	// Round 0: this is not a review round and has no round number.
-	if _, ferr := o.runFixModel(ctx, prompt, 0, sub.Tier, false); ferr != nil {
+	if _, ferr := o.runFixModel(ctx, prompt, 0, string(sub.Sizing.Bar), false); ferr != nil {
 		return ferr
 	}
 
@@ -428,7 +428,8 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 			return harness.Result{}, "", fmt.Errorf("coder for %s: %w", sub.ID, err)
 		}
 
-		logMsg := fmt.Sprintf("coder model %s selected for subtask %q (tier=%s)", model, sub.Title, tierOf(sub))
+		logMsg := fmt.Sprintf("coder model %s selected for subtask %q (bar=%s, turns=%s)",
+			model, sub.Title, sub.Sizing.Bar, budgetLabel(sub.Sizing.Budget))
 		if sc.tag != "" {
 			// A candidate solver tags its log line so parallel selections are
 			// distinguishable; the parent (tag "") logs the bare line as before.
@@ -437,7 +438,7 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 
 		d.logCard(ctx, "%s", logMsg)
 
-		res, dur, err := o.runModelCoder(ctx, sc.tools, prompt, model, coderWrapUpMessage, seedBudgetStep(tierOf(sub)))
+		res, dur, err := o.runModelCoder(ctx, sc.tools, prompt, model, coderWrapUpMessage, sub.Sizing.Budget)
 
 		// Record the resolved coder slug so the review panel excludes it: a capable
 		// model must not review its own code. This runs BEFORE the incapable check
@@ -532,7 +533,7 @@ func (o *run) pushBranch(ctx context.Context) error {
 // provenance is what separates a laddered selection from a pin or the
 // off-ladder default, and the slug alone cannot carry that.
 func (o *run) resolveCoderModel(ctx context.Context, sub subtaskRef, prompt string) (registry.Pick, error) {
-	tier := tierOf(sub)
+	tier := sub.Sizing.Bar
 
 	if resolvePin(o.d.Registry, o.tc.ModelCoder) {
 		// A pinned model is returned even if it is in o.excluded: we never override
@@ -587,22 +588,6 @@ func subtaskBody(sub subtaskRef) string {
 	}
 
 	return sub.Title
-}
-
-// tierOf maps a subtask's planner tier string to a registry.Tier. An empty or
-// unrecognised tier defaults to moderate: conservative, since under-selecting a
-// model for real work is worse than slightly over-paying.
-func tierOf(sub subtaskRef) registry.Tier {
-	switch sub.Tier {
-	case "simple":
-		return registry.TierSimple
-	case "complex":
-		return registry.TierComplex
-	case "critical":
-		return registry.TierCritical
-	default:
-		return registry.TierModerate
-	}
 }
 
 // salvageCapped rescues a Best-of-N candidate that hit the turn cap on its
@@ -885,17 +870,17 @@ func (o *run) reportSoloOutcome(ctx context.Context, cardID, model, result strin
 	}
 }
 
-// escalateSubtaskTier bumps the persisted tier marker on sub's card body one
-// step (nextTier) so a resumed run selects a stronger model against a bigger
-// turn cap - a park at the same tier would otherwise repeat the same losing
-// attempt indefinitely. It fetches the subtask's live card body (never the
-// possibly-empty in-memory subtaskRef.Body) and writes it back, mirroring
-// recordCheckpointOnSubtask. Best-effort: a fetch or write failure only
-// warns - the run is parking either way, and a stale marker just means resume
-// retries at the prior tier instead of escalating. Does not mutate sub.Tier -
-// this run is ending; the marker is read back only on the NEXT run. Critical
-// is already the ceiling (nextTier maps it to itself), so that case skips the
-// board write entirely - there is nothing to persist.
+// escalateSubtaskTier raises the persisted bar on sub's card body one rung so a
+// resumed run selects a stronger model - a park at the same bar would otherwise
+// repeat the same losing attempt indefinitely. It fetches the subtask's live
+// card body (never the possibly-empty in-memory subtaskRef.Body) and writes it
+// back, mirroring recordCheckpointOnSubtask. The whole marker is re-serialised
+// from the parsed map, so keys this code does not read survive. Best-effort: a
+// fetch or write failure only warns - the run is parking either way, and a
+// stale marker just means resume retries at the prior bar instead of
+// escalating. Does not mutate sub.Sizing - this run is ending; the marker is
+// read back only on the NEXT run. Critical is already the ceiling, so that case
+// skips the board write entirely - there is nothing to persist.
 func (o *run) escalateSubtaskTier(ctx context.Context, sub subtaskRef) {
 	tc, err := o.d.Ops.GetTaskContext(ctx, sub.ID, false)
 	if err != nil {
@@ -905,26 +890,23 @@ func (o *run) escalateSubtaskTier(ctx context.Context, sub subtaskRef) {
 		return
 	}
 
-	tier, clean := parseTierMarker(tc.Description)
-	next := nextTier(tier)
+	kv, from := readMeta(tc.Description)
 
-	if next == tier {
+	to := from.raiseBar()
+	if to == from {
 		return
 	}
 
-	if uerr := o.d.Ops.UpdateCardBody(ctx, sub.ID, withTierMarker(clean, next)); uerr != nil {
+	kv["bar"] = string(to.Bar)
+
+	if uerr := o.d.Ops.UpdateCardBody(ctx, sub.ID, writeMeta(tc.Description, kv)); uerr != nil {
 		slog.Warn("turn cap: subtask tier escalation write failed",
 			"card_id", o.d.Cfg.CardID, "subtask_id", sub.ID, "error", uerr)
 
 		return
 	}
 
-	from := tier
-	if from == "" {
-		from = reconcileTierDefault
-	}
-
-	o.d.logCard(ctx, "turn cap: escalating subtask tier %s -> %s for the next attempt", from, next)
+	o.d.logCard(ctx, "turn cap: escalating subtask tier %s -> %s for the next attempt", from.Bar, to.Bar)
 }
 
 // sanitizeTitle builds the fallback commit message from a subtask title when the

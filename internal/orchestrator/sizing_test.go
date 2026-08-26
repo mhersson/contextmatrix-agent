@@ -132,23 +132,21 @@ func TestWriteMetaNormalisesAnEmptyBar(t *testing.T) {
 	assert.Equal(t, "Do it.", stripMeta(again), "the prompt-facing body is the marker-free original")
 }
 
-// The live defect this design closes, reproduced exactly.
+// Why writeMeta PREPENDS.
 //
-// Today's marker is APPENDED. escalateSubtaskTier rewrites the body as
-// withTierMarker(clean, next), so on a card that already carries a section the
-// marker lands INSIDE that section's replace range. The next
-// recordCheckpointOnSubtask upsert of the same heading deletes it, and the run
-// silently reverts to the moderate default:
+// An appended marker on a card that already carries a section lands INSIDE that
+// section's replace range, and the next recordCheckpointOnSubtask upsert of the
+// same heading deletes it, silently reverting the run to the moderate default:
 //
 //	run 1 checkpoint  "Do it.\n\n## Discussion\n\nSeats: round 1\n"
-//	run 1 turn cap    "Do it.\n\n## Discussion\n\nSeats: round 1\n\n<!-- cm:tier=complex -->"
+//	run 1 turn cap    "Do it.\n\n## Discussion\n\nSeats: round 1\n\n<!-- marker -->"
 //	run 2 checkpoint  "Do it.\n\n## Discussion\n\nSeats: round 2\n"   <- escalation gone
 //
-// upsertSection preserves lines[:start] verbatim, so a PREPENDED marker cannot
+// upsertSection preserves lines[:start] verbatim, so a marker on line 1 cannot
 // land inside any section and survives every rewrite. This test drives the
 // escalate-after-checkpoint sequence rather than a bare upsert, because a bare
-// upsert leaves an appended marker intact too - the spec's version of this test
-// passed with the bug still present.
+// upsert leaves an appended marker intact too - a test built on one would pass
+// with the bug still present.
 func TestMetaMarkerSurvivesEscalationThenSectionUpsert(t *testing.T) {
 	body := writeMeta("Implement the thing.", metaKV{"bar": "moderate", "budget": "0", "seed": "moderate"})
 

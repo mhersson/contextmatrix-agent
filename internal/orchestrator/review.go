@@ -775,7 +775,7 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 func (o *run) reviewPanel(ctx context.Context, estTokens int, authoritative bool) []registry.Pick {
 	// The authoritative pass escalates the panel to the complex tier so the
 	// strongest models judge the change before parking.
-	tier := tierFromString(o.cardTier)
+	tier := o.cardSizing.Bar
 	if authoritative {
 		tier = registry.TierComplex
 	}
@@ -1238,7 +1238,7 @@ func (o *run) fixTierEffective(fixTier string, authoritative bool) registry.Tier
 // falls back so the fixer is never under-sized.
 func (o *run) effectiveFixTier(fixTier string) string {
 	if fixTier == "" {
-		return o.cardTier
+		return string(o.cardSizing.Bar)
 	}
 
 	return fixTier
