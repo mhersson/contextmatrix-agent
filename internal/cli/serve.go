@@ -413,10 +413,15 @@ func emitRunEnd(
 // use, so a transcript reader parses it exactly like every other line.
 //
 // It carries no seq: the sequence counter belongs to the container, and this
-// line is written after the container is gone. The attempt ordinal is stamped
-// only past the first run, matching what the container does with its own lines,
-// where an absent ordinal already reads as attempt 1. Without it a restarted
-// card's terminal event would be filed under the run it replaced.
+// line is written after the container is gone. The harness envelope declares
+// seq without omitempty, so a consumer decoding into that struct reads zero
+// here and must take this line in file order rather than sort by sequence,
+// which would file the end of the run at its start.
+//
+// The attempt ordinal is stamped only past the first run, matching what the
+// container does with its own lines, where an absent ordinal already reads as
+// attempt 1. Without it a restarted card's terminal event would be filed under
+// the run it replaced.
 func runEndEvent(exitCode int64, cause executor.ExitCause, ordinal int) map[string]any {
 	ev := map[string]any{
 		"kind": runEndKind,

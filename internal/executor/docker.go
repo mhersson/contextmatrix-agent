@@ -84,22 +84,32 @@ var (
 )
 
 // ExitCause records how a container run ended. It travels with the exit code
-// because the code alone cannot say: both kill paths report -1, so a consumer
-// reading only the code cannot tell a timed-out container from one whose wait
-// failed, nor either from a worker that genuinely exited -1.
+// because the code alone cannot say: both kill paths report -1, a container the
+// watchdog killed reports the same SIGKILL code as one that chose to exit on
+// it, and a wait the daemon flagged reports a code that means nothing at all.
 type ExitCause string
 
-// The ways a run can end, as observed by the supervision goroutine.
+// The ways a run can end. resolveCause folds them into one value.
 const (
-	// ExitNormal is a container whose wait returned. The exit code says
-	// whether the run succeeded; any recorded kill reason (idle timeout, an
-	// operator kill) reaches the container_duration outcome label instead.
+	// ExitNormal is a container that exited on its own and whose wait the
+	// daemon reported cleanly. The exit code says whether the run succeeded.
 	ExitNormal ExitCause = "normal"
 	// ExitTimeout is a container killed for outliving the container timeout.
 	ExitTimeout ExitCause = "timeout"
 	// ExitWaitFailure is a container killed because the wait itself failed,
 	// which leaves the run's own outcome unobserved.
 	ExitWaitFailure ExitCause = "wait_failure"
+	// ExitDaemonError is a wait the daemon returned with an error attached.
+	// Nothing here killed the container, but the status code that arrived with
+	// the error is not a run outcome and must not be read as one.
+	ExitDaemonError ExitCause = "daemon_error"
+	// ExitIdleTimeout is a container the idle watchdog killed for producing no
+	// output. Its wait returns cleanly with the SIGKILL code, so only the
+	// recorded reason separates it from a container that exited on its own.
+	ExitIdleTimeout ExitCause = metrics.OutcomeIdleTimeout
+	// ExitKilled is a container killed on request, by an operator or by a
+	// shutdown sweep. Like the idle kill, its wait returns cleanly.
+	ExitKilled ExitCause = metrics.OutcomeKilled
 )
 
 // containerWaiter is the one-method slice of the Docker API Kill needs to
@@ -464,8 +474,7 @@ func (e *DockerExecutor) waitAndCleanup(
 	defer attach.Close()
 
 	exitCode := int64(0)
-	timedOut := false
-	cause := ExitNormal
+	observed := ExitNormal
 
 	waitCtx, cancel := context.WithTimeout(context.Background(), e.containerTimeout)
 	defer cancel()
@@ -477,17 +486,18 @@ func (e *DockerExecutor) waitAndCleanup(
 		exitCode = res.StatusCode
 		if res.Error != nil {
 			log.Warn("container wait reported error", "error", res.Error.Message)
+
+			observed = ExitDaemonError
 		}
 	case err := <-errCh:
 		if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
 			log.Warn("container timed out, killing", "timeout", e.containerTimeout)
 
-			timedOut = true
-			cause = ExitTimeout
+			observed = ExitTimeout
 		} else {
 			log.Warn("container wait failed, killing", "error", err)
 
-			cause = ExitWaitFailure
+			observed = ExitWaitFailure
 		}
 
 		e.kill(containerID, log)
@@ -502,8 +512,14 @@ func (e *DockerExecutor) waitAndCleanup(
 		log.Warn("failed to remove container", "container_id", truncateID(containerID), "error", err)
 	}
 
+	// Read the recorded kill reason before Remove clears it, and derive both
+	// the cause and the metrics label from it, so the two cannot disagree
+	// about how the run ended.
+	reason := e.tracker.Reason(project, cardID)
+	cause := resolveCause(observed, reason)
+
 	if e.metrics != nil {
-		outcome := resolveOutcome(timedOut, e.tracker.Reason(project, cardID), exitCode)
+		outcome := resolveOutcome(cause, reason, exitCode)
 		e.metrics.ContainerDuration.WithLabelValues(outcome).Observe(time.Since(startedAt).Seconds())
 	}
 

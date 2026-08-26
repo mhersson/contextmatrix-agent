@@ -358,6 +358,9 @@ func TestFooterAndTerminalEventWrittenOnEveryExitPath(t *testing.T) {
 		{"normal", 0, executor.ExitNormal},
 		{"timeout", -1, executor.ExitTimeout},
 		{"wait failure", -1, executor.ExitWaitFailure},
+		{"daemon-flagged wait", 0, executor.ExitDaemonError},
+		{"idle watchdog kill", 137, executor.ExitIdleTimeout},
+		{"requested kill", 137, executor.ExitKilled},
 	}
 
 	for _, tc := range tests {

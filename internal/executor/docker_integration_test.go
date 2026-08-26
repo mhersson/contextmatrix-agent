@@ -296,10 +296,11 @@ func TestIntegration_IdleWatchdogKillsSilentContainer(t *testing.T) {
 	// Silent container: no output, idle watchdog must kill it well before the
 	// container timeout. The watchdog SIGKILLs independently, so ContainerWait
 	// returns a normal result with code 137 (128 + SIGKILL) via the wait path
-	// rather than the timeout path's synthetic -1.
+	// rather than the timeout path's synthetic -1. The recorded reason is the
+	// only thing separating that from a container that chose to exit on it.
 	code, cause := exits.wait(t, 10*time.Second)
 	assert.Equal(t, int64(137), code, "idle SIGKILL surfaces 137 via the wait path")
-	assert.Equal(t, ExitNormal, cause, "the wait returned; the recorded kill reason rides the metrics outcome label")
+	assert.Equal(t, ExitIdleTimeout, cause, "a reaped container must not read as a normal exit")
 
 	assert.Eventually(t, func() bool {
 		return exec.tracker.Count() == 0
@@ -395,8 +396,9 @@ func TestIntegration_StopAllAndCleanupOrphans(t *testing.T) {
 	require.Len(t, results, 1)
 	require.NoError(t, results[0].Err, "the tracked container must be killed successfully")
 
-	code, _ := exits.wait(t, 30*time.Second)
+	code, cause := exits.wait(t, 30*time.Second)
 	assert.Equal(t, int64(137), code, "SIGKILL surfaces 137 via the wait path")
+	assert.Equal(t, ExitKilled, cause, "a swept container must not read as a normal exit")
 
 	assert.Eventually(t, func() bool {
 		return exec.tracker.Count() == 0

@@ -17,6 +17,7 @@ import (
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
+	"github.com/mhersson/contextmatrix-agent/internal/metrics"
 	"github.com/mhersson/contextmatrix-backendkit/webhookcore"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/assert"
@@ -454,6 +455,18 @@ func exitsWith(code int64) func(context.Context) (<-chan container.WaitResponse,
 	}
 }
 
+// flaggedBy yields a wait result the daemon flagged with an error. The status
+// code in such a response is not trustworthy, and the container was never
+// killed by this process.
+func flaggedBy(message string) func(context.Context) (<-chan container.WaitResponse, <-chan error) {
+	return func(context.Context) (<-chan container.WaitResponse, <-chan error) {
+		wc := make(chan container.WaitResponse, 1)
+		wc <- container.WaitResponse{Error: &container.WaitExitError{Message: message}}
+
+		return wc, make(chan error, 1)
+	}
+}
+
 // hangsUntilDeadline never yields a result, so the container timeout fires and
 // waitCtx reports DeadlineExceeded on errCh - the timeout-kill path.
 func hangsUntilDeadline(ctx context.Context) (<-chan container.WaitResponse, <-chan error) {
@@ -477,31 +490,50 @@ func failsImmediately(context.Context) (<-chan container.WaitResponse, <-chan er
 	return make(chan container.WaitResponse), ec
 }
 
-// TestWaitAndCleanupReportsExitCause pins the distinction the exit code alone
-// cannot carry: a timeout kill and a wait failure both report -1, so a
-// consumer can only tell them apart from the cause.
+// TestWaitAndCleanupReportsExitCause pins every way a run can end that the
+// exit code alone cannot carry: both kill paths report -1, both recorded kills
+// report a normal wait with the SIGKILL code, and a wait the daemon flagged
+// reports a status code that is not trustworthy. Only the cause separates them.
 func TestWaitAndCleanupReportsExitCause(t *testing.T) {
 	tests := []struct {
 		name     string
 		waitFn   func(context.Context) (<-chan container.WaitResponse, <-chan error)
+		reason   string
 		wantCode int64
 		wantCaus ExitCause
 		wantKill bool
 	}{
-		{"normal exit", exitsWith(0), 0, ExitNormal, false},
-		{"non-zero exit", exitsWith(7), 7, ExitNormal, false},
-		{"timeout kill", hangsUntilDeadline, -1, ExitTimeout, true},
-		{"wait failure", failsImmediately, -1, ExitWaitFailure, true},
+		{"normal exit", exitsWith(0), "", 0, ExitNormal, false},
+		{"non-zero exit", exitsWith(7), "", 7, ExitNormal, false},
+		{"timeout kill", hangsUntilDeadline, "", -1, ExitTimeout, true},
+		{"wait failure", failsImmediately, "", -1, ExitWaitFailure, true},
+		{"daemon-flagged wait", flaggedBy("no such container"), "", 0, ExitDaemonError, false},
+		{"idle watchdog kill", exitsWith(137), metrics.OutcomeIdleTimeout, 137, ExitIdleTimeout, false},
+		{"requested kill", exitsWith(137), metrics.OutcomeKilled, 137, ExitKilled, false},
+		{
+			"the container timeout outranks a recorded kill",
+			hangsUntilDeadline, metrics.OutcomeKilled, -1, ExitTimeout, true,
+		},
+		{
+			"a recorded kill outranks a daemon-flagged wait",
+			flaggedBy("no such container"), metrics.OutcomeIdleTimeout, 0, ExitIdleTimeout, false,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			docker := &stubDocker{waitFn: tc.waitFn}
 			got := make(chan exitCall, 1)
+			tracker := NewTracker(1)
+
+			if tc.reason != "" {
+				require.True(t, tracker.AddIfUnderLimit(&Run{Project: "proj", CardID: "CARD-1"}))
+				tracker.SetReason("proj", "CARD-1", tc.reason)
+			}
 
 			e := NewDockerExecutor(Config{
 				Docker:           docker,
-				Tracker:          NewTracker(1),
+				Tracker:          tracker,
 				ContainerTimeout: 30 * time.Millisecond,
 				Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
 				OnExit: func(_, _ string, code int64, cause ExitCause, attempt int) {
@@ -534,18 +566,6 @@ func TestWaitAndCleanupReportsExitCause(t *testing.T) {
 			assert.Equal(t, tc.wantKill, len(docker.killed) == 1, "kill expectation")
 			assert.Equal(t, []string{"cid-1"}, docker.removed, "the container is always removed")
 		})
-	}
-}
-
-// TestExitCausesAreDistinct guards the one property a consumer depends on:
-// the three ways a run can end never collapse onto the same code.
-func TestExitCausesAreDistinct(t *testing.T) {
-	seen := map[ExitCause]bool{}
-
-	for _, c := range []ExitCause{ExitNormal, ExitTimeout, ExitWaitFailure} {
-		assert.NotEmpty(t, string(c))
-		assert.False(t, seen[c], "duplicate exit cause %q", c)
-		seen[c] = true
 	}
 }
 
