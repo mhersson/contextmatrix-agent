@@ -340,9 +340,19 @@ func TestSeverityFieldInSynthesisPrompts(t *testing.T) {
 }
 
 func TestCoderGroundingRuleInCoderPrompt(t *testing.T) {
-	assert.Contains(t, coderPrompt, "hints to verify, not guarantees",
-		"coderPrompt must include the coder grounding rule")
-	assert.NotContains(t, fixPrompt, "hints to verify, not guarantees",
+	t.Parallel()
+
+	low := strings.ToLower(coderPrompt)
+
+	// The rule must still catch a stale anchor: that is why it exists.
+	assert.Contains(t, low, "trust the code",
+		"coderPrompt must keep the stale-anchor protection")
+
+	// ... and must now bound the check to a window rather than the whole file.
+	assert.Contains(t, low, "window",
+		"coderPrompt must scope an anchor check to a window around the cited line")
+
+	assert.NotContains(t, strings.ToLower(fixPrompt), "trust the code",
 		"the coder grounding rule is coder-only, not spliced into fixPrompt")
 }
 

@@ -321,9 +321,17 @@ Fix anything you find before finishing.`
 // coderGroundingRule tells the coder to treat the subtask's concrete specifics
 // as hints to verify, not guarantees - so a stale line number or a claimed
 // site/symbol the code lacks cannot send it chasing a phantom to the turn cap.
+// The check is bounded to a window around the citation: the earlier wording
+// licensed re-reading the whole file for every anchor the plan had already
+// pinned, which accounted for 41-99% of post-plan read bytes across the
+// recorded runs and roughly half of one run's prompt tokens.
 const coderGroundingRule = `Treat concrete specifics in the subtask description - line numbers, exact
 counts ("all N sites"), symbol/file/token names - as hints to verify, not guarantees.
-If the code contradicts one (a named symbol or site does not exist, or there are
+Verify a cited line by reading a window around it, not by re-reading the whole
+file: read roughly 40 lines either side and check the citation against that.
+Re-read the file in full only when the window contradicts the citation - the
+symbol is not there, or what is there does not match what the description says.
+If the code contradicts a specific (a named symbol or site does not exist, or there are
 fewer than claimed), trust the code: satisfy the requirement's intent, note the
 discrepancy in your finish message, and stop - a confirmed absence discharges a
 "find all N" criterion. Do not keep searching to prove a negative.`
