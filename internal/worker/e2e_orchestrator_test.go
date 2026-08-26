@@ -602,10 +602,20 @@ const e2eCapableDefault = "default/model"
 // is no second candidate. Splitting the roles here is what lets the real
 // selector run in these tests instead of the exclusion collapsing the panel.
 //
-// Creator is left empty on purpose - that exempts the models from
-// vendor-diversity treatment, so seat order follows the priors alone and the
-// panel is deterministic. The SSE stub matches on prompt content, never on the
-// model, so which slug reaches it changes nothing about the scripted replies.
+// These models are NOT exempt from the vendor-diversity preference. Creator is
+// empty, but an unregistered creator falls back to the slug prefix, so all four
+// share the vendor "e2e" and the preference applies to every seat. Seat order
+// is deterministic because the preference is bounded to the rung: from seat 2
+// on, the vendor-filtered pool is empty at every rung and lands on the
+// off-ladder capable default, whose met tier does not match the vendor-blind
+// pick's, so the filtered candidate is rejected and each seat keeps its
+// vendor-blind answer. The fixture therefore depends on that rung bound
+// holding - a fifth model under a different vendor prefix would start winning
+// seats, and adding one on the assumption that vendor does not matter here
+// would change the panel.
+//
+// The SSE stub matches on prompt content, never on the model, so which slug
+// reaches it changes nothing about the scripted replies.
 func e2eSelection() *protocol.SelectionContext {
 	const (
 		window = 200000
@@ -758,11 +768,17 @@ func TestOrchestratorEndToEndHappyPath(t *testing.T) {
 		3*backend.specialistCost + backend.synthesisCost
 	assert.InDelta(t, expected, reported, 1e-9, "the total reported cost matches the scripted script")
 
-	// --- the real selector ran, and the panel is not the coder ---------------
-	// A model must not review its own code, so the coder slug is excluded from
-	// the panel. Without this the run still reaches "completed" with the panel
-	// collapsed onto the capable default three times over, and every assertion
-	// above holds - so the seats are checked directly.
+	assertRealSelectorSeats(t, ops)
+}
+
+// assertRealSelectorSeats pins that the coder and every review seat were
+// distinct measured models from e2eSelection. A model must not review its own
+// code, so the coder slug is excluded from the panel; without this a fixture
+// edit can leave the panel collapsed onto the capable default three times over
+// while the run still reaches "completed" and every other assertion holds.
+func assertRealSelectorSeats(t *testing.T, ops *stubOps) {
+	t.Helper()
+
 	logs := strings.Join(cardLogMessages(ops), "\n")
 	for _, m := range []string{"e2e/coder", "e2e/reviewer-a", "e2e/reviewer-b", "e2e/reviewer-c"} {
 		assert.Contains(t, logs, m, "every seat is a distinct measured model")
@@ -898,6 +914,8 @@ func TestOrchestratorEndToEndFixLoop(t *testing.T) {
 
 	last := ops.pushCalls[len(ops.pushCalls)-1]
 	assert.Equal(t, branch, last.branch)
+
+	assertRealSelectorSeats(t, ops)
 }
 
 // compile-time proof the recorder satisfies BOTH surfaces: the worker's narrow
