@@ -818,3 +818,78 @@ func (r *Registry) specFor(id string) ModelSpec {
 
 	return spec
 }
+
+// TierReach is one row of the reachability preflight: how many shipped
+// candidates clear one tier's bar for one role, and how far short the
+// catalog falls when none do.
+type TierReach struct {
+	Role  Role
+	Tier  Tier
+	Bar   float64
+	Count int
+	Best  float64 // highest prior available for Role, any tier
+}
+
+// Reachability reports whether the shipped candidate set can answer a
+// request at each tier at all - blacklist and tool support applied, no
+// run-time exclusions. Count 0 means every request at that tier degrades
+// for the whole run regardless of card, which is the one thing card-level
+// logs can never reveal. Rows are ordered role, then strictest tier first.
+func (r *Registry) Reachability() []TierReach {
+	bars := r.bars()
+
+	tiers := slices.Collect(maps.Keys(bars))
+	slices.SortFunc(tiers, func(a, b Tier) int {
+		if c := cmp.Compare(bars[b], bars[a]); c != 0 {
+			return c
+		}
+
+		return cmp.Compare(a, b)
+	})
+
+	out := make([]TierReach, 0, 2*len(tiers))
+
+	for _, role := range []Role{RoleCoder, RoleReviewer} {
+		best := 0.0
+
+		for _, e := range r.catalog {
+			if !e.SupportsTools() || r.blacklist[e.ID] {
+				continue
+			}
+
+			if q, ok := r.priors.ForRole(e.ID, role); ok && q > best {
+				best = q
+			}
+		}
+
+		for _, t := range tiers {
+			out = append(out, TierReach{
+				Role:  role,
+				Tier:  t,
+				Bar:   bars[t],
+				Count: len(r.candidates(SelectInput{Role: role, Tier: t})),
+				Best:  best,
+			})
+		}
+	}
+
+	return out
+}
+
+// OrphanFavoriteTiers lists favorite tiers the ladder does not contain.
+// CM sends FavoriteRule.Tier as a free string and build.go converts it
+// unchecked, so a typo produces a favorite no rung can ever consult. Sorted
+// for a stable log line.
+func (r *Registry) OrphanFavoriteTiers() []Tier {
+	bars := r.bars()
+
+	seen := map[Tier]bool{}
+
+	for key := range r.favorites {
+		if _, ok := bars[key.Tier]; !ok {
+			seen[key.Tier] = true
+		}
+	}
+
+	return slices.Sorted(maps.Keys(seen))
+}

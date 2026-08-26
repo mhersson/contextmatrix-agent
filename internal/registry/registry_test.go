@@ -1526,3 +1526,99 @@ func TestDescentCollapsesTiedAdjacentBars(t *testing.T) {
 	// the walk skips it: three rungs, not four.
 	assert.Equal(t, []Tier{TierCritical, TierModerate, TierSimple}, r.descent(TierCritical))
 }
+
+func TestReachabilityReportsTheGapAtUnreachableTiers(t *testing.T) {
+	r := ladderRegistry(nil)
+
+	reviewerByTier := func() map[Tier]TierReach {
+		out := map[Tier]TierReach{}
+
+		for _, rc := range r.Reachability() {
+			if rc.Role == RoleReviewer {
+				out[rc.Tier] = rc
+			}
+		}
+
+		return out
+	}
+
+	got := reviewerByTier()
+	require.Len(t, got, 4)
+	assert.Positive(t, got[TierCritical].Count)
+	assert.InDelta(t, 0.93, got[TierCritical].Best, 1e-9)
+	assert.InDelta(t, 0.90, got[TierCritical].Bar, 1e-9)
+
+	// Blacklisting the only critical-clearing model makes the tier structurally
+	// unreachable for the whole run - what the preflight exists to surface.
+	r.blacklist["top/one"] = true
+
+	got = reviewerByTier()
+	assert.Zero(t, got[TierCritical].Count, "critical is now unreachable")
+	assert.InDelta(t, 0.85, got[TierCritical].Best, 1e-9,
+		"the report must say how far short the catalog falls, not only that it does")
+	assert.Positive(t, got[TierComplex].Count, "lower tiers stay reachable")
+}
+
+// TestReachabilityIsOrderedStrictestFirst pins that the report walks the
+// operator's ladder rather than a hardcoded tier list, so a replaced ladder
+// reports in its own order.
+func TestReachabilityIsOrderedStrictestFirst(t *testing.T) {
+	r := ladderRegistry(nil).WithTierBars(map[Tier]float64{
+		TierSimple: 0.50, TierModerate: 0.60, TierComplex: 0.70, TierCritical: 0.95,
+	})
+
+	var coderTiers []Tier
+
+	for _, rc := range r.Reachability() {
+		if rc.Role == RoleCoder {
+			coderTiers = append(coderTiers, rc.Tier)
+		}
+	}
+
+	assert.Equal(t, []Tier{TierCritical, TierComplex, TierModerate, TierSimple}, coderTiers)
+}
+
+// TestOrphanFavoriteTiersNamesFavoritesNoRungCanConsult pins the dead-favorite
+// class the rung-local lookup does not fix: CM sends the tier as a free string
+// and build.go converts it unchecked.
+func TestOrphanFavoriteTiersNamesFavoritesNoRungCanConsult(t *testing.T) {
+	tests := []struct {
+		name string
+		favs map[favKey][]string
+		want []Tier
+	}{
+		{name: "no favorites", want: nil},
+		{
+			name: "every favorite tier is on the ladder",
+			favs: map[favKey][]string{{Tier: TierModerate}: {"mid/two"}, {Tier: TierComplex}: {"high/one"}},
+			want: nil,
+		},
+		{
+			name: "misspelled and empty tiers are reported",
+			favs: map[favKey][]string{
+				{Tier: TierModerate}:      {"mid/two"},
+				{Tier: Tier("moderatte")}: {"mid/one"},
+				{Tier: Tier("")}:          {"low/one"},
+			},
+			want: []Tier{Tier(""), Tier("moderatte")},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, ladderRegistry(tt.favs).OrphanFavoriteTiers())
+		})
+	}
+}
+
+// TestOrphanFavoriteTiersReadsTheLiveLadder pins the operator-ladder half of
+// the dead-favorite check: a favorite sitting on a rung the DEFAULT ladder
+// has but a custom WithTierBars ladder drops must still be reported, so the
+// check has to consult the live ladder rather than the built-in one.
+func TestOrphanFavoriteTiersReadsTheLiveLadder(t *testing.T) {
+	r := ladderRegistry(map[favKey][]string{{Tier: TierModerate}: {"mid/two"}}).
+		WithTierBars(map[Tier]float64{TierSimple: 0.50, TierComplex: 0.70, TierCritical: 0.90})
+
+	assert.Equal(t, []Tier{TierModerate}, r.OrphanFavoriteTiers(),
+		"moderate is a default-ladder rung the custom ladder dropped, so its favorite is now orphaned")
+}
