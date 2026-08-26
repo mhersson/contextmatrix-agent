@@ -2081,3 +2081,37 @@ func TestCoderTierIsAlwaysDerivedFromTheWork(t *testing.T) {
 		}
 	})
 }
+
+// TestShortfallAdvisoryNeverTakesTheSelectionLock observes the lock directly
+// instead of through a behaviour that happens to break: hold the selection
+// lock, raise an advisory from another goroutine, and wait. It returns only if
+// the advisory takes some other mutex. The candidate resolver holds this lock
+// across a selection, so an advisory that reached for it would deadlock the
+// Best-of-N fan-out rather than fail visibly.
+func TestShortfallAdvisoryNeverTakesTheSelectionLock(t *testing.T) {
+	o := newExecRun(midTierCoderDeps(&fakeOps{}), nil, 5)
+
+	o.selMu.Lock()
+	defer o.selMu.Unlock()
+
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		o.noteShortfall(context.Background(), "probe", registry.Pick{
+			ModelSpec:     registry.ModelSpec{Model: "mid/model"},
+			Role:          registry.RoleCoder,
+			RequestedTier: registry.TierComplex,
+			MetTier:       registry.TierModerate,
+			HasPrior:      true,
+			OK:            true,
+		})
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the shortfall advisory blocked on the selection lock")
+	}
+}

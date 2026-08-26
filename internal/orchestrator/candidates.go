@@ -408,53 +408,69 @@ func lastSubtaskID(subs []subtaskRef) string {
 // the others running.
 //
 // The advisory for a re-pick that fell short of the card tier is raised AFTER
-// the selection lock is released: noteShortfall takes its own mutex, and an
-// advisory reaching for selMu from in here would deadlock the fan-out.
+// the selection lock is released, which is why the locked work lives in
+// pickCandidateModel: noteShortfall takes its own mutex, and an advisory
+// reaching for selMu from inside the lock would deadlock the fan-out.
 func (o *run) candidateCoderModel(c *candidate) func(context.Context, subtaskRef, string) (string, error) {
 	return func(ctx context.Context, _ subtaskRef, prompt string) (string, error) {
-		o.selMu.Lock()
-
-		// Never override an explicit operator coder pin (the fan-out assigns it to a
-		// single candidate); let a pinned-but-incapable model park via the cap.
-		if c.model == o.tc.ModelCoder && resolvePin(o.d.Registry, o.tc.ModelCoder) {
-			pinned := c.model
-			o.selMu.Unlock()
-
-			return pinned, nil
-		}
-
-		if !o.excluded[c.model] {
-			current := c.model
-			o.selMu.Unlock()
-
-			return current, nil
-		}
-
-		pick := o.d.Registry.SelectByComplexity(registry.SelectInput{
-			Role:      registry.RoleCoder,
-			Tier:      tierFromString(o.cardTier),
-			EstTokens: estimateTokens(prompt),
-			Exclude:   o.excluded,
-		})
-
-		// Nothing is employable for this candidate any more - every rung is dry
-		// and the capable default is excluded too. Drop this candidate; the
-		// others carry on.
-		if !pick.OK {
-			o.selMu.Unlock()
-
+		model, fresh, ok := o.pickCandidateModel(c, prompt)
+		if !ok {
 			return "", errCandidatePoolExhausted
 		}
 
-		c.model = pick.Model
-		idx := c.idx
+		// A candidate staying on the model it already had has nothing new to
+		// report; only a fresh re-pick does. c.idx is fixed when the candidate
+		// is built, before any fan-out goroutine starts, so naming the seat
+		// needs no lock.
+		if fresh.OK {
+			o.noteShortfall(ctx, candidatePhase(c.idx), fresh)
+		}
 
-		o.selMu.Unlock()
-
-		o.noteShortfall(ctx, candidatePhase(idx), pick)
-
-		return pick.Model, nil
+		return model, nil
 	}
+}
+
+// pickCandidateModel does candidate c's coder resolution under the selection
+// lock and nothing else, so the lock is released by defer and a panic in the
+// selector cannot strand it. A leaked selMu would block every other candidate
+// forever: the fan-out recovers a candidate panic and carries on, so the run
+// would hang rather than fail.
+//
+// fresh is the pick to report once the lock is released, and is the zero Pick
+// when c kept the model it already had - a pin, or a model this run has not
+// excluded - since that model was reported when it was chosen. ok is false
+// when nothing is employable for this candidate any more.
+func (o *run) pickCandidateModel(c *candidate, prompt string) (model string, fresh registry.Pick, ok bool) {
+	o.selMu.Lock()
+	defer o.selMu.Unlock()
+
+	// Never override an explicit operator coder pin (the fan-out assigns it to a
+	// single candidate); let a pinned-but-incapable model park via the cap.
+	if c.model == o.tc.ModelCoder && resolvePin(o.d.Registry, o.tc.ModelCoder) {
+		return c.model, registry.Pick{}, true
+	}
+
+	if !o.excluded[c.model] {
+		return c.model, registry.Pick{}, true
+	}
+
+	pick := o.d.Registry.SelectByComplexity(registry.SelectInput{
+		Role:      registry.RoleCoder,
+		Tier:      tierFromString(o.cardTier),
+		EstTokens: estimateTokens(prompt),
+		Exclude:   o.excluded,
+	})
+
+	// Nothing is employable for this candidate any more - every rung is dry
+	// and the capable default is excluded too. Drop this candidate; the
+	// others carry on.
+	if !pick.OK {
+		return "", registry.Pick{}, false
+	}
+
+	c.model = pick.Model
+
+	return pick.Model, pick, true
 }
 
 // candidatePhase names one Best-of-N seat in selection advisories, so the

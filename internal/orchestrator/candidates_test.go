@@ -796,3 +796,28 @@ func TestFanoutSeatsReportTheirShortfall(t *testing.T) {
 	assert.Contains(t, advisories[1], "candidate 2")
 	assert.Contains(t, advisories[1], "other/model")
 }
+
+// TestFanoutPinnedSeatReportsItsMeasuredShortfall covers the one pinned seat
+// the registry actually measures. A pin is an operator's choice, so it never
+// gets the "no model clears the bar" wording - the selector never looked - but
+// when its own prior is known and falls short of the tier the card asked for,
+// that is a true fact and the card says it in its own words.
+func TestFanoutPinnedSeatReportsItsMeasuredShortfall(t *testing.T) {
+	ops := &fakeOps{}
+	d, _, _ := fanoutDeps(t, ops, &fakeGit{}, &planLLM{}, 2)
+	d.Registry = belowComplexRegistry()
+
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
+	o.cardTier = "complex"
+	o.tc.ModelCoder = "mid/model" // catalog-resolvable, so the pin is honoured
+
+	require.NoError(t, o.runFanout(context.Background()))
+
+	assert.True(t, ops.loggedContains("the pinned model mid/model does not clear the complex bar"),
+		"a pin the registry measured has a true shortfall to report; logs=%v", ops.logs)
+
+	for _, l := range ops.logs {
+		assert.NotContains(t, l, "no model clears the complex bar (0.82) for role coder - selected mid/model",
+			"the pin was chosen by hand, so no search happened to report on; logs=%v", ops.logs)
+	}
+}
