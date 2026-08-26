@@ -1979,3 +1979,105 @@ func TestShortfallAdvisoryIsOncePerPhaseRoleAndTier(t *testing.T) {
 			"a different requested bar is a different fact and earns its own line; logs=%v", ops.logs)
 	})
 }
+
+// tierNamingRegistry prices one model per tier so that exactly one is
+// affordable at each rung: the best-value band around the cheapest candidate
+// excludes everything above it. The model that comes back therefore NAMES the
+// tier that went in, which is what lets a test observe the tier a call site
+// asked for without a spy.
+func tierNamingRegistry() *registry.Registry {
+	return registry.NewRegistryFromParts(
+		llm.Catalog{
+			{ID: "tier/simple", ContextLength: 200000, PromptPricePerTok: 5e-10, CompletionPricePerTok: 5e-10, SupportedParameters: []string{"tools"}},
+			{ID: "tier/moderate", ContextLength: 200000, PromptPricePerTok: 5e-7, CompletionPricePerTok: 5e-7, SupportedParameters: []string{"tools"}},
+			{ID: "tier/complex", ContextLength: 200000, PromptPricePerTok: 5e-4, CompletionPricePerTok: 5e-4, SupportedParameters: []string{"tools"}},
+			{ID: "capable/default", ContextLength: 200000, SupportedParameters: []string{"tools"}},
+		},
+		registry.Priors{Models: map[string]registry.PriorEntry{
+			"tier/simple":   coderPrior(0.70),
+			"tier/moderate": coderPrior(0.80),
+			"tier/complex":  coderPrior(0.90),
+		}},
+		nil, nil, "capable/default")
+}
+
+// TestCoderTierIsAlwaysDerivedFromTheWork guards the distinction this whole
+// selection design rests on.
+//
+// An AUTHORING tier is a claim about how hard the work is. The run can check
+// that claim against what actually happens, so it is measured and corrected -
+// never pinned to a constant. A JUDGMENT bar is a claim about how good the
+// judgement has to be; nothing in the run measures that, so it is stated
+// policy with a stated reason.
+//
+// Every coder selection is authoring, so all three of them must keep deriving
+// their tier from the subtask or the card. Flooring any of them at a constant
+// would silently overpay on trivial work and, worse, make the tier stop
+// meaning anything the run could correct.
+//
+// The one deliberate exception is the authoritative fix pass, which pins the
+// complex tier because it is the last round before a human takes the card.
+// That is precedent for nothing else and this guard does not cover it.
+func TestCoderTierIsAlwaysDerivedFromTheWork(t *testing.T) {
+	tiers := []struct {
+		tier      string
+		wantModel string
+	}{
+		{tier: "simple", wantModel: "tier/simple"},
+		{tier: "moderate", wantModel: "tier/moderate"},
+		{tier: "complex", wantModel: "tier/complex"},
+	}
+
+	t.Run("the subtask coder derives from the subtask", func(t *testing.T) {
+		for _, tt := range tiers {
+			t.Run(tt.tier, func(t *testing.T) {
+				d := execTestDeps(&fakeOps{}, &fakeGit{}, &planLLM{})
+				d.Registry = tierNamingRegistry()
+				o := newExecRun(d, nil, 0)
+
+				model, err := o.resolveCoderModel(context.Background(),
+					subtaskRef{ID: "SUB-1", Title: "First", Tier: tt.tier}, "prompt")
+				require.NoError(t, err)
+				assert.Equal(t, tt.wantModel, model,
+					"the coder tier must be the subtask's, not a constant")
+			})
+		}
+	})
+
+	t.Run("the candidate fan-out derives from the card", func(t *testing.T) {
+		for _, tt := range tiers {
+			t.Run(tt.tier, func(t *testing.T) {
+				d, _, _ := fanoutDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, 2)
+				d.Registry = tierNamingRegistry()
+
+				o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
+				o.cardTier = tt.tier
+
+				require.NoError(t, o.runFanout(context.Background()))
+				require.NotEmpty(t, o.candidates)
+				assert.Equal(t, tt.wantModel, o.candidates[0].model,
+					"the fan-out's first seat must be the card's tier, not a constant")
+			})
+		}
+	})
+
+	t.Run("the candidate re-pick derives from the card", func(t *testing.T) {
+		for _, tt := range tiers {
+			t.Run(tt.tier, func(t *testing.T) {
+				d := execTestDeps(&fakeOps{}, &fakeGit{}, &planLLM{})
+				d.Registry = tierNamingRegistry()
+
+				o := newExecRun(d, nil, 0)
+				o.cardTier = tt.tier
+				o.excluded = map[string]bool{"dropped/model": true}
+
+				c := &candidate{idx: 1, model: "dropped/model"}
+
+				model, err := o.candidateCoderModel(c)(context.Background(), subtaskRef{ID: "SUB-1"}, "prompt")
+				require.NoError(t, err)
+				assert.Equal(t, tt.wantModel, model,
+					"a candidate re-pick must stay on the card's tier, not a constant")
+			})
+		}
+	})
+}
