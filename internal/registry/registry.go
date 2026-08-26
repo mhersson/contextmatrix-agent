@@ -671,20 +671,23 @@ func (r *Registry) SelectReviewPanel(in SelectInput, n int) []Pick {
 	return panel
 }
 
-// SelectDiscussionPanel returns n distinct models for mob session discussion seats.
-// It is the review-panel diversity walk by construction - distinct-first with
-// wrap-around when the pool runs dry - honoring the caller's exclusions
-// (review discussions exclude the models that coded the card). It exists as a
-// named seam so discussion selection can diverge from review selection
-// without touching call sites.
+// SelectDiscussionPanel returns n seats for mob session discussion, honoring
+// the caller's exclusions (review discussions exclude the models that coded
+// the card). It is the review-panel selection by construction - distinct
+// models first, a flagged repeat of the last seat as the last resort, nil
+// when nothing is selectable at all - named as its own seam so discussion
+// selection can diverge from review selection without touching call sites.
 func (r *Registry) SelectDiscussionPanel(in SelectInput, n int) []Pick {
 	return r.SelectReviewPanel(in, n)
 }
 
 // SelectCandidateModels picks n coder models for a Best-of-N fan-out. pin, if
-// non-empty, occupies slot 1 (excluded from the auto picks); the remaining
-// slots are distinct-first with wrap-around when the pool is smaller than n
-// (SelectReviewPanel semantics) - model scarcity never shrinks n.
+// non-empty, occupies slot 1 and is never degraded away; the remaining slots
+// follow SelectReviewPanel's contract (distinct models first, a flagged
+// repeat as the last resort). With no pin, an unselectable pool returns nil
+// like SelectReviewPanel; with a pin, an unselectable auto pool instead fills
+// the remaining slots with the pin itself, flagged as a repeat, so a pinned
+// fan-out still gets n candidates.
 func (r *Registry) SelectCandidateModels(in SelectInput, n int, pin string) []Pick {
 	if n <= 0 {
 		return nil
@@ -717,9 +720,6 @@ func (r *Registry) SelectCandidateModels(in SelectInput, n int, pin string) []Pi
 	// wrong for every pinned run. Source SourcePinned is what carries the
 	// authority; AtBar carries the measurement.
 	pinPick := r.pickFor(pin, in, SourcePinned)
-	if !r.Has(pin) {
-		pinPick.ContextWindow = r.ContextWindow(pin)
-	}
 
 	out := make([]Pick, 0, n)
 	out = append(out, pinPick)

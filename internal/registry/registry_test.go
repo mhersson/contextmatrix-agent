@@ -737,7 +737,10 @@ func TestSelectReviewPanelFillsWithARealPickNotAnEscalation(t *testing.T) {
 	assert.False(t, panel[0].Duplicate)
 
 	// Seats 2 and 3: only/one is excluded now, so the ladder is dry and the
-	// capable default is the floor - a duplicate of it, flagged both ways.
+	// walk lands on the capable default - which repeats the last real pick
+	// (only/one) rather than seating the off-ladder default fresh.
+	assert.Equal(t, "only/one", panel[1].Model, "a dry ladder repeats the last real pick, not the capable default")
+
 	for i, s := range panel[1:] {
 		require.True(t, s.OK, "seat %d", i+1)
 		assert.True(t, s.Duplicate, "seat %d must be flagged as a repeat", i+1)
