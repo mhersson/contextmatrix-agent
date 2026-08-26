@@ -699,6 +699,22 @@ func TestSelectReviewPanelClampsBeforeDuplicating(t *testing.T) {
 	}
 }
 
+// TestSelectReviewPanelSeatsDegradeIndependently pins that one seat dropping a
+// rung never drags the seats above it down with it. high/two is excluded so
+// the complex pool holds exactly two models (top/one, high/one): both seats 1
+// and 2 stay at complex, and only seat 3, with the complex pool now empty,
+// clamps to moderate.
+func TestSelectReviewPanelSeatsDegradeIndependently(t *testing.T) {
+	in := SelectInput{Role: RoleReviewer, Tier: TierComplex, Exclude: map[string]bool{"high/two": true}}
+	panel := ladderRegistry(nil).SelectReviewPanel(in, 3)
+	require.Len(t, panel, 3)
+
+	assert.Equal(t, TierComplex, panel[0].MetTier)
+	assert.Equal(t, TierComplex, panel[1].MetTier, "a second complex-clearing model must stay at complex")
+	assert.Equal(t, TierModerate, panel[2].MetTier)
+	assert.Equal(t, 3, DistinctModels(panel))
+}
+
 // TestSelectReviewPanelFillsWithARealPickNotAnEscalation pins the last-resort
 // order: a repeat is reached only when no rung holds an unseated model, and it
 // repeats a real, quality-bearing pick rather than escalating price.

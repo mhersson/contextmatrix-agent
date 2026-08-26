@@ -618,6 +618,11 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 	}
 
 	panel := o.reviewPanel(ctx, estimateTokens(diff), authoritative)
+	if len(panel) == 0 {
+		d.logCard(ctx, "review: no model is selectable for the reviewer role - parking the card in review for a human")
+
+		return "", &ReviewParkedError{}
+	}
 
 	d.logCard(ctx, "review panel models: %s, %s, %s", panel[0].Model, panel[1].Model, panel[2].Model)
 

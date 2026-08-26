@@ -1256,6 +1256,24 @@ func TestReviewPanelEscalatesWhenAuthoritative(t *testing.T) {
 		"complex bar gates out the weak trio, forcing the strong model in; complex=%v", complexPanel)
 }
 
+// TestRunSpecialistsNoReviewerParksInstead pins that an empty review panel
+// parks the card for a human rather than indexing into it. No prior clears
+// any bar and there is no capable default, so the panel is empty on the very
+// first seat.
+func TestRunSpecialistsNoReviewerParksInstead(t *testing.T) {
+	reg := registry.NewRegistryFromParts(reviewerCatalog(), registry.Priors{}, nil, nil, "")
+	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reg)
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+
+	_, err := o.runSpecialists(context.Background(), false)
+
+	var parked *ReviewParkedError
+
+	require.ErrorAs(t, err, &parked, "an empty panel must park rather than panic")
+}
+
 func TestReviewGateFailureSkipsSpecialists(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true}
