@@ -202,88 +202,124 @@ func TestParseVerdictNormalizesSeverity(t *testing.T) {
 		"the malicious severity must not inject a synthetic fixFiles-parsed file path; got=%v", files)
 }
 
-// TestResolveFixModelUsesFixTier proves the fix run sizes its coder on the
-// synthesizer's fix_tier, not the card tier. The registry seeds one cheap coder
-// model whose prior (0.70) clears the simple tier bar (0.65) but sits below the
-// complex bar (0.82), with a DISTINCT capable fallback. So resolveFixModel("simple")
-// must pick the cheap coder; resolveFixModel("complex") must fall back.
-func TestResolveFixModelUsesFixTier(t *testing.T) {
-	const (
-		cheapCoder = "cheap/coder"
-		fallback   = "capable/fallback"
-	)
+// fixTierCoder is measured between the default simple bar (0.65) and the
+// moderate (0.76) and complex (0.82) bars; fixTierFallback is the capable
+// default and carries no prior at all. Every fix-model test below reads that
+// one relationship, so it is stated once here.
+const (
+	fixTierCoder    = "cheap/coder"
+	fixTierFallback = "capable/fallback"
+)
 
-	catalog := llm.Catalog{
-		{ID: cheapCoder, ContextLength: 200000, PromptPricePerTok: 0.0000005, CompletionPricePerTok: 0.0000015, SupportedParameters: []string{"tools"}},
-		{ID: fallback, ContextLength: 200000, PromptPricePerTok: 0.000006, CompletionPricePerTok: 0.000012, SupportedParameters: []string{"tools"}},
+func fixTierCatalog() llm.Catalog {
+	return llm.Catalog{
+		{ID: fixTierCoder, ContextLength: 200000, PromptPricePerTok: 0.0000005, CompletionPricePerTok: 0.0000015, SupportedParameters: []string{"tools"}},
+		{ID: fixTierFallback, ContextLength: 200000, PromptPricePerTok: 0.000006, CompletionPricePerTok: 0.000012, SupportedParameters: []string{"tools"}},
 	}
-	// Prior between the default simple (0.65) and complex (0.82) bars.
-	prior := 0.70
-	priors := registry.Priors{
-		Models: map[string]registry.PriorEntry{cheapCoder: {Coder: &prior}},
-	}
-	reg := registry.NewRegistryFromParts(catalog, priors, nil, nil, fallback)
-
-	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reg)
-	// No coder pin -> complexity selection path; card tier is moderate by default.
-	o := newReviewRun(d, cmclient.TaskContext{}, 0)
-
-	simple, err := o.resolveFixModel(context.Background(), "simple", false)
-	require.NoError(t, err)
-
-	complexFirst, err := o.resolveFixModel(context.Background(), "complex", false)
-	require.NoError(t, err)
-
-	complexSecond, err := o.resolveFixModel(context.Background(), "complex", false)
-	require.NoError(t, err)
-
-	assert.Equal(t, cheapCoder, simple.Model,
-		"simple fix_tier clears the cheap coder's bar")
-	assert.Equal(t, fallback, complexFirst.Model,
-		"complex fix_tier excludes the cheap coder -> capable fallback")
-	assert.NotEqual(t, cheapCoder, complexSecond.Model)
 }
 
-// TestResolveFixModelAuthoritativeForcesComplex proves the authoritative pass
-// sizes the fix coder on the complex tier regardless of the synthesizer's
-// fix_tier. The cheap coder clears the simple bar (0.65) but not the complex bar
-// (0.82); so resolveFixModel("simple", false) picks it, but the authoritative
-// resolveFixModel("simple", true) escalates to complex, gating the cheap coder
-// out and falling back to the capable model.
-func TestResolveFixModelAuthoritativeForcesComplex(t *testing.T) {
-	const (
-		cheapCoder = "cheap/coder"
-		fallback   = "capable/fallback"
-	)
-
-	catalog := llm.Catalog{
-		{ID: cheapCoder, ContextLength: 200000, PromptPricePerTok: 0.0000005, CompletionPricePerTok: 0.0000015, SupportedParameters: []string{"tools"}},
-		{ID: fallback, ContextLength: 200000, PromptPricePerTok: 0.000006, CompletionPricePerTok: 0.000012, SupportedParameters: []string{"tools"}},
-	}
-	// Prior between the default simple (0.65) and complex (0.82) bars.
+func fixTierPriors() registry.Priors {
 	prior := 0.70
-	priors := registry.Priors{
-		Models: map[string]registry.PriorEntry{cheapCoder: {Coder: &prior}},
+
+	return registry.Priors{
+		Models: map[string]registry.PriorEntry{fixTierCoder: {Coder: &prior}},
 	}
-	reg := registry.NewRegistryFromParts(catalog, priors, nil, nil, fallback)
+}
 
+func fixTierRun(t *testing.T) *run {
+	t.Helper()
+
+	reg := registry.NewRegistryFromParts(fixTierCatalog(), fixTierPriors(), nil, nil, fixTierFallback)
 	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reg)
-	o := newReviewRun(d, cmclient.TaskContext{}, 0)
 
-	plain, err := o.resolveFixModel(context.Background(), "simple", false)
+	// No coder pin, so every case goes down the complexity-selection path.
+	return newReviewRun(d, cmclient.TaskContext{}, 0)
+}
+
+// TestResolveFixModelRequestsTheRightTier pins what the synthesizer's fix_tier
+// and the authoritative flag actually control: the tier the fix coder is
+// REQUESTED at. What that request buys is a separate fact, and the pick
+// carries it. Only fixTierCoder is measured, at 0.70, so any request above
+// that bar walks down to the simple rung and reports the shortfall through
+// MetTier and AtBar. The unmeasured capable fallback is the floor below the
+// ladder, not the answer to a quality question.
+func TestResolveFixModelRequestsTheRightTier(t *testing.T) {
+	tests := []struct {
+		name          string
+		fixTier       string
+		authoritative bool
+		wantRequested registry.Tier
+		wantMet       registry.Tier
+		wantAtBar     bool
+	}{
+		{
+			name:          "simple fix_tier clears the cheap coder's bar",
+			fixTier:       "simple",
+			wantRequested: registry.TierSimple,
+			wantMet:       registry.TierSimple,
+			wantAtBar:     true,
+		},
+		{
+			name:          "complex fix_tier clamps to the rung the coder clears",
+			fixTier:       "complex",
+			wantRequested: registry.TierComplex,
+			wantMet:       registry.TierSimple,
+			wantAtBar:     false,
+		},
+		{
+			name:          "authoritative overrides fix_tier and requests complex",
+			fixTier:       "simple",
+			authoritative: true,
+			wantRequested: registry.TierComplex,
+			wantMet:       registry.TierSimple,
+			wantAtBar:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			o := fixTierRun(t)
+
+			got, err := o.resolveFixModel(context.Background(), tt.fixTier, tt.authoritative)
+			require.NoError(t, err)
+
+			assert.Equal(t, fixTierCoder, got.Model,
+				"the measured coder is the pick at every rung it clears; an unmeasured model never outranks it on quality")
+			assert.Equal(t, registry.SourceAuto, got.Source,
+				"a clamped pick is a real selection at its rung, not the capable default")
+			assert.Equal(t, tt.wantRequested, got.RequestedTier,
+				"fix_tier and the authoritative flag decide what is asked for")
+			assert.Equal(t, tt.wantMet, got.MetTier,
+				"the met tier is measured from the prior, never copied from the request")
+			assert.Equal(t, tt.wantAtBar, got.AtBar())
+
+			again, err := o.resolveFixModel(context.Background(), tt.fixTier, tt.authoritative)
+			require.NoError(t, err)
+			assert.Equal(t, got, again, "resolving the same round twice is stable")
+		})
+	}
+}
+
+// TestAuthoritativeFixGateLivesInAtBarNotInTheModel pins WHERE the
+// authoritative pass's complex floor is enforced. It is not enforced by which
+// model comes back: nothing in this catalog clears 0.82, so the authoritative
+// pass gets the same coder the plain pass got. The two picks differ in that
+// the authoritative one reports it did not reach the tier it asked for, and
+// that flag is what the escalated fix round and the shortfall advisory branch
+// on.
+func TestAuthoritativeFixGateLivesInAtBarNotInTheModel(t *testing.T) {
+	o := fixTierRun(t)
+
+	nonAuth, err := o.resolveFixModel(context.Background(), "simple", false)
 	require.NoError(t, err)
 
-	authFirst, err := o.resolveFixModel(context.Background(), "simple", true)
+	auth, err := o.resolveFixModel(context.Background(), "simple", true)
 	require.NoError(t, err)
 
-	authSecond, err := o.resolveFixModel(context.Background(), "simple", true)
-	require.NoError(t, err)
-
-	assert.Equal(t, cheapCoder, plain.Model,
-		"non-authoritative simple fix_tier clears the cheap coder's bar")
-	assert.Equal(t, fallback, authFirst.Model,
-		"authoritative pass forces complex -> cheap coder excluded -> capable fallback")
-	assert.NotEqual(t, cheapCoder, authSecond.Model)
+	assert.Equal(t, nonAuth.Model, auth.Model, "the catalog offers the authoritative pass nothing stronger")
+	assert.True(t, nonAuth.AtBar(), "a simple request served at simple got what it asked for")
+	assert.False(t, auth.AtBar(), "an authoritative pass that could not reach complex must say so")
+	assert.Equal(t, registry.TierComplex, auth.RequestedTier)
 }
 
 // TestFormatFixesFixFilesRoundTrip pins the line-shape contract between

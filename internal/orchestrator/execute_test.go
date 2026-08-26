@@ -1813,24 +1813,42 @@ func TestCoderPromptParentSlotOmitsRecordedHistory(t *testing.T) {
 }
 
 // TestResolveCoderModelPinMissingAdvisory proves that a non-empty but
-// unresolvable coder pin emits exactly one card-log advisory across multiple
-// resolveCoderModel calls (the once-per-run guard), and does not change the
-// model actually selected.
+// unresolvable coder pin reaches the card exactly once per run, however many
+// subtasks resolve a coder, and does not become the model selected.
+//
+// The count is taken over the lines that NAME the pin. The card log also
+// carries tier-shortfall advisories, deduped on their own key and therefore
+// one per distinct requested tier, so a total-line count would be measuring a
+// different guarantee and would move whenever an unrelated advisory is added.
 func TestResolveCoderModelPinMissingAdvisory(t *testing.T) {
+	const missingPin = "pinned/missing" // not in planTestCatalog
+
 	ops := &fakeOps{}
 	d := execTestDeps(ops, &fakeGit{}, &planLLM{})
 	o := newExecRun(d, nil, 5)
 	ctx := context.Background()
 
-	o.tc.ModelCoder = "pinned/missing" // not in planTestCatalog
+	o.tc.ModelCoder = missingPin
 
 	// Multiple calls across different subtasks.
-	_, _ = o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-1", Title: "First", Tier: "simple"}, "prompt1")
-	_, _ = o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-2", Title: "Second", Tier: "moderate"}, "prompt2")
+	first, err := o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-1", Title: "First", Tier: "simple"}, "prompt1")
+	require.NoError(t, err)
 
-	// Exactly one advisory log entry (once-per-run guard).
-	require.Len(t, ops.logs, 1, "exactly one advisory log for the missing pin")
-	assert.Contains(t, ops.logs[0], "pinned/missing")
+	second, err := o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-2", Title: "Second", Tier: "moderate"}, "prompt2")
+	require.NoError(t, err)
+
+	assert.NotEqual(t, missingPin, first, "an unresolvable pin never becomes the selected model")
+	assert.NotEqual(t, missingPin, second)
+
+	var pinAdvisories []string
+
+	for _, l := range ops.logs {
+		if strings.Contains(l, missingPin) {
+			pinAdvisories = append(pinAdvisories, l)
+		}
+	}
+
+	require.Len(t, pinAdvisories, 1, "exactly one advisory log for the missing pin")
 }
 
 // TestResolveCoderModelPinResolvableNoAdvisory proves that a resolvable coder
