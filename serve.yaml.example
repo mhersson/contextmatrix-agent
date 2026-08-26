@@ -189,9 +189,10 @@ selector_price_headroom: 1.5
 # naming one tier raises or lowers only that rung and the rest keep their
 # built-in value. The ladder must be non-decreasing (simple <= moderate <=
 # complex <= critical) - a lower rung above a higher one fails validation at
-# startup. Empty (the default) leaves the built-in bars unchanged.
+# startup. Empty (the default) leaves the built-in bars unchanged. YAML only -
+# a bare CMX_SELECTOR_TIER_BARS cannot express a map; override one rung at a
+# time with the nested form instead, e.g. CMX_SELECTOR_TIER_BARS__CRITICAL=0.95.
 # Default: {} (built-in bars)
-# CMX_SELECTOR_TIER_BARS
 # selector_tier_bars:
 #   critical: 0.95
 

@@ -1359,6 +1359,40 @@ func TestBuildLaunchSpec_ReviewAttemptsCapEnv(t *testing.T) {
 	})
 }
 
+func TestBuildLaunchSpec_SelectorTierBarsEnv(t *testing.T) {
+	// The configured ladder must reach the container as CMX_SELECTOR_TIER_BARS
+	// (JSON-encoded) - this forwarding hop is the only path from serve.yaml to
+	// the worker's registry build. An empty ladder means "use the built-in
+	// bars" and must be omitted rather than emitted as "{}".
+	newServer := func(bars map[string]float64) *Server {
+		return NewServer(Config{
+			APIKey:   "k",
+			Executor: &fakeExecutor{},
+			Tracker:  executor.NewTracker(1),
+			LaunchEnv: LaunchEnv{
+				BaseImage:        "img",
+				MCPURL:           "http://mcp",
+				SelectorTierBars: bars,
+			},
+		})
+	}
+
+	t.Run("configured ladder is forwarded", func(t *testing.T) {
+		spec := newServer(map[string]float64{"critical": 0.95}).
+			buildLaunchSpec(protocol.TriggerPayload{CardID: "C1", Project: "p"}, "corr", "")
+
+		assert.Contains(t, spec.Env, `CMX_SELECTOR_TIER_BARS={"critical":0.95}`)
+	})
+
+	t.Run("empty ladder is omitted", func(t *testing.T) {
+		spec := newServer(nil).buildLaunchSpec(protocol.TriggerPayload{CardID: "C1", Project: "p"}, "corr", "")
+
+		for _, e := range spec.Env {
+			assert.NotContains(t, e, "CMX_SELECTOR_TIER_BARS")
+		}
+	})
+}
+
 func TestBuildLaunchSpec_MaxCapabilityEnvEmitted(t *testing.T) {
 	// A TriggerPayload with MaxCapability=true must produce CM_MAX_CAPABILITY=true
 	// in the container env.
