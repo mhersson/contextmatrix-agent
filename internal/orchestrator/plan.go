@@ -1038,7 +1038,7 @@ func runPlan(ctx context.Context, o *run) error {
 
 		o.recordSection(ctx, "Plan", sectionFrom("Plan", formatPlannedPlan(p)))
 
-		outcome, fb, gerr := o.gate(ctx, gatePlanApproval, model, presentPlan(p))
+		outcome, fb, gerr := o.gate(ctx, gatePlanApproval, fixedGateModel(model), presentPlan(p))
 		if gerr != nil {
 			return gerr
 		}

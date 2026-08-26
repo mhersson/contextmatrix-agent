@@ -11,6 +11,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/mob"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-harness/events"
+	"github.com/mhersson/contextmatrix-harness/harness"
 	"github.com/mhersson/contextmatrix-harness/llm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -140,8 +141,19 @@ func TestCoderSelectionKeepsTheCardLogEntry(t *testing.T) {
 
 	require.NoError(t, runExecute(context.Background(), o))
 
-	assert.Contains(t, strings.Join(ops.logs, "\n"),
-		`coder model coder/strong selected for subtask "Only" (tier=simple)`)
+	// The line is operator prose that nothing parses, so this pins the two
+	// facts it must carry rather than its wording: rewording it is not a
+	// behaviour change, deleting it is.
+	var logged bool
+
+	for _, l := range ops.logs {
+		if strings.Contains(l, "coder/strong") && strings.Contains(l, "tier=simple") {
+			logged = true
+		}
+	}
+
+	assert.True(t, logged,
+		"one card-log entry still names the selected model and its tier; logs=%v", ops.logs)
 	assert.NotEmpty(t, modelSelections(t, &transcript), "and the transcript event is there too")
 }
 
@@ -295,6 +307,8 @@ func TestDecisionModelSelectionReachesTheTranscript(t *testing.T) {
 	require.Len(t, sels, 1)
 	assert.Equal(t, model, sels[0].Model, "the transcript names the model that actually ran")
 	assert.Equal(t, "complex", sels[0].TierRequested, "decision phases are floored to complex")
+	assert.Equal(t, "auto", sels[0].Source,
+		"a floor pick that cleared the bar came off the ladder, not from a pin or the default")
 }
 
 // TestDecisionModelBelowBarReportsTheFallback proves the event names the model
@@ -360,4 +374,136 @@ func TestJudgeSelectionReachesTheTranscript(t *testing.T) {
 	require.Len(t, sels, 1)
 	assert.Equal(t, o.judgeModel, sels[0].Model)
 	assert.Equal(t, "complex", sels[0].TierRequested)
+}
+
+// TestReviewGateSelectionIsRecordedWhenTheGateModelRuns pairs with the promoted
+// case below: a human turn reaches the classification model, so the phase
+// records the one selection that ran.
+func TestReviewGateSelectionIsRecordedWhenTheGateModelRuns(t *testing.T) {
+	var transcript bytes.Buffer
+
+	ops := &fakeOps{}
+	inbox := &fakeInbox{msgs: []harness.UserMessage{{Content: "approve"}}}
+	client := &planLLM{responses: []llm.Response{
+		stopResp("No concerns.", 0.001),
+		stopResp("No concerns.", 0.001),
+		stopResp("No concerns.", 0.001),
+		stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.001),
+		stopResp(`{"verdict":"approve","feedback":""}`, 0.001),
+	}}
+
+	d := hitlReviewDeps(ops, &fakeGit{}, inbox, client)
+	d.Emit = events.NewEmitter(nil, &transcript)
+	o := newRun(d, cmclient.TaskContext{Title: "T", Description: "b", State: "review"})
+	isolateVerify(o)
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	sels := selectionsForPhase(modelSelections(t, &transcript), "review gate")
+	require.Len(t, sels, 1, "the gate model ran, so its selection is on the transcript")
+	assert.NotEmpty(t, sels[0].Model)
+}
+
+// TestPromotedReviewGateRecordsNoSelection keeps the phase's event count
+// meaningful. A card promoted mid-run closes the inbox, so the gate returns
+// without ever classifying a reply and no model runs. An event here would
+// count a model into the review-gate distribution that never saw a prompt.
+func TestPromotedReviewGateRecordsNoSelection(t *testing.T) {
+	var transcript bytes.Buffer
+
+	ops := &fakeOps{}
+	// Empty, non-blocking inbox: the first gate Wait reports ErrInboxClosed,
+	// exactly what a promote frame produces.
+	inbox := &fakeInbox{}
+	client := &planLLM{responses: []llm.Response{
+		stopResp("Correctness: bug", 0.001), stopResp("Design: ok", 0.001), stopResp("Security: ok", 0.001),
+		stopResp(`{"approved":false,"summary":"fix it","fixes":[{"file":"a.go","issue":"bug","suggestion":"patch"}]}`, 0.001),
+		stopResp("Fixed.", 0.001),
+		stopResp("Correctness: ok now", 0.001), stopResp("Design: ok", 0.001), stopResp("Security: ok", 0.001),
+		stopResp(`{"approved":true,"summary":"clean now","fixes":[]}`, 0.001),
+	}}
+
+	d := hitlReviewDeps(ops, &fakeGit{committed: true, lastCommitTarget: "abc123"}, inbox, client)
+	d.Emit = events.NewEmitter(nil, &transcript)
+	o := newRun(d, cmclient.TaskContext{Title: "T", Description: "b", State: "review"})
+	isolateVerify(o)
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	assert.Empty(t, selectionsForPhase(modelSelections(t, &transcript), "review gate"),
+		"no gate classification ran, so no gate model was selected")
+}
+
+// TestVerifyProposeSelectionReachesTheTranscript covers one of the three
+// selecting sites the brief did not name.
+func TestVerifyProposeSelectionReachesTheTranscript(t *testing.T) {
+	var transcript bytes.Buffer
+
+	client := &planLLM{responses: []llm.Response{stopResp(`{"command":"cargo test"}`, 0.01)}}
+	o := newProposeRun(t, &fakeOps{}, client, t.TempDir())
+	o.d.Emit = events.NewEmitter(nil, &transcript)
+
+	_, err := o.proposeVerify(context.Background())
+	require.NoError(t, err)
+
+	sels := selectionsForPhase(modelSelections(t, &transcript), "verify propose")
+	require.Len(t, sels, 1)
+	assert.Equal(t, "simple", sels[0].TierRequested, "the proposal is a cheap read-only step")
+	assert.NotEmpty(t, sels[0].Model)
+	assert.Empty(t, sels[0].Subtask)
+}
+
+// TestFanoutCandidateSelectionsReachTheTranscript covers the Best-of-N seat
+// selection: one event per candidate, so the fan-out's model spread is
+// countable from the transcript.
+func TestFanoutCandidateSelectionsReachTheTranscript(t *testing.T) {
+	var transcript bytes.Buffer
+
+	d, _, _ := fanoutDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, 3)
+	d.Emit = events.NewEmitter(nil, &transcript)
+
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
+
+	require.NoError(t, o.runFanout(context.Background()))
+
+	sels := modelSelections(t, &transcript)
+	for i := 1; i <= 3; i++ {
+		seat := selectionsForPhase(sels, candidatePhase(i))
+		require.Len(t, seat, 1, "candidate %d records its seat selection", i)
+		assert.Equal(t, "moderate", seat[0].TierRequested, "the fan-out seats on the card tier")
+		assert.Empty(t, seat[0].Subtask, "the seat is chosen before any subtask runs")
+	}
+}
+
+// TestCandidateRepickRecordsTheSubtaskItRepickedFor covers the third unnamed
+// site. A candidate whose model proves harness-incapable re-picks mid-run, and
+// the replacement selection names the subtask it will run: without it the
+// transcript shows a second model for the candidate with no way to place it.
+func TestCandidateRepickRecordsTheSubtaskItRepickedFor(t *testing.T) {
+	var transcript bytes.Buffer
+
+	client := &modelAwareLLM{incapable: map[string]bool{"solo/coder": true}}
+	d, _, _ := fanoutDeps(t, &fakeOps{}, &fakeGit{}, client, 1)
+	d.Registry = registry.NewRegistryFromParts(
+		llm.Catalog{
+			{ID: "solo/coder", ContextLength: 200000, SupportedParameters: []string{"tools"}, PromptPricePerTok: 1e-6},
+			{ID: "capgood/default", ContextLength: 200000, SupportedParameters: []string{"tools"}},
+		},
+		registry.Priors{Models: map[string]registry.PriorEntry{"solo/coder": coderPrior(0.9)}},
+		nil, nil, "capgood/default",
+	)
+	d.Emit = events.NewEmitter(nil, &transcript)
+
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "moderate"}}, 0)
+
+	require.NoError(t, o.runFanout(context.Background()))
+
+	sels := selectionsForPhase(modelSelections(t, &transcript), candidatePhase(1))
+	require.Len(t, sels, 2, "the seat selection, then the re-pick after the incapable model")
+
+	assert.Equal(t, "solo/coder", sels[0].Model)
+	assert.Empty(t, sels[0].Subtask, "the seat is chosen before any subtask runs")
+
+	assert.Equal(t, "capgood/default", sels[1].Model, "the re-pick names the replacement")
+	assert.Equal(t, "SUB-1", sels[1].Subtask, "and the subtask that replacement runs")
 }

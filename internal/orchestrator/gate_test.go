@@ -41,7 +41,7 @@ func TestGateAutonomousPassesThrough(t *testing.T) {
 	// Human is nil and Interactive is false: gate must not touch the inbox.
 	o := gateRun(ops, nil, false, &planLLM{}, nil, 0, 0)
 
-	outcome, fb, err := o.gate(context.Background(), gatePlanApproval, "payload/model", "plan?")
+	outcome, fb, err := o.gate(context.Background(), gatePlanApproval, fixedGateModel("payload/model"), "plan?")
 	require.NoError(t, err)
 	assert.Equal(t, gateApprove, outcome)
 	assert.Empty(t, fb)
@@ -54,7 +54,7 @@ func TestGateHITLApprove(t *testing.T) {
 	client := &planLLM{responses: []llm.Response{stopResp(`{"verdict":"approve","feedback":""}`, 0.001)}}
 	o := gateRun(ops, inbox, true, client, nil, 0, 0)
 
-	outcome, fb, err := o.gate(context.Background(), gatePlanApproval, "payload/model", "plan?")
+	outcome, fb, err := o.gate(context.Background(), gatePlanApproval, fixedGateModel("payload/model"), "plan?")
 	require.NoError(t, err)
 	assert.Equal(t, gateApprove, outcome)
 	assert.Empty(t, fb)
@@ -66,7 +66,7 @@ func TestGateHITLAdjustCarriesFeedback(t *testing.T) {
 	client := &planLLM{responses: []llm.Response{stopResp(`{"verdict":"adjust","feedback":"split subtask 2 into two"}`, 0.001)}}
 	o := gateRun(ops, inbox, true, client, nil, 0, 0)
 
-	outcome, fb, err := o.gate(context.Background(), gatePlanApproval, "payload/model", "plan?")
+	outcome, fb, err := o.gate(context.Background(), gatePlanApproval, fixedGateModel("payload/model"), "plan?")
 	require.NoError(t, err)
 	assert.Equal(t, gateAdjust, outcome)
 	assert.Equal(t, "split subtask 2 into two", fb)
@@ -77,7 +77,7 @@ func TestGateHITLPromoteReturnsPromoted(t *testing.T) {
 	inbox := &fakeInbox{} // no messages, not blocking -> Wait returns ErrInboxClosed (promote)
 	o := gateRun(ops, inbox, true, &planLLM{}, nil, 0, 0)
 
-	outcome, _, err := o.gate(context.Background(), gatePlanApproval, "payload/model", "plan?")
+	outcome, _, err := o.gate(context.Background(), gatePlanApproval, fixedGateModel("payload/model"), "plan?")
 	require.NoError(t, err)
 	assert.Equal(t, gatePromoted, outcome, "promotion is passthrough, not approval")
 	assert.True(t, ops.loggedContains("promoted"), "promote logged; logs=%v", ops.logs)
@@ -91,7 +91,7 @@ func TestGateHITLEndSessionReturnsError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // end_session: the parked Wait returns ctx.Err immediately
 
-	_, _, err := o.gate(ctx, gatePlanApproval, "payload/model", "plan?")
+	_, _, err := o.gate(ctx, gatePlanApproval, fixedGateModel("payload/model"), "plan?")
 	require.Error(t, err, "end_session surfaces as an error the worker maps to a park")
 }
 
@@ -101,7 +101,7 @@ func TestGateClassificationParseFailureIsAdjust(t *testing.T) {
 	client := &planLLM{responses: []llm.Response{stopResp("not json", 0.001)}}
 	o := gateRun(ops, inbox, true, client, nil, 0, 0)
 
-	outcome, fb, err := o.gate(context.Background(), gatePlanApproval, "payload/model", "plan?")
+	outcome, fb, err := o.gate(context.Background(), gatePlanApproval, fixedGateModel("payload/model"), "plan?")
 	require.NoError(t, err)
 	assert.Equal(t, gateAdjust, outcome, "an unparseable verdict is never an approval")
 	assert.Equal(t, "hmm, not sure", fb, "feedback falls back to the raw reply")
@@ -116,7 +116,7 @@ func TestGateEmitsAwaitingHuman(t *testing.T) {
 
 	o := gateRun(ops, inbox, true, client, &transcript, 0, 0)
 
-	_, _, err := o.gate(context.Background(), gateReviewDecision, "payload/model", "findings?")
+	_, _, err := o.gate(context.Background(), gateReviewDecision, fixedGateModel("payload/model"), "findings?")
 	require.NoError(t, err)
 	assert.Contains(t, transcript.String(), `"state":"awaiting_human"`)
 }
@@ -127,7 +127,7 @@ func TestGateBudgetParkDuringClassification(t *testing.T) {
 	// Already over budget: the classification ledger.Check parks before the model call.
 	o := gateRun(ops, inbox, true, &planLLM{}, nil, 1.0, 2.0)
 
-	_, _, err := o.gate(context.Background(), gatePlanApproval, "payload/model", "plan?")
+	_, _, err := o.gate(context.Background(), gatePlanApproval, fixedGateModel("payload/model"), "plan?")
 
 	var be *BudgetExceededError
 	require.ErrorAs(t, err, &be, "a budget breach in classification parks the run")

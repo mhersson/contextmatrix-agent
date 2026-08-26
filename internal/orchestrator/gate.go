@@ -36,6 +36,19 @@ const (
 	gateReviewDecision gateKind = "review-decision"
 )
 
+// gateModel yields the model a gate classifies the human's reply on. It is a
+// function rather than a string because a gate can return without ever
+// classifying: an inbox closed by a mid-run promotion skips the model call
+// entirely, and a phase that resolved its model up front would record a
+// selection for a model that never runs.
+type gateModel func(ctx context.Context) string
+
+// fixedGateModel wraps a model the calling phase already resolved and ran
+// before it reached the gate, so its selection is on the record either way.
+func fixedGateModel(model string) gateModel {
+	return func(context.Context) string { return model }
+}
+
 // gate presents `presentation` to the human and blocks for their verdict.
 //
 // Autonomous (Cfg.Interactive == false) is pure pass-through: it returns
@@ -53,7 +66,7 @@ const (
 //
 // The returned outcome is meaningful only when err == nil; callers check err
 // first.
-func (o *run) gate(ctx context.Context, kind gateKind, model, presentation string) (gateOutcome, string, error) {
+func (o *run) gate(ctx context.Context, kind gateKind, model gateModel, presentation string) (gateOutcome, string, error) {
 	if !o.d.Cfg.Interactive {
 		return gateApprove, "", nil
 	}
@@ -82,16 +95,20 @@ func (o *run) gate(ctx context.Context, kind gateKind, model, presentation strin
 // parse failure or any non-"approve" verdict is treated as adjust with the raw
 // reply as feedback - adjust is the fail-safe default, never an accidental
 // approval. A budget breach returns the *BudgetExceededError so execute() parks.
-func (o *run) classifyVerdict(ctx context.Context, kind gateKind, model, reply string) (gateOutcome, string, error) {
+func (o *run) classifyVerdict(ctx context.Context, kind gateKind, model gateModel, reply string) (gateOutcome, string, error) {
 	if err := o.ledger.Check(); err != nil {
 		return gateApprove, "", err
 	}
 
+	// Resolved here, past the budget check, because this is the first point at
+	// which the model is certain to run.
+	m := model(ctx)
+
 	task := fmt.Sprintf(gateClassifyPrompt, kind, reply)
 
-	res, dur, err := o.runModel(ctx, o.d.ReadTools, task, model)
+	res, dur, err := o.runModel(ctx, o.d.ReadTools, task, m)
 
-	o.spendAndReport(ctx, o.ledger, o.d.Cfg.CardID, "gate: report classification usage failed", res, model, "gate", dur)
+	o.spendAndReport(ctx, o.ledger, o.d.Cfg.CardID, "gate: report classification usage failed", res, m, "gate", dur)
 
 	if err != nil {
 		// A classification model error must not silently approve.

@@ -324,8 +324,20 @@ func (o *run) runReviewHITL(ctx context.Context, plan verifyPlan) error {
 	d := o.d
 	cfg := d.Cfg
 
-	model := resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
-		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels(), "review gate")
+	// The gate model resolves on the first classification, not up front: a card
+	// promoted mid-run closes the inbox, so every gate returns without a model
+	// call, and the phase would otherwise record a selection for a model that
+	// never runs. Resolved once and reused across rounds; the gates run
+	// sequentially from this loop, so the captured slug needs no lock.
+	resolved := ""
+	resolveGateModel := func(ctx context.Context) string {
+		if resolved == "" {
+			resolved = resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
+				o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels(), "review gate")
+		}
+
+		return resolved
+	}
 
 	for iter := range hardReviewIterationCap {
 		round := o.tc.ReviewAttempts + iter + 1
@@ -337,7 +349,7 @@ func (o *run) runReviewHITL(ctx context.Context, plan verifyPlan) error {
 
 		o.recordReview(ctx, round, findings, autoApproved, vres)
 
-		outcome, fb, gerr := o.gate(ctx, gateReviewDecision, model, presentFindings(findings, autoApproved))
+		outcome, fb, gerr := o.gate(ctx, gateReviewDecision, resolveGateModel, presentFindings(findings, autoApproved))
 		if gerr != nil {
 			return gerr
 		}
