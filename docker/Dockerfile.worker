@@ -135,16 +135,27 @@ ARG RUSTUP_VERSION
 ARG RUSTUP_SHA256_AMD64
 ARG RUSTUP_SHA256_ARM64
 
-ENV RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo
-ENV PATH="/usr/local/cargo/bin:${PATH}"
+ENV RUSTUP_HOME=/home/user/.rustup \
+    CARGO_HOME=/home/user/.cargo
+ENV PATH="/home/user/.cargo/bin:${PATH}"
 
 # Install Rust. rustup-init is SHA256-verified before execution, mirroring the
 # Go tarball check above. --profile minimal keeps the footprint down; clippy and
-# rustfmt are added explicitly. RUSTUP_HOME/CARGO_HOME are made world-writable so
-# the unprivileged runtime user (UID 1000) can populate the cargo registry cache
-# - the official rust image uses the same pattern.
+# rustfmt are added explicitly.
+#
+# The toolchain lives in the runtime user's home because that is the only place
+# the rustup proxies look. Subprocesses the model runs get an environment
+# scrubbed down to a small allowlist (PATH, HOME, USER, LANG, LC_ALL, TMPDIR,
+# TERM), so RUSTUP_HOME/CARGO_HOME set here never reach the model's shell and
+# the proxies resolve the toolchain from their own defaults, $HOME/.rustup and
+# $HOME/.cargo. /home/user is created and handed to UID 1000 up front: the
+# useradd -m in the rust variant below finds the directory already present and
+# leaves its ownership alone. RUSTUP_HOME/CARGO_HOME are then made
+# world-writable so UID 1000 can populate the cargo registry cache - the
+# official rust image uses the same pattern.
 RUN set -eux; \
+    mkdir -p /home/user; \
+    chown 1000:1000 /home/user; \
     ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/'); \
     case "$ARCH" in \
       amd64) RUSTUP_SHA256="${RUSTUP_SHA256_AMD64}"; RUST_ARCH="x86_64-unknown-linux-gnu" ;; \
@@ -258,10 +269,14 @@ ENTRYPOINT ["contextmatrix-agent", "work"]
 #
 # Built FROM python-toolchain so the managed CPython, its /usr/local/bin symlinks
 # and the uv tool shims stay intact (an explicit-source COPY would dereference
-# them). Go and Rust are self-contained prefixes and copy in cleanly. --chmod on
-# the Rust copy re-applies the world-writable bits (COPY --from drops them) in the
-# same layer, so UID 1000 can populate the cargo registry cache without a second
-# ~1 GB chmod layer.
+# them). Go is a self-contained prefix and copies in cleanly. Rust lands in the
+# runtime user's home, where the rustup proxies resolve it by default: the
+# environment of the subprocesses the model runs is scrubbed down to a small
+# allowlist that carries no RUSTUP_HOME/CARGO_HOME, so a build-time prefix
+# variable would never reach the model's shell. --chmod on the Rust copy
+# re-applies the world-writable bits (COPY --from drops them) in the same layer,
+# so UID 1000 can populate the cargo registry cache without a second ~1 GB chmod
+# layer.
 # ---------------------------------------------------------------------------
 FROM python-toolchain AS full
 
@@ -270,11 +285,11 @@ COPY --from=go-node-toolchain /usr/local/go /usr/local/go
 COPY --from=go-node-toolchain /usr/local/bin/golangci-lint /usr/local/bin/gofumpt /usr/local/bin/
 
 # Rust toolchain.
-ENV RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo
-ENV PATH="/usr/local/cargo/bin:${PATH}"
-COPY --chmod=0777 --from=rust-toolchain /usr/local/rustup /usr/local/rustup
-COPY --chmod=0777 --from=rust-toolchain /usr/local/cargo /usr/local/cargo
+ENV RUSTUP_HOME=/home/user/.rustup \
+    CARGO_HOME=/home/user/.cargo
+ENV PATH="/home/user/.cargo/bin:${PATH}"
+COPY --chmod=0777 --from=rust-toolchain /home/user/.rustup /home/user/.rustup
+COPY --chmod=0777 --from=rust-toolchain /home/user/.cargo /home/user/.cargo
 
 COPY --from=build /out/contextmatrix-agent /usr/local/bin/contextmatrix-agent
 RUN useradd -m -u 1000 -s /bin/bash user
