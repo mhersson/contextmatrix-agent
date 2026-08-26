@@ -47,16 +47,20 @@ func runExecute(ctx context.Context, o *run) error {
 	// Resolve the verify plan once at execute entry (the first phase to reach the
 	// gate on a fresh run), so the resolution log fires early and the coder prompt
 	// can name the command. A budget park during the proposal tier propagates.
-	if _, err := o.ensureVerify(ctx); err != nil {
+	plan, err := o.ensureVerify(ctx)
+	if err != nil {
 		return err
 	}
 
 	// Best-of-N replaces the single-solver execute with a candidate fan-out: N
 	// implementations of the shared plan race in isolated worktrees, off the board
-	// and never pushing, and a later phase judges them.
+	// and never pushing, and a later phase judges them. Each candidate binds its
+	// own verify tool, rooted at its own worktree.
 	if o.d.Cfg.BestOfN >= 2 {
 		return o.runFanout(ctx)
 	}
+
+	o.bindVerifyTool(o.solver, plan)
 
 	ordered, err := topoOrder(o.subtasks)
 	if err != nil {
@@ -70,6 +74,30 @@ func runExecute(ctx context.Context, o *run) error {
 	}
 
 	return nil
+}
+
+// bindVerifyTool rebuilds the solver's registry with the run's verify tool, so
+// the coder calls the resolved command instead of guessing shell commands for
+// it. It binds here rather than in newRun because the plan resolves at this
+// point, not at construction. A run with no resolvable command leaves the
+// registry exactly as it was.
+//
+// Ordering, since this mutates solver state mid-run: it runs after the plan has
+// resolved and before the first coder harness starts, on the goroutine that
+// drives the phase. Nothing reads sc.tools in between. A Best-of-N fan-out
+// cannot observe it at all - that branch returns above, o.solver is untouched by
+// the fan-out, and each candidate binds its own tool inside runCandidate.
+func (o *run) bindVerifyTool(sc *solverCtx, plan verifyPlan) {
+	if o.d.WriteToolsForDir == nil {
+		return
+	}
+
+	vt := o.verifyToolFor(sc.git, sc.workspace, plan)
+	if vt == nil {
+		return
+	}
+
+	sc.tools = o.d.WriteToolsForDir(sc.workspace, vt)
 }
 
 // executeSubtaskWith runs one subtask end to end through the given solver:
@@ -139,6 +167,96 @@ func (o *run) executeSubtaskWith(ctx context.Context, sc *solverCtx, sub subtask
 // subtaskHeartbeatInterval matches the worker's parent-card cadence (5m against
 // CM's default 30m heartbeat_timeout). A var so tests can shrink it.
 var subtaskHeartbeatInterval = 5 * time.Minute
+
+// preCommitVerify runs the run's resolved verify command against the coder's
+// uncommitted work and gates the commit on the result. Returning nil means the
+// commit may proceed: the command passed, no command resolved (the skip tier),
+// or the run was inconclusive - a timeout or a missing tool, which is not
+// evidence of a defect, so the commit proceeds unverified exactly as it did
+// before this gate existed. That mirrors the review round's own handling of a
+// skip. A genuine failure gets ONE fix pass through the review phase's fix path
+// and one re-run; still red, and the error parks the subtask with the work
+// uncommitted, so the coder's work is never committed while the gate is red.
+// One pass, never a loop - the review phase's fix loop is the multi-round
+// mechanism.
+//
+// That error is deliberately a plain one, not a park sentinel: the worker's
+// park switch pushes WIP only on its sentinel arms, and a WIP push here would
+// commit and push the very tree this gate just refused. The absent push is the
+// point, not an omission.
+//
+// The plan comes from ensureVerify and the execution from runVerifyPlan, the
+// same two calls the review-round gate makes, so the two cannot drift into
+// different commands, timeouts or environments. Nothing here knows what a check
+// command looks like; the resolved plan is the only source. Whether that command
+// measures the working tree rather than a cache is a property of what the
+// project declares, not something this gate can or should patch.
+//
+// Solo solvers only. A Best-of-N candidate is gated by the judge phase's
+// authoritative verify over every candidate worktree, and candidates race in
+// parallel over one shared run: resolving per candidate would race the run's
+// cached plan, and a per-candidate fix pass would charge the run ledger during
+// the fan-out, which the candidate sub-ledgers exist to keep separate.
+func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef) error {
+	if !sc.boardOps {
+		return nil
+	}
+
+	plan, err := o.ensureVerify(ctx)
+	if err != nil {
+		return err
+	}
+
+	if len(plan.Argv) == 0 {
+		return nil
+	}
+
+	vres, rerr := o.runVerifyPlan(ctx, sc.workspace, plan)
+	if rerr != nil {
+		return rerr
+	}
+
+	o.logVerifyGate(ctx, vres, subtaskGateContext(sub.ID))
+
+	if vres.Status != verifyFailed {
+		return nil
+	}
+
+	// Budget gate before the fix run: the subprocess above costs no tokens, the
+	// model call does, so a park happens before the spend rather than after.
+	if err := o.ledger.Check(); err != nil {
+		return err
+	}
+
+	o.d.logCard(ctx, "subtask %s: verify failed before the commit - running one fix pass", sub.ID)
+
+	// The subtask's own tier sizes the fix, the way it sized the coder that wrote
+	// the work; an unset tier falls back to the card tier inside the fix path.
+	prompt := fmt.Sprintf(verifyFixPrompt, o.skillEngage(), o.grounding, sc.workspace,
+		fixVerifyLine(plan), o.tc.Title, verifyFailedFindings(plan, vres.Output))
+
+	// Round 0: this is not a review round and has no round number.
+	if _, ferr := o.runFixModel(ctx, prompt, 0, sub.Tier, false); ferr != nil {
+		return ferr
+	}
+
+	vres, rerr = o.runVerifyPlan(ctx, sc.workspace, plan)
+	if rerr != nil {
+		return rerr
+	}
+
+	o.logVerifyGate(ctx, vres, subtaskGateContext(sub.ID))
+
+	if vres.Status == verifyFailed {
+		return fmt.Errorf("subtask %s: `%s` still fails after one fix pass", sub.ID, plan.Display)
+	}
+
+	return nil
+}
+
+func subtaskGateContext(subID string) string {
+	return fmt.Sprintf("subtask %s, before commit", subID)
+}
 
 // executeClaimedWith is the owned span of a subtask: coder run, commit, push,
 // complete. When sc.boardOps a heartbeat goroutine covers the whole span - CM's
@@ -210,6 +328,10 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 		commitMsg = sanitizeTitle(sub.Title)
 	}
 
+	if verr := o.preCommitVerify(ctx, sc, sub); verr != nil {
+		return verr
+	}
+
 	committed, err := sc.git.CommitWithMessage(ctx, commitMsg)
 	if err != nil {
 		return fmt.Errorf("commit subtask %s: %w", sub.ID, err)
@@ -237,9 +359,12 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 		// Report the win BEFORE CompleteTask (claim-gating rationale on
 		// reportSoloOutcome - a report after complete_task releases the claim
 		// would silently vanish). VerifyPass false means unknown here, not
-		// failure: no authoritative verify runs on a finish-terminated
-		// completion. The model finished, committed, and pushed, so the win is
-		// real regardless of what the board bookkeeping below does with it.
+		// failure: reaching this line means the pre-commit gate did not fail,
+		// but it may equally have found no command or been inconclusive, and
+		// preCommitVerify does not carry out which - so the report stays
+		// conservative rather than claiming a pass it cannot see. The model
+		// finished, committed, and pushed, so the win is real regardless of
+		// what the board bookkeeping below does with it.
 		o.reportSoloOutcome(ctx, sub.ID, model, "win", false, sc.ledger.Spent()-spendBefore)
 
 		if err := d.Ops.CompleteTask(ctx, sub.ID, commitSubject(commitMsg, sub.Title)); err != nil {
@@ -396,17 +521,29 @@ func (o *run) pushBranch(ctx context.Context) error {
 
 // resolveCoderModel picks the coder model for a subtask: the card's coder pin
 // when it is catalog-resolvable, else the best-value complexity selection for
-// the subtask's tier and a real window estimate of the coder prompt. A
-// selection that could not be served at the subtask's tier is reported; a
-// *NoModelError is returned when even the operator's capable default is barred
-// this run, which parks the card - there is no work to do without a coder.
-func (o *run) resolveCoderModel(ctx context.Context, sub subtaskRef, prompt string) (string, error) {
+// the subtask's tier and a real window estimate of the coder prompt. Either way
+// the outcome is reported, which is what puts the pick on the run transcript. A
+// selection that could not be served at the subtask's tier is also advised on;
+// a *NoModelError is returned when even the operator's capable default is
+// barred this run, which parks the card - there is no work to do without a
+// coder.
+//
+// It returns the whole Pick, like its fix-round sibling resolveFixModel: the
+// provenance is what separates a laddered selection from a pin or the
+// off-ladder default, and the slug alone cannot carry that.
+func (o *run) resolveCoderModel(ctx context.Context, sub subtaskRef, prompt string) (registry.Pick, error) {
+	tier := tierOf(sub)
+
 	if resolvePin(o.d.Registry, o.tc.ModelCoder) {
 		// A pinned model is returned even if it is in o.excluded: we never override
 		// an explicit operator pin with an auto-selected substitute. A pinned model
 		// that is harness-incapable therefore keeps being re-selected, exhausts the
 		// re-selection cap, and parks - the blacklist still records it.
-		return o.tc.ModelCoder, nil
+		p := offLadderPick(o.d.Registry, o.tc.ModelCoder, registry.RoleCoder, tier, registry.SourcePinned)
+
+		o.noteShortfall(ctx, "coder", sub.ID, p)
+
+		return p, nil
 	}
 
 	if o.tc.ModelCoder != "" {
@@ -415,19 +552,29 @@ func (o *run) resolveCoderModel(ctx context.Context, sub subtaskRef, prompt stri
 
 	in := registry.SelectInput{
 		Role:      registry.RoleCoder,
-		Tier:      tierOf(sub),
+		Tier:      tier,
 		EstTokens: estimateTokens(prompt),
 		Exclude:   o.excluded,
 	}
 
 	p := o.d.Registry.SelectByComplexity(in)
 	if !p.OK {
-		return "", o.noModelError(in, p)
+		return registry.Pick{}, o.noModelError(in, p)
 	}
 
-	o.noteShortfall(ctx, "coder", p)
+	o.noteShortfall(ctx, "coder", sub.ID, p)
 
-	return p.Model, nil
+	return p, nil
+}
+
+// solverCoderModel adapts resolveCoderModel to the solver seam, which needs
+// only the slug. The pick's provenance is reported inside the resolver, the
+// same way the Best-of-N candidate resolver reports its own, so nothing
+// downstream has to carry it.
+func (o *run) solverCoderModel(ctx context.Context, sub subtaskRef, prompt string) (string, error) {
+	p, err := o.resolveCoderModel(ctx, sub, prompt)
+
+	return p.Model, err
 }
 
 // subtaskBody returns the description text for a subtask: the planner's

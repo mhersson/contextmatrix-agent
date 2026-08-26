@@ -178,7 +178,7 @@ func (o *run) runFanout(ctx context.Context) (retErr error) {
 			ledger: NewLedger(cfg.MaxCardCost, 0),
 		}
 
-		o.noteShortfall(ctx, candidatePhase(idx), specs[i])
+		o.noteShortfall(ctx, candidatePhase(idx), "", specs[i])
 
 		o.d.logCard(ctx, "best-of-n: candidate %d/%d starting (model %s)", idx, nEff, o.candidates[i].model)
 	}
@@ -352,10 +352,14 @@ func allSubtasksDone(subs []subtaskRef) bool {
 // each subtask body before it runs. It records the executed subtasks on the
 // candidate and returns the first subtask error, which drops the candidate.
 func (o *run) runCandidate(ctx context.Context, c *candidate, ordered []subtaskRef, nEff int) error {
+	// One verify tool per candidate, rooted at that candidate's own worktree and
+	// git handle. Candidates write concurrently, so a shared instance would let
+	// one candidate's write invalidate another's cache - or report a pass one
+	// candidate earned as if it were another's.
 	sc := &solverCtx{
 		git:        c.git,
 		ledger:     c.ledger,
-		tools:      o.d.WriteToolsForDir(c.dir),
+		tools:      o.d.WriteToolsForDir(c.dir, o.verifyToolFor(c.git, c.dir, o.resolvedVerifyPlan())),
 		workspace:  c.dir,
 		coderModel: o.candidateCoderModel(c),
 		boardOps:   false,
@@ -410,9 +414,11 @@ func lastSubtaskID(subs []subtaskRef) string {
 // The advisory for a re-pick that fell short of the card tier is raised AFTER
 // the selection lock is released, which is why the locked work lives in
 // pickCandidateModel: noteShortfall takes its own mutex, and an advisory
-// reaching for selMu from inside the lock would deadlock the fan-out.
+// reaching for selMu from inside the lock would deadlock the fan-out. It names
+// the subtask the re-pick happened for, which is the first subtask the fresh
+// model runs.
 func (o *run) candidateCoderModel(c *candidate) func(context.Context, subtaskRef, string) (string, error) {
-	return func(ctx context.Context, _ subtaskRef, prompt string) (string, error) {
+	return func(ctx context.Context, sub subtaskRef, prompt string) (string, error) {
 		model, fresh, ok := o.pickCandidateModel(c, prompt)
 		if !ok {
 			return "", errCandidatePoolExhausted
@@ -423,7 +429,7 @@ func (o *run) candidateCoderModel(c *candidate) func(context.Context, subtaskRef
 		// is built, before any fan-out goroutine starts, so naming the seat
 		// needs no lock.
 		if fresh.OK {
-			o.noteShortfall(ctx, candidatePhase(c.idx), fresh)
+			o.noteShortfall(ctx, candidatePhase(c.idx), sub.ID, fresh)
 		}
 
 		return model, nil

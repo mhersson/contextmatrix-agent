@@ -431,6 +431,11 @@ func resolveOrchestratorModel(
 	return fallback
 }
 
+// decisionTier is the fixed bar every orchestrator decision phase selects on.
+// Decision quality does not scale with task complexity, so even a trivial card
+// gets a calibrated judge.
+const decisionTier = registry.TierComplex
+
 // resolveDecisionModel resolves the model an orchestrator DECISION phase runs on
 // (plan decomposition, review synthesis). These phases are reasoning- and
 // calibration-sensitive - a weak model emits malformed plans and mis-calibrated
@@ -453,17 +458,26 @@ func resolveDecisionModel(
 	ops Ops,
 	cardID, pinned, payload, fallback string,
 	exclude map[string]bool,
+	phase string,
 ) string {
 	base := resolveOrchestratorModel(ctx, reg, emit, ops, cardID, pinned, payload, fallback)
 
+	// Without a registry there is no ladder and no tier, so there is no
+	// selection to record.
+	if reg == nil {
+		return base
+	}
+
 	// A resolvable operator pin is authoritative - never floor over it.
-	if resolvePin(reg, pinned) || reg == nil {
+	if resolvePin(reg, pinned) {
+		emitModelSelection(emit, phase, "", offLadderPick(reg, base, registry.RoleReviewer, decisionTier, registry.SourcePinned))
+
 		return base
 	}
 
 	p := reg.SelectByComplexity(registry.SelectInput{
 		Role:    registry.RoleReviewer,
-		Tier:    registry.TierComplex,
+		Tier:    decisionTier,
 		Exclude: exclude,
 	})
 
@@ -472,9 +486,16 @@ func resolveDecisionModel(
 	// meet the bar it was asked for would replace a stronger base with a weaker
 	// catalogued model: a floor that can land below the thing it is flooring is
 	// not a floor.
+	//
+	// The transcript names base, not p: p was proposed and discarded, and an
+	// event naming a model that never ran is worse than none.
 	if !p.AtBar() {
+		emitModelSelection(emit, phase, "", offLadderPick(reg, base, registry.RoleReviewer, decisionTier, registry.SourceDefault))
+
 		return base
 	}
+
+	emitModelSelection(emit, phase, "", p)
 
 	return p.Model
 }
@@ -517,9 +538,10 @@ func (o *run) runDiagnose(ctx context.Context, model string) (string, error) {
 		return "", err
 	}
 
-	task := fmt.Sprintf(diagnosePrompt, o.grounding, cfg.Workspace, o.tc.Title, o.taskDescription)
+	task := fmt.Sprintf(diagnosePrompt, o.grounding, cfg.Workspace, readRootsBlock(d.ReadRoots),
+		o.tc.Title, o.taskDescription)
 
-	res, dur, err := o.runModelImages(ctx, d.ReadTools, task, model, o.taskImages)
+	res, dur, err := o.runModelDiagnose(ctx, d.ReadTools, task, model, o.taskImages)
 
 	o.spendAndReport(ctx, o.ledger, cfg.CardID, "plan: report diagnose usage failed", res, model, "main", dur)
 
@@ -577,8 +599,8 @@ func (o *run) draftPlan(ctx context.Context, model, diagnosis, design, feedback 
 			repair = repairBlock(lastErr.Error())
 		}
 
-		task := fmt.Sprintf(planPrompt, o.grounding, snapshot, cfg.Workspace, o.tc.Title, o.plannerDescription(),
-			diagBlock, dsnBlock, resume, fbBlock, repair)
+		task := fmt.Sprintf(planPrompt, o.grounding, snapshot, cfg.Workspace, readRootsBlock(o.d.ReadRoots),
+			o.tc.Title, o.plannerDescription(), diagBlock, dsnBlock, resume, fbBlock, repair)
 
 		res, dur, err := o.runModelPlan(ctx, reg, task, model, o.taskImages, attempt > 0)
 
@@ -641,8 +663,9 @@ func (o *run) reviseTestSplit(
 		prev = []byte("(previous plan unavailable)")
 	}
 
-	task := fmt.Sprintf(planPrompt, o.grounding, snapshot, cfg.Workspace, o.tc.Title, o.plannerDescription(),
-		diagBlock, dsnBlock, resume, fbBlock, testSplitRevisionBlock(title, prev))
+	task := fmt.Sprintf(planPrompt, o.grounding, snapshot, cfg.Workspace, readRootsBlock(o.d.ReadRoots),
+		o.tc.Title, o.plannerDescription(), diagBlock, dsnBlock, resume, fbBlock,
+		testSplitRevisionBlock(title, prev))
 
 	res, dur, err := o.runModelPlan(ctx, reg, task, model, o.taskImages, true)
 
@@ -768,10 +791,12 @@ func (o *run) mobDraftPlan(ctx context.Context, diagnosis, design, feedback stri
 	return p, &out, true
 }
 
-// mobPlanBriefing assembles the plan-discussion briefing from the SAME
-// content blocks draftPlan feeds the solo planner: grounding, workspace,
-// title, description, diagnosis (bug-like cards), design (creative HITL
-// cards), and the resume-subtasks block.
+// mobPlanBriefing assembles the plan-discussion briefing: grounding, the repo
+// snapshot, workspace, the read-only roots, title, description, diagnosis
+// (bug-like cards), design (creative HITL cards), and the resume-subtasks
+// block. The seats discuss rather than emit, so the briefing carries none of
+// the solo planner's decomposition rules or JSON contract - the moderator's
+// synthesis prompt owns those.
 func (o *run) mobPlanBriefing(diagnosis, design string) string {
 	var existingTitles []string
 
@@ -785,7 +810,8 @@ func (o *run) mobPlanBriefing(diagnosis, design string) string {
 	diagBlock := diagnosisBlock(diagnosis)
 	dsnBlock := designBlock(design)
 
-	return fmt.Sprintf(planBriefing, o.grounding, o.repoSnapshotBlock(), o.d.Cfg.Workspace, o.tc.Title, o.plannerDescription(),
+	return fmt.Sprintf(planBriefing, o.grounding, o.repoSnapshotBlock(), o.d.Cfg.Workspace,
+		readRootsBlock(o.d.ReadRoots), o.tc.Title, o.plannerDescription(),
 		diagBlock, dsnBlock, resume)
 }
 
@@ -872,7 +898,7 @@ func runPlan(ctx context.Context, o *run) error {
 	cfg := d.Cfg
 
 	model := resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
-		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels())
+		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels(), "plan decision")
 
 	d.logCard(ctx, "orchestrator model: %s", model)
 
@@ -927,7 +953,7 @@ func runPlan(ctx context.Context, o *run) error {
 
 				prev := model
 				model = resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
-					o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels())
+					o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels(), "plan decision")
 
 				if model != prev {
 					d.logCard(ctx, "orchestrator model: %s (re-selected after diagnose)", model)
@@ -1015,7 +1041,7 @@ func runPlan(ctx context.Context, o *run) error {
 
 		o.recordSection(ctx, "Plan", sectionFrom("Plan", formatPlannedPlan(p)))
 
-		outcome, fb, gerr := o.gate(ctx, gatePlanApproval, model, presentPlan(p))
+		outcome, fb, gerr := o.gate(ctx, gatePlanApproval, fixedGateModel(model), presentPlan(p))
 		if gerr != nil {
 			return gerr
 		}

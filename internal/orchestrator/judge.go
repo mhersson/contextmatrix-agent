@@ -193,7 +193,7 @@ func runJudge(ctx context.Context, o *run) error {
 
 	// The judge picks the branch that ships, so its shortfall is the one that
 	// matters most.
-	o.noteShortfall(ctx, "best-of-n judge", p)
+	o.noteShortfall(ctx, "best-of-n judge", "", p)
 
 	model := p.Model
 

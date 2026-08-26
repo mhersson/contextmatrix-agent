@@ -38,6 +38,16 @@ const verifyOutputTail = 4000
 // than the specialist panel, so runFix can route them to verifyFixPrompt.
 const verifyFailedPrefix = "verify command failed: "
 
+// verifyFailedFindings is the finding text a failed verify gate hands its fix
+// run: the command that failed, then the redacted excerpt of what it printed.
+// The "(tail)" label matches judge.go's identical evidence, so the coder knows
+// the block starts mid-output rather than at the command's start. Shared by
+// both gates that can fail - the review round and the pre-commit gate - so the
+// coder sees one framing whichever one caught the failure.
+func verifyFailedFindings(plan verifyPlan, output string) string {
+	return verifyFailedPrefix + plan.Display + "\n\nVerify output (tail):\n\n" + verifyFailureExcerpt(output)
+}
+
 // reviewRoundReserve is the least container time a verify run, a specialist
 // panel, and a fix round need to complete without being killed mid-work. A var
 // so tests can shrink it.
@@ -314,8 +324,20 @@ func (o *run) runReviewHITL(ctx context.Context, plan verifyPlan) error {
 	d := o.d
 	cfg := d.Cfg
 
-	model := resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
-		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels())
+	// The gate model resolves on the first classification, not up front: a card
+	// promoted mid-run closes the inbox, so every gate returns without a model
+	// call, and the phase would otherwise record a selection for a model that
+	// never runs. Resolved once and reused across rounds; the gates run
+	// sequentially from this loop, so the captured slug needs no lock.
+	resolved := ""
+	resolveGateModel := func(ctx context.Context) string {
+		if resolved == "" {
+			resolved = resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
+				o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels(), "review gate")
+		}
+
+		return resolved
+	}
 
 	for iter := range hardReviewIterationCap {
 		round := o.tc.ReviewAttempts + iter + 1
@@ -327,7 +349,7 @@ func (o *run) runReviewHITL(ctx context.Context, plan verifyPlan) error {
 
 		o.recordReview(ctx, round, findings, autoApproved, vres)
 
-		outcome, fb, gerr := o.gate(ctx, gateReviewDecision, model, presentFindings(findings, autoApproved))
+		outcome, fb, gerr := o.gate(ctx, gateReviewDecision, resolveGateModel, presentFindings(findings, autoApproved))
 		if gerr != nil {
 			return gerr
 		}
@@ -571,12 +593,9 @@ func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, autho
 		switch res.Status {
 		case verifyFailed:
 			// Gate failure goes STRAIGHT to the fix loop without burning reviewer
-			// tokens. The redacted output tail is the finding the coder fixes - the
-			// "(tail)" label matches judge.go's identical evidence, so the coder
-			// knows the block starts mid-output rather than at the command's start.
+			// tokens. The redacted output tail is the finding the coder fixes.
 			// No verdict ran, so the fix run falls back to the card tier (empty fixTier).
-			return verifyFailedPrefix + plan.Display + "\n\nVerify output (tail):\n\n" +
-				verifyFailureExcerpt(res.Output), "", false, vres, nil, nil
+			return verifyFailedFindings(plan, res.Output), "", false, vres, nil, nil
 		case verifySkipped:
 			// A missing or timed-out gate is inconclusive, not a defect: proceed to
 			// the specialists without a fix loop. logVerifyRound already said so.
@@ -683,8 +702,9 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 	specs := make([]harness.SubagentSpec, len(lenses))
 	for i, l := range lenses {
 		specs[i] = harness.SubagentSpec{
-			Role:          l.role,
-			Prompt:        fmt.Sprintf(specialistPrompt, o.skillEngage(), o.grounding, l.prompt, o.tc.Title, o.taskDescription, diff, prior),
+			Role: l.role,
+			Prompt: fmt.Sprintf(specialistPrompt, o.skillEngage(), o.grounding, readRootsBlock(d.ReadRoots),
+				l.prompt, o.tc.Title, o.taskDescription, diff, prior),
 			Model:         panel[i].Model,
 			MaxTurns:      cfg.MaxTurns,
 			ContextWindow: panel[i].ContextWindow,
@@ -702,7 +722,7 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 			DefaultModel:       cfg.DefaultModel,
 			ToolOutputMaxBytes: cfg.ToolOutputMax,
 			RedactToolOutput:   d.Redact,
-			ExtraReadOnlyTools: skillToolSlice(d.SkillTool),
+			ExtraReadOnlyTools: reviewSubagentTools(cfg.Workspace, d.ReadRoots, d.SkillTool),
 			Provider:           parentCfg.Provider,
 			Reasoning:          parentCfg.Reasoning,
 		})
@@ -761,16 +781,7 @@ func (o *run) reviewPanel(ctx context.Context, estTokens int, authoritative bool
 	}
 
 	if resolvePin(o.d.Registry, o.tc.ModelReviewer) {
-		seat := registry.Pick{
-			ModelSpec: registry.ModelSpec{
-				Model:         o.tc.ModelReviewer,
-				ContextWindow: o.d.Registry.ContextWindow(o.tc.ModelReviewer),
-			},
-			Role:          registry.RoleReviewer,
-			RequestedTier: tier,
-			Source:        registry.SourcePinned,
-			OK:            true,
-		}
+		seat := offLadderPick(o.d.Registry, o.tc.ModelReviewer, registry.RoleReviewer, tier, registry.SourcePinned)
 
 		panel := make([]registry.Pick, reviewPanelSize)
 		for i := range panel {
@@ -778,6 +789,10 @@ func (o *run) reviewPanel(ctx context.Context, estTokens int, authoritative bool
 			// Every seat after the first repeats seat 1. Flagged, so the card
 			// log cannot read one model's opinion as three agreeing ones.
 			panel[i].Duplicate = i > 0
+
+			// A pinned panel is still a per-seat selection, so the transcript
+			// carries a line per seat exactly as the selected panel does.
+			o.noteShortfall(ctx, "review panel", "", panel[i])
 		}
 
 		return panel
@@ -800,7 +815,7 @@ func (o *run) reviewPanel(ctx context.Context, estTokens int, authoritative bool
 	// One label for the whole panel: seats that fell the same distance are one
 	// fact, and the panel summary below carries the per-seat detail.
 	for _, p := range panel {
-		o.noteShortfall(ctx, "review panel", p)
+		o.noteShortfall(ctx, "review panel", "", p)
 	}
 
 	return panel
@@ -906,7 +921,8 @@ func (o *run) mobReviewBriefing(ctx context.Context) (string, error) {
 
 	prior := priorFindingsBlock(o.lastFindings)
 
-	return fmt.Sprintf(reviewBriefing, o.grounding, o.tc.Title, o.taskDescription, fencedDiff(diff), prior), nil
+	return fmt.Sprintf(reviewBriefing, o.grounding, readRootsBlock(o.d.ReadRoots),
+		o.tc.Title, o.taskDescription, fencedDiff(diff), prior), nil
 }
 
 // synthesize runs ONE orchestrator-model call that reads the three specialists'
@@ -917,7 +933,7 @@ func (o *run) synthesize(ctx context.Context, findings string, authoritative boo
 	cfg := d.Cfg
 
 	model := resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
-		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels())
+		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels(), "review synthesis")
 
 	var (
 		v       verdict
@@ -984,7 +1000,7 @@ func (o *run) runFixModel(ctx context.Context, prompt string, round int, fixTier
 
 		model := p.Model
 
-		o.noteShortfall(ctx, "fix coder", p)
+		o.noteShortfall(ctx, "fix coder", "", p)
 
 		if o.fixEscalate {
 			d.logCard(ctx, "fix coder %s selected for round %d fixes (tier=%s) - escalated after a fix round that %s",
@@ -1017,7 +1033,7 @@ func (o *run) runFixModel(ctx context.Context, prompt string, round int, fixTier
 		}
 
 		if err != nil {
-			return "", fmt.Errorf("review fix run: %w", err)
+			return "", fmt.Errorf("fix run: %w", err)
 		}
 
 		return model, nil
@@ -1165,16 +1181,7 @@ func (o *run) resolveFixModel(ctx context.Context, fixTier string, authoritative
 		// an explicit operator pin with an auto-selected substitute. A pinned model
 		// that is harness-incapable therefore keeps being re-selected, exhausts the
 		// re-selection cap, and parks - the blacklist still records it.
-		return registry.Pick{
-			ModelSpec: registry.ModelSpec{
-				Model:         o.tc.ModelCoder,
-				ContextWindow: o.d.Registry.ContextWindow(o.tc.ModelCoder),
-			},
-			Role:          registry.RoleCoder,
-			RequestedTier: tier,
-			Source:        registry.SourcePinned,
-			OK:            true,
-		}, nil
+		return offLadderPick(o.d.Registry, o.tc.ModelCoder, registry.RoleCoder, tier, registry.SourcePinned), nil
 	}
 
 	if o.tc.ModelCoder != "" {
@@ -1434,8 +1441,29 @@ func tierFromString(tier string) registry.Tier {
 	}
 }
 
+// reviewSubagentTools is what the specialist panel gets on top of the
+// workspace-confined read-only set harness.SpawnSubagents registers for it: the
+// optional Skill tool, plus read, grep and glob widened to the operator's
+// declared read-only roots. SpawnSubagents builds its child registry as
+// tools.NewRegistry(append(tools.ReadOnlyTools(root), extras...)...), and
+// NewRegistry keeps the LAST registration for a duplicate name, so the widened
+// three replace the confined ones without a harness change. With no roots
+// declared the panel gets exactly what it got before.
+func reviewSubagentTools(workspace string, roots []string, skill tools.Tool) []tools.Tool {
+	out := skillToolSlice(skill)
+	if len(roots) == 0 {
+		return out
+	}
+
+	return append(out,
+		tools.NewReadTool(workspace).WithReadRoots(roots),
+		tools.NewGrepTool(workspace).WithReadRoots(roots),
+		tools.NewGlobTool(workspace).WithReadRoots(roots),
+	)
+}
+
 // skillToolSlice wraps an optional Skill tool as a SubagentOpts.ExtraReadOnlyTools
-// slice. Nil tool → nil slice (the review panel then gets the default read-only set).
+// slice. Nil tool → nil slice.
 func skillToolSlice(t tools.Tool) []tools.Tool {
 	if t == nil {
 		return nil

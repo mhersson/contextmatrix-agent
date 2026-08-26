@@ -2,8 +2,11 @@ package worker
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"log/slog"
 	"os"
@@ -239,6 +242,134 @@ func (g *Git) isDirty(ctx context.Context) (bool, error) {
 	}
 
 	return strings.TrimSpace(out) != "", nil
+}
+
+// WorktreeState is an opaque fingerprint of everything uncommitted in the
+// worktree: the porcelain status, the diff of every tracked change, and the
+// content of every untracked file the status names. Equal fingerprints mean
+// nothing was written in between.
+//
+// It reads the tree through git rather than by walking it so the repository's
+// own ignore rules apply: a build artifact tree a check command produced is
+// invisible here, while everything the coder authored is not.
+//
+// Every part of the read is bounded - the two git calls by the caller's
+// context, the untracked content by both that context and untrackedHashBudget
+// - because this runs on the coder's critical path and a read that outlasts
+// the turn is worse than no fingerprint at all. An error, from any of them, is
+// the caller's cue to assume something was written.
+func (g *Git) WorktreeState(ctx context.Context) (string, error) {
+	status, err := g.run(ctx, "status", "--porcelain=v1", "--untracked-files=all", "-z")
+	if err != nil {
+		return "", fmt.Errorf("worktree state: %w", err)
+	}
+
+	diff, err := g.run(ctx, "diff", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("worktree state: %w", err)
+	}
+
+	h := sha256.New()
+	h.Write([]byte(status))
+	h.Write([]byte(diff))
+
+	// Untracked content appears in neither of the two above - status names the
+	// file, the diff covers tracked paths only - so an edit to a file the coder
+	// had just created would otherwise read as nothing written.
+	if err := foldUntracked(ctx, h, g.dir, untrackedPaths(status), untrackedHashBudget); err != nil {
+		return "", fmt.Errorf("worktree state: %w", err)
+	}
+
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// untrackedPaths pulls the untracked entries out of NUL-delimited porcelain v1
+// status output. -z leaves paths unquoted and verbatim, so a name with spaces or
+// non-ASCII bytes survives; a rename's second field is a bare path and matches
+// no status prefix, so it is skipped.
+func untrackedPaths(status string) []string {
+	var out []string
+
+	for _, rec := range strings.Split(status, "\x00") {
+		if rel, ok := strings.CutPrefix(rec, "?? "); ok && rel != "" {
+			out = append(out, rel)
+		}
+	}
+
+	return out
+}
+
+// untrackedHashBudget is the total untracked content one fingerprint reads.
+// Untracked files are read whole because git can diff only what it tracks, so
+// without a bound a project that does not ignore its build output makes every
+// read walk that tree - twice per verify call, with no ceiling but the tree's
+// size.
+const untrackedHashBudget = 32 << 20
+
+// errHashBudget reports that the untracked content ran past
+// untrackedHashBudget. It fails the whole read rather than hashing a prefix:
+// two prefixes can match across a write further into the file, and a
+// fingerprint that wrongly compares equal reports a stale pass as a fresh one.
+// Failing costs a command re-run, which is the direction that is only ever
+// wasteful.
+var errHashBudget = errors.New("untracked content exceeds the fingerprint budget")
+
+// foldUntracked folds the named workspace-relative files into h, stopping at
+// the first that would take the total past budget. Each file contributes its
+// path as well as its content, so a rename moves the fingerprint even when the
+// bytes do not.
+//
+// An unreadable file contributes its error text instead, which keeps the
+// fingerprint defined without pretending the file is empty and without costing
+// the whole read.
+func foldUntracked(ctx context.Context, h hash.Hash, dir string, paths []string, budget int64) error {
+	remaining := budget
+
+	for _, rel := range paths {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		h.Write([]byte(rel))
+
+		n, err := hashFile(h, filepath.Join(dir, rel), remaining)
+		if err != nil {
+			return err
+		}
+
+		remaining -= n
+	}
+
+	return nil
+}
+
+// hashFile folds up to limit bytes of a file's content into h and reports how
+// many it read. A file that runs past limit returns errHashBudget; a file that
+// cannot be opened or read contributes its error text and no error, so one
+// unreadable entry does not fail the read.
+func hashFile(h io.Writer, absPath string, limit int64) (int64, error) {
+	f, err := os.Open(absPath) //nolint:gosec // path is a workspace-relative entry from git status
+	if err != nil {
+		fmt.Fprint(h, err.Error())
+
+		return 0, nil
+	}
+	defer f.Close() //nolint:errcheck // read-only
+
+	// limit+1 so a file sitting exactly on the budget is folded in whole and
+	// only one that exceeds it is detected as exceeding it.
+	n, err := io.Copy(h, io.LimitReader(f, limit+1))
+	if err != nil {
+		fmt.Fprint(h, err.Error())
+
+		return n, nil
+	}
+
+	if n > limit {
+		return n, errHashBudget
+	}
+
+	return n, nil
 }
 
 // hasExecutableMagic reports whether the file begins with a known native

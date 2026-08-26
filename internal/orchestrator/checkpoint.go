@@ -105,8 +105,8 @@ func (o *run) mobCheckpoint(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 
 	t := mob.Topic{
 		Kind: "checkpoint",
-		Briefing: fmt.Sprintf(checkpointBriefing, o.grounding, sub.Title, subtaskBody(sub), o.tc.Title,
-			o.envFacts, fencedDiff(diff)),
+		Briefing: fmt.Sprintf(checkpointBriefing, o.grounding, readRootsBlock(o.d.ReadRoots),
+			sub.Title, subtaskBody(sub), o.tc.Title, o.envFacts, fencedDiff(diff)),
 		Lenses:          checkpointLenses[:seats],
 		Rounds:          o.d.Cfg.Mob.CheckpointRounds,
 		Blind:           false,

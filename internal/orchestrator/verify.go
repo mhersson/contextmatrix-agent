@@ -61,7 +61,7 @@ type verifyPlan struct {
 }
 
 // verifyResult is one execution's classified outcome. Output is redacted at
-// capture (runVerifyPlan applies the run redactor); Note is the human-facing
+// capture (runVerifyCommand applies the run redactor); Note is the human-facing
 // reason a run was skipped.
 type verifyResult struct {
 	Status verifyStatus
@@ -78,7 +78,7 @@ const (
 	maxVerifyTimeout = 2 * time.Hour
 )
 
-// verifyRetryWait is how long runVerifyPlan waits before its one retry of a
+// verifyRetryWait is how long runVerifyCommand waits before its one retry of a
 // resource-exhausted verify run, giving the prior run's processes time to be
 // reaped. A package var (not a const) so tests can shrink it - see
 // subtaskHeartbeatInterval in execute.go for the same pattern.
@@ -108,29 +108,38 @@ func verifyStatusWord(s verifyStatus) string {
 	}
 }
 
-// logVerifyRound records one review round's gate outcome on the card. Without
-// it the board carries only the resolution line, so a gate that failed and a
-// gate that never ran read identically to a human reviewing the activity log.
-// A skip names its reason and says out loud that the round proceeds unverified
-// - unless the reason already says so: every skip note classifyVerify actually
-// emits already ends in "treated as unverified", and appending the suffix on
-// top of one reads as "unverified" and "verify" twice in the same line. Only a
-// noteless skip (the "no verify command resolved" case) needs the suffix
-// spelled out.
-func (o *run) logVerifyRound(ctx context.Context, res verifyResult, round int) {
+// logVerifyGate records one gate outcome on the card, for whichever gate ran;
+// where names the caller's context ("review round 3", "subtask SUB-1, before
+// commit"). Without it the board carries only the resolution line, so a gate
+// that failed and a gate that never ran read identically to a human reviewing
+// the activity log. A skip names its reason and says out loud that the work
+// proceeds unverified - unless the reason already says so: every skip note
+// classifyVerify actually emits already ends in "treated as unverified", and
+// appending the suffix on top of one reads as "unverified" and "verify" twice
+// in the same line. Only a noteless skip (the "no verify command resolved"
+// case) needs the suffix spelled out.
+//
+// Both gates share this one builder: the run's two verify gates must not drift
+// into two different renderings of the same outcome any more than they may
+// drift into two different commands.
+func (o *run) logVerifyGate(ctx context.Context, res verifyResult, where string) {
 	msg := fmt.Sprintf("verify %s", verifyStatusWord(res.Status))
 
 	if res.Note != "" {
 		msg += " (" + res.Note + ")"
 	}
 
-	msg += fmt.Sprintf(" - review round %d", round)
+	msg += " - " + where
 
 	if res.Status == verifySkipped && res.Note == "" {
 		msg += " - proceeding unverified"
 	}
 
 	o.d.logCard(ctx, "%s", msg)
+}
+
+func (o *run) logVerifyRound(ctx context.Context, res verifyResult, round int) {
+	o.logVerifyGate(ctx, res, fmt.Sprintf("review round %d", round))
 }
 
 // verifyDocContext is the advisory verify line handed to the document phase:
@@ -190,8 +199,8 @@ func verifyProvenance(p *verifyPlan) string {
 
 // classifyVerify maps a raw execution Outcome to the tri-state result. It is
 // pure so the whole decision table is unit-tested without a subprocess. Parent-
-// context cancellation is NOT an outcome here - runVerifyPlan checks ctx.Err()
-// and propagates the abort before classifying.
+// context cancellation is NOT an outcome here - runVerifyCommand checks
+// ctx.Err() and propagates the abort before classifying.
 func classifyVerify(plan verifyPlan, out verifyexec.Outcome) verifyResult {
 	switch {
 	case out.ExitCode == 0 && !out.TimedOut && !out.StartErr:
@@ -280,7 +289,7 @@ const verifyConfigErrorMarker = "CMX_VERIFY (unreadable)"
 // command failed because it needed a container runtime the worker does not
 // have: no Docker socket bind, CapDrop: ALL, no-new-privileges, uid 1000, and
 // no Docker CLI in the worker image, all by design. Unlike the declared/
-// detected tiers above, this is discovered at EXECUTION time - runVerifyPlan
+// detected tiers above, this is discovered at EXECUTION time - runVerifyCommand
 // reading the failed output - not at resolution time, so the card-section and
 // log-line renderers key on it for the "no containers here" remedy instead of
 // "install the toolchain" (see verifyToolchainSection and toolchainLogMessage).
@@ -420,21 +429,63 @@ func (o *run) resolveVerify(ctx context.Context) (verifyPlan, error) {
 	}
 }
 
-// runVerifyPlan executes the resolved plan in dir and returns the classified
-// result. It is the single capture point: it redacts the output and
-// disambiguates a parent-context cancel (returned as an error to propagate the
-// abort) from a real verify outcome. An empty plan is a skip, never a run. A
-// non-pass whose output looks resource-exhausted (container pressure, not a
-// real defect) gets exactly one retry after a short wait; a plain failure is
-// never retried, and neither is a run that hit its own timeout. A non-pass
-// whose output looks like an unreachable container runtime takes precedence
-// over the skipped/failed classification and returns a *ToolchainMissingError
-// instead of a verifyResult - see the check below.
+// runVerifyPlan executes the resolved plan in dir, records the outcome as a
+// Verification event and returns the classified result. It is the gate's entry
+// point and the single capture point for the event. An empty plan is a skip,
+// never a run. The protections around the command itself - cancellation, the
+// resource-exhaustion retry and the container-runtime park - live in
+// runVerifyCommand, which every caller that runs the command shares.
 func (o *run) runVerifyPlan(ctx context.Context, dir string, plan verifyPlan) (verifyResult, error) {
 	if len(plan.Argv) == 0 {
 		return verifyResult{Status: verifySkipped, Note: "no verify command resolved"}, nil
 	}
 
+	res, err := o.runVerifyCommand(ctx, dir, plan)
+	if err != nil {
+		return verifyResult{}, err
+	}
+
+	// The gate is a subprocess, not a tool call, so nothing else records what it
+	// printed: a FAILED gate reaches the card body as review findings, but a
+	// PASSED or SKIPPED one would leave no output on any channel. res.Output is
+	// already redacted by runVerifyCommand's agent-side redactor - which scrubs its own
+	// credentials (LLM key, MCP key, git token, mob guest tokens), not arbitrary
+	// secrets a chatty build could print via the verify.env passthrough - and
+	// already bounded at 64 KiB by verifyexec, so this carries a hard ceiling
+	// with no cap of its own. Guarded: Emit is nil on several construction paths
+	// and events.Emitter.Emit does not nil-check.
+	if o.d.Emit != nil {
+		o.d.Emit.Emit(events.Verification, map[string]any{
+			// ok collapses to false for both FAILED and SKIPPED; status
+			// disambiguates them, so read ok:false alongside status, never alone -
+			// a SKIPPED gate is not a defect the way a FAILED one is.
+			"ok":      res.Status == verifyPassed,
+			"status":  verifyStatusWord(res.Status),
+			"command": plan.Display,
+			"detail":  res.Output,
+		})
+	}
+
+	return res, nil
+}
+
+// runVerifyCommand runs plan's command in dir and classifies the outcome. It
+// carries the protections every caller that runs a project's verify command
+// needs, so no caller reaches the raw runner and loses one of them:
+//
+//   - A parent-context cancel comes back as an error, never as a result: the
+//     runner reports a killed process, which classifies as a failure, and an
+//     aborted run must not be presented as a code defect.
+//   - A non-pass whose output looks resource-exhausted (container pressure, not
+//     a real defect) gets exactly one retry after a short wait; a plain failure
+//     is never retried, and neither is a run that hit its own timeout.
+//   - A non-pass whose output looks like an unreachable container runtime takes
+//     precedence over the skipped/failed classification and comes back as a
+//     *ToolchainMissingError instead of a verifyResult.
+//
+// The output is redacted before the container-runtime check, so every caller
+// classifies the same bytes.
+func (o *run) runVerifyCommand(ctx context.Context, dir string, plan verifyPlan) (verifyResult, error) {
 	out := o.runVerify(ctx, dir, plan.Argv, plan.Timeout, plan.Env)
 
 	if err := ctx.Err(); err != nil {
@@ -493,27 +544,6 @@ func (o *run) runVerifyPlan(ctx context.Context, dir string, plan verifyPlan) (v
 			Subject: containerRuntimeUnavailableMarker,
 			Reason:  "the verify command needs a container runtime, and the worker has none by design",
 		}
-	}
-
-	// The gate is a subprocess, not a tool call, so nothing else records what it
-	// printed: a FAILED gate reaches the card body as review findings, but a
-	// PASSED or SKIPPED one would leave no output on any channel. res.Output is
-	// already redacted above by the agent's own redactor - which scrubs its own
-	// credentials (LLM key, MCP key, git token, mob guest tokens), not arbitrary
-	// secrets a chatty build could print via the verify.env passthrough - and
-	// already bounded at 64 KiB by verifyexec, so this carries a hard ceiling
-	// with no cap of its own. Guarded: Emit is nil on several construction paths
-	// and events.Emitter.Emit does not nil-check.
-	if o.d.Emit != nil {
-		o.d.Emit.Emit(events.Verification, map[string]any{
-			// ok collapses to false for both FAILED and SKIPPED; status
-			// disambiguates them, so read ok:false alongside status, never alone -
-			// a SKIPPED gate is not a defect the way a FAILED one is.
-			"ok":      res.Status == verifyPassed,
-			"status":  verifyStatusWord(res.Status),
-			"command": plan.Display,
-			"detail":  res.Output,
-		})
 	}
 
 	return res, nil

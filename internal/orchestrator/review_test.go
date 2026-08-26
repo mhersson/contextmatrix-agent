@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -2965,4 +2968,205 @@ func TestFixModelRefusalNamesItsRealCause(t *testing.T) {
 		"the card must read the true cause; err=%v", err)
 	assert.NotContains(t, err.Error(), "attempts cap",
 		"no attempts cap was reached on this path; err=%v", err)
+}
+
+// --- read-only roots on the review panel ----------------------------------
+
+// readProbeLLM drives every review specialist to read one path and records the
+// tool result it got back; the synthesizer gets a clean approval. It routes on
+// message shape, not a call counter, because SpawnSubagents runs the three
+// specialists concurrently.
+type readProbeLLM struct {
+	mu          sync.Mutex
+	path        string
+	toolResults []string
+}
+
+func (c *readProbeLLM) Send(_ context.Context, req llm.Request) (llm.Response, error) {
+	return c.next(req)
+}
+
+func (c *readProbeLLM) SendStream(_ context.Context, req llm.Request, _ func(llm.Delta)) (llm.Response, error) {
+	return c.next(req)
+}
+
+func (c *readProbeLLM) next(req llm.Request) (llm.Response, error) {
+	if n := len(req.Messages); n > 0 && req.Messages[n-1].Role == "tool" {
+		c.mu.Lock()
+		c.toolResults = append(c.toolResults, req.Messages[n-1].Content)
+		c.mu.Unlock()
+
+		return llm.Response{Content: "no findings", FinishReason: "stop"}, nil
+	}
+
+	specialist := false
+
+	for _, m := range req.Messages {
+		if strings.Contains(m.Content, "You are a code-review specialist") {
+			specialist = true
+
+			break
+		}
+	}
+
+	if !specialist {
+		return llm.Response{Content: `{"approved":true,"summary":"clean","fixes":[]}`, FinishReason: "stop"}, nil
+	}
+
+	args, _ := json.Marshal(map[string]string{"path": c.path})
+
+	return llm.Response{
+		ToolCalls: []llm.ToolCall{{
+			ID:       "probe-1",
+			Type:     "function",
+			Function: llm.FunctionCall{Name: "read", Arguments: string(args)},
+		}},
+		FinishReason: "tool_calls",
+	}, nil
+}
+
+// TestReviewSubagentReadToolsCarryExtraRoots drives the whole chain the review
+// panel depends on: Deps.ReadRoots reaches SubagentOpts.ExtraReadOnlyTools, and
+// tools.NewRegistry's last-registration-wins means the widened read replaces the
+// workspace-confined one SpawnSubagents registers first.
+func TestReviewSubagentReadToolsCarryExtraRoots(t *testing.T) {
+	dep := t.TempDir()
+	depFile := filepath.Join(dep, "api.go")
+	require.NoError(t, os.WriteFile(depFile, []byte("package dep // WIDGET\n"), 0o600))
+
+	tests := []struct {
+		name  string
+		roots []string
+		want  string
+	}{
+		{"a declared root resolves", []string{dep}, "WIDGET"},
+		{"no declaration keeps the confinement", nil, "tool error"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &readProbeLLM{path: depFile}
+			d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, client, reviewerRegistry())
+			d.ReadRoots = tc.roots
+
+			o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}, 0)
+			require.NoError(t, runReview(context.Background(), o))
+
+			client.mu.Lock()
+			defer client.mu.Unlock()
+
+			require.Len(t, client.toolResults, 3, "each of the three specialists must have probed once")
+
+			for i, got := range client.toolResults {
+				assert.Contains(t, got, tc.want, "specialist %d tool result: %q", i, got)
+			}
+		})
+	}
+}
+
+// TestReviewSubagentToolsKeepTheSkillTool: widening the panel's read tools must
+// not cost it the Skill tool - both ride the same ExtraReadOnlyTools slice.
+func TestReviewSubagentToolsKeepTheSkillTool(t *testing.T) {
+	t.Parallel()
+
+	skillsDir := filepath.Join(t.TempDir(), "skills")
+	require.NoError(t, os.MkdirAll(filepath.Join(skillsDir, "go-development"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(skillsDir, "go-development", "SKILL.md"),
+		[]byte("---\nname: go-development\ndescription: Use for Go.\n---\nbody"), 0o644))
+
+	skill, ok := tools.NewSkillTool(skillsDir, nil, false, nil)
+	require.True(t, ok)
+
+	ws := t.TempDir()
+	dep := t.TempDir()
+
+	var names []string
+	for _, tl := range reviewSubagentTools(ws, []string{dep}, skill) {
+		names = append(names, tl.Name())
+	}
+
+	assert.Subset(t, names, []string{"skill", "read", "grep", "glob"})
+
+	// No declaration: the panel gets exactly what it got before, the Skill tool alone.
+	names = nil
+	for _, tl := range reviewSubagentTools(ws, nil, skill) {
+		names = append(names, tl.Name())
+	}
+
+	assert.Equal(t, []string{"skill"}, names)
+	assert.Empty(t, reviewSubagentTools(ws, nil, nil))
+}
+
+// TestExtraReadOnlyToolsOverrideConfinedDefaults pins the harness mechanism the
+// panel wiring rides on, mirroring how SpawnSubagents builds its child registry:
+// a duplicate name keeps the LAST registration.
+func TestExtraReadOnlyToolsOverrideConfinedDefaults(t *testing.T) {
+	t.Parallel()
+
+	ws := t.TempDir()
+	dep := t.TempDir()
+	depFile := filepath.Join(dep, "api.go")
+	require.NoError(t, os.WriteFile(depFile, []byte("package dep // WIDGET\n"), 0o600))
+
+	reg := tools.NewRegistry(append(tools.ReadOnlyTools(ws), reviewSubagentTools(ws, []string{dep}, nil)...)...)
+
+	read, ok := reg.Get("read")
+	require.True(t, ok)
+
+	res, err := read.Execute(context.Background(), map[string]any{"path": depFile})
+	require.NoError(t, err, "the widened read must win over the confined default")
+	assert.Contains(t, res.Text, "WIDGET")
+}
+
+// TestReadRootsReachTheSpecialistPrompt: the review panel reads through the same
+// widened tools, so it needs the same declaration in its prompt.
+func TestReadRootsReachTheSpecialistPrompt(t *testing.T) {
+	tests := []struct {
+		name  string
+		roots []string
+	}{
+		{"declared roots are named", []string{"/declared/dep-source", "/declared/other"}},
+		{"no declaration leaves the prompt alone", nil},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &planLLM{responses: []llm.Response{
+				stopResp("Correctness: fine", 0.01),
+				stopResp("Design: fine", 0.01),
+				stopResp("Security: fine", 0.01),
+				stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.02),
+			}}
+
+			d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, client, reviewerRegistry())
+			d.ReadRoots = tc.roots
+
+			o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}, 0)
+			require.NoError(t, runReview(context.Background(), o))
+
+			client.mu.Lock()
+			defer client.mu.Unlock()
+
+			var specialists []string
+
+			for _, task := range client.tasks {
+				if strings.Contains(task, "code-review specialist") {
+					specialists = append(specialists, task)
+				}
+			}
+
+			require.Len(t, specialists, 3)
+
+			for i, task := range specialists {
+				for _, r := range tc.roots {
+					assert.Contains(t, task, r, "specialist %d must be told about %s", i, r)
+				}
+
+				if len(tc.roots) == 0 {
+					assert.NotContains(t, task, "outside the workspace",
+						"specialist %d must carry no roots line when nothing is declared", i)
+				}
+			}
+		})
+	}
 }

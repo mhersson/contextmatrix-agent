@@ -784,7 +784,7 @@ func TestPlanPhaseDiagnoseIncapableModelIsRecovered(t *testing.T) {
 	// The decision model the registry resolves first is incapable; the
 	// registry's next pick must answer the plan.
 	first := resolveDecisionModel(context.Background(), d.Registry, d.Emit, ops, "CARD-1",
-		"", d.Cfg.PayloadModel, d.Cfg.DefaultModel, nil)
+		"", d.Cfg.PayloadModel, d.Cfg.DefaultModel, nil, "plan decision")
 	llmFake := &modelAwareLLM{
 		incapable: map[string]bool{first: true},
 		responses: []llm.Response{stopResp(goodPlanJSON, 0.03)},
@@ -860,7 +860,7 @@ func TestResolveDecisionModelFloorsWeakPayload(t *testing.T) {
 	ops := &fakeOps{}
 
 	got := resolveDecisionModel(context.Background(), reg, emit, ops, "CARD-1",
-		"", "payload/model", "default/model", nil)
+		"", "payload/model", "default/model", nil, "plan decision")
 
 	assert.Equal(t, "rev/alpha", got)
 	assert.NotEqual(t, "payload/model", got)
@@ -873,7 +873,7 @@ func TestResolveDecisionModelHonorsPin(t *testing.T) {
 	ops := &fakeOps{}
 
 	got := resolveDecisionModel(context.Background(), reg, emit, ops, "CARD-1",
-		"pinned/model", "payload/model", "default/model", nil)
+		"pinned/model", "payload/model", "default/model", nil, "plan decision")
 
 	assert.Equal(t, "pinned/model", got)
 }
@@ -884,7 +884,7 @@ func TestResolveDecisionModelUnresolvablePinFloorsAndWarns(t *testing.T) {
 	ops := &fakeOps{}
 
 	got := resolveDecisionModel(context.Background(), reg, emit, ops, "CARD-1",
-		"ghost/model", "payload/model", "default/model", nil)
+		"ghost/model", "payload/model", "default/model", nil, "plan decision")
 
 	assert.Equal(t, "rev/alpha", got)
 
@@ -905,7 +905,7 @@ func TestResolveDecisionModelNilRegistryFallsBack(t *testing.T) {
 	ops := &fakeOps{}
 
 	got := resolveDecisionModel(context.Background(), nil, emit, ops, "CARD-1",
-		"", "payload/model", "default/model", nil)
+		"", "payload/model", "default/model", nil, "plan decision")
 
 	assert.Equal(t, "payload/model", got)
 }
@@ -933,7 +933,7 @@ func TestResolveDecisionModelKeepsBaseOverTheCapableDefault(t *testing.T) {
 	require.False(t, p.AtBar())
 
 	got := resolveDecisionModel(context.Background(), reg, emit, ops, "CARD-1",
-		"", "payload/model", "default/model", nil)
+		"", "payload/model", "default/model", nil, "plan decision")
 
 	assert.Equal(t, "payload/model", got, "the operator's own orchestrator model survives a below-bar floor")
 	assert.NotEqual(t, p.Model, got, "a below-bar pick must never replace base")
@@ -1609,9 +1609,56 @@ func TestResolveDecisionModelKeepsBaseWhenTheFloorFallsShort(t *testing.T) {
 				}}, nil, nil, "capable/default")
 
 			got := resolveDecisionModel(context.Background(), reg, nil, &fakeOps{},
-				"CARD-1", "", "payload/default", "serve/fallback", nil)
+				"CARD-1", "", "payload/default", "serve/fallback", nil, "plan decision")
 
 			assert.Equal(t, tt.wantModel, got)
+		})
+	}
+}
+
+// TestReadRootsReachThePlanningPrompts: the plan and diagnosis phases have no
+// shell, and every tool schema describes paths as workspace-relative, so a root
+// the prompt never names is a root the model has no way to discover.
+func TestReadRootsReachThePlanningPrompts(t *testing.T) {
+	tests := []struct {
+		name  string
+		roots []string
+	}{
+		{"declared roots are named", []string{"/declared/dep-source", "/declared/other"}},
+		{"no declaration leaves the prompts alone", nil},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ops := &fakeOps{
+				taskContext: cmclient.TaskContext{
+					Title: "Fix the broken parser", Description: "it throws on empty input",
+				},
+				createdIDs: []string{"SUB-1", "SUB-2"},
+			}
+			llmFake := &planLLM{responses: []llm.Response{
+				stopResp("## Diagnosis\n### Root cause\nnil slice on empty input.\n", 0.02),
+				stopResp(goodPlanJSON, 0.03),
+			}}
+
+			d := planTestDeps(ops, llmFake)
+			d.ReadRoots = tc.roots
+
+			o := newRun(d, ops.taskContext)
+			require.NoError(t, runPlan(context.Background(), o))
+			require.Len(t, llmFake.tasks, 2, "a bug-like card runs diagnose then plan")
+
+			for i, phase := range []string{"diagnosis", "plan"} {
+				for _, r := range tc.roots {
+					assert.Contains(t, llmFake.tasks[i], r,
+						"the %s prompt must name the declared root %s", phase, r)
+				}
+
+				if len(tc.roots) == 0 {
+					assert.NotContains(t, llmFake.tasks[i], "outside the workspace",
+						"the %s prompt must carry no roots line when nothing is declared", phase)
+				}
+			}
 		})
 	}
 }

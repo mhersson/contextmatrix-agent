@@ -853,7 +853,7 @@ func TestSalvageCappedFinalSubtask(t *testing.T) {
 	cg := &fakeGit{committed: true}
 	sc := &solverCtx{
 		git: cg, ledger: NewLedger(0, 0), tools: d.WriteTools,
-		workspace: "ws", coderModel: o.resolveCoderModel,
+		workspace: "ws", coderModel: o.solverCoderModel,
 		boardOps: false, push: false, tag: "candidate 1/1",
 		lastSubID: "SUB-2",
 	}
@@ -889,7 +889,7 @@ func TestNoSalvageOnCleanTree(t *testing.T) {
 	cg := &fakeGit{committed: false}
 	sc := &solverCtx{
 		git: cg, ledger: NewLedger(0, 0), tools: d.WriteTools,
-		workspace: "ws", coderModel: o.resolveCoderModel,
+		workspace: "ws", coderModel: o.solverCoderModel,
 		boardOps: false, push: false, tag: "candidate 1/1",
 		lastSubID: "SUB-2",
 	}
@@ -918,7 +918,7 @@ func TestSalvageFallsBackToTitleCommitMessage(t *testing.T) {
 	cg := &fakeGit{committed: true}
 	sc := &solverCtx{
 		git: cg, ledger: NewLedger(0, 0), tools: d.WriteTools,
-		workspace: "ws", coderModel: o.resolveCoderModel,
+		workspace: "ws", coderModel: o.solverCoderModel,
 		boardOps: false, push: false, tag: "candidate 1/1",
 		lastSubID: "SUB-2",
 	}
@@ -943,7 +943,7 @@ func TestNoSalvageOnEarlierSubtask(t *testing.T) {
 	cg := &fakeGit{committed: true}
 	sc := &solverCtx{
 		git: cg, ledger: NewLedger(0, 0), tools: d.WriteTools,
-		workspace: "ws", coderModel: o.resolveCoderModel,
+		workspace: "ws", coderModel: o.solverCoderModel,
 		boardOps: false, push: false, tag: "candidate 1/1",
 		lastSubID: "SUB-9", // the capped subtask is NOT the final one
 	}
@@ -1721,7 +1721,7 @@ func TestCandidateCompletionDoesNotReportSoloOutcome(t *testing.T) {
 	cg := &fakeGit{committed: true}
 	sc := &solverCtx{
 		git: cg, ledger: NewLedger(0, 0), tools: d.WriteTools,
-		workspace: "ws", coderModel: o.resolveCoderModel,
+		workspace: "ws", coderModel: o.solverCoderModel,
 		boardOps: false, push: false, tag: "candidate 1/1",
 	}
 
@@ -1781,7 +1781,7 @@ func TestCandidateSubtaskParksOnRunLedgerBreach(t *testing.T) {
 
 	sc := &solverCtx{
 		git: &fakeGit{committed: true}, ledger: NewLedger(0, 0), tools: d.WriteTools,
-		workspace: "ws", coderModel: o.resolveCoderModel,
+		workspace: "ws", coderModel: o.solverCoderModel,
 		boardOps: false, push: false, tag: "candidate 1/1",
 	}
 
@@ -1837,8 +1837,8 @@ func TestResolveCoderModelPinMissingAdvisory(t *testing.T) {
 	second, err := o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-2", Title: "Second", Tier: "moderate"}, "prompt2")
 	require.NoError(t, err)
 
-	assert.NotEqual(t, missingPin, first, "an unresolvable pin never becomes the selected model")
-	assert.NotEqual(t, missingPin, second)
+	assert.NotEqual(t, missingPin, first.Model, "an unresolvable pin never becomes the selected model")
+	assert.NotEqual(t, missingPin, second.Model)
 
 	var pinAdvisories []string
 
@@ -1889,9 +1889,9 @@ func TestResolveCoderModelParksOnlyWhenEvenTheDefaultIsBarred(t *testing.T) {
 		d.Registry = subFloorCoderRegistry()
 		o := newExecRun(d, nil, 5)
 
-		model, err := o.resolveCoderModel(context.Background(), sub, "prompt")
+		pick, err := o.resolveCoderModel(context.Background(), sub, "prompt")
 		require.NoError(t, err)
-		assert.Equal(t, "operator/default", model,
+		assert.Equal(t, "operator/default", pick.Model,
 			"the capable default is the trigger's default_model - operator intent, not junk")
 	})
 
@@ -1902,9 +1902,9 @@ func TestResolveCoderModelParksOnlyWhenEvenTheDefaultIsBarred(t *testing.T) {
 		o := newExecRun(d, nil, 5)
 		o.excluded = map[string]bool{"operator/default": true, "weak/model": true}
 
-		model, err := o.resolveCoderModel(context.Background(), sub, "prompt")
+		pick, err := o.resolveCoderModel(context.Background(), sub, "prompt")
 		require.Error(t, err)
-		assert.Empty(t, model)
+		assert.Empty(t, pick.Model)
 
 		var nme *NoModelError
 
@@ -1972,9 +1972,9 @@ func TestShortfallAdvisoryIsOncePerPhaseRoleAndTier(t *testing.T) {
 		ctx := context.Background()
 
 		for _, id := range []string{"SUB-1", "SUB-2", "SUB-3"} {
-			model, err := o.resolveCoderModel(ctx, subtaskRef{ID: id, Title: id, Tier: "complex"}, "prompt")
+			pick, err := o.resolveCoderModel(ctx, subtaskRef{ID: id, Title: id, Tier: "complex"}, "prompt")
 			require.NoError(t, err)
-			assert.Equal(t, "mid/model", model, "the clamped pick is still a measured model")
+			assert.Equal(t, "mid/model", pick.Model, "the clamped pick is still a measured model")
 		}
 
 		require.Len(t, ops.logs, 1,
@@ -2053,10 +2053,10 @@ func TestCoderTierIsAlwaysDerivedFromTheWork(t *testing.T) {
 				d.Registry = tierNamingRegistry()
 				o := newExecRun(d, nil, 0)
 
-				model, err := o.resolveCoderModel(context.Background(),
+				pick, err := o.resolveCoderModel(context.Background(),
 					subtaskRef{ID: "SUB-1", Title: "First", Tier: tt.tier}, "prompt")
 				require.NoError(t, err)
-				assert.Equal(t, tt.wantModel, model,
+				assert.Equal(t, tt.wantModel, pick.Model,
 					"the coder tier must be the subtask's, not a constant")
 			})
 		}
@@ -2117,7 +2117,7 @@ func TestShortfallAdvisoryNeverTakesTheSelectionLock(t *testing.T) {
 	go func() {
 		defer close(done)
 
-		o.noteShortfall(context.Background(), "probe", registry.Pick{
+		o.noteShortfall(context.Background(), "probe", "", registry.Pick{
 			ModelSpec:     registry.ModelSpec{Model: "mid/model"},
 			Role:          registry.RoleCoder,
 			RequestedTier: registry.TierComplex,
@@ -2146,13 +2146,259 @@ func TestUnmeasuredPickReportsNoPriorRatherThanZero(t *testing.T) {
 	// answer is the operator's capable default: the standard degraded shape.
 	o := newExecRun(execTestDeps(ops, &fakeGit{}, &planLLM{}), nil, 5)
 
-	model, err := o.resolveCoderModel(context.Background(),
+	pick, err := o.resolveCoderModel(context.Background(),
 		subtaskRef{ID: "SUB-1", Title: "First", Tier: "moderate"}, "prompt")
 	require.NoError(t, err)
-	require.Equal(t, "default/model", model)
+	require.Equal(t, "default/model", pick.Model)
 
 	require.Len(t, ops.logs, 1, "logs=%v", ops.logs)
 	assert.Contains(t, ops.logs[0], "no measured prior")
 	assert.NotContains(t, ops.logs[0], "prior 0.00",
 		"nothing measured this model, so no number may be printed for it; logs=%v", ops.logs)
+}
+
+// verifyCall is one recorded invocation of the verify exec seam: everything a
+// gate resolved and passed down, so two gates can be compared tuple for tuple.
+type verifyCall struct {
+	dir     string
+	argv    []string
+	timeout time.Duration
+	env     []string
+}
+
+// verifyFixPasses counts the scripted model calls whose prompt carries a failed
+// verify gate's finding, so a test can assert how many fix passes ran. Keyed on
+// verifyFailedPrefix - the constant that marks the finding - not on prose.
+func verifyFixPasses(c *planLLM) int {
+	n := 0
+
+	for i := range modelCallCount(c) {
+		if strings.Contains(promptOfCall(c, i), verifyFailedPrefix) {
+			n++
+		}
+	}
+
+	return n
+}
+
+// TestPreCommitVerifyFailureBlocksCommitAndRoutesToFix proves the gate stops a
+// broken subtask from reaching a commit. Two commits carrying three failing
+// tests and a nil-pointer panic shipped because nothing ran between the coder's
+// terminal call and CommitWithMessage; a verify that fails, earns one fix pass,
+// and fails again must leave the work uncommitted and park the subtask.
+func TestPreCommitVerifyFailureBlocksCommitAndRoutesToFix(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: []llm.Response{
+		finishResp("feat: subtask done", 0.01),     // the coder's terminal call
+		stopResp("coder: attempted the fix", 0.02), // the one fix pass
+	}}
+	d := execTestDeps(ops, git, client)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 1, Output: "--- FAIL: TestThing"}
+	}
+
+	err := runExecute(context.Background(), o)
+	require.Error(t, err, "a subtask whose verify is still red after one fix pass must not commit")
+
+	assert.Empty(t, git.commitMsgs, "nothing may be committed while the verify is red; git=%v", git.recorded())
+	assert.Equal(t, 1, verifyFixPasses(client), "exactly one bounded fix pass, never a loop")
+
+	calls := ops.recorded()
+	assert.Equal(t, -1, indexOfCall(calls, "CompleteTask:SUB-1"), "an uncommitted subtask is not completed")
+	assert.GreaterOrEqual(t, indexOfCall(calls, "ReleaseCard:SUB-1"), 0, "the parked claim is released")
+	assert.Empty(t, git.pushBranches, "a red tree is never pushed")
+}
+
+// TestPreCommitVerifyFailureThenFixPassCommits proves the fix pass is a real
+// second chance: a gate that goes green after it commits the coder's own work
+// under the coder's own message.
+func TestPreCommitVerifyFailureThenFixPassCommits(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: []llm.Response{
+		finishResp("feat: subtask done", 0.01),
+		stopResp("coder: fixed the failing test", 0.02),
+	}}
+	d := execTestDeps(ops, git, client)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+
+	seedResolvedVerifyPlan(o)
+
+	runs := 0
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		runs++
+		if runs == 1 {
+			return verifyexec.Outcome{ExitCode: 1, Output: "--- FAIL: TestThing"}
+		}
+
+		return verifyexec.Outcome{ExitCode: 0}
+	}
+
+	require.NoError(t, runExecute(context.Background(), o),
+		"a gate that goes green after the fix pass commits")
+
+	require.Len(t, git.commitMsgs, 1, "exactly one commit; git=%v", git.recorded())
+	assert.Equal(t, "feat: subtask done", git.commitMsgs[0], "the commit carries the coder's finish message")
+	assert.Equal(t, 1, verifyFixPasses(client), "exactly one bounded fix pass, never a loop")
+	assert.Equal(t, 2, runs, "the gate re-runs once after the fix pass")
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "CompleteTask:SUB-1"), 0, "the verified subtask completes")
+}
+
+// TestPreCommitVerifyPassCommitsAsToday proves a green gate is invisible: the
+// commit lands under the coder's own message and no fix model is spent.
+func TestPreCommitVerifyPassCommitsAsToday(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: []llm.Response{finishResp("feat: subtask done", 0.01)}}
+	d := execTestDeps(ops, git, client)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 0}
+	}
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	require.Len(t, git.commitMsgs, 1, "exactly one commit; git=%v", git.recorded())
+	assert.Equal(t, "feat: subtask done", git.commitMsgs[0])
+	assert.Equal(t, 0, verifyFixPasses(client), "a green gate spends no fix model")
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "CompleteTask:SUB-1"), 0)
+}
+
+// TestPreCommitVerifySkippedCommitsAsToday proves an inconclusive gate is
+// neither a pass nor a failure: a timed-out run (or a missing tool) is not
+// evidence of a defect, so the commit proceeds exactly as it did before the
+// gate existed and no fix model is spent. This mirrors the review round's own
+// verifySkipped arm.
+func TestPreCommitVerifySkippedCommitsAsToday(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: []llm.Response{finishResp("feat: subtask done", 0.01)}}
+	d := execTestDeps(ops, git, client)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		return verifyexec.Outcome{TimedOut: true, ExitCode: -1}
+	}
+
+	require.NoError(t, runExecute(context.Background(), o),
+		"an inconclusive gate is not a failure - the commit proceeds as it did before the gate existed")
+
+	require.Len(t, git.commitMsgs, 1, "exactly one commit; git=%v", git.recorded())
+	assert.Equal(t, "feat: subtask done", git.commitMsgs[0])
+	assert.Equal(t, 0, verifyFixPasses(client), "an inconclusive gate spends no fix model")
+	assert.True(t, ops.loggedContains("verify timed out"),
+		"the skip is logged with its classification; logs=%v", ops.logs)
+}
+
+// TestNoResolvableVerifyCommitsAsToday proves the skip tier is byte-identical
+// to today: an empty resolved argv means there is nothing to run, so no
+// subprocess starts and the commit proceeds.
+func TestNoResolvableVerifyCommitsAsToday(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: []llm.Response{finishResp("feat: subtask done", 0.01)}}
+	d := execTestDeps(ops, git, client)
+	// newExecRun's isolateVerify leaves the plan at the skip tier (empty Argv).
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+
+	ran := false
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		ran = true
+
+		return verifyexec.Outcome{ExitCode: 0}
+	}
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	require.Len(t, git.commitMsgs, 1, "exactly one commit; git=%v", git.recorded())
+	assert.Equal(t, "feat: subtask done", git.commitMsgs[0])
+	assert.False(t, ran, "an empty resolved argv means there is nothing to run")
+	assert.Equal(t, 0, verifyFixPasses(client))
+}
+
+// TestPreCommitGateAndReviewGateResolveIdentically proves the two gates cannot
+// drift into different commands, timeouts or environments: both take the plan
+// ensureVerify resolved and hand it to runVerifyPlan unchanged, so the tuple
+// reaching the exec seam is the same from either caller.
+func TestPreCommitGateAndReviewGateResolveIdentically(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: []llm.Response{stopResp("coder: attempted the fix", 0.02)}}
+	d := execTestDeps(ops, git, client)
+	d.Cfg.Workspace = t.TempDir()
+	o := newExecRun(d, nil, 0)
+
+	// A plan whose timeout and env are both distinct from what the run would
+	// resolve on its own, so a gate that resolved its own instead of taking the
+	// plan's is visible in the tuple.
+	o.verify = &verifyPlan{
+		Argv:    []string{"declared", "check"},
+		Display: "declared check",
+		Source:  verifySourceDeclared,
+		Timeout: 42 * time.Minute,
+		Env:     []string{"DECLARED=1"},
+	}
+
+	var seen []verifyCall
+
+	o.runVerify = func(_ context.Context, dir string, argv []string, timeout time.Duration, env []string) verifyexec.Outcome {
+		seen = append(seen, verifyCall{dir: dir, argv: argv, timeout: timeout, env: env})
+
+		return verifyexec.Outcome{ExitCode: 1, Output: "--- FAIL: TestThing"}
+	}
+
+	require.NotEqual(t, o.verifyTimeout(), o.verify.Timeout,
+		"the plan's timeout must differ from the run default, or this test cannot see the drift")
+
+	sub := subtaskRef{ID: "SUB-1", Title: "Only", Tier: "simple"}
+	require.Error(t, o.preCommitVerify(context.Background(), o.solver, sub))
+	require.NotEmpty(t, seen, "the pre-commit gate ran the command")
+
+	preCommit := seen[0]
+	seen = nil
+
+	_, _, approved, _, _, err := o.reviewRound(context.Background(), o.resolvedVerifyPlan(), 1, false)
+	require.NoError(t, err)
+	require.False(t, approved, "a red gate short-circuits the review round")
+	require.NotEmpty(t, seen, "the review gate ran the command")
+
+	assert.Equal(t, preCommit, seen[0],
+		"the pre-commit gate and the review gate must run the identical command, timeout and environment")
+}
+
+// TestPreCommitVerifySkippedForCandidateSolver proves the gate is solo-only. A
+// Best-of-N candidate is judged by the judge phase's authoritative verify over
+// every candidate worktree, and candidates race in parallel over one shared
+// run: resolving and fixing per candidate would race the run's cached plan and
+// charge the run ledger during the fan-out, which the candidate sub-ledgers
+// exist to keep separate.
+func TestPreCommitVerifySkippedForCandidateSolver(t *testing.T) {
+	ops := &fakeOps{}
+	d := execTestDeps(ops, &fakeGit{committed: true}, &planLLM{})
+	o := newExecRun(d, nil, 0)
+
+	seedResolvedVerifyPlan(o)
+
+	ran := false
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		ran = true
+
+		return verifyexec.Outcome{ExitCode: 1, Output: "--- FAIL: TestThing"}
+	}
+
+	sc := &solverCtx{
+		git: &fakeGit{committed: true}, ledger: NewLedger(0, 0), tools: d.WriteTools,
+		workspace: "ws", coderModel: o.solverCoderModel,
+		boardOps: false, push: false, tag: "candidate 1/2",
+	}
+
+	require.NoError(t, o.preCommitVerify(context.Background(), sc, subtaskRef{ID: "SUB-1", Title: "Only"}))
+	assert.False(t, ran, "a candidate solver never runs the pre-commit gate")
 }

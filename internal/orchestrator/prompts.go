@@ -5,6 +5,21 @@ import (
 	"strings"
 )
 
+// readRootsBlock names the trees outside the workspace the phase's file tools
+// can resolve. Every tool schema describes paths as workspace-relative, and the
+// read-only phases have no shell to discover anything else with, so a root the
+// prompt never names is a root the model has no reason to reach for. Empty
+// roots collapse to "", leaving the prompt unchanged.
+func readRootsBlock(roots []string) string {
+	if len(roots) == 0 {
+		return ""
+	}
+
+	return fmt.Sprintf("Dependency source outside the workspace is readable at these absolute paths: %s. "+
+		"read, grep and glob resolve them - read the API you need there rather than inferring it.\n\n",
+		strings.Join(roots, ", "))
+}
+
 // skillEngageBlock is the model-driven engagement preamble prepended to the
 // coder/fix/document/review prompts when task-skills are mounted. It mirrors
 // Claude Code's using-superpowers pressure: list the skills and insist the model
@@ -22,15 +37,18 @@ func skillEngageBlock(menu string) string {
 		"\n"
 }
 
-// verifyCommandBlock names the resolved verify command for the coder prompt when
-// one resolved, or "" when the gate is a skip. The command text is runtime
-// data, so the template stays language-neutral.
+// verifyCommandBlock points the coder at the verify tool, which runs the
+// resolved command, or returns "" when the gate is a skip and no tool is
+// registered. The command text is runtime data, so the template stays
+// language-neutral. The bash prohibition is scoped to that one command: the
+// tool reaches nothing else, so a wider ban would forbid the rungs it does not
+// cover without covering them.
 func verifyCommandBlock(p verifyPlan) string {
 	if len(p.Argv) == 0 || p.Display == "" {
 		return ""
 	}
 
-	return fmt.Sprintf("\n\nThe project's verify command is `%s` (%s). Run it before finishing and make it pass.", p.Display, p.Source)
+	return fmt.Sprintf("\n\nRun the project's checks by calling the `verify` tool - it runs `%s` (%s) and returns the combined result. Do not run `%s` yourself with bash - call the tool instead; checks that command does not cover are still yours to run. Call it once your changes are complete, and again only after you have written something since the last call. Make it pass before you finish.", p.Display, p.Source, p.Display)
 }
 
 // fixVerifyLine is the fix prompt's verify instruction: the resolved command
@@ -96,13 +114,13 @@ contract between formatFixes and fixFiles is not broken.`
 //
 // The leading %s is the grounding block; the second %s is the repo-snapshot
 // block (bounded tracked-file list + README head; "" when not a git repo). The
-// trailing %s slots are filled by draftPlan: workspace root, card title,
-// card description, an optional diagnosis block (root-cause investigation for
-// bug-like cards), an optional design block (brainstormed design for creative
-// HITL cards), an optional resume block (existing subtasks), an optional
-// feedback block (HITL reviewer's requested changes on a re-draft), and an
-// optional repair block (the previous parse error). Empty optional blocks
-// collapse to nothing.
+// trailing %s slots are filled by draftPlan: workspace root, an optional
+// read-only-roots block, card title, card description, an optional diagnosis
+// block (root-cause investigation for bug-like cards), an optional design block
+// (brainstormed design for creative HITL cards), an optional resume block
+// (existing subtasks), an optional feedback block (HITL reviewer's requested
+// changes on a re-draft), and an optional repair block (the previous parse
+// error). Empty optional blocks collapse to nothing.
 const planPrompt = `%s%sYou are the planning agent for a software task. You have read-only
 tools (read, grep, glob, git) to inspect the codebase, plus record_finding to
 save durable notes as you go. You do NOT create or modify cards or files - you
@@ -110,7 +128,7 @@ only read code and output a plan as JSON.
 
 Repo root: %s - paths are relative to it.
 
-First understand the task deeply, then decompose it. If a ROOT-CAUSE DIAGNOSIS
+%sFirst understand the task deeply, then decompose it. If a ROOT-CAUSE DIAGNOSIS
 is provided below, ground the plan in it - the subtasks must implement that fix
 approach. For feature work with no diagnosis, read the relevant code and settle
 on the simplest approach that solves the problem before decomposing.
@@ -203,8 +221,8 @@ Respond with ONLY a JSON object, no prose:
 // cards before planning. Adapted from the systematic-debugging workflow skill:
 // the same root-cause-first discipline, but the investigator has only read
 // tools and returns a "## Diagnosis" text blob (no card writes) that grounds
-// the plan. The trailing %s slots are filled by runDiagnose: workspace root,
-// card title, body.
+// the plan. The trailing %s slots are filled by runDiagnose: workspace root, an
+// optional read-only-roots block, card title, body.
 const diagnosePrompt = `%sYou are a read-only debugging investigator for a task that looks like a bug.
 You have read-only tools (read, grep, glob, git) to inspect the codebase. Git is
 available read-only (status, diff, log, show, branch). You do NOT modify files or
@@ -213,7 +231,7 @@ separately, after you finish.
 
 Repo root: %s - paths are relative to it.
 
-Work the evidence in order:
+%sWork the evidence in order:
 - Read the task below; quote any error messages, stack traces, or reproduction
   steps it gives.
 - Read the referenced files in full; trace the failing path back to where the
@@ -303,9 +321,17 @@ Fix anything you find before finishing.`
 // coderGroundingRule tells the coder to treat the subtask's concrete specifics
 // as hints to verify, not guarantees - so a stale line number or a claimed
 // site/symbol the code lacks cannot send it chasing a phantom to the turn cap.
+// The check is bounded to a window around the citation: the earlier wording
+// licensed re-reading the whole file for every anchor the plan had already
+// pinned, which accounted for 41-99% of post-plan read bytes across the
+// recorded runs and roughly half of one run's prompt tokens.
 const coderGroundingRule = `Treat concrete specifics in the subtask description - line numbers, exact
 counts ("all N sites"), symbol/file/token names - as hints to verify, not guarantees.
-If the code contradicts one (a named symbol or site does not exist, or there are
+Verify a cited line by reading a window around it, not by re-reading the whole
+file: read roughly 40 lines either side and check the citation against that.
+Re-read the file in full only when the window contradicts the citation - the
+symbol is not there, or what is there does not match what the description says.
+If the code contradicts a specific (a named symbol or site does not exist, or there are
 fewer than claimed), trust the code: satisfy the requirement's intent, note the
 discrepancy in your finish message, and stop - a confirmed absence discharges a
 "find all N" criterion. Do not keep searching to prove a negative.`
@@ -377,16 +403,17 @@ Description:
 // (synthesis) decides approve-or-fix from the three findings. Commit status is
 // never a review concern.
 //
-// The trailing %s slots are filled by runSpecialists: the lens block (one of the
-// three below), parent card title, parent card description, the full branch diff
-// against base, and an optional prior-findings block (the previous round's
+// The trailing %s slots are filled by runSpecialists: an optional
+// read-only-roots block, the lens block (one of the three below), parent card
+// title, parent card description, the full branch diff against base, and an
+// optional prior-findings block (the previous round's
 // findings on delta rounds). The empty prior-findings block collapses to nothing.
 const specialistPrompt = `%s%sYou are a code-review specialist. You have read-only tools (read, grep, glob, git)
 to inspect the codebase. Git is available read-only (status, diff, log, show,
 branch). You do NOT create or modify cards or files. Produce a findings report as TEXT - another agent synthesizes the
 three specialist reports into a single verdict.
 
-%s
+%s%s
 
 Review only the change set in the diff below. Read surrounding code for context
 as needed. Every finding must cite a file in the change set. Commit status is
@@ -565,14 +592,19 @@ REVIEW FINDINGS TO FIX
 %s
 `
 
-// verifyFixPrompt is the coder fix-run instruction for a review round whose
-// findings came from a failed verify gate instead of the specialist panel: one
-// failing command, not a critique of the whole card. Unlike fixPrompt, the
-// parent card goes in title-only - no description - with an explicit SCOPE
-// block in its place, so the coder fixes the failure instead of re-auditing
-// everything the card's description lists as done.
+// verifyFixPrompt is the coder fix-run instruction for findings that came from
+// a failed verify gate instead of the specialist panel: one failing command,
+// not a critique of the whole card. Unlike fixPrompt, the parent card goes in
+// title-only - no description - with an explicit SCOPE block in its place, so
+// the coder fixes the failure instead of re-auditing everything the card's
+// description lists as done.
 //
-// The trailing %s slots are filled by runFix: workspace root, the verify
+// Both gates that can fail use it: the review round, where the work is
+// committed and pushed and the fix lands as a fixup, and the pre-commit gate,
+// where the work is still uncommitted in the working tree. Its wording holds
+// for both, so it names neither a fixup nor a branch state.
+//
+// The trailing %s slots are filled by the caller: workspace root, the verify
 // instruction line, parent card title, and the verify failure text.
 const verifyFixPrompt = `%s%sYou are the coding agent addressing review feedback on the current branch.
 You have the full write toolset (read, grep, glob, edit, write, bash) rooted at
@@ -588,7 +620,7 @@ Repo root: %s - bash commands already execute there; use paths relative to the
 repo root.
 
 Do NOT run git yourself (no commit, no push, no branch) - the orchestrator
-commits your changes as a fixup and pushes after you finish.
+commits and pushes your changes after you finish.
 
 ` + selfReviewBlock + `
 
@@ -606,7 +638,7 @@ PARENT CARD (context)
 Title: %s
 
 SCOPE
-The card's work is already on the branch.
+The card's work is already in the working tree.
 The ONLY item in scope is the failure below - do not re-audit or re-implement other card items. If the failing test was added on this branch and its expectation is wrong, fix the expectation or delete the test; if the failure is in code the branch changed, fix the code. Make the smallest edit that turns the verify command green, run it, then finish.
 
 VERIFY FAILURE TO FIX
@@ -951,13 +983,14 @@ func designBlock(design string) string {
 }
 
 // Wrap-up nudge messages, injected by the harness when wrapUpTurns turns
-// remain (runModelWrapUp / runModelPlan). Built from the shared constant so the
-// stated count can never drift from the threshold. The coder, fix, and document
-// phases wrap up by driving the model to call the finish tool (document always
-// calls it, even with no doc changes, since the orchestrator only commits when
-// files actually changed). The planner has no finish tool: it wraps up by
-// emitting its JSON plan as the final message, so its nudge forces that emit
-// rather than a tool call.
+// remain (runModelWrapUp / runModelPlan / runModelDiagnose). Built from the
+// shared constant so the stated count can never drift from the threshold. The
+// coder, fix, and document phases wrap up by driving the model to call the
+// finish tool (document always calls it, even with no doc changes, since the
+// orchestrator only commits when files actually changed). The planner and the
+// diagnosis investigator have no finish tool: each wraps up by emitting its
+// final text (the JSON plan, or the "## Diagnosis" block) as the last message,
+// so their nudges force that emit rather than a tool call.
 var (
 	coderWrapUpMessage = fmt.Sprintf("%d turns remain. If the acceptance criteria pass, call the finish tool now with your commit message and make no further tool calls. Do not re-run checks that already passed.", wrapUpTurns)
 
@@ -966,6 +999,8 @@ var (
 	documentWrapUpMessage = fmt.Sprintf("%d turns remain. Call the finish tool now with your docs commit message (whether or not you wrote documentation) and make no further tool calls.", wrapUpTurns)
 
 	planWrapUpMessage = fmt.Sprintf("%d turns remain. Stop investigating now and output your final answer: ONLY the JSON plan object described above, built from the analysis you already have. Make no further tool calls, no prose, no code fences.", wrapUpTurns)
+
+	diagnoseWrapUpMessage = fmt.Sprintf("%d turns remain. Stop investigating now and output your final answer: the \"## Diagnosis\" section in exactly the shape described above, built from the evidence you already have. Make no further tool calls.", wrapUpTurns)
 
 	seatWrapUpMessage = fmt.Sprintf("%d turns remain in this round. Stop exploring and state your position now, built only from what you have already read - plain text, no further tool calls.", mobSeatWrapUpTurns)
 
@@ -995,13 +1030,13 @@ Rules:
 // carries NO output-format contract - seats discuss; the moderator's
 // synthesis prompt owns the strict JSON. Slots: grounding, repo-snapshot block
 // (bounded tracked-file list + README head; "" when not a git repo),
-// workspace, title, description, diagnosis block, design block, resume block
-// (the same content blocks draftPlan feeds the solo planner).
+// workspace, an optional read-only-roots block, title, description, diagnosis
+// block, design block, resume block.
 const planBriefing = `%s%sYou are discussing how to plan a software task. Repo root: %s - paths are
 relative to it. You have read-only tools (read, grep, glob) - ground your
 positions in the real code structure.
 
-Propose how to decompose the task into subtasks: the overall approach, the
+%sPropose how to decompose the task into subtasks: the overall approach, the
 split, ordering and dependencies, risks, and the complexity tier. Each
 subtask should be completable by a single agent in one focused session,
 include its own tests, and touch a bounded set of files. Argue from your
@@ -1055,9 +1090,9 @@ Respond with ONLY a JSON object, no prose:
 
 // reviewBriefing is the review-discussion problem statement: the SAME
 // diff-and-prior-findings scope the specialist fan-out reviews. Slots:
-// grounding, title, description, branch diff (pre-wrapped by fencedDiff - the
-// briefing is relayed to the board chat, where a bare diff renders as bullet
-// soup), prior-findings block.
+// grounding, an optional read-only-roots block, title, description, branch
+// diff (pre-wrapped by fencedDiff - the briefing is relayed to the board chat,
+// where a bare diff renders as bullet soup), prior-findings block.
 const reviewBriefing = `%sYou are discussing a code review. Review only the change set in the diff
 below; read surrounding code for context as needed. Every finding must cite a
 file in the change set. Commit status is never a review concern. Judge the
@@ -1066,7 +1101,7 @@ speculative abstractions are not defects. Argue from your assigned lens; in
 the critique round, contest findings you disagree with and explicitly
 withdraw your own findings that did not survive rebuttal.
 
-PARENT CARD
+%sPARENT CARD
 Title: %s
 
 Description:
@@ -1121,8 +1156,8 @@ array asserts that nothing survived the critique round - never a default.
 
 // checkpointBriefing opens an execute-checkpoint discussion: the just-
 // committed subtask diff under critique before the run builds on it. Slots:
-// grounding, subtask title, subtask description, parent card title,
-// environment block, fenced diff.
+// grounding, an optional read-only-roots block, subtask title, subtask
+// description, parent card title, environment block, fenced diff.
 const checkpointBriefing = `%sYou are discussing a just-committed increment of work: one subtask of a
 larger task, written by a coding agent moments ago. Decide whether the run
 should proceed to the next subtask or revise this diff first. Review only
@@ -1135,7 +1170,7 @@ speculative abstractions are not defects. Argue from your assigned lens; in
 the critique rounds, contest findings you disagree with and explicitly
 withdraw your own findings that did not survive rebuttal.
 
-SUBTASK
+%sSUBTASK
 Title: %s
 
 Description:

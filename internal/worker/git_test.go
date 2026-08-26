@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"crypto/sha256"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1240,4 +1241,108 @@ func TestCandidateGitCannotPush(t *testing.T) {
 	err := g.Push(context.Background(), "cm/x-1-c1")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "branch policy not set")
+}
+
+// WorktreeState must move for everything the coder writes and stay put for the
+// build artifacts a check command leaves behind - the distinction the verify
+// tool's already-passed report rests on.
+func TestWorktreeStateTracksWritesAndIgnoresArtifacts(t *testing.T) {
+	t.Parallel()
+
+	remote := setupBareRemote(t)
+	ws := filepath.Join(t.TempDir(), "ws")
+	g := NewGit(ws, "", "", "")
+	ctx := context.Background()
+
+	require.NoError(t, g.Clone(ctx, remote, "main"))
+
+	state := func() string {
+		s, err := g.WorktreeState(ctx)
+		require.NoError(t, err)
+
+		return s
+	}
+
+	clean := state()
+	assert.Equal(t, clean, state(), "an unchanged worktree must fingerprint the same twice")
+
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "README.md"), []byte("edited\n"), 0o644))
+
+	tracked := state()
+	assert.NotEqual(t, clean, tracked, "an edit to a tracked file must move the fingerprint")
+
+	created := filepath.Join(ws, "new.txt")
+	require.NoError(t, os.WriteFile(created, []byte("one\n"), 0o644))
+
+	added := state()
+	assert.NotEqual(t, tracked, added, "a new untracked file must move the fingerprint")
+
+	require.NoError(t, os.WriteFile(created, []byte("two\n"), 0o644))
+	assert.NotEqual(t, added, state(), "an edit to an untracked file must move the fingerprint")
+
+	require.NoError(t, os.WriteFile(filepath.Join(ws, ".gitignore"), []byte("artifacts/\n"), 0o644))
+
+	ignoring := state()
+
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "artifacts"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "artifacts", "out"), []byte("build output\n"), 0o644))
+	assert.Equal(t, ignoring, state(), "an ignored build artifact must not read as a write")
+}
+
+// foldUntracked is on the coder's critical path twice per verify call, so its
+// work has to be bounded: past the budget it degrades to an error, which the
+// fingerprint's only caller reads as "assume written".
+func TestFoldUntrackedBoundsTotalBytes(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "a"), []byte("aaaaaaaaaa"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "b"), []byte("bbbbbbbbbb"), 0o644))
+
+	paths := []string{"a", "b"}
+
+	require.NoError(t, foldUntracked(context.Background(), sha256.New(), dir, paths, 20),
+		"content that fits the budget is folded in whole")
+
+	require.ErrorIs(t, foldUntracked(context.Background(), sha256.New(), dir, paths, 15), errHashBudget,
+		"content past the budget must fail rather than hash a prefix")
+	require.ErrorIs(t, foldUntracked(context.Background(), sha256.New(), dir, []string{"a"}, 4), errHashBudget,
+		"a single file past the budget must fail too")
+}
+
+// A cancelled context stops the fold instead of reading every remaining file:
+// the two git calls have their own timeout, and this loop used to sit outside
+// every bound the function's contract promises.
+func TestFoldUntrackedHonoursContext(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "a"), []byte("aaa"), 0o644))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	h := sha256.New()
+	err := foldUntracked(ctx, h, dir, []string{"a"}, 1<<20)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, sha256.New().Sum(nil), h.Sum(nil), "a cancelled fold reads nothing")
+}
+
+// An unreadable file contributes its error text and the fold continues: the
+// fingerprint stays defined without pretending the file is empty, and a
+// transient read error must not cost the whole state read.
+func TestFoldUntrackedUnreadableFileKeepsGoing(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "b"), []byte("bbb"), 0o644))
+
+	withGap := sha256.New()
+	require.NoError(t, foldUntracked(context.Background(), withGap, dir, []string{"gone", "b"}, 1<<20))
+
+	present := sha256.New()
+	require.NoError(t, foldUntracked(context.Background(), present, dir, []string{"b"}, 1<<20))
+
+	assert.NotEqual(t, present.Sum(nil), withGap.Sum(nil),
+		"the missing file still contributes to the fingerprint")
 }

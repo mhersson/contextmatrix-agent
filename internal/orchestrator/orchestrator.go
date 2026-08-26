@@ -92,6 +92,13 @@ type GitOps interface {
 	DiffStat(ctx context.Context, base string) (string, error)
 	DisableAutoGC(ctx context.Context) error
 	AddInfoExclude(ctx context.Context, pattern string) error
+	// WorktreeState is an opaque fingerprint of everything uncommitted in the
+	// worktree, built from the repository's own ignore rules so that artifacts a
+	// check command produces do not move it. Equal fingerprints mean nothing was
+	// written in between. The read is bounded in both time and bytes, so an
+	// implementation may report an error instead of fingerprinting a tree it
+	// cannot read cheaply; callers treat that as "assume written".
+	WorktreeState(ctx context.Context) (string, error)
 }
 
 // Config carries the per-run parameters the FSM needs.
@@ -199,9 +206,12 @@ type Deps struct {
 	Emit       *events.Emitter
 	Registry   *registry.Registry
 	WriteTools *tools.Registry // full toolset rooted at the workspace
-	// WriteToolsForDir builds the full write toolset rooted at dir. Used by
-	// Best-of-N to give each candidate worktree its own jailed tool registry.
-	WriteToolsForDir func(dir string) *tools.Registry
+	// WriteToolsForDir builds the full write toolset rooted at dir, plus the
+	// caller's verify tool when it has one (a genuine nil interface when the run
+	// resolved no verify command). Used by Best-of-N to give each candidate
+	// worktree its own jailed tool registry, and by the execute phase to bind the
+	// solo solver's registry once the verify plan has resolved.
+	WriteToolsForDir func(dir string, verify tools.Tool) *tools.Registry
 	ReadTools        *tools.Registry // read-only subset for planner/reviewers
 	// PlanTools builds the plan phase's own registry: the read-only subset plus
 	// the findings tool. A factory, not a registry, because the findings tool is
@@ -209,6 +219,10 @@ type Deps struct {
 	// the first attempt's list while separate drafts start clean. Nil falls back
 	// to ReadTools.
 	PlanTools func() *tools.Registry
+	// ReadRoots are the operator's declared read-only roots, resolved once at
+	// worker start. Phases hand them to tools that read paths; nothing here
+	// derives them from a card body, a plan, or a model output.
+	ReadRoots []string
 	SkillTool tools.Tool // optional; engaged by coder/review/document subagents (nil when no task-skills)
 	Cfg       Config
 	Redact    func(string) string // nil = identity; scrubs tool output in phase runs (wired by the worker)
@@ -517,7 +531,7 @@ func newRun(d Deps, tc cmclient.TaskContext) *run {
 		ledger:     o.ledger,
 		tools:      d.WriteTools,
 		workspace:  d.Cfg.Workspace,
-		coderModel: o.resolveCoderModel,
+		coderModel: o.solverCoderModel,
 		boardOps:   true,
 		push:       true,
 	}

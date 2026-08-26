@@ -51,6 +51,27 @@ the Temurin block.
   home and write permissions. End your Dockerfile on `USER user`.
 - Add your apt repo keyrings under `/usr/share/keyrings` and clean
   `/var/lib/apt/lists/*` in the same layer, matching the base image's pattern.
+- Re-declare `CMX_READ_ONLY_ROOTS` when you add a toolchain. It is the
+  colon-separated list of absolute trees the agent's `read`, `grep` and `glob`
+  tools may resolve outside the workspace, so the shell-less planning,
+  diagnosis, review and checkpoint phases can read dependency source instead of
+  guessing at an API. Your image inherits the base stage's value, which names
+  only that stage's toolchains, and setting it **replaces** the list rather than
+  adding to it - repeat the inherited paths alongside your own. Three rules:
+  - Use absolute paths, and `mkdir -p` each one in the image. A root that does
+    not exist when the worker starts is dropped silently, and the phases then
+    behave exactly as they did before, with nothing in the run to say why.
+  - Point at where the toolchain writes *at runtime*. The agent scrubs the
+    environment of every subprocess it runs for the model down to `PATH`,
+    `HOME`, `USER`, `LANG`, `LC_ALL`, `TMPDIR` and `TERM`, so a cache-prefix
+    variable you set with `ENV` does not reach the tool and it falls back to its
+    own default under `$HOME`. A JDK worker declares `/home/user/.m2/repository`
+    for the same reason the Rust variant declares `/home/user/.cargo/registry`.
+    If the toolchain must see that variable, name it in a project's
+    `verify.env`, which is the allowlist the scrub honours; the value itself
+    still has to be in the container, from the image or `worker_extra_env`.
+  - Declare only source trees. Writes are never widened: `edit`, `write` and
+    `bash` stay inside the workspace whatever this is set to.
 
 ## Publish and point a project at it
 

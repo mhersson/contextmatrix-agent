@@ -731,3 +731,62 @@ func TestCloseBoundedWaitsForFastClose(t *testing.T) {
 
 	closeBounded(c, time.Second) // returns immediately, no panic, no leak
 }
+
+func TestSpecFromEnvParsesReadOnlyRoots(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  []string
+	}{
+		{"absent", "", nil},
+		{"single root", "/opt/python", []string{"/opt/python"}},
+		{"two roots", "/a:/b", []string{"/a", "/b"}},
+		{"blank and empty entries dropped", ":/a::  :/b:", []string{"/a", "/b"}},
+		{"only separators", "::", nil},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setRequired(t)
+			t.Setenv("CMX_READ_ONLY_ROOTS", tc.value)
+
+			spec, err := specFromEnv()
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, spec.ReadOnlyRoots)
+		})
+	}
+}
+
+func TestSpecFromEnv_Attempt(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  int
+	}{
+		{"absent is the first attempt", "", 1},
+		{"zero is the first attempt", "0", 1},
+		{"negative is the first attempt", "-3", 1},
+		{"first attempt", "1", 1},
+		{"later attempt", "4", 4},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setRequired(t)
+			t.Setenv("CMX_ATTEMPT", tc.value)
+
+			spec, err := specFromEnv()
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, spec.Attempt)
+		})
+	}
+
+	t.Run("garbage is an error", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("CMX_ATTEMPT", "two")
+
+		_, err := specFromEnv()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "CMX_ATTEMPT")
+	})
+}

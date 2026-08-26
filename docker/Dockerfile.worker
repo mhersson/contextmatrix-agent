@@ -135,16 +135,27 @@ ARG RUSTUP_VERSION
 ARG RUSTUP_SHA256_AMD64
 ARG RUSTUP_SHA256_ARM64
 
-ENV RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo
-ENV PATH="/usr/local/cargo/bin:${PATH}"
+ENV RUSTUP_HOME=/home/user/.rustup \
+    CARGO_HOME=/home/user/.cargo
+ENV PATH="/home/user/.cargo/bin:${PATH}"
 
 # Install Rust. rustup-init is SHA256-verified before execution, mirroring the
 # Go tarball check above. --profile minimal keeps the footprint down; clippy and
-# rustfmt are added explicitly. RUSTUP_HOME/CARGO_HOME are made world-writable so
-# the unprivileged runtime user (UID 1000) can populate the cargo registry cache
-# - the official rust image uses the same pattern.
+# rustfmt are added explicitly.
+#
+# The toolchain lives in the runtime user's home because that is the only place
+# the rustup proxies look. Subprocesses the model runs get an environment
+# scrubbed down to a small allowlist (PATH, HOME, USER, LANG, LC_ALL, TMPDIR,
+# TERM), so RUSTUP_HOME/CARGO_HOME set here never reach the model's shell and
+# the proxies resolve the toolchain from their own defaults, $HOME/.rustup and
+# $HOME/.cargo. /home/user is created and handed to UID 1000 up front: the
+# useradd -m in the rust variant below finds the directory already present and
+# leaves its ownership alone. RUSTUP_HOME/CARGO_HOME are then made
+# world-writable so UID 1000 can populate the cargo registry cache - the
+# official rust image uses the same pattern.
 RUN set -eux; \
+    mkdir -p /home/user; \
+    chown 1000:1000 /home/user; \
     ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/'); \
     case "$ARCH" in \
       amd64) RUSTUP_SHA256="${RUSTUP_SHA256_AMD64}"; RUST_ARCH="x86_64-unknown-linux-gnu" ;; \
@@ -189,6 +200,26 @@ RUN set -eux; \
     uv tool install --python "${PYTHON_VERSION}" "ruff==${RUFF_VERSION}"
 
 # ---------------------------------------------------------------------------
+# Read-only roots. Each final stage declares in CMX_READ_ONLY_ROOTS the absolute
+# trees where ITS OWN toolchain keeps dependency source. The agent reads the list
+# once at worker start and widens the read, grep and glob tools of every phase to
+# those trees, so the shell-less planning, diagnosis, review and checkpoint
+# phases can read dependency source instead of guessing at an API; edit, write
+# and bash stay confined to the workspace. These are image facts, which is why
+# they live here rather than in the agent's source, and an operator replaces the
+# list per deployment through worker_extra_env. A stage that declares nothing
+# behaves exactly as before.
+#
+# A declared directory must exist when the worker starts or it is dropped as
+# unresolvable, so caches the run populates later are created empty first. Every
+# path is under the runtime user's home unless the toolchain honours a prefix
+# variable at runtime: the harness scrubs the environment of subprocesses it runs
+# for the model down to PATH, HOME, USER, LANG, LC_ALL, TMPDIR and TERM, so a
+# toolchain pointed elsewhere by a build-time ENV falls back to its own default.
+# Node needs no entry: node_modules lives inside the workspace.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
 # go-node - the Go + Node worker variant (historical image content).
 # ---------------------------------------------------------------------------
 FROM go-node-toolchain AS go-node
@@ -196,7 +227,9 @@ COPY --from=build /out/contextmatrix-agent /usr/local/bin/contextmatrix-agent
 RUN useradd -m -u 1000 -s /bin/bash user
 USER 1000:1000
 WORKDIR /home/user
-RUN mkdir -p /home/user/workspace
+# GOPATH is unset, so the module cache resolves to $HOME/go/pkg/mod.
+ENV CMX_READ_ONLY_ROOTS=/home/user/go/pkg/mod
+RUN mkdir -p /home/user/workspace /home/user/go/pkg/mod
 HEALTHCHECK NONE
 ENTRYPOINT ["contextmatrix-agent", "work"]
 
@@ -208,7 +241,11 @@ COPY --from=build /out/contextmatrix-agent /usr/local/bin/contextmatrix-agent
 RUN useradd -m -u 1000 -s /bin/bash user
 USER 1000:1000
 WORKDIR /home/user
-RUN mkdir -p /home/user/workspace
+# CARGO_HOME is not on the harness subprocess allowlist, so cargo falls back to
+# its default: crate sources land in $HOME/.cargo/registry and git dependencies
+# in $HOME/.cargo/git.
+ENV CMX_READ_ONLY_ROOTS=/home/user/.cargo/registry:/home/user/.cargo/git
+RUN mkdir -p /home/user/workspace /home/user/.cargo/registry /home/user/.cargo/git
 HEALTHCHECK NONE
 ENTRYPOINT ["contextmatrix-agent", "work"]
 
@@ -220,6 +257,9 @@ COPY --from=build /out/contextmatrix-agent /usr/local/bin/contextmatrix-agent
 RUN useradd -m -u 1000 -s /bin/bash user
 USER 1000:1000
 WORKDIR /home/user
+# The managed CPython install prefix, holding the standard library source. A
+# project's own dependencies live in its in-workspace virtualenv.
+ENV CMX_READ_ONLY_ROOTS=/opt/python
 RUN mkdir -p /home/user/workspace
 HEALTHCHECK NONE
 ENTRYPOINT ["contextmatrix-agent", "work"]
@@ -230,10 +270,17 @@ ENTRYPOINT ["contextmatrix-agent", "work"]
 #
 # Built FROM python-toolchain so the managed CPython, its /usr/local/bin symlinks
 # and the uv tool shims stay intact (an explicit-source COPY would dereference
-# them). Go and Rust are self-contained prefixes and copy in cleanly. --chmod on
-# the Rust copy re-applies the world-writable bits (COPY --from drops them) in the
-# same layer, so UID 1000 can populate the cargo registry cache without a second
-# ~1 GB chmod layer.
+# them). Go is a self-contained prefix and copies in cleanly. Rust lands in the
+# runtime user's home, where the rustup proxies resolve it by default: the
+# environment of the subprocesses the model runs is scrubbed down to a small
+# allowlist that carries no RUSTUP_HOME/CARGO_HOME, so a build-time prefix
+# variable would never reach the model's shell. --chmod on the Rust copy
+# re-applies the world-writable bits (COPY --from drops them) in the same layer,
+# so UID 1000 can populate the cargo registry cache without a second ~1 GB chmod
+# layer. Whether that --chmod also reaches the copied trees' own top directories,
+# and the /home/user they imply, varies between BuildKit releases, so nothing
+# here leans on it: the home, both toolchain roots and every cache directory are
+# created and handed to UID 1000 explicitly, as root, below.
 # ---------------------------------------------------------------------------
 FROM python-toolchain AS full
 
@@ -242,16 +289,28 @@ COPY --from=go-node-toolchain /usr/local/go /usr/local/go
 COPY --from=go-node-toolchain /usr/local/bin/golangci-lint /usr/local/bin/gofumpt /usr/local/bin/
 
 # Rust toolchain.
-ENV RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo
-ENV PATH="/usr/local/cargo/bin:${PATH}"
-COPY --chmod=0777 --from=rust-toolchain /usr/local/rustup /usr/local/rustup
-COPY --chmod=0777 --from=rust-toolchain /usr/local/cargo /usr/local/cargo
+ENV RUSTUP_HOME=/home/user/.rustup \
+    CARGO_HOME=/home/user/.cargo
+ENV PATH="/home/user/.cargo/bin:${PATH}"
+COPY --chmod=0777 --from=rust-toolchain /home/user/.rustup /home/user/.rustup
+COPY --chmod=0777 --from=rust-toolchain /home/user/.cargo /home/user/.cargo
 
 COPY --from=build /out/contextmatrix-agent /usr/local/bin/contextmatrix-agent
-RUN useradd -m -u 1000 -s /bin/bash user
+# The runtime home is laid out in one root step: the caches the read-only roots
+# name must exist before the worker starts, and UID 1000 has to write into them
+# and into CARGO_HOME itself, where cargo takes its package-cache lock. The
+# toolchain roots are chowned and chmodded non-recursively, so their contents
+# keep the mode the copies gave them and no second pass over ~1 GB is added.
+RUN useradd -m -u 1000 -s /bin/bash user \
+    && mkdir -p /home/user/workspace /home/user/go/pkg/mod \
+         /home/user/.cargo/registry /home/user/.cargo/git \
+    && chown -R 1000:1000 /home/user/workspace /home/user/go \
+    && chown 1000:1000 /home/user /home/user/.rustup /home/user/.cargo \
+         /home/user/.cargo/registry /home/user/.cargo/git \
+    && chmod 0755 /home/user /home/user/.rustup /home/user/.cargo
 USER 1000:1000
 WORKDIR /home/user
-RUN mkdir -p /home/user/workspace
+# Every toolchain's own roots, joined: Go, Rust, Python.
+ENV CMX_READ_ONLY_ROOTS=/home/user/go/pkg/mod:/home/user/.cargo/registry:/home/user/.cargo/git:/opt/python
 HEALTHCHECK NONE
 ENTRYPOINT ["contextmatrix-agent", "work"]

@@ -83,6 +83,35 @@ var (
 	ErrNotFound = errors.New("executor: container not found")
 )
 
+// ExitCause records how a container run ended. It travels with the exit code
+// because the code alone cannot say: both kill paths report -1, a container the
+// watchdog killed reports the same SIGKILL code as one that chose to exit on
+// it, and a wait the daemon flagged reports a code that means nothing at all.
+type ExitCause string
+
+// The ways a run can end. resolveCause folds them into one value.
+const (
+	// ExitNormal is a container that exited on its own and whose wait the
+	// daemon reported cleanly. The exit code says whether the run succeeded.
+	ExitNormal ExitCause = "normal"
+	// ExitTimeout is a container killed for outliving the container timeout.
+	ExitTimeout ExitCause = "timeout"
+	// ExitWaitFailure is a container killed because the wait itself failed,
+	// which leaves the run's own outcome unobserved.
+	ExitWaitFailure ExitCause = "wait_failure"
+	// ExitDaemonError is a wait the daemon returned with an error attached.
+	// Nothing here killed the container, but the status code that arrived with
+	// the error is not a run outcome and must not be read as one.
+	ExitDaemonError ExitCause = "daemon_error"
+	// ExitIdleTimeout is a container the idle watchdog killed for producing no
+	// output. Its wait returns cleanly with the SIGKILL code, so only the
+	// recorded reason separates it from a container that exited on its own.
+	ExitIdleTimeout ExitCause = metrics.OutcomeIdleTimeout
+	// ExitKilled is a container killed on request, by an operator or by a
+	// shutdown sweep. Like the idle kill, its wait returns cleanly.
+	ExitKilled ExitCause = metrics.OutcomeKilled
+)
+
 // containerWaiter is the one-method slice of the Docker API Kill needs to
 // observe a self-exit, narrow so tests can fake it.
 type containerWaiter interface {
@@ -119,6 +148,12 @@ type LaunchSpec struct {
 	MemoryBytes     int64
 	PidsLimit       int64
 	CorrelationID   string
+
+	// Attempt is the ordinal of this container run for the card: 1 for the
+	// first, 2 for a container that replaced a dead one, and so on. The
+	// container stamps it on its own transcript lines; the host needs it too,
+	// to stamp the terminal event it writes after the container is gone.
+	Attempt int
 
 	// MCPURL is the CM MCP endpoint the worker connects to. Its hostname is
 	// pinned into the container's /etc/hosts (see buildExtraHosts) so a name
@@ -241,7 +276,7 @@ type DockerExecutor struct {
 	pollInterval     time.Duration
 
 	onStart func(project, cardID, containerID string)
-	onExit  func(project, cardID string, exitCode int64)
+	onExit  func(project, cardID string, exitCode int64, cause ExitCause, attempt int)
 	onLog   func(project, cardID string, line []byte, stderr bool)
 
 	logger  *slog.Logger
@@ -260,7 +295,7 @@ type Config struct {
 	PollInterval     time.Duration
 
 	OnStart func(project, cardID, containerID string)
-	OnExit  func(project, cardID string, exitCode int64)
+	OnExit  func(project, cardID string, exitCode int64, cause ExitCause, attempt int)
 	OnLog   func(project, cardID string, line []byte, stderr bool)
 
 	Logger *slog.Logger
@@ -382,7 +417,7 @@ func (e *DockerExecutor) Launch(ctx context.Context, spec LaunchSpec) error {
 	// a returned webhook handler would cancel a still-running container's wait
 	// and cleanup. The container timeout is the bound.
 	//nolint:gosec // G118: detached ctx is intentional; container outlives the request
-	go e.waitAndCleanup(spec.Project, spec.CardID, resp.ID, run.StartedAt, attach, done, pumpDone, log)
+	go e.waitAndCleanup(spec.Project, spec.CardID, resp.ID, spec.Attempt, run.StartedAt, attach, done, pumpDone, log)
 
 	log.Info("container launched", "container_id", truncateID(resp.ID), "name", name)
 
@@ -423,9 +458,12 @@ func (e *DockerExecutor) pump(project, cardID string, r io.Reader, pumpDone chan
 // waitAndCleanup blocks on ContainerWait under the container timeout, kills on
 // timeout, force-removes the container, observes its duration by outcome,
 // clears the tracker entry, closes the attach connection, signals the watchdog
-// via done, waits for the pump to finish flushing output, and fires onExit.
+// via done, waits for the pump to finish flushing output, and fires onExit with
+// the exit code, the cause that separates the two kill paths, and the run's
+// attempt ordinal.
 func (e *DockerExecutor) waitAndCleanup(
 	project, cardID, containerID string,
+	attempt int,
 	startedAt time.Time,
 	attach types.HijackedResponse,
 	done chan struct{},
@@ -436,7 +474,7 @@ func (e *DockerExecutor) waitAndCleanup(
 	defer attach.Close()
 
 	exitCode := int64(0)
-	timedOut := false
+	observed := ExitNormal
 
 	waitCtx, cancel := context.WithTimeout(context.Background(), e.containerTimeout)
 	defer cancel()
@@ -448,14 +486,18 @@ func (e *DockerExecutor) waitAndCleanup(
 		exitCode = res.StatusCode
 		if res.Error != nil {
 			log.Warn("container wait reported error", "error", res.Error.Message)
+
+			observed = ExitDaemonError
 		}
 	case err := <-errCh:
 		if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
 			log.Warn("container timed out, killing", "timeout", e.containerTimeout)
 
-			timedOut = true
+			observed = ExitTimeout
 		} else {
 			log.Warn("container wait failed, killing", "error", err)
+
+			observed = ExitWaitFailure
 		}
 
 		e.kill(containerID, log)
@@ -470,14 +512,20 @@ func (e *DockerExecutor) waitAndCleanup(
 		log.Warn("failed to remove container", "container_id", truncateID(containerID), "error", err)
 	}
 
+	// Read the recorded kill reason before Remove clears it, and derive both
+	// the cause and the metrics label from it, so the two cannot disagree
+	// about how the run ended.
+	reason := e.tracker.Reason(project, cardID)
+	cause := resolveCause(observed, reason)
+
 	if e.metrics != nil {
-		outcome := resolveOutcome(timedOut, e.tracker.Reason(project, cardID), exitCode)
+		outcome := resolveOutcome(cause, reason, exitCode)
 		e.metrics.ContainerDuration.WithLabelValues(outcome).Observe(time.Since(startedAt).Seconds())
 	}
 
 	e.tracker.Remove(project, cardID)
 
-	log.Info("container exited", "exit_code", exitCode)
+	log.Info("container exited", "exit_code", exitCode, "cause", string(cause))
 
 	// Wait for the output pump to finish flushing before firing onExit, so the
 	// session secret registry still covers trailing stderr lines that arrive
@@ -489,7 +537,7 @@ func (e *DockerExecutor) waitAndCleanup(
 	}
 
 	if e.onExit != nil {
-		e.onExit(project, cardID, exitCode)
+		e.onExit(project, cardID, exitCode, cause, attempt)
 	}
 }
 

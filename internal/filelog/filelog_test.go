@@ -25,7 +25,7 @@ func TestBeginWriteEnd(t *testing.T) {
 	l.Begin("proj", "CARD-1", "abcdef0123456789")
 	l.Write("proj", "CARD-1", []byte(`{"kind":"model_response"}`), false)
 	l.Write("proj", "CARD-1", []byte("time=T level=INFO msg=claimed"), true)
-	l.End("proj", "CARD-1", 0)
+	l.End("proj", "CARD-1", 0, "normal")
 
 	data, err := os.ReadFile(filepath.Join(dir, "proj", "card-1.log"))
 	require.NoError(t, err)
@@ -46,11 +46,11 @@ func TestResumeAppends(t *testing.T) {
 
 	l.Begin("p", "C-1", "cid-run-1")
 	l.Write("p", "C-1", []byte("run one line"), false)
-	l.End("p", "C-1", 0)
+	l.End("p", "C-1", 0, "normal")
 
 	l.Begin("p", "C-1", "cid-run-2")
 	l.Write("p", "C-1", []byte("run two line"), false)
-	l.End("p", "C-1", 1)
+	l.End("p", "C-1", 1, "normal")
 
 	data, err := os.ReadFile(filepath.Join(dir, "p", "c-1.log"))
 	require.NoError(t, err)
@@ -71,7 +71,7 @@ func TestBeginSupersedesUnclosedRun(t *testing.T) {
 	// No End for the first run - its entry is still open.
 	l.Begin("p", "C-1", "run-two")
 	l.Write("p", "C-1", []byte("second run line"), false)
-	l.End("p", "C-1", 0)
+	l.End("p", "C-1", 0, "normal")
 
 	data, err := os.ReadFile(filepath.Join(dir, "p", "c-1.log"))
 	require.NoError(t, err)
@@ -101,7 +101,7 @@ func TestConcurrentCardsSeparateFiles(t *testing.T) {
 				l.Write("p", card, []byte(card+" line"), false)
 			}
 
-			l.End("p", card, 0)
+			l.End("p", card, 0, "normal")
 		})
 	}
 
@@ -132,7 +132,7 @@ func TestDisabledAndNilAreNoops(t *testing.T) {
 	assert.NotPanics(t, func() {
 		disabled.Begin("p", "C", "cid")
 		disabled.Write("p", "C", []byte("x"), false)
-		disabled.End("p", "C", 0)
+		disabled.End("p", "C", 0, "normal")
 	})
 
 	var nilLogger *Logger
@@ -140,7 +140,7 @@ func TestDisabledAndNilAreNoops(t *testing.T) {
 	assert.NotPanics(t, func() {
 		nilLogger.Begin("p", "C", "cid")
 		nilLogger.Write("p", "C", []byte("x"), false)
-		nilLogger.End("p", "C", 0)
+		nilLogger.End("p", "C", 0, "normal")
 	})
 
 	entries, err := os.ReadDir(dir)
@@ -158,7 +158,7 @@ func TestUnwritableRootSwallowed(t *testing.T) {
 	assert.NotPanics(t, func() {
 		l.Begin("proj", "C-1", "cid")
 		l.Write("proj", "C-1", []byte("line"), false)
-		l.End("proj", "C-1", 0)
+		l.End("proj", "C-1", 0, "normal")
 	})
 }
 
@@ -168,7 +168,7 @@ func TestSanitizePreventsTraversal(t *testing.T) {
 
 	l.Begin("..", "..", "cid")
 	l.Write("..", "..", []byte("evil"), false)
-	l.End("..", "..", 0)
+	l.End("..", "..", 0, "normal")
 
 	// ".." sanitizes to "--"; the file stays inside dir.
 	_, err := os.Stat(filepath.Join(dir, "--", "--.log"))
@@ -189,7 +189,7 @@ func TestFilePermissions(t *testing.T) {
 
 	l.Begin("proj", "CARD-1", "cid")
 	l.Write("proj", "CARD-1", []byte("line"), false)
-	l.End("proj", "CARD-1", 0)
+	l.End("proj", "CARD-1", 0, "normal")
 
 	fi, err := os.Stat(filepath.Join(dir, "proj", "card-1.log"))
 	require.NoError(t, err)
@@ -198,4 +198,127 @@ func TestFilePermissions(t *testing.T) {
 	di, err := os.Stat(filepath.Join(dir, "proj"))
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o700), di.Mode().Perm())
+}
+
+func TestNextAttemptCountsRunHeaders(t *testing.T) {
+	dir := t.TempDir()
+	l := New(dir, testLogger())
+
+	assert.Equal(t, 1, l.NextAttempt("proj", "CARD-1"), "a card with no log has never run")
+
+	l.Begin("proj", "CARD-1", "aaaaaaaaaaaa")
+	l.Write("proj", "CARD-1", []byte(`{"seq":1,"kind":"state_change"}`), false)
+	l.End("proj", "CARD-1", 0, "normal")
+
+	assert.Equal(t, 2, l.NextAttempt("proj", "CARD-1"))
+
+	l.Begin("proj", "CARD-1", "bbbbbbbbbbbb")
+	l.End("proj", "CARD-1", 137, "normal")
+
+	assert.Equal(t, 3, l.NextAttempt("proj", "CARD-1"))
+	assert.Equal(t, 1, l.NextAttempt("proj", "CARD-2"), "the count is per card")
+	assert.Equal(t, 1, l.NextAttempt("other", "CARD-1"), "the count is per project")
+}
+
+// A container that dies leaves a header with no footer - exactly the restart
+// case the ordinal exists for - so the count must include it.
+func TestNextAttemptCountsAnUnclosedRun(t *testing.T) {
+	dir := t.TempDir()
+	l := New(dir, testLogger())
+
+	l.Begin("proj", "CARD-1", "aaaaaaaaaaaa")
+
+	assert.Equal(t, 2, l.NextAttempt("proj", "CARD-1"))
+}
+
+// Container output lands in the same file as the headers, so a line that
+// merely quotes the header text must not be counted as a run.
+func TestNextAttemptCountsOnlyLineLeadingHeaders(t *testing.T) {
+	dir := t.TempDir()
+	l := New(dir, testLogger())
+
+	l.Begin("proj", "CARD-1", "aaaaaaaaaaaa")
+	l.Write("proj", "CARD-1", []byte(`{"seq":1,"data":{"text":"==== run started 2026-08-25T00:00:00Z container=x ===="}}`), false)
+	l.Write("proj", "CARD-1", []byte("tail of the log: ==== run started later ===="), true)
+	l.End("proj", "CARD-1", 0, "normal")
+
+	assert.Equal(t, 2, l.NextAttempt("proj", "CARD-1"))
+}
+
+// Transcript lines can be far larger than any fixed scan buffer (tool output
+// alone defaults to 128 KB), so the count must not depend on line length.
+func TestNextAttemptCountsPastVeryLongLines(t *testing.T) {
+	dir := t.TempDir()
+	l := New(dir, testLogger())
+
+	l.Begin("proj", "CARD-1", "aaaaaaaaaaaa")
+	l.Write("proj", "CARD-1", []byte(`{"data":"`+strings.Repeat("x", 256<<10)+`"}`), false)
+	l.End("proj", "CARD-1", 0, "normal")
+
+	l.Begin("proj", "CARD-1", "bbbbbbbbbbbb")
+	l.Write("proj", "CARD-1", []byte(strings.Repeat("y", 300<<10)), true)
+	l.End("proj", "CARD-1", 0, "normal")
+
+	assert.Equal(t, 3, l.NextAttempt("proj", "CARD-1"))
+}
+
+func TestNextAttemptDisabledAndNilAreFirstAttempt(t *testing.T) {
+	var nilLogger *Logger
+
+	assert.Equal(t, 1, nilLogger.NextAttempt("proj", "CARD-1"))
+	assert.Equal(t, 1, New("", testLogger()).NextAttempt("proj", "CARD-1"))
+}
+
+// TestFooterRecordsTheCause pins the datum the exit code cannot carry: both
+// kill paths report -1, so only the cause says which one ended the run.
+func TestFooterRecordsTheCause(t *testing.T) {
+	tests := []struct {
+		name     string
+		exitCode int64
+		cause    string
+	}{
+		{"normal", 0, "normal"},
+		{"timeout kill", -1, "timeout"},
+		{"wait failure", -1, "wait_failure"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			l := New(dir, testLogger())
+
+			l.Begin("proj", "CARD-1", "abcdef012345")
+			l.End("proj", "CARD-1", tc.exitCode, tc.cause)
+
+			data, err := os.ReadFile(filepath.Join(dir, "proj", "card-1.log"))
+			require.NoError(t, err)
+
+			s := string(data)
+
+			assert.Contains(t, s, fmt.Sprintf("exit=%d", tc.exitCode))
+			assert.Contains(t, s, "cause="+tc.cause)
+		})
+	}
+}
+
+// TestSupersededRunFooterIsNotAnObservedCause covers the one footer no exit
+// path writes: a prior run still open when a new one begins. Nothing observed
+// how it ended, so it must not read as a timeout or a wait failure.
+func TestSupersededRunFooterIsNotAnObservedCause(t *testing.T) {
+	dir := t.TempDir()
+	l := New(dir, testLogger())
+
+	l.Begin("proj", "CARD-1", "aaaaaaaaaaaa")
+	l.Begin("proj", "CARD-1", "bbbbbbbbbbbb") // no End: the first run is superseded
+
+	data, err := os.ReadFile(filepath.Join(dir, "proj", "card-1.log"))
+	require.NoError(t, err)
+
+	s := string(data)
+
+	require.Equal(t, 1, strings.Count(s, "==== run ended "), "the superseded run is footered")
+	assert.Contains(t, s, "cause="+causeSuperseded)
+	assert.NotContains(t, s, "cause=timeout")
+	assert.NotContains(t, s, "cause=wait_failure")
+	assert.NotContains(t, s, "cause=normal")
 }

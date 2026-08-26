@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -463,4 +464,100 @@ func TestSpendAndReportNoSyncOnReportFailure(t *testing.T) {
 		"test: report usage failed", res, "configured/model", "main", time.Second)
 
 	assert.InDelta(t, 0.25, o.ledger.Spent(), 1e-9, "a failed report leaves only the local charge")
+}
+
+// TestDiagnoseConfigCarriesWrapUpNudge proves the diagnosis phase opts into
+// the wrap-up nudge, exactly like the planner: when the run burns down to
+// wrapUpTurns remaining, the diagnosis-specific nudge is injected as a user
+// message, steering the model to emit its "## Diagnosis" block before the cap
+// instead of exploring into it.
+func TestDiagnoseConfigCarriesWrapUpNudge(t *testing.T) {
+	ops := &fakeOps{taskContext: cmclient.TaskContext{Title: "Fix the bug", Description: "it crashes"}}
+	// Three burn turns, then the diagnosis text: with MaxTurns=8 the nudge
+	// fires after 8-5=3 consumed turns, before the model emits its diagnosis.
+	client := &planLLM{responses: []llm.Response{
+		burnResp(""), burnResp(""), burnResp(""),
+		stopResp("## Diagnosis\n### Root cause\nx\n", 0.01),
+	}}
+	d := planTestDeps(ops, client)
+	d.Cfg.MaxTurns = 8
+	o := newRun(d, ops.taskContext)
+
+	_, err := o.runDiagnose(context.Background(), "default/model")
+	require.NoError(t, err)
+
+	joined := strings.Join(client.tasks, "\n")
+	assert.Contains(t, joined, diagnoseWrapUpMessage,
+		"the wrap-up nudge reaches the diagnosis conversation as a user message")
+}
+
+// TestDiagnoseTurnCapNeverRaisesTheConfiguredBase mirrors TestPlanTurnCap: the
+// diagnosis phase cap only ever tightens the configured budget, never lifts it.
+func TestDiagnoseTurnCapNeverRaisesTheConfiguredBase(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		base int
+		want int
+	}{
+		"a smaller configured base is not raised": {base: 10, want: 10},
+		"a larger configured base is capped":      {base: 100, want: diagnoseMaxTurns},
+		"base equal to the cap is unchanged":      {base: diagnoseMaxTurns, want: diagnoseMaxTurns},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, diagnoseTurnCap(tc.base))
+		})
+	}
+}
+
+// TestGuardedPhasesUnchanged pins that giving the diagnosis phase its own
+// end-of-run guards does not disturb the already-guarded phases. The coder
+// keeps its wrap-up nudge and its grace-turn finish at the cap - its
+// WriteTools registry carries the finish tool, so the grace call actually
+// lands. The plan phase keeps its own wrap-up nudge and its own turn cap,
+// distinct from diagnoseMaxTurns, and still requests no grace turn: like
+// diagnosis, the planner's registry carries no Terminal tool, so the field
+// would be inert there too - see the doc comment on runModelDiagnose.
+func TestGuardedPhasesUnchanged(t *testing.T) {
+	t.Run("coder keeps its wrap-up nudge and grace-turn finish", func(t *testing.T) {
+		ops := &fakeOps{}
+		git := &fakeGit{committed: true}
+		// Five burn turns == MaxTurns(5) caps the main loop; the sixth response
+		// is consumed by the grace call, which lands finish before max_turns is
+		// returned (mirrors TestCoderGraceTurnFinishes).
+		client := &planLLM{responses: append(burnResps(5), finishResp("feat: done", 0.01))}
+		d := execTestDeps(ops, git, client)
+		d.Cfg.MaxTurns = 5
+		o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+
+		require.NoError(t, runExecute(context.Background(), o))
+
+		joined := strings.Join(client.tasks, "\n")
+		assert.Contains(t, joined, coderWrapUpMessage, "the coder still gets its own wrap-up nudge")
+
+		calls := ops.recorded()
+		assert.GreaterOrEqual(t, indexOfCall(calls, "CompleteTask:SUB-1"), 0,
+			"the coder still lands a grace-turn finish at its cap; calls=%v", calls)
+	})
+
+	t.Run("plan keeps its own wrap-up nudge and its own turn cap", func(t *testing.T) {
+		ops := &fakeOps{}
+		// Three burn turns, then the plan JSON: with MaxTurns=8 the nudge fires
+		// after 8-5=3 consumed turns (mirrors TestRunPlanGetsWrapUpNudge).
+		client := &planLLM{responses: []llm.Response{
+			burnResp(""), burnResp(""), burnResp(""),
+			stopResp(onePlanJSON, 0.01),
+		}}
+		o := autoPlanRun(ops, client, 8)
+
+		require.NoError(t, runPlan(context.Background(), o))
+		assert.Len(t, ops.createCardArgs, 1, "the plan still runs to completion")
+
+		joined := strings.Join(client.tasks, "\n")
+		assert.Contains(t, joined, planWrapUpMessage, "the plan still gets its own wrap-up nudge")
+
+		assert.Equal(t, planMaxTurns, planTurnCap(999, false),
+			"the plan's own cap is untouched and stays distinct from diagnoseMaxTurns")
+	})
 }

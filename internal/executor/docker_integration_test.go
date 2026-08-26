@@ -29,12 +29,13 @@ func integrationGuard(t *testing.T) {
 const alpineImage = "alpine:3"
 
 // exitRecorder collects onExit callbacks so a test can wait for the exit and
-// assert the code.
+// assert the code and the cause.
 type exitRecorder struct {
 	mu    sync.Mutex
 	done  chan struct{}
 	once  sync.Once
 	code  int64
+	cause ExitCause
 	fired bool
 }
 
@@ -42,15 +43,16 @@ func newExitRecorder() *exitRecorder {
 	return &exitRecorder{done: make(chan struct{})}
 }
 
-func (r *exitRecorder) onExit(_, _ string, code int64) {
+func (r *exitRecorder) onExit(_, _ string, code int64, cause ExitCause, _ int) {
 	r.mu.Lock()
 	r.code = code
+	r.cause = cause
 	r.fired = true
 	r.mu.Unlock()
 	r.once.Do(func() { close(r.done) })
 }
 
-func (r *exitRecorder) wait(t *testing.T, d time.Duration) int64 {
+func (r *exitRecorder) wait(t *testing.T, d time.Duration) (int64, ExitCause) {
 	t.Helper()
 
 	select {
@@ -58,11 +60,11 @@ func (r *exitRecorder) wait(t *testing.T, d time.Duration) int64 {
 		r.mu.Lock()
 		defer r.mu.Unlock()
 
-		return r.code
+		return r.code, r.cause
 	case <-time.After(d):
 		t.Fatalf("onExit did not fire within %s", d)
 
-		return 0
+		return 0, ""
 	}
 }
 
@@ -183,8 +185,9 @@ func TestIntegration_LaunchEchoAndExit(t *testing.T) {
 	_, err = run.Stdin.Write([]byte("hello\n"))
 	require.NoError(t, err)
 
-	code := exits.wait(t, 30*time.Second)
+	code, cause := exits.wait(t, 30*time.Second)
 	assert.Equal(t, int64(0), code, "clean exit")
+	assert.Equal(t, ExitNormal, cause)
 
 	// Verify that waitAndCleanup observed exactly one container_duration sample.
 	// The observation happens before onExit fires, so by the time wait() returns
@@ -257,8 +260,9 @@ func TestIntegration_ContainerTimeout(t *testing.T) {
 		Cmd:         []string{"sleep", "60"},
 	}))
 
-	code := exits.wait(t, 30*time.Second)
+	code, cause := exits.wait(t, 30*time.Second)
 	assert.Equal(t, int64(-1), code, "timeout kill reports -1")
+	assert.Equal(t, ExitTimeout, cause, "the cause is what separates this from a wait failure, which also reports -1")
 
 	assert.Eventually(t, func() bool {
 		return exec.tracker.Count() == 0
@@ -292,9 +296,11 @@ func TestIntegration_IdleWatchdogKillsSilentContainer(t *testing.T) {
 	// Silent container: no output, idle watchdog must kill it well before the
 	// container timeout. The watchdog SIGKILLs independently, so ContainerWait
 	// returns a normal result with code 137 (128 + SIGKILL) via the wait path
-	// rather than the timeout path's synthetic -1.
-	code := exits.wait(t, 10*time.Second)
+	// rather than the timeout path's synthetic -1. The recorded reason is the
+	// only thing separating that from a container that chose to exit on it.
+	code, cause := exits.wait(t, 10*time.Second)
 	assert.Equal(t, int64(137), code, "idle SIGKILL surfaces 137 via the wait path")
+	assert.Equal(t, ExitIdleTimeout, cause, "a reaped container must not read as a normal exit")
 
 	assert.Eventually(t, func() bool {
 		return exec.tracker.Count() == 0
@@ -353,7 +359,7 @@ func TestIntegration_IdleWatchdogSuspendedWhileAwaiting(t *testing.T) {
 
 	// SIGKILL of a running process yields exit code 137 (128 + SIGKILL); the
 	// wait branch (not the timeout branch) surfaces it, so it is NOT -1.
-	code := exits.wait(t, 10*time.Second)
+	code, _ := exits.wait(t, 10*time.Second)
 	assert.Equal(t, int64(137), code, "SIGKILL surfaces 137 via the wait path")
 
 	assert.Eventually(t, func() bool {
@@ -390,8 +396,9 @@ func TestIntegration_StopAllAndCleanupOrphans(t *testing.T) {
 	require.Len(t, results, 1)
 	require.NoError(t, results[0].Err, "the tracked container must be killed successfully")
 
-	code := exits.wait(t, 30*time.Second)
+	code, cause := exits.wait(t, 30*time.Second)
 	assert.Equal(t, int64(137), code, "SIGKILL surfaces 137 via the wait path")
+	assert.Equal(t, ExitKilled, cause, "a swept container must not read as a normal exit")
 
 	assert.Eventually(t, func() bool {
 		return exec.tracker.Count() == 0
