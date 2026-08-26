@@ -175,6 +175,10 @@ func TestE2EHITLFullFlow(t *testing.T) {
 	spec.Interactive = true // HITL
 	spec.MaxCardCost = 0
 	spec.MaxTurns = 6
+	// Coder and reviewer roles are served by different models, so the review
+	// panel still has candidates once the coder is excluded from reviewing its
+	// own work. See e2eSelection in e2e_orchestrator_test.go.
+	spec.Selection = e2eSelection()
 
 	var transcript syncBuffer
 
@@ -233,6 +237,7 @@ func TestE2EHITLFullFlow(t *testing.T) {
 	assert.Contains(t, tx, "## Design", "the design section was presented")
 	assert.True(t, remoteHasBranch(t, remote, "cm/cmx-001"), "the card branch was pushed")
 	assert.Equal(t, "palette\n", branchFile(t, remote, "cm/cmx-001", "palette.txt"))
+	assertRealSelectorSeats(t, ops)
 }
 
 // TestE2EHITLPromoteMidRunCompletesAutonomously drives a HITL card through the
@@ -268,6 +273,7 @@ func TestE2EHITLPromoteMidRunCompletesAutonomously(t *testing.T) {
 	spec.Interactive = true // HITL until the promote frame lands
 	spec.MaxCardCost = 0
 	spec.MaxTurns = 6
+	spec.Selection = e2eSelection()
 
 	var transcript syncBuffer
 
@@ -324,6 +330,14 @@ func TestE2EHITLPromoteMidRunCompletesAutonomously(t *testing.T) {
 
 	assert.True(t, remoteHasBranch(t, remote, "cm/cmx-001"), "the promoted run pushed the card branch")
 	assert.Equal(t, "palette\n", branchFile(t, remote, "cm/cmx-001", "palette.txt"))
+
+	// The card branch is pushed by execute, so branch assertions alone cannot
+	// tell a completed run from one that parked in review. The persisted phase
+	// order can: it has to reach the end of the FSM.
+	assert.Equal(t, []string{"plan", "execute", "judge", "document", "review", "integrate", "pr_gates", "done"}, ops.phases,
+		"the promoted run drives the whole FSM, review included")
+	assert.Equal(t, 1, ops.count("StartReview"), "the review panel actually convened")
+	assertRealSelectorSeats(t, ops)
 }
 
 // waitForAwaiting blocks until the transcript shows at least n awaiting-human

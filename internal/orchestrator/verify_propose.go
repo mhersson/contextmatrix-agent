@@ -90,13 +90,20 @@ func (o *run) proposeVerify(ctx context.Context) (verifyPlan, error) {
 		return verifyPlan{}, err // budget park propagates
 	}
 
-	model := d.Registry.SelectByComplexity(registry.SelectInput{
+	p := d.Registry.SelectByComplexity(registry.SelectInput{
 		Role: registry.RoleReviewer,
 		Tier: registry.TierSimple,
-	}).Model
-	if model == "" {
+	})
+
+	// Nothing is employable: an unproposed gate is safe, so skip rather than
+	// park the run over a step that is itself best-effort.
+	if !p.OK {
 		return verifyPlan{}, nil
 	}
+
+	o.noteShortfall(ctx, "verify propose", p)
+
+	model := p.Model
 
 	task := fmt.Sprintf(verifyProposePrompt, o.grounding, cfg.Workspace)
 

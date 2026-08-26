@@ -202,70 +202,124 @@ func TestParseVerdictNormalizesSeverity(t *testing.T) {
 		"the malicious severity must not inject a synthetic fixFiles-parsed file path; got=%v", files)
 }
 
-// TestResolveFixModelUsesFixTier proves the fix run sizes its coder on the
-// synthesizer's fix_tier, not the card tier. The registry seeds one cheap coder
-// model whose prior (0.70) clears the simple tier bar (0.65) but sits below the
-// complex bar (0.82), with a DISTINCT capable fallback. So resolveFixModel("simple")
-// must pick the cheap coder; resolveFixModel("complex") must fall back.
-func TestResolveFixModelUsesFixTier(t *testing.T) {
-	const (
-		cheapCoder = "cheap/coder"
-		fallback   = "capable/fallback"
-	)
+// fixTierCoder is measured between the default simple bar (0.65) and the
+// moderate (0.76) and complex (0.82) bars; fixTierFallback is the capable
+// default and carries no prior at all. Every fix-model test below reads that
+// one relationship, so it is stated once here.
+const (
+	fixTierCoder    = "cheap/coder"
+	fixTierFallback = "capable/fallback"
+)
 
-	catalog := llm.Catalog{
-		{ID: cheapCoder, ContextLength: 200000, PromptPricePerTok: 0.0000005, CompletionPricePerTok: 0.0000015, SupportedParameters: []string{"tools"}},
-		{ID: fallback, ContextLength: 200000, PromptPricePerTok: 0.000006, CompletionPricePerTok: 0.000012, SupportedParameters: []string{"tools"}},
+func fixTierCatalog() llm.Catalog {
+	return llm.Catalog{
+		{ID: fixTierCoder, ContextLength: 200000, PromptPricePerTok: 0.0000005, CompletionPricePerTok: 0.0000015, SupportedParameters: []string{"tools"}},
+		{ID: fixTierFallback, ContextLength: 200000, PromptPricePerTok: 0.000006, CompletionPricePerTok: 0.000012, SupportedParameters: []string{"tools"}},
 	}
-	// Prior between the default simple (0.65) and complex (0.82) bars.
-	prior := 0.70
-	priors := registry.Priors{
-		Models: map[string]registry.PriorEntry{cheapCoder: {Coder: &prior}},
-	}
-	reg := registry.NewRegistryFromParts(catalog, priors, nil, nil, fallback)
-
-	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reg)
-	// No coder pin -> complexity selection path; card tier is moderate by default.
-	o := newReviewRun(d, cmclient.TaskContext{}, 0)
-
-	assert.Equal(t, cheapCoder, o.resolveFixModel(context.Background(), "simple", false),
-		"simple fix_tier clears the cheap coder's bar")
-	assert.Equal(t, fallback, o.resolveFixModel(context.Background(), "complex", false),
-		"complex fix_tier excludes the cheap coder -> capable fallback")
-	assert.NotEqual(t, cheapCoder, o.resolveFixModel(context.Background(), "complex", false))
 }
 
-// TestResolveFixModelAuthoritativeForcesComplex proves the authoritative pass
-// sizes the fix coder on the complex tier regardless of the synthesizer's
-// fix_tier. The cheap coder clears the simple bar (0.65) but not the complex bar
-// (0.82); so resolveFixModel("simple", false) picks it, but the authoritative
-// resolveFixModel("simple", true) escalates to complex, gating the cheap coder
-// out and falling back to the capable model.
-func TestResolveFixModelAuthoritativeForcesComplex(t *testing.T) {
-	const (
-		cheapCoder = "cheap/coder"
-		fallback   = "capable/fallback"
-	)
-
-	catalog := llm.Catalog{
-		{ID: cheapCoder, ContextLength: 200000, PromptPricePerTok: 0.0000005, CompletionPricePerTok: 0.0000015, SupportedParameters: []string{"tools"}},
-		{ID: fallback, ContextLength: 200000, PromptPricePerTok: 0.000006, CompletionPricePerTok: 0.000012, SupportedParameters: []string{"tools"}},
-	}
-	// Prior between the default simple (0.65) and complex (0.82) bars.
+func fixTierPriors() registry.Priors {
 	prior := 0.70
-	priors := registry.Priors{
-		Models: map[string]registry.PriorEntry{cheapCoder: {Coder: &prior}},
+
+	return registry.Priors{
+		Models: map[string]registry.PriorEntry{fixTierCoder: {Coder: &prior}},
 	}
-	reg := registry.NewRegistryFromParts(catalog, priors, nil, nil, fallback)
+}
 
+func fixTierRun(t *testing.T) *run {
+	t.Helper()
+
+	reg := registry.NewRegistryFromParts(fixTierCatalog(), fixTierPriors(), nil, nil, fixTierFallback)
 	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reg)
-	o := newReviewRun(d, cmclient.TaskContext{}, 0)
 
-	assert.Equal(t, cheapCoder, o.resolveFixModel(context.Background(), "simple", false),
-		"non-authoritative simple fix_tier clears the cheap coder's bar")
-	assert.Equal(t, fallback, o.resolveFixModel(context.Background(), "simple", true),
-		"authoritative pass forces complex -> cheap coder excluded -> capable fallback")
-	assert.NotEqual(t, cheapCoder, o.resolveFixModel(context.Background(), "simple", true))
+	// No coder pin, so every case goes down the complexity-selection path.
+	return newReviewRun(d, cmclient.TaskContext{}, 0)
+}
+
+// TestResolveFixModelRequestsTheRightTier pins what the synthesizer's fix_tier
+// and the authoritative flag actually control: the tier the fix coder is
+// REQUESTED at. What that request buys is a separate fact, and the pick
+// carries it. Only fixTierCoder is measured, at 0.70, so any request above
+// that bar walks down to the simple rung and reports the shortfall through
+// MetTier and AtBar. The unmeasured capable fallback is the floor below the
+// ladder, not the answer to a quality question.
+func TestResolveFixModelRequestsTheRightTier(t *testing.T) {
+	tests := []struct {
+		name          string
+		fixTier       string
+		authoritative bool
+		wantRequested registry.Tier
+		wantMet       registry.Tier
+		wantAtBar     bool
+	}{
+		{
+			name:          "simple fix_tier clears the cheap coder's bar",
+			fixTier:       "simple",
+			wantRequested: registry.TierSimple,
+			wantMet:       registry.TierSimple,
+			wantAtBar:     true,
+		},
+		{
+			name:          "complex fix_tier clamps to the rung the coder clears",
+			fixTier:       "complex",
+			wantRequested: registry.TierComplex,
+			wantMet:       registry.TierSimple,
+			wantAtBar:     false,
+		},
+		{
+			name:          "authoritative overrides fix_tier and requests complex",
+			fixTier:       "simple",
+			authoritative: true,
+			wantRequested: registry.TierComplex,
+			wantMet:       registry.TierSimple,
+			wantAtBar:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			o := fixTierRun(t)
+
+			got, err := o.resolveFixModel(context.Background(), tt.fixTier, tt.authoritative)
+			require.NoError(t, err)
+
+			assert.Equal(t, fixTierCoder, got.Model,
+				"the measured coder is the pick at every rung it clears; an unmeasured model never outranks it on quality")
+			assert.Equal(t, registry.SourceAuto, got.Source,
+				"a clamped pick is a real selection at its rung, not the capable default")
+			assert.Equal(t, tt.wantRequested, got.RequestedTier,
+				"fix_tier and the authoritative flag decide what is asked for")
+			assert.Equal(t, tt.wantMet, got.MetTier,
+				"the met tier is measured from the prior, never copied from the request")
+			assert.Equal(t, tt.wantAtBar, got.AtBar())
+
+			again, err := o.resolveFixModel(context.Background(), tt.fixTier, tt.authoritative)
+			require.NoError(t, err)
+			assert.Equal(t, got, again, "resolving the same round twice is stable")
+		})
+	}
+}
+
+// TestAuthoritativeFixGateLivesInAtBarNotInTheModel pins WHERE the
+// authoritative pass's complex floor is enforced. It is not enforced by which
+// model comes back: nothing in this catalog clears 0.82, so the authoritative
+// pass gets the same coder the plain pass got. The two picks differ in that
+// the authoritative one reports it did not reach the tier it asked for, and
+// that flag is what the escalated fix round and the shortfall advisory branch
+// on.
+func TestAuthoritativeFixGateLivesInAtBarNotInTheModel(t *testing.T) {
+	o := fixTierRun(t)
+
+	nonAuth, err := o.resolveFixModel(context.Background(), "simple", false)
+	require.NoError(t, err)
+
+	auth, err := o.resolveFixModel(context.Background(), "simple", true)
+	require.NoError(t, err)
+
+	assert.Equal(t, nonAuth.Model, auth.Model, "the catalog offers the authoritative pass nothing stronger")
+	assert.True(t, nonAuth.AtBar(), "a simple request served at simple got what it asked for")
+	assert.False(t, auth.AtBar(), "an authoritative pass that could not reach complex must say so")
+	assert.Equal(t, registry.TierComplex, auth.RequestedTier)
 }
 
 // TestFormatFixesFixFilesRoundTrip pins the line-shape contract between
@@ -1141,7 +1195,7 @@ func TestResolveFixModelUnresolvablePinEmitsAdvisory(t *testing.T) {
 	}
 	o := newReviewRun(d, tc, 0)
 
-	_ = o.resolveFixModel(context.Background(), "simple", false)
+	_, _ = o.resolveFixModel(context.Background(), "simple", false)
 
 	require.Len(t, ops.logs, 1, "unresolvable coder pin must produce exactly one advisory")
 	assert.Contains(t, ops.logs[0], "pinned/missing")
@@ -1158,7 +1212,7 @@ func TestResolveFixModelResolvablePinNoAdvisory(t *testing.T) {
 	}
 	o := newReviewRun(d, tc, 0)
 
-	_ = o.resolveFixModel(context.Background(), "simple", false)
+	_, _ = o.resolveFixModel(context.Background(), "simple", false)
 
 	assert.Empty(t, ops.logs, "resolvable coder pin must produce no advisory")
 }
@@ -1175,12 +1229,12 @@ func TestResolveFixModelUnresolvablePinDeduplicates(t *testing.T) {
 	o := newReviewRun(d, tc, 0)
 
 	// First call warns.
-	_ = o.resolveFixModel(context.Background(), "simple", false)
+	_, _ = o.resolveFixModel(context.Background(), "simple", false)
 
 	require.Len(t, ops.logs, 1)
 
 	// Second call with the same pin must NOT produce another entry (once-per-run).
-	_ = o.resolveFixModel(context.Background(), "simple", false)
+	_, _ = o.resolveFixModel(context.Background(), "simple", false)
 
 	require.Len(t, ops.logs, 1, "resolvedFixModel must deduplicate with the coderPinWarned guard")
 }
@@ -1254,6 +1308,24 @@ func TestReviewPanelEscalatesWhenAuthoritative(t *testing.T) {
 		moderatePanel, complexPanel)
 	assert.Contains(t, []string{complexPanel[0].Model, complexPanel[1].Model, complexPanel[2].Model}, strong,
 		"complex bar gates out the weak trio, forcing the strong model in; complex=%v", complexPanel)
+}
+
+// TestRunSpecialistsNoReviewerParksInstead pins that an empty review panel
+// parks the card for a human rather than indexing into it. No prior clears
+// any bar and there is no capable default, so the panel is empty on the very
+// first seat.
+func TestRunSpecialistsNoReviewerParksInstead(t *testing.T) {
+	reg := registry.NewRegistryFromParts(reviewerCatalog(), registry.Priors{}, nil, nil, "")
+	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reg)
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+
+	_, err := o.runSpecialists(context.Background(), false)
+
+	var parked *ReviewParkedError
+
+	require.ErrorAs(t, err, &parked, "an empty panel must park rather than panic")
 }
 
 func TestReviewGateFailureSkipsSpecialists(t *testing.T) {
@@ -2629,4 +2701,268 @@ func TestReviewAuthoritativeApprovedWithFindingsFramesSummary(t *testing.T) {
 	assert.Contains(t, o.reviewSummary, "were not fixed",
 		"findings surviving an approval at the cliff must not read as addressed")
 	assert.Contains(t, o.reviewSummary, "a.go", "the finding rides the summary")
+}
+
+// reviewerPrior builds a PriorEntry with only the reviewer role scored.
+func reviewerPrior(v float64) registry.PriorEntry {
+	return registry.PriorEntry{Reviewer: &v}
+}
+
+// TestReviewPanelIsEmptyWhenNoReviewerIsSelectable pins the panel builder's own
+// contract: an unservable reviewer role yields no panel at all. That empty
+// panel is the condition the review phase turns into a park for a human, which
+// TestRunSpecialistsNoReviewerParksInstead pins separately.
+func TestReviewPanelIsEmptyWhenNoReviewerIsSelectable(t *testing.T) {
+	reg := registry.NewRegistryFromParts(
+		llm.Catalog{{ID: "weak/model", ContextLength: 200000, SupportedParameters: []string{"tools"}}},
+		registry.Priors{Models: map[string]registry.PriorEntry{"weak/model": reviewerPrior(0.30)}},
+		nil, nil, "") // no capable default: nothing is employable at all
+	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reg)
+	o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", State: "in_progress"}, 0)
+
+	assert.Empty(t, o.reviewPanel(context.Background(), estimateTokens("diff"), false),
+		"an unservable reviewer role yields no panel at all")
+}
+
+// TestRefusalSentinelsDifferByPhase pins the deliberate asymmetry a future
+// reader will otherwise "fix" into consistency: no coder means there is no work
+// (blocked park), no fix model means the code is already written and pushed, so
+// a human taking it from review is the right destination.
+func TestRefusalSentinelsDifferByPhase(t *testing.T) {
+	reg := registry.NewRegistryFromParts(llm.Catalog{}, registry.Priors{}, nil, nil, "")
+
+	t.Run("coder refusal parks the card as blocked", func(t *testing.T) {
+		d := execTestDeps(&fakeOps{}, &fakeGit{}, &planLLM{})
+		d.Registry = reg
+		o := newExecRun(d, nil, 5)
+
+		_, err := o.resolveCoderModel(context.Background(),
+			subtaskRef{ID: "SUB-1", Tier: "moderate"}, "prompt")
+
+		var nme *NoModelError
+
+		require.ErrorAs(t, err, &nme)
+
+		var rp *ReviewParkedError
+
+		assert.NotErrorAs(t, err, &rp,
+			"there is no work without a coder, so this must not be a review park")
+	})
+
+	t.Run("fix refusal parks the card in review", func(t *testing.T) {
+		d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reg)
+		o := newReviewRun(d, cmclient.TaskContext{}, 0)
+
+		_, err := o.resolveFixModel(context.Background(), "moderate", false)
+
+		var rp *ReviewParkedError
+
+		require.ErrorAs(t, err, &rp)
+
+		var nme *NoModelError
+
+		assert.NotErrorAs(t, err, &nme,
+			"the code is written and pushed, so a human takes it from review, not from blocked")
+	})
+}
+
+// TestFixEscalationThatBuysNothingIsRecorded pins the no-op the card currently
+// cannot see: the escalation climbs moderate -> complex, the complex rung is
+// dry, and the walk lands back on the same model the un-escalated round would
+// have used. The round still runs - the pick is fresh - but the card says the
+// climb bought nothing.
+func TestFixEscalationThatBuysNothingIsRecorded(t *testing.T) {
+	ops := &fakeOps{}
+	reg := registry.NewRegistryFromParts(
+		llm.Catalog{{ID: "mid/coder", ContextLength: 200000, SupportedParameters: []string{"tools"}}},
+		registry.Priors{Models: map[string]registry.PriorEntry{"mid/coder": coderPrior(0.78)}},
+		nil, nil, "capable/default")
+	client := &planLLM{responses: []llm.Response{stopResp("Applied the fix.", 0.01)}}
+	d := reviewTestDeps(t, ops, &fakeGit{}, client, reg)
+	o := newReviewRun(d, cmclient.TaskContext{}, 0)
+
+	plain, err := o.resolveFixModel(context.Background(), "moderate", false)
+	require.NoError(t, err)
+	require.True(t, plain.AtBar())
+
+	o.fixEscalate = true
+	o.fixFailReason = "landed no commit"
+
+	climbed, err := o.resolveFixModel(context.Background(), "moderate", false)
+	require.NoError(t, err)
+
+	assert.Equal(t, plain.Model, climbed.Model, "the climb reached the same model")
+	assert.False(t, climbed.AtBar(), "and the caller can see the climb bought nothing")
+	assert.Equal(t, registry.TierComplex, climbed.RequestedTier)
+	assert.Equal(t, registry.TierModerate, climbed.MetTier)
+
+	model, err := o.runFixModel(context.Background(), "fix it", 2, "moderate", false)
+	require.NoError(t, err)
+	assert.Equal(t, "mid/coder", model)
+	assert.True(t, ops.loggedContains("bought nothing"),
+		"an escalation that reached no stronger model must say so; logs=%v", ops.logs)
+}
+
+// belowComplexReviewerRegistry seeds three reviewers that clear the moderate
+// bar (0.76) but none that clears the complex bar (0.82) the authoritative
+// pass asks for. One vendor prefix keeps the diversity preference out of it.
+func belowComplexReviewerRegistry() *registry.Registry {
+	return registry.NewRegistryFromParts(
+		llm.Catalog{
+			{ID: "acme/one", ContextLength: 200000, PromptPricePerTok: 4e-7, CompletionPricePerTok: 6e-7, SupportedParameters: []string{"tools"}},
+			{ID: "acme/two", ContextLength: 200000, PromptPricePerTok: 4e-7, CompletionPricePerTok: 6e-7, SupportedParameters: []string{"tools"}},
+			{ID: "acme/three", ContextLength: 200000, PromptPricePerTok: 4e-7, CompletionPricePerTok: 6e-7, SupportedParameters: []string{"tools"}},
+			{ID: "default/model", ContextLength: 131072, SupportedParameters: []string{"tools"}},
+		},
+		registry.Priors{Models: map[string]registry.PriorEntry{
+			"acme/one":   reviewerPrior(0.77),
+			"acme/two":   reviewerPrior(0.78),
+			"acme/three": reviewerPrior(0.79),
+		}},
+		nil, nil, "default/model")
+}
+
+// TestAuthoritativeReviewBelowItsBarRunsAndRecords pins the escalation gate on
+// the last pass before a human park: refusing would spend a whole run to say
+// nothing, so the pass RUNS and its verdict stands - but the card records that
+// it ran below the bar it asked for, which is what turns an invisible collapse
+// into a fact a human reading the card can weigh.
+func TestAuthoritativeReviewBelowItsBarRunsAndRecords(t *testing.T) {
+	panelResponses := func() []llm.Response {
+		return []llm.Response{
+			stopResp("Correctness ok", 0.01),
+			stopResp("Design ok", 0.01),
+			stopResp("Security ok", 0.01),
+		}
+	}
+
+	t.Run("no seat clears the bar", func(t *testing.T) {
+		ops := &fakeOps{}
+		d := reviewTestDeps(t, ops, &fakeGit{}, &planLLM{responses: panelResponses()}, belowComplexReviewerRegistry())
+		o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", State: "in_progress"}, 0)
+
+		_, err := o.runSpecialists(context.Background(), true)
+		require.NoError(t, err, "the authoritative pass still runs below its bar")
+
+		assert.True(t, ops.loggedContains("authoritative review ran below its bar"),
+			"the card must record that the last pass before a human park was under-powered; logs=%v", ops.logs)
+	})
+
+	t.Run("a seat clears the bar", func(t *testing.T) {
+		ops := &fakeOps{}
+		d := reviewTestDeps(t, ops, &fakeGit{}, &planLLM{responses: panelResponses()}, reviewerRegistry())
+		o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", State: "in_progress"}, 0)
+
+		_, err := o.runSpecialists(context.Background(), true)
+		require.NoError(t, err)
+
+		assert.False(t, ops.loggedContains("authoritative review ran below its bar"),
+			"a panel that met its bar has nothing to record; logs=%v", ops.logs)
+	})
+}
+
+// TestReviewPinnedPanelRendersRepeatedSeats pins that three copies of one
+// pinned model do not read as three independent judgements: the synthesizer
+// reads agreement as signal, so the seat count and the distinct-model count
+// must stay separable in the card log.
+func TestReviewPinnedPanelRendersRepeatedSeats(t *testing.T) {
+	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reviewerRegistry())
+	o := newReviewRun(d, cmclient.TaskContext{ModelReviewer: "pinned/model"}, 0)
+
+	panel := o.reviewPanel(context.Background(), estimateTokens("diff"), false)
+	require.Len(t, panel, reviewPanelSize)
+	assert.Equal(t, 1, registry.DistinctModels(panel), "a pin fills every seat with the one model")
+
+	summary := panelSummary(panel)
+	assert.Equal(t, reviewPanelSize-1, strings.Count(summary, "repeat"),
+		"every seat after the first repeats the pin; summary=%s", summary)
+	assert.Contains(t, summary, "pinned", "and the summary says the panel came from an operator pin")
+}
+
+// TestPinnedFixModelReportsNoFabricatedShortfall pins that a selection the
+// operator made by hand never produces an advisory about a bar it was never
+// measured against. The pins this package synthesizes carry no prior, so a
+// shortfall line for one would state a number nothing measured.
+func TestPinnedFixModelReportsNoFabricatedShortfall(t *testing.T) {
+	ops := &fakeOps{}
+	client := &planLLM{responses: []llm.Response{stopResp("Applied the fix.", 0.01)}}
+	d := reviewTestDeps(t, ops, &fakeGit{}, client, reviewerRegistry())
+	o := newReviewRun(d, cmclient.TaskContext{ModelCoder: "pinned/model"}, 0)
+	o.fixEscalate = true
+	o.fixFailReason = "landed no commit"
+
+	model, err := o.runFixModel(context.Background(), "fix it", 2, "moderate", false)
+	require.NoError(t, err)
+	assert.Equal(t, "pinned/model", model)
+
+	for _, l := range ops.logs {
+		assert.NotContains(t, l, "prior 0.00",
+			"a pin this package synthesizes carries no measured prior, so no line may state one; logs=%v", ops.logs)
+		assert.NotContains(t, l, "does not clear",
+			"nothing measured this model against a bar, so no line may say it missed one; logs=%v", ops.logs)
+		assert.NotContains(t, l, "no model clears",
+			"a pinned model was chosen by hand, so no bar was searched; logs=%v", ops.logs)
+		assert.NotContains(t, l, "bought nothing",
+			"an escalation cannot be scored against a pin that has no prior; logs=%v", ops.logs)
+	}
+}
+
+// TestFixEscalationNoOpReportsNoPriorRatherThanZero is the same guard on the
+// other card line that prints a prior: an escalated round that landed on the
+// operator's unrated fallback must not report it as rated zero.
+func TestFixEscalationNoOpReportsNoPriorRatherThanZero(t *testing.T) {
+	ops := &fakeOps{}
+	client := &planLLM{responses: []llm.Response{stopResp("Applied the fix.", 0.01)}}
+	// No priors: the escalated pick can only be the capable default.
+	reg := registry.NewRegistryFromParts(reviewerCatalog(), registry.Priors{}, nil, nil, "default/model")
+	d := reviewTestDeps(t, ops, &fakeGit{}, client, reg)
+	o := newReviewRun(d, cmclient.TaskContext{}, 0)
+	o.fixEscalate = true
+	o.fixFailReason = "landed no commit"
+
+	_, err := o.runFixModel(context.Background(), "fix it", 2, "moderate", false)
+	require.NoError(t, err)
+
+	require.True(t, ops.loggedContains("bought nothing"), "logs=%v", ops.logs)
+
+	for _, l := range ops.logs {
+		assert.NotContains(t, l, "prior 0.00",
+			"the fallback is unrated, not rated worst possible; logs=%v", ops.logs)
+	}
+}
+
+// TestReviewParkedErrorNamesItsCause pins that the sentinel reports the reason
+// it was actually constructed with, and that a bare construction still means
+// what it always meant.
+func TestReviewParkedErrorNamesItsCause(t *testing.T) {
+	assert.Equal(t, "review parked: attempts cap exhausted without approval",
+		(&ReviewParkedError{}).Error(),
+		"a bare construction keeps the meaning every existing site gave it")
+
+	assert.Equal(t, "review parked: no fix model is selectable",
+		(&ReviewParkedError{Reason: reviewParkedNoFixModel}).Error())
+}
+
+// TestFixModelRefusalNamesItsRealCause covers the one park path whose Error()
+// text IS the card line: the cleanup fix pass renders the error verbatim into
+// its own log entry, with no accurate line of its own ahead of it. A fixed
+// attempts-cap string there would tell the operator the cap was exhausted when
+// it was not, and hide the real cause entirely.
+func TestFixModelRefusalNamesItsRealCause(t *testing.T) {
+	reg := registry.NewRegistryFromParts(llm.Catalog{}, registry.Priors{}, nil, nil, "")
+	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reg)
+	o := newReviewRun(d, cmclient.TaskContext{Title: "Parent"}, 0)
+
+	committed, err := o.runFix(context.Background(), "- a.go: something", 2, "moderate", false)
+	require.Error(t, err)
+	assert.False(t, committed)
+
+	var parked *ReviewParkedError
+
+	require.ErrorAs(t, err, &parked, "the fix refusal still parks the card in review")
+
+	assert.Contains(t, err.Error(), "no fix model is selectable",
+		"the card must read the true cause; err=%v", err)
+	assert.NotContains(t, err.Error(), "attempts cap",
+		"no attempts cap was reached on this path; err=%v", err)
 }

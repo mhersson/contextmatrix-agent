@@ -1137,6 +1137,49 @@ func TestToolchainMissingMapsToBlocked(t *testing.T) {
 	assert.Equal(t, "blocked", args[1])
 }
 
+// TestNoModelMapsToBlocked: a NoModelError is an environmental park like the
+// toolchain one - the role has no employable model at all - so it takes the
+// identical path: transition the card to blocked BEFORE releasing the claim,
+// push the WIP, surface a non-nil error. Without this arm the run would land
+// in the default arm, which releases the claim and leaves the card in
+// in_progress with no visible cause.
+func TestNoModelMapsToBlocked(t *testing.T) {
+	remote := setupBareRemote(t)
+	wsParent := t.TempDir()
+	ops := newFakeOps()
+
+	swapRunOrchestrator(t, func(_ context.Context, d orchestrator.Deps) error {
+		require.NoError(t, os.WriteFile(filepath.Join(d.Cfg.Workspace, "wip.txt"), []byte("partial\n"), 0o644))
+
+		return &orchestrator.NoModelError{Role: "coder", Tier: "moderate", RequestedBar: 0.76, LowestBar: 0.65, Excluded: 3}
+	})
+
+	llmClient := &scriptedLLM{}
+
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	res, err := Run(context.Background(), baseSpec(t, remote, wsParent), ops, llmClient, emit, openStdin(t))
+	require.Error(t, err)
+	assert.Equal(t, "error", res.Reason)
+
+	assert.True(t, remoteHasBranch(t, remote, "cm/cmx-001"), "the model-selection park pushes WIP")
+	assert.Equal(t, 1, ops.count("TransitionCard"), "card transitioned to blocked")
+	assert.Equal(t, 1, ops.count("ReleaseCard"), "claim released on the model-selection park")
+	assert.Equal(t, 0, ops.count("CompleteTask"))
+
+	calls := ops.ops()
+	transitionIdx := slices.Index(calls, "TransitionCard")
+	releaseIdx := slices.Index(calls, "ReleaseCard")
+
+	require.GreaterOrEqual(t, transitionIdx, 0)
+	require.GreaterOrEqual(t, releaseIdx, 0)
+	assert.Less(t, transitionIdx, releaseIdx, "TransitionCard must happen before ReleaseCard: ownership may be required")
+
+	args := ops.argsOf("TransitionCard")
+	require.Len(t, args, 2)
+	assert.Equal(t, "blocked", args[1])
+}
+
 // TestToolchainMissingTransitionFailureDegradesGracefully: when TransitionCard
 // fails (e.g. the project's board has no in_progress -> blocked transition),
 // the park must still complete exactly like the other park arms - push WIP,
@@ -1523,10 +1566,120 @@ func TestBuildRegistryFallbackPrecedence(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := buildRegistry(tt.spec)
+			r, err := buildRegistry(tt.spec)
+			require.NoError(t, err)
+
 			got := r.SelectByComplexity(in)
 			assert.Equal(t, tt.want, got.Model,
 				"buildRegistry capable default: want %q, got %q", tt.want, got.Model)
 		})
 	}
+}
+
+// TestBuildRegistryThreadsTierBars proves the operator ladder actually reaches
+// the registry buildRegistry returns, not just the FromSelection call: the
+// registry-level tests never exercise buildRegistry, so a build that parses
+// SelectorTierBars but drops the WithTierBars chain passes every test in
+// that package while the knob does nothing.
+func TestBuildRegistryThreadsTierBars(t *testing.T) {
+	spec := RunSpec{
+		Selection: &protocol.SelectionContext{
+			Candidates: []protocol.CandidateModel{
+				{
+					Slug:                  "mid/model",
+					PromptPricePerTok:     0.000001,
+					CompletionPricePerTok: 0.000002,
+					ContextWindow:         200000,
+					CoderPrior:            0.85,
+					ReviewerPrior:         0.85,
+				},
+			},
+		},
+		// Raising complex above the model's 0.85 prior (and critical to match,
+		// keeping the ladder monotone) means a complex request cannot be met
+		// directly and must clamp down to moderate (default bar 0.76, which
+		// 0.85 clears).
+		SelectorTierBars: map[string]float64{"complex": 0.99, "critical": 0.99},
+	}
+
+	r, err := buildRegistry(spec)
+	require.NoError(t, err)
+
+	got := r.SelectByComplexity(registry.SelectInput{Role: registry.RoleCoder, Tier: registry.TierComplex})
+
+	require.True(t, got.OK)
+	assert.False(t, got.AtBar(),
+		"the operator's elevated complex bar must not be silently satisfied by an unthreaded default ladder")
+	assert.Equal(t, registry.TierModerate, got.MetTier)
+}
+
+// TestRunReleasesClaimOnInvalidTierLadder proves an invalid operator ladder
+// stops the worker before any orchestrator phase runs: the claim taken by
+// Run is released, the orchestrator is never invoked, and the error message
+// carries the underlying reason exactly once rather than being wrapped a
+// second time on its way out of runFSM.
+func TestRunReleasesClaimOnInvalidTierLadder(t *testing.T) {
+	remote := setupBareRemote(t)
+	wsParent := t.TempDir()
+	ops := newFakeOps()
+
+	swapRunOrchestrator(t, func(context.Context, orchestrator.Deps) error {
+		t.Fatal("orchestrator must not run when the tier ladder fails to build")
+
+		return nil
+	})
+
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	spec := baseSpec(t, remote, wsParent)
+	// Inverted ladder: simple above critical fails the monotone check.
+	spec.SelectorTierBars = map[string]float64{"simple": 0.90, "critical": 0.10}
+
+	res, err := Run(context.Background(), spec, ops, &scriptedLLM{}, emit, openStdin(t))
+
+	require.Error(t, err)
+	assert.Equal(t, "error", res.Reason)
+	assert.Equal(t, 1, ops.count("ReleaseCard"))
+
+	msg := err.Error()
+	assert.Contains(t, msg, "ladder must not decrease")
+	assert.Equal(t, 1, strings.Count(msg, "build registry:"),
+		"the error must be wrapped with context exactly once, not doubled on the way out of runFSM")
+}
+
+// TestLogReachabilityLogsCardOnlyWhenSomeTierIsUnreachable pins the worker-side
+// gate on top of registry.Reachability: a catalog that clears every configured
+// tier logs no card line at all, and a catalog that cannot reach any tier
+// (nothing injected, so every request falls to the capable default) logs
+// exactly one.
+func TestLogReachabilityLogsCardOnlyWhenSomeTierIsUnreachable(t *testing.T) {
+	catalog := llm.Catalog{
+		{ID: "top/one", ContextLength: 200000, SupportedParameters: []string{"tools"}},
+	}
+	prior := new(0.95)
+	priors := registry.Priors{Models: map[string]registry.PriorEntry{
+		"top/one": {Coder: prior, Reviewer: prior},
+	}}
+
+	reachable := registry.NewRegistryFromParts(catalog, priors, nil, nil, "top/one")
+
+	ops := newStubOps()
+	logReachability(context.Background(), reachable, ops, "CMX-001")
+	assert.Equal(t, 0, ops.count("AddLog"), "every tier reachable means no card log")
+
+	unreachable := registry.NewRegistry("top/one", nil)
+
+	ops2 := newStubOps()
+	logReachability(context.Background(), unreachable, ops2, "CMX-001")
+	assert.Equal(t, 1, ops2.count("AddLog"), "an unreachable tier logs exactly one card line")
+}
+
+// TestLogReachabilityToleratesNilOps proves the worker-side call is safe when
+// ops2orchestrator hands back nil, which it does for a test fake that only
+// implements CardOps: such tests swap runOrchestrator and never touch
+// Deps.Ops, but logReachability runs before that swap takes effect.
+func TestLogReachabilityToleratesNilOps(t *testing.T) {
+	assert.NotPanics(t, func() {
+		logReachability(context.Background(), registry.NewRegistry("top/one", nil), nil, "CMX-001")
+	})
 }

@@ -442,8 +442,10 @@ func resolveOrchestratorModel(
 // level judgment (the live catalog measures only coder/reviewer; reviewer is the
 // closer fit for both decomposing and judging). Fixed at TierComplex for EVERY
 // call: decision quality does not scale with task complexity, so even a trivial
-// card gets a calibrated judge. Degrades to the base resolution when no registry
-// is present.
+// card gets a calibrated judge. The floor only ever RAISES base, never lowers
+// it: a selection that did not clear the complex bar has no claim over an
+// operator-configured orchestrator model, so base is kept. Degrades to the base
+// resolution when no registry is present.
 func resolveDecisionModel(
 	ctx context.Context,
 	reg *registry.Registry,
@@ -459,16 +461,22 @@ func resolveDecisionModel(
 		return base
 	}
 
-	floor := reg.SelectByComplexity(registry.SelectInput{
+	p := reg.SelectByComplexity(registry.SelectInput{
 		Role:    registry.RoleReviewer,
 		Tier:    registry.TierComplex,
 		Exclude: exclude,
-	}).Model
-	if floor == "" {
-		return base // defensive; SelectByComplexity does not return empty today
+	})
+
+	// base is already an operator-configured orchestrator model for this phase,
+	// so the selection layered on top is an upgrade attempt. A pick that did not
+	// meet the bar it was asked for would replace a stronger base with a weaker
+	// catalogued model: a floor that can land below the thing it is flooring is
+	// not a floor.
+	if !p.AtBar() {
+		return base
 	}
 
-	return floor
+	return p.Model
 }
 
 // isBudgetError reports whether err is (or wraps) the budget-ceiling sentinel.
@@ -479,7 +487,7 @@ func isBudgetError(err error) bool {
 }
 
 // isParkError reports whether err is one of the sentinels execute stops the run
-// on rather than advancing to the next phase (orchestrator.go's four park arms).
+// on rather than advancing to the next phase (orchestrator.go's park arms).
 // A caller that swallows one of these returns nil, so the run walks into the
 // next phase carrying whatever half-done state the parked phase left behind -
 // and the worker never gets to push the WIP it exists to preserve.
@@ -489,9 +497,11 @@ func isParkError(err error) bool {
 		cle *ContextLimitError
 		mte *MaxTurnsError
 		tme *ToolchainMissingError
+		nme *NoModelError
 	)
 
-	return errors.As(err, &be) || errors.As(err, &cle) || errors.As(err, &mte) || errors.As(err, &tme)
+	return errors.As(err, &be) || errors.As(err, &cle) || errors.As(err, &mte) ||
+		errors.As(err, &tme) || errors.As(err, &nme)
 }
 
 // runDiagnose runs one read-only investigation pass on the orchestrator model

@@ -910,15 +910,33 @@ func TestResolveDecisionModelNilRegistryFallsBack(t *testing.T) {
 	assert.Equal(t, "payload/model", got)
 }
 
-func TestResolveDecisionModelEmptyPoolReturnsCapableDefault(t *testing.T) {
+// TestResolveDecisionModelKeepsBaseOverTheCapableDefault covers the decision
+// floor's unmeasured case: a registry with no priors at all, where every rung
+// is dry and the selection comes off the bottom of the ladder as the capable
+// default with no met tier. That answer is a floor for the run, not a
+// judgement about quality, so it has no claim over the orchestrator model the
+// operator configured for this phase - the floor only ever raises base.
+// TestResolveDecisionModelKeepsBaseWhenTheFloorFallsShort covers the other
+// case, where the pick is measured but lands on a lower rung.
+func TestResolveDecisionModelKeepsBaseOverTheCapableDefault(t *testing.T) {
 	reg := registry.NewRegistryFromParts(reviewerCatalog(), registry.Priors{}, nil, nil, "default/model")
 	emit := events.NewEmitter(nil, nil)
 	ops := &fakeOps{}
 
+	// The gate is genuinely exercised: the selector does answer here, with the
+	// capable default, and that answer clears no configured bar.
+	p := reg.SelectByComplexity(registry.SelectInput{Role: registry.RoleReviewer, Tier: registry.TierComplex})
+	require.True(t, p.OK)
+	require.Equal(t, "default/model", p.Model)
+	require.Equal(t, registry.SourceDefault, p.Source)
+	require.Empty(t, p.MetTier, "off the bottom of the ladder there is no met tier")
+	require.False(t, p.AtBar())
+
 	got := resolveDecisionModel(context.Background(), reg, emit, ops, "CARD-1",
 		"", "payload/model", "default/model", nil)
 
-	assert.Equal(t, "default/model", got)
+	assert.Equal(t, "payload/model", got, "the operator's own orchestrator model survives a below-bar floor")
+	assert.NotEqual(t, p.Model, got, "a below-bar pick must never replace base")
 }
 
 func TestExtractJSON(t *testing.T) {
@@ -1566,4 +1584,34 @@ func TestPlanReuseListExcludesCancelled(t *testing.T) {
 		assert.Contains(t, prompt, "Done subtask",
 			"the done subtask must appear in the reuse list so the planner sees it")
 	})
+}
+
+// TestResolveDecisionModelKeepsBaseWhenTheFloorFallsShort is the regression
+// guard for the one call site where a walked-down pick would REPLACE a stronger
+// operator-configured model. The floor exists to raise the decision model, and
+// a below-bar pick has no claim over base.
+func TestResolveDecisionModelKeepsBaseWhenTheFloorFallsShort(t *testing.T) {
+	tests := []struct {
+		name      string
+		reviewer  float64
+		wantModel string
+	}{
+		{name: "floor clears the complex bar and wins", reviewer: 0.88, wantModel: "strong/reviewer"},
+		{name: "floor falls short and base is kept", reviewer: 0.70, wantModel: "payload/default"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reg := registry.NewRegistryFromParts(
+				llm.Catalog{{ID: "strong/reviewer", ContextLength: 200000, SupportedParameters: []string{"tools"}}},
+				registry.Priors{Models: map[string]registry.PriorEntry{
+					"strong/reviewer": {Reviewer: &tt.reviewer},
+				}}, nil, nil, "capable/default")
+
+			got := resolveDecisionModel(context.Background(), reg, nil, &fakeOps{},
+				"CARD-1", "", "payload/default", "serve/fallback", nil)
+
+			assert.Equal(t, tt.wantModel, got)
+		})
+	}
 }

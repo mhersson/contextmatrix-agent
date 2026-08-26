@@ -1,6 +1,9 @@
 package registry
 
 import (
+	"fmt"
+	"maps"
+	"math"
 	"testing"
 
 	"github.com/mhersson/contextmatrix-harness/llm"
@@ -160,11 +163,11 @@ func TestSelectReviewPanel(t *testing.T) {
 
 func TestTierBarsIncludeCritical(t *testing.T) {
 	r := &Registry{}
-	if got := r.tierBar(TierCritical); got != 0.90 {
+	if got := r.barFor(TierCritical); got != 0.90 {
 		t.Errorf("critical bar = %v, want 0.90", got)
 	}
 
-	if got := r.tierBar(TierSimple); got != 0.65 {
+	if got := r.barFor(TierSimple); got != 0.65 {
 		t.Errorf("simple bar = %v, want 0.65", got)
 	}
 }
@@ -205,16 +208,27 @@ func TestCandidatesArePriorsOnlyAndSkipBlacklist(t *testing.T) {
 		"black/listed": {Coder: new(0.95)},
 	}}
 	r := NewRegistryFromParts(cat, pr, map[string]bool{"black/listed": true}, nil, "capable/default")
-	got := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierComplex}) // bar 0.82
-	// cheap/ok (0.80) is below 0.82; blacklisted is excluded; nothing qualifies -> capable default
-	if got.Model != "capable/default" {
-		t.Errorf("want capable default when nothing clears bar, got %q", got.Model)
-	}
 
-	got = r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierModerate}) // bar 0.76
-	if got.Model != "cheap/ok" {
-		t.Errorf("want cheap/ok at moderate, got %q (blacklisted must never win)", got.Model)
-	}
+	// The complex bar (0.82) is above cheap/ok's 0.80, so the complex rung is
+	// dry and the request clamps to moderate (0.76), returning the pick a
+	// direct moderate request would have made. The answer names what it is
+	// worth: a moderate met tier and a shortfall against the request. The
+	// capable default is the floor BELOW the ladder, not the answer to the
+	// first dry rung.
+	got := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierComplex})
+	require.True(t, got.OK)
+	assert.Equal(t, "cheap/ok", got.Model)
+	assert.Equal(t, SourceAuto, got.Source, "a clamped pick is a real selection at its rung, not the default")
+	assert.Equal(t, TierComplex, got.RequestedTier)
+	assert.Equal(t, TierModerate, got.MetTier)
+	assert.False(t, got.AtBar(), "the caller must be able to see it did not get what it asked for")
+
+	// The blacklisted model has the best prior in the catalog and WOULD clear
+	// complex. It is unselectable at every rung: the ladder relaxes the quality
+	// bar and nothing else.
+	got = r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierModerate})
+	assert.Equal(t, "cheap/ok", got.Model, "blacklisted must never win")
+	assert.True(t, got.AtBar())
 }
 
 func TestSelectCandidateModelsNoPinWrapsAround(t *testing.T) {
@@ -239,7 +253,15 @@ func TestSelectCandidateModelsNoPinWrapsAround(t *testing.T) {
 	assert.Equal(t, "m1", specs[0].Model)
 	assert.Equal(t, "m2", specs[1].Model)
 	assert.Equal(t, "m3", specs[2].Model)
-	assert.Equal(t, specs[2], specs[3], "4th slot must wrap and repeat the 3rd pick exactly")
+	// Duplication and provenance are two independent facts. The wrapped seat is
+	// the seat it wrapped in every measured field - model, window, source,
+	// prior, requested and met tier - and carries the flag on top, so a caller
+	// can count the panel's real models without losing what any seat is worth.
+	want := specs[2]
+	want.Duplicate = true
+
+	assert.False(t, specs[2].Duplicate, "the last real pick is not a repeat")
+	assert.Equal(t, want, specs[3], "a repeated seat is the seat it wrapped, flagged")
 }
 
 func TestSelectCandidateModelsSingleModelPoolRepeatsThroughout(t *testing.T) {
@@ -671,6 +693,129 @@ func TestSelectReviewPanelVendorEdgeCases(t *testing.T) {
 	})
 }
 
+func TestSelectReviewPanelClampsBeforeDuplicating(t *testing.T) {
+	panel := ladderRegistry(nil).SelectReviewPanel(SelectInput{Role: RoleReviewer, Tier: TierCritical}, 3)
+	require.Len(t, panel, 3)
+
+	models := make([]string, len(panel))
+	for i, s := range panel {
+		require.True(t, s.OK, "seat %d", i)
+		assert.False(t, s.Duplicate, "seat %d: a clamped-but-distinct seat is not a duplicate", i)
+		models[i] = s.Model
+	}
+
+	assert.Equal(t, 3, DistinctModels(panel),
+		"seats must be distinct models, not one model repeated: %v", models)
+
+	// Seat 1 holds the requested tier; the seats below it clamp down a rung to
+	// stay distinct rather than duplicating seat 1 at critical price.
+	assert.Equal(t, "top/one", panel[0].Model)
+	assert.Equal(t, TierCritical, panel[0].MetTier)
+	assert.True(t, panel[0].AtBar())
+
+	for _, s := range panel[1:] {
+		assert.True(t, s.BelowBar(), "seat %s must report its clamp", s.Model)
+		assert.Equal(t, TierCritical, s.RequestedTier)
+	}
+}
+
+// TestSelectReviewPanelSeatsDegradeIndependently pins that one seat dropping a
+// rung never drags the seats above it down with it. high/two is excluded so
+// the complex pool holds exactly two models (top/one, high/one): both seats 1
+// and 2 stay at complex, and only seat 3, with the complex pool now empty,
+// clamps to moderate.
+func TestSelectReviewPanelSeatsDegradeIndependently(t *testing.T) {
+	in := SelectInput{Role: RoleReviewer, Tier: TierComplex, Exclude: map[string]bool{"high/two": true}}
+	panel := ladderRegistry(nil).SelectReviewPanel(in, 3)
+	require.Len(t, panel, 3)
+
+	assert.Equal(t, TierComplex, panel[0].MetTier)
+	assert.Equal(t, TierComplex, panel[1].MetTier, "a second complex-clearing model must stay at complex")
+	assert.Equal(t, TierModerate, panel[2].MetTier)
+	assert.Equal(t, 3, DistinctModels(panel))
+}
+
+// TestSelectReviewPanelFillsWithARealPickNotAnEscalation pins the last-resort
+// order: a repeat is reached only when no rung holds an unseated model, and it
+// repeats a real, quality-bearing pick rather than escalating price.
+func TestSelectReviewPanelFillsWithARealPickNotAnEscalation(t *testing.T) {
+	cat := llm.Catalog{
+		entry("only/one", 1.0, 2.0, 200000),
+		entry("sub/floor", 0.1, 0.2, 200000),
+	}
+	priors := Priors{Models: map[string]PriorEntry{
+		"only/one":  {Reviewer: new(0.88)},
+		"sub/floor": {Reviewer: new(0.40)},
+	}}
+	r := NewRegistryFromParts(cat, priors, nil, nil, "capable/default")
+
+	panel := r.SelectReviewPanel(SelectInput{Role: RoleReviewer, Tier: TierCritical}, 3)
+	require.Len(t, panel, 3, "the panel is always n seats")
+
+	assert.Equal(t, "only/one", panel[0].Model)
+	assert.InDelta(t, 0.88, panel[0].Prior, 1e-9)
+	assert.False(t, panel[0].Duplicate)
+
+	// Seats 2 and 3: only/one is excluded now, so the ladder is dry and the
+	// walk lands on the capable default - which repeats the last real pick
+	// (only/one) rather than seating the off-ladder default fresh.
+	assert.Equal(t, "only/one", panel[1].Model, "a dry ladder repeats the last real pick, not the capable default")
+
+	for i, s := range panel[1:] {
+		require.True(t, s.OK, "seat %d", i+1)
+		assert.True(t, s.Duplicate, "seat %d must be flagged as a repeat", i+1)
+	}
+
+	assert.Less(t, DistinctModels(panel), 3, "the collapse must be countable")
+}
+
+// TestSelectReviewPanelVendorPreferenceIsBoundedToTheRung pins that the soft
+// diversity preference breaks ties WITHIN a rung and never overrides the
+// quality ladder. Without the rung bound, seat 2 walks down to find the fresh
+// vendor and the panel trades a measured 0.83 for a measured 0.66.
+func TestSelectReviewPanelVendorPreferenceIsBoundedToTheRung(t *testing.T) {
+	r := ladderRegistry(nil).WithCreators(map[string]string{
+		"top/one": "alpha", "high/one": "alpha", "high/two": "alpha",
+		"mid/one": "alpha", "mid/two": "alpha", "low/one": "beta",
+	})
+
+	panel := r.SelectReviewPanel(SelectInput{Role: RoleReviewer, Tier: TierComplex}, 2)
+	require.Len(t, panel, 2)
+
+	assert.Equal(t, "high/one", panel[0].Model)
+	assert.Equal(t, "high/two", panel[1].Model,
+		"seat 2 must stay on the complex rung; diversity must not buy a rung of quality")
+	assert.True(t, panel[1].AtBar())
+}
+
+func TestSelectReviewPanelReturnsNothingWhenNoModelIsSelectable(t *testing.T) {
+	cat := llm.Catalog{entry("sub/floor", 0.1, 0.2, 200000)}
+	priors := Priors{Models: map[string]PriorEntry{"sub/floor": {Reviewer: new(0.40)}}}
+	// No capable default and nothing employable: the only honest answer is none.
+	r := NewRegistryFromParts(cat, priors, nil, nil, "")
+
+	assert.Nil(t, r.SelectReviewPanel(SelectInput{Role: RoleReviewer, Tier: TierSimple}, 3))
+}
+
+// TestSelectCandidateModelsPinReportsMeasuredNotAsserted pins that the pin seat
+// does not fabricate a met tier: authority is Source, measurement is MetTier.
+func TestSelectCandidateModelsPinReportsMeasuredNotAsserted(t *testing.T) {
+	r := ladderRegistry(nil)
+
+	picks := r.SelectCandidateModels(SelectInput{Role: RoleCoder, Tier: TierCritical}, 2, "sub/floor")
+	require.Len(t, picks, 2)
+
+	assert.Equal(t, "sub/floor", picks[0].Model)
+	assert.Equal(t, SourcePinned, picks[0].Source, "a pin is authoritative")
+	assert.Empty(t, picks[0].MetTier, "a 0.40 prior clears no configured bar - say so")
+	assert.False(t, picks[0].AtBar())
+	assert.InDelta(t, 0.40, picks[0].Prior, 1e-9)
+	assert.True(t, picks[0].HasPrior)
+
+	assert.Equal(t, "top/one", picks[1].Model, "the auto seat beside a pin is unaffected")
+	assert.True(t, picks[1].AtBar())
+}
+
 // --- MaxCapability tests ---
 
 func TestMaxCapabilityBypassesFavorites(t *testing.T) {
@@ -825,4 +970,704 @@ func TestMaxCapabilityReviewPanelSpansVendors(t *testing.T) {
 	assert.Equal(t, "gpt-a", panel[0].Model)
 	assert.Equal(t, "claude-x", panel[1].Model)
 	assert.Equal(t, "gpt-b", panel[2].Model)
+}
+
+// ladderRegistry spreads seven tool-capable models across the default bars so a
+// walk from critical to simple crosses every rung, with at least two models per
+// rung so the best-value rule is live at each one rather than settled by a
+// single survivor. Blended $/Mtok: top/one 15.0, high/one 3.0, high/two 3.3,
+// mid/one 1.8, mid/two 1.5, low/one 0.6, sub/floor 0.3.
+//
+// At-rung picks: critical -> top/one; complex (cheapest 3.0, band 4.5) ->
+// high/one; moderate (cheapest 1.5, band 2.25) -> mid/one; simple (cheapest
+// 0.6, band 0.9) -> low/one. sub/floor (0.40) clears no bar at all.
+func ladderRegistry(favorites map[favKey][]string) *Registry {
+	cat := llm.Catalog{
+		entry("top/one", 5.0, 10.0, 200000),
+		entry("high/one", 1.0, 2.0, 200000),
+		entry("high/two", 1.1, 2.2, 200000),
+		entry("mid/one", 0.6, 1.2, 200000),
+		entry("mid/two", 0.5, 1.0, 200000),
+		entry("low/one", 0.2, 0.4, 200000),
+		entry("sub/floor", 0.1, 0.2, 200000),
+	}
+	priors := Priors{Models: map[string]PriorEntry{
+		"top/one":   {Coder: new(0.93), Reviewer: new(0.93)},
+		"high/one":  {Coder: new(0.85), Reviewer: new(0.85)},
+		"high/two":  {Coder: new(0.83), Reviewer: new(0.83)},
+		"mid/one":   {Coder: new(0.79), Reviewer: new(0.79)},
+		"mid/two":   {Coder: new(0.77), Reviewer: new(0.77)},
+		"low/one":   {Coder: new(0.66), Reviewer: new(0.66)},
+		"sub/floor": {Coder: new(0.40), Reviewer: new(0.40)},
+	}}
+
+	return NewRegistryFromParts(cat, priors, nil, favorites, "capable/default")
+}
+
+// oldPick recomputes HEAD's selection for in.Tier ALONE - no walk, no rung
+// ordering - as the oracle for the at-bar guarantee. It deliberately reuses the
+// lifted helpers: what changed in this task is the walk, so the oracle's job is
+// to prove the walk never touches an answer the walk should not reach.
+func oldPick(r *Registry, in SelectInput) string {
+	blind := in
+	blind.ExcludeVendors = nil
+
+	if fav := r.favoriteAmong(r.candidates(blind), in.Tier, in.Role); fav != "" {
+		return fav
+	}
+
+	cands := r.candidates(in)
+	if len(cands) == 0 {
+		return ""
+	}
+
+	return bestValue(cands, r.headroom(), r.sel.MaxCapability)
+}
+
+// TestAtBarSelectionsAreUnchanged is THE production-behaviour guard. Every
+// selection whose requested tier has a non-empty pool - which is every
+// selection production makes today at simple and moderate - must return exactly
+// the model the pre-ladder selector returned, down to the tie-break.
+func TestAtBarSelectionsAreUnchanged(t *testing.T) {
+	tests := []struct {
+		name string
+		favs map[favKey][]string
+	}{
+		{name: "no favorites"},
+		{name: "operator favorites configured", favs: map[favKey][]string{
+			{Tier: TierModerate}:                    {"mid/two"},
+			{Tier: TierComplex, Role: RoleReviewer}: {"high/two"},
+		}},
+	}
+
+	tiers := []Tier{TierSimple, TierModerate, TierComplex, TierCritical}
+	exclusions := []map[string]bool{
+		nil,
+		{"mid/two": true},
+		{"low/one": true, "mid/two": true},
+		{"top/one": true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := ladderRegistry(tt.favs)
+
+			covered := 0
+
+			for _, role := range []Role{RoleCoder, RoleReviewer} {
+				for _, tier := range tiers {
+					for i, excl := range exclusions {
+						in := SelectInput{Role: role, Tier: tier, Exclude: excl, EstTokens: 50000}
+						if len(r.candidates(in)) == 0 {
+							continue // the ladder case, covered by the walk tests
+						}
+
+						covered++
+						got := r.SelectByComplexity(in)
+
+						require.True(t, got.AtBar(),
+							"a non-empty pool at %s must be served at %s (role=%s excl=%d)", tier, tier, role, i)
+						assert.Equal(t, oldPick(r, in), got.Model,
+							"role=%s tier=%s excl=%d: the ladder changed an at-bar answer", role, tier, i)
+					}
+				}
+			}
+
+			require.Positive(t, covered, "fixture drift: the matrix exercised no at-bar selection")
+		})
+	}
+}
+
+func TestSelectByComplexityClampsDownTheLadder(t *testing.T) {
+	r := ladderRegistry(nil)
+
+	tests := []struct {
+		name    string
+		in      SelectInput
+		wantID  string
+		wantMet Tier
+	}{
+		{
+			name:    "requested tier has a pool",
+			in:      SelectInput{Role: RoleCoder, Tier: TierCritical},
+			wantID:  "top/one",
+			wantMet: TierCritical,
+		},
+		{
+			// Critical is dry, so the pick is the one a DIRECT complex request
+			// would have made, not the capable default - which may be weaker
+			// than high/one.
+			name:    "critical dry clamps to complex",
+			in:      SelectInput{Role: RoleCoder, Tier: TierCritical, Exclude: map[string]bool{"top/one": true}},
+			wantID:  "high/one",
+			wantMet: TierComplex,
+		},
+		{
+			name: "two rungs dry clamps to moderate",
+			in: SelectInput{Role: RoleCoder, Tier: TierCritical, Exclude: map[string]bool{
+				"top/one": true, "high/one": true, "high/two": true,
+			}},
+			wantID:  "mid/one",
+			wantMet: TierModerate,
+		},
+		{
+			name: "three rungs dry clamps to simple",
+			in: SelectInput{Role: RoleCoder, Tier: TierCritical, Exclude: map[string]bool{
+				"top/one": true, "high/one": true, "high/two": true, "mid/one": true, "mid/two": true,
+			}},
+			wantID:  "low/one",
+			wantMet: TierSimple,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := r.SelectByComplexity(tt.in)
+
+			require.True(t, got.OK)
+			assert.Equal(t, tt.wantID, got.Model)
+			assert.Equal(t, tt.wantMet, got.MetTier)
+			assert.Equal(t, tt.in.Tier, got.RequestedTier, "the request must be reported unchanged")
+			assert.Equal(t, tt.wantMet == tt.in.Tier, got.AtBar())
+			assert.Equal(t, SourceAuto, got.Source)
+			assert.Positive(t, got.ContextWindow, "a real pick carries its catalog window")
+		})
+	}
+}
+
+// TestEscalationNeverDowngrades pins the escalation-is-a-downgrade
+// regression: under identical exclusions, asking for a HIGHER tier must
+// never return a model with a LOWER prior. Clamping down the ladder instead
+// of jumping straight to the capable default is what keeps this true even
+// when the requested tier's pool is empty.
+func TestEscalationNeverDowngrades(t *testing.T) {
+	r := ladderRegistry(nil)
+
+	// The exclusion sets a run actually produces: the panel walk and the
+	// incapable-model recovery both feed growing Exclude sets in.
+	exclusionSets := []map[string]bool{
+		nil,
+		{"top/one": true},
+		{"top/one": true, "high/one": true},
+		{"top/one": true, "high/one": true, "high/two": true},
+		{"top/one": true, "high/one": true, "high/two": true, "mid/one": true},
+		{"top/one": true, "high/one": true, "high/two": true, "mid/one": true, "mid/two": true, "low/one": true},
+	}
+
+	ladder := []Tier{TierSimple, TierModerate, TierComplex, TierCritical}
+
+	for i, excl := range exclusionSets {
+		t.Run(fmt.Sprintf("exclusions_%d", i), func(t *testing.T) {
+			for lo := range ladder {
+				for hi := lo + 1; hi < len(ladder); hi++ {
+					low := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: ladder[lo], Exclude: excl})
+					high := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: ladder[hi], Exclude: excl})
+
+					require.Equal(t, low.OK, high.OK,
+						"a higher tier is selectable exactly when a lower one is (%s vs %s)", ladder[lo], ladder[hi])
+
+					if !low.OK {
+						continue
+					}
+
+					assert.GreaterOrEqual(t, high.Prior, low.Prior,
+						"escalating %s -> %s downgraded: %s (%.2f) -> %s (%.2f)",
+						ladder[lo], ladder[hi], low.Model, low.Prior, high.Model, high.Prior)
+				}
+			}
+		})
+	}
+}
+
+// TestCapableDefaultIsTheFloorAndIsHardFiltered pins that the bottom of the
+// ladder is the OPERATOR's default (it is the trigger's default_model, not
+// junk), but it is subject to every hard filter the same as any candidate -
+// so an excluded or blacklisted default can never be handed back.
+func TestCapableDefaultIsTheFloorAndIsHardFiltered(t *testing.T) {
+	allAboveFloorGone := map[string]bool{
+		"top/one": true, "high/one": true, "high/two": true,
+		"mid/one": true, "mid/two": true, "low/one": true,
+	}
+
+	withDefaultExcluded := maps.Clone(allAboveFloorGone)
+	withDefaultExcluded["capable/default"] = true
+
+	// A tier absent from the configured ladder has bar 0 (barFor's documented
+	// fallback), so every ladderRegistry model's prior would trivially clear
+	// it if any reached the pool - excluding all seven is what forces the
+	// walk down to the capable default at this tier too.
+	everyLadderModelGone := map[string]bool{
+		"top/one": true, "high/one": true, "high/two": true,
+		"mid/one": true, "mid/two": true, "low/one": true, "sub/floor": true,
+	}
+
+	tests := []struct {
+		name      string
+		in        SelectInput
+		blacklist map[string]bool
+		// extraPriors scores slugs the ladder catalog does not carry, which is
+		// the shape a capable default takes when CM ships a rating for the
+		// operator's fallback.
+		extraPriors  map[string]PriorEntry
+		wantOK       bool
+		wantModel    string
+		wantHasPrior bool
+		wantMetTier  Tier
+	}{
+		{
+			name:      "ladder dry falls to the operator default",
+			in:        SelectInput{Role: RoleCoder, Tier: TierCritical, Exclude: allAboveFloorGone},
+			wantOK:    true,
+			wantModel: "capable/default",
+		},
+		{
+			// The case that matters: recoverIncapable puts the default in
+			// Exclude, and the default must never be handed back regardless.
+			name:   "an excluded default is never resurrected",
+			in:     SelectInput{Role: RoleCoder, Tier: TierCritical, Exclude: withDefaultExcluded},
+			wantOK: false,
+		},
+		{
+			name:      "a blacklisted default is never resurrected",
+			in:        SelectInput{Role: RoleCoder, Tier: TierCritical, Exclude: allAboveFloorGone},
+			blacklist: map[string]bool{"capable/default": true},
+			wantOK:    false,
+		},
+		{
+			// A tier with no configured bar is a degenerate rung, not a free
+			// pass: the capable default's MetTier must still come from a real
+			// prior, never from a prior-less model trivially clearing a bar of
+			// zero at the tier that was asked for.
+			name:      "an off-ladder tier still measures the default honestly",
+			in:        SelectInput{Role: RoleCoder, Tier: Tier("unrecognised"), Exclude: everyLadderModelGone},
+			wantOK:    true,
+			wantModel: "capable/default",
+		},
+		{
+			// The other direction of the same encoding: a default CM did score
+			// reports that score, and its MetTier is the rung the score
+			// actually reaches - not the rung that was asked for, and not
+			// empty. Without this row the default's provenance is pinned only
+			// where it happens to be unmeasured, and a caller that renders
+			// HasPrior would be untested on the branch that has a number.
+			name: "a scored default reports its measurement",
+			in:   SelectInput{Role: RoleCoder, Tier: TierCritical, Exclude: allAboveFloorGone},
+			extraPriors: map[string]PriorEntry{
+				"capable/default": {Coder: new(0.78)},
+			},
+			wantOK:       true,
+			wantModel:    "capable/default",
+			wantHasPrior: true,
+			wantMetTier:  TierModerate,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := ladderRegistry(nil)
+			for id := range tt.blacklist {
+				r.blacklist[id] = true
+			}
+
+			for id, entry := range tt.extraPriors {
+				r.priors.Models[id] = entry
+			}
+
+			got := r.SelectByComplexity(tt.in)
+
+			assert.Equal(t, tt.wantOK, got.OK)
+
+			if !tt.wantOK {
+				assert.Empty(t, got.Model, "a refusal carries no model at all")
+				assert.Equal(t, tt.in.Tier, got.RequestedTier)
+
+				return
+			}
+
+			assert.Equal(t, tt.wantModel, got.Model)
+			assert.Equal(t, SourceDefault, got.Source)
+			assert.False(t, got.AtBar(), "the default sits below the ladder, so it never meets the bar asked for")
+			assert.Equal(t, tt.wantHasPrior, got.HasPrior)
+			assert.Equal(t, tt.wantMetTier, got.MetTier, "MetTier is measured, never asserted")
+		})
+	}
+}
+
+// TestMetTierEqualsTheReachedRung pins the theorem the walk relies on: because
+// each rung's pool is a superset of the rung above it under identical hard
+// filters, a rung is reached only when nothing in it clears the next bar up. So
+// the measured MetTier is exactly the rung the walk stopped at, and the two
+// encodings can never disagree.
+func TestMetTierEqualsTheReachedRung(t *testing.T) {
+	r := ladderRegistry(nil)
+
+	for _, excl := range []map[string]bool{
+		nil,
+		{"top/one": true},
+		{"top/one": true, "high/one": true, "high/two": true},
+	} {
+		got := r.SelectByComplexity(SelectInput{Role: RoleReviewer, Tier: TierCritical, Exclude: excl})
+		require.True(t, got.OK)
+		require.NotEmpty(t, got.MetTier)
+
+		at := SelectInput{Role: RoleReviewer, Tier: got.MetTier, Exclude: excl}
+		assert.NotEmpty(t, r.candidates(at), "the met rung must hold the pick")
+		assert.GreaterOrEqual(t, got.Prior, r.barFor(got.MetTier))
+
+		for _, rung := range r.descent(TierCritical) {
+			if r.barFor(rung) > r.barFor(got.MetTier) {
+				above := SelectInput{Role: RoleReviewer, Tier: rung, Exclude: excl}
+				assert.Empty(t, r.candidates(above),
+					"rung %s was skipped but is not dry - the walk stopped too early", rung)
+			}
+		}
+	}
+}
+
+func TestFavoritesAreConsultedAtTheMetRung(t *testing.T) {
+	tests := []struct {
+		name       string
+		favorites  map[favKey][]string
+		in         SelectInput
+		wantID     string
+		wantMet    Tier
+		wantSource PickSource
+	}{
+		{
+			// The requested tier is dry, so the pick is made on the moderate
+			// rung - and a moderate selection must honour the operator's
+			// moderate favorite even though the request itself was critical.
+			name:      "clamped pick honours the met rung's favorite",
+			favorites: map[favKey][]string{{Tier: TierModerate}: {"mid/two"}},
+			in: SelectInput{Role: RoleCoder, Tier: TierCritical, Exclude: map[string]bool{
+				"top/one": true, "high/one": true, "high/two": true,
+			}},
+			wantID: "mid/two", wantMet: TierModerate, wantSource: SourceFavorite,
+		},
+		{
+			// mid/two (0.77) is below the complex bar and complex has a pool, so
+			// the moderate favorite must not hijack it.
+			name:      "lower-tier favorite never hijacks a live higher rung",
+			favorites: map[favKey][]string{{Tier: TierModerate}: {"mid/two"}},
+			in:        SelectInput{Role: RoleCoder, Tier: TierComplex},
+			wantID:    "high/one", wantMet: TierComplex, wantSource: SourceAuto,
+		},
+		{
+			// Even a favorite that WOULD clear the higher bar is not inherited
+			// upward: top/one clears complex, but the operator configured it for
+			// moderate.
+			name:      "favorites are not inherited upward even when eligible",
+			favorites: map[favKey][]string{{Tier: TierModerate}: {"top/one"}},
+			in:        SelectInput{Role: RoleCoder, Tier: TierComplex},
+			wantID:    "high/one", wantMet: TierComplex, wantSource: SourceAuto,
+		},
+		{
+			name:      "favorites are not inherited downward",
+			favorites: map[favKey][]string{{Tier: TierComplex}: {"high/one"}},
+			in:        SelectInput{Role: RoleCoder, Tier: TierSimple},
+			wantID:    "low/one", wantMet: TierSimple, wantSource: SourceAuto,
+		},
+		{
+			name: "role-specific favorite beats the any-role favorite at the same tier",
+			favorites: map[favKey][]string{
+				{Tier: TierComplex, Role: RoleCoder}: {"high/two"},
+				{Tier: TierComplex}:                  {"high/one"},
+			},
+			in:     SelectInput{Role: RoleCoder, Tier: TierComplex},
+			wantID: "high/two", wantMet: TierComplex, wantSource: SourceFavorite,
+		},
+		{
+			// A favorite that does not clear its own tier's bar is not eligible,
+			// so the rung falls through to the cost-optimal pick.
+			name:      "favorite below its own tier bar is ignored",
+			favorites: map[favKey][]string{{Tier: TierComplex}: {"mid/one"}},
+			in:        SelectInput{Role: RoleCoder, Tier: TierComplex},
+			wantID:    "high/one", wantMet: TierComplex, wantSource: SourceAuto,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ladderRegistry(tt.favorites).SelectByComplexity(tt.in)
+
+			require.True(t, got.OK)
+			assert.Equal(t, tt.wantID, got.Model)
+			assert.Equal(t, tt.wantMet, got.MetTier)
+			assert.Equal(t, tt.wantSource, got.Source)
+		})
+	}
+}
+
+// TestMonotonicityHoldsOnTheAutoPathAndFavoritesAreTheException sweeps favorite
+// configurations rather than testing only the input class where monotonicity is
+// trivially true. The auto path must be monotone under every configuration; a
+// violation is permitted ONLY where a favorite fired, and the test asserts that
+// pairing so the exception cannot silently widen.
+func TestMonotonicityHoldsOnTheAutoPathAndFavoritesAreTheException(t *testing.T) {
+	favoriteSets := []map[favKey][]string{
+		nil,
+		{{Tier: TierModerate}: {"mid/two"}},
+		{{Tier: TierComplex}: {"high/two"}},
+		{{Tier: TierSimple}: {"low/one"}, {Tier: TierCritical}: {"top/one"}},
+		// The counterexample the exception exists for: an expensive, strong
+		// favorite at moderate that the complex band would exclude on price.
+		{{Tier: TierModerate}: {"top/one"}},
+	}
+
+	ladder := []Tier{TierSimple, TierModerate, TierComplex, TierCritical}
+	exclusions := []map[string]bool{nil, {"top/one": true}, {"top/one": true, "high/one": true}}
+
+	sawException := false
+
+	for fi, favs := range favoriteSets {
+		t.Run(fmt.Sprintf("favorites_%d", fi), func(t *testing.T) {
+			r := ladderRegistry(favs)
+
+			for ei, excl := range exclusions {
+				for lo := range ladder {
+					for hi := lo + 1; hi < len(ladder); hi++ {
+						low := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: ladder[lo], Exclude: excl})
+						high := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: ladder[hi], Exclude: excl})
+
+						// A pick with no prior reports Prior 0, which is not a
+						// measurement: comparing it would invent a violation, or
+						// hide one behind a zero neither model earned.
+						if !low.OK || !high.OK || !low.HasPrior || !high.HasPrior {
+							continue
+						}
+
+						if high.Prior >= low.Prior {
+							continue
+						}
+
+						sawException = true
+
+						assert.Equal(t, SourceFavorite, low.Source,
+							"excl=%d %s(%.2f) > %s(%.2f) is only permitted when a favorite fired at the lower tier",
+							ei, low.Model, low.Prior, high.Model, high.Prior)
+					}
+				}
+			}
+		})
+	}
+
+	assert.True(t, sawException,
+		"fixture drift: no favorite configuration exercised the documented exception")
+}
+
+func TestTierBarsFromStrings(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      map[string]float64
+		want    map[Tier]float64
+		wantErr bool
+	}{
+		{name: "empty ladder uses the defaults", in: nil, want: nil},
+		{
+			// The edit an operator actually makes. Merging is what stops the
+			// three unnamed rungs from silently dropping to bar 0.
+			name: "partial ladder inherits the unnamed rungs",
+			in:   map[string]float64{"critical": 0.95},
+			want: map[Tier]float64{TierSimple: 0.65, TierModerate: 0.76, TierComplex: 0.82, TierCritical: 0.95},
+		},
+		{
+			name: "full ladder replaces every rung",
+			in:   map[string]float64{"simple": 0.6, "moderate": 0.7, "complex": 0.8, "critical": 0.9},
+			want: map[Tier]float64{TierSimple: 0.6, TierModerate: 0.7, TierComplex: 0.8, TierCritical: 0.9},
+		},
+		{name: "unknown tier rejected", in: map[string]float64{"trivial": 0.5}, wantErr: true},
+		{name: "bar above one rejected", in: map[string]float64{"simple": 1.5}, wantErr: true},
+		{name: "negative bar rejected", in: map[string]float64{"simple": -0.1}, wantErr: true},
+		{
+			// NaN fails both bar<0 and bar>1, so it must be checked explicitly:
+			// without the check it would pass range and monotone validation and
+			// then fail to marshal into CMX_SELECTOR_TIER_BARS, discarding the
+			// operator's entire ladder.
+			name:    "NaN bar rejected",
+			in:      map[string]float64{"simple": math.NaN()},
+			wantErr: true,
+		},
+		{
+			// Passes names and range; makes critical the weakest rung with no
+			// descent, so escalating would silently downgrade.
+			name:    "inverted ladder rejected",
+			in:      map[string]float64{"simple": 0.90, "moderate": 0.80, "complex": 0.70, "critical": 0.50},
+			wantErr: true,
+		},
+		{
+			// A single raised rung that crosses its neighbour is the transposed-
+			// value case the monotone check is for.
+			name:    "partial edit that inverts a neighbour pair is rejected",
+			in:      map[string]float64{"moderate": 0.88},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := TierBarsFromStrings(tt.in)
+			if tt.wantErr {
+				require.Error(t, err)
+
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestPartialLadderCannotZeroTheUnnamedBars is the behavioural half of the
+// merge rule: it proves that a one-rung edit does not turn the other three bars
+// off. Without the merge, sub/floor (0.40) becomes selectable at moderate and
+// the Pick still reports AtBar() true - the bars silently off while every
+// report claims compliance.
+func TestPartialLadderCannotZeroTheUnnamedBars(t *testing.T) {
+	bars, err := TierBarsFromStrings(map[string]float64{"critical": 0.95})
+	require.NoError(t, err)
+
+	r := ladderRegistry(nil).WithTierBars(bars)
+
+	got := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierModerate})
+	require.True(t, got.OK)
+	assert.Equal(t, "mid/one", got.Model, "the moderate bar must still be 0.76")
+	assert.True(t, got.AtBar())
+	assert.InDelta(t, 0.76, got.RequestedBar, 1e-9)
+}
+
+// TestOperatorLadderDrivesTheWalk proves the knob is not decorative: replacing
+// the bars replaces both the thresholds and the descent order.
+func TestOperatorLadderDrivesTheWalk(t *testing.T) {
+	r := ladderRegistry(nil).WithTierBars(map[Tier]float64{
+		TierSimple: 0.50, TierModerate: 0.60, TierComplex: 0.70, TierCritical: 0.95,
+	})
+
+	// Nothing clears 0.95, so the request clamps to the operator's complex bar
+	// (0.70), which admits top/one, high/one, high/two, mid/one and mid/two
+	// (low/one's 0.66 prior still falls short of 0.70). Cheapest in that pool
+	// is mid/two at $1.5, band $2.25, and mid/one ($1.8, quality 0.79) beats
+	// mid/two (quality 0.77) within the band.
+	got := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierCritical})
+
+	require.True(t, got.OK)
+	assert.Equal(t, TierComplex, got.MetTier)
+	assert.InDelta(t, 0.70, got.MetBar, 1e-9)
+	assert.InDelta(t, 0.95, got.RequestedBar, 1e-9)
+	assert.Equal(t, "mid/one", got.Model)
+
+	// And the descent order follows the configured table.
+	assert.Equal(t,
+		[]Tier{TierCritical, TierComplex, TierModerate, TierSimple},
+		r.descent(TierCritical))
+}
+
+// TestDescentCollapsesTiedAdjacentBars pins the tie-collapse case descent's
+// doc comment describes: this ladder is not order-isomorphic to the default
+// one, since the default has four distinct bars and this one ties complex
+// and critical, so only a genuinely-threaded ladder can produce this order.
+func TestDescentCollapsesTiedAdjacentBars(t *testing.T) {
+	r := NewRegistry("", nil).WithTierBars(map[Tier]float64{
+		TierSimple: 0.50, TierModerate: 0.60, TierComplex: 0.70, TierCritical: 0.70,
+	})
+
+	// complex ties critical's bar rather than falling strictly below it, so
+	// the walk skips it: three rungs, not four.
+	assert.Equal(t, []Tier{TierCritical, TierModerate, TierSimple}, r.descent(TierCritical))
+}
+
+func TestReachabilityReportsTheGapAtUnreachableTiers(t *testing.T) {
+	r := ladderRegistry(nil)
+
+	reviewerByTier := func() map[Tier]TierReach {
+		out := map[Tier]TierReach{}
+
+		for _, rc := range r.Reachability() {
+			if rc.Role == RoleReviewer {
+				out[rc.Tier] = rc
+			}
+		}
+
+		return out
+	}
+
+	got := reviewerByTier()
+	require.Len(t, got, 4)
+	assert.Positive(t, got[TierCritical].Count)
+	assert.InDelta(t, 0.93, got[TierCritical].Best, 1e-9)
+	assert.InDelta(t, 0.90, got[TierCritical].Bar, 1e-9)
+
+	// Blacklisting the only critical-clearing model makes the tier structurally
+	// unreachable for the whole run - what the preflight exists to surface.
+	r.blacklist["top/one"] = true
+
+	got = reviewerByTier()
+	assert.Zero(t, got[TierCritical].Count, "critical is now unreachable")
+	assert.InDelta(t, 0.85, got[TierCritical].Best, 1e-9,
+		"the report must say how far short the catalog falls, not only that it does")
+	assert.Positive(t, got[TierComplex].Count, "lower tiers stay reachable")
+}
+
+// TestReachabilityIsOrderedStrictestFirst pins that the report walks the
+// operator's ladder rather than a hardcoded tier list, so a replaced ladder
+// reports in its own order.
+func TestReachabilityIsOrderedStrictestFirst(t *testing.T) {
+	r := ladderRegistry(nil).WithTierBars(map[Tier]float64{
+		TierSimple: 0.50, TierModerate: 0.60, TierComplex: 0.70, TierCritical: 0.95,
+	})
+
+	var coderTiers []Tier
+
+	for _, rc := range r.Reachability() {
+		if rc.Role == RoleCoder {
+			coderTiers = append(coderTiers, rc.Tier)
+		}
+	}
+
+	assert.Equal(t, []Tier{TierCritical, TierComplex, TierModerate, TierSimple}, coderTiers)
+}
+
+// TestOrphanFavoriteTiersNamesFavoritesNoRungCanConsult pins the dead-favorite
+// class the rung-local lookup does not fix: CM sends the tier as a free string
+// and build.go converts it unchecked.
+func TestOrphanFavoriteTiersNamesFavoritesNoRungCanConsult(t *testing.T) {
+	tests := []struct {
+		name string
+		favs map[favKey][]string
+		want []Tier
+	}{
+		{name: "no favorites", want: nil},
+		{
+			name: "every favorite tier is on the ladder",
+			favs: map[favKey][]string{{Tier: TierModerate}: {"mid/two"}, {Tier: TierComplex}: {"high/one"}},
+			want: nil,
+		},
+		{
+			name: "misspelled and empty tiers are reported",
+			favs: map[favKey][]string{
+				{Tier: TierModerate}:      {"mid/two"},
+				{Tier: Tier("moderatte")}: {"mid/one"},
+				{Tier: Tier("")}:          {"low/one"},
+			},
+			want: []Tier{Tier(""), Tier("moderatte")},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, ladderRegistry(tt.favs).OrphanFavoriteTiers())
+		})
+	}
+}
+
+// TestOrphanFavoriteTiersReadsTheLiveLadder pins the operator-ladder half of
+// the dead-favorite check: a favorite sitting on a rung the DEFAULT ladder
+// has but a custom WithTierBars ladder drops must still be reported, so the
+// check has to consult the live ladder rather than the built-in one.
+func TestOrphanFavoriteTiersReadsTheLiveLadder(t *testing.T) {
+	r := ladderRegistry(map[favKey][]string{{Tier: TierModerate}: {"mid/two"}}).
+		WithTierBars(map[Tier]float64{TierSimple: 0.50, TierComplex: 0.70, TierCritical: 0.90})
+
+	assert.Equal(t, []Tier{TierModerate}, r.OrphanFavoriteTiers(),
+		"moderate is a default-ladder rung the custom ladder dropped, so its favorite is now orphaned")
 }

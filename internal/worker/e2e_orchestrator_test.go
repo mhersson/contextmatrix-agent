@@ -17,6 +17,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/orchestrator"
 	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/mhersson/contextmatrix-harness/llm"
+	protocol "github.com/mhersson/contextmatrix-protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -587,6 +588,50 @@ func gitLog(t *testing.T, remote, branch string) []string {
 	return subjects
 }
 
+// e2eCapableDefault is baseSpec's DefaultModel: the floor below the ladder,
+// which these runs must never need.
+const e2eCapableDefault = "default/model"
+
+// e2eSelection is the model-selection context these end-to-end runs are driven
+// with: one coder-only model and three reviewer-only models, each measured
+// clear of the complex bar for its own role and at zero for the other.
+//
+// A run that codes and reviews needs at least two employable models. The coder
+// slug is excluded from its own review, so a single-model catalog leaves the
+// panel with nothing to seat: the coder cannot review its own work, and there
+// is no second candidate. Splitting the roles here is what lets the real
+// selector run in these tests instead of the exclusion collapsing the panel.
+//
+// These models are NOT exempt from the vendor-diversity preference. Creator is
+// empty, but an unregistered creator falls back to the slug prefix, so all four
+// share the vendor "e2e" and the preference applies to every seat. Seat order
+// is deterministic because the preference is bounded to the rung: from seat 2
+// on, the vendor-filtered pool is empty at every rung and lands on the
+// off-ladder capable default, whose met tier does not match the vendor-blind
+// pick's, so the filtered candidate is rejected and each seat keeps its
+// vendor-blind answer. The fixture therefore depends on that rung bound
+// holding - a fifth model under a different vendor prefix would start winning
+// seats, and adding one on the assumption that vendor does not matter here
+// would change the panel.
+//
+// The SSE stub matches on prompt content, never on the model, so which slug
+// reaches it changes nothing about the scripted replies.
+func e2eSelection() *protocol.SelectionContext {
+	const (
+		window = 200000
+		price  = 1e-6
+	)
+
+	return &protocol.SelectionContext{
+		Candidates: []protocol.CandidateModel{
+			{Slug: "e2e/coder", ContextWindow: window, PromptPricePerTok: price, CompletionPricePerTok: price, CoderPrior: 0.90},
+			{Slug: "e2e/reviewer-a", ContextWindow: window, PromptPricePerTok: price, CompletionPricePerTok: price, ReviewerPrior: 0.88},
+			{Slug: "e2e/reviewer-b", ContextWindow: window, PromptPricePerTok: price, CompletionPricePerTok: price, ReviewerPrior: 0.86},
+			{Slug: "e2e/reviewer-c", ContextWindow: window, PromptPricePerTok: price, CompletionPricePerTok: price, ReviewerPrior: 0.84},
+		},
+	}
+}
+
 // runOrchestratorE2E wires the REAL worker.Run for an autonomous card against a
 // real clone of remote, a content-aware SSE backend, and the in-process ops
 // recorder. It returns the result and the recorder for assertions.
@@ -601,6 +646,7 @@ func runOrchestratorE2E(t *testing.T, remote string, backend *scriptedBackend, o
 	spec.Interactive = false // autonomous -> the FSM owns the run
 	spec.MaxCardCost = 0     // no budget ceiling: this run must complete, not park
 	spec.MaxTurns = 6
+	spec.Selection = e2eSelection()
 
 	emit := events.NewEmitter(io.Discard, io.Discard)
 
@@ -721,6 +767,42 @@ func TestOrchestratorEndToEndHappyPath(t *testing.T) {
 	expected := backend.planCost + 2*backend.coderCost + backend.documentCost +
 		3*backend.specialistCost + backend.synthesisCost
 	assert.InDelta(t, expected, reported, 1e-9, "the total reported cost matches the scripted script")
+
+	assertRealSelectorSeats(t, ops)
+}
+
+// assertRealSelectorSeats pins that the coder and every review seat were
+// distinct measured models from e2eSelection. A model must not review its own
+// code, so the coder slug is excluded from the panel; without this a fixture
+// edit can leave the panel collapsed onto the capable default three times over
+// while the run still reaches "completed" and every other assertion holds.
+func assertRealSelectorSeats(t *testing.T, ops *stubOps) {
+	t.Helper()
+
+	logs := strings.Join(cardLogMessages(ops), "\n")
+	for _, m := range []string{"e2e/coder", "e2e/reviewer-a", "e2e/reviewer-b", "e2e/reviewer-c"} {
+		assert.Contains(t, logs, m, "every seat is a distinct measured model")
+	}
+
+	assert.NotContains(t, logs, e2eCapableDefault, "no phase fell back to the capable default")
+}
+
+// cardLogMessages is every message the run wrote to the card activity log.
+func cardLogMessages(ops *stubOps) []string {
+	ops.mu.Lock()
+	defer ops.mu.Unlock()
+
+	var msgs []string
+
+	for _, c := range ops.log {
+		if c.op == "AddLog" && len(c.args) == 2 {
+			if m, ok := c.args[1].(string); ok {
+				msgs = append(msgs, m)
+			}
+		}
+	}
+
+	return msgs
 }
 
 // --- Test: gate-positive + one review fix loop -----------------------------
@@ -832,6 +914,8 @@ func TestOrchestratorEndToEndFixLoop(t *testing.T) {
 
 	last := ops.pushCalls[len(ops.pushCalls)-1]
 	assert.Equal(t, branch, last.branch)
+
+	assertRealSelectorSeats(t, ops)
 }
 
 // compile-time proof the recorder satisfies BOTH surfaces: the worker's narrow

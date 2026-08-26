@@ -60,14 +60,38 @@ type fix struct {
 	Severity   string `json:"severity"`
 }
 
-// ReviewParkedError marks the review cap being exhausted without approval. The
-// worker maps it to the park path: exit 0, completed callback, card left in
-// review. Parked is not failed - a human picks the card up from review.
-type ReviewParkedError struct{}
+// ReviewParkedError marks the review phase stopping and leaving the card for a
+// human. The worker maps it to the park path: exit 0, completed callback, card
+// left in review. Parked is not failed - a human picks the card up from review.
+//
+// Reason is the true cause. Several paths reach this sentinel and most write
+// an accurate line of their own before returning it, but the cleanup fix pass
+// renders Error() straight onto the card, so a fixed string would state a
+// cause that is false there. The zero value keeps the attempts-cap wording,
+// which is what a bare construction has always meant.
+type ReviewParkedError struct {
+	Reason string
+}
 
 func (e *ReviewParkedError) Error() string {
-	return "review parked: attempts cap exhausted without approval"
+	reason := e.Reason
+	if reason == "" {
+		reason = reviewParkedAttemptsCap
+	}
+
+	return "review parked: " + reason
 }
+
+// The causes a review park can have. Each is the phrase that follows
+// "review parked: " on the card.
+const (
+	reviewParkedAttemptsCap  = "attempts cap exhausted without approval"
+	reviewParkedServerCap    = "the board's review attempts cap was reached"
+	reviewParkedNoTime       = "less than one round of container time left"
+	reviewParkedNoReviewer   = "no reviewer model is selectable"
+	reviewParkedNoFixModel   = "no fix model is selectable"
+	reviewParkedFixExhausted = "no fix model other than the ones that already failed"
+)
 
 // reviewTimeLeft parks the review when less than reviewRoundReserve remains on
 // the container deadline, before a verify run, panel, or fix round can be
@@ -92,7 +116,7 @@ func (o *run) reviewTimeLeft(ctx context.Context, round int) error {
 	d.logCard(ctx, "review parked: %s of container time left, less than the %s a review round needs - a re-trigger resumes at round %d",
 		remaining, reviewRoundReserve, round)
 
-	return &ReviewParkedError{}
+	return &ReviewParkedError{Reason: reviewParkedNoTime}
 }
 
 // runReview is the review phase. The parent enters review (idempotent on
@@ -490,7 +514,7 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 	// configured cap actually bought.
 	d.logCard(ctx, "review parked after %d attempts (authoritative pass) - outstanding findings:\n%s", n, findings2)
 
-	return &ReviewParkedError{}
+	return &ReviewParkedError{Reason: reviewParkedAttemptsCap}
 }
 
 // incrementReviewAttempt calls IncrementReviewAttempts and treats
@@ -508,7 +532,7 @@ func (o *run) incrementReviewAttempt(ctx context.Context, findings string) (int,
 	if errors.Is(err, cmclient.ErrReviewAttemptsCapped) {
 		o.d.logCard(ctx, "review parked at server cap - outstanding findings:\n%s", findings)
 
-		return 0, &ReviewParkedError{}
+		return 0, &ReviewParkedError{Reason: reviewParkedServerCap}
 	}
 
 	return 0, fmt.Errorf("increment review attempts: %w", err)
@@ -618,8 +642,27 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 	}
 
 	panel := o.reviewPanel(ctx, estimateTokens(diff), authoritative)
+	if len(panel) == 0 {
+		d.logCard(ctx, "review: no model is selectable for the reviewer role - parking the card in review for a human")
 
-	d.logCard(ctx, "review panel models: %s, %s, %s", panel[0].Model, panel[1].Model, panel[2].Model)
+		return "", &ReviewParkedError{Reason: reviewParkedNoReviewer}
+	}
+
+	d.logCard(ctx, "review panel: %s", panelSummary(panel))
+
+	if distinct := registry.DistinctModels(panel); distinct < 2 &&
+		o.firstNote(fmt.Sprintf("panel-collapsed/%s/%d", panel[0].RequestedTier, distinct)) {
+		d.logCard(ctx, "review panel collapsed to %d distinct model(s) - an approval from it is single-model evidence", distinct)
+	}
+
+	// The authoritative pass is the last thing before parking the card for a
+	// human. When no seat met the bar it asked for, the pass still RUNS -
+	// refusing would spend a whole run to say nothing - but the card records
+	// that the verdict came from an under-powered panel.
+	if authoritative && panelBelowBar(panel) && o.firstNote("authoritative-below-bar") {
+		d.logCard(ctx, "authoritative review ran below its bar: no seat cleared %s, and the panel held %d distinct model(s) - the verdict stands, weigh it accordingly",
+			panel[0].RequestedTier, registry.DistinctModels(panel))
+	}
 
 	lenses := []struct{ role, prompt string }{
 		{"correctness", correctnessPrompt},
@@ -702,20 +745,39 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 	return b.String(), nil
 }
 
-// reviewPanel returns the three specialist model specs. An explicit,
-// catalog-resolvable reviewer pin overrides the entire panel (all three run on
-// the pinned model). Otherwise the registry selects a diverse panel for the
-// card tier, excluding every model that coded a subtask on this run.
-func (o *run) reviewPanel(ctx context.Context, estTokens int, authoritative bool) []registry.ModelSpec {
+// reviewPanel returns the three specialist seats. An explicit,
+// catalog-resolvable reviewer pin overrides the entire panel: all three run on
+// the pinned model, and every seat after the first is flagged as a repeat so
+// one model's opinion cannot read as three agreeing ones. Otherwise the
+// registry selects a diverse panel for the card tier, excluding every model
+// that coded a subtask on this run, and any seat that could not be served at
+// that tier reports its shortfall.
+func (o *run) reviewPanel(ctx context.Context, estTokens int, authoritative bool) []registry.Pick {
+	// The authoritative pass escalates the panel to the complex tier so the
+	// strongest models judge the change before parking.
+	tier := tierFromString(o.cardTier)
+	if authoritative {
+		tier = registry.TierComplex
+	}
+
 	if resolvePin(o.d.Registry, o.tc.ModelReviewer) {
-		spec := registry.ModelSpec{
-			Model:         o.tc.ModelReviewer,
-			ContextWindow: o.d.Registry.ContextWindow(o.tc.ModelReviewer),
+		seat := registry.Pick{
+			ModelSpec: registry.ModelSpec{
+				Model:         o.tc.ModelReviewer,
+				ContextWindow: o.d.Registry.ContextWindow(o.tc.ModelReviewer),
+			},
+			Role:          registry.RoleReviewer,
+			RequestedTier: tier,
+			Source:        registry.SourcePinned,
+			OK:            true,
 		}
 
-		panel := make([]registry.ModelSpec, reviewPanelSize)
+		panel := make([]registry.Pick, reviewPanelSize)
 		for i := range panel {
-			panel[i] = spec
+			panel[i] = seat
+			// Every seat after the first repeats seat 1. Flagged, so the card
+			// log cannot read one model's opinion as three agreeing ones.
+			panel[i].Duplicate = i > 0
 		}
 
 		return panel
@@ -725,14 +787,7 @@ func (o *run) reviewPanel(ctx context.Context, estTokens int, authoritative bool
 		o.warnUnresolvablePin(ctx, "reviewer", o.tc.ModelReviewer)
 	}
 
-	// The authoritative pass escalates the panel to the complex tier so the
-	// strongest models judge the change before parking.
-	tier := tierFromString(o.cardTier)
-	if authoritative {
-		tier = registry.TierComplex
-	}
-
-	return o.d.Registry.SelectReviewPanel(registry.SelectInput{
+	panel := o.d.Registry.SelectReviewPanel(registry.SelectInput{
 		Role:      registry.RoleReviewer,
 		Tier:      tier,
 		EstTokens: estTokens,
@@ -741,6 +796,14 @@ func (o *run) reviewPanel(ctx context.Context, estTokens int, authoritative bool
 		// records it). Merged so neither set masks the other.
 		Exclude: o.reviewExclusions(),
 	}, reviewPanelSize)
+
+	// One label for the whole panel: seats that fell the same distance are one
+	// fact, and the panel summary below carries the per-seat detail.
+	for _, p := range panel {
+		o.noteShortfall(ctx, "review panel", p)
+	}
+
+	return panel
 }
 
 // reviewExclusions is the union of the coder models (a model must not review its
@@ -914,13 +977,30 @@ func (o *run) runFixModel(ctx context.Context, prompt string, round int, fixTier
 	tier := o.fixTierEffective(fixTier, authoritative)
 
 	for attempt := 0; attempt <= reselectCap; attempt++ {
-		model := o.resolveFixModel(ctx, fixTier, authoritative)
+		p, rerr := o.resolveFixModel(ctx, fixTier, authoritative)
+		if rerr != nil {
+			return "", rerr
+		}
+
+		model := p.Model
+
+		o.noteShortfall(ctx, "fix coder", p)
 
 		if o.fixEscalate {
 			d.logCard(ctx, "fix coder %s selected for round %d fixes (tier=%s) - escalated after a fix round that %s",
 				model, round, tier, o.fixFailReason)
 		} else {
 			d.logCard(ctx, "fix coder %s selected for round %d fixes (tier=%s)", model, round, tier)
+		}
+
+		// The escalated round exists to reach a STRONGER model after a failure.
+		// When the climb does not clear the bar it climbed to, it bought
+		// nothing; the round still runs on a pick that is at least fresh, but
+		// the no-op is no longer invisible.
+		if o.fixEscalate && !p.AtBar() && p.Source != registry.SourcePinned &&
+			o.firstNote("fix-escalation-noop/"+string(tier)+"/"+model) {
+			d.logCard(ctx, "fix escalation to %s bought nothing - %s does not clear it (%s); running anyway",
+				tier, model, priorClause(p))
 		}
 
 		res, dur, err := o.runModelCoder(ctx, d.WriteTools, prompt, model, fixWrapUpMessage, tier)
@@ -958,11 +1038,16 @@ func (o *run) runFix(ctx context.Context, findings string, round int, fixTier st
 	cfg := d.Cfg
 
 	if o.fixEscalate {
-		if model := o.resolveFixModel(ctx, fixTier, authoritative); o.fixFailed[model] {
+		p, rerr := o.resolveFixModel(ctx, fixTier, authoritative)
+		if rerr != nil || o.fixFailed[p.Model] {
 			d.logCard(ctx, "review parked: the previous fix round %s and no other fix model is available (tried: %s) - outstanding findings:\n%s",
 				o.fixFailReason, strings.Join(sortedKeys(o.fixFailed), ", "), findings)
 
-			return false, &ReviewParkedError{}
+			if rerr != nil {
+				return false, fmt.Errorf("resolve fix model: %w", rerr)
+			}
+
+			return false, &ReviewParkedError{Reason: reviewParkedFixExhausted}
 		}
 	}
 
@@ -1072,13 +1157,24 @@ func sortedKeys(set map[string]bool) []string {
 // resolveFixModel picks the coder model for the fix run: the card's coder pin
 // when catalog-resolvable, else the best-value coder selection for the effective
 // fix tier (the synthesizer's fix_tier, falling back to the card tier).
-func (o *run) resolveFixModel(ctx context.Context, fixTier string, authoritative bool) string {
+func (o *run) resolveFixModel(ctx context.Context, fixTier string, authoritative bool) (registry.Pick, error) {
+	tier := o.fixTierEffective(fixTier, authoritative)
+
 	if resolvePin(o.d.Registry, o.tc.ModelCoder) {
 		// A pinned model is returned even if it is in o.excluded: we never override
 		// an explicit operator pin with an auto-selected substitute. A pinned model
 		// that is harness-incapable therefore keeps being re-selected, exhausts the
 		// re-selection cap, and parks - the blacklist still records it.
-		return o.tc.ModelCoder
+		return registry.Pick{
+			ModelSpec: registry.ModelSpec{
+				Model:         o.tc.ModelCoder,
+				ContextWindow: o.d.Registry.ContextWindow(o.tc.ModelCoder),
+			},
+			Role:          registry.RoleCoder,
+			RequestedTier: tier,
+			Source:        registry.SourcePinned,
+			OK:            true,
+		}, nil
 	}
 
 	if o.tc.ModelCoder != "" {
@@ -1087,24 +1183,36 @@ func (o *run) resolveFixModel(ctx context.Context, fixTier string, authoritative
 
 	in := registry.SelectInput{
 		Role:    registry.RoleCoder,
-		Tier:    o.fixTierEffective(fixTier, authoritative),
+		Tier:    tier,
 		Exclude: o.fixExclusions(),
 	}
 
 	if !o.fixEscalate {
-		return o.d.Registry.SelectByComplexity(in).Model
+		return o.employableFixPick(o.d.Registry.SelectByComplexity(in))
 	}
 
 	// Escalating after a failed round: prefer a vendor that has not failed this
 	// card, and fall back to any vendor when that leaves only a failed model.
 	in.ExcludeVendors = o.fixFailedVendors()
-	if spec := o.d.Registry.SelectByComplexity(in); !o.fixFailed[spec.Model] {
-		return spec.Model
+	if p := o.d.Registry.SelectByComplexity(in); p.OK && !o.fixFailed[p.Model] {
+		return p, nil
 	}
 
 	in.ExcludeVendors = nil
 
-	return o.d.Registry.SelectByComplexity(in).Model
+	return o.employableFixPick(o.d.Registry.SelectByComplexity(in))
+}
+
+// employableFixPick converts the selector's refusal into a review park. The
+// asymmetry with the coder path is deliberate: no coder means there is no work
+// at all, while the code a fix round would touch is already written and
+// pushed, so a human taking the card FROM REVIEW is the right destination.
+func (o *run) employableFixPick(p registry.Pick) (registry.Pick, error) {
+	if !p.OK {
+		return registry.Pick{}, &ReviewParkedError{Reason: reviewParkedNoFixModel}
+	}
+
+	return p, nil
 }
 
 // fixTierEffective is the tier the fix coder is sized and selected on: fixTierFor,
@@ -1334,4 +1442,47 @@ func skillToolSlice(t tools.Tool) []tools.Tool {
 	}
 
 	return []tools.Tool{t}
+}
+
+// panelSummary renders a review panel for the card log. Three identical slugs
+// printed bare are indistinguishable from three independent judgements, and
+// the synthesizer reads agreement as signal - so each seat carries the bar it
+// actually met, whether it fell short of the bar the panel asked for, whether
+// it came from an operator pin, and whether it merely repeats the seat above.
+func panelSummary(panel []registry.Pick) string {
+	seats := make([]string, 0, len(panel))
+
+	for _, p := range panel {
+		var seat string
+
+		switch {
+		case p.Source == registry.SourcePinned:
+			seat = p.Model + " (pinned)"
+		case p.AtBar():
+			seat = p.Model + "@" + string(p.MetTier)
+		default:
+			seat = fmt.Sprintf("%s@%s (below %s)", p.Model, metTierLabel(p), p.RequestedTier)
+		}
+
+		if p.Duplicate {
+			seat += " (repeat)"
+		}
+
+		seats = append(seats, seat)
+	}
+
+	return strings.Join(seats, ", ")
+}
+
+// panelBelowBar reports that not one seat cleared the tier the panel asked
+// for. An operator pin exempts the panel: a pin is an explicit choice carrying
+// no measured prior, so it has no shortfall to report.
+func panelBelowBar(panel []registry.Pick) bool {
+	for _, p := range panel {
+		if p.Source == registry.SourcePinned || p.AtBar() {
+			return false
+		}
+	}
+
+	return true
 }

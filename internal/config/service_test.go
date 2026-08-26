@@ -1,6 +1,7 @@
 package config
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -284,6 +285,27 @@ func TestServiceValidate(t *testing.T) {
 	t.Run("exactly 1.0 selector_price_headroom passes (no band)", func(t *testing.T) {
 		cfg := validServiceConfig()
 		cfg.SelectorPriceHeadroom = 1.0
+		require.NoError(t, cfg.Validate())
+	})
+
+	t.Run("inverted selector_tier_bars errors", func(t *testing.T) {
+		cfg := validServiceConfig()
+		cfg.SelectorTierBars = map[string]float64{"simple": 0.90, "critical": 0.10}
+		err := cfg.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "selector_tier_bars")
+	})
+
+	t.Run("NaN selector_tier_bars errors", func(t *testing.T) {
+		cfg := validServiceConfig()
+		cfg.SelectorTierBars = map[string]float64{"critical": math.NaN()}
+		err := cfg.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "selector_tier_bars")
+	})
+
+	t.Run("empty selector_tier_bars passes (built-in bars)", func(t *testing.T) {
+		cfg := validServiceConfig()
 		require.NoError(t, cfg.Validate())
 	})
 

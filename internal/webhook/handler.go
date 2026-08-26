@@ -135,6 +135,11 @@ type LaunchEnv struct {
 	// CMX_SELECTOR_PRICE_HEADROOM. Zero is omitted (worker applies its own default).
 	SelectorPriceHeadroom float64
 
+	// SelectorTierBars is the operator's quality ladder passed as
+	// CMX_SELECTOR_TIER_BARS (JSON-encoded). Empty is omitted (worker applies
+	// registry.DefaultTierBars).
+	SelectorTierBars map[string]float64
+
 	// CompactionEnabled, CompactionThreshold, and CompactionKeepRecentTurns
 	// configure the worker harness loop's in-window compaction. When disabled
 	// (the default) the CMX_COMPACTION_* vars are omitted so the worker keeps the
@@ -696,6 +701,15 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 
 	if s.launchEnv.SelectorPriceHeadroom != 0 {
 		env = append(env, "CMX_SELECTOR_PRICE_HEADROOM="+formatFloat(s.launchEnv.SelectorPriceHeadroom))
+	}
+
+	if len(s.launchEnv.SelectorTierBars) > 0 {
+		if b, err := json.Marshal(s.launchEnv.SelectorTierBars); err == nil {
+			env = append(env, "CMX_SELECTOR_TIER_BARS="+string(b))
+		} else {
+			s.logger.Warn("failed to marshal selector tier bars; container will use the default ladder",
+				"project", p.Project, "card_id", p.CardID, "error", err)
+		}
 	}
 
 	if s.launchEnv.CompactionEnabled {

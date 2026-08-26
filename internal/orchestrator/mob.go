@@ -131,7 +131,14 @@ func (o *run) mobDiscuss(ctx context.Context, t mob.Topic) (mob.Outcome, bool) {
 		}
 	}
 
-	cfg := buildEngineConfig(o, t, bearer)
+	cfg, ok := buildEngineConfig(ctx, o, t, bearer)
+	if !ok {
+		slog.Warn("mob: no discussion panel is selectable; continuing solo", "card_id", o.d.Cfg.CardID, "kind", t.Kind)
+		o.d.logCard(ctx, "mob discussion unavailable (%s): no model is selectable - continuing solo", t.Kind)
+
+		return mob.Outcome{}, false
+	}
+
 	o.mobSeats = cfg.Seats
 
 	// Clamp the mob session term to the remaining headroom (min keeps whichever binds).
@@ -176,7 +183,7 @@ func (o *run) mobDiscuss(ctx context.Context, t mob.Topic) (mob.Outcome, bool) {
 // budget term. SeatEndpoint is NOT set here - the caller
 // wires it once the loopback server has started (the server is built from
 // this config's Seats/Runner, so it cannot exist before this call returns).
-func buildEngineConfig(o *run, t mob.Topic, bearer string) mob.EngineConfig {
+func buildEngineConfig(ctx context.Context, o *run, t mob.Topic, bearer string) (mob.EngineConfig, bool) {
 	// No topic may seat a model proven harness-incapable this run. Review and
 	// checkpoint topics judge code this run wrote, so they exclude the models
 	// that coded it as well (reviewExclusions folds in the incapable set).
@@ -190,6 +197,26 @@ func buildEngineConfig(o *run, t mob.Topic, bearer string) mob.EngineConfig {
 		Tier:    registry.TierComplex,
 		Exclude: exclude,
 	}, len(t.Lenses))
+
+	// Nothing is employable for the reviewer role, so the topic cannot be
+	// seated. A discussion is an enhancement over the normal path; the caller
+	// continues on it rather than failing the run.
+	if len(panel) == 0 {
+		return mob.EngineConfig{}, false
+	}
+
+	for _, p := range panel {
+		o.noteShortfall(ctx, "mob "+t.Kind, p)
+	}
+
+	// The panel is always one seat per lens, so a discussion whose seats share
+	// a model looks full while being one model talking to itself - and a
+	// synthesizer reads that as agreement.
+	if distinct := registry.DistinctModels(panel); distinct < len(t.Lenses) &&
+		o.firstNote(fmt.Sprintf("mob-dependent/%s/%d", t.Kind, distinct)) {
+		o.d.logCard(ctx, "mob discussion (%s) is not fully independent: %d seats share %d distinct model(s)",
+			t.Kind, len(t.Lenses), distinct)
+	}
 
 	seats := make([]mob.SeatConfig, len(t.Lenses))
 	for i, lens := range t.Lenses {
@@ -238,7 +265,7 @@ func buildEngineConfig(o *run, t mob.Topic, bearer string) mob.EngineConfig {
 		Inbox:     o.d.Human,
 		BudgetUSD: budget,
 		Bearer:    bearer,
-	}
+	}, true
 }
 
 // seatContextMaxBytes bounds the accumulated seat conversation carried

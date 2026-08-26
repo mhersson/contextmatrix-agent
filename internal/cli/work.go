@@ -213,6 +213,14 @@ func specFromEnv() (worker.RunSpec, error) {
 		return worker.RunSpec{}, err
 	}
 
+	var selectorTierBars map[string]float64
+
+	if raw := os.Getenv("CMX_SELECTOR_TIER_BARS"); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &selectorTierBars); err != nil {
+			return worker.RunSpec{}, fmt.Errorf("env var CMX_SELECTOR_TIER_BARS: %w", err)
+		}
+	}
+
 	compactionThreshold, err := envFloat("CMX_COMPACTION_THRESHOLD", 0.85)
 	if err != nil {
 		return worker.RunSpec{}, err
@@ -354,6 +362,7 @@ func specFromEnv() (worker.RunSpec, error) {
 		MaxTurns:                  maxTurns,
 		MaxCardCost:               maxCardCost,
 		SelectorPriceHeadroom:     selectorPriceHeadroom,
+		SelectorTierBars:          selectorTierBars,
 		ContainerTimeout:          time.Duration(containerTimeoutSeconds) * time.Second,
 		GatesPollInterval:         time.Duration(gatesPollSeconds) * time.Second,
 		GatesCIWaitTimeout:        time.Duration(gatesCIWaitSeconds) * time.Second,

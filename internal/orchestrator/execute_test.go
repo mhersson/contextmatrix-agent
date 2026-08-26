@@ -1813,24 +1813,42 @@ func TestCoderPromptParentSlotOmitsRecordedHistory(t *testing.T) {
 }
 
 // TestResolveCoderModelPinMissingAdvisory proves that a non-empty but
-// unresolvable coder pin emits exactly one card-log advisory across multiple
-// resolveCoderModel calls (the once-per-run guard), and does not change the
-// model actually selected.
+// unresolvable coder pin reaches the card exactly once per run, however many
+// subtasks resolve a coder, and does not become the model selected.
+//
+// The count is taken over the lines that NAME the pin. The card log also
+// carries tier-shortfall advisories, deduped on their own key and therefore
+// one per distinct requested tier, so a total-line count would be measuring a
+// different guarantee and would move whenever an unrelated advisory is added.
 func TestResolveCoderModelPinMissingAdvisory(t *testing.T) {
+	const missingPin = "pinned/missing" // not in planTestCatalog
+
 	ops := &fakeOps{}
 	d := execTestDeps(ops, &fakeGit{}, &planLLM{})
 	o := newExecRun(d, nil, 5)
 	ctx := context.Background()
 
-	o.tc.ModelCoder = "pinned/missing" // not in planTestCatalog
+	o.tc.ModelCoder = missingPin
 
 	// Multiple calls across different subtasks.
-	o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-1", Title: "First", Tier: "simple"}, "prompt1")
-	o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-2", Title: "Second", Tier: "moderate"}, "prompt2")
+	first, err := o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-1", Title: "First", Tier: "simple"}, "prompt1")
+	require.NoError(t, err)
 
-	// Exactly one advisory log entry (once-per-run guard).
-	require.Len(t, ops.logs, 1, "exactly one advisory log for the missing pin")
-	assert.Contains(t, ops.logs[0], "pinned/missing")
+	second, err := o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-2", Title: "Second", Tier: "moderate"}, "prompt2")
+	require.NoError(t, err)
+
+	assert.NotEqual(t, missingPin, first, "an unresolvable pin never becomes the selected model")
+	assert.NotEqual(t, missingPin, second)
+
+	var pinAdvisories []string
+
+	for _, l := range ops.logs {
+		if strings.Contains(l, missingPin) {
+			pinAdvisories = append(pinAdvisories, l)
+		}
+	}
+
+	require.Len(t, pinAdvisories, 1, "exactly one advisory log for the missing pin")
 }
 
 // TestResolveCoderModelPinResolvableNoAdvisory proves that a resolvable coder
@@ -1843,9 +1861,298 @@ func TestResolveCoderModelPinResolvableNoAdvisory(t *testing.T) {
 
 	o.tc.ModelCoder = "pinned/model" // IS in planTestCatalog
 
-	o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-1", Title: "First", Tier: "simple"}, "prompt1")
-	o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-2", Title: "Second", Tier: "moderate"}, "prompt2")
+	_, _ = o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-1", Title: "First", Tier: "simple"}, "prompt1")
+	_, _ = o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-2", Title: "Second", Tier: "moderate"}, "prompt2")
 
 	// No advisory logs because the pin is resolvable.
 	assert.Empty(t, ops.logs, "resolvable pin produces no advisory logs")
+}
+
+// subFloorCoderRegistry seeds one coder model whose prior sits below every
+// configured bar, so the only employable answer is the operator's capable
+// default.
+func subFloorCoderRegistry() *registry.Registry {
+	return registry.NewRegistryFromParts(
+		llm.Catalog{{ID: "weak/model", ContextLength: 200000, SupportedParameters: []string{"tools"}}},
+		registry.Priors{Models: map[string]registry.PriorEntry{"weak/model": coderPrior(0.30)}},
+		nil, nil, "operator/default")
+}
+
+// TestResolveCoderModelParksOnlyWhenEvenTheDefaultIsBarred pins the narrow
+// refusal: a sub-floor catalog still runs on the operator's default, and the
+// run parks only when that default is itself barred this run.
+func TestResolveCoderModelParksOnlyWhenEvenTheDefaultIsBarred(t *testing.T) {
+	sub := subtaskRef{ID: "SUB-1", Title: "First", Tier: "moderate"}
+
+	t.Run("sub-floor catalog falls to the operator default", func(t *testing.T) {
+		d := execTestDeps(&fakeOps{}, &fakeGit{}, &planLLM{})
+		d.Registry = subFloorCoderRegistry()
+		o := newExecRun(d, nil, 5)
+
+		model, err := o.resolveCoderModel(context.Background(), sub, "prompt")
+		require.NoError(t, err)
+		assert.Equal(t, "operator/default", model,
+			"the capable default is the trigger's default_model - operator intent, not junk")
+	})
+
+	t.Run("an excluded default parks the run", func(t *testing.T) {
+		ops := &fakeOps{}
+		d := execTestDeps(ops, &fakeGit{}, &planLLM{})
+		d.Registry = subFloorCoderRegistry()
+		o := newExecRun(d, nil, 5)
+		o.excluded = map[string]bool{"operator/default": true, "weak/model": true}
+
+		model, err := o.resolveCoderModel(context.Background(), sub, "prompt")
+		require.Error(t, err)
+		assert.Empty(t, model)
+
+		var nme *NoModelError
+
+		require.ErrorAs(t, err, &nme)
+		assert.Equal(t, registry.RoleCoder, nme.Role)
+		assert.Equal(t, registry.TierModerate, nme.Tier)
+		assert.Equal(t, 2, nme.Excluded)
+		assert.False(t, nme.WindowLimited)
+
+		assert.True(t, isParkError(err),
+			"a run with no selectable coder must park, not walk into the next phase")
+	})
+}
+
+// TestNoModelErrorNamesTheWindowWhenThatIsTheCause proves the refusal does not
+// send the operator to look at priors when the actual constraint is context
+// size - the ladder cannot buy a bigger window.
+func TestNoModelErrorNamesTheWindowWhenThatIsTheCause(t *testing.T) {
+	d := execTestDeps(&fakeOps{}, &fakeGit{}, &planLLM{})
+	// Both the scored model and the capable default are window-short, so the
+	// pool empties on fit rather than on quality.
+	d.Registry = registry.NewRegistryFromParts(
+		llm.Catalog{
+			{ID: "small/window", ContextLength: 8000, SupportedParameters: []string{"tools"}},
+			{ID: "tiny/default", ContextLength: 8000, SupportedParameters: []string{"tools"}},
+		},
+		registry.Priors{Models: map[string]registry.PriorEntry{"small/window": coderPrior(0.90)}},
+		nil, nil, "tiny/default")
+	o := newExecRun(d, nil, 5)
+
+	in := registry.SelectInput{
+		Role: registry.RoleCoder, Tier: registry.TierModerate, EstTokens: 500000,
+	}
+
+	p := d.Registry.SelectByComplexity(in)
+	require.False(t, p.OK, "the fixture must actually refuse, or the classification is never exercised")
+
+	nme := o.noModelError(in, p)
+
+	assert.True(t, nme.WindowLimited,
+		"a pool that is non-empty at EstTokens 0 emptied on window fit, not on quality")
+}
+
+// midTierCoderDeps wires an execute run whose only scored coder clears the
+// moderate bar (0.76) but neither complex (0.82) nor critical (0.90), so every
+// selection above moderate reports a shortfall.
+func midTierCoderDeps(ops *fakeOps) Deps {
+	d := execTestDeps(ops, &fakeGit{}, &planLLM{})
+	d.Registry = registry.NewRegistryFromParts(
+		llm.Catalog{{ID: "mid/model", ContextLength: 200000, SupportedParameters: []string{"tools"}}},
+		registry.Priors{Models: map[string]registry.PriorEntry{"mid/model": coderPrior(0.78)}},
+		nil, nil, "capable/default")
+
+	return d
+}
+
+// TestShortfallAdvisoryIsOncePerPhaseRoleAndTier mirrors the pin-advisory
+// guard: the fixed-tier callers ask for the same tier on every call and the
+// card's activity log is capped, so an undeduped advisory would evict real
+// history. A distinct requested bar is a distinct fact and earns its own line.
+func TestShortfallAdvisoryIsOncePerPhaseRoleAndTier(t *testing.T) {
+	t.Run("repeated selections at one tier advise once", func(t *testing.T) {
+		ops := &fakeOps{}
+		o := newExecRun(midTierCoderDeps(ops), nil, 5)
+		ctx := context.Background()
+
+		for _, id := range []string{"SUB-1", "SUB-2", "SUB-3"} {
+			model, err := o.resolveCoderModel(ctx, subtaskRef{ID: id, Title: id, Tier: "complex"}, "prompt")
+			require.NoError(t, err)
+			assert.Equal(t, "mid/model", model, "the clamped pick is still a measured model")
+		}
+
+		require.Len(t, ops.logs, 1,
+			"one shortfall advisory across repeated same-tier selections; logs=%v", ops.logs)
+		assert.Contains(t, ops.logs[0], "mid/model")
+	})
+
+	t.Run("two requested tiers in one phase advise separately", func(t *testing.T) {
+		ops := &fakeOps{}
+		o := newExecRun(midTierCoderDeps(ops), nil, 5)
+		ctx := context.Background()
+
+		_, err := o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-1", Title: "First", Tier: "complex"}, "prompt")
+		require.NoError(t, err)
+
+		_, err = o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-2", Title: "Second", Tier: "critical"}, "prompt")
+		require.NoError(t, err)
+
+		require.Len(t, ops.logs, 2,
+			"a different requested bar is a different fact and earns its own line; logs=%v", ops.logs)
+	})
+}
+
+// tierNamingRegistry prices one model per tier so that exactly one is
+// affordable at each rung: the best-value band around the cheapest candidate
+// excludes everything above it. The model that comes back therefore NAMES the
+// tier that went in, which is what lets a test observe the tier a call site
+// asked for without a spy.
+func tierNamingRegistry() *registry.Registry {
+	return registry.NewRegistryFromParts(
+		llm.Catalog{
+			{ID: "tier/simple", ContextLength: 200000, PromptPricePerTok: 5e-10, CompletionPricePerTok: 5e-10, SupportedParameters: []string{"tools"}},
+			{ID: "tier/moderate", ContextLength: 200000, PromptPricePerTok: 5e-7, CompletionPricePerTok: 5e-7, SupportedParameters: []string{"tools"}},
+			{ID: "tier/complex", ContextLength: 200000, PromptPricePerTok: 5e-4, CompletionPricePerTok: 5e-4, SupportedParameters: []string{"tools"}},
+			{ID: "capable/default", ContextLength: 200000, SupportedParameters: []string{"tools"}},
+		},
+		registry.Priors{Models: map[string]registry.PriorEntry{
+			"tier/simple":   coderPrior(0.70),
+			"tier/moderate": coderPrior(0.80),
+			"tier/complex":  coderPrior(0.90),
+		}},
+		nil, nil, "capable/default")
+}
+
+// TestCoderTierIsAlwaysDerivedFromTheWork guards the distinction this whole
+// selection design rests on.
+//
+// An AUTHORING tier is a claim about how hard the work is. The run can check
+// that claim against what actually happens, so it is measured and corrected -
+// never pinned to a constant. A JUDGMENT bar is a claim about how good the
+// judgement has to be; nothing in the run measures that, so it is stated
+// policy with a stated reason.
+//
+// Every coder selection is authoring, so all three of them must keep deriving
+// their tier from the subtask or the card. Flooring any of them at a constant
+// would silently overpay on trivial work and, worse, make the tier stop
+// meaning anything the run could correct.
+//
+// The one deliberate exception is the authoritative fix pass, which pins the
+// complex tier because it is the last round before a human takes the card.
+// That is precedent for nothing else and this guard does not cover it.
+func TestCoderTierIsAlwaysDerivedFromTheWork(t *testing.T) {
+	tiers := []struct {
+		tier      string
+		wantModel string
+	}{
+		{tier: "simple", wantModel: "tier/simple"},
+		{tier: "moderate", wantModel: "tier/moderate"},
+		{tier: "complex", wantModel: "tier/complex"},
+	}
+
+	t.Run("the subtask coder derives from the subtask", func(t *testing.T) {
+		for _, tt := range tiers {
+			t.Run(tt.tier, func(t *testing.T) {
+				d := execTestDeps(&fakeOps{}, &fakeGit{}, &planLLM{})
+				d.Registry = tierNamingRegistry()
+				o := newExecRun(d, nil, 0)
+
+				model, err := o.resolveCoderModel(context.Background(),
+					subtaskRef{ID: "SUB-1", Title: "First", Tier: tt.tier}, "prompt")
+				require.NoError(t, err)
+				assert.Equal(t, tt.wantModel, model,
+					"the coder tier must be the subtask's, not a constant")
+			})
+		}
+	})
+
+	t.Run("the candidate fan-out derives from the card", func(t *testing.T) {
+		for _, tt := range tiers {
+			t.Run(tt.tier, func(t *testing.T) {
+				d, _, _ := fanoutDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, 2)
+				d.Registry = tierNamingRegistry()
+
+				o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
+				o.cardTier = tt.tier
+
+				require.NoError(t, o.runFanout(context.Background()))
+				require.NotEmpty(t, o.candidates)
+				assert.Equal(t, tt.wantModel, o.candidates[0].model,
+					"the fan-out's first seat must be the card's tier, not a constant")
+			})
+		}
+	})
+
+	t.Run("the candidate re-pick derives from the card", func(t *testing.T) {
+		for _, tt := range tiers {
+			t.Run(tt.tier, func(t *testing.T) {
+				d := execTestDeps(&fakeOps{}, &fakeGit{}, &planLLM{})
+				d.Registry = tierNamingRegistry()
+
+				o := newExecRun(d, nil, 0)
+				o.cardTier = tt.tier
+				o.excluded = map[string]bool{"dropped/model": true}
+
+				c := &candidate{idx: 1, model: "dropped/model"}
+
+				model, err := o.candidateCoderModel(c)(context.Background(), subtaskRef{ID: "SUB-1"}, "prompt")
+				require.NoError(t, err)
+				assert.Equal(t, tt.wantModel, model,
+					"a candidate re-pick must stay on the card's tier, not a constant")
+			})
+		}
+	})
+}
+
+// TestShortfallAdvisoryNeverTakesTheSelectionLock observes the lock directly
+// instead of through a behaviour that happens to break: hold the selection
+// lock, raise an advisory from another goroutine, and wait. It returns only if
+// the advisory takes some other mutex. The candidate resolver holds this lock
+// across a selection, so an advisory that reached for it would deadlock the
+// Best-of-N fan-out rather than fail visibly.
+func TestShortfallAdvisoryNeverTakesTheSelectionLock(t *testing.T) {
+	o := newExecRun(midTierCoderDeps(&fakeOps{}), nil, 5)
+
+	o.selMu.Lock()
+	defer o.selMu.Unlock()
+
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		o.noteShortfall(context.Background(), "probe", registry.Pick{
+			ModelSpec:     registry.ModelSpec{Model: "mid/model"},
+			Role:          registry.RoleCoder,
+			RequestedTier: registry.TierComplex,
+			MetTier:       registry.TierModerate,
+			HasPrior:      true,
+			OK:            true,
+		})
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the shortfall advisory blocked on the selection lock")
+	}
+}
+
+// TestUnmeasuredPickReportsNoPriorRatherThanZero pins the difference HasPrior
+// exists to carry, at the point where it reaches a human. The capable default
+// is normally absent from the live catalog, so the priors built from that
+// catalog cannot score it - and a card line reading "prior 0.00" tells an
+// operator their own chosen fallback rated worst possible, which is grounds to
+// blacklist a model whose only fault is having no rating.
+func TestUnmeasuredPickReportsNoPriorRatherThanZero(t *testing.T) {
+	ops := &fakeOps{}
+	// The plan registry carries no priors at all, so every rung is dry and the
+	// answer is the operator's capable default: the standard degraded shape.
+	o := newExecRun(execTestDeps(ops, &fakeGit{}, &planLLM{}), nil, 5)
+
+	model, err := o.resolveCoderModel(context.Background(),
+		subtaskRef{ID: "SUB-1", Title: "First", Tier: "moderate"}, "prompt")
+	require.NoError(t, err)
+	require.Equal(t, "default/model", model)
+
+	require.Len(t, ops.logs, 1, "logs=%v", ops.logs)
+	assert.Contains(t, ops.logs[0], "no measured prior")
+	assert.NotContains(t, ops.logs[0], "prior 0.00",
+		"nothing measured this model, so no number may be printed for it; logs=%v", ops.logs)
 }

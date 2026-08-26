@@ -28,7 +28,7 @@ type solverCtx struct {
 	ledger     *Ledger
 	tools      *tools.Registry
 	workspace  string
-	coderModel func(ctx context.Context, sub subtaskRef, prompt string) string
+	coderModel func(ctx context.Context, sub subtaskRef, prompt string) (string, error)
 	boardOps   bool         // false: no subtask claim/heartbeat/complete (candidate mode)
 	push       bool         // false: never push (candidate mode)
 	tag        string       // "" parent; "candidate 2/3 (slug)" for candidate log lines
@@ -298,15 +298,9 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 	// is the authoritative bound (it errors at the cap), the +1 is a belt-and-braces
 	// ceiling so a logic slip can never spin.
 	for attempt := 0; attempt <= reselectCap; attempt++ {
-		model := sc.coderModel(ctx, sub, prompt)
-
-		// A candidate's reselection-aware resolver returns "" when its model pool is
-		// exhausted (every viable model excluded this run). Drop the candidate
-		// cleanly rather than run the harness with no model. The parent/single-solver
-		// resolver never returns "" (it falls back to the capable default), so this
-		// is candidate-only in practice.
-		if model == "" {
-			return harness.Result{}, "", fmt.Errorf("coder for %s: candidate model pool exhausted", sub.ID)
+		model, err := sc.coderModel(ctx, sub, prompt)
+		if err != nil {
+			return harness.Result{}, "", fmt.Errorf("coder for %s: %w", sub.ID, err)
 		}
 
 		logMsg := fmt.Sprintf("coder model %s selected for subtask %q (tier=%s)", model, sub.Title, tierOf(sub))
@@ -402,28 +396,38 @@ func (o *run) pushBranch(ctx context.Context) error {
 
 // resolveCoderModel picks the coder model for a subtask: the card's coder pin
 // when it is catalog-resolvable, else the best-value complexity selection for
-// the subtask's tier and a real window estimate of the coder prompt.
-func (o *run) resolveCoderModel(ctx context.Context, sub subtaskRef, prompt string) string {
+// the subtask's tier and a real window estimate of the coder prompt. A
+// selection that could not be served at the subtask's tier is reported; a
+// *NoModelError is returned when even the operator's capable default is barred
+// this run, which parks the card - there is no work to do without a coder.
+func (o *run) resolveCoderModel(ctx context.Context, sub subtaskRef, prompt string) (string, error) {
 	if resolvePin(o.d.Registry, o.tc.ModelCoder) {
 		// A pinned model is returned even if it is in o.excluded: we never override
 		// an explicit operator pin with an auto-selected substitute. A pinned model
 		// that is harness-incapable therefore keeps being re-selected, exhausts the
 		// re-selection cap, and parks - the blacklist still records it.
-		return o.tc.ModelCoder
+		return o.tc.ModelCoder, nil
 	}
 
 	if o.tc.ModelCoder != "" {
 		o.warnUnresolvablePin(ctx, "coder", o.tc.ModelCoder)
 	}
 
-	spec := o.d.Registry.SelectByComplexity(registry.SelectInput{
+	in := registry.SelectInput{
 		Role:      registry.RoleCoder,
 		Tier:      tierOf(sub),
 		EstTokens: estimateTokens(prompt),
 		Exclude:   o.excluded,
-	})
+	}
 
-	return spec.Model
+	p := o.d.Registry.SelectByComplexity(in)
+	if !p.OK {
+		return "", o.noModelError(in, p)
+	}
+
+	o.noteShortfall(ctx, "coder", p)
+
+	return p.Model, nil
 }
 
 // subtaskBody returns the description text for a subtask: the planner's

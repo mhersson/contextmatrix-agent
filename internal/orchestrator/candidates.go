@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -151,6 +152,9 @@ func (o *run) runFanout(ctx context.Context) (retErr error) {
 		EstTokens: estimateTokens(o.taskDescription),
 		Exclude:   o.excluded,
 	}, nEff, pin)
+	if len(specs) < nEff {
+		return fmt.Errorf("no coder model is selectable for the candidate fan-out")
+	}
 
 	// Build every candidate and cut its worktree BEFORE spawning any goroutine, so
 	// an AddWorktree failure returns cleanly with nothing running to leak.
@@ -173,6 +177,8 @@ func (o *run) runFanout(ctx context.Context) (retErr error) {
 			git:    o.d.GitForDir(dir),
 			ledger: NewLedger(cfg.MaxCardCost, 0),
 		}
+
+		o.noteShortfall(ctx, candidatePhase(idx), specs[i])
 
 		o.d.logCard(ctx, "best-of-n: candidate %d/%d starting (model %s)", idx, nEff, o.candidates[i].model)
 	}
@@ -397,43 +403,84 @@ func lastSubtaskID(subs []subtaskRef) string {
 // therefore always reflects the LAST model the candidate ran (what logs and
 // outcome rows report). An explicit operator coder pin is never overridden
 // (mirroring resolveCoderModel): the pinned candidate keeps the pin, exhausts the
-// shared cap, and parks. When the pool is exhausted - the registry can only offer
-// an already-excluded model (its capable-default fallback) - it returns "", the
-// pool-exhausted sentinel runCoderWith turns into a clean candidate drop.
-func (o *run) candidateCoderModel(c *candidate) func(context.Context, subtaskRef, string) string {
-	return func(_ context.Context, _ subtaskRef, prompt string) string {
-		o.selMu.Lock()
-		defer o.selMu.Unlock()
-
-		// Never override an explicit operator coder pin (the fan-out assigns it to a
-		// single candidate); let a pinned-but-incapable model park via the cap.
-		if c.model == o.tc.ModelCoder && resolvePin(o.d.Registry, o.tc.ModelCoder) {
-			return c.model
+// shared cap, and parks. When nothing is employable for this candidate any more
+// it returns errCandidatePoolExhausted, which drops this candidate and leaves
+// the others running.
+//
+// The advisory for a re-pick that fell short of the card tier is raised AFTER
+// the selection lock is released, which is why the locked work lives in
+// pickCandidateModel: noteShortfall takes its own mutex, and an advisory
+// reaching for selMu from inside the lock would deadlock the fan-out.
+func (o *run) candidateCoderModel(c *candidate) func(context.Context, subtaskRef, string) (string, error) {
+	return func(ctx context.Context, _ subtaskRef, prompt string) (string, error) {
+		model, fresh, ok := o.pickCandidateModel(c, prompt)
+		if !ok {
+			return "", errCandidatePoolExhausted
 		}
 
-		if !o.excluded[c.model] {
-			return c.model
+		// A candidate staying on the model it already had has nothing new to
+		// report; only a fresh re-pick does. c.idx is fixed when the candidate
+		// is built, before any fan-out goroutine starts, so naming the seat
+		// needs no lock.
+		if fresh.OK {
+			o.noteShortfall(ctx, candidatePhase(c.idx), fresh)
 		}
 
-		spec := o.d.Registry.SelectByComplexity(registry.SelectInput{
-			Role:      registry.RoleCoder,
-			Tier:      tierFromString(o.cardTier),
-			EstTokens: estimateTokens(prompt),
-			Exclude:   o.excluded,
-		})
-
-		// Pool exhausted: the registry could only return an already-excluded model
-		// (its capable-default fallback fired), so this candidate has no viable model
-		// left. Signal the drop with the empty sentinel.
-		if spec.Model == "" || o.excluded[spec.Model] {
-			return ""
-		}
-
-		c.model = spec.Model
-
-		return c.model
+		return model, nil
 	}
 }
+
+// pickCandidateModel does candidate c's coder resolution under the selection
+// lock and nothing else, so the lock is released by defer and a panic in the
+// selector cannot strand it. A leaked selMu would block every other candidate
+// forever: the fan-out recovers a candidate panic and carries on, so the run
+// would hang rather than fail.
+//
+// fresh is the pick to report once the lock is released, and is the zero Pick
+// when c kept the model it already had - a pin, or a model this run has not
+// excluded - since that model was reported when it was chosen. ok is false
+// when nothing is employable for this candidate any more.
+func (o *run) pickCandidateModel(c *candidate, prompt string) (model string, fresh registry.Pick, ok bool) {
+	o.selMu.Lock()
+	defer o.selMu.Unlock()
+
+	// Never override an explicit operator coder pin (the fan-out assigns it to a
+	// single candidate); let a pinned-but-incapable model park via the cap.
+	if c.model == o.tc.ModelCoder && resolvePin(o.d.Registry, o.tc.ModelCoder) {
+		return c.model, registry.Pick{}, true
+	}
+
+	if !o.excluded[c.model] {
+		return c.model, registry.Pick{}, true
+	}
+
+	pick := o.d.Registry.SelectByComplexity(registry.SelectInput{
+		Role:      registry.RoleCoder,
+		Tier:      tierFromString(o.cardTier),
+		EstTokens: estimateTokens(prompt),
+		Exclude:   o.excluded,
+	})
+
+	// Nothing is employable for this candidate any more - every rung is dry
+	// and the capable default is excluded too. Drop this candidate; the
+	// others carry on.
+	if !pick.OK {
+		return "", registry.Pick{}, false
+	}
+
+	c.model = pick.Model
+
+	return pick.Model, pick, true
+}
+
+// candidatePhase names one Best-of-N seat in selection advisories, so the
+// fan-out's own pick and a later re-pick for the same candidate share a
+// dedupe key.
+func candidatePhase(idx int) string { return fmt.Sprintf("best-of-n candidate %d", idx) }
+
+// errCandidatePoolExhausted drops one Best-of-N candidate cleanly: every model
+// it could run on is excluded this run, and the other candidates carry on.
+var errCandidatePoolExhausted = errors.New("candidate model pool exhausted")
 
 // userNotes fans mid-run human turns out to the live Best-of-N candidates. In
 // HITL mode collect drains the inbox into a shared, mutex-guarded buffer; each

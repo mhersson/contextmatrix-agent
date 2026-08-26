@@ -79,6 +79,10 @@ type RunSpec struct {
 	MaxCardCost           float64 // CMX_MAX_CARD_COST; 0 disables
 	SelectorPriceHeadroom float64 // CMX_SELECTOR_PRICE_HEADROOM; 0 uses worker default
 
+	// SelectorTierBars is the operator's quality ladder (CMX_SELECTOR_TIER_BARS,
+	// JSON-encoded). Empty uses registry.DefaultTierBars.
+	SelectorTierBars map[string]float64
+
 	// ContainerTimeout is serve's hard kill ceiling for this run's container
 	// (CMX_CONTAINER_TIMEOUT_SECONDS). 0 = unknown - an older serve, or a host
 	// that never configured it - so a phase that must park before the kill
@@ -378,8 +382,21 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 		deadline = time.Now().Add(a.spec.ContainerTimeout - gatesFinalizeMargin)
 	}
 
+	// An invalid operator tier ladder fails here, before any phase runs: no
+	// work has been done yet, so this releases the claim and reports the
+	// error rather than parking or pushing anything.
+	reg, err := buildRegistry(a.spec)
+	if err != nil {
+		releaseQuietly(ctx, a.ops, a.spec.CardID)
+
+		return Result{Reason: "error"}, err
+	}
+
+	orchOps := ops2orchestrator(a.ops)
+	logReachability(ctx, reg, orchOps, a.spec.CardID)
+
 	d := orchestrator.Deps{
-		Ops: ops2orchestrator(a.ops),
+		Ops: orchOps,
 		Git: a.git,
 		GitForDir: func(dir string) orchestrator.GitOps {
 			return NewGit(dir, secretsPathForAuth(a.spec), hostFromRepoURL(a.spec.RepoURL), a.spec.CACertFile)
@@ -388,7 +405,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 		PRGates:    pr,
 		Client:     a.client,
 		Emit:       a.emit,
-		Registry:   buildRegistry(a.spec),
+		Registry:   reg,
 		WriteTools: tools.NewRegistry(wt...),
 		WriteToolsForDir: func(dir string) *tools.Registry {
 			// Candidates get the same skill tool as the main solver - the
@@ -442,7 +459,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 		},
 	}
 
-	err := runOrchestrator(runCtx, d)
+	err = runOrchestrator(runCtx, d)
 
 	return mapFSMResult(ctx, a, err)
 }
@@ -533,6 +550,26 @@ func mapFSMResult(ctx context.Context, a fsmArgs, err error) (Result, error) {
 
 		return Result{Reason: "error"}, fmt.Errorf("orchestrator: %w", err)
 
+	case isNoModel(err):
+		// Model-selection park: no catalogued model clears any configured bar
+		// for the role and the operator's capable default is barred too, so
+		// there is nothing to run the work on. Environmental like the
+		// toolchain arm above, and mapped identically - transition to blocked
+		// BEFORE releasing the claim (ownership may be required for the
+		// transition), push the WIP, then fail. blocked is
+		// project-configurable, so a failed transition is logged and the park
+		// still completes. The orchestrator already wrote the reason to the
+		// card log.
+		if terr := a.ops.TransitionCard(ctx, a.spec.CardID, "blocked"); terr != nil {
+			slog.Warn("transition to blocked failed; leaving card state as-is",
+				"card", a.spec.CardID, "error", terr)
+		}
+
+		pushWIP(ctx, a)
+		releaseQuietly(ctx, a.ops, a.spec.CardID)
+
+		return Result{Reason: "error"}, fmt.Errorf("orchestrator: %w", err)
+
 	default:
 		releaseQuietly(ctx, a.ops, a.spec.CardID)
 
@@ -574,6 +611,14 @@ func isMaxTurns(err error) bool {
 	var mte *orchestrator.MaxTurnsError
 
 	return errors.As(err, &mte)
+}
+
+// isNoModel reports whether err is (or wraps) the orchestrator's
+// model-selection sentinel.
+func isNoModel(err error) bool {
+	var nme *orchestrator.NoModelError
+
+	return errors.As(err, &nme)
 }
 
 // isToolchainMissing reports whether err is (or wraps) the orchestrator's
@@ -816,7 +861,11 @@ func buildSkillTool(spec RunSpec, ops CardOps) tools.Tool {
 // with precedence: (1) spec.Model (the trigger's default_model), when non-empty;
 // (2) spec.DefaultModel (the serve-config default); (3) config.DefaultCapableModel
 // (a compiled-in guard).
-func buildRegistry(spec RunSpec) *registry.Registry {
+//
+// spec.SelectorTierBars carries the operator's quality ladder. An invalid
+// ladder is returned as an error so the worker exits rather than running the
+// card on a half-understood ladder.
+func buildRegistry(spec RunSpec) (*registry.Registry, error) {
 	capable := spec.Model
 
 	if capable == "" {
@@ -827,7 +876,43 @@ func buildRegistry(spec RunSpec) *registry.Registry {
 		capable = config.DefaultCapableModel
 	}
 
-	return registry.FromSelection(spec.Selection, capable, spec.SelectorPriceHeadroom, spec.MaxCapability)
+	bars, err := registry.TierBarsFromStrings(spec.SelectorTierBars)
+	if err != nil {
+		return nil, fmt.Errorf("build registry: %w", err)
+	}
+
+	return registry.FromSelection(spec.Selection, capable, spec.SelectorPriceHeadroom, spec.MaxCapability).
+		WithTierBars(bars), nil
+}
+
+// logReachability reports structural tier unreachability BEFORE the first
+// model call. It never gates the run: refusing to start because `critical`
+// is unreachable would block every `simple` card too. ops is nil in tests
+// that only implement the worker's narrower CardOps (see ops2orchestrator);
+// the card-log line is then simply skipped.
+func logReachability(ctx context.Context, reg *registry.Registry, ops orchestrator.Ops, cardID string) {
+	var unreachable []string
+
+	for _, tr := range reg.Reachability() {
+		slog.Info("selector: tier reachability",
+			"card_id", cardID, "role", string(tr.Role), "tier", string(tr.Tier),
+			"bar", tr.Bar, "candidates", tr.Count, "best_available", tr.Best)
+
+		if tr.Count == 0 {
+			unreachable = append(unreachable,
+				fmt.Sprintf("%s/%s bar %.2f (best available %.2f)", tr.Role, tr.Tier, tr.Bar, tr.Best))
+		}
+	}
+
+	for _, t := range reg.OrphanFavoriteTiers() {
+		slog.Warn("selector: favorite configured for an unknown tier; it can never be consulted",
+			"card_id", cardID, "tier", string(t))
+	}
+
+	if len(unreachable) > 0 && ops != nil {
+		_ = ops.AddLog(ctx, cardID, //nolint:errcheck // advisory
+			"model catalog cannot reach every tier: "+strings.Join(unreachable, ", "))
+	}
 }
 
 // declaredVerify maps the protocol verify config onto the orchestrator-local

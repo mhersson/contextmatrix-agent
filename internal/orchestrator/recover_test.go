@@ -146,14 +146,19 @@ func TestExecuteRecoversFromIncapableCoder(t *testing.T) {
 	assert.Contains(t, ops.recorded(), "CompleteTask:SUB-1")
 }
 
-// TestExecuteIncapableCapParks pins the cap: a coder model that is ALWAYS
-// incapable (every candidate AND the capable default) drives reselects to 3 and
-// then the run parks with an error instead of looping forever.
-func TestExecuteIncapableCapParks(t *testing.T) {
+// TestExecuteParksWhenIncapableModelsDrainTheCatalog pins how an
+// always-incapable catalog ends: every model the selector can return, the
+// operator's capable default included, is excluded as it proves incapable, and
+// the next selection has nothing left to hand back. The exclusion set is
+// absolute over the capable default too, so the run parks on the selector's
+// refusal rather than being handed the same barred model again.
+//
+// Every incapable model is still reported to the board on its way out. That
+// guarantee is independent of which park ends the run: the blacklist call
+// happens before any cap or refusal is decided.
+func TestExecuteParksWhenIncapableModelsDrainTheCatalog(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true}
-	// Every model the selector can return is incapable, so no re-selection ever
-	// yields a working model - the cap is the only thing that stops the loop.
 	llmFake := &modelAwareLLM{incapable: map[string]bool{
 		"alpha/coder":     true,
 		"beta/coder":      true,
@@ -166,15 +171,69 @@ func TestExecuteIncapableCapParks(t *testing.T) {
 	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "moderate"}}, 0)
 	err := runExecute(context.Background(), o)
 
-	require.Error(t, err, "an always-incapable model must eventually park")
+	require.Error(t, err, "an always-incapable catalog must park")
+
+	var nme *NoModelError
+	require.ErrorAs(t, err, &nme, "the park names the selector's refusal, not the re-selection cap")
+	assert.Equal(t, registry.RoleCoder, nme.Role)
+	assert.Equal(t, 3, nme.Excluded, "all three models were excluded before the refusal")
+	assert.False(t, nme.WindowLimited, "the pool emptied on exclusions, not on window fit")
+
+	assert.Equal(t, reselectCap, o.reselects, "each incapable model spent one re-selection")
+
+	for _, m := range []string{"alpha/coder", "beta/coder", "capable/default"} {
+		assert.Contains(t, ops.recorded(), "BlacklistModel:CARD-1/"+m,
+			"every incapable model must be reported to CM")
+	}
+
+	// No coder ran successfully, so the subtask never completes.
+	assert.NotContains(t, ops.recorded(), "CompleteTask:SUB-1")
+}
+
+// TestExecutePinnedIncapableModelExhaustsTheCap pins the path that still
+// reaches the re-selection cap end to end. An operator pin is honoured even
+// once it is excluded - the run never substitutes an auto-selected model for an
+// explicit choice - so a pinned model that cannot drive the tool loop is
+// re-selected until the cap stops it. Auto-selected coders cannot reach this
+// branch any more: exclusions drain the catalog and the selector refuses first.
+func TestExecutePinnedIncapableModelExhaustsTheCap(t *testing.T) {
+	const pin = "alpha/coder"
+
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	llmFake := &modelAwareLLM{incapable: map[string]bool{pin: true}}
+
+	d := execTestDeps(ops, git, llmFake)
+	d.Registry = twoCoderRegistry()
+
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "moderate"}}, 0)
+	o.tc.ModelCoder = pin
+
+	err := runExecute(context.Background(), o)
+
+	require.Error(t, err)
 
 	var ie *IncapableError
-	require.ErrorAs(t, err, &ie, "the park error must wrap the IncapableError")
-
-	assert.Equal(t, 3, o.reselects, "the re-selection cap is 3")
+	require.ErrorAs(t, err, &ie, "the cap park wraps the incapable model that spent the last attempt")
+	assert.Equal(t, pin, ie.Model)
+	assert.Equal(t, reselectCap, o.reselects, "the counter stops at the cap")
 	assert.Contains(t, err.Error(), "re-selection cap", "the park error names the cap")
 
-	// The subtask never completes when the cap is exhausted.
+	// The pin is re-handed on every attempt, so no other model is ever tried.
+	used := llmFake.recordedModels()
+	require.NotEmpty(t, used)
+
+	for _, m := range used {
+		assert.Equal(t, pin, m, "an excluded pin is still the pick; the cap is the only bound")
+	}
+
+	assert.False(t, modelsUsed(llmFake, "beta/coder"), "an auto-selected substitute must never replace a pin")
+
+	// The model that spent the last attempt is reported to CM like any other:
+	// the blacklist call happens before the cap decision.
+	assert.Contains(t, ops.recorded(), "BlacklistModel:CARD-1/"+pin,
+		"the cap-exhausting model must still be reported to CM")
+
 	assert.NotContains(t, ops.recorded(), "CompleteTask:SUB-1")
 }
 

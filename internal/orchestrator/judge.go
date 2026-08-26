@@ -173,7 +173,7 @@ func runJudge(ctx context.Context, o *run) error {
 	sections := o.judgeSections(pool)
 	prompt := fmt.Sprintf(judgePrompt, len(pool), o.tc.Title, sections)
 
-	model := d.Registry.SelectByComplexity(registry.SelectInput{
+	p := d.Registry.SelectByComplexity(registry.SelectInput{
 		Role:      registry.RoleReviewer,
 		Tier:      registry.TierComplex,
 		EstTokens: estimateTokens(prompt),
@@ -182,7 +182,20 @@ func runJudge(ctx context.Context, o *run) error {
 		// exactly the authoritative-review exclusions. Candidates register their
 		// models in o.coderModels before judging.
 		Exclude: o.reviewExclusions(),
-	}).Model
+	})
+
+	// Nothing is employable for the reviewer role. Failing here would throw
+	// away N finished implementations over a selection problem, so take the
+	// same degrade an unusable verdict takes.
+	if !p.OK {
+		return o.judgeDegrade(ctx, pool, "no judge model is selectable")
+	}
+
+	// The judge picks the branch that ships, so its shortfall is the one that
+	// matters most.
+	o.noteShortfall(ctx, "best-of-n judge", p)
+
+	model := p.Model
 
 	v, ok, err := o.runJudgeVerdict(ctx, model, prompt, len(pool))
 	if err != nil {
@@ -191,16 +204,8 @@ func runJudge(ctx context.Context, o *run) error {
 
 	if !ok {
 		// Two unparsable verdicts: fall back to the first verifying candidate
-		// rather than fail the whole run. No judge model is recorded - no model
-		// actually produced a usable decision.
-		o.winner = pool[0]
-
-		d.logCard(ctx, "best-of-n: judge verdict unparsable; falling back to first verifying candidate")
-		o.logUnverifiedWinner(ctx)
-
-		o.recordJudgeReport(ctx, nil)
-
-		return o.adoptWinner(ctx)
+		// rather than fail the whole run.
+		return o.judgeDegrade(ctx, pool, "judge verdict unparsable")
 	}
 
 	o.winner = pool[v.Winner-1]
@@ -705,4 +710,19 @@ func (o *run) reportCandidateOutcomes(ctx context.Context) {
 	if err := o.d.Ops.ReportModelOutcomes(ctx, cfg.CardID, rows); err != nil {
 		slog.Warn("adopt: report model outcomes failed", "card_id", cfg.CardID, "error", err)
 	}
+}
+
+// judgeDegrade adopts the first verifying candidate when no usable judgement
+// was produced - none was selectable, or none parsed. No judge model is
+// recorded: no model actually decided.
+func (o *run) judgeDegrade(ctx context.Context, pool []*candidate, reason string) error {
+	o.winner = pool[0]
+	o.judgeModel = ""
+
+	o.d.logCard(ctx, "best-of-n: %s; falling back to first verifying candidate", reason)
+	o.logUnverifiedWinner(ctx)
+
+	o.recordJudgeReport(ctx, nil)
+
+	return o.adoptWinner(ctx)
 }
