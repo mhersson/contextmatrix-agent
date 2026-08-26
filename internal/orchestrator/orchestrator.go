@@ -95,7 +95,9 @@ type GitOps interface {
 	// WorktreeState is an opaque fingerprint of everything uncommitted in the
 	// worktree, built from the repository's own ignore rules so that artifacts a
 	// check command produces do not move it. Equal fingerprints mean nothing was
-	// written in between.
+	// written in between. The read is bounded in both time and bytes, so an
+	// implementation may report an error instead of fingerprinting a tree it
+	// cannot read cheaply; callers treat that as "assume written".
 	WorktreeState(ctx context.Context) (string, error)
 }
 

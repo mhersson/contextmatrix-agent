@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"crypto/sha256"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1286,4 +1287,62 @@ func TestWorktreeStateTracksWritesAndIgnoresArtifacts(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(ws, "artifacts"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(ws, "artifacts", "out"), []byte("build output\n"), 0o644))
 	assert.Equal(t, ignoring, state(), "an ignored build artifact must not read as a write")
+}
+
+// foldUntracked is on the coder's critical path twice per verify call, so its
+// work has to be bounded: past the budget it degrades to an error, which the
+// fingerprint's only caller reads as "assume written".
+func TestFoldUntrackedBoundsTotalBytes(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "a"), []byte("aaaaaaaaaa"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "b"), []byte("bbbbbbbbbb"), 0o644))
+
+	paths := []string{"a", "b"}
+
+	require.NoError(t, foldUntracked(context.Background(), sha256.New(), dir, paths, 20),
+		"content that fits the budget is folded in whole")
+
+	require.ErrorIs(t, foldUntracked(context.Background(), sha256.New(), dir, paths, 15), errHashBudget,
+		"content past the budget must fail rather than hash a prefix")
+	require.ErrorIs(t, foldUntracked(context.Background(), sha256.New(), dir, []string{"a"}, 4), errHashBudget,
+		"a single file past the budget must fail too")
+}
+
+// A cancelled context stops the fold instead of reading every remaining file:
+// the two git calls have their own timeout, and this loop used to sit outside
+// every bound the function's contract promises.
+func TestFoldUntrackedHonoursContext(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "a"), []byte("aaa"), 0o644))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	h := sha256.New()
+	err := foldUntracked(ctx, h, dir, []string{"a"}, 1<<20)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, sha256.New().Sum(nil), h.Sum(nil), "a cancelled fold reads nothing")
+}
+
+// An unreadable file contributes its error text and the fold continues: the
+// fingerprint stays defined without pretending the file is empty, and a
+// transient read error must not cost the whole state read.
+func TestFoldUntrackedUnreadableFileKeepsGoing(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "b"), []byte("bbb"), 0o644))
+
+	withGap := sha256.New()
+	require.NoError(t, foldUntracked(context.Background(), withGap, dir, []string{"gone", "b"}, 1<<20))
+
+	present := sha256.New()
+	require.NoError(t, foldUntracked(context.Background(), present, dir, []string{"b"}, 1<<20))
+
+	assert.NotEqual(t, present.Sum(nil), withGap.Sum(nil),
+		"the missing file still contributes to the fingerprint")
 }

@@ -152,9 +152,9 @@ func renderVerifyToolResult(plan verifyPlan, res verifyResult) string {
 	return head + "\n\n" + res.Output
 }
 
-// worktreeStateTimeout bounds one fingerprint read. The closure is on the
-// coder's critical path, so a wedged git call must degrade to "assume written"
-// rather than hang the turn.
+// worktreeStateTimeout bounds one fingerprint read end to end - the git calls
+// and the untracked content both. The closure is on the coder's critical path,
+// so a wedged read must degrade to "assume written" rather than hang the turn.
 const worktreeStateTimeout = 30 * time.Second
 
 // worktreeDirty builds the VerifyTool's dirty closure: it fingerprints the
@@ -175,8 +175,11 @@ const worktreeStateTimeout = 30 * time.Second
 // fingerprint. The baseline the tool records after each run folds in whatever
 // that run wrote, so artifact churn caused by the checks themselves does not
 // cost a re-run; anything written between two calls does count as a write, and
-// the tool simply runs the command again. That degrades to the behavior before
-// this tool existed rather than to a wrong answer, which is the right way round.
+// the tool simply runs the command again. An artifact tree big enough to run
+// past the fingerprint's own read budget lands in the same place by the error
+// path: unreadable state is written, so every call re-runs the command. Both
+// degrade to the behavior before this tool existed rather than to a wrong
+// answer, which is the right way round.
 func worktreeDirty(g GitOps) func() bool {
 	var (
 		baseline string
