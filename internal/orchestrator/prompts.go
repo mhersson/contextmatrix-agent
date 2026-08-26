@@ -982,20 +982,29 @@ func designBlock(design string) string {
 	return "\nAGREED DESIGN (the human and the agent converged on this design during\nbrainstorming - plan to implement it):\n" + design + "\n"
 }
 
-// Wrap-up nudge messages, injected by the harness when wrapUpTurns turns
-// remain (runModelWrapUp / runModelPlan / runModelDiagnose). Built from the
-// shared constant so the stated count can never drift from the threshold. The
-// coder, fix, and document phases wrap up by driving the model to call the
-// finish tool (document always calls it, even with no doc changes, since the
-// orchestrator only commits when files actually changed). The planner and the
-// diagnosis investigator have no finish tool: each wraps up by emitting its
-// final text (the JSON plan, or the "## Diagnosis" block) as the last message,
-// so their nudges force that emit rather than a tool call.
+// coderWrapUpMessage and fixWrapUpMessage are the coder-family wrap-up nudges.
+// They take the reserve the harness was actually configured with rather than
+// reading the wrapUpTurns constant, because a laddered run's reserve scales with
+// its window - a message built from the constant would tell a widened run it has
+// 5 turns left when it has 10 or 15.
+func coderWrapUpMessage(n int) string {
+	return fmt.Sprintf("%d turns remain. If the acceptance criteria pass, call the finish tool now with your commit message and make no further tool calls. Do not re-run checks that already passed.", n)
+}
+
+func fixWrapUpMessage(n int) string {
+	return fmt.Sprintf("%d turns remain. If the findings are addressed and the tests pass, call the finish tool now and make no further tool calls. Do not re-run checks that already passed.", n)
+}
+
+// Wrap-up nudge messages for the phases that run at the fixed reserve
+// (runModelWrapUp / runModelPlan / runModelDiagnose). Built from the shared
+// constant so the stated count can never drift from the threshold. The document
+// phase wraps up by driving the model to call the finish tool (it always calls
+// it, even with no doc changes, since the orchestrator only commits when files
+// actually changed). The planner and the diagnosis investigator have no finish
+// tool: each wraps up by emitting its final text (the JSON plan, or the
+// "## Diagnosis" block) as the last message, so their nudges force that emit
+// rather than a tool call.
 var (
-	coderWrapUpMessage = fmt.Sprintf("%d turns remain. If the acceptance criteria pass, call the finish tool now with your commit message and make no further tool calls. Do not re-run checks that already passed.", wrapUpTurns)
-
-	fixWrapUpMessage = fmt.Sprintf("%d turns remain. If the findings are addressed and the tests pass, call the finish tool now and make no further tool calls. Do not re-run checks that already passed.", wrapUpTurns)
-
 	documentWrapUpMessage = fmt.Sprintf("%d turns remain. Call the finish tool now with your docs commit message (whether or not you wrote documentation) and make no further tool calls.", wrapUpTurns)
 
 	planWrapUpMessage = fmt.Sprintf("%d turns remain. Stop investigating now and output your final answer: ONLY the JSON plan object described above, built from the analysis you already have. Make no further tool calls, no prose, no code fences.", wrapUpTurns)

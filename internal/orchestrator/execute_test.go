@@ -742,8 +742,39 @@ func TestCoderRunGetsWrapUpNudge(t *testing.T) {
 	require.NoError(t, runExecute(context.Background(), o))
 
 	joined := strings.Join(client.tasks, "\n")
-	assert.Contains(t, joined, coderWrapUpMessage,
+	assert.Contains(t, joined, coderWrapUpMessage(wrapUpTurns),
 		"the wrap-up nudge reaches the coder conversation as a user message")
+}
+
+// TestCoderLadderWidensTheWindowAndSaysSo drives the whole coder path with a
+// complex subtask and proves three things at once: the ladder produces the
+// widened cap (1.5x of 10 is 15), the wrap-up reserve is re-anchored to that
+// window rather than left at the constant (5 * 15/10 rounds to 8), and the
+// message the harness injects quotes the reserve it will actually use.
+//
+// The harness fires the nudge on EXACT equality with the remaining turns, so
+// the arithmetic is observable end to end: with a 15-turn window and an 8-turn
+// reserve the nudge lands on the 8th call, after 7 consumed turns. Before this
+// change the cap was 15 but the reserve was the constant 5, so the nudge did
+// not fire until turn 11 and this run never saw it at all.
+func TestCoderLadderWidensTheWindowAndSaysSo(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	// Seven burn turns; the eighth call falls through to the fake's default
+	// stop response, which is the call the nudge is injected into.
+	client := &planLLM{responses: burnResps(7)}
+
+	d := execTestDeps(ops, git, client)
+	d.Cfg.MaxTurns = 10
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "complex"}}, 0)
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	joined := strings.Join(client.tasks, "\n")
+	assert.Contains(t, joined, "8 turns remain",
+		"the widened window must carry a proportionally widened reserve, and the message must state it")
+	assert.NotContains(t, joined, "5 turns remain",
+		"quoting the constant against a widened cap tells the model it has a third of the room it has")
 }
 
 // TestCoderRunGetsBatchNudge proves the coder phase actually arms the harness
@@ -1006,7 +1037,7 @@ func TestCoderGraceTurnFinishes(t *testing.T) {
 	client := &planLLM{responses: append(burnResps(5), finishResp("feat: done", 0.01))}
 	d := execTestDeps(ops, git, client)
 	d.Cfg.MaxTurns = 5
-	// A simple tier keeps coderMaxTurns at the flat base (5), so the cap trips on
+	// A simple tier keeps the ladder at the flat base (5), so the cap trips on
 	// the fifth burn and the grace call fires on the sixth response.
 	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
 
@@ -1201,7 +1232,7 @@ func TestSalvageDeclineOnCleanTreeEscalatesTierAndReportsFailed(t *testing.T) {
 func TestSalvageDeclineCriticalTierStaysCritical(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true}
-	// Critical scales coderMaxTurns to 2x the base (10), so it takes 10 burn
+	// Critical scales the ladder to 2x the base (10), so it takes 10 burn
 	// turns - not the base 5 - to trip the cap.
 	client := &planLLM{responses: burnResps(10)}
 	d := execTestDeps(ops, git, client)

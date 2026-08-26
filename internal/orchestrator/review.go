@@ -1019,7 +1019,7 @@ func (o *run) runFixModel(ctx context.Context, prompt string, round int, fixTier
 				tier, model, priorClause(p))
 		}
 
-		res, dur, err := o.runModelCoder(ctx, d.WriteTools, prompt, model, fixWrapUpMessage, tier)
+		res, dur, err := o.runModelCoder(ctx, d.WriteTools, prompt, model, fixWrapUpMessage, seedBudgetStep(tier))
 
 		o.spendAndReport(ctx, o.ledger, cfg.CardID, "review: report fix usage failed", res, model, "main", dur)
 

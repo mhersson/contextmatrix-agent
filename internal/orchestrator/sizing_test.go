@@ -9,11 +9,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The ladder must reproduce the factors coderMaxTurns applied, so the split
-// changes no fresh run's turn cap, and must never hand the harness a
-// pathological cap when the operator's base is unset or negative - today
-// coderMaxTurns(0, tier) returns 0 and the harness substitutes its own default
-// of 30 (harness.go: `if cfg.MaxTurns <= 0 && !cfg.Interactive`).
+// The ladder must reproduce the factors the pre-split single-tier turn cap
+// applied, so the split changes no fresh run's turn cap, and must never hand
+// the harness a pathological cap when the operator's base is unset or
+// negative - turnBudget(0, step) returns 0 for every step, and the harness
+// substitutes its own default of 30 (harness.go: `if cfg.MaxTurns <= 0 &&
+// !cfg.Interactive`).
 func TestTurnBudgetLadder(t *testing.T) {
 	const base = 45
 
@@ -196,8 +197,8 @@ func TestEscalationIsMonotoneAndPerAxis(t *testing.T) {
 }
 
 // seedSizing is the single bridge from the planner's wire word onto both axes.
-// The budget seed must reproduce coderMaxTurns exactly or every fresh run's
-// turn cap moves.
+// The budget seed must reproduce the pre-split single-tier turn cap exactly or
+// every fresh run's turn cap moves.
 func TestSeedSizingMapsBothAxes(t *testing.T) {
 	for word, want := range map[string]sizing{
 		"simple":   {registry.TierSimple, 0},

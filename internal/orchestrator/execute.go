@@ -437,7 +437,7 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 
 		d.logCard(ctx, "%s", logMsg)
 
-		res, dur, err := o.runModelCoder(ctx, sc.tools, prompt, model, coderWrapUpMessage, tierOf(sub))
+		res, dur, err := o.runModelCoder(ctx, sc.tools, prompt, model, coderWrapUpMessage, seedBudgetStep(tierOf(sub)))
 
 		// Record the resolved coder slug so the review panel excludes it: a capable
 		// model must not review its own code. This runs BEFORE the incapable check
@@ -621,12 +621,12 @@ func tierOf(sub subtaskRef) registry.Tier {
 // subtasks are missing, which a green verify cannot expose - and the
 // parent/single-solver (boardOps) keeps its park-and-resume path.
 //
-// Turn-budget decision: the coder budget is tier-scaled (complex 1.5x / critical
-// 2x the configured base via coderMaxTurns) with deliberately NO separate
-// candidate cap - candidates run the same tier-sized coder budget. The wrap-up
-// nudge removes post-green dithering and this salvage removes the cliff, so the
-// extra headroom is spent only on genuinely productive work; a flat candidate
-// bump would only fund waste (see the turn-waste design spec).
+// Turn-budget decision: the coder budget is laddered (complex 1.5x / critical
+// 2x the configured base via seedBudgetStep and coderTurnCfg) with deliberately
+// NO separate candidate cap - candidates run the same laddered coder budget.
+// The wrap-up nudge removes post-green dithering and this salvage removes the
+// cliff, so the extra headroom is spent only on genuinely productive work; a
+// flat candidate bump would only fund waste (see the turn-waste design spec).
 func (o *run) salvageCapped(ctx context.Context, sc *solverCtx, sub subtaskRef, res harness.Result, err error) bool {
 	var mte *MaxTurnsError
 	if sc.boardOps || sc.lastSubID == "" || sub.ID != sc.lastSubID || !errors.As(err, &mte) {
