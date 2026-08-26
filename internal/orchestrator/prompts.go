@@ -5,6 +5,21 @@ import (
 	"strings"
 )
 
+// readRootsBlock names the trees outside the workspace the phase's file tools
+// can resolve. Every tool schema describes paths as workspace-relative, and the
+// read-only phases have no shell to discover anything else with, so a root the
+// prompt never names is a root the model has no reason to reach for. Empty
+// roots collapse to "", leaving the prompt unchanged.
+func readRootsBlock(roots []string) string {
+	if len(roots) == 0 {
+		return ""
+	}
+
+	return fmt.Sprintf("Dependency source outside the workspace is readable at these absolute paths: %s. "+
+		"read, grep and glob resolve them - read the API you need there rather than inferring it.\n\n",
+		strings.Join(roots, ", "))
+}
+
 // skillEngageBlock is the model-driven engagement preamble prepended to the
 // coder/fix/document/review prompts when task-skills are mounted. It mirrors
 // Claude Code's using-superpowers pressure: list the skills and insist the model
@@ -99,13 +114,13 @@ contract between formatFixes and fixFiles is not broken.`
 //
 // The leading %s is the grounding block; the second %s is the repo-snapshot
 // block (bounded tracked-file list + README head; "" when not a git repo). The
-// trailing %s slots are filled by draftPlan: workspace root, card title,
-// card description, an optional diagnosis block (root-cause investigation for
-// bug-like cards), an optional design block (brainstormed design for creative
-// HITL cards), an optional resume block (existing subtasks), an optional
-// feedback block (HITL reviewer's requested changes on a re-draft), and an
-// optional repair block (the previous parse error). Empty optional blocks
-// collapse to nothing.
+// trailing %s slots are filled by draftPlan: workspace root, an optional
+// read-only-roots block, card title, card description, an optional diagnosis
+// block (root-cause investigation for bug-like cards), an optional design block
+// (brainstormed design for creative HITL cards), an optional resume block
+// (existing subtasks), an optional feedback block (HITL reviewer's requested
+// changes on a re-draft), and an optional repair block (the previous parse
+// error). Empty optional blocks collapse to nothing.
 const planPrompt = `%s%sYou are the planning agent for a software task. You have read-only
 tools (read, grep, glob, git) to inspect the codebase, plus record_finding to
 save durable notes as you go. You do NOT create or modify cards or files - you
@@ -113,7 +128,7 @@ only read code and output a plan as JSON.
 
 Repo root: %s - paths are relative to it.
 
-First understand the task deeply, then decompose it. If a ROOT-CAUSE DIAGNOSIS
+%sFirst understand the task deeply, then decompose it. If a ROOT-CAUSE DIAGNOSIS
 is provided below, ground the plan in it - the subtasks must implement that fix
 approach. For feature work with no diagnosis, read the relevant code and settle
 on the simplest approach that solves the problem before decomposing.
@@ -206,8 +221,8 @@ Respond with ONLY a JSON object, no prose:
 // cards before planning. Adapted from the systematic-debugging workflow skill:
 // the same root-cause-first discipline, but the investigator has only read
 // tools and returns a "## Diagnosis" text blob (no card writes) that grounds
-// the plan. The trailing %s slots are filled by runDiagnose: workspace root,
-// card title, body.
+// the plan. The trailing %s slots are filled by runDiagnose: workspace root, an
+// optional read-only-roots block, card title, body.
 const diagnosePrompt = `%sYou are a read-only debugging investigator for a task that looks like a bug.
 You have read-only tools (read, grep, glob, git) to inspect the codebase. Git is
 available read-only (status, diff, log, show, branch). You do NOT modify files or
@@ -216,7 +231,7 @@ separately, after you finish.
 
 Repo root: %s - paths are relative to it.
 
-Work the evidence in order:
+%sWork the evidence in order:
 - Read the task below; quote any error messages, stack traces, or reproduction
   steps it gives.
 - Read the referenced files in full; trace the failing path back to where the
@@ -380,16 +395,17 @@ Description:
 // (synthesis) decides approve-or-fix from the three findings. Commit status is
 // never a review concern.
 //
-// The trailing %s slots are filled by runSpecialists: the lens block (one of the
-// three below), parent card title, parent card description, the full branch diff
-// against base, and an optional prior-findings block (the previous round's
+// The trailing %s slots are filled by runSpecialists: an optional
+// read-only-roots block, the lens block (one of the three below), parent card
+// title, parent card description, the full branch diff against base, and an
+// optional prior-findings block (the previous round's
 // findings on delta rounds). The empty prior-findings block collapses to nothing.
 const specialistPrompt = `%s%sYou are a code-review specialist. You have read-only tools (read, grep, glob, git)
 to inspect the codebase. Git is available read-only (status, diff, log, show,
 branch). You do NOT create or modify cards or files. Produce a findings report as TEXT - another agent synthesizes the
 three specialist reports into a single verdict.
 
-%s
+%s%s
 
 Review only the change set in the diff below. Read surrounding code for context
 as needed. Every finding must cite a file in the change set. Commit status is

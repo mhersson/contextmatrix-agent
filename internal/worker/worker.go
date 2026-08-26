@@ -404,6 +404,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 
 	orchOps := ops2orchestrator(a.ops)
 	logReachability(ctx, reg, orchOps, a.spec.CardID)
+	logReadOnlyRoots(a.spec.CardID, a.spec.ReadOnlyRoots)
 
 	d := orchestrator.Deps{
 		Ops: orchOps,
@@ -842,6 +843,32 @@ func writeToolsFor(dir string, bashTimeoutMax int, extraEnv, readRoots []string,
 	}
 
 	return wt
+}
+
+// logReadOnlyRoots records the read-only roots this run was configured with and
+// which of them are not on disk. The harness drops an unresolvable root when it
+// builds the tools, and does so silently, so an operator whose declared prefix
+// is wrong for the image's toolchain otherwise sees nothing at all: the phases
+// just behave as they did before. Nothing is logged when no roots are declared.
+func logReadOnlyRoots(cardID string, roots []string) {
+	if len(roots) == 0 {
+		return
+	}
+
+	var dropped []string
+
+	for _, r := range roots {
+		if _, err := os.Stat(r); err != nil {
+			dropped = append(dropped, r)
+		}
+	}
+
+	sep := string(os.PathListSeparator)
+
+	slog.Info("read-only roots declared",
+		"card_id", cardID,
+		"roots", strings.Join(roots, sep),
+		"dropped_unresolvable", strings.Join(dropped, sep))
 }
 
 // readOnlyToolsWithRoots is tools.ReadOnlyTools widened by the operator's

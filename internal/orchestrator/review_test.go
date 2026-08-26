@@ -3117,3 +3117,56 @@ func TestExtraReadOnlyToolsOverrideConfinedDefaults(t *testing.T) {
 	require.NoError(t, err, "the widened read must win over the confined default")
 	assert.Contains(t, res.Text, "WIDGET")
 }
+
+// TestReadRootsReachTheSpecialistPrompt: the review panel reads through the same
+// widened tools, so it needs the same declaration in its prompt.
+func TestReadRootsReachTheSpecialistPrompt(t *testing.T) {
+	tests := []struct {
+		name  string
+		roots []string
+	}{
+		{"declared roots are named", []string{"/declared/dep-source", "/declared/other"}},
+		{"no declaration leaves the prompt alone", nil},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &planLLM{responses: []llm.Response{
+				stopResp("Correctness: fine", 0.01),
+				stopResp("Design: fine", 0.01),
+				stopResp("Security: fine", 0.01),
+				stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.02),
+			}}
+
+			d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, client, reviewerRegistry())
+			d.ReadRoots = tc.roots
+
+			o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}, 0)
+			require.NoError(t, runReview(context.Background(), o))
+
+			client.mu.Lock()
+			defer client.mu.Unlock()
+
+			var specialists []string
+
+			for _, task := range client.tasks {
+				if strings.Contains(task, "code-review specialist") {
+					specialists = append(specialists, task)
+				}
+			}
+
+			require.Len(t, specialists, 3)
+
+			for i, task := range specialists {
+				for _, r := range tc.roots {
+					assert.Contains(t, task, r, "specialist %d must be told about %s", i, r)
+				}
+
+				if len(tc.roots) == 0 {
+					assert.NotContains(t, task, "outside the workspace",
+						"specialist %d must carry no roots line when nothing is declared", i)
+				}
+			}
+		})
+	}
+}

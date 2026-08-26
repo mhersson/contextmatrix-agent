@@ -517,7 +517,8 @@ func (o *run) runDiagnose(ctx context.Context, model string) (string, error) {
 		return "", err
 	}
 
-	task := fmt.Sprintf(diagnosePrompt, o.grounding, cfg.Workspace, o.tc.Title, o.taskDescription)
+	task := fmt.Sprintf(diagnosePrompt, o.grounding, cfg.Workspace, readRootsBlock(d.ReadRoots),
+		o.tc.Title, o.taskDescription)
 
 	res, dur, err := o.runModelImages(ctx, d.ReadTools, task, model, o.taskImages)
 
@@ -577,8 +578,8 @@ func (o *run) draftPlan(ctx context.Context, model, diagnosis, design, feedback 
 			repair = repairBlock(lastErr.Error())
 		}
 
-		task := fmt.Sprintf(planPrompt, o.grounding, snapshot, cfg.Workspace, o.tc.Title, o.plannerDescription(),
-			diagBlock, dsnBlock, resume, fbBlock, repair)
+		task := fmt.Sprintf(planPrompt, o.grounding, snapshot, cfg.Workspace, readRootsBlock(o.d.ReadRoots),
+			o.tc.Title, o.plannerDescription(), diagBlock, dsnBlock, resume, fbBlock, repair)
 
 		res, dur, err := o.runModelPlan(ctx, reg, task, model, o.taskImages, attempt > 0)
 
@@ -641,8 +642,9 @@ func (o *run) reviseTestSplit(
 		prev = []byte("(previous plan unavailable)")
 	}
 
-	task := fmt.Sprintf(planPrompt, o.grounding, snapshot, cfg.Workspace, o.tc.Title, o.plannerDescription(),
-		diagBlock, dsnBlock, resume, fbBlock, testSplitRevisionBlock(title, prev))
+	task := fmt.Sprintf(planPrompt, o.grounding, snapshot, cfg.Workspace, readRootsBlock(o.d.ReadRoots),
+		o.tc.Title, o.plannerDescription(), diagBlock, dsnBlock, resume, fbBlock,
+		testSplitRevisionBlock(title, prev))
 
 	res, dur, err := o.runModelPlan(ctx, reg, task, model, o.taskImages, true)
 

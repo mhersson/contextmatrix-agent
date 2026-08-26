@@ -143,9 +143,7 @@ ENV PATH="/usr/local/cargo/bin:${PATH}"
 # Go tarball check above. --profile minimal keeps the footprint down; clippy and
 # rustfmt are added explicitly. RUSTUP_HOME/CARGO_HOME are made world-writable so
 # the unprivileged runtime user (UID 1000) can populate the cargo registry cache
-# - the official rust image uses the same pattern. The registry and git cache
-# directories are created empty: they are declared read-only roots below, and a
-# root that does not exist when the worker builds its tools is dropped.
+# - the official rust image uses the same pattern.
 RUN set -eux; \
     ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/'); \
     case "$ARCH" in \
@@ -159,7 +157,6 @@ RUN set -eux; \
     /tmp/rustup-init -y --no-modify-path --profile minimal \
       --default-toolchain "${RUST_VERSION}" --component clippy --component rustfmt; \
     rm -f /tmp/rustup-init; \
-    mkdir -p "${CARGO_HOME}/registry" "${CARGO_HOME}/git"; \
     chmod -R a+w "${RUSTUP_HOME}" "${CARGO_HOME}"
 
 # ---------------------------------------------------------------------------
@@ -194,15 +191,19 @@ RUN set -eux; \
 # ---------------------------------------------------------------------------
 # Read-only roots. Each final stage declares in CMX_READ_ONLY_ROOTS the absolute
 # trees where ITS OWN toolchain keeps dependency source. The agent reads the list
-# once at worker start and widens the read, grep and glob tools of its
-# shell-less phases to those trees, so planning and diagnosis can read the APIs
-# they are planning against; edit, write and bash stay confined to the
+# once at worker start and widens the read, grep and glob tools of every phase to
+# those trees, so the shell-less planning, diagnosis and review phases can read
+# the APIs they are working against; edit, write and bash stay confined to the
 # workspace. These are image facts, which is why they live here rather than in
 # the agent's source, and an operator replaces the list per deployment through
 # worker_extra_env. A stage that declares nothing behaves exactly as before.
 #
 # A declared directory must exist when the worker starts or it is dropped as
-# unresolvable, so caches the run populates later are created empty first.
+# unresolvable, so caches the run populates later are created empty first. Every
+# path is under the runtime user's home unless the toolchain honours a prefix
+# variable at runtime: the harness scrubs the environment of subprocesses it runs
+# for the model down to PATH, HOME, USER, LANG, LC_ALL, TMPDIR and TERM, so a
+# toolchain pointed elsewhere by a build-time ENV falls back to its own default.
 # Node needs no entry: node_modules lives inside the workspace.
 # ---------------------------------------------------------------------------
 
@@ -228,9 +229,11 @@ COPY --from=build /out/contextmatrix-agent /usr/local/bin/contextmatrix-agent
 RUN useradd -m -u 1000 -s /bin/bash user
 USER 1000:1000
 WORKDIR /home/user
-# Crate sources under $CARGO_HOME/registry, git dependencies under $CARGO_HOME/git.
-ENV CMX_READ_ONLY_ROOTS=/usr/local/cargo/registry:/usr/local/cargo/git
-RUN mkdir -p /home/user/workspace
+# CARGO_HOME is not on the harness subprocess allowlist, so cargo falls back to
+# its default: crate sources land in $HOME/.cargo/registry and git dependencies
+# in $HOME/.cargo/git.
+ENV CMX_READ_ONLY_ROOTS=/home/user/.cargo/registry:/home/user/.cargo/git
+RUN mkdir -p /home/user/workspace /home/user/.cargo/registry /home/user/.cargo/git
 HEALTHCHECK NONE
 ENTRYPOINT ["contextmatrix-agent", "work"]
 
@@ -277,9 +280,9 @@ COPY --from=build /out/contextmatrix-agent /usr/local/bin/contextmatrix-agent
 RUN useradd -m -u 1000 -s /bin/bash user
 USER 1000:1000
 WORKDIR /home/user
-# Every toolchain's own roots, joined: Go, Rust, Python. The cargo caches ride
-# in with the COPY above; the Go module cache is created here.
-ENV CMX_READ_ONLY_ROOTS=/home/user/go/pkg/mod:/usr/local/cargo/registry:/usr/local/cargo/git:/opt/python
-RUN mkdir -p /home/user/workspace /home/user/go/pkg/mod
+# Every toolchain's own roots, joined: Go, Rust, Python.
+ENV CMX_READ_ONLY_ROOTS=/home/user/go/pkg/mod:/home/user/.cargo/registry:/home/user/.cargo/git:/opt/python
+RUN mkdir -p /home/user/workspace /home/user/go/pkg/mod \
+      /home/user/.cargo/registry /home/user/.cargo/git
 HEALTHCHECK NONE
 ENTRYPOINT ["contextmatrix-agent", "work"]

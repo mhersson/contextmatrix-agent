@@ -410,3 +410,22 @@ func TestCheckpointBriefingRendersGrounding(t *testing.T) {
 	assert.Contains(t, out, g, "checkpoint briefing must embed the grounding value")
 	assert.NotContains(t, out, "%!", "checkpoint briefing must have no formatting artifact")
 }
+
+// TestReadRootsBlockEmptyKeepsPromptSpacing pins that an undeclared root list
+// leaves the three widened prompts byte-identical at the join, the same way the
+// coder prompt's empty verify block does.
+func TestReadRootsBlockEmptyKeepsPromptSpacing(t *testing.T) {
+	assert.Empty(t, readRootsBlock(nil))
+
+	plan := fmt.Sprintf(planPrompt, "", "", "/ws", readRootsBlock(nil), "t", "b", "", "", "", "", "")
+	assert.Contains(t, plan, "paths are relative to it.\n\nFirst understand",
+		"an empty roots block leaves the plan prompt spacing unchanged")
+
+	diagnose := fmt.Sprintf(diagnosePrompt, "", "/ws", readRootsBlock(nil), "t", "b")
+	assert.Contains(t, diagnose, "paths are relative to it.\n\nWork the evidence",
+		"an empty roots block leaves the diagnosis prompt spacing unchanged")
+
+	specialist := fmt.Sprintf(specialistPrompt, "", "", readRootsBlock(nil), "LENS", "t", "b", "d", "")
+	assert.Contains(t, specialist, "single verdict.\n\nLENS\n\nReview only",
+		"an empty roots block leaves the specialist prompt spacing unchanged")
+}

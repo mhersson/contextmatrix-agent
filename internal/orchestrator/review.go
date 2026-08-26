@@ -690,8 +690,9 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 	specs := make([]harness.SubagentSpec, len(lenses))
 	for i, l := range lenses {
 		specs[i] = harness.SubagentSpec{
-			Role:          l.role,
-			Prompt:        fmt.Sprintf(specialistPrompt, o.skillEngage(), o.grounding, l.prompt, o.tc.Title, o.taskDescription, diff, prior),
+			Role: l.role,
+			Prompt: fmt.Sprintf(specialistPrompt, o.skillEngage(), o.grounding, readRootsBlock(d.ReadRoots),
+				l.prompt, o.tc.Title, o.taskDescription, diff, prior),
 			Model:         panel[i].Model,
 			MaxTurns:      cfg.MaxTurns,
 			ContextWindow: panel[i].ContextWindow,

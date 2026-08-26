@@ -1615,3 +1615,50 @@ func TestResolveDecisionModelKeepsBaseWhenTheFloorFallsShort(t *testing.T) {
 		})
 	}
 }
+
+// TestReadRootsReachThePlanningPrompts: the plan and diagnosis phases have no
+// shell, and every tool schema describes paths as workspace-relative, so a root
+// the prompt never names is a root the model has no way to discover.
+func TestReadRootsReachThePlanningPrompts(t *testing.T) {
+	tests := []struct {
+		name  string
+		roots []string
+	}{
+		{"declared roots are named", []string{"/declared/dep-source", "/declared/other"}},
+		{"no declaration leaves the prompts alone", nil},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ops := &fakeOps{
+				taskContext: cmclient.TaskContext{
+					Title: "Fix the broken parser", Description: "it throws on empty input",
+				},
+				createdIDs: []string{"SUB-1", "SUB-2"},
+			}
+			llmFake := &planLLM{responses: []llm.Response{
+				stopResp("## Diagnosis\n### Root cause\nnil slice on empty input.\n", 0.02),
+				stopResp(goodPlanJSON, 0.03),
+			}}
+
+			d := planTestDeps(ops, llmFake)
+			d.ReadRoots = tc.roots
+
+			o := newRun(d, ops.taskContext)
+			require.NoError(t, runPlan(context.Background(), o))
+			require.Len(t, llmFake.tasks, 2, "a bug-like card runs diagnose then plan")
+
+			for i, phase := range []string{"diagnosis", "plan"} {
+				for _, r := range tc.roots {
+					assert.Contains(t, llmFake.tasks[i], r,
+						"the %s prompt must name the declared root %s", phase, r)
+				}
+
+				if len(tc.roots) == 0 {
+					assert.NotContains(t, llmFake.tasks[i], "outside the workspace",
+						"the %s prompt must carry no roots line when nothing is declared", phase)
+				}
+			}
+		})
+	}
+}

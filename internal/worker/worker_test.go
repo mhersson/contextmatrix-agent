@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -1926,4 +1928,39 @@ func TestReadRootsComeOnlyFromResolvedConfig(t *testing.T) {
 		_, err = read.Execute(context.Background(), map[string]any{"path": otherFile})
 		require.Error(t, err, "%s: a tree that is not on the resolved list must stay refused", name)
 	}
+}
+
+// TestReadRootsAreLoggedWithResolveStatus: the harness drops an unresolvable
+// root silently when it builds the tools, so the run must say which roots it
+// was given and which of them are not there.
+func TestReadRootsAreLoggedWithResolveStatus(t *testing.T) {
+	remote := setupBareRemote(t)
+	wsParent := t.TempDir()
+	ops := newFakeOps()
+
+	present := t.TempDir()
+	absent := filepath.Join(t.TempDir(), "never-created")
+
+	var buf strings.Builder
+
+	prev := slog.Default()
+
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	swapRunOrchestrator(t, func(context.Context, orchestrator.Deps) error { return nil })
+
+	spec := baseSpec(t, remote, wsParent)
+	spec.ReadOnlyRoots = []string{present, absent}
+
+	_, err := Run(context.Background(), spec, ops, &scriptedLLM{}, events.NewEmitter(io.Discard, io.Discard), openStdin(t))
+	require.NoError(t, err)
+
+	logged := buf.String()
+	assert.Contains(t, logged, present, "the log must name every declared root")
+	assert.Contains(t, logged, absent)
+	assert.Regexp(t, `dropped_unresolvable=\S*`+regexp.QuoteMeta(absent), logged,
+		"a root that is not on disk must be reported as dropped; log=%s", logged)
+	assert.NotRegexp(t, `dropped_unresolvable=\S*`+regexp.QuoteMeta(present), logged,
+		"a root that resolves must not be reported as dropped; log=%s", logged)
 }
