@@ -7,6 +7,7 @@ package registry
 
 import (
 	"cmp"
+	"fmt"
 	"maps"
 	"math"
 	"slices"
@@ -39,6 +40,50 @@ func DefaultTierBars() map[Tier]float64 {
 		TierComplex:  0.82,
 		TierCritical: 0.90,
 	}
+}
+
+// TierBarsFromStrings converts an operator ladder to the typed map. It
+// MERGES over the defaults rather than replacing them: a partial map raises
+// or lowers the rungs it names and inherits the rest, so a one-line edit
+// like {"critical": 0.95} cannot silently drop the other three bars to zero,
+// which would admit every model carrying any prior while every Pick still
+// reported AtBar() true.
+//
+// It also rejects a non-monotone ladder. An inverted ladder passes name and
+// range validation but makes descent() treat the strictest tier as the
+// weakest rung with nothing below it, so escalating would return a WORSE
+// model and report no clamp. The check needs no threshold and catches
+// transposed values.
+func TierBarsFromStrings(in map[string]float64) (map[Tier]float64, error) {
+	if len(in) == 0 {
+		return nil, nil
+	}
+
+	out := DefaultTierBars()
+
+	for name, bar := range in {
+		t := Tier(name)
+		if _, ok := out[t]; !ok {
+			return nil, fmt.Errorf("tier bars: unknown tier %q (known: %v)",
+				name, slices.Sorted(maps.Keys(DefaultTierBars())))
+		}
+
+		if bar < 0 || bar > 1 {
+			return nil, fmt.Errorf("tier bars: %s must be in [0,1], got %g", name, bar)
+		}
+
+		out[t] = bar
+	}
+
+	ladder := []Tier{TierSimple, TierModerate, TierComplex, TierCritical}
+	for i := 1; i < len(ladder); i++ {
+		if out[ladder[i]] < out[ladder[i-1]] {
+			return nil, fmt.Errorf("tier bars: ladder must not decrease: %s %g is below %s %g",
+				ladder[i], out[ladder[i]], ladder[i-1], out[ladder[i-1]])
+		}
+	}
+
+	return out, nil
 }
 
 // PickSource says HOW a selection was reached. It is orthogonal to AtBar,
@@ -198,6 +243,14 @@ func NewRegistry(capableDefault string, catalog llm.Catalog) *Registry {
 // preference. nil disables vendor tracking. Returns r for chaining.
 func (r *Registry) WithCreators(creators map[string]string) *Registry {
 	r.creators = creators
+
+	return r
+}
+
+// WithTierBars replaces the quality ladder. nil restores the defaults.
+// Returns r for chaining.
+func (r *Registry) WithTierBars(bars map[Tier]float64) *Registry {
+	r.sel.TierBars = bars
 
 	return r
 }

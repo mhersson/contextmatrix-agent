@@ -1404,3 +1404,101 @@ func TestMonotonicityHoldsOnTheAutoPathAndFavoritesAreTheException(t *testing.T)
 	assert.True(t, sawException,
 		"fixture drift: no favorite configuration exercised the documented exception")
 }
+
+func TestTierBarsFromStrings(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      map[string]float64
+		want    map[Tier]float64
+		wantErr bool
+	}{
+		{name: "empty ladder uses the defaults", in: nil, want: nil},
+		{
+			// The edit an operator actually makes. Merging is what stops the
+			// three unnamed rungs from silently dropping to bar 0.
+			name: "partial ladder inherits the unnamed rungs",
+			in:   map[string]float64{"critical": 0.95},
+			want: map[Tier]float64{TierSimple: 0.65, TierModerate: 0.76, TierComplex: 0.82, TierCritical: 0.95},
+		},
+		{
+			name: "full ladder replaces every rung",
+			in:   map[string]float64{"simple": 0.6, "moderate": 0.7, "complex": 0.8, "critical": 0.9},
+			want: map[Tier]float64{TierSimple: 0.6, TierModerate: 0.7, TierComplex: 0.8, TierCritical: 0.9},
+		},
+		{name: "unknown tier rejected", in: map[string]float64{"trivial": 0.5}, wantErr: true},
+		{name: "bar above one rejected", in: map[string]float64{"simple": 1.5}, wantErr: true},
+		{name: "negative bar rejected", in: map[string]float64{"simple": -0.1}, wantErr: true},
+		{
+			// Passes names and range; makes critical the weakest rung with no
+			// descent, so escalating would silently downgrade.
+			name:    "inverted ladder rejected",
+			in:      map[string]float64{"simple": 0.90, "moderate": 0.80, "complex": 0.70, "critical": 0.50},
+			wantErr: true,
+		},
+		{
+			// A single raised rung that crosses its neighbour is the transposed-
+			// value case the monotone check is for.
+			name:    "partial edit that inverts a neighbour pair is rejected",
+			in:      map[string]float64{"moderate": 0.88},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := TierBarsFromStrings(tt.in)
+			if tt.wantErr {
+				require.Error(t, err)
+
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestPartialLadderCannotZeroTheUnnamedBars is the behavioural half of the
+// merge rule: it proves that a one-rung edit does not turn the other three bars
+// off. Without the merge, sub/floor (0.40) becomes selectable at moderate and
+// the Pick still reports AtBar() true - the bars silently off while every
+// report claims compliance.
+func TestPartialLadderCannotZeroTheUnnamedBars(t *testing.T) {
+	bars, err := TierBarsFromStrings(map[string]float64{"critical": 0.95})
+	require.NoError(t, err)
+
+	r := ladderRegistry(nil).WithTierBars(bars)
+
+	got := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierModerate})
+	require.True(t, got.OK)
+	assert.Equal(t, "mid/one", got.Model, "the moderate bar must still be 0.76")
+	assert.True(t, got.AtBar())
+	assert.InDelta(t, 0.76, got.RequestedBar, 1e-9)
+}
+
+// TestOperatorLadderDrivesTheWalk proves the knob is not decorative: replacing
+// the bars replaces both the thresholds and the descent order.
+func TestOperatorLadderDrivesTheWalk(t *testing.T) {
+	r := ladderRegistry(nil).WithTierBars(map[Tier]float64{
+		TierSimple: 0.50, TierModerate: 0.60, TierComplex: 0.70, TierCritical: 0.95,
+	})
+
+	// Nothing clears 0.95, so the request clamps to the operator's complex bar
+	// (0.70), which admits top/one, high/one, high/two, mid/one and mid/two
+	// (low/one's 0.66 prior still falls short of 0.70). Cheapest in that pool
+	// is mid/two at $1.5, band $2.25, and mid/one ($1.8, quality 0.79) beats
+	// mid/two (quality 0.77) within the band.
+	got := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierCritical})
+
+	require.True(t, got.OK)
+	assert.Equal(t, TierComplex, got.MetTier)
+	assert.InDelta(t, 0.70, got.MetBar, 1e-9)
+	assert.InDelta(t, 0.95, got.RequestedBar, 1e-9)
+	assert.Equal(t, "mid/one", got.Model)
+
+	// And the descent order follows the new table, not a hardcoded ordering.
+	assert.Equal(t,
+		[]Tier{TierCritical, TierComplex, TierModerate, TierSimple},
+		r.descent(TierCritical))
+}
