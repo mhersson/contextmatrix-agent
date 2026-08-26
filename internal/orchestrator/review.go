@@ -1233,18 +1233,6 @@ func (o *run) fixTierEffective(fixTier string, authoritative bool) registry.Tier
 	return tier
 }
 
-// escalateTier is one tier up; critical stays critical.
-func escalateTier(t registry.Tier) registry.Tier {
-	switch t {
-	case registry.TierSimple:
-		return registry.TierModerate
-	case registry.TierModerate:
-		return registry.TierComplex
-	default:
-		return registry.TierCritical
-	}
-}
-
 // effectiveFixTier is the tier the fix run sizes on: the synthesizer's fix_tier
 // when present, else the card tier. An empty fix_tier (synthesizer omitted it)
 // falls back so the fixer is never under-sized.
