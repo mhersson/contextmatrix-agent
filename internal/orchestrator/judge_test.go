@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
+	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-agent/internal/verifyexec"
 	"github.com/mhersson/contextmatrix-harness/llm"
 	"github.com/stretchr/testify/assert"
@@ -826,4 +827,51 @@ func TestJudgeDiffStatFailureLeavesStatEmpty(t *testing.T) {
 	// The card log records the DiffStat failure.
 	assert.True(t, ops.loggedContains("diffstat failed for candidate 1"),
 		"the card log must contain the diffstat failure warning; logs=%v", ops.logs)
+}
+
+// TestJudgeDegradesWhenNoJudgeModelIsSelectable pins the judge's refusal arm:
+// with nothing employable for the reviewer role the run takes the SAME degrade
+// an unusable verdict takes - the first verifying candidate wins and no judge
+// model is recorded, because none judged. Failing the run instead would throw
+// away N finished implementations over a selection problem.
+func TestJudgeDegradesWhenNoJudgeModelIsSelectable(t *testing.T) {
+	ops := &fakeOps{}
+	client := &planLLM{}
+	cands := []*candidate{
+		judgeCandidate(1, "alpha/coder", "dir-c1", "DIFF_ONE"),
+		judgeCandidate(2, "beta/coder", "dir-c2", "DIFF_TWO"),
+	}
+	o := newJudgeRun(t, ops, &fakeGit{}, client, cands, map[string]bool{"dir-c1": true, "dir-c2": true})
+	o.d.Registry = registry.NewRegistryFromParts(llm.Catalog{}, registry.Priors{}, nil, nil, "")
+
+	require.NoError(t, runJudge(context.Background(), o))
+
+	require.NotNil(t, o.winner)
+	assert.Equal(t, 1, o.winner.idx, "the degrade takes the first verifying candidate")
+	assert.Empty(t, o.judgeModel, "no model judged, so none is recorded")
+	assert.Empty(t, client.tasks, "no model call is made when none is selectable")
+	assert.True(t, ops.loggedContains("no judge model is selectable"),
+		"the degrade names its cause; logs=%v", ops.logs)
+}
+
+// TestJudgeReportsItsShortfall pins the highest-stakes advisory in the system:
+// the judge picks the branch that ships, so a judge running below the bar it
+// asked for must be visible on the card.
+func TestJudgeReportsItsShortfall(t *testing.T) {
+	ops := &fakeOps{}
+	client := &planLLM{responses: []llm.Response{
+		stopResp(`{"winner": 1, "ranking": [1, 2], "rationale": "c1 wins.", "notes": []}`, 0.02),
+	}}
+	cands := []*candidate{
+		judgeCandidate(1, "alpha/coder", "dir-c1", "DIFF_ONE"),
+		judgeCandidate(2, "beta/coder", "dir-c2", "DIFF_TWO"),
+	}
+	o := newJudgeRun(t, ops, &fakeGit{}, client, cands, map[string]bool{"dir-c1": true, "dir-c2": true})
+	o.d.Registry = belowComplexReviewerRegistry()
+
+	require.NoError(t, runJudge(context.Background(), o))
+
+	assert.NotEmpty(t, o.judgeModel, "the judge still runs on the best available model")
+	assert.True(t, ops.loggedContains("no model clears the complex bar"),
+		"the judge's shortfall must reach the card; logs=%v", ops.logs)
 }

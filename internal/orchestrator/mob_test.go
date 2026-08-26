@@ -102,7 +102,7 @@ func TestBuildEngineConfigPlanTopic(t *testing.T) {
 
 	topic := mob.Topic{Kind: "plan", Lenses: planLenses[:3], Rounds: 2, Blind: true}
 
-	cfg, ok := buildEngineConfig(o, topic, "test-bearer")
+	cfg, ok := buildEngineConfig(context.Background(), o, topic, "test-bearer")
 	require.True(t, ok)
 
 	require.Len(t, cfg.Seats, 3)
@@ -135,7 +135,7 @@ func TestBuildEngineConfigReviewExcludesCoderModels(t *testing.T) {
 
 	topic := mob.Topic{Kind: "review", Lenses: reviewLenses[:3], Rounds: 1, Blind: true}
 
-	cfg, ok := buildEngineConfig(o, topic, "b")
+	cfg, ok := buildEngineConfig(context.Background(), o, topic, "b")
 	require.True(t, ok)
 
 	require.Len(t, cfg.Seats, 3)
@@ -154,7 +154,7 @@ func TestBuildEngineConfigPlanExcludesIncapableModels(t *testing.T) {
 
 	topic := mob.Topic{Kind: "plan", Lenses: planLenses[:3], Rounds: 2, Blind: true}
 
-	cfg, ok := buildEngineConfig(o, topic, "b")
+	cfg, ok := buildEngineConfig(context.Background(), o, topic, "b")
 	require.True(t, ok)
 
 	require.Len(t, cfg.Seats, 3)
@@ -168,7 +168,7 @@ func TestBuildEngineConfigZeroCostDisablesBudget(t *testing.T) {
 	ops := &fakeOps{}
 	o := mobTestRun(ops, MobConfig{Participants: 2, Plan: true, Rounds: 2, BudgetFactor: 0.75}, 0)
 
-	cfg, ok := buildEngineConfig(o, mob.Topic{Kind: "plan", Lenses: planLenses[:2], Rounds: 2}, "b")
+	cfg, ok := buildEngineConfig(context.Background(), o, mob.Topic{Kind: "plan", Lenses: planLenses[:2], Rounds: 2}, "b")
 	require.True(t, ok)
 
 	assert.Zero(t, cfg.BudgetUSD, "MaxCardCost 0 disables the mob session budget term")
@@ -489,4 +489,37 @@ func TestTrimSeatContextUnderCapUntouched(t *testing.T) {
 
 	require.Len(t, got, 3)
 	assert.Equal(t, "output", got[1].Content)
+}
+
+// TestBuildEngineConfigContinuesSoloWhenNoSeatIsSelectable pins mob's refusal
+// arm: a discussion is an enhancement over the normal path, so a topic that
+// cannot be seated at all falls back to it instead of failing the run.
+func TestBuildEngineConfigContinuesSoloWhenNoSeatIsSelectable(t *testing.T) {
+	ops := &fakeOps{}
+	o := mobTestRun(ops, MobConfig{Participants: 3, Plan: true, Rounds: 2, BudgetFactor: 0.75}, 2.0)
+	o.d.Registry = registry.NewRegistryFromParts(llm.Catalog{}, registry.Priors{}, nil, nil, "")
+
+	_, ok := buildEngineConfig(context.Background(), o, mob.Topic{Kind: "plan", Lenses: planLenses[:3], Rounds: 2}, "b")
+	assert.False(t, ok, "an unseatable topic continues on the normal path")
+}
+
+// TestBuildEngineConfigRecordsADependentDiscussion pins the degenerate case
+// the old short-panel guard could never catch: the panel is always n seats, so
+// seats that collapse onto one model look like a full discussion while being
+// one model talking to itself.
+func TestBuildEngineConfigRecordsADependentDiscussion(t *testing.T) {
+	ops := &fakeOps{}
+	o := mobTestRun(ops, MobConfig{Participants: 3, Plan: true, Rounds: 2, BudgetFactor: 0.75}, 2.0)
+	// One employable model for the reviewer role, so every seat repeats it.
+	o.d.Registry = registry.NewRegistryFromParts(
+		llm.Catalog{{ID: "only/reviewer", ContextLength: 200000, SupportedParameters: []string{"tools"}}},
+		registry.Priors{Models: map[string]registry.PriorEntry{"only/reviewer": reviewerPrior(0.90)}},
+		nil, nil, "")
+
+	cfg, ok := buildEngineConfig(context.Background(), o, mob.Topic{Kind: "plan", Lenses: planLenses[:3], Rounds: 2}, "b")
+	require.True(t, ok, "a collapsed panel still seats the discussion")
+	require.Len(t, cfg.Seats, 3)
+
+	assert.True(t, ops.loggedContains("not fully independent"),
+		"a discussion whose seats share a model must say so; logs=%v", ops.logs)
 }

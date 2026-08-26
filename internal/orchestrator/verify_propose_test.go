@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
+	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-harness/llm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -183,4 +184,19 @@ func TestProposeVerifyBudgetParkPropagates(t *testing.T) {
 
 	var be *BudgetExceededError
 	require.ErrorAs(t, err, &be, "a budget park during proposal propagates")
+}
+
+// TestProposeVerifySkipsWhenNoModelIsSelectable pins the propose step's
+// refusal arm: an unproposed gate is safe, so a run with nothing employable
+// skips the proposal instead of parking. The card still resolves a plan.
+func TestProposeVerifySkipsWhenNoModelIsSelectable(t *testing.T) {
+	ops := &fakeOps{}
+	client := &planLLM{responses: []llm.Response{stopResp(`{"command":"cargo test"}`, 0.01)}}
+	o := newProposeRun(t, ops, client, t.TempDir())
+	o.d.Registry = registry.NewRegistryFromParts(llm.Catalog{}, registry.Priors{}, nil, nil, "")
+
+	plan, err := o.proposeVerify(context.Background())
+	require.NoError(t, err, "an unproposed gate is safe; the run must not park here")
+	assert.Equal(t, verifyPlan{}, plan)
+	assert.Empty(t, client.models, "no model call is made when none is selectable")
 }
