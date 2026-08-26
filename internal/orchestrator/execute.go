@@ -148,8 +148,14 @@ var subtaskHeartbeatInterval = 5 * time.Minute
 // before this gate existed. That mirrors the review round's own handling of a
 // skip. A genuine failure gets ONE fix pass through the review phase's fix path
 // and one re-run; still red, and the error parks the subtask with the work
-// uncommitted, so a broken tree is never completed as a finished subtask. One
-// pass, never a loop - the review phase's fix loop is the multi-round mechanism.
+// uncommitted, so the coder's work is never committed while the gate is red.
+// One pass, never a loop - the review phase's fix loop is the multi-round
+// mechanism.
+//
+// That error is deliberately a plain one, not a park sentinel: the worker's
+// park switch pushes WIP only on its sentinel arms, and a WIP push here would
+// commit and push the very tree this gate just refused. The absent push is the
+// point, not an omission.
 //
 // The plan comes from ensureVerify and the execution from runVerifyPlan, the
 // same two calls the review-round gate makes, so the two cannot drift into
@@ -182,7 +188,7 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 		return rerr
 	}
 
-	o.logVerifySubtask(ctx, vres, sub.ID)
+	o.logVerifyGate(ctx, vres, subtaskGateContext(sub.ID))
 
 	if vres.Status != verifyFailed {
 		return nil
@@ -201,6 +207,7 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 	prompt := fmt.Sprintf(verifyFixPrompt, o.skillEngage(), o.grounding, sc.workspace,
 		fixVerifyLine(plan), o.tc.Title, verifyFailedFindings(plan, vres.Output))
 
+	// Round 0: this is not a review round and has no round number.
 	if _, ferr := o.runFixModel(ctx, prompt, 0, sub.Tier, false); ferr != nil {
 		return ferr
 	}
@@ -210,7 +217,7 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 		return rerr
 	}
 
-	o.logVerifySubtask(ctx, vres, sub.ID)
+	o.logVerifyGate(ctx, vres, subtaskGateContext(sub.ID))
 
 	if vres.Status == verifyFailed {
 		return fmt.Errorf("subtask %s: `%s` still fails after one fix pass", sub.ID, plan.Display)
@@ -219,25 +226,8 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 	return nil
 }
 
-// logVerifySubtask records one pre-commit gate outcome on the card. Without it
-// a gate that failed and a gate that never ran read identically in the activity
-// log. It mirrors logVerifyRound: the status, the classification note when
-// there is one, and - for a noteless skip alone - that the commit proceeds
-// unverified, since every note classifyVerify emits already says so itself.
-func (o *run) logVerifySubtask(ctx context.Context, res verifyResult, subID string) {
-	msg := fmt.Sprintf("verify %s", verifyStatusWord(res.Status))
-
-	if res.Note != "" {
-		msg += " (" + res.Note + ")"
-	}
-
-	msg += fmt.Sprintf(" - subtask %s, before commit", subID)
-
-	if res.Status == verifySkipped && res.Note == "" {
-		msg += " - proceeding unverified"
-	}
-
-	o.d.logCard(ctx, "%s", msg)
+func subtaskGateContext(subID string) string {
+	return fmt.Sprintf("subtask %s, before commit", subID)
 }
 
 // executeClaimedWith is the owned span of a subtask: coder run, commit, push,
@@ -341,9 +331,12 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 		// Report the win BEFORE CompleteTask (claim-gating rationale on
 		// reportSoloOutcome - a report after complete_task releases the claim
 		// would silently vanish). VerifyPass false means unknown here, not
-		// failure: no authoritative verify runs on a finish-terminated
-		// completion. The model finished, committed, and pushed, so the win is
-		// real regardless of what the board bookkeeping below does with it.
+		// failure: reaching this line means the pre-commit gate did not fail,
+		// but it may equally have found no command or been inconclusive, and
+		// preCommitVerify does not carry out which - so the report stays
+		// conservative rather than claiming a pass it cannot see. The model
+		// finished, committed, and pushed, so the win is real regardless of
+		// what the board bookkeeping below does with it.
 		o.reportSoloOutcome(ctx, sub.ID, model, "win", false, sc.ledger.Spent()-spendBefore)
 
 		if err := d.Ops.CompleteTask(ctx, sub.ID, commitSubject(commitMsg, sub.Title)); err != nil {

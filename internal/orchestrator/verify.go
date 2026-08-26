@@ -108,29 +108,38 @@ func verifyStatusWord(s verifyStatus) string {
 	}
 }
 
-// logVerifyRound records one review round's gate outcome on the card. Without
-// it the board carries only the resolution line, so a gate that failed and a
-// gate that never ran read identically to a human reviewing the activity log.
-// A skip names its reason and says out loud that the round proceeds unverified
-// - unless the reason already says so: every skip note classifyVerify actually
-// emits already ends in "treated as unverified", and appending the suffix on
-// top of one reads as "unverified" and "verify" twice in the same line. Only a
-// noteless skip (the "no verify command resolved" case) needs the suffix
-// spelled out.
-func (o *run) logVerifyRound(ctx context.Context, res verifyResult, round int) {
+// logVerifyGate records one gate outcome on the card, for whichever gate ran;
+// where names the caller's context ("review round 3", "subtask SUB-1, before
+// commit"). Without it the board carries only the resolution line, so a gate
+// that failed and a gate that never ran read identically to a human reviewing
+// the activity log. A skip names its reason and says out loud that the work
+// proceeds unverified - unless the reason already says so: every skip note
+// classifyVerify actually emits already ends in "treated as unverified", and
+// appending the suffix on top of one reads as "unverified" and "verify" twice
+// in the same line. Only a noteless skip (the "no verify command resolved"
+// case) needs the suffix spelled out.
+//
+// Both gates share this one builder: the run's two verify gates must not drift
+// into two different renderings of the same outcome any more than they may
+// drift into two different commands.
+func (o *run) logVerifyGate(ctx context.Context, res verifyResult, where string) {
 	msg := fmt.Sprintf("verify %s", verifyStatusWord(res.Status))
 
 	if res.Note != "" {
 		msg += " (" + res.Note + ")"
 	}
 
-	msg += fmt.Sprintf(" - review round %d", round)
+	msg += " - " + where
 
 	if res.Status == verifySkipped && res.Note == "" {
 		msg += " - proceeding unverified"
 	}
 
 	o.d.logCard(ctx, "%s", msg)
+}
+
+func (o *run) logVerifyRound(ctx context.Context, res verifyResult, round int) {
+	o.logVerifyGate(ctx, res, fmt.Sprintf("review round %d", round))
 }
 
 // verifyDocContext is the advisory verify line handed to the document phase:

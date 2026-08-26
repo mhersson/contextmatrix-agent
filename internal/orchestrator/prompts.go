@@ -565,14 +565,19 @@ REVIEW FINDINGS TO FIX
 %s
 `
 
-// verifyFixPrompt is the coder fix-run instruction for a review round whose
-// findings came from a failed verify gate instead of the specialist panel: one
-// failing command, not a critique of the whole card. Unlike fixPrompt, the
-// parent card goes in title-only - no description - with an explicit SCOPE
-// block in its place, so the coder fixes the failure instead of re-auditing
-// everything the card's description lists as done.
+// verifyFixPrompt is the coder fix-run instruction for findings that came from
+// a failed verify gate instead of the specialist panel: one failing command,
+// not a critique of the whole card. Unlike fixPrompt, the parent card goes in
+// title-only - no description - with an explicit SCOPE block in its place, so
+// the coder fixes the failure instead of re-auditing everything the card's
+// description lists as done.
 //
-// The trailing %s slots are filled by runFix: workspace root, the verify
+// Both gates that can fail use it: the review round, where the work is
+// committed and pushed and the fix lands as a fixup, and the pre-commit gate,
+// where the work is still uncommitted in the working tree. Its wording holds
+// for both, so it names neither a fixup nor a branch state.
+//
+// The trailing %s slots are filled by the caller: workspace root, the verify
 // instruction line, parent card title, and the verify failure text.
 const verifyFixPrompt = `%s%sYou are the coding agent addressing review feedback on the current branch.
 You have the full write toolset (read, grep, glob, edit, write, bash) rooted at
@@ -588,7 +593,7 @@ Repo root: %s - bash commands already execute there; use paths relative to the
 repo root.
 
 Do NOT run git yourself (no commit, no push, no branch) - the orchestrator
-commits your changes as a fixup and pushes after you finish.
+commits and pushes your changes after you finish.
 
 ` + selfReviewBlock + `
 
@@ -606,7 +611,7 @@ PARENT CARD (context)
 Title: %s
 
 SCOPE
-The card's work is already on the branch.
+The card's work is already in the working tree.
 The ONLY item in scope is the failure below - do not re-audit or re-implement other card items. If the failing test was added on this branch and its expectation is wrong, fix the expectation or delete the test; if the failure is in code the branch changed, fix the code. Make the smallest edit that turns the verify command green, run it, then finish.
 
 VERIFY FAILURE TO FIX

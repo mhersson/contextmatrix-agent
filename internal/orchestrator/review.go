@@ -1024,7 +1024,7 @@ func (o *run) runFixModel(ctx context.Context, prompt string, round int, fixTier
 		}
 
 		if err != nil {
-			return "", fmt.Errorf("review fix run: %w", err)
+			return "", fmt.Errorf("fix run: %w", err)
 		}
 
 		return model, nil
