@@ -437,8 +437,9 @@ func (r *Registry) pickFor(id string, in SelectInput, src PickSource) Pick {
 // and so on. Each rung is exactly the selection a direct request at that
 // rung would have made, so escalating a tier can never yield a worse model
 // than asking for less. Favorites and pins are declared exceptions to that
-// invariant (a favorite bypasses the price band by design); see the package
-// contract.
+// invariant: both are operator intent, and operator intent outranks a rule
+// the selector derived, so a favorite bypassing the price band may out-quality
+// a higher tier's automatic pick.
 //
 // Below the lowest configured bar the answer is the operator's capable
 // default - the trigger's default_model, the serve default, or the
@@ -614,7 +615,8 @@ func (r *Registry) candidates(in SelectInput) []candidate {
 //
 // A favorite bypasses the price band, so it is the declared exception to
 // the tier-monotonicity invariant - the same exemption a pin gets, for the
-// same reason. See the package contract.
+// same reason: both are operator intent, which outranks a rule the selector
+// derived.
 func (r *Registry) favoriteAmong(cands []candidate, tier Tier, role Role) string {
 	if len(r.favorites) == 0 || len(cands) == 0 {
 		return ""
