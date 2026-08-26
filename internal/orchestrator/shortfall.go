@@ -33,6 +33,15 @@ func (o *run) noteShortfall(ctx context.Context, phase string, p registry.Pick) 
 		return
 	}
 
+	// An operator pin is a choice, not a shortfall of the search: the selector
+	// never looked, so "no model clears the bar" would be false, and the pins
+	// this package synthesizes carry no measured prior to report either. The
+	// trace above still records the pin and whatever the registry measured.
+	// Whether a pin resolves at all is a separate advisory.
+	if p.Source == registry.SourcePinned {
+		return
+	}
+
 	if !o.firstNote(fmt.Sprintf("%s/%s/%s->%s", phase, p.Role, p.RequestedTier, p.MetTier)) {
 		return
 	}

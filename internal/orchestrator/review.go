@@ -963,7 +963,8 @@ func (o *run) runFixModel(ctx context.Context, prompt string, round int, fixTier
 		// When the climb does not clear the bar it climbed to, it bought
 		// nothing; the round still runs on a pick that is at least fresh, but
 		// the no-op is no longer invisible.
-		if o.fixEscalate && !p.AtBar() && o.firstNote("fix-escalation-noop/"+string(tier)+"/"+model) {
+		if o.fixEscalate && !p.AtBar() && p.Source != registry.SourcePinned &&
+			o.firstNote("fix-escalation-noop/"+string(tier)+"/"+model) {
 			d.logCard(ctx, "fix escalation to %s bought nothing - %s does not clear it (prior %.2f); running anyway",
 				tier, model, p.Prior)
 		}

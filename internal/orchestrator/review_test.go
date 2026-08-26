@@ -2840,3 +2840,27 @@ func TestReviewPinnedPanelRendersRepeatedSeats(t *testing.T) {
 		"every seat after the first repeats the pin; summary=%s", summary)
 	assert.Contains(t, summary, "pinned", "and the summary says the panel came from an operator pin")
 }
+
+// TestPinnedFixModelReportsNoFabricatedShortfall pins that a selection the
+// operator made by hand never produces an advisory about a bar it was never
+// measured against. The pins this package synthesizes carry no prior, so a
+// shortfall line for one would state a number nothing measured.
+func TestPinnedFixModelReportsNoFabricatedShortfall(t *testing.T) {
+	ops := &fakeOps{}
+	client := &planLLM{responses: []llm.Response{stopResp("Applied the fix.", 0.01)}}
+	d := reviewTestDeps(t, ops, &fakeGit{}, client, reviewerRegistry())
+	o := newReviewRun(d, cmclient.TaskContext{ModelCoder: "pinned/model"}, 0)
+	o.fixEscalate = true
+	o.fixFailReason = "landed no commit"
+
+	model, err := o.runFixModel(context.Background(), "fix it", 2, "moderate", false)
+	require.NoError(t, err)
+	assert.Equal(t, "pinned/model", model)
+
+	for _, l := range ops.logs {
+		assert.NotContains(t, l, "no model clears",
+			"a pinned model was chosen by hand, so no bar was searched; logs=%v", ops.logs)
+		assert.NotContains(t, l, "bought nothing",
+			"an escalation cannot be measured against a pin's prior; logs=%v", ops.logs)
+	}
+}
