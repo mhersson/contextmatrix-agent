@@ -1030,13 +1030,13 @@ Rules:
 // carries NO output-format contract - seats discuss; the moderator's
 // synthesis prompt owns the strict JSON. Slots: grounding, repo-snapshot block
 // (bounded tracked-file list + README head; "" when not a git repo),
-// workspace, title, description, diagnosis block, design block, resume block
-// (the same content blocks draftPlan feeds the solo planner).
+// workspace, an optional read-only-roots block, title, description, diagnosis
+// block, design block, resume block.
 const planBriefing = `%s%sYou are discussing how to plan a software task. Repo root: %s - paths are
 relative to it. You have read-only tools (read, grep, glob) - ground your
 positions in the real code structure.
 
-Propose how to decompose the task into subtasks: the overall approach, the
+%sPropose how to decompose the task into subtasks: the overall approach, the
 split, ordering and dependencies, risks, and the complexity tier. Each
 subtask should be completable by a single agent in one focused session,
 include its own tests, and touch a bounded set of files. Argue from your
@@ -1090,9 +1090,9 @@ Respond with ONLY a JSON object, no prose:
 
 // reviewBriefing is the review-discussion problem statement: the SAME
 // diff-and-prior-findings scope the specialist fan-out reviews. Slots:
-// grounding, title, description, branch diff (pre-wrapped by fencedDiff - the
-// briefing is relayed to the board chat, where a bare diff renders as bullet
-// soup), prior-findings block.
+// grounding, an optional read-only-roots block, title, description, branch
+// diff (pre-wrapped by fencedDiff - the briefing is relayed to the board chat,
+// where a bare diff renders as bullet soup), prior-findings block.
 const reviewBriefing = `%sYou are discussing a code review. Review only the change set in the diff
 below; read surrounding code for context as needed. Every finding must cite a
 file in the change set. Commit status is never a review concern. Judge the
@@ -1101,7 +1101,7 @@ speculative abstractions are not defects. Argue from your assigned lens; in
 the critique round, contest findings you disagree with and explicitly
 withdraw your own findings that did not survive rebuttal.
 
-PARENT CARD
+%sPARENT CARD
 Title: %s
 
 Description:
@@ -1156,8 +1156,8 @@ array asserts that nothing survived the critique round - never a default.
 
 // checkpointBriefing opens an execute-checkpoint discussion: the just-
 // committed subtask diff under critique before the run builds on it. Slots:
-// grounding, subtask title, subtask description, parent card title,
-// environment block, fenced diff.
+// grounding, an optional read-only-roots block, subtask title, subtask
+// description, parent card title, environment block, fenced diff.
 const checkpointBriefing = `%sYou are discussing a just-committed increment of work: one subtask of a
 larger task, written by a coding agent moments ago. Decide whether the run
 should proceed to the next subtask or revise this diff first. Review only
@@ -1170,7 +1170,7 @@ speculative abstractions are not defects. Argue from your assigned lens; in
 the critique rounds, contest findings you disagree with and explicitly
 withdraw your own findings that did not survive rebuttal.
 
-SUBTASK
+%sSUBTASK
 Title: %s
 
 Description:

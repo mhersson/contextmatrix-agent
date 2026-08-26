@@ -791,10 +791,12 @@ func (o *run) mobDraftPlan(ctx context.Context, diagnosis, design, feedback stri
 	return p, &out, true
 }
 
-// mobPlanBriefing assembles the plan-discussion briefing from the SAME
-// content blocks draftPlan feeds the solo planner: grounding, workspace,
-// title, description, diagnosis (bug-like cards), design (creative HITL
-// cards), and the resume-subtasks block.
+// mobPlanBriefing assembles the plan-discussion briefing: grounding, the repo
+// snapshot, workspace, the read-only roots, title, description, diagnosis
+// (bug-like cards), design (creative HITL cards), and the resume-subtasks
+// block. The seats discuss rather than emit, so the briefing carries none of
+// the solo planner's decomposition rules or JSON contract - the moderator's
+// synthesis prompt owns those.
 func (o *run) mobPlanBriefing(diagnosis, design string) string {
 	var existingTitles []string
 
@@ -808,7 +810,8 @@ func (o *run) mobPlanBriefing(diagnosis, design string) string {
 	diagBlock := diagnosisBlock(diagnosis)
 	dsnBlock := designBlock(design)
 
-	return fmt.Sprintf(planBriefing, o.grounding, o.repoSnapshotBlock(), o.d.Cfg.Workspace, o.tc.Title, o.plannerDescription(),
+	return fmt.Sprintf(planBriefing, o.grounding, o.repoSnapshotBlock(), o.d.Cfg.Workspace,
+		readRootsBlock(o.d.ReadRoots), o.tc.Title, o.plannerDescription(),
 		diagBlock, dsnBlock, resume)
 }
 

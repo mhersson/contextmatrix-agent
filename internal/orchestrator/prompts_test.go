@@ -1,11 +1,14 @@
 package orchestrator
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/mhersson/contextmatrix-agent/internal/mob"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSelfReviewInBothCodingPrompts(t *testing.T) {
@@ -406,7 +409,7 @@ func TestReadOnlyPromptsMentionGit(t *testing.T) {
 // %! formatting artifact (placeholder/argument count mismatch).
 func TestReviewBriefingRendersGrounding(t *testing.T) {
 	g := "REPO GROUNDING\nFollow the repo conventions.\n"
-	out := fmt.Sprintf(reviewBriefing, g, "My Title", "My Description", fencedDiff("diff - old +new"), "previous findings")
+	out := fmt.Sprintf(reviewBriefing, g, "", "My Title", "My Description", fencedDiff("diff - old +new"), "previous findings")
 	assert.Contains(t, out, g, "review briefing must embed the grounding value")
 	assert.NotContains(t, out, "%!", "review briefing must have no formatting artifact")
 }
@@ -416,7 +419,7 @@ func TestReviewBriefingRendersGrounding(t *testing.T) {
 // producing a %! formatting artifact.
 func TestCheckpointBriefingRendersGrounding(t *testing.T) {
 	g := "REPO GROUNDING\nCheck the CLAUDE.md.\n"
-	out := fmt.Sprintf(checkpointBriefing, g, "Subtask Title", "Subtask description", "Parent Card Title", "ENV go 1.22", fencedDiff("diff - old +new"))
+	out := fmt.Sprintf(checkpointBriefing, g, "", "Subtask Title", "Subtask description", "Parent Card Title", "ENV go 1.22", fencedDiff("diff - old +new"))
 	assert.Contains(t, out, g, "checkpoint briefing must embed the grounding value")
 	assert.NotContains(t, out, "%!", "checkpoint briefing must have no formatting artifact")
 }
@@ -438,4 +441,61 @@ func TestReadRootsBlockEmptyKeepsPromptSpacing(t *testing.T) {
 	specialist := fmt.Sprintf(specialistPrompt, "", "", readRootsBlock(nil), "LENS", "t", "b", "d", "")
 	assert.Contains(t, specialist, "single verdict.\n\nLENS\n\nReview only",
 		"an empty roots block leaves the specialist prompt spacing unchanged")
+}
+
+// TestReadRootsBlockEmptyKeepsBriefingSpacing pins that an undeclared root list
+// leaves the three mob briefings byte-identical at the join, the same way the
+// solo prompts collapse theirs.
+func TestReadRootsBlockEmptyKeepsBriefingSpacing(t *testing.T) {
+	plan := fmt.Sprintf(planBriefing, "", "", "/ws", readRootsBlock(nil), "t", "b", "", "", "")
+	assert.Contains(t, plan, "real code structure.\n\nP",
+		"an empty roots block leaves the plan briefing spacing unchanged")
+
+	review := fmt.Sprintf(reviewBriefing, "", readRootsBlock(nil), "t", "b", fencedDiff("d"), "")
+	assert.Contains(t, review, "survive rebuttal.\n\nPARENT CARD",
+		"an empty roots block leaves the review briefing spacing unchanged")
+
+	checkpoint := fmt.Sprintf(checkpointBriefing, "", readRootsBlock(nil), "t", "b", "p", "env", fencedDiff("d"))
+	assert.Contains(t, checkpoint, "survive rebuttal.\n\nSUBTASK",
+		"an empty roots block leaves the checkpoint briefing spacing unchanged")
+}
+
+// TestMobBriefingsNameReadRoots pins that a mob seat is told about the trees its
+// read tools can reach. The seats run on the same read registry the solo phases
+// do, widened with the operator's roots, so a briefing that never names them
+// leaves the seat with an access it has no reason to use.
+func TestMobBriefingsNameReadRoots(t *testing.T) {
+	const root = "/opt/deps/registry"
+
+	t.Run("plan", func(t *testing.T) {
+		o := mobPlanRun(&fakeOps{}, &planLLM{}, &scriptedEngine{})
+		o.d.ReadRoots = []string{root}
+
+		assert.Contains(t, o.mobPlanBriefing("", ""), root)
+	})
+
+	t.Run("review", func(t *testing.T) {
+		o := mobReviewRun(t, &fakeOps{}, &fakeGit{}, &planLLM{}, &scriptedEngine{})
+		o.d.ReadRoots = []string{root}
+
+		briefing, err := o.mobReviewBriefing(context.Background())
+		require.NoError(t, err)
+		assert.Contains(t, briefing, root)
+	})
+
+	t.Run("checkpoint", func(t *testing.T) {
+		eng := &scriptedEngine{outcomes: []mob.Outcome{{Synthesis: `{"verdict":"proceed","fixes":[]}`}}}
+		o := mobTestRun(&fakeOps{}, MobConfig{
+			Participants: 2, Execute: true, CheckpointMinTier: "simple", CheckpointRounds: 2,
+		}, 0)
+		o.d.ReadRoots = []string{root}
+		o.mobEngine = eng.run
+		o.solver.git = &diffGit{fakeGit: &fakeGit{}, diff: "diff --git a/a.go b/a.go\n+lgtm\n"}
+
+		o.mobCheckpoint(context.Background(), o.solver,
+			subtaskRef{ID: "SUB-1", Title: "t", Tier: "simple"}, "abc123")
+
+		require.Len(t, eng.topics, 1)
+		assert.Contains(t, eng.topics[0].Briefing, root)
+	})
 }
