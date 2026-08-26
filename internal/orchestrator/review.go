@@ -60,14 +60,38 @@ type fix struct {
 	Severity   string `json:"severity"`
 }
 
-// ReviewParkedError marks the review cap being exhausted without approval. The
-// worker maps it to the park path: exit 0, completed callback, card left in
-// review. Parked is not failed - a human picks the card up from review.
-type ReviewParkedError struct{}
+// ReviewParkedError marks the review phase stopping and leaving the card for a
+// human. The worker maps it to the park path: exit 0, completed callback, card
+// left in review. Parked is not failed - a human picks the card up from review.
+//
+// Reason is the true cause. Several paths reach this sentinel and most write
+// an accurate line of their own before returning it, but the cleanup fix pass
+// renders Error() straight onto the card, so a fixed string would state a
+// cause that is false there. The zero value keeps the attempts-cap wording,
+// which is what a bare construction has always meant.
+type ReviewParkedError struct {
+	Reason string
+}
 
 func (e *ReviewParkedError) Error() string {
-	return "review parked: attempts cap exhausted without approval"
+	reason := e.Reason
+	if reason == "" {
+		reason = reviewParkedAttemptsCap
+	}
+
+	return "review parked: " + reason
 }
+
+// The causes a review park can have. Each is the phrase that follows
+// "review parked: " on the card.
+const (
+	reviewParkedAttemptsCap  = "attempts cap exhausted without approval"
+	reviewParkedServerCap    = "the board's review attempts cap was reached"
+	reviewParkedNoTime       = "less than one round of container time left"
+	reviewParkedNoReviewer   = "no reviewer model is selectable"
+	reviewParkedNoFixModel   = "no fix model is selectable"
+	reviewParkedFixExhausted = "no fix model other than the ones that already failed"
+)
 
 // reviewTimeLeft parks the review when less than reviewRoundReserve remains on
 // the container deadline, before a verify run, panel, or fix round can be
@@ -92,7 +116,7 @@ func (o *run) reviewTimeLeft(ctx context.Context, round int) error {
 	d.logCard(ctx, "review parked: %s of container time left, less than the %s a review round needs - a re-trigger resumes at round %d",
 		remaining, reviewRoundReserve, round)
 
-	return &ReviewParkedError{}
+	return &ReviewParkedError{Reason: reviewParkedNoTime}
 }
 
 // runReview is the review phase. The parent enters review (idempotent on
@@ -490,7 +514,7 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 	// configured cap actually bought.
 	d.logCard(ctx, "review parked after %d attempts (authoritative pass) - outstanding findings:\n%s", n, findings2)
 
-	return &ReviewParkedError{}
+	return &ReviewParkedError{Reason: reviewParkedAttemptsCap}
 }
 
 // incrementReviewAttempt calls IncrementReviewAttempts and treats
@@ -508,7 +532,7 @@ func (o *run) incrementReviewAttempt(ctx context.Context, findings string) (int,
 	if errors.Is(err, cmclient.ErrReviewAttemptsCapped) {
 		o.d.logCard(ctx, "review parked at server cap - outstanding findings:\n%s", findings)
 
-		return 0, &ReviewParkedError{}
+		return 0, &ReviewParkedError{Reason: reviewParkedServerCap}
 	}
 
 	return 0, fmt.Errorf("increment review attempts: %w", err)
@@ -621,7 +645,7 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 	if len(panel) == 0 {
 		d.logCard(ctx, "review: no model is selectable for the reviewer role - parking the card in review for a human")
 
-		return "", &ReviewParkedError{}
+		return "", &ReviewParkedError{Reason: reviewParkedNoReviewer}
 	}
 
 	d.logCard(ctx, "review panel: %s", panelSummary(panel))
@@ -975,8 +999,8 @@ func (o *run) runFixModel(ctx context.Context, prompt string, round int, fixTier
 		// the no-op is no longer invisible.
 		if o.fixEscalate && !p.AtBar() && p.Source != registry.SourcePinned &&
 			o.firstNote("fix-escalation-noop/"+string(tier)+"/"+model) {
-			d.logCard(ctx, "fix escalation to %s bought nothing - %s does not clear it (prior %.2f); running anyway",
-				tier, model, p.Prior)
+			d.logCard(ctx, "fix escalation to %s bought nothing - %s does not clear it (%s); running anyway",
+				tier, model, priorClause(p))
 		}
 
 		res, dur, err := o.runModelCoder(ctx, d.WriteTools, prompt, model, fixWrapUpMessage, tier)
@@ -1023,7 +1047,7 @@ func (o *run) runFix(ctx context.Context, findings string, round int, fixTier st
 				return false, fmt.Errorf("resolve fix model: %w", rerr)
 			}
 
-			return false, &ReviewParkedError{}
+			return false, &ReviewParkedError{Reason: reviewParkedFixExhausted}
 		}
 	}
 
@@ -1185,7 +1209,7 @@ func (o *run) resolveFixModel(ctx context.Context, fixTier string, authoritative
 // pushed, so a human taking the card FROM REVIEW is the right destination.
 func (o *run) employableFixPick(p registry.Pick) (registry.Pick, error) {
 	if !p.OK {
-		return registry.Pick{}, &ReviewParkedError{}
+		return registry.Pick{}, &ReviewParkedError{Reason: reviewParkedNoFixModel}
 	}
 
 	return p, nil

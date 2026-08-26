@@ -1205,8 +1205,14 @@ func TestCapableDefaultIsTheFloorAndIsHardFiltered(t *testing.T) {
 		name      string
 		in        SelectInput
 		blacklist map[string]bool
-		wantOK    bool
-		wantModel string
+		// extraPriors scores slugs the ladder catalog does not carry, which is
+		// the shape a capable default takes when CM ships a rating for the
+		// operator's fallback.
+		extraPriors  map[string]PriorEntry
+		wantOK       bool
+		wantModel    string
+		wantHasPrior bool
+		wantMetTier  Tier
 	}{
 		{
 			name:      "ladder dry falls to the operator default",
@@ -1237,6 +1243,23 @@ func TestCapableDefaultIsTheFloorAndIsHardFiltered(t *testing.T) {
 			wantOK:    true,
 			wantModel: "capable/default",
 		},
+		{
+			// The other direction of the same encoding: a default CM did score
+			// reports that score, and its MetTier is the rung the score
+			// actually reaches - not the rung that was asked for, and not
+			// empty. Without this row the default's provenance is pinned only
+			// where it happens to be unmeasured, and a caller that renders
+			// HasPrior would be untested on the branch that has a number.
+			name: "a scored default reports its measurement",
+			in:   SelectInput{Role: RoleCoder, Tier: TierCritical, Exclude: allAboveFloorGone},
+			extraPriors: map[string]PriorEntry{
+				"capable/default": {Coder: new(0.78)},
+			},
+			wantOK:       true,
+			wantModel:    "capable/default",
+			wantHasPrior: true,
+			wantMetTier:  TierModerate,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1244,6 +1267,10 @@ func TestCapableDefaultIsTheFloorAndIsHardFiltered(t *testing.T) {
 			r := ladderRegistry(nil)
 			for id := range tt.blacklist {
 				r.blacklist[id] = true
+			}
+
+			for id, entry := range tt.extraPriors {
+				r.priors.Models[id] = entry
 			}
 
 			got := r.SelectByComplexity(tt.in)
@@ -1259,9 +1286,9 @@ func TestCapableDefaultIsTheFloorAndIsHardFiltered(t *testing.T) {
 
 			assert.Equal(t, tt.wantModel, got.Model)
 			assert.Equal(t, SourceDefault, got.Source)
-			assert.False(t, got.AtBar(), "an unmeasured default meets no bar")
-			assert.False(t, got.HasPrior)
-			assert.Empty(t, got.MetTier, "MetTier is measured, never asserted")
+			assert.False(t, got.AtBar(), "the default sits below the ladder, so it never meets the bar asked for")
+			assert.Equal(t, tt.wantHasPrior, got.HasPrior)
+			assert.Equal(t, tt.wantMetTier, got.MetTier, "MetTier is measured, never asserted")
 		})
 	}
 }
@@ -1402,7 +1429,10 @@ func TestMonotonicityHoldsOnTheAutoPathAndFavoritesAreTheException(t *testing.T)
 						low := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: ladder[lo], Exclude: excl})
 						high := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: ladder[hi], Exclude: excl})
 
-						if !low.OK || !high.OK {
+						// A pick with no prior reports Prior 0, which is not a
+						// measurement: comparing it would invent a violation, or
+						// hide one behind a zero neither model earned.
+						if !low.OK || !high.OK || !low.HasPrior || !high.HasPrior {
 							continue
 						}
 

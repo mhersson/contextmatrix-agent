@@ -2906,3 +2906,63 @@ func TestPinnedFixModelReportsNoFabricatedShortfall(t *testing.T) {
 			"an escalation cannot be scored against a pin that has no prior; logs=%v", ops.logs)
 	}
 }
+
+// TestFixEscalationNoOpReportsNoPriorRatherThanZero is the same guard on the
+// other card line that prints a prior: an escalated round that landed on the
+// operator's unrated fallback must not report it as rated zero.
+func TestFixEscalationNoOpReportsNoPriorRatherThanZero(t *testing.T) {
+	ops := &fakeOps{}
+	client := &planLLM{responses: []llm.Response{stopResp("Applied the fix.", 0.01)}}
+	// No priors: the escalated pick can only be the capable default.
+	reg := registry.NewRegistryFromParts(reviewerCatalog(), registry.Priors{}, nil, nil, "default/model")
+	d := reviewTestDeps(t, ops, &fakeGit{}, client, reg)
+	o := newReviewRun(d, cmclient.TaskContext{}, 0)
+	o.fixEscalate = true
+	o.fixFailReason = "landed no commit"
+
+	_, err := o.runFixModel(context.Background(), "fix it", 2, "moderate", false)
+	require.NoError(t, err)
+
+	require.True(t, ops.loggedContains("bought nothing"), "logs=%v", ops.logs)
+
+	for _, l := range ops.logs {
+		assert.NotContains(t, l, "prior 0.00",
+			"the fallback is unrated, not rated worst possible; logs=%v", ops.logs)
+	}
+}
+
+// TestReviewParkedErrorNamesItsCause pins that the sentinel reports the reason
+// it was actually constructed with, and that a bare construction still means
+// what it always meant.
+func TestReviewParkedErrorNamesItsCause(t *testing.T) {
+	assert.Equal(t, "review parked: attempts cap exhausted without approval",
+		(&ReviewParkedError{}).Error(),
+		"a bare construction keeps the meaning every existing site gave it")
+
+	assert.Equal(t, "review parked: no fix model is selectable",
+		(&ReviewParkedError{Reason: reviewParkedNoFixModel}).Error())
+}
+
+// TestFixModelRefusalNamesItsRealCause covers the one park path whose Error()
+// text IS the card line: the cleanup fix pass renders the error verbatim into
+// its own log entry, with no accurate line of its own ahead of it. A fixed
+// attempts-cap string there would tell the operator the cap was exhausted when
+// it was not, and hide the real cause entirely.
+func TestFixModelRefusalNamesItsRealCause(t *testing.T) {
+	reg := registry.NewRegistryFromParts(llm.Catalog{}, registry.Priors{}, nil, nil, "")
+	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reg)
+	o := newReviewRun(d, cmclient.TaskContext{Title: "Parent"}, 0)
+
+	committed, err := o.runFix(context.Background(), "- a.go: something", 2, "moderate", false)
+	require.Error(t, err)
+	assert.False(t, committed)
+
+	var parked *ReviewParkedError
+
+	require.ErrorAs(t, err, &parked, "the fix refusal still parks the card in review")
+
+	assert.Contains(t, err.Error(), "no fix model is selectable",
+		"the card must read the true cause; err=%v", err)
+	assert.NotContains(t, err.Error(), "attempts cap",
+		"no attempts cap was reached on this path; err=%v", err)
+}

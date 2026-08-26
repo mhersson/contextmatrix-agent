@@ -2133,3 +2133,26 @@ func TestShortfallAdvisoryNeverTakesTheSelectionLock(t *testing.T) {
 		t.Fatal("the shortfall advisory blocked on the selection lock")
 	}
 }
+
+// TestUnmeasuredPickReportsNoPriorRatherThanZero pins the difference HasPrior
+// exists to carry, at the point where it reaches a human. The capable default
+// is normally absent from the live catalog, so the priors built from that
+// catalog cannot score it - and a card line reading "prior 0.00" tells an
+// operator their own chosen fallback rated worst possible, which is grounds to
+// blacklist a model whose only fault is having no rating.
+func TestUnmeasuredPickReportsNoPriorRatherThanZero(t *testing.T) {
+	ops := &fakeOps{}
+	// The plan registry carries no priors at all, so every rung is dry and the
+	// answer is the operator's capable default: the standard degraded shape.
+	o := newExecRun(execTestDeps(ops, &fakeGit{}, &planLLM{}), nil, 5)
+
+	model, err := o.resolveCoderModel(context.Background(),
+		subtaskRef{ID: "SUB-1", Title: "First", Tier: "moderate"}, "prompt")
+	require.NoError(t, err)
+	require.Equal(t, "default/model", model)
+
+	require.Len(t, ops.logs, 1, "logs=%v", ops.logs)
+	assert.Contains(t, ops.logs[0], "no measured prior")
+	assert.NotContains(t, ops.logs[0], "prior 0.00",
+		"nothing measured this model, so no number may be printed for it; logs=%v", ops.logs)
+}

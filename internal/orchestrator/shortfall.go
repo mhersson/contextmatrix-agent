@@ -27,7 +27,8 @@ func (o *run) noteShortfall(ctx context.Context, phase string, p registry.Pick) 
 	slog.Info("selector: pick",
 		"card_id", o.d.Cfg.CardID, "phase", phase, "model", p.Model,
 		"requested_tier", string(p.RequestedTier), "met_tier", string(p.MetTier),
-		"bar", p.RequestedBar, "prior", p.Prior, "source", p.Source.String())
+		"bar", p.RequestedBar, "prior", p.Prior, "has_prior", p.HasPrior,
+		"source", p.Source.String())
 
 	if p.AtBar() {
 		return
@@ -53,19 +54,19 @@ func (o *run) noteShortfall(ctx context.Context, phase string, p registry.Pick) 
 
 	warning := "no model clears the requested tier bar"
 
-	line := fmt.Sprintf("%s: no model clears the %s bar (%.2f) for role %s - selected %s at %s (prior %.2f)",
-		phase, p.RequestedTier, p.RequestedBar, p.Role, p.Model, met, p.Prior)
+	line := fmt.Sprintf("%s: no model clears the %s bar (%.2f) for role %s - selected %s at %s (%s)",
+		phase, p.RequestedTier, p.RequestedBar, p.Role, p.Model, met, priorClause(p))
 
 	if pinned {
 		warning = "the pinned model does not clear the requested tier bar"
-		line = fmt.Sprintf("%s: the pinned model %s does not clear the %s bar (%.2f) - it met %s (prior %.2f)",
-			phase, p.Model, p.RequestedTier, p.RequestedBar, met, p.Prior)
+		line = fmt.Sprintf("%s: the pinned model %s does not clear the %s bar (%.2f) - it met %s (%s)",
+			phase, p.Model, p.RequestedTier, p.RequestedBar, met, priorClause(p))
 	}
 
 	slog.Warn("tier bar unreachable; selection fell short",
 		"card_id", o.d.Cfg.CardID, "phase", phase, "role", string(p.Role),
 		"requested", string(p.RequestedTier), "met", met, "model", p.Model,
-		"prior", p.Prior, "source", p.Source.String())
+		"prior", p.Prior, "has_prior", p.HasPrior, "source", p.Source.String())
 
 	if o.d.Emit != nil {
 		o.d.Emit.Emit(events.StateChange, map[string]any{
@@ -79,6 +80,21 @@ func (o *run) noteShortfall(ctx context.Context, phase string, p registry.Pick) 
 	}
 
 	o.d.logCard(ctx, "%s", line)
+}
+
+// priorClause renders a pick's prior, or says there is none. HasPrior exists
+// to separate a measured zero from no measurement at all, and this is where
+// that distinction reaches a human. The capable default routinely has no
+// prior - it is typically an operator-configured slug the live catalog does
+// not carry, so the priors built from that catalog cannot score it - and
+// printing 0.00 there would tell an operator their own chosen fallback rated
+// worst possible.
+func priorClause(p registry.Pick) string {
+	if !p.HasPrior {
+		return "no measured prior"
+	}
+
+	return fmt.Sprintf("prior %.2f", p.Prior)
 }
 
 // metTierLabel names the strictest bar a pick actually cleared. A pick with no
