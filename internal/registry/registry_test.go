@@ -952,8 +952,8 @@ func TestSelectByComplexityClampsDownTheLadder(t *testing.T) {
 		},
 		{
 			// Critical is dry, so the pick is the one a DIRECT complex request
-			// would have made - not the capable default, which is what the old
-			// fall-through returned and which may be weaker than high/one.
+			// would have made, not the capable default - which may be weaker
+			// than high/one.
 			name:    "critical dry clamps to complex",
 			in:      SelectInput{Role: RoleCoder, Tier: TierCritical, Exclude: map[string]bool{"top/one": true}},
 			wantID:  "high/one",
@@ -992,10 +992,11 @@ func TestSelectByComplexityClampsDownTheLadder(t *testing.T) {
 	}
 }
 
-// TestEscalationNeverDowngrades is the DEFECT 1 test: under identical
-// exclusions, asking for a HIGHER tier must never return a model with a LOWER
-// prior. The capable-default fall-through violated this the moment the top pool
-// emptied - an escalation that was a downgrade.
+// TestEscalationNeverDowngrades pins the escalation-is-a-downgrade
+// regression: under identical exclusions, asking for a HIGHER tier must
+// never return a model with a LOWER prior. Clamping down the ladder instead
+// of jumping straight to the capable default is what keeps this true even
+// when the requested tier's pool is empty.
 func TestEscalationNeverDowngrades(t *testing.T) {
 	r := ladderRegistry(nil)
 
@@ -1035,10 +1036,10 @@ func TestEscalationNeverDowngrades(t *testing.T) {
 	}
 }
 
-// TestCapableDefaultIsTheFloorAndIsHardFiltered pins the D1/D3 coupling: the
-// bottom of the ladder is the OPERATOR's default (it is the trigger's
-// default_model, not junk), but it is subject to every hard filter - which is
-// the hole today's fall-through leaves open.
+// TestCapableDefaultIsTheFloorAndIsHardFiltered pins that the bottom of the
+// ladder is the OPERATOR's default (it is the trigger's default_model, not
+// junk), but it is subject to every hard filter the same as any candidate -
+// so an excluded or blacklisted default can never be handed back.
 func TestCapableDefaultIsTheFloorAndIsHardFiltered(t *testing.T) {
 	allAboveFloorGone := map[string]bool{
 		"top/one": true, "high/one": true, "high/two": true,
@@ -1047,6 +1048,15 @@ func TestCapableDefaultIsTheFloorAndIsHardFiltered(t *testing.T) {
 
 	withDefaultExcluded := maps.Clone(allAboveFloorGone)
 	withDefaultExcluded["capable/default"] = true
+
+	// A tier absent from the configured ladder has bar 0 (barFor's documented
+	// fallback), so every ladderRegistry model's prior would trivially clear
+	// it if any reached the pool - excluding all seven is what forces the
+	// walk down to the capable default at this tier too.
+	everyLadderModelGone := map[string]bool{
+		"top/one": true, "high/one": true, "high/two": true,
+		"mid/one": true, "mid/two": true, "low/one": true, "sub/floor": true,
+	}
 
 	tests := []struct {
 		name      string
@@ -1062,8 +1072,8 @@ func TestCapableDefaultIsTheFloorAndIsHardFiltered(t *testing.T) {
 			wantModel: "capable/default",
 		},
 		{
-			// The regression that matters: recoverIncapable puts the default in
-			// Exclude, and today the fall-through hands it straight back.
+			// The case that matters: recoverIncapable puts the default in
+			// Exclude, and the default must never be handed back regardless.
 			name:   "an excluded default is never resurrected",
 			in:     SelectInput{Role: RoleCoder, Tier: TierCritical, Exclude: withDefaultExcluded},
 			wantOK: false,
@@ -1073,6 +1083,16 @@ func TestCapableDefaultIsTheFloorAndIsHardFiltered(t *testing.T) {
 			in:        SelectInput{Role: RoleCoder, Tier: TierCritical, Exclude: allAboveFloorGone},
 			blacklist: map[string]bool{"capable/default": true},
 			wantOK:    false,
+		},
+		{
+			// A tier with no configured bar is a degenerate rung, not a free
+			// pass: the capable default's MetTier must still come from a real
+			// prior, never from a prior-less model trivially clearing a bar of
+			// zero at the tier that was asked for.
+			name:      "an off-ladder tier still measures the default honestly",
+			in:        SelectInput{Role: RoleCoder, Tier: Tier("unrecognised"), Exclude: everyLadderModelGone},
+			wantOK:    true,
+			wantModel: "capable/default",
 		},
 	}
 

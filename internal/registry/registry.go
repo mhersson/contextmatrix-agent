@@ -73,9 +73,9 @@ type ModelSpec struct {
 }
 
 // Pick is one selection outcome. A ModelSpec alone cannot say "I could not
-// do what you asked", which is the whole of DEFECT 1: the dishonesty was
-// never the fallback, it was that the return type had no field in which to
-// admit one happened. Pick embeds ModelSpec so callers that only feed the
+// do what you asked": a caller that only sees the chosen model has no way
+// to tell an at-bar pick from a degraded fallback. Pick carries that
+// provenance explicitly. It embeds ModelSpec so callers that only feed the
 // harness need no edit.
 type Pick struct {
 	ModelSpec
@@ -273,9 +273,11 @@ func (r *Registry) bars() map[Tier]float64 {
 	return DefaultTierBars()
 }
 
-// barFor replaces tierBar (registry.go:443). A tier absent from the ladder
-// has bar 0 - today's behaviour for an unrecognised tier. The zero-value
-// Registry still works (TestTierBarsIncludeCritical builds one directly).
+// barFor returns the quality bar for t. A tier absent from the configured
+// ladder has bar 0, so it can never gate a candidate out and descent always
+// treats it as reachable. The zero-value Registry still works
+// (TestTierBarsIncludeCritical builds one directly) because bars() falls
+// back to DefaultTierBars.
 func (r *Registry) barFor(t Tier) float64 { return r.bars()[t] }
 
 // lowestBar is the bottom of the configured ladder: the floor a walk can ever
@@ -364,17 +366,19 @@ func (r *Registry) pickFor(id string, in SelectInput, src PickSource) Pick {
 // When the requested tier's pool is empty the selection CLAMPS DOWN the
 // configured ladder: it re-runs at the next tier with a strictly lower bar,
 // and so on. Each rung is exactly the selection a direct request at that
-// rung would have made, so escalating can never yield a worse model than
-// asking for less - the property the old fall-through broke. Favorites and
-// pins are declared exceptions to that invariant (a favorite bypasses the
-// price band by design); see the package contract.
+// rung would have made, so escalating a tier can never yield a worse model
+// than asking for less. Favorites and pins are declared exceptions to that
+// invariant (a favorite bypasses the price band by design); see the package
+// contract.
 //
 // Below the lowest configured bar the answer is the operator's capable
 // default - the trigger's default_model, the serve default, or the
 // compiled-in guard - marked SourceDefault and subject to the SAME hard
-// filters as any candidate. That last clause is new and load-bearing:
-// today's fall-through ignores Exclude, so a model proven harness-incapable
-// this run can be re-handed forever (candidates.go:427 documents the hole).
+// filters as any candidate (Exclude, blacklist, ExcludeVendors, window
+// fit). Hard-filtering the default is what keeps a model this run has
+// already proven harness-incapable from being handed back indefinitely: it
+// answers "what did the operator choose for this run?", not "what is
+// selectable regardless of what has already failed?".
 //
 // OK is false only when even that default is excluded, blacklisted, or
 // window-short. The caller decides what a refusal costs.
@@ -401,11 +405,11 @@ func (r *Registry) pickAt(in SelectInput) (string, PickSource) {
 		// Favorites bypass the vendor-diversity preference: explicit
 		// operator intent beats the emergent heuristic. Evaluated per rung,
 		// so a clamped pick consults the favorites of the tier it actually
-		// landed on. Preserved subtlety: a rung counts as non-dry when a
-		// vendor-BLIND favorite is eligible even if the vendor-FILTERED
-		// pool is empty - today's ordering (favoriteFor ran before
-		// candidates), and changing it would let a soft vendor preference
-		// silently override an explicit favorite.
+		// landed on. The favorite lookup runs vendor-blind and before the
+		// vendor-filtered candidate pool, so a rung counts as non-dry when
+		// an eligible favorite exists even if the vendor-filtered pool is
+		// empty - a soft vendor preference must never silently override an
+		// explicit favorite.
 		blind := in
 		blind.ExcludeVendors = nil
 
@@ -426,6 +430,11 @@ func (r *Registry) pickAt(in SelectInput) (string, PickSource) {
 // model that is not being judged on quality. The capable default answers a
 // question the bars cannot ("what did the operator choose for this run?"),
 // but it must never resurrect a model this run has already barred.
+// Deliberately omitted: SupportsTools(). The capable default is typically an
+// operator-configured slug absent from the live catalog, where tool support
+// cannot be evaluated at all - requiring it here would refuse every
+// out-of-catalog default rather than just the ones that legitimately lack
+// tool support.
 func (r *Registry) employable(id string, in SelectInput) bool {
 	if in.Exclude[id] || r.blacklist[id] {
 		return false
