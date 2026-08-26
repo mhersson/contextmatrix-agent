@@ -567,72 +567,103 @@ func (r *Registry) favoriteAmong(cands []candidate, tier Tier, role Role) string
 	return ""
 }
 
-// SelectReviewPanel returns n specs for the review specialists: distinct models
-// chosen by repeated SelectByComplexity with a growing Exclude set. Each seat
-// softly prefers vendors not yet on the panel: the pick runs vendor-filtered
-// when that still leaves a qualifying candidate, vendor-blind otherwise. When
-// the pool runs dry, the last pick is reused to fill remaining slots rather
-// than escalating price.
-func (r *Registry) SelectReviewPanel(in SelectInput, n int) []ModelSpec {
+// SelectReviewPanel returns exactly n seats for the review specialists:
+// distinct models chosen by repeated SelectByComplexity with a growing
+// Exclude set, each seat softly preferring vendors not yet seated. Because
+// each pick walks the tier ladder, a seat that cannot stay at the requested
+// tier takes a distinct model one rung down rather than duplicating the
+// seat above it: for a panel, independent judgement from a lower-bar
+// reviewer is worth more than a second copy of the higher-bar one, and
+// costs less.
+//
+// Duplicate fill is the last resort. It duplicates the previous seat and
+// sets Duplicate on the copy: three identical slugs with no Duplicate flag
+// are indistinguishable from three independent judgements, and the
+// synthesizer would read that as agreement.
+//
+// The panel is always n seats: callers index it positionally against a
+// fixed lens list, so a short panel deletes a lens rather than thinning
+// the panel.
+func (r *Registry) SelectReviewPanel(in SelectInput, n int) []Pick {
 	if n <= 0 {
 		return nil
 	}
 
-	exclude := map[string]bool{}
-	for id := range in.Exclude {
-		exclude[id] = true
+	exclude := maps.Clone(in.Exclude)
+	if exclude == nil {
+		exclude = map[string]bool{}
 	}
 
-	usedVendors := map[string]bool{}
-	for v := range in.ExcludeVendors {
-		usedVendors[v] = true // e.g. a Best-of-N pin's vendor
+	usedVendors := maps.Clone(in.ExcludeVendors) // e.g. a Best-of-N pin's vendor
+	if usedVendors == nil {
+		usedVendors = map[string]bool{}
 	}
 
-	panel := make([]ModelSpec, 0, n)
+	panel := make([]Pick, 0, n)
 
-	var last ModelSpec
+	var last Pick
 
 	for len(panel) < n {
-		next := in
-		next.Exclude = exclude
-		next.ExcludeVendors = nil // the dry probe and the fallback are vendor-blind
+		seat := in
+		seat.Exclude = exclude
+		seat.ExcludeVendors = nil
 
-		// Probe the candidate pool directly: an empty pool means no distinct
-		// model remains, so reuse the last real pick rather than escalating to
-		// the (pricier) capable default. The probe duplicates the filter work
-		// SelectByComplexity does internally - accepted for clarity at catalog
-		// sizes.
-		if len(r.candidates(next)) == 0 {
+		blind := r.SelectByComplexity(seat)
+
+		// No distinct model remains at any rung, and even the capable
+		// default is barred: repeat the last real pick.
+		if !blind.OK {
 			if len(panel) == 0 {
-				// Dry from the start: every slot is the capable default, so the
-				// panel is always n non-empty specs.
-				last = r.SelectByComplexity(next).ModelSpec
+				return nil // nothing is selectable for this role at all
 			}
 
-			panel = append(panel, last)
+			dup := last
+			dup.Duplicate = true
+			panel = append(panel, dup)
 
 			continue
 		}
 
-		// Soft vendor preference: restrict to unseated vendors only when that
-		// still leaves a qualifying candidate. The price band re-anchors on the
-		// filtered subset, so a diverse seat may cost more than the
-		// vendor-blind pick would have - accepted, diversity is the point.
+		// The capable default sits below every configured rung. Once a real
+		// seat already holds the panel, an off-ladder default is not a
+		// second independent judgement - it is the same terminal fill as an
+		// unselectable rung, so it repeats the previous seat instead of
+		// occupying a seat of its own. The first seat is the exception:
+		// with nothing on the panel yet, the default IS the answer.
+		if blind.Source == SourceDefault && len(panel) > 0 {
+			dup := last
+			dup.Duplicate = true
+			panel = append(panel, dup)
+
+			continue
+		}
+
+		pick := blind
+
+		// Soft vendor preference, bounded to the rung the vendor-blind pick
+		// landed on: diversity breaks ties within a rung, it never
+		// overrides the quality ladder. Accepting a filtered pick from a
+		// lower rung would let a soft, emergent preference outrank a
+		// measured bar - and high-prior models cluster in a handful of
+		// vendors, so a 3-seat panel would routinely push seats 2-3 far
+		// down the ladder chasing a fresh vendor. The price band still
+		// re-anchors on the filtered subset, so a diverse seat may cost
+		// more than the vendor-blind pick - accepted, that is the
+		// documented cost of diversity.
 		if len(usedVendors) > 0 {
-			filtered := next
+			filtered := seat
 			filtered.ExcludeVendors = usedVendors
 
-			if len(r.candidates(filtered)) > 0 {
-				next = filtered
+			if f := r.SelectByComplexity(filtered); f.OK && f.MetTier == blind.MetTier {
+				pick = f
 			}
 		}
 
-		spec := r.SelectByComplexity(next).ModelSpec
-		panel = append(panel, spec)
-		last = spec
-		exclude[spec.Model] = true
+		panel = append(panel, pick)
+		last = pick
+		exclude[pick.Model] = true
 
-		if v := r.vendorOf(spec.Model); v != "" {
+		if v := r.vendorOf(pick.Model); v != "" {
 			usedVendors[v] = true
 		}
 	}
@@ -646,7 +677,7 @@ func (r *Registry) SelectReviewPanel(in SelectInput, n int) []ModelSpec {
 // (review discussions exclude the models that coded the card). It exists as a
 // named seam so discussion selection can diverge from review selection
 // without touching call sites.
-func (r *Registry) SelectDiscussionPanel(in SelectInput, n int) []ModelSpec {
+func (r *Registry) SelectDiscussionPanel(in SelectInput, n int) []Pick {
 	return r.SelectReviewPanel(in, n)
 }
 
@@ -654,7 +685,7 @@ func (r *Registry) SelectDiscussionPanel(in SelectInput, n int) []ModelSpec {
 // non-empty, occupies slot 1 (excluded from the auto picks); the remaining
 // slots are distinct-first with wrap-around when the pool is smaller than n
 // (SelectReviewPanel semantics) - model scarcity never shrinks n.
-func (r *Registry) SelectCandidateModels(in SelectInput, n int, pin string) []ModelSpec {
+func (r *Registry) SelectCandidateModels(in SelectInput, n int, pin string) []Pick {
 	if n <= 0 {
 		return nil
 	}
@@ -679,10 +710,34 @@ func (r *Registry) SelectCandidateModels(in SelectInput, n int, pin string) []Mo
 		}
 	}
 
-	out := make([]ModelSpec, 0, n)
-	out = append(out, ModelSpec{Model: pin, ContextWindow: r.ContextWindow(pin)})
+	// The pin is operator intent and is never degraded away - but its MetTier
+	// and Prior are measured like every other seat's. Asserting MetTier ==
+	// in.Tier would make the field mean "measured" for auto picks and
+	// "asserted" for pins, and any aggregate over it would then be silently
+	// wrong for every pinned run. Source SourcePinned is what carries the
+	// authority; AtBar carries the measurement.
+	pinPick := r.pickFor(pin, in, SourcePinned)
+	if !r.Has(pin) {
+		pinPick.ContextWindow = r.ContextWindow(pin)
+	}
 
-	return append(out, r.SelectReviewPanel(next, n-1)...)
+	out := make([]Pick, 0, n)
+	out = append(out, pinPick)
+
+	rest := r.SelectReviewPanel(next, n-1)
+	if rest == nil && n > 1 {
+		// Nothing else is selectable: fill the remaining seats with the pin,
+		// flagged, so the fan-out still gets n candidates.
+		for range n - 1 {
+			dup := pinPick
+			dup.Duplicate = true
+			out = append(out, dup)
+		}
+
+		return out
+	}
+
+	return append(out, rest...)
 }
 
 // specFor builds a ModelSpec for id, filling the context window from the catalog.

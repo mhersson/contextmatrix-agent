@@ -732,7 +732,7 @@ func (o *run) reviewPanel(ctx context.Context, estTokens int, authoritative bool
 		tier = registry.TierComplex
 	}
 
-	return o.d.Registry.SelectReviewPanel(registry.SelectInput{
+	picks := o.d.Registry.SelectReviewPanel(registry.SelectInput{
 		Role:      registry.RoleReviewer,
 		Tier:      tier,
 		EstTokens: estTokens,
@@ -741,6 +741,13 @@ func (o *run) reviewPanel(ctx context.Context, estTokens int, authoritative bool
 		// records it). Merged so neither set masks the other.
 		Exclude: o.reviewExclusions(),
 	}, reviewPanelSize)
+
+	panel := make([]registry.ModelSpec, len(picks))
+	for i, p := range picks {
+		panel[i] = p.ModelSpec
+	}
+
+	return panel
 }
 
 // reviewExclusions is the union of the coder models (a model must not review its

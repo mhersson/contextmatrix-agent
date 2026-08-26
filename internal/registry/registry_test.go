@@ -673,6 +673,110 @@ func TestSelectReviewPanelVendorEdgeCases(t *testing.T) {
 	})
 }
 
+func TestSelectReviewPanelClampsBeforeDuplicating(t *testing.T) {
+	panel := ladderRegistry(nil).SelectReviewPanel(SelectInput{Role: RoleReviewer, Tier: TierCritical}, 3)
+	require.Len(t, panel, 3)
+
+	models := make([]string, len(panel))
+	for i, s := range panel {
+		require.True(t, s.OK, "seat %d", i)
+		assert.False(t, s.Duplicate, "seat %d: a clamped-but-distinct seat is not a duplicate", i)
+		models[i] = s.Model
+	}
+
+	assert.Equal(t, 3, DistinctModels(panel),
+		"seats must be distinct models, not one model repeated: %v", models)
+
+	// Seat 1 holds the requested tier; the seats below it clamp down a rung to
+	// stay distinct rather than duplicating seat 1 at critical price.
+	assert.Equal(t, "top/one", panel[0].Model)
+	assert.Equal(t, TierCritical, panel[0].MetTier)
+	assert.True(t, panel[0].AtBar())
+
+	for _, s := range panel[1:] {
+		assert.True(t, s.BelowBar(), "seat %s must report its clamp", s.Model)
+		assert.Equal(t, TierCritical, s.RequestedTier)
+	}
+}
+
+// TestSelectReviewPanelFillsWithARealPickNotAnEscalation pins the last-resort
+// order: a repeat is reached only when no rung holds an unseated model, and it
+// repeats a real, quality-bearing pick rather than escalating price.
+func TestSelectReviewPanelFillsWithARealPickNotAnEscalation(t *testing.T) {
+	cat := llm.Catalog{
+		entry("only/one", 1.0, 2.0, 200000),
+		entry("sub/floor", 0.1, 0.2, 200000),
+	}
+	priors := Priors{Models: map[string]PriorEntry{
+		"only/one":  {Reviewer: new(0.88)},
+		"sub/floor": {Reviewer: new(0.40)},
+	}}
+	r := NewRegistryFromParts(cat, priors, nil, nil, "capable/default")
+
+	panel := r.SelectReviewPanel(SelectInput{Role: RoleReviewer, Tier: TierCritical}, 3)
+	require.Len(t, panel, 3, "the panel is always n seats")
+
+	assert.Equal(t, "only/one", panel[0].Model)
+	assert.InDelta(t, 0.88, panel[0].Prior, 1e-9)
+	assert.False(t, panel[0].Duplicate)
+
+	// Seats 2 and 3: only/one is excluded now, so the ladder is dry and the
+	// capable default is the floor - a duplicate of it, flagged both ways.
+	for i, s := range panel[1:] {
+		require.True(t, s.OK, "seat %d", i+1)
+		assert.True(t, s.Duplicate, "seat %d must be flagged as a repeat", i+1)
+	}
+
+	assert.Less(t, DistinctModels(panel), 3, "the collapse must be countable")
+}
+
+// TestSelectReviewPanelVendorPreferenceIsBoundedToTheRung pins that the soft
+// diversity preference breaks ties WITHIN a rung and never overrides the
+// quality ladder. Without the rung bound, seat 2 walks down to find the fresh
+// vendor and the panel trades a measured 0.83 for a measured 0.66.
+func TestSelectReviewPanelVendorPreferenceIsBoundedToTheRung(t *testing.T) {
+	r := ladderRegistry(nil).WithCreators(map[string]string{
+		"top/one": "alpha", "high/one": "alpha", "high/two": "alpha",
+		"mid/one": "alpha", "mid/two": "alpha", "low/one": "beta",
+	})
+
+	panel := r.SelectReviewPanel(SelectInput{Role: RoleReviewer, Tier: TierComplex}, 2)
+	require.Len(t, panel, 2)
+
+	assert.Equal(t, "high/one", panel[0].Model)
+	assert.Equal(t, "high/two", panel[1].Model,
+		"seat 2 must stay on the complex rung; diversity must not buy a rung of quality")
+	assert.True(t, panel[1].AtBar())
+}
+
+func TestSelectReviewPanelReturnsNothingWhenNoModelIsSelectable(t *testing.T) {
+	cat := llm.Catalog{entry("sub/floor", 0.1, 0.2, 200000)}
+	priors := Priors{Models: map[string]PriorEntry{"sub/floor": {Reviewer: new(0.40)}}}
+	// No capable default and nothing employable: the only honest answer is none.
+	r := NewRegistryFromParts(cat, priors, nil, nil, "")
+
+	assert.Nil(t, r.SelectReviewPanel(SelectInput{Role: RoleReviewer, Tier: TierSimple}, 3))
+}
+
+// TestSelectCandidateModelsPinReportsMeasuredNotAsserted pins that the pin seat
+// does not fabricate a met tier: authority is Source, measurement is MetTier.
+func TestSelectCandidateModelsPinReportsMeasuredNotAsserted(t *testing.T) {
+	r := ladderRegistry(nil)
+
+	picks := r.SelectCandidateModels(SelectInput{Role: RoleCoder, Tier: TierCritical}, 2, "sub/floor")
+	require.Len(t, picks, 2)
+
+	assert.Equal(t, "sub/floor", picks[0].Model)
+	assert.Equal(t, SourcePinned, picks[0].Source, "a pin is authoritative")
+	assert.Empty(t, picks[0].MetTier, "a 0.40 prior clears no configured bar - say so")
+	assert.False(t, picks[0].AtBar())
+	assert.InDelta(t, 0.40, picks[0].Prior, 1e-9)
+	assert.True(t, picks[0].HasPrior)
+
+	assert.Equal(t, "top/one", picks[1].Model, "the auto seat beside a pin is unaffected")
+	assert.True(t, picks[1].AtBar())
+}
+
 // --- MaxCapability tests ---
 
 func TestMaxCapabilityBypassesFavorites(t *testing.T) {
