@@ -1569,3 +1569,37 @@ func TestBuildRegistryThreadsTierBars(t *testing.T) {
 		"the operator's elevated complex bar must not be silently satisfied by an unthreaded default ladder")
 	assert.Equal(t, registry.TierModerate, got.MetTier)
 }
+
+// TestRunReleasesClaimOnInvalidTierLadder proves an invalid operator ladder
+// stops the worker before any orchestrator phase runs: the claim taken by
+// Run is released, the orchestrator is never invoked, and the error message
+// carries the underlying reason exactly once rather than being wrapped a
+// second time on its way out of runFSM.
+func TestRunReleasesClaimOnInvalidTierLadder(t *testing.T) {
+	remote := setupBareRemote(t)
+	wsParent := t.TempDir()
+	ops := newFakeOps()
+
+	swapRunOrchestrator(t, func(context.Context, orchestrator.Deps) error {
+		t.Fatal("orchestrator must not run when the tier ladder fails to build")
+
+		return nil
+	})
+
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	spec := baseSpec(t, remote, wsParent)
+	// Inverted ladder: simple above critical fails the monotone check.
+	spec.SelectorTierBars = map[string]float64{"simple": 0.90, "critical": 0.10}
+
+	res, err := Run(context.Background(), spec, ops, &scriptedLLM{}, emit, openStdin(t))
+
+	require.Error(t, err)
+	assert.Equal(t, "error", res.Reason)
+	assert.Equal(t, 1, ops.count("ReleaseCard"))
+
+	msg := err.Error()
+	assert.Contains(t, msg, "ladder must not decrease")
+	assert.Equal(t, 1, strings.Count(msg, "build registry:"),
+		"the error must be wrapped with context exactly once, not doubled on the way out of runFSM")
+}

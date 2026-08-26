@@ -389,7 +389,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 	if err != nil {
 		releaseQuietly(ctx, a.ops, a.spec.CardID)
 
-		return Result{Reason: "error"}, fmt.Errorf("build registry: %w", err)
+		return Result{Reason: "error"}, err
 	}
 
 	d := orchestrator.Deps{
