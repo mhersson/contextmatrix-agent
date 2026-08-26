@@ -801,23 +801,24 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 
 		o.logSoloCapPark(ctx, sub.ID, reason)
 
-		// The same predicate that decides the leaderboard exemption below decides
-		// whether this cap carries QUALITY evidence too. Reusing it - not
-		// re-deriving it - is what keeps the card log, the outcome report and the
-		// bar agreeing about the cause. A verify that never ran, or that died of
-		// container resource pressure, says nothing about the model; the cap
-		// itself is still volume evidence either way.
-		if vres.Status != verifySkipped && !exhausted {
+		// modelEvidence is whether this failure says anything about the MODEL.
+		// One binding read by both the bar raise and the leaderboard report, so
+		// the card log, the outcome report and the bar cannot disagree about the
+		// cause. A skipped verify (a timeout or a missing tool - rerr != nil
+		// takes the same zero-value Status) is an environment problem, and so is
+		// one that died of container resource pressure; the cap itself is still
+		// volume evidence either way.
+		modelEvidence := vres.Status != verifySkipped && !exhausted
+
+		if modelEvidence {
 			o.raiseSubtaskBoth(ctx, sub, "the turn cap was reached and the verify then failed")
 		} else {
 			o.raiseSubtaskBudget(ctx, sub, "the turn cap was reached; the verify outcome was environmental")
 		}
 
-		// A skipped verify (timeout or missing tool - rerr != nil takes the same
-		// zero-value Status) is an environment problem, not evidence about the
-		// model - the same exemption the ToolchainMissingError branch above gets,
+		// The same exemption the ToolchainMissingError branch above gets,
 		// extended to the exhausted-failure shape.
-		if vres.Status != verifySkipped && !exhausted {
+		if modelEvidence {
 			o.reportSoloOutcome(ctx, sub.ID, model, "failed", false, sc.ledger.Spent()-spendBefore)
 		}
 
@@ -942,8 +943,9 @@ const sizingEscalationKind = "sizing_escalation"
 // Does not mutate sub.Sizing: this run is ending, and the marker is read back
 // only on the NEXT run.
 //
-// The axis carries both the transform and the words for it, so a trigger
-// cannot move one axis while the ceiling line names the other.
+// The axis carries both the transform and the words for it, chosen together in
+// one literal per trigger, so a mismatch between them is one visible edit rather
+// than two files apart.
 func (o *run) resizeSubtask(ctx context.Context, sub subtaskRef, why string, axis resizeAxis) {
 	tc, err := o.d.Ops.GetTaskContext(ctx, sub.ID, false)
 	if err != nil {
@@ -987,9 +989,12 @@ func (o *run) resizeSubtask(ctx context.Context, sub subtaskRef, why string, axi
 
 // resizeAxis pairs the transform one trigger applies with the words the card
 // log uses for it: the noun phrase that names the axis, and what a human can
-// still do about THAT axis once it is exhausted. They are chosen together, in
-// one literal per trigger, so the line cannot name an axis the trigger did not
-// move or offer a lever that belongs to the other one.
+// still do about THAT axis once it is exhausted. Nothing here type-checks the
+// pairing - what the struct buys is co-location: all three are chosen together
+// in one literal per trigger, so a line naming the axis its trigger did not
+// move is one visible edit rather than two functions apart. Each trigger's
+// pairing is pinned by TestCeilingLineNamesTheExhaustedAxis, and a fourth
+// trigger needs its own row there.
 type resizeAxis struct {
 	name   string
 	advice string
