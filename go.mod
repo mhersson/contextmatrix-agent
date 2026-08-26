@@ -3,7 +3,7 @@ module github.com/mhersson/contextmatrix-agent
 go 1.26.7
 
 require (
-	github.com/a2aproject/a2a-go/v2 v2.4.0
+	github.com/a2aproject/a2a-go/v2 v2.5.0
 	github.com/docker/docker v28.5.2+incompatible
 	github.com/knadh/koanf/parsers/yaml v1.1.1
 	github.com/knadh/koanf/providers/env v1.1.0
