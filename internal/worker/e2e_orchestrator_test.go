@@ -17,6 +17,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/orchestrator"
 	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/mhersson/contextmatrix-harness/llm"
+	protocol "github.com/mhersson/contextmatrix-protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -587,6 +588,40 @@ func gitLog(t *testing.T, remote, branch string) []string {
 	return subjects
 }
 
+// e2eCapableDefault is baseSpec's DefaultModel: the floor below the ladder,
+// which these runs must never need.
+const e2eCapableDefault = "default/model"
+
+// e2eSelection is the model-selection context these end-to-end runs are driven
+// with: one coder-only model and three reviewer-only models, each measured
+// clear of the complex bar for its own role and at zero for the other.
+//
+// A run that codes and reviews needs at least two employable models. The coder
+// slug is excluded from its own review, so a single-model catalog leaves the
+// panel with nothing to seat: the coder cannot review its own work, and there
+// is no second candidate. Splitting the roles here is what lets the real
+// selector run in these tests instead of the exclusion collapsing the panel.
+//
+// Creator is left empty on purpose - that exempts the models from
+// vendor-diversity treatment, so seat order follows the priors alone and the
+// panel is deterministic. The SSE stub matches on prompt content, never on the
+// model, so which slug reaches it changes nothing about the scripted replies.
+func e2eSelection() *protocol.SelectionContext {
+	const (
+		window = 200000
+		price  = 1e-6
+	)
+
+	return &protocol.SelectionContext{
+		Candidates: []protocol.CandidateModel{
+			{Slug: "e2e/coder", ContextWindow: window, PromptPricePerTok: price, CompletionPricePerTok: price, CoderPrior: 0.90},
+			{Slug: "e2e/reviewer-a", ContextWindow: window, PromptPricePerTok: price, CompletionPricePerTok: price, ReviewerPrior: 0.88},
+			{Slug: "e2e/reviewer-b", ContextWindow: window, PromptPricePerTok: price, CompletionPricePerTok: price, ReviewerPrior: 0.86},
+			{Slug: "e2e/reviewer-c", ContextWindow: window, PromptPricePerTok: price, CompletionPricePerTok: price, ReviewerPrior: 0.84},
+		},
+	}
+}
+
 // runOrchestratorE2E wires the REAL worker.Run for an autonomous card against a
 // real clone of remote, a content-aware SSE backend, and the in-process ops
 // recorder. It returns the result and the recorder for assertions.
@@ -601,6 +636,7 @@ func runOrchestratorE2E(t *testing.T, remote string, backend *scriptedBackend, o
 	spec.Interactive = false // autonomous -> the FSM owns the run
 	spec.MaxCardCost = 0     // no budget ceiling: this run must complete, not park
 	spec.MaxTurns = 6
+	spec.Selection = e2eSelection()
 
 	emit := events.NewEmitter(io.Discard, io.Discard)
 
@@ -721,6 +757,36 @@ func TestOrchestratorEndToEndHappyPath(t *testing.T) {
 	expected := backend.planCost + 2*backend.coderCost + backend.documentCost +
 		3*backend.specialistCost + backend.synthesisCost
 	assert.InDelta(t, expected, reported, 1e-9, "the total reported cost matches the scripted script")
+
+	// --- the real selector ran, and the panel is not the coder ---------------
+	// A model must not review its own code, so the coder slug is excluded from
+	// the panel. Without this the run still reaches "completed" with the panel
+	// collapsed onto the capable default three times over, and every assertion
+	// above holds - so the seats are checked directly.
+	logs := strings.Join(cardLogMessages(ops), "\n")
+	for _, m := range []string{"e2e/coder", "e2e/reviewer-a", "e2e/reviewer-b", "e2e/reviewer-c"} {
+		assert.Contains(t, logs, m, "every seat is a distinct measured model")
+	}
+
+	assert.NotContains(t, logs, e2eCapableDefault, "no phase fell back to the capable default")
+}
+
+// cardLogMessages is every message the run wrote to the card activity log.
+func cardLogMessages(ops *stubOps) []string {
+	ops.mu.Lock()
+	defer ops.mu.Unlock()
+
+	var msgs []string
+
+	for _, c := range ops.log {
+		if c.op == "AddLog" && len(c.args) == 2 {
+			if m, ok := c.args[1].(string); ok {
+				msgs = append(msgs, m)
+			}
+		}
+	}
+
+	return msgs
 }
 
 // --- Test: gate-positive + one review fix loop -----------------------------
