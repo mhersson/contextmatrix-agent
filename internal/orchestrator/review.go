@@ -709,7 +709,7 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 			DefaultModel:       cfg.DefaultModel,
 			ToolOutputMaxBytes: cfg.ToolOutputMax,
 			RedactToolOutput:   d.Redact,
-			ExtraReadOnlyTools: skillToolSlice(d.SkillTool),
+			ExtraReadOnlyTools: reviewSubagentTools(cfg.Workspace, d.ReadRoots, d.SkillTool),
 			Provider:           parentCfg.Provider,
 			Reasoning:          parentCfg.Reasoning,
 		})
@@ -1441,8 +1441,29 @@ func tierFromString(tier string) registry.Tier {
 	}
 }
 
+// reviewSubagentTools is what the specialist panel gets on top of the
+// workspace-confined read-only set harness.SpawnSubagents registers for it: the
+// optional Skill tool, plus read, grep and glob widened to the operator's
+// declared read-only roots. SpawnSubagents builds its child registry as
+// tools.NewRegistry(append(tools.ReadOnlyTools(root), extras...)...), and
+// NewRegistry keeps the LAST registration for a duplicate name, so the widened
+// three replace the confined ones without a harness change. With no roots
+// declared the panel gets exactly what it got before.
+func reviewSubagentTools(workspace string, roots []string, skill tools.Tool) []tools.Tool {
+	out := skillToolSlice(skill)
+	if len(roots) == 0 {
+		return out
+	}
+
+	return append(out,
+		tools.NewReadTool(workspace).WithReadRoots(roots),
+		tools.NewGrepTool(workspace).WithReadRoots(roots),
+		tools.NewGlobTool(workspace).WithReadRoots(roots),
+	)
+}
+
 // skillToolSlice wraps an optional Skill tool as a SubagentOpts.ExtraReadOnlyTools
-// slice. Nil tool → nil slice (the review panel then gets the default read-only set).
+// slice. Nil tool → nil slice.
 func skillToolSlice(t tools.Tool) []tools.Tool {
 	if t == nil {
 		return nil

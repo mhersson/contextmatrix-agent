@@ -142,9 +142,21 @@ secrets_dir: /var/run/cm-agent/secrets
 
 # Additional environment variables injected verbatim into every worker
 # container. Useful for operator-specific passthrough.
+#
+# CMX_READ_ONLY_ROOTS belongs here when the image's own declaration is wrong for
+# your deployment. It is a colon-separated list of absolute trees the worker's
+# read, grep and glob tools may resolve in addition to the workspace, so the
+# shell-less planning and diagnosis phases can read dependency source instead of
+# guessing at its API. Every worker image already declares where its own
+# toolchain caches source; a value set here replaces that declaration. Writes
+# are never widened - edit, write and bash stay inside the workspace - and a
+# root that is relative, unresolvable, the filesystem root, or a parent of the
+# workspace is dropped, so a mistake here narrows access, never widens it.
+#
 # worker_extra_env:
 #   HTTP_PROXY: http://proxy.example.com:3128
 #   NO_PROXY: localhost,127.0.0.1
+#   CMX_READ_ONLY_ROOTS: /home/user/go/pkg/mod:/opt/python
 
 # Default model slug used when a trigger does not specify a model or
 # the requested model is unresolvable. Also the selector's second-choice

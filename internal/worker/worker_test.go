@@ -1465,7 +1465,7 @@ func TestPlanToolsRegistryCarriesFindingsTool(t *testing.T) {
 func TestWriteToolsForThreadsExtraEnv(t *testing.T) {
 	t.Parallel()
 
-	wt := writeToolsFor(t.TempDir(), 60, []string{"TEST_EXTRA_VAR=hello-from-extra"}, nil)
+	wt := writeToolsFor(t.TempDir(), 60, []string{"TEST_EXTRA_VAR=hello-from-extra"}, nil, nil)
 
 	var bash tools.Tool
 
@@ -1705,7 +1705,7 @@ func TestWriteToolsRegisterVerifyToolWhenResolved(t *testing.T) {
 	t.Parallel()
 
 	var names []string
-	for _, tl := range writeToolsFor(t.TempDir(), 60, nil, stubVerifyTool{}) {
+	for _, tl := range writeToolsFor(t.TempDir(), 60, nil, nil, stubVerifyTool{}) {
 		names = append(names, tl.Name())
 	}
 
@@ -1716,9 +1716,214 @@ func TestWriteToolsOmitVerifyToolWhenUnresolved(t *testing.T) {
 	t.Parallel()
 
 	var names []string
-	for _, tl := range writeToolsFor(t.TempDir(), 60, nil, nil) {
+	for _, tl := range writeToolsFor(t.TempDir(), 60, nil, nil, nil) {
 		names = append(names, tl.Name())
 	}
 
 	assert.NotContains(t, names, "verify", "a run with no resolvable verify command must offer no verify tool")
+}
+
+// --- image-declared read-only roots ---------------------------------------
+
+// readRootsFixture mirrors the container layout: the clone lives in the
+// workspace, the toolchain's dependency source lives in a sibling tree the
+// workspace does not contain.
+func readRootsFixture(t *testing.T) (ws, dep, depFile string) {
+	t.Helper()
+
+	base := t.TempDir()
+	ws = filepath.Join(base, "workspace")
+	dep = filepath.Join(base, "dep")
+
+	require.NoError(t, os.MkdirAll(ws, 0o755))
+	require.NoError(t, os.MkdirAll(dep, 0o755))
+
+	depFile = filepath.Join(dep, "api.go")
+	require.NoError(t, os.WriteFile(depFile, []byte("package dep // WIDGET\n"), 0o600))
+
+	return ws, dep, depFile
+}
+
+func requireRipgrep(t *testing.T) {
+	t.Helper()
+
+	if _, err := exec.LookPath("rg"); err != nil {
+		t.Skip("ripgrep (rg) not installed")
+	}
+}
+
+// TestReadRootsReachReadGrepAndGlob is the friction this wiring exists to
+// remove: a phase with no shell must be able to read the dependency source it
+// is planning against.
+func TestReadRootsReachReadGrepAndGlob(t *testing.T) {
+	t.Parallel()
+	requireRipgrep(t)
+
+	ws, dep, depFile := readRootsFixture(t)
+	reg := tools.NewRegistry(readOnlyToolsWithRoots(ws, []string{dep})...)
+
+	read, ok := reg.Get("read")
+	require.True(t, ok)
+
+	res, err := read.Execute(context.Background(), map[string]any{"path": depFile})
+	require.NoError(t, err, "read must resolve a declared read-only root")
+	assert.Contains(t, res.Text, "WIDGET")
+
+	grep, ok := reg.Get("grep")
+	require.True(t, ok)
+
+	res, err = grep.Execute(context.Background(), map[string]any{"pattern": "WIDGET", "path": dep})
+	require.NoError(t, err, "grep must resolve a declared read-only root")
+	assert.Contains(t, res.Text, "WIDGET")
+
+	glob, ok := reg.Get("glob")
+	require.True(t, ok)
+
+	res, err = glob.Execute(context.Background(), map[string]any{"pattern": "*.go", "path": dep})
+	require.NoError(t, err, "glob must resolve a declared read-only root")
+	assert.Contains(t, res.Text, "api.go")
+}
+
+// TestAbsentDeclarationLeavesBehaviourUnchanged: an image that declares no
+// roots behaves exactly as the harness default, refusal for refusal.
+func TestAbsentDeclarationLeavesBehaviourUnchanged(t *testing.T) {
+	t.Parallel()
+	requireRipgrep(t)
+
+	ws, dep, depFile := readRootsFixture(t)
+
+	widened := tools.NewRegistry(readOnlyToolsWithRoots(ws, nil)...)
+	baseline := tools.NewRegistry(tools.ReadOnlyTools(ws)...)
+
+	assert.ElementsMatch(t, toolNames(t, baseline), toolNames(t, widened),
+		"an absent declaration must not change the read-only tool set")
+
+	calls := map[string]map[string]any{
+		"read": {"path": depFile},
+		"grep": {"pattern": "WIDGET", "path": dep},
+		"glob": {"pattern": "*.go", "path": dep},
+	}
+
+	for name, args := range calls {
+		w, ok := widened.Get(name)
+		require.True(t, ok, name)
+
+		b, ok := baseline.Get(name)
+		require.True(t, ok, name)
+
+		_, wErr := w.Execute(context.Background(), args)
+		_, bErr := b.Execute(context.Background(), args)
+
+		require.Error(t, wErr, "%s must refuse the sibling tree when no roots are declared", name)
+		require.Error(t, bErr, name)
+		assert.Equal(t, bErr.Error(), wErr.Error(), "%s must refuse identically to the harness default", name)
+	}
+}
+
+// TestWriteToolsAreNotWidened pins the security boundary: read where the
+// operator permits, write only in the workspace. The bash tool has no path
+// jail of its own - it is a shell, and the container is the boundary - so what
+// is pinned for it is that its root is still the workspace.
+func TestWriteToolsAreNotWidened(t *testing.T) {
+	t.Parallel()
+
+	ws, dep, depFile := readRootsFixture(t)
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "in-workspace.txt"), []byte("x"), 0o600))
+
+	reg := tools.NewRegistry(writeToolsFor(ws, 60, nil, []string{dep}, nil)...)
+
+	read, ok := reg.Get("read")
+	require.True(t, ok)
+
+	_, err := read.Execute(context.Background(), map[string]any{"path": depFile})
+	require.NoError(t, err, "the write phases read dependency source through the same roots")
+
+	edit, ok := reg.Get("edit")
+	require.True(t, ok)
+
+	_, err = edit.Execute(context.Background(), map[string]any{
+		"path": depFile, "old_string": "package dep", "new_string": "package hacked",
+	})
+	require.Error(t, err, "edit must stay confined to the workspace")
+
+	write, ok := reg.Get("write")
+	require.True(t, ok)
+
+	newFile := filepath.Join(dep, "planted.go")
+
+	_, err = write.Execute(context.Background(), map[string]any{"path": newFile, "content": "planted"})
+	require.Error(t, err, "write must stay confined to the workspace")
+
+	body, err := os.ReadFile(depFile)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "package dep", "the dependency tree must be untouched")
+	assert.NoFileExists(t, newFile)
+
+	bash, ok := reg.Get("bash")
+	require.True(t, ok)
+
+	out, err := bash.Execute(context.Background(), map[string]any{"command": "ls"})
+	require.NoError(t, err)
+	assert.Contains(t, out.Text, "in-workspace.txt", "bash must still run in the workspace root")
+	assert.NotContains(t, out.Text, "api.go")
+}
+
+// TestReadRootsComeOnlyFromResolvedConfig: the roots the built tools carry are
+// the resolved spec's and nothing else. Provenance is enforced by construction
+// rather than asserted here - the value is read exactly once, in specFromEnv,
+// so no card body, plan or model output has a path into it.
+func TestReadRootsComeOnlyFromResolvedConfig(t *testing.T) {
+	remote := setupBareRemote(t)
+	wsParent := t.TempDir()
+	ops := newFakeOps()
+
+	declared := t.TempDir()
+	depFile := filepath.Join(declared, "api.go")
+	require.NoError(t, os.WriteFile(depFile, []byte("package dep // WIDGET\n"), 0o600))
+
+	undeclared := t.TempDir()
+	otherFile := filepath.Join(undeclared, "secret.go")
+	require.NoError(t, os.WriteFile(otherFile, []byte("package other\n"), 0o600))
+
+	var captured orchestrator.Deps
+
+	swapRunOrchestrator(t, func(_ context.Context, d orchestrator.Deps) error {
+		captured = d
+
+		return nil
+	})
+
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	spec := baseSpec(t, remote, wsParent)
+	spec.ReadOnlyRoots = []string{declared}
+
+	res, err := Run(context.Background(), spec, ops, &scriptedLLM{}, emit, openStdin(t))
+	require.NoError(t, err)
+	assert.Equal(t, "completed", res.Reason)
+
+	assert.Equal(t, spec.ReadOnlyRoots, captured.ReadRoots,
+		"the orchestrator's roots must be the resolved spec's list verbatim")
+
+	require.NotNil(t, captured.PlanTools)
+
+	registries := map[string]*tools.Registry{
+		"diagnosis": captured.ReadTools,
+		"plan":      captured.PlanTools(),
+		"write":     captured.WriteTools,
+		"candidate": captured.WriteToolsForDir(filepath.Join(wsParent, "cmx-001"), nil),
+	}
+
+	for name, reg := range registries {
+		require.NotNil(t, reg, name)
+
+		read, ok := reg.Get("read")
+		require.True(t, ok, name)
+
+		_, err := read.Execute(context.Background(), map[string]any{"path": depFile})
+		require.NoError(t, err, "%s: the declared root must resolve", name)
+
+		_, err = read.Execute(context.Background(), map[string]any{"path": otherFile})
+		require.Error(t, err, "%s: a tree that is not on the resolved list must stay refused", name)
+	}
 }

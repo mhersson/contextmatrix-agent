@@ -135,6 +135,13 @@ type RunSpec struct {
 	// shipping under a weaker gate.
 	VerifyConfigError string
 
+	// ReadOnlyRoots are absolute trees the read tools may resolve in addition to
+	// the workspace (CMX_READ_ONLY_ROOTS, colon-separated). Declared by the
+	// worker image for its own toolchain source caches; an operator override
+	// rides the launcher's extra-env channel. Empty leaves every tool confined
+	// to the workspace.
+	ReadOnlyRoots []string
+
 	TaskSkillsDir string   // in-container skills mount path (CMX_TASK_SKILLS_DIR); empty = no skills
 	TaskSkills    []string // per-card subset (CM_TASK_SKILLS)
 	TaskSkillsSet bool     // whether the subset was set (CM_TASK_SKILLS_SET)
@@ -365,7 +372,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 	// The main workspace registry is built before the run resolves its verify
 	// command; the execute phase rebinds the solver's registry through
 	// WriteToolsForDir once it has one.
-	wt := writeToolsFor(a.ws, a.spec.BashTimeoutMax, verifyEnv, nil)
+	wt := writeToolsFor(a.ws, a.spec.BashTimeoutMax, verifyEnv, a.spec.ReadOnlyRoots, nil)
 
 	if skillTool != nil {
 		wt = append(wt, skillTool)
@@ -414,17 +421,19 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 			// Candidates get the same skill tool as the main solver - the
 			// skills mount is a fixed path, not workspace-relative, so the
 			// shared instance is safe across worktrees.
-			wts := writeToolsFor(dir, a.spec.BashTimeoutMax, verifyEnv, verify)
+			wts := writeToolsFor(dir, a.spec.BashTimeoutMax, verifyEnv, a.spec.ReadOnlyRoots, verify)
 			if skillTool != nil {
 				wts = append(wts, skillTool)
 			}
 
 			return tools.NewRegistry(wts...)
 		},
-		ReadTools: tools.NewReadOnlyRegistry(a.ws),
+		ReadTools: tools.NewRegistry(readOnlyToolsWithRoots(a.ws, a.spec.ReadOnlyRoots)...),
 		PlanTools: func() *tools.Registry {
-			return tools.NewRegistry(append(tools.ReadOnlyTools(a.ws), orchestrator.NewFindingsTool())...)
+			return tools.NewRegistry(append(
+				readOnlyToolsWithRoots(a.ws, a.spec.ReadOnlyRoots), orchestrator.NewFindingsTool())...)
 		},
+		ReadRoots: a.spec.ReadOnlyRoots,
 		SkillTool: skillTool,
 		Redact:    red.Apply,
 		Human:     human,
@@ -813,14 +822,16 @@ func ops2orchestrator(ops CardOps) orchestrator.Ops {
 // scrubbed environment, so the model's shell resolves the same set as the
 // verify gate and can reproduce it. verify is the orchestrator's verify tool
 // for this dir, nil when the run resolved no verify command - registering it
-// here is what keeps both registries from drifting apart on it.
-func writeToolsFor(dir string, bashTimeoutMax int, extraEnv []string, verify tools.Tool) []tools.Tool {
+// here is what keeps both registries from drifting apart on it. readRoots widens
+// the read path tools to the operator's declared trees; edit, write and bash keep
+// the single dir root, so the write boundary stays the workspace.
+func writeToolsFor(dir string, bashTimeoutMax int, extraEnv, readRoots []string, verify tools.Tool) []tools.Tool {
 	wt := []tools.Tool{
-		tools.NewReadTool(dir),
+		tools.NewReadTool(dir).WithReadRoots(readRoots),
 		tools.NewEditTool(dir),
 		tools.NewWriteTool(dir),
-		tools.NewGrepTool(dir),
-		tools.NewGlobTool(dir),
+		tools.NewGrepTool(dir).WithReadRoots(readRoots),
+		tools.NewGlobTool(dir).WithReadRoots(readRoots),
 		tools.NewGitTool(dir),
 		tools.NewBashTool(dir).WithMaxTimeout(bashTimeoutMax).WithExtraEnv(extraEnv),
 		orchestrator.NewFinishTool(),
@@ -831,6 +842,23 @@ func writeToolsFor(dir string, bashTimeoutMax int, extraEnv []string, verify too
 	}
 
 	return wt
+}
+
+// readOnlyToolsWithRoots is tools.ReadOnlyTools widened by the operator's
+// declared read-only roots. The harness's ReadOnlyTools takes only the
+// workspace, so the three path tools are constructed individually here. The git
+// tool is unchanged: it operates on the workspace repository, not on arbitrary
+// paths. Roots come from the resolved configuration and are sanitized inside
+// the harness, which drops anything that would widen access rather than add a
+// sibling tree, so nothing is validated here. An empty list yields tools
+// identical to the harness defaults.
+func readOnlyToolsWithRoots(ws string, roots []string) []tools.Tool {
+	return []tools.Tool{
+		tools.NewReadTool(ws).WithReadRoots(roots),
+		tools.NewGrepTool(ws).WithReadRoots(roots),
+		tools.NewGlobTool(ws).WithReadRoots(roots),
+		tools.NewGitTool(ws),
+	}
 }
 
 // buildSkillTool constructs the per-run Skill tool from the mounted skills dir

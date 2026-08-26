@@ -217,6 +217,10 @@ type Deps struct {
 	// the first attempt's list while separate drafts start clean. Nil falls back
 	// to ReadTools.
 	PlanTools func() *tools.Registry
+	// ReadRoots are the operator's declared read-only roots, resolved once at
+	// worker start. Phases hand them to tools that read paths; nothing here
+	// derives them from a card body, a plan, or a model output.
+	ReadRoots []string
 	SkillTool tools.Tool // optional; engaged by coder/review/document subagents (nil when no task-skills)
 	Cfg       Config
 	Redact    func(string) string // nil = identity; scrubs tool output in phase runs (wired by the worker)

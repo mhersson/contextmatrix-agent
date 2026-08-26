@@ -731,3 +731,28 @@ func TestCloseBoundedWaitsForFastClose(t *testing.T) {
 
 	closeBounded(c, time.Second) // returns immediately, no panic, no leak
 }
+
+func TestSpecFromEnvParsesReadOnlyRoots(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  []string
+	}{
+		{"absent", "", nil},
+		{"single root", "/opt/python", []string{"/opt/python"}},
+		{"two roots", "/a:/b", []string{"/a", "/b"}},
+		{"blank and empty entries dropped", ":/a::  :/b:", []string{"/a", "/b"}},
+		{"only separators", "::", nil},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setRequired(t)
+			t.Setenv("CMX_READ_ONLY_ROOTS", tc.value)
+
+			spec, err := specFromEnv()
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, spec.ReadOnlyRoots)
+		})
+	}
+}

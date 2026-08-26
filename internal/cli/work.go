@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -126,6 +127,21 @@ func newWorkCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// splitPathList splits an os.PathListSeparator-separated list of paths,
+// dropping empty and whitespace-only entries. An unset or all-empty value
+// yields nil, which every consumer reads as "nothing declared".
+func splitPathList(v string) []string {
+	var out []string
+
+	for _, p := range filepath.SplitList(v) {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+
+	return out
 }
 
 // specFromEnv builds a RunSpec from the CM_*/CMX_* environment contract.
@@ -331,6 +347,14 @@ func specFromEnv() (worker.RunSpec, error) {
 
 	taskSkillsDir := os.Getenv("CMX_TASK_SKILLS_DIR")
 
+	// The one place read-only roots enter the run. They are resolved
+	// configuration - the worker image's declaration of where its own toolchain
+	// keeps dependency source, with an operator override appended last by the
+	// launcher - so no card body, plan, or model output has a path into the tool
+	// jail. The harness sanitizes the list when it builds the tools, dropping
+	// anything that would widen access rather than add a sibling tree.
+	readOnlyRoots := splitPathList(os.Getenv("CMX_READ_ONLY_ROOTS"))
+
 	var (
 		taskSkills    []string
 		taskSkillsSet bool
@@ -378,6 +402,7 @@ func specFromEnv() (worker.RunSpec, error) {
 		Verify:                    verify,
 		VerifyConfigError:         verifyErr,
 		ReviewAttemptsCap:         reviewAttemptsCap,
+		ReadOnlyRoots:             readOnlyRoots,
 		TaskSkillsDir:             taskSkillsDir,
 		TaskSkills:                taskSkills,
 		TaskSkillsSet:             taskSkillsSet,

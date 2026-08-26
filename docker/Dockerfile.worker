@@ -143,7 +143,9 @@ ENV PATH="/usr/local/cargo/bin:${PATH}"
 # Go tarball check above. --profile minimal keeps the footprint down; clippy and
 # rustfmt are added explicitly. RUSTUP_HOME/CARGO_HOME are made world-writable so
 # the unprivileged runtime user (UID 1000) can populate the cargo registry cache
-# - the official rust image uses the same pattern.
+# - the official rust image uses the same pattern. The registry and git cache
+# directories are created empty: they are declared read-only roots below, and a
+# root that does not exist when the worker builds its tools is dropped.
 RUN set -eux; \
     ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/'); \
     case "$ARCH" in \
@@ -157,6 +159,7 @@ RUN set -eux; \
     /tmp/rustup-init -y --no-modify-path --profile minimal \
       --default-toolchain "${RUST_VERSION}" --component clippy --component rustfmt; \
     rm -f /tmp/rustup-init; \
+    mkdir -p "${CARGO_HOME}/registry" "${CARGO_HOME}/git"; \
     chmod -R a+w "${RUSTUP_HOME}" "${CARGO_HOME}"
 
 # ---------------------------------------------------------------------------
@@ -189,6 +192,21 @@ RUN set -eux; \
     uv tool install --python "${PYTHON_VERSION}" "ruff==${RUFF_VERSION}"
 
 # ---------------------------------------------------------------------------
+# Read-only roots. Each final stage declares in CMX_READ_ONLY_ROOTS the absolute
+# trees where ITS OWN toolchain keeps dependency source. The agent reads the list
+# once at worker start and widens the read, grep and glob tools of its
+# shell-less phases to those trees, so planning and diagnosis can read the APIs
+# they are planning against; edit, write and bash stay confined to the
+# workspace. These are image facts, which is why they live here rather than in
+# the agent's source, and an operator replaces the list per deployment through
+# worker_extra_env. A stage that declares nothing behaves exactly as before.
+#
+# A declared directory must exist when the worker starts or it is dropped as
+# unresolvable, so caches the run populates later are created empty first.
+# Node needs no entry: node_modules lives inside the workspace.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
 # go-node - the Go + Node worker variant (historical image content).
 # ---------------------------------------------------------------------------
 FROM go-node-toolchain AS go-node
@@ -196,7 +214,9 @@ COPY --from=build /out/contextmatrix-agent /usr/local/bin/contextmatrix-agent
 RUN useradd -m -u 1000 -s /bin/bash user
 USER 1000:1000
 WORKDIR /home/user
-RUN mkdir -p /home/user/workspace
+# GOPATH is unset, so the module cache resolves to $HOME/go/pkg/mod.
+ENV CMX_READ_ONLY_ROOTS=/home/user/go/pkg/mod
+RUN mkdir -p /home/user/workspace /home/user/go/pkg/mod
 HEALTHCHECK NONE
 ENTRYPOINT ["contextmatrix-agent", "work"]
 
@@ -208,6 +228,8 @@ COPY --from=build /out/contextmatrix-agent /usr/local/bin/contextmatrix-agent
 RUN useradd -m -u 1000 -s /bin/bash user
 USER 1000:1000
 WORKDIR /home/user
+# Crate sources under $CARGO_HOME/registry, git dependencies under $CARGO_HOME/git.
+ENV CMX_READ_ONLY_ROOTS=/usr/local/cargo/registry:/usr/local/cargo/git
 RUN mkdir -p /home/user/workspace
 HEALTHCHECK NONE
 ENTRYPOINT ["contextmatrix-agent", "work"]
@@ -220,6 +242,9 @@ COPY --from=build /out/contextmatrix-agent /usr/local/bin/contextmatrix-agent
 RUN useradd -m -u 1000 -s /bin/bash user
 USER 1000:1000
 WORKDIR /home/user
+# The managed CPython install prefix, holding the standard library source. A
+# project's own dependencies live in its in-workspace virtualenv.
+ENV CMX_READ_ONLY_ROOTS=/opt/python
 RUN mkdir -p /home/user/workspace
 HEALTHCHECK NONE
 ENTRYPOINT ["contextmatrix-agent", "work"]
@@ -252,6 +277,9 @@ COPY --from=build /out/contextmatrix-agent /usr/local/bin/contextmatrix-agent
 RUN useradd -m -u 1000 -s /bin/bash user
 USER 1000:1000
 WORKDIR /home/user
-RUN mkdir -p /home/user/workspace
+# Every toolchain's own roots, joined: Go, Rust, Python. The cargo caches ride
+# in with the COPY above; the Go module cache is created here.
+ENV CMX_READ_ONLY_ROOTS=/home/user/go/pkg/mod:/usr/local/cargo/registry:/usr/local/cargo/git:/opt/python
+RUN mkdir -p /home/user/workspace /home/user/go/pkg/mod
 HEALTHCHECK NONE
 ENTRYPOINT ["contextmatrix-agent", "work"]
