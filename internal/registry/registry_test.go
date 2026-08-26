@@ -1153,3 +1153,131 @@ func TestMetTierEqualsTheReachedRung(t *testing.T) {
 		}
 	}
 }
+
+func TestFavoritesAreConsultedAtTheMetRung(t *testing.T) {
+	tests := []struct {
+		name       string
+		favorites  map[favKey][]string
+		in         SelectInput
+		wantID     string
+		wantMet    Tier
+		wantSource PickSource
+	}{
+		{
+			// The requested tier is dry, so the pick is made on the moderate
+			// rung - and a moderate selection must honour the operator's
+			// moderate favorite even though the request itself was critical.
+			name:      "clamped pick honours the met rung's favorite",
+			favorites: map[favKey][]string{{Tier: TierModerate}: {"mid/two"}},
+			in: SelectInput{Role: RoleCoder, Tier: TierCritical, Exclude: map[string]bool{
+				"top/one": true, "high/one": true, "high/two": true,
+			}},
+			wantID: "mid/two", wantMet: TierModerate, wantSource: SourceFavorite,
+		},
+		{
+			// mid/two (0.77) is below the complex bar and complex has a pool, so
+			// the moderate favorite must not hijack it.
+			name:      "lower-tier favorite never hijacks a live higher rung",
+			favorites: map[favKey][]string{{Tier: TierModerate}: {"mid/two"}},
+			in:        SelectInput{Role: RoleCoder, Tier: TierComplex},
+			wantID:    "high/one", wantMet: TierComplex, wantSource: SourceAuto,
+		},
+		{
+			// Even a favorite that WOULD clear the higher bar is not inherited
+			// upward: top/one clears complex, but the operator configured it for
+			// moderate.
+			name:      "favorites are not inherited upward even when eligible",
+			favorites: map[favKey][]string{{Tier: TierModerate}: {"top/one"}},
+			in:        SelectInput{Role: RoleCoder, Tier: TierComplex},
+			wantID:    "high/one", wantMet: TierComplex, wantSource: SourceAuto,
+		},
+		{
+			name:      "favorites are not inherited downward",
+			favorites: map[favKey][]string{{Tier: TierComplex}: {"high/one"}},
+			in:        SelectInput{Role: RoleCoder, Tier: TierSimple},
+			wantID:    "low/one", wantMet: TierSimple, wantSource: SourceAuto,
+		},
+		{
+			name: "role-specific favorite beats the any-role favorite at the same tier",
+			favorites: map[favKey][]string{
+				{Tier: TierComplex, Role: RoleCoder}: {"high/two"},
+				{Tier: TierComplex}:                  {"high/one"},
+			},
+			in:     SelectInput{Role: RoleCoder, Tier: TierComplex},
+			wantID: "high/two", wantMet: TierComplex, wantSource: SourceFavorite,
+		},
+		{
+			// A favorite that does not clear its own tier's bar is not eligible,
+			// so the rung falls through to the cost-optimal pick.
+			name:      "favorite below its own tier bar is ignored",
+			favorites: map[favKey][]string{{Tier: TierComplex}: {"mid/one"}},
+			in:        SelectInput{Role: RoleCoder, Tier: TierComplex},
+			wantID:    "high/one", wantMet: TierComplex, wantSource: SourceAuto,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ladderRegistry(tt.favorites).SelectByComplexity(tt.in)
+
+			require.True(t, got.OK)
+			assert.Equal(t, tt.wantID, got.Model)
+			assert.Equal(t, tt.wantMet, got.MetTier)
+			assert.Equal(t, tt.wantSource, got.Source)
+		})
+	}
+}
+
+// TestMonotonicityHoldsOnTheAutoPathAndFavoritesAreTheException sweeps favorite
+// configurations rather than testing only the input class where monotonicity is
+// trivially true. The auto path must be monotone under every configuration; a
+// violation is permitted ONLY where a favorite fired, and the test asserts that
+// pairing so the exception cannot silently widen.
+func TestMonotonicityHoldsOnTheAutoPathAndFavoritesAreTheException(t *testing.T) {
+	favoriteSets := []map[favKey][]string{
+		nil,
+		{{Tier: TierModerate}: {"mid/two"}},
+		{{Tier: TierComplex}: {"high/two"}},
+		{{Tier: TierSimple}: {"low/one"}, {Tier: TierCritical}: {"top/one"}},
+		// The counterexample the exception exists for: an expensive, strong
+		// favorite at moderate that the complex band would exclude on price.
+		{{Tier: TierModerate}: {"top/one"}},
+	}
+
+	ladder := []Tier{TierSimple, TierModerate, TierComplex, TierCritical}
+	exclusions := []map[string]bool{nil, {"top/one": true}, {"top/one": true, "high/one": true}}
+
+	sawException := false
+
+	for fi, favs := range favoriteSets {
+		t.Run(fmt.Sprintf("favorites_%d", fi), func(t *testing.T) {
+			r := ladderRegistry(favs)
+
+			for ei, excl := range exclusions {
+				for lo := range ladder {
+					for hi := lo + 1; hi < len(ladder); hi++ {
+						low := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: ladder[lo], Exclude: excl})
+						high := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: ladder[hi], Exclude: excl})
+
+						if !low.OK || !high.OK {
+							continue
+						}
+
+						if high.Prior >= low.Prior {
+							continue
+						}
+
+						sawException = true
+
+						assert.Equal(t, SourceFavorite, low.Source,
+							"excl=%d %s(%.2f) > %s(%.2f) is only permitted when a favorite fired at the lower tier",
+							ei, low.Model, low.Prior, high.Model, high.Prior)
+					}
+				}
+			}
+		})
+	}
+
+	assert.True(t, sawException,
+		"fixture drift: no favorite configuration exercised the documented exception")
+}

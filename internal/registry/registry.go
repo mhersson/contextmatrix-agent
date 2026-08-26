@@ -532,8 +532,20 @@ func (r *Registry) candidates(in SelectInput) []candidate {
 }
 
 // favoriteAmong returns the first operator favorite for (tier, role) - then
-// (tier, any role) - that is present among cands. An empty string means no
-// eligible favorite.
+// (tier, any role) - present in cands. Favorites are looked up at the tier
+// the pick is being MADE on, never at a different one: a moderate favorite
+// is an operator statement about moderate work, so it must not be promoted
+// onto a higher rung whose bar it does not clear, and must not be skipped
+// when a higher request clamps down onto the moderate rung.
+//
+// cands is the caller's already-computed pool, so eligibility (bar,
+// blacklist, exclusions, window) is enforced by construction and the filter
+// work is not repeated. pickAt passes the vendor-blind pool: explicit
+// operator intent beats the emergent diversity heuristic.
+//
+// A favorite bypasses the price band, so it is the declared exception to
+// the tier-monotonicity invariant - the same exemption a pin gets, for the
+// same reason. See the package contract.
 func (r *Registry) favoriteAmong(cands []candidate, tier Tier, role Role) string {
 	if len(r.favorites) == 0 || len(cands) == 0 {
 		return ""
