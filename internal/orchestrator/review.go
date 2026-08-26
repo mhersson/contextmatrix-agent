@@ -1059,6 +1059,28 @@ func (o *run) runFixModel(ctx context.Context, prompt string, req fixRequest) (s
 
 		o.spendAndReport(ctx, o.ledger, cfg.CardID, "review: report fix usage failed", res, model, "main", dur)
 
+		// One row per ATTEMPT, on the same footing as the coder loop's. Three
+		// call paths reach here: a review round and a gate round fix findings
+		// across the card and leave the unit unset, while the pre-commit verify
+		// fix is scoped to one subtask and names it. The estimate is chosen by
+		// that SCOPE rather than by an empty request field, so a subtask whose
+		// planner word could not be recovered reports no estimate instead of
+		// borrowing the card's - the pair only means anything when both halves
+		// describe the same unit.
+		plannerBar := o.cardPlannerBar
+		if req.Subtask != "" {
+			plannerBar = req.PlannerBar
+		}
+
+		maxTurns, wrapUp := coderTurnCfg(cfg.MaxTurns, fs.Budget)
+
+		o.emitSizingObs(sizingObs{
+			Phase: o.curPhase, Solver: "fix", Subtask: req.Subtask, Reselect: attempt,
+			Model: model, Bar: string(fs.Bar), BudgetStep: fs.Budget,
+			PlannerBar: plannerBar, MaxTurns: maxTurns, WrapUpTurns: wrapUp,
+			Turns: res.Turns, Outcome: sizingOutcome(err), DurationMS: dur.Milliseconds(),
+		})
+
 		var ie *IncapableError
 		if errors.As(err, &ie) {
 			if rerr := o.recoverIncapable(ctx, ie); rerr != nil {
@@ -1294,7 +1316,14 @@ type fixRequest struct {
 	Round    int
 	// FixTier is the synthesizer's fix_tier for this round. Empty falls back to
 	// the card bar, so the fixer is never under-sized.
-	FixTier       string
+	FixTier string
+	// Subtask and PlannerBar name the unit a SUBTASK-SCOPED round runs on: the
+	// pre-commit verify fix is sized on one subtask's bar, not the card's, so
+	// its measurement row has to report that subtask's estimate rather than the
+	// card's. Both are empty on a card-scoped round (a review round or a gate
+	// round), which is what makes the round's scope readable off the row.
+	Subtask       string
+	PlannerBar    string
 	Authoritative bool
 	// NoEscalate marks a call site that must neither climb the counters nor be
 	// refused by the exhausted-fixers park: the post-approval cleanup pass runs

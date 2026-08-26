@@ -948,10 +948,10 @@ func (f *fakeInbox) Wait(ctx context.Context) (harness.UserMessage, error) {
 
 var _ harness.Inbox = (*fakeInbox)(nil)
 
-// onlyEvent decodes the single transcript event of the given kind, failing the
-// test when there is not exactly one. Mirrors batchNudgeCounts' line-oriented
-// decode; numbers arrive as float64, so assert them with EqualValues.
-func onlyEvent(t *testing.T, transcript *bytes.Buffer, kind string) map[string]any {
+// eventsOfKind decodes every transcript event of the given kind, in emission
+// order. Mirrors batchNudgeCounts' line-oriented decode; numbers arrive as
+// float64, so assert them with EqualValues.
+func eventsOfKind(t *testing.T, transcript *bytes.Buffer, kind string) []map[string]any {
 	t.Helper()
 
 	var found []map[string]any
@@ -973,6 +973,15 @@ func onlyEvent(t *testing.T, transcript *bytes.Buffer, kind string) map[string]a
 		}
 	}
 
+	return found
+}
+
+// onlyEvent decodes the single transcript event of the given kind, failing the
+// test when there is not exactly one.
+func onlyEvent(t *testing.T, transcript *bytes.Buffer, kind string) map[string]any {
+	t.Helper()
+
+	found := eventsOfKind(t, transcript, kind)
 	require.Len(t, found, 1, "want exactly one %s event", kind)
 
 	return found[0]

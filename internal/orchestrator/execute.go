@@ -236,8 +236,11 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 	prompt := fmt.Sprintf(verifyFixPrompt, o.skillEngage(), o.grounding, sc.workspace,
 		fixVerifyLine(plan), o.tc.Title, verifyFailedFindings(plan, vres.Output))
 
-	// Round 0: this is not a review round and has no round number.
-	if _, ferr := o.runFixModel(ctx, prompt, fixRequest{Round: 0, FixTier: string(sub.Sizing.Bar)}); ferr != nil {
+	// Round 0: this is not a review round and has no round number. The subtask
+	// rides along because this round is sized on ITS bar, so its measurement row
+	// must report its estimate rather than the card's.
+	req := fixRequest{Round: 0, FixTier: string(sub.Sizing.Bar), Subtask: sub.ID, PlannerBar: sub.PlannerBar}
+	if _, ferr := o.runFixModel(ctx, prompt, req); ferr != nil {
 		return ferr
 	}
 
@@ -467,6 +470,24 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 
 		// The incapable attempt is charged too - it burned tokens before tripping.
 		o.spendAndReport(ctx, sc.ledger, target, "execute: report usage failed", res, model, "main", dur)
+
+		// One row per ATTEMPT. It sits here rather than after the loop because
+		// the three exits below - an exhausted re-selection cap, a run error,
+		// and success - would each need their own copy, and the incapable
+		// attempts that continue past them would get none at all.
+		maxTurns, wrapUp := coderTurnCfg(cfg.MaxTurns, sub.Sizing.Budget)
+		solver := "solo"
+
+		if !sc.boardOps {
+			solver = "candidate"
+		}
+
+		o.emitSizingObs(sizingObs{
+			Phase: o.curPhase, Solver: solver, Subtask: sub.ID, Reselect: attempt,
+			Model: model, Bar: string(sub.Sizing.Bar), BudgetStep: sub.Sizing.Budget,
+			PlannerBar: sub.PlannerBar, MaxTurns: maxTurns, WrapUpTurns: wrapUp,
+			Turns: res.Turns, Outcome: sizingOutcome(err), DurationMS: dur.Milliseconds(),
+		})
 
 		var ie *IncapableError
 		if errors.As(err, &ie) {
