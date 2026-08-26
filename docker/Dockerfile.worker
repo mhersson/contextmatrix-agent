@@ -277,11 +277,10 @@ ENTRYPOINT ["contextmatrix-agent", "work"]
 # variable would never reach the model's shell. --chmod on the Rust copy
 # re-applies the world-writable bits (COPY --from drops them) in the same layer,
 # so UID 1000 can populate the cargo registry cache without a second ~1 GB chmod
-# layer. That copy also creates /home/user as an implicit parent and applies the
-# same mode to it, which leaves useradd -m nothing to create and so nothing to
-# own; the home is set explicitly below instead, as root, so this variant's
-# runtime user gets the same home ownership and mode as the single-toolchain
-# ones.
+# layer. Whether that --chmod also reaches the copied trees' own top directories,
+# and the /home/user they imply, varies between BuildKit releases, so nothing
+# here leans on it: the home, both toolchain roots and every cache directory are
+# created and handed to UID 1000 explicitly, as root, below.
 # ---------------------------------------------------------------------------
 FROM python-toolchain AS full
 
@@ -297,17 +296,21 @@ COPY --chmod=0777 --from=rust-toolchain /home/user/.rustup /home/user/.rustup
 COPY --chmod=0777 --from=rust-toolchain /home/user/.cargo /home/user/.cargo
 
 COPY --from=build /out/contextmatrix-agent /usr/local/bin/contextmatrix-agent
-# The home is chowned here rather than in the mkdir below, which runs as UID
-# 1000 and cannot. Not recursive: the Rust trees under it stay world-writable so
-# the cargo cache is still populatable at runtime.
+# The runtime home is laid out in one root step: the caches the read-only roots
+# name must exist before the worker starts, and UID 1000 has to write into them
+# and into CARGO_HOME itself, where cargo takes its package-cache lock. The
+# toolchain roots are chowned and chmodded non-recursively, so their contents
+# keep the mode the copies gave them and no second pass over ~1 GB is added.
 RUN useradd -m -u 1000 -s /bin/bash user \
-    && chown 1000:1000 /home/user \
-    && chmod 0755 /home/user
+    && mkdir -p /home/user/workspace /home/user/go/pkg/mod \
+         /home/user/.cargo/registry /home/user/.cargo/git \
+    && chown -R 1000:1000 /home/user/workspace /home/user/go \
+    && chown 1000:1000 /home/user /home/user/.rustup /home/user/.cargo \
+         /home/user/.cargo/registry /home/user/.cargo/git \
+    && chmod 0755 /home/user /home/user/.rustup /home/user/.cargo
 USER 1000:1000
 WORKDIR /home/user
 # Every toolchain's own roots, joined: Go, Rust, Python.
 ENV CMX_READ_ONLY_ROOTS=/home/user/go/pkg/mod:/home/user/.cargo/registry:/home/user/.cargo/git:/opt/python
-RUN mkdir -p /home/user/workspace /home/user/go/pkg/mod \
-      /home/user/.cargo/registry /home/user/.cargo/git
 HEALTHCHECK NONE
 ENTRYPOINT ["contextmatrix-agent", "work"]
