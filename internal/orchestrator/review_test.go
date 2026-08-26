@@ -2672,9 +2672,11 @@ func reviewerPrior(v float64) registry.PriorEntry {
 	return registry.PriorEntry{Reviewer: &v}
 }
 
-// TestReviewPanelParksWhenNoReviewerIsSelectable pins that the review phase
-// hands the card to a human rather than running three lenses on nothing.
-func TestReviewPanelParksWhenNoReviewerIsSelectable(t *testing.T) {
+// TestReviewPanelIsEmptyWhenNoReviewerIsSelectable pins the panel builder's own
+// contract: an unservable reviewer role yields no panel at all. That empty
+// panel is the condition the review phase turns into a park for a human, which
+// TestRunSpecialistsNoReviewerParksInstead pins separately.
+func TestReviewPanelIsEmptyWhenNoReviewerIsSelectable(t *testing.T) {
 	reg := registry.NewRegistryFromParts(
 		llm.Catalog{{ID: "weak/model", ContextLength: 200000, SupportedParameters: []string{"tools"}}},
 		registry.Priors{Models: map[string]registry.PriorEntry{"weak/model": reviewerPrior(0.30)}},
@@ -2858,9 +2860,13 @@ func TestPinnedFixModelReportsNoFabricatedShortfall(t *testing.T) {
 	assert.Equal(t, "pinned/model", model)
 
 	for _, l := range ops.logs {
+		assert.NotContains(t, l, "prior 0.00",
+			"a pin this package synthesizes carries no measured prior, so no line may state one; logs=%v", ops.logs)
+		assert.NotContains(t, l, "does not clear",
+			"nothing measured this model against a bar, so no line may say it missed one; logs=%v", ops.logs)
 		assert.NotContains(t, l, "no model clears",
 			"a pinned model was chosen by hand, so no bar was searched; logs=%v", ops.logs)
 		assert.NotContains(t, l, "bought nothing",
-			"an escalation cannot be measured against a pin's prior; logs=%v", ops.logs)
+			"an escalation cannot be scored against a pin that has no prior; logs=%v", ops.logs)
 	}
 }

@@ -33,12 +33,15 @@ func (o *run) noteShortfall(ctx context.Context, phase string, p registry.Pick) 
 		return
 	}
 
-	// An operator pin is a choice, not a shortfall of the search: the selector
-	// never looked, so "no model clears the bar" would be false, and the pins
-	// this package synthesizes carry no measured prior to report either. The
-	// trace above still records the pin and whatever the registry measured.
-	// Whether a pin resolves at all is a separate advisory.
-	if p.Source == registry.SourcePinned {
+	// An operator pin is a choice, not a shortfall of the search, so it never
+	// gets the "no model clears the bar" wording: the selector never looked.
+	// A pin the registry MEASURED still has a true fact to report, that its
+	// own prior does not clear the bar the phase asked for, and gets its own
+	// wording below. The pins this package synthesizes carry no prior at all,
+	// so there is nothing to say about them beyond the trace above; whether
+	// such a pin resolves is a separate advisory.
+	pinned := p.Source == registry.SourcePinned
+	if pinned && !p.HasPrior {
 		return
 	}
 
@@ -48,13 +51,25 @@ func (o *run) noteShortfall(ctx context.Context, phase string, p registry.Pick) 
 
 	met := metTierLabel(p)
 
+	warning := "no model clears the requested tier bar"
+
+	line := fmt.Sprintf("%s: no model clears the %s bar (%.2f) for role %s - selected %s at %s (prior %.2f)",
+		phase, p.RequestedTier, p.RequestedBar, p.Role, p.Model, met, p.Prior)
+
+	if pinned {
+		warning = "the pinned model does not clear the requested tier bar"
+		line = fmt.Sprintf("%s: the pinned model %s does not clear the %s bar (%.2f) - it met %s (prior %.2f)",
+			phase, p.Model, p.RequestedTier, p.RequestedBar, met, p.Prior)
+	}
+
 	slog.Warn("tier bar unreachable; selection fell short",
 		"card_id", o.d.Cfg.CardID, "phase", phase, "role", string(p.Role),
-		"requested", string(p.RequestedTier), "met", met, "model", p.Model, "prior", p.Prior)
+		"requested", string(p.RequestedTier), "met", met, "model", p.Model,
+		"prior", p.Prior, "source", p.Source.String())
 
 	if o.d.Emit != nil {
 		o.d.Emit.Emit(events.StateChange, map[string]any{
-			"warning":   "no model clears the requested tier bar",
+			"warning":   warning,
 			"phase":     phase,
 			"role":      string(p.Role),
 			"requested": string(p.RequestedTier),
@@ -63,8 +78,7 @@ func (o *run) noteShortfall(ctx context.Context, phase string, p registry.Pick) 
 		})
 	}
 
-	o.d.logCard(ctx, "%s: no model clears the %s bar (%.2f) for role %s - selected %s at %s (prior %.2f)",
-		phase, p.RequestedTier, p.RequestedBar, p.Role, p.Model, met, p.Prior)
+	o.d.logCard(ctx, "%s", line)
 }
 
 // metTierLabel names the strictest bar a pick actually cleared. A pick with no

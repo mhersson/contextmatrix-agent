@@ -1019,6 +1019,10 @@ func (o *run) runFix(ctx context.Context, findings string, round int, fixTier st
 			d.logCard(ctx, "review parked: the previous fix round %s and no other fix model is available (tried: %s) - outstanding findings:\n%s",
 				o.fixFailReason, strings.Join(sortedKeys(o.fixFailed), ", "), findings)
 
+			if rerr != nil {
+				return false, fmt.Errorf("resolve fix model: %w", rerr)
+			}
+
 			return false, &ReviewParkedError{}
 		}
 	}
