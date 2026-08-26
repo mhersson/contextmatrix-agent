@@ -25,6 +25,12 @@ import (
 // one definition and cannot drift apart.
 const runHeaderPrefix = "==== run started "
 
+// causeSuperseded is the footer cause for a run whose entry was still open
+// when the next run began: its End never fired, so nothing observed how it
+// ended. It is deliberately not one of the causes an exit path reports, so a
+// reader never mistakes an unobserved run for a timeout or a wait failure.
+const causeSuperseded = "superseded"
+
 // Logger writes per-card container output to <dir>/<project>/<cardID>.log.
 // A nil *Logger, or one built with an empty dir, disables every operation, so
 // callers can wire it unconditionally. Safe for concurrent use across cards.
@@ -77,14 +83,14 @@ func (l *Logger) path(project, cardID string) string {
 // per container run, before any Write. The executor runs one container per card
 // and calls End before the next Begin, but if a prior run's entry is somehow
 // still open for this card (e.g. an End that never fired), it is footered as
-// aborted (exit=-1) and closed first, so a stray double-Begin never leaks the
-// old handle or drops its footer.
+// superseded (exit=-1) and closed first, so a stray double-Begin never leaks
+// the old handle or drops its footer.
 func (l *Logger) Begin(project, cardID, containerID string) {
 	if !l.enabled() {
 		return
 	}
 
-	l.closeCard(key(project, cardID), -1) // supersede a still-open prior run, if any
+	l.closeCard(key(project, cardID), -1, causeSuperseded) // supersede a still-open prior run, if any
 
 	p := l.path(project, cardID)
 
@@ -146,9 +152,9 @@ func (l *Logger) Write(project, cardID string, line []byte, _ bool) {
 	}
 }
 
-// closeCard writes the run footer with exitCode, closes the file, and forgets
-// the card. No-op if the card has no open file.
-func (l *Logger) closeCard(k string, exitCode int64) {
+// closeCard writes the run footer with exitCode and cause, closes the file, and
+// forgets the card. No-op if the card has no open file.
+func (l *Logger) closeCard(k string, exitCode int64, cause string) {
 	l.mu.Lock()
 	cf := l.files[k]
 	delete(l.files, k)
@@ -161,8 +167,8 @@ func (l *Logger) closeCard(k string, exitCode int64) {
 	cf.mu.Lock()
 	defer cf.mu.Unlock()
 
-	footer := fmt.Sprintf("==== run ended %s container=%s exit=%d ====\n",
-		time.Now().UTC().Format(time.RFC3339), shortID(cf.containerID), exitCode)
+	footer := fmt.Sprintf("==== run ended %s container=%s exit=%d cause=%s ====\n",
+		time.Now().UTC().Format(time.RFC3339), shortID(cf.containerID), exitCode, cause)
 	if _, err := cf.f.WriteString(footer); err != nil {
 		l.logger.Warn("filelog: write footer failed", "key", k, "error", err)
 	}
@@ -174,14 +180,15 @@ func (l *Logger) closeCard(k string, exitCode int64) {
 	cf.closed = true
 }
 
-// End writes a run footer, closes the file, and forgets the card. No-op if the
-// card has no open file.
-func (l *Logger) End(project, cardID string, exitCode int64) {
+// End writes a run footer naming the exit code and how the run ended, closes
+// the file, and forgets the card. The cause is what separates the two kill
+// paths, which share exit code -1. No-op if the card has no open file.
+func (l *Logger) End(project, cardID string, exitCode int64, cause string) {
 	if !l.enabled() {
 		return
 	}
 
-	l.closeCard(key(project, cardID), exitCode)
+	l.closeCard(key(project, cardID), exitCode, cause)
 }
 
 // NextAttempt returns the ordinal of the run about to start for this card:

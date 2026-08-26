@@ -2159,6 +2159,7 @@ func TestBuildLaunchSpec_AttemptEnv(t *testing.T) {
 			buildLaunchSpec(protocol.TriggerPayload{CardID: "C1", Project: "p"}, "corr", "")
 
 		assert.Contains(t, spec.Env, "CMX_ATTEMPT=3")
+		assert.Equal(t, 3, spec.Attempt, "the host side needs the same ordinal for its own exit event")
 	})
 
 	t.Run("the first attempt is omitted", func(t *testing.T) {
@@ -2168,6 +2169,8 @@ func TestBuildLaunchSpec_AttemptEnv(t *testing.T) {
 		for _, e := range spec.Env {
 			assert.NotContains(t, e, "CMX_ATTEMPT")
 		}
+
+		assert.Equal(t, 1, spec.Attempt)
 	})
 
 	t.Run("no counter wired is the first attempt", func(t *testing.T) {
@@ -2176,6 +2179,8 @@ func TestBuildLaunchSpec_AttemptEnv(t *testing.T) {
 		for _, e := range spec.Env {
 			assert.NotContains(t, e, "CMX_ATTEMPT")
 		}
+
+		assert.Equal(t, 1, spec.Attempt)
 	})
 
 	t.Run("the counter is asked about this card", func(t *testing.T) {

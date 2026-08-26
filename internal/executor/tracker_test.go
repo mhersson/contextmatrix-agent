@@ -183,3 +183,21 @@ func TestTracker_Touch_UntrackedRunIsNoop(t *testing.T) {
 	assert.True(t, tr.LastActivity("p", "A").IsZero())
 	assert.True(t, tr.LastActivity("p", "never-existed").IsZero())
 }
+
+// TestTracker_SetAwaitingIgnoresAnUntrackedRun pins the guard that keeps the
+// awaiting map bounded. The exit path removes the run before the last entries
+// it publishes reach the bridge, and the bridge clears awaiting on every one of
+// them, so an unguarded write would leave an entry behind for every completed
+// run and nothing would ever reclaim it.
+func TestTracker_SetAwaitingIgnoresAnUntrackedRun(t *testing.T) {
+	tr := NewTracker(5)
+	require.True(t, tr.AddIfUnderLimit(&Run{Project: "p", CardID: "A"}))
+
+	tr.Remove("p", "A")
+	tr.SetAwaiting("p", "A", false)
+	tr.SetAwaiting("p", "never-existed", true)
+
+	assert.False(t, tr.Awaiting("p", "A"))
+	assert.False(t, tr.Awaiting("p", "never-existed"))
+	assert.Empty(t, tr.awaiting, "a removed run leaves nothing behind in the awaiting map")
+}

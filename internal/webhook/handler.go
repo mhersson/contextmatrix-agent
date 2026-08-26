@@ -650,12 +650,16 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 
 	// A container that replaces a dead one writes into the same per-card log,
 	// with an event sequence that starts over at 1. The ordinal is what tells
-	// the two apart. The first attempt is left unmarked: the worker reads an
-	// absent value as 1.
+	// the two apart. The first attempt is left unmarked in the container env:
+	// the worker reads an absent value as 1. The spec carries the ordinal
+	// either way, because the host stamps its own terminal event with it.
+	ordinal := 1
 	if s.nextAttempt != nil {
-		if n := s.nextAttempt(p.Project, p.CardID); n > 1 {
-			env = append(env, "CMX_ATTEMPT="+strconv.Itoa(n))
-		}
+		ordinal = s.nextAttempt(p.Project, p.CardID)
+	}
+
+	if ordinal > 1 {
+		env = append(env, "CMX_ATTEMPT="+strconv.Itoa(ordinal))
 	}
 
 	if p.BestOfN > 1 {
@@ -802,6 +806,7 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 		PidsLimit:      pids,
 		CorrelationID:  correlationID,
 		MCPURL:         s.launchEnv.MCPURL,
+		Attempt:        ordinal,
 	}
 }
 

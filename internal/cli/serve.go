@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -20,6 +21,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
 
+	"github.com/mhersson/contextmatrix-agent/internal/attempt"
 	"github.com/mhersson/contextmatrix-agent/internal/callback"
 	"github.com/mhersson/contextmatrix-agent/internal/config"
 	"github.com/mhersson/contextmatrix-agent/internal/executor"
@@ -158,7 +160,7 @@ func runServe(ctx context.Context, configPath string) error {
 			bridge.BridgeLine(logbridge.Key{Project: project, CardID: cardID}, line, stderr)
 			files.Write(project, cardID, line, stderr)
 		},
-		OnExit:  onContainerExit(cbClient, credentials, files, registry, logger),
+		OnExit:  onContainerExit(cbClient, credentials, files, registry, bridge, logger),
 		Logger:  logger,
 		Metrics: mx,
 	})
@@ -329,6 +331,10 @@ func gracefulShutdown(
 // waitAndCleanup is the single funnel every container exits through, so this is
 // the teardown seam for the per-run refresh loop.
 //
+// Ordering invariant: the terminal run_end event is written BEFORE files.End,
+// because files.End closes the per-card log and a Write after it is a no-op -
+// the event would reach the live stream and never the durable transcript.
+//
 // Ordering invariant: both files.End and this exit-path Teardown run BEFORE the
 // exit status callback below, and that callback is what gates CM's re-triggers
 // (CM learns the run finished only from it). files.End footers and closes the
@@ -343,10 +349,13 @@ func onContainerExit(
 	credentials *secrets.RunCredentials,
 	files *filelog.Logger,
 	registry *logbridge.RedactorRegistry,
+	bridge *logbridge.Bridge,
 	logger *slog.Logger,
-) func(project, cardID string, exitCode int64) {
-	return func(project, cardID string, exitCode int64) {
-		files.End(project, cardID, exitCode)
+) func(project, cardID string, exitCode int64, cause executor.ExitCause, ordinal int) {
+	return func(project, cardID string, exitCode int64, cause executor.ExitCause, ordinal int) {
+		emitRunEnd(bridge, files, project, cardID, exitCode, cause, ordinal, logger)
+
+		files.End(project, cardID, exitCode, string(cause))
 		credentials.Teardown(project, cardID)
 
 		// Remove the session secrets after credential teardown but before
@@ -363,6 +372,66 @@ func onContainerExit(
 				"project", project, "card_id", cardID, "status", status, "error", err)
 		}
 	}
+}
+
+// runEndKind is the transcript event kind the host writes when a container run
+// ends. Every other event on the stream comes from inside the container, so a
+// run that dies leaves output that simply stops mid-sentence; this line is what
+// says a run ended and how. It goes to both surfaces the container's own output
+// goes to - the live SSE stream and the durable per-card transcript - because
+// the two have different readers.
+const runEndKind = "run_end"
+
+// emitRunEnd writes the terminal event to the live stream and the durable
+// transcript. It is best-effort throughout: it returns nothing and never
+// short-circuits, so a failure to describe the exit cannot change the exit
+// path or mask the cause the caller is reporting.
+func emitRunEnd(
+	bridge *logbridge.Bridge,
+	files *filelog.Logger,
+	project, cardID string,
+	exitCode int64,
+	cause executor.ExitCause,
+	ordinal int,
+	logger *slog.Logger,
+) {
+	line, err := json.Marshal(runEndEvent(exitCode, cause, ordinal))
+	if err != nil {
+		logger.Warn("could not build the run_end event",
+			"project", project, "card_id", cardID, "error", err)
+
+		return
+	}
+
+	// Same order as the output tee: the live stream is never gated on a disk
+	// write, BridgeLine does not mutate line and Write copies it.
+	bridge.BridgeLine(logbridge.Key{Project: project, CardID: cardID}, line, false)
+	files.Write(project, cardID, line, false)
+}
+
+// runEndEvent builds the terminal line in the envelope the worker's own events
+// use, so a transcript reader parses it exactly like every other line.
+//
+// It carries no seq: the sequence counter belongs to the container, and this
+// line is written after the container is gone. The attempt ordinal is stamped
+// only past the first run, matching what the container does with its own lines,
+// where an absent ordinal already reads as attempt 1. Without it a restarted
+// card's terminal event would be filed under the run it replaced.
+func runEndEvent(exitCode int64, cause executor.ExitCause, ordinal int) map[string]any {
+	ev := map[string]any{
+		"kind": runEndKind,
+		"time": time.Now().UTC(),
+		"data": map[string]any{
+			"exit_code": exitCode,
+			"cause":     string(cause),
+		},
+	}
+
+	if ordinal > 1 {
+		ev[attempt.Field] = ordinal
+	}
+
+	return ev
 }
 
 // exitStatus maps a container exit code to a ContextMatrix worker-status and a
@@ -474,6 +543,8 @@ func agentMapExtra(kind string, data map[string]any) (protocol.LogEntry, bool, b
 		return discussionMapExtra(data)
 	case "gate_progress":
 		return gateProgressMapExtra(data)
+	case runEndKind:
+		return runEndMapExtra(data)
 	default:
 		return protocol.LogEntry{}, false, false
 	}
@@ -509,6 +580,31 @@ func gateProgressMapExtra(data map[string]any) (protocol.LogEntry, bool, bool) {
 		Type:    "system",
 		Content: mapStr(data, "status"),
 	}, false, true
+}
+
+// runEndMapExtra maps the host's terminal event to a system entry, so a live
+// stream that would otherwise stop mid-sentence closes with a line naming the
+// exit code and the cause. Without an arm here the shared bridge's default skip
+// drops the kind and the stream still ends in silence.
+func runEndMapExtra(data map[string]any) (protocol.LogEntry, bool, bool) {
+	return protocol.LogEntry{
+		Type: "system",
+		Content: fmt.Sprintf("run ended: exit=%d cause=%s",
+			mapInt64(data, "exit_code"), mapStr(data, "cause")),
+	}, false, true
+}
+
+// mapInt64 reads a numeric field out of an event's data payload. JSON numbers
+// decode as float64, which is the shape the bridge hands over.
+func mapInt64(data map[string]any, key string) int64 {
+	switch n := data[key].(type) {
+	case float64:
+		return int64(n)
+	case int64:
+		return n
+	default:
+		return 0
+	}
 }
 
 // mapStr reads a string field out of an event's data payload, returning "" when

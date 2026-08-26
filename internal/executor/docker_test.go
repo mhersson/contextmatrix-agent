@@ -1,14 +1,24 @@
 package executor
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"errors"
+	"io"
+	"log/slog"
+	"net"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/client"
 	"github.com/mhersson/contextmatrix-backendkit/webhookcore"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -367,4 +377,209 @@ func TestWaitForPumpDrain_TimesOut(t *testing.T) {
 
 	assert.False(t, waitForPumpDrain(pumpDone, 20*time.Millisecond))
 	assert.Less(t, time.Since(start), time.Second, "the wait must be bounded, not blocked")
+}
+
+// exitCall is one recorded onExit invocation.
+type exitCall struct {
+	exitCode int64
+	cause    ExitCause
+	attempt  int
+}
+
+// stubDocker fakes the slice of the Docker API the supervision goroutines
+// touch. The embedded interface is nil: any method the test does not set is a
+// panic, so an unexpected daemon call fails loudly instead of silently.
+type stubDocker struct {
+	client.APIClient
+
+	waitFn func(ctx context.Context) (<-chan container.WaitResponse, <-chan error)
+
+	mu      sync.Mutex
+	killed  []string
+	removed []string
+}
+
+func (s *stubDocker) ContainerWait(
+	ctx context.Context, _ string, _ container.WaitCondition,
+) (<-chan container.WaitResponse, <-chan error) {
+	return s.waitFn(ctx)
+}
+
+func (s *stubDocker) ContainerKill(_ context.Context, id, _ string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.killed = append(s.killed, id)
+
+	return nil
+}
+
+func (s *stubDocker) ContainerRemove(_ context.Context, id string, _ container.RemoveOptions) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.removed = append(s.removed, id)
+
+	return nil
+}
+
+func (s *stubDocker) ContainerCreate(
+	_ context.Context, _ *container.Config, _ *container.HostConfig,
+	_ *network.NetworkingConfig, _ *ocispec.Platform, _ string,
+) (container.CreateResponse, error) {
+	return container.CreateResponse{ID: "container-1"}, nil
+}
+
+func (s *stubDocker) ContainerAttach(
+	_ context.Context, _ string, _ container.AttachOptions,
+) (types.HijackedResponse, error) {
+	local, remote := net.Pipe()
+	_ = remote.Close()
+
+	return types.HijackedResponse{Conn: local, Reader: bufio.NewReader(bytes.NewReader(nil))}, nil
+}
+
+func (s *stubDocker) ContainerStart(_ context.Context, _ string, _ container.StartOptions) error {
+	return nil
+}
+
+// exitsWith yields a wait result carrying code, the shape of a container that
+// ran to completion on its own.
+func exitsWith(code int64) func(context.Context) (<-chan container.WaitResponse, <-chan error) {
+	return func(context.Context) (<-chan container.WaitResponse, <-chan error) {
+		wc := make(chan container.WaitResponse, 1)
+		wc <- container.WaitResponse{StatusCode: code}
+
+		return wc, make(chan error, 1)
+	}
+}
+
+// hangsUntilDeadline never yields a result, so the container timeout fires and
+// waitCtx reports DeadlineExceeded on errCh - the timeout-kill path.
+func hangsUntilDeadline(ctx context.Context) (<-chan container.WaitResponse, <-chan error) {
+	ec := make(chan error, 1)
+
+	go func() {
+		<-ctx.Done()
+
+		ec <- ctx.Err()
+	}()
+
+	return make(chan container.WaitResponse), ec
+}
+
+// failsImmediately yields a wait error while the context is still live - the
+// wait-failure path, which shares its exit code with the timeout kill.
+func failsImmediately(context.Context) (<-chan container.WaitResponse, <-chan error) {
+	ec := make(chan error, 1)
+	ec <- errors.New("daemon connection lost")
+
+	return make(chan container.WaitResponse), ec
+}
+
+// TestWaitAndCleanupReportsExitCause pins the distinction the exit code alone
+// cannot carry: a timeout kill and a wait failure both report -1, so a
+// consumer can only tell them apart from the cause.
+func TestWaitAndCleanupReportsExitCause(t *testing.T) {
+	tests := []struct {
+		name     string
+		waitFn   func(context.Context) (<-chan container.WaitResponse, <-chan error)
+		wantCode int64
+		wantCaus ExitCause
+		wantKill bool
+	}{
+		{"normal exit", exitsWith(0), 0, ExitNormal, false},
+		{"non-zero exit", exitsWith(7), 7, ExitNormal, false},
+		{"timeout kill", hangsUntilDeadline, -1, ExitTimeout, true},
+		{"wait failure", failsImmediately, -1, ExitWaitFailure, true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			docker := &stubDocker{waitFn: tc.waitFn}
+			got := make(chan exitCall, 1)
+
+			e := NewDockerExecutor(Config{
+				Docker:           docker,
+				Tracker:          NewTracker(1),
+				ContainerTimeout: 30 * time.Millisecond,
+				Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+				OnExit: func(_, _ string, code int64, cause ExitCause, attempt int) {
+					got <- exitCall{exitCode: code, cause: cause, attempt: attempt}
+				},
+			})
+
+			conn, other := net.Pipe()
+
+			t.Cleanup(func() { _ = other.Close() })
+
+			pumpDone := make(chan struct{})
+			close(pumpDone)
+
+			e.waitAndCleanup("proj", "CARD-1", "cid-1", 1, time.Now(),
+				types.HijackedResponse{Conn: conn}, make(chan struct{}), pumpDone,
+				slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+			select {
+			case call := <-got:
+				assert.Equal(t, tc.wantCode, call.exitCode)
+				assert.Equal(t, tc.wantCaus, call.cause)
+			default:
+				t.Fatal("onExit never fired")
+			}
+
+			docker.mu.Lock()
+			defer docker.mu.Unlock()
+
+			assert.Equal(t, tc.wantKill, len(docker.killed) == 1, "kill expectation")
+			assert.Equal(t, []string{"cid-1"}, docker.removed, "the container is always removed")
+		})
+	}
+}
+
+// TestExitCausesAreDistinct guards the one property a consumer depends on:
+// the three ways a run can end never collapse onto the same code.
+func TestExitCausesAreDistinct(t *testing.T) {
+	seen := map[ExitCause]bool{}
+
+	for _, c := range []ExitCause{ExitNormal, ExitTimeout, ExitWaitFailure} {
+		assert.NotEmpty(t, string(c))
+		assert.False(t, seen[c], "duplicate exit cause %q", c)
+		seen[c] = true
+	}
+}
+
+// TestLaunchCarriesTheAttemptOrdinalToOnExit pins the hop that keeps a
+// host-written terminal event separable per container run: the ordinal the
+// launch spec carries is the one the exit callback reports. Without it every
+// run's terminal event reads as attempt 1.
+func TestLaunchCarriesTheAttemptOrdinalToOnExit(t *testing.T) {
+	docker := &stubDocker{waitFn: exitsWith(0)}
+	got := make(chan exitCall, 1)
+
+	e := NewDockerExecutor(Config{
+		Docker:           docker,
+		Tracker:          NewTracker(1),
+		PullPolicy:       PullNever,
+		ContainerTimeout: time.Second,
+		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+		OnExit: func(_, _ string, code int64, cause ExitCause, attempt int) {
+			got <- exitCall{exitCode: code, cause: cause, attempt: attempt}
+		},
+	})
+
+	require.NoError(t, e.Launch(t.Context(), LaunchSpec{
+		Project: "proj",
+		CardID:  "CARD-1",
+		Image:   "alpine:3",
+		Attempt: 3,
+	}))
+
+	select {
+	case call := <-got:
+		assert.Equal(t, 3, call.attempt)
+		assert.Equal(t, ExitNormal, call.cause)
+	case <-time.After(5 * time.Second):
+		t.Fatal("onExit never fired")
+	}
 }

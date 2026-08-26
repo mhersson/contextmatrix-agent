@@ -120,11 +120,21 @@ func (t *Tracker) Count() int {
 // SetAwaiting records whether project/cardID is awaiting human input. While
 // awaiting, the idle watchdog suspends so a human-blocked container is not
 // killed for silence.
+//
+// It no-ops for an untracked run, like Touch and SetReason: the exit path
+// removes the run before the last entries it publishes reach the bridge, and
+// the bridge clears awaiting on every entry it publishes, so an unguarded
+// write would leave an entry behind for every completed run.
 func (t *Tracker) SetAwaiting(project, cardID string, v bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	t.awaiting[key(project, cardID)] = v
+	k := key(project, cardID)
+	if _, ok := t.byKey[k]; !ok {
+		return
+	}
+
+	t.awaiting[k] = v
 }
 
 // Awaiting reports whether project/cardID is awaiting human input. Unknown keys
