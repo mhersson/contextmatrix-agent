@@ -359,7 +359,7 @@ func (o *run) runCandidate(ctx context.Context, c *candidate, ordered []subtaskR
 	sc := &solverCtx{
 		git:        c.git,
 		ledger:     c.ledger,
-		tools:      o.d.WriteToolsForDir(c.dir, verifyToolFor(c.git, c.dir, o.resolvedVerifyPlan())),
+		tools:      o.d.WriteToolsForDir(c.dir, o.verifyToolFor(c.git, c.dir, o.resolvedVerifyPlan())),
 		workspace:  c.dir,
 		coderModel: o.candidateCoderModel(c),
 		boardOps:   false,

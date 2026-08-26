@@ -3,10 +3,10 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
-	"github.com/mhersson/contextmatrix-agent/internal/verifyexec"
 	"github.com/mhersson/contextmatrix-harness/llm"
 	"github.com/mhersson/contextmatrix-harness/tools"
 )
@@ -33,29 +33,43 @@ import (
 // covers formatting, linting and building. Widening it is a change to the
 // DECLARATION - an ordered list in the operator-declared config, or a proposal
 // prompt that asks for the repository's whole check set - never a change that
-// teaches this package what a check is. It is not done here.
+// teaches this package what a check is. It is not done here, so the coder's
+// prompt and this tool's schema scope their bash prohibition to the one command
+// the tool runs and leave the rungs it cannot reach to the coder.
 type VerifyTool struct {
 	plan      verifyPlan
 	workspace string
 	// dirty reports whether anything has been written to the workspace since the
-	// previous call. Execute calls it exactly once per invocation, so each call
-	// measures from the start of the previous one.
+	// previous call. Execute calls it on entry and again once a run has finished,
+	// so a call measures from the end of the previous run rather than from its
+	// start: a command that touches a non-ignored file does not report itself as
+	// a write and cost the next call a re-run.
 	dirty func() bool
+	// exec runs the command and classifies the outcome. It is the same executor
+	// the run's verify gate uses, so the coder gets the retry, the cancellation
+	// guard and the container-runtime verdict the gate gets instead of a raw
+	// classification of whatever the subprocess did.
+	exec verifyExecFunc
 
 	ran        bool
 	lastPassed bool
 	lastResult string
 }
 
+// verifyExecFunc runs a resolved verify plan in dir and returns the classified
+// result, or an error when the run was cancelled or the command needs a
+// toolchain the worker does not have. (*run).runVerifyCommand implements it.
+type verifyExecFunc func(ctx context.Context, dir string, plan verifyPlan) (verifyResult, error)
+
 // NewVerifyTool builds the coder's verify tool for one workspace. It returns nil
 // when no command resolved, so a run with nothing to verify never offers a tool
 // that could only report its own absence.
-func NewVerifyTool(plan verifyPlan, workspace string, dirty func() bool) *VerifyTool {
+func NewVerifyTool(plan verifyPlan, workspace string, dirty func() bool, exec verifyExecFunc) *VerifyTool {
 	if len(plan.Argv) == 0 {
 		return nil
 	}
 
-	return &VerifyTool{plan: plan, workspace: workspace, dirty: dirty}
+	return &VerifyTool{plan: plan, workspace: workspace, dirty: dirty, exec: exec}
 }
 
 func (t *VerifyTool) Name() string { return "verify" }
@@ -65,10 +79,11 @@ func (t *VerifyTool) Schema() llm.Tool {
 		Name: "verify",
 		Description: fmt.Sprintf(
 			"Run the project's checks: `%s` (%s), executed in the workspace, with its combined output returned. "+
-				"Do not run the project's checks yourself with bash - this tool is the one that counts. "+
+				"Do not run `%s` yourself with bash - this tool is the one that counts; checks that command "+
+				"does not cover are still yours to run. "+
 				"Call it when your changes are complete, and call it again only after you have written "+
 				"something since the last call.",
-			t.plan.Display, t.plan.Source),
+			t.plan.Display, t.plan.Source, t.plan.Display),
 		Parameters: json.RawMessage(`{"type":"object","properties":{}}`),
 	}}
 }
@@ -84,11 +99,36 @@ func (t *VerifyTool) Execute(ctx context.Context, _ map[string]any) (tools.Resul
 		)}, nil
 	}
 
-	res := classifyVerify(t.plan, verifyexec.Exec(ctx, t.workspace, t.plan.Argv, t.plan.Timeout, t.plan.Env))
+	res, err := t.exec(ctx, t.workspace, t.plan)
+
+	if cerr := ctx.Err(); cerr != nil {
+		// An aborted run is not an outcome. The killed command classifies as a
+		// failure, and the coder would read the abort as a defect in its own code.
+		return tools.Result{}, cerr
+	}
+
+	if err != nil {
+		var missing *ToolchainMissingError
+		if !errors.As(err, &missing) {
+			return tools.Result{}, err
+		}
+
+		// The gate parks on a missing toolchain; a tool call cannot park, and the
+		// condition is not one the coder can do anything about. Report it as
+		// inconclusive with the reason rather than as a failing check the coder
+		// will spend a fix round on.
+		res = verifyResult{Status: verifySkipped, Note: missing.Reason}
+	}
 
 	t.ran = true
 	t.lastPassed = res.Status == verifyPassed
 	t.lastResult = renderVerifyToolResult(t.plan, res)
+
+	// Re-read the fingerprint so the recorded baseline is the tree the run left
+	// behind. Nothing else can write while the command runs: the harness
+	// dispatches tool calls sequentially and this tool never reaches a subagent
+	// registry, so anything the fingerprint moved by is the command's own doing.
+	t.dirty()
 
 	return tools.Result{Text: t.lastResult}, nil
 }
@@ -122,18 +162,20 @@ const worktreeStateTimeout = 30 * time.Second
 // previous call. The tool itself stays ignorant of both git and the filesystem.
 //
 // Git rather than a filesystem walk, because only git can tell "the coder wrote
-// something" from "the verify run wrote build artifacts": the fingerprint is
-// built from the repository's own ignore rules, so an artifact tree the project
-// ignores does not move it. A plain walk would see every artifact a check
-// command produces and report written on every call, which would make the
-// already-passed report unreachable.
+// something" from "the toolchain left an artifact": the fingerprint is built
+// from the repository's own ignore rules, so an artifact tree the project
+// ignores does not move it. A plain walk would count every artifact any command
+// dropped between two calls as a write, and the already-passed report would
+// rarely fire.
 //
 // Unknown state is written, never clean: the first call has no baseline, and a
 // fingerprint that could not be read is not evidence that nothing changed.
 //
-// A project that does not ignore its build artifacts moves the fingerprint on
-// every check run, so the already-passed report never fires and the tool simply
-// runs the command each time it is called. That degrades to the behavior before
+// A project that does not ignore its build artifacts keeps them in the
+// fingerprint. The baseline the tool records after each run folds in whatever
+// that run wrote, so artifact churn caused by the checks themselves does not
+// cost a re-run; anything written between two calls does count as a write, and
+// the tool simply runs the command again. That degrades to the behavior before
 // this tool existed rather than to a wrong answer, which is the right way round.
 func worktreeDirty(g GitOps) func() bool {
 	var (
@@ -162,8 +204,8 @@ func worktreeDirty(g GitOps) func() bool {
 // verifyToolFor builds the coder's verify tool for one solver's workspace, or a
 // genuine nil interface when no command resolved - never a non-nil interface
 // holding a nil pointer, which a registry would happily offer to the model.
-func verifyToolFor(g GitOps, dir string, plan verifyPlan) tools.Tool {
-	vt := NewVerifyTool(plan, dir, worktreeDirty(g))
+func (o *run) verifyToolFor(g GitOps, dir string, plan verifyPlan) tools.Tool {
+	vt := NewVerifyTool(plan, dir, worktreeDirty(g), o.runVerifyCommand)
 	if vt == nil {
 		return nil
 	}

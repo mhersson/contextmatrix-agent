@@ -429,21 +429,63 @@ func (o *run) resolveVerify(ctx context.Context) (verifyPlan, error) {
 	}
 }
 
-// runVerifyPlan executes the resolved plan in dir and returns the classified
-// result. It is the single capture point: it redacts the output and
-// disambiguates a parent-context cancel (returned as an error to propagate the
-// abort) from a real verify outcome. An empty plan is a skip, never a run. A
-// non-pass whose output looks resource-exhausted (container pressure, not a
-// real defect) gets exactly one retry after a short wait; a plain failure is
-// never retried, and neither is a run that hit its own timeout. A non-pass
-// whose output looks like an unreachable container runtime takes precedence
-// over the skipped/failed classification and returns a *ToolchainMissingError
-// instead of a verifyResult - see the check below.
+// runVerifyPlan executes the resolved plan in dir, records the outcome as a
+// Verification event and returns the classified result. It is the gate's entry
+// point and the single capture point for the event. An empty plan is a skip,
+// never a run. The protections around the command itself - cancellation, the
+// resource-exhaustion retry and the container-runtime park - live in
+// runVerifyCommand, which every caller that runs the command shares.
 func (o *run) runVerifyPlan(ctx context.Context, dir string, plan verifyPlan) (verifyResult, error) {
 	if len(plan.Argv) == 0 {
 		return verifyResult{Status: verifySkipped, Note: "no verify command resolved"}, nil
 	}
 
+	res, err := o.runVerifyCommand(ctx, dir, plan)
+	if err != nil {
+		return verifyResult{}, err
+	}
+
+	// The gate is a subprocess, not a tool call, so nothing else records what it
+	// printed: a FAILED gate reaches the card body as review findings, but a
+	// PASSED or SKIPPED one would leave no output on any channel. res.Output is
+	// already redacted by runVerifyCommand's agent-side redactor - which scrubs its own
+	// credentials (LLM key, MCP key, git token, mob guest tokens), not arbitrary
+	// secrets a chatty build could print via the verify.env passthrough - and
+	// already bounded at 64 KiB by verifyexec, so this carries a hard ceiling
+	// with no cap of its own. Guarded: Emit is nil on several construction paths
+	// and events.Emitter.Emit does not nil-check.
+	if o.d.Emit != nil {
+		o.d.Emit.Emit(events.Verification, map[string]any{
+			// ok collapses to false for both FAILED and SKIPPED; status
+			// disambiguates them, so read ok:false alongside status, never alone -
+			// a SKIPPED gate is not a defect the way a FAILED one is.
+			"ok":      res.Status == verifyPassed,
+			"status":  verifyStatusWord(res.Status),
+			"command": plan.Display,
+			"detail":  res.Output,
+		})
+	}
+
+	return res, nil
+}
+
+// runVerifyCommand runs plan's command in dir and classifies the outcome. It
+// carries the protections every caller that runs a project's verify command
+// needs, so no caller reaches the raw runner and loses one of them:
+//
+//   - A parent-context cancel comes back as an error, never as a result: the
+//     runner reports a killed process, which classifies as a failure, and an
+//     aborted run must not be presented as a code defect.
+//   - A non-pass whose output looks resource-exhausted (container pressure, not
+//     a real defect) gets exactly one retry after a short wait; a plain failure
+//     is never retried, and neither is a run that hit its own timeout.
+//   - A non-pass whose output looks like an unreachable container runtime takes
+//     precedence over the skipped/failed classification and comes back as a
+//     *ToolchainMissingError instead of a verifyResult.
+//
+// The output is redacted before the container-runtime check, so every caller
+// classifies the same bytes.
+func (o *run) runVerifyCommand(ctx context.Context, dir string, plan verifyPlan) (verifyResult, error) {
 	out := o.runVerify(ctx, dir, plan.Argv, plan.Timeout, plan.Env)
 
 	if err := ctx.Err(); err != nil {
@@ -502,27 +544,6 @@ func (o *run) runVerifyPlan(ctx context.Context, dir string, plan verifyPlan) (v
 			Subject: containerRuntimeUnavailableMarker,
 			Reason:  "the verify command needs a container runtime, and the worker has none by design",
 		}
-	}
-
-	// The gate is a subprocess, not a tool call, so nothing else records what it
-	// printed: a FAILED gate reaches the card body as review findings, but a
-	// PASSED or SKIPPED one would leave no output on any channel. res.Output is
-	// already redacted above by the agent's own redactor - which scrubs its own
-	// credentials (LLM key, MCP key, git token, mob guest tokens), not arbitrary
-	// secrets a chatty build could print via the verify.env passthrough - and
-	// already bounded at 64 KiB by verifyexec, so this carries a hard ceiling
-	// with no cap of its own. Guarded: Emit is nil on several construction paths
-	// and events.Emitter.Emit does not nil-check.
-	if o.d.Emit != nil {
-		o.d.Emit.Emit(events.Verification, map[string]any{
-			// ok collapses to false for both FAILED and SKIPPED; status
-			// disambiguates them, so read ok:false alongside status, never alone -
-			// a SKIPPED gate is not a defect the way a FAILED one is.
-			"ok":      res.Status == verifyPassed,
-			"status":  verifyStatusWord(res.Status),
-			"command": plan.Display,
-			"detail":  res.Output,
-		})
 	}
 
 	return res, nil

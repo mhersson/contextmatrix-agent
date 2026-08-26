@@ -23,8 +23,34 @@ func TestVerifyCommandBlock(t *testing.T) {
 	out := verifyCommandBlock(verifyPlan{Argv: []string{"go", "test", "./..."}, Display: "go test ./...", Source: verifySourceDetected})
 	assert.Contains(t, out, "`verify` tool", "the coder must be sent to the tool, not to a bare command string")
 	assert.Contains(t, out, "`go test ./...` (detected)")
-	assert.Contains(t, out, "Do not run the checks yourself with bash")
 	assert.Contains(t, out, "Make it pass")
+}
+
+// prohibitionSentence returns the sentence of s that forbids something, so a
+// test can assert on the scope of a prohibition without pinning the rest of the
+// prose around it.
+func prohibitionSentence(t *testing.T, s string) string {
+	t.Helper()
+
+	for _, sentence := range strings.Split(s, ". ") {
+		if strings.Contains(sentence, "not run") {
+			return sentence
+		}
+	}
+
+	t.Fatalf("no prohibition sentence in %q", s)
+
+	return ""
+}
+
+// The bash prohibition must name the command the tool runs. The tool reaches
+// exactly one command, so a blanket "do not run the checks yourself" forbids the
+// format, lint and build rungs it cannot reach without covering them.
+func TestVerifyCommandBlockScopesTheBashProhibition(t *testing.T) {
+	out := verifyCommandBlock(verifyPlan{Argv: []string{"make", "check"}, Display: "make check", Source: verifySourceDeclared})
+
+	assert.Contains(t, prohibitionSentence(t, out), "make check",
+		"the prohibition must be scoped to the command the tool runs")
 }
 
 func TestFixVerifyLine(t *testing.T) {

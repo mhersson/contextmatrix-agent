@@ -92,7 +92,7 @@ func (o *run) bindVerifyTool(sc *solverCtx, plan verifyPlan) {
 		return
 	}
 
-	vt := verifyToolFor(sc.git, sc.workspace, plan)
+	vt := o.verifyToolFor(sc.git, sc.workspace, plan)
 	if vt == nil {
 		return
 	}
