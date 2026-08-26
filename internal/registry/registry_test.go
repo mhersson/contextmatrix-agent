@@ -208,16 +208,27 @@ func TestCandidatesArePriorsOnlyAndSkipBlacklist(t *testing.T) {
 		"black/listed": {Coder: new(0.95)},
 	}}
 	r := NewRegistryFromParts(cat, pr, map[string]bool{"black/listed": true}, nil, "capable/default")
-	got := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierComplex}) // bar 0.82
-	// cheap/ok (0.80) is below 0.82; blacklisted is excluded; nothing qualifies -> capable default
-	if got.Model != "capable/default" {
-		t.Errorf("want capable default when nothing clears bar, got %q", got.Model)
-	}
 
-	got = r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierModerate}) // bar 0.76
-	if got.Model != "cheap/ok" {
-		t.Errorf("want cheap/ok at moderate, got %q (blacklisted must never win)", got.Model)
-	}
+	// The complex bar (0.82) is above cheap/ok's 0.80, so the complex rung is
+	// dry and the request clamps to moderate (0.76), returning the pick a
+	// direct moderate request would have made. The answer names what it is
+	// worth: a moderate met tier and a shortfall against the request. The
+	// capable default is the floor BELOW the ladder, not the answer to the
+	// first dry rung.
+	got := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierComplex})
+	require.True(t, got.OK)
+	assert.Equal(t, "cheap/ok", got.Model)
+	assert.Equal(t, SourceAuto, got.Source, "a clamped pick is a real selection at its rung, not the default")
+	assert.Equal(t, TierComplex, got.RequestedTier)
+	assert.Equal(t, TierModerate, got.MetTier)
+	assert.False(t, got.AtBar(), "the caller must be able to see it did not get what it asked for")
+
+	// The blacklisted model has the best prior in the catalog and WOULD clear
+	// complex. It is unselectable at every rung: the ladder relaxes the quality
+	// bar and nothing else.
+	got = r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierModerate})
+	assert.Equal(t, "cheap/ok", got.Model, "blacklisted must never win")
+	assert.True(t, got.AtBar())
 }
 
 func TestSelectCandidateModelsNoPinWrapsAround(t *testing.T) {
@@ -242,7 +253,15 @@ func TestSelectCandidateModelsNoPinWrapsAround(t *testing.T) {
 	assert.Equal(t, "m1", specs[0].Model)
 	assert.Equal(t, "m2", specs[1].Model)
 	assert.Equal(t, "m3", specs[2].Model)
-	assert.Equal(t, specs[2], specs[3], "4th slot must wrap and repeat the 3rd pick exactly")
+	// The wrapped seat repeats the 3rd pick's model and window, and says so.
+	// Duplication and provenance are two independent facts: the repeat keeps
+	// the source it wrapped and carries the flag on top, so a caller can count
+	// the panel's real models without losing where each seat came from.
+	assert.Equal(t, specs[2].Model, specs[3].Model, "4th slot must wrap and repeat the 3rd pick")
+	assert.Equal(t, specs[2].ContextWindow, specs[3].ContextWindow)
+	assert.Equal(t, specs[2].Source, specs[3].Source)
+	assert.False(t, specs[2].Duplicate, "the last real pick is not a repeat")
+	assert.True(t, specs[3].Duplicate, "a repeated seat must be countable as one")
 }
 
 func TestSelectCandidateModelsSingleModelPoolRepeatsThroughout(t *testing.T) {
