@@ -551,6 +551,25 @@ func TestFanoutCandidateDropsWhenPoolExhausted(t *testing.T) {
 	assert.Positive(t, countCalls(fg.recorded(), "CommitWithMessage"), "the surviving candidate committed its work")
 }
 
+// TestFanoutNoCoderModelParksInsteadOfPanicking pins that a coder pool with
+// nothing selectable at all - no prior clears any bar and there is no
+// capable default - errors out of runFanout before any worktree is cut,
+// instead of indexing into a short candidate-model slice.
+func TestFanoutNoCoderModelParksInsteadOfPanicking(t *testing.T) {
+	ops := &fakeOps{}
+	mainGit := &fakeGit{}
+	d, _, _ := fanoutDeps(t, ops, mainGit, &planLLM{}, 2)
+	d.Registry = registry.NewRegistryFromParts(
+		llm.Catalog{{ID: "solo/coder", ContextLength: 200000, SupportedParameters: []string{"tools"}}},
+		registry.Priors{}, nil, nil, "",
+	)
+
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "moderate"}}, 0)
+
+	require.Error(t, o.runFanout(context.Background()), "an unselectable coder pool must error rather than panic")
+	assert.Empty(t, o.candidates, "no worktree is cut when no coder model is selectable")
+}
+
 func TestUserNotesUnseen(t *testing.T) {
 	var nilNotes *userNotes
 	assert.Empty(t, nilNotes.unseen(1), "a nil *userNotes (autonomous) is a no-op")

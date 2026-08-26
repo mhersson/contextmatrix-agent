@@ -12,6 +12,7 @@ import (
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/mob"
+	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/mhersson/contextmatrix-harness/harness"
 	"github.com/mhersson/contextmatrix-harness/llm"
@@ -101,7 +102,8 @@ func TestBuildEngineConfigPlanTopic(t *testing.T) {
 
 	topic := mob.Topic{Kind: "plan", Lenses: planLenses[:3], Rounds: 2, Blind: true}
 
-	cfg := buildEngineConfig(o, topic, "test-bearer")
+	cfg, ok := buildEngineConfig(o, topic, "test-bearer")
+	require.True(t, ok)
 
 	require.Len(t, cfg.Seats, 3)
 
@@ -133,7 +135,8 @@ func TestBuildEngineConfigReviewExcludesCoderModels(t *testing.T) {
 
 	topic := mob.Topic{Kind: "review", Lenses: reviewLenses[:3], Rounds: 1, Blind: true}
 
-	cfg := buildEngineConfig(o, topic, "b")
+	cfg, ok := buildEngineConfig(o, topic, "b")
+	require.True(t, ok)
 
 	require.Len(t, cfg.Seats, 3)
 
@@ -151,7 +154,8 @@ func TestBuildEngineConfigPlanExcludesIncapableModels(t *testing.T) {
 
 	topic := mob.Topic{Kind: "plan", Lenses: planLenses[:3], Rounds: 2, Blind: true}
 
-	cfg := buildEngineConfig(o, topic, "b")
+	cfg, ok := buildEngineConfig(o, topic, "b")
+	require.True(t, ok)
 
 	require.Len(t, cfg.Seats, 3)
 
@@ -164,7 +168,8 @@ func TestBuildEngineConfigZeroCostDisablesBudget(t *testing.T) {
 	ops := &fakeOps{}
 	o := mobTestRun(ops, MobConfig{Participants: 2, Plan: true, Rounds: 2, BudgetFactor: 0.75}, 0)
 
-	cfg := buildEngineConfig(o, mob.Topic{Kind: "plan", Lenses: planLenses[:2], Rounds: 2}, "b")
+	cfg, ok := buildEngineConfig(o, mob.Topic{Kind: "plan", Lenses: planLenses[:2], Rounds: 2}, "b")
+	require.True(t, ok)
 
 	assert.Zero(t, cfg.BudgetUSD, "MaxCardCost 0 disables the mob session budget term")
 }
@@ -187,6 +192,26 @@ func TestMobDiscussQuorumFallback(t *testing.T) {
 	assert.Empty(t, out.Synthesis)
 	require.Len(t, eng.cfgs, 1)
 	assert.NotNil(t, eng.cfgs[0].SeatEndpoint, "the real server endpoint is wired before Discuss")
+
+	joined := strings.Join(ops.logs, "\n")
+	assert.Contains(t, joined, "continuing solo", "the fallback is recorded on the card")
+}
+
+// TestMobDiscussNoPanelSelectableRunsSolo pins that a discussion panel with
+// nothing selectable at all - no prior clears any bar and there is no
+// capable default - degrades to solo like any other engine failure, instead
+// of indexing into a short seat slice.
+func TestMobDiscussNoPanelSelectableRunsSolo(t *testing.T) {
+	ops := &fakeOps{}
+	o := mobTestRun(ops, MobConfig{Participants: 2, Plan: true, Rounds: 2, BudgetFactor: 0.75}, 2.0)
+	o.d.Registry = registry.NewRegistryFromParts(llm.Catalog{}, registry.Priors{}, nil, nil, "")
+
+	out, ok := o.mobDiscuss(context.Background(), mob.Topic{
+		Kind: "plan", Lenses: planLenses[:2], Rounds: 2, Blind: true, Briefing: "b",
+	})
+
+	assert.False(t, ok, "an unselectable discussion panel must degrade to solo, never panic")
+	assert.Empty(t, out.Synthesis)
 
 	joined := strings.Join(ops.logs, "\n")
 	assert.Contains(t, joined, "continuing solo", "the fallback is recorded on the card")

@@ -151,6 +151,9 @@ func (o *run) runFanout(ctx context.Context) (retErr error) {
 		EstTokens: estimateTokens(o.taskDescription),
 		Exclude:   o.excluded,
 	}, nEff, pin)
+	if len(specs) < nEff {
+		return fmt.Errorf("no coder model is selectable for the candidate fan-out")
+	}
 
 	// Build every candidate and cut its worktree BEFORE spawning any goroutine, so
 	// an AddWorktree failure returns cleanly with nothing running to leak.
