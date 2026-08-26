@@ -61,7 +61,7 @@ type verifyPlan struct {
 }
 
 // verifyResult is one execution's classified outcome. Output is redacted at
-// capture (runVerifyPlan applies the run redactor); Note is the human-facing
+// capture (runVerifyCommand applies the run redactor); Note is the human-facing
 // reason a run was skipped.
 type verifyResult struct {
 	Status verifyStatus
@@ -78,7 +78,7 @@ const (
 	maxVerifyTimeout = 2 * time.Hour
 )
 
-// verifyRetryWait is how long runVerifyPlan waits before its one retry of a
+// verifyRetryWait is how long runVerifyCommand waits before its one retry of a
 // resource-exhausted verify run, giving the prior run's processes time to be
 // reaped. A package var (not a const) so tests can shrink it - see
 // subtaskHeartbeatInterval in execute.go for the same pattern.
@@ -199,8 +199,8 @@ func verifyProvenance(p *verifyPlan) string {
 
 // classifyVerify maps a raw execution Outcome to the tri-state result. It is
 // pure so the whole decision table is unit-tested without a subprocess. Parent-
-// context cancellation is NOT an outcome here - runVerifyPlan checks ctx.Err()
-// and propagates the abort before classifying.
+// context cancellation is NOT an outcome here - runVerifyCommand checks
+// ctx.Err() and propagates the abort before classifying.
 func classifyVerify(plan verifyPlan, out verifyexec.Outcome) verifyResult {
 	switch {
 	case out.ExitCode == 0 && !out.TimedOut && !out.StartErr:
@@ -289,7 +289,7 @@ const verifyConfigErrorMarker = "CMX_VERIFY (unreadable)"
 // command failed because it needed a container runtime the worker does not
 // have: no Docker socket bind, CapDrop: ALL, no-new-privileges, uid 1000, and
 // no Docker CLI in the worker image, all by design. Unlike the declared/
-// detected tiers above, this is discovered at EXECUTION time - runVerifyPlan
+// detected tiers above, this is discovered at EXECUTION time - runVerifyCommand
 // reading the failed output - not at resolution time, so the card-section and
 // log-line renderers key on it for the "no containers here" remedy instead of
 // "install the toolchain" (see verifyToolchainSection and toolchainLogMessage).
