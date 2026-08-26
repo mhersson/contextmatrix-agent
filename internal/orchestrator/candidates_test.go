@@ -686,3 +686,113 @@ func TestFanoutSalvagesCappedCandidates(t *testing.T) {
 
 	assert.True(t, ops.loggedContains("turn cap on final subtask"), "logs=%v", ops.logs)
 }
+
+// belowComplexRegistry seeds two coder models that clear the moderate bar
+// (0.76) but neither the complex bar (0.82) nor anything above it, so a
+// complex-tier request is served one rung down and reports a shortfall.
+func belowComplexRegistry() *registry.Registry {
+	return registry.NewRegistryFromParts(
+		llm.Catalog{
+			{ID: "mid/model", ContextLength: 200000, SupportedParameters: []string{"tools"}},
+			{ID: "other/model", ContextLength: 200000, SupportedParameters: []string{"tools"}},
+		},
+		registry.Priors{Models: map[string]registry.PriorEntry{
+			"mid/model":   coderPrior(0.78),
+			"other/model": coderPrior(0.77),
+		}},
+		nil, nil, "capable/default")
+}
+
+// TestCandidateCoderModelAdvisesOutsideTheSelectionLock pins both halves of the
+// candidate re-selection: the shortfall is reported, and it is reported with
+// the selection lock released. The resolver holds that lock across its whole
+// body, so an advisory taking it too would deadlock the fan-out rather than
+// fail visibly - hence the explicit wait.
+func TestCandidateCoderModelAdvisesOutsideTheSelectionLock(t *testing.T) {
+	ops := &fakeOps{}
+	d := execTestDeps(ops, &fakeGit{}, &planLLM{})
+	d.Registry = belowComplexRegistry()
+
+	o := newExecRun(d, nil, 0)
+	o.cardTier = "complex"
+	o.excluded = map[string]bool{"other/model": true}
+
+	c := &candidate{idx: 2, model: "other/model"}
+	resolve := o.candidateCoderModel(c)
+
+	var (
+		model string
+		err   error
+	)
+
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		model, err = resolve(context.Background(), subtaskRef{ID: "SUB-1"}, "prompt")
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("candidate coder resolution deadlocked: the shortfall advisory must not take the selection lock")
+	}
+
+	require.NoError(t, err)
+	assert.Equal(t, "mid/model", model, "the excluded model is replaced by the next-best pick")
+	assert.Equal(t, "mid/model", c.model, "and the candidate records what it now runs on")
+
+	require.Len(t, ops.logs, 1, "the re-selected candidate reports its shortfall; logs=%v", ops.logs)
+	assert.Contains(t, ops.logs[0], "mid/model")
+	assert.Contains(t, ops.logs[0], "candidate 2")
+}
+
+// TestCandidateCoderModelDropsWhenThePoolIsExhausted pins the candidate
+// refusal: a candidate with no employable model left is dropped cleanly, so
+// the other candidates carry on - it never parks the whole run.
+func TestCandidateCoderModelDropsWhenThePoolIsExhausted(t *testing.T) {
+	d := execTestDeps(&fakeOps{}, &fakeGit{}, &planLLM{})
+	d.Registry = belowComplexRegistry()
+
+	o := newExecRun(d, nil, 0)
+	o.cardTier = "moderate"
+	o.excluded = map[string]bool{"mid/model": true, "other/model": true, "capable/default": true}
+
+	c := &candidate{idx: 1, model: "mid/model"}
+
+	model, err := o.candidateCoderModel(c)(context.Background(), subtaskRef{ID: "SUB-1"}, "prompt")
+	require.ErrorIs(t, err, errCandidatePoolExhausted)
+	assert.Empty(t, model)
+	assert.False(t, isParkError(err), "a dropped candidate must not park the run")
+}
+
+// TestFanoutSeatsReportTheirShortfall pins the fan-out's own selection: the
+// seats it hands the candidates are picks like any other, and a card whose
+// tier no model can serve says so - once per seat, because the seats run
+// DIFFERENT models and collapsing them would hide that the second one fell
+// short too.
+func TestFanoutSeatsReportTheirShortfall(t *testing.T) {
+	ops := &fakeOps{}
+	d, _, _ := fanoutDeps(t, ops, &fakeGit{}, &planLLM{}, 2)
+	d.Registry = belowComplexRegistry()
+
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
+	o.cardTier = "complex"
+
+	require.NoError(t, o.runFanout(context.Background()))
+
+	var advisories []string
+
+	for _, l := range ops.logs {
+		if strings.Contains(l, "no model clears the complex bar") {
+			advisories = append(advisories, l)
+		}
+	}
+
+	require.Len(t, advisories, 2, "one advisory per short seat; logs=%v", ops.logs)
+	assert.Contains(t, advisories[0], "candidate 1")
+	assert.Contains(t, advisories[0], "mid/model")
+	assert.Contains(t, advisories[1], "candidate 2")
+	assert.Contains(t, advisories[1], "other/model")
+}
