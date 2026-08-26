@@ -79,6 +79,10 @@ type RunSpec struct {
 	MaxCardCost           float64 // CMX_MAX_CARD_COST; 0 disables
 	SelectorPriceHeadroom float64 // CMX_SELECTOR_PRICE_HEADROOM; 0 uses worker default
 
+	// SelectorTierBars is the operator's quality ladder (CMX_SELECTOR_TIER_BARS,
+	// JSON-encoded). Empty uses registry.DefaultTierBars.
+	SelectorTierBars map[string]float64
+
 	// ContainerTimeout is serve's hard kill ceiling for this run's container
 	// (CMX_CONTAINER_TIMEOUT_SECONDS). 0 = unknown - an older serve, or a host
 	// that never configured it - so a phase that must park before the kill
@@ -378,6 +382,16 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 		deadline = time.Now().Add(a.spec.ContainerTimeout - gatesFinalizeMargin)
 	}
 
+	// An invalid operator tier ladder fails here, before any phase runs: no
+	// work has been done yet, so this releases the claim and reports the
+	// error rather than parking or pushing anything.
+	reg, err := buildRegistry(a.spec)
+	if err != nil {
+		releaseQuietly(ctx, a.ops, a.spec.CardID)
+
+		return Result{Reason: "error"}, fmt.Errorf("build registry: %w", err)
+	}
+
 	d := orchestrator.Deps{
 		Ops: ops2orchestrator(a.ops),
 		Git: a.git,
@@ -388,7 +402,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 		PRGates:    pr,
 		Client:     a.client,
 		Emit:       a.emit,
-		Registry:   buildRegistry(a.spec),
+		Registry:   reg,
 		WriteTools: tools.NewRegistry(wt...),
 		WriteToolsForDir: func(dir string) *tools.Registry {
 			// Candidates get the same skill tool as the main solver - the
@@ -442,7 +456,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 		},
 	}
 
-	err := runOrchestrator(runCtx, d)
+	err = runOrchestrator(runCtx, d)
 
 	return mapFSMResult(ctx, a, err)
 }
@@ -816,7 +830,11 @@ func buildSkillTool(spec RunSpec, ops CardOps) tools.Tool {
 // with precedence: (1) spec.Model (the trigger's default_model), when non-empty;
 // (2) spec.DefaultModel (the serve-config default); (3) config.DefaultCapableModel
 // (a compiled-in guard).
-func buildRegistry(spec RunSpec) *registry.Registry {
+//
+// spec.SelectorTierBars carries the operator's quality ladder. An invalid
+// ladder is returned as an error so the worker exits rather than running the
+// card on a half-understood ladder.
+func buildRegistry(spec RunSpec) (*registry.Registry, error) {
 	capable := spec.Model
 
 	if capable == "" {
@@ -827,7 +845,13 @@ func buildRegistry(spec RunSpec) *registry.Registry {
 		capable = config.DefaultCapableModel
 	}
 
-	return registry.FromSelection(spec.Selection, capable, spec.SelectorPriceHeadroom, spec.MaxCapability)
+	bars, err := registry.TierBarsFromStrings(spec.SelectorTierBars)
+	if err != nil {
+		return nil, fmt.Errorf("build registry: %w", err)
+	}
+
+	return registry.FromSelection(spec.Selection, capable, spec.SelectorPriceHeadroom, spec.MaxCapability).
+		WithTierBars(bars), nil
 }
 
 // declaredVerify maps the protocol verify config onto the orchestrator-local

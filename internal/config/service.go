@@ -14,6 +14,7 @@ import (
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/providers/structs"
 	"github.com/knadh/koanf/v2"
+	"github.com/mhersson/contextmatrix-agent/internal/registry"
 )
 
 // reconcileCap is the ceiling on ContainerTimeout. ContextMatrix's reconcile
@@ -126,6 +127,13 @@ type ServiceConfig struct {
 	// (1.5) applies when the key is absent from config and env.
 	SelectorPriceHeadroom float64
 
+	// SelectorTierBars is the operator's quality ladder for the model
+	// selector, keyed by complexity tier name. Workers receive it as
+	// CMX_SELECTOR_TIER_BARS (JSON-encoded). Empty uses registry.DefaultTierBars.
+	// Validate rejects a ladder registry.TierBarsFromStrings cannot parse, so a
+	// bad ladder fails at serve startup rather than per card.
+	SelectorTierBars map[string]float64
+
 	// AdminPort is the admin listener that serves Prometheus /metrics. Zero
 	// disables it (the default). Workers never see it; it is host-side only.
 	AdminPort int
@@ -153,42 +161,43 @@ type ServiceConfig struct {
 // time.ParseDuration. Keeping the wire shape separate from ServiceConfig means
 // the typed public struct never carries half-parsed values.
 type serviceRaw struct {
-	ContextMatrixURL          string            `koanf:"contextmatrix_url"`
-	ContainerContextMatrixURL string            `koanf:"container_contextmatrix_url"`
-	APIKey                    string            `koanf:"api_key"`
-	MCPAPIKey                 string            `koanf:"mcp_api_key"`
-	Port                      int               `koanf:"port"`
-	AdminPort                 int               `koanf:"admin_port"`
-	AdminBindAddr             string            `koanf:"admin_bind_addr"`
-	MetricsToken              string            `koanf:"metrics_token"`
-	BaseImage                 string            `koanf:"base_image"`
-	ImagePullPolicy           string            `koanf:"image_pull_policy"`
-	ImageListFilters          []string          `koanf:"image_list_filters"`
-	MaxConcurrent             int               `koanf:"max_concurrent"`
-	ContainerTimeout          string            `koanf:"container_timeout"`
-	ContainerMemoryLimit      int64             `koanf:"container_memory_limit"`
-	ContainerPidsLimit        int64             `koanf:"container_pids_limit"`
-	IdleOutputTimeout         string            `koanf:"idle_output_timeout"`
-	IdleWatchdogInterval      string            `koanf:"idle_watchdog_interval"`
-	SecretsDir                string            `koanf:"secrets_dir"`
-	CACertFile                string            `koanf:"ca_cert_file"`
-	LogDir                    string            `koanf:"log_dir"`
-	WorkerExtraEnv            map[string]string `koanf:"worker_extra_env"`
-	ReplaySkewSeconds         int               `koanf:"webhook_replay_skew_seconds"`
-	ReplayCacheSize           int               `koanf:"webhook_replay_cache_size"`
-	MessageDedupTTLSeconds    int               `koanf:"message_dedup_ttl_seconds"`
-	MessageDedupCacheSize     int               `koanf:"message_dedup_cache_size"`
-	BashTimeoutMaxSeconds     int               `koanf:"bash_timeout_max_seconds"`
-	ToolOutputMaxBytes        int               `koanf:"tool_output_max_bytes"`
-	DefaultModel              string            `koanf:"default_model"`
-	ReasoningEffort           string            `koanf:"reasoning_effort"`
-	LogLevel                  string            `koanf:"log_level"`
-	MaxCardCost               float64           `koanf:"max_card_cost"`
-	SelectorPriceHeadroom     float64           `koanf:"selector_price_headroom"`
-	CompactionEnabled         bool              `koanf:"compaction_enabled"`
-	CompactionThreshold       float64           `koanf:"compaction_threshold"`
-	CompactionKeepRecentTurns int               `koanf:"compaction_keep_recent_turns"`
-	ReviewAttemptsCap         int               `koanf:"review_attempts_cap"`
+	ContextMatrixURL          string             `koanf:"contextmatrix_url"`
+	ContainerContextMatrixURL string             `koanf:"container_contextmatrix_url"`
+	APIKey                    string             `koanf:"api_key"`
+	MCPAPIKey                 string             `koanf:"mcp_api_key"`
+	Port                      int                `koanf:"port"`
+	AdminPort                 int                `koanf:"admin_port"`
+	AdminBindAddr             string             `koanf:"admin_bind_addr"`
+	MetricsToken              string             `koanf:"metrics_token"`
+	BaseImage                 string             `koanf:"base_image"`
+	ImagePullPolicy           string             `koanf:"image_pull_policy"`
+	ImageListFilters          []string           `koanf:"image_list_filters"`
+	MaxConcurrent             int                `koanf:"max_concurrent"`
+	ContainerTimeout          string             `koanf:"container_timeout"`
+	ContainerMemoryLimit      int64              `koanf:"container_memory_limit"`
+	ContainerPidsLimit        int64              `koanf:"container_pids_limit"`
+	IdleOutputTimeout         string             `koanf:"idle_output_timeout"`
+	IdleWatchdogInterval      string             `koanf:"idle_watchdog_interval"`
+	SecretsDir                string             `koanf:"secrets_dir"`
+	CACertFile                string             `koanf:"ca_cert_file"`
+	LogDir                    string             `koanf:"log_dir"`
+	WorkerExtraEnv            map[string]string  `koanf:"worker_extra_env"`
+	ReplaySkewSeconds         int                `koanf:"webhook_replay_skew_seconds"`
+	ReplayCacheSize           int                `koanf:"webhook_replay_cache_size"`
+	MessageDedupTTLSeconds    int                `koanf:"message_dedup_ttl_seconds"`
+	MessageDedupCacheSize     int                `koanf:"message_dedup_cache_size"`
+	BashTimeoutMaxSeconds     int                `koanf:"bash_timeout_max_seconds"`
+	ToolOutputMaxBytes        int                `koanf:"tool_output_max_bytes"`
+	DefaultModel              string             `koanf:"default_model"`
+	ReasoningEffort           string             `koanf:"reasoning_effort"`
+	LogLevel                  string             `koanf:"log_level"`
+	MaxCardCost               float64            `koanf:"max_card_cost"`
+	SelectorPriceHeadroom     float64            `koanf:"selector_price_headroom"`
+	SelectorTierBars          map[string]float64 `koanf:"selector_tier_bars"`
+	CompactionEnabled         bool               `koanf:"compaction_enabled"`
+	CompactionThreshold       float64            `koanf:"compaction_threshold"`
+	CompactionKeepRecentTurns int                `koanf:"compaction_keep_recent_turns"`
+	ReviewAttemptsCap         int                `koanf:"review_attempts_cap"`
 }
 
 // serviceDefaults is the lowest-precedence layer. Durations are wire-form
@@ -315,6 +324,7 @@ func (r serviceRaw) toConfig() (*ServiceConfig, error) {
 		LogLevel:                  r.LogLevel,
 		MaxCardCost:               r.MaxCardCost,
 		SelectorPriceHeadroom:     r.SelectorPriceHeadroom,
+		SelectorTierBars:          r.SelectorTierBars,
 		ReviewAttemptsCap:         r.ReviewAttemptsCap,
 		Compaction: CompactionConfig{
 			Enabled:         r.CompactionEnabled,
@@ -476,6 +486,10 @@ func (c *ServiceConfig) Validate() error {
 			"selector_price_headroom must be 0 (use worker default) or >= 1 (band multiplier), got %g",
 			c.SelectorPriceHeadroom,
 		)
+	}
+
+	if _, err := registry.TierBarsFromStrings(c.SelectorTierBars); err != nil {
+		return fmt.Errorf("selector_tier_bars: %w", err)
 	}
 
 	if c.CACertFile != "" {

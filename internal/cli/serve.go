@@ -400,6 +400,7 @@ func launchEnv(cfg *config.ServiceConfig, secretsHostDir string) webhook.LaunchE
 		ReasoningEffort:           cfg.ReasoningEffort,
 		MaxCardCost:               cfg.MaxCardCost,
 		SelectorPriceHeadroom:     cfg.SelectorPriceHeadroom,
+		SelectorTierBars:          cfg.SelectorTierBars,
 		ReviewAttemptsCap:         cfg.ReviewAttemptsCap,
 		CompactionEnabled:         cfg.Compaction.Enabled,
 		CompactionThreshold:       cfg.Compaction.Threshold,

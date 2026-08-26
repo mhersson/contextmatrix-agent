@@ -1523,10 +1523,49 @@ func TestBuildRegistryFallbackPrecedence(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := buildRegistry(tt.spec)
+			r, err := buildRegistry(tt.spec)
+			require.NoError(t, err)
+
 			got := r.SelectByComplexity(in)
 			assert.Equal(t, tt.want, got.Model,
 				"buildRegistry capable default: want %q, got %q", tt.want, got.Model)
 		})
 	}
+}
+
+// TestBuildRegistryThreadsTierBars proves the operator ladder actually reaches
+// the registry buildRegistry returns, not just the FromSelection call: the
+// registry-level tests never exercise buildRegistry, so a build that parses
+// SelectorTierBars but drops the WithTierBars chain passes every test in
+// that package while the knob does nothing.
+func TestBuildRegistryThreadsTierBars(t *testing.T) {
+	spec := RunSpec{
+		Selection: &protocol.SelectionContext{
+			Candidates: []protocol.CandidateModel{
+				{
+					Slug:                  "mid/model",
+					PromptPricePerTok:     0.000001,
+					CompletionPricePerTok: 0.000002,
+					ContextWindow:         200000,
+					CoderPrior:            0.85,
+					ReviewerPrior:         0.85,
+				},
+			},
+		},
+		// Raising complex above the model's 0.85 prior (and critical to match,
+		// keeping the ladder monotone) means a complex request cannot be met
+		// directly and must clamp down to moderate (default bar 0.76, which
+		// 0.85 clears).
+		SelectorTierBars: map[string]float64{"complex": 0.99, "critical": 0.99},
+	}
+
+	r, err := buildRegistry(spec)
+	require.NoError(t, err)
+
+	got := r.SelectByComplexity(registry.SelectInput{Role: registry.RoleCoder, Tier: registry.TierComplex})
+
+	require.True(t, got.OK)
+	assert.False(t, got.AtBar(),
+		"the operator's elevated complex bar must not be silently satisfied by an unthreaded default ladder")
+	assert.Equal(t, registry.TierModerate, got.MetTier)
 }
