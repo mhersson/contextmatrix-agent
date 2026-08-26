@@ -54,10 +54,10 @@ the Temurin block.
 - Re-declare `CMX_READ_ONLY_ROOTS` when you add a toolchain. It is the
   colon-separated list of absolute trees the agent's `read`, `grep` and `glob`
   tools may resolve outside the workspace, so the shell-less planning,
-  diagnosis and review phases can read dependency source instead of guessing at
-  an API. Your image inherits the base stage's value, which names only that
-  stage's toolchains, and setting it **replaces** the list rather than adding to
-  it - repeat the inherited paths alongside your own. Three rules:
+  diagnosis, review and checkpoint phases can read dependency source instead of
+  guessing at an API. Your image inherits the base stage's value, which names
+  only that stage's toolchains, and setting it **replaces** the list rather than
+  adding to it - repeat the inherited paths alongside your own. Three rules:
   - Use absolute paths, and `mkdir -p` each one in the image. A root that does
     not exist when the worker starts is dropped silently, and the phases then
     behave exactly as they did before, with nothing in the run to say why.

@@ -146,12 +146,13 @@ secrets_dir: /var/run/cm-agent/secrets
 # CMX_READ_ONLY_ROOTS belongs here when the image's own declaration is wrong for
 # your deployment. It is a colon-separated list of absolute trees the worker's
 # read, grep and glob tools may resolve in addition to the workspace, so the
-# shell-less planning and diagnosis phases can read dependency source instead of
-# guessing at its API. Every worker image already declares where its own
-# toolchain caches source; a value set here replaces that declaration. Writes
-# are never widened - edit, write and bash stay inside the workspace - and a
-# root that is relative, unresolvable, the filesystem root, or a parent of the
-# workspace is dropped, so a mistake here narrows access, never widens it.
+# shell-less planning, diagnosis, review and checkpoint phases can read
+# dependency source instead of guessing at an API. Every worker image already
+# declares where its own toolchain caches source; a value set here replaces that
+# declaration. Writes are never widened - edit, write and bash stay inside the
+# workspace - and a root that is relative, unresolvable, the filesystem root, or
+# a parent of the workspace is dropped, so a mistake here narrows access, never
+# widens it.
 #
 # worker_extra_env:
 #   HTTP_PROXY: http://proxy.example.com:3128

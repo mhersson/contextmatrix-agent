@@ -203,11 +203,12 @@ RUN set -eux; \
 # Read-only roots. Each final stage declares in CMX_READ_ONLY_ROOTS the absolute
 # trees where ITS OWN toolchain keeps dependency source. The agent reads the list
 # once at worker start and widens the read, grep and glob tools of every phase to
-# those trees, so the shell-less planning, diagnosis and review phases can read
-# the APIs they are working against; edit, write and bash stay confined to the
-# workspace. These are image facts, which is why they live here rather than in
-# the agent's source, and an operator replaces the list per deployment through
-# worker_extra_env. A stage that declares nothing behaves exactly as before.
+# those trees, so the shell-less planning, diagnosis, review and checkpoint
+# phases can read dependency source instead of guessing at an API; edit, write
+# and bash stay confined to the workspace. These are image facts, which is why
+# they live here rather than in the agent's source, and an operator replaces the
+# list per deployment through worker_extra_env. A stage that declares nothing
+# behaves exactly as before.
 #
 # A declared directory must exist when the worker starts or it is dropped as
 # unresolvable, so caches the run populates later are created empty first. Every
