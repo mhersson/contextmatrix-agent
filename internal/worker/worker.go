@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/mhersson/contextmatrix-agent/internal/attempt"
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/config"
 	"github.com/mhersson/contextmatrix-agent/internal/orchestrator"
@@ -54,6 +55,13 @@ type RunSpec struct {
 	Interactive bool   // CM_INTERACTIVE ("true")
 	BestOfN     int    // CM_BEST_OF_N; >= 2 races N candidate implementations (0 = normal run)
 	Model       string // CM_MODEL (optional; honored if catalog-resolvable; also the first-choice selector fallback in buildRegistry)
+
+	// Attempt is this container's ordinal for the card: 1 for the first run, 2
+	// for a container that replaced it, and so on (CMX_ATTEMPT). It is stamped
+	// on every transcript line, so a card whose container restarted has two
+	// separable runs in one log rather than two runs whose event sequences both
+	// start at 1.
+	Attempt int
 
 	// Mob configures mob session discussions for this run: scalar knobs from
 	// CM_MOB_* env, guest specs (bearer tokens inside) from the mounted
@@ -441,7 +449,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 		// The work command writes the JSONL transcript to process stdout;
 		// seat-debug lines belong on the same stream (kind-rewritten so the
 		// log bridge skips them).
-		SeatDebugWriter: os.Stdout,
+		SeatDebugWriter: attempt.NewWriter(os.Stdout, a.spec.Attempt),
 		Cfg: orchestrator.Config{
 			Project:           a.spec.Project,
 			CardID:            a.spec.CardID,

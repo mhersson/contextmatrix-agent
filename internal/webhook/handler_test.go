@@ -2137,3 +2137,58 @@ func TestAdminAuth_BearerTokenFromConfig(t *testing.T) {
 	assert.True(t, ran)
 	assert.Equal(t, http.StatusOK, w.Code)
 }
+
+// TestBuildLaunchSpec_AttemptEnv pins the only hop that tells a container which
+// attempt it is: without it the transcript of a restarted run is
+// indistinguishable from the first one. A nil counter (any construction path
+// that does not wire one) and a first attempt both leave the var out, so the
+// worker's own default applies.
+func TestBuildLaunchSpec_AttemptEnv(t *testing.T) {
+	newServer := func(next func(project, cardID string) int) *Server {
+		return NewServer(Config{
+			APIKey:      "k",
+			Executor:    &fakeExecutor{},
+			Tracker:     executor.NewTracker(1),
+			NextAttempt: next,
+			LaunchEnv:   LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"},
+		})
+	}
+
+	t.Run("a later attempt is forwarded", func(t *testing.T) {
+		spec := newServer(func(string, string) int { return 3 }).
+			buildLaunchSpec(protocol.TriggerPayload{CardID: "C1", Project: "p"}, "corr", "")
+
+		assert.Contains(t, spec.Env, "CMX_ATTEMPT=3")
+	})
+
+	t.Run("the first attempt is omitted", func(t *testing.T) {
+		spec := newServer(func(string, string) int { return 1 }).
+			buildLaunchSpec(protocol.TriggerPayload{CardID: "C1", Project: "p"}, "corr", "")
+
+		for _, e := range spec.Env {
+			assert.NotContains(t, e, "CMX_ATTEMPT")
+		}
+	})
+
+	t.Run("no counter wired is the first attempt", func(t *testing.T) {
+		spec := newServer(nil).buildLaunchSpec(protocol.TriggerPayload{CardID: "C1", Project: "p"}, "corr", "")
+
+		for _, e := range spec.Env {
+			assert.NotContains(t, e, "CMX_ATTEMPT")
+		}
+	})
+
+	t.Run("the counter is asked about this card", func(t *testing.T) {
+		var gotProject, gotCard string
+
+		spec := newServer(func(project, cardID string) int {
+			gotProject, gotCard = project, cardID
+
+			return 2
+		}).buildLaunchSpec(protocol.TriggerPayload{CardID: "C7", Project: "beta"}, "corr", "")
+
+		assert.Equal(t, "beta", gotProject)
+		assert.Equal(t, "C7", gotCard)
+		assert.Contains(t, spec.Env, "CMX_ATTEMPT=2")
+	})
+}

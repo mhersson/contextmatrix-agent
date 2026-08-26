@@ -199,3 +199,72 @@ func TestFilePermissions(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o700), di.Mode().Perm())
 }
+
+func TestNextAttemptCountsRunHeaders(t *testing.T) {
+	dir := t.TempDir()
+	l := New(dir, testLogger())
+
+	assert.Equal(t, 1, l.NextAttempt("proj", "CARD-1"), "a card with no log has never run")
+
+	l.Begin("proj", "CARD-1", "aaaaaaaaaaaa")
+	l.Write("proj", "CARD-1", []byte(`{"seq":1,"kind":"state_change"}`), false)
+	l.End("proj", "CARD-1", 0)
+
+	assert.Equal(t, 2, l.NextAttempt("proj", "CARD-1"))
+
+	l.Begin("proj", "CARD-1", "bbbbbbbbbbbb")
+	l.End("proj", "CARD-1", 137)
+
+	assert.Equal(t, 3, l.NextAttempt("proj", "CARD-1"))
+	assert.Equal(t, 1, l.NextAttempt("proj", "CARD-2"), "the count is per card")
+	assert.Equal(t, 1, l.NextAttempt("other", "CARD-1"), "the count is per project")
+}
+
+// A container that dies leaves a header with no footer - exactly the restart
+// case the ordinal exists for - so the count must include it.
+func TestNextAttemptCountsAnUnclosedRun(t *testing.T) {
+	dir := t.TempDir()
+	l := New(dir, testLogger())
+
+	l.Begin("proj", "CARD-1", "aaaaaaaaaaaa")
+
+	assert.Equal(t, 2, l.NextAttempt("proj", "CARD-1"))
+}
+
+// Container output lands in the same file as the headers, so a line that
+// merely quotes the header text must not be counted as a run.
+func TestNextAttemptCountsOnlyLineLeadingHeaders(t *testing.T) {
+	dir := t.TempDir()
+	l := New(dir, testLogger())
+
+	l.Begin("proj", "CARD-1", "aaaaaaaaaaaa")
+	l.Write("proj", "CARD-1", []byte(`{"seq":1,"data":{"text":"==== run started 2026-08-25T00:00:00Z container=x ===="}}`), false)
+	l.Write("proj", "CARD-1", []byte("tail of the log: ==== run started later ===="), true)
+	l.End("proj", "CARD-1", 0)
+
+	assert.Equal(t, 2, l.NextAttempt("proj", "CARD-1"))
+}
+
+// Transcript lines can be far larger than any fixed scan buffer (tool output
+// alone defaults to 128 KB), so the count must not depend on line length.
+func TestNextAttemptCountsPastVeryLongLines(t *testing.T) {
+	dir := t.TempDir()
+	l := New(dir, testLogger())
+
+	l.Begin("proj", "CARD-1", "aaaaaaaaaaaa")
+	l.Write("proj", "CARD-1", []byte(`{"data":"`+strings.Repeat("x", 256<<10)+`"}`), false)
+	l.End("proj", "CARD-1", 0)
+
+	l.Begin("proj", "CARD-1", "bbbbbbbbbbbb")
+	l.Write("proj", "CARD-1", []byte(strings.Repeat("y", 300<<10)), true)
+	l.End("proj", "CARD-1", 0)
+
+	assert.Equal(t, 3, l.NextAttempt("proj", "CARD-1"))
+}
+
+func TestNextAttemptDisabledAndNilAreFirstAttempt(t *testing.T) {
+	var nilLogger *Logger
+
+	assert.Equal(t, 1, nilLogger.NextAttempt("proj", "CARD-1"))
+	assert.Equal(t, 1, New("", testLogger()).NextAttempt("proj", "CARD-1"))
+}

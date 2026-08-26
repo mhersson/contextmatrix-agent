@@ -756,3 +756,37 @@ func TestSpecFromEnvParsesReadOnlyRoots(t *testing.T) {
 		})
 	}
 }
+
+func TestSpecFromEnv_Attempt(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  int
+	}{
+		{"absent is the first attempt", "", 1},
+		{"zero is the first attempt", "0", 1},
+		{"negative is the first attempt", "-3", 1},
+		{"first attempt", "1", 1},
+		{"later attempt", "4", 4},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setRequired(t)
+			t.Setenv("CMX_ATTEMPT", tc.value)
+
+			spec, err := specFromEnv()
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, spec.Attempt)
+		})
+	}
+
+	t.Run("garbage is an error", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("CMX_ATTEMPT", "two")
+
+		_, err := specFromEnv()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "CMX_ATTEMPT")
+	})
+}

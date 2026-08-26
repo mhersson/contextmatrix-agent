@@ -192,6 +192,14 @@ type Config struct {
 
 	LaunchEnv LaunchEnv
 
+	// NextAttempt returns the ordinal of the run about to start for a card: 1
+	// the first time, 2 for a container that replaces it, and so on. It travels
+	// to the worker as CMX_ATTEMPT and is stamped on every transcript line,
+	// which is the only thing that separates a restarted run's events from the
+	// earlier ones - the event sequence itself restarts at 1. Nil reads as
+	// "first attempt", so a server built without one still launches.
+	NextAttempt func(project, cardID string) int
+
 	Replay *webhookcore.ReplayCache
 	Dedup  *DedupCache
 
@@ -227,6 +235,10 @@ type Server struct {
 	credentials    CredentialProvisioner
 
 	launchEnv LaunchEnv
+
+	// nextAttempt counts the card's prior container runs. Nil is the first
+	// attempt.
+	nextAttempt func(project, cardID string) int
 
 	dedup *DedupCache
 
@@ -300,6 +312,7 @@ func NewServer(cfg Config) *Server {
 		credentials:     cfg.Credentials,
 		sessionRegistry: cfg.SessionSecrets,
 		launchEnv:       cfg.LaunchEnv,
+		nextAttempt:     cfg.NextAttempt,
 		dedup:           dedup,
 		logger:          logger,
 	}
@@ -633,6 +646,16 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 
 	if p.MaxCapability {
 		env = append(env, "CM_MAX_CAPABILITY=true")
+	}
+
+	// A container that replaces a dead one writes into the same per-card log,
+	// with an event sequence that starts over at 1. The ordinal is what tells
+	// the two apart. The first attempt is left unmarked: the worker reads an
+	// absent value as 1.
+	if s.nextAttempt != nil {
+		if n := s.nextAttempt(p.Project, p.CardID); n > 1 {
+			env = append(env, "CMX_ATTEMPT="+strconv.Itoa(n))
+		}
 	}
 
 	if p.BestOfN > 1 {

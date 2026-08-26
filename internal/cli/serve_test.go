@@ -15,6 +15,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/config"
 	"github.com/mhersson/contextmatrix-agent/internal/filelog"
 	"github.com/mhersson/contextmatrix-agent/internal/secrets"
+	"github.com/mhersson/contextmatrix-agent/internal/webhook"
 	"github.com/mhersson/contextmatrix-backendkit/logbridge"
 	protocol "github.com/mhersson/contextmatrix-protocol"
 )
@@ -186,4 +187,23 @@ func TestServeCommandRegistered(t *testing.T) {
 	}
 
 	assert.True(t, found, "serve command should be registered on root")
+}
+
+// The file logger is the only durable record of a card's prior runs, and the
+// webhook server is what puts the ordinal in the container env - but the two
+// never meet unless serve wires them together. This pins that seam: the
+// counter the webhook config accepts is the one that counts real run headers.
+func TestNextAttemptWiresFileLoggerIntoWebhookConfig(t *testing.T) {
+	dir := t.TempDir()
+	files := filelog.New(dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	cfg := webhook.Config{NextAttempt: files.NextAttempt}
+	require.NotNil(t, cfg.NextAttempt)
+
+	assert.Equal(t, 1, cfg.NextAttempt("proj", "CARD-1"))
+
+	files.Begin("proj", "CARD-1", "abcdef012345")
+	files.End("proj", "CARD-1", 0)
+
+	assert.Equal(t, 2, cfg.NextAttempt("proj", "CARD-1"))
 }

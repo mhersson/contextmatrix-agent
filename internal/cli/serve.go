@@ -196,6 +196,7 @@ func runServe(ctx context.Context, configPath string) error {
 		Images:           exec,
 		ImageListFilters: cfg.ImageListFilters,
 		LaunchEnv:        launchEnv(cfg, filepath.Join(cfg.SecretsDir, "shared")),
+		NextAttempt:      files.NextAttempt,
 		Replay:           replay,
 		Dedup:            dedup,
 		Draining:         &draining,

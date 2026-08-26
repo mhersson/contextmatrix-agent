@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mhersson/contextmatrix-agent/internal/attempt"
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/config"
 	"github.com/mhersson/contextmatrix-agent/internal/secrets"
@@ -92,7 +93,10 @@ func newWorkCmd() *cobra.Command {
 			}
 
 			// human off (io.Discard), JSONL → stdout for the service log bridge.
-			emit := events.NewEmitter(io.Discard, cmd.OutOrStdout())
+			// The attempt writer stamps this container's ordinal onto every
+			// event line, so a card whose container was restarted has two
+			// separable runs in one log instead of two colliding sequences.
+			emit := events.NewEmitter(io.Discard, attempt.NewWriter(cmd.OutOrStdout(), spec.Attempt))
 
 			// When an extra CA is mounted, the worker's own outbound TLS (LLM
 			// client + MCP connection) must trust it. Build the injections once
@@ -211,6 +215,16 @@ func specFromEnv() (worker.RunSpec, error) {
 	if err != nil {
 		return worker.RunSpec{}, err
 	}
+
+	// The launcher marks a re-run of a card; an unmarked run is the first one.
+	// A value below 1 means the same thing, so it lands on 1 rather than
+	// producing an ordinal no consumer can order.
+	attemptOrdinal, err := envInt("CMX_ATTEMPT", 1)
+	if err != nil {
+		return worker.RunSpec{}, err
+	}
+
+	attemptOrdinal = max(attemptOrdinal, 1)
 
 	defaults := config.Defaults()
 
@@ -380,6 +394,7 @@ func specFromEnv() (worker.RunSpec, error) {
 		Interactive:               os.Getenv("CM_INTERACTIVE") == "true",
 		MaxCapability:             os.Getenv("CM_MAX_CAPABILITY") == "true",
 		BestOfN:                   bestOfN,
+		Attempt:                   attemptOrdinal,
 		Mob:                       mobSpec,
 		BashTimeoutMax:            bashTimeoutMax,
 		ToolOutputMax:             toolOutputMax,
