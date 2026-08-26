@@ -798,7 +798,9 @@ func (o *run) copilotFixRound(ctx context.Context, st *gatesState, findings []co
 		st.CopilotRounds, gatesRoundsCap, len(findings)),
 		map[string]any{"round": st.CopilotRounds, "cap": gatesRoundsCap, "findings": len(findings)})
 
-	committed, err := o.runFix(ctx, copilotFixFindings(findings), st.CopilotRounds, "", false)
+	// FixTier is deliberately left empty: a gate finding is not scoped to one
+	// review round, so the card bar is the right fallback.
+	committed, err := o.runFix(ctx, fixRequest{Findings: copilotFixFindings(findings), Round: st.CopilotRounds})
 	if err != nil {
 		if reason := gateResourcePark(err, gatesCopilotFixBudgetParkReason, gatesCopilotTurnCapParkReason); reason != "" {
 			return o.parkGates(ctx, st, reason)
@@ -1377,7 +1379,9 @@ func (o *run) ciFixRound(ctx context.Context, prURL string, st *gatesState, fail
 		return o.parkGates(ctx, st, gatesBudgetParkReason)
 	}
 
-	committed, err := o.runFix(ctx, ciFixFindings(digest), st.CIRounds, "", false)
+	// FixTier is deliberately left empty: a gate finding is not scoped to one
+	// review round, so the card bar is the right fallback.
+	committed, err := o.runFix(ctx, fixRequest{Findings: ciFixFindings(digest), Round: st.CIRounds})
 	if err != nil {
 		// A fix that ran out of budget or turns takes the same park arm as the
 		// ledger check above - only the reason on the card differs.

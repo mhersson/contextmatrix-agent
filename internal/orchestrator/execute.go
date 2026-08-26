@@ -237,7 +237,7 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 		fixVerifyLine(plan), o.tc.Title, verifyFailedFindings(plan, vres.Output))
 
 	// Round 0: this is not a review round and has no round number.
-	if _, ferr := o.runFixModel(ctx, prompt, 0, string(sub.Sizing.Bar), false); ferr != nil {
+	if _, ferr := o.runFixModel(ctx, prompt, fixRequest{Round: 0, FixTier: string(sub.Sizing.Bar)}); ferr != nil {
 		return ferr
 	}
 

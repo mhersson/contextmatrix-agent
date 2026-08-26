@@ -283,7 +283,7 @@ func TestFixCoderSelectionReachesTheTranscript(t *testing.T) {
 	d.Emit = events.NewEmitter(nil, &transcript)
 	o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", State: "review"}, 0)
 
-	_, err := o.runFixModel(context.Background(), "fix prompt", 1, "complex", false)
+	_, err := o.runFixModel(context.Background(), "fix prompt", fixRequest{Round: 1, FixTier: "complex"})
 	require.NoError(t, err)
 
 	sels := selectionsForPhase(modelSelections(t, &transcript), "fix coder")

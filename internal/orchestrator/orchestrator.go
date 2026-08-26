@@ -381,14 +381,24 @@ type run struct {
 
 	// fixFailed is the set of fix-coder models whose review fix round failed
 	// this run - it landed no commit, or the next round's verify was still red.
-	// Every later fix pick excludes them; while fixEscalate is set the pick also
-	// climbs one tier and prefers a vendor that has not failed. fixFailReason is
-	// the last failure's wording for the card log; lastFixModel is the model the
-	// most recent fix round ran on.
-	fixFailed     map[string]bool
-	fixEscalate   bool
-	fixFailReason string
-	lastFixModel  string
+	// Every later fix pick excludes them.
+	//
+	// fixBarSteps and fixBudgetSteps are the two correction counters, both
+	// MONOTONE for the whole run. A round that produced nothing or left the
+	// verify red is quality evidence and climbs the bar; a round that ran out of
+	// turns is volume evidence and widens the budget without blaming the model.
+	// Neither is ever lowered: runFix is shared with pr_gates, which runs AFTER
+	// review approval, so clearing them on an approving verdict handed the first
+	// gate round the model that had already failed. A call site that must not
+	// escalate says so per-call, via fixRequest.NoEscalate.
+	//
+	// fixFailReason is the last failure's wording for the card log; lastFixModel
+	// is the model the most recent fix round ran on.
+	fixFailed      map[string]bool
+	fixBarSteps    int
+	fixBudgetSteps int
+	fixFailReason  string
+	lastFixModel   string
 
 	// excluded is the per-card set of models proven harness-incapable on this run.
 	// It is threaded into every SelectInput.Exclude (coder selection and the review

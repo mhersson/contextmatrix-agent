@@ -230,7 +230,6 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 
 		if approved {
 			o.reviewSummary = findings // synthesis verdict summary (plus any surviving fixes), for the PR body
-			o.fixEscalate = false
 
 			// Findings survived the critique round despite approval: run exactly
 			// one non-escalating cleanup pass and finish either way. This is not
@@ -253,7 +252,7 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 					return nil
 				}
 
-				committed, ferr := o.runFix(ctx, findings, round, fixTier, false)
+				committed, ferr := o.runFix(ctx, fixRequest{Findings: findings, Round: round, FixTier: fixTier, NoEscalate: true})
 				if ferr != nil {
 					if isParkError(ferr) {
 						d.logCard(ctx, "review: approved with %d surviving finding(s), but the cleanup fix pass parked - stopping: %s",
@@ -295,7 +294,7 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 			return err
 		}
 
-		committed, err := o.runFix(ctx, findings, round, fixTier, false)
+		committed, err := o.runFix(ctx, fixRequest{Findings: findings, Round: round, FixTier: fixTier})
 		if err != nil {
 			return err
 		}
@@ -384,7 +383,7 @@ func (o *run) runReviewHITL(ctx context.Context, plan verifyPlan) error {
 				return fmt.Errorf("increment review attempts: %w", err)
 			}
 
-			if _, err := o.runFix(ctx, findings, round, fixTier, false); err != nil {
+			if _, err := o.runFix(ctx, fixRequest{Findings: findings, Round: round, FixTier: fixTier}); err != nil {
 				return err
 			}
 
@@ -403,7 +402,7 @@ func (o *run) runReviewHITL(ctx context.Context, plan verifyPlan) error {
 			return fmt.Errorf("increment review attempts: %w", err)
 		}
 
-		if _, err := o.runFix(ctx, mergeFeedback(findings, fb), round, fixTier, false); err != nil {
+		if _, err := o.runFix(ctx, fixRequest{Findings: mergeFeedback(findings, fb), Round: round, FixTier: fixTier}); err != nil {
 			return err
 		}
 	}
@@ -501,7 +500,7 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 
 	// Gated strong fix - runs only because the authoritative review confirmed
 	// real issues.
-	if _, err := o.runFix(ctx, findings, round, fixTier, true); err != nil {
+	if _, err := o.runFix(ctx, fixRequest{Findings: findings, Round: round, FixTier: fixTier, Authoritative: true}); err != nil {
 		return err
 	}
 
@@ -987,13 +986,13 @@ func (o *run) synthesize(ctx context.Context, findings string, authoritative boo
 // immediately. The successful run's output is consumed inside the harness loop
 // (the fixup targets files parsed from the findings, not the model output), so
 // it returns only the model that ran and the error.
-func (o *run) runFixModel(ctx context.Context, prompt string, round int, fixTier string, authoritative bool) (string, error) {
+func (o *run) runFixModel(ctx context.Context, prompt string, req fixRequest) (string, error) {
 	d := o.d
 	cfg := d.Cfg
-	tier := o.fixTierEffective(fixTier, authoritative)
+	fs := o.fixSizing(req)
 
 	for attempt := 0; attempt <= reselectCap; attempt++ {
-		p, rerr := o.resolveFixModel(ctx, fixTier, authoritative)
+		p, rerr := o.resolveFixModel(ctx, req)
 		if rerr != nil {
 			return "", rerr
 		}
@@ -1002,24 +1001,25 @@ func (o *run) runFixModel(ctx context.Context, prompt string, round int, fixTier
 
 		o.noteShortfall(ctx, "fix coder", "", p)
 
-		if o.fixEscalate {
-			d.logCard(ctx, "fix coder %s selected for round %d fixes (tier=%s) - escalated after a fix round that %s",
-				model, round, tier, o.fixFailReason)
+		if o.fixBarSteps > 0 {
+			d.logCard(ctx, "fix coder %s selected for round %d fixes (bar=%s, turns=%s) - escalated after a fix round that %s",
+				model, req.Round, fs.Bar, budgetLabel(fs.Budget), o.fixFailReason)
 		} else {
-			d.logCard(ctx, "fix coder %s selected for round %d fixes (tier=%s)", model, round, tier)
+			d.logCard(ctx, "fix coder %s selected for round %d fixes (bar=%s, turns=%s)",
+				model, req.Round, fs.Bar, budgetLabel(fs.Budget))
 		}
 
 		// The escalated round exists to reach a STRONGER model after a failure.
 		// When the climb does not clear the bar it climbed to, it bought
 		// nothing; the round still runs on a pick that is at least fresh, but
 		// the no-op is no longer invisible.
-		if o.fixEscalate && !p.AtBar() && p.Source != registry.SourcePinned &&
-			o.firstNote("fix-escalation-noop/"+string(tier)+"/"+model) {
+		if o.fixBarSteps > 0 && !p.AtBar() && p.Source != registry.SourcePinned &&
+			o.firstNote("fix-escalation-noop/"+string(fs.Bar)+"/"+model) {
 			d.logCard(ctx, "fix escalation to %s bought nothing - %s does not clear it (%s); running anyway",
-				tier, model, priorClause(p))
+				fs.Bar, model, priorClause(p))
 		}
 
-		res, dur, err := o.runModelCoder(ctx, d.WriteTools, prompt, model, fixWrapUpMessage, seedBudgetStep(tier))
+		res, dur, err := o.runModelCoder(ctx, d.WriteTools, prompt, model, fixWrapUpMessage, fs.Budget)
 
 		o.spendAndReport(ctx, o.ledger, cfg.CardID, "review: report fix usage failed", res, model, "main", dur)
 
@@ -1033,7 +1033,10 @@ func (o *run) runFixModel(ctx context.Context, prompt string, round int, fixTier
 		}
 
 		if err != nil {
-			return "", fmt.Errorf("fix run: %w", err)
+			// The slug rides out with the error: the caller attributes the round
+			// to the model that ran it, and a failed round that reported no model
+			// leaves the exclusion set empty forever.
+			return model, fmt.Errorf("fix run: %w", err)
 		}
 
 		return model, nil
@@ -1047,14 +1050,20 @@ func (o *run) runFixModel(ctx context.Context, prompt string, round int, fixTier
 // changes as a fixup onto the commit that last touched the fixed files (HEAD
 // fallback), and pushes. Budget is checked before the model call. It reports
 // whether the fix landed a commit - a round that landed nothing is a failed
-// round to the review loop. After a failed round it parks instead of running
-// when no fix model other than the ones that failed is available.
-func (o *run) runFix(ctx context.Context, findings string, round int, fixTier string, authoritative bool) (bool, error) {
+// round to the review loop - and returns a turn cap ALONGSIDE that verdict, so
+// the caller learns the round was truncated without the round's edits being
+// thrown away. After a failed round it parks instead of running when no fix
+// model other than the ones that failed is available; a request that says
+// NoEscalate is exempt from that park.
+func (o *run) runFix(ctx context.Context, req fixRequest) (bool, error) {
 	d := o.d
 	cfg := d.Cfg
+	findings := req.Findings
 
-	if o.fixEscalate {
-		p, rerr := o.resolveFixModel(ctx, fixTier, authoritative)
+	// Keyed on the BAR counter alone: a widened budget is not a reason to refuse
+	// to re-run the same model - running it wider is precisely the correction.
+	if !req.NoEscalate && o.fixBarSteps > 0 {
+		p, rerr := o.resolveFixModel(ctx, req)
 		if rerr != nil || o.fixFailed[p.Model] {
 			d.logCard(ctx, "review parked: the previous fix round %s and no other fix model is available (tried: %s) - outstanding findings:\n%s",
 				o.fixFailReason, strings.Join(sortedKeys(o.fixFailed), ", "), findings)
@@ -1083,12 +1092,28 @@ func (o *run) runFix(ctx context.Context, findings string, round int, fixTier st
 			fixVerifyLine(o.resolvedVerifyPlan()), o.tc.Title, o.taskDescription, findings)
 	}
 
-	model, err := o.runFixModel(ctx, prompt, round, fixTier, authoritative)
-	if err != nil {
-		return false, err
+	model, ferr := o.runFixModel(ctx, prompt, req)
+
+	// A cap is not a reason to throw the round's edits away. The model ran out of
+	// room, but what it wrote is the only evidence the round produced, and
+	// leaving it uncommitted in the tree makes any retry the caller attempts
+	// unsound - the next round would start from a dirty workspace it did not
+	// write. Fall through to the fixup and the push, and return the cap
+	// alongside whether anything landed.
+	var mte *MaxTurnsError
+
+	if ferr != nil && !errors.As(ferr, &mte) {
+		return false, ferr
 	}
 
-	o.lastFixModel = model
+	// The slug is only ever recorded, never cleared: the next markFixFailed keys
+	// the exclusion set off it, and a value wiped to empty means the failed model
+	// is never excluded and the exhausted-fixers park can never trip. Guarded
+	// here rather than trusting every runFixModel return path, because that
+	// coupling is what produced the defect.
+	if model != "" {
+		o.lastFixModel = model
+	}
 
 	// Target the commit that last touched the fixed files so the fixup autosquashes
 	// onto the right change; HEAD is the fallback when the path lookup yields
@@ -1112,19 +1137,19 @@ func (o *run) runFix(ctx context.Context, findings string, round int, fixTier st
 		// the full base-branch diff and actually re-examines the outstanding work.
 		o.lastReviewBase = ""
 
-		return false, nil
+		return false, ferr
 	}
 
 	if err := d.Git.Push(ctx, cfg.Branch); err != nil {
 		return false, fmt.Errorf("push review fixup: %w", err)
 	}
 
-	return true, nil
+	return true, ferr
 }
 
 // markFixFailed records that the most recent fix round failed for the given
 // reason: its model is excluded from every later fix pick, and the next pick
-// escalates.
+// climbs one bar rung.
 func (o *run) markFixFailed(reason string) {
 	if o.fixFailed == nil {
 		o.fixFailed = map[string]bool{}
@@ -1134,7 +1159,7 @@ func (o *run) markFixFailed(reason string) {
 		o.fixFailed[o.lastFixModel] = true
 	}
 
-	o.fixEscalate = true
+	o.fixBarSteps++
 	o.fixFailReason = reason
 }
 
@@ -1171,10 +1196,13 @@ func sortedKeys(set map[string]bool) []string {
 }
 
 // resolveFixModel picks the coder model for the fix run: the card's coder pin
-// when catalog-resolvable, else the best-value coder selection for the effective
-// fix tier (the synthesizer's fix_tier, falling back to the card tier).
-func (o *run) resolveFixModel(ctx context.Context, fixTier string, authoritative bool) (registry.Pick, error) {
-	tier := o.fixTierEffective(fixTier, authoritative)
+// when catalog-resolvable, else the best-value coder selection at this round's
+// fix bar (see fixSizing). Once the bar has climbed, the pick also prefers a
+// vendor that has not failed this card - unless the request declines to
+// escalate, which opts a call site out of the whole correction, the vendor
+// preference included.
+func (o *run) resolveFixModel(ctx context.Context, req fixRequest) (registry.Pick, error) {
+	tier := o.fixSizing(req).Bar
 
 	if resolvePin(o.d.Registry, o.tc.ModelCoder) {
 		// A pinned model is returned even if it is in o.excluded: we never override
@@ -1194,7 +1222,7 @@ func (o *run) resolveFixModel(ctx context.Context, fixTier string, authoritative
 		Exclude: o.fixExclusions(),
 	}
 
-	if !o.fixEscalate {
+	if req.NoEscalate || o.fixBarSteps == 0 {
 		return o.employableFixPick(o.d.Registry.SelectByComplexity(in))
 	}
 
@@ -1222,37 +1250,88 @@ func (o *run) employableFixPick(p registry.Pick) (registry.Pick, error) {
 	return p, nil
 }
 
-// fixTierEffective is the tier the fix coder is sized and selected on: fixTierFor,
-// climbed one tier after a failed fix round.
-func (o *run) fixTierEffective(fixTier string, authoritative bool) registry.Tier {
-	tier := o.fixTierFor(fixTier, authoritative)
-	if o.fixEscalate {
-		return escalateTier(tier)
-	}
-
-	return tier
+// fixRequest is one fix round's inputs. A struct rather than four positional
+// arguments because two of them are booleans, and Round is meaningful to three
+// different callers who count different things.
+type fixRequest struct {
+	Findings string
+	Round    int
+	// FixTier is the synthesizer's fix_tier for this round. Empty falls back to
+	// the card bar, so the fixer is never under-sized.
+	FixTier       string
+	Authoritative bool
+	// NoEscalate marks a call site that must neither climb the counters nor be
+	// refused by the exhausted-fixers park: the post-approval cleanup pass runs
+	// at the un-escalated sizing on a card that has already been approved, and
+	// must still run on a card whose earlier rounds failed.
+	NoEscalate bool
 }
 
-// effectiveFixTier is the tier the fix run sizes on: the synthesizer's fix_tier
-// when present, else the card tier. An empty fix_tier (synthesizer omitted it)
-// falls back so the fixer is never under-sized.
-func (o *run) effectiveFixTier(fixTier string) string {
-	if fixTier == "" {
-		return string(o.cardSizing.Bar)
-	}
-
-	return fixTier
-}
-
-// fixTierFor is the tier the fix coder is sized on: TierComplex on the
-// authoritative pass (escalated), else the synthesizer's fix_tier with the card
-// tier as fallback.
-func (o *run) fixTierFor(fixTier string, authoritative bool) registry.Tier {
-	if authoritative {
+// fixBarBase is the bar this round starts from, before any correction. The
+// authoritative pass is floored at complex: it is the last chance before a
+// park, and a stated policy constant is legitimate on a JUDGMENT-shaped call
+// where nothing in the run measures the right answer.
+func (o *run) fixBarBase(req fixRequest) registry.Tier {
+	if req.Authoritative {
 		return registry.TierComplex
 	}
 
-	return tierFromString(o.effectiveFixTier(fixTier))
+	if req.FixTier == "" {
+		return o.cardSizing.Bar
+	}
+
+	return tierFromString(req.FixTier)
+}
+
+// fixSizing is the bar and budget this fix round runs at: the base bar climbed
+// once per failed round, and a budget seeded from the bar the round ACTUALLY
+// RUNS AT, then widened once per capped round.
+//
+// The budget is seeded from the fix bar rather than from the card's, which
+// reproduces what the pre-split code did. Taking it from the card would drop the
+// authoritative pass - floored at complex, and the one run where exhausting the
+// turns ends the run rather than deferring it - back to the base on every
+// moderate card.
+//
+// The two axes stay separate in the direction that matters: a turn cap widens
+// the budget and never touches the bar, so running out of room can never buy a
+// more expensive model. The reverse direction is this system's own seeding rule
+// - seedSizing derives the budget from the bar, which is why a complex card
+// opens on a wider window in the first place - so a climbed bar carries its
+// window with it.
+func (o *run) fixSizing(req fixRequest) sizing {
+	base := o.fixBarBase(req)
+	s := sizing{Bar: base, Budget: seedBudgetStep(base)}
+
+	if req.NoEscalate {
+		return s
+	}
+
+	for range o.fixBarSteps {
+		s = s.raiseBar()
+	}
+
+	// Re-seed from the climbed bar. raiseBar deliberately leaves the budget
+	// alone - other callers depend on that - so without this a failed round
+	// would hand the harder bar the base window and ask it to do the harder
+	// work inside it. Widening only, and applied BEFORE the cap steps so those
+	// land on top of the seed rather than instead of it.
+	s.Budget = max(s.Budget, seedBudgetStep(s.Bar))
+
+	for range o.fixBudgetSteps {
+		s = s.raiseBudget()
+	}
+
+	return s
+}
+
+// markFixCapped records that the most recent fix round ran out of turns. The
+// next round runs WIDER on the same pool - deliberately without adding the
+// model to fixFailed: it ran out of room, it was not shown to be too weak, and
+// re-running it with more room is the correction.
+func (o *run) markFixCapped(reason string) {
+	o.fixBudgetSteps++
+	o.fixFailReason = reason
 }
 
 // reviewFindingsHistory returns every "## Review Findings" section recorded on
