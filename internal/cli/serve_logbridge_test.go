@@ -58,6 +58,15 @@ func TestAgentMapExtra(t *testing.T) {
 			wantOK: false,
 		},
 		{
+			// Shadow telemetry stays off a human's live card stream. The
+			// mechanism is the ABSENCE of an arm in agentMapExtra, and adding
+			// one is a two-line change that would look harmless.
+			name:   "sizing_escalation kind is not mapped",
+			kind:   "sizing_escalation",
+			data:   map[string]any{"subtask": "SUB-1", "axis": "budget"},
+			wantOK: false,
+		},
+		{
 			name:   "unknown kind is not mapped",
 			kind:   "unknown",
 			data:   nil,

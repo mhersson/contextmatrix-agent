@@ -148,6 +148,25 @@ func coderTurnCfg(base, step int) (maxTurns, wrapUp int) {
 // without touching this code, and a turn cap cannot delete them.
 type metaKV map[string]string
 
+// markerFor is the marker a freshly sized card or subtask is created with: both
+// axes plus the write-once planner word that produced them. One home for the
+// three-key convention, so a creation site cannot spell it differently from
+// another.
+func markerFor(s sizing, seed string) metaKV {
+	return setSizing(metaKV{"seed": seed}, s)
+}
+
+// setSizing writes both axes onto kv and returns it. Every marker writer goes
+// through it, so the axis key names have exactly one home. A writer correcting
+// an existing marker passes the map it PARSED, which is what lets keys this
+// package does not understand round-trip untouched.
+func setSizing(kv metaKV, s sizing) metaKV {
+	kv["bar"] = string(s.Bar)
+	kv["budget"] = strconv.Itoa(s.Budget)
+
+	return kv
+}
+
 // metaRe matches the marker line. The value class is deliberately permissive so
 // a malformed marker is still MATCHED, and therefore still stripped, rather
 // than orphaned above a freshly written one.
@@ -182,11 +201,7 @@ func readMeta(body string) (metaKV, sizing) {
 	if m := legacyTierRe.FindStringSubmatch(body); m != nil {
 		s := seedSizing(m[1])
 
-		return metaKV{
-			"bar":    string(s.Bar),
-			"budget": strconv.Itoa(s.Budget),
-			"seed":   m[1],
-		}, s
+		return markerFor(s, m[1]), s
 	}
 
 	return metaKV{}, defaultSizing()

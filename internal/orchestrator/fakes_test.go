@@ -948,6 +948,36 @@ func (f *fakeInbox) Wait(ctx context.Context) (harness.UserMessage, error) {
 
 var _ harness.Inbox = (*fakeInbox)(nil)
 
+// onlyEvent decodes the single transcript event of the given kind, failing the
+// test when there is not exactly one. Mirrors batchNudgeCounts' line-oriented
+// decode; numbers arrive as float64, so assert them with EqualValues.
+func onlyEvent(t *testing.T, transcript *bytes.Buffer, kind string) map[string]any {
+	t.Helper()
+
+	var found []map[string]any
+
+	for line := range strings.SplitSeq(strings.TrimSpace(transcript.String()), "\n") {
+		if line == "" {
+			continue
+		}
+
+		var ev struct {
+			Kind string         `json:"kind"`
+			Data map[string]any `json:"data"`
+		}
+
+		require.NoError(t, json.Unmarshal([]byte(line), &ev))
+
+		if ev.Kind == kind {
+			found = append(found, ev.Data)
+		}
+	}
+
+	require.Len(t, found, 1, "want exactly one %s event", kind)
+
+	return found[0]
+}
+
 // batchNudgeCounts decodes every batch_nudge event the emitter wrote, returning
 // each one's single_call_turns in emission order. Tests use it to assert both
 // that a phase earns the harness batching nudge and that a phase deliberately

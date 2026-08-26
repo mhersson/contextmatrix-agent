@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
-	"strconv"
 	"strings"
 
 	"github.com/mhersson/contextmatrix-agent/internal/mob"
@@ -1102,11 +1101,7 @@ func (o *run) createSubtasks(ctx context.Context, p plan) error {
 		}
 
 		s := seedSizing(st.Tier)
-		body := writeMeta(st.Description, metaKV{
-			"bar":    string(s.Bar),
-			"budget": strconv.Itoa(s.Budget),
-			"seed":   st.Tier,
-		})
+		body := writeMeta(st.Description, markerFor(s, st.Tier))
 
 		id, err := d.Ops.CreateCard(ctx, cfg.Project, cfg.CardID, st.Title, body, depIDs)
 		if err != nil {
@@ -1133,11 +1128,7 @@ func (o *run) createSubtasks(ctx context.Context, p plan) error {
 	// and without this every resumed run sizes its review panel and its
 	// Best-of-N pool at the moderate default. recordSection preserves whatever
 	// is above its heading, so one write carries both.
-	o.body = writeMeta(o.body, metaKV{
-		"bar":    string(o.cardSizing.Bar),
-		"budget": strconv.Itoa(o.cardSizing.Budget),
-		"seed":   p.CardTier,
-	})
+	o.body = writeMeta(o.body, markerFor(o.cardSizing, p.CardTier))
 
 	// Record the plan on the parent card body so it carries the full history
 	// (the subtask cards hold the detail; this is the consolidated view, like

@@ -11,6 +11,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-agent/internal/verifyexec"
+	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/mhersson/contextmatrix-harness/harness"
 	"github.com/mhersson/contextmatrix-harness/tools"
 )
@@ -248,6 +249,8 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 	o.logVerifyGate(ctx, vres, subtaskGateContext(sub.ID))
 
 	if vres.Status == verifyFailed {
+		o.applyPrecommitVerifyEvidence(ctx, sub, vres)
+
 		return fmt.Errorf("subtask %s: `%s` still fails after one fix pass", sub.ID, plan.Display)
 	}
 
@@ -696,8 +699,9 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 	committed, cerr := sc.git.CommitWithMessage(ctx, commitMsg)
 	if cerr != nil || !committed {
 		// The cap happened regardless of whether there was anything to
-		// salvage-commit - escalate so resume does not repeat it at the same tier.
-		o.escalateSubtaskTier(ctx, sub)
+		// salvage-commit, and a clean tree says only that the work did not fit in
+		// the turns it had - nothing about the model that ran it.
+		o.raiseSubtaskBudget(ctx, sub, "the turn cap was reached with nothing committed")
 		o.reportSoloOutcome(ctx, sub.ID, model, "failed", false, sc.ledger.Spent()-spendBefore)
 
 		return false, nil
@@ -721,7 +725,7 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 		}
 
 		o.logSoloCapPark(ctx, sub.ID, "verify could not be resolved")
-		o.escalateSubtaskTier(ctx, sub)
+		o.raiseSubtaskBudget(ctx, sub, "the turn cap was reached and the verify could not be resolved")
 		o.reportSoloOutcome(ctx, sub.ID, model, "failed", false, sc.ledger.Spent()-spendBefore)
 
 		return false, nil
@@ -729,7 +733,7 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 
 	if len(plan.Argv) == 0 {
 		o.logSoloCapPark(ctx, sub.ID, "no verify command resolved to confirm it")
-		o.escalateSubtaskTier(ctx, sub)
+		o.raiseSubtaskBudget(ctx, sub, "the turn cap was reached with no verify command to confirm the work")
 		o.reportSoloOutcome(ctx, sub.ID, model, "failed", false, sc.ledger.Spent()-spendBefore)
 
 		return false, nil
@@ -775,7 +779,18 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 		}
 
 		o.logSoloCapPark(ctx, sub.ID, reason)
-		o.escalateSubtaskTier(ctx, sub)
+
+		// The same predicate that decides the leaderboard exemption below decides
+		// whether this cap carries QUALITY evidence too. Reusing it - not
+		// re-deriving it - is what keeps the card log, the outcome report and the
+		// bar agreeing about the cause. A verify that never ran, or that died of
+		// container resource pressure, says nothing about the model; the cap
+		// itself is still volume evidence either way.
+		if vres.Status != verifySkipped && !exhausted {
+			o.raiseSubtaskBoth(ctx, sub, "the turn cap was reached and the verify then failed")
+		} else {
+			o.raiseSubtaskBudget(ctx, sub, "the turn cap was reached; the verify outcome was environmental")
+		}
 
 		// A skipped verify (timeout or missing tool - rerr != nil takes the same
 		// zero-value Status) is an environment problem, not evidence about the
@@ -870,21 +885,48 @@ func (o *run) reportSoloOutcome(ctx context.Context, cardID, model, result strin
 	}
 }
 
-// escalateSubtaskTier raises the persisted bar on sub's card body one rung so a
-// resumed run selects a stronger model - a park at the same bar would otherwise
-// repeat the same losing attempt indefinitely. It fetches the subtask's live
-// card body (never the possibly-empty in-memory subtaskRef.Body) and writes it
-// back, mirroring recordCheckpointOnSubtask. The whole marker is re-serialised
-// from the parsed map, so keys this code does not read survive. Best-effort: a
-// fetch or write failure only warns - the run is parking either way, and a
-// stale marker just means resume retries at the prior bar instead of
-// escalating. Does not mutate sub.Sizing - this run is ending; the marker is
-// read back only on the NEXT run. Critical is already the ceiling, so that case
-// skips the board write entirely - there is nothing to persist.
-func (o *run) escalateSubtaskTier(ctx context.Context, sub subtaskRef) {
+// sizingEscalationKind records one correction to a subtask's sizing on the run
+// transcript: which axis moved, from what to what, and on what evidence.
+//
+// The card log carries the human version of the same line. This is the machine
+// version, and it exists because a later analysis has to pair a correction with
+// the outcome that caused it and the outcome that followed - both of which live
+// in other runs' rows in the same per-card transcript. The resulting MODEL is
+// deliberately absent: it is not knowable here. The corrected bar is read by the
+// NEXT run, whose model_selected line names the model it bought.
+//
+// Like model_selected, no arm claims this kind in the log bridge, so it reaches
+// the durable transcript and never an operator's live card stream.
+const sizingEscalationKind = "sizing_escalation"
+
+// resizeSubtask applies the axis's raise to the subtask's persisted sizing,
+// writes the result back, and says on the card log which axis moved and why.
+//
+// ONE fetch and ONE write, whatever the raise does, so evidence that arrives
+// together lands together: a composed raise that was split into two calls could leave
+// the card budget-raised with the quality half dropped on a failed second write.
+//
+// It reads the subtask's LIVE card body rather than the possibly-empty
+// in-memory ref (a resume-loaded ref legitimately has no body), mirroring
+// recordCheckpointOnSubtask, and it mutates the parsed key map rather than
+// rebuilding it, so keys this package does not understand round-trip.
+//
+// Best-effort throughout: the run is ending either way, and a stale marker only
+// means the next attempt repeats this one. But a resize that could not move -
+// an axis already at its ceiling - is LOGGED rather than skipped silently.
+// There is no in-run retry on this path, so that line is the whole signal an
+// operator gets that automatic correction is exhausted, and silence there reads
+// exactly like a write that failed.
+//
+// Does not mutate sub.Sizing: this run is ending, and the marker is read back
+// only on the NEXT run.
+//
+// The axis carries both the transform and the words for it, so a trigger
+// cannot move one axis while the ceiling line names the other.
+func (o *run) resizeSubtask(ctx context.Context, sub subtaskRef, why string, axis resizeAxis) {
 	tc, err := o.d.Ops.GetTaskContext(ctx, sub.ID, false)
 	if err != nil {
-		slog.Warn("turn cap: subtask body fetch failed; skipping tier escalation",
+		slog.Warn("resize subtask: body fetch failed; skipping the correction",
 			"card_id", o.d.Cfg.CardID, "subtask_id", sub.ID, "error", err)
 
 		return
@@ -892,21 +934,167 @@ func (o *run) escalateSubtaskTier(ctx context.Context, sub subtaskRef) {
 
 	kv, from := readMeta(tc.Description)
 
-	to := from.raiseBar()
+	to := axis.raise(from)
 	if to == from {
+		o.d.logCard(ctx, "subtask %s: %s - the %s cannot be raised any further; re-triggering will repeat this attempt. %s",
+			sub.ID, why, axis.name, axis.advice)
+
 		return
 	}
 
-	kv["bar"] = string(to.Bar)
-
-	if uerr := o.d.Ops.UpdateCardBody(ctx, sub.ID, writeMeta(tc.Description, kv)); uerr != nil {
-		slog.Warn("turn cap: subtask tier escalation write failed",
+	if uerr := o.d.Ops.UpdateCardBody(ctx, sub.ID, writeMeta(tc.Description, setSizing(kv, to))); uerr != nil {
+		slog.Warn("resize subtask: body update failed",
 			"card_id", o.d.Cfg.CardID, "subtask_id", sub.ID, "error", uerr)
 
 		return
 	}
 
-	o.d.logCard(ctx, "turn cap: escalating subtask tier %s -> %s for the next attempt", from.Bar, to.Bar)
+	// Only a pin the catalog can still serve reaches the selector: an
+	// unresolvable one is warned about and falls through to the laddered
+	// selection, which DOES honour the raised bar. Naming it here would
+	// contradict both the raise and the unresolvable-pin advisory on the same
+	// card log.
+	pin := ""
+	if resolvePin(o.d.Registry, o.tc.ModelCoder) {
+		pin = o.tc.ModelCoder
+	}
+
+	o.emitSizingEscalation(sub, from, to, why)
+	o.d.logCard(ctx, "subtask %s: %s - %s for the next attempt%s",
+		sub.ID, why, resizeSummary(from, to), pinClause(pin, from, to))
+}
+
+// resizeAxis pairs the transform one trigger applies with the words the card
+// log uses for it: the noun phrase that names the axis, and what a human can
+// still do about THAT axis once it is exhausted. They are chosen together, in
+// one literal per trigger, so the line cannot name an axis the trigger did not
+// move or offer a lever that belongs to the other one.
+type resizeAxis struct {
+	name   string
+	advice string
+	raise  func(sizing) sizing
+}
+
+// resizeSummary names exactly the axes that moved, in the words the card log
+// uses for them.
+func resizeSummary(from, to sizing) string {
+	switch {
+	case from.Bar != to.Bar && from.Budget != to.Budget:
+		return fmt.Sprintf("model bar %s -> %s and turn budget %s -> %s",
+			from.Bar, to.Bar, budgetLabel(from.Budget), budgetLabel(to.Budget))
+	case from.Bar != to.Bar:
+		return fmt.Sprintf("model bar %s -> %s", from.Bar, to.Bar)
+	default:
+		return fmt.Sprintf("turn budget %s -> %s", budgetLabel(from.Budget), budgetLabel(to.Budget))
+	}
+}
+
+// pinClause warns that a bar raise under a coder pin cannot change the pick:
+// the selector returns an operator pin whatever bar it is asked for, so the
+// correction is recorded but inert until the pin is lifted. Empty when no bar
+// moved, or when there is no pin the selector would actually honour - the
+// caller resolves that before calling, because an unresolvable pin falls
+// through to the laddered selection, which the raise does reach.
+func pinClause(pin string, from, to sizing) string {
+	if pin == "" || from.Bar == to.Bar {
+		return ""
+	}
+
+	return fmt.Sprintf(" (the coder model is pinned to %s, so the bar raise will not change the pick)", pin)
+}
+
+// emitSizingEscalation records one landed correction on the run transcript. A
+// nil emitter is a no-op, which is how the orchestrator is wired in tests that
+// do not read the transcript.
+func (o *run) emitSizingEscalation(sub subtaskRef, from, to sizing, why string) {
+	if o.d.Emit == nil {
+		return
+	}
+
+	axis := "both"
+
+	switch {
+	case from.Bar == to.Bar:
+		axis = "budget"
+	case from.Budget == to.Budget:
+		axis = "bar"
+	}
+
+	o.d.Emit.Emit(events.Kind(sizingEscalationKind), map[string]any{
+		"subtask":     sub.ID,
+		"axis":        axis,
+		"from_bar":    string(from.Bar),
+		"to_bar":      string(to.Bar),
+		"from_budget": from.Budget,
+		"to_budget":   to.Budget,
+		"why":         why,
+	})
+}
+
+// raiseSubtaskBudget records volume evidence: the work did not fit in the turns
+// it had. It says nothing about whether the model was capable of doing it, so
+// the bar is untouched.
+func (o *run) raiseSubtaskBudget(ctx context.Context, sub subtaskRef, why string) {
+	o.resizeSubtask(ctx, sub, why, resizeAxis{
+		name: "turn budget",
+		// The ladder scales the operator's configured base, so lifting the base
+		// lifts every rung - the ceiling included.
+		advice: "Split the subtask or raise the configured turn cap.",
+		raise:  sizing.raiseBudget,
+	})
+}
+
+// raiseSubtaskBar records quality evidence: what the model produced was wrong.
+// The turn budget is untouched - a model that finished and was wrong did not
+// run out of room.
+func (o *run) raiseSubtaskBar(ctx context.Context, sub subtaskRef, why string) {
+	o.resizeSubtask(ctx, sub, why, resizeAxis{
+		name: "model bar",
+		// The top rung has no stronger tier above it, so the remaining lever is an
+		// explicit coder pin - the one selection path that ignores the ladder.
+		advice: "Split the subtask or pin a coder model for it.",
+		raise:  sizing.raiseBar,
+	})
+}
+
+// raiseSubtaskBoth records volume AND quality evidence arriving together: the
+// run hit its cap, and what it did commit fails the project's own verify.
+func (o *run) raiseSubtaskBoth(ctx context.Context, sub subtaskRef, why string) {
+	o.resizeSubtask(ctx, sub, why, resizeAxis{
+		name:   "turn budget and model bar",
+		advice: "Split the subtask, raise the configured turn cap, or pin a coder model for it.",
+		raise:  func(s sizing) sizing { return s.raiseBudget().raiseBar() },
+	})
+}
+
+// applyPrecommitVerifyEvidence records what a still-red pre-commit verify says
+// about a subtask's sizing.
+//
+// A verify that RAN and genuinely FAILED, after a fix pass had already had its
+// chance at it, is evidence about QUALITY and about nothing else: the coder
+// reached the finish tool, so it did not run out of turns, and the budget is
+// not implicated. The bar rises so the next attempt draws a stronger coder.
+//
+// A failure carrying the container's resource-exhaustion signature is evidence
+// about the environment - under a pids limit a compile step succeeds and its
+// inner fork dies with EAGAIN, so the command exits non-zero and is classified
+// failed - and about neither axis. That is the same exemption the capped path's
+// leaderboard report takes, for the same reason.
+//
+// The guard is written positively rather than as a list of exclusions because
+// the only call site reaches it on verifyFailed alone: a skipped result and a
+// *ToolchainMissingError both return earlier, so an exclusion list would name
+// branches production cannot produce.
+//
+// There is no reader for this on THIS run - a still-red gate returns a plain
+// error that fails the run with the work uncommitted and unpushed. The next run
+// redoes the subtask from scratch, and reconcile hands it the raised bar.
+func (o *run) applyPrecommitVerifyEvidence(ctx context.Context, sub subtaskRef, vres verifyResult) {
+	if vres.Status != verifyFailed || verifyexec.LooksResourceExhausted(vres.Output) {
+		return
+	}
+
+	o.raiseSubtaskBar(ctx, sub, "the pre-commit verify still failed after a fix pass")
 }
 
 // sanitizeTitle builds the fallback commit message from a subtask title when the
