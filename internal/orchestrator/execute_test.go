@@ -853,7 +853,7 @@ func TestSalvageCappedFinalSubtask(t *testing.T) {
 	cg := &fakeGit{committed: true}
 	sc := &solverCtx{
 		git: cg, ledger: NewLedger(0, 0), tools: d.WriteTools,
-		workspace: "ws", coderModel: o.resolveCoderModel,
+		workspace: "ws", coderModel: o.solverCoderModel,
 		boardOps: false, push: false, tag: "candidate 1/1",
 		lastSubID: "SUB-2",
 	}
@@ -889,7 +889,7 @@ func TestNoSalvageOnCleanTree(t *testing.T) {
 	cg := &fakeGit{committed: false}
 	sc := &solverCtx{
 		git: cg, ledger: NewLedger(0, 0), tools: d.WriteTools,
-		workspace: "ws", coderModel: o.resolveCoderModel,
+		workspace: "ws", coderModel: o.solverCoderModel,
 		boardOps: false, push: false, tag: "candidate 1/1",
 		lastSubID: "SUB-2",
 	}
@@ -918,7 +918,7 @@ func TestSalvageFallsBackToTitleCommitMessage(t *testing.T) {
 	cg := &fakeGit{committed: true}
 	sc := &solverCtx{
 		git: cg, ledger: NewLedger(0, 0), tools: d.WriteTools,
-		workspace: "ws", coderModel: o.resolveCoderModel,
+		workspace: "ws", coderModel: o.solverCoderModel,
 		boardOps: false, push: false, tag: "candidate 1/1",
 		lastSubID: "SUB-2",
 	}
@@ -943,7 +943,7 @@ func TestNoSalvageOnEarlierSubtask(t *testing.T) {
 	cg := &fakeGit{committed: true}
 	sc := &solverCtx{
 		git: cg, ledger: NewLedger(0, 0), tools: d.WriteTools,
-		workspace: "ws", coderModel: o.resolveCoderModel,
+		workspace: "ws", coderModel: o.solverCoderModel,
 		boardOps: false, push: false, tag: "candidate 1/1",
 		lastSubID: "SUB-9", // the capped subtask is NOT the final one
 	}
@@ -1721,7 +1721,7 @@ func TestCandidateCompletionDoesNotReportSoloOutcome(t *testing.T) {
 	cg := &fakeGit{committed: true}
 	sc := &solverCtx{
 		git: cg, ledger: NewLedger(0, 0), tools: d.WriteTools,
-		workspace: "ws", coderModel: o.resolveCoderModel,
+		workspace: "ws", coderModel: o.solverCoderModel,
 		boardOps: false, push: false, tag: "candidate 1/1",
 	}
 
@@ -1781,7 +1781,7 @@ func TestCandidateSubtaskParksOnRunLedgerBreach(t *testing.T) {
 
 	sc := &solverCtx{
 		git: &fakeGit{committed: true}, ledger: NewLedger(0, 0), tools: d.WriteTools,
-		workspace: "ws", coderModel: o.resolveCoderModel,
+		workspace: "ws", coderModel: o.solverCoderModel,
 		boardOps: false, push: false, tag: "candidate 1/1",
 	}
 
@@ -1837,8 +1837,8 @@ func TestResolveCoderModelPinMissingAdvisory(t *testing.T) {
 	second, err := o.resolveCoderModel(ctx, subtaskRef{ID: "SUB-2", Title: "Second", Tier: "moderate"}, "prompt2")
 	require.NoError(t, err)
 
-	assert.NotEqual(t, missingPin, first, "an unresolvable pin never becomes the selected model")
-	assert.NotEqual(t, missingPin, second)
+	assert.NotEqual(t, missingPin, first.Model, "an unresolvable pin never becomes the selected model")
+	assert.NotEqual(t, missingPin, second.Model)
 
 	var pinAdvisories []string
 
@@ -1889,9 +1889,9 @@ func TestResolveCoderModelParksOnlyWhenEvenTheDefaultIsBarred(t *testing.T) {
 		d.Registry = subFloorCoderRegistry()
 		o := newExecRun(d, nil, 5)
 
-		model, err := o.resolveCoderModel(context.Background(), sub, "prompt")
+		pick, err := o.resolveCoderModel(context.Background(), sub, "prompt")
 		require.NoError(t, err)
-		assert.Equal(t, "operator/default", model,
+		assert.Equal(t, "operator/default", pick.Model,
 			"the capable default is the trigger's default_model - operator intent, not junk")
 	})
 
@@ -1902,9 +1902,9 @@ func TestResolveCoderModelParksOnlyWhenEvenTheDefaultIsBarred(t *testing.T) {
 		o := newExecRun(d, nil, 5)
 		o.excluded = map[string]bool{"operator/default": true, "weak/model": true}
 
-		model, err := o.resolveCoderModel(context.Background(), sub, "prompt")
+		pick, err := o.resolveCoderModel(context.Background(), sub, "prompt")
 		require.Error(t, err)
-		assert.Empty(t, model)
+		assert.Empty(t, pick.Model)
 
 		var nme *NoModelError
 
@@ -1972,9 +1972,9 @@ func TestShortfallAdvisoryIsOncePerPhaseRoleAndTier(t *testing.T) {
 		ctx := context.Background()
 
 		for _, id := range []string{"SUB-1", "SUB-2", "SUB-3"} {
-			model, err := o.resolveCoderModel(ctx, subtaskRef{ID: id, Title: id, Tier: "complex"}, "prompt")
+			pick, err := o.resolveCoderModel(ctx, subtaskRef{ID: id, Title: id, Tier: "complex"}, "prompt")
 			require.NoError(t, err)
-			assert.Equal(t, "mid/model", model, "the clamped pick is still a measured model")
+			assert.Equal(t, "mid/model", pick.Model, "the clamped pick is still a measured model")
 		}
 
 		require.Len(t, ops.logs, 1,
@@ -2053,10 +2053,10 @@ func TestCoderTierIsAlwaysDerivedFromTheWork(t *testing.T) {
 				d.Registry = tierNamingRegistry()
 				o := newExecRun(d, nil, 0)
 
-				model, err := o.resolveCoderModel(context.Background(),
+				pick, err := o.resolveCoderModel(context.Background(),
 					subtaskRef{ID: "SUB-1", Title: "First", Tier: tt.tier}, "prompt")
 				require.NoError(t, err)
-				assert.Equal(t, tt.wantModel, model,
+				assert.Equal(t, tt.wantModel, pick.Model,
 					"the coder tier must be the subtask's, not a constant")
 			})
 		}
@@ -2117,7 +2117,7 @@ func TestShortfallAdvisoryNeverTakesTheSelectionLock(t *testing.T) {
 	go func() {
 		defer close(done)
 
-		o.noteShortfall(context.Background(), "probe", registry.Pick{
+		o.noteShortfall(context.Background(), "probe", "", registry.Pick{
 			ModelSpec:     registry.ModelSpec{Model: "mid/model"},
 			Role:          registry.RoleCoder,
 			RequestedTier: registry.TierComplex,
@@ -2146,10 +2146,10 @@ func TestUnmeasuredPickReportsNoPriorRatherThanZero(t *testing.T) {
 	// answer is the operator's capable default: the standard degraded shape.
 	o := newExecRun(execTestDeps(ops, &fakeGit{}, &planLLM{}), nil, 5)
 
-	model, err := o.resolveCoderModel(context.Background(),
+	pick, err := o.resolveCoderModel(context.Background(),
 		subtaskRef{ID: "SUB-1", Title: "First", Tier: "moderate"}, "prompt")
 	require.NoError(t, err)
-	require.Equal(t, "default/model", model)
+	require.Equal(t, "default/model", pick.Model)
 
 	require.Len(t, ops.logs, 1, "logs=%v", ops.logs)
 	assert.Contains(t, ops.logs[0], "no measured prior")
@@ -2395,7 +2395,7 @@ func TestPreCommitVerifySkippedForCandidateSolver(t *testing.T) {
 
 	sc := &solverCtx{
 		git: &fakeGit{committed: true}, ledger: NewLedger(0, 0), tools: d.WriteTools,
-		workspace: "ws", coderModel: o.resolveCoderModel,
+		workspace: "ws", coderModel: o.solverCoderModel,
 		boardOps: false, push: false, tag: "candidate 1/2",
 	}
 

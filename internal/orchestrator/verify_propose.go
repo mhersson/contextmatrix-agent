@@ -101,7 +101,7 @@ func (o *run) proposeVerify(ctx context.Context) (verifyPlan, error) {
 		return verifyPlan{}, nil
 	}
 
-	o.noteShortfall(ctx, "verify propose", p)
+	o.noteShortfall(ctx, "verify propose", "", p)
 
 	model := p.Model
 

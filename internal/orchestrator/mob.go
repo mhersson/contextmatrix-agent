@@ -206,7 +206,7 @@ func buildEngineConfig(ctx context.Context, o *run, t mob.Topic, bearer string) 
 	}
 
 	for _, p := range panel {
-		o.noteShortfall(ctx, "mob "+t.Kind, p)
+		o.noteShortfall(ctx, "mob "+t.Kind, "", p)
 	}
 
 	// The panel is always one seat per lens, so a discussion whose seats share
@@ -415,7 +415,7 @@ func (o *run) mobModeratorRunner(sink *seatDebugSink, step string) mob.Moderator
 	return func(ctx context.Context, prompt string) (string, string, float64, error) {
 		if model == "" {
 			model = resolveDecisionModel(ctx, o.d.Registry, o.d.Emit, o.d.Ops, o.d.Cfg.CardID,
-				o.tc.ModelOrchestrator, o.d.Cfg.PayloadModel, o.d.Cfg.DefaultModel, o.excludedModels())
+				o.tc.ModelOrchestrator, o.d.Cfg.PayloadModel, o.d.Cfg.DefaultModel, o.excludedModels(), "mob moderator")
 		}
 
 		cfg := o.harnessConfig(model)

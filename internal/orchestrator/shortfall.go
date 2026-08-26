@@ -10,9 +10,13 @@ import (
 )
 
 // noteShortfall records what one selection was actually worth. Every pick is
-// traced to the process log; a pick that did not clear the tier bar it asked
-// for also reaches the operator, as a warning, a state-change event and one
-// entry on the card's activity log.
+// traced to the process log and emitted to the run transcript; a pick that did
+// not clear the tier bar it asked for also reaches the operator, as a warning,
+// a state-change event and one entry on the card's activity log.
+//
+// It is the single wiring point for the transcript event, so a phase that
+// selects a model on a tier records that selection by construction. subtaskID
+// is empty for the card-level phases.
 //
 // The card entry is deduped per (phase, role, requested -> met): the
 // fixed-tier callers ask for the same tier on every call and the activity log
@@ -23,7 +27,12 @@ import (
 // It takes o.shortfallMu, never o.selMu: the Best-of-N candidate resolver
 // holds selMu across a selection, so an advisory reaching for selMu would
 // deadlock the fan-out.
-func (o *run) noteShortfall(ctx context.Context, phase string, p registry.Pick) {
+func (o *run) noteShortfall(ctx context.Context, phase, subtaskID string, p registry.Pick) {
+	// Unconditional, and above every gate below: the transcript records what
+	// ran, not only what fell short, and the shortfall dedupe must never
+	// swallow a selection.
+	emitModelSelection(o.d.Emit, phase, subtaskID, p)
+
 	slog.Info("selector: pick",
 		"card_id", o.d.Cfg.CardID, "phase", phase, "model", p.Model,
 		"requested_tier", string(p.RequestedTier), "met_tier", string(p.MetTier),

@@ -431,6 +431,11 @@ func resolveOrchestratorModel(
 	return fallback
 }
 
+// decisionTier is the fixed bar every orchestrator decision phase selects on.
+// Decision quality does not scale with task complexity, so even a trivial card
+// gets a calibrated judge.
+const decisionTier = registry.TierComplex
+
 // resolveDecisionModel resolves the model an orchestrator DECISION phase runs on
 // (plan decomposition, review synthesis). These phases are reasoning- and
 // calibration-sensitive - a weak model emits malformed plans and mis-calibrated
@@ -453,17 +458,26 @@ func resolveDecisionModel(
 	ops Ops,
 	cardID, pinned, payload, fallback string,
 	exclude map[string]bool,
+	phase string,
 ) string {
 	base := resolveOrchestratorModel(ctx, reg, emit, ops, cardID, pinned, payload, fallback)
 
+	// Without a registry there is no ladder and no tier, so there is no
+	// selection to record.
+	if reg == nil {
+		return base
+	}
+
 	// A resolvable operator pin is authoritative - never floor over it.
-	if resolvePin(reg, pinned) || reg == nil {
+	if resolvePin(reg, pinned) {
+		emitModelSelection(emit, phase, "", offLadderPick(reg, base, registry.RoleReviewer, decisionTier, registry.SourcePinned))
+
 		return base
 	}
 
 	p := reg.SelectByComplexity(registry.SelectInput{
 		Role:    registry.RoleReviewer,
-		Tier:    registry.TierComplex,
+		Tier:    decisionTier,
 		Exclude: exclude,
 	})
 
@@ -472,9 +486,16 @@ func resolveDecisionModel(
 	// meet the bar it was asked for would replace a stronger base with a weaker
 	// catalogued model: a floor that can land below the thing it is flooring is
 	// not a floor.
+	//
+	// The transcript names base, not p: p was proposed and discarded, and an
+	// event naming a model that never ran is worse than none.
 	if !p.AtBar() {
+		emitModelSelection(emit, phase, "", offLadderPick(reg, base, registry.RoleReviewer, decisionTier, registry.SourceDefault))
+
 		return base
 	}
+
+	emitModelSelection(emit, phase, "", p)
 
 	return p.Model
 }
@@ -874,7 +895,7 @@ func runPlan(ctx context.Context, o *run) error {
 	cfg := d.Cfg
 
 	model := resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
-		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels())
+		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels(), "plan decision")
 
 	d.logCard(ctx, "orchestrator model: %s", model)
 
@@ -929,7 +950,7 @@ func runPlan(ctx context.Context, o *run) error {
 
 				prev := model
 				model = resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
-					o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels())
+					o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels(), "plan decision")
 
 				if model != prev {
 					d.logCard(ctx, "orchestrator model: %s (re-selected after diagnose)", model)

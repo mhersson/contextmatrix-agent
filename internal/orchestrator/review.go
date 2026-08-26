@@ -325,7 +325,7 @@ func (o *run) runReviewHITL(ctx context.Context, plan verifyPlan) error {
 	cfg := d.Cfg
 
 	model := resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
-		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels())
+		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels(), "review gate")
 
 	for iter := range hardReviewIterationCap {
 		round := o.tc.ReviewAttempts + iter + 1
@@ -769,16 +769,7 @@ func (o *run) reviewPanel(ctx context.Context, estTokens int, authoritative bool
 	}
 
 	if resolvePin(o.d.Registry, o.tc.ModelReviewer) {
-		seat := registry.Pick{
-			ModelSpec: registry.ModelSpec{
-				Model:         o.tc.ModelReviewer,
-				ContextWindow: o.d.Registry.ContextWindow(o.tc.ModelReviewer),
-			},
-			Role:          registry.RoleReviewer,
-			RequestedTier: tier,
-			Source:        registry.SourcePinned,
-			OK:            true,
-		}
+		seat := offLadderPick(o.d.Registry, o.tc.ModelReviewer, registry.RoleReviewer, tier, registry.SourcePinned)
 
 		panel := make([]registry.Pick, reviewPanelSize)
 		for i := range panel {
@@ -786,6 +777,10 @@ func (o *run) reviewPanel(ctx context.Context, estTokens int, authoritative bool
 			// Every seat after the first repeats seat 1. Flagged, so the card
 			// log cannot read one model's opinion as three agreeing ones.
 			panel[i].Duplicate = i > 0
+
+			// A pinned panel is still a per-seat selection, so the transcript
+			// carries a line per seat exactly as the selected panel does.
+			o.noteShortfall(ctx, "review panel", "", panel[i])
 		}
 
 		return panel
@@ -808,7 +803,7 @@ func (o *run) reviewPanel(ctx context.Context, estTokens int, authoritative bool
 	// One label for the whole panel: seats that fell the same distance are one
 	// fact, and the panel summary below carries the per-seat detail.
 	for _, p := range panel {
-		o.noteShortfall(ctx, "review panel", p)
+		o.noteShortfall(ctx, "review panel", "", p)
 	}
 
 	return panel
@@ -925,7 +920,7 @@ func (o *run) synthesize(ctx context.Context, findings string, authoritative boo
 	cfg := d.Cfg
 
 	model := resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
-		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels())
+		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels(), "review synthesis")
 
 	var (
 		v       verdict
@@ -992,7 +987,7 @@ func (o *run) runFixModel(ctx context.Context, prompt string, round int, fixTier
 
 		model := p.Model
 
-		o.noteShortfall(ctx, "fix coder", p)
+		o.noteShortfall(ctx, "fix coder", "", p)
 
 		if o.fixEscalate {
 			d.logCard(ctx, "fix coder %s selected for round %d fixes (tier=%s) - escalated after a fix round that %s",
@@ -1173,16 +1168,7 @@ func (o *run) resolveFixModel(ctx context.Context, fixTier string, authoritative
 		// an explicit operator pin with an auto-selected substitute. A pinned model
 		// that is harness-incapable therefore keeps being re-selected, exhausts the
 		// re-selection cap, and parks - the blacklist still records it.
-		return registry.Pick{
-			ModelSpec: registry.ModelSpec{
-				Model:         o.tc.ModelCoder,
-				ContextWindow: o.d.Registry.ContextWindow(o.tc.ModelCoder),
-			},
-			Role:          registry.RoleCoder,
-			RequestedTier: tier,
-			Source:        registry.SourcePinned,
-			OK:            true,
-		}, nil
+		return offLadderPick(o.d.Registry, o.tc.ModelCoder, registry.RoleCoder, tier, registry.SourcePinned), nil
 	}
 
 	if o.tc.ModelCoder != "" {

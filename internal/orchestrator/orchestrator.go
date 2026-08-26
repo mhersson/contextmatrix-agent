@@ -529,7 +529,7 @@ func newRun(d Deps, tc cmclient.TaskContext) *run {
 		ledger:     o.ledger,
 		tools:      d.WriteTools,
 		workspace:  d.Cfg.Workspace,
-		coderModel: o.resolveCoderModel,
+		coderModel: o.solverCoderModel,
 		boardOps:   true,
 		push:       true,
 	}

@@ -521,17 +521,29 @@ func (o *run) pushBranch(ctx context.Context) error {
 
 // resolveCoderModel picks the coder model for a subtask: the card's coder pin
 // when it is catalog-resolvable, else the best-value complexity selection for
-// the subtask's tier and a real window estimate of the coder prompt. A
-// selection that could not be served at the subtask's tier is reported; a
-// *NoModelError is returned when even the operator's capable default is barred
-// this run, which parks the card - there is no work to do without a coder.
-func (o *run) resolveCoderModel(ctx context.Context, sub subtaskRef, prompt string) (string, error) {
+// the subtask's tier and a real window estimate of the coder prompt. Either way
+// the outcome is reported, which is what puts the pick on the run transcript. A
+// selection that could not be served at the subtask's tier is also advised on;
+// a *NoModelError is returned when even the operator's capable default is
+// barred this run, which parks the card - there is no work to do without a
+// coder.
+//
+// It returns the whole Pick, like its fix-round sibling resolveFixModel: the
+// provenance is what separates a laddered selection from a pin or the
+// off-ladder default, and the slug alone cannot carry that.
+func (o *run) resolveCoderModel(ctx context.Context, sub subtaskRef, prompt string) (registry.Pick, error) {
+	tier := tierOf(sub)
+
 	if resolvePin(o.d.Registry, o.tc.ModelCoder) {
 		// A pinned model is returned even if it is in o.excluded: we never override
 		// an explicit operator pin with an auto-selected substitute. A pinned model
 		// that is harness-incapable therefore keeps being re-selected, exhausts the
 		// re-selection cap, and parks - the blacklist still records it.
-		return o.tc.ModelCoder, nil
+		p := offLadderPick(o.d.Registry, o.tc.ModelCoder, registry.RoleCoder, tier, registry.SourcePinned)
+
+		o.noteShortfall(ctx, "coder", sub.ID, p)
+
+		return p, nil
 	}
 
 	if o.tc.ModelCoder != "" {
@@ -540,19 +552,29 @@ func (o *run) resolveCoderModel(ctx context.Context, sub subtaskRef, prompt stri
 
 	in := registry.SelectInput{
 		Role:      registry.RoleCoder,
-		Tier:      tierOf(sub),
+		Tier:      tier,
 		EstTokens: estimateTokens(prompt),
 		Exclude:   o.excluded,
 	}
 
 	p := o.d.Registry.SelectByComplexity(in)
 	if !p.OK {
-		return "", o.noModelError(in, p)
+		return registry.Pick{}, o.noModelError(in, p)
 	}
 
-	o.noteShortfall(ctx, "coder", p)
+	o.noteShortfall(ctx, "coder", sub.ID, p)
 
-	return p.Model, nil
+	return p, nil
+}
+
+// solverCoderModel adapts resolveCoderModel to the solver seam, which needs
+// only the slug. The pick's provenance is reported inside the resolver, the
+// same way the Best-of-N candidate resolver reports its own, so nothing
+// downstream has to carry it.
+func (o *run) solverCoderModel(ctx context.Context, sub subtaskRef, prompt string) (string, error) {
+	p, err := o.resolveCoderModel(ctx, sub, prompt)
+
+	return p.Model, err
 }
 
 // subtaskBody returns the description text for a subtask: the planner's
