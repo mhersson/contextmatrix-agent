@@ -200,6 +200,9 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 		attemptsCap = config.DefaultReviewAttemptsCap
 	}
 
+	// fixRan is whether the IMMEDIATELY PRECEDING fix round completed. Not
+	// sticky: a capped round clears it, so the red verify a truncation leaves
+	// behind is never read as the finished round's failure.
 	fixRan := false
 
 	for iter := range hardReviewIterationCap {
@@ -281,7 +284,12 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 
 		// A fix round that committed but left this round's verify red failed as
 		// surely as one that landed nothing: the next fix escalates. Round 1's
-		// red verify has no fix behind it and escalates nothing.
+		// red verify has no fix behind it and escalates nothing, and neither
+		// does a round WE truncated - a cap clears fixRan, because a round that
+		// ran out of turns mid-work is the likeliest of all to leave the verify
+		// red, and that event is already charged on the budget axis. Charging it
+		// on the bar axis too would blame a model for turns it never got, and
+		// shrink the fix pool on evidence about volume.
 		if fixRan && vres.Status == verifyFailed {
 			o.markFixFailed("left the verify red")
 		}
@@ -294,7 +302,31 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 			return err
 		}
 
-		committed, err := o.runFix(ctx, fixRequest{Findings: findings, Round: round, FixTier: fixTier})
+		req := fixRequest{Findings: findings, Round: round, FixTier: fixTier}
+		committed, err := o.runFix(ctx, req)
+
+		var mte *MaxTurnsError
+
+		// Keyed on the WIDTH this round actually ran at, not on the step counter:
+		// the budget is clamped at the top rung, so a card whose bar already
+		// seeds it there would keep buying rounds of identical width while the
+		// log claimed each was wider.
+		if errors.As(err, &mte) && o.fixSizing(req).Budget < maxBudgetStep {
+			// The round is already counted against attemptsCap, so the loop stays
+			// bounded; the cap is volume evidence and the next round runs wider on
+			// the same pool. Parking the whole run here would spend a round and
+			// learn nothing from it.
+			o.markFixCapped()
+			d.logCard(ctx, "review: fix round %d hit its turn cap - retrying wider", round)
+
+			// Cleared, not merely left alone: an earlier COMPLETED round would
+			// otherwise leave this true and hand the next round's red verify to
+			// the bar axis, blaming the model this cap just excused.
+			fixRan = false
+
+			continue
+		}
+
 		if err != nil {
 			return err
 		}
@@ -1001,10 +1033,14 @@ func (o *run) runFixModel(ctx context.Context, prompt string, req fixRequest) (s
 
 		o.noteShortfall(ctx, "fix coder", "", p)
 
-		if o.fixBarSteps > 0 {
+		switch {
+		case o.fixBarSteps > 0:
 			d.logCard(ctx, "fix coder %s selected for round %d fixes (bar=%s, turns=%s) - escalated after a fix round that %s",
 				model, req.Round, fs.Bar, budgetLabel(fs.Budget), o.fixFailReason)
-		} else {
+		case o.fixBudgetSteps > 0:
+			d.logCard(ctx, "fix coder %s selected for round %d fixes (bar=%s, turns=%s) - widened after a fix round that %s",
+				model, req.Round, fs.Bar, budgetLabel(fs.Budget), o.fixCapReason)
+		default:
 			d.logCard(ctx, "fix coder %s selected for round %d fixes (bar=%s, turns=%s)",
 				model, req.Round, fs.Bar, budgetLabel(fs.Budget))
 		}
@@ -1328,10 +1364,13 @@ func (o *run) fixSizing(req fixRequest) sizing {
 // markFixCapped records that the most recent fix round ran out of turns. The
 // next round runs WIDER on the same pool - deliberately without adding the
 // model to fixFailed: it ran out of room, it was not shown to be too weak, and
-// re-running it with more room is the correction.
-func (o *run) markFixCapped(reason string) {
+// re-running it with more room is the correction. The wording is fixed rather
+// than passed in, because a cap has exactly one cause, and it is kept in
+// fixCapReason rather than fixFailReason so no card log reports a cap as a bar
+// escalation or as an exhausted fix pool.
+func (o *run) markFixCapped() {
 	o.fixBudgetSteps++
-	o.fixFailReason = reason
+	o.fixCapReason = "hit its turn cap"
 }
 
 // reviewFindingsHistory returns every "## Review Findings" section recorded on

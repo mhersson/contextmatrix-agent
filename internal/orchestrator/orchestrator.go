@@ -392,12 +392,18 @@ type run struct {
 	// gate round the model that had already failed. A call site that must not
 	// escalate says so per-call, via fixRequest.NoEscalate.
 	//
-	// fixFailReason is the last failure's wording for the card log; lastFixModel
-	// is the model the most recent fix round ran on.
+	// fixFailReason and fixCapReason are the card-log wording for the last
+	// failure of each kind, kept apart because the two readers of a reason
+	// state different things: one says the bar was escalated, the other that
+	// the fix pool is exhausted, and neither is true of a round that merely ran
+	// out of turns. Only markFixFailed writes fixFailReason; only markFixCapped
+	// writes fixCapReason. lastFixModel is the model the most recent fix round
+	// ran on.
 	fixFailed      map[string]bool
 	fixBarSteps    int
 	fixBudgetSteps int
 	fixFailReason  string
+	fixCapReason   string
 	lastFixModel   string
 
 	// excluded is the per-card set of models proven harness-incapable on this run.

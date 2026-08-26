@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -618,39 +619,74 @@ func TestReviewFixLoop(t *testing.T) {
 }
 
 // TestReviewFixMaxTurnsKeepsItsPartialWork pins that a fix run truncated at the
-// turn cap still lands what it wrote: the cap propagates, so nothing reads the
-// findings as addressed, but the edits are committed and pushed rather than
-// left in the tree for the next round to start from a workspace it did not
-// write.
+// turn cap still lands what it wrote: with no wider round left to buy the cap
+// propagates - so nothing reads the findings as addressed - but the edits are
+// committed and pushed rather than left in the tree for the next round to start
+// from a workspace it did not write.
+//
+// "No wider round left" has two shapes, and the retry must recognise both: the
+// step counter spent, and a card whose bar already opens the budget at the top
+// rung so the width cannot move however many steps remain. Both rows land on
+// the same 3-turn window, which is why one burn script covers them.
 func TestReviewFixMaxTurnsKeepsItsPartialWork(t *testing.T) {
-	ops := &fakeOps{}
-	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
-	call := llm.ToolCall{
-		ID:       "c1",
-		Type:     "function",
-		Function: llm.FunctionCall{Name: "read", Arguments: `{"path":"no-such-file.txt"}`},
+	tests := []struct {
+		name       string
+		seed       func(o *run)
+		wantBudget int
+	}{
+		{
+			name:       "the step counter is spent",
+			seed:       func(o *run) { o.fixBudgetSteps = maxBudgetStep },
+			wantBudget: maxBudgetStep,
+		},
+		{
+			name: "the width is already at the top rung",
+			seed: func(o *run) {
+				o.cardSizing = sizing{Bar: registry.TierCritical, Budget: seedBudgetStep(registry.TierCritical)}
+				o.fixBudgetSteps = 1
+			},
+			wantBudget: 1,
+		},
 	}
-	client := &planLLM{responses: []llm.Response{
-		stopResp("Correctness: bug found", 0.01),
-		stopResp("Design: ok", 0.01),
-		stopResp("Security: ok", 0.01),
-		stopResp(`{"approved":false,"summary":"needs fix","fixes":[{"file":"a.go","issue":"bug"}]}`, 0.02),
-		{ToolCalls: []llm.ToolCall{call}}, // fix coder burns its single turn -> max_turns
-	}}
-	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
-	d.Cfg.MaxTurns = 1
 
-	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
-	o := newReviewRun(d, tc, 0)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
 
-	err := runReview(context.Background(), o)
-	require.Error(t, err)
+			responses := []llm.Response{
+				stopResp("Correctness: bug found", 0.01),
+				stopResp("Design: ok", 0.01),
+				stopResp("Security: ok", 0.01),
+				stopResp(`{"approved":false,"summary":"needs fix","fixes":[{"file":"a.go","issue":"bug"}]}`, 0.02),
+			}
+			// The top rung of a 1-turn base is a 3-turn window; the coder burns
+			// all of it -> max_turns.
+			responses = append(responses, burnResps(3)...)
 
-	var mte *MaxTurnsError
-	require.ErrorAs(t, err, &mte)
+			d := reviewTestDeps(t, ops, git, &planLLM{responses: responses}, reviewerRegistry())
+			d.Cfg.MaxTurns = 1
 
-	assert.Equal(t, []string{"cm/card-1"}, git.pushBranches,
-		"a truncated fix round's edits are pushed, not abandoned; git=%v", git.recorded())
+			tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
+			o := newReviewRun(d, tc, 0)
+			tt.seed(o)
+
+			err := runReview(context.Background(), o)
+
+			// Checked before the error, because a retry the width cannot serve
+			// derails the run in ways that would otherwise mask this claim.
+			assert.Equal(t, tt.wantBudget, o.fixBudgetSteps,
+				"a round that could not run wider is not recorded as a widening")
+
+			require.Error(t, err)
+
+			var mte *MaxTurnsError
+			require.ErrorAs(t, err, &mte)
+
+			assert.Equal(t, []string{"cm/card-1"}, git.pushBranches,
+				"a truncated fix round's edits are pushed, not abandoned; git=%v", git.recorded())
+		})
+	}
 }
 
 // TestFixRunTierScalesTurnBudget proves a complex fix tier lifts the fix coder
@@ -2985,7 +3021,11 @@ func TestFixBudgetComesFromTheFixBarNotTheCard(t *testing.T) {
 	ops := &fakeOps{}
 	o := newReviewRun(reviewTestDeps(t, ops, &fakeGit{}, &planLLM{}, reviewerRegistry()),
 		cmclient.TaskContext{Title: "Card"}, 0)
-	o.cardSizing = sizing{Bar: registry.TierModerate, Budget: 0}
+	// A card budget ABOVE every rung these rows expect: sourcing the fix budget
+	// from it would show up as 135 on all three, where a card budget at or below
+	// the bar's own seed would be re-seeded back to the right answer and hide
+	// the mutation entirely.
+	o.cardSizing = sizing{Bar: registry.TierModerate, Budget: 3}
 
 	auth := o.fixSizing(fixRequest{Round: 3, Authoritative: true})
 	assert.Equal(t, registry.TierComplex, auth.Bar)
@@ -3012,7 +3052,7 @@ func TestFixEscalationSurvivesApproval(t *testing.T) {
 
 	o.markFixFailed("produced no change")
 	o.markFixFailed("left the verify red")
-	o.markFixCapped("hit its turn cap")
+	o.markFixCapped()
 
 	gate := o.fixSizing(fixRequest{Round: 1}) // a pr_gates round, after approval
 	assert.Equal(t, registry.TierCritical, gate.Bar, "two failed rounds climb two bar rungs")
@@ -3065,7 +3105,7 @@ func TestFixCapWidensBudgetWithoutBlamingTheModel(t *testing.T) {
 	o.cardSizing = sizing{Bar: registry.TierModerate, Budget: 0}
 	o.lastFixModel = "vendor/fine"
 
-	o.markFixCapped("hit its turn cap")
+	o.markFixCapped()
 
 	next := o.fixSizing(fixRequest{Round: 2})
 	assert.Equal(t, 1, next.Budget)
@@ -3147,7 +3187,7 @@ func TestCappedRoundDoesNotClaimTheFixersAreExhausted(t *testing.T) {
 	// the guard sees a pick that already failed.
 	o.fixFailed = map[string]bool{"pinned/model": true}
 	o.lastFixModel = "pinned/model"
-	o.markFixCapped("hit its turn cap")
+	o.markFixCapped()
 
 	committed, err := o.runFix(context.Background(), fixRequest{Findings: "- a.go: something", Round: 2})
 	require.NoError(t, err, "a cap is not evidence that any fixer was too weak")
@@ -3417,6 +3457,197 @@ func TestReadRootsReachTheSpecialistPrompt(t *testing.T) {
 						"specialist %d must carry no roots line when nothing is declared", i)
 				}
 			}
+		})
+	}
+}
+
+// A capped review fix round must not park the whole run. The review loop is the
+// one place a turn-cap correction is free: the round is already counted against
+// attemptsCap, so the loop stays bounded and the next round simply runs wider.
+//
+// Response script: round 1's panel and synthesis (four one-turn calls) revise;
+// the round-1 fix coder then burns the whole 5-turn budget and returns
+// max_turns; round 2's panel and synthesis approve. The panel and synthesis
+// calls all finish on their first turn, so the small MaxTurns caps only the fix
+// coder.
+func TestCappedReviewFixRoundRetriesWiderInsteadOfParking(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+
+	responses := []llm.Response{
+		stopResp("Correctness: broken", 0.01),
+		stopResp("Design: broken", 0.01),
+		stopResp("Security: fine", 0.01),
+		stopResp(`{"approved":false,"summary":"needs work","fixes":[{"file":"a.go","issue":"bug","suggestion":"fix","severity":"major"}]}`, 0.02),
+	}
+	responses = append(responses, burnResps(5)...)
+	responses = append(responses,
+		stopResp("Correctness: fine", 0.01),
+		stopResp("Design: fine", 0.01),
+		stopResp("Security: fine", 0.01),
+		stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.02),
+	)
+
+	d := reviewTestDeps(t, ops, git, &planLLM{responses: responses}, reviewerRegistry())
+	d.Cfg.MaxTurns = 5
+
+	o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}, 0)
+
+	require.NoError(t, runReview(context.Background(), o),
+		"a capped fix round must not park the whole run")
+
+	assert.Equal(t, 1, o.fixBudgetSteps, "the cap widened the next round by one rung")
+	assert.Zero(t, o.fixBarSteps, "the retried round approved, so nothing climbed the bar")
+	assert.True(t, ops.loggedContains("hit its turn cap"), "logs=%v", ops.logs)
+	assert.GreaterOrEqual(t, indexOfPrefix(git.recorded(), "CommitFixup:"), 0,
+		"the capped round's partial work is still committed; git=%v", git.recorded())
+}
+
+// A turn cap widens the budget and says nothing about the fixer's quality, so
+// the round after a cap must not be reported to the operator as an escalation -
+// and a cap that follows a genuine quality failure must not overwrite the
+// reason that failure gave the escalation. Sharing one reason string between
+// the two corrections told the operator that a turn cap had bought a stronger
+// model.
+func TestFixRoundReportsTheCorrectionItActuallyMade(t *testing.T) {
+	tests := []struct {
+		name         string
+		mark         func(o *run)
+		wantReason   string
+		unwantReason string
+		wantWord     string
+		unwantWord   string
+	}{
+		{
+			name:         "capped only",
+			mark:         func(o *run) { o.markFixCapped() },
+			wantReason:   "hit its turn cap",
+			unwantReason: "produced no change",
+			wantWord:     "widened",
+			unwantWord:   "escalated",
+		},
+		{
+			name: "escalated then capped",
+			mark: func(o *run) {
+				o.markFixFailed("produced no change")
+				o.markFixCapped()
+			},
+			wantReason:   "produced no change",
+			unwantReason: "hit its turn cap",
+			wantWord:     "escalated",
+			unwantWord:   "widened",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			o := newReviewRun(reviewTestDeps(t, ops, &fakeGit{committed: true},
+				&planLLM{responses: []llm.Response{stopResp("coder: fixed", 0.01)}}, reviewerRegistry()),
+				cmclient.TaskContext{Title: "Card"}, 0)
+			o.lastFixModel = "vendor/weak"
+			tt.mark(o)
+
+			_, err := o.runFixModel(context.Background(), "fix prompt", fixRequest{Round: 2})
+			require.NoError(t, err)
+
+			assert.True(t, ops.loggedContains(tt.wantWord), "logs=%v", ops.logs)
+			assert.False(t, ops.loggedContains(tt.unwantWord), "logs=%v", ops.logs)
+			assert.True(t, ops.loggedContains(tt.wantReason), "logs=%v", ops.logs)
+			assert.False(t, ops.loggedContains(tt.unwantReason), "logs=%v", ops.logs)
+		})
+	}
+}
+
+// A round truncated at its turn cap is the likeliest of all to leave the verify
+// red - it ran out of turns mid-work, and runFix committed the partial result.
+// That red verify is the cap showing through, already charged on the budget
+// axis, so it must not ALSO climb the bar and exclude the fixer: a turn cap is
+// zero evidence about capability, and every exclusion shrinks the pool toward
+// the exhausted-fixers park.
+//
+// Both rows matter because the flag that carries this is per-round, not
+// per-run. Omitting the write on the cap path is enough only when the cap is
+// the FIRST fix round; once any earlier round has completed, the flag is
+// already true and the cap must actively clear it.
+func TestACappedRoundIsNotBlamedForTheVerifyItLeftRed(t *testing.T) {
+	panelRejects := func() []llm.Response {
+		return []llm.Response{
+			stopResp("Correctness: broken", 0.01),
+			stopResp("Design: ok", 0.01),
+			stopResp("Security: ok", 0.01),
+			stopResp(`{"approved":false,"summary":"needs work","fixes":[{"file":"a.go","issue":"bug","suggestion":"fix","severity":"major"}]}`, 0.02),
+		}
+	}
+	panelApproves := func() []llm.Response {
+		return []llm.Response{
+			stopResp("Correctness: fine", 0.01),
+			stopResp("Design: fine", 0.01),
+			stopResp("Security: fine", 0.01),
+			stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.02),
+		}
+	}
+	// A red gate short-circuits the panel entirely, so a red round's only model
+	// call is its own fix coder's.
+	fixCompletes := stopResp("coder: fixed it this time", 0.05)
+
+	tests := []struct {
+		name string
+		// script is the model conversation; redGate is the gate run that fails;
+		// wantGates is how many rounds ran in total.
+		script    []llm.Response
+		redGate   int
+		wantGates int
+	}{
+		{
+			name: "the cap is the first fix round",
+			// pass/reject/cap, red/fix, pass/approve.
+			script: slices.Concat(panelRejects(), burnResps(5),
+				[]llm.Response{fixCompletes}, panelApproves()),
+			redGate:   2,
+			wantGates: 3,
+		},
+		{
+			name: "a completed fix round precedes the cap",
+			// pass/reject/fix, pass/reject/cap, red/fix, pass/approve. The first
+			// round completing is what leaves the per-round flag set going into
+			// the cap.
+			script: slices.Concat(panelRejects(), []llm.Response{fixCompletes},
+				panelRejects(), burnResps(5),
+				[]llm.Response{fixCompletes}, panelApproves()),
+			redGate:   3,
+			wantGates: 4,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+
+			d := reviewTestDeps(t, ops, git, &planLLM{responses: tt.script}, reviewerRegistry())
+			d.Cfg.MaxTurns = 5
+
+			o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}, 0)
+			o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
+
+			gateRuns := 0
+			o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+				gateRuns++
+				if gateRuns == tt.redGate {
+					return verifyexec.Outcome{ExitCode: 1, Output: "still failing"}
+				}
+
+				return verifyexec.Outcome{ExitCode: 0}
+			}
+
+			require.NoError(t, runReview(context.Background(), o),
+				"the capped fixer must still be selectable for the round that follows it")
+
+			assert.Zero(t, o.fixBarSteps, "the red verify a cap left is charged on the budget axis, not the bar")
+			assert.Empty(t, o.fixFailed, "the truncated fixer stays eligible; fixFailed=%v", o.fixFailed)
+			assert.Equal(t, 1, o.fixBudgetSteps, "the cap was charged once, and on the budget axis")
+			assert.Equal(t, tt.wantGates, gateRuns, "every scripted round ran")
 		})
 	}
 }
