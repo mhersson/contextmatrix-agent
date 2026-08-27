@@ -44,16 +44,21 @@ type plan struct {
 }
 
 // subtaskRef is a created subtask carried on the run struct for the execute
-// phase: the real card ID, its title, body, tier, current state, and the real
+// phase: the real card ID, its title, body, sizing, current state, and the real
 // card IDs it depends on. State drives resume skipping in the execute phase
 // ("done" subtasks are not re-run); plan-created subtasks start "todo". Body
 // carries the planner's description (file lists, acceptance criteria) into the
-// coder prompt; resume-loaded refs lack it (SubtaskStates has no body field).
+// coder prompt; resume-loaded refs restore it from the card body.
 type subtaskRef struct {
-	ID           string
-	Title        string
-	Body         string
-	Tier         string
+	ID     string
+	Title  string
+	Body   string
+	Sizing sizing
+	// PlannerBar is the planner's own word for this subtask, restored from the
+	// marker's write-once seed key. Kept separate from Sizing.Bar because an
+	// escalation overwrites the bar, and the estimate a later analysis is
+	// testing must stay recoverable after the correction that replaced it.
+	PlannerBar   string
 	State        string
 	DependsOnIDs []string
 }
@@ -1075,7 +1080,7 @@ func presentPlan(p plan) string {
 
 // createSubtasks creates one card per plan subtask in order, mapping each
 // depends_on index to the real card ID returned for that earlier subtask, and
-// records the resulting refs (plus the overall card tier) on the run struct.
+// records the resulting refs (plus the card-level sizing) on the run struct.
 //
 // Creation order is deterministic (plan order), and depends_on validation in
 // parsePlan guarantees every referenced index is already created when used, so
@@ -1095,7 +1100,10 @@ func (o *run) createSubtasks(ctx context.Context, p plan) error {
 			depIDs = append(depIDs, ids[dep])
 		}
 
-		id, err := d.Ops.CreateCard(ctx, cfg.Project, cfg.CardID, st.Title, withTierMarker(st.Description, st.Tier), depIDs)
+		s := seedSizing(st.Tier)
+		body := writeMeta(st.Description, markerFor(s, st.Tier))
+
+		id, err := d.Ops.CreateCard(ctx, cfg.Project, cfg.CardID, st.Title, body, depIDs)
 		if err != nil {
 			return fmt.Errorf("create subtask %q: %w", st.Title, err)
 		}
@@ -1105,13 +1113,22 @@ func (o *run) createSubtasks(ctx context.Context, p plan) error {
 			ID:           id,
 			Title:        st.Title,
 			Body:         st.Description,
-			Tier:         st.Tier,
+			Sizing:       s,
+			PlannerBar:   st.Tier,
 			State:        "todo", // freshly created; resume reconciliation refreshes this
 			DependsOnIDs: depIDs,
 		})
 	}
 
-	o.cardTier = p.CardTier
+	o.cardSizing = seedSizing(p.CardTier)
+	o.cardPlannerBar = p.CardTier
+
+	// Fold the card-level marker into the body BEFORE the "## Plan" record
+	// pushes it: the parent card is the only persistence a resumed run can read,
+	// and without this every resumed run sizes its review panel and its
+	// Best-of-N pool at the moderate default. recordSection preserves whatever
+	// is above its heading, so one write carries both.
+	o.body = writeMeta(o.body, markerFor(o.cardSizing, p.CardTier))
 
 	// Record the plan on the parent card body so it carries the full history
 	// (the subtask cards hold the detail; this is the consolidated view, like

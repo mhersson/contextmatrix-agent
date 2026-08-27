@@ -948,6 +948,45 @@ func (f *fakeInbox) Wait(ctx context.Context) (harness.UserMessage, error) {
 
 var _ harness.Inbox = (*fakeInbox)(nil)
 
+// eventsOfKind decodes every transcript event of the given kind, in emission
+// order. Mirrors batchNudgeCounts' line-oriented decode; numbers arrive as
+// float64, so assert them with EqualValues.
+func eventsOfKind(t *testing.T, transcript *bytes.Buffer, kind string) []map[string]any {
+	t.Helper()
+
+	var found []map[string]any
+
+	for line := range strings.SplitSeq(strings.TrimSpace(transcript.String()), "\n") {
+		if line == "" {
+			continue
+		}
+
+		var ev struct {
+			Kind string         `json:"kind"`
+			Data map[string]any `json:"data"`
+		}
+
+		require.NoError(t, json.Unmarshal([]byte(line), &ev))
+
+		if ev.Kind == kind {
+			found = append(found, ev.Data)
+		}
+	}
+
+	return found
+}
+
+// onlyEvent decodes the single transcript event of the given kind, failing the
+// test when there is not exactly one.
+func onlyEvent(t *testing.T, transcript *bytes.Buffer, kind string) map[string]any {
+	t.Helper()
+
+	found := eventsOfKind(t, transcript, kind)
+	require.Len(t, found, 1, "want exactly one %s event", kind)
+
+	return found[0]
+}
+
 // batchNudgeCounts decodes every batch_nudge event the emitter wrote, returning
 // each one's single_call_turns in emission order. Tests use it to assert both
 // that a phase earns the harness batching nudge and that a phase deliberately
@@ -978,4 +1017,12 @@ func batchNudgeCounts(t *testing.T, transcript *bytes.Buffer) []int {
 	}
 
 	return counts
+}
+
+// legacyTierMarker builds the pre-split single-axis marker exactly as it is
+// written on every subtask card created before the two-axis split. Live cards
+// carry this form forever, so the fixtures that stand in for them must keep
+// producing it after the writer that made it is gone.
+func legacyTierMarker(body, tier string) string {
+	return strings.TrimRight(body, "\n") + "\n\n<!-- cm:tier=" + tier + " -->"
 }

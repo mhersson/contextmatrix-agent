@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
+	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -191,8 +192,8 @@ func TestReconcileSortsSubtasksByCardID(t *testing.T) {
 }
 
 func TestReconcileTierRecoveryDefaultsModerate(t *testing.T) {
-	// Tier recovery: reconciled refs (no in-memory tier - tiers aren't persisted
-	// on subtask cards) get the conservative "moderate" default.
+	// Sizing recovery: a reconciled ref whose card body carries no marker gets
+	// the conservative moderate default.
 	ops := &fakeOps{
 		subtaskStates: []cmclient.SubtaskState{
 			{CardID: "SUB-1", Title: "one", State: "todo"},
@@ -204,7 +205,7 @@ func TestReconcileTierRecoveryDefaultsModerate(t *testing.T) {
 	require.NoError(t, o.reconcile(context.Background()))
 
 	require.Len(t, o.subtasks, 1)
-	assert.Equal(t, "moderate", o.subtasks[0].Tier, "reconciled refs default to the conservative moderate tier")
+	assert.Equal(t, defaultSizing(), o.subtasks[0].Sizing, "reconciled refs default to the conservative moderate bar")
 }
 
 func TestReconcileContextPhasesNoSideEffects(t *testing.T) {
@@ -396,12 +397,12 @@ func TestExecuteCalledFromExecuteDriver(t *testing.T) {
 
 func TestReconcileRestoresTierAndBody(t *testing.T) {
 	// The core persistence contract: a pending subtask's card body carries the
-	// marker written at creation time (plan.go's withTierMarker), and reconcile
-	// restores both the tier and the marker-stripped planner body from it.
+	// marker written at creation time (plan.go's writeMeta), and reconcile
+	// restores both the sizing and the marker-stripped planner body from it.
 	ops := &fakeOps{}
 	ops.subtaskStates = []cmclient.SubtaskState{{CardID: "SUB-2", Title: "impl", State: "todo"}}
 	ops.taskContexts = map[string]cmclient.TaskContext{
-		"SUB-2": {Title: "impl", Description: withTierMarker("planner body", "complex")},
+		"SUB-2": {Title: "impl", Description: legacyTierMarker("planner body", "complex")},
 	}
 	git := &fakeGit{remoteTip: "abc123"}
 
@@ -409,14 +410,14 @@ func TestReconcileRestoresTierAndBody(t *testing.T) {
 	require.NoError(t, o.reconcile(context.Background()))
 
 	require.Len(t, o.subtasks, 1)
-	assert.Equal(t, "complex", o.subtasks[0].Tier, "persisted tier survives resume")
+	assert.Equal(t, registry.TierComplex, o.subtasks[0].Sizing.Bar, "persisted bar survives resume")
 	assert.Equal(t, "planner body", o.subtasks[0].Body, "planner body survives resume, marker stripped")
 }
 
 func TestReconcileTierFallbackWithoutMarker(t *testing.T) {
-	// A subtask card body without a marker (e.g. created before this feature, or
-	// hand-edited) falls back to the conservative default tier, and the body is
-	// still restored from the fetched description (better than a bare title).
+	// A subtask card body without a marker (e.g. hand-edited) falls back to the
+	// conservative default sizing, and the body is still restored from the
+	// fetched description (better than a bare title).
 	ops := &fakeOps{}
 	ops.subtaskStates = []cmclient.SubtaskState{{CardID: "SUB-2", Title: "impl", State: "todo"}}
 	ops.taskContexts = map[string]cmclient.TaskContext{
@@ -428,14 +429,14 @@ func TestReconcileTierFallbackWithoutMarker(t *testing.T) {
 	require.NoError(t, o.reconcile(context.Background()))
 
 	require.Len(t, o.subtasks, 1)
-	assert.Equal(t, "moderate", o.subtasks[0].Tier, "no marker: falls back to the conservative default")
+	assert.Equal(t, defaultSizing(), o.subtasks[0].Sizing, "no marker: falls back to the conservative default")
 	assert.Equal(t, "planner body, no marker", o.subtasks[0].Body, "body is still restored from the fetched description")
 }
 
 func TestReconcileToleratesTaskContextFailure(t *testing.T) {
 	// Resume must not become fragile: a GetTaskContext failure for a subtask
-	// degrades to today's defaults (title-only body, "moderate" tier) rather than
-	// failing the whole resume.
+	// degrades to the conservative defaults (title-only body, moderate bar,
+	// base budget) rather than failing the whole resume.
 	ops := &fakeOps{}
 	ops.subtaskStates = []cmclient.SubtaskState{{CardID: "SUB-2", Title: "impl", State: "todo"}}
 	ops.taskCtxErr = assertErr("context fetch unavailable")
@@ -445,6 +446,43 @@ func TestReconcileToleratesTaskContextFailure(t *testing.T) {
 	require.NoError(t, o.reconcile(context.Background()), "a subtask context fetch failure must not fail reconcile")
 
 	require.Len(t, o.subtasks, 1)
-	assert.Equal(t, "moderate", o.subtasks[0].Tier, "fetch failure falls back to the conservative default")
+	assert.Equal(t, defaultSizing(), o.subtasks[0].Sizing, "fetch failure falls back to the conservative default")
 	assert.Empty(t, o.subtasks[0].Body, "fetch failure leaves the body unset (title-only)")
+}
+
+// Every live subtask card carries the pre-split single-axis marker. It must
+// resolve to the same bar AND the same turn budget it resolves to today, with
+// no sweep and no backfill.
+func TestReconcileReadsLegacyAndNewMarkers(t *testing.T) {
+	cases := map[string]struct {
+		body string
+		want sizing
+		// wantSeed is the planner's own word, restored from the marker's
+		// write-once seed key. It is the estimate a later analysis pairs its
+		// turn measurements against, so a resumed run has to recover it.
+		wantSeed string
+	}{
+		"legacy": {legacyTierMarker("Do it.", "complex"), sizing{registry.TierComplex, 1}, "complex"},
+		// A card corrected on BOTH axes: the bar climbed off the planner's word
+		// and the budget widened off that bar's seed, so no restored field can
+		// be read out of another one.
+		"new":     {writeMeta("Do it.", metaKV{"bar": "complex", "budget": "2", "seed": "simple"}), sizing{registry.TierComplex, 2}, "simple"},
+		"no mark": {"Do it.", defaultSizing(), ""},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			ops := &fakeOps{}
+			ops.taskContexts = map[string]cmclient.TaskContext{"SUB-001": {Description: tc.body}}
+			ops.subtaskStates = []cmclient.SubtaskState{{CardID: "SUB-001", Title: "t", State: "todo"}}
+
+			o := reconcileTestRun(ops, &fakeGit{remoteTip: "abc123"}, "execute")
+			require.NoError(t, o.reconcile(context.Background()))
+
+			require.Len(t, o.subtasks, 1)
+			assert.Equal(t, tc.want, o.subtasks[0].Sizing)
+			assert.Equal(t, tc.wantSeed, o.subtasks[0].PlannerBar, "the planner's own word survives the resume")
+			assert.Equal(t, "Do it.", o.subtasks[0].Body, "the restored body is marker-free")
+		})
+	}
 }

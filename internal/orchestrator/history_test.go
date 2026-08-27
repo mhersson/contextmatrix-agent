@@ -49,14 +49,14 @@ func TestSectionFrom(t *testing.T) {
 
 func TestFormatPlanReadable(t *testing.T) {
 	subs := []subtaskRef{
-		{ID: "X-2", Title: "Sysinfo pkg", Tier: "simple", Body: "Create go.mod and a sysinfo package.\n\nFiles: go.mod, sysinfo/sysinfo.go"},
-		{ID: "X-3", Title: "HTTP server", Tier: "simple", DependsOnIDs: []string{"X-2"}, Body: "Add main.go serving GET /."},
+		{ID: "X-2", Title: "Sysinfo pkg", Sizing: seedSizing("simple"), Body: "Create go.mod and a sysinfo package.\n\nFiles: go.mod, sysinfo/sysinfo.go"},
+		{ID: "X-3", Title: "HTTP server", Sizing: seedSizing("simple"), DependsOnIDs: []string{"X-2"}, Body: "Add main.go serving GET /."},
 	}
 	got := formatPlan(subs)
 	assert.Contains(t, got, "### 1. X-2 - Sysinfo pkg")
-	assert.Contains(t, got, "_Tier: simple · Depends on: none_")
+	assert.Contains(t, got, "_Bar: simple · Turns: base · Depends on: none_")
 	assert.Contains(t, got, "### 2. X-3 - HTTP server")
-	assert.Contains(t, got, "_Tier: simple · Depends on: X-2_")
+	assert.Contains(t, got, "_Bar: simple · Turns: base · Depends on: X-2_")
 	// Body is its own block, not crammed onto a "Body:" line.
 	assert.NotContains(t, got, "Body:")
 	assert.Contains(t, got, "Create go.mod and a sysinfo package.")

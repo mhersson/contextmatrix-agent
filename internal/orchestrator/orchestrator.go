@@ -290,7 +290,14 @@ type run struct {
 	// Plan-phase outputs, consumed by later phases. Set by runPlan, or - on
 	// resume - pre-loaded by reconcile from SubtaskStates before any phase runs.
 	subtasks []subtaskRef
-	cardTier string
+	// cardSizing is the card-level bar and budget, seeded from the planner's
+	// card_tier and persisted on the parent body so a resumed run restores it.
+	// Before it was persisted it had one writer and no reader on resume, so
+	// every resumed run sized its review panel and its Best-of-N pool at the
+	// moderate default no matter what the planner said. cardPlannerBar is the
+	// planner's own word, kept for the same reason as subtaskRef.PlannerBar.
+	cardSizing     sizing
+	cardPlannerBar string
 
 	// curPhase is the phase currently executing, set by the sequential FSM loop
 	// in execute BEFORE each phase runs and read by spendAndReport to tag usage
@@ -374,14 +381,30 @@ type run struct {
 
 	// fixFailed is the set of fix-coder models whose review fix round failed
 	// this run - it landed no commit, or the next round's verify was still red.
-	// Every later fix pick excludes them; while fixEscalate is set the pick also
-	// climbs one tier and prefers a vendor that has not failed. fixFailReason is
-	// the last failure's wording for the card log; lastFixModel is the model the
-	// most recent fix round ran on.
-	fixFailed     map[string]bool
-	fixEscalate   bool
-	fixFailReason string
-	lastFixModel  string
+	// Every later fix pick excludes them.
+	//
+	// fixBarSteps and fixBudgetSteps are the two correction counters, both
+	// MONOTONE for the whole run. A round that produced nothing or left the
+	// verify red is quality evidence and climbs the bar; a round that ran out of
+	// turns is volume evidence and widens the budget without blaming the model.
+	// Neither is ever lowered: runFix is shared with pr_gates, which runs AFTER
+	// review approval, so clearing them on an approving verdict handed the first
+	// gate round the model that had already failed. A call site that must not
+	// escalate says so per-call, via fixRequest.NoEscalate.
+	//
+	// fixFailReason and fixCapReason are the card-log wording for the last
+	// failure of each kind, kept apart because the two readers of a reason
+	// state different things: one says the bar was escalated, the other that
+	// the fix pool is exhausted, and neither is true of a round that merely ran
+	// out of turns. Only markFixFailed writes fixFailReason; only markFixCapped
+	// writes fixCapReason. lastFixModel is the model the most recent fix round
+	// ran on.
+	fixFailed      map[string]bool
+	fixBarSteps    int
+	fixBudgetSteps int
+	fixFailReason  string
+	fixCapReason   string
+	lastFixModel   string
 
 	// excluded is the per-card set of models proven harness-incapable on this run.
 	// It is threaded into every SelectInput.Exclude (coder selection and the review
@@ -518,8 +541,13 @@ func newRun(d Deps, tc cmclient.TaskContext) *run {
 
 	o.coderModels = map[string]bool{}
 	o.excluded = map[string]bool{}
+	kv, s := readMeta(tc.Description)
+	o.cardSizing = s
+	o.cardPlannerBar = kv["seed"]
+	// o.body keeps the marker: it is the persisted body, and dropping it here
+	// would delete the marker on the next recordSection push.
 	o.body = tc.Description
-	o.taskDescription = stripAgentSections(tc.Description)
+	o.taskDescription = stripAgentSections(stripMeta(tc.Description))
 	o.lastFindings = reviewFindingsHistory(tc.Description)
 	o.taskImages = dataURLs(tc.Images)
 

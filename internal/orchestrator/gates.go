@@ -67,6 +67,13 @@ const (
 
 	gatesCopilotFixNoChangeParkReason = "Copilot fix produced no change"
 	gatesCIFixNoChangeParkReason      = "CI fix produced no change"
+
+	// gatesFixParkFallbackReason names a fix-round park that arrived carrying no
+	// reason of its own. Every park path sets one, so this guards an invariant
+	// rather than describing a case: an empty return from gateResourcePark reads
+	// as "not a park at all" and puts the gate back on the hard-fail path that
+	// ends a run whose work is already pushed.
+	gatesFixParkFallbackReason = "the fix round could not run"
 )
 
 // gatesNoChecksGrace is how long the CI gate waits for the first check to appear
@@ -798,7 +805,9 @@ func (o *run) copilotFixRound(ctx context.Context, st *gatesState, findings []co
 		st.CopilotRounds, gatesRoundsCap, len(findings)),
 		map[string]any{"round": st.CopilotRounds, "cap": gatesRoundsCap, "findings": len(findings)})
 
-	committed, err := o.runFix(ctx, copilotFixFindings(findings), st.CopilotRounds, "", false)
+	// FixTier is deliberately left empty: a gate finding is not scoped to one
+	// review round, so the card bar is the right fallback.
+	committed, err := o.runFix(ctx, fixRequest{Findings: copilotFixFindings(findings), Round: st.CopilotRounds})
 	if err != nil {
 		if reason := gateResourcePark(err, gatesCopilotFixBudgetParkReason, gatesCopilotTurnCapParkReason); reason != "" {
 			return o.parkGates(ctx, st, reason)
@@ -1377,7 +1386,29 @@ func (o *run) ciFixRound(ctx context.Context, prURL string, st *gatesState, fail
 		return o.parkGates(ctx, st, gatesBudgetParkReason)
 	}
 
-	committed, err := o.runFix(ctx, ciFixFindings(digest), st.CIRounds, "", false)
+	// FixTier is deliberately left empty: a gate finding is not scoped to one
+	// review round, so the card bar is the right fallback.
+	req := fixRequest{Findings: ciFixFindings(digest), Round: st.CIRounds}
+	committed, err := o.runFix(ctx, req)
+
+	var mte *MaxTurnsError
+
+	// The budget term is keyed on the WIDTH this round actually ran at, not on
+	// the step counter: the budget is clamped at the top rung, so a card whose
+	// bar already seeds it there would keep buying rounds of identical width
+	// while the note claimed each was wider.
+	if errors.As(err, &mte) && committed && o.fixSizing(req).Budget < maxBudgetStep && st.CIRounds < gatesRoundsCap {
+		// A capped round that PUSHED earns another CI cycle: the poll loop will
+		// see a real new head. One that pushed nothing does not - it would
+		// re-bucket the identical settled-red checks and burn the remaining
+		// rounds back to back with no CI feedback between them.
+		o.markFixCapped()
+		o.gateNote(ctx, "ci", fmt.Sprintf("pr_gates: CI fix round %d hit its turn cap after pushing - retrying wider",
+			st.CIRounds), map[string]any{"round": st.CIRounds})
+
+		return nil
+	}
+
 	if err != nil {
 		// A fix that ran out of budget or turns takes the same park arm as the
 		// ledger check above - only the reason on the card differs.
@@ -1389,6 +1420,20 @@ func (o *run) ciFixRound(ctx context.Context, prURL string, st *gatesState, fail
 	}
 
 	if !committed {
+		// A round that changed nothing is quality evidence, and another round is
+		// already funded. Raise the bar once and spend it on a stronger fixer
+		// rather than parking without ever having tried one. Keyed on the bar
+		// counter, which the review loop also writes: on a card whose review
+		// rounds already escalated, a stronger fixer has been tried and failed,
+		// so this parks on the first no-op round exactly as before.
+		if o.fixBarSteps == 0 && st.CIRounds < gatesRoundsCap {
+			o.markFixFailed("produced no change")
+			o.gateNote(ctx, "ci", fmt.Sprintf("pr_gates: CI fix round %d produced no change - retrying with a stronger fixer",
+				st.CIRounds), map[string]any{"round": st.CIRounds})
+
+			return nil
+		}
+
 		return o.parkGates(ctx, st, gatesCIFixNoChangeParkReason)
 	}
 
@@ -1404,6 +1449,7 @@ func gateResourcePark(err error, budgetReason, turnCapReason string) string {
 	var (
 		budget   *BudgetExceededError
 		maxTurns *MaxTurnsError
+		parked   *ReviewParkedError
 	)
 
 	switch {
@@ -1411,6 +1457,16 @@ func gateResourcePark(err error, budgetReason, turnCapReason string) string {
 		return budgetReason
 	case errors.As(err, &maxTurns):
 		return turnCapReason
+	case errors.As(err, &parked):
+		// The shared fix path parks for more than one reason - no fixer left
+		// after the failed rounds, and nothing selectable at all, which can
+		// happen on a gate's FIRST round. The card carries the error's own
+		// reason rather than a cause the gate guessed at.
+		if parked.Reason != "" {
+			return parked.Reason
+		}
+
+		return gatesFixParkFallbackReason
 	}
 
 	return ""

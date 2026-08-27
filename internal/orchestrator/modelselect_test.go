@@ -107,7 +107,7 @@ func TestCoderSelectionReachesTheTranscript(t *testing.T) {
 	d.Registry = coderPriorRegistry()
 	d.Emit = events.NewEmitter(nil, &transcript)
 
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
 
 	require.NoError(t, runExecute(context.Background(), o))
 
@@ -137,7 +137,7 @@ func TestCoderSelectionKeepsTheCardLogEntry(t *testing.T) {
 	d.Registry = coderPriorRegistry()
 	d.Emit = events.NewEmitter(nil, &transcript)
 
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
 
 	require.NoError(t, runExecute(context.Background(), o))
 
@@ -147,13 +147,13 @@ func TestCoderSelectionKeepsTheCardLogEntry(t *testing.T) {
 	var logged bool
 
 	for _, l := range ops.logs {
-		if strings.Contains(l, "coder/strong") && strings.Contains(l, "tier=simple") {
+		if strings.Contains(l, "coder/strong") && strings.Contains(l, "bar=simple") {
 			logged = true
 		}
 	}
 
 	assert.True(t, logged,
-		"one card-log entry still names the selected model and its tier; logs=%v", ops.logs)
+		"one card-log entry still names the selected model and its bar; logs=%v", ops.logs)
 	assert.NotEmpty(t, modelSelections(t, &transcript), "and the transcript event is there too")
 }
 
@@ -169,7 +169,7 @@ func TestPinnedCoderReportsPinSource(t *testing.T) {
 	d.Registry = coderPriorRegistry()
 	d.Emit = events.NewEmitter(nil, &transcript)
 
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
 	o.tc.ModelCoder = "pinned/model"
 
 	require.NoError(t, runExecute(context.Background(), o))
@@ -201,7 +201,7 @@ func TestFallbackEqualToThePinIsNotReportedAsAPin(t *testing.T) {
 	d.Registry = offCatalogDefaultRegistry("fallback/model")
 	d.Emit = events.NewEmitter(nil, &transcript)
 
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
 	o.tc.ModelCoder = "fallback/model"
 
 	require.NoError(t, runExecute(context.Background(), o))
@@ -283,7 +283,7 @@ func TestFixCoderSelectionReachesTheTranscript(t *testing.T) {
 	d.Emit = events.NewEmitter(nil, &transcript)
 	o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", State: "review"}, 0)
 
-	_, err := o.runFixModel(context.Background(), "fix prompt", 1, "complex", false)
+	_, err := o.runFixModel(context.Background(), "fix prompt", fixRequest{Round: 1, FixTier: "complex"})
 	require.NoError(t, err)
 
 	sels := selectionsForPhase(modelSelections(t, &transcript), "fix coder")
@@ -462,7 +462,7 @@ func TestFanoutCandidateSelectionsReachTheTranscript(t *testing.T) {
 	d, _, _ := fanoutDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, 3)
 	d.Emit = events.NewEmitter(nil, &transcript)
 
-	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")}}, 0)
 
 	require.NoError(t, o.runFanout(context.Background()))
 
@@ -494,7 +494,7 @@ func TestCandidateRepickRecordsTheSubtaskItRepickedFor(t *testing.T) {
 	)
 	d.Emit = events.NewEmitter(nil, &transcript)
 
-	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "moderate"}}, 0)
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("moderate")}}, 0)
 
 	require.NoError(t, o.runFanout(context.Background()))
 

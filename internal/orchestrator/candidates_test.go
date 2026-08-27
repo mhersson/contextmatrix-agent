@@ -110,7 +110,7 @@ func newFanoutRun(t *testing.T, d Deps, subs []subtaskRef, maxCost float64) *run
 	t.Helper()
 
 	o := newExecRun(d, subs, maxCost)
-	o.cardTier = "moderate"
+	o.cardSizing = seedSizing("moderate")
 
 	t.Cleanup(o.stopFanoutHeartbeat)
 
@@ -169,8 +169,8 @@ func TestFanoutHappyPath(t *testing.T) {
 	d, pdg, _ := fanoutDeps(t, ops, mainGit, &planLLM{}, 3)
 
 	o := newFanoutRun(t, d, []subtaskRef{
-		{ID: "SUB-1", Title: "First", Tier: "simple"},
-		{ID: "SUB-2", Title: "Second", Tier: "simple"},
+		{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")},
+		{ID: "SUB-2", Title: "Second", Sizing: seedSizing("simple")},
 	}, 0)
 
 	require.NoError(t, o.runFanout(context.Background()))
@@ -234,8 +234,8 @@ func TestFanoutCandidateFailureIsolated(t *testing.T) {
 	pdg.set(filepath.Join(ws, ".worktrees", "c2"), &fakeGit{commitErr: assertErr("disk full")})
 
 	o := newFanoutRun(t, d, []subtaskRef{
-		{ID: "SUB-1", Title: "First", Tier: "simple"},
-		{ID: "SUB-2", Title: "Second", Tier: "simple"},
+		{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")},
+		{ID: "SUB-2", Title: "Second", Sizing: seedSizing("simple")},
 	}, 0)
 
 	// Two candidates still succeed, so the fan-out as a whole succeeds.
@@ -265,7 +265,7 @@ func TestFanoutPanicIsolated(t *testing.T) {
 	// convert it into a per-candidate error without crashing the run.
 	pdg.set(filepath.Join(ws, ".worktrees", "c1"), &panicGit{fakeGit: &fakeGit{committed: true}})
 
-	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")}}, 0)
 
 	require.NoError(t, o.runFanout(context.Background()))
 
@@ -282,7 +282,7 @@ func TestFanoutDegradeLogged(t *testing.T) {
 	d, _, _ := fanoutDeps(t, ops, mainGit, &planLLM{}, 3)
 
 	// MaxCardCost 5, ceiling 20, already reported 12.6 -> remaining 7.4 funds one.
-	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 5)
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")}}, 5)
 	o.tc.ReportedCostUSD = 12.6
 
 	require.NoError(t, o.runFanout(context.Background()))
@@ -300,7 +300,7 @@ func TestFanoutAllFailed(t *testing.T) {
 	// Every coder run errors (transport failure), so no candidate survives.
 	d, _, _ := fanoutDeps(t, ops, mainGit, &errLLM{err: errors.New("connection reset")}, 3)
 
-	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")}}, 0)
 
 	err := o.runFanout(context.Background())
 	require.Error(t, err)
@@ -321,7 +321,7 @@ func TestFanoutFirstArrivalClaimBestEffort(t *testing.T) {
 	mainGit := &fakeGit{}
 	d, _, _ := fanoutDeps(t, ops, mainGit, &planLLM{}, 3)
 
-	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")}}, 0)
 
 	require.NoError(t, o.runFanout(context.Background()), "claim failure must not abort the fan-out")
 	assert.Equal(t, 1, countCalls(ops.recorded(), "ClaimCard:SUB-1"),
@@ -380,7 +380,7 @@ func TestFanoutIncapableRecoveryRaceSafe(t *testing.T) {
 	d, _, _ := fanoutDeps(t, ops, mainGit, client, 3)
 	d.Registry = twoCoderRegistry()
 
-	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "moderate"}}, 0)
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("moderate")}}, 0)
 
 	err := o.runFanout(context.Background())
 	require.Error(t, err, "no capable model exists, so every candidate fails")
@@ -466,8 +466,8 @@ func TestFanoutFoldsCandidateSpendIntoParentLedger(t *testing.T) {
 
 	// Generous budget so nothing parks and all three candidates run both subtasks.
 	o := newFanoutRun(t, d, []subtaskRef{
-		{ID: "SUB-1", Title: "First", Tier: "simple"},
-		{ID: "SUB-2", Title: "Second", Tier: "simple"},
+		{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")},
+		{ID: "SUB-2", Title: "Second", Sizing: seedSizing("simple")},
 	}, 100)
 
 	require.NoError(t, o.runFanout(context.Background()))
@@ -498,7 +498,7 @@ func TestFanoutCandidateReselectsOnIncapable(t *testing.T) {
 		nil, nil, "capgood/default",
 	)
 
-	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "moderate"}}, 0)
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("moderate")}}, 0)
 
 	require.NoError(t, o.runFanout(context.Background()))
 	require.Len(t, o.candidates, 1)
@@ -535,7 +535,7 @@ func TestFanoutCandidateDropsWhenPoolExhausted(t *testing.T) {
 		nil, nil, "bad2/default",
 	)
 
-	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "moderate"}}, 0)
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("moderate")}}, 0)
 	o.tc.ModelCoder = "pinned/coder" // fan-out gives slot 1 the pin
 
 	require.NoError(t, o.runFanout(context.Background()), "one survivor keeps the fan-out alive")
@@ -568,7 +568,7 @@ func TestFanoutNoCoderModelParksInsteadOfPanicking(t *testing.T) {
 		registry.Priors{}, nil, nil, "",
 	)
 
-	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "moderate"}}, 0)
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("moderate")}}, 0)
 
 	require.Error(t, o.runFanout(context.Background()), "an unselectable coder pool must error rather than panic")
 	assert.Empty(t, o.candidates, "no worktree is cut when no coder model is selectable")
@@ -606,7 +606,7 @@ func TestFanoutInteractiveBroadcast(t *testing.T) {
 	// One queued turn, then the inbox closes (block=false) so the collector stops.
 	d.Human = &fakeInbox{msgs: []harness.UserMessage{{Content: "please add tests", MessageID: "m1"}}}
 
-	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")}}, 0)
 
 	require.NoError(t, o.runFanout(context.Background()))
 
@@ -625,7 +625,7 @@ func TestFanoutInteractiveCollectorLifecycle(t *testing.T) {
 	d.Cfg.Interactive = true
 	d.Human = &fakeInbox{block: true} // no messages; blocks until canceled
 
-	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")}}, 0)
 
 	require.NoError(t, o.runFanout(context.Background()))
 
@@ -644,7 +644,7 @@ func TestFanoutCoderPromptsCarryWorktreeRoot(t *testing.T) {
 	client := &planLLM{}
 	d, _, ws := fanoutDeps(t, ops, &fakeGit{}, client, 2)
 
-	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
 	require.NoError(t, o.runFanout(context.Background()))
 
 	joined := strings.Join(client.tasks, "\n")
@@ -672,7 +672,7 @@ func TestFanoutSalvagesCappedCandidates(t *testing.T) {
 	// turns - set BEFORE newFanoutRun, or 12 responses against MaxTurns=20
 	// exhaust into a clean stop and nothing caps.
 	d.Cfg.MaxTurns = 5
-	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "Only", Tier: "simple"}}, 0)
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
 
 	require.NoError(t, o.runFanout(context.Background()), "capped candidates are survivors, not failures")
 
@@ -718,7 +718,7 @@ func TestCandidateCoderModelAdvisesOutsideTheSelectionLock(t *testing.T) {
 	d.Registry = belowComplexRegistry()
 
 	o := newExecRun(d, nil, 0)
-	o.cardTier = "complex"
+	o.cardSizing = seedSizing("complex")
 	o.excluded = map[string]bool{"other/model": true}
 
 	c := &candidate{idx: 2, model: "other/model"}
@@ -760,7 +760,7 @@ func TestCandidateCoderModelDropsWhenThePoolIsExhausted(t *testing.T) {
 	d.Registry = belowComplexRegistry()
 
 	o := newExecRun(d, nil, 0)
-	o.cardTier = "moderate"
+	o.cardSizing = seedSizing("moderate")
 	o.excluded = map[string]bool{"mid/model": true, "other/model": true, "capable/default": true}
 
 	c := &candidate{idx: 1, model: "mid/model"}
@@ -781,8 +781,8 @@ func TestFanoutSeatsReportTheirShortfall(t *testing.T) {
 	d, _, _ := fanoutDeps(t, ops, &fakeGit{}, &planLLM{}, 2)
 	d.Registry = belowComplexRegistry()
 
-	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
-	o.cardTier = "complex"
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")}}, 0)
+	o.cardSizing = seedSizing("complex")
 
 	require.NoError(t, o.runFanout(context.Background()))
 
@@ -811,8 +811,8 @@ func TestFanoutPinnedSeatReportsItsMeasuredShortfall(t *testing.T) {
 	d, _, _ := fanoutDeps(t, ops, &fakeGit{}, &planLLM{}, 2)
 	d.Registry = belowComplexRegistry()
 
-	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Tier: "simple"}}, 0)
-	o.cardTier = "complex"
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")}}, 0)
+	o.cardSizing = seedSizing("complex")
 	o.tc.ModelCoder = "mid/model" // catalog-resolvable, so the pin is honoured
 
 	require.NoError(t, o.runFanout(context.Background()))

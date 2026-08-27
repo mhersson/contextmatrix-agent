@@ -5,11 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"math"
 	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
-	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-harness/harness"
 	"github.com/mhersson/contextmatrix-harness/llm"
 	"github.com/mhersson/contextmatrix-harness/tools"
@@ -241,31 +239,6 @@ func diagnoseTurnCap(base int) int {
 	return min(base, diagnoseMaxTurns)
 }
 
-// complexTurnFactor and criticalTurnFactor scale a coder run's turn budget above
-// the configured base for the two heaviest tiers, so a single unsplittable
-// cross-cutting subtask can land its source changes AND the tests those changes
-// break in one session instead of turn-capping mid-way. Factors of the base (not
-// absolute floors) so lifting the base lifts every tier with it; simple/moderate
-// run at the base unchanged.
-const (
-	complexTurnFactor  = 1.5
-	criticalTurnFactor = 2.0
-)
-
-// coderMaxTurns scales a coder run's turn budget by subtask tier: complex gets
-// complexTurnFactor x the base, critical criticalTurnFactor x, rounded to the
-// nearest turn; simple/moderate keep the base.
-func coderMaxTurns(base int, tier registry.Tier) int {
-	switch tier {
-	case registry.TierComplex:
-		return int(math.Round(float64(base) * complexTurnFactor))
-	case registry.TierCritical:
-		return int(math.Round(float64(base) * criticalTurnFactor))
-	default:
-		return base
-	}
-}
-
 // coderBatchNudgeTurns arms the harness batching nudge for the coder family:
 // after this many consecutive turns that each spend a whole model call on one
 // read-only lookup, the harness injects a single message suggesting the model
@@ -291,7 +264,7 @@ const coderBatchNudgeTurns = 3
 // runModelWrapUp is runModel with the wrap-up nudge configured: when
 // wrapUpTurns turns remain before the cap, the harness injects msg once as a
 // fresh user message. Used by the document run; the coder and fix runs use
-// runModelCoder, which layers a tier-scaled turn budget on the same nudge.
+// runModelCoder, which layers a laddered turn budget on the same nudge.
 func (o *run) runModelWrapUp(ctx context.Context, reg *tools.Registry, prompt, model, msg string) (harness.Result, time.Duration, error) {
 	cfg := o.harnessConfig(model)
 	cfg.WrapUpTurns = wrapUpTurns
@@ -300,20 +273,28 @@ func (o *run) runModelWrapUp(ctx context.Context, reg *tools.Registry, prompt, m
 	return o.runModelCfg(ctx, reg, prompt, model, cfg)
 }
 
-// runModelCoder is runModelWrapUp with a tier-scaled turn budget and the
-// batching nudge armed. The budget: complex and critical work gets more turns
-// than the flat base (via coderMaxTurns) so a single unsplittable cross-cutting
-// subtask can land its source changes AND the tests those changes break in one
-// session instead of turn-capping mid-way; simple/moderate keep the base. The
-// nudge: the coder is the phase measured spending whole model calls on one
-// lookup at a time (see coderBatchNudgeTurns). Used by the execute-phase coder
-// and the review-phase fix run - both tier-sized coder work. document.go keeps
-// runModelWrapUp: its work carries no tier and is not read-heavy.
-func (o *run) runModelCoder(ctx context.Context, reg *tools.Registry, prompt, model, msg string, tier registry.Tier) (harness.Result, time.Duration, error) {
+// runModelCoder is runModelWrapUp with a laddered turn budget and the batching
+// nudge armed. budget is a step into turnBudgetLadder, not a turn count: the
+// operator's base cap is the authority and the step scales it, so lifting the
+// base lifts every rung.
+//
+// The cap and its wrap-up reserve come back from coderTurnCfg together, and the
+// message is built from the reserve that call returned. The harness injects the
+// nudge on exact equality with the REMAINING turns, so a widened cap under a
+// constant reserve would buy unsupervised turns and then announce a deadline
+// far too late - and a message quoting the constant would misstate the room the
+// model actually has. Neither can drift now: one call returns the pair, and the
+// message is a function of it.
+//
+// Used by the execute-phase coder and the review-phase fix run - both laddered
+// coder work. document.go keeps runModelWrapUp: its work carries no sizing and
+// is not read-heavy.
+func (o *run) runModelCoder(ctx context.Context, reg *tools.Registry, prompt, model string,
+	msg func(int) string, budget int,
+) (harness.Result, time.Duration, error) {
 	cfg := o.harnessConfig(model)
-	cfg.WrapUpTurns = wrapUpTurns
-	cfg.WrapUpMessage = msg
-	cfg.MaxTurns = coderMaxTurns(cfg.MaxTurns, tier)
+	cfg.MaxTurns, cfg.WrapUpTurns = coderTurnCfg(cfg.MaxTurns, budget)
+	cfg.WrapUpMessage = msg(cfg.WrapUpTurns)
 	// Message left empty: the harness default names the count of single-lookup
 	// turns that triggered it, which is the useful part. Never both nudges: the
 	// wrap-up above suppresses this one for the rest of the run, because telling

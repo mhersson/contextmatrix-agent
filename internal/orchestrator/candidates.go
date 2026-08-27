@@ -148,7 +148,7 @@ func (o *run) runFanout(ctx context.Context) (retErr error) {
 
 	specs := o.d.Registry.SelectCandidateModels(registry.SelectInput{
 		Role:      registry.RoleCoder,
-		Tier:      tierFromString(o.cardTier),
+		Tier:      o.cardSizing.Bar,
 		EstTokens: estimateTokens(o.taskDescription),
 		Exclude:   o.excluded,
 	}, nEff, pin)
@@ -462,7 +462,7 @@ func (o *run) pickCandidateModel(c *candidate, prompt string) (model string, fre
 
 	pick := o.d.Registry.SelectByComplexity(registry.SelectInput{
 		Role:      registry.RoleCoder,
-		Tier:      tierFromString(o.cardTier),
+		Tier:      o.cardSizing.Bar,
 		EstTokens: estimateTokens(prompt),
 		Exclude:   o.excluded,
 	})

@@ -493,7 +493,7 @@ func TestMobBriefingsNameReadRoots(t *testing.T) {
 		o.solver.git = &diffGit{fakeGit: &fakeGit{}, diff: "diff --git a/a.go b/a.go\n+lgtm\n"}
 
 		o.mobCheckpoint(context.Background(), o.solver,
-			subtaskRef{ID: "SUB-1", Title: "t", Tier: "simple"}, "abc123")
+			subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("simple")}, "abc123")
 
 		require.Len(t, eng.topics, 1)
 		assert.Contains(t, eng.topics[0].Briefing, root)

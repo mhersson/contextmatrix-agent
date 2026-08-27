@@ -143,7 +143,7 @@ func newJudgeRun(t *testing.T, ops *fakeOps, mainGit *fakeGit, client llm.LLM, c
 	d.Cfg.Workspace = t.TempDir()
 
 	o := newRun(d, cmclient.TaskContext{Title: "Parent", Description: "body"})
-	o.cardTier = "moderate"
+	o.cardSizing = seedSizing("moderate")
 	o.candidates = cands
 	// Pre-resolve a non-empty plan so runVerifyPlan invokes the stub on each
 	// candidate worktree (an empty plan would short-circuit to skipped).

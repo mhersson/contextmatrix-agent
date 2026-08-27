@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -65,7 +66,7 @@ func reviewTestDeps(t *testing.T, ops *fakeOps, git *fakeGit, client llm.LLM, re
 func newReviewRun(d Deps, tc cmclient.TaskContext, maxCost float64) *run {
 	d.Cfg.MaxCardCost = maxCost
 	o := newRun(d, tc)
-	o.cardTier = "moderate"
+	o.cardSizing = seedSizing("moderate")
 	// Default: pre-resolved skip, so ensureVerify is a cached no-op and no gate runs.
 	isolateVerify(o)
 	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
@@ -283,7 +284,7 @@ func TestResolveFixModelRequestsTheRightTier(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			o := fixTierRun(t)
 
-			got, err := o.resolveFixModel(context.Background(), tt.fixTier, tt.authoritative)
+			got, err := o.resolveFixModel(context.Background(), fixRequest{FixTier: tt.fixTier, Authoritative: tt.authoritative})
 			require.NoError(t, err)
 
 			assert.Equal(t, fixTierCoder, got.Model,
@@ -296,7 +297,7 @@ func TestResolveFixModelRequestsTheRightTier(t *testing.T) {
 				"the met tier is measured from the prior, never copied from the request")
 			assert.Equal(t, tt.wantAtBar, got.AtBar())
 
-			again, err := o.resolveFixModel(context.Background(), tt.fixTier, tt.authoritative)
+			again, err := o.resolveFixModel(context.Background(), fixRequest{FixTier: tt.fixTier, Authoritative: tt.authoritative})
 			require.NoError(t, err)
 			assert.Equal(t, got, again, "resolving the same round twice is stable")
 		})
@@ -313,10 +314,10 @@ func TestResolveFixModelRequestsTheRightTier(t *testing.T) {
 func TestAuthoritativeFixGateLivesInAtBarNotInTheModel(t *testing.T) {
 	o := fixTierRun(t)
 
-	nonAuth, err := o.resolveFixModel(context.Background(), "simple", false)
+	nonAuth, err := o.resolveFixModel(context.Background(), fixRequest{FixTier: "simple"})
 	require.NoError(t, err)
 
-	auth, err := o.resolveFixModel(context.Background(), "simple", true)
+	auth, err := o.resolveFixModel(context.Background(), fixRequest{FixTier: "simple", Authoritative: true})
 	require.NoError(t, err)
 
 	assert.Equal(t, nonAuth.Model, auth.Model, "the catalog offers the authoritative pass nothing stronger")
@@ -434,12 +435,16 @@ func TestReviewApprovedWithFixesRunsOneFixPass(t *testing.T) {
 	assert.Contains(t, o.reviewSummary, "a.go", "the finding rides the summary")
 }
 
-// TestReviewApprovedFixCleanupNoOpDoesNotEscalate proves that when the
+// TestReviewApprovedFixCleanupNoOpKeepsTheCounters proves that when the
 // cleanup pass lands no commit, the approved run still finishes cleanly: the
 // fix-coder call actually ran (client.tasks), it was built from the surviving
-// finding, the no-op was logged, and no attempts increment or escalated state
-// was left behind for a later (unrelated) fix pick to trip over.
-func TestReviewApprovedFixCleanupNoOpDoesNotEscalate(t *testing.T) {
+// finding, the no-op was logged, and no attempts increment happened.
+//
+// The counters are NOT cleared on the way out. Clearing them was the defect:
+// runFix is shared with pr_gates, which runs AFTER approval, so an approving
+// verdict handed the first gate round the model that had already failed, at the
+// un-escalated bar. The cleanup pass declines to escalate per-call instead.
+func TestReviewApprovedFixCleanupNoOpKeepsTheCounters(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: false}
 	client := &planLLM{responses: []llm.Response{
@@ -453,9 +458,9 @@ func TestReviewApprovedFixCleanupNoOpDoesNotEscalate(t *testing.T) {
 
 	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
 	o := newReviewRun(d, tc, 0)
-	// Enter already escalated, so the assertion below proves the reset at the top
-	// of the approval branch rather than the zero value it would report anyway.
-	o.fixEscalate = true
+	// Enter already escalated, so the assertion below reads a value an approval
+	// could clear rather than the zero value it would report anyway.
+	o.fixBarSteps = 1
 
 	require.NoError(t, runReview(context.Background(), o))
 
@@ -470,8 +475,8 @@ func TestReviewApprovedFixCleanupNoOpDoesNotEscalate(t *testing.T) {
 
 	assert.Equal(t, -1, indexOfCall(ops.recorded(), "IncrementReviewAttempts:CARD-1"),
 		"a no-op cleanup pass must not increment attempts; calls=%v", ops.recorded())
-	assert.False(t, o.fixEscalate,
-		"an approved run's no-op cleanup pass must never leave the run in an escalated state")
+	assert.Equal(t, 1, o.fixBarSteps,
+		"an approving verdict must not clear the escalation the gate rounds after it read")
 }
 
 // TestReviewApprovedFixCleanupErrorHandling covers both arms of the cleanup
@@ -613,38 +618,74 @@ func TestReviewFixLoop(t *testing.T) {
 	assert.Equal(t, 1, incCount, "exactly one fix round; calls=%v", ops.recorded())
 }
 
-// TestReviewFixMaxTurnsAborts pins that a fix run truncated at the turn cap is
-// NOT fixup-committed and pushed as if the findings were addressed.
-func TestReviewFixMaxTurnsAborts(t *testing.T) {
-	ops := &fakeOps{}
-	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
-	call := llm.ToolCall{
-		ID:       "c1",
-		Type:     "function",
-		Function: llm.FunctionCall{Name: "read", Arguments: `{"path":"no-such-file.txt"}`},
+// TestReviewFixMaxTurnsKeepsItsPartialWork pins that a fix run truncated at the
+// turn cap still lands what it wrote: with no wider round left to buy the cap
+// propagates - so nothing reads the findings as addressed - but the edits are
+// committed and pushed rather than left in the tree for the next round to start
+// from a workspace it did not write.
+//
+// "No wider round left" has two shapes, and the retry must recognise both: the
+// step counter spent, and a card whose bar already opens the budget at the top
+// rung so the width cannot move however many steps remain. Both rows land on
+// the same 3-turn window, which is why one burn script covers them.
+func TestReviewFixMaxTurnsKeepsItsPartialWork(t *testing.T) {
+	tests := []struct {
+		name       string
+		seed       func(o *run)
+		wantBudget int
+	}{
+		{
+			name:       "the step counter is spent",
+			seed:       func(o *run) { o.fixBudgetSteps = maxBudgetStep },
+			wantBudget: maxBudgetStep,
+		},
+		{
+			name: "the width is already at the top rung",
+			seed: func(o *run) {
+				o.cardSizing = sizing{Bar: registry.TierCritical, Budget: seedBudgetStep(registry.TierCritical)}
+				o.fixBudgetSteps = 1
+			},
+			wantBudget: 1,
+		},
 	}
-	client := &planLLM{responses: []llm.Response{
-		stopResp("Correctness: bug found", 0.01),
-		stopResp("Design: ok", 0.01),
-		stopResp("Security: ok", 0.01),
-		stopResp(`{"approved":false,"summary":"needs fix","fixes":[{"file":"a.go","issue":"bug"}]}`, 0.02),
-		{ToolCalls: []llm.ToolCall{call}}, // fix coder burns its single turn -> max_turns
-	}}
-	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
-	d.Cfg.MaxTurns = 1
 
-	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
-	o := newReviewRun(d, tc, 0)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
 
-	err := runReview(context.Background(), o)
-	require.Error(t, err)
+			responses := []llm.Response{
+				stopResp("Correctness: bug found", 0.01),
+				stopResp("Design: ok", 0.01),
+				stopResp("Security: ok", 0.01),
+				stopResp(`{"approved":false,"summary":"needs fix","fixes":[{"file":"a.go","issue":"bug"}]}`, 0.02),
+			}
+			// The top rung of a 1-turn base is a 3-turn window; the coder burns
+			// all of it -> max_turns.
+			responses = append(responses, burnResps(3)...)
 
-	var mte *MaxTurnsError
-	require.ErrorAs(t, err, &mte)
+			d := reviewTestDeps(t, ops, git, &planLLM{responses: responses}, reviewerRegistry())
+			d.Cfg.MaxTurns = 1
 
-	for _, c := range git.recorded() {
-		assert.False(t, strings.HasPrefix(c, "CommitFixup"), "truncated fix fixup-committed: %v", git.recorded())
-		assert.False(t, strings.HasPrefix(c, "Push:"), "truncated fix pushed: %v", git.recorded())
+			tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
+			o := newReviewRun(d, tc, 0)
+			tt.seed(o)
+
+			err := runReview(context.Background(), o)
+
+			// Checked before the error, because a retry the width cannot serve
+			// derails the run in ways that would otherwise mask this claim.
+			assert.Equal(t, tt.wantBudget, o.fixBudgetSteps,
+				"a round that could not run wider is not recorded as a widening")
+
+			require.Error(t, err)
+
+			var mte *MaxTurnsError
+			require.ErrorAs(t, err, &mte)
+
+			assert.Equal(t, []string{"cm/card-1"}, git.pushBranches,
+				"a truncated fix round's edits are pushed, not abandoned; git=%v", git.recorded())
+		})
 	}
 }
 
@@ -662,7 +703,7 @@ func TestFixRunTierScalesTurnBudget(t *testing.T) {
 	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
 	o := newReviewRun(d, tc, 0)
 
-	_, err := o.runFixModel(context.Background(), "fix prompt", 1, "complex", false)
+	_, err := o.runFixModel(context.Background(), "fix prompt", fixRequest{Round: 1, FixTier: "complex"})
 	require.NoError(t, err, "a complex fix tier scales the budget above the base, so 25 turns do not cap")
 }
 
@@ -678,7 +719,7 @@ func TestFixRunSimpleTierCapsAtBase(t *testing.T) {
 	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
 	o := newReviewRun(d, tc, 0)
 
-	_, err := o.runFixModel(context.Background(), "fix prompt", 1, "simple", false)
+	_, err := o.runFixModel(context.Background(), "fix prompt", fixRequest{Round: 1, FixTier: "simple"})
 	require.Error(t, err, "a simple fix tier keeps the flat base, so 25 turns cap")
 
 	var mte *MaxTurnsError
@@ -710,13 +751,14 @@ func TestReviewFixCoderSelectionLogged(t *testing.T) {
 	require.NoError(t, runReview(context.Background(), o))
 
 	// Find the fix-coder selection line for round 1: the message shape must match
-	// the panel-models log style without hinging on a specific tier value.
+	// the panel-models log style, and it must name BOTH sizing axes without
+	// hinging on a specific value for either.
 	var selection string
 
 	for _, m := range ops.logs {
 		if strings.Contains(m, "fix coder ") &&
 			strings.Contains(m, "selected for round 1 fixes") &&
-			strings.Contains(m, "(tier=") {
+			strings.Contains(m, "bar=") && strings.Contains(m, "turns=") {
 			selection = m
 
 			break
@@ -1198,7 +1240,7 @@ func TestResolveFixModelUnresolvablePinEmitsAdvisory(t *testing.T) {
 	}
 	o := newReviewRun(d, tc, 0)
 
-	_, _ = o.resolveFixModel(context.Background(), "simple", false)
+	_, _ = o.resolveFixModel(context.Background(), fixRequest{FixTier: "simple"})
 
 	require.Len(t, ops.logs, 1, "unresolvable coder pin must produce exactly one advisory")
 	assert.Contains(t, ops.logs[0], "pinned/missing")
@@ -1215,7 +1257,7 @@ func TestResolveFixModelResolvablePinNoAdvisory(t *testing.T) {
 	}
 	o := newReviewRun(d, tc, 0)
 
-	_, _ = o.resolveFixModel(context.Background(), "simple", false)
+	_, _ = o.resolveFixModel(context.Background(), fixRequest{FixTier: "simple"})
 
 	assert.Empty(t, ops.logs, "resolvable coder pin must produce no advisory")
 }
@@ -1232,12 +1274,12 @@ func TestResolveFixModelUnresolvablePinDeduplicates(t *testing.T) {
 	o := newReviewRun(d, tc, 0)
 
 	// First call warns.
-	_, _ = o.resolveFixModel(context.Background(), "simple", false)
+	_, _ = o.resolveFixModel(context.Background(), fixRequest{FixTier: "simple"})
 
 	require.Len(t, ops.logs, 1)
 
 	// Second call with the same pin must NOT produce another entry (once-per-run).
-	_, _ = o.resolveFixModel(context.Background(), "simple", false)
+	_, _ = o.resolveFixModel(context.Background(), fixRequest{FixTier: "simple"})
 
 	require.Len(t, ops.logs, 1, "resolvedFixModel must deduplicate with the coderPinWarned guard")
 }
@@ -1277,7 +1319,7 @@ func TestReviewPanelEscalatesWhenAuthoritative(t *testing.T) {
 
 	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reg)
 	o := newReviewRun(d, cmclient.TaskContext{}, 0)
-	o.cardTier = "moderate" // no reviewer pin -> selection path
+	o.cardSizing = seedSizing("moderate") // no reviewer pin -> selection path
 
 	est := estimateTokens("diff")
 
@@ -1407,7 +1449,7 @@ func TestRunFixRoutesByFindingsOrigin(t *testing.T) {
 		require.NoError(t, err)
 		assert.False(t, approved)
 
-		committed, err := o.runFix(context.Background(), findings, 1, fixTier, false)
+		committed, err := o.runFix(context.Background(), fixRequest{Findings: findings, Round: 1, FixTier: fixTier})
 		require.NoError(t, err)
 		assert.True(t, committed)
 
@@ -1435,7 +1477,7 @@ func TestRunFixRoutesByFindingsOrigin(t *testing.T) {
 		require.NoError(t, err)
 		assert.False(t, approved)
 
-		committed, err := o.runFix(context.Background(), findings, 1, fixTier, false)
+		committed, err := o.runFix(context.Background(), fixRequest{Findings: findings, Round: 1, FixTier: fixTier})
 		require.NoError(t, err)
 		assert.True(t, committed)
 
@@ -2740,7 +2782,7 @@ func TestRefusalSentinelsDifferByPhase(t *testing.T) {
 		o := newExecRun(d, nil, 5)
 
 		_, err := o.resolveCoderModel(context.Background(),
-			subtaskRef{ID: "SUB-1", Tier: "moderate"}, "prompt")
+			subtaskRef{ID: "SUB-1", Sizing: seedSizing("moderate")}, "prompt")
 
 		var nme *NoModelError
 
@@ -2756,7 +2798,7 @@ func TestRefusalSentinelsDifferByPhase(t *testing.T) {
 		d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reg)
 		o := newReviewRun(d, cmclient.TaskContext{}, 0)
 
-		_, err := o.resolveFixModel(context.Background(), "moderate", false)
+		_, err := o.resolveFixModel(context.Background(), fixRequest{FixTier: "moderate"})
 
 		var rp *ReviewParkedError
 
@@ -2784,14 +2826,14 @@ func TestFixEscalationThatBuysNothingIsRecorded(t *testing.T) {
 	d := reviewTestDeps(t, ops, &fakeGit{}, client, reg)
 	o := newReviewRun(d, cmclient.TaskContext{}, 0)
 
-	plain, err := o.resolveFixModel(context.Background(), "moderate", false)
+	plain, err := o.resolveFixModel(context.Background(), fixRequest{FixTier: "moderate"})
 	require.NoError(t, err)
 	require.True(t, plain.AtBar())
 
-	o.fixEscalate = true
+	o.fixBarSteps = 1
 	o.fixFailReason = "landed no commit"
 
-	climbed, err := o.resolveFixModel(context.Background(), "moderate", false)
+	climbed, err := o.resolveFixModel(context.Background(), fixRequest{FixTier: "moderate"})
 	require.NoError(t, err)
 
 	assert.Equal(t, plain.Model, climbed.Model, "the climb reached the same model")
@@ -2799,7 +2841,7 @@ func TestFixEscalationThatBuysNothingIsRecorded(t *testing.T) {
 	assert.Equal(t, registry.TierComplex, climbed.RequestedTier)
 	assert.Equal(t, registry.TierModerate, climbed.MetTier)
 
-	model, err := o.runFixModel(context.Background(), "fix it", 2, "moderate", false)
+	model, err := o.runFixModel(context.Background(), "fix it", fixRequest{Round: 2, FixTier: "moderate"})
 	require.NoError(t, err)
 	assert.Equal(t, "mid/coder", model)
 	assert.True(t, ops.loggedContains("bought nothing"),
@@ -2891,10 +2933,10 @@ func TestPinnedFixModelReportsNoFabricatedShortfall(t *testing.T) {
 	client := &planLLM{responses: []llm.Response{stopResp("Applied the fix.", 0.01)}}
 	d := reviewTestDeps(t, ops, &fakeGit{}, client, reviewerRegistry())
 	o := newReviewRun(d, cmclient.TaskContext{ModelCoder: "pinned/model"}, 0)
-	o.fixEscalate = true
+	o.fixBarSteps = 1
 	o.fixFailReason = "landed no commit"
 
-	model, err := o.runFixModel(context.Background(), "fix it", 2, "moderate", false)
+	model, err := o.runFixModel(context.Background(), "fix it", fixRequest{Round: 2, FixTier: "moderate"})
 	require.NoError(t, err)
 	assert.Equal(t, "pinned/model", model)
 
@@ -2920,10 +2962,10 @@ func TestFixEscalationNoOpReportsNoPriorRatherThanZero(t *testing.T) {
 	reg := registry.NewRegistryFromParts(reviewerCatalog(), registry.Priors{}, nil, nil, "default/model")
 	d := reviewTestDeps(t, ops, &fakeGit{}, client, reg)
 	o := newReviewRun(d, cmclient.TaskContext{}, 0)
-	o.fixEscalate = true
+	o.fixBarSteps = 1
 	o.fixFailReason = "landed no commit"
 
-	_, err := o.runFixModel(context.Background(), "fix it", 2, "moderate", false)
+	_, err := o.runFixModel(context.Background(), "fix it", fixRequest{Round: 2, FixTier: "moderate"})
 	require.NoError(t, err)
 
 	require.True(t, ops.loggedContains("bought nothing"), "logs=%v", ops.logs)
@@ -2956,7 +2998,7 @@ func TestFixModelRefusalNamesItsRealCause(t *testing.T) {
 	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reg)
 	o := newReviewRun(d, cmclient.TaskContext{Title: "Parent"}, 0)
 
-	committed, err := o.runFix(context.Background(), "- a.go: something", 2, "moderate", false)
+	committed, err := o.runFix(context.Background(), fixRequest{Findings: "- a.go: something", Round: 2, FixTier: "moderate"})
 	require.Error(t, err)
 	assert.False(t, committed)
 
@@ -2968,6 +3010,254 @@ func TestFixModelRefusalNamesItsRealCause(t *testing.T) {
 		"the card must read the true cause; err=%v", err)
 	assert.NotContains(t, err.Error(), "attempts cap",
 		"no attempts cap was reached on this path; err=%v", err)
+}
+
+// The terminal, last-chance fix before a park runs at TierComplex
+// unconditionally, which today buys it 1.5x the base turns. Sourcing the fix
+// budget from the CARD's budget would silently cut a third of the turns off the
+// one run where running out ends the run rather than deferring it - and would
+// re-conflate exactly what the two-axis split exists to separate.
+func TestFixBudgetComesFromTheFixBarNotTheCard(t *testing.T) {
+	ops := &fakeOps{}
+	o := newReviewRun(reviewTestDeps(t, ops, &fakeGit{}, &planLLM{}, reviewerRegistry()),
+		cmclient.TaskContext{Title: "Card"}, 0)
+	// A card budget ABOVE every rung these rows expect: sourcing the fix budget
+	// from it would show up as 135 on all three, where a card budget at or below
+	// the bar's own seed would be re-seeded back to the right answer and hide
+	// the mutation entirely.
+	o.cardSizing = sizing{Bar: registry.TierModerate, Budget: 3}
+
+	auth := o.fixSizing(fixRequest{Round: 3, Authoritative: true})
+	assert.Equal(t, registry.TierComplex, auth.Bar)
+	assert.Equal(t, 68, turnBudget(45, auth.Budget), "the authoritative pass keeps its 1.5x")
+
+	hot := o.fixSizing(fixRequest{Round: 1, FixTier: "critical"})
+	assert.Equal(t, 90, turnBudget(45, hot.Budget), "a critical fix_tier still buys 2x on a moderate card")
+
+	plain := o.fixSizing(fixRequest{Round: 1})
+	assert.Equal(t, registry.TierModerate, plain.Bar, "an empty fix_tier falls back to the card bar")
+	assert.Equal(t, 45, turnBudget(45, plain.Budget))
+}
+
+// runFix is SHARED with pr_gates, which runs AFTER approval - so resetting the
+// escalation state on an approving verdict made the first Copilot fix round
+// re-pick the exact model that had already failed twice, at the un-escalated
+// bar. The counters must be monotone across an approval.
+func TestFixEscalationSurvivesApproval(t *testing.T) {
+	ops := &fakeOps{}
+	o := newReviewRun(reviewTestDeps(t, ops, &fakeGit{}, &planLLM{}, reviewerRegistry()),
+		cmclient.TaskContext{Title: "Card"}, 0)
+	o.cardSizing = sizing{Bar: registry.TierModerate, Budget: 0}
+	o.lastFixModel = "vendor/weak"
+
+	o.markFixFailed("produced no change")
+	o.markFixFailed("left the verify red")
+	o.markFixCapped()
+
+	gate := o.fixSizing(fixRequest{Round: 1}) // a pr_gates round, after approval
+	assert.Equal(t, registry.TierCritical, gate.Bar, "two failed rounds climb two bar rungs")
+	assert.Equal(t, 3, gate.Budget,
+		"the critical bar re-seeds the budget at rung 2, and the capped round widens it once more")
+	assert.True(t, o.fixFailed["vendor/weak"], "the failed fixer stays excluded after approval")
+}
+
+// A failed round climbs the bar, and the round that runs at the CLIMBED bar
+// must get the window that bar opens - which is what the pre-split code did,
+// since it sized every fix run on the escalated tier. Seeding from the bar the
+// round started at instead silently hands the harder bar the base window, on
+// the most common escalation path there is: round 1 lands no commit, round 2
+// runs climbed.
+func TestEscalatedFixRoundKeepsThePreSplitTurnBudget(t *testing.T) {
+	tests := []struct {
+		cardBar registry.Tier
+		wantBar registry.Tier
+		// The cap the harness receives against an operator base of 20.
+		wantTurns int
+	}{
+		{registry.TierSimple, registry.TierModerate, 20},
+		{registry.TierModerate, registry.TierComplex, 30},
+		{registry.TierComplex, registry.TierCritical, 40},
+		{registry.TierCritical, registry.TierCritical, 40},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.cardBar), func(t *testing.T) {
+			o := newReviewRun(reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reviewerRegistry()),
+				cmclient.TaskContext{Title: "Card"}, 0)
+			o.cardSizing = sizing{Bar: tt.cardBar, Budget: seedBudgetStep(tt.cardBar)}
+			o.lastFixModel = "vendor/weak"
+			o.markFixFailed("produced no change")
+
+			got := o.fixSizing(fixRequest{Round: 2})
+			assert.Equal(t, tt.wantBar, got.Bar)
+			assert.Equal(t, tt.wantTurns, turnBudget(20, got.Budget),
+				"the climbed bar must run on the window that bar opens")
+		})
+	}
+}
+
+// A turn cap widens the fix budget WITHOUT blaming the model: it ran out of
+// room, it was not shown to be too weak, and re-running it wider is the fix.
+func TestFixCapWidensBudgetWithoutBlamingTheModel(t *testing.T) {
+	ops := &fakeOps{}
+	o := newReviewRun(reviewTestDeps(t, ops, &fakeGit{}, &planLLM{}, reviewerRegistry()),
+		cmclient.TaskContext{Title: "Card"}, 0)
+	o.cardSizing = sizing{Bar: registry.TierModerate, Budget: 0}
+	o.lastFixModel = "vendor/fine"
+
+	o.markFixCapped()
+
+	next := o.fixSizing(fixRequest{Round: 2})
+	assert.Equal(t, 1, next.Budget)
+	assert.Equal(t, registry.TierModerate, next.Bar, "a cap must not raise the bar")
+	assert.False(t, o.fixFailed["vendor/fine"], "a capped model is still eligible, with more room")
+}
+
+// The post-approval cleanup pass must not escalate - but as a property of that
+// call site, not by LOWERING shared state pr_gates later reads. NoEscalate must
+// gate the park guard too, or the cleanup pass silently stops running on every
+// card whose earlier rounds failed.
+func TestCleanupPassNeitherEscalatesNorLowers(t *testing.T) {
+	ops := &fakeOps{}
+	o := newReviewRun(reviewTestDeps(t, ops, &fakeGit{}, &planLLM{}, reviewerRegistry()),
+		cmclient.TaskContext{Title: "Card"}, 0)
+	o.cardSizing = sizing{Bar: registry.TierModerate, Budget: 1}
+	o.lastFixModel = "vendor/weak"
+	o.markFixFailed("produced no change")
+
+	cleanup := o.fixSizing(fixRequest{Round: 3, NoEscalate: true})
+	assert.Equal(t, registry.TierModerate, cleanup.Bar, "the cleanup pass runs at the un-escalated bar")
+	assert.Equal(t, 0, cleanup.Budget, "and at the un-escalated budget")
+	assert.Equal(t, 1, o.fixBarSteps, "but it must not LOWER the counters pr_gates reads later")
+}
+
+// NoEscalate gates the exhausted-fixers park as well as the sizing. The
+// cleanup pass runs on a card review has ALREADY approved, so a card whose
+// earlier rounds failed must still get its pass - while an ordinary round on
+// the same state parks.
+func TestCleanupPassRunsDespiteExhaustedFixers(t *testing.T) {
+	// A pinned fix coder is returned by resolveFixModel even when it is
+	// excluded, so it is the one live shape in which the park guard sees a pick
+	// that already failed.
+	newRunWithFailedPin := func(t *testing.T, ops *fakeOps, git *fakeGit) *run {
+		t.Helper()
+
+		client := &planLLM{responses: []llm.Response{stopResp("Applied the fix.", 0.01)}}
+		d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+		o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", ModelCoder: "pinned/model"}, 0)
+		o.lastFixModel = "pinned/model"
+		o.markFixFailed("produced no change")
+
+		return o
+	}
+
+	t.Run("an ordinary round parks", func(t *testing.T) {
+		o := newRunWithFailedPin(t, &fakeOps{}, &fakeGit{committed: true})
+
+		committed, err := o.runFix(context.Background(), fixRequest{Findings: "- a.go: something", Round: 2})
+		assert.False(t, committed)
+
+		var parked *ReviewParkedError
+
+		require.ErrorAs(t, err, &parked)
+		assert.Equal(t, reviewParkedFixExhausted, parked.Reason)
+	})
+
+	t.Run("the cleanup pass still runs", func(t *testing.T) {
+		git := &fakeGit{committed: true}
+		o := newRunWithFailedPin(t, &fakeOps{}, git)
+
+		committed, err := o.runFix(context.Background(), fixRequest{Findings: "- a.go: something", Round: 3, NoEscalate: true})
+		require.NoError(t, err, "the cleanup pass must not be refused by the exhausted-fixers park")
+		assert.True(t, committed)
+	})
+}
+
+// A capped round widens the next one; it is never evidence that a fixer
+// FAILED, so it must not turn a "no model is selectable" refusal into the
+// exhausted-fixers park - which would put a cause on the card that nothing
+// observed.
+func TestCappedRoundDoesNotClaimTheFixersAreExhausted(t *testing.T) {
+	client := &planLLM{responses: []llm.Response{stopResp("Applied the fix.", 0.01)}}
+	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{committed: true}, client, reviewerRegistry())
+	o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", ModelCoder: "pinned/model"}, 0)
+	// Set directly rather than through markFixFailed, which would climb the BAR
+	// counter the guard is legitimately keyed on. A pin is returned by
+	// resolveFixModel even when excluded, so this is the one live shape in which
+	// the guard sees a pick that already failed.
+	o.fixFailed = map[string]bool{"pinned/model": true}
+	o.lastFixModel = "pinned/model"
+	o.markFixCapped()
+
+	committed, err := o.runFix(context.Background(), fixRequest{Findings: "- a.go: something", Round: 2})
+	require.NoError(t, err, "a cap is not evidence that any fixer was too weak")
+	assert.True(t, committed, "the widened round runs the same model again instead of parking")
+}
+
+// NoEscalate opts a call site out of the WHOLE correction, not just the bar.
+// The post-approval cleanup pass runs on a card review has already approved, so
+// it must take the plain pick - the failed-vendor preference is part of the
+// escalation the request declined, and applying it there would quietly steer
+// the pass away from a vendor it has no reason to avoid.
+func TestCleanupPassTakesThePlainPick(t *testing.T) {
+	reg := registry.NewRegistryFromParts(
+		llm.Catalog{
+			{ID: "acme/failed", ContextLength: 200000, PromptPricePerTok: 4e-7, CompletionPricePerTok: 6e-7, SupportedParameters: []string{"tools"}},
+			{ID: "acme/cheap", ContextLength: 200000, PromptPricePerTok: 4e-7, CompletionPricePerTok: 6e-7, SupportedParameters: []string{"tools"}},
+			{ID: "bravo/dear", ContextLength: 200000, PromptPricePerTok: 4e-6, CompletionPricePerTok: 6e-6, SupportedParameters: []string{"tools"}},
+		},
+		registry.Priors{Models: map[string]registry.PriorEntry{
+			"acme/failed": coderPrior(0.90),
+			"acme/cheap":  coderPrior(0.80),
+			"bravo/dear":  coderPrior(0.80),
+		}},
+		nil, nil, "")
+	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reg)
+	o := newReviewRun(d, cmclient.TaskContext{Title: "Parent"}, 0)
+	o.lastFixModel = "acme/failed"
+	o.markFixFailed("produced no change")
+
+	ordinary, err := o.resolveFixModel(context.Background(), fixRequest{Round: 2})
+	require.NoError(t, err)
+	assert.Equal(t, "bravo/dear", ordinary.Model,
+		"an escalating round prefers a vendor that has not failed this card")
+
+	cleanup, err := o.resolveFixModel(context.Background(), fixRequest{Round: 3, NoEscalate: true})
+	require.NoError(t, err)
+	assert.Equal(t, "acme/cheap", cleanup.Model,
+		"the cleanup pass declined the escalation, so it declines its vendor preference too")
+}
+
+// runFixModel returns ("", err) on a cap. Assigning that unconditionally wipes
+// lastFixModel, so the NEXT round's markFixFailed records nothing, fixFailed
+// stays empty, the exclusion never fires and the "no other fix model" park can
+// never trip. And a capped round's partial edits are the only evidence it
+// produced - leaving them uncommitted makes the caller's retry unsound.
+func TestCappedFixRoundKeepsTheModelAndCommitsItsWork(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	// Burn the whole (small) budget so the harness returns max_turns. A base of
+	// 8 keeps the fixture clear of wrapUpTurns, so the nudge cannot become the
+	// captured last user message and turn this into a test about the nudge.
+	client := &planLLM{responses: burnResps(8)}
+
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+	d.Cfg.MaxTurns = 8
+
+	o := newReviewRun(d, cmclient.TaskContext{Title: "Card"}, 0)
+	o.cardSizing = sizing{Bar: registry.TierModerate, Budget: 0}
+	o.lastFixModel = "vendor/prior"
+
+	committed, err := o.runFix(context.Background(), fixRequest{Findings: "- a.go: something", Round: 1})
+
+	var mte *MaxTurnsError
+
+	require.ErrorAs(t, err, &mte, "the cap must still reach the caller")
+	assert.True(t, committed, "a capped fix's partial edits are the only evidence it produced")
+	assert.Contains(t, git.pushBranches, "cm/card-1",
+		"an uncommitted, unpushed capped fix makes the caller's retry unsound")
+	assert.NotEqual(t, "vendor/prior", o.lastFixModel, "lastFixModel must never be wiped or left stale")
+	assert.NotEmpty(t, o.lastFixModel)
 }
 
 // --- read-only roots on the review panel ----------------------------------
@@ -3167,6 +3457,242 @@ func TestReadRootsReachTheSpecialistPrompt(t *testing.T) {
 						"specialist %d must carry no roots line when nothing is declared", i)
 				}
 			}
+		})
+	}
+}
+
+// A capped review fix round must not park the whole run. The review loop is the
+// one place a turn-cap correction is free: the round is already counted against
+// attemptsCap, so the loop stays bounded and the next round simply runs wider.
+//
+// Response script: round 1's panel and synthesis (four one-turn calls) revise;
+// the round-1 fix coder then burns the whole 5-turn budget and returns
+// max_turns; round 2's panel and synthesis approve. The panel and synthesis
+// calls all finish on their first turn, so the small MaxTurns caps only the fix
+// coder.
+func TestCappedReviewFixRoundRetriesWiderInsteadOfParking(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+
+	responses := []llm.Response{
+		stopResp("Correctness: broken", 0.01),
+		stopResp("Design: broken", 0.01),
+		stopResp("Security: fine", 0.01),
+		stopResp(`{"approved":false,"summary":"needs work","fixes":[{"file":"a.go","issue":"bug","suggestion":"fix","severity":"major"}]}`, 0.02),
+	}
+	responses = append(responses, burnResps(5)...)
+	responses = append(responses,
+		stopResp("Correctness: fine", 0.01),
+		stopResp("Design: fine", 0.01),
+		stopResp("Security: fine", 0.01),
+		stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.02),
+	)
+
+	d := reviewTestDeps(t, ops, git, &planLLM{responses: responses}, reviewerRegistry())
+	d.Cfg.MaxTurns = 5
+
+	o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}, 0)
+
+	require.NoError(t, runReview(context.Background(), o),
+		"a capped fix round must not park the whole run")
+
+	assert.Equal(t, 1, o.fixBudgetSteps, "the cap widened the next round by one rung")
+	assert.Zero(t, o.fixBarSteps, "the retried round approved, so nothing climbed the bar")
+	assert.True(t, ops.loggedContains("hit its turn cap"), "logs=%v", ops.logs)
+	assert.GreaterOrEqual(t, indexOfPrefix(git.recorded(), "CommitFixup:"), 0,
+		"the capped round's partial work is still committed; git=%v", git.recorded())
+}
+
+// A turn cap widens the budget and says nothing about the fixer's quality, so
+// the round after a cap must not be reported to the operator as an escalation -
+// and a cap that follows a genuine quality failure must not overwrite the
+// reason that failure gave the escalation. Sharing one reason string between
+// the two corrections told the operator that a turn cap had bought a stronger
+// model.
+func TestFixRoundReportsTheCorrectionItActuallyMade(t *testing.T) {
+	tests := []struct {
+		name         string
+		mark         func(o *run)
+		wantReason   string
+		unwantReason string
+		wantWord     string
+		unwantWord   string
+	}{
+		{
+			name:         "capped only",
+			mark:         func(o *run) { o.markFixCapped() },
+			wantReason:   "hit its turn cap",
+			unwantReason: "produced no change",
+			wantWord:     "widened",
+			unwantWord:   "escalated",
+		},
+		{
+			name: "escalated then capped",
+			mark: func(o *run) {
+				o.markFixFailed("produced no change")
+				o.markFixCapped()
+			},
+			wantReason:   "produced no change",
+			unwantReason: "hit its turn cap",
+			wantWord:     "escalated",
+			unwantWord:   "widened",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			o := newReviewRun(reviewTestDeps(t, ops, &fakeGit{committed: true},
+				&planLLM{responses: []llm.Response{stopResp("coder: fixed", 0.01)}}, reviewerRegistry()),
+				cmclient.TaskContext{Title: "Card"}, 0)
+			o.lastFixModel = "vendor/weak"
+			tt.mark(o)
+
+			_, err := o.runFixModel(context.Background(), "fix prompt", fixRequest{Round: 2})
+			require.NoError(t, err)
+
+			assert.True(t, ops.loggedContains(tt.wantWord), "logs=%v", ops.logs)
+			assert.False(t, ops.loggedContains(tt.unwantWord), "logs=%v", ops.logs)
+			assert.True(t, ops.loggedContains(tt.wantReason), "logs=%v", ops.logs)
+			assert.False(t, ops.loggedContains(tt.unwantReason), "logs=%v", ops.logs)
+		})
+	}
+}
+
+// One fix round produces one outcome and is charged for it exactly once. The
+// carrier is fixRan, which is true only when the IMMEDIATELY PRECEDING round
+// both ran and committed, so a round the next iteration finds behind a red
+// verify is one that has not already been judged.
+//
+// Three shapes, all of which charged twice or on the wrong axis at some point:
+//
+//   - A round truncated at its turn cap is the likeliest of all to leave the
+//     verify red - it ran out of turns mid-work, and runFix committed the
+//     partial result. That red verify is the cap showing through, already
+//     charged on the budget axis, and a turn cap is zero evidence about
+//     capability.
+//   - The flag is per-round, not per-run, so omitting the write on the cap path
+//     covers only a FIRST-round cap; once an earlier round has completed, the
+//     cap must actively clear it.
+//   - A round that committed nothing is charged on the spot. Its HEAD is
+//     unchanged, so the next round's verify is the same subprocess against the
+//     same tree and carries no new information - charging that too would jump
+//     the bar two rungs on the evidence of one round.
+//
+// Every exclusion shrinks the pool toward the exhausted-fixers park, which the
+// third row reaches for real.
+func TestOneFixRoundOutcomeIsChargedOnce(t *testing.T) {
+	panelRejects := func() []llm.Response {
+		return []llm.Response{
+			stopResp("Correctness: broken", 0.01),
+			stopResp("Design: ok", 0.01),
+			stopResp("Security: ok", 0.01),
+			stopResp(`{"approved":false,"summary":"needs work","fixes":[{"file":"a.go","issue":"bug","suggestion":"fix","severity":"major"}]}`, 0.02),
+		}
+	}
+	panelApproves := func() []llm.Response {
+		return []llm.Response{
+			stopResp("Correctness: fine", 0.01),
+			stopResp("Design: fine", 0.01),
+			stopResp("Security: fine", 0.01),
+			stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.02),
+		}
+	}
+	// A red gate short-circuits the panel entirely, so a red round's only model
+	// call is its own fix coder's.
+	fixCompletes := stopResp("coder: fixed it this time", 0.05)
+
+	tests := []struct {
+		name string
+		// script is the model conversation; redGate is the gate run that fails;
+		// wantGates is how many rounds ran before the loop ended.
+		script    []llm.Response
+		redGate   int
+		wantGates int
+		// committed is what every fixup in the row lands. wantParked marks the
+		// row that ends on the exhausted-fixers park instead of an approval.
+		committed   bool
+		wantParked  bool
+		wantBar     int
+		wantBudget  int
+		wantFailers int
+	}{
+		{
+			name: "the cap is the first fix round",
+			// pass/reject/cap, red/fix, pass/approve.
+			script: slices.Concat(panelRejects(), burnResps(5),
+				[]llm.Response{fixCompletes}, panelApproves()),
+			redGate:    2,
+			wantGates:  3,
+			committed:  true,
+			wantBudget: 1,
+		},
+		{
+			name: "a completed fix round precedes the cap",
+			// pass/reject/fix, pass/reject/cap, red/fix, pass/approve. The first
+			// round completing is what leaves the per-round flag set going into
+			// the cap.
+			script: slices.Concat(panelRejects(), []llm.Response{fixCompletes},
+				panelRejects(), burnResps(5),
+				[]llm.Response{fixCompletes}, panelApproves()),
+			redGate:    3,
+			wantGates:  4,
+			committed:  true,
+			wantBudget: 1,
+		},
+		{
+			name: "the round before the red verify committed nothing",
+			// pass/reject/no-op fix, red. The no-op is charged on the spot, so
+			// the red verify behind it adds nothing; round 2's escalated pick
+			// then finds the pool empty and parks, which is where the run ends.
+			script:      slices.Concat(panelRejects(), []llm.Response{fixCompletes}),
+			redGate:     2,
+			wantGates:   2,
+			committed:   false,
+			wantParked:  true,
+			wantBar:     1,
+			wantFailers: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			git := &fakeGit{committed: tt.committed, lastCommitTarget: "abc123"}
+
+			d := reviewTestDeps(t, ops, git, &planLLM{responses: tt.script}, reviewerRegistry())
+			d.Cfg.MaxTurns = 5
+
+			o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}, 0)
+			o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
+
+			gateRuns := 0
+			o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+				gateRuns++
+				if gateRuns == tt.redGate {
+					return verifyexec.Outcome{ExitCode: 1, Output: "still failing"}
+				}
+
+				return verifyexec.Outcome{ExitCode: 0}
+			}
+
+			err := runReview(context.Background(), o)
+
+			// Asserted first: a double charge derails the run in ways that would
+			// otherwise mask the count this test exists for.
+			assert.Equal(t, tt.wantBar, o.fixBarSteps, "one round, one charge on the bar axis")
+			assert.Equal(t, tt.wantBudget, o.fixBudgetSteps, "one round, one charge on the budget axis")
+			assert.Len(t, o.fixFailed, tt.wantFailers,
+				"only a round judged too weak excludes its fixer; fixFailed=%v", o.fixFailed)
+
+			if tt.wantParked {
+				var parked *ReviewParkedError
+				require.ErrorAs(t, err, &parked, "the row ends on the exhausted-fixers park")
+			} else {
+				require.NoError(t, err, "the fixer must still be selectable for the round that follows")
+			}
+
+			assert.Equal(t, tt.wantGates, gateRuns, "every scripted round ran")
 		})
 	}
 }

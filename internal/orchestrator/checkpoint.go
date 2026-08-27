@@ -39,7 +39,7 @@ func (o *run) checkpointEligible(sub subtaskRef) bool {
 		return false
 	}
 
-	return tierRanks[tierOf(sub)] >= tierRanks[tierFromString(cfg.CheckpointMinTier)]
+	return tierRanks[sub.Sizing.Bar] >= tierRanks[tierFromString(cfg.CheckpointMinTier)]
 }
 
 // checkpointVerdict is the moderator's synthesis decision for one execute

@@ -7,17 +7,6 @@ import (
 	"sort"
 )
 
-// reconcileTierDefault is the fallback tier assigned to a reconciled subtask
-// ref when its persisted tier cannot be recovered. Tiers ARE persisted on
-// subtask cards via an invisible marker in the body (see tiermarker.go),
-// written at creation and restored below via GetTaskContext - but
-// SubtaskStates itself carries only id/title/state, and the per-subtask
-// restore is advisory: an absent marker (e.g. a pre-existing card) or a failed
-// fetch falls back here. "moderate" is the safe middle: under-selecting a
-// coder model for real work is worse than slightly over-paying. tierOf maps
-// this string to registry.TierModerate.
-const reconcileTierDefault = "moderate"
-
 // reconcile is crash-resume reconciliation: a single pass, run once by execute()
 // BEFORE the phase loop, that aligns the run with whatever a prior, interrupted
 // run left behind. It is driven entirely by the card's persisted phase
@@ -136,24 +125,23 @@ func (o *run) reconcile(ctx context.Context) error {
 
 	o.subtasks = make([]subtaskRef, 0, len(states))
 	for _, st := range states {
-		ref := subtaskRef{ID: st.CardID, Title: st.Title, State: st.State, Tier: reconcileTierDefault}
+		ref := subtaskRef{ID: st.CardID, Title: st.Title, State: st.State, Sizing: defaultSizing()}
 
-		// Pending refs get their persisted tier and planner body back from the
+		// Pending refs get their persisted sizing and planner body back from the
 		// card itself (done refs are never re-run - skip the fetch). A fetch
-		// failure degrades to today's conservative defaults; resume must not
-		// become fragile over an advisory enrichment.
+		// failure degrades to the conservative default; resume must not become
+		// fragile over an advisory enrichment.
 		if !isTerminal(st.State) {
 			tc, err := o.d.Ops.GetTaskContext(ctx, st.CardID, false)
 			if err != nil {
 				slog.Warn("reconcile: subtask context fetch failed; using defaults",
 					"card_id", st.CardID, "error", err)
 			} else {
-				tier, body := parseTierMarker(tc.Description)
-				if tier != "" {
-					ref.Tier = tier
-				}
+				kv, s := readMeta(tc.Description)
+				ref.Sizing = s
+				ref.PlannerBar = kv["seed"]
 
-				if body != "" {
+				if body := stripMeta(tc.Description); body != "" {
 					ref.Body = body
 				}
 			}

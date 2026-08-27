@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
+	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/mhersson/contextmatrix-harness/llm"
 	"github.com/stretchr/testify/assert"
@@ -2735,7 +2736,11 @@ func TestCopilotGate_FixRoundNoChangeParks(t *testing.T) {
 }
 
 // TestCIGate_FixRoundNoChangeParks: a CI fix round whose fix commits nothing
-// parks with the no-change reason instead of cycling to the rounds cap.
+// parks with the no-change reason instead of cycling to the rounds cap - once
+// the bar raise that buys a first no-op round one more attempt is spent. The
+// bar counter is shared with the review loop, so a card whose review rounds
+// already escalated has had a stronger fixer tried on it and parks here on the
+// first no-op round.
 func TestCIGate_FixRoundNoChangeParks(t *testing.T) {
 	shrinkFixRoundReserve(t, 0) // a millisecond-scale gate still funds its round
 
@@ -2747,6 +2752,7 @@ func TestCIGate_FixRoundNoChangeParks(t *testing.T) {
 
 	// committed defaults to false -> runFix returns committed=false, err=nil
 	o := prGateRun(ops, gates, &fakeGit{}, client, ciGateContext("No change CI fix", "body"), 0)
+	o.fixBarSteps = 1 // a review round already climbed the bar
 
 	err := runPRGates(context.Background(), o)
 
@@ -2774,4 +2780,142 @@ func nonEmpty(s []string) []string {
 	}
 
 	return s
+}
+
+// With the fix counters monotone, a gate's runFix can exhaust its fix models
+// and return *ReviewParkedError through the SHARED runFix. Every resource a
+// gate can run out of maps to a park reason, so the gate parks with the PR
+// standing rather than falling through to a hard error that ends the run. The
+// fix path parks for more than one reason, so the card carries the one the
+// error itself gives.
+func TestGateResourceParkMatchesReviewParked(t *testing.T) {
+	cases := map[string]struct {
+		err  error
+		want string
+	}{
+		"budget":                   {&BudgetExceededError{}, "budget"},
+		"turn cap":                 {&MaxTurnsError{Model: "m", Turns: 45}, "turns"},
+		"parked, fixers exhausted": {&ReviewParkedError{Reason: reviewParkedFixExhausted}, reviewParkedFixExhausted},
+		"parked, none selectable":  {&ReviewParkedError{Reason: reviewParkedNoFixModel}, reviewParkedNoFixModel},
+		"parked, no reason given":  {&ReviewParkedError{}, gatesFixParkFallbackReason},
+		"unrelated":                {errors.New("boom"), ""},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tc.want, gateResourcePark(tc.err, "budget", "turns"))
+		})
+	}
+}
+
+// A capped CI fix round that LANDED a diff is worth another CI cycle: the poll
+// loop will see a real new head. One that landed nothing is not - it would
+// re-bucket the identical settled-red checks and burn the remaining rounds
+// back to back with no CI feedback between them.
+//
+// The retry is not one-shot: a pushing round that keeps capping keeps buying
+// cycles until gatesRoundsCap stops it, which is what bounds it. A round that
+// pushes nothing parks on the first cap.
+func TestCIGate_CappedFixRetriesOnlyWhenItPushed(t *testing.T) {
+	for name, tc := range map[string]struct {
+		committed bool
+		// atTopRung seeds a card whose bar already opens the budget at the top
+		// rung, so the width cannot move and only the budget term parks it.
+		atTopRung  bool
+		wantRounds int
+		wantWider  bool
+	}{
+		"capped with a commit":   {committed: true, wantRounds: 3, wantWider: true},
+		"capped with nothing":    {committed: false, wantRounds: 1},
+		"capped at the top rung": {committed: true, atTopRung: true, wantRounds: 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ops := &fakeOps{}
+			gates := &fakeGates{checks: [][]CheckResult{
+				{failingCheck()}, {failingCheck()}, {failingCheck()}, {failingCheck()},
+			}}
+			git := &fakeGit{committed: tc.committed}
+			// Every fix round burns its whole budget, so each returns max_turns.
+			client := &planLLM{responses: burnResps(60)}
+
+			o := prGateRun(ops, gates, git, client, ciGateContext("Capped", "body"), 0)
+			o.d.Cfg.MaxTurns = 5
+
+			if tc.atTopRung {
+				o.cardSizing = sizing{Bar: registry.TierCritical, Budget: seedBudgetStep(registry.TierCritical)}
+				o.fixBudgetSteps = 1 // one rung short of the counter's ceiling, but already at the width ceiling
+			}
+
+			var parked *GatesParkedError
+			require.ErrorAs(t, runPRGates(context.Background(), o), &parked)
+
+			body := ops.lastBody()
+			assert.Contains(t, body, fmt.Sprintf("- CI rounds used: %d/3", tc.wantRounds))
+
+			if tc.wantWider {
+				assert.Positive(t, o.fixBudgetSteps, "a pushed capped round runs the next one wider")
+			}
+
+			if tc.atTopRung {
+				assert.Equal(t, 1, o.fixBudgetSteps,
+					"a round that could not run wider is not recorded as a widening")
+			}
+		})
+	}
+}
+
+// A CI fix round that produced no change is QUALITY evidence, and one more
+// round is already funded by gatesRoundsCap - so the gate spends it on a
+// stronger fixer instead of parking without ever having tried one.
+func TestCIGate_NoChangeRaisesTheBarBeforeParking(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{checks: [][]CheckResult{
+		{failingCheck()}, {failingCheck()}, {failingCheck()}, {failingCheck()},
+	}}
+	git := &fakeGit{committed: false}
+	client := &planLLM{responses: []llm.Response{
+		stopResp("coder: nothing to change", 0.01),
+		stopResp("coder: still nothing", 0.01),
+	}}
+
+	o := prGateRun(ops, gates, git, client, ciGateContext("No change", "body"), 0)
+	// A pool with a second coder in it, so the round the bar raise buys has a
+	// model to run: the default gate registry carries one, and round 2's pick
+	// excludes round 1's failed fixer.
+	o.d.Registry = reviewFixRegistry()
+
+	var parked *GatesParkedError
+	require.ErrorAs(t, runPRGates(context.Background(), o), &parked)
+
+	assert.Equal(t, 1, o.fixBarSteps, "the second round got a stronger fixer")
+	assert.Zero(t, o.fixBudgetSteps, "a no-op round is not volume evidence")
+	assert.Equal(t, 2, modelCallCount(client), "exactly one extra round was bought, not a spin")
+	assert.Contains(t, ops.lastBody(), "- CI rounds used: 2/3")
+}
+
+// A gate fix round can exhaust its fix models through the SHARED runFix: the
+// no-change bar raise excludes the model that failed, and a pool with no other
+// coder in it leaves the escalated round nothing to select. That park must reach
+// the card as a park. A hard error here would end a run whose work is already
+// pushed, instead of leaving the PR standing for a human.
+func TestCIGate_ExhaustedFixModelsParksInsteadOfFailing(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{checks: [][]CheckResult{
+		{failingCheck()}, {failingCheck()}, {failingCheck()},
+	}}
+	// One coder model in the pool, and one scripted round: the second round never
+	// reaches a model call.
+	client := &planLLM{responses: []llm.Response{stopResp("coder: nothing to change", 0.01)}}
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, ciGateContext("Exhausted", "body"), 0)
+
+	var parked *GatesParkedError
+	require.ErrorAs(t, runPRGates(context.Background(), o), &parked,
+		"an exhausted fix pool parks the gate; a hard error would end the run and abandon the PR")
+
+	assert.Equal(t, reviewParkedNoFixModel, parked.Reason,
+		"the card names what actually happened: nothing was selectable, not that a round had failed")
+	assert.Equal(t, 1, modelCallCount(client), "the escalated round is refused before it spends a call")
+	assert.Equal(t, -1, indexOfCall(ops.recorded(), "TransitionCard:done"),
+		"a parked card must NOT reach done")
 }
