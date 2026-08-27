@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/filelog"
 	"github.com/mhersson/contextmatrix-backendkit/logbridge"
@@ -99,10 +100,14 @@ func TestContainerLogSink_TeeForwardsToSSEBridgeToo(t *testing.T) {
 	sink("proj", "card-3", []byte("leaked PLACEHOLDER-SECRET-CCCC here"), true)
 	files.End("proj", "card-3", 0, "exit")
 
-	entry := <-ch
-	assert.NotContains(t, entry.Content, "PLACEHOLDER-SECRET-CCCC",
-		"one AddSessionKey call must mask the secret on the SSE stream too")
-	assert.Contains(t, entry.Content, "[REDACTED]")
+	select {
+	case entry := <-ch:
+		assert.NotContains(t, entry.Content, "PLACEHOLDER-SECRET-CCCC",
+			"one AddSessionKey call must mask the secret on the SSE stream too")
+		assert.Contains(t, entry.Content, "[REDACTED]")
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the hub to publish the bridged entry")
+	}
 
 	content := readCardLog(t, dir, "proj", "card-3")
 	assert.NotContains(t, content, "PLACEHOLDER-SECRET-CCCC")

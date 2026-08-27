@@ -390,21 +390,36 @@ func (t *sessionSecretTee) RemoveSessionKey(sessionID string) {
 }
 
 // rebuild composes every registered key into a fresh redactor and swaps it
-// into t.file. The caller holds t.mu.
+// into t.file, or clears t.file to nil when nothing is registered - Redact's
+// short-circuit and the "nothing registered yet" startup state both key off
+// that nil, a single atomic read with no separate flag to fall out of sync
+// with it. The caller holds t.mu.
 func (t *sessionSecretTee) rebuild() {
 	all := make([]string, 0, len(t.session))
 	for _, keys := range t.session {
 		all = append(all, keys...)
 	}
 
+	if len(all) == 0 {
+		t.file.Store(nil)
+
+		return
+	}
+
 	t.file.Store(redact.New(all))
 }
 
-// Redact masks every currently-registered secret in line. A nil *Redactor
-// (nothing registered yet) is the identity, so callers may call this
-// unconditionally.
+// Redact masks every currently-registered secret in line. Nothing registered
+// yet (t.file is nil) skips the copy through string(line)/Apply/[]byte(...)
+// entirely and returns line as-is - the common case is every line taking that
+// round trip for zero matches, since most output carries no secret.
 func (t *sessionSecretTee) Redact(line []byte) []byte {
-	return []byte(t.file.Load().Apply(string(line)))
+	r := t.file.Load()
+	if r == nil {
+		return line
+	}
+
+	return []byte(r.Apply(string(line)))
 }
 
 // containerLogSink returns the executor OnLog callback: it fans out one

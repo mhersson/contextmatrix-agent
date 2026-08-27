@@ -55,10 +55,16 @@ type RunCredentials struct {
 	minSleep      time.Duration // floor on the sleep between refreshes
 	retryBackoff  time.Duration // fast retry after a transient failure
 
-	// OnTokenRefresh is an optional hook fired after every successful git
-	// token refresh (i.e. after WriteEnvFile completes), before the refresh
-	// log line, with the rotated token. It is never called for a PAT-style
-	// token (no expiry) since those never enter the refresh loop. Nil-safe.
+	// OnTokenRefresh is an optional hook fired with a freshly-minted git token
+	// BEFORE it is written to the run's env file - the redaction registry
+	// must learn a rotated token before the worker container can possibly
+	// read it from disk, or the window between the write and the hook lets
+	// the new token reach the durable log unmasked. Registering a token the
+	// worker cannot yet reach is strictly safe, so this may fire once per
+	// fetched token even on a WriteEnvFile failure that retries with a fresh
+	// fetch - never under-registers, at worst registers a token that never
+	// lands on disk. Never called for a PAT-style token (no expiry) since
+	// those never enter the refresh loop. Nil-safe.
 	OnTokenRefresh func(project, cardID, token string)
 
 	mu   sync.Mutex
@@ -242,6 +248,17 @@ func (m *RunCredentials) refreshLoop(
 			continue
 		}
 
+		// Register the rotated token with the redaction registry before it
+		// ever reaches disk: a worker that read the env file between the
+		// write and this call could have already printed the new token to
+		// output, landing it unmasked in the durable log. Firing this before
+		// WriteEnvFile closes that window - a token registered but never
+		// written (a WriteEnvFile failure below retries with a fresh fetch)
+		// is a harmless no-op secret, never a leak.
+		if m.OnTokenRefresh != nil {
+			m.OnTokenRefresh(project, cardID, token)
+		}
+
 		if err := WriteEnvFile(path, endpointVals(token, endpoint)); err != nil {
 			m.logger.Error("rewrite per-run env file failed; retrying on backoff",
 				"project", project, "card_id", cardID, "error", err, "backoff", m.retryBackoff)
@@ -253,10 +270,6 @@ func (m *RunCredentials) refreshLoop(
 			}
 
 			continue
-		}
-
-		if m.OnTokenRefresh != nil {
-			m.OnTokenRefresh(project, cardID, token)
 		}
 
 		m.logger.Info("per-run env file refreshed",

@@ -496,6 +496,71 @@ func TestOnTokenRefreshFiresForExpiringToken(t *testing.T) {
 	assert.Equal(t, "refreshed-token-1", hookToken, "the hook must receive the first rotated token")
 }
 
+// TestOnTokenRefreshFiresBeforeEnvFileWrite pins the ordering the security
+// fix depends on: the redaction registry must learn a rotated token before
+// the worker container can possibly read it from the env file. refreshLoop
+// runs single-threaded, so reading the env file from INSIDE the hook is a
+// race-free recording of what has landed on disk at that exact point - if the
+// hook still ran after WriteEnvFile, this read would already see the rotated
+// token; the fix means it can only ever see the pre-rotation one.
+func TestOnTokenRefreshFiresBeforeEnvFileWrite(t *testing.T) {
+	t.Parallel()
+
+	stub := &stubCM{apiKey: "test-key"}
+	srv := httptest.NewServer(stub.handler(t))
+	t.Cleanup(srv.Close)
+
+	m := newTestManager(t, srv.URL, "test-key")
+
+	envPath := filepath.Join(m.HostDir("proj", "CARD-1"), "env")
+
+	var (
+		mu          sync.Mutex
+		hookFired   bool
+		tokenOnDisk string
+		hookErr     error
+	)
+
+	m.OnTokenRefresh = func(_, _, _ string) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if hookFired {
+			return
+		}
+
+		hookFired = true
+
+		src, err := Open(envPath)
+		if err != nil {
+			hookErr = err
+
+			return
+		}
+
+		tokenOnDisk = src.Get("CM_GIT_TOKEN")
+	}
+
+	expiry := time.Now().Add(40 * time.Millisecond).UTC().Format(time.RFC3339)
+	require.NoError(t, m.Provision("proj", "CARD-1", "payload-token", expiry, EndpointSecrets{}))
+	t.Cleanup(func() { m.Teardown("proj", "CARD-1") })
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+
+		return hookFired
+	}, 5*time.Second, 10*time.Millisecond, "expected the token refresh hook to fire")
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	require.NoError(t, hookErr)
+	assert.Equal(t, "payload-token", tokenOnDisk,
+		"the env file must still hold the pre-rotation token while the redaction hook runs - "+
+			"the rotated token must never be readable from disk before it is registered")
+}
+
 // TestOnTokenRefreshNeverFiresForPAT verifies that a PAT-style token (no
 // expiry) never triggers the refresh hook.
 func TestOnTokenRefreshNeverFiresForPAT(t *testing.T) {
