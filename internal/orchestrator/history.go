@@ -33,11 +33,6 @@ func (o *run) recordSection(ctx context.Context, heading, section string) {
 // Every round leads with the round's verify result, so a human reading the card
 // sees whether the change was verified - never inferring it from silence.
 func (o *run) recordReview(ctx context.Context, round int, findings string, approved bool, vres verifyResult) {
-	heading := "Review Findings"
-	if round > 1 {
-		heading = fmt.Sprintf("Review Findings (Round %d)", round)
-	}
-
 	verdict := "revise"
 	if approved {
 		verdict = "approve"
@@ -47,10 +42,46 @@ func (o *run) recordReview(ctx context.Context, round int, findings string, appr
 	// the PR-body and completion-note trailers.
 	o.lastVerify = vres
 
-	section := fmt.Sprintf("## %s\n\n%s\n\n%s\n\n### Recommendation\n\n%s",
-		heading, verifyRoundLine(vres, o.resolvedVerifyPlan()), strings.TrimSpace(findings), verdict)
+	heading := reviewRoundHeading(round)
 
-	o.recordSection(ctx, heading, section)
+	o.recordSection(ctx, heading,
+		reviewRoundSection(heading, verifyRoundLine(vres, o.resolvedVerifyPlan()), findings, verdict))
+}
+
+// recordReviewVerifyCorrection rewrites an APPROVED round's recorded section
+// when a later gate proves the branch is no longer the tree that round
+// measured - the post-approval cleanup fixup is still on it and did not pass a
+// gate of its own. Only the verify line changes: the round's findings and its
+// verdict still stand, since what the reviewers approved is unaffected by what
+// the cleanup pass did to the tree afterwards.
+//
+// Without this the body would keep a PASSED line for a tree already known red,
+// while the PR trailer built from the same run said FAILED - the two surfaces
+// contradicting each other on the one fact this gate exists to get right.
+func (o *run) recordReviewVerifyCorrection(ctx context.Context, round int, findings string, vres verifyResult) {
+	heading := reviewRoundHeading(round)
+
+	line := verifyRoundLine(vres, o.resolvedVerifyPlan()) + " - " + cleanupVerifyCorrection
+
+	o.recordSection(ctx, heading, reviewRoundSection(heading, line, findings, "approve"))
+}
+
+// reviewRoundHeading is the card-body heading for one review round: round 1
+// takes the bare heading (matching CM's review-task workflow skill), later
+// rounds carry their number, which is what makes the upsert an append.
+func reviewRoundHeading(round int) string {
+	if round > 1 {
+		return fmt.Sprintf("Review Findings (Round %d)", round)
+	}
+
+	return "Review Findings"
+}
+
+// reviewRoundSection renders one recorded round: the verify line first, then
+// the findings, then the recommendation.
+func reviewRoundSection(heading, verifyLine, findings, verdict string) string {
+	return fmt.Sprintf("## %s\n\n%s\n\n%s\n\n### Recommendation\n\n%s",
+		heading, verifyLine, strings.TrimSpace(findings), verdict)
 }
 
 // verifyRoundLine renders the "**Verify:** ..." status line prepended to each

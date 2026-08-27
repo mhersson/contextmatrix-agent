@@ -704,8 +704,59 @@ func TestReviewCleanupFixupRedAndUndiscardable(t *testing.T) {
 				"a fixup that stayed on the branch must be reported on its own gate result")
 			assert.Contains(t, verifyStatusLine(o.lastVerify, o.resolvedVerifyPlan()), "FAILED",
 				"the trailer must not carry the approving round's PASSED over a tree it never measured")
+
+			// The round section was recorded before the cleanup pass ran. The
+			// branch it described is gone, so the card body must not keep
+			// claiming a gate that passed on it.
+			body := ops.lastBody()
+			assert.NotContains(t, body, "**Verify:** PASSED",
+				"the recorded round must not claim PASSED for a tree already known red; body=%q", body)
+			assert.Contains(t, body, "**Verify:** FAILED")
+			assert.Contains(t, body, cleanupVerifyCorrection, "the correction must say why the round's gate no longer holds")
+			assert.Contains(t, body, "### Recommendation\n\napprove",
+				"correcting the verify line must not rewrite the verdict the reviewers reached")
 		})
 	}
+}
+
+// TestReviewCleanupFixupInconclusiveIsKeptNotDiscarded proves an inconclusive
+// cleanup gate (here a timeout) is not a red one: the fixup stays, mirroring
+// the pre-commit gate's skip arm. Both surfaces stop claiming the round's
+// PASSED, because the tree that ships now carries a fixup nothing measured.
+func TestReviewCleanupFixupInconclusiveIsKeptNotDiscarded(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{
+		committed:        true,
+		lastCommitTarget: "abc123",
+		headSHAs:         []string{"snapshot-sha", "pre-cleanup-sha"},
+	}
+	client := &planLLM{responses: cleanupVerifyResponses()}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+	o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
+
+	runs := 0
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		runs++
+		if runs == 1 {
+			return verifyexec.Outcome{ExitCode: 0, Output: "round gate"}
+		}
+
+		return verifyexec.Outcome{TimedOut: true, ExitCode: -1}
+	}
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	assert.Empty(t, git.hardResetRefs, "an inconclusive gate is not proof of a defect, so the fixup stays; git=%v", git.recorded())
+	assert.Equal(t, verifySkipped, o.lastVerify.Status)
+	assert.Contains(t, verifyStatusLine(o.lastVerify, o.resolvedVerifyPlan()), "NOT VERIFIED",
+		"a kept fixup nothing could measure must not ship under the round's PASSED")
+
+	body := ops.lastBody()
+	assert.NotContains(t, body, "**Verify:** PASSED", "body=%q", body)
+	assert.Contains(t, body, cleanupVerifyCorrection)
 }
 
 // TestReviewCleanupNoCommitSkipsTheVerify proves the re-run is keyed on a

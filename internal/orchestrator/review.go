@@ -298,7 +298,7 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 
 					// The fixup landed AFTER this round's gate ran, so nothing
 					// has checked it: prove it or drop it.
-					o.verifyCleanupFixup(ctx, plan, pre, findings)
+					o.verifyCleanupFixup(ctx, plan, round, pre, findings)
 				} else {
 					d.logCard(ctx, "review: approved with %d surviving finding(s), but the cleanup fix pass produced no change", len(fixes))
 				}
@@ -513,6 +513,11 @@ func approvedWithFixesApplied(findings string) string {
 // position, after the review round's and the pre-commit one's.
 const cleanupVerifyContext = "cleanup fix pass, after the fixup"
 
+// cleanupVerifyCorrection is the clause appended to a recorded round's verify
+// line when the cleanup fixup outlives its own gate: the line the round wrote
+// describes a tree the branch no longer holds.
+const cleanupVerifyCorrection = "the cleanup fix pass that followed this round is still on the branch, and its own verify did not pass"
+
 // verifyCleanupFixup re-runs the resolved verify plan over a committed cleanup
 // fixup and either keeps it or resets it away. The fixup lands after the
 // approving round's gate has already run, so without this the run would carry
@@ -533,8 +538,10 @@ const cleanupVerifyContext = "cleanup fix pass, after the fixup"
 // timeout, a missing tool) proves nothing about it - both are facts about the
 // fixup rather than about the tree the approving round measured. So is a red
 // gate whose discard could not be performed, which is the one path that reports
-// a failure it could not undo.
-func (o *run) verifyCleanupFixup(ctx context.Context, plan verifyPlan, pre, findings string) {
+// a failure it could not undo. Whenever a kept fixup did not pass, the round's
+// recorded section is corrected too: the PR trailer and the card body must not
+// contradict each other about the same tree.
+func (o *run) verifyCleanupFixup(ctx context.Context, plan verifyPlan, round int, pre, findings string) {
 	if len(plan.Argv) == 0 {
 		return
 	}
@@ -547,18 +554,20 @@ func (o *run) verifyCleanupFixup(ctx context.Context, plan verifyPlan, pre, find
 
 		// Kept but unproven: the note is the only evidence left of why, and it
 		// reaches the PR body through the NOT VERIFIED trailer.
-		o.lastVerify = verifyResult{Status: verifySkipped, Note: "the cleanup fix pass could not be verified: " + err.Error()}
+		vres = verifyResult{Status: verifySkipped, Note: "the cleanup fix pass could not be verified: " + err.Error()}
+	} else {
+		o.logVerifyGate(ctx, vres, cleanupVerifyContext)
 
-		return
-	}
-
-	o.logVerifyGate(ctx, vres, cleanupVerifyContext)
-
-	if vres.Status == verifyFailed && o.discardCleanupFixup(ctx, pre, findings, "verify failed") {
-		return
+		if vres.Status == verifyFailed && o.discardCleanupFixup(ctx, pre, findings, "verify failed") {
+			return
+		}
 	}
 
 	o.lastVerify = vres
+
+	if vres.Status != verifyPassed {
+		o.recordReviewVerifyCorrection(ctx, round, findings, vres)
+	}
 }
 
 // discardCleanupFixup resets the branch to pre - the commit the cleanup pass
