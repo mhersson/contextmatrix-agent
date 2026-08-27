@@ -447,6 +447,7 @@ func TestWorktreeDirtyDegradesToWrittenOnError(t *testing.T) {
 		assert.False(t, dirty(), "sanity: the same read is not a write")
 
 		g.worktreeStateErr = errors.New("read budget blown")
+
 		assert.True(t, dirty(), "a failed read must be treated as written, never clean")
 		assert.True(t, dirty(), "every call on the error path stays written, baseline or not")
 	})
