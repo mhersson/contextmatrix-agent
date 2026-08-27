@@ -1425,12 +1425,10 @@ func (o *run) raiseSubtaskBoth(ctx context.Context, sub subtaskRef, why string) 
 // same exemption the capped path's leaderboard report takes, for the same
 // reason.
 //
-// The capped path diverges here, deliberately: after a turn cap it still widens
-// the BUDGET on an environmentally-failed verify, because the cap itself cut the
-// run off and is volume evidence whatever the verify then said. This path has no
-// such cap - the coder landed its terminal call and claimed the work done - so a
-// spent window alone is the weaker fact, and an environmental failure leaves it
-// carrying no evidence at all.
+// The capped path takes the same exemption: an environmentally-failed verify
+// after a turn cap gets logEnvironmentalCapBudget's card-log-only note, not a
+// raise either, so this path's no-op on the identical shape is consistent
+// rather than a divergence.
 //
 // The guard is written positively rather than as a list of exclusions because
 // the only call site reaches it on verifyFailed alone: a skipped result and a
