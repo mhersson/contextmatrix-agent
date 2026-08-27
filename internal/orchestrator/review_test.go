@@ -546,6 +546,195 @@ func TestReviewApprovedFixCleanupErrorHandling(t *testing.T) {
 	}
 }
 
+// cleanupVerifyResponses is the LLM script every cleanup-verify test below
+// shares: three specialists, an approving verdict that still carries one
+// actionable finding, and the cleanup pass's fix-coder run.
+func cleanupVerifyResponses() []llm.Response {
+	return []llm.Response{
+		stopResp("Correctness: minor issue", 0.01),
+		stopResp("Design: looks fine", 0.01),
+		stopResp("Security: looks fine", 0.01),
+		stopResp(`{"approved":true,"summary":"clean","fixes":[{"file":"a.go","issue":"leak","suggestion":"close it","severity":"minor"}]}`, 0.02),
+		stopResp("coder: tidied", 0.05),
+	}
+}
+
+// TestReviewCleanupFixupVerified proves the post-approval cleanup fixup is
+// verified in its own right: the resolved plan runs again after the fixup
+// lands, and the run-level result - the one the PR body and the completion note
+// render - is the CLEANUP run's, not the approving round's. Without the re-run
+// the PASSED trailer would describe the pre-cleanup tree.
+func TestReviewCleanupFixupVerified(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{
+		committed:        true,
+		lastCommitTarget: "abc123",
+		headSHAs:         []string{"snapshot-sha", "pre-cleanup-sha"},
+	}
+	client := &planLLM{responses: cleanupVerifyResponses()}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+	o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
+
+	runs := 0
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		runs++
+		if runs == 1 {
+			return verifyexec.Outcome{ExitCode: 0, Output: "round gate"}
+		}
+
+		return verifyexec.Outcome{ExitCode: 0, Output: "cleanup gate"}
+	}
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	assert.Equal(t, 2, runs, "the committed cleanup fixup must be verified, not shipped on the round's earlier gate")
+	assert.Equal(t, verifyPassed, o.lastVerify.Status)
+	assert.Equal(t, "cleanup gate", o.lastVerify.Output,
+		"the run-level result must come from the run that saw the fixup")
+	assert.Contains(t, verifyStatusLine(o.lastVerify, o.resolvedVerifyPlan()), "PASSED",
+		"a cleanup the gate proved keeps the PASSED trailer")
+	assert.Empty(t, git.hardResetRefs, "a proven cleanup fixup must not be reset away; git=%v", git.recorded())
+	assert.Contains(t, o.reviewSummary, "were applied in a follow-up cleanup pass")
+}
+
+// TestReviewCleanupFixupDiscardedOnRedVerify proves a cleanup fixup that breaks
+// the verify is dropped rather than shipped: the branch returns to the commit
+// the pass started from, the discard is on the card, the approved run still
+// finishes, the run-level result is the approving round's (which describes the
+// tree that survived), and the summary stops claiming the findings were fixed.
+func TestReviewCleanupFixupDiscardedOnRedVerify(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{
+		committed:        true,
+		lastCommitTarget: "abc123",
+		// The snapshot head, the head the cleanup pass commits onto, and a head
+		// only a capture taken AFTER the fix run could read.
+		headSHAs: []string{"snapshot-sha", "pre-cleanup-sha", "post-cleanup-sha"},
+	}
+	client := &planLLM{responses: cleanupVerifyResponses()}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+	o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
+
+	runs := 0
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		runs++
+		if runs == 1 {
+			return verifyexec.Outcome{ExitCode: 0, Output: "round gate"}
+		}
+
+		return verifyexec.Outcome{ExitCode: 1, Output: "FAIL: the cleanup broke the build"}
+	}
+
+	require.NoError(t, runReview(context.Background(), o),
+		"discarding the cleanup is not a review failure - the approved change still ships")
+
+	assert.Equal(t, []string{"pre-cleanup-sha"}, git.hardResetRefs,
+		"the branch must return to the commit the cleanup pass started from; git=%v", git.recorded())
+	assert.True(t, ops.loggedContains(cleanupDiscardPrefix),
+		"the discard must be recorded on the card; logs=%v", ops.logs)
+	assert.Equal(t, "round gate", o.lastVerify.Output,
+		"the tree that ships is the one the approving round verified, so its result stands")
+	assert.Contains(t, o.reviewSummary, "were not fixed",
+		"findings whose fixup was discarded must not read as applied")
+}
+
+// TestReviewCleanupFixupRedAndUndiscardable proves the one path that keeps a
+// red fixup: the discard could not be performed. Both ways that happens - the
+// pre-cleanup commit was never recorded, and the reset itself failed - must
+// leave the run finishing on the RED result, so the PR body and the completion
+// note stop claiming the approving round's PASSED for a tree that no longer
+// matches it.
+func TestReviewCleanupFixupRedAndUndiscardable(t *testing.T) {
+	tests := []struct {
+		name         string
+		git          *fakeGit
+		wantResetRef []string
+	}{
+		{
+			// An empty Head read leaves the pass no commit to fall back to.
+			name: "the pre-cleanup commit was never recorded",
+			git: &fakeGit{
+				committed:        true,
+				lastCommitTarget: "abc123",
+				headSHAs:         []string{"snapshot-sha", ""},
+			},
+		},
+		{
+			name: "the reset failed",
+			git: &fakeGit{
+				committed:        true,
+				lastCommitTarget: "abc123",
+				headSHAs:         []string{"snapshot-sha", "pre-cleanup-sha"},
+				hardResetErr:     assertErr("detached worktree"),
+			},
+			wantResetRef: []string{"pre-cleanup-sha"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			client := &planLLM{responses: cleanupVerifyResponses()}
+			d := reviewTestDeps(t, ops, tt.git, client, reviewerRegistry())
+
+			tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+			o := newReviewRun(d, tc, 0)
+			o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
+
+			runs := 0
+			o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+				runs++
+				if runs == 1 {
+					return verifyexec.Outcome{ExitCode: 0, Output: "round gate"}
+				}
+
+				return verifyexec.Outcome{ExitCode: 1, Output: "FAIL: the cleanup broke the build"}
+			}
+
+			require.NoError(t, runReview(context.Background(), o))
+
+			assert.Equal(t, tt.wantResetRef, tt.git.hardResetRefs)
+			assert.Equal(t, verifyFailed, o.lastVerify.Status,
+				"a fixup that stayed on the branch must be reported on its own gate result")
+			assert.Contains(t, verifyStatusLine(o.lastVerify, o.resolvedVerifyPlan()), "FAILED",
+				"the trailer must not carry the approving round's PASSED over a tree it never measured")
+		})
+	}
+}
+
+// TestReviewCleanupNoCommitSkipsTheVerify proves the re-run is keyed on a
+// cleanup pass that actually COMMITTED: a pass that landed nothing leaves HEAD
+// where the round's own gate already measured it, and re-running the suite
+// there buys nothing.
+func TestReviewCleanupNoCommitSkipsTheVerify(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: false, headSHAs: []string{"snapshot-sha", "pre-cleanup-sha"}}
+	client := &planLLM{responses: cleanupVerifyResponses()}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+	o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
+
+	runs := 0
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		runs++
+
+		return verifyexec.Outcome{ExitCode: 0, Output: "round gate"}
+	}
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	assert.Equal(t, 1, runs, "a cleanup pass that committed nothing must not re-run the verify")
+	assert.Empty(t, git.hardResetRefs, "nothing landed, so there is nothing to discard; git=%v", git.recorded())
+}
+
 func TestReviewSkipsStartReviewWhenAlreadyInReview(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{}

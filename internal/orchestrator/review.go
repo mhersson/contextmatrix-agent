@@ -48,6 +48,13 @@ func verifyFailedFindings(plan verifyPlan, output string) string {
 	return verifyFailedPrefix + plan.Display + "\n\nVerify output (tail):\n\n" + verifyFailureExcerpt(output)
 }
 
+// cleanupDiscardPrefix opens the card-log line the post-approval cleanup pass
+// writes when its fixup is reset away. A constant because the discard is the
+// one event on that path with no other trace: the fixup is gone from the
+// branch, the summary reverts to open findings, and nothing else on the card
+// says a cleanup pass ran at all.
+const cleanupDiscardPrefix = "cleanup fix discarded: "
+
 // reviewRoundReserve is the least container time a verify run, a specialist
 // panel, and a fix round need to complete without being killed mid-work. A var
 // so tests can shrink it.
@@ -256,6 +263,19 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 					return nil
 				}
 
+				// The commit the cleanup pass starts from, read BEFORE it runs:
+				// a fixup its own verify cannot prove is reset back to here, and
+				// once the fixup exists this commit is no longer what HEAD reads.
+				// An unreadable HEAD is not fatal - the pass still runs, and the
+				// gate below reports the result it can no longer discard.
+				pre, herr := d.Git.Head(ctx)
+				if herr != nil {
+					slog.Warn("review: could not record the pre-cleanup head",
+						"card_id", cfg.CardID, "error", herr)
+
+					pre = ""
+				}
+
 				committed, ferr := o.runFix(ctx, fixRequest{Findings: findings, Round: round, FixTier: fixTier, NoEscalate: true})
 				if ferr != nil {
 					if isParkError(ferr) {
@@ -275,6 +295,10 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 					o.reviewSummary = approvedWithFixesApplied(findings)
 
 					d.logCard(ctx, "review: approved with %d surviving finding(s) - applied a non-escalating cleanup fix pass", len(fixes))
+
+					// The fixup landed AFTER this round's gate ran, so nothing
+					// has checked it: prove it or drop it.
+					o.verifyCleanupFixup(ctx, plan, pre, findings)
 				} else {
 					d.logCard(ctx, "review: approved with %d surviving finding(s), but the cleanup fix pass produced no change", len(fixes))
 				}
@@ -483,6 +507,84 @@ func approvedWithOpenFindings(findings string) string {
 // than open.
 func approvedWithFixesApplied(findings string) string {
 	return "The review approved the change. These findings survived the critique round and were applied in a follow-up cleanup pass:\n\n" + findings
+}
+
+// cleanupVerifyContext names the gate for logVerifyGate: the run's third gate
+// position, after the review round's and the pre-commit one's.
+const cleanupVerifyContext = "cleanup fix pass, after the fixup"
+
+// verifyCleanupFixup re-runs the resolved verify plan over a committed cleanup
+// fixup and either keeps it or resets it away. The fixup lands after the
+// approving round's gate has already run, so without this the run would carry
+// that round's PASSED into the PR body and the completion note while describing
+// a tree the cleanup could have broken.
+//
+// pre is the commit the pass started from. A red gate resets the branch to it
+// and reverts the summary to open findings: the cleanup pass is optional by
+// construction, so dropping it restores a tree the approving round already
+// verified - which is why a failure here needs no fix round, no retry and no
+// park. A gate that could not report at all sits in the same position (the
+// fixup is unproven) and takes the same exit. The pushed fixup outlives the
+// reset on the remote until integrate's lease push overwrites the branch from
+// here, which is the same overwrite every rebased run performs.
+//
+// Every other outcome updates the run-level result, because it describes the
+// tree that will ship: a pass proves the fixup, and an inconclusive run (a
+// timeout, a missing tool) proves nothing about it - both are facts about the
+// fixup rather than about the tree the approving round measured. So is a red
+// gate whose discard could not be performed, which is the one path that reports
+// a failure it could not undo.
+func (o *run) verifyCleanupFixup(ctx context.Context, plan verifyPlan, pre, findings string) {
+	if len(plan.Argv) == 0 {
+		return
+	}
+
+	vres, err := o.runVerifyPlan(ctx, o.d.Cfg.Workspace, plan)
+	if err != nil {
+		if o.discardCleanupFixup(ctx, pre, findings, "verify could not run - "+err.Error()) {
+			return
+		}
+
+		// Kept but unproven: the note is the only evidence left of why, and it
+		// reaches the PR body through the NOT VERIFIED trailer.
+		o.lastVerify = verifyResult{Status: verifySkipped, Note: "the cleanup fix pass could not be verified: " + err.Error()}
+
+		return
+	}
+
+	o.logVerifyGate(ctx, vres, cleanupVerifyContext)
+
+	if vres.Status == verifyFailed && o.discardCleanupFixup(ctx, pre, findings, "verify failed") {
+		return
+	}
+
+	o.lastVerify = vres
+}
+
+// discardCleanupFixup resets the branch to pre - the commit the cleanup pass
+// started from - and reverts the review summary to open findings, so no
+// surface narrates fixes the branch no longer carries. It reports whether the
+// fixup is actually gone: an unrecorded pre-cleanup commit or a failed reset
+// leaves it in place, and the caller then has to report the gate result it
+// would otherwise have discarded.
+func (o *run) discardCleanupFixup(ctx context.Context, pre, findings, reason string) bool {
+	if pre == "" {
+		o.d.logCard(ctx, "review: the cleanup fix pass could not be discarded (%s) - the pre-cleanup commit was never recorded", reason)
+
+		return false
+	}
+
+	if err := o.d.Git.HardReset(ctx, pre); err != nil {
+		o.d.logCard(ctx, "review: the cleanup fix pass could not be discarded (%s): %s", reason, err)
+
+		return false
+	}
+
+	o.reviewSummary = approvedWithOpenFindings(findings)
+
+	o.d.logCard(ctx, "review: %s%s - the branch is back at %s", cleanupDiscardPrefix, reason, pre)
+
+	return true
 }
 
 // mergeFeedback folds the human's adjust feedback into the synthesized findings

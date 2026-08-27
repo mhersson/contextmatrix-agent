@@ -831,7 +831,8 @@ func (g *Git) DeleteBranch(ctx context.Context, name string) error {
 }
 
 // HardReset moves the checked-out branch to ref, discarding the work tree.
-// Used once, to adopt the Best-of-N winner onto the card branch.
+// Used to adopt the Best-of-N winner onto the card branch, to drop a resumed
+// run's diverged local tip, and to discard work a verify gate refused.
 func (g *Git) HardReset(ctx context.Context, ref string) error {
 	_, err := g.run(ctx, "reset", "--hard", ref)
 
