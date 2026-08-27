@@ -475,6 +475,9 @@ type fakeGit struct {
 	// before a commit from the same head read after it. Empty falls back to
 	// headSHA, the single-value form every other test uses.
 	headSHAs []string
+	// headErr fails the read, for callers that must degrade rather than treat an
+	// unknown head as a known one.
+	headErr error
 
 	// Worktree/branch lifecycle scripting (Best-of-N candidate fan-out):
 	// worktreeErr fails AddWorktree and RemoveWorktree; deleteBranchErr fails
@@ -597,6 +600,10 @@ func (g *fakeGit) Head(_ context.Context) (string, error) {
 
 	g.mu.Lock()
 	defer g.mu.Unlock()
+
+	if g.headErr != nil {
+		return "", g.headErr
+	}
 
 	if len(g.headSHAs) == 0 {
 		return g.headSHA, nil

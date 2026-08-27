@@ -428,29 +428,73 @@ func TestVerifyToolErroringFingerprintAlwaysReruns(t *testing.T) {
 	})
 }
 
-// worktreeDirty's contract, directly: an unchanged readable fingerprint moves
-// exactly once (first call true, second false) and hands back the fingerprint it
-// read, while any failed read reports written with no fingerprint at all, on
-// every call, whatever the recorded baseline says.
+// A commit moves the tree even though nothing was written to it: the fingerprint
+// half of the identity covers uncommitted state only, and the coder holds a bash
+// tool no prompt line stops from committing. The already-passed shortcut must
+// not fire across one - the command has not run against the tree the coder is
+// looking at now.
+func TestVerifyToolReRunsAfterACommit(t *testing.T) {
+	t.Parallel()
+
+	ws := t.TempDir()
+	counter := filepath.Join(ws, "runs.txt")
+
+	// Identical uncommitted state throughout. Only HEAD moves, and only on the
+	// third read: the first call's entry and post-run reads, then the second
+	// call's entry read.
+	g := &fakeGit{worktreeStates: []string{"a"}, headSHAs: []string{"A", "A", "B"}}
+
+	vt := NewVerifyTool(countingPlan(counter), ws, worktreeDirty(g), directVerifyExec(), nil)
+	require.NotNil(t, vt)
+
+	_, err := vt.Execute(context.Background(), nil)
+	require.NoError(t, err)
+
+	res, err := vt.Execute(context.Background(), nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, 2, countLines(t, counter), "a commit between two calls must cost a re-run")
+	assert.NotContains(t, res.Text, "already passed",
+		"the second call ran the command, so it must not report a cached pass")
+}
+
+// worktreeDirty's contract, directly: an unchanged identity moves exactly once
+// (first call true, second false) and hands back the identity it read - both
+// halves of it - while a commit moves it and any failed read, of either half,
+// reports moved with no identity at all, on every call, whatever the recorded
+// baseline says.
 func TestWorktreeDirtyDegradesToWrittenOnError(t *testing.T) {
 	t.Parallel()
 
-	t.Run("unchanged readable fingerprint", func(t *testing.T) {
+	t.Run("unchanged readable identity", func(t *testing.T) {
 		t.Parallel()
 
-		g := &fakeGit{worktreeStates: []string{"a", "a"}}
+		g := &fakeGit{worktreeStates: []string{"a", "a"}, headSHAs: []string{"A"}}
 		probe := worktreeDirty(g)
 
-		moved, state := probe()
+		moved, id := probe()
 		assert.True(t, moved, "the first call has no baseline, so it counts as a write")
-		assert.Equal(t, "a", state, "the fingerprint it measured travels with the verdict")
+		assert.Equal(t, "A:a", id, "the identity it measured - commit and uncommitted state - travels with the verdict")
 
-		moved, state = probe()
-		assert.False(t, moved, "an unchanged fingerprint between calls means nothing was written")
-		assert.Equal(t, "a", state)
+		moved, id = probe()
+		assert.False(t, moved, "an unchanged identity between calls means nothing moved")
+		assert.Equal(t, "A:a", id)
 	})
 
-	t.Run("unreadable fingerprint", func(t *testing.T) {
+	t.Run("commit between reads", func(t *testing.T) {
+		t.Parallel()
+
+		g := &fakeGit{worktreeStates: []string{"a"}, headSHAs: []string{"A", "B"}}
+		probe := worktreeDirty(g)
+
+		_, before := probe()
+
+		moved, after := probe()
+		assert.True(t, moved, "a commit moves the tree even with identical uncommitted state")
+		assert.NotEqual(t, before, after, "the identity must distinguish the two trees")
+	})
+
+	t.Run("unreadable identity", func(t *testing.T) {
 		t.Parallel()
 
 		g := &fakeGit{worktreeStates: []string{"a"}}
@@ -464,12 +508,19 @@ func TestWorktreeDirtyDegradesToWrittenOnError(t *testing.T) {
 
 		g.worktreeStateErr = errors.New("read budget blown")
 
-		moved, state := probe()
+		moved, id := probe()
 		assert.True(t, moved, "a failed read must be treated as written, never clean")
-		assert.Empty(t, state, "an unreadable fingerprint is evidence of nothing, so none is reported")
+		assert.Empty(t, id, "an unreadable identity is evidence of nothing, so none is reported")
 
 		moved, _ = probe()
 		assert.True(t, moved, "every call on the error path stays written, baseline or not")
+
+		g.worktreeStateErr = nil
+		g.headErr = errors.New("rev-parse exploded")
+
+		moved, id = probe()
+		assert.True(t, moved, "an unreadable head degrades exactly like an unreadable fingerprint")
+		assert.Empty(t, id)
 	})
 }
 

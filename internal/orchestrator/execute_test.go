@@ -2827,21 +2827,27 @@ func TestPreCommitVerifySkippedForCandidateSolver(t *testing.T) {
 // The gate must not pay for a second full suite run when the coder's verify
 // tool already ran the identical command against the identical tree. It accepts
 // the tool's recorded pass only under all three conditions - the tool's last run
-// passed, the gate's own fingerprint read succeeds, and it equals the
-// fingerprint recorded at that pass - and runs the command itself on every other
-// case. The counter is the whole point: it counts every execution of the
+// passed, the gate's own read of the worktree identity succeeds, and it equals
+// the identity recorded at that pass - and runs the command itself on every
+// other case. The counter is the whole point: it counts every execution of the
 // command, tool call and gate alike.
 func TestPreCommitGateReusesOnlyAFingerprintVerifiedToolPass(t *testing.T) {
 	cases := []struct {
 		name string
-		// states scripts the worktree fingerprint the tool and the gate read, in
-		// call order; the last one repeats.
+		// states scripts the uncommitted-state fingerprint each identity read
+		// sees, in call order; the last one repeats. heads does the same for
+		// HEAD, the other half of the identity.
 		states []string
+		heads  []string
 		// exits scripts the exit code of each execution of the command, in order.
-		exits            []int
-		callTool         bool
-		breakFingerprint bool
-		wantRuns         int
+		exits    []int
+		callTool bool
+		// breakAt names the read that fails: "gate" fails the gate's own read,
+		// "record" fails the read the tool records its pass against (cleared
+		// again before the gate, so the case isolates the recorded half),
+		// "gate-head" fails the gate's HEAD read rather than its state read.
+		breakAt  string
+		wantRuns int
 	}{
 		{
 			name:     "tool passed and nothing was written since",
@@ -2860,12 +2866,43 @@ func TestPreCommitGateReusesOnlyAFingerprintVerifiedToolPass(t *testing.T) {
 			wantRuns: 2,
 		},
 		{
-			name:             "the gate cannot read the fingerprint",
-			states:           []string{"a"},
-			exits:            []int{0, 0},
-			callTool:         true,
-			breakFingerprint: true,
-			wantRuns:         2,
+			// The uncommitted state is identical throughout - a clean tree
+			// before the commit and the clean tree it leaves behind. Only HEAD
+			// moved, and only the gate's read sees it: the coder committed its
+			// work with the bash tool it holds, which no prompt line prevents.
+			name:     "the coder committed between the tool and the gate",
+			states:   []string{"a"},
+			heads:    []string{"A", "A", "B"},
+			exits:    []int{0, 0},
+			callTool: true,
+			wantRuns: 2,
+		},
+		{
+			name:     "the gate cannot read the fingerprint",
+			states:   []string{"a"},
+			exits:    []int{0, 0},
+			callTool: true,
+			breakAt:  "gate",
+			wantRuns: 2,
+		},
+		{
+			name:     "the gate cannot read HEAD",
+			states:   []string{"a"},
+			exits:    []int{0, 0},
+			callTool: true,
+			breakAt:  "gate-head",
+			wantRuns: 2,
+		},
+		{
+			// The tool ran and passed, but the read it would have recorded the
+			// pass against failed: it holds no identity, so there is nothing for
+			// the gate to match even though the gate's own read succeeds.
+			name:     "the tool could not record what it measured",
+			states:   []string{"a"},
+			exits:    []int{0, 0},
+			callTool: true,
+			breakAt:  "record",
+			wantRuns: 2,
 		},
 		{
 			name:     "the tool never ran",
@@ -2884,7 +2921,7 @@ func TestPreCommitGateReusesOnlyAFingerprintVerifiedToolPass(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			git := &fakeGit{worktreeStates: tc.states}
+			git := &fakeGit{worktreeStates: tc.states, headSHAs: tc.heads}
 			d := execTestDeps(&fakeOps{}, git, &planLLM{})
 			d.Cfg.Workspace = t.TempDir()
 			d.WriteToolsForDir = func(_ string, verify tools.Tool) *tools.Registry {
@@ -2906,6 +2943,10 @@ func TestPreCommitGateReusesOnlyAFingerprintVerifiedToolPass(t *testing.T) {
 
 			o.bindVerifyTool(o.solver, o.resolvedVerifyPlan())
 
+			if tc.breakAt == "record" {
+				git.worktreeStateErr = errors.New("git status exploded")
+			}
+
 			if tc.callTool {
 				vt, ok := o.solver.tools.Get("verify")
 				require.True(t, ok, "the coder must have been offered the verify tool")
@@ -2914,8 +2955,13 @@ func TestPreCommitGateReusesOnlyAFingerprintVerifiedToolPass(t *testing.T) {
 				require.NoError(t, err)
 			}
 
-			if tc.breakFingerprint {
+			switch tc.breakAt {
+			case "record":
+				git.worktreeStateErr = nil
+			case "gate":
 				git.worktreeStateErr = errors.New("git status exploded")
+			case "gate-head":
+				git.headErr = errors.New("git rev-parse exploded")
 			}
 
 			exhausted := false
@@ -2929,11 +2975,10 @@ func TestPreCommitGateReusesOnlyAFingerprintVerifiedToolPass(t *testing.T) {
 	}
 }
 
-// A verdict belongs to the subtask that earned it. The fingerprint behind it
-// covers uncommitted state only, so a clean tree before a commit and the clean
-// tree that commit leaves behind fingerprint identically - matching them across
-// a subtask boundary would certify a tree nothing ever ran against. Both gates
-// here see the fingerprint the seeded pass carries, and both must still run.
+// A verdict belongs to the subtask that earned it, and the gate is never even
+// offered one from a subtask that is over. HEAD deliberately does not move here,
+// so the seeded identity is one both gates WOULD match: this pins the reset
+// itself rather than the head qualification that also covers it.
 func TestPreCommitGateNeverReusesAToolPassFromAnEarlierSubtask(t *testing.T) {
 	git := &fakeGit{committed: true, worktreeStates: []string{"a"}}
 	client := &planLLM{responses: []llm.Response{
@@ -2956,8 +3001,9 @@ func TestPreCommitGateNeverReusesAToolPassFromAnEarlierSubtask(t *testing.T) {
 	}
 
 	// The coder's verify tool passed against the tree an earlier subtask
-	// committed - the same fingerprint both gates below will read.
-	o.solver.toolVerify = verifyToolPass{passed: true, fingerprint: "a"}
+	// committed - the exact identity both gates below will read (the fake's
+	// default empty HEAD, then the scripted state).
+	o.solver.toolVerify = verifyToolPass{passed: true, identity: ":a"}
 
 	require.NoError(t, runExecute(context.Background(), o))
 

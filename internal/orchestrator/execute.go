@@ -38,11 +38,11 @@ type solverCtx struct {
 	capped     bool         // the final subtask hit the turn cap; its work was salvage-committed for judge verification
 	gate       gateEvidence // what the pre-commit and checkpoint gates learned about this subtask's coder work and its revise
 	// toolVerify is the verdict of the coder verify tool's last actual run and
-	// the fingerprint it was measured against, republished by the tool on every
-	// run. Zero until the coder calls the tool, and for a candidate solver,
-	// which binds no recorder. Written by the tool during the coder harness run
-	// and read by the pre-commit gate after it returns, on the goroutine that
-	// drives the subtask.
+	// the worktree identity it was measured against, republished by the tool on
+	// every run. Zero until the coder calls the tool, and for a candidate
+	// solver, which binds no recorder. Written by the tool during the coder
+	// harness run and read by the pre-commit gate after it returns, on the
+	// goroutine that drives the subtask.
 	toolVerify verifyToolPass
 }
 
@@ -396,14 +396,17 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 //
 //   - the tool's last actual run PASSED (a failure, an inconclusive run, or a
 //     tool the coder never called leaves the pair zero);
-//   - the fingerprint recorded at that pass is readable, and so is the one this
+//   - the identity recorded at that pass is readable, and so is the one this
 //     reads now (either unreadable is evidence of nothing);
 //   - the two are equal - the tree about to be committed is the tree the command
-//     passed against, byte for byte, by the repository's own ignore rules.
+//     passed against: the same commit, and the same uncommitted work on top of
+//     it by the repository's own ignore rules. Both halves, because the coder
+//     holds a bash tool and a commit it made would otherwise leave the two trees
+//     indistinguishable - see worktreeIdentity.
 //
 // Every other direction runs the gate, which is what makes this safe to skip:
-// the fingerprint's error paths all degrade to "assume written", so a gate that
-// cannot prove the trees are identical behaves exactly as it did before.
+// every read error degrades to "assume moved", so a gate that cannot prove the
+// trees are identical behaves exactly as it did before.
 //
 // What the gate gives up is a re-run of the same command over the same bytes.
 // The tool ran it through runVerifyCommand, the same executor runVerifyPlan
@@ -411,22 +414,22 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 // environment, one workspace. What it does not give up is the fix pass: a tool
 // verdict that is anything but a pass never reaches here.
 func (o *run) gateAcceptsToolPass(ctx context.Context, sc *solverCtx) bool {
-	if !sc.toolVerify.passed || sc.toolVerify.fingerprint == "" {
+	if !sc.toolVerify.passed || sc.toolVerify.identity == "" {
 		return false
 	}
 
-	fctx, cancel := context.WithTimeout(ctx, worktreeStateTimeout)
+	ictx, cancel := context.WithTimeout(ctx, worktreeStateTimeout)
 	defer cancel()
 
-	state, err := sc.git.WorktreeState(fctx)
+	id, err := worktreeIdentity(ictx, sc.git)
 	if err != nil {
-		slog.Warn("verify gate: worktree fingerprint unreadable; running the command",
+		slog.Warn("verify gate: worktree identity unreadable; running the command",
 			"card_id", o.d.Cfg.CardID, "error", err)
 
 		return false
 	}
 
-	return state == sc.toolVerify.fingerprint
+	return id == sc.toolVerify.identity
 }
 
 func subtaskGateContext(subID string) string {
@@ -444,12 +447,11 @@ func subtaskGateContext(subID string) string {
 func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtaskRef) error {
 	d := o.d
 
-	// A tool verdict belongs to the subtask that earned it. The fingerprint
-	// behind it covers uncommitted state only, so the clean tree an earlier
-	// subtask left behind when it committed fingerprints identically to the
-	// clean tree before that commit - matching fingerprints across a commit are
-	// not the same tree. Nothing commits between here and this subtask's gate,
-	// so inside one subtask the pair means what it says.
+	// A tool verdict belongs to the subtask that earned it. Belt and braces on
+	// top of the identity itself: the recorded identity is qualified by HEAD, so
+	// an earlier subtask's verdict can no longer match once that subtask
+	// committed, and clearing it here means the gate is never even offered a
+	// verdict from a subtask that is over.
 	sc.toolVerify = verifyToolPass{}
 
 	// Snapshot the ledger before this subtask's own spend, so every solo

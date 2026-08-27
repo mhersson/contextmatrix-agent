@@ -247,7 +247,10 @@ func (g *Git) isDirty(ctx context.Context) (bool, error) {
 // WorktreeState is an opaque fingerprint of everything uncommitted in the
 // worktree: the porcelain status, the diff of every tracked change, and the
 // content of every untracked file the status names. Equal fingerprints mean
-// nothing was written in between.
+// nothing was written in between AT THE SAME COMMIT - a commit empties all
+// three inputs, so the clean tree it leaves behind fingerprints exactly like the
+// clean tree before it. A caller that needs "the same tree" rather than "nothing
+// written since" pairs this with Head.
 //
 // It reads the tree through git rather than by walking it so the repository's
 // own ignore rules apply: a build artifact tree a check command produced is
