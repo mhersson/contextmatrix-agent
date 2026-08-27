@@ -71,12 +71,14 @@ type gateEvidence struct {
 
 	// stillRed: the gate burned its one fix pass and the re-run STILL came
 	// back FAILED - the only preCommitVerify exit a solo outcome row reports
-	// from. Assigned only on that arm, so every earlier error exit (a resolve
-	// failure, the skip tier, the first gate failure, the budget check, the
-	// fix-model failure, a verification re-run error) leaves it zero and
-	// reports nothing: the budget park in particular never earned the claim
-	// that a fix pass could not rescue the work, and the exits around the
-	// verification reruns say nothing about the coder.
+	// from. Assigned only on that arm, so all five of the earlier error exits
+	// (a resolve failure, either verify run failing to produce a verdict at
+	// all, the budget check before the fix pass, and the fix model itself
+	// failing) leave it zero and report nothing: the budget park in particular
+	// never earned the claim that a fix pass could not rescue the work, and a
+	// verify that never ran says nothing about the coder either way. The exits
+	// that return nil - a candidate solver, the skip tier, and either gate
+	// coming back anything but FAILED - leave it zero for the same reason.
 	stillRed bool
 
 	// environmentalFailure: whether the still-red arm's FINAL failing verify

@@ -3230,3 +3230,42 @@ func TestStillRedGateOnAResolutionErrorReportsNothing(t *testing.T) {
 		"the command never produced a code verdict - there is nothing for selection to learn")
 	assert.Equal(t, 0, verifyFixPasses(client))
 }
+
+// TestStillRedGateOnAnExhaustedWindowStillReports pins the other half of the
+// settled decision: a coder that spent its whole turn window and STILL left the
+// gate red is reported, not excused. Volume has never been an exemption in this
+// taxonomy - salvageSoloCapped reports failed on both its cap arms - and the
+// exhaustion flag's job is choosing which sizing axes applyPrecommitVerifyEvidence
+// raises, not whether the leaderboard hears about it.
+//
+// Without this, an exemption keyed on the spent window would restore the exact
+// silence this reporting exists to end, and nothing else in the suite objects.
+func TestStillRedGateOnAnExhaustedWindowStillReports(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	// 9 burns then the terminal call: the coder lands finish on its last turn,
+	// so the window is fully spent on a run the harness reports as complete.
+	client := &planLLM{responses: append(burnResps(9),
+		finishResp("feat: subtask done", 0.01),
+		stopResp("coder: attempted the fix", 0.02),
+	)}
+	d := execTestDeps(ops, git, client)
+	d.Cfg.MaxTurns = 10
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
+
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 1, Output: "--- FAIL: TestThing"}
+	}
+
+	require.Error(t, runExecute(context.Background(), o))
+
+	_, got := readMeta(ops.bodyFor("SUB-1"))
+	require.Equal(t, 1, got.Budget, "the fixture must actually exhaust the window, or this pins nothing")
+
+	require.Len(t, ops.reportOutcomes, 1, "a spent window does not excuse work that stayed red")
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 1)
+	assert.Equal(t, "failed", rows[0].Result)
+	assert.False(t, rows[0].VerifyPass)
+}
