@@ -1586,15 +1586,17 @@ func TestResizeAtTheCeilingEmitsNothing(t *testing.T) {
 	assert.NotContains(t, transcript.String(), sizingEscalationKind)
 }
 
-// TestRaiseSubtaskBudgetInRunNeverPersistsOrEmits pins the persist/no-persist
+// TestLogEnvironmentalCapBudgetNeverPersistsOrEmits pins the no-raise
 // mechanism directly, independent of the salvage flow that drives it: an
-// in-run-only raise still logs the widen - so an operator can see why this
-// attempt's cap landed where it did - but never writes the card body and
-// never emits a sizing_escalation event. The event's own contract is "the
-// corrected bar is read by the NEXT run" (see sizingEscalationKind); that is
-// false for a raise that never reaches the marker, so emitting one here would
-// claim a correction that never landed.
-func TestRaiseSubtaskBudgetInRunNeverPersistsOrEmits(t *testing.T) {
+// environmental cap incident logs the CURRENT (unchanged) budget - not a
+// target it was raised to, because nothing raises it - never writes the card
+// body, and never emits a sizing_escalation event. There is no in-run
+// consumer for a raised figure (salvageSoloCapped runs after the attempt
+// that hit the cap has already ended, and the solo path has no in-process
+// retry), so a raise here would be a log-line fiction; the event's own
+// contract is "the corrected bar is read by the NEXT run" (see
+// sizingEscalationKind), which nothing would ever satisfy.
+func TestLogEnvironmentalCapBudgetNeverPersistsOrEmits(t *testing.T) {
 	var transcript bytes.Buffer
 
 	seed := cmclient.TaskContext{Description: writeMeta("Do it.", metaKV{"bar": "moderate", "budget": "0", "seed": "moderate"})}
@@ -1604,21 +1606,20 @@ func TestRaiseSubtaskBudgetInRunNeverPersistsOrEmits(t *testing.T) {
 	d.Emit = events.NewEmitter(nil, &transcript)
 
 	o := newExecRun(d, nil, 0)
-	o.raiseSubtaskBudgetInRun(context.Background(),
-		subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("moderate")},
-		"the turn cap was reached; the verify outcome was environmental")
+	o.logEnvironmentalCapBudget(context.Background(), subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("moderate")})
 
-	assert.Zero(t, countCalls(ops.recorded(), "UpdateCardBody:SUB-1"), "no board write for an in-run-only raise")
+	assert.Zero(t, countCalls(ops.recorded(), "UpdateCardBody:SUB-1"), "no board write - nothing is raised")
 
 	kv, got := readMeta(seed.Description)
 	assert.Equal(t, 0, got.Budget, "the card marker is untouched")
 	assert.Equal(t, registry.TierModerate, got.Bar)
 	assert.Equal(t, "moderate", kv["seed"])
 
-	assert.True(t, ops.loggedContains("turn budget base -> 1.5x base"), "logs=%v", ops.logs)
-	assert.True(t, ops.loggedContains("this attempt only"), "logs=%v", ops.logs)
+	assert.True(t, ops.loggedContains("the card's turn budget stays at base"),
+		"names the current, unchanged value; logs=%v", ops.logs)
+	assert.False(t, ops.loggedContains("->"), "no target figure - nothing was raised; logs=%v", ops.logs)
 	assert.NotContains(t, transcript.String(), sizingEscalationKind,
-		"an unpersisted raise has no next run to pair it with, so it emits nothing")
+		"no correction happened, so nothing is emitted")
 }
 
 // TestSalvageDeclineAfterVerifyPassKeepsTierAndReportsNoOutcome proves the
@@ -1971,11 +1972,12 @@ func TestSoloTurnCapSalvageReportsWinOutcome(t *testing.T) {
 // resource-exhaustion signature on both attempts: under a pids limit `go test`
 // compiles, then its inner fork/exec dies with EAGAIN and go exits 1 -
 // classified failed, surviving the single retry - yet that is container
-// pressure, not evidence about the model OR about the card: the cap widens
-// this attempt's turn budget but the marker is left untouched, so a pids-limit
-// incident cannot buy the card a permanently wider window. The bar never moves
-// and the leaderboard row is withheld either way.
-func TestSalvageDeclineExhaustedVerifyRaisesBudgetOnly(t *testing.T) {
+// pressure, not evidence about the model OR about the card: nothing raises
+// the turn budget and the marker is left untouched, so a pids-limit incident
+// cannot buy the card a permanently (or even temporarily) wider window - there
+// is no in-process retry to spend a wider figure on anyway. The bar never
+// moves and the leaderboard row is withheld either way.
+func TestSalvageDeclineExhaustedVerifyLeavesBudgetUnchanged(t *testing.T) {
 	withFastVerifyRetryWait(t)
 
 	ops := &fakeOps{}
@@ -2002,7 +2004,7 @@ func TestSalvageDeclineExhaustedVerifyRaisesBudgetOnly(t *testing.T) {
 	assert.Empty(t, ops.reportOutcomes,
 		"a verify killed by container pressure is an environment problem, not evidence about the model")
 	assert.Zero(t, countCalls(ops.recorded(), "UpdateCardBody:SUB-1"),
-		"an environmental incident buys this attempt room, not the card's future - no board write at all")
+		"an environmental incident is logged, never raised - no board write at all")
 	_, got := readMeta(ops.taskContext.Description)
 	assert.Equal(t, registry.TierModerate, got.Bar,
 		"a pids limit or a missing tool is not evidence about the model")
@@ -2012,21 +2014,21 @@ func TestSalvageDeclineExhaustedVerifyRaisesBudgetOnly(t *testing.T) {
 		"the card body itself is untouched")
 	assert.True(t, ops.loggedContains("resource exhaustion"),
 		"the card log names the environmental cause the reporting exemption acted on; logs=%v", ops.logs)
-	assert.True(t, ops.loggedContains("this attempt only"),
-		"the widen is still logged, scoped to this run; logs=%v", ops.logs)
+	assert.True(t, ops.loggedContains("the card's turn budget stays at base"),
+		"names the current, unchanged value - no raise; logs=%v", ops.logs)
+	assert.False(t, ops.loggedContains("->"), "no target figure - nothing was raised; logs=%v", ops.logs)
 }
 
-// TestSalvageDeclineSkippedVerifyRaisesBudgetOnly proves a skip-classified
+// TestSalvageDeclineSkippedVerifyLeavesBudgetUnchanged proves a skip-classified
 // authoritative verify (here, a timeout - environmental, not a code defect)
-// gets the same exemption as the *ToolchainMissingError branch: the cap
-// widens this attempt's turn budget so the coder is not starved on retry, but
-// that widen never reaches the card marker - a timeout is not evidence the
-// card itself should carry forward a bigger budget - and the bar holds and no
-// ReportModelOutcomes call fires, because a skipped verify is not evidence
-// about the model. Its sibling,
+// gets the same exemption as the *ToolchainMissingError branch: nothing
+// raises the turn budget and nothing reaches the card marker - a timeout is
+// not evidence the card itself should carry forward a bigger budget - and the
+// bar holds and no ReportModelOutcomes call fires, because a skipped verify is
+// not evidence about the model. Its sibling,
 // TestSalvageDeclineOnVerifyFailureRaisesBothInOneWrite, proves a genuine
 // (ran-and-failed) verify moves both axes and persists them as before.
-func TestSalvageDeclineSkippedVerifyRaisesBudgetOnly(t *testing.T) {
+func TestSalvageDeclineSkippedVerifyLeavesBudgetUnchanged(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true}
 	client := &planLLM{responses: burnResps(5)}
@@ -2047,7 +2049,7 @@ func TestSalvageDeclineSkippedVerifyRaisesBudgetOnly(t *testing.T) {
 
 	assert.Empty(t, ops.reportOutcomes, "a skipped verify is an environment problem, not evidence about the model")
 	assert.Zero(t, countCalls(ops.recorded(), "UpdateCardBody:SUB-1"),
-		"an environmental incident buys this attempt room, not the card's future - no board write at all")
+		"an environmental incident is logged, never raised - no board write at all")
 	_, got := readMeta(ops.taskContext.Description)
 	assert.Equal(t, registry.TierModerate, got.Bar,
 		"a pids limit or a missing tool is not evidence about the model")
@@ -2057,8 +2059,9 @@ func TestSalvageDeclineSkippedVerifyRaisesBudgetOnly(t *testing.T) {
 		"the card body itself is untouched")
 	assert.True(t, ops.loggedContains("verify timed out"),
 		"the park is still activity-logged; logs=%v", ops.logs)
-	assert.True(t, ops.loggedContains("this attempt only"),
-		"the widen is still logged, scoped to this run; logs=%v", ops.logs)
+	assert.True(t, ops.loggedContains("the card's turn budget stays at base"),
+		"names the current, unchanged value - no raise; logs=%v", ops.logs)
+	assert.False(t, ops.loggedContains("->"), "no target figure - nothing was raised; logs=%v", ops.logs)
 }
 
 // TestSoloOutcomeKeyedOnSelectedSlug proves the outcome row is keyed on the

@@ -1080,7 +1080,7 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 		if modelEvidence {
 			o.raiseSubtaskBoth(ctx, sub, "the turn cap was reached and the verify then failed")
 		} else {
-			o.raiseSubtaskBudgetInRun(ctx, sub, "the turn cap was reached; the verify outcome was environmental")
+			o.logEnvironmentalCapBudget(ctx, sub)
 		}
 
 		// The same exemption the ToolchainMissingError branch above gets,
@@ -1244,18 +1244,6 @@ func (o *run) resizeSubtask(ctx context.Context, sub subtaskRef, why string, axi
 		return
 	}
 
-	if axis.inRunOnly {
-		// An environment-caused raise is scoped to this attempt's card log only:
-		// there is no board write, so the NEXT run's marker read sees exactly
-		// what it saw before. emitSizingEscalation is skipped for the same
-		// reason - its own contract (see sizingEscalationKind) is that the
-		// corrected value is read by the next run, which is false here.
-		o.d.logCard(ctx, "subtask %s: %s - %s for this attempt only; the card is not updated",
-			sub.ID, why, resizeSummary(from, to))
-
-		return
-	}
-
 	if uerr := o.d.Ops.UpdateCardBody(ctx, sub.ID, writeMeta(tc.Description, setSizing(kv, to))); uerr != nil {
 		slog.Warn("resize subtask: body update failed",
 			"card_id", o.d.Cfg.CardID, "subtask_id", sub.ID, "error", uerr)
@@ -1290,12 +1278,6 @@ type resizeAxis struct {
 	name   string
 	advice string
 	raise  func(sizing) sizing
-
-	// inRunOnly widens the axis for this attempt's card log alone, never the
-	// card marker. Zero value (false) is the persisting behaviour every
-	// trigger had before this field existed, so only the one literal that opts
-	// in needs to say so.
-	inRunOnly bool
 }
 
 // resizeSummary names exactly the axes that moved, in the words the card log
@@ -1367,21 +1349,30 @@ func (o *run) raiseSubtaskBudget(ctx context.Context, sub subtaskRef, why string
 	})
 }
 
-// raiseSubtaskBudgetInRun widens the turn budget for THIS attempt only: a
-// resource-exhausted or skipped verify after a cap says the environment
-// interfered, not that the work needed more room, so the card marker must not
-// carry it forward - a pids-limit incident cannot buy the card a permanently
-// wider window. The cap itself is still real (the run WAS capped), so this
-// widens exactly like raiseSubtaskBudget's transform; only the persistence
-// differs. Every other budget raise - the cap alone, an unresolvable verify, a
-// verify that genuinely ran and failed - is unaffected and keeps persisting.
-func (o *run) raiseSubtaskBudgetInRun(ctx context.Context, sub subtaskRef, why string) {
-	o.resizeSubtask(ctx, sub, why, resizeAxis{
-		name:      "turn budget",
-		advice:    "Split the subtask or raise the configured turn cap.",
-		raise:     sizing.raiseBudget,
-		inRunOnly: true,
-	})
+// logEnvironmentalCapBudget records, card-log only, that a turn cap whose
+// verify outcome was environmental (resource-exhausted or skipped) left the
+// turn budget exactly where it was. Unlike raiseSubtaskBudget this makes no
+// board write and computes no raised value: salvageSoloCapped runs after the
+// attempt that hit the cap has already ended - the solo path has no
+// in-process retry - so nothing in this run or any future one would ever read
+// an in-run-only figure. Naming a target the budget "widened to" would be a
+// card-log claim with nothing behind it; naming the UNCHANGED value is the
+// honest line. It reads the LIVE marker, matching resizeSubtask's own
+// rationale, so a resumed run's possibly-empty in-memory sizing does not
+// misname the figure.
+func (o *run) logEnvironmentalCapBudget(ctx context.Context, sub subtaskRef) {
+	tc, err := o.d.Ops.GetTaskContext(ctx, sub.ID, false)
+	if err != nil {
+		slog.Warn("environmental cap budget: body fetch failed; skipping the log line",
+			"card_id", o.d.Cfg.CardID, "subtask_id", sub.ID, "error", err)
+
+		return
+	}
+
+	_, s := readMeta(tc.Description)
+
+	o.d.logCard(ctx, "subtask %s: the turn cap was environmental this attempt; the card's turn budget stays at %s",
+		sub.ID, budgetLabel(s.Budget))
 }
 
 // raiseSubtaskBar records quality evidence: what the model produced was wrong.
