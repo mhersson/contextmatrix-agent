@@ -362,7 +362,7 @@ func onContainerExit(
 		// the status callback so a re-trigger does not inherit stale keys.
 		registry.RemoveSessionKey(project + "/" + cardID)
 
-		status, message := exitStatus(exitCode)
+		status, message := exitStatus(exitCode, cause)
 
 		ctx, cancel := context.WithTimeout(context.Background(), onExitTimeout)
 		defer cancel()
@@ -439,10 +439,27 @@ func runEndEvent(exitCode int64, cause executor.ExitCause, ordinal int) map[stri
 	return ev
 }
 
-// exitStatus maps a container exit code to a ContextMatrix worker-status and a
-// human-readable message. Exit 0 is "completed"; anything else is "failed",
-// with the code carried in the message for the operator.
-func exitStatus(exitCode int64) (status, message string) {
+// exitStatus maps a container exit code and the way the run ended to a
+// ContextMatrix worker-status and a human-readable message. Exit 0 is
+// "completed"; anything else is "failed", with the code carried in the message
+// for the operator.
+//
+// A daemon-flagged wait is the one exception. The status code that arrives with
+// a daemon error comes from the same response the daemon could not complete, so
+// it is not a run outcome and must not be read as one. It is typically 0, which
+// would otherwise record the run as a clean finish on evidence that does not
+// support it. The message says the exit is unknown rather than quoting a number
+// it cannot stand behind.
+//
+// `failed` is not certainly accurate here either - the work may well have
+// succeeded - but it is honest about what is known, and it fails in the safe
+// direction: a run recorded as failed gets looked at, while one recorded as a
+// clean finish does not.
+func exitStatus(exitCode int64, cause executor.ExitCause) (status, message string) {
+	if cause == executor.ExitDaemonError {
+		return "failed", "worker exit status unknown: the container wait returned a daemon error"
+	}
+
 	if exitCode == 0 {
 		return "completed", ""
 	}
