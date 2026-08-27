@@ -3269,3 +3269,40 @@ func TestStillRedGateOnAnExhaustedWindowStillReports(t *testing.T) {
 	assert.Equal(t, "failed", rows[0].Result)
 	assert.False(t, rows[0].VerifyPass)
 }
+
+// TestStillRedGateParksThroughTheTypedSentinel pins the park SHAPE. A plain
+// error landed in the worker's default arm - claim released, no WIP push, no
+// transition - so the container was destroyed with the coder's uncommitted tree
+// still in it, the only park in the taxonomy that discarded work. The typed
+// sentinel is what routes the exit to a park arm instead, and it carries the
+// failing command and the tail of what that command printed because the
+// container holding them is gone by the time a human reads the card.
+func TestStillRedGateParksThroughTheTypedSentinel(t *testing.T) {
+	o, ops, git, _ := stillRedFixture(t, 0)
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		return verifyexec.Outcome{
+			ExitCode: 1,
+			Output:   "--- FAIL: TestThing\n    thing_test.go:12: want 1, got 2",
+		}
+	}
+
+	err := runExecute(context.Background(), o)
+
+	var vpe *VerifyParkedError
+	require.ErrorAs(t, err, &vpe, "a still-red gate must park through the typed sentinel")
+
+	assert.Equal(t, "SUB-1", vpe.Subtask)
+	assert.Equal(t, "verify", vpe.Command, "the sentinel names the command that stayed red")
+	assert.Contains(t, vpe.Output, "--- FAIL: TestThing", "the failing output tail travels with the park")
+	assert.Contains(t, vpe.Output, "want 1, got 2")
+
+	assert.True(t, isParkError(err),
+		"a still-red gate must stop the run at a park arm, not walk into the next phase")
+
+	// The gate's own guarantee is unchanged by the routing: the orchestrator
+	// still refuses to commit, push or complete a red tree. Preserving the work
+	// is the worker's WIP commit, not a subtask commit.
+	assert.Empty(t, git.commitMsgs, "nothing may be committed while the verify is red; git=%v", git.recorded())
+	assert.Empty(t, git.pushBranches, "a red tree is never pushed by the subtask path")
+	assert.Equal(t, -1, indexOfCall(ops.recorded(), "CompleteTask:SUB-1"), "a parked subtask is not completed")
+}

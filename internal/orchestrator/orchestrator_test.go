@@ -236,6 +236,40 @@ func TestRunToolchainMissingParks(t *testing.T) {
 	assert.Equal(t, -1, indexOfCall(calls, "SetPhase:execute"))
 }
 
+func TestRunVerifyParkedParks(t *testing.T) {
+	ops := &fakeOps{
+		taskContext: cmclient.TaskContext{},
+	}
+	d := Deps{Ops: ops, Git: &fakeGit{}, Cfg: Config{CardID: "CARD-1"}}
+
+	o := newRun(d, ops.taskContext)
+	// Execute stops because the pre-commit verify stayed red after its one fix pass.
+	vpe := &VerifyParkedError{
+		Subtask: "SUB-1",
+		Command: "make test",
+		Output:  "--- FAIL: TestThing\n    thing_test.go:12: want 1, got 2",
+	}
+	o.planFn = func(context.Context) error { return vpe }
+
+	err := o.execute(context.Background())
+
+	var got *VerifyParkedError
+	require.ErrorAs(t, err, &got)
+	assert.Equal(t, "SUB-1", got.Subtask)
+
+	calls := ops.recorded()
+	// AddLog must be recorded on the verify park.
+	assert.GreaterOrEqual(t, indexOfCall(calls, "AddLog:"+verifyParkedLogMessage(vpe)), 0,
+		"verify park must AddLog the reason; calls=%v", calls)
+	// The evidence a human needs is on the card, not only in the container that
+	// is about to be destroyed: the command that failed and what it printed.
+	assert.True(t, ops.loggedContains("make test"), "the card names the command that stayed red; logs=%v", ops.logs)
+	assert.True(t, ops.loggedContains("--- FAIL: TestThing"),
+		"the card carries the failing output tail; logs=%v", ops.logs)
+	// No further phase entered after the park.
+	assert.Equal(t, -1, indexOfCall(calls, "SetPhase:execute"))
+}
+
 // TestMaxTurnsLogMessagePhaseAware proves the turn-cap park message names a
 // remedy that actually works for the phase it fires in: the plan phase's
 // budget is capped at the fixed planMaxTurns constant regardless of

@@ -1182,6 +1182,82 @@ func TestNoModelMapsToBlocked(t *testing.T) {
 	assert.Equal(t, "blocked", args[1])
 }
 
+// TestVerifyParkedMapsToBlocked: a VerifyParkedError takes the toolchain park's
+// path - transition the card to blocked BEFORE releasing the claim, push the
+// WIP, surface a non-nil error. Before this arm the still-red pre-commit gate
+// fell through to the default arm, which releases the claim and returns: the
+// container was then destroyed with the coder's uncommitted tree in it and the
+// card left in in_progress with no visible cause. The push is the whole point -
+// it is the only thing that carries the refused work out of the container.
+func TestVerifyParkedMapsToBlocked(t *testing.T) {
+	remote := setupBareRemote(t)
+	wsParent := t.TempDir()
+	ops := newFakeOps()
+
+	swapRunOrchestrator(t, func(_ context.Context, d orchestrator.Deps) error {
+		// The tree the gate refused to commit: what the park must preserve.
+		require.NoError(t, os.WriteFile(filepath.Join(d.Cfg.Workspace, "wip.txt"), []byte("red work\n"), 0o644))
+
+		return &orchestrator.VerifyParkedError{
+			Subtask: "SUB-1",
+			Command: "make test",
+			Output:  "--- FAIL: TestThing",
+		}
+	})
+
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	res, err := Run(context.Background(), baseSpec(t, remote, wsParent), ops, &scriptedLLM{}, emit, openStdin(t))
+	require.Error(t, err)
+	assert.Equal(t, "error", res.Reason)
+
+	assert.True(t, remoteHasBranch(t, remote, "cm/cmx-001"), "the refused work is pushed, not discarded")
+	assert.GreaterOrEqual(t, ops.count("ReportPush"), 1, "WIP push reported")
+	assert.Equal(t, 1, ops.count("TransitionCard"), "card transitioned to blocked")
+	assert.Equal(t, 1, ops.count("ReleaseCard"), "claim released on the verify park")
+	assert.Equal(t, 0, ops.count("CompleteTask"), "a red tree is never completed")
+
+	calls := ops.ops()
+	transitionIdx := slices.Index(calls, "TransitionCard")
+	releaseIdx := slices.Index(calls, "ReleaseCard")
+
+	require.GreaterOrEqual(t, transitionIdx, 0)
+	require.GreaterOrEqual(t, releaseIdx, 0)
+	assert.Less(t, transitionIdx, releaseIdx, "TransitionCard must happen before ReleaseCard: ownership may be required")
+
+	args := ops.argsOf("TransitionCard")
+	require.Len(t, args, 2)
+	assert.Equal(t, "blocked", args[1])
+}
+
+// TestVerifyParkedTransitionFailureDegradesGracefully: blocked is
+// project-configurable, so a board without in_progress -> blocked must still
+// get the park's real payload - the WIP push and the release - rather than
+// losing the work to a failed transition.
+func TestVerifyParkedTransitionFailureDegradesGracefully(t *testing.T) {
+	remote := setupBareRemote(t)
+	wsParent := t.TempDir()
+	ops := newFakeOps()
+	ops.transitionCardErr = map[string]error{"blocked": fmt.Errorf("call transition_card: invalid state transition")}
+
+	swapRunOrchestrator(t, func(_ context.Context, d orchestrator.Deps) error {
+		require.NoError(t, os.WriteFile(filepath.Join(d.Cfg.Workspace, "wip.txt"), []byte("red work\n"), 0o644))
+
+		return &orchestrator.VerifyParkedError{Subtask: "SUB-1", Command: "make test", Output: "--- FAIL: TestThing"}
+	})
+
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	res, err := Run(context.Background(), baseSpec(t, remote, wsParent), ops, &scriptedLLM{}, emit, openStdin(t))
+	require.Error(t, err, "the park must still surface the underlying error despite the failed transition")
+	assert.Equal(t, "error", res.Reason)
+
+	assert.True(t, remoteHasBranch(t, remote, "cm/cmx-001"), "the refused work is pushed even when the transition fails")
+	assert.Equal(t, 1, ops.count("TransitionCard"), "transition was attempted")
+	assert.Equal(t, 1, ops.count("ReleaseCard"), "claim still released despite the transition failure")
+	assert.Equal(t, 0, ops.count("CompleteTask"))
+}
+
 // TestToolchainMissingTransitionFailureDegradesGracefully: when TransitionCard
 // fails (e.g. the project's board has no in_progress -> blocked transition),
 // the park must still complete exactly like the other park arms - push WIP,

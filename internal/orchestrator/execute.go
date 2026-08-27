@@ -221,6 +221,26 @@ func (o *run) executeSubtaskWith(ctx context.Context, sc *solverCtx, sub subtask
 // CM's default 30m heartbeat_timeout). A var so tests can shrink it.
 var subtaskHeartbeatInterval = 5 * time.Minute
 
+// VerifyParkedError marks the pre-commit verify park: the run's resolved verify
+// command was red on the coder's work, the one bounded fix pass ran, and the
+// re-run was still red. The worker maps it like the toolchain park - push the
+// WIP, transition the card to blocked, release the claim, fail - so the tree
+// the gate refused leaves the container instead of dying with it, and the park
+// is visible on the board rather than only in the log.
+//
+// The command and the output tail travel on the error because the container
+// holding them is destroyed before anyone reads the card, and because the park
+// arm that writes them to the card sits above the phase that produced them.
+type VerifyParkedError struct {
+	Subtask string // the subtask whose gate stayed red
+	Command string // the verify command, as displayed
+	Output  string // a bounded excerpt of what the failing run printed
+}
+
+func (e *VerifyParkedError) Error() string {
+	return fmt.Sprintf("subtask %s: `%s` still fails after one fix pass", e.Subtask, e.Command)
+}
+
 // preCommitVerify runs the run's resolved verify command against the coder's
 // uncommitted work and gates the commit on the result. Returning nil means the
 // commit may proceed: the command passed, no command resolved (the skip tier),
@@ -233,10 +253,13 @@ var subtaskHeartbeatInterval = 5 * time.Minute
 // One pass, never a loop - the review phase's fix loop is the multi-round
 // mechanism.
 //
-// That error is deliberately a plain one, not a park sentinel: the worker's
-// park switch pushes WIP only on its sentinel arms, and a WIP push here would
-// commit and push the very tree this gate just refused. The absent push is the
-// point, not an omission.
+// That error is *VerifyParkedError, a park sentinel, so the exit takes the
+// worker's park path rather than its default arm: the WIP is pushed, the card
+// goes to blocked, and the claim is released. The push carries the very tree
+// this gate refused, deliberately - refusing to COMMIT it as finished work is
+// the gate's job, and destroying it with the container is not the same thing.
+// It reaches a human as a red branch on a blocked card, which is what a resume
+// and a review both need.
 //
 // The plan comes from ensureVerify and the execution from runVerifyPlan, the
 // same two calls the review-round gate makes, so the two cannot drift into
@@ -326,7 +349,11 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 		sc.gate.stillRed = true
 		sc.gate.environmentalFailure = verifyexec.LooksResourceExhausted(vres.Output)
 
-		return fmt.Errorf("subtask %s: `%s` still fails after one fix pass", sub.ID, plan.Display)
+		return &VerifyParkedError{
+			Subtask: sub.ID,
+			Command: plan.Display,
+			Output:  verifyFailureExcerpt(vres.Output),
+		}
 	}
 
 	// Symmetry with the first-run arm, not a live value: reaching here means
@@ -1297,9 +1324,10 @@ func (o *run) raiseSubtaskBoth(ctx context.Context, sub subtaskRef, why string) 
 // *ToolchainMissingError both return earlier, so an exclusion list would name
 // branches production cannot produce.
 //
-// There is no reader for this on THIS run - a still-red gate returns a plain
-// error that fails the run with the work uncommitted and unpushed. The next run
-// redoes the subtask from scratch, and reconcile hands it the raised sizing.
+// There is no reader for this on THIS run - a still-red gate parks it, and the
+// tree reaches the next run only as the worker's WIP commit, never as a finished
+// subtask. That next run redoes the subtask, and reconcile hands it the raised
+// sizing.
 func (o *run) applyPrecommitVerifyEvidence(ctx context.Context, sub subtaskRef, vres verifyResult, exhausted bool) {
 	if vres.Status != verifyFailed || verifyexec.LooksResourceExhausted(vres.Output) {
 		return
