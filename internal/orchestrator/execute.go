@@ -58,15 +58,15 @@ type gateEvidence struct {
 	coderFailed bool
 
 	// reviseVerified: the checkpoint's own gate (checkpointReviseVerify) RAN
-	// and PASSED against the tree a revise commit is about to replace verified
-	// with. False for the skip tier and for an inconclusive run, mirroring
-	// verified above - neither is evidence the revised tree is good. Also
-	// false, and never assigned otherwise, on every arm that discards the
-	// revise (a failed verify, or an error resolving/running it): none of
-	// those ever reach commitRevise, so the field stays at its zero value on
-	// all of them. Set true only immediately before commitRevise is called,
-	// so commitRevise can read it to decide what a landed revise does to
-	// verified.
+	// and PASSED against the tree a revise commit is about to install in
+	// place of the one verified describes. False for the skip tier and for
+	// an inconclusive run, mirroring verified above - neither is evidence
+	// the revised tree is good. Also false, and never assigned otherwise, on
+	// every arm that discards the revise (a failed verify, or an error
+	// resolving/running it): none of those ever reach commitRevise, so the
+	// field stays at its zero value on all of them. Set true only
+	// immediately before commitRevise is called, so commitRevise can read it
+	// to decide what a landed revise does to verified.
 	reviseVerified bool
 }
 
@@ -448,8 +448,9 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 		// work that was demonstrably red.
 		//
 		// A mob checkpoint's revise commit is deliberately not treated the same
-		// way. It clears the verify evidence, because nothing re-runs the gate
-		// against the revised tree, but it does not set coderFailed: the
+		// way. Its own gate re-runs against the revised tree and verified
+		// follows what that gate learned - true on a pass, false on a skip or
+		// an inconclusive run - but a revise never sets coderFailed: the
 		// pre-commit gate is a deterministic project command and its red is a
 		// fact, while a revise verdict is model opinion, and recording a
 		// failure off model opinion would be a far noisier signal than the one

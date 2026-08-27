@@ -204,11 +204,14 @@ func (o *run) mobCheckpoint(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 //
 //   - A FAILED verify: the revise is a defect.
 //   - An error resolving or running the verify - a budget park, a
-//     cancelled context, or a *ToolchainMissingError, which on its way out
-//     of ensureVerify rewrites the card's "Verify Command" section to say
-//     the command cannot run in this container. Committing here would
-//     leave a card that says its own verify command cannot run in this
-//     container while quietly shipping a revise nobody checked.
+//     cancelled context, or a *ToolchainMissingError. Only a declared- or
+//     detected-tier one, raised by resolveVerify inside ensureVerify's own
+//     call, rewrites the card's "Verify Command" section on its way out to
+//     say the command cannot run in this container; a runtime-tier one,
+//     raised later by runVerifyPlan when the command itself hits an
+//     unreachable container runtime, carries no such rewrite. Either way,
+//     committing here would ship a revise nobody checked, and for the
+//     ensureVerify case would also leave a card that contradicts itself.
 //
 // A revise nobody could check is not evidence it is good, and every other
 // failure on this path - mobCheckpoint's diff/quorum/engine/parse/fix-run
@@ -416,9 +419,11 @@ func (o *run) commitRevise(ctx context.Context, sc *solverCtx, sub subtaskRef, m
 		return
 	}
 
-	// The pre-commit gate ran against the tree the coder produced; this commit
-	// replaces that tree, and nothing re-runs the gate against the revised
-	// result. The run no longer has evidence the committed work passed, so the
-	// verdict must not stand.
-	sc.gate.verified = false
+	// checkpointReviseVerify already ran the same gate against this revise,
+	// immediately before commitRevise was called, so the run's evidence now
+	// follows the tree that actually landed rather than the tree it
+	// replaced: verified takes the revise gate's own verdict, true only when
+	// that gate ran and passed, false for a skipped or inconclusive one -
+	// neither is evidence the revised tree is good.
+	sc.gate.verified = sc.gate.reviseVerified
 }
