@@ -2729,11 +2729,12 @@ func TestNoResolvableVerifyCommitsAsToday(t *testing.T) {
 	assert.Equal(t, 0, verifyFixPasses(client))
 }
 
-// TestPreCommitGateAndReviewGateResolveIdentically proves the two gates cannot
-// drift into different commands, timeouts or environments: both take the plan
-// ensureVerify resolved and hand it to runVerifyPlan unchanged, so the tuple
-// reaching the exec seam is the same from either caller.
-func TestPreCommitGateAndReviewGateResolveIdentically(t *testing.T) {
+// TestAllThreeVerifyGatesResolveIdentically proves the pre-commit, review and
+// checkpoint gates cannot drift into different commands, timeouts or
+// environments: all three take the plan ensureVerify resolved and hand it to
+// runVerifyPlan unchanged, so the tuple reaching the exec seam is the same
+// from any of the three callers.
+func TestAllThreeVerifyGatesResolveIdentically(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true}
 	client := &planLLM{responses: []llm.Response{stopResp("coder: attempted the fix", 0.02)}}
@@ -2776,8 +2777,20 @@ func TestPreCommitGateAndReviewGateResolveIdentically(t *testing.T) {
 	require.False(t, approved, "a red gate short-circuits the review round")
 	require.NotEmpty(t, seen, "the review gate ran the command")
 
-	assert.Equal(t, preCommit, seen[0],
+	review := seen[0]
+	seen = nil
+
+	assert.Equal(t, preCommit, review,
 		"the pre-commit gate and the review gate must run the identical command, timeout and environment")
+
+	ok := o.checkpointReviseVerify(context.Background(), o.solver, sub)
+	require.False(t, ok, "a red gate discards the checkpoint revise")
+	require.NotEmpty(t, seen, "the checkpoint gate ran the command")
+
+	// review == seen[0] follows transitively from preCommit == review above and
+	// the equality asserted here, so a third assertion would be redundant.
+	assert.Equal(t, preCommit, seen[0],
+		"the pre-commit gate and the checkpoint gate must run the identical command, timeout and environment")
 }
 
 // TestPreCommitVerifySkippedForCandidateSolver proves the gate is solo-only. A

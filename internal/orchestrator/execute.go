@@ -36,10 +36,11 @@ type solverCtx struct {
 	completed  []subtaskRef // subtasks this solver actually executed
 	lastSubID  string       // final subtask ID in execution order; "" disables turn-cap salvage (parent/single-solver)
 	capped     bool         // the final subtask hit the turn cap; its work was salvage-committed for judge verification
-	gate       gateEvidence // what the pre-commit gate learned about this subtask's coder work
+	gate       gateEvidence // what the pre-commit and checkpoint gates learned about this subtask's coder work and its revise
 }
 
-// gateEvidence is what the pre-commit gate learned about the coder's own work.
+// gateEvidence is what the pre-commit gate learned about the coder's own work,
+// and what the checkpoint gate later learned about a mob revise of it.
 // It is carried on the solver rather than returned because the evidence has to
 // survive past preCommitVerify's return: mobCheckpoint runs between the gate
 // and the report site and mutates it. A return value would have to be threaded
@@ -55,6 +56,18 @@ type gateEvidence struct {
 	// pass. It stays true when the fix pass then repaired it - the point is
 	// what the CODER produced, not what shipped.
 	coderFailed bool
+
+	// reviseVerified: the checkpoint's own gate (checkpointReviseVerify) RAN
+	// and PASSED against the tree a revise commit is about to replace verified
+	// with. False for the skip tier and for an inconclusive run, mirroring
+	// verified above - neither is evidence the revised tree is good. Also
+	// false, and never assigned otherwise, on every arm that discards the
+	// revise (a failed verify, or an error resolving/running it): none of
+	// those ever reach commitRevise, so the field stays at its zero value on
+	// all of them. Set true only immediately before commitRevise is called,
+	// so commitRevise can read it to decide what a landed revise does to
+	// verified.
+	reviseVerified bool
 }
 
 // runExecute is the execute phase: subtasks run SEQUENTIALLY in dependency
