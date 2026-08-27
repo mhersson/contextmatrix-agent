@@ -2824,6 +2824,147 @@ func TestPreCommitVerifySkippedForCandidateSolver(t *testing.T) {
 	assert.False(t, ran, "a candidate solver never runs the pre-commit gate")
 }
 
+// The gate must not pay for a second full suite run when the coder's verify
+// tool already ran the identical command against the identical tree. It accepts
+// the tool's recorded pass only under all three conditions - the tool's last run
+// passed, the gate's own fingerprint read succeeds, and it equals the
+// fingerprint recorded at that pass - and runs the command itself on every other
+// case. The counter is the whole point: it counts every execution of the
+// command, tool call and gate alike.
+func TestPreCommitGateReusesOnlyAFingerprintVerifiedToolPass(t *testing.T) {
+	cases := []struct {
+		name string
+		// states scripts the worktree fingerprint the tool and the gate read, in
+		// call order; the last one repeats.
+		states []string
+		// exits scripts the exit code of each execution of the command, in order.
+		exits            []int
+		callTool         bool
+		breakFingerprint bool
+		wantRuns         int
+	}{
+		{
+			name:     "tool passed and nothing was written since",
+			states:   []string{"a"},
+			exits:    []int{0},
+			callTool: true,
+			wantRuns: 1,
+		},
+		{
+			// Entry probe, post-run probe, then the gate's own read - the third
+			// fingerprint is the coder writing after the tool passed.
+			name:     "something was written after the tool passed",
+			states:   []string{"a", "a", "written since"},
+			exits:    []int{0, 0},
+			callTool: true,
+			wantRuns: 2,
+		},
+		{
+			name:             "the gate cannot read the fingerprint",
+			states:           []string{"a"},
+			exits:            []int{0, 0},
+			callTool:         true,
+			breakFingerprint: true,
+			wantRuns:         2,
+		},
+		{
+			name:     "the tool never ran",
+			states:   []string{"a"},
+			exits:    []int{0},
+			wantRuns: 1,
+		},
+		{
+			name:     "the tool's last run did not pass",
+			states:   []string{"a"},
+			exits:    []int{1, 0},
+			callTool: true,
+			wantRuns: 2,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			git := &fakeGit{worktreeStates: tc.states}
+			d := execTestDeps(&fakeOps{}, git, &planLLM{})
+			d.Cfg.Workspace = t.TempDir()
+			d.WriteToolsForDir = func(_ string, verify tools.Tool) *tools.Registry {
+				return tools.NewRegistry(append(testWriteTools().All(), verify)...)
+			}
+
+			o := newExecRun(d, nil, 0)
+			seedResolvedVerifyPlan(o)
+
+			runs := 0
+			o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+				require.Less(t, runs, len(tc.exits), "the command ran more often than the case scripts")
+
+				code := tc.exits[runs]
+				runs++
+
+				return verifyexec.Outcome{ExitCode: code, Output: "checks output"}
+			}
+
+			o.bindVerifyTool(o.solver, o.resolvedVerifyPlan())
+
+			if tc.callTool {
+				vt, ok := o.solver.tools.Get("verify")
+				require.True(t, ok, "the coder must have been offered the verify tool")
+
+				_, err := vt.Execute(context.Background(), nil)
+				require.NoError(t, err)
+			}
+
+			if tc.breakFingerprint {
+				git.worktreeStateErr = errors.New("git status exploded")
+			}
+
+			exhausted := false
+			require.NoError(t, o.preCommitVerify(context.Background(), o.solver,
+				subtaskRef{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}, exhausted))
+
+			assert.Equal(t, tc.wantRuns, runs, "executions of the verify command, tool call and gate together")
+			assert.True(t, o.solver.gate.verified,
+				"a green gate certifies the tree whether it ran the command itself or took the tool's verdict")
+		})
+	}
+}
+
+// A verdict belongs to the subtask that earned it. The fingerprint behind it
+// covers uncommitted state only, so a clean tree before a commit and the clean
+// tree that commit leaves behind fingerprint identically - matching them across
+// a subtask boundary would certify a tree nothing ever ran against. Both gates
+// here see the fingerprint the seeded pass carries, and both must still run.
+func TestPreCommitGateNeverReusesAToolPassFromAnEarlierSubtask(t *testing.T) {
+	git := &fakeGit{committed: true, worktreeStates: []string{"a"}}
+	client := &planLLM{responses: []llm.Response{
+		finishResp("feat: first subtask", 0.01),
+		finishResp("feat: second subtask", 0.01),
+	}}
+	d := execTestDeps(&fakeOps{}, git, client)
+	o := newExecRun(d, []subtaskRef{
+		{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")},
+		{ID: "SUB-2", Title: "Second", Sizing: seedSizing("simple")},
+	}, 0)
+
+	seedResolvedVerifyPlan(o)
+
+	runs := 0
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		runs++
+
+		return verifyexec.Outcome{ExitCode: 0}
+	}
+
+	// The coder's verify tool passed against the tree an earlier subtask
+	// committed - the same fingerprint both gates below will read.
+	o.solver.toolVerify = verifyToolPass{passed: true, fingerprint: "a"}
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	assert.Equal(t, 2, runs, "every subtask's gate measures its own tree")
+	require.Len(t, git.commitMsgs, 2, "both subtasks committed; git=%v", git.recorded())
+}
+
 // TestSoloFinishReportsVerifyPassWhenTheGateActuallyPassed proves the finish
 // path stops discarding evidence it holds. An authoritative verify runs before
 // the commit, and when it passes, the row says so - the same fact the salvage

@@ -37,6 +37,13 @@ type solverCtx struct {
 	lastSubID  string       // final subtask ID in execution order; "" disables turn-cap salvage (parent/single-solver)
 	capped     bool         // the final subtask hit the turn cap; its work was salvage-committed for judge verification
 	gate       gateEvidence // what the pre-commit and checkpoint gates learned about this subtask's coder work and its revise
+	// toolVerify is the verdict of the coder verify tool's last actual run and
+	// the fingerprint it was measured against, republished by the tool on every
+	// run. Zero until the coder calls the tool, and for a candidate solver,
+	// which binds no recorder. Written by the tool during the coder harness run
+	// and read by the pre-commit gate after it returns, on the goroutine that
+	// drives the subtask.
+	toolVerify verifyToolPass
 }
 
 // gateEvidence is what the pre-commit gate learned about the coder's own work,
@@ -145,7 +152,7 @@ func (o *run) bindVerifyTool(sc *solverCtx, plan verifyPlan) {
 		return
 	}
 
-	vt := o.verifyToolFor(sc.git, sc.workspace, plan)
+	vt := o.verifyToolFor(sc.git, sc.workspace, plan, func(p verifyToolPass) { sc.toolVerify = p })
 	if vt == nil {
 		return
 	}
@@ -261,6 +268,11 @@ func (e *VerifyParkedError) Error() string {
 // It reaches a human as a red branch on a blocked card, which is what a resume
 // and a review both need.
 //
+// The command runs once per subtask, not twice: when the coder's verify tool
+// already passed and the tree has not moved since, the gate takes that verdict
+// rather than re-running the identical command over identical bytes - see
+// gateAcceptsToolPass for the three conditions and why nothing else qualifies.
+//
 // The plan comes from ensureVerify and the execution from runVerifyPlan, the
 // same two calls the review-round gate makes, so the two cannot drift into
 // different commands, timeouts or environments. Nothing here knows what a check
@@ -293,6 +305,20 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 	}
 
 	if len(plan.Argv) == 0 {
+		return nil
+	}
+
+	if o.gateAcceptsToolPass(ctx, sc) {
+		sc.gate.verified = true
+
+		// The gate line still fires: a human reading the activity log must see a
+		// gate for every subtask, and this one says out loud where the verdict
+		// came from rather than implying a second run happened.
+		o.logVerifyGate(ctx, verifyResult{
+			Status: verifyPassed,
+			Note:   "the coder's own run measured this exact tree; not re-run",
+		}, subtaskGateContext(sub.ID))
+
 		return nil
 	}
 
@@ -364,6 +390,45 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 	return nil
 }
 
+// gateAcceptsToolPass reports whether the gate may certify on the verdict the
+// coder's verify tool recorded instead of running the command a second time.
+// All three conditions hold or it returns false:
+//
+//   - the tool's last actual run PASSED (a failure, an inconclusive run, or a
+//     tool the coder never called leaves the pair zero);
+//   - the fingerprint recorded at that pass is readable, and so is the one this
+//     reads now (either unreadable is evidence of nothing);
+//   - the two are equal - the tree about to be committed is the tree the command
+//     passed against, byte for byte, by the repository's own ignore rules.
+//
+// Every other direction runs the gate, which is what makes this safe to skip:
+// the fingerprint's error paths all degrade to "assume written", so a gate that
+// cannot prove the trees are identical behaves exactly as it did before.
+//
+// What the gate gives up is a re-run of the same command over the same bytes.
+// The tool ran it through runVerifyCommand, the same executor runVerifyPlan
+// wraps, on the plan ensureVerify resolved - one command, one timeout, one
+// environment, one workspace. What it does not give up is the fix pass: a tool
+// verdict that is anything but a pass never reaches here.
+func (o *run) gateAcceptsToolPass(ctx context.Context, sc *solverCtx) bool {
+	if !sc.toolVerify.passed || sc.toolVerify.fingerprint == "" {
+		return false
+	}
+
+	fctx, cancel := context.WithTimeout(ctx, worktreeStateTimeout)
+	defer cancel()
+
+	state, err := sc.git.WorktreeState(fctx)
+	if err != nil {
+		slog.Warn("verify gate: worktree fingerprint unreadable; running the command",
+			"card_id", o.d.Cfg.CardID, "error", err)
+
+		return false
+	}
+
+	return state == sc.toolVerify.fingerprint
+}
+
 func subtaskGateContext(subID string) string {
 	return fmt.Sprintf("subtask %s, before commit", subID)
 }
@@ -378,6 +443,14 @@ func subtaskGateContext(subID string) string {
 // (boardOps false) holds no claim, so it runs no heartbeat and no complete.
 func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtaskRef) error {
 	d := o.d
+
+	// A tool verdict belongs to the subtask that earned it. The fingerprint
+	// behind it covers uncommitted state only, so the clean tree an earlier
+	// subtask left behind when it committed fingerprints identically to the
+	// clean tree before that commit - matching fingerprints across a commit are
+	// not the same tree. Nothing commits between here and this subtask's gate,
+	// so inside one subtask the pair means what it says.
+	sc.toolVerify = verifyToolPass{}
 
 	// Snapshot the ledger before this subtask's own spend, so every solo
 	// outcome report below carries only THIS subtask's cost delta - not the

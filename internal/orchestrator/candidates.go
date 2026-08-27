@@ -355,11 +355,13 @@ func (o *run) runCandidate(ctx context.Context, c *candidate, ordered []subtaskR
 	// One verify tool per candidate, rooted at that candidate's own worktree and
 	// git handle. Candidates write concurrently, so a shared instance would let
 	// one candidate's write invalidate another's cache - or report a pass one
-	// candidate earned as if it were another's.
+	// candidate earned as if it were another's. Nothing records the tool's
+	// verdicts here: the pre-commit gate is solo-only, and a candidate is judged
+	// by the judge phase's own verify over its worktree.
 	sc := &solverCtx{
 		git:        c.git,
 		ledger:     c.ledger,
-		tools:      o.d.WriteToolsForDir(c.dir, o.verifyToolFor(c.git, c.dir, o.resolvedVerifyPlan())),
+		tools:      o.d.WriteToolsForDir(c.dir, o.verifyToolFor(c.git, c.dir, o.resolvedVerifyPlan(), nil)),
 		workspace:  c.dir,
 		coderModel: o.candidateCoderModel(c),
 		boardOps:   false,
