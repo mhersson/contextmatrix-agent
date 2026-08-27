@@ -48,6 +48,11 @@ type gateEvidence struct {
 	// about to be committed. False for the skip tier and for an inconclusive
 	// run, neither of which is evidence of anything.
 	verified bool
+
+	// coderFailed: the gate was RED on the coder's own work, before any fix
+	// pass. It stays true when the fix pass then repaired it - the point is
+	// what the CODER produced, not what shipped.
+	coderFailed bool
 }
 
 // runExecute is the execute phase: subtasks run SEQUENTIALLY in dependency
@@ -254,6 +259,8 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 
 	o.d.logCard(ctx, "subtask %s: verify failed before the commit - running one fix pass", sub.ID)
 
+	sc.gate.coderFailed = true
+
 	// The subtask's own tier sizes the fix, the way it sized the coder that wrote
 	// the work; an unset tier falls back to the card tier inside the fix path.
 	prompt := fmt.Sprintf(verifyFixPrompt, o.skillEngage(), o.grounding, sc.workspace,
@@ -387,13 +394,36 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 	}
 
 	if sc.boardOps {
-		// Report the win BEFORE CompleteTask (claim-gating rationale on
+		// Report the outcome BEFORE CompleteTask (claim-gating rationale on
 		// reportSoloOutcome - a report after complete_task releases the claim
-		// would silently vanish). VerifyPass carries what the pre-commit gate
-		// actually saw: true only when the resolved command ran and passed. The
-		// skip tier and an inconclusive run both leave it false, because
-		// neither is evidence of a pass.
-		o.reportSoloOutcome(ctx, sub.ID, model, "win", sc.gate.verified, sc.ledger.Spent()-spendBefore)
+		// would silently vanish).
+		//
+		// The row answers one question: did THIS model's work stand on its own?
+		// A subtask the bounded fix pass had to repair did not, so it reports
+		// `failed` even though the work shipped - the subtask still commits,
+		// pushes and completes below. `failed` is the model's verdict, not the
+		// card's.
+		//
+		// That choice is deliberate and it is the only one that reaches the
+		// priors. A solo row carries n_candidates 1, so it contributes exactly
+		// 1.0 to expected wins: recording a win nets to zero and suppressing the
+		// row does nothing at all, while `failed` moves the coder prior down by
+		// a bounded 1/samples. Attributing the win to the fix model instead was
+		// rejected - it double-counts one unit of work as two samples, and the
+		// two slugs are usually the same model anyway. The fix model's
+		// contribution stays visible in the cost delta below and in its own
+		// sizing observation row.
+		//
+		// VerifyPass carries what the gate actually saw: true only when the
+		// resolved command ran and passed on work that was never red. The skip
+		// tier and an inconclusive run both leave it false, because neither is
+		// evidence of a pass.
+		result, verifyPass := "win", sc.gate.verified
+		if sc.gate.coderFailed {
+			result, verifyPass = "failed", false
+		}
+
+		o.reportSoloOutcome(ctx, sub.ID, model, result, verifyPass, sc.ledger.Spent()-spendBefore)
 
 		if err := d.Ops.CompleteTask(ctx, sub.ID, commitSubject(commitMsg, sub.Title)); err != nil {
 			return fmt.Errorf("complete subtask %s: %w", sub.ID, err)

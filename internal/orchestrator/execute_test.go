@@ -2929,3 +2929,151 @@ func TestGateEvidenceDoesNotLeakBetweenSubtasks(t *testing.T) {
 	assert.False(t, ops.reportOutcomes[1][0].VerifyPass,
 		"the second subtask's gate was inconclusive and must not inherit the first's pass")
 }
+
+// TestRepairedSubtaskDoesNotRecordACoderWin is the judgment this change exists
+// to encode: a coder whose work was red and had to be repaired by a fix model
+// did not produce a winning result, and recording one feeds a false signal into
+// the coder prior. The row answers whether THIS model's work stood on its own.
+func TestRepairedSubtaskDoesNotRecordACoderWin(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: []llm.Response{
+		finishResp("feat: subtask done", 0.01),
+		stopResp("coder: fixed the failing test", 0.02),
+	}}
+	d := execTestDeps(ops, git, client)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
+
+	seedResolvedVerifyPlan(o)
+
+	runs := 0
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		runs++
+		if runs == 1 {
+			return verifyexec.Outcome{ExitCode: 1, Output: "--- FAIL: TestThing"}
+		}
+
+		return verifyexec.Outcome{ExitCode: 0}
+	}
+
+	require.NoError(t, runExecute(context.Background(), o))
+	require.Equal(t, 1, verifyFixPasses(client), "exactly one fix pass ran")
+
+	require.Len(t, ops.reportOutcomes, 1)
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 1)
+	assert.Equal(t, "failed", rows[0].Result, "the coder's own work did not pass the gate")
+	assert.False(t, rows[0].VerifyPass, "what passed was the repaired tree, not the coder's work")
+	assert.InDelta(t, 0.03, rows[0].CostUSD, 1e-9,
+		"the fix model's spend stays folded into the subtask's delta - the subtask really cost that")
+}
+
+// TestRepairedSubtaskStillCompletes guards against over-correcting. A failed
+// MODEL outcome is not a failed subtask: the work was repaired, committed and
+// pushed, and the card still completes. Only the leaderboard row changes.
+func TestRepairedSubtaskStillCompletes(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: []llm.Response{
+		finishResp("feat: subtask done", 0.01),
+		stopResp("coder: fixed the failing test", 0.02),
+	}}
+	d := execTestDeps(ops, git, client)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
+
+	seedResolvedVerifyPlan(o)
+
+	runs := 0
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		runs++
+		if runs == 1 {
+			return verifyexec.Outcome{ExitCode: 1, Output: "--- FAIL: TestThing"}
+		}
+
+		return verifyexec.Outcome{ExitCode: 0}
+	}
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	require.Len(t, git.commitMsgs, 1, "the repaired work commits; git=%v", git.recorded())
+	assert.Equal(t, "feat: subtask done", git.commitMsgs[0], "under the coder's own finish message")
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "CompleteTask:SUB-1"), 0,
+		"a failed model outcome is not a failed subtask")
+}
+
+// TestRedGateWithAnInconclusiveRecheckStillReportsFailed pins the arm where the
+// fix pass ran but the re-run could not confirm it. The coder's work was
+// demonstrably red before the fix; an inconclusive recheck does not undo that,
+// so the row must not fall back to a win.
+func TestRedGateWithAnInconclusiveRecheckStillReportsFailed(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: []llm.Response{
+		finishResp("feat: subtask done", 0.01),
+		stopResp("coder: attempted the fix", 0.02),
+	}}
+	d := execTestDeps(ops, git, client)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
+
+	seedResolvedVerifyPlan(o)
+
+	runs := 0
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		runs++
+		if runs == 1 {
+			return verifyexec.Outcome{ExitCode: 1, Output: "--- FAIL: TestThing"}
+		}
+
+		return verifyexec.Outcome{TimedOut: true, ExitCode: -1}
+	}
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	require.Len(t, ops.reportOutcomes, 1)
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 1)
+	assert.Equal(t, "failed", rows[0].Result)
+	assert.False(t, rows[0].VerifyPass)
+}
+
+// TestRepairedEvidenceDoesNotLeakToTheNextSubtask proves the gate's verdict is
+// per subtask on the arm that actually needs the reset. coderFailed is set only
+// when the gate goes red, and no passing run clears it, so a subtask following a
+// repaired one would otherwise report a failure it did not earn.
+func TestRepairedEvidenceDoesNotLeakToTheNextSubtask(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: []llm.Response{
+		finishResp("feat: first subtask", 0.01),
+		stopResp("coder: fixed the failing test", 0.02),
+		finishResp("feat: second subtask", 0.01),
+	}}
+	d := execTestDeps(ops, git, client)
+	o := newExecRun(d, []subtaskRef{
+		{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")},
+		{ID: "SUB-2", Title: "Second", Sizing: seedSizing("simple")},
+	}, 0)
+
+	seedResolvedVerifyPlan(o)
+
+	runs := 0
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		runs++
+		if runs == 1 {
+			return verifyexec.Outcome{ExitCode: 1, Output: "--- FAIL: TestThing"}
+		}
+
+		return verifyexec.Outcome{ExitCode: 0}
+	}
+
+	require.NoError(t, runExecute(context.Background(), o))
+	require.Equal(t, 1, verifyFixPasses(client), "only the first subtask needed a fix pass")
+
+	require.Len(t, ops.reportOutcomes, 2)
+	require.Len(t, ops.reportOutcomes[0], 1)
+	require.Len(t, ops.reportOutcomes[1], 1)
+	assert.Equal(t, "failed", ops.reportOutcomes[0][0].Result, "the first subtask's coder work was red")
+	assert.Equal(t, "win", ops.reportOutcomes[1][0].Result,
+		"the second subtask passed on its own and must not inherit the first's failure")
+	assert.True(t, ops.reportOutcomes[1][0].VerifyPass)
+}
