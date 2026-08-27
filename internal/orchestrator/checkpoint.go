@@ -182,7 +182,95 @@ func (o *run) mobCheckpoint(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 		msg = "fix: address checkpoint findings"
 	}
 
+	if !o.checkpointReviseVerify(ctx, sc, sub) {
+		return
+	}
+
 	o.commitRevise(ctx, sc, sub, msg)
+}
+
+// checkpointReviseVerify gates the checkpoint's revise commit through the
+// same ensureVerify and runVerifyPlan pair preCommitVerify uses for the
+// subtask coder's own work, so the three gates cannot drift into different
+// commands, timeouts or environments. Unlike preCommitVerify it has no
+// boardOps guard or gate-evidence reset of its own - the caller's
+// sc.boardOps && checkpointEligible check already restricts checkpoints to
+// the solo path - and it earns no fix pass: the alternative to rescuing a
+// bad revise is discarding a suggestion, which costs nothing.
+//
+// Every non-passing outcome DISCARDS the revise and keeps the verified
+// commit already in place, rather than parking the subtask or committing
+// unverified:
+//
+//   - A FAILED verify: the revise is a defect.
+//   - An error resolving or running the verify - a budget park, a
+//     cancelled context, or a *ToolchainMissingError. Only a declared- or
+//     detected-tier one, raised by resolveVerify inside ensureVerify's own
+//     call, rewrites the card's "Verify Command" section on its way out to
+//     say the command cannot run in this container; a runtime-tier one,
+//     raised later by runVerifyPlan when the command itself hits an
+//     unreachable container runtime, carries no such rewrite. Either way,
+//     committing here would ship a revise nobody checked, and for the
+//     ensureVerify case would also leave a card that contradicts itself.
+//
+// A revise nobody could check is not evidence it is good, and every other
+// failure on this path - mobCheckpoint's diff/quorum/engine/parse/fix-run
+// failures - already abandons the revise and continues on the committed
+// tree; this gate follows the same rule rather than being the one arm that
+// ships unverified work.
+//
+// A skipped or inconclusive result - no command resolved, or the command
+// ran but was inconclusive (timeout, missing tool) - is NOT a failure,
+// mirroring the pre-commit gate's own skip arm: the commit proceeds exactly
+// as it did before this gate existed.
+//
+// Reports false when the caller must discard the revise and return without
+// committing.
+func (o *run) checkpointReviseVerify(ctx context.Context, sc *solverCtx, sub subtaskRef) bool {
+	plan, err := o.ensureVerify(ctx)
+	if err != nil {
+		return o.discardCheckpointRevise(ctx, sc, sub, fmt.Sprintf("verify could not be resolved - %v", err))
+	}
+
+	if len(plan.Argv) == 0 {
+		return true
+	}
+
+	vres, rerr := o.runVerifyPlan(ctx, sc.workspace, plan)
+	if rerr != nil {
+		return o.discardCheckpointRevise(ctx, sc, sub, fmt.Sprintf("verify run failed - %v", rerr))
+	}
+
+	o.logVerifyGate(ctx, vres, checkpointReviseGateContext(sub.ID))
+
+	if vres.Status != verifyFailed {
+		sc.gate.reviseVerified = vres.Status == verifyPassed
+
+		return true
+	}
+
+	return o.discardCheckpointRevise(ctx, sc, sub, "verify failed")
+}
+
+// discardCheckpointRevise logs why a checkpoint revise was discarded on the
+// CARD log, so an operator sees a mob suggestion was rejected, and
+// HardResets the working tree. Best-effort like the sibling coder-run-
+// failure discard above, and the same caveat applies: HardReset only rolls
+// back TRACKED changes, so an untracked file the rejected revise created
+// survives and can still be swept into the next subtask's commit.
+func (o *run) discardCheckpointRevise(ctx context.Context, sc *solverCtx, sub subtaskRef, reason string) bool {
+	o.d.logCard(ctx, "mob checkpoint (%s): revise discarded - %s", sub.ID, reason)
+
+	if herr := sc.git.HardReset(ctx, "HEAD"); herr != nil {
+		slog.Warn("mob checkpoint: failed to discard revise edits",
+			"card_id", o.d.Cfg.CardID, "subtask_id", sub.ID, "error", herr)
+	}
+
+	return false
+}
+
+func checkpointReviseGateContext(subID string) string {
+	return fmt.Sprintf("checkpoint revise %s, before commit", subID)
 }
 
 // recordCheckpointDiscussion writes the checkpoint discussion summary to two
@@ -331,9 +419,11 @@ func (o *run) commitRevise(ctx context.Context, sc *solverCtx, sub subtaskRef, m
 		return
 	}
 
-	// The pre-commit gate ran against the tree the coder produced; this commit
-	// replaces that tree, and nothing re-runs the gate against the revised
-	// result. The run no longer has evidence the committed work passed, so the
-	// verdict must not stand.
-	sc.gate.verified = false
+	// checkpointReviseVerify already ran the same gate against this revise,
+	// immediately before commitRevise was called, so the run's evidence now
+	// follows the tree that actually landed rather than the tree it
+	// replaced: verified takes the revise gate's own verdict, true only when
+	// that gate ran and passed, false for a skipped or inconclusive one -
+	// neither is evidence the revised tree is good.
+	sc.gate.verified = sc.gate.reviseVerified
 }

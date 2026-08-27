@@ -5,9 +5,11 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/mob"
+	"github.com/mhersson/contextmatrix-agent/internal/verifyexec"
 	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/mhersson/contextmatrix-harness/llm"
 	"github.com/mhersson/contextmatrix-harness/tools"
@@ -296,9 +298,10 @@ func TestCommitReviseSurfacesFullDecline(t *testing.T) {
 }
 
 // TestCommitReviseNoopLeavesGateEvidenceIntact proves the companion case to
-// TestMobCheckpointReviseClearsGateEvidence: a revise pass that commits
-// nothing never replaced the tree the gate verified, so the verdict must
-// survive rather than being cleared alongside an actual revise commit.
+// TestMobCheckpointReviseGateSkippedLeavesVerifiedFalse: a revise pass that
+// commits nothing never replaced the tree the gate verified, so the verdict
+// must survive rather than being overwritten alongside an actual revise
+// commit.
 func TestCommitReviseNoopLeavesGateEvidenceIntact(t *testing.T) {
 	ops := &fakeOps{}
 	o := mobTestRun(ops, MobConfig{Participants: 2, Execute: true}, 0)
@@ -312,16 +315,18 @@ func TestCommitReviseNoopLeavesGateEvidenceIntact(t *testing.T) {
 		"a no-op revise commit must not clear the gate verdict on the untouched tree")
 }
 
-// TestMobCheckpointReviseClearsGateEvidence proves F1: a mob execute
-// checkpoint that lands a revise commit after the pre-commit gate ran must
-// not let that gate's verdict stand. The gate ran and passed on the coder's
-// ORIGINAL work; the checkpoint's revise pass replaces that tree with a fix
-// commit that nothing re-verifies, so the run can no longer claim the
-// committed work passed. Drives the real mobCheckpoint path (verdict parse,
-// fix coder run, commitRevise) the way the other checkpoint tests do, rather
-// than calling commitRevise directly, so the revise-verdict branch that
-// reaches it is exercised too.
-func TestMobCheckpointReviseClearsGateEvidence(t *testing.T) {
+// TestMobCheckpointReviseGateSkippedLeavesVerifiedFalse proves a mob execute
+// checkpoint that lands a revise commit does not let a stale pass stand in
+// for evidence about the revised tree: when the revise's OWN gate skips (no
+// verify command resolved), that is not a pass, so verified goes false even
+// though the pre-commit gate had already passed on the ORIGINAL work the
+// revise replaced. isolateVerify pins the revise gate to the skip tier
+// deliberately, rather than relying on the test workspace happening to have
+// nothing to detect. Drives the real mobCheckpoint path (verdict parse, fix
+// coder run, checkpointReviseVerify, commitRevise) the way the other
+// checkpoint tests do, rather than calling commitRevise directly, so the
+// revise-verdict branch that reaches it is exercised too.
+func TestMobCheckpointReviseGateSkippedLeavesVerifiedFalse(t *testing.T) {
 	ops := &fakeOps{}
 	client := &planLLM{responses: []llm.Response{finishResp("fix: address checkpoint findings", 0.01)}}
 	d := Deps{
@@ -341,15 +346,19 @@ func TestMobCheckpointReviseClearsGateEvidence(t *testing.T) {
 	}
 	o := newRun(d, cmclient.TaskContext{Title: "Parent", Description: "body"})
 	o.solver.git = &diffGit{fakeGit: &fakeGit{committed: true}, diff: "diff --git a/a.go b/a.go\n+lgtm\n"}
+	isolateVerify(o)
 
 	eng := &scriptedEngine{outcomes: []mob.Outcome{{
 		Synthesis: `{"verdict":"revise","fixes":[{"file":"a.go","issue":"missed a case"}],"summary":"one fix"}`,
 	}}}
 	o.mobEngine = eng.run
 
-	// Simulate the pre-commit gate having already run and passed on the
-	// coder's original work, the way executeClaimedWith leaves sc.gate before
-	// calling mobCheckpoint.
+	// Seeded true to isolate the arm under test: this pins that a skipped
+	// revise gate cannot leave a stale true standing, regardless of what
+	// verified held going in. It does not claim a passing pre-commit gate
+	// and a skipped revise gate can co-occur in a real run - the paired,
+	// reachable version of this invariant is
+	// TestMobCheckpointReviseGateInconclusiveLeavesVerifiedFalse below.
 	o.solver.gate.verified = true
 
 	o.mobCheckpoint(context.Background(), o.solver,
@@ -357,7 +366,355 @@ func TestMobCheckpointReviseClearsGateEvidence(t *testing.T) {
 
 	require.Len(t, eng.topics, 1, "the checkpoint discussion ran")
 	assert.False(t, o.solver.gate.verified,
-		"the revise commit replaced the verified tree; nothing re-verified it")
+		"a skipped revise gate is not evidence the revised tree passed, even though the pre-commit gate on the original tree was")
+}
+
+// checkpointReviseGateRun builds a run wired to drive a real revise verdict
+// through mobCheckpoint end to end - mob discussion, fix coder run, the
+// checkpointReviseVerify gate, and commitRevise - the same path
+// TestMobCheckpointReviseGateSkippedLeavesVerifiedFalse drives. Callers seed
+// o.verify / o.runVerify (or call isolateVerify) to control the gate's
+// outcome before invoking mobCheckpoint.
+func checkpointReviseGateRun(ops *fakeOps, git *fakeGit) *run {
+	client := &planLLM{responses: []llm.Response{finishResp("fix: address checkpoint findings", 0.01)}}
+	d := Deps{
+		Ops:        ops,
+		Git:        git,
+		Client:     client,
+		Emit:       events.NewEmitter(nil, nil),
+		Registry:   planTestRegistry(),
+		WriteTools: testWriteTools(),
+		ReadTools:  tools.NewRegistry(tools.NewReadTool(".")),
+		Cfg: Config{
+			Project: "proj", CardID: "CARD-1",
+			PayloadModel: "payload/model", DefaultModel: "default/model",
+			MaxTurns: 20,
+			Mob:      MobConfig{Participants: 2, Execute: true, CheckpointMinTier: "simple", CheckpointRounds: 1},
+		},
+	}
+	o := newRun(d, cmclient.TaskContext{Title: "Parent", Description: "body"})
+	o.solver.git = &diffGit{fakeGit: git, diff: "diff --git a/a.go b/a.go\n+lgtm\n"}
+
+	eng := &scriptedEngine{outcomes: []mob.Outcome{{
+		Synthesis: `{"verdict":"revise","fixes":[{"file":"a.go","issue":"missed a case"}],"summary":"one fix"}`,
+	}}}
+	o.mobEngine = eng.run
+
+	return o
+}
+
+// checkpointRedGate stubs the exec seam to fail, the way a real regression in
+// the revise commit would.
+func checkpointRedGate(o *run) {
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 1, Output: "--- FAIL: TestThing"}
+	}
+}
+
+// TestMobCheckpointReviseGateFailureDoesNotCommit proves a red checkpoint
+// revise gate never lands the commit it just refused.
+func TestMobCheckpointReviseGateFailureDoesNotCommit(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	o := checkpointReviseGateRun(ops, git)
+	checkpointRedGate(o)
+
+	o.mobCheckpoint(context.Background(), o.solver,
+		subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("simple")}, "abc123")
+
+	require.Contains(t, strings.Join(ops.logs, "\n"), "revise - 1 fixes",
+		"the checkpoint must actually reach a revise verdict, or this test asserts nothing")
+	assert.Empty(t, git.commitMsgs, "a red revise gate must not commit")
+}
+
+// TestMobCheckpointReviseGateFailureHardResets proves a red checkpoint
+// revise gate resets the working tree via HardReset, matching the
+// coder-failure discard's own shape. Best-effort like that sibling arm:
+// HardReset only rolls back TRACKED changes, so this does not guarantee an
+// untracked file the rejected revise created is gone too.
+func TestMobCheckpointReviseGateFailureHardResets(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	o := checkpointReviseGateRun(ops, git)
+	checkpointRedGate(o)
+
+	o.mobCheckpoint(context.Background(), o.solver,
+		subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("simple")}, "abc123")
+
+	require.Contains(t, strings.Join(ops.logs, "\n"), "revise - 1 fixes",
+		"the checkpoint must actually reach a revise verdict, or this test asserts nothing")
+	assert.Contains(t, git.hardResetRefs, "HEAD")
+}
+
+// TestMobCheckpointReviseGateFailureLogsDiscard proves a red checkpoint
+// revise gate says so on the card log, so an operator sees it.
+func TestMobCheckpointReviseGateFailureLogsDiscard(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	o := checkpointReviseGateRun(ops, git)
+	checkpointRedGate(o)
+
+	o.mobCheckpoint(context.Background(), o.solver,
+		subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("simple")}, "abc123")
+
+	assert.Contains(t, strings.Join(ops.logs, "\n"), "revise discarded")
+}
+
+// TestMobCheckpointReviseGatePassCommitsAsToday proves a green checkpoint
+// revise gate still lands the one commit with the fix coder's message, and
+// additionally now records that the gate saw it pass.
+func TestMobCheckpointReviseGatePassCommitsAsToday(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	o := checkpointReviseGateRun(ops, git)
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 0}
+	}
+
+	o.mobCheckpoint(context.Background(), o.solver,
+		subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("simple")}, "abc123")
+
+	require.Len(t, git.commitMsgs, 1)
+	assert.Equal(t, "fix: address checkpoint findings", git.commitMsgs[0])
+	assert.True(t, o.solver.gate.reviseVerified, "a passing gate is evidence the revise is good")
+}
+
+// TestMobCheckpointReviseGateInconclusiveLeavesVerifiedFalse pins the
+// REACHABLE half of the pass -> non-pass divergence
+// TestMobCheckpointReviseGateSkippedLeavesVerifiedFalse cannot: a pre-commit
+// gate that ran and PASSED caches a non-empty resolved plan, so the
+// checkpoint's own gate re-resolves that same plan and actually RUNS it -
+// the empty-argv short-circuit can never fire here. An inconclusive run
+// (a timeout) is still not a pass, so verified must go false even though it
+// came in true from a real, passing pre-commit gate on the tree the revise
+// replaced.
+func TestMobCheckpointReviseGateInconclusiveLeavesVerifiedFalse(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	o := checkpointReviseGateRun(ops, git)
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		return verifyexec.Outcome{TimedOut: true, ExitCode: -1}
+	}
+	o.solver.gate.verified = true
+
+	o.mobCheckpoint(context.Background(), o.solver,
+		subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("simple")}, "abc123")
+
+	require.Len(t, git.commitMsgs, 1, "an inconclusive gate is not a defect; the revise still commits")
+	assert.False(t, o.solver.gate.verified,
+		"an inconclusive revise gate is not evidence the landed tree passed")
+}
+
+// TestMobCheckpointReviseGateSkippedStillCommits proves an inconclusive or
+// skipped checkpoint revise gate is not treated as a defect: the commit
+// proceeds exactly as it did before the gate existed, mirroring the
+// pre-commit gate's own skip arm.
+func TestMobCheckpointReviseGateSkippedStillCommits(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(o *run)
+	}{
+		{
+			name: "verify times out - inconclusive",
+			setup: func(o *run) {
+				seedResolvedVerifyPlan(o)
+				o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+					return verifyexec.Outcome{TimedOut: true, Output: "still running"}
+				}
+			},
+		},
+		{
+			name:  "empty resolved argv - nothing to run",
+			setup: isolateVerify,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			git := &fakeGit{committed: true}
+			o := checkpointReviseGateRun(ops, git)
+			tt.setup(o)
+
+			o.mobCheckpoint(context.Background(), o.solver,
+				subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("simple")}, "abc123")
+
+			require.Len(t, git.commitMsgs, 1, "an inconclusive or skipped gate is not evidence of a defect")
+			assert.Equal(t, "fix: address checkpoint findings", git.commitMsgs[0])
+		})
+	}
+}
+
+// TestMobCheckpointReviseGateErrorDiscards proves that an error resolving or
+// running the verify - not just a FAILED result - discards the revise
+// exactly like a red gate. A cancelled context, a budget park, or a missing
+// toolchain are none of them evidence the revise is good, so none of them
+// may commit it unverified; committing on a toolchain-missing error would
+// also contradict the "cannot run here" note ensureVerify just wrote to the
+// card's own Verify Command section. Calls checkpointReviseVerify directly,
+// the way the three-gate identity test does, so no subprocess or coder run
+// is needed to drive either error source.
+func TestMobCheckpointReviseGateErrorDiscards(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(o *run)
+	}{
+		{
+			name: "ensureVerify resolution error",
+			setup: func(o *run) {
+				o.verify = nil
+				o.proposeAttempted = true // skip Tier 3; Tier 4 falls straight to the ctx.Err() check
+			},
+		},
+		{
+			name:  "runVerifyPlan run error",
+			setup: seedResolvedVerifyPlan,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			git := &fakeGit{committed: true}
+			o := mobTestRun(ops, MobConfig{Participants: 2, Execute: true}, 0)
+			o.solver.git = git
+			tt.setup(o)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel() // already cancelled: both call sites classify this as an error, not a result
+
+			ok := o.checkpointReviseVerify(ctx, o.solver, subtaskRef{ID: "SUB-1"})
+
+			assert.False(t, ok, "an error resolving/running the verify must discard, not commit unverified")
+			assert.Contains(t, git.hardResetRefs, "HEAD")
+			assert.Contains(t, strings.Join(ops.logs, "\n"), "revise discarded")
+		})
+	}
+}
+
+// TestSoloCheckpointReviseGatePassReportsVerifyPass drives a full subtask
+// through runExecute end to end: the coder's own work passes the pre-commit
+// gate, the checkpoint mob discussion returns a revise verdict, the fix
+// coder's revise lands, and the revise's OWN gate also passes. The reported
+// model outcome row must say VerifyPass true - a pass the revise gate
+// actually earned, which the unconditional `sc.gate.verified = false`
+// commitRevise used to force would have understated.
+func TestSoloCheckpointReviseGatePassReportsVerifyPass(t *testing.T) {
+	ops := &fakeOps{}
+	// headSHA must be non-empty: executeSubtaskWith only captures a
+	// checkpointBase (and so only checkpoints at all) when Head returns one.
+	git := &fakeGit{committed: true, headSHA: "abc123"}
+	client := &planLLM{responses: []llm.Response{
+		finishResp("feat: subtask done", 0.01),
+		finishResp("fix: address checkpoint findings", 0.01),
+	}}
+	// reviewerRegistry, not planTestRegistry: the checkpoint panel excludes
+	// whatever model the subtask's own coder used, and planTestRegistry's only
+	// employable model IS the coder's fallback, which would leave zero seats.
+	d := Deps{
+		Ops:        ops,
+		Git:        git,
+		Client:     client,
+		Emit:       events.NewEmitter(nil, nil),
+		Registry:   reviewerRegistry(),
+		WriteTools: testWriteTools(),
+		ReadTools:  tools.NewRegistry(tools.NewReadTool(".")),
+		Cfg: Config{
+			Project: "proj", CardID: "CARD-1",
+			PayloadModel: "payload/model", DefaultModel: "default/model",
+			MaxTurns: 20,
+			Mob:      MobConfig{Participants: 2, Execute: true, CheckpointMinTier: "simple", CheckpointRounds: 1},
+		},
+	}
+
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
+	o.solver.git = &diffGit{fakeGit: git, diff: "diff --git a/a.go b/a.go\n+lgtm\n"}
+
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 0}
+	}
+
+	eng := &scriptedEngine{outcomes: []mob.Outcome{{
+		Synthesis: `{"verdict":"revise","fixes":[{"file":"a.go","issue":"missed a case"}],"summary":"one fix"}`,
+	}}}
+	o.mobEngine = eng.run
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	require.Len(t, git.commitMsgs, 2, "the coder's own commit and the revise commit both land")
+	require.Len(t, ops.reportOutcomes, 1)
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 1)
+	assert.Equal(t, "win", rows[0].Result)
+	assert.True(t, rows[0].VerifyPass, "the revise gate ran and passed against the revised tree")
+}
+
+// TestSoloCheckpointReviseGateFailKeepsOriginalVerifyPass is the negative
+// half: a revise whose own gate FAILS is discarded before commitRevise ever
+// runs (checkpointReviseVerify), so the reported row still carries what the
+// pre-commit gate saw on the tree that actually shipped - the ORIGINAL
+// commit - never a claim about the discarded revise.
+func TestSoloCheckpointReviseGateFailKeepsOriginalVerifyPass(t *testing.T) {
+	ops := &fakeOps{}
+	// headSHA must be non-empty: executeSubtaskWith only captures a
+	// checkpointBase (and so only checkpoints at all) when Head returns one.
+	git := &fakeGit{committed: true, headSHA: "abc123"}
+	client := &planLLM{responses: []llm.Response{
+		finishResp("feat: subtask done", 0.01),
+		finishResp("fix: address checkpoint findings", 0.01),
+	}}
+	// reviewerRegistry, not planTestRegistry: see the sibling positive test
+	// for why planTestRegistry leaves the checkpoint panel with zero seats.
+	d := Deps{
+		Ops:        ops,
+		Git:        git,
+		Client:     client,
+		Emit:       events.NewEmitter(nil, nil),
+		Registry:   reviewerRegistry(),
+		WriteTools: testWriteTools(),
+		ReadTools:  tools.NewRegistry(tools.NewReadTool(".")),
+		Cfg: Config{
+			Project: "proj", CardID: "CARD-1",
+			PayloadModel: "payload/model", DefaultModel: "default/model",
+			MaxTurns: 20,
+			Mob:      MobConfig{Participants: 2, Execute: true, CheckpointMinTier: "simple", CheckpointRounds: 1},
+		},
+	}
+
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
+	o.solver.git = &diffGit{fakeGit: git, diff: "diff --git a/a.go b/a.go\n+lgtm\n"}
+
+	seedResolvedVerifyPlan(o)
+
+	calls := 0
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		calls++
+		if calls == 1 {
+			// The pre-commit gate, on the coder's original work: passes.
+			return verifyexec.Outcome{ExitCode: 0}
+		}
+		// The checkpoint revise gate, on the fix coder's work: fails.
+		return verifyexec.Outcome{ExitCode: 1, Output: "--- FAIL: TestThing"}
+	}
+
+	eng := &scriptedEngine{outcomes: []mob.Outcome{{
+		Synthesis: `{"verdict":"revise","fixes":[{"file":"a.go","issue":"missed a case"}],"summary":"one fix"}`,
+	}}}
+	o.mobEngine = eng.run
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	require.Len(t, git.commitMsgs, 1, "the failed revise gate discards the revise; only the original commit lands")
+	require.Len(t, ops.reportOutcomes, 1)
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 1)
+	assert.Equal(t, "win", rows[0].Result)
+	assert.True(t, rows[0].VerifyPass,
+		"the original commit's gate passed, and the failed revise never touched what shipped")
 }
 
 func TestRecordCheckpointDiscussion(t *testing.T) {
