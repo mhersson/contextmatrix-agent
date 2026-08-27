@@ -409,13 +409,15 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 		// 1 + (wins - expected_wins)/samples, and a solo row carries
 		// n_candidates 1, so it contributes exactly 1.0 to expected wins: a
 		// `win` leaves that numerator untouched where a `failed` lowers it.
-		// A win and a suppressed row are NOT equivalent, and neither is inert -
-		// both still move the sample count, which dilutes any existing
-		// deviation and gates whether the factor applies at all - but neither
-		// records that the work needed repair, which is the fact worth
-		// keeping. Adding a second row crediting the fix model was rejected as
-		// well: it would count one unit of work as two samples, and the two
-		// picks resolve through the same registry at the same bar, so they are
+		// The two rejected options fail differently. A `win` is not inert - it
+		// still increments the sample count, which dilutes any existing
+		// deviation and can carry a model past the floor that gates the factor
+		// - but what it moves says nothing about the work having needed
+		// repair. Suppressing the row writes nothing at all, so it touches
+		// neither the numerator nor the count, and loses the fact entirely.
+		// Adding a second row crediting the fix model was rejected as well: it
+		// would count one unit of work as two samples, and the two picks
+		// resolve through the same registry at the same bar, so they are
 		// frequently the same model. The fix model's contribution stays
 		// visible in the cost delta below and in its own sizing observation
 		// row.
