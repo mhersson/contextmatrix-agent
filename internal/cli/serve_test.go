@@ -47,18 +47,31 @@ func TestExitStatus(t *testing.T) {
 	tests := []struct {
 		name        string
 		code        int64
+		cause       executor.ExitCause
 		wantStatus  string
 		wantMessage string
 	}{
-		{"zero is completed", 0, "completed", ""},
-		{"nonzero is failed", 1, "failed", "worker exited with code 1"},
-		{"timeout sentinel is failed", -1, "failed", "worker exited with code -1"},
-		{"high code is failed", 137, "failed", "worker exited with code 137"},
+		{"zero is completed", 0, executor.ExitNormal, "completed", ""},
+		{"nonzero is failed", 1, executor.ExitNormal, "failed", "worker exited with code 1"},
+		{"timeout sentinel is failed", -1, executor.ExitTimeout, "failed", "worker exited with code -1"},
+		{"wait failure sentinel is failed", -1, executor.ExitWaitFailure, "failed", "worker exited with code -1"},
+		{"idle kill is failed", 137, executor.ExitIdleTimeout, "failed", "worker exited with code 137"},
+		{"requested kill is failed", 137, executor.ExitKilled, "failed", "worker exited with code 137"},
+		{
+			"a daemon error is failed even carrying a zero code",
+			0, executor.ExitDaemonError,
+			"failed", "worker exit status unknown: the container wait returned a daemon error",
+		},
+		{
+			"a daemon error does not quote the code it arrived with",
+			1, executor.ExitDaemonError,
+			"failed", "worker exit status unknown: the container wait returned a daemon error",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			status, message := exitStatus(tt.code)
+			status, message := exitStatus(tt.code, tt.cause)
 			assert.Equal(t, tt.wantStatus, status)
 			assert.Equal(t, tt.wantMessage, message)
 		})
@@ -351,16 +364,17 @@ func TestTerminalEventCarriesTheAttemptOrdinal(t *testing.T) {
 // three ways closes both surfaces, and the cause distinguishes them.
 func TestFooterAndTerminalEventWrittenOnEveryExitPath(t *testing.T) {
 	tests := []struct {
-		name     string
-		exitCode int64
-		cause    executor.ExitCause
+		name       string
+		exitCode   int64
+		cause      executor.ExitCause
+		wantStatus string
 	}{
-		{"normal", 0, executor.ExitNormal},
-		{"timeout", -1, executor.ExitTimeout},
-		{"wait failure", -1, executor.ExitWaitFailure},
-		{"daemon-flagged wait", 0, executor.ExitDaemonError},
-		{"idle watchdog kill", 137, executor.ExitIdleTimeout},
-		{"requested kill", 137, executor.ExitKilled},
+		{"normal", 0, executor.ExitNormal, "completed"},
+		{"timeout", -1, executor.ExitTimeout, "failed"},
+		{"wait failure", -1, executor.ExitWaitFailure, "failed"},
+		{"daemon-flagged wait", 0, executor.ExitDaemonError, "failed"},
+		{"idle watchdog kill", 137, executor.ExitIdleTimeout, "failed"},
+		{"requested kill", 137, executor.ExitKilled, "failed"},
 	}
 
 	for _, tc := range tests {
@@ -376,6 +390,7 @@ func TestFooterAndTerminalEventWrittenOnEveryExitPath(t *testing.T) {
 			assert.Equal(t, string(tc.cause), data["cause"])
 			assert.Contains(t, s, "==== run ended ")
 			assert.Contains(t, s, "cause="+string(tc.cause))
+			assert.Equal(t, tc.wantStatus, h.rep.status)
 			require.Len(t, drainStream(h.stream), 1)
 		})
 	}
