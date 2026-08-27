@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -361,6 +362,95 @@ func TestVerifyToolBaselineIsTakenAfterTheRun(t *testing.T) {
 
 	assert.Equal(t, 1, countLines(t, counter), "a command's own writes must not make the next call re-run it")
 	assert.Contains(t, res.Text, "already passed")
+}
+
+// An unreadable fingerprint is evidence of nothing: worktreeDirty must treat
+// every failed read as "assume written", so the tool costs a redundant verify
+// run rather than reporting a stale pass through Execute's shortcut. The error
+// variant asserts countLines == 2; clearing only the error, with identical
+// fingerprints otherwise, collapses it back to one run - proving only the error
+// path degrades.
+func TestVerifyToolErroringFingerprintAlwaysReruns(t *testing.T) {
+	t.Parallel()
+
+	t.Run("worktree state read fails", func(t *testing.T) {
+		t.Parallel()
+
+		ws := t.TempDir()
+		counter := filepath.Join(ws, "runs.txt")
+
+		g := &fakeGit{worktreeStateErr: errors.New("git status exploded")}
+
+		vt := NewVerifyTool(countingPlan(counter), ws, worktreeDirty(g), directVerifyExec())
+		require.NotNil(t, vt)
+
+		_, err := vt.Execute(context.Background(), nil)
+		require.NoError(t, err)
+
+		res, err := vt.Execute(context.Background(), nil)
+		require.NoError(t, err)
+
+		assert.Equal(t, 2, countLines(t, counter),
+			"an unreadable fingerprint must cost a re-run, never a cached pass")
+		assert.Contains(t, res.Text, "passed")
+		assert.NotContains(t, res.Text, "already passed",
+			"the second call must report a fresh run when the fingerprint cannot be read")
+	})
+
+	t.Run("worktree state read succeeds", func(t *testing.T) {
+		t.Parallel()
+
+		ws := t.TempDir()
+		counter := filepath.Join(ws, "runs.txt")
+
+		g := &fakeGit{worktreeStates: []string{"a", "a"}}
+
+		vt := NewVerifyTool(countingPlan(counter), ws, worktreeDirty(g), directVerifyExec())
+		require.NotNil(t, vt)
+
+		_, err := vt.Execute(context.Background(), nil)
+		require.NoError(t, err)
+
+		res, err := vt.Execute(context.Background(), nil)
+		require.NoError(t, err)
+
+		assert.Equal(t, 1, countLines(t, counter),
+			"an unchanged readable fingerprint must let the already-passed shortcut fire")
+		assert.Contains(t, res.Text, "already passed",
+			"only the error path may degrade to assume-written")
+	})
+}
+
+// worktreeDirty's contract, directly: an unchanged readable fingerprint moves
+// exactly once (first call true, second false), while any failed read reports
+// written on every call whatever the recorded baseline says.
+func TestWorktreeDirtyDegradesToWrittenOnError(t *testing.T) {
+	t.Parallel()
+
+	t.Run("unchanged readable fingerprint", func(t *testing.T) {
+		t.Parallel()
+
+		g := &fakeGit{worktreeStates: []string{"a", "a"}}
+		dirty := worktreeDirty(g)
+
+		assert.True(t, dirty(), "the first call has no baseline, so it counts as a write")
+		assert.False(t, dirty(), "an unchanged fingerprint between calls means nothing was written")
+	})
+
+	t.Run("unreadable fingerprint", func(t *testing.T) {
+		t.Parallel()
+
+		g := &fakeGit{worktreeStates: []string{"a"}}
+		dirty := worktreeDirty(g)
+
+		assert.True(t, dirty(), "sanity: the clean-path first call")
+		assert.False(t, dirty(), "sanity: the same read is not a write")
+
+		g.worktreeStateErr = errors.New("read budget blown")
+
+		assert.True(t, dirty(), "a failed read must be treated as written, never clean")
+		assert.True(t, dirty(), "every call on the error path stays written, baseline or not")
+	})
 }
 
 // The schema's prohibition is scoped the same way the prompt's is, and for the
