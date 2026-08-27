@@ -71,7 +71,7 @@ func TestBrainstormRecordsDesignOnMarker(t *testing.T) {
 	}}
 	o := brainstormRun(ops, inbox, client, 0, 0)
 
-	design, err := o.runBrainstorm(context.Background(), "payload/model")
+	design, err := o.runBrainstorm(context.Background(), fixedGateModel("payload/model"))
 	require.NoError(t, err)
 	assert.True(t, hasDesignSection(o.body), "## Design recorded on the card body; body=%q", o.body)
 	assert.Contains(t, ops.lastBody(), "Approach A")
@@ -84,7 +84,7 @@ func TestBrainstormPromoteEndsWithoutDesign(t *testing.T) {
 	client := &planLLM{responses: []llm.Response{stopResp("What sizes do you need?", 0.01)}}
 	o := brainstormRun(ops, inbox, client, 0, 0)
 
-	design, err := o.runBrainstorm(context.Background(), "payload/model")
+	design, err := o.runBrainstorm(context.Background(), fixedGateModel("payload/model"))
 	require.NoError(t, err)
 	assert.Empty(t, design, "no design returned on a mid-dialogue promote")
 	assert.False(t, hasDesignSection(o.body), "no design recorded on a mid-dialogue promote")
@@ -100,7 +100,7 @@ func TestBrainstormEndSessionParks(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := o.runBrainstorm(ctx, "payload/model")
+	_, err := o.runBrainstorm(ctx, fixedGateModel("payload/model"))
 	require.Error(t, err, "end_session surfaces as an error")
 }
 
@@ -109,7 +109,7 @@ func TestBrainstormBudgetParks(t *testing.T) {
 	inbox := &fakeInbox{}
 	o := brainstormRun(ops, inbox, &planLLM{}, 1.0, 2.0) // already over budget
 
-	_, err := o.runBrainstorm(context.Background(), "payload/model")
+	_, err := o.runBrainstorm(context.Background(), fixedGateModel("payload/model"))
 
 	var be *BudgetExceededError
 	require.ErrorAs(t, err, &be, "an over-budget brainstorm parks before any model call")
@@ -126,7 +126,7 @@ func TestBrainstormPromptOmitsRecordedHistory(t *testing.T) {
 	o.tc.Description = "Add a palette.\n\n## Plan\n\n1. SUBTASK: old\n\n## Review Findings\n\n- old note\n"
 	o.taskDescription = stripAgentSections(o.tc.Description)
 
-	_, err := o.runBrainstorm(context.Background(), "payload/model")
+	_, err := o.runBrainstorm(context.Background(), fixedGateModel("payload/model"))
 	require.NoError(t, err)
 
 	require.NotEmpty(t, client.tasks)

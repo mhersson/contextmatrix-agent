@@ -454,7 +454,7 @@ func TestDiagnoseConfigCarriesWrapUpNudge(t *testing.T) {
 	d.Cfg.MaxTurns = 8
 	o := newRun(d, ops.taskContext)
 
-	_, err := o.runDiagnose(context.Background(), "default/model")
+	_, err := o.runDiagnose(context.Background(), fixedGateModel("default/model"))
 	require.NoError(t, err)
 
 	joined := strings.Join(client.tasks, "\n")
