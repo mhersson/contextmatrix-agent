@@ -295,6 +295,23 @@ func TestCommitReviseSurfacesFullDecline(t *testing.T) {
 	}
 }
 
+// TestCommitReviseNoopLeavesGateEvidenceIntact proves the companion case to
+// TestMobCheckpointReviseClearsGateEvidence: a revise pass that commits
+// nothing never replaced the tree the gate verified, so the verdict must
+// survive rather than being cleared alongside an actual revise commit.
+func TestCommitReviseNoopLeavesGateEvidenceIntact(t *testing.T) {
+	ops := &fakeOps{}
+	o := mobTestRun(ops, MobConfig{Participants: 2, Execute: true}, 0)
+	o.solver.git = &fakeGit{committed: false}
+	o.solver.gate.verified = true
+
+	o.commitRevise(context.Background(), o.solver, subtaskRef{ID: "SUB-1"},
+		"declined: premise contradicted\n\ndetail body")
+
+	assert.True(t, o.solver.gate.verified,
+		"a no-op revise commit must not clear the gate verdict on the untouched tree")
+}
+
 // TestMobCheckpointReviseClearsGateEvidence proves F1: a mob execute
 // checkpoint that lands a revise commit after the pre-commit gate ran must
 // not let that gate's verdict stand. The gate ran and passed on the coder's

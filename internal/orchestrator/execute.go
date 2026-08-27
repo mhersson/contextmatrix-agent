@@ -40,9 +40,11 @@ type solverCtx struct {
 }
 
 // gateEvidence is what the pre-commit gate learned about the coder's own work.
-// It is carried on the solver rather than returned because preCommitVerify's
-// signature is a hook other work builds on and already takes an exhaustion
-// argument; a third parameter, or a second return, would widen it further.
+// It is carried on the solver rather than returned because the evidence has to
+// survive past preCommitVerify's return: mobCheckpoint runs between the gate
+// and the report site and mutates it. A return value would have to be threaded
+// through that call anyway, and that signature already carries the exhaustion
+// flag the turn-window work added.
 type gateEvidence struct {
 	// verified: the resolved command RAN and PASSED against the tree that is
 	// about to be committed. False for the skip tier and for an inconclusive
@@ -287,6 +289,9 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 		return fmt.Errorf("subtask %s: `%s` still fails after one fix pass", sub.ID, plan.Display)
 	}
 
+	// Symmetry with the first-run arm, not a live value: reaching here means
+	// the gate went red, so coderFailed is set and the report site overrides
+	// verifyPass to false whatever this assigns.
 	sc.gate.verified = vres.Status == verifyPassed
 
 	return nil
@@ -428,6 +433,14 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 		// on the re-run, or a fix pass that changed nothing, both land here
 		// too. Accepted, because the alternative is recording a clean win for
 		// work that was demonstrably red.
+		//
+		// A mob checkpoint's revise commit is deliberately not treated the same
+		// way. It clears the verify evidence, because nothing re-runs the gate
+		// against the revised tree, but it does not set coderFailed: the
+		// pre-commit gate is a deterministic project command and its red is a
+		// fact, while a revise verdict is model opinion, and recording a
+		// failure off model opinion would be a far noisier signal than the one
+		// this row exists to carry.
 		//
 		// VerifyPass carries what the gate actually saw: true only when the
 		// resolved command ran and passed on work that was never red. The skip
@@ -964,13 +977,14 @@ func (o *run) logSoloCapPark(ctx context.Context, subID, reason string) {
 // Bias-math note: a Best-of-N judge samples N candidates, so a model's win
 // rate over many judged runs settles below 100% and the leaderboard's
 // calibration factor is built to track that spread. A solo run is a sample of
-// exactly one candidate, so its expected win rate is already 1.0 - an
-// unbroken string of solo wins is therefore neutral, not inflationary: it
-// cannot push a model's calibration factor above the parity a single BoN win
-// already implies. Only a solo failure moves the needle, and only downward
-// toward the calibration floor. Solo reporting can widen the gap between a
-// reliable and an unreliable model; it can never manufacture a prior a model
-// has not earned.
+// exactly one candidate, so it contributes 1.0 to expected wins, and a solo
+// win therefore leaves the observed-minus-expected numerator exactly where it
+// was. That does NOT make a solo win inert. It still increments the sample
+// count, which both dilutes any deviation already recorded and counts toward
+// the sample threshold below which the calibration factor is not applied at
+// all - so a run of solo wins can switch an already-above-parity factor on.
+// What a solo win cannot do is move the numerator in a model's favour. Only a
+// solo failure moves it, downward, and the factor is clamped at both ends.
 func (o *run) reportSoloOutcome(ctx context.Context, cardID, model, result string, verifyPass bool, costUSD float64) {
 	outcome := cmclient.ModelOutcome{
 		Model:       model,
