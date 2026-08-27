@@ -26,15 +26,19 @@ func resolveCause(observed ExitCause, reason string) ExitCause {
 
 // resolveOutcome maps the way a container ended to a container_duration outcome
 // label. Precedence: an explicit container timeout wins; then a recorded kill
-// reason (idle_timeout / killed); otherwise the exit code (0 = success, any
-// other = failure). The label vocabulary is coarser than the cause vocabulary,
-// and stays that way: dashboards are built on these five values.
+// reason (idle_timeout / killed); then a daemon-flagged wait, whose zero exit
+// code cannot be trusted and is a failure regardless; otherwise the exit code
+// (0 = success, any other = failure). The label vocabulary is coarser than the
+// cause vocabulary, and stays that way: dashboards are built on these five
+// values.
 func resolveOutcome(cause ExitCause, reason string, exitCode int64) string {
 	switch {
 	case cause == ExitTimeout:
 		return metrics.OutcomeTimeout
 	case reason != "":
 		return reason
+	case cause == ExitDaemonError:
+		return metrics.OutcomeFailure
 	case exitCode == 0:
 		return metrics.OutcomeSuccess
 	default:
