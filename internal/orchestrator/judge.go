@@ -697,6 +697,19 @@ func (o *run) reportCandidateOutcomes(ctx context.Context) {
 			result = "failed"
 		}
 
+		// The same rule the solo path applies (walkedDown carries the
+		// reasoning): a candidate the ladder walked down was never rated for
+		// this work, so its `failed` row is not written. Only `failed` is
+		// suppressed - a `loss` is the judge preferring another
+		// implementation, which is a comparative measurement the row exists
+		// to carry. n is untouched: the race really had that many candidates.
+		if result == "failed" && walkedDown(c.pick) {
+			o.d.logCard(ctx, "best-of-n: nothing cleared the %s bar, so candidate %d walked down to %s at %s - the failure is not recorded against the model",
+				c.pick.RequestedTier, c.idx, c.model, metTierLabel(c.pick))
+
+			continue
+		}
+
 		rows = append(rows, cmclient.ModelOutcome{
 			Model:       c.model,
 			Result:      result,
@@ -705,6 +718,13 @@ func (o *run) reportCandidateOutcomes(ctx context.Context) {
 			NCandidates: n,
 			JudgeModel:  o.judgeModel,
 		})
+	}
+
+	// Every row can be suppressed - a fan-out where every candidate was walked
+	// down the ladder and then dropped. There is nothing to report then, and an
+	// empty batch is a board write that can only fail.
+	if len(rows) == 0 {
+		return
 	}
 
 	if err := o.d.Ops.ReportModelOutcomes(ctx, cfg.CardID, rows); err != nil {

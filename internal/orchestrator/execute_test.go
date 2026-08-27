@@ -934,7 +934,7 @@ func TestSalvageCappedFinalSubtask(t *testing.T) {
 	cg := &fakeGit{committed: true}
 	sc := &solverCtx{
 		git: cg, ledger: NewLedger(0, 0), tools: d.WriteTools,
-		workspace: "ws", coderModel: o.solverCoderModel,
+		workspace: "ws", coderModel: o.resolveCoderModel,
 		boardOps: false, push: false, tag: "candidate 1/1",
 		lastSubID: "SUB-2",
 	}
@@ -970,7 +970,7 @@ func TestNoSalvageOnCleanTree(t *testing.T) {
 	cg := &fakeGit{committed: false}
 	sc := &solverCtx{
 		git: cg, ledger: NewLedger(0, 0), tools: d.WriteTools,
-		workspace: "ws", coderModel: o.solverCoderModel,
+		workspace: "ws", coderModel: o.resolveCoderModel,
 		boardOps: false, push: false, tag: "candidate 1/1",
 		lastSubID: "SUB-2",
 	}
@@ -999,7 +999,7 @@ func TestSalvageFallsBackToTitleCommitMessage(t *testing.T) {
 	cg := &fakeGit{committed: true}
 	sc := &solverCtx{
 		git: cg, ledger: NewLedger(0, 0), tools: d.WriteTools,
-		workspace: "ws", coderModel: o.solverCoderModel,
+		workspace: "ws", coderModel: o.resolveCoderModel,
 		boardOps: false, push: false, tag: "candidate 1/1",
 		lastSubID: "SUB-2",
 	}
@@ -1024,7 +1024,7 @@ func TestNoSalvageOnEarlierSubtask(t *testing.T) {
 	cg := &fakeGit{committed: true}
 	sc := &solverCtx{
 		git: cg, ledger: NewLedger(0, 0), tools: d.WriteTools,
-		workspace: "ws", coderModel: o.solverCoderModel,
+		workspace: "ws", coderModel: o.resolveCoderModel,
 		boardOps: false, push: false, tag: "candidate 1/1",
 		lastSubID: "SUB-9", // the capped subtask is NOT the final one
 	}
@@ -1309,7 +1309,7 @@ func TestSalvageDeclineOnUnresolvableVerifyRaisesBudgetOnly(t *testing.T) {
 
 	salvaged, err := o.salvageSoloCapped(ctx, o.solver,
 		subtaskRef{ID: "SUB-1", Title: "Only", Sizing: seedSizing("moderate")},
-		"coder/model", 0, harness.Result{}, &MaxTurnsError{Model: "coder/model", Turns: 5})
+		atBarPick("coder/model"), 0, harness.Result{}, &MaxTurnsError{Model: "coder/model", Turns: 5})
 	require.False(t, salvaged, "an unresolvable verify cannot confirm the work")
 	require.NoError(t, err, "a non-toolchain resolution error parks as a plain turn cap")
 	require.True(t, ops.loggedContains("verify could not be resolved"),
@@ -2090,7 +2090,7 @@ func TestCandidateCompletionDoesNotReportSoloOutcome(t *testing.T) {
 	cg := &fakeGit{committed: true}
 	sc := &solverCtx{
 		git: cg, ledger: NewLedger(0, 0), tools: d.WriteTools,
-		workspace: "ws", coderModel: o.solverCoderModel,
+		workspace: "ws", coderModel: o.resolveCoderModel,
 		boardOps: false, push: false, tag: "candidate 1/1",
 	}
 
@@ -2150,7 +2150,7 @@ func TestCandidateSubtaskParksOnRunLedgerBreach(t *testing.T) {
 
 	sc := &solverCtx{
 		git: &fakeGit{committed: true}, ledger: NewLedger(0, 0), tools: d.WriteTools,
-		workspace: "ws", coderModel: o.solverCoderModel,
+		workspace: "ws", coderModel: o.resolveCoderModel,
 		boardOps: false, push: false, tag: "candidate 1/1",
 	}
 
@@ -2460,9 +2460,9 @@ func TestCoderTierIsAlwaysDerivedFromTheWork(t *testing.T) {
 
 				c := &candidate{idx: 1, model: "dropped/model"}
 
-				model, err := o.candidateCoderModel(c)(context.Background(), subtaskRef{ID: "SUB-1"}, "prompt")
+				pick, err := o.candidateCoderModel(c)(context.Background(), subtaskRef{ID: "SUB-1"}, "prompt")
 				require.NoError(t, err)
-				assert.Equal(t, tt.wantModel, model,
+				assert.Equal(t, tt.wantModel, pick.Model,
 					"a candidate re-pick must stay on the card's tier, not a constant")
 			})
 		}
@@ -2815,7 +2815,7 @@ func TestPreCommitVerifySkippedForCandidateSolver(t *testing.T) {
 
 	sc := &solverCtx{
 		git: &fakeGit{committed: true}, ledger: NewLedger(0, 0), tools: d.WriteTools,
-		workspace: "ws", coderModel: o.solverCoderModel,
+		workspace: "ws", coderModel: o.resolveCoderModel,
 		boardOps: false, push: false, tag: "candidate 1/2",
 	}
 
@@ -3492,4 +3492,219 @@ func TestStillRedGateParksThroughTheTypedSentinel(t *testing.T) {
 	assert.Empty(t, git.commitMsgs, "nothing may be committed while the verify is red; git=%v", git.recorded())
 	assert.Empty(t, git.pushBranches, "a red tree is never pushed by the subtask path")
 	assert.Equal(t, -1, indexOfCall(ops.recorded(), "CompleteTask:SUB-1"), "a parked subtask is not completed")
+}
+
+// belowBarSubtask is a subtask asking for the complex bar, which
+// priorTestRegistry(0.70) cannot serve: the ladder walks down to simple and
+// the coder runs on a model rated for far less than this work.
+func belowBarSubtask() []subtaskRef {
+	return []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("complex")}}
+}
+
+// repairedRunVerify is the pre-commit gate script that produces a "failed"
+// coder row: the coder's own tree is red, the bounded fix pass repairs it, and
+// the subtask ships. The row is about the CODER's work, so it says failed.
+func repairedRunVerify() func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+	runs := 0
+
+	return func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		runs++
+		if runs == 1 {
+			return verifyexec.Outcome{ExitCode: 1, Output: "--- FAIL: TestThing"}
+		}
+
+		return verifyexec.Outcome{ExitCode: 0}
+	}
+}
+
+func repairedResponses() []llm.Response {
+	return []llm.Response{
+		finishResp("feat: subtask done", 0.01),
+		stopResp("coder: fixed the failing test", 0.02),
+	}
+}
+
+// TestBelowBarFailureIsNotChargedToTheModel is the ratchet this suppression
+// exists to break. When the requested rung is empty the selector walks DOWN
+// and hands the work to a model rated for less. Charging that model a loss
+// lowers the prior that put it on its own rung, so that rung empties too and
+// the next selection walks down further - a self-reinforcing downgrade.
+func TestBelowBarFailureIsNotChargedToTheModel(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	d := execTestDeps(ops, git, &planLLM{responses: repairedResponses()})
+	d.Registry = priorTestRegistry(0.70)
+
+	o := newExecRun(d, belowBarSubtask(), 0)
+	seedResolvedVerifyPlan(o)
+	o.runVerify = repairedRunVerify()
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	assert.Empty(t, ops.reportOutcomes,
+		"a model that was walked down the ladder must not be charged a loss for work it was never rated for")
+
+	// The suppression is silent otherwise, so the note is the only signal an
+	// operator has that a row was skipped rather than lost.
+	assert.True(t, ops.loggedContains("not recorded"),
+		"the skipped row must be said out loud on the card; logs=%v", ops.logs)
+}
+
+// TestBelowBarSubtaskStillCompletes guards against over-correcting: skipping
+// the leaderboard row changes nothing about the work itself.
+func TestBelowBarSubtaskStillCompletes(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	d := execTestDeps(ops, git, &planLLM{responses: repairedResponses()})
+	d.Registry = priorTestRegistry(0.70)
+
+	o := newExecRun(d, belowBarSubtask(), 0)
+	seedResolvedVerifyPlan(o)
+	o.runVerify = repairedRunVerify()
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "CompleteTask:SUB-1"), 0,
+		"the repaired work still ships; only the leaderboard row changes")
+	assert.NotEmpty(t, git.pushBranches, "the subtask is still pushed")
+}
+
+// TestBelowBarWinIsStillRecorded pins the asymmetry. The suppression protects a
+// model from a penalty it did not earn; it is not a blanket exemption from
+// measurement. A model that succeeded ABOVE the rung it was rated for is the
+// most valuable evidence the leaderboard can collect, and dropping it would
+// make the rung it belongs to permanently unclimbable.
+func TestBelowBarWinIsStillRecorded(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	d := execTestDeps(ops, git, &planLLM{responses: []llm.Response{finishResp("feat(x): add y", 0.10)}})
+	d.Registry = priorTestRegistry(0.70)
+
+	o := newExecRun(d, belowBarSubtask(), 0)
+	require.NoError(t, runExecute(context.Background(), o))
+
+	require.Len(t, ops.reportOutcomes, 1)
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 1)
+	assert.Equal(t, "win", rows[0].Result)
+	assert.Equal(t, "default/model", rows[0].Model)
+}
+
+// TestAtBarFailureIsStillRecorded is the unchanged-behaviour guard: a model
+// that got exactly the bar it asked for and still failed earned its row, and
+// this change must not have widened into a general amnesty.
+func TestAtBarFailureIsStillRecorded(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	d := execTestDeps(ops, git, &planLLM{responses: repairedResponses()})
+	d.Registry = priorTestRegistry(0.90) // clears the complex bar outright
+
+	o := newExecRun(d, belowBarSubtask(), 0)
+	seedResolvedVerifyPlan(o)
+	o.runVerify = repairedRunVerify()
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	require.Len(t, ops.reportOutcomes, 1)
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 1)
+	assert.Equal(t, "failed", rows[0].Result, "an at-bar coder whose work was red still earns its loss row")
+}
+
+// TestPinnedPickIsNotAWalkDownSoItsFailureIsRecorded is one half of the
+// boundary, stated as a name so the next reader does not have to infer it. A
+// pin is operator intent: the selector never walked anywhere, so there is no
+// walk-down to suppress. It matters because the synthesized pins this package
+// builds carry no measured prior, so every one of them reports BelowBar -
+// suppressing on that alone would silently stop recording outcomes for every
+// pinned run, which is exactly the operator who most needs to learn their pin
+// is failing. Same reading the authoritative fix gate and panelBelowBar take.
+func TestPinnedPickIsNotAWalkDownSoItsFailureIsRecorded(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	d := execTestDeps(ops, git, &planLLM{responses: repairedResponses()})
+	d.Registry = priorTestRegistry(0.70)
+
+	o := newExecRun(d, belowBarSubtask(), 0)
+	o.tc.ModelCoder = "pinned/model"
+	seedResolvedVerifyPlan(o)
+	o.runVerify = repairedRunVerify()
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	require.Len(t, ops.reportOutcomes, 1)
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 1)
+	assert.Equal(t, "failed", rows[0].Result)
+	assert.Equal(t, "pinned/model", rows[0].Model, "the operator's pin is what ran and what is measured")
+}
+
+// TestBelowBarCapFailureIsNotChargedToTheModel covers the OTHER failed-row
+// producer on the solo path. salvageSoloCapped receives its pick down a
+// different route - the error return of the coder loop rather than its success
+// return - so a slug threaded correctly through one path proves nothing about
+// the other.
+func TestBelowBarCapFailureIsNotChargedToTheModel(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{} // clean tree: nothing to salvage-commit, so the cap parks
+	d := execTestDeps(ops, git, &planLLM{responses: burnResps(20)})
+	d.Registry = priorTestRegistry(0.70)
+	d.Cfg.MaxTurns = 5
+
+	o := newExecRun(d, belowBarSubtask(), 0)
+
+	err := runExecute(context.Background(), o)
+	require.Error(t, err, "a capped subtask with nothing committed still parks")
+
+	assert.Empty(t, ops.reportOutcomes,
+		"the turn-cap arm must respect the same rule as the pre-commit gate")
+	assert.True(t, ops.loggedContains("not recorded"),
+		"the skipped row is said out loud here too; logs=%v", ops.logs)
+}
+
+// TestAtBarCapFailureIsStillRecorded is its unchanged-behaviour twin: the cap
+// arm still charges a model that got the bar it asked for.
+func TestAtBarCapFailureIsStillRecorded(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{}
+	d := execTestDeps(ops, git, &planLLM{responses: burnResps(20)})
+	d.Registry = priorTestRegistry(0.90)
+	d.Cfg.MaxTurns = 5
+
+	o := newExecRun(d, belowBarSubtask(), 0)
+
+	err := runExecute(context.Background(), o)
+	require.Error(t, err)
+
+	require.Len(t, ops.reportOutcomes, 1)
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 1)
+	assert.Equal(t, "failed", rows[0].Result)
+}
+
+// TestCapableDefaultIsNotAWalkDownSoItsFailureIsRecorded is the other half of
+// the boundary. The capable default is reached only when NO rung had anything,
+// so it clears no configured bar and reports BelowBar like the pins do - but it
+// sits in no rung, so charging it cannot empty one and cannot feed the ratchet
+// the suppression exists to break. Its rows are the only evidence that exists
+// about the operator's fallback model, and dropping them would leave a failing
+// fallback invisible.
+//
+// planTestRegistry carries no priors, so it resolves to exactly this shape.
+func TestCapableDefaultIsNotAWalkDownSoItsFailureIsRecorded(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	d := execTestDeps(ops, git, &planLLM{responses: repairedResponses()})
+
+	o := newExecRun(d, belowBarSubtask(), 0)
+	seedResolvedVerifyPlan(o)
+	o.runVerify = repairedRunVerify()
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	require.Len(t, ops.reportOutcomes, 1)
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 1)
+	assert.Equal(t, "failed", rows[0].Result)
+	assert.Equal(t, "default/model", rows[0].Model, "the operator's fallback is what ran and what is measured")
 }

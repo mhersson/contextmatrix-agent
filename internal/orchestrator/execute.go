@@ -25,11 +25,14 @@ func estimateTokens(prompt string) int { return len(prompt)/4 + 24000 }
 // through. The parent run's solver targets the main workspace and the board;
 // Best-of-N candidates target a worktree and stay off the board.
 type solverCtx struct {
-	git        GitOps
-	ledger     *Ledger
-	tools      *tools.Registry
-	workspace  string
-	coderModel func(ctx context.Context, sub subtaskRef, prompt string) (string, error)
+	git       GitOps
+	ledger    *Ledger
+	tools     *tools.Registry
+	workspace string
+	// coderModel resolves the model for one coder attempt. It returns the whole
+	// Pick, not the slug: the outcome report has to know whether the selector
+	// got the bar it asked for, and a slug cannot carry that.
+	coderModel func(ctx context.Context, sub subtaskRef, prompt string) (registry.Pick, error)
 	boardOps   bool         // false: no subtask claim/heartbeat/complete (candidate mode)
 	push       bool         // false: never push (candidate mode)
 	tag        string       // "" parent; "candidate 2/3 (slug)" for candidate log lines
@@ -486,13 +489,13 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 	prompt := fmt.Sprintf(coderPrompt, o.skillEngage(), o.grounding, sc.workspace,
 		verifyCommandBlock(o.resolvedVerifyPlan()), sub.Title, subtaskBody(sub), o.tc.Title, o.taskDescription)
 
-	res, model, coderMaxTurns, err := o.runCoderWith(ctx, sc, sub, prompt)
+	res, pick, coderMaxTurns, err := o.runCoderWith(ctx, sc, sub, prompt)
 	if err != nil {
 		if o.salvageCapped(ctx, sc, sub, res, err) {
 			return nil
 		}
 
-		salvaged, serr := o.salvageSoloCapped(ctx, sc, sub, model, spendBefore, res, err)
+		salvaged, serr := o.salvageSoloCapped(ctx, sc, sub, pick, spendBefore, res, err)
 		if salvaged {
 			return nil
 		}
@@ -541,7 +544,7 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 			if sc.gate.environmentalFailure {
 				o.d.logCard(ctx, "subtask %s: verify still failed under container resource exhaustion - treated as environmental; no model outcome reported", sub.ID)
 			} else {
-				o.reportSoloOutcome(ctx, sub.ID, model, "failed", false, sc.ledger.Spent()-spendBefore)
+				o.reportSoloOutcome(ctx, sub.ID, pick, "failed", false, sc.ledger.Spent()-spendBefore)
 			}
 		}
 
@@ -625,7 +628,7 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 			result, verifyPass = "failed", false
 		}
 
-		o.reportSoloOutcome(ctx, sub.ID, model, result, verifyPass, sc.ledger.Spent()-spendBefore)
+		o.reportSoloOutcome(ctx, sub.ID, pick, result, verifyPass, sc.ledger.Spent()-spendBefore)
 
 		if err := d.Ops.CompleteTask(ctx, sub.ID, commitSubject(commitMsg, sub.Title)); err != nil {
 			return fmt.Errorf("complete subtask %s: %w", sub.ID, err)
@@ -669,19 +672,21 @@ func (o *run) releaseSubtask(ctx context.Context, cardID string) {
 // clean (no git reset). The loop is bounded by recoverIncapable's per-card cap:
 // once exhausted it returns the wrapped park error. Any non-incapable run error
 // (transport, context limit, budget) is returned immediately, unwrapped of the
-// recovery loop. Returns the successful run's result, alongside the SELECTED
-// catalog slug for that attempt - not the gateway-echoed ModelUsed - because a
-// caller reporting a model outcome must key the row the way Best-of-N rows are
-// keyed (candidates.go's c.model = spec.Model): CM attaches outcome stats back
-// onto candidates by that slug, so a row keyed on a gateway's echoed name would
-// never rejoin selection.
+// recovery loop. Returns the successful run's result, alongside the PICK that
+// attempt ran on - so its Model is the SELECTED catalog slug, not the
+// gateway-echoed ModelUsed, because a caller reporting a model outcome must key
+// the row the way Best-of-N rows are keyed (candidates.go's setPick): CM
+// attaches outcome stats back onto candidates by that slug, so a row keyed on a
+// gateway's echoed name would never rejoin selection. The rest of the Pick is
+// what tells that caller whether the selector got the bar it asked for, which
+// decides whether a failure may be charged to the model at all.
 //
 // The third return is the turn window the run was configured with. A caller that
 // judges res.Turns against a window - the pre-commit gate does, to tell a coder
 // that finished early from one that spent everything it had - must judge against
 // THIS window rather than derive its own, or a cap that ever becomes per-attempt
 // leaves the two silently disagreeing.
-func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, prompt string) (harness.Result, string, int, error) {
+func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, prompt string) (harness.Result, registry.Pick, int, error) {
 	d := o.d
 	cfg := d.Cfg
 
@@ -696,10 +701,12 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 	// is the authoritative bound (it errors at the cap), the +1 is a belt-and-braces
 	// ceiling so a logic slip can never spin.
 	for attempt := 0; attempt <= reselectCap; attempt++ {
-		model, err := sc.coderModel(ctx, sub, prompt)
+		pick, err := sc.coderModel(ctx, sub, prompt)
 		if err != nil {
-			return harness.Result{}, "", maxTurns, fmt.Errorf("coder for %s: %w", sub.ID, err)
+			return harness.Result{}, registry.Pick{}, maxTurns, fmt.Errorf("coder for %s: %w", sub.ID, err)
 		}
+
+		model := pick.Model
 
 		logMsg := fmt.Sprintf("coder model %s selected for subtask %q (bar=%s, turns=%s)",
 			model, sub.Title, sub.Sizing.Bar, budgetLabel(sub.Sizing.Budget))
@@ -760,7 +767,7 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 			// recoverIncapable blacklists + excludes the model and returns an error
 			// only when the per-card re-selection cap is exhausted - park then.
 			if rerr := o.recoverIncapable(ctx, ie); rerr != nil {
-				return res, model, maxTurns, rerr
+				return res, pick, maxTurns, rerr
 			}
 
 			// Re-select (the failed model is now excluded) and re-run the SAME
@@ -769,15 +776,15 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 		}
 
 		if err != nil {
-			return res, model, maxTurns, fmt.Errorf("coder run for %s: %w", sub.ID, err)
+			return res, pick, maxTurns, fmt.Errorf("coder run for %s: %w", sub.ID, err)
 		}
 
-		return res, model, maxTurns, nil
+		return res, pick, maxTurns, nil
 	}
 
 	// Unreachable in practice: recoverIncapable errors at the cap before the loop
 	// can exhaust its iterations. Defensive guard against an infinite loop.
-	return harness.Result{}, "", maxTurns, fmt.Errorf("coder for %s: re-selection loop exhausted", sub.ID)
+	return harness.Result{}, registry.Pick{}, maxTurns, fmt.Errorf("coder for %s: re-selection loop exhausted", sub.ID)
 }
 
 // pushBranch pushes the card branch after a commit. On a FRESH run that found a
@@ -856,16 +863,6 @@ func (o *run) resolveCoderModel(ctx context.Context, sub subtaskRef, prompt stri
 	o.noteShortfall(ctx, "coder", sub.ID, p)
 
 	return p, nil
-}
-
-// solverCoderModel adapts resolveCoderModel to the solver seam, which needs
-// only the slug. The pick's provenance is reported inside the resolver, the
-// same way the Best-of-N candidate resolver reports its own, so nothing
-// downstream has to carry it.
-func (o *run) solverCoderModel(ctx context.Context, sub subtaskRef, prompt string) (string, error) {
-	p, err := o.resolveCoderModel(ctx, sub, prompt)
-
-	return p.Model, err
 }
 
 // subtaskBody returns the description text for a subtask: the planner's
@@ -969,7 +966,11 @@ func (o *run) salvageCapped(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 // spendBefore is the run ledger's total at this subtask's start (captured by
 // the caller before the coder run), so every report below carries this
 // subtask's own cost delta, not the run's cumulative spend.
-func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskRef, model string, spendBefore float64, res harness.Result, err error) (bool, error) {
+//
+// One more exemption applies underneath all of these and is NOT enumerated per
+// arm: a failure from a pick the ladder walked down is dropped inside
+// reportSoloOutcome, whichever arm asked for it.
+func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskRef, pick registry.Pick, spendBefore float64, res harness.Result, err error) (bool, error) {
 	var mte *MaxTurnsError
 	if !sc.boardOps || !errors.As(err, &mte) {
 		return false, nil
@@ -989,7 +990,7 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 		// salvage-commit, and a clean tree says only that the work did not fit in
 		// the turns it had - nothing about the model that ran it.
 		o.raiseSubtaskBudget(ctx, sub, "the turn cap was reached with nothing committed")
-		o.reportSoloOutcome(ctx, sub.ID, model, "failed", false, sc.ledger.Spent()-spendBefore)
+		o.reportSoloOutcome(ctx, sub.ID, pick, "failed", false, sc.ledger.Spent()-spendBefore)
 
 		return false, nil
 	}
@@ -1013,7 +1014,7 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 
 		o.logSoloCapPark(ctx, sub.ID, "verify could not be resolved")
 		o.raiseSubtaskBudget(ctx, sub, "the turn cap was reached and the verify could not be resolved")
-		o.reportSoloOutcome(ctx, sub.ID, model, "failed", false, sc.ledger.Spent()-spendBefore)
+		o.reportSoloOutcome(ctx, sub.ID, pick, "failed", false, sc.ledger.Spent()-spendBefore)
 
 		return false, nil
 	}
@@ -1021,7 +1022,7 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 	if len(plan.Argv) == 0 {
 		o.logSoloCapPark(ctx, sub.ID, "no verify command resolved to confirm it")
 		o.raiseSubtaskBudget(ctx, sub, "the turn cap was reached with no verify command to confirm the work")
-		o.reportSoloOutcome(ctx, sub.ID, model, "failed", false, sc.ledger.Spent()-spendBefore)
+		o.reportSoloOutcome(ctx, sub.ID, pick, "failed", false, sc.ledger.Spent()-spendBefore)
 
 		return false, nil
 	}
@@ -1085,7 +1086,7 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 		// The same exemption the ToolchainMissingError branch above gets,
 		// extended to the exhausted-failure shape.
 		if modelEvidence {
-			o.reportSoloOutcome(ctx, sub.ID, model, "failed", false, sc.ledger.Spent()-spendBefore)
+			o.reportSoloOutcome(ctx, sub.ID, pick, "failed", false, sc.ledger.Spent()-spendBefore)
 		}
 
 		return false, nil
@@ -1112,7 +1113,7 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 	// rationale on reportSoloOutcome): the verify already confirmed the work,
 	// so the win is real regardless of what CompleteTask does next - a
 	// CompleteTask failure below gets no second, contradictory row.
-	o.reportSoloOutcome(ctx, sub.ID, model, "win", true, sc.ledger.Spent()-spendBefore)
+	o.reportSoloOutcome(ctx, sub.ID, pick, "win", true, sc.ledger.Spent()-spendBefore)
 
 	if cerr := o.d.Ops.CompleteTask(ctx, sub.ID, commitSubject(commitMsg, sub.Title)); cerr != nil {
 		slog.Warn("salvage: CompleteTask failed after passing verify",
@@ -1159,9 +1160,20 @@ func (o *run) logSoloCapPark(ctx context.Context, subID, reason string) {
 // all - so a run of solo wins can switch an already-above-parity factor on.
 // What a solo win cannot do is move the numerator in a model's favour. Only a
 // solo failure moves it, downward, and the factor is clamped at both ends.
-func (o *run) reportSoloOutcome(ctx context.Context, cardID, model, result string, verifyPass bool, costUSD float64) {
+// It takes the whole Pick rather than the slug because a `failed` row from a
+// selection the LADDER WALKED DOWN is not recorded at all (walkedDown carries
+// that rule and the reasoning): every reporting call site on this path funnels
+// through here, so the suppression sits here once instead of at each of them.
+func (o *run) reportSoloOutcome(ctx context.Context, cardID string, pick registry.Pick, result string, verifyPass bool, costUSD float64) {
+	if result == "failed" && walkedDown(pick) {
+		o.d.logCard(ctx, "subtask %s: nothing cleared the %s bar, so the ladder walked down to %s at %s - the failure is not recorded against the model",
+			cardID, pick.RequestedTier, pick.Model, metTierLabel(pick))
+
+		return
+	}
+
 	outcome := cmclient.ModelOutcome{
-		Model:       model,
+		Model:       pick.Model,
 		Result:      result,
 		VerifyPass:  verifyPass,
 		CostUSD:     costUSD,
@@ -1170,7 +1182,7 @@ func (o *run) reportSoloOutcome(ctx context.Context, cardID, model, result strin
 
 	if err := o.d.Ops.ReportModelOutcomes(ctx, cardID, []cmclient.ModelOutcome{outcome}); err != nil {
 		slog.Warn("execute: report solo model outcome failed",
-			"card_id", cardID, "model", model, "result", result, "error", err)
+			"card_id", cardID, "model", pick.Model, "result", result, "error", err)
 	}
 }
 

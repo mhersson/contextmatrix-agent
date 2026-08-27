@@ -118,13 +118,15 @@ func (g *errDiffStatGit) DiffStat(_ context.Context, _ string) (string, error) {
 // pre-loaded with zero spend (the adoption tail reads c.ledger.Spent() for
 // every candidate, so it must never be nil).
 func judgeCandidate(idx int, model, dir, diff string) *candidate {
-	return &candidate{
+	c := &candidate{
 		idx:    idx,
-		model:  model,
 		dir:    dir,
 		git:    &diffGit{fakeGit: &fakeGit{}, diff: diff},
 		ledger: NewLedger(0, 0),
 	}
+	c.setPick(atBarPick(model))
+
+	return c
 }
 
 // newJudgeRun wires a run for the judge phase: BestOfN=2, a scripted verify stub
@@ -874,4 +876,118 @@ func TestJudgeReportsItsShortfall(t *testing.T) {
 	assert.NotEmpty(t, o.judgeModel, "the judge still runs on the best available model")
 	assert.True(t, ops.loggedContains("no model clears the complex bar"),
 		"the judge's shortfall must reach the card; logs=%v", ops.logs)
+}
+
+// TestDroppedBelowBarCandidateIsNotChargedAFailure carries the solo path's rule
+// onto the Best-of-N rollup, which is the other place a below-bar pick's
+// failure can reach a loss row. A candidate the ladder walked down and that
+// then dropped out reports `failed` - the strongest negative row this system
+// writes - for work it was never rated for. The candidates that DID get the
+// bar they asked for are unaffected, and the race size stays honest: three
+// models really did run.
+func TestDroppedBelowBarCandidateIsNotChargedAFailure(t *testing.T) {
+	ops := &fakeOps{}
+	mainGit := &fakeGit{}
+	client := &planLLM{responses: []llm.Response{
+		stopResp(`{"winner": 2, "ranking": [2, 1], "rationale": "c2 is the cleanest.", "notes": []}`, 0.04),
+	}}
+
+	c1 := adoptionCandidate(1, "coder/one", "dir-c1", "DIFF_ONE", "cm/card-1-c1", 0.01)
+	c2 := adoptionCandidate(2, "coder/two", "dir-c2", "DIFF_TWO", "cm/card-1-c2", 0.02)
+	c3 := adoptionCandidate(3, "coder/three", "dir-c3", "DIFF_THREE", "cm/card-1-c3", 0.03)
+	c3.setPick(belowBarPick("coder/three"))
+	c3.err = assertErr("candidate 3 build failed")
+
+	verify := map[string]bool{"dir-c1": true, "dir-c2": true, "dir-c3": false}
+	o := newJudgeRun(t, ops, mainGit, client, []*candidate{c1, c2, c3}, verify)
+	o.stopSubHB = func() {}
+
+	require.NoError(t, runJudge(context.Background(), o))
+
+	require.Len(t, ops.reportOutcomes, 1)
+	rows := ops.reportOutcomes[0]
+
+	byModel := map[string]cmclient.ModelOutcome{}
+	for _, row := range rows {
+		byModel[row.Model] = row
+	}
+
+	assert.NotContains(t, byModel, "coder/three",
+		"a candidate walked down the ladder must not be charged a failure for work it was never rated for")
+	assert.Equal(t, "win", byModel["coder/two"].Result, "the winner is unaffected")
+	assert.Equal(t, "loss", byModel["coder/one"].Result, "an at-bar survivor is unaffected")
+
+	for model, row := range byModel {
+		assert.Equal(t, 3, row.NCandidates,
+			"model %s: the race really had three candidates; suppressing a row does not shrink it", model)
+	}
+
+	assert.True(t, ops.loggedContains("not recorded"),
+		"the skipped row must be said out loud on the card; logs=%v", ops.logs)
+}
+
+// TestDroppedAtBarCandidateStillReportsFailed is the unchanged-behaviour guard
+// beside it: a candidate that got the tier it asked for and still dropped out
+// earned its row.
+func TestDroppedAtBarCandidateStillReportsFailed(t *testing.T) {
+	ops := &fakeOps{}
+	mainGit := &fakeGit{}
+	client := &planLLM{}
+
+	c1 := adoptionCandidate(1, "coder/one", "dir-c1", "DIFF_ONE", "cm/card-1-c1", 0.01)
+	c2 := adoptionCandidate(2, "coder/two", "dir-c2", "DIFF_TWO", "cm/card-1-c2", 0.02)
+	c2.err = assertErr("candidate 2 build failed")
+
+	verify := map[string]bool{"dir-c1": true, "dir-c2": false}
+	o := newJudgeRun(t, ops, mainGit, client, []*candidate{c1, c2}, verify)
+	o.stopSubHB = func() {}
+
+	require.NoError(t, runJudge(context.Background(), o))
+
+	require.Len(t, ops.reportOutcomes, 1)
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 2)
+
+	byModel := map[string]cmclient.ModelOutcome{}
+	for _, row := range rows {
+		byModel[row.Model] = row
+	}
+
+	assert.Equal(t, "failed", byModel["coder/two"].Result)
+}
+
+// TestBelowBarCandidateLossIsStillRecorded pins the edge of the suppression on
+// the judge path. A `loss` is not a failure: the model produced a real
+// implementation and another candidate's was judged better. That is a
+// comparative measurement the leaderboard is built to absorb, and it is the
+// only signal a below-bar candidate that finished its work ever produces -
+// dropping it would leave the whole race unmeasured.
+func TestBelowBarCandidateLossIsStillRecorded(t *testing.T) {
+	ops := &fakeOps{}
+	mainGit := &fakeGit{}
+	client := &planLLM{responses: []llm.Response{
+		stopResp(`{"winner": 2, "ranking": [2, 1], "rationale": "c2 is the cleanest.", "notes": []}`, 0.04),
+	}}
+
+	c1 := adoptionCandidate(1, "coder/one", "dir-c1", "DIFF_ONE", "cm/card-1-c1", 0.01)
+	c1.setPick(belowBarPick("coder/one"))
+
+	c2 := adoptionCandidate(2, "coder/two", "dir-c2", "DIFF_TWO", "cm/card-1-c2", 0.02)
+
+	verify := map[string]bool{"dir-c1": true, "dir-c2": true}
+	o := newJudgeRun(t, ops, mainGit, client, []*candidate{c1, c2}, verify)
+	o.stopSubHB = func() {}
+
+	require.NoError(t, runJudge(context.Background(), o))
+
+	require.Len(t, ops.reportOutcomes, 1)
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 2, "an out-judged below-bar candidate still earns its comparative row")
+
+	byModel := map[string]cmclient.ModelOutcome{}
+	for _, row := range rows {
+		byModel[row.Model] = row
+	}
+
+	assert.Equal(t, "loss", byModel["coder/one"].Result)
 }

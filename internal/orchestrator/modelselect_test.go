@@ -507,3 +507,50 @@ func TestCandidateRepickRecordsTheSubtaskItRepickedFor(t *testing.T) {
 	assert.Equal(t, "capgood/default", sels[1].Model, "the re-pick names the replacement")
 	assert.Equal(t, "SUB-1", sels[1].Subtask, "and the subtask that replacement runs")
 }
+
+// TestWalkedDownExcludesOffLadderPicksByDesign states the rule in one place,
+// over the whole source space, rather than leaving it inferable only from the
+// two recording sites that consume it.
+//
+// The name is the point: pins and the capable default are not exceptions
+// carved out of a below-bar test, they are picks the ladder never walked. Both
+// report BelowBar, so a reader who assumes the two are the same thing will
+// "simplify" this predicate into a silent stop on outcome recording for every
+// pinned and every fallback run.
+func TestWalkedDownExcludesOffLadderPicksByDesign(t *testing.T) {
+	pick := func(src registry.PickSource, met registry.Tier) registry.Pick {
+		return registry.Pick{
+			Role:          registry.RoleCoder,
+			RequestedTier: registry.TierComplex,
+			MetTier:       met,
+			Source:        src,
+			OK:            true,
+		}
+	}
+
+	tests := []struct {
+		name string
+		p    registry.Pick
+		want bool
+	}{
+		{"a ladder pick that got its rung was not walked down", pick(registry.SourceAuto, registry.TierComplex), false},
+		{"a ladder pick served a rung lower was walked down", pick(registry.SourceAuto, registry.TierSimple), true},
+		{"a ladder pick that cleared nothing was walked down", pick(registry.SourceAuto, ""), true},
+		{"a favorite at its rung was not walked down", pick(registry.SourceFavorite, registry.TierComplex), false},
+		{"a favorite served a rung lower was walked down", pick(registry.SourceFavorite, registry.TierSimple), true},
+		// The two off-ladder sources. Both report BelowBar; neither was
+		// walked down, because the ladder is not what chose them.
+		{"a pin is intent, so the selector never walked", pick(registry.SourcePinned, ""), false},
+		{"the capable default sits in no rung to be walked down from", pick(registry.SourceDefault, ""), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, walkedDown(tt.p))
+		})
+	}
+
+	// A refusal (OK false) never reaches a recording site - there is no model
+	// to charge - but it must not read as a walk-down if one ever does.
+	assert.False(t, walkedDown(registry.Pick{RequestedTier: registry.TierComplex, Source: registry.SourceAuto}))
+}
