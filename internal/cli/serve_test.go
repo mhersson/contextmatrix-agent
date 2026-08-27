@@ -181,7 +181,7 @@ func TestOnContainerExitClosesLogFile(t *testing.T) {
 	// A minimal bridge + registry so onContainerExit compiles.
 	hub := logbridge.NewHub(func(e protocol.LogEntry) string { return e.Project }, nil)
 	bridge := logbridge.NewBridge(logbridge.BridgeConfig{Hub: hub})
-	registry := logbridge.NewRedactorRegistry(bridge)
+	registry := newSessionSecretTee(logbridge.NewRedactorRegistry(bridge))
 
 	onExit := onContainerExit(rep, creds, files, registry, bridge, logger)
 	onExit("proj", "CARD-1", 0, executor.ExitNormal, 1)
@@ -256,7 +256,7 @@ func newExitHarness(t *testing.T, logDir string) *exitHarness {
 
 	hub := logbridge.NewHub(func(e protocol.LogEntry) string { return e.Project }, nil)
 	bridge := logbridge.NewBridge(logbridge.BridgeConfig{Hub: hub, MapExtra: agentMapExtra})
-	registry := logbridge.NewRedactorRegistry(bridge)
+	registry := newSessionSecretTee(logbridge.NewRedactorRegistry(bridge))
 
 	id, ch := hub.Subscribe("proj")
 

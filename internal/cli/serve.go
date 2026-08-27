@@ -32,6 +32,7 @@ import (
 	"github.com/mhersson/contextmatrix-backendkit/logbridge"
 	"github.com/mhersson/contextmatrix-backendkit/taskskills"
 	"github.com/mhersson/contextmatrix-backendkit/webhookcore"
+	"github.com/mhersson/contextmatrix-harness/redact"
 	protocol "github.com/mhersson/contextmatrix-protocol"
 )
 
@@ -134,7 +135,14 @@ func runServe(ctx context.Context, configPath string) error {
 	// per-session keys and atomically swaps it on every mutation. Register
 	// the process-lifetime config-level secrets first under a reserved id
 	// so they survive every per-run add and remove (the trap fix).
-	registry := logbridge.NewRedactorRegistry(bridge)
+	//
+	// registry tees every AddSessionKey/RemoveSessionKey call to the
+	// backendkit RedactorRegistry above (unchanged - still drives the SSE
+	// bridge) and to a second, file-log-only redactor built from the
+	// identical key set, so the durable per-card log can mask the same
+	// secrets on the full raw line - not just the derived Content field the
+	// SSE bridge redacts. See sessionSecretTee.
+	registry := newSessionSecretTee(logbridge.NewRedactorRegistry(bridge))
 	registry.AddSessionKey(staticSecretsID, cfg.MCPAPIKey)
 	registry.AddSessionKey(staticSecretsID, cfg.APIKey)
 
@@ -153,16 +161,10 @@ func runServe(ctx context.Context, configPath string) error {
 		IdleTimeout:      cfg.IdleOutputTimeout,
 		PollInterval:     cfg.IdleWatchdogInterval,
 		OnStart:          files.Begin,
-		OnLog: func(project, cardID string, line []byte, stderr bool) {
-			// Bridge to the live /logs SSE stream first so the interactive
-			// stream is never gated on the durable-log disk write. BridgeLine
-			// does not mutate line and Write copies it, so the order is safe.
-			bridge.BridgeLine(logbridge.Key{Project: project, CardID: cardID}, line, stderr)
-			files.Write(project, cardID, line, stderr)
-		},
-		OnExit:  onContainerExit(cbClient, credentials, files, registry, bridge, logger),
-		Logger:  logger,
-		Metrics: mx,
+		OnLog:            containerLogSink(bridge, files, registry),
+		OnExit:           onContainerExit(cbClient, credentials, files, registry, bridge, logger),
+		Logger:           logger,
+		Metrics:          mx,
 	})
 
 	// Force-remove any agent-labeled containers left by a previous process before
@@ -324,6 +326,108 @@ func gracefulShutdown(
 	}
 }
 
+// sessionSecretTee tees every session-secret registration to backendkit's
+// logbridge.RedactorRegistry (unchanged - still drives the SSE bridge's
+// per-field redaction) and to a second, locally-held redactor built from the
+// identical key set via the same redact.New primitive the registry uses
+// internally. AddSessionKey/RemoveSessionKey forward the same arguments to
+// both sides, so the active key set cannot drift between them - this is not
+// a second, independently-tracked secret set, just a second reader of the
+// one set of registrations. containerLogSink uses Redact to mask the durable
+// per-card file log on the full raw line, catching secrets in JSON fields the
+// SSE bridge's Content-only redaction never inspects.
+//
+// Follow-up (ledgered): once backendkit exposes the bridge's redactor (or a
+// redact-and-return BridgeLine) in a tagged release, this tee can be deleted
+// in favor of reusing that single result directly.
+type sessionSecretTee struct {
+	sse *logbridge.RedactorRegistry
+
+	mu      sync.Mutex
+	session map[string][]string
+	file    atomic.Pointer[redact.Redactor]
+}
+
+// newSessionSecretTee wraps sse, an already-constructed RedactorRegistry, so
+// callers keep wiring the SSE side exactly as before.
+func newSessionSecretTee(sse *logbridge.RedactorRegistry) *sessionSecretTee {
+	return &sessionSecretTee{sse: sse, session: make(map[string][]string)}
+}
+
+// AddSessionKey registers key under sessionID on both the SSE registry and
+// the file-log redactor. An empty key is ignored on the file-log side too,
+// matching RedactorRegistry's contract, so callers may register
+// unconditionally.
+func (t *sessionSecretTee) AddSessionKey(sessionID, key string) {
+	t.sse.AddSessionKey(sessionID, key)
+
+	if key == "" {
+		return
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.session[sessionID] = append(t.session[sessionID], key)
+	t.rebuild()
+}
+
+// RemoveSessionKey forgets sessionID's secrets on both the SSE registry and
+// the file-log redactor. Idempotent: removing an unregistered session is a
+// no-op on the file-log side too.
+func (t *sessionSecretTee) RemoveSessionKey(sessionID string) {
+	t.sse.RemoveSessionKey(sessionID)
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if _, ok := t.session[sessionID]; !ok {
+		return
+	}
+
+	delete(t.session, sessionID)
+	t.rebuild()
+}
+
+// rebuild composes every registered key into a fresh redactor and swaps it
+// into t.file. The caller holds t.mu.
+func (t *sessionSecretTee) rebuild() {
+	all := make([]string, 0, len(t.session))
+	for _, keys := range t.session {
+		all = append(all, keys...)
+	}
+
+	t.file.Store(redact.New(all))
+}
+
+// Redact masks every currently-registered secret in line. A nil *Redactor
+// (nothing registered yet) is the identity, so callers may call this
+// unconditionally.
+func (t *sessionSecretTee) Redact(line []byte) []byte {
+	return []byte(t.file.Load().Apply(string(line)))
+}
+
+// containerLogSink returns the executor OnLog callback: it fans out one
+// worker output line to the live SSE bridge and the durable per-card file
+// log. The file log receives the line masked by registry's tee redactor -
+// the identical secret set the SSE bridge redacts from - applied to the full
+// raw line for both the stdout and stderr arms, so a CM-provisioned secret
+// never reaches disk in plaintext even in JSON fields the SSE bridge's
+// per-field redaction does not inspect.
+func containerLogSink(
+	bridge *logbridge.Bridge,
+	files *filelog.Logger,
+	registry *sessionSecretTee,
+) func(project, cardID string, line []byte, stderr bool) {
+	return func(project, cardID string, line []byte, stderr bool) {
+		// Bridge to the live /logs SSE stream first so the interactive
+		// stream is never gated on the durable-log disk write. BridgeLine
+		// does not mutate line and Write copies it, so the order is safe.
+		bridge.BridgeLine(logbridge.Key{Project: project, CardID: cardID}, line, stderr)
+		files.Write(project, cardID, registry.Redact(line), stderr)
+	}
+}
+
 // onContainerExit builds the executor OnExit hook: it tears down the run's
 // per-run credentials (stop the refresh loop, remove the run dir), maps the
 // container exit code to a worker-status, and reports it to ContextMatrix on a
@@ -348,7 +452,7 @@ func onContainerExit(
 	reporter webhook.StatusReporter,
 	credentials *secrets.RunCredentials,
 	files *filelog.Logger,
-	registry *logbridge.RedactorRegistry,
+	registry *sessionSecretTee,
 	bridge *logbridge.Bridge,
 	logger *slog.Logger,
 ) func(project, cardID string, exitCode int64, cause executor.ExitCause, ordinal int) {
