@@ -534,8 +534,9 @@ func isParkError(err error) bool {
 // for a bug-like card and returns a "## Diagnosis" text blob to ground the
 // plan. Budget-checked and usage-reported like every model-bearing step. The
 // caller treats a returned error as best-effort: planning proceeds without a
-// diagnosis rather than failing.
-func (o *run) runDiagnose(ctx context.Context, model string) (string, error) {
+// diagnosis rather than failing. model resolves lazily - the diagnose pass is
+// the first certain run of the plan decision model on non-creative bug cards.
+func (o *run) runDiagnose(ctx context.Context, model func(context.Context) string) (string, error) {
 	d := o.d
 	cfg := d.Cfg
 
@@ -546,9 +547,11 @@ func (o *run) runDiagnose(ctx context.Context, model string) (string, error) {
 	task := fmt.Sprintf(diagnosePrompt, o.grounding, cfg.Workspace, readRootsBlock(d.ReadRoots),
 		o.tc.Title, o.taskDescription)
 
-	res, dur, err := o.runModelDiagnose(ctx, d.ReadTools, task, model, o.taskImages)
+	slug := model(ctx)
 
-	o.spendAndReport(ctx, o.ledger, cfg.CardID, "plan: report diagnose usage failed", res, model, "main", dur)
+	res, dur, err := o.runModelDiagnose(ctx, d.ReadTools, task, slug, o.taskImages)
+
+	o.spendAndReport(ctx, o.ledger, cfg.CardID, "plan: report diagnose usage failed", res, slug, "main", dur)
 
 	if err != nil {
 		return "", fmt.Errorf("diagnose run: %w", err)
@@ -563,8 +566,10 @@ func (o *run) runDiagnose(ctx context.Context, model string) (string, error) {
 // brainstormed agreed design for creative HITL cards; feedback carries a
 // HITL reviewer's requested changes on a re-draft; all collapse to nothing
 // when empty. The budget ledger is checked before every model call and every
-// call's usage is spent + reported.
-func (o *run) draftPlan(ctx context.Context, model, diagnosis, design, feedback string) (plan, error) {
+// call's usage is spent + reported. model resolves lazily: the solo draft is
+// the first certain run of the plan decision model when no brainstorm or
+// diagnose pass ran ahead of it.
+func (o *run) draftPlan(ctx context.Context, model func(context.Context) string, diagnosis, design, feedback string) (plan, error) {
 	d := o.d
 	cfg := d.Cfg
 
@@ -607,9 +612,11 @@ func (o *run) draftPlan(ctx context.Context, model, diagnosis, design, feedback 
 		task := fmt.Sprintf(planPrompt, o.grounding, snapshot, cfg.Workspace, readRootsBlock(o.d.ReadRoots),
 			o.tc.Title, o.plannerDescription(), diagBlock, dsnBlock, resume, fbBlock, repair)
 
-		res, dur, err := o.runModelPlan(ctx, reg, task, model, o.taskImages, attempt > 0)
+		slug := model(ctx)
 
-		o.spendAndReport(ctx, o.ledger, cfg.CardID, "plan: report usage failed", res, model, "main", dur)
+		res, dur, err := o.runModelPlan(ctx, reg, task, slug, o.taskImages, attempt > 0)
+
+		o.spendAndReport(ctx, o.ledger, cfg.CardID, "plan: report usage failed", res, slug, "main", dur)
 
 		if err != nil {
 			return plan{}, fmt.Errorf("planner run: %w", err)
@@ -617,7 +624,7 @@ func (o *run) draftPlan(ctx context.Context, model, diagnosis, design, feedback 
 
 		p, lastErr = parsePlan(res.Output)
 		if lastErr == nil {
-			return o.reviseTestSplit(ctx, reg, model, snapshot, diagBlock, dsnBlock, resume, fbBlock, p)
+			return o.reviseTestSplit(ctx, reg, slug, snapshot, diagBlock, dsnBlock, resume, fbBlock, p)
 		}
 
 		slog.Warn("plan: parse failed", "card_id", cfg.CardID, "attempt", attempt, "error", lastErr)
@@ -902,10 +909,35 @@ func runPlan(ctx context.Context, o *run) error {
 	d := o.d
 	cfg := d.Cfg
 
-	model := resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
-		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels(), "plan decision")
+	// The 'plan decision' model resolves lazily, on the first point the model
+	// certainly runs (a brainstorm turn, the diagnose pass, the solo planner,
+	// or a plan-gate classification), mirroring runReviewHITL's gate-model
+	// resolver: a successful mob discussion drafts the plan without this model,
+	// and a card promoted at the first gate skips the classification too, so an
+	// entry-time resolution would put a model_selected line on the transcript
+	// naming a model that never ran. The slug resolves once and is reused; the
+	// model-bearing steps run sequentially inside this phase, so the captured
+	// value needs no lock. announce guards the entry-time card log so the
+	// diagnose recovery's forced re-resolution below speaks only through its
+	// own distinction line.
+	resolved := ""
 
-	d.logCard(ctx, "orchestrator model: %s", model)
+	announced := false
+
+	decisionModel := func(ctx context.Context) string {
+		if resolved == "" {
+			resolved = resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
+				o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels(), "plan decision")
+
+			if !announced {
+				announced = true
+
+				d.logCard(ctx, "orchestrator model: %s", resolved)
+			}
+		}
+
+		return resolved
+	}
 
 	// Creative HITL cards get a design dialogue before planning (create-plan
 	// Phase 0 Branch C). Skipped in autonomous, for non-creative cards, and when
@@ -917,7 +949,7 @@ func runPlan(ctx context.Context, o *run) error {
 	design := recordedDesign(o.tc.Description)
 
 	if cfg.Interactive && isCreative(o.tc) && design == "" {
-		d, err := o.runBrainstorm(ctx, model)
+		d, err := o.runBrainstorm(ctx, decisionModel)
 		if err != nil {
 			return err
 		}
@@ -933,7 +965,7 @@ func runPlan(ctx context.Context, o *run) error {
 	if isBugLike(o.tc) {
 		d.logCard(ctx, "running root-cause investigation (bug-like card)")
 
-		diag, derr := o.runDiagnose(ctx, model)
+		diag, derr := o.runDiagnose(ctx, decisionModel)
 		switch {
 		case derr == nil:
 			diagnosis = diag
@@ -956,9 +988,16 @@ func runPlan(ctx context.Context, o *run) error {
 						"card_id", cfg.CardID, "error", rerr)
 				}
 
-				prev := model
-				model = resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
-					o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels(), "plan decision")
+				// recoverIncapable extended the exclusion set; the resolver's
+				// resolve-once cache must be invalidated so the next call
+				// re-selects off the excluded slug. The announced flag stays
+				// set: this forced re-resolution speaks through one of the two
+				// distinction lines below, never the entry-time line again.
+				prev := resolved
+
+				resolved = ""
+
+				model := decisionModel(ctx)
 
 				if model != prev {
 					d.logCard(ctx, "orchestrator model: %s (re-selected after diagnose)", model)
@@ -993,7 +1032,7 @@ func runPlan(ctx context.Context, o *run) error {
 			}
 		}
 
-		p, err := o.draftPlan(ctx, model, diagnosis, design, "")
+		p, err := o.draftPlan(ctx, decisionModel, diagnosis, design, "")
 		if err != nil {
 			return err
 		}
@@ -1036,7 +1075,7 @@ func runPlan(ctx context.Context, o *run) error {
 		if !drafted {
 			var err error
 
-			p, err = o.draftPlan(ctx, model, diagnosis, design, feedback)
+			p, err = o.draftPlan(ctx, decisionModel, diagnosis, design, feedback)
 			if err != nil {
 				return err
 			}
@@ -1046,7 +1085,7 @@ func runPlan(ctx context.Context, o *run) error {
 
 		o.recordSection(ctx, "Plan", sectionFrom("Plan", formatPlannedPlan(p)))
 
-		outcome, fb, gerr := o.gate(ctx, gatePlanApproval, fixedGateModel(model), presentPlan(p))
+		outcome, fb, gerr := o.gate(ctx, gatePlanApproval, decisionModel, presentPlan(p))
 		if gerr != nil {
 			return gerr
 		}

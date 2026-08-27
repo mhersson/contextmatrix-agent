@@ -65,14 +65,16 @@ const maxBrainstormTurns = 30
 // stop on a no-tool-call turn; the orchestrator owns the human turns via the
 // inbox and threads the dialogue as a text block (keeping internal/harness
 // generic). The agreed design is captured from the model's marked output and
-// recorded as a ## Design section; the model never writes the card.
+// recorded as a ## Design section; the model never writes the card. model
+// resolves lazily: a dialogue is the first certain run of the plan decision
+// model on creative HITL cards.
 //
 // Returns the recorded design string on DESIGN_COMPLETE so draftPlan can ground
 // the first plan draft on it (fixing the fresh-run/resume asymmetry). Returns ""
 // on every other path: promote (ErrInboxClosed) → ("", nil); end_session (ctx
 // error) → ("", err); budget breach → ("", *BudgetExceededError); turn cap →
 // ("", nil).
-func (o *run) runBrainstorm(ctx context.Context, model string) (string, error) {
+func (o *run) runBrainstorm(ctx context.Context, model func(context.Context) string) (string, error) {
 	d := o.d
 	cfg := d.Cfg
 
@@ -85,9 +87,11 @@ func (o *run) runBrainstorm(ctx context.Context, model string) (string, error) {
 
 		task := fmt.Sprintf(brainstormPrompt, o.grounding, o.tc.Title, o.taskDescription, convoBlock(convo))
 
-		res, dur, err := o.runModel(ctx, d.ReadTools, task, model)
+		slug := model(ctx)
 
-		o.spendAndReport(ctx, o.ledger, cfg.CardID, "brainstorm: report usage failed", res, model, "brainstorm", dur)
+		res, dur, err := o.runModel(ctx, d.ReadTools, task, slug)
+
+		o.spendAndReport(ctx, o.ledger, cfg.CardID, "brainstorm: report usage failed", res, slug, "brainstorm", dur)
 
 		if err != nil {
 			return "", fmt.Errorf("brainstorm run: %w", err)

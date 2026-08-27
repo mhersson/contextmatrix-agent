@@ -24,15 +24,8 @@ const modelSelectedKind = "model_selected"
 // orchestrator is wired in tests that do not read the transcript.
 //
 // The field names and values are a wire contract: a transcript consumer parses
-// them to answer, per phase, which model ran and whether the selector picked
-// it.
-//
-// One phase departs from that: the plan decision phase resolves its model
-// before it knows which branch it will take, and emits there. A discussion that
-// drafts the plan, or a card promoted at the first gate, then leaves the run
-// with a recorded selection it never followed. Every other phase emits where
-// the model runs, so a consumer counting model use should read the plan
-// decision line as a resolution, not as a call.
+// them to answer, per phase, which model ran. Every phase emits where its model
+// runs, so a selection line is always a record of use.
 func emitModelSelection(emit *events.Emitter, phase, subtaskID string, p registry.Pick) {
 	if emit == nil {
 		return

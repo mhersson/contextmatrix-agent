@@ -1718,3 +1718,313 @@ func TestParsePlanStillRejectsAnUnknownTier(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "complex", p.CardTier, "the wire names must not have changed")
 }
+
+// mobHITLPlanRun builds a HITL run whose plan comes from a mob discussion. The
+// card carries a ## Design, so brainstorm is skipped and the plan-approval gate
+// is the only place left that could still call the plan decision model.
+func mobHITLPlanRun(ops *fakeOps, inbox *fakeInbox, client llm.LLM, transcript *bytes.Buffer) *run {
+	d := Deps{
+		Ops:       ops,
+		Git:       &fakeGit{},
+		Client:    client,
+		Emit:      events.NewEmitter(nil, transcript),
+		Registry:  reviewerRegistry(),
+		ReadTools: tools.NewRegistry(tools.NewReadTool(".")),
+		Human:     inbox,
+		Cfg: Config{
+			Project: "proj", CardID: "CARD-1",
+			PayloadModel: "payload/model", DefaultModel: "default/model",
+			MaxTurns: 20, MaxCardCost: 2.0, Interactive: true,
+			Mob: MobConfig{Participants: 3, Plan: true, Rounds: 2, BudgetFactor: 0.75},
+		},
+	}
+
+	tc := cmclient.TaskContext{
+		Title:       "Add a palette",
+		Description: "## Design\n\nA palette config.", // present -> brainstorm skipped
+	}
+
+	return newRun(d, tc)
+}
+
+// bugPlanRun builds an autonomous run for a bug-like card on the reviewer-prior
+// registry, so the plan decision is a real ladder pick with a next-best
+// alternative to fall to when the first model proves harness-incapable.
+func bugPlanRun(ops *fakeOps, client llm.LLM, transcript *bytes.Buffer) *run {
+	d := Deps{
+		Ops:       ops,
+		Client:    client,
+		Emit:      events.NewEmitter(nil, transcript),
+		Registry:  reviewerRegistry(),
+		ReadTools: tools.NewRegistry(tools.NewReadTool(".")),
+		Cfg: Config{
+			Project: "proj", CardID: "CARD-1",
+			PayloadModel: "payload/model", DefaultModel: "default/model",
+			MaxTurns: 20,
+		},
+	}
+
+	tc := cmclient.TaskContext{
+		Title:       "Fix the crash on startup",
+		Type:        "bug", // bug-like -> the diagnose pass runs ahead of the draft
+		Description: "The worker crashes on start.",
+	}
+
+	return newRun(d, tc)
+}
+
+// The two card-log fragments the plan phase uses to distinguish an entry
+// announcement from a forced re-resolution. They are held here, not inlined,
+// because they are the ONE place the test suite couples to that prose:
+// rewording either message in runPlan means changing these two consts and
+// nothing else.
+const (
+	decisionModelLog  = "orchestrator model: "
+	reselectedLogPart = "(re-selected after diagnose)"
+)
+
+// entryAnnouncements returns the card-log lines announcing the decision model at
+// phase entry, excluding the re-selection distinction line. The card log is the
+// only channel that separates the entry announcement from a forced
+// re-resolution, so it is what pins the announce-once guard.
+//
+// A reworded card log makes this helper return nothing, and the assertion it
+// feeds then fails as if the announce-once guard had regressed. If that
+// assertion fails, check the two consts above before suspecting the guard.
+func entryAnnouncements(ops *fakeOps) []string {
+	var out []string
+
+	for _, c := range ops.recorded() {
+		msg, ok := strings.CutPrefix(c, "AddLog:"+decisionModelLog)
+		if !ok || strings.Contains(msg, reselectedLogPart) {
+			continue
+		}
+
+		out = append(out, msg)
+	}
+
+	return out
+}
+
+// TestPlanDecisionSilentWhenTheMobDraftsThePlan pins the wire contract on the
+// autonomous mob path: a model_selected line records a model that RAN, and a
+// discussion that drafts the plan never calls the plan decision model, so the
+// phase must leave no "plan decision" line behind. A line here would count a
+// model into the plan-decision distribution that never saw a prompt.
+//
+// The seat selections are the live-transcript control: they prove the phase
+// emitted into this buffer at all, so the empty assertion cannot pass on a run
+// that never reached the code path.
+func TestPlanDecisionSilentWhenTheMobDraftsThePlan(t *testing.T) {
+	tests := []struct {
+		name          string
+		synthesis     string
+		responses     []llm.Response
+		wantModerator int
+	}{
+		{
+			name:      "synthesis parses",
+			synthesis: goodPlanJSON,
+		},
+		{
+			// The repair is the only path that puts a moderator on the
+			// transcript with a stubbed engine, and the draft still succeeds.
+			name:          "moderator repairs the synthesis",
+			synthesis:     "prose only, no JSON here",
+			responses:     []llm.Response{stopResp(goodPlanJSON, 0.02)},
+			wantModerator: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var transcript bytes.Buffer
+
+			ops := &fakeOps{createdIDs: []string{"SUB-1", "SUB-2"}}
+			eng := &scriptedEngine{outcomes: []mob.Outcome{{Synthesis: tt.synthesis, Consensus: true}}}
+			o := mobPlanRun(ops, &planLLM{responses: tt.responses}, eng)
+			o.d.Emit = events.NewEmitter(nil, &transcript)
+
+			require.NoError(t, runPlan(context.Background(), o))
+			require.Len(t, ops.createCardArgs, 2, "the discussion produced the plan")
+
+			sels := modelSelections(t, &transcript)
+			assert.Empty(t, selectionsForPhase(sels, "plan decision"),
+				"the discussion drafted the plan, so no decision model ran")
+			assert.Len(t, selectionsForPhase(sels, "mob plan"), 3,
+				"the seat selections prove the phase wrote to this transcript")
+			assert.Len(t, selectionsForPhase(sels, "mob moderator"), tt.wantModerator,
+				"the moderator records a selection exactly where it runs")
+		})
+	}
+}
+
+// TestPlanGateDecisionRecordsOnlyTheClassificationThatRan is the plan-gate half
+// of the same contract, and the pair is the point. With the plan already drafted
+// by the discussion, the gate is the only remaining caller of the decision
+// model: a human reply reaches the classification model and records one
+// selection, while a card promoted mid-run closes the inbox, so the gate returns
+// without classifying and must record none.
+func TestPlanGateDecisionRecordsOnlyTheClassificationThatRan(t *testing.T) {
+	tests := []struct {
+		name         string
+		msgs         []harness.UserMessage
+		responses    []llm.Response
+		want         int
+		wantPromoted bool
+	}{
+		{
+			// Empty, non-blocking inbox: the gate Wait reports ErrInboxClosed,
+			// exactly what a promote frame produces. No classification response
+			// is scripted because no model call happens.
+			name:         "promoted at the first gate",
+			want:         0,
+			wantPromoted: true,
+		},
+		{
+			name:      "human reply is classified",
+			msgs:      []harness.UserMessage{{Content: "approve"}},
+			responses: []llm.Response{stopResp(`{"verdict":"approve","feedback":""}`, 0.001)},
+			want:      1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var transcript bytes.Buffer
+
+			ops := &fakeOps{createdIDs: []string{"SUB-1", "SUB-2"}}
+			eng := &scriptedEngine{outcomes: []mob.Outcome{{Synthesis: goodPlanJSON, Consensus: true}}}
+			o := mobHITLPlanRun(ops, &fakeInbox{msgs: tt.msgs}, &planLLM{responses: tt.responses}, &transcript)
+			o.mobEngine = eng.run
+
+			require.NoError(t, runPlan(context.Background(), o))
+			require.Len(t, ops.createCardArgs, 2, "the plan reached createSubtasks either way")
+
+			// Subtask creation alone does not separate the two cases: an
+			// approval creates them too. Only the promote log pins that the
+			// zero came from an inbox that closed rather than from some other
+			// outcome that happens to skip the classification.
+			if tt.wantPromoted {
+				assert.True(t, ops.loggedContains("promoted"),
+					"the gate took the promote path; logs=%v", ops.logs)
+			}
+
+			sels := modelSelections(t, &transcript)
+			assert.Len(t, selectionsForPhase(sels, "plan decision"), tt.want,
+				"the gate records a selection only when it classifies a reply")
+			assert.Len(t, selectionsForPhase(sels, "mob plan"), 3,
+				"the seat selections prove the phase wrote to this transcript")
+		})
+	}
+}
+
+// TestPlanDecisionRecordedOnceAcrossTheHITLAdjustLoop pins the resolve-once half
+// of the contract. The adjust loop puts four decision-model calls on the wire
+// (draft, classify, re-draft, classify), and a consumer reads one selection line
+// per phase as one model: resolving per call would report four models for a
+// phase that ran on one.
+func TestPlanDecisionRecordedOnceAcrossTheHITLAdjustLoop(t *testing.T) {
+	var transcript bytes.Buffer
+
+	ops := &fakeOps{}
+	inbox := &fakeInbox{msgs: []harness.UserMessage{
+		{Content: "make it two subtasks"},
+		{Content: "approve"},
+	}}
+	client := &planLLM{responses: []llm.Response{
+		stopResp(onePlanJSON, 0.01),                                       // draft 1
+		stopResp(`{"verdict":"adjust","feedback":"two subtasks"}`, 0.001), // gate -> adjust
+		stopResp(onePlanJSON, 0.01),                                       // draft 2 (re-draft)
+		stopResp(`{"verdict":"approve","feedback":""}`, 0.001),            // gate -> approve
+	}}
+	o := hitlPlanRun(ops, inbox, client)
+	// The reviewer-prior registry resolves the decision to a ladder model that
+	// is NOT the configured payload model, so "the transcript names the model
+	// the calls ran on" is a real comparison rather than two names that coincide.
+	o.d.Registry = reviewerRegistry()
+	o.d.Emit = events.NewEmitter(nil, &transcript)
+
+	require.NoError(t, runPlan(context.Background(), o))
+	require.Len(t, client.models, 4, "the adjust loop made four decision-model calls")
+
+	sels := selectionsForPhase(modelSelections(t, &transcript), "plan decision")
+	require.Len(t, sels, 1, "one resolution is reused across the whole phase")
+
+	for i, m := range client.models {
+		assert.Equal(t, sels[0].Model, m, "call %d ran on the model the transcript names", i)
+	}
+}
+
+// TestPlanDecisionRecordedOnceForTheAutonomousSoloDraft is the control for the
+// lazy resolution: moving the resolve to the point of use must not lose the line
+// where the model DOES run. The autonomous solo draft is that point, and the
+// recorded model has to be the one the planner call was configured with.
+func TestPlanDecisionRecordedOnceForTheAutonomousSoloDraft(t *testing.T) {
+	var transcript bytes.Buffer
+
+	ops := &fakeOps{}
+	client := &planLLM{responses: []llm.Response{stopResp(onePlanJSON, 0.01)}}
+	o := autoPlanRun(ops, client, 20)
+	// A ladder model distinct from the configured payload model, so the
+	// recorded slug cannot match the planner's by coincidence.
+	o.d.Registry = reviewerRegistry()
+	o.d.Emit = events.NewEmitter(nil, &transcript)
+
+	require.NoError(t, runPlan(context.Background(), o))
+	require.Len(t, ops.createCardArgs, 1, "the solo draft produced the plan")
+	require.Len(t, client.models, 1, "exactly the planner call")
+
+	sels := selectionsForPhase(modelSelections(t, &transcript), "plan decision")
+	require.Len(t, sels, 1, "the solo draft records the selection it ran on")
+	assert.Equal(t, client.models[0], sels[0].Model, "the transcript names the model the planner ran on")
+	assert.Equal(t, "complex", sels[0].TierRequested, "decision phases are floored to complex")
+}
+
+// TestPlanDecisionReresolvesOffAnIncapableDiagnoseModel pins the diagnose
+// recovery. The diagnose model cannot drive the tool loop, so it is blacklisted
+// and excluded, and the phase must re-select off that slug: the transcript
+// carries a SECOND selection naming the replacement, because a second model
+// genuinely ran. The card log is the only channel separating the entry
+// announcement from that forced re-resolution, so it is asserted here and only
+// here - the re-selection must speak through its own distinction line and must
+// not re-announce as a fresh phase entry.
+//
+// TestPlanPhaseDiagnoseIncapableModelIsRecovered covers the recovery mechanism
+// itself (exclusion, blacklist, the plan not running on the incapable model).
+// What this test adds, and what a later deduplication of the two must keep, is
+// the pair of "plan decision" transcript selections and the announce-once
+// check: the observable half of the contract, which the sibling does not read.
+func TestPlanDecisionReresolvesOffAnIncapableDiagnoseModel(t *testing.T) {
+	var transcript bytes.Buffer
+
+	ops := &fakeOps{}
+	// rev/alpha is the top reviewer prior, so it is the first decision pick;
+	// every turn it emits unparseable tool-call arguments, which the harness
+	// reports as incapable. rev/beta is the next-best pick and drafts the plan.
+	client := &modelAwareLLM{
+		incapable: map[string]bool{"rev/alpha": true},
+		responses: []llm.Response{stopResp(onePlanJSON, 0.01)},
+	}
+	o := bugPlanRun(ops, client, &transcript)
+
+	require.NoError(t, runPlan(context.Background(), o), "a failed diagnosis must not fail planning")
+	require.Len(t, ops.createCardArgs, 1, "planning continued without a diagnosis")
+	assert.True(t, o.excluded["rev/alpha"], "the incapable model is excluded for the rest of the run")
+
+	sels := selectionsForPhase(modelSelections(t, &transcript), "plan decision")
+	require.Len(t, sels, 2, "the diagnose pass and the re-selected draft each ran a model")
+	assert.Equal(t, "rev/alpha", sels[0].Model, "the diagnose pass ran on the first pick")
+	assert.Equal(t, "rev/beta", sels[1].Model, "the re-resolution picked off the excluded slug")
+	assert.NotEqual(t, sels[0].Model, sels[1].Model,
+		"the re-resolution must land somewhere else, whatever the priors rank first")
+
+	models := client.recordedModels()
+	require.NotEmpty(t, models)
+	assert.Equal(t, "rev/beta", models[len(models)-1], "the planner ran on the replacement")
+
+	assert.True(t, ops.loggedContains("rev/beta "+reselectedLogPart),
+		"the re-selection is logged as a re-selection; logs=%v", ops.logs)
+	assert.Equal(t, []string{"rev/alpha"}, entryAnnouncements(ops),
+		"the phase announces its model once, at entry; the re-resolution does not re-announce")
+}
