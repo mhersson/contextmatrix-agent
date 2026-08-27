@@ -288,6 +288,17 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 					d.logCard(ctx, "review: approved with %d surviving finding(s), but the cleanup fix pass failed - proceeding approved: %s",
 						len(fixes), ferr)
 
+					// The failed pass may have left partial edits uncommitted (a
+					// transport error mid-run, before runFix ever reaches its own
+					// commit). Best-effort, matching the sibling coder-run-failure
+					// discards elsewhere: untracked files survive a hard reset, but
+					// a dirty tracked file left behind here would otherwise carry
+					// into integrate's autosquash rebase and kill an approved run.
+					if herr := d.Git.HardReset(ctx, "HEAD"); herr != nil {
+						slog.Warn("review: failed to discard the swallowed cleanup pass's partial edits",
+							"card_id", cfg.CardID, "error", herr)
+					}
+
 					return nil
 				}
 

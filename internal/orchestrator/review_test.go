@@ -538,6 +538,9 @@ func TestReviewApprovedFixCleanupErrorHandling(t *testing.T) {
 				require.NoError(t, err, "a non-budget cleanup-pass error must be swallowed, not returned")
 				assert.True(t, ops.loggedContains("cleanup fix pass failed"),
 					"the swallowed failure must be logged on the card; logs=%v", ops.logs)
+				assert.Contains(t, git.hardResetRefs, "HEAD",
+					"a swallowed cleanup-pass error must reset the worktree, or the failed coder's "+
+						"uncommitted edits carry a dirty tree into integrate's autosquash rebase")
 			}
 
 			assert.Equal(t, -1, indexOfCall(ops.recorded(), "IncrementReviewAttempts:CARD-1"),
