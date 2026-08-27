@@ -1080,7 +1080,7 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 		if modelEvidence {
 			o.raiseSubtaskBoth(ctx, sub, "the turn cap was reached and the verify then failed")
 		} else {
-			o.raiseSubtaskBudget(ctx, sub, "the turn cap was reached; the verify outcome was environmental")
+			o.raiseSubtaskBudgetInRun(ctx, sub, "the turn cap was reached; the verify outcome was environmental")
 		}
 
 		// The same exemption the ToolchainMissingError branch above gets,
@@ -1244,6 +1244,18 @@ func (o *run) resizeSubtask(ctx context.Context, sub subtaskRef, why string, axi
 		return
 	}
 
+	if axis.inRunOnly {
+		// An environment-caused raise is scoped to this attempt's card log only:
+		// there is no board write, so the NEXT run's marker read sees exactly
+		// what it saw before. emitSizingEscalation is skipped for the same
+		// reason - its own contract (see sizingEscalationKind) is that the
+		// corrected value is read by the next run, which is false here.
+		o.d.logCard(ctx, "subtask %s: %s - %s for this attempt only; the card is not updated",
+			sub.ID, why, resizeSummary(from, to))
+
+		return
+	}
+
 	if uerr := o.d.Ops.UpdateCardBody(ctx, sub.ID, writeMeta(tc.Description, setSizing(kv, to))); uerr != nil {
 		slog.Warn("resize subtask: body update failed",
 			"card_id", o.d.Cfg.CardID, "subtask_id", sub.ID, "error", uerr)
@@ -1278,6 +1290,12 @@ type resizeAxis struct {
 	name   string
 	advice string
 	raise  func(sizing) sizing
+
+	// inRunOnly widens the axis for this attempt's card log alone, never the
+	// card marker. Zero value (false) is the persisting behaviour every
+	// trigger had before this field existed, so only the one literal that opts
+	// in needs to say so.
+	inRunOnly bool
 }
 
 // resizeSummary names exactly the axes that moved, in the words the card log
@@ -1346,6 +1364,23 @@ func (o *run) raiseSubtaskBudget(ctx context.Context, sub subtaskRef, why string
 		// lifts every rung - the ceiling included.
 		advice: "Split the subtask or raise the configured turn cap.",
 		raise:  sizing.raiseBudget,
+	})
+}
+
+// raiseSubtaskBudgetInRun widens the turn budget for THIS attempt only: a
+// resource-exhausted or skipped verify after a cap says the environment
+// interfered, not that the work needed more room, so the card marker must not
+// carry it forward - a pids-limit incident cannot buy the card a permanently
+// wider window. The cap itself is still real (the run WAS capped), so this
+// widens exactly like raiseSubtaskBudget's transform; only the persistence
+// differs. Every other budget raise - the cap alone, an unresolvable verify, a
+// verify that genuinely ran and failed - is unaffected and keeps persisting.
+func (o *run) raiseSubtaskBudgetInRun(ctx context.Context, sub subtaskRef, why string) {
+	o.resizeSubtask(ctx, sub, why, resizeAxis{
+		name:      "turn budget",
+		advice:    "Split the subtask or raise the configured turn cap.",
+		raise:     sizing.raiseBudget,
+		inRunOnly: true,
 	})
 }
 
