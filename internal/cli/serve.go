@@ -148,9 +148,11 @@ func runServe(ctx context.Context, configPath string) error {
 
 	// Wire the token-refresh hook so every rotated git token is added to the
 	// redactor set. Appending is correct - both the original and the rotated
-	// token can appear in output.
-	credentials.OnTokenRefresh = func(project, cardID, token string) {
-		registry.AddSessionKey(project+"/"+cardID, token)
+	// token can appear in output. Keyed by sessionID (project, card, and this
+	// run's correlation id) so the rotated token joins the SAME bucket
+	// addSessionSecrets registered the run's other secrets under.
+	credentials.OnTokenRefresh = func(project, cardID, correlationID, token string) {
+		registry.AddSessionKey(sessionID(project, cardID, correlationID), token)
 	}
 
 	exec := executor.NewDockerExecutor(executor.Config{
@@ -326,6 +328,17 @@ func gracefulShutdown(
 	}
 }
 
+// sessionID composes the id the session-secret registry stores keys under:
+// project, card ID, and the run's correlation id together. This must match
+// internal/webhook/handler.go's identical sessionID composition exactly -
+// addSessionSecrets registers under it and this package's onContainerExit and
+// credentials.OnTokenRefresh wiring remove/append under it - or registration
+// and removal target different map entries and a session either never gets
+// cleaned up or (the bug this keying fixes) gets cleaned up by the wrong run.
+func sessionID(project, cardID, correlationID string) string {
+	return project + "/" + cardID + "/" + correlationID
+}
+
 // sessionSecretTee tees every session-secret registration to backendkit's
 // logbridge.RedactorRegistry (unchanged - still drives the SSE bridge's
 // per-field redaction) and to a second, locally-held redactor built from the
@@ -463,6 +476,20 @@ func containerLogSink(
 // re-trigger, and it cannot be hit. A re-trigger racing in out of band inside
 // that microsecond window would at worst lose its own fresh provisioning to this
 // Teardown - a loud, self-inflicted failure - never a leaked or cross-run token.
+//
+// Session-secret removal keying: credentials.Teardown stays keyed by
+// project/cardID (RunCredentials only ever tracks one live run per card, so
+// there is nothing to disambiguate there), but the session-secret registry
+// removal below uses sessionID(project, cardID, correlationID) - the run's
+// own correlation id, forwarded here from the executor's OnExit callback.
+// This is the fix for the pump-drain race: a re-trigger of the same card can
+// be admitted (and register its own secrets) during the up-to-5-second window
+// between waitAndCleanup's tracker.Remove and this callback finally firing
+// for the run that just exited. Before this run and its successor shared the
+// bare project/cardID key, so this stale call would strip the successor's
+// still-live redaction. Keying by correlationID makes the two calls target
+// different map entries, so a stale exit can only ever remove its own run's
+// keys.
 func onContainerExit(
 	reporter webhook.StatusReporter,
 	credentials *secrets.RunCredentials,
@@ -470,8 +497,8 @@ func onContainerExit(
 	registry *sessionSecretTee,
 	bridge *logbridge.Bridge,
 	logger *slog.Logger,
-) func(project, cardID string, exitCode int64, cause executor.ExitCause, ordinal int) {
-	return func(project, cardID string, exitCode int64, cause executor.ExitCause, ordinal int) {
+) func(project, cardID string, exitCode int64, cause executor.ExitCause, ordinal int, correlationID string) {
+	return func(project, cardID string, exitCode int64, cause executor.ExitCause, ordinal int, correlationID string) {
 		emitRunEnd(bridge, files, project, cardID, exitCode, cause, ordinal, logger)
 
 		files.End(project, cardID, exitCode, string(cause))
@@ -479,7 +506,7 @@ func onContainerExit(
 
 		// Remove the session secrets after credential teardown but before
 		// the status callback so a re-trigger does not inherit stale keys.
-		registry.RemoveSessionKey(project + "/" + cardID)
+		registry.RemoveSessionKey(sessionID(project, cardID, correlationID))
 
 		status, message := exitStatus(exitCode, cause)
 

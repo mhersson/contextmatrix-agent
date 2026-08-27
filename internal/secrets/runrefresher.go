@@ -65,7 +65,12 @@ type RunCredentials struct {
 	// fetch - never under-registers, at worst registers a token that never
 	// lands on disk. Never called for a PAT-style token (no expiry) since
 	// those never enter the refresh loop. Nil-safe.
-	OnTokenRefresh func(project, cardID, token string)
+	//
+	// correlationID is the same value passed to Provision for this run: the
+	// caller must fold it into whatever session id it registers the token
+	// under, so a stale run's later cleanup (keyed the same way) cannot strip
+	// this rotation from a fresh run reusing the same project/card.
+	OnTokenRefresh func(project, cardID, correlationID, token string)
 
 	mu   sync.Mutex
 	runs map[string]*runHandle // keyed by project/cardID
@@ -124,6 +129,10 @@ func (m *RunCredentials) HostDir(project, cardID string) string {
 // when expiresAt parses to a real expiry, starts a goroutine that rewrites the
 // file ahead of each expiry by minting a fresh token from CM. A PAT-style token
 // (empty or unparseable expiresAt) is written once with no refresh loop.
+// correlationID identifies this specific run and is threaded through
+// unchanged to every OnTokenRefresh call the refresh loop fires - it is not
+// otherwise used by RunCredentials, whose own bookkeeping stays keyed by
+// project/cardID.
 //
 // A re-provision of the same run replaces any existing refresh loop. The initial
 // write is synchronous so the file exists before the container mounts it; a
@@ -136,7 +145,7 @@ func (m *RunCredentials) HostDir(project, cardID string) string {
 // refresh loop no Teardown can reach. The refresh loop takes no locks, so
 // holding the lock across the join cannot deadlock, and the join is prompt
 // (cancel aborts the loop's in-flight CM request).
-func (m *RunCredentials) Provision(project, cardID, token, expiresAt string, endpoint EndpointSecrets) error {
+func (m *RunCredentials) Provision(project, cardID, correlationID, token, expiresAt string, endpoint EndpointSecrets) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -168,7 +177,7 @@ func (m *RunCredentials) Provision(project, cardID, token, expiresAt string, end
 		go func() {
 			defer close(done)
 
-			m.refreshLoop(ctx, project, cardID, path, endpoint, expiry)
+			m.refreshLoop(ctx, project, cardID, correlationID, path, endpoint, expiry)
 		}()
 	}
 
@@ -217,7 +226,7 @@ func (m *RunCredentials) CleanupOrphans() error {
 // fresh token from CM. It blocks until ctx is cancelled (Teardown).
 func (m *RunCredentials) refreshLoop(
 	ctx context.Context,
-	project, cardID, path string,
+	project, cardID, correlationID, path string,
 	endpoint EndpointSecrets,
 	expiresAt time.Time,
 ) {
@@ -256,7 +265,7 @@ func (m *RunCredentials) refreshLoop(
 		// written (a WriteEnvFile failure below retries with a fresh fetch)
 		// is a harmless no-op secret, never a leak.
 		if m.OnTokenRefresh != nil {
-			m.OnTokenRefresh(project, cardID, token)
+			m.OnTokenRefresh(project, cardID, correlationID, token)
 		}
 
 		if err := WriteEnvFile(path, endpointVals(token, endpoint)); err != nil {

@@ -184,7 +184,7 @@ func TestOnContainerExitClosesLogFile(t *testing.T) {
 	registry := newSessionSecretTee(logbridge.NewRedactorRegistry(bridge))
 
 	onExit := onContainerExit(rep, creds, files, registry, bridge, logger)
-	onExit("proj", "CARD-1", 0, executor.ExitNormal, 1)
+	onExit("proj", "CARD-1", 0, executor.ExitNormal, 1, "corr-1")
 
 	data, err := os.ReadFile(filepath.Join(dir, "proj", "card-1.log"))
 	require.NoError(t, err)
@@ -243,7 +243,7 @@ type exitHarness struct {
 	files  *filelog.Logger
 	rep    *stubReporter
 	stream <-chan protocol.LogEntry
-	onExit func(project, cardID string, exitCode int64, cause executor.ExitCause, attempt int)
+	onExit func(project, cardID string, exitCode int64, cause executor.ExitCause, attempt int, correlationID string)
 }
 
 func newExitHarness(t *testing.T, logDir string) *exitHarness {
@@ -324,7 +324,7 @@ func TestExitEmitsTerminalEventAndFooterFromOneCall(t *testing.T) {
 	h.files.Begin("proj", "CARD-1", "abcdef012345")
 	h.files.Write("proj", "CARD-1", []byte(`{"seq":1,"kind":"state_change"}`), false)
 
-	h.onExit("proj", "CARD-1", -1, executor.ExitTimeout, 2)
+	h.onExit("proj", "CARD-1", -1, executor.ExitTimeout, 2, "corr-1")
 
 	s := h.transcript(t)
 
@@ -354,7 +354,7 @@ func TestTerminalEventCarriesTheAttemptOrdinal(t *testing.T) {
 	t.Run("second attempt is stamped", func(t *testing.T) {
 		h := newExitHarness(t, t.TempDir())
 		h.files.Begin("proj", "CARD-1", "abcdef012345")
-		h.onExit("proj", "CARD-1", 0, executor.ExitNormal, 2)
+		h.onExit("proj", "CARD-1", 0, executor.ExitNormal, 2, "corr-1")
 
 		ev, _ := findRunEnd(t, h.transcript(t))
 		assert.InDelta(t, 2, ev[attempt.Field], 0)
@@ -363,7 +363,7 @@ func TestTerminalEventCarriesTheAttemptOrdinal(t *testing.T) {
 	t.Run("first attempt is left unmarked", func(t *testing.T) {
 		h := newExitHarness(t, t.TempDir())
 		h.files.Begin("proj", "CARD-1", "abcdef012345")
-		h.onExit("proj", "CARD-1", 0, executor.ExitNormal, 1)
+		h.onExit("proj", "CARD-1", 0, executor.ExitNormal, 1, "corr-1")
 
 		ev, _ := findRunEnd(t, h.transcript(t))
 		assert.NotContains(t, ev, attempt.Field, "an absent ordinal already reads as the first attempt")
@@ -393,7 +393,7 @@ func TestFooterAndTerminalEventWrittenOnEveryExitPath(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newExitHarness(t, t.TempDir())
 			h.files.Begin("proj", "CARD-1", "abcdef012345")
-			h.onExit("proj", "CARD-1", tc.exitCode, tc.cause, 1)
+			h.onExit("proj", "CARD-1", tc.exitCode, tc.cause, 1, "corr-1")
 
 			s := h.transcript(t)
 
@@ -415,7 +415,7 @@ func TestFooterAndTerminalEventWrittenOnEveryExitPath(t *testing.T) {
 func TestExitPathSurvivesAnUnwritableTranscript(t *testing.T) {
 	h := newExitHarness(t, "") // an empty dir disables the file logger entirely
 
-	h.onExit("proj", "CARD-1", 137, executor.ExitTimeout, 1)
+	h.onExit("proj", "CARD-1", 137, executor.ExitTimeout, 1, "corr-1")
 
 	assert.Equal(t, "failed", h.rep.status)
 	assert.Equal(t, "worker exited with code 137", h.rep.message)

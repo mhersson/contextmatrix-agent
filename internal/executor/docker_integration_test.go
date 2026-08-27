@@ -43,7 +43,7 @@ func newExitRecorder() *exitRecorder {
 	return &exitRecorder{done: make(chan struct{})}
 }
 
-func (r *exitRecorder) onExit(_, _ string, code int64, cause ExitCause, _ int) {
+func (r *exitRecorder) onExit(_, _ string, code int64, cause ExitCause, _ int, _ string) {
 	r.mu.Lock()
 	r.code = code
 	r.cause = cause

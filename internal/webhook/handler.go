@@ -77,8 +77,8 @@ type CredentialProvisioner interface {
 	HostDir(project, cardID string) string
 	// Provision writes the initial per-run env file and starts the refresh loop
 	// (when the token carries an expiry). Synchronous initial write; returns its
-	// error.
-	Provision(project, cardID, token, expiresAt string, endpoint secrets.EndpointSecrets) error
+	// error. correlationID identifies this run for OnTokenRefresh callers.
+	Provision(project, cardID, correlationID, token, expiresAt string, endpoint secrets.EndpointSecrets) error
 	// Teardown stops the refresh loop and removes the run directory. Idempotent.
 	Teardown(project, cardID string)
 }
@@ -406,7 +406,12 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 
 	// Correlation ID travels in the X-Correlation-ID header, not the trigger
 	// body. Fall back to the card ID so the worker always has a non-empty
-	// trace key.
+	// trace key. Redaction-session isolation (addSessionSecrets/
+	// removeSessionSecrets keying) depends on this being a fresh value per
+	// trigger; the card-ID fallback is constant across a card's re-triggers,
+	// so isolation degrades to the pre-fix, project/card-only behavior for
+	// any request CM sends without the header - a constraint this code
+	// cannot show on its own.
 	correlationID := r.Header.Get(correlationHeader)
 	if correlationID == "" {
 		correlationID = payload.CardID
@@ -498,7 +503,7 @@ func (s *Server) admitAndLaunch(ctx context.Context, spec executor.LaunchSpec, p
 
 	// The fail-closed guard above already rejected empty-GitToken payloads.
 	if s.credentials != nil {
-		if err := s.credentials.Provision(project, cardID, p.GitToken, p.GitTokenExpiresAt, s.runEndpoint(p)); err != nil {
+		if err := s.credentials.Provision(project, cardID, spec.CorrelationID, p.GitToken, p.GitTokenExpiresAt, s.runEndpoint(p)); err != nil {
 			s.logger.Error("provision per-run credentials failed",
 				"project", project, "card_id", cardID, "error", err)
 
@@ -508,7 +513,7 @@ func (s *Server) admitAndLaunch(ctx context.Context, spec executor.LaunchSpec, p
 		provisioned = true
 	}
 
-	s.addSessionSecrets(project, cardID, p)
+	s.addSessionSecrets(project, cardID, spec.CorrelationID, p)
 
 	if err := s.executor.Launch(ctx, spec); err != nil {
 		// Tear down only what THIS launch provisioned: a duplicate that skipped
@@ -517,7 +522,7 @@ func (s *Server) admitAndLaunch(ctx context.Context, spec executor.LaunchSpec, p
 			s.credentials.Teardown(project, cardID)
 		}
 
-		s.removeSessionSecrets(project, cardID)
+		s.removeSessionSecrets(project, cardID, spec.CorrelationID)
 
 		s.logger.Error("launch failed", "project", project, "card_id", cardID, "error", err)
 
@@ -527,16 +532,29 @@ func (s *Server) admitAndLaunch(ctx context.Context, spec executor.LaunchSpec, p
 	return ""
 }
 
+// sessionID composes the id AddSessionKey/RemoveSessionKey register secrets
+// under: project, card ID, and correlationID together. Folding in the
+// correlation id (rather than just project/cardID) is what makes a re-trigger
+// of the same card a structurally different session bucket from the run it
+// replaced - a stale run's RemoveSessionKey then cannot reach a fresh run's
+// keys no matter how the two overlap in time. internal/cli/serve.go composes
+// this identically for the OnTokenRefresh and container-exit paths; the two
+// must stay in lockstep; or the removal side simply targets an id that was
+// never registered, silently leaking a session forever.
+func sessionID(project, cardID, correlationID string) string {
+	return project + "/" + cardID + "/" + correlationID
+}
+
 // addSessionSecrets registers every CM-provisioned secret in the session
-// secret registry under the id project+"/"+cardID: the git token, the LLM
-// endpoint key, the resolved MCP API key (the payload override, else the
-// configured one - the same expression buildLaunchSpec uses, so the key the
-// worker actually sends is the key that gets masked), and every mob guest
-// bearer token. Registration happens before Launch so no container output can
-// precede it; removeSessionSecrets unregisters on container exit and on a
-// failed launch, so a re-trigger never inherits stale keys. It is nil-safe
-// against a nil registry, a nil endpoint, and a nil mob, so callers never
-// nil-guard, and AddSessionKey ignores empty values.
+// secret registry under sessionID(project, cardID, correlationID): the git
+// token, the LLM endpoint key, the resolved MCP API key (the payload
+// override, else the configured one - the same expression buildLaunchSpec
+// uses, so the key the worker actually sends is the key that gets masked),
+// and every mob guest bearer token. Registration happens before Launch so no
+// container output can precede it; removeSessionSecrets unregisters on
+// container exit and on a failed launch, so a re-trigger never inherits stale
+// keys. It is nil-safe against a nil registry, a nil endpoint, and a nil mob,
+// so callers never nil-guard, and AddSessionKey ignores empty values.
 //
 // Operator-supplied worker_extra_env is deliberately not registered. Those
 // values are appended verbatim to the container environment and AGENTS.md
@@ -544,12 +562,12 @@ func (s *Server) admitAndLaunch(ctx context.Context, spec executor.LaunchSpec, p
 // transcripts, so masking only the /logs copy would be a false assurance.
 // (The chat backend does register its worker_extra_env LLM_API_KEY, which is
 // why the two backends differ here.)
-func (s *Server) addSessionSecrets(project, cardID string, p protocol.TriggerPayload) {
+func (s *Server) addSessionSecrets(project, cardID, correlationID string, p protocol.TriggerPayload) {
 	if s.sessionRegistry == nil {
 		return
 	}
 
-	id := project + "/" + cardID
+	id := sessionID(project, cardID, correlationID)
 
 	s.sessionRegistry.AddSessionKey(id, p.GitToken)
 
@@ -571,14 +589,14 @@ func (s *Server) addSessionSecrets(project, cardID string, p protocol.TriggerPay
 	}
 }
 
-// removeSessionSecrets unregisters the session id from the secret registry.
-// Nil-tolerant: a nil registry makes this a no-op.
-func (s *Server) removeSessionSecrets(project, cardID string) {
+// removeSessionSecrets unregisters sessionID(project, cardID, correlationID)
+// from the secret registry. Nil-tolerant: a nil registry makes this a no-op.
+func (s *Server) removeSessionSecrets(project, cardID, correlationID string) {
 	if s.sessionRegistry == nil {
 		return
 	}
 
-	s.sessionRegistry.RemoveSessionKey(project + "/" + cardID)
+	s.sessionRegistry.RemoveSessionKey(sessionID(project, cardID, correlationID))
 }
 
 // runEndpoint maps the payload's llm_endpoint - plus the mob session guest

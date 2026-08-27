@@ -183,15 +183,15 @@ type fakeCredentials struct {
 }
 
 type provisionCall struct {
-	project, cardID, token, expiresAt string
-	endpoint                          secrets.EndpointSecrets
+	project, cardID, correlationID, token, expiresAt string
+	endpoint                                         secrets.EndpointSecrets
 }
 
 func (f *fakeCredentials) HostDir(project, cardID string) string {
 	return "/secrets/runs/" + project + "/" + cardID
 }
 
-func (f *fakeCredentials) Provision(project, cardID, token, expiresAt string, endpoint secrets.EndpointSecrets) error {
+func (f *fakeCredentials) Provision(project, cardID, correlationID, token, expiresAt string, endpoint secrets.EndpointSecrets) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -199,7 +199,7 @@ func (f *fakeCredentials) Provision(project, cardID, token, expiresAt string, en
 		return f.provisionErr
 	}
 
-	f.provisions = append(f.provisions, provisionCall{project, cardID, token, expiresAt, endpoint})
+	f.provisions = append(f.provisions, provisionCall{project, cardID, correlationID, token, expiresAt, endpoint})
 
 	return nil
 }
@@ -1615,11 +1615,12 @@ func TestLaunch_ProvisionsPerRunCredentials(t *testing.T) {
 	calls := creds.provisionCalls()
 	require.Len(t, calls, 1)
 	assert.Equal(t, provisionCall{
-		project:   "p",
-		cardID:    "C1",
-		token:     "cm-git-token",
-		expiresAt: "2026-07-05T12:00:00Z",
-		endpoint:  secrets.EndpointSecrets{Type: "openai", BaseURL: "https://llm.example/v1", APIKey: "cm-llm-key"},
+		project:       "p",
+		cardID:        "C1",
+		correlationID: "corr",
+		token:         "cm-git-token",
+		expiresAt:     "2026-07-05T12:00:00Z",
+		endpoint:      secrets.EndpointSecrets{Type: "openai", BaseURL: "https://llm.example/v1", APIKey: "cm-llm-key"},
 	}, calls[0])
 	assert.Empty(t, creds.teardownCalls(), "no teardown on a successful launch")
 	assert.Equal(t, [][3]string{{"C1", "running", ""}}, reporter.statuses())

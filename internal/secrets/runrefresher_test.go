@@ -122,7 +122,7 @@ func TestRunCredentialsInitialWrite(t *testing.T) {
 
 	m := newTestManager(t, "http://cm.invalid", "key")
 
-	err := m.Provision("proj", "CARD-1", "payload-token", "", EndpointSecrets{
+	err := m.Provision("proj", "CARD-1", "corr-1", "payload-token", "", EndpointSecrets{
 		APIKey:  "llm-key",
 		BaseURL: "https://llm.example/v1",
 		Type:    "openai",
@@ -161,7 +161,7 @@ func TestRunCredentialsRefreshesFromCM(t *testing.T) {
 	// A token that expires very soon so the loop fetches promptly.
 	expiry := time.Now().Add(40 * time.Millisecond).UTC().Format(time.RFC3339)
 
-	require.NoError(t, m.Provision("proj", "CARD-1", "payload-token", expiry, EndpointSecrets{APIKey: "llm-key"}))
+	require.NoError(t, m.Provision("proj", "CARD-1", "corr-1", "payload-token", expiry, EndpointSecrets{APIKey: "llm-key"}))
 	t.Cleanup(func() { m.Teardown("proj", "CARD-1") })
 
 	path := filepath.Join(m.HostDir("proj", "CARD-1"), "env")
@@ -203,7 +203,7 @@ func TestRunCredentialsPATNoRefresh(t *testing.T) {
 
 	m := newTestManager(t, srv.URL, "test-key")
 
-	require.NoError(t, m.Provision("proj", "CARD-1", "pat-token", "", EndpointSecrets{}))
+	require.NoError(t, m.Provision("proj", "CARD-1", "corr-1", "pat-token", "", EndpointSecrets{}))
 	t.Cleanup(func() { m.Teardown("proj", "CARD-1") })
 
 	path := filepath.Join(m.HostDir("proj", "CARD-1"), "env")
@@ -228,7 +228,7 @@ func TestRunCredentialsTeardownStopsLoopAndRemovesDir(t *testing.T) {
 	m := newTestManager(t, srv.URL, "test-key")
 
 	expiry := time.Now().Add(40 * time.Millisecond).UTC().Format(time.RFC3339)
-	require.NoError(t, m.Provision("proj", "CARD-1", "payload-token", expiry, EndpointSecrets{}))
+	require.NoError(t, m.Provision("proj", "CARD-1", "corr-1", "payload-token", expiry, EndpointSecrets{}))
 
 	dir := m.HostDir("proj", "CARD-1")
 
@@ -287,8 +287,8 @@ func TestRunCredentialsProjectScopedIsolation(t *testing.T) {
 
 	m := newTestManager(t, "http://cm.invalid", "key")
 
-	require.NoError(t, m.Provision("projA", "CARD-1", "token-A", "", EndpointSecrets{APIKey: "key-A"}))
-	require.NoError(t, m.Provision("projB", "CARD-1", "token-B", "", EndpointSecrets{APIKey: "key-B"}))
+	require.NoError(t, m.Provision("projA", "CARD-1", "corr-A", "token-A", "", EndpointSecrets{APIKey: "key-A"}))
+	require.NoError(t, m.Provision("projB", "CARD-1", "corr-B", "token-B", "", EndpointSecrets{APIKey: "key-B"}))
 
 	t.Cleanup(func() { m.Teardown("projB", "CARD-1") })
 
@@ -323,7 +323,7 @@ func TestRunCredentialsCleanupOrphans(t *testing.T) {
 
 	m := newTestManager(t, "http://cm.invalid", "key")
 
-	require.NoError(t, m.Provision("proj", "CARD-1", "tok", "", EndpointSecrets{}))
+	require.NoError(t, m.Provision("proj", "CARD-1", "corr-1", "tok", "", EndpointSecrets{}))
 	path := filepath.Join(m.HostDir("proj", "CARD-1"), "env")
 	_, err := os.Stat(path)
 	require.NoError(t, err)
@@ -374,7 +374,7 @@ func TestRunCredentialsConcurrentProvisionNoLeakedLoop(t *testing.T) {
 				<-start
 
 				expiry := time.Now().Add(runExpiry).UTC().Format(time.RFC3339)
-				errCh <- m.Provision("proj", "CARD-1", runToken, expiry, EndpointSecrets{})
+				errCh <- m.Provision("proj", "CARD-1", "corr-1", runToken, expiry, EndpointSecrets{})
 			})
 		}
 
@@ -444,7 +444,8 @@ func TestParseExpiry(t *testing.T) {
 }
 
 // TestOnTokenRefreshFiresForExpiringToken verifies that the optional hook
-// receives the rotated token with the correct project and card ID after a
+// receives the rotated token with the correct project, card ID, and
+// correlation id (the same one passed to Provision, unchanged) after a
 // successful refresh. A sync.Once-style channel avoids a race between the
 // async refresh loop and the assertion.
 func TestOnTokenRefreshFiresForExpiringToken(t *testing.T) {
@@ -458,27 +459,29 @@ func TestOnTokenRefreshFiresForExpiringToken(t *testing.T) {
 
 	// Channel closed once the hook fires, a once-style guard.
 	var (
-		mu          sync.Mutex
-		hookProject string
-		hookCardID  string
-		hookToken   string
-		hookFired   bool
+		mu              sync.Mutex
+		hookProject     string
+		hookCardID      string
+		hookCorrelation string
+		hookToken       string
+		hookFired       bool
 	)
 
-	m.OnTokenRefresh = func(project, cardID, token string) {
+	m.OnTokenRefresh = func(project, cardID, correlationID, token string) {
 		mu.Lock()
 		defer mu.Unlock()
 
 		if !hookFired {
 			hookProject = project
 			hookCardID = cardID
+			hookCorrelation = correlationID
 			hookToken = token
 			hookFired = true
 		}
 	}
 
 	expiry := time.Now().Add(40 * time.Millisecond).UTC().Format(time.RFC3339)
-	require.NoError(t, m.Provision("proj", "CARD-1", "payload-token", expiry, EndpointSecrets{}))
+	require.NoError(t, m.Provision("proj", "CARD-1", "corr-1", "payload-token", expiry, EndpointSecrets{}))
 	t.Cleanup(func() { m.Teardown("proj", "CARD-1") })
 
 	require.Eventually(t, func() bool {
@@ -493,6 +496,7 @@ func TestOnTokenRefreshFiresForExpiringToken(t *testing.T) {
 
 	assert.Equal(t, "proj", hookProject)
 	assert.Equal(t, "CARD-1", hookCardID)
+	assert.Equal(t, "corr-1", hookCorrelation, "the hook must receive the same correlation id passed to Provision")
 	assert.Equal(t, "refreshed-token-1", hookToken, "the hook must receive the first rotated token")
 }
 
@@ -521,7 +525,7 @@ func TestOnTokenRefreshFiresBeforeEnvFileWrite(t *testing.T) {
 		hookErr     error
 	)
 
-	m.OnTokenRefresh = func(_, _, _ string) {
+	m.OnTokenRefresh = func(_, _, _, _ string) {
 		mu.Lock()
 		defer mu.Unlock()
 
@@ -542,7 +546,7 @@ func TestOnTokenRefreshFiresBeforeEnvFileWrite(t *testing.T) {
 	}
 
 	expiry := time.Now().Add(40 * time.Millisecond).UTC().Format(time.RFC3339)
-	require.NoError(t, m.Provision("proj", "CARD-1", "payload-token", expiry, EndpointSecrets{}))
+	require.NoError(t, m.Provision("proj", "CARD-1", "corr-1", "payload-token", expiry, EndpointSecrets{}))
 	t.Cleanup(func() { m.Teardown("proj", "CARD-1") })
 
 	require.Eventually(t, func() bool {
@@ -574,11 +578,11 @@ func TestOnTokenRefreshNeverFiresForPAT(t *testing.T) {
 
 	fireCount := &atomic.Int32{}
 
-	m.OnTokenRefresh = func(_, _, _ string) {
+	m.OnTokenRefresh = func(_, _, _, _ string) {
 		fireCount.Add(1)
 	}
 
-	require.NoError(t, m.Provision("proj", "CARD-1", "pat-token", "", EndpointSecrets{}))
+	require.NoError(t, m.Provision("proj", "CARD-1", "corr-1", "pat-token", "", EndpointSecrets{}))
 	t.Cleanup(func() { m.Teardown("proj", "CARD-1") })
 
 	time.Sleep(100 * time.Millisecond)

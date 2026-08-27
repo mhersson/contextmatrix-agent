@@ -135,6 +135,59 @@ func TestSessionSecretTee_RemoveSessionKeyStopsFileRedaction(t *testing.T) {
 		"the line written after removal keeps the literal secret")
 }
 
+// TestSessionSecretTee_StaleExitCannotStripFreshRunKeys pins the fix for the
+// pump-drain re-trigger race: a re-triggered run admitted while a previous
+// run's exit callback is still in flight (up to pumpDrainTimeout after the
+// tracker forgets the old run) must not have its redaction keys stripped by
+// the stale run's own RemoveSessionKey call. Session ids are now scoped by
+// the run's correlation id (sessionID), so run 1's removal and run 2's
+// registration are structurally different map keys - no shared mutable
+// "who owns this" state to race on. Both surfaces the redaction covers - the
+// live SSE stream and the durable file log - are asserted.
+func TestSessionSecretTee_StaleExitCannotStripFreshRunKeys(t *testing.T) {
+	dir := t.TempDir()
+	files := filelog.New(dir, nil)
+	hub := logbridge.NewHub(func(e protocol.LogEntry) string { return e.Project }, nil)
+	bridge := logbridge.NewBridge(logbridge.BridgeConfig{Hub: hub})
+	registry := newSessionSecretTee(logbridge.NewRedactorRegistry(bridge))
+	sink := containerLogSink(bridge, files, registry)
+
+	subID, ch := hub.Subscribe("proj")
+	defer hub.Unsubscribe(subID)
+
+	// Run 1 registers its own secret under its own correlation id.
+	registry.AddSessionKey(sessionID("proj", "card-race", "corr-1"), "PLACEHOLDER-RUN1-SECRET")
+
+	// Run 2 is a re-trigger of the SAME card, admitted during run 1's
+	// pump-drain window, and registers its own secret under a DIFFERENT
+	// correlation id.
+	registry.AddSessionKey(sessionID("proj", "card-race", "corr-2"), "PLACEHOLDER-RUN2-SECRET")
+
+	files.Begin("proj", "card-race", "container-2")
+
+	// Run 1's stale exit fires now and removes only its own bucket.
+	registry.RemoveSessionKey(sessionID("proj", "card-race", "corr-1"))
+
+	// Run 2's secret must still redact on the durable file log...
+	sink("proj", "card-race", []byte("leaked PLACEHOLDER-RUN2-SECRET here"), true)
+	files.End("proj", "card-race", 0, "exit")
+
+	content := readCardLog(t, dir, "proj", "card-race")
+	assert.NotContains(t, content, "PLACEHOLDER-RUN2-SECRET",
+		"a stale run's exit must not strip a fresh run's durable-file redaction")
+	assert.Contains(t, content, "[REDACTED]")
+
+	// ...and on the live SSE stream.
+	select {
+	case entry := <-ch:
+		assert.NotContains(t, entry.Content, "PLACEHOLDER-RUN2-SECRET",
+			"a stale run's exit must not strip a fresh run's SSE redaction")
+		assert.Contains(t, entry.Content, "[REDACTED]")
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the hub to publish the bridged entry")
+	}
+}
+
 func TestAgentMapExtra(t *testing.T) {
 	tests := []struct {
 		name      string

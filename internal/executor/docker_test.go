@@ -382,9 +382,10 @@ func TestWaitForPumpDrain_TimesOut(t *testing.T) {
 
 // exitCall is one recorded onExit invocation.
 type exitCall struct {
-	exitCode int64
-	cause    ExitCause
-	attempt  int
+	exitCode      int64
+	cause         ExitCause
+	attempt       int
+	correlationID string
 }
 
 // stubDocker fakes the slice of the Docker API the supervision goroutines
@@ -536,8 +537,8 @@ func TestWaitAndCleanupReportsExitCause(t *testing.T) {
 				Tracker:          tracker,
 				ContainerTimeout: 30 * time.Millisecond,
 				Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
-				OnExit: func(_, _ string, code int64, cause ExitCause, attempt int) {
-					got <- exitCall{exitCode: code, cause: cause, attempt: attempt}
+				OnExit: func(_, _ string, code int64, cause ExitCause, attempt int, correlationID string) {
+					got <- exitCall{exitCode: code, cause: cause, attempt: attempt, correlationID: correlationID}
 				},
 			})
 
@@ -548,7 +549,7 @@ func TestWaitAndCleanupReportsExitCause(t *testing.T) {
 			pumpDone := make(chan struct{})
 			close(pumpDone)
 
-			e.waitAndCleanup("proj", "CARD-1", "cid-1", 1, time.Now(),
+			e.waitAndCleanup("proj", "CARD-1", "cid-1", 1, "corr-1", time.Now(),
 				types.HijackedResponse{Conn: conn}, make(chan struct{}), pumpDone,
 				slog.New(slog.NewTextHandler(io.Discard, nil)))
 
@@ -583,8 +584,8 @@ func TestLaunchCarriesTheAttemptOrdinalToOnExit(t *testing.T) {
 		PullPolicy:       PullNever,
 		ContainerTimeout: time.Second,
 		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
-		OnExit: func(_, _ string, code int64, cause ExitCause, attempt int) {
-			got <- exitCall{exitCode: code, cause: cause, attempt: attempt}
+		OnExit: func(_, _ string, code int64, cause ExitCause, attempt int, correlationID string) {
+			got <- exitCall{exitCode: code, cause: cause, attempt: attempt, correlationID: correlationID}
 		},
 	})
 
@@ -599,6 +600,42 @@ func TestLaunchCarriesTheAttemptOrdinalToOnExit(t *testing.T) {
 	case call := <-got:
 		assert.Equal(t, 3, call.attempt)
 		assert.Equal(t, ExitNormal, call.cause)
+	case <-time.After(5 * time.Second):
+		t.Fatal("onExit never fired")
+	}
+}
+
+// TestLaunchCarriesTheCorrelationIDToOnExit pins the other half of the
+// per-run identity the exit callback needs: unlike the attempt ordinal (which
+// collapses to 1 for every run when file logging is disabled), the
+// correlation id is always distinct per admitted trigger, so it is what a
+// caller must use to tell a stale run's exit apart from a fresh one racing in
+// behind it.
+func TestLaunchCarriesTheCorrelationIDToOnExit(t *testing.T) {
+	docker := &stubDocker{waitFn: exitsWith(0)}
+	got := make(chan exitCall, 1)
+
+	e := NewDockerExecutor(Config{
+		Docker:           docker,
+		Tracker:          NewTracker(1),
+		PullPolicy:       PullNever,
+		ContainerTimeout: time.Second,
+		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+		OnExit: func(_, _ string, code int64, cause ExitCause, attempt int, correlationID string) {
+			got <- exitCall{exitCode: code, cause: cause, attempt: attempt, correlationID: correlationID}
+		},
+	})
+
+	require.NoError(t, e.Launch(t.Context(), LaunchSpec{
+		Project:       "proj",
+		CardID:        "CARD-1",
+		Image:         "alpine:3",
+		CorrelationID: "trace-xyz",
+	}))
+
+	select {
+	case call := <-got:
+		assert.Equal(t, "trace-xyz", call.correlationID)
 	case <-time.After(5 * time.Second):
 		t.Fatal("onExit never fired")
 	}
