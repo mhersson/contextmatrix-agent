@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/filelog"
+	"github.com/mhersson/contextmatrix-agent/internal/webhook"
 	"github.com/mhersson/contextmatrix-backendkit/logbridge"
 	protocol "github.com/mhersson/contextmatrix-protocol"
 	"github.com/stretchr/testify/assert"
@@ -140,7 +141,7 @@ func TestSessionSecretTee_RemoveSessionKeyStopsFileRedaction(t *testing.T) {
 // run's exit callback is still in flight (up to pumpDrainTimeout after the
 // tracker forgets the old run) must not have its redaction keys stripped by
 // the stale run's own RemoveSessionKey call. Session ids are now scoped by
-// the run's correlation id (sessionID), so run 1's removal and run 2's
+// the run's correlation id (webhook.SessionID), so run 1's removal and run 2's
 // registration are structurally different map keys - no shared mutable
 // "who owns this" state to race on. Both surfaces the redaction covers - the
 // live SSE stream and the durable file log - are asserted.
@@ -156,17 +157,17 @@ func TestSessionSecretTee_StaleExitCannotStripFreshRunKeys(t *testing.T) {
 	defer hub.Unsubscribe(subID)
 
 	// Run 1 registers its own secret under its own correlation id.
-	registry.AddSessionKey(sessionID("proj", "card-race", "corr-1"), "PLACEHOLDER-RUN1-SECRET")
+	registry.AddSessionKey(webhook.SessionID("proj", "card-race", "corr-1"), "PLACEHOLDER-RUN1-SECRET")
 
 	// Run 2 is a re-trigger of the SAME card, admitted during run 1's
 	// pump-drain window, and registers its own secret under a DIFFERENT
 	// correlation id.
-	registry.AddSessionKey(sessionID("proj", "card-race", "corr-2"), "PLACEHOLDER-RUN2-SECRET")
+	registry.AddSessionKey(webhook.SessionID("proj", "card-race", "corr-2"), "PLACEHOLDER-RUN2-SECRET")
 
 	files.Begin("proj", "card-race", "container-2")
 
 	// Run 1's stale exit fires now and removes only its own bucket.
-	registry.RemoveSessionKey(sessionID("proj", "card-race", "corr-1"))
+	registry.RemoveSessionKey(webhook.SessionID("proj", "card-race", "corr-1"))
 
 	// Run 2's secret must still redact on the durable file log...
 	sink("proj", "card-race", []byte("leaked PLACEHOLDER-RUN2-SECRET here"), true)

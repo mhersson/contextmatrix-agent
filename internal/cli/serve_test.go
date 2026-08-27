@@ -238,12 +238,16 @@ func TestNextAttemptWiresFileLoggerIntoWebhookConfig(t *testing.T) {
 
 // exitHarness wires the collaborators onContainerExit needs plus a hub
 // subscriber, so a test can read both surfaces a terminal event lands on.
+// registry is exported so a test can register a session key before firing
+// onExit and then check whether it survived - the only way to pin that
+// onExit's removal call actually targets the id a real registration used.
 type exitHarness struct {
-	dir    string
-	files  *filelog.Logger
-	rep    *stubReporter
-	stream <-chan protocol.LogEntry
-	onExit func(project, cardID string, exitCode int64, cause executor.ExitCause, attempt int, correlationID string)
+	dir      string
+	files    *filelog.Logger
+	rep      *stubReporter
+	stream   <-chan protocol.LogEntry
+	registry *sessionSecretTee
+	onExit   func(project, cardID string, exitCode int64, cause executor.ExitCause, attempt int, correlationID string)
 }
 
 func newExitHarness(t *testing.T, logDir string) *exitHarness {
@@ -263,11 +267,12 @@ func newExitHarness(t *testing.T, logDir string) *exitHarness {
 	t.Cleanup(func() { hub.Unsubscribe(id) })
 
 	return &exitHarness{
-		dir:    logDir,
-		files:  files,
-		rep:    rep,
-		stream: ch,
-		onExit: onContainerExit(rep, creds, files, registry, bridge, logger),
+		dir:      logDir,
+		files:    files,
+		rep:      rep,
+		stream:   ch,
+		registry: registry,
+		onExit:   onContainerExit(rep, creds, files, registry, bridge, logger),
 	}
 }
 
@@ -344,6 +349,52 @@ func TestExitEmitsTerminalEventAndFooterFromOneCall(t *testing.T) {
 	assert.Equal(t, "CARD-1", entries[0].CardID)
 	assert.Contains(t, entries[0].Content, "-1")
 	assert.Contains(t, entries[0].Content, string(executor.ExitTimeout))
+}
+
+// TestOnContainerExit_RemovalTargetsExactRegisteredID pins the link a bare
+// project/cardID revert at either onContainerExit's removal call or
+// onTokenRefreshHook's registration call would silently break. It registers a
+// key exactly the way production code does - webhook.SessionID for the
+// initial registration (what addSessionSecrets uses) and the real
+// onTokenRefreshHook for a mid-run rotation - then fires the real onExit
+// closure and checks removal by behavior (Redact no longer masks a key once
+// it is gone), not by re-deriving the id inside the test. A second run's key,
+// registered under a different correlation id, must stay masked - untouched
+// by run 1's exit. Reverting onContainerExit's removal call to the bare
+// project+"/"+cardID id fails this test: it would target an id nothing was
+// ever registered under (production registration always includes the
+// correlation id), so run 1's own keys would still be masked after its exit.
+// Reverting onTokenRefreshHook alone means the rotated token registers under
+// an id removal never targets, so it alone would still be masked afterward.
+func TestOnContainerExit_RemovalTargetsExactRegisteredID(t *testing.T) {
+	h := newExitHarness(t, t.TempDir())
+
+	// Simulates addSessionSecrets registering run 1's initial secret, then
+	// onTokenRefreshHook registering a mid-run rotated token - both under the
+	// same correlation id a real admission would use.
+	h.registry.AddSessionKey(webhook.SessionID("proj", "CARD-1", "corr-1"), "PLACEHOLDER-RUN1-SECRET")
+	onTokenRefreshHook(h.registry)("proj", "CARD-1", "corr-1", "PLACEHOLDER-RUN1-ROTATED")
+
+	// A second run of the same card, registered under a different
+	// correlation id, must be unaffected by run 1's exit.
+	h.registry.AddSessionKey(webhook.SessionID("proj", "CARD-1", "corr-2"), "PLACEHOLDER-RUN2-SECRET")
+
+	h.files.Begin("proj", "CARD-1", "abcdef012345")
+	h.onExit("proj", "CARD-1", 0, executor.ExitNormal, 1, "corr-1")
+
+	line := []byte("PLACEHOLDER-RUN1-SECRET PLACEHOLDER-RUN1-ROTATED PLACEHOLDER-RUN2-SECRET")
+	redacted := string(h.registry.Redact(line))
+
+	// Removed keys are no longer masked - Redact leaves them literal.
+	assert.Contains(t, redacted, "PLACEHOLDER-RUN1-SECRET",
+		"run 1's initial secret must be gone from the registry after its own exit")
+	assert.Contains(t, redacted, "PLACEHOLDER-RUN1-ROTATED",
+		"run 1's rotated token, registered under the same correlation id, must also be gone")
+
+	// A still-registered key stays masked.
+	assert.NotContains(t, redacted, "PLACEHOLDER-RUN2-SECRET",
+		"run 2's secret, registered under a different correlation id, must still be masked")
+	assert.Equal(t, 1, strings.Count(redacted, "[REDACTED]"), "exactly run 2's one still-registered secret is masked")
 }
 
 // TestTerminalEventCarriesTheAttemptOrdinal keeps a restarted container's

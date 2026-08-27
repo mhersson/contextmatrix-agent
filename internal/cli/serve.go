@@ -148,12 +148,8 @@ func runServe(ctx context.Context, configPath string) error {
 
 	// Wire the token-refresh hook so every rotated git token is added to the
 	// redactor set. Appending is correct - both the original and the rotated
-	// token can appear in output. Keyed by sessionID (project, card, and this
-	// run's correlation id) so the rotated token joins the SAME bucket
-	// addSessionSecrets registered the run's other secrets under.
-	credentials.OnTokenRefresh = func(project, cardID, correlationID, token string) {
-		registry.AddSessionKey(sessionID(project, cardID, correlationID), token)
-	}
+	// token can appear in output.
+	credentials.OnTokenRefresh = onTokenRefreshHook(registry)
 
 	exec := executor.NewDockerExecutor(executor.Config{
 		Docker:           docker,
@@ -328,15 +324,18 @@ func gracefulShutdown(
 	}
 }
 
-// sessionID composes the id the session-secret registry stores keys under:
-// project, card ID, and the run's correlation id together. This must match
-// internal/webhook/handler.go's identical sessionID composition exactly -
-// addSessionSecrets registers under it and this package's onContainerExit and
-// credentials.OnTokenRefresh wiring remove/append under it - or registration
-// and removal target different map entries and a session either never gets
-// cleaned up or (the bug this keying fixes) gets cleaned up by the wrong run.
-func sessionID(project, cardID, correlationID string) string {
-	return project + "/" + cardID + "/" + correlationID
+// onTokenRefreshHook builds the RunCredentials.OnTokenRefresh callback: it
+// registers a freshly-minted git token with the session-secret registry
+// under webhook.SessionID(project, cardID, correlationID) - the exact id
+// addSessionSecrets registered the run's other secrets under (see
+// internal/webhook/handler.go), so the rotated token joins its own run's
+// redaction bucket rather than a different one. Extracted to a named
+// function (rather than an inline closure in runServe) so it is directly
+// unit-testable.
+func onTokenRefreshHook(registry *sessionSecretTee) func(project, cardID, correlationID, token string) {
+	return func(project, cardID, correlationID, token string) {
+		registry.AddSessionKey(webhook.SessionID(project, cardID, correlationID), token)
+	}
 }
 
 // sessionSecretTee tees every session-secret registration to backendkit's
@@ -471,25 +470,37 @@ func containerLogSink(
 // exit status callback below, and that callback is what gates CM's re-triggers
 // (CM learns the run finished only from it). files.End footers and closes the
 // per-card log first, so the log is closed before the status callback can let CM
-// admit a new run for the same card. Likewise for Teardown: under the normal
-// flow the tracker.Remove → Teardown window is already closed before CM can
-// re-trigger, and it cannot be hit. A re-trigger racing in out of band inside
-// that microsecond window would at worst lose its own fresh provisioning to this
-// Teardown - a loud, self-inflicted failure - never a leaked or cross-run token.
+// admit a new run for the same card.
 //
-// Session-secret removal keying: credentials.Teardown stays keyed by
-// project/cardID (RunCredentials only ever tracks one live run per card, so
-// there is nothing to disambiguate there), but the session-secret registry
-// removal below uses sessionID(project, cardID, correlationID) - the run's
-// own correlation id, forwarded here from the executor's OnExit callback.
-// This is the fix for the pump-drain race: a re-trigger of the same card can
-// be admitted (and register its own secrets) during the up-to-5-second window
-// between waitAndCleanup's tracker.Remove and this callback finally firing
-// for the run that just exited. Before this run and its successor shared the
-// bare project/cardID key, so this stale call would strip the successor's
-// still-live redaction. Keying by correlationID makes the two calls target
-// different map entries, so a stale exit can only ever remove its own run's
-// keys.
+// The tracker.Remove -> this callback window is NOT negligible: waitAndCleanup
+// (internal/executor/docker.go) clears the tracker entry BEFORE the pump-drain
+// wait (up to pumpDrainTimeout, 5s), and this callback - which runs Teardown
+// and the session-secret removal below - fires only once that wait completes.
+// Nothing but the tracker entry gates admission, so CM can and does re-trigger
+// inside that window; a re-trigger racing in here is the normal case this file
+// defends against, not an unreachable edge case.
+//
+// credentials.Teardown stays keyed by plain project/cardID: RunCredentials
+// tracks one live handle per card, and Provision's own re-provision-displaces
+// design (see its doc comment) means a re-trigger's Provision landing inside
+// this window already replaces the stale run's handle with its own before this
+// stale Teardown call runs. Teardown then finds and stops the RE-TRIGGER's
+// handle, not the original run's - at worst the re-trigger loses its own
+// freshly-provisioned credential directory to this call, a loud, self-inflicted
+// failure (the new run fails fast on a missing secrets file), never a leaked or
+// cross-run token. That narrower risk is unchanged by this task; only the
+// session-secret registry removal below is now scoped to avoid the equivalent
+// cross-run failure mode.
+//
+// Session-secret removal keying: the registry removal below uses
+// webhook.SessionID(project, cardID, correlationID) - the run's own
+// correlation id, forwarded here from the executor's OnExit callback - so it
+// does NOT share credentials.Teardown's exposure above. Before this fix, both
+// this call and addSessionSecrets composed the bare project/cardID id, so a
+// stale run's removal here would strip a re-trigger's still-live redaction
+// keys during the same window. Keying by correlationID makes the two calls
+// target different map entries, so a stale exit can only ever remove its own
+// run's keys.
 func onContainerExit(
 	reporter webhook.StatusReporter,
 	credentials *secrets.RunCredentials,
@@ -506,7 +517,7 @@ func onContainerExit(
 
 		// Remove the session secrets after credential teardown but before
 		// the status callback so a re-trigger does not inherit stale keys.
-		registry.RemoveSessionKey(sessionID(project, cardID, correlationID))
+		registry.RemoveSessionKey(webhook.SessionID(project, cardID, correlationID))
 
 		status, message := exitStatus(exitCode, cause)
 

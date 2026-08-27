@@ -533,6 +533,46 @@ func TestTrigger_LaunchErrorReportsFailed(t *testing.T) {
 	}, time.Second, 5*time.Millisecond)
 }
 
+// TestTrigger_MintsDistinctCorrelationIDsAcrossReTriggers pins the fix's real
+// effectiveness: CM does not send X-Correlation-ID today, so the fallback in
+// handleTrigger is the common path, not a rare edge case. Two triggers of the
+// same card without the header must still resolve to distinct correlation
+// ids, or redaction-session isolation (SessionID) stays inert for every
+// real-world trigger, which is exactly the bug this fix closes.
+func TestTrigger_MintsDistinctCorrelationIDsAcrossReTriggers(t *testing.T) {
+	h := newHarness(t, 4)
+
+	payload := provisionedPayload("PROJ-MINT")
+
+	ts := time.Now().Unix()
+
+	w := h.doAt(t, http.MethodPost, "/trigger", payload, strconv.FormatInt(ts, 10))
+	require.Equal(t, http.StatusAccepted, w.Code)
+
+	require.Eventually(t, func() bool {
+		return len(h.exec.launchedSpecs()) == 1
+	}, time.Second, 5*time.Millisecond)
+
+	// Simulate run 1 finishing (its exit callback would remove the tracker
+	// entry) so a re-trigger of the same card is admitted. A distinct
+	// timestamp (a real retry carries a fresh one) keeps the two identical
+	// payloads from colliding in the replay cache.
+	h.tracker.Remove("proj", "PROJ-MINT")
+
+	w = h.doAt(t, http.MethodPost, "/trigger", payload, strconv.FormatInt(ts+1, 10))
+	require.Equal(t, http.StatusAccepted, w.Code)
+
+	require.Eventually(t, func() bool {
+		return len(h.exec.launchedSpecs()) == 2
+	}, time.Second, 5*time.Millisecond)
+
+	specs := h.exec.launchedSpecs()
+	assert.NotEmpty(t, specs[0].CorrelationID)
+	assert.NotEmpty(t, specs[1].CorrelationID)
+	assert.NotEqual(t, specs[0].CorrelationID, specs[1].CorrelationID,
+		"two triggers of the same card without X-Correlation-ID must mint distinct ids")
+}
+
 // ---- kill -------------------------------------------------------------------
 
 func TestKill_TrackedReturns200(t *testing.T) {
