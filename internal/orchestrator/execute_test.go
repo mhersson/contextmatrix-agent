@@ -2810,3 +2810,119 @@ func TestPreCommitVerifySkippedForCandidateSolver(t *testing.T) {
 	require.NoError(t, o.preCommitVerify(context.Background(), sc, subtaskRef{ID: "SUB-1", Title: "Only"}, exhausted))
 	assert.False(t, ran, "a candidate solver never runs the pre-commit gate")
 }
+
+// TestSoloFinishReportsVerifyPassWhenTheGateActuallyPassed proves the finish
+// path stops discarding evidence it holds. An authoritative verify runs before
+// the commit, and when it passes, the row says so - the same fact the salvage
+// path and the Best-of-N judge already report off their own verify calls.
+func TestSoloFinishReportsVerifyPassWhenTheGateActuallyPassed(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: []llm.Response{finishResp("feat: subtask done", 0.01)}}
+	d := execTestDeps(ops, git, client)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
+
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 0}
+	}
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	require.Len(t, ops.reportOutcomes, 1)
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 1)
+	assert.Equal(t, "win", rows[0].Result)
+	assert.True(t, rows[0].VerifyPass, "the gate ran and passed on the coder's own work")
+}
+
+// TestSoloFinishReportsNoVerifyPassOnAnInconclusiveGate is the other half of
+// the same honesty, and the reason passing a literal true would have been
+// wrong: reaching the report site means the gate did not FAIL, which is not the
+// same as its having PASSED. A timed-out run is not evidence of a pass.
+func TestSoloFinishReportsNoVerifyPassOnAnInconclusiveGate(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: []llm.Response{finishResp("feat: subtask done", 0.01)}}
+	d := execTestDeps(ops, git, client)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
+
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		return verifyexec.Outcome{TimedOut: true, ExitCode: -1}
+	}
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	require.Len(t, ops.reportOutcomes, 1)
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 1)
+	assert.Equal(t, "win", rows[0].Result, "an inconclusive gate is not a failure")
+	assert.False(t, rows[0].VerifyPass, "an inconclusive gate is not a pass either")
+}
+
+// TestSoloFinishReportsNoVerifyPassWhenNoCommandResolved covers the skip tier:
+// an empty resolved argv means no subprocess started, so there is no verdict to
+// report. newExecRun's isolateVerify leaves the plan at exactly that tier.
+func TestSoloFinishReportsNoVerifyPassWhenNoCommandResolved(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: []llm.Response{finishResp("feat: subtask done", 0.01)}}
+	d := execTestDeps(ops, git, client)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
+
+	ran := false
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		ran = true
+
+		return verifyexec.Outcome{ExitCode: 0}
+	}
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	assert.False(t, ran, "an empty resolved argv means there is nothing to run")
+
+	require.Len(t, ops.reportOutcomes, 1)
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 1)
+	assert.False(t, rows[0].VerifyPass, "no command ran, so nothing passed")
+}
+
+// TestGateEvidenceDoesNotLeakBetweenSubtasks proves the evidence is per
+// subtask. One solverCtx drives every subtask in a run, so a verdict left
+// standing from an earlier subtask would let a later one claim a pass it never
+// earned - the exact class of false record this change exists to end.
+func TestGateEvidenceDoesNotLeakBetweenSubtasks(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: []llm.Response{
+		finishResp("feat: first subtask", 0.01),
+		finishResp("feat: second subtask", 0.01),
+	}}
+	d := execTestDeps(ops, git, client)
+	o := newExecRun(d, []subtaskRef{
+		{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")},
+		{ID: "SUB-2", Title: "Second", Sizing: seedSizing("simple")},
+	}, 0)
+
+	seedResolvedVerifyPlan(o)
+
+	runs := 0
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		runs++
+		if runs == 1 {
+			return verifyexec.Outcome{ExitCode: 0}
+		}
+
+		return verifyexec.Outcome{TimedOut: true, ExitCode: -1}
+	}
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	require.Len(t, ops.reportOutcomes, 2)
+	require.Len(t, ops.reportOutcomes[0], 1)
+	require.Len(t, ops.reportOutcomes[1], 1)
+	assert.True(t, ops.reportOutcomes[0][0].VerifyPass, "the first subtask's gate passed")
+	assert.False(t, ops.reportOutcomes[1][0].VerifyPass,
+		"the second subtask's gate was inconclusive and must not inherit the first's pass")
+}

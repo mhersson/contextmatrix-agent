@@ -36,6 +36,18 @@ type solverCtx struct {
 	completed  []subtaskRef // subtasks this solver actually executed
 	lastSubID  string       // final subtask ID in execution order; "" disables turn-cap salvage (parent/single-solver)
 	capped     bool         // the final subtask hit the turn cap; its work was salvage-committed for judge verification
+	gate       gateEvidence // what the pre-commit gate learned about this subtask's coder work
+}
+
+// gateEvidence is what the pre-commit gate learned about the coder's own work.
+// It is carried on the solver rather than returned because preCommitVerify's
+// signature is a hook other work builds on and already takes an exhaustion
+// argument; a third parameter, or a second return, would widen it further.
+type gateEvidence struct {
+	// verified: the resolved command RAN and PASSED against the tree that is
+	// about to be committed. False for the skip tier and for an inconclusive
+	// run, neither of which is evidence of anything.
+	verified bool
 }
 
 // runExecute is the execute phase: subtasks run SEQUENTIALLY in dependency
@@ -204,6 +216,10 @@ var subtaskHeartbeatInterval = 5 * time.Minute
 // both operands, and it is what lets the still-red arm correct the turn budget
 // as well as the bar - see applyPrecommitVerifyEvidence.
 func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef, exhausted bool) error {
+	// One assignment point, before any early return, so a verdict from an
+	// earlier subtask can never stand in for this one.
+	sc.gate = gateEvidence{}
+
 	if !sc.boardOps {
 		return nil
 	}
@@ -225,6 +241,8 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 	o.logVerifyGate(ctx, vres, subtaskGateContext(sub.ID))
 
 	if vres.Status != verifyFailed {
+		sc.gate.verified = vres.Status == verifyPassed
+
 		return nil
 	}
 
@@ -261,6 +279,8 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 
 		return fmt.Errorf("subtask %s: `%s` still fails after one fix pass", sub.ID, plan.Display)
 	}
+
+	sc.gate.verified = vres.Status == verifyPassed
 
 	return nil
 }
@@ -369,14 +389,11 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 	if sc.boardOps {
 		// Report the win BEFORE CompleteTask (claim-gating rationale on
 		// reportSoloOutcome - a report after complete_task releases the claim
-		// would silently vanish). VerifyPass false means unknown here, not
-		// failure: reaching this line means the pre-commit gate did not fail,
-		// but it may equally have found no command or been inconclusive, and
-		// preCommitVerify does not carry out which - so the report stays
-		// conservative rather than claiming a pass it cannot see. The model
-		// finished, committed, and pushed, so the win is real regardless of
-		// what the board bookkeeping below does with it.
-		o.reportSoloOutcome(ctx, sub.ID, model, "win", false, sc.ledger.Spent()-spendBefore)
+		// would silently vanish). VerifyPass carries what the pre-commit gate
+		// actually saw: true only when the resolved command ran and passed. The
+		// skip tier and an inconclusive run both leave it false, because
+		// neither is evidence of a pass.
+		o.reportSoloOutcome(ctx, sub.ID, model, "win", sc.gate.verified, sc.ledger.Spent()-spendBefore)
 
 		if err := d.Ops.CompleteTask(ctx, sub.ID, commitSubject(commitMsg, sub.Title)); err != nil {
 			return fmt.Errorf("complete subtask %s: %w", sub.ID, err)
