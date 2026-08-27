@@ -2997,6 +2997,8 @@ func TestRepairedSubtaskStillCompletes(t *testing.T) {
 
 	require.Len(t, git.commitMsgs, 1, "the repaired work commits; git=%v", git.recorded())
 	assert.Equal(t, "feat: subtask done", git.commitMsgs[0], "under the coder's own finish message")
+	require.Len(t, git.pushBranches, 1, "the repaired work is pushed; git=%v", git.recorded())
+	assert.Equal(t, "cm/card-1", git.pushBranches[0])
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "CompleteTask:SUB-1"), 0,
 		"a failed model outcome is not a failed subtask")
 }
@@ -3028,6 +3030,7 @@ func TestRedGateWithAnInconclusiveRecheckStillReportsFailed(t *testing.T) {
 	}
 
 	require.NoError(t, runExecute(context.Background(), o))
+	require.Equal(t, 1, verifyFixPasses(client), "the red gate earned one fix pass")
 
 	require.Len(t, ops.reportOutcomes, 1)
 	rows := ops.reportOutcomes[0]

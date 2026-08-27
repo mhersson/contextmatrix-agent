@@ -404,15 +404,28 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 		// pushes and completes below. `failed` is the model's verdict, not the
 		// card's.
 		//
-		// That choice is deliberate and it is the only one that reaches the
-		// priors. A solo row carries n_candidates 1, so it contributes exactly
-		// 1.0 to expected wins: recording a win nets to zero and suppressing the
-		// row does nothing at all, while `failed` moves the coder prior down by
-		// a bounded 1/samples. Attributing the win to the fix model instead was
-		// rejected - it double-counts one unit of work as two samples, and the
-		// two slugs are usually the same model anyway. The fix model's
-		// contribution stays visible in the cost delta below and in its own
-		// sizing observation row.
+		// That choice is deliberate, and it is the only one that moves the
+		// numerator the coder prior is built from. The calibration factor is
+		// 1 + (wins - expected_wins)/samples, and a solo row carries
+		// n_candidates 1, so it contributes exactly 1.0 to expected wins: a
+		// `win` leaves that numerator untouched where a `failed` lowers it.
+		// A win and a suppressed row are NOT equivalent, and neither is inert -
+		// both still move the sample count, which dilutes any existing
+		// deviation and gates whether the factor applies at all - but neither
+		// records that the work needed repair, which is the fact worth
+		// keeping. Adding a second row crediting the fix model was rejected as
+		// well: it would count one unit of work as two samples, and the two
+		// picks resolve through the same registry at the same bar, so they are
+		// frequently the same model. The fix model's contribution stays
+		// visible in the cost delta below and in its own sizing observation
+		// row.
+		//
+		// What this records is that the GATE went red on the coder's work.
+		// Reading that as "the model's work did not stand on its own" is the
+		// intended inference and it is not free: a flaky command that passes
+		// on the re-run, or a fix pass that changed nothing, both land here
+		// too. Accepted, because the alternative is recording a clean win for
+		// work that was demonstrably red.
 		//
 		// VerifyPass carries what the gate actually saw: true only when the
 		// resolved command ran and passed on work that was never red. The skip
