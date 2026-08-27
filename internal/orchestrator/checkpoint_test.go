@@ -8,6 +8,9 @@ import (
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/mob"
+	"github.com/mhersson/contextmatrix-harness/events"
+	"github.com/mhersson/contextmatrix-harness/llm"
+	"github.com/mhersson/contextmatrix-harness/tools"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -290,6 +293,71 @@ func TestCommitReviseSurfacesFullDecline(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCommitReviseNoopLeavesGateEvidenceIntact proves the companion case to
+// TestMobCheckpointReviseClearsGateEvidence: a revise pass that commits
+// nothing never replaced the tree the gate verified, so the verdict must
+// survive rather than being cleared alongside an actual revise commit.
+func TestCommitReviseNoopLeavesGateEvidenceIntact(t *testing.T) {
+	ops := &fakeOps{}
+	o := mobTestRun(ops, MobConfig{Participants: 2, Execute: true}, 0)
+	o.solver.git = &fakeGit{committed: false}
+	o.solver.gate.verified = true
+
+	o.commitRevise(context.Background(), o.solver, subtaskRef{ID: "SUB-1"},
+		"declined: premise contradicted\n\ndetail body")
+
+	assert.True(t, o.solver.gate.verified,
+		"a no-op revise commit must not clear the gate verdict on the untouched tree")
+}
+
+// TestMobCheckpointReviseClearsGateEvidence proves F1: a mob execute
+// checkpoint that lands a revise commit after the pre-commit gate ran must
+// not let that gate's verdict stand. The gate ran and passed on the coder's
+// ORIGINAL work; the checkpoint's revise pass replaces that tree with a fix
+// commit that nothing re-verifies, so the run can no longer claim the
+// committed work passed. Drives the real mobCheckpoint path (verdict parse,
+// fix coder run, commitRevise) the way the other checkpoint tests do, rather
+// than calling commitRevise directly, so the revise-verdict branch that
+// reaches it is exercised too.
+func TestMobCheckpointReviseClearsGateEvidence(t *testing.T) {
+	ops := &fakeOps{}
+	client := &planLLM{responses: []llm.Response{finishResp("fix: address checkpoint findings", 0.01)}}
+	d := Deps{
+		Ops:        ops,
+		Git:        &fakeGit{},
+		Client:     client,
+		Emit:       events.NewEmitter(nil, nil),
+		Registry:   planTestRegistry(),
+		WriteTools: testWriteTools(),
+		ReadTools:  tools.NewRegistry(tools.NewReadTool(".")),
+		Cfg: Config{
+			Project: "proj", CardID: "CARD-1",
+			PayloadModel: "payload/model", DefaultModel: "default/model",
+			MaxTurns: 20,
+			Mob:      MobConfig{Participants: 2, Execute: true, CheckpointMinTier: "simple", CheckpointRounds: 1},
+		},
+	}
+	o := newRun(d, cmclient.TaskContext{Title: "Parent", Description: "body"})
+	o.solver.git = &diffGit{fakeGit: &fakeGit{committed: true}, diff: "diff --git a/a.go b/a.go\n+lgtm\n"}
+
+	eng := &scriptedEngine{outcomes: []mob.Outcome{{
+		Synthesis: `{"verdict":"revise","fixes":[{"file":"a.go","issue":"missed a case"}],"summary":"one fix"}`,
+	}}}
+	o.mobEngine = eng.run
+
+	// Simulate the pre-commit gate having already run and passed on the
+	// coder's original work, the way executeClaimedWith leaves sc.gate before
+	// calling mobCheckpoint.
+	o.solver.gate.verified = true
+
+	o.mobCheckpoint(context.Background(), o.solver,
+		subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("simple")}, "abc123")
+
+	require.Len(t, eng.topics, 1, "the checkpoint discussion ran")
+	assert.False(t, o.solver.gate.verified,
+		"the revise commit replaced the verified tree; nothing re-verified it")
 }
 
 func TestRecordCheckpointDiscussion(t *testing.T) {

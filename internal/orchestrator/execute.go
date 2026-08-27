@@ -36,6 +36,25 @@ type solverCtx struct {
 	completed  []subtaskRef // subtasks this solver actually executed
 	lastSubID  string       // final subtask ID in execution order; "" disables turn-cap salvage (parent/single-solver)
 	capped     bool         // the final subtask hit the turn cap; its work was salvage-committed for judge verification
+	gate       gateEvidence // what the pre-commit gate learned about this subtask's coder work
+}
+
+// gateEvidence is what the pre-commit gate learned about the coder's own work.
+// It is carried on the solver rather than returned because the evidence has to
+// survive past preCommitVerify's return: mobCheckpoint runs between the gate
+// and the report site and mutates it. A return value would have to be threaded
+// through that call anyway, and that signature already carries the exhaustion
+// flag the turn-window work added.
+type gateEvidence struct {
+	// verified: the resolved command RAN and PASSED against the tree that is
+	// about to be committed. False for the skip tier and for an inconclusive
+	// run, neither of which is evidence of anything.
+	verified bool
+
+	// coderFailed: the gate was RED on the coder's own work, before any fix
+	// pass. It stays true when the fix pass then repaired it - the point is
+	// what the CODER produced, not what shipped.
+	coderFailed bool
 }
 
 // runExecute is the execute phase: subtasks run SEQUENTIALLY in dependency
@@ -204,6 +223,10 @@ var subtaskHeartbeatInterval = 5 * time.Minute
 // both operands, and it is what lets the still-red arm correct the turn budget
 // as well as the bar - see applyPrecommitVerifyEvidence.
 func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef, exhausted bool) error {
+	// One assignment point, before any early return, so a verdict from an
+	// earlier subtask can never stand in for this one.
+	sc.gate = gateEvidence{}
+
 	if !sc.boardOps {
 		return nil
 	}
@@ -225,6 +248,8 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 	o.logVerifyGate(ctx, vres, subtaskGateContext(sub.ID))
 
 	if vres.Status != verifyFailed {
+		sc.gate.verified = vres.Status == verifyPassed
+
 		return nil
 	}
 
@@ -235,6 +260,8 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 	}
 
 	o.d.logCard(ctx, "subtask %s: verify failed before the commit - running one fix pass", sub.ID)
+
+	sc.gate.coderFailed = true
 
 	// The subtask's own tier sizes the fix, the way it sized the coder that wrote
 	// the work; an unset tier falls back to the card tier inside the fix path.
@@ -261,6 +288,11 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 
 		return fmt.Errorf("subtask %s: `%s` still fails after one fix pass", sub.ID, plan.Display)
 	}
+
+	// Symmetry with the first-run arm, not a live value: reaching here means
+	// the gate went red, so coderFailed is set and the report site overrides
+	// verifyPass to false whatever this assigns.
+	sc.gate.verified = vres.Status == verifyPassed
 
 	return nil
 }
@@ -367,16 +399,59 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 	}
 
 	if sc.boardOps {
-		// Report the win BEFORE CompleteTask (claim-gating rationale on
+		// Report the outcome BEFORE CompleteTask (claim-gating rationale on
 		// reportSoloOutcome - a report after complete_task releases the claim
-		// would silently vanish). VerifyPass false means unknown here, not
-		// failure: reaching this line means the pre-commit gate did not fail,
-		// but it may equally have found no command or been inconclusive, and
-		// preCommitVerify does not carry out which - so the report stays
-		// conservative rather than claiming a pass it cannot see. The model
-		// finished, committed, and pushed, so the win is real regardless of
-		// what the board bookkeeping below does with it.
-		o.reportSoloOutcome(ctx, sub.ID, model, "win", false, sc.ledger.Spent()-spendBefore)
+		// would silently vanish).
+		//
+		// The row answers one question: did THIS model's work stand on its own?
+		// A subtask the bounded fix pass had to repair did not, so it reports
+		// `failed` even though the work shipped - the subtask still commits,
+		// pushes and completes below. `failed` is the model's verdict, not the
+		// card's.
+		//
+		// That choice is deliberate, and it is the only one that moves the
+		// numerator the coder prior is built from. The calibration factor is
+		// 1 + (wins - expected_wins)/samples, and a solo row carries
+		// n_candidates 1, so it contributes exactly 1.0 to expected wins: a
+		// `win` leaves that numerator untouched where a `failed` lowers it.
+		// The two rejected options fail differently. A `win` is not inert - it
+		// still increments the sample count, which dilutes any existing
+		// deviation and can carry a model past the floor that gates the factor
+		// - but what it moves says nothing about the work having needed
+		// repair. Suppressing the row writes nothing at all, so it touches
+		// neither the numerator nor the count, and loses the fact entirely.
+		// Adding a second row crediting the fix model was rejected as well: it
+		// would count one unit of work as two samples, and the two picks
+		// resolve through the same registry at the same bar, so they are
+		// frequently the same model. The fix model's contribution stays
+		// visible in the cost delta below and in its own sizing observation
+		// row.
+		//
+		// What this records is that the GATE went red on the coder's work.
+		// Reading that as "the model's work did not stand on its own" is the
+		// intended inference and it is not free: a flaky command that passes
+		// on the re-run, or a fix pass that changed nothing, both land here
+		// too. Accepted, because the alternative is recording a clean win for
+		// work that was demonstrably red.
+		//
+		// A mob checkpoint's revise commit is deliberately not treated the same
+		// way. It clears the verify evidence, because nothing re-runs the gate
+		// against the revised tree, but it does not set coderFailed: the
+		// pre-commit gate is a deterministic project command and its red is a
+		// fact, while a revise verdict is model opinion, and recording a
+		// failure off model opinion would be a far noisier signal than the one
+		// this row exists to carry.
+		//
+		// VerifyPass carries what the gate actually saw: true only when the
+		// resolved command ran and passed on work that was never red. The skip
+		// tier and an inconclusive run both leave it false, because neither is
+		// evidence of a pass.
+		result, verifyPass := "win", sc.gate.verified
+		if sc.gate.coderFailed {
+			result, verifyPass = "failed", false
+		}
+
+		o.reportSoloOutcome(ctx, sub.ID, model, result, verifyPass, sc.ledger.Spent()-spendBefore)
 
 		if err := d.Ops.CompleteTask(ctx, sub.ID, commitSubject(commitMsg, sub.Title)); err != nil {
 			return fmt.Errorf("complete subtask %s: %w", sub.ID, err)
@@ -902,13 +977,14 @@ func (o *run) logSoloCapPark(ctx context.Context, subID, reason string) {
 // Bias-math note: a Best-of-N judge samples N candidates, so a model's win
 // rate over many judged runs settles below 100% and the leaderboard's
 // calibration factor is built to track that spread. A solo run is a sample of
-// exactly one candidate, so its expected win rate is already 1.0 - an
-// unbroken string of solo wins is therefore neutral, not inflationary: it
-// cannot push a model's calibration factor above the parity a single BoN win
-// already implies. Only a solo failure moves the needle, and only downward
-// toward the calibration floor. Solo reporting can widen the gap between a
-// reliable and an unreliable model; it can never manufacture a prior a model
-// has not earned.
+// exactly one candidate, so it contributes 1.0 to expected wins, and a solo
+// win therefore leaves the observed-minus-expected numerator exactly where it
+// was. That does NOT make a solo win inert. It still increments the sample
+// count, which both dilutes any deviation already recorded and counts toward
+// the sample threshold below which the calibration factor is not applied at
+// all - so a run of solo wins can switch an already-above-parity factor on.
+// What a solo win cannot do is move the numerator in a model's favour. Only a
+// solo failure moves it, downward, and the factor is clamped at both ends.
 func (o *run) reportSoloOutcome(ctx context.Context, cardID, model, result string, verifyPass bool, costUSD float64) {
 	outcome := cmclient.ModelOutcome{
 		Model:       model,
