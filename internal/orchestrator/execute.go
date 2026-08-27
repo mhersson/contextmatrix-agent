@@ -198,7 +198,12 @@ var subtaskHeartbeatInterval = 5 * time.Minute
 // parallel over one shared run: resolving per candidate would race the run's
 // cached plan, and a per-candidate fix pass would charge the run ledger during
 // the fan-out, which the candidate sub-ledgers exist to keep separate.
-func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef) error {
+//
+// exhausted says whether the coder that wrote the work spent every turn it was
+// given. It is carried in rather than measured here because the caller holds
+// both operands, and it is what lets the still-red arm correct the turn budget
+// as well as the bar - see applyPrecommitVerifyEvidence.
+func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef, exhausted bool) error {
 	if !sc.boardOps {
 		return nil
 	}
@@ -252,7 +257,7 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 	o.logVerifyGate(ctx, vres, subtaskGateContext(sub.ID))
 
 	if vres.Status == verifyFailed {
-		o.applyPrecommitVerifyEvidence(ctx, sub, vres)
+		o.applyPrecommitVerifyEvidence(ctx, sub, vres, exhausted)
 
 		return fmt.Errorf("subtask %s: `%s` still fails after one fix pass", sub.ID, plan.Display)
 	}
@@ -307,7 +312,7 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 	prompt := fmt.Sprintf(coderPrompt, o.skillEngage(), o.grounding, sc.workspace,
 		verifyCommandBlock(o.resolvedVerifyPlan()), sub.Title, subtaskBody(sub), o.tc.Title, o.taskDescription)
 
-	res, model, err := o.runCoderWith(ctx, sc, sub, prompt)
+	res, model, coderMaxTurns, err := o.runCoderWith(ctx, sc, sub, prompt)
 	if err != nil {
 		if o.salvageCapped(ctx, sc, sub, res, err) {
 			return nil
@@ -334,7 +339,7 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 		commitMsg = sanitizeTitle(sub.Title)
 	}
 
-	if verr := o.preCommitVerify(ctx, sc, sub); verr != nil {
+	if verr := o.preCommitVerify(ctx, sc, sub, windowExhausted(res.Turns, coderMaxTurns)); verr != nil {
 		return verr
 	}
 
@@ -421,9 +426,22 @@ func (o *run) releaseSubtask(ctx context.Context, cardID string) {
 // keyed (candidates.go's c.model = spec.Model): CM attaches outcome stats back
 // onto candidates by that slug, so a row keyed on a gateway's echoed name would
 // never rejoin selection.
-func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, prompt string) (harness.Result, string, error) {
+//
+// The third return is the turn window the run was configured with. A caller that
+// judges res.Turns against a window - the pre-commit gate does, to tell a coder
+// that finished early from one that spent everything it had - must judge against
+// THIS window rather than derive its own, or a cap that ever becomes per-attempt
+// leaves the two silently disagreeing.
+func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, prompt string) (harness.Result, string, int, error) {
 	d := o.d
 	cfg := d.Cfg
+
+	// The window every attempt runs at, with the wrap-up reserve that goes with
+	// it. Computed once, above the loop, because it is a function of the
+	// operator's base cap and the subtask's budget step and neither changes
+	// across re-selections - and returned, so this is the only place the coder's
+	// window is derived on this side of runModelCoder.
+	maxTurns, wrapUp := coderTurnCfg(cfg.MaxTurns, sub.Sizing.Budget)
 
 	// At most one initial attempt plus reselectCap re-selections; recoverIncapable
 	// is the authoritative bound (it errors at the cap), the +1 is a belt-and-braces
@@ -431,7 +449,7 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 	for attempt := 0; attempt <= reselectCap; attempt++ {
 		model, err := sc.coderModel(ctx, sub, prompt)
 		if err != nil {
-			return harness.Result{}, "", fmt.Errorf("coder for %s: %w", sub.ID, err)
+			return harness.Result{}, "", maxTurns, fmt.Errorf("coder for %s: %w", sub.ID, err)
 		}
 
 		logMsg := fmt.Sprintf("coder model %s selected for subtask %q (bar=%s, turns=%s)",
@@ -475,7 +493,6 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 		// the three exits below - an exhausted re-selection cap, a run error,
 		// and success - would each need their own copy, and the incapable
 		// attempts that continue past them would get none at all.
-		maxTurns, wrapUp := coderTurnCfg(cfg.MaxTurns, sub.Sizing.Budget)
 		solver := "solo"
 
 		if !sc.boardOps {
@@ -486,7 +503,7 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 			Phase: o.curPhase, Solver: solver, Subtask: sub.ID, Reselect: attempt,
 			Model: model, Bar: string(sub.Sizing.Bar), BudgetStep: sub.Sizing.Budget,
 			PlannerBar: sub.PlannerBar, MaxTurns: maxTurns, WrapUpTurns: wrapUp,
-			Turns: res.Turns, Outcome: sizingOutcome(err), DurationMS: dur.Milliseconds(),
+			Turns: res.Turns, Outcome: sizingOutcome(err, res.Turns, maxTurns), DurationMS: dur.Milliseconds(),
 		})
 
 		var ie *IncapableError
@@ -494,7 +511,7 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 			// recoverIncapable blacklists + excludes the model and returns an error
 			// only when the per-card re-selection cap is exhausted - park then.
 			if rerr := o.recoverIncapable(ctx, ie); rerr != nil {
-				return res, model, rerr
+				return res, model, maxTurns, rerr
 			}
 
 			// Re-select (the failed model is now excluded) and re-run the SAME
@@ -503,15 +520,15 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 		}
 
 		if err != nil {
-			return res, model, fmt.Errorf("coder run for %s: %w", sub.ID, err)
+			return res, model, maxTurns, fmt.Errorf("coder run for %s: %w", sub.ID, err)
 		}
 
-		return res, model, nil
+		return res, model, maxTurns, nil
 	}
 
 	// Unreachable in practice: recoverIncapable errors at the cap before the loop
 	// can exhaust its iterations. Defensive guard against an infinite loop.
-	return harness.Result{}, "", fmt.Errorf("coder for %s: re-selection loop exhausted", sub.ID)
+	return harness.Result{}, "", maxTurns, fmt.Errorf("coder for %s: re-selection loop exhausted", sub.ID)
 }
 
 // pushBranch pushes the card branch after a commit. On a FRESH run that found a
@@ -1084,7 +1101,10 @@ func (o *run) raiseSubtaskBar(ctx context.Context, sub subtaskRef, why string) {
 }
 
 // raiseSubtaskBoth records volume AND quality evidence arriving together: the
-// run hit its cap, and what it did commit fails the project's own verify.
+// coder spent its whole turn window, and the work it produced fails the
+// project's own verify. Both triggers for it are that shape - a cap that parked
+// the run and a window spent by a coder that still reached its terminal call -
+// because the grace turn makes the second arrive with no error at all.
 func (o *run) raiseSubtaskBoth(ctx context.Context, sub subtaskRef, why string) {
 	o.resizeSubtask(ctx, sub, why, resizeAxis{
 		name:   "turn budget and model bar",
@@ -1094,18 +1114,35 @@ func (o *run) raiseSubtaskBoth(ctx context.Context, sub subtaskRef, why string) 
 }
 
 // applyPrecommitVerifyEvidence records what a still-red pre-commit verify says
-// about a subtask's sizing.
+// about a subtask's sizing, from the two facts the gate has: whether the verify
+// genuinely failed, and whether the coder that wrote the work spent every turn
+// it was given.
 //
 // A verify that RAN and genuinely FAILED, after a fix pass had already had its
-// chance at it, is evidence about QUALITY and about nothing else: the coder
-// reached the finish tool, so it did not run out of turns, and the budget is
-// not implicated. The bar rises so the next attempt draws a stronger coder.
+// chance at it, is evidence about QUALITY: what the coder produced is wrong.
+// The bar rises so the next attempt draws a stronger coder.
+//
+// When that coder also exhausted its window, the same failure is evidence about
+// VOLUME too, and both axes rise - the same composed correction the capped path
+// makes for the identical shape. The grace turn is why the two cases have to be
+// told apart here rather than by an error: it grants one terminal call after the
+// cap and returns cleanly, so a coder that ran out of room does not raise
+// *MaxTurnsError, and a window exhausted without raising it must not buy a
+// weaker correction than one that raised it.
 //
 // A failure carrying the container's resource-exhaustion signature is evidence
 // about the environment - under a pids limit a compile step succeeds and its
 // inner fork dies with EAGAIN, so the command exits non-zero and is classified
-// failed - and about neither axis. That is the same exemption the capped path's
-// leaderboard report takes, for the same reason.
+// failed - and about neither axis, whatever the coder's turns were. That is the
+// same exemption the capped path's leaderboard report takes, for the same
+// reason.
+//
+// The capped path diverges here, deliberately: after a turn cap it still widens
+// the BUDGET on an environmentally-failed verify, because the cap itself cut the
+// run off and is volume evidence whatever the verify then said. This path has no
+// such cap - the coder landed its terminal call and claimed the work done - so a
+// spent window alone is the weaker fact, and an environmental failure leaves it
+// carrying no evidence at all.
 //
 // The guard is written positively rather than as a list of exclusions because
 // the only call site reaches it on verifyFailed alone: a skipped result and a
@@ -1114,9 +1151,16 @@ func (o *run) raiseSubtaskBoth(ctx context.Context, sub subtaskRef, why string) 
 //
 // There is no reader for this on THIS run - a still-red gate returns a plain
 // error that fails the run with the work uncommitted and unpushed. The next run
-// redoes the subtask from scratch, and reconcile hands it the raised bar.
-func (o *run) applyPrecommitVerifyEvidence(ctx context.Context, sub subtaskRef, vres verifyResult) {
+// redoes the subtask from scratch, and reconcile hands it the raised sizing.
+func (o *run) applyPrecommitVerifyEvidence(ctx context.Context, sub subtaskRef, vres verifyResult, exhausted bool) {
 	if vres.Status != verifyFailed || verifyexec.LooksResourceExhausted(vres.Output) {
+		return
+	}
+
+	if exhausted {
+		o.raiseSubtaskBoth(ctx, sub,
+			"the coder spent its whole turn budget and the pre-commit verify still failed after a fix pass")
+
 		return
 	}
 
