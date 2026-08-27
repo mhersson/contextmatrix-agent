@@ -67,6 +67,16 @@ func TestExitStatus(t *testing.T) {
 			1, executor.ExitDaemonError,
 			"failed", "worker exit status unknown: the container wait returned a daemon error",
 		},
+		{
+			"an idle-kill cause carrying a zero code is failed",
+			0, executor.ExitIdleTimeout,
+			"failed", "worker exit status unknown: the run ended by a kill or a timeout rather than on its own terms",
+		},
+		{
+			"a requested kill carrying a zero code is failed",
+			0, executor.ExitKilled,
+			"failed", "worker exit status unknown: the run ended by a kill or a timeout rather than on its own terms",
+		},
 	}
 
 	for _, tt := range tests {
@@ -375,6 +385,8 @@ func TestFooterAndTerminalEventWrittenOnEveryExitPath(t *testing.T) {
 		{"daemon-flagged wait", 0, executor.ExitDaemonError, "failed"},
 		{"idle watchdog kill", 137, executor.ExitIdleTimeout, "failed"},
 		{"requested kill", 137, executor.ExitKilled, "failed"},
+		{"idle watchdog kill carrying zero", 0, executor.ExitIdleTimeout, "failed"},
+		{"requested kill carrying zero", 0, executor.ExitKilled, "failed"},
 	}
 
 	for _, tc := range tests {

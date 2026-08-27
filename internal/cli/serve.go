@@ -441,15 +441,22 @@ func runEndEvent(exitCode int64, cause executor.ExitCause, ordinal int) map[stri
 
 // exitStatus maps a container exit code and the way the run ended to a
 // ContextMatrix worker-status and a human-readable message. Exit 0 is
-// "completed"; anything else is "failed", with the code carried in the message
-// for the operator.
+// "completed" only when the cause is ExitNormal, the one case where the
+// container ended on its own terms and the code carries its usual meaning; any
+// other cause arriving with a zero code means the code is not evidence of
+// success, so it is "failed" too. Any non-zero code is "failed", with the code
+// carried in the message for the operator.
 //
-// A daemon-flagged wait is the one exception. The status code that arrives with
-// a daemon error comes from the same response the daemon could not complete, so
-// it is not a run outcome and must not be read as one. It is typically 0, which
-// would otherwise record the run as a clean finish on evidence that does not
-// support it. The message says the exit is unknown rather than quoting a number
-// it cannot stand behind.
+// A daemon-flagged wait is called out separately. The status code that arrives
+// with a daemon error comes from the same response the daemon could not
+// complete, so it is not a run outcome and must not be read as one,
+// whatever the value. The message names the daemon rather than leaving the
+// operator to guess.
+//
+// For the other zero-code cases the message says the exit status is unknown
+// because the run ended by a kill or a timeout rather than on its own terms -
+// it does not quote the meaningless zero or claim a specific cause it cannot
+// name.
 //
 // `failed` is not certainly accurate here either - the work may well have
 // succeeded - but it is honest about what is known, and it fails in the safe
@@ -458,6 +465,10 @@ func runEndEvent(exitCode int64, cause executor.ExitCause, ordinal int) map[stri
 func exitStatus(exitCode int64, cause executor.ExitCause) (status, message string) {
 	if cause == executor.ExitDaemonError {
 		return "failed", "worker exit status unknown: the container wait returned a daemon error"
+	}
+
+	if exitCode == 0 && cause != executor.ExitNormal {
+		return "failed", "worker exit status unknown: the run ended by a kill or a timeout rather than on its own terms"
 	}
 
 	if exitCode == 0 {
