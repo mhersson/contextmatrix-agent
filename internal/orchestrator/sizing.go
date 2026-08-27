@@ -142,6 +142,21 @@ func coderTurnCfg(base, step int) (maxTurns, wrapUp int) {
 	return maxTurns, wrapUpFor(base, maxTurns)
 }
 
+// windowExhausted reports whether an attempt spent every turn it was given.
+//
+// It is deliberately a property of the MEASUREMENT rather than of the harness's
+// mechanism: the coder family runs with the grace turn, which grants one
+// terminal call after the cap and returns a clean result, so an exhausted run
+// can arrive with no error at all. A model that lands its terminal call exactly
+// on the last turn is in the same position and reads the same way here.
+//
+// A non-positive cap means the operator left the budget unset and the harness
+// substituted its own, so this side does not know what the window was and must
+// not guess one.
+func windowExhausted(turns, maxTurns int) bool {
+	return maxTurns > 0 && turns >= maxTurns
+}
+
 // metaKV is one marker's raw key/value pairs, including keys this package does
 // not understand. Every writer must fetch, parse, mutate keys and re-serialise
 // the WHOLE map - never rebuild from a subset - so a later stage can add keys

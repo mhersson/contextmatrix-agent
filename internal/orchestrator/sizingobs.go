@@ -65,20 +65,31 @@ type sizingObs struct {
 	WrapUpTurns int
 	Turns       int
 	TurnRatio   float64
-	Outcome     string // done | incapable | max_turns | error
+	Outcome     string // done | done_at_cap | incapable | max_turns | error
 	DurationMS  int64
 }
 
 // sizingOutcome classifies how an attempt ended, from the error the choke point
-// normalised. The four values are disjoint and exhaustive over what runModelCfg
-// can return.
-func sizingOutcome(err error) string {
+// normalised and from the turns the attempt actually spent. The values are
+// disjoint and ordered, so an attempt matches exactly one.
+//
+// The turn pair is what separates done_at_cap from done, and it is needed
+// because the error alone cannot make that split: the coder family runs with
+// the harness grace turn, which grants one terminal call after the cap is spent
+// and returns without setting the max_turns reason, so an attempt that used its
+// whole window arrives here with a nil error. max_turns therefore means the run
+// was cut off at the cap, and done_at_cap means it ended cleanly with the window
+// spent - both are exhausted windows, told apart by whether the model landed a
+// terminal call.
+func sizingOutcome(err error, turns, maxTurns int) string {
 	var (
 		ie  *IncapableError
 		mte *MaxTurnsError
 	)
 
 	switch {
+	case err == nil && windowExhausted(turns, maxTurns):
+		return "done_at_cap"
 	case err == nil:
 		return "done"
 	case errors.As(err, &ie):

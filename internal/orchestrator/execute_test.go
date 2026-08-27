@@ -784,6 +784,49 @@ func TestCoderLadderWidensTheWindowAndSaysSo(t *testing.T) {
 		"quoting the constant against a widened cap tells the model it has a third of the room it has")
 }
 
+// TestCoderRunReportsTheWindowItRanAt proves runCoderWith hands the turn window
+// back to its caller instead of leaving each one to derive its own. The
+// pre-commit gate judges res.Turns against that number to tell a coder that
+// finished early from one that spent everything it had, so a window the run did
+// not actually use is a gate reading the wrong axis.
+//
+// Driven to a CLEAN finish on the last turn, which is both the shape the gate
+// exists to recognise and the only return the gate ever reads - the caller takes
+// this value on the err == nil path. The widened rungs are what separate the
+// laddered window from the operator's base echoed back: at step 0 the two are
+// the same 10, so a base echoed back would go unnoticed there.
+func TestCoderRunReportsTheWindowItRanAt(t *testing.T) {
+	cases := map[string]struct {
+		budget  int
+		wantCap int
+	}{
+		"the operator's base":  {0, 10},
+		"one rung above base":  {1, 15},
+		"two rungs above base": {2, 20},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			// Burn every turn but the last, then land finish on it, so the run
+			// completes with the whole window spent.
+			client := &planLLM{responses: append(burnResps(tc.wantCap-1), finishResp("feat: done", 0.01))}
+			d := execTestDeps(&fakeOps{}, &fakeGit{committed: true}, client)
+			d.Cfg.MaxTurns = 10
+
+			o := newExecRun(d, nil, 0)
+			sub := subtaskRef{ID: "SUB-1", Title: "Only", Sizing: sizing{registry.TierModerate, tc.budget}}
+
+			res, _, gotCap, err := o.runCoderWith(context.Background(), o.solver, sub, "do it")
+
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantCap, gotCap, "the window reported is the laddered one, not the configured base")
+			assert.Equal(t, tc.wantCap, res.Turns, "the fixture spends the whole window, so the two must agree")
+			assert.True(t, windowExhausted(res.Turns, gotCap),
+				"which is the pair the pre-commit gate reads to see a spent window")
+		})
+	}
+}
+
 // TestCoderRunGetsBatchNudge proves the coder phase actually arms the harness
 // batching nudge: three consecutive turns that each spend a whole model call on
 // one read-only lookup earn exactly one nudge, naming the three turns that
@@ -1330,28 +1373,51 @@ func TestResizePreservesForeignMarkerKeys(t *testing.T) {
 	assert.Equal(t, "paths", kv["coupling_src"])
 }
 
-// TestPrecommitVerifyEvidenceRaisesTheBarOnlyOnARealFailure proves a
-// pre-commit verify that RAN and FAILED, after a fix pass already had its
-// chance, is evidence about QUALITY alone: the coder finished and called finish,
-// so it had turns left and the budget is not implicated. The exhaustion
-// signature is the same exemption the capped path's leaderboard report takes -
-// a test command whose inner fork dies under a pids limit exits non-zero and is
-// classified failed, and that is the container, not the model.
-func TestPrecommitVerifyEvidenceRaisesTheBarOnlyOnARealFailure(t *testing.T) {
+// TestPrecommitVerifyEvidenceMovesTheAxisTheEvidenceIsAbout proves the gate
+// reads BOTH facts it has: whether the verify failed, and whether the attempt
+// that produced the work still had room. A coder that reached its terminal call
+// with turns to spare and was wrong is evidence about QUALITY alone. A coder
+// that used every turn it was given and was wrong is evidence about quality AND
+// volume, and gets the same composed correction the capped path already makes -
+// a window exhausted without raising *MaxTurnsError must not buy a weaker
+// correction than one that raised it. The exhaustion signature is the same
+// exemption the capped path's leaderboard report takes: a test command whose
+// inner fork dies under a pids limit exits non-zero and is classified failed,
+// and that is the container, not the model.
+func TestPrecommitVerifyEvidenceMovesTheAxisTheEvidenceIsAbout(t *testing.T) {
 	cases := map[string]struct {
-		vres verifyResult
-		want sizing
+		vres      verifyResult
+		exhausted bool
+		want      sizing
+		wantWrite bool
 	}{
-		"real failure": {
+		"real failure with turns to spare": {
 			verifyResult{Status: verifyFailed, Output: "FAIL\tpkg\t0.1s"},
+			false,
 			sizing{registry.TierComplex, 0},
+			true,
+		},
+		"real failure on an exhausted window": {
+			verifyResult{Status: verifyFailed, Output: "FAIL\tpkg\t0.1s"},
+			true,
+			sizing{registry.TierComplex, 1},
+			true,
 		},
 		"resource exhaustion": {
 			verifyResult{Status: verifyFailed, Output: "fork/exec: resource temporarily unavailable"},
+			false,
 			sizing{registry.TierModerate, 0},
+			false,
 		},
-		"never ran": {verifyResult{Status: verifySkipped}, sizing{registry.TierModerate, 0}},
-		"passed":    {verifyResult{Status: verifyPassed}, sizing{registry.TierModerate, 0}},
+		"resource exhaustion on an exhausted window": {
+			verifyResult{Status: verifyFailed, Output: "fork/exec: resource temporarily unavailable"},
+			true,
+			sizing{registry.TierModerate, 0},
+			false,
+		},
+		"never ran":                     {verifyResult{Status: verifySkipped}, false, sizing{registry.TierModerate, 0}, false},
+		"passed":                        {verifyResult{Status: verifyPassed}, false, sizing{registry.TierModerate, 0}, false},
+		"passed on an exhausted window": {verifyResult{Status: verifyPassed}, true, sizing{registry.TierModerate, 0}, false},
 	}
 
 	for name, tc := range cases {
@@ -1362,14 +1428,18 @@ func TestPrecommitVerifyEvidenceRaisesTheBarOnlyOnARealFailure(t *testing.T) {
 
 			o := newExecRun(execTestDeps(ops, &fakeGit{}, &planLLM{}), nil, 0)
 			o.applyPrecommitVerifyEvidence(context.Background(),
-				subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("moderate")}, tc.vres)
+				subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("moderate")}, tc.vres, tc.exhausted)
 
-			body := ops.bodyFor("SUB-1")
-			if body == "" {
-				body = ops.taskContexts["SUB-1"].Description // no write happened
+			writes := countCalls(ops.recorded(), "UpdateCardBody:SUB-1")
+			if !tc.wantWrite {
+				assert.Zero(t, writes, "nothing to correct here, so the card must not be written at all")
+
+				return
 			}
 
-			_, got := readMeta(body)
+			require.Equal(t, 1, writes, "a correction is one fetch and one write")
+
+			_, got := readMeta(ops.bodyFor("SUB-1"))
 			assert.Equal(t, tc.want, got)
 		})
 	}
@@ -2518,6 +2588,37 @@ func TestPreCommitVerifyFailureBlocksCommitAndRoutesToFix(t *testing.T) {
 	assert.Equal(t, 0, got.Budget, "the coder finished, so the budget is not implicated")
 }
 
+// TestPreCommitVerifyOnAnExhaustedWindowRaisesBothAxes is the end-to-end twin of
+// TestPreCommitVerifyFailureBlocksCommitAndRoutesToFix: the same still-red gate,
+// but reached by a coder that spent every turn it was given. The run in the
+// field that motivated this used 45 of 45 turns twice and was told it needed a
+// better model.
+func TestPreCommitVerifyOnAnExhaustedWindowRaisesBothAxes(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	// 9 burns then the terminal call: the coder lands finish on its last turn,
+	// so the harness reports a clean completion with the whole window spent.
+	client := &planLLM{responses: append(burnResps(9),
+		finishResp("feat: subtask done", 0.01),
+		stopResp("coder: attempted the fix", 0.02),
+	)}
+	d := execTestDeps(ops, git, client)
+	d.Cfg.MaxTurns = 10
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
+
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 1, Output: "--- FAIL: TestThing"}
+	}
+
+	require.Error(t, runExecute(context.Background(), o),
+		"a subtask whose verify is still red after one fix pass must not commit")
+
+	_, got := readMeta(ops.bodyFor("SUB-1"))
+	assert.Equal(t, registry.TierComplex, got.Bar, "a still-red gate is evidence about quality")
+	assert.Equal(t, 1, got.Budget, "a coder that spent its whole window is evidence about volume too")
+}
+
 // TestPreCommitVerifyFailureThenFixPassCommits proves the fix pass is a real
 // second chance: a gate that goes green after it commits the coder's own work
 // under the coder's own message.
@@ -2663,7 +2764,8 @@ func TestPreCommitGateAndReviewGateResolveIdentically(t *testing.T) {
 		"the plan's timeout must differ from the run default, or this test cannot see the drift")
 
 	sub := subtaskRef{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}
-	require.Error(t, o.preCommitVerify(context.Background(), o.solver, sub))
+	exhausted := false
+	require.Error(t, o.preCommitVerify(context.Background(), o.solver, sub, exhausted))
 	require.NotEmpty(t, seen, "the pre-commit gate ran the command")
 
 	preCommit := seen[0]
@@ -2704,6 +2806,7 @@ func TestPreCommitVerifySkippedForCandidateSolver(t *testing.T) {
 		boardOps: false, push: false, tag: "candidate 1/2",
 	}
 
-	require.NoError(t, o.preCommitVerify(context.Background(), sc, subtaskRef{ID: "SUB-1", Title: "Only"}))
+	exhausted := false
+	require.NoError(t, o.preCommitVerify(context.Background(), sc, subtaskRef{ID: "SUB-1", Title: "Only"}, exhausted))
 	assert.False(t, ran, "a candidate solver never runs the pre-commit gate")
 }

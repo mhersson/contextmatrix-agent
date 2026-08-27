@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"bytes"
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -209,7 +210,8 @@ func TestFixRoundsEmitTheirOwnObservation(t *testing.T) {
 		// Deliberately a bar the CARD does not have: under a row that reports the
 		// card's estimate, bar and planner_bar disagree for no reason.
 		sub := subtaskRef{ID: "SUB-1", Title: "Only", Sizing: seedSizing("complex"), PlannerBar: "complex"}
-		require.NoError(t, o.preCommitVerify(context.Background(), o.solver, sub))
+		exhausted := false
+		require.NoError(t, o.preCommitVerify(context.Background(), o.solver, sub, exhausted))
 
 		rec := onlyEvent(t, &transcript, sizingObservationKind)
 		assert.Equal(t, "fix", rec["solver"])
@@ -246,7 +248,7 @@ func TestCandidateAttemptsAreLabelledAsSuch(t *testing.T) {
 
 	sub := subtaskRef{ID: "SUB-1", Title: "Only", Sizing: seedSizing("moderate"), PlannerBar: "moderate"}
 
-	_, _, err := o.runCoderWith(context.Background(), sc, sub, "do it")
+	_, _, _, err := o.runCoderWith(context.Background(), sc, sub, "do it")
 	require.NoError(t, err)
 
 	rec := onlyEvent(t, &transcript, sizingObservationKind)
@@ -273,4 +275,38 @@ func TestTurnRatioIsAlwaysDerived(t *testing.T) {
 	// the int expected and let 0.99 through as 0.
 	assert.InDelta(t, 0.0, rec["turn_ratio"], 0.001, "no cap, no denominator - and no borrowed value either")
 	assert.EqualValues(t, 7, rec["turns"], "the turns are still recorded; max_turns is what tells a consumer why the ratio is absent")
+}
+
+// TestSizingOutcomeSeparatesAFinishAtTheCapFromAFinishWithRoom proves the
+// measurement row does not pool two attempts a later analysis must tell apart.
+// The coder family runs with the harness grace turn, which grants one terminal
+// call AFTER the cap is spent and returns without setting the max_turns reason -
+// so an attempt that used every turn arrives as a clean completion. Pooling it
+// with a run that finished early makes the turns-to-cap ratio unreadable, which
+// is the only reason the row is emitted.
+func TestSizingOutcomeSeparatesAFinishAtTheCapFromAFinishWithRoom(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]struct {
+		err      error
+		turns    int
+		maxTurns int
+		want     string
+	}{
+		"finished with room":        {nil, 12, 45, "done"},
+		"finished on the last turn": {nil, 45, 45, "done_at_cap"},
+		"ran past the cap":          {nil, 46, 45, "done_at_cap"},
+		"no cap configured":         {nil, 12, 0, "done"},
+		"cut off at the cap":        {&MaxTurnsError{Model: "m", Turns: 45}, 45, 45, "max_turns"},
+		"incapable":                 {&IncapableError{Model: "m", Reason: "r"}, 1, 45, "incapable"},
+		"transport error":           {errors.New("boom"), 3, 45, "error"},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tc.want, sizingOutcome(tc.err, tc.turns, tc.maxTurns))
+		})
+	}
 }

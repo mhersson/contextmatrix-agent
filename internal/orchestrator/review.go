@@ -1084,7 +1084,7 @@ func (o *run) runFixModel(ctx context.Context, prompt string, req fixRequest) (s
 			Phase: o.curPhase, Solver: "fix", Subtask: req.Subtask, Reselect: attempt,
 			Model: model, Bar: string(fs.Bar), BudgetStep: fs.Budget,
 			PlannerBar: plannerBar, MaxTurns: maxTurns, WrapUpTurns: wrapUp,
-			Turns: res.Turns, Outcome: sizingOutcome(err), DurationMS: dur.Milliseconds(),
+			Turns: res.Turns, Outcome: sizingOutcome(err, res.Turns, maxTurns), DurationMS: dur.Milliseconds(),
 		})
 
 		var ie *IncapableError
