@@ -43,10 +43,10 @@ const (
 // selection for a model that never runs.
 type gateModel func(ctx context.Context) string
 
-// fixedGateModel wraps a model the calling phase resolved on a path where it
-// certainly runs, so the gate reuses that resolution instead of making one of
-// its own. A phase whose resolution is lazy passes its resolver straight to
-// the gate instead.
+// fixedGateModel hands the gate an explicitly supplied model slug - typically
+// a test literal or a slug the caller has already confirmed ran. Test suites
+// for other model-bearing phases (runBrainstorm, runDiagnose) also use it as a
+// static gateModel value. It resolves nothing and emits nothing on its own.
 func fixedGateModel(model string) gateModel {
 	return func(context.Context) string { return model }
 }

@@ -534,11 +534,6 @@ func isParkError(err error) bool {
 // for a bug-like card and returns a "## Diagnosis" text blob to ground the
 // plan. Budget-checked and usage-reported like every model-bearing step. The
 // caller treats a returned error as best-effort: planning proceeds without a
-// diagnosis rather than failing.
-// runDiagnose runs one read-only investigation pass on the orchestrator model
-// for a bug-like card and returns a "## Diagnosis" text blob to ground the
-// plan. Budget-checked and usage-reported like every model-bearing step. The
-// caller treats a returned error as best-effort: planning proceeds without a
 // diagnosis rather than failing. model resolves lazily - the diagnose pass is
 // the first certain run of the plan decision model on non-creative bug cards.
 func (o *run) runDiagnose(ctx context.Context, model func(context.Context) string) (string, error) {
