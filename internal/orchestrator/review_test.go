@@ -3299,8 +3299,8 @@ func TestFixEscalationSurvivesApproval(t *testing.T) {
 
 	gate := o.fixSizing(fixRequest{Round: 1}) // a pr_gates round, after approval
 	assert.Equal(t, registry.TierCritical, gate.Bar, "two failed rounds climb two bar rungs")
-	assert.Equal(t, 3, gate.Budget,
-		"the critical bar re-seeds the budget at rung 2, and the capped round widens it once more")
+	assert.Equal(t, maxBudgetStep, gate.Budget,
+		"the critical bar re-seeds the budget at the ladder's ceiling, and the capped round has nothing left to widen")
 	assert.True(t, o.fixFailed["vendor/weak"], "the failed fixer stays excluded after approval")
 }
 
@@ -3744,6 +3744,57 @@ func TestCappedReviewFixRoundRetriesWiderInsteadOfParking(t *testing.T) {
 	assert.True(t, ops.loggedContains("hit its turn cap"), "logs=%v", ops.logs)
 	assert.GreaterOrEqual(t, indexOfPrefix(git.recorded(), "CommitFixup:"), 0,
 		"the capped round's partial work is still committed; git=%v", git.recorded())
+}
+
+// A capped review fix round that committed NOTHING must not retry wider: HEAD
+// is unchanged, so a second panel would critique the exact diff round 1
+// already reviewed - a full extra 3-reviewer panel bought for no new evidence.
+// The CI gate's capped arm already requires a push before retrying (see
+// gates.go's ciFixRound); this is the same rule ported to the review loop.
+//
+// Response script: round 1's panel and synthesis (four one-turn calls) revise;
+// the round-1 fix coder then burns the whole 5-turn budget and returns
+// max_turns, landing no commit. Only five responses beyond round 1 are
+// scripted - a retried round 2 would run out of scripted panel responses and
+// either hang the assertions on stale content or misreport findings, so
+// exhausting the script is itself evidence the retry did not happen.
+func TestCappedReviewFixRoundWithNoCommitParksInsteadOfRetrying(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: false}
+
+	responses := []llm.Response{
+		stopResp("Correctness: broken", 0.01),
+		stopResp("Design: broken", 0.01),
+		stopResp("Security: fine", 0.01),
+		stopResp(`{"approved":false,"summary":"needs work","fixes":[{"file":"a.go","issue":"bug","suggestion":"fix","severity":"major"}]}`, 0.02),
+	}
+	responses = append(responses, burnResps(5)...)
+
+	client := &planLLM{responses: responses}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+	d.Cfg.MaxTurns = 5
+
+	o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}, 0)
+
+	err := runReview(context.Background(), o)
+
+	var mte *MaxTurnsError
+	require.ErrorAs(t, err, &mte, "a capped round that committed nothing must park, never retry")
+
+	client.mu.Lock()
+	specialists := 0
+
+	for _, task := range client.tasks {
+		if strings.Contains(task, "code-review specialist") {
+			specialists++
+		}
+	}
+
+	client.mu.Unlock()
+
+	assert.Equal(t, 3, specialists, "no second panel - the capped, uncommitted round bought no new evidence")
+	assert.Zero(t, o.fixBudgetSteps, "nothing widened; the round never retried")
+	assert.Equal(t, -1, indexOfPrefix(git.recorded(), "Push:"), "an uncommitted round has nothing to push")
 }
 
 // A turn cap widens the budget and says nothing about the fixer's quality, so

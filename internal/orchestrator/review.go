@@ -343,11 +343,18 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 
 		var mte *MaxTurnsError
 
+		// committed gates the retry the same way it gates the CI gate's capped
+		// arm (see gates.go's ciFixRound): a round that pushed earns another
+		// panel, because the next round has a real new diff to critique. One
+		// that pushed nothing leaves HEAD exactly where round 1 left it, so a
+		// retry would spend a full panel re-critiquing the same diff round 1
+		// already judged - and it falls through to the park below instead.
+		//
 		// Keyed on the WIDTH this round actually ran at, not on the step counter:
 		// the budget is clamped at the top rung, so a card whose bar already
 		// seeds it there would keep buying rounds of identical width while the
 		// log claimed each was wider.
-		if errors.As(err, &mte) && o.fixSizing(req).Budget < maxBudgetStep {
+		if errors.As(err, &mte) && committed && o.fixSizing(req).Budget < maxBudgetStep {
 			// The round is already counted against attemptsCap, so the loop stays
 			// bounded; the cap is volume evidence and the next round runs wider on
 			// the same pool. Parking the whole run here would spend a round and
