@@ -36,9 +36,9 @@ func TestMobConfigMapping(t *testing.T) {
 			orchestrator.MobConfig{Participants: 2, Plan: true, Rounds: 2, BudgetFactor: 0.75},
 		},
 		{
-			"empty phases default to plan plus review",
+			"empty phases default to review only",
 			&protocol.MobSpec{Participants: 2, Rounds: 1, BudgetFactor: 0.6},
-			orchestrator.MobConfig{Participants: 2, Plan: true, Review: true, Rounds: 1, BudgetFactor: 0.6},
+			orchestrator.MobConfig{Participants: 2, Review: true, Rounds: 1, BudgetFactor: 0.6},
 		},
 		{
 			"unknown phases ignored, execute inert without the server flag",
@@ -103,10 +103,10 @@ func TestMobConfigExecuteMapping(t *testing.T) {
 			},
 		},
 		{
-			name: "empty phases still default plan+review only",
+			name: "empty phases default to review only, execute stays off",
 			spec: &protocol.MobSpec{Participants: 2, ExecuteCheckpoints: true},
 			want: orchestrator.MobConfig{
-				Participants: 2, Plan: true, Review: true, Rounds: 2, BudgetFactor: 0.75,
+				Participants: 2, Review: true, Rounds: 2, BudgetFactor: 0.75,
 			},
 		},
 	}
