@@ -1773,16 +1773,30 @@ func bugPlanRun(ops *fakeOps, client llm.LLM, transcript *bytes.Buffer) *run {
 	return newRun(d, tc)
 }
 
+// The two card-log fragments the plan phase uses to distinguish an entry
+// announcement from a forced re-resolution. They are held here, not inlined,
+// because they are the ONE place the test suite couples to that prose:
+// rewording either message in runPlan means changing these two consts and
+// nothing else.
+const (
+	decisionModelLog  = "orchestrator model: "
+	reselectedLogPart = "(re-selected after diagnose)"
+)
+
 // entryAnnouncements returns the card-log lines announcing the decision model at
 // phase entry, excluding the re-selection distinction line. The card log is the
 // only channel that separates the entry announcement from a forced
 // re-resolution, so it is what pins the announce-once guard.
+//
+// A reworded card log makes this helper return nothing, and the assertion it
+// feeds then fails as if the announce-once guard had regressed. If that
+// assertion fails, check the two consts above before suspecting the guard.
 func entryAnnouncements(ops *fakeOps) []string {
 	var out []string
 
 	for _, c := range ops.recorded() {
-		msg, ok := strings.CutPrefix(c, "AddLog:orchestrator model: ")
-		if !ok || strings.Contains(msg, "re-selected after diagnose") {
+		msg, ok := strings.CutPrefix(c, "AddLog:"+decisionModelLog)
+		if !ok || strings.Contains(msg, reselectedLogPart) {
 			continue
 		}
 
@@ -1853,17 +1867,19 @@ func TestPlanDecisionSilentWhenTheMobDraftsThePlan(t *testing.T) {
 // without classifying and must record none.
 func TestPlanGateDecisionRecordsOnlyTheClassificationThatRan(t *testing.T) {
 	tests := []struct {
-		name      string
-		msgs      []harness.UserMessage
-		responses []llm.Response
-		want      int
+		name         string
+		msgs         []harness.UserMessage
+		responses    []llm.Response
+		want         int
+		wantPromoted bool
 	}{
 		{
 			// Empty, non-blocking inbox: the gate Wait reports ErrInboxClosed,
 			// exactly what a promote frame produces. No classification response
 			// is scripted because no model call happens.
-			name: "promoted at the first gate",
-			want: 0,
+			name:         "promoted at the first gate",
+			want:         0,
+			wantPromoted: true,
 		},
 		{
 			name:      "human reply is classified",
@@ -1884,6 +1900,15 @@ func TestPlanGateDecisionRecordsOnlyTheClassificationThatRan(t *testing.T) {
 
 			require.NoError(t, runPlan(context.Background(), o))
 			require.Len(t, ops.createCardArgs, 2, "the plan reached createSubtasks either way")
+
+			// Subtask creation alone does not separate the two cases: an
+			// approval creates them too. Only the promote log pins that the
+			// zero came from an inbox that closed rather than from some other
+			// outcome that happens to skip the classification.
+			if tt.wantPromoted {
+				assert.True(t, ops.loggedContains("promoted"),
+					"the gate took the promote path; logs=%v", ops.logs)
+			}
 
 			sels := modelSelections(t, &transcript)
 			assert.Len(t, selectionsForPhase(sels, "plan decision"), tt.want,
@@ -1964,6 +1989,12 @@ func TestPlanDecisionRecordedOnceForTheAutonomousSoloDraft(t *testing.T) {
 // announcement from that forced re-resolution, so it is asserted here and only
 // here - the re-selection must speak through its own distinction line and must
 // not re-announce as a fresh phase entry.
+//
+// TestPlanPhaseDiagnoseIncapableModelIsRecovered covers the recovery mechanism
+// itself (exclusion, blacklist, the plan not running on the incapable model).
+// What this test adds, and what a later deduplication of the two must keep, is
+// the pair of "plan decision" transcript selections and the announce-once
+// check: the observable half of the contract, which the sibling does not read.
 func TestPlanDecisionReresolvesOffAnIncapableDiagnoseModel(t *testing.T) {
 	var transcript bytes.Buffer
 
@@ -1985,12 +2016,14 @@ func TestPlanDecisionReresolvesOffAnIncapableDiagnoseModel(t *testing.T) {
 	require.Len(t, sels, 2, "the diagnose pass and the re-selected draft each ran a model")
 	assert.Equal(t, "rev/alpha", sels[0].Model, "the diagnose pass ran on the first pick")
 	assert.Equal(t, "rev/beta", sels[1].Model, "the re-resolution picked off the excluded slug")
+	assert.NotEqual(t, sels[0].Model, sels[1].Model,
+		"the re-resolution must land somewhere else, whatever the priors rank first")
 
 	models := client.recordedModels()
 	require.NotEmpty(t, models)
 	assert.Equal(t, "rev/beta", models[len(models)-1], "the planner ran on the replacement")
 
-	assert.True(t, ops.loggedContains("rev/beta (re-selected after diagnose)"),
+	assert.True(t, ops.loggedContains("rev/beta "+reselectedLogPart),
 		"the re-selection is logged as a re-selection; logs=%v", ops.logs)
 	assert.Equal(t, []string{"rev/alpha"}, entryAnnouncements(ops),
 		"the phase announces its model once, at entry; the re-resolution does not re-announce")
