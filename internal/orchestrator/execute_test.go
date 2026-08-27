@@ -2863,7 +2863,9 @@ func TestSoloFinishReportsNoVerifyPassOnAnInconclusiveGate(t *testing.T) {
 
 // TestSoloFinishReportsNoVerifyPassWhenNoCommandResolved covers the skip tier:
 // an empty resolved argv means no subprocess started, so there is no verdict to
-// report. newExecRun's isolateVerify leaves the plan at exactly that tier.
+// report. The plan stays empty because detectVerifyCommand finds no marker
+// file: execTestDeps leaves Cfg.Workspace unset, so detection walks the
+// package directory, which carries no go.mod, Makefile or package.json.
 func TestSoloFinishReportsNoVerifyPassWhenNoCommandResolved(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true}
@@ -2885,6 +2887,7 @@ func TestSoloFinishReportsNoVerifyPassWhenNoCommandResolved(t *testing.T) {
 	require.Len(t, ops.reportOutcomes, 1)
 	rows := ops.reportOutcomes[0]
 	require.Len(t, rows, 1)
+	assert.Equal(t, "win", rows[0].Result)
 	assert.False(t, rows[0].VerifyPass, "no command ran, so nothing passed")
 }
 

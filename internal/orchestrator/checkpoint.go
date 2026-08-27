@@ -327,5 +327,13 @@ func (o *run) commitRevise(ctx context.Context, sc *solverCtx, sub subtaskRef, m
 	if !committed {
 		first, _, _ := strings.Cut(msg, "\n")
 		o.d.logCard(ctx, "mob checkpoint (%s): revise made no changes - %s", sub.ID, first)
+
+		return
 	}
+
+	// The pre-commit gate ran against the tree the coder produced; this commit
+	// replaces that tree, and nothing re-runs the gate against the revised
+	// result. The run no longer has evidence the committed work passed, so the
+	// verdict must not stand.
+	sc.gate.verified = false
 }
