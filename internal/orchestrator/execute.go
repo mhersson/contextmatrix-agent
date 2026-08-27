@@ -68,6 +68,26 @@ type gateEvidence struct {
 	// immediately before commitRevise is called, so commitRevise can read it
 	// to decide what a landed revise does to verified.
 	reviseVerified bool
+
+	// stillRed: the gate burned its one fix pass and the re-run STILL came
+	// back FAILED - the only preCommitVerify exit a solo outcome row reports
+	// from. Assigned only on that arm, so all five of the earlier error exits
+	// (a resolve failure, either verify run failing to produce a verdict at
+	// all, the budget check before the fix pass, and the fix model itself
+	// failing) leave it zero and report nothing: the budget park in particular
+	// never earned the claim that a fix pass could not rescue the work, and a
+	// verify that never ran says nothing about the coder either way. The exits
+	// that return nil - a candidate solver, the skip tier, and either gate
+	// coming back anything but FAILED - leave it zero for the same reason.
+	stillRed bool
+
+	// environmentalFailure: whether the still-red arm's FINAL failing verify
+	// output carries the container resource-exhaustion signature, bound ONCE
+	// from verifyexec.LooksResourceExhausted beside the stillRed stamp so the
+	// card-log line and the suppressed row cannot disagree about the cause -
+	// the same single-binding pattern salvageSoloCapped uses for its
+	// modelEvidence. Consumed only alongside stillRed.
+	environmentalFailure bool
 }
 
 // runExecute is the execute phase: subtasks run SEQUENTIALLY in dependency
@@ -299,6 +319,13 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 	if vres.Status == verifyFailed {
 		o.applyPrecommitVerifyEvidence(ctx, sub, vres, exhausted)
 
+		// One arm stamps the evidence: stillRed marks this as the only exit the
+		// caller reports a solo outcome row from, and environmentalFailure binds
+		// the exhaustion verdict once from the final failing output so the card
+		// log and the suppressed row agree about the cause.
+		sc.gate.stillRed = true
+		sc.gate.environmentalFailure = verifyexec.LooksResourceExhausted(vres.Output)
+
 		return fmt.Errorf("subtask %s: `%s` still fails after one fix pass", sub.ID, plan.Display)
 	}
 
@@ -385,6 +412,37 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 	}
 
 	if verr := o.preCommitVerify(ctx, sc, sub, windowExhausted(res.Turns, coderMaxTurns)); verr != nil {
+		// This report must fire HERE, while the claim is still held:
+		// executeSubtaskWith calls releaseSubtask on this error path, and a
+		// report_model_outcome against a released claim silently vanishes.
+		//
+		// Settled decision: a still-red park reports `failed` for the CODER
+		// model. This is the strongest negative evidence the solo path ever
+		// holds - the coder's work was red, a bounded fix pass ran, and it was
+		// still red - and `failed` is the only value that moves the numerator
+		// the coder prior is built from, since a solo row carries n_candidates
+		// 1 and a `win` therefore nets to zero. The row is cross-card
+		// down-weighting evidence and does not double-count against the
+		// per-card sizing correction applyPrecommitVerifyEvidence makes: that
+		// mechanism behaves exactly as before, and one failure feeding both is
+		// deliberate - one failure measured in two currencies, not counted
+		// twice. The cost delta matches the win/repaired rows' convention,
+		// folding the fix model's spend in - the subtask really cost that.
+		//
+		// An exhausted TURN WINDOW does NOT exempt: salvageSoloCapped reports
+		// failed on both its cap arms, so volume has never been an exemption
+		// in this taxonomy. A container RESOURCE-EXHAUSTION signature in the
+		// final failing output does - the same exemption the capped path
+		// takes - with a card-log line naming the classification so the log
+		// agrees with the suppression.
+		if sc.gate.stillRed {
+			if sc.gate.environmentalFailure {
+				o.d.logCard(ctx, "subtask %s: verify still failed under container resource exhaustion - treated as environmental; no model outcome reported", sub.ID)
+			} else {
+				o.reportSoloOutcome(ctx, sub.ID, model, "failed", false, sc.ledger.Spent()-spendBefore)
+			}
+		}
+
 		return verr
 	}
 

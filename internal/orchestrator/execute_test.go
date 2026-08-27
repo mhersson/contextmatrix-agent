@@ -3093,3 +3093,179 @@ func TestRepairedEvidenceDoesNotLeakToTheNextSubtask(t *testing.T) {
 		"the second subtask passed on its own and must not inherit the first's failure")
 	assert.True(t, ops.reportOutcomes[1][0].VerifyPass)
 }
+
+// ---------------------------------------------------------------------------
+// Still-red gate outcome reporting
+// ---------------------------------------------------------------------------
+
+// stillRedResponses is the LLM script shared by the still-red fixtures: one
+// terminal coder call, then the bounded fix pass a red gate earns.
+func stillRedResponses() []llm.Response {
+	return []llm.Response{
+		finishResp("feat: subtask done", 0.01),
+		stopResp("coder: attempted the fix", 0.02),
+	}
+}
+
+// stillRedFixture wires the common shape behind the still-red tests: one solo
+// subtask, a resolved verify plan, and the caller picking the verify outcome.
+func stillRedFixture(t *testing.T, maxCost float64) (*run, *fakeOps, *fakeGit, *planLLM) {
+	t.Helper()
+
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: stillRedResponses()}
+	d := execTestDeps(ops, git, client)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, maxCost)
+
+	seedResolvedVerifyPlan(o)
+
+	return o, ops, git, client
+}
+
+// TestStillRedGateReportsOneFailedRowWhileTheClaimIsHeld encodes the settled
+// decision on the last silent terminal shape: a subtask whose gate went red on
+// the coder's work and STAYED red through the one fix pass parks the run, but
+// it must not teach selection nothing while the repaired case records a
+// `failed`. The row keys on the coder's slug, verify_pass is false, and the
+// cost delta folds the fix model's spend in - the subtask really cost that.
+func TestStillRedGateReportsOneFailedRowWhileTheClaimIsHeld(t *testing.T) {
+	o, ops, git, _ := stillRedFixture(t, 0)
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 1, Output: "--- FAIL: TestThing"}
+	}
+
+	err := runExecute(context.Background(), o)
+	require.Error(t, err, "a subtask still red after one fix pass parks")
+
+	assert.Empty(t, git.commitMsgs, "nothing may be committed while the verify is red; git=%v", git.recorded())
+	assert.Empty(t, git.pushBranches, "a red tree is never pushed")
+	assert.Equal(t, -1, indexOfCall(ops.recorded(), "CompleteTask:SUB-1"), "a parked subtask is not completed")
+
+	require.Len(t, ops.reportOutcomes, 1,
+		"the repaired case records failed - the still-red case must not be the one recording nothing")
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 1)
+
+	assert.Equal(t, "default/model", rows[0].Model, "the row names the selected coder slug")
+	assert.Equal(t, "failed", rows[0].Result)
+	assert.False(t, rows[0].VerifyPass, "what produced the tree was refused; nothing passed")
+	assert.Equal(t, 1, rows[0].NCandidates, "a solo row is never scaled by candidate count")
+	assert.InDelta(t, 0.03, rows[0].CostUSD, 1e-9,
+		"the delta carries the coder's 0.01 AND the fix model's 0.02")
+
+	report := indexOfCall(ops.recorded(), "ReportModelOutcomes:SUB-1")
+	release := indexOfCall(ops.recorded(), "ReleaseCard:SUB-1")
+	require.GreaterOrEqual(t, report, 0, "calls=%v", ops.recorded())
+	require.GreaterOrEqual(t, release, 0, "calls=%v", ops.recorded())
+	assert.Less(t, report, release,
+		"report_model_outcome is claim-gated: the row must land while the claim is still held")
+}
+
+// TestStillRedGateUnderResourceExhaustionReportsNothing pins the environmental
+// exemption: when the final failing verify output carries the container
+// resource-exhaustion signature, the still-red park is the environment's, not
+// the coder's - no row, and a card-log line naming the classification so the
+// log agrees with the suppression, exactly as salvageSoloCapped writes its own.
+func TestStillRedGateUnderResourceExhaustionReportsNothing(t *testing.T) {
+	withFastVerifyRetryWait(t) // the exhausted signature earns the runner's one retry
+
+	o, ops, _, _ := stillRedFixture(t, 0)
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		return verifyexec.Outcome{
+			ExitCode: 1,
+			Output:   "fork/exec /tmp/go-build/test.bin: resource temporarily unavailable",
+		}
+	}
+
+	err := runExecute(context.Background(), o)
+	require.Error(t, err, "the exhausted verify still parks the run")
+
+	assert.Empty(t, ops.reportOutcomes,
+		"a pids limit killed the command, not the coder - no model outcome row")
+	assert.True(t, ops.loggedContains("resource exhaustion"),
+		"the card log must name the environmental classification the suppression acted on; logs=%v", ops.logs)
+}
+
+// TestStillRedGateBudgetParkBeforeTheFixPassReportsNothing pins one of the
+// non-reporting arms: a ledger breach between the first red verify and the fix
+// pass parks the run with the bounded second chance never having run, so the
+// leaderboard claim "a fix pass could not rescue this work" was never earned.
+// gateEvidence carries nothing on this exit and no row is written.
+func TestStillRedGateBudgetParkBeforeTheFixPassReportsNothing(t *testing.T) {
+	o, ops, _, client := stillRedFixture(t, 0.005)
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 1, Output: "--- FAIL: TestThing"}
+	}
+
+	err := runExecute(context.Background(), o)
+
+	var be *BudgetExceededError
+	require.ErrorAs(t, err, &be, "a mid-gate breach parks the run")
+	assert.Empty(t, ops.reportOutcomes, "no fix pass ran, so no failed row was earned")
+	assert.Equal(t, 0, verifyFixPasses(client), "the park fired before the fix model was bought")
+}
+
+// TestStillRedGateOnAResolutionErrorReportsNothing covers the remaining silent
+// exit: a verify that never produces a code verdict because the worker lacks a
+// container runtime surfaces preCommitVerify's error without ever classifying
+// the coder's work as unrescuable - the same reasoning salvageSoloCapped
+// applies to its ToolchainMissingError branches.
+func TestStillRedGateOnAResolutionErrorReportsNothing(t *testing.T) {
+	o, ops, _, client := stillRedFixture(t, 0)
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		return verifyexec.Outcome{
+			ExitCode: 1,
+			Output:   "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+		}
+	}
+
+	err := runExecute(context.Background(), o)
+	require.Error(t, err)
+
+	var tme *ToolchainMissingError
+	require.ErrorAs(t, err, &tme, "an unreachable container runtime is a toolchain park, not a red gate")
+
+	assert.Empty(t, ops.reportOutcomes,
+		"the command never produced a code verdict - there is nothing for selection to learn")
+	assert.Equal(t, 0, verifyFixPasses(client))
+}
+
+// TestStillRedGateOnAnExhaustedWindowStillReports pins the other half of the
+// settled decision: a coder that spent its whole turn window and STILL left the
+// gate red is reported, not excused. Volume has never been an exemption in this
+// taxonomy - salvageSoloCapped reports failed on both its cap arms - and the
+// exhaustion flag's job is choosing which sizing axes applyPrecommitVerifyEvidence
+// raises, not whether the leaderboard hears about it.
+//
+// Without this, an exemption keyed on the spent window would restore the exact
+// silence this reporting exists to end, and nothing else in the suite objects.
+func TestStillRedGateOnAnExhaustedWindowStillReports(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	// 9 burns then the terminal call: the coder lands finish on its last turn,
+	// so the window is fully spent on a run the harness reports as complete.
+	client := &planLLM{responses: append(burnResps(9),
+		finishResp("feat: subtask done", 0.01),
+		stopResp("coder: attempted the fix", 0.02),
+	)}
+	d := execTestDeps(ops, git, client)
+	d.Cfg.MaxTurns = 10
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
+
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 1, Output: "--- FAIL: TestThing"}
+	}
+
+	require.Error(t, runExecute(context.Background(), o))
+
+	_, got := readMeta(ops.bodyFor("SUB-1"))
+	require.Equal(t, 1, got.Budget, "the fixture must actually exhaust the window, or this pins nothing")
+
+	require.Len(t, ops.reportOutcomes, 1, "a spent window does not excuse work that stayed red")
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 1)
+	assert.Equal(t, "failed", rows[0].Result)
+	assert.False(t, rows[0].VerifyPass)
+}
