@@ -64,7 +64,14 @@ type gateEvidence struct {
 
 	// coderFailed: the gate was RED on the coder's own work, before any fix
 	// pass. It stays true when the fix pass then repaired it - the point is
-	// what the CODER produced, not what shipped.
+	// what the CODER produced, not what shipped. A mob checkpoint's revise
+	// never sets it: the pre-commit gate is a deterministic project command
+	// and its red is a fact, while a revise verdict is model opinion, and
+	// recording a failure off model opinion would be a far noisier signal
+	// than this field exists to carry. The noise it does accept: a flaky
+	// command that passes on the re-run, or a fix pass that changed nothing,
+	// both still land here as a red gate too - accepted, because the
+	// alternative is recording a clean win for work that was demonstrably red.
 	coderFailed bool
 
 	// reviseVerified: the checkpoint's own gate (checkpointReviseVerify) RAN
@@ -1105,10 +1112,11 @@ func (o *run) logSoloCapPark(ctx context.Context, subID, reason string) {
 // board write on this path.
 //
 // Claim-gating: CM's report_model_outcome handler requires an active claim on
-// cardID, and complete_task atomically releases that claim on success. Every
-// caller MUST report while the claim is still held, i.e. before
-// CompleteTask/ReleaseCard - reporting after either would silently fail
-// against an already-released claim.
+// cardID, and complete_task atomically releases that claim on success -
+// report_usage is NOT the transferable precedent here (usage reporting
+// carries no claim gate). Every caller MUST report while the claim is still
+// held, i.e. before CompleteTask/ReleaseCard - reporting after either would
+// silently fail against an already-released claim.
 //
 // Bias-math: a solo win never moves a model's calibration numerator on CM's
 // leaderboard in its favour; only a solo failure moves it, downward. That is
