@@ -1921,6 +1921,52 @@ func TestCopilotGate_ValidFindingsFixedThenClean(t *testing.T) {
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
 }
 
+// TestCopilotGate_ReRequestNotTakingSkipsAfterGrace: the re-request after a
+// fix round can be accepted and silently dropped exactly like the first
+// request. When the reviewer never appears and no review lands in the grace
+// window, the gate passes with a note naming the dropped re-request - it does
+// not burn the full copilot_wait on a re-review nothing requested.
+func TestCopilotGate_ReRequestNotTakingSkipsAfterGrace(t *testing.T) {
+	shrinkCopilotRecheck(t, time.Millisecond)
+	shrinkCopilotGrace(t, 5*time.Millisecond)
+
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requestSilentlyNoOps: true,
+		headSHA:              copilotHeadSHA,
+		// A review is already on the head, so the gate goes straight to triage;
+		// the only RequestCopilotReview call is the re-request after the fix.
+		// The nil entry then answers every later poll: no re-review ever lands.
+		reviews: []*CopilotReview{
+			reviewOnHead("1 suggestion", swallowedErrorComment),
+			nil,
+		},
+	}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: []llm.Response{
+		copilotVerdict(copilotFinding{File: "internal/api/handler.go", Issue: "dropped error", Valid: true, Reason: "real"}),
+		stopResp("coder: fixed", 0.02),
+	}}
+
+	o := prGateRun(ops, gates, git, client, copilotGateContext("Dropped re-request", "body"), 0)
+	// Far longer than the grace window, short enough that a regression to the
+	// full wait fails this test quickly rather than hanging it.
+	o.d.Cfg.GatesCopilotWaitTimeout = 300 * time.Millisecond
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	assert.Equal(t, 2, modelCallCount(client), "triage and the fix; there is no re-review to re-triage")
+	assert.Contains(t, git.recorded(), "Push:cm/card-1", "the fix is pushed; git=%v", git.recorded())
+	assert.True(t, ops.loggedContains("re-review request did not take"),
+		"the pass note names the dropped re-request; logs=%v", ops.recorded())
+	assert.False(t, ops.loggedContains("did not arrive in time"),
+		"a dropped re-request must not read as a slow review; logs=%v", ops.recorded())
+	assert.NotContains(t, ops.lastBody(), "- Copilot gate: satisfied",
+		"an unreviewed fix must not be recorded as a satisfied gate")
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0,
+		"the gate passes; the fix is already pushed")
+}
+
 // TestCopilotGate_ReRequestFailureStillWaitsForTheAutoReview: on a ruleset
 // repo Copilot re-reviews every push by itself and the explicit re-request is
 // the fragile step. A generic re-request failure must not pass the gate with

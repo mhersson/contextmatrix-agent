@@ -445,9 +445,25 @@ func (o *run) copilotGate(ctx context.Context, prURL string, st *gatesState) err
 			return o.skipCopilot(ctx, st, "pr_gates: Copilot review did not arrive in time; proceeding")
 		}
 
-		satisfied, err := o.copilotReviewCycle(ctx, prURL, st, triaged, review)
-		if err != nil || satisfied {
+		outcome, err := o.copilotReviewCycle(ctx, prURL, st, triaged, review)
+		if err != nil || outcome == cycleSatisfied {
 			return err
+		}
+
+		if outcome == cycleAwaitGrace {
+			found, requested, gerr := o.awaitCopilotGrace(ctx, prURL)
+			if gerr != nil {
+				return gerr
+			}
+
+			if found == nil && !requested {
+				return o.skipCopilot(ctx, st,
+					"pr_gates: fix pushed but the Copilot re-review request did not take; proceeding without a re-review of the fixed head")
+			}
+
+			// requested=true leaves pending nil: the reviewer is on the PR
+			// after all, so the full wait at the top of the loop covers it.
+			pending = found
 		}
 	}
 }
@@ -468,14 +484,17 @@ func (o *run) copilotLateCheck(ctx context.Context, prURL string, st *gatesState
 
 	o.gateNote(ctx, "copilot", "pr_gates: late Copilot review found on the PR head; triaging it", nil)
 
-	satisfied, err := o.copilotReviewCycle(ctx, prURL, st, copilotTriagedComments(o.body), review)
+	outcome, err := o.copilotReviewCycle(ctx, prURL, st, copilotTriagedComments(o.body), review)
 	if err != nil {
 		return false, err
 	}
 
 	o.recordGates(ctx, *st)
 
-	return !satisfied, nil
+	// cycleAwaitGrace gets no wait of its own here: pushed=true re-runs the
+	// enabled gates, and the Copilot gate probes and requests again on the
+	// new head.
+	return outcome != cycleSatisfied, nil
 }
 
 // copilotReviewOnHead returns the PR's latest Copilot review when it is a review
@@ -508,22 +527,38 @@ func (o *run) copilotReviewOnHead(ctx context.Context, prURL string) *CopilotRev
 	return review
 }
 
+// copilotCycleOutcome says what the gate should do after one triage/fix cycle.
+type copilotCycleOutcome int
+
+const (
+	// cycleSatisfied: the gate passes; nothing left to wait for.
+	cycleSatisfied copilotCycleOutcome = iota
+	// cycleAwaitReview: a re-review is (or may be) in flight; wait the full
+	// deadline for it.
+	cycleAwaitReview
+	// cycleAwaitGrace: the re-request affirmatively did not take; wait only
+	// the grace window for a repo-automated review of the fixed head.
+	cycleAwaitGrace
+)
+
 // copilotReviewCycle handles one arrived review: dedupes against what earlier
 // rounds triaged, triages the fresh comments, and either passes the gate
-// (satisfied=true) or spends fix rounds until one commits, then re-requests
-// the review (satisfied=false - the caller waits for the re-review of the new
-// head). A fix round that committed nothing earns the gateNoChangeRetry-funded
-// retry, and HEAD has not moved since the review that produced the findings -
-// re-requesting would buy a guaranteed-identical review - so the retry is
-// spent on the same findings instead. The loop is self-bounding: the second
-// no-change round finds the retry already spent and parks. A
-// comment an earlier round triaged VALID counts as still open when Copilot
-// repeats it verbatim - the fix round did not actually resolve it - and it
-// funds a fix round of its own, folded in with anything freshly triaged VALID
-// this round.
+// (cycleSatisfied) or spends fix rounds until one commits, then re-requests
+// the review - the caller waits for the re-review of the new head, for the
+// full deadline when the re-request confirmably took (cycleAwaitReview) and
+// for only the grace window when it was accepted but dropped
+// (cycleAwaitGrace). A fix round that committed nothing earns the
+// gateNoChangeRetry-funded retry, and HEAD has not moved since the review
+// that produced the findings - re-requesting would buy a
+// guaranteed-identical review - so the retry is spent on the same findings
+// instead. The loop is self-bounding: the second no-change round finds the
+// retry already spent and parks. A comment an earlier round triaged VALID
+// counts as still open when Copilot repeats it verbatim - the fix round did
+// not actually resolve it - and it funds a fix round of its own, folded in
+// with anything freshly triaged VALID this round.
 func (o *run) copilotReviewCycle(
 	ctx context.Context, prURL string, st *gatesState, triaged map[string]bool, review *CopilotReview,
-) (bool, error) {
+) (copilotCycleOutcome, error) {
 	fresh := unseenComments(review.Comments, triaged)
 	reopened := repeatedValidComments(review.Comments, triaged)
 
@@ -537,7 +572,7 @@ func (o *run) copilotReviewCycle(
 
 		o.gateNote(ctx, "copilot", "pr_gates: Copilot repeated only comments already triaged as invalid; gate passes", nil)
 
-		return true, nil
+		return cycleSatisfied, nil
 	}
 
 	var findings []copilotFinding
@@ -554,7 +589,7 @@ func (o *run) copilotReviewCycle(
 
 		findings, terr = o.triageCopilot(ctx, st, review, fresh)
 		if terr != nil {
-			return false, terr
+			return cycleAwaitReview, terr
 		}
 
 		verdicts := copilotCommentVerdicts(fresh, findings)
@@ -572,7 +607,7 @@ func (o *run) copilotReviewCycle(
 
 		o.gateNote(ctx, "copilot", "pr_gates: Copilot review addressed", nil)
 
-		return true, nil
+		return cycleSatisfied, nil
 	}
 
 	if len(reopened) > 0 {
@@ -585,7 +620,7 @@ func (o *run) copilotReviewCycle(
 	for {
 		committed, ferr := o.copilotFixRound(ctx, st, stillOpen)
 		if ferr != nil {
-			return false, ferr
+			return cycleAwaitReview, ferr
 		}
 
 		if committed {
@@ -600,9 +635,10 @@ func (o *run) copilotReviewCycle(
 		// that commits falls through to the re-request below.
 	}
 
-	if _, rerr := o.d.PRGates.RequestCopilotReview(ctx, prURL); rerr != nil {
+	confirmed, rerr := o.d.PRGates.RequestCopilotReview(ctx, prURL)
+	if rerr != nil {
 		if strings.Contains(rerr.Error(), "Copilot isn't available for this repository") {
-			return true, o.skipCopilot(ctx, st, "pr_gates: Copilot re-review unavailable: "+
+			return cycleSatisfied, o.skipCopilot(ctx, st, "pr_gates: Copilot re-review unavailable: "+
 				rerr.Error()+"; gate passes with the fixes already pushed")
 		}
 
@@ -613,9 +649,29 @@ func (o *run) copilotReviewCycle(
 		o.gateNote(ctx, "copilot", fmt.Sprintf(
 			"pr_gates: Copilot re-review could not be requested (%s); waiting for the review of the fixed head", rerr.Error(),
 		), nil)
+
+		return cycleAwaitReview, nil
 	}
 
-	return false, nil
+	if !confirmed {
+		// Give the listing one recheck's worth of lag before concluding the
+		// re-request was dropped - the same allowance the first request gets.
+		if serr := o.sleepGate(ctx, gatesCopilotRecheck); serr != nil {
+			return cycleAwaitReview, serr
+		}
+
+		requested, qerr := o.d.PRGates.CopilotRequested(ctx, prURL)
+		if qerr == nil && !requested {
+			st.CopilotDetail = "- pr_gates: Copilot re-review request did not take; waiting briefly for a repo-automated review of the fixed head\n"
+			o.recordGates(ctx, *st)
+			o.gateNote(ctx, "copilot",
+				"pr_gates: Copilot re-review request did not take; waiting briefly for a repo-automated review of the fixed head", nil)
+
+			return cycleAwaitGrace, nil
+		}
+	}
+
+	return cycleAwaitReview, nil
 }
 
 // copilotRequestOutcome says how the gate should read ensureCopilotReviewer's
