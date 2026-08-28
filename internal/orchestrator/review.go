@@ -412,7 +412,12 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 		// clears fixRan - a round that ran out of room is the likeliest of all to
 		// leave the verify red, and blaming the model for turns it never got would
 		// shrink the fix pool on evidence about volume.
-		if committed && o.lastFixExhausted && o.fixBudgetSteps < maxBudgetStep {
+		//
+		// Keyed on the WIDTH this round actually ran at, same as the MaxTurnsError
+		// arm above: a card whose bar already seeds the budget at the top rung
+		// keeps fixBudgetSteps at zero while the width is already clamped, so the
+		// step counter alone cannot see that there is no wider left to charge.
+		if committed && o.lastFixExhausted && o.fixSizing(req).Budget < maxBudgetStep {
 			o.markFixCapped()
 			d.logCard(ctx, "review: fix round %d spent its whole turn window - the next fix round runs wider", round)
 
