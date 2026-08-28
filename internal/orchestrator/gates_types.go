@@ -69,6 +69,15 @@ type PRGates interface {
 	// adding the reviewer, but an unreadable response reads the same way.
 	RequestCopilotReview(ctx context.Context, prURL string) (bool, error)
 	CopilotReview(ctx context.Context, prURL string) (*CopilotReview, error)
+
+	// ReviewThreads lists the PR's review-comment threads; ReplyToReviewComment
+	// and ResolveReviewThread write the gate's triage verdicts back into them.
+	// All three serve a best-effort path: their errors are logged on the card,
+	// never escalated.
+	ReviewThreads(ctx context.Context, prURL string) ([]ReviewThread, error)
+	ReplyToReviewComment(ctx context.Context, prURL string, commentID int64, body string) error
+	ResolveReviewThread(ctx context.Context, threadID string) error
+
 	FailureLogs(ctx context.Context, prURL string, failed []CheckResult) (string, error)
 
 	// FindPRURL returns the URL of the open PR for the workspace's current

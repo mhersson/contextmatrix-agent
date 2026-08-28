@@ -176,6 +176,12 @@ type Config struct {
 	// GatesCopilotWaitTimeout bounds how long the Copilot gate waits for a
 	// review to land. Zero falls back to the package default.
 	GatesCopilotWaitTimeout time.Duration
+
+	// GatesCopilotThreadReplies posts the Copilot gate's triage verdicts back
+	// to the PR's review threads and resolves settled ones. The worker wires
+	// it from CMX_GATES_COPILOT_THREAD_REPLIES (on unless exactly "false"); a
+	// Deps built directly leaves it false and writes nothing.
+	GatesCopilotThreadReplies bool
 }
 
 // DeclaredVerify is the operator-declared verify configuration for a run, mapped

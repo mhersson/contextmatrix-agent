@@ -256,6 +256,30 @@ func TestSpecFromEnv_BoolParsing(t *testing.T) {
 	}
 }
 
+func TestSpecFromEnv_CopilotThreadReplies(t *testing.T) {
+	tests := []struct {
+		name     string
+		value    string
+		expected bool
+	}{
+		{"absent defaults on", "", true},
+		{"explicit false disables", "false", false},
+		{"true", "true", true},
+		{"garbage stays on", "yes", true}, // only exact "false" disables
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setRequired(t)
+			t.Setenv("CMX_GATES_COPILOT_THREAD_REPLIES", tc.value)
+
+			spec, err := specFromEnv()
+			require.NoError(t, err)
+			assert.Equal(t, tc.expected, spec.GatesCopilotThreadReplies)
+		})
+	}
+}
+
 func TestSpecFromEnv_MaxCapability(t *testing.T) {
 	t.Run("true", func(t *testing.T) {
 		setRequired(t)

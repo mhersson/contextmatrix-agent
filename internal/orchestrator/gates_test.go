@@ -69,6 +69,13 @@ type fakeGates struct {
 	// outlast the gate deadline.
 	logsDelay time.Duration
 
+	// Thread write-back scripting: threads is what ReviewThreads returns;
+	// replyErr/resolveErr script write failures.
+	threads    []ReviewThread
+	threadsErr error
+	replyErr   error
+	resolveErr error
+
 	// FindPRURL scripting: the recovery probe's result for a fail-closed gate.
 	findPRURL    string
 	findPRURLErr error
@@ -158,6 +165,33 @@ func (f *fakeGates) RequestCopilotReview(_ context.Context, prURL string) (bool,
 	f.requested = true
 
 	return true, nil
+}
+
+func (f *fakeGates) ReviewThreads(_ context.Context, prURL string) ([]ReviewThread, error) {
+	f.record("ReviewThreads:" + prURL)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.threads, f.threadsErr
+}
+
+func (f *fakeGates) ReplyToReviewComment(_ context.Context, prURL string, commentID int64, body string) error {
+	f.record(fmt.Sprintf("Reply:%s:%d:%s", prURL, commentID, body))
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.replyErr
+}
+
+func (f *fakeGates) ResolveReviewThread(_ context.Context, threadID string) error {
+	f.record("Resolve:" + threadID)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.resolveErr
 }
 
 func (f *fakeGates) CopilotReview(_ context.Context, prURL string) (*CopilotReview, error) {
