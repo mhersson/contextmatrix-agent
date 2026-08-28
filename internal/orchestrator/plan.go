@@ -1140,12 +1140,17 @@ func (o *run) createSubtasks(ctx context.Context, p plan) error {
 			depIDs = append(depIDs, ids[dep])
 		}
 
-		s := seedSizing(st.Tier)
+		s := seedSubtaskSizing(st.Tier, st.Description)
 		body := writeMeta(st.Description, markerFor(s, st.Tier))
 
 		id, err := d.Ops.CreateCard(ctx, cfg.Project, cfg.CardID, st.Title, body, depIDs)
 		if err != nil {
 			return fmt.Errorf("create subtask %q: %w", st.Title, err)
+		}
+
+		if s.Budget > seedSizing(st.Tier).Budget {
+			d.logCard(ctx, "subtask %s lists %d files - turn budget widened to %s",
+				id, len(filePathTokens(filesSection(st.Description))), budgetLabel(s.Budget))
 		}
 
 		ids[i] = id

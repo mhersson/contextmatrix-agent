@@ -3902,6 +3902,156 @@ func TestCappedReviewFixRoundRetriesWiderInsteadOfParking(t *testing.T) {
 		"the capped round's partial work is still committed; git=%v", git.recorded())
 }
 
+// A review fix round can spend its entire turn window and still return no
+// error at all: the harness's grace turn grants one terminal-only call after
+// the cap, and a coder that lands `finish` there completes cleanly. That is
+// the same "ran out of room" evidence as a hard MaxTurnsError - just without
+// one - so it must charge the budget axis exactly like the capped-arm sibling
+// above, and the round behind it must not blame the model on the bar axis for
+// a verify that only went red because the round it followed never got a real
+// chance to finish the work.
+//
+// Response script: round 1's panel and synthesis (four one-turn calls) reject;
+// the round-1 fix coder then burns its whole 5-turn budget and lands `finish`
+// on the harness's terminal-only grace call, so Turns comes back equal to
+// MaxTurns with no error. Round 2's verify gate is red, so it skips the panel
+// entirely and goes straight to a fix that lands cleanly; round 3's panel
+// approves.
+func TestGraceLandedFixRoundChargesBudgetNotBar(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+
+	responses := slices.Concat(
+		[]llm.Response{
+			stopResp("Correctness: broken", 0.01),
+			stopResp("Design: ok", 0.01),
+			stopResp("Security: ok", 0.01),
+			stopResp(`{"approved":false,"summary":"needs work","fixes":[{"file":"a.go","issue":"bug","suggestion":"fix","severity":"major"}]}`, 0.02),
+		},
+		append(burnResps(5), finishResp("fix: grace landing", 0.01)),
+		[]llm.Response{stopResp("coder: fixed it this time", 0.05)},
+		[]llm.Response{
+			stopResp("Correctness: fine", 0.01),
+			stopResp("Design: fine", 0.01),
+			stopResp("Security: fine", 0.01),
+			stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.02),
+		},
+	)
+
+	d := reviewTestDeps(t, ops, git, &planLLM{responses: responses}, reviewerRegistry())
+	d.Cfg.MaxTurns = 5
+	// The grace call only lands when the registry has a terminal tool to offer.
+	d.WriteTools = testWriteTools()
+
+	o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}, 0)
+	o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
+
+	gateRuns := 0
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		gateRuns++
+		if gateRuns == 2 {
+			return verifyexec.Outcome{ExitCode: 1, Output: "still failing"}
+		}
+
+		return verifyexec.Outcome{ExitCode: 0}
+	}
+
+	require.NoError(t, runReview(context.Background(), o),
+		"a grace-landed cap must not park the run any more than a hard one does")
+
+	assert.Equal(t, 1, o.fixBudgetSteps, "the grace landing widened the next round by one rung")
+	assert.Zero(t, o.fixBarSteps, "the round-2 red verify is the cap showing through, not a quality failure")
+	assert.True(t, ops.loggedContains("spent its whole turn window"), "logs=%v", ops.logs)
+	assert.Equal(t, 3, gateRuns, "every scripted round's gate ran")
+}
+
+// A grace-landed round whose bar was ALREADY at the top rung (critical, so
+// seedBudgetStep seeds the budget at maxBudgetStep before a single cap has
+// landed) must not fire the grace-landing charge at all: fixBudgetSteps is
+// the wrong key, because it stays zero on a card that opened at the ceiling.
+// Keyed on the round's actual width (o.fixSizing(req).Budget) instead - the
+// same key the sibling MaxTurnsError arm above already uses - the block sees
+// the width is already clamped and stays out of the way, so fixRan survives
+// into round 2 and that round's red verify charges the bar axis exactly like
+// any other quality failure, not the budget axis a no-op cap would have
+// claimed.
+//
+// A real bar charge escalates the next fix pick away from the failed
+// vendor (see resolveFixModel), so this test needs a second coder-capable
+// model behind a different vendor prefix - reviewerRegistry's only
+// coder-eligible model is the capable default, which would leave round 2
+// with nothing to escalate to and park for an unrelated reason.
+func criticalCoderEscalationRegistry() *registry.Registry {
+	alpha, beta, gamma, delta := 0.90, 0.88, 0.86, 0.84
+	coderAlpha := 0.92
+	priors := registry.Priors{
+		Models: map[string]registry.PriorEntry{
+			"rev/alpha": {Reviewer: &alpha, Coder: &coderAlpha},
+			"rev/beta":  {Reviewer: &beta},
+			"rev/gamma": {Reviewer: &gamma},
+			"rev/delta": {Reviewer: &delta},
+		},
+	}
+
+	return registry.NewRegistryFromParts(reviewerCatalog(), priors, nil, nil, "default/model")
+}
+
+func TestGraceLandedFixRoundAtTopRungDoesNotChargeBudgetAgain(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+
+	responses := slices.Concat(
+		[]llm.Response{
+			stopResp("Correctness: broken", 0.01),
+			stopResp("Design: ok", 0.01),
+			stopResp("Security: ok", 0.01),
+			stopResp(`{"approved":false,"summary":"needs work","fixes":[{"file":"a.go","issue":"bug","suggestion":"fix","severity":"major"}]}`, 0.02),
+		},
+		// The critical bar seeds the budget at maxBudgetStep (2 = a 2.0x
+		// ladder factor), so exhausting a base-5 window at this tier takes
+		// 10 turns, not 5 - the grace landing has to spend the WIDENED
+		// window to be exhausted evidence at this bar.
+		append(burnResps(10), finishResp("fix: grace landing", 0.01)),
+		[]llm.Response{stopResp("coder: fixed it this time", 0.05)},
+		[]llm.Response{
+			stopResp("Correctness: fine", 0.01),
+			stopResp("Design: fine", 0.01),
+			stopResp("Security: fine", 0.01),
+			stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.02),
+		},
+	)
+
+	d := reviewTestDeps(t, ops, git, &planLLM{responses: responses}, criticalCoderEscalationRegistry())
+	d.Cfg.MaxTurns = 5
+	// The grace call only lands when the registry has a terminal tool to offer.
+	d.WriteTools = testWriteTools()
+
+	o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}, 0)
+	o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
+	// A card whose bar already opened at critical seeds the budget at
+	// maxBudgetStep with zero fixBudgetSteps spent - the case the counter key
+	// cannot see.
+	o.cardSizing = sizing{Bar: registry.TierCritical, Budget: seedBudgetStep(registry.TierCritical)}
+
+	gateRuns := 0
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		gateRuns++
+		if gateRuns == 2 {
+			return verifyexec.Outcome{ExitCode: 1, Output: "still failing"}
+		}
+
+		return verifyexec.Outcome{ExitCode: 0}
+	}
+
+	require.NoError(t, runReview(context.Background(), o),
+		"a grace-landed round already at the ceiling must not park the run")
+
+	assert.Zero(t, o.fixBudgetSteps, "already at the top rung - there is no wider to charge")
+	assert.Equal(t, 1, o.fixBarSteps, "round 2's red verify is a real quality failure and must charge the bar")
+	assert.False(t, ops.loggedContains("runs wider"), "nothing widened, so the log must not claim it did: logs=%v", ops.logs)
+	assert.Equal(t, 3, gateRuns, "every scripted round's gate ran")
+}
+
 // A capped review fix round that committed NOTHING must not retry wider: HEAD
 // is unchanged, so a second panel would critique the exact diff round 1
 // already reviewed - a full extra 3-reviewer panel bought for no new evidence.
