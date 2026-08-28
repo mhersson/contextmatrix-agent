@@ -50,8 +50,13 @@ type Logger struct {
 	// ended records run keys whose Begin has already been followed by a
 	// footer-and-close, so a replayed Begin for such an id is recognized as
 	// stale and no-ops instead of superseding a live run's writer. Entries
-	// are never removed: a correlation id is unique per admitted run, so the
-	// map grows by one small entry per ended run for the life of the process.
+	// are never removed: a correlation id is unique per admitted run
+	// (webhook.handleTrigger always mints a fresh random suffix), so the map
+	// grows by one small entry per ended run for the life of the process -
+	// each key is the short card-scoped id webhook.handleTrigger mints, well
+	// under 100 bytes. Should retention ever matter, bound the minted id's
+	// size at admission rather than evicting here: an evicted entry would
+	// let a delayed stale Begin supersede a live run's writer.
 	ended map[string]bool
 }
 
@@ -91,9 +96,10 @@ func key(project, cardID string) string {
 }
 
 // runKey composes the in-memory open-writer id: the sanitized per-card key
-// plus the run's correlation id, mirroring webhook.SessionID's shape. A
-// correlation id is process-internal (minted by the executor's caller, never
-// a filesystem input), so it needs no sanitizing for a map key.
+// plus the run's correlation id, mirroring webhook.SessionID's shape. The
+// correlation id is minted by webhook.handleTrigger (cardID plus a short
+// random suffix, never a filesystem input), so it needs no sanitizing for a
+// map key.
 func runKey(project, cardID, correlationID string) string {
 	return key(project, cardID) + "/" + correlationID
 }

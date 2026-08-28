@@ -244,6 +244,7 @@ func TestNextAttemptWiresFileLoggerIntoWebhookConfig(t *testing.T) {
 type exitHarness struct {
 	dir      string
 	files    *filelog.Logger
+	creds    *secrets.RunCredentials
 	rep      *stubReporter
 	stream   <-chan protocol.LogEntry
 	registry *sessionSecretTee
@@ -269,6 +270,7 @@ func newExitHarness(t *testing.T, logDir string) *exitHarness {
 	return &exitHarness{
 		dir:      logDir,
 		files:    files,
+		creds:    creds,
 		rep:      rep,
 		stream:   ch,
 		registry: registry,
@@ -303,7 +305,7 @@ func drainStream(ch <-chan protocol.LogEntry) []protocol.LogEntry {
 func findRunEnd(t *testing.T, s string) (map[string]any, int) {
 	t.Helper()
 
-	for _, line := range strings.Split(s, "\n") {
+	for line := range strings.SplitSeq(s, "\n") {
 		if !strings.Contains(line, `"`+runEndKind+`"`) {
 			continue
 		}
@@ -395,6 +397,37 @@ func TestOnContainerExit_RemovalTargetsExactRegisteredID(t *testing.T) {
 	assert.NotContains(t, redacted, "PLACEHOLDER-RUN2-SECRET",
 		"run 2's secret, registered under a different correlation id, must still be masked")
 	assert.Equal(t, 1, strings.Count(redacted, "[REDACTED]"), "exactly run 2's one still-registered secret is masked")
+}
+
+// TestOnContainerExit_StaleTeardownSparesSuccessorCredentials pins the
+// credentials leg of the per-run cleanup invariant end to end: run 1's exit
+// fires the real onExit closure with run 1's correlation id, and because the
+// credentials handle registry is keyed by that id, the stale Teardown is a
+// no-op against run 2's state - the env file run 2's Provision wrote (and its
+// shared dir) stays on disk. Run 2's own exit still removes it.
+func TestOnContainerExit_StaleTeardownSparesSuccessorCredentials(t *testing.T) {
+	h := newExitHarness(t, t.TempDir())
+
+	credsDir := h.creds.HostDir("proj", "CARD-1")
+	envPath := filepath.Join(credsDir, "env")
+
+	// Run 1 lives, then run 2 of the same card re-provisions over it (the
+	// displacement a real re-trigger's Provision performs).
+	require.NoError(t, h.creds.Provision("proj", "CARD-1", "corr-1", "run1-token", "", secrets.EndpointSecrets{APIKey: "llm-key"}))
+	require.NoError(t, h.creds.Provision("proj", "CARD-1", "corr-2", "run2-token", "", secrets.EndpointSecrets{APIKey: "llm-key"}))
+
+	h.onExit("proj", "CARD-1", 0, executor.ExitNormal, 1, "corr-1")
+
+	src, err := secrets.Open(envPath)
+	require.NoError(t, err)
+	assert.Equal(t, "run2-token", src.Get("CM_GIT_TOKEN"),
+		"run 1's stale exit must leave run 2's credentials dir and env file untouched")
+
+	// Run 2's own exit still tears the dir down.
+	h.onExit("proj", "CARD-1", 0, executor.ExitNormal, 2, "corr-2")
+
+	_, err = os.Stat(credsDir)
+	assert.True(t, os.IsNotExist(err), "run 2's own exit must remove the credentials dir")
 }
 
 // TestTerminalEventCarriesTheAttemptOrdinal keeps a restarted container's

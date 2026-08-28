@@ -488,27 +488,16 @@ func containerLogSink(
 // sessions by), so this stale run's End is a no-op against a re-trigger's
 // already-open writer.
 //
-// credentials.Teardown stays keyed by plain project/cardID: RunCredentials
-// tracks one live handle per card, and Provision's own re-provision-displaces
-// design (see its doc comment) means a re-trigger's Provision landing inside
-// this window already replaces the stale run's handle with its own before this
-// stale Teardown call runs. Teardown then finds and stops the RE-TRIGGER's
-// handle, not the original run's - at worst the re-trigger loses its own
-// freshly-provisioned credential directory to this call, a loud, self-inflicted
-// failure (the new run fails fast on a missing secrets file), never a leaked or
-// cross-run token. That narrower risk is unchanged by this task; only the
-// session-secret registry removal below is now scoped to avoid the equivalent
-// cross-run failure mode.
-//
-// Session-secret removal keying: the registry removal below uses
-// webhook.SessionID(project, cardID, correlationID) - the run's own
-// correlation id, forwarded here from the executor's OnExit callback - so it
-// does NOT share credentials.Teardown's exposure above. Before this fix, both
-// this call and addSessionSecrets composed the bare project/cardID id, so a
-// stale run's removal here would strip a re-trigger's still-live redaction
-// keys during the same window. Keying by correlationID makes the two calls
-// target different map entries, so a stale exit can only ever remove its own
-// run's keys.
+// Per-run cleanup keying: every cleanup call below - filelog End, credentials
+// Teardown, session-secret removal - is keyed by the run's own correlation id
+// (the correlationID forwarded here from the executor's OnExit callback; the
+// credentials handle registry composes the same project/cardID/correlationID
+// triple webhook.SessionID keys redaction sessions by). A stale exit firing
+// during the pump-drain window therefore targets only its own run's state and
+// is a no-op against a successor run's: a re-trigger's Provision re-registered
+// the credential handle under its own correlation id (displacing run 1's),
+// its writer is open under its own id, and its redaction keys live in their
+// own session bucket - none of them reachable by this stale run's calls.
 func onContainerExit(
 	reporter webhook.StatusReporter,
 	credentials *secrets.RunCredentials,
@@ -521,7 +510,7 @@ func onContainerExit(
 		emitRunEnd(bridge, files, project, cardID, correlationID, exitCode, cause, ordinal, logger)
 
 		files.End(project, cardID, correlationID, exitCode, string(cause))
-		credentials.Teardown(project, cardID)
+		credentials.Teardown(project, cardID, correlationID)
 
 		// Remove the session secrets after credential teardown but before
 		// the status callback so a re-trigger does not inherit stale keys.

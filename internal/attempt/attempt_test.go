@@ -230,18 +230,16 @@ func TestWriterKeepsLinesIntactUnderConcurrentWriters(t *testing.T) {
 	var wg sync.WaitGroup
 
 	for i := range writers {
-		wg.Add(1)
 
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 
 			for j := range perWriter {
-				line := []byte(fmt.Sprintf(`{"seq":%d,"kind":"tool_call","writer":%d}`+"\n", j+1, i))
+				line := fmt.Appendf(nil, `{"seq":%d,"kind":"tool_call","writer":%d}`+"\n", j+1, i)
 
 				_, err := w.Write(line)
 				assert.NoError(t, err)
 			}
-		}()
+		})
 	}
 
 	wg.Wait()

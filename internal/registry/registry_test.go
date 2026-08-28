@@ -1269,9 +1269,7 @@ func TestCapableDefaultIsTheFloorAndIsHardFiltered(t *testing.T) {
 				r.blacklist[id] = true
 			}
 
-			for id, entry := range tt.extraPriors {
-				r.priors.Models[id] = entry
-			}
+			maps.Copy(r.priors.Models, tt.extraPriors)
 
 			got := r.SelectByComplexity(tt.in)
 
