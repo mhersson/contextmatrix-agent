@@ -17,8 +17,10 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/mob"
@@ -759,19 +761,79 @@ func toolchainLogMessage(tme *ToolchainMissingError) string {
 	return fmt.Sprintf("verify toolchain cannot run here (%s: %s - %s); parking card as blocked", tme.Tier, tme.Subject, tme.Reason)
 }
 
+// verifyParkNoteMax bounds the whole park note. ContextMatrix REJECTS an
+// activity-log message over 2000 bytes (its maxLogMessage) instead of clipping
+// it, and logCard swallows that rejection into a warning - so an over-long note
+// does not arrive trimmed, it does not arrive at all.
+const verifyParkNoteMax = 1900
+
+// verifyParkOutputElision marks a note whose output was trimmed to fit, so the
+// block visibly starts mid-stream rather than reading as the whole run.
+const verifyParkOutputElision = "[earlier output elided]\n"
+
 // verifyParkedLogMessage is the canonical card-log line for a pre-commit verify
 // park. Alone among the park lines it carries output: the command and what it
 // printed ARE the reason the card is blocked, and the container that held them
 // is destroyed before a human reads the card.
+//
+// The header always survives, so the card names the subtask and the command
+// even when nothing else fits; the output is then trimmed from the FRONT, since
+// a build tool's diagnostics are concentrated in its last bytes.
 func verifyParkedLogMessage(vpe *VerifyParkedError) string {
-	msg := fmt.Sprintf("subtask %s: `%s` still failed after one fix pass; parking card as blocked",
+	header := fmt.Sprintf("subtask %s: `%s` still failed after one fix pass; parking card as blocked",
 		vpe.Subtask, vpe.Command)
 
-	if vpe.Output != "" {
-		msg += "\n\nVerify output (tail):\n\n" + vpe.Output
+	const label = "\n\nVerify output (tail):\n\n"
+
+	room := verifyParkNoteMax - len(header) - len(label) - len(verifyParkOutputElision)
+	if vpe.Output == "" || room <= 0 {
+		// A header long enough to crowd out the output can also overrun the cap
+		// on its own (Command is whatever the project declared), so it takes the
+		// same bound - keeping its head, which is where the subtask and command
+		// are.
+		return truncateBytes(header, verifyParkNoteMax)
 	}
 
-	return msg
+	return header + label + verifyParkOutputTail(vpe.Output, room)
+}
+
+// verifyParkOutputTail returns at most n bytes of out's tail, cut on a rune
+// boundary and on a line boundary where one is available, marked as elided
+// whenever anything was dropped.
+func verifyParkOutputTail(out string, n int) string {
+	if len(out) <= n {
+		return out
+	}
+
+	tail := out[len(out)-n:]
+
+	// Advance past a rune split by the cut, then past the partial first line, so
+	// the block opens on a whole line rather than mid-word.
+	for len(tail) > 0 && !utf8.RuneStart(tail[0]) {
+		tail = tail[1:]
+	}
+
+	if i := strings.IndexByte(tail, '\n'); i >= 0 && i < len(tail)-1 {
+		tail = tail[i+1:]
+	}
+
+	return verifyParkOutputElision + tail
+}
+
+// truncateBytes caps s at n BYTES, keeping its head and cutting on a rune
+// boundary. Distinct from truncateRunes, which caps a rune COUNT - the board's
+// log limit is on bytes, which n runes can overrun by up to 4x.
+func truncateBytes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+
+	cut := n
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+
+	return s[:cut]
 }
 
 // reselectCap bounds in-run model re-selections per card. A model that emits
