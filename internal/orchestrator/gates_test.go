@@ -1488,14 +1488,28 @@ const copilotHeadSHA = "head-sha"
 // is the style nit the triage model rejects.
 var (
 	swallowedErrorComment = ReviewComment{
+		ID:   901,
 		Path: "internal/api/handler.go",
 		Body: "This error is swallowed - the caller can never see it.",
 	}
 	renamingComment = ReviewComment{
+		ID:   902,
 		Path: "README.md",
 		Body: "Consider rewording this sentence.",
 	}
 )
+
+// threadOf builds the review thread rooted at a comment, the shape
+// ReviewThreads would report for it.
+func threadOf(id string, c ReviewComment, extra ...int64) ReviewThread {
+	return ReviewThread{
+		ThreadID:   id,
+		CommentIDs: append([]int64{c.ID}, extra...),
+		ReplyCount: len(extra),
+		RootPath:   c.Path,
+		RootBody:   c.Body,
+	}
+}
 
 // TestCopilotGate_ExistingReviewOnHeadSkipsTheRequest: a re-trigger or a slow
 // earlier run finds Copilot's review already on the PR head. The gate must
@@ -2032,6 +2046,122 @@ func TestCopilotGate_ValidFindingsFixedThenClean(t *testing.T) {
 	assert.Contains(t, body, "## Copilot Review (Round 2)", "later rounds are numbered; body=%q", body)
 	assert.Contains(t, body, "- Copilot rounds used: 1/3")
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+}
+
+// TestCopilotGate_ThreadWriteBack: the triage verdicts reach the PR. The
+// INVALID comment gets a reply carrying the dismissal reason and its thread
+// is resolved; the VALID comment gets a reply after the fix round pushes,
+// citing the new head, and its thread stays open for the re-review to
+// confirm.
+func TestCopilotGate_ThreadWriteBack(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		threads: []ReviewThread{
+			threadOf("RT_VALID", swallowedErrorComment),
+			threadOf("RT_INVALID", renamingComment),
+		},
+		reviews: []*CopilotReview{
+			reviewOnHead("2 suggestions", swallowedErrorComment, renamingComment),
+			reviewOnHead("LGTM"),
+		},
+	}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: []llm.Response{
+		copilotVerdict(
+			copilotFinding{
+				File: "internal/api/handler.go", Issue: "the write error is dropped",
+				Valid: true, Reason: "the caller cannot tell the write failed",
+			},
+			copilotFinding{
+				File: "README.md", Issue: "wording could be clearer",
+				Valid: false, Reason: "style preference, not a defect",
+			},
+		),
+		stopResp("coder: returned the write error", 0.02),
+		copilotVerdict(),
+	}}
+
+	o := prGateRun(ops, gates, git, client, copilotGateContext("Two comments", "body"), 0)
+	o.d.Cfg.GatesCopilotThreadReplies = true
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	calls := gates.recorded()
+
+	invalidReply := indexOfCallPrefix(calls, fmt.Sprintf("Reply:%s:%d:", gatePRURL, renamingComment.ID))
+	require.GreaterOrEqual(t, invalidReply, 0, "the INVALID comment gets a reply; calls=%v", calls)
+	assert.Contains(t, calls[invalidReply], "style preference, not a defect",
+		"the dismissal reasoning is the reply body")
+	assert.GreaterOrEqual(t, indexOfCall(calls, "Resolve:RT_INVALID"), 0,
+		"a dismissed thread is resolved; calls=%v", calls)
+
+	validReply := indexOfCallPrefix(calls, fmt.Sprintf("Reply:%s:%d:", gatePRURL, swallowedErrorComment.ID))
+	require.GreaterOrEqual(t, validReply, 0, "the VALID comment gets a reply; calls=%v", calls)
+	assert.Contains(t, calls[validReply], "the caller cannot tell the write failed")
+	assert.Contains(t, calls[validReply], copilotHeadSHA, "the VALID reply cites the fixed head")
+	assert.Equal(t, -1, indexOfCall(calls, "Resolve:RT_VALID"),
+		"a VALID thread is never resolved on the fix push alone; calls=%v", calls)
+
+	assert.Contains(t, git.recorded(), "Push:cm/card-1", "the fix is pushed")
+}
+
+// TestCopilotGate_ThreadWriteBackOffByZeroValue: a Deps built without the
+// knob writes nothing - no thread listing, no replies, no resolves.
+func TestCopilotGate_ThreadWriteBackOffByZeroValue(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		threads:   []ReviewThread{threadOf("RT_1", swallowedErrorComment)},
+		reviews: []*CopilotReview{
+			reviewOnHead("1 suggestion", renamingComment),
+		},
+	}
+	client := &planLLM{responses: []llm.Response{copilotVerdict(
+		copilotFinding{File: "README.md", Issue: "wording", Valid: false, Reason: "style"},
+	)}}
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, copilotGateContext("Knob off", "body"), 0)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	for _, call := range gates.recorded() {
+		assert.NotContains(t, call, "ReviewThreads:", "no thread reads with the knob off")
+		assert.NotContains(t, call, "Reply:", "no replies with the knob off")
+		assert.NotContains(t, call, "Resolve:", "no resolves with the knob off")
+	}
+}
+
+// TestCopilotGate_ThreadWriteBackFailureNeverParks: a failing reply is one
+// card note; the gate still passes and the card completes.
+func TestCopilotGate_ThreadWriteBackFailureNeverParks(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		threads:   []ReviewThread{threadOf("RT_1", renamingComment)},
+		replyErr:  errors.New("HTTP 403: Resource not accessible"),
+		reviews: []*CopilotReview{
+			reviewOnHead("1 suggestion", renamingComment),
+		},
+	}
+	client := &planLLM{responses: []llm.Response{copilotVerdict(
+		copilotFinding{File: "README.md", Issue: "wording", Valid: false, Reason: "style"},
+	)}}
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, copilotGateContext("Reply fails", "body"), 0)
+	o.d.Cfg.GatesCopilotThreadReplies = true
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	assert.True(t, ops.loggedContains("could not write triage verdicts"),
+		"the failure is one card note; logs=%v", ops.recorded())
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0,
+		"a write failure never parks the card")
+	assert.Equal(t, -1, indexOfCall(gates.recorded(), "Resolve:RT_1"),
+		"an unanswered thread is not resolved; the reply failed first")
 }
 
 // TestCopilotGate_ReRequestNotTakingSkipsAfterGrace: the re-request after a
