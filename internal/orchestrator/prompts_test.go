@@ -284,6 +284,12 @@ func TestSeverityFieldInSynthesisPrompts(t *testing.T) {
 			assert.Contains(t, p, sev,
 				"%s must offer the %q severity that normalizeSeverity accepts", name, sev)
 		}
+
+		// The code-level severity gate (demoteContradictoryApproval) is the
+		// guard, but the prompt states the rule so demotions stay rare: an
+		// approved verdict must never carry a critical or important finding.
+		assert.Contains(t, p, "An approved verdict must not carry Critical or Important findings",
+			"%s must state the approved-verdict severity rule", name)
 	}
 }
 

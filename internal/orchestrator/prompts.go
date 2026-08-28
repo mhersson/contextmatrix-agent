@@ -518,6 +518,8 @@ Decision rule:
   approved:false.
 - Minor concerns and Nits never block - approved stays true - but they still go
   in fixes.
+- An approved verdict must not carry Critical or Important findings: if your
+  judgement says a finding is that severe, return approved:false.
 
 Be specific and actionable. Every fix must cite a file in the change set and
 give a concrete suggestion - no vague hand-waves. Commit status is never an
@@ -1142,6 +1144,8 @@ Decision rule:
   approved:false.
 - Minor concerns and Nits never block - approved stays true - but they still go
   in fixes.
+- An approved verdict must not carry Critical or Important findings: if your
+  judgement says a finding is that severe, return approved:false.
 
 ` + sweepRule + `
 
