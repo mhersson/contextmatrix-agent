@@ -92,11 +92,7 @@ func newWorkCmd() *cobra.Command {
 				spec.Mob.Guests = mobGuestsFromSecrets(src)
 			}
 
-			// human off (io.Discard), JSONL → stdout for the service log bridge.
-			// The attempt writer stamps this container's ordinal onto every
-			// event line, so a card whose container was restarted has two
-			// separable runs in one log instead of two colliding sequences.
-			emit := events.NewEmitter(io.Discard, attempt.NewWriter(cmd.OutOrStdout(), spec.Attempt))
+			emit := buildWorkEmitter(cmd, spec)
 
 			// When an extra CA is mounted, the worker's own outbound TLS (LLM
 			// client + MCP connection) must trust it. Build the injections once
@@ -131,6 +127,16 @@ func newWorkCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// buildWorkEmitter builds the container's event emitter: human output is
+// discarded (io.Discard), and the machine JSONL stream goes to cmd's
+// configured out (stdout in production) for the service's log bridge. The
+// attempt writer stamps this container's ordinal onto every event line, so a
+// card whose container was restarted has two separable runs in one log
+// instead of two colliding sequences.
+func buildWorkEmitter(cmd *cobra.Command, spec worker.RunSpec) *events.Emitter {
+	return events.NewEmitter(io.Discard, attempt.NewWriter(cmd.OutOrStdout(), spec.Attempt))
 }
 
 // splitPathList splits an os.PathListSeparator-separated list of paths,

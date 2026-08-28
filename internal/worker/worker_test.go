@@ -1,7 +1,9 @@
 package worker
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -1605,6 +1607,82 @@ func TestRunFSMPassesVerifyEnvToWriteTools(t *testing.T) {
 		assert.Equal(t, "resolved-value|unset", out.Text,
 			"%s: declared allowed name must resolve, denied name must stay absent", name)
 	}
+}
+
+// captureStdout redirects os.Stdout for fn's duration and returns what was
+// written to it. Safe alongside this file's other swapRunOrchestrator tests:
+// none of them call t.Parallel, and Go never runs a serial test concurrently
+// with another test in the same package, so the global os.Stdout swap cannot
+// race a concurrent write from elsewhere in this suite.
+func captureStdout(t *testing.T, fn func()) []byte {
+	t.Helper()
+
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+
+	defer func() { _ = r.Close() }()
+
+	orig := os.Stdout
+	os.Stdout = w
+
+	defer func() { os.Stdout = orig }()
+
+	fn()
+
+	require.NoError(t, w.Close())
+
+	out, err := io.ReadAll(r)
+	require.NoError(t, err)
+
+	return out
+}
+
+// TestRunFSMWiresAttemptOrdinalIntoSeatDebugWriter pins the worker.go wiring
+// site that builds Deps.SeatDebugWriter: it must be the real attempt.NewWriter
+// wrapper carrying spec.Attempt, not a hardcoded 1. A hardcoded 1 would pass
+// every other test in this suite (1 is the writer's untouched pass-through
+// case, indistinguishable from "no attempt field at all") while silently
+// losing the ordinal that separates a restarted container's transcript from
+// its predecessor's.
+func TestRunFSMWiresAttemptOrdinalIntoSeatDebugWriter(t *testing.T) {
+	remote := setupBareRemote(t)
+	wsParent := t.TempDir()
+	ops := newFakeOps()
+
+	var seatDebug io.Writer
+
+	swapRunOrchestrator(t, func(_ context.Context, d orchestrator.Deps) error {
+		seatDebug = d.SeatDebugWriter
+
+		return nil
+	})
+
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	spec := baseSpec(t, remote, wsParent)
+	spec.Attempt = 2
+
+	stdout := captureStdout(t, func() {
+		res, err := Run(context.Background(), spec, ops, &scriptedLLM{}, emit, openStdin(t))
+		require.NoError(t, err)
+		assert.Equal(t, "completed", res.Reason)
+
+		require.NotNil(t, seatDebug, "Deps.SeatDebugWriter must be wired")
+
+		ev := events.Event{Seq: 1, Kind: events.ToolCallKind, Data: map[string]any{"tool": "bash"}}
+
+		line, err := json.Marshal(ev)
+		require.NoError(t, err)
+
+		_, err = seatDebug.Write(append(line, '\n'))
+		require.NoError(t, err)
+	})
+
+	var got map[string]any
+
+	require.NoError(t, json.Unmarshal(bytes.TrimRight(stdout, "\n"), &got))
+	assert.EqualValues(t, 2, got["attempt"],
+		"the seat-debug writer must stamp this container's attempt ordinal, not a hardcoded 1")
 }
 
 // TestBuildRegistryFallbackPrecedence verifies that buildRegistry resolves the
