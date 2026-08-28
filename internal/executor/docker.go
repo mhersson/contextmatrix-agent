@@ -256,6 +256,10 @@ func containerConfig(spec LaunchSpec) (*container.Config, *container.HostConfig)
 		cfg.Env = append(cfg.Env, "CMX_CA_CERT_FILE="+caCertMountPath)
 	}
 
+	if spec.CorrelationID != "" {
+		cfg.Env = append(cfg.Env, "CM_RUN_ID="+spec.CorrelationID)
+	}
+
 	return cfg, host
 }
 

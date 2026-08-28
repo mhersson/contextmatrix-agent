@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"log/slog"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -523,6 +524,59 @@ func TestSpecFromEnv_CardIDShape(t *testing.T) {
 			assert.Contains(t, err.Error(), "CM_CARD_ID")
 		})
 	}
+}
+
+func TestSpecFromEnv_RunID(t *testing.T) {
+	t.Run("set", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("CM_RUN_ID", "run-abc")
+
+		spec, err := specFromEnv()
+		require.NoError(t, err)
+		assert.Equal(t, "run-abc", spec.RunID)
+	})
+
+	t.Run("unset_yields_empty", func(t *testing.T) {
+		setRequired(t)
+
+		spec, err := specFromEnv()
+		require.NoError(t, err)
+		assert.Empty(t, spec.RunID)
+	})
+}
+
+func TestWithRunID(t *testing.T) {
+	t.Run("with_id_attaches_attribute", func(t *testing.T) {
+		var buf bytes.Buffer
+
+		logger := slog.New(slog.NewTextHandler(&buf, nil))
+		withRunID(logger, "run-abc").Info("worker line")
+
+		assert.Contains(t, buf.String(), "run_id=run-abc")
+	})
+
+	t.Run("empty_id_leaves_output_unchanged", func(t *testing.T) {
+		var withHelper, baseline bytes.Buffer
+
+		// Suppress the time key: two independent handlers capture time.Now()
+		// separately, and a scheduling boundary between them diverges the raw
+		// strings even when the loggers are otherwise identical.
+		dropTime := func(_ []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.TimeKey {
+				return slog.Attr{}
+			}
+
+			return a
+		}
+
+		base := slog.New(slog.NewTextHandler(&baseline, &slog.HandlerOptions{ReplaceAttr: dropTime}))
+		base.Info("worker line", "card_id", "PROJ-1")
+
+		withRunID(slog.New(slog.NewTextHandler(&withHelper, &slog.HandlerOptions{ReplaceAttr: dropTime})), "").
+			Info("worker line", "card_id", "PROJ-1")
+
+		assert.Equal(t, baseline.String(), withHelper.String())
+	})
 }
 
 func TestSpecFromEnv_OptionalVars(t *testing.T) {
