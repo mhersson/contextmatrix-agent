@@ -470,6 +470,14 @@ type fakeGit struct {
 	// default "" preserves the no-snapshot behaviour the other review tests rely on.
 	diffBases []string
 	headSHA   string
+	// headSHAs scripts successive Head returns (the last one repeating), for
+	// tests that must tell one point in the run from another - a head captured
+	// before a commit from the same head read after it. Empty falls back to
+	// headSHA, the single-value form every other test uses.
+	headSHAs []string
+	// headErr fails the read, for callers that must degrade rather than treat an
+	// unknown head as a known one.
+	headErr error
 
 	// Worktree/branch lifecycle scripting (Best-of-N candidate fan-out):
 	// worktreeErr fails AddWorktree and RemoveWorktree; deleteBranchErr fails
@@ -590,7 +598,23 @@ func (g *fakeGit) SoftReset(_ context.Context, to string) error {
 func (g *fakeGit) Head(_ context.Context) (string, error) {
 	g.record("Head")
 
-	return g.headSHA, nil
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if g.headErr != nil {
+		return "", g.headErr
+	}
+
+	if len(g.headSHAs) == 0 {
+		return g.headSHA, nil
+	}
+
+	sha := g.headSHAs[0]
+	if len(g.headSHAs) > 1 {
+		g.headSHAs = g.headSHAs[1:]
+	}
+
+	return sha, nil
 }
 
 // assertOrder fails the test unless the named calls appear in g's recorded log

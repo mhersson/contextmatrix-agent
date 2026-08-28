@@ -22,11 +22,13 @@ import (
 // declares about itself. Recognising particular commands here would be a
 // language-specific dependency this package must not take.
 //
-// The tool's cache is private to the tool and is never consulted by the run's
-// verify gates. This tool answers "is my work passing right now"; a gate answers
-// "is the tree about to be committed green", and only a gate that measures the
-// tree itself can answer that. A subtask whose coder ran the tool and passed
-// runs the command a second time at the gate, deliberately.
+// The tool's cache is private to the tool and is never consulted by a gate.
+// What the tool does hand out is the verdict of its last actual run paired with
+// the worktree identity that run was measured against - see verifyToolPass. A
+// gate answers "is the tree about to be committed green", so it measures the
+// tree itself; that a pass it holds was earned by the tool rather than by its
+// own subprocess costs it nothing, because the identities prove the two ran
+// against the same tree.
 //
 // Known limitation, recorded rather than papered over: the resolved verify
 // command is a SINGLE command, while a project's real check set usually also
@@ -39,21 +41,41 @@ import (
 type VerifyTool struct {
 	plan      verifyPlan
 	workspace string
-	// dirty reports whether anything has been written to the workspace since the
-	// previous call. Execute calls it on entry and again once a run has finished,
-	// so a call measures from the end of the previous run rather than from its
-	// start: a command that touches a non-ignored file does not report itself as
-	// a write and cost the next call a re-run.
-	dirty func() bool
+	// probe reports whether the workspace has moved since the previous call, and
+	// the identity it measured. Execute calls it on entry and again once a run
+	// has finished, so a call measures from the end of the previous run rather
+	// than from its start: a command that touches a non-ignored file does not
+	// report itself as a write and cost the next call a re-run.
+	probe worktreeProbe
 	// exec runs the command and classifies the outcome. It is the same executor
 	// the run's verify gate uses, so the coder gets the retry, the cancellation
 	// guard and the container-runtime verdict the gate gets instead of a raw
 	// classification of whatever the subprocess did.
 	exec verifyExecFunc
+	// record publishes the verdict of every completed run, paired with the
+	// fingerprint of the tree it left behind, to whoever bound the tool. Nil
+	// when nobody is listening.
+	record func(verifyToolPass)
 
 	ran        bool
 	lastPassed bool
 	lastResult string
+}
+
+// verifyToolPass is what the coder's verify tool learned on its last actual run:
+// whether the resolved command passed, and the worktree identity that verdict
+// was measured against. Empty identity means the read failed, which is evidence
+// of nothing.
+//
+// A pair, published on every run, rather than a cache the gate shares with the
+// tool: a gate that read the tool's already-passed shortcut would be trusting
+// the tool's own bookkeeping about what has been written since. Reading the pair
+// leaves the gate measuring the tree itself and comparing - so an unreadable
+// identity on either side, a write in between, a commit in between, or a run
+// that did not pass all land in the same place, the gate running the command.
+type verifyToolPass struct {
+	passed   bool
+	identity string
 }
 
 // verifyExecFunc runs a resolved verify plan in dir and returns the classified
@@ -63,13 +85,13 @@ type verifyExecFunc func(ctx context.Context, dir string, plan verifyPlan) (veri
 
 // NewVerifyTool builds the coder's verify tool for one workspace. It returns nil
 // when no command resolved, so a run with nothing to verify never offers a tool
-// that could only report its own absence.
-func NewVerifyTool(plan verifyPlan, workspace string, dirty func() bool, exec verifyExecFunc) *VerifyTool {
+// that could only report its own absence. record may be nil.
+func NewVerifyTool(plan verifyPlan, workspace string, probe worktreeProbe, exec verifyExecFunc, record func(verifyToolPass)) *VerifyTool {
 	if len(plan.Argv) == 0 {
 		return nil
 	}
 
-	return &VerifyTool{plan: plan, workspace: workspace, dirty: dirty, exec: exec}
+	return &VerifyTool{plan: plan, workspace: workspace, probe: probe, exec: exec, record: record}
 }
 
 func (t *VerifyTool) Name() string { return "verify" }
@@ -89,7 +111,7 @@ func (t *VerifyTool) Schema() llm.Tool {
 }
 
 func (t *VerifyTool) Execute(ctx context.Context, _ map[string]any) (tools.Result, error) {
-	written := t.dirty()
+	written, _ := t.probe()
 
 	if t.ran && t.lastPassed && !written {
 		return tools.Result{Text: fmt.Sprintf(
@@ -124,11 +146,18 @@ func (t *VerifyTool) Execute(ctx context.Context, _ map[string]any) (tools.Resul
 	t.lastPassed = res.Status == verifyPassed
 	t.lastResult = renderVerifyToolResult(t.plan, res)
 
-	// Re-read the fingerprint so the recorded baseline is the tree the run left
+	// Re-read the identity so the recorded baseline is the tree the run left
 	// behind. Nothing else can write while the command runs: the harness
 	// dispatches tool calls sequentially and this tool never reaches a subagent
-	// registry, so anything the fingerprint moved by is the command's own doing.
-	t.dirty()
+	// registry, so anything the identity moved by is the command's own doing.
+	_, identity := t.probe()
+
+	// Publish the verdict with the identity it was measured against - every run,
+	// pass or not, so a later failure retracts an earlier pass rather than
+	// leaving it standing.
+	if t.record != nil {
+		t.record(verifyToolPass{passed: t.lastPassed, identity: identity})
+	}
 
 	return tools.Result{Text: t.lastResult}, nil
 }
@@ -152,24 +181,59 @@ func renderVerifyToolResult(plan verifyPlan, res verifyResult) string {
 	return head + "\n\n" + res.Output
 }
 
-// worktreeStateTimeout bounds one fingerprint read end to end - the git calls
-// and the untracked content both. The closure is on the coder's critical path,
-// so a wedged read must degrade to "assume written" rather than hang the turn.
+// worktreeStateTimeout bounds one identity read end to end - both git calls and
+// the untracked content. The closure is on the coder's critical path, so a
+// wedged read must degrade to "assume written" rather than hang the turn.
 const worktreeStateTimeout = 30 * time.Second
 
-// worktreeDirty builds the VerifyTool's dirty closure: it fingerprints the
-// workspace through git and reports whether the fingerprint moved since the
-// previous call. The tool itself stays ignorant of both git and the filesystem.
+// worktreeProbe reports whether the workspace moved since the previous call, and
+// the identity it measured - empty when the read failed, which is why an empty
+// identity can never match another.
+type worktreeProbe func() (moved bool, identity string)
+
+// worktreeIdentity is what a verify run was measured against: the commit the
+// workspace sits on, plus everything uncommitted on top of it.
+//
+// Both halves, because neither alone identifies a tree. WorktreeState covers
+// uncommitted state ALONE, so a clean tree before a commit and the clean tree
+// that same commit leaves behind fingerprint identically - and the coder holds
+// an unrestricted bash tool, so a commit landing between two reads is something
+// that can happen, not something a prompt line prevents. HEAD alone is blind to
+// everything uncommitted, which is most of what a coder produces. Qualified by
+// HEAD, equality means "the same tree", which is what every caller here is
+// actually asking.
+//
+// An error from either read is reported as one: unknown state is never reported
+// as unchanged.
+func worktreeIdentity(ctx context.Context, g GitOps) (string, error) {
+	head, err := g.Head(ctx)
+	if err != nil {
+		return "", fmt.Errorf("worktree identity: %w", err)
+	}
+
+	state, err := g.WorktreeState(ctx)
+	if err != nil {
+		return "", fmt.Errorf("worktree identity: %w", err)
+	}
+
+	return head + ":" + state, nil
+}
+
+// worktreeDirty builds the VerifyTool's probe: it reads the workspace identity
+// through git and reports whether it moved since the previous call, alongside
+// the identity itself. The tool stays ignorant of both git and the filesystem.
 //
 // Git rather than a filesystem walk, because only git can tell "the coder wrote
-// something" from "the toolchain left an artifact": the fingerprint is built
-// from the repository's own ignore rules, so an artifact tree the project
+// something" from "the toolchain left an artifact": the fingerprint half is
+// built from the repository's own ignore rules, so an artifact tree the project
 // ignores does not move it. A plain walk would count every artifact any command
 // dropped between two calls as a write, and the already-passed report would
 // rarely fire.
 //
-// Unknown state is written, never clean: the first call has no baseline, and a
-// fingerprint that could not be read is not evidence that nothing changed.
+// Unknown state is written, never clean: the first call has no baseline, and an
+// identity that could not be read is not evidence that nothing changed. A commit
+// counts as a move, because it is one: the tree the next call would report on is
+// not the tree the last run measured.
 //
 // A project that does not ignore its build artifacts keeps them in the
 // fingerprint. The baseline the tool records after each run folds in whatever
@@ -180,35 +244,37 @@ const worktreeStateTimeout = 30 * time.Second
 // path: unreadable state is written, so every call re-runs the command. Both
 // degrade to the behavior before this tool existed rather than to a wrong
 // answer, which is the right way round.
-func worktreeDirty(g GitOps) func() bool {
+func worktreeDirty(g GitOps) worktreeProbe {
 	var (
 		baseline string
 		have     bool
 	)
 
-	return func() bool {
+	return func() (bool, string) {
 		ctx, cancel := context.WithTimeout(context.Background(), worktreeStateTimeout)
 		defer cancel()
 
-		state, err := g.WorktreeState(ctx)
+		id, err := worktreeIdentity(ctx, g)
 		if err != nil {
 			have = false
 
-			return true
+			return true, ""
 		}
 
-		moved := !have || state != baseline
-		baseline, have = state, true
+		moved := !have || id != baseline
+		baseline, have = id, true
 
-		return moved
+		return moved, id
 	}
 }
 
 // verifyToolFor builds the coder's verify tool for one solver's workspace, or a
 // genuine nil interface when no command resolved - never a non-nil interface
 // holding a nil pointer, which a registry would happily offer to the model.
-func (o *run) verifyToolFor(g GitOps, dir string, plan verifyPlan) tools.Tool {
-	vt := NewVerifyTool(plan, dir, worktreeDirty(g), o.runVerifyCommand)
+// record is where the tool publishes each run's verdict, or nil when nobody
+// reads it.
+func (o *run) verifyToolFor(g GitOps, dir string, plan verifyPlan, record func(verifyToolPass)) tools.Tool {
+	vt := NewVerifyTool(plan, dir, worktreeDirty(g), o.runVerifyCommand, record)
 	if vt == nil {
 		return nil
 	}

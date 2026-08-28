@@ -95,9 +95,13 @@ type GitOps interface {
 	// WorktreeState is an opaque fingerprint of everything uncommitted in the
 	// worktree, built from the repository's own ignore rules so that artifacts a
 	// check command produces do not move it. Equal fingerprints mean nothing was
-	// written in between. The read is bounded in both time and bytes, so an
-	// implementation may report an error instead of fingerprinting a tree it
-	// cannot read cheaply; callers treat that as "assume written".
+	// written in between AT THE SAME COMMIT: uncommitted state is all it covers,
+	// so a clean tree before a commit and the clean tree that commit leaves
+	// behind are equal here while being entirely different trees. A caller that
+	// needs "the same tree" pairs it with Head - see worktreeIdentity. The read
+	// is bounded in both time and bytes, so an implementation may report an
+	// error instead of fingerprinting a tree it cannot read cheaply; callers
+	// treat that as "assume written".
 	WorktreeState(ctx context.Context) (string, error)
 }
 
@@ -699,6 +703,13 @@ func (o *run) execute(ctx context.Context) error {
 				o.d.logCard(ctx, "%s", noModelLogMessage(nme))
 			}
 
+			var vpe *VerifyParkedError
+			if errors.As(err, &vpe) {
+				// Pre-commit verify park: same shape as the other arms, with
+				// the failing output carried along - see verifyParkedLogMessage.
+				o.d.logCard(ctx, "%s", verifyParkedLogMessage(vpe))
+			}
+
 			return err
 		}
 	}
@@ -746,6 +757,21 @@ func toolchainLogMessage(tme *ToolchainMissingError) string {
 	}
 
 	return fmt.Sprintf("verify toolchain cannot run here (%s: %s - %s); parking card as blocked", tme.Tier, tme.Subject, tme.Reason)
+}
+
+// verifyParkedLogMessage is the canonical card-log line for a pre-commit verify
+// park. Alone among the park lines it carries output: the command and what it
+// printed ARE the reason the card is blocked, and the container that held them
+// is destroyed before a human reads the card.
+func verifyParkedLogMessage(vpe *VerifyParkedError) string {
+	msg := fmt.Sprintf("subtask %s: `%s` still failed after one fix pass; parking card as blocked",
+		vpe.Subtask, vpe.Command)
+
+	if vpe.Output != "" {
+		msg += "\n\nVerify output (tail):\n\n" + vpe.Output
+	}
+
+	return msg
 }
 
 // reselectCap bounds in-run model re-selections per card. A model that emits

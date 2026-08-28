@@ -49,6 +49,13 @@ func directVerifyExec() verifyExecFunc {
 	return verifyToolRun(verifyexec.Exec).runVerifyCommand
 }
 
+// staticProbe is a probe with a fixed written verdict and no readable
+// fingerprint, for tests that exercise what the tool does with a run rather than
+// how it decides to make one.
+func staticProbe(written bool) worktreeProbe {
+	return func() (bool, string) { return written, "" }
+}
+
 func TestVerifyToolRunsResolvedPlan(t *testing.T) {
 	t.Parallel()
 
@@ -57,7 +64,7 @@ func TestVerifyToolRunsResolvedPlan(t *testing.T) {
 		Display: "run the checks",
 		Source:  verifySourceDetected,
 		Timeout: time.Minute,
-	}, t.TempDir(), func() bool { return true }, directVerifyExec())
+	}, t.TempDir(), staticProbe(true), directVerifyExec(), nil)
 	require.NotNil(t, vt)
 
 	res, err := vt.Execute(context.Background(), nil)
@@ -74,7 +81,7 @@ func TestVerifyToolCombinesFailureOutput(t *testing.T) {
 		Display: "run the checks",
 		Source:  verifySourceDetected,
 		Timeout: time.Minute,
-	}, t.TempDir(), func() bool { return true }, directVerifyExec())
+	}, t.TempDir(), staticProbe(true), directVerifyExec(), nil)
 	require.NotNil(t, vt)
 
 	res, err := vt.Execute(context.Background(), nil)
@@ -89,7 +96,7 @@ func TestVerifyToolReportsAlreadyPassedWithoutRerunning(t *testing.T) {
 	ws := t.TempDir()
 	counter := filepath.Join(ws, "runs.txt")
 
-	vt := NewVerifyTool(countingPlan(counter), ws, func() bool { return false }, directVerifyExec())
+	vt := NewVerifyTool(countingPlan(counter), ws, staticProbe(false), directVerifyExec(), nil)
 	require.NotNil(t, vt)
 
 	_, err := vt.Execute(context.Background(), nil)
@@ -109,7 +116,7 @@ func TestVerifyToolReRunsAfterAWrite(t *testing.T) {
 	ws := t.TempDir()
 	counter := filepath.Join(ws, "runs.txt")
 
-	vt := NewVerifyTool(countingPlan(counter), ws, func() bool { return true }, directVerifyExec())
+	vt := NewVerifyTool(countingPlan(counter), ws, staticProbe(true), directVerifyExec(), nil)
 	require.NotNil(t, vt)
 
 	_, err := vt.Execute(context.Background(), nil)
@@ -124,7 +131,7 @@ func TestVerifyToolReRunsAfterAWrite(t *testing.T) {
 func TestNewVerifyToolNilWithNoCommand(t *testing.T) {
 	t.Parallel()
 
-	assert.Nil(t, NewVerifyTool(verifyPlan{}, t.TempDir(), func() bool { return true }, directVerifyExec()),
+	assert.Nil(t, NewVerifyTool(verifyPlan{}, t.TempDir(), staticProbe(true), directVerifyExec(), nil),
 		"a run with no resolvable verify command must not offer the tool")
 }
 
@@ -246,7 +253,7 @@ func TestVerifyToolReportsContainerRuntimeAsInconclusive(t *testing.T) {
 		}
 	})
 
-	vt := NewVerifyTool(toolPlan(), t.TempDir(), func() bool { return true }, o.runVerifyCommand)
+	vt := NewVerifyTool(toolPlan(), t.TempDir(), staticProbe(true), o.runVerifyCommand, nil)
 	require.NotNil(t, vt)
 
 	res, err := vt.Execute(context.Background(), nil)
@@ -272,7 +279,7 @@ func TestVerifyToolRetriesResourceExhaustion(t *testing.T) {
 		return verifyexec.Outcome{ExitCode: 0, Output: "everything ok"}
 	})
 
-	vt := NewVerifyTool(toolPlan(), t.TempDir(), func() bool { return true }, o.runVerifyCommand)
+	vt := NewVerifyTool(toolPlan(), t.TempDir(), staticProbe(true), o.runVerifyCommand, nil)
 	require.NotNil(t, vt)
 
 	res, err := vt.Execute(context.Background(), nil)
@@ -295,7 +302,7 @@ func TestVerifyToolReportsCancellationAsAnError(t *testing.T) {
 		return verifyResult{Status: verifyFailed, Output: "signal: killed"}, nil
 	}
 
-	vt := NewVerifyTool(toolPlan(), t.TempDir(), func() bool { return true }, exec)
+	vt := NewVerifyTool(toolPlan(), t.TempDir(), staticProbe(true), exec, nil)
 	require.NotNil(t, vt)
 
 	res, err := vt.Execute(ctx, nil)
@@ -304,11 +311,11 @@ func TestVerifyToolReportsCancellationAsAnError(t *testing.T) {
 	assert.False(t, vt.ran, "a cancelled run must not be cached as a run")
 }
 
-// workspaceDirty is a dirty closure over the workspace's own file contents,
-// standing in for the git fingerprint: it reports whether anything directly
-// under ws changed since the previous call, so a test can prove WHEN the
-// baseline is taken rather than only that one is.
-func workspaceDirty(t *testing.T, ws string) func() bool {
+// workspaceDirty is a probe over the workspace's own file contents, standing in
+// for the git fingerprint: it reports whether anything directly under ws changed
+// since the previous call, so a test can prove WHEN the baseline is taken rather
+// than only that one is.
+func workspaceDirty(t *testing.T, ws string) worktreeProbe {
 	t.Helper()
 
 	var (
@@ -316,7 +323,7 @@ func workspaceDirty(t *testing.T, ws string) func() bool {
 		have     bool
 	)
 
-	return func() bool {
+	return func() (bool, string) {
 		entries, err := os.ReadDir(ws)
 		require.NoError(t, err)
 
@@ -337,7 +344,7 @@ func workspaceDirty(t *testing.T, ws string) func() bool {
 		moved := !have || state != baseline
 		baseline, have = state, true
 
-		return moved
+		return moved, state
 	}
 }
 
@@ -351,7 +358,7 @@ func TestVerifyToolBaselineIsTakenAfterTheRun(t *testing.T) {
 	ws := t.TempDir()
 	counter := filepath.Join(ws, "runs.txt")
 
-	vt := NewVerifyTool(countingPlan(counter), ws, workspaceDirty(t, ws), directVerifyExec())
+	vt := NewVerifyTool(countingPlan(counter), ws, workspaceDirty(t, ws), directVerifyExec(), nil)
 	require.NotNil(t, vt)
 
 	_, err := vt.Execute(context.Background(), nil)
@@ -381,7 +388,7 @@ func TestVerifyToolErroringFingerprintAlwaysReruns(t *testing.T) {
 
 		g := &fakeGit{worktreeStateErr: errors.New("git status exploded")}
 
-		vt := NewVerifyTool(countingPlan(counter), ws, worktreeDirty(g), directVerifyExec())
+		vt := NewVerifyTool(countingPlan(counter), ws, worktreeDirty(g), directVerifyExec(), nil)
 		require.NotNil(t, vt)
 
 		_, err := vt.Execute(context.Background(), nil)
@@ -405,7 +412,7 @@ func TestVerifyToolErroringFingerprintAlwaysReruns(t *testing.T) {
 
 		g := &fakeGit{worktreeStates: []string{"a", "a"}}
 
-		vt := NewVerifyTool(countingPlan(counter), ws, worktreeDirty(g), directVerifyExec())
+		vt := NewVerifyTool(countingPlan(counter), ws, worktreeDirty(g), directVerifyExec(), nil)
 		require.NotNil(t, vt)
 
 		_, err := vt.Execute(context.Background(), nil)
@@ -421,35 +428,99 @@ func TestVerifyToolErroringFingerprintAlwaysReruns(t *testing.T) {
 	})
 }
 
-// worktreeDirty's contract, directly: an unchanged readable fingerprint moves
-// exactly once (first call true, second false), while any failed read reports
-// written on every call whatever the recorded baseline says.
+// A commit moves the tree even though nothing was written to it: the fingerprint
+// half of the identity covers uncommitted state only, and the coder holds a bash
+// tool no prompt line stops from committing. The already-passed shortcut must
+// not fire across one - the command has not run against the tree the coder is
+// looking at now.
+func TestVerifyToolReRunsAfterACommit(t *testing.T) {
+	t.Parallel()
+
+	ws := t.TempDir()
+	counter := filepath.Join(ws, "runs.txt")
+
+	// Identical uncommitted state throughout. Only HEAD moves, and only on the
+	// third read: the first call's entry and post-run reads, then the second
+	// call's entry read.
+	g := &fakeGit{worktreeStates: []string{"a"}, headSHAs: []string{"A", "A", "B"}}
+
+	vt := NewVerifyTool(countingPlan(counter), ws, worktreeDirty(g), directVerifyExec(), nil)
+	require.NotNil(t, vt)
+
+	_, err := vt.Execute(context.Background(), nil)
+	require.NoError(t, err)
+
+	res, err := vt.Execute(context.Background(), nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, 2, countLines(t, counter), "a commit between two calls must cost a re-run")
+	assert.NotContains(t, res.Text, "already passed",
+		"the second call ran the command, so it must not report a cached pass")
+}
+
+// worktreeDirty's contract, directly: an unchanged identity moves exactly once
+// (first call true, second false) and hands back the identity it read - both
+// halves of it - while a commit moves it and any failed read, of either half,
+// reports moved with no identity at all, on every call, whatever the recorded
+// baseline says.
 func TestWorktreeDirtyDegradesToWrittenOnError(t *testing.T) {
 	t.Parallel()
 
-	t.Run("unchanged readable fingerprint", func(t *testing.T) {
+	t.Run("unchanged readable identity", func(t *testing.T) {
 		t.Parallel()
 
-		g := &fakeGit{worktreeStates: []string{"a", "a"}}
-		dirty := worktreeDirty(g)
+		g := &fakeGit{worktreeStates: []string{"a", "a"}, headSHAs: []string{"A"}}
+		probe := worktreeDirty(g)
 
-		assert.True(t, dirty(), "the first call has no baseline, so it counts as a write")
-		assert.False(t, dirty(), "an unchanged fingerprint between calls means nothing was written")
+		moved, id := probe()
+		assert.True(t, moved, "the first call has no baseline, so it counts as a write")
+		assert.Equal(t, "A:a", id, "the identity it measured - commit and uncommitted state - travels with the verdict")
+
+		moved, id = probe()
+		assert.False(t, moved, "an unchanged identity between calls means nothing moved")
+		assert.Equal(t, "A:a", id)
 	})
 
-	t.Run("unreadable fingerprint", func(t *testing.T) {
+	t.Run("commit between reads", func(t *testing.T) {
+		t.Parallel()
+
+		g := &fakeGit{worktreeStates: []string{"a"}, headSHAs: []string{"A", "B"}}
+		probe := worktreeDirty(g)
+
+		_, before := probe()
+
+		moved, after := probe()
+		assert.True(t, moved, "a commit moves the tree even with identical uncommitted state")
+		assert.NotEqual(t, before, after, "the identity must distinguish the two trees")
+	})
+
+	t.Run("unreadable identity", func(t *testing.T) {
 		t.Parallel()
 
 		g := &fakeGit{worktreeStates: []string{"a"}}
-		dirty := worktreeDirty(g)
+		probe := worktreeDirty(g)
 
-		assert.True(t, dirty(), "sanity: the clean-path first call")
-		assert.False(t, dirty(), "sanity: the same read is not a write")
+		moved, _ := probe()
+		assert.True(t, moved, "sanity: the clean-path first call")
+
+		moved, _ = probe()
+		assert.False(t, moved, "sanity: the same read is not a write")
 
 		g.worktreeStateErr = errors.New("read budget blown")
 
-		assert.True(t, dirty(), "a failed read must be treated as written, never clean")
-		assert.True(t, dirty(), "every call on the error path stays written, baseline or not")
+		moved, id := probe()
+		assert.True(t, moved, "a failed read must be treated as written, never clean")
+		assert.Empty(t, id, "an unreadable identity is evidence of nothing, so none is reported")
+
+		moved, _ = probe()
+		assert.True(t, moved, "every call on the error path stays written, baseline or not")
+
+		g.worktreeStateErr = nil
+		g.headErr = errors.New("rev-parse exploded")
+
+		moved, id = probe()
+		assert.True(t, moved, "an unreadable head degrades exactly like an unreadable fingerprint")
+		assert.Empty(t, id)
 	})
 }
 
@@ -464,7 +535,7 @@ func TestVerifyToolSchemaScopesTheBashProhibition(t *testing.T) {
 		Display: "make check",
 		Source:  verifySourceDeclared,
 		Timeout: time.Minute,
-	}, t.TempDir(), func() bool { return true }, directVerifyExec())
+	}, t.TempDir(), staticProbe(true), directVerifyExec(), nil)
 	require.NotNil(t, vt)
 
 	assert.Contains(t, prohibitionSentence(t, vt.Schema().Function.Description), "make check",

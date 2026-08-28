@@ -358,6 +358,9 @@ type fsmArgs struct {
 //     released claim. A failed transition (blocked is project-configurable)
 //     is logged and degrades to the same silent park as the other arms -
 //     never fatal.
+//   - VerifyParkedError: identical to the toolchain arm - push WIP, blocked,
+//     release, fail. The pre-commit gate refused to COMMIT the coder's work as
+//     finished; the push is what keeps that work from dying with the container.
 //   - any other error: release the claim and return it.
 func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, error) {
 	// Guest bearer tokens are known at worker start, so they join the
@@ -591,6 +594,27 @@ func mapFSMResult(ctx context.Context, a fsmArgs, err error) (Result, error) {
 
 		return Result{Reason: "error"}, fmt.Errorf("orchestrator: %w", err)
 
+	case isVerifyParked(err):
+		// Pre-commit verify park: a subtask's verify stayed red through its one
+		// fix pass, so the orchestrator refused to commit that work as
+		// finished. Refusing the COMMIT is not a reason to destroy the tree
+		// with the container, so this maps exactly like the two environmental
+		// arms above - the push carries the refused work out on the card
+		// branch, and the blocked transition makes the park visible on the
+		// board. Unlike those two this park IS about the model's output, but
+		// the orchestrator already reported that outcome row while it still
+		// held the subtask claim, and it wrote the card log line carrying the
+		// failing command and output; the worker duplicates neither.
+		if terr := a.ops.TransitionCard(ctx, a.spec.CardID, "blocked"); terr != nil {
+			slog.Warn("transition to blocked failed; leaving card state as-is",
+				"card", a.spec.CardID, "error", terr)
+		}
+
+		pushWIP(ctx, a)
+		releaseQuietly(ctx, a.ops, a.spec.CardID)
+
+		return Result{Reason: "error"}, fmt.Errorf("orchestrator: %w", err)
+
 	default:
 		releaseQuietly(ctx, a.ops, a.spec.CardID)
 
@@ -648,6 +672,14 @@ func isToolchainMissing(err error) bool {
 	var tme *orchestrator.ToolchainMissingError
 
 	return errors.As(err, &tme)
+}
+
+// isVerifyParked reports whether err is (or wraps) the orchestrator's
+// pre-commit verify-park sentinel.
+func isVerifyParked(err error) bool {
+	var vpe *orchestrator.VerifyParkedError
+
+	return errors.As(err, &vpe)
 }
 
 // errorsIsCanceled reports whether err is (or wraps) context cancellation, which

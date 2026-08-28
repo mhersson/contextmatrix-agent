@@ -2824,6 +2824,193 @@ func TestPreCommitVerifySkippedForCandidateSolver(t *testing.T) {
 	assert.False(t, ran, "a candidate solver never runs the pre-commit gate")
 }
 
+// The gate must not pay for a second full suite run when the coder's verify
+// tool already ran the identical command against the identical tree. It accepts
+// the tool's recorded pass only under all three conditions - the tool's last run
+// passed, the gate's own read of the worktree identity succeeds, and it equals
+// the identity recorded at that pass - and runs the command itself on every
+// other case. The counter is the whole point: it counts every execution of the
+// command, tool call and gate alike.
+func TestPreCommitGateReusesOnlyAFingerprintVerifiedToolPass(t *testing.T) {
+	cases := []struct {
+		name string
+		// states scripts the uncommitted-state fingerprint each identity read
+		// sees, in call order; the last one repeats. heads does the same for
+		// HEAD, the other half of the identity.
+		states []string
+		heads  []string
+		// exits scripts the exit code of each execution of the command, in order.
+		exits    []int
+		callTool bool
+		// breakAt names the read that fails: "gate" fails the gate's own read,
+		// "record" fails the read the tool records its pass against (cleared
+		// again before the gate, so the case isolates the recorded half),
+		// "gate-head" fails the gate's HEAD read rather than its state read.
+		breakAt  string
+		wantRuns int
+	}{
+		{
+			name:     "tool passed and nothing was written since",
+			states:   []string{"a"},
+			exits:    []int{0},
+			callTool: true,
+			wantRuns: 1,
+		},
+		{
+			// Entry probe, post-run probe, then the gate's own read - the third
+			// fingerprint is the coder writing after the tool passed.
+			name:     "something was written after the tool passed",
+			states:   []string{"a", "a", "written since"},
+			exits:    []int{0, 0},
+			callTool: true,
+			wantRuns: 2,
+		},
+		{
+			// The uncommitted state is identical throughout - a clean tree
+			// before the commit and the clean tree it leaves behind. Only HEAD
+			// moved, and only the gate's read sees it: the coder committed its
+			// work with the bash tool it holds, which no prompt line prevents.
+			name:     "the coder committed between the tool and the gate",
+			states:   []string{"a"},
+			heads:    []string{"A", "A", "B"},
+			exits:    []int{0, 0},
+			callTool: true,
+			wantRuns: 2,
+		},
+		{
+			name:     "the gate cannot read the fingerprint",
+			states:   []string{"a"},
+			exits:    []int{0, 0},
+			callTool: true,
+			breakAt:  "gate",
+			wantRuns: 2,
+		},
+		{
+			name:     "the gate cannot read HEAD",
+			states:   []string{"a"},
+			exits:    []int{0, 0},
+			callTool: true,
+			breakAt:  "gate-head",
+			wantRuns: 2,
+		},
+		{
+			// The tool ran and passed, but the read it would have recorded the
+			// pass against failed: it holds no identity, so there is nothing for
+			// the gate to match even though the gate's own read succeeds.
+			name:     "the tool could not record what it measured",
+			states:   []string{"a"},
+			exits:    []int{0, 0},
+			callTool: true,
+			breakAt:  "record",
+			wantRuns: 2,
+		},
+		{
+			name:     "the tool never ran",
+			states:   []string{"a"},
+			exits:    []int{0},
+			wantRuns: 1,
+		},
+		{
+			name:     "the tool's last run did not pass",
+			states:   []string{"a"},
+			exits:    []int{1, 0},
+			callTool: true,
+			wantRuns: 2,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			git := &fakeGit{worktreeStates: tc.states, headSHAs: tc.heads}
+			d := execTestDeps(&fakeOps{}, git, &planLLM{})
+			d.Cfg.Workspace = t.TempDir()
+			d.WriteToolsForDir = func(_ string, verify tools.Tool) *tools.Registry {
+				return tools.NewRegistry(append(testWriteTools().All(), verify)...)
+			}
+
+			o := newExecRun(d, nil, 0)
+			seedResolvedVerifyPlan(o)
+
+			runs := 0
+			o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+				require.Less(t, runs, len(tc.exits), "the command ran more often than the case scripts")
+
+				code := tc.exits[runs]
+				runs++
+
+				return verifyexec.Outcome{ExitCode: code, Output: "checks output"}
+			}
+
+			o.bindVerifyTool(o.solver, o.resolvedVerifyPlan())
+
+			if tc.breakAt == "record" {
+				git.worktreeStateErr = errors.New("git status exploded")
+			}
+
+			if tc.callTool {
+				vt, ok := o.solver.tools.Get("verify")
+				require.True(t, ok, "the coder must have been offered the verify tool")
+
+				_, err := vt.Execute(context.Background(), nil)
+				require.NoError(t, err)
+			}
+
+			switch tc.breakAt {
+			case "record":
+				git.worktreeStateErr = nil
+			case "gate":
+				git.worktreeStateErr = errors.New("git status exploded")
+			case "gate-head":
+				git.headErr = errors.New("git rev-parse exploded")
+			}
+
+			exhausted := false
+			require.NoError(t, o.preCommitVerify(context.Background(), o.solver,
+				subtaskRef{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}, exhausted))
+
+			assert.Equal(t, tc.wantRuns, runs, "executions of the verify command, tool call and gate together")
+			assert.True(t, o.solver.gate.verified,
+				"a green gate certifies the tree whether it ran the command itself or took the tool's verdict")
+		})
+	}
+}
+
+// A verdict belongs to the subtask that earned it, and the gate is never even
+// offered one from a subtask that is over. HEAD deliberately does not move here,
+// so the seeded identity is one both gates WOULD match: this pins the reset
+// itself rather than the head qualification that also covers it.
+func TestPreCommitGateNeverReusesAToolPassFromAnEarlierSubtask(t *testing.T) {
+	git := &fakeGit{committed: true, worktreeStates: []string{"a"}}
+	client := &planLLM{responses: []llm.Response{
+		finishResp("feat: first subtask", 0.01),
+		finishResp("feat: second subtask", 0.01),
+	}}
+	d := execTestDeps(&fakeOps{}, git, client)
+	o := newExecRun(d, []subtaskRef{
+		{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")},
+		{ID: "SUB-2", Title: "Second", Sizing: seedSizing("simple")},
+	}, 0)
+
+	seedResolvedVerifyPlan(o)
+
+	runs := 0
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		runs++
+
+		return verifyexec.Outcome{ExitCode: 0}
+	}
+
+	// The coder's verify tool passed against the tree an earlier subtask
+	// committed - the exact identity both gates below will read (the fake's
+	// default empty HEAD, then the scripted state).
+	o.solver.toolVerify = verifyToolPass{passed: true, identity: ":a"}
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	assert.Equal(t, 2, runs, "every subtask's gate measures its own tree")
+	require.Len(t, git.commitMsgs, 2, "both subtasks committed; git=%v", git.recorded())
+}
+
 // TestSoloFinishReportsVerifyPassWhenTheGateActuallyPassed proves the finish
 // path stops discarding evidence it holds. An authoritative verify runs before
 // the commit, and when it passes, the row says so - the same fact the salvage
@@ -3268,4 +3455,41 @@ func TestStillRedGateOnAnExhaustedWindowStillReports(t *testing.T) {
 	require.Len(t, rows, 1)
 	assert.Equal(t, "failed", rows[0].Result)
 	assert.False(t, rows[0].VerifyPass)
+}
+
+// TestStillRedGateParksThroughTheTypedSentinel pins the park SHAPE. A plain
+// error landed in the worker's default arm - claim released, no WIP push, no
+// transition - so the container was destroyed with the coder's uncommitted tree
+// still in it, the only park in the taxonomy that discarded work. The typed
+// sentinel is what routes the exit to a park arm instead, and it carries the
+// failing command and the tail of what that command printed because the
+// container holding them is gone by the time a human reads the card.
+func TestStillRedGateParksThroughTheTypedSentinel(t *testing.T) {
+	o, ops, git, _ := stillRedFixture(t, 0)
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		return verifyexec.Outcome{
+			ExitCode: 1,
+			Output:   "--- FAIL: TestThing\n    thing_test.go:12: want 1, got 2",
+		}
+	}
+
+	err := runExecute(context.Background(), o)
+
+	var vpe *VerifyParkedError
+	require.ErrorAs(t, err, &vpe, "a still-red gate must park through the typed sentinel")
+
+	assert.Equal(t, "SUB-1", vpe.Subtask)
+	assert.Equal(t, "verify", vpe.Command, "the sentinel names the command that stayed red")
+	assert.Contains(t, vpe.Output, "--- FAIL: TestThing", "the failing output tail travels with the park")
+	assert.Contains(t, vpe.Output, "want 1, got 2")
+
+	assert.True(t, isParkError(err),
+		"a still-red gate must stop the run at a park arm, not walk into the next phase")
+
+	// The gate's own guarantee is unchanged by the routing: the orchestrator
+	// still refuses to commit, push or complete a red tree. Preserving the work
+	// is the worker's WIP commit, not a subtask commit.
+	assert.Empty(t, git.commitMsgs, "nothing may be committed while the verify is red; git=%v", git.recorded())
+	assert.Empty(t, git.pushBranches, "a red tree is never pushed by the subtask path")
+	assert.Equal(t, -1, indexOfCall(ops.recorded(), "CompleteTask:SUB-1"), "a parked subtask is not completed")
 }

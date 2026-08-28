@@ -37,6 +37,13 @@ type solverCtx struct {
 	lastSubID  string       // final subtask ID in execution order; "" disables turn-cap salvage (parent/single-solver)
 	capped     bool         // the final subtask hit the turn cap; its work was salvage-committed for judge verification
 	gate       gateEvidence // what the pre-commit and checkpoint gates learned about this subtask's coder work and its revise
+	// toolVerify is the verdict of the coder verify tool's last actual run and
+	// the worktree identity it was measured against, republished by the tool on
+	// every run. Zero until the coder calls the tool, and for a candidate
+	// solver, which binds no recorder. Written by the tool during the coder
+	// harness run and read by the pre-commit gate after it returns, on the
+	// goroutine that drives the subtask.
+	toolVerify verifyToolPass
 }
 
 // gateEvidence is what the pre-commit gate learned about the coder's own work,
@@ -145,7 +152,7 @@ func (o *run) bindVerifyTool(sc *solverCtx, plan verifyPlan) {
 		return
 	}
 
-	vt := o.verifyToolFor(sc.git, sc.workspace, plan)
+	vt := o.verifyToolFor(sc.git, sc.workspace, plan, func(p verifyToolPass) { sc.toolVerify = p })
 	if vt == nil {
 		return
 	}
@@ -221,6 +228,26 @@ func (o *run) executeSubtaskWith(ctx context.Context, sc *solverCtx, sub subtask
 // CM's default 30m heartbeat_timeout). A var so tests can shrink it.
 var subtaskHeartbeatInterval = 5 * time.Minute
 
+// VerifyParkedError marks the pre-commit verify park: the run's resolved verify
+// command was red on the coder's work, the one bounded fix pass ran, and the
+// re-run was still red. The worker maps it like the toolchain park - push the
+// WIP, transition the card to blocked, release the claim, fail - so the tree
+// the gate refused leaves the container instead of dying with it, and the park
+// is visible on the board rather than only in the log.
+//
+// The command and the output tail travel on the error because the container
+// holding them is destroyed before anyone reads the card, and because the park
+// arm that writes them to the card sits above the phase that produced them.
+type VerifyParkedError struct {
+	Subtask string // the subtask whose gate stayed red
+	Command string // the verify command, as displayed
+	Output  string // a bounded excerpt of what the failing run printed
+}
+
+func (e *VerifyParkedError) Error() string {
+	return fmt.Sprintf("subtask %s: `%s` still fails after one fix pass", e.Subtask, e.Command)
+}
+
 // preCommitVerify runs the run's resolved verify command against the coder's
 // uncommitted work and gates the commit on the result. Returning nil means the
 // commit may proceed: the command passed, no command resolved (the skip tier),
@@ -233,10 +260,18 @@ var subtaskHeartbeatInterval = 5 * time.Minute
 // One pass, never a loop - the review phase's fix loop is the multi-round
 // mechanism.
 //
-// That error is deliberately a plain one, not a park sentinel: the worker's
-// park switch pushes WIP only on its sentinel arms, and a WIP push here would
-// commit and push the very tree this gate just refused. The absent push is the
-// point, not an omission.
+// That error is *VerifyParkedError, a park sentinel, so the exit takes the
+// worker's park path rather than its default arm: the WIP is pushed, the card
+// goes to blocked, and the claim is released. The push carries the very tree
+// this gate refused, deliberately - refusing to COMMIT it as finished work is
+// the gate's job, and destroying it with the container is not the same thing.
+// It reaches a human as a red branch on a blocked card, which is what a resume
+// and a review both need.
+//
+// The command runs once per subtask, not twice: when the coder's verify tool
+// already passed and the tree has not moved since, the gate takes that verdict
+// rather than re-running the identical command over identical bytes - see
+// gateAcceptsToolPass for the three conditions and why nothing else qualifies.
 //
 // The plan comes from ensureVerify and the execution from runVerifyPlan, the
 // same two calls the review-round gate makes, so the two cannot drift into
@@ -270,6 +305,20 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 	}
 
 	if len(plan.Argv) == 0 {
+		return nil
+	}
+
+	if o.gateAcceptsToolPass(ctx, sc) {
+		sc.gate.verified = true
+
+		// The gate line still fires: a human reading the activity log must see a
+		// gate for every subtask, and this one says out loud where the verdict
+		// came from rather than implying a second run happened.
+		o.logVerifyGate(ctx, verifyResult{
+			Status: verifyPassed,
+			Note:   "the coder's own run measured this exact tree; not re-run",
+		}, subtaskGateContext(sub.ID))
+
 		return nil
 	}
 
@@ -326,7 +375,11 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 		sc.gate.stillRed = true
 		sc.gate.environmentalFailure = verifyexec.LooksResourceExhausted(vres.Output)
 
-		return fmt.Errorf("subtask %s: `%s` still fails after one fix pass", sub.ID, plan.Display)
+		return &VerifyParkedError{
+			Subtask: sub.ID,
+			Command: plan.Display,
+			Output:  verifyFailureExcerpt(vres.Output),
+		}
 	}
 
 	// Symmetry with the first-run arm, not a live value: reaching here means
@@ -335,6 +388,48 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 	sc.gate.verified = vres.Status == verifyPassed
 
 	return nil
+}
+
+// gateAcceptsToolPass reports whether the gate may certify on the verdict the
+// coder's verify tool recorded instead of running the command a second time.
+// All three conditions hold or it returns false:
+//
+//   - the tool's last actual run PASSED (a failure, an inconclusive run, or a
+//     tool the coder never called leaves the pair zero);
+//   - the identity recorded at that pass is readable, and so is the one this
+//     reads now (either unreadable is evidence of nothing);
+//   - the two are equal - the tree about to be committed is the tree the command
+//     passed against: the same commit, and the same uncommitted work on top of
+//     it by the repository's own ignore rules. Both halves, because the coder
+//     holds a bash tool and a commit it made would otherwise leave the two trees
+//     indistinguishable - see worktreeIdentity.
+//
+// Every other direction runs the gate, which is what makes this safe to skip:
+// every read error degrades to "assume moved", so a gate that cannot prove the
+// trees are identical behaves exactly as it did before.
+//
+// What the gate gives up is a re-run of the same command over the same bytes.
+// The tool ran it through runVerifyCommand, the same executor runVerifyPlan
+// wraps, on the plan ensureVerify resolved - one command, one timeout, one
+// environment, one workspace. What it does not give up is the fix pass: a tool
+// verdict that is anything but a pass never reaches here.
+func (o *run) gateAcceptsToolPass(ctx context.Context, sc *solverCtx) bool {
+	if !sc.toolVerify.passed || sc.toolVerify.identity == "" {
+		return false
+	}
+
+	ictx, cancel := context.WithTimeout(ctx, worktreeStateTimeout)
+	defer cancel()
+
+	id, err := worktreeIdentity(ictx, sc.git)
+	if err != nil {
+		slog.Warn("verify gate: worktree identity unreadable; running the command",
+			"card_id", o.d.Cfg.CardID, "error", err)
+
+		return false
+	}
+
+	return id == sc.toolVerify.identity
 }
 
 func subtaskGateContext(subID string) string {
@@ -351,6 +446,13 @@ func subtaskGateContext(subID string) string {
 // (boardOps false) holds no claim, so it runs no heartbeat and no complete.
 func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtaskRef) error {
 	d := o.d
+
+	// A tool verdict belongs to the subtask that earned it. Belt and braces on
+	// top of the identity itself: the recorded identity is qualified by HEAD, so
+	// an earlier subtask's verdict can no longer match once that subtask
+	// committed, and clearing it here means the gate is never even offered a
+	// verdict from a subtask that is over.
+	sc.toolVerify = verifyToolPass{}
 
 	// Snapshot the ledger before this subtask's own spend, so every solo
 	// outcome report below carries only THIS subtask's cost delta - not the
@@ -1297,9 +1399,10 @@ func (o *run) raiseSubtaskBoth(ctx context.Context, sub subtaskRef, why string) 
 // *ToolchainMissingError both return earlier, so an exclusion list would name
 // branches production cannot produce.
 //
-// There is no reader for this on THIS run - a still-red gate returns a plain
-// error that fails the run with the work uncommitted and unpushed. The next run
-// redoes the subtask from scratch, and reconcile hands it the raised sizing.
+// There is no reader for this on THIS run - a still-red gate parks it, and the
+// tree reaches the next run only as the worker's WIP commit, never as a finished
+// subtask. That next run redoes the subtask, and reconcile hands it the raised
+// sizing.
 func (o *run) applyPrecommitVerifyEvidence(ctx context.Context, sub subtaskRef, vres verifyResult, exhausted bool) {
 	if vres.Status != verifyFailed || verifyexec.LooksResourceExhausted(vres.Output) {
 		return

@@ -524,10 +524,11 @@ func isParkError(err error) bool {
 		mte *MaxTurnsError
 		tme *ToolchainMissingError
 		nme *NoModelError
+		vpe *VerifyParkedError
 	)
 
 	return errors.As(err, &be) || errors.As(err, &cle) || errors.As(err, &mte) ||
-		errors.As(err, &tme) || errors.As(err, &nme)
+		errors.As(err, &tme) || errors.As(err, &nme) || errors.As(err, &vpe)
 }
 
 // runDiagnose runs one read-only investigation pass on the orchestrator model
