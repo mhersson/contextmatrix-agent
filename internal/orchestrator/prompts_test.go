@@ -26,7 +26,7 @@ func TestVerifyCommandBlock(t *testing.T) {
 func prohibitionSentence(t *testing.T, s string) string {
 	t.Helper()
 
-	for sentence := range strings.SplitSeq(s, ". ") {
+	for _, sentence := range strings.Split(s, ". ") {
 		if strings.Contains(sentence, "not run") {
 			return sentence
 		}

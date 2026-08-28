@@ -204,7 +204,7 @@ func readMeta(body string) (metaKV, sizing) {
 	if m := metaRe.FindStringSubmatch(body); m != nil {
 		kv := metaKV{}
 
-		for f := range strings.FieldsSeq(m[1]) {
+		for _, f := range strings.Fields(m[1]) {
 			k, v, ok := strings.Cut(f, "=")
 			if ok {
 				kv[k] = v

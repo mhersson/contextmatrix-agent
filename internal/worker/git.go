@@ -293,7 +293,7 @@ func (g *Git) WorktreeState(ctx context.Context) (string, error) {
 func untrackedPaths(status string) []string {
 	var out []string
 
-	for rec := range strings.SplitSeq(status, "\x00") {
+	for _, rec := range strings.Split(status, "\x00") {
 		if rel, ok := strings.CutPrefix(rec, "?? "); ok && rel != "" {
 			out = append(out, rel)
 		}
