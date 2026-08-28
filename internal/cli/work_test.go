@@ -56,9 +56,9 @@ func writeSelfSignedCA(t *testing.T) string {
 
 // TestBuildWorkEmitterStampsAttemptOrdinal pins the RunE wiring site that
 // builds the container's event emitter: buildWorkEmitter must thread
-// spec.Attempt through the real attempt.NewWriter wrapper onto cmd's output,
-// not a hardcoded 1 - hardcoding 1 would pass every other test in the suite
-// (attempt 1 is the writer's untouched pass-through case) while silently
+// spec.Attempt through the real events.WithEnvelopeFields option, not a
+// hardcoded 1 - hardcoding 1 would pass every other test in the suite
+// (attempt 1 needs no option, the emitter's own untouched case) while silently
 // losing the ordinal that separates a restarted container's transcript from
 // its predecessor's.
 func TestBuildWorkEmitterStampsAttemptOrdinal(t *testing.T) {

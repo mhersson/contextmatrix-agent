@@ -8,6 +8,11 @@
 // this side of the boundary. An absent or zero ordinal is the first attempt, so
 // a consumer reading a transcript written without the field still gets an
 // answer.
+//
+// The work command's main transcript stream stamps via the harness emitter's
+// own envelope-field option instead of this package's writer; the writer here
+// remains the stamping point for the seat-debug funnel, which has no emitter
+// of its own to configure.
 package attempt
 
 import (

@@ -3614,7 +3614,7 @@ func TestReviewSubagentToolsKeepTheSkillTool(t *testing.T) {
 	dep := t.TempDir()
 
 	var names []string
-	for _, tl := range reviewSubagentTools(ws, []string{dep}, skill) {
+	for _, tl := range reviewSubagentTools("", ws, []string{dep}, skill, nil) {
 		names = append(names, tl.Name())
 	}
 
@@ -3622,12 +3622,65 @@ func TestReviewSubagentToolsKeepTheSkillTool(t *testing.T) {
 
 	// No declaration: the panel gets exactly what it got before, the Skill tool alone.
 	names = nil
-	for _, tl := range reviewSubagentTools(ws, nil, skill) {
+	for _, tl := range reviewSubagentTools("", ws, nil, skill, nil) {
 		names = append(names, tl.Name())
 	}
 
 	assert.Equal(t, []string{"skill"}, names)
-	assert.Empty(t, reviewSubagentTools(ws, nil, nil))
+	assert.Empty(t, reviewSubagentTools("", ws, nil, nil, nil))
+}
+
+// TestReviewSubagentToolsLogsTheDeclarationOutcome: the panel's widened tools
+// go through the same sanitizeReadRoots gate as the worker's - a declared
+// root the harness drops must not vanish silently here either. cardID must
+// reach the line too: it is the same identity the worker's construction
+// sites log with, and the dedup key depends on it matching.
+func TestReviewSubagentToolsLogsTheDeclarationOutcome(t *testing.T) {
+	buf := captureReadRootsLog(t)
+	l := NewReadRootsLog()
+
+	ws := t.TempDir()
+	present := t.TempDir()
+	absent := filepath.Join(t.TempDir(), "never-created")
+
+	reviewSubagentTools("CMX-001", ws, []string{present, absent}, nil, l)
+
+	logged := buf.String()
+	assert.Contains(t, logged, "CMX-001", "the panel's line must carry the card id, same as the worker's")
+	assert.Contains(t, logged, present, "the surviving root must be logged as effective")
+	assert.Contains(t, logged, absent, "the dropped root must be named")
+	assert.Contains(t, logged, string(tools.DropReasonNonexistent), "the drop reason must be named")
+
+	// No declaration: nothing to log, matching the early-return that also
+	// skips building the widened tools.
+	buf.Reset()
+	reviewSubagentTools("CMX-001", ws, nil, nil, l)
+	assert.Empty(t, buf.String())
+}
+
+// TestReviewSubagentToolsDedupesAgainstTheWorkersLine: writeToolsFor and
+// readOnlyToolsWithRoots log the same (cardID, workspace, roots)
+// declaration's outcome through the run's shared tracker (Deps.ReadRootsLog)
+// before the review phase ever runs. If the panel logged with a different
+// identity (e.g. no card id) it would never collapse with that earlier line,
+// silently defeating the shared tracker at the one seam it exists for.
+func TestReviewSubagentToolsDedupesAgainstTheWorkersLine(t *testing.T) {
+	buf := captureReadRootsLog(t)
+	l := NewReadRootsLog()
+
+	ws := t.TempDir()
+	present := t.TempDir()
+
+	// Simulates the worker-path line already logged through the same tracker
+	// earlier in the run, for the identical declaration the panel widens with.
+	readTool := tools.NewReadTool(ws).WithReadRoots([]string{present})
+	l.Log("CMX-001", ws, readTool.ReadRoots())
+	require.NotEmpty(t, buf.String(), "the simulated worker-path line must log")
+
+	buf.Reset()
+	reviewSubagentTools("CMX-001", ws, []string{present}, nil, l)
+	assert.Empty(t, buf.String(),
+		"the panel must not re-log an outcome the worker already reported through the same tracker")
 }
 
 // TestExtraReadOnlyToolsOverrideConfinedDefaults pins the harness mechanism the
@@ -3641,7 +3694,7 @@ func TestExtraReadOnlyToolsOverrideConfinedDefaults(t *testing.T) {
 	depFile := filepath.Join(dep, "api.go")
 	require.NoError(t, os.WriteFile(depFile, []byte("package dep // WIDGET\n"), 0o600))
 
-	reg := tools.NewRegistry(append(tools.ReadOnlyTools(ws), reviewSubagentTools(ws, []string{dep}, nil)...)...)
+	reg := tools.NewRegistry(append(tools.ReadOnlyTools(ws), reviewSubagentTools("", ws, []string{dep}, nil, nil)...)...)
 
 	read, ok := reg.Get("read")
 	require.True(t, ok)

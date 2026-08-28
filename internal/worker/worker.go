@@ -380,10 +380,16 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 	skillTool := buildSkillTool(a.spec, a.ops)
 	dv := declaredVerify(a.spec.Verify)
 	verifyEnv := orchestrator.ResolveVerifyEnv(dv)
+	// One tracker for the whole run: threaded into every read-roots tool
+	// construction below (and into Deps for reviewSubagentTools) so a
+	// declaration rebuilt more than once - the two Deps fields below share one
+	// declaration, and PlanTools/WriteToolsForDir are closures the orchestrator
+	// can invoke again later - reports its outcome once, not once per rebuild.
+	rrLog := orchestrator.NewReadRootsLog()
 	// The main workspace registry is built before the run resolves its verify
 	// command; the execute phase rebinds the solver's registry through
 	// WriteToolsForDir once it has one.
-	wt := writeToolsFor(a.ws, a.spec.BashTimeoutMax, verifyEnv, a.spec.ReadOnlyRoots, nil)
+	wt := writeToolsFor(rrLog, a.spec.CardID, a.ws, a.spec.BashTimeoutMax, verifyEnv, a.spec.ReadOnlyRoots, nil)
 
 	if skillTool != nil {
 		wt = append(wt, skillTool)
@@ -415,7 +421,6 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 
 	orchOps := ops2orchestrator(a.ops)
 	logReachability(ctx, reg, orchOps, a.spec.CardID)
-	logReadOnlyRoots(a.spec.CardID, a.spec.ReadOnlyRoots)
 
 	d := orchestrator.Deps{
 		Ops: orchOps,
@@ -433,22 +438,23 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 			// Candidates get the same skill tool as the main solver - the
 			// skills mount is a fixed path, not workspace-relative, so the
 			// shared instance is safe across worktrees.
-			wts := writeToolsFor(dir, a.spec.BashTimeoutMax, verifyEnv, a.spec.ReadOnlyRoots, verify)
+			wts := writeToolsFor(rrLog, a.spec.CardID, dir, a.spec.BashTimeoutMax, verifyEnv, a.spec.ReadOnlyRoots, verify)
 			if skillTool != nil {
 				wts = append(wts, skillTool)
 			}
 
 			return tools.NewRegistry(wts...)
 		},
-		ReadTools: tools.NewRegistry(readOnlyToolsWithRoots(a.ws, a.spec.ReadOnlyRoots)...),
+		ReadTools: tools.NewRegistry(readOnlyToolsWithRoots(rrLog, a.spec.CardID, a.ws, a.spec.ReadOnlyRoots)...),
 		PlanTools: func() *tools.Registry {
 			return tools.NewRegistry(append(
-				readOnlyToolsWithRoots(a.ws, a.spec.ReadOnlyRoots), orchestrator.NewFindingsTool())...)
+				readOnlyToolsWithRoots(rrLog, a.spec.CardID, a.ws, a.spec.ReadOnlyRoots), orchestrator.NewFindingsTool())...)
 		},
-		ReadRoots: a.spec.ReadOnlyRoots,
-		SkillTool: skillTool,
-		Redact:    red.Apply,
-		Human:     human,
+		ReadRoots:    a.spec.ReadOnlyRoots,
+		ReadRootsLog: rrLog,
+		SkillTool:    skillTool,
+		Redact:       red.Apply,
+		Human:        human,
 		// The work command writes the JSONL transcript to process stdout;
 		// seat-debug lines belong on the same stream (kind-rewritten so the
 		// log bridge skips them).
@@ -865,10 +871,18 @@ func ops2orchestrator(ops CardOps) orchestrator.Ops {
 // for this dir, nil when the run resolved no verify command - registering it
 // here is what keeps both registries from drifting apart on it. readRoots widens
 // the read path tools to the operator's declared trees; edit, write and bash keep
-// the single dir root, so the write boundary stays the workspace.
-func writeToolsFor(dir string, bashTimeoutMax int, extraEnv, readRoots []string, verify tools.Tool) []tools.Tool {
+// the single dir root, so the write boundary stays the workspace. cardID
+// attributes the read-roots outcome logged for this construction; rrLog is
+// the run's shared tracker (see orchestrator.ReadRootsLog) that keeps repeat
+// constructions of the same declaration from each logging their own line.
+func writeToolsFor(rrLog *orchestrator.ReadRootsLog, cardID, dir string, bashTimeoutMax int, extraEnv, readRoots []string, verify tools.Tool) []tools.Tool {
+	// The read, grep and glob tools built here from the same (dir, readRoots)
+	// all sanitize identically, so only the read tool's outcome needs logging.
+	readTool := tools.NewReadTool(dir).WithReadRoots(readRoots)
+	rrLog.Log(cardID, dir, readTool.ReadRoots())
+
 	wt := []tools.Tool{
-		tools.NewReadTool(dir).WithReadRoots(readRoots),
+		readTool,
 		tools.NewEditTool(dir),
 		tools.NewWriteTool(dir),
 		tools.NewGrepTool(dir).WithReadRoots(readRoots),
@@ -885,43 +899,23 @@ func writeToolsFor(dir string, bashTimeoutMax int, extraEnv, readRoots []string,
 	return wt
 }
 
-// logReadOnlyRoots records the read-only roots this run was configured with and
-// which of them are not on disk. The harness drops an unresolvable root when it
-// builds the tools, and does so silently, so an operator whose declared prefix
-// is wrong for the image's toolchain otherwise sees nothing at all: the phases
-// just behave as they did before. Nothing is logged when no roots are declared.
-func logReadOnlyRoots(cardID string, roots []string) {
-	if len(roots) == 0 {
-		return
-	}
-
-	var dropped []string
-
-	for _, r := range roots {
-		if _, err := os.Stat(r); err != nil {
-			dropped = append(dropped, r)
-		}
-	}
-
-	sep := string(os.PathListSeparator)
-
-	slog.Info("read-only roots declared",
-		"card_id", cardID,
-		"roots", strings.Join(roots, sep),
-		"dropped_unresolvable", strings.Join(dropped, sep))
-}
-
 // readOnlyToolsWithRoots is tools.ReadOnlyTools widened by the operator's
 // declared read-only roots. The harness's ReadOnlyTools takes only the
 // workspace, so the three path tools are constructed individually here. The git
 // tool is unchanged: it operates on the workspace repository, not on arbitrary
 // paths. Roots come from the resolved configuration and are sanitized inside
 // the harness, which drops anything that would widen access rather than add a
-// sibling tree, so nothing is validated here. An empty list yields tools
-// identical to the harness defaults.
-func readOnlyToolsWithRoots(ws string, roots []string) []tools.Tool {
+// sibling tree - ReadRootsLog is what surfaces that outcome, so nothing else
+// validates it here. An empty list yields tools identical to the harness
+// defaults. cardID attributes the logged outcome; ws is also the workspace
+// the log line names; rrLog is the run's shared tracker (see writeToolsFor).
+func readOnlyToolsWithRoots(rrLog *orchestrator.ReadRootsLog, cardID, ws string, roots []string) []tools.Tool {
+	// Same reasoning as writeToolsFor: read, grep and glob share one outcome.
+	readTool := tools.NewReadTool(ws).WithReadRoots(roots)
+	rrLog.Log(cardID, ws, readTool.ReadRoots())
+
 	return []tools.Tool{
-		tools.NewReadTool(ws).WithReadRoots(roots),
+		readTool,
 		tools.NewGrepTool(ws).WithReadRoots(roots),
 		tools.NewGlobTool(ws).WithReadRoots(roots),
 		tools.NewGitTool(ws),
