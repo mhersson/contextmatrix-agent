@@ -419,6 +419,12 @@ type run struct {
 	fixCapReason   string
 	lastFixModel   string
 
+	// lastFixExhausted records whether the most recent fix round spent every turn
+	// it was given, including a grace-turn landing that returns no error. The
+	// loop reads it to charge the budget axis for caps the MaxTurnsError arm
+	// never sees.
+	lastFixExhausted bool
+
 	// excluded is the per-card set of models proven harness-incapable on this run.
 	// It is threaded into every SelectInput.Exclude (coder selection and the review
 	// panel) so a model that could not drive the tool loop is never re-picked.

@@ -405,6 +405,19 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 		if !committed {
 			o.markFixFailed("produced no change")
 		}
+
+		// A grace-turn landing that spent every turn is the same volume evidence as
+		// a hard MaxTurnsError: charge the budget axis now, and keep the follow-on
+		// red verify off the bar axis for the same reason the MaxTurnsError arm
+		// clears fixRan - a round that ran out of room is the likeliest of all to
+		// leave the verify red, and blaming the model for turns it never got would
+		// shrink the fix pool on evidence about volume.
+		if committed && o.lastFixExhausted && o.fixBudgetSteps < maxBudgetStep {
+			o.markFixCapped()
+			d.logCard(ctx, "review: fix round %d spent its whole turn window - the next fix round runs wider", round)
+
+			fixRan = false
+		}
 	}
 
 	return fmt.Errorf("review exceeded the hard iteration cap of %d", hardReviewIterationCap)
@@ -1235,6 +1248,8 @@ func (o *run) runFixModel(ctx context.Context, prompt string, req fixRequest) (s
 		}
 
 		maxTurns, wrapUp := coderTurnCfg(cfg.MaxTurns, fs.Budget)
+
+		o.lastFixExhausted = windowExhausted(res.Turns, maxTurns)
 
 		o.emitSizingObs(sizingObs{
 			Phase: o.curPhase, Solver: "fix", Subtask: req.Subtask, Reselect: attempt,

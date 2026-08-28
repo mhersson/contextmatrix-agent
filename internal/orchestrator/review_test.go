@@ -3902,6 +3902,69 @@ func TestCappedReviewFixRoundRetriesWiderInsteadOfParking(t *testing.T) {
 		"the capped round's partial work is still committed; git=%v", git.recorded())
 }
 
+// A review fix round can spend its entire turn window and still return no
+// error at all: the harness's grace turn grants one terminal-only call after
+// the cap, and a coder that lands `finish` there completes cleanly. That is
+// the same "ran out of room" evidence as a hard MaxTurnsError - just without
+// one - so it must charge the budget axis exactly like the capped-arm sibling
+// above, and the round behind it must not blame the model on the bar axis for
+// a verify that only went red because the round it followed never got a real
+// chance to finish the work.
+//
+// Response script: round 1's panel and synthesis (four one-turn calls) reject;
+// the round-1 fix coder then burns its whole 5-turn budget and lands `finish`
+// on the harness's terminal-only grace call, so Turns comes back equal to
+// MaxTurns with no error. Round 2's verify gate is red, so it skips the panel
+// entirely and goes straight to a fix that lands cleanly; round 3's panel
+// approves.
+func TestGraceLandedFixRoundChargesBudgetNotBar(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+
+	responses := slices.Concat(
+		[]llm.Response{
+			stopResp("Correctness: broken", 0.01),
+			stopResp("Design: ok", 0.01),
+			stopResp("Security: ok", 0.01),
+			stopResp(`{"approved":false,"summary":"needs work","fixes":[{"file":"a.go","issue":"bug","suggestion":"fix","severity":"major"}]}`, 0.02),
+		},
+		append(burnResps(5), finishResp("fix: grace landing", 0.01)),
+		[]llm.Response{stopResp("coder: fixed it this time", 0.05)},
+		[]llm.Response{
+			stopResp("Correctness: fine", 0.01),
+			stopResp("Design: fine", 0.01),
+			stopResp("Security: fine", 0.01),
+			stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.02),
+		},
+	)
+
+	d := reviewTestDeps(t, ops, git, &planLLM{responses: responses}, reviewerRegistry())
+	d.Cfg.MaxTurns = 5
+	// The grace call only lands when the registry has a terminal tool to offer.
+	d.WriteTools = testWriteTools()
+
+	o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}, 0)
+	o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
+
+	gateRuns := 0
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		gateRuns++
+		if gateRuns == 2 {
+			return verifyexec.Outcome{ExitCode: 1, Output: "still failing"}
+		}
+
+		return verifyexec.Outcome{ExitCode: 0}
+	}
+
+	require.NoError(t, runReview(context.Background(), o),
+		"a grace-landed cap must not park the run any more than a hard one does")
+
+	assert.Equal(t, 1, o.fixBudgetSteps, "the grace landing widened the next round by one rung")
+	assert.Zero(t, o.fixBarSteps, "the round-2 red verify is the cap showing through, not a quality failure")
+	assert.True(t, ops.loggedContains("spent its whole turn window"), "logs=%v", ops.logs)
+	assert.Equal(t, 3, gateRuns, "every scripted round's gate ran")
+}
+
 // A capped review fix round that committed NOTHING must not retry wider: HEAD
 // is unchanged, so a second panel would critique the exact diff round 1
 // already reviewed - a full extra 3-reviewer panel bought for no new evidence.
