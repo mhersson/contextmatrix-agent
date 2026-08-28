@@ -466,6 +466,11 @@ func (o *run) runVerifyPlan(ctx context.Context, dir string, plan verifyPlan) (v
 		})
 	}
 
+	// This emit carries no "subtask" field, while the gate's accepted-pass
+	// arm in execute.go does: attaching one here would mean threading a
+	// subtask identifier through every caller, and the review and judge
+	// phases verify at round/candidate scope with none to pass. Consumers
+	// must treat the field as optional.
 	return res, nil
 }
 
