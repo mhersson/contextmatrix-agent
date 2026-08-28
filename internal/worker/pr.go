@@ -554,6 +554,7 @@ func parseCopilotReview(out string) (*orchestrator.CopilotReview, int64, error) 
 
 // ghReviewComment is one entry of a GitHub REST /pulls/{n}/comments response.
 type ghReviewComment struct {
+	ID                  int64  `json:"id"`
 	Path                string `json:"path"`
 	Body                string `json:"body"`
 	PullRequestReviewID int64  `json:"pull_request_review_id"`
@@ -574,10 +575,94 @@ func parseReviewComments(out string, reviewID int64) ([]orchestrator.ReviewComme
 			continue
 		}
 
-		comments = append(comments, orchestrator.ReviewComment{Path: c.Path, Body: c.Body})
+		comments = append(comments, orchestrator.ReviewComment{ID: c.ID, Path: c.Path, Body: c.Body})
 	}
 
 	return comments, nil
+}
+
+// reviewThreadsQuery lists the PR's review threads with the fields the
+// thread write-back needs. The first 100 threads with 50 comments each is
+// far above any observed Copilot review; a PR beyond that loses write-back
+// on the tail, which is acceptable for a best-effort feature.
+const reviewThreadsQuery = `query($owner:String!,$repo:String!,$number:Int!){
+  repository(owner:$owner,name:$repo){ pullRequest(number:$number){
+    reviewThreads(first:100){ nodes{
+      id isResolved comments(first:50){ nodes{ databaseId path body } } } } } } }`
+
+// ReviewThreads returns the PR's review-comment threads via GraphQL - the
+// only API surface that exposes thread node IDs and resolved state; the REST
+// comments endpoint carries neither.
+func (p *PRCreator) ReviewThreads(ctx context.Context, prURL string) ([]orchestrator.ReviewThread, error) {
+	owner, repo, number, err := parsePRPath(prURL)
+	if err != nil {
+		return nil, fmt.Errorf("review threads: %w", err)
+	}
+
+	out, err := p.runGH(ctx, "", false, "api", "graphql",
+		"-f", "query="+reviewThreadsQuery,
+		"-f", "owner="+owner, "-f", "repo="+repo, "-F", "number="+strconv.Itoa(number))
+	if err != nil {
+		return nil, fmt.Errorf("review threads: %w", err)
+	}
+
+	threads, err := parseReviewThreads(out)
+	if err != nil {
+		return nil, fmt.Errorf("review threads: %w", err)
+	}
+
+	return threads, nil
+}
+
+func parseReviewThreads(out string) ([]orchestrator.ReviewThread, error) {
+	var doc struct {
+		Data struct {
+			Repository struct {
+				PullRequest struct {
+					ReviewThreads struct {
+						Nodes []struct {
+							ID         string `json:"id"`
+							IsResolved bool   `json:"isResolved"`
+							Comments   struct {
+								Nodes []struct {
+									DatabaseID int64  `json:"databaseId"`
+									Path       string `json:"path"`
+									Body       string `json:"body"`
+								} `json:"nodes"`
+							} `json:"comments"`
+						} `json:"nodes"`
+					} `json:"reviewThreads"`
+				} `json:"pullRequest"`
+			} `json:"repository"`
+		} `json:"data"`
+	}
+
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		return nil, fmt.Errorf("parse review threads: %w", err)
+	}
+
+	var threads []orchestrator.ReviewThread
+
+	for _, n := range doc.Data.Repository.PullRequest.ReviewThreads.Nodes {
+		t := orchestrator.ReviewThread{ThreadID: n.ID, IsResolved: n.IsResolved}
+
+		for i, c := range n.Comments.Nodes {
+			t.CommentIDs = append(t.CommentIDs, c.DatabaseID)
+
+			if i == 0 {
+				t.RootPath = c.Path
+				t.RootBody = c.Body
+			}
+		}
+
+		if len(t.CommentIDs) > 1 {
+			t.ReplyCount = len(t.CommentIDs) - 1
+		}
+
+		threads = append(threads, t)
+	}
+
+	return threads, nil
 }
 
 // parseRunID extracts the numeric run ID from an Actions job/run link, or ""

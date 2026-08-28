@@ -10,10 +10,30 @@ type CheckResult struct {
 	Description string `json:"description"`
 }
 
-// ReviewComment is one line comment from a PR review.
+// ReviewComment is one line comment from a PR review. ID is the REST comment
+// id the reply endpoint is addressed by; zero on a value that never carried
+// one.
 type ReviewComment struct {
+	ID   int64
 	Path string
 	Body string
+}
+
+// ReviewThread is one review-comment thread on the PR, as GraphQL sees it.
+// ThreadID is the opaque node ID resolveReviewThread needs. CommentIDs are
+// the REST databaseIds of the thread's comments in order - the first is the
+// root comment a reply targets. RootPath and RootBody are the root comment's
+// location and text, the inputs of the dedupe key that matches threads to
+// triaged card lines across a park/resume. ReplyCount is the number of
+// comments beyond the root: a thread that already has any reply is one the
+// gate must not reply to again.
+type ReviewThread struct {
+	ThreadID   string
+	IsResolved bool
+	CommentIDs []int64
+	ReplyCount int
+	RootPath   string
+	RootBody   string
 }
 
 // CopilotReview is the latest completed Copilot review on the PR.

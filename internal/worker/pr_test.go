@@ -402,6 +402,53 @@ func TestParseCombinedStatus(t *testing.T) {
 	assert.Equal(t, "pending", checks[2].Bucket)
 }
 
+// TestParseReviewCommentsCarriesIDs pins that the REST comment id survives
+// parsing - the thread write-back's reply endpoint is addressed by it.
+func TestParseReviewCommentsCarriesIDs(t *testing.T) {
+	t.Parallel()
+
+	out := `[{"id":901,"path":"a.go","body":"nit","pull_request_review_id":11},
+	        {"id":902,"path":"b.go","body":"drop","pull_request_review_id":12}]`
+
+	comments, err := parseReviewComments(out, 11)
+	require.NoError(t, err)
+	require.Len(t, comments, 1)
+	assert.Equal(t, int64(901), comments[0].ID)
+	assert.Equal(t, "a.go", comments[0].Path)
+}
+
+// TestReviewThreadsParsesGraphQL pins the thread listing the write-back
+// navigates by: thread node id, resolved flag, comment databaseIds in order,
+// the root comment's path and body (the dedupe-key inputs), and the reply
+// count derived from the comment list.
+func TestReviewThreadsParsesGraphQL(t *testing.T) {
+	stubGH(t, `
+echo "$@" > args.log
+echo '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"id":"RT_1","isResolved":false,"comments":{"nodes":[{"databaseId":901,"path":"a.go","body":"nit"}]}},{"id":"RT_2","isResolved":true,"comments":{"nodes":[{"databaseId":902,"path":"b.go","body":"drop"},{"databaseId":903,"path":"b.go","body":"reply"}]}}]}}}}}'
+exit 0
+`)
+
+	workspace := t.TempDir()
+	pc := NewPRCreator(workspace, "", "", "")
+
+	threads, err := pc.ReviewThreads(t.Context(), "https://github.com/org/repo/pull/7")
+	require.NoError(t, err)
+	require.Len(t, threads, 2)
+	assert.Equal(t, orchestrator.ReviewThread{
+		ThreadID: "RT_1", CommentIDs: []int64{901}, RootPath: "a.go", RootBody: "nit",
+	}, threads[0])
+	assert.Equal(t, orchestrator.ReviewThread{
+		ThreadID: "RT_2", IsResolved: true, CommentIDs: []int64{902, 903},
+		ReplyCount: 1, RootPath: "b.go", RootBody: "drop",
+	}, threads[1])
+
+	log, err := os.ReadFile(filepath.Join(workspace, "args.log"))
+	require.NoError(t, err)
+	got := strings.TrimSpace(string(log))
+	assert.Contains(t, got, "api graphql", "threads come from GraphQL - REST has no thread ids")
+	assert.Contains(t, got, "number=7")
+}
+
 // TestParseReviewRequests detects a Copilot reviewer request in a REST
 // requested_reviewers document, case-insensitively and regardless of where
 // the login appears in the document shape.
