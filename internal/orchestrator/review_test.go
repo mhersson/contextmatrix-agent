@@ -4397,6 +4397,407 @@ func TestOneFixRoundOutcomeIsChargedOnce(t *testing.T) {
 	}
 }
 
+// regressionResponses scripts the four-round conversation every green->red
+// discard test runs: round 1's panel rejects with a real finding and its fix
+// commits, round 2's gate goes red (a red gate short-circuits the panel, so the
+// round's only model call is its own fix coder's), and round 3's panel
+// approves. The round-2 fix is the call that runs on whichever tree the discard
+// decision left behind, which is what every row here is really asserting on.
+func regressionResponses() []llm.Response {
+	return slices.Concat(
+		panelRejects("nil deref"),
+		[]llm.Response{stopResp("coder: round 1 fix", 0.05)},
+		[]llm.Response{stopResp("coder: round 2 fix", 0.05)},
+		panelApproves(),
+	)
+}
+
+// regressionGate is the gate stub for those rounds: round 2 red, every other
+// round green. It reports the run's gate count through runs.
+func regressionGate(runs *int) verifyRunner {
+	return func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		*runs++
+		if *runs == 2 {
+			return verifyexec.Outcome{ExitCode: 1, Output: "still failing"}
+		}
+
+		return verifyexec.Outcome{ExitCode: 0}
+	}
+}
+
+// A fix pass that takes the verify gate from GREEN to red did not merely fail
+// to fix - it broke a tree that worked, and parking on it hands the operator a
+// red branch with a mergeable commit one revision behind and nothing saying so.
+// The fixup is reset away and the force-push takes the remote back with it, so
+// the round that follows starts from the green tree with the panel's mandate
+// rather than a verify tail that no longer describes the branch.
+func TestReviewRegressingFixIsDiscarded(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{
+		committed:        true,
+		lastCommitTarget: "abc123",
+		// Head reads in order: round 1's review snapshot, the head round 1's fix
+		// starts from, the regressing fixup round 2 finds on the branch, the head
+		// round 2's fix starts from (the branch is back at the green commit), and
+		// round 3's review snapshot.
+		headSHAs: []string{"snapshot-1", "green-head", "red-fixup", "green-head", "snapshot-3"},
+	}
+	client := &planLLM{responses: regressionResponses()}
+	d := reviewTestDeps(t, ops, git, client, verifyRedFixRegistry())
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "the distinctive parent description", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+	o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
+
+	gateRuns := 0
+	o.runVerify = regressionGate(&gateRuns)
+
+	require.NoError(t, runReview(context.Background(), o))
+	assert.Equal(t, 3, gateRuns, "every round's gate ran")
+
+	calls := git.recorded()
+
+	assert.Equal(t, []string{"green-head"}, git.hardResetRefs,
+		"the branch returns to the commit the regressing fix started from; git=%v", calls)
+	assert.Equal(t, []string{"cm/card-1"}, git.leaseBranches, "the discard is pushed to the card branch; git=%v", calls)
+	assert.Equal(t, []string{"red-fixup"}, git.leaseTips,
+		"the lease expects the regressing fixup the agent itself pushed; git=%v", calls)
+	git.assertOrder(t, "HardReset:green-head", "ForcePushWithLease:cm/card-1")
+
+	reset := indexOfCall(calls, "HardReset:green-head")
+	require.GreaterOrEqual(t, reset, 0)
+	assert.GreaterOrEqual(t, indexOfPrefix(calls[reset:], "CommitFixup:"), 0,
+		"the fix that follows the discard commits onto the restored tree; git=%v", calls)
+
+	assert.True(t, ops.loggedContains("fix round 1 regressed the verify (green -> red)"),
+		"the round named is the one whose fix was thrown away, not the round that caught it; logs=%v", ops.logs)
+	assert.True(t, ops.loggedContains("recorded as unactioned"),
+		"the discarded findings must be on the card, not lost with the fixup; logs=%v", ops.logs)
+
+	require.Len(t, o.fixFailed, 1, "exactly the fixer that regressed the gate is excluded; fixFailed=%v", o.fixFailed)
+	require.GreaterOrEqual(t, len(client.models), 6, "models=%v", client.models)
+	assert.True(t, o.fixFailed[client.models[4]],
+		"the excluded fixer is the one that ran the discarded round; models=%v", client.models)
+	assert.NotEqual(t, client.models[4], client.models[5], "the round after the discard runs on a different fixer")
+	assert.Equal(t, 1, o.fixBarSteps, "a regression is quality evidence: one rung on the bar axis")
+	assert.Zero(t, o.fixBudgetSteps, "nothing here says the round ran out of turns")
+
+	prompt := promptOfCall(client, 5)
+	assert.Contains(t, prompt, "nil deref",
+		"the round after the discard chases the mandate the discarded fixup was addressing; prompt=%q", prompt)
+	assert.Contains(t, prompt, "the distinctive parent description",
+		"the panel mandate routes through the review-findings prompt, not the verify one")
+	assert.NotContains(t, prompt, verifyFailedPrefix,
+		"a verify tail describing a tree the branch no longer holds must not reach the coder")
+}
+
+// The whole point of the discard, end to end: when the fixers run out, the card
+// parks on the MERGEABLE tree with the mandate on it, instead of on a red
+// commit with a green one a revision behind and nothing saying so. Two fix
+// rounds in a row regress the gate; both are discarded, the branch is back on
+// the same green commit each time, and the exhausted-fixers park quotes the
+// findings neither round landed.
+//
+// It also pins the half of the comparison a discard has to restore: a
+// discarding round records itself as GREEN, because the branch it hands
+// forward is the tree the previous gate proved. Reading the red gate result
+// there instead would let the SECOND regression through unchallenged.
+func TestRepeatedRegressionsParkOnTheGreenTree(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{
+		committed:        true,
+		lastCommitTarget: "abc123",
+		// Round 1's snapshot, the green commit both fixes start from, and the
+		// two regressing fixups found on the branch in rounds 2 and 3.
+		headSHAs: []string{"snapshot-1", "green-head", "red-fixup-1", "green-head", "red-fixup-2"},
+	}
+	client := &planLLM{responses: slices.Concat(
+		panelRejects("nil deref"),
+		[]llm.Response{stopResp("coder: round 1 fix", 0.05)},
+		[]llm.Response{stopResp("coder: round 2 fix", 0.05)},
+	)}
+	d := reviewTestDeps(t, ops, git, client, verifyRedFixRegistry())
+
+	o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}, 0)
+	o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
+
+	gateRuns := 0
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		gateRuns++
+		if gateRuns == 1 {
+			return verifyexec.Outcome{ExitCode: 0}
+		}
+
+		return verifyexec.Outcome{ExitCode: 1, Output: "still failing"}
+	}
+
+	var parked *ReviewParkedError
+
+	require.ErrorAs(t, runReview(context.Background(), o), &parked,
+		"both fixers regressed the gate, so the pool is exhausted and the card parks")
+
+	assert.Equal(t, []string{"green-head", "green-head"}, git.hardResetRefs,
+		"every regression goes back to the same green commit; git=%v", git.recorded())
+	assert.Equal(t, []string{"red-fixup-1", "red-fixup-2"}, git.leaseTips,
+		"each discard leases against the fixup it is dropping; git=%v", git.recorded())
+	assert.Len(t, o.fixFailed, 2, "both fixers regressed the gate; fixFailed=%v", o.fixFailed)
+
+	parkNote := ""
+
+	for _, m := range ops.logs {
+		if strings.Contains(m, "no other fix model is available") {
+			parkNote = m
+		}
+	}
+
+	require.NotEmpty(t, parkNote, "the run parks on the exhausted fix pool; logs=%v", ops.logs)
+	assert.Contains(t, parkNote, "regressed the verify", "the park names what the fix rounds actually did")
+	assert.Contains(t, parkNote, "nil deref",
+		"the park hands the operator the mandate neither round landed, not a verify tail for a discarded tree")
+}
+
+// A pre-fix head that could not be read is the discard's most dangerous input:
+// carried over from an earlier round it still looks like a valid commit, and
+// resetting to it would throw away - and force-push away - every fix round
+// since, not the one that regressed the gate. So an unreadable head disables
+// the discard for that round rather than falling back to the last one that
+// worked.
+//
+// Round 1 records a head and its fix lands; round 2's head read fails and its
+// fix lands too; round 3's gate goes red with a green predecessor - every
+// condition for a discard except a head worth resetting to.
+func TestUnreadablePreFixHeadDisablesTheDiscard(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{
+		committed:        true,
+		lastCommitTarget: "abc123",
+		headSHAs:         []string{"snapshot-1", "old-head", "snapshot-2", "", "green-head", "snapshot-4"},
+		// The fourth read - round 2's pre-fix capture - is the one that fails.
+		headErrs: []error{nil, nil, nil, assertErr("cannot read HEAD")},
+	}
+	client := &planLLM{responses: slices.Concat(
+		panelRejects("nil deref"),
+		[]llm.Response{stopResp("coder: round 1 fix", 0.05)},
+		panelRejects("still there"),
+		[]llm.Response{stopResp("coder: round 2 fix", 0.05)},
+		[]llm.Response{stopResp("coder: round 3 fix", 0.05)},
+		panelApproves(),
+	)}
+	d := reviewTestDeps(t, ops, git, client, verifyRedFixRegistry())
+
+	o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}, 0)
+	o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
+
+	gateRuns := 0
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		gateRuns++
+		if gateRuns == 3 {
+			return verifyexec.Outcome{ExitCode: 1, Output: "still failing"}
+		}
+
+		return verifyexec.Outcome{ExitCode: 0}
+	}
+
+	require.NoError(t, runReview(context.Background(), o))
+	assert.Equal(t, 4, gateRuns, "every round's gate ran")
+
+	assert.Empty(t, git.hardResetRefs,
+		"an unreadable head must never fall back to an earlier round's commit; git=%v", git.recorded())
+	assert.Empty(t, git.leaseBranches, "nothing was discarded, so nothing is force-pushed; git=%v", git.recorded())
+	assert.False(t, ops.loggedContains("regressed the verify"), "logs=%v", ops.logs)
+	assert.Equal(t, 1, o.fixBarSteps, "the red round is still charged, on today's reason")
+}
+
+// The regression guard needs a GREEN predecessor. A round whose gate was
+// already red has no working tree to go back to, so its fix is judged the way
+// it always was - charged on the bar axis, with the failure itself as the next
+// round's mandate - and nothing is reset away.
+func TestReviewRedToRedKeepsTheFixup(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{
+		committed:        true,
+		lastCommitTarget: "abc123",
+		// Every Head read returns a different commit, so the discard's own
+		// "nothing landed" guard cannot be what holds it back here: the missing
+		// green predecessor is.
+		headSHAs: []string{"h1", "h2", "h3", "h4", "h5"},
+	}
+	client := &planLLM{responses: slices.Concat(
+		[]llm.Response{stopResp("coder: round 1 fix", 0.05)},
+		[]llm.Response{stopResp("coder: round 2 fix", 0.05)},
+		panelApproves(),
+	)}
+	d := reviewTestDeps(t, ops, git, client, verifyRedFixRegistry())
+
+	o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}, 0)
+	o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
+
+	gateRuns := 0
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		gateRuns++
+		if gateRuns <= 2 {
+			return verifyexec.Outcome{ExitCode: 1, Output: "still failing"}
+		}
+
+		return verifyexec.Outcome{ExitCode: 0}
+	}
+
+	require.NoError(t, runReview(context.Background(), o))
+	assert.Equal(t, 3, gateRuns, "every round's gate ran")
+
+	assert.Empty(t, git.hardResetRefs, "a red predecessor leaves nothing worth going back to; git=%v", git.recorded())
+	assert.Empty(t, git.leaseBranches, "nothing was discarded, so nothing is force-pushed; git=%v", git.recorded())
+	assert.False(t, ops.loggedContains("regressed the verify"), "logs=%v", ops.logs)
+	assert.True(t, ops.loggedContains("left the verify red"),
+		"the round is still charged, on the reason it always had; logs=%v", ops.logs)
+	assert.Equal(t, 1, o.fixBarSteps, "one round, one charge")
+}
+
+// Every way the discard can fail leaves the branch exactly as it found it and
+// the round judged exactly as it is today: charged "left the verify red", with
+// the verify tail as the next fix's mandate, because that failure is still the
+// one on the branch.
+func TestReviewRegressingFixUndiscardable(t *testing.T) {
+	tests := []struct {
+		name string
+		// git is the scripted repo; wantResets is every HardReset ref it must
+		// see, in order; wantLog is the card line naming what went wrong.
+		git        func() *fakeGit
+		wantResets []string
+		wantLeases []string
+		wantLog    string
+	}{
+		{
+			name: "the reset failed",
+			git: func() *fakeGit {
+				return &fakeGit{
+					committed:        true,
+					lastCommitTarget: "abc123",
+					headSHAs:         []string{"snapshot-1", "green-head", "red-fixup", "red-fixup", "snapshot-3"},
+					hardResetErr:     assertErr("detached worktree"),
+				}
+			},
+			wantResets: []string{"green-head"},
+			wantLog:    "could not be discarded",
+		},
+		{
+			// The remote still holds the regression, so the local tree is put
+			// back on it rather than left split from it.
+			name: "the lease push failed",
+			git: func() *fakeGit {
+				return &fakeGit{
+					committed:        true,
+					lastCommitTarget: "abc123",
+					headSHAs:         []string{"snapshot-1", "green-head", "red-fixup", "red-fixup", "snapshot-3"},
+					leasePushErr:     assertErr("stale lease"),
+				}
+			},
+			wantResets: []string{"green-head", "red-fixup"},
+			wantLeases: []string{"cm/card-1"},
+			wantLog:    "could not be pushed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			git := tt.git()
+			client := &planLLM{responses: regressionResponses()}
+			d := reviewTestDeps(t, ops, git, client, verifyRedFixRegistry())
+
+			tc := cmclient.TaskContext{Title: "Parent", Description: "the distinctive parent description", State: "in_progress"}
+			o := newReviewRun(d, tc, 0)
+			o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
+
+			gateRuns := 0
+			o.runVerify = regressionGate(&gateRuns)
+
+			require.NoError(t, runReview(context.Background(), o),
+				"a discard that could not be performed is not a review failure")
+			assert.Equal(t, 3, gateRuns, "the loop proceeds exactly as it does today")
+
+			assert.Equal(t, tt.wantResets, git.hardResetRefs, "git=%v", git.recorded())
+			assert.Equal(t, tt.wantLeases, git.leaseBranches, "git=%v", git.recorded())
+			assert.True(t, ops.loggedContains(tt.wantLog), "the card must say why; logs=%v", ops.logs)
+			assert.False(t, ops.loggedContains("recorded as unactioned"),
+				"nothing was discarded, so no findings were dropped; logs=%v", ops.logs)
+
+			prompt := promptOfCall(client, 5)
+			assert.Contains(t, prompt, verifyFailedPrefix,
+				"the failure is still on the branch, so it is still what the next fix chases; prompt=%q", prompt)
+		})
+	}
+}
+
+// Precedence between the two corrections a red round can carry: a fix round we
+// TRUNCATED is charged on the budget axis and clears fixRan, and that clearing
+// outranks the regression guard. A round that ran out of turns mid-work is the
+// likeliest of all to leave the gate red, so the evidence in hand is about
+// volume, not about a model breaking a working tree - and discarding its work
+// would throw away the partial result the widened retry builds on. Both ways a
+// round is truncated must behave the same: a hard turn cap, and a grace-turn
+// landing that spends the whole window without erroring.
+func TestCappedFixRoundOutranksTheRegressionDiscard(t *testing.T) {
+	tests := []struct {
+		name string
+		// script is the model conversation; graceTools arms the harness's
+		// terminal-only grace call, which is what lets a capped round land
+		// cleanly instead of returning MaxTurnsError.
+		script     []llm.Response
+		graceTools bool
+	}{
+		{
+			name: "hard turn cap",
+			script: slices.Concat(panelRejects("nil deref"), burnResps(5),
+				[]llm.Response{stopResp("coder: round 2 fix", 0.05)}, panelApproves()),
+		},
+		{
+			name: "grace-turn landing",
+			script: slices.Concat(panelRejects("nil deref"),
+				append(burnResps(5), finishResp("fix: grace landing", 0.01)),
+				[]llm.Response{stopResp("coder: round 2 fix", 0.05)}, panelApproves()),
+			graceTools: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			git := &fakeGit{
+				committed:        true,
+				lastCommitTarget: "abc123",
+				// Distinct on every read, so the branch always LOOKS like it moved:
+				// the only thing standing between the red round and a discard is
+				// the cap having already claimed it.
+				headSHAs: []string{"h1", "h2", "h3", "h4", "h5"},
+			}
+			client := &planLLM{responses: tt.script}
+			d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+			d.Cfg.MaxTurns = 5
+
+			if tt.graceTools {
+				d.WriteTools = testWriteTools()
+			}
+
+			o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}, 0)
+			o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
+
+			gateRuns := 0
+			o.runVerify = regressionGate(&gateRuns)
+
+			require.NoError(t, runReview(context.Background(), o))
+			assert.Equal(t, 3, gateRuns, "every round's gate ran")
+
+			assert.Equal(t, 1, o.fixBudgetSteps, "the cap is charged on the budget axis, exactly once")
+			assert.Zero(t, o.fixBarSteps, "the red round behind a cap blames no model")
+			assert.Empty(t, o.fixFailed, "no fixer is excluded on volume evidence; fixFailed=%v", o.fixFailed)
+			assert.Empty(t, git.hardResetRefs, "a capped round's partial work is kept, not discarded; git=%v", git.recorded())
+			assert.Empty(t, git.leaseBranches, "nothing was discarded, so nothing is force-pushed; git=%v", git.recorded())
+			assert.False(t, ops.loggedContains("regressed the verify"), "logs=%v", ops.logs)
+		})
+	}
+}
+
 func TestReviewParkNote(t *testing.T) {
 	head := "review parked after 4 attempts (authoritative pass) - outstanding findings:\n"
 

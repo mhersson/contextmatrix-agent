@@ -458,11 +458,13 @@ type fakeGit struct {
 	// fatal paths (the branch exists per remoteTip, but fetch/checkout fail).
 	// leaseBranches/leaseTips capture each ForcePushWithLease branch and expected
 	// tip (index-aligned) so first-push-lease tests can assert the exact values
-	// reaching the git layer.
+	// reaching the git layer. leasePushErr fails the push, for callers that must
+	// restore the local tree rather than leave it split from the remote.
 	fetchErr      error
 	checkoutErr   error
 	leaseBranches []string
 	leaseTips     []string
+	leasePushErr  error
 
 	// Diff/Head scripting: diffBases captures the base of each Diff call in order
 	// so delta-review tests can assert round 1 diffs the base branch and later
@@ -478,6 +480,12 @@ type fakeGit struct {
 	// headErr fails the read, for callers that must degrade rather than treat an
 	// unknown head as a known one.
 	headErr error
+	// headErrs fails ONE read: it is indexed by the Head call ordinal (nil, or
+	// past the end, means that call succeeds), for callers whose behaviour turns
+	// on a single unreadable head mid-run rather than on a repo that can never
+	// report one. headCalls is that ordinal.
+	headErrs  []error
+	headCalls int
 
 	// Worktree/branch lifecycle scripting (Best-of-N candidate fan-out):
 	// worktreeErr fails AddWorktree and RemoveWorktree; deleteBranchErr fails
@@ -546,7 +554,7 @@ func (g *fakeGit) ForcePushWithLease(_ context.Context, branch, expectedTip stri
 
 	g.record("ForcePushWithLease:" + branch)
 
-	return nil
+	return g.leasePushErr
 }
 
 func (g *fakeGit) Fetch(_ context.Context, ref string) error {
@@ -601,17 +609,24 @@ func (g *fakeGit) Head(_ context.Context) (string, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
+	n := g.headCalls
+	g.headCalls++
+
 	if g.headErr != nil {
 		return "", g.headErr
 	}
 
-	if len(g.headSHAs) == 0 {
-		return g.headSHA, nil
+	sha := g.headSHA
+
+	if len(g.headSHAs) > 0 {
+		sha = g.headSHAs[0]
+		if len(g.headSHAs) > 1 {
+			g.headSHAs = g.headSHAs[1:]
+		}
 	}
 
-	sha := g.headSHAs[0]
-	if len(g.headSHAs) > 1 {
-		g.headSHAs = g.headSHAs[1:]
+	if n < len(g.headErrs) && g.headErrs[n] != nil {
+		return "", g.headErrs[n]
 	}
 
 	return sha, nil

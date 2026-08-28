@@ -425,6 +425,18 @@ type run struct {
 	// never sees.
 	lastFixExhausted bool
 
+	// prevRoundGreen is whether the LAST review round's verify gate passed - the
+	// half of the green->red comparison the loop otherwise forgets. A round that
+	// discarded a regressing fix records it as green too: the branch is back on
+	// the tree that gate proved.
+	//
+	// preFixHead is the commit the branch was on before the most recent fix
+	// pass, captured so a fix that regresses the verify can be discarded instead
+	// of parked on. Empty when the head could not be read - never a value from
+	// an earlier round, which would discard more than the fixup that regressed.
+	prevRoundGreen bool
+	preFixHead     string
+
 	// excluded is the per-card set of models proven harness-incapable on this run.
 	// It is threaded into every SelectInput.Exclude (coder selection and the review
 	// panel) so a model that could not drive the tool loop is never re-picked.
