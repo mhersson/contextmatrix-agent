@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -63,6 +64,33 @@ func TestContainerConfig_CorrelationIDLabel(t *testing.T) {
 	})
 
 	assert.Equal(t, "corr-123", cfg.Labels[labelCorrelationID])
+}
+
+func TestContainerConfig_CorrelationIDRunIDEnv(t *testing.T) {
+	t.Run("set", func(t *testing.T) {
+		cfg, _ := containerConfig(LaunchSpec{
+			CardID:        "ABC-1",
+			Project:       "demo",
+			Image:         "alpine:3",
+			Env:           []string{"FOO=bar"},
+			CorrelationID: "corr-123",
+		})
+
+		assert.Contains(t, cfg.Env, "CM_RUN_ID=corr-123")
+		assert.Contains(t, cfg.Env, "FOO=bar", "pre-existing env is preserved")
+	})
+
+	t.Run("empty", func(t *testing.T) {
+		cfg, _ := containerConfig(LaunchSpec{
+			CardID:  "ABC-1",
+			Project: "demo",
+			Image:   "alpine:3",
+		})
+
+		for _, entry := range cfg.Env {
+			assert.False(t, strings.HasPrefix(entry, "CM_RUN_ID="), "no CM_RUN_ID entry expected, got %q", entry)
+		}
+	})
 }
 
 func TestContainerConfig_EnvPassthrough(t *testing.T) {
