@@ -310,6 +310,42 @@ func TestDialGuestResolvesCardAndTalks(t *testing.T) {
 	assert.Zero(t, h.lastCost, "guest compute is the guest's own")
 }
 
+// TestDialGuestPathedURLResolvesWellKnownCard pins the guest contract: the
+// card lives at {url}/.well-known/agent-card.json even when the registered
+// guest URL carries a path. a2a-go 2.5.0 changed the resolver default to
+// fetch a pathed URL directly as the card document, so dialGuest must ask
+// for the well-known path explicitly.
+func TestDialGuestPathedURLResolvesWellKnownCard(t *testing.T) {
+	runner := func(_ context.Context, _ SeatConfig, _ []Turn, _ string) (string, float64, error) {
+		return "guest says hi", 0, nil
+	}
+
+	mux := http.NewServeMux()
+	ts := httptest.NewServer(bearerMiddleware("guest-token", mux))
+	t.Cleanup(ts.Close)
+
+	card := &a2a.AgentCard{
+		Name:    "guest-shim",
+		Version: "1",
+		SupportedInterfaces: []*a2a.AgentInterface{
+			a2a.NewAgentInterface(ts.URL+"/agents/laptop/a2a", a2a.TransportProtocolJSONRPC),
+		},
+		DefaultInputModes:  []string{"text/plain"},
+		DefaultOutputModes: []string{"text/plain"},
+	}
+
+	mux.Handle("/agents/laptop"+a2asrv.WellKnownAgentCardPath, a2asrv.NewStaticAgentCardHandler(card))
+	mux.Handle("/agents/laptop/a2a", a2asrv.NewJSONRPCHandler(a2asrv.NewHandler(newSeatExecutor(SeatConfig{Name: "guest"}, runner))))
+
+	h, err := dialGuest(t.Context(), GuestSeat{Name: "laptop", URL: ts.URL + "/agents/laptop", Token: "guest-token"})
+	require.NoError(t, err)
+	t.Cleanup(func() { h.closeSeat(context.Background()) })
+
+	u, err := h.sendTurn(t.Context(), 0, "briefing")
+	require.NoError(t, err)
+	assert.Equal(t, "guest says hi", u)
+}
+
 func TestDialGuestWrongTokenFails(t *testing.T) {
 	runner := func(_ context.Context, _ SeatConfig, _ []Turn, _ string) (string, float64, error) {
 		return "unreachable", 0, nil

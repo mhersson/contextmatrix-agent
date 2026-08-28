@@ -10,6 +10,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
 	"github.com/a2aproject/a2a-go/v2/a2aclient/agentcard"
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
 )
 
 // errTurnTimeout marks one seat turn exceeding its deadline. The seat is
@@ -70,8 +71,12 @@ func dialSeat(ctx context.Context, name, lens, endpoint, bearer string) (*seatHa
 // dialGuest resolves {url}/.well-known/agent-card.json and connects from the
 // card. A registered-but-unreachable guest fails here - the engine records
 // it as a dead seat and the discussion proceeds on quorum.
+//
+// The well-known path is passed explicitly: since a2a-go 2.5.0 the resolver
+// fetches a URL with a non-root path directly as the card document, which
+// would silently break every registered guest URL that carries a path.
 func dialGuest(ctx context.Context, g GuestSeat) (*seatHandle, error) {
-	var opts []agentcard.ResolveOption
+	opts := []agentcard.ResolveOption{agentcard.WithPath(a2asrv.WellKnownAgentCardPath)}
 	if g.Token != "" {
 		opts = append(opts, agentcard.WithRequestHeader("Authorization", "Bearer "+g.Token))
 	}
