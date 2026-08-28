@@ -353,14 +353,7 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 
 		// Carry this round's findings into the next round so the panel verifies
 		// their resolution without importing new scope (cross-round memory).
-		o.lastFindings = findings
-
-		// A verify-red round's findings are the gate's output tail, not a panel
-		// verdict: lastPanelFindings keeps the most recent SYNTHESIZED mandate so
-		// a run of verify-red rounds cannot erase it from cross-round memory.
-		if !strings.HasPrefix(findings, verifyFailedPrefix) {
-			o.lastPanelFindings = findings
-		}
+		o.recordRoundFindings(findings)
 
 		if _, err := o.incrementReviewAttempt(ctx, findings); err != nil {
 			return err
@@ -498,7 +491,7 @@ func (o *run) runReviewHITL(ctx context.Context, plan verifyPlan) error {
 				return nil
 			}
 
-			o.lastFindings = findings
+			o.recordRoundFindings(findings)
 
 			if _, err := d.Ops.IncrementReviewAttempts(ctx, cfg.CardID); err != nil {
 				return fmt.Errorf("increment review attempts: %w", err)
@@ -517,7 +510,7 @@ func (o *run) runReviewHITL(ctx context.Context, plan verifyPlan) error {
 			return o.reviewLoop(ctx, plan, iter+1)
 		}
 
-		o.lastFindings = findings
+		o.recordRoundFindings(findings)
 
 		if _, err := d.Ops.IncrementReviewAttempts(ctx, cfg.CardID); err != nil {
 			return fmt.Errorf("increment review attempts: %w", err)
@@ -745,6 +738,22 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 		fmt.Sprintf("review parked after %d attempts (authoritative pass) - outstanding findings:\n", n), findings2))
 
 	return &ReviewParkedError{Reason: reviewParkedAttemptsCap}
+}
+
+// recordRoundFindings sets lastFindings (this round's raw output, always) and
+// lastPanelFindings (the most recent SYNTHESIZED panel verdict). A verify-red
+// round's findings are the gate's output tail, not a panel verdict, so they
+// never overwrite lastPanelFindings - otherwise a run of verify-red rounds
+// would erase the panel's mandate from cross-round memory. Shared by every
+// non-authoritative write site (the autonomous loop and both HITL branches);
+// the authoritative pass writes lastFindings directly since nothing ever
+// reads either field back on that path.
+func (o *run) recordRoundFindings(findings string) {
+	o.lastFindings = findings
+
+	if !strings.HasPrefix(findings, verifyFailedPrefix) {
+		o.lastPanelFindings = findings
+	}
 }
 
 // incrementReviewAttempt calls IncrementReviewAttempts and treats

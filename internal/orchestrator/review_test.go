@@ -1266,6 +1266,89 @@ func TestReviewPanelMandateSurvivesVerifyRedRound(t *testing.T) {
 			"not just round 2's verify-failure tail; round3=%v", round3Specialists)
 }
 
+// TestReviewHITLPanelMandateSurvivesVerifyRedRound is the HITL-mode sibling of
+// TestReviewPanelMandateSurvivesVerifyRedRound: runReviewHITL's "adjust"
+// branch has its own o.lastFindings write site, separate from reviewLoop's,
+// and must apply the same lastPanelFindings guard. The human adjusts round 1
+// (carrying panel finding F), adjusts again after round 2's verify goes red,
+// then approves round 3 - whose panel must still see F under PRIOR FINDINGS.
+func TestReviewHITLPanelMandateSurvivesVerifyRedRound(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+	client := &planLLM{responses: []llm.Response{
+		// Round 1: verify passes, specialists + synthesis reject with a real finding.
+		stopResp("Correctness: bug", 0.01),
+		stopResp("Design: ok", 0.01),
+		stopResp("Security: ok", 0.01),
+		stopResp(`{"approved":false,"summary":"fix it","fixes":[{"file":"delta.go","issue":"nil deref","suggestion":"guard the pointer"}]}`, 0.02),
+		// Round 1's gate classification: human adjusts.
+		stopResp(`{"verdict":"adjust","feedback":"please address these"}`, 0.001),
+		// Round 1's fix.
+		stopResp("coder: fixed round 1", 0.05),
+		// Round 2: verify gate goes red - short-circuits straight to the gate, no panel spent.
+		// Round 2's gate classification: human adjusts again.
+		stopResp(`{"verdict":"adjust","feedback":"fix the build"}`, 0.001),
+		// Round 2's fix.
+		stopResp("coder: fixed the verify failure", 0.05),
+		// Round 3: verify passes, specialists + synthesis reject again (severity
+		// does not matter - only the gate's approval ends the loop in HITL mode).
+		stopResp("Correctness: still see something", 0.01),
+		stopResp("Design: ok", 0.01),
+		stopResp("Security: ok", 0.01),
+		stopResp(`{"approved":false,"summary":"minor","fixes":[]}`, 0.02),
+		// Round 3's gate classification: human approves, ending the loop.
+		stopResp(`{"verdict":"approve","feedback":""}`, 0.001),
+	}}
+	d := reviewTestDeps(t, ops, git, client, verifyRedFixRegistry())
+	d.Cfg.Interactive = true
+	inbox := &fakeInbox{msgs: []harness.UserMessage{
+		{Content: "please look again"}, {Content: "still broken?"}, {Content: "approved, ship it"},
+	}}
+	d.Human = inbox
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+	o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
+
+	gateRuns := 0
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		gateRuns++
+		if gateRuns == 2 {
+			return verifyexec.Outcome{ExitCode: 1, Output: "still failing"}
+		}
+
+		return verifyexec.Outcome{ExitCode: 0}
+	}
+
+	require.NoError(t, runReview(context.Background(), o))
+	assert.Equal(t, 3, gateRuns, "every round's verify gate ran")
+
+	var specialistPrompts []string
+
+	for _, task := range client.tasks {
+		if strings.Contains(task, "code-review specialist") {
+			specialistPrompts = append(specialistPrompts, task)
+		}
+	}
+
+	require.Len(t, specialistPrompts, 6, "round 1 and round 3 each fan out three specialists; round 2 spends none")
+	round3Specialists := specialistPrompts[3:]
+
+	carried := false
+
+	for _, task := range round3Specialists {
+		if strings.Contains(task, "PRIOR FINDINGS") &&
+			strings.Contains(task, "delta.go") &&
+			strings.Contains(task, "nil deref") {
+			carried = true
+		}
+	}
+
+	assert.True(t, carried,
+		"round 3 specialist prompt (HITL) must still carry round 1's panel finding under PRIOR FINDINGS, "+
+			"not just round 2's verify-failure tail; round3=%v", round3Specialists)
+}
+
 func TestReviewCapParks(t *testing.T) {
 	// At the review cliff the gated authoritative pass runs instead of parking on a
 	// cheap verdict: one strong review (rejects), ONE strong fix, one strong
