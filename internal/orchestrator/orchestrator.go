@@ -325,6 +325,11 @@ type run struct {
 	// loop is blocked inside the phase.
 	curPhase string
 
+	// threadWriteFailNoted dedupes the review-thread write-back failure note
+	// across the run's Copilot cycles: one broken permission fails the same
+	// way in every cycle, and one card note says everything the fifth would.
+	threadWriteFailNoted bool
+
 	// body is the live parent-card body the FSM accumulates run history into
 	// (## Diagnosis, ## Plan, ## Review Findings ...). Seeded from the task
 	// context at newRun; recordSection upserts a section and pushes the updated

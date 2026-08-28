@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"maps"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -556,9 +557,11 @@ const (
 // review threads, best-effort: every write failure is a slog line, plus one
 // card note for the first, and nothing ever parks - the work is already
 // pushed by the time these writes happen. Threads are fetched lazily, once. A
-// thread that already carries any reply is never replied to again (a resumed
-// round must not double-post, and a human who answered owns the thread), and
-// a resolved thread is never re-resolved.
+// thread that already carries any reply is never replied to again - a resumed
+// round must not double-post, and a thread a human answered gets no competing
+// agent reply (a dismissal still resolves such a thread: the writer cannot
+// tell a human's reply from its own crash-window one, and the verdict on the
+// card is final either way). A resolved thread is never re-resolved.
 //
 // The resolve rule: a dismissed (INVALID) thread resolves the moment its
 // reply lands - the decision is final. A VALID thread is resolved only by
@@ -606,6 +609,12 @@ func (w *copilotThreadWriter) ensureThreads(ctx context.Context) bool {
 	for i := range threads {
 		t := &threads[i]
 
+		// A thread with no comment nodes has nothing to reply to, and indexing
+		// it would turn this best-effort path into a run-crashing panic.
+		if len(t.CommentIDs) == 0 {
+			continue
+		}
+
 		for _, id := range t.CommentIDs {
 			w.byComment[id] = t
 		}
@@ -645,6 +654,8 @@ func (w *copilotThreadWriter) dismiss(ctx context.Context, c ReviewComment, reas
 
 			return
 		}
+
+		t.ReplyCount++
 	}
 
 	if !t.IsResolved {
@@ -662,6 +673,12 @@ func (w *copilotThreadWriter) dismiss(ctx context.Context, c ReviewComment, reas
 // head that addressed them. Threads stay open for resolveConfirmed.
 func (w *copilotThreadWriter) repliesToFixed(ctx context.Context, fresh []ReviewComment, findings []*copilotFinding) {
 	if !w.enabled || w.failed {
+		return
+	}
+
+	// A reopened-only round carries no fresh VALID finding - skip the head
+	// read a reply would have cited.
+	if !slices.ContainsFunc(findings, func(f *copilotFinding) bool { return f != nil && f.Valid }) {
 		return
 	}
 
@@ -723,18 +740,21 @@ func (w *copilotThreadWriter) threadByKey(ctx context.Context, key string) *Revi
 	return w.byKey[key]
 }
 
-// fail records the first write failure on the card - the later ones only in
-// the log - and stops further writes: one broken permission would otherwise
-// fail every remaining write the same way.
+// fail records the run's first write failure on the card - the later ones,
+// this cycle's or a later cycle's, only in the log - and stops this writer:
+// one broken permission would otherwise fail every remaining write the same
+// way.
 func (w *copilotThreadWriter) fail(ctx context.Context, err error) {
 	slog.Warn("pr_gates: review-thread write-back failed",
 		"card_id", w.o.d.Cfg.CardID, "pr_url", w.prURL, "error", err)
 
-	if w.failed {
+	w.failed = true
+
+	if w.o.threadWriteFailNoted {
 		return
 	}
 
-	w.failed = true
+	w.o.threadWriteFailNoted = true
 	w.o.gateNote(ctx, "copilot", fmt.Sprintf(
 		"pr_gates: could not write triage verdicts to the PR review threads (%s); verdicts remain on the card", err,
 	), nil)

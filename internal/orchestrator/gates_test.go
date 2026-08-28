@@ -70,7 +70,10 @@ type fakeGates struct {
 	logsDelay time.Duration
 
 	// Thread write-back scripting: threads is what ReviewThreads returns;
-	// replyErr/resolveErr script write failures.
+	// replyErr/resolveErr script write failures. ReviewThreads returns the
+	// backing slice DELIBERATELY: the writer's in-place IsResolved/ReplyCount
+	// updates persist into later fetches, modeling GitHub's own persistence -
+	// tests depend on that, so never "fix" this to return copies.
 	threads    []ReviewThread
 	threadsErr error
 	replyErr   error
@@ -2263,6 +2266,44 @@ func TestCopilotGate_ThreadWithReplyIsNotRepliedAgain(t *testing.T) {
 		"an answered thread gets no second reply; calls=%v", calls)
 	assert.GreaterOrEqual(t, indexOfCall(calls, "Resolve:RT_1"), 0,
 		"the dismissal still resolves the thread; calls=%v", calls)
+}
+
+// TestCopilotGate_ThreadFoundByDedupeKeyWhenIDMisses: a comment whose REST id
+// is absent from the thread listing (a legacy zero-ID value, or a null
+// GraphQL databaseId) still reaches its thread through the card's dedupe key
+// - the documented fallback, and the only path serving such comments.
+func TestCopilotGate_ThreadFoundByDedupeKeyWhenIDMisses(t *testing.T) {
+	legacy := ReviewComment{Path: renamingComment.Path, Body: renamingComment.Body} // ID 0
+
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		// The thread's comment ids do not contain the comment's (zero) id, so
+		// only the RootPath/RootBody key can match it.
+		threads: []ReviewThread{{
+			ThreadID:   "RT_KEY",
+			CommentIDs: []int64{777},
+			RootPath:   legacy.Path,
+			RootBody:   legacy.Body,
+		}},
+		reviews: []*CopilotReview{
+			reviewOnHead("1 suggestion", legacy),
+		},
+	}
+	client := &planLLM{responses: []llm.Response{copilotVerdict(
+		copilotFinding{File: "README.md", Issue: "wording", Valid: false, Reason: "style"},
+	)}}
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, copilotGateContext("Key fallback", "body"), 0)
+	o.d.Cfg.GatesCopilotThreadReplies = true
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	calls := gates.recorded()
+	reply := indexOfCallPrefix(calls, fmt.Sprintf("Reply:%s:%d:", gatePRURL, 777))
+	require.GreaterOrEqual(t, reply, 0, "the reply lands on the key-matched thread's root; calls=%v", calls)
+	assert.GreaterOrEqual(t, indexOfCall(calls, "Resolve:RT_KEY"), 0, "and the dismissal resolves it")
 }
 
 // TestCopilotGate_ThreadWriteBackFailureNeverParks: a failing reply is one
