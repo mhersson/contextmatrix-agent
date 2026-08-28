@@ -181,7 +181,7 @@ func TestOnContainerExitClosesLogFile(t *testing.T) {
 	// A minimal bridge + registry so onContainerExit compiles.
 	hub := logbridge.NewHub(func(e protocol.LogEntry) string { return e.Project }, nil)
 	bridge := logbridge.NewBridge(logbridge.BridgeConfig{Hub: hub})
-	registry := newSessionSecretTee(logbridge.NewRedactorRegistry(bridge))
+	registry := logbridge.NewRedactorRegistry(bridge)
 
 	onExit := onContainerExit(rep, creds, files, registry, bridge, logger)
 	onExit("proj", "CARD-1", 0, executor.ExitNormal, 1, "corr-1")
@@ -247,7 +247,7 @@ type exitHarness struct {
 	creds    *secrets.RunCredentials
 	rep      *stubReporter
 	stream   <-chan protocol.LogEntry
-	registry *sessionSecretTee
+	registry *logbridge.RedactorRegistry
 	onExit   func(project, cardID string, exitCode int64, cause executor.ExitCause, attempt int, correlationID string)
 }
 
@@ -261,7 +261,7 @@ func newExitHarness(t *testing.T, logDir string) *exitHarness {
 
 	hub := logbridge.NewHub(func(e protocol.LogEntry) string { return e.Project }, nil)
 	bridge := logbridge.NewBridge(logbridge.BridgeConfig{Hub: hub, MapExtra: agentMapExtra})
-	registry := newSessionSecretTee(logbridge.NewRedactorRegistry(bridge))
+	registry := logbridge.NewRedactorRegistry(bridge)
 
 	id, ch := hub.Subscribe("proj")
 
@@ -359,7 +359,7 @@ func TestExitEmitsTerminalEventAndFooterFromOneCall(t *testing.T) {
 // key exactly the way production code does - webhook.SessionID for the
 // initial registration (what addSessionSecrets uses) and the real
 // onTokenRefreshHook for a mid-run rotation - then fires the real onExit
-// closure and checks removal by behavior (Redact no longer masks a key once
+// closure and checks removal by behavior (RedactLine no longer masks a key once
 // it is gone), not by re-deriving the id inside the test. A second run's key,
 // registered under a different correlation id, must stay masked - untouched
 // by run 1's exit. Reverting onContainerExit's removal call to the bare
@@ -384,8 +384,8 @@ func TestOnContainerExit_RemovalTargetsExactRegisteredID(t *testing.T) {
 	h.files.Begin("proj", "CARD-1", "abcdef012345", "corr-1")
 	h.onExit("proj", "CARD-1", 0, executor.ExitNormal, 1, "corr-1")
 
-	line := []byte("PLACEHOLDER-RUN1-SECRET PLACEHOLDER-RUN1-ROTATED PLACEHOLDER-RUN2-SECRET")
-	redacted := string(h.registry.Redact(line))
+	line := "PLACEHOLDER-RUN1-SECRET PLACEHOLDER-RUN1-ROTATED PLACEHOLDER-RUN2-SECRET"
+	redacted := h.registry.RedactLine(line)
 
 	// Removed keys are no longer masked - Redact leaves them literal.
 	assert.Contains(t, redacted, "PLACEHOLDER-RUN1-SECRET",
