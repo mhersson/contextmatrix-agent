@@ -66,6 +66,12 @@ func newWorkCmd() *cobra.Command {
 		Short:  "Container entrypoint: execute one card under ContextMatrix control",
 		Hidden: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Correlate before any parsing: specFromEnv emits slog.Warn
+			// diagnostics for malformed CMX_SELECTION/CMX_VERIFY values, and
+			// those early lines need the run id too. CM_RUN_ID read directly -
+			// specFromEnv re-reads it onto the spec for later consumers.
+			slog.SetDefault(withRunID(slog.Default(), os.Getenv("CM_RUN_ID")))
+
 			spec, err := specFromEnv()
 			if err != nil {
 				return err
@@ -127,6 +133,18 @@ func newWorkCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// withRunID attaches the run's correlation id (CM_RUN_ID) as a default
+// attribute, so every worker slog line carries it and can be joined to
+// serve-side per-run records. An empty id - an older serve, or tests - leaves
+// the logger unchanged and the output byte-identical to today.
+func withRunID(logger *slog.Logger, runID string) *slog.Logger {
+	if runID == "" {
+		return logger
+	}
+
+	return logger.With("run_id", runID)
 }
 
 // buildWorkEmitter builds the container's event emitter: human output is
@@ -405,6 +423,7 @@ func specFromEnv() (worker.RunSpec, error) {
 		SecretsEnvPath:            cmEnvFile,
 		BaseBranch:                os.Getenv("CM_BASE_BRANCH"),
 		Model:                     os.Getenv("CM_MODEL"),
+		RunID:                     os.Getenv("CM_RUN_ID"),
 		Interactive:               os.Getenv("CM_INTERACTIVE") == "true",
 		MaxCapability:             os.Getenv("CM_MAX_CAPABILITY") == "true",
 		BestOfN:                   bestOfN,
