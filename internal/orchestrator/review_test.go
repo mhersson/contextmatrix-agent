@@ -1162,6 +1162,110 @@ func TestReviewPriorFindingsFedToNextRound(t *testing.T) {
 		"round 2 specialist prompt must carry the round-1 findings under PRIOR FINDINGS; round2=%v", round2Specialists)
 }
 
+// verifyRedFixRegistry provides two coder-capable models (in addition to the
+// usual reviewer panel) so a round-2 fix, which excludes round-1's fix model
+// (markFixFailed - the preceding fix left the verify red), still has a second
+// model to pick: with only one coder-capable model in the registry, that
+// exclusion would strand the round with no fix model at all, parking the run
+// before round 3 ever runs - a fixture artifact unrelated to the cross-round
+// memory behavior this test exercises.
+func verifyRedFixRegistry() *registry.Registry {
+	revAlpha, revBeta, revGamma := 0.90, 0.88, 0.86
+	coderAlpha, coderBeta := 0.90, 0.88
+	priors := registry.Priors{
+		Models: map[string]registry.PriorEntry{
+			"rev/alpha":   {Reviewer: &revAlpha},
+			"rev/beta":    {Reviewer: &revBeta},
+			"rev/gamma":   {Reviewer: &revGamma},
+			"coder/alpha": {Coder: &coderAlpha},
+			"coder/beta":  {Coder: &coderBeta},
+		},
+	}
+
+	catalog := llm.Catalog{
+		{ID: "rev/alpha", ContextLength: 200000, SupportedParameters: []string{"tools"}},
+		{ID: "rev/beta", ContextLength: 200000, SupportedParameters: []string{"tools"}},
+		{ID: "rev/gamma", ContextLength: 200000, SupportedParameters: []string{"tools"}},
+		{ID: "coder/alpha", ContextLength: 200000, SupportedParameters: []string{"tools"}},
+		{ID: "coder/beta", ContextLength: 200000, SupportedParameters: []string{"tools"}},
+	}
+
+	return registry.NewRegistryFromParts(catalog, priors, nil, nil, "coder/alpha")
+}
+
+// TestReviewPanelMandateSurvivesVerifyRedRound reproduces the cross-round
+// memory regression: round 1's panel rejects with a real finding (F), the fix
+// commits, round 2's verify gate goes red (short-circuiting straight to a fix
+// without spending a panel), and round 3's panel must still see F under PRIOR
+// FINDINGS - not just round 2's verify-failure tail, which would otherwise
+// have clobbered it.
+func TestReviewPanelMandateSurvivesVerifyRedRound(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+	client := &planLLM{responses: []llm.Response{
+		// Round 1: verify passes, specialists + synthesis reject with a real finding.
+		stopResp("Correctness: bug", 0.01),
+		stopResp("Design: ok", 0.01),
+		stopResp("Security: ok", 0.01),
+		stopResp(`{"approved":false,"summary":"fix it","fixes":[{"file":"delta.go","issue":"nil deref","suggestion":"guard the pointer"}]}`, 0.02),
+		// Round 1's fix.
+		stopResp("coder: fixed round 1", 0.05),
+		// Round 2: verify gate goes red - short-circuits straight to a fix, no panel spent.
+		stopResp("coder: fixed the verify failure", 0.05),
+		// Round 3: verify passes, specialists + synthesis approve.
+		stopResp("Correctness: ok now", 0.01),
+		stopResp("Design: ok", 0.01),
+		stopResp("Security: ok", 0.01),
+		stopResp(`{"approved":true,"summary":"clean now","fixes":[]}`, 0.02),
+	}}
+	d := reviewTestDeps(t, ops, git, client, verifyRedFixRegistry())
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+	o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
+
+	gateRuns := 0
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		gateRuns++
+		if gateRuns == 2 {
+			return verifyexec.Outcome{ExitCode: 1, Output: "still failing"}
+		}
+
+		return verifyexec.Outcome{ExitCode: 0}
+	}
+
+	require.NoError(t, runReview(context.Background(), o))
+	assert.Equal(t, 3, gateRuns, "every round's verify gate ran")
+
+	var specialistPrompts []string
+
+	for _, task := range client.tasks {
+		if strings.Contains(task, "code-review specialist") {
+			specialistPrompts = append(specialistPrompts, task)
+		}
+	}
+
+	// Round 1 fans out 3 specialists, round 2's verify-red short-circuit spends
+	// none, round 3 fans out 3 more - so the last 3 captured specialist prompts
+	// are round 3's.
+	require.Len(t, specialistPrompts, 6, "round 1 and round 3 each fan out three specialists; round 2 spends none")
+	round3Specialists := specialistPrompts[3:]
+
+	carried := false
+
+	for _, task := range round3Specialists {
+		if strings.Contains(task, "PRIOR FINDINGS") &&
+			strings.Contains(task, "delta.go") &&
+			strings.Contains(task, "nil deref") {
+			carried = true
+		}
+	}
+
+	assert.True(t, carried,
+		"round 3 specialist prompt must still carry round 1's panel finding under PRIOR FINDINGS, "+
+			"not just round 2's verify-failure tail; round3=%v", round3Specialists)
+}
+
 func TestReviewCapParks(t *testing.T) {
 	// At the review cliff the gated authoritative pass runs instead of parking on a
 	// cheap verdict: one strong review (rejects), ONE strong fix, one strong

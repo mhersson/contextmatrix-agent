@@ -463,6 +463,11 @@ type run struct {
 	// reach the panel through this framing rather than as raw description text.
 	lastFindings string
 
+	// lastPanelFindings is the most recent SYNTHESIZED panel verdict, retained
+	// across verify-red rounds: those replace lastFindings with the verify tail,
+	// which would otherwise erase the mandate a regressing fix was chasing.
+	lastPanelFindings string
+
 	// grounding is the prebuilt REPO GROUNDING block (root + nested
 	// AGENTS.md/CLAUDE.md), injected into model phases. Built once in
 	// newRun; "" when the workspace has no instruction files.

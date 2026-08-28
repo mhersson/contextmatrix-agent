@@ -355,6 +355,13 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 		// their resolution without importing new scope (cross-round memory).
 		o.lastFindings = findings
 
+		// A verify-red round's findings are the gate's output tail, not a panel
+		// verdict: lastPanelFindings keeps the most recent SYNTHESIZED mandate so
+		// a run of verify-red rounds cannot erase it from cross-round memory.
+		if !strings.HasPrefix(findings, verifyFailedPrefix) {
+			o.lastPanelFindings = findings
+		}
+
 		if _, err := o.incrementReviewAttempt(ctx, findings); err != nil {
 			return err
 		}
@@ -897,7 +904,11 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 	// Prior findings are constant across the three lenses: the same previous-round
 	// context goes to every specialist (cross-round memory). The authoritative pass
 	// gets the FULL recorded history, not just the last round.
-	priorText := o.lastFindings
+	priorText := o.lastPanelFindings
+	if priorText == "" {
+		priorText = o.lastFindings
+	}
+
 	if authoritative {
 		priorText = reviewFindingsHistory(o.body)
 	}
@@ -1125,7 +1136,12 @@ func (o *run) mobReviewBriefing(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("review diff: %w", err)
 	}
 
-	prior := priorFindingsBlock(o.lastFindings)
+	priorText := o.lastPanelFindings
+	if priorText == "" {
+		priorText = o.lastFindings
+	}
+
+	prior := priorFindingsBlock(priorText)
 
 	return fmt.Sprintf(reviewBriefing, o.grounding, readRootsBlock(o.d.ReadRoots),
 		o.tc.Title, o.taskDescription, fencedDiff(diff), prior), nil
@@ -1156,7 +1172,11 @@ func (o *run) synthesize(ctx context.Context, findings string, authoritative boo
 			repair = repairBlock(lastErr.Error())
 		}
 
-		priorText := o.lastFindings
+		priorText := o.lastPanelFindings
+		if priorText == "" {
+			priorText = o.lastFindings
+		}
+
 		if authoritative {
 			priorText = reviewFindingsHistory(o.body)
 		}
