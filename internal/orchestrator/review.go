@@ -48,6 +48,27 @@ func verifyFailedFindings(plan verifyPlan, output string) string {
 	return verifyFailedPrefix + plan.Display + "\n\nVerify output (tail):\n\n" + verifyFailureExcerpt(output)
 }
 
+// reviewParkNote bounds a park's card-log line to what CM's activity log
+// accepts (the MCP client head-clamps anything longer, which silently discards
+// the end). Verify-gate findings end in build output whose diagnostics
+// concentrate in the last bytes, so those keep their tail; panel findings are
+// an ordered list whose head carries the strongest items, so those keep their
+// head.
+func reviewParkNote(head, findings string) string {
+	if len(head)+len(findings) <= verifyParkNoteMax {
+		return head + findings
+	}
+
+	if strings.HasPrefix(findings, verifyFailedPrefix) {
+		room := verifyParkNoteMax - len(head) - len(verifyParkOutputElision)
+		if room > 0 {
+			return head + verifyParkOutputTail(findings, room)
+		}
+	}
+
+	return truncateBytes(head+findings, verifyParkNoteMax)
+}
+
 // cleanupDiscardPrefix opens the card-log line the post-approval cleanup pass
 // writes when its fixup is reset away. A constant because the discard is the
 // one event on that path with no other trace: the fixup is gone from the
@@ -700,7 +721,8 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 	// Park with the strong findings. n is the persisted counter after both
 	// increments, and is the card's only visible record of how many rounds the
 	// configured cap actually bought.
-	d.logCard(ctx, "review parked after %d attempts (authoritative pass) - outstanding findings:\n%s", n, findings2)
+	d.logCard(ctx, "%s", reviewParkNote(
+		fmt.Sprintf("review parked after %d attempts (authoritative pass) - outstanding findings:\n", n), findings2))
 
 	return &ReviewParkedError{Reason: reviewParkedAttemptsCap}
 }
@@ -718,7 +740,7 @@ func (o *run) incrementReviewAttempt(ctx context.Context, findings string) (int,
 	}
 
 	if errors.Is(err, cmclient.ErrReviewAttemptsCapped) {
-		o.d.logCard(ctx, "review parked at server cap - outstanding findings:\n%s", findings)
+		o.d.logCard(ctx, "%s", reviewParkNote("review parked at server cap - outstanding findings:\n", findings))
 
 		return 0, &ReviewParkedError{Reason: reviewParkedServerCap}
 	}
@@ -1263,8 +1285,9 @@ func (o *run) runFix(ctx context.Context, req fixRequest) (bool, error) {
 	if !req.NoEscalate && o.fixBarSteps > 0 {
 		p, rerr := o.resolveFixModel(ctx, req)
 		if rerr != nil || o.fixFailed[p.Model] {
-			d.logCard(ctx, "review parked: the previous fix round %s and no other fix model is available (tried: %s) - outstanding findings:\n%s",
-				o.fixFailReason, strings.Join(sortedKeys(o.fixFailed), ", "), findings)
+			d.logCard(ctx, "%s", reviewParkNote(
+				fmt.Sprintf("review parked: the previous fix round %s and no other fix model is available (tried: %s) - outstanding findings:\n",
+					o.fixFailReason, strings.Join(sortedKeys(o.fixFailed), ", ")), findings))
 
 			if rerr != nil {
 				return false, fmt.Errorf("resolve fix model: %w", rerr)

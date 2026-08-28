@@ -4146,3 +4146,32 @@ func TestOneFixRoundOutcomeIsChargedOnce(t *testing.T) {
 		})
 	}
 }
+
+func TestReviewParkNote(t *testing.T) {
+	head := "review parked after 4 attempts (authoritative pass) - outstanding findings:\n"
+
+	t.Run("short findings pass through untouched", func(t *testing.T) {
+		got := reviewParkNote(head, "1. fix the thing")
+		assert.Equal(t, head+"1. fix the thing", got)
+	})
+
+	t.Run("verify findings keep their tail", func(t *testing.T) {
+		noise := strings.Repeat("Hibernate: select * from person\n", 200) // ~6.4KB
+		findings := verifyFailedPrefix + "cd backend && mvn -q verify\n\nVerify output (tail):\n\n" +
+			noise + "[ERROR] Tests run: 130, Failures: 1, Errors: 0, Skipped: 0\n"
+
+		got := reviewParkNote(head, findings)
+		assert.LessOrEqual(t, len(got), verifyParkNoteMax)
+		assert.True(t, strings.HasPrefix(got, head))
+		assert.Contains(t, got, "[ERROR] Tests run: 130, Failures: 1")
+		assert.Contains(t, got, verifyParkOutputElision)
+	})
+
+	t.Run("panel findings keep their head", func(t *testing.T) {
+		findings := "1. [critical] the important one\n" + strings.Repeat("2. filler finding line\n", 200)
+
+		got := reviewParkNote(head, findings)
+		assert.LessOrEqual(t, len(got), verifyParkNoteMax)
+		assert.Contains(t, got, "[critical] the important one")
+	})
+}
