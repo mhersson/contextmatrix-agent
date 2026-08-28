@@ -64,6 +64,50 @@ func TestCoderPromptEmptyVerifyByteIdentical(t *testing.T) {
 		"an empty verify block leaves the coder prompt spacing unchanged")
 }
 
+// TestSharedBlocksAreSplicedIntoTheirPrompts is a structural composition guard:
+// each shared prompt block below is composed via `+ block +` into one or more
+// prompt templates (see prompts.go), and this asserts the block is verbatim
+// present in every prompt that is supposed to carry it. Comparing against the
+// constant itself - not a copy of its wording - keeps this immune to rewording
+// the block's prose; it only fails if a future edit drops a splice.
+func TestSharedBlocksAreSplicedIntoTheirPrompts(t *testing.T) {
+	cases := []struct {
+		block      string
+		blockName  string
+		prompt     string
+		promptName string
+	}{
+		{coderGroundingRule, "coderGroundingRule", coderPrompt, "coderPrompt"},
+
+		{selfReviewBlock, "selfReviewBlock", coderPrompt, "coderPrompt"},
+		{selfReviewBlock, "selfReviewBlock", fixPrompt, "fixPrompt"},
+		{selfReviewBlock, "selfReviewBlock", verifyFixPrompt, "verifyFixPrompt"},
+
+		{processTeardownNote, "processTeardownNote", coderPrompt, "coderPrompt"},
+		{processTeardownNote, "processTeardownNote", fixPrompt, "fixPrompt"},
+		{processTeardownNote, "processTeardownNote", verifyFixPrompt, "verifyFixPrompt"},
+
+		{buildHygieneNote, "buildHygieneNote", coderPrompt, "coderPrompt"},
+		{buildHygieneNote, "buildHygieneNote", fixPrompt, "fixPrompt"},
+		{buildHygieneNote, "buildHygieneNote", verifyFixPrompt, "verifyFixPrompt"},
+
+		{plannerGroundingRule, "plannerGroundingRule", planPrompt, "planPrompt"},
+		{plannerGroundingRule, "plannerGroundingRule", planBriefing, "planBriefing"},
+		{plannerGroundingRule, "plannerGroundingRule", planSynthesisPrompt, "planSynthesisPrompt"},
+
+		{sweepRule, "sweepRule", synthesisPrompt, "synthesisPrompt"},
+		{sweepRule, "sweepRule", reviewSynthesisPrompt, "reviewSynthesisPrompt"},
+		{sweepRule, "sweepRule", checkpointSynthesisPrompt, "checkpointSynthesisPrompt"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.promptName+"/"+c.blockName, func(t *testing.T) {
+			assert.Contains(t, c.prompt, c.block,
+				"%s must splice in %s verbatim", c.promptName, c.blockName)
+		})
+	}
+}
+
 func TestSpecialistPromptScopesToTask(t *testing.T) {
 	// trimmed gold-plating solicitations:
 	assert.NotContains(t, designPrompt, "API / interface design at module boundaries")
