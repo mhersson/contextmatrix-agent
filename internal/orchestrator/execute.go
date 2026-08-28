@@ -575,54 +575,16 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 	}
 
 	if sc.boardOps {
-		// Report the outcome BEFORE CompleteTask (claim-gating rationale on
-		// reportSoloOutcome - a report after complete_task releases the claim
-		// would silently vanish).
+		// Report BEFORE CompleteTask/ReleaseCard: reportSoloOutcome needs the
+		// claim still held (its doc has the claim-gating rationale).
 		//
-		// The row answers one question: did THIS model's work stand on its own?
-		// A subtask the bounded fix pass had to repair did not, so it reports
-		// `failed` even though the work shipped - the subtask still commits,
-		// pushes and completes below. `failed` is the model's verdict, not the
-		// card's.
-		//
-		// That choice is deliberate, and it is the only one that moves the
-		// numerator the coder prior is built from. The calibration factor is
-		// 1 + (wins - expected_wins)/samples, and a solo row carries
-		// n_candidates 1, so it contributes exactly 1.0 to expected wins: a
-		// `win` leaves that numerator untouched where a `failed` lowers it.
-		// The two rejected options fail differently. A `win` is not inert - it
-		// still increments the sample count, which dilutes any existing
-		// deviation and can carry a model past the floor that gates the factor
-		// - but what it moves says nothing about the work having needed
-		// repair. Suppressing the row writes nothing at all, so it touches
-		// neither the numerator nor the count, and loses the fact entirely.
-		// Adding a second row crediting the fix model was rejected as well: it
-		// would count one unit of work as two samples, and the two picks
-		// resolve through the same registry at the same bar, so they are
-		// frequently the same model. The fix model's contribution stays
-		// visible in the cost delta below and in its own sizing observation
-		// row.
-		//
-		// What this records is that the GATE went red on the coder's work.
-		// Reading that as "the model's work did not stand on its own" is the
-		// intended inference and it is not free: a flaky command that passes
-		// on the re-run, or a fix pass that changed nothing, both land here
-		// too. Accepted, because the alternative is recording a clean win for
-		// work that was demonstrably red.
-		//
-		// A mob checkpoint's revise commit is deliberately not treated the same
-		// way. Its own gate re-runs against the revised tree and verified
-		// follows what that gate learned - true on a pass, false on a skip or
-		// an inconclusive run - but a revise never sets coderFailed: the
-		// pre-commit gate is a deterministic project command and its red is a
-		// fact, while a revise verdict is model opinion, and recording a
-		// failure off model opinion would be a far noisier signal than the one
-		// this row exists to carry.
-		//
-		// VerifyPass carries what the gate actually saw: true only when the
-		// resolved command ran and passed on work that was never red. The skip
-		// tier and an inconclusive run both leave it false, because neither is
-		// evidence of a pass.
+		// A subtask the bounded fix pass had to repair reports `failed` for
+		// the coder model even though the work still commits, pushes and
+		// completes below - `failed` is the model's verdict, not the card's.
+		// See reportSoloOutcome's doc for why this is the only choice that
+		// moves the leaderboard numerator, and gateEvidence's field docs for
+		// what verified/coderFailed mean (including the mob-checkpoint
+		// revise, which is deliberately not judged the same way).
 		result, verifyPass := "win", sc.gate.verified
 		if sc.gate.coderFailed {
 			result, verifyPass = "failed", false
@@ -1137,33 +1099,26 @@ func (o *run) logSoloCapPark(ctx context.Context, subID, reason string) {
 
 // reportSoloOutcome reports one solo (boardOps) run's terminal model outcome
 // to CM's leaderboard, keyed on the subtask card itself - not the parent,
-// deliberately unlike the Best-of-N judge's parent rollup - mirroring the
-// existing ReportUsage solo precedent. NCandidates is always 1 and JudgeModel
-// is always empty: there is no judge on the solo path. Best-effort: a report
-// failure only warns, mirroring every other board write on this path.
+// deliberately unlike the Best-of-N judge's parent rollup. NCandidates is
+// always 1 and JudgeModel is always empty: there is no judge on the solo
+// path. Best-effort: a report failure only warns, mirroring every other
+// board write on this path.
 //
 // Claim-gating: CM's report_model_outcome handler requires an active claim on
-// cardID, and complete_task atomically releases that claim on success -
-// report_usage is NOT the transferable precedent here (usage reporting
-// carries no claim gate). Every caller MUST report while the claim is still
-// held, i.e. before CompleteTask/ReleaseCard - reporting after either would
-// silently fail against an already-released claim.
+// cardID, and complete_task atomically releases that claim on success. Every
+// caller MUST report while the claim is still held, i.e. before
+// CompleteTask/ReleaseCard - reporting after either would silently fail
+// against an already-released claim.
 //
-// Bias-math note: a Best-of-N judge samples N candidates, so a model's win
-// rate over many judged runs settles below 100% and the leaderboard's
-// calibration factor is built to track that spread. A solo run is a sample of
-// exactly one candidate, so it contributes 1.0 to expected wins, and a solo
-// win therefore leaves the observed-minus-expected numerator exactly where it
-// was. That does NOT make a solo win inert. It still increments the sample
-// count, which both dilutes any deviation already recorded and counts toward
-// the sample threshold below which the calibration factor is not applied at
-// all - so a run of solo wins can switch an already-above-parity factor on.
-// What a solo win cannot do is move the numerator in a model's favour. Only a
-// solo failure moves it, downward, and the factor is clamped at both ends.
+// Bias-math: a solo win never moves a model's calibration numerator on CM's
+// leaderboard in its favour; only a solo failure moves it, downward. That is
+// why the call site in executeClaimedWith reports `failed` for a subtask the
+// fix pass had to repair, even though the subtask still ships.
+//
 // It takes the whole Pick rather than the slug because a `failed` row from a
-// selection the LADDER WALKED DOWN is not recorded at all (walkedDown carries
-// that rule and the reasoning): every reporting call site on this path funnels
-// through here, so the suppression sits here once instead of at each of them.
+// selection the ladder walked down is not recorded at all (walkedDown carries
+// that rule): every reporting call site on this path funnels through here, so
+// the suppression sits once instead of at each of them.
 func (o *run) reportSoloOutcome(ctx context.Context, cardID string, pick registry.Pick, result string, verifyPass bool, costUSD float64) {
 	if result == "failed" && walkedDown(pick) {
 		o.d.logCard(ctx, "subtask %s: nothing cleared the %s bar, so the ladder walked down to %s at %s - the failure is not recorded against the model",
@@ -1272,8 +1227,7 @@ func (o *run) resizeSubtask(ctx context.Context, sub subtaskRef, why string, axi
 // pairing - what the struct buys is co-location: all three are chosen together
 // in one literal per trigger, so a line naming the axis its trigger did not
 // move is one visible edit rather than two functions apart. Each trigger's
-// pairing is pinned by TestCeilingLineNamesTheExhaustedAxis, and a fourth
-// trigger needs its own row there.
+// pairing is pinned by its own test case, and a fourth trigger needs one too.
 type resizeAxis struct {
 	name   string
 	advice string

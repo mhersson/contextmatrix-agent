@@ -421,8 +421,8 @@ func TestTerminalEventCarriesTheAttemptOrdinal(t *testing.T) {
 	})
 }
 
-// TestFooterAndTerminalEventWrittenOnEveryExitPath: a run that ends any of the
-// three ways closes both surfaces, and the cause distinguishes them.
+// TestFooterAndTerminalEventWrittenOnEveryExitPath: a run that ends any of
+// these ways closes both surfaces, and the cause distinguishes them.
 func TestFooterAndTerminalEventWrittenOnEveryExitPath(t *testing.T) {
 	tests := []struct {
 		name       string

@@ -168,8 +168,8 @@ func (p Pick) AtBar() bool { return p.OK && p.MetTier == p.RequestedTier }
 // the requested bar.
 func (p Pick) BelowBar() bool { return p.OK && p.MetTier != p.RequestedTier }
 
-// DistinctModels counts distinct slugs across picks. A panel whose seats
-// collapse onto one model is not a panel; callers use this to say so.
+// DistinctModels: a panel whose seats collapse onto one model is not a
+// panel; callers use this to say so.
 func DistinctModels(picks []Pick) int {
 	seen := make(map[string]bool, len(picks))
 	for _, p := range picks {
@@ -344,9 +344,8 @@ func (r *Registry) bars() map[Tier]float64 {
 
 // barFor returns the quality bar for t. A tier absent from the configured
 // ladder has bar 0, so it can never gate a candidate out and descent always
-// treats it as reachable. The zero-value Registry still works
-// (TestTierBarsIncludeCritical builds one directly) because bars() falls
-// back to DefaultTierBars.
+// treats it as reachable. The zero-value Registry still works because bars()
+// falls back to DefaultTierBars.
 func (r *Registry) barFor(t Tier) float64 { return r.bars()[t] }
 
 // lowestBar is the bottom of the configured ladder: the floor a walk can ever

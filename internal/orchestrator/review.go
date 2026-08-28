@@ -1525,13 +1525,10 @@ func (o *run) fixSizing(req fixRequest) sizing {
 	return s
 }
 
-// markFixCapped records that the most recent fix round ran out of turns. The
-// next round runs WIDER on the same pool - deliberately without adding the
-// model to fixFailed: it ran out of room, it was not shown to be too weak, and
-// re-running it with more room is the correction. The wording is fixed rather
-// than passed in, because a cap has exactly one cause, and it is kept in
-// fixCapReason rather than fixFailReason so no card log reports a cap as a bar
-// escalation or as an exhausted fix pool.
+// markFixCapped records that the most recent fix round ran out of turns,
+// without adding the model to fixFailed - it ran out of room, not shown to be
+// too weak. fixCapReason (kept separate from fixFailReason) keeps the card
+// log from reporting a cap as a bar escalation or an exhausted fix pool.
 func (o *run) markFixCapped() {
 	o.fixBudgetSteps++
 	o.fixCapReason = "hit its turn cap"

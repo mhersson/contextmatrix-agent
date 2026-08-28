@@ -784,8 +784,8 @@ func runEndMapExtra(data map[string]any) (protocol.LogEntry, bool, bool) {
 	}, false, true
 }
 
-// mapInt64 reads a numeric field out of an event's data payload. JSON numbers
-// decode as float64, which is the shape the bridge hands over.
+// mapInt64: JSON numbers decode as float64, which is the shape the bridge
+// hands over.
 func mapInt64(data map[string]any, key string) int64 {
 	switch n := data[key].(type) {
 	case float64:

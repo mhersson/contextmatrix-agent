@@ -145,9 +145,9 @@ ENV PATH="/home/user/.cargo/bin:${PATH}"
 #
 # The toolchain lives in the runtime user's home because that is the only place
 # the rustup proxies look. Subprocesses the model runs get an environment
-# scrubbed down to a small allowlist (PATH, HOME, USER, LANG, LC_ALL, TMPDIR,
-# TERM), so RUSTUP_HOME/CARGO_HOME set here never reach the model's shell and
-# the proxies resolve the toolchain from their own defaults, $HOME/.rustup and
+# scrubbed to a small allowlist (see docs/custom-images.md for the full list),
+# so RUSTUP_HOME/CARGO_HOME set here never reach the model's shell and the
+# proxies resolve the toolchain from their own defaults, $HOME/.rustup and
 # $HOME/.cargo. /home/user is created and handed to UID 1000 up front: the
 # useradd -m in the rust variant below finds the directory already present and
 # leaves its ownership alone. RUSTUP_HOME/CARGO_HOME are then made
@@ -213,10 +213,11 @@ RUN set -eux; \
 # A declared directory must exist when the worker starts or it is dropped as
 # unresolvable, so caches the run populates later are created empty first. Every
 # path is under the runtime user's home unless the toolchain honours a prefix
-# variable at runtime: the harness scrubs the environment of subprocesses it runs
-# for the model down to PATH, HOME, USER, LANG, LC_ALL, TMPDIR and TERM, so a
-# toolchain pointed elsewhere by a build-time ENV falls back to its own default.
-# Node needs no entry: node_modules lives inside the workspace.
+# variable at runtime: the harness scrubs the environment of subprocesses it
+# runs for the model to a small allowlist (see docs/custom-images.md for the
+# full list), so a toolchain pointed elsewhere by a build-time ENV falls back
+# to its own default. Node needs no entry: node_modules lives inside the
+# workspace.
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
