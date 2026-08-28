@@ -35,6 +35,7 @@ func TestTurnBudgetLadder(t *testing.T) {
 
 	assert.Equal(t, turnBudget(base, maxBudgetStep), turnBudget(base, maxBudgetStep+9), "steps clamp")
 	assert.Equal(t, base, turnBudget(base, -3), "negative steps clamp to the base")
+	assert.Equal(t, 90, turnBudget(base, maxBudgetStep), "the ladder tops out at 2x base - no observed run ever needed more")
 
 	for _, bad := range []int{0, -1} {
 		assert.Equal(t, bad, turnBudget(bad, 2),

@@ -725,8 +725,8 @@ func TestCandidateCoderModelAdvisesOutsideTheSelectionLock(t *testing.T) {
 	resolve := o.candidateCoderModel(c)
 
 	var (
-		model string
-		err   error
+		pick registry.Pick
+		err  error
 	)
 
 	done := make(chan struct{})
@@ -734,7 +734,7 @@ func TestCandidateCoderModelAdvisesOutsideTheSelectionLock(t *testing.T) {
 	go func() {
 		defer close(done)
 
-		model, err = resolve(context.Background(), subtaskRef{ID: "SUB-1"}, "prompt")
+		pick, err = resolve(context.Background(), subtaskRef{ID: "SUB-1"}, "prompt")
 	}()
 
 	select {
@@ -744,7 +744,7 @@ func TestCandidateCoderModelAdvisesOutsideTheSelectionLock(t *testing.T) {
 	}
 
 	require.NoError(t, err)
-	assert.Equal(t, "mid/model", model, "the excluded model is replaced by the next-best pick")
+	assert.Equal(t, "mid/model", pick.Model, "the excluded model is replaced by the next-best pick")
 	assert.Equal(t, "mid/model", c.model, "and the candidate records what it now runs on")
 
 	require.Len(t, ops.logs, 1, "the re-selected candidate reports its shortfall; logs=%v", ops.logs)
@@ -765,9 +765,9 @@ func TestCandidateCoderModelDropsWhenThePoolIsExhausted(t *testing.T) {
 
 	c := &candidate{idx: 1, model: "mid/model"}
 
-	model, err := o.candidateCoderModel(c)(context.Background(), subtaskRef{ID: "SUB-1"}, "prompt")
+	pick, err := o.candidateCoderModel(c)(context.Background(), subtaskRef{ID: "SUB-1"}, "prompt")
 	require.ErrorIs(t, err, errCandidatePoolExhausted)
-	assert.Empty(t, model)
+	assert.Empty(t, pick.Model)
 	assert.False(t, isParkError(err), "a dropped candidate must not park the run")
 }
 

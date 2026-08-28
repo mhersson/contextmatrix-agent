@@ -934,7 +934,7 @@ func TestSalvageCappedFinalSubtask(t *testing.T) {
 	cg := &fakeGit{committed: true}
 	sc := &solverCtx{
 		git: cg, ledger: NewLedger(0, 0), tools: d.WriteTools,
-		workspace: "ws", coderModel: o.solverCoderModel,
+		workspace: "ws", coderModel: o.resolveCoderModel,
 		boardOps: false, push: false, tag: "candidate 1/1",
 		lastSubID: "SUB-2",
 	}
@@ -970,7 +970,7 @@ func TestNoSalvageOnCleanTree(t *testing.T) {
 	cg := &fakeGit{committed: false}
 	sc := &solverCtx{
 		git: cg, ledger: NewLedger(0, 0), tools: d.WriteTools,
-		workspace: "ws", coderModel: o.solverCoderModel,
+		workspace: "ws", coderModel: o.resolveCoderModel,
 		boardOps: false, push: false, tag: "candidate 1/1",
 		lastSubID: "SUB-2",
 	}
@@ -999,7 +999,7 @@ func TestSalvageFallsBackToTitleCommitMessage(t *testing.T) {
 	cg := &fakeGit{committed: true}
 	sc := &solverCtx{
 		git: cg, ledger: NewLedger(0, 0), tools: d.WriteTools,
-		workspace: "ws", coderModel: o.solverCoderModel,
+		workspace: "ws", coderModel: o.resolveCoderModel,
 		boardOps: false, push: false, tag: "candidate 1/1",
 		lastSubID: "SUB-2",
 	}
@@ -1024,7 +1024,7 @@ func TestNoSalvageOnEarlierSubtask(t *testing.T) {
 	cg := &fakeGit{committed: true}
 	sc := &solverCtx{
 		git: cg, ledger: NewLedger(0, 0), tools: d.WriteTools,
-		workspace: "ws", coderModel: o.solverCoderModel,
+		workspace: "ws", coderModel: o.resolveCoderModel,
 		boardOps: false, push: false, tag: "candidate 1/1",
 		lastSubID: "SUB-9", // the capped subtask is NOT the final one
 	}
@@ -1309,7 +1309,7 @@ func TestSalvageDeclineOnUnresolvableVerifyRaisesBudgetOnly(t *testing.T) {
 
 	salvaged, err := o.salvageSoloCapped(ctx, o.solver,
 		subtaskRef{ID: "SUB-1", Title: "Only", Sizing: seedSizing("moderate")},
-		"coder/model", 0, harness.Result{}, &MaxTurnsError{Model: "coder/model", Turns: 5})
+		atBarPick("coder/model"), 0, harness.Result{}, &MaxTurnsError{Model: "coder/model", Turns: 5})
 	require.False(t, salvaged, "an unresolvable verify cannot confirm the work")
 	require.NoError(t, err, "a non-toolchain resolution error parks as a plain turn cap")
 	require.True(t, ops.loggedContains("verify could not be resolved"),
@@ -1584,6 +1584,42 @@ func TestResizeAtTheCeilingEmitsNothing(t *testing.T) {
 		subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("critical")}, "turn cap")
 
 	assert.NotContains(t, transcript.String(), sizingEscalationKind)
+}
+
+// TestLogEnvironmentalCapBudgetNeverPersistsOrEmits pins the no-raise
+// mechanism directly, independent of the salvage flow that drives it: an
+// environmental cap incident logs the CURRENT (unchanged) budget - not a
+// target it was raised to, because nothing raises it - never writes the card
+// body, and never emits a sizing_escalation event. There is no in-run
+// consumer for a raised figure (salvageSoloCapped runs after the attempt
+// that hit the cap has already ended, and the solo path has no in-process
+// retry), so a raise here would be a log-line fiction; the event's own
+// contract is "the corrected bar is read by the NEXT run" (see
+// sizingEscalationKind), which nothing would ever satisfy.
+func TestLogEnvironmentalCapBudgetNeverPersistsOrEmits(t *testing.T) {
+	var transcript bytes.Buffer
+
+	seed := cmclient.TaskContext{Description: writeMeta("Do it.", metaKV{"bar": "moderate", "budget": "0", "seed": "moderate"})}
+	ops := &fakeOps{taskContexts: map[string]cmclient.TaskContext{"SUB-1": seed}}
+
+	d := execTestDeps(ops, &fakeGit{}, &planLLM{})
+	d.Emit = events.NewEmitter(nil, &transcript)
+
+	o := newExecRun(d, nil, 0)
+	o.logEnvironmentalCapBudget(context.Background(), subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("moderate")})
+
+	assert.Zero(t, countCalls(ops.recorded(), "UpdateCardBody:SUB-1"), "no board write - nothing is raised")
+
+	kv, got := readMeta(seed.Description)
+	assert.Equal(t, 0, got.Budget, "the card marker is untouched")
+	assert.Equal(t, registry.TierModerate, got.Bar)
+	assert.Equal(t, "moderate", kv["seed"])
+
+	assert.True(t, ops.loggedContains("the card's turn budget stays at base"),
+		"names the current, unchanged value; logs=%v", ops.logs)
+	assert.False(t, ops.loggedContains("->"), "no target figure - nothing was raised; logs=%v", ops.logs)
+	assert.NotContains(t, transcript.String(), sizingEscalationKind,
+		"no correction happened, so nothing is emitted")
 }
 
 // TestSalvageDeclineAfterVerifyPassKeepsTierAndReportsNoOutcome proves the
@@ -1936,10 +1972,12 @@ func TestSoloTurnCapSalvageReportsWinOutcome(t *testing.T) {
 // resource-exhaustion signature on both attempts: under a pids limit `go test`
 // compiles, then its inner fork/exec dies with EAGAIN and go exits 1 -
 // classified failed, surviving the single retry - yet that is container
-// pressure, not evidence about the model. The cap itself is still volume
-// evidence, so the budget widens and the bar does not; the leaderboard row is
-// withheld.
-func TestSalvageDeclineExhaustedVerifyRaisesBudgetOnly(t *testing.T) {
+// pressure, not evidence about the model OR about the card: nothing raises
+// the turn budget and the marker is left untouched, so a pids-limit incident
+// cannot buy the card a permanently (or even temporarily) wider window - there
+// is no in-process retry to spend a wider figure on anyway. The bar never
+// moves and the leaderboard row is withheld either way.
+func TestSalvageDeclineExhaustedVerifyLeavesBudgetUnchanged(t *testing.T) {
 	withFastVerifyRetryWait(t)
 
 	ops := &fakeOps{}
@@ -1965,25 +2003,32 @@ func TestSalvageDeclineExhaustedVerifyRaisesBudgetOnly(t *testing.T) {
 
 	assert.Empty(t, ops.reportOutcomes,
 		"a verify killed by container pressure is an environment problem, not evidence about the model")
-	_, got := readMeta(ops.bodyFor("SUB-1"))
+	assert.Zero(t, countCalls(ops.recorded(), "UpdateCardBody:SUB-1"),
+		"an environmental incident is logged, never raised - no board write at all")
+	_, got := readMeta(ops.taskContext.Description)
 	assert.Equal(t, registry.TierModerate, got.Bar,
 		"a pids limit or a missing tool is not evidence about the model")
-	assert.Equal(t, 1, got.Budget, "the cap itself is still volume evidence")
-	assert.Equal(t, "Implement the thing.", stripMeta(ops.bodyFor("SUB-1")),
-		"the rest of the body is unchanged")
+	assert.Equal(t, 0, got.Budget,
+		"an environment-caused cap must not persist a wider budget to the card")
+	assert.Equal(t, "Implement the thing.", stripMeta(ops.taskContext.Description),
+		"the card body itself is untouched")
 	assert.True(t, ops.loggedContains("resource exhaustion"),
 		"the card log names the environmental cause the reporting exemption acted on; logs=%v", ops.logs)
+	assert.True(t, ops.loggedContains("the card's turn budget stays at base"),
+		"names the current, unchanged value - no raise; logs=%v", ops.logs)
+	assert.False(t, ops.loggedContains("->"), "no target figure - nothing was raised; logs=%v", ops.logs)
 }
 
-// TestSalvageDeclineSkippedVerifyRaisesBudgetOnly proves a skip-classified
+// TestSalvageDeclineSkippedVerifyLeavesBudgetUnchanged proves a skip-classified
 // authoritative verify (here, a timeout - environmental, not a code defect)
-// gets the same exemption as the *ToolchainMissingError branch: the cap is
-// still volume evidence so the budget widens, but the bar holds and no
-// ReportModelOutcomes call fires, because a skipped verify is not evidence
-// about the model. Its sibling,
+// gets the same exemption as the *ToolchainMissingError branch: nothing
+// raises the turn budget and nothing reaches the card marker - a timeout is
+// not evidence the card itself should carry forward a bigger budget - and the
+// bar holds and no ReportModelOutcomes call fires, because a skipped verify is
+// not evidence about the model. Its sibling,
 // TestSalvageDeclineOnVerifyFailureRaisesBothInOneWrite, proves a genuine
-// (ran-and-failed) verify moves both axes and keeps reporting unchanged.
-func TestSalvageDeclineSkippedVerifyRaisesBudgetOnly(t *testing.T) {
+// (ran-and-failed) verify moves both axes and persists them as before.
+func TestSalvageDeclineSkippedVerifyLeavesBudgetUnchanged(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true}
 	client := &planLLM{responses: burnResps(5)}
@@ -2003,14 +2048,20 @@ func TestSalvageDeclineSkippedVerifyRaisesBudgetOnly(t *testing.T) {
 	require.Error(t, err, "a timed-out verify still parks the capped subtask")
 
 	assert.Empty(t, ops.reportOutcomes, "a skipped verify is an environment problem, not evidence about the model")
-	_, got := readMeta(ops.bodyFor("SUB-1"))
+	assert.Zero(t, countCalls(ops.recorded(), "UpdateCardBody:SUB-1"),
+		"an environmental incident is logged, never raised - no board write at all")
+	_, got := readMeta(ops.taskContext.Description)
 	assert.Equal(t, registry.TierModerate, got.Bar,
 		"a pids limit or a missing tool is not evidence about the model")
-	assert.Equal(t, 1, got.Budget, "the cap itself is still volume evidence")
-	assert.Equal(t, "Implement the thing.", stripMeta(ops.bodyFor("SUB-1")),
-		"the rest of the body is unchanged")
+	assert.Equal(t, 0, got.Budget,
+		"an environment-caused cap must not persist a wider budget to the card")
+	assert.Equal(t, "Implement the thing.", stripMeta(ops.taskContext.Description),
+		"the card body itself is untouched")
 	assert.True(t, ops.loggedContains("verify timed out"),
 		"the park is still activity-logged; logs=%v", ops.logs)
+	assert.True(t, ops.loggedContains("the card's turn budget stays at base"),
+		"names the current, unchanged value - no raise; logs=%v", ops.logs)
+	assert.False(t, ops.loggedContains("->"), "no target figure - nothing was raised; logs=%v", ops.logs)
 }
 
 // TestSoloOutcomeKeyedOnSelectedSlug proves the outcome row is keyed on the
@@ -2090,7 +2141,7 @@ func TestCandidateCompletionDoesNotReportSoloOutcome(t *testing.T) {
 	cg := &fakeGit{committed: true}
 	sc := &solverCtx{
 		git: cg, ledger: NewLedger(0, 0), tools: d.WriteTools,
-		workspace: "ws", coderModel: o.solverCoderModel,
+		workspace: "ws", coderModel: o.resolveCoderModel,
 		boardOps: false, push: false, tag: "candidate 1/1",
 	}
 
@@ -2150,7 +2201,7 @@ func TestCandidateSubtaskParksOnRunLedgerBreach(t *testing.T) {
 
 	sc := &solverCtx{
 		git: &fakeGit{committed: true}, ledger: NewLedger(0, 0), tools: d.WriteTools,
-		workspace: "ws", coderModel: o.solverCoderModel,
+		workspace: "ws", coderModel: o.resolveCoderModel,
 		boardOps: false, push: false, tag: "candidate 1/1",
 	}
 
@@ -2460,9 +2511,9 @@ func TestCoderTierIsAlwaysDerivedFromTheWork(t *testing.T) {
 
 				c := &candidate{idx: 1, model: "dropped/model"}
 
-				model, err := o.candidateCoderModel(c)(context.Background(), subtaskRef{ID: "SUB-1"}, "prompt")
+				pick, err := o.candidateCoderModel(c)(context.Background(), subtaskRef{ID: "SUB-1"}, "prompt")
 				require.NoError(t, err)
-				assert.Equal(t, tt.wantModel, model,
+				assert.Equal(t, tt.wantModel, pick.Model,
 					"a candidate re-pick must stay on the card's tier, not a constant")
 			})
 		}
@@ -2815,7 +2866,7 @@ func TestPreCommitVerifySkippedForCandidateSolver(t *testing.T) {
 
 	sc := &solverCtx{
 		git: &fakeGit{committed: true}, ledger: NewLedger(0, 0), tools: d.WriteTools,
-		workspace: "ws", coderModel: o.solverCoderModel,
+		workspace: "ws", coderModel: o.resolveCoderModel,
 		boardOps: false, push: false, tag: "candidate 1/2",
 	}
 
@@ -3492,4 +3543,219 @@ func TestStillRedGateParksThroughTheTypedSentinel(t *testing.T) {
 	assert.Empty(t, git.commitMsgs, "nothing may be committed while the verify is red; git=%v", git.recorded())
 	assert.Empty(t, git.pushBranches, "a red tree is never pushed by the subtask path")
 	assert.Equal(t, -1, indexOfCall(ops.recorded(), "CompleteTask:SUB-1"), "a parked subtask is not completed")
+}
+
+// belowBarSubtask is a subtask asking for the complex bar, which
+// priorTestRegistry(0.70) cannot serve: the ladder walks down to simple and
+// the coder runs on a model rated for far less than this work.
+func belowBarSubtask() []subtaskRef {
+	return []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("complex")}}
+}
+
+// repairedRunVerify is the pre-commit gate script that produces a "failed"
+// coder row: the coder's own tree is red, the bounded fix pass repairs it, and
+// the subtask ships. The row is about the CODER's work, so it says failed.
+func repairedRunVerify() func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+	runs := 0
+
+	return func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		runs++
+		if runs == 1 {
+			return verifyexec.Outcome{ExitCode: 1, Output: "--- FAIL: TestThing"}
+		}
+
+		return verifyexec.Outcome{ExitCode: 0}
+	}
+}
+
+func repairedResponses() []llm.Response {
+	return []llm.Response{
+		finishResp("feat: subtask done", 0.01),
+		stopResp("coder: fixed the failing test", 0.02),
+	}
+}
+
+// TestBelowBarFailureIsNotChargedToTheModel is the ratchet this suppression
+// exists to break. When the requested rung is empty the selector walks DOWN
+// and hands the work to a model rated for less. Charging that model a loss
+// lowers the prior that put it on its own rung, so that rung empties too and
+// the next selection walks down further - a self-reinforcing downgrade.
+func TestBelowBarFailureIsNotChargedToTheModel(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	d := execTestDeps(ops, git, &planLLM{responses: repairedResponses()})
+	d.Registry = priorTestRegistry(0.70)
+
+	o := newExecRun(d, belowBarSubtask(), 0)
+	seedResolvedVerifyPlan(o)
+	o.runVerify = repairedRunVerify()
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	assert.Empty(t, ops.reportOutcomes,
+		"a model that was walked down the ladder must not be charged a loss for work it was never rated for")
+
+	// The suppression is silent otherwise, so the note is the only signal an
+	// operator has that a row was skipped rather than lost.
+	assert.True(t, ops.loggedContains("not recorded"),
+		"the skipped row must be said out loud on the card; logs=%v", ops.logs)
+}
+
+// TestBelowBarSubtaskStillCompletes guards against over-correcting: skipping
+// the leaderboard row changes nothing about the work itself.
+func TestBelowBarSubtaskStillCompletes(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	d := execTestDeps(ops, git, &planLLM{responses: repairedResponses()})
+	d.Registry = priorTestRegistry(0.70)
+
+	o := newExecRun(d, belowBarSubtask(), 0)
+	seedResolvedVerifyPlan(o)
+	o.runVerify = repairedRunVerify()
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "CompleteTask:SUB-1"), 0,
+		"the repaired work still ships; only the leaderboard row changes")
+	assert.NotEmpty(t, git.pushBranches, "the subtask is still pushed")
+}
+
+// TestBelowBarWinIsStillRecorded pins the asymmetry. The suppression protects a
+// model from a penalty it did not earn; it is not a blanket exemption from
+// measurement. A model that succeeded ABOVE the rung it was rated for is the
+// most valuable evidence the leaderboard can collect, and dropping it would
+// make the rung it belongs to permanently unclimbable.
+func TestBelowBarWinIsStillRecorded(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	d := execTestDeps(ops, git, &planLLM{responses: []llm.Response{finishResp("feat(x): add y", 0.10)}})
+	d.Registry = priorTestRegistry(0.70)
+
+	o := newExecRun(d, belowBarSubtask(), 0)
+	require.NoError(t, runExecute(context.Background(), o))
+
+	require.Len(t, ops.reportOutcomes, 1)
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 1)
+	assert.Equal(t, "win", rows[0].Result)
+	assert.Equal(t, "default/model", rows[0].Model)
+}
+
+// TestAtBarFailureIsStillRecorded is the unchanged-behaviour guard: a model
+// that got exactly the bar it asked for and still failed earned its row, and
+// this change must not have widened into a general amnesty.
+func TestAtBarFailureIsStillRecorded(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	d := execTestDeps(ops, git, &planLLM{responses: repairedResponses()})
+	d.Registry = priorTestRegistry(0.90) // clears the complex bar outright
+
+	o := newExecRun(d, belowBarSubtask(), 0)
+	seedResolvedVerifyPlan(o)
+	o.runVerify = repairedRunVerify()
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	require.Len(t, ops.reportOutcomes, 1)
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 1)
+	assert.Equal(t, "failed", rows[0].Result, "an at-bar coder whose work was red still earns its loss row")
+}
+
+// TestPinnedPickIsNotAWalkDownSoItsFailureIsRecorded is one half of the
+// boundary, stated as a name so the next reader does not have to infer it. A
+// pin is operator intent: the selector never walked anywhere, so there is no
+// walk-down to suppress. It matters because the synthesized pins this package
+// builds carry no measured prior, so every one of them reports BelowBar -
+// suppressing on that alone would silently stop recording outcomes for every
+// pinned run, which is exactly the operator who most needs to learn their pin
+// is failing. Same reading the authoritative fix gate and panelBelowBar take.
+func TestPinnedPickIsNotAWalkDownSoItsFailureIsRecorded(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	d := execTestDeps(ops, git, &planLLM{responses: repairedResponses()})
+	d.Registry = priorTestRegistry(0.70)
+
+	o := newExecRun(d, belowBarSubtask(), 0)
+	o.tc.ModelCoder = "pinned/model"
+	seedResolvedVerifyPlan(o)
+	o.runVerify = repairedRunVerify()
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	require.Len(t, ops.reportOutcomes, 1)
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 1)
+	assert.Equal(t, "failed", rows[0].Result)
+	assert.Equal(t, "pinned/model", rows[0].Model, "the operator's pin is what ran and what is measured")
+}
+
+// TestBelowBarCapFailureIsNotChargedToTheModel covers the OTHER failed-row
+// producer on the solo path. salvageSoloCapped receives its pick down a
+// different route - the error return of the coder loop rather than its success
+// return - so a slug threaded correctly through one path proves nothing about
+// the other.
+func TestBelowBarCapFailureIsNotChargedToTheModel(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{} // clean tree: nothing to salvage-commit, so the cap parks
+	d := execTestDeps(ops, git, &planLLM{responses: burnResps(20)})
+	d.Registry = priorTestRegistry(0.70)
+	d.Cfg.MaxTurns = 5
+
+	o := newExecRun(d, belowBarSubtask(), 0)
+
+	err := runExecute(context.Background(), o)
+	require.Error(t, err, "a capped subtask with nothing committed still parks")
+
+	assert.Empty(t, ops.reportOutcomes,
+		"the turn-cap arm must respect the same rule as the pre-commit gate")
+	assert.True(t, ops.loggedContains("not recorded"),
+		"the skipped row is said out loud here too; logs=%v", ops.logs)
+}
+
+// TestAtBarCapFailureIsStillRecorded is its unchanged-behaviour twin: the cap
+// arm still charges a model that got the bar it asked for.
+func TestAtBarCapFailureIsStillRecorded(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{}
+	d := execTestDeps(ops, git, &planLLM{responses: burnResps(20)})
+	d.Registry = priorTestRegistry(0.90)
+	d.Cfg.MaxTurns = 5
+
+	o := newExecRun(d, belowBarSubtask(), 0)
+
+	err := runExecute(context.Background(), o)
+	require.Error(t, err)
+
+	require.Len(t, ops.reportOutcomes, 1)
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 1)
+	assert.Equal(t, "failed", rows[0].Result)
+}
+
+// TestCapableDefaultIsNotAWalkDownSoItsFailureIsRecorded is the other half of
+// the boundary. The capable default is reached only when NO rung had anything,
+// so it clears no configured bar and reports BelowBar like the pins do - but it
+// sits in no rung, so charging it cannot empty one and cannot feed the ratchet
+// the suppression exists to break. Its rows are the only evidence that exists
+// about the operator's fallback model, and dropping them would leave a failing
+// fallback invisible.
+//
+// planTestRegistry carries no priors, so it resolves to exactly this shape.
+func TestCapableDefaultIsNotAWalkDownSoItsFailureIsRecorded(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	d := execTestDeps(ops, git, &planLLM{responses: repairedResponses()})
+
+	o := newExecRun(d, belowBarSubtask(), 0)
+	seedResolvedVerifyPlan(o)
+	o.runVerify = repairedRunVerify()
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	require.Len(t, ops.reportOutcomes, 1)
+	rows := ops.reportOutcomes[0]
+	require.Len(t, rows, 1)
+	assert.Equal(t, "failed", rows[0].Result)
+	assert.Equal(t, "default/model", rows[0].Model, "the operator's fallback is what ran and what is measured")
 }

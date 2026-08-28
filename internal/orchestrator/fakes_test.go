@@ -878,6 +878,50 @@ func planTestRegistry() *registry.Registry {
 	return registry.NewRegistry("default/model", planTestCatalog())
 }
 
+// priorTestRegistry builds a registry whose only laddered candidate is
+// "default/model", carrying coderPrior for the coder role. It is what lets a
+// test decide whether a subtask's selection lands AT the tier it asked for or
+// gets walked down below it: a prior above the complex bar (0.82) is picked at
+// complex, one between the simple bar (0.65) and the moderate bar (0.76) is
+// picked at simple whatever was requested.
+//
+// The slug matches planTestRegistry's capable default deliberately, so the
+// fixtures differ only in what the model is WORTH, never in which model runs.
+func priorTestRegistry(coderPrior float64) *registry.Registry {
+	return registry.NewRegistryFromParts(
+		planTestCatalog(),
+		registry.Priors{Models: map[string]registry.PriorEntry{
+			"default/model": {Coder: &coderPrior, Reviewer: &coderPrior},
+		}},
+		nil, nil, "default/model")
+}
+
+// atBarPick is a selection that got exactly the tier it asked for - the normal
+// case, and what every fixture that is not ABOUT the bar wants, since a zero
+// Pick would be neither at bar nor below it.
+func atBarPick(model string) registry.Pick {
+	return registry.Pick{
+		ModelSpec:     registry.ModelSpec{Model: model},
+		Role:          registry.RoleCoder,
+		RequestedTier: registry.TierComplex,
+		MetTier:       registry.TierComplex,
+		Prior:         0.9,
+		HasPrior:      true,
+		Source:        registry.SourceAuto,
+		OK:            true,
+	}
+}
+
+// belowBarPick is a selection the ladder walked DOWN because the requested
+// rung had nothing: the model runs work it is not rated for.
+func belowBarPick(model string) registry.Pick {
+	p := atBarPick(model)
+	p.MetTier = registry.TierSimple
+	p.Prior = 0.7
+
+	return p
+}
+
 // isolateVerify pins a run's verify plan to a resolved skip and marks the
 // model-proposal tier spent, so ensureVerify is a cheap no-op in tests that do
 // not exercise the gate: a re-resolve finds nothing and never fires a proposal

@@ -29,7 +29,7 @@ func TestResolveOutcome(t *testing.T) {
 		{"timeout beats reason", ExitTimeout, metrics.OutcomeKilled, -1, metrics.OutcomeTimeout},
 		{"wait failure leaves the reason as the label", ExitWaitFailure, metrics.OutcomeKilled, -1, metrics.OutcomeKilled},
 		{"wait failure without a reason is a failure", ExitWaitFailure, "", -1, metrics.OutcomeFailure},
-		{"a daemon-flagged wait does not change the label", ExitDaemonError, "", 0, metrics.OutcomeSuccess},
+		{"a daemon-flagged wait is a failure even carrying a zero code", ExitDaemonError, "", 0, metrics.OutcomeFailure},
 	}
 
 	for _, tc := range tests {
@@ -92,6 +92,10 @@ func TestResolveOutcomeComposedWithCause(t *testing.T) {
 		// container; the recorded reason becomes the label.
 		{"wait failure with a recorded kill is killed", ExitWaitFailure, metrics.OutcomeKilled, -1, metrics.OutcomeKilled},
 		{"clean exit is success", ExitNormal, "", 0, metrics.OutcomeSuccess},
+		// A daemon-flagged wait carries a zero code that cannot be trusted; the
+		// board already labels this run failed, and the metrics label must
+		// agree instead of counting it as a success.
+		{"a daemon-flagged wait with a zero code is a failure", ExitDaemonError, "", 0, metrics.OutcomeFailure},
 	}
 
 	for _, tc := range tests {

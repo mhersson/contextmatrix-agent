@@ -41,12 +41,13 @@ const defaultBar = registry.TierModerate
 
 // turnBudgetLadder scales a coder run's turn budget above the configured base.
 // Steps 1 and 2 are the complex and critical factors this ladder replaces, so
-// a fresh run's cap is unchanged. Step 3 exists because critical used to be the
-// ceiling, and a cap there escalated nothing at all.
+// a fresh run's cap is unchanged. 2x is the ceiling: across observed runs none
+// ever needed more, so a wider rung would only compound the cost of a cap that
+// is already retrying.
 //
 // Factors of the base rather than absolute floors, so lifting the operator's
 // base lifts every rung with it.
-var turnBudgetLadder = [...]float64{1.0, 1.5, 2.0, 3.0}
+var turnBudgetLadder = [...]float64{1.0, 1.5, 2.0}
 
 // maxBudgetStep is the top rung. Derived from the ladder so the two cannot drift.
 const maxBudgetStep = len(turnBudgetLadder) - 1

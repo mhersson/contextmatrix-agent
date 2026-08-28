@@ -242,7 +242,7 @@ func TestCandidateAttemptsAreLabelledAsSuch(t *testing.T) {
 
 	sc := &solverCtx{
 		git: &fakeGit{committed: true}, ledger: NewLedger(0, 0), tools: d.WriteTools,
-		workspace: "ws", coderModel: o.solverCoderModel,
+		workspace: "ws", coderModel: o.resolveCoderModel,
 		boardOps: false, push: false, tag: "candidate 1/2",
 	}
 
