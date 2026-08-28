@@ -292,7 +292,7 @@ func TestSeverityFieldInSynthesisPrompts(t *testing.T) {
 func TestCoderGroundingRuleInCoderPrompt(t *testing.T) {
 	t.Parallel()
 
-	assert.NotContains(t, strings.ToLower(fixPrompt), "trust the code",
+	assert.NotContains(t, fixPrompt, coderGroundingRule,
 		"the coder grounding rule is coder-only, not spliced into fixPrompt")
 }
 

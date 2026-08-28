@@ -1003,9 +1003,6 @@ func (o *run) reviewExclusions() map[string]bool {
 	return excl
 }
 
-// mobReviewVerdict convenes the review discussion and parses its synthesis
-// into the existing verdict shape, with ONE moderator repair on a parse
-// failure (mirroring synthesize's repair turn). ok=false on any failure -
 // mobFallback records a mob-review degradation and returns the no-verdict
 // result that sends the round to the solo fan-out. It logs to the card, not
 // just the transcript: a review that quietly changed shape otherwise looks
@@ -1022,9 +1019,13 @@ func (o *run) mobFallback(ctx context.Context, reason string, err error) (verdic
 	return verdict{}, false
 }
 
-// the caller falls back to the specialist fan-out. On success it records the
-// review snapshot head, exactly like runSpecialists - the mob briefing itself
-// never uses it, but a later round that falls back to the solo fan-out does.
+// mobReviewVerdict convenes the review discussion and parses its synthesis
+// into the existing verdict shape, with ONE moderator repair on a parse
+// failure (mirroring synthesize's repair turn). ok=false on any failure -
+// the caller falls back to the specialist fan-out (see mobFallback). On
+// success it records the review snapshot head, exactly like runSpecialists -
+// the mob briefing itself never uses it, but a later round that falls back
+// to the solo fan-out does.
 func (o *run) mobReviewVerdict(ctx context.Context) (verdict, bool) {
 	briefing, err := o.mobReviewBriefing(ctx)
 	if err != nil {

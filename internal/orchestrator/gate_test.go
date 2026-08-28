@@ -15,10 +15,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fixedGateModel hands the gate an explicitly supplied model slug - typically
-// a test literal or a slug the caller has already confirmed ran. Test suites
-// for other model-bearing phases (runBrainstorm, runDiagnose) also use it as a
-// static gateModel value. It resolves nothing and emits nothing on its own.
+// fixedGateModel hands the gate an explicitly supplied test-literal model
+// slug, standing in for whatever gateModel would resolve at runtime. Test
+// suites for other model-bearing phases (runBrainstorm, runDiagnose) also use
+// it as a static gateModel value. It resolves nothing and emits nothing on
+// its own.
 func fixedGateModel(model string) gateModel {
 	return func(context.Context) string { return model }
 }
