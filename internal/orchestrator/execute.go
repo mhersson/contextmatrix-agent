@@ -329,6 +329,21 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 			Note:   "the coder's own run measured this exact tree; not re-run",
 		}, subtaskGateContext(sub.ID))
 
+		// Same reasoning as runVerifyPlan's emit: without an event the
+		// transcript carries no record of this gate at all, and consumers
+		// undercount one verification per accepted subtask. The source names
+		// the acceptance and no command field is set - nothing re-ran, and an
+		// accepted pass must never read as a gate-executed one.
+		if o.d.Emit != nil {
+			o.d.Emit.Emit(events.Verification, map[string]any{
+				"ok":      true,
+				"status":  verifyStatusWord(verifyPassed),
+				"source":  "coder-verify-tool-pass",
+				"detail":  "the gate accepted the coder's own verify-tool pass against this exact tree and did not re-run the command",
+				"subtask": sub.ID,
+			})
+		}
+
 		return nil
 	}
 
