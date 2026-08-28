@@ -2101,10 +2101,111 @@ func TestCopilotGate_ThreadWriteBack(t *testing.T) {
 	require.GreaterOrEqual(t, validReply, 0, "the VALID comment gets a reply; calls=%v", calls)
 	assert.Contains(t, calls[validReply], "the caller cannot tell the write failed")
 	assert.Contains(t, calls[validReply], copilotHeadSHA, "the VALID reply cites the fixed head")
-	assert.Equal(t, -1, indexOfCall(calls, "Resolve:RT_VALID"),
+
+	// The clean re-review (the second CopilotReview read) confirms the fix
+	// and only THEN may the VALID thread resolve - never on the push alone.
+	validResolve := indexOfCall(calls, "Resolve:RT_VALID")
+	require.GreaterOrEqual(t, validResolve, 0, "the confirmed fix resolves the thread; calls=%v", calls)
+	assert.Greater(t, validResolve, nthIndexOfCall(calls, "CopilotReview:"+gatePRURL, 2),
 		"a VALID thread is never resolved on the fix push alone; calls=%v", calls)
 
 	assert.Contains(t, git.recorded(), "Push:cm/card-1", "the fix is pushed")
+}
+
+// TestCopilotGate_ConfirmedFixResolvesOnReReview: Copilot re-posts every
+// comment it still holds open, so a re-review that stops repeating a VALID
+// comment is the all-clear - only then is its thread resolved.
+func TestCopilotGate_ConfirmedFixResolvesOnReReview(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		threads:   []ReviewThread{threadOf("RT_VALID", swallowedErrorComment)},
+		reviews: []*CopilotReview{
+			reviewOnHead("1 suggestion", swallowedErrorComment),
+			reviewOnHead("LGTM"),
+		},
+	}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: []llm.Response{
+		copilotVerdict(copilotFinding{
+			File: "internal/api/handler.go", Issue: "dropped error",
+			Valid: true, Reason: "the caller cannot tell the write failed",
+		}),
+		stopResp("coder: fixed", 0.02),
+		copilotVerdict(),
+	}}
+
+	o := prGateRun(ops, gates, git, client, copilotGateContext("Confirmed fix", "body"), 0)
+	o.d.Cfg.GatesCopilotThreadReplies = true
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	calls := gates.recorded()
+	resolve := indexOfCall(calls, "Resolve:RT_VALID")
+	require.GreaterOrEqual(t, resolve, 0, "the clean re-review confirms the fix; calls=%v", calls)
+	assert.Greater(t, resolve, nthIndexOfCall(calls, "CopilotReview:"+gatePRURL, 2),
+		"the resolve is earned by the re-review, not the fix push; calls=%v", calls)
+	assert.True(t, ops.loggedContains("Copilot review addressed"))
+}
+
+// nthIndexOfCall returns the index of the n-th (1-based) occurrence of name,
+// or -1.
+func nthIndexOfCall(calls []string, name string, n int) int {
+	seen := 0
+
+	for i, c := range calls {
+		if c == name {
+			seen++
+
+			if seen == n {
+				return i
+			}
+		}
+	}
+
+	return -1
+}
+
+// TestCopilotGate_RepeatedValidCommentResolvesNothing: a re-review that
+// repeats the VALID comment proves the fix did NOT land - the thread stays
+// open and funds another fix round instead.
+func TestCopilotGate_RepeatedValidCommentResolvesNothing(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		threads:   []ReviewThread{threadOf("RT_VALID", swallowedErrorComment, 950)},
+		reviews: []*CopilotReview{
+			reviewOnHead("1 suggestion", swallowedErrorComment),
+			reviewOnHead("still there", swallowedErrorComment),
+			reviewOnHead("LGTM"),
+		},
+	}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: []llm.Response{
+		copilotVerdict(copilotFinding{
+			File: "internal/api/handler.go", Issue: "dropped error",
+			Valid: true, Reason: "real",
+		}),
+		stopResp("coder: fix one", 0.02),
+		stopResp("coder: fix two", 0.02),
+		copilotVerdict(),
+	}}
+
+	o := prGateRun(ops, gates, git, client, copilotGateContext("Repeat", "body"), 0)
+	o.d.Cfg.GatesCopilotThreadReplies = true
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	calls := gates.recorded()
+	resolve := indexOfCall(calls, "Resolve:RT_VALID")
+	thirdRead := nthIndexOfCall(calls, "CopilotReview:"+gatePRURL, 3)
+	require.GreaterOrEqual(t, thirdRead, 0, "the gate read the repeat and the final clean review; calls=%v", calls)
+	require.GreaterOrEqual(t, resolve, 0, "the final clean review still confirms; calls=%v", calls)
+	assert.Greater(t, resolve, thirdRead,
+		"the repeat round must not resolve; only the clean review does; calls=%v", calls)
+	assert.Equal(t, 1, countCalls(calls, "Resolve:RT_VALID"))
 }
 
 // TestCopilotGate_ThreadWriteBackOffByZeroValue: a Deps built without the

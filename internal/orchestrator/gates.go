@@ -580,36 +580,48 @@ func (o *run) newCopilotThreadWriter(prURL string) *copilotThreadWriter {
 	return &copilotThreadWriter{o: o, prURL: prURL, enabled: o.d.Cfg.GatesCopilotThreadReplies}
 }
 
+// ensureThreads fetches the thread listing on first use. False means every
+// write should be skipped: the writer is off, or a fetch failed.
+func (w *copilotThreadWriter) ensureThreads(ctx context.Context) bool {
+	if !w.enabled || w.failed {
+		return false
+	}
+
+	if w.fetched {
+		return true
+	}
+
+	w.fetched = true
+
+	threads, err := w.o.d.PRGates.ReviewThreads(ctx, w.prURL)
+	if err != nil {
+		w.fail(ctx, err)
+
+		return false
+	}
+
+	w.byComment = make(map[int64]*ReviewThread)
+	w.byKey = make(map[string]*ReviewThread)
+
+	for i := range threads {
+		t := &threads[i]
+
+		for _, id := range t.CommentIDs {
+			w.byComment[id] = t
+		}
+
+		w.byKey[copilotCommentKey(t.RootPath, t.RootBody)] = t
+	}
+
+	return true
+}
+
 // threadFor resolves a comment to its thread, fetching the listing on first
 // use. A nil answer means the write should be skipped: the writer is off, a
 // fetch failed, or the thread cannot be found.
 func (w *copilotThreadWriter) threadFor(ctx context.Context, c ReviewComment) *ReviewThread {
-	if !w.enabled || w.failed {
+	if !w.ensureThreads(ctx) {
 		return nil
-	}
-
-	if !w.fetched {
-		w.fetched = true
-
-		threads, err := w.o.d.PRGates.ReviewThreads(ctx, w.prURL)
-		if err != nil {
-			w.fail(ctx, err)
-
-			return nil
-		}
-
-		w.byComment = make(map[int64]*ReviewThread)
-		w.byKey = make(map[string]*ReviewThread)
-
-		for i := range threads {
-			t := &threads[i]
-
-			for _, id := range t.CommentIDs {
-				w.byComment[id] = t
-			}
-
-			w.byKey[copilotCommentKey(t.RootPath, t.RootBody)] = t
-		}
 	}
 
 	if t, ok := w.byComment[c.ID]; ok && c.ID != 0 {
@@ -682,6 +694,35 @@ func (w *copilotThreadWriter) repliesToFixed(ctx context.Context, fresh []Review
 	}
 }
 
+// resolveConfirmed resolves the threads of comments confirmed fixed - keys an
+// earlier round triaged VALID that the arrived re-review no longer repeats.
+func (w *copilotThreadWriter) resolveConfirmed(ctx context.Context, keys []string) {
+	for _, key := range keys {
+		t := w.threadByKey(ctx, key)
+		if t == nil || t.IsResolved {
+			continue
+		}
+
+		if err := w.o.d.PRGates.ResolveReviewThread(ctx, t.ThreadID); err != nil {
+			w.fail(ctx, err)
+
+			return
+		}
+
+		t.IsResolved = true
+	}
+}
+
+// threadByKey resolves a dedupe key to its thread, fetching the listing on
+// first use; nil means skip the write.
+func (w *copilotThreadWriter) threadByKey(ctx context.Context, key string) *ReviewThread {
+	if !w.ensureThreads(ctx) {
+		return nil
+	}
+
+	return w.byKey[key]
+}
+
 // fail records the first write failure on the card - the later ones only in
 // the log - and stops further writes: one broken permission would otherwise
 // fail every remaining write the same way.
@@ -720,6 +761,13 @@ func (o *run) copilotReviewCycle(
 	fresh := unseenComments(review.Comments, triaged)
 	reopened := repeatedValidComments(review.Comments, triaged)
 	writer := o.newCopilotThreadWriter(prURL)
+
+	// A comment an earlier round triaged VALID that this review no longer
+	// repeats is confirmed fixed - Copilot re-posts every comment it still
+	// holds open, so absence is the all-clear - and its thread can close.
+	// Before the early exits: an all-repeats review still confirms whatever
+	// it stopped repeating.
+	writer.resolveConfirmed(ctx, confirmedFixedKeys(review.Comments, triaged))
 
 	// Copilot re-posts the comments it already made on every re-review. A
 	// round that carries nothing new AND nothing still open is nothing to
@@ -1504,6 +1552,26 @@ func repeatedValidComments(comments []ReviewComment, triaged map[string]bool) []
 	}
 
 	return reopened
+}
+
+// confirmedFixedKeys returns the dedupe keys of comments an earlier round
+// triaged VALID that the arrived review no longer carries - the fix for them
+// is confirmed, since Copilot re-posts every comment it still holds open.
+func confirmedFixedKeys(comments []ReviewComment, triaged map[string]bool) []string {
+	live := make(map[string]bool, len(comments))
+	for _, c := range comments {
+		live[copilotCommentKey(c.Path, c.Body)] = true
+	}
+
+	var confirmed []string
+
+	for key, valid := range triaged {
+		if valid && !live[key] {
+			confirmed = append(confirmed, key)
+		}
+	}
+
+	return confirmed
 }
 
 // copilotCommentKey identifies a review comment for dedupe: its flattened path
