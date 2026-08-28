@@ -640,7 +640,7 @@ func parkReason(err error) string {
 func reportParkedQuietly(ctx context.Context, a fsmArgs, reason string) {
 	if err := a.ops.ReportParked(ctx, a.spec.CardID, reason); err != nil {
 		slog.Warn("report parked failed; board will not show the park",
-			"card", a.spec.CardID, "error", err)
+			"card", a.spec.CardID, "reason_head", reason[:min(len(reason), 120)], "error", err)
 	}
 }
 

@@ -1517,3 +1517,28 @@ func TestVerifyFailureExcerpt(t *testing.T) {
 		})
 	}
 }
+
+func TestIsVerifyFailureLine(t *testing.T) {
+	tests := []struct {
+		line string
+		want bool
+	}{
+		{line: "[ERROR] Tests run: 135, Failures: 1, Errors: 0, Skipped: 0", want: true},
+		{line: "[ERROR] Failures: ", want: true},
+		{line: "[ERROR]   PayloadIT.someInvariantTest:283 no row for id", want: true},
+		{line: "[ERROR] Failed to execute goal org.apache.maven.plugins:maven-failsafe-plugin:3.5.2:verify", want: true},
+		{line: "[FATAL] Non-resolvable parent POM", want: true},
+		{line: "Tests run: 135, Failures: 1, Errors: 0, Skipped: 0", want: true},
+		{line: "Tests run: 135, Failures: 0, Errors: 7, Skipped: 0", want: true},
+		{line: "Tests run: 135, Failures: 0, Errors: 0, Skipped: 0", want: false},
+		{line: "[INFO] BUILD FAILURE", want: false},
+		{line: "[WARNING] Using platform encoding", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.line, func(t *testing.T) {
+			got := isVerifyFailureLine(tt.line)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
