@@ -10,24 +10,27 @@ import (
 	"github.com/mhersson/contextmatrix-harness/tools"
 )
 
-// readRootsLogMu and readRootsLogged dedupe identical read-only-roots log
-// lines within one process. The three construction sites that call
-// LogReadRootsOutcome can each rebuild read/grep/glob tools from the SAME
-// declaration more than once per run: readOnlyToolsWithRoots backs two Deps
-// fields built from one call, and PlanTools / WriteToolsForDir are closures
-// the orchestrator can invoke again later in the run. Keying on the full
-// (identity, outcome) pair - not just the inputs - means a genuinely
-// different outcome (a different workspace, or a declaration that resolved
-// differently) still gets its own line. Best-of-N candidates build their
-// registries concurrently (see runCandidate), so this needs a mutex.
-var (
-	readRootsLogMu  sync.Mutex
-	readRootsLogged = map[string]struct{}{}
-)
+// ReadRootsLog dedupes identical read-only-roots log lines for one run. The
+// worker constructs a single instance in runFSM and threads it through every
+// construction site (including via Deps.ReadRootsLog for the review panel),
+// so its dedupe window matches the run's lifetime rather than the process's:
+// readOnlyToolsWithRoots backs two Deps fields built from one declaration,
+// and PlanTools / WriteToolsForDir are closures the orchestrator can invoke
+// again later in the same run. Best-of-N candidates build their registries
+// concurrently (see runCandidate), so the mutex is required, not defensive.
+type ReadRootsLog struct {
+	mu     sync.Mutex
+	logged map[string]struct{}
+}
 
-// LogReadRootsOutcome logs one read/grep/glob tool construction's
-// sanitizeReadRoots outcome: the extra read-only roots that survived, and for
-// each one dropped, why. The harness drops a widening root silently (see
+// NewReadRootsLog returns a fresh, empty tracker.
+func NewReadRootsLog() *ReadRootsLog {
+	return &ReadRootsLog{logged: make(map[string]struct{})}
+}
+
+// Log records one read/grep/glob tool construction's sanitizeReadRoots
+// outcome: the extra read-only roots that survived, and for each one
+// dropped, why. The harness drops a widening root silently (see
 // tools.ReadRoots in the harness's jail.go), so this is the only place an
 // operator whose declared prefix is wrong for the image sees it.
 //
@@ -37,24 +40,31 @@ var (
 // identifies the line. Nothing is logged when no roots were declared -
 // matches the behavior of the logReadOnlyRoots function this replaces. Logs
 // at warn when anything was dropped, info otherwise.
-func LogReadRootsOutcome(cardID, workspace string, rr tools.ReadRoots) {
+//
+// A nil receiver performs no dedup - every call logs. Production always
+// threads a real instance (via runFSM); this only matters for a caller that
+// has no run-scoped tracker to hand in, where an occasional repeat line is
+// the honest cost of not tracking it.
+func (l *ReadRootsLog) Log(cardID, workspace string, rr tools.ReadRoots) {
 	if len(rr.Effective) == 0 && len(rr.Dropped) == 0 {
 		return
 	}
 
-	key := fmt.Sprintf("%s\x00%s\x00%+v", cardID, workspace, rr)
+	if l != nil {
+		key := fmt.Sprintf("%s\x00%s\x00%+v", cardID, workspace, rr)
 
-	readRootsLogMu.Lock()
+		l.mu.Lock()
 
-	_, already := readRootsLogged[key]
-	if !already {
-		readRootsLogged[key] = struct{}{}
-	}
+		_, already := l.logged[key]
+		if !already {
+			l.logged[key] = struct{}{}
+		}
 
-	readRootsLogMu.Unlock()
+		l.mu.Unlock()
 
-	if already {
-		return
+		if already {
+			return
+		}
 	}
 
 	sep := string(os.PathListSeparator)

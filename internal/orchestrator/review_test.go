@@ -3614,7 +3614,7 @@ func TestReviewSubagentToolsKeepTheSkillTool(t *testing.T) {
 	dep := t.TempDir()
 
 	var names []string
-	for _, tl := range reviewSubagentTools(ws, []string{dep}, skill) {
+	for _, tl := range reviewSubagentTools(ws, []string{dep}, skill, nil) {
 		names = append(names, tl.Name())
 	}
 
@@ -3622,12 +3622,12 @@ func TestReviewSubagentToolsKeepTheSkillTool(t *testing.T) {
 
 	// No declaration: the panel gets exactly what it got before, the Skill tool alone.
 	names = nil
-	for _, tl := range reviewSubagentTools(ws, nil, skill) {
+	for _, tl := range reviewSubagentTools(ws, nil, skill, nil) {
 		names = append(names, tl.Name())
 	}
 
 	assert.Equal(t, []string{"skill"}, names)
-	assert.Empty(t, reviewSubagentTools(ws, nil, nil))
+	assert.Empty(t, reviewSubagentTools(ws, nil, nil, nil))
 }
 
 // TestReviewSubagentToolsLogsTheDeclarationOutcome: the panel's widened tools
@@ -3635,12 +3635,13 @@ func TestReviewSubagentToolsKeepTheSkillTool(t *testing.T) {
 // root the harness drops must not vanish silently here either.
 func TestReviewSubagentToolsLogsTheDeclarationOutcome(t *testing.T) {
 	buf := captureReadRootsLog(t)
+	l := NewReadRootsLog()
 
 	ws := t.TempDir()
 	present := t.TempDir()
 	absent := filepath.Join(t.TempDir(), "never-created")
 
-	reviewSubagentTools(ws, []string{present, absent}, nil)
+	reviewSubagentTools(ws, []string{present, absent}, nil, l)
 
 	logged := buf.String()
 	assert.Contains(t, logged, present, "the surviving root must be logged as effective")
@@ -3650,7 +3651,7 @@ func TestReviewSubagentToolsLogsTheDeclarationOutcome(t *testing.T) {
 	// No declaration: nothing to log, matching the early-return that also
 	// skips building the widened tools.
 	buf.Reset()
-	reviewSubagentTools(ws, nil, nil)
+	reviewSubagentTools(ws, nil, nil, l)
 	assert.Empty(t, buf.String())
 }
 
@@ -3665,7 +3666,7 @@ func TestExtraReadOnlyToolsOverrideConfinedDefaults(t *testing.T) {
 	depFile := filepath.Join(dep, "api.go")
 	require.NoError(t, os.WriteFile(depFile, []byte("package dep // WIDGET\n"), 0o600))
 
-	reg := tools.NewRegistry(append(tools.ReadOnlyTools(ws), reviewSubagentTools(ws, []string{dep}, nil)...)...)
+	reg := tools.NewRegistry(append(tools.ReadOnlyTools(ws), reviewSubagentTools(ws, []string{dep}, nil, nil)...)...)
 
 	read, ok := reg.Get("read")
 	require.True(t, ok)

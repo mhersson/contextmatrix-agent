@@ -26,22 +26,22 @@ func captureReadRootsLog(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
-// TestLogReadRootsOutcomeNoRootsNoLog: an empty outcome (no roots declared)
-// must produce nothing, matching the pre-v0.19.0 behavior of the function this
+// TestReadRootsLogNoRootsNoLog: an empty outcome (no roots declared) must
+// produce nothing, matching the pre-v0.19.0 behavior of the function this
 // replaces.
-func TestLogReadRootsOutcomeNoRootsNoLog(t *testing.T) {
+func TestReadRootsLogNoRootsNoLog(t *testing.T) {
 	buf := captureReadRootsLog(t)
 
-	LogReadRootsOutcome("CMX-001", t.TempDir(), tools.ReadRoots{})
+	NewReadRootsLog().Log("CMX-001", t.TempDir(), tools.ReadRoots{})
 
 	assert.Empty(t, buf.String(), "no declared roots means nothing widened or dropped - nothing to log")
 }
 
-// TestLogReadRootsOutcomeReportsEffectiveAndDroppedWithReason: an operator
-// whose declared prefix is wrong must be able to see the dropped root AND its
+// TestReadRootsLogReportsEffectiveAndDroppedWithReason: an operator whose
+// declared prefix is wrong must be able to see the dropped root AND its
 // category, not just silence; a surviving root must show as effective. Level
 // escalates to warn only when something was actually dropped.
-func TestLogReadRootsOutcomeReportsEffectiveAndDroppedWithReason(t *testing.T) {
+func TestReadRootsLogReportsEffectiveAndDroppedWithReason(t *testing.T) {
 	buf := captureReadRootsLog(t)
 
 	rr := tools.ReadRoots{
@@ -51,7 +51,7 @@ func TestLogReadRootsOutcomeReportsEffectiveAndDroppedWithReason(t *testing.T) {
 		},
 	}
 
-	LogReadRootsOutcome("CMX-001", "/workspace", rr)
+	NewReadRootsLog().Log("CMX-001", "/workspace", rr)
 
 	logged := buf.String()
 	assert.Contains(t, logged, "level=WARN", "a drop must be reported at warning level")
@@ -61,12 +61,12 @@ func TestLogReadRootsOutcomeReportsEffectiveAndDroppedWithReason(t *testing.T) {
 	assert.Contains(t, logged, string(tools.DropReasonRelative), "the drop reason must be named")
 }
 
-// TestLogReadRootsOutcomeNoDropsStaysInfo: an outcome with only effective
-// roots and nothing dropped is not warning-worthy.
-func TestLogReadRootsOutcomeNoDropsStaysInfo(t *testing.T) {
+// TestReadRootsLogNoDropsStaysInfo: an outcome with only effective roots and
+// nothing dropped is not warning-worthy.
+func TestReadRootsLogNoDropsStaysInfo(t *testing.T) {
 	buf := captureReadRootsLog(t)
 
-	LogReadRootsOutcome("CMX-001", "/workspace", tools.ReadRoots{Effective: []string{"/srv/deps"}})
+	NewReadRootsLog().Log("CMX-001", "/workspace", tools.ReadRoots{Effective: []string{"/srv/deps"}})
 
 	logged := buf.String()
 	require.NotEmpty(t, logged)
@@ -74,28 +74,59 @@ func TestLogReadRootsOutcomeNoDropsStaysInfo(t *testing.T) {
 	assert.NotContains(t, logged, "level=WARN")
 }
 
-// TestLogReadRootsOutcomeDedupesIdenticalOutcome: readOnlyToolsWithRoots is
-// invoked from two Deps fields built from the same declaration, and a
+// TestReadRootsLogDedupesIdenticalOutcome: readOnlyToolsWithRoots is invoked
+// from two Deps fields built from the same declaration, and a
 // PlanTools/WriteToolsForDir closure can rebuild the same tools again later in
-// the same run - so an identical (identity, outcome) pair must log once, not
-// once per construction. A genuinely different workspace is a different
-// outcome and must still get its own line.
-func TestLogReadRootsOutcomeDedupesIdenticalOutcome(t *testing.T) {
+// the same run - so one tracker instance must log an identical (identity,
+// outcome) pair once, not once per construction. A genuinely different
+// workspace is a different outcome and must still get its own line.
+func TestReadRootsLogDedupesIdenticalOutcome(t *testing.T) {
 	buf := captureReadRootsLog(t)
 
+	l := NewReadRootsLog()
 	ws := t.TempDir()
 	rr := tools.ReadRoots{Effective: []string{filepath.Join(ws, "vendor")}}
 
-	LogReadRootsOutcome("CMX-100", ws, rr)
+	l.Log("CMX-100", ws, rr)
 
 	first := buf.String()
 	require.NotEmpty(t, first, "the first construction with this outcome must log")
 
 	buf.Reset()
-	LogReadRootsOutcome("CMX-100", ws, rr)
-	assert.Empty(t, buf.String(), "an identical (identity, outcome) pair must not log again")
+	l.Log("CMX-100", ws, rr)
+	assert.Empty(t, buf.String(), "an identical (identity, outcome) pair on the same tracker must not log again")
 
 	buf.Reset()
-	LogReadRootsOutcome("CMX-100", t.TempDir(), rr)
+	l.Log("CMX-100", t.TempDir(), rr)
 	assert.NotEmpty(t, buf.String(), "a different workspace is a different outcome and must still log")
+}
+
+// TestReadRootsLogDoesNotDedupeAcrossTrackers: two independent runs (each
+// with their own tracker) must not suppress each other's line - dedup is
+// run-scoped, not process-wide.
+func TestReadRootsLogDoesNotDedupeAcrossTrackers(t *testing.T) {
+	buf := captureReadRootsLog(t)
+
+	ws := t.TempDir()
+	rr := tools.ReadRoots{Effective: []string{filepath.Join(ws, "vendor")}}
+
+	NewReadRootsLog().Log("CMX-100", ws, rr)
+	require.NotEmpty(t, buf.String())
+
+	buf.Reset()
+	NewReadRootsLog().Log("CMX-100", ws, rr)
+	assert.NotEmpty(t, buf.String(), "a fresh tracker for the same (identity, outcome) must still log")
+}
+
+// TestReadRootsLogNilReceiverLogsWithoutDedup: a caller with no run-scoped
+// tracker to hand in (a nil *ReadRootsLog) still gets the line - it just
+// can't dedupe repeats.
+func TestReadRootsLogNilReceiverLogsWithoutDedup(t *testing.T) {
+	buf := captureReadRootsLog(t)
+
+	var l *ReadRootsLog
+
+	l.Log("CMX-001", "/workspace", tools.ReadRoots{Effective: []string{"/srv/deps"}})
+
+	assert.NotEmpty(t, buf.String(), "a nil tracker must still log - it only skips dedup")
 }

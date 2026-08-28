@@ -229,9 +229,16 @@ type Deps struct {
 	// worker start. Phases hand them to tools that read paths; nothing here
 	// derives them from a card body, a plan, or a model output.
 	ReadRoots []string
-	SkillTool tools.Tool // optional; engaged by coder/review/document subagents (nil when no task-skills)
-	Cfg       Config
-	Redact    func(string) string // nil = identity; scrubs tool output in phase runs (wired by the worker)
+	// ReadRootsLog dedupes the read-only-roots outcome line across every tool
+	// construction in this run (see ReadRootsLog). The worker constructs one
+	// instance per run and threads it here as well as into writeToolsFor and
+	// readOnlyToolsWithRoots, so reviewSubagentTools - which only has this
+	// Deps value to work from - reports through the same tracker. Nil is safe
+	// (Log degrades to no dedup) but production always sets it.
+	ReadRootsLog *ReadRootsLog
+	SkillTool    tools.Tool // optional; engaged by coder/review/document subagents (nil when no task-skills)
+	Cfg          Config
+	Redact       func(string) string // nil = identity; scrubs tool output in phase runs (wired by the worker)
 	// Human is the HITL ask-and-wait channel, satisfied by the worker's live
 	// Inbox. It is a genuine nil for autonomous runs; mode is read from
 	// Cfg.Interactive, never from Human != nil (the nil-concrete footgun).

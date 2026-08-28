@@ -1544,7 +1544,7 @@ func TestPlanToolsRegistryCarriesFindingsTool(t *testing.T) {
 func TestWriteToolsForThreadsExtraEnv(t *testing.T) {
 	t.Parallel()
 
-	wt := writeToolsFor("", t.TempDir(), 60, []string{"TEST_EXTRA_VAR=hello-from-extra"}, nil, nil)
+	wt := writeToolsFor(nil, "", t.TempDir(), 60, []string{"TEST_EXTRA_VAR=hello-from-extra"}, nil, nil)
 
 	var bash tools.Tool
 
@@ -1860,7 +1860,7 @@ func TestWriteToolsRegisterVerifyToolWhenResolved(t *testing.T) {
 	t.Parallel()
 
 	var names []string
-	for _, tl := range writeToolsFor("", t.TempDir(), 60, nil, nil, stubVerifyTool{}) {
+	for _, tl := range writeToolsFor(nil, "", t.TempDir(), 60, nil, nil, stubVerifyTool{}) {
 		names = append(names, tl.Name())
 	}
 
@@ -1871,7 +1871,7 @@ func TestWriteToolsOmitVerifyToolWhenUnresolved(t *testing.T) {
 	t.Parallel()
 
 	var names []string
-	for _, tl := range writeToolsFor("", t.TempDir(), 60, nil, nil, nil) {
+	for _, tl := range writeToolsFor(nil, "", t.TempDir(), 60, nil, nil, nil) {
 		names = append(names, tl.Name())
 	}
 
@@ -1915,7 +1915,7 @@ func TestReadRootsReachReadGrepAndGlob(t *testing.T) {
 	requireRipgrep(t)
 
 	ws, dep, depFile := readRootsFixture(t)
-	reg := tools.NewRegistry(readOnlyToolsWithRoots("", ws, []string{dep})...)
+	reg := tools.NewRegistry(readOnlyToolsWithRoots(nil, "", ws, []string{dep})...)
 
 	read, ok := reg.Get("read")
 	require.True(t, ok)
@@ -1947,7 +1947,7 @@ func TestAbsentDeclarationLeavesBehaviourUnchanged(t *testing.T) {
 
 	ws, dep, depFile := readRootsFixture(t)
 
-	widened := tools.NewRegistry(readOnlyToolsWithRoots("", ws, nil)...)
+	widened := tools.NewRegistry(readOnlyToolsWithRoots(nil, "", ws, nil)...)
 	baseline := tools.NewRegistry(tools.ReadOnlyTools(ws)...)
 
 	assert.ElementsMatch(t, toolNames(t, baseline), toolNames(t, widened),
@@ -1985,7 +1985,7 @@ func TestWriteToolsAreNotWidened(t *testing.T) {
 	ws, dep, depFile := readRootsFixture(t)
 	require.NoError(t, os.WriteFile(filepath.Join(ws, "in-workspace.txt"), []byte("x"), 0o600))
 
-	reg := tools.NewRegistry(writeToolsFor("", ws, 60, nil, []string{dep}, nil)...)
+	reg := tools.NewRegistry(writeToolsFor(nil, "", ws, 60, nil, []string{dep}, nil)...)
 
 	read, ok := reg.Get("read")
 	require.True(t, ok)
@@ -2108,7 +2108,7 @@ func TestWriteToolsForLogsReadRootsOutcome(t *testing.T) {
 	present := t.TempDir()
 	absent := filepath.Join(t.TempDir(), "never-created")
 
-	writeToolsFor("CMX-001", t.TempDir(), 60, nil, []string{present, absent}, nil)
+	writeToolsFor(orchestrator.NewReadRootsLog(), "CMX-001", t.TempDir(), 60, nil, []string{present, absent}, nil)
 
 	logged := buf.String()
 	assert.Contains(t, logged, present, "the surviving root must be logged as effective")
@@ -2122,7 +2122,7 @@ func TestWriteToolsForLogsReadRootsOutcome(t *testing.T) {
 func TestWriteToolsForLogsNothingWithNoDeclaration(t *testing.T) {
 	buf := captureReadRootsLog(t)
 
-	writeToolsFor("CMX-001", t.TempDir(), 60, nil, nil, nil)
+	writeToolsFor(orchestrator.NewReadRootsLog(), "CMX-001", t.TempDir(), 60, nil, nil, nil)
 
 	assert.Empty(t, buf.String())
 }
@@ -2135,7 +2135,7 @@ func TestReadOnlyToolsWithRootsLogsReadRootsOutcome(t *testing.T) {
 	present := t.TempDir()
 	absent := filepath.Join(t.TempDir(), "never-created")
 
-	readOnlyToolsWithRoots("CMX-001", t.TempDir(), []string{present, absent})
+	readOnlyToolsWithRoots(orchestrator.NewReadRootsLog(), "CMX-001", t.TempDir(), []string{present, absent})
 
 	logged := buf.String()
 	assert.Contains(t, logged, present, "the surviving root must be logged as effective")
@@ -2148,7 +2148,29 @@ func TestReadOnlyToolsWithRootsLogsReadRootsOutcome(t *testing.T) {
 func TestReadOnlyToolsWithRootsLogsNothingWithNoDeclaration(t *testing.T) {
 	buf := captureReadRootsLog(t)
 
-	readOnlyToolsWithRoots("CMX-001", t.TempDir(), nil)
+	readOnlyToolsWithRoots(orchestrator.NewReadRootsLog(), "CMX-001", t.TempDir(), nil)
 
 	assert.Empty(t, buf.String())
+}
+
+// TestSharedTrackerDedupesAcrossConstructionSites: runFSM builds exactly one
+// ReadRootsLog per run and threads it into both writeToolsFor and
+// readOnlyToolsWithRoots. In production both are called with the SAME
+// (cardID, a.ws, a.spec.ReadOnlyRoots), so this proves the second call, not
+// just repeat calls to the same function, is what the shared tracker
+// suppresses.
+func TestSharedTrackerDedupesAcrossConstructionSites(t *testing.T) {
+	buf := captureReadRootsLog(t)
+
+	rrLog := orchestrator.NewReadRootsLog()
+	ws := t.TempDir()
+	present := t.TempDir()
+
+	writeToolsFor(rrLog, "CMX-001", ws, 60, nil, []string{present}, nil)
+	require.NotEmpty(t, buf.String(), "the first construction must log")
+
+	buf.Reset()
+	readOnlyToolsWithRoots(rrLog, "CMX-001", ws, []string{present})
+	assert.Empty(t, buf.String(),
+		"the shared tracker must dedupe an identical outcome reached through a different construction site")
 }
