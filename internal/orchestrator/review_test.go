@@ -1803,6 +1803,94 @@ func TestRunSpecialistsNoReviewerParksInstead(t *testing.T) {
 	require.ErrorAs(t, err, &parked, "an empty panel must park rather than panic")
 }
 
+// TestRunSpecialistsMaxTurnsMarksTruncated proves a specialist that hits its
+// turn cap without ever emitting final-form findings gets flagged in the
+// synthesis input under its own role heading - so an empty or partial section
+// doesn't read as a clean bill - and named in the card log, so a human can see
+// which reviewer dropped out.
+func TestRunSpecialistsMaxTurnsMarksTruncated(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{}
+	// Every specialist gets exactly one turn (MaxTurns=1) and burns it on a
+	// tool call that never resolves to a final answer, so every result comes
+	// back with Reason=="max_turns".
+	client := &planLLM{responses: []llm.Response{burnResp(""), burnResp(""), burnResp("")}}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+	d.Cfg.MaxTurns = 1
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+
+	out, err := o.runSpecialists(context.Background(), false)
+	require.NoError(t, err)
+
+	var section string
+
+	for _, s := range strings.Split(out, "## ") {
+		if strings.HasPrefix(s, "correctness findings") {
+			section = s
+
+			break
+		}
+	}
+
+	require.NotEmpty(t, section, "the correctness section must exist in the output; out=%q", out)
+
+	assert.Contains(t, section, "(this specialist ran out of turns",
+		"a max_turns result must be flagged under its own role heading; section=%q", section)
+
+	assert.True(t, ops.loggedContains("correctness specialist ran out of turns"),
+		"the card log must name the dropped role; logs=%v", ops.logs)
+}
+
+// TestRunSpecialistsSpecsCarryWrapUp proves every specialist spec is built
+// with a wrap-up nudge armed, so a specialist about to run out of turns is
+// told to land its findings instead of dying silently at the cap.
+func TestRunSpecialistsSpecsCarryWrapUp(t *testing.T) {
+	require.Positive(t, reviewWrapUpTurns)
+	require.NotEmpty(t, reviewWrapUpMessage)
+
+	ops := &fakeOps{}
+	git := &fakeGit{}
+	// Every request burns a turn so no specialist stops on its own; MaxTurns
+	// is set just above reviewWrapUpTurns so the nudge fires - once each -
+	// before every one of the 3 specialists then hits its cap.
+	responses := make([]llm.Response, 0, 3*(reviewWrapUpTurns+1))
+	for range 3 * (reviewWrapUpTurns + 1) {
+		responses = append(responses, burnResp(""))
+	}
+
+	client := &planLLM{responses: responses}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+	d.Cfg.MaxTurns = reviewWrapUpTurns + 1
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+
+	_, err := o.runSpecialists(context.Background(), false)
+	require.NoError(t, err)
+
+	client.mu.Lock()
+	tasks := append([]string(nil), client.tasks...)
+	models := append([]string(nil), client.models...)
+	client.mu.Unlock()
+
+	// Each specialist runs a distinct model (reviewerRegistry's priors rank
+	// alpha/beta/gamma above delta), so the model on each call identifies
+	// which specialist it belongs to - proving the nudge reached all 3, not
+	// just one specialist repeatedly.
+	nudgedModels := map[string]bool{}
+
+	for i, task := range tasks {
+		if task == reviewWrapUpMessage {
+			nudgedModels[models[i]] = true
+		}
+	}
+
+	assert.Len(t, nudgedModels, 3,
+		"every one of the 3 specialist specs must carry the wrap-up nudge; nudged models=%v tasks=%v", nudgedModels, tasks)
+}
+
 func TestReviewGateFailureSkipsSpecialists(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true}
