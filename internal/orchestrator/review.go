@@ -1125,27 +1125,7 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 		o.spendAndReport(ctx, o.ledger, cfg.CardID, "review: report specialist usage failed",
 			res.Result, specs[i].Model, "main", 0, "role", res.Role)
 
-		b.WriteString("## ")
-		b.WriteString(res.Role)
-		b.WriteString(" findings\n")
-
-		switch {
-		case res.Err != nil:
-			slog.Warn("review: specialist run failed", "card_id", cfg.CardID, "role", res.Role, "error", res.Err)
-			b.WriteString("(specialist run failed: " + res.Err.Error() + ")\n")
-		case res.Result.Reason == "max_turns":
-			// The findings were never emitted in final form; telling the
-			// synthesizer the lens is truncated stops an empty section from
-			// reading as a clean bill.
-			slog.Warn("review: specialist hit its turn cap", "card_id", cfg.CardID, "role", res.Role, "turns", res.Result.Turns)
-			d.logCard(ctx, "review: the %s specialist ran out of turns - its findings are truncated or missing", res.Role)
-			b.WriteString("(this specialist ran out of turns; anything below is truncated, and silence is NOT a clean bill)\n")
-			b.WriteString(res.Output)
-			b.WriteString("\n")
-		default:
-			b.WriteString(res.Output)
-			b.WriteString("\n")
-		}
+		b.WriteString(o.specialistSection(ctx, res))
 	}
 
 	// Capture the reviewed head as the next round's delta base (mirrors CM's
@@ -1159,6 +1139,39 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 	}
 
 	return b.String(), nil
+}
+
+// specialistSection renders one specialist's findings section - heading plus
+// body - for the review synthesis input.
+func (o *run) specialistSection(ctx context.Context, res harness.SubagentResult) string {
+	var b strings.Builder
+
+	b.WriteString("## ")
+	b.WriteString(res.Role)
+	b.WriteString(" findings\n")
+
+	switch {
+	case res.Err != nil:
+		slog.Warn("review: specialist run failed", "card_id", o.d.Cfg.CardID, "role", res.Role, "error", res.Err)
+		b.WriteString("(specialist run failed: " + res.Err.Error() + ")\n")
+	case res.Result.Reason != "done":
+		// The findings were never emitted in final form - the child hit a
+		// turn cap, its context window, a cost cap, or was judged
+		// incapable. Whatever the reason, telling the synthesizer the lens
+		// is truncated stops an empty section from reading as a clean
+		// bill. Keyed on != done so a reason this code has never heard of
+		// fails FLAGGED, not clean.
+		slog.Warn("review: specialist stopped early", "card_id", o.d.Cfg.CardID, "role", res.Role, "reason", res.Result.Reason, "turns", res.Result.Turns)
+		o.d.logCard(ctx, "review: the %s specialist stopped early (%s) - its findings are truncated or missing", res.Role, res.Result.Reason)
+		b.WriteString("(this specialist stopped early: " + res.Result.Reason + "; anything below is truncated, and silence is NOT a clean bill)\n")
+		b.WriteString(res.Output)
+		b.WriteString("\n")
+	default:
+		b.WriteString(res.Output)
+		b.WriteString("\n")
+	}
+
+	return b.String()
 }
 
 // reviewPanel returns the three specialist seats. An explicit,

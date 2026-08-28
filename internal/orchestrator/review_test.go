@@ -1836,11 +1836,71 @@ func TestRunSpecialistsMaxTurnsMarksTruncated(t *testing.T) {
 
 	require.NotEmpty(t, section, "the correctness section must exist in the output; out=%q", out)
 
-	assert.Contains(t, section, "(this specialist ran out of turns",
+	assert.Contains(t, section, "(this specialist stopped early: max_turns",
 		"a max_turns result must be flagged under its own role heading; section=%q", section)
 
-	assert.True(t, ops.loggedContains("correctness specialist ran out of turns"),
+	assert.True(t, ops.loggedContains("correctness specialist stopped early (max_turns)"),
 		"the card log must name the dropped role; logs=%v", ops.logs)
+}
+
+// TestRunSpecialistsFlagsNonCleanStops proves specialistSection flags EVERY
+// non-clean stop reason - not just max_turns - the same way: a truncation
+// marker naming the reason under the role's heading, plus a card-log line,
+// with the partial output still carried through. The "some_future_reason"
+// row pins the polarity: a reason this code has never seen must still be
+// flagged, never read as clean. The "done" row is the negative control - a
+// clean stop gets neither marker nor log line, and its output passes through
+// untouched.
+func TestRunSpecialistsFlagsNonCleanStops(t *testing.T) {
+	tests := []struct {
+		reason   string
+		wantFlag bool
+	}{
+		{reason: "max_turns", wantFlag: true},
+		{reason: "context_limit", wantFlag: true},
+		{reason: harness.ReasonIncapable, wantFlag: true},
+		{reason: "max_cost", wantFlag: true},
+		{reason: "canceled", wantFlag: true},
+		{reason: "some_future_reason", wantFlag: true}, // polarity: unknown reasons are flagged, never clean
+		{reason: "done", wantFlag: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.reason, func(t *testing.T) {
+			ops := &fakeOps{}
+			d := reviewTestDeps(t, ops, &fakeGit{}, &planLLM{}, reviewerRegistry())
+			tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+			o := newReviewRun(d, tc, 0)
+
+			res := harness.SubagentResult{
+				Role:   "correctness",
+				Output: "partial findings before the stop",
+				Result: harness.Result{Reason: tt.reason, Turns: 3},
+			}
+
+			section := o.specialistSection(context.Background(), res)
+
+			assert.Contains(t, section, res.Output,
+				"the partial output must always pass through; section=%q", section)
+
+			marker := "(this specialist stopped early: " + tt.reason +
+				"; anything below is truncated, and silence is NOT a clean bill)"
+			logLine := "review: the correctness specialist stopped early (" + tt.reason +
+				") - its findings are truncated or missing"
+
+			if tt.wantFlag {
+				assert.Contains(t, section, marker,
+					"a %q result must be flagged under its own role heading; section=%q", tt.reason, section)
+				assert.True(t, ops.loggedContains(logLine),
+					"the card log must name the dropped role and reason; logs=%v", ops.logs)
+			} else {
+				assert.NotContains(t, section, "stopped early",
+					"a clean done result must carry no truncation marker; section=%q", section)
+				assert.False(t, ops.loggedContains("stopped early"),
+					"a clean done result must log nothing; logs=%v", ops.logs)
+			}
+		})
+	}
 }
 
 // TestRunSpecialistsSpecsCarryWrapUp proves every specialist spec is built
