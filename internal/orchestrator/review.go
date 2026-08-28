@@ -1009,6 +1009,12 @@ func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, autho
 	return strings.TrimSpace(formatFixes(v)), v.FixTier, false, vres, v.Fixes, nil
 }
 
+// reviewWrapUpMessage lands the specialist the way coders land: findings
+// emitted in the required format beat a silent max_turns death.
+const reviewWrapUpMessage = "You are nearly out of turns. Stop investigating and output your findings NOW in the required format. An incomplete findings list is useful; no findings is not."
+
+const reviewWrapUpTurns = 3
+
 // runSpecialists fans the three review lenses out as parallel read-only child
 // agents over the branch diff and returns their concatenated findings. Each
 // child's spend is recorded on the ledger and reported per result.
@@ -1081,6 +1087,8 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 			Model:         panel[i].Model,
 			MaxTurns:      cfg.MaxTurns,
 			ContextWindow: panel[i].ContextWindow,
+			WrapUpTurns:   reviewWrapUpTurns,
+			WrapUpMessage: reviewWrapUpMessage,
 		}
 	}
 
@@ -1116,10 +1124,20 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 		b.WriteString(res.Role)
 		b.WriteString(" findings\n")
 
-		if res.Err != nil {
+		switch {
+		case res.Err != nil:
 			slog.Warn("review: specialist run failed", "card_id", cfg.CardID, "role", res.Role, "error", res.Err)
 			b.WriteString("(specialist run failed: " + res.Err.Error() + ")\n")
-		} else {
+		case res.Result.Reason == "max_turns":
+			// The findings were never emitted in final form; telling the
+			// synthesizer the lens is truncated stops an empty section from
+			// reading as a clean bill.
+			slog.Warn("review: specialist hit its turn cap", "card_id", cfg.CardID, "role", res.Role, "turns", res.Result.Turns)
+			d.logCard(ctx, "review: the %s specialist ran out of turns - its findings are truncated or missing", res.Role)
+			b.WriteString("(this specialist ran out of turns; anything below is truncated, and silence is NOT a clean bill)\n")
+			b.WriteString(res.Output)
+			b.WriteString("\n")
+		default:
 			b.WriteString(res.Output)
 			b.WriteString("\n")
 		}
