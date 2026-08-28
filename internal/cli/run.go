@@ -141,8 +141,8 @@ func newRunCmd() *cobra.Command {
 	return cmd
 }
 
-// runSpike wires concrete deps and runs the harness once. Exposed for tests with
-// a fake LLM (TestRunSpikeDrivesKataGreen).
+// runSpike wires concrete deps and runs the harness once. Exposed for tests
+// that drive it with a fake LLM.
 func runSpike(ctx context.Context, client llm.LLM, o runOpts) (harness.Result, error) {
 	if o.taskDir == "" {
 		return harness.Result{}, fmt.Errorf("workspace is required")

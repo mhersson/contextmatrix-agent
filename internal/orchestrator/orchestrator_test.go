@@ -3,8 +3,10 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/stretchr/testify/assert"
@@ -268,6 +270,99 @@ func TestRunVerifyParkedParks(t *testing.T) {
 		"the card carries the failing output tail; logs=%v", ops.logs)
 	// No further phase entered after the park.
 	assert.Equal(t, -1, indexOfCall(calls, "SetPhase:execute"))
+}
+
+// bigVerifyOutput builds a numbered multi-line verify output far larger than
+// any card-log entry can carry, so a truncation test can tell the head of the
+// output from its tail.
+func bigVerifyOutput(lines int) string {
+	var b strings.Builder
+
+	for i := range lines {
+		fmt.Fprintf(&b, "verify output line %04d\n", i)
+	}
+
+	return b.String()
+}
+
+// TestVerifyParkedLogMessageFitsTheBoardsLogCap pins the bound that keeps this
+// note on the card at all. ContextMatrix REJECTS an activity-log message over
+// 2000 bytes rather than truncating it, and logCard swallows the rejection into
+// a warning - so an over-long note does not arrive clipped, it does not arrive.
+// A park whose whole purpose is visibility would then be invisible, which is
+// the failure this bound exists to prevent.
+//
+// The truncation is tail-biased: a build tool's diagnostics are concentrated in
+// its LAST bytes, so a note that kept the head would keep the least useful part
+// and drop the reason the card is blocked.
+func TestVerifyParkedLogMessageFitsTheBoardsLogCap(t *testing.T) {
+	// The board's own limit, restated rather than read from the constant under
+	// test: raising that constant past what ContextMatrix accepts must fail here.
+	const boardLogCap = 2000
+
+	t.Run("output far past the cap is trimmed from the front", func(t *testing.T) {
+		out := bigVerifyOutput(500) // ~12 KB
+		require.Greater(t, len(out), 4000, "the fixture must exceed the excerpt cap, or this pins nothing")
+
+		got := verifyParkedLogMessage(&VerifyParkedError{
+			Subtask: "SUB-1",
+			Command: "make test",
+			Output:  out,
+		})
+
+		assert.LessOrEqual(t, len(got), 1900,
+			"the note must fit under the board's %d-byte log cap with margin; got %d bytes", boardLogCap, len(got))
+
+		assert.Contains(t, got, "SUB-1", "the header survives truncation")
+		assert.Contains(t, got, "make test", "the failing command survives truncation")
+
+		assert.Contains(t, got, "verify output line 0499", "the note keeps the output's tail")
+		assert.NotContains(t, got, "verify output line 0000", "the note drops the output's head")
+
+		assert.True(t, utf8.ValidString(got), "truncation must not split a rune")
+	})
+
+	t.Run("output that already fits is carried whole", func(t *testing.T) {
+		out := "--- FAIL: TestThing\n    thing_test.go:12: want 1, got 2"
+
+		got := verifyParkedLogMessage(&VerifyParkedError{Subtask: "SUB-1", Command: "make test", Output: out})
+
+		assert.LessOrEqual(t, len(got), 1900)
+		assert.Contains(t, got, out, "a note that fits is never elided")
+	})
+
+	t.Run("no output leaves the header alone", func(t *testing.T) {
+		got := verifyParkedLogMessage(&VerifyParkedError{Subtask: "SUB-1", Command: "make test"})
+
+		assert.LessOrEqual(t, len(got), 1900)
+		assert.Contains(t, got, "SUB-1")
+		assert.Contains(t, got, "make test")
+	})
+
+	t.Run("a pathologically long command still fits", func(t *testing.T) {
+		got := verifyParkedLogMessage(&VerifyParkedError{
+			Subtask: "SUB-1",
+			Command: strings.Repeat("x", 4000),
+			Output:  bigVerifyOutput(500),
+		})
+
+		assert.LessOrEqual(t, len(got), 1900,
+			"the bound holds even when the header alone would overrun it; got %d bytes", len(got))
+		assert.True(t, utf8.ValidString(got))
+	})
+
+	t.Run("multi-byte output is cut on a rune boundary", func(t *testing.T) {
+		// Every line ends in a 3-byte rune, so a byte-aligned cut lands mid-rune.
+		var b strings.Builder
+		for i := range 500 {
+			fmt.Fprintf(&b, "line %04d ✗\n", i)
+		}
+
+		got := verifyParkedLogMessage(&VerifyParkedError{Subtask: "SUB-1", Command: "make test", Output: b.String()})
+
+		assert.LessOrEqual(t, len(got), 1900)
+		assert.True(t, utf8.ValidString(got), "a multi-byte rune at the cut must be dropped whole")
+	})
 }
 
 // TestMaxTurnsLogMessagePhaseAware proves the turn-cap park message names a

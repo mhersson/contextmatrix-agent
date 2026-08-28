@@ -496,9 +496,8 @@ func (o *run) pickCandidateModel(c *candidate, prompt string) (pick registry.Pic
 	return next, true, true
 }
 
-// candidatePhase names one Best-of-N seat in selection advisories, so the
-// fan-out's own pick and a later re-pick for the same candidate share a
-// dedupe key.
+// candidatePhase gives the fan-out's own pick and a later re-pick for the
+// same candidate a shared dedupe key in selection advisories.
 func candidatePhase(idx int) string { return fmt.Sprintf("best-of-n candidate %d", idx) }
 
 // errCandidatePoolExhausted drops one Best-of-N candidate cleanly: every model

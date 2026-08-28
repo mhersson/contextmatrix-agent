@@ -1,11 +1,13 @@
 package cli
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"math/big"
 	"os"
@@ -16,8 +18,11 @@ import (
 
 	"github.com/mhersson/contextmatrix-agent/internal/config"
 	"github.com/mhersson/contextmatrix-agent/internal/secrets"
+	"github.com/mhersson/contextmatrix-agent/internal/worker"
+	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/mhersson/contextmatrix-harness/llm"
 	protocol "github.com/mhersson/contextmatrix-protocol"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -47,6 +52,44 @@ func writeSelfSignedCA(t *testing.T) string {
 	require.NoError(t, os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600))
 
 	return path
+}
+
+// TestBuildWorkEmitterStampsAttemptOrdinal pins the RunE wiring site that
+// builds the container's event emitter: buildWorkEmitter must thread
+// spec.Attempt through the real attempt.NewWriter wrapper onto cmd's output,
+// not a hardcoded 1 - hardcoding 1 would pass every other test in the suite
+// (attempt 1 is the writer's untouched pass-through case) while silently
+// losing the ordinal that separates a restarted container's transcript from
+// its predecessor's.
+func TestBuildWorkEmitterStampsAttemptOrdinal(t *testing.T) {
+	t.Run("an attempt above 1 is stamped onto the transcript", func(t *testing.T) {
+		var buf bytes.Buffer
+
+		cmd := &cobra.Command{}
+		cmd.SetOut(&buf)
+
+		emit := buildWorkEmitter(cmd, worker.RunSpec{Attempt: 2})
+		emit.Emit(events.ToolCallKind, map[string]any{"tool": "bash"})
+
+		var got map[string]any
+		require.NoError(t, json.Unmarshal(bytes.TrimRight(buf.Bytes(), "\n"), &got))
+		assert.EqualValues(t, 2, got["attempt"])
+	})
+
+	t.Run("the first attempt is left unstamped", func(t *testing.T) {
+		var buf bytes.Buffer
+
+		cmd := &cobra.Command{}
+		cmd.SetOut(&buf)
+
+		emit := buildWorkEmitter(cmd, worker.RunSpec{Attempt: 1})
+		emit.Emit(events.ToolCallKind, map[string]any{"tool": "bash"})
+
+		var got map[string]any
+		require.NoError(t, json.Unmarshal(bytes.TrimRight(buf.Bytes(), "\n"), &got))
+		_, ok := got["attempt"]
+		assert.False(t, ok, "attempt 1 must not carry an explicit attempt field")
+	})
 }
 
 func TestCAInjections(t *testing.T) {
