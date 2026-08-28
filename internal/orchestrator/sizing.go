@@ -63,6 +63,27 @@ func seedSizing(plannerTier string) sizing {
 	return sizing{Bar: bar, Budget: seedBudgetStep(bar)}
 }
 
+// wideSubtaskFiles is the declared-file count at which a fresh subtask opens
+// one budget rung wider. The plan prompt's file guidance is ~5; a subtask
+// listing this many was emitted under the cross-cutting exception and is known
+// wide at emission time - the one case that needs a wider window and costs no
+// inference to detect.
+const wideSubtaskFiles = 7
+
+// seedSubtaskSizing sizes a fresh subtask from the planner's tier word plus
+// the volume the subtask itself declares in its Files: list. The tier word
+// only ever answers risk; breadth arrives on the budget axis alone, so a wide
+// subtask can never buy a more expensive model.
+func seedSubtaskSizing(plannerTier, description string) sizing {
+	s := seedSizing(plannerTier)
+
+	if len(filePathTokens(filesSection(description))) >= wideSubtaskFiles {
+		s = s.raiseBudget()
+	}
+
+	return s
+}
+
 // seedBudgetStep is the ladder rung a bar opens at.
 func seedBudgetStep(bar registry.Tier) int {
 	switch bar {

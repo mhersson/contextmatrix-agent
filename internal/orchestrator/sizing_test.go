@@ -212,3 +212,33 @@ func TestSeedSizingMapsBothAxes(t *testing.T) {
 		})
 	}
 }
+
+// seedSubtaskSizing folds the subtask's declared Files: volume onto the
+// budget axis at creation time. The bar never moves on volume - breadth is
+// evidence about turns spent, not about how capable the model must be.
+func TestSeedSubtaskSizing(t *testing.T) {
+	wide := "Files:\n" +
+		"- backend/src/main/java/a/One.java\n- backend/src/main/java/a/Two.java\n" +
+		"- backend/src/main/java/a/Three.java\n- backend/src/main/java/a/Four.java\n" +
+		"- backend/src/main/java/a/Five.java\n- backend/src/main/java/a/Six.java\n" +
+		"- backend/src/main/java/a/Seven.java\n- backend/src/main/java/a/Eight.java\n"
+	narrow := "Files:\n- backend/src/main/java/a/One.java\n- backend/src/test/java/a/OneTest.java\n"
+
+	tests := []struct {
+		name, tier, desc string
+		wantBudget       int
+	}{
+		{"moderate narrow keeps base", "moderate", narrow, 0},
+		{"moderate wide widens one rung", "moderate", wide, 1},
+		{"complex wide widens above its seed", "complex", wide, 2},
+		{"critical wide clamps at the top rung", "critical", wide, maxBudgetStep},
+		{"no files section keeps the seed", "moderate", "just prose", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := seedSubtaskSizing(tt.tier, tt.desc)
+			assert.Equal(t, tt.wantBudget, s.Budget)
+			assert.Equal(t, seedSizing(tt.tier).Bar, s.Bar) // bar never moves on volume
+		})
+	}
+}
