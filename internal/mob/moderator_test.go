@@ -154,6 +154,83 @@ func TestSendTurnTimeoutReplacesTask(t *testing.T) {
 	assert.Empty(t, rec.get(2), "fresh task starts with empty history")
 }
 
+func TestSendTurnSalvagesResponseInsideGrace(t *testing.T) {
+	calls := 0
+
+	runner := func(_ context.Context, _ SeatConfig, _ []Turn, _ string) (string, float64, error) {
+		calls++
+
+		// Lands past the deadline but inside the grace: a finished review the
+		// old wait discarded must come back as a normal turn.
+		time.Sleep(150 * time.Millisecond)
+
+		return "late but finished", 0.02, nil
+	}
+
+	srv, err := StartServer([]SeatConfig{{Name: "seat-1"}}, runner, modBearer)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = srv.Close() })
+
+	h, err := dialSeat(t.Context(), "seat-1", "", srv.SeatEndpoint("seat-1"), modBearer)
+	require.NoError(t, err)
+	t.Cleanup(func() { h.closeSeat(context.Background()) })
+
+	h.deadline = 50 * time.Millisecond
+	h.grace = 5 * time.Second
+
+	u, err := h.sendTurn(t.Context(), 0, "body-0")
+	require.NoError(t, err)
+	assert.Equal(t, "late but finished", u)
+	assert.InDelta(t, 0.02, h.lastCost, 1e-12)
+	require.NotEmpty(t, h.taskID, "a salvaged turn keeps its task for the next round")
+	assert.Equal(t, 1, calls, "the in-flight run was not canceled or retried")
+}
+
+func TestSendTurnDropsResponsePastGrace(t *testing.T) {
+	canceled := make(chan struct{})
+	calls := 0
+
+	runner := func(ctx context.Context, _ SeatConfig, _ []Turn, _ string) (string, float64, error) {
+		calls++
+
+		if calls == 1 {
+			return "reply-1", 0, nil
+		}
+
+		<-ctx.Done() // hang until CancelTask lands
+		close(canceled)
+
+		return "", 0, ctx.Err()
+	}
+
+	srv, err := StartServer([]SeatConfig{{Name: "seat-1"}}, runner, modBearer)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = srv.Close() })
+
+	h, err := dialSeat(t.Context(), "seat-1", "", srv.SeatEndpoint("seat-1"), modBearer)
+	require.NoError(t, err)
+	t.Cleanup(func() { h.closeSeat(context.Background()) })
+
+	h.deadline = 50 * time.Millisecond
+	h.grace = 100 * time.Millisecond
+
+	// Establish the task: CancelTask can only reach a task the moderator
+	// knows the ID of (a first-turn orphan is bounded by the seat harness).
+	_, err = h.sendTurn(t.Context(), 0, "body-0")
+	require.NoError(t, err)
+
+	_, err = h.sendTurn(t.Context(), 1, "body-1")
+	require.ErrorIs(t, err, errTurnTimeout,
+		"a seat that has not returned when the grace expires is dropped exactly as before")
+	assert.Empty(t, h.taskID)
+
+	select {
+	case <-canceled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runner context was never canceled after CancelTask")
+	}
+}
+
 func TestCloseSeatCompletesTask(t *testing.T) {
 	var calls atomic.Int32
 

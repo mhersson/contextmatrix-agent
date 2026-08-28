@@ -2865,6 +2865,109 @@ func TestReviewApprovedUnlabelledFindingRunsCleanupPass(t *testing.T) {
 	require.Len(t, client.tasks, 5, "an unlabelled finding earns the pass; tasks=%v", client.tasks)
 }
 
+// TestReviewApprovedCriticalOrImportantFindingDemotedToFixRound pins the
+// severity gate: an approved verdict carrying a critical- or important-severity
+// fix is a contradiction the code resolves - the routed approved value is
+// forced false, so the round falls through to the existing not-approved fix +
+// re-review loop, and the card log records the override.
+func TestReviewApprovedCriticalOrImportantFindingDemotedToFixRound(t *testing.T) {
+	for _, sev := range []string{"critical", "important"} {
+		t.Run(sev, func(t *testing.T) {
+			ops := &fakeOps{}
+			git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+			client := &planLLM{responses: []llm.Response{
+				stopResp("Correctness: real bug", 0.01),
+				stopResp("Design: ok", 0.01),
+				stopResp("Security: ok", 0.01),
+				stopResp(`{"approved":true,"summary":"clean","fixes":[`+
+					`{"file":"a.go","issue":"off-by-one in the loop bound","suggestion":"use <=","severity":"`+sev+`"}]}`, 0.02),
+				stopResp("coder: fixed", 0.05),
+				stopResp("Correctness: fixed now", 0.01),
+				stopResp("Design: ok", 0.01),
+				stopResp("Security: ok", 0.01),
+				stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.02),
+			}}
+			d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+			tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+			o := newReviewRun(d, tc, 0)
+
+			require.NoError(t, runReview(context.Background(), o))
+
+			require.Len(t, client.tasks, 9, "panel + synthesis + fix coder + panel + synthesis; tasks=%v", client.tasks)
+			assert.Equal(t, 1, countPrefix(git.recorded(), "CommitFixup:"),
+				"the fix round landed exactly one fixup; git=%v", git.recorded())
+			assert.True(t, ops.loggedContains("review: approval overridden - 1 critical/important finding(s) require a re-reviewed fix round"),
+				"the demotion is card-logged; logs=%v", ops.recorded())
+			assert.Equal(t, 1, ops.reviewAttempts,
+				"the demoted round went through the not-approved loop and incremented attempts")
+		})
+	}
+}
+
+// TestReviewApprovedMinorOrNitFindingsUnchanged pins the other side of the
+// severity gate: approval carrying only minor and/or nit fixes keeps today's
+// behavior byte-for-byte - minor earns the post-approval cleanup fix pass, and
+// nit-only stays report-only with no fix run.
+func TestReviewApprovedMinorOrNitFindingsUnchanged(t *testing.T) {
+	cases := []struct {
+		name       string
+		fixes      string
+		wantTasks  int
+		wantFixup  bool
+		wantLog    string
+		notWantLog string
+	}{
+		{
+			name:      "minor only runs the cleanup fix pass",
+			fixes:     `{"file":"b.go","issue":"off-by-one in the loop bound","suggestion":"use <=","severity":"minor"}`,
+			wantTasks: 5,
+			wantFixup: true,
+			wantLog:   "applied a non-escalating cleanup fix pass",
+		},
+		{
+			name:      "nit only stays report-only",
+			fixes:     `{"file":"a.go","issue":"name could be shorter","suggestion":"rename","severity":"nit"}`,
+			wantTasks: 4,
+			wantFixup: false,
+			wantLog:   "reported, no cleanup pass",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+			client := &planLLM{responses: []llm.Response{
+				stopResp("Correctness: nothing blocking", 0.01),
+				stopResp("Design: naming nit", 0.01),
+				stopResp("Security: looks fine", 0.01),
+				stopResp(`{"approved":true,"summary":"clean","fixes":[`+tc.fixes+`]}`, 0.02),
+				stopResp("coder: fixed", 0.05),
+			}}
+			d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+			runtc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+			o := newReviewRun(d, runtc, 0)
+
+			require.NoError(t, runReview(context.Background(), o))
+
+			require.Len(t, client.tasks, tc.wantTasks, "tasks=%v", client.tasks)
+
+			fixups := countPrefix(git.recorded(), "CommitFixup:")
+			if tc.wantFixup {
+				assert.GreaterOrEqual(t, fixups, 1, "the cleanup pass must land a fixup; git=%v", git.recorded())
+				assert.True(t, ops.loggedContains(tc.wantLog), "logs=%v", ops.recorded())
+				assert.False(t, ops.loggedContains("approval overridden"), "no demotion is expected; logs=%v", ops.recorded())
+			} else {
+				assert.Equal(t, -1, indexOfPrefix(git.recorded(), "CommitFixup:"), "nit-only findings must not buy a fixup commit; git=%v", git.recorded())
+				assert.True(t, ops.loggedContains(tc.wantLog), "logs=%v", ops.recorded())
+				assert.False(t, ops.loggedContains("approval overridden"), "no demotion is expected; logs=%v", ops.recorded())
+			}
+		})
+	}
+}
+
 // TestRunReviewHITLAutoApprovedWithFindingsFramesSummary extends the PR-body
 // honesty contract to the path this card newly made reachable: an approving
 // verdict that carries surviving findings. Nothing fixes them on the HITL

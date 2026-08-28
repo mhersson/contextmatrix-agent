@@ -777,6 +777,8 @@ func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, autho
 	// machinery); a failed discussion degrades to the fan-out below.
 	if o.d.Cfg.Mob.enabled() && o.d.Cfg.Mob.Review && !authoritative {
 		if v, ok := o.mobReviewVerdict(ctx); ok {
+			o.demoteContradictoryApproval(ctx, &v)
+
 			if v.Approved {
 				return strings.TrimSpace(formatFixes(v)), v.FixTier, true, vres, v.Fixes, nil
 			}
@@ -798,6 +800,8 @@ func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, autho
 	if err != nil {
 		return "", "", false, vres, nil, err
 	}
+
+	o.demoteContradictoryApproval(ctx, &v)
 
 	if v.Approved {
 		return strings.TrimSpace(formatFixes(v)), v.FixTier, true, vres, v.Fixes, nil
@@ -1544,6 +1548,50 @@ func reviewFindingsHistory(body string) string {
 
 // severityNit is the one severity that does not earn a cleanup fix pass.
 const severityNit = "nit"
+
+// severityCritical and severityImportant are the severities that contradict an
+// approved verdict - see demoteContradictoryApproval.
+const (
+	severityCritical  = "critical"
+	severityImportant = "important"
+)
+
+// demoteContradictoryApproval is the severity gate on the review verdict: an
+// approved verdict cannot carry a critical- or important-severity fix. When it
+// does, the routed approved value is forced false so the round falls through to
+// the existing not-approved fix + re-review loop, and the override is logged on
+// the card - an approved verdict whose post-approval cleanup pass carries a fix
+// this severe would otherwise land never-re-reviewed code on the branch.
+//
+// Called at the single choke point both verdict paths return through
+// (reviewRound, covering the solo fan-out and the mob discussion), and only
+// mutates the verdict when the contradiction exists: approval carrying only
+// minor and/or nit fixes keeps today's behavior - minor earns the post-approval
+// cleanup fix pass (worthCleanupPass), nit-only stays report-only.
+func (o *run) demoteContradictoryApproval(ctx context.Context, v *verdict) {
+	if !v.Approved {
+		return
+	}
+
+	blocked := 0
+
+	for _, f := range v.Fixes {
+		// Compare through the same normalization the verdict parser applied,
+		// so the gate cannot drift from the accepted severity vocabulary.
+		switch normalizeSeverity(f.Severity) {
+		case severityCritical, severityImportant:
+			blocked++
+		}
+	}
+
+	if blocked == 0 {
+		return
+	}
+
+	v.Approved = false
+
+	o.d.logCard(ctx, "review: approval overridden - %d critical/important finding(s) require a re-reviewed fix round", blocked)
+}
 
 // validSeverities is the vocabulary the synthesis prompts ask for (see
 // specialistPrompt and synthesisPrompt/reviewSynthesisPrompt in prompts.go).

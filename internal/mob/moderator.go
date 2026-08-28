@@ -30,6 +30,10 @@ type seatHandle struct {
 	client   *a2aclient.Client
 	taskID   a2a.TaskID
 	deadline time.Duration
+	// grace is the salvage window past deadline in which a completed-but-late
+	// utterance is still accepted instead of being canceled and dropped
+	// (EngineConfig.SalvageGrace; 0 restores the old immediate-drop behavior).
+	grace time.Duration
 	// dead marks a seat permanently gone (open failed). A failed dial never
 	// returns a handle from dialSeat/dialGuest; the engine constructs the
 	// dead placeholder itself and reads it when skipping the seat across
@@ -105,11 +109,16 @@ func (h *seatHandle) authCtx(ctx context.Context) context.Context {
 // sendTurn sends one round message and waits for the utterance. body is the
 // rendered delta (or the full snapshot for a replacement task); round >= 0.
 // On success the handle's taskID is recorded/refreshed and the truncated
-// utterance returned. On the deadline expiring: best-effort CancelTask
-// (detached context, 2 s budget), clear the task so the seat rejoins next
-// round on a replacement task, return errTurnTimeout.
+// utterance returned. The wait is bounded by deadline plus grace: inside
+// grace the call context stays live, so a completed-but-late response is
+// salvaged as a normal turn (task and lastCost recorded) - the deadline
+// bounds how long the round must wait for a majority of seats, the grace
+// keeps the round from throwing away a review that finished seconds late.
+// On the grace expiring: best-effort CancelTask (detached context, 2 s
+// budget), clear the task so the seat rejoins next round on a replacement
+// task, return errTurnTimeout.
 func (h *seatHandle) sendTurn(ctx context.Context, round int, body string) (string, error) {
-	callCtx, cancel := context.WithTimeout(ctx, h.deadline)
+	callCtx, cancel := context.WithTimeout(ctx, h.deadline+h.grace)
 	defer cancel()
 
 	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart(body))

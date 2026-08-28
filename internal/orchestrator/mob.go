@@ -74,7 +74,17 @@ func mobModeratorStep(kind string) string {
 // so any seat count 2..5 is well-defined.
 var planLenses = []string{"feasibility/simplicity", "architecture/extensibility", "risk/testing", "performance", "developer-experience"}
 
-var reviewLenses = []string{"correctness", "security", "design", "performance", "developer-experience"}
+// reviewLenses[0] is a briefing, not a bare lens name: the seat judges the
+// change - and the plan decisions behind it - against the card's stated
+// requirements (carried in the seat briefing by reviewBriefing), challenging
+// plan choices instead of treating the plan as the spec. Callers slice
+// [:seats] so any seat count 2..5 is well-defined.
+var reviewLenses = []string{
+	"correctness - judge the change, and the plan decisions behind it, against " +
+		"the card's stated requirements; explicitly challenge choices the plan " +
+		"made rather than treating the plan as the spec",
+	"security", "design", "performance", "developer-experience",
+}
 
 // mobSeatMaxTurns caps one seat turn's harness run (spec constant - fixed by
 // the design, not config).

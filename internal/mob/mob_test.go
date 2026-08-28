@@ -13,6 +13,7 @@ func TestSpecFixedConstants(t *testing.T) {
 	assert.Equal(t, "\n[truncated by moderator]", truncationMarker)
 	assert.Equal(t, 240*time.Second, internalTurnDeadline)
 	assert.Equal(t, 300*time.Second, guestTurnDeadline)
+	assert.Equal(t, 60*time.Second, salvageGrace)
 }
 
 func TestNewEngineDefaults(t *testing.T) {
@@ -20,6 +21,7 @@ func TestNewEngineDefaults(t *testing.T) {
 
 	assert.Equal(t, 240*time.Second, e.cfg.InternalDeadline)
 	assert.Equal(t, 300*time.Second, e.cfg.GuestDeadline)
+	assert.Equal(t, 60*time.Second, e.cfg.SalvageGrace)
 	require.NotNil(t, e.cfg.Emit)
 	e.cfg.Emit("moderator", "", "", -1, "must not panic")
 }
@@ -28,8 +30,16 @@ func TestNewEngineKeepsCustomDeadlines(t *testing.T) {
 	e := NewEngine(EngineConfig{
 		InternalDeadline: time.Second,
 		GuestDeadline:    2 * time.Second,
+		SalvageGrace:     3 * time.Second,
 	})
 
 	assert.Equal(t, time.Second, e.cfg.InternalDeadline)
 	assert.Equal(t, 2*time.Second, e.cfg.GuestDeadline)
+	assert.Equal(t, 3*time.Second, e.cfg.SalvageGrace)
+}
+
+func TestNewEngineSalvageGrace(t *testing.T) {
+	// Explicitly disabling salvage restores the old drop-at-deadline shape.
+	e := NewEngine(EngineConfig{SalvageGrace: -time.Second})
+	assert.Zero(t, e.cfg.SalvageGrace)
 }

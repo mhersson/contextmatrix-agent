@@ -347,6 +347,25 @@ func TestMobDiscussUnlimitedCeilingKeepsUnbounded(t *testing.T) {
 	assert.Zero(t, eng.cfgs[0].BudgetUSD, "unlimited ceiling keeps the mob session budget unbounded")
 }
 
+// TestReviewLensesCorrectnessChallengesPlan pins the enriched correctness
+// lens: seat 0 must be briefed to judge the change - and the plan decisions
+// behind it - against the card's stated requirements, not to treat the plan
+// as the spec. The remaining lenses stay bare names.
+func TestReviewLensesCorrectnessChallengesPlan(t *testing.T) {
+	require.NotEmpty(t, reviewLenses)
+
+	lens := reviewLenses[0]
+	assert.Contains(t, lens, "correctness", "seat 0 is still the correctness seat")
+	assert.Contains(t, lens, "card's stated requirements",
+		"the briefing must anchor the seat to the card requirements")
+	assert.Contains(t, lens, "challenge", "the briefing must instruct the seat to challenge the plan")
+	assert.Contains(t, lens, "the plan as the spec",
+		"the briefing must forbid treating the plan as the spec")
+
+	assert.Equal(t, []string{"security", "design", "performance", "developer-experience"},
+		reviewLenses[1:], "only the correctness lens is enriched")
+}
+
 func TestSeatConfigCapsToolOutput(t *testing.T) {
 	base := harness.Config{ToolOutputMaxBytes: 131072, MaxTurns: 45}
 	cfg := seatConfig(base, mob.SeatConfig{Name: "seat-1", Lens: "risk"}, 0.10, nil)

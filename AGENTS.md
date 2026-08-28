@@ -194,6 +194,18 @@ file only - never via flags or committed YAML.
    container time remain before a round would start, since a verify run, a
    panel, and a fix round need that much to finish without being killed
    mid-work; a re-trigger resumes at the same round.
+
+   The synthesis verdict is severity-gated: an approved verdict cannot carry a
+   critical- or important-severity finding. When one parses out, the code
+   forces `Approved = false` (logged on the card as an override) so the round
+   routes through the not-approved fix + re-review loop instead of the
+   unreviewed post-approval cleanup pass. Approval carrying only `minor`
+   (cleanup fix pass) or `nit` (report-only) findings keeps today's behavior;
+   the rule is also stated in the synthesis prompts so demotions stay rare, but
+   the code check is the guard. In a mob review discussion, the correctness
+   seat's lens is a briefing that judges the change - and the plan decisions
+   behind it - against the card's stated requirements, challenging choices the
+   plan made rather than treating the plan as the spec.
 5. **Model selection is priors-only.** The planner (a fixed capable model) emits
    a complexity tier per subtask - simple / moderate / complex / critical;
    deterministic code maps the tier to a cost-optimal model per role. The LLM
