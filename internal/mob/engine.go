@@ -249,6 +249,7 @@ func (e *Engine) open(ctx context.Context) []*liveSeat {
 
 		h.model = sc.Model
 		h.deadline = e.cfg.InternalDeadline
+		h.grace = e.cfg.SalvageGrace
 		seats = append(seats, &liveSeat{h: h})
 	}
 
@@ -273,6 +274,7 @@ func (e *Engine) open(ctx context.Context) []*liveSeat {
 		}
 
 		h.deadline = e.cfg.GuestDeadline
+		h.grace = e.cfg.SalvageGrace
 		seats = append(seats, &liveSeat{h: h})
 	}
 

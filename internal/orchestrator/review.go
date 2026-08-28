@@ -1576,7 +1576,10 @@ func (o *run) demoteContradictoryApproval(ctx context.Context, v *verdict) {
 	blocked := 0
 
 	for _, f := range v.Fixes {
-		if f.Severity == severityCritical || f.Severity == severityImportant {
+		// Compare through the same normalization the verdict parser applied,
+		// so the gate cannot drift from the accepted severity vocabulary.
+		switch normalizeSeverity(f.Severity) {
+		case severityCritical, severityImportant:
 			blocked++
 		}
 	}

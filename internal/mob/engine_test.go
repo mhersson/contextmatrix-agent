@@ -684,3 +684,115 @@ func TestDiscussEmptySeatBecomesAbsenceNotice(t *testing.T) {
 
 	assert.True(t, noticed, "absence notice for seat-2 expected")
 }
+
+// TestDiscussSalvagesLateSeatResponse proves a seat whose utterance lands
+// past InternalDeadline but before the round moves on is a full round
+// participant, not a dropped errTurnTimeout: it enters the transcript and
+// the synthesis input, no absence notice fires for it, and the next round's
+// delta excludes its own text.
+func TestDiscussSalvagesLateSeatResponse(t *testing.T) {
+	seats := []SeatConfig{
+		{Name: "seat-1", Lens: "a"},
+		{Name: "seat-2", Lens: "b"},
+	}
+	script := &seatScript{reply: func(seat string, call int) (string, float64, error) {
+		if seat == "seat-2" && call == 0 {
+			time.Sleep(150 * time.Millisecond) // lands past the deadline, inside the grace
+
+			return "LATE-FINISHED-POSITION", 0.01, nil
+		}
+
+		return fmt.Sprintf("%s-%d", seat, call), 0.01, nil
+	}}
+	mod := &modScript{replies: []string{"consensus", "SYNTH"}}
+
+	eng, log := startEngine(t, seats, script.run, mod.run, func(cfg *EngineConfig) {
+		cfg.InternalDeadline = 50 * time.Millisecond
+		// SalvageGrace stays at its 60s default: the late response lands
+		// inside it.
+	})
+
+	out, err := eng.Discuss(t.Context(), Topic{
+		Briefing:        "brief",
+		Rounds:          1,
+		Blind:           true,
+		SynthesisPrompt: "synthesize",
+	})
+	require.NoError(t, err, "the late seat must not error the round")
+
+	// The salvaged response entered the transcript as a normal entry:
+	// briefing + both round-0 positions (seat-2's late) + both round-1
+	// positions.
+	require.Len(t, out.Transcript, 5)
+	assert.Equal(t, "LATE-FINISHED-POSITION", out.Transcript[2].Content)
+	assert.Equal(t, "seat-2", out.Transcript[2].Author)
+	assert.Equal(t, 0, out.Transcript[2].Round)
+
+	// Synthesis consumed it.
+	calls := mod.calls()
+	require.Len(t, calls, 2, "classify + synthesis")
+	assert.Contains(t, calls[1], "LATE-FINISHED-POSITION")
+
+	// No absence notice was emitted for the salvaged seat.
+	for _, r := range log.snapshot() {
+		if r.author == "moderator" && strings.Contains(r.content, "seat-2") {
+			assert.NotContains(t, r.content, "absent",
+				"a salvaged seat must not be reported absent")
+		}
+	}
+}
+
+// TestDiscussDropsSeatPastGrace proves the deadline still bounds the round: a
+// seat that has not returned when the grace expires is dropped with the
+// existing timeout error, reported absent, and rejoins next round on a
+// replacement task.
+func TestDiscussDropsSeatPastGrace(t *testing.T) {
+	seats := []SeatConfig{
+		{Name: "seat-1", Lens: "a"},
+		{Name: "seat-2", Lens: "b"},
+		{Name: "seat-3", Lens: "c"},
+	}
+	script := &seatScript{reply: func(seat string, call int) (string, float64, error) {
+		if seat == "seat-2" && call == 0 {
+			time.Sleep(2 * time.Second) // past deadline + grace: genuinely absent
+
+			return "TOO-LATE-POSITION", 0.01, nil
+		}
+
+		return fmt.Sprintf("%s-%d", seat, call), 0.01, nil
+	}}
+	mod := &modScript{replies: []string{"consensus", "SYNTH"}}
+
+	eng, log := startEngine(t, seats, script.run, mod.run, func(cfg *EngineConfig) {
+		cfg.InternalDeadline = 50 * time.Millisecond
+		cfg.SalvageGrace = 100 * time.Millisecond
+	})
+
+	out, err := eng.Discuss(t.Context(), Topic{
+		Briefing:        "brief",
+		Rounds:          1,
+		Blind:           true,
+		SynthesisPrompt: "synthesize",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "SYNTH", out.Synthesis)
+
+	// The dropped seat's work is not in the transcript or the synthesis.
+	for _, e := range out.Transcript {
+		assert.NotContains(t, e.Content, "TOO-LATE-POSITION")
+	}
+
+	assert.NotContains(t, mod.calls()[1], "TOO-LATE-POSITION")
+
+	// It was reported absent, exactly as before the salvage existed.
+	var absences int
+
+	for _, r := range log.snapshot() {
+		if r.author == "moderator" && strings.Contains(r.content, "seat-2") &&
+			strings.Contains(r.content, "absent") {
+			absences++
+		}
+	}
+
+	assert.Equal(t, 1, absences)
+}

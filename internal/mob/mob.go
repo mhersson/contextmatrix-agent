@@ -28,6 +28,15 @@ const (
 	// deadlines, measured from SendMessage to utterance.
 	internalTurnDeadline = 240 * time.Second
 	guestTurnDeadline    = 300 * time.Second
+
+	// salvageGrace is how far past the per-turn deadline a completed-but-late
+	// seat response is still accepted (the engine default for
+	// EngineConfig.SalvageGrace). The deadline still bounds the round - the
+	// wait extends by at most this much - and a seat that has not returned
+	// when the grace expires is dropped with errTurnTimeout exactly as
+	// before. Tuned against observed runs where a seat finished its review
+	// seconds past the deadline and the round discarded completed work.
+	salvageGrace = 60 * time.Second
 )
 
 // ErrNoQuorum marks a quorum failure - fewer than two seats responded in the
@@ -124,6 +133,7 @@ type EngineConfig struct {
 	// test seams (defaulted by NewEngine):
 	InternalDeadline time.Duration // 240 * time.Second
 	GuestDeadline    time.Duration // 300 * time.Second
+	SalvageGrace     time.Duration // 60 * time.Second; 0 = default, negative = salvage disabled
 }
 
 // Engine runs mob sessions. Construct with NewEngine; the Discuss
@@ -142,6 +152,12 @@ func NewEngine(cfg EngineConfig) *Engine {
 
 	if cfg.GuestDeadline <= 0 {
 		cfg.GuestDeadline = guestTurnDeadline
+	}
+
+	if cfg.SalvageGrace == 0 {
+		cfg.SalvageGrace = salvageGrace
+	} else if cfg.SalvageGrace < 0 {
+		cfg.SalvageGrace = 0 // negative disables salvage: drop at the deadline
 	}
 
 	if cfg.Emit == nil {
