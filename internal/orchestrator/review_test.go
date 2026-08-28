@@ -4556,6 +4556,168 @@ func TestRepeatedRegressionsParkOnTheGreenTree(t *testing.T) {
 		"the park hands the operator the mandate neither round landed, not a verify tail for a discarded tree")
 }
 
+// The authoritative pass is the loop's PRIMARY park gate, and its gated strong
+// fix runs between two gates of its own - so a strong fix that takes the pass
+// from green to red parks the operator on the regression with the mergeable
+// commit one revision behind, the exact failure the cheap loop's arm exists to
+// prevent, on the likelier route. The strong fixup is discarded, the park lands
+// on the restored tree, and the park quotes the mandate the discarded fix was
+// sent to address rather than a verify tail for a tree that is gone.
+//
+// Seeded at the cliff (ReviewAttempts = cap-1) so the first iteration IS the
+// authoritative pass.
+func TestAuthoritativeRegressingFixParksOnTheGreenTree(t *testing.T) {
+	ops := &fakeOps{reviewAttempts: 4}
+	git := &fakeGit{
+		committed:        true,
+		lastCommitTarget: "abc123",
+		// The pass's review snapshot, the green commit its strong fix starts
+		// from, and the regressing fixup its re-review finds on the branch.
+		headSHAs: []string{"snapshot-1", "green-head", "red-fixup"},
+	}
+	client := &planLLM{responses: slices.Concat(
+		panelRejects("nil deref"),
+		[]llm.Response{stopResp("coder: strong fix", 0.05)},
+	)}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress", ReviewAttempts: 4}
+	o := newReviewRun(d, tc, 0)
+	o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
+
+	gateRuns := 0
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		gateRuns++
+		if gateRuns == 2 {
+			return verifyexec.Outcome{ExitCode: 1, Output: "still failing"}
+		}
+
+		return verifyexec.Outcome{ExitCode: 0}
+	}
+
+	var parked *ReviewParkedError
+
+	require.ErrorAs(t, runReview(context.Background(), o), &parked,
+		"discarding the strong fix does not save the card - it parks on a tree worth merging")
+	assert.Equal(t, 2, gateRuns, "both of the pass's gates ran")
+
+	assert.Equal(t, []string{"green-head"}, git.hardResetRefs,
+		"the branch returns to the commit the strong fix started from; git=%v", git.recorded())
+	assert.Equal(t, []string{"cm/card-1"}, git.leaseBranches, "git=%v", git.recorded())
+	assert.Equal(t, []string{"red-fixup"}, git.leaseTips,
+		"the lease expects the regressing fixup the pass itself pushed; git=%v", git.recorded())
+
+	assert.True(t, ops.loggedContains("fix round 5 regressed the verify (green -> red)"),
+		"the round named is the one whose fix was thrown away; logs=%v", ops.logs)
+	assert.True(t, ops.loggedContains("recorded as unactioned"), "logs=%v", ops.logs)
+
+	require.GreaterOrEqual(t, len(client.models), 5, "models=%v", client.models)
+	assert.True(t, o.fixFailed[client.models[4]],
+		"the strong fixer that regressed the gate is recorded as failed, as in the loop; models=%v", client.models)
+
+	parkNote := ""
+
+	for _, m := range ops.logs {
+		if strings.Contains(m, "review parked after") {
+			parkNote = m
+		}
+	}
+
+	require.NotEmpty(t, parkNote, "the pass still parks; logs=%v", ops.logs)
+	assert.Contains(t, parkNote, "regressed the verify and was discarded",
+		"the park must say the branch is back on the tree that passed - that is the actionable fact")
+	assert.Contains(t, parkNote, "nil deref",
+		"the park hands over the mandate the discarded fix was addressing")
+	assert.NotContains(t, parkNote, verifyFailedPrefix,
+		"a verify tail for a discarded tree must not be what the operator is told is outstanding")
+}
+
+// The authoritative discard is held to the same rule as the loop's: it needs a
+// green predecessor, and any git failure leaves the branch alone and parks on
+// the red tree exactly as before - with the verify failure as the outstanding
+// finding, which is correct precisely because it is still on the branch.
+func TestAuthoritativeParkKeepsTheFixItCannotDiscard(t *testing.T) {
+	tests := []struct {
+		name string
+		// responses is the model script; firstGateRed makes the pass's own
+		// opening gate red, so its strong fix never had a green tree to break.
+		responses    []llm.Response
+		firstGateRed bool
+		hardResetErr error
+		wantResets   []string
+		wantLog      string
+	}{
+		{
+			name:         "the pass never had a green gate",
+			responses:    []llm.Response{stopResp("coder: strong fix", 0.05)},
+			firstGateRed: true,
+		},
+		{
+			name: "the reset failed",
+			responses: slices.Concat(panelRejects("nil deref"),
+				[]llm.Response{stopResp("coder: strong fix", 0.05)}),
+			hardResetErr: assertErr("detached worktree"),
+			wantResets:   []string{"green-head"},
+			wantLog:      "could not be discarded",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{reviewAttempts: 4}
+			git := &fakeGit{
+				committed:        true,
+				lastCommitTarget: "abc123",
+				headSHAs:         []string{"snapshot-1", "green-head", "red-fixup"},
+				hardResetErr:     tt.hardResetErr,
+			}
+			client := &planLLM{responses: tt.responses}
+			d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+			tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress", ReviewAttempts: 4}
+			o := newReviewRun(d, tc, 0)
+			o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
+
+			gateRuns := 0
+			o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+				gateRuns++
+				if gateRuns == 2 || (tt.firstGateRed && gateRuns == 1) {
+					return verifyexec.Outcome{ExitCode: 1, Output: "still failing"}
+				}
+
+				return verifyexec.Outcome{ExitCode: 0}
+			}
+
+			var parked *ReviewParkedError
+
+			require.ErrorAs(t, runReview(context.Background(), o), &parked)
+
+			assert.Equal(t, tt.wantResets, git.hardResetRefs, "git=%v", git.recorded())
+			assert.Empty(t, git.leaseBranches, "an undiscarded fixup is never force-pushed; git=%v", git.recorded())
+
+			if tt.wantLog != "" {
+				assert.True(t, ops.loggedContains(tt.wantLog), "the card must say why; logs=%v", ops.logs)
+			}
+
+			assert.False(t, ops.loggedContains("recorded as unactioned"),
+				"nothing was discarded, so no findings were dropped; logs=%v", ops.logs)
+
+			parkNote := ""
+
+			for _, m := range ops.logs {
+				if strings.Contains(m, "review parked after") {
+					parkNote = m
+				}
+			}
+
+			require.NotEmpty(t, parkNote, "logs=%v", ops.logs)
+			assert.NotContains(t, parkNote, "was discarded", "the fixup is still on the branch")
+			assert.Contains(t, parkNote, verifyFailedPrefix,
+				"the failure is still on the branch, so it is still what is outstanding")
+		})
+	}
+}
+
 // A pre-fix head that could not be read is the discard's most dangerous input:
 // carried over from an earlier round it still looks like a valid commit, and
 // resetting to it would throw away - and force-push away - every fix round
