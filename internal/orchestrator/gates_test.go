@@ -49,6 +49,13 @@ type fakeGates struct {
 	reviews              []*CopilotReview
 	requests             int
 
+	// requestedAfterChecks scripts a pending request appearing late (a ruleset,
+	// or a listing that lagged the request): once CopilotRequested has been
+	// called this many times it answers true regardless of requested. Zero
+	// disables the knob.
+	requestedAfterChecks int
+	requestedCalls       int
+
 	// holdReviewsUntilChecks reproduces a review that lands DURING the CI wait:
 	// while it is set and Checks has never been polled, CopilotReview reads as
 	// "no review yet" without consuming the queue, so the Copilot wait times out
@@ -118,6 +125,12 @@ func (f *fakeGates) CopilotRequested(_ context.Context, prURL string) (bool, err
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	f.requestedCalls++
+
+	if f.requestedAfterChecks > 0 && f.requestedCalls >= f.requestedAfterChecks {
+		return true, nil
+	}
 
 	return f.requested, nil
 }
@@ -1819,6 +1832,70 @@ func TestCopilotGate_UnconfirmedRequestSkipsAfterGrace(t *testing.T) {
 	assert.Equal(t, 0, modelCallCount(client), "no review, nothing to triage")
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0,
 		"the gate passes; Copilot being unreachable never parks the card")
+}
+
+// TestCopilotGate_GraceUpgradesWhenRequestListedLate: a pending request that
+// appears during the grace window - a ruleset adding the reviewer on its own,
+// or a listing that lagged - proves a review is coming, so the gate upgrades
+// from the grace window to the full wait and triages the review it delivers.
+func TestCopilotGate_GraceUpgradesWhenRequestListedLate(t *testing.T) {
+	shrinkCopilotRecheck(t, time.Millisecond)
+	shrinkCopilotGrace(t, 5*time.Millisecond)
+
+	// The review sits behind more empty polls than the grace window can make
+	// before its deadline, so only the upgrade to the full wait reaches it -
+	// a grace window left to run out would skip instead.
+	reviews := make([]*CopilotReview, 12)
+	reviews[len(reviews)-1] = reviewOnHead("LGTM")
+
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requestSilentlyNoOps: true,
+		headSHA:              copilotHeadSHA,
+		// Call 1 is the pre-check, call 2 the post-request re-check - both
+		// false, so the gate enters the grace window - and call 3 is the first
+		// grace poll, where the pending request finally shows.
+		requestedAfterChecks: 3,
+		reviews:              reviews,
+	}
+	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, copilotGateContext("Late listing", "body"), 0)
+	o.d.Cfg.GatesCopilotWaitTimeout = 2 * time.Second
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	assert.True(t, ops.loggedContains("request did not take"),
+		"the unconfirmed request is recorded before the grace wait; logs=%v", ops.recorded())
+	assert.False(t, ops.loggedContains("no review arrived"),
+		"a late-listed request must not end in the grace skip; logs=%v", ops.recorded())
+	assert.Equal(t, 1, modelCallCount(client), "the review the full wait delivers is triaged")
+	assert.True(t, ops.loggedContains("Copilot review addressed"))
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+}
+
+// TestCopilotGate_ConfirmedRequestSkipsRecheck: when the POST's response body
+// already lists the bot as a requested reviewer, the sleep-and-recheck round
+// trip buys nothing - the only CopilotRequested call is the pre-check.
+func TestCopilotGate_ConfirmedRequestSkipsRecheck(t *testing.T) {
+	// No recheck shrink on purpose: if the code regresses into the recheck
+	// path, the full 10s pause makes this test conspicuously slow rather than
+	// silently green.
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		headSHA: copilotHeadSHA,
+		reviews: []*CopilotReview{nil, reviewOnHead("LGTM")},
+	}
+	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, copilotGateContext("Confirmed request", "body"), 0)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	calls := gates.recorded()
+	assert.Equal(t, 1, countCalls(calls, "CopilotRequested:"+gatePRURL),
+		"a body-confirmed request needs no re-check; calls=%v", calls)
+	assert.True(t, ops.loggedContains("Copilot review addressed"))
 }
 
 // TestCopilotGate_TimeoutProceeds: a review that never lands proceeds at the wait
