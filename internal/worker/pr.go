@@ -470,19 +470,19 @@ func parseReviewRequests(out string) (bool, error) {
 // reviewer. GitHub accepts the POST with a 2xx even when it discards the
 // request (a requesting identity without Copilot access, or a reviewer that
 // already reviewed), so the response body - not the exit status - is the only
-// proof the request took effect. Only the two reviewer fields are searched: a
-// copilot-ish login elsewhere in the PR object must not confirm.
+// proof the request took effect. Only requested_reviewers is searched: a
+// copilot-ish login elsewhere in the PR object must not confirm, and team
+// entries carry no login at all - the bot is always a user-shaped reviewer.
 func parseRequestedReviewersResponse(out string) (bool, error) {
 	var doc struct {
 		RequestedReviewers []any `json:"requested_reviewers"`
-		RequestedTeams     []any `json:"requested_teams"`
 	}
 
 	if err := json.Unmarshal([]byte(out), &doc); err != nil {
 		return false, fmt.Errorf("parse requested reviewers response: %w", err)
 	}
 
-	return containsCopilotLogin(doc.RequestedReviewers) || containsCopilotLogin(doc.RequestedTeams), nil
+	return containsCopilotLogin(doc.RequestedReviewers), nil
 }
 
 // containsCopilotLogin recursively searches a decoded JSON value for any

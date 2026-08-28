@@ -353,11 +353,14 @@ func runPRGates(ctx context.Context, o *run) error {
 // (e.g. a GraphQL login-resolution error) is NOT treated as unavailability: the
 // gate still enters the wait loop, because a repo-automated Copilot review may
 // arrive regardless, and a review that never arrives is recorded and passed at
-// the wait deadline. A request that succeeds without the bot showing up in the
-// pending reviewer list is recorded and waited through, not skipped - rulesets
-// add Copilot asynchronously and gh cannot be trusted to list bots. The gate
-// parks only on findings it could not get fixed, or on running out of budget or
-// turns while fixing them.
+// the wait deadline. A 2xx on the request is not trusted either - GitHub
+// silently discards the request in some setups - so it is confirmed against
+// the POST's response body and one delayed re-read of the pending reviewer
+// list; a request confirmed by neither waits only a short grace window for a
+// repo-automated review (a pending request appearing during grace upgrades to
+// the full wait) and then passes with a note naming the dropped request. The
+// gate parks only on findings it could not get fixed, or on running out of
+// budget or turns while fixing them.
 func (o *run) copilotGate(ctx context.Context, prURL string, st *gatesState) error {
 	if st.CopilotSatisfied {
 		o.gateNote(ctx, "copilot", "pr_gates: Copilot review was addressed in an earlier run; gate already satisfied", nil)
@@ -413,6 +416,10 @@ func (o *run) copilotGate(ctx context.Context, prURL string, st *gatesState) err
 
 			// requested=true falls through with pending nil: the reviewer is
 			// on the PR after all, so the full wait below covers it.
+			if requested {
+				o.noteCopilotGraceUpgrade(ctx, st)
+			}
+
 			pending = review
 
 		case copilotIndeterminate:
@@ -463,6 +470,10 @@ func (o *run) copilotGate(ctx context.Context, prURL string, st *gatesState) err
 
 			// requested=true leaves pending nil: the reviewer is on the PR
 			// after all, so the full wait at the top of the loop covers it.
+			if requested {
+				o.noteCopilotGraceUpgrade(ctx, st)
+			}
+
 			pending = found
 		}
 	}
@@ -839,6 +850,17 @@ func (o *run) awaitCopilotReview(ctx context.Context, prURL string) (*CopilotRev
 			return nil, werr
 		}
 	}
+}
+
+// noteCopilotGraceUpgrade records that a pending request appeared during the
+// grace window, so the card note no longer claims a brief wait while the gate
+// waits the full one.
+func (o *run) noteCopilotGraceUpgrade(ctx context.Context, st *gatesState) {
+	const line = "pr_gates: a pending Copilot review request appeared during the grace window; waiting the full window"
+
+	st.CopilotDetail = "- " + line + "\n"
+	o.recordGates(ctx, *st)
+	o.gateNote(ctx, "copilot", line, nil)
 }
 
 // awaitCopilotGrace waits briefly for evidence that anyone will review: a

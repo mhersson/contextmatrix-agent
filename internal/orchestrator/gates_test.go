@@ -1867,6 +1867,8 @@ func TestCopilotGate_GraceUpgradesWhenRequestListedLate(t *testing.T) {
 
 	assert.True(t, ops.loggedContains("request did not take"),
 		"the unconfirmed request is recorded before the grace wait; logs=%v", ops.recorded())
+	assert.True(t, ops.loggedContains("appeared during the grace window"),
+		"the upgrade to the full wait is recorded; logs=%v", ops.recorded())
 	assert.False(t, ops.loggedContains("no review arrived"),
 		"a late-listed request must not end in the grace skip; logs=%v", ops.recorded())
 	assert.Equal(t, 1, modelCallCount(client), "the review the full wait delivers is triaged")
