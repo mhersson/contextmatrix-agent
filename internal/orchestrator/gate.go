@@ -43,14 +43,6 @@ const (
 // selection for a model that never runs.
 type gateModel func(ctx context.Context) string
 
-// fixedGateModel hands the gate an explicitly supplied model slug - typically
-// a test literal or a slug the caller has already confirmed ran. Test suites
-// for other model-bearing phases (runBrainstorm, runDiagnose) also use it as a
-// static gateModel value. It resolves nothing and emits nothing on its own.
-func fixedGateModel(model string) gateModel {
-	return func(context.Context) string { return model }
-}
-
 // gate presents `presentation` to the human and blocks for their verdict.
 //
 // Autonomous (Cfg.Interactive == false) is pure pass-through: it returns

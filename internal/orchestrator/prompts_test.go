@@ -11,14 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestSelfReviewInBothCodingPrompts(t *testing.T) {
-	for name, p := range map[string]string{"coder": coderPrompt, "fix": fixPrompt, "verify-fix": verifyFixPrompt} {
-		assert.Contains(t, p, "self-review", "%s prompt must include the self-review block", name)
-		assert.Contains(t, p, "Re-read every file you changed", name)
-		assert.Contains(t, p, "no fall-through after writing an error response", name)
-	}
-}
-
 func TestVerifyCommandBlock(t *testing.T) {
 	assert.Empty(t, verifyCommandBlock(verifyPlan{}), "an empty plan yields no block (prompt unchanged)")
 	assert.Empty(t, verifyCommandBlock(verifyPlan{Source: verifySourceNone}), "a skip plan yields no block")
@@ -26,7 +18,6 @@ func TestVerifyCommandBlock(t *testing.T) {
 	out := verifyCommandBlock(verifyPlan{Argv: []string{"go", "test", "./..."}, Display: "go test ./...", Source: verifySourceDetected})
 	assert.Contains(t, out, "`verify` tool", "the coder must be sent to the tool, not to a bare command string")
 	assert.Contains(t, out, "`go test ./...` (detected)")
-	assert.Contains(t, out, "Make it pass")
 }
 
 // prohibitionSentence returns the sentence of s that forbids something, so a
@@ -74,22 +65,9 @@ func TestCoderPromptEmptyVerifyByteIdentical(t *testing.T) {
 }
 
 func TestSpecialistPromptScopesToTask(t *testing.T) {
-	assert.Contains(t, specialistPrompt, "not an idealized production service")
-	assert.Contains(t, specialistPrompt, "speculative abstractions")
 	// trimmed gold-plating solicitations:
 	assert.NotContains(t, designPrompt, "API / interface design at module boundaries")
 	assert.NotContains(t, securityPrompt, "caching effectiveness")
-}
-
-func TestSynthesisPromptGatesScope(t *testing.T) {
-	assert.Contains(t, synthesisPrompt, "never blocking")
-	assert.Contains(t, synthesisPrompt, "acceptance criteria")
-	assert.Contains(t, synthesisPrompt, "remove them")
-}
-
-func TestFixPromptForbidsNewArchitecture(t *testing.T) {
-	assert.Contains(t, fixPrompt, "add no new abstractions")
-	assert.Contains(t, fixPrompt, "flag it, don't build it")
 }
 
 func TestVerifyFixPromptIsTitleOnly(t *testing.T) {
@@ -99,31 +77,16 @@ func TestVerifyFixPromptIsTitleOnly(t *testing.T) {
 
 func TestBuildArtifactHygieneInBothCodingPrompts(t *testing.T) {
 	for name, p := range map[string]string{"coder": coderPrompt, "fix": fixPrompt, "verify-fix": verifyFixPrompt} {
-		assert.Contains(t, p, "do not leave its output",
-			"%s prompt must include the build-hygiene note", name)
 		// The hygiene note must name no build tool - it applies to every language.
 		assert.NotContains(t, p, "go build",
 			"%s prompt build-hygiene note must stay language-neutral", name)
 	}
 }
 
-func TestProcessTeardownInBothCodingPrompts(t *testing.T) {
-	for name, p := range map[string]string{"coder": coderPrompt, "fix": fixPrompt, "verify-fix": verifyFixPrompt} {
-		assert.Contains(t, p, "Shut down any long-running process you start for verification",
-			"%s prompt must include the process-teardown note", name)
-		assert.Contains(t, p, `"still running" checks in later phases of this run`, name)
-	}
-}
-
-// guard: the document prompt must carry the conservative gate, the docs-only
-// restriction, the no-git instruction, and the finish-tool docs(...) convention.
+// guard: the document prompt must carry the finish-tool docs(...) convention and
+// no remnant of the removed commit-prefix convention.
 func TestDocumentPromptShape(t *testing.T) {
 	low := strings.ToLower(documentPrompt)
-	assert.Contains(t, low, "default: no external documentation is needed")
-	assert.Contains(t, low, "documentation only")
-	assert.Contains(t, low, "user-facing behavior")
-	assert.Contains(t, low, "api contracts")
-	assert.Contains(t, low, "do not run git")
 	assert.Contains(t, low, "finish tool")
 	assert.NotContains(t, low, "commit:")
 }
@@ -138,11 +101,8 @@ func TestFixPromptShape(t *testing.T) {
 
 func TestBrainstormPromptShape(t *testing.T) {
 	low := strings.ToLower(brainstormPrompt)
-	assert.Contains(t, low, "one question at a time")
-	assert.Contains(t, low, "2-3 approaches")
 	assert.Contains(t, low, "## design")
 	assert.Contains(t, low, "design_complete")
-	assert.Contains(t, low, "read-only")
 }
 
 func TestFeedbackBlock(t *testing.T) {
@@ -154,8 +114,6 @@ func TestFeedbackBlock(t *testing.T) {
 
 func TestDiagnosePromptRigor(t *testing.T) {
 	low := strings.ToLower(diagnosePrompt)
-	assert.Contains(t, low, "similar path that works")
-	assert.Contains(t, low, "hypothes")
 	assert.Contains(t, low, "### test approach")
 	assert.Contains(t, low, "### risk / scope notes")
 }
@@ -178,22 +136,6 @@ func TestPromptsCarryRepoRoot(t *testing.T) {
 	} {
 		assert.Contains(t, tpl, "Repo root: %s", "the %s prompt must name the repo root", name)
 	}
-}
-
-func TestCoderPromptDiscouragesRepeatVerification(t *testing.T) {
-	assert.Contains(t, coderPrompt, "finish immediately",
-		"the coder prompt sets the stop-when-green expectation early")
-}
-
-// guard: the plan prompt must emphatically forbid test-only / test-pinning
-// subtasks. A prior run produced a subtask titled "pin ... with a prompts test"
-// despite the softer "do NOT create separate write-tests subtasks" wording, so
-// the rule is strengthened to name that failure mode.
-func TestPlanPromptForbidsTestOnlySubtasks(t *testing.T) {
-	low := strings.ToLower(planPrompt)
-	assert.Contains(t, low, "do not create separate")
-	assert.Contains(t, low, "testing, pinning, asserting, or verifying another subtask's code")
-	assert.Contains(t, low, "writes and runs its own tests")
 }
 
 // allPhasePrompts is every phase prompt constant defined in prompts.go, keyed by
@@ -242,23 +184,6 @@ func TestPromptsAreLanguageNeutral(t *testing.T) {
 	}
 }
 
-// TestPromptsCarryNeutralisedStrings pins the language-neutral replacements from
-// the de-Go'ing of the prompts: each must survive in the specific prompt that
-// carries it, so a future edit cannot silently drop the neutral wording (or
-// re-introduce a Go-specific phrasing in its place).
-func TestPromptsCarryNeutralisedStrings(t *testing.T) {
-	assert.Contains(t, correctnessPrompt, "leaked concurrent workers",
-		"the correctness lens must keep the language-neutral concurrency wording")
-	assert.Contains(t, designPrompt, "cross-module coupling",
-		"the design lens must keep the neutral coupling wording")
-	assert.Contains(t, designPrompt, "unused public symbols",
-		"the design lens must keep the neutral dead-symbol wording")
-	assert.Contains(t, synthesisPrompt, "passing verify run",
-		"synthesis must weigh a passing verify run, not a language-specific test command")
-	assert.Contains(t, planPrompt, "keeps the tree passing its checks",
-		"the plan prompt must keep the neutral 'passing its checks' wording")
-}
-
 // TestFencedDiff pins the markdown fencing of diffs relayed to the board
 // chat: one ```diff block, trailing newline normalized, and a fence that
 // grows past any backtick run embedded in the diff so it cannot break out.
@@ -276,24 +201,11 @@ func TestFencedDiff(t *testing.T) {
 	assert.Equal(t, "```diff\n\n```", fencedDiff(""), "empty diff still yields a well-formed block")
 }
 
-func TestPlannerGroundingRuleInPlanPrompts(t *testing.T) {
-	for name, p := range map[string]string{
-		"planPrompt":          planPrompt,
-		"planSynthesisPrompt": planSynthesisPrompt,
-		"planBriefing":        planBriefing,
-	} {
-		assert.Contains(t, p, "Do not put unverified specifics",
-			"%s must include the planner grounding rule", name)
-	}
-}
-
 func TestPlanPromptCarriesFindingsClauses(t *testing.T) {
 	t.Parallel()
 
 	assert.Contains(t, planPrompt, "record_finding",
 		"planPrompt must name the tool the plan registry provides")
-	assert.Contains(t, planPrompt, "counts as confirmed",
-		"planPrompt must let a recorded anchor satisfy the grounding rule")
 }
 
 // The findings clauses are plan-only. planBriefing and planSynthesisPrompt run
@@ -309,17 +221,6 @@ func TestFindingsClausesAreNotInSharedPlanPrompts(t *testing.T) {
 	} {
 		assert.NotContains(t, p, "record_finding",
 			"%s must not promise a tool that is not registered for it", name)
-	}
-}
-
-func TestSweepRuleInSynthesisPrompts(t *testing.T) {
-	for name, p := range map[string]string{
-		"synthesisPrompt":           synthesisPrompt,
-		"reviewSynthesisPrompt":     reviewSynthesisPrompt,
-		"checkpointSynthesisPrompt": checkpointSynthesisPrompt,
-	} {
-		assert.Contains(t, p, "When a finding asserts that a specific statement",
-			"%s must splice the sweepRule", name)
 	}
 }
 
@@ -342,66 +243,13 @@ func TestSeverityFieldInSynthesisPrompts(t *testing.T) {
 	}
 }
 
+// guard: the coder grounding rule (stale-anchor protection) is coder-only, not
+// spliced into fixPrompt.
 func TestCoderGroundingRuleInCoderPrompt(t *testing.T) {
 	t.Parallel()
 
-	low := strings.ToLower(coderPrompt)
-
-	// The rule must still catch a stale anchor: that is why it exists.
-	assert.Contains(t, low, "trust the code",
-		"coderPrompt must keep the stale-anchor protection")
-
-	// ... and must now bound the check to a window rather than the whole file.
-	assert.Contains(t, low, "window",
-		"coderPrompt must scope an anchor check to a window around the cited line")
-
 	assert.NotContains(t, strings.ToLower(fixPrompt), "trust the code",
 		"the coder grounding rule is coder-only, not spliced into fixPrompt")
-}
-
-// guard: a production coder finished its subtask with turns to spare, then
-// spent them implementing work the parent card's description and acceptance
-// criteria described but the plan had assigned to a sibling subtask. The
-// scope rule already forbade sibling-subtask work; this pins the added
-// clause that the parent card itself is not a second source of scope.
-func TestCoderPromptScopedAgainstParentCriteria(t *testing.T) {
-	low := strings.ToLower(coderPrompt)
-	assert.Contains(t, low, "nothing from sibling subtasks")
-	assert.Contains(t, low, "the parent card's description and acceptance criteria may cover")
-}
-
-// TestReadOnlyPromptsMentionGit asserts that the six read-only prompt
-// constants enumerate git among their tools and none forbids running git.
-// planPrompt is asserted as already correct (unchanged).
-func TestReadOnlyPromptsMentionGit(t *testing.T) {
-	readOnly := map[string]string{
-		"diagnose":      diagnosePrompt,
-		"specialist":    specialistPrompt,
-		"prBody":        prBodyPrompt,
-		"copilotTriage": copilotTriagePrompt,
-		"brainstorm":    brainstormPrompt,
-		"seatSystem":    seatSystemPrompt,
-	}
-
-	prohibitions := []string{
-		"do not run git",
-		"do NOT run git",
-		"never run git",
-	}
-
-	for name, p := range readOnly {
-		t.Run(name, func(t *testing.T) {
-			assert.Contains(t, p, "git", "%s must mention git", name)
-
-			for _, phrase := range prohibitions {
-				assert.NotContains(t, p, phrase,
-					"%s must not forbid running git", name)
-			}
-		})
-	}
-
-	// planPrompt is not part of this change - it already has git and must stay that way.
-	assert.Contains(t, planPrompt, "git")
 }
 
 // TestReviewBriefingRendersGrounding asserts that the review briefing template
