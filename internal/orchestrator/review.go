@@ -1723,8 +1723,13 @@ func reviewSubagentTools(workspace string, roots []string, skill tools.Tool) []t
 		return out
 	}
 
+	// The read, grep and glob tools built here from the same (workspace, roots)
+	// all sanitize identically, so only the read tool's outcome needs logging.
+	readTool := tools.NewReadTool(workspace).WithReadRoots(roots)
+	LogReadRootsOutcome("", workspace, readTool.ReadRoots())
+
 	return append(out,
-		tools.NewReadTool(workspace).WithReadRoots(roots),
+		readTool,
 		tools.NewGrepTool(workspace).WithReadRoots(roots),
 		tools.NewGlobTool(workspace).WithReadRoots(roots),
 	)

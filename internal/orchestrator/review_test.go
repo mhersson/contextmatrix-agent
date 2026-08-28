@@ -3630,6 +3630,30 @@ func TestReviewSubagentToolsKeepTheSkillTool(t *testing.T) {
 	assert.Empty(t, reviewSubagentTools(ws, nil, nil))
 }
 
+// TestReviewSubagentToolsLogsTheDeclarationOutcome: the panel's widened tools
+// go through the same sanitizeReadRoots gate as the worker's - a declared
+// root the harness drops must not vanish silently here either.
+func TestReviewSubagentToolsLogsTheDeclarationOutcome(t *testing.T) {
+	buf := captureReadRootsLog(t)
+
+	ws := t.TempDir()
+	present := t.TempDir()
+	absent := filepath.Join(t.TempDir(), "never-created")
+
+	reviewSubagentTools(ws, []string{present, absent}, nil)
+
+	logged := buf.String()
+	assert.Contains(t, logged, present, "the surviving root must be logged as effective")
+	assert.Contains(t, logged, absent, "the dropped root must be named")
+	assert.Contains(t, logged, string(tools.DropReasonNonexistent), "the drop reason must be named")
+
+	// No declaration: nothing to log, matching the early-return that also
+	// skips building the widened tools.
+	buf.Reset()
+	reviewSubagentTools(ws, nil, nil)
+	assert.Empty(t, buf.String())
+}
+
 // TestExtraReadOnlyToolsOverrideConfinedDefaults pins the harness mechanism the
 // panel wiring rides on, mirroring how SpawnSubagents builds its child registry:
 // a duplicate name keeps the LAST registration.
