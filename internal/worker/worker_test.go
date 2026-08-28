@@ -226,6 +226,12 @@ func (f *fakeOps) ReportPush(_ context.Context, cardID, branch, prURL string) er
 	return nil
 }
 
+func (f *fakeOps) ReportParked(_ context.Context, cardID, reason string) error {
+	f.record("ReportParked", cardID, reason)
+
+	return nil
+}
+
 func (f *fakeOps) CompleteTask(_ context.Context, cardID, summary string) error {
 	f.record("CompleteTask", cardID, summary)
 
@@ -889,6 +895,10 @@ func TestReviewParkedMapsToCompleted(t *testing.T) {
 
 	assert.Equal(t, 0, ops.count("CompleteTask"), "review park must NOT complete the card")
 	assert.Equal(t, 0, ops.count("ReleaseCard"), "review park leaves the card in review")
+
+	require.Equal(t, 1, ops.count("ReportParked"), "the park must be reported to CM so the board can show it")
+	args := ops.argsOf("ReportParked")
+	assert.Equal(t, "review parked: attempts cap exhausted without approval", args[1])
 }
 
 // TestMapFSMResult_GatesParked: a GatesParkedError is the same graceful shape as
@@ -911,6 +921,10 @@ func TestMapFSMResult_GatesParked(t *testing.T) {
 
 	assert.Equal(t, 0, ops.count("CompleteTask"), "a gates park must NOT complete the card")
 	assert.Equal(t, 0, ops.count("ReleaseCard"), "a gates park leaves the card in review")
+
+	require.Equal(t, 1, ops.count("ReportParked"), "the park must be reported to CM so the board can show it")
+	args := ops.argsOf("ReportParked")
+	assert.Equal(t, "pr gates parked: PR creation failed - nothing to gate on", args[1])
 }
 
 // TestFSMDepsCarryGateWiring: the worker hands the FSM the gh gates seam and the
