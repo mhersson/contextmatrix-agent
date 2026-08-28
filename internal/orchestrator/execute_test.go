@@ -3026,6 +3026,58 @@ func TestPreCommitGateReusesOnlyAFingerprintVerifiedToolPass(t *testing.T) {
 	}
 }
 
+// TestPreCommitAcceptedToolPassEmitsVerification: the accepted arm certifies the
+// subtask without re-running the command, so without an event the transcript
+// records no gate verification for the subtask at all while the activity log
+// does - and the two records disagree. The event must carry the pass and name
+// the acceptance, but no command: nothing re-ran, and an accepted pass must
+// never read as a gate-executed one.
+func TestPreCommitAcceptedToolPassEmitsVerification(t *testing.T) {
+	var transcript bytes.Buffer
+
+	git := &fakeGit{worktreeStates: []string{"a"}}
+	d := execTestDeps(&fakeOps{}, git, &planLLM{})
+	d.Cfg.Workspace = t.TempDir()
+	d.Emit = events.NewEmitter(nil, &transcript)
+	d.WriteToolsForDir = func(_ string, verify tools.Tool) *tools.Registry {
+		return tools.NewRegistry(append(testWriteTools().All(), verify)...)
+	}
+
+	o := newExecRun(d, nil, 0)
+	seedResolvedVerifyPlan(o)
+
+	runs := 0
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		runs++
+
+		return verifyexec.Outcome{ExitCode: 0, Output: "checks output"}
+	}
+
+	o.bindVerifyTool(o.solver, o.resolvedVerifyPlan())
+
+	vt, ok := o.solver.tools.Get("verify")
+	require.True(t, ok, "the coder must have been offered the verify tool")
+
+	_, err := vt.Execute(context.Background(), nil)
+	require.NoError(t, err)
+
+	require.NoError(t, o.preCommitVerify(context.Background(), o.solver,
+		subtaskRef{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}, false))
+
+	assert.Equal(t, 1, runs, "the tool's run only - the gate took the verdict instead of re-running the command")
+	assert.True(t, o.solver.gate.verified, "the accepted pass certifies the tree")
+
+	line := transcript.String()
+	require.Contains(t, line, `"kind":"verification"`, "a verification event is emitted; transcript=%s", line)
+	assert.Equal(t, 1, strings.Count(line, `"kind":"verification"`),
+		"exactly one verification event; transcript=%s", line)
+	assert.Contains(t, line, `"ok":true`)
+	assert.Contains(t, line, `"status":"passed"`)
+	assert.Contains(t, line, "coder-verify-tool-pass", "the event names the acceptance, not a run")
+	assert.Contains(t, line, "did not re-run", "the detail says the gate took the tool's verdict")
+	assert.NotContains(t, line, `"command"`, "no command field may imply a gate-executed run")
+}
+
 // A verdict belongs to the subtask that earned it, and the gate is never even
 // offered one from a subtask that is over. HEAD deliberately does not move here,
 // so the seeded identity is one both gates WOULD match: this pins the reset

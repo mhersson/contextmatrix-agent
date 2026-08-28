@@ -562,70 +562,56 @@ func mapFSMResult(ctx context.Context, a fsmArgs, err error) (Result, error) {
 	case isToolchainMissing(err):
 		// Toolchain-missing park: an environmental failure, not a model
 		// failure - no ReportModelOutcomes/BlacklistModel call belongs here,
-		// mirroring the Budget/Context/MaxTurns arms above. The genuinely new
-		// step: transition the card to blocked BEFORE releasing the claim,
-		// since ownership may be required for the transition. blocked is
-		// project-configurable (not every .board.yaml declares
-		// in_progress -> blocked), so a failure here is logged and the park
-		// still completes exactly like the other arms - never fatal. The
-		// orchestrator already wrote the blocker reason to the card log; this
-		// path does not duplicate it.
-		if terr := a.ops.TransitionCard(ctx, a.spec.CardID, "blocked"); terr != nil {
-			slog.Warn("transition to blocked failed; leaving card state as-is",
-				"card", a.spec.CardID, "error", terr)
-		}
-
-		pushWIP(ctx, a)
-		releaseQuietly(ctx, a.ops, a.spec.CardID)
-
-		return Result{Reason: "error"}, fmt.Errorf("orchestrator: %w", err)
+		// mirroring the Budget/Context/MaxTurns arms above. The orchestrator
+		// already wrote the blocker reason to the card log; this path does not
+		// duplicate it.
+		return parkBlocked(ctx, a, err)
 
 	case isNoModel(err):
 		// Model-selection park: no catalogued model clears any configured bar
 		// for the role and the operator's capable default is barred too, so
 		// there is nothing to run the work on. Environmental like the
-		// toolchain arm above, and mapped identically - transition to blocked
-		// BEFORE releasing the claim (ownership may be required for the
-		// transition), push the WIP, then fail. blocked is
-		// project-configurable, so a failed transition is logged and the park
-		// still completes. The orchestrator already wrote the reason to the
-		// card log.
-		if terr := a.ops.TransitionCard(ctx, a.spec.CardID, "blocked"); terr != nil {
-			slog.Warn("transition to blocked failed; leaving card state as-is",
-				"card", a.spec.CardID, "error", terr)
-		}
-
-		pushWIP(ctx, a)
-		releaseQuietly(ctx, a.ops, a.spec.CardID)
-
-		return Result{Reason: "error"}, fmt.Errorf("orchestrator: %w", err)
+		// toolchain arm above, and mapped identically. The orchestrator
+		// already wrote the reason to the card log.
+		return parkBlocked(ctx, a, err)
 
 	case isVerifyParked(err):
 		// Pre-commit verify park: a subtask's verify stayed red through its one
 		// fix pass, so the orchestrator refused to commit that work as
 		// finished. Refusing the COMMIT is not a reason to destroy the tree
-		// with the container, so this maps exactly like the two environmental
-		// arms above - the push carries the refused work out on the card
-		// branch, and the blocked transition makes the park visible on the
-		// board. Unlike those two this park IS about the model's output, but
-		// the orchestrator already reported that outcome row while it still
-		// held the subtask claim, and it wrote the card log line carrying the
+		// with the container, so this maps exactly like the environmental
+		// parks - the push carries the refused work out on the card branch,
+		// and the blocked transition makes the park visible on the board.
+		// Unlike those this park IS about the model's output, but the
+		// orchestrator already reported that outcome row while it still held
+		// the subtask claim, and it wrote the card log line carrying the
 		// failing command and output; the worker duplicates neither.
-		if terr := a.ops.TransitionCard(ctx, a.spec.CardID, "blocked"); terr != nil {
-			slog.Warn("transition to blocked failed; leaving card state as-is",
-				"card", a.spec.CardID, "error", terr)
-		}
-
-		pushWIP(ctx, a)
-		releaseQuietly(ctx, a.ops, a.spec.CardID)
-
-		return Result{Reason: "error"}, fmt.Errorf("orchestrator: %w", err)
+		return parkBlocked(ctx, a, err)
 
 	default:
 		releaseQuietly(ctx, a.ops, a.spec.CardID)
 
 		return Result{Reason: "error"}, fmt.Errorf("orchestrator: %w", err)
 	}
+}
+
+// parkBlocked maps one of the environmental park arms (toolchain-missing,
+// no-model, verify-parked) onto the shared blocked-park sequence. The genuinely
+// distinguishing step: transition the card to blocked BEFORE releasing the
+// claim, since ownership may be required for the transition. blocked is
+// project-configurable (not every .board.yaml declares in_progress ->
+// blocked), so a failure here is logged and the park still completes - never
+// fatal.
+func parkBlocked(ctx context.Context, a fsmArgs, err error) (Result, error) {
+	if terr := a.ops.TransitionCard(ctx, a.spec.CardID, "blocked"); terr != nil {
+		slog.Warn("transition to blocked failed; leaving card state as-is",
+			"card", a.spec.CardID, "error", terr)
+	}
+
+	pushWIP(ctx, a)
+	releaseQuietly(ctx, a.ops, a.spec.CardID)
+
+	return Result{Reason: "error"}, fmt.Errorf("orchestrator: %w", err)
 }
 
 // isReviewParked reports whether err is the orchestrator's review-park sentinel.
