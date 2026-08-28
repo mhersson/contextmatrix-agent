@@ -347,19 +347,66 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 		// red, and that event is already charged on the budget axis. Charging it
 		// on the bar axis too would blame a model for turns it never got, and
 		// shrink the fix pool on evidence about volume.
+		//
+		// When the round behind it left a GREEN gate, that fix did not merely
+		// fail to fix - it broke a tree that worked, so its fixup is discarded
+		// and the branch goes back to the commit it started from. discarded
+		// steers only what the discard actually changes: vres still describes
+		// the red gate that really ran (the round is already recorded from it),
+		// while the round that FOLLOWS starts from a predecessor the gate proved
+		// green.
+		discarded := false
+
 		if fixRan && vres.Status == verifyFailed {
-			o.markFixFailed("left the verify red")
+			reason := "left the verify red"
+
+			// round-1: the fix under judgement ran at the END of the previous
+			// iteration, which is what fixRan carries forward.
+			if o.prevRoundGreen && o.discardRegressingFix(ctx, round-1, o.lastPanelFindings) {
+				reason = "regressed the verify"
+				discarded = true
+
+				// The verify tail describes a tree the branch no longer holds,
+				// and the command it names passes on the restored one. The fix
+				// round below gets the mandate the discarded fixup was chasing
+				// instead - anything else sends the coder after a failure that
+				// is already gone.
+				findings = o.lastPanelFindings
+			}
+
+			o.markFixFailed(reason)
 		}
+
+		// Recorded before the fix below runs, so every exit from this iteration -
+		// the turn-cap retry's continue included - leaves the next round's
+		// green->red comparison holding this round's real gate outcome rather
+		// than a stale one from the round before.
+		o.prevRoundGreen = discarded || vres.Status == verifyPassed
 
 		// Carry this round's findings into the next round so the panel verifies
 		// their resolution without importing new scope (cross-round memory).
-		o.lastFindings = findings
+		o.recordRoundFindings(findings)
 
 		if _, err := o.incrementReviewAttempt(ctx, findings); err != nil {
 			return err
 		}
 
 		req := fixRequest{Findings: findings, Round: round, FixTier: fixTier}
+
+		// The commit the branch sits on before this round's fix, read BEFORE it
+		// runs: a fix that takes the gate from green to red is reset back to
+		// here. CLEARED when the head cannot be read, never left alone - a value
+		// left over from an earlier round would discard more than the fixup that
+		// regressed the gate.
+		o.preFixHead = ""
+
+		if sha, herr := d.Git.Head(ctx); herr != nil {
+			slog.Warn("review: could not record the pre-fix head",
+				"card_id", cfg.CardID, "error", herr)
+		} else {
+			o.preFixHead = sha
+		}
+
 		committed, err := o.runFix(ctx, req)
 
 		var mte *MaxTurnsError
@@ -496,7 +543,7 @@ func (o *run) runReviewHITL(ctx context.Context, plan verifyPlan) error {
 				return nil
 			}
 
-			o.lastFindings = findings
+			o.recordRoundFindings(findings)
 
 			if _, err := d.Ops.IncrementReviewAttempts(ctx, cfg.CardID); err != nil {
 				return fmt.Errorf("increment review attempts: %w", err)
@@ -515,7 +562,7 @@ func (o *run) runReviewHITL(ctx context.Context, plan verifyPlan) error {
 			return o.reviewLoop(ctx, plan, iter+1)
 		}
 
-		o.lastFindings = findings
+		o.recordRoundFindings(findings)
 
 		if _, err := d.Ops.IncrementReviewAttempts(ctx, cfg.CardID); err != nil {
 			return fmt.Errorf("increment review attempts: %w", err)
@@ -653,6 +700,65 @@ func (o *run) discardCleanupFixup(ctx context.Context, pre, findings, reason str
 	return true
 }
 
+// discardRegressingFix resets the branch to the pre-fix head after a fix pass
+// took the verify gate from green to red, so a later park hands the operator the
+// mergeable tree instead of the regression. The fixup was pushed by the round
+// that made it, so the remote is taken back with a lease against it.
+//
+// It reports whether the fixup is actually gone. Every failure path leaves the
+// branch exactly as it found it and the caller falls back to today's behavior -
+// the round charged "left the verify red", with the verify tail still the next
+// fix's mandate, which is correct precisely because the failure is still there.
+//
+// fixRound is the round whose fix pass is being discarded - the round BEHIND
+// the red gate that detected it, not the one detecting it. mandate is what that
+// fix was sent to address, recorded on the card as un-actioned because the work
+// aimed at it is being thrown away; it comes from the caller rather than from
+// run state, since the cheap loop and the authoritative pass keep the findings
+// they are acting on in different places.
+func (o *run) discardRegressingFix(ctx context.Context, fixRound int, mandate string) bool {
+	d := o.d
+
+	if o.preFixHead == "" {
+		return false
+	}
+
+	// tip is both what the reset drops and the lease the force-push expects: the
+	// fixup this run pushed itself, so the remote sits on it too. A tip equal to
+	// the pre-fix head means no fixup landed and there is nothing to discard - a
+	// reset that changes nothing locally would still overwrite the remote.
+	tip, err := d.Git.Head(ctx)
+	if err != nil || tip == "" || tip == o.preFixHead {
+		return false
+	}
+
+	if err := d.Git.HardReset(ctx, o.preFixHead); err != nil {
+		d.logCard(ctx, "review: a fix pass regressed the verify (green -> red) but could not be discarded: %s", err)
+
+		return false
+	}
+
+	if err := d.Git.ForcePushWithLease(ctx, d.Cfg.Branch, tip); err != nil {
+		// The remote still holds the regression; put the local tree back on it
+		// rather than leaving the two split.
+		if rerr := d.Git.HardReset(ctx, tip); rerr != nil {
+			d.logCard(ctx, "review: the fix discard left the branch at %s while the remote holds %s: %s",
+				o.preFixHead, tip, rerr)
+		}
+
+		d.logCard(ctx, "review: a fix pass regressed the verify (green -> red) but the discard could not be pushed: %s", err)
+
+		return false
+	}
+
+	d.logCard(ctx, "%s", reviewParkNote(
+		fmt.Sprintf("review: fix round %d regressed the verify (green -> red); its fixup was discarded and the branch is back at %s - the findings it was addressing are recorded as unactioned:\n",
+			fixRound, o.preFixHead),
+		mandate))
+
+	return true
+}
+
 // mergeFeedback folds the human's adjust feedback into the synthesized findings
 // fed to the fix coder, so the fix run addresses both.
 func mergeFeedback(findings, feedback string) string {
@@ -704,6 +810,19 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 		return err
 	}
 
+	// The commit the strong fix starts from, read BEFORE it runs, so a fix that
+	// regresses the gate below can be discarded. Cleared on an unreadable head
+	// for the same reason the loop clears it: a value left over from a cheap
+	// round would discard more than the strong fixup.
+	o.preFixHead = ""
+
+	if sha, herr := d.Git.Head(ctx); herr != nil {
+		slog.Warn("review: could not record the pre-fix head",
+			"card_id", d.Cfg.CardID, "error", herr)
+	} else {
+		o.preFixHead = sha
+	}
+
 	// Gated strong fix - runs only because the authoritative review confirmed
 	// real issues.
 	if _, err := o.runFix(ctx, fixRequest{Findings: findings, Round: round, FixTier: fixTier, Authoritative: true}); err != nil {
@@ -729,20 +848,65 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 		return nil
 	}
 
-	o.lastFindings = findings2
+	// The strong fix ran between this pass's two gates, so a green-then-red pair
+	// is that fix regressing a tree that worked - the same event the cheap
+	// loop's arm discards, on the route that actually parks. Discarding it here
+	// is what puts the mergeable commit under the operator's park instead of one
+	// revision behind it, with nothing saying the green commit exists. Every git
+	// failure inside leaves the branch alone and parks on the red tree exactly as
+	// before.
+	parkFindings := findings2
+	discarded := false
 
-	n, err := o.incrementReviewAttempt(ctx, findings2)
+	if vres.Status == verifyPassed && vres2.Status == verifyFailed &&
+		o.discardRegressingFix(ctx, round, findings) {
+		discarded = true
+
+		// The verify tail describes a tree the branch no longer holds; what is
+		// still outstanding is the mandate the discarded fix was sent to address.
+		parkFindings = findings
+
+		// Recorded exactly as the loop records it, so the run's account of which
+		// fixers failed does not depend on which gate caught them.
+		o.markFixFailed("regressed the verify")
+	}
+
+	o.lastFindings = parkFindings
+
+	n, err := o.incrementReviewAttempt(ctx, parkFindings)
 	if err != nil {
 		return err
 	}
 
 	// Park with the strong findings. n is the persisted counter after both
 	// increments, and is the card's only visible record of how many rounds the
-	// configured cap actually bought.
-	d.logCard(ctx, "%s", reviewParkNote(
-		fmt.Sprintf("review parked after %d attempts (authoritative pass) - outstanding findings:\n", n), findings2))
+	// configured cap actually bought. A discard changes what the park is handing
+	// over: the branch is mergeable, which is the first thing the operator needs
+	// to know.
+	head := fmt.Sprintf("review parked after %d attempts (authoritative pass) - outstanding findings:\n", n)
+	if discarded {
+		head = fmt.Sprintf("review parked after %d attempts (authoritative pass); the strong fix regressed the verify and was discarded, so the branch is back on the tree its gate passed - outstanding findings:\n", n)
+	}
+
+	d.logCard(ctx, "%s", reviewParkNote(head, parkFindings))
 
 	return &ReviewParkedError{Reason: reviewParkedAttemptsCap}
+}
+
+// recordRoundFindings sets lastFindings (this round's raw output, always) and
+// lastPanelFindings (the most recent SYNTHESIZED panel verdict). A verify-red
+// round's findings are the gate's output tail, not a panel verdict, so they
+// never overwrite lastPanelFindings - otherwise a run of verify-red rounds
+// would erase the panel's mandate from cross-round memory. Shared by every
+// non-authoritative write site (the autonomous loop and both HITL branches);
+// the authoritative pass writes lastFindings directly since nothing ever
+// reads either field back on that path.
+func (o *run) recordRoundFindings(findings string) {
+	o.lastFindings = findings
+
+	if !strings.HasPrefix(findings, verifyFailedPrefix) {
+		o.lastPanelFindings = findings
+	}
 }
 
 // incrementReviewAttempt calls IncrementReviewAttempts and treats
@@ -902,7 +1066,11 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 	// Prior findings are constant across the three lenses: the same previous-round
 	// context goes to every specialist (cross-round memory). The authoritative pass
 	// gets the FULL recorded history, not just the last round.
-	priorText := o.lastFindings
+	priorText := o.lastPanelFindings
+	if priorText == "" {
+		priorText = o.lastFindings
+	}
+
 	if authoritative {
 		priorText = reviewFindingsHistory(o.body)
 	}
@@ -1130,7 +1298,12 @@ func (o *run) mobReviewBriefing(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("review diff: %w", err)
 	}
 
-	prior := priorFindingsBlock(o.lastFindings)
+	priorText := o.lastPanelFindings
+	if priorText == "" {
+		priorText = o.lastFindings
+	}
+
+	prior := priorFindingsBlock(priorText)
 
 	return fmt.Sprintf(reviewBriefing, o.grounding, readRootsBlock(o.d.ReadRoots),
 		o.tc.Title, o.taskDescription, fencedDiff(diff), prior), nil
@@ -1161,7 +1334,11 @@ func (o *run) synthesize(ctx context.Context, findings string, authoritative boo
 			repair = repairBlock(lastErr.Error())
 		}
 
-		priorText := o.lastFindings
+		priorText := o.lastPanelFindings
+		if priorText == "" {
+			priorText = o.lastFindings
+		}
+
 		if authoritative {
 			priorText = reviewFindingsHistory(o.body)
 		}
