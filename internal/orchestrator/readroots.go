@@ -34,12 +34,13 @@ func NewReadRootsLog() *ReadRootsLog {
 // tools.ReadRoots in the harness's jail.go), so this is the only place an
 // operator whose declared prefix is wrong for the image sees it.
 //
-// cardID attributes the line to a run when the caller has one; pass "" where
-// none is threaded through (the review panel builds its tools as a free
-// function with no card identity available) and the workspace still
-// identifies the line. Nothing is logged when no roots were declared -
-// matches the behavior of the logReadOnlyRoots function this replaces. Logs
-// at warn when anything was dropped, info otherwise.
+// cardID attributes the line to a run and is part of the dedup key: every
+// caller building tools for the same run must pass the SAME cardID (the
+// worker's Config.CardID, threaded to the review panel too) or their lines
+// for an identical declaration will never collapse. Nothing is logged when
+// no roots were declared - matches the behavior of the logReadOnlyRoots
+// function this replaces. Logs at warn when anything was dropped, info
+// otherwise.
 //
 // A nil receiver performs no dedup - every call logs. Production always
 // threads a real instance (via runFSM); this only matters for a caller that
@@ -51,7 +52,7 @@ func (l *ReadRootsLog) Log(cardID, workspace string, rr tools.ReadRoots) {
 	}
 
 	if l != nil {
-		key := fmt.Sprintf("%s\x00%s\x00%+v", cardID, workspace, rr)
+		key := readRootsKey(cardID, workspace, rr)
 
 		l.mu.Lock()
 
@@ -84,4 +85,21 @@ func (l *ReadRootsLog) Log(cardID, workspace string, rr tools.ReadRoots) {
 	} else {
 		slog.Info("read-only roots resolved", attrs...)
 	}
+}
+
+// readRootsKey builds an explicit, unambiguous dedup key for one (identity,
+// outcome) pair: every field - cardID, workspace, each effective root, each
+// dropped root paired with its reason - is its own element in a NUL-joined
+// list, rather than leaning on a struct's default %v formatting (which is
+// readable but not a documented, collision-safe encoding).
+func readRootsKey(cardID, workspace string, rr tools.ReadRoots) string {
+	parts := make([]string, 0, 2+len(rr.Effective)+2*len(rr.Dropped))
+	parts = append(parts, cardID, workspace)
+	parts = append(parts, rr.Effective...)
+
+	for _, d := range rr.Dropped {
+		parts = append(parts, d.Root, string(d.Reason))
+	}
+
+	return strings.Join(parts, "\x00")
 }

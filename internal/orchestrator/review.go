@@ -888,7 +888,7 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 			DefaultModel:       cfg.DefaultModel,
 			ToolOutputMaxBytes: cfg.ToolOutputMax,
 			RedactToolOutput:   d.Redact,
-			ExtraReadOnlyTools: reviewSubagentTools(cfg.Workspace, d.ReadRoots, d.SkillTool, d.ReadRootsLog),
+			ExtraReadOnlyTools: reviewSubagentTools(cfg.CardID, cfg.Workspace, d.ReadRoots, d.SkillTool, d.ReadRootsLog),
 			Provider:           parentCfg.Provider,
 			Reasoning:          parentCfg.Reasoning,
 		})
@@ -1716,10 +1716,14 @@ func tierFromString(tier string) registry.Tier {
 // tools.NewRegistry(append(tools.ReadOnlyTools(root), extras...)...), and
 // NewRegistry keeps the LAST registration for a duplicate name, so the widened
 // three replace the confined ones without a harness change. With no roots
-// declared the panel gets exactly what it got before. rrLog is the run's
-// shared read-roots tracker (Deps.ReadRootsLog); nil is safe (logs without
-// dedup) for callers with none to hand in.
-func reviewSubagentTools(workspace string, roots []string, skill tools.Tool, rrLog *ReadRootsLog) []tools.Tool {
+// declared the panel gets exactly what it got before. cardID must match the
+// identity the worker's own construction sites log with (Config.CardID) -
+// rrLog's dedup key is (cardID, workspace, outcome), so a mismatched cardID
+// (e.g. "") would never collapse with the run's earlier worker-path line for
+// the same declaration. rrLog is the run's shared read-roots tracker
+// (Deps.ReadRootsLog); nil is safe (logs without dedup) for callers with
+// none to hand in.
+func reviewSubagentTools(cardID, workspace string, roots []string, skill tools.Tool, rrLog *ReadRootsLog) []tools.Tool {
 	out := skillToolSlice(skill)
 	if len(roots) == 0 {
 		return out
@@ -1728,7 +1732,7 @@ func reviewSubagentTools(workspace string, roots []string, skill tools.Tool, rrL
 	// The read, grep and glob tools built here from the same (workspace, roots)
 	// all sanitize identically, so only the read tool's outcome needs logging.
 	readTool := tools.NewReadTool(workspace).WithReadRoots(roots)
-	rrLog.Log("", workspace, readTool.ReadRoots())
+	rrLog.Log(cardID, workspace, readTool.ReadRoots())
 
 	return append(out,
 		readTool,
