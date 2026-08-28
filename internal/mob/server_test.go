@@ -129,8 +129,12 @@ func TestSeatAgentCardResolvable(t *testing.T) {
 
 	resolver := agentcard.NewResolver(http.DefaultClient)
 
-	// Default path resolution against the seat endpoint as base URL.
+	// Resolution against the seat endpoint as base URL, asking for the
+	// well-known path explicitly - the seat endpoint has a path, which the
+	// 2.5.0 resolver would otherwise fetch directly as the card document.
+	// This mirrors how dialGuest resolves.
 	card, err := resolver.Resolve(t.Context(), srv.SeatEndpoint("seat-1"),
+		agentcard.WithPath(a2asrv.WellKnownAgentCardPath),
 		agentcard.WithRequestHeader("Authorization", "Bearer "+testBearer))
 	require.NoError(t, err)
 
