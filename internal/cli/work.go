@@ -131,12 +131,19 @@ func newWorkCmd() *cobra.Command {
 
 // buildWorkEmitter builds the container's event emitter: human output is
 // discarded (io.Discard), and the machine JSONL stream goes to cmd's
-// configured out (stdout in production) for the service's log bridge. The
-// attempt writer stamps this container's ordinal onto every event line, so a
-// card whose container was restarted has two separable runs in one log
-// instead of two colliding sequences.
+// configured out (stdout in production) for the service's log bridge. Above
+// attempt 1, the envelope-field option stamps this container's ordinal onto
+// every event line, so a card whose container was restarted has two
+// separable runs in one log instead of two colliding sequences. Attempt 1
+// gets no option, keeping the output byte-identical to an unwrapped emitter.
 func buildWorkEmitter(cmd *cobra.Command, spec worker.RunSpec) *events.Emitter {
-	return events.NewEmitter(io.Discard, attempt.NewWriter(cmd.OutOrStdout(), spec.Attempt))
+	var opts []events.Option
+
+	if spec.Attempt > 1 {
+		opts = append(opts, events.WithEnvelopeFields(map[string]any{attempt.Field: spec.Attempt}))
+	}
+
+	return events.NewEmitter(io.Discard, cmd.OutOrStdout(), opts...)
 }
 
 // splitPathList splits an os.PathListSeparator-separated list of paths,
