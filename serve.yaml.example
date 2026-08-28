@@ -310,3 +310,10 @@ tool_output_max_bytes: 131072
 # How long the Copilot gate waits for a review to land before proceeding
 # without one - it never parks on this timeout. Default: 1200.
 # CMX_GATES_COPILOT_WAIT_TIMEOUT_SECONDS
+
+# Whether the Copilot gate posts its triage verdicts back to the PR's review
+# threads (a reply per triaged comment; dismissed threads resolved at once,
+# fixed ones once a re-review confirms). Best-effort - a write failure is a
+# card note, never a park. Set to exactly "false" to disable; anything else
+# leaves it on.
+# CMX_GATES_COPILOT_THREAD_REPLIES

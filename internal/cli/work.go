@@ -439,6 +439,7 @@ func specFromEnv() (worker.RunSpec, error) {
 		GatesPollInterval:         time.Duration(gatesPollSeconds) * time.Second,
 		GatesCIWaitTimeout:        time.Duration(gatesCIWaitSeconds) * time.Second,
 		GatesCopilotWaitTimeout:   time.Duration(gatesCopilotWaitSeconds) * time.Second,
+		GatesCopilotThreadReplies: os.Getenv("CMX_GATES_COPILOT_THREAD_REPLIES") != "false",
 		CompactionEnabled:         compactionEnabled,
 		CompactionThreshold:       compactionThreshold,
 		CompactionKeepRecentTurns: compactionKeepRecentTurns,

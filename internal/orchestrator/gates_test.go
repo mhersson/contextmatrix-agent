@@ -69,6 +69,16 @@ type fakeGates struct {
 	// outlast the gate deadline.
 	logsDelay time.Duration
 
+	// Thread write-back scripting: threads is what ReviewThreads returns;
+	// replyErr/resolveErr script write failures. ReviewThreads returns the
+	// backing slice DELIBERATELY: the writer's in-place IsResolved/ReplyCount
+	// updates persist into later fetches, modeling GitHub's own persistence -
+	// tests depend on that, so never "fix" this to return copies.
+	threads    []ReviewThread
+	threadsErr error
+	replyErr   error
+	resolveErr error
+
 	// FindPRURL scripting: the recovery probe's result for a fail-closed gate.
 	findPRURL    string
 	findPRURLErr error
@@ -158,6 +168,33 @@ func (f *fakeGates) RequestCopilotReview(_ context.Context, prURL string) (bool,
 	f.requested = true
 
 	return true, nil
+}
+
+func (f *fakeGates) ReviewThreads(_ context.Context, prURL string) ([]ReviewThread, error) {
+	f.record("ReviewThreads:" + prURL)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.threads, f.threadsErr
+}
+
+func (f *fakeGates) ReplyToReviewComment(_ context.Context, prURL string, commentID int64, body string) error {
+	f.record(fmt.Sprintf("Reply:%s:%d:%s", prURL, commentID, body))
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.replyErr
+}
+
+func (f *fakeGates) ResolveReviewThread(_ context.Context, threadID string) error {
+	f.record("Resolve:" + threadID)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.resolveErr
 }
 
 func (f *fakeGates) CopilotReview(_ context.Context, prURL string) (*CopilotReview, error) {
@@ -1454,14 +1491,28 @@ const copilotHeadSHA = "head-sha"
 // is the style nit the triage model rejects.
 var (
 	swallowedErrorComment = ReviewComment{
+		ID:   901,
 		Path: "internal/api/handler.go",
 		Body: "This error is swallowed - the caller can never see it.",
 	}
 	renamingComment = ReviewComment{
+		ID:   902,
 		Path: "README.md",
 		Body: "Consider rewording this sentence.",
 	}
 )
+
+// threadOf builds the review thread rooted at a comment, the shape
+// ReviewThreads would report for it.
+func threadOf(id string, c ReviewComment, extra ...int64) ReviewThread {
+	return ReviewThread{
+		ThreadID:   id,
+		CommentIDs: append([]int64{c.ID}, extra...),
+		ReplyCount: len(extra),
+		RootPath:   c.Path,
+		RootBody:   c.Body,
+	}
+}
 
 // TestCopilotGate_ExistingReviewOnHeadSkipsTheRequest: a re-trigger or a slow
 // earlier run finds Copilot's review already on the PR head. The gate must
@@ -1998,6 +2049,291 @@ func TestCopilotGate_ValidFindingsFixedThenClean(t *testing.T) {
 	assert.Contains(t, body, "## Copilot Review (Round 2)", "later rounds are numbered; body=%q", body)
 	assert.Contains(t, body, "- Copilot rounds used: 1/3")
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+}
+
+// TestCopilotGate_ThreadWriteBack: the triage verdicts reach the PR. The
+// INVALID comment gets a reply carrying the dismissal reason and its thread
+// is resolved; the VALID comment gets a reply after the fix round pushes,
+// citing the new head, and its thread stays open for the re-review to
+// confirm.
+func TestCopilotGate_ThreadWriteBack(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		threads: []ReviewThread{
+			threadOf("RT_VALID", swallowedErrorComment),
+			threadOf("RT_INVALID", renamingComment),
+		},
+		reviews: []*CopilotReview{
+			reviewOnHead("2 suggestions", swallowedErrorComment, renamingComment),
+			reviewOnHead("LGTM"),
+		},
+	}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: []llm.Response{
+		copilotVerdict(
+			copilotFinding{
+				File: "internal/api/handler.go", Issue: "the write error is dropped",
+				Valid: true, Reason: "the caller cannot tell the write failed",
+			},
+			copilotFinding{
+				File: "README.md", Issue: "wording could be clearer",
+				Valid: false, Reason: "style preference, not a defect",
+			},
+		),
+		stopResp("coder: returned the write error", 0.02),
+		copilotVerdict(),
+	}}
+
+	o := prGateRun(ops, gates, git, client, copilotGateContext("Two comments", "body"), 0)
+	o.d.Cfg.GatesCopilotThreadReplies = true
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	calls := gates.recorded()
+
+	invalidReply := indexOfCallPrefix(calls, fmt.Sprintf("Reply:%s:%d:", gatePRURL, renamingComment.ID))
+	require.GreaterOrEqual(t, invalidReply, 0, "the INVALID comment gets a reply; calls=%v", calls)
+	assert.Contains(t, calls[invalidReply], "style preference, not a defect",
+		"the dismissal reasoning is the reply body")
+	assert.GreaterOrEqual(t, indexOfCall(calls, "Resolve:RT_INVALID"), 0,
+		"a dismissed thread is resolved; calls=%v", calls)
+
+	validReply := indexOfCallPrefix(calls, fmt.Sprintf("Reply:%s:%d:", gatePRURL, swallowedErrorComment.ID))
+	require.GreaterOrEqual(t, validReply, 0, "the VALID comment gets a reply; calls=%v", calls)
+	assert.Contains(t, calls[validReply], "the caller cannot tell the write failed")
+	assert.Contains(t, calls[validReply], copilotHeadSHA, "the VALID reply cites the fixed head")
+
+	// The clean re-review (the second CopilotReview read) confirms the fix
+	// and only THEN may the VALID thread resolve - never on the push alone.
+	validResolve := indexOfCall(calls, "Resolve:RT_VALID")
+	require.GreaterOrEqual(t, validResolve, 0, "the confirmed fix resolves the thread; calls=%v", calls)
+	assert.Greater(t, validResolve, nthIndexOfCall(calls, "CopilotReview:"+gatePRURL, 2),
+		"a VALID thread is never resolved on the fix push alone; calls=%v", calls)
+
+	assert.Contains(t, git.recorded(), "Push:cm/card-1", "the fix is pushed")
+}
+
+// TestCopilotGate_ConfirmedFixResolvesOnReReview: Copilot re-posts every
+// comment it still holds open, so a re-review that stops repeating a VALID
+// comment is the all-clear - only then is its thread resolved.
+func TestCopilotGate_ConfirmedFixResolvesOnReReview(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		threads:   []ReviewThread{threadOf("RT_VALID", swallowedErrorComment)},
+		reviews: []*CopilotReview{
+			reviewOnHead("1 suggestion", swallowedErrorComment),
+			reviewOnHead("LGTM"),
+		},
+	}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: []llm.Response{
+		copilotVerdict(copilotFinding{
+			File: "internal/api/handler.go", Issue: "dropped error",
+			Valid: true, Reason: "the caller cannot tell the write failed",
+		}),
+		stopResp("coder: fixed", 0.02),
+		copilotVerdict(),
+	}}
+
+	o := prGateRun(ops, gates, git, client, copilotGateContext("Confirmed fix", "body"), 0)
+	o.d.Cfg.GatesCopilotThreadReplies = true
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	calls := gates.recorded()
+	resolve := indexOfCall(calls, "Resolve:RT_VALID")
+	require.GreaterOrEqual(t, resolve, 0, "the clean re-review confirms the fix; calls=%v", calls)
+	assert.Greater(t, resolve, nthIndexOfCall(calls, "CopilotReview:"+gatePRURL, 2),
+		"the resolve is earned by the re-review, not the fix push; calls=%v", calls)
+	assert.True(t, ops.loggedContains("Copilot review addressed"))
+}
+
+// nthIndexOfCall returns the index of the n-th (1-based) occurrence of name,
+// or -1.
+func nthIndexOfCall(calls []string, name string, n int) int {
+	seen := 0
+
+	for i, c := range calls {
+		if c == name {
+			seen++
+
+			if seen == n {
+				return i
+			}
+		}
+	}
+
+	return -1
+}
+
+// TestCopilotGate_RepeatedValidCommentResolvesNothing: a re-review that
+// repeats the VALID comment proves the fix did NOT land - the thread stays
+// open and funds another fix round instead.
+func TestCopilotGate_RepeatedValidCommentResolvesNothing(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		threads:   []ReviewThread{threadOf("RT_VALID", swallowedErrorComment, 950)},
+		reviews: []*CopilotReview{
+			reviewOnHead("1 suggestion", swallowedErrorComment),
+			reviewOnHead("still there", swallowedErrorComment),
+			reviewOnHead("LGTM"),
+		},
+	}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: []llm.Response{
+		copilotVerdict(copilotFinding{
+			File: "internal/api/handler.go", Issue: "dropped error",
+			Valid: true, Reason: "real",
+		}),
+		stopResp("coder: fix one", 0.02),
+		stopResp("coder: fix two", 0.02),
+		copilotVerdict(),
+	}}
+
+	o := prGateRun(ops, gates, git, client, copilotGateContext("Repeat", "body"), 0)
+	o.d.Cfg.GatesCopilotThreadReplies = true
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	calls := gates.recorded()
+	resolve := indexOfCall(calls, "Resolve:RT_VALID")
+	thirdRead := nthIndexOfCall(calls, "CopilotReview:"+gatePRURL, 3)
+	require.GreaterOrEqual(t, thirdRead, 0, "the gate read the repeat and the final clean review; calls=%v", calls)
+	require.GreaterOrEqual(t, resolve, 0, "the final clean review still confirms; calls=%v", calls)
+	assert.Greater(t, resolve, thirdRead,
+		"the repeat round must not resolve; only the clean review does; calls=%v", calls)
+	assert.Equal(t, 1, countCalls(calls, "Resolve:RT_VALID"))
+}
+
+// TestCopilotGate_ThreadWriteBackOffByZeroValue: a Deps built without the
+// knob writes nothing - no thread listing, no replies, no resolves.
+func TestCopilotGate_ThreadWriteBackOffByZeroValue(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		threads:   []ReviewThread{threadOf("RT_1", swallowedErrorComment)},
+		reviews: []*CopilotReview{
+			reviewOnHead("1 suggestion", renamingComment),
+		},
+	}
+	client := &planLLM{responses: []llm.Response{copilotVerdict(
+		copilotFinding{File: "README.md", Issue: "wording", Valid: false, Reason: "style"},
+	)}}
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, copilotGateContext("Knob off", "body"), 0)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	for _, call := range gates.recorded() {
+		assert.NotContains(t, call, "ReviewThreads:", "no thread reads with the knob off")
+		assert.NotContains(t, call, "Reply:", "no replies with the knob off")
+		assert.NotContains(t, call, "Resolve:", "no resolves with the knob off")
+	}
+}
+
+// TestCopilotGate_ThreadWithReplyIsNotRepliedAgain: a thread that already
+// carries a reply is never replied to twice - the crash window between
+// posting a reply and recording the verdict line would otherwise double-post
+// on resume - but a dismissed thread still resolves.
+func TestCopilotGate_ThreadWithReplyIsNotRepliedAgain(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		threads:   []ReviewThread{threadOf("RT_1", renamingComment, 950)},
+		reviews: []*CopilotReview{
+			reviewOnHead("1 suggestion", renamingComment),
+		},
+	}
+	client := &planLLM{responses: []llm.Response{copilotVerdict(
+		copilotFinding{File: "README.md", Issue: "wording", Valid: false, Reason: "style"},
+	)}}
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, copilotGateContext("Replied already", "body"), 0)
+	o.d.Cfg.GatesCopilotThreadReplies = true
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	calls := gates.recorded()
+	assert.Equal(t, -1, indexOfCallPrefix(calls, "Reply:"),
+		"an answered thread gets no second reply; calls=%v", calls)
+	assert.GreaterOrEqual(t, indexOfCall(calls, "Resolve:RT_1"), 0,
+		"the dismissal still resolves the thread; calls=%v", calls)
+}
+
+// TestCopilotGate_ThreadFoundByDedupeKeyWhenIDMisses: a comment whose REST id
+// is absent from the thread listing (a legacy zero-ID value, or a null
+// GraphQL databaseId) still reaches its thread through the card's dedupe key
+// - the documented fallback, and the only path serving such comments.
+func TestCopilotGate_ThreadFoundByDedupeKeyWhenIDMisses(t *testing.T) {
+	legacy := ReviewComment{Path: renamingComment.Path, Body: renamingComment.Body} // ID 0
+
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		// The thread's comment ids do not contain the comment's (zero) id, so
+		// only the RootPath/RootBody key can match it.
+		threads: []ReviewThread{{
+			ThreadID:   "RT_KEY",
+			CommentIDs: []int64{777},
+			RootPath:   legacy.Path,
+			RootBody:   legacy.Body,
+		}},
+		reviews: []*CopilotReview{
+			reviewOnHead("1 suggestion", legacy),
+		},
+	}
+	client := &planLLM{responses: []llm.Response{copilotVerdict(
+		copilotFinding{File: "README.md", Issue: "wording", Valid: false, Reason: "style"},
+	)}}
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, copilotGateContext("Key fallback", "body"), 0)
+	o.d.Cfg.GatesCopilotThreadReplies = true
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	calls := gates.recorded()
+	reply := indexOfCallPrefix(calls, fmt.Sprintf("Reply:%s:%d:", gatePRURL, 777))
+	require.GreaterOrEqual(t, reply, 0, "the reply lands on the key-matched thread's root; calls=%v", calls)
+	assert.GreaterOrEqual(t, indexOfCall(calls, "Resolve:RT_KEY"), 0, "and the dismissal resolves it")
+}
+
+// TestCopilotGate_ThreadWriteBackFailureNeverParks: a failing reply is one
+// card note; the gate still passes and the card completes.
+func TestCopilotGate_ThreadWriteBackFailureNeverParks(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		threads:   []ReviewThread{threadOf("RT_1", renamingComment)},
+		replyErr:  errors.New("HTTP 403: Resource not accessible"),
+		reviews: []*CopilotReview{
+			reviewOnHead("1 suggestion", renamingComment),
+		},
+	}
+	client := &planLLM{responses: []llm.Response{copilotVerdict(
+		copilotFinding{File: "README.md", Issue: "wording", Valid: false, Reason: "style"},
+	)}}
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, copilotGateContext("Reply fails", "body"), 0)
+	o.d.Cfg.GatesCopilotThreadReplies = true
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	assert.True(t, ops.loggedContains("could not write triage verdicts"),
+		"the failure is one card note; logs=%v", ops.recorded())
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0,
+		"a write failure never parks the card")
+	assert.Equal(t, -1, indexOfCall(gates.recorded(), "Resolve:RT_1"),
+		"an unanswered thread is not resolved; the reply failed first")
 }
 
 // TestCopilotGate_ReRequestNotTakingSkipsAfterGrace: the re-request after a

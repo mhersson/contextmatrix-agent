@@ -10,10 +10,30 @@ type CheckResult struct {
 	Description string `json:"description"`
 }
 
-// ReviewComment is one line comment from a PR review.
+// ReviewComment is one line comment from a PR review. ID is the REST comment
+// id the reply endpoint is addressed by; zero on a value that never carried
+// one.
 type ReviewComment struct {
+	ID   int64
 	Path string
 	Body string
+}
+
+// ReviewThread is one review-comment thread on the PR, as GraphQL sees it.
+// ThreadID is the opaque node ID resolveReviewThread needs. CommentIDs are
+// the REST databaseIds of the thread's comments in order - the first is the
+// root comment a reply targets. RootPath and RootBody are the root comment's
+// location and text, the inputs of the dedupe key that matches threads to
+// triaged card lines across a park/resume. ReplyCount is the number of
+// comments beyond the root: a thread that already has any reply is one the
+// gate must not reply to again.
+type ReviewThread struct {
+	ThreadID   string
+	IsResolved bool
+	CommentIDs []int64
+	ReplyCount int
+	RootPath   string
+	RootBody   string
 }
 
 // CopilotReview is the latest completed Copilot review on the PR.
@@ -49,6 +69,15 @@ type PRGates interface {
 	// adding the reviewer, but an unreadable response reads the same way.
 	RequestCopilotReview(ctx context.Context, prURL string) (bool, error)
 	CopilotReview(ctx context.Context, prURL string) (*CopilotReview, error)
+
+	// ReviewThreads lists the PR's review-comment threads; ReplyToReviewComment
+	// and ResolveReviewThread write the gate's triage verdicts back into them.
+	// All three serve a best-effort path: their errors are logged on the card,
+	// never escalated.
+	ReviewThreads(ctx context.Context, prURL string) ([]ReviewThread, error)
+	ReplyToReviewComment(ctx context.Context, prURL string, commentID int64, body string) error
+	ResolveReviewThread(ctx context.Context, threadID string) error
+
 	FailureLogs(ctx context.Context, prURL string, failed []CheckResult) (string, error)
 
 	// FindPRURL returns the URL of the open PR for the workspace's current

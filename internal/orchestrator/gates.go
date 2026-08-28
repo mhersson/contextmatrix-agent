@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"maps"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -552,6 +553,213 @@ const (
 	cycleAwaitGrace
 )
 
+// copilotThreadWriter posts the gate's triage verdicts back into the PR's
+// review threads, best-effort: every write failure is a slog line, plus one
+// card note for the first, and nothing ever parks - the work is already
+// pushed by the time these writes happen. Threads are fetched lazily, once. A
+// thread that already carries any reply is never replied to again - a resumed
+// round must not double-post, and a thread a human answered gets no competing
+// agent reply (a dismissal still resolves such a thread: the writer cannot
+// tell a human's reply from its own crash-window one, and the verdict on the
+// card is final either way). A resolved thread is never re-resolved.
+//
+// The resolve rule: a dismissed (INVALID) thread resolves the moment its
+// reply lands - the decision is final. A VALID thread is resolved only by
+// resolveConfirmed, when a re-review arrives without repeating the comment;
+// resolving on the fix push alone would blind repeatedValidComments, which
+// exists because a fix round sometimes does not fix it.
+type copilotThreadWriter struct {
+	o       *run
+	prURL   string
+	enabled bool
+
+	fetched   bool
+	failed    bool
+	byComment map[int64]*ReviewThread
+	byKey     map[string]*ReviewThread
+}
+
+func (o *run) newCopilotThreadWriter(prURL string) *copilotThreadWriter {
+	return &copilotThreadWriter{o: o, prURL: prURL, enabled: o.d.Cfg.GatesCopilotThreadReplies}
+}
+
+// ensureThreads fetches the thread listing on first use. False means every
+// write should be skipped: the writer is off, or a fetch failed.
+func (w *copilotThreadWriter) ensureThreads(ctx context.Context) bool {
+	if !w.enabled || w.failed {
+		return false
+	}
+
+	if w.fetched {
+		return true
+	}
+
+	w.fetched = true
+
+	threads, err := w.o.d.PRGates.ReviewThreads(ctx, w.prURL)
+	if err != nil {
+		w.fail(ctx, err)
+
+		return false
+	}
+
+	w.byComment = make(map[int64]*ReviewThread)
+	w.byKey = make(map[string]*ReviewThread)
+
+	for i := range threads {
+		t := &threads[i]
+
+		// A thread with no comment nodes has nothing to reply to, and indexing
+		// it would turn this best-effort path into a run-crashing panic.
+		if len(t.CommentIDs) == 0 {
+			continue
+		}
+
+		for _, id := range t.CommentIDs {
+			w.byComment[id] = t
+		}
+
+		w.byKey[copilotCommentKey(t.RootPath, t.RootBody)] = t
+	}
+
+	return true
+}
+
+// threadFor resolves a comment to its thread, fetching the listing on first
+// use. A nil answer means the write should be skipped: the writer is off, a
+// fetch failed, or the thread cannot be found.
+func (w *copilotThreadWriter) threadFor(ctx context.Context, c ReviewComment) *ReviewThread {
+	if !w.ensureThreads(ctx) {
+		return nil
+	}
+
+	if t, ok := w.byComment[c.ID]; ok && c.ID != 0 {
+		return t
+	}
+
+	return w.byKey[copilotCommentKey(c.Path, c.Body)]
+}
+
+// dismiss replies with the dismissal reasoning and resolves the thread.
+func (w *copilotThreadWriter) dismiss(ctx context.Context, c ReviewComment, reason string) {
+	t := w.threadFor(ctx, c)
+	if t == nil {
+		return
+	}
+
+	if t.ReplyCount == 0 {
+		body := "Triaged by contextmatrix-agent: not a defect.\n\n" + strings.TrimSpace(reason)
+		if err := w.o.d.PRGates.ReplyToReviewComment(ctx, w.prURL, t.CommentIDs[0], body); err != nil {
+			w.fail(ctx, err)
+
+			return
+		}
+
+		t.ReplyCount++
+	}
+
+	if !t.IsResolved {
+		if err := w.o.d.PRGates.ResolveReviewThread(ctx, t.ThreadID); err != nil {
+			w.fail(ctx, err)
+
+			return
+		}
+
+		t.IsResolved = true
+	}
+}
+
+// repliesToFixed posts the VALID replies after a fix round pushed, citing the
+// head that addressed them. Threads stay open for resolveConfirmed.
+func (w *copilotThreadWriter) repliesToFixed(ctx context.Context, fresh []ReviewComment, findings []*copilotFinding) {
+	if !w.enabled || w.failed {
+		return
+	}
+
+	// A reopened-only round carries no fresh VALID finding - skip the head
+	// read a reply would have cited.
+	if !slices.ContainsFunc(findings, func(f *copilotFinding) bool { return f != nil && f.Valid }) {
+		return
+	}
+
+	fixedOn := "Addressed by a follow-up commit pushed to this PR."
+
+	if head, err := w.o.d.PRGates.HeadSHA(ctx, w.prURL); err == nil && head != "" {
+		fixedOn = "Addressed on " + head + "."
+	}
+
+	for i, f := range findings {
+		if f == nil || !f.Valid {
+			continue
+		}
+
+		t := w.threadFor(ctx, fresh[i])
+		if t == nil || t.ReplyCount > 0 {
+			continue
+		}
+
+		body := "Triaged by contextmatrix-agent: valid finding.\n\n" + strings.TrimSpace(f.Reason) +
+			"\n\n" + fixedOn + " This thread stays open until a re-review confirms the fix."
+
+		if err := w.o.d.PRGates.ReplyToReviewComment(ctx, w.prURL, t.CommentIDs[0], body); err != nil {
+			w.fail(ctx, err)
+
+			return
+		}
+
+		t.ReplyCount++
+	}
+}
+
+// resolveConfirmed resolves the threads of comments confirmed fixed - keys an
+// earlier round triaged VALID that the arrived re-review no longer repeats.
+func (w *copilotThreadWriter) resolveConfirmed(ctx context.Context, keys []string) {
+	for _, key := range keys {
+		t := w.threadByKey(ctx, key)
+		if t == nil || t.IsResolved {
+			continue
+		}
+
+		if err := w.o.d.PRGates.ResolveReviewThread(ctx, t.ThreadID); err != nil {
+			w.fail(ctx, err)
+
+			return
+		}
+
+		t.IsResolved = true
+	}
+}
+
+// threadByKey resolves a dedupe key to its thread, fetching the listing on
+// first use; nil means skip the write.
+func (w *copilotThreadWriter) threadByKey(ctx context.Context, key string) *ReviewThread {
+	if !w.ensureThreads(ctx) {
+		return nil
+	}
+
+	return w.byKey[key]
+}
+
+// fail records the run's first write failure on the card - the later ones,
+// this cycle's or a later cycle's, only in the log - and stops this writer:
+// one broken permission would otherwise fail every remaining write the same
+// way.
+func (w *copilotThreadWriter) fail(ctx context.Context, err error) {
+	slog.Warn("pr_gates: review-thread write-back failed",
+		"card_id", w.o.d.Cfg.CardID, "pr_url", w.prURL, "error", err)
+
+	w.failed = true
+
+	if w.o.threadWriteFailNoted {
+		return
+	}
+
+	w.o.threadWriteFailNoted = true
+	w.o.gateNote(ctx, "copilot", fmt.Sprintf(
+		"pr_gates: could not write triage verdicts to the PR review threads (%s); verdicts remain on the card", err,
+	), nil)
+}
+
 // copilotReviewCycle handles one arrived review: dedupes against what earlier
 // rounds triaged, triages the fresh comments, and either passes the gate
 // (cycleSatisfied) or spends fix rounds until one commits, then re-requests
@@ -572,6 +780,14 @@ func (o *run) copilotReviewCycle(
 ) (copilotCycleOutcome, error) {
 	fresh := unseenComments(review.Comments, triaged)
 	reopened := repeatedValidComments(review.Comments, triaged)
+	writer := o.newCopilotThreadWriter(prURL)
+
+	// A comment an earlier round triaged VALID that this review no longer
+	// repeats is confirmed fixed - Copilot re-posts every comment it still
+	// holds open, so absence is the all-clear - and its thread can close.
+	// Before the early exits: an all-repeats review still confirms whatever
+	// it stopped repeating.
+	writer.resolveConfirmed(ctx, confirmedFixedKeys(review.Comments, triaged))
 
 	// Copilot re-posts the comments it already made on every re-review. A
 	// round that carries nothing new AND nothing still open is nothing to
@@ -606,6 +822,15 @@ func (o *run) copilotReviewCycle(
 		verdicts := copilotCommentVerdicts(fresh, findings)
 		for i, c := range fresh {
 			triaged[copilotCommentKey(c.Path, c.Body)] = verdicts[i]
+		}
+
+		// A dismissed comment is settled the moment the verdict lands: the
+		// reasoning goes onto its thread and the thread closes, so a human
+		// reading the PR can tell "considered and rejected" from "ignored".
+		for i, f := range copilotCommentFindings(fresh, findings) {
+			if f != nil && !f.Valid {
+				writer.dismiss(ctx, fresh[i], f.Reason)
+			}
 		}
 	}
 
@@ -645,6 +870,12 @@ func (o *run) copilotReviewCycle(
 		// round finds the retry already spent and parks, and a round
 		// that commits falls through to the re-request below.
 	}
+
+	// A VALID comment's reply waits for the fix push so it can cite the head
+	// that addressed it. The thread stays open: only a re-review that stops
+	// repeating the comment proves the fix landed (see the resolve rule on
+	// copilotThreadWriter). Reopened comments already carry their reply.
+	writer.repliesToFixed(ctx, fresh, copilotCommentFindings(fresh, findings))
 
 	confirmed, rerr := o.d.PRGates.RequestCopilotReview(ctx, prURL)
 	if rerr != nil {
@@ -1101,39 +1332,68 @@ func (o *run) recordCopilotRound(
 	o.recordSection(ctx, heading, b.String())
 }
 
-// copilotCommentVerdicts pairs each comment with the triage verdict it
-// received, for recordCopilotRound to write and copilotTriagedComments to read
-// back. The triage prompt asks for one finding entry per comment, in the order
-// given, so when the counts match the pairing is by index. A triage response
-// that omits or duplicates an entry breaks that alignment, so the fallback ORs
-// the Valid flag over every finding naming the comment's path instead; a
-// comment no finding names at all was never judged and reads VALID, since an
-// unjudged comment must never be recorded as safe to ignore.
-func copilotCommentVerdicts(comments []ReviewComment, findings []copilotFinding) []bool {
-	verdicts := make([]bool, len(comments))
+// copilotCommentFindings maps each comment to the finding that judged it, nil
+// where no finding names it. The triage prompt asks for one finding entry per
+// comment, in the order given, so when the counts match the pairing is by
+// index. A triage response that omits or duplicates an entry breaks that
+// alignment, so the fallback matches per path instead, merging multiple
+// same-path findings into one whose Valid is the OR and whose Reason joins
+// theirs - the same semantics copilotCommentVerdicts always applied, kept in
+// one place so the recorded verdict and the thread reply can never diverge.
+func copilotCommentFindings(comments []ReviewComment, findings []copilotFinding) []*copilotFinding {
+	out := make([]*copilotFinding, len(comments))
 
 	if len(findings) == len(comments) {
-		for i, f := range findings {
-			verdicts[i] = f.Valid
+		for i := range findings {
+			out[i] = &findings[i]
 		}
 
-		return verdicts
+		return out
 	}
 
 	for i, c := range comments {
-		var (
-			matched bool
-			valid   bool
-		)
+		var matched []*copilotFinding
 
-		for _, f := range findings {
-			if f.File == c.Path {
-				matched = true
-				valid = valid || f.Valid
+		for j := range findings {
+			if findings[j].File == c.Path {
+				matched = append(matched, &findings[j])
 			}
 		}
 
-		verdicts[i] = valid || !matched
+		switch len(matched) {
+		case 0:
+		case 1:
+			out[i] = matched[0]
+		default:
+			merged := &copilotFinding{File: c.Path, Issue: matched[0].Issue}
+
+			var reasons []string
+
+			for _, f := range matched {
+				merged.Valid = merged.Valid || f.Valid
+
+				if r := strings.TrimSpace(f.Reason); r != "" {
+					reasons = append(reasons, r)
+				}
+			}
+
+			merged.Reason = strings.Join(reasons, " / ")
+			out[i] = merged
+		}
+	}
+
+	return out
+}
+
+// copilotCommentVerdicts pairs each comment with the triage verdict it
+// received, for recordCopilotRound to write and copilotTriagedComments to read
+// back. A comment no finding names at all was never judged and reads VALID,
+// since an unjudged comment must never be recorded as safe to ignore.
+func copilotCommentVerdicts(comments []ReviewComment, findings []copilotFinding) []bool {
+	verdicts := make([]bool, len(comments))
+
+	for i, f := range copilotCommentFindings(comments, findings) {
+		verdicts[i] = f == nil || f.Valid
 	}
 
 	return verdicts
@@ -1312,6 +1572,26 @@ func repeatedValidComments(comments []ReviewComment, triaged map[string]bool) []
 	}
 
 	return reopened
+}
+
+// confirmedFixedKeys returns the dedupe keys of comments an earlier round
+// triaged VALID that the arrived review no longer carries - the fix for them
+// is confirmed, since Copilot re-posts every comment it still holds open.
+func confirmedFixedKeys(comments []ReviewComment, triaged map[string]bool) []string {
+	live := make(map[string]bool, len(comments))
+	for _, c := range comments {
+		live[copilotCommentKey(c.Path, c.Body)] = true
+	}
+
+	var confirmed []string
+
+	for key, valid := range triaged {
+		if valid && !live[key] {
+			confirmed = append(confirmed, key)
+		}
+	}
+
+	return confirmed
 }
 
 // copilotCommentKey identifies a review comment for dedupe: its flattened path

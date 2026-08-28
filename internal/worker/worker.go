@@ -111,6 +111,11 @@ type RunSpec struct {
 	// CMX_GATES_COPILOT_WAIT_TIMEOUT_SECONDS; default 20m.
 	GatesCopilotWaitTimeout time.Duration
 
+	// GatesCopilotThreadReplies posts the Copilot gate's triage verdicts back
+	// to the PR's review threads and resolves settled ones.
+	// CMX_GATES_COPILOT_THREAD_REPLIES; on unless set to exactly "false".
+	GatesCopilotThreadReplies bool
+
 	MaxCapability bool // CM_MAX_CAPABILITY; every pick chooses the most capable model in the tier regardless of price
 
 	// ReviewAttemptsCap is the number of review rounds before the card parks in
@@ -482,12 +487,13 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 				Threshold:       a.spec.CompactionThreshold,
 				KeepRecentTurns: a.spec.CompactionKeepRecentTurns,
 			},
-			Verify:                  dv,
-			VerifyConfigError:       a.spec.VerifyConfigError,
-			Deadline:                deadline,
-			GatesPollInterval:       a.spec.GatesPollInterval,
-			GatesCIWaitTimeout:      a.spec.GatesCIWaitTimeout,
-			GatesCopilotWaitTimeout: a.spec.GatesCopilotWaitTimeout,
+			Verify:                    dv,
+			VerifyConfigError:         a.spec.VerifyConfigError,
+			Deadline:                  deadline,
+			GatesPollInterval:         a.spec.GatesPollInterval,
+			GatesCIWaitTimeout:        a.spec.GatesCIWaitTimeout,
+			GatesCopilotWaitTimeout:   a.spec.GatesCopilotWaitTimeout,
+			GatesCopilotThreadReplies: a.spec.GatesCopilotThreadReplies,
 		},
 	}
 

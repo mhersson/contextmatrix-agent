@@ -176,6 +176,12 @@ type Config struct {
 	// GatesCopilotWaitTimeout bounds how long the Copilot gate waits for a
 	// review to land. Zero falls back to the package default.
 	GatesCopilotWaitTimeout time.Duration
+
+	// GatesCopilotThreadReplies posts the Copilot gate's triage verdicts back
+	// to the PR's review threads and resolves settled ones. The worker wires
+	// it from CMX_GATES_COPILOT_THREAD_REPLIES (on unless exactly "false"); a
+	// Deps built directly leaves it false and writes nothing.
+	GatesCopilotThreadReplies bool
 }
 
 // DeclaredVerify is the operator-declared verify configuration for a run, mapped
@@ -318,6 +324,11 @@ type run struct {
 	// mob seat), so it needs no synchronization: the fan-out reads it while the
 	// loop is blocked inside the phase.
 	curPhase string
+
+	// threadWriteFailNoted dedupes the review-thread write-back failure note
+	// across the run's Copilot cycles: one broken permission fails the same
+	// way in every cycle, and one card note says everything the fifth would.
+	threadWriteFailNoted bool
 
 	// body is the live parent-card body the FSM accumulates run history into
 	// (## Diagnosis, ## Plan, ## Review Findings ...). Seeded from the task

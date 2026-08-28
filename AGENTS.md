@@ -400,7 +400,16 @@ file only - never via flags or committed YAML.
     unreviewed further, while a comment an earlier round triaged VALID that
     the fix round failed to resolve counts as still open - it is fed back
     through another fix round rather than waved through, bounded by the same
-    3-round cap as any other Copilot finding. The outcome is kept in its own
+    3-round cap as any other Copilot finding. The verdicts also reach the PR
+    itself (`CMX_GATES_COPILOT_THREAD_REPLIES`, on unless set to exactly
+    "false"): each triaged comment's thread gets one reply - the dismissal
+    reasoning for INVALID, and for VALID the reasoning plus the head the fix
+    pushed - a dismissed thread is resolved at once, and a VALID thread is
+    resolved only when a re-review stops repeating its comment, so the
+    still-open reopen logic keeps working. All of it is best-effort: threads
+    are matched by comment id with the card's dedupe digest as the fallback,
+    a thread already carrying any reply is never replied to again, and a
+    write failure is one card note, never a park. The outcome is kept in its own
     detail line under `## PR Gates`, separate from the CI gate's, so a later
     CI pass never erases it. An addressed Copilot review persists a satisfied
     marker in the `## PR Gates` section, so a re-trigger skips the paid
