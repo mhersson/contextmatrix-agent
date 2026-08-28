@@ -164,6 +164,7 @@ type CardOps interface {
 	Heartbeat(ctx context.Context, cardID string) error
 	ReportUsage(ctx context.Context, cardID string, u cmclient.UsageReport) (float64, error)
 	ReportPush(ctx context.Context, cardID, branch, prURL string) error
+	ReportParked(ctx context.Context, cardID, reason string) error
 	CompleteTask(ctx context.Context, cardID, summary string) error
 	ReleaseCard(ctx context.Context, cardID string) error
 	TransitionCard(ctx context.Context, cardID, state string) error
@@ -507,6 +508,7 @@ func mapFSMResult(ctx context.Context, a fsmArgs, err error) (Result, error) {
 		// Parked, not failed: the card stays in review for a human. No
 		// CompleteTask, no release.
 		slog.Info("review parked; leaving card in review", "card", a.spec.CardID)
+		reportParkedQuietly(ctx, a, parkReason(err))
 
 		return Result{Reason: "completed"}, nil
 
@@ -514,6 +516,7 @@ func mapFSMResult(ctx context.Context, a fsmArgs, err error) (Result, error) {
 		// Parked, not failed: the card stays in review with a ## PR Gates
 		// note. No CompleteTask, no release - same shape as review parking.
 		slog.Info("pr gates parked; leaving card in review", "card", a.spec.CardID)
+		reportParkedQuietly(ctx, a, parkReason(err))
 
 		return Result{Reason: "completed"}, nil
 
@@ -613,6 +616,32 @@ func parkBlocked(ctx context.Context, a fsmArgs, err error) (Result, error) {
 	releaseQuietly(ctx, a.ops, a.spec.CardID)
 
 	return Result{Reason: "error"}, fmt.Errorf("orchestrator: %w", err)
+}
+
+// parkReason renders the park sentinel's own message, unwrapped from any
+// orchestrator wrapping, for the board's parked report.
+func parkReason(err error) string {
+	var rp *orchestrator.ReviewParkedError
+	if errors.As(err, &rp) {
+		return rp.Error()
+	}
+
+	var gp *orchestrator.GatesParkedError
+	if errors.As(err, &gp) {
+		return gp.Error()
+	}
+
+	return err.Error()
+}
+
+// reportParkedQuietly reports the park to CM so the board shows the parked
+// status. Best-effort: the park itself must never fail on a reporting error
+// (an older server without the tool just misses the board signal).
+func reportParkedQuietly(ctx context.Context, a fsmArgs, reason string) {
+	if err := a.ops.ReportParked(ctx, a.spec.CardID, reason); err != nil {
+		slog.Warn("report parked failed; board will not show the park",
+			"card", a.spec.CardID, "error", err)
+	}
 }
 
 // isReviewParked reports whether err is the orchestrator's review-park sentinel.

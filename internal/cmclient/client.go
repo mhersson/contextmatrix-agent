@@ -526,6 +526,19 @@ func (c *Client) ReportPush(ctx context.Context, cardID, branch, prURL string) e
 	return err
 }
 
+// ReportParked reports that this run parked the card - review or PR gates
+// left for a human. CM records worker_status "parked" so the board can show
+// it (the completed callback that follows preserves it) and appends the
+// reason to the card's activity log.
+func (c *Client) ReportParked(ctx context.Context, cardID, reason string) error {
+	_, err := c.call(ctx, "report_parked", map[string]any{
+		"card_id": cardID,
+		"reason":  reason,
+	})
+
+	return err
+}
+
 // ModelOutcome is one model's terminal result on a card, reported via
 // ReportModelOutcomes: one row per Best-of-N candidate (win/loss/failed,
 // NCandidates > 1, JudgeModel set, keyed on the parent card), or a single row

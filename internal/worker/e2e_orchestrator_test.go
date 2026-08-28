@@ -504,6 +504,12 @@ func (s *stubOps) ReportPush(_ context.Context, cardID, branch, prURL string) er
 	return nil
 }
 
+func (s *stubOps) ReportParked(_ context.Context, cardID, reason string) error {
+	s.record("ReportParked", cardID, reason)
+
+	return nil
+}
+
 func (s *stubOps) ReportModelOutcomes(_ context.Context, cardID string, outcomes []cmclient.ModelOutcome) error {
 	s.record("ReportModelOutcomes", cardID, len(outcomes))
 
