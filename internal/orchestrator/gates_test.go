@@ -2235,6 +2235,36 @@ func TestCopilotGate_ThreadWriteBackOffByZeroValue(t *testing.T) {
 	}
 }
 
+// TestCopilotGate_ThreadWithReplyIsNotRepliedAgain: a thread that already
+// carries a reply is never replied to twice - the crash window between
+// posting a reply and recording the verdict line would otherwise double-post
+// on resume - but a dismissed thread still resolves.
+func TestCopilotGate_ThreadWithReplyIsNotRepliedAgain(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		threads:   []ReviewThread{threadOf("RT_1", renamingComment, 950)},
+		reviews: []*CopilotReview{
+			reviewOnHead("1 suggestion", renamingComment),
+		},
+	}
+	client := &planLLM{responses: []llm.Response{copilotVerdict(
+		copilotFinding{File: "README.md", Issue: "wording", Valid: false, Reason: "style"},
+	)}}
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, copilotGateContext("Replied already", "body"), 0)
+	o.d.Cfg.GatesCopilotThreadReplies = true
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	calls := gates.recorded()
+	assert.Equal(t, -1, indexOfCallPrefix(calls, "Reply:"),
+		"an answered thread gets no second reply; calls=%v", calls)
+	assert.GreaterOrEqual(t, indexOfCall(calls, "Resolve:RT_1"), 0,
+		"the dismissal still resolves the thread; calls=%v", calls)
+}
+
 // TestCopilotGate_ThreadWriteBackFailureNeverParks: a failing reply is one
 // card note; the gate still passes and the card completes.
 func TestCopilotGate_ThreadWriteBackFailureNeverParks(t *testing.T) {
