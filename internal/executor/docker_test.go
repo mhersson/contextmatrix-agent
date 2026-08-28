@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"log/slog"
@@ -296,12 +297,12 @@ func TestContainerConfigNoSkillsBindWhenUnset(t *testing.T) {
 func TestNewDockerExecutor_WiresOnStart(t *testing.T) {
 	called := false
 	e := NewDockerExecutor(Config{
-		OnStart: func(_, _, _ string) { called = true },
+		OnStart: func(_, _, _, _ string) { called = true },
 	})
 
 	require.NotNil(t, e.onStart)
 
-	e.onStart("p", "c", "id")
+	e.onStart("p", "c", "id", "corr")
 	assert.True(t, called)
 }
 
@@ -394,7 +395,8 @@ type exitCall struct {
 type stubDocker struct {
 	client.APIClient
 
-	waitFn func(ctx context.Context) (<-chan container.WaitResponse, <-chan error)
+	waitFn  func(ctx context.Context) (<-chan container.WaitResponse, <-chan error)
+	attachR io.Reader // if non-nil, the container output stream the pump reads
 
 	mu      sync.Mutex
 	killed  []string
@@ -435,10 +437,15 @@ func (s *stubDocker) ContainerCreate(
 func (s *stubDocker) ContainerAttach(
 	_ context.Context, _ string, _ container.AttachOptions,
 ) (types.HijackedResponse, error) {
+	r := s.attachR
+	if r == nil {
+		r = bytes.NewReader(nil)
+	}
+
 	local, remote := net.Pipe()
 	_ = remote.Close()
 
-	return types.HijackedResponse{Conn: local, Reader: bufio.NewReader(bytes.NewReader(nil))}, nil
+	return types.HijackedResponse{Conn: local, Reader: bufio.NewReader(r)}, nil
 }
 
 func (s *stubDocker) ContainerStart(_ context.Context, _ string, _ container.StartOptions) error {
@@ -611,8 +618,7 @@ func TestLaunchCarriesTheAttemptOrdinalToOnExit(t *testing.T) {
 // correlation id is always distinct per admitted trigger, so it is what a
 // caller must use to tell a stale run's exit apart from a fresh one racing in
 // behind it.
-func TestLaunchCarriesTheCorrelationIDToOnExit(t *testing.T) {
-	docker := &stubDocker{waitFn: exitsWith(0)}
+func TestLaunchCarriesTheCorrelationIDToOnExit(t *testing.T) {	docker := &stubDocker{waitFn: exitsWith(0)}
 	got := make(chan exitCall, 1)
 
 	e := NewDockerExecutor(Config{
@@ -639,4 +645,75 @@ func TestLaunchCarriesTheCorrelationIDToOnExit(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("onExit never fired")
 	}
+}
+
+// TestLaunchCarriesTheCorrelationIDToOnStartAndOnLog pins the identity the
+// filelog keying depends on: OnStart and OnLog deliver the launch spec's
+// correlation id, so the serve layer can key the run's durable-log writer by
+// it. OnLog captures the id at launch time (a pump parameter), not by
+// re-reading shared spec state on the per-line hot path.
+func TestLaunchCarriesTheCorrelationIDToOnStartAndOnLog(t *testing.T) {
+	docker := &stubDocker{waitFn: exitsWith(0)}
+
+	type startCall struct{ correlationID string }
+
+	starts := make(chan startCall, 1)
+	logs := make(chan string, 16)
+
+	e := NewDockerExecutor(Config{
+		Docker:           docker,
+		Tracker:          NewTracker(1),
+		PullPolicy:       PullNever,
+		ContainerTimeout: time.Second,
+		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+		OnStart: func(_, _, _, correlationID string) {
+			starts <- startCall{correlationID: correlationID}
+		},
+		OnLog: func(_, _, correlationID string, _ []byte, _ bool) {
+			logs <- correlationID
+		},
+	})
+
+	// Pipe the attach stream: the stub hands pr to the pump, and the test
+	// writes a docker-multiplexed stdout frame through pw after launch.
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { _ = pw.Close() })
+	docker.attachR = pr
+
+	require.NoError(t, e.Launch(t.Context(), LaunchSpec{
+		Project:       "proj",
+		CardID:        "CARD-1",
+		Image:         "alpine:3",
+		CorrelationID: "trace-start",
+	}))
+
+	select {
+	case call := <-starts:
+		assert.Equal(t, "trace-start", call.correlationID)
+	case <-time.After(5 * time.Second):
+		t.Fatal("onStart never fired")
+	}
+
+	// Emit one stdout line through the attach stream so onLog fires with the
+	// id the pump captured at launch.
+	if _, err := pw.Write(stdioFrame("trace-start log line\n")); err != nil {
+		t.Fatalf("write attach stream: %v", err)
+	}
+
+	select {
+	case id := <-logs:
+		assert.Equal(t, "trace-start", id)
+	case <-time.After(5 * time.Second):
+		t.Fatal("onLog never fired")
+	}
+}
+
+// stdioFrame wraps s in the docker std-multiplexing header stdcopy expects
+// for the stdout stream.
+func stdioFrame(s string) []byte {
+	out := make([]byte, 0, len(s)+8)
+	out = append(out, 0, 0, 0, 0)
+	out = binary.BigEndian.AppendUint32(out, uint32(len(s)))
+
+	return append(out, s...)
 }

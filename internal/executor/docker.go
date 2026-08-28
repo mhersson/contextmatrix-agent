@@ -275,9 +275,9 @@ type DockerExecutor struct {
 	idleTimeout      time.Duration
 	pollInterval     time.Duration
 
-	onStart func(project, cardID, containerID string)
+	onStart func(project, cardID, containerID, correlationID string)
 	onExit  func(project, cardID string, exitCode int64, cause ExitCause, attempt int, correlationID string)
-	onLog   func(project, cardID string, line []byte, stderr bool)
+	onLog   func(project, cardID, correlationID string, line []byte, stderr bool)
 
 	logger  *slog.Logger
 	metrics *metrics.Metrics
@@ -294,9 +294,9 @@ type Config struct {
 	IdleTimeout      time.Duration
 	PollInterval     time.Duration
 
-	OnStart func(project, cardID, containerID string)
+	OnStart func(project, cardID, containerID, correlationID string)
 	OnExit  func(project, cardID string, exitCode int64, cause ExitCause, attempt int, correlationID string)
-	OnLog   func(project, cardID string, line []byte, stderr bool)
+	OnLog   func(project, cardID, correlationID string, line []byte, stderr bool)
 
 	Logger *slog.Logger
 	// Metrics is the Prometheus bundle. Nil disables container-duration
@@ -404,13 +404,13 @@ func (e *DockerExecutor) Launch(ctx context.Context, spec LaunchSpec) error {
 	// Signal the run started now that the container ID and card are both known,
 	// before the pump starts, so a per-card log header precedes any output.
 	if e.onStart != nil {
-		e.onStart(spec.Project, spec.CardID, resp.ID)
+		e.onStart(spec.Project, spec.CardID, resp.ID, spec.CorrelationID)
 	}
 
 	done := make(chan struct{})
 	pumpDone := make(chan struct{})
 
-	go e.pump(spec.Project, spec.CardID, attach.Reader, pumpDone, log)
+	go e.pump(spec.Project, spec.CardID, spec.CorrelationID, attach.Reader, pumpDone, log)
 	go e.runIdleWatchdog(spec.Project, spec.CardID, resp.ID, done, log)
 	// waitAndCleanup deliberately runs on a detached context: the container's
 	// supervision must outlive the request ctx that triggered Launch, otherwise
@@ -425,24 +425,25 @@ func (e *DockerExecutor) Launch(ctx context.Context, spec LaunchSpec) error {
 }
 
 // pump demultiplexes the attach reader into stdout/stderr line streams, calling
-// onLog and tracker.Touch for every completed line. It closes pumpDone when
-// both stream flushes are complete so waitAndCleanup can synchronize on it
-// before firing onExit.
-func (e *DockerExecutor) pump(project, cardID string, r io.Reader, pumpDone chan struct{}, log *slog.Logger) {
+// onLog and tracker.Touch for every completed line. correlationID is captured
+// at launch time rather than re-read from the spec so the per-line hot path
+// carries no shared-state access. It closes pumpDone when both stream flushes
+// are complete so waitAndCleanup can synchronize on it before firing onExit.
+func (e *DockerExecutor) pump(project, cardID, correlationID string, r io.Reader, pumpDone chan struct{}, log *slog.Logger) {
 	defer close(pumpDone)
 
 	stdoutW := newLineWriter(func(line []byte) {
 		e.tracker.Touch(project, cardID)
 
 		if e.onLog != nil {
-			e.onLog(project, cardID, line, false)
+			e.onLog(project, cardID, correlationID, line, false)
 		}
 	})
 	stderrW := newLineWriter(func(line []byte) {
 		e.tracker.Touch(project, cardID)
 
 		if e.onLog != nil {
-			e.onLog(project, cardID, line, true)
+			e.onLog(project, cardID, correlationID, line, true)
 		}
 	})
 
