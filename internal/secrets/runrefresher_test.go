@@ -129,7 +129,7 @@ func TestRunCredentialsInitialWrite(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	t.Cleanup(func() { m.Teardown("proj", "CARD-1") })
+	t.Cleanup(func() { m.Teardown("proj", "CARD-1", "corr-1") })
 
 	path := filepath.Join(m.HostDir("proj", "CARD-1"), "env")
 	src, err := Open(path)
@@ -162,7 +162,7 @@ func TestRunCredentialsRefreshesFromCM(t *testing.T) {
 	expiry := time.Now().Add(40 * time.Millisecond).UTC().Format(time.RFC3339)
 
 	require.NoError(t, m.Provision("proj", "CARD-1", "corr-1", "payload-token", expiry, EndpointSecrets{APIKey: "llm-key"}))
-	t.Cleanup(func() { m.Teardown("proj", "CARD-1") })
+	t.Cleanup(func() { m.Teardown("proj", "CARD-1", "corr-1") })
 
 	path := filepath.Join(m.HostDir("proj", "CARD-1"), "env")
 
@@ -204,7 +204,7 @@ func TestRunCredentialsPATNoRefresh(t *testing.T) {
 	m := newTestManager(t, srv.URL, "test-key")
 
 	require.NoError(t, m.Provision("proj", "CARD-1", "corr-1", "pat-token", "", EndpointSecrets{}))
-	t.Cleanup(func() { m.Teardown("proj", "CARD-1") })
+	t.Cleanup(func() { m.Teardown("proj", "CARD-1", "corr-1") })
 
 	path := filepath.Join(m.HostDir("proj", "CARD-1"), "env")
 	src, err := Open(path)
@@ -237,7 +237,7 @@ func TestRunCredentialsTeardownStopsLoopAndRemovesDir(t *testing.T) {
 		return stub.callCount() >= 1
 	}, 3*time.Second, 10*time.Millisecond, "expected the loop to call CM at least once")
 
-	m.Teardown("proj", "CARD-1")
+	m.Teardown("proj", "CARD-1", "corr-1")
 
 	// The run directory must be gone.
 	_, err := os.Stat(dir)
@@ -256,7 +256,140 @@ func TestRunCredentialsTeardownUnknownRunIsNoop(t *testing.T) {
 	t.Parallel()
 
 	m := newTestManager(t, "http://cm.invalid", "key")
-	assert.NotPanics(t, func() { m.Teardown("proj", "nope") })
+	assert.NotPanics(t, func() { m.Teardown("proj", "nope", "corr-1") })
+}
+
+// TestRunCredentialsStaleTeardownSparesSuccessor pins the drain-window fix: a
+// successor run's Provision (a different correlation id, same project/cardID)
+// re-registers the handle, so the stale run-1 Teardown is a no-op against run
+// 2's state - its handle, refresh loop, and env file all survive - while run
+// 2's own Teardown still stops the loop and removes the shared dir.
+func TestRunCredentialsStaleTeardownSparesSuccessor(t *testing.T) {
+	t.Parallel()
+
+	stub := &stubCM{apiKey: "test-key", respExpiry: 30 * time.Millisecond}
+	srv := httptest.NewServer(stub.handler(t))
+	t.Cleanup(srv.Close)
+
+	m := newTestManager(t, srv.URL, "test-key")
+
+	dir := m.HostDir("proj", "CARD-1")
+	envPath := filepath.Join(dir, "env")
+
+	expiry := time.Now().Add(40 * time.Millisecond).UTC().Format(time.RFC3339)
+
+	// Run 1 lives first, then run 2 of the same card re-provisions over it.
+	require.NoError(t, m.Provision("proj", "CARD-1", "corr-1", "run1-token", expiry, EndpointSecrets{APIKey: "llm-key"}))
+	require.NoError(t, m.Provision("proj", "CARD-1", "corr-2", "run2-token", expiry, EndpointSecrets{APIKey: "llm-key"}))
+
+	// Run 2's env file carries run 2's initial token.
+	src, err := Open(envPath)
+	require.NoError(t, err)
+	assert.Equal(t, "run2-token", src.Get("CM_GIT_TOKEN"))
+
+	// Run 1's stale exit teardown fires during run 2's life.
+	m.Teardown("proj", "CARD-1", "corr-1")
+
+	// Run 2's env file is intact and its refresh loop keeps advancing.
+	src, err = Open(envPath)
+	require.NoError(t, err)
+	assert.Equal(t, "run2-token", src.Get("CM_GIT_TOKEN"),
+		"the stale teardown must not remove the successor run's env file")
+
+	require.Eventually(t, func() bool {
+		return stub.callCount() > 0
+	}, 3*time.Second, 5*time.Millisecond,
+		"run 2's refresh loop must be calling CM after run 1's stale teardown")
+
+	before := stub.callCount()
+
+	require.Eventually(t, func() bool {
+		return stub.callCount() > before
+	}, 3*time.Second, 5*time.Millisecond,
+		"run 2's refresh loop must keep calling CM after run 1's stale teardown")
+
+	// Run 2's own teardown still stops its loop and removes the dir.
+	m.Teardown("proj", "CARD-1", "corr-2")
+
+	_, err = os.Stat(dir)
+	assert.True(t, os.IsNotExist(err), "run 2's own teardown must remove the run dir")
+
+	after := stub.callCount()
+
+	time.Sleep(80 * time.Millisecond)
+	assert.Equal(t, after, stub.callCount(), "no CM calls must happen after run 2's teardown")
+}
+
+// TestRunCredentialsProvisionDisplacesPredecessorLoop pins the shared-dir
+// invariant: the on-disk layout stays keyed by (project, cardID), so run 2's
+// Provision must displace and stop run 1's still-live refresh loop (same dir,
+// different correlation id) before writing - otherwise run 1's loop keeps
+// overwriting run 2's env file. Both loops write to the same path with tokens
+// minted from the same stub, so the file content cannot say who wrote it; the
+// OnTokenRefresh hook's correlation id is the observable: after run 2's
+// Provision lands, the hook must fire only for run 2.
+func TestRunCredentialsProvisionDisplacesPredecessorLoop(t *testing.T) {
+	t.Parallel()
+
+	stub := &stubCM{apiKey: "test-key", respExpiry: 30 * time.Millisecond}
+	srv := httptest.NewServer(stub.handler(t))
+	t.Cleanup(srv.Close)
+
+	m := newTestManager(t, srv.URL, "test-key")
+
+	envPath := filepath.Join(m.HostDir("proj", "CARD-1"), "env")
+
+	// hookCounts records how many rotations each run's loop has fired.
+	hookCounts := &sync.Map{}
+
+	m.OnTokenRefresh = func(_, _, correlationID, _ string) {
+		v, _ := hookCounts.LoadOrStore(correlationID, &atomic.Int32{})
+		v.(*atomic.Int32).Add(1)
+	}
+
+	hookCount := func(correlationID string) int32 {
+		v, ok := hookCounts.Load(correlationID)
+		if !ok {
+			return 0
+		}
+
+		return v.(*atomic.Int32).Load()
+	}
+
+	expiry := time.Now().Add(40 * time.Millisecond).UTC().Format(time.RFC3339)
+
+	require.NoError(t, m.Provision("proj", "CARD-1", "corr-1", "run1-token", expiry, EndpointSecrets{APIKey: "llm-key"}))
+
+	// Run 1's loop is definitely live.
+	require.Eventually(t, func() bool {
+		return hookCount("corr-1") >= 1
+	}, 3*time.Second, 5*time.Millisecond, "run 1's refresh loop must fire the hook")
+
+	// Run 2's Provision lands over the same (project, cardID) dir.
+	require.NoError(t, m.Provision("proj", "CARD-1", "corr-2", "run2-token", expiry, EndpointSecrets{APIKey: "llm-key"}))
+
+	// The env file now carries run 2's initial token.
+	src, err := Open(envPath)
+	require.NoError(t, err)
+	assert.Equal(t, "run2-token", src.Get("CM_GIT_TOKEN"))
+
+	// Run 2's loop is live after the displacement.
+	require.Eventually(t, func() bool {
+		return hookCount("corr-2") >= 1
+	}, 3*time.Second, 5*time.Millisecond,
+		"run 2's refresh loop must fire the hook after displacing run 1's")
+
+	// Run 1's displaced loop must never fire again.
+	c1 := hookCount("corr-1")
+
+	time.Sleep(120 * time.Millisecond)
+	assert.Equal(t, c1, hookCount("corr-1"),
+		"run 1's displaced refresh loop must stop after run 2's Provision lands")
+
+	m.Teardown("proj", "CARD-1", "corr-2")
+
+	_, err = os.Stat(m.HostDir("proj", "CARD-1"))
+	assert.True(t, os.IsNotExist(err), "run dir must be removed on run 2's teardown")
 }
 
 // TestRunCredentialsHostDirSanitizesCardID verifies HostDir keeps the run
@@ -290,7 +423,7 @@ func TestRunCredentialsProjectScopedIsolation(t *testing.T) {
 	require.NoError(t, m.Provision("projA", "CARD-1", "corr-A", "token-A", "", EndpointSecrets{APIKey: "key-A"}))
 	require.NoError(t, m.Provision("projB", "CARD-1", "corr-B", "token-B", "", EndpointSecrets{APIKey: "key-B"}))
 
-	t.Cleanup(func() { m.Teardown("projB", "CARD-1") })
+	t.Cleanup(func() { m.Teardown("projB", "CARD-1", "corr-B") })
 
 	dirA := m.HostDir("projA", "CARD-1")
 	dirB := m.HostDir("projB", "CARD-1")
@@ -305,7 +438,7 @@ func TestRunCredentialsProjectScopedIsolation(t *testing.T) {
 	assert.Equal(t, "token-B", srcB.Get("CM_GIT_TOKEN"), "project B keeps its own token")
 
 	// Tearing down project A must not touch project B's still-live credentials.
-	m.Teardown("projA", "CARD-1")
+	m.Teardown("projA", "CARD-1", "corr-A")
 
 	_, err = os.Stat(dirA)
 	assert.True(t, os.IsNotExist(err), "the torn-down run dir must be gone")
@@ -393,7 +526,7 @@ func TestRunCredentialsConcurrentProvisionNoLeakedLoop(t *testing.T) {
 		return stub.callCount() >= 1
 	}, 3*time.Second, 5*time.Millisecond, "expected the surviving loop to call CM")
 
-	m.Teardown("proj", "CARD-1")
+	m.Teardown("proj", "CARD-1", "corr-1")
 
 	// The loops poll every ~5-15ms here; 150ms of post-teardown silence proves
 	// nothing survived.
@@ -482,7 +615,7 @@ func TestOnTokenRefreshFiresForExpiringToken(t *testing.T) {
 
 	expiry := time.Now().Add(40 * time.Millisecond).UTC().Format(time.RFC3339)
 	require.NoError(t, m.Provision("proj", "CARD-1", "corr-1", "payload-token", expiry, EndpointSecrets{}))
-	t.Cleanup(func() { m.Teardown("proj", "CARD-1") })
+	t.Cleanup(func() { m.Teardown("proj", "CARD-1", "corr-1") })
 
 	require.Eventually(t, func() bool {
 		mu.Lock()
@@ -547,7 +680,7 @@ func TestOnTokenRefreshFiresBeforeEnvFileWrite(t *testing.T) {
 
 	expiry := time.Now().Add(40 * time.Millisecond).UTC().Format(time.RFC3339)
 	require.NoError(t, m.Provision("proj", "CARD-1", "corr-1", "payload-token", expiry, EndpointSecrets{}))
-	t.Cleanup(func() { m.Teardown("proj", "CARD-1") })
+	t.Cleanup(func() { m.Teardown("proj", "CARD-1", "corr-1") })
 
 	require.Eventually(t, func() bool {
 		mu.Lock()
@@ -583,7 +716,7 @@ func TestOnTokenRefreshNeverFiresForPAT(t *testing.T) {
 	}
 
 	require.NoError(t, m.Provision("proj", "CARD-1", "corr-1", "pat-token", "", EndpointSecrets{}))
-	t.Cleanup(func() { m.Teardown("proj", "CARD-1") })
+	t.Cleanup(func() { m.Teardown("proj", "CARD-1", "corr-1") })
 
 	time.Sleep(100 * time.Millisecond)
 

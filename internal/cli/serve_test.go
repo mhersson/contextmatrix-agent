@@ -172,8 +172,8 @@ func TestOnContainerExitClosesLogFile(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	files := filelog.New(dir, logger)
-	files.Begin("proj", "CARD-1", "abcdef012345")
-	files.Write("proj", "CARD-1", []byte("a line"), false)
+	files.Begin("proj", "CARD-1", "abcdef012345", "corr-1")
+	files.Write("proj", "CARD-1", "corr-1", []byte("a line"), false)
 
 	creds := secrets.NewRunCredentials(t.TempDir(), "http://cm", "key", logger)
 	rep := &stubReporter{}
@@ -194,7 +194,7 @@ func TestOnContainerExitClosesLogFile(t *testing.T) {
 	assert.Equal(t, "completed", rep.status)
 
 	// The file is closed and forgotten: a further Write does not reach it.
-	files.Write("proj", "CARD-1", []byte("after close"), false)
+	files.Write("proj", "CARD-1", "corr-1", []byte("after close"), false)
 
 	after, err := os.ReadFile(filepath.Join(dir, "proj", "card-1.log"))
 	require.NoError(t, err)
@@ -230,8 +230,8 @@ func TestNextAttemptWiresFileLoggerIntoWebhookConfig(t *testing.T) {
 
 	assert.Equal(t, 1, cfg.NextAttempt("proj", "CARD-1"))
 
-	files.Begin("proj", "CARD-1", "abcdef012345")
-	files.End("proj", "CARD-1", 0, "normal")
+	files.Begin("proj", "CARD-1", "abcdef012345", "corr-1")
+	files.End("proj", "CARD-1", "corr-1", 0, "normal")
 
 	assert.Equal(t, 2, cfg.NextAttempt("proj", "CARD-1"))
 }
@@ -244,6 +244,7 @@ func TestNextAttemptWiresFileLoggerIntoWebhookConfig(t *testing.T) {
 type exitHarness struct {
 	dir      string
 	files    *filelog.Logger
+	creds    *secrets.RunCredentials
 	rep      *stubReporter
 	stream   <-chan protocol.LogEntry
 	registry *sessionSecretTee
@@ -269,6 +270,7 @@ func newExitHarness(t *testing.T, logDir string) *exitHarness {
 	return &exitHarness{
 		dir:      logDir,
 		files:    files,
+		creds:    creds,
 		rep:      rep,
 		stream:   ch,
 		registry: registry,
@@ -303,7 +305,7 @@ func drainStream(ch <-chan protocol.LogEntry) []protocol.LogEntry {
 func findRunEnd(t *testing.T, s string) (map[string]any, int) {
 	t.Helper()
 
-	for _, line := range strings.Split(s, "\n") {
+	for line := range strings.SplitSeq(s, "\n") {
 		if !strings.Contains(line, `"`+runEndKind+`"`) {
 			continue
 		}
@@ -326,8 +328,8 @@ func findRunEnd(t *testing.T, s string) (map[string]any, int) {
 func TestExitEmitsTerminalEventAndFooterFromOneCall(t *testing.T) {
 	h := newExitHarness(t, t.TempDir())
 
-	h.files.Begin("proj", "CARD-1", "abcdef012345")
-	h.files.Write("proj", "CARD-1", []byte(`{"seq":1,"kind":"state_change"}`), false)
+	h.files.Begin("proj", "CARD-1", "abcdef012345", "corr-1")
+	h.files.Write("proj", "CARD-1", "corr-1", []byte(`{"seq":1,"kind":"state_change"}`), false)
 
 	h.onExit("proj", "CARD-1", -1, executor.ExitTimeout, 2, "corr-1")
 
@@ -379,7 +381,7 @@ func TestOnContainerExit_RemovalTargetsExactRegisteredID(t *testing.T) {
 	// correlation id, must be unaffected by run 1's exit.
 	h.registry.AddSessionKey(webhook.SessionID("proj", "CARD-1", "corr-2"), "PLACEHOLDER-RUN2-SECRET")
 
-	h.files.Begin("proj", "CARD-1", "abcdef012345")
+	h.files.Begin("proj", "CARD-1", "abcdef012345", "corr-1")
 	h.onExit("proj", "CARD-1", 0, executor.ExitNormal, 1, "corr-1")
 
 	line := []byte("PLACEHOLDER-RUN1-SECRET PLACEHOLDER-RUN1-ROTATED PLACEHOLDER-RUN2-SECRET")
@@ -397,6 +399,37 @@ func TestOnContainerExit_RemovalTargetsExactRegisteredID(t *testing.T) {
 	assert.Equal(t, 1, strings.Count(redacted, "[REDACTED]"), "exactly run 2's one still-registered secret is masked")
 }
 
+// TestOnContainerExit_StaleTeardownSparesSuccessorCredentials pins the
+// credentials leg of the per-run cleanup invariant end to end: run 1's exit
+// fires the real onExit closure with run 1's correlation id, and because the
+// credentials handle registry is keyed by that id, the stale Teardown is a
+// no-op against run 2's state - the env file run 2's Provision wrote (and its
+// shared dir) stays on disk. Run 2's own exit still removes it.
+func TestOnContainerExit_StaleTeardownSparesSuccessorCredentials(t *testing.T) {
+	h := newExitHarness(t, t.TempDir())
+
+	credsDir := h.creds.HostDir("proj", "CARD-1")
+	envPath := filepath.Join(credsDir, "env")
+
+	// Run 1 lives, then run 2 of the same card re-provisions over it (the
+	// displacement a real re-trigger's Provision performs).
+	require.NoError(t, h.creds.Provision("proj", "CARD-1", "corr-1", "run1-token", "", secrets.EndpointSecrets{APIKey: "llm-key"}))
+	require.NoError(t, h.creds.Provision("proj", "CARD-1", "corr-2", "run2-token", "", secrets.EndpointSecrets{APIKey: "llm-key"}))
+
+	h.onExit("proj", "CARD-1", 0, executor.ExitNormal, 1, "corr-1")
+
+	src, err := secrets.Open(envPath)
+	require.NoError(t, err)
+	assert.Equal(t, "run2-token", src.Get("CM_GIT_TOKEN"),
+		"run 1's stale exit must leave run 2's credentials dir and env file untouched")
+
+	// Run 2's own exit still tears the dir down.
+	h.onExit("proj", "CARD-1", 0, executor.ExitNormal, 2, "corr-2")
+
+	_, err = os.Stat(credsDir)
+	assert.True(t, os.IsNotExist(err), "run 2's own exit must remove the credentials dir")
+}
+
 // TestTerminalEventCarriesTheAttemptOrdinal keeps a restarted container's
 // terminal event separable from the run it replaced. The container stamps its
 // own lines; a line the host writes has to carry the ordinal itself or it
@@ -404,7 +437,7 @@ func TestOnContainerExit_RemovalTargetsExactRegisteredID(t *testing.T) {
 func TestTerminalEventCarriesTheAttemptOrdinal(t *testing.T) {
 	t.Run("second attempt is stamped", func(t *testing.T) {
 		h := newExitHarness(t, t.TempDir())
-		h.files.Begin("proj", "CARD-1", "abcdef012345")
+		h.files.Begin("proj", "CARD-1", "abcdef012345", "corr-1")
 		h.onExit("proj", "CARD-1", 0, executor.ExitNormal, 2, "corr-1")
 
 		ev, _ := findRunEnd(t, h.transcript(t))
@@ -413,7 +446,7 @@ func TestTerminalEventCarriesTheAttemptOrdinal(t *testing.T) {
 
 	t.Run("first attempt is left unmarked", func(t *testing.T) {
 		h := newExitHarness(t, t.TempDir())
-		h.files.Begin("proj", "CARD-1", "abcdef012345")
+		h.files.Begin("proj", "CARD-1", "abcdef012345", "corr-1")
 		h.onExit("proj", "CARD-1", 0, executor.ExitNormal, 1, "corr-1")
 
 		ev, _ := findRunEnd(t, h.transcript(t))
@@ -443,7 +476,7 @@ func TestFooterAndTerminalEventWrittenOnEveryExitPath(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newExitHarness(t, t.TempDir())
-			h.files.Begin("proj", "CARD-1", "abcdef012345")
+			h.files.Begin("proj", "CARD-1", "abcdef012345", "corr-1")
 			h.onExit("proj", "CARD-1", tc.exitCode, tc.cause, 1, "corr-1")
 
 			s := h.transcript(t)

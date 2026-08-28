@@ -158,11 +158,13 @@ func runServe(ctx context.Context, configPath string) error {
 		ContainerTimeout: cfg.ContainerTimeout,
 		IdleTimeout:      cfg.IdleOutputTimeout,
 		PollInterval:     cfg.IdleWatchdogInterval,
-		OnStart:          files.Begin,
-		OnLog:            containerLogSink(bridge, files, registry),
-		OnExit:           onContainerExit(cbClient, credentials, files, registry, bridge, logger),
-		Logger:           logger,
-		Metrics:          mx,
+		OnStart: func(project, cardID, containerID, correlationID string) {
+			files.Begin(project, cardID, containerID, correlationID)
+		},
+		OnLog:   containerLogSink(bridge, files, registry),
+		OnExit:  onContainerExit(cbClient, credentials, files, registry, bridge, logger),
+		Logger:  logger,
+		Metrics: mx,
 	})
 
 	// Force-remove any agent-labeled containers left by a previous process before
@@ -445,13 +447,13 @@ func containerLogSink(
 	bridge *logbridge.Bridge,
 	files *filelog.Logger,
 	registry *sessionSecretTee,
-) func(project, cardID string, line []byte, stderr bool) {
-	return func(project, cardID string, line []byte, stderr bool) {
+) func(project, cardID, correlationID string, line []byte, stderr bool) {
+	return func(project, cardID, correlationID string, line []byte, stderr bool) {
 		// Bridge to the live /logs SSE stream first so the interactive
 		// stream is never gated on the durable-log disk write. BridgeLine
 		// does not mutate line and Write copies it, so the order is safe.
 		bridge.BridgeLine(logbridge.Key{Project: project, CardID: cardID}, line, stderr)
-		files.Write(project, cardID, registry.Redact(line), stderr)
+		files.Write(project, cardID, correlationID, registry.Redact(line), stderr)
 	}
 }
 
@@ -463,14 +465,16 @@ func containerLogSink(
 // the teardown seam for the per-run refresh loop.
 //
 // Ordering invariant: the terminal run_end event is written BEFORE files.End,
-// because files.End closes the per-card log and a Write after it is a no-op -
-// the event would reach the live stream and never the durable transcript.
+// because files.End closes this run's log writer and a Write after it is a
+// no-op - the event would reach the live stream and never the durable
+// transcript.
 //
 // Ordering invariant: both files.End and this exit-path Teardown run BEFORE the
 // exit status callback below, and that callback is what gates CM's re-triggers
-// (CM learns the run finished only from it). files.End footers and closes the
-// per-card log first, so the log is closed before the status callback can let CM
-// admit a new run for the same card.
+// (CM learns the run finished only from it). files.End footers and closes this
+// run's own writer first - keyed by the run's correlation id, so it can only
+// ever close the writer this run's Begin opened, never a re-trigger's - before
+// the status callback can let CM admit a new run for the same card.
 //
 // The tracker.Remove -> this callback window is NOT negligible: waitAndCleanup
 // (internal/executor/docker.go) clears the tracker entry BEFORE the pump-drain
@@ -478,29 +482,22 @@ func containerLogSink(
 // and the session-secret removal below - fires only once that wait completes.
 // Nothing but the tracker entry gates admission, so CM can and does re-trigger
 // inside that window; a re-trigger racing in here is the normal case this file
-// defends against, not an unreachable edge case.
+// defends against, not an unreachable edge case. files.End shares the same
+// window, and the same defense: the durable log's open writers are keyed by
+// the run's correlation id (the same triple webhook.SessionID keys redaction
+// sessions by), so this stale run's End is a no-op against a re-trigger's
+// already-open writer.
 //
-// credentials.Teardown stays keyed by plain project/cardID: RunCredentials
-// tracks one live handle per card, and Provision's own re-provision-displaces
-// design (see its doc comment) means a re-trigger's Provision landing inside
-// this window already replaces the stale run's handle with its own before this
-// stale Teardown call runs. Teardown then finds and stops the RE-TRIGGER's
-// handle, not the original run's - at worst the re-trigger loses its own
-// freshly-provisioned credential directory to this call, a loud, self-inflicted
-// failure (the new run fails fast on a missing secrets file), never a leaked or
-// cross-run token. That narrower risk is unchanged by this task; only the
-// session-secret registry removal below is now scoped to avoid the equivalent
-// cross-run failure mode.
-//
-// Session-secret removal keying: the registry removal below uses
-// webhook.SessionID(project, cardID, correlationID) - the run's own
-// correlation id, forwarded here from the executor's OnExit callback - so it
-// does NOT share credentials.Teardown's exposure above. Before this fix, both
-// this call and addSessionSecrets composed the bare project/cardID id, so a
-// stale run's removal here would strip a re-trigger's still-live redaction
-// keys during the same window. Keying by correlationID makes the two calls
-// target different map entries, so a stale exit can only ever remove its own
-// run's keys.
+// Per-run cleanup keying: every cleanup call below - filelog End, credentials
+// Teardown, session-secret removal - is keyed by the run's own correlation id
+// (the correlationID forwarded here from the executor's OnExit callback; the
+// credentials handle registry composes the same project/cardID/correlationID
+// triple webhook.SessionID keys redaction sessions by). A stale exit firing
+// during the pump-drain window therefore targets only its own run's state and
+// is a no-op against a successor run's: a re-trigger's Provision re-registered
+// the credential handle under its own correlation id (displacing run 1's),
+// its writer is open under its own id, and its redaction keys live in their
+// own session bucket - none of them reachable by this stale run's calls.
 func onContainerExit(
 	reporter webhook.StatusReporter,
 	credentials *secrets.RunCredentials,
@@ -510,10 +507,10 @@ func onContainerExit(
 	logger *slog.Logger,
 ) func(project, cardID string, exitCode int64, cause executor.ExitCause, ordinal int, correlationID string) {
 	return func(project, cardID string, exitCode int64, cause executor.ExitCause, ordinal int, correlationID string) {
-		emitRunEnd(bridge, files, project, cardID, exitCode, cause, ordinal, logger)
+		emitRunEnd(bridge, files, project, cardID, correlationID, exitCode, cause, ordinal, logger)
 
-		files.End(project, cardID, exitCode, string(cause))
-		credentials.Teardown(project, cardID)
+		files.End(project, cardID, correlationID, exitCode, string(cause))
+		credentials.Teardown(project, cardID, correlationID)
 
 		// Remove the session secrets after credential teardown but before
 		// the status callback so a re-trigger does not inherit stale keys.
@@ -546,7 +543,7 @@ const runEndKind = "run_end"
 func emitRunEnd(
 	bridge *logbridge.Bridge,
 	files *filelog.Logger,
-	project, cardID string,
+	project, cardID, correlationID string,
 	exitCode int64,
 	cause executor.ExitCause,
 	ordinal int,
@@ -563,7 +560,7 @@ func emitRunEnd(
 	// Same order as the output tee: the live stream is never gated on a disk
 	// write, BridgeLine does not mutate line and Write copies it.
 	bridge.BridgeLine(logbridge.Key{Project: project, CardID: cardID}, line, false)
-	files.Write(project, cardID, line, false)
+	files.Write(project, cardID, correlationID, line, false)
 }
 
 // runEndEvent builds the terminal line in the envelope the worker's own events

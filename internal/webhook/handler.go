@@ -84,8 +84,10 @@ type CredentialProvisioner interface {
 	// (when the token carries an expiry). Synchronous initial write; returns its
 	// error. correlationID identifies this run for OnTokenRefresh callers.
 	Provision(project, cardID, correlationID, token, expiresAt string, endpoint secrets.EndpointSecrets) error
-	// Teardown stops the refresh loop and removes the run directory. Idempotent.
-	Teardown(project, cardID string)
+	// Teardown stops this run's refresh loop and removes the directory its
+	// own handle carried. Keyed by correlation id: a stale run's teardown
+	// against a successor run's state is a no-op. Idempotent.
+	Teardown(project, cardID, correlationID string)
 }
 
 // LaunchEnv carries the static, per-process inputs the handler folds together
@@ -410,20 +412,16 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Correlation ID travels in the X-Correlation-ID header, not the trigger
-	// body; a present header is used as-is. CM does not send this header
-	// today, so the fallback below is not a rare edge case - it is the
-	// common path. It also doubles as the discriminator SessionID keys
-	// redaction sessions by (see addSessionSecrets/removeSessionSecrets): a
-	// bare cardID fallback would be constant across a card's re-triggers and
-	// leave that isolation inert, so the fallback mints a fresh per-run id
-	// instead (cardID plus a short random suffix) rather than reusing the
-	// card ID unchanged. The container label built from this value becoming
-	// unique per run rather than per card is harmless - nothing parses it,
-	// and distinguishing runs in the label is arguably more useful for trace
-	// stitching than the old constant value.
-	correlationID := r.Header.Get(correlationHeader)
-	if correlationID == "" {
-		correlationID = mintRunID(payload.CardID)
+	// body. A header is namespaced, never trusted verbatim: the value feeds
+	// the per-run keying that SessionID, RunCredentials, and the filelog all
+	// lean on, so a re-trigger reusing a trace id must still mint a distinct
+	// run id - cardID plus a short random suffix keeps every admitted run
+	// unique, while the header stays recognizable inside the id for trace
+	// stitching. CM does not send this header today, so the mint below is the
+	// common path regardless.
+	correlationID := mintRunID(payload.CardID)
+	if supplied := r.Header.Get(correlationHeader); supplied != "" {
+		correlationID += "-" + supplied
 	}
 
 	spec := s.buildLaunchSpec(payload, correlationID, skillsDir)
@@ -528,7 +526,7 @@ func (s *Server) admitAndLaunch(ctx context.Context, spec executor.LaunchSpec, p
 		// Tear down only what THIS launch provisioned: a duplicate that skipped
 		// provisioning must not touch the winner's credentials.
 		if provisioned {
-			s.credentials.Teardown(project, cardID)
+			s.credentials.Teardown(project, cardID, spec.CorrelationID)
 		}
 
 		s.removeSessionSecrets(project, cardID, spec.CorrelationID)
@@ -554,11 +552,13 @@ func SessionID(project, cardID, correlationID string) string {
 	return project + "/" + cardID + "/" + correlationID
 }
 
-// mintRunID builds a per-run correlation id when CM sends no
-// X-Correlation-ID header: cardID plus a short random suffix, so two
-// triggers for the same card without the header still get distinct ids.
-// crypto/rand.Text cannot fail, so this always returns a fresh, non-empty
-// value - handleTrigger never needs an error path for it.
+// mintRunID builds a per-run correlation id: cardID plus a short random
+// suffix, so two triggers for the same card always get distinct ids - the
+// X-Correlation-ID header is namespaced onto this base, never trusted
+// verbatim, because SessionID, the RunCredentials teardown, and the filelog
+// writer registry all key per-run state by this id. crypto/rand.Text cannot
+// fail, so this always returns a fresh, non-empty value - handleTrigger never
+// needs an error path for it.
 func mintRunID(cardID string) string {
 	return cardID + "-" + strings.ToLower(rand.Text()[:8])
 }

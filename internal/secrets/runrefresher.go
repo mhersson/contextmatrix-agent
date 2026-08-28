@@ -73,7 +73,7 @@ type RunCredentials struct {
 	OnTokenRefresh func(project, cardID, correlationID, token string)
 
 	mu   sync.Mutex
-	runs map[string]*runHandle // keyed by project/cardID
+	runs map[string]*runHandle // keyed by runKey (project/cardID/correlationID)
 }
 
 // runHandle tracks one provisioned run so Teardown can stop its refresh loop
@@ -129,14 +129,17 @@ func (m *RunCredentials) HostDir(project, cardID string) string {
 // when expiresAt parses to a real expiry, starts a goroutine that rewrites the
 // file ahead of each expiry by minting a fresh token from CM. A PAT-style token
 // (empty or unparseable expiresAt) is written once with no refresh loop.
-// correlationID identifies this specific run and is threaded through
-// unchanged to every OnTokenRefresh call the refresh loop fires - it is not
-// otherwise used by RunCredentials, whose own bookkeeping stays keyed by
-// project/cardID.
+// correlationID identifies this specific run: the handle is registered under
+// it, so only this run's own Teardown can stop its loop or remove its dir, and
+// it is threaded through unchanged to every OnTokenRefresh call the refresh
+// loop fires.
 //
-// A re-provision of the same run replaces any existing refresh loop. The initial
-// write is synchronous so the file exists before the container mounts it; a
-// write error is returned and nothing is registered.
+// A re-provision displaces any live handle that owns this run's directory -
+// the previous run of the same card (same project/cardID, different
+// correlation id) or a re-provision of this same run - and joins its refresh
+// loop before the write, so two goroutines never race on the shared path. The
+// initial write is synchronous so the file exists before the container mounts
+// it; a write error is returned and nothing is registered.
 //
 // The whole provision runs under the manager lock: displacing the previous
 // handle, joining its goroutine, writing the file, and storing the new handle
@@ -149,16 +152,21 @@ func (m *RunCredentials) Provision(project, cardID, correlationID, token, expire
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	k := runKey(project, cardID)
+	dir := m.HostDir(project, cardID)
 
-	// Displace and join any pre-existing loop for this run before rewriting the
-	// file so two goroutines never race on the same path.
-	if old, ok := m.runs[k]; ok {
-		delete(m.runs, k)
-		old.stop()
+	// Displace and join any live handle that owns this run's directory before
+	// rewriting the file. The dir comparison - not a (project, cardID) key -
+	// is what finds it: the on-disk layout stays keyed by (project, cardID)
+	// so two runs of one card share one env file, while the handle registry
+	// is keyed by correlation id. Without this, the displaced run's
+	// still-live refresh loop would keep overwriting the new run's env file.
+	for k, old := range m.runs {
+		if old.dir == dir {
+			delete(m.runs, k)
+			old.stop()
+		}
 	}
 
-	dir := m.HostDir(project, cardID)
 	path := filepath.Join(dir, "env")
 
 	if err := WriteEnvFile(path, endpointVals(token, endpoint)); err != nil {
@@ -181,21 +189,23 @@ func (m *RunCredentials) Provision(project, cardID, correlationID, token, expire
 		}()
 	}
 
-	m.runs[k] = h
+	m.runs[runKey(project, cardID, correlationID)] = h
 
 	return nil
 }
 
-// Teardown stops the run's refresh loop (if any), waits for the goroutine to
-// exit, and removes the run directory. Idempotent: a run that was never
-// provisioned is a no-op. It holds the manager lock throughout so the dir
-// removal cannot interleave with a concurrent Provision's write to the same
-// path.
-func (m *RunCredentials) Teardown(project, cardID string) {
+// Teardown stops the run's refresh loop (if any) and removes the directory
+// carried by that run's handle. Keyed by the run's correlation id: a teardown
+// for an unknown or already-displaced run (a stale exit firing during the
+// drain window while a successor run of the same card has re-provisioned) is
+// a no-op - the successor's handle, refresh loop, and env file stay intact.
+// Idempotent. It holds the manager lock throughout so the dir removal cannot
+// interleave with a concurrent Provision's write to the same path.
+func (m *RunCredentials) Teardown(project, cardID, correlationID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	k := runKey(project, cardID)
+	k := runKey(project, cardID, correlationID)
 
 	h, ok := m.runs[k]
 	if !ok {
@@ -205,6 +215,8 @@ func (m *RunCredentials) Teardown(project, cardID string) {
 	delete(m.runs, k)
 	h.stop()
 
+	// Remove only the dir this run's own handle carried - never a path
+	// recomputed from project/cardID, which a successor run now shares.
 	if err := os.RemoveAll(h.dir); err != nil {
 		m.logger.Warn("remove per-run secrets dir failed",
 			"project", project, "card_id", cardID, "error", err)
@@ -357,10 +369,12 @@ func (m *RunCredentials) fetchGitCredentials(ctx context.Context, project, cardI
 	return gc.Token, expiry, nil
 }
 
-// runKey is the map key for a run: project and card ID together disambiguate the
-// same card ID reused across projects.
-func runKey(project, cardID string) string {
-	return project + "/" + cardID
+// runKey is the in-memory handle-registry key for one run: the SessionID-style
+// triple project/cardID/correlationID, so a stale run's Teardown can never
+// reach a successor run's handle. The on-disk layout stays keyed by
+// (project, cardID) - see HostDir.
+func runKey(project, cardID, correlationID string) string {
+	return project + "/" + cardID + "/" + correlationID
 }
 
 // parseExpiry parses an RFC3339 expiry (CM's tokenExpiryString format). It

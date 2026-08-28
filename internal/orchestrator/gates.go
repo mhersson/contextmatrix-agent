@@ -468,8 +468,13 @@ func (o *run) copilotReviewOnHead(ctx context.Context, prURL string) *CopilotRev
 
 // copilotReviewCycle handles one arrived review: dedupes against what earlier
 // rounds triaged, triages the fresh comments, and either passes the gate
-// (satisfied=true) or spends a fix round and re-requests the review
-// (satisfied=false - the caller waits for the re-review of the new head). A
+// (satisfied=true) or spends fix rounds until one commits, then re-requests
+// the review (satisfied=false - the caller waits for the re-review of the new
+// head). A fix round that committed nothing earns the gateNoChangeRetry-funded
+// retry, and HEAD has not moved since the review that produced the findings -
+// re-requesting would buy a guaranteed-identical review - so the retry is
+// spent on the same findings instead. The loop is self-bounding: the second
+// no-change round finds the retry already spent and parks. A
 // comment an earlier round triaged VALID counts as still open when Copilot
 // repeats it verbatim - the fix round did not actually resolve it - and it
 // funds a fix round of its own, folded in with anything freshly triaged VALID
@@ -535,8 +540,22 @@ func (o *run) copilotReviewCycle(
 			map[string]any{"reopened": len(reopened)})
 	}
 
-	if ferr := o.copilotFixRound(ctx, st, stillOpen); ferr != nil {
-		return false, ferr
+	for {
+		committed, ferr := o.copilotFixRound(ctx, st, stillOpen)
+		if ferr != nil {
+			return false, ferr
+		}
+
+		if committed {
+			break
+		}
+
+		// gateNoChangeRetry funded a retry and HEAD is unchanged - a
+		// re-request would return the same findings verbatim. Work the
+		// same already-fetched findings with the stronger fixer the bar
+		// raise buys. The loop is self-bounding: a second no-change
+		// round finds the retry already spent and parks, and a round
+		// that commits falls through to the re-request below.
 	}
 
 	if rerr := o.d.PRGates.RequestCopilotReview(ctx, prURL); rerr != nil {
@@ -788,12 +807,15 @@ func (o *run) triageCopilot(
 // copilotFixRound spends one Copilot fix round on the findings triaged as valid.
 // The round is counted and persisted BEFORE any work, so a crash mid-fix cannot
 // buy a free retry on resume. It returns a park error when the rounds cap is
-// spent or the fix runs out of budget or turns, and nil once the fix is pushed.
-func (o *run) copilotFixRound(ctx context.Context, st *gatesState, findings []copilotFinding) error {
+// spent or the fix runs out of budget or turns, and reports whether the fix
+// committed a change: nil with committed=false means the gateNoChangeRetry-
+// funded retry was granted, so HEAD has not moved and the caller must not
+// re-request the review.
+func (o *run) copilotFixRound(ctx context.Context, st *gatesState, findings []copilotFinding) (bool, error) {
 	st.CopilotDetail = copilotFindingLines(findings)
 
 	if st.CopilotRounds >= gatesRoundsCap {
-		return o.parkGates(ctx, st,
+		return false, o.parkGates(ctx, st,
 			fmt.Sprintf("Copilot findings still open after %d rounds", gatesRoundsCap))
 	}
 
@@ -810,21 +832,21 @@ func (o *run) copilotFixRound(ctx context.Context, st *gatesState, findings []co
 	committed, err := o.runFix(ctx, fixRequest{Findings: copilotFixFindings(findings), Round: st.CopilotRounds})
 	if err != nil {
 		if reason := gateResourcePark(err, gatesCopilotFixBudgetParkReason, gatesCopilotTurnCapParkReason); reason != "" {
-			return o.parkGates(ctx, st, reason)
+			return false, o.parkGates(ctx, st, reason)
 		}
 
-		return fmt.Errorf("copilot gate fix round %d: %w", st.CopilotRounds, err)
+		return false, fmt.Errorf("copilot gate fix round %d: %w", st.CopilotRounds, err)
 	}
 
 	if !committed {
 		if o.gateNoChangeRetry(ctx, "copilot", "Copilot", st.CopilotRounds) {
-			return nil
+			return false, nil
 		}
 
-		return o.parkGates(ctx, st, gatesCopilotFixNoChangeParkReason)
+		return false, o.parkGates(ctx, st, gatesCopilotFixNoChangeParkReason)
 	}
 
-	return nil
+	return true, nil
 }
 
 // skipCopilot records why the Copilot gate is not holding the card and passes it.

@@ -2782,6 +2782,86 @@ func TestCopilotGate_NoChangeRaisesTheBarBeforeParking(t *testing.T) {
 	assert.Contains(t, ops.lastBody(), "- Copilot rounds used: 2/3")
 }
 
+// TestCopilotGate_NoChangeRetrySkipsReRequest: the gateNoChangeRetry-funded
+// retry works an unchanged head, so re-requesting the review would return the
+// same findings verbatim - the retry round runs on the already-fetched
+// findings instead, and the family extends
+// TestCopilotGate_NoChangeRaisesTheBarBeforeParking with the request count.
+// The self-bounding loop: the second no-change round finds the retry already
+// spent and parks before any re-request is issued.
+func TestCopilotGate_NoChangeRetrySkipsReRequest(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		reviews:   []*CopilotReview{reviewOnHead("1 suggestion", swallowedErrorComment)},
+	}
+	git := &fakeGit{committed: false}
+	client := &planLLM{responses: []llm.Response{
+		copilotVerdict(copilotFinding{
+			File: "internal/api/handler.go", Issue: "the write error is dropped",
+			Valid: true, Reason: "the caller cannot tell the write failed",
+		}),
+		stopResp("coder: nothing to change", 0.01),
+		stopResp("coder: still nothing", 0.01),
+	}}
+
+	o := prGateRun(ops, gates, git, client, copilotGateContext("No change no re-request", "body"), 0)
+	// A pool with a second coder in it, so the round the bar raise buys has a
+	// model to run: the default gate registry carries one, and round 2's pick
+	// excludes round 1's failed fixer.
+	o.d.Registry = reviewFixRegistry()
+
+	var parked *GatesParkedError
+
+	require.ErrorAs(t, runPRGates(context.Background(), o), &parked)
+	assert.Contains(t, parked.Reason, "Copilot fix produced no change",
+		"the park reason names the no-change outcome; reason=%q", parked.Reason)
+
+	assert.Zero(t, gates.requests,
+		"a no-change retry works an unchanged head and must never re-request a review; calls=%v", gates.recorded())
+	assert.Equal(t, 3, modelCallCount(client),
+		"one triage call plus the retry fix round, with no re-triage of the same findings")
+	assert.NotContains(t, git.recorded(), "Push:cm/card-1",
+		"neither round committed anything, so nothing was pushed; git=%v", git.recorded())
+	assert.Contains(t, ops.lastBody(), "- Copilot rounds used: 2/3", "the retry round ran on the same findings")
+}
+
+// TestCopilotGate_CommittedFixStillReRequests: the re-request skip is scoped
+// to the funded no-change retry. A fix round that commits moves the head, so
+// today's behavior holds verbatim - exactly one re-request goes out and the
+// clean re-review of the new head passes the gate.
+func TestCopilotGate_CommittedFixStillReRequests(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		reviews: []*CopilotReview{
+			reviewOnHead("1 suggestion", swallowedErrorComment),
+			reviewOnHead("LGTM"),
+		},
+	}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: []llm.Response{
+		copilotVerdict(copilotFinding{
+			File: "internal/api/handler.go", Issue: "the write error is dropped",
+			Valid: true, Reason: "the caller cannot tell the write failed",
+		}),
+		stopResp("coder: returned the write error", 0.02),
+		copilotVerdict(),
+	}}
+
+	o := prGateRun(ops, gates, git, client, copilotGateContext("Committed fix", "body"), 0)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	assert.Equal(t, 1, gates.requests,
+		"a committed fix round re-requests the review exactly once; calls=%v", gates.recorded())
+	assert.Contains(t, git.recorded(), "Push:cm/card-1", "the fix is pushed; git=%v", git.recorded())
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0,
+		"the clean re-review completes the card")
+}
+
 // TestCIGate_FixRoundNoChangeParks: a CI fix round whose fix commits nothing
 // parks with the no-change reason instead of cycling to the rounds cap - once
 // the bar raise that buys a first no-op round one more attempt is spent. The

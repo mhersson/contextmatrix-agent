@@ -70,14 +70,15 @@ func (r *exitRecorder) wait(t *testing.T, d time.Duration) (int64, ExitCause) {
 
 // startRecorder captures the single onStart callback.
 type startRecorder struct {
-	mu          sync.Mutex
-	fired       bool
-	project     string
-	cardID      string
-	containerID string
+	mu            sync.Mutex
+	fired         bool
+	project       string
+	cardID        string
+	containerID   string
+	correlationID string
 }
 
-func (r *startRecorder) onStart(project, cardID, containerID string) {
+func (r *startRecorder) onStart(project, cardID, containerID, correlationID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -85,19 +86,23 @@ func (r *startRecorder) onStart(project, cardID, containerID string) {
 	r.project = project
 	r.cardID = cardID
 	r.containerID = containerID
+	r.correlationID = correlationID
 }
 
-// logCollector accumulates onLog lines.
+// logCollector accumulates onLog lines along with the correlation id each
+// line's callback carried.
 type logCollector struct {
-	mu    sync.Mutex
-	lines []string
+	mu            sync.Mutex
+	lines         []string
+	correlationID string
 }
 
-func (c *logCollector) onLog(_, _ string, line []byte, _ bool) {
+func (c *logCollector) onLog(_, _, correlationID string, line []byte, _ bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	c.lines = append(c.lines, string(line))
+	c.correlationID = correlationID
 }
 
 func (c *logCollector) snapshot() []string {

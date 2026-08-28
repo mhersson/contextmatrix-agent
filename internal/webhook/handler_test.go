@@ -1,6 +1,7 @@
 package webhook
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -179,7 +180,7 @@ type fakeCredentials struct {
 
 	provisionErr error
 	provisions   []provisionCall
-	teardowns    [][2]string // project, cardID
+	teardowns    [][3]string // project, cardID, correlationID
 }
 
 type provisionCall struct {
@@ -204,11 +205,11 @@ func (f *fakeCredentials) Provision(project, cardID, correlationID, token, expir
 	return nil
 }
 
-func (f *fakeCredentials) Teardown(project, cardID string) {
+func (f *fakeCredentials) Teardown(project, cardID, correlationID string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	f.teardowns = append(f.teardowns, [2]string{project, cardID})
+	f.teardowns = append(f.teardowns, [3]string{project, cardID, correlationID})
 }
 
 func (f *fakeCredentials) provisionCalls() []provisionCall {
@@ -221,11 +222,11 @@ func (f *fakeCredentials) provisionCalls() []provisionCall {
 	return out
 }
 
-func (f *fakeCredentials) teardownCalls() [][2]string {
+func (f *fakeCredentials) teardownCalls() [][3]string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	out := make([][2]string, len(f.teardowns))
+	out := make([][3]string, len(f.teardowns))
 	copy(out, f.teardowns)
 
 	return out
@@ -571,6 +572,53 @@ func TestTrigger_MintsDistinctCorrelationIDsAcrossReTriggers(t *testing.T) {
 	assert.NotEmpty(t, specs[1].CorrelationID)
 	assert.NotEqual(t, specs[0].CorrelationID, specs[1].CorrelationID,
 		"two triggers of the same card without X-Correlation-ID must mint distinct ids")
+}
+
+// TestTrigger_SuppliedCorrelationIDIsNamespacedNotTrusted pins the uniqueness
+// invariant every downstream run-keyed structure leans on: even when the caller
+// sends X-Correlation-ID, the id handed to the LaunchSpec must carry a
+// per-run nonce, so a re-trigger reusing the same header value still gets a
+// distinct run id - otherwise run 1's stale Teardown/End would key straight
+// into run 2's credentials and filelog state.
+func TestTrigger_SuppliedCorrelationIDIsNamespacedNotTrusted(t *testing.T) {
+	h := newHarness(t, 4)
+
+	payload := provisionedPayload("PROJ-NAMESPACED")
+
+	ts := time.Now().Unix()
+
+	w := h.doAt(t, http.MethodPost, "/trigger", payload, strconv.FormatInt(ts, 10))
+	require.Equal(t, http.StatusAccepted, w.Code)
+
+	require.Eventually(t, func() bool {
+		return len(h.exec.launchedSpecs()) == 1
+	}, time.Second, 5*time.Millisecond)
+
+	h.tracker.Remove("proj", "PROJ-NAMESPACED")
+
+	// A distinct timestamp (a real retry carries a fresh one) keeps the two
+	// identical payloads from colliding in the replay cache. This time the
+	// client supplies X-Correlation-ID explicitly.
+	body, err := json.Marshal(payload)
+	require.NoError(t, err)
+
+	r := httptest.NewRequest(http.MethodPost, "/trigger", bytes.NewReader(body))
+	signReq(t, r, testAPIKey, body, strconv.FormatInt(ts+1, 10))
+	r.Header.Set(correlationHeader, "static-trace-id")
+
+	w = httptest.NewRecorder()
+	h.server.Routes().ServeHTTP(w, r)
+	require.Equal(t, http.StatusAccepted, w.Code)
+
+	require.Eventually(t, func() bool {
+		return len(h.exec.launchedSpecs()) == 2
+	}, time.Second, 5*time.Millisecond)
+
+	specs := h.exec.launchedSpecs()
+	assert.NotEqual(t, specs[0].CorrelationID, specs[1].CorrelationID,
+		"a repeated X-Correlation-ID must not collapse two runs onto one id")
+	assert.Contains(t, specs[1].CorrelationID, "static-trace-id",
+		"the supplied id stays recognizable inside the namespaced run id")
 }
 
 // ---- kill -------------------------------------------------------------------
@@ -1692,7 +1740,7 @@ func TestLaunch_TearsDownPerRunCredentialsOnLaunchFailure(t *testing.T) {
 	s.launch(s.buildLaunchSpec(payload, "corr", ""), payload)
 
 	assert.Len(t, creds.provisionCalls(), 1)
-	assert.Equal(t, [][2]string{{"p", "C1"}}, creds.teardownCalls(),
+	assert.Equal(t, [][3]string{{"p", "C1", "corr"}}, creds.teardownCalls(),
 		"a launch failure must tear down the per-run credentials")
 	assert.Equal(t, [][3]string{{"C1", "failed", "launch failed"}}, reporter.statuses())
 }

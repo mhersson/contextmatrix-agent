@@ -34,20 +34,41 @@ const causeSuperseded = "superseded"
 // Logger writes per-card container output to <dir>/<project>/<cardID>.log.
 // A nil *Logger, or one built with an empty dir, disables every operation, so
 // callers can wire it unconditionally. Safe for concurrent use across cards.
+//
+// Open writers are keyed by (project, cardID, correlationID) - the same
+// per-run triple webhook.SessionID keys redaction sessions by - so a stale
+// run's late End (an exit callback still draining after its container died)
+// cannot close a re-trigger's just-opened writer during the pump-drain
+// window. The on-disk layout and NextAttempt's attempt count stay keyed by
+// (project, cardID): a successor run appends to the same durable file.
 type Logger struct {
 	dir    string
 	logger *slog.Logger
 
-	mu    sync.Mutex           // guards files only
-	files map[string]*cardFile // key: sanitize(project)/sanitize(cardID)
+	mu    sync.Mutex           // guards files and ended
+	files map[string]*cardFile // key: runKey(project, cardID, correlationID)
+	// ended records run keys whose Begin has already been followed by a
+	// footer-and-close, so a replayed Begin for such an id is recognized as
+	// stale and no-ops instead of superseding a live run's writer. Entries
+	// are never removed: a correlation id is unique per admitted run
+	// (webhook.handleTrigger always mints a fresh random suffix), so the map
+	// grows by one small entry per ended run for the life of the process -
+	// each key is the short card-scoped id webhook.handleTrigger mints, well
+	// under 100 bytes. Should retention ever matter, bound the minted id's
+	// size at admission rather than evicting here: an evicted entry would
+	// let a delayed stale Begin supersede a live run's writer.
+	ended map[string]bool
 }
 
 // cardFile is one open per-card log file plus the metadata the footer needs.
 // Its own mutex guards writes/close so concurrent cards never serialize on the
-// manager lock.
+// manager lock. path is retained so a superseding Begin can still find and
+// close a prior run's orphaned writer by the file it holds, even though that
+// writer sits under a different map key.
 type cardFile struct {
 	mu          sync.Mutex
 	f           *os.File
+	path        string
 	containerID string
 	closed      bool
 }
@@ -62,6 +83,7 @@ func New(dir string, logger *slog.Logger) *Logger {
 		dir:    dir,
 		logger: logger,
 		files:  make(map[string]*cardFile),
+		ended:  make(map[string]bool),
 	}
 }
 
@@ -73,6 +95,15 @@ func key(project, cardID string) string {
 	return sanitize(project) + "/" + sanitize(cardID)
 }
 
+// runKey composes the in-memory open-writer id: the sanitized per-card key
+// plus the run's correlation id, mirroring webhook.SessionID's shape. The
+// correlation id is minted by webhook.handleTrigger (cardID plus a short
+// random suffix, never a filesystem input), so it needs no sanitizing for a
+// map key.
+func runKey(project, cardID, correlationID string) string {
+	return key(project, cardID) + "/" + correlationID
+}
+
 // path is the on-disk log path for a card: <dir>/<project>/<cardID>.log, each
 // segment sanitized so an untrusted project/cardID cannot escape the root.
 func (l *Logger) path(project, cardID string) string {
@@ -80,19 +111,38 @@ func (l *Logger) path(project, cardID string) string {
 }
 
 // Begin opens (append) the card's log file and writes a run header. Call once
-// per container run, before any Write. The executor runs one container per card
-// and calls End before the next Begin, but if a prior run's entry is somehow
-// still open for this card (e.g. an End that never fired), it is footered as
-// superseded (exit=-1) and closed first, so a stray double-Begin never leaks
-// the old handle or drops its footer.
-func (l *Logger) Begin(project, cardID, containerID string) {
+// per container run, before any Write. The executor runs one container per
+// card and calls End before the next Begin, but if this run's own correlation
+// id still has an open entry (e.g. an End that never fired for that id), it is
+// footered as superseded (exit=-1) and closed first. Separately, a still-open
+// writer on the SAME card file under a DIFFERENT correlation id - a prior run
+// orphaned by a killed container or a lost exit callback - is footered and
+// closed too: two writers cannot hold the same file, and the orphan's End will
+// never arrive. The orphan close is keyed on the file path, not the map key,
+// so it never touches a concurrent run writing a different file, and it leaves
+// this run's freshly registered entry alone.
+func (l *Logger) Begin(project, cardID, containerID, correlationID string) {
 	if !l.enabled() {
 		return
 	}
 
-	l.closeCard(key(project, cardID), -1, causeSuperseded) // supersede a still-open prior run, if any
-
 	p := l.path(project, cardID)
+
+	keepKey := runKey(project, cardID, correlationID)
+
+	l.mu.Lock()
+	stale := l.ended[keepKey] // a replayed Begin for an already-ended run id
+	l.mu.Unlock()
+
+	if stale {
+		l.logger.Warn("filelog: stale Begin for an already-ended run id ignored",
+			"project", project, "card_id", cardID, "correlation_id", correlationID)
+
+		return
+	}
+
+	l.closeCard(keepKey, -1, causeSuperseded) // supersede this run id's still-open entry, if any
+	l.closeOrphans(p, keepKey)                // supersede a prior run orphaned on this card file
 
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		l.logger.Warn("filelog: mkdir failed", "project", project, "card_id", cardID, "error", err)
@@ -115,19 +165,43 @@ func (l *Logger) Begin(project, cardID, containerID string) {
 	}
 
 	l.mu.Lock()
-	l.files[key(project, cardID)] = &cardFile{f: f, containerID: containerID}
+	l.files[runKey(project, cardID, correlationID)] = &cardFile{f: f, path: p, containerID: containerID}
 	l.mu.Unlock()
 }
 
-// Write appends one line (with a trailing newline) to the card's file. No-op
-// if the card has no open file.
-func (l *Logger) Write(project, cardID string, line []byte, _ bool) {
+// closeOrphans footers and closes every still-open entry holding the given
+// file path whose correlation id differs from the one keepKey carries - a
+// prior run of this card whose End never fired. An entry holding a different
+// file (another card, or this run's own just-superseded slot) is untouched.
+func (l *Logger) closeOrphans(path, keepKey string) {
+	l.mu.Lock()
+
+	var orphans []*cardFile
+
+	for k, cf := range l.files {
+		if cf.path == path && k != keepKey {
+			orphans = append(orphans, cf)
+
+			delete(l.files, k)
+		}
+	}
+	l.mu.Unlock()
+
+	for _, cf := range orphans {
+		l.footerAndClose(cf, path, -1, causeSuperseded)
+	}
+}
+
+// Write appends one line (with a trailing newline) to the run's file. No-op if
+// the run has no open file - including when a stale run id writes after its
+// own End or Begin, which can never reach another run's writer.
+func (l *Logger) Write(project, cardID, correlationID string, line []byte, _ bool) {
 	if !l.enabled() {
 		return
 	}
 
 	l.mu.Lock()
-	cf := l.files[key(project, cardID)]
+	cf := l.files[runKey(project, cardID, correlationID)]
 	l.mu.Unlock()
 
 	if cf == nil {
@@ -152,43 +226,60 @@ func (l *Logger) Write(project, cardID string, line []byte, _ bool) {
 	}
 }
 
-// closeCard writes the run footer with exitCode and cause, closes the file, and
-// forgets the card. No-op if the card has no open file.
+// closeCard writes the run footer with exitCode and cause, closes the file,
+// and forgets the entry. No-op if the key has no open file.
 func (l *Logger) closeCard(k string, exitCode int64, cause string) {
 	l.mu.Lock()
 	cf := l.files[k]
 	delete(l.files, k)
+
+	if cf != nil {
+		l.ended[k] = true
+	}
 	l.mu.Unlock()
 
 	if cf == nil {
 		return
 	}
 
+	l.footerAndClose(cf, cf.path, exitCode, cause)
+}
+
+// footerAndClose writes the footer and closes the file. The path is the
+// closed handle's own, not a key-derived lookup, so it is correct for entries
+// found either by run key or by file path.
+func (l *Logger) footerAndClose(cf *cardFile, path string, exitCode int64, cause string) {
 	cf.mu.Lock()
 	defer cf.mu.Unlock()
+
+	if cf.closed {
+		return
+	}
 
 	footer := fmt.Sprintf("==== run ended %s container=%s exit=%d cause=%s ====\n",
 		time.Now().UTC().Format(time.RFC3339), shortID(cf.containerID), exitCode, cause)
 	if _, err := cf.f.WriteString(footer); err != nil {
-		l.logger.Warn("filelog: write footer failed", "key", k, "error", err)
+		l.logger.Warn("filelog: write footer failed", "path", path, "error", err)
 	}
 
 	if err := cf.f.Close(); err != nil {
-		l.logger.Warn("filelog: close failed", "key", k, "error", err)
+		l.logger.Warn("filelog: close failed", "path", path, "error", err)
 	}
 
 	cf.closed = true
 }
 
 // End writes a run footer naming the exit code and how the run ended, closes
-// the file, and forgets the card. The cause is what separates the two kill
-// paths, which share exit code -1. No-op if the card has no open file.
-func (l *Logger) End(project, cardID string, exitCode int64, cause string) {
+// the file, and forgets the entry. The cause is what separates the two kill
+// paths, which share exit code -1. No-op if the run has no open file - in
+// particular, a stale run's late End cannot close a re-trigger's writer,
+// because the two sit under different keys.
+func (l *Logger) End(project, cardID, correlationID string, exitCode int64, cause string) {
 	if !l.enabled() {
 		return
 	}
 
-	l.closeCard(key(project, cardID), exitCode, cause)
+	l.closeCard(runKey(project, cardID, correlationID), exitCode, cause)
 }
 
 // NextAttempt returns the ordinal of the run about to start for this card:
