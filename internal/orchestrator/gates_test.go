@@ -2698,8 +2698,13 @@ func TestPRGates_ReEnteredCIGateRemembersEarlierChecks(t *testing.T) {
 }
 
 // TestCopilotGate_FixRoundNoChangeParks: a Copilot fix round whose fix commits
-// nothing parks with the no-change reason instead of cycling to the rounds cap.
-// The fakeGit defaults to committed=false, producing a no-change outcome.
+// nothing parks with the no-change reason instead of cycling to the rounds cap,
+// once the one-step retry the bar raise buys is already spent (see
+// TestCopilotGate_NoChangeRaisesTheBarBeforeParking for that retry itself). The
+// bar counter is shared with the review loop and the CI gate, so a card whose
+// rounds already escalated has had a stronger fixer tried on it and parks here
+// on the first no-op round. The fakeGit defaults to committed=false, producing
+// a no-change outcome.
 func TestCopilotGate_FixRoundNoChangeParks(t *testing.T) {
 	ops := &fakeOps{}
 	gates := &fakeGates{
@@ -2717,6 +2722,7 @@ func TestCopilotGate_FixRoundNoChangeParks(t *testing.T) {
 
 	// committed defaults to false -> runFix returns committed=false, err=nil
 	o := prGateRun(ops, gates, &fakeGit{}, client, copilotGateContext("No change fix", "body"), 0)
+	o.fixBarSteps = 1 // a review round already climbed the bar
 
 	err := runPRGates(context.Background(), o)
 
@@ -2733,6 +2739,47 @@ func TestCopilotGate_FixRoundNoChangeParks(t *testing.T) {
 		"one triage call and one fix model call; client.calls=%v", client.models)
 	assert.Equal(t, -1, indexOfCall(ops.recorded(), "TransitionCard:done"),
 		"a parked card must NOT reach done")
+}
+
+// TestCopilotGate_NoChangeRaisesTheBarBeforeParking: a Copilot fix round that
+// produced no change is QUALITY evidence, and one more round is already funded
+// by gatesRoundsCap - so the gate spends it on a stronger fixer instead of
+// parking without ever having tried one, mirroring the CI gate's rule (see
+// TestCIGate_NoChangeRaisesTheBarBeforeParking). The repeated VALID finding on
+// the unchanged head buys the second round without a fresh triage call.
+func TestCopilotGate_NoChangeRaisesTheBarBeforeParking(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		reviews:   []*CopilotReview{reviewOnHead("1 suggestion", swallowedErrorComment)},
+	}
+	git := &fakeGit{committed: false}
+	client := &planLLM{responses: []llm.Response{
+		copilotVerdict(copilotFinding{
+			File: "internal/api/handler.go", Issue: "the write error is dropped",
+			Valid: true, Reason: "the caller cannot tell the write failed",
+		}),
+		stopResp("coder: nothing to change", 0.01),
+		stopResp("coder: still nothing", 0.01),
+	}}
+
+	o := prGateRun(ops, gates, git, client, copilotGateContext("No change", "body"), 0)
+	// A pool with a second coder in it, so the round the bar raise buys has a
+	// model to run: the default gate registry carries one, and round 2's pick
+	// excludes round 1's failed fixer.
+	o.d.Registry = reviewFixRegistry()
+
+	var parked *GatesParkedError
+	require.ErrorAs(t, runPRGates(context.Background(), o), &parked)
+	assert.Contains(t, parked.Reason, "Copilot fix produced no change",
+		"the park reason names the no-change outcome; reason=%q", parked.Reason)
+
+	assert.Equal(t, 1, o.fixBarSteps, "the second round got a stronger fixer")
+	assert.Zero(t, o.fixBudgetSteps, "a no-op round is not volume evidence")
+	assert.Equal(t, 3, modelCallCount(client),
+		"one triage call plus exactly one extra fix round was bought, not a spin")
+	assert.Contains(t, ops.lastBody(), "- Copilot rounds used: 2/3")
 }
 
 // TestCIGate_FixRoundNoChangeParks: a CI fix round whose fix commits nothing

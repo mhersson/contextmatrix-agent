@@ -32,6 +32,7 @@ import (
 	"github.com/mhersson/contextmatrix-backendkit/logbridge"
 	"github.com/mhersson/contextmatrix-backendkit/taskskills"
 	"github.com/mhersson/contextmatrix-backendkit/webhookcore"
+	"github.com/mhersson/contextmatrix-harness/redact"
 	protocol "github.com/mhersson/contextmatrix-protocol"
 )
 
@@ -134,16 +135,21 @@ func runServe(ctx context.Context, configPath string) error {
 	// per-session keys and atomically swaps it on every mutation. Register
 	// the process-lifetime config-level secrets first under a reserved id
 	// so they survive every per-run add and remove (the trap fix).
-	registry := logbridge.NewRedactorRegistry(bridge)
+	//
+	// registry tees every AddSessionKey/RemoveSessionKey call to the
+	// backendkit RedactorRegistry above (unchanged - still drives the SSE
+	// bridge) and to a second, file-log-only redactor built from the
+	// identical key set, so the durable per-card log can mask the same
+	// secrets on the full raw line - not just the derived Content field the
+	// SSE bridge redacts. See sessionSecretTee.
+	registry := newSessionSecretTee(logbridge.NewRedactorRegistry(bridge))
 	registry.AddSessionKey(staticSecretsID, cfg.MCPAPIKey)
 	registry.AddSessionKey(staticSecretsID, cfg.APIKey)
 
 	// Wire the token-refresh hook so every rotated git token is added to the
 	// redactor set. Appending is correct - both the original and the rotated
 	// token can appear in output.
-	credentials.OnTokenRefresh = func(project, cardID, token string) {
-		registry.AddSessionKey(project+"/"+cardID, token)
-	}
+	credentials.OnTokenRefresh = onTokenRefreshHook(registry)
 
 	exec := executor.NewDockerExecutor(executor.Config{
 		Docker:           docker,
@@ -153,16 +159,10 @@ func runServe(ctx context.Context, configPath string) error {
 		IdleTimeout:      cfg.IdleOutputTimeout,
 		PollInterval:     cfg.IdleWatchdogInterval,
 		OnStart:          files.Begin,
-		OnLog: func(project, cardID string, line []byte, stderr bool) {
-			// Bridge to the live /logs SSE stream first so the interactive
-			// stream is never gated on the durable-log disk write. BridgeLine
-			// does not mutate line and Write copies it, so the order is safe.
-			bridge.BridgeLine(logbridge.Key{Project: project, CardID: cardID}, line, stderr)
-			files.Write(project, cardID, line, stderr)
-		},
-		OnExit:  onContainerExit(cbClient, credentials, files, registry, bridge, logger),
-		Logger:  logger,
-		Metrics: mx,
+		OnLog:            containerLogSink(bridge, files, registry),
+		OnExit:           onContainerExit(cbClient, credentials, files, registry, bridge, logger),
+		Logger:           logger,
+		Metrics:          mx,
 	})
 
 	// Force-remove any agent-labeled containers left by a previous process before
@@ -324,6 +324,137 @@ func gracefulShutdown(
 	}
 }
 
+// onTokenRefreshHook builds the RunCredentials.OnTokenRefresh callback: it
+// registers a freshly-minted git token with the session-secret registry
+// under webhook.SessionID(project, cardID, correlationID) - the exact id
+// addSessionSecrets registered the run's other secrets under (see
+// internal/webhook/handler.go), so the rotated token joins its own run's
+// redaction bucket rather than a different one. Extracted to a named
+// function (rather than an inline closure in runServe) so it is directly
+// unit-testable.
+func onTokenRefreshHook(registry *sessionSecretTee) func(project, cardID, correlationID, token string) {
+	return func(project, cardID, correlationID, token string) {
+		registry.AddSessionKey(webhook.SessionID(project, cardID, correlationID), token)
+	}
+}
+
+// sessionSecretTee tees every session-secret registration to backendkit's
+// logbridge.RedactorRegistry (unchanged - still drives the SSE bridge's
+// per-field redaction) and to a second, locally-held redactor built from the
+// identical key set via the same redact.New primitive the registry uses
+// internally. AddSessionKey/RemoveSessionKey forward the same arguments to
+// both sides, so the active key set cannot drift between them - this is not
+// a second, independently-tracked secret set, just a second reader of the
+// one set of registrations. containerLogSink uses Redact to mask the durable
+// per-card file log on the full raw line, catching secrets in JSON fields the
+// SSE bridge's Content-only redaction never inspects.
+//
+// Follow-up (ledgered): once backendkit exposes the bridge's redactor (or a
+// redact-and-return BridgeLine) in a tagged release, this tee can be deleted
+// in favor of reusing that single result directly.
+type sessionSecretTee struct {
+	sse *logbridge.RedactorRegistry
+
+	mu      sync.Mutex
+	session map[string][]string
+	file    atomic.Pointer[redact.Redactor]
+}
+
+// newSessionSecretTee wraps sse, an already-constructed RedactorRegistry, so
+// callers keep wiring the SSE side exactly as before.
+func newSessionSecretTee(sse *logbridge.RedactorRegistry) *sessionSecretTee {
+	return &sessionSecretTee{sse: sse, session: make(map[string][]string)}
+}
+
+// AddSessionKey registers key under sessionID on both the SSE registry and
+// the file-log redactor. An empty key is ignored on the file-log side too,
+// matching RedactorRegistry's contract, so callers may register
+// unconditionally.
+func (t *sessionSecretTee) AddSessionKey(sessionID, key string) {
+	t.sse.AddSessionKey(sessionID, key)
+
+	if key == "" {
+		return
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.session[sessionID] = append(t.session[sessionID], key)
+	t.rebuild()
+}
+
+// RemoveSessionKey forgets sessionID's secrets on both the SSE registry and
+// the file-log redactor. Idempotent: removing an unregistered session is a
+// no-op on the file-log side too.
+func (t *sessionSecretTee) RemoveSessionKey(sessionID string) {
+	t.sse.RemoveSessionKey(sessionID)
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if _, ok := t.session[sessionID]; !ok {
+		return
+	}
+
+	delete(t.session, sessionID)
+	t.rebuild()
+}
+
+// rebuild composes every registered key into a fresh redactor and swaps it
+// into t.file, or clears t.file to nil when nothing is registered - Redact's
+// short-circuit and the "nothing registered yet" startup state both key off
+// that nil, a single atomic read with no separate flag to fall out of sync
+// with it. The caller holds t.mu.
+func (t *sessionSecretTee) rebuild() {
+	all := make([]string, 0, len(t.session))
+	for _, keys := range t.session {
+		all = append(all, keys...)
+	}
+
+	if len(all) == 0 {
+		t.file.Store(nil)
+
+		return
+	}
+
+	t.file.Store(redact.New(all))
+}
+
+// Redact masks every currently-registered secret in line. Nothing registered
+// yet (t.file is nil) skips the copy through string(line)/Apply/[]byte(...)
+// entirely and returns line as-is - the common case is every line taking that
+// round trip for zero matches, since most output carries no secret.
+func (t *sessionSecretTee) Redact(line []byte) []byte {
+	r := t.file.Load()
+	if r == nil {
+		return line
+	}
+
+	return []byte(r.Apply(string(line)))
+}
+
+// containerLogSink returns the executor OnLog callback: it fans out one
+// worker output line to the live SSE bridge and the durable per-card file
+// log. The file log receives the line masked by registry's tee redactor -
+// the identical secret set the SSE bridge redacts from - applied to the full
+// raw line for both the stdout and stderr arms, so a CM-provisioned secret
+// never reaches disk in plaintext even in JSON fields the SSE bridge's
+// per-field redaction does not inspect.
+func containerLogSink(
+	bridge *logbridge.Bridge,
+	files *filelog.Logger,
+	registry *sessionSecretTee,
+) func(project, cardID string, line []byte, stderr bool) {
+	return func(project, cardID string, line []byte, stderr bool) {
+		// Bridge to the live /logs SSE stream first so the interactive
+		// stream is never gated on the durable-log disk write. BridgeLine
+		// does not mutate line and Write copies it, so the order is safe.
+		bridge.BridgeLine(logbridge.Key{Project: project, CardID: cardID}, line, stderr)
+		files.Write(project, cardID, registry.Redact(line), stderr)
+	}
+}
+
 // onContainerExit builds the executor OnExit hook: it tears down the run's
 // per-run credentials (stop the refresh loop, remove the run dir), maps the
 // container exit code to a worker-status, and reports it to ContextMatrix on a
@@ -339,20 +470,46 @@ func gracefulShutdown(
 // exit status callback below, and that callback is what gates CM's re-triggers
 // (CM learns the run finished only from it). files.End footers and closes the
 // per-card log first, so the log is closed before the status callback can let CM
-// admit a new run for the same card. Likewise for Teardown: under the normal
-// flow the tracker.Remove → Teardown window is already closed before CM can
-// re-trigger, and it cannot be hit. A re-trigger racing in out of band inside
-// that microsecond window would at worst lose its own fresh provisioning to this
-// Teardown - a loud, self-inflicted failure - never a leaked or cross-run token.
+// admit a new run for the same card.
+//
+// The tracker.Remove -> this callback window is NOT negligible: waitAndCleanup
+// (internal/executor/docker.go) clears the tracker entry BEFORE the pump-drain
+// wait (up to pumpDrainTimeout, 5s), and this callback - which runs Teardown
+// and the session-secret removal below - fires only once that wait completes.
+// Nothing but the tracker entry gates admission, so CM can and does re-trigger
+// inside that window; a re-trigger racing in here is the normal case this file
+// defends against, not an unreachable edge case.
+//
+// credentials.Teardown stays keyed by plain project/cardID: RunCredentials
+// tracks one live handle per card, and Provision's own re-provision-displaces
+// design (see its doc comment) means a re-trigger's Provision landing inside
+// this window already replaces the stale run's handle with its own before this
+// stale Teardown call runs. Teardown then finds and stops the RE-TRIGGER's
+// handle, not the original run's - at worst the re-trigger loses its own
+// freshly-provisioned credential directory to this call, a loud, self-inflicted
+// failure (the new run fails fast on a missing secrets file), never a leaked or
+// cross-run token. That narrower risk is unchanged by this task; only the
+// session-secret registry removal below is now scoped to avoid the equivalent
+// cross-run failure mode.
+//
+// Session-secret removal keying: the registry removal below uses
+// webhook.SessionID(project, cardID, correlationID) - the run's own
+// correlation id, forwarded here from the executor's OnExit callback - so it
+// does NOT share credentials.Teardown's exposure above. Before this fix, both
+// this call and addSessionSecrets composed the bare project/cardID id, so a
+// stale run's removal here would strip a re-trigger's still-live redaction
+// keys during the same window. Keying by correlationID makes the two calls
+// target different map entries, so a stale exit can only ever remove its own
+// run's keys.
 func onContainerExit(
 	reporter webhook.StatusReporter,
 	credentials *secrets.RunCredentials,
 	files *filelog.Logger,
-	registry *logbridge.RedactorRegistry,
+	registry *sessionSecretTee,
 	bridge *logbridge.Bridge,
 	logger *slog.Logger,
-) func(project, cardID string, exitCode int64, cause executor.ExitCause, ordinal int) {
-	return func(project, cardID string, exitCode int64, cause executor.ExitCause, ordinal int) {
+) func(project, cardID string, exitCode int64, cause executor.ExitCause, ordinal int, correlationID string) {
+	return func(project, cardID string, exitCode int64, cause executor.ExitCause, ordinal int, correlationID string) {
 		emitRunEnd(bridge, files, project, cardID, exitCode, cause, ordinal, logger)
 
 		files.End(project, cardID, exitCode, string(cause))
@@ -360,7 +517,7 @@ func onContainerExit(
 
 		// Remove the session secrets after credential teardown but before
 		// the status callback so a re-trigger does not inherit stale keys.
-		registry.RemoveSessionKey(project + "/" + cardID)
+		registry.RemoveSessionKey(webhook.SessionID(project, cardID, correlationID))
 
 		status, message := exitStatus(exitCode, cause)
 

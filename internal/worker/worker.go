@@ -1094,7 +1094,7 @@ func withDefaults(spec RunSpec) RunSpec {
 
 // mobConfig maps the payload mob session spec onto the orchestrator's config:
 // the phase list becomes per-phase booleans and the spec-level defaults (2
-// critique rounds, budget factor 0.75, phases plan+review, checkpoint tier
+// critique rounds, budget factor 0.75, phases review-only, checkpoint tier
 // "simple" / 3 rounds) fill zero values so the orchestrator never sees an
 // ambiguous zero. "execute" is live only when the payload's server flag rode
 // along - a bare phase value from a stale CM stays inert. nil or
@@ -1122,7 +1122,7 @@ func mobConfig(spec *protocol.MobSpec) orchestrator.MobConfig {
 	}
 
 	if len(spec.Phases) == 0 {
-		c.Plan, c.Review = true, true
+		c.Review = true
 	}
 
 	if c.Rounds <= 0 {

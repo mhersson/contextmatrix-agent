@@ -817,6 +817,10 @@ func (o *run) copilotFixRound(ctx context.Context, st *gatesState, findings []co
 	}
 
 	if !committed {
+		if o.gateNoChangeRetry(ctx, "copilot", "Copilot", st.CopilotRounds) {
+			return nil
+		}
+
 		return o.parkGates(ctx, st, gatesCopilotFixNoChangeParkReason)
 	}
 
@@ -1420,17 +1424,7 @@ func (o *run) ciFixRound(ctx context.Context, prURL string, st *gatesState, fail
 	}
 
 	if !committed {
-		// A round that changed nothing is quality evidence, and another round is
-		// already funded. Raise the bar once and spend it on a stronger fixer
-		// rather than parking without ever having tried one. Keyed on the bar
-		// counter, which the review loop also writes: on a card whose review
-		// rounds already escalated, a stronger fixer has been tried and failed,
-		// so this parks on the first no-op round exactly as before.
-		if o.fixBarSteps == 0 && st.CIRounds < gatesRoundsCap {
-			o.markFixFailed("produced no change")
-			o.gateNote(ctx, "ci", fmt.Sprintf("pr_gates: CI fix round %d produced no change - retrying with a stronger fixer",
-				st.CIRounds), map[string]any{"round": st.CIRounds})
-
+		if o.gateNoChangeRetry(ctx, "ci", "CI", st.CIRounds) {
 			return nil
 		}
 
@@ -1438,6 +1432,27 @@ func (o *run) ciFixRound(ctx context.Context, prURL string, st *gatesState, fail
 	}
 
 	return nil
+}
+
+// gateNoChangeRetry funds the ONE retry a no-change fix round earns before a
+// gate parks: a round that changed nothing is quality evidence, and another
+// round is already funded, so the gate raises the shared bar once and spends
+// it on a stronger fixer rather than parking without ever having tried one.
+// Shared by the CI and Copilot arms so neither carries its own copy of the
+// rule. Keyed on the bar counter, which the review loop also writes: on a
+// card whose rounds already escalated elsewhere, a stronger fixer has been
+// tried and failed, so the caller parks on the first no-op round exactly as
+// before. Reports whether it funded the retry; false tells the caller to park.
+func (o *run) gateNoChangeRetry(ctx context.Context, gate, label string, rounds int) bool {
+	if o.fixBarSteps != 0 || rounds >= gatesRoundsCap {
+		return false
+	}
+
+	o.markFixFailed("produced no change")
+	o.gateNote(ctx, gate, fmt.Sprintf("pr_gates: %s fix round %d produced no change - retrying with a stronger fixer",
+		label, rounds), map[string]any{"round": rounds})
+
+	return true
 }
 
 // gateResourcePark maps a model-run failure to the park reason a gate records

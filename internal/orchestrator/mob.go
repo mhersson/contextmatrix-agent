@@ -193,9 +193,10 @@ func buildEngineConfig(ctx context.Context, o *run, t mob.Topic, bearer string) 
 	}
 
 	panel := o.d.Registry.SelectDiscussionPanel(registry.SelectInput{
-		Role:    registry.RoleReviewer,
-		Tier:    registry.TierComplex,
-		Exclude: exclude,
+		Role:      registry.RoleReviewer,
+		Tier:      registry.TierComplex,
+		EstTokens: estimateTokens(t.Briefing),
+		Exclude:   exclude,
 	}, len(t.Lenses))
 
 	// Nothing is employable for the reviewer role, so the topic cannot be

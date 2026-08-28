@@ -104,9 +104,9 @@ func TestAddSessionSecrets_FullyProvisionedTrigger(t *testing.T) {
 		},
 	}
 
-	s.addSessionSecrets("p", "C1", payload)
+	s.addSessionSecrets("p", "C1", "corr-1", payload)
 
-	got := registry.keys("p/C1")
+	got := registry.keys(SessionID("p", "C1", "corr-1"))
 	require.Len(t, got, 5, "five entries: git token, llm key, mcp key, and two guest tokens (one entry each)")
 
 	// Check each class is present (order is append-order from addSessionSecrets)
@@ -143,9 +143,9 @@ func TestAddSessionSecrets_UsesConfigMCPKey(t *testing.T) {
 		// No MCPAPIKey override - should use config default
 	}
 
-	s.addSessionSecrets("p", "C1", payload)
+	s.addSessionSecrets("p", "C1", "corr-1", payload)
 
-	got := registry.keys("p/C1")
+	got := registry.keys(SessionID("p", "C1", "corr-1"))
 	assert.Contains(t, got, "cfg-mcp-key", "config-level MCP key must be registered when no payload override")
 }
 
@@ -170,9 +170,9 @@ func TestAddSessionSecrets_NilEndpointAndMob(t *testing.T) {
 		GitToken: "cm-git-token",
 	}
 
-	s.addSessionSecrets("p", "C1", payload)
+	s.addSessionSecrets("p", "C1", "corr-1", payload)
 
-	got := registry.keys("p/C1")
+	got := registry.keys(SessionID("p", "C1", "corr-1"))
 	require.Len(t, got, 2, "git token and config MCP key only")
 	assert.Contains(t, got, "cm-git-token")
 	assert.Contains(t, got, "cfg-mcp-key")
@@ -201,8 +201,8 @@ func TestAddSessionSecrets_NilRegistryIsNoOp(t *testing.T) {
 	}
 
 	// Must not panic
-	s.addSessionSecrets("p", "C1", payload)
-	s.removeSessionSecrets("p", "C1")
+	s.addSessionSecrets("p", "C1", "corr-1", payload)
+	s.removeSessionSecrets("p", "C1", "corr-1")
 }
 
 // TestRemoveSessionSecrets verifies the container-exit path removes the session
@@ -226,13 +226,65 @@ func TestRemoveSessionSecrets(t *testing.T) {
 		LLMEndpoint: &protocol.LLMEndpoint{Type: "openai", APIKey: "cm-llm-key"},
 	}
 
-	s.addSessionSecrets("p", "C1", payload)
-	require.Len(t, registry.keys("p/C1"), 3, "secrets registered")
+	s.addSessionSecrets("p", "C1", "corr-1", payload)
+	require.Len(t, registry.keys(SessionID("p", "C1", "corr-1")), 3, "secrets registered")
 
-	s.removeSessionSecrets("p", "C1")
+	s.removeSessionSecrets("p", "C1", "corr-1")
 
-	assert.Empty(t, registry.keys("p/C1"), "secrets removed after session end")
-	assert.Contains(t, registry.removedIDs(), "p/C1", "remove call recorded")
+	assert.Empty(t, registry.keys(SessionID("p", "C1", "corr-1")), "secrets removed after session end")
+	assert.Contains(t, registry.removedIDs(), SessionID("p", "C1", "corr-1"), "remove call recorded")
+}
+
+// TestRemoveSessionSecrets_DifferentCorrelationIDDoesNotCollide pins the
+// keying half of the fix at the handler layer: removeSessionSecrets for a
+// stale run's correlation id must not remove a second, still-live run's
+// secrets for the SAME project/card registered under a different correlation
+// id. Before the fix both runs shared the id "p/C1" and this would have wiped
+// run 2's secrets too.
+func TestRemoveSessionSecrets_DifferentCorrelationIDDoesNotCollide(t *testing.T) {
+	registry := newFakeSessionSecretRegistry()
+
+	s := NewServer(Config{
+		APIKey:         "k",
+		Executor:       &fakeExecutor{},
+		Tracker:        executor.NewTracker(1),
+		SessionSecrets: registry,
+		LaunchEnv:      LaunchEnv{BaseImage: "img", MCPURL: "http://mcp", MCPAPIKey: "cfg-mcp-key"},
+		Logger:         quietLogger(),
+	})
+
+	payload := protocol.TriggerPayload{
+		CardID:      "C1",
+		Project:     "p",
+		GitToken:    "cm-git-token",
+		LLMEndpoint: &protocol.LLMEndpoint{Type: "openai", APIKey: "cm-llm-key"},
+	}
+
+	// Run 1 registers, then is superseded by a re-trigger (run 2) of the same
+	// card before its own exit-path removal fires.
+	s.addSessionSecrets("p", "C1", "corr-1", payload)
+	s.addSessionSecrets("p", "C1", "corr-2", payload)
+
+	// Run 1's stale exit removes only its own bucket.
+	s.removeSessionSecrets("p", "C1", "corr-1")
+
+	assert.Empty(t, registry.keys(SessionID("p", "C1", "corr-1")), "run 1's own secrets are removed")
+	assert.NotEmpty(t, registry.keys(SessionID("p", "C1", "corr-2")),
+		"run 2's secrets must survive run 1's stale removal")
+}
+
+// TestMintRunID_ProducesDistinctIDsForTheSameCardID pins the primitive
+// handleTrigger's X-Correlation-ID fallback relies on: since CM does not send
+// that header today, mintRunID is what actually gives two re-triggers of the
+// same card distinct redaction-session ids. A cardID-only fallback (the
+// pre-fix behavior) would return the identical string both times.
+func TestMintRunID_ProducesDistinctIDsForTheSameCardID(t *testing.T) {
+	first := mintRunID("CARD-1")
+	second := mintRunID("CARD-1")
+
+	assert.NotEqual(t, first, second, "two mints for the same card must not collide")
+	assert.Contains(t, first, "CARD-1", "the minted id stays traceable to its card")
+	assert.Contains(t, second, "CARD-1")
 }
 
 // TestFailedLaunchRemovesSessionSecrets verifies that when the executor launch
@@ -265,8 +317,8 @@ func TestFailedLaunchRemovesSessionSecrets(t *testing.T) {
 	// Use the launch goroutine which goes through admitAndLaunch
 	s.launch(s.buildLaunchSpec(payload, "corr", ""), payload)
 
-	assert.Empty(t, registry.keys("p/C1"), "secrets removed after launch failure")
-	assert.Contains(t, registry.removedIDs(), "p/C1", "remove call recorded on launch failure")
+	assert.Empty(t, registry.keys(SessionID("p", "C1", "corr")), "secrets removed after launch failure")
+	assert.Contains(t, registry.removedIDs(), SessionID("p", "C1", "corr"), "remove call recorded on launch failure")
 }
 
 // TestRebuildTrap_StaticKeyStillMaskedAfterRunRegisters validates the interface

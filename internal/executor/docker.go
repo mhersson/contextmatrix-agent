@@ -276,7 +276,7 @@ type DockerExecutor struct {
 	pollInterval     time.Duration
 
 	onStart func(project, cardID, containerID string)
-	onExit  func(project, cardID string, exitCode int64, cause ExitCause, attempt int)
+	onExit  func(project, cardID string, exitCode int64, cause ExitCause, attempt int, correlationID string)
 	onLog   func(project, cardID string, line []byte, stderr bool)
 
 	logger  *slog.Logger
@@ -295,7 +295,7 @@ type Config struct {
 	PollInterval     time.Duration
 
 	OnStart func(project, cardID, containerID string)
-	OnExit  func(project, cardID string, exitCode int64, cause ExitCause, attempt int)
+	OnExit  func(project, cardID string, exitCode int64, cause ExitCause, attempt int, correlationID string)
 	OnLog   func(project, cardID string, line []byte, stderr bool)
 
 	Logger *slog.Logger
@@ -417,7 +417,7 @@ func (e *DockerExecutor) Launch(ctx context.Context, spec LaunchSpec) error {
 	// a returned webhook handler would cancel a still-running container's wait
 	// and cleanup. The container timeout is the bound.
 	//nolint:gosec // G118: detached ctx is intentional; container outlives the request
-	go e.waitAndCleanup(spec.Project, spec.CardID, resp.ID, spec.Attempt, run.StartedAt, attach, done, pumpDone, log)
+	go e.waitAndCleanup(spec.Project, spec.CardID, resp.ID, spec.Attempt, spec.CorrelationID, run.StartedAt, attach, done, pumpDone, log)
 
 	log.Info("container launched", "container_id", truncateID(resp.ID), "name", name)
 
@@ -459,11 +459,16 @@ func (e *DockerExecutor) pump(project, cardID string, r io.Reader, pumpDone chan
 // timeout, force-removes the container, observes its duration by outcome,
 // clears the tracker entry, closes the attach connection, signals the watchdog
 // via done, waits for the pump to finish flushing output, and fires onExit with
-// the exit code, the cause that separates the two kill paths, and the run's
-// attempt ordinal.
+// the exit code, the cause that separates the two kill paths, the run's
+// attempt ordinal, and its correlation id. The correlation id lets a caller
+// key per-run state (the redaction-session registry) on this run alone: the
+// attempt ordinal cannot serve that purpose because it comes from counting
+// durable-log run headers, which is always 1 when file logging is disabled -
+// no discriminating power in that configuration.
 func (e *DockerExecutor) waitAndCleanup(
 	project, cardID, containerID string,
 	attempt int,
+	correlationID string,
 	startedAt time.Time,
 	attach types.HijackedResponse,
 	done chan struct{},
@@ -537,7 +542,7 @@ func (e *DockerExecutor) waitAndCleanup(
 	}
 
 	if e.onExit != nil {
-		e.onExit(project, cardID, exitCode, cause, attempt)
+		e.onExit(project, cardID, exitCode, cause, attempt, correlationID)
 	}
 }
 

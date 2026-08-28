@@ -145,6 +145,68 @@ func TestBuildEngineConfigReviewExcludesCoderModels(t *testing.T) {
 	}
 }
 
+// TestBuildEngineConfigExcludesASeatTheBriefingCannotFit pins the fix for the
+// failed-mob-pays-twice case: a briefing too large for a candidate's context
+// window must exclude that candidate from seat selection, exactly like the
+// solo review panel's estimateTokens(diff) sizing (reviewPanel in review.go).
+// Without this, a large branch briefing blows a seated model's window, the
+// discussion fails, and the round pays for both the failed mob attempt and
+// the solo fallback fan-out.
+func TestBuildEngineConfigExcludesASeatTheBriefingCannotFit(t *testing.T) {
+	ops := &fakeOps{}
+	o := mobTestRun(ops, MobConfig{Participants: 2, Review: true, Rounds: 1, BudgetFactor: 0.75}, 2.0)
+	o.d.Registry = registry.NewRegistryFromParts(
+		llm.Catalog{
+			{ID: "small/window", ContextLength: 40000, SupportedParameters: []string{"tools"}},
+			{ID: "large/window", ContextLength: 200000, SupportedParameters: []string{"tools"}},
+		},
+		registry.Priors{Models: map[string]registry.PriorEntry{
+			"small/window": reviewerPrior(0.90),
+			"large/window": reviewerPrior(0.88),
+		}},
+		nil, nil, "")
+
+	// estimateTokens(briefing) = len/4 + 24000 = 124000: over small/window's
+	// 40000 but within large/window's 200000.
+	briefing := strings.Repeat("x", 400000)
+
+	topic := mob.Topic{Kind: "review", Briefing: briefing, Lenses: reviewLenses[:2], Rounds: 1, Blind: true}
+
+	cfg, ok := buildEngineConfig(context.Background(), o, topic, "b")
+	require.True(t, ok)
+	require.Len(t, cfg.Seats, 2)
+
+	for _, s := range cfg.Seats {
+		assert.NotEqual(t, "small/window", s.Model, "a seat whose window cannot hold the briefing must not be seated")
+	}
+}
+
+// TestBuildEngineConfigSeatsUnchangedWhenBriefingFits guards against the
+// EstTokens plumbing over-filtering: a briefing that fits every candidate's
+// window must not change seat selection from the unsized behavior.
+func TestBuildEngineConfigSeatsUnchangedWhenBriefingFits(t *testing.T) {
+	ops := &fakeOps{}
+	o := mobTestRun(ops, MobConfig{Participants: 2, Review: true, Rounds: 1, BudgetFactor: 0.75}, 2.0)
+	o.d.Registry = registry.NewRegistryFromParts(
+		llm.Catalog{
+			{ID: "small/window", ContextLength: 40000, SupportedParameters: []string{"tools"}},
+			{ID: "large/window", ContextLength: 200000, SupportedParameters: []string{"tools"}},
+		},
+		registry.Priors{Models: map[string]registry.PriorEntry{
+			"small/window": reviewerPrior(0.90),
+			"large/window": reviewerPrior(0.88),
+		}},
+		nil, nil, "")
+
+	topic := mob.Topic{Kind: "review", Briefing: "small review briefing", Lenses: reviewLenses[:2], Rounds: 1, Blind: true}
+
+	cfg, ok := buildEngineConfig(context.Background(), o, topic, "b")
+	require.True(t, ok)
+	require.Len(t, cfg.Seats, 2)
+
+	assert.Equal(t, "small/window", cfg.Seats[0].Model, "the higher-prior model still takes the first seat when its window fits")
+}
+
 func TestBuildEngineConfigPlanExcludesIncapableModels(t *testing.T) {
 	ops := &fakeOps{}
 	o := mobTestRun(ops, MobConfig{Participants: 3, Plan: true, Rounds: 2, BudgetFactor: 0.75}, 2.0)

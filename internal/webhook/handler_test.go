@@ -183,15 +183,15 @@ type fakeCredentials struct {
 }
 
 type provisionCall struct {
-	project, cardID, token, expiresAt string
-	endpoint                          secrets.EndpointSecrets
+	project, cardID, correlationID, token, expiresAt string
+	endpoint                                         secrets.EndpointSecrets
 }
 
 func (f *fakeCredentials) HostDir(project, cardID string) string {
 	return "/secrets/runs/" + project + "/" + cardID
 }
 
-func (f *fakeCredentials) Provision(project, cardID, token, expiresAt string, endpoint secrets.EndpointSecrets) error {
+func (f *fakeCredentials) Provision(project, cardID, correlationID, token, expiresAt string, endpoint secrets.EndpointSecrets) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -199,7 +199,7 @@ func (f *fakeCredentials) Provision(project, cardID, token, expiresAt string, en
 		return f.provisionErr
 	}
 
-	f.provisions = append(f.provisions, provisionCall{project, cardID, token, expiresAt, endpoint})
+	f.provisions = append(f.provisions, provisionCall{project, cardID, correlationID, token, expiresAt, endpoint})
 
 	return nil
 }
@@ -531,6 +531,46 @@ func TestTrigger_LaunchErrorReportsFailed(t *testing.T) {
 
 		return false
 	}, time.Second, 5*time.Millisecond)
+}
+
+// TestTrigger_MintsDistinctCorrelationIDsAcrossReTriggers pins the fix's real
+// effectiveness: CM does not send X-Correlation-ID today, so the fallback in
+// handleTrigger is the common path, not a rare edge case. Two triggers of the
+// same card without the header must still resolve to distinct correlation
+// ids, or redaction-session isolation (SessionID) stays inert for every
+// real-world trigger, which is exactly the bug this fix closes.
+func TestTrigger_MintsDistinctCorrelationIDsAcrossReTriggers(t *testing.T) {
+	h := newHarness(t, 4)
+
+	payload := provisionedPayload("PROJ-MINT")
+
+	ts := time.Now().Unix()
+
+	w := h.doAt(t, http.MethodPost, "/trigger", payload, strconv.FormatInt(ts, 10))
+	require.Equal(t, http.StatusAccepted, w.Code)
+
+	require.Eventually(t, func() bool {
+		return len(h.exec.launchedSpecs()) == 1
+	}, time.Second, 5*time.Millisecond)
+
+	// Simulate run 1 finishing (its exit callback would remove the tracker
+	// entry) so a re-trigger of the same card is admitted. A distinct
+	// timestamp (a real retry carries a fresh one) keeps the two identical
+	// payloads from colliding in the replay cache.
+	h.tracker.Remove("proj", "PROJ-MINT")
+
+	w = h.doAt(t, http.MethodPost, "/trigger", payload, strconv.FormatInt(ts+1, 10))
+	require.Equal(t, http.StatusAccepted, w.Code)
+
+	require.Eventually(t, func() bool {
+		return len(h.exec.launchedSpecs()) == 2
+	}, time.Second, 5*time.Millisecond)
+
+	specs := h.exec.launchedSpecs()
+	assert.NotEmpty(t, specs[0].CorrelationID)
+	assert.NotEmpty(t, specs[1].CorrelationID)
+	assert.NotEqual(t, specs[0].CorrelationID, specs[1].CorrelationID,
+		"two triggers of the same card without X-Correlation-ID must mint distinct ids")
 }
 
 // ---- kill -------------------------------------------------------------------
@@ -1615,11 +1655,12 @@ func TestLaunch_ProvisionsPerRunCredentials(t *testing.T) {
 	calls := creds.provisionCalls()
 	require.Len(t, calls, 1)
 	assert.Equal(t, provisionCall{
-		project:   "p",
-		cardID:    "C1",
-		token:     "cm-git-token",
-		expiresAt: "2026-07-05T12:00:00Z",
-		endpoint:  secrets.EndpointSecrets{Type: "openai", BaseURL: "https://llm.example/v1", APIKey: "cm-llm-key"},
+		project:       "p",
+		cardID:        "C1",
+		correlationID: "corr",
+		token:         "cm-git-token",
+		expiresAt:     "2026-07-05T12:00:00Z",
+		endpoint:      secrets.EndpointSecrets{Type: "openai", BaseURL: "https://llm.example/v1", APIKey: "cm-llm-key"},
 	}, calls[0])
 	assert.Empty(t, creds.teardownCalls(), "no teardown on a successful launch")
 	assert.Equal(t, [][3]string{{"C1", "running", ""}}, reporter.statuses())
