@@ -161,10 +161,10 @@ func runServe(ctx context.Context, configPath string) error {
 		OnStart: func(project, cardID, containerID, correlationID string) {
 			files.Begin(project, cardID, containerID, correlationID)
 		},
-		OnLog:  containerLogSink(bridge, files, registry),
-		OnExit:           onContainerExit(cbClient, credentials, files, registry, bridge, logger),
-		Logger:           logger,
-		Metrics:          mx,
+		OnLog:   containerLogSink(bridge, files, registry),
+		OnExit:  onContainerExit(cbClient, credentials, files, registry, bridge, logger),
+		Logger:  logger,
+		Metrics: mx,
 	})
 
 	// Force-remove any agent-labeled containers left by a previous process before

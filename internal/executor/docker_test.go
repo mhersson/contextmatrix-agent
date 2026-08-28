@@ -618,7 +618,8 @@ func TestLaunchCarriesTheAttemptOrdinalToOnExit(t *testing.T) {
 // correlation id is always distinct per admitted trigger, so it is what a
 // caller must use to tell a stale run's exit apart from a fresh one racing in
 // behind it.
-func TestLaunchCarriesTheCorrelationIDToOnExit(t *testing.T) {	docker := &stubDocker{waitFn: exitsWith(0)}
+func TestLaunchCarriesTheCorrelationIDToOnExit(t *testing.T) {
+	docker := &stubDocker{waitFn: exitsWith(0)}
 	got := make(chan exitCall, 1)
 
 	e := NewDockerExecutor(Config{
@@ -677,7 +678,9 @@ func TestLaunchCarriesTheCorrelationIDToOnStartAndOnLog(t *testing.T) {
 	// Pipe the attach stream: the stub hands pr to the pump, and the test
 	// writes a docker-multiplexed stdout frame through pw after launch.
 	pr, pw := io.Pipe()
+
 	t.Cleanup(func() { _ = pw.Close() })
+
 	docker.attachR = pr
 
 	require.NoError(t, e.Launch(t.Context(), LaunchSpec{

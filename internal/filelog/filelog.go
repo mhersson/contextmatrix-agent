@@ -175,6 +175,7 @@ func (l *Logger) closeOrphans(path, keepKey string) {
 	for k, cf := range l.files {
 		if cf.path == path && k != keepKey {
 			orphans = append(orphans, cf)
+
 			delete(l.files, k)
 		}
 	}
