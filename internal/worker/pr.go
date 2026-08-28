@@ -665,6 +665,38 @@ func parseReviewThreads(out string) ([]orchestrator.ReviewThread, error) {
 	return threads, nil
 }
 
+// ReplyToReviewComment posts a reply into the review thread rooted at the
+// given REST comment id, carrying the gate's triage verdict to the one place
+// a PR reviewer actually looks.
+func (p *PRCreator) ReplyToReviewComment(ctx context.Context, prURL string, commentID int64, body string) error {
+	owner, repo, number, err := parsePRPath(prURL)
+	if err != nil {
+		return fmt.Errorf("reply to review comment: %w", err)
+	}
+
+	path := fmt.Sprintf("repos/%s/%s/pulls/%d/comments/%d/replies", owner, repo, number, commentID)
+	if _, err := p.runGH(ctx, "", false, "api", path, "--method", "POST", "-f", "body="+body); err != nil {
+		return fmt.Errorf("reply to review comment: %w", err)
+	}
+
+	return nil
+}
+
+// resolveThreadMutation marks one review thread resolved. GraphQL is the only
+// surface with a resolve concept - REST has none.
+const resolveThreadMutation = `mutation($threadId:ID!){
+  resolveReviewThread(input:{threadId:$threadId}){ thread{ id } } }`
+
+// ResolveReviewThread marks one review thread resolved by its node id.
+func (p *PRCreator) ResolveReviewThread(ctx context.Context, threadID string) error {
+	if _, err := p.runGH(ctx, "", false, "api", "graphql",
+		"-f", "query="+resolveThreadMutation, "-f", "threadId="+threadID); err != nil {
+		return fmt.Errorf("resolve review thread: %w", err)
+	}
+
+	return nil
+}
+
 // parseRunID extracts the numeric run ID from an Actions job/run link, or ""
 // when the link isn't an Actions URL.
 func parseRunID(link string) string {

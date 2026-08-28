@@ -449,6 +449,49 @@ exit 0
 	assert.Contains(t, got, "number=7")
 }
 
+// TestReplyToReviewCommentPostsRESTReply pins the reply write: the REST
+// replies endpoint of the root comment, body verbatim.
+func TestReplyToReviewCommentPostsRESTReply(t *testing.T) {
+	stubGH(t, `
+echo "$@" > args.log
+echo '{}'
+exit 0
+`)
+
+	workspace := t.TempDir()
+	pc := NewPRCreator(workspace, "", "", "")
+
+	err := pc.ReplyToReviewComment(t.Context(), "https://github.com/org/repo/pull/7", 901, "not a defect: fails closed")
+	require.NoError(t, err)
+
+	log, err := os.ReadFile(filepath.Join(workspace, "args.log"))
+	require.NoError(t, err)
+	assert.Equal(t, "api repos/org/repo/pulls/7/comments/901/replies --method POST -f body=not a defect: fails closed",
+		strings.TrimSpace(string(log)))
+}
+
+// TestResolveReviewThreadCallsMutation pins the resolve write: the GraphQL
+// resolveReviewThread mutation addressed by thread node id.
+func TestResolveReviewThreadCallsMutation(t *testing.T) {
+	stubGH(t, `
+echo "$@" > args.log
+echo '{"data":{}}'
+exit 0
+`)
+
+	workspace := t.TempDir()
+	pc := NewPRCreator(workspace, "", "", "")
+
+	require.NoError(t, pc.ResolveReviewThread(t.Context(), "RT_1"))
+
+	log, err := os.ReadFile(filepath.Join(workspace, "args.log"))
+	require.NoError(t, err)
+	got := strings.TrimSpace(string(log))
+	assert.Contains(t, got, "api graphql")
+	assert.Contains(t, got, "resolveReviewThread")
+	assert.Contains(t, got, "threadId=RT_1")
+}
+
 // TestParseReviewRequests detects a Copilot reviewer request in a REST
 // requested_reviewers document, case-insensitively and regardless of where
 // the login appears in the document shape.
