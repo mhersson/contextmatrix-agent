@@ -42,7 +42,11 @@ type PRGates interface {
 	Checks(ctx context.Context, prURL string) ([]CheckResult, error)
 	HeadSHA(ctx context.Context, prURL string) (string, error)
 	CopilotRequested(ctx context.Context, prURL string) (bool, error)
-	RequestCopilotReview(ctx context.Context, prURL string) error
+
+	// RequestCopilotReview requests a Copilot review and reports whether the
+	// request confirmably took effect: false with a nil error means the API
+	// accepted the request without adding the reviewer.
+	RequestCopilotReview(ctx context.Context, prURL string) (bool, error)
 	CopilotReview(ctx context.Context, prURL string) (*CopilotReview, error)
 	FailureLogs(ctx context.Context, prURL string, failed []CheckResult) (string, error)
 

@@ -122,7 +122,7 @@ func (f *fakeGates) CopilotRequested(_ context.Context, prURL string) (bool, err
 	return f.requested, nil
 }
 
-func (f *fakeGates) RequestCopilotReview(_ context.Context, prURL string) error {
+func (f *fakeGates) RequestCopilotReview(_ context.Context, prURL string) (bool, error) {
 	f.record("RequestCopilotReview:" + prURL)
 
 	f.mu.Lock()
@@ -131,18 +131,20 @@ func (f *fakeGates) RequestCopilotReview(_ context.Context, prURL string) error 
 	f.requests++
 
 	if f.requestErr != nil {
-		return f.requestErr
+		return false, f.requestErr
 	}
 
 	if f.requests > 1 && f.reRequestErr != nil {
-		return f.reRequestErr
+		return false, f.reRequestErr
 	}
 
-	if !f.requestSilentlyNoOps {
-		f.requested = true
+	if f.requestSilentlyNoOps {
+		return false, nil
 	}
 
-	return nil
+	f.requested = true
+
+	return true, nil
 }
 
 func (f *fakeGates) CopilotReview(_ context.Context, prURL string) (*CopilotReview, error) {
@@ -1765,7 +1767,7 @@ func TestCopilotGate_ReviewerNotListedStillWaits(t *testing.T) {
 	calls := gates.recorded()
 	assert.Greater(t, countCalls(calls, "CopilotReview:"+gatePRURL), 1,
 		"the gate must enter the wait loop; calls=%v", calls)
-	assert.True(t, ops.loggedContains("not listed as a reviewer"),
+	assert.True(t, ops.loggedContains("never added as a reviewer"),
 		"the observation is recorded verbatim; logs=%v", ops.recorded())
 	assert.False(t, ops.loggedContains("unavailable"),
 		"an unlisted reviewer must not read as Copilot unavailability; logs=%v", ops.recorded())

@@ -988,7 +988,9 @@ exit 0
 // TestRequestCopilotReviewIssuesRESTRequest pins the fix for the Copilot
 // reviewer request: it calls the REST requested_reviewers endpoint via gh api
 // (with the bot login and POST method) instead of gh pr edit --add-reviewer,
-// which cannot resolve the bot login through GraphQL.
+// which cannot resolve the bot login through GraphQL. A 2xx whose response
+// body does not list the bot as a requested reviewer is a request GitHub
+// accepted and discarded, so it reads as unconfirmed.
 func TestRequestCopilotReviewIssuesRESTRequest(t *testing.T) {
 	stubGH(t, `
 echo "$@" > args.log
@@ -1000,13 +1002,82 @@ exit 0
 	pc := NewPRCreator(workspace, "", "", "")
 
 	prURL := "https://github.com/org/repo/pull/7"
-	err := pc.RequestCopilotReview(t.Context(), prURL)
+	confirmed, err := pc.RequestCopilotReview(t.Context(), prURL)
 	require.NoError(t, err)
+	assert.False(t, confirmed, "an empty response body must not confirm the request")
 
 	log, err := os.ReadFile(filepath.Join(workspace, "args.log"))
 	require.NoError(t, err)
 	assert.Equal(t, "api repos/org/repo/pulls/7/requested_reviewers --method POST -f reviewers[]=copilot-pull-request-reviewer[bot]",
 		strings.TrimSpace(string(log)))
+}
+
+// TestRequestCopilotReviewConfirmsFromResponseBody pins the confirmation
+// signal: the POST's response is the updated PR object, and only the bot
+// appearing in its requested_reviewers (or requested_teams) proves the
+// request took effect. GitHub returns 2xx for requests it silently discards.
+func TestRequestCopilotReviewConfirmsFromResponseBody(t *testing.T) {
+	stubGH(t, `
+echo '{"number":7,"user":{"login":"some-app[bot]"},"requested_reviewers":[{"login":"copilot-pull-request-reviewer[bot]","type":"Bot"}],"requested_teams":[]}'
+exit 0
+`)
+
+	pc := NewPRCreator(t.TempDir(), "", "", "")
+
+	confirmed, err := pc.RequestCopilotReview(t.Context(), "https://github.com/org/repo/pull/7")
+	require.NoError(t, err)
+	assert.True(t, confirmed)
+}
+
+// TestParseRequestedReviewersResponse pins where the confirmation may come
+// from: the requested_reviewers/requested_teams fields only. A copilot-ish
+// login elsewhere in the PR object (author, assignees) must not confirm.
+func TestParseRequestedReviewersResponse(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		json    string
+		want    bool
+		wantErr bool
+	}{
+		{
+			name: "bot in requested_reviewers",
+			json: `{"number":7,"requested_reviewers":[{"login":"copilot-pull-request-reviewer[bot]","type":"Bot"}],"requested_teams":[]}`,
+			want: true,
+		},
+		{
+			name: "request dropped: empty requested_reviewers",
+			json: `{"number":7,"user":{"login":"contextmatrix-runner[bot]"},"requested_reviewers":[],"requested_teams":[]}`,
+			want: false,
+		},
+		{
+			name: "copilot login outside the reviewer fields does not confirm",
+			json: `{"number":7,"user":{"login":"copilot-swe-agent[bot]"},"assignees":[{"login":"Copilot"}],"requested_reviewers":[],"requested_teams":[]}`,
+			want: false,
+		},
+		{
+			name:    "malformed JSON",
+			json:    `{"requested_reviewers":`,
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := parseRequestedReviewersResponse(tc.json)
+			if tc.wantErr {
+				require.Error(t, err)
+
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
 }
 
 // TestCopilotRequestedUsesRESTEndpoint pins the pre-check's data source: the
@@ -1078,8 +1149,9 @@ exit 1
 	pc := NewPRCreator(t.TempDir(), "", "", "")
 
 	prURL := "https://github.com/org/repo/pull/7"
-	err := pc.RequestCopilotReview(t.Context(), prURL)
+	confirmed, err := pc.RequestCopilotReview(t.Context(), prURL)
 	require.Error(t, err)
+	assert.False(t, confirmed)
 	assert.Contains(t, err.Error(), "gh api request copilot reviewer")
 	assert.Contains(t, err.Error(), "HTTP 422")
 }
