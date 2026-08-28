@@ -291,3 +291,4 @@ working **on** this codebase live in [`AGENTS.md`](AGENTS.md).
 ## License
 
 MIT - see [`LICENSE`](LICENSE).
+
