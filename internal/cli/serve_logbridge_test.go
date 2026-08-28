@@ -16,18 +16,18 @@ import (
 )
 
 // newTestSink builds a bridge, hub, and file logger rooted at t.TempDir(),
-// wires them through newSessionSecretTee exactly as runServe does, and
-// returns the OnLog callback plus the tee and the SAME *filelog.Logger the
+// wires the shared RedactorRegistry exactly as runServe does, and
+// returns the OnLog callback plus the registry and the SAME *filelog.Logger the
 // callback writes through (a second Logger over the same directory would not
 // share its in-memory open-file state, so Begin/End must run on this one).
-func newTestSink(t *testing.T) (sink func(project, cardID, correlationID string, line []byte, stderr bool), registry *sessionSecretTee, files *filelog.Logger, dir string) {
+func newTestSink(t *testing.T) (sink func(project, cardID, correlationID string, line []byte, stderr bool), registry *logbridge.RedactorRegistry, files *filelog.Logger, dir string) {
 	t.Helper()
 
 	dir = t.TempDir()
 	files = filelog.New(dir, nil)
 	hub := logbridge.NewHub(func(e protocol.LogEntry) string { return e.Project }, nil)
 	bridge := logbridge.NewBridge(logbridge.BridgeConfig{Hub: hub})
-	registry = newSessionSecretTee(logbridge.NewRedactorRegistry(bridge))
+	registry = logbridge.NewRedactorRegistry(bridge)
 
 	return containerLogSink(bridge, files, registry), registry, files, dir
 }
@@ -89,7 +89,7 @@ func TestContainerLogSink_TeeForwardsToSSEBridgeToo(t *testing.T) {
 	files := filelog.New(dir, nil)
 	hub := logbridge.NewHub(func(e protocol.LogEntry) string { return e.Project }, nil)
 	bridge := logbridge.NewBridge(logbridge.BridgeConfig{Hub: hub})
-	registry := newSessionSecretTee(logbridge.NewRedactorRegistry(bridge))
+	registry := logbridge.NewRedactorRegistry(bridge)
 	sink := containerLogSink(bridge, files, registry)
 
 	subID, ch := hub.Subscribe("")
@@ -115,7 +115,7 @@ func TestContainerLogSink_TeeForwardsToSSEBridgeToo(t *testing.T) {
 	assert.Contains(t, content, "[REDACTED]")
 }
 
-func TestSessionSecretTee_RemoveSessionKeyStopsFileRedaction(t *testing.T) {
+func TestContainerLogSink_RemoveSessionKeyStopsFileRedaction(t *testing.T) {
 	sink, registry, files, dir := newTestSink(t)
 
 	files.Begin("proj", "card-4", "container-4", "corr-1")
@@ -136,7 +136,7 @@ func TestSessionSecretTee_RemoveSessionKeyStopsFileRedaction(t *testing.T) {
 		"the line written after removal keeps the literal secret")
 }
 
-// TestSessionSecretTee_StaleExitCannotStripFreshRunKeys pins the fix for the
+// TestContainerLogSink_StaleExitCannotStripFreshRunKeys pins the fix for the
 // pump-drain re-trigger race: a re-triggered run admitted while a previous
 // run's exit callback is still in flight (up to pumpDrainTimeout after the
 // tracker forgets the old run) must not have its redaction keys stripped by
@@ -145,12 +145,12 @@ func TestSessionSecretTee_RemoveSessionKeyStopsFileRedaction(t *testing.T) {
 // registration are structurally different map keys - no shared mutable
 // "who owns this" state to race on. Both surfaces the redaction covers - the
 // live SSE stream and the durable file log - are asserted.
-func TestSessionSecretTee_StaleExitCannotStripFreshRunKeys(t *testing.T) {
+func TestContainerLogSink_StaleExitCannotStripFreshRunKeys(t *testing.T) {
 	dir := t.TempDir()
 	files := filelog.New(dir, nil)
 	hub := logbridge.NewHub(func(e protocol.LogEntry) string { return e.Project }, nil)
 	bridge := logbridge.NewBridge(logbridge.BridgeConfig{Hub: hub})
-	registry := newSessionSecretTee(logbridge.NewRedactorRegistry(bridge))
+	registry := logbridge.NewRedactorRegistry(bridge)
 	sink := containerLogSink(bridge, files, registry)
 
 	subID, ch := hub.Subscribe("proj")
