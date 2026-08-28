@@ -444,6 +444,7 @@ exit 0
 
 	log, err := os.ReadFile(filepath.Join(workspace, "args.log"))
 	require.NoError(t, err)
+
 	got := strings.TrimSpace(string(log))
 	assert.Contains(t, got, "api graphql", "threads come from GraphQL - REST has no thread ids")
 	assert.Contains(t, got, "number=7")
@@ -486,6 +487,7 @@ exit 0
 
 	log, err := os.ReadFile(filepath.Join(workspace, "args.log"))
 	require.NoError(t, err)
+
 	got := strings.TrimSpace(string(log))
 	assert.Contains(t, got, "api graphql")
 	assert.Contains(t, got, "resolveReviewThread")
