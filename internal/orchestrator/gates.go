@@ -96,6 +96,13 @@ const gatesCoderAllowance = 2 * time.Minute
 // no-op on an account without Copilot review access). A var so tests can shrink it.
 var gatesCopilotRecheck = 10 * time.Second
 
+// gatesCopilotGraceWait bounds the wait after a review request that did not
+// take: the POST was accepted but the reviewer never appeared. A ruleset that
+// reviews new PRs both lists the reviewer and delivers within minutes of PR
+// creation, so a short window catches it; the full copilot_wait is reserved
+// for a request known to be in flight. A var so tests can shrink it.
+var gatesCopilotGraceWait = 5 * time.Minute
+
 // gateProgressKind is the event a gate emits once per poll. It is not a
 // harness kind - the log bridge picks it up through the agent's MapExtra hook,
 // the same way mob discussion events are carried.
@@ -346,11 +353,14 @@ func runPRGates(ctx context.Context, o *run) error {
 // (e.g. a GraphQL login-resolution error) is NOT treated as unavailability: the
 // gate still enters the wait loop, because a repo-automated Copilot review may
 // arrive regardless, and a review that never arrives is recorded and passed at
-// the wait deadline. A request that succeeds without the bot showing up in the
-// pending reviewer list is recorded and waited through, not skipped - rulesets
-// add Copilot asynchronously and gh cannot be trusted to list bots. The gate
-// parks only on findings it could not get fixed, or on running out of budget or
-// turns while fixing them.
+// the wait deadline. A 2xx on the request is not trusted either - GitHub
+// silently discards the request in some setups - so it is confirmed against
+// the POST's response body and one delayed re-read of the pending reviewer
+// list; a request confirmed by neither waits only a short grace window for a
+// repo-automated review (a pending request appearing during grace upgrades to
+// the full wait) and then passes with a note naming the dropped request. The
+// gate parks only on findings it could not get fixed, or on running out of
+// budget or turns while fixing them.
 func (o *run) copilotGate(ctx context.Context, prURL string, st *gatesState) error {
 	if st.CopilotSatisfied {
 		o.gateNote(ctx, "copilot", "pr_gates: Copilot review was addressed in an earlier run; gate already satisfied", nil)
@@ -362,27 +372,57 @@ func (o *run) copilotGate(ctx context.Context, prURL string, st *gatesState) err
 	// grown in memory as this run triages further rounds.
 	triaged := copilotTriagedComments(o.body)
 
+	// pending carries a review already in hand into the wait loop below, so
+	// the head probe and the grace wait feed the same triage path without a
+	// duplicate cycle call site.
+	var pending *CopilotReview
+
 	// A review may already be on the head - a re-trigger after a park, or a
 	// ruleset review that landed while integrate was finishing. Reading it is
 	// two gh calls; requesting another is a paid duplicate and a full wait.
 	if review := o.copilotReviewOnHead(ctx, prURL); review != nil {
 		o.gateNote(ctx, "copilot", "pr_gates: Copilot review already on the PR head; triaging it", nil)
 
-		satisfied, err := o.copilotReviewCycle(ctx, prURL, st, triaged, review)
-		if err != nil || satisfied {
-			return err
-		}
+		pending = review
 	} else {
-		reason, unavailable, err := o.ensureCopilotReviewer(ctx, prURL)
+		reason, outcome, err := o.ensureCopilotReviewer(ctx, prURL)
 		if err != nil {
 			return err
 		}
 
-		if reason != "" {
-			if unavailable {
-				return o.skipCopilot(ctx, st, "pr_gates: Copilot review unavailable: "+reason+"; gate skipped")
+		switch outcome {
+		case copilotUnavailable:
+			return o.skipCopilot(ctx, st, "pr_gates: Copilot review unavailable: "+reason+"; gate skipped")
+
+		case copilotUnconfirmed:
+			// The request affirmatively did not take. A full wait would stall
+			// the card ~20 minutes for a review nothing suggests is coming, so
+			// wait only a grace window - long enough to catch a ruleset that
+			// reviews new PRs on its own, or a request the API listed late.
+			st.CopilotDetail = "- pr_gates: Copilot review request did not take (" + reason + "); waiting briefly for a repo-automated review\n"
+			o.recordGates(ctx, *st)
+			o.gateNote(ctx, "copilot",
+				fmt.Sprintf("pr_gates: Copilot review request did not take (%s); waiting briefly for a repo-automated review", reason), nil)
+
+			review, requested, gerr := o.awaitCopilotGrace(ctx, prURL)
+			if gerr != nil {
+				return gerr
 			}
 
+			if review == nil && !requested {
+				return o.skipCopilot(ctx, st,
+					"pr_gates: Copilot review request did not take - the reviewer was never added and no review arrived; proceeding without one")
+			}
+
+			// requested=true falls through with pending nil: the reviewer is
+			// on the PR after all, so the full wait below covers it.
+			if requested {
+				o.noteCopilotGraceUpgrade(ctx, st)
+			}
+
+			pending = review
+
+		case copilotIndeterminate:
 			// Not proof Copilot cannot review - the repo may assign the reviewer
 			// itself. Record the verbatim reason and wait; a pass exit or a
 			// pass-by-timeout overwrites CopilotDetail with its own line.
@@ -390,22 +430,51 @@ func (o *run) copilotGate(ctx context.Context, prURL string, st *gatesState) err
 			o.recordGates(ctx, *st)
 			o.gateNote(ctx, "copilot",
 				fmt.Sprintf("pr_gates: Copilot review could not be confirmed (%s); waiting for the review", reason), nil)
+
+		case copilotReviewerPresent:
 		}
 	}
 
 	for {
-		review, werr := o.awaitCopilotReview(ctx, prURL)
-		if werr != nil {
-			return werr
+		review := pending
+		pending = nil
+
+		if review == nil {
+			var werr error
+
+			review, werr = o.awaitCopilotReview(ctx, prURL)
+			if werr != nil {
+				return werr
+			}
 		}
 
 		if review == nil {
 			return o.skipCopilot(ctx, st, "pr_gates: Copilot review did not arrive in time; proceeding")
 		}
 
-		satisfied, err := o.copilotReviewCycle(ctx, prURL, st, triaged, review)
-		if err != nil || satisfied {
+		outcome, err := o.copilotReviewCycle(ctx, prURL, st, triaged, review)
+		if err != nil || outcome == cycleSatisfied {
 			return err
+		}
+
+		if outcome == cycleAwaitGrace {
+			found, requested, gerr := o.awaitCopilotGrace(ctx, prURL)
+			if gerr != nil {
+				return gerr
+			}
+
+			if found == nil && !requested {
+				return o.skipCopilot(ctx, st,
+					"pr_gates: fix pushed but the Copilot re-review request did not take; proceeding without a re-review of the fixed head")
+			}
+
+			// requested=true leaves pending nil: the reviewer is on the PR
+			// after all, so the full wait at the top of the loop covers it.
+			if requested {
+				o.noteCopilotGraceUpgrade(ctx, st)
+			}
+
+			pending = found
 		}
 	}
 }
@@ -426,14 +495,17 @@ func (o *run) copilotLateCheck(ctx context.Context, prURL string, st *gatesState
 
 	o.gateNote(ctx, "copilot", "pr_gates: late Copilot review found on the PR head; triaging it", nil)
 
-	satisfied, err := o.copilotReviewCycle(ctx, prURL, st, copilotTriagedComments(o.body), review)
+	outcome, err := o.copilotReviewCycle(ctx, prURL, st, copilotTriagedComments(o.body), review)
 	if err != nil {
 		return false, err
 	}
 
 	o.recordGates(ctx, *st)
 
-	return !satisfied, nil
+	// cycleAwaitGrace gets no wait of its own here: pushed=true re-runs the
+	// enabled gates, and the Copilot gate probes and requests again on the
+	// new head.
+	return outcome != cycleSatisfied, nil
 }
 
 // copilotReviewOnHead returns the PR's latest Copilot review when it is a review
@@ -466,22 +538,38 @@ func (o *run) copilotReviewOnHead(ctx context.Context, prURL string) *CopilotRev
 	return review
 }
 
+// copilotCycleOutcome says what the gate should do after one triage/fix cycle.
+type copilotCycleOutcome int
+
+const (
+	// cycleSatisfied: the gate passes; nothing left to wait for.
+	cycleSatisfied copilotCycleOutcome = iota
+	// cycleAwaitReview: a re-review is (or may be) in flight; wait the full
+	// deadline for it.
+	cycleAwaitReview
+	// cycleAwaitGrace: the re-request affirmatively did not take; wait only
+	// the grace window for a repo-automated review of the fixed head.
+	cycleAwaitGrace
+)
+
 // copilotReviewCycle handles one arrived review: dedupes against what earlier
 // rounds triaged, triages the fresh comments, and either passes the gate
-// (satisfied=true) or spends fix rounds until one commits, then re-requests
-// the review (satisfied=false - the caller waits for the re-review of the new
-// head). A fix round that committed nothing earns the gateNoChangeRetry-funded
-// retry, and HEAD has not moved since the review that produced the findings -
-// re-requesting would buy a guaranteed-identical review - so the retry is
-// spent on the same findings instead. The loop is self-bounding: the second
-// no-change round finds the retry already spent and parks. A
-// comment an earlier round triaged VALID counts as still open when Copilot
-// repeats it verbatim - the fix round did not actually resolve it - and it
-// funds a fix round of its own, folded in with anything freshly triaged VALID
-// this round.
+// (cycleSatisfied) or spends fix rounds until one commits, then re-requests
+// the review - the caller waits for the re-review of the new head, for the
+// full deadline when the re-request confirmably took (cycleAwaitReview) and
+// for only the grace window when it was accepted but dropped
+// (cycleAwaitGrace). A fix round that committed nothing earns the
+// gateNoChangeRetry-funded retry, and HEAD has not moved since the review
+// that produced the findings - re-requesting would buy a
+// guaranteed-identical review - so the retry is spent on the same findings
+// instead. The loop is self-bounding: the second no-change round finds the
+// retry already spent and parks. A comment an earlier round triaged VALID
+// counts as still open when Copilot repeats it verbatim - the fix round did
+// not actually resolve it - and it funds a fix round of its own, folded in
+// with anything freshly triaged VALID this round.
 func (o *run) copilotReviewCycle(
 	ctx context.Context, prURL string, st *gatesState, triaged map[string]bool, review *CopilotReview,
-) (bool, error) {
+) (copilotCycleOutcome, error) {
 	fresh := unseenComments(review.Comments, triaged)
 	reopened := repeatedValidComments(review.Comments, triaged)
 
@@ -495,7 +583,7 @@ func (o *run) copilotReviewCycle(
 
 		o.gateNote(ctx, "copilot", "pr_gates: Copilot repeated only comments already triaged as invalid; gate passes", nil)
 
-		return true, nil
+		return cycleSatisfied, nil
 	}
 
 	var findings []copilotFinding
@@ -512,7 +600,7 @@ func (o *run) copilotReviewCycle(
 
 		findings, terr = o.triageCopilot(ctx, st, review, fresh)
 		if terr != nil {
-			return false, terr
+			return cycleAwaitReview, terr
 		}
 
 		verdicts := copilotCommentVerdicts(fresh, findings)
@@ -530,7 +618,7 @@ func (o *run) copilotReviewCycle(
 
 		o.gateNote(ctx, "copilot", "pr_gates: Copilot review addressed", nil)
 
-		return true, nil
+		return cycleSatisfied, nil
 	}
 
 	if len(reopened) > 0 {
@@ -543,7 +631,7 @@ func (o *run) copilotReviewCycle(
 	for {
 		committed, ferr := o.copilotFixRound(ctx, st, stillOpen)
 		if ferr != nil {
-			return false, ferr
+			return cycleAwaitReview, ferr
 		}
 
 		if committed {
@@ -558,9 +646,10 @@ func (o *run) copilotReviewCycle(
 		// that commits falls through to the re-request below.
 	}
 
-	if rerr := o.d.PRGates.RequestCopilotReview(ctx, prURL); rerr != nil {
+	confirmed, rerr := o.d.PRGates.RequestCopilotReview(ctx, prURL)
+	if rerr != nil {
 		if strings.Contains(rerr.Error(), "Copilot isn't available for this repository") {
-			return true, o.skipCopilot(ctx, st, "pr_gates: Copilot re-review unavailable: "+
+			return cycleSatisfied, o.skipCopilot(ctx, st, "pr_gates: Copilot re-review unavailable: "+
 				rerr.Error()+"; gate passes with the fixes already pushed")
 		}
 
@@ -571,53 +660,89 @@ func (o *run) copilotReviewCycle(
 		o.gateNote(ctx, "copilot", fmt.Sprintf(
 			"pr_gates: Copilot re-review could not be requested (%s); waiting for the review of the fixed head", rerr.Error(),
 		), nil)
+
+		return cycleAwaitReview, nil
 	}
 
-	return false, nil
+	if !confirmed {
+		// Give the listing one recheck's worth of lag before concluding the
+		// re-request was dropped - the same allowance the first request gets.
+		if serr := o.sleepGate(ctx, gatesCopilotRecheck); serr != nil {
+			return cycleAwaitReview, serr
+		}
+
+		requested, qerr := o.d.PRGates.CopilotRequested(ctx, prURL)
+		if qerr == nil && !requested {
+			st.CopilotDetail = "- pr_gates: Copilot re-review request did not take; waiting briefly for a repo-automated review of the fixed head\n"
+			o.recordGates(ctx, *st)
+			o.gateNote(ctx, "copilot",
+				"pr_gates: Copilot re-review request did not take; waiting briefly for a repo-automated review of the fixed head", nil)
+
+			return cycleAwaitGrace, nil
+		}
+	}
+
+	return cycleAwaitReview, nil
 }
 
-// ensureCopilotReviewer makes sure Copilot is on the PR as a reviewer, requesting
-// it when it is not. It reports how a failure to put it there should be read:
-// unavailable=true means Copilot is proven unable to review this repo - the
-// request failed with a 422 "Copilot isn't available for this repository" - and
-// the gate may skip. unavailable=false with a non-empty reason covers every other
-// outcome: a check failure, a generic request failure (e.g. a GraphQL
-// login-resolution error), or a request that succeeded without the reviewer
-// showing up on re-check. None of those prove Copilot cannot review, so the
-// caller records the reason and still waits for a repo-automated review. A
-// non-nil error is the run context ending, and is fatal. The reason, when set, is
-// the gh error VERBATIM - where Copilot cannot run, the line it puts on the card
-// is the only diagnostic anyone gets.
-func (o *run) ensureCopilotReviewer(ctx context.Context, prURL string) (reason string, unavailable bool, err error) {
+// copilotRequestOutcome says how the gate should read ensureCopilotReviewer's
+// result.
+type copilotRequestOutcome int
+
+const (
+	// copilotReviewerPresent: Copilot is confirmed pending; wait the full
+	// deadline.
+	copilotReviewerPresent copilotRequestOutcome = iota
+	// copilotUnavailable: a proven 422 "Copilot isn't available for this
+	// repository"; the gate may skip.
+	copilotUnavailable
+	// copilotUnconfirmed: the request was accepted but the reviewer is
+	// affirmatively absent - the POST response body and a delayed re-check
+	// both came up empty. Nothing suggests a review is coming, so the caller
+	// waits only a short grace window.
+	copilotUnconfirmed
+	// copilotIndeterminate: a check or request errored; nothing proves
+	// Copilot will not review (a repo-automated review may arrive), so the
+	// caller records the reason and waits the full deadline.
+	copilotIndeterminate
+)
+
+// ensureCopilotReviewer makes sure Copilot is on the PR as a reviewer,
+// requesting it when it is not, and reports how the result should be read via
+// copilotRequestOutcome. A non-nil error is the run context ending, and is
+// fatal. The reason, when set, is the gh error VERBATIM - where Copilot cannot
+// run, the line it puts on the card is the only diagnostic anyone gets.
+func (o *run) ensureCopilotReviewer(ctx context.Context, prURL string) (reason string, outcome copilotRequestOutcome, err error) {
 	requested, err := o.d.PRGates.CopilotRequested(ctx, prURL)
 	if err != nil {
 		slog.Info("pr_gates: Copilot reviewer check failed", "card_id", o.d.Cfg.CardID, "pr_url", prURL, "reason", err.Error())
 
 		// A check failure is not proof of unavailability - the caller should
 		// still wait for a repo-automated review.
-		return err.Error(), false, nil
+		return err.Error(), copilotIndeterminate, nil
 	}
 
 	if requested {
 		slog.Info("pr_gates: Copilot is already a requested reviewer", "card_id", o.d.Cfg.CardID, "pr_url", prURL)
 
-		return "", false, nil
+		return "", copilotReviewerPresent, nil
 	}
 
-	if err := o.d.PRGates.RequestCopilotReview(ctx, prURL); err != nil {
+	confirmed, rerr := o.d.PRGates.RequestCopilotReview(ctx, prURL)
+	if rerr != nil {
 		// A 422 "Copilot isn't available for this repository" is proven
 		// unavailability - skip the gate. Any other error is a generic request
 		// failure and does not prove Copilot cannot review: a bare 422 is also
 		// generic, since it can mean the request itself was malformed (e.g. the
 		// requested_reviewers payload shape), and the repo's automatic Copilot
 		// review may still arrive.
-		errText := err.Error()
+		errText := rerr.Error()
 
 		if strings.Contains(errText, "Copilot isn't available for this repository") {
 			slog.Info("pr_gates: Copilot is unavailable for this repository",
 				"card_id", o.d.Cfg.CardID, "pr_url", prURL, "reason", errText)
 
-			return errText, true, nil
+			return errText, copilotUnavailable, nil
 		}
 
 		slog.Info("pr_gates: Copilot review request failed",
@@ -625,15 +750,24 @@ func (o *run) ensureCopilotReviewer(ctx context.Context, prURL string) (reason s
 
 		// Generic request failure - return the error as a non-fatal signal so
 		// the caller can log it and still enter the wait loop.
-		return errText, false, nil
+		return errText, copilotIndeterminate, nil
 	}
 
-	slog.Info("pr_gates: Copilot review requested", "card_id", o.d.Cfg.CardID, "pr_url", prURL)
+	if confirmed {
+		// The POST's response body listed the bot as a pending reviewer -
+		// authoritative, no re-check needed.
+		slog.Info("pr_gates: Copilot review requested and confirmed", "card_id", o.d.Cfg.CardID, "pr_url", prURL)
+
+		return "", copilotReviewerPresent, nil
+	}
+
+	slog.Info("pr_gates: Copilot review requested but not confirmed by the response",
+		"card_id", o.d.Cfg.CardID, "pr_url", prURL)
 
 	// Re-check instead of trusting the request: a reviewer that was never added
 	// would otherwise burn the gate's entire wait on a review nobody is writing.
 	if err := o.sleepGate(ctx, gatesCopilotRecheck); err != nil {
-		return "", false, err
+		return "", copilotIndeterminate, err
 	}
 
 	requested, err = o.d.PRGates.CopilotRequested(ctx, prURL)
@@ -642,24 +776,25 @@ func (o *run) ensureCopilotReviewer(ctx context.Context, prURL string) (reason s
 			"card_id", o.d.Cfg.CardID, "pr_url", prURL, "reason", err.Error())
 
 		// A re-check failure is not proof of unavailability.
-		return err.Error(), false, nil
+		return err.Error(), copilotIndeterminate, nil
 	}
 
 	if !requested {
 		slog.Info("pr_gates: Copilot is not listed as a reviewer after the request",
 			"card_id", o.d.Cfg.CardID, "pr_url", prURL)
 
-		// Not proof of unavailability either: a ruleset adds the reviewer
-		// asynchronously, the listing can lag the request, and the API is known
-		// to accept the request without listing the bot. Record the observation
-		// and let the caller wait - a review that never arrives passes at the
-		// wait deadline; a silent skip here loses a review that does arrive.
-		return "the request succeeded but Copilot is not listed as a reviewer yet", false, nil
+		// The API accepted the request, but neither the response body nor a
+		// delayed listing shows the reviewer: the request was dropped. GitHub
+		// does this instead of erroring when the requesting identity cannot
+		// use Copilot. Not proof a review will never arrive - a ruleset may
+		// deliver one on its own - so the caller waits a grace window, not
+		// the full deadline.
+		return "the request was accepted but Copilot was never added as a reviewer", copilotUnconfirmed, nil
 	}
 
 	slog.Info("pr_gates: Copilot is on the PR as a reviewer", "card_id", o.d.Cfg.CardID, "pr_url", prURL)
 
-	return "", false, nil
+	return "", copilotReviewerPresent, nil
 }
 
 // awaitCopilotReview waits for a completed Copilot review of the PR's CURRENT
@@ -713,6 +848,54 @@ func (o *run) awaitCopilotReview(ctx context.Context, prURL string) (*CopilotRev
 
 		if werr := o.sleepPoll(ctx); werr != nil {
 			return nil, werr
+		}
+	}
+}
+
+// noteCopilotGraceUpgrade records that a pending request appeared during the
+// grace window, so the card note no longer claims a brief wait while the gate
+// waits the full one.
+func (o *run) noteCopilotGraceUpgrade(ctx context.Context, st *gatesState) {
+	const line = "pr_gates: a pending Copilot review request appeared during the grace window; waiting the full window"
+
+	st.CopilotDetail = "- " + line + "\n"
+	o.recordGates(ctx, *st)
+	o.gateNote(ctx, "copilot", line, nil)
+}
+
+// awaitCopilotGrace waits briefly for evidence that anyone will review: a
+// review landing on the current head, or Copilot appearing as a pending
+// reviewer (a ruleset request, or a request the API listed late) - the latter
+// returned as requested=true so the caller can upgrade to the full wait. It
+// exists for requests that did not confirmably take: burning the full
+// copilot_wait there stalls the card for a review nothing suggests is coming.
+// Like awaitCopilotReview, it returns nil results (never an error) at the
+// deadline - the gate proceeds on a missing review, it never parks on one.
+func (o *run) awaitCopilotGrace(ctx context.Context, prURL string) (review *CopilotReview, requested bool, err error) {
+	deadline := o.gateDeadline(gatesCopilotGraceWait)
+	poller := &gatePoller{gate: "copilot"}
+
+	for {
+		pending, reqErr := o.d.PRGates.CopilotRequested(ctx, prURL)
+		if reqErr == nil && pending {
+			return nil, true, nil
+		}
+
+		found := o.copilotReviewOnHead(ctx, prURL)
+
+		poller.poll(o.d.Emit, copilotPollStatus(found != nil, found != nil),
+			map[string]any{"have_review": found != nil, "unconfirmed_grace": true})
+
+		if found != nil {
+			return found, false, nil
+		}
+
+		if time.Now().After(deadline) {
+			return nil, false, nil
+		}
+
+		if werr := o.sleepPoll(ctx); werr != nil {
+			return nil, false, werr
 		}
 	}
 }

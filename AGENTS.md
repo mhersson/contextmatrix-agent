@@ -377,11 +377,19 @@ file only - never via flags or committed YAML.
     unavailability - the gate still enters the wait loop, because a
     repo-automated Copilot review may arrive regardless, and the same holds
     for a re-request that fails after a fix round: it waits for the automatic
-    re-review rather than passing the gate unreviewed. A request that
-    succeeds without the bot showing up in the pending reviewer list is
-    recorded and waited through, not skipped - rulesets add Copilot
-    asynchronously and gh cannot be trusted to list bots. A review that never
-    arrives is recorded and passed at the wait deadline, 20 minutes by default
+    re-review rather than passing the gate unreviewed. A request the API
+    accepts with a 2xx is not trusted either: GitHub silently discards the
+    request in some setups, so the gate confirms it against the POST's own
+    response body (the updated PR object's `requested_reviewers`) and, when
+    that comes back empty, against one delayed re-read of the pending
+    reviewer list. A request confirmed by neither is treated as dropped: the
+    gate waits only a short grace window (5 minutes) for a ruleset-delivered
+    review or a late-listed request - a pending request appearing during
+    grace upgrades to the full wait - and then passes with a note naming the
+    dropped request, instead of burning the full wait and blaming a slow
+    review. The re-request after a fix round gets the same
+    confirm-or-grace treatment. A confirmed request that never produces a
+    review is recorded and passed at the wait deadline, 20 minutes by default
     (`CMX_GATES_COPILOT_WAIT_TIMEOUT_SECONDS`). Every triage round records a
     VALID/INVALID verdict per finding under a `## Copilot Review (Round N)`
     card section, and the same verdict per comment under its
