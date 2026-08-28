@@ -1111,9 +1111,27 @@ var verifyFailureMarkers = []string{
 	"●",
 }
 
+// jvmTestsRunFailureRe matches a JVM test-runner summary line (Surefire,
+// Failsafe, Gradle's test task) reporting at least one failure or error. The
+// all-green form of the same line must NOT match: it appears once per test
+// class in a passing build.
+var jvmTestsRunFailureRe = regexp.MustCompile(`^Tests run: \d+, Failures: (?:[1-9]\d*, Errors: \d+|\d+, Errors: [1-9]\d*)`)
+
 // isVerifyFailureLine reports whether trimmed - a line already stripped of
 // leading whitespace - starts with a recognised failure marker.
 func isVerifyFailureLine(trimmed string) bool {
+	// JVM build tools bracket their log level; a line the tool itself
+	// classifies ERROR or FATAL is failure output regardless of what follows,
+	// and matching the whole level keeps Maven's multi-line [ERROR] failure
+	// block contiguous in the excerpt.
+	if strings.HasPrefix(trimmed, "[ERROR]") || strings.HasPrefix(trimmed, "[FATAL]") {
+		return true
+	}
+
+	if jvmTestsRunFailureRe.MatchString(trimmed) {
+		return true
+	}
+
 	for _, m := range verifyFailureMarkers {
 		if strings.HasPrefix(trimmed, m) {
 			return true
