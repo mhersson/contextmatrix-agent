@@ -452,24 +452,121 @@ func (r *Registry) pickFor(id string, in SelectInput, src PickSource) Pick {
 // OK is false only when even that default is excluded, blacklisted, or
 // window-short. The caller decides what a refusal costs.
 func (r *Registry) SelectByComplexity(in SelectInput) Pick {
+	pick, _ := r.SelectByComplexityReport(in)
+
+	return pick
+}
+
+// SelectionReport explains where a selection landed and who competed for it.
+// Rung is the tier the pick was made on and Bar that rung's configured bar;
+// both are empty when the walk fell through the ladder to the capable
+// default, which has no rung. Pool lists every candidate that reached the
+// rung with its outcome; FilteredOut summarizes why the rest of the catalog
+// never got there. A favorite pick reports the pool of the rung it was
+// looked up on, the favorite marked selected.
+type SelectionReport struct {
+	Rung Tier
+	Bar  float64
+	Pool []PoolEntry
+	// FilteredOut is reason-aggregated with the model slugs in catalog
+	// order, so a growing Exclude set reads as one growing entry.
+	FilteredOut []FilteredOutEntry
+}
+
+// PoolOutcome classifies how one pool candidate fared.
+type PoolOutcome string
+
+const (
+	// PoolSelected: the candidate is the pick.
+	PoolSelected PoolOutcome = "selected"
+	// PoolInBand: the candidate was inside the price band but lost on
+	// quality, or tied on quality and lost to a cheaper model.
+	PoolInBand PoolOutcome = "in-band"
+	// PoolOutOfBand: the candidate's price exceeds the cheapest candidate
+	// times the headroom. With MaxCapability the band is unbounded, so no
+	// candidate is out of band.
+	PoolOutOfBand PoolOutcome = "out-of-band"
+)
+
+// PoolEntry is one candidate that reached a rung's pool.
+type PoolEntry struct {
+	Model string
+	// Prior is the model's normalized prior for the requested role.
+	Prior float64
+	// Price is the combined prompt+completion price per token.
+	Price   float64
+	Outcome PoolOutcome
+}
+
+// FilterReason says why a catalog model never reached a rung's pool.
+type FilterReason string
+
+const (
+	FilterPriorBelowBar   FilterReason = "prior-below-bar"
+	FilterNoPrior         FilterReason = "no-prior-for-role"
+	FilterNotToolsCapable FilterReason = "not-tools-capable"
+	FilterExcluded        FilterReason = "excluded"
+	FilterBlacklisted     FilterReason = "blacklisted"
+	FilterVendorExcluded  FilterReason = "vendor-excluded"
+	FilterWindowTooSmall  FilterReason = "window-too-small"
+)
+
+// FilteredOutEntry aggregates every catalog model kept out of a rung's pool
+// by the same reason.
+type FilteredOutEntry struct {
+	Reason FilterReason
+	Models []string
+}
+
+// SelectByComplexityReport is SelectByComplexity with the competing pool:
+// the pick the plain selector returns, plus a report classifying every
+// catalog model at the rung the pick landed on. Pins and off-ladder picks
+// synthesized by callers never go through the selector and get no report.
+func (r *Registry) SelectByComplexityReport(in SelectInput) (Pick, SelectionReport) {
 	for _, rung := range r.descent(in.Tier) {
 		at := in
 		at.Tier = rung
 
-		if id, src := r.pickAt(at); id != "" {
-			return r.pickFor(id, in, src)
+		res := r.selectAtRung(at)
+		if res.winner == "" {
+			continue
 		}
+
+		pool := make([]PoolEntry, len(res.pool))
+		for i, c := range res.pool {
+			pool[i] = PoolEntry{Model: c.id, Prior: c.quality, Price: c.price, Outcome: res.outcomes[i]}
+		}
+
+		return r.pickFor(res.winner, in, res.source),
+			SelectionReport{Rung: rung, Bar: r.barFor(rung), Pool: pool, FilteredOut: res.filtered}
 	}
 
 	if r.capable != "" && r.employable(r.capable, in) {
-		return r.pickFor(r.capable, in, SourceDefault)
+		return r.pickFor(r.capable, in, SourceDefault), SelectionReport{}
 	}
 
-	return Pick{Role: in.Role, RequestedTier: in.Tier, RequestedBar: r.barFor(in.Tier), LowestBar: r.lowestBar()}
+	return Pick{Role: in.Role, RequestedTier: in.Tier, RequestedBar: r.barFor(in.Tier), LowestBar: r.lowestBar()},
+		SelectionReport{}
 }
 
-// pickAt makes one rung's selection. "" means the rung is dry.
-func (r *Registry) pickAt(in SelectInput) (string, PickSource) {
+// rungResult is one rung's outcome: the winner with its source, and the
+// classification of every catalog model against that rung - the pool the
+// winner was drawn from with per-candidate outcomes, and the reason buckets
+// for the models that never reached it.
+type rungResult struct {
+	winner   string
+	source   PickSource
+	pool     []candidate
+	outcomes []PoolOutcome
+	filtered []FilteredOutEntry
+}
+
+// selectAtRung makes one rung's selection. An empty winner means the rung
+// is dry. The pool is the pool the pick was actually made from: the
+// vendor-blind classification when a favorite fired (explicit operator
+// intent beats the vendor heuristic, so the vendor filter does not apply to
+// it), the vendor-filtered one otherwise.
+func (r *Registry) selectAtRung(in SelectInput) rungResult {
 	if !r.sel.MaxCapability {
 		// Favorites bypass the vendor-diversity preference: explicit
 		// operator intent beats the emergent heuristic. Evaluated per rung,
@@ -482,17 +579,41 @@ func (r *Registry) pickAt(in SelectInput) (string, PickSource) {
 		blind := in
 		blind.ExcludeVendors = nil
 
-		if fav := r.favoriteAmong(r.candidates(blind), in.Tier, in.Role); fav != "" {
-			return fav, SourceFavorite
+		pool, filtered := r.classify(blind)
+		if fav := r.favoriteAmong(pool, in.Tier, in.Role); fav != "" {
+			// A favorite bypasses the price band, so it is marked selected
+			// wherever it sits; the band classification still shows the
+			// remaining candidates what the automatic rule would have done.
+			band := priceBand(pool, r.headroom(), false)
+			_, bandWinner := valuePick(pool, band)
+			outcomes := classifyPool(pool, band, bandWinner)
+
+			favIdx := slices.IndexFunc(pool, func(c candidate) bool { return c.id == fav })
+			outcomes[favIdx] = PoolSelected
+
+			if bandWinner != favIdx && bandWinner >= 0 {
+				outcomes[bandWinner] = PoolInBand
+			}
+
+			return rungResult{winner: fav, source: SourceFavorite, pool: pool, outcomes: outcomes, filtered: filtered}
 		}
 	}
 
-	cands := r.candidates(in)
-	if len(cands) == 0 {
-		return "", SourceAuto
+	pool, filtered := r.classify(in)
+	if len(pool) == 0 {
+		return rungResult{filtered: filtered}
 	}
 
-	return bestValue(cands, r.headroom(), r.sel.MaxCapability), SourceAuto
+	band := priceBand(pool, r.headroom(), r.sel.MaxCapability)
+	best, bandWinner := valuePick(pool, band)
+
+	return rungResult{
+		winner:   best.id,
+		source:   SourceAuto,
+		pool:     pool,
+		outcomes: classifyPool(pool, band, bandWinner),
+		filtered: filtered,
+	}
 }
 
 // employable applies the hard filters - and only the hard filters - to a
@@ -526,7 +647,9 @@ func (r *Registry) headroom() float64 {
 	return r.sel.PriceHeadroom
 }
 
-func bestValue(cands []candidate, headroom float64, maxCapability bool) string {
+// priceBand returns the price ceiling the best-value rule admits: the
+// cheapest candidate times the headroom, or unbounded with MaxCapability.
+func priceBand(cands []candidate, headroom float64, maxCapability bool) float64 {
 	cheapest := cands[0].price
 	for _, c := range cands[1:] {
 		if c.price < cheapest {
@@ -534,28 +657,64 @@ func bestValue(cands []candidate, headroom float64, maxCapability bool) string {
 		}
 	}
 
-	band := math.Inf(1)
-	if !maxCapability {
-		band = cheapest * headroom
+	if maxCapability {
+		return math.Inf(1)
 	}
 
-	best := candidate{}
-	have := false
+	return cheapest * headroom
+}
 
-	for _, c := range cands {
+// valuePick applies the best-value rule to the in-band candidates: the
+// highest quality inside the band, quality ties breaking to the cheaper
+// model. It returns the winner and its index in cands; -1 when every
+// candidate is out of band.
+func valuePick(cands []candidate, band float64) (candidate, int) {
+	best := candidate{}
+	bestIdx := -1
+
+	for i, c := range cands {
 		if c.price > band {
 			continue
 		}
 
 		switch {
-		case !have:
-			best, have = c, true
+		case bestIdx < 0:
+			best, bestIdx = c, i
 		case c.quality > best.quality:
-			best = c
+			best, bestIdx = c, i
 		case c.quality == best.quality && c.price < best.price:
-			best = c
+			best, bestIdx = c, i
 		}
 	}
+
+	return best, bestIdx
+}
+
+// classifyPool pairs every candidate with its outcome under the band: the
+// band winner is selected, the rest in band are in-band (lower quality, or
+// a tie lost to a cheaper model), and anything priced above the band is
+// out-of-band.
+func classifyPool(cands []candidate, band float64, winnerIdx int) []PoolOutcome {
+	outcomes := make([]PoolOutcome, len(cands))
+
+	for i, c := range cands {
+		switch {
+		case i == winnerIdx:
+			outcomes[i] = PoolSelected
+		case c.price > band:
+			outcomes[i] = PoolOutOfBand
+		default:
+			outcomes[i] = PoolInBand
+		}
+	}
+
+	return outcomes
+}
+
+// bestValue returns the id of the best-value candidate, the rule
+// valuePick applies.
+func bestValue(cands []candidate, headroom float64, maxCapability bool) string {
+	best, _ := valuePick(cands, priceBand(cands, headroom, maxCapability))
 
 	return best.id
 }
@@ -565,28 +724,67 @@ func bestValue(cands []candidate, headroom float64, maxCapability bool) string {
 // role, a prior below the tier bar, no tool support, an exclusion, a blacklist
 // entry, or a window that cannot hold the estimate is dropped.
 func (r *Registry) candidates(in SelectInput) []candidate {
+	pool, _ := r.classify(in)
+
+	return pool
+}
+
+// hardFilterReason returns the hard filter that keeps e out of the pool, or
+// "" when e passes the hard filters. The hard filters (tools support, run
+// exclusions, blacklist, vendor exclusion) apply at every rung; the quality
+// and window checks after them are per-rung and stay in classify. Models
+// with no resolvable vendor are never vendor-filtered.
+func (r *Registry) hardFilterReason(e llm.CatalogEntry, in SelectInput) FilterReason {
+	switch {
+	case !e.SupportsTools():
+		return FilterNotToolsCapable
+	case in.Exclude[e.ID]:
+		return FilterExcluded
+	case r.blacklist[e.ID]:
+		return FilterBlacklisted
+	case len(in.ExcludeVendors) > 0 && r.vendorOf(e.ID) != "" && in.ExcludeVendors[r.vendorOf(e.ID)]:
+		return FilterVendorExcluded
+	default:
+		return ""
+	}
+}
+
+// classify splits the catalog for one rung's input into the pool that
+// reached the rung (candidates in catalog order) and the reason-aggregated
+// summary of everything that did not. The filter reasons are evaluated in a
+// fixed order per model and the first hit wins, so a model excluded AND
+// blacklisted lands in exactly one bucket.
+func (r *Registry) classify(in SelectInput) ([]candidate, []FilteredOutEntry) {
 	bar := r.barFor(in.Tier)
+
+	buckets := make(map[FilterReason][]string, 7)
 
 	var cands []candidate
 
 	for _, e := range r.catalog {
-		if !e.SupportsTools() || in.Exclude[e.ID] || r.blacklist[e.ID] {
+		hard := r.hardFilterReason(e, in)
+		if hard != "" {
+			buckets[hard] = append(buckets[hard], e.ID)
+
 			continue
 		}
 
-		if len(in.ExcludeVendors) > 0 {
-			// Models with no resolvable vendor are never vendor-filtered.
-			if v := r.vendorOf(e.ID); v != "" && in.ExcludeVendors[v] {
-				continue
-			}
+		quality, ok := r.priors.ForRole(e.ID, in.Role)
+		if !ok {
+			buckets[FilterNoPrior] = append(buckets[FilterNoPrior], e.ID)
+
+			continue
 		}
 
-		quality, ok := r.priors.ForRole(e.ID, in.Role)
-		if !ok || quality < bar {
+		if quality < bar {
+			buckets[FilterPriorBelowBar] = append(buckets[FilterPriorBelowBar], e.ID)
+
 			continue
 		}
 
 		if in.EstTokens > 0 && !r.fitsWindow(e.ID, in.EstTokens) {
+			buckets[FilterWindowTooSmall] = append(buckets[FilterWindowTooSmall], e.ID)
+
 			continue
 		}
 
@@ -597,7 +795,25 @@ func (r *Registry) candidates(in SelectInput) []candidate {
 		})
 	}
 
-	return cands
+	if len(buckets) == 0 {
+		return cands, nil
+	}
+
+	// Fixed emission order for stable reports, matching the per-model check
+	// order above.
+	order := []FilterReason{
+		FilterNotToolsCapable, FilterExcluded, FilterBlacklisted, FilterVendorExcluded,
+		FilterNoPrior, FilterPriorBelowBar, FilterWindowTooSmall,
+	}
+
+	filtered := make([]FilteredOutEntry, 0, len(buckets))
+	for _, reason := range order {
+		if models := buckets[reason]; len(models) > 0 {
+			filtered = append(filtered, FilteredOutEntry{Reason: reason, Models: models})
+		}
+	}
+
+	return cands, filtered
 }
 
 // favoriteAmong returns the first operator favorite for (tier, role) - then
