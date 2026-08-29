@@ -421,17 +421,19 @@ type run struct {
 	reselects int
 
 	// fixFailed is the set of fix-coder models whose review fix round failed
-	// this run - it landed no commit, or the next round's verify was still red.
-	// Every later fix pick excludes them.
+	// this run - it landed no commit, left the verify red, or hit its turn
+	// cap with a failing verify. Every later fix pick excludes them.
 	//
 	// fixBarSteps and fixBudgetSteps are the two correction counters, both
 	// MONOTONE for the whole run. A round that produced nothing or left the
-	// verify red is quality evidence and climbs the bar; a round that ran out of
-	// turns is volume evidence and widens the budget without blaming the model.
-	// Neither is ever lowered: runFix is shared with pr_gates, which runs AFTER
-	// review approval, so clearing them on an approving verdict handed the first
-	// gate round the model that had already failed. A call site that must not
-	// escalate says so per-call, via fixRequest.NoEscalate.
+	// verify red is quality evidence and climbs the bar; a round that ran out
+	// of turns is volume evidence and widens the budget without blaming the
+	// model. A round that did BOTH - spent its whole window and still
+	// committed a tree the next verify rejects - is charged on both axes.
+	// Neither counter is ever lowered: runFix is shared with pr_gates, which
+	// runs AFTER review approval, so clearing them on an approving verdict
+	// handed the first gate round the model that had already failed. A call
+	// site that must not escalate says so per-call, via fixRequest.NoEscalate.
 	//
 	// fixFailReason and fixCapReason are the card-log wording for the last
 	// failure of each kind, kept apart because the two readers of a reason
@@ -452,6 +454,20 @@ type run struct {
 	// loop reads it to charge the budget axis for caps the MaxTurnsError arm
 	// never sees.
 	lastFixExhausted bool
+
+	// fixCappedPending records that the most recent fix round hit its turn cap
+	// while committing work, and that its quality verdict is not in yet: the
+	// next review round's verify gate settles it. A red gate there charges the
+	// bar axis too (markFixFailed, "hit its turn cap with a failing verify");
+	// a green or skipped gate consumes the flag with no bar charge. The gate
+	// that settles it is whichever one runs next, on either path into review:
+	// the cheap loop's consumption block, or the authoritative pass at the
+	// cliff (which captures and clears the flag on entry, before delegating -
+	// the loop's own block never runs that iteration). Cleared unconditionally
+	// at every cheap-loop gate it reaches, and on the authoritative pass's
+	// entry before any early return it can take, so it can never ride into a
+	// park or error path.
+	fixCappedPending bool
 
 	// prevRoundGreen is whether the LAST review round's verify gate passed - the
 	// half of the green->red comparison the loop otherwise forgets. A round that

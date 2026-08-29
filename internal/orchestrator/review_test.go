@@ -4232,6 +4232,8 @@ func TestCappedReviewFixRoundRetriesWiderInsteadOfParking(t *testing.T) {
 
 	assert.Equal(t, 1, o.fixBudgetSteps, "the cap widened the next round by one rung")
 	assert.Zero(t, o.fixBarSteps, "the retried round approved, so nothing climbed the bar")
+	assert.False(t, ops.loggedContains("hit its turn cap with a failing verify"),
+		"the cap's verify never came back red, so no escalation was logged; logs=%v", ops.logs)
 	assert.True(t, ops.loggedContains("hit its turn cap"), "logs=%v", ops.logs)
 	assert.GreaterOrEqual(t, indexOfPrefix(git.recorded(), "CommitFixup:"), 0,
 		"the capped round's partial work is still committed; git=%v", git.recorded())
@@ -4240,64 +4242,108 @@ func TestCappedReviewFixRoundRetriesWiderInsteadOfParking(t *testing.T) {
 // A review fix round can spend its entire turn window and still return no
 // error at all: the harness's grace turn grants one terminal-only call after
 // the cap, and a coder that lands `finish` there completes cleanly. That is
-// the same "ran out of room" evidence as a hard MaxTurnsError - just without
-// one - so it must charge the budget axis exactly like the capped-arm sibling
-// above, and the round behind it must not blame the model on the bar axis for
-// a verify that only went red because the round it followed never got a real
-// chance to finish the work.
+// the same "ran out of room" evidence as a hard MaxTurnsError - it charges
+// the budget axis exactly like the capped-arm sibling above - and when the
+// round behind it also leaves the verify red, that red charges the bar axis
+// too, through the same fixCappedPending deferral the hard cap uses: the
+// next fix both climbs the bar and runs wider, with the capped fixer
+// excluded. A grace landing whose next gate comes back green stays
+// widen-only: the round was making progress and proved it, so no bar step
+// and no exclusion. The registry needs a second coder vendor because the
+// escalated red-gate row excludes the capped fixer (see escalationRegistry).
 //
-// Response script: round 1's panel and synthesis (four one-turn calls) reject;
-// the round-1 fix coder then burns its whole 5-turn budget and lands `finish`
-// on the harness's terminal-only grace call, so Turns comes back equal to
-// MaxTurns with no error. Round 2's verify gate is red, so it skips the panel
-// entirely and goes straight to a fix that lands cleanly; round 3's panel
-// approves.
-func TestGraceLandedFixRoundChargesBudgetNotBar(t *testing.T) {
-	ops := &fakeOps{}
-	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
-
-	responses := slices.Concat(
-		[]llm.Response{
-			stopResp("Correctness: broken", 0.01),
-			stopResp("Design: ok", 0.01),
-			stopResp("Security: ok", 0.01),
-			stopResp(`{"approved":false,"summary":"needs work","fixes":[{"file":"a.go","issue":"bug","suggestion":"fix","severity":"major"}]}`, 0.02),
-		},
-		append(burnResps(5), finishResp("fix: grace landing", 0.01)),
-		[]llm.Response{stopResp("coder: fixed it this time", 0.05)},
-		[]llm.Response{
-			stopResp("Correctness: fine", 0.01),
-			stopResp("Design: fine", 0.01),
-			stopResp("Security: fine", 0.01),
-			stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.02),
-		},
-	)
-
-	d := reviewTestDeps(t, ops, git, &planLLM{responses: responses}, reviewerRegistry())
-	d.Cfg.MaxTurns = 5
-	// The grace call only lands when the registry has a terminal tool to offer.
-	d.WriteTools = testWriteTools()
-
-	o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}, 0)
-	o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
-
-	gateRuns := 0
-	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
-		gateRuns++
-		if gateRuns == 2 {
-			return verifyexec.Outcome{ExitCode: 1, Output: "still failing"}
-		}
-
-		return verifyexec.Outcome{ExitCode: 0}
+// Response script, red-gate row: round 1's panel and synthesis (four one-turn
+// calls) reject; the round-1 fix coder then burns its whole 5-turn budget and
+// lands `finish` on the harness's terminal-only grace call, so Turns comes
+// back equal to MaxTurns with no error. Round 2's verify gate is red, so it
+// skips the panel entirely and goes straight to a fix that lands cleanly;
+// round 3's panel approves. Green-gate row: round 2's gate passes and its
+// panel approves, ending the run there.
+func TestGraceLandedFixRoundChargesBudgetAndRedVerifyEscalatesBar(t *testing.T) {
+	panel := []llm.Response{
+		stopResp("Correctness: broken", 0.01),
+		stopResp("Design: ok", 0.01),
+		stopResp("Security: ok", 0.01),
+		stopResp(`{"approved":false,"summary":"needs work","fixes":[{"file":"a.go","issue":"bug","suggestion":"fix","severity":"major"}]}`, 0.02),
 	}
 
-	require.NoError(t, runReview(context.Background(), o),
-		"a grace-landed cap must not park the run any more than a hard one does")
+	graceLanding := append(burnResps(5), finishResp("fix: grace landing", 0.01))
 
-	assert.Equal(t, 1, o.fixBudgetSteps, "the grace landing widened the next round by one rung")
-	assert.Zero(t, o.fixBarSteps, "the round-2 red verify is the cap showing through, not a quality failure")
-	assert.True(t, ops.loggedContains("spent its whole turn window"), "logs=%v", ops.logs)
-	assert.Equal(t, 3, gateRuns, "every scripted round's gate ran")
+	tests := []struct {
+		name      string
+		redGateOn int // 1-based gate run whose verify is red; 0 = never red
+		script    []llm.Response
+	}{
+		{
+			name:      "red verify behind the grace landing escalates the bar",
+			redGateOn: 2,
+			script: slices.Concat(panel, graceLanding,
+				[]llm.Response{stopResp("coder: fixed it this time", 0.05)},
+				panelApproves()),
+		},
+		{
+			name:   "green gate behind the grace landing stays widen-only",
+			script: slices.Concat(panel, graceLanding, panelApproves()),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+			client := &planLLM{responses: tt.script}
+
+			d := reviewTestDeps(t, ops, git, client, escalationRegistry())
+			d.Cfg.MaxTurns = 5
+			// The grace call only lands when the registry has a terminal tool to offer.
+			d.WriteTools = testWriteTools()
+
+			o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}, 0)
+			o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
+
+			gateRuns := 0
+			redOn := tt.redGateOn
+			o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+				gateRuns++
+				if redOn != 0 && gateRuns == redOn {
+					return verifyexec.Outcome{ExitCode: 1, Output: "still failing"}
+				}
+
+				return verifyexec.Outcome{ExitCode: 0}
+			}
+
+			require.NoError(t, runReview(context.Background(), o),
+				"a grace-landed cap must not park the run any more than a hard one does")
+
+			assert.Equal(t, 1, o.fixBudgetSteps, "the grace landing widened the next round by one rung")
+			assert.True(t, ops.loggedContains("spent its whole turn window"), "logs=%v", ops.logs)
+
+			if tt.redGateOn != 0 {
+				assert.Equal(t, 1, o.fixBarSteps, "the red verify behind the grace landing is quality evidence on top of the volume evidence")
+				assert.True(t, ops.loggedContains("hit its turn cap with a failing verify"),
+					"the escalation names both conditions; logs=%v", ops.logs)
+				require.Len(t, o.fixFailed, 1, "the capped fixer is excluded once its verify came back red; fixFailed=%v", o.fixFailed)
+				require.GreaterOrEqual(t, len(client.models), 5, "models=%v", client.models)
+				assert.True(t, o.fixFailed[client.models[4]],
+					"the excluded fixer is the one that ran the grace-landed round; models=%v", client.models)
+
+				next := o.fixSizing(fixRequest{Round: 3})
+				assert.Equal(t, registry.TierComplex, next.Bar, "one bar step above the moderate card bar")
+				assert.Equal(t, 2, next.Budget, "the bar reseed plus one cap step: two rungs above the base window")
+				assert.Equal(t, 3, gateRuns, "every scripted round's gate ran")
+			} else {
+				assert.Zero(t, o.fixBarSteps, "the gate came back green, so the cap stays widen-only")
+				assert.Empty(t, o.fixFailed, "a green gate excludes nobody; fixFailed=%v", o.fixFailed)
+				assert.False(t, ops.loggedContains("hit its turn cap with a failing verify"),
+					"no escalation was logged; logs=%v", ops.logs)
+
+				next := o.fixSizing(fixRequest{Round: 2})
+				assert.Equal(t, registry.TierModerate, next.Bar, "no bar step, so the bar is unchanged")
+				assert.Equal(t, 1, next.Budget, "the cap step alone, on top of the base window")
+				assert.Equal(t, 2, gateRuns, "every scripted round's gate ran")
+			}
+		})
+	}
 }
 
 // A grace-landed round whose bar was ALREADY at the top rung (critical, so
@@ -4503,12 +4549,14 @@ func TestFixRoundReportsTheCorrectionItActuallyMade(t *testing.T) {
 //
 //   - A round truncated at its turn cap is the likeliest of all to leave the
 //     verify red - it ran out of turns mid-work, and runFix committed the
-//     partial result. That red verify is the cap showing through, already
-//     charged on the budget axis, and a turn cap is zero evidence about
-//     capability.
+//     partial result. The cap alone is volume evidence and stays off the bar
+//     axis, but that red verify charges the bar too, once, in the NEXT
+//     iteration: the round had a full budget, spent it, and the tree is still
+//     broken.
 //   - The flag is per-round, not per-run, so omitting the write on the cap path
 //     covers only a FIRST-round cap; once an earlier round has completed, the
-//     cap must actively clear it.
+//     cap must actively clear it. The cap-with-red-verify charge is keyed the
+//     same way: only the round the gate immediately follows pays for it.
 //   - A round that committed nothing is charged on the spot. Its HEAD is
 //     unchanged, so the next round's verify is the same subprocess against the
 //     same tree and carries no new information - charging that too would jump
@@ -4554,13 +4602,17 @@ func TestOneFixRoundOutcomeIsChargedOnce(t *testing.T) {
 	}{
 		{
 			name: "the cap is the first fix round",
-			// pass/reject/cap, red/fix, pass/approve.
+			// pass/reject/cap, red/fix, pass/approve. The capped round's red
+			// verify now charges BOTH axes: a full budget spent and a broken
+			// tree left behind is quality evidence on top of volume evidence.
 			script: slices.Concat(panelRejects(), burnResps(5),
 				[]llm.Response{fixCompletes}, panelApproves()),
-			redGate:    2,
-			wantGates:  3,
-			committed:  true,
-			wantBudget: 1,
+			redGate:     2,
+			wantGates:   3,
+			committed:   true,
+			wantBar:     1,
+			wantBudget:  1,
+			wantFailers: 1,
 		},
 		{
 			name: "a completed fix round precedes the cap",
@@ -4570,10 +4622,12 @@ func TestOneFixRoundOutcomeIsChargedOnce(t *testing.T) {
 			script: slices.Concat(panelRejects(), []llm.Response{fixCompletes},
 				panelRejects(), burnResps(5),
 				[]llm.Response{fixCompletes}, panelApproves()),
-			redGate:    3,
-			wantGates:  4,
-			committed:  true,
-			wantBudget: 1,
+			redGate:     3,
+			wantGates:   4,
+			committed:   true,
+			wantBar:     1,
+			wantBudget:  1,
+			wantFailers: 1,
 		},
 		{
 			name: "the round before the red verify committed nothing",
@@ -4595,7 +4649,16 @@ func TestOneFixRoundOutcomeIsChargedOnce(t *testing.T) {
 			ops := &fakeOps{}
 			git := &fakeGit{committed: tt.committed, lastCommitTarget: "abc123"}
 
-			d := reviewTestDeps(t, ops, git, &planLLM{responses: tt.script}, reviewerRegistry())
+			// Row-keyed registry: rows that keep fixing need a second coder
+			// vendor (escalationRegistry) once the first fixer is excluded,
+			// while the park row needs reviewerRegistry's single coder pick
+			// so the exhausted-fixers park can actually trip.
+			reg := reviewerRegistry()
+			if !tt.wantParked {
+				reg = escalationRegistry()
+			}
+
+			d := reviewTestDeps(t, ops, git, &planLLM{responses: tt.script}, reg)
 			d.Cfg.MaxTurns = 5
 
 			o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}, 0)
@@ -5134,6 +5197,17 @@ func TestReviewRegressingFixUndiscardable(t *testing.T) {
 // would throw away the partial result the widened retry builds on. Both ways a
 // round is truncated must behave the same: a hard turn cap, and a grace-turn
 // landing that spends the whole window without erroring.
+// A capped round whose committed tree still fails the next verify is charged
+// on BOTH axes: the cap widens the budget (volume evidence) and the red
+// verify escalates the bar and excludes the fixer (quality evidence) - the
+// round had a full window, spent it all, and left the tree broken. The
+// regression DISCARD still does not fire on this path (a capped round's
+// partial work stays, and nothing is force-pushed), and the reason names both
+// conditions rather than reading as a green-to-red regression.
+//
+// The registry needs a second coder-capable vendor: once the capped fixer is
+// excluded, the round-2 fix must have somewhere else to go (see
+// escalationRegistry).
 func TestCappedFixRoundOutranksTheRegressionDiscard(t *testing.T) {
 	tests := []struct {
 		name string
@@ -5169,7 +5243,7 @@ func TestCappedFixRoundOutranksTheRegressionDiscard(t *testing.T) {
 				headSHAs: []string{"h1", "h2", "h3", "h4", "h5"},
 			}
 			client := &planLLM{responses: tt.script}
-			d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+			d := reviewTestDeps(t, ops, git, client, escalationRegistry())
 			d.Cfg.MaxTurns = 5
 
 			if tt.graceTools {
@@ -5186,11 +5260,184 @@ func TestCappedFixRoundOutranksTheRegressionDiscard(t *testing.T) {
 			assert.Equal(t, 3, gateRuns, "every round's gate ran")
 
 			assert.Equal(t, 1, o.fixBudgetSteps, "the cap is charged on the budget axis, exactly once")
-			assert.Zero(t, o.fixBarSteps, "the red round behind a cap blames no model")
-			assert.Empty(t, o.fixFailed, "no fixer is excluded on volume evidence; fixFailed=%v", o.fixFailed)
+			assert.Equal(t, 1, o.fixBarSteps, "the capped round's red verify is quality evidence too: one rung on the bar axis")
+			require.Len(t, o.fixFailed, 1, "the capped fixer is excluded once its verify came back red; fixFailed=%v", o.fixFailed)
+			require.GreaterOrEqual(t, len(client.models), 5, "models=%v", client.models)
+			assert.True(t, o.fixFailed[client.models[4]],
+				"the excluded fixer is the one that ran the capped round; models=%v", client.models)
 			assert.Empty(t, git.hardResetRefs, "a capped round's partial work is kept, not discarded; git=%v", git.recorded())
 			assert.Empty(t, git.leaseBranches, "nothing was discarded, so nothing is force-pushed; git=%v", git.recorded())
 			assert.False(t, ops.loggedContains("regressed the verify"), "logs=%v", ops.logs)
+			assert.True(t, ops.loggedContains("hit its turn cap with a failing verify"),
+				"the escalation names both conditions; logs=%v", ops.logs)
+		})
+	}
+}
+
+// The full escalation, end to end: round 1's fix coder spends its whole turn
+// window and commits a red tree anyway, so round 2's fix must run on a raised
+// bar (fixBarSteps) AND a widened budget (fixBudgetSteps), with the capped
+// model excluded and its partial work still on the branch. Covered for both
+// cap shapes: the hard MaxTurnsError and the grace-turn landing that returns
+// no error.
+func TestCappedFixRoundWithRedVerifyEscalatesBarAndBudget(t *testing.T) {
+	tests := []struct {
+		name       string
+		script     []llm.Response
+		graceTools bool
+	}{
+		{
+			name: "hard turn cap",
+			script: slices.Concat(panelRejects("nil deref"), burnResps(5),
+				[]llm.Response{stopResp("coder: round 2 fix", 0.05)}, panelApproves()),
+		},
+		{
+			name: "grace-turn landing",
+			script: slices.Concat(panelRejects("nil deref"),
+				append(burnResps(5), finishResp("fix: grace landing", 0.01)),
+				[]llm.Response{stopResp("coder: round 2 fix", 0.05)}, panelApproves()),
+			graceTools: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+			client := &planLLM{responses: tt.script}
+			d := reviewTestDeps(t, ops, git, client, escalationRegistry())
+			d.Cfg.MaxTurns = 5
+
+			if tt.graceTools {
+				d.WriteTools = testWriteTools()
+			}
+
+			o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}, 0)
+			o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
+
+			gateRuns := 0
+			o.runVerify = regressionGate(&gateRuns)
+
+			require.NoError(t, runReview(context.Background(), o))
+			assert.Equal(t, 3, gateRuns, "every round's gate ran")
+
+			assert.Equal(t, 1, o.fixBarSteps, "the red verify behind the cap climbed the bar")
+			assert.Equal(t, 1, o.fixBudgetSteps, "the cap widened the budget")
+			require.Len(t, o.fixFailed, 1, "fixFailed=%v", o.fixFailed)
+			require.GreaterOrEqual(t, len(client.models), 5, "models=%v", client.models)
+			assert.True(t, o.fixFailed[client.models[4]],
+				"the capped round's fixer is excluded from later picks; models=%v", client.models)
+
+			next := o.fixSizing(fixRequest{Round: 3})
+			assert.Equal(t, registry.TierComplex, next.Bar, "one bar step above the moderate card bar")
+			assert.Equal(t, 2, next.Budget, "the bar reseed plus one cap step: two rungs above the base window")
+
+			assert.True(t, ops.loggedContains("hit its turn cap with a failing verify"),
+				"the card log names the combined reason; logs=%v", ops.logs)
+			assert.Empty(t, git.hardResetRefs, "the capped round's partial work stays; git=%v", git.recorded())
+			assert.Empty(t, git.leaseBranches, "no discard, no force push; git=%v", git.recorded())
+		})
+	}
+}
+
+// The authoritative pass at the cliff is the OTHER gate that settles a capped
+// round's deferred quality verdict: the loop delegates to it before its own
+// flag-consumption block can run, so a fix round capped on the round
+// immediately before the cliff carries fixCappedPending into the pass, which
+// captures and clears it on entry and settles it from the captured value once
+// ITS gate result is known. Red gate: the bar is raised and the capped fixer
+// joins fixFailed BEFORE the strong fix is selected. Green gate: widen-only,
+// no bar step and no exclusion.
+//
+// Script shape, red row: round 4's gate is red (the verify short-circuit skips
+// the panel), the round-4 fix coder burns its whole 5-turn window and returns
+// max_turns with a commit, so it caps with fixCappedPending set; round 5 is
+// the cliff (attemptsCap 5), whose authoritative gate is red; the strong fix
+// lands cleanly; the strong re-review's gate is green and its panel approves.
+// Green row: the round-5 authoritative gate passes and its panel approves,
+// ending the run there.
+func TestAuthoritativeGateSettlesCappedRoundVerdict(t *testing.T) {
+	redGate := verifyexec.Outcome{ExitCode: 1, Output: "still failing"}
+
+	tests := []struct {
+		name            string
+		authGateRed     bool // whether the authoritative gate (gate run 2) is red
+		strongFixScript []llm.Response
+		reReviewScript  []llm.Response
+	}{
+		{
+			name:        "red authoritative gate escalates the bar before the strong fix",
+			authGateRed: true,
+			strongFixScript: []llm.Response{
+				stopResp("strong coder: fixed it", 0.05),
+			},
+			reReviewScript: panelApproves(),
+		},
+		{
+			name:           "green authoritative gate stays widen-only",
+			authGateRed:    false,
+			reReviewScript: panelApproves(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+			client := &planLLM{responses: slices.Concat(burnResps(5), tt.strongFixScript, tt.reReviewScript)}
+
+			d := reviewTestDeps(t, ops, git, client, escalationRegistry())
+			d.Cfg.MaxTurns = 5
+
+			// ReviewAttempts 3 puts the first in-process round at 4 and the
+			// second at 5, the cliff - so the cheap round's fix caps one round
+			// before the pass that must settle it.
+			o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress", ReviewAttempts: 3}, 0)
+			o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
+
+			gateRuns := 0
+			o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+				gateRuns++
+				// Gate run 1 is the cheap round-4 gate (red, so the fix runs and
+				// caps); gate run 2 is the authoritative round-5 gate; anything
+				// after is the strong re-review and passes.
+				if gateRuns == 1 || (gateRuns == 2 && tt.authGateRed) {
+					return redGate
+				}
+
+				return verifyexec.Outcome{ExitCode: 0}
+			}
+
+			require.NoError(t, runReview(context.Background(), o))
+
+			assert.Equal(t, 1, o.fixBudgetSteps, "the round-4 cap widened the budget exactly once")
+			assert.False(t, o.fixCappedPending, "the authoritative gate consumed the pending flag whatever its verdict was")
+
+			if tt.authGateRed {
+				assert.Equal(t, 1, o.fixBarSteps, "the red authoritative gate is quality evidence on top of the volume evidence")
+				require.Len(t, o.fixFailed, 1, "the capped fixer joins fixFailed; fixFailed=%v", o.fixFailed)
+				require.GreaterOrEqual(t, len(client.models), 5, "models=%v", client.models)
+				assert.True(t, o.fixFailed[client.models[4]],
+					"the excluded fixer is the one that ran the capped round; models=%v", client.models)
+				assert.NotEqual(t, client.models[4], client.models[5],
+					"the strong fix runs on a different fixer than the capped round; models=%v", client.models)
+				assert.True(t, ops.loggedContains("hit its turn cap with a failing verify"),
+					"the card log names the combined reason; logs=%v", ops.logs)
+
+				// The bar was raised BEFORE the strong fix was selected, so the
+				// strong fix's sizing already carries the climb on top of the
+				// authoritative floor.
+				strong := o.fixSizing(fixRequest{Round: 6, Authoritative: true})
+				assert.Equal(t, registry.TierCritical, strong.Bar, "one bar step above the authoritative complex floor")
+				assert.Equal(t, 2, strong.Budget, "the bar reseed plus the cap step, clamped at the top rung")
+				assert.Equal(t, 3, gateRuns, "every scripted round's gate ran")
+			} else {
+				assert.Zero(t, o.fixBarSteps, "the gate came back green, so the cap stays widen-only on the cliff too")
+				assert.Empty(t, o.fixFailed, "a green gate excludes nobody; fixFailed=%v", o.fixFailed)
+				assert.False(t, ops.loggedContains("hit its turn cap with a failing verify"),
+					"no escalation was logged; logs=%v", ops.logs)
+				assert.Equal(t, 2, gateRuns, "every scripted round's gate ran")
+			}
 		})
 	}
 }

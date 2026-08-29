@@ -231,7 +231,11 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 	// fixRan is whether the IMMEDIATELY PRECEDING fix round both ran to
 	// completion and committed: a capped round clears it and a round that
 	// landed nothing never sets it, because a red verify is charged to the
-	// round behind it only when that round has not already been judged.
+	// round behind it only when that round has not already been judged. A
+	// capped round records itself in fixCappedPending instead, so the next
+	// iteration can still charge a red verify to the bar axis - as a round
+	// that hit its turn cap WITH a failing verify - without the cap alone
+	// ever counting as a quality failure.
 	fixRan := false
 
 	for iter := range hardReviewIterationCap {
@@ -341,12 +345,14 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 
 		// A fix round that committed but left this round's verify red failed as
 		// surely as one that landed nothing: the next fix escalates. Round 1's
-		// red verify has no fix behind it and escalates nothing, and neither
-		// does a round WE truncated - a cap clears fixRan, because a round that
-		// ran out of turns mid-work is the likeliest of all to leave the verify
-		// red, and that event is already charged on the budget axis. Charging it
-		// on the bar axis too would blame a model for turns it never got, and
-		// shrink the fix pool on evidence about volume.
+		// red verify has no fix behind it and escalates nothing. A round WE
+		// truncated clears fixRan - the cap itself stays volume evidence,
+		// charged on the budget axis alone - but it records fixCappedPending,
+		// so a truncated round that committed a still-red tree is charged on
+		// the bar axis here too: a full budget spent and a broken tree left
+		// behind is quality evidence as well as volume evidence, and the next
+		// fix both climbs the bar and runs wider. A truncated round whose gate
+		// came back green (or skipped) consumes the flag with no bar charge.
 		//
 		// When the round behind it left a GREEN gate, that fix did not merely
 		// fail to fix - it broke a tree that worked, so its fixup is discarded
@@ -356,6 +362,14 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 		// while the round that FOLLOWS starts from a predecessor the gate proved
 		// green.
 		discarded := false
+
+		// A capped round consumed the pending flag when its gate came back
+		// red (the markFixFailed below); here its gate was green or skipped,
+		// so the cap stays widen-only and the flag dies with the iteration.
+		// Cleared unconditionally rather than left alone, so a pending flag
+		// can never leak into a later round.
+		cappedPending := o.fixCappedPending
+		o.fixCappedPending = false
 
 		if fixRan && vres.Status == verifyFailed {
 			reason := "left the verify red"
@@ -375,6 +389,14 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 			}
 
 			o.markFixFailed(reason)
+		} else if cappedPending && vres.Status == verifyFailed {
+			// The round behind was truncated at its turn cap and still
+			// committed a red tree: a full budget spent and nothing to show
+			// for it is quality evidence on top of the volume evidence the
+			// cap already charged, so the bar rises too. No regression
+			// discard on this path - the capped round's partial work stays,
+			// whatever the gate says about it.
+			o.markFixFailed("hit its turn cap with a failing verify")
 		}
 
 		// Recorded before the fix below runs, so every exit from this iteration -
@@ -426,8 +448,14 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 			// The round is already counted against attemptsCap, so the loop stays
 			// bounded; the cap is volume evidence and the next round runs wider on
 			// the same pool. Parking the whole run here would spend a round and
-			// learn nothing from it.
+			// learn nothing from it. The pending flag defers the quality verdict:
+			// if this round's committed tree leaves the next verify red, that red
+			// charges the bar too (a full budget spent and a broken tree left
+			// behind); if the gate comes back green the flag dies unused.
 			o.markFixCapped()
+
+			o.fixCappedPending = true
+
 			d.logCard(ctx, "review: fix round %d hit its turn cap - retrying wider", round)
 
 			// Cleared, not merely left alone: an earlier COMPLETED round would
@@ -454,18 +482,24 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 		}
 
 		// A grace-turn landing that spent every turn is the same volume evidence as
-		// a hard MaxTurnsError: charge the budget axis now, and keep the follow-on
-		// red verify off the bar axis for the same reason the MaxTurnsError arm
-		// clears fixRan - a round that ran out of room is the likeliest of all to
-		// leave the verify red, and blaming the model for turns it never got would
-		// shrink the fix pool on evidence about volume.
+		// a hard MaxTurnsError: charge the budget axis now, and defer the quality
+		// verdict to the next round's gate via fixCappedPending, for the same
+		// reason the MaxTurnsError arm clears fixRan - the cap alone must not
+		// blame the model for turns it never got, but a committed red tree is
+		// quality evidence on top of volume evidence.
 		//
 		// Keyed on the WIDTH this round actually ran at, same as the MaxTurnsError
 		// arm above: a card whose bar already seeds the budget at the top rung
 		// keeps fixBudgetSteps at zero while the width is already clamped, so the
 		// step counter alone cannot see that there is no wider left to charge.
 		if committed && o.lastFixExhausted && o.fixSizing(req).Budget < maxBudgetStep {
+			// The pending flag defers the quality verdict exactly as in the
+			// MaxTurnsError arm above: a committed red tree from this round
+			// charges the bar in the next iteration, a green one does not.
 			o.markFixCapped()
+
+			o.fixCappedPending = true
+
 			d.logCard(ctx, "review: fix round %d spent its whole turn window - the next fix round runs wider", round)
 
 			fixRan = false
@@ -782,6 +816,18 @@ func mergeFeedback(findings, feedback string) string {
 func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round int) error {
 	d := o.d
 
+	// reviewLoop delegates to this pass at the cliff, before its own
+	// flag-consumption block can run, so a fix round capped on the round
+	// immediately before the cliff may still carry an unsettled quality
+	// verdict. This pass's verify gate is that settling gate: capture the flag
+	// and clear it on entry - before any early return this pass can take, so
+	// it can never ride into a park or error path - then settle from the
+	// captured value once the gate result is known. A red gate charges the bar
+	// and excludes the capped fixer before the strong fix below is selected; a
+	// green or skipped gate consumes the flag with no bar charge.
+	cappedPending := o.fixCappedPending
+	o.fixCappedPending = false
+
 	// reviewLoop checked this at the top of the iteration that reached the
 	// cliff; checked again here so authoritativeReview keeps its own entry
 	// contract for any caller other than that cliff.
@@ -811,6 +857,15 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 	}
 
 	o.lastFindings = findings
+
+	if cappedPending && vres.Status == verifyFailed {
+		// The round behind was truncated at its turn cap and still committed a
+		// red tree: a full budget spent and nothing to show for it is quality
+		// evidence on top of the volume evidence the cap already charged, so
+		// the bar rises (and the capped fixer is excluded) before the strong
+		// fix below is selected.
+		o.markFixFailed("hit its turn cap with a failing verify")
+	}
 
 	if _, err := o.incrementReviewAttempt(ctx, findings); err != nil {
 		return err
@@ -1805,7 +1860,11 @@ func (o *run) fixSizing(req fixRequest) sizing {
 // markFixCapped records that the most recent fix round ran out of turns,
 // without adding the model to fixFailed - it ran out of room, not shown to be
 // too weak. fixCapReason (kept separate from fixFailReason) keeps the card
-// log from reporting a cap as a bar escalation or an exhausted fix pool.
+// log from reporting a cap as a bar escalation or an exhausted fix pool. The
+// quality verdict is deferred, not waived: the review loop's fixCappedPending
+// flag escalates the bar as well when the capped round still leaves the
+// verify red, because a full budget spent and a broken tree left behind is
+// quality evidence on top of volume evidence.
 func (o *run) markFixCapped() {
 	o.fixBudgetSteps++
 	o.fixCapReason = "hit its turn cap"
