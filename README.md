@@ -265,6 +265,9 @@ The blacklist is self-learning: when a model proves harness-incapable mid-run
 (for example, it cannot reliably call tools), the agent reports it back so it is
 excluded and a replacement is re-selected.
 
+Full policy detail - tier bars, vendor diversity, fallback precedence - lives
+in [`docs/model-selection.md`](docs/model-selection.md).
+
 ## Development
 
 ```bash
@@ -285,6 +288,13 @@ working **on** this codebase live in [`AGENTS.md`](AGENTS.md).
 ## Further reading
 
 - [`AGENTS.md`](AGENTS.md) - orientation for contributors and agents.
+- [`docs/orchestrator.md`](docs/orchestrator.md) - how a card run works: phases,
+  git workflow, review, verify resolution, plan split, repo grounding.
+- [`docs/pr-gates.md`](docs/pr-gates.md) - the CI and Copilot gates.
+- [`docs/model-selection.md`](docs/model-selection.md) - the selection policy.
+- [`docs/secrets.md`](docs/secrets.md) - credential staging and redaction.
+- [`docs/observability.md`](docs/observability.md) - metrics and the admin listener.
+- [`docs/custom-images.md`](docs/custom-images.md) - custom worker images.
 - [`serve.yaml.example`](serve.yaml.example) - every service config field, documented.
 - [ContextMatrix](https://github.com/mhersson/contextmatrix) - the control plane.
 
