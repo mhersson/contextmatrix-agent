@@ -354,10 +354,14 @@ type run struct {
 	// "## Unreachable Criteria") have landed - both headings survive
 	// stripAgentSections by design, so the refresh is what lets execute's
 	// coder prompts and the review specialists/synthesizers see them. The
-	// first write stays authoritative through diagnose/design/drafting: the
-	// HITL adjust loop reads o.tc.Description directly (via
-	// plannerDescription), never this field, so re-deriving it here cannot
-	// leak an in-flight draft back into the planner.
+	// first write stays authoritative through diagnose/design/drafting - not
+	// because the HITL adjust loop avoids this field (plannerDescription
+	// returns it as the base, only splicing in the prior "## Plan" from
+	// o.tc.Description), but because of ordering: every draftPlan/mobDraftPlan
+	// call that reads it happens strictly before createSubtasks, and every
+	// createSubtasks call site in runPlan is terminal (a return follows
+	// immediately), so the refresh below can never land before a planner read
+	// it could poison.
 	taskDescription string
 
 	// staleRemoteTip is the remote tip of this run's card branch as observed at

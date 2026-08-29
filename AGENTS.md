@@ -466,19 +466,31 @@ file only - never via flags or committed YAML.
     unreachable from inside the container - reading an input that does not
     exist in the repo, or writing outside it (a criterion whose artifact does
     not exist yet but is created inside the repo by the work itself is NOT
-    unreachable). `recordUnreachable` writes one
-    `UNREACHABLE-AC: "<criterion>" - <reason>` add_log line per entry (the
-    convention review keys on) plus a `## Unreachable Criteria` section on the
-    card body naming the same claims. The coder/fix/verify-fix prompts treat
-    both this section and `## Split` as out of scope to implement. Each review
-    specialist verifies every `## Unreachable Criteria` claim against the repo
-    as part of its normal pass and reports VERIFIED or REFUTED with one line
-    of evidence; synthesis - solo and the mob moderator alike, sharing
+    unreachable). `recordUnreachable` writes a `## Unreachable Criteria`
+    section on the card body naming every claim - the section, reaching
+    prompts via the refreshed description, is what review actually keys its
+    exemption on - plus an `UNREACHABLE-AC: "<criterion>" - <reason>` add_log
+    line per entry as the human audit trail, capped at
+    `maxUnreachableLogLines` (10): past the cap only the first 9 entries get
+    their own line and one summary line covers the rest, though the section
+    itself always lists every entry regardless. The coder/fix prompts treat
+    both this section and `## Split` as out of scope to implement;
+    `verifyFixPrompt` carries neither note - it shows the coder only the
+    parent card's title, never its description, so a note pointing at
+    sections it cannot show would be untethered. Each review specialist
+    verifies every `## Unreachable Criteria` claim against the repo as part
+    of its normal pass and reports VERIFIED or REFUTED with one line of
+    evidence (`unreachableVerifyInstruction`, shared by the solo specialist
+    prompt and the mob `reviewBriefing` so neither review path can drift);
+    synthesis - solo and the mob moderator alike, sharing
     `unreachableVerdictRule` - excludes VERIFIED entries from the
     approve/revise decision (they stay visible to the human but never fail the
     work), treats a REFUTED entry as an ordinary unmet criterion that can
     still block, and excludes `## Split` scope from the verdict as work that
-    moved to other cards.
+    moved to other cards. The HITL plan-approval gate (`formatPlannedPlan`)
+    renders unreachable criteria - alongside any follow-up cards - before a
+    human approves the plan, so approval never hides which criteria review
+    will later exempt.
 
     Both sections land on `o.body` before `createSubtasks` re-derives
     `o.taskDescription` at its end (`stripAgentSections(stripMeta(o.body))`,

@@ -98,6 +98,9 @@ func TestSharedBlocksAreSplicedIntoTheirPrompts(t *testing.T) {
 		{sweepRule, "sweepRule", synthesisPrompt, "synthesisPrompt"},
 		{sweepRule, "sweepRule", reviewSynthesisPrompt, "reviewSynthesisPrompt"},
 		{sweepRule, "sweepRule", checkpointSynthesisPrompt, "checkpointSynthesisPrompt"},
+
+		{unreachableVerifyInstruction, "unreachableVerifyInstruction", specialistPrompt, "specialistPrompt"},
+		{unreachableVerifyInstruction, "unreachableVerifyInstruction", reviewBriefing, "reviewBriefing"},
 	}
 
 	for _, c := range cases {
@@ -117,6 +120,17 @@ func TestSpecialistPromptScopesToTask(t *testing.T) {
 func TestVerifyFixPromptIsTitleOnly(t *testing.T) {
 	assert.Contains(t, verifyFixPrompt, "VERIFY FAILURE TO FIX")
 	assert.NotContains(t, verifyFixPrompt, "Description:")
+}
+
+// TestUnreachableScopeNoteNotInVerifyFixPrompt: verifyFixPrompt carries only
+// the parent card's title, never its description, so a note pointing at
+// "## Unreachable Criteria" / "## Split" sections it cannot show would be
+// untethered. coderPrompt and fixPrompt, which do carry the description,
+// keep the note.
+func TestUnreachableScopeNoteNotInVerifyFixPrompt(t *testing.T) {
+	assert.NotContains(t, verifyFixPrompt, unreachableScopeNote)
+	assert.Contains(t, coderPrompt, unreachableScopeNote)
+	assert.Contains(t, fixPrompt, unreachableScopeNote)
 }
 
 func TestBuildArtifactHygieneInBothCodingPrompts(t *testing.T) {
@@ -344,7 +358,7 @@ func TestReadRootsBlockEmptyKeepsBriefingSpacing(t *testing.T) {
 		"an empty roots block leaves the plan briefing spacing unchanged")
 
 	review := fmt.Sprintf(reviewBriefing, "", readRootsBlock(nil), "t", "b", fencedDiff("d"), "")
-	assert.Contains(t, review, "survive rebuttal.\n\nPARENT CARD",
+	assert.Contains(t, review, "survive rebuttal.\n\n"+unreachableVerifyInstruction+"\n\nPARENT CARD",
 		"an empty roots block leaves the review briefing spacing unchanged")
 
 	checkpoint := fmt.Sprintf(checkpointBriefing, "", readRootsBlock(nil), "t", "b", "p", "env", fencedDiff("d"))

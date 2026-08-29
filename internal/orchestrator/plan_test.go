@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -1981,6 +1982,48 @@ func TestRecordUnreachable(t *testing.T) {
 	assert.Contains(t, body, "## Unreachable Criteria")
 	assert.Contains(t, body, "staging deploy succeeds")
 	assert.Contains(t, body, "prod metrics show zero errors")
+}
+
+// TestRecordUnreachableCapsLogLines: a plan with more unreachable entries than
+// maxUnreachableLogLines caps the UNREACHABLE-AC add_log lines at that
+// constant (first maxUnreachableLogLines-1 individually, plus one summary
+// line), so a long unreachable list cannot itself burn a large share of CM's
+// 50-entry-capped activity log. The "## Unreachable Criteria" section is not
+// capped - it lists every entry regardless.
+func TestRecordUnreachableCapsLogLines(t *testing.T) {
+	ops := &fakeOps{}
+	o := newRun(planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: true})
+
+	const n = 12
+
+	p := plan{Unreachable: make([]planUnreachable, n)}
+	for i := range p.Unreachable {
+		p.Unreachable[i] = planUnreachable{
+			Criterion: fmt.Sprintf("criterion %d", i),
+			Reason:    fmt.Sprintf("reason %d", i),
+		}
+	}
+
+	o.recordUnreachable(context.Background(), p)
+
+	logLines := 0
+
+	for _, l := range ops.logs {
+		if strings.Contains(l, "UNREACHABLE-AC") {
+			logLines++
+		}
+	}
+
+	assert.Equal(t, maxUnreachableLogLines, logLines,
+		"log lines must be capped at maxUnreachableLogLines regardless of how many entries overflow it")
+
+	body := ops.lastBody()
+	assert.Contains(t, body, "## Unreachable Criteria")
+
+	for i := range p.Unreachable {
+		assert.Contains(t, body, fmt.Sprintf("criterion %d", i),
+			"the section lists every entry even when the log is capped")
+	}
 }
 
 // TestRecordUnreachableNoneIsNoop: a plan with no unreachable entries must not

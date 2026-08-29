@@ -1316,11 +1316,20 @@ func (o *run) createFollowups(ctx context.Context, p plan) error {
 	return nil
 }
 
+// maxUnreachableLogLines caps the individual UNREACHABLE-AC add_log lines
+// recordUnreachable emits, so a plan with an unusually long unreachable list
+// cannot itself burn a large share of CM's 50-entry-capped activity log. The
+// "## Unreachable Criteria" section - the channel review and the HITL gate
+// actually read - always carries every entry regardless of this cap.
+const maxUnreachableLogLines = 10
+
 // recordUnreachable persists the planner's unreachable acceptance criteria
-// where both review and the human can see them: one UNREACHABLE-AC log line
-// per entry (the convention review prompts key on) and a section on the
-// parent body, which is the description slot every review prompt receives.
-// Best-effort like every card-body record.
+// where both review and the human can see them: a "## Unreachable Criteria"
+// section on the parent body - the description slot every review prompt
+// receives, and what review actually keys its VERIFIED/REFUTED exemption on -
+// plus an UNREACHABLE-AC add_log line per entry (capped at
+// maxUnreachableLogLines) as the human-facing audit trail. Best-effort like
+// every card-body record.
 func (o *run) recordUnreachable(ctx context.Context, p plan) {
 	if len(p.Unreachable) == 0 {
 		return
@@ -1331,9 +1340,26 @@ func (o *run) recordUnreachable(ctx context.Context, p plan) {
 	b.WriteString("Acceptance criteria the executor cannot reach from inside this repo's container. " +
 		"Review verifies each claim; verified entries are excluded from the verdict:\n")
 
-	for _, u := range p.Unreachable {
+	// Within the cap, every entry gets its own log line. Past it, only the
+	// first maxUnreachableLogLines-1 do; the rest are covered by one summary
+	// line below, keeping the total at maxUnreachableLogLines regardless of
+	// how far over the cap the plan runs. The section itself (b) always lists
+	// every entry - only the add_log audit trail is capped.
+	logIndividually := len(p.Unreachable)
+	if logIndividually > maxUnreachableLogLines {
+		logIndividually = maxUnreachableLogLines - 1
+	}
+
+	for i, u := range p.Unreachable {
 		fmt.Fprintf(&b, "- %q - %s\n", u.Criterion, u.Reason)
-		o.d.logCard(ctx, "UNREACHABLE-AC: %q - %s", u.Criterion, u.Reason)
+
+		if i < logIndividually {
+			o.d.logCard(ctx, "UNREACHABLE-AC: %q - %s", u.Criterion, u.Reason)
+		}
+	}
+
+	if more := len(p.Unreachable) - logIndividually; more > 0 {
+		o.d.logCard(ctx, "UNREACHABLE-AC: %d more unreachable criteria recorded in the \"## Unreachable Criteria\" section", more)
 	}
 
 	o.recordSection(ctx, "Unreachable Criteria", sectionFrom("Unreachable Criteria", b.String()))
