@@ -1273,6 +1273,46 @@ func TestVerifyParkedTransitionFailureDegradesGracefully(t *testing.T) {
 	assert.Equal(t, 0, ops.count("CompleteTask"))
 }
 
+// TestSplitOverflowMapsToBlocked: a SplitOverflowError takes the verify park's
+// path - transition the card to blocked BEFORE releasing the claim, push the
+// WIP, surface a non-nil error. The plan phase refused to auto-create a
+// follow-up split larger than the cap, so a human must re-cut the card.
+func TestSplitOverflowMapsToBlocked(t *testing.T) {
+	remote := setupBareRemote(t)
+	wsParent := t.TempDir()
+	ops := newFakeOps()
+
+	swapRunOrchestrator(t, func(_ context.Context, d orchestrator.Deps) error {
+		require.NoError(t, os.WriteFile(filepath.Join(d.Cfg.Workspace, "wip.txt"), []byte("partial\n"), 0o644))
+
+		return &orchestrator.SplitOverflowError{Count: 5, Titles: []string{"A", "B", "C", "D", "E"}}
+	})
+
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	res, err := Run(context.Background(), baseSpec(t, remote, wsParent), ops, &scriptedLLM{}, emit, openStdin(t))
+	require.Error(t, err)
+	assert.Equal(t, "error", res.Reason)
+
+	assert.True(t, remoteHasBranch(t, remote, "cm/cmx-001"), "the split proposal is pushed, not discarded")
+	assert.GreaterOrEqual(t, ops.count("ReportPush"), 1, "WIP push reported")
+	assert.Equal(t, 1, ops.count("TransitionCard"), "card transitioned to blocked")
+	assert.Equal(t, 1, ops.count("ReleaseCard"), "claim released on the split-overflow park")
+	assert.Equal(t, 0, ops.count("CompleteTask"), "an overflowed split is never completed")
+
+	calls := ops.ops()
+	transitionIdx := slices.Index(calls, "TransitionCard")
+	releaseIdx := slices.Index(calls, "ReleaseCard")
+
+	require.GreaterOrEqual(t, transitionIdx, 0)
+	require.GreaterOrEqual(t, releaseIdx, 0)
+	assert.Less(t, transitionIdx, releaseIdx, "TransitionCard must happen before ReleaseCard: ownership may be required")
+
+	args := ops.argsOf("TransitionCard")
+	require.Len(t, args, 2)
+	assert.Equal(t, "blocked", args[1])
+}
+
 // TestToolchainMissingTransitionFailureDegradesGracefully: when TransitionCard
 // fails (e.g. the project's board has no in_progress -> blocked transition),
 // the park must still complete exactly like the other park arms - push WIP,

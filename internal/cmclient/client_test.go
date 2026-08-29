@@ -765,6 +765,65 @@ func TestCreateCard_IsError(t *testing.T) {
 	assert.Contains(t, err.Error(), "stub failure: create_card")
 }
 
+func TestCreateTopLevelCard(t *testing.T) {
+	rec := newRecorder()
+	c := newTestClient(t, rec, "")
+
+	id, err := c.CreateTopLevelCard(context.Background(), "demo", "Extract config loader", "## Details\n\nSplit it out.", []string{"CMX-001"})
+	require.NoError(t, err)
+	assert.Equal(t, "CMX-042", id)
+
+	args, ok := rec.get("create_card")
+	require.True(t, ok, "create_card stub should have been called")
+	assert.Equal(t, "demo", args["project"])
+	assert.NotContains(t, args, "parent", "a top-level card must not carry a parent")
+	assert.Equal(t, "Extract config loader", args["title"])
+	assert.Equal(t, "## Details\n\nSplit it out.", args["body"])
+	assert.Equal(t, testAgentID, args["agent_id"])
+	// depends_on must land in args as a slice.
+	depRaw, hasDeps := args["depends_on"]
+	require.True(t, hasDeps, "depends_on must be present")
+	// JSON round-trip makes this []interface{}.
+	deps, ok := depRaw.([]any)
+	require.True(t, ok, "depends_on must be a slice")
+	require.Len(t, deps, 1)
+	assert.Equal(t, "CMX-001", deps[0])
+}
+
+func TestCreateTopLevelCard_NilDependsOnOmitted(t *testing.T) {
+	rec := newRecorder()
+	c := newTestClient(t, rec, "")
+
+	_, err := c.CreateTopLevelCard(context.Background(), "demo", "Title", "body", nil)
+	require.NoError(t, err)
+
+	args, ok := rec.get("create_card")
+	require.True(t, ok)
+	assert.NotContains(t, args, "depends_on", "nil depends_on must be omitted")
+}
+
+func TestCreateTopLevelCard_IsError(t *testing.T) {
+	rec := newRecorder()
+	c := newTestClient(t, rec, "create_card")
+
+	_, err := c.CreateTopLevelCard(context.Background(), "demo", "Title", "", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "stub failure: create_card")
+}
+
+func TestSetAutonomous(t *testing.T) {
+	rec := newRecorder()
+	c := newTestClient(t, rec, "")
+
+	require.NoError(t, c.SetAutonomous(context.Background(), "CMX-001", true))
+
+	args, ok := rec.get("update_card")
+	require.True(t, ok, "update_card stub should have been called")
+	assert.Equal(t, "CMX-001", args["card_id"])
+	assert.Equal(t, testAgentID, args["agent_id"])
+	assert.Equal(t, true, args["autonomous"])
+}
+
 func TestSetPhase(t *testing.T) {
 	rec := newRecorder()
 	c := newTestClient(t, rec, "")

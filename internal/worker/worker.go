@@ -368,6 +368,9 @@ type fsmArgs struct {
 //   - VerifyParkedError: identical to the toolchain arm - push WIP, blocked,
 //     release, fail. The pre-commit gate refused to COMMIT the coder's work as
 //     finished; the push is what keeps that work from dying with the container.
+//   - SplitOverflowError: identical to the verify-park arm - push WIP, blocked,
+//     release, fail. The plan phase refused to auto-create a follow-up split
+//     larger than the cap; a human must re-cut the card.
 //   - any other error: release the claim and return it.
 func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, error) {
 	// Guest bearer tokens are known at worker start, so they join the
@@ -598,6 +601,15 @@ func mapFSMResult(ctx context.Context, a fsmArgs, err error) (Result, error) {
 		// failing command and output; the worker duplicates neither.
 		return parkBlocked(ctx, a, err)
 
+	case isSplitOverflow(err):
+		// Split-overflow park: the plan phase refused to auto-create a
+		// follow-up split larger than the cap. Environmental-shaped like the
+		// toolchain/no-model arms - the card is mis-scoped, not the model's
+		// output - and the orchestrator already wrote the proposed titles to
+		// the card log, so the worker duplicates neither the log nor a model
+		// outcome report.
+		return parkBlocked(ctx, a, err)
+
 	default:
 		releaseQuietly(ctx, a.ops, a.spec.CardID)
 
@@ -708,6 +720,14 @@ func isVerifyParked(err error) bool {
 	var vpe *orchestrator.VerifyParkedError
 
 	return errors.As(err, &vpe)
+}
+
+// isSplitOverflow reports whether err is (or wraps) the orchestrator's
+// plan-split overflow sentinel.
+func isSplitOverflow(err error) bool {
+	var soe *orchestrator.SplitOverflowError
+
+	return errors.As(err, &soe)
 }
 
 // errorsIsCanceled reports whether err is (or wraps) context cancellation, which

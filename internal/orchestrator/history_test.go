@@ -62,6 +62,34 @@ func TestFormatPlanReadable(t *testing.T) {
 	assert.Contains(t, got, "Create go.mod and a sysinfo package.")
 }
 
+func TestFormatPlannedPlanWithFollowups(t *testing.T) {
+	p := plan{
+		CardTier: "moderate",
+		Subtasks: []planSubtask{{Title: "Wire the endpoint", Tier: "simple"}},
+		FollowupCards: []planFollowup{
+			{Title: "Extract config loader", DependsOnOriginal: true},
+			{Title: "Add config docs", DependsOn: []int{0}},
+		},
+	}
+
+	got := formatPlannedPlan(p)
+
+	assert.Contains(t, got, "### Follow-up cards")
+	assert.Contains(t, got, "inheriting this card's autonomous flag")
+	assert.Contains(t, got, "Follow-up #1: Extract config loader")
+	assert.Contains(t, got, "depends on: this card")
+	assert.Contains(t, got, "Follow-up #2: Add config docs")
+	assert.Contains(t, got, "depends on: follow-up #1")
+}
+
+func TestFormatPlannedPlanNoFollowupsOmitsSection(t *testing.T) {
+	p := plan{CardTier: "simple", Subtasks: []planSubtask{{Title: "Only task", Tier: "simple"}}}
+
+	got := formatPlannedPlan(p)
+
+	assert.NotContains(t, got, "Follow-up")
+}
+
 func TestRecordReview_RoundHeadingsAndVerdict(t *testing.T) {
 	o := &run{d: Deps{Ops: &fakeOps{}, Cfg: Config{CardID: "CARD-1"}}, body: "Task."}
 	ops := o.d.Ops.(*fakeOps)

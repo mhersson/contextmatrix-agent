@@ -428,6 +428,23 @@ func (s *stubOps) CreateCard(_ context.Context, project, parent, title, _ string
 	return id, nil
 }
 
+func (s *stubOps) CreateTopLevelCard(_ context.Context, project, title, _ string, dependsOn []string) (string, error) {
+	s.mu.Lock()
+	s.nextID++
+	id := "CMX-SUB-" + itoa(s.nextID)
+	s.createCalls = append(s.createCalls, createRecord{
+		project:    project,
+		title:      title,
+		dependsOn:  append([]string(nil), dependsOn...),
+		returnedID: id,
+	})
+	s.mu.Unlock()
+
+	s.record("CreateTopLevelCard", project, title)
+
+	return id, nil
+}
+
 func (s *stubOps) SetPhase(_ context.Context, _, phase string) error {
 	s.mu.Lock()
 	s.phases = append(s.phases, phase)
@@ -444,6 +461,12 @@ func (s *stubOps) UpdateCardBody(_ context.Context, _, body string) error {
 	s.mu.Unlock()
 
 	s.record("UpdateCardBody", body)
+
+	return nil
+}
+
+func (s *stubOps) SetAutonomous(_ context.Context, cardID string, autonomous bool) error {
+	s.record("SetAutonomous", cardID, autonomous)
 
 	return nil
 }

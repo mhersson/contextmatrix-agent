@@ -1775,6 +1775,108 @@ func TestCreateSubtasksPersistsBothAxes(t *testing.T) {
 	assert.Equal(t, "critical", o.subtasks[0].PlannerBar)
 }
 
+// TestCreateFollowups: two followups, [0] chains on the original card, [1]
+// chains on [0]. The original card is autonomous, so both split-out cards
+// must inherit the flag, and the parent card body records the split.
+func TestCreateFollowups(t *testing.T) {
+	ops := &fakeOps{createdTopLevelIDs: []string{"CARD-2", "CARD-3"}}
+	o := newRun(planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: true})
+
+	p := plan{
+		FollowupCards: []planFollowup{
+			{Title: "Extract config loader", Description: "Split out the config loader.", DependsOnOriginal: true},
+			{Title: "Add config docs", Description: "Document the new loader.", DependsOn: []int{0}},
+		},
+	}
+
+	require.NoError(t, o.createFollowups(context.Background(), p))
+
+	require.Len(t, ops.createTopLevelCardArgs, 2)
+	assert.Equal(t, "Extract config loader", ops.createTopLevelCardArgs[0].title)
+	assert.Equal(t, "Split out the config loader.", ops.createTopLevelCardArgs[0].body)
+	assert.Equal(t, []string{"CARD-1"}, ops.createTopLevelCardArgs[0].dependsOn,
+		"the first followup chains on the original card being planned")
+
+	assert.Equal(t, "Add config docs", ops.createTopLevelCardArgs[1].title)
+	assert.Equal(t, []string{"CARD-2"}, ops.createTopLevelCardArgs[1].dependsOn,
+		"the second followup chains on the first followup's real card ID")
+
+	require.Len(t, ops.setAutonomousCalls, 2)
+	assert.Equal(t, "CARD-2", ops.setAutonomousCalls[0].cardID)
+	assert.True(t, ops.setAutonomousCalls[0].autonomous)
+	assert.Equal(t, "CARD-3", ops.setAutonomousCalls[1].cardID)
+	assert.True(t, ops.setAutonomousCalls[1].autonomous)
+
+	require.NotEmpty(t, ops.logs)
+	lastLog := ops.logs[len(ops.logs)-1]
+	assert.Contains(t, lastLog, "CARD-2")
+	assert.Contains(t, lastLog, "CARD-3")
+
+	body := ops.lastBody()
+	assert.Contains(t, body, "## Split")
+	assert.Contains(t, body, "CARD-2")
+	assert.Contains(t, body, "CARD-3")
+}
+
+// TestCreateFollowupsNotAutonomous: a non-autonomous original card must not
+// flip the flag on the split-out cards - they stay HITL like the original.
+func TestCreateFollowupsNotAutonomous(t *testing.T) {
+	ops := &fakeOps{createdTopLevelIDs: []string{"CARD-2"}}
+	o := newRun(planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: false})
+
+	p := plan{
+		FollowupCards: []planFollowup{
+			{Title: "Extract config loader", Description: "Split out the config loader.", DependsOnOriginal: true},
+		},
+	}
+
+	require.NoError(t, o.createFollowups(context.Background(), p))
+
+	require.Len(t, ops.createTopLevelCardArgs, 1)
+	assert.Empty(t, ops.setAutonomousCalls, "a non-autonomous original must not autonomize its followups")
+}
+
+// TestCreateFollowupsOverflowParks: a plan proposing more followups than
+// maxFollowupCards must park the run instead of mutating the board - no card
+// is created, and the returned error is a park sentinel.
+func TestCreateFollowupsOverflowParks(t *testing.T) {
+	ops := &fakeOps{}
+	o := newRun(planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: true})
+
+	followups := []planFollowup{
+		{Title: "Followup 1", Description: "d1"},
+		{Title: "Followup 2", Description: "d2"},
+		{Title: "Followup 3", Description: "d3"},
+		{Title: "Followup 4", Description: "d4"},
+		{Title: "Followup 5", Description: "d5"},
+	}
+
+	err := o.createFollowups(context.Background(), plan{FollowupCards: followups})
+	require.Error(t, err)
+
+	var soe *SplitOverflowError
+
+	require.ErrorAs(t, err, &soe)
+	assert.Equal(t, 5, soe.Count)
+	assert.Len(t, soe.Titles, 5)
+
+	assert.Empty(t, ops.createTopLevelCardArgs, "overflow must not mutate the board")
+	assert.True(t, isParkError(err), "the FSM must stop the run on this sentinel like the other park errors")
+}
+
+// TestCreateFollowupsNoneIsNoop: a plan with no followups must not touch Ops
+// at all - the common case (no split) stays byte-identical to before.
+func TestCreateFollowupsNoneIsNoop(t *testing.T) {
+	ops := &fakeOps{}
+	o := newRun(planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: true})
+
+	require.NoError(t, o.createFollowups(context.Background(), plan{}))
+
+	assert.Empty(t, ops.createTopLevelCardArgs)
+	assert.Empty(t, ops.setAutonomousCalls)
+	assert.Empty(t, ops.recorded(), "a no-op split must not touch Ops at all")
+}
+
 // The plan JSON wire contract is deliberately untouched, so parsePlan keeps
 // rejecting an unrecognised bar. The bar is the SILENT axis: one repair turn on
 // the loud channel is the price of protecting the axis with no other defence.

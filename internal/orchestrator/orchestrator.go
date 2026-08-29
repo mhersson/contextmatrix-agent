@@ -40,8 +40,10 @@ type Ops interface {
 	Heartbeat(ctx context.Context, cardID string) error
 	GetTaskContext(ctx context.Context, cardID string, includeImages bool) (cmclient.TaskContext, error)
 	CreateCard(ctx context.Context, project, parent, title, body string, dependsOn []string) (string, error)
+	CreateTopLevelCard(ctx context.Context, project, title, body string, dependsOn []string) (string, error)
 	SetPhase(ctx context.Context, cardID, phase string) error
 	UpdateCardBody(ctx context.Context, cardID, body string) error
+	SetAutonomous(ctx context.Context, cardID string, autonomous bool) error
 	TransitionCard(ctx context.Context, cardID, state string) error
 	StartReview(ctx context.Context, cardID string) error
 	IncrementReviewAttempts(ctx context.Context, cardID string) (int, error)
@@ -753,6 +755,13 @@ func (o *run) execute(ctx context.Context) error {
 				o.d.logCard(ctx, "%s", verifyParkedLogMessage(vpe))
 			}
 
+			var soe *SplitOverflowError
+			if errors.As(err, &soe) {
+				// Split-overflow park: same shape as the other arms - log
+				// best-effort, then stop without entering the next phase.
+				o.d.logCard(ctx, "%s", splitOverflowLogMessage(soe))
+			}
+
 			return err
 		}
 	}
@@ -859,6 +868,19 @@ func verifyParkOutputTail(out string, n int) string {
 	}
 
 	return verifyParkOutputElision + tail
+}
+
+// splitOverflowLogMessage is the canonical card-log line for a split-overflow
+// park: the count, the cap, and the proposed titles so a human can re-cut the
+// card without re-running the planner.
+func splitOverflowLogMessage(soe *SplitOverflowError) string {
+	titles := strings.Join(soe.Titles, "; ")
+	if len(titles) > 1500 {
+		titles = titles[:1500] + "..."
+	}
+
+	return fmt.Sprintf("plan proposes %d follow-up cards (max %d) - parking; re-cut this card manually. Proposed: %s",
+		soe.Count, maxFollowupCards, titles)
 }
 
 // truncateBytes caps s at n BYTES, keeping its head and cutting on a rune

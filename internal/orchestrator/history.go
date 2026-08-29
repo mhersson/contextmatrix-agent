@@ -185,6 +185,30 @@ func formatPlannedPlan(p plan) string {
 		b.WriteString("\n")
 	}
 
+	if len(p.FollowupCards) > 0 {
+		b.WriteString("### Follow-up cards\n")
+		b.WriteString("These deliverables will be created as separate cards, inheriting this card's autonomous flag, once the plan is approved:\n\n")
+
+		for i, fc := range p.FollowupCards {
+			var deps []string
+
+			if fc.DependsOnOriginal {
+				deps = append(deps, "this card")
+			}
+
+			for _, dep := range fc.DependsOn {
+				deps = append(deps, fmt.Sprintf("follow-up #%d", dep+1))
+			}
+
+			depsStr := "none"
+			if len(deps) > 0 {
+				depsStr = strings.Join(deps, ", ")
+			}
+
+			fmt.Fprintf(&b, "- Follow-up #%d: %s _(depends on: %s)_\n", i+1, fc.Title, depsStr)
+		}
+	}
+
 	return strings.TrimRight(b.String(), "\n")
 }
 

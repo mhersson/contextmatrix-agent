@@ -39,8 +39,6 @@ type planSubtask struct {
 // maxFollowupCards caps a plan-time deliverable split. A split larger than
 // this means the card is mis-scoped for automatic handling: the run parks
 // with the proposal instead of mutating the board at scale.
-//
-//nolint:unused // consumed by the plan step that enforces the followup-split cap
 const maxFollowupCards = 4
 
 // planFollowup is one extra deliverable the planner split out of the card:
@@ -571,6 +569,18 @@ func isBudgetError(err error) bool {
 	return errors.As(err, &be)
 }
 
+// SplitOverflowError parks a run whose plan proposes more follow-up cards
+// than maxFollowupCards: a split that large means the card is mis-scoped and
+// a human must re-cut it - automatic board mutation at that scale is wrong.
+type SplitOverflowError struct {
+	Count  int
+	Titles []string
+}
+
+func (e *SplitOverflowError) Error() string {
+	return fmt.Sprintf("plan proposes %d follow-up cards (max %d) - card is mis-scoped", e.Count, maxFollowupCards)
+}
+
 // isParkError reports whether err is one of the sentinels execute stops the run
 // on rather than advancing to the next phase (orchestrator.go's park arms).
 // A caller that swallows one of these returns nil, so the run walks into the
@@ -584,10 +594,11 @@ func isParkError(err error) bool {
 		tme *ToolchainMissingError
 		nme *NoModelError
 		vpe *VerifyParkedError
+		soe *SplitOverflowError
 	)
 
 	return errors.As(err, &be) || errors.As(err, &cle) || errors.As(err, &mte) ||
-		errors.As(err, &tme) || errors.As(err, &nme) || errors.As(err, &vpe)
+		errors.As(err, &tme) || errors.As(err, &nme) || errors.As(err, &vpe) || errors.As(err, &soe)
 }
 
 // runDiagnose runs one read-only investigation pass on the orchestrator model
@@ -1177,6 +1188,69 @@ func presentPlan(p plan) string {
 		"\n\nApprove to start execution, or tell me what you'd like to adjust."
 }
 
+// createFollowups creates one top-level card per plan followup - the
+// deliverables the planner split out - copying the original card's autonomous
+// flag, wiring depends_on to the original card and earlier followups, then
+// recording the split on the original card body and log. More followups than
+// maxFollowupCards parks the run instead of mutating the board at scale.
+func (o *run) createFollowups(ctx context.Context, p plan) error {
+	if len(p.FollowupCards) == 0 {
+		return nil
+	}
+
+	d := o.d
+	cfg := d.Cfg
+
+	if len(p.FollowupCards) > maxFollowupCards {
+		titles := make([]string, 0, len(p.FollowupCards))
+		for _, fc := range p.FollowupCards {
+			titles = append(titles, fc.Title)
+		}
+
+		return &SplitOverflowError{Count: len(p.FollowupCards), Titles: titles}
+	}
+
+	ids := make([]string, len(p.FollowupCards))
+
+	for i, fc := range p.FollowupCards {
+		var depIDs []string
+
+		if fc.DependsOnOriginal {
+			depIDs = append(depIDs, cfg.CardID)
+		}
+
+		for _, dep := range fc.DependsOn {
+			depIDs = append(depIDs, ids[dep])
+		}
+
+		id, err := d.Ops.CreateTopLevelCard(ctx, cfg.Project, fc.Title, fc.Description, depIDs)
+		if err != nil {
+			return fmt.Errorf("create follow-up card %q: %w", fc.Title, err)
+		}
+
+		if o.tc.Autonomous {
+			if err := d.Ops.SetAutonomous(ctx, id, true); err != nil {
+				return fmt.Errorf("set follow-up card %s autonomous: %w", id, err)
+			}
+		}
+
+		ids[i] = id
+	}
+
+	var b strings.Builder
+
+	b.WriteString("Deliverables split out of this card at plan time - their scope, including any acceptance criteria that belong to them, is NOT part of this card:\n")
+
+	for i, fc := range p.FollowupCards {
+		fmt.Fprintf(&b, "- %s: %s\n", ids[i], fc.Title)
+	}
+
+	o.recordSection(ctx, "Split", sectionFrom("Split", b.String()))
+	d.logCard(ctx, "plan split: created %d follow-up card(s): %s", len(ids), strings.Join(ids, ", "))
+
+	return nil
+}
+
 // createSubtasks creates one card per plan subtask in order, mapping each
 // depends_on index to the real card ID returned for that earlier subtask, and
 // records the resulting refs (plus the card-level sizing) on the run struct.
@@ -1187,6 +1261,10 @@ func presentPlan(p plan) string {
 // guard makes re-entry idempotent: an existing card's ID is returned and used
 // as the dependency target exactly like a freshly created one.
 func (o *run) createSubtasks(ctx context.Context, p plan) error {
+	if err := o.createFollowups(ctx, p); err != nil {
+		return err
+	}
+
 	d := o.d
 	cfg := d.Cfg
 
