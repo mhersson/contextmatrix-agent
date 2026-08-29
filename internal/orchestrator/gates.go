@@ -1253,8 +1253,7 @@ func (o *run) triageCopilot(
 		return nil, o.parkGates(ctx, st, gatesCopilotTriageBudgetParkReason)
 	}
 
-	model := resolveOrchestratorModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
-		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel)
+	model := o.emitOrchestratorModel(ctx, "pr_gates")
 
 	task := fmt.Sprintf(copilotTriagePrompt, o.grounding, o.tc.Title, o.taskDescription,
 		copilotReviewSummary(review), formatCopilotComments(comments))

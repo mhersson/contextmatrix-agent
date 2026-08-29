@@ -874,16 +874,18 @@ func TestResolveOrchestratorModel(t *testing.T) {
 
 	t.Run("card pin honoured when catalog-resolvable", func(t *testing.T) {
 		ops := &fakeOps{}
-		got := resolveOrchestratorModel(context.Background(), reg, emit, ops, "CARD-1",
+		got, src := resolveOrchestratorModel(context.Background(), reg, emit, ops, "CARD-1",
 			"pinned/model", "payload/model", "default/model")
 		assert.Equal(t, "pinned/model", got)
+		assert.Equal(t, registry.SourcePinned, src, "a resolvable pin reports pinned provenance")
 	})
 
 	t.Run("unresolvable pin falls back to payload model with warning", func(t *testing.T) {
 		ops := &fakeOps{}
-		got := resolveOrchestratorModel(context.Background(), reg, emit, ops, "CARD-1",
+		got, src := resolveOrchestratorModel(context.Background(), reg, emit, ops, "CARD-1",
 			"ghost/model", "payload/model", "default/model")
 		assert.Equal(t, "payload/model", got)
+		assert.Equal(t, registry.SourceDefault, src, "an unresolvable pin falls back to payload default")
 
 		// A warning note must be logged to the card - specifically an AddLog
 		// entry naming the unresolvable pin.
@@ -902,16 +904,18 @@ func TestResolveOrchestratorModel(t *testing.T) {
 
 	t.Run("no pin uses payload model", func(t *testing.T) {
 		ops := &fakeOps{}
-		got := resolveOrchestratorModel(context.Background(), reg, emit, ops, "CARD-1",
+		got, src := resolveOrchestratorModel(context.Background(), reg, emit, ops, "CARD-1",
 			"", "payload/model", "default/model")
 		assert.Equal(t, "payload/model", got)
+		assert.Equal(t, registry.SourceDefault, src)
 	})
 
 	t.Run("no pin no payload uses default", func(t *testing.T) {
 		ops := &fakeOps{}
-		got := resolveOrchestratorModel(context.Background(), reg, emit, ops, "CARD-1",
+		got, src := resolveOrchestratorModel(context.Background(), reg, emit, ops, "CARD-1",
 			"", "", "default/model")
 		assert.Equal(t, "default/model", got)
+		assert.Equal(t, registry.SourceDefault, src)
 	})
 }
 

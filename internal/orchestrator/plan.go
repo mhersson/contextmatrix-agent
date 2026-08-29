@@ -453,6 +453,9 @@ func resolvePin(reg *registry.Registry, pin string) bool {
 //  3. payload (CM's default_model from the trigger), if set;
 //  4. else the serve-config default.
 //
+// It also returns the provenance so callers can emit a model_selected event
+// without re-deriving the precedence tree.
+//
 // A best-effort card-log failure is swallowed - the warning is advisory.
 func resolveOrchestratorModel(
 	ctx context.Context,
@@ -460,10 +463,10 @@ func resolveOrchestratorModel(
 	emit *events.Emitter,
 	ops Ops,
 	cardID, pinned, payload, fallback string,
-) string {
+) (model string, source registry.PickSource) {
 	if pinned != "" {
 		if resolvePin(reg, pinned) {
-			return pinned
+			return pinned, registry.SourcePinned
 		}
 
 		target := payload
@@ -487,10 +490,10 @@ func resolveOrchestratorModel(
 	}
 
 	if payload != "" {
-		return payload
+		return payload, registry.SourceDefault
 	}
 
-	return fallback
+	return fallback, registry.SourceDefault
 }
 
 // decisionTier is the fixed bar every orchestrator decision phase selects on.
@@ -531,7 +534,7 @@ func resolveDecisionModel(
 	cardID, pinned, payload, fallback string,
 	exclude map[string]bool,
 ) (registry.Pick, registry.SelectionReport) {
-	base := resolveOrchestratorModel(ctx, reg, emit, ops, cardID, pinned, payload, fallback)
+	base, _ := resolveOrchestratorModel(ctx, reg, emit, ops, cardID, pinned, payload, fallback)
 
 	// Without a registry there is no ladder and no tier, so there is no
 	// selection to record: base comes back unbuilt (OK false) and the caller

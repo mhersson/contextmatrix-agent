@@ -513,6 +513,83 @@ func TestCandidateRepickRecordsTheSubtaskItRepickedFor(t *testing.T) {
 	assert.Equal(t, "SUB-1", sels[1].Subtask, "and the subtask that replacement runs")
 }
 
+// TestEmitOrchestratorModelSelectionProvenance is a focused unit test covering
+// the full provenance matrix of emitOrchestratorModelSelection: a catalog-
+// resolvable pin, an unresolvable pin falling back to the payload default,
+// payload default alone, and serve-config fallback. Every case asserts the
+// resolved model, the source, and the tier_requested field.
+func TestEmitOrchestratorModelSelectionProvenance(t *testing.T) {
+	tests := []struct {
+		name        string
+		pinned      string
+		payload     string
+		fallback    string
+		wantModel   string
+		wantSource  string
+		wantMetTier string
+	}{
+		{
+			name:        "catalog-resolvable pin",
+			pinned:      "pinned/model",
+			payload:     "payload/model",
+			fallback:    "default/model",
+			wantModel:   "pinned/model",
+			wantSource:  "pinned",
+			wantMetTier: "",
+		},
+		{
+			name:        "unresolvable pin falls back to payload",
+			pinned:      "ghost/model",
+			payload:     "payload/model",
+			fallback:    "default/model",
+			wantModel:   "payload/model",
+			wantSource:  "capable-default",
+			wantMetTier: "",
+		},
+		{
+			name:        "no pin uses payload default",
+			pinned:      "",
+			payload:     "payload/model",
+			fallback:    "default/model",
+			wantModel:   "payload/model",
+			wantSource:  "capable-default",
+			wantMetTier: "",
+		},
+		{
+			name:        "no pin no payload uses serve default",
+			pinned:      "",
+			payload:     "",
+			fallback:    "default/model",
+			wantModel:   "default/model",
+			wantSource:  "capable-default",
+			wantMetTier: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var transcript bytes.Buffer
+
+			emit := events.NewEmitter(nil, &transcript)
+			reg := planTestRegistry()
+
+			model := emitOrchestratorModelSelection(context.Background(), reg, emit, &fakeOps{}, "CARD-1",
+				tt.pinned, tt.payload, tt.fallback, "off-ladder")
+
+			assert.Equal(t, tt.wantModel, model, "resolved model")
+
+			sels := selectionsForPhase(modelSelections(t, &transcript), "off-ladder")
+			require.Len(t, sels, 1, "exactly one model_selected event")
+
+			assert.Equal(t, tt.wantModel, sels[0].Model, "event model")
+			assert.Equal(t, tt.wantSource, sels[0].Source, "source")
+			assert.Empty(t, sels[0].Subtask, "card-level phase has no subtask")
+			assert.Equal(t, "complex", sels[0].TierRequested, "off-ladder phases request the complex bar")
+			assert.Equal(t, tt.wantMetTier, sels[0].MetTier, "met tier reflects an off-ladder pick")
+		})
+	}
+}
+
 // TestWalkedDownExcludesOffLadderPicksByDesign states the rule in one place,
 // over the whole source space, rather than leaving it inferable only from the
 // two recording sites that consume it.
