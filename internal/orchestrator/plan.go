@@ -36,11 +36,41 @@ type planSubtask struct {
 	Tier        string `json:"tier"`
 }
 
-// plan is the planner's structured final output: the overall card tier plus the
-// ordered subtask list. depends_on indices reference earlier entries only.
+// maxFollowupCards caps a plan-time deliverable split. A split larger than
+// this means the card is mis-scoped for automatic handling: the run parks
+// with the proposal instead of mutating the board at scale.
+const maxFollowupCards = 4
+
+// planFollowup is one extra deliverable the planner split out of the card:
+// created by the orchestrator as a new TOP-LEVEL card (not a subtask), with a
+// self-contained description. DependsOn indexes earlier followup entries;
+// DependsOnOriginal additionally chains on the card being planned.
+type planFollowup struct {
+	Title             string `json:"title"`
+	Description       string `json:"description"`
+	DependsOn         []int  `json:"depends_on"`
+	DependsOnOriginal bool   `json:"depends_on_original"`
+}
+
+// planUnreachable is one acceptance criterion the planner judged unreachable
+// from inside the container: it needs an input that does not exist in the
+// repo, or a write target outside it. Recorded on the card for review to
+// verify and exclude - never silently dropped.
+type planUnreachable struct {
+	Criterion string `json:"criterion"`
+	Reason    string `json:"reason"`
+}
+
+// plan is the planner's structured final output: the overall card tier, the
+// ordered subtask list, an optional list of extra deliverables split out as
+// followup_cards, and an optional list of acceptance criteria judged
+// unreachable_criteria. depends_on indices (subtasks and followup cards each
+// index their own array) reference earlier entries only.
 type plan struct {
-	CardTier string        `json:"card_tier"`
-	Subtasks []planSubtask `json:"subtasks"`
+	CardTier      string            `json:"card_tier"`
+	Subtasks      []planSubtask     `json:"subtasks"`
+	FollowupCards []planFollowup    `json:"followup_cards"`
+	Unreachable   []planUnreachable `json:"unreachable_criteria"`
 }
 
 // subtaskRef is a created subtask carried on the run struct for the execute
@@ -64,8 +94,13 @@ type subtaskRef struct {
 }
 
 // parsePlan extracts a JSON object from s (tolerating prose / code-fence wrap)
-// and validates it: 1..maxSubtasks subtasks, valid card and subtask tiers, and
-// depends_on indices that reference only earlier subtasks (no self/forward refs).
+// and validates it: 1..maxSubtasks subtasks, valid card and subtask tiers,
+// depends_on indices that reference only earlier subtasks (no self/forward
+// refs), non-empty followup_cards titles/descriptions with depends_on
+// indices referencing only earlier followup entries, and non-empty
+// unreachable_criteria criterion text. followup_cards and
+// unreachable_criteria are both optional and unvalidated against
+// maxFollowupCards - the cap is enforced where the plan is consumed, not here.
 func parsePlan(s string) (plan, error) {
 	raw, ok := extractJSON(s)
 	if !ok {
@@ -106,6 +141,28 @@ func parsePlan(s string) (plan, error) {
 			if dep >= i {
 				return plan{}, fmt.Errorf("subtask %d depends_on index %d must reference an earlier subtask", i, dep)
 			}
+		}
+	}
+
+	for i, fc := range p.FollowupCards {
+		if strings.TrimSpace(fc.Title) == "" {
+			return plan{}, fmt.Errorf("followup card %d has an empty title", i)
+		}
+
+		if strings.TrimSpace(fc.Description) == "" {
+			return plan{}, fmt.Errorf("followup card %d has an empty description", i)
+		}
+
+		for _, dep := range fc.DependsOn {
+			if dep < 0 || dep >= i {
+				return plan{}, fmt.Errorf("followup card %d depends_on index %d must reference an earlier followup", i, dep)
+			}
+		}
+	}
+
+	for i, u := range p.Unreachable {
+		if strings.TrimSpace(u.Criterion) == "" {
+			return plan{}, fmt.Errorf("unreachable criterion %d is empty", i)
 		}
 	}
 
@@ -512,6 +569,18 @@ func isBudgetError(err error) bool {
 	return errors.As(err, &be)
 }
 
+// SplitOverflowError parks a run whose plan proposes more follow-up cards
+// than maxFollowupCards: a split that large means the card is mis-scoped and
+// a human must re-cut it - automatic board mutation at that scale is wrong.
+type SplitOverflowError struct {
+	Count  int
+	Titles []string
+}
+
+func (e *SplitOverflowError) Error() string {
+	return fmt.Sprintf("plan proposes %d follow-up cards (max %d) - card is mis-scoped", e.Count, maxFollowupCards)
+}
+
 // isParkError reports whether err is one of the sentinels execute stops the run
 // on rather than advancing to the next phase (orchestrator.go's park arms).
 // A caller that swallows one of these returns nil, so the run walks into the
@@ -525,10 +594,11 @@ func isParkError(err error) bool {
 		tme *ToolchainMissingError
 		nme *NoModelError
 		vpe *VerifyParkedError
+		soe *SplitOverflowError
 	)
 
 	return errors.As(err, &be) || errors.As(err, &cle) || errors.As(err, &mte) ||
-		errors.As(err, &tme) || errors.As(err, &nme) || errors.As(err, &vpe)
+		errors.As(err, &tme) || errors.As(err, &nme) || errors.As(err, &vpe) || errors.As(err, &soe)
 }
 
 // runDiagnose runs one read-only investigation pass on the orchestrator model
@@ -1118,6 +1188,183 @@ func presentPlan(p plan) string {
 		"\n\nApprove to start execution, or tell me what you'd like to adjust."
 }
 
+// splitSectionEntry matches one "- <cardID>: <title>" line in a recorded
+// "## Split" section - the format formatSplitSection writes.
+var splitSectionEntry = regexp.MustCompile(`^-\s+(\S+):\s+(.+)$`)
+
+// normalizeFollowupTitle trims and lowercases a followup title for dedupe
+// comparison, matching CM's own subtask-dedupe normalization (trimmed,
+// case-insensitive) so a re-planned followup with the identical title is
+// recognized as the same card regardless of casing or stray whitespace.
+func normalizeFollowupTitle(title string) string {
+	return strings.ToLower(strings.TrimSpace(title))
+}
+
+// parseSplitSection reads a previously recorded "## Split" section (see
+// formatSplitSection) out of body and returns its entries keyed by
+// normalized title. Returns an empty map when no section is present or none
+// of its lines parse - a fresh run (no prior split) is the common case.
+func parseSplitSection(body string) map[string]string {
+	out := map[string]string{}
+
+	sec := extractSection(body, "Split")
+	if sec == "" {
+		return out
+	}
+
+	for _, line := range strings.Split(sec, "\n") {
+		m := splitSectionEntry.FindStringSubmatch(strings.TrimSpace(line))
+		if m == nil {
+			continue
+		}
+
+		out[normalizeFollowupTitle(m[2])] = m[1]
+	}
+
+	return out
+}
+
+// formatSplitSection renders the "## Split" section body for the given
+// followups and their (already resolved) real card IDs - index-aligned,
+// same length. Called with a growing prefix of both slices as followups are
+// created, so each call's output is a strict superset of the last.
+func formatSplitSection(followups []planFollowup, ids []string) string {
+	var b strings.Builder
+
+	b.WriteString("Deliverables split out of this card at plan time - their scope, including any acceptance criteria that belong to them, is NOT part of this card:\n")
+
+	for i, fc := range followups {
+		fmt.Fprintf(&b, "- %s: %s\n", ids[i], fc.Title)
+	}
+
+	return b.String()
+}
+
+// createFollowups creates one top-level card per plan followup - the
+// deliverables the planner split out - copying the original card's autonomous
+// flag, wiring depends_on to the original card and earlier followups, then
+// recording the split on the original card body and log. More followups than
+// maxFollowupCards parks the run instead of mutating the board at scale.
+//
+// Resume-safe: a followup whose title already appears in the claim-time
+// body's "## Split" section (written by an earlier, interrupted run of this
+// same method) is not re-created - its recorded card ID is reused for
+// depends_on wiring and for SetAutonomous, which is re-asserted unconditionally
+// so a crash between CreateTopLevelCard and SetAutonomous on the prior attempt
+// still converges. The section is upserted after each followup is resolved
+// (created or reused), so a card is durably on-record before the next
+// followup risks failing - a mid-loop error leaves every card created so far
+// visible on the board and in the ## Split note, not orphaned.
+func (o *run) createFollowups(ctx context.Context, p plan) error {
+	if len(p.FollowupCards) == 0 {
+		return nil
+	}
+
+	d := o.d
+	cfg := d.Cfg
+
+	if len(p.FollowupCards) > maxFollowupCards {
+		titles := make([]string, 0, len(p.FollowupCards))
+		for _, fc := range p.FollowupCards {
+			titles = append(titles, fc.Title)
+		}
+
+		return &SplitOverflowError{Count: len(p.FollowupCards), Titles: titles}
+	}
+
+	existing := parseSplitSection(o.tc.Description)
+
+	ids := make([]string, len(p.FollowupCards))
+
+	for i, fc := range p.FollowupCards {
+		var depIDs []string
+
+		if fc.DependsOnOriginal {
+			depIDs = append(depIDs, cfg.CardID)
+		}
+
+		for _, dep := range fc.DependsOn {
+			depIDs = append(depIDs, ids[dep])
+		}
+
+		id, reused := existing[normalizeFollowupTitle(fc.Title)]
+		if !reused {
+			var err error
+
+			id, err = d.Ops.CreateTopLevelCard(ctx, cfg.Project, fc.Title, fc.Description, depIDs)
+			if err != nil {
+				return fmt.Errorf("create follow-up card %q: %w", fc.Title, err)
+			}
+		}
+
+		ids[i] = id
+
+		// Durable before the next followup risks failing: the section grows
+		// by exactly this entry, so a mid-loop error still leaves everything
+		// created so far on record.
+		o.recordSection(ctx, "Split", sectionFrom("Split", formatSplitSection(p.FollowupCards[:i+1], ids[:i+1])))
+
+		if o.tc.Autonomous {
+			if err := d.Ops.SetAutonomous(ctx, id, true); err != nil {
+				return fmt.Errorf("set follow-up card %s autonomous: %w", id, err)
+			}
+		}
+	}
+
+	d.logCard(ctx, "plan split: created %d follow-up card(s): %s", len(ids), strings.Join(ids, ", "))
+
+	return nil
+}
+
+// maxUnreachableLogLines caps the individual UNREACHABLE-AC add_log lines
+// recordUnreachable emits, so a plan with an unusually long unreachable list
+// cannot itself burn a large share of CM's 50-entry-capped activity log. The
+// "## Unreachable Criteria" section - the channel review and the HITL gate
+// actually read - always carries every entry regardless of this cap.
+const maxUnreachableLogLines = 10
+
+// recordUnreachable persists the planner's unreachable acceptance criteria
+// where both review and the human can see them: a "## Unreachable Criteria"
+// section on the parent body - the description slot every review prompt
+// receives, and what review actually keys its VERIFIED/REFUTED exemption on -
+// plus an UNREACHABLE-AC add_log line per entry (capped at
+// maxUnreachableLogLines) as the human-facing audit trail. Best-effort like
+// every card-body record.
+func (o *run) recordUnreachable(ctx context.Context, p plan) {
+	if len(p.Unreachable) == 0 {
+		return
+	}
+
+	var b strings.Builder
+
+	b.WriteString("Acceptance criteria the executor cannot reach from inside this repo's container. " +
+		"Review verifies each claim; verified entries are excluded from the verdict:\n")
+
+	// Within the cap, every entry gets its own log line. Past it, only the
+	// first maxUnreachableLogLines-1 do; the rest are covered by one summary
+	// line below, keeping the total at maxUnreachableLogLines regardless of
+	// how far over the cap the plan runs. The section itself (b) always lists
+	// every entry - only the add_log audit trail is capped.
+	logIndividually := len(p.Unreachable)
+	if logIndividually > maxUnreachableLogLines {
+		logIndividually = maxUnreachableLogLines - 1
+	}
+
+	for i, u := range p.Unreachable {
+		fmt.Fprintf(&b, "- %q - %s\n", u.Criterion, u.Reason)
+
+		if i < logIndividually {
+			o.d.logCard(ctx, "UNREACHABLE-AC: %q - %s", u.Criterion, u.Reason)
+		}
+	}
+
+	if more := len(p.Unreachable) - logIndividually; more > 0 {
+		o.d.logCard(ctx, "UNREACHABLE-AC: %d more unreachable criteria recorded in the \"## Unreachable Criteria\" section", more)
+	}
+
+	o.recordSection(ctx, "Unreachable Criteria", sectionFrom("Unreachable Criteria", b.String()))
+}
+
 // createSubtasks creates one card per plan subtask in order, mapping each
 // depends_on index to the real card ID returned for that earlier subtask, and
 // records the resulting refs (plus the card-level sizing) on the run struct.
@@ -1128,6 +1375,12 @@ func presentPlan(p plan) string {
 // guard makes re-entry idempotent: an existing card's ID is returned and used
 // as the dependency target exactly like a freshly created one.
 func (o *run) createSubtasks(ctx context.Context, p plan) error {
+	if err := o.createFollowups(ctx, p); err != nil {
+		return err
+	}
+
+	o.recordUnreachable(ctx, p)
+
 	d := o.d
 	cfg := d.Cfg
 
@@ -1179,6 +1432,20 @@ func (o *run) createSubtasks(ctx context.Context, p plan) error {
 	// (the subtask cards hold the detail; this is the consolidated view, like
 	// CM's create-plan workflow skill writes ## Plan).
 	o.recordSection(ctx, "Plan", sectionFrom("Plan", formatPlan(o.subtasks)))
+
+	// Refresh the prompt-facing snapshot now that plan-phase board mutations
+	// have landed on o.body: taskDescription stayed frozen at its newRun value
+	// through diagnose/design/drafting on purpose (the HITL adjust loop must
+	// never see its own in-flight draft - plannerDescription re-supplies the
+	// prior plan explicitly, from o.tc.Description, not from this field). But
+	// every phase AFTER planning - execute's coder prompts, the review
+	// specialists, both synthesizers - reads this same cached field, and
+	// createFollowups/recordUnreachable just wrote "## Split" and
+	// "## Unreachable Criteria" onto o.body. Re-derive it once, here, so those
+	// two sections (which stripAgentSections deliberately does not strip)
+	// reach every downstream prompt, while "## Plan" and the sizing marker -
+	// both agent-recorded / meta - stay stripped exactly as before.
+	o.taskDescription = stripAgentSections(stripMeta(o.body))
 
 	return nil
 }

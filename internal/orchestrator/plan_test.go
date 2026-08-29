@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -105,6 +106,77 @@ func TestParsePlan(t *testing.T) {
 		_, err := parsePlan("I could not produce a plan, sorry.")
 		require.Error(t, err)
 	})
+}
+
+func TestParsePlanFollowupsAndUnreachable(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantErr string // empty = valid
+	}{
+		{
+			name: "valid followups and unreachable",
+			input: `{"card_tier":"moderate",
+			 "subtasks":[{"title":"a","description":"d","depends_on":[],"tier":"simple"}],
+			 "followup_cards":[
+			   {"title":"second deliverable","description":"self-contained body","depends_on":[],"depends_on_original":true},
+			   {"title":"third deliverable","description":"body","depends_on":[0],"depends_on_original":false}],
+			 "unreachable_criteria":[{"criterion":"update the sibling repo","reason":"write target outside this repo"}]}`,
+		},
+		{
+			name: "omitted arrays still valid",
+			input: `{"card_tier":"simple",
+			 "subtasks":[{"title":"a","description":"d","depends_on":[],"tier":"simple"}]}`,
+		},
+		{
+			name: "followup empty title rejected",
+			input: `{"card_tier":"simple",
+			 "subtasks":[{"title":"a","description":"d","depends_on":[],"tier":"simple"}],
+			 "followup_cards":[{"title":" ","description":"b","depends_on":[],"depends_on_original":false}]}`,
+			wantErr: "followup card 0",
+		},
+		{
+			name: "followup empty description rejected",
+			input: `{"card_tier":"simple",
+			 "subtasks":[{"title":"a","description":"d","depends_on":[],"tier":"simple"}],
+			 "followup_cards":[{"title":"t","description":"","depends_on":[],"depends_on_original":false}]}`,
+			wantErr: "followup card 0",
+		},
+		{
+			name: "followup forward dependency rejected",
+			input: `{"card_tier":"simple",
+			 "subtasks":[{"title":"a","description":"d","depends_on":[],"tier":"simple"}],
+			 "followup_cards":[{"title":"t","description":"b","depends_on":[1],"depends_on_original":false},
+			                   {"title":"u","description":"b","depends_on":[],"depends_on_original":false}]}`,
+			wantErr: "followup card 0 depends_on",
+		},
+		{
+			name: "unreachable empty criterion rejected",
+			input: `{"card_tier":"simple",
+			 "subtasks":[{"title":"a","description":"d","depends_on":[],"tier":"simple"}],
+			 "unreachable_criteria":[{"criterion":"","reason":"r"}]}`,
+			wantErr: "unreachable criterion 0",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, err := parsePlan(tt.input)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+
+				return
+			}
+
+			require.NoError(t, err)
+
+			if tt.name == "valid followups and unreachable" {
+				assert.Len(t, p.FollowupCards, 2)
+				assert.True(t, p.FollowupCards[0].DependsOnOriginal)
+				assert.Len(t, p.Unreachable, 1)
+			}
+		})
+	}
 }
 
 func TestIsTestOnlySubtask(t *testing.T) {
@@ -1702,6 +1774,301 @@ func TestCreateSubtasksPersistsBothAxes(t *testing.T) {
 	require.Len(t, o.subtasks, 1)
 	assert.Equal(t, sizing{registry.TierCritical, 2}, o.subtasks[0].Sizing)
 	assert.Equal(t, "critical", o.subtasks[0].PlannerBar)
+}
+
+// TestCreateFollowups: two followups, [0] chains on the original card, [1]
+// chains on [0]. The original card is autonomous, so both split-out cards
+// must inherit the flag, and the parent card body records the split.
+func TestCreateFollowups(t *testing.T) {
+	ops := &fakeOps{createdTopLevelIDs: []string{"CARD-2", "CARD-3"}}
+	o := newRun(planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: true})
+
+	p := plan{
+		FollowupCards: []planFollowup{
+			{Title: "Extract config loader", Description: "Split out the config loader.", DependsOnOriginal: true},
+			{Title: "Add config docs", Description: "Document the new loader.", DependsOn: []int{0}},
+		},
+	}
+
+	require.NoError(t, o.createFollowups(context.Background(), p))
+
+	require.Len(t, ops.createTopLevelCardArgs, 2)
+	assert.Equal(t, "Extract config loader", ops.createTopLevelCardArgs[0].title)
+	assert.Equal(t, "Split out the config loader.", ops.createTopLevelCardArgs[0].body)
+	assert.Equal(t, []string{"CARD-1"}, ops.createTopLevelCardArgs[0].dependsOn,
+		"the first followup chains on the original card being planned")
+
+	assert.Equal(t, "Add config docs", ops.createTopLevelCardArgs[1].title)
+	assert.Equal(t, []string{"CARD-2"}, ops.createTopLevelCardArgs[1].dependsOn,
+		"the second followup chains on the first followup's real card ID")
+
+	require.Len(t, ops.setAutonomousCalls, 2)
+	assert.Equal(t, "CARD-2", ops.setAutonomousCalls[0].cardID)
+	assert.True(t, ops.setAutonomousCalls[0].autonomous)
+	assert.Equal(t, "CARD-3", ops.setAutonomousCalls[1].cardID)
+	assert.True(t, ops.setAutonomousCalls[1].autonomous)
+
+	require.NotEmpty(t, ops.logs)
+	lastLog := ops.logs[len(ops.logs)-1]
+	assert.Contains(t, lastLog, "CARD-2")
+	assert.Contains(t, lastLog, "CARD-3")
+
+	body := ops.lastBody()
+	assert.Contains(t, body, "## Split")
+	assert.Contains(t, body, "CARD-2")
+	assert.Contains(t, body, "CARD-3")
+}
+
+// TestCreateFollowupsNotAutonomous: a non-autonomous original card must not
+// flip the flag on the split-out cards - they stay HITL like the original.
+func TestCreateFollowupsNotAutonomous(t *testing.T) {
+	ops := &fakeOps{createdTopLevelIDs: []string{"CARD-2"}}
+	o := newRun(planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: false})
+
+	p := plan{
+		FollowupCards: []planFollowup{
+			{Title: "Extract config loader", Description: "Split out the config loader.", DependsOnOriginal: true},
+		},
+	}
+
+	require.NoError(t, o.createFollowups(context.Background(), p))
+
+	require.Len(t, ops.createTopLevelCardArgs, 1)
+	assert.Empty(t, ops.setAutonomousCalls, "a non-autonomous original must not autonomize its followups")
+}
+
+// TestCreateFollowupsOverflowParks: a plan proposing more followups than
+// maxFollowupCards must park the run instead of mutating the board - no card
+// is created, and the returned error is a park sentinel.
+func TestCreateFollowupsOverflowParks(t *testing.T) {
+	ops := &fakeOps{}
+	o := newRun(planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: true})
+
+	followups := []planFollowup{
+		{Title: "Followup 1", Description: "d1"},
+		{Title: "Followup 2", Description: "d2"},
+		{Title: "Followup 3", Description: "d3"},
+		{Title: "Followup 4", Description: "d4"},
+		{Title: "Followup 5", Description: "d5"},
+	}
+
+	err := o.createFollowups(context.Background(), plan{FollowupCards: followups})
+	require.Error(t, err)
+
+	var soe *SplitOverflowError
+
+	require.ErrorAs(t, err, &soe)
+	assert.Equal(t, 5, soe.Count)
+	assert.Len(t, soe.Titles, 5)
+
+	assert.Empty(t, ops.createTopLevelCardArgs, "overflow must not mutate the board")
+	assert.True(t, isParkError(err), "the FSM must stop the run on this sentinel like the other park errors")
+}
+
+// TestCreateFollowupsNoneIsNoop: a plan with no followups must not touch Ops
+// at all - the common case (no split) stays byte-identical to before.
+func TestCreateFollowupsNoneIsNoop(t *testing.T) {
+	ops := &fakeOps{}
+	o := newRun(planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: true})
+
+	require.NoError(t, o.createFollowups(context.Background(), plan{}))
+
+	assert.Empty(t, ops.createTopLevelCardArgs)
+	assert.Empty(t, ops.setAutonomousCalls)
+	assert.Empty(t, ops.recorded(), "a no-op split must not touch Ops at all")
+}
+
+// splitSectionBody renders a claim-time card description carrying a prior
+// "## Split" record, as an earlier (interrupted) run of createFollowups would
+// have written it - the exact shape parseSplitSection must read back.
+func splitSectionBody(entries ...string) string {
+	body := "Some task.\n\n## Split\n\n" +
+		"Deliverables split out of this card at plan time - their scope, including any acceptance criteria that belong to them, is NOT part of this card:\n"
+	for _, e := range entries {
+		body += "- " + e + "\n"
+	}
+
+	return body
+}
+
+// TestCreateFollowupsResumeDedupesByTitle: a resumed run whose claim-time
+// body already carries a "## Split" entry for followup 1 (an earlier,
+// interrupted createFollowups run created it) must not re-create it - the
+// recorded ID is reused for dependency wiring, and SetAutonomous is
+// re-asserted for it exactly like a freshly created followup, covering a
+// crash between CreateTopLevelCard and SetAutonomous on the prior attempt.
+func TestCreateFollowupsResumeDedupesByTitle(t *testing.T) {
+	ops := &fakeOps{createdTopLevelIDs: []string{"CARD-3"}}
+	desc := splitSectionBody("CARD-2: Extract config loader")
+	o := newRun(planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Description: desc, Autonomous: true})
+
+	p := plan{
+		FollowupCards: []planFollowup{
+			{Title: "Extract config loader", Description: "Split out the config loader.", DependsOnOriginal: true},
+			{Title: "Add config docs", Description: "Document the new loader.", DependsOn: []int{0}},
+		},
+	}
+
+	require.NoError(t, o.createFollowups(context.Background(), p))
+
+	require.Len(t, ops.createTopLevelCardArgs, 1, "the already-recorded followup must not be re-created")
+	assert.Equal(t, "Add config docs", ops.createTopLevelCardArgs[0].title)
+	assert.Equal(t, []string{"CARD-2"}, ops.createTopLevelCardArgs[0].dependsOn,
+		"depends_on must use the RECORDED id of the deduped followup, not a freshly minted one")
+
+	require.Len(t, ops.setAutonomousCalls, 2, "autonomous is re-asserted for both, including the deduped one")
+	assert.Equal(t, "CARD-2", ops.setAutonomousCalls[0].cardID)
+	assert.True(t, ops.setAutonomousCalls[0].autonomous)
+	assert.Equal(t, "CARD-3", ops.setAutonomousCalls[1].cardID)
+	assert.True(t, ops.setAutonomousCalls[1].autonomous)
+}
+
+// TestCreateFollowupsPartialFailureRecordsCreatedSoFar: when the 2nd
+// followup's creation fails, the error is still returned, but the 1st
+// followup - already created before the failure - must be durably on record
+// in the recorded body's "## Split" section, not lost with the failed run.
+func TestCreateFollowupsPartialFailureRecordsCreatedSoFar(t *testing.T) {
+	ops := &fakeOps{
+		createdTopLevelIDs:         []string{"CARD-2"},
+		createTopLevelCardErr:      errors.New("board unreachable"),
+		createTopLevelCardErrAfter: 1, // the 1st call succeeds, the 2nd fails
+	}
+	o := newRun(planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: true})
+
+	p := plan{
+		FollowupCards: []planFollowup{
+			{Title: "Extract config loader", Description: "d1", DependsOnOriginal: true},
+			{Title: "Add config docs", Description: "d2", DependsOn: []int{0}},
+		},
+	}
+
+	err := o.createFollowups(context.Background(), p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Add config docs")
+
+	body := ops.lastBody()
+	assert.Contains(t, body, "## Split")
+	assert.Contains(t, body, "CARD-2: Extract config loader", "the followup created before the failure stays on record")
+	assert.NotContains(t, body, "Add config docs", "the failed followup was never created and must not appear")
+}
+
+// TestRecordUnreachable: a plan carrying 2 unreachable entries logs one
+// UNREACHABLE-AC line per entry and records an "## Unreachable Criteria"
+// section on the parent body containing both criterion strings.
+func TestRecordUnreachable(t *testing.T) {
+	ops := &fakeOps{}
+	o := newRun(planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: true})
+
+	p := plan{
+		Unreachable: []planUnreachable{
+			{Criterion: "staging deploy succeeds", Reason: "no staging access from this container"},
+			{Criterion: "prod metrics show zero errors", Reason: "prod is not reachable from this container"},
+		},
+	}
+
+	o.recordUnreachable(context.Background(), p)
+
+	logLines := 0
+
+	for _, l := range ops.logs {
+		if strings.Contains(l, "UNREACHABLE-AC") {
+			logLines++
+		}
+	}
+
+	assert.Equal(t, 2, logLines, "one UNREACHABLE-AC log line per unreachable entry")
+
+	body := ops.lastBody()
+	assert.Contains(t, body, "## Unreachable Criteria")
+	assert.Contains(t, body, "staging deploy succeeds")
+	assert.Contains(t, body, "prod metrics show zero errors")
+}
+
+// TestRecordUnreachableCapsLogLines: a plan with more unreachable entries than
+// maxUnreachableLogLines caps the UNREACHABLE-AC add_log lines at that
+// constant (first maxUnreachableLogLines-1 individually, plus one summary
+// line), so a long unreachable list cannot itself burn a large share of CM's
+// 50-entry-capped activity log. The "## Unreachable Criteria" section is not
+// capped - it lists every entry regardless.
+func TestRecordUnreachableCapsLogLines(t *testing.T) {
+	ops := &fakeOps{}
+	o := newRun(planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: true})
+
+	const n = 12
+
+	p := plan{Unreachable: make([]planUnreachable, n)}
+	for i := range p.Unreachable {
+		p.Unreachable[i] = planUnreachable{
+			Criterion: fmt.Sprintf("criterion %d", i),
+			Reason:    fmt.Sprintf("reason %d", i),
+		}
+	}
+
+	o.recordUnreachable(context.Background(), p)
+
+	logLines := 0
+
+	for _, l := range ops.logs {
+		if strings.Contains(l, "UNREACHABLE-AC") {
+			logLines++
+		}
+	}
+
+	assert.Equal(t, maxUnreachableLogLines, logLines,
+		"log lines must be capped at maxUnreachableLogLines regardless of how many entries overflow it")
+
+	body := ops.lastBody()
+	assert.Contains(t, body, "## Unreachable Criteria")
+
+	for i := range p.Unreachable {
+		assert.Contains(t, body, fmt.Sprintf("criterion %d", i),
+			"the section lists every entry even when the log is capped")
+	}
+}
+
+// TestRecordUnreachableNoneIsNoop: a plan with no unreachable entries must not
+// touch Ops at all - the common case (every AC reachable) stays byte-identical
+// to before.
+func TestRecordUnreachableNoneIsNoop(t *testing.T) {
+	ops := &fakeOps{}
+	o := newRun(planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: true})
+
+	o.recordUnreachable(context.Background(), plan{})
+
+	assert.Empty(t, ops.recorded(), "a no-op unreachable list must not touch Ops at all")
+}
+
+// TestCreateSubtasksRefreshesTaskDescription: createSubtasks re-derives
+// o.taskDescription from the post-mutation body, so the "## Split" and
+// "## Unreachable Criteria" sections it (and createFollowups) just wrote
+// reach every downstream prompt that reads the cached field - while "## Plan",
+// which createSubtasks itself records last, stays stripped like every other
+// agent-recorded section.
+func TestCreateSubtasksRefreshesTaskDescription(t *testing.T) {
+	ops := &fakeOps{createdIDs: []string{"SUB-1"}, createdTopLevelIDs: []string{"CARD-2"}}
+	o := newRun(planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: true})
+
+	p := plan{
+		CardTier: "moderate",
+		Subtasks: []planSubtask{{Title: "Do it", Description: "do it", Tier: "moderate"}},
+		FollowupCards: []planFollowup{
+			{Title: "Extract config loader", Description: "Split out the config loader.", DependsOnOriginal: true},
+		},
+		Unreachable: []planUnreachable{
+			{Criterion: "staging deploy succeeds", Reason: "no staging access from this container"},
+		},
+	}
+
+	require.NoError(t, o.createSubtasks(context.Background(), p))
+
+	assert.Contains(t, o.taskDescription, "## Split",
+		"the refreshed snapshot must carry the split record")
+	assert.Contains(t, o.taskDescription, "## Unreachable Criteria",
+		"the refreshed snapshot must carry the unreachable-criteria record")
+	assert.Contains(t, o.taskDescription, "staging deploy succeeds",
+		"the refreshed snapshot must carry the criterion text, not just the heading")
+	assert.NotContains(t, o.taskDescription, "## Plan",
+		"the plan record is agent-recorded history and must stay stripped like before")
 }
 
 // The plan JSON wire contract is deliberately untouched, so parsePlan keeps

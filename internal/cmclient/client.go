@@ -669,6 +669,39 @@ func (c *Client) CreateCard(ctx context.Context, project, parent, title, body st
 	return card.ID, nil
 }
 
+// CreateTopLevelCard creates a parentless card on project - a plan-time
+// deliverable split target, not a subtask. Same wire call as CreateCard minus
+// the parent field. body is the markdown description. dependsOn is the list
+// of card IDs this card depends on; nil omits the field. Returns the
+// server-assigned card ID.
+func (c *Client) CreateTopLevelCard(ctx context.Context, project, title, body string, dependsOn []string) (string, error) {
+	args := map[string]any{
+		"project":  project,
+		"title":    title,
+		"body":     body,
+		"type":     "task",
+		"priority": "medium",
+	}
+	if len(dependsOn) > 0 {
+		args["depends_on"] = dependsOn
+	}
+
+	text, err := c.call(ctx, "create_card", args)
+	if err != nil {
+		return "", err
+	}
+
+	// create_card returns a card summary (no body/activity_log); extract the id field.
+	var card struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(text), &card); err != nil {
+		return "", fmt.Errorf("parse create_card response: %w", err)
+	}
+
+	return card.ID, nil
+}
+
 // SetPhase sets the orchestrator phase on the card via update_card.
 func (c *Client) SetPhase(ctx context.Context, cardID, phase string) error {
 	_, err := c.call(ctx, "update_card", map[string]any{
@@ -687,6 +720,17 @@ func (c *Client) UpdateCardBody(ctx context.Context, cardID, body string) error 
 	_, err := c.call(ctx, "update_card", map[string]any{
 		"card_id": cardID,
 		"body":    body,
+	})
+
+	return err
+}
+
+// SetAutonomous flips a card's autonomous flag via update_card. Used to copy
+// the original card's flag onto split-out follow-up cards before they run.
+func (c *Client) SetAutonomous(ctx context.Context, cardID string, autonomous bool) error {
+	_, err := c.call(ctx, "update_card", map[string]any{
+		"card_id":    cardID,
+		"autonomous": autonomous,
 	})
 
 	return err

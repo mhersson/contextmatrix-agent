@@ -90,6 +90,21 @@ type fakeOps struct {
 	createCardArgs []createCardCall
 	createCardErr  error
 
+	// CreateTopLevelCard scripting: mirrors CreateCard's pattern minus parent.
+	// createdTopLevelIDs supplies the returned card ID per call (index-aligned
+	// to call order); when exhausted, IDs fall back to FOLLOWUP-<n>.
+	// createTopLevelCardErr fails calls once createTopLevelCardErrAfter calls
+	// have already succeeded (0 = fail every call), mirroring incrementErrAfter.
+	createdTopLevelIDs         []string
+	createTopLevelCardArgs     []createTopLevelCardCall
+	createTopLevelCardErr      error
+	createTopLevelCardErrAfter int
+
+	// SetAutonomous scripting: setAutonomousCalls captures every call
+	// (index-aligned to call order); setAutonomousErr fails every call.
+	setAutonomousCalls []setAutonomousCall
+	setAutonomousErr   error
+
 	// SubtaskStates scripting.
 	subtaskStates    []cmclient.SubtaskState
 	subtaskStatesErr error
@@ -124,6 +139,20 @@ type createCardCall struct {
 	title     string
 	body      string
 	dependsOn []string
+}
+
+// createTopLevelCardCall is a recorded CreateTopLevelCard invocation.
+type createTopLevelCardCall struct {
+	project   string
+	title     string
+	body      string
+	dependsOn []string
+}
+
+// setAutonomousCall is a recorded SetAutonomous invocation.
+type setAutonomousCall struct {
+	cardID     string
+	autonomous bool
 }
 
 func (f *fakeOps) record(call string) {
@@ -193,6 +222,40 @@ func (f *fakeOps) CreateCard(_ context.Context, project, parent, title, body str
 	}
 
 	return fmt.Sprintf("NEW-%d", idx+1), nil
+}
+
+func (f *fakeOps) CreateTopLevelCard(_ context.Context, project, title, body string, dependsOn []string) (string, error) {
+	f.mu.Lock()
+	idx := len(f.createTopLevelCardArgs)
+	f.createTopLevelCardArgs = append(f.createTopLevelCardArgs, createTopLevelCardCall{
+		project:   project,
+		title:     title,
+		body:      body,
+		dependsOn: append([]string(nil), dependsOn...),
+	})
+	f.mu.Unlock()
+
+	f.record(fmt.Sprintf("CreateTopLevelCard:%s/%s", project, title))
+
+	if f.createTopLevelCardErr != nil && idx >= f.createTopLevelCardErrAfter {
+		return "", f.createTopLevelCardErr
+	}
+
+	if idx < len(f.createdTopLevelIDs) {
+		return f.createdTopLevelIDs[idx], nil
+	}
+
+	return fmt.Sprintf("FOLLOWUP-%d", idx+1), nil
+}
+
+func (f *fakeOps) SetAutonomous(_ context.Context, cardID string, autonomous bool) error {
+	f.mu.Lock()
+	f.setAutonomousCalls = append(f.setAutonomousCalls, setAutonomousCall{cardID: cardID, autonomous: autonomous})
+	f.mu.Unlock()
+
+	f.record("SetAutonomous:" + cardID)
+
+	return f.setAutonomousErr
 }
 
 func (f *fakeOps) SetPhase(_ context.Context, cardID, phase string) error {

@@ -106,6 +106,32 @@ change set. The fix entry's File field stays the single canonical path (the
 primary occurrence); the sweep instruction goes in Suggestion so the line-shape
 contract between formatFixes and fixFiles is not broken.`
 
+// unreachableVerifyInstruction tells a review pass - solo specialist or mob
+// review seat - to verify each claim under a parent card's "## Unreachable
+// Criteria" section and report VERIFIED or REFUTED with one line of evidence.
+// Shared by specialistPrompt and reviewBriefing so the solo and mob review
+// paths cannot drift: the moderator's unreachableVerdictRule (like solo
+// synthesis) keys its exemption on the VERIFIED/REFUTED verdict this
+// instruction produces, so a review path that never asks for it cannot
+// exempt anything.
+const unreachableVerifyInstruction = `If the parent card description contains an "## Unreachable Criteria" section,
+verify each claim as part of your pass: a claimed-missing input must genuinely
+be absent from the repo (check the quoted path or artifact); a claimed
+out-of-repo write target must genuinely point outside the repo. Report each
+claim in your findings as VERIFIED or REFUTED with one line of evidence.`
+
+// unreachableVerdictRule is the decision-rule bullet that exempts an
+// unreachable acceptance criterion the specialists VERIFIED from blocking the
+// verdict, while a REFUTED one stays an ordinary unmet criterion, and notes
+// that "## Split" scope is out of bounds too. Shared by synthesisPrompt and
+// reviewSynthesisPrompt so the two verdict contracts cannot drift.
+const unreachableVerdictRule = `- Unreachable acceptance criteria: when the card carries an "## Unreachable
+  Criteria" section, exclude entries the specialists VERIFIED from the
+  approve/revise decision - do not fail the work for not meeting them; they
+  remain visible to the human. Treat REFUTED entries as ordinary unmet
+  criteria. Scope listed under a "## Split" section was moved to other cards
+  and is likewise out of scope for this verdict.`
+
 // planPrompt is the read-only planner's instruction block. It is adapted from
 // the create-plan workflow skill's task-decomposition guidance: the same
 // rules for splitting work, dependency thinking, and right-sizing apply, but
@@ -186,6 +212,25 @@ Decompose the task into subtasks following these rules:
 - Acceptance criteria must be verifiable from the working tree and test
   runs. Never write criteria about git metadata or history shape (tags,
   commit counts, commit messages, git show output).
+- If the decomposition reveals the card is really MULTIPLE INDEPENDENT
+  deliverables - groups of subtasks that are not slices of one deliverable -
+  plan ONLY the first deliverable and emit each extra deliverable as a
+  followup_cards entry: a title plus a SELF-CONTAINED description (inline
+  everything its future executor needs - it runs later in a fresh container
+  holding only this repo, without this card or this plan). Set
+  depends_on_original true only when the deliverable builds on this card's
+  work; depends_on lists indices of earlier followup entries. Emitting more
+  than 4 followup entries parks the card for a human to re-cut - if you count
+  more than 4, the card itself is mis-scoped; emit them anyway rather than
+  cramming.
+- Check every acceptance criterion for reachability before planning it. A
+  criterion is UNREACHABLE when it requires READING an input that does not
+  exist in this repo (a file on someone's machine, another repo, an absent
+  document) or WRITING outside this repo. A criterion whose artifact does not
+  exist yet but is CREATED inside this repo by the work itself is NOT
+  unreachable - the absence is the work. Emit each unreachable criterion as
+  an unreachable_criteria entry quoting the criterion with a one-line
+  reason, and do not plan subtasks that attempt it.
 
 ` + plannerGroundingRule + `
 
@@ -212,9 +257,12 @@ Title: %s
 Description:
 %s
 %s%s%s%s%s
-Respond with ONLY a JSON object, no prose:
+Respond with ONLY a JSON object, no prose (omit followup_cards and
+unreachable_criteria when empty):
 {"card_tier":"simple|moderate|complex|critical",
- "subtasks":[{"title":"...","description":"...","depends_on":[<earlier indices>],"tier":"simple|moderate|complex|critical"}]}
+ "subtasks":[{"title":"...","description":"...","depends_on":[<earlier indices>],"tier":"simple|moderate|complex|critical"}],
+ "followup_cards":[{"title":"...","description":"...","depends_on":[<earlier followup indices>],"depends_on_original":true|false}],
+ "unreachable_criteria":[{"criterion":"...","reason":"..."}]}
 `
 
 // diagnosePrompt is the read-only debug-investigation pass run for bug-like
@@ -318,6 +366,16 @@ memory. For each change verify:
 - Every exit path is correct: each early return and error branch releases what it acquired and stops where it should - no fall-through after writing an error response.
 Fix anything you find before finishing.`
 
+// unreachableScopeNote tells the coder that acceptance criteria the planner
+// flagged unreachable, and scope split into other cards, are both out of
+// bounds to implement. Shared by coderPrompt and fixPrompt so the two cannot
+// drift. verifyFixPrompt does NOT carry it: that prompt gives the coder only
+// the parent card's title, never its description, so a note pointing at
+// sections the prompt cannot show would be untethered.
+const unreachableScopeNote = `Acceptance criteria listed under "## Unreachable Criteria" on the parent card
+are out of scope - do not attempt them. Scope listed under "## Split" belongs
+to other cards - do not implement it.`
+
 // coderGroundingRule tells the coder to treat the subtask's concrete specifics
 // as hints to verify, not guarantees - so a stale line number or a claimed
 // site/symbol the code lacks cannot send it chasing a phantom to the turn cap.
@@ -352,6 +410,8 @@ Implement EXACTLY this subtask - nothing from sibling subtasks, nothing
 speculative. The parent card's description and acceptance criteria may cover
 work assigned to other subtasks - do only what YOUR subtask's description
 assigns, even when the parent lists more.
+
+` + unreachableScopeNote + `
 
 Repo root: %s - bash commands already execute there; use paths relative to the
 repo root.
@@ -412,6 +472,8 @@ const specialistPrompt = `%s%sYou are a code-review specialist. You have read-on
 to inspect the codebase. Git is available read-only (status, diff, log, show,
 branch). You do NOT create or modify cards or files. Produce a findings report as TEXT - another agent synthesizes the
 three specialist reports into a single verdict.
+
+` + unreachableVerifyInstruction + `
 
 %s%s
 
@@ -520,6 +582,7 @@ Decision rule:
   in fixes.
 - An approved verdict must not carry Critical or Important findings: if your
   judgement says a finding is that severe, return approved:false.
+` + unreachableVerdictRule + `
 
 Be specific and actionable. Every fix must cite a file in the change set and
 give a concrete suggestion - no vague hand-waves. Commit status is never an
@@ -565,6 +628,8 @@ One exception: if a finding's suggestion instructs a repo-wide sweep for an
 incorrect claim (a doc line, code comment, or error message), you MUST search the
 whole repo using the harness grep tool and fix every occurrence, not just the
 cited file.
+
+` + unreachableScopeNote + `
 
 Repo root: %s - bash commands already execute there; use paths relative to the
 repo root.
@@ -1051,7 +1116,10 @@ positions in the real code structure.
 split, ordering and dependencies, risks, and the complexity tier. Each
 subtask should be completable by a single agent in one focused session,
 include its own tests, and touch a bounded set of files. Argue from your
-assigned lens.
+assigned lens. If the task is really multiple independent deliverables, or an
+acceptance criterion cannot be reached from inside this repo, say so - the
+moderator decides whether to split out follow-up cards or declare the
+criterion unreachable.
 
 ` + plannerGroundingRule + `
 
@@ -1085,6 +1153,22 @@ The plan must follow these rules:
   ("Files:" line), and acceptance criteria - no placeholders.
 - Assign an overall card_tier and a per-subtask tier: "simple", "moderate",
   "complex", or "critical".
+- If the card is really MULTIPLE INDEPENDENT deliverables - groups of
+  subtasks that are not slices of one deliverable - synthesize ONLY the
+  first deliverable and emit each extra deliverable as a followup_cards
+  entry: a title plus a SELF-CONTAINED description (inline everything its
+  future executor needs - it runs later in a fresh container holding only
+  this repo, without this card or this plan). Set depends_on_original true
+  only when the deliverable builds on this card's work; depends_on lists
+  indices of earlier followup entries. More than 4 followup entries parks
+  the card for a human to re-cut - if you count more than 4, the card
+  itself is mis-scoped; emit them anyway rather than cramming.
+- Check every acceptance criterion for reachability. A criterion is
+  UNREACHABLE when it requires READING an input that does not exist in
+  this repo or WRITING outside this repo - not when its artifact is simply
+  CREATED inside this repo by the work itself. Emit each unreachable
+  criterion as an unreachable_criteria entry quoting the criterion with a
+  one-line reason, and do not synthesize subtasks that attempt it.
 
 ` + plannerGroundingRule + `
 
@@ -1094,9 +1178,12 @@ Title: %s
 Description:
 %s
 
-Respond with ONLY a JSON object, no prose:
+Respond with ONLY a JSON object, no prose (omit followup_cards and
+unreachable_criteria when empty):
 {"card_tier":"simple|moderate|complex|critical",
- "subtasks":[{"title":"...","description":"...","depends_on":[<earlier indices>],"tier":"simple|moderate|complex|critical"}]}
+ "subtasks":[{"title":"...","description":"...","depends_on":[<earlier indices>],"tier":"simple|moderate|complex|critical"}],
+ "followup_cards":[{"title":"...","description":"...","depends_on":[<earlier followup indices>],"depends_on_original":true|false}],
+ "unreachable_criteria":[{"criterion":"...","reason":"..."}]}
 `
 
 // reviewBriefing is the review-discussion problem statement: the SAME
@@ -1111,6 +1198,8 @@ change against what the task requires - unrequested hardening and missing
 speculative abstractions are not defects. Argue from your assigned lens; in
 the critique round, contest findings you disagree with and explicitly
 withdraw your own findings that did not survive rebuttal.
+
+` + unreachableVerifyInstruction + `
 
 %sPARENT CARD
 Title: %s
@@ -1146,6 +1235,7 @@ Decision rule:
   in fixes.
 - An approved verdict must not carry Critical or Important findings: if your
   judgement says a finding is that severe, return approved:false.
+` + unreachableVerdictRule + `
 
 ` + sweepRule + `
 

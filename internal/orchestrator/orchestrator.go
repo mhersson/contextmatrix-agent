@@ -40,8 +40,10 @@ type Ops interface {
 	Heartbeat(ctx context.Context, cardID string) error
 	GetTaskContext(ctx context.Context, cardID string, includeImages bool) (cmclient.TaskContext, error)
 	CreateCard(ctx context.Context, project, parent, title, body string, dependsOn []string) (string, error)
+	CreateTopLevelCard(ctx context.Context, project, title, body string, dependsOn []string) (string, error)
 	SetPhase(ctx context.Context, cardID, phase string) error
 	UpdateCardBody(ctx context.Context, cardID, body string) error
+	SetAutonomous(ctx context.Context, cardID string, autonomous bool) error
 	TransitionCard(ctx context.Context, cardID, state string) error
 	StartReview(ctx context.Context, cardID string) error
 	IncrementReviewAttempts(ctx context.Context, cardID string) (int, error)
@@ -345,6 +347,21 @@ type run struct {
 	// design and prior plan; review: lastFindings). A human-authored section
 	// named like a recorded one is stripped too - accepted cost, mitigated by
 	// the planner re-supply baking it into subtask bodies.
+	//
+	// Written twice: newRun seeds it from tc.Description before planning, then
+	// createSubtasks re-derives it from the now-current o.body once plan-phase
+	// mutations (createFollowups' "## Split", recordUnreachable's
+	// "## Unreachable Criteria") have landed - both headings survive
+	// stripAgentSections by design, so the refresh is what lets execute's
+	// coder prompts and the review specialists/synthesizers see them. The
+	// first write stays authoritative through diagnose/design/drafting - not
+	// because the HITL adjust loop avoids this field (plannerDescription
+	// returns it as the base, only splicing in the prior "## Plan" from
+	// o.tc.Description), but because of ordering: every draftPlan/mobDraftPlan
+	// call that reads it happens strictly before createSubtasks, and every
+	// createSubtasks call site in runPlan is terminal (a return follows
+	// immediately), so the refresh below can never land before a planner read
+	// it could poison.
 	taskDescription string
 
 	// staleRemoteTip is the remote tip of this run's card branch as observed at
@@ -753,6 +770,13 @@ func (o *run) execute(ctx context.Context) error {
 				o.d.logCard(ctx, "%s", verifyParkedLogMessage(vpe))
 			}
 
+			var soe *SplitOverflowError
+			if errors.As(err, &soe) {
+				// Split-overflow park: same shape as the other arms - log
+				// best-effort, then stop without entering the next phase.
+				o.d.logCard(ctx, "%s", splitOverflowLogMessage(soe))
+			}
+
 			return err
 		}
 	}
@@ -859,6 +883,23 @@ func verifyParkOutputTail(out string, n int) string {
 	}
 
 	return verifyParkOutputElision + tail
+}
+
+// splitOverflowLogMessage is the canonical card-log line for a split-overflow
+// park: the count, the cap, and the proposed titles so a human can re-cut the
+// card without re-running the planner. The header always survives, so the
+// card names the count and cap even when nothing else fits; the titles are
+// then trimmed to what remains, mirroring verifyParkedLogMessage's bound.
+func splitOverflowLogMessage(soe *SplitOverflowError) string {
+	header := fmt.Sprintf("plan proposes %d follow-up cards (max %d) - parking; re-cut this card manually. Proposed: ",
+		soe.Count, maxFollowupCards)
+
+	room := verifyParkNoteMax - len(header)
+	if room <= 0 {
+		return truncateBytes(header, verifyParkNoteMax)
+	}
+
+	return header + truncateBytes(strings.Join(soe.Titles, "; "), room)
 }
 
 // truncateBytes caps s at n BYTES, keeping its head and cutting on a rune

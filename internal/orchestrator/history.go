@@ -155,7 +155,10 @@ func formatPlan(subs []subtaskRef) string {
 // plan-approval gate: numbered subtasks with the planner's bar and
 // depends-on-by-index, so the human sees the decomposition before any subtask
 // card exists. No turn budget here: a not-yet-created plan has no persisted
-// ladder step.
+// ladder step. Also renders any follow-up cards and any acceptance criteria
+// the planner declared unreachable, so a human approving the plan sees both
+// before subtasks are created - approval would otherwise hide which
+// criteria review will exempt from the verdict.
 func formatPlannedPlan(p plan) string {
 	var b strings.Builder
 
@@ -183,6 +186,39 @@ func formatPlannedPlan(p plan) string {
 		}
 
 		b.WriteString("\n")
+	}
+
+	if len(p.FollowupCards) > 0 {
+		b.WriteString("### Follow-up cards\n")
+		b.WriteString("These deliverables will be created as separate cards, inheriting this card's autonomous flag, once the plan is approved:\n\n")
+
+		for i, fc := range p.FollowupCards {
+			var deps []string
+
+			if fc.DependsOnOriginal {
+				deps = append(deps, "this card")
+			}
+
+			for _, dep := range fc.DependsOn {
+				deps = append(deps, fmt.Sprintf("follow-up #%d", dep+1))
+			}
+
+			depsStr := "none"
+			if len(deps) > 0 {
+				depsStr = strings.Join(deps, ", ")
+			}
+
+			fmt.Fprintf(&b, "- Follow-up #%d: %s _(depends on: %s)_\n", i+1, fc.Title, depsStr)
+		}
+	}
+
+	if len(p.Unreachable) > 0 {
+		b.WriteString("\n### Unreachable acceptance criteria\n")
+		b.WriteString("These are excluded from execution and verified by review, not implemented:\n\n")
+
+		for _, u := range p.Unreachable {
+			fmt.Fprintf(&b, "- %q - %s\n", u.Criterion, u.Reason)
+		}
 	}
 
 	return strings.TrimRight(b.String(), "\n")
