@@ -238,6 +238,11 @@ Also assign an overall card_tier reflecting the whole task's complexity, and a
 per-subtask tier. Tiers: "simple" (mechanical, low-risk), "moderate"
 (standard feature work), "complex" (architectural or high-risk), "critical"
 (security-sensitive changes, or intricate concurrency/architecture work).
+Work that changes the signature or contract of a widely-called function,
+method, or interface - anything that forces edits across many call sites,
+implementations, or test fakes - is "complex" at minimum, no matter how small
+the central diff is; price the work by the count of affected seams, not the
+line count of the core change.
 
 Read the relevant code first to ground the plan in the real structure, then
 respond.
@@ -1152,7 +1157,11 @@ The plan must follow these rules:
 - Each subtask description states concrete actions, the files touched
   ("Files:" line), and acceptance criteria - no placeholders.
 - Assign an overall card_tier and a per-subtask tier: "simple", "moderate",
-  "complex", or "critical".
+  "complex", or "critical". Work that changes the signature or contract of a
+  widely-called function, method, or interface - anything that forces edits
+  across many call sites, implementations, or test fakes - is "complex" at
+  minimum, no matter how small the central diff is; price the work by the
+  count of affected seams, not the line count of the core change.
 - If the card is really MULTIPLE INDEPENDENT deliverables - groups of
   subtasks that are not slices of one deliverable - synthesize ONLY the
   first deliverable and emit each extra deliverable as a followup_cards
