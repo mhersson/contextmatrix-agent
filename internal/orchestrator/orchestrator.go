@@ -347,6 +347,17 @@ type run struct {
 	// design and prior plan; review: lastFindings). A human-authored section
 	// named like a recorded one is stripped too - accepted cost, mitigated by
 	// the planner re-supply baking it into subtask bodies.
+	//
+	// Written twice: newRun seeds it from tc.Description before planning, then
+	// createSubtasks re-derives it from the now-current o.body once plan-phase
+	// mutations (createFollowups' "## Split", recordUnreachable's
+	// "## Unreachable Criteria") have landed - both headings survive
+	// stripAgentSections by design, so the refresh is what lets execute's
+	// coder prompts and the review specialists/synthesizers see them. The
+	// first write stays authoritative through diagnose/design/drafting: the
+	// HITL adjust loop reads o.tc.Description directly (via
+	// plannerDescription), never this field, so re-deriving it here cannot
+	// leak an in-flight draft back into the planner.
 	taskDescription string
 
 	// staleRemoteTip is the remote tip of this run's card branch as observed at

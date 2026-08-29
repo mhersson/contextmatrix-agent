@@ -1951,6 +1951,83 @@ func TestCreateFollowupsPartialFailureRecordsCreatedSoFar(t *testing.T) {
 	assert.NotContains(t, body, "Add config docs", "the failed followup was never created and must not appear")
 }
 
+// TestRecordUnreachable: a plan carrying 2 unreachable entries logs one
+// UNREACHABLE-AC line per entry and records an "## Unreachable Criteria"
+// section on the parent body containing both criterion strings.
+func TestRecordUnreachable(t *testing.T) {
+	ops := &fakeOps{}
+	o := newRun(planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: true})
+
+	p := plan{
+		Unreachable: []planUnreachable{
+			{Criterion: "staging deploy succeeds", Reason: "no staging access from this container"},
+			{Criterion: "prod metrics show zero errors", Reason: "prod is not reachable from this container"},
+		},
+	}
+
+	o.recordUnreachable(context.Background(), p)
+
+	logLines := 0
+
+	for _, l := range ops.logs {
+		if strings.Contains(l, "UNREACHABLE-AC") {
+			logLines++
+		}
+	}
+
+	assert.Equal(t, 2, logLines, "one UNREACHABLE-AC log line per unreachable entry")
+
+	body := ops.lastBody()
+	assert.Contains(t, body, "## Unreachable Criteria")
+	assert.Contains(t, body, "staging deploy succeeds")
+	assert.Contains(t, body, "prod metrics show zero errors")
+}
+
+// TestRecordUnreachableNoneIsNoop: a plan with no unreachable entries must not
+// touch Ops at all - the common case (every AC reachable) stays byte-identical
+// to before.
+func TestRecordUnreachableNoneIsNoop(t *testing.T) {
+	ops := &fakeOps{}
+	o := newRun(planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: true})
+
+	o.recordUnreachable(context.Background(), plan{})
+
+	assert.Empty(t, ops.recorded(), "a no-op unreachable list must not touch Ops at all")
+}
+
+// TestCreateSubtasksRefreshesTaskDescription: createSubtasks re-derives
+// o.taskDescription from the post-mutation body, so the "## Split" and
+// "## Unreachable Criteria" sections it (and createFollowups) just wrote
+// reach every downstream prompt that reads the cached field - while "## Plan",
+// which createSubtasks itself records last, stays stripped like every other
+// agent-recorded section.
+func TestCreateSubtasksRefreshesTaskDescription(t *testing.T) {
+	ops := &fakeOps{createdIDs: []string{"SUB-1"}, createdTopLevelIDs: []string{"CARD-2"}}
+	o := newRun(planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: true})
+
+	p := plan{
+		CardTier: "moderate",
+		Subtasks: []planSubtask{{Title: "Do it", Description: "do it", Tier: "moderate"}},
+		FollowupCards: []planFollowup{
+			{Title: "Extract config loader", Description: "Split out the config loader.", DependsOnOriginal: true},
+		},
+		Unreachable: []planUnreachable{
+			{Criterion: "staging deploy succeeds", Reason: "no staging access from this container"},
+		},
+	}
+
+	require.NoError(t, o.createSubtasks(context.Background(), p))
+
+	assert.Contains(t, o.taskDescription, "## Split",
+		"the refreshed snapshot must carry the split record")
+	assert.Contains(t, o.taskDescription, "## Unreachable Criteria",
+		"the refreshed snapshot must carry the unreachable-criteria record")
+	assert.Contains(t, o.taskDescription, "staging deploy succeeds",
+		"the refreshed snapshot must carry the criterion text, not just the heading")
+	assert.NotContains(t, o.taskDescription, "## Plan",
+		"the plan record is agent-recorded history and must stay stripped like before")
+}
+
 // The plan JSON wire contract is deliberately untouched, so parsePlan keeps
 // rejecting an unrecognised bar. The bar is the SILENT axis: one repair turn on
 // the loud channel is the price of protecting the axis with no other defence.

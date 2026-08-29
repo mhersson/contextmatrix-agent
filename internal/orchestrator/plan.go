@@ -1316,6 +1316,29 @@ func (o *run) createFollowups(ctx context.Context, p plan) error {
 	return nil
 }
 
+// recordUnreachable persists the planner's unreachable acceptance criteria
+// where both review and the human can see them: one UNREACHABLE-AC log line
+// per entry (the convention review prompts key on) and a section on the
+// parent body, which is the description slot every review prompt receives.
+// Best-effort like every card-body record.
+func (o *run) recordUnreachable(ctx context.Context, p plan) {
+	if len(p.Unreachable) == 0 {
+		return
+	}
+
+	var b strings.Builder
+
+	b.WriteString("Acceptance criteria the executor cannot reach from inside this repo's container. " +
+		"Review verifies each claim; verified entries are excluded from the verdict:\n")
+
+	for _, u := range p.Unreachable {
+		fmt.Fprintf(&b, "- %q - %s\n", u.Criterion, u.Reason)
+		o.d.logCard(ctx, "UNREACHABLE-AC: %q - %s", u.Criterion, u.Reason)
+	}
+
+	o.recordSection(ctx, "Unreachable Criteria", sectionFrom("Unreachable Criteria", b.String()))
+}
+
 // createSubtasks creates one card per plan subtask in order, mapping each
 // depends_on index to the real card ID returned for that earlier subtask, and
 // records the resulting refs (plus the card-level sizing) on the run struct.
@@ -1329,6 +1352,8 @@ func (o *run) createSubtasks(ctx context.Context, p plan) error {
 	if err := o.createFollowups(ctx, p); err != nil {
 		return err
 	}
+
+	o.recordUnreachable(ctx, p)
 
 	d := o.d
 	cfg := d.Cfg
@@ -1381,6 +1406,20 @@ func (o *run) createSubtasks(ctx context.Context, p plan) error {
 	// (the subtask cards hold the detail; this is the consolidated view, like
 	// CM's create-plan workflow skill writes ## Plan).
 	o.recordSection(ctx, "Plan", sectionFrom("Plan", formatPlan(o.subtasks)))
+
+	// Refresh the prompt-facing snapshot now that plan-phase board mutations
+	// have landed on o.body: taskDescription stayed frozen at its newRun value
+	// through diagnose/design/drafting on purpose (the HITL adjust loop must
+	// never see its own in-flight draft - plannerDescription re-supplies the
+	// prior plan explicitly, from o.tc.Description, not from this field). But
+	// every phase AFTER planning - execute's coder prompts, the review
+	// specialists, both synthesizers - reads this same cached field, and
+	// createFollowups/recordUnreachable just wrote "## Split" and
+	// "## Unreachable Criteria" onto o.body. Re-derive it once, here, so those
+	// two sections (which stripAgentSections deliberately does not strip)
+	// reach every downstream prompt, while "## Plan" and the sizing marker -
+	// both agent-recorded / meta - stay stripped exactly as before.
+	o.taskDescription = stripAgentSections(stripMeta(o.body))
 
 	return nil
 }

@@ -331,7 +331,7 @@ func TestReadRootsBlockEmptyKeepsPromptSpacing(t *testing.T) {
 		"an empty roots block leaves the diagnosis prompt spacing unchanged")
 
 	specialist := fmt.Sprintf(specialistPrompt, "", "", readRootsBlock(nil), "LENS", "t", "b", "d", "")
-	assert.Contains(t, specialist, "single verdict.\n\nLENS\n\nReview only",
+	assert.Contains(t, specialist, "one line of evidence.\n\nLENS\n\nReview only",
 		"an empty roots block leaves the specialist prompt spacing unchanged")
 }
 

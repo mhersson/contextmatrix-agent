@@ -106,6 +106,18 @@ change set. The fix entry's File field stays the single canonical path (the
 primary occurrence); the sweep instruction goes in Suggestion so the line-shape
 contract between formatFixes and fixFiles is not broken.`
 
+// unreachableVerdictRule is the decision-rule bullet that exempts an
+// unreachable acceptance criterion the specialists VERIFIED from blocking the
+// verdict, while a REFUTED one stays an ordinary unmet criterion, and notes
+// that "## Split" scope is out of bounds too. Shared by synthesisPrompt and
+// reviewSynthesisPrompt so the two verdict contracts cannot drift.
+const unreachableVerdictRule = `- Unreachable acceptance criteria: when the card carries an "## Unreachable
+  Criteria" section, exclude entries the specialists VERIFIED from the
+  approve/revise decision - do not fail the work for not meeting them; they
+  remain visible to the human. Treat REFUTED entries as ordinary unmet
+  criteria. Scope listed under a "## Split" section was moved to other cards
+  and is likewise out of scope for this verdict.`
+
 // planPrompt is the read-only planner's instruction block. It is adapted from
 // the create-plan workflow skill's task-decomposition guidance: the same
 // rules for splitting work, dependency thinking, and right-sizing apply, but
@@ -340,6 +352,14 @@ memory. For each change verify:
 - Every exit path is correct: each early return and error branch releases what it acquired and stops where it should - no fall-through after writing an error response.
 Fix anything you find before finishing.`
 
+// unreachableScopeNote tells the coder that acceptance criteria the planner
+// flagged unreachable, and scope split into other cards, are both out of
+// bounds to implement. Shared by coderPrompt, fixPrompt, and verifyFixPrompt
+// so the three cannot drift.
+const unreachableScopeNote = `Acceptance criteria listed under "## Unreachable Criteria" on the parent card
+are out of scope - do not attempt them. Scope listed under "## Split" belongs
+to other cards - do not implement it.`
+
 // coderGroundingRule tells the coder to treat the subtask's concrete specifics
 // as hints to verify, not guarantees - so a stale line number or a claimed
 // site/symbol the code lacks cannot send it chasing a phantom to the turn cap.
@@ -374,6 +394,8 @@ Implement EXACTLY this subtask - nothing from sibling subtasks, nothing
 speculative. The parent card's description and acceptance criteria may cover
 work assigned to other subtasks - do only what YOUR subtask's description
 assigns, even when the parent lists more.
+
+` + unreachableScopeNote + `
 
 Repo root: %s - bash commands already execute there; use paths relative to the
 repo root.
@@ -434,6 +456,12 @@ const specialistPrompt = `%s%sYou are a code-review specialist. You have read-on
 to inspect the codebase. Git is available read-only (status, diff, log, show,
 branch). You do NOT create or modify cards or files. Produce a findings report as TEXT - another agent synthesizes the
 three specialist reports into a single verdict.
+
+If the parent card description contains an "## Unreachable Criteria" section,
+verify each claim as part of your pass: a claimed-missing input must genuinely
+be absent from the repo (check the quoted path or artifact); a claimed
+out-of-repo write target must genuinely point outside the repo. Report each
+claim in your findings as VERIFIED or REFUTED with one line of evidence.
 
 %s%s
 
@@ -542,6 +570,7 @@ Decision rule:
   in fixes.
 - An approved verdict must not carry Critical or Important findings: if your
   judgement says a finding is that severe, return approved:false.
+` + unreachableVerdictRule + `
 
 Be specific and actionable. Every fix must cite a file in the change set and
 give a concrete suggestion - no vague hand-waves. Commit status is never an
@@ -587,6 +616,8 @@ One exception: if a finding's suggestion instructs a repo-wide sweep for an
 incorrect claim (a doc line, code comment, or error message), you MUST search the
 whole repo using the harness grep tool and fix every occurrence, not just the
 cited file.
+
+` + unreachableScopeNote + `
 
 Repo root: %s - bash commands already execute there; use paths relative to the
 repo root.
@@ -664,6 +695,7 @@ Title: %s
 SCOPE
 The card's work is already in the working tree.
 The ONLY item in scope is the failure below - do not re-audit or re-implement other card items. If the failing test was added on this branch and its expectation is wrong, fix the expectation or delete the test; if the failure is in code the branch changed, fix the code. Make the smallest edit that turns the verify command green, run it, then finish.
+` + unreachableScopeNote + `
 
 VERIFY FAILURE TO FIX
 %s
@@ -1187,6 +1219,7 @@ Decision rule:
   in fixes.
 - An approved verdict must not carry Critical or Important findings: if your
   judgement says a finding is that severe, return approved:false.
+` + unreachableVerdictRule + `
 
 ` + sweepRule + `
 
