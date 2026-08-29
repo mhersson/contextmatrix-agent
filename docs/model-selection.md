@@ -94,3 +94,28 @@ The one ladder consult whose pool is not logged is the decision floor's
 below-bar proposal: the operator's configured model keeps the seat, so logging
 the discarded proposal's pool beside its pick line would misattribute the pool
 to a model that never ran.
+
+## Off-ladder phases on the transcript
+
+`model_selected` events on the run transcript (the JSON-lines file a local run
+writes with `--transcript`, and the container stdout the host captures per
+card) record, per phase, which model ran. Ladder phases reach the transcript
+through `noteShortfall` alongside their `selector: pick` and `selector: pool`
+lines. Three phases resolve the orchestrator model by precedence alone - a
+catalog-resolvable card pin, else the payload `default_model`, else the
+serve-config default - and never consult a rung: the document phase
+(`document`), the integrate PR-body call (`integrate`), and the Copilot triage
+call in `pr_gates`. They record their choice with the same event shape:
+
+```json
+{"seq":48,"kind":"model_selected","time":"2026-02-14T10:00:00Z","data":{"phase":"integrate","subtask":"","model":"anthropic/claude-sonnet","source":"capable-default","tier_requested":"complex","met_tier":""}}
+```
+
+`source` is `pinned` when a catalog-resolvable card pin chose the model, and
+`capable-default` otherwise (payload default or serve-config fallback -
+`PickSource` does not separate the two). `tier_requested` is `complex`, the
+shared decision tier; `subtask` is empty for these card-level phases and
+`met_tier` is empty because nothing scored the model against a bar. These
+picks consult no rung, so they also produce no `selector: pick` or
+`selector: pool` line. The event is observability only - resolution behavior
+and the pin-fallback warning path are unchanged.

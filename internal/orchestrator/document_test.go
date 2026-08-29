@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -253,4 +254,73 @@ func TestDocumentPromptOmitsRecordedHistory(t *testing.T) {
 	assert.Contains(t, llmFake.tasks[0], "Add a config flag to toggle the feature.")
 	assert.NotContains(t, llmFake.tasks[0], "naming could improve")
 	assert.NotContains(t, llmFake.tasks[0], "1. SUBTASK: Add the flag")
+}
+
+// TestDocumentModelSelectionEmitted tests that runDocument emits a
+// model_selected event for the "document" phase via the new wrapper,
+// covering the pin, payload-default, and serve-default provenance cases as
+// thin smoke coverage. The full provenance matrix is covered by
+// TestEmitOrchestratorModelSelectionProvenance in modelselect_test.go.
+func TestDocumentModelSelectionEmitted(t *testing.T) {
+	tests := []struct {
+		name       string
+		pin        string
+		payload    string
+		fallback   string
+		wantModel  string
+		wantSource string
+	}{
+		{
+			name:       "payload default (no pin)",
+			pin:        "",
+			payload:    "payload/model",
+			fallback:   "default/model",
+			wantModel:  "payload/model",
+			wantSource: "capable-default",
+		},
+		{
+			name:       "serve default (no pin, no payload)",
+			pin:        "",
+			payload:    "",
+			fallback:   "default/model",
+			wantModel:  "default/model",
+			wantSource: "capable-default",
+		},
+		{
+			name:       "catalog-resolvable pin",
+			pin:        "pinned/model",
+			payload:    "payload/model",
+			fallback:   "default/model",
+			wantModel:  "pinned/model",
+			wantSource: "pinned",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var transcript bytes.Buffer
+
+			ops := &fakeOps{}
+			git := &fakeGit{committed: false}
+			llmFake := &planLLM{responses: []llm.Response{stopResp("No docs needed.", 0.01)}}
+
+			d := documentTestDeps(ops, git, llmFake)
+			d.Emit = events.NewEmitter(nil, &transcript)
+			d.Cfg.PayloadModel = tt.payload
+			d.Cfg.DefaultModel = tt.fallback
+
+			tc := cmclient.TaskContext{Title: "T", Description: "body", ModelOrchestrator: tt.pin}
+			o := newDocumentRun(d, tc, 0)
+
+			require.NoError(t, runDocument(context.Background(), o))
+
+			sels := selectionsForPhase(modelSelections(t, &transcript), "document")
+			require.Len(t, sels, 1, "exactly one model_selected event for the document phase")
+
+			assert.Equal(t, tt.wantModel, sels[0].Model, "resolved model")
+			assert.Equal(t, tt.wantSource, sels[0].Source, "off-ladder source")
+			assert.Empty(t, sels[0].Subtask, "card-level phase has no subtask")
+			assert.Equal(t, "complex", sels[0].TierRequested, "off-ladder phases request the complex bar")
+		})
+	}
 }

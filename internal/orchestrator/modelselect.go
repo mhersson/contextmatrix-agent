@@ -1,6 +1,8 @@
 package orchestrator
 
 import (
+	"context"
+
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-harness/events"
 )
@@ -102,4 +104,45 @@ func offLadderPick(reg *registry.Registry, model string, role registry.Role, tie
 		Source:        src,
 		OK:            true,
 	}
+}
+
+// emitOrchestratorModelSelection resolves the orchestrator model (same
+// precedence as resolveOrchestratorModel) and emits a model_selected event for
+// the given phase. When reg is nil the emit is skipped entirely: the
+// orchestrator's decision phases already guard on this, and there is no ladder
+// to prove the model came from. The returned model string is the resolved slug,
+// unchanged from what resolveOrchestratorModel returns, so call sites that only
+// need the string can assign from the return.
+//
+// Provenance comes directly from resolveOrchestratorModel, not from a second
+// precedence tree, so the event source is always in sync with what the resolver
+// decided.
+func emitOrchestratorModelSelection(
+	ctx context.Context,
+	reg *registry.Registry,
+	emit *events.Emitter,
+	ops Ops,
+	cardID, pinned, payload, fallback string,
+	phase string,
+) string {
+	model, src := resolveOrchestratorModel(ctx, reg, emit, ops, cardID, pinned, payload, fallback)
+
+	if reg != nil {
+		p := offLadderPick(reg, model, registry.RoleReviewer, decisionTier, src)
+		emitModelSelection(emit, phase, "", p)
+	}
+
+	return model
+}
+
+// emitOrchestratorModel is a thin wrapper on *run so that every bare
+// resolveOrchestratorModel call site in the orchestrator phases gets both
+// the resolution and the model_selected event in one call. Future call sites
+// that need the orchestrator model for a phase should use this method rather
+// than calling resolveOrchestratorModel directly.
+func (o *run) emitOrchestratorModel(ctx context.Context, phase string) string {
+	d := o.d
+
+	return emitOrchestratorModelSelection(ctx, d.Registry, d.Emit, d.Ops, d.Cfg.CardID,
+		o.tc.ModelOrchestrator, d.Cfg.PayloadModel, d.Cfg.DefaultModel, phase)
 }

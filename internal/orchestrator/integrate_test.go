@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -341,6 +342,77 @@ func TestWritePRBodyAppendsVerificationTrailer(t *testing.T) {
 			assert.Contains(t, body, "## What", "the model-written body is preserved")
 			assert.NotContains(t, client.tasks[0], "**Verification:**", "the model was not asked to write the trailer")
 			assert.Contains(t, body, "**Verification:** "+tc.want, "the trailer is appended by code")
+		})
+	}
+}
+
+// TestWritePRBodyModelSelectionEmitted tests that writePRBody emits a
+// model_selected event for the "integrate" phase, covering the pin, payload-
+// default, and serve-default provenance cases as thin smoke coverage. The full
+// provenance matrix is covered by TestEmitOrchestratorModelSelectionProvenance
+// in modelselect_test.go.
+func TestWritePRBodyModelSelectionEmitted(t *testing.T) {
+	tests := []struct {
+		name       string
+		pin        string
+		payload    string
+		fallback   string
+		wantModel  string
+		wantSource string
+	}{
+		{
+			name:       "payload default (no pin)",
+			pin:        "",
+			payload:    "payload/model",
+			fallback:   "default/model",
+			wantModel:  "payload/model",
+			wantSource: "capable-default",
+		},
+		{
+			name:       "serve default (no pin, no payload)",
+			pin:        "",
+			payload:    "",
+			fallback:   "default/model",
+			wantModel:  "default/model",
+			wantSource: "capable-default",
+		},
+		{
+			name:       "catalog-resolvable pin",
+			pin:        "pinned/model",
+			payload:    "payload/model",
+			fallback:   "default/model",
+			wantModel:  "pinned/model",
+			wantSource: "pinned",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var transcript bytes.Buffer
+
+			ops := &fakeOps{}
+			client := &planLLM{responses: []llm.Response{stopResp("## What\nDid the work.\n", 0.01)}}
+			d := integrateTestDeps(ops, &fakeGit{}, &fakePR{}, client)
+			d.Emit = events.NewEmitter(nil, &transcript)
+			d.Cfg.PayloadModel = tt.payload
+			d.Cfg.DefaultModel = tt.fallback
+
+			o := newIntegrateRun(d, cmclient.TaskContext{
+				Title: "T", Description: "b", ModelOrchestrator: tt.pin,
+			}, 0)
+			o.lastVerify = verifyResult{Status: verifyPassed}
+			o.verify = &verifyPlan{Argv: []string{"x"}, Display: "go test ./...", Source: verifySourceDetected}
+
+			_, err := o.writePRBody(context.Background())
+			require.NoError(t, err)
+
+			sels := selectionsForPhase(modelSelections(t, &transcript), "integrate")
+			require.Len(t, sels, 1, "exactly one model_selected event for the integrate phase")
+
+			assert.Equal(t, tt.wantModel, sels[0].Model, "resolved model")
+			assert.Equal(t, tt.wantSource, sels[0].Source, "off-ladder source")
+			assert.Empty(t, sels[0].Subtask, "card-level phase has no subtask")
+			assert.Equal(t, "complex", sels[0].TierRequested, "off-ladder phases request the complex bar")
 		})
 	}
 }

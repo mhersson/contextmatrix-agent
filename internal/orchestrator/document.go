@@ -31,8 +31,7 @@ func runDocument(ctx context.Context, o *run) error {
 		return err
 	}
 
-	model := resolveOrchestratorModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
-		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel)
+	model := o.emitOrchestratorModel(ctx, "document")
 
 	// The branch diff grounds both the gate decision and doc accuracy. A diff
 	// failure is non-fatal (best-effort): log and pass a placeholder so the prompt
