@@ -423,6 +423,70 @@ file only - never via flags or committed YAML.
     Copilot gate recorded proven unavailability this run, the probe is
     skipped - a repo that refused a review cannot have one sitting on the
     head, so the extra probe would only read an empty result.
+13. **Plan-time deliverable split and unreachable-criteria valve.** The
+    planner's JSON contract adds two optional arrays alongside `card_tier` and
+    `subtasks`: `followup_cards` and `unreachable_criteria`. Both are omitted
+    from the response when empty and validated in `parsePlan` (non-empty
+    title/description, `depends_on` referencing only earlier entries in their
+    own array) without a size check - the cap is enforced where the plan is
+    consumed, not there.
+
+    The split trigger is independent deliverables ONLY - the planner
+    recognizes the card is really MULTIPLE INDEPENDENT deliverables, not
+    slices of one. There is no subtask-count trigger: a card that decomposes
+    into many subtasks for a single deliverable stays one plan. When the
+    trigger fires, the planner plans only the first deliverable as subtasks
+    and emits each extra deliverable as a `followup_cards` entry: a title plus
+    a SELF-CONTAINED description, since its future executor runs later in a
+    fresh container holding only the repo, without this card or this plan.
+
+    `createFollowups` creates one TOP-LEVEL card per entry (`CreateTopLevelCard`,
+    never a subtask), copies the original card's `autonomous` flag onto it
+    (`SetAutonomous`, re-asserted unconditionally on every resume so a crash
+    mid-loop still converges), and wires `depends_on`: `depends_on_original`
+    chains to the card being planned, `depends_on` indices chain to earlier
+    followup entries, both resolved to real card IDs. It is resume-safe: a
+    followup whose title already appears (trimmed, case-insensitive) in a
+    `## Split` section written by an earlier interrupted run is not
+    recreated - its recorded card ID is reused for the wiring. The `## Split`
+    section is upserted after each followup resolves (created or reused), so a
+    mid-loop failure still leaves every card created so far on record instead
+    of orphaned.
+
+    More than `maxFollowupCards` (4) proposed followups parks the run instead
+    of mutating the board at scale: `SplitOverflowError` joins the other park
+    sentinels (Budget/Context/MaxTurns/Toolchain/NoModel/VerifyParked) that
+    stop execute rather than advance to the next phase, logging the count, the
+    cap, and the proposed titles so a human can re-cut the card without
+    re-running the planner. This is an overflow guard on the split path, not a
+    trigger of its own - a card with many subtasks and no independent
+    deliverable never reaches it.
+
+    `unreachable_criteria` names acceptance criteria the planner judged
+    unreachable from inside the container - reading an input that does not
+    exist in the repo, or writing outside it (a criterion whose artifact does
+    not exist yet but is created inside the repo by the work itself is NOT
+    unreachable). `recordUnreachable` writes one
+    `UNREACHABLE-AC: "<criterion>" - <reason>` add_log line per entry (the
+    convention review keys on) plus a `## Unreachable Criteria` section on the
+    card body naming the same claims. The coder/fix/verify-fix prompts treat
+    both this section and `## Split` as out of scope to implement. Each review
+    specialist verifies every `## Unreachable Criteria` claim against the repo
+    as part of its normal pass and reports VERIFIED or REFUTED with one line
+    of evidence; synthesis - solo and the mob moderator alike, sharing
+    `unreachableVerdictRule` - excludes VERIFIED entries from the
+    approve/revise decision (they stay visible to the human but never fail the
+    work), treats a REFUTED entry as an ordinary unmet criterion that can
+    still block, and excludes `## Split` scope from the verdict as work that
+    moved to other cards.
+
+    Both sections land on `o.body` before `createSubtasks` re-derives
+    `o.taskDescription` at its end (`stripAgentSections(stripMeta(o.body))`,
+    after `## Plan` and the sizing marker are recorded) - `## Split` and
+    `## Unreachable Criteria` are deliberately absent from
+    `stripAgentSections`'s stripped headings, so they reach every downstream
+    phase in the SAME run (execute's coder prompts, the review specialists,
+    both synthesizers), not just a later resumed one.
 
 ## Repo grounding
 
