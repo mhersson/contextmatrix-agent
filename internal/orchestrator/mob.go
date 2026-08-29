@@ -425,8 +425,14 @@ func (o *run) mobModeratorRunner(sink *seatDebugSink, step string) mob.Moderator
 
 	return func(ctx context.Context, prompt string) (string, string, float64, error) {
 		if model == "" {
-			model = resolveDecisionModel(ctx, o.d.Registry, o.d.Emit, o.d.Ops, o.d.Cfg.CardID,
+			pick, rep := resolveDecisionModel(ctx, o.d.Registry, o.d.Emit, o.d.Ops, o.d.Cfg.CardID,
 				o.tc.ModelOrchestrator, o.d.Cfg.PayloadModel, o.d.Cfg.DefaultModel, o.excludedModels(), "mob moderator")
+
+			if pick.OK {
+				o.noteShortfall(ctx, "mob moderator", "", pick, rep)
+			}
+
+			model = pick.Model
 		}
 
 		cfg := o.harnessConfig(model)

@@ -297,15 +297,18 @@ func TestFixCoderSelectionReachesTheTranscript(t *testing.T) {
 func TestDecisionModelSelectionReachesTheTranscript(t *testing.T) {
 	var transcript bytes.Buffer
 
-	emit := events.NewEmitter(nil, &transcript)
-	ops := &fakeOps{}
+	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reviewerRegistry())
+	d.Emit = events.NewEmitter(nil, &transcript)
+	o := newReviewRun(d, cmclient.TaskContext{}, 0)
 
-	model := resolveDecisionModel(context.Background(), reviewerRegistry(), emit, ops,
+	pick, rep := resolveDecisionModel(context.Background(), d.Registry, d.Emit, d.Ops,
 		"CARD-1", "", "payload/model", "default/model", nil, "plan decision")
+	require.True(t, pick.OK)
+	o.noteShortfall(context.Background(), "plan decision", "", pick, rep)
 
 	sels := selectionsForPhase(modelSelections(t, &transcript), "plan decision")
 	require.Len(t, sels, 1)
-	assert.Equal(t, model, sels[0].Model, "the transcript names the model that actually ran")
+	assert.Equal(t, pick.Model, sels[0].Model, "the transcript names the model that actually ran")
 	assert.Equal(t, "complex", sels[0].TierRequested, "decision phases are floored to complex")
 	assert.Equal(t, "auto", sels[0].Source,
 		"a floor pick that cleared the bar came off the ladder, not from a pin or the default")
@@ -317,15 +320,17 @@ func TestDecisionModelSelectionReachesTheTranscript(t *testing.T) {
 func TestDecisionModelBelowBarReportsTheFallback(t *testing.T) {
 	var transcript bytes.Buffer
 
-	emit := events.NewEmitter(nil, &transcript)
-	ops := &fakeOps{}
+	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, nil)
+	d.Emit = events.NewEmitter(nil, &transcript)
+	o := newReviewRun(d, cmclient.TaskContext{}, 0)
 
 	// No priors anywhere, so no candidate clears the complex bar and base wins.
 	reg := offCatalogDefaultRegistry("capable/default")
 
-	model := resolveDecisionModel(context.Background(), reg, emit, ops,
+	pick, rep := resolveDecisionModel(context.Background(), reg, d.Emit, d.Ops,
 		"CARD-1", "", "payload/model", "default/model", nil, "review synthesis")
-	require.Equal(t, "payload/model", model)
+	require.Equal(t, "payload/model", pick.Model)
+	o.noteShortfall(context.Background(), "review synthesis", "", pick, rep)
 
 	sels := selectionsForPhase(modelSelections(t, &transcript), "review synthesis")
 	require.Len(t, sels, 1)
