@@ -497,8 +497,14 @@ func (o *run) runReviewHITL(ctx context.Context, plan verifyPlan) error {
 	resolved := ""
 	resolveGateModel := func(ctx context.Context) string {
 		if resolved == "" {
-			resolved = resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
-				o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels(), "review gate")
+			pick, rep := resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
+				o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels())
+
+			if pick.OK {
+				o.noteShortfall(ctx, "review gate", "", pick, rep)
+			}
+
+			resolved = pick.Model
 		}
 
 		return resolved
@@ -1201,7 +1207,7 @@ func (o *run) reviewPanel(ctx context.Context, estTokens int, authoritative bool
 
 			// A pinned panel is still a per-seat selection, so the transcript
 			// carries a line per seat exactly as the selected panel does.
-			o.noteShortfall(ctx, "review panel", "", panel[i])
+			o.noteShortfall(ctx, "review panel", "", panel[i], registry.SelectionReport{})
 		}
 
 		return panel
@@ -1211,7 +1217,7 @@ func (o *run) reviewPanel(ctx context.Context, estTokens int, authoritative bool
 		o.warnUnresolvablePin(ctx, "reviewer", o.tc.ModelReviewer)
 	}
 
-	panel := o.d.Registry.SelectReviewPanel(registry.SelectInput{
+	seats := o.d.Registry.SelectReviewPanelReport(registry.SelectInput{
 		Role:      registry.RoleReviewer,
 		Tier:      tier,
 		EstTokens: estTokens,
@@ -1223,11 +1229,11 @@ func (o *run) reviewPanel(ctx context.Context, estTokens int, authoritative bool
 
 	// One label for the whole panel: seats that fell the same distance are one
 	// fact, and the panel summary below carries the per-seat detail.
-	for _, p := range panel {
-		o.noteShortfall(ctx, "review panel", "", p)
+	for _, seat := range seats {
+		o.noteShortfall(ctx, "review panel", "", seat.Pick, seat.Report)
 	}
 
-	return panel
+	return registry.SeatPicks(seats)
 }
 
 // reviewExclusions is the union of the coder models (a model must not review its
@@ -1347,8 +1353,14 @@ func (o *run) synthesize(ctx context.Context, findings string, authoritative boo
 	d := o.d
 	cfg := d.Cfg
 
-	model := resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
-		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels(), "review synthesis")
+	pick, rep := resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
+		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels())
+
+	if pick.OK {
+		o.noteShortfall(ctx, "review synthesis", "", pick, rep)
+	}
+
+	model := pick.Model
 
 	var (
 		v       verdict
@@ -1412,14 +1424,15 @@ func (o *run) runFixModel(ctx context.Context, prompt string, req fixRequest) (s
 	fs := o.fixSizing(req)
 
 	for attempt := 0; attempt <= reselectCap; attempt++ {
-		p, rerr := o.resolveFixModel(ctx, req)
+		fp, rerr := o.resolveFixModel(ctx, req)
 		if rerr != nil {
 			return "", rerr
 		}
 
+		p := fp.Pick
 		model := p.Model
 
-		o.noteShortfall(ctx, "fix coder", "", p)
+		o.noteShortfall(ctx, "fix coder", "", p, fp.Selection)
 
 		switch {
 		case o.fixBarSteps > 0:
@@ -1511,8 +1524,8 @@ func (o *run) runFix(ctx context.Context, req fixRequest) (bool, error) {
 	// Keyed on the BAR counter alone: a widened budget is not a reason to refuse
 	// to re-run the same model - running it wider is precisely the correction.
 	if !req.NoEscalate && o.fixBarSteps > 0 {
-		p, rerr := o.resolveFixModel(ctx, req)
-		if rerr != nil || o.fixFailed[p.Model] {
+		fp, rerr := o.resolveFixModel(ctx, req)
+		if rerr != nil || o.fixFailed[fp.Pick.Model] {
 			d.logCard(ctx, "%s", reviewParkNote(
 				fmt.Sprintf("review parked: the previous fix round %s and no other fix model is available (tried: %s) - outstanding findings:\n",
 					o.fixFailReason, strings.Join(sortedKeys(o.fixFailed), ", ")), findings))
@@ -1644,13 +1657,21 @@ func sortedKeys(set map[string]bool) []string {
 	return keys
 }
 
+// fixPick pairs a resolved fix-coder pick with the competing-pool report of
+// the selection that made it, so the caller's noteShortfall call can log the
+// pool beside the pick. A pin consults no rung and carries an empty report.
+type fixPick struct {
+	Pick      registry.Pick
+	Selection registry.SelectionReport
+}
+
 // resolveFixModel picks the coder model for the fix run: the card's coder pin
 // when catalog-resolvable, else the best-value coder selection at this round's
 // fix bar (see fixSizing). Once the bar has climbed, the pick also prefers a
 // vendor that has not failed this card - unless the request declines to
 // escalate, which opts a call site out of the whole correction, the vendor
 // preference included.
-func (o *run) resolveFixModel(ctx context.Context, req fixRequest) (registry.Pick, error) {
+func (o *run) resolveFixModel(ctx context.Context, req fixRequest) (fixPick, error) {
 	tier := o.fixSizing(req).Bar
 
 	if resolvePin(o.d.Registry, o.tc.ModelCoder) {
@@ -1658,7 +1679,7 @@ func (o *run) resolveFixModel(ctx context.Context, req fixRequest) (registry.Pic
 		// an explicit operator pin with an auto-selected substitute. A pinned model
 		// that is harness-incapable therefore keeps being re-selected, exhausts the
 		// re-selection cap, and parks - the blacklist still records it.
-		return offLadderPick(o.d.Registry, o.tc.ModelCoder, registry.RoleCoder, tier, registry.SourcePinned), nil
+		return fixPick{Pick: offLadderPick(o.d.Registry, o.tc.ModelCoder, registry.RoleCoder, tier, registry.SourcePinned)}, nil
 	}
 
 	if o.tc.ModelCoder != "" {
@@ -1672,31 +1693,31 @@ func (o *run) resolveFixModel(ctx context.Context, req fixRequest) (registry.Pic
 	}
 
 	if req.NoEscalate || o.fixBarSteps == 0 {
-		return o.employableFixPick(o.d.Registry.SelectByComplexity(in))
+		return o.employableFixPick(o.d.Registry.SelectByComplexityReport(in))
 	}
 
 	// Escalating after a failed round: prefer a vendor that has not failed this
 	// card, and fall back to any vendor when that leaves only a failed model.
 	in.ExcludeVendors = o.fixFailedVendors()
-	if p := o.d.Registry.SelectByComplexity(in); p.OK && !o.fixFailed[p.Model] {
-		return p, nil
+	if p, rep := o.d.Registry.SelectByComplexityReport(in); p.OK && !o.fixFailed[p.Model] {
+		return fixPick{Pick: p, Selection: rep}, nil
 	}
 
 	in.ExcludeVendors = nil
 
-	return o.employableFixPick(o.d.Registry.SelectByComplexity(in))
+	return o.employableFixPick(o.d.Registry.SelectByComplexityReport(in))
 }
 
 // employableFixPick converts the selector's refusal into a review park. The
 // asymmetry with the coder path is deliberate: no coder means there is no work
 // at all, while the code a fix round would touch is already written and
 // pushed, so a human taking the card FROM REVIEW is the right destination.
-func (o *run) employableFixPick(p registry.Pick) (registry.Pick, error) {
+func (o *run) employableFixPick(p registry.Pick, rep registry.SelectionReport) (fixPick, error) {
 	if !p.OK {
-		return registry.Pick{}, &ReviewParkedError{Reason: reviewParkedNoFixModel}
+		return fixPick{}, &ReviewParkedError{Reason: reviewParkedNoFixModel}
 	}
 
-	return p, nil
+	return fixPick{Pick: p, Selection: rep}, nil
 }
 
 // fixRequest is one fix round's inputs. A struct rather than four positional

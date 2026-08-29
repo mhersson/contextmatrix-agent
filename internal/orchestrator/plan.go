@@ -513,6 +513,16 @@ const decisionTier = registry.TierComplex
 // it: a selection that did not clear the complex bar has no claim over an
 // operator-configured orchestrator model, so base is kept. Degrades to the base
 // resolution when no registry is present.
+//
+// The pick is returned paired with its competing-pool report so every caller
+// routes the pair through noteShortfall, the single chokepoint for the
+// transcript event, the pick line and the pool line. The arms that never
+// consulted a rung - an operator pin, a floor that kept base - carry an empty
+// report. The kept-base arm drops the discarded proposal's report as a stated
+// convention: the pool's selected entry is the proposal, so logging it under
+// base's pick line would misattribute the pool to a model that never ran. OK is
+// false only when no registry resolved base - there is no ladder and no tier,
+// hence no selection to record - and the caller skips the note.
 func resolveDecisionModel(
 	ctx context.Context,
 	reg *registry.Registry,
@@ -520,24 +530,23 @@ func resolveDecisionModel(
 	ops Ops,
 	cardID, pinned, payload, fallback string,
 	exclude map[string]bool,
-	phase string,
-) string {
+) (registry.Pick, registry.SelectionReport) {
 	base := resolveOrchestratorModel(ctx, reg, emit, ops, cardID, pinned, payload, fallback)
 
 	// Without a registry there is no ladder and no tier, so there is no
-	// selection to record.
+	// selection to record: base comes back unbuilt (OK false) and the caller
+	// skips the note.
 	if reg == nil {
-		return base
+		return registry.Pick{ModelSpec: registry.ModelSpec{Model: base}}, registry.SelectionReport{}
 	}
 
 	// A resolvable operator pin is authoritative - never floor over it.
 	if resolvePin(reg, pinned) {
-		emitModelSelection(emit, phase, "", offLadderPick(reg, base, registry.RoleReviewer, decisionTier, registry.SourcePinned))
-
-		return base
+		return offLadderPick(reg, base, registry.RoleReviewer, decisionTier, registry.SourcePinned),
+			registry.SelectionReport{}
 	}
 
-	p := reg.SelectByComplexity(registry.SelectInput{
+	p, rep := reg.SelectByComplexityReport(registry.SelectInput{
 		Role:    registry.RoleReviewer,
 		Tier:    decisionTier,
 		Exclude: exclude,
@@ -550,16 +559,14 @@ func resolveDecisionModel(
 	// not a floor.
 	//
 	// The transcript names base, not p: p was proposed and discarded, and an
-	// event naming a model that never ran is worse than none.
+	// event naming a model that never ran is worse than none. Its pool report is
+	// dropped with it - see the comment above.
 	if !p.AtBar() {
-		emitModelSelection(emit, phase, "", offLadderPick(reg, base, registry.RoleReviewer, decisionTier, registry.SourceDefault))
-
-		return base
+		return offLadderPick(reg, base, registry.RoleReviewer, decisionTier, registry.SourceDefault),
+			registry.SelectionReport{}
 	}
 
-	emitModelSelection(emit, phase, "", p)
-
-	return p.Model
+	return p, rep
 }
 
 // isBudgetError reports whether err is (or wraps) the budget-ceiling sentinel.
@@ -997,8 +1004,14 @@ func runPlan(ctx context.Context, o *run) error {
 
 	decisionModel := func(ctx context.Context) string {
 		if resolved == "" {
-			resolved = resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
-				o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels(), "plan decision")
+			pick, rep := resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
+				o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels())
+
+			if pick.OK {
+				o.noteShortfall(ctx, "plan decision", "", pick, rep)
+			}
+
+			resolved = pick.Model
 
 			if !announced {
 				announced = true

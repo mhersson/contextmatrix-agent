@@ -159,7 +159,7 @@ func (o *run) runFanout(ctx context.Context) (retErr error) {
 		o.warnUnresolvablePin(ctx, "coder", o.tc.ModelCoder)
 	}
 
-	specs := o.d.Registry.SelectCandidateModels(registry.SelectInput{
+	specs := o.d.Registry.SelectCandidateModelsReport(registry.SelectInput{
 		Role:      registry.RoleCoder,
 		Tier:      o.cardSizing.Bar,
 		EstTokens: estimateTokens(o.taskDescription),
@@ -189,9 +189,9 @@ func (o *run) runFanout(ctx context.Context) (retErr error) {
 			git:    o.d.GitForDir(dir),
 			ledger: NewLedger(cfg.MaxCardCost, 0),
 		}
-		o.candidates[i].setPick(specs[i])
+		o.candidates[i].setPick(specs[i].Pick)
 
-		o.noteShortfall(ctx, candidatePhase(idx), "", specs[i])
+		o.noteShortfall(ctx, candidatePhase(idx), "", specs[i].Pick, specs[i].Report)
 
 		o.d.logCard(ctx, "best-of-n: candidate %d/%d starting (model %s)", idx, nEff, o.candidates[i].model)
 	}
@@ -434,7 +434,7 @@ func lastSubtaskID(subs []subtaskRef) string {
 // model runs.
 func (o *run) candidateCoderModel(c *candidate) func(context.Context, subtaskRef, string) (registry.Pick, error) {
 	return func(ctx context.Context, sub subtaskRef, prompt string) (registry.Pick, error) {
-		pick, fresh, ok := o.pickCandidateModel(c, prompt)
+		pick, rep, fresh, ok := o.pickCandidateModel(c, prompt)
 		if !ok {
 			return registry.Pick{}, errCandidatePoolExhausted
 		}
@@ -444,7 +444,7 @@ func (o *run) candidateCoderModel(c *candidate) func(context.Context, subtaskRef
 		// is built, before any fan-out goroutine starts, so naming the seat
 		// needs no lock.
 		if fresh {
-			o.noteShortfall(ctx, candidatePhase(c.idx), sub.ID, pick)
+			o.noteShortfall(ctx, candidatePhase(c.idx), sub.ID, pick, rep)
 		}
 
 		return pick, nil
@@ -463,21 +463,21 @@ func (o *run) candidateCoderModel(c *candidate) func(context.Context, subtaskRef
 // it already had (a pin, or a model this run has not excluded) had that model
 // reported when it was chosen. ok is false when nothing is employable for this
 // candidate any more.
-func (o *run) pickCandidateModel(c *candidate, prompt string) (pick registry.Pick, fresh, ok bool) {
+func (o *run) pickCandidateModel(c *candidate, prompt string) (pick registry.Pick, rep registry.SelectionReport, fresh, ok bool) {
 	o.selMu.Lock()
 	defer o.selMu.Unlock()
 
 	// Never override an explicit operator coder pin (the fan-out assigns it to a
 	// single candidate); let a pinned-but-incapable model park via the cap.
 	if c.model == o.tc.ModelCoder && resolvePin(o.d.Registry, o.tc.ModelCoder) {
-		return c.pick, false, true
+		return c.pick, registry.SelectionReport{}, false, true
 	}
 
 	if !o.excluded[c.model] {
-		return c.pick, false, true
+		return c.pick, registry.SelectionReport{}, false, true
 	}
 
-	next := o.d.Registry.SelectByComplexity(registry.SelectInput{
+	next, nextRep := o.d.Registry.SelectByComplexityReport(registry.SelectInput{
 		Role:      registry.RoleCoder,
 		Tier:      o.cardSizing.Bar,
 		EstTokens: estimateTokens(prompt),
@@ -488,12 +488,12 @@ func (o *run) pickCandidateModel(c *candidate, prompt string) (pick registry.Pic
 	// and the capable default is excluded too. Drop this candidate; the
 	// others carry on.
 	if !next.OK {
-		return registry.Pick{}, false, false
+		return registry.Pick{}, registry.SelectionReport{}, false, false
 	}
 
 	c.setPick(next)
 
-	return next, true, true
+	return next, nextRep, true, true
 }
 
 // candidatePhase gives the fan-out's own pick and a later re-pick for the

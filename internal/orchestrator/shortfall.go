@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
+	"strings"
 
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-harness/events"
@@ -13,6 +15,11 @@ import (
 // traced to the process log and emitted to the run transcript; a pick that did
 // not clear the tier bar it asked for also reaches the operator, as a warning,
 // a state-change event and one entry on the card's activity log.
+//
+// rep is the competing-pool report the registry returned for this pick, empty
+// for the paths that never consulted a rung (pins, off-ladder capable-default
+// picks). A non-empty report earns exactly one "selector: pool" line beside
+// the pick line, so every pick correlates with the field it was chosen from.
 //
 // It is the single wiring point for the transcript event, so a phase that
 // selects a model on a tier records that selection by construction. subtaskID
@@ -27,7 +34,7 @@ import (
 // It takes o.shortfallMu, never o.selMu: the Best-of-N candidate resolver
 // holds selMu across a selection, so an advisory reaching for selMu would
 // deadlock the fan-out.
-func (o *run) noteShortfall(ctx context.Context, phase, subtaskID string, p registry.Pick) {
+func (o *run) noteShortfall(ctx context.Context, phase, subtaskID string, p registry.Pick, rep registry.SelectionReport) {
 	// Unconditional, and above every gate below: the transcript records what
 	// ran, not only what fell short, and the shortfall dedupe must never
 	// swallow a selection.
@@ -38,6 +45,8 @@ func (o *run) noteShortfall(ctx context.Context, phase, subtaskID string, p regi
 		"requested_tier", string(p.RequestedTier), "met_tier", string(p.MetTier),
 		"bar", p.RequestedBar, "prior", p.Prior, "has_prior", p.HasPrior,
 		"source", p.Source.String())
+
+	o.logSelectionPool(phase, subtaskID, p, rep)
 
 	if p.AtBar() {
 		return
@@ -89,6 +98,40 @@ func (o *run) noteShortfall(ctx context.Context, phase, subtaskID string, p regi
 	}
 
 	o.d.logCard(ctx, "%s", line)
+}
+
+// logSelectionPool emits the competing-pool line beside the pick line: every
+// candidate that reached the rung the pick was made on, with its prior, price
+// and outcome, plus a compact reason-aggregated summary of the catalog models
+// that never got there. Exactly one line per pick, and only when the pick
+// came off a rung - a pin, an off-ladder capable default, or a discarded
+// proposal never consulted a pool and reports none.
+func (o *run) logSelectionPool(phase, subtaskID string, p registry.Pick, rep registry.SelectionReport) {
+	if rep.Rung == "" && len(rep.Pool) == 0 && len(rep.FilteredOut) == 0 {
+		return
+	}
+
+	attrs := []any{
+		"card_id", o.d.Cfg.CardID, "phase", phase, "subtask_id", subtaskID,
+		"model", p.Model, "requested_tier", string(p.RequestedTier),
+		"rung", string(rep.Rung), "rung_bar", rep.Bar, "role", string(p.Role),
+	}
+
+	for _, e := range rep.Pool {
+		attrs = append(attrs,
+			"pool_"+e.Model,
+			strings.Join([]string{
+				"prior=" + strconv.FormatFloat(e.Prior, 'f', -1, 64),
+				"price=" + strconv.FormatFloat(e.Price, 'g', -1, 64),
+				"outcome=" + string(e.Outcome),
+			}, " "))
+	}
+
+	for _, f := range rep.FilteredOut {
+		attrs = append(attrs, "filtered_"+string(f.Reason), strings.Join(f.Models, ","))
+	}
+
+	slog.Info("selector: pool", attrs...)
 }
 
 // priorClause renders a pick's prior, or says there is none. HasPrior exists

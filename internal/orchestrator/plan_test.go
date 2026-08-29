@@ -843,8 +843,9 @@ func TestPlanPhaseDiagnoseIncapableModelIsRecovered(t *testing.T) {
 
 	// The decision model the registry resolves first is incapable; the
 	// registry's next pick must answer the plan.
-	first := resolveDecisionModel(context.Background(), d.Registry, d.Emit, ops, "CARD-1",
-		"", d.Cfg.PayloadModel, d.Cfg.DefaultModel, nil, "plan decision")
+	firstPick, _ := resolveDecisionModel(context.Background(), d.Registry, d.Emit, ops, "CARD-1",
+		"", d.Cfg.PayloadModel, d.Cfg.DefaultModel, nil)
+	first := firstPick.Model
 	llmFake := &modelAwareLLM{
 		incapable: map[string]bool{first: true},
 		responses: []llm.Response{stopResp(goodPlanJSON, 0.03)},
@@ -919,10 +920,10 @@ func TestResolveDecisionModelFloorsWeakPayload(t *testing.T) {
 	emit := events.NewEmitter(nil, nil)
 	ops := &fakeOps{}
 
-	got := resolveDecisionModel(context.Background(), reg, emit, ops, "CARD-1",
-		"", "payload/model", "default/model", nil, "plan decision")
+	got, _ := resolveDecisionModel(context.Background(), reg, emit, ops, "CARD-1",
+		"", "payload/model", "default/model", nil)
 
-	assert.Equal(t, "rev/alpha", got)
+	assert.Equal(t, "rev/alpha", got.Model)
 	assert.NotEqual(t, "payload/model", got)
 	assert.NotEqual(t, "default/model", got)
 }
@@ -932,10 +933,10 @@ func TestResolveDecisionModelHonorsPin(t *testing.T) {
 	emit := events.NewEmitter(nil, nil)
 	ops := &fakeOps{}
 
-	got := resolveDecisionModel(context.Background(), reg, emit, ops, "CARD-1",
-		"pinned/model", "payload/model", "default/model", nil, "plan decision")
+	got, _ := resolveDecisionModel(context.Background(), reg, emit, ops, "CARD-1",
+		"pinned/model", "payload/model", "default/model", nil)
 
-	assert.Equal(t, "pinned/model", got)
+	assert.Equal(t, "pinned/model", got.Model)
 }
 
 func TestResolveDecisionModelUnresolvablePinFloorsAndWarns(t *testing.T) {
@@ -943,10 +944,10 @@ func TestResolveDecisionModelUnresolvablePinFloorsAndWarns(t *testing.T) {
 	emit := events.NewEmitter(nil, nil)
 	ops := &fakeOps{}
 
-	got := resolveDecisionModel(context.Background(), reg, emit, ops, "CARD-1",
-		"ghost/model", "payload/model", "default/model", nil, "plan decision")
+	got, _ := resolveDecisionModel(context.Background(), reg, emit, ops, "CARD-1",
+		"ghost/model", "payload/model", "default/model", nil)
 
-	assert.Equal(t, "rev/alpha", got)
+	assert.Equal(t, "rev/alpha", got.Model)
 
 	var addLogs []string
 
@@ -964,10 +965,10 @@ func TestResolveDecisionModelNilRegistryFallsBack(t *testing.T) {
 	emit := events.NewEmitter(nil, nil)
 	ops := &fakeOps{}
 
-	got := resolveDecisionModel(context.Background(), nil, emit, ops, "CARD-1",
-		"", "payload/model", "default/model", nil, "plan decision")
+	got, _ := resolveDecisionModel(context.Background(), nil, emit, ops, "CARD-1",
+		"", "payload/model", "default/model", nil)
 
-	assert.Equal(t, "payload/model", got)
+	assert.Equal(t, "payload/model", got.Model)
 }
 
 // TestResolveDecisionModelKeepsBaseOverTheCapableDefault covers the decision
@@ -992,11 +993,11 @@ func TestResolveDecisionModelKeepsBaseOverTheCapableDefault(t *testing.T) {
 	require.Empty(t, p.MetTier, "off the bottom of the ladder there is no met tier")
 	require.False(t, p.AtBar())
 
-	got := resolveDecisionModel(context.Background(), reg, emit, ops, "CARD-1",
-		"", "payload/model", "default/model", nil, "plan decision")
+	got, _ := resolveDecisionModel(context.Background(), reg, emit, ops, "CARD-1",
+		"", "payload/model", "default/model", nil)
 
-	assert.Equal(t, "payload/model", got, "the operator's own orchestrator model survives a below-bar floor")
-	assert.NotEqual(t, p.Model, got, "a below-bar pick must never replace base")
+	assert.Equal(t, "payload/model", got.Model, "the operator's own orchestrator model survives a below-bar floor")
+	assert.NotEqual(t, p.Model, got.Model, "a below-bar pick must never replace base")
 }
 
 func TestExtractJSON(t *testing.T) {
@@ -1668,10 +1669,10 @@ func TestResolveDecisionModelKeepsBaseWhenTheFloorFallsShort(t *testing.T) {
 					"strong/reviewer": {Reviewer: &tt.reviewer},
 				}}, nil, nil, "capable/default")
 
-			got := resolveDecisionModel(context.Background(), reg, nil, &fakeOps{},
-				"CARD-1", "", "payload/default", "serve/fallback", nil, "plan decision")
+			got, _ := resolveDecisionModel(context.Background(), reg, nil, &fakeOps{},
+				"CARD-1", "", "payload/default", "serve/fallback", nil)
 
-			assert.Equal(t, tt.wantModel, got)
+			assert.Equal(t, tt.wantModel, got.Model)
 		})
 	}
 }

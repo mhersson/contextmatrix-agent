@@ -51,7 +51,46 @@ Pins are consulted separately in the orchestrator and always override the
 catalog path; the fallback precedence is card pin → payload default →
 serve-config default.
 
-## Self-learning blacklist
+## Reading a pick in the logs
 
-A model that proves harness-incapable mid-run is reported back
-(`report_incapable_model`), excluded, and a replacement re-selected.
+Every rung selection writes two `slog` INFO lines with the same identifying
+fields (`card_id`, `phase`, `model`, `requested_tier`), so a pick and its
+field correlate in the log. The existing `selector: pick` line reports the
+winner; the new `selector: pool` line explains why it won.
+
+```text
+selector: pick card_id=... phase=coder model=high/one \
+  requested_tier=complex met_tier=complex bar=0.82 prior=0.85 has_prior=true source=auto
+selector: pool card_id=... phase=coder model=high/one \
+  requested_tier=complex rung=complex rung_bar=0.82 role=coder \
+  pool_top/one="prior=0.93 price=1.5e-05 outcome=out-of-band" \
+  pool_high/one="prior=0.85 price=3e-06 outcome=selected" \
+  pool_high/two="prior=0.83 price=3.3e-06 outcome=in-band" \
+  filtered_prior-below-bar="mid/one,mid/two,low/one"
+```
+
+The pool line lists every candidate that reached the rung the pick was made
+on (not the tier asked for - a clamped pick describes the rung it clamped to)
+with its prior, per-token price, and outcome:
+
+- `selected` - the pick.
+- `in-band` - inside the price band but lower quality (or a quality tie lost
+  to a cheaper model).
+- `out-of-band` - priced above the cheapest candidate times the headroom.
+  With `max_capability` the band is unbounded and nothing is out of band.
+
+Catalog models that never reached the pool are aggregated by reason
+(`filtered_<reason>="slug1,slug2"`), in catalog order: `prior-below-bar`,
+`no-prior-for-role`, `not-tools-capable`, `excluded`, `blacklisted`,
+`vendor-excluded`, `window-too-small`. A growing in-run exclude set shows up
+as one growing `filtered_excluded` entry, so a panel seat's pool reflects the
+seats already seated. Exactly one pool line per pick; a pin or an off-ladder
+capable-default pick consulted no rung and produces no pool line.
+
+The line is emitted alongside every pick that went through the rung ladder:
+coder, fix coder, judge, mob discussion seats, mob moderator, plan and review
+decision floors, review panel seats, Best-of-N candidates, and verify-propose.
+The one ladder consult whose pool is not logged is the decision floor's
+below-bar proposal: the operator's configured model keeps the seat, so logging
+the discarded proposal's pool beside its pick line would misattribute the pool
+to a model that never ran.

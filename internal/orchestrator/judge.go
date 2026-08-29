@@ -173,7 +173,7 @@ func runJudge(ctx context.Context, o *run) error {
 	sections := o.judgeSections(pool)
 	prompt := fmt.Sprintf(judgePrompt, len(pool), o.tc.Title, sections)
 
-	p := d.Registry.SelectByComplexity(registry.SelectInput{
+	p, rep := d.Registry.SelectByComplexityReport(registry.SelectInput{
 		Role:      registry.RoleReviewer,
 		Tier:      registry.TierComplex,
 		EstTokens: estimateTokens(prompt),
@@ -193,7 +193,7 @@ func runJudge(ctx context.Context, o *run) error {
 
 	// The judge picks the branch that ships, so its shortfall is the one that
 	// matters most.
-	o.noteShortfall(ctx, "best-of-n judge", "", p)
+	o.noteShortfall(ctx, "best-of-n judge", "", p, rep)
 
 	model := p.Model
 

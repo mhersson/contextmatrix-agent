@@ -202,7 +202,7 @@ func buildEngineConfig(ctx context.Context, o *run, t mob.Topic, bearer string) 
 		exclude = o.reviewExclusions()
 	}
 
-	panel := o.d.Registry.SelectDiscussionPanel(registry.SelectInput{
+	panel := o.d.Registry.SelectDiscussionPanelReport(registry.SelectInput{
 		Role:      registry.RoleReviewer,
 		Tier:      registry.TierComplex,
 		EstTokens: estimateTokens(t.Briefing),
@@ -216,14 +216,14 @@ func buildEngineConfig(ctx context.Context, o *run, t mob.Topic, bearer string) 
 		return mob.EngineConfig{}, false
 	}
 
-	for _, p := range panel {
-		o.noteShortfall(ctx, "mob "+t.Kind, "", p)
+	for _, seat := range panel {
+		o.noteShortfall(ctx, "mob "+t.Kind, "", seat.Pick, seat.Report)
 	}
 
 	// The panel is always one seat per lens, so a discussion whose seats share
 	// a model looks full while being one model talking to itself - and a
 	// synthesizer reads that as agreement.
-	if distinct := registry.DistinctModels(panel); distinct < len(t.Lenses) &&
+	if distinct := registry.DistinctModels(registry.SeatPicks(panel)); distinct < len(t.Lenses) &&
 		o.firstNote(fmt.Sprintf("mob-dependent/%s/%d", t.Kind, distinct)) {
 		o.d.logCard(ctx, "mob discussion (%s) is not fully independent: %d seats share %d distinct model(s)",
 			t.Kind, len(t.Lenses), distinct)
@@ -234,7 +234,7 @@ func buildEngineConfig(ctx context.Context, o *run, t mob.Topic, bearer string) 
 		seats[i] = mob.SeatConfig{
 			Name:  fmt.Sprintf("seat-%d", i+1),
 			Lens:  lens,
-			Model: panel[i].Model,
+			Model: panel[i].Pick.Model,
 		}
 	}
 
@@ -425,8 +425,14 @@ func (o *run) mobModeratorRunner(sink *seatDebugSink, step string) mob.Moderator
 
 	return func(ctx context.Context, prompt string) (string, string, float64, error) {
 		if model == "" {
-			model = resolveDecisionModel(ctx, o.d.Registry, o.d.Emit, o.d.Ops, o.d.Cfg.CardID,
-				o.tc.ModelOrchestrator, o.d.Cfg.PayloadModel, o.d.Cfg.DefaultModel, o.excludedModels(), "mob moderator")
+			pick, rep := resolveDecisionModel(ctx, o.d.Registry, o.d.Emit, o.d.Ops, o.d.Cfg.CardID,
+				o.tc.ModelOrchestrator, o.d.Cfg.PayloadModel, o.d.Cfg.DefaultModel, o.excludedModels())
+
+			if pick.OK {
+				o.noteShortfall(ctx, "mob moderator", "", pick, rep)
+			}
+
+			model = pick.Model
 		}
 
 		cfg := o.harnessConfig(model)
