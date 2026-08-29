@@ -107,6 +107,77 @@ func TestParsePlan(t *testing.T) {
 	})
 }
 
+func TestParsePlanFollowupsAndUnreachable(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantErr string // empty = valid
+	}{
+		{
+			name: "valid followups and unreachable",
+			input: `{"card_tier":"moderate",
+			 "subtasks":[{"title":"a","description":"d","depends_on":[],"tier":"simple"}],
+			 "followup_cards":[
+			   {"title":"second deliverable","description":"self-contained body","depends_on":[],"depends_on_original":true},
+			   {"title":"third deliverable","description":"body","depends_on":[0],"depends_on_original":false}],
+			 "unreachable_criteria":[{"criterion":"update the sibling repo","reason":"write target outside this repo"}]}`,
+		},
+		{
+			name: "omitted arrays still valid",
+			input: `{"card_tier":"simple",
+			 "subtasks":[{"title":"a","description":"d","depends_on":[],"tier":"simple"}]}`,
+		},
+		{
+			name: "followup empty title rejected",
+			input: `{"card_tier":"simple",
+			 "subtasks":[{"title":"a","description":"d","depends_on":[],"tier":"simple"}],
+			 "followup_cards":[{"title":" ","description":"b","depends_on":[],"depends_on_original":false}]}`,
+			wantErr: "followup card 0",
+		},
+		{
+			name: "followup empty description rejected",
+			input: `{"card_tier":"simple",
+			 "subtasks":[{"title":"a","description":"d","depends_on":[],"tier":"simple"}],
+			 "followup_cards":[{"title":"t","description":"","depends_on":[],"depends_on_original":false}]}`,
+			wantErr: "followup card 0",
+		},
+		{
+			name: "followup forward dependency rejected",
+			input: `{"card_tier":"simple",
+			 "subtasks":[{"title":"a","description":"d","depends_on":[],"tier":"simple"}],
+			 "followup_cards":[{"title":"t","description":"b","depends_on":[1],"depends_on_original":false},
+			                   {"title":"u","description":"b","depends_on":[],"depends_on_original":false}]}`,
+			wantErr: "followup card 0 depends_on",
+		},
+		{
+			name: "unreachable empty criterion rejected",
+			input: `{"card_tier":"simple",
+			 "subtasks":[{"title":"a","description":"d","depends_on":[],"tier":"simple"}],
+			 "unreachable_criteria":[{"criterion":"","reason":"r"}]}`,
+			wantErr: "unreachable criterion 0",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, err := parsePlan(tt.input)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+
+				return
+			}
+
+			require.NoError(t, err)
+
+			if tt.name == "valid followups and unreachable" {
+				assert.Len(t, p.FollowupCards, 2)
+				assert.True(t, p.FollowupCards[0].DependsOnOriginal)
+				assert.Len(t, p.Unreachable, 1)
+			}
+		})
+	}
+}
+
 func TestIsTestOnlySubtask(t *testing.T) {
 	tests := []struct {
 		name  string

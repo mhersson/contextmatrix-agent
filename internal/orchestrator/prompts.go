@@ -186,6 +186,25 @@ Decompose the task into subtasks following these rules:
 - Acceptance criteria must be verifiable from the working tree and test
   runs. Never write criteria about git metadata or history shape (tags,
   commit counts, commit messages, git show output).
+- If the decomposition reveals the card is really MULTIPLE INDEPENDENT
+  deliverables - groups of subtasks that are not slices of one deliverable -
+  plan ONLY the first deliverable and emit each extra deliverable as a
+  followup_cards entry: a title plus a SELF-CONTAINED description (inline
+  everything its future executor needs - it runs later in a fresh container
+  holding only this repo, without this card or this plan). Set
+  depends_on_original true only when the deliverable builds on this card's
+  work; depends_on lists indices of earlier followup entries. Emitting more
+  than 4 followup entries parks the card for a human to re-cut - if you count
+  more than 4, the card itself is mis-scoped; emit them anyway rather than
+  cramming.
+- Check every acceptance criterion for reachability before planning it. A
+  criterion is UNREACHABLE when it requires READING an input that does not
+  exist in this repo (a file on someone's machine, another repo, an absent
+  document) or WRITING outside this repo. A criterion whose artifact does not
+  exist yet but is CREATED inside this repo by the work itself is NOT
+  unreachable - the absence is the work. Emit each unreachable criterion as
+  an unreachable_criteria entry quoting the criterion with a one-line
+  reason, and do not plan subtasks that attempt it.
 
 ` + plannerGroundingRule + `
 
@@ -212,9 +231,12 @@ Title: %s
 Description:
 %s
 %s%s%s%s%s
-Respond with ONLY a JSON object, no prose:
+Respond with ONLY a JSON object, no prose (omit followup_cards and
+unreachable_criteria when empty):
 {"card_tier":"simple|moderate|complex|critical",
- "subtasks":[{"title":"...","description":"...","depends_on":[<earlier indices>],"tier":"simple|moderate|complex|critical"}]}
+ "subtasks":[{"title":"...","description":"...","depends_on":[<earlier indices>],"tier":"simple|moderate|complex|critical"}],
+ "followup_cards":[{"title":"...","description":"...","depends_on":[<earlier followup indices>],"depends_on_original":true|false}],
+ "unreachable_criteria":[{"criterion":"...","reason":"..."}]}
 `
 
 // diagnosePrompt is the read-only debug-investigation pass run for bug-like
@@ -1085,6 +1107,22 @@ The plan must follow these rules:
   ("Files:" line), and acceptance criteria - no placeholders.
 - Assign an overall card_tier and a per-subtask tier: "simple", "moderate",
   "complex", or "critical".
+- If the card is really MULTIPLE INDEPENDENT deliverables - groups of
+  subtasks that are not slices of one deliverable - synthesize ONLY the
+  first deliverable and emit each extra deliverable as a followup_cards
+  entry: a title plus a SELF-CONTAINED description (inline everything its
+  future executor needs - it runs later in a fresh container holding only
+  this repo, without this card or this plan). Set depends_on_original true
+  only when the deliverable builds on this card's work; depends_on lists
+  indices of earlier followup entries. More than 4 followup entries parks
+  the card for a human to re-cut - if you count more than 4, the card
+  itself is mis-scoped; emit them anyway rather than cramming.
+- Check every acceptance criterion for reachability. A criterion is
+  UNREACHABLE when it requires READING an input that does not exist in
+  this repo or WRITING outside this repo - not when its artifact is simply
+  CREATED inside this repo by the work itself. Emit each unreachable
+  criterion as an unreachable_criteria entry quoting the criterion with a
+  one-line reason, and do not synthesize subtasks that attempt it.
 
 ` + plannerGroundingRule + `
 
@@ -1094,9 +1132,12 @@ Title: %s
 Description:
 %s
 
-Respond with ONLY a JSON object, no prose:
+Respond with ONLY a JSON object, no prose (omit followup_cards and
+unreachable_criteria when empty):
 {"card_tier":"simple|moderate|complex|critical",
- "subtasks":[{"title":"...","description":"...","depends_on":[<earlier indices>],"tier":"simple|moderate|complex|critical"}]}
+ "subtasks":[{"title":"...","description":"...","depends_on":[<earlier indices>],"tier":"simple|moderate|complex|critical"}],
+ "followup_cards":[{"title":"...","description":"...","depends_on":[<earlier followup indices>],"depends_on_original":true|false}],
+ "unreachable_criteria":[{"criterion":"...","reason":"..."}]}
 `
 
 // reviewBriefing is the review-discussion problem statement: the SAME

@@ -36,11 +36,43 @@ type planSubtask struct {
 	Tier        string `json:"tier"`
 }
 
-// plan is the planner's structured final output: the overall card tier plus the
-// ordered subtask list. depends_on indices reference earlier entries only.
+// maxFollowupCards caps a plan-time deliverable split. A split larger than
+// this means the card is mis-scoped for automatic handling: the run parks
+// with the proposal instead of mutating the board at scale.
+//
+//nolint:unused // consumed by the plan step that enforces the followup-split cap
+const maxFollowupCards = 4
+
+// planFollowup is one extra deliverable the planner split out of the card:
+// created by the orchestrator as a new TOP-LEVEL card (not a subtask), with a
+// self-contained description. DependsOn indexes earlier followup entries;
+// DependsOnOriginal additionally chains on the card being planned.
+type planFollowup struct {
+	Title             string `json:"title"`
+	Description       string `json:"description"`
+	DependsOn         []int  `json:"depends_on"`
+	DependsOnOriginal bool   `json:"depends_on_original"`
+}
+
+// planUnreachable is one acceptance criterion the planner judged unreachable
+// from inside the container: it needs an input that does not exist in the
+// repo, or a write target outside it. Recorded on the card for review to
+// verify and exclude - never silently dropped.
+type planUnreachable struct {
+	Criterion string `json:"criterion"`
+	Reason    string `json:"reason"`
+}
+
+// plan is the planner's structured final output: the overall card tier, the
+// ordered subtask list, an optional list of extra deliverables split out as
+// followup_cards, and an optional list of acceptance criteria judged
+// unreachable_criteria. depends_on indices (subtasks and followup cards each
+// index their own array) reference earlier entries only.
 type plan struct {
-	CardTier string        `json:"card_tier"`
-	Subtasks []planSubtask `json:"subtasks"`
+	CardTier      string            `json:"card_tier"`
+	Subtasks      []planSubtask     `json:"subtasks"`
+	FollowupCards []planFollowup    `json:"followup_cards"`
+	Unreachable   []planUnreachable `json:"unreachable_criteria"`
 }
 
 // subtaskRef is a created subtask carried on the run struct for the execute
@@ -64,8 +96,13 @@ type subtaskRef struct {
 }
 
 // parsePlan extracts a JSON object from s (tolerating prose / code-fence wrap)
-// and validates it: 1..maxSubtasks subtasks, valid card and subtask tiers, and
-// depends_on indices that reference only earlier subtasks (no self/forward refs).
+// and validates it: 1..maxSubtasks subtasks, valid card and subtask tiers,
+// depends_on indices that reference only earlier subtasks (no self/forward
+// refs), non-empty followup_cards titles/descriptions with depends_on
+// indices referencing only earlier followup entries, and non-empty
+// unreachable_criteria criterion text. followup_cards and
+// unreachable_criteria are both optional and unvalidated against
+// maxFollowupCards - the cap is enforced where the plan is consumed, not here.
 func parsePlan(s string) (plan, error) {
 	raw, ok := extractJSON(s)
 	if !ok {
@@ -106,6 +143,28 @@ func parsePlan(s string) (plan, error) {
 			if dep >= i {
 				return plan{}, fmt.Errorf("subtask %d depends_on index %d must reference an earlier subtask", i, dep)
 			}
+		}
+	}
+
+	for i, fc := range p.FollowupCards {
+		if strings.TrimSpace(fc.Title) == "" {
+			return plan{}, fmt.Errorf("followup card %d has an empty title", i)
+		}
+
+		if strings.TrimSpace(fc.Description) == "" {
+			return plan{}, fmt.Errorf("followup card %d has an empty description", i)
+		}
+
+		for _, dep := range fc.DependsOn {
+			if dep < 0 || dep >= i {
+				return plan{}, fmt.Errorf("followup card %d depends_on index %d must reference an earlier followup", i, dep)
+			}
+		}
+	}
+
+	for i, u := range p.Unreachable {
+		if strings.TrimSpace(u.Criterion) == "" {
+			return plan{}, fmt.Errorf("unreachable criterion %d is empty", i)
 		}
 	}
 
