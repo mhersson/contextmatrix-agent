@@ -1877,6 +1877,80 @@ func TestCreateFollowupsNoneIsNoop(t *testing.T) {
 	assert.Empty(t, ops.recorded(), "a no-op split must not touch Ops at all")
 }
 
+// splitSectionBody renders a claim-time card description carrying a prior
+// "## Split" record, as an earlier (interrupted) run of createFollowups would
+// have written it - the exact shape parseSplitSection must read back.
+func splitSectionBody(entries ...string) string {
+	body := "Some task.\n\n## Split\n\n" +
+		"Deliverables split out of this card at plan time - their scope, including any acceptance criteria that belong to them, is NOT part of this card:\n"
+	for _, e := range entries {
+		body += "- " + e + "\n"
+	}
+
+	return body
+}
+
+// TestCreateFollowupsResumeDedupesByTitle: a resumed run whose claim-time
+// body already carries a "## Split" entry for followup 1 (an earlier,
+// interrupted createFollowups run created it) must not re-create it - the
+// recorded ID is reused for dependency wiring, and SetAutonomous is
+// re-asserted for it exactly like a freshly created followup, covering a
+// crash between CreateTopLevelCard and SetAutonomous on the prior attempt.
+func TestCreateFollowupsResumeDedupesByTitle(t *testing.T) {
+	ops := &fakeOps{createdTopLevelIDs: []string{"CARD-3"}}
+	desc := splitSectionBody("CARD-2: Extract config loader")
+	o := newRun(planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Description: desc, Autonomous: true})
+
+	p := plan{
+		FollowupCards: []planFollowup{
+			{Title: "Extract config loader", Description: "Split out the config loader.", DependsOnOriginal: true},
+			{Title: "Add config docs", Description: "Document the new loader.", DependsOn: []int{0}},
+		},
+	}
+
+	require.NoError(t, o.createFollowups(context.Background(), p))
+
+	require.Len(t, ops.createTopLevelCardArgs, 1, "the already-recorded followup must not be re-created")
+	assert.Equal(t, "Add config docs", ops.createTopLevelCardArgs[0].title)
+	assert.Equal(t, []string{"CARD-2"}, ops.createTopLevelCardArgs[0].dependsOn,
+		"depends_on must use the RECORDED id of the deduped followup, not a freshly minted one")
+
+	require.Len(t, ops.setAutonomousCalls, 2, "autonomous is re-asserted for both, including the deduped one")
+	assert.Equal(t, "CARD-2", ops.setAutonomousCalls[0].cardID)
+	assert.True(t, ops.setAutonomousCalls[0].autonomous)
+	assert.Equal(t, "CARD-3", ops.setAutonomousCalls[1].cardID)
+	assert.True(t, ops.setAutonomousCalls[1].autonomous)
+}
+
+// TestCreateFollowupsPartialFailureRecordsCreatedSoFar: when the 2nd
+// followup's creation fails, the error is still returned, but the 1st
+// followup - already created before the failure - must be durably on record
+// in the recorded body's "## Split" section, not lost with the failed run.
+func TestCreateFollowupsPartialFailureRecordsCreatedSoFar(t *testing.T) {
+	ops := &fakeOps{
+		createdTopLevelIDs:         []string{"CARD-2"},
+		createTopLevelCardErr:      errors.New("board unreachable"),
+		createTopLevelCardErrAfter: 1, // the 1st call succeeds, the 2nd fails
+	}
+	o := newRun(planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: true})
+
+	p := plan{
+		FollowupCards: []planFollowup{
+			{Title: "Extract config loader", Description: "d1", DependsOnOriginal: true},
+			{Title: "Add config docs", Description: "d2", DependsOn: []int{0}},
+		},
+	}
+
+	err := o.createFollowups(context.Background(), p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Add config docs")
+
+	body := ops.lastBody()
+	assert.Contains(t, body, "## Split")
+	assert.Contains(t, body, "CARD-2: Extract config loader", "the followup created before the failure stays on record")
+	assert.NotContains(t, body, "Add config docs", "the failed followup was never created and must not appear")
+}
+
 // The plan JSON wire contract is deliberately untouched, so parsePlan keeps
 // rejecting an unrecognised bar. The bar is the SILENT axis: one repair turn on
 // the loud channel is the price of protecting the axis with no other defence.

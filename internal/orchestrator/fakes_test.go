@@ -93,9 +93,12 @@ type fakeOps struct {
 	// CreateTopLevelCard scripting: mirrors CreateCard's pattern minus parent.
 	// createdTopLevelIDs supplies the returned card ID per call (index-aligned
 	// to call order); when exhausted, IDs fall back to FOLLOWUP-<n>.
-	createdTopLevelIDs     []string
-	createTopLevelCardArgs []createTopLevelCardCall
-	createTopLevelCardErr  error
+	// createTopLevelCardErr fails calls once createTopLevelCardErrAfter calls
+	// have already succeeded (0 = fail every call), mirroring incrementErrAfter.
+	createdTopLevelIDs         []string
+	createTopLevelCardArgs     []createTopLevelCardCall
+	createTopLevelCardErr      error
+	createTopLevelCardErrAfter int
 
 	// SetAutonomous scripting: setAutonomousCalls captures every call
 	// (index-aligned to call order); setAutonomousErr fails every call.
@@ -234,7 +237,7 @@ func (f *fakeOps) CreateTopLevelCard(_ context.Context, project, title, body str
 
 	f.record(fmt.Sprintf("CreateTopLevelCard:%s/%s", project, title))
 
-	if f.createTopLevelCardErr != nil {
+	if f.createTopLevelCardErr != nil && idx >= f.createTopLevelCardErrAfter {
 		return "", f.createTopLevelCardErr
 	}
 

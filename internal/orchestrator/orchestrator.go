@@ -872,15 +872,19 @@ func verifyParkOutputTail(out string, n int) string {
 
 // splitOverflowLogMessage is the canonical card-log line for a split-overflow
 // park: the count, the cap, and the proposed titles so a human can re-cut the
-// card without re-running the planner.
+// card without re-running the planner. The header always survives, so the
+// card names the count and cap even when nothing else fits; the titles are
+// then trimmed to what remains, mirroring verifyParkedLogMessage's bound.
 func splitOverflowLogMessage(soe *SplitOverflowError) string {
-	titles := strings.Join(soe.Titles, "; ")
-	if len(titles) > 1500 {
-		titles = titles[:1500] + "..."
+	header := fmt.Sprintf("plan proposes %d follow-up cards (max %d) - parking; re-cut this card manually. Proposed: ",
+		soe.Count, maxFollowupCards)
+
+	room := verifyParkNoteMax - len(header)
+	if room <= 0 {
+		return truncateBytes(header, verifyParkNoteMax)
 	}
 
-	return fmt.Sprintf("plan proposes %d follow-up cards (max %d) - parking; re-cut this card manually. Proposed: %s",
-		soe.Count, maxFollowupCards, titles)
+	return header + truncateBytes(strings.Join(soe.Titles, "; "), room)
 }
 
 // truncateBytes caps s at n BYTES, keeping its head and cutting on a rune

@@ -365,6 +365,50 @@ func TestVerifyParkedLogMessageFitsTheBoardsLogCap(t *testing.T) {
 	})
 }
 
+// TestSplitOverflowLogMessageFitsTheBoardsLogCap pins the same bound
+// verifyParkedLogMessage carries: the note must fit under ContextMatrix's
+// activity-log cap with margin, and a truncated title list must never split a
+// multi-byte rune - splitOverflowLogMessage computes its room against
+// verifyParkNoteMax via truncateBytes rather than a fixed byte count.
+func TestSplitOverflowLogMessageFitsTheBoardsLogCap(t *testing.T) {
+	t.Run("titles far past the cap are trimmed", func(t *testing.T) {
+		titles := make([]string, 0, maxFollowupCards+1)
+		for i := range 500 {
+			titles = append(titles, fmt.Sprintf("A very long proposed follow-up card title number %04d that eats a lot of room", i))
+		}
+
+		got := splitOverflowLogMessage(&SplitOverflowError{Count: len(titles), Titles: titles})
+
+		assert.LessOrEqual(t, len(got), verifyParkNoteMax,
+			"the note must fit under the board's log cap with margin; got %d bytes", len(got))
+		assert.Contains(t, got, "500", "the header survives truncation")
+		assert.Contains(t, got, fmt.Sprintf("max %d", maxFollowupCards))
+		assert.True(t, utf8.ValidString(got), "truncation must not split a rune")
+	})
+
+	t.Run("titles that already fit are carried whole", func(t *testing.T) {
+		soe := &SplitOverflowError{Count: 2, Titles: []string{"Extract config loader", "Add config docs"}}
+
+		got := splitOverflowLogMessage(soe)
+
+		assert.LessOrEqual(t, len(got), verifyParkNoteMax)
+		assert.Contains(t, got, "Extract config loader; Add config docs", "a note that fits is never elided")
+	})
+
+	t.Run("multi-byte titles are cut on a rune boundary", func(t *testing.T) {
+		// Every title ends in a 3-byte rune, so a byte-aligned cut lands mid-rune.
+		titles := make([]string, 0, 500)
+		for i := range 500 {
+			titles = append(titles, fmt.Sprintf("Follow-up title %04d ✗", i))
+		}
+
+		got := splitOverflowLogMessage(&SplitOverflowError{Count: len(titles), Titles: titles})
+
+		assert.LessOrEqual(t, len(got), verifyParkNoteMax)
+		assert.True(t, utf8.ValidString(got), "a multi-byte rune at the cut must be dropped whole")
+	})
+}
+
 // TestMaxTurnsLogMessagePhaseAware proves the turn-cap park message names a
 // remedy that actually works for the phase it fires in: the plan phase's
 // budget is capped at the fixed planMaxTurns constant regardless of

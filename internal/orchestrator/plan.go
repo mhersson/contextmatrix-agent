@@ -1188,11 +1188,73 @@ func presentPlan(p plan) string {
 		"\n\nApprove to start execution, or tell me what you'd like to adjust."
 }
 
+// splitSectionEntry matches one "- <cardID>: <title>" line in a recorded
+// "## Split" section - the format formatSplitSection writes.
+var splitSectionEntry = regexp.MustCompile(`^-\s+(\S+):\s+(.+)$`)
+
+// normalizeFollowupTitle trims and lowercases a followup title for dedupe
+// comparison, matching CM's own subtask-dedupe normalization (trimmed,
+// case-insensitive) so a re-planned followup with the identical title is
+// recognized as the same card regardless of casing or stray whitespace.
+func normalizeFollowupTitle(title string) string {
+	return strings.ToLower(strings.TrimSpace(title))
+}
+
+// parseSplitSection reads a previously recorded "## Split" section (see
+// formatSplitSection) out of body and returns its entries keyed by
+// normalized title. Returns an empty map when no section is present or none
+// of its lines parse - a fresh run (no prior split) is the common case.
+func parseSplitSection(body string) map[string]string {
+	out := map[string]string{}
+
+	sec := extractSection(body, "Split")
+	if sec == "" {
+		return out
+	}
+
+	for _, line := range strings.Split(sec, "\n") {
+		m := splitSectionEntry.FindStringSubmatch(strings.TrimSpace(line))
+		if m == nil {
+			continue
+		}
+
+		out[normalizeFollowupTitle(m[2])] = m[1]
+	}
+
+	return out
+}
+
+// formatSplitSection renders the "## Split" section body for the given
+// followups and their (already resolved) real card IDs - index-aligned,
+// same length. Called with a growing prefix of both slices as followups are
+// created, so each call's output is a strict superset of the last.
+func formatSplitSection(followups []planFollowup, ids []string) string {
+	var b strings.Builder
+
+	b.WriteString("Deliverables split out of this card at plan time - their scope, including any acceptance criteria that belong to them, is NOT part of this card:\n")
+
+	for i, fc := range followups {
+		fmt.Fprintf(&b, "- %s: %s\n", ids[i], fc.Title)
+	}
+
+	return b.String()
+}
+
 // createFollowups creates one top-level card per plan followup - the
 // deliverables the planner split out - copying the original card's autonomous
 // flag, wiring depends_on to the original card and earlier followups, then
 // recording the split on the original card body and log. More followups than
 // maxFollowupCards parks the run instead of mutating the board at scale.
+//
+// Resume-safe: a followup whose title already appears in the claim-time
+// body's "## Split" section (written by an earlier, interrupted run of this
+// same method) is not re-created - its recorded card ID is reused for
+// depends_on wiring and for SetAutonomous, which is re-asserted unconditionally
+// so a crash between CreateTopLevelCard and SetAutonomous on the prior attempt
+// still converges. The section is upserted after each followup is resolved
+// (created or reused), so a card is durably on-record before the next
+// followup risks failing - a mid-loop error leaves every card created so far
+// visible on the board and in the ## Split note, not orphaned.
 func (o *run) createFollowups(ctx context.Context, p plan) error {
 	if len(p.FollowupCards) == 0 {
 		return nil
@@ -1210,6 +1272,8 @@ func (o *run) createFollowups(ctx context.Context, p plan) error {
 		return &SplitOverflowError{Count: len(p.FollowupCards), Titles: titles}
 	}
 
+	existing := parseSplitSection(o.tc.Description)
+
 	ids := make([]string, len(p.FollowupCards))
 
 	for i, fc := range p.FollowupCards {
@@ -1223,29 +1287,30 @@ func (o *run) createFollowups(ctx context.Context, p plan) error {
 			depIDs = append(depIDs, ids[dep])
 		}
 
-		id, err := d.Ops.CreateTopLevelCard(ctx, cfg.Project, fc.Title, fc.Description, depIDs)
-		if err != nil {
-			return fmt.Errorf("create follow-up card %q: %w", fc.Title, err)
+		id, reused := existing[normalizeFollowupTitle(fc.Title)]
+		if !reused {
+			var err error
+
+			id, err = d.Ops.CreateTopLevelCard(ctx, cfg.Project, fc.Title, fc.Description, depIDs)
+			if err != nil {
+				return fmt.Errorf("create follow-up card %q: %w", fc.Title, err)
+			}
 		}
+
+		ids[i] = id
+
+		// Durable before the next followup risks failing: the section grows
+		// by exactly this entry, so a mid-loop error still leaves everything
+		// created so far on record.
+		o.recordSection(ctx, "Split", sectionFrom("Split", formatSplitSection(p.FollowupCards[:i+1], ids[:i+1])))
 
 		if o.tc.Autonomous {
 			if err := d.Ops.SetAutonomous(ctx, id, true); err != nil {
 				return fmt.Errorf("set follow-up card %s autonomous: %w", id, err)
 			}
 		}
-
-		ids[i] = id
 	}
 
-	var b strings.Builder
-
-	b.WriteString("Deliverables split out of this card at plan time - their scope, including any acceptance criteria that belong to them, is NOT part of this card:\n")
-
-	for i, fc := range p.FollowupCards {
-		fmt.Fprintf(&b, "- %s: %s\n", ids[i], fc.Title)
-	}
-
-	o.recordSection(ctx, "Split", sectionFrom("Split", b.String()))
 	d.logCard(ctx, "plan split: created %d follow-up card(s): %s", len(ids), strings.Join(ids, ", "))
 
 	return nil
