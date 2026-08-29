@@ -90,7 +90,7 @@ func (o *run) proposeVerify(ctx context.Context) (verifyPlan, error) {
 		return verifyPlan{}, err // budget park propagates
 	}
 
-	p := d.Registry.SelectByComplexity(registry.SelectInput{
+	p, rep := d.Registry.SelectByComplexityReport(registry.SelectInput{
 		Role: registry.RoleReviewer,
 		Tier: registry.TierSimple,
 	})
@@ -101,7 +101,7 @@ func (o *run) proposeVerify(ctx context.Context) (verifyPlan, error) {
 		return verifyPlan{}, nil
 	}
 
-	o.noteShortfall(ctx, "verify propose", "", p)
+	o.noteShortfall(ctx, "verify propose", "", p, rep)
 
 	model := p.Model
 

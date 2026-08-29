@@ -2544,7 +2544,7 @@ func TestShortfallAdvisoryNeverTakesTheSelectionLock(t *testing.T) {
 			MetTier:       registry.TierModerate,
 			HasPrior:      true,
 			OK:            true,
-		})
+		}, registry.SelectionReport{})
 	}()
 
 	select {

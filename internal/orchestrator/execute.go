@@ -813,6 +813,9 @@ func (o *run) pushBranch(ctx context.Context) error {
 // It returns the whole Pick, like its fix-round sibling resolveFixModel: the
 // provenance is what separates a laddered selection from a pin or the
 // off-ladder default, and the slug alone cannot carry that.
+//
+// The competing-pool report of the selection rides out beside the pick for
+// noteShortfall's pool line; a pin consults no rung and reports no pool.
 func (o *run) resolveCoderModel(ctx context.Context, sub subtaskRef, prompt string) (registry.Pick, error) {
 	tier := sub.Sizing.Bar
 
@@ -823,7 +826,7 @@ func (o *run) resolveCoderModel(ctx context.Context, sub subtaskRef, prompt stri
 		// re-selection cap, and parks - the blacklist still records it.
 		p := offLadderPick(o.d.Registry, o.tc.ModelCoder, registry.RoleCoder, tier, registry.SourcePinned)
 
-		o.noteShortfall(ctx, "coder", sub.ID, p)
+		o.noteShortfall(ctx, "coder", sub.ID, p, registry.SelectionReport{})
 
 		return p, nil
 	}
@@ -839,12 +842,12 @@ func (o *run) resolveCoderModel(ctx context.Context, sub subtaskRef, prompt stri
 		Exclude:   o.excluded,
 	}
 
-	p := o.d.Registry.SelectByComplexity(in)
+	p, rep := o.d.Registry.SelectByComplexityReport(in)
 	if !p.OK {
 		return registry.Pick{}, o.noModelError(in, p)
 	}
 
-	o.noteShortfall(ctx, "coder", sub.ID, p)
+	o.noteShortfall(ctx, "coder", sub.ID, p, rep)
 
 	return p, nil
 }

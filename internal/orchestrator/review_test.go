@@ -287,15 +287,15 @@ func TestResolveFixModelRequestsTheRightTier(t *testing.T) {
 			got, err := o.resolveFixModel(context.Background(), fixRequest{FixTier: tt.fixTier, Authoritative: tt.authoritative})
 			require.NoError(t, err)
 
-			assert.Equal(t, fixTierCoder, got.Model,
+			assert.Equal(t, fixTierCoder, got.Pick.Model,
 				"the measured coder is the pick at every rung it clears; an unmeasured model never outranks it on quality")
-			assert.Equal(t, registry.SourceAuto, got.Source,
+			assert.Equal(t, registry.SourceAuto, got.Pick.Source,
 				"a clamped pick is a real selection at its rung, not the capable default")
-			assert.Equal(t, tt.wantRequested, got.RequestedTier,
+			assert.Equal(t, tt.wantRequested, got.Pick.RequestedTier,
 				"fix_tier and the authoritative flag decide what is asked for")
-			assert.Equal(t, tt.wantMet, got.MetTier,
+			assert.Equal(t, tt.wantMet, got.Pick.MetTier,
 				"the met tier is measured from the prior, never copied from the request")
-			assert.Equal(t, tt.wantAtBar, got.AtBar())
+			assert.Equal(t, tt.wantAtBar, got.Pick.AtBar())
 
 			again, err := o.resolveFixModel(context.Background(), fixRequest{FixTier: tt.fixTier, Authoritative: tt.authoritative})
 			require.NoError(t, err)
@@ -320,10 +320,10 @@ func TestAuthoritativeFixGateLivesInAtBarNotInTheModel(t *testing.T) {
 	auth, err := o.resolveFixModel(context.Background(), fixRequest{FixTier: "simple", Authoritative: true})
 	require.NoError(t, err)
 
-	assert.Equal(t, nonAuth.Model, auth.Model, "the catalog offers the authoritative pass nothing stronger")
-	assert.True(t, nonAuth.AtBar(), "a simple request served at simple got what it asked for")
-	assert.False(t, auth.AtBar(), "an authoritative pass that could not reach complex must say so")
-	assert.Equal(t, registry.TierComplex, auth.RequestedTier)
+	assert.Equal(t, nonAuth.Pick.Model, auth.Pick.Model, "the catalog offers the authoritative pass nothing stronger")
+	assert.True(t, nonAuth.Pick.AtBar(), "a simple request served at simple got what it asked for")
+	assert.False(t, auth.Pick.AtBar(), "an authoritative pass that could not reach complex must say so")
+	assert.Equal(t, registry.TierComplex, auth.Pick.RequestedTier)
 }
 
 // TestFormatFixesFixFilesRoundTrip pins the line-shape contract between
@@ -3509,7 +3509,7 @@ func TestFixEscalationThatBuysNothingIsRecorded(t *testing.T) {
 
 	plain, err := o.resolveFixModel(context.Background(), fixRequest{FixTier: "moderate"})
 	require.NoError(t, err)
-	require.True(t, plain.AtBar())
+	require.True(t, plain.Pick.AtBar())
 
 	o.fixBarSteps = 1
 	o.fixFailReason = "landed no commit"
@@ -3517,10 +3517,10 @@ func TestFixEscalationThatBuysNothingIsRecorded(t *testing.T) {
 	climbed, err := o.resolveFixModel(context.Background(), fixRequest{FixTier: "moderate"})
 	require.NoError(t, err)
 
-	assert.Equal(t, plain.Model, climbed.Model, "the climb reached the same model")
-	assert.False(t, climbed.AtBar(), "and the caller can see the climb bought nothing")
-	assert.Equal(t, registry.TierComplex, climbed.RequestedTier)
-	assert.Equal(t, registry.TierModerate, climbed.MetTier)
+	assert.Equal(t, plain.Pick.Model, climbed.Pick.Model, "the climb reached the same model")
+	assert.False(t, climbed.Pick.AtBar(), "and the caller can see the climb bought nothing")
+	assert.Equal(t, registry.TierComplex, climbed.Pick.RequestedTier)
+	assert.Equal(t, registry.TierModerate, climbed.Pick.MetTier)
 
 	model, err := o.runFixModel(context.Background(), "fix it", fixRequest{Round: 2, FixTier: "moderate"})
 	require.NoError(t, err)
@@ -3900,12 +3900,12 @@ func TestCleanupPassTakesThePlainPick(t *testing.T) {
 
 	ordinary, err := o.resolveFixModel(context.Background(), fixRequest{Round: 2})
 	require.NoError(t, err)
-	assert.Equal(t, "bravo/dear", ordinary.Model,
+	assert.Equal(t, "bravo/dear", ordinary.Pick.Model,
 		"an escalating round prefers a vendor that has not failed this card")
 
 	cleanup, err := o.resolveFixModel(context.Background(), fixRequest{Round: 3, NoEscalate: true})
 	require.NoError(t, err)
-	assert.Equal(t, "acme/cheap", cleanup.Model,
+	assert.Equal(t, "acme/cheap", cleanup.Pick.Model,
 		"the cleanup pass declined the escalation, so it declines its vendor preference too")
 }
 

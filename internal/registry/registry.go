@@ -871,6 +871,48 @@ func (r *Registry) favoriteAmong(cands []candidate, tier Tier, role Role) string
 // fixed lens list, so a short panel deletes a lens rather than thinning
 // the panel.
 func (r *Registry) SelectReviewPanel(in SelectInput, n int) []Pick {
+	seats := r.SelectReviewPanelReport(in, n)
+	if seats == nil {
+		return nil
+	}
+
+	picks := make([]Pick, 0, len(seats))
+	for _, s := range seats {
+		picks = append(picks, s.Pick)
+	}
+
+	return picks
+}
+
+// SeatReport pairs one panel or candidate seat with the SelectionReport of
+// the selection that chose it, so the caller can log the competing pool
+// beside the pick. A seat filled by duplication carries no report: the seat
+// it repeats already logged that pool.
+type SeatReport struct {
+	Pick   Pick
+	Report SelectionReport
+}
+
+// SeatPicks strips a seat list to its picks, for callers that consume a
+// panel positionally.
+func SeatPicks(seats []SeatReport) []Pick {
+	if seats == nil {
+		return nil
+	}
+
+	picks := make([]Pick, 0, len(seats))
+	for _, s := range seats {
+		picks = append(picks, s.Pick)
+	}
+
+	return picks
+}
+
+// SelectReviewPanelReport is SelectReviewPanel with each seat's competing
+// pool. Seats chosen by the selector carry the report of the selection that
+// made them; duplicated or default seats carry an empty report, exactly like
+// the picks that never consult a rung.
+func (r *Registry) SelectReviewPanelReport(in SelectInput, n int) []SeatReport {
 	if n <= 0 {
 		return nil
 	}
@@ -885,16 +927,16 @@ func (r *Registry) SelectReviewPanel(in SelectInput, n int) []Pick {
 		usedVendors = map[string]bool{}
 	}
 
-	panel := make([]Pick, 0, n)
+	panel := make([]SeatReport, 0, n)
 
-	var last Pick
+	var last SeatReport
 
 	for len(panel) < n {
 		seat := in
 		seat.Exclude = exclude
 		seat.ExcludeVendors = nil
 
-		blind := r.SelectByComplexity(seat)
+		blind, blindRep := r.SelectByComplexityReport(seat)
 
 		// No distinct model remains at any rung, and even the capable
 		// default is barred: repeat the last real pick.
@@ -903,9 +945,9 @@ func (r *Registry) SelectReviewPanel(in SelectInput, n int) []Pick {
 				return nil // nothing is selectable for this role at all
 			}
 
-			dup := last
+			dup := last.Pick
 			dup.Duplicate = true
-			panel = append(panel, dup)
+			panel = append(panel, SeatReport{Pick: dup})
 
 			continue
 		}
@@ -917,14 +959,15 @@ func (r *Registry) SelectReviewPanel(in SelectInput, n int) []Pick {
 		// occupying a seat of its own. The first seat is the exception:
 		// with nothing on the panel yet, the default IS the answer.
 		if blind.Source == SourceDefault && len(panel) > 0 {
-			dup := last
+			dup := last.Pick
 			dup.Duplicate = true
-			panel = append(panel, dup)
+			panel = append(panel, SeatReport{Pick: dup})
 
 			continue
 		}
 
 		pick := blind
+		rep := blindRep
 
 		// Soft vendor preference, bounded to the rung the vendor-blind pick
 		// landed on: diversity breaks ties within a rung, it never
@@ -940,13 +983,14 @@ func (r *Registry) SelectReviewPanel(in SelectInput, n int) []Pick {
 			filtered := seat
 			filtered.ExcludeVendors = usedVendors
 
-			if f := r.SelectByComplexity(filtered); f.OK && f.MetTier == blind.MetTier {
+			if f, frep := r.SelectByComplexityReport(filtered); f.OK && f.MetTier == blind.MetTier {
 				pick = f
+				rep = frep
 			}
 		}
 
-		panel = append(panel, pick)
-		last = pick
+		panel = append(panel, SeatReport{Pick: pick, Report: rep})
+		last = panel[len(panel)-1]
 		exclude[pick.Model] = true
 
 		if v := r.vendorOf(pick.Model); v != "" {
@@ -967,6 +1011,12 @@ func (r *Registry) SelectDiscussionPanel(in SelectInput, n int) []Pick {
 	return r.SelectReviewPanel(in, n)
 }
 
+// SelectDiscussionPanelReport is SelectDiscussionPanel with each seat's
+// competing pool, as SelectReviewPanelReport produces it.
+func (r *Registry) SelectDiscussionPanelReport(in SelectInput, n int) []SeatReport {
+	return r.SelectReviewPanelReport(in, n)
+}
+
 // SelectCandidateModels picks n coder models for a Best-of-N fan-out. pin, if
 // non-empty, occupies slot 1 and is never degraded away; the remaining slots
 // follow SelectReviewPanel's contract (distinct models first, a flagged
@@ -975,12 +1025,29 @@ func (r *Registry) SelectDiscussionPanel(in SelectInput, n int) []Pick {
 // the remaining slots with the pin itself, flagged as a repeat, so a pinned
 // fan-out still gets n candidates.
 func (r *Registry) SelectCandidateModels(in SelectInput, n int, pin string) []Pick {
+	seats := r.SelectCandidateModelsReport(in, n, pin)
+	if seats == nil {
+		return nil
+	}
+
+	picks := make([]Pick, 0, len(seats))
+	for _, s := range seats {
+		picks = append(picks, s.Pick)
+	}
+
+	return picks
+}
+
+// SelectCandidateModelsReport is SelectCandidateModels with each seat's
+// competing pool, as SelectReviewPanelReport produces it. The pinned slot
+// carries no report: pins never consult a rung.
+func (r *Registry) SelectCandidateModelsReport(in SelectInput, n int, pin string) []SeatReport {
 	if n <= 0 {
 		return nil
 	}
 
 	if pin == "" {
-		return r.SelectReviewPanel(in, n)
+		return r.SelectReviewPanelReport(in, n)
 	}
 
 	next := in
@@ -1007,17 +1074,17 @@ func (r *Registry) SelectCandidateModels(in SelectInput, n int, pin string) []Pi
 	// authority; AtBar carries the measurement.
 	pinPick := r.pickFor(pin, in, SourcePinned)
 
-	out := make([]Pick, 0, n)
-	out = append(out, pinPick)
+	out := make([]SeatReport, 0, n)
+	out = append(out, SeatReport{Pick: pinPick})
 
-	rest := r.SelectReviewPanel(next, n-1)
+	rest := r.SelectReviewPanelReport(next, n-1)
 	if rest == nil && n > 1 {
 		// Nothing else is selectable: fill the remaining seats with the pin,
 		// flagged, so the fan-out still gets n candidates.
 		for range n - 1 {
 			dup := pinPick
 			dup.Duplicate = true
-			out = append(out, dup)
+			out = append(out, SeatReport{Pick: dup})
 		}
 
 		return out
