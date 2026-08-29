@@ -1214,6 +1214,14 @@ func (o *run) awaitCopilotGrace(ctx context.Context, prURL string) (review *Copi
 
 					return nil, true, "", nil
 				}
+
+				if qerr == nil {
+					slog.Info("pr_gates: in-grace Copilot review re-request was dropped again",
+						"card_id", o.d.Cfg.CardID, "pr_url", prURL)
+				} else {
+					slog.Info("pr_gates: in-grace Copilot review re-request re-check failed",
+						"card_id", o.d.Cfg.CardID, "pr_url", prURL, "error", qerr)
+				}
 			}
 		}
 
