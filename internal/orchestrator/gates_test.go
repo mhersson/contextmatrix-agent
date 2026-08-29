@@ -56,6 +56,20 @@ type fakeGates struct {
 	requestedAfterChecks int
 	requestedCalls       int
 
+	// confirmAfterRequests scripts a request that is silently dropped N times
+	// and then takes: every RequestCopilotReview call after the Nth is
+	// confirmed by its response body and flips requested. Zero disables the
+	// knob. It takes precedence over requestSilentlyNoOps so the first request
+	// can stay a silent no-op while a later retry confirms.
+	confirmAfterRequests int
+
+	// requestedAfterRequests scripts a listing that lags the request: once
+	// RequestCopilotReview has been called this many times, CopilotRequested
+	// answers true regardless of requested. Zero disables the knob, and it
+	// wins over requestedAfterChecks so the first request's pre-check and
+	// re-check read false while a retry's follow-up check reads true.
+	requestedAfterRequests int
+
 	// holdReviewsUntilChecks reproduces a review that lands DURING the CI wait:
 	// while it is set and Checks has never been polled, CopilotReview reads as
 	// "no review yet" without consuming the queue, so the Copilot wait times out
@@ -138,6 +152,10 @@ func (f *fakeGates) CopilotRequested(_ context.Context, prURL string) (bool, err
 
 	f.requestedCalls++
 
+	if f.requestedAfterRequests > 0 && f.requests >= f.requestedAfterRequests {
+		return true, nil
+	}
+
 	if f.requestedAfterChecks > 0 && f.requestedCalls >= f.requestedAfterChecks {
 		return true, nil
 	}
@@ -161,8 +179,14 @@ func (f *fakeGates) RequestCopilotReview(_ context.Context, prURL string) (bool,
 		return false, f.reRequestErr
 	}
 
-	if f.requestSilentlyNoOps {
+	if f.requestSilentlyNoOps && (f.confirmAfterRequests == 0 || f.requests <= f.confirmAfterRequests) {
 		return false, nil
+	}
+
+	if f.confirmAfterRequests > 0 && f.requests > f.confirmAfterRequests {
+		f.requested = true
+
+		return true, nil
 	}
 
 	f.requested = true
@@ -1467,6 +1491,19 @@ func shrinkCopilotGrace(t *testing.T, d time.Duration) {
 	t.Cleanup(func() { gatesCopilotGraceWait = prev })
 }
 
+// shrinkCopilotGraceRetries re-times the in-grace review-request retries, so
+// they fire (or are proven dropped) in milliseconds instead of minutes. The
+// poller helper: the first offset above the shrunk window fires nothing, the
+// second fires once.
+func shrinkCopilotGraceRetries(t *testing.T, first, second time.Duration) {
+	t.Helper()
+
+	prev := gatesCopilotGraceRetries
+	gatesCopilotGraceRetries = []time.Duration{first, second}
+
+	t.Cleanup(func() { gatesCopilotGraceRetries = prev })
+}
+
 // copilotVerdict scripts one triage response: the strict JSON the gate asks for.
 func copilotVerdict(findings ...copilotFinding) llm.Response {
 	raw, err := json.Marshal(copilotTriage{Findings: findings})
@@ -1925,6 +1962,178 @@ func TestCopilotGate_GraceUpgradesWhenRequestListedLate(t *testing.T) {
 	assert.Equal(t, 1, modelCallCount(client), "the review the full wait delivers is triaged")
 	assert.True(t, ops.loggedContains("Copilot review addressed"))
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+}
+
+// TestCopilotGate_GraceRetryLandsUpgradesToFullWait: a request dropped at
+// first is retried inside the grace window. When a retry lands - confirmed by
+// the response body, or listed on the follow-up re-check - the gate upgrades
+// to the full wait exactly as it does for a request the API listed late.
+func TestCopilotGate_GraceRetryLandsUpgradesToFullWait(t *testing.T) {
+	shrinkCopilotRecheck(t, time.Millisecond)
+	shrinkCopilotGrace(t, 40*time.Millisecond)
+	shrinkCopilotGraceRetries(t, 8*time.Millisecond, 16*time.Millisecond)
+
+	// The review sits behind more empty polls than the grace window can make
+	// before its deadline, so only the upgrade to the full wait reaches it -
+	// a grace window left to run out would skip instead.
+	reviews := make([]*CopilotReview, 20)
+	reviews[len(reviews)-1] = reviewOnHead("LGTM")
+
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		// The first request is a silent no-op; the SECOND - the in-grace
+		// retry - is body-confirmed.
+		requestSilentlyNoOps: true,
+		confirmAfterRequests: 1,
+		headSHA:              copilotHeadSHA,
+		reviews:              reviews,
+	}
+	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, copilotGateContext("Retry lands", "body"), 0)
+	o.d.Cfg.GatesCopilotWaitTimeout = 2 * time.Second
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	calls := gates.recorded()
+	assert.Equal(t, 2, countCalls(calls, "RequestCopilotReview:"+gatePRURL),
+		"the dropped request is re-issued exactly once inside the grace window; calls=%v", calls)
+	assert.True(t, ops.loggedContains("request did not take"),
+		"the unconfirmed request is recorded before the grace wait; logs=%v", ops.recorded())
+	assert.True(t, ops.loggedContains("appeared during the grace window"),
+		"the landed retry upgrades to the full wait; logs=%v", ops.recorded())
+	assert.False(t, ops.loggedContains("no review arrived"),
+		"a landed retry must not end in the grace skip; logs=%v", ops.recorded())
+	assert.Equal(t, 1, modelCallCount(client), "the review the full wait delivers is triaged")
+	assert.True(t, ops.loggedContains("Copilot review addressed"))
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+}
+
+// TestCopilotGate_GraceRetryListedLateUpgradesToFullWait: a retry whose
+// confirmation does not come through the response body still counts as landed
+// when the follow-up CopilotRequested re-check lists the reviewer - the same
+// two-step confirmation the first request gets.
+func TestCopilotGate_GraceRetryListedLateUpgradesToFullWait(t *testing.T) {
+	shrinkCopilotRecheck(t, time.Millisecond)
+	shrinkCopilotGrace(t, 40*time.Millisecond)
+	shrinkCopilotGraceRetries(t, 8*time.Millisecond, 16*time.Millisecond)
+
+	// CopilotRequested stays false while only the dropped first request is on
+	// the books and starts answering true once the in-grace retry has been
+	// issued, so the pending listing shows up on the retry's own re-check.
+	// The review sits behind more empty polls than the grace window can make,
+	// so only the upgrade to the full wait reaches it - a grace window left
+	// to run out would skip instead.
+	reviews := make([]*CopilotReview, 20)
+	reviews[len(reviews)-1] = reviewOnHead("LGTM")
+
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requestSilentlyNoOps: true,
+		headSHA:              copilotHeadSHA,
+		// The listing lags the request: CopilotRequested reads false while
+		// only the first request exists, and true once the in-grace retry is
+		// on the books - so the retry's body-silent response gets its
+		// confirmation from its follow-up re-check.
+		requestedAfterRequests: 2,
+		reviews:                reviews,
+	}
+	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, copilotGateContext("Retry listed late", "body"), 0)
+	o.d.Cfg.GatesCopilotWaitTimeout = 2 * time.Second
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	calls := gates.recorded()
+	assert.Equal(t, 2, countCalls(calls, "RequestCopilotReview:"+gatePRURL),
+		"the dropped request is re-issued exactly once inside the grace window; calls=%v", calls)
+	assert.True(t, ops.loggedContains("appeared during the grace window"),
+		"the listed-late retry upgrades to the full wait; logs=%v", ops.recorded())
+	assert.Equal(t, 1, modelCallCount(client), "the review the full wait delivers is triaged")
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+}
+
+// TestCopilotGate_GraceRetriesDroppedFailOpenQuietly: when every in-grace
+// retry is silently dropped too, the gate keeps today's fail-open outcome -
+// the same skip note, no extra card notes, no decision events - and the total
+// grace duration stays bounded by the grace window.
+func TestCopilotGate_GraceRetriesDroppedFailOpenQuietly(t *testing.T) {
+	shrinkCopilotRecheck(t, time.Millisecond)
+	shrinkCopilotGrace(t, 40*time.Millisecond)
+	shrinkCopilotGraceRetries(t, 8*time.Millisecond, 16*time.Millisecond)
+
+	var transcript bytes.Buffer
+
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requestSilentlyNoOps: true,
+		headSHA:              copilotHeadSHA,
+	}
+	client := &planLLM{}
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, copilotGateContext("Every retry dropped", "body"), 0)
+	o.d.Cfg.GatesCopilotWaitTimeout = 300 * time.Millisecond
+	o.d.Emit = events.NewEmitter(nil, &transcript)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	calls := gates.recorded()
+	assert.Equal(t, 3, countCalls(calls, "RequestCopilotReview:"+gatePRURL),
+		"both in-grace retries fire, and nothing re-requests past the deadline; calls=%v", calls)
+	assert.True(t, ops.loggedContains("request did not take"),
+		"the skip names the dropped request; logs=%v", ops.recorded())
+	assert.False(t, ops.loggedContains("unavailable"),
+		"a dropped request is not proven unavailability; logs=%v", ops.recorded())
+	assert.Equal(t, 0, modelCallCount(client), "no review, nothing to triage")
+
+	// Byte-for-byte the fail-open behavior: exactly today's decision events -
+	// entering, the unconfirmed note, the skip note, passed - nothing from
+	// the retries.
+	assert.Equal(t, []string{
+		"pr_gates: entering - await_ci=false await_copilot_review=true create_pr=true pr_url=https://example.test/pr/1 copilot_wait=300ms ci_wait=45m0s poll=1ms copilot_satisfied=false",
+		"pr_gates: Copilot review request did not take (the request was accepted but Copilot was never added as a reviewer); waiting briefly for a repo-automated review",
+		"pr_gates: Copilot review request did not take - the reviewer was never added and no review arrived; proceeding without one",
+		"pr_gates: passed",
+	}, gateDecisionStatuses(t, &transcript), "retries stay quiet; decisions=%v", gateDecisionStatuses(t, &transcript))
+
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0,
+		"the gate passes; Copilot being unreachable never parks the card")
+}
+
+// TestCopilotGate_GraceRetry422SkipsUnavailable: a retry that proves Copilot
+// cannot review the repository surfaces the verbatim 422 reason and takes the
+// existing unavailability skip - the same shape as the first request's 422.
+func TestCopilotGate_GraceRetry422SkipsUnavailable(t *testing.T) {
+	shrinkCopilotRecheck(t, time.Millisecond)
+	shrinkCopilotGrace(t, 40*time.Millisecond)
+	shrinkCopilotGraceRetries(t, 8*time.Millisecond, 16*time.Millisecond)
+
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requestSilentlyNoOps: true,
+		headSHA:              copilotHeadSHA,
+		// The first request is a silent no-op; the SECOND - the in-grace
+		// retry - answers the proven unavailability 422.
+		reRequestErr: errors.New("HTTP 422: Copilot isn't available for this repository"),
+	}
+	client := &planLLM{}
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, copilotGateContext("Retry 422", "body"), 0)
+	o.d.Cfg.GatesCopilotWaitTimeout = 300 * time.Millisecond
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	calls := gates.recorded()
+	assert.Equal(t, 2, countCalls(calls, "RequestCopilotReview:"+gatePRURL),
+		"the 422 stops the retry ladder at the first retry; calls=%v", calls)
+	assert.True(t, ops.loggedContains("Copilot review unavailable: HTTP 422: Copilot isn't available for this repository"),
+		"the verbatim reason is recorded; logs=%v", ops.recorded())
+	assert.False(t, ops.loggedContains("appeared during the grace window"),
+		"an unavailable reviewer never upgrades to the full wait; logs=%v", ops.recorded())
+	assert.Equal(t, 0, modelCallCount(client), "no review, nothing to triage")
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0,
+		"the gate skips rather than parks; Copilot being unreachable never parks the card")
 }
 
 // TestCopilotGate_ConfirmedRequestSkipsRecheck: when the POST's response body

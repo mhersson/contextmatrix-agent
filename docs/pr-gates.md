@@ -86,10 +86,17 @@ POST's own response body (the updated PR object's `requested_reviewers`) and,
 when that comes back empty, against one delayed re-read of the pending
 reviewer list. A request confirmed by neither is treated as dropped: the gate
 waits only a short grace window (5 minutes) for a ruleset-delivered review or
-a late-listed request - a pending request appearing during grace upgrades to
-the full wait - and then passes with a note naming the dropped request,
-instead of burning the full wait and blaming a slow review. The re-request
-after a fix round gets the same confirm-or-grace treatment.
+a late-listed request, and re-issues the dropped request twice inside the
+window (about 60 and 180 seconds in). Each re-request gets the same two-step
+confirmation as the first - the response body, then a delayed re-read of the
+pending reviewer list. A retry that lands, by either confirmation, upgrades to
+the full wait, as does a pending request that appears during grace. A retry
+answering the 422 unavailability is proof Copilot cannot review the
+repository: it records the reason verbatim and takes the same skip as a
+first-request 422. When every retry is dropped too, the gate still passes at
+the grace deadline with a note naming the dropped request, instead of burning
+the full wait and blaming a slow review. The re-request after a fix round gets
+the same re-tried confirm-or-grace treatment.
 
 A confirmed request that never produces a review is recorded and passed at the
 wait deadline, 20 minutes by default
