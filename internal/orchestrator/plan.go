@@ -530,7 +530,6 @@ func resolveDecisionModel(
 	ops Ops,
 	cardID, pinned, payload, fallback string,
 	exclude map[string]bool,
-	phase string,
 ) (registry.Pick, registry.SelectionReport) {
 	base := resolveOrchestratorModel(ctx, reg, emit, ops, cardID, pinned, payload, fallback)
 
@@ -1006,13 +1005,14 @@ func runPlan(ctx context.Context, o *run) error {
 	decisionModel := func(ctx context.Context) string {
 		if resolved == "" {
 			pick, rep := resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
-				o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels(), "plan decision")
+				o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels())
 
 			if pick.OK {
 				o.noteShortfall(ctx, "plan decision", "", pick, rep)
 			}
 
 			resolved = pick.Model
+
 			if !announced {
 				announced = true
 

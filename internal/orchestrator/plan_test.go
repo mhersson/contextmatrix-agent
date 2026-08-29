@@ -844,7 +844,7 @@ func TestPlanPhaseDiagnoseIncapableModelIsRecovered(t *testing.T) {
 	// The decision model the registry resolves first is incapable; the
 	// registry's next pick must answer the plan.
 	firstPick, _ := resolveDecisionModel(context.Background(), d.Registry, d.Emit, ops, "CARD-1",
-		"", d.Cfg.PayloadModel, d.Cfg.DefaultModel, nil, "plan decision")
+		"", d.Cfg.PayloadModel, d.Cfg.DefaultModel, nil)
 	first := firstPick.Model
 	llmFake := &modelAwareLLM{
 		incapable: map[string]bool{first: true},
@@ -921,7 +921,7 @@ func TestResolveDecisionModelFloorsWeakPayload(t *testing.T) {
 	ops := &fakeOps{}
 
 	got, _ := resolveDecisionModel(context.Background(), reg, emit, ops, "CARD-1",
-		"", "payload/model", "default/model", nil, "plan decision")
+		"", "payload/model", "default/model", nil)
 
 	assert.Equal(t, "rev/alpha", got.Model)
 	assert.NotEqual(t, "payload/model", got)
@@ -934,7 +934,7 @@ func TestResolveDecisionModelHonorsPin(t *testing.T) {
 	ops := &fakeOps{}
 
 	got, _ := resolveDecisionModel(context.Background(), reg, emit, ops, "CARD-1",
-		"pinned/model", "payload/model", "default/model", nil, "plan decision")
+		"pinned/model", "payload/model", "default/model", nil)
 
 	assert.Equal(t, "pinned/model", got.Model)
 }
@@ -945,7 +945,7 @@ func TestResolveDecisionModelUnresolvablePinFloorsAndWarns(t *testing.T) {
 	ops := &fakeOps{}
 
 	got, _ := resolveDecisionModel(context.Background(), reg, emit, ops, "CARD-1",
-		"ghost/model", "payload/model", "default/model", nil, "plan decision")
+		"ghost/model", "payload/model", "default/model", nil)
 
 	assert.Equal(t, "rev/alpha", got.Model)
 
@@ -966,7 +966,7 @@ func TestResolveDecisionModelNilRegistryFallsBack(t *testing.T) {
 	ops := &fakeOps{}
 
 	got, _ := resolveDecisionModel(context.Background(), nil, emit, ops, "CARD-1",
-		"", "payload/model", "default/model", nil, "plan decision")
+		"", "payload/model", "default/model", nil)
 
 	assert.Equal(t, "payload/model", got.Model)
 }
@@ -994,7 +994,7 @@ func TestResolveDecisionModelKeepsBaseOverTheCapableDefault(t *testing.T) {
 	require.False(t, p.AtBar())
 
 	got, _ := resolveDecisionModel(context.Background(), reg, emit, ops, "CARD-1",
-		"", "payload/model", "default/model", nil, "plan decision")
+		"", "payload/model", "default/model", nil)
 
 	assert.Equal(t, "payload/model", got.Model, "the operator's own orchestrator model survives a below-bar floor")
 	assert.NotEqual(t, p.Model, got.Model, "a below-bar pick must never replace base")
@@ -1670,7 +1670,7 @@ func TestResolveDecisionModelKeepsBaseWhenTheFloorFallsShort(t *testing.T) {
 				}}, nil, nil, "capable/default")
 
 			got, _ := resolveDecisionModel(context.Background(), reg, nil, &fakeOps{},
-				"CARD-1", "", "payload/default", "serve/fallback", nil, "plan decision")
+				"CARD-1", "", "payload/default", "serve/fallback", nil)
 
 			assert.Equal(t, tt.wantModel, got.Model)
 		})

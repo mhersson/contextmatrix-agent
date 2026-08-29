@@ -498,7 +498,7 @@ func (o *run) runReviewHITL(ctx context.Context, plan verifyPlan) error {
 	resolveGateModel := func(ctx context.Context) string {
 		if resolved == "" {
 			pick, rep := resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
-				o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels(), "review gate")
+				o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels())
 
 			if pick.OK {
 				o.noteShortfall(ctx, "review gate", "", pick, rep)
@@ -1354,7 +1354,7 @@ func (o *run) synthesize(ctx context.Context, findings string, authoritative boo
 	cfg := d.Cfg
 
 	pick, rep := resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
-		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels(), "review synthesis")
+		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels())
 
 	if pick.OK {
 		o.noteShortfall(ctx, "review synthesis", "", pick, rep)

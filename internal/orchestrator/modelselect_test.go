@@ -302,7 +302,7 @@ func TestDecisionModelSelectionReachesTheTranscript(t *testing.T) {
 	o := newReviewRun(d, cmclient.TaskContext{}, 0)
 
 	pick, rep := resolveDecisionModel(context.Background(), d.Registry, d.Emit, d.Ops,
-		"CARD-1", "", "payload/model", "default/model", nil, "plan decision")
+		"CARD-1", "", "payload/model", "default/model", nil)
 	require.True(t, pick.OK)
 	o.noteShortfall(context.Background(), "plan decision", "", pick, rep)
 
@@ -328,7 +328,7 @@ func TestDecisionModelBelowBarReportsTheFallback(t *testing.T) {
 	reg := offCatalogDefaultRegistry("capable/default")
 
 	pick, rep := resolveDecisionModel(context.Background(), reg, d.Emit, d.Ops,
-		"CARD-1", "", "payload/model", "default/model", nil, "review synthesis")
+		"CARD-1", "", "payload/model", "default/model", nil)
 	require.Equal(t, "payload/model", pick.Model)
 	o.noteShortfall(context.Background(), "review synthesis", "", pick, rep)
 

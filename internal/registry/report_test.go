@@ -121,7 +121,10 @@ func TestSelectByComplexityReportGrowingExcludeStaysOutOfThePool(t *testing.T) {
 		require.Equal(t, want, pick.Model, "seat %d", seat+1)
 
 		pool := poolByModel(rep)
-		assert.NotContains(t, pool, exclude, "seat %d: previously seated models must not be in the pool", seat+1)
+		for slug := range exclude {
+			assert.NotContains(t, pool, slug,
+				"seat %d: previously seated model %q must not be in the pool", seat+1, slug)
+		}
 
 		filtered := filteredByReason(rep)
 		for slug := range exclude {
