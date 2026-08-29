@@ -4653,12 +4653,12 @@ func TestOneFixRoundOutcomeIsChargedOnce(t *testing.T) {
 			// vendor (escalationRegistry) once the first fixer is excluded,
 			// while the park row needs reviewerRegistry's single coder pick
 			// so the exhausted-fixers park can actually trip.
-			registry_ := reviewerRegistry()
+			reg := reviewerRegistry()
 			if !tt.wantParked {
-				registry_ = escalationRegistry()
+				reg = escalationRegistry()
 			}
 
-			d := reviewTestDeps(t, ops, git, &planLLM{responses: tt.script}, registry_)
+			d := reviewTestDeps(t, ops, git, &planLLM{responses: tt.script}, reg)
 			d.Cfg.MaxTurns = 5
 
 			o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}, 0)

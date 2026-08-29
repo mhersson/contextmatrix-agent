@@ -453,7 +453,9 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 			// charges the bar too (a full budget spent and a broken tree left
 			// behind); if the gate comes back green the flag dies unused.
 			o.markFixCapped()
+
 			o.fixCappedPending = true
+
 			d.logCard(ctx, "review: fix round %d hit its turn cap - retrying wider", round)
 
 			// Cleared, not merely left alone: an earlier COMPLETED round would
@@ -495,7 +497,9 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 			// MaxTurnsError arm above: a committed red tree from this round
 			// charges the bar in the next iteration, a green one does not.
 			o.markFixCapped()
+
 			o.fixCappedPending = true
+
 			d.logCard(ctx, "review: fix round %d spent its whole turn window - the next fix round runs wider", round)
 
 			fixRan = false
