@@ -14,8 +14,11 @@ import (
 // CM's workflow-skills, which write these sections onto the card. section
 // must be the COMPLETE block, starting with its "## <heading>" line.
 //
-// Best-effort: a failure is logged, not fatal - the body is a human-facing
-// record, never control state, and must not fail a phase.
+// Best-effort: a failure is logged, not fatal - the body is primarily a
+// human-facing record, and must not fail a phase. The Review Approval section
+// is an exception: it is a fail-open, SHA-bound adoption gate on resume, but a
+// failed write degrades to the pre-change re-review behavior rather than
+// halting the run.
 func (o *run) recordSection(ctx context.Context, heading, section string) {
 	o.body = upsertSection(o.body, heading, section)
 

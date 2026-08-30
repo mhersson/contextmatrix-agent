@@ -5496,7 +5496,9 @@ func TestTryAdoptApproval_MatchingHeadAndGreenVerify(t *testing.T) {
 		return verifyexec.Outcome{ExitCode: 0, Output: "green"}
 	}
 
-	require.True(t, o.tryAdoptApproval(context.Background(), *o.verify),
+	adopted, err := o.tryAdoptApproval(context.Background(), *o.verify)
+	require.NoError(t, err)
+	require.True(t, adopted,
 		"adoption must succeed when HEAD matches and the gate passes")
 
 	// Exactly one model call: the cleanup fix pass, no specialist, no synthesis.
@@ -5538,7 +5540,9 @@ func TestTryAdoptApproval_NoFixesSkipsCleanup(t *testing.T) {
 	// No verify command, so gate is vacuous - HEAD match alone suffices.
 	o.verify = &verifyPlan{Source: verifySourceNone}
 
-	require.True(t, o.tryAdoptApproval(context.Background(), *o.verify),
+	adopted, err := o.tryAdoptApproval(context.Background(), *o.verify)
+	require.NoError(t, err)
+	assert.True(t, adopted,
 		"adoption must succeed when HEAD matches and no verify command is configured")
 
 	assert.Zero(t, modelCallCount(client),
@@ -5565,7 +5569,9 @@ func TestTryAdoptApproval_DifferentHeadIgnoresRecord(t *testing.T) {
 
 	o.verify = &verifyPlan{Source: verifySourceNone}
 
-	assert.False(t, o.tryAdoptApproval(context.Background(), *o.verify),
+	adopted, err := o.tryAdoptApproval(context.Background(), *o.verify)
+	require.NoError(t, err)
+	assert.False(t, adopted,
 		"adoption must be refused when HEAD does not match the recorded SHA")
 
 	// No model calls, no cleanup, no body change.
@@ -5593,7 +5599,9 @@ func TestTryAdoptApproval_RedVerifyIgnoresRecord(t *testing.T) {
 		return verifyexec.Outcome{ExitCode: 1, Output: "FAIL: tests failed"}
 	}
 
-	assert.False(t, o.tryAdoptApproval(context.Background(), *o.verify),
+	adopted, err := o.tryAdoptApproval(context.Background(), *o.verify)
+	require.NoError(t, err)
+	assert.False(t, adopted,
 		"adoption must be refused when the verify gate is red")
 
 	// No model calls, no cleanup, no body change.
@@ -5614,7 +5622,9 @@ func TestTryAdoptApproval_NoRecordReturnsFalse(t *testing.T) {
 	o := newReviewRun(d, tc, 0)
 	o.body = "## Plan\n\njust a plan"
 
-	assert.False(t, o.tryAdoptApproval(context.Background(), verifyPlan{}),
+	adopted, err := o.tryAdoptApproval(context.Background(), verifyPlan{})
+	require.NoError(t, err)
+	assert.False(t, adopted,
 		"adoption must return false when no approval record exists")
 }
 
@@ -5634,7 +5644,9 @@ func TestTryAdoptApproval_NitOnlySkipsCleanupPass(t *testing.T) {
 
 	o.verify = &verifyPlan{Source: verifySourceNone}
 
-	assert.True(t, o.tryAdoptApproval(context.Background(), *o.verify),
+	adopted, err := o.tryAdoptApproval(context.Background(), *o.verify)
+	require.NoError(t, err)
+	assert.True(t, adopted,
 		"adoption must succeed even when the cleanup pass is skipped")
 
 	assert.Equal(t, -1, indexOfPrefix(git.recorded(), "CommitFixup:"),

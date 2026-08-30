@@ -29,12 +29,14 @@ type approval struct {
 
 // recordApproval writes the approval section onto the parent card body,
 // capturing the branch HEAD SHA at the time of approval so a later resume
-// can verify nothing changed. The section is a markdown block with the SHA
-// in the body followed by a fenced-JSON payload for the summary and fixes.
+// can verify nothing changed before adopting. The section is a markdown
+// block with the SHA in the body followed by a fenced-JSON payload for the
+// summary and fixes. A failed write degrades to the pre-change re-review
+// behavior - the approval is not lost because the body is the adoption gate's
+// source of truth and a missing section is treated as "no record".
 //
-// Best-effort: a failure is logged, not fatal - the body is a human-facing
-// record, never control state. When HEAD cannot be read the record is
-// skipped (nothing to bind to) and the caller proceeds normally.
+// Best-effort: a failure is logged, not fatal. When HEAD cannot be read the
+// record is skipped (nothing to bind to) and the caller proceeds normally.
 func (o *run) recordApproval(ctx context.Context, summary string, fixes []fix) {
 	d := o.d
 
@@ -113,7 +115,7 @@ func extractApproval(body string) (approval, bool) {
 
 // clearApproval removes the "## Review Approval" section from the parent card
 // body and pushes the updated body to CM, so a resumed run that adopted an
-// approval clears it before proceeding to documentation. Best-effort: a
+// approval clears it before the FSM proceeds to integrate. Best-effort: a
 // failure is logged, not fatal.
 func (o *run) clearApproval(ctx context.Context) {
 	o.body = removeSection(o.body, approvalHeading)

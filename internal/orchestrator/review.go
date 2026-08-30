@@ -163,7 +163,7 @@ func (o *run) reviewTimeLeft(ctx context.Context, round int) error {
 // current branch HEAD and the verify gate (when one is configured) still
 // passes, the approval is adopted, skipping the specialist panel and synthesis.
 // On adoption the recorded surviving fixes run as a non-escalating cleanup
-// pass, the approval record is cleared, and the FSM proceeds to documentation.
+// pass, the approval record is cleared, and the FSM proceeds to integrate.
 // Any mismatch (no record, different HEAD, red or erroring verify) falls
 // through to the normal review loop unchanged.
 func runReview(ctx context.Context, o *run) error {
@@ -207,8 +207,15 @@ func runReview(ctx context.Context, o *run) error {
 	// loop. When a prior run approved the card, the record binds the verdict to
 	// the commit it approved. Resume adopts it when the HEAD still matches and,
 	// when a verify command is configured, the gate still passes. Any mismatch
-	// falls through to the normal review loop.
-	if o.tryAdoptApproval(ctx, plan) {
+	// falls through to the normal review loop. A park error from the adopted
+	// cleanup fix pass propagates out of runReview so the FSM parks the card
+	// rather than re-buying the panel on an exhausted budget.
+	adopted, aerr := o.tryAdoptApproval(ctx, plan)
+	if aerr != nil {
+		return aerr
+	}
+
+	if adopted {
 		return nil
 	}
 
@@ -216,19 +223,21 @@ func runReview(ctx context.Context, o *run) error {
 }
 
 // tryAdoptApproval checks whether a recorded approval can be adopted on resume.
-// It returns true when adoption succeeds: the record exists, the current branch
-// HEAD matches the recorded SHA, and the verify gate (when the plan has a
+// It returns (true, nil) when adoption succeeds: the record exists, the current
+// branch HEAD matches the recorded SHA, and the verify gate (when the plan has a
 // command) is still green. On adoption it runs the recorded surviving fixes as
 // a non-escalating cleanup pass, clears the approval record from the card body,
-// and returns nil for the FSM to proceed to documentation. On any mismatch
-// (no record, different HEAD, red or erroring verify) it does nothing and
-// returns false so the caller falls through to the normal review loop.
-func (o *run) tryAdoptApproval(ctx context.Context, plan verifyPlan) bool {
+// and returns nil for the FSM to proceed to integrate. On any mismatch (no
+// record, different HEAD, red or erroring verify) it does nothing and returns
+// (false, nil) so the caller falls through to the normal review loop. A park
+// error from the adopted cleanup fix pass propagates up to park the card rather
+// than re-buying the panel on an exhausted budget.
+func (o *run) tryAdoptApproval(ctx context.Context, plan verifyPlan) (bool, error) {
 	d := o.d
 
 	rec, ok := extractApproval(o.body)
 	if !ok {
-		return false
+		return false, nil
 	}
 
 	// The recorded HEAD SHA must match the current branch HEAD.
@@ -237,7 +246,7 @@ func (o *run) tryAdoptApproval(ctx context.Context, plan verifyPlan) bool {
 		slog.Debug("review: recorded approval HEAD does not match current branch - ignoring",
 			"card_id", d.Cfg.CardID, "recorded", rec.HeadSHA, "current", head, "error", err)
 
-		return false
+		return false, nil
 	}
 
 	// When a verify command is configured, re-run it. An approval never bypasses
@@ -250,14 +259,14 @@ func (o *run) tryAdoptApproval(ctx context.Context, plan verifyPlan) bool {
 			slog.Warn("review: could not verify before adopting recorded approval",
 				"card_id", d.Cfg.CardID, "error", verr)
 
-			return false
+			return false, nil
 		}
 
 		o.lastVerify = vres
 
 		if vres.Status != verifyPassed {
 			// Red or skipped verify: do not adopt.
-			return false
+			return false, nil
 		}
 	}
 
@@ -265,8 +274,15 @@ func (o *run) tryAdoptApproval(ctx context.Context, plan verifyPlan) bool {
 	d.logCard(ctx, "review: adopted recorded approval from %s - skipping panel review", shortSHA(rec.HeadSHA))
 
 	// Frame the review summary from the recorded summary, using the same helpers
-	// the live path uses so the PR body and completion note are honest.
-	o.reviewSummary = approvedWithOpenFindings(rec.Summary)
+	// the live path uses so the PR body and completion note are honest. An
+	// approval with surviving fixes frames the summary as open findings; a clean
+	// one carries the summary verbatim, matching the live approval path's framing
+	// condition.
+	if len(rec.Fixes) > 0 {
+		o.reviewSummary = approvedWithOpenFindings(rec.Summary)
+	} else {
+		o.reviewSummary = rec.Summary
+	}
 
 	// Run the recorded surviving fixes as a non-escalating cleanup pass - exactly
 	// the same fixRequest.NoEscalate semantics the live approval branch uses so a
@@ -289,7 +305,9 @@ func (o *run) tryAdoptApproval(ctx context.Context, plan verifyPlan) bool {
 			if isParkError(ferr) {
 				d.logCard(ctx, "review: adopted approval but the cleanup fix pass parked - stopping: %s", ferr)
 
-				return false
+				// Propagate the park error so the FSM parks the card instead of
+				// falling through to a re-bought panel.
+				return false, ferr
 			}
 
 			d.logCard(ctx, "review: adopted approval but the cleanup fix pass failed - proceeding approved: %s", ferr)
@@ -301,7 +319,7 @@ func (o *run) tryAdoptApproval(ctx context.Context, plan verifyPlan) bool {
 
 			o.clearApproval(ctx)
 
-			return true
+			return true, nil
 		}
 
 		if committed {
@@ -310,6 +328,9 @@ func (o *run) tryAdoptApproval(ctx context.Context, plan verifyPlan) bool {
 			d.logCard(ctx, "review: adopted approval with %d surviving finding(s) - applied a non-escalating cleanup fix pass", len(rec.Fixes))
 
 			// The fixup landed after HEAD was matched, so verify it or drop it.
+			// A round of 0 means no round was recorded by this run, so the verify
+			// correction is skipped - there is no in-run round to attribute a
+			// correction to.
 			o.verifyCleanupFixup(ctx, plan, 0, pre, rec.Summary)
 		} else {
 			d.logCard(ctx, "review: adopted approval with %d surviving finding(s), but the cleanup fix pass produced no change", len(rec.Fixes))
@@ -320,7 +341,7 @@ func (o *run) tryAdoptApproval(ctx context.Context, plan verifyPlan) bool {
 	// is not confused by a stale approval.
 	o.clearApproval(ctx)
 
-	return true
+	return true, nil
 }
 
 // reviewLoop is the autonomous review loop. Approval exits nil; each
@@ -394,7 +415,7 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 			// after it, and if that pass later lands a fixup the recorded SHA
 			// will no longer match HEAD - which is correct, because a resumed
 			// run must not adopt an approval whose tree has moved on.
-			o.recordApproval(ctx, approvedWithOpenFindings(findings), fixes)
+			o.recordApproval(ctx, findings, fixes)
 
 			// Findings survived the critique round despite approval: run exactly
 			// one non-escalating cleanup pass and finish either way. This is not
@@ -838,7 +859,7 @@ func (o *run) verifyCleanupFixup(ctx context.Context, plan verifyPlan, round int
 
 	o.lastVerify = vres
 
-	if vres.Status != verifyPassed {
+	if vres.Status != verifyPassed && round > 0 {
 		o.recordReviewVerifyCorrection(ctx, round, findings, vres)
 	}
 }
@@ -976,7 +997,7 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 		// between here and the next phase does not lose the verdict. The HEAD
 		// SHA is captured at verdict time - the commit the authoritative pass
 		// approved - so a resumed run can verify the tree has not changed.
-		o.recordApproval(ctx, approvedWithOpenFindings(findings), fixes)
+		o.recordApproval(ctx, findings, fixes)
 
 		// Deliberately no cleanup pass here, unlike reviewLoop's approval branch:
 		// this IS the cliff, so any surviving findings are simply surfaced
@@ -1036,6 +1057,12 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 	o.recordReview(ctx, round2, findings2, approved2, vres2)
 
 	if approved2 {
+		// Record the approval on the card body before proceeding, so a park
+		// between here and the next phase does not lose the re-review verdict.
+		// The HEAD SHA is captured at verdict time so a resumed run can verify
+		// the tree has not changed.
+		o.recordApproval(ctx, findings2, fixes2)
+
 		o.reviewSummary = findings2
 		if len(fixes2) > 0 {
 			o.reviewSummary = approvedWithOpenFindings(findings2)
