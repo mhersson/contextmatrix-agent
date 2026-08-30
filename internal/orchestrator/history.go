@@ -336,6 +336,7 @@ var agentSectionHeadings = []string{
 	"Execute Discussions",
 	"Best-of-N Report",
 	"Verify Command",
+	"Review Approval",
 	"PR Gates",
 }
 

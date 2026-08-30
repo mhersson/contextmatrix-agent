@@ -613,9 +613,10 @@ func TestReviewCleanupFixupDiscardedOnRedVerify(t *testing.T) {
 	git := &fakeGit{
 		committed:        true,
 		lastCommitTarget: "abc123",
-		// The snapshot head, the head the cleanup pass commits onto, and a head
-		// only a capture taken AFTER the fix run could read.
-		headSHAs: []string{"snapshot-sha", "pre-cleanup-sha", "post-cleanup-sha"},
+		// The snapshot head (runSpecialists), the approval head (recordApproval),
+		// the head the cleanup pass commits onto, and a head only a capture taken
+		// AFTER the fix run could read.
+		headSHAs: []string{"snapshot-sha", "approval-sha", "pre-cleanup-sha", "post-cleanup-sha"},
 	}
 	client := &planLLM{responses: cleanupVerifyResponses()}
 	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())

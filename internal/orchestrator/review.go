@@ -267,6 +267,15 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 		if approved {
 			o.reviewSummary = findings // synthesis verdict summary (plus any surviving fixes), for the PR body
 
+			// Record the approval on the card body BEFORE any post-approval
+			// cleanup pass, so a park mid-cleanup does not lose the fact that
+			// this round's verdict approved the change. The HEAD SHA captured
+			// here is the commit the approval judged; the cleanup pass runs
+			// after it, and if that pass later lands a fixup the recorded SHA
+			// will no longer match HEAD - which is correct, because a resumed
+			// run must not adopt an approval whose tree has moved on.
+			o.recordApproval(ctx, approvedWithOpenFindings(findings), fixes)
+
 			// Findings survived the critique round despite approval: run exactly
 			// one non-escalating cleanup pass and finish either way. This is not
 			// another review round - it never increments review attempts, never
@@ -843,6 +852,12 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 	o.recordReview(ctx, round, findings, approved, vres)
 
 	if approved {
+		// Record the approval on the card body before proceeding, so a park
+		// between here and the next phase does not lose the verdict. The HEAD
+		// SHA is captured at verdict time - the commit the authoritative pass
+		// approved - so a resumed run can verify the tree has not changed.
+		o.recordApproval(ctx, approvedWithOpenFindings(findings), fixes)
+
 		// Deliberately no cleanup pass here, unlike reviewLoop's approval branch:
 		// this IS the cliff, so any surviving findings are simply surfaced
 		// through reviewSummary (and the PR body) rather than spending another
