@@ -76,8 +76,8 @@ github.com/mhersson/contextmatrix-backendkit v0.4.4 h1:GzMNJEEz7r+q8JM5ZIAIfbvjF
 github.com/mhersson/contextmatrix-backendkit v0.4.4/go.mod h1:KUJOgCbbriYpT/mclaksI2h06FodqH+bOdq8ATpIYAk=
 github.com/mhersson/contextmatrix-harness v0.20.0 h1:DV9irvFNqzYV7FtqmPBGrb6hwYBmmWNrA1KIEzU/3tY=
 github.com/mhersson/contextmatrix-harness v0.20.0/go.mod h1:+tbo9tmokwEDSxRnAVEbmGv4bvyZZxe+4WN2m2KsVrE=
-github.com/mhersson/contextmatrix-protocol v0.16.0 h1:lqLZrbsBt4gg+Ki+qSfTV58gEU3hKRvyjiSs5Du7LVw=
-github.com/mhersson/contextmatrix-protocol v0.16.0/go.mod h1:oukqhfSUHf3sNL5x+cKhftwaBP+AKQwseGlNlc4JZqU=
+github.com/mhersson/contextmatrix-protocol v0.17.0 h1:qOIEf3NYr2Fr6eWtw7DcO+YGSjLVq9wybWKInHWmaV8=
+github.com/mhersson/contextmatrix-protocol v0.17.0/go.mod h1:Je4jQj+MkbkjhYuUYmWjJca2Mjj4inJKBq9DiNvhJ38=
 github.com/mitchellh/copystructure v1.2.0 h1:vpKXTN4ewci03Vljg/q9QvCGUDttBOGBIa15WveJJGw=
 github.com/mitchellh/copystructure v1.2.0/go.mod h1:qLl+cE2AmVv+CoeAwDPye/v+N2HKCj9FbZEVFJRxO9s=
 github.com/mitchellh/reflectwalk v1.0.2 h1:G2LzWKi524PWgd3mLHV8Y5k7s6XUvT0Gef6zxSIeXaQ=

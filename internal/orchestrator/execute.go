@@ -1123,7 +1123,7 @@ func (o *run) logSoloCapPark(ctx context.Context, subID, reason string) {
 }
 
 // reportSoloOutcome reports one solo (boardOps) run's terminal model outcome
-// to CM's leaderboard, keyed on the subtask card itself - not the parent,
+// to CM's outcome ledger, keyed on the subtask card itself - not the parent,
 // deliberately unlike the Best-of-N judge's parent rollup. NCandidates is
 // always 1 and JudgeModel is always empty: there is no judge on the solo
 // path. Best-effort: a report failure only warns, mirroring every other
@@ -1136,10 +1136,11 @@ func (o *run) logSoloCapPark(ctx context.Context, subID, reason string) {
 // held, i.e. before CompleteTask/ReleaseCard - reporting after either would
 // silently fail against an already-released claim.
 //
-// Bias-math: a solo win never moves a model's calibration numerator on CM's
-// leaderboard in its favour; only a solo failure moves it, downward. That is
-// why the call site in executeClaimedWith reports `failed` for a subtask the
-// fix pass had to repair, even though the subtask still ships.
+// Ledger semantics: the ledger is observability only - selection never reads
+// it - and a solo completion is not a comparative win; only a solo failure
+// carries signal. That is why the call site in executeClaimedWith reports
+// `failed` for a subtask the fix pass had to repair, even though the subtask
+// still ships.
 //
 // It takes the whole Pick rather than the slug because a `failed` row from a
 // selection the ladder walked down is not recorded at all (walkedDown carries

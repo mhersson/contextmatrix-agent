@@ -1,8 +1,6 @@
 package registry
 
 import (
-	"math"
-
 	"github.com/mhersson/contextmatrix-harness/llm"
 	protocol "github.com/mhersson/contextmatrix-protocol"
 )
@@ -26,10 +24,6 @@ func FromSelection(sc *protocol.SelectionContext, capable string, priceHeadroom 
 			})
 
 			coder, rev := c.CoderPrior, c.ReviewerPrior
-			if sc.OutcomeFloor > 0 && c.Outcomes != nil && c.Outcomes.Samples >= sc.OutcomeFloor {
-				coder *= outcomeBiasFactor(c.Outcomes)
-			}
-
 			priors.Models[c.Slug] = PriorEntry{Coder: &coder, Reviewer: &rev}
 
 			if c.Creator != "" {
@@ -61,22 +55,4 @@ func FromSelection(sc *protocol.SelectionContext, capable string, priceHeadroom 
 	r.sel.MaxCapability = maxCapability
 
 	return r
-}
-
-const (
-	outcomeBiasMin = 0.8
-	outcomeBiasMax = 1.2
-)
-
-// outcomeBiasFactor turns head-to-head history into a bounded multiplier on
-// the coder prior: observed win-rate minus the expected baseline, clamped to
-// ±20%. Self-play (wrap-around candidates) nets to exactly 1.0.
-func outcomeBiasFactor(o *protocol.OutcomeStats) float64 {
-	if o.Samples == 0 {
-		return 1
-	}
-
-	f := 1 + (float64(o.Wins)-o.ExpectedWins)/float64(o.Samples)
-
-	return math.Min(math.Max(f, outcomeBiasMin), outcomeBiasMax)
 }
