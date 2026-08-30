@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
@@ -336,5 +337,86 @@ func TestReviewRejectionNoApproval(t *testing.T) {
 
 	// The body may have review findings, increment attempts, etc. But it must
 	// NOT have an approval section.
+	assert.NotContains(t, body, "## Review Approval")
+}
+
+// TestRemoveSection_RemovesApprovalBlock proves removeSection strips a
+// "## Review Approval" block from the body, including its JSON payload.
+func TestRemoveSection_RemovesApprovalBlock(t *testing.T) {
+	body := "Intro.\n\n## Review Approval\n\nCommit: abc123\n\n```json\n{\"head_sha\":\"abc123\"}\n```\n\n## Keep\n\nhuman text"
+
+	got := removeSection(body, approvalHeading)
+
+	assert.NotContains(t, got, "## Review Approval")
+	assert.NotContains(t, got, "abc123")
+	assert.NotContains(t, got, "```json")
+	assert.Contains(t, got, "Intro.")
+	assert.Contains(t, got, "## Keep")
+	assert.Contains(t, got, "human text")
+}
+
+// TestRemoveSection_AbsentHeading returns body unchanged.
+func TestRemoveSection_AbsentHeading(t *testing.T) {
+	body := "## Plan\n\nplain body"
+
+	got := removeSection(body, approvalHeading)
+
+	assert.Equal(t, body, got, "removeSection on an absent heading must return the body unchanged")
+}
+
+// TestRemoveSection_LastSection proves removing the final section works.
+func TestRemoveSection_LastSection(t *testing.T) {
+	body := "## Review Approval\n\nCommit: abc\n\n```json\n{}\n```"
+
+	got := removeSection(body, approvalHeading)
+
+	assert.Empty(t, strings.TrimSpace(got), "removing the only section must leave an empty body")
+}
+
+// TestRemoveSection_EmptyBody returns empty.
+func TestRemoveSection_EmptyBody(t *testing.T) {
+	got := removeSection("", approvalHeading)
+
+	assert.Empty(t, got)
+}
+
+// TestClearApproval_UpdatesBody proves clearApproval removes the approval
+// section from the body and pushes via UpdateCardBody.
+func TestClearApproval_UpdatesBody(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{}
+	d := reviewTestDeps(t, ops, git, &planLLM{}, reviewerRegistry())
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+	o.body = "Intro.\n\n## Review Approval\n\nCommit: abc\n\n```json\n{\"head_sha\":\"abc\"}\n```\n\n## Keep\n\nhuman text"
+
+	o.clearApproval(t.Context())
+
+	body := ops.bodyFor("CARD-1")
+	require.NotEmpty(t, body)
+
+	assert.NotContains(t, body, "## Review Approval")
+	assert.NotContains(t, body, "```json")
+	assert.Contains(t, body, "Intro.")
+	assert.Contains(t, body, "## Keep")
+	assert.Contains(t, body, "human text")
+}
+
+// TestClearApproval_NoSectionSkips proves clearApproval on a body without an
+// approval section still succeeds (no-op).
+func TestClearApproval_NoSectionSkips(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{}
+	d := reviewTestDeps(t, ops, git, &planLLM{}, reviewerRegistry())
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+	o.body = "## Plan\n\nplain"
+
+	o.clearApproval(t.Context())
+
+	body := ops.bodyFor("CARD-1")
+	assert.Contains(t, body, "## Plan")
 	assert.NotContains(t, body, "## Review Approval")
 }

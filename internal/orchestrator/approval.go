@@ -110,3 +110,71 @@ func extractApproval(body string) (approval, bool) {
 
 	return a, true
 }
+
+// clearApproval removes the "## Review Approval" section from the parent card
+// body and pushes the updated body to CM, so a resumed run that adopted an
+// approval clears it before proceeding to documentation. Best-effort: a
+// failure is logged, not fatal.
+func (o *run) clearApproval(ctx context.Context) {
+	o.body = removeSection(o.body, approvalHeading)
+
+	if err := o.d.Ops.UpdateCardBody(ctx, o.d.Cfg.CardID, o.body); err != nil {
+		slog.Warn("review: failed to clear approval record",
+			"card_id", o.d.Cfg.CardID, "error", err)
+	}
+}
+
+// removeSection removes the "## <heading>" block from body and returns the
+// result. Heading matching is exact, matching upsertSection/extractSection.
+// Returns the input byte-identical when the heading is absent.
+func removeSection(body, heading string) string {
+	marker := "## " + heading
+
+	lines := strings.Split(body, "\n")
+
+	start := -1
+
+	for i, l := range lines {
+		if strings.TrimSpace(l) == marker {
+			start = i
+
+			break
+		}
+	}
+
+	if start < 0 {
+		return body
+	}
+
+	// Find the end of the existing block: the next "## " heading after start.
+	end := len(lines)
+
+	for i := start + 1; i < len(lines); i++ {
+		if strings.HasPrefix(lines[i], "## ") {
+			end = i
+
+			break
+		}
+	}
+
+	before := strings.TrimRight(strings.Join(lines[:start], "\n"), "\n")
+	after := strings.TrimLeft(strings.Join(lines[end:], "\n"), "\n")
+
+	var b strings.Builder
+
+	if before != "" {
+		b.WriteString(before)
+	}
+
+	if after != "" {
+		if before != "" {
+			b.WriteString("\n\n")
+		}
+
+		b.WriteString(after)
+	}
+
+	b.WriteString("\n")
+
+	return b.String()
+}

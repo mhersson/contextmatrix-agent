@@ -5471,3 +5471,325 @@ func TestReviewParkNote(t *testing.T) {
 		assert.Contains(t, got, "[critical] the important one")
 	})
 }
+
+// TestTryAdoptApproval_MatchingHeadAndGreenVerify proves a resume whose
+// recorded SHA matches HEAD and whose gate passes skips all specialist/synthesis
+// model calls, runs the recorded fixes as a fixup when present, logs the
+// adoption line, clears the record from the pushed body, and leaves no approval
+// section behind.
+func TestTryAdoptApproval_MatchingHeadAndGreenVerify(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{headSHA: "abc1234", committed: true}
+	client := &planLLM{}
+
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+
+	// Seed the body with a recorded approval and set the verify plan to a
+	// real command whose gate we stub to pass.
+	o.body = "## Review Approval\n\nCommit: abc1234\n\n```json\n{\"head_sha\":\"abc1234\",\"summary\":\"approved with minor nits\",\"fixes\":[{\"file\":\"a.go\",\"issue\":\"nit\",\"suggestion\":\"tidy\",\"severity\":\"minor\"}]}\n```"
+
+	o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 0, Output: "green"}
+	}
+
+	require.True(t, o.tryAdoptApproval(context.Background(), *o.verify),
+		"adoption must succeed when HEAD matches and the gate passes")
+
+	// Exactly one model call: the cleanup fix pass, no specialist, no synthesis.
+	assert.Equal(t, 1, modelCallCount(client),
+		"adoption must make exactly one model call for the cleanup fix pass; tasks=%v", client.tasks)
+
+	// The adoption was logged on the card.
+	assert.True(t, ops.loggedContains("adopted recorded approval"),
+		"adoption must be logged on the card; logs=%v", ops.logs)
+
+	// The cleanup fix pass ran (committed=true from fakeGit).
+	assert.GreaterOrEqual(t, indexOfPrefix(git.recorded(), "CommitFixup:"), 0,
+		"the recorded fixes must run as a cleanup pass; git=%v", git.recorded())
+
+	// The review summary is set.
+	assert.Contains(t, o.reviewSummary, "approved with minor nits")
+
+	// The approval section was cleared from the body.
+	body := ops.bodyFor("CARD-1")
+	assert.NotEmpty(t, body)
+	assert.NotContains(t, body, "## Review Approval",
+		"the approval section must be cleared from the body after adoption")
+}
+
+// TestTryAdoptApproval_NoFixesSkipsCleanup proves adoption without surviving
+// fixes skips the fix-coder call entirely.
+func TestTryAdoptApproval_NoFixesSkipsCleanup(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{headSHA: "abc1234"}
+	client := &planLLM{}
+
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+
+	o.body = "## Review Approval\n\nCommit: abc1234\n\n```json\n{\"head_sha\":\"abc1234\",\"summary\":\"clean approval\",\"fixes\":[]}\n```"
+
+	// No verify command, so gate is vacuous - HEAD match alone suffices.
+	o.verify = &verifyPlan{Source: verifySourceNone}
+
+	require.True(t, o.tryAdoptApproval(context.Background(), *o.verify),
+		"adoption must succeed when HEAD matches and no verify command is configured")
+
+	assert.Zero(t, modelCallCount(client),
+		"no model calls when the recorded approval has no fixes and no gate runs")
+
+	assert.Equal(t, -1, indexOfPrefix(git.recorded(), "CommitFixup:"),
+		"no cleanup pass when the recorded approval carries no fixes; git=%v", git.recorded())
+}
+
+// TestTryAdoptApproval_DifferentHeadIgnoresRecord proves a resume whose HEAD
+// does not match the recorded SHA ignores the record and returns false, so the
+// review loop runs normally.
+func TestTryAdoptApproval_DifferentHeadIgnoresRecord(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{headSHA: "def456"}
+	client := &planLLM{}
+
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+
+	o.body = "## Review Approval\n\nCommit: abc123\n\n```json\n{\"head_sha\":\"abc123\",\"summary\":\"stale\",\"fixes\":[]}\n```"
+
+	o.verify = &verifyPlan{Source: verifySourceNone}
+
+	assert.False(t, o.tryAdoptApproval(context.Background(), *o.verify),
+		"adoption must be refused when HEAD does not match the recorded SHA")
+
+	// No model calls, no cleanup, no body change.
+	assert.Zero(t, modelCallCount(client))
+	assert.Empty(t, ops.bodyFor("CARD-1"), "the body must not be modified on a failed adoption")
+}
+
+// TestTryAdoptApproval_RedVerifyIgnoresRecord proves a red verify on the
+// recorded HEAD ignores the record and returns false, so the review loop runs
+// normally and an approval never bypasses a red verify.
+func TestTryAdoptApproval_RedVerifyIgnoresRecord(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{headSHA: "abc123"}
+	client := &planLLM{}
+
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+
+	o.body = "## Review Approval\n\nCommit: abc123\n\n```json\n{\"head_sha\":\"abc123\",\"summary\":\"stale\",\"fixes\":[]}\n```"
+
+	o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 1, Output: "FAIL: tests failed"}
+	}
+
+	assert.False(t, o.tryAdoptApproval(context.Background(), *o.verify),
+		"adoption must be refused when the verify gate is red")
+
+	// No model calls, no cleanup, no body change.
+	assert.Zero(t, modelCallCount(client))
+	assert.Empty(t, ops.bodyFor("CARD-1"))
+}
+
+// TestTryAdoptApproval_NoRecordReturnsFalse proves tryAdoptApproval returns
+// false when no approval section exists on the body.
+func TestTryAdoptApproval_NoRecordReturnsFalse(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{headSHA: "abc123"}
+	client := &planLLM{}
+
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+	o.body = "## Plan\n\njust a plan"
+
+	assert.False(t, o.tryAdoptApproval(context.Background(), verifyPlan{}),
+		"adoption must return false when no approval record exists")
+}
+
+// TestTryAdoptApproval_NitOnlySkipsCleanupPass proves a recorded approval
+// whose fixes are all nits skips the cleanup pass (worthCleanupPass is false).
+func TestTryAdoptApproval_NitOnlySkipsCleanupPass(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{headSHA: "abc123"}
+	client := &planLLM{}
+
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+
+	o.body = "## Review Approval\n\nCommit: abc123\n\n```json\n{\"head_sha\":\"abc123\",\"summary\":\"nit-only\",\"fixes\":[{\"file\":\"a.go\",\"issue\":\"trailing space\",\"severity\":\"nit\"}]}\n```"
+
+	o.verify = &verifyPlan{Source: verifySourceNone}
+
+	assert.True(t, o.tryAdoptApproval(context.Background(), *o.verify),
+		"adoption must succeed even when the cleanup pass is skipped")
+
+	assert.Equal(t, -1, indexOfPrefix(git.recorded(), "CommitFixup:"),
+		"nit-only fixes must not trigger a cleanup pass; git=%v", git.recorded())
+}
+
+// TestRunReview_AdoptsApprovalOnResume proves the integration of
+// tryAdoptApproval in runReview: when the run enters the autonomous branch and
+// tryAdoptApproval succeeds, runReview returns nil immediately without entering
+// the review loop.
+func TestRunReview_AdoptsApprovalOnResume(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{headSHA: "abc123", committed: true}
+	// If adoption fails and reviewLoop runs, it needs these responses.
+	// If adoption succeeds (which we expect), no client calls happen.
+	client := &planLLM{}
+
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+	o.body = "## Review Approval\n\nCommit: abc123\n\n```json\n{\"head_sha\":\"abc123\",\"summary\":\"clean approval\",\"fixes\":[]}\n```"
+
+	o.verify = &verifyPlan{Source: verifySourceNone}
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	// No model calls: no specialists, no synthesis.
+	assert.Zero(t, modelCallCount(client),
+		"a successful adoption in runReview must skip all model calls; tasks=%v", client.tasks)
+
+	// The review summary was set.
+	assert.NotEmpty(t, o.reviewSummary)
+	assert.Contains(t, o.reviewSummary, "clean approval")
+
+	// The approval section was cleared from the card body.
+	body := ops.bodyFor("CARD-1")
+	assert.NotEmpty(t, body)
+	assert.NotContains(t, body, "## Review Approval",
+		"the approval section must be cleared after adoption")
+
+	// StartReview was called exactly once.
+	calls := ops.recorded()
+	startCount := 0
+
+	for _, c := range calls {
+		if c == "StartReview:CARD-1" {
+			startCount++
+		}
+	}
+
+	assert.Equal(t, 1, startCount, "StartReview must be called exactly once; calls=%v", calls)
+}
+
+// TestRunReview_DifferentHeadRunsFullPanel proves a resume whose recorded SHA
+// does not match HEAD ignores the record and runs the full specialist panel
+// and synthesis - shown by the expected model calls.
+func TestRunReview_DifferentHeadRunsFullPanel(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{headSHA: "def456"}
+	// Three specialist + synthesis + approval.
+	client := &planLLM{responses: []llm.Response{
+		stopResp("Correctness: looks fine", 0.01),
+		stopResp("Design: looks fine", 0.01),
+		stopResp("Security: looks fine", 0.01),
+		stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.02),
+	}}
+
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+	o.body = "## Review Approval\n\nCommit: abc123\n\n```json\n{\"head_sha\":\"abc123\",\"summary\":\"stale\",\"fixes\":[]}\n```"
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	// The full panel ran: 3 specialists + 1 synthesis.
+	assert.Equal(t, 4, modelCallCount(client),
+		"a non-matching HEAD must run the full specialist panel; tasks=%v", client.tasks)
+}
+
+// TestRunReview_RedVerifyRunsFullPanel proves a resume with matching HEAD but
+// a red verify gate ignores the approval and runs the normal review loop.
+func TestRunReview_RedVerifyRunsFullPanel(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{headSHA: "abc123", committed: true}
+	// Round 1: verify fails -> short-circuits to a fix, round 2: fix lands,
+	// verify passes, specialists approve.
+	client := &planLLM{responses: []llm.Response{
+		// Fix for the verify-failure round.
+		stopResp("coder: fixed", 0.05),
+		// Round 2: specialists + synthesis approve.
+		stopResp("Correctness: looks fine", 0.01),
+		stopResp("Design: looks fine", 0.01),
+		stopResp("Security: looks fine", 0.01),
+		stopResp(`{"approved":true,"summary":"clean now","fixes":[]}`, 0.02),
+	}}
+
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+	o.body = "## Review Approval\n\nCommit: abc123\n\n```json\n{\"head_sha\":\"abc123\",\"summary\":\"stale\",\"fixes\":[]}\n```"
+
+	o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
+
+	gateRuns := 0
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		gateRuns++
+		if gateRuns == 1 {
+			// First call is tryAdoptApproval's verify - red, so adoption is refused.
+			return verifyexec.Outcome{ExitCode: 1, Output: "FAIL: tests failed"}
+		}
+
+		// Second call is the review loop's round 2 verify - passes.
+		return verifyexec.Outcome{ExitCode: 0, Output: "green"}
+	}
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	// Round 2's 3 specialists + 1 synthesis ran (round 1 short-circuited to fix).
+	assert.Equal(t, 5, modelCallCount(client),
+		"a red verify on the recorded HEAD must fall through to the normal review loop; tasks=%v", client.tasks)
+}
+
+// TestRunReview_RejectionStillRecordsNothing proves a rejected verdict on a
+// resume-with-different-HEAD path still records no approval on the card body.
+func TestRunReview_RejectionStillRecordsNothing(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{headSHA: "def456", committed: true}
+	client := &planLLM{responses: []llm.Response{
+		stopResp("Correctness: has bugs", 0.01),
+		stopResp("Design: needs work", 0.01),
+		stopResp("Security: has issues", 0.01),
+		stopResp(`{"approved":false,"summary":"needs work","fixes":[{"file":"a.go","issue":"bug","suggestion":"fix","severity":"important"}]}`, 0.02),
+		// Fix round.
+		stopResp("coder: fixed", 0.05),
+		// Round 2: specialists approve.
+		stopResp("Correctness: looks fine", 0.01),
+		stopResp("Design: looks fine", 0.01),
+		stopResp("Security: looks fine", 0.01),
+		stopResp(`{"approved":true,"summary":"clean now","fixes":[]}`, 0.02),
+	}}
+
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+	o.body = "## Review Approval\n\nCommit: abc123\n\n```json\n{\"head_sha\":\"abc123\",\"summary\":\"stale\",\"fixes\":[]}\n```"
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	// The final body must have an approval section from round 2's approval.
+	body := ops.bodyFor("CARD-1")
+	require.NotEmpty(t, body)
+	assert.Contains(t, body, "## Review Approval",
+		"the final approval from round 2 must produce a new approval section")
+}
