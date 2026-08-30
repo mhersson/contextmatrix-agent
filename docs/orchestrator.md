@@ -65,6 +65,30 @@ or `nit` (report-only) findings keeps the normal behavior; the rule is also
 stated in the synthesis prompts so demotions stay rare, but the code check is
 the guard.
 
+An approved verdict is durable across parks. On approval - from the cheap
+loop or the gated authoritative pass - the orchestrator records a
+`## Review Approval` section on the card body before any post-approval cleanup
+pass runs. The section binds the verdict to the commit it approved: the branch
+HEAD SHA at the moment of approval, the approval summary, and the surviving
+fixes. Recording is best-effort and skips when HEAD is unreadable or empty -
+the Review Approval section is a fail-open, SHA-bound adoption gate on resume,
+distinct from the card body's human-facing record role: a missing or
+unparseable section is treated as "no record" and the normal review loop runs,
+so the card body is the adoption gate's source of truth for control flow on
+resume.
+
+A resume entering the autonomous review path consults the record first. It
+adopts the approval only when the current branch HEAD equals the recorded SHA
+and the resolved verify gate still passes - a red or erroring verify refuses
+adoption, so an approval never bypasses a red gate. Adoption skips the
+specialist panel and synthesis, runs the recorded surviving fixes as the usual
+non-escalating cleanup pass (skipped when the list is empty or nit-only, and
+gated by the same verify-or-discard of the fixup as a live approval), logs
+`adopted recorded approval` on the card, then clears the record before the FSM
+proceeds to the next phase. Any mismatch - no record, a different HEAD, a red
+verify - falls through to the normal review loop unchanged, and only approvals
+are persisted: a rejected verdict never produces a record.
+
 In a mob review discussion, the correctness seat's lens is a briefing that
 judges the change - and the plan decisions behind it - against the card's
 stated requirements, challenging choices the plan made rather than treating
