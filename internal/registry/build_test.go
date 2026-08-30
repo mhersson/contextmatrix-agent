@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"encoding/json"
 	"testing"
 
 	protocol "github.com/mhersson/contextmatrix-protocol"
@@ -77,25 +78,28 @@ func TestFromSelectionThreadsMaxCapability(t *testing.T) {
 		"maxCapability=true must pick the premium (more capable) model regardless of price")
 }
 
-// TestFromSelectionIgnoresOutcomeStats pins the priors-only contract: even
-// when a payload arrives carrying per-candidate outcome stats and an outcome
-// floor (an older CM), the priors pass through untouched - recorded outcomes
-// never bias a pick.
+// TestFromSelectionIgnoresOutcomeStats pins the priors-only contract at the
+// wire level: an older CM may still send per-candidate "outcomes" and
+// "outcome_floor" JSON (removed from the protocol in v0.17.0), and those keys
+// must be silently ignored - the priors pass through untouched, and recorded
+// outcomes never bias a pick.
 func TestFromSelectionIgnoresOutcomeStats(t *testing.T) {
-	candidates := []protocol.CandidateModel{
-		{
-			Slug: "model/a", PromptPricePerTok: 1e-6, CompletionPricePerTok: 1e-6,
-			ContextWindow: 200000, CoderPrior: 0.80, ReviewerPrior: 0.80,
-			Outcomes: &protocol.OutcomeStats{Samples: 30, Wins: 20, ExpectedWins: 10},
-		},
-		{
-			Slug: "model/b", PromptPricePerTok: 1e-6, CompletionPricePerTok: 1e-6,
-			ContextWindow: 200000, CoderPrior: 0.80, ReviewerPrior: 0.80,
-			Outcomes: &protocol.OutcomeStats{Samples: 30, Wins: 4, ExpectedWins: 10},
-		},
-	}
-	sc := &protocol.SelectionContext{Candidates: candidates, OutcomeFloor: 20}
-	r := FromSelection(sc, "fallback/capable", 0, false)
+	payload := `{
+		"outcome_floor": 20,
+		"candidates": [
+			{"slug": "model/a", "prompt_price_per_tok": 1e-6, "completion_price_per_tok": 1e-6,
+			 "context_window": 200000, "coder_prior": 0.80, "reviewer_prior": 0.80,
+			 "outcomes": {"samples": 30, "wins": 20, "expected_wins": 10}},
+			{"slug": "model/b", "prompt_price_per_tok": 1e-6, "completion_price_per_tok": 1e-6,
+			 "context_window": 200000, "coder_prior": 0.80, "reviewer_prior": 0.80,
+			 "outcomes": {"samples": 30, "wins": 4, "expected_wins": 10}}
+		]
+	}`
+
+	var sc protocol.SelectionContext
+	require.NoError(t, json.Unmarshal([]byte(payload), &sc))
+
+	r := FromSelection(&sc, "fallback/capable", 0, false)
 
 	a, ok := r.priors.ForRole("model/a", RoleCoder)
 	require.True(t, ok)
