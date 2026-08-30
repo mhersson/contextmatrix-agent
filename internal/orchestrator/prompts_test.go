@@ -99,6 +99,9 @@ func TestSharedBlocksAreSplicedIntoTheirPrompts(t *testing.T) {
 		{sweepRule, "sweepRule", reviewSynthesisPrompt, "reviewSynthesisPrompt"},
 		{sweepRule, "sweepRule", checkpointSynthesisPrompt, "checkpointSynthesisPrompt"},
 
+		{fixTierFloorRule, "fixTierFloorRule", synthesisPrompt, "synthesisPrompt"},
+		{fixTierFloorRule, "fixTierFloorRule", reviewSynthesisPrompt, "reviewSynthesisPrompt"},
+
 		{unreachableVerifyInstruction, "unreachableVerifyInstruction", specialistPrompt, "specialistPrompt"},
 		{unreachableVerifyInstruction, "unreachableVerifyInstruction", reviewBriefing, "reviewBriefing"},
 	}
