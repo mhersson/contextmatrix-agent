@@ -118,7 +118,7 @@ func extractApproval(body string) (approval, bool) {
 // approval clears it before the FSM proceeds to integrate. Best-effort: a
 // failure is logged, not fatal.
 func (o *run) clearApproval(ctx context.Context) {
-	o.body = removeSection(o.body, approvalHeading)
+	o.body = removeApprovalSection(o.body)
 
 	if err := o.d.Ops.UpdateCardBody(ctx, o.d.Cfg.CardID, o.body); err != nil {
 		slog.Warn("review: failed to clear approval record",
@@ -126,11 +126,12 @@ func (o *run) clearApproval(ctx context.Context) {
 	}
 }
 
-// removeSection removes the "## <heading>" block from body and returns the
-// result. Heading matching is exact, matching upsertSection/extractSection.
-// Returns the input byte-identical when the heading is absent.
-func removeSection(body, heading string) string {
-	marker := "## " + heading
+// removeApprovalSection removes the "## Review Approval" block from body and
+// returns the result. Heading matching is exact, matching
+// upsertSection/extractSection. Returns the input byte-identical when the
+// heading is absent.
+func removeApprovalSection(body string) string {
+	marker := "## " + approvalHeading
 
 	lines := strings.Split(body, "\n")
 

@@ -2328,6 +2328,7 @@ func shortSHA(s string) string {
 	if len(s) < 7 {
 		return s
 	}
+
 	return s[:7]
 }
 
