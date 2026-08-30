@@ -132,6 +132,16 @@ const unreachableVerdictRule = `- Unreachable acceptance criteria: when the card
   criteria. Scope listed under a "## Split" section was moved to other cards
   and is likewise out of scope for this verdict.`
 
+// fixTierFloorRule sets two unconditional floors on the fix_tier rating,
+// overriding the default-to-card-tier guidance when the criteria below are
+// met. Shared by synthesisPrompt and reviewSynthesisPrompt so the two verdict
+// templates cannot drift.
+const fixTierFloorRule = `Fix_tier floors (these override default-to-card-tier):
+- When any finding is critical severity, fix_tier is never below the card's tier.
+- Fixes that touch concurrency or synchronization - concurrent or parallel
+  execution, shared mutable state, locking, cancellation, and lifecycle or
+  ownership guards - are "complex" at minimum regardless of finding severity.`
+
 // planPrompt is the read-only planner's instruction block. It is adapted from
 // the create-plan workflow skill's task-decomposition guidance: the same
 // rules for splitting work, dependency thinking, and right-sizing apply, but
@@ -611,6 +621,7 @@ Respond with ONLY a JSON object, no prose:
  "fixes":[{"file":"...","issue":"...","suggestion":"...","severity":"critical|important|minor|nit"}]}
 
 fix_tier is the difficulty of APPLYING these fixes (default to the card's tier if unsure).
+` + fixTierFloorRule + `
 fixes is independent of approved: it carries every finding a seat raised and did
 not withdraw, whatever its severity. An approved verdict with an empty fixes
 array asserts that nothing survived the critique round - never a default.
@@ -1261,6 +1272,7 @@ Respond with ONLY a JSON object, no prose:
  "fixes":[{"file":"...","issue":"...","suggestion":"...","severity":"critical|important|minor|nit"}]}
 
 fix_tier is the difficulty of APPLYING these fixes (default to the card's tier if unsure).
+` + fixTierFloorRule + `
 fixes is independent of approved: it carries every finding a seat raised and did
 not withdraw, whatever its severity. An approved verdict with an empty fixes
 array asserts that nothing survived the critique round - never a default.
