@@ -47,10 +47,14 @@ Performance - run in parallel, read-only, behind a spec/test gate that
 short-circuits to the fix loop before spending reviewer tokens; the
 orchestrator synthesizes the report.
 
-Each specialist's diff scope stays the branch diff; alongside it sits a
-second, separately labeled block showing what the previous round's fix
-actually changed (`fixDeltaBlock`, capped at 32 KiB) - context, not a
-narrower review scope. The mob discussion briefing carries the same block.
+The mob discussion briefing always diffs the full branch against the base
+branch; the solo panel does too on round 1 and the authoritative pass, but on
+later cheap rounds it narrows to the delta since the last review round's
+snapshot, re-widening to the full branch whenever a fix round lands no
+commit (an unchanged HEAD would otherwise leave the next round diffing
+nothing). Either way, alongside that diff sits a second, separately labeled
+block showing what the previous round's fix actually changed
+(`fixDeltaBlock`, capped at 32 KiB) - context, not a narrower review scope.
 It lets a reviewer tell fix-introduced code from the rest of the delivered
 work; the block is empty on round 1, before any fix has committed. A finding
 about fix-introduced code needs concrete evidence - a demonstrated
