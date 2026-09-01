@@ -979,6 +979,13 @@ func repairBlock(parseErr string) string {
 		"below - no prose, no code fences. Read a file only if strictly necessary.\n"
 }
 
+// capRetryBlock replaces the parse-repair block on a synthesis retry after a
+// turn-cap stop: the failure was volume, not format, so the instruction is to
+// emit immediately rather than to fix JSON.
+func capRetryBlock() string {
+	return "\nYOUR PREVIOUS ATTEMPT RAN OUT OF TURNS while investigating. Do NOT read or\nsearch anything. Respond with ONLY the verdict JSON object immediately, based\non the findings above.\n"
+}
+
 // testSplitRevisionBlock renders the post-parse validation feedback inserted
 // into the planner prompt on the single test-split revision round: title
 // names the subtask flagged by the test-only-subtask heuristic and previous

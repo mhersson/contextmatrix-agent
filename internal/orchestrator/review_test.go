@@ -973,13 +973,15 @@ func TestFixRunSimpleTierCapsAtBase(t *testing.T) {
 // TestSynthesisRunsUnderPhaseCap proves the synthesis model call gets a phase
 // cap of its own instead of the flat configured budget: with a base far above
 // synthesisMaxTurns, a synthesis that keeps investigating is stopped at the
-// phase cap, not at the base.
+// phase cap on every attempt, not at the base - the retry that follows the
+// first cap is itself capped at the same phase budget, not the base, before
+// the run parks.
 func TestSynthesisRunsUnderPhaseCap(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true}
 
 	// The synthesizer keeps investigating turn after turn, never emitting a
-	// verdict on its own.
+	// verdict on its own, on either attempt.
 	client := &planLLM{responses: burnResps(synthesisMaxTurns + 20)}
 
 	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
@@ -988,16 +990,16 @@ func TestSynthesisRunsUnderPhaseCap(t *testing.T) {
 	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
 	o := newReviewRun(d, tc, 0)
 
-	_, err := o.synthesize(context.Background(), "specialist findings", false)
-	require.Error(t, err)
+	_, err := o.synthesize(context.Background(), "specialist findings", 1, false)
 
-	var mte *MaxTurnsError
-	require.ErrorAs(t, err, &mte)
+	var park *ReviewParkedError
+	require.ErrorAs(t, err, &park, "a synthesis capped on both attempts parks rather than returning a bare turn-cap error")
 
 	// Without a phase cap the burn would consume the full base budget (32
-	// turns); with it, the call stops at synthesisMaxTurns.
-	assert.Len(t, client.toolCountsSeen(), synthesisMaxTurns,
-		"synthesis must run under its phase cap, not the flat base budget")
+	// turns) per attempt; with it, each of the two attempts stops at
+	// synthesisMaxTurns.
+	assert.Len(t, client.toolCountsSeen(), synthesisMaxTurns*2,
+		"synthesis must run under its phase cap on every attempt, not the flat base budget")
 }
 
 // TestSynthesisConfigCarriesWrapUpNudge proves the synthesis call opts into
@@ -1022,7 +1024,7 @@ func TestSynthesisConfigCarriesWrapUpNudge(t *testing.T) {
 	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
 	o := newReviewRun(d, tc, 0)
 
-	_, err := o.synthesize(context.Background(), "specialist findings", false)
+	_, err := o.synthesize(context.Background(), "specialist findings", 1, false)
 	require.NoError(t, err)
 
 	joined := strings.Join(client.tasks, "\n")
@@ -1039,6 +1041,58 @@ func TestSynthesisCapLeavesRoomForTheWrapUpNudge(t *testing.T) {
 
 	assert.Greater(t, synthesisMaxTurns, synthesisWrapUpTurns,
 		"synthesisMaxTurns must exceed synthesisWrapUpTurns so the wrap-up nudge still fires")
+}
+
+// TestSynthesisCapRetriesThenParks proves a synthesis that caps twice parks the
+// card with the specialist findings preserved on the body, instead of failing
+// the run: the work is green and read-only synthesis holds no half-done tree,
+// so a park a human (or a resume) can continue from is strictly better than a
+// dead run.
+func TestSynthesisCapRetriesThenParks(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+
+	responses := append([]llm.Response{}, burnResps(synthesisMaxTurns)...)
+	responses = append(responses, burnResps(synthesisMaxTurns)...)
+
+	client := &planLLM{responses: responses}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
+	o := newReviewRun(d, tc, 0)
+
+	_, err := o.synthesize(context.Background(), "the specialist findings text", 2, false)
+
+	var park *ReviewParkedError
+
+	require.ErrorAs(t, err, &park, "a double-capped synthesis parks, it does not fail the run")
+	assert.Equal(t, reviewParkedSynthesisCap, park.Reason)
+
+	assert.Contains(t, o.body, "the specialist findings text",
+		"the round's paid-for specialist findings must be preserved on the body for resume")
+	assert.Contains(t, o.body, reviewRoundHeading(2),
+		"preserved under this round's heading so a re-run of the round replaces it")
+}
+
+// TestSynthesisCapRetrySucceeds proves one cap is recoverable: the retry runs
+// with the emit-now instruction and its verdict is used.
+func TestSynthesisCapRetrySucceeds(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+
+	responses := append([]llm.Response{}, burnResps(synthesisMaxTurns)...)
+	responses = append(responses,
+		stopResp(`{"approved":true,"summary":"clean","fix_tier":"simple","fixes":[]}`, 0.02))
+
+	client := &planLLM{responses: responses}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
+	o := newReviewRun(d, tc, 0)
+
+	v, err := o.synthesize(context.Background(), "findings", 1, false)
+	require.NoError(t, err)
+	assert.True(t, v.Approved)
 }
 
 func TestReviewFixCoderSelectionLogged(t *testing.T) {

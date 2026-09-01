@@ -129,6 +129,7 @@ const (
 	reviewParkedNoReviewer   = "no reviewer model is selectable"
 	reviewParkedNoFixModel   = "no fix model is selectable"
 	reviewParkedFixExhausted = "no fix model other than the ones that already failed"
+	reviewParkedSynthesisCap = "the synthesis verdict could not be produced within its turn cap"
 )
 
 // reviewTimeLeft parks the review when less than reviewRoundReserve remains on
@@ -1223,7 +1224,7 @@ func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, autho
 		return "", "", false, vres, nil, err
 	}
 
-	v, err := o.synthesize(ctx, specialistFindings, authoritative)
+	v, err := o.synthesize(ctx, specialistFindings, round, authoritative)
 	if err != nil {
 		return "", "", false, vres, nil, err
 	}
@@ -1565,8 +1566,13 @@ func (o *run) mobReviewBriefing(ctx context.Context) (string, error) {
 
 // synthesize runs ONE orchestrator-model call that reads the three specialists'
 // findings and emits the structured verdict. The verdict JSON is parsed with the
-// same extractJSON + one repair turn the planner uses.
-func (o *run) synthesize(ctx context.Context, findings string, authoritative bool) (verdict, error) {
+// same extractJSON + one repair turn the planner uses. A turn-capped attempt is
+// retried once with an emit-now instruction; a second cap parks the card with
+// the specialist findings recorded on the body under this round's heading -
+// synthesis is read-only, so there is no half-done tree to protect, and a park
+// that preserves the paid-for findings lets a resume continue instead of
+// re-buying the panel.
+func (o *run) synthesize(ctx context.Context, findings string, round int, authoritative bool) (verdict, error) {
 	d := o.d
 	cfg := d.Cfg
 
@@ -1582,6 +1588,7 @@ func (o *run) synthesize(ctx context.Context, findings string, authoritative boo
 	var (
 		v       verdict
 		lastErr error
+		capped  bool
 	)
 
 	for attempt := range 2 {
@@ -1590,7 +1597,11 @@ func (o *run) synthesize(ctx context.Context, findings string, authoritative boo
 		}
 
 		repair := ""
-		if attempt > 0 {
+
+		switch {
+		case attempt > 0 && capped:
+			repair = capRetryBlock()
+		case attempt > 0:
 			repair = repairBlock(lastErr.Error())
 		}
 
@@ -1611,9 +1622,23 @@ func (o *run) synthesize(ctx context.Context, findings string, authoritative boo
 
 		o.spendAndReport(ctx, o.ledger, cfg.CardID, "review: report synthesis usage failed", res, model, "main", dur)
 
-		if err != nil {
+		var mte *MaxTurnsError
+
+		switch {
+		case errors.As(err, &mte) && attempt == 0:
+			capped = true
+			lastErr = err
+
+			d.logCard(ctx, "review: synthesis hit its turn cap - retrying once with an emit-now instruction")
+
+			continue
+		case errors.As(err, &mte):
+			return verdict{}, o.parkSynthesisCap(ctx, round, findings)
+		case err != nil:
 			return verdict{}, fmt.Errorf("synthesis run: %w", err)
 		}
+
+		capped = false
 
 		v, lastErr = parseVerdict(res.Output)
 		if lastErr == nil {
@@ -1624,6 +1649,23 @@ func (o *run) synthesize(ctx context.Context, findings string, authoritative boo
 	}
 
 	return verdict{}, fmt.Errorf("verdict parse failed after repair: %w", lastErr)
+}
+
+// parkSynthesisCap preserves the round's specialist findings on the card body -
+// under the round's own heading, so a re-run of the round on resume replaces
+// rather than duplicates - and parks. The findings are the round's paid-for
+// output; losing them would make the park no cheaper than the failure it
+// replaces.
+func (o *run) parkSynthesisCap(ctx context.Context, round int, findings string) error {
+	heading := reviewRoundHeading(round)
+
+	o.recordSection(ctx, heading, "## "+heading+
+		"\n\nSynthesis parked at its turn cap before a verdict was produced. The specialist findings below are preserved for the next run.\n\n"+
+		findings+"\n\n**Verdict: revise** (no synthesis verdict - parked)\n")
+
+	o.d.logCard(ctx, "%s", reviewParkNote("review parked - synthesis could not produce a verdict within its turn cap; specialist findings:\n", findings))
+
+	return &ReviewParkedError{Reason: reviewParkedSynthesisCap}
 }
 
 // runFixModel runs the fix coder harness with the same in-run incapable recovery
