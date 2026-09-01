@@ -871,8 +871,6 @@ func TestVerifyRedRoundDoesNotConsumeAPanelAttempt(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
 
-	ws := t.TempDir()
-
 	// Fails on the first run, passes afterwards.
 	verify := verifyPlan{
 		Argv:    []string{"sh", "-c", "test -f gate-ran || { touch gate-ran; exit 1; }"},
@@ -909,7 +907,6 @@ func TestVerifyRedRoundDoesNotConsumeAPanelAttempt(t *testing.T) {
 	)
 
 	d := reviewTestDeps(t, ops, git, &planLLM{responses: responses}, reviewerRegistry())
-	d.Cfg.Workspace = ws
 	d.Cfg.ReviewAttemptsCap = 3
 	d.WriteTools = testWriteTools()
 
@@ -927,10 +924,30 @@ func TestVerifyRedRoundDoesNotConsumeAPanelAttempt(t *testing.T) {
 	// Round numbering is untouched: the verify-red round is round 1 and the
 	// authoritative pass starts at round 4, one later than it would without
 	// the credit (round 3).
+	// Not on its own discriminating: authoritativeReview's re-review always
+	// records round+1, so even an UNCREDITED cliff (triggering at round 3)
+	// would still produce this same heading via its re-review. Kept as
+	// documentation of the round numbering; incCount below is what actually
+	// proves the credit ran.
 	assert.Contains(t, o.body, reviewRoundHeading(4),
 		"the third full panel round must run as round 4 - the verify-red round did not consume a panel attempt")
 	assert.True(t, ops.loggedContains("verify-gate failure, not a panel round"),
 		"the extension is announced on the card log")
+
+	// Discriminating: incrementReviewAttempt runs unconditionally every round
+	// (verify-red rounds included), so this count is one higher with the
+	// credit than without it - 5 rounds ran here (1 verify-red + 2 cheap +
+	// authoritative + its re-review) versus 4 if the verify-red round had
+	// instead consumed a panel attempt and the cliff tripped one round early.
+	incCount := 0
+
+	for _, c := range ops.recorded() {
+		if c == "IncrementReviewAttempts:CARD-1" {
+			incCount++
+		}
+	}
+
+	assert.Equal(t, 5, incCount, "5 rounds increment the counter; calls=%v", ops.recorded())
 }
 
 // TestReviewFixMaxTurnsKeepsItsPartialWork pins that a fix run truncated at the
