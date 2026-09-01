@@ -1078,6 +1078,13 @@ func fixWrapUpMessage(n int) string {
 	return fmt.Sprintf("%d turns remain. If the findings are addressed and the tests pass, call the finish tool now and make no further tool calls. Do not re-run checks that already passed.", n)
 }
 
+// synthesisWrapUpMessage forces the synthesizer to land its verdict the way
+// the specialists land their findings: an imperfect verdict beats a silent
+// max_turns death on a run that is otherwise green.
+const synthesisWrapUpMessage = "You are nearly out of turns. Stop investigating and respond with ONLY the verdict JSON object NOW, in the required format. A verdict based on what you have already read is useful; no verdict is not."
+
+const synthesisWrapUpTurns = 3
+
 // Wrap-up nudge messages for the phases that run at the fixed reserve
 // (runModelWrapUp / runModelPlan / runModelDiagnose). Built from the shared
 // constant so the stated count can never drift from the threshold. The document

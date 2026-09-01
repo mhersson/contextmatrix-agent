@@ -239,6 +239,34 @@ func diagnoseTurnCap(base int) int {
 	return min(base, diagnoseMaxTurns)
 }
 
+// synthesisMaxTurns caps the review-synthesis call. Like the planner and the
+// diagnosis phase it is a read-only run with no terminal tool and no tier
+// scaling, so without a cap of its own it inherits the flat configured budget -
+// the one phase left unguarded, and the one whose failure is fatal to a run
+// that is otherwise green. A healthy synthesis emits its verdict in a single
+// turn; the cap leaves room for a bounded skim of the findings, and the
+// wrap-up nudge forces the emit before the cap lands.
+const synthesisMaxTurns = 12
+
+// synthesisTurnCap is the synthesis run's turn budget, min'd with base so a
+// smaller configured cap is never raised - mirrors planTurnCap.
+func synthesisTurnCap(base int) int {
+	return min(base, synthesisMaxTurns)
+}
+
+// runModelSynthesis is the review synthesizer's model call: the flat base is
+// replaced by the synthesis phase cap and the emit-now wrap-up nudge, so an
+// over-investigating synthesizer is steered into emitting its verdict instead
+// of dying at the cap with the verdict unwritten.
+func (o *run) runModelSynthesis(ctx context.Context, reg *tools.Registry, prompt, model string) (harness.Result, time.Duration, error) {
+	cfg := o.harnessConfig(model)
+	cfg.WrapUpTurns = synthesisWrapUpTurns
+	cfg.WrapUpMessage = synthesisWrapUpMessage
+	cfg.MaxTurns = synthesisTurnCap(cfg.MaxTurns)
+
+	return o.runModelCfg(ctx, reg, prompt, model, cfg)
+}
+
 // coderBatchNudgeTurns arms the harness batching nudge for the coder family:
 // after this many consecutive turns that each spend a whole model call on one
 // read-only lookup, the harness injects a single message suggesting the model

@@ -1607,7 +1607,7 @@ func (o *run) synthesize(ctx context.Context, findings string, authoritative boo
 
 		task := fmt.Sprintf(synthesisPrompt, o.grounding, o.tc.Title, o.taskDescription, prior, findings, repair)
 
-		res, dur, err := o.runModel(ctx, d.ReadTools, task, model)
+		res, dur, err := o.runModelSynthesis(ctx, d.ReadTools, task, model)
 
 		o.spendAndReport(ctx, o.ledger, cfg.CardID, "review: report synthesis usage failed", res, model, "main", dur)
 

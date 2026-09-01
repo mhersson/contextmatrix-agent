@@ -970,6 +970,36 @@ func TestFixRunSimpleTierCapsAtBase(t *testing.T) {
 	require.ErrorAs(t, err, &mte)
 }
 
+// TestSynthesisRunsUnderPhaseCap proves the synthesis model call gets a phase
+// cap of its own instead of the flat configured budget: with a base far above
+// synthesisMaxTurns, a synthesis that keeps investigating is stopped at the
+// phase cap, not at the base.
+func TestSynthesisRunsUnderPhaseCap(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+
+	// The synthesizer keeps investigating turn after turn, never emitting a
+	// verdict on its own.
+	client := &planLLM{responses: burnResps(synthesisMaxTurns + 20)}
+
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+	d.Cfg.MaxTurns = synthesisMaxTurns + 20
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
+	o := newReviewRun(d, tc, 0)
+
+	_, err := o.synthesize(context.Background(), "specialist findings", false)
+	require.Error(t, err)
+
+	var mte *MaxTurnsError
+	require.ErrorAs(t, err, &mte)
+
+	// Without a phase cap the burn would consume the full base budget (32
+	// turns); with it, the call stops at synthesisMaxTurns.
+	assert.Len(t, client.toolCountsSeen(), synthesisMaxTurns,
+		"synthesis must run under its phase cap, not the flat base budget")
+}
+
 func TestReviewFixCoderSelectionLogged(t *testing.T) {
 	// Round 1 is not approved -> fix coder run -> round 2 approves. The fix run
 	// must announce the selected coder model, the round number, and the tier on
