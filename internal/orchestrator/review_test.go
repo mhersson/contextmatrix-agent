@@ -2413,6 +2413,34 @@ func TestReviewGateFailureRedactsFindings(t *testing.T) {
 	assert.Empty(t, client.tasks, "a gate failure short-circuits to the fix loop before any reviewer model call")
 }
 
+// TestReviewRoundResetsLastPriorResolvedOnVerifyRed proves lastPriorResolved
+// reflects only the most recent round that actually produced a verdict: a
+// round whose verify gate fails short-circuits to the fix loop before any
+// verdict runs (settleVerdict never executes), so a true value left over from
+// an earlier round must not survive it - the authoritative pass's park head
+// reads this field, and a stale true there would claim a resolution the
+// short-circuited round never evaluated.
+func TestReviewRoundResetsLastPriorResolvedOnVerifyRed(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{}
+	client := &planLLM{}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{Title: "P", Description: "b", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+	o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 1, Output: "build failed"}
+	}
+	o.lastPriorResolved = true
+
+	_, _, approved, vres, _, err := o.reviewRound(context.Background(), *o.verify, 1, false)
+	require.NoError(t, err)
+	assert.False(t, approved)
+	assert.Equal(t, verifyFailed, vres.Status)
+	assert.False(t, o.lastPriorResolved, "a verify-red round produced no verdict; the stale signal must not survive it")
+}
+
 func TestReviewBudgetParkBeforeSpecialists(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{}

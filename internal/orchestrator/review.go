@@ -1209,6 +1209,16 @@ func (o *run) incrementReviewAttempt(ctx context.Context, findings string) (int,
 // proceeds. On any gate outcome that reaches them, the three specialists fan
 // out and the synthesis verdict decides.
 func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, authoritative bool) (findings string, fixTier string, approved bool, vres verifyResult, fixes []fix, err error) {
+	// lastPriorResolved reflects ONLY the most recent round that actually
+	// produced a verdict: reset before the verify gate so a round that
+	// short-circuits on verify-red (no verdict, settleVerdict never runs)
+	// cannot leave a stale true from an earlier round in place - the
+	// authoritative pass's park head reads this field, and it must never
+	// claim a resolution the final round did not evaluate. settleVerdict
+	// sets it truthfully once a verdict exists; under-claiming (false) is
+	// the safe direction for everything short of that.
+	o.lastPriorResolved = false
+
 	// Budget gate before the verify subprocess too - the gate may be cheap, but
 	// the fix run it can trigger is not, and we park before doing any work.
 	if err := o.ledger.Check(); err != nil {
