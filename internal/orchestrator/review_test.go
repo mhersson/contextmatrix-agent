@@ -862,6 +862,77 @@ func TestReviewFixLoop(t *testing.T) {
 	assert.Equal(t, 1, incCount, "exactly one fix round; calls=%v", ops.recorded())
 }
 
+// TestVerifyRedRoundDoesNotConsumeAPanelAttempt proves a round whose verify
+// gate fails - no panel ran, no verdict was produced - extends the attempts
+// cliff instead of consuming one of the panel rounds: with the default cap of
+// 3 and one verify-red round, three real panel rounds still run before the
+// authoritative pass.
+func TestVerifyRedRoundDoesNotConsumeAPanelAttempt(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+
+	ws := t.TempDir()
+
+	// Fails on the first run, passes afterwards.
+	verify := verifyPlan{
+		Argv:    []string{"sh", "-c", "test -f gate-ran || { touch gate-ran; exit 1; }"},
+		Display: "sh -c gate",
+		Source:  verifySourceDetected,
+		Timeout: time.Minute,
+	}
+
+	reject := `{"approved":false,"summary":"needs work","fix_tier":"simple","fixes":[{"file":"a.go","issue":"bug","suggestion":"fix","severity":"important"}]}`
+
+	var responses []llm.Response
+	// Round 1 is verify-red: only a fix run happens (no panel).
+	responses = append(responses, finishResp("fix build", 0.01))
+	// Rounds 2 and 3: two cheap panel rounds (3 specialists + synthesis + fix
+	// each) - the verify-red credit moves the cliff from round 3 to round 4, so
+	// only two cheap rounds run before the authoritative pass takes over.
+	for range 2 {
+		responses = append(responses,
+			stopResp("Correctness: bug", 0.01),
+			stopResp("Design: ok", 0.01),
+			stopResp("Security: ok", 0.01),
+			stopResp(reject, 0.02),
+			finishResp("fix findings", 0.01),
+		)
+	}
+	// Authoritative pass: strong panel + synthesis reject + strong fix +
+	// re-review panel + synthesis reject -> park.
+	responses = append(responses,
+		stopResp("Correctness: bug", 0.01), stopResp("Design: ok", 0.01), stopResp("Security: ok", 0.01),
+		stopResp(reject, 0.02),
+		finishResp("strong fix", 0.01),
+		stopResp("Correctness: bug", 0.01), stopResp("Design: ok", 0.01), stopResp("Security: ok", 0.01),
+		stopResp(reject, 0.02),
+	)
+
+	d := reviewTestDeps(t, ops, git, &planLLM{responses: responses}, reviewerRegistry())
+	d.Cfg.Workspace = ws
+	d.Cfg.ReviewAttemptsCap = 3
+	d.WriteTools = testWriteTools()
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
+	o := newReviewRun(d, tc, 0)
+	o.verify = &verify
+	o.runVerify = verifyexec.Exec
+
+	err := runReview(context.Background(), o)
+
+	var park *ReviewParkedError
+
+	require.ErrorAs(t, err, &park)
+
+	// Round numbering is untouched: the verify-red round is round 1 and the
+	// authoritative pass starts at round 4, one later than it would without
+	// the credit (round 3).
+	assert.Contains(t, o.body, reviewRoundHeading(4),
+		"the third full panel round must run as round 4 - the verify-red round did not consume a panel attempt")
+	assert.True(t, ops.loggedContains("verify-gate failure, not a panel round"),
+		"the extension is announced on the card log")
+}
+
 // TestReviewFixMaxTurnsKeepsItsPartialWork pins that a fix run truncated at the
 // turn cap still lands what it wrote: with no wider round left to buy the cap
 // propagates - so nothing reads the findings as addressed - but the edits are
@@ -5475,13 +5546,21 @@ func TestCappedFixRoundWithRedVerifyEscalatesBarAndBudget(t *testing.T) {
 // joins fixFailed BEFORE the strong fix is selected. Green gate: widen-only,
 // no bar step and no exclusion.
 //
-// Script shape, red row: round 4's gate is red (the verify short-circuit skips
-// the panel), the round-4 fix coder burns its whole 5-turn window and returns
+// Script shape, red row: round 4's gate is green, so its panel runs and
+// rejects; the round-4 fix coder burns its whole 5-turn window and returns
 // max_turns with a commit, so it caps with fixCappedPending set; round 5 is
 // the cliff (attemptsCap 5), whose authoritative gate is red; the strong fix
 // lands cleanly; the strong re-review's gate is green and its panel approves.
 // Green row: the round-5 authoritative gate passes and its panel approves,
 // ending the run there.
+//
+// Round 4's cap comes from a panel rejection, not a verify-red short-circuit:
+// a verify-red round now earns a bounded credit (maxVerifyRedCredit) that
+// pushes the cliff one round further out, so a verify-red round can never
+// again sit immediately before the cliff the way this test needs. The
+// verify-red credit itself is covered by
+// TestVerifyRedRoundDoesNotConsumeAPanelAttempt; this test stays focused on
+// authoritativeReview settling a cappedPending flag it inherits.
 func TestAuthoritativeGateSettlesCappedRoundVerdict(t *testing.T) {
 	redGate := verifyexec.Outcome{ExitCode: 1, Output: "still failing"}
 
@@ -5510,7 +5589,7 @@ func TestAuthoritativeGateSettlesCappedRoundVerdict(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ops := &fakeOps{}
 			git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
-			client := &planLLM{responses: slices.Concat(burnResps(5), tt.strongFixScript, tt.reReviewScript)}
+			client := &planLLM{responses: slices.Concat(panelRejects("nil deref"), burnResps(5), tt.strongFixScript, tt.reReviewScript)}
 
 			d := reviewTestDeps(t, ops, git, client, escalationRegistry())
 			d.Cfg.MaxTurns = 5
@@ -5524,10 +5603,11 @@ func TestAuthoritativeGateSettlesCappedRoundVerdict(t *testing.T) {
 			gateRuns := 0
 			o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
 				gateRuns++
-				// Gate run 1 is the cheap round-4 gate (red, so the fix runs and
-				// caps); gate run 2 is the authoritative round-5 gate; anything
-				// after is the strong re-review and passes.
-				if gateRuns == 1 || (gateRuns == 2 && tt.authGateRed) {
+				// Gate run 1 is the cheap round-4 gate (green, so the panel runs
+				// and rejects, and the fix that follows caps); gate run 2 is the
+				// authoritative round-5 gate; anything after is the strong
+				// re-review and passes.
+				if gateRuns == 2 && tt.authGateRed {
 					return redGate
 				}
 
@@ -5542,10 +5622,10 @@ func TestAuthoritativeGateSettlesCappedRoundVerdict(t *testing.T) {
 			if tt.authGateRed {
 				assert.Equal(t, 1, o.fixBarSteps, "the red authoritative gate is quality evidence on top of the volume evidence")
 				require.Len(t, o.fixFailed, 1, "the capped fixer joins fixFailed; fixFailed=%v", o.fixFailed)
-				require.GreaterOrEqual(t, len(client.models), 5, "models=%v", client.models)
-				assert.True(t, o.fixFailed[client.models[4]],
+				require.GreaterOrEqual(t, len(client.models), 9, "models=%v", client.models)
+				assert.True(t, o.fixFailed[client.models[8]],
 					"the excluded fixer is the one that ran the capped round; models=%v", client.models)
-				assert.NotEqual(t, client.models[4], client.models[5],
+				assert.NotEqual(t, client.models[8], client.models[9],
 					"the strong fix runs on a different fixer than the capped round; models=%v", client.models)
 				assert.True(t, ops.loggedContains("hit its turn cap with a failing verify"),
 					"the card log names the combined reason; logs=%v", ops.logs)

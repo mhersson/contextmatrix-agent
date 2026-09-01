@@ -28,6 +28,15 @@ const reviewPanelSize = 3
 // a zero cap) can never loop forever.
 const hardReviewIterationCap = 50
 
+// maxVerifyRedCredit bounds how far verify-red rounds can extend the attempts
+// cliff. A verify-red round runs no panel and produces no verdict - charging
+// it a panel attempt spends the review budget on a build failure - but the
+// extension is bounded so a tree that never comes back green still reaches
+// the authoritative pass and parks. The server-side counter still increments
+// every round: it is the resume-stable round numbering and the lifetime
+// ceiling, and both must keep counting verify-red rounds.
+const maxVerifyRedCredit = 3
+
 // verifyOutputTail caps the verify-command output carried into findings, so a
 // noisy failing suite does not swamp the fix prompt. It is a TAIL: a build
 // tool's diagnostics are concentrated in its last bytes, and res.Output is
@@ -380,6 +389,10 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 	// ever counting as a quality failure.
 	fixRan := false
 
+	// verifyRedCredit extends the cliff one round per verify-red round, so a
+	// build failure costs fix-loop budget instead of a panel attempt.
+	verifyRedCredit := 0
+
 	for iter := range hardReviewIterationCap {
 		// Round number continues across resumes: review_attempts persists the
 		// count of prior rounds, so round N is stable for the body record.
@@ -393,7 +406,7 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 		// authoritative pass instead of another cheap round - never park on a cheap
 		// verdict here, except when the server's own ceiling refuses this round's
 		// increment. It is terminal: returns nil (finished) or parks.
-		if round >= attemptsCap {
+		if round >= attemptsCap+verifyRedCredit {
 			return o.authoritativeReview(ctx, plan, round)
 		}
 
@@ -405,6 +418,13 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 		// Record this round on the parent card body for the complete review
 		// history (CM's review-task workflow skill writes ## Review Findings the same way).
 		o.recordReview(ctx, round, findings, approved, vres)
+
+		if strings.HasPrefix(findings, verifyFailedPrefix) && verifyRedCredit < maxVerifyRedCredit {
+			verifyRedCredit++
+
+			d.logCard(ctx, "review: round %d was a verify-gate failure, not a panel round - it does not consume a panel attempt (%d/%d)",
+				round, verifyRedCredit, maxVerifyRedCredit)
+		}
 
 		if approved {
 			o.reviewSummary = findings // synthesis verdict summary (plus any surviving fixes), for the PR body
