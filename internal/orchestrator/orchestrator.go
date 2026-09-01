@@ -481,6 +481,14 @@ type run struct {
 	prevRoundGreen bool
 	preFixHead     string
 
+	// lastFixBase is the commit the branch sat on before the most recently
+	// COMMITTED fix - set only when a fix pass actually lands, never on a
+	// no-op or a discarded regression, so fixDeltaBlock diffs exactly the
+	// change the next round's panel should see labeled as the prior fix.
+	// Never cleared once set: a later round with no new fix still benefits
+	// from seeing the last one that landed.
+	lastFixBase string
+
 	// excluded is the per-card set of models proven harness-incapable on this run.
 	// It is threaded into every SelectInput.Exclude (coder selection and the review
 	// panel) so a model that could not drive the tool loop is never re-picked.
@@ -523,6 +531,12 @@ type run struct {
 	// across verify-red rounds: those replace lastFindings with the verify tail,
 	// which would otherwise erase the mandate a regressing fix was chasing.
 	lastPanelFindings string
+
+	// lastPriorResolved is the most recent verdict's own report of whether
+	// every prior finding was resolved or withdrawn (settleVerdict). The
+	// authoritative pass's park head reads it to tell an operator a failed
+	// fix from a review that only surfaced new findings.
+	lastPriorResolved bool
 
 	// grounding is the prebuilt REPO GROUNDING block (root + nested
 	// AGENTS.md/CLAUDE.md), injected into model phases. Built once in
@@ -628,7 +642,7 @@ func newRun(d Deps, tc cmclient.TaskContext) *run {
 	// would delete the marker on the next recordSection push.
 	o.body = tc.Description
 	o.taskDescription = stripAgentSections(stripMeta(tc.Description))
-	o.lastFindings = reviewFindingsHistory(tc.Description)
+	o.lastFindings = recentReviewFindingsHistory(tc.Description)
 	o.taskImages = dataURLs(tc.Images)
 
 	// The parent solver binds the execute seam to today's exact collaborators:

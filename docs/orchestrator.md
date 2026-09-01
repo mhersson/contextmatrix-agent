@@ -47,6 +47,23 @@ Performance - run in parallel, read-only, behind a spec/test gate that
 short-circuits to the fix loop before spending reviewer tokens; the
 orchestrator synthesizes the report.
 
+The mob discussion briefing always diffs the full branch against the base
+branch; the solo panel does too on round 1 and the authoritative pass, but on
+later cheap rounds it narrows to the delta since the last review round's
+snapshot, re-widening to the full branch whenever a fix round lands no
+commit (an unchanged HEAD would otherwise leave the next round diffing
+nothing). Either way, alongside that diff sits a second, separately labeled
+block showing what the previous round's fix actually changed
+(`fixDeltaBlock`, capped at 32 KiB) - context, not a narrower review scope.
+It lets a reviewer tell fix-introduced code from the rest of the delivered
+work; the block is empty on round 1, before any fix has committed. A finding
+about fix-introduced code needs concrete evidence - a demonstrated
+correctness bug, a real vulnerability, a broken or vacuous test, or a missed
+acceptance criterion - to earn an Important or Critical severity; without
+that evidence it is Minor at most. This evidence bar, and the convergence
+rule described below, are worded identically in the solo synthesis prompt
+and the mob moderator prompt, so the two review paths cannot drift.
+
 The loop runs to the `review_attempts` cap - default 3, set per deployment via
 `review_attempts_cap` in `serve.yaml` or `CMX_REVIEW_ATTEMPTS_CAP`. Valid
 range 1-6; 6 is the ceiling because the loop leaves the server's
@@ -56,14 +73,75 @@ before a round would start, since a verify run, a panel, and a fix round need
 that much to finish without being killed mid-work; a re-trigger resumes at the
 same round.
 
-The synthesis verdict is severity-gated: an approved verdict cannot carry a
-critical- or important-severity finding. When one parses out, the code forces
-`Approved = false` (logged on the card as an override) so the round routes
-through the not-approved fix + re-review loop instead of the unreviewed
-post-approval cleanup pass. Approval carrying only `minor` (cleanup fix pass)
-or `nit` (report-only) findings keeps the normal behavior; the rule is also
-stated in the synthesis prompts so demotions stay rare, but the code check is
-the guard.
+A verify-red round - the gate fails before any specialist runs - produces no
+verdict, so charging it against the attempts cap would spend review budget on
+a build failure rather than a critique. Each verify-red round instead extends
+the cliff that triggers the authoritative pass by one round, up to
+`maxVerifyRedCredit` (3): the cliff sits at `attemptsCap + verifyRedCredit`
+rounds, not the bare cap. The server-side `review_attempts` counter still
+increments on every round, verify-red rounds included - it is the
+resume-stable round numbering and the lifetime ceiling, and both keep
+counting regardless of what a round produced.
+
+The credit is itself clamped to `min(maxVerifyRedCredit,
+config.MaxReviewAttemptsCap - attemptsCap)` before the loop starts, so it can
+never push the authoritative pass's final increments past CM's server-side
+ceiling of 7: at the default cap of 3 the clamp is a no-op (`min(3, 6-3) ==
+3`), and at the maximum cap of 6 it computes to zero, reproducing the
+uncredited cliff exactly.
+
+Synthesis - the model call that reads the specialist findings and emits the
+verdict - runs under its own turn cap (`synthesisMaxTurns`, 12, min'd with
+the configured base) rather than inheriting the flat per-phase budget, with a
+wrap-up nudge at 3 turns remaining (`synthesisWrapUpTurns`) that forces an
+emit-now instruction instead of letting the model keep investigating into
+the cap. An attempt that still hits the cap is retried once with an explicit
+emit-now repair block; a second cap, or a retry that lands but returns
+unparseable output, both park the round - the specialist findings that round
+already paid for are recorded on the card body under the round's own
+`## Review Findings` heading (so a resumed run replaces rather than
+duplicates them) before the park. Only a parse failure with no cap anywhere
+in the call is fatal to the run.
+
+Cross-round context is bounded, not unbounded. A non-authoritative round
+carries forward only the most recently synthesized panel verdict
+(`lastPanelFindings`); when no panel verdict has synthesized yet in this run
+- round 1, or a run made up so far entirely of verify-red rounds - it falls
+back to the most recent round's raw output (`lastFindings`) instead. The
+authoritative pass, and the value a resumed run seeds at start (`newRun`
+reading the card body before any round runs), both use the
+`reviewHistoryWindow` (3) most recently recorded `## Review Findings`
+sections concatenated (`recentReviewFindingsHistory`) instead of the full
+history - rounds older than the window are redundant, since each recorded
+verdict already carries every surviving finding forward, and an unbounded
+history is what pushes synthesis past its own turn budget over a
+long-running review.
+
+The synthesis verdict is severity-gated in both directions. An approved
+verdict cannot carry a critical- or important-severity finding: when one
+parses out, `demoteContradictoryApproval` forces `Approved = false` (logged
+on the card as an override) so the round routes through the not-approved fix
++ re-review loop instead of the unreviewed post-approval cleanup pass.
+Approval carrying only `minor` (cleanup fix pass) or `nit` (report-only)
+findings keeps the normal behavior. Its mirror, `promoteConsistentRevise`,
+runs the other direction: a revise verdict whose every fix is minor or nit is
+forced to `Approved = true`, since minors and nits never block by the
+verdict's own rules and looping the review on findings it already calls
+non-blocking would never converge; a revise with no fixes at all, or with an
+unlabelled severity, is left alone rather than promoted. Both gates run at
+`settleVerdict`, the single choke point the solo synthesis path and the mob
+moderator path both return through, so neither can drift from the other.
+
+The verdict also carries `prior_findings_resolved`, the synthesizer's own
+report of whether every finding under PRIOR FINDINGS is resolved or
+withdrawn - false on round 1 and whenever any prior remains open. It never
+changes the verdict; it makes a non-converging review legible. A revise
+verdict that reports every prior finding resolved logs a convergence line on
+the card naming the round; when the authoritative pass parks after such a
+round, its park note says the outstanding items are new observations rather
+than unaddressed carryover. The signal resets to false before every round's
+verify gate runs, so a round that short-circuits on verify-red - producing no
+verdict - can never leave a stale true in place from an earlier round.
 
 An approved verdict is durable across parks. On approval - from the cheap
 loop or the gated authoritative pass - the orchestrator records a

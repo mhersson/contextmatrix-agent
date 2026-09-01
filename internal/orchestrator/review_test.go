@@ -862,6 +862,171 @@ func TestReviewFixLoop(t *testing.T) {
 	assert.Equal(t, 1, incCount, "exactly one fix round; calls=%v", ops.recorded())
 }
 
+// TestVerifyRedRoundDoesNotConsumeAPanelAttempt proves a round whose verify
+// gate fails - no panel ran, no verdict was produced - extends the attempts
+// cliff instead of consuming one of the panel rounds: with the default cap of
+// 3 and one verify-red round, three real panel rounds still run before the
+// authoritative pass.
+func TestVerifyRedRoundDoesNotConsumeAPanelAttempt(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+
+	// Fails on the first run, passes afterwards.
+	verify := verifyPlan{
+		Argv:    []string{"sh", "-c", "test -f gate-ran || { touch gate-ran; exit 1; }"},
+		Display: "sh -c gate",
+		Source:  verifySourceDetected,
+		Timeout: time.Minute,
+	}
+
+	reject := `{"approved":false,"summary":"needs work","fix_tier":"simple","fixes":[{"file":"a.go","issue":"bug","suggestion":"fix","severity":"important"}]}`
+
+	var responses []llm.Response
+	// Round 1 is verify-red: only a fix run happens (no panel).
+	responses = append(responses, finishResp("fix build", 0.01))
+	// Rounds 2 and 3: two cheap panel rounds (3 specialists + synthesis + fix
+	// each) - the verify-red credit moves the cliff from round 3 to round 4, so
+	// only two cheap rounds run before the authoritative pass takes over.
+	for range 2 {
+		responses = append(responses,
+			stopResp("Correctness: bug", 0.01),
+			stopResp("Design: ok", 0.01),
+			stopResp("Security: ok", 0.01),
+			stopResp(reject, 0.02),
+			finishResp("fix findings", 0.01),
+		)
+	}
+	// Authoritative pass: strong panel + synthesis reject + strong fix +
+	// re-review panel + synthesis reject -> park.
+	responses = append(responses,
+		stopResp("Correctness: bug", 0.01), stopResp("Design: ok", 0.01), stopResp("Security: ok", 0.01),
+		stopResp(reject, 0.02),
+		finishResp("strong fix", 0.01),
+		stopResp("Correctness: bug", 0.01), stopResp("Design: ok", 0.01), stopResp("Security: ok", 0.01),
+		stopResp(reject, 0.02),
+	)
+
+	d := reviewTestDeps(t, ops, git, &planLLM{responses: responses}, reviewerRegistry())
+	d.Cfg.ReviewAttemptsCap = 3
+	d.WriteTools = testWriteTools()
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
+	o := newReviewRun(d, tc, 0)
+	o.verify = &verify
+	o.runVerify = verifyexec.Exec
+
+	err := runReview(context.Background(), o)
+
+	var park *ReviewParkedError
+
+	require.ErrorAs(t, err, &park)
+
+	// Round numbering is untouched: the verify-red round is round 1 and the
+	// authoritative pass starts at round 4, one later than it would without
+	// the credit (round 3).
+	// Not on its own discriminating: authoritativeReview's re-review always
+	// records round+1, so even an UNCREDITED cliff (triggering at round 3)
+	// would still produce this same heading via its re-review. Kept as
+	// documentation of the round numbering; incCount below is what actually
+	// proves the credit ran.
+	assert.Contains(t, o.body, reviewRoundHeading(4),
+		"the third full panel round must run as round 4 - the verify-red round did not consume a panel attempt")
+	assert.True(t, ops.loggedContains("verify-gate failure, not a panel round"),
+		"the extension is announced on the card log")
+
+	// Discriminating: incrementReviewAttempt runs unconditionally every round
+	// (verify-red rounds included), so this count is one higher with the
+	// credit than without it - 5 rounds ran here (1 verify-red + 2 cheap +
+	// authoritative + its re-review) versus 4 if the verify-red round had
+	// instead consumed a panel attempt and the cliff tripped one round early.
+	incCount := 0
+
+	for _, c := range ops.recorded() {
+		if c == "IncrementReviewAttempts:CARD-1" {
+			incCount++
+		}
+	}
+
+	assert.Equal(t, 5, incCount, "5 rounds increment the counter; calls=%v", ops.recorded())
+}
+
+// TestVerifyRedCreditClampedAtServerCeiling proves the verify-red credit is
+// clamped to what config.MaxReviewAttemptsCap leaves under the configured cap:
+// at the maximum cap of 6 the clamp computes to zero (min(3, 6-6)), so a
+// verify-red round must NOT move the cliff - it still trips at round 6, exactly
+// where an uncredited run would trip, instead of being pushed past CM's
+// server-side review_attempts ceiling.
+func TestVerifyRedCreditClampedAtServerCeiling(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+
+	// Fails on the first run, passes afterwards.
+	verify := verifyPlan{
+		Argv:    []string{"sh", "-c", "test -f gate-ran || { touch gate-ran; exit 1; }"},
+		Display: "sh -c gate",
+		Source:  verifySourceDetected,
+		Timeout: time.Minute,
+	}
+
+	reject := `{"approved":false,"summary":"needs work","fix_tier":"simple","fixes":[{"file":"a.go","issue":"bug","suggestion":"fix","severity":"important"}]}`
+
+	var responses []llm.Response
+	// Round 1 is verify-red: only a fix run happens (no panel).
+	responses = append(responses, finishResp("fix build", 0.01))
+	// Rounds 2-5: four cheap panel rounds. With the credit clamped to zero, the
+	// cliff trips at round 6 (== attemptsCap), never later.
+	for range 4 {
+		responses = append(responses,
+			stopResp("Correctness: bug", 0.01),
+			stopResp("Design: ok", 0.01),
+			stopResp("Security: ok", 0.01),
+			stopResp(reject, 0.02),
+			finishResp("fix findings", 0.01),
+		)
+	}
+	// Authoritative pass at round 6: strong panel + synthesis reject + strong
+	// fix + re-review panel + synthesis reject -> park.
+	responses = append(responses,
+		stopResp("Correctness: bug", 0.01), stopResp("Design: ok", 0.01), stopResp("Security: ok", 0.01),
+		stopResp(reject, 0.02),
+		finishResp("strong fix", 0.01),
+		stopResp("Correctness: bug", 0.01), stopResp("Design: ok", 0.01), stopResp("Security: ok", 0.01),
+		stopResp(reject, 0.02),
+	)
+
+	d := reviewTestDeps(t, ops, git, &planLLM{responses: responses}, reviewerRegistry())
+	d.Cfg.ReviewAttemptsCap = 6
+	d.WriteTools = testWriteTools()
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
+	o := newReviewRun(d, tc, 0)
+	o.verify = &verify
+	o.runVerify = verifyexec.Exec
+
+	err := runReview(context.Background(), o)
+
+	var park *ReviewParkedError
+
+	require.ErrorAs(t, err, &park)
+
+	assert.False(t, ops.loggedContains("verify-gate failure, not a panel round"),
+		"the clamp leaves zero credit at the maximum cap, so the extension must never be announced")
+
+	// Discriminating: 7 rounds ran (1 verify-red + 4 cheap + authoritative +
+	// its re-review). An uncredited-but-unclamped bug would instead let the
+	// verify-red round push the cliff to round 7, running an extra cheap round
+	// (8 increments) and risking the server's own ceiling of 7.
+	incCount := 0
+
+	for _, c := range ops.recorded() {
+		if c == "IncrementReviewAttempts:CARD-1" {
+			incCount++
+		}
+	}
+
+	assert.Equal(t, 7, incCount, "7 rounds increment the counter; calls=%v", ops.recorded())
+}
+
 // TestReviewFixMaxTurnsKeepsItsPartialWork pins that a fix run truncated at the
 // turn cap still lands what it wrote: with no wider round left to buy the cap
 // propagates - so nothing reads the findings as addressed - but the edits are
@@ -968,6 +1133,194 @@ func TestFixRunSimpleTierCapsAtBase(t *testing.T) {
 
 	var mte *MaxTurnsError
 	require.ErrorAs(t, err, &mte)
+}
+
+// TestSynthesisRunsUnderPhaseCap proves the synthesis model call gets a phase
+// cap of its own instead of the flat configured budget: with a base far above
+// synthesisMaxTurns, a synthesis that keeps investigating is stopped at the
+// phase cap on every attempt, not at the base - the retry that follows the
+// first cap is itself capped at the same phase budget, not the base, before
+// the run parks.
+func TestSynthesisRunsUnderPhaseCap(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+
+	// The synthesizer keeps investigating turn after turn, never emitting a
+	// verdict on its own, on either attempt.
+	client := &planLLM{responses: burnResps(synthesisMaxTurns + 20)}
+
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+	d.Cfg.MaxTurns = synthesisMaxTurns + 20
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
+	o := newReviewRun(d, tc, 0)
+
+	_, err := o.synthesize(context.Background(), "specialist findings", 1, false)
+
+	var park *ReviewParkedError
+	require.ErrorAs(t, err, &park, "a synthesis capped on both attempts parks rather than returning a bare turn-cap error")
+
+	// Without a phase cap the burn would consume the full base budget (32
+	// turns) per attempt; with it, each of the two attempts stops at
+	// synthesisMaxTurns.
+	assert.Len(t, client.toolCountsSeen(), synthesisMaxTurns*2,
+		"synthesis must run under its phase cap on every attempt, not the flat base budget")
+}
+
+// TestSynthesisConfigCarriesWrapUpNudge proves the synthesis call opts into
+// the wrap-up nudge, exactly like the planner and the diagnosis phase: when
+// the run burns down to synthesisWrapUpTurns remaining, the synthesis-specific
+// nudge is injected as a user message, steering the model to emit its verdict
+// before the cap instead of investigating into it.
+func TestSynthesisConfigCarriesWrapUpNudge(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+
+	// Nine burn turns, then a valid verdict: with MaxTurns=synthesisMaxTurns
+	// (12) the nudge fires after 12-3=9 consumed turns, before the model emits
+	// its verdict.
+	responses := burnResps(synthesisMaxTurns - synthesisWrapUpTurns)
+	responses = append(responses, stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.01))
+
+	client := &planLLM{responses: responses}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+	d.Cfg.MaxTurns = synthesisMaxTurns
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
+	o := newReviewRun(d, tc, 0)
+
+	_, err := o.synthesize(context.Background(), "specialist findings", 1, false)
+	require.NoError(t, err)
+
+	joined := strings.Join(client.tasks, "\n")
+	assert.Contains(t, joined, synthesisWrapUpMessage,
+		"the wrap-up nudge reaches the synthesis conversation as a user message")
+}
+
+// TestSynthesisCapLeavesRoomForTheWrapUpNudge mirrors
+// TestPlanCapLeavesRoomForTheWrapUpNudge: the nudge must land inside the
+// capped budget or the cap silently removes the only forcing function the
+// synthesis phase has.
+func TestSynthesisCapLeavesRoomForTheWrapUpNudge(t *testing.T) {
+	t.Parallel()
+
+	assert.Greater(t, synthesisMaxTurns, synthesisWrapUpTurns,
+		"synthesisMaxTurns must exceed synthesisWrapUpTurns so the wrap-up nudge still fires")
+}
+
+// TestSynthesisCapRetriesThenParks proves a synthesis that caps twice parks the
+// card with the specialist findings preserved on the body, instead of failing
+// the run: the work is green and read-only synthesis holds no half-done tree,
+// so a park a human (or a resume) can continue from is strictly better than a
+// dead run.
+func TestSynthesisCapRetriesThenParks(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+
+	responses := append([]llm.Response{}, burnResps(synthesisMaxTurns)...)
+	responses = append(responses, burnResps(synthesisMaxTurns)...)
+
+	client := &planLLM{responses: responses}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
+	o := newReviewRun(d, tc, 0)
+
+	_, err := o.synthesize(context.Background(), "the specialist findings text", 2, false)
+
+	var park *ReviewParkedError
+
+	require.ErrorAs(t, err, &park, "a double-capped synthesis parks, it does not fail the run")
+	assert.Equal(t, reviewParkedSynthesisCap, park.Reason)
+
+	assert.Contains(t, o.body, "the specialist findings text",
+		"the round's paid-for specialist findings must be preserved on the body for resume")
+	assert.Contains(t, o.body, reviewRoundHeading(2),
+		"preserved under this round's heading so a re-run of the round replaces it")
+}
+
+// TestRecordLastFixBaseSurvivesUnreadableHead proves lastFixBase's documented
+// invariant - never cleared once set - holds even when a committed fix's
+// preFixHead could not be read: an unreadable Head must be skipped, not
+// treated as a legitimate empty base that overwrites a real one.
+func TestRecordLastFixBaseSurvivesUnreadableHead(t *testing.T) {
+	t.Run("unreadable head leaves a previously set base untouched", func(t *testing.T) {
+		o := &run{lastFixBase: "sha-from-an-earlier-round", preFixHead: ""}
+
+		o.recordLastFixBase(true)
+
+		assert.Equal(t, "sha-from-an-earlier-round", o.lastFixBase,
+			"an unreadable preFixHead must never erase a previously valid base")
+	})
+
+	t.Run("a readable head on a committed fix updates the base", func(t *testing.T) {
+		o := &run{lastFixBase: "sha-from-an-earlier-round", preFixHead: "sha-just-read"}
+
+		o.recordLastFixBase(true)
+
+		assert.Equal(t, "sha-just-read", o.lastFixBase, "a committed fix with a readable head advances the base")
+	})
+
+	t.Run("a round that did not commit never updates the base", func(t *testing.T) {
+		o := &run{lastFixBase: "sha-from-an-earlier-round", preFixHead: "sha-just-read"}
+
+		o.recordLastFixBase(false)
+
+		assert.Equal(t, "sha-from-an-earlier-round", o.lastFixBase, "a no-op round must not advance the base")
+	})
+}
+
+// TestSynthesisCapThenUnparseableParks proves that a cap on attempt 0 followed
+// by an unparseable (but not capped) verdict on attempt 1 still parks with the
+// specialist findings preserved, instead of falling out to the fatal "verdict
+// parse failed after repair" error: the round is cap-caused work either way,
+// and losing its findings on the parse-failure arm would be strictly worse
+// than the mirror ordering (two caps), which already parks.
+func TestSynthesisCapThenUnparseableParks(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+
+	responses := append([]llm.Response{}, burnResps(synthesisMaxTurns)...)
+	responses = append(responses, stopResp("not a verdict, just prose", 0.01))
+
+	client := &planLLM{responses: responses}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
+	o := newReviewRun(d, tc, 0)
+
+	_, err := o.synthesize(context.Background(), "the specialist findings text", 2, false)
+
+	var park *ReviewParkedError
+
+	require.ErrorAs(t, err, &park, "a capped-then-unparseable synthesis parks, it does not fail the run")
+	assert.Equal(t, reviewParkedSynthesisCap, park.Reason)
+
+	assert.Contains(t, o.body, "the specialist findings text",
+		"the round's paid-for specialist findings must be preserved on the body for resume")
+	assert.Contains(t, o.body, reviewRoundHeading(2),
+		"preserved under this round's heading so a re-run of the round replaces it")
+}
+
+// TestSynthesisCapRetrySucceeds proves one cap is recoverable: the retry runs
+// with the emit-now instruction and its verdict is used.
+func TestSynthesisCapRetrySucceeds(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+
+	responses := append([]llm.Response{}, burnResps(synthesisMaxTurns)...)
+	responses = append(responses,
+		stopResp(`{"approved":true,"summary":"clean","fix_tier":"simple","fixes":[]}`, 0.02))
+
+	client := &planLLM{responses: responses}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
+	o := newReviewRun(d, tc, 0)
+
+	v, err := o.synthesize(context.Background(), "findings", 1, false)
+	require.NoError(t, err)
+	assert.True(t, v.Approved)
 }
 
 func TestReviewFixCoderSelectionLogged(t *testing.T) {
@@ -1161,6 +1514,91 @@ func TestReviewPriorFindingsFedToNextRound(t *testing.T) {
 
 	assert.True(t, carried,
 		"round 2 specialist prompt must carry the round-1 findings under PRIOR FINDINGS; round2=%v", round2Specialists)
+}
+
+// TestRoundTwoCarriesFixDelta proves the round after a committed fix shows the
+// panel what that fix changed, as labeled context beside the unchanged
+// full-scope diff - and that round 1, which follows no fix, carries no such
+// block.
+func TestRoundTwoCarriesFixDelta(t *testing.T) {
+	// Head is called three times on this path: once at the end of round 1's
+	// runSpecialists (snapshotting o.lastReviewBase, which becomes round 2's
+	// diff base), once for o.preFixHead before the fix runs (which becomes
+	// o.lastFixBase once the fix commits), and once at the end of round 2's
+	// runSpecialists (irrelevant here - round 2 approves). headSHAs gives the
+	// first two calls distinct values and repeats the second for the third.
+	ops := &fakeOps{}
+	git := &fakeGit{
+		committed: true,
+		headSHAs:  []string{"sha-round1-snapshot", "sha-pre-fix"},
+		diffByBase: map[string]string{
+			"sha-round1-snapshot": "FULL-DIFF",
+			"sha-pre-fix":         "THE-FIX-DELTA",
+		},
+	}
+	// Round 1: 3 specialists + synthesis (fixes) -> fix coder run (committed).
+	// Round 2: 3 specialists + synthesis (approved).
+	client := &planLLM{responses: []llm.Response{
+		stopResp("Correctness: bug", 0.01),
+		stopResp("Design: ok", 0.01),
+		stopResp("Security: ok", 0.01),
+		stopResp(`{"approved":false,"summary":"fix it","fixes":[{"file":"a.go","issue":"bug","suggestion":"patch"}]}`, 0.02),
+		stopResp("coder: fixed the bug", 0.05),
+		stopResp("Correctness: ok now", 0.01),
+		stopResp("Design: ok", 0.01),
+		stopResp("Security: ok", 0.01),
+		stopResp(`{"approved":true,"summary":"clean now","fixes":[]}`, 0.02),
+	}}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	// Partition the captured specialist prompts into round 1 (before the fix
+	// coder run) and round 2 (after it), the same split
+	// TestReviewPriorFindingsFedToNextRound uses.
+	fixIdx := -1
+
+	for i, task := range client.tasks {
+		if strings.Contains(task, "addressing review feedback") {
+			fixIdx = i
+
+			break
+		}
+	}
+
+	require.GreaterOrEqual(t, fixIdx, 0, "fix coder run must appear in captured tasks; tasks=%v", client.tasks)
+
+	var round1Specialists, round2Specialists []string
+
+	for i, task := range client.tasks {
+		if !strings.Contains(task, "code-review specialist") {
+			continue
+		}
+
+		if i < fixIdx {
+			round1Specialists = append(round1Specialists, task)
+		} else {
+			round2Specialists = append(round2Specialists, task)
+		}
+	}
+
+	require.Len(t, round1Specialists, 3, "round 1 fans out three specialists")
+	require.Len(t, round2Specialists, 3, "round 2 fans out three specialists")
+
+	for _, task := range round1Specialists {
+		assert.NotContains(t, task, "PREVIOUS ROUND'S FIX",
+			"round 1 follows no fix; its specialist prompt must not carry the fix-delta block")
+	}
+
+	for _, task := range round2Specialists {
+		assert.Contains(t, task, "THE-FIX-DELTA",
+			"round 2 specialist prompt must carry the previous round's fix delta")
+		assert.Contains(t, task, "FULL-DIFF",
+			"round 2 specialist prompt must still carry the unchanged full-scope diff")
+	}
 }
 
 // verifyRedFixRegistry provides two coder-capable models (in addition to the
@@ -2115,6 +2553,34 @@ func TestReviewGateFailureRedactsFindings(t *testing.T) {
 	assert.Empty(t, client.tasks, "a gate failure short-circuits to the fix loop before any reviewer model call")
 }
 
+// TestReviewRoundResetsLastPriorResolvedOnVerifyRed proves lastPriorResolved
+// reflects only the most recent round that actually produced a verdict: a
+// round whose verify gate fails short-circuits to the fix loop before any
+// verdict runs (settleVerdict never executes), so a true value left over from
+// an earlier round must not survive it - the authoritative pass's park head
+// reads this field, and a stale true there would claim a resolution the
+// short-circuited round never evaluated.
+func TestReviewRoundResetsLastPriorResolvedOnVerifyRed(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{}
+	client := &planLLM{}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{Title: "P", Description: "b", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+	o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 1, Output: "build failed"}
+	}
+	o.lastPriorResolved = true
+
+	_, _, approved, vres, _, err := o.reviewRound(context.Background(), *o.verify, 1, false)
+	require.NoError(t, err)
+	assert.False(t, approved)
+	assert.Equal(t, verifyFailed, vres.Status)
+	assert.False(t, o.lastPriorResolved, "a verify-red round produced no verdict; the stale signal must not survive it")
+}
+
 func TestReviewBudgetParkBeforeSpecialists(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{}
@@ -2532,11 +2998,14 @@ func TestReviewMobPostFixRoundFullScope(t *testing.T) {
 	o := mobReviewRun(t, ops, git, llmFake, eng)
 	require.NoError(t, runReview(context.Background(), o))
 
-	require.Len(t, git.diffBases, 2, "one briefing diff per round, no specialist fan-out")
+	require.Len(t, git.diffBases, 3,
+		"one briefing diff per round, no specialist fan-out, plus one fix-delta diff for round 2's committed fix")
 	assert.Equal(t, "main", git.diffBases[0],
 		"round 1 has no snapshot yet, so it already diffs the base branch")
 	assert.Equal(t, "main", git.diffBases[1],
 		"round 2 follows a fix, so it re-widens despite lastReviewBase==snap1")
+	assert.Equal(t, "snap1", git.diffBases[2],
+		"round 2 also diffs the fix's pre-fix head for the fix-delta context block")
 
 	require.Len(t, eng.topics, 2, "the flag adds no rounds")
 	assert.Equal(t, reviewLenses[:3], eng.topics[0].Lenses, "the flag adds no seats")
@@ -3299,6 +3768,112 @@ func TestReviewApprovedMinorOrNitFindingsUnchanged(t *testing.T) {
 				assert.Equal(t, -1, indexOfPrefix(git.recorded(), "CommitFixup:"), "nit-only findings must not buy a fixup commit; git=%v", git.recorded())
 				assert.True(t, ops.loggedContains(tc.wantLog), "logs=%v", ops.recorded())
 				assert.False(t, ops.loggedContains("approval overridden"), "no demotion is expected; logs=%v", ops.recorded())
+			}
+		})
+	}
+}
+
+// TestConvergenceIsLoggedOnResolvedButRejected proves a revise verdict that
+// itself reports every prior finding resolved is called out on the card log -
+// the operator must be able to tell "the fix failed" from "the review found
+// new things", which are opposite situations wearing the same verdict.
+func TestConvergenceIsLoggedOnResolvedButRejected(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+
+	// severity is "important" rather than the panel's actual minor/nit-shaped
+	// finding, so promoteConsistentRevise (tested separately) leaves this
+	// verdict as a genuine revise across both rounds - isolating the
+	// convergence log from the promotion gate it would otherwise trip.
+	reject := `{"approved":false,"summary":"new finding","fix_tier":"simple","prior_findings_resolved":true,` +
+		`"fixes":[{"file":"a.go","issue":"needs a closer look","suggestion":"investigate","severity":"important"}]}`
+	approve := `{"approved":true,"summary":"clean","fix_tier":"simple","prior_findings_resolved":true,"fixes":[]}`
+
+	client := &planLLM{responses: []llm.Response{
+		// Round 1: reject (prior_findings_resolved is meaningless on round 1 - no log).
+		stopResp("Correctness: bug", 0.01), stopResp("Design: ok", 0.01), stopResp("Security: ok", 0.01),
+		stopResp(reject, 0.02),
+		stopResp("coder: fixed", 0.01),
+		// Round 2: reject again, priors resolved -> log line.
+		stopResp("Correctness: new nit", 0.01), stopResp("Design: ok", 0.01), stopResp("Security: ok", 0.01),
+		stopResp(reject, 0.02),
+		stopResp("coder: fixed", 0.01),
+		// Round 3 (cliff at default cap 3) runs authoritative; approve to end.
+		stopResp("Correctness: ok", 0.01), stopResp("Design: ok", 0.01), stopResp("Security: ok", 0.01),
+		stopResp(approve, 0.02),
+	}}
+
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+	// reviewTestDeps defaults to cap 5; the cliff this script scripts sits at
+	// CM's real default (config.DefaultReviewAttemptsCap = 3).
+	d.Cfg.ReviewAttemptsCap = 3
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
+	o := newReviewRun(d, tc, 0)
+
+	err := runReview(context.Background(), o)
+	require.NoError(t, err)
+
+	assert.True(t, ops.loggedContains("resolved every prior finding"),
+		"a revise resting only on new findings must be legible on the card")
+}
+
+// TestPromoteConsistentRevise proves the demote gate's mirror: a revise
+// verdict carrying only non-blocking findings is promoted to approval, while
+// any blocker, an unlabelled severity, or an empty fix list leaves the revise
+// standing.
+func TestPromoteConsistentRevise(t *testing.T) {
+	tests := []struct {
+		name         string
+		fixes        []fix
+		wantApproved bool
+	}{
+		{
+			name: "minor and nit only promotes",
+			fixes: []fix{
+				{File: "a.go", Issue: "polish", Severity: "minor"},
+				{File: "b.go", Issue: "typo", Severity: "nit"},
+			},
+			wantApproved: true,
+		},
+		{
+			name: "an important finding blocks promotion",
+			fixes: []fix{
+				{File: "a.go", Issue: "polish", Severity: "minor"},
+				{File: "b.go", Issue: "real defect", Severity: "important"},
+			},
+			wantApproved: false,
+		},
+		{
+			name: "an unlabelled severity blocks promotion",
+			fixes: []fix{
+				{File: "a.go", Issue: "unlabelled", Severity: ""},
+			},
+			wantApproved: false,
+		},
+		{
+			name:         "no fixes at all is left alone",
+			fixes:        nil,
+			wantApproved: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			d := reviewTestDeps(t, ops, &fakeGit{}, &planLLM{}, reviewerRegistry())
+
+			tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
+			o := newReviewRun(d, tc, 0)
+
+			v := verdict{Approved: false, Summary: "revise", Fixes: tt.fixes}
+			o.settleVerdict(context.Background(), &v, 2)
+
+			assert.Equal(t, tt.wantApproved, v.Approved)
+
+			if tt.wantApproved {
+				assert.True(t, ops.loggedContains("promoted to approval with open findings"),
+					"the override must be visible on the card log")
 			}
 		})
 	}
@@ -5350,13 +5925,21 @@ func TestCappedFixRoundWithRedVerifyEscalatesBarAndBudget(t *testing.T) {
 // joins fixFailed BEFORE the strong fix is selected. Green gate: widen-only,
 // no bar step and no exclusion.
 //
-// Script shape, red row: round 4's gate is red (the verify short-circuit skips
-// the panel), the round-4 fix coder burns its whole 5-turn window and returns
+// Script shape, red row: round 4's gate is green, so its panel runs and
+// rejects; the round-4 fix coder burns its whole 5-turn window and returns
 // max_turns with a commit, so it caps with fixCappedPending set; round 5 is
 // the cliff (attemptsCap 5), whose authoritative gate is red; the strong fix
 // lands cleanly; the strong re-review's gate is green and its panel approves.
 // Green row: the round-5 authoritative gate passes and its panel approves,
 // ending the run there.
+//
+// Round 4's cap comes from a panel rejection, not a verify-red short-circuit:
+// a verify-red round now earns a bounded credit (maxVerifyRedCredit) that
+// pushes the cliff one round further out, so a verify-red round can never
+// again sit immediately before the cliff the way this test needs. The
+// verify-red credit itself is covered by
+// TestVerifyRedRoundDoesNotConsumeAPanelAttempt; this test stays focused on
+// authoritativeReview settling a cappedPending flag it inherits.
 func TestAuthoritativeGateSettlesCappedRoundVerdict(t *testing.T) {
 	redGate := verifyexec.Outcome{ExitCode: 1, Output: "still failing"}
 
@@ -5385,7 +5968,7 @@ func TestAuthoritativeGateSettlesCappedRoundVerdict(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ops := &fakeOps{}
 			git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
-			client := &planLLM{responses: slices.Concat(burnResps(5), tt.strongFixScript, tt.reReviewScript)}
+			client := &planLLM{responses: slices.Concat(panelRejects("nil deref"), burnResps(5), tt.strongFixScript, tt.reReviewScript)}
 
 			d := reviewTestDeps(t, ops, git, client, escalationRegistry())
 			d.Cfg.MaxTurns = 5
@@ -5399,10 +5982,11 @@ func TestAuthoritativeGateSettlesCappedRoundVerdict(t *testing.T) {
 			gateRuns := 0
 			o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
 				gateRuns++
-				// Gate run 1 is the cheap round-4 gate (red, so the fix runs and
-				// caps); gate run 2 is the authoritative round-5 gate; anything
-				// after is the strong re-review and passes.
-				if gateRuns == 1 || (gateRuns == 2 && tt.authGateRed) {
+				// Gate run 1 is the cheap round-4 gate (green, so the panel runs
+				// and rejects, and the fix that follows caps); gate run 2 is the
+				// authoritative round-5 gate; anything after is the strong
+				// re-review and passes.
+				if gateRuns == 2 && tt.authGateRed {
 					return redGate
 				}
 
@@ -5417,10 +6001,10 @@ func TestAuthoritativeGateSettlesCappedRoundVerdict(t *testing.T) {
 			if tt.authGateRed {
 				assert.Equal(t, 1, o.fixBarSteps, "the red authoritative gate is quality evidence on top of the volume evidence")
 				require.Len(t, o.fixFailed, 1, "the capped fixer joins fixFailed; fixFailed=%v", o.fixFailed)
-				require.GreaterOrEqual(t, len(client.models), 5, "models=%v", client.models)
-				assert.True(t, o.fixFailed[client.models[4]],
+				require.GreaterOrEqual(t, len(client.models), 9, "models=%v", client.models)
+				assert.True(t, o.fixFailed[client.models[8]],
 					"the excluded fixer is the one that ran the capped round; models=%v", client.models)
-				assert.NotEqual(t, client.models[4], client.models[5],
+				assert.NotEqual(t, client.models[8], client.models[9],
 					"the strong fix runs on a different fixer than the capped round; models=%v", client.models)
 				assert.True(t, ops.loggedContains("hit its turn cap with a failing verify"),
 					"the card log names the combined reason; logs=%v", ops.logs)

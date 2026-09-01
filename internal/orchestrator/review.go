@@ -28,6 +28,21 @@ const reviewPanelSize = 3
 // a zero cap) can never loop forever.
 const hardReviewIterationCap = 50
 
+// maxVerifyRedCredit bounds how far verify-red rounds can extend the attempts
+// cliff. A verify-red round runs no panel and produces no verdict - charging
+// it a panel attempt spends the review budget on a build failure - but the
+// extension is bounded so a tree that never comes back green still reaches
+// the authoritative pass and parks. The server-side counter still increments
+// every round: it is the resume-stable round numbering and the lifetime
+// ceiling, and both must keep counting verify-red rounds.
+//
+// This is a ceiling on the credit, not a promise it is always available: the
+// per-run credit is further clamped to what config.MaxReviewAttemptsCap
+// leaves under the configured cap (see reviewLoop's creditCap), so the credit
+// never pushes the authoritative pass's final increments past CM's
+// server-side ceiling.
+const maxVerifyRedCredit = 3
+
 // verifyOutputTail caps the verify-command output carried into findings, so a
 // noisy failing suite does not swamp the fix prompt. It is a TAIL: a build
 // tool's diagnostics are concentrated in its last bytes, and res.Output is
@@ -87,7 +102,13 @@ type verdict struct {
 	Approved bool   `json:"approved"`
 	Summary  string `json:"summary"`
 	FixTier  string `json:"fix_tier"`
-	Fixes    []fix  `json:"fixes"`
+	// PriorFindingsResolved is the synthesizer's own report of whether every
+	// finding in the PRIOR FINDINGS block is resolved or withdrawn. False on
+	// round 1 (no priors) and whenever any prior remains open. It never
+	// changes the verdict - it makes a non-converging review legible: a
+	// revise with this true rests entirely on new findings.
+	PriorFindingsResolved bool  `json:"prior_findings_resolved"`
+	Fixes                 []fix `json:"fixes"`
 }
 
 // fix is one actionable finding the coder must address on the next round.
@@ -129,6 +150,7 @@ const (
 	reviewParkedNoReviewer   = "no reviewer model is selectable"
 	reviewParkedNoFixModel   = "no fix model is selectable"
 	reviewParkedFixExhausted = "no fix model other than the ones that already failed"
+	reviewParkedSynthesisCap = "the synthesis verdict could not be produced within its turn cap"
 )
 
 // reviewTimeLeft parks the review when less than reviewRoundReserve remains on
@@ -369,6 +391,14 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 		attemptsCap = config.DefaultReviewAttemptsCap
 	}
 
+	// creditCap clamps the per-run verify-red credit to what CM's server-side
+	// ceiling leaves under this cap: config.MaxReviewAttemptsCap already
+	// documents that the authoritative pass's final increments land the
+	// counter at attemptsCap+1, so credit can widen the cliff only as far as
+	// that headroom allows. A no-op at the default cap (min(3, 6-3) == 3);
+	// zero at the maximum cap, matching main's uncredited behavior exactly.
+	creditCap := min(maxVerifyRedCredit, config.MaxReviewAttemptsCap-attemptsCap)
+
 	// fixRan is whether the IMMEDIATELY PRECEDING fix round both ran to
 	// completion and committed: a capped round clears it and a round that
 	// landed nothing never sets it, because a red verify is charged to the
@@ -378,6 +408,10 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 	// that hit its turn cap WITH a failing verify - without the cap alone
 	// ever counting as a quality failure.
 	fixRan := false
+
+	// verifyRedCredit extends the cliff one round per verify-red round, so a
+	// build failure costs fix-loop budget instead of a panel attempt.
+	verifyRedCredit := 0
 
 	for iter := range hardReviewIterationCap {
 		// Round number continues across resumes: review_attempts persists the
@@ -392,7 +426,7 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 		// authoritative pass instead of another cheap round - never park on a cheap
 		// verdict here, except when the server's own ceiling refuses this round's
 		// increment. It is terminal: returns nil (finished) or parks.
-		if round >= attemptsCap {
+		if round >= attemptsCap+verifyRedCredit {
 			return o.authoritativeReview(ctx, plan, round)
 		}
 
@@ -404,6 +438,13 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 		// Record this round on the parent card body for the complete review
 		// history (CM's review-task workflow skill writes ## Review Findings the same way).
 		o.recordReview(ctx, round, findings, approved, vres)
+
+		if strings.HasPrefix(findings, verifyFailedPrefix) && verifyRedCredit < creditCap {
+			verifyRedCredit++
+
+			d.logCard(ctx, "review: round %d was a verify-gate failure, not a panel round - it does not consume a panel attempt (%d/%d)",
+				round, verifyRedCredit, creditCap)
+		}
 
 		if approved {
 			o.reviewSummary = findings // synthesis verdict summary (plus any surviving fixes), for the PR body
@@ -613,6 +654,8 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 			// the bar axis, blaming the model this cap just excused.
 			fixRan = false
 
+			o.recordLastFixBase(true)
+
 			continue
 		}
 
@@ -626,6 +669,8 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 		// carries no new information - charging it again would jump the bar two
 		// rungs on the evidence of one round.
 		fixRan = committed
+
+		o.recordLastFixBase(committed)
 
 		if !committed {
 			o.markFixFailed("produced no change")
@@ -1042,9 +1087,12 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 
 	// Gated strong fix - runs only because the authoritative review confirmed
 	// real issues.
-	if _, err := o.runFix(ctx, fixRequest{Findings: findings, Round: round, FixTier: fixTier, Authoritative: true}); err != nil {
+	committed, err := o.runFix(ctx, fixRequest{Findings: findings, Round: round, FixTier: fixTier, Authoritative: true})
+	if err != nil {
 		return err
 	}
+
+	o.recordLastFixBase(committed)
 
 	// One strong re-review of the full change.
 	round2 := round + 1
@@ -1107,8 +1155,12 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 	// over: the branch is mergeable, which is the first thing the operator needs
 	// to know.
 	head := fmt.Sprintf("review parked after %d attempts (authoritative pass) - outstanding findings:\n", n)
-	if discarded {
+
+	switch {
+	case discarded:
 		head = fmt.Sprintf("review parked after %d attempts (authoritative pass); the strong fix regressed the verify and was discarded, so the branch is back on the tree its gate passed - outstanding findings:\n", n)
+	case o.lastPriorResolved:
+		head = fmt.Sprintf("review parked after %d attempts (authoritative pass); the final round resolved every earlier finding - the outstanding items are new observations:\n", n)
 	}
 
 	d.logCard(ctx, "%s", reviewParkNote(head, parkFindings))
@@ -1167,6 +1219,16 @@ func (o *run) incrementReviewAttempt(ctx context.Context, findings string) (int,
 // proceeds. On any gate outcome that reaches them, the three specialists fan
 // out and the synthesis verdict decides.
 func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, authoritative bool) (findings string, fixTier string, approved bool, vres verifyResult, fixes []fix, err error) {
+	// lastPriorResolved reflects ONLY the most recent round that actually
+	// produced a verdict: reset before the verify gate so a round that
+	// short-circuits on verify-red (no verdict, settleVerdict never runs)
+	// cannot leave a stale true from an earlier round in place - the
+	// authoritative pass's park head reads this field, and it must never
+	// claim a resolution the final round did not evaluate. settleVerdict
+	// sets it truthfully once a verdict exists; under-claiming (false) is
+	// the safe direction for everything short of that.
+	o.lastPriorResolved = false
+
 	// Budget gate before the verify subprocess too - the gate may be cheap, but
 	// the fix run it can trigger is not, and we park before doing any work.
 	if err := o.ledger.Check(); err != nil {
@@ -1204,7 +1266,7 @@ func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, autho
 	// machinery); a failed discussion degrades to the fan-out below.
 	if o.d.Cfg.Mob.enabled() && o.d.Cfg.Mob.Review && !authoritative {
 		if v, ok := o.mobReviewVerdict(ctx); ok {
-			o.demoteContradictoryApproval(ctx, &v)
+			o.settleVerdict(ctx, &v, round)
 
 			if v.Approved {
 				return strings.TrimSpace(formatFixes(v)), v.FixTier, true, vres, v.Fixes, nil
@@ -1223,12 +1285,12 @@ func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, autho
 		return "", "", false, vres, nil, err
 	}
 
-	v, err := o.synthesize(ctx, specialistFindings, authoritative)
+	v, err := o.synthesize(ctx, specialistFindings, round, authoritative)
 	if err != nil {
 		return "", "", false, vres, nil, err
 	}
 
-	o.demoteContradictoryApproval(ctx, &v)
+	o.settleVerdict(ctx, &v, round)
 
 	if v.Approved {
 		return strings.TrimSpace(formatFixes(v)), v.FixTier, true, vres, v.Fixes, nil
@@ -1242,6 +1304,49 @@ func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, autho
 const reviewWrapUpMessage = "You are nearly out of turns. Stop investigating and output your findings NOW in the required format. An incomplete findings list is useful; no findings is not."
 
 const reviewWrapUpTurns = 3
+
+// fixDeltaMaxBytes bounds the fix-delta context block. The delta is context,
+// not the review scope; a fix large enough to blow this bound is visible in
+// the full diff regardless.
+const fixDeltaMaxBytes = 32768
+
+// recordLastFixBase sets lastFixBase from preFixHead when a fix round
+// committed and preFixHead was actually read - never on a no-op round, and
+// never when the Head read that should have populated preFixHead failed.
+// lastFixBase is documented to never clear once set (see its field comment),
+// so assigning an empty preFixHead here would erase a previously valid base
+// instead of just skipping this update.
+func (o *run) recordLastFixBase(committed bool) {
+	if committed && o.preFixHead != "" {
+		o.lastFixBase = o.preFixHead
+	}
+}
+
+// fixDeltaBlock renders what the previous round's fix changed, as labeled
+// context for the next round's panel. The full-scope diff is deliberately
+// untouched: a fix can land code outside the delta it targeted, so scope
+// stays the whole branch - this block only lets a reviewer tell fix-introduced
+// code from delivered work, which the severity rules key on. Empty when no
+// fix has committed yet, when the delta cannot be read, or when it is empty.
+func (o *run) fixDeltaBlock(ctx context.Context) string {
+	if o.lastFixBase == "" {
+		return ""
+	}
+
+	delta, err := o.d.Git.Diff(ctx, o.lastFixBase)
+	if err != nil {
+		slog.Warn("review: could not read the fix delta", "card_id", o.d.Cfg.CardID, "error", err)
+
+		return ""
+	}
+
+	if strings.TrimSpace(delta) == "" {
+		return ""
+	}
+
+	return "\nPREVIOUS ROUND'S FIX (this delta was landed in response to the PRIOR FINDINGS.\nIt is context, not the review scope. When a finding of yours concerns code this\ndelta introduced, say so explicitly in the finding):\n" +
+		fencedDiff(truncateBytes(delta, fixDeltaMaxBytes)) + "\n"
+}
 
 // runSpecialists fans the three review lenses out as parallel read-only child
 // agents over the branch diff and returns their concatenated findings. Each
@@ -1294,24 +1399,29 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 
 	// Prior findings are constant across the three lenses: the same previous-round
 	// context goes to every specialist (cross-round memory). The authoritative pass
-	// gets the FULL recorded history, not just the last round.
+	// gets the recent recorded history (reviewHistoryWindow rounds), not just the
+	// last round.
 	priorText := o.lastPanelFindings
 	if priorText == "" {
 		priorText = o.lastFindings
 	}
 
 	if authoritative {
-		priorText = reviewFindingsHistory(o.body)
+		priorText = recentReviewFindingsHistory(o.body)
 	}
 
 	prior := priorFindingsBlock(priorText)
+
+	// Constant across the three lenses, same as prior: the fix delta is
+	// per-round context, not per-specialty.
+	fixDelta := o.fixDeltaBlock(ctx)
 
 	specs := make([]harness.SubagentSpec, len(lenses))
 	for i, l := range lenses {
 		specs[i] = harness.SubagentSpec{
 			Role: l.role,
 			Prompt: fmt.Sprintf(specialistPrompt, o.skillEngage(), o.grounding, readRootsBlock(d.ReadRoots),
-				l.prompt, o.tc.Title, o.taskDescription, diff, prior),
+				l.prompt, o.tc.Title, o.taskDescription, diff, prior, fixDelta),
 			Model:         panel[i].Model,
 			MaxTurns:      cfg.MaxTurns,
 			ContextWindow: panel[i].ContextWindow,
@@ -1560,13 +1670,19 @@ func (o *run) mobReviewBriefing(ctx context.Context) (string, error) {
 	prior := priorFindingsBlock(priorText)
 
 	return fmt.Sprintf(reviewBriefing, o.grounding, readRootsBlock(o.d.ReadRoots),
-		o.tc.Title, o.taskDescription, fencedDiff(diff), prior), nil
+		o.tc.Title, o.taskDescription, fencedDiff(diff), prior, o.fixDeltaBlock(ctx)), nil
 }
 
 // synthesize runs ONE orchestrator-model call that reads the three specialists'
 // findings and emits the structured verdict. The verdict JSON is parsed with the
-// same extractJSON + one repair turn the planner uses.
-func (o *run) synthesize(ctx context.Context, findings string, authoritative bool) (verdict, error) {
+// same extractJSON + one repair turn the planner uses. A turn-capped attempt is
+// retried once with an emit-now instruction; a second cap, or a retry that lands
+// but produces unparseable output, both park the card with the specialist
+// findings recorded on the body under this round's heading - synthesis is
+// read-only, so there is no half-done tree to protect, and a park that
+// preserves the paid-for findings lets a resume continue instead of re-buying
+// the panel. Only a parse failure with no cap anywhere in the call is fatal.
+func (o *run) synthesize(ctx context.Context, findings string, round int, authoritative bool) (verdict, error) {
 	d := o.d
 	cfg := d.Cfg
 
@@ -1582,6 +1698,14 @@ func (o *run) synthesize(ctx context.Context, findings string, authoritative boo
 	var (
 		v       verdict
 		lastErr error
+		capped  bool
+		// wasCapped records that the turn cap fired at some point in this call,
+		// independent of capped: capped resets to false once a later attempt
+		// returns without hitting the cap, but a retry that lands unparseable
+		// output is still cap-caused work, not a plain parse failure - it must
+		// park with the specialist findings preserved, the same as a second cap,
+		// not fail the run.
+		wasCapped bool
 	)
 
 	for attempt := range 2 {
@@ -1590,7 +1714,11 @@ func (o *run) synthesize(ctx context.Context, findings string, authoritative boo
 		}
 
 		repair := ""
-		if attempt > 0 {
+
+		switch {
+		case attempt > 0 && capped:
+			repair = capRetryBlock()
+		case attempt > 0:
 			repair = repairBlock(lastErr.Error())
 		}
 
@@ -1600,20 +1728,35 @@ func (o *run) synthesize(ctx context.Context, findings string, authoritative boo
 		}
 
 		if authoritative {
-			priorText = reviewFindingsHistory(o.body)
+			priorText = recentReviewFindingsHistory(o.body)
 		}
 
 		prior := priorFindingsBlock(priorText)
 
 		task := fmt.Sprintf(synthesisPrompt, o.grounding, o.tc.Title, o.taskDescription, prior, findings, repair)
 
-		res, dur, err := o.runModel(ctx, d.ReadTools, task, model)
+		res, dur, err := o.runModelSynthesis(ctx, d.ReadTools, task, model)
 
 		o.spendAndReport(ctx, o.ledger, cfg.CardID, "review: report synthesis usage failed", res, model, "main", dur)
 
-		if err != nil {
+		var mte *MaxTurnsError
+
+		switch {
+		case errors.As(err, &mte) && attempt == 0:
+			capped = true
+			wasCapped = true
+			lastErr = err
+
+			d.logCard(ctx, "review: synthesis hit its turn cap - retrying once with an emit-now instruction")
+
+			continue
+		case errors.As(err, &mte):
+			return verdict{}, o.parkSynthesisCap(ctx, round, findings)
+		case err != nil:
 			return verdict{}, fmt.Errorf("synthesis run: %w", err)
 		}
+
+		capped = false
 
 		v, lastErr = parseVerdict(res.Output)
 		if lastErr == nil {
@@ -1623,7 +1766,32 @@ func (o *run) synthesize(ctx context.Context, findings string, authoritative boo
 		slog.Warn("review: verdict parse failed", "card_id", cfg.CardID, "attempt", attempt, "error", lastErr)
 	}
 
+	// The cap already fired once this call: a garbage retry is still cap-caused
+	// - the specialist findings are paid for and the tree is untouched by
+	// synthesis, so park and preserve them exactly as the second-cap path does,
+	// rather than falling out to the fatal parse error and losing the round.
+	if wasCapped {
+		return verdict{}, o.parkSynthesisCap(ctx, round, findings)
+	}
+
 	return verdict{}, fmt.Errorf("verdict parse failed after repair: %w", lastErr)
+}
+
+// parkSynthesisCap preserves the round's specialist findings on the card body -
+// under the round's own heading, so a re-run of the round on resume replaces
+// rather than duplicates - and parks. The findings are the round's paid-for
+// output; losing them would make the park no cheaper than the failure it
+// replaces.
+func (o *run) parkSynthesisCap(ctx context.Context, round int, findings string) error {
+	heading := reviewRoundHeading(round)
+
+	o.recordSection(ctx, heading, "## "+heading+
+		"\n\nSynthesis parked at its turn cap before a verdict was produced. The specialist findings below are preserved for the next run.\n\n"+
+		findings+"\n\n**Verdict: revise** (no synthesis verdict - parked)\n")
+
+	o.d.logCard(ctx, "%s", reviewParkNote("review parked - synthesis could not produce a verdict within its turn cap; specialist findings:\n", findings))
+
+	return &ReviewParkedError{Reason: reviewParkedSynthesisCap}
 }
 
 // runFixModel runs the fix coder harness with the same in-run incapable recovery
@@ -2032,11 +2200,21 @@ func (o *run) markFixCapped() {
 	o.fixCapReason = "hit its turn cap"
 }
 
-// reviewFindingsHistory returns every "## Review Findings" section recorded on
-// the parent body, concatenated - the full prior-findings context for the
-// authoritative pass. Empty when none have been recorded yet.
-func reviewFindingsHistory(body string) string {
-	return strings.TrimSpace(sectionsWithPrefix(body, "Review Findings"))
+// reviewHistoryWindow is how many recent review rounds feed back into the
+// run: the authoritative pass's prior-findings context, and the o.lastFindings
+// seed newRun computes from a resumed card's body (which the first
+// non-authoritative panel/synthesis call reads before recordRoundFindings
+// overwrites it). Each recorded verdict carries every surviving finding
+// forward, so rounds older than the window are redundant to the decision -
+// and an unbounded history on either path is what pushed the synthesis step
+// past its budget in production.
+const reviewHistoryWindow = 3
+
+// recentReviewFindingsHistory returns the most recent reviewHistoryWindow
+// "## Review Findings" sections recorded on the parent body, concatenated.
+// Empty when none have been recorded yet.
+func recentReviewFindingsHistory(body string) string {
+	return strings.TrimSpace(lastSectionsWithPrefix(body, "Review Findings", reviewHistoryWindow))
 }
 
 // severityNit is the one severity that does not earn a cleanup fix pass.
@@ -2084,6 +2262,54 @@ func (o *run) demoteContradictoryApproval(ctx context.Context, v *verdict) {
 	v.Approved = false
 
 	o.d.logCard(ctx, "review: approval overridden - %d critical/important finding(s) require a re-reviewed fix round", blocked)
+}
+
+// settleVerdict is the single post-verdict choke point both paths (solo
+// synthesis and mob moderator) pass through: the two severity gates run
+// first - demote an approval that carries a blocker, promote a revise that
+// carries none - then the convergence signal is captured and, when a revise
+// verdict itself reports every prior finding resolved, called out on the
+// card, so the operator can tell a failed fix from a review that only found
+// new things.
+func (o *run) settleVerdict(ctx context.Context, v *verdict, round int) {
+	o.demoteContradictoryApproval(ctx, v)
+	o.promoteConsistentRevise(ctx, v)
+
+	o.lastPriorResolved = v.PriorFindingsResolved
+
+	if !v.Approved && v.PriorFindingsResolved && round > 1 {
+		o.d.logCard(ctx, "review: round %d resolved every prior finding - the revise verdict rests only on new findings", round)
+	}
+}
+
+// promoteConsistentRevise is demoteContradictoryApproval's mirror: a revise
+// verdict whose every finding is minor or nit contradicts the decision rules
+// the same way an approval carrying a critical does - minors and nits never
+// block. Forcing approval here is what makes the convergence rule mechanical
+// once severities are honest: the surviving polish flows through the existing
+// approved-with-open-findings machinery (cleanup pass, or report-only for
+// nits), and the review cannot loop on findings its own rules call
+// non-blocking. A verdict with no fixes at all is left alone - a revise with
+// an empty fix list asserts a defect the verdict failed to itemize, and
+// promoting it would approve on missing information. So is one carrying an
+// unlabelled severity, for the same reason worthCleanupPass treats unlabelled
+// as actionable: a model that omits severity must not have its findings
+// silently waved through.
+func (o *run) promoteConsistentRevise(ctx context.Context, v *verdict) {
+	if v.Approved || len(v.Fixes) == 0 {
+		return
+	}
+
+	for _, f := range v.Fixes {
+		switch normalizeSeverity(f.Severity) {
+		case severityCritical, severityImportant, "":
+			return
+		}
+	}
+
+	v.Approved = true
+
+	o.d.logCard(ctx, "review: revise verdict carried only minor/nit findings - promoted to approval with open findings (minors and nits never block)")
 }
 
 // validSeverities is the vocabulary the synthesis prompts ask for (see

@@ -137,6 +137,34 @@ func TestRecordReview_RoundHeadingsAndVerdict(t *testing.T) {
 	assert.Contains(t, body, "**Verify:** SKIPPED - tool missing")
 }
 
+// TestLastSectionsWithPrefixWindows proves the windowed reader returns only the
+// most recent n matching sections, keeping non-matching sections out entirely.
+func TestLastSectionsWithPrefixWindows(t *testing.T) {
+	body := "intro\n" +
+		"## Review Findings\nround one text\n" +
+		"## Plan\nplan text\n" +
+		"## Review Findings (Round 2)\nround two text\n" +
+		"## Review Findings (Round 3)\nround three text\n" +
+		"## Review Findings (Round 4)\nround four text\n"
+
+	got := lastSectionsWithPrefix(body, "Review Findings", 2)
+
+	assert.Contains(t, got, "round three text")
+	assert.Contains(t, got, "round four text")
+	assert.NotContains(t, got, "round one text")
+	assert.NotContains(t, got, "round two text")
+	assert.NotContains(t, got, "plan text")
+}
+
+// TestLastSectionsWithPrefixUnderWindow proves a body with fewer sections than
+// the window comes back whole - identical to the unwindowed reader.
+func TestLastSectionsWithPrefixUnderWindow(t *testing.T) {
+	body := "## Review Findings\nonly round\n"
+
+	assert.Equal(t, sectionsWithPrefix(body, "Review Findings"),
+		lastSectionsWithPrefix(body, "Review Findings", 3))
+}
+
 func TestExtractSection_ReturnsBlockOrEmpty(t *testing.T) {
 	body := "Desc.\n\n## Execute Discussions\n\n### SUB-1 - a\nx\n\n## Plan\n\n1. y"
 

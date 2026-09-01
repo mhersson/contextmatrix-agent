@@ -318,7 +318,7 @@ func TestCoderGroundingRuleInCoderPrompt(t *testing.T) {
 // %! formatting artifact (placeholder/argument count mismatch).
 func TestReviewBriefingRendersGrounding(t *testing.T) {
 	g := "REPO GROUNDING\nFollow the repo conventions.\n"
-	out := fmt.Sprintf(reviewBriefing, g, "", "My Title", "My Description", fencedDiff("diff - old +new"), "previous findings")
+	out := fmt.Sprintf(reviewBriefing, g, "", "My Title", "My Description", fencedDiff("diff - old +new"), "previous findings", "")
 	assert.Contains(t, out, g, "review briefing must embed the grounding value")
 	assert.NotContains(t, out, "%!", "review briefing must have no formatting artifact")
 }
@@ -347,7 +347,7 @@ func TestReadRootsBlockEmptyKeepsPromptSpacing(t *testing.T) {
 	assert.Contains(t, diagnose, "paths are relative to it.\n\nWork the evidence",
 		"an empty roots block leaves the diagnosis prompt spacing unchanged")
 
-	specialist := fmt.Sprintf(specialistPrompt, "", "", readRootsBlock(nil), "LENS", "t", "b", "d", "")
+	specialist := fmt.Sprintf(specialistPrompt, "", "", readRootsBlock(nil), "LENS", "t", "b", "d", "", "")
 	assert.Contains(t, specialist, "one line of evidence.\n\nLENS\n\nReview only",
 		"an empty roots block leaves the specialist prompt spacing unchanged")
 }
@@ -360,7 +360,7 @@ func TestReadRootsBlockEmptyKeepsBriefingSpacing(t *testing.T) {
 	assert.Contains(t, plan, "real code structure.\n\nP",
 		"an empty roots block leaves the plan briefing spacing unchanged")
 
-	review := fmt.Sprintf(reviewBriefing, "", readRootsBlock(nil), "t", "b", fencedDiff("d"), "")
+	review := fmt.Sprintf(reviewBriefing, "", readRootsBlock(nil), "t", "b", fencedDiff("d"), "", "")
 	assert.Contains(t, review, "survive rebuttal.\n\n"+unreachableVerifyInstruction+"\n\nPARENT CARD",
 		"an empty roots block leaves the review briefing spacing unchanged")
 

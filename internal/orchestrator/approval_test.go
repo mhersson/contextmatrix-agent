@@ -197,13 +197,13 @@ func TestStripAgentSections_RemovesReviewApproval(t *testing.T) {
 	assert.Contains(t, got, "human text")
 }
 
-// TestReviewFindingsHistory_ExcludesApproval proves that
-// reviewFindingsHistory (which collects "Review Findings" sections) does
-// NOT include the approval section, because the headings are distinct.
-func TestReviewFindingsHistory_ExcludesApproval(t *testing.T) {
+// TestRecentReviewFindingsHistory_ExcludesApproval proves that
+// recentReviewFindingsHistory (which collects "Review Findings" sections)
+// does NOT include the approval section, because the headings are distinct.
+func TestRecentReviewFindingsHistory_ExcludesApproval(t *testing.T) {
 	body := "Intro.\n\n## Review Findings\n\nRound 1 findings\n\n### Recommendation\n\nrevise\n\n## Review Approval\n\nCommit: abc\n\n```json\n{}\n```\n\n## Keep\n\nk"
 
-	got := reviewFindingsHistory(body)
+	got := recentReviewFindingsHistory(body)
 
 	assert.Contains(t, got, "Round 1 findings")
 	assert.NotContains(t, got, "Review Approval")

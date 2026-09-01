@@ -142,6 +142,30 @@ const fixTierFloorRule = `Fix_tier floors (these override default-to-card-tier):
   execution, shared mutable state, locking, cancellation, and lifecycle or
   ownership guards - are "complex" at minimum regardless of finding severity.`
 
+// fixScopedSeverityRule requires evidence before a finding about the previous
+// round's own fix can block. The severity gate on the verdict is right for
+// defects in the delivered work; applied to unevidenced observations about
+// the fix it just requested, it is a loop with no exit. Shared by
+// synthesisPrompt and reviewSynthesisPrompt so the two cannot drift.
+const fixScopedSeverityRule = `- Code introduced by the PREVIOUS ROUND'S FIX (seats flag such findings): an
+  Important or Critical label there requires concrete evidence of real impact -
+  a demonstrated correctness bug, a real vulnerability, a broken or vacuous
+  test, or a missed acceptance criterion. Without that evidence a
+  fix-introduced observation is Minor at most. With it, the severity stands -
+  a fix can introduce a real defect, and this rule never protects one.`
+
+// convergenceRule is the verdict's exit condition: a round that resolved
+// everything it was asked to resolve and found only new polish has converged.
+// Without it the review has no way to stop - each fix feeds the next round's
+// findings until the attempts cap parks a card whose work was fine. Shared by
+// synthesisPrompt and reviewSynthesisPrompt so the two cannot drift.
+const convergenceRule = `- Convergence: when every finding under PRIOR FINDINGS is resolved or
+  explicitly withdrawn, nothing new is Critical, and every new Important
+  finding lacks the concrete evidence required above, return approved:true and
+  carry the remaining observations in fixes as minor or nit. A round that
+  resolves everything it was asked to fix and surfaces only new polish has
+  converged - do not send it around again.`
+
 // planPrompt is the read-only planner's instruction block. It is adapted from
 // the create-plan workflow skill's task-decomposition guidance: the same
 // rules for splitting work, dependency thinking, and right-sizing apply, but
@@ -480,9 +504,11 @@ Description:
 //
 // The trailing %s slots are filled by runSpecialists: an optional
 // read-only-roots block, the lens block (one of the three below), parent card
-// title, parent card description, the full branch diff against base, and an
-// optional prior-findings block (the previous round's
-// findings on delta rounds). The empty prior-findings block collapses to nothing.
+// title, parent card description, the full branch diff against base, an
+// optional prior-findings block (the previous round's findings on delta
+// rounds), and an optional fix-delta block (what the previous round's
+// COMMITTED fix changed, labeled as context rather than review scope). Both
+// optional blocks collapse to nothing when empty.
 const specialistPrompt = `%s%sYou are a code-review specialist. You have read-only tools (read, grep, glob, git)
 to inspect the codebase. Git is available read-only (status, diff, log, show,
 branch). You do NOT create or modify cards or files. Produce a findings report as TEXT - another agent synthesizes the
@@ -516,6 +542,7 @@ Description:
 %s
 
 BRANCH DIFF (changes under review)
+%s
 %s
 %s
 Respond with your findings as text: a short Strengths list, then Concerns
@@ -597,6 +624,8 @@ Decision rule:
   in fixes.
 - An approved verdict must not carry Critical or Important findings: if your
   judgement says a finding is that severe, return approved:false.
+` + fixScopedSeverityRule + `
+` + convergenceRule + `
 ` + unreachableVerdictRule + `
 
 Be specific and actionable. Every fix must cite a file in the change set and
@@ -618,10 +647,14 @@ Respond with ONLY a JSON object, no prose:
 {"approved":true|false,
  "summary":"<one-line overall verdict>",
  "fix_tier":"simple|moderate|complex",
+ "prior_findings_resolved":true|false,
  "fixes":[{"file":"...","issue":"...","suggestion":"...","severity":"critical|important|minor|nit"}]}
 
 fix_tier is the difficulty of APPLYING these fixes (default to the card's tier if unsure).
 ` + fixTierFloorRule + `
+prior_findings_resolved is true only when every finding under PRIOR FINDINGS is
+genuinely resolved or explicitly withdrawn; false when any remains open, and
+false when there is no PRIOR FINDINGS block.
 fixes is independent of approved: it carries every finding a seat raised and did
 not withdraw, whatever its severity. An approved verdict with an empty fixes
 array asserts that nothing survived the critique round - never a default.
@@ -979,6 +1012,13 @@ func repairBlock(parseErr string) string {
 		"below - no prose, no code fences. Read a file only if strictly necessary.\n"
 }
 
+// capRetryBlock replaces the parse-repair block on a synthesis retry after a
+// turn-cap stop: the failure was volume, not format, so the instruction is to
+// emit immediately rather than to fix JSON.
+func capRetryBlock() string {
+	return "\nYOUR PREVIOUS ATTEMPT RAN OUT OF TURNS while investigating. Do NOT read or\nsearch anything. Respond with ONLY the verdict JSON object immediately, based\non the findings above.\n"
+}
+
 // testSplitRevisionBlock renders the post-parse validation feedback inserted
 // into the planner prompt on the single test-split revision round: title
 // names the subtask flagged by the test-only-subtask heuristic and previous
@@ -1077,6 +1117,13 @@ func coderWrapUpMessage(n int) string {
 func fixWrapUpMessage(n int) string {
 	return fmt.Sprintf("%d turns remain. If the findings are addressed and the tests pass, call the finish tool now and make no further tool calls. Do not re-run checks that already passed.", n)
 }
+
+// synthesisWrapUpMessage forces the synthesizer to land its verdict the way
+// the specialists land their findings: an imperfect verdict beats a silent
+// max_turns death on a run that is otherwise green.
+const synthesisWrapUpMessage = "You are nearly out of turns. Stop investigating and respond with ONLY the verdict JSON object NOW, in the required format. A verdict based on what you have already read is useful; no verdict is not."
+
+const synthesisWrapUpTurns = 3
 
 // Wrap-up nudge messages for the phases that run at the fixed reserve
 // (runModelWrapUp / runModelPlan / runModelDiagnose). Built from the shared
@@ -1210,7 +1257,10 @@ unreachable_criteria when empty):
 // diff-and-prior-findings scope the specialist fan-out reviews. Slots:
 // grounding, an optional read-only-roots block, title, description, branch
 // diff (pre-wrapped by fencedDiff - the briefing is relayed to the board chat,
-// where a bare diff renders as bullet soup), prior-findings block.
+// where a bare diff renders as bullet soup), prior-findings block, and an
+// optional fix-delta block (what the previous round's COMMITTED fix changed,
+// labeled as context rather than review scope - collapses to nothing when
+// empty).
 const reviewBriefing = `%sYou are discussing a code review. Review only the change set in the diff
 below; read surrounding code for context as needed. Every finding must cite a
 file in the change set. Commit status is never a review concern. Judge the
@@ -1228,6 +1278,7 @@ Description:
 %s
 
 BRANCH DIFF (changes under review)
+%s
 %s
 %s`
 
@@ -1255,6 +1306,8 @@ Decision rule:
   in fixes.
 - An approved verdict must not carry Critical or Important findings: if your
   judgement says a finding is that severe, return approved:false.
+` + fixScopedSeverityRule + `
+` + convergenceRule + `
 ` + unreachableVerdictRule + `
 
 ` + sweepRule + `
@@ -1269,10 +1322,14 @@ Respond with ONLY a JSON object, no prose:
 {"approved":true|false,
  "summary":"<one-line overall verdict>",
  "fix_tier":"simple|moderate|complex",
+ "prior_findings_resolved":true|false,
  "fixes":[{"file":"...","issue":"...","suggestion":"...","severity":"critical|important|minor|nit"}]}
 
 fix_tier is the difficulty of APPLYING these fixes (default to the card's tier if unsure).
 ` + fixTierFloorRule + `
+prior_findings_resolved is true only when every finding under PRIOR FINDINGS is
+genuinely resolved or explicitly withdrawn; false when any remains open, and
+false when there is no PRIOR FINDINGS block.
 fixes is independent of approved: it carries every finding a seat raised and did
 not withdraw, whatever its severity. An approved verdict with an empty fixes
 array asserts that nothing survived the critique round - never a default.

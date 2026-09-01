@@ -495,8 +495,30 @@ func TestNewRunSeedsFilteredDescriptionAndFindings(t *testing.T) {
 	// Prompt sites read the stripped view.
 	assert.Equal(t, "Original task.", o.taskDescription)
 	// Prior findings re-enter through the cross-round memory channel.
-	assert.Equal(t, reviewFindingsHistory(grown), o.lastFindings)
+	assert.Equal(t, recentReviewFindingsHistory(grown), o.lastFindings)
 	assert.Contains(t, o.lastFindings, "- a.go: bug - fix it")
+}
+
+// TestNewRunSeedsBoundedFindingsOnResume proves the resume seed at newRun is
+// windowed like the authoritative reads. o.lastFindings is the cross-round-
+// memory field that feeds the first non-authoritative panel/synthesis call
+// after a resume (before recordRoundFindings overwrites it), so an unbounded
+// seed here reproduces the same unbounded-prompt failure mode through that
+// path, defeating the point of windowing the authoritative reads.
+func TestNewRunSeedsBoundedFindingsOnResume(t *testing.T) {
+	grown := "Original task.\n\n" +
+		"## Review Findings\n\nround one text\n\n" +
+		"## Review Findings (Round 2)\n\nround two text\n\n" +
+		"## Review Findings (Round 3)\n\nround three text\n\n" +
+		"## Review Findings (Round 4)\n\nround four text\n"
+	d := Deps{Ops: &fakeOps{}, Cfg: Config{CardID: "CARD-1"}}
+
+	o := newRun(d, cmclient.TaskContext{Title: "Parent", Description: grown})
+
+	assert.Contains(t, o.lastFindings, "round four text")
+	assert.Contains(t, o.lastFindings, "round three text")
+	assert.Contains(t, o.lastFindings, "round two text")
+	assert.NotContains(t, o.lastFindings, "round one text")
 }
 
 func TestNewRunFreshDescriptionSeedsEmptyFindings(t *testing.T) {

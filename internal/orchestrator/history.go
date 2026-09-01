@@ -401,6 +401,49 @@ func sectionsWithPrefix(body, heading string) string {
 	return b.String()
 }
 
+// lastSectionsWithPrefix is sectionsWithPrefix bounded to the n most recent
+// matching sections. The review-findings history grows one section per round
+// across rounds AND resumes, while each recorded verdict already carries every
+// finding that survived it - so a bounded recent window loses nothing a
+// consumer needs, and keeps the prompts that embed it proportional to what
+// they actually decide.
+func lastSectionsWithPrefix(body, heading string, n int) string {
+	marker := "## " + heading
+
+	var (
+		sections [][]string
+		in       bool
+	)
+
+	for line := range strings.SplitSeq(body, "\n") {
+		if strings.HasPrefix(line, "## ") {
+			in = strings.HasPrefix(line, marker)
+			if in {
+				sections = append(sections, nil)
+			}
+		}
+
+		if in {
+			sections[len(sections)-1] = append(sections[len(sections)-1], line)
+		}
+	}
+
+	if len(sections) > n {
+		sections = sections[len(sections)-n:]
+	}
+
+	var b strings.Builder
+
+	for _, s := range sections {
+		for _, line := range s {
+			b.WriteString(line)
+			b.WriteByte('\n')
+		}
+	}
+
+	return b.String()
+}
+
 // stripAgentSections returns body with every recorded run-history section
 // removed, keeping the human-written content - the pre-heading intro and any
 // heading isAgentHeading does not recognize, i.e. not an exact match in
