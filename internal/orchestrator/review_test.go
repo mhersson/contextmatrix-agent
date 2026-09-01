@@ -1000,6 +1000,47 @@ func TestSynthesisRunsUnderPhaseCap(t *testing.T) {
 		"synthesis must run under its phase cap, not the flat base budget")
 }
 
+// TestSynthesisConfigCarriesWrapUpNudge proves the synthesis call opts into
+// the wrap-up nudge, exactly like the planner and the diagnosis phase: when
+// the run burns down to synthesisWrapUpTurns remaining, the synthesis-specific
+// nudge is injected as a user message, steering the model to emit its verdict
+// before the cap instead of investigating into it.
+func TestSynthesisConfigCarriesWrapUpNudge(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+
+	// Nine burn turns, then a valid verdict: with MaxTurns=synthesisMaxTurns
+	// (12) the nudge fires after 12-3=9 consumed turns, before the model emits
+	// its verdict.
+	responses := burnResps(synthesisMaxTurns - synthesisWrapUpTurns)
+	responses = append(responses, stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.01))
+
+	client := &planLLM{responses: responses}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+	d.Cfg.MaxTurns = synthesisMaxTurns
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
+	o := newReviewRun(d, tc, 0)
+
+	_, err := o.synthesize(context.Background(), "specialist findings", false)
+	require.NoError(t, err)
+
+	joined := strings.Join(client.tasks, "\n")
+	assert.Contains(t, joined, synthesisWrapUpMessage,
+		"the wrap-up nudge reaches the synthesis conversation as a user message")
+}
+
+// TestSynthesisCapLeavesRoomForTheWrapUpNudge mirrors
+// TestPlanCapLeavesRoomForTheWrapUpNudge: the nudge must land inside the
+// capped budget or the cap silently removes the only forcing function the
+// synthesis phase has.
+func TestSynthesisCapLeavesRoomForTheWrapUpNudge(t *testing.T) {
+	t.Parallel()
+
+	assert.Greater(t, synthesisMaxTurns, synthesisWrapUpTurns,
+		"synthesisMaxTurns must exceed synthesisWrapUpTurns so the wrap-up nudge still fires")
+}
+
 func TestReviewFixCoderSelectionLogged(t *testing.T) {
 	// Round 1 is not approved -> fix coder run -> round 2 approves. The fix run
 	// must announce the selected coder model, the round number, and the tier on
