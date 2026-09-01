@@ -532,6 +532,12 @@ type run struct {
 	// which would otherwise erase the mandate a regressing fix was chasing.
 	lastPanelFindings string
 
+	// lastPriorResolved is the most recent verdict's own report of whether
+	// every prior finding was resolved or withdrawn (settleVerdict). The
+	// authoritative pass's park head reads it to tell an operator a failed
+	// fix from a review that only surfaced new findings.
+	lastPriorResolved bool
+
 	// grounding is the prebuilt REPO GROUNDING block (root + nested
 	// AGENTS.md/CLAUDE.md), injected into model phases. Built once in
 	// newRun; "" when the workspace has no instruction files.

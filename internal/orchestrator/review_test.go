@@ -3605,6 +3605,112 @@ func TestReviewApprovedMinorOrNitFindingsUnchanged(t *testing.T) {
 	}
 }
 
+// TestConvergenceIsLoggedOnResolvedButRejected proves a revise verdict that
+// itself reports every prior finding resolved is called out on the card log -
+// the operator must be able to tell "the fix failed" from "the review found
+// new things", which are opposite situations wearing the same verdict.
+func TestConvergenceIsLoggedOnResolvedButRejected(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+
+	// severity is "important" rather than the panel's actual minor/nit-shaped
+	// finding, so promoteConsistentRevise (tested separately) leaves this
+	// verdict as a genuine revise across both rounds - isolating the
+	// convergence log from the promotion gate it would otherwise trip.
+	reject := `{"approved":false,"summary":"new finding","fix_tier":"simple","prior_findings_resolved":true,` +
+		`"fixes":[{"file":"a.go","issue":"needs a closer look","suggestion":"investigate","severity":"important"}]}`
+	approve := `{"approved":true,"summary":"clean","fix_tier":"simple","prior_findings_resolved":true,"fixes":[]}`
+
+	client := &planLLM{responses: []llm.Response{
+		// Round 1: reject (prior_findings_resolved is meaningless on round 1 - no log).
+		stopResp("Correctness: bug", 0.01), stopResp("Design: ok", 0.01), stopResp("Security: ok", 0.01),
+		stopResp(reject, 0.02),
+		stopResp("coder: fixed", 0.01),
+		// Round 2: reject again, priors resolved -> log line.
+		stopResp("Correctness: new nit", 0.01), stopResp("Design: ok", 0.01), stopResp("Security: ok", 0.01),
+		stopResp(reject, 0.02),
+		stopResp("coder: fixed", 0.01),
+		// Round 3 (cliff at default cap 3) runs authoritative; approve to end.
+		stopResp("Correctness: ok", 0.01), stopResp("Design: ok", 0.01), stopResp("Security: ok", 0.01),
+		stopResp(approve, 0.02),
+	}}
+
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+	// reviewTestDeps defaults to cap 5; the cliff this script scripts sits at
+	// CM's real default (config.DefaultReviewAttemptsCap = 3).
+	d.Cfg.ReviewAttemptsCap = 3
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
+	o := newReviewRun(d, tc, 0)
+
+	err := runReview(context.Background(), o)
+	require.NoError(t, err)
+
+	assert.True(t, ops.loggedContains("resolved every prior finding"),
+		"a revise resting only on new findings must be legible on the card")
+}
+
+// TestPromoteConsistentRevise proves the demote gate's mirror: a revise
+// verdict carrying only non-blocking findings is promoted to approval, while
+// any blocker, an unlabelled severity, or an empty fix list leaves the revise
+// standing.
+func TestPromoteConsistentRevise(t *testing.T) {
+	tests := []struct {
+		name         string
+		fixes        []fix
+		wantApproved bool
+	}{
+		{
+			name: "minor and nit only promotes",
+			fixes: []fix{
+				{File: "a.go", Issue: "polish", Severity: "minor"},
+				{File: "b.go", Issue: "typo", Severity: "nit"},
+			},
+			wantApproved: true,
+		},
+		{
+			name: "an important finding blocks promotion",
+			fixes: []fix{
+				{File: "a.go", Issue: "polish", Severity: "minor"},
+				{File: "b.go", Issue: "real defect", Severity: "important"},
+			},
+			wantApproved: false,
+		},
+		{
+			name: "an unlabelled severity blocks promotion",
+			fixes: []fix{
+				{File: "a.go", Issue: "unlabelled", Severity: ""},
+			},
+			wantApproved: false,
+		},
+		{
+			name:         "no fixes at all is left alone",
+			fixes:        nil,
+			wantApproved: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			d := reviewTestDeps(t, ops, &fakeGit{}, &planLLM{}, reviewerRegistry())
+
+			tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
+			o := newReviewRun(d, tc, 0)
+
+			v := verdict{Approved: false, Summary: "revise", Fixes: tt.fixes}
+			o.settleVerdict(context.Background(), &v, 2)
+
+			assert.Equal(t, tt.wantApproved, v.Approved)
+
+			if tt.wantApproved {
+				assert.True(t, ops.loggedContains("promoted to approval with open findings"),
+					"the override must be visible on the card log")
+			}
+		})
+	}
+}
+
 // TestRunReviewHITLAutoApprovedWithFindingsFramesSummary extends the PR-body
 // honesty contract to the path this card newly made reachable: an approving
 // verdict that carries surviving findings. Nothing fixes them on the HITL

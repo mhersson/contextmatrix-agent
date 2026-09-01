@@ -142,6 +142,30 @@ const fixTierFloorRule = `Fix_tier floors (these override default-to-card-tier):
   execution, shared mutable state, locking, cancellation, and lifecycle or
   ownership guards - are "complex" at minimum regardless of finding severity.`
 
+// fixScopedSeverityRule requires evidence before a finding about the previous
+// round's own fix can block. The severity gate on the verdict is right for
+// defects in the delivered work; applied to unevidenced observations about
+// the fix it just requested, it is a loop with no exit. Shared by
+// synthesisPrompt and reviewSynthesisPrompt so the two cannot drift.
+const fixScopedSeverityRule = `- Code introduced by the PREVIOUS ROUND'S FIX (seats flag such findings): an
+  Important or Critical label there requires concrete evidence of real impact -
+  a demonstrated correctness bug, a real vulnerability, a broken or vacuous
+  test, or a missed acceptance criterion. Without that evidence a
+  fix-introduced observation is Minor at most. With it, the severity stands -
+  a fix can introduce a real defect, and this rule never protects one.`
+
+// convergenceRule is the verdict's exit condition: a round that resolved
+// everything it was asked to resolve and found only new polish has converged.
+// Without it the review has no way to stop - each fix feeds the next round's
+// findings until the attempts cap parks a card whose work was fine. Shared by
+// synthesisPrompt and reviewSynthesisPrompt so the two cannot drift.
+const convergenceRule = `- Convergence: when every finding under PRIOR FINDINGS is resolved or
+  explicitly withdrawn, nothing new is Critical, and every new Important
+  finding lacks the concrete evidence required above, return approved:true and
+  carry the remaining observations in fixes as minor or nit. A round that
+  resolves everything it was asked to fix and surfaces only new polish has
+  converged - do not send it around again.`
+
 // planPrompt is the read-only planner's instruction block. It is adapted from
 // the create-plan workflow skill's task-decomposition guidance: the same
 // rules for splitting work, dependency thinking, and right-sizing apply, but
@@ -600,6 +624,8 @@ Decision rule:
   in fixes.
 - An approved verdict must not carry Critical or Important findings: if your
   judgement says a finding is that severe, return approved:false.
+` + fixScopedSeverityRule + `
+` + convergenceRule + `
 ` + unreachableVerdictRule + `
 
 Be specific and actionable. Every fix must cite a file in the change set and
@@ -621,10 +647,14 @@ Respond with ONLY a JSON object, no prose:
 {"approved":true|false,
  "summary":"<one-line overall verdict>",
  "fix_tier":"simple|moderate|complex",
+ "prior_findings_resolved":true|false,
  "fixes":[{"file":"...","issue":"...","suggestion":"...","severity":"critical|important|minor|nit"}]}
 
 fix_tier is the difficulty of APPLYING these fixes (default to the card's tier if unsure).
 ` + fixTierFloorRule + `
+prior_findings_resolved is true only when every finding under PRIOR FINDINGS is
+genuinely resolved or explicitly withdrawn; false when any remains open, and
+false when there is no PRIOR FINDINGS block.
 fixes is independent of approved: it carries every finding a seat raised and did
 not withdraw, whatever its severity. An approved verdict with an empty fixes
 array asserts that nothing survived the critique round - never a default.
@@ -1276,6 +1306,8 @@ Decision rule:
   in fixes.
 - An approved verdict must not carry Critical or Important findings: if your
   judgement says a finding is that severe, return approved:false.
+` + fixScopedSeverityRule + `
+` + convergenceRule + `
 ` + unreachableVerdictRule + `
 
 ` + sweepRule + `
@@ -1290,10 +1322,14 @@ Respond with ONLY a JSON object, no prose:
 {"approved":true|false,
  "summary":"<one-line overall verdict>",
  "fix_tier":"simple|moderate|complex",
+ "prior_findings_resolved":true|false,
  "fixes":[{"file":"...","issue":"...","suggestion":"...","severity":"critical|important|minor|nit"}]}
 
 fix_tier is the difficulty of APPLYING these fixes (default to the card's tier if unsure).
 ` + fixTierFloorRule + `
+prior_findings_resolved is true only when every finding under PRIOR FINDINGS is
+genuinely resolved or explicitly withdrawn; false when any remains open, and
+false when there is no PRIOR FINDINGS block.
 fixes is independent of approved: it carries every finding a seat raised and did
 not withdraw, whatever its severity. An approved verdict with an empty fixes
 array asserts that nothing survived the critique round - never a default.

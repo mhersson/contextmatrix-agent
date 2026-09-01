@@ -96,7 +96,13 @@ type verdict struct {
 	Approved bool   `json:"approved"`
 	Summary  string `json:"summary"`
 	FixTier  string `json:"fix_tier"`
-	Fixes    []fix  `json:"fixes"`
+	// PriorFindingsResolved is the synthesizer's own report of whether every
+	// finding in the PRIOR FINDINGS block is resolved or withdrawn. False on
+	// round 1 (no priors) and whenever any prior remains open. It never
+	// changes the verdict - it makes a non-converging review legible: a
+	// revise with this true rests entirely on new findings.
+	PriorFindingsResolved bool  `json:"prior_findings_resolved"`
+	Fixes                 []fix `json:"fixes"`
 }
 
 // fix is one actionable finding the coder must address on the next round.
@@ -1139,8 +1145,12 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 	// over: the branch is mergeable, which is the first thing the operator needs
 	// to know.
 	head := fmt.Sprintf("review parked after %d attempts (authoritative pass) - outstanding findings:\n", n)
-	if discarded {
+
+	switch {
+	case discarded:
 		head = fmt.Sprintf("review parked after %d attempts (authoritative pass); the strong fix regressed the verify and was discarded, so the branch is back on the tree its gate passed - outstanding findings:\n", n)
+	case o.lastPriorResolved:
+		head = fmt.Sprintf("review parked after %d attempts (authoritative pass); the final round resolved every earlier finding - the outstanding items are new observations:\n", n)
 	}
 
 	d.logCard(ctx, "%s", reviewParkNote(head, parkFindings))
@@ -1236,7 +1246,7 @@ func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, autho
 	// machinery); a failed discussion degrades to the fan-out below.
 	if o.d.Cfg.Mob.enabled() && o.d.Cfg.Mob.Review && !authoritative {
 		if v, ok := o.mobReviewVerdict(ctx); ok {
-			o.demoteContradictoryApproval(ctx, &v)
+			o.settleVerdict(ctx, &v, round)
 
 			if v.Approved {
 				return strings.TrimSpace(formatFixes(v)), v.FixTier, true, vres, v.Fixes, nil
@@ -1260,7 +1270,7 @@ func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, autho
 		return "", "", false, vres, nil, err
 	}
 
-	o.demoteContradictoryApproval(ctx, &v)
+	o.settleVerdict(ctx, &v, round)
 
 	if v.Approved {
 		return strings.TrimSpace(formatFixes(v)), v.FixTier, true, vres, v.Fixes, nil
@@ -2197,6 +2207,54 @@ func (o *run) demoteContradictoryApproval(ctx context.Context, v *verdict) {
 	v.Approved = false
 
 	o.d.logCard(ctx, "review: approval overridden - %d critical/important finding(s) require a re-reviewed fix round", blocked)
+}
+
+// settleVerdict is the single post-verdict choke point both paths (solo
+// synthesis and mob moderator) pass through: the two severity gates run
+// first - demote an approval that carries a blocker, promote a revise that
+// carries none - then the convergence signal is captured and, when a revise
+// verdict itself reports every prior finding resolved, called out on the
+// card, so the operator can tell a failed fix from a review that only found
+// new things.
+func (o *run) settleVerdict(ctx context.Context, v *verdict, round int) {
+	o.demoteContradictoryApproval(ctx, v)
+	o.promoteConsistentRevise(ctx, v)
+
+	o.lastPriorResolved = v.PriorFindingsResolved
+
+	if !v.Approved && v.PriorFindingsResolved && round > 1 {
+		o.d.logCard(ctx, "review: round %d resolved every prior finding - the revise verdict rests only on new findings", round)
+	}
+}
+
+// promoteConsistentRevise is demoteContradictoryApproval's mirror: a revise
+// verdict whose every finding is minor or nit contradicts the decision rules
+// the same way an approval carrying a critical does - minors and nits never
+// block. Forcing approval here is what makes the convergence rule mechanical
+// once severities are honest: the surviving polish flows through the existing
+// approved-with-open-findings machinery (cleanup pass, or report-only for
+// nits), and the review cannot loop on findings its own rules call
+// non-blocking. A verdict with no fixes at all is left alone - a revise with
+// an empty fix list asserts a defect the verdict failed to itemize, and
+// promoting it would approve on missing information. So is one carrying an
+// unlabelled severity, for the same reason worthCleanupPass treats unlabelled
+// as actionable: a model that omits severity must not have its findings
+// silently waved through.
+func (o *run) promoteConsistentRevise(ctx context.Context, v *verdict) {
+	if v.Approved || len(v.Fixes) == 0 {
+		return
+	}
+
+	for _, f := range v.Fixes {
+		switch normalizeSeverity(f.Severity) {
+		case severityCritical, severityImportant, "":
+			return
+		}
+	}
+
+	v.Approved = true
+
+	o.d.logCard(ctx, "review: revise verdict carried only minor/nit findings - promoted to approval with open findings (minors and nits never block)")
 }
 
 // validSeverities is the vocabulary the synthesis prompts ask for (see
