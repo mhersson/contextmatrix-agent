@@ -1376,6 +1376,91 @@ func TestReviewPriorFindingsFedToNextRound(t *testing.T) {
 		"round 2 specialist prompt must carry the round-1 findings under PRIOR FINDINGS; round2=%v", round2Specialists)
 }
 
+// TestRoundTwoCarriesFixDelta proves the round after a committed fix shows the
+// panel what that fix changed, as labeled context beside the unchanged
+// full-scope diff - and that round 1, which follows no fix, carries no such
+// block.
+func TestRoundTwoCarriesFixDelta(t *testing.T) {
+	// Head is called three times on this path: once at the end of round 1's
+	// runSpecialists (snapshotting o.lastReviewBase, which becomes round 2's
+	// diff base), once for o.preFixHead before the fix runs (which becomes
+	// o.lastFixBase once the fix commits), and once at the end of round 2's
+	// runSpecialists (irrelevant here - round 2 approves). headSHAs gives the
+	// first two calls distinct values and repeats the second for the third.
+	ops := &fakeOps{}
+	git := &fakeGit{
+		committed: true,
+		headSHAs:  []string{"sha-round1-snapshot", "sha-pre-fix"},
+		diffByBase: map[string]string{
+			"sha-round1-snapshot": "FULL-DIFF",
+			"sha-pre-fix":         "THE-FIX-DELTA",
+		},
+	}
+	// Round 1: 3 specialists + synthesis (fixes) -> fix coder run (committed).
+	// Round 2: 3 specialists + synthesis (approved).
+	client := &planLLM{responses: []llm.Response{
+		stopResp("Correctness: bug", 0.01),
+		stopResp("Design: ok", 0.01),
+		stopResp("Security: ok", 0.01),
+		stopResp(`{"approved":false,"summary":"fix it","fixes":[{"file":"a.go","issue":"bug","suggestion":"patch"}]}`, 0.02),
+		stopResp("coder: fixed the bug", 0.05),
+		stopResp("Correctness: ok now", 0.01),
+		stopResp("Design: ok", 0.01),
+		stopResp("Security: ok", 0.01),
+		stopResp(`{"approved":true,"summary":"clean now","fixes":[]}`, 0.02),
+	}}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	// Partition the captured specialist prompts into round 1 (before the fix
+	// coder run) and round 2 (after it), the same split
+	// TestReviewPriorFindingsFedToNextRound uses.
+	fixIdx := -1
+
+	for i, task := range client.tasks {
+		if strings.Contains(task, "addressing review feedback") {
+			fixIdx = i
+
+			break
+		}
+	}
+
+	require.GreaterOrEqual(t, fixIdx, 0, "fix coder run must appear in captured tasks; tasks=%v", client.tasks)
+
+	var round1Specialists, round2Specialists []string
+
+	for i, task := range client.tasks {
+		if !strings.Contains(task, "code-review specialist") {
+			continue
+		}
+
+		if i < fixIdx {
+			round1Specialists = append(round1Specialists, task)
+		} else {
+			round2Specialists = append(round2Specialists, task)
+		}
+	}
+
+	require.Len(t, round1Specialists, 3, "round 1 fans out three specialists")
+	require.Len(t, round2Specialists, 3, "round 2 fans out three specialists")
+
+	for _, task := range round1Specialists {
+		assert.NotContains(t, task, "PREVIOUS ROUND'S FIX",
+			"round 1 follows no fix; its specialist prompt must not carry the fix-delta block")
+	}
+
+	for _, task := range round2Specialists {
+		assert.Contains(t, task, "THE-FIX-DELTA",
+			"round 2 specialist prompt must carry the previous round's fix delta")
+		assert.Contains(t, task, "FULL-DIFF",
+			"round 2 specialist prompt must still carry the unchanged full-scope diff")
+	}
+}
+
 // verifyRedFixRegistry provides two coder-capable models (in addition to the
 // usual reviewer panel) so a round-2 fix, which excludes round-1's fix model
 // (markFixFailed - the preceding fix left the verify red), still has a second
@@ -2745,11 +2830,14 @@ func TestReviewMobPostFixRoundFullScope(t *testing.T) {
 	o := mobReviewRun(t, ops, git, llmFake, eng)
 	require.NoError(t, runReview(context.Background(), o))
 
-	require.Len(t, git.diffBases, 2, "one briefing diff per round, no specialist fan-out")
+	require.Len(t, git.diffBases, 3,
+		"one briefing diff per round, no specialist fan-out, plus one fix-delta diff for round 2's committed fix")
 	assert.Equal(t, "main", git.diffBases[0],
 		"round 1 has no snapshot yet, so it already diffs the base branch")
 	assert.Equal(t, "main", git.diffBases[1],
 		"round 2 follows a fix, so it re-widens despite lastReviewBase==snap1")
+	assert.Equal(t, "snap1", git.diffBases[2],
+		"round 2 also diffs the fix's pre-fix head for the fix-delta context block")
 
 	require.Len(t, eng.topics, 2, "the flag adds no rounds")
 	assert.Equal(t, reviewLenses[:3], eng.topics[0].Lenses, "the flag adds no seats")

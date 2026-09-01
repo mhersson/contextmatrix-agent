@@ -480,9 +480,11 @@ Description:
 //
 // The trailing %s slots are filled by runSpecialists: an optional
 // read-only-roots block, the lens block (one of the three below), parent card
-// title, parent card description, the full branch diff against base, and an
-// optional prior-findings block (the previous round's
-// findings on delta rounds). The empty prior-findings block collapses to nothing.
+// title, parent card description, the full branch diff against base, an
+// optional prior-findings block (the previous round's findings on delta
+// rounds), and an optional fix-delta block (what the previous round's
+// COMMITTED fix changed, labeled as context rather than review scope). Both
+// optional blocks collapse to nothing when empty.
 const specialistPrompt = `%s%sYou are a code-review specialist. You have read-only tools (read, grep, glob, git)
 to inspect the codebase. Git is available read-only (status, diff, log, show,
 branch). You do NOT create or modify cards or files. Produce a findings report as TEXT - another agent synthesizes the
@@ -516,6 +518,7 @@ Description:
 %s
 
 BRANCH DIFF (changes under review)
+%s
 %s
 %s
 Respond with your findings as text: a short Strengths list, then Concerns
@@ -1224,7 +1227,10 @@ unreachable_criteria when empty):
 // diff-and-prior-findings scope the specialist fan-out reviews. Slots:
 // grounding, an optional read-only-roots block, title, description, branch
 // diff (pre-wrapped by fencedDiff - the briefing is relayed to the board chat,
-// where a bare diff renders as bullet soup), prior-findings block.
+// where a bare diff renders as bullet soup), prior-findings block, and an
+// optional fix-delta block (what the previous round's COMMITTED fix changed,
+// labeled as context rather than review scope - collapses to nothing when
+// empty).
 const reviewBriefing = `%sYou are discussing a code review. Review only the change set in the diff
 below; read surrounding code for context as needed. Every finding must cite a
 file in the change set. Commit status is never a review concern. Judge the
@@ -1242,6 +1248,7 @@ Description:
 %s
 
 BRANCH DIFF (changes under review)
+%s
 %s
 %s`
 

@@ -481,6 +481,14 @@ type run struct {
 	prevRoundGreen bool
 	preFixHead     string
 
+	// lastFixBase is the commit the branch sat on before the most recently
+	// COMMITTED fix - set only when a fix pass actually lands, never on a
+	// no-op or a discarded regression, so fixDeltaBlock diffs exactly the
+	// change the next round's panel should see labeled as the prior fix.
+	// Never cleared once set: a later round with no new fix still benefits
+	// from seeing the last one that landed.
+	lastFixBase string
+
 	// excluded is the per-card set of models proven harness-incapable on this run.
 	// It is threaded into every SelectInput.Exclude (coder selection and the review
 	// panel) so a model that could not drive the tool loop is never re-picked.

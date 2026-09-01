@@ -634,6 +634,8 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 			// the bar axis, blaming the model this cap just excused.
 			fixRan = false
 
+			o.lastFixBase = o.preFixHead
+
 			continue
 		}
 
@@ -647,6 +649,10 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 		// carries no new information - charging it again would jump the bar two
 		// rungs on the evidence of one round.
 		fixRan = committed
+
+		if committed {
+			o.lastFixBase = o.preFixHead
+		}
 
 		if !committed {
 			o.markFixFailed("produced no change")
@@ -1063,8 +1069,13 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 
 	// Gated strong fix - runs only because the authoritative review confirmed
 	// real issues.
-	if _, err := o.runFix(ctx, fixRequest{Findings: findings, Round: round, FixTier: fixTier, Authoritative: true}); err != nil {
+	committed, err := o.runFix(ctx, fixRequest{Findings: findings, Round: round, FixTier: fixTier, Authoritative: true})
+	if err != nil {
 		return err
+	}
+
+	if committed {
+		o.lastFixBase = o.preFixHead
 	}
 
 	// One strong re-review of the full change.
@@ -1264,6 +1275,31 @@ const reviewWrapUpMessage = "You are nearly out of turns. Stop investigating and
 
 const reviewWrapUpTurns = 3
 
+// fixDeltaMaxBytes bounds the fix-delta context block. The delta is context,
+// not the review scope; a fix large enough to blow this bound is visible in
+// the full diff regardless.
+const fixDeltaMaxBytes = 32768
+
+// fixDeltaBlock renders what the previous round's fix changed, as labeled
+// context for the next round's panel. The full-scope diff is deliberately
+// untouched: a fix can land code outside the delta it targeted, so scope
+// stays the whole branch - this block only lets a reviewer tell fix-introduced
+// code from delivered work, which the severity rules key on. Empty when no
+// fix has committed yet, when the delta cannot be read, or when it is empty.
+func (o *run) fixDeltaBlock(ctx context.Context) string {
+	if o.lastFixBase == "" {
+		return ""
+	}
+
+	delta, err := o.d.Git.Diff(ctx, o.lastFixBase)
+	if err != nil || strings.TrimSpace(delta) == "" {
+		return ""
+	}
+
+	return "\nPREVIOUS ROUND'S FIX (this delta was landed in response to the PRIOR FINDINGS.\nIt is context, not the review scope. When a finding of yours concerns code this\ndelta introduced, say so explicitly in the finding):\n" +
+		fencedDiff(truncateBytes(delta, fixDeltaMaxBytes)) + "\n"
+}
+
 // runSpecialists fans the three review lenses out as parallel read-only child
 // agents over the branch diff and returns their concatenated findings. Each
 // child's spend is recorded on the ledger and reported per result.
@@ -1328,12 +1364,16 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 
 	prior := priorFindingsBlock(priorText)
 
+	// Constant across the three lenses, same as prior: the fix delta is
+	// per-round context, not per-specialty.
+	fixDelta := o.fixDeltaBlock(ctx)
+
 	specs := make([]harness.SubagentSpec, len(lenses))
 	for i, l := range lenses {
 		specs[i] = harness.SubagentSpec{
 			Role: l.role,
 			Prompt: fmt.Sprintf(specialistPrompt, o.skillEngage(), o.grounding, readRootsBlock(d.ReadRoots),
-				l.prompt, o.tc.Title, o.taskDescription, diff, prior),
+				l.prompt, o.tc.Title, o.taskDescription, diff, prior, fixDelta),
 			Model:         panel[i].Model,
 			MaxTurns:      cfg.MaxTurns,
 			ContextWindow: panel[i].ContextWindow,
@@ -1582,7 +1622,7 @@ func (o *run) mobReviewBriefing(ctx context.Context) (string, error) {
 	prior := priorFindingsBlock(priorText)
 
 	return fmt.Sprintf(reviewBriefing, o.grounding, readRootsBlock(o.d.ReadRoots),
-		o.tc.Title, o.taskDescription, fencedDiff(diff), prior), nil
+		o.tc.Title, o.taskDescription, fencedDiff(diff), prior, o.fixDeltaBlock(ctx)), nil
 }
 
 // synthesize runs ONE orchestrator-model call that reads the three specialists'

@@ -535,6 +535,12 @@ type fakeGit struct {
 	// default "" preserves the no-snapshot behaviour the other review tests rely on.
 	diffBases []string
 	headSHA   string
+	// diffByBase scripts the text Diff returns, keyed by the base it was called
+	// with; diffValue is the fallback for a base not in the map. The zero value
+	// of both (nil map, "" fallback) preserves the "" every existing test relies
+	// on, so this is additive.
+	diffByBase map[string]string
+	diffValue  string
 	// headSHAs scripts successive Head returns (the last one repeating), for
 	// tests that must tell one point in the run from another - a head captured
 	// before a commit from the same head read after it. Empty falls back to
@@ -726,11 +732,16 @@ func (g *fakeGit) Checkout(_ context.Context, ref string) error {
 func (g *fakeGit) Diff(_ context.Context, base string) (string, error) {
 	g.mu.Lock()
 	g.diffBases = append(g.diffBases, base)
+	v, ok := g.diffByBase[base]
 	g.mu.Unlock()
 
 	g.record("Diff")
 
-	return "", nil
+	if ok {
+		return v, nil
+	}
+
+	return g.diffValue, nil
 }
 
 func (g *fakeGit) AddWorktree(_ context.Context, path, branch, startRef string) error {
