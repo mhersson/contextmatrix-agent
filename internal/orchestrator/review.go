@@ -1295,14 +1295,15 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 
 	// Prior findings are constant across the three lenses: the same previous-round
 	// context goes to every specialist (cross-round memory). The authoritative pass
-	// gets the FULL recorded history, not just the last round.
+	// gets the recent recorded history (reviewHistoryWindow rounds), not just the
+	// last round.
 	priorText := o.lastPanelFindings
 	if priorText == "" {
 		priorText = o.lastFindings
 	}
 
 	if authoritative {
-		priorText = reviewFindingsHistory(o.body)
+		priorText = recentReviewFindingsHistory(o.body)
 	}
 
 	prior := priorFindingsBlock(priorText)
@@ -1611,7 +1612,7 @@ func (o *run) synthesize(ctx context.Context, findings string, round int, author
 		}
 
 		if authoritative {
-			priorText = reviewFindingsHistory(o.body)
+			priorText = recentReviewFindingsHistory(o.body)
 		}
 
 		prior := priorFindingsBlock(priorText)
@@ -2079,6 +2080,19 @@ func (o *run) markFixCapped() {
 // authoritative pass. Empty when none have been recorded yet.
 func reviewFindingsHistory(body string) string {
 	return strings.TrimSpace(sectionsWithPrefix(body, "Review Findings"))
+}
+
+// reviewHistoryWindow is how many recent review rounds the authoritative pass
+// reads. Each recorded verdict carries every surviving finding forward, so
+// rounds older than the window are redundant to the decision - and an
+// unbounded history is what pushed the synthesis step past its budget in
+// production.
+const reviewHistoryWindow = 3
+
+// recentReviewFindingsHistory is reviewFindingsHistory bounded to the most
+// recent reviewHistoryWindow rounds.
+func recentReviewFindingsHistory(body string) string {
+	return strings.TrimSpace(lastSectionsWithPrefix(body, "Review Findings", reviewHistoryWindow))
 }
 
 // severityNit is the one severity that does not earn a cleanup fix pass.
