@@ -950,6 +950,83 @@ func TestVerifyRedRoundDoesNotConsumeAPanelAttempt(t *testing.T) {
 	assert.Equal(t, 5, incCount, "5 rounds increment the counter; calls=%v", ops.recorded())
 }
 
+// TestVerifyRedCreditClampedAtServerCeiling proves the verify-red credit is
+// clamped to what config.MaxReviewAttemptsCap leaves under the configured cap:
+// at the maximum cap of 6 the clamp computes to zero (min(3, 6-6)), so a
+// verify-red round must NOT move the cliff - it still trips at round 6, exactly
+// where an uncredited run would trip, instead of being pushed past CM's
+// server-side review_attempts ceiling.
+func TestVerifyRedCreditClampedAtServerCeiling(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+
+	// Fails on the first run, passes afterwards.
+	verify := verifyPlan{
+		Argv:    []string{"sh", "-c", "test -f gate-ran || { touch gate-ran; exit 1; }"},
+		Display: "sh -c gate",
+		Source:  verifySourceDetected,
+		Timeout: time.Minute,
+	}
+
+	reject := `{"approved":false,"summary":"needs work","fix_tier":"simple","fixes":[{"file":"a.go","issue":"bug","suggestion":"fix","severity":"important"}]}`
+
+	var responses []llm.Response
+	// Round 1 is verify-red: only a fix run happens (no panel).
+	responses = append(responses, finishResp("fix build", 0.01))
+	// Rounds 2-5: four cheap panel rounds. With the credit clamped to zero, the
+	// cliff trips at round 6 (== attemptsCap), never later.
+	for range 4 {
+		responses = append(responses,
+			stopResp("Correctness: bug", 0.01),
+			stopResp("Design: ok", 0.01),
+			stopResp("Security: ok", 0.01),
+			stopResp(reject, 0.02),
+			finishResp("fix findings", 0.01),
+		)
+	}
+	// Authoritative pass at round 6: strong panel + synthesis reject + strong
+	// fix + re-review panel + synthesis reject -> park.
+	responses = append(responses,
+		stopResp("Correctness: bug", 0.01), stopResp("Design: ok", 0.01), stopResp("Security: ok", 0.01),
+		stopResp(reject, 0.02),
+		finishResp("strong fix", 0.01),
+		stopResp("Correctness: bug", 0.01), stopResp("Design: ok", 0.01), stopResp("Security: ok", 0.01),
+		stopResp(reject, 0.02),
+	)
+
+	d := reviewTestDeps(t, ops, git, &planLLM{responses: responses}, reviewerRegistry())
+	d.Cfg.ReviewAttemptsCap = 6
+	d.WriteTools = testWriteTools()
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
+	o := newReviewRun(d, tc, 0)
+	o.verify = &verify
+	o.runVerify = verifyexec.Exec
+
+	err := runReview(context.Background(), o)
+
+	var park *ReviewParkedError
+
+	require.ErrorAs(t, err, &park)
+
+	assert.False(t, ops.loggedContains("verify-gate failure, not a panel round"),
+		"the clamp leaves zero credit at the maximum cap, so the extension must never be announced")
+
+	// Discriminating: 7 rounds ran (1 verify-red + 4 cheap + authoritative +
+	// its re-review). An uncredited-but-unclamped bug would instead let the
+	// verify-red round push the cliff to round 7, running an extra cheap round
+	// (8 increments) and risking the server's own ceiling of 7.
+	incCount := 0
+
+	for _, c := range ops.recorded() {
+		if c == "IncrementReviewAttempts:CARD-1" {
+			incCount++
+		}
+	}
+
+	assert.Equal(t, 7, incCount, "7 rounds increment the counter; calls=%v", ops.recorded())
+}
+
 // TestReviewFixMaxTurnsKeepsItsPartialWork pins that a fix run truncated at the
 // turn cap still lands what it wrote: with no wider round left to buy the cap
 // propagates - so nothing reads the findings as addressed - but the edits are
@@ -1154,6 +1231,69 @@ func TestSynthesisCapRetriesThenParks(t *testing.T) {
 	var park *ReviewParkedError
 
 	require.ErrorAs(t, err, &park, "a double-capped synthesis parks, it does not fail the run")
+	assert.Equal(t, reviewParkedSynthesisCap, park.Reason)
+
+	assert.Contains(t, o.body, "the specialist findings text",
+		"the round's paid-for specialist findings must be preserved on the body for resume")
+	assert.Contains(t, o.body, reviewRoundHeading(2),
+		"preserved under this round's heading so a re-run of the round replaces it")
+}
+
+// TestRecordLastFixBaseSurvivesUnreadableHead proves lastFixBase's documented
+// invariant - never cleared once set - holds even when a committed fix's
+// preFixHead could not be read: an unreadable Head must be skipped, not
+// treated as a legitimate empty base that overwrites a real one.
+func TestRecordLastFixBaseSurvivesUnreadableHead(t *testing.T) {
+	t.Run("unreadable head leaves a previously set base untouched", func(t *testing.T) {
+		o := &run{lastFixBase: "sha-from-an-earlier-round", preFixHead: ""}
+
+		o.recordLastFixBase(true)
+
+		assert.Equal(t, "sha-from-an-earlier-round", o.lastFixBase,
+			"an unreadable preFixHead must never erase a previously valid base")
+	})
+
+	t.Run("a readable head on a committed fix updates the base", func(t *testing.T) {
+		o := &run{lastFixBase: "sha-from-an-earlier-round", preFixHead: "sha-just-read"}
+
+		o.recordLastFixBase(true)
+
+		assert.Equal(t, "sha-just-read", o.lastFixBase, "a committed fix with a readable head advances the base")
+	})
+
+	t.Run("a round that did not commit never updates the base", func(t *testing.T) {
+		o := &run{lastFixBase: "sha-from-an-earlier-round", preFixHead: "sha-just-read"}
+
+		o.recordLastFixBase(false)
+
+		assert.Equal(t, "sha-from-an-earlier-round", o.lastFixBase, "a no-op round must not advance the base")
+	})
+}
+
+// TestSynthesisCapThenUnparseableParks proves that a cap on attempt 0 followed
+// by an unparseable (but not capped) verdict on attempt 1 still parks with the
+// specialist findings preserved, instead of falling out to the fatal "verdict
+// parse failed after repair" error: the round is cap-caused work either way,
+// and losing its findings on the parse-failure arm would be strictly worse
+// than the mirror ordering (two caps), which already parks.
+func TestSynthesisCapThenUnparseableParks(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+
+	responses := append([]llm.Response{}, burnResps(synthesisMaxTurns)...)
+	responses = append(responses, stopResp("not a verdict, just prose", 0.01))
+
+	client := &planLLM{responses: responses}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
+	o := newReviewRun(d, tc, 0)
+
+	_, err := o.synthesize(context.Background(), "the specialist findings text", 2, false)
+
+	var park *ReviewParkedError
+
+	require.ErrorAs(t, err, &park, "a capped-then-unparseable synthesis parks, it does not fail the run")
 	assert.Equal(t, reviewParkedSynthesisCap, park.Reason)
 
 	assert.Contains(t, o.body, "the specialist findings text",

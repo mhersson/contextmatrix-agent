@@ -83,16 +83,25 @@ increments on every round, verify-red rounds included - it is the
 resume-stable round numbering and the lifetime ceiling, and both keep
 counting regardless of what a round produced.
 
+The credit is itself clamped to `min(maxVerifyRedCredit,
+config.MaxReviewAttemptsCap - attemptsCap)` before the loop starts, so it can
+never push the authoritative pass's final increments past CM's server-side
+ceiling of 7: at the default cap of 3 the clamp is a no-op (`min(3, 6-3) ==
+3`), and at the maximum cap of 6 it computes to zero, reproducing the
+uncredited cliff exactly.
+
 Synthesis - the model call that reads the specialist findings and emits the
 verdict - runs under its own turn cap (`synthesisMaxTurns`, 12, min'd with
 the configured base) rather than inheriting the flat per-phase budget, with a
 wrap-up nudge at 3 turns remaining (`synthesisWrapUpTurns`) that forces an
 emit-now instruction instead of letting the model keep investigating into
 the cap. An attempt that still hits the cap is retried once with an explicit
-emit-now repair block; a second cap parks the round - the specialist
-findings that round already paid for are recorded on the card body under the
-round's own `## Review Findings` heading (so a resumed run replaces rather
-than duplicates them) before the park.
+emit-now repair block; a second cap, or a retry that lands but returns
+unparseable output, both park the round - the specialist findings that round
+already paid for are recorded on the card body under the round's own
+`## Review Findings` heading (so a resumed run replaces rather than
+duplicates them) before the park. Only a parse failure with no cap anywhere
+in the call is fatal to the run.
 
 Cross-round context is bounded, not unbounded. A non-authoritative round
 carries forward only the most recently synthesized panel verdict

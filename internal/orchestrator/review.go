@@ -35,6 +35,12 @@ const hardReviewIterationCap = 50
 // the authoritative pass and parks. The server-side counter still increments
 // every round: it is the resume-stable round numbering and the lifetime
 // ceiling, and both must keep counting verify-red rounds.
+//
+// This is a ceiling on the credit, not a promise it is always available: the
+// per-run credit is further clamped to what config.MaxReviewAttemptsCap
+// leaves under the configured cap (see reviewLoop's creditCap), so the credit
+// never pushes the authoritative pass's final increments past CM's
+// server-side ceiling.
 const maxVerifyRedCredit = 3
 
 // verifyOutputTail caps the verify-command output carried into findings, so a
@@ -385,6 +391,14 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 		attemptsCap = config.DefaultReviewAttemptsCap
 	}
 
+	// creditCap clamps the per-run verify-red credit to what CM's server-side
+	// ceiling leaves under this cap: config.MaxReviewAttemptsCap already
+	// documents that the authoritative pass's final increments land the
+	// counter at attemptsCap+1, so credit can widen the cliff only as far as
+	// that headroom allows. A no-op at the default cap (min(3, 6-3) == 3);
+	// zero at the maximum cap, matching main's uncredited behavior exactly.
+	creditCap := min(maxVerifyRedCredit, config.MaxReviewAttemptsCap-attemptsCap)
+
 	// fixRan is whether the IMMEDIATELY PRECEDING fix round both ran to
 	// completion and committed: a capped round clears it and a round that
 	// landed nothing never sets it, because a red verify is charged to the
@@ -425,11 +439,11 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 		// history (CM's review-task workflow skill writes ## Review Findings the same way).
 		o.recordReview(ctx, round, findings, approved, vres)
 
-		if strings.HasPrefix(findings, verifyFailedPrefix) && verifyRedCredit < maxVerifyRedCredit {
+		if strings.HasPrefix(findings, verifyFailedPrefix) && verifyRedCredit < creditCap {
 			verifyRedCredit++
 
 			d.logCard(ctx, "review: round %d was a verify-gate failure, not a panel round - it does not consume a panel attempt (%d/%d)",
-				round, verifyRedCredit, maxVerifyRedCredit)
+				round, verifyRedCredit, creditCap)
 		}
 
 		if approved {
@@ -640,7 +654,7 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 			// the bar axis, blaming the model this cap just excused.
 			fixRan = false
 
-			o.lastFixBase = o.preFixHead
+			o.recordLastFixBase(true)
 
 			continue
 		}
@@ -656,9 +670,7 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 		// rungs on the evidence of one round.
 		fixRan = committed
 
-		if committed {
-			o.lastFixBase = o.preFixHead
-		}
+		o.recordLastFixBase(committed)
 
 		if !committed {
 			o.markFixFailed("produced no change")
@@ -1080,9 +1092,7 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 		return err
 	}
 
-	if committed {
-		o.lastFixBase = o.preFixHead
-	}
+	o.recordLastFixBase(committed)
 
 	// One strong re-review of the full change.
 	round2 := round + 1
@@ -1300,6 +1310,18 @@ const reviewWrapUpTurns = 3
 // the full diff regardless.
 const fixDeltaMaxBytes = 32768
 
+// recordLastFixBase sets lastFixBase from preFixHead when a fix round
+// committed and preFixHead was actually read - never on a no-op round, and
+// never when the Head read that should have populated preFixHead failed.
+// lastFixBase is documented to never clear once set (see its field comment),
+// so assigning an empty preFixHead here would erase a previously valid base
+// instead of just skipping this update.
+func (o *run) recordLastFixBase(committed bool) {
+	if committed && o.preFixHead != "" {
+		o.lastFixBase = o.preFixHead
+	}
+}
+
 // fixDeltaBlock renders what the previous round's fix changed, as labeled
 // context for the next round's panel. The full-scope diff is deliberately
 // untouched: a fix can land code outside the delta it targeted, so scope
@@ -1312,7 +1334,13 @@ func (o *run) fixDeltaBlock(ctx context.Context) string {
 	}
 
 	delta, err := o.d.Git.Diff(ctx, o.lastFixBase)
-	if err != nil || strings.TrimSpace(delta) == "" {
+	if err != nil {
+		slog.Warn("review: could not read the fix delta", "card_id", o.d.Cfg.CardID, "error", err)
+
+		return ""
+	}
+
+	if strings.TrimSpace(delta) == "" {
 		return ""
 	}
 
@@ -1648,11 +1676,12 @@ func (o *run) mobReviewBriefing(ctx context.Context) (string, error) {
 // synthesize runs ONE orchestrator-model call that reads the three specialists'
 // findings and emits the structured verdict. The verdict JSON is parsed with the
 // same extractJSON + one repair turn the planner uses. A turn-capped attempt is
-// retried once with an emit-now instruction; a second cap parks the card with
-// the specialist findings recorded on the body under this round's heading -
-// synthesis is read-only, so there is no half-done tree to protect, and a park
-// that preserves the paid-for findings lets a resume continue instead of
-// re-buying the panel.
+// retried once with an emit-now instruction; a second cap, or a retry that lands
+// but produces unparseable output, both park the card with the specialist
+// findings recorded on the body under this round's heading - synthesis is
+// read-only, so there is no half-done tree to protect, and a park that
+// preserves the paid-for findings lets a resume continue instead of re-buying
+// the panel. Only a parse failure with no cap anywhere in the call is fatal.
 func (o *run) synthesize(ctx context.Context, findings string, round int, authoritative bool) (verdict, error) {
 	d := o.d
 	cfg := d.Cfg
@@ -1670,6 +1699,13 @@ func (o *run) synthesize(ctx context.Context, findings string, round int, author
 		v       verdict
 		lastErr error
 		capped  bool
+		// wasCapped records that the turn cap fired at some point in this call,
+		// independent of capped: capped resets to false once a later attempt
+		// returns without hitting the cap, but a retry that lands unparseable
+		// output is still cap-caused work, not a plain parse failure - it must
+		// park with the specialist findings preserved, the same as a second cap,
+		// not fail the run.
+		wasCapped bool
 	)
 
 	for attempt := range 2 {
@@ -1708,6 +1744,7 @@ func (o *run) synthesize(ctx context.Context, findings string, round int, author
 		switch {
 		case errors.As(err, &mte) && attempt == 0:
 			capped = true
+			wasCapped = true
 			lastErr = err
 
 			d.logCard(ctx, "review: synthesis hit its turn cap - retrying once with an emit-now instruction")
@@ -1727,6 +1764,14 @@ func (o *run) synthesize(ctx context.Context, findings string, round int, author
 		}
 
 		slog.Warn("review: verdict parse failed", "card_id", cfg.CardID, "attempt", attempt, "error", lastErr)
+	}
+
+	// The cap already fired once this call: a garbage retry is still cap-caused
+	// - the specialist findings are paid for and the tree is untouched by
+	// synthesis, so park and preserve them exactly as the second-cap path does,
+	// rather than falling out to the fatal parse error and losing the round.
+	if wasCapped {
+		return verdict{}, o.parkSynthesisCap(ctx, round, findings)
 	}
 
 	return verdict{}, fmt.Errorf("verdict parse failed after repair: %w", lastErr)
