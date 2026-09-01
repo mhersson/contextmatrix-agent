@@ -2075,22 +2075,19 @@ func (o *run) markFixCapped() {
 	o.fixCapReason = "hit its turn cap"
 }
 
-// reviewFindingsHistory returns every "## Review Findings" section recorded on
-// the parent body, concatenated - the full prior-findings context for the
-// authoritative pass. Empty when none have been recorded yet.
-func reviewFindingsHistory(body string) string {
-	return strings.TrimSpace(sectionsWithPrefix(body, "Review Findings"))
-}
-
-// reviewHistoryWindow is how many recent review rounds the authoritative pass
-// reads. Each recorded verdict carries every surviving finding forward, so
-// rounds older than the window are redundant to the decision - and an
-// unbounded history is what pushed the synthesis step past its budget in
-// production.
+// reviewHistoryWindow is how many recent review rounds feed back into the
+// run: the authoritative pass's prior-findings context, and the o.lastFindings
+// seed newRun computes from a resumed card's body (which the first
+// non-authoritative panel/synthesis call reads before recordRoundFindings
+// overwrites it). Each recorded verdict carries every surviving finding
+// forward, so rounds older than the window are redundant to the decision -
+// and an unbounded history on either path is what pushed the synthesis step
+// past its budget in production.
 const reviewHistoryWindow = 3
 
-// recentReviewFindingsHistory is reviewFindingsHistory bounded to the most
-// recent reviewHistoryWindow rounds.
+// recentReviewFindingsHistory returns the most recent reviewHistoryWindow
+// "## Review Findings" sections recorded on the parent body, concatenated.
+// Empty when none have been recorded yet.
 func recentReviewFindingsHistory(body string) string {
 	return strings.TrimSpace(lastSectionsWithPrefix(body, "Review Findings", reviewHistoryWindow))
 }

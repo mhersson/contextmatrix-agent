@@ -628,7 +628,7 @@ func newRun(d Deps, tc cmclient.TaskContext) *run {
 	// would delete the marker on the next recordSection push.
 	o.body = tc.Description
 	o.taskDescription = stripAgentSections(stripMeta(tc.Description))
-	o.lastFindings = reviewFindingsHistory(tc.Description)
+	o.lastFindings = recentReviewFindingsHistory(tc.Description)
 	o.taskImages = dataURLs(tc.Images)
 
 	// The parent solver binds the execute seam to today's exact collaborators:

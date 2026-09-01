@@ -10,7 +10,7 @@ import (
 
 // approvalHeading is the card-body heading for the durable approval record,
 // chosen to be unique - NOT a prefix match for "Review Findings", so
-// reviewFindingsHistory (which collects "Review Findings" sections) and
+// recentReviewFindingsHistory (which collects "Review Findings" sections) and
 // stripAgentSections (which tracks agentRoundSectionHeadings) both treat it
 // independently.
 const approvalHeading = "Review Approval"
