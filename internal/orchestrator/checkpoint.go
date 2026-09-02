@@ -229,7 +229,7 @@ func (o *run) mobCheckpoint(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 // committing. verified is true only when this gate RAN and PASSED against the
 // revised tree: false for the skip tier and for an inconclusive run, neither
 // of which is evidence the revised tree is good, and false on every discard.
-func (o *run) checkpointReviseVerify(ctx context.Context, sc *solverCtx, sub subtaskRef) (bool, bool) {
+func (o *run) checkpointReviseVerify(ctx context.Context, sc *solverCtx, sub subtaskRef) (keep, verified bool) {
 	plan, err := o.ensureVerify(ctx)
 	if err != nil {
 		return o.discardCheckpointRevise(ctx, sc, sub, fmt.Sprintf("verify could not be resolved - %v", err)), false

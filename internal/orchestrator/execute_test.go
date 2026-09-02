@@ -2755,6 +2755,8 @@ func TestPreCommitVerifyPassCommitsAsToday(t *testing.T) {
 	require.Len(t, git.commitMsgs, 1, "exactly one commit; git=%v", git.recorded())
 	assert.Equal(t, "feat: subtask done", git.commitMsgs[0])
 	assert.Equal(t, 0, verifyFixPasses(client), "a green gate spends no fix model")
+	assert.Zero(t, countCalls(ops.recorded(), "UpdateCardBody:SUB-1"),
+		"a green gate is not evidence about sizing - nothing may be corrected")
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "CompleteTask:SUB-1"), 0)
 }
 
@@ -2781,6 +2783,8 @@ func TestPreCommitVerifySkippedCommitsAsToday(t *testing.T) {
 	require.Len(t, git.commitMsgs, 1, "exactly one commit; git=%v", git.recorded())
 	assert.Equal(t, "feat: subtask done", git.commitMsgs[0])
 	assert.Equal(t, 0, verifyFixPasses(client), "an inconclusive gate spends no fix model")
+	assert.Zero(t, countCalls(ops.recorded(), "UpdateCardBody:SUB-1"),
+		"a gate that reached no verdict is not evidence about sizing - nothing may be corrected")
 	assert.True(t, ops.loggedContains("verify timed out"),
 		"the skip is logged with its classification; logs=%v", ops.logs)
 }
