@@ -3948,7 +3948,10 @@ func TestMobReviewBriefingAlwaysDiffsBaseBranch(t *testing.T) {
 // TestCleanupPassTurnCapNeverParksAnApprovedCard.
 func TestReviewApprovedCleanupPassPropagatesParks(t *testing.T) {
 	ops := &fakeOps{}
-	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+	// headSHA is what recordApproval binds the approval to; an unreadable head
+	// skips the record entirely and the assertion below could not tell an
+	// approved round from one that never got a verdict.
+	git := &fakeGit{committed: true, headSHA: "approved-sha", lastCommitTarget: "abc123"}
 	client := &planLLM{responses: []llm.Response{
 		stopResp("Correctness: minor", 0.01),
 		stopResp("Design: ok", 0.01),
@@ -3965,6 +3968,13 @@ func TestReviewApprovedCleanupPassPropagatesParks(t *testing.T) {
 
 	err := runReview(context.Background(), o)
 	require.Error(t, err, "a park in the cleanup pass must reach the worker")
+
+	// Where the park arose, not just that one did: the approval section is
+	// written by the approving verdict, so a ceiling that tripped at the round's
+	// own pre-synthesis budget check would leave the body without it and this
+	// test would be pinning the wrong park.
+	assert.Contains(t, ops.bodyFor("CARD-1"), "## Review Approval",
+		"the round must have approved before the cleanup pass parked")
 
 	var bee *BudgetExceededError
 	assert.ErrorAs(t, err, &bee, "the worker parks on this sentinel and pushes the WIP; nil would integrate a dirty tree")
@@ -6418,6 +6428,11 @@ func TestCleanupPassTurnCapNeverParksAnApprovedCard(t *testing.T) {
 
 			// A park would have surfaced as the returned error above; the
 			// orchestrator never calls report_parked itself (the worker does).
+			//
+			// 4 panel calls + exactly the 5 scripted burns: planLLM answers a
+			// 10th call with a fallback stop response, so an uncapped coder ends
+			// the run cleanly and this test would pass without a cap ever firing.
+			assert.Equal(t, 9, modelCallCount(client), "the coder was cut off at the cap, not by running out of script")
 			assert.Equal(t, 2, gates, "the pre-panel gate and the post-fixup re-run both ran")
 			assert.Equal(t, tt.want(findings), o.reviewSummary)
 			assert.Len(t, git.hardResetRefs, tt.wantReset, "git=%v", git.recorded())
