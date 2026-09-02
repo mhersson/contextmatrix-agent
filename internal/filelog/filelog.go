@@ -25,10 +25,11 @@ import (
 // one definition and cannot drift apart.
 const runHeaderPrefix = "==== run started "
 
-// causeSuperseded is the footer cause for a run whose entry was still open
-// when the next run began: its End never fired, so nothing observed how it
-// ended. It is deliberately not one of the causes an exit path reports, so a
-// reader never mistakes an unobserved run for a timeout or a wait failure.
+// causeSuperseded is the footer cause for a run whose own correlation id
+// still had an open entry when its Begin was replayed: its End never fired,
+// so nothing observed how it ended. It is deliberately not one of the causes
+// an exit path reports, so a reader never mistakes an unobserved run for a
+// timeout or a wait failure.
 const causeSuperseded = "superseded"
 
 // Logger writes per-card container output to <dir>/<project>/<cardID>.log.
@@ -176,13 +177,12 @@ func (l *Logger) closeCard(k string, exitCode int64, cause string) {
 		return
 	}
 
-	l.footerAndClose(cf, cf.path, exitCode, cause)
+	l.footerAndClose(cf, exitCode, cause)
 }
 
-// footerAndClose writes the footer and closes the file. The path is the
-// closed handle's own, not a key-derived lookup, so it is correct for entries
-// found either by run key or by file path.
-func (l *Logger) footerAndClose(cf *cardFile, path string, exitCode int64, cause string) {
+// footerAndClose writes the run footer and closes the file. It is a no-op on
+// an already-closed handle.
+func (l *Logger) footerAndClose(cf *cardFile, exitCode int64, cause string) {
 	cf.mu.Lock()
 	defer cf.mu.Unlock()
 
@@ -193,11 +193,11 @@ func (l *Logger) footerAndClose(cf *cardFile, path string, exitCode int64, cause
 	footer := fmt.Sprintf("==== run ended %s container=%s exit=%d cause=%s ====\n",
 		time.Now().UTC().Format(time.RFC3339), shortID(cf.containerID), exitCode, cause)
 	if _, err := cf.f.WriteString(footer); err != nil {
-		l.logger.Warn("filelog: write footer failed", "path", path, "error", err)
+		l.logger.Warn("filelog: write footer failed", "path", cf.path, "error", err)
 	}
 
 	if err := cf.f.Close(); err != nil {
-		l.logger.Warn("filelog: close failed", "path", path, "error", err)
+		l.logger.Warn("filelog: close failed", "path", cf.path, "error", err)
 	}
 
 	cf.closed = true
