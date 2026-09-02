@@ -374,9 +374,10 @@ func TestMobCheckpointReviseGateSkippedLeavesVerifiedFalse(t *testing.T) {
 // checkpointReviseVerify gate, and commitRevise - the same path
 // TestMobCheckpointReviseGateSkippedLeavesVerifiedFalse drives. Callers seed
 // o.verify / o.runVerify (or call isolateVerify) to control the gate's
-// outcome before invoking mobCheckpoint.
-func checkpointReviseGateRun(ops *fakeOps, git *fakeGit) *run {
-	client := &planLLM{responses: []llm.Response{finishResp("fix: address checkpoint findings", 0.01)}}
+// outcome before invoking mobCheckpoint. before is scripted ahead of the revise
+// coder's finish turn, for a caller whose coder must call a tool first.
+func checkpointReviseGateRun(ops *fakeOps, git *fakeGit, before ...llm.Response) *run {
+	client := &planLLM{responses: append(before, finishResp("fix: address checkpoint findings", 0.01))}
 	d := Deps{
 		Ops:        ops,
 		Git:        git,
@@ -384,7 +385,12 @@ func checkpointReviseGateRun(ops *fakeOps, git *fakeGit) *run {
 		Emit:       events.NewEmitter(nil, nil),
 		Registry:   planTestRegistry(),
 		WriteTools: testWriteTools(),
-		ReadTools:  tools.NewRegistry(tools.NewReadTool(".")),
+		// The verify tool reaches the coder only once a caller binds it, the
+		// way the execute phase does before the subtask this checkpoint sits in.
+		WriteToolsForDir: func(_ string, verify tools.Tool) *tools.Registry {
+			return tools.NewRegistry(append(testWriteTools().All(), verify)...)
+		},
+		ReadTools: tools.NewRegistry(tools.NewReadTool(".")),
 		Cfg: Config{
 			Project: "proj", CardID: "CARD-1",
 			PayloadModel: "payload/model", DefaultModel: "default/model",
@@ -479,6 +485,55 @@ func TestMobCheckpointReviseGatePassCommitsAsToday(t *testing.T) {
 	require.Len(t, git.commitMsgs, 1)
 	assert.Equal(t, "fix: address checkpoint findings", git.commitMsgs[0])
 	assert.True(t, o.solver.gate.verified, "a passing gate is evidence the revise is good")
+}
+
+// TestMobCheckpointReviseGateAcceptsTheRevisersToolPass proves the checkpoint
+// revise gate buys no second subprocess when the revise coder's own verify tool
+// already passed against the tree the gate is about to certify: it takes that
+// verdict, exactly as the pre-commit gate does in
+// TestPreCommitGateReusesOnlyAFingerprintVerifiedToolPass, so one execution of
+// the command covers both. The counter counts every execution, tool call and
+// gate alike.
+func TestMobCheckpointReviseGateAcceptsTheRevisersToolPass(t *testing.T) {
+	ops := &fakeOps{}
+	// One identity across the reviser's tool call and the gate's own read:
+	// nothing was written in between, which is what makes that pass evidence
+	// about the tree the gate is asked to certify.
+	git := &fakeGit{committed: true, headSHA: "abc123", worktreeStates: []string{"a"}}
+
+	verifyCall := llm.Response{
+		ToolCalls: []llm.ToolCall{{
+			ID:       "verify-1",
+			Type:     "function",
+			Function: llm.FunctionCall{Name: "verify", Arguments: "{}"},
+		}},
+		FinishReason: "tool_calls",
+		Usage:        llm.Usage{Cost: 0.01},
+	}
+
+	o := checkpointReviseGateRun(ops, git, verifyCall)
+	seedResolvedVerifyPlan(o)
+
+	gateRuns := 0
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		gateRuns++
+
+		return verifyexec.Outcome{ExitCode: 0}
+	}
+
+	// The execute phase binds the tool before the subtask this checkpoint sits
+	// inside; nothing rebinds it for the revise coder, so it is the same tool.
+	o.bindVerifyTool(o.solver, o.resolvedVerifyPlan())
+
+	o.mobCheckpoint(context.Background(), o.solver,
+		subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("simple")}, "abc123")
+
+	require.Contains(t, strings.Join(ops.logs, "\n"), "revise - 1 fixes",
+		"the checkpoint must actually reach a revise verdict, or this test asserts nothing")
+	require.Len(t, git.commitMsgs, 1, "a green gate still lands the revise commit")
+	require.Equal(t, 1, gateRuns,
+		"the revise coder's own pass on this tree is the checkpoint's verdict; no second run")
+	assert.True(t, o.solver.gate.verified)
 }
 
 // TestMobCheckpointReviseGateInconclusiveLeavesVerifiedFalse pins the

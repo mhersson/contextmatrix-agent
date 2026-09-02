@@ -190,14 +190,16 @@ func (o *run) mobCheckpoint(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 	o.commitRevise(ctx, sc, sub, msg, verified)
 }
 
-// checkpointReviseVerify gates the checkpoint's revise commit through the
-// same ensureVerify and runVerifyPlan pair preCommitVerify uses for the
-// subtask coder's own work, so the three gates cannot drift into different
-// commands, timeouts or environments. Unlike preCommitVerify it has no
-// boardOps guard or gate-evidence reset of its own - the caller's
-// sc.boardOps && checkpointEligible check already restricts checkpoints to
-// the solo path - and it earns no fix pass: the alternative to rescuing a
-// bad revise is discarding a suggestion, which costs nothing.
+// checkpointReviseVerify gates the checkpoint's revise commit through
+// runGate, the same gate preCommitVerify runs over the subtask coder's own
+// work, so the three gates cannot drift into different commands, timeouts or
+// environments - and so the revise coder's own verify-tool pass on the tree
+// about to be committed spares this gate a second run of it, exactly as the
+// subtask coder's does. Unlike preCommitVerify it has no boardOps guard or
+// gate-evidence reset of its own - the caller's sc.boardOps &&
+// checkpointEligible check already restricts checkpoints to the solo path -
+// and it earns no fix pass: the alternative to rescuing a bad revise is
+// discarding a suggestion, which costs nothing.
 //
 // Every non-passing outcome DISCARDS the revise and keeps the verified
 // commit already in place, rather than parking the subtask or committing
@@ -226,25 +228,27 @@ func (o *run) mobCheckpoint(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 // as it did before this gate existed.
 //
 // keep is false when the caller must discard the revise and return without
-// committing. verified is true only when this gate RAN and PASSED against the
-// revised tree: false for the skip tier and for an inconclusive run, neither
-// of which is evidence the revised tree is good, and false on every discard.
+// committing. verified is true only when the gate certified the revised tree,
+// whether it ran the command itself or took the reviser's own pass against
+// that exact tree: false for the skip tier and for an inconclusive run,
+// neither of which is evidence the revised tree is good, and false on every
+// discard.
 func (o *run) checkpointReviseVerify(ctx context.Context, sc *solverCtx, sub subtaskRef) (keep, verified bool) {
-	plan, err := o.ensureVerify(ctx)
+	_, vres, ran, err := o.runGate(ctx, sc, sub, checkpointReviseGateContext(sub.ID))
 	if err != nil {
-		return o.discardCheckpointRevise(ctx, sc, sub, fmt.Sprintf("verify could not be resolved - %v", err)), false
+		// ran separates the two error sources the log names: a plan that could
+		// not be resolved at all from a command that could not be run.
+		reason := fmt.Sprintf("verify could not be resolved - %v", err)
+		if ran {
+			reason = fmt.Sprintf("verify run failed - %v", err)
+		}
+
+		return o.discardCheckpointRevise(ctx, sc, sub, reason), false
 	}
 
-	if len(plan.Argv) == 0 {
+	if !ran {
 		return true, false
 	}
-
-	vres, rerr := o.runVerifyPlan(ctx, sc.workspace, plan)
-	if rerr != nil {
-		return o.discardCheckpointRevise(ctx, sc, sub, fmt.Sprintf("verify run failed - %v", rerr)), false
-	}
-
-	o.logVerifyGate(ctx, vres, checkpointReviseGateContext(sub.ID))
 
 	if vres.Status != verifyFailed {
 		return true, vres.Status == verifyPassed

@@ -266,50 +266,14 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 		return nil
 	}
 
-	plan, err := o.ensureVerify(ctx)
+	plan, vres, ran, err := o.runGate(ctx, sc, sub, subtaskGateContext(sub.ID))
 	if err != nil {
 		return err
 	}
 
-	if len(plan.Argv) == 0 {
+	if !ran {
 		return nil
 	}
-
-	if o.gateAcceptsToolPass(ctx, sc) {
-		sc.gate.verified = true
-
-		// The gate line still fires: a human reading the activity log must see a
-		// gate for every subtask, and this one says out loud where the verdict
-		// came from rather than implying a second run happened.
-		o.logVerifyGate(ctx, verifyResult{
-			Status: verifyPassed,
-			Note:   "the coder's own run measured this exact tree; not re-run",
-		}, subtaskGateContext(sub.ID))
-
-		// Same reasoning as runVerifyPlan's emit: without an event the
-		// transcript carries no record of this gate at all, and consumers
-		// undercount one verification per accepted subtask. The source names
-		// the acceptance and no command field is set - nothing re-ran, and an
-		// accepted pass must never read as a gate-executed one.
-		if o.d.Emit != nil {
-			o.d.Emit.Emit(events.Verification, map[string]any{
-				"ok":      true,
-				"status":  verifyStatusWord(verifyPassed),
-				"source":  "coder-verify-tool-pass",
-				"detail":  "the gate accepted the coder's own verify-tool pass against this exact tree and did not re-run the command",
-				"subtask": sub.ID,
-			})
-		}
-
-		return nil
-	}
-
-	vres, rerr := o.runVerifyPlan(ctx, sc.workspace, plan)
-	if rerr != nil {
-		return rerr
-	}
-
-	o.logVerifyGate(ctx, vres, subtaskGateContext(sub.ID))
 
 	if vres.Status != verifyFailed {
 		sc.gate.verified = vres.Status == verifyPassed
@@ -347,7 +311,9 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 		o.d.logCard(ctx, "subtask %s: the fix pass hit its turn cap - verifying what it left", sub.ID)
 	}
 
-	vres, rerr = o.runVerifyPlan(ctx, sc.workspace, plan)
+	// A direct run, not the shared gate: the fix coder holds no verify tool, so
+	// there is no pass of its own for the gate to take.
+	vres, rerr := o.runVerifyPlan(ctx, sc.workspace, plan)
 	if rerr != nil {
 		return rerr
 	}
@@ -376,6 +342,66 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 	sc.gate.verified = vres.Status == verifyPassed
 
 	return nil
+}
+
+// runGate is the one verify gate the pre-commit and checkpoint-revise callers
+// share: resolve the plan, take the coder's own verify-tool pass when that pass
+// measured this exact tree, otherwise run the command, and log the verdict under
+// where. ran is false only for the skip tier - no command resolved - so an error
+// alongside ran true came from the run and one alongside ran false from resolution.
+func (o *run) runGate(ctx context.Context, sc *solverCtx, sub subtaskRef, where string) (verifyPlan, verifyResult, bool, error) {
+	plan, err := o.ensureVerify(ctx)
+	if err != nil {
+		return verifyPlan{}, verifyResult{}, false, err
+	}
+
+	if len(plan.Argv) == 0 {
+		return plan, verifyResult{}, false, nil
+	}
+
+	if o.gateAcceptsToolPass(ctx, sc) {
+		// The gate line still fires: a human reading the activity log must see a
+		// gate for every subtask, and this one says out loud where the verdict
+		// came from rather than implying a second run happened.
+		vres := verifyResult{
+			Status: verifyPassed,
+			Note:   "the coder's own run measured this exact tree; not re-run",
+		}
+
+		o.logVerifyGate(ctx, vres, where)
+		o.emitAcceptedToolPass(sub)
+
+		return plan, vres, true, nil
+	}
+
+	vres, err := o.runVerifyPlan(ctx, sc.workspace, plan)
+	if err != nil {
+		return plan, verifyResult{}, true, err
+	}
+
+	o.logVerifyGate(ctx, vres, where)
+
+	return plan, vres, true, nil
+}
+
+// emitAcceptedToolPass records a gate that certified on the coder's own verify
+// tool pass. Same reasoning as runVerifyPlan's emit: without an event the
+// transcript carries no record of this gate at all, and consumers undercount one
+// verification per accepted subtask. The source names the acceptance and no
+// command field is set - nothing re-ran, and an accepted pass must never read as
+// a gate-executed one.
+func (o *run) emitAcceptedToolPass(sub subtaskRef) {
+	if o.d.Emit == nil {
+		return
+	}
+
+	o.d.Emit.Emit(events.Verification, map[string]any{
+		"ok":      true,
+		"status":  verifyStatusWord(verifyPassed),
+		"source":  "coder-verify-tool-pass",
+		"detail":  "the gate accepted the coder's own verify-tool pass against this exact tree and did not re-run the command",
+		"subtask": sub.ID,
+	})
 }
 
 // gateAcceptsToolPass reports whether the gate may certify on the verdict the
