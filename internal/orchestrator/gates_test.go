@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -3577,6 +3578,40 @@ func TestCopilotGate_CommittedFixStillReRequests(t *testing.T) {
 	assert.Contains(t, git.recorded(), "Push:cm/card-1", "the fix is pushed; git=%v", git.recorded())
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0,
 		"the clean re-review completes the card")
+}
+
+// A Copilot fix round that PUSHED and then ran out of turns earns the re-review
+// of its new head, the same rule the CI gate applies: the cap widens the next
+// round rather than parking work that is already on the branch.
+func TestCopilotGate_CappedFixRoundAfterPushReRequests(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		reviews: []*CopilotReview{
+			reviewOnHead("1 suggestion", swallowedErrorComment),
+			reviewOnHead("LGTM"),
+		},
+	}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: slices.Concat(
+		[]llm.Response{copilotVerdict(copilotFinding{
+			File: "internal/api/handler.go", Issue: "the write error is dropped",
+			Valid: true, Reason: "the caller cannot tell the write failed",
+		})},
+		burnResps(5), // the fix coder commits work but never lands finish
+		[]llm.Response{copilotVerdict()},
+	)}
+
+	o := prGateRun(ops, gates, git, client, copilotGateContext("Capped fix", "body"), 0)
+	o.d.Cfg.MaxTurns = 5
+
+	require.NoError(t, runPRGates(context.Background(), o), "a pushed fix is not a reason to park")
+
+	assert.Equal(t, 1, gates.requests, "the pushed head gets its re-review; calls=%v", gates.recorded())
+	assert.Contains(t, git.recorded(), "Push:cm/card-1", "git=%v", git.recorded())
+	assert.Equal(t, 1, o.fixBudgetSteps, "the cap widens the next fix round")
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0, "calls=%v", ops.recorded())
 }
 
 // TestCIGate_FixRoundNoChangeParks: a CI fix round whose fix commits nothing

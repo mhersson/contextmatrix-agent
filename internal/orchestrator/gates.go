@@ -1320,10 +1320,10 @@ func (o *run) triageCopilot(
 // copilotFixRound spends one Copilot fix round on the findings triaged as valid.
 // The round is counted and persisted BEFORE any work, so a crash mid-fix cannot
 // buy a free retry on resume. It returns a park error when the rounds cap is
-// spent or the fix runs out of budget or turns, and reports whether the fix
-// committed a change: nil with committed=false means the gateNoChangeRetry-
-// funded retry was granted, so HEAD has not moved and the caller must not
-// re-request the review.
+// spent, the fix runs out of budget, or it runs out of turns without pushing,
+// and reports whether the fix committed a change: nil with committed=false
+// means the gateNoChangeRetry-funded retry was granted, so HEAD has not moved
+// and the caller must not re-request the review.
 func (o *run) copilotFixRound(ctx context.Context, st *gatesState, findings []copilotFinding) (bool, error) {
 	st.CopilotDetail = copilotFindingLines(findings)
 
@@ -1342,7 +1342,22 @@ func (o *run) copilotFixRound(ctx context.Context, st *gatesState, findings []co
 
 	// FixTier is deliberately left empty: a gate finding is not scoped to one
 	// review round, so the card bar is the right fallback.
-	committed, err := o.runFix(ctx, fixRequest{Findings: copilotFixFindings(findings), Round: st.CopilotRounds})
+	req := fixRequest{Findings: copilotFixFindings(findings), Round: st.CopilotRounds}
+	committed, err := o.runFix(ctx, req)
+
+	var mte *MaxTurnsError
+
+	// Same rule as ciFixRound: a capped round that PUSHED earns the re-review
+	// of its new head; one that pushed nothing takes the park below.
+	if errors.As(err, &mte) && committed && o.fixSizing(req).Budget < maxBudgetStep && st.CopilotRounds < gatesRoundsCap {
+		o.markFixCapped()
+		o.gateNote(ctx, "copilot", fmt.Sprintf(
+			"pr_gates: Copilot fix round %d hit its turn cap after pushing - re-requesting the review of the pushed head",
+			st.CopilotRounds), map[string]any{"round": st.CopilotRounds})
+
+		return true, nil
+	}
+
 	if err != nil {
 		if reason := gateResourcePark(err, gatesCopilotFixBudgetParkReason, gatesCopilotTurnCapParkReason); reason != "" {
 			return false, o.parkGates(ctx, st, reason)
