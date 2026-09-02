@@ -457,10 +457,8 @@ type run struct {
 	// at, promoted to lastFixBar when that round fails its gate.
 	pendingFixBar registry.Tier
 
-	// lastFixExhausted records whether the most recent fix round spent every turn
-	// it was given, including a grace-turn landing that returns no error. The
-	// loop reads it to charge the budget axis for caps the MaxTurnsError arm
-	// never sees.
+	// lastFixExhausted: the most recent fix round spent every turn of its
+	// window (a grace landing raises no MaxTurnsError).
 	lastFixExhausted bool
 
 	// fixCappedPending records that the most recent fix round hit its turn cap

@@ -524,43 +524,51 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 
 		var mte *MaxTurnsError
 
-		// committed gates the retry the same way it gates the CI gate's capped
-		// arm (see gates.go's ciFixRound): a round that pushed earns another
-		// panel, because the next round has a real new diff to critique. One
-		// that pushed nothing leaves HEAD exactly where round 1 left it, so a
-		// retry would spend a full panel re-critiquing the same diff round 1
-		// already judged - and it falls through to the park below instead.
+		capped := errors.As(err, &mte)
+
+		if err != nil && !capped {
+			return err
+		}
+
+		// Nothing pushed: HEAD is exactly where the round before left it, so a
+		// retry would spend a full panel re-critiquing a diff already judged.
+		if capped && !committed {
+			return err
+		}
+
+		o.recordLastFixBase(committed)
+
+		// A round that spent its whole window - a hard MaxTurnsError or a
+		// grace-turn landing that returns no error - is volume evidence: widen
+		// while there is wider to run, and defer the quality verdict to the
+		// next gate via fixCappedPending. A round that COMMITTED never parks
+		// here at any rung: it is already counted against attemptsCap, so the
+		// loop stays bounded, and the diff it pushed earns the next panel.
 		//
-		// Keyed on the WIDTH this round actually ran at, not on the step counter:
-		// the budget is clamped at the top rung, so a card whose bar already
-		// seeds it there would keep buying rounds of identical width while the
-		// log claimed each was wider.
-		if errors.As(err, &mte) && committed && o.fixSizing(req).Budget < maxBudgetStep {
-			// The round is already counted against attemptsCap, so the loop stays
-			// bounded; the cap is volume evidence and the next round runs wider on
-			// the same pool. Parking the whole run here would spend a round and
-			// learn nothing from it. The pending flag defers the quality verdict:
-			// if this round's committed tree leaves the next verify red, that red
-			// charges the bar too (a full budget spent and a broken tree left
-			// behind); if the gate comes back green the flag dies unused.
-			o.markFixCapped()
+		// The widening is keyed on the WIDTH this round actually ran at, not on
+		// the step counter: the budget is clamped at the top rung, so a card
+		// whose bar already seeds it there would keep buying rounds of identical
+		// width while the log claimed each was wider.
+		if committed && (capped || o.lastFixExhausted) {
+			if o.fixSizing(req).Budget < maxBudgetStep {
+				o.markFixCapped()
 
+				d.logCard(ctx, "review: fix round %d spent its whole turn window - the next fix round runs wider", round)
+			} else {
+				d.logCard(ctx, "review: fix round %d spent its whole turn window at the widest setting", round)
+			}
+
+			// The pending flag defers the quality verdict: if this round's
+			// committed tree leaves the next verify red, that red charges the
+			// bar too; if the gate comes back green the flag dies unused.
 			o.fixCappedPending = true
-
-			d.logCard(ctx, "review: fix round %d hit its turn cap - retrying wider", round)
 
 			// Cleared, not merely left alone: an earlier COMPLETED round would
 			// otherwise leave this true and hand the next round's red verify to
 			// the bar axis, blaming the model this cap just excused.
 			fixRan = false
 
-			o.recordLastFixBase(true)
-
 			continue
-		}
-
-		if err != nil {
-			return err
 		}
 
 		// Only a round that COMMITTED is handed forward. A round that landed
@@ -570,34 +578,8 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 		// rungs on the evidence of one round.
 		fixRan = committed
 
-		o.recordLastFixBase(committed)
-
 		if !committed {
 			o.markFixFailed("produced no change")
-		}
-
-		// A grace-turn landing that spent every turn is the same volume evidence as
-		// a hard MaxTurnsError: charge the budget axis now, and defer the quality
-		// verdict to the next round's gate via fixCappedPending, for the same
-		// reason the MaxTurnsError arm clears fixRan - the cap alone must not
-		// blame the model for turns it never got, but a committed red tree is
-		// quality evidence on top of volume evidence.
-		//
-		// Keyed on the WIDTH this round actually ran at, same as the MaxTurnsError
-		// arm above: a card whose bar already seeds the budget at the top rung
-		// keeps fixBudgetSteps at zero while the width is already clamped, so the
-		// step counter alone cannot see that there is no wider left to charge.
-		if committed && o.lastFixExhausted && o.fixSizing(req).Budget < maxBudgetStep {
-			// The pending flag defers the quality verdict exactly as in the
-			// MaxTurnsError arm above: a committed red tree from this round
-			// charges the bar in the next iteration, a green one does not.
-			o.markFixCapped()
-
-			o.fixCappedPending = true
-
-			d.logCard(ctx, "review: fix round %d spent its whole turn window - the next fix round runs wider", round)
-
-			fixRan = false
 		}
 	}
 
