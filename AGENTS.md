@@ -45,7 +45,7 @@ cmd/contextmatrix-agent/main.go → entrypoint; builds the cobra root command
 
 internal/cli/        → cobra commands: run, serve, work
 internal/config/     → koanf config; Config (harness) and ServiceConfig (serve); CMX_* env tags
-internal/registry/   → model selector: SelectByComplexity, SelectReviewPanel; priors-only, payload-driven (FromSelection) - agent-side policy, not mechanism
+internal/registry/   → model selector: SelectByComplexity, SelectReviewPanelReport; priors-only, payload-driven (FromSelection) - agent-side policy, not mechanism
 
 # Autonomous executor - the FSM and its container lifecycle
 internal/orchestrator/ → hand-written FSM plan → execute → judge → document → review → integrate → pr_gates → done; phase persistence; git finalize

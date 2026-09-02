@@ -124,7 +124,7 @@ func TestFromSelectionThreadsCreators(t *testing.T) {
 	}
 	r := FromSelection(sc, "capable-default", 0, false)
 
-	panel := r.SelectDiscussionPanel(SelectInput{Role: RoleReviewer, Tier: TierComplex, EstTokens: 50000}, 3)
+	panel := SeatPicks(r.SelectDiscussionPanelReport(SelectInput{Role: RoleReviewer, Tier: TierComplex, EstTokens: 50000}, 3))
 	require.Len(t, panel, 3)
 	assert.Equal(t, "gpt-a", panel[0].Model)
 	assert.Equal(t, "claude-x", panel[1].Model, "creators from the payload must drive vendor diversity")
@@ -137,7 +137,7 @@ func TestFromSelectionThreadsCreators(t *testing.T) {
 
 	rBlind := FromSelection(sc, "capable-default", 0, false)
 
-	panel = rBlind.SelectDiscussionPanel(SelectInput{Role: RoleReviewer, Tier: TierComplex, EstTokens: 50000}, 3)
+	panel = SeatPicks(rBlind.SelectDiscussionPanelReport(SelectInput{Role: RoleReviewer, Tier: TierComplex, EstTokens: 50000}, 3))
 	require.Len(t, panel, 3)
 	assert.Equal(t, "gpt-a", panel[0].Model)
 	assert.Equal(t, "gpt-b", panel[1].Model)

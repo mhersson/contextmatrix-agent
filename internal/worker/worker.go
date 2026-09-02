@@ -55,7 +55,6 @@ type RunSpec struct {
 	Interactive bool   // CM_INTERACTIVE ("true")
 	BestOfN     int    // CM_BEST_OF_N; >= 2 races N candidate implementations (0 = normal run)
 	Model       string // CM_MODEL (optional; honored if catalog-resolvable; also the first-choice selector fallback in buildRegistry)
-	RunID       string // CM_RUN_ID; serve's per-run correlation id, attached as a default log attribute (absent with an older serve)
 
 	// Attempt is this container's ordinal for the card: 1 for the first run, 2
 	// for a container that replaced it, and so on (CMX_ATTEMPT). It is stamped

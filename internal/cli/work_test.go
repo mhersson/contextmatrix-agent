@@ -550,25 +550,6 @@ func TestSpecFromEnv_CardIDShape(t *testing.T) {
 	}
 }
 
-func TestSpecFromEnv_RunID(t *testing.T) {
-	t.Run("set", func(t *testing.T) {
-		setRequired(t)
-		t.Setenv("CM_RUN_ID", "run-abc")
-
-		spec, err := specFromEnv()
-		require.NoError(t, err)
-		assert.Equal(t, "run-abc", spec.RunID)
-	})
-
-	t.Run("unset_yields_empty", func(t *testing.T) {
-		setRequired(t)
-
-		spec, err := specFromEnv()
-		require.NoError(t, err)
-		assert.Empty(t, spec.RunID)
-	})
-}
-
 func TestWithRunID(t *testing.T) {
 	t.Run("with_id_attaches_attribute", func(t *testing.T) {
 		var buf bytes.Buffer

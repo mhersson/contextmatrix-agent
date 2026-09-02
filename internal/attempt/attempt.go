@@ -122,38 +122,3 @@ func (a *writer) stamp(line []byte) []byte {
 
 	return b
 }
-
-// Of reads the ordinal off a decoded transcript entry. An absent, zero, or
-// unusable value is the first attempt - which is exactly what every transcript
-// written before the field existed is.
-func Of(entry map[string]any) int {
-	n, ok := asInt(entry[Field])
-	if !ok || n < 1 {
-		return 1
-	}
-
-	return n
-}
-
-// asInt accepts the shapes a decoded JSON number arrives in: float64 from a
-// plain decode, json.Number from a UseNumber decode, and the Go integers a
-// caller may have built the map with itself.
-func asInt(v any) (int, bool) {
-	switch n := v.(type) {
-	case int:
-		return n, true
-	case int64:
-		return int(n), true
-	case float64:
-		return int(n), true
-	case json.Number:
-		i, err := n.Int64()
-		if err != nil {
-			return 0, false
-		}
-
-		return int(i), true
-	default:
-		return 0, false
-	}
-}

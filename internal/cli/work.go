@@ -66,10 +66,7 @@ func newWorkCmd() *cobra.Command {
 		Short:  "Container entrypoint: execute one card under ContextMatrix control",
 		Hidden: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			// Correlate before any parsing: specFromEnv emits slog.Warn
-			// diagnostics for malformed CMX_SELECTION/CMX_VERIFY values, and
-			// those early lines need the run id too. CM_RUN_ID read directly -
-			// specFromEnv re-reads it onto the spec for later consumers.
+			// Correlate before any parsing so specFromEnv's own diagnostics carry the run id.
 			slog.SetDefault(withRunID(slog.Default(), os.Getenv("CM_RUN_ID")))
 
 			spec, err := specFromEnv()
@@ -423,7 +420,6 @@ func specFromEnv() (worker.RunSpec, error) {
 		SecretsEnvPath:            cmEnvFile,
 		BaseBranch:                os.Getenv("CM_BASE_BRANCH"),
 		Model:                     os.Getenv("CM_MODEL"),
-		RunID:                     os.Getenv("CM_RUN_ID"),
 		Interactive:               os.Getenv("CM_INTERACTIVE") == "true",
 		MaxCapability:             os.Getenv("CM_MAX_CAPABILITY") == "true",
 		BestOfN:                   bestOfN,

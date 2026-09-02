@@ -49,7 +49,7 @@ func TestWriterStampsOrdinal(t *testing.T) {
 
 	require.NoError(t, json.Unmarshal([]byte(out), &got))
 
-	assert.Equal(t, 2, Of(got))
+	assert.InDelta(t, 2.0, got[Field], 1e-9)
 	assert.EqualValues(t, 7, got["seq"])
 	assert.Equal(t, string(events.ToolCallKind), got["kind"])
 	assert.Equal(t, "2026-08-25T12:00:00Z", got["time"])
@@ -118,7 +118,7 @@ func TestWriterBuffersLineSplitAcrossWrites(t *testing.T) {
 	var got map[string]any
 
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &got))
-	assert.Equal(t, 4, Of(got))
+	assert.InDelta(t, 4.0, got[Field], 1e-9)
 	assert.EqualValues(t, 9, got["seq"], "the two halves reassemble into one intact event")
 }
 
@@ -147,7 +147,7 @@ func TestWriterHandlesManyLinesAndATrailingPartial(t *testing.T) {
 		var got map[string]any
 
 		require.NoError(t, json.Unmarshal([]byte(l), &got), "line %d", i)
-		assert.Equal(t, 2, Of(got), "line %d", i)
+		assert.InDelta(t, 2.0, got[Field], 1e-9, "line %d", i)
 		assert.EqualValues(t, i+1, got["seq"])
 	}
 }
@@ -176,17 +176,6 @@ func TestWriterPreservesNumericPrecision(t *testing.T) {
 	assert.Contains(t, out, "0.00012500", "a decimal must survive the round trip exactly")
 }
 
-func TestOfTreatsAbsentAsFirstAttempt(t *testing.T) {
-	assert.Equal(t, 1, Of(map[string]any{"seq": 3.0}))
-	assert.Equal(t, 1, Of(map[string]any{"attempt": 0.0}))
-	assert.Equal(t, 1, Of(map[string]any{"attempt": -4.0}))
-	assert.Equal(t, 1, Of(map[string]any{"attempt": "two"}))
-	assert.Equal(t, 1, Of(nil))
-	assert.Equal(t, 2, Of(map[string]any{"attempt": 2.0}))
-	assert.Equal(t, 2, Of(map[string]any{"attempt": 2}))
-	assert.Equal(t, 2, Of(map[string]any{"attempt": json.Number("2")}))
-}
-
 func TestEntriesFromTwoAttemptsSeparableOnCollidingSeq(t *testing.T) {
 	var first, second bytes.Buffer
 
@@ -204,9 +193,8 @@ func TestEntriesFromTwoAttemptsSeparableOnCollidingSeq(t *testing.T) {
 	require.NoError(t, json.Unmarshal(second.Bytes(), &b))
 
 	assert.Equal(t, a["seq"], b["seq"], "the two runs collide on the sequence number")
-	assert.NotEqual(t, Of(a), Of(b), "the ordinal is what separates them")
-	assert.Equal(t, 1, Of(a))
-	assert.Equal(t, 2, Of(b))
+	assert.Nil(t, a[Field], "attempt 1 needs no mark, so its absence is the separator")
+	assert.InDelta(t, 2.0, b[Field], 1e-9)
 }
 
 // The transcript stream has more than one writer on it (the event emitter and
@@ -253,7 +241,7 @@ func TestWriterKeepsLinesIntactUnderConcurrentWriters(t *testing.T) {
 		var got map[string]any
 
 		require.NoError(t, json.Unmarshal([]byte(l), &got), "every line is one intact event: %q", l)
-		assert.Equal(t, 3, Of(got))
+		assert.InDelta(t, 3.0, got[Field], 1e-9)
 	}
 }
 

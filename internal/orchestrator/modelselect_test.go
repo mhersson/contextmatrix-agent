@@ -89,9 +89,9 @@ func coderPriorRegistry() *registry.Registry {
 // catalog does not carry, and a catalogue with no priors, so every selection
 // walks the whole ladder dry and lands on that default.
 func offCatalogDefaultRegistry(capable string) *registry.Registry {
-	return registry.NewRegistry(capable, llm.Catalog{
+	return registry.NewRegistryFromParts(llm.Catalog{
 		{ID: "cat/model", ContextLength: 131072, SupportedParameters: []string{"tools"}},
-	})
+	}, registry.Priors{}, nil, nil, capable)
 }
 
 // TestCoderSelectionReachesTheTranscript is the core of this event: a subtask

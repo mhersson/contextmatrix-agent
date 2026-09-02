@@ -975,7 +975,7 @@ func planTestCatalog() llm.Catalog {
 }
 
 func planTestRegistry() *registry.Registry {
-	return registry.NewRegistry("default/model", planTestCatalog())
+	return registry.NewRegistryFromParts(planTestCatalog(), registry.Priors{}, nil, nil, "default/model")
 }
 
 // priorTestRegistry builds a registry whose only laddered candidate is
