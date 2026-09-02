@@ -1891,9 +1891,13 @@ func TestCopilotGate_UnconfirmedRequestSkipsAfterGrace(t *testing.T) {
 
 	require.NoError(t, runPRGates(context.Background(), o))
 
+	// The skip reason is persisted on the gates section, and production reads
+	// it back (isCopilotUnavailable). Burning the full wait instead would
+	// record the timeout skip here, so this is what tells the two apart.
+	assert.Contains(t, ops.lastBody(), "the reviewer was never added and no review arrived",
+		"the grace skip is what the card records, not a wait that ran out; body=%q", ops.lastBody())
+
 	calls := gates.recorded()
-	assert.Greater(t, countCalls(calls, "CopilotRequested:"+gatePRURL), 1,
-		"the grace window re-reads the listing; a confirmed reviewer goes straight to the full wait; calls=%v", calls)
 	assert.Greater(t, countCalls(calls, "CopilotReview:"+gatePRURL), 1,
 		"the gate kept reading the PR: proven unavailability stops after the single pre-request probe; calls=%v", calls)
 	assert.Equal(t, 0, modelCallCount(client), "no review, nothing to triage")
@@ -2532,8 +2536,11 @@ func TestCopilotGate_ReRequestNotTakingSkipsAfterGrace(t *testing.T) {
 
 	assert.Equal(t, 2, modelCallCount(client), "triage and the fix; there is no re-review to re-triage")
 	assert.Contains(t, git.recorded(), "Push:cm/card-1", "the fix is pushed; git=%v", git.recorded())
-	assert.Greater(t, countCalls(gates.recorded(), "CopilotRequested:"+gatePRURL), 1,
-		"the grace window re-reads the listing; the full wait never does; calls=%v", gates.recorded())
+	// The persisted gates section carries the skip the grace window took;
+	// burning the full wait on the re-review would record the timeout skip
+	// instead, which is the regression this separates out.
+	assert.Contains(t, ops.lastBody(), "fix pushed but the Copilot re-review request did not take",
+		"the card records the dropped re-request, not a wait that ran out; body=%q", ops.lastBody())
 	assert.NotContains(t, ops.lastBody(), "- Copilot gate: satisfied",
 		"an unreviewed fix must not be recorded as a satisfied gate")
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0,

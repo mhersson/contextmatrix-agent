@@ -3543,13 +3543,16 @@ func TestReviewFixNoAlternativeModelParks(t *testing.T) {
 		nil, nil, "only/coder")
 
 	cases := []struct {
-		name  string
-		reg   *registry.Registry
-		pin   string
-		model string
+		name string
+		reg  *registry.Registry
+		pin  string
+		// wantReason separates the two ways the pool can run out: a registry
+		// with nothing else in it never yields a pick at all, while a pin the
+		// catalog can serve yields the model that already failed.
+		wantReason string
 	}{
-		{"single-model registry", single, "", "only/coder"},
-		{"operator coder pin", reviewerRegistry(), "pinned/model", "pinned/model"},
+		{"single-model registry", single, "", reviewParkedNoFixModel},
+		{"operator coder pin", reviewerRegistry(), "pinned/model", reviewParkedFixExhausted},
 	}
 
 	for _, tc := range cases {
@@ -3572,6 +3575,8 @@ func TestReviewFixNoAlternativeModelParks(t *testing.T) {
 			var parked *ReviewParkedError
 
 			require.ErrorAs(t, err, &parked, "no alternative fix model parks; err=%v", err)
+			assert.Equal(t, tc.wantReason, parked.Reason,
+				"the park names the cause this row exercises")
 			assert.Equal(t, 1, countPrefix(git.recorded(), "CommitFixup:"), "exactly one fix round ran; git=%v", git.recorded())
 		})
 	}
@@ -5640,7 +5645,16 @@ func TestCappedFixRoundWithRedVerifyEscalatesBarAndBudget(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ops := &fakeOps{}
-			git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+			git := &fakeGit{
+				committed:        true,
+				lastCommitTarget: "abc123",
+				// Distinct on all five of the run's head reads, so the branch
+				// always LOOKS like it moved: without that the discard cannot
+				// fire at all, and "nothing was discarded" would hold for the
+				// wrong reason. What actually keeps the capped round's work is
+				// the cap having already claimed the round.
+				headSHAs: []string{"h1", "h2", "h3", "h4", "h5"},
+			}
 
 			script := tt.script
 			if script == nil {

@@ -1323,6 +1323,7 @@ func TestLogVerifyRound(t *testing.T) {
 		verifyPlan{Timeout: 10 * time.Minute},
 		verifyexec.Outcome{TimedOut: true},
 	)
+	require.NotEmpty(t, realTimeoutSkip.Note, "an empty note would make the noted-skip row's token vacuous")
 
 	tests := []struct {
 		name  string

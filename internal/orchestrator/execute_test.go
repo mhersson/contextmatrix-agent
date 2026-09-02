@@ -1294,6 +1294,12 @@ func TestSalvageDeclineOnUnresolvableVerifyRaisesBudgetOnly(t *testing.T) {
 	require.False(t, salvaged, "an unresolvable verify cannot confirm the work")
 	require.NoError(t, err, "a non-toolchain resolution error parks as a plain turn cap")
 
+	// The unresolvable-verify arm and the no-command arm leave identical
+	// state - same marker, same absent outcome row, same return - so the park
+	// line is the only thing that says which one ran.
+	require.True(t, ops.loggedContains("verify could not be resolved"),
+		"the arm under test is the one that ran; logs=%v", ops.logs)
+
 	_, got := readMeta(ops.bodyFor("SUB-1"))
 	assert.Equal(t, 1, got.Budget, "the cap itself is still volume evidence")
 	assert.Equal(t, registry.TierModerate, got.Bar,
@@ -1564,6 +1570,12 @@ func TestLogEnvironmentalCapBudgetNeverPersistsOrEmits(t *testing.T) {
 	o.logEnvironmentalCapBudget(context.Background(), subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("moderate")})
 
 	assert.Zero(t, countCalls(ops.recorded(), "UpdateCardBody:SUB-1"), "no board write - nothing is raised")
+
+	// Nothing is persisted and nothing is emitted, so this line is the whole
+	// output of the path - without it the assertions below hold for an empty
+	// function body.
+	assert.True(t, ops.loggedContains("the card's turn budget stays at base"),
+		"the note names the current, unchanged value; logs=%v", ops.logs)
 
 	kv, got := readMeta(seed.Description)
 	assert.Equal(t, 0, got.Budget, "the card marker is untouched")
