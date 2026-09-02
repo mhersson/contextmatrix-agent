@@ -130,16 +130,7 @@ func runServe(ctx context.Context, configPath string) error {
 		MapExtra:             agentMapExtra,
 	})
 
-	// RedactorRegistry composes the bridge's redactor from all registered
-	// per-session keys and atomically swaps it on every mutation. Register
-	// the process-lifetime config-level secrets first under a reserved id
-	// so they survive every per-run add and remove (the trap fix). The same
-	// registry serves both sinks: the SSE bridge's per-field redaction, and
-	// - via RedactLine - the durable per-card file log's full-raw-line
-	// masking in containerLogSink, so the two can never drift.
-	registry := logbridge.NewRedactorRegistry(bridge)
-	registry.AddSessionKey(staticSecretsID, cfg.MCPAPIKey)
-	registry.AddSessionKey(staticSecretsID, cfg.APIKey)
+	registry := newRedactorRegistry(bridge, cfg.MCPAPIKey, cfg.APIKey)
 
 	// Wire the token-refresh hook so every rotated git token is added to the
 	// redactor set. Appending is correct - both the original and the rotated
@@ -319,6 +310,17 @@ func gracefulShutdown(
 
 		cbCancel()
 	}
+}
+
+// newRedactorRegistry composes the bridge's redactor. Config-level secrets are
+// registered under a reserved id so per-run adds and removes never touch them.
+func newRedactorRegistry(bridge *logbridge.Bridge, staticKeys ...string) *logbridge.RedactorRegistry {
+	registry := logbridge.NewRedactorRegistry(bridge)
+	for _, k := range staticKeys {
+		registry.AddSessionKey(staticSecretsID, k)
+	}
+
+	return registry
 }
 
 // onTokenRefreshHook builds the RunCredentials.OnTokenRefresh callback: it
