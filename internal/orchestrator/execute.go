@@ -699,7 +699,7 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 		// below, so an incapable model (which produced no code) is also recorded
 		// here - harmless, and it keeps that model out of its own review via this
 		// set plus o.excluded. Keyed on the slug we configured, which is what
-		// SelectReviewPanel's Exclude set compares against. newRun initializes the
+		// SelectReviewPanelReport's Exclude set compares against. newRun initializes the
 		// map unconditionally. selMu guards it: Best-of-N candidates write here in
 		// parallel; the review-phase read is sequenced after the fan-out's wg.Wait.
 		o.selMu.Lock()

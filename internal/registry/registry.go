@@ -379,27 +379,27 @@ func (r *Registry) descent(requested Tier) []Tier {
 // bar prior clears; "" when none does or the model has no prior. Every Pick
 // gets its MetTier from here, so a pin and a walked-down auto pick are
 // reported on the same scale and an aggregate over MetTier is meaningful.
-func (r *Registry) metTierFor(prior float64, hasPrior bool, requested Tier) (Tier, float64) {
+func (r *Registry) metTierFor(prior float64, hasPrior bool, requested Tier) Tier {
 	if !hasPrior {
-		return "", 0
+		return ""
 	}
 
 	bars := r.bars()
 
 	for _, rung := range r.descent(requested) {
 		if prior >= bars[rung] {
-			return rung, bars[rung]
+			return rung
 		}
 	}
 
-	return "", 0
+	return ""
 }
 
 // pickFor assembles a Pick for a chosen model, measuring MetTier from the
 // model's own prior rather than from the rung it was found on.
 func (r *Registry) pickFor(id string, in SelectInput, src PickSource) Pick {
 	prior, has := r.priors.ForRole(id, in.Role)
-	met, _ := r.metTierFor(prior, has, in.Tier)
+	met := r.metTierFor(prior, has, in.Tier)
 
 	return Pick{
 		ModelSpec:     r.specFor(id),

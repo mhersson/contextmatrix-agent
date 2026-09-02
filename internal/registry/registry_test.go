@@ -39,15 +39,15 @@ func TestFitsWindow(t *testing.T) {
 }
 
 func TestSelectByComplexityPrefersCheapestCapableToolModel(t *testing.T) {
-	// NewRegistry injects no priors, so no catalog model carries a prior for the
-	// role: selection always falls back to the capable default.
+	// newTestRegistry injects no priors, so no catalog model carries a prior for
+	// the role: selection always falls back to the capable default.
 	r := newTestRegistry("deepseek/deepseek-v4-flash", testCatalog())
 	spec := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierComplex})
 	assert.Equal(t, "deepseek/deepseek-v4-flash", spec.Model)
 }
 
 func TestSelectByComplexityFallsBackToCapable(t *testing.T) {
-	// All tool-capable models lack a prior (NewRegistry injects none). A model
+	// All tool-capable models lack a prior (newTestRegistry injects none). A model
 	// with no prior for the role is never selectable, so selection falls back to
 	// the capable default.
 	cat := llm.Catalog{
@@ -247,7 +247,7 @@ func TestSelectCandidateModelsNoPinWrapsAround(t *testing.T) {
 	// Three equally-priced, equally-qualified models: the exclude set built up
 	// across rounds forces distinct picks in catalog order while the pool
 	// lasts (m1, m2, m3), then the pool runs dry and the 4th slot reuses the
-	// last real pick (SelectReviewPanel wrap semantics) rather than shrinking
+	// last real pick (candidateModels wrap semantics) rather than shrinking
 	// n or escalating price.
 	catalog := llm.Catalog{
 		entry("m1", 1.0, 2.0, 200000),
@@ -345,7 +345,7 @@ func TestSelectCandidateModelsPinMergesExcludeWithoutMutatingCaller(t *testing.T
 	}
 
 	assert.Equal(t, map[string]bool{"already-excluded": true}, origExclude,
-		"SelectCandidateModels must not mutate the caller's Exclude map")
+		"candidateModels must not mutate the caller's Exclude map")
 }
 
 func TestSelectCandidateModelsZeroOrNegativeNReturnsNil(t *testing.T) {
@@ -377,7 +377,7 @@ func TestFavoritesConsideredFirst(t *testing.T) {
 // TestSelectDiscussionPanel pins the mob session seat-selection seam: it must give
 // distinct models first, honor the caller's exclusions (review discussions
 // exclude the models that coded the card), and wrap around on scarcity
-// instead of shrinking the panel - the SelectReviewPanel walk, by name.
+// instead of shrinking the panel - the SelectReviewPanelReport walk, by name.
 func TestSelectDiscussionPanel(t *testing.T) {
 	// Four qualifying reviewers at the complex bar (0.82) with distinct prices.
 	catalog := llm.Catalog{

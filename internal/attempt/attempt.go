@@ -5,9 +5,10 @@
 // sequence numbers overlap completely and nothing in the envelope tells them
 // apart. The ordinal counts a card's container runs - a notion the harness,
 // which sees one loop invocation, does not have - so it is stamped here, on
-// this side of the boundary. An absent or zero ordinal is the first attempt, so
-// a consumer reading a transcript written without the field still gets an
-// answer.
+// this side of the boundary. NewWriter treats an ordinal of 1 or less as the
+// first attempt and stamps nothing, so a transcript written before the field
+// existed and a first-attempt transcript written after are indistinguishable
+// on the wire - both simply carry no attempt field.
 //
 // The work command's main transcript stream stamps via the harness emitter's
 // own envelope-field option instead of this package's writer; the writer here
