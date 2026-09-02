@@ -182,11 +182,12 @@ func (o *run) mobCheckpoint(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 		msg = "fix: address checkpoint findings"
 	}
 
-	if !o.checkpointReviseVerify(ctx, sc, sub) {
+	keep, verified := o.checkpointReviseVerify(ctx, sc, sub)
+	if !keep {
 		return
 	}
 
-	o.commitRevise(ctx, sc, sub, msg)
+	o.commitRevise(ctx, sc, sub, msg, verified)
 }
 
 // checkpointReviseVerify gates the checkpoint's revise commit through the
@@ -224,32 +225,32 @@ func (o *run) mobCheckpoint(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 // mirroring the pre-commit gate's own skip arm: the commit proceeds exactly
 // as it did before this gate existed.
 //
-// Reports false when the caller must discard the revise and return without
-// committing.
-func (o *run) checkpointReviseVerify(ctx context.Context, sc *solverCtx, sub subtaskRef) bool {
+// keep is false when the caller must discard the revise and return without
+// committing. verified is true only when this gate RAN and PASSED against the
+// revised tree: false for the skip tier and for an inconclusive run, neither
+// of which is evidence the revised tree is good, and false on every discard.
+func (o *run) checkpointReviseVerify(ctx context.Context, sc *solverCtx, sub subtaskRef) (bool, bool) {
 	plan, err := o.ensureVerify(ctx)
 	if err != nil {
-		return o.discardCheckpointRevise(ctx, sc, sub, fmt.Sprintf("verify could not be resolved - %v", err))
+		return o.discardCheckpointRevise(ctx, sc, sub, fmt.Sprintf("verify could not be resolved - %v", err)), false
 	}
 
 	if len(plan.Argv) == 0 {
-		return true
+		return true, false
 	}
 
 	vres, rerr := o.runVerifyPlan(ctx, sc.workspace, plan)
 	if rerr != nil {
-		return o.discardCheckpointRevise(ctx, sc, sub, fmt.Sprintf("verify run failed - %v", rerr))
+		return o.discardCheckpointRevise(ctx, sc, sub, fmt.Sprintf("verify run failed - %v", rerr)), false
 	}
 
 	o.logVerifyGate(ctx, vres, checkpointReviseGateContext(sub.ID))
 
 	if vres.Status != verifyFailed {
-		sc.gate.reviseVerified = vres.Status == verifyPassed
-
-		return true
+		return true, vres.Status == verifyPassed
 	}
 
-	return o.discardCheckpointRevise(ctx, sc, sub, "verify failed")
+	return o.discardCheckpointRevise(ctx, sc, sub, "verify failed"), false
 }
 
 // discardCheckpointRevise logs why a checkpoint revise was discarded on the
@@ -403,7 +404,7 @@ func (o *run) recordCheckpointOnParent(ctx context.Context, sub subtaskRef, summ
 // decline (clean tree - the fixer applied nothing) on the card's activity
 // log, so a "declined:" finish message is visible instead of vanishing.
 // Best-effort like the rest of the checkpoint path.
-func (o *run) commitRevise(ctx context.Context, sc *solverCtx, sub subtaskRef, msg string) {
+func (o *run) commitRevise(ctx context.Context, sc *solverCtx, sub subtaskRef, msg string, verified bool) {
 	committed, cerr := sc.git.CommitWithMessage(ctx, msg)
 	if cerr != nil {
 		slog.Warn("mob checkpoint: revise commit failed",
@@ -422,8 +423,8 @@ func (o *run) commitRevise(ctx context.Context, sc *solverCtx, sub subtaskRef, m
 	// checkpointReviseVerify already ran the same gate against this revise,
 	// immediately before commitRevise was called, so the run's evidence now
 	// follows the tree that actually landed rather than the tree it
-	// replaced: verified takes the revise gate's own verdict, true only when
+	// replaced: verified is the revise gate's own verdict, true only when
 	// that gate ran and passed, false for a skipped or inconclusive one -
 	// neither is evidence the revised tree is good.
-	sc.gate.verified = sc.gate.reviseVerified
+	sc.gate.verified = verified
 }

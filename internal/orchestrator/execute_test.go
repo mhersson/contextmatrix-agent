@@ -1375,50 +1375,27 @@ func TestResizePreservesForeignMarkerKeys(t *testing.T) {
 }
 
 // TestPrecommitVerifyEvidenceMovesTheAxisTheEvidenceIsAbout proves the gate
-// reads BOTH facts it has: whether the verify failed, and whether the attempt
-// that produced the work still had room. A coder that reached its terminal call
-// with turns to spare and was wrong is evidence about QUALITY alone. A coder
-// that used every turn it was given and was wrong is evidence about quality AND
-// volume, and gets the same composed correction the capped path already makes -
-// a window exhausted without raising *MaxTurnsError must not buy a weaker
-// correction than one that raised it. The exhaustion signature is the same
-// exemption the capped path's leaderboard report takes: a test command whose
-// inner fork dies under a pids limit exits non-zero and is classified failed,
-// and that is the container, not the model.
+// reads BOTH facts it has: whether the failure was environmental, and whether
+// the attempt that produced the work still had room. A coder that reached its
+// terminal call with turns to spare and was wrong is evidence about QUALITY
+// alone. A coder that used every turn it was given and was wrong is evidence
+// about quality AND volume, and gets the same composed correction the capped
+// path already makes - a window exhausted without raising *MaxTurnsError must
+// not buy a weaker correction than one that raised it. The exhaustion signature
+// is the same exemption the capped path's leaderboard report takes: a test
+// command whose inner fork dies under a pids limit exits non-zero and is
+// classified failed, and that is the container, not the model.
 func TestPrecommitVerifyEvidenceMovesTheAxisTheEvidenceIsAbout(t *testing.T) {
 	cases := map[string]struct {
-		vres      verifyResult
-		exhausted bool
-		want      sizing
-		wantWrite bool
+		environmental bool
+		exhausted     bool
+		want          sizing
+		wantWrite     bool
 	}{
-		"real failure with turns to spare": {
-			verifyResult{Status: verifyFailed, Output: "FAIL\tpkg\t0.1s"},
-			false,
-			sizing{registry.TierComplex, 0},
-			true,
-		},
-		"real failure on an exhausted window": {
-			verifyResult{Status: verifyFailed, Output: "FAIL\tpkg\t0.1s"},
-			true,
-			sizing{registry.TierComplex, 1},
-			true,
-		},
-		"resource exhaustion": {
-			verifyResult{Status: verifyFailed, Output: "fork/exec: resource temporarily unavailable"},
-			false,
-			sizing{registry.TierModerate, 0},
-			false,
-		},
-		"resource exhaustion on an exhausted window": {
-			verifyResult{Status: verifyFailed, Output: "fork/exec: resource temporarily unavailable"},
-			true,
-			sizing{registry.TierModerate, 0},
-			false,
-		},
-		"never ran":                     {verifyResult{Status: verifySkipped}, false, sizing{registry.TierModerate, 0}, false},
-		"passed":                        {verifyResult{Status: verifyPassed}, false, sizing{registry.TierModerate, 0}, false},
-		"passed on an exhausted window": {verifyResult{Status: verifyPassed}, true, sizing{registry.TierModerate, 0}, false},
+		"real failure with turns to spare":           {false, false, sizing{registry.TierComplex, 0}, true},
+		"real failure on an exhausted window":        {false, true, sizing{registry.TierComplex, 1}, true},
+		"resource exhaustion":                        {true, false, sizing{registry.TierModerate, 0}, false},
+		"resource exhaustion on an exhausted window": {true, true, sizing{registry.TierModerate, 0}, false},
 	}
 
 	for name, tc := range cases {
@@ -1429,7 +1406,7 @@ func TestPrecommitVerifyEvidenceMovesTheAxisTheEvidenceIsAbout(t *testing.T) {
 
 			o := newExecRun(execTestDeps(ops, &fakeGit{}, &planLLM{}), nil, 0)
 			o.applyPrecommitVerifyEvidence(context.Background(),
-				subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("moderate")}, tc.vres, tc.exhausted)
+				subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("moderate")}, tc.environmental, tc.exhausted)
 
 			writes := countCalls(ops.recorded(), "UpdateCardBody:SUB-1")
 			if !tc.wantWrite {
@@ -2888,7 +2865,7 @@ func TestAllThreeVerifyGatesResolveIdentically(t *testing.T) {
 	assert.Equal(t, preCommit, review,
 		"the pre-commit gate and the review gate must run the identical command, timeout and environment")
 
-	ok := o.checkpointReviseVerify(context.Background(), o.solver, sub)
+	ok, _ := o.checkpointReviseVerify(context.Background(), o.solver, sub)
 	require.False(t, ok, "a red gate discards the checkpoint revise")
 	require.NotEmpty(t, seen, "the checkpoint gate ran the command")
 

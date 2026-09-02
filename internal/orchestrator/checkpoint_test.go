@@ -285,7 +285,7 @@ func TestCommitReviseSurfacesFullDecline(t *testing.T) {
 			o.solver.git = &fakeGit{committed: tt.committed, commitErr: tt.commitErr}
 
 			o.commitRevise(context.Background(), o.solver, subtaskRef{ID: "SUB-1"},
-				"declined: premise contradicted\n\ndetail body")
+				"declined: premise contradicted\n\ndetail body", false)
 
 			joined := strings.Join(ops.logs, "\n")
 			if tt.wantLog == "" {
@@ -309,7 +309,7 @@ func TestCommitReviseNoopLeavesGateEvidenceIntact(t *testing.T) {
 	o.solver.gate.verified = true
 
 	o.commitRevise(context.Background(), o.solver, subtaskRef{ID: "SUB-1"},
-		"declined: premise contradicted\n\ndetail body")
+		"declined: premise contradicted\n\ndetail body", false)
 
 	assert.True(t, o.solver.gate.verified,
 		"a no-op revise commit must not clear the gate verdict on the untouched tree")
@@ -478,7 +478,7 @@ func TestMobCheckpointReviseGatePassCommitsAsToday(t *testing.T) {
 
 	require.Len(t, git.commitMsgs, 1)
 	assert.Equal(t, "fix: address checkpoint findings", git.commitMsgs[0])
-	assert.True(t, o.solver.gate.reviseVerified, "a passing gate is evidence the revise is good")
+	assert.True(t, o.solver.gate.verified, "a passing gate is evidence the revise is good")
 }
 
 // TestMobCheckpointReviseGateInconclusiveLeavesVerifiedFalse pins the
@@ -586,7 +586,7 @@ func TestMobCheckpointReviseGateErrorDiscards(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel() // already cancelled: both call sites classify this as an error, not a result
 
-			ok := o.checkpointReviseVerify(ctx, o.solver, subtaskRef{ID: "SUB-1"})
+			ok, _ := o.checkpointReviseVerify(ctx, o.solver, subtaskRef{ID: "SUB-1"})
 
 			assert.False(t, ok, "an error resolving/running the verify must discard, not commit unverified")
 			assert.Contains(t, git.hardResetRefs, "HEAD")
