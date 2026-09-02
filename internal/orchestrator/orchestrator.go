@@ -453,8 +453,8 @@ type run struct {
 	// at; fixSizing never sizes an escalating round below it.
 	lastFixBar registry.Tier
 
-	// pendingFixBar is the bar the most recent card-scoped fix round ran at,
-	// promoted to lastFixBar when that round fails its gate.
+	// pendingFixBar is the bar the most recent card-scoped fix round was sized
+	// at, promoted to lastFixBar when that round fails its gate.
 	pendingFixBar registry.Tier
 
 	// lastFixExhausted records whether the most recent fix round spent every turn

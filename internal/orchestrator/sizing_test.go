@@ -258,6 +258,9 @@ func TestFixSizingNeverEscalatesBelowTheBarThatFailed(t *testing.T) {
 	// the escalated round still runs one rung above complex.
 	got := o.fixSizing(fixRequest{Round: 2, FixTier: "simple"})
 	assert.Equal(t, registry.TierCritical, got.Bar)
+	// A floored bar carries its window with it: seedBudgetStep(critical) is 2,
+	// not the base window the simple fix_tier would have seeded.
+	assert.Equal(t, 2, got.Budget)
 
 	// No failed round yet: the per-round fix_tier is the base, unfloored.
 	o.fixBarSteps = 0
@@ -287,10 +290,14 @@ func TestFixSizingFloorRisesOnlyWhenTheRoundFailed(t *testing.T) {
 	})
 
 	t.Run("a green round leaves no floor", func(t *testing.T) {
+		// fixBarSteps is 1 from an EARLIER failure, so the floor read is live
+		// and the probe discriminates: the complex round that just went green
+		// earned no floor, so the climb starts from the synthesizer's simple.
+		// Promoting on every round instead would make this critical.
 		o := &run{cardSizing: sizing{Bar: registry.TierModerate}}
+		o.fixBarSteps = 1
 		o.pendingFixBar = registry.TierComplex
 
-		assert.Empty(t, o.lastFixBar)
-		assert.Equal(t, registry.TierSimple, o.fixSizing(fixRequest{Round: 2, FixTier: "simple"}).Bar)
+		assert.Equal(t, registry.TierModerate, o.fixSizing(fixRequest{Round: 2, FixTier: "simple"}).Bar)
 	})
 }
