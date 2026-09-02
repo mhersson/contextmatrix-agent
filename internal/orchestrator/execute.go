@@ -345,10 +345,10 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 }
 
 // runGate is the one verify gate the pre-commit and checkpoint-revise callers
-// share: resolve the plan, take the coder's own verify-tool pass when that pass
-// measured this exact tree, otherwise run the command, and log the verdict under
-// where. ran is false only for the skip tier - no command resolved - so an error
-// alongside ran true came from the run and one alongside ran false from resolution.
+// share: resolve the plan, take the coder's own verify-tool pass when it
+// measured this exact tree, otherwise run the command, log the verdict under
+// where. ran is false for the skip tier and for a resolution error, true on an
+// accepted pass though nothing ran, so an error with ran true came from the run.
 func (o *run) runGate(ctx context.Context, sc *solverCtx, sub subtaskRef, where string) (verifyPlan, verifyResult, bool, error) {
 	plan, err := o.ensureVerify(ctx)
 	if err != nil {

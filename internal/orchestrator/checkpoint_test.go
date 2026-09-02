@@ -531,6 +531,10 @@ func TestMobCheckpointReviseGateAcceptsTheRevisersToolPass(t *testing.T) {
 	require.Contains(t, strings.Join(ops.logs, "\n"), "revise - 1 fixes",
 		"the checkpoint must actually reach a revise verdict, or this test asserts nothing")
 	require.Len(t, git.commitMsgs, 1, "a green gate still lands the revise commit")
+	// Without this, one run is also what a gate that ran the command itself
+	// spends, and the tool never reaching the reviser would pass unnoticed.
+	require.True(t, o.solver.toolVerify.passed,
+		"the reviser's own tool must have run and recorded the pass the gate then took")
 	require.Equal(t, 1, gateRuns,
 		"the revise coder's own pass on this tree is the checkpoint's verdict; no second run")
 	assert.True(t, o.solver.gate.verified)

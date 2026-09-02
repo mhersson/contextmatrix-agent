@@ -424,11 +424,10 @@ func (o *run) commitRevise(ctx context.Context, sc *solverCtx, sub subtaskRef, m
 		return
 	}
 
-	// checkpointReviseVerify already ran the same gate against this revise,
-	// immediately before commitRevise was called, so the run's evidence now
-	// follows the tree that actually landed rather than the tree it
-	// replaced: verified is the revise gate's own verdict, true only when
-	// that gate ran and passed, false for a skipped or inconclusive one -
-	// neither is evidence the revised tree is good.
+	// checkpointReviseVerify ran the same gate against this revise immediately
+	// before this call, so the evidence follows the tree that landed rather
+	// than the one it replaced: verified is that gate's verdict - true whether
+	// it ran the command or took the reviser's own pass on this exact tree,
+	// false for a skipped or inconclusive one, which is evidence of nothing.
 	sc.gate.verified = verified
 }
