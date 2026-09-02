@@ -380,7 +380,14 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 	// must report its estimate rather than the card's.
 	req := fixRequest{Round: 0, FixTier: string(sub.Sizing.Bar), Subtask: sub.ID, PlannerBar: sub.PlannerBar}
 	if _, ferr := o.runFixModel(ctx, prompt, req); ferr != nil {
-		return ferr
+		// A cap is not a verdict on the tree the fix left behind: the re-run
+		// below decides, exactly as runFix does for the review rounds.
+		var mte *MaxTurnsError
+		if !errors.As(ferr, &mte) {
+			return ferr
+		}
+
+		o.d.logCard(ctx, "subtask %s: the fix pass hit its turn cap - verifying what it left", sub.ID)
 	}
 
 	vres, rerr = o.runVerifyPlan(ctx, sc.workspace, plan)

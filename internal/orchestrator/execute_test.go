@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -2703,6 +2704,59 @@ func TestPreCommitVerifyFailureThenFixPassCommits(t *testing.T) {
 	assert.Equal(t, 1, verifyFixPasses(client), "exactly one bounded fix pass, never a loop")
 	assert.Equal(t, 2, runs, "the gate re-runs once after the fix pass")
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "CompleteTask:SUB-1"), 0, "the verified subtask completes")
+}
+
+// TestPreCommitVerifyCappedFixPassStillGetsItsReVerify proves a fix pass that
+// runs out of turns is not itself a verdict: the gate re-runs and judges the
+// tree the capped pass left behind.
+func TestPreCommitVerifyCappedFixPassStillGetsItsReVerify(t *testing.T) {
+	tests := []struct {
+		name      string
+		rerun     verifyexec.Outcome
+		wantErr   bool
+		wantCalls string
+	}{
+		{name: "green after the cap commits", rerun: verifyexec.Outcome{ExitCode: 0}, wantCalls: "CompleteTask:SUB-1"},
+		{name: "still red after the cap parks", rerun: verifyexec.Outcome{ExitCode: 1, Output: "--- FAIL: TestThing"}, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			git := &fakeGit{committed: true}
+			// The fix coder burns its whole window and never lands finish.
+			client := &planLLM{responses: slices.Concat(
+				[]llm.Response{finishResp("feat: subtask done", 0.01)}, burnResps(5))}
+			d := execTestDeps(ops, git, client)
+			d.Cfg.MaxTurns = 5
+			o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
+			seedResolvedVerifyPlan(o)
+
+			runs := 0
+			o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+				runs++
+				if runs == 1 {
+					return verifyexec.Outcome{ExitCode: 1, Output: "--- FAIL: TestThing"}
+				}
+
+				return tt.rerun
+			}
+
+			err := runExecute(context.Background(), o)
+
+			assert.Equal(t, 2, runs, "the gate re-runs after a capped fix pass; a cap is not a verdict")
+
+			if tt.wantErr {
+				var vpe *VerifyParkedError
+				require.ErrorAs(t, err, &vpe, "still red parks through the verify sentinel, not the turn cap")
+
+				return
+			}
+
+			require.NoError(t, err)
+			assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), tt.wantCalls), 0, "calls=%v", ops.recorded())
+		})
+	}
 }
 
 // TestPreCommitVerifyPassCommitsAsToday proves a green gate is invisible: the
