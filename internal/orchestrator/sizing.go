@@ -126,6 +126,20 @@ func escalateTier(t registry.Tier) registry.Tier {
 	}
 }
 
+// tierRank orders the ladder for comparisons: simple < moderate < complex < critical.
+func tierRank(t registry.Tier) int {
+	switch t {
+	case registry.TierModerate:
+		return 1
+	case registry.TierComplex:
+		return 2
+	case registry.TierCritical:
+		return 3
+	default:
+		return 0
+	}
+}
+
 // turnBudget is the harness turn cap for a ladder step against the operator's
 // base. A base of zero or less passes through unchanged: the harness
 // substitutes its own default there, and turning that into a 1-turn run would

@@ -1808,6 +1808,14 @@ func (o *run) runFixModel(ctx context.Context, prompt string, req fixRequest) (s
 	cfg := d.Cfg
 	fs := o.fixSizing(req)
 
+	// Stashed, not promoted: only a round that then FAILS its gate raises the
+	// floor (markFixFailed). Subtask-scoped rounds are excluded outright - the
+	// pre-commit verify fix is sized on one subtask's bar and must not size the
+	// card's review loop.
+	if !req.NoEscalate && req.Subtask == "" {
+		o.pendingFixBar = fs.Bar
+	}
+
 	for attempt := 0; attempt <= reselectCap; attempt++ {
 		fp, rerr := o.resolveFixModel(ctx, req)
 		if rerr != nil {
@@ -2006,6 +2014,13 @@ func (o *run) markFixFailed(reason string) {
 		o.fixFailed[o.lastFixModel] = true
 	}
 
+	// The floor and the bar step share one trigger, so the round that failed is
+	// the round the next one is sized against. Highest wins: a later failure at
+	// a weaker bar never lowers what an earlier one earned.
+	if tierRank(o.pendingFixBar) > tierRank(o.lastFixBar) {
+		o.lastFixBar = o.pendingFixBar
+	}
+
 	o.fixBarSteps++
 	o.fixFailReason = reason
 }
@@ -2163,6 +2178,10 @@ func (o *run) fixBarBase(req fixRequest) registry.Tier {
 // window with it.
 func (o *run) fixSizing(req fixRequest) sizing {
 	base := o.fixBarBase(req)
+	if !req.NoEscalate && o.fixBarSteps > 0 && tierRank(o.lastFixBar) > tierRank(base) {
+		base = o.lastFixBar
+	}
+
 	s := sizing{Bar: base, Budget: seedBudgetStep(base)}
 
 	if req.NoEscalate {

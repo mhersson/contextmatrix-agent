@@ -242,3 +242,55 @@ func TestSeedSubtaskSizing(t *testing.T) {
 		})
 	}
 }
+
+// An escalated fix round exists to reach a STRONGER model than the round that
+// failed. The synthesizer names a fix_tier per round, so a later verdict can
+// name a weaker one than the failed round actually ran at; without a floor the
+// escalation then climbs from that weaker base and hands the harder problem a
+// weaker fixer. The floor applies only where the correction does: the base
+// round and the no-escalate cleanup pass keep the per-round tier as-is.
+func TestFixSizingNeverEscalatesBelowTheBarThatFailed(t *testing.T) {
+	o := &run{cardSizing: sizing{Bar: registry.TierModerate}}
+	o.fixBarSteps = 1
+	o.lastFixBar = registry.TierComplex
+
+	// The synthesizer lowered fix_tier to simple after a complex fix failed:
+	// the escalated round still runs one rung above complex.
+	got := o.fixSizing(fixRequest{Round: 2, FixTier: "simple"})
+	assert.Equal(t, registry.TierCritical, got.Bar)
+
+	// No failed round yet: the per-round fix_tier is the base, unfloored.
+	o.fixBarSteps = 0
+	got = o.fixSizing(fixRequest{Round: 1, FixTier: "simple"})
+	assert.Equal(t, registry.TierSimple, got.Bar)
+
+	// A non-escalating cleanup pass ignores the floor.
+	o.fixBarSteps = 1
+	got = o.fixSizing(fixRequest{Round: 2, FixTier: "simple", NoEscalate: true})
+	assert.Equal(t, registry.TierSimple, got.Bar)
+}
+
+// The floor rises only for a round that FAILED its gate. markFixFailed is the
+// single promotion point - the same trigger that charges the bar axis - so a
+// green escalated round leaves nothing behind and one failure buys exactly one
+// rung. runFixModel needs the full harness deps, so the round's own bar is set
+// directly here; the promotion under test runs through markFixFailed.
+func TestFixSizingFloorRisesOnlyWhenTheRoundFailed(t *testing.T) {
+	t.Run("a failed round promotes its bar into the floor", func(t *testing.T) {
+		o := &run{cardSizing: sizing{Bar: registry.TierModerate}}
+		o.pendingFixBar = registry.TierComplex
+
+		o.markFixFailed("left the verify red")
+
+		assert.Equal(t, registry.TierComplex, o.lastFixBar)
+		assert.Equal(t, registry.TierCritical, o.fixSizing(fixRequest{Round: 2, FixTier: "simple"}).Bar)
+	})
+
+	t.Run("a green round leaves no floor", func(t *testing.T) {
+		o := &run{cardSizing: sizing{Bar: registry.TierModerate}}
+		o.pendingFixBar = registry.TierComplex
+
+		assert.Empty(t, o.lastFixBar)
+		assert.Equal(t, registry.TierSimple, o.fixSizing(fixRequest{Round: 2, FixTier: "simple"}).Bar)
+	})
+}

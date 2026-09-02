@@ -449,6 +449,14 @@ type run struct {
 	fixCapReason   string
 	lastFixModel   string
 
+	// lastFixBar is the highest bar a fix round that then failed its gate ran
+	// at; fixSizing never sizes an escalating round below it.
+	lastFixBar registry.Tier
+
+	// pendingFixBar is the bar the most recent card-scoped fix round ran at,
+	// promoted to lastFixBar when that round fails its gate.
+	pendingFixBar registry.Tier
+
 	// lastFixExhausted records whether the most recent fix round spent every turn
 	// it was given, including a grace-turn landing that returns no error. The
 	// loop reads it to charge the budget axis for caps the MaxTurnsError arm
