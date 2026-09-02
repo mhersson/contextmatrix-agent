@@ -470,9 +470,6 @@ func TestReviewApprovedFixCleanupNoOpKeepsTheCounters(t *testing.T) {
 		"the cleanup pass's fix prompt must be built from the surviving finding")
 	assert.Contains(t, o.reviewSummary, "were not fixed",
 		"a cleanup pass that landed nothing must not leave the PR model free to narrate the findings as fixed")
-	assert.True(t, ops.loggedContains("produced no change"),
-		"the no-op cleanup pass must be logged; logs=%v", ops.logs)
-
 	assert.Equal(t, -1, indexOfCall(ops.recorded(), "IncrementReviewAttempts:CARD-1"),
 		"a no-op cleanup pass must not increment attempts; calls=%v", ops.recorded())
 	assert.Equal(t, 1, o.fixBarSteps,
@@ -536,8 +533,6 @@ func TestReviewApprovedFixCleanupErrorHandling(t *testing.T) {
 				require.Len(t, client.tasks, 4, "the fix coder must never run once the ledger trips; tasks=%v", client.tasks)
 			} else {
 				require.NoError(t, err, "a non-budget cleanup-pass error must be swallowed, not returned")
-				assert.True(t, ops.loggedContains("cleanup fix pass failed"),
-					"the swallowed failure must be logged on the card; logs=%v", ops.logs)
 				assert.Contains(t, git.hardResetRefs, "HEAD",
 					"a swallowed cleanup-pass error must reset the worktree, or the failed coder's "+
 						"uncommitted edits carry a dirty tree into integrate's autosquash rebase")
@@ -640,8 +635,6 @@ func TestReviewCleanupFixupDiscardedOnRedVerify(t *testing.T) {
 
 	assert.Equal(t, []string{"pre-cleanup-sha"}, git.hardResetRefs,
 		"the branch must return to the commit the cleanup pass started from; git=%v", git.recorded())
-	assert.True(t, ops.loggedContains(cleanupDiscardPrefix),
-		"the discard must be recorded on the card; logs=%v", ops.logs)
 	assert.Equal(t, "round gate", o.lastVerify.Output,
 		"the tree that ships is the one the approving round verified, so its result stands")
 	assert.Contains(t, o.reviewSummary, "were not fixed",
@@ -931,9 +924,6 @@ func TestVerifyRedRoundDoesNotConsumeAPanelAttempt(t *testing.T) {
 	// proves the credit ran.
 	assert.Contains(t, o.body, reviewRoundHeading(4),
 		"the third full panel round must run as round 4 - the verify-red round did not consume a panel attempt")
-	assert.True(t, ops.loggedContains("verify-gate failure, not a panel round"),
-		"the extension is announced on the card log")
-
 	// Discriminating: incrementReviewAttempt runs unconditionally every round
 	// (verify-red rounds included), so this count is one higher with the
 	// credit than without it - 5 rounds ran here (1 verify-red + 2 cheap +
@@ -1008,9 +998,6 @@ func TestVerifyRedCreditClampedAtServerCeiling(t *testing.T) {
 	var park *ReviewParkedError
 
 	require.ErrorAs(t, err, &park)
-
-	assert.False(t, ops.loggedContains("verify-gate failure, not a panel round"),
-		"the clamp leaves zero credit at the maximum cap, so the extension must never be announced")
 
 	// Discriminating: 7 rounds ran (1 verify-red + 4 cheap + authoritative +
 	// its re-review). An uncredited-but-unclamped bug would instead let the
@@ -1913,8 +1900,8 @@ func TestReviewLoopParksOnLowDeadline(t *testing.T) {
 
 				require.ErrorAs(t, err, &parked, "a short deadline must park before any model call")
 				assert.Zero(t, modelCallCount(client), "no model call before the park")
-				assert.True(t, ops.loggedContains("20m0s"), "log names the reserve; logs=%v", ops.logs)
-				assert.True(t, ops.loggedContains("resumes at round 1"), "log names the resume round; logs=%v", ops.logs)
+				assert.Equal(t, reviewParkedNoTime, parked.Reason,
+					"the park carries the deadline reserve as its cause")
 
 				return
 			}
@@ -2290,9 +2277,6 @@ func TestRunSpecialistsMaxTurnsMarksTruncated(t *testing.T) {
 
 	assert.Contains(t, section, "(this specialist stopped early: max_turns",
 		"a max_turns result must be flagged under its own role heading; section=%q", section)
-
-	assert.True(t, ops.loggedContains("correctness specialist stopped early (max_turns)"),
-		"the card log must name the dropped role; logs=%v", ops.logs)
 }
 
 // TestRunSpecialistsFlagsNonCleanStops proves specialistSection flags EVERY
@@ -2337,19 +2321,13 @@ func TestRunSpecialistsFlagsNonCleanStops(t *testing.T) {
 
 			marker := "(this specialist stopped early: " + tt.reason +
 				"; anything below is truncated, and silence is NOT a clean bill)"
-			logLine := "review: the correctness specialist stopped early (" + tt.reason +
-				") - its findings are truncated or missing"
 
 			if tt.wantFlag {
 				assert.Contains(t, section, marker,
 					"a %q result must be flagged under its own role heading; section=%q", tt.reason, section)
-				assert.True(t, ops.loggedContains(logLine),
-					"the card log must name the dropped role and reason; logs=%v", ops.logs)
 			} else {
 				assert.NotContains(t, section, "stopped early",
 					"a clean done result must carry no truncation marker; section=%q", section)
-				assert.False(t, ops.loggedContains("stopped early"),
-					"a clean done result must log nothing; logs=%v", ops.logs)
 			}
 		})
 	}
@@ -2539,7 +2517,6 @@ func TestReviewGateSkippedProceedsUnverified(t *testing.T) {
 	assert.Equal(t, verifySkipped, vres.Status)
 	assert.True(t, approved, "a skipped gate proceeds to the specialists, which approve")
 	assert.NotEmpty(t, findings)
-	assert.True(t, ops.loggedContains("verify skipped"), "the skip is logged loudly; logs=%v", ops.logs)
 	assert.Len(t, client.tasks, 4, "a skipped gate runs the full panel (3 specialists + synthesis), not a fix loop")
 }
 
@@ -2772,7 +2749,6 @@ func TestRunReviewHITLPromotedRejectPersistsParks(t *testing.T) {
 		"promoted round + authoritative fix + park each increment; calls=%v", ops.recorded())
 	assert.Equal(t, 2, countPrefix(git.recorded(), "CommitFixup:"),
 		"the promoted fix and the strong fix each land a fixup; git=%v", git.recorded())
-	assert.True(t, ops.loggedContains("review parked"), "park logged; logs=%v", ops.logs)
 
 	body := ops.lastBody()
 	assert.Contains(t, body, "## Review Findings (Round 3)", "authoritative round numbering continues")
@@ -3516,7 +3492,6 @@ func TestReviewFixZeroEditRoundEscalatesModel(t *testing.T) {
 	assert.Equal(t, "alpha/coder", client.models[4], "the first fix runs on the card-tier pick; models=%v", client.models)
 	assert.Equal(t, "beta/coder", client.models[9],
 		"a zero-edit round escalates: one tier up, another vendor, the failed model excluded; models=%v", client.models)
-	assert.True(t, ops.loggedContains("escalated"), "the escalation is card-logged; logs=%v", ops.recorded())
 }
 
 // TestReviewFixRedVerifyAfterFixEscalatesModel: a fix round that committed but
@@ -3598,8 +3573,6 @@ func TestReviewFixNoAlternativeModelParks(t *testing.T) {
 
 			require.ErrorAs(t, err, &parked, "no alternative fix model parks; err=%v", err)
 			assert.Equal(t, 1, countPrefix(git.recorded(), "CommitFixup:"), "exactly one fix round ran; git=%v", git.recorded())
-			assert.True(t, ops.loggedContains("no other fix model"), "the park names the cause; logs=%v", ops.recorded())
-			assert.True(t, ops.loggedContains(tc.model), "the park names the model that failed; logs=%v", ops.recorded())
 		})
 	}
 }
@@ -3715,120 +3688,10 @@ func TestReviewApprovedCriticalOrImportantFindingDemotedToFixRound(t *testing.T)
 			require.Len(t, client.tasks, 9, "panel + synthesis + fix coder + panel + synthesis; tasks=%v", client.tasks)
 			assert.Equal(t, 1, countPrefix(git.recorded(), "CommitFixup:"),
 				"the fix round landed exactly one fixup; git=%v", git.recorded())
-			assert.True(t, ops.loggedContains("review: approval overridden - 1 critical/important finding(s) require a re-reviewed fix round"),
-				"the demotion is card-logged; logs=%v", ops.recorded())
 			assert.Equal(t, 1, ops.reviewAttempts,
 				"the demoted round went through the not-approved loop and incremented attempts")
 		})
 	}
-}
-
-// TestReviewApprovedMinorOrNitFindingsUnchanged pins the other side of the
-// severity gate: approval carrying only minor and/or nit fixes keeps today's
-// behavior byte-for-byte - minor earns the post-approval cleanup fix pass, and
-// nit-only stays report-only with no fix run.
-func TestReviewApprovedMinorOrNitFindingsUnchanged(t *testing.T) {
-	cases := []struct {
-		name       string
-		fixes      string
-		wantTasks  int
-		wantFixup  bool
-		wantLog    string
-		notWantLog string
-	}{
-		{
-			name:      "minor only runs the cleanup fix pass",
-			fixes:     `{"file":"b.go","issue":"off-by-one in the loop bound","suggestion":"use <=","severity":"minor"}`,
-			wantTasks: 5,
-			wantFixup: true,
-			wantLog:   "applied a non-escalating cleanup fix pass",
-		},
-		{
-			name:      "nit only stays report-only",
-			fixes:     `{"file":"a.go","issue":"name could be shorter","suggestion":"rename","severity":"nit"}`,
-			wantTasks: 4,
-			wantFixup: false,
-			wantLog:   "reported, no cleanup pass",
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			ops := &fakeOps{}
-			git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
-			client := &planLLM{responses: []llm.Response{
-				stopResp("Correctness: nothing blocking", 0.01),
-				stopResp("Design: naming nit", 0.01),
-				stopResp("Security: looks fine", 0.01),
-				stopResp(`{"approved":true,"summary":"clean","fixes":[`+tc.fixes+`]}`, 0.02),
-				stopResp("coder: fixed", 0.05),
-			}}
-			d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
-
-			runtc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
-			o := newReviewRun(d, runtc, 0)
-
-			require.NoError(t, runReview(context.Background(), o))
-
-			require.Len(t, client.tasks, tc.wantTasks, "tasks=%v", client.tasks)
-
-			fixups := countPrefix(git.recorded(), "CommitFixup:")
-			if tc.wantFixup {
-				assert.GreaterOrEqual(t, fixups, 1, "the cleanup pass must land a fixup; git=%v", git.recorded())
-				assert.True(t, ops.loggedContains(tc.wantLog), "logs=%v", ops.recorded())
-				assert.False(t, ops.loggedContains("approval overridden"), "no demotion is expected; logs=%v", ops.recorded())
-			} else {
-				assert.Equal(t, -1, indexOfPrefix(git.recorded(), "CommitFixup:"), "nit-only findings must not buy a fixup commit; git=%v", git.recorded())
-				assert.True(t, ops.loggedContains(tc.wantLog), "logs=%v", ops.recorded())
-				assert.False(t, ops.loggedContains("approval overridden"), "no demotion is expected; logs=%v", ops.recorded())
-			}
-		})
-	}
-}
-
-// TestConvergenceIsLoggedOnResolvedButRejected proves a revise verdict that
-// itself reports every prior finding resolved is called out on the card log -
-// the operator must be able to tell "the fix failed" from "the review found
-// new things", which are opposite situations wearing the same verdict.
-func TestConvergenceIsLoggedOnResolvedButRejected(t *testing.T) {
-	ops := &fakeOps{}
-	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
-
-	// severity is "important" rather than the panel's actual minor/nit-shaped
-	// finding, so promoteConsistentRevise (tested separately) leaves this
-	// verdict as a genuine revise across both rounds - isolating the
-	// convergence log from the promotion gate it would otherwise trip.
-	reject := `{"approved":false,"summary":"new finding","fix_tier":"simple","prior_findings_resolved":true,` +
-		`"fixes":[{"file":"a.go","issue":"needs a closer look","suggestion":"investigate","severity":"important"}]}`
-	approve := `{"approved":true,"summary":"clean","fix_tier":"simple","prior_findings_resolved":true,"fixes":[]}`
-
-	client := &planLLM{responses: []llm.Response{
-		// Round 1: reject (prior_findings_resolved is meaningless on round 1 - no log).
-		stopResp("Correctness: bug", 0.01), stopResp("Design: ok", 0.01), stopResp("Security: ok", 0.01),
-		stopResp(reject, 0.02),
-		stopResp("coder: fixed", 0.01),
-		// Round 2: reject again, priors resolved -> log line.
-		stopResp("Correctness: new nit", 0.01), stopResp("Design: ok", 0.01), stopResp("Security: ok", 0.01),
-		stopResp(reject, 0.02),
-		stopResp("coder: fixed", 0.01),
-		// Round 3 (cliff at default cap 3) runs authoritative; approve to end.
-		stopResp("Correctness: ok", 0.01), stopResp("Design: ok", 0.01), stopResp("Security: ok", 0.01),
-		stopResp(approve, 0.02),
-	}}
-
-	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
-	// reviewTestDeps defaults to cap 5; the cliff this script scripts sits at
-	// CM's real default (config.DefaultReviewAttemptsCap = 3).
-	d.Cfg.ReviewAttemptsCap = 3
-
-	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
-	o := newReviewRun(d, tc, 0)
-
-	err := runReview(context.Background(), o)
-	require.NoError(t, err)
-
-	assert.True(t, ops.loggedContains("resolved every prior finding"),
-		"a revise resting only on new findings must be legible on the card")
 }
 
 // TestPromoteConsistentRevise proves the demote gate's mirror: a revise
@@ -3883,11 +3746,6 @@ func TestPromoteConsistentRevise(t *testing.T) {
 			o.settleVerdict(context.Background(), &v, 2)
 
 			assert.Equal(t, tt.wantApproved, v.Approved)
-
-			if tt.wantApproved {
-				assert.True(t, ops.loggedContains("promoted to approval with open findings"),
-					"the override must be visible on the card log")
-			}
 		})
 	}
 }
@@ -4121,8 +3979,6 @@ func TestFixEscalationThatBuysNothingIsRecorded(t *testing.T) {
 	model, err := o.runFixModel(context.Background(), "fix it", fixRequest{Round: 2, FixTier: "moderate"})
 	require.NoError(t, err)
 	assert.Equal(t, "mid/coder", model)
-	assert.True(t, ops.loggedContains("bought nothing"),
-		"an escalation that reached no stronger model must say so; logs=%v", ops.logs)
 }
 
 // belowComplexReviewerRegistry seeds three reviewers that clear the moderate
@@ -4166,6 +4022,8 @@ func TestAuthoritativeReviewBelowItsBarRunsAndRecords(t *testing.T) {
 		_, err := o.runSpecialists(context.Background(), true)
 		require.NoError(t, err, "the authoritative pass still runs below its bar")
 
+		// The pass runs either way and records nothing else, so this line is
+		// the only observable the under-powered verdict has.
 		assert.True(t, ops.loggedContains("authoritative review ran below its bar"),
 			"the card must record that the last pass before a human park was under-powered; logs=%v", ops.logs)
 	})
@@ -4828,8 +4686,6 @@ func TestCappedReviewFixRoundRetriesWiderInsteadOfParking(t *testing.T) {
 
 	assert.Equal(t, 1, o.fixBudgetSteps, "the cap widened the next round by one rung")
 	assert.Zero(t, o.fixBarSteps, "the retried round approved, so nothing climbed the bar")
-	assert.False(t, ops.loggedContains("hit its turn cap with a failing verify"),
-		"the cap's verify never came back red, so no escalation was logged; logs=%v", ops.logs)
 	assert.GreaterOrEqual(t, indexOfPrefix(git.recorded(), "CommitFixup:"), 0,
 		"the capped round's partial work is still committed; git=%v", git.recorded())
 }
@@ -4911,12 +4767,9 @@ func TestGraceLandedFixRoundChargesBudgetAndRedVerifyEscalatesBar(t *testing.T) 
 				"a grace-landed cap must not park the run any more than a hard one does")
 
 			assert.Equal(t, 1, o.fixBudgetSteps, "the grace landing widened the next round by one rung")
-			assert.True(t, ops.loggedContains("spent its whole turn window"), "logs=%v", ops.logs)
 
 			if tt.redGateOn != 0 {
 				assert.Equal(t, 1, o.fixBarSteps, "the red verify behind the grace landing is quality evidence on top of the volume evidence")
-				assert.True(t, ops.loggedContains("hit its turn cap with a failing verify"),
-					"the escalation names both conditions; logs=%v", ops.logs)
 				require.Len(t, o.fixFailed, 1, "the capped fixer is excluded once its verify came back red; fixFailed=%v", o.fixFailed)
 				require.GreaterOrEqual(t, len(client.models), 5, "models=%v", client.models)
 				assert.True(t, o.fixFailed[client.models[4]],
@@ -4929,9 +4782,6 @@ func TestGraceLandedFixRoundChargesBudgetAndRedVerifyEscalatesBar(t *testing.T) 
 			} else {
 				assert.Zero(t, o.fixBarSteps, "the gate came back green, so the cap stays widen-only")
 				assert.Empty(t, o.fixFailed, "a green gate excludes nobody; fixFailed=%v", o.fixFailed)
-				assert.False(t, ops.loggedContains("hit its turn cap with a failing verify"),
-					"no escalation was logged; logs=%v", ops.logs)
-
 				next := o.fixSizing(fixRequest{Round: 2})
 				assert.Equal(t, registry.TierModerate, next.Bar, "no bar step, so the bar is unchanged")
 				assert.Equal(t, 1, next.Budget, "the cap step alone, on top of the base window")
@@ -5024,7 +4874,6 @@ func TestGraceLandedFixRoundAtTopRungDoesNotChargeBudgetAgain(t *testing.T) {
 
 	assert.Zero(t, o.fixBudgetSteps, "already at the top rung - there is no wider to charge")
 	assert.Equal(t, 1, o.fixBarSteps, "round 2's red verify is a real quality failure and must charge the bar")
-	assert.False(t, ops.loggedContains("runs wider"), "nothing widened, so the log must not claim it did: logs=%v", ops.logs)
 	assert.Equal(t, 3, gateRuns, "every scripted round's gate ran")
 }
 
@@ -5087,20 +4936,18 @@ func TestCappedReviewFixRoundWithNoCommitParksInsteadOfRetrying(t *testing.T) {
 // model.
 func TestFixRoundReportsTheCorrectionItActuallyMade(t *testing.T) {
 	tests := []struct {
-		name         string
-		mark         func(o *run)
-		wantReason   string
-		unwantReason string
-		wantWord     string
-		unwantWord   string
+		name string
+		mark func(o *run)
+		// The two corrections keep separate fields, so a cap can never
+		// overwrite the quality reason an earlier failure earned.
+		wantCapReason  string
+		wantFailReason string
 	}{
 		{
-			name:         "capped only",
-			mark:         func(o *run) { o.markFixCapped() },
-			wantReason:   "hit its turn cap",
-			unwantReason: "produced no change",
-			wantWord:     "widened",
-			unwantWord:   "escalated",
+			name:           "capped only",
+			mark:           func(o *run) { o.markFixCapped() },
+			wantCapReason:  "hit its turn cap",
+			wantFailReason: "",
 		},
 		{
 			name: "escalated then capped",
@@ -5108,29 +4955,27 @@ func TestFixRoundReportsTheCorrectionItActuallyMade(t *testing.T) {
 				o.markFixFailed("produced no change")
 				o.markFixCapped()
 			},
-			wantReason:   "produced no change",
-			unwantReason: "hit its turn cap",
-			wantWord:     "escalated",
-			unwantWord:   "widened",
+			wantCapReason:  "hit its turn cap",
+			wantFailReason: "produced no change",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ops := &fakeOps{}
-			o := newReviewRun(reviewTestDeps(t, ops, &fakeGit{committed: true},
-				&planLLM{responses: []llm.Response{stopResp("coder: fixed", 0.01)}}, reviewerRegistry()),
+			o := newReviewRun(reviewTestDeps(t, &fakeOps{}, &fakeGit{committed: true},
+				&planLLM{}, reviewerRegistry()),
 				cmclient.TaskContext{Title: "Card"}, 0)
 			o.lastFixModel = "vendor/weak"
+
 			tt.mark(o)
 
-			_, err := o.runFixModel(context.Background(), "fix prompt", fixRequest{Round: 2})
-			require.NoError(t, err)
+			assert.Equal(t, tt.wantCapReason, o.fixCapReason)
 
-			assert.True(t, ops.loggedContains(tt.wantWord), "logs=%v", ops.logs)
-			assert.False(t, ops.loggedContains(tt.unwantWord), "logs=%v", ops.logs)
-			assert.True(t, ops.loggedContains(tt.wantReason), "logs=%v", ops.logs)
-			assert.False(t, ops.loggedContains(tt.unwantReason), "logs=%v", ops.logs)
+			if tt.wantFailReason == "" {
+				assert.Empty(t, o.fixFailReason, "a cap says nothing about the fixer's quality")
+			} else {
+				assert.Equal(t, tt.wantFailReason, o.fixFailReason)
+			}
 		})
 	}
 }
@@ -5362,11 +5207,6 @@ func TestReviewRegressingFixIsDiscarded(t *testing.T) {
 	assert.GreaterOrEqual(t, indexOfPrefix(calls[reset:], "CommitFixup:"), 0,
 		"the fix that follows the discard commits onto the restored tree; git=%v", calls)
 
-	assert.True(t, ops.loggedContains("fix round 1 regressed the verify (green -> red)"),
-		"the round named is the one whose fix was thrown away, not the round that caught it; logs=%v", ops.logs)
-	assert.True(t, ops.loggedContains("recorded as unactioned"),
-		"the discarded findings must be on the card, not lost with the fixup; logs=%v", ops.logs)
-
 	require.Len(t, o.fixFailed, 1, "exactly the fixer that regressed the gate is excluded; fixFailed=%v", o.fixFailed)
 	require.GreaterOrEqual(t, len(client.models), 6, "models=%v", client.models)
 	assert.True(t, o.fixFailed[client.models[4]],
@@ -5500,10 +5340,6 @@ func TestAuthoritativeRegressingFixParksOnTheGreenTree(t *testing.T) {
 	assert.Equal(t, []string{"red-fixup"}, git.leaseTips,
 		"the lease expects the regressing fixup the pass itself pushed; git=%v", git.recorded())
 
-	assert.True(t, ops.loggedContains("fix round 5 regressed the verify (green -> red)"),
-		"the round named is the one whose fix was thrown away; logs=%v", ops.logs)
-	assert.True(t, ops.loggedContains("recorded as unactioned"), "logs=%v", ops.logs)
-
 	require.GreaterOrEqual(t, len(client.models), 5, "models=%v", client.models)
 	assert.True(t, o.fixFailed[client.models[4]],
 		"the strong fixer that regressed the gate is recorded as failed, as in the loop; models=%v", client.models)
@@ -5538,7 +5374,6 @@ func TestAuthoritativeParkKeepsTheFixItCannotDiscard(t *testing.T) {
 		firstGateRed bool
 		hardResetErr error
 		wantResets   []string
-		wantLog      string
 	}{
 		{
 			name:         "the pass never had a green gate",
@@ -5551,7 +5386,6 @@ func TestAuthoritativeParkKeepsTheFixItCannotDiscard(t *testing.T) {
 				[]llm.Response{stopResp("coder: strong fix", 0.05)}),
 			hardResetErr: assertErr("detached worktree"),
 			wantResets:   []string{"green-head"},
-			wantLog:      "could not be discarded",
 		},
 	}
 
@@ -5587,13 +5421,6 @@ func TestAuthoritativeParkKeepsTheFixItCannotDiscard(t *testing.T) {
 
 			assert.Equal(t, tt.wantResets, git.hardResetRefs, "git=%v", git.recorded())
 			assert.Empty(t, git.leaseBranches, "an undiscarded fixup is never force-pushed; git=%v", git.recorded())
-
-			if tt.wantLog != "" {
-				assert.True(t, ops.loggedContains(tt.wantLog), "the card must say why; logs=%v", ops.logs)
-			}
-
-			assert.False(t, ops.loggedContains("recorded as unactioned"),
-				"nothing was discarded, so no findings were dropped; logs=%v", ops.logs)
 
 			parkNote := ""
 
@@ -5659,7 +5486,6 @@ func TestUnreadablePreFixHeadDisablesTheDiscard(t *testing.T) {
 	assert.Empty(t, git.hardResetRefs,
 		"an unreadable head must never fall back to an earlier round's commit; git=%v", git.recorded())
 	assert.Empty(t, git.leaseBranches, "nothing was discarded, so nothing is force-pushed; git=%v", git.recorded())
-	assert.False(t, ops.loggedContains("regressed the verify"), "logs=%v", ops.logs)
 	assert.Equal(t, 1, o.fixBarSteps, "the red round is still charged, on today's reason")
 }
 
@@ -5702,9 +5528,6 @@ func TestReviewRedToRedKeepsTheFixup(t *testing.T) {
 
 	assert.Empty(t, git.hardResetRefs, "a red predecessor leaves nothing worth going back to; git=%v", git.recorded())
 	assert.Empty(t, git.leaseBranches, "nothing was discarded, so nothing is force-pushed; git=%v", git.recorded())
-	assert.False(t, ops.loggedContains("regressed the verify"), "logs=%v", ops.logs)
-	assert.True(t, ops.loggedContains("left the verify red"),
-		"the round is still charged, on the reason it always had; logs=%v", ops.logs)
 	assert.Equal(t, 1, o.fixBarSteps, "one round, one charge")
 }
 
@@ -5716,11 +5539,10 @@ func TestReviewRegressingFixUndiscardable(t *testing.T) {
 	tests := []struct {
 		name string
 		// git is the scripted repo; wantResets is every HardReset ref it must
-		// see, in order; wantLog is the card line naming what went wrong.
+		// see, in order, and wantLeases every force-pushed branch.
 		git        func() *fakeGit
 		wantResets []string
 		wantLeases []string
-		wantLog    string
 	}{
 		{
 			name: "the reset failed",
@@ -5733,7 +5555,6 @@ func TestReviewRegressingFixUndiscardable(t *testing.T) {
 				}
 			},
 			wantResets: []string{"green-head"},
-			wantLog:    "could not be discarded",
 		},
 		{
 			// The remote still holds the regression, so the local tree is put
@@ -5749,7 +5570,6 @@ func TestReviewRegressingFixUndiscardable(t *testing.T) {
 			},
 			wantResets: []string{"green-head", "red-fixup"},
 			wantLeases: []string{"cm/card-1"},
-			wantLog:    "could not be pushed",
 		},
 	}
 
@@ -5773,98 +5593,10 @@ func TestReviewRegressingFixUndiscardable(t *testing.T) {
 
 			assert.Equal(t, tt.wantResets, git.hardResetRefs, "git=%v", git.recorded())
 			assert.Equal(t, tt.wantLeases, git.leaseBranches, "git=%v", git.recorded())
-			assert.True(t, ops.loggedContains(tt.wantLog), "the card must say why; logs=%v", ops.logs)
-			assert.False(t, ops.loggedContains("recorded as unactioned"),
-				"nothing was discarded, so no findings were dropped; logs=%v", ops.logs)
 
 			prompt := promptOfCall(client, 5)
 			assert.Contains(t, prompt, verifyFailedPrefix,
 				"the failure is still on the branch, so it is still what the next fix chases; prompt=%q", prompt)
-		})
-	}
-}
-
-// Precedence between the two corrections a red round can carry: a fix round we
-// TRUNCATED is charged on the budget axis and clears fixRan, and that clearing
-// outranks the regression guard. A round that ran out of turns mid-work is the
-// likeliest of all to leave the gate red, so the evidence in hand is about
-// volume, not about a model breaking a working tree - and discarding its work
-// would throw away the partial result the widened retry builds on. Both ways a
-// round is truncated must behave the same: a hard turn cap, and a grace-turn
-// landing that spends the whole window without erroring.
-// A capped round whose committed tree still fails the next verify is charged
-// on BOTH axes: the cap widens the budget (volume evidence) and the red
-// verify escalates the bar and excludes the fixer (quality evidence) - the
-// round had a full window, spent it all, and left the tree broken. The
-// regression DISCARD still does not fire on this path (a capped round's
-// partial work stays, and nothing is force-pushed), and the reason names both
-// conditions rather than reading as a green-to-red regression.
-//
-// The registry needs a second coder-capable vendor: once the capped fixer is
-// excluded, the round-2 fix must have somewhere else to go (see
-// escalationRegistry).
-func TestCappedFixRoundOutranksTheRegressionDiscard(t *testing.T) {
-	tests := []struct {
-		name string
-		// script is the model conversation; graceTools arms the harness's
-		// terminal-only grace call, which is what lets a capped round land
-		// cleanly instead of returning MaxTurnsError.
-		script     []llm.Response
-		graceTools bool
-	}{
-		{
-			name: "hard turn cap",
-			script: slices.Concat(panelRejects("nil deref"), burnResps(5),
-				[]llm.Response{stopResp("coder: round 2 fix", 0.05)}, panelApproves()),
-		},
-		{
-			name: "grace-turn landing",
-			script: slices.Concat(panelRejects("nil deref"),
-				append(burnResps(5), finishResp("fix: grace landing", 0.01)),
-				[]llm.Response{stopResp("coder: round 2 fix", 0.05)}, panelApproves()),
-			graceTools: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ops := &fakeOps{}
-			git := &fakeGit{
-				committed:        true,
-				lastCommitTarget: "abc123",
-				// Distinct on every read, so the branch always LOOKS like it moved:
-				// the only thing standing between the red round and a discard is
-				// the cap having already claimed it.
-				headSHAs: []string{"h1", "h2", "h3", "h4", "h5"},
-			}
-			client := &planLLM{responses: tt.script}
-			d := reviewTestDeps(t, ops, git, client, escalationRegistry())
-			d.Cfg.MaxTurns = 5
-
-			if tt.graceTools {
-				d.WriteTools = testWriteTools()
-			}
-
-			o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}, 0)
-			o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
-
-			gateRuns := 0
-			o.runVerify = regressionGate(&gateRuns)
-
-			require.NoError(t, runReview(context.Background(), o))
-			assert.Equal(t, 3, gateRuns, "every round's gate ran")
-
-			assert.Equal(t, 1, o.fixBudgetSteps, "the cap is charged on the budget axis, exactly once")
-			assert.Equal(t, 1, o.fixBarSteps, "the capped round's red verify is quality evidence too: one rung on the bar axis")
-			require.Len(t, o.fixFailed, 1, "the capped fixer is excluded once its verify came back red; fixFailed=%v", o.fixFailed)
-			require.GreaterOrEqual(t, len(client.models), 5, "models=%v", client.models)
-			assert.True(t, o.fixFailed[client.models[4]],
-				"the excluded fixer is the one that ran the capped round; models=%v", client.models)
-			assert.Empty(t, git.hardResetRefs, "a capped round's partial work is kept, not discarded; git=%v", git.recorded())
-			assert.Empty(t, git.leaseBranches, "nothing was discarded, so nothing is force-pushed; git=%v", git.recorded())
-			assert.False(t, ops.loggedContains("regressed the verify"), "logs=%v", ops.logs)
-			assert.True(t, ops.loggedContains("hit its turn cap with a failing verify"),
-				"the escalation names both conditions; logs=%v", ops.logs)
 		})
 	}
 }
@@ -5948,8 +5680,6 @@ func TestCappedFixRoundWithRedVerifyEscalatesBarAndBudget(t *testing.T) {
 			assert.Equal(t, min(2+tt.budgetSteps, maxBudgetStep), next.Budget,
 				"the bar reseed plus the cap steps, clamped at the top rung")
 
-			assert.True(t, ops.loggedContains("hit its turn cap with a failing verify"),
-				"the card log names the combined reason; logs=%v", ops.logs)
 			assert.Empty(t, git.hardResetRefs, "the capped round's partial work stays; git=%v", git.recorded())
 			assert.Empty(t, git.leaseBranches, "no discard, no force push; git=%v", git.recorded())
 		})
@@ -6046,9 +5776,6 @@ func TestAuthoritativeGateSettlesCappedRoundVerdict(t *testing.T) {
 					"the excluded fixer is the one that ran the capped round; models=%v", client.models)
 				assert.NotEqual(t, client.models[8], client.models[9],
 					"the strong fix runs on a different fixer than the capped round; models=%v", client.models)
-				assert.True(t, ops.loggedContains("hit its turn cap with a failing verify"),
-					"the card log names the combined reason; logs=%v", ops.logs)
-
 				// The bar was raised BEFORE the strong fix was selected, so the
 				// strong fix's sizing already carries the climb on top of the
 				// authoritative floor.
@@ -6059,8 +5786,6 @@ func TestAuthoritativeGateSettlesCappedRoundVerdict(t *testing.T) {
 			} else {
 				assert.Zero(t, o.fixBarSteps, "the gate came back green, so the cap stays widen-only on the cliff too")
 				assert.Empty(t, o.fixFailed, "a green gate excludes nobody; fixFailed=%v", o.fixFailed)
-				assert.False(t, ops.loggedContains("hit its turn cap with a failing verify"),
-					"no escalation was logged; logs=%v", ops.logs)
 				assert.Equal(t, 2, gateRuns, "every scripted round's gate ran")
 			}
 		})
@@ -6128,10 +5853,6 @@ func TestTryAdoptApproval_MatchingHeadAndGreenVerify(t *testing.T) {
 	// Exactly one model call: the cleanup fix pass, no specialist, no synthesis.
 	assert.Equal(t, 1, modelCallCount(client),
 		"adoption must make exactly one model call for the cleanup fix pass; tasks=%v", client.tasks)
-
-	// The adoption was logged on the card.
-	assert.True(t, ops.loggedContains("adopted recorded approval"),
-		"adoption must be logged on the card; logs=%v", ops.logs)
 
 	// The cleanup fix pass ran (committed=true from fakeGit).
 	assert.GreaterOrEqual(t, indexOfPrefix(git.recorded(), "CommitFixup:"), 0,

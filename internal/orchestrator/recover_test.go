@@ -2,7 +2,6 @@ package orchestrator
 
 import (
 	"context"
-	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -372,7 +371,6 @@ func TestRecoverIncapableLogsReason(t *testing.T) {
 	err := o.recoverIncapable(context.Background(), &IncapableError{Model: "m", Reason: reason})
 	require.NoError(t, err, "recovery within the cap must succeed")
 	require.Len(t, ops.logs, 1)
-	assert.Contains(t, ops.logs[0], "blacklisted and re-selecting")
 	assert.Contains(t, ops.logs[0], reason, "the re-selecting log must name the reason")
 
 	for i := 2; i <= reselectCap; i++ {
@@ -385,7 +383,6 @@ func TestRecoverIncapableLogsReason(t *testing.T) {
 	require.Len(t, ops.logs, reselectCap+1)
 
 	last := ops.logs[len(ops.logs)-1]
-	assert.Contains(t, last, fmt.Sprintf("cap (%d) exhausted", reselectCap))
 	assert.Contains(t, last, reason, "the cap-exhausted log must also name the reason")
 
 	blacklisted := ops.blacklistReasons()

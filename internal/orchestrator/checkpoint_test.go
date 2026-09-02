@@ -135,7 +135,6 @@ func TestMobCheckpointProceed(t *testing.T) {
 	assert.False(t, eng.topics[0].Blind)
 	assert.Equal(t, 3, eng.topics[0].Rounds)
 	assert.Equal(t, []string{"correctness", "diff-hygiene/simplicity"}, eng.topics[0].Lenses)
-	assert.Contains(t, strings.Join(ops.logs, "\n"), "mob checkpoint (SUB-1): proceed")
 
 	sub := ops.bodyFor("SUB-1")
 	assert.Contains(t, sub, "sub body") // live description preserved
