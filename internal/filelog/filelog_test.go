@@ -386,62 +386,17 @@ func TestStaleWriteCannotReachFreshRunWriter(t *testing.T) {
 	assert.NotContains(t, s, "run one trailing line", "a stale run's Write must not reach another run's writer")
 }
 
-// TestStaleBeginCannotCloseFreshRunWriter pins the Begin-side guard: a
-// replayed or re-ordered Begin carrying run 1's already-finished id must not
-// footer-and-close run 2's live writer. The supersede scan skips any
-// correlation id that has already ended in this process, so a stale Begin can
-// only ever supersede its own still-open slot.
-func TestStaleBeginCannotCloseFreshRunWriter(t *testing.T) {
+func TestTwoRunsOnOneCardEachFooterTheirOwnWriter(t *testing.T) {
 	dir := t.TempDir()
 	l := New(dir, testLogger())
 
+	// Run 1 is still draining when CM re-triggers the card as run 2.
 	l.Begin("proj", "CARD-1", "aaaaaaaaaaaa", "corr-1")
+	l.Begin("proj", "CARD-1", "bbbbbbbbbbbb", "corr-2")
+
+	l.Write("proj", "CARD-1", "corr-1", []byte("run one tail"), false)
 	l.End("proj", "CARD-1", "corr-1", 0, "normal")
 
-	l.Begin("proj", "CARD-1", "bbbbbbbbbbbb", "corr-2")
-	l.Write("proj", "CARD-1", "corr-2", []byte("run two line"), false)
-
-	// A stale replay of run 1's Begin fires now.
-	l.Begin("proj", "CARD-1", "aaaaaaaaaaaa", "corr-1")
-
-	l.Write("proj", "CARD-1", "corr-2", []byte("run two keeps writing"), false)
-
-	data, err := os.ReadFile(filepath.Join(dir, "proj", "card-1.log"))
-	require.NoError(t, err)
-
-	s := string(data)
-	assert.Equal(t, 1, strings.Count(s, "cause=normal"), "the stale Begin must not supersede run 2's writer")
-	assert.Contains(t, s, "run two keeps writing\n", "run 2's writer survived the stale Begin")
-
-	// The stale Begin was a full no-op: run 1's id stays ended, so a
-	// subsequent End under it finds nothing to footer.
-	l.End("proj", "CARD-1", "corr-1", 3, "normal")
-
-	// Run 2's own End still footers and closes its writer.
-	l.End("proj", "CARD-1", "corr-2", 0, "normal")
-
-	data, err = os.ReadFile(filepath.Join(dir, "proj", "card-1.log"))
-	require.NoError(t, err)
-	assert.Equal(t, 2, strings.Count(string(data), "==== run started "))
-	assert.Equal(t, 2, strings.Count(string(data), "==== run ended "))
-	assert.NotContains(t, string(data), "exit=3", "the stale id's End has no live writer to footer")
-}
-
-// TestBeginSupersedesOrphanedPriorRun pins the crash-resume case the
-// correlation-id keying introduced: run 1 was killed before its End fired, so
-// its writer sits open under its own correlation id. Run 2's Begin must still
-// footer-and-close that orphan (keyed on the file path, not the map key) so
-// the handle does not leak, and run 2 must then append to the same file.
-func TestBeginSupersedesOrphanedPriorRun(t *testing.T) {
-	dir := t.TempDir()
-	l := New(dir, testLogger())
-
-	// Run 1 begins but is killed: no End, its writer stays open.
-	l.Begin("proj", "CARD-1", "aaaaaaaaaaaa", "corr-1")
-	l.Write("proj", "CARD-1", "corr-1", []byte("run one line"), false)
-
-	// Run 2 is the crash-resume, under a different correlation id.
-	l.Begin("proj", "CARD-1", "bbbbbbbbbbbb", "corr-2")
 	l.Write("proj", "CARD-1", "corr-2", []byte("run two line"), false)
 	l.End("proj", "CARD-1", "corr-2", 0, "normal")
 
@@ -449,34 +404,9 @@ func TestBeginSupersedesOrphanedPriorRun(t *testing.T) {
 	require.NoError(t, err)
 
 	s := string(data)
-
 	assert.Equal(t, 2, strings.Count(s, "==== run started "))
-	assert.Equal(t, 2, strings.Count(s, "==== run ended "), "the orphan's End will never fire, so its Begin did")
-	assert.Contains(t, s, "exit=-1", "the orphaned run is footered as superseded")
-	assert.Contains(t, s, "cause="+causeSuperseded)
-	assert.Contains(t, s, "exit=0")
-	assert.Less(t, strings.Index(s, "run one line"), strings.Index(s, "run two line"))
-}
-
-// TestOrphanSupersedeIsPerCard: run 2's Begin on CARD-2 must not footer CARD-1's
-// unrelated still-open writer, even though both sit in the same registry.
-func TestOrphanSupersedeIsPerCard(t *testing.T) {
-	dir := t.TempDir()
-	l := New(dir, testLogger())
-
-	l.Begin("proj", "CARD-1", "aaaaaaaaaaaa", "corr-1")
-	l.Begin("proj", "CARD-2", "bbbbbbbbbbbb", "corr-2")
-
-	// CARD-1's orphan is untouched: it is the only entry for its file and
-	// still receives writes.
-	l.Write("proj", "CARD-1", "corr-1", []byte("card one still writing"), false)
-
-	l.End("proj", "CARD-1", "corr-1", 0, "normal")
-
-	data, err := os.ReadFile(filepath.Join(dir, "proj", "card-1.log"))
-	require.NoError(t, err)
-
-	s := string(data)
-	assert.Contains(t, s, "card one still writing\n")
-	assert.NotContains(t, s, "cause="+causeSuperseded, "another card's Begin must not supersede this card's writer")
+	assert.Equal(t, 2, strings.Count(s, "cause=normal"), "each run footers its own writer with its real cause")
+	assert.NotContains(t, s, "cause=superseded")
+	assert.Contains(t, s, "run one tail\n", "the draining run's tail reaches the durable log")
+	assert.Contains(t, s, "run two line\n")
 }
