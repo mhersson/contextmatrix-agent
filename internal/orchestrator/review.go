@@ -300,62 +300,16 @@ func (o *run) tryAdoptApproval(ctx context.Context, plan verifyPlan) (bool, erro
 	// approval with surviving fixes frames the summary as open findings; a clean
 	// one carries the summary verbatim, matching the live approval path's framing
 	// condition.
+	o.reviewSummary = rec.Summary
+
 	if len(rec.Fixes) > 0 {
 		o.reviewSummary = approvedWithOpenFindings(rec.Summary)
-	} else {
-		o.reviewSummary = rec.Summary
-	}
 
-	// Run the recorded surviving fixes as a non-escalating cleanup pass - exactly
-	// the same fixRequest.NoEscalate semantics the live approval branch uses so a
-	// cleanup fixup cannot climb counters or trigger the exhausted-fixers park.
-	if len(rec.Fixes) > 0 && worthCleanupPass(rec.Fixes) {
-		// Reconstruct the findings text from the recorded fixes so the fix prompt
-		// has real context. This mirrors what the live path builds from v.Fixes.
-		findings := formatFixes(verdict{Summary: rec.Summary, Fixes: rec.Fixes})
-
-		pre, herr := d.Git.Head(ctx)
-		if herr != nil {
-			slog.Warn("review: could not record the pre-cleanup head before adopted cleanup pass",
-				"card_id", d.Cfg.CardID, "error", herr)
-
-			pre = ""
-		}
-
-		committed, ferr := o.runFix(ctx, fixRequest{Findings: findings, Round: 0, NoEscalate: true})
-		if ferr != nil {
-			if isParkError(ferr) {
-				d.logCard(ctx, "review: adopted approval but the cleanup fix pass parked - stopping: %s", ferr)
-
-				// Propagate the park error so the FSM parks the card instead of
-				// falling through to a re-bought panel.
-				return false, ferr
-			}
-
-			d.logCard(ctx, "review: adopted approval but the cleanup fix pass failed - proceeding approved: %s", ferr)
-
-			if herr := d.Git.HardReset(ctx, "HEAD"); herr != nil {
-				slog.Warn("review: failed to discard the swallowed cleanup pass's partial edits",
-					"card_id", d.Cfg.CardID, "error", herr)
-			}
-
-			o.clearApproval(ctx)
-
-			return true, nil
-		}
-
-		if committed {
-			o.reviewSummary = approvedWithFixesApplied(rec.Summary)
-
-			d.logCard(ctx, "review: adopted approval with %d surviving finding(s) - applied a non-escalating cleanup fix pass", len(rec.Fixes))
-
-			// The fixup landed after HEAD was matched, so verify it or drop it.
-			// A round of 0 means no round was recorded by this run, so the verify
-			// correction is skipped - there is no in-run round to attribute a
-			// correction to.
-			o.verifyCleanupFixup(ctx, plan, 0, pre, rec.Summary)
-		} else {
-			d.logCard(ctx, "review: adopted approval with %d surviving finding(s), but the cleanup fix pass produced no change", len(rec.Fixes))
+		// rec.Summary is already the rendered findings text; it is the prompt.
+		// A round of 0 means no round was recorded by this run, so the cleanup
+		// pass's verify correction has no in-run round to attribute itself to.
+		if err := o.cleanupPass(ctx, plan, fixRequest{Findings: rec.Summary, Round: 0, NoEscalate: true}, rec.Summary, rec.Fixes); err != nil {
+			return false, err
 		}
 	}
 
@@ -473,62 +427,8 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 				// narrate them as fixed (see approvedDespiteFindings).
 				o.reviewSummary = approvedWithOpenFindings(findings)
 
-				if !worthCleanupPass(fixes) {
-					d.logCard(ctx, "review: approved with %d surviving nit-only finding(s) - reported, no cleanup pass", len(fixes))
-
-					return nil
-				}
-
-				// The commit the cleanup pass starts from, read BEFORE it runs:
-				// a fixup its own verify cannot prove is reset back to here, and
-				// once the fixup exists this commit is no longer what HEAD reads.
-				// An unreadable HEAD is not fatal - the pass still runs, and the
-				// gate below reports the result it can no longer discard.
-				pre, herr := d.Git.Head(ctx)
-				if herr != nil {
-					slog.Warn("review: could not record the pre-cleanup head",
-						"card_id", cfg.CardID, "error", herr)
-
-					pre = ""
-				}
-
-				committed, ferr := o.runFix(ctx, fixRequest{Findings: findings, Round: round, FixTier: fixTier, NoEscalate: true})
-				if ferr != nil {
-					if isParkError(ferr) {
-						d.logCard(ctx, "review: approved with %d surviving finding(s), but the cleanup fix pass parked - stopping: %s",
-							len(fixes), ferr)
-
-						return ferr
-					}
-
-					d.logCard(ctx, "review: approved with %d surviving finding(s), but the cleanup fix pass failed - proceeding approved: %s",
-						len(fixes), ferr)
-
-					// The failed pass may have left partial edits uncommitted (a
-					// transport error mid-run, before runFix ever reaches its own
-					// commit). Best-effort, matching the sibling coder-run-failure
-					// discards elsewhere: untracked files survive a hard reset, but
-					// a dirty tracked file left behind here would otherwise carry
-					// into integrate's autosquash rebase and kill an approved run.
-					if herr := d.Git.HardReset(ctx, "HEAD"); herr != nil {
-						slog.Warn("review: failed to discard the swallowed cleanup pass's partial edits",
-							"card_id", cfg.CardID, "error", herr)
-					}
-
-					return nil
-				}
-
-				if committed {
-					o.reviewSummary = approvedWithFixesApplied(findings)
-
-					d.logCard(ctx, "review: approved with %d surviving finding(s) - applied a non-escalating cleanup fix pass", len(fixes))
-
-					// The fixup landed AFTER this round's gate ran, so nothing
-					// has checked it: prove it or drop it.
-					o.verifyCleanupFixup(ctx, plan, round, pre, findings)
-				} else {
-					d.logCard(ctx, "review: approved with %d surviving finding(s), but the cleanup fix pass produced no change", len(fixes))
-				}
+				return o.cleanupPass(ctx, plan,
+					fixRequest{Findings: findings, Round: round, FixTier: fixTier, NoEscalate: true}, findings, fixes)
 			}
 
 			return nil
@@ -846,6 +746,79 @@ func approvedWithOpenFindings(findings string) string {
 // than open.
 func approvedWithFixesApplied(findings string) string {
 	return "The review approved the change. These findings survived the critique round and were applied in a follow-up cleanup pass:\n\n" + findings
+}
+
+// cleanupPass runs an approving verdict's surviving findings as one
+// non-escalating fix pass and proves or drops the fixup. Only a park (budget,
+// context limit, toolchain) propagates; a turn cap is handled like any other
+// outcome of an optional pass, and every other failure leaves the run approved.
+func (o *run) cleanupPass(ctx context.Context, plan verifyPlan, req fixRequest, summary string, fixes []fix) error {
+	d := o.d
+
+	if !worthCleanupPass(fixes) {
+		d.logCard(ctx, "review: approved with %d surviving nit-only finding(s) - reported, no cleanup pass", len(fixes))
+
+		return nil
+	}
+
+	// The commit the pass starts from, read BEFORE it runs: a fixup its own
+	// verify cannot prove is reset back to here, and once the fixup exists this
+	// commit is no longer what HEAD reads. An unreadable HEAD is not fatal - the
+	// pass still runs, and the gate below reports the result it can no longer
+	// discard.
+	pre, herr := d.Git.Head(ctx)
+	if herr != nil {
+		slog.Warn("review: could not record the pre-cleanup head", "card_id", d.Cfg.CardID, "error", herr)
+
+		pre = ""
+	}
+
+	committed, ferr := o.runFix(ctx, req)
+
+	var mte *MaxTurnsError
+
+	switch {
+	case errors.As(ferr, &mte):
+		// Ordered ahead of the park arm, which would otherwise match this too:
+		// the pass is optional and the card is already approved, so a cap costs
+		// the run nothing beyond whatever the coder did not get to. What it
+		// committed is proven or dropped by the gate below like any other fixup.
+		d.logCard(ctx, "review: the cleanup fix pass hit its turn cap - keeping what it committed, if anything")
+	case isParkError(ferr):
+		d.logCard(ctx, "review: approved with %d surviving finding(s), but the cleanup fix pass parked - stopping: %s", len(fixes), ferr)
+
+		return ferr
+	case ferr != nil:
+		d.logCard(ctx, "review: approved with %d surviving finding(s), but the cleanup fix pass failed - proceeding approved: %s", len(fixes), ferr)
+
+		// The failed pass may have left partial edits uncommitted (a transport
+		// error mid-run, before runFix ever reaches its own commit). Best-effort,
+		// matching the sibling coder-run-failure discards elsewhere: untracked
+		// files survive a hard reset, but a dirty tracked file left behind here
+		// would otherwise carry into integrate's autosquash rebase and kill an
+		// approved run.
+		if herr := d.Git.HardReset(ctx, "HEAD"); herr != nil {
+			slog.Warn("review: failed to discard the swallowed cleanup pass's partial edits", "card_id", d.Cfg.CardID, "error", herr)
+		}
+
+		return nil
+	}
+
+	if !committed {
+		d.logCard(ctx, "review: approved with %d surviving finding(s), but the cleanup fix pass produced no change", len(fixes))
+
+		return nil
+	}
+
+	o.reviewSummary = approvedWithFixesApplied(summary)
+
+	d.logCard(ctx, "review: approved with %d surviving finding(s) - applied a non-escalating cleanup fix pass", len(fixes))
+
+	// The fixup landed AFTER the gate that judged this tree ran, so nothing has
+	// checked it: prove it or drop it.
+	o.verifyCleanupFixup(ctx, plan, req.Round, pre, summary)
+
+	return nil
 }
 
 // cleanupVerifyContext names the gate for logVerifyGate: the run's third gate

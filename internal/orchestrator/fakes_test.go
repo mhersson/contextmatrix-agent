@@ -501,6 +501,11 @@ type fakeGit struct {
 	commitErr  error
 	commitMsgs []string
 
+	// headAfterFixup, when set, is the SHA a successful CommitFixup advances
+	// headSHA to, so a test can tell a head read before the fixup from one read
+	// after it.
+	headAfterFixup string
+
 	// Push scripting: pushErr fails the call; pushBranches captures each branch.
 	pushErr      error
 	pushBranches []string
@@ -646,6 +651,12 @@ func (g *fakeGit) MergeBase(_ context.Context, a, b string) (string, error) {
 
 func (g *fakeGit) CommitFixup(_ context.Context, target string) (bool, error) {
 	g.record("CommitFixup:" + target)
+
+	if g.headAfterFixup != "" && g.committed {
+		g.mu.Lock()
+		g.headSHA = g.headAfterFixup
+		g.mu.Unlock()
+	}
 
 	return g.committed, g.commitErr
 }

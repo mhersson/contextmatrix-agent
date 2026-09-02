@@ -3939,38 +3939,35 @@ func TestMobReviewBriefingAlwaysDiffsBaseBranch(t *testing.T) {
 		"the briefing diffs the base branch even with a snapshot recorded")
 }
 
-// TestReviewApprovedCleanupPassPropagatesParks pins that the cleanup pass on an
-// approved verdict propagates every park sentinel execute special-cases, not
-// only the budget one. A swallowed park returns nil, the run advances to
-// integrate with the coder's partial edits uncommitted, the rebase fails on the
-// dirty tree, and the worker exits without pushing the WIP - so the half-done
-// work dies with the container.
+// TestReviewApprovedCleanupPassPropagatesParks pins that a park sentinel raised
+// by the cleanup pass on an approved verdict still reaches the worker. A
+// swallowed park returns nil, the run advances to integrate with the coder's
+// partial edits uncommitted, the rebase fails on the dirty tree, and the worker
+// exits without pushing the WIP - so the half-done work dies with the
+// container. The turn cap is the deliberate exception, pinned separately by
+// TestCleanupPassTurnCapNeverParksAnApprovedCard.
 func TestReviewApprovedCleanupPassPropagatesParks(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
-	call := llm.ToolCall{
-		ID:       "c1",
-		Type:     "function",
-		Function: llm.FunctionCall{Name: "read", Arguments: `{"path":"no-such-file.txt"}`},
-	}
 	client := &planLLM{responses: []llm.Response{
 		stopResp("Correctness: minor", 0.01),
 		stopResp("Design: ok", 0.01),
 		stopResp("Security: ok", 0.01),
 		stopResp(`{"approved":true,"summary":"clean","fixes":[{"file":"a.go","issue":"bug","suggestion":"patch","severity":"minor"}]}`, 0.02),
-		{ToolCalls: []llm.ToolCall{call}}, // the cleanup coder burns its single turn
 	}}
 	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
-	d.Cfg.MaxTurns = 1
 
 	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
-	o := newReviewRun(d, tc, 0)
+
+	// The panel spends $0.05 - under the ceiling at every check the round makes,
+	// over it by the time the cleanup pass reaches its own budget gate.
+	o := newReviewRun(d, tc, 0.04)
 
 	err := runReview(context.Background(), o)
-	require.Error(t, err, "a turn-cap park in the cleanup pass must reach the worker")
+	require.Error(t, err, "a park in the cleanup pass must reach the worker")
 
-	var mte *MaxTurnsError
-	assert.ErrorAs(t, err, &mte, "the worker parks on this sentinel and pushes the WIP; nil would integrate a dirty tree")
+	var bee *BudgetExceededError
+	assert.ErrorAs(t, err, &bee, "the worker parks on this sentinel and pushes the WIP; nil would integrate a dirty tree")
 }
 
 // TestReviewAuthoritativeApprovedWithFindingsFramesSummary covers the honesty
@@ -6356,36 +6353,110 @@ func TestRunReview_RedVerifyRunsFullPanel(t *testing.T) {
 		"a red verify on the recorded HEAD must fall through to the normal review loop; tasks=%v", client.tasks)
 }
 
-// TestRunReview_RejectionStillRecordsNothing proves a rejected verdict on a
-// resume-with-different-HEAD path still records no approval on the card body.
-func TestRunReview_RejectionStillRecordsNothing(t *testing.T) {
+// TestCleanupPassTurnCapNeverParksAnApprovedCard proves the post-approval
+// cleanup pass treats its own turn cap as an outcome rather than a park: the
+// approval stands, and the fixup the capped coder committed is kept or dropped
+// on the strength of its own verify gate.
+func TestCleanupPassTurnCapNeverParksAnApprovedCard(t *testing.T) {
+	// The findings text reviewRound renders from the approving verdict below.
+	// The two framings the cleanup pass can leave behind are both built from it,
+	// so the assertion names the outcome without pinning either helper's prose.
+	const findings = "clean\n- a.go: [minor] nit - tidy"
+
+	tests := []struct {
+		name      string
+		fixupGate verifyexec.Outcome
+		want      func(string) string
+		wantReset int
+	}{
+		{
+			name:      "green fixup is kept",
+			fixupGate: verifyexec.Outcome{ExitCode: 0},
+			want:      approvedWithFixesApplied,
+		},
+		{
+			name:      "red fixup is dropped",
+			fixupGate: verifyexec.Outcome{ExitCode: 1, Output: "FAIL"},
+			want:      approvedWithOpenFindings,
+			wantReset: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			git := &fakeGit{committed: true, headSHA: "pre-cleanup", lastCommitTarget: "abc123"}
+			client := &planLLM{responses: slices.Concat(
+				[]llm.Response{
+					stopResp("Correctness: minor nit", 0.01),
+					stopResp("Design: looks fine", 0.01),
+					stopResp("Security: looks fine", 0.01),
+					stopResp(`{"approved":true,"summary":"clean","fixes":[{"file":"a.go","issue":"nit","suggestion":"tidy","severity":"minor"}]}`, 0.02),
+				},
+				burnResps(5), // the cleanup coder runs out of turns after committing
+			)}
+			d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+			d.Cfg.MaxTurns = 5
+			o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}, 0)
+			o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
+
+			// Two gate runs, in order: the round's own pre-panel gate, which must
+			// be green or the round short-circuits to the fix loop and nothing is
+			// ever approved, then verifyCleanupFixup's re-run over the committed
+			// fixup - the only one this table varies.
+			gates := 0
+			o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+				gates++
+				if gates == 1 {
+					return verifyexec.Outcome{ExitCode: 0}
+				}
+
+				return tt.fixupGate
+			}
+
+			require.NoError(t, runReview(context.Background(), o), "a capped cleanup pass is not a park")
+
+			// A park would have surfaced as the returned error above; the
+			// orchestrator never calls report_parked itself (the worker does).
+			assert.Equal(t, 2, gates, "the pre-panel gate and the post-fixup re-run both ran")
+			assert.Equal(t, tt.want(findings), o.reviewSummary)
+			assert.Len(t, git.hardResetRefs, tt.wantReset, "git=%v", git.recorded())
+			assert.Contains(t, ops.bodyFor("CARD-1"), "## Review Approval",
+				"the approval stands through the capped pass")
+		})
+	}
+}
+
+// TestAdoptedApprovalCleanupPromptNamesEachFindingOnce proves the adopted
+// approval's cleanup prompt carries the recorded findings text as-is: the
+// record already holds the rendered fix lines, so re-rendering them would name
+// every surviving finding twice.
+func TestAdoptedApprovalCleanupPromptNamesEachFindingOnce(t *testing.T) {
 	ops := &fakeOps{}
-	git := &fakeGit{headSHA: "def456", committed: true}
-	client := &planLLM{responses: []llm.Response{
-		stopResp("Correctness: has bugs", 0.01),
-		stopResp("Design: needs work", 0.01),
-		stopResp("Security: has issues", 0.01),
-		stopResp(`{"approved":false,"summary":"needs work","fixes":[{"file":"a.go","issue":"bug","suggestion":"fix","severity":"important"}]}`, 0.02),
-		// Fix round.
-		stopResp("coder: fixed", 0.05),
-		// Round 2: specialists approve.
-		stopResp("Correctness: looks fine", 0.01),
-		stopResp("Design: looks fine", 0.01),
-		stopResp("Security: looks fine", 0.01),
-		stopResp(`{"approved":true,"summary":"clean now","fixes":[]}`, 0.02),
-	}}
-
+	git := &fakeGit{committed: true, headSHA: "abc123"}
+	client := &planLLM{responses: []llm.Response{stopResp("coder: tidied", 0.05)}}
 	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+	o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}, 0)
 
-	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
-	o := newReviewRun(d, tc, 0)
-	o.body = "## Review Approval\n\nCommit: abc123\n\n```json\n{\"head_sha\":\"abc123\",\"summary\":\"stale\",\"fixes\":[]}\n```"
+	// The recorded summary is the rendered findings text, fix lines included.
+	rec := approval{
+		HeadSHA: "abc123",
+		Summary: "clean\n- a.go: [minor] unused import - drop it\n- b.go: [minor] typo - fix it",
+		Fixes: []fix{
+			{File: "a.go", Issue: "unused import", Suggestion: "drop it", Severity: "minor"},
+			{File: "b.go", Issue: "typo", Suggestion: "fix it", Severity: "minor"},
+		},
+	}
+	o.body = formatApproval(rec)
 
 	require.NoError(t, runReview(context.Background(), o))
 
-	// The final body must have an approval section from round 2's approval.
-	body := ops.bodyFor("CARD-1")
-	require.NotEmpty(t, body)
-	assert.Contains(t, body, "## Review Approval",
-		"the final approval from round 2 must produce a new approval section")
+	require.Len(t, client.tasks, 1, "exactly one cleanup coder call; tasks=%d", len(client.tasks))
+	assert.Equal(t, 1, strings.Count(client.tasks[0], "unused import"), "prompt=%s", client.tasks[0])
+	assert.Equal(t, 1, strings.Count(client.tasks[0], "typo"), "prompt=%s", client.tasks[0])
+
+	// The recorded text is still the line shape fixFiles parses, so the fixup
+	// keeps targeting the commits that last touched the named files.
+	require.Len(t, git.lastCommitPaths, 1)
+	assert.Equal(t, []string{"a.go", "b.go"}, git.lastCommitPaths[0])
 }
