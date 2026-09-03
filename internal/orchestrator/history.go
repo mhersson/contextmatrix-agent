@@ -9,16 +9,10 @@ import (
 )
 
 // recordSection upserts a "## <heading>" markdown section into the parent card
-// body and pushes the updated body to CM, so the parent accumulates the run's
-// history (diagnosis, plan, review rounds) for a complete record - mirroring
-// CM's workflow-skills, which write these sections onto the card. section
-// must be the COMPLETE block, starting with its "## <heading>" line.
-//
-// Best-effort: a failure is logged, not fatal - the body is primarily a
-// human-facing record, and must not fail a phase. The Review Approval section
-// is an exception: it is a fail-open, SHA-bound adoption gate on resume, but a
-// failed write degrades to the pre-change re-review behavior rather than
-// halting the run.
+// body and pushes it to CM, mirroring the workflow-skills that write the same
+// sections. section must be the COMPLETE block, starting with its "## " line.
+// Best-effort: a failure is logged, not fatal - even for the SHA-bound Review
+// Approval gate, where a failed write means the next run re-reviews.
 func (o *run) recordSection(ctx context.Context, heading, section string) {
 	o.body = upsertSection(o.body, heading, section)
 

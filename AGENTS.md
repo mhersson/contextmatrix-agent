@@ -141,9 +141,8 @@ Go 1.26+, **cobra** + **koanf** (not viper), the **Docker SDK**
 
 ### Git credentials
 
-All git tokens are CM-provisioned per run. Do not read raw tokens from config
-or env in new code paths, and do not add local minting back. Staging, refresh,
-and redaction mechanics: `docs/secrets.md`.
+All git tokens are CM-provisioned per run; never read raw tokens from config or
+env. Staging, refresh, and redaction mechanics: `docs/secrets.md`.
 
 ### Config
 

@@ -312,11 +312,9 @@ type run struct {
 	// resume - pre-loaded by reconcile from SubtaskStates before any phase runs.
 	subtasks []subtaskRef
 	// cardSizing is the card-level bar and budget, seeded from the planner's
-	// card_tier and persisted on the parent body so a resumed run restores it.
-	// Before it was persisted it had one writer and no reader on resume, so
-	// every resumed run sized its review panel and its Best-of-N pool at the
-	// moderate default no matter what the planner said. cardPlannerBar is the
-	// planner's own word, kept for the same reason as subtaskRef.PlannerBar.
+	// card_tier and persisted in the parent body marker so a resumed run sizes
+	// its review panel and Best-of-N pool the same way. cardPlannerBar is the
+	// planner's own word (see subtaskRef.PlannerBar).
 	cardSizing     sizing
 	cardPlannerBar string
 
@@ -348,20 +346,9 @@ type run struct {
 	// named like a recorded one is stripped too - accepted cost, mitigated by
 	// the planner re-supply baking it into subtask bodies.
 	//
-	// Written twice: newRun seeds it from tc.Description before planning, then
-	// createSubtasks re-derives it from the now-current o.body once plan-phase
-	// mutations (createFollowups' "## Split", recordUnreachable's
-	// "## Unreachable Criteria") have landed - both headings survive
-	// stripAgentSections by design, so the refresh is what lets execute's
-	// coder prompts and the review specialists/synthesizers see them. The
-	// first write stays authoritative through diagnose/design/drafting - not
-	// because the HITL adjust loop avoids this field (plannerDescription
-	// returns it as the base, only splicing in the prior "## Plan" from
-	// o.tc.Description), but because of ordering: every draftPlan/mobDraftPlan
-	// call that reads it happens strictly before createSubtasks, and every
-	// createSubtasks call site in runPlan is terminal (a return follows
-	// immediately), so the refresh below can never land before a planner read
-	// it could poison.
+	// Seeded by newRun from tc.Description and re-derived once by createSubtasks
+	// after ## Split and ## Unreachable Criteria land; every planner read
+	// happens before that refresh.
 	taskDescription string
 
 	// staleRemoteTip is the remote tip of this run's card branch as observed at
@@ -420,28 +407,11 @@ type run struct {
 	// forever.
 	reselects int
 
-	// fixFailed is the set of fix-coder models whose review fix round failed
-	// this run - it landed no commit, left the verify red, or hit its turn
-	// cap with a failing verify. Every later fix pick excludes them.
-	//
-	// fixBarSteps and fixBudgetSteps are the two correction counters, both
-	// MONOTONE for the whole run. A round that produced nothing or left the
-	// verify red is quality evidence and climbs the bar; a round that ran out
-	// of turns is volume evidence and widens the budget without blaming the
-	// model. A round that did BOTH - spent its whole window and still
-	// committed a tree the next verify rejects - is charged on both axes.
-	// Neither counter is ever lowered: runFix is shared with pr_gates, which
-	// runs AFTER review approval, so clearing them on an approving verdict
-	// handed the first gate round the model that had already failed. A call
-	// site that must not escalate says so per-call, via fixRequest.NoEscalate.
-	//
-	// fixFailReason and fixCapReason are the card-log wording for the last
-	// failure of each kind, kept apart because the two readers of a reason
-	// state different things: one says the bar was escalated, the other that
-	// the fix pool is exhausted, and neither is true of a round that merely ran
-	// out of turns. Only markFixFailed writes fixFailReason; only markFixCapped
-	// writes fixCapReason. lastFixModel is the model the most recent fix round
-	// ran on.
+	// fixFailed is the set of fix models whose round failed this run; later picks
+	// exclude them. fixBarSteps (quality) and fixBudgetSteps (volume) are monotone
+	// for the whole run because runFix is shared with pr_gates; a call site opts
+	// out per call via fixRequest.NoEscalate. fixFailReason and fixCapReason are
+	// the card-log wording for the last failure of each kind; lastFixModel ran last.
 	fixFailed      map[string]bool
 	fixBarSteps    int
 	fixBudgetSteps int
@@ -457,8 +427,8 @@ type run struct {
 	// at, promoted to lastFixBar when that round fails its gate.
 	pendingFixBar registry.Tier
 
-	// lastFixExhausted: the most recent fix round spent every turn of its
-	// window (a grace landing raises no MaxTurnsError).
+	// lastFixExhausted records that the most recent fix round spent every turn
+	// of its window (a grace landing raises no MaxTurnsError).
 	lastFixExhausted bool
 
 	// fixCappedPending records that the most recent fix round hit its turn cap

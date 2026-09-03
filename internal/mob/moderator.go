@@ -33,7 +33,7 @@ type seatHandle struct {
 	deadline time.Duration
 	// grace is the salvage window past deadline in which a completed-but-late
 	// utterance is still accepted instead of being canceled and dropped
-	// (EngineConfig.SalvageGrace; 0 restores the old immediate-drop behavior).
+	// (EngineConfig.SalvageGrace; 0 drops immediately).
 	grace time.Duration
 	// dead marks a seat permanently gone (open failed). A failed dial never
 	// returns a handle from dialSeat/dialGuest; the engine constructs the

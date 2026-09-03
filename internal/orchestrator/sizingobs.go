@@ -6,45 +6,14 @@ import (
 	"github.com/mhersson/contextmatrix-harness/events"
 )
 
-// sizingObservationKind records what one coder attempt actually cost in turns
-// against the budget it was given.
-//
-// harness.Result.Turns is the only turn measurement this system produces, and
-// before this row existed it was returned to the caller and discarded. Nothing
-// in the orchestrator reads a sizing_observation: it is free measurement,
-// recorded so a later analysis can ask whether the planner's estimate predicted
-// anything, and it stands on its own if that analysis never happens.
-//
-// One row per ATTEMPT, not per subtask, discriminated by outcome. An incapable
-// attempt burned about one turn and wrote nothing; pooled undiscriminated with
-// real completions it makes the turns-to-cap ratio meaningless, which is the
-// one thing the row exists to measure.
-//
-// The envelope already carries the card (the transcript is one file per card)
-// and the container-run ordinal (stamped by internal/attempt under "attempt"),
-// so neither is repeated here - and this invocation's attempt index is named
-// "reselect" so it cannot be read as that ordinal.
-//
-// Like model_selected, no arm claims this kind in the log bridge, so it reaches
-// the durable transcript and never an operator's live card stream. That absence
-// is the mechanism, and it is pinned by a test in internal/cli.
+// sizingObservationKind is the transcript row recording what one coder attempt
+// cost in turns against its window - one row per ATTEMPT, incapable attempts
+// included, so their near-zero turns do not pollute the ratio. Nothing in the
+// orchestrator reads it; the field names are a wire contract for offline
+// analysis. Like model_selected it reaches the durable transcript only.
 const sizingObservationKind = "sizing_observation"
 
 // sizingObs is one coder attempt's measurement.
-//
-// PlannerBar is the planner's own word for the unit named by Subtask: the
-// subtask's estimate on a coder row and on a subtask-scoped fix row, and the
-// card's on a card-scoped fix round. Pairing it with Bar is what separates a run
-// at the planner's estimate from a run at a corrected one - after a correction,
-// Bar carries the correction and the estimate is otherwise unrecoverable - which
-// only holds while both halves describe the same unit.
-//
-// TurnRatio is derived by emitSizingObs, which discards whatever a caller left
-// on the field, so no call site can compute it against a window it did not run
-// at. It is zero when MaxTurns is not positive: the operator left the cap unset,
-// the harness substituted its own default, and this side does not know what that
-// was. A consumer reads MaxTurns to tell that apart from a run that used no
-// turns.
 type sizingObs struct {
 	Phase  string
 	Solver string // solo | candidate | fix
@@ -56,17 +25,24 @@ type sizingObs struct {
 	// restarts at 0 for every subtask and every fix round; the cap bounding it
 	// is run-wide and shared across both paths, so a run's re-selections are
 	// not the sum of this column.
-	Reselect    int
-	Model       string
-	Bar         string
-	BudgetStep  int
+	Reselect   int
+	Model      string
+	Bar        string
+	BudgetStep int
+	// PlannerBar is the planner's own word for the unit named by Subtask.
+	// Pairing it with Bar separates a run at the planner's estimate from a run
+	// at a corrected one, which only holds while both halves describe the same
+	// unit.
 	PlannerBar  string
 	MaxTurns    int
 	WrapUpTurns int
 	Turns       int
-	TurnRatio   float64
-	Outcome     string // done | done_at_cap | incapable | max_turns | error
-	DurationMS  int64
+	// TurnRatio is derived by emitSizingObs, so no call site can compute it
+	// against a window it did not run at. Zero when MaxTurns is not positive:
+	// the harness substituted a default this side does not know.
+	TurnRatio  float64
+	Outcome    string // done | done_at_cap | incapable | max_turns | error
+	DurationMS int64
 }
 
 // sizingOutcome classifies how an attempt ended, from the error the choke point

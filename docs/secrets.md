@@ -3,8 +3,8 @@
 All credentials are CM-provisioned per run: ContextMatrix mints git tokens and
 the LLM endpoint credentials per run and sends them on the trigger payload
 (and on the task-skills pointer for the skills clone). The agent carries no
-local credential config and mints no tokens itself. Do not read raw tokens
-from config or env in new code paths, and do not add local minting back.
+local credential config and mints no tokens itself; never read raw tokens from
+config or env.
 
 ## Staging
 

@@ -104,16 +104,10 @@ var gatesCopilotRecheck = 10 * time.Second
 // for a request known to be in flight. A var so tests can shrink it.
 var gatesCopilotGraceWait = 5 * time.Minute
 
-// gatesCopilotGraceRetries are the elapsed-time offsets, measured from the
-// start of the grace window, at which awaitCopilotGrace re-issues a review
-// request that did not confirmably take. GitHub drops the requested_reviewers
-// POST without erroring when the request races the Copilot app's registration
-// of a new PR, so a re-request inside the window is cheaper than a whole
-// window of waiting for a review nothing was going to write; a retry proving
-// the reviewer is unwelcome keeps the fail-open skip. Offsets at or beyond
-// the window's deadline never fire, so the retries stay inside the grace
-// window; a retry firing late can run its confirmation re-check at most one
-// gatesCopilotRecheck past the deadline, and nothing beyond that.
+// gatesCopilotGraceRetries are the elapsed-time offsets from the start of the
+// grace window at which awaitCopilotGrace re-issues a review request that did
+// not confirmably take. Offsets at or beyond the window's deadline never fire,
+// so a retry's confirmation re-check runs at most one gatesCopilotRecheck late.
 var gatesCopilotGraceRetries = []time.Duration{time.Minute, 3 * time.Minute}
 
 // gateProgressKind is the event a gate emits once per poll. It is not a
@@ -354,26 +348,11 @@ func runPRGates(ctx context.Context, o *run) error {
 	return nil
 }
 
-// copilotGate holds the card until the Copilot review on the PR is addressed: it
-// takes a review already on the PR's current head when there is one, otherwise
-// makes sure a review is actually requested and waits for one on that head, then
-// triages its comments with one model call and spends up to gatesRoundsCap fix
-// rounds on the findings it judges real.
-//
-// Copilot being unavailable NEVER parks the card. A proven "cannot review"
-// response - a 422 "Copilot isn't available for this repository" - records the
-// verbatim reason on the card and passes the gate. A generic request failure
-// (e.g. a GraphQL login-resolution error) is NOT treated as unavailability: the
-// gate still enters the wait loop, because a repo-automated Copilot review may
-// arrive regardless, and a review that never arrives is recorded and passed at
-// the wait deadline. A 2xx on the request is not trusted either - GitHub
-// silently discards the request in some setups - so it is confirmed against
-// the POST's response body and one delayed re-read of the pending reviewer
-// list; a request confirmed by neither waits only a short grace window for a
-// repo-automated review (a pending request appearing during grace upgrades to
-// the full wait) and then passes with a note naming the dropped request. The
-// gate parks only on findings it could not get fixed, or on running out of
-// budget or turns while fixing them.
+// copilotGate holds the card until the Copilot review on the PR head is
+// addressed: it reuses a review already on the head, otherwise requests one
+// and waits, then triages and spends up to gatesRoundsCap fix rounds.
+// Invariant: a review the gate cannot obtain never parks the card; only
+// findings it could not fix, or budget/turn exhaustion while fixing, park.
 func (o *run) copilotGate(ctx context.Context, prURL string, st *gatesState) error {
 	if st.CopilotSatisfied {
 		o.gateNote(ctx, "copilot", "pr_gates: Copilot review was addressed in an earlier run; gate already satisfied", nil)
@@ -564,21 +543,11 @@ const (
 	cycleAwaitGrace
 )
 
-// copilotThreadWriter posts the gate's triage verdicts back into the PR's
-// review threads, best-effort: every write failure is a slog line, plus one
-// card note for the first, and nothing ever parks - the work is already
-// pushed by the time these writes happen. Threads are fetched lazily, once. A
-// thread that already carries any reply is never replied to again - a resumed
-// round must not double-post, and a thread a human answered gets no competing
-// agent reply (a dismissal still resolves such a thread: the writer cannot
-// tell a human's reply from its own crash-window one, and the verdict on the
-// card is final either way). A resolved thread is never re-resolved.
-//
-// The resolve rule: a dismissed (INVALID) thread resolves the moment its
-// reply lands - the decision is final. A VALID thread is resolved only by
-// resolveConfirmed, when a re-review arrives without repeating the comment;
-// resolving on the fix push alone would blind repeatedValidComments, which
-// exists because a fix round sometimes does not fix it.
+// copilotThreadWriter writes triage verdicts back into the PR's review
+// threads, best-effort: a write failure is one card note, never a park.
+// Resolve rule: an INVALID thread resolves with its reply; a VALID thread
+// resolves only when a re-review stops repeating the comment, because
+// resolving on the push alone would blind repeatedValidComments.
 type copilotThreadWriter struct {
 	o       *run
 	prURL   string
@@ -771,21 +740,11 @@ func (w *copilotThreadWriter) fail(ctx context.Context, err error) {
 	), nil)
 }
 
-// copilotReviewCycle handles one arrived review: dedupes against what earlier
-// rounds triaged, triages the fresh comments, and either passes the gate
-// (cycleSatisfied) or spends fix rounds until one commits, then re-requests
-// the review - the caller waits for the re-review of the new head, for the
-// full deadline when the re-request confirmably took (cycleAwaitReview) and
-// for only the grace window when it was accepted but dropped
-// (cycleAwaitGrace). A fix round that committed nothing earns the
-// gateNoChangeRetry-funded retry, and HEAD has not moved since the review
-// that produced the findings - re-requesting would buy a
-// guaranteed-identical review - so the retry is spent on the same findings
-// instead. The loop is self-bounding: the second no-change round finds the
-// retry already spent and parks. A comment an earlier round triaged VALID
-// counts as still open when Copilot repeats it verbatim - the fix round did
-// not actually resolve it - and it funds a fix round of its own, folded in
-// with anything freshly triaged VALID this round.
+// copilotReviewCycle handles one arrived review: dedupes it against earlier
+// rounds, triages what is new, and either passes the gate or spends fix
+// rounds until one commits, then re-requests the review. The outcome says
+// how long the caller waits for the re-review (see copilotCycleOutcome).
+// A comment an earlier round triaged VALID that Copilot repeats is still open.
 func (o *run) copilotReviewCycle(
 	ctx context.Context, prURL string, st *gatesState, triaged map[string]bool, review *CopilotReview,
 ) (copilotCycleOutcome, error) {
@@ -883,8 +842,7 @@ func (o *run) copilotReviewCycle(
 	}
 
 	// A VALID comment's reply waits for the fix push so it can cite the head
-	// that addressed it. The thread stays open: only a re-review that stops
-	// repeating the comment proves the fix landed (see the resolve rule on
+	// that addressed it. The thread stays open (see the resolve rule on
 	// copilotThreadWriter). Reopened comments already carry their reply.
 	writer.repliesToFixed(ctx, fresh, copilotCommentFindings(fresh, findings))
 
@@ -924,8 +882,8 @@ func (o *run) copilotReviewCycle(
 	return cycleAwaitReview, nil
 }
 
-// copilotRequestOutcome says how the gate should read ensureCopilotReviewer's
-// result.
+// copilotRequestOutcome says how the gate should read the result
+// requestCopilotReview produces.
 type copilotRequestOutcome int
 
 const (
@@ -1127,9 +1085,9 @@ func (o *run) noteCopilotGraceUpgrade(ctx context.Context, st *gatesState) {
 
 // settleCopilotGrace turns awaitCopilotGrace's answer into the gate's next
 // step: a skip that ends the gate (done, carrying the skip's own error), or
-// the review to carry into the wait loop. The two lines are the calling site's
-// wording for its skips - a first request and a re-request after a fix round
-// pass the gate on different terms.
+// the review to carry into the wait loop. A pending request found during the
+// window also records the upgrade note. The two lines are the calling site's
+// wording for its skips, which differ between a first request and a re-request.
 func (o *run) settleCopilotGrace(
 	ctx context.Context, st *gatesState, review *CopilotReview, requested bool,
 	unavailable, unavailableLine, droppedLine string,
@@ -1151,21 +1109,11 @@ func (o *run) settleCopilotGrace(
 	return review, false, nil
 }
 
-// awaitCopilotGrace waits briefly for evidence that anyone will review: a
-// review landing on the current head, or Copilot appearing as a pending
-// reviewer (a ruleset request, or a request the API listed late) - the latter
-// returned as requested=true so the caller can upgrade to the full wait. It
-// exists for requests that did not confirmably take: burning the full
-// copilot_wait there stalls the card for a review nothing suggests is coming.
-// While the window runs it also re-issues the review request at the
-// gatesCopilotGraceRetries offsets, each re-request confirmed the same way the
-// first one was - the response body, then a delayed CopilotRequested listing -
-// because GitHub drops the request without erroring when it races the PR's
-// registration with the Copilot app. A retry answering the proven 422
-// unavailability returns unavailableReason set so the caller can take the
-// same skip it would on a first-request 422. Like awaitCopilotReview, it
-// returns nil results (never an error) at the deadline - the gate proceeds on
-// a missing review, it never parks on one.
+// awaitCopilotGrace waits the short grace window for evidence a review is
+// coming - a review on the head, or Copilot listed as pending (returned as
+// requested=true so the caller upgrades to the full wait) - re-issuing the
+// dropped request at the gatesCopilotGraceRetries offsets. A retry's 422 comes
+// back as unavailableReason; like awaitCopilotReview it never errors at the deadline.
 func (o *run) awaitCopilotGrace(ctx context.Context, prURL string) (review *CopilotReview, requested bool, unavailableReason string, err error) {
 	start := time.Now()
 	deadline := o.gateDeadline(gatesCopilotGraceWait)
@@ -1194,10 +1142,6 @@ func (o *run) awaitCopilotGrace(ctx context.Context, prURL string) (review *Copi
 		// Re-issue the dropped request when the clock crosses a retry offset
 		// that has not fired yet, and confirm it exactly like the first
 		// request: the response body, then a recheck's worth of listing lag.
-		// A retry past the window's deadline never fires, so the retries
-		// stay inside the grace window; a retry firing late can run its
-		// confirmation re-check one gatesCopilotRecheck past the deadline,
-		// and nothing beyond that.
 		if nextRetry < len(gatesCopilotGraceRetries) && !start.Add(gatesCopilotGraceRetries[nextRetry]).After(time.Now()) &&
 			start.Add(gatesCopilotGraceRetries[nextRetry]).Before(deadline) {
 			nextRetry++
@@ -2032,15 +1976,11 @@ func (o *run) ciFixRound(ctx context.Context, prURL string, st *gatesState, fail
 	return nil
 }
 
-// gateNoChangeRetry funds the ONE retry a no-change fix round earns before a
-// gate parks: a round that changed nothing is quality evidence, and another
-// round is already funded, so the gate raises the shared bar once and spends
-// it on a stronger fixer rather than parking without ever having tried one.
-// Shared by the CI and Copilot arms so neither carries its own copy of the
-// rule. Keyed on the bar counter, which the review loop also writes: on a
-// card whose rounds already escalated elsewhere, a stronger fixer has been
-// tried and failed, so the caller parks on the first no-op round exactly as
-// before. Reports whether it funded the retry; false tells the caller to park.
+// gateNoChangeRetry funds the one retry a no-change fix round earns before a
+// gate parks: it raises the shared fix bar so the retry runs on a stronger
+// fixer. Keyed on fixBarSteps, which the review loop also writes, so a card
+// that already escalated gets no second retry. Returns false when the caller
+// must park.
 func (o *run) gateNoChangeRetry(ctx context.Context, gate, label string, rounds int) bool {
 	if o.fixBarSteps != 0 || rounds >= gatesRoundsCap {
 		return false

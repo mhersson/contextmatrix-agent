@@ -28,19 +28,10 @@ const reviewPanelSize = 3
 // a zero cap) can never loop forever.
 const hardReviewIterationCap = 50
 
-// maxVerifyRedCredit bounds how far verify-red rounds can extend the attempts
-// cliff. A verify-red round runs no panel and produces no verdict - charging
-// it a panel attempt spends the review budget on a build failure - but the
-// extension is bounded so a tree that never comes back green still reaches
-// the authoritative pass and parks. The server-side counter still increments
-// every round: it is the resume-stable round numbering and the lifetime
-// ceiling, and both must keep counting verify-red rounds.
-//
-// This is a ceiling on the credit, not a promise it is always available: the
-// per-run credit is further clamped to what config.MaxReviewAttemptsCap
-// leaves under the configured cap (see reviewLoop's creditCap), so the credit
-// never pushes the authoritative pass's final increments past CM's
-// server-side ceiling.
+// maxVerifyRedCredit bounds how many verify-red rounds may push the
+// authoritative cliff out by one round each: such rounds run no panel, so a
+// panel attempt should not pay for a build failure. reviewLoop clamps the
+// per-run credit further so the cliff never passes config.MaxReviewAttemptsCap.
 const maxVerifyRedCredit = 3
 
 // verifyOutputTail caps the verify-command output carried into findings, so a
@@ -179,15 +170,9 @@ func (o *run) reviewTimeLeft(ctx context.Context, round int) error {
 	return &ReviewParkedError{Reason: reviewParkedNoTime}
 }
 
-// runReview is the review phase. The parent enters review (idempotent on
-// resume), then - on the autonomous path and before the review loop - consults
-// a recorded approval from a prior run: if the recorded HEAD SHA matches the
-// current branch HEAD and the verify gate (when one is configured) still
-// passes, the approval is adopted, skipping the specialist panel and synthesis.
-// On adoption the recorded surviving fixes run as a non-escalating cleanup
-// pass, the approval record is cleared, and the FSM proceeds to integrate.
-// Any mismatch (no record, different HEAD, red or erroring verify) falls
-// through to the normal review loop unchanged.
+// runReview is the review phase: the parent enters review (idempotent on
+// resume), then the run delegates to the HITL path, to an adoptable recorded
+// approval, or to the review loop.
 func runReview(ctx context.Context, o *run) error {
 	d := o.d
 	cfg := d.Cfg
@@ -225,13 +210,6 @@ func runReview(ctx context.Context, o *run) error {
 		return o.runReviewHITL(ctx, plan)
 	}
 
-	// Autonomous path: consult the recorded approval before entering the review
-	// loop. When a prior run approved the card, the record binds the verdict to
-	// the commit it approved. Resume adopts it when the HEAD still matches and,
-	// when a verify command is configured, the gate still passes. Any mismatch
-	// falls through to the normal review loop. A park error from the adopted
-	// cleanup fix pass propagates out of runReview so the FSM parks the card
-	// rather than re-buying the panel on an exhausted budget.
 	adopted, aerr := o.tryAdoptApproval(ctx, plan)
 	if aerr != nil {
 		return aerr
@@ -244,16 +222,11 @@ func runReview(ctx context.Context, o *run) error {
 	return o.reviewLoop(ctx, plan, 0)
 }
 
-// tryAdoptApproval checks whether a recorded approval can be adopted on resume.
-// It returns (true, nil) when adoption succeeds: the record exists, the current
-// branch HEAD matches the recorded SHA, and the verify gate (when the plan has a
-// command) is still green. On adoption it runs the recorded surviving fixes as
-// a non-escalating cleanup pass, clears the approval record from the card body,
-// and returns nil for the FSM to proceed to integrate. On any mismatch (no
-// record, different HEAD, red or erroring verify) it does nothing and returns
-// (false, nil) so the caller falls through to the normal review loop. A park
-// error from the adopted cleanup fix pass propagates up to park the card rather
-// than re-buying the panel on an exhausted budget.
+// tryAdoptApproval adopts a recorded approval on resume when HEAD still equals
+// the recorded SHA and the verify gate (if any) is green: it runs the recorded
+// fixes as a non-escalating cleanup pass, clears the record and reports
+// (true, nil). Any mismatch reports (false, nil); a park from the cleanup pass
+// propagates.
 func (o *run) tryAdoptApproval(ctx context.Context, plan verifyPlan) (bool, error) {
 	d := o.d
 
@@ -350,7 +323,7 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 	// documents that the authoritative pass's final increments land the
 	// counter at attemptsCap+1, so credit can widen the cliff only as far as
 	// that headroom allows. A no-op at the default cap (min(3, 6-3) == 3);
-	// zero at the maximum cap, matching main's uncredited behavior exactly.
+	// zero at the maximum cap, so a cap of 6 gets no credit.
 	creditCap := min(maxVerifyRedCredit, config.MaxReviewAttemptsCap-attemptsCap)
 
 	// fixRan is whether the IMMEDIATELY PRECEDING fix round both ran to
@@ -434,24 +407,11 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 			return nil
 		}
 
-		// A fix round that committed but left this round's verify red failed as
-		// surely as one that landed nothing: the next fix escalates. Round 1's
-		// red verify has no fix behind it and escalates nothing. A round WE
-		// truncated clears fixRan - the cap itself stays volume evidence,
-		// charged on the budget axis alone - but it records fixCappedPending,
-		// so a truncated round that committed a still-red tree is charged on
-		// the bar axis here too: a full budget spent and a broken tree left
-		// behind is quality evidence as well as volume evidence, and the next
-		// fix both climbs the bar and runs wider. A truncated round whose gate
-		// came back green (or skipped) consumes the flag with no bar charge.
-		//
-		// When the round behind it left a GREEN gate, that fix did not merely
-		// fail to fix - it broke a tree that worked, so its fixup is discarded
-		// and the branch goes back to the commit it started from. discarded
-		// steers only what the discard actually changes: vres still describes
-		// the red gate that really ran (the round is already recorded from it),
-		// while the round that FOLLOWS starts from a predecessor the gate proved
-		// green.
+		// A committed fix behind a red gate failed. If the gate it followed was
+		// green it regressed a working tree: discard its fixup (branch back to
+		// preFixHead) and re-issue the panel mandate. A round truncated at its
+		// cap cleared fixRan but left fixCappedPending, so a red gate behind it
+		// still charges the bar.
 		discarded := false
 
 		// A capped round consumed the pending flag when its gate came back
@@ -731,9 +691,10 @@ func approvedWithFixesApplied(findings string) string {
 }
 
 // cleanupPass runs an approving verdict's surviving findings as one
-// non-escalating fix pass and proves or drops the fixup. Only a park (budget,
-// context limit, toolchain) propagates; a turn cap is handled like any other
-// outcome of an optional pass, and every other failure leaves the run approved.
+// non-escalating fix pass and proves or drops the fixup. summary is the same
+// findings text as req.Findings, framed by the approvedWith* helpers for the
+// PR body. Only a park propagates; a turn cap and every other failure leave
+// the run approved.
 func (o *run) cleanupPass(ctx context.Context, plan verifyPlan, req fixRequest, summary string, fixes []fix) error {
 	d := o.d
 
@@ -812,29 +773,11 @@ const cleanupVerifyContext = "cleanup fix pass, after the fixup"
 // describes a tree the branch no longer holds.
 const cleanupVerifyCorrection = "the cleanup fix pass that followed this round is still on the branch, and its own verify did not pass"
 
-// verifyCleanupFixup re-runs the resolved verify plan over a committed cleanup
-// fixup and either keeps it or resets it away. The fixup lands after the
-// approving round's gate has already run, so without this the run would carry
-// that round's PASSED into the PR body and the completion note while describing
-// a tree the cleanup could have broken.
-//
-// pre is the commit the pass started from. A red gate resets the branch to it
-// and reverts the summary to open findings: the cleanup pass is optional by
-// construction, so dropping it restores a tree the approving round already
-// verified - which is why a failure here needs no fix round, no retry and no
-// park. A gate that could not report at all sits in the same position (the
-// fixup is unproven) and takes the same exit. The pushed fixup outlives the
-// reset on the remote until integrate's lease push overwrites the branch from
-// here, which is the same overwrite every rebased run performs.
-//
-// Every other outcome updates the run-level result, because it describes the
-// tree that will ship: a pass proves the fixup, and an inconclusive run (a
-// timeout, a missing tool) proves nothing about it - both are facts about the
-// fixup rather than about the tree the approving round measured. So is a red
-// gate whose discard could not be performed, which is the one path that reports
-// a failure it could not undo. Whenever a kept fixup did not pass, the round's
-// recorded section is corrected too: the PR trailer and the card body must not
-// contradict each other about the same tree.
+// verifyCleanupFixup re-runs the verify plan over a committed cleanup fixup.
+// Red: reset to pre (the tree the approving round verified) and revert the
+// summary to open findings. Passed, inconclusive, or red but undiscardable:
+// keep it and make its result the run's, correcting the round's recorded
+// verify line when the kept fixup did not pass.
 func (o *run) verifyCleanupFixup(ctx context.Context, plan verifyPlan, round int, pre, findings string) {
 	if len(plan.Argv) == 0 {
 		return
@@ -1602,15 +1545,10 @@ func (o *run) mobReviewVerdict(ctx context.Context) (verdict, bool) {
 }
 
 // mobReviewBriefing assembles the discussion briefing: the branch diff against
-// the base branch plus the prior round's findings.
-//
-// The diff is never scoped to a review snapshot. A fix can land code outside
-// the delta it targeted, and every mob round after the first follows a fix, so
-// a snapshot-scoped briefing would hide exactly the code the round exists to
-// re-examine - a seat reported this at runtime, saying the findings cited
-// symbols absent from its diff. The solo fan-out still scopes to the snapshot
-// on those rounds (it re-widens only on the authoritative pass and after a
-// no-op fix), so it carries the same gap; closing it there is separate work.
+// the base branch plus the prior round's findings. The diff is never scoped to
+// a review snapshot, because a fix can land code outside the delta it targeted
+// and every mob round after the first follows a fix. The solo fan-out does
+// scope to the snapshot on those rounds, so it carries that gap.
 func (o *run) mobReviewBriefing(ctx context.Context) (string, error) {
 	diff, err := o.d.Git.Diff(ctx, o.d.Cfg.BaseBranch)
 	if err != nil {
@@ -2119,11 +2057,8 @@ func (o *run) fixBarBase(req fixRequest) registry.Tier {
 // once per failed round, and a budget seeded from the bar the round ACTUALLY
 // RUNS AT, then widened once per capped round.
 //
-// The budget is seeded from the fix bar rather than from the card's, which
-// reproduces what the pre-split code did. Taking it from the card would drop the
-// authoritative pass - floored at complex, and the one run where exhausting the
-// turns ends the run rather than deferring it - back to the base on every
-// moderate card.
+// The budget is seeded from the fix bar so the authoritative pass, floored at
+// complex, keeps its wider window.
 //
 // The two axes stay separate in the direction that matters: a turn cap widens
 // the budget and never touches the bar, so running out of room can never buy a
@@ -2174,14 +2109,11 @@ func (o *run) markFixCapped() {
 	o.fixCapReason = "hit its turn cap"
 }
 
-// reviewHistoryWindow is how many recent review rounds feed back into the
-// run: the authoritative pass's prior-findings context, and the o.lastFindings
-// seed newRun computes from a resumed card's body (which the first
-// non-authoritative panel/synthesis call reads before recordRoundFindings
-// overwrites it). Each recorded verdict carries every surviving finding
-// forward, so rounds older than the window are redundant to the decision -
-// and an unbounded history on either path is what pushed the synthesis step
-// past its budget in production.
+// reviewHistoryWindow is how many recent review rounds feed back into the run:
+// the authoritative pass's prior-findings context, and the o.lastFindings seed
+// newRun computes from a resumed body, read by the first non-authoritative
+// panel/synthesis call before recordRoundFindings overwrites it. Each verdict
+// carries every surviving finding forward, so older rounds are redundant.
 const reviewHistoryWindow = 3
 
 // recentReviewFindingsHistory returns the most recent reviewHistoryWindow

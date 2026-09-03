@@ -268,25 +268,10 @@ func (o *run) runModelSynthesis(ctx context.Context, reg *tools.Registry, prompt
 }
 
 // coderBatchNudgeTurns arms the harness batching nudge for the coder family:
-// after this many consecutive turns that each spend a whole model call on one
-// read-only lookup, the harness injects a single message suggesting the model
-// group independent lookups. It suggests only - it never groups anything itself,
-// so a model whose next lookup depends on this one can ignore it.
-//
-// Three is deliberate. It is the length at which the measured waste starts (37
-// stretches of three or more consecutive single read-only turns across the
-// recorded runs, one reaching six), and it is short enough that lookups remain
-// to group when it lands. Two would fire on the ordinary dependent pair: grep,
-// then read what it found.
-//
-// Scoped to the coder because that is the measured offender - 1.32 calls per
-// turn, 79% of its turns making exactly one, despite being the only phase whose
-// prompt already asks it to batch. Planning and diagnosis already batch at 2.39
-// and 2.10 calls per turn; nudging them would spend the one-shot injection on a
-// phase doing it right.
-//
-// The message is left empty on purpose: the harness default names the count,
-// and no phase-specific wording improves on that.
+// after this many consecutive single-lookup turns the harness injects one
+// suggestion to group lookups. Three, not two: two fires on the ordinary
+// dependent pair (grep, then read). Coder only - planning and diagnosis
+// already batch. Message left empty so the harness default names the count.
 const coderBatchNudgeTurns = 3
 
 // runModelWrapUp is runModel with the wrap-up nudge configured: when

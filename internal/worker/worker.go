@@ -263,7 +263,7 @@ func Run(ctx context.Context, spec RunSpec, ops CardOps, client llm.LLM, emit *e
 	// Every card runs the FSM. HITL (interactive && !autonomous) runs it in HITL
 	// mode - sign-off gates wait on the inbox and creative cards brainstorm;
 	// autonomous/non-interactive runs it with gates auto-passed and brainstorming
-	// skipped. The freeform linear path is retired.
+	// skipped.
 	return runFSM(ctx, runCtx, fsmArgs{
 		ops: ops, git: git, client: client, emit: emit,
 		spec: spec, tcx: tcx, branch: branchName,
@@ -335,42 +335,10 @@ type fsmArgs struct {
 	human      *Inbox
 }
 
-// runFSM drives the orchestrator phase loop for an autonomous (or promoted) card
-// and maps its outcome to a worker Result. The heartbeat goroutine and run
-// context are owned by Run; runFSM never starts or stops them. Token usage is
-// reported per-phase by the orchestrator, so the park paths here do not re-report.
-//
-// Error mapping (spec §3.2):
-//   - nil: the FSM completed the card (it called CompleteTask itself in done) ->
-//     graceful "completed", no extra CompleteTask here.
-//   - ReviewParkedError: graceful "completed", card left in review, NO
-//     CompleteTask and NO release - a human picks it up from review.
-//   - GatesParkedError: identical shape - the pr_gates phase could not clear a
-//     PR gate, so the card waits in review with its ## PR Gates note.
-//   - BudgetExceededError: push WIP, release the claim, return the error
-//     (non-zero exit; serve emits the failed callback).
-//   - ContextLimitError: identical to the budget park - push WIP, release the
-//     claim, return the error - so in-flight work survives a context-window stop.
-//   - ctx.Err() (end_session/kill): graceful path - push WIP, release,
-//     exit 0; the persisted phase stays for a later resume. Checked BEFORE
-//     ToolchainMissingError below: a context-canceled Tier-3 model call can
-//     still surface the toolchain sentinel, and an operator-initiated kill
-//     must win that race rather than being reported as an environmental
-//     blocked-park.
-//   - ToolchainMissingError: same push-WIP/release/error shape as
-//     Budget/Context above, plus the genuinely new step - transition the card
-//     to blocked (before the release, since ownership may be required) so a
-//     human sees the environmental park on the board instead of a silently
-//     released claim. A failed transition (blocked is project-configurable)
-//     is logged and degrades to the same silent park as the other arms -
-//     never fatal.
-//   - VerifyParkedError: identical to the toolchain arm - push WIP, blocked,
-//     release, fail. The pre-commit gate refused to COMMIT the coder's work as
-//     finished; the push is what keeps that work from dying with the container.
-//   - SplitOverflowError: identical to the verify-park arm - push WIP, blocked,
-//     release, fail. The plan phase refused to auto-create a follow-up split
-//     larger than the cap; a human must re-cut the card.
-//   - any other error: release the claim and return it.
+// runFSM builds the orchestrator Deps for one card, runs the phase loop under
+// runCtx, and maps the terminal error to a worker Result via mapFSMResult.
+// The heartbeat goroutine and run context are owned by Run. Usage is reported
+// per phase by the orchestrator, so no park path here re-reports it.
 func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, error) {
 	// Guest bearer tokens are known at worker start, so they join the
 	// immutable redactor alongside the endpoint credentials.
@@ -901,8 +869,7 @@ func ops2orchestrator(ops CardOps) orchestrator.Ops {
 	return nil
 }
 
-// writeToolsFor is the full model-facing toolset rooted at dir, matching the
-// linear path's registry so the FSM coder has the same capabilities. It is the
+// writeToolsFor is the full model-facing toolset rooted at dir. It is the
 // one source of truth behind both the main workspace's WriteTools registry and
 // Best-of-N's per-candidate WriteToolsForDir factory: the root dir and the
 // verify tool vary per call site, every other argument is fixed for the run.

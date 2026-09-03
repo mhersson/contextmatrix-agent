@@ -190,16 +190,11 @@ func (o *run) executeSubtaskWith(ctx context.Context, sc *solverCtx, sub subtask
 // CM's default 30m heartbeat_timeout). A var so tests can shrink it.
 var subtaskHeartbeatInterval = 5 * time.Minute
 
-// VerifyParkedError marks the pre-commit verify park: the run's resolved verify
-// command was red on the coder's work, the one bounded fix pass ran, and the
-// re-run was still red. The worker maps it like the toolchain park - push the
-// WIP, transition the card to blocked, release the claim, fail - so the tree
-// the gate refused leaves the container instead of dying with it, and the park
-// is visible on the board rather than only in the log.
-//
-// The command and the output tail travel on the error because the container
-// holding them is destroyed before anyone reads the card, and because the park
-// arm that writes them to the card sits above the phase that produced them.
+// VerifyParkedError marks the pre-commit verify park: the resolved verify
+// command was red, the one bounded fix pass ran, and the re-run was still red.
+// The worker maps it like the toolchain park - push the WIP, move the card to
+// blocked, release the claim. Command, output and Environmental all travel on
+// it because the park arm that reports them outlives the container.
 type VerifyParkedError struct {
 	Subtask string // the subtask whose gate stayed red
 	Command string // the verify command, as displayed
@@ -215,48 +210,12 @@ func (e *VerifyParkedError) Error() string {
 	return fmt.Sprintf("subtask %s: `%s` still fails after one fix pass", e.Subtask, e.Command)
 }
 
-// preCommitVerify runs the run's resolved verify command against the coder's
-// uncommitted work and gates the commit on the result. Returning nil means the
-// commit may proceed: the command passed, no command resolved (the skip tier),
-// or the run was inconclusive - a timeout or a missing tool, which is not
-// evidence of a defect, so the commit proceeds unverified exactly as it did
-// before this gate existed. That mirrors the review round's own handling of a
-// skip. A genuine failure gets ONE fix pass through the review phase's fix path
-// and one re-run; still red, and the error parks the subtask with the work
-// uncommitted, so the coder's work is never committed while the gate is red.
-// One pass, never a loop - the review phase's fix loop is the multi-round
-// mechanism.
-//
-// That error is *VerifyParkedError, a park sentinel, so the exit takes the
-// worker's park path rather than its default arm: the WIP is pushed, the card
-// goes to blocked, and the claim is released. The push carries the very tree
-// this gate refused, deliberately - refusing to COMMIT it as finished work is
-// the gate's job, and destroying it with the container is not the same thing.
-// It reaches a human as a red branch on a blocked card, which is what a resume
-// and a review both need.
-//
-// The command runs once per subtask, not twice: when the coder's verify tool
-// already passed and the tree has not moved since, the gate takes that verdict
-// rather than re-running the identical command over identical bytes - see
-// gateAcceptsToolPass for the three conditions and why nothing else qualifies.
-//
-// The plan comes from ensureVerify and the execution from runVerifyPlan, the
-// same two calls the review-round gate makes, so the two cannot drift into
-// different commands, timeouts or environments. Nothing here knows what a check
-// command looks like; the resolved plan is the only source. Whether that command
-// measures the working tree rather than a cache is a property of what the
-// project declares, not something this gate can or should patch.
-//
-// Solo solvers only. A Best-of-N candidate is gated by the judge phase's
-// authoritative verify over every candidate worktree, and candidates race in
-// parallel over one shared run: resolving per candidate would race the run's
-// cached plan, and a per-candidate fix pass would charge the run ledger during
-// the fan-out, which the candidate sub-ledgers exist to keep separate.
-//
-// exhausted says whether the coder that wrote the work spent every turn it was
-// given. It is carried in rather than measured here because the caller holds
-// both operands, and it is what lets the still-red arm correct the turn budget
-// as well as the bar - see applyPrecommitVerifyEvidence.
+// preCommitVerify gates the coder's uncommitted work on the run's verify plan.
+// nil means commit: passed, no command resolved, or inconclusive (a timeout or
+// missing tool is not evidence of a defect). A failure gets exactly one fix pass
+// and one re-run; still red returns *VerifyParkedError, whose park path pushes
+// the refused tree as WIP. Solo only - candidates are verified by the judge.
+// exhausted (the coder spent its whole window) picks which sizing axes rise.
 func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef, exhausted bool) error {
 	// One assignment point, before any early return, so a verdict from an
 	// earlier subtask can never stand in for this one.
@@ -385,11 +344,10 @@ func (o *run) runGate(ctx context.Context, sc *solverCtx, sub subtaskRef, where 
 }
 
 // emitAcceptedToolPass records a gate that certified on the coder's own verify
-// tool pass. Same reasoning as runVerifyPlan's emit: without an event the
-// transcript carries no record of this gate at all, and consumers undercount one
-// verification per accepted subtask. The source names the acceptance and no
-// command field is set - nothing re-ran, and an accepted pass must never read as
-// a gate-executed one.
+// tool pass: without an event the transcript carries no record of this gate at
+// all, and consumers undercount one verification per accepted subtask. The
+// source names the acceptance and no command field is set - nothing re-ran,
+// and an accepted pass must never read as a gate-executed one.
 func (o *run) emitAcceptedToolPass(sub subtaskRef) {
 	if o.d.Emit == nil {
 		return
@@ -1379,45 +1337,11 @@ func (o *run) raiseSubtaskBoth(ctx context.Context, sub subtaskRef, why string) 
 	})
 }
 
-// applyPrecommitVerifyEvidence records what a still-red pre-commit verify says
-// about a subtask's sizing, from the two facts the gate hands it: whether the
-// failure was environmental, and whether the coder that wrote the work spent
-// every turn it was given.
-//
-// A verify that RAN and genuinely FAILED, after a fix pass had already had its
-// chance at it, is evidence about QUALITY: what the coder produced is wrong.
-// The bar rises so the next attempt draws a stronger coder.
-//
-// When that coder also exhausted its window, the same failure is evidence about
-// VOLUME too, and both axes rise - the same composed correction the capped path
-// makes for the identical shape. The grace turn is why the two cases have to be
-// told apart here rather than by an error: it grants one terminal call after the
-// cap and returns cleanly, so a coder that ran out of room does not raise
-// *MaxTurnsError, and a window exhausted without raising it must not buy a
-// weaker correction than one that raised it.
-//
-// A failure carrying the container's resource-exhaustion signature is evidence
-// about the environment - under a pids limit a compile step succeeds and its
-// inner fork dies with EAGAIN, so the command exits non-zero and is classified
-// failed - and about neither axis, whatever the coder's turns were. That is the
-// same exemption the capped path's leaderboard report takes, for the same
-// reason.
-//
-// The capped path takes the same exemption: an environmentally-failed verify
-// after a turn cap gets logEnvironmentalCapBudget's card-log-only note, not a
-// raise either, so this path's no-op on the identical shape is consistent
-// rather than a divergence.
-//
-// The environmental verdict is classified once by the caller and carried in,
-// so this correction and the caller's own suppression of the outcome row can
-// never disagree about the cause. The only call site reaches this on a genuine
-// verifyFailed: a skipped result and a *ToolchainMissingError both return
-// earlier, so no status guard is needed here.
-//
-// There is no reader for this on THIS run - a still-red gate parks it, and the
-// tree reaches the next run only as the worker's WIP commit, never as a finished
-// subtask. That next run redoes the subtask, and reconcile hands it the raised
-// sizing.
+// applyPrecommitVerifyEvidence raises the subtask's sizing after a still-red
+// gate: a genuine failure is quality evidence (bar); a failure by a coder that
+// also spent its whole window is volume evidence too (bar and budget). An
+// environmental failure raises nothing, matching executeClaimedWith's
+// suppression of the outcome row. The raised marker is read by the next run.
 func (o *run) applyPrecommitVerifyEvidence(ctx context.Context, sub subtaskRef, environmental, exhausted bool) {
 	if environmental {
 		return

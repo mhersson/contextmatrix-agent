@@ -190,49 +190,11 @@ func (o *run) mobCheckpoint(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 	o.commitRevise(ctx, sc, sub, msg, verified)
 }
 
-// checkpointReviseVerify gates the checkpoint's revise commit through
-// runGate, the same gate preCommitVerify runs over the subtask coder's own
-// work, so the three gates cannot drift into different commands, timeouts or
-// environments - and so the revise coder's own verify-tool pass on the tree
-// about to be committed spares this gate a second run of it, exactly as the
-// subtask coder's does. Unlike preCommitVerify it has no boardOps guard or
-// gate-evidence reset of its own - the caller's sc.boardOps &&
-// checkpointEligible check already restricts checkpoints to the solo path -
-// and it earns no fix pass: the alternative to rescuing a bad revise is
-// discarding a suggestion, which costs nothing.
-//
-// Every non-passing outcome DISCARDS the revise and keeps the verified
-// commit already in place, rather than parking the subtask or committing
-// unverified:
-//
-//   - A FAILED verify: the revise is a defect.
-//   - An error resolving or running the verify - a budget park, a
-//     cancelled context, or a *ToolchainMissingError. Only a declared- or
-//     detected-tier one, raised by resolveVerify inside ensureVerify's own
-//     call, rewrites the card's "Verify Command" section on its way out to
-//     say the command cannot run in this container; a runtime-tier one,
-//     raised later by runVerifyPlan when the command itself hits an
-//     unreachable container runtime, carries no such rewrite. Either way,
-//     committing here would ship a revise nobody checked, and for the
-//     ensureVerify case would also leave a card that contradicts itself.
-//
-// A revise nobody could check is not evidence it is good, and every other
-// failure on this path - mobCheckpoint's diff/quorum/engine/parse/fix-run
-// failures - already abandons the revise and continues on the committed
-// tree; this gate follows the same rule rather than being the one arm that
-// ships unverified work.
-//
-// A skipped or inconclusive result - no command resolved, or the command
-// ran but was inconclusive (timeout, missing tool) - is NOT a failure,
-// mirroring the pre-commit gate's own skip arm: the commit proceeds exactly
-// as it did before this gate existed.
-//
-// keep is false when the caller must discard the revise and return without
-// committing. verified is true only when the gate certified the revised tree,
-// whether it ran the command itself or took the reviser's own pass against
-// that exact tree: false for the skip tier and for an inconclusive run,
-// neither of which is evidence the revised tree is good, and false on every
-// discard.
+// checkpointReviseVerify gates a checkpoint revise through the same runner as
+// preCommitVerify. A pass or an inconclusive run keeps the revise; a failed
+// verify or any error resolving/running it discards it and keeps the
+// already-verified commit - a revise nobody checked is not evidence it is good,
+// and dropping a suggestion costs nothing. No fix pass. Returns (keep, verified).
 func (o *run) checkpointReviseVerify(ctx context.Context, sc *solverCtx, sub subtaskRef) (keep, verified bool) {
 	_, vres, ran, err := o.runGate(ctx, sc, sub, checkpointReviseGateContext(sub.ID))
 	if err != nil {

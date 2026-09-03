@@ -50,35 +50,11 @@ func emitModelSelection(emit *events.Emitter, phase, subtaskID string, p registr
 	})
 }
 
-// walkedDown reports that the LADDER produced this pick at a lower rung than
-// the phase asked for. It is the condition an outcome report suppresses a
-// `failed` row on, and it is deliberately narrower than Pick.BelowBar().
-//
-// The harm being avoided is a ratchet, and the ratchet needs a rung to empty.
-// When the requested rung's pool is dry the selector hands the work to a model
-// rated for less; a loss row then lowers the very prior that put that model on
-// its OWN rung, so that rung empties too and the next selection walks down
-// further. The row would be measuring the selector's shortfall as the model's.
-//
-// So the question is not "did this pick clear the bar" but "did the ladder
-// walk it down", and only a ladder pick can be walked down. The two OFF-LADDER
-// sources are excluded by that definition rather than exempted from it:
-//
-//   - A pin is operator intent. The selector never looked, so there was no
-//     walk and no shortfall of the search. (The pins this package synthesizes
-//     also carry no measured prior at all, so every one of them reports
-//     BelowBar - suppressing on BelowBar alone would silently stop recording
-//     outcomes for every pinned run, denying the operator the one piece of
-//     feedback they have on their own choice. Same reading the authoritative
-//     fix gate and panelBelowBar already take.)
-//   - The capable default is reached only when NO rung had anything, so it
-//     clears no configured bar and sits in no rung. Nothing can empty beneath
-//     it, and its rows are the only evidence that exists about the operator's
-//     fallback model.
-//
-// This gates the FAILURE only. A win from a walked-down pick is still
-// recorded: succeeding above your rung is real evidence, and dropping it would
-// leave the rung above permanently unclimbable.
+// walkedDown reports that the ladder served this pick from a lower rung than
+// the phase asked for. Only ladder sources (auto, favorite) can be walked down:
+// a pin is operator intent and the capable default sits in no rung, so both
+// return false even though Pick.BelowBar() is true for them. Callers suppress a
+// `failed` row on it, so the search's shortfall is never charged to the model.
 func walkedDown(p registry.Pick) bool {
 	switch p.Source {
 	case registry.SourceAuto, registry.SourceFavorite:
