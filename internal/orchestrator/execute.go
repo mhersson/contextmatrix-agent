@@ -190,11 +190,11 @@ func (o *run) executeSubtaskWith(ctx context.Context, sc *solverCtx, sub subtask
 // CM's default 30m heartbeat_timeout). A var so tests can shrink it.
 var subtaskHeartbeatInterval = 5 * time.Minute
 
-// VerifyParkedError marks the pre-commit verify park: the resolved verify
-// command was red, the one bounded fix pass ran, and the re-run was still red.
-// The worker maps it like the toolchain park - push the WIP, move the card to
-// blocked, release the claim. Command, output and Environmental all travel on
-// it because the park arm that reports them outlives the container.
+// VerifyParkedError marks the pre-commit verify park: red command, one fix
+// pass, still red. The worker maps it like the toolchain park - push the WIP,
+// blocked, release. Command and Output travel on it for the card note written
+// after the container is gone; Environmental binds the exhaustion verdict once,
+// so sizing, the card log and the suppressed outcome row cannot disagree.
 type VerifyParkedError struct {
 	Subtask string // the subtask whose gate stayed red
 	Command string // the verify command, as displayed

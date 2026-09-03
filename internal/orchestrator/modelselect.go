@@ -53,7 +53,7 @@ func emitModelSelection(emit *events.Emitter, phase, subtaskID string, p registr
 // walkedDown reports that the ladder served this pick from a lower rung than
 // the phase asked for. Only ladder sources (auto, favorite) can be walked down:
 // a pin is operator intent and the capable default sits in no rung, so both
-// return false even though Pick.BelowBar() is true for them. Callers suppress a
+// return false even though Pick.BelowBar() can be true for them. Callers suppress
 // `failed` row on it, so the search's shortfall is never charged to the model.
 func walkedDown(p registry.Pick) bool {
 	switch p.Source {

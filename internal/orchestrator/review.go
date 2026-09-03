@@ -774,10 +774,10 @@ const cleanupVerifyContext = "cleanup fix pass, after the fixup"
 const cleanupVerifyCorrection = "the cleanup fix pass that followed this round is still on the branch, and its own verify did not pass"
 
 // verifyCleanupFixup re-runs the verify plan over a committed cleanup fixup.
-// Red: reset to pre (the tree the approving round verified) and revert the
-// summary to open findings. Passed, inconclusive, or red but undiscardable:
-// keep it and make its result the run's, correcting the round's recorded
-// verify line when the kept fixup did not pass.
+// Red, or unable to run at all: reset to pre (the tree the approving round
+// verified) and revert the summary to open findings. Passed, inconclusive, or
+// undiscardable: keep it, make its result the run's, and correct the round's
+// recorded verify line when the kept fixup did not pass.
 func (o *run) verifyCleanupFixup(ctx context.Context, plan verifyPlan, round int, pre, findings string) {
 	if len(plan.Argv) == 0 {
 		return

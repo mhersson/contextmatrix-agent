@@ -191,10 +191,10 @@ func (o *run) mobCheckpoint(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 }
 
 // checkpointReviseVerify gates a checkpoint revise through the same runner as
-// preCommitVerify. A pass or an inconclusive run keeps the revise; a failed
-// verify or any error resolving/running it discards it and keeps the
-// already-verified commit - a revise nobody checked is not evidence it is good,
-// and dropping a suggestion costs nothing. No fix pass. Returns (keep, verified).
+// preCommitVerify, returning (keep, verified). A pass, an inconclusive run or
+// no resolved command keeps the revise; a failed verify or any error resolving
+// or running it discards the revise and keeps the already-verified commit - a
+// revise nobody checked is not evidence it is good, and dropping one is free.
 func (o *run) checkpointReviseVerify(ctx context.Context, sc *solverCtx, sub subtaskRef) (keep, verified bool) {
 	_, vres, ran, err := o.runGate(ctx, sc, sub, checkpointReviseGateContext(sub.ID))
 	if err != nil {

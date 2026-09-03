@@ -620,7 +620,10 @@ func (w *copilotThreadWriter) threadFor(ctx context.Context, c ReviewComment) *R
 	return w.byKey[copilotCommentKey(c.Path, c.Body)]
 }
 
-// dismiss replies with the dismissal reasoning and resolves the thread.
+// dismiss replies with the dismissal reasoning and resolves the thread. The
+// resolve runs even on a thread that already carries a reply: the writer cannot
+// tell a human's reply from its own crash-window one, and the card verdict is
+// final either way.
 func (w *copilotThreadWriter) dismiss(ctx context.Context, c ReviewComment, reason string) {
 	t := w.threadFor(ctx, c)
 	if t == nil {

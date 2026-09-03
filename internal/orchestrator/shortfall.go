@@ -12,10 +12,10 @@ import (
 )
 
 // noteShortfall records one selection: the model_selected event and the
-// `selector: pick`/`selector: pool` lines unconditionally, then - for a pick
-// below the bar it asked for - a warning, a state-change event and one card
-// line, deduped per (phase, role, requested -> met). Takes shortfallMu, never
-// selMu: the Best-of-N resolver holds selMu across a selection and would deadlock.
+// `selector: pick` line unconditionally, a `selector: pool` line when the pick
+// consulted a rung, then - below the bar it asked for - a warning, a state
+// change and one card line, deduped per (phase, role, requested -> met). Takes
+// shortfallMu, never selMu: the Best-of-N resolver holds selMu and would deadlock.
 func (o *run) noteShortfall(ctx context.Context, phase, subtaskID string, p registry.Pick, rep registry.SelectionReport) {
 	// Unconditional, and above every gate below: the transcript records what
 	// ran, not only what fell short, and the shortfall dedupe must never
