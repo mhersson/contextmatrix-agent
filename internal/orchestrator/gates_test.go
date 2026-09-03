@@ -1809,8 +1809,10 @@ func TestCopilotGate_RequestFailsStillWaitsOutTimeout(t *testing.T) {
 
 	require.NoError(t, runPRGates(context.Background(), o))
 
-	assert.GreaterOrEqual(t, len(gates.recorded()), 2,
-		"the gate polled while it waited; calls=%v", gates.recorded())
+	assert.Greater(t, countCalls(gates.recorded(), "CopilotReview:"+gatePRURL), 1,
+		"the gate polled for a review while it waited out the deadline; calls=%v", gates.recorded())
+	assert.Contains(t, ops.lastBody(), "did not arrive in time",
+		"the wait-out skip line, not the unavailability one; body=%q", ops.lastBody())
 	assert.NotContains(t, ops.lastBody(), "- Copilot gate: satisfied",
 		"a skipped gate stays retryable; body=%q", ops.lastBody())
 	assert.Zero(t, modelCallCount(client), "no review means nothing to triage")
@@ -2089,6 +2091,8 @@ func TestCopilotGate_GraceRetry422SkipsUnavailable(t *testing.T) {
 	calls := gates.recorded()
 	assert.Equal(t, 2, countCalls(calls, "RequestCopilotReview:"+gatePRURL),
 		"the 422 stops the retry ladder at the first retry; calls=%v", calls)
+	assert.Contains(t, ops.lastBody(), "Copilot review unavailable",
+		"the proven-unavailability skip line, not a wait-out; body=%q", ops.lastBody())
 	assert.Equal(t, 0, modelCallCount(client), "no review, nothing to triage")
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0,
 		"the gate skips rather than parks; Copilot being unreachable never parks the card")

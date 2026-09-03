@@ -3984,6 +3984,11 @@ func TestFixEscalationThatBuysNothingIsRecorded(t *testing.T) {
 	model, err := o.runFixModel(context.Background(), "fix it", fixRequest{Round: 2, FixTier: "moderate"})
 	require.NoError(t, err)
 	assert.Equal(t, "mid/coder", model)
+
+	// The advisory line is the block's only output, so it is the only
+	// observable that the no-op climb was recorded at all.
+	assert.True(t, ops.loggedContains("bought nothing"),
+		"the card must record that the escalation reached no stronger model; logs=%v", ops.logs)
 }
 
 // belowComplexReviewerRegistry seeds three reviewers that clear the moderate
