@@ -273,6 +273,50 @@ func TestFixSizingNeverEscalatesBelowTheBarThatFailed(t *testing.T) {
 	assert.Equal(t, registry.TierSimple, got.Bar)
 }
 
+// The climb and the floor compose by taking the higher, not by stacking. The
+// floor already contains every rung the failed round had climbed, so re-climbing
+// the steps on top of it charges one failure twice: a round is sized at the
+// higher of the climb from its own base and one rung above the bar that failed.
+func TestFixSizingTakesTheHigherOfTheClimbAndTheFloor(t *testing.T) {
+	tests := []struct {
+		name       string
+		lastFixBar registry.Tier
+		steps      int
+		wantBar    registry.Tier
+		wantBudget int
+	}{
+		{
+			// Two failures from a simple base reach complex; the moderate bar
+			// the second one ran at is already inside that climb.
+			name:       "the climb already covers the bar that failed",
+			lastFixBar: registry.TierModerate,
+			steps:      2,
+			wantBar:    registry.TierComplex,
+			wantBudget: 1,
+		},
+		{
+			// One failure from a simple base reaches moderate, below the
+			// complex bar that failed, so the floor decides.
+			name:       "the floor outruns the climb",
+			lastFixBar: registry.TierComplex,
+			steps:      1,
+			wantBar:    registry.TierCritical,
+			wantBudget: 2,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			o := &run{cardSizing: sizing{Bar: registry.TierSimple}}
+			o.fixBarSteps = tt.steps
+			o.lastFixBar = tt.lastFixBar
+
+			got := o.fixSizing(fixRequest{Round: tt.steps + 1, FixTier: "simple"})
+			assert.Equal(t, tt.wantBar, got.Bar)
+			assert.Equal(t, tt.wantBudget, got.Budget, "the window follows the bar the round actually runs at")
+		})
+	}
+}
+
 // The floor rises only for a round that FAILED its gate. markFixFailed is the
 // single promotion point - the same trigger that charges the bar axis - so a
 // green escalated round leaves nothing behind and one failure buys exactly one

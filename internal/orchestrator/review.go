@@ -2054,8 +2054,9 @@ func (o *run) fixBarBase(req fixRequest) registry.Tier {
 }
 
 // fixSizing is the bar and budget this fix round runs at: the base bar climbed
-// once per failed round, and a budget seeded from the bar the round ACTUALLY
-// RUNS AT, then widened once per capped round.
+// once per failed round and floored one rung above the bar a failed round ran
+// at, and a budget seeded from the bar the round ACTUALLY RUNS AT, then widened
+// once per capped round.
 //
 // The budget is seeded from the fix bar so the authoritative pass, floored at
 // complex, keeps its wider window.
@@ -2068,10 +2069,6 @@ func (o *run) fixBarBase(req fixRequest) registry.Tier {
 // window with it.
 func (o *run) fixSizing(req fixRequest) sizing {
 	base := o.fixBarBase(req)
-	if !req.NoEscalate && o.fixBarSteps > 0 && tierRank(o.lastFixBar) > tierRank(base) {
-		base = o.lastFixBar
-	}
-
 	s := sizing{Bar: base, Budget: seedBudgetStep(base)}
 
 	if req.NoEscalate {
@@ -2080,6 +2077,13 @@ func (o *run) fixSizing(req fixRequest) sizing {
 
 	for range o.fixBarSteps {
 		s = s.raiseBar()
+	}
+
+	// Floor the CLIMBED bar, not the base: lastFixBar already carries the rungs
+	// that round had climbed, so flooring the base and re-climbing on top would
+	// charge one failure twice. The result is the higher of the two corrections.
+	if o.fixBarSteps > 0 && o.lastFixBar != "" && tierRank(escalateTier(o.lastFixBar)) > tierRank(s.Bar) {
+		s.Bar = escalateTier(o.lastFixBar)
 	}
 
 	// Re-seed from the climbed bar. raiseBar deliberately leaves the budget
