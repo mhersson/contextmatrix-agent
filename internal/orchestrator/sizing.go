@@ -12,23 +12,11 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 )
 
-// sizing is the two-axis replacement for the single complexity tier.
-//
-// Bar is how capable the model must be. Its failure mode is SILENT - a model
-// below the bar ships a subtly wrong change that verify and the panel may both
-// pass - so its only evidence is a quality failure, and it is corrected one
-// rung at a time. Its vocabulary stays registry.Tier because that vocabulary is
-// a cross-repo wire contract: CM keys operator favorites by tier and role, and
-// spells checkpoint_min_tier in the same four words.
-//
-// Budget is how many harness turns the run may spend, held as a STEP INDEX into
-// turnBudgetLadder rather than an absolute count: the operator's base cap is a
-// knob that can change between runs, so persisting a step keeps that base
-// authoritative. Its failure mode is LOUD - the cap trips and the phase parks -
-// so a turn cap is evidence about volume and about nothing else.
-//
-// One word answered both questions before this type existed, which meant a turn
-// cap bought a more expensive model on every later attempt.
+// sizing is a subtask's two independent axes. Bar is how capable the model must
+// be (registry.Tier, a cross-repo wire word), corrected one rung at a time and
+// only on quality evidence. Budget is a step index into turnBudgetLadder - a
+// factor of the operator's base cap, so a persisted step survives a base change
+// - corrected only on turn-cap evidence. Volume never buys a stronger model.
 type sizing struct {
 	Bar    registry.Tier
 	Budget int
@@ -40,13 +28,9 @@ type sizing struct {
 const defaultBar = registry.TierModerate
 
 // turnBudgetLadder scales a coder run's turn budget above the configured base.
-// Steps 1 and 2 are the complex and critical factors this ladder replaces, so
-// a fresh run's cap is unchanged. 2x is the ceiling: across observed runs none
-// ever needed more, so a wider rung would only compound the cost of a cap that
-// is already retrying.
-//
-// Factors of the base rather than absolute floors, so lifting the operator's
-// base lifts every rung with it.
+// 2x is the ceiling: a wider rung would only compound the cost of a cap that is
+// already retrying. Factors of the base rather than absolute floors, so lifting
+// the operator's base lifts every rung with it.
 var turnBudgetLadder = [...]float64{1.0, 1.5, 2.0}
 
 // maxBudgetStep is the top rung. Derived from the ladder so the two cannot drift.
@@ -54,9 +38,7 @@ const maxBudgetStep = len(turnBudgetLadder) - 1
 
 func defaultSizing() sizing { return sizing{Bar: defaultBar} }
 
-// seedSizing maps the planner's wire word onto both axes at creation time. The
-// budget seed reproduces the factors the pre-split turn cap applied, so a fresh
-// run's cap is byte-identical either side of the change.
+// seedSizing maps the planner's wire word onto both axes at creation time.
 func seedSizing(plannerTier string) sizing {
 	bar := tierFromString(plannerTier)
 
@@ -123,6 +105,20 @@ func escalateTier(t registry.Tier) registry.Tier {
 		return registry.TierCritical
 	default:
 		return registry.TierCritical
+	}
+}
+
+// tierRank orders the ladder for comparisons: simple < moderate < complex < critical.
+func tierRank(t registry.Tier) int {
+	switch t {
+	case registry.TierModerate:
+		return 1
+	case registry.TierComplex:
+		return 2
+	case registry.TierCritical:
+		return 3
+	default:
+		return 0
 	}
 }
 
@@ -209,11 +205,10 @@ func setSizing(kv metaKV, s sizing) metaKV {
 // than orphaned above a freshly written one.
 var metaRe = regexp.MustCompile(`(?m)^[ \t]*<!--[ \t]*cm:meta((?:[ \t]+[a-z_]+=[^ \t>]*)*)[ \t]*-->[ \t]*\r?\n?`)
 
-// legacyTierRe matches the single-axis marker every card created before this
-// change carries. It is read forever and mapped through seedSizing, so every
-// live card keeps the bar and the turn budget it has today. No sweep, no
-// backfill. Permissive in the same way as metaRe, so an unrecognised legacy
-// word is stripped rather than left behind.
+// legacyTierRe matches the single-axis cm:tier= marker; readMeta maps it
+// through seedSizing so those cards keep their bar and budget. Permissive in
+// the same way as metaRe, so an unrecognised word is stripped rather than left
+// behind.
 var legacyTierRe = regexp.MustCompile(`(?m)^[ \t]*<!--[ \t]*cm:tier=([a-z]+)[ \t]*-->[ \t]*\r?\n?`)
 
 // readMeta parses the marker off a card body. It NEVER fails: an absent marker,

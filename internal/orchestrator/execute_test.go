@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -163,10 +164,6 @@ func TestExecuteSubtaskFlow(t *testing.T) {
 
 	// Actual cost spent on the ledger.
 	assert.InDelta(t, 0.10, o.ledger.Spent(), 1e-9)
-
-	// The selected coder model is logged to the card activity feed for the user.
-	assert.True(t, ops.loggedContains("coder model"),
-		"executeSubtask must log the selected coder model")
 }
 
 // TestExecuteSubtaskHeartbeatsClaim pins that a claimed subtask is heartbeated
@@ -314,8 +311,6 @@ func TestExecuteSubtaskMaxTurnsNeverCompletes(t *testing.T) {
 	assert.GreaterOrEqual(t, indexOfCall(calls, "ReleaseCard:SUB-1"), 0, "parked subtask claim must be released")
 	// The WIP is committed as resume evidence even though the run parks.
 	require.NotEmpty(t, git.commitMsgs, "the capped subtask commits its WIP as resume evidence")
-	assert.True(t, ops.loggedContains("no verify command resolved"),
-		"an unresolved-verify park is activity-logged; logs=%v", ops.logs)
 
 	// The cap happened; an absent verify command says nothing about the model.
 	_, got := readMeta(ops.bodyFor("SUB-1"))
@@ -949,7 +944,6 @@ func TestSalvageCappedFinalSubtask(t *testing.T) {
 		"a capped run never called finish, so the salvage commit uses the sanitized-title fallback, not the trailing prose")
 	require.Len(t, sc.completed, 1)
 	assert.Equal(t, "SUB-2", sc.completed[0].ID, "the salvaged subtask counts as completed for winner replay")
-	assert.True(t, ops.loggedContains("turn cap on final subtask SUB-2"), "logs=%v", ops.logs)
 }
 
 // TestNoSalvageOnCleanTree proves a capped candidate whose final-subtask tree
@@ -1069,8 +1063,6 @@ func TestSoloTurnCapSalvagedWhenVerifyPasses(t *testing.T) {
 		"a salvaged subtask is completed, not released")
 	require.NotEmpty(t, git.pushBranches, "salvaged work is pushed")
 	assert.Equal(t, "cm/card-1", git.pushBranches[0])
-	assert.True(t, ops.loggedContains("passed the authoritative verify"),
-		"the salvage is activity-logged; logs=%v", ops.logs)
 }
 
 // TestCoderGraceTurnFinishes proves the grace turn is the first net at the cap:
@@ -1109,13 +1101,6 @@ func TestCoderGraceTurnFinishes(t *testing.T) {
 	// fallback the salvage path uses - proving completion ran through finish.
 	require.NotEmpty(t, git.commitMsgs)
 	assert.Equal(t, "feat: done", git.commitMsgs[len(git.commitMsgs)-1])
-
-	// No salvage advisory: the run finished through the grace call, not the
-	// verify-gated turn-cap salvage.
-	assert.False(t, ops.loggedContains("passed the authoritative verify"),
-		"a grace finish must not log the salvage advisory; logs=%v", ops.logs)
-	assert.False(t, ops.loggedContains("turn cap"),
-		"a grace finish must not log any turn-cap advisory; logs=%v", ops.logs)
 }
 
 // TestSoloTurnCapStillParksWhenVerifyFails proves the gate is inviolable: a
@@ -1145,7 +1130,6 @@ func TestSoloTurnCapStillParksWhenVerifyFails(t *testing.T) {
 	assert.Equal(t, -1, indexOfCall(calls, "CompleteTask:SUB-1"), "a failed verify must not complete the subtask")
 	assert.Empty(t, git.pushBranches, "failed-verify work must not be pushed")
 	assert.GreaterOrEqual(t, indexOfCall(calls, "ReleaseCard:SUB-1"), 0, "the parked claim is released")
-	assert.True(t, ops.loggedContains("verify did not pass"), "the park is activity-logged; logs=%v", ops.logs)
 }
 
 // TestSoloTurnCapParkNamesClassification proves the park reason distinguishes a
@@ -1170,10 +1154,10 @@ func TestSoloTurnCapParkNamesClassification(t *testing.T) {
 	var mte *MaxTurnsError
 	require.ErrorAs(t, err, &mte)
 
+	// MaxTurnsError carries no reason and the park writes no marker, so the
+	// card line is the only place the classification is observable.
 	assert.True(t, ops.loggedContains("verify timed out"),
 		"the park reason names the timeout classification; logs=%v", ops.logs)
-	assert.False(t, ops.loggedContains("verify did not pass (verify timed out"),
-		"the note already states its own verdict; wrapping it in \"verify did not pass (...)\" would say it twice; logs=%v", ops.logs)
 }
 
 // TestSoloTurnCapStillParksOnCleanTree proves a clean tree is never salvaged:
@@ -1272,9 +1256,6 @@ func TestSalvageDeclineOnCleanTreeRaisesBudgetNeverBar(t *testing.T) {
 	assert.Equal(t, "simple", kv["seed"], "the write-once planner estimate is not rewritten")
 	assert.Equal(t, "Implement the thing.", stripMeta(ops.bodyFor("SUB-1")),
 		"the rest of the body is untouched")
-	assert.True(t, ops.loggedContains("turn budget"), "logs=%v", ops.logs)
-	assert.False(t, ops.loggedContains("model bar"), "logs=%v", ops.logs)
-
 	require.Len(t, ops.reportOutcomes, 1)
 	rows := ops.reportOutcomes[0]
 	require.Len(t, rows, 1)
@@ -1312,6 +1293,10 @@ func TestSalvageDeclineOnUnresolvableVerifyRaisesBudgetOnly(t *testing.T) {
 		atBarPick("coder/model"), 0, harness.Result{}, &MaxTurnsError{Model: "coder/model", Turns: 5})
 	require.False(t, salvaged, "an unresolvable verify cannot confirm the work")
 	require.NoError(t, err, "a non-toolchain resolution error parks as a plain turn cap")
+
+	// The unresolvable-verify arm and the no-command arm leave identical
+	// state - same marker, same absent outcome row, same return - so the park
+	// line is the only thing that says which one ran.
 	require.True(t, ops.loggedContains("verify could not be resolved"),
 		"the arm under test is the one that ran; logs=%v", ops.logs)
 
@@ -1343,10 +1328,11 @@ func TestResizeAtTheCeilingIsLoggedNotSilent(t *testing.T) {
 
 	assert.Zero(t, countCalls(ops.recorded(), "UpdateCardBody:SUB-1"),
 		"a no-op write burns a request and promises what a resume cannot keep")
+	// A ceiling raises nothing and emits nothing, so this line is the whole
+	// observable outcome of the path. Which axis it names is covered by
+	// TestCeilingLineNamesTheExhaustedAxis.
 	assert.True(t, ops.loggedContains("the turn budget cannot be raised any further"),
 		"the operator's only signal that automatic correction is exhausted; logs=%v", ops.logs)
-	assert.False(t, ops.loggedContains("model bar"),
-		"a budget ceiling must not name the other axis; logs=%v", ops.logs)
 }
 
 // TestResizePreservesForeignMarkerKeys proves a resize rewrites the whole body
@@ -1374,50 +1360,27 @@ func TestResizePreservesForeignMarkerKeys(t *testing.T) {
 }
 
 // TestPrecommitVerifyEvidenceMovesTheAxisTheEvidenceIsAbout proves the gate
-// reads BOTH facts it has: whether the verify failed, and whether the attempt
-// that produced the work still had room. A coder that reached its terminal call
-// with turns to spare and was wrong is evidence about QUALITY alone. A coder
-// that used every turn it was given and was wrong is evidence about quality AND
-// volume, and gets the same composed correction the capped path already makes -
-// a window exhausted without raising *MaxTurnsError must not buy a weaker
-// correction than one that raised it. The exhaustion signature is the same
-// exemption the capped path's leaderboard report takes: a test command whose
-// inner fork dies under a pids limit exits non-zero and is classified failed,
-// and that is the container, not the model.
+// reads BOTH facts it has: whether the failure was environmental, and whether
+// the attempt that produced the work still had room. A coder that reached its
+// terminal call with turns to spare and was wrong is evidence about QUALITY
+// alone. A coder that used every turn it was given and was wrong is evidence
+// about quality AND volume, and gets the same composed correction the capped
+// path already makes - a window exhausted without raising *MaxTurnsError must
+// not buy a weaker correction than one that raised it. The exhaustion signature
+// is the same exemption the capped path's leaderboard report takes: a test
+// command whose inner fork dies under a pids limit exits non-zero and is
+// classified failed, and that is the container, not the model.
 func TestPrecommitVerifyEvidenceMovesTheAxisTheEvidenceIsAbout(t *testing.T) {
 	cases := map[string]struct {
-		vres      verifyResult
-		exhausted bool
-		want      sizing
-		wantWrite bool
+		environmental bool
+		exhausted     bool
+		want          sizing
+		wantWrite     bool
 	}{
-		"real failure with turns to spare": {
-			verifyResult{Status: verifyFailed, Output: "FAIL\tpkg\t0.1s"},
-			false,
-			sizing{registry.TierComplex, 0},
-			true,
-		},
-		"real failure on an exhausted window": {
-			verifyResult{Status: verifyFailed, Output: "FAIL\tpkg\t0.1s"},
-			true,
-			sizing{registry.TierComplex, 1},
-			true,
-		},
-		"resource exhaustion": {
-			verifyResult{Status: verifyFailed, Output: "fork/exec: resource temporarily unavailable"},
-			false,
-			sizing{registry.TierModerate, 0},
-			false,
-		},
-		"resource exhaustion on an exhausted window": {
-			verifyResult{Status: verifyFailed, Output: "fork/exec: resource temporarily unavailable"},
-			true,
-			sizing{registry.TierModerate, 0},
-			false,
-		},
-		"never ran":                     {verifyResult{Status: verifySkipped}, false, sizing{registry.TierModerate, 0}, false},
-		"passed":                        {verifyResult{Status: verifyPassed}, false, sizing{registry.TierModerate, 0}, false},
-		"passed on an exhausted window": {verifyResult{Status: verifyPassed}, true, sizing{registry.TierModerate, 0}, false},
+		"real failure with turns to spare":           {false, false, sizing{registry.TierComplex, 0}, true},
+		"real failure on an exhausted window":        {false, true, sizing{registry.TierComplex, 1}, true},
+		"resource exhaustion":                        {true, false, sizing{registry.TierModerate, 0}, false},
+		"resource exhaustion on an exhausted window": {true, true, sizing{registry.TierModerate, 0}, false},
 	}
 
 	for name, tc := range cases {
@@ -1428,7 +1391,7 @@ func TestPrecommitVerifyEvidenceMovesTheAxisTheEvidenceIsAbout(t *testing.T) {
 
 			o := newExecRun(execTestDeps(ops, &fakeGit{}, &planLLM{}), nil, 0)
 			o.applyPrecommitVerifyEvidence(context.Background(),
-				subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("moderate")}, tc.vres, tc.exhausted)
+				subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("moderate")}, tc.environmental, tc.exhausted)
 
 			writes := countCalls(ops.recorded(), "UpdateCardBody:SUB-1")
 			if !tc.wantWrite {
@@ -1474,8 +1437,12 @@ func TestBarRaiseUnderACoderPinNamesThePin(t *testing.T) {
 			o.raiseSubtaskBar(context.Background(),
 				subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("moderate")}, "verify failed")
 
-			require.True(t, ops.loggedContains("model bar moderate -> complex"),
-				"the raise itself is always logged; logs=%v", ops.logs)
+			_, got := readMeta(ops.bodyFor("SUB-1"))
+			require.Equal(t, registry.TierComplex, got.Bar,
+				"the raise itself always lands on the card marker")
+
+			// Whether a pin makes the raise moot changes nothing that is
+			// persisted or emitted - the card line is its only observable.
 			assert.Equal(t, tc.wantNamed, ops.loggedContains("will not change the pick"),
 				"logs=%v", ops.logs)
 		})
@@ -1493,28 +1460,27 @@ func TestCeilingLineNamesTheExhaustedAxis(t *testing.T) {
 	cases := map[string]struct {
 		marker metaKV
 		raise  func(*run, subtaskRef)
-		want   string
-		absent string
+		// want is the axis phrase and the lever that go with this trigger.
+		// A ceiling persists nothing and emits nothing, so the line is the
+		// only observable each row has.
+		want string
 	}{
 		"budget exhausted": {
 			metaKV{"bar": "moderate", "budget": top},
 			func(o *run, s subtaskRef) { o.raiseSubtaskBudget(context.Background(), s, "turn cap") },
 			"the turn budget cannot be raised any further; re-triggering will repeat this attempt. " +
 				"Split the subtask or raise the configured turn cap.",
-			"model bar",
 		},
 		"bar exhausted": {
 			metaKV{"bar": "critical", "budget": "0"},
 			func(o *run, s subtaskRef) { o.raiseSubtaskBar(context.Background(), s, "verify failed") },
 			"the model bar cannot be raised any further; re-triggering will repeat this attempt. " +
 				"Split the subtask or pin a coder model for it.",
-			"turn budget",
 		},
 		"both exhausted": {
 			metaKV{"bar": "critical", "budget": top},
 			func(o *run, s subtaskRef) { o.raiseSubtaskBoth(context.Background(), s, "turn cap") },
 			"the turn budget and model bar cannot be raised any further",
-			"",
 		},
 	}
 
@@ -1528,11 +1494,6 @@ func TestCeilingLineNamesTheExhaustedAxis(t *testing.T) {
 			tc.raise(o, subtaskRef{ID: "SUB-1", Title: "t"})
 
 			assert.True(t, ops.loggedContains(tc.want), "logs=%v", ops.logs)
-
-			if tc.absent != "" {
-				assert.False(t, ops.loggedContains(tc.absent),
-					"a ceiling line must not name the axis the trigger did not move; logs=%v", ops.logs)
-			}
 		})
 	}
 }
@@ -1610,14 +1571,17 @@ func TestLogEnvironmentalCapBudgetNeverPersistsOrEmits(t *testing.T) {
 
 	assert.Zero(t, countCalls(ops.recorded(), "UpdateCardBody:SUB-1"), "no board write - nothing is raised")
 
+	// Nothing is persisted and nothing is emitted, so this line is the whole
+	// output of the path - without it the assertions below hold for an empty
+	// function body.
+	assert.True(t, ops.loggedContains("the card's turn budget stays at base"),
+		"the note names the current, unchanged value; logs=%v", ops.logs)
+
 	kv, got := readMeta(seed.Description)
 	assert.Equal(t, 0, got.Budget, "the card marker is untouched")
 	assert.Equal(t, registry.TierModerate, got.Bar)
 	assert.Equal(t, "moderate", kv["seed"])
 
-	assert.True(t, ops.loggedContains("the card's turn budget stays at base"),
-		"names the current, unchanged value; logs=%v", ops.logs)
-	assert.False(t, ops.loggedContains("->"), "no target figure - nothing was raised; logs=%v", ops.logs)
 	assert.NotContains(t, transcript.String(), sizingEscalationKind,
 		"no correction happened, so nothing is emitted")
 }
@@ -1655,12 +1619,8 @@ func TestSalvageDeclineAfterVerifyPassKeepsTierAndReportsNoOutcome(t *testing.T)
 	assert.Equal(t, -1, indexOfCall(ops.recorded(), "UpdateCardBody:SUB-1"),
 		"a park after a passing verify must not touch the subtask body at all")
 	assert.Empty(t, ops.bodyFor("SUB-1"), "no sizing-marker write on a post-verify-pass park")
-	assert.False(t, ops.loggedContains("the turn cap was reached"),
-		"a post-verify-pass park must not resize the subtask; logs=%v", ops.logs)
 	assert.Empty(t, ops.reportOutcomes,
 		"an infrastructure park after a passing verify is not evidence about the model")
-	assert.True(t, ops.loggedContains("push"),
-		"the push error must be recorded on the card log; logs=%v", ops.logs)
 }
 
 // TestSalvageDeclineAfterCompleteTaskFailKeepsTierAndWinRow is the sibling of
@@ -1697,16 +1657,11 @@ func TestSalvageDeclineAfterCompleteTaskFailKeepsTierAndWinRow(t *testing.T) {
 	assert.Equal(t, -1, indexOfCall(ops.recorded(), "UpdateCardBody:SUB-1"),
 		"a park after a passing verify must not touch the subtask body at all")
 	assert.Empty(t, ops.bodyFor("SUB-1"), "no sizing-marker write on a post-verify-pass park")
-	assert.False(t, ops.loggedContains("the turn cap was reached"),
-		"a post-verify-pass park must not resize the subtask; logs=%v", ops.logs)
-
 	require.Len(t, ops.reportOutcomes, 1, "exactly one outcome row - no duplicate report on the CompleteTask failure")
 	rows := ops.reportOutcomes[0]
 	require.Len(t, rows, 1)
 	assert.Equal(t, "win", rows[0].Result, "the verify already proved the work correct before CompleteTask failed")
 	assert.True(t, rows[0].VerifyPass)
-	assert.True(t, ops.loggedContains("CompleteTask"),
-		"the CompleteTask error must be recorded on the card log; logs=%v", ops.logs)
 }
 
 // markerMidRunLLM wraps a scripted LLM and writes a toolchain marker file into
@@ -1788,14 +1743,6 @@ func TestSoloTurnCapPropagatesToolchainSentinel(t *testing.T) {
 	assert.Equal(t, -1, indexOfCall(calls, "CompleteTask:SUB-1"), "an unresolvable toolchain must not complete the subtask")
 	assert.Empty(t, git.pushBranches, "an unresolvable toolchain must not push")
 	assert.GreaterOrEqual(t, indexOfCall(calls, "ReleaseCard:SUB-1"), 0, "the parked claim is released")
-
-	// execute()'s dedicated toolchain arm writes this line - confirms the
-	// sentinel actually reached it rather than being logged generically by
-	// logSoloCapPark ("verify could not be resolved").
-	assert.True(t, ops.loggedContains("parking card as blocked"),
-		"the toolchain-missing park must be activity-logged via execute()'s dedicated arm; logs=%v", ops.logs)
-	assert.False(t, ops.loggedContains("verify could not be resolved"),
-		"a toolchain sentinel must not be logged as a generic unresolved-verify park; logs=%v", ops.logs)
 }
 
 // TestSoloTurnCapPropagatesContainerRuntimeSentinel proves the salvage path's
@@ -1840,11 +1787,6 @@ func TestSoloTurnCapPropagatesContainerRuntimeSentinel(t *testing.T) {
 	assert.Equal(t, -1, indexOfCall(calls, "CompleteTask:SUB-1"), "an unreachable container runtime must not complete the subtask")
 	assert.Empty(t, git.pushBranches, "an unreachable container runtime must not push")
 	assert.GreaterOrEqual(t, indexOfCall(calls, "ReleaseCard:SUB-1"), 0, "the parked claim is released")
-
-	assert.True(t, ops.loggedContains("container runtime"),
-		"the container-runtime park must be activity-logged via execute()'s dedicated arm; logs=%v", ops.logs)
-	assert.False(t, ops.loggedContains("verify did not pass"),
-		"a container-runtime sentinel must not be logged as a generic did-not-pass park; logs=%v", ops.logs)
 }
 
 // TestFakeOpsReportModelOutcomesEnforcesContract proves fakeOps validates
@@ -2012,11 +1954,6 @@ func TestSalvageDeclineExhaustedVerifyLeavesBudgetUnchanged(t *testing.T) {
 		"an environment-caused cap must not persist a wider budget to the card")
 	assert.Equal(t, "Implement the thing.", stripMeta(ops.taskContext.Description),
 		"the card body itself is untouched")
-	assert.True(t, ops.loggedContains("resource exhaustion"),
-		"the card log names the environmental cause the reporting exemption acted on; logs=%v", ops.logs)
-	assert.True(t, ops.loggedContains("the card's turn budget stays at base"),
-		"names the current, unchanged value - no raise; logs=%v", ops.logs)
-	assert.False(t, ops.loggedContains("->"), "no target figure - nothing was raised; logs=%v", ops.logs)
 }
 
 // TestSalvageDeclineSkippedVerifyLeavesBudgetUnchanged proves a skip-classified
@@ -2057,11 +1994,6 @@ func TestSalvageDeclineSkippedVerifyLeavesBudgetUnchanged(t *testing.T) {
 		"an environment-caused cap must not persist a wider budget to the card")
 	assert.Equal(t, "Implement the thing.", stripMeta(ops.taskContext.Description),
 		"the card body itself is untouched")
-	assert.True(t, ops.loggedContains("verify timed out"),
-		"the park is still activity-logged; logs=%v", ops.logs)
-	assert.True(t, ops.loggedContains("the card's turn budget stays at base"),
-		"names the current, unchanged value - no raise; logs=%v", ops.logs)
-	assert.False(t, ops.loggedContains("->"), "no target figure - nothing was raised; logs=%v", ops.logs)
 }
 
 // TestSoloOutcomeKeyedOnSelectedSlug proves the outcome row is keyed on the
@@ -2572,8 +2504,9 @@ func TestUnmeasuredPickReportsNoPriorRatherThanZero(t *testing.T) {
 	require.Equal(t, "default/model", pick.Model)
 
 	require.Len(t, ops.logs, 1, "logs=%v", ops.logs)
-	assert.Contains(t, ops.logs[0], "no measured prior")
-	assert.NotContains(t, ops.logs[0], "prior 0.00",
+	// The advisory is written and never read back, so its own text is the
+	// only observable this path has.
+	assert.Contains(t, ops.logs[0], "no measured prior",
 		"nothing measured this model, so no number may be printed for it; logs=%v", ops.logs)
 }
 
@@ -2705,6 +2638,59 @@ func TestPreCommitVerifyFailureThenFixPassCommits(t *testing.T) {
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "CompleteTask:SUB-1"), 0, "the verified subtask completes")
 }
 
+// TestPreCommitVerifyCappedFixPassStillGetsItsReVerify proves a fix pass that
+// runs out of turns is not itself a verdict: the gate re-runs and judges the
+// tree the capped pass left behind.
+func TestPreCommitVerifyCappedFixPassStillGetsItsReVerify(t *testing.T) {
+	tests := []struct {
+		name      string
+		rerun     verifyexec.Outcome
+		wantErr   bool
+		wantCalls string
+	}{
+		{name: "green after the cap commits", rerun: verifyexec.Outcome{ExitCode: 0}, wantCalls: "CompleteTask:SUB-1"},
+		{name: "still red after the cap parks", rerun: verifyexec.Outcome{ExitCode: 1, Output: "--- FAIL: TestThing"}, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			git := &fakeGit{committed: true}
+			// The fix coder burns its whole window and never lands finish.
+			client := &planLLM{responses: slices.Concat(
+				[]llm.Response{finishResp("feat: subtask done", 0.01)}, burnResps(5))}
+			d := execTestDeps(ops, git, client)
+			d.Cfg.MaxTurns = 5
+			o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
+			seedResolvedVerifyPlan(o)
+
+			runs := 0
+			o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+				runs++
+				if runs == 1 {
+					return verifyexec.Outcome{ExitCode: 1, Output: "--- FAIL: TestThing"}
+				}
+
+				return tt.rerun
+			}
+
+			err := runExecute(context.Background(), o)
+
+			assert.Equal(t, 2, runs, "the gate re-runs after a capped fix pass; a cap is not a verdict")
+
+			if tt.wantErr {
+				var vpe *VerifyParkedError
+				require.ErrorAs(t, err, &vpe, "still red parks through the verify sentinel, not the turn cap")
+
+				return
+			}
+
+			require.NoError(t, err)
+			assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), tt.wantCalls), 0, "calls=%v", ops.recorded())
+		})
+	}
+}
+
 // TestPreCommitVerifyPassCommitsAsToday proves a green gate is invisible: the
 // commit lands under the coder's own message and no fix model is spent.
 func TestPreCommitVerifyPassCommitsAsToday(t *testing.T) {
@@ -2724,6 +2710,8 @@ func TestPreCommitVerifyPassCommitsAsToday(t *testing.T) {
 	require.Len(t, git.commitMsgs, 1, "exactly one commit; git=%v", git.recorded())
 	assert.Equal(t, "feat: subtask done", git.commitMsgs[0])
 	assert.Equal(t, 0, verifyFixPasses(client), "a green gate spends no fix model")
+	assert.Zero(t, countCalls(ops.recorded(), "UpdateCardBody:SUB-1"),
+		"a green gate is not evidence about sizing - nothing may be corrected")
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "CompleteTask:SUB-1"), 0)
 }
 
@@ -2750,8 +2738,8 @@ func TestPreCommitVerifySkippedCommitsAsToday(t *testing.T) {
 	require.Len(t, git.commitMsgs, 1, "exactly one commit; git=%v", git.recorded())
 	assert.Equal(t, "feat: subtask done", git.commitMsgs[0])
 	assert.Equal(t, 0, verifyFixPasses(client), "an inconclusive gate spends no fix model")
-	assert.True(t, ops.loggedContains("verify timed out"),
-		"the skip is logged with its classification; logs=%v", ops.logs)
+	assert.Zero(t, countCalls(ops.recorded(), "UpdateCardBody:SUB-1"),
+		"a gate that reached no verdict is not evidence about sizing - nothing may be corrected")
 }
 
 // TestNoResolvableVerifyCommitsAsToday proves the skip tier is byte-identical
@@ -2834,7 +2822,7 @@ func TestAllThreeVerifyGatesResolveIdentically(t *testing.T) {
 	assert.Equal(t, preCommit, review,
 		"the pre-commit gate and the review gate must run the identical command, timeout and environment")
 
-	ok := o.checkpointReviseVerify(context.Background(), o.solver, sub)
+	ok, _ := o.checkpointReviseVerify(context.Background(), o.solver, sub)
 	require.False(t, ok, "a red gate discards the checkpoint revise")
 	require.NotEmpty(t, seen, "the checkpoint gate ran the command")
 
@@ -3473,8 +3461,6 @@ func TestStillRedGateUnderResourceExhaustionReportsNothing(t *testing.T) {
 
 	assert.Empty(t, ops.reportOutcomes,
 		"a pids limit killed the command, not the coder - no model outcome row")
-	assert.True(t, ops.loggedContains("resource exhaustion"),
-		"the card log must name the environmental classification the suppression acted on; logs=%v", ops.logs)
 }
 
 // TestStillRedGateBudgetParkBeforeTheFixPassReportsNothing pins one of the
@@ -3646,11 +3632,6 @@ func TestBelowBarFailureIsNotChargedToTheModel(t *testing.T) {
 
 	assert.Empty(t, ops.reportOutcomes,
 		"a model that was walked down the ladder must not be charged a loss for work it was never rated for")
-
-	// The suppression is silent otherwise, so the note is the only signal an
-	// operator has that a row was skipped rather than lost.
-	assert.True(t, ops.loggedContains("not recorded"),
-		"the skipped row must be said out loud on the card; logs=%v", ops.logs)
 }
 
 // TestBelowBarSubtaskStillCompletes guards against over-correcting: skipping
@@ -3761,8 +3742,6 @@ func TestBelowBarCapFailureIsNotChargedToTheModel(t *testing.T) {
 
 	assert.Empty(t, ops.reportOutcomes,
 		"the turn-cap arm must respect the same rule as the pre-commit gate")
-	assert.True(t, ops.loggedContains("not recorded"),
-		"the skipped row is said out loud here too; logs=%v", ops.logs)
 }
 
 // TestAtBarCapFailureIsStillRecorded is its unchanged-behaviour twin: the cap

@@ -5,9 +5,10 @@
 // sequence numbers overlap completely and nothing in the envelope tells them
 // apart. The ordinal counts a card's container runs - a notion the harness,
 // which sees one loop invocation, does not have - so it is stamped here, on
-// this side of the boundary. An absent or zero ordinal is the first attempt, so
-// a consumer reading a transcript written without the field still gets an
-// answer.
+// this side of the boundary. NewWriter treats an ordinal of 1 or less as the
+// first attempt and stamps nothing, so a transcript written before the field
+// existed and a first-attempt transcript written after are indistinguishable
+// on the wire - both simply carry no attempt field.
 //
 // The work command's main transcript stream stamps via the harness emitter's
 // own envelope-field option instead of this package's writer; the writer here
@@ -121,39 +122,4 @@ func (a *writer) stamp(line []byte) []byte {
 	}
 
 	return b
-}
-
-// Of reads the ordinal off a decoded transcript entry. An absent, zero, or
-// unusable value is the first attempt - which is exactly what every transcript
-// written before the field existed is.
-func Of(entry map[string]any) int {
-	n, ok := asInt(entry[Field])
-	if !ok || n < 1 {
-		return 1
-	}
-
-	return n
-}
-
-// asInt accepts the shapes a decoded JSON number arrives in: float64 from a
-// plain decode, json.Number from a UseNumber decode, and the Go integers a
-// caller may have built the map with itself.
-func asInt(v any) (int, bool) {
-	switch n := v.(type) {
-	case int:
-		return n, true
-	case int64:
-		return int(n), true
-	case float64:
-		return int(n), true
-	case json.Number:
-		i, err := n.Int64()
-		if err != nil {
-			return 0, false
-		}
-
-		return int(i), true
-	default:
-		return 0, false
-	}
 }

@@ -189,6 +189,26 @@ func TestContainerLogSink_StaleExitCannotStripFreshRunKeys(t *testing.T) {
 	}
 }
 
+// TestStaticSecretsSurviveEveryRunKeyRemoval exercises newRedactorRegistry
+// itself (the serve.go wiring), not just backendkit's RedactorRegistry: the
+// config-level static keys must still mask after a per-run key is added and
+// then removed.
+func TestStaticSecretsSurviveEveryRunKeyRemoval(t *testing.T) {
+	hub := logbridge.NewHub(func(e protocol.LogEntry) string { return e.Project }, nil)
+	bridge := logbridge.NewBridge(logbridge.BridgeConfig{Hub: hub})
+
+	registry := newRedactorRegistry(bridge, "PLACEHOLDER-MCP-KEY", "PLACEHOLDER-API-KEY")
+
+	run := webhook.SessionID("proj", "CARD-1", "corr-1")
+	registry.AddSessionKey(run, "PLACEHOLDER-RUN-SECRET")
+	registry.RemoveSessionKey(run)
+
+	got := registry.RedactLine("PLACEHOLDER-MCP-KEY PLACEHOLDER-API-KEY PLACEHOLDER-RUN-SECRET")
+	assert.NotContains(t, got, "PLACEHOLDER-MCP-KEY")
+	assert.NotContains(t, got, "PLACEHOLDER-API-KEY")
+	assert.Contains(t, got, "PLACEHOLDER-RUN-SECRET", "a removed run key stops masking; the static keys do not")
+}
+
 func TestAgentMapExtra(t *testing.T) {
 	tests := []struct {
 		name      string

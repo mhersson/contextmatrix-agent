@@ -19,30 +19,42 @@ func testCatalog() llm.Catalog {
 	}
 }
 
+func newTestRegistry(capable string, cat llm.Catalog) *Registry {
+	return NewRegistryFromParts(cat, Priors{}, nil, nil, capable)
+}
+
+func (r *Registry) reviewPanel(in SelectInput, n int) []Pick {
+	return SeatPicks(r.SelectReviewPanelReport(in, n))
+}
+
+func (r *Registry) candidateModels(in SelectInput, n int, pin string) []Pick {
+	return SeatPicks(r.SelectCandidateModelsReport(in, n, pin))
+}
+
 func TestFitsWindow(t *testing.T) {
-	r := NewRegistry("x", testCatalog())
+	r := newTestRegistry("x", testCatalog())
 	assert.True(t, r.fitsWindow("deepseek/deepseek-v4-flash", 100000))
 	assert.False(t, r.fitsWindow("cheap/small", 100000))
 	assert.True(t, r.fitsWindow("unknown/model", 100000)) // fail-open
 }
 
 func TestSelectByComplexityPrefersCheapestCapableToolModel(t *testing.T) {
-	// NewRegistry injects no priors, so no catalog model carries a prior for the
-	// role: selection always falls back to the capable default.
-	r := NewRegistry("deepseek/deepseek-v4-flash", testCatalog())
+	// newTestRegistry injects no priors, so no catalog model carries a prior for
+	// the role: selection always falls back to the capable default.
+	r := newTestRegistry("deepseek/deepseek-v4-flash", testCatalog())
 	spec := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierComplex})
 	assert.Equal(t, "deepseek/deepseek-v4-flash", spec.Model)
 }
 
 func TestSelectByComplexityFallsBackToCapable(t *testing.T) {
-	// All tool-capable models lack a prior (NewRegistry injects none). A model
+	// All tool-capable models lack a prior (newTestRegistry injects none). A model
 	// with no prior for the role is never selectable, so selection falls back to
 	// the capable default.
 	cat := llm.Catalog{
 		{ID: "unseeded/a", ContextLength: 8192, SupportedParameters: []string{"tools"}},
 		{ID: "unseeded/b", ContextLength: 8192, SupportedParameters: []string{"tools"}},
 	}
-	r := NewRegistry("capable/default", cat)
+	r := newTestRegistry("capable/default", cat)
 	spec := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierSimple})
 	assert.Equal(t, "capable/default", spec.Model)
 }
@@ -135,7 +147,7 @@ func TestSelectReviewPanel(t *testing.T) {
 	//   band 4.5: gamma only. -> gamma.
 	// Pick 3 (exclude beta,gamma): delta only ($18). -> delta.
 	in := SelectInput{Role: RoleReviewer, Tier: TierModerate, EstTokens: 50000, Exclude: map[string]bool{"alpha": true}}
-	panel := r.SelectReviewPanel(in, 3)
+	panel := r.reviewPanel(in, 3)
 	require.Len(t, panel, 3)
 	assert.Equal(t, "beta", panel[0].Model)
 	assert.Equal(t, "gamma", panel[1].Model)
@@ -154,7 +166,7 @@ func TestSelectReviewPanel(t *testing.T) {
 	// band 3.15: both in; top quality beta(0.85). Pick1=beta.
 	// Pick2 (exclude beta): alpha only. Pick2=alpha.
 	// Pick3 (exclude beta,alpha): pool dry -> reuse last pick alpha.
-	panel2 := r2.SelectReviewPanel(in2, 3)
+	panel2 := r2.reviewPanel(in2, 3)
 	require.Len(t, panel2, 3)
 	assert.Equal(t, "beta", panel2[0].Model)
 	assert.Equal(t, "alpha", panel2[1].Model)
@@ -173,7 +185,7 @@ func TestTierBarsIncludeCritical(t *testing.T) {
 }
 
 func TestRegistryContextWindow(t *testing.T) {
-	r := NewRegistry("x", testCatalog())
+	r := newTestRegistry("x", testCatalog())
 
 	assert.Equal(t, 131072, r.ContextWindow("deepseek/deepseek-v4-flash"))
 	assert.Equal(t, 8192, r.ContextWindow("cheap/small"))
@@ -190,7 +202,7 @@ func TestSelectReviewPanelDryFromStart(t *testing.T) {
 	}
 	r := NewRegistryFromParts(catalog, Priors{}, nil, nil, "capable-default")
 
-	panel := r.SelectReviewPanel(SelectInput{Role: RoleReviewer, Tier: TierModerate, EstTokens: 50000}, 3)
+	panel := r.reviewPanel(SelectInput{Role: RoleReviewer, Tier: TierModerate, EstTokens: 50000}, 3)
 	require.Len(t, panel, 3)
 
 	for i, spec := range panel {
@@ -235,7 +247,7 @@ func TestSelectCandidateModelsNoPinWrapsAround(t *testing.T) {
 	// Three equally-priced, equally-qualified models: the exclude set built up
 	// across rounds forces distinct picks in catalog order while the pool
 	// lasts (m1, m2, m3), then the pool runs dry and the 4th slot reuses the
-	// last real pick (SelectReviewPanel wrap semantics) rather than shrinking
+	// last real pick (candidateModels wrap semantics) rather than shrinking
 	// n or escalating price.
 	catalog := llm.Catalog{
 		entry("m1", 1.0, 2.0, 200000),
@@ -248,7 +260,7 @@ func TestSelectCandidateModelsNoPinWrapsAround(t *testing.T) {
 	r := NewRegistryFromParts(catalog, priors, nil, nil, "capable-default")
 	in := SelectInput{Role: RoleCoder, Tier: TierSimple, EstTokens: 50000}
 
-	specs := r.SelectCandidateModels(in, 4, "")
+	specs := r.candidateModels(in, 4, "")
 	require.Len(t, specs, 4)
 	assert.Equal(t, "m1", specs[0].Model)
 	assert.Equal(t, "m2", specs[1].Model)
@@ -270,7 +282,7 @@ func TestSelectCandidateModelsSingleModelPoolRepeatsThroughout(t *testing.T) {
 	r := NewRegistryFromParts(catalog, priors, nil, nil, "capable-default")
 	in := SelectInput{Role: RoleCoder, Tier: TierSimple, EstTokens: 50000}
 
-	specs := r.SelectCandidateModels(in, 3, "")
+	specs := r.candidateModels(in, 3, "")
 	require.Len(t, specs, 3)
 
 	for i, s := range specs {
@@ -297,7 +309,7 @@ func TestSelectCandidateModelsPinOccupiesSlotOneExcludedFromRest(t *testing.T) {
 	r := NewRegistryFromParts(catalog, priors, nil, nil, "capable-default")
 	in := SelectInput{Role: RoleCoder, Tier: TierSimple, EstTokens: 50000}
 
-	specs := r.SelectCandidateModels(in, 3, "pinned/x")
+	specs := r.candidateModels(in, 3, "pinned/x")
 	require.Len(t, specs, 3)
 	assert.Equal(t, "pinned/x", specs[0].Model)
 	assert.Equal(t, 99000, specs[0].ContextWindow, "pin must carry its own catalog context window")
@@ -322,7 +334,7 @@ func TestSelectCandidateModelsPinMergesExcludeWithoutMutatingCaller(t *testing.T
 	origExclude := map[string]bool{"already-excluded": true}
 	in := SelectInput{Role: RoleCoder, Tier: TierSimple, EstTokens: 50000, Exclude: origExclude}
 
-	specs := r.SelectCandidateModels(in, 3, "pinned/x")
+	specs := r.candidateModels(in, 3, "pinned/x")
 	require.Len(t, specs, 3)
 	assert.Equal(t, "pinned/x", specs[0].Model)
 	assert.Equal(t, "m1", specs[1].Model)
@@ -333,16 +345,16 @@ func TestSelectCandidateModelsPinMergesExcludeWithoutMutatingCaller(t *testing.T
 	}
 
 	assert.Equal(t, map[string]bool{"already-excluded": true}, origExclude,
-		"SelectCandidateModels must not mutate the caller's Exclude map")
+		"candidateModels must not mutate the caller's Exclude map")
 }
 
 func TestSelectCandidateModelsZeroOrNegativeNReturnsNil(t *testing.T) {
-	r := NewRegistry("capable-default", testCatalog())
+	r := newTestRegistry("capable-default", testCatalog())
 	in := SelectInput{Role: RoleCoder, Tier: TierSimple}
 
-	assert.Nil(t, r.SelectCandidateModels(in, 0, ""))
-	assert.Nil(t, r.SelectCandidateModels(in, -1, ""))
-	assert.Nil(t, r.SelectCandidateModels(in, 0, "pinned/x"))
+	assert.Nil(t, r.candidateModels(in, 0, ""))
+	assert.Nil(t, r.candidateModels(in, -1, ""))
+	assert.Nil(t, r.candidateModels(in, 0, "pinned/x"))
 }
 
 func TestFavoritesConsideredFirst(t *testing.T) {
@@ -365,7 +377,7 @@ func TestFavoritesConsideredFirst(t *testing.T) {
 // TestSelectDiscussionPanel pins the mob session seat-selection seam: it must give
 // distinct models first, honor the caller's exclusions (review discussions
 // exclude the models that coded the card), and wrap around on scarcity
-// instead of shrinking the panel - the SelectReviewPanel walk, by name.
+// instead of shrinking the panel - the SelectReviewPanelReport walk, by name.
 func TestSelectDiscussionPanel(t *testing.T) {
 	// Four qualifying reviewers at the complex bar (0.82) with distinct prices.
 	catalog := llm.Catalog{
@@ -437,7 +449,7 @@ func TestSelectDiscussionPanel(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			r := NewRegistryFromParts(catalog, tt.priors, nil, nil, "capable-default")
 
-			panel := r.SelectDiscussionPanel(tt.in, tt.n)
+			panel := SeatPicks(r.SelectDiscussionPanelReport(tt.in, tt.n))
 
 			if tt.wantLen > 0 {
 				require.Len(t, panel, tt.wantLen)
@@ -489,7 +501,7 @@ func TestSelectReviewPanelSpansVendors(t *testing.T) {
 		})
 
 	in := SelectInput{Role: RoleReviewer, Tier: TierComplex, EstTokens: 50000}
-	panel := r.SelectReviewPanel(in, 3)
+	panel := r.reviewPanel(in, 3)
 	require.Len(t, panel, 3)
 
 	// Seat 1 is unchanged from the vendor-blind walk: band 2.1*1.5=3.15 holds
@@ -523,7 +535,7 @@ func TestSelectReviewPanelFavoriteBypassesVendorFilter(t *testing.T) {
 		})
 
 	in := SelectInput{Role: RoleReviewer, Tier: TierComplex, EstTokens: 50000}
-	panel := r.SelectReviewPanel(in, 3)
+	panel := r.reviewPanel(in, 3)
 	require.Len(t, panel, 3)
 
 	// Seat 1: first favorite. Seat 2: the second favorite must win despite
@@ -552,7 +564,7 @@ func TestSelectCandidateModelsPinSeedsVendor(t *testing.T) {
 		})
 
 	in := SelectInput{Role: RoleCoder, Tier: TierComplex, EstTokens: 50000}
-	specs := r.SelectCandidateModels(in, 3, "gpt-pin")
+	specs := r.candidateModels(in, 3, "gpt-pin")
 	require.Len(t, specs, 3)
 	assert.Equal(t, "gpt-pin", specs[0].Model)
 	// Slot 2 prefers the unseated vendor over the higher-prior gpt-d.
@@ -561,7 +573,7 @@ func TestSelectCandidateModelsPinSeedsVendor(t *testing.T) {
 
 	// A pin with no resolvable vendor (absent from the catalog, bare slug)
 	// seeds nothing and must not panic.
-	specs = r.SelectCandidateModels(in, 2, "mystery")
+	specs = r.candidateModels(in, 2, "mystery")
 	require.Len(t, specs, 2)
 	assert.Equal(t, "mystery", specs[0].Model)
 	assert.Equal(t, "gpt-d", specs[1].Model, "no vendor seed: slot 2 stays the vendor-blind pick")
@@ -588,7 +600,7 @@ func TestSelectReviewPanelVendorEdgeCases(t *testing.T) {
 		r := NewRegistryFromParts(catalog, priors, nil, nil, "capable-default").
 			WithCreators(map[string]string{"gpt-a": "openai", "gpt-b": "openai", "claude-weak": "anthropic"})
 
-		panel := r.SelectReviewPanel(in, 2)
+		panel := r.reviewPanel(in, 2)
 		require.Len(t, panel, 2)
 		assert.Equal(t, "gpt-a", panel[0].Model)
 		assert.Equal(t, "gpt-b", panel[1].Model, "diversity must never seat a below-bar model")
@@ -607,7 +619,7 @@ func TestSelectReviewPanelVendorEdgeCases(t *testing.T) {
 		r := NewRegistryFromParts(catalog, priors, nil, nil, "capable-default").
 			WithCreators(map[string]string{"gpt-a": "openai", "gpt-b": "openai", "claude-exp": "anthropic"})
 
-		panel := r.SelectReviewPanel(in, 2)
+		panel := r.reviewPanel(in, 2)
 		require.Len(t, panel, 2)
 		assert.Equal(t, "gpt-a", panel[0].Model)
 		assert.Equal(t, "claude-exp", panel[1].Model,
@@ -627,7 +639,7 @@ func TestSelectReviewPanelVendorEdgeCases(t *testing.T) {
 		r := NewRegistryFromParts(catalog, priors, nil, nil, "capable-default").
 			WithCreators(map[string]string{"gpt-a": "openai", "gpt-b": "openai"})
 
-		panel := r.SelectReviewPanel(in, 3)
+		panel := r.reviewPanel(in, 3)
 		require.Len(t, panel, 3)
 		assert.Equal(t, "gpt-a", panel[0].Model)
 		assert.Equal(t, "bare-n", panel[1].Model,
@@ -646,9 +658,9 @@ func TestSelectReviewPanelVendorEdgeCases(t *testing.T) {
 		}}
 		creators := map[string]string{"gpt-a": "openai", "gpt-b": "openai", "gpt-c": "openai"}
 
-		blind := NewRegistryFromParts(catalog, priors, nil, nil, "capable-default").SelectReviewPanel(in, 3)
+		blind := NewRegistryFromParts(catalog, priors, nil, nil, "capable-default").reviewPanel(in, 3)
 		aware := NewRegistryFromParts(catalog, priors, nil, nil, "capable-default").
-			WithCreators(creators).SelectReviewPanel(in, 3)
+			WithCreators(creators).reviewPanel(in, 3)
 		assert.Equal(t, blind, aware)
 	})
 
@@ -663,7 +675,7 @@ func TestSelectReviewPanelVendorEdgeCases(t *testing.T) {
 		r := NewRegistryFromParts(catalog, priors, nil, nil, "capable-default").
 			WithCreators(map[string]string{"gpt-a": "openai", "claude-x": "anthropic"})
 
-		panel := r.SelectReviewPanel(in, 4)
+		panel := r.reviewPanel(in, 4)
 		require.Len(t, panel, 4)
 		assert.Equal(t, "gpt-a", panel[0].Model)
 		assert.Equal(t, "claude-x", panel[1].Model)
@@ -685,7 +697,7 @@ func TestSelectReviewPanelVendorEdgeCases(t *testing.T) {
 		}}
 		r := NewRegistryFromParts(catalog, priors, nil, nil, "capable-default")
 
-		panel := r.SelectReviewPanel(in, 3)
+		panel := r.reviewPanel(in, 3)
 		require.Len(t, panel, 3)
 		assert.Equal(t, "openai/one", panel[0].Model)
 		assert.Equal(t, "anthropic/x", panel[1].Model)
@@ -694,7 +706,7 @@ func TestSelectReviewPanelVendorEdgeCases(t *testing.T) {
 }
 
 func TestSelectReviewPanelClampsBeforeDuplicating(t *testing.T) {
-	panel := ladderRegistry(nil).SelectReviewPanel(SelectInput{Role: RoleReviewer, Tier: TierCritical}, 3)
+	panel := ladderRegistry(nil).reviewPanel(SelectInput{Role: RoleReviewer, Tier: TierCritical}, 3)
 	require.Len(t, panel, 3)
 
 	models := make([]string, len(panel))
@@ -726,7 +738,7 @@ func TestSelectReviewPanelClampsBeforeDuplicating(t *testing.T) {
 // clamps to moderate.
 func TestSelectReviewPanelSeatsDegradeIndependently(t *testing.T) {
 	in := SelectInput{Role: RoleReviewer, Tier: TierComplex, Exclude: map[string]bool{"high/two": true}}
-	panel := ladderRegistry(nil).SelectReviewPanel(in, 3)
+	panel := ladderRegistry(nil).reviewPanel(in, 3)
 	require.Len(t, panel, 3)
 
 	assert.Equal(t, TierComplex, panel[0].MetTier)
@@ -749,7 +761,7 @@ func TestSelectReviewPanelFillsWithARealPickNotAnEscalation(t *testing.T) {
 	}}
 	r := NewRegistryFromParts(cat, priors, nil, nil, "capable/default")
 
-	panel := r.SelectReviewPanel(SelectInput{Role: RoleReviewer, Tier: TierCritical}, 3)
+	panel := r.reviewPanel(SelectInput{Role: RoleReviewer, Tier: TierCritical}, 3)
 	require.Len(t, panel, 3, "the panel is always n seats")
 
 	assert.Equal(t, "only/one", panel[0].Model)
@@ -779,7 +791,7 @@ func TestSelectReviewPanelVendorPreferenceIsBoundedToTheRung(t *testing.T) {
 		"mid/one": "alpha", "mid/two": "alpha", "low/one": "beta",
 	})
 
-	panel := r.SelectReviewPanel(SelectInput{Role: RoleReviewer, Tier: TierComplex}, 2)
+	panel := r.reviewPanel(SelectInput{Role: RoleReviewer, Tier: TierComplex}, 2)
 	require.Len(t, panel, 2)
 
 	assert.Equal(t, "high/one", panel[0].Model)
@@ -794,7 +806,7 @@ func TestSelectReviewPanelReturnsNothingWhenNoModelIsSelectable(t *testing.T) {
 	// No capable default and nothing employable: the only honest answer is none.
 	r := NewRegistryFromParts(cat, priors, nil, nil, "")
 
-	assert.Nil(t, r.SelectReviewPanel(SelectInput{Role: RoleReviewer, Tier: TierSimple}, 3))
+	assert.Nil(t, r.reviewPanel(SelectInput{Role: RoleReviewer, Tier: TierSimple}, 3))
 }
 
 // TestSelectCandidateModelsPinReportsMeasuredNotAsserted pins that the pin seat
@@ -802,7 +814,7 @@ func TestSelectReviewPanelReturnsNothingWhenNoModelIsSelectable(t *testing.T) {
 func TestSelectCandidateModelsPinReportsMeasuredNotAsserted(t *testing.T) {
 	r := ladderRegistry(nil)
 
-	picks := r.SelectCandidateModels(SelectInput{Role: RoleCoder, Tier: TierCritical}, 2, "sub/floor")
+	picks := r.candidateModels(SelectInput{Role: RoleCoder, Tier: TierCritical}, 2, "sub/floor")
 	require.Len(t, picks, 2)
 
 	assert.Equal(t, "sub/floor", picks[0].Model)
@@ -961,7 +973,7 @@ func TestMaxCapabilityReviewPanelSpansVendors(t *testing.T) {
 	r.sel.MaxCapability = true
 
 	in := SelectInput{Role: RoleReviewer, Tier: TierComplex, EstTokens: 50000}
-	panel := r.SelectReviewPanel(in, 3)
+	panel := r.reviewPanel(in, 3)
 	require.Len(t, panel, 3)
 
 	// Seat 1: all candidates; highest quality gpt-a (0.95). Seat 2: prefers
@@ -1021,7 +1033,9 @@ func oldPick(r *Registry, in SelectInput) string {
 		return ""
 	}
 
-	return bestValue(cands, r.headroom(), r.sel.MaxCapability)
+	best, _ := valuePick(cands, priceBand(cands, r.headroom(), r.sel.MaxCapability))
+
+	return best.id
 }
 
 // TestAtBarSelectionsAreUnchanged is THE production-behaviour guard. Every
@@ -1550,7 +1564,6 @@ func TestOperatorLadderDrivesTheWalk(t *testing.T) {
 
 	require.True(t, got.OK)
 	assert.Equal(t, TierComplex, got.MetTier)
-	assert.InDelta(t, 0.70, got.MetBar, 1e-9)
 	assert.InDelta(t, 0.95, got.RequestedBar, 1e-9)
 	assert.Equal(t, "mid/one", got.Model)
 
@@ -1565,7 +1578,7 @@ func TestOperatorLadderDrivesTheWalk(t *testing.T) {
 // one, since the default has four distinct bars and this one ties complex
 // and critical, so only a genuinely-threaded ladder can produce this order.
 func TestDescentCollapsesTiedAdjacentBars(t *testing.T) {
-	r := NewRegistry("", nil).WithTierBars(map[Tier]float64{
+	r := newTestRegistry("", nil).WithTierBars(map[Tier]float64{
 		TierSimple: 0.50, TierModerate: 0.60, TierComplex: 0.70, TierCritical: 0.70,
 	})
 

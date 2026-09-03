@@ -49,62 +49,14 @@ type solverCtx struct {
 	toolVerify verifyToolPass
 }
 
-// gateEvidence is what the pre-commit gate learned about the coder's own work,
-// and what the checkpoint gate later learned about a mob revise of it.
-// It is carried on the solver rather than returned because the evidence has to
-// survive past preCommitVerify's return: mobCheckpoint runs between the gate
-// and the report site and mutates it. A return value would have to be threaded
-// through that call anyway, and that signature already carries the exhaustion
-// flag the turn-window work added.
+// gateEvidence is what the pre-commit gate learned about this subtask. It
+// lives on the solver because mobCheckpoint may replace the tree between the
+// gate and the report site. verified: the command ran and passed on the tree
+// being committed. coderFailed: the gate was red on the coder's own work,
+// even when the fix pass then repaired it.
 type gateEvidence struct {
-	// verified: the resolved command RAN and PASSED against the tree that is
-	// about to be committed. False for the skip tier and for an inconclusive
-	// run, neither of which is evidence of anything.
-	verified bool
-
-	// coderFailed: the gate was RED on the coder's own work, before any fix
-	// pass. It stays true when the fix pass then repaired it - the point is
-	// what the CODER produced, not what shipped. A mob checkpoint's revise
-	// never sets it: the pre-commit gate is a deterministic project command
-	// and its red is a fact, while a revise verdict is model opinion, and
-	// recording a failure off model opinion would be a far noisier signal
-	// than this field exists to carry. The noise it does accept: a flaky
-	// command that passes on the re-run, or a fix pass that changed nothing,
-	// both still land here as a red gate too - accepted, because the
-	// alternative is recording a clean win for work that was demonstrably red.
+	verified    bool
 	coderFailed bool
-
-	// reviseVerified: the checkpoint's own gate (checkpointReviseVerify) RAN
-	// and PASSED against the tree a revise commit is about to install in
-	// place of the one verified describes. False for the skip tier and for
-	// an inconclusive run, mirroring verified above - neither is evidence
-	// the revised tree is good. Also false, and never assigned otherwise, on
-	// every arm that discards the revise (a failed verify, or an error
-	// resolving/running it): none of those ever reach commitRevise, so the
-	// field stays at its zero value on all of them. Set true only
-	// immediately before commitRevise is called, so commitRevise can read it
-	// to decide what a landed revise does to verified.
-	reviseVerified bool
-
-	// stillRed: the gate burned its one fix pass and the re-run STILL came
-	// back FAILED - the only preCommitVerify exit a solo outcome row reports
-	// from. Assigned only on that arm, so all five of the earlier error exits
-	// (a resolve failure, either verify run failing to produce a verdict at
-	// all, the budget check before the fix pass, and the fix model itself
-	// failing) leave it zero and report nothing: the budget park in particular
-	// never earned the claim that a fix pass could not rescue the work, and a
-	// verify that never ran says nothing about the coder either way. The exits
-	// that return nil - a candidate solver, the skip tier, and either gate
-	// coming back anything but FAILED - leave it zero for the same reason.
-	stillRed bool
-
-	// environmentalFailure: whether the still-red arm's FINAL failing verify
-	// output carries the container resource-exhaustion signature, bound ONCE
-	// from verifyexec.LooksResourceExhausted beside the stillRed stamp so the
-	// card-log line and the suppressed row cannot disagree about the cause -
-	// the same single-binding pattern salvageSoloCapped uses for its
-	// modelEvidence. Consumed only alongside stillRed.
-	environmentalFailure bool
 }
 
 // runExecute is the execute phase: subtasks run SEQUENTIALLY in dependency
@@ -238,68 +190,32 @@ func (o *run) executeSubtaskWith(ctx context.Context, sc *solverCtx, sub subtask
 // CM's default 30m heartbeat_timeout). A var so tests can shrink it.
 var subtaskHeartbeatInterval = 5 * time.Minute
 
-// VerifyParkedError marks the pre-commit verify park: the run's resolved verify
-// command was red on the coder's work, the one bounded fix pass ran, and the
-// re-run was still red. The worker maps it like the toolchain park - push the
-// WIP, transition the card to blocked, release the claim, fail - so the tree
-// the gate refused leaves the container instead of dying with it, and the park
-// is visible on the board rather than only in the log.
-//
-// The command and the output tail travel on the error because the container
-// holding them is destroyed before anyone reads the card, and because the park
-// arm that writes them to the card sits above the phase that produced them.
+// VerifyParkedError marks the pre-commit verify park: red command, one fix
+// pass, still red. The worker maps it like the toolchain park - push the WIP,
+// blocked, release. Command and Output travel on it for the card note written
+// after the container is gone; Environmental binds the exhaustion verdict once,
+// so sizing, the card log and the suppressed outcome row cannot disagree.
 type VerifyParkedError struct {
 	Subtask string // the subtask whose gate stayed red
 	Command string // the verify command, as displayed
 	Output  string // a bounded excerpt of what the failing run printed
+
+	// Environmental: the final failure carried the container
+	// resource-exhaustion signature, so it is evidence about neither the
+	// model nor the sizing.
+	Environmental bool
 }
 
 func (e *VerifyParkedError) Error() string {
 	return fmt.Sprintf("subtask %s: `%s` still fails after one fix pass", e.Subtask, e.Command)
 }
 
-// preCommitVerify runs the run's resolved verify command against the coder's
-// uncommitted work and gates the commit on the result. Returning nil means the
-// commit may proceed: the command passed, no command resolved (the skip tier),
-// or the run was inconclusive - a timeout or a missing tool, which is not
-// evidence of a defect, so the commit proceeds unverified exactly as it did
-// before this gate existed. That mirrors the review round's own handling of a
-// skip. A genuine failure gets ONE fix pass through the review phase's fix path
-// and one re-run; still red, and the error parks the subtask with the work
-// uncommitted, so the coder's work is never committed while the gate is red.
-// One pass, never a loop - the review phase's fix loop is the multi-round
-// mechanism.
-//
-// That error is *VerifyParkedError, a park sentinel, so the exit takes the
-// worker's park path rather than its default arm: the WIP is pushed, the card
-// goes to blocked, and the claim is released. The push carries the very tree
-// this gate refused, deliberately - refusing to COMMIT it as finished work is
-// the gate's job, and destroying it with the container is not the same thing.
-// It reaches a human as a red branch on a blocked card, which is what a resume
-// and a review both need.
-//
-// The command runs once per subtask, not twice: when the coder's verify tool
-// already passed and the tree has not moved since, the gate takes that verdict
-// rather than re-running the identical command over identical bytes - see
-// gateAcceptsToolPass for the three conditions and why nothing else qualifies.
-//
-// The plan comes from ensureVerify and the execution from runVerifyPlan, the
-// same two calls the review-round gate makes, so the two cannot drift into
-// different commands, timeouts or environments. Nothing here knows what a check
-// command looks like; the resolved plan is the only source. Whether that command
-// measures the working tree rather than a cache is a property of what the
-// project declares, not something this gate can or should patch.
-//
-// Solo solvers only. A Best-of-N candidate is gated by the judge phase's
-// authoritative verify over every candidate worktree, and candidates race in
-// parallel over one shared run: resolving per candidate would race the run's
-// cached plan, and a per-candidate fix pass would charge the run ledger during
-// the fan-out, which the candidate sub-ledgers exist to keep separate.
-//
-// exhausted says whether the coder that wrote the work spent every turn it was
-// given. It is carried in rather than measured here because the caller holds
-// both operands, and it is what lets the still-red arm correct the turn budget
-// as well as the bar - see applyPrecommitVerifyEvidence.
+// preCommitVerify gates the coder's uncommitted work on the run's verify plan.
+// nil means commit: passed, no command resolved, or inconclusive (a timeout or
+// missing tool is not evidence of a defect). A failure gets exactly one fix pass
+// and one re-run; still red returns *VerifyParkedError, whose park path pushes
+// the refused tree as WIP. Solo only - candidates are verified by the judge.
+// exhausted (the coder spent its whole window) picks which sizing axes rise.
 func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef, exhausted bool) error {
 	// One assignment point, before any early return, so a verdict from an
 	// earlier subtask can never stand in for this one.
@@ -309,50 +225,14 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 		return nil
 	}
 
-	plan, err := o.ensureVerify(ctx)
+	plan, vres, ran, err := o.runGate(ctx, sc, sub, subtaskGateContext(sub.ID))
 	if err != nil {
 		return err
 	}
 
-	if len(plan.Argv) == 0 {
+	if !ran {
 		return nil
 	}
-
-	if o.gateAcceptsToolPass(ctx, sc) {
-		sc.gate.verified = true
-
-		// The gate line still fires: a human reading the activity log must see a
-		// gate for every subtask, and this one says out loud where the verdict
-		// came from rather than implying a second run happened.
-		o.logVerifyGate(ctx, verifyResult{
-			Status: verifyPassed,
-			Note:   "the coder's own run measured this exact tree; not re-run",
-		}, subtaskGateContext(sub.ID))
-
-		// Same reasoning as runVerifyPlan's emit: without an event the
-		// transcript carries no record of this gate at all, and consumers
-		// undercount one verification per accepted subtask. The source names
-		// the acceptance and no command field is set - nothing re-ran, and an
-		// accepted pass must never read as a gate-executed one.
-		if o.d.Emit != nil {
-			o.d.Emit.Emit(events.Verification, map[string]any{
-				"ok":      true,
-				"status":  verifyStatusWord(verifyPassed),
-				"source":  "coder-verify-tool-pass",
-				"detail":  "the gate accepted the coder's own verify-tool pass against this exact tree and did not re-run the command",
-				"subtask": sub.ID,
-			})
-		}
-
-		return nil
-	}
-
-	vres, rerr := o.runVerifyPlan(ctx, sc.workspace, plan)
-	if rerr != nil {
-		return rerr
-	}
-
-	o.logVerifyGate(ctx, vres, subtaskGateContext(sub.ID))
 
 	if vres.Status != verifyFailed {
 		sc.gate.verified = vres.Status == verifyPassed
@@ -380,10 +260,19 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 	// must report its estimate rather than the card's.
 	req := fixRequest{Round: 0, FixTier: string(sub.Sizing.Bar), Subtask: sub.ID, PlannerBar: sub.PlannerBar}
 	if _, ferr := o.runFixModel(ctx, prompt, req); ferr != nil {
-		return ferr
+		// A cap is not a verdict on the tree the fix left behind: the re-run
+		// below decides, exactly as runFix does for the review rounds.
+		var mte *MaxTurnsError
+		if !errors.As(ferr, &mte) {
+			return ferr
+		}
+
+		o.d.logCard(ctx, "subtask %s: the fix pass hit its turn cap - verifying what it left", sub.ID)
 	}
 
-	vres, rerr = o.runVerifyPlan(ctx, sc.workspace, plan)
+	// A direct run, not the shared gate: the fix coder holds no verify tool, so
+	// there is no pass of its own for the gate to take.
+	vres, rerr := o.runVerifyPlan(ctx, sc.workspace, plan)
 	if rerr != nil {
 		return rerr
 	}
@@ -391,19 +280,18 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 	o.logVerifyGate(ctx, vres, subtaskGateContext(sub.ID))
 
 	if vres.Status == verifyFailed {
-		o.applyPrecommitVerifyEvidence(ctx, sub, vres, exhausted)
+		// One binding of the exhaustion verdict, from the final failing output,
+		// so the sizing correction, the card log and the suppressed outcome row
+		// cannot disagree about the cause.
+		env := verifyexec.LooksResourceExhausted(vres.Output)
 
-		// One arm stamps the evidence: stillRed marks this as the only exit the
-		// caller reports a solo outcome row from, and environmentalFailure binds
-		// the exhaustion verdict once from the final failing output so the card
-		// log and the suppressed row agree about the cause.
-		sc.gate.stillRed = true
-		sc.gate.environmentalFailure = verifyexec.LooksResourceExhausted(vres.Output)
+		o.applyPrecommitVerifyEvidence(ctx, sub, env, exhausted)
 
 		return &VerifyParkedError{
-			Subtask: sub.ID,
-			Command: plan.Display,
-			Output:  verifyFailureExcerpt(vres.Output),
+			Subtask:       sub.ID,
+			Command:       plan.Display,
+			Output:        verifyFailureExcerpt(vres.Output),
+			Environmental: env,
 		}
 	}
 
@@ -413,6 +301,65 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 	sc.gate.verified = vres.Status == verifyPassed
 
 	return nil
+}
+
+// runGate is the one verify gate the pre-commit and checkpoint-revise callers
+// share: resolve the plan, take the coder's own verify-tool pass when it
+// measured this exact tree, otherwise run the command, log the verdict under
+// where. ran is false for the skip tier and for a resolution error, true on an
+// accepted pass though nothing ran, so an error with ran true came from the run.
+func (o *run) runGate(ctx context.Context, sc *solverCtx, sub subtaskRef, where string) (verifyPlan, verifyResult, bool, error) {
+	plan, err := o.ensureVerify(ctx)
+	if err != nil {
+		return verifyPlan{}, verifyResult{}, false, err
+	}
+
+	if len(plan.Argv) == 0 {
+		return plan, verifyResult{}, false, nil
+	}
+
+	if o.gateAcceptsToolPass(ctx, sc) {
+		// The gate line still fires: a human reading the activity log must see a
+		// gate for every subtask, and this one says out loud where the verdict
+		// came from rather than implying a second run happened.
+		vres := verifyResult{
+			Status: verifyPassed,
+			Note:   "the coder's own run measured this exact tree; not re-run",
+		}
+
+		o.logVerifyGate(ctx, vres, where)
+		o.emitAcceptedToolPass(sub)
+
+		return plan, vres, true, nil
+	}
+
+	vres, err := o.runVerifyPlan(ctx, sc.workspace, plan)
+	if err != nil {
+		return plan, verifyResult{}, true, err
+	}
+
+	o.logVerifyGate(ctx, vres, where)
+
+	return plan, vres, true, nil
+}
+
+// emitAcceptedToolPass records a gate that certified on the coder's own verify
+// tool pass: without an event the transcript carries no record of this gate at
+// all, and consumers undercount one verification per accepted subtask. The
+// source names the acceptance and no command field is set - nothing re-ran,
+// and an accepted pass must never read as a gate-executed one.
+func (o *run) emitAcceptedToolPass(sub subtaskRef) {
+	if o.d.Emit == nil {
+		return
+	}
+
+	o.d.Emit.Emit(events.Verification, map[string]any{
+		"ok":      true,
+		"status":  verifyStatusWord(verifyPassed),
+		"source":  "coder-verify-tool-pass",
+		"detail":  "the gate accepted the coder's own verify-tool pass against this exact tree and did not re-run the command",
+		"subtask": sub.ID,
+	})
 }
 
 // gateAcceptsToolPass reports whether the gate may certify on the verdict the
@@ -562,9 +509,10 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 		// final failing output does - the same exemption the capped path
 		// takes - with a card-log line naming the classification so the log
 		// agrees with the suppression.
-		if sc.gate.stillRed {
-			if sc.gate.environmentalFailure {
-				o.d.logCard(ctx, "subtask %s: verify still failed under container resource exhaustion - treated as environmental; no model outcome reported", sub.ID)
+		var vpe *VerifyParkedError
+		if errors.As(verr, &vpe) {
+			if vpe.Environmental {
+				o.logEnvironmentalVerify(ctx, sub)
 			} else {
 				o.reportSoloOutcome(ctx, sub.ID, pick, "failed", false, sc.ledger.Spent()-spendBefore)
 			}
@@ -709,7 +657,7 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 		// below, so an incapable model (which produced no code) is also recorded
 		// here - harmless, and it keeps that model out of its own review via this
 		// set plus o.excluded. Keyed on the slug we configured, which is what
-		// SelectReviewPanel's Exclude set compares against. newRun initializes the
+		// SelectReviewPanelReport's Exclude set compares against. newRun initializes the
 		// map unconditionally. selMu guards it: Best-of-N candidates write here in
 		// parallel; the review-phase read is sequenced after the fan-out's wg.Wait.
 		o.selMu.Lock()
@@ -1330,6 +1278,13 @@ func (o *run) raiseSubtaskBudget(ctx context.Context, sub subtaskRef, why string
 	})
 }
 
+// logEnvironmentalVerify names, on the card, a verify failure that carried the
+// container resource-exhaustion signature: sizing and the leaderboard are
+// untouched.
+func (o *run) logEnvironmentalVerify(ctx context.Context, sub subtaskRef) {
+	o.d.logCard(ctx, "subtask %s: the verify failed under container resource exhaustion - treated as environmental; sizing and model outcome unchanged", sub.ID)
+}
+
 // logEnvironmentalCapBudget records, card-log only, that a turn cap whose
 // verify outcome was environmental (resource-exhausted or skipped) left the
 // turn budget exactly where it was. Unlike raiseSubtaskBudget this makes no
@@ -1382,46 +1337,13 @@ func (o *run) raiseSubtaskBoth(ctx context.Context, sub subtaskRef, why string) 
 	})
 }
 
-// applyPrecommitVerifyEvidence records what a still-red pre-commit verify says
-// about a subtask's sizing, from the two facts the gate has: whether the verify
-// genuinely failed, and whether the coder that wrote the work spent every turn
-// it was given.
-//
-// A verify that RAN and genuinely FAILED, after a fix pass had already had its
-// chance at it, is evidence about QUALITY: what the coder produced is wrong.
-// The bar rises so the next attempt draws a stronger coder.
-//
-// When that coder also exhausted its window, the same failure is evidence about
-// VOLUME too, and both axes rise - the same composed correction the capped path
-// makes for the identical shape. The grace turn is why the two cases have to be
-// told apart here rather than by an error: it grants one terminal call after the
-// cap and returns cleanly, so a coder that ran out of room does not raise
-// *MaxTurnsError, and a window exhausted without raising it must not buy a
-// weaker correction than one that raised it.
-//
-// A failure carrying the container's resource-exhaustion signature is evidence
-// about the environment - under a pids limit a compile step succeeds and its
-// inner fork dies with EAGAIN, so the command exits non-zero and is classified
-// failed - and about neither axis, whatever the coder's turns were. That is the
-// same exemption the capped path's leaderboard report takes, for the same
-// reason.
-//
-// The capped path takes the same exemption: an environmentally-failed verify
-// after a turn cap gets logEnvironmentalCapBudget's card-log-only note, not a
-// raise either, so this path's no-op on the identical shape is consistent
-// rather than a divergence.
-//
-// The guard is written positively rather than as a list of exclusions because
-// the only call site reaches it on verifyFailed alone: a skipped result and a
-// *ToolchainMissingError both return earlier, so an exclusion list would name
-// branches production cannot produce.
-//
-// There is no reader for this on THIS run - a still-red gate parks it, and the
-// tree reaches the next run only as the worker's WIP commit, never as a finished
-// subtask. That next run redoes the subtask, and reconcile hands it the raised
-// sizing.
-func (o *run) applyPrecommitVerifyEvidence(ctx context.Context, sub subtaskRef, vres verifyResult, exhausted bool) {
-	if vres.Status != verifyFailed || verifyexec.LooksResourceExhausted(vres.Output) {
+// applyPrecommitVerifyEvidence raises the subtask's sizing after a still-red
+// gate: a genuine failure is quality evidence (bar); a failure by a coder that
+// also spent its whole window is volume evidence too (bar and budget). An
+// environmental failure raises nothing, matching executeClaimedWith's
+// suppression of the outcome row. The raised marker is read by the next run.
+func (o *run) applyPrecommitVerifyEvidence(ctx context.Context, sub subtaskRef, environmental, exhausted bool) {
+	if environmental {
 		return
 	}
 

@@ -217,7 +217,7 @@ func TestRecentReviewFindingsHistory_ExcludesApproval(t *testing.T) {
 func TestApprovalRecordedBeforeCleanupPass(t *testing.T) {
 	ops := &fakeOps{}
 	// committed=true so the fix pass actually creates a fixup.
-	git := &fakeGit{committed: true, headSHA: "pre-cleanup-sha"}
+	git := &fakeGit{committed: true, headSHA: "pre-cleanup-sha", headAfterFixup: "post-cleanup-sha"}
 	client := &planLLM{responses: []llm.Response{
 		stopResp("Correctness: minor nit", 0.01),
 		stopResp("Design: looks fine", 0.01),
@@ -239,21 +239,9 @@ func TestApprovalRecordedBeforeCleanupPass(t *testing.T) {
 	assert.Contains(t, body, "## Review Approval")
 	assert.Contains(t, body, "pre-cleanup-sha")
 
-	// The two Head calls from the git log trace the sequence:
-	//   Head (recordApproval captures pre-cleanup sha)
-	//   Head (cleanup pass records pre-cleanup head)
-	//   CommitFixup (cleanup fix lands)
-	// The first Head happens before CommitFixup; the second Head is the
-	// runFix internal read and also happens before CommitFixup. We prove
-	// the sequence by checking recorded call order within the git log.
-	gitCalls := git.recorded()
-	assert.Greater(t, indexOfCall(gitCalls, "Head"), -1,
-		"Head must have been called")
-	assert.GreaterOrEqual(t, indexOfPrefix(gitCalls, "CommitFixup:"), 0,
-		"CommitFixup must have been called")
-	// Head appears before CommitFixup.
-	assert.Less(t, indexOfCall(gitCalls, "Head"), indexOfPrefix(gitCalls, "CommitFixup:"),
-		"the HEAD capture must happen before the fixup commit")
+	// CommitFixup moves HEAD; the recorded SHA must be the one BEFORE it.
+	assert.NotContains(t, body, "post-cleanup-sha",
+		"the approval must bind the commit the panel judged, not the fixup")
 }
 
 // TestReviewApprovalRecordedOnReviewLoopApproval proves that the approval

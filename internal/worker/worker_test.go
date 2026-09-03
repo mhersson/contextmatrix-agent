@@ -1876,7 +1876,7 @@ func TestLogReachabilityLogsCardOnlyWhenSomeTierIsUnreachable(t *testing.T) {
 	logReachability(context.Background(), reachable, ops, "CMX-001")
 	assert.Equal(t, 0, ops.count("AddLog"), "every tier reachable means no card log")
 
-	unreachable := registry.NewRegistry("top/one", nil)
+	unreachable := registry.NewRegistryFromParts(nil, registry.Priors{}, nil, nil, "top/one")
 
 	ops2 := newStubOps()
 	logReachability(context.Background(), unreachable, ops2, "CMX-001")
@@ -1889,7 +1889,7 @@ func TestLogReachabilityLogsCardOnlyWhenSomeTierIsUnreachable(t *testing.T) {
 // Deps.Ops, but logReachability runs before that swap takes effect.
 func TestLogReachabilityToleratesNilOps(t *testing.T) {
 	assert.NotPanics(t, func() {
-		logReachability(context.Background(), registry.NewRegistry("top/one", nil), nil, "CMX-001")
+		logReachability(context.Background(), registry.NewRegistryFromParts(nil, registry.Priors{}, nil, nil, "top/one"), nil, "CMX-001")
 	})
 }
 

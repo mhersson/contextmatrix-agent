@@ -28,19 +28,10 @@ const reviewPanelSize = 3
 // a zero cap) can never loop forever.
 const hardReviewIterationCap = 50
 
-// maxVerifyRedCredit bounds how far verify-red rounds can extend the attempts
-// cliff. A verify-red round runs no panel and produces no verdict - charging
-// it a panel attempt spends the review budget on a build failure - but the
-// extension is bounded so a tree that never comes back green still reaches
-// the authoritative pass and parks. The server-side counter still increments
-// every round: it is the resume-stable round numbering and the lifetime
-// ceiling, and both must keep counting verify-red rounds.
-//
-// This is a ceiling on the credit, not a promise it is always available: the
-// per-run credit is further clamped to what config.MaxReviewAttemptsCap
-// leaves under the configured cap (see reviewLoop's creditCap), so the credit
-// never pushes the authoritative pass's final increments past CM's
-// server-side ceiling.
+// maxVerifyRedCredit bounds how many verify-red rounds may push the
+// authoritative cliff out by one round each: such rounds run no panel, so a
+// panel attempt should not pay for a build failure. reviewLoop clamps the
+// per-run credit further so the cliff never passes config.MaxReviewAttemptsCap.
 const maxVerifyRedCredit = 3
 
 // verifyOutputTail caps the verify-command output carried into findings, so a
@@ -179,15 +170,9 @@ func (o *run) reviewTimeLeft(ctx context.Context, round int) error {
 	return &ReviewParkedError{Reason: reviewParkedNoTime}
 }
 
-// runReview is the review phase. The parent enters review (idempotent on
-// resume), then - on the autonomous path and before the review loop - consults
-// a recorded approval from a prior run: if the recorded HEAD SHA matches the
-// current branch HEAD and the verify gate (when one is configured) still
-// passes, the approval is adopted, skipping the specialist panel and synthesis.
-// On adoption the recorded surviving fixes run as a non-escalating cleanup
-// pass, the approval record is cleared, and the FSM proceeds to integrate.
-// Any mismatch (no record, different HEAD, red or erroring verify) falls
-// through to the normal review loop unchanged.
+// runReview is the review phase: the parent enters review (idempotent on
+// resume), then the run delegates to the HITL path, to an adoptable recorded
+// approval, or to the review loop.
 func runReview(ctx context.Context, o *run) error {
 	d := o.d
 	cfg := d.Cfg
@@ -225,13 +210,6 @@ func runReview(ctx context.Context, o *run) error {
 		return o.runReviewHITL(ctx, plan)
 	}
 
-	// Autonomous path: consult the recorded approval before entering the review
-	// loop. When a prior run approved the card, the record binds the verdict to
-	// the commit it approved. Resume adopts it when the HEAD still matches and,
-	// when a verify command is configured, the gate still passes. Any mismatch
-	// falls through to the normal review loop. A park error from the adopted
-	// cleanup fix pass propagates out of runReview so the FSM parks the card
-	// rather than re-buying the panel on an exhausted budget.
 	adopted, aerr := o.tryAdoptApproval(ctx, plan)
 	if aerr != nil {
 		return aerr
@@ -244,16 +222,11 @@ func runReview(ctx context.Context, o *run) error {
 	return o.reviewLoop(ctx, plan, 0)
 }
 
-// tryAdoptApproval checks whether a recorded approval can be adopted on resume.
-// It returns (true, nil) when adoption succeeds: the record exists, the current
-// branch HEAD matches the recorded SHA, and the verify gate (when the plan has a
-// command) is still green. On adoption it runs the recorded surviving fixes as
-// a non-escalating cleanup pass, clears the approval record from the card body,
-// and returns nil for the FSM to proceed to integrate. On any mismatch (no
-// record, different HEAD, red or erroring verify) it does nothing and returns
-// (false, nil) so the caller falls through to the normal review loop. A park
-// error from the adopted cleanup fix pass propagates up to park the card rather
-// than re-buying the panel on an exhausted budget.
+// tryAdoptApproval adopts a recorded approval on resume when HEAD still equals
+// the recorded SHA and the verify gate (if any) is green: it runs the recorded
+// fixes as a non-escalating cleanup pass, clears the record and reports
+// (true, nil). Any mismatch reports (false, nil); a park from the cleanup pass
+// propagates.
 func (o *run) tryAdoptApproval(ctx context.Context, plan verifyPlan) (bool, error) {
 	d := o.d
 
@@ -300,62 +273,16 @@ func (o *run) tryAdoptApproval(ctx context.Context, plan verifyPlan) (bool, erro
 	// approval with surviving fixes frames the summary as open findings; a clean
 	// one carries the summary verbatim, matching the live approval path's framing
 	// condition.
+	o.reviewSummary = rec.Summary
+
 	if len(rec.Fixes) > 0 {
 		o.reviewSummary = approvedWithOpenFindings(rec.Summary)
-	} else {
-		o.reviewSummary = rec.Summary
-	}
 
-	// Run the recorded surviving fixes as a non-escalating cleanup pass - exactly
-	// the same fixRequest.NoEscalate semantics the live approval branch uses so a
-	// cleanup fixup cannot climb counters or trigger the exhausted-fixers park.
-	if len(rec.Fixes) > 0 && worthCleanupPass(rec.Fixes) {
-		// Reconstruct the findings text from the recorded fixes so the fix prompt
-		// has real context. This mirrors what the live path builds from v.Fixes.
-		findings := formatFixes(verdict{Summary: rec.Summary, Fixes: rec.Fixes})
-
-		pre, herr := d.Git.Head(ctx)
-		if herr != nil {
-			slog.Warn("review: could not record the pre-cleanup head before adopted cleanup pass",
-				"card_id", d.Cfg.CardID, "error", herr)
-
-			pre = ""
-		}
-
-		committed, ferr := o.runFix(ctx, fixRequest{Findings: findings, Round: 0, NoEscalate: true})
-		if ferr != nil {
-			if isParkError(ferr) {
-				d.logCard(ctx, "review: adopted approval but the cleanup fix pass parked - stopping: %s", ferr)
-
-				// Propagate the park error so the FSM parks the card instead of
-				// falling through to a re-bought panel.
-				return false, ferr
-			}
-
-			d.logCard(ctx, "review: adopted approval but the cleanup fix pass failed - proceeding approved: %s", ferr)
-
-			if herr := d.Git.HardReset(ctx, "HEAD"); herr != nil {
-				slog.Warn("review: failed to discard the swallowed cleanup pass's partial edits",
-					"card_id", d.Cfg.CardID, "error", herr)
-			}
-
-			o.clearApproval(ctx)
-
-			return true, nil
-		}
-
-		if committed {
-			o.reviewSummary = approvedWithFixesApplied(rec.Summary)
-
-			d.logCard(ctx, "review: adopted approval with %d surviving finding(s) - applied a non-escalating cleanup fix pass", len(rec.Fixes))
-
-			// The fixup landed after HEAD was matched, so verify it or drop it.
-			// A round of 0 means no round was recorded by this run, so the verify
-			// correction is skipped - there is no in-run round to attribute a
-			// correction to.
-			o.verifyCleanupFixup(ctx, plan, 0, pre, rec.Summary)
-		} else {
-			d.logCard(ctx, "review: adopted approval with %d surviving finding(s), but the cleanup fix pass produced no change", len(rec.Fixes))
+		// rec.Summary is already the rendered findings text; it is the prompt.
+		// A round of 0 means no round was recorded by this run, so the cleanup
+		// pass's verify correction has no in-run round to attribute itself to.
+		if err := o.cleanupPass(ctx, plan, fixRequest{Findings: rec.Summary, Round: 0, NoEscalate: true}, rec.Summary, rec.Fixes); err != nil {
+			return false, err
 		}
 	}
 
@@ -396,7 +323,7 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 	// documents that the authoritative pass's final increments land the
 	// counter at attemptsCap+1, so credit can widen the cliff only as far as
 	// that headroom allows. A no-op at the default cap (min(3, 6-3) == 3);
-	// zero at the maximum cap, matching main's uncredited behavior exactly.
+	// zero at the maximum cap, so a cap of 6 gets no credit.
 	creditCap := min(maxVerifyRedCredit, config.MaxReviewAttemptsCap-attemptsCap)
 
 	// fixRan is whether the IMMEDIATELY PRECEDING fix round both ran to
@@ -462,96 +389,29 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 			// one non-escalating cleanup pass and finish either way. This is not
 			// another review round - it never increments review attempts, never
 			// loops back into the panel, and a transport error or a no-op commit
-			// can never un-approve a verdict that already cleared review. A PARK
-			// is the exception: budget, context limit, turn cap and missing
-			// toolchain are not opinions about the change, they are the points at
-			// which the worker learns the run must stop and push its WIP, so they
-			// propagate instead of being swallowed here.
+			// can never un-approve a verdict that already cleared review. A park
+			// is the exception: budget, context limit and missing toolchain are
+			// the points at which the worker learns the run must stop and push its
+			// WIP, so they propagate. A turn cap on this optional pass does not -
+			// cleanupPass keeps or drops whatever the capped coder committed.
 			if len(fixes) > 0 {
 				// Findings reach the PR body framed as open until a pass lands
 				// them: an approval carrying raw findings text lets the PR model
 				// narrate them as fixed (see approvedDespiteFindings).
 				o.reviewSummary = approvedWithOpenFindings(findings)
 
-				if !worthCleanupPass(fixes) {
-					d.logCard(ctx, "review: approved with %d surviving nit-only finding(s) - reported, no cleanup pass", len(fixes))
-
-					return nil
-				}
-
-				// The commit the cleanup pass starts from, read BEFORE it runs:
-				// a fixup its own verify cannot prove is reset back to here, and
-				// once the fixup exists this commit is no longer what HEAD reads.
-				// An unreadable HEAD is not fatal - the pass still runs, and the
-				// gate below reports the result it can no longer discard.
-				pre, herr := d.Git.Head(ctx)
-				if herr != nil {
-					slog.Warn("review: could not record the pre-cleanup head",
-						"card_id", cfg.CardID, "error", herr)
-
-					pre = ""
-				}
-
-				committed, ferr := o.runFix(ctx, fixRequest{Findings: findings, Round: round, FixTier: fixTier, NoEscalate: true})
-				if ferr != nil {
-					if isParkError(ferr) {
-						d.logCard(ctx, "review: approved with %d surviving finding(s), but the cleanup fix pass parked - stopping: %s",
-							len(fixes), ferr)
-
-						return ferr
-					}
-
-					d.logCard(ctx, "review: approved with %d surviving finding(s), but the cleanup fix pass failed - proceeding approved: %s",
-						len(fixes), ferr)
-
-					// The failed pass may have left partial edits uncommitted (a
-					// transport error mid-run, before runFix ever reaches its own
-					// commit). Best-effort, matching the sibling coder-run-failure
-					// discards elsewhere: untracked files survive a hard reset, but
-					// a dirty tracked file left behind here would otherwise carry
-					// into integrate's autosquash rebase and kill an approved run.
-					if herr := d.Git.HardReset(ctx, "HEAD"); herr != nil {
-						slog.Warn("review: failed to discard the swallowed cleanup pass's partial edits",
-							"card_id", cfg.CardID, "error", herr)
-					}
-
-					return nil
-				}
-
-				if committed {
-					o.reviewSummary = approvedWithFixesApplied(findings)
-
-					d.logCard(ctx, "review: approved with %d surviving finding(s) - applied a non-escalating cleanup fix pass", len(fixes))
-
-					// The fixup landed AFTER this round's gate ran, so nothing
-					// has checked it: prove it or drop it.
-					o.verifyCleanupFixup(ctx, plan, round, pre, findings)
-				} else {
-					d.logCard(ctx, "review: approved with %d surviving finding(s), but the cleanup fix pass produced no change", len(fixes))
-				}
+				return o.cleanupPass(ctx, plan,
+					fixRequest{Findings: findings, Round: round, FixTier: fixTier, NoEscalate: true}, findings, fixes)
 			}
 
 			return nil
 		}
 
-		// A fix round that committed but left this round's verify red failed as
-		// surely as one that landed nothing: the next fix escalates. Round 1's
-		// red verify has no fix behind it and escalates nothing. A round WE
-		// truncated clears fixRan - the cap itself stays volume evidence,
-		// charged on the budget axis alone - but it records fixCappedPending,
-		// so a truncated round that committed a still-red tree is charged on
-		// the bar axis here too: a full budget spent and a broken tree left
-		// behind is quality evidence as well as volume evidence, and the next
-		// fix both climbs the bar and runs wider. A truncated round whose gate
-		// came back green (or skipped) consumes the flag with no bar charge.
-		//
-		// When the round behind it left a GREEN gate, that fix did not merely
-		// fail to fix - it broke a tree that worked, so its fixup is discarded
-		// and the branch goes back to the commit it started from. discarded
-		// steers only what the discard actually changes: vres still describes
-		// the red gate that really ran (the round is already recorded from it),
-		// while the round that FOLLOWS starts from a predecessor the gate proved
-		// green.
+		// A committed fix behind a red gate failed. If the gate it followed was
+		// green it regressed a working tree: discard its fixup (branch back to
+		// preFixHead) and re-issue the panel mandate. A round truncated at its
+		// cap cleared fixRan but left fixCappedPending, so a red gate behind it
+		// still charges the bar.
 		discarded := false
 
 		// A capped round consumed the pending flag when its gate came back
@@ -624,43 +484,51 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 
 		var mte *MaxTurnsError
 
-		// committed gates the retry the same way it gates the CI gate's capped
-		// arm (see gates.go's ciFixRound): a round that pushed earns another
-		// panel, because the next round has a real new diff to critique. One
-		// that pushed nothing leaves HEAD exactly where round 1 left it, so a
-		// retry would spend a full panel re-critiquing the same diff round 1
-		// already judged - and it falls through to the park below instead.
+		capped := errors.As(err, &mte)
+
+		if err != nil && !capped {
+			return err
+		}
+
+		// Nothing pushed: HEAD is exactly where the round before left it, so a
+		// retry would spend a full panel re-critiquing a diff already judged.
+		if capped && !committed {
+			return err
+		}
+
+		o.recordLastFixBase(committed)
+
+		// A round that spent its whole window - a hard MaxTurnsError or a
+		// grace-turn landing that returns no error - is volume evidence: widen
+		// while there is wider to run, and defer the quality verdict to the
+		// next gate via fixCappedPending. A round that COMMITTED never parks
+		// here at any rung: it is already counted against attemptsCap, so the
+		// loop stays bounded, and the diff it pushed earns the next panel.
 		//
-		// Keyed on the WIDTH this round actually ran at, not on the step counter:
-		// the budget is clamped at the top rung, so a card whose bar already
-		// seeds it there would keep buying rounds of identical width while the
-		// log claimed each was wider.
-		if errors.As(err, &mte) && committed && o.fixSizing(req).Budget < maxBudgetStep {
-			// The round is already counted against attemptsCap, so the loop stays
-			// bounded; the cap is volume evidence and the next round runs wider on
-			// the same pool. Parking the whole run here would spend a round and
-			// learn nothing from it. The pending flag defers the quality verdict:
-			// if this round's committed tree leaves the next verify red, that red
-			// charges the bar too (a full budget spent and a broken tree left
-			// behind); if the gate comes back green the flag dies unused.
-			o.markFixCapped()
+		// The widening is keyed on the WIDTH this round actually ran at, not on
+		// the step counter: the budget is clamped at the top rung, so a card
+		// whose bar already seeds it there would keep buying rounds of identical
+		// width while the log claimed each was wider.
+		if committed && (capped || o.lastFixExhausted) {
+			if o.fixSizing(req).Budget < maxBudgetStep {
+				o.markFixCapped()
 
+				d.logCard(ctx, "review: fix round %d spent its whole turn window - the next fix round runs wider", round)
+			} else {
+				d.logCard(ctx, "review: fix round %d spent its whole turn window at the widest setting", round)
+			}
+
+			// The pending flag defers the quality verdict: if this round's
+			// committed tree leaves the next verify red, that red charges the
+			// bar too; if the gate comes back green the flag dies unused.
 			o.fixCappedPending = true
-
-			d.logCard(ctx, "review: fix round %d hit its turn cap - retrying wider", round)
 
 			// Cleared, not merely left alone: an earlier COMPLETED round would
 			// otherwise leave this true and hand the next round's red verify to
 			// the bar axis, blaming the model this cap just excused.
 			fixRan = false
 
-			o.recordLastFixBase(true)
-
 			continue
-		}
-
-		if err != nil {
-			return err
 		}
 
 		// Only a round that COMMITTED is handed forward. A round that landed
@@ -670,34 +538,8 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 		// rungs on the evidence of one round.
 		fixRan = committed
 
-		o.recordLastFixBase(committed)
-
 		if !committed {
 			o.markFixFailed("produced no change")
-		}
-
-		// A grace-turn landing that spent every turn is the same volume evidence as
-		// a hard MaxTurnsError: charge the budget axis now, and defer the quality
-		// verdict to the next round's gate via fixCappedPending, for the same
-		// reason the MaxTurnsError arm clears fixRan - the cap alone must not
-		// blame the model for turns it never got, but a committed red tree is
-		// quality evidence on top of volume evidence.
-		//
-		// Keyed on the WIDTH this round actually ran at, same as the MaxTurnsError
-		// arm above: a card whose bar already seeds the budget at the top rung
-		// keeps fixBudgetSteps at zero while the width is already clamped, so the
-		// step counter alone cannot see that there is no wider left to charge.
-		if committed && o.lastFixExhausted && o.fixSizing(req).Budget < maxBudgetStep {
-			// The pending flag defers the quality verdict exactly as in the
-			// MaxTurnsError arm above: a committed red tree from this round
-			// charges the bar in the next iteration, a green one does not.
-			o.markFixCapped()
-
-			o.fixCappedPending = true
-
-			d.logCard(ctx, "review: fix round %d spent its whole turn window - the next fix round runs wider", round)
-
-			fixRan = false
 		}
 	}
 
@@ -848,6 +690,80 @@ func approvedWithFixesApplied(findings string) string {
 	return "The review approved the change. These findings survived the critique round and were applied in a follow-up cleanup pass:\n\n" + findings
 }
 
+// cleanupPass runs an approving verdict's surviving findings as one
+// non-escalating fix pass and proves or drops the fixup. summary is the same
+// findings text as req.Findings, framed by the approvedWith* helpers for the
+// PR body. Only a park propagates; a turn cap and every other failure leave
+// the run approved.
+func (o *run) cleanupPass(ctx context.Context, plan verifyPlan, req fixRequest, summary string, fixes []fix) error {
+	d := o.d
+
+	if !worthCleanupPass(fixes) {
+		d.logCard(ctx, "review: approved with %d surviving nit-only finding(s) - reported, no cleanup pass", len(fixes))
+
+		return nil
+	}
+
+	// The commit the pass starts from, read BEFORE it runs: a fixup its own
+	// verify cannot prove is reset back to here, and once the fixup exists this
+	// commit is no longer what HEAD reads. An unreadable HEAD is not fatal - the
+	// pass still runs, and the gate below reports the result it can no longer
+	// discard.
+	pre, herr := d.Git.Head(ctx)
+	if herr != nil {
+		slog.Warn("review: could not record the pre-cleanup head", "card_id", d.Cfg.CardID, "error", herr)
+
+		pre = ""
+	}
+
+	committed, ferr := o.runFix(ctx, req)
+
+	var mte *MaxTurnsError
+
+	switch {
+	case errors.As(ferr, &mte):
+		// Ordered ahead of the park arm, which would otherwise match this too:
+		// the pass is optional and the card is already approved, so a cap costs
+		// the run nothing beyond whatever the coder did not get to. What it
+		// committed is proven or dropped by the gate below like any other fixup.
+		d.logCard(ctx, "review: the cleanup fix pass hit its turn cap - keeping what it committed, if anything")
+	case isParkError(ferr):
+		d.logCard(ctx, "review: approved with %d surviving finding(s), but the cleanup fix pass parked - stopping: %s", len(fixes), ferr)
+
+		return ferr
+	case ferr != nil:
+		d.logCard(ctx, "review: approved with %d surviving finding(s), but the cleanup fix pass failed - proceeding approved: %s", len(fixes), ferr)
+
+		// The failed pass may have left partial edits uncommitted (a transport
+		// error mid-run, before runFix ever reaches its own commit). Best-effort,
+		// matching the sibling coder-run-failure discards elsewhere: untracked
+		// files survive a hard reset, but a dirty tracked file left behind here
+		// would otherwise carry into integrate's autosquash rebase and kill an
+		// approved run.
+		if herr := d.Git.HardReset(ctx, "HEAD"); herr != nil {
+			slog.Warn("review: failed to discard the swallowed cleanup pass's partial edits", "card_id", d.Cfg.CardID, "error", herr)
+		}
+
+		return nil
+	}
+
+	if !committed {
+		d.logCard(ctx, "review: approved with %d surviving finding(s), but the cleanup fix pass produced no change", len(fixes))
+
+		return nil
+	}
+
+	o.reviewSummary = approvedWithFixesApplied(summary)
+
+	d.logCard(ctx, "review: approved with %d surviving finding(s) - applied a non-escalating cleanup fix pass", len(fixes))
+
+	// The fixup landed AFTER the gate that judged this tree ran, so nothing has
+	// checked it: prove it or drop it.
+	o.verifyCleanupFixup(ctx, plan, req.Round, pre, summary)
+
+	return nil
+}
+
 // cleanupVerifyContext names the gate for logVerifyGate: the run's third gate
 // position, after the review round's and the pre-commit one's.
 const cleanupVerifyContext = "cleanup fix pass, after the fixup"
@@ -857,29 +773,11 @@ const cleanupVerifyContext = "cleanup fix pass, after the fixup"
 // describes a tree the branch no longer holds.
 const cleanupVerifyCorrection = "the cleanup fix pass that followed this round is still on the branch, and its own verify did not pass"
 
-// verifyCleanupFixup re-runs the resolved verify plan over a committed cleanup
-// fixup and either keeps it or resets it away. The fixup lands after the
-// approving round's gate has already run, so without this the run would carry
-// that round's PASSED into the PR body and the completion note while describing
-// a tree the cleanup could have broken.
-//
-// pre is the commit the pass started from. A red gate resets the branch to it
-// and reverts the summary to open findings: the cleanup pass is optional by
-// construction, so dropping it restores a tree the approving round already
-// verified - which is why a failure here needs no fix round, no retry and no
-// park. A gate that could not report at all sits in the same position (the
-// fixup is unproven) and takes the same exit. The pushed fixup outlives the
-// reset on the remote until integrate's lease push overwrites the branch from
-// here, which is the same overwrite every rebased run performs.
-//
-// Every other outcome updates the run-level result, because it describes the
-// tree that will ship: a pass proves the fixup, and an inconclusive run (a
-// timeout, a missing tool) proves nothing about it - both are facts about the
-// fixup rather than about the tree the approving round measured. So is a red
-// gate whose discard could not be performed, which is the one path that reports
-// a failure it could not undo. Whenever a kept fixup did not pass, the round's
-// recorded section is corrected too: the PR trailer and the card body must not
-// contradict each other about the same tree.
+// verifyCleanupFixup re-runs the verify plan over a committed cleanup fixup.
+// Red, or unable to run at all: reset to pre (the tree the approving round
+// verified) and revert the summary to open findings. Passed, inconclusive, or
+// undiscardable: keep it, make its result the run's, and correct the round's
+// recorded verify line when the kept fixup did not pass.
 func (o *run) verifyCleanupFixup(ctx context.Context, plan verifyPlan, round int, pre, findings string) {
 	if len(plan.Argv) == 0 {
 		return
@@ -1647,15 +1545,10 @@ func (o *run) mobReviewVerdict(ctx context.Context) (verdict, bool) {
 }
 
 // mobReviewBriefing assembles the discussion briefing: the branch diff against
-// the base branch plus the prior round's findings.
-//
-// The diff is never scoped to a review snapshot. A fix can land code outside
-// the delta it targeted, and every mob round after the first follows a fix, so
-// a snapshot-scoped briefing would hide exactly the code the round exists to
-// re-examine - a seat reported this at runtime, saying the findings cited
-// symbols absent from its diff. The solo fan-out still scopes to the snapshot
-// on those rounds (it re-widens only on the authoritative pass and after a
-// no-op fix), so it carries the same gap; closing it there is separate work.
+// the base branch plus the prior round's findings. The diff is never scoped to
+// a review snapshot, because a fix can land code outside the delta it targeted
+// and every mob round after the first follows a fix. The solo fan-out does
+// scope to the snapshot on those rounds, so it carries that gap.
 func (o *run) mobReviewBriefing(ctx context.Context) (string, error) {
 	diff, err := o.d.Git.Diff(ctx, o.d.Cfg.BaseBranch)
 	if err != nil {
@@ -1807,6 +1700,14 @@ func (o *run) runFixModel(ctx context.Context, prompt string, req fixRequest) (s
 	d := o.d
 	cfg := d.Cfg
 	fs := o.fixSizing(req)
+
+	// Stashed, not promoted: only a round that then FAILS its gate raises the
+	// floor (markFixFailed). Subtask-scoped rounds are excluded outright - the
+	// pre-commit verify fix is sized on one subtask's bar and must not size the
+	// card's review loop.
+	if !req.NoEscalate && req.Subtask == "" {
+		o.pendingFixBar = fs.Bar
+	}
 
 	for attempt := 0; attempt <= reselectCap; attempt++ {
 		fp, rerr := o.resolveFixModel(ctx, req)
@@ -2006,6 +1907,13 @@ func (o *run) markFixFailed(reason string) {
 		o.fixFailed[o.lastFixModel] = true
 	}
 
+	// The floor and the bar step share one trigger, so the round that failed is
+	// the round the next one is sized against. Highest wins: a later failure at
+	// a weaker bar never lowers what an earlier one earned.
+	if tierRank(o.pendingFixBar) > tierRank(o.lastFixBar) {
+		o.lastFixBar = o.pendingFixBar
+	}
+
 	o.fixBarSteps++
 	o.fixFailReason = reason
 }
@@ -2146,14 +2054,12 @@ func (o *run) fixBarBase(req fixRequest) registry.Tier {
 }
 
 // fixSizing is the bar and budget this fix round runs at: the base bar climbed
-// once per failed round, and a budget seeded from the bar the round ACTUALLY
-// RUNS AT, then widened once per capped round.
+// once per failed round and floored one rung above the bar a failed round ran
+// at, and a budget seeded from the bar the round ACTUALLY RUNS AT, then widened
+// once per capped round.
 //
-// The budget is seeded from the fix bar rather than from the card's, which
-// reproduces what the pre-split code did. Taking it from the card would drop the
-// authoritative pass - floored at complex, and the one run where exhausting the
-// turns ends the run rather than deferring it - back to the base on every
-// moderate card.
+// The budget is seeded from the fix bar so the authoritative pass, floored at
+// complex, keeps its wider window.
 //
 // The two axes stay separate in the direction that matters: a turn cap widens
 // the budget and never touches the bar, so running out of room can never buy a
@@ -2171,6 +2077,13 @@ func (o *run) fixSizing(req fixRequest) sizing {
 
 	for range o.fixBarSteps {
 		s = s.raiseBar()
+	}
+
+	// Floor the CLIMBED bar, not the base: lastFixBar already carries the rungs
+	// that round had climbed, so flooring the base and re-climbing on top would
+	// charge one failure twice. The result is the higher of the two corrections.
+	if o.fixBarSteps > 0 && o.lastFixBar != "" && tierRank(escalateTier(o.lastFixBar)) > tierRank(s.Bar) {
+		s.Bar = escalateTier(o.lastFixBar)
 	}
 
 	// Re-seed from the climbed bar. raiseBar deliberately leaves the budget
@@ -2200,14 +2113,11 @@ func (o *run) markFixCapped() {
 	o.fixCapReason = "hit its turn cap"
 }
 
-// reviewHistoryWindow is how many recent review rounds feed back into the
-// run: the authoritative pass's prior-findings context, and the o.lastFindings
-// seed newRun computes from a resumed card's body (which the first
-// non-authoritative panel/synthesis call reads before recordRoundFindings
-// overwrites it). Each recorded verdict carries every surviving finding
-// forward, so rounds older than the window are redundant to the decision -
-// and an unbounded history on either path is what pushed the synthesis step
-// past its budget in production.
+// reviewHistoryWindow is how many recent review rounds feed back into the run:
+// the authoritative pass's prior-findings context, and the o.lastFindings seed
+// newRun computes from a resumed body, read by the first non-authoritative
+// panel/synthesis call before recordRoundFindings overwrites it. Each verdict
+// carries every surviving finding forward, so older rounds are redundant.
 const reviewHistoryWindow = 3
 
 // recentReviewFindingsHistory returns the most recent reviewHistoryWindow

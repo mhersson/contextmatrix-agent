@@ -31,11 +31,8 @@ const (
 
 	// salvageGrace is how far past the per-turn deadline a completed-but-late
 	// seat response is still accepted (the engine default for
-	// EngineConfig.SalvageGrace). The deadline still bounds the round - the
-	// wait extends by at most this much - and a seat that has not returned
-	// when the grace expires is dropped with errTurnTimeout exactly as
-	// before. Tuned against observed runs where a seat finished its review
-	// seconds past the deadline and the round discarded completed work.
+	// EngineConfig.SalvageGrace); a seat still absent when the grace expires
+	// is dropped with errTurnTimeout.
 	salvageGrace = 60 * time.Second
 )
 

@@ -130,16 +130,7 @@ func runServe(ctx context.Context, configPath string) error {
 		MapExtra:             agentMapExtra,
 	})
 
-	// RedactorRegistry composes the bridge's redactor from all registered
-	// per-session keys and atomically swaps it on every mutation. Register
-	// the process-lifetime config-level secrets first under a reserved id
-	// so they survive every per-run add and remove (the trap fix). The same
-	// registry serves both sinks: the SSE bridge's per-field redaction, and
-	// - via RedactLine - the durable per-card file log's full-raw-line
-	// masking in containerLogSink, so the two can never drift.
-	registry := logbridge.NewRedactorRegistry(bridge)
-	registry.AddSessionKey(staticSecretsID, cfg.MCPAPIKey)
-	registry.AddSessionKey(staticSecretsID, cfg.APIKey)
+	registry := newRedactorRegistry(bridge, cfg.MCPAPIKey, cfg.APIKey)
 
 	// Wire the token-refresh hook so every rotated git token is added to the
 	// redactor set. Appending is correct - both the original and the rotated
@@ -321,6 +312,17 @@ func gracefulShutdown(
 	}
 }
 
+// newRedactorRegistry composes the bridge's redactor. Config-level secrets are
+// registered under a reserved id so per-run adds and removes never touch them.
+func newRedactorRegistry(bridge *logbridge.Bridge, staticKeys ...string) *logbridge.RedactorRegistry {
+	registry := logbridge.NewRedactorRegistry(bridge)
+	for _, k := range staticKeys {
+		registry.AddSessionKey(staticSecretsID, k)
+	}
+
+	return registry
+}
+
 // onTokenRefreshHook builds the RunCredentials.OnTokenRefresh callback: it
 // registers a freshly-minted git token with the session-secret registry
 // under webhook.SessionID(project, cardID, correlationID) - the exact id
@@ -356,47 +358,11 @@ func containerLogSink(
 	}
 }
 
-// onContainerExit builds the executor OnExit hook: it tears down the run's
-// per-run credentials (stop the refresh loop, remove the run dir), maps the
-// container exit code to a worker-status, and reports it to ContextMatrix on a
-// bounded detached context (the supervision goroutine carries no request ctx).
-// waitAndCleanup is the single funnel every container exits through, so this is
-// the teardown seam for the per-run refresh loop.
-//
-// Ordering invariant: the terminal run_end event is written BEFORE files.End,
-// because files.End closes this run's log writer and a Write after it is a
-// no-op - the event would reach the live stream and never the durable
-// transcript.
-//
-// Ordering invariant: both files.End and this exit-path Teardown run BEFORE the
-// exit status callback below, and that callback is what gates CM's re-triggers
-// (CM learns the run finished only from it). files.End footers and closes this
-// run's own writer first - keyed by the run's correlation id, so it can only
-// ever close the writer this run's Begin opened, never a re-trigger's - before
-// the status callback can let CM admit a new run for the same card.
-//
-// The tracker.Remove -> this callback window is NOT negligible: waitAndCleanup
-// (internal/executor/docker.go) clears the tracker entry BEFORE the pump-drain
-// wait (up to pumpDrainTimeout, 5s), and this callback - which runs Teardown
-// and the session-secret removal below - fires only once that wait completes.
-// Nothing but the tracker entry gates admission, so CM can and does re-trigger
-// inside that window; a re-trigger racing in here is the normal case this file
-// defends against, not an unreachable edge case. files.End shares the same
-// window, and the same defense: the durable log's open writers are keyed by
-// the run's correlation id (the same triple webhook.SessionID keys redaction
-// sessions by), so this stale run's End is a no-op against a re-trigger's
-// already-open writer.
-//
-// Per-run cleanup keying: every cleanup call below - filelog End, credentials
-// Teardown, session-secret removal - is keyed by the run's own correlation id
-// (the correlationID forwarded here from the executor's OnExit callback; the
-// credentials handle registry composes the same project/cardID/correlationID
-// triple webhook.SessionID keys redaction sessions by). A stale exit firing
-// during the pump-drain window therefore targets only its own run's state and
-// is a no-op against a successor run's: a re-trigger's Provision re-registered
-// the credential handle under its own correlation id (displacing run 1's),
-// its writer is open under its own id, and its redaction keys live in their
-// own session bucket - none of them reachable by this stale run's calls.
+// onContainerExit builds the executor OnExit hook. Order matters: the run_end
+// event goes out before files.End (End closes the writer), and End, Teardown
+// and RemoveSessionKey all run before the status callback that lets CM admit
+// a re-trigger. Every cleanup is keyed by this run's correlation id, so a stale
+// exit racing a re-trigger inside the pump-drain window touches only its own run.
 func onContainerExit(
 	reporter webhook.StatusReporter,
 	credentials *secrets.RunCredentials,
@@ -492,29 +458,10 @@ func runEndEvent(exitCode int64, cause executor.ExitCause, ordinal int) map[stri
 	return ev
 }
 
-// exitStatus maps a container exit code and the way the run ended to a
-// ContextMatrix worker-status and a human-readable message. Exit 0 is
-// "completed" only when the cause is ExitNormal, the one case where the
-// container ended on its own terms and the code carries its usual meaning; any
-// other cause arriving with a zero code means the code is not evidence of
-// success, so it is "failed" too. Any non-zero code is "failed", with the code
-// carried in the message for the operator.
-//
-// A daemon-flagged wait is called out separately. The status code that arrives
-// with a daemon error comes from the same response the daemon could not
-// complete, so it is not a run outcome and must not be read as one,
-// whatever the value. The message names the daemon rather than leaving the
-// operator to guess.
-//
-// For the other zero-code cases the message says the exit status is unknown
-// because the run ended by a kill or a timeout rather than on its own terms -
-// it does not quote the meaningless zero or claim a specific cause it cannot
-// name.
-//
-// `failed` is not certainly accurate here either - the work may well have
-// succeeded - but it is honest about what is known, and it fails in the safe
-// direction: a run recorded as failed gets looked at, while one recorded as a
-// clean finish does not.
+// exitStatus maps a container exit to a CM worker-status. Exit 0 is
+// "completed" only for ExitNormal: a zero arriving with any other cause is not
+// evidence of success, and a daemon-flagged wait's code is not a run outcome
+// at all, so both report "failed" with a message naming why the status is unknown.
 func exitStatus(exitCode int64, cause executor.ExitCause) (status, message string) {
 	if cause == executor.ExitDaemonError {
 		return "failed", "worker exit status unknown: the container wait returned a daemon error"

@@ -242,3 +242,106 @@ func TestSeedSubtaskSizing(t *testing.T) {
 		})
 	}
 }
+
+// An escalated fix round exists to reach a STRONGER model than the round that
+// failed. The synthesizer names a fix_tier per round, so a later verdict can
+// name a weaker one than the failed round actually ran at; without a floor the
+// escalation then climbs from that weaker base and hands the harder problem a
+// weaker fixer. The floor applies only where the correction does: the base
+// round and the no-escalate cleanup pass keep the per-round tier as-is.
+func TestFixSizingNeverEscalatesBelowTheBarThatFailed(t *testing.T) {
+	o := &run{cardSizing: sizing{Bar: registry.TierModerate}}
+	o.fixBarSteps = 1
+	o.lastFixBar = registry.TierComplex
+
+	// The synthesizer lowered fix_tier to simple after a complex fix failed:
+	// the escalated round still runs one rung above complex.
+	got := o.fixSizing(fixRequest{Round: 2, FixTier: "simple"})
+	assert.Equal(t, registry.TierCritical, got.Bar)
+	// A floored bar carries its window with it: seedBudgetStep(critical) is 2,
+	// not the base window the simple fix_tier would have seeded.
+	assert.Equal(t, 2, got.Budget)
+
+	// No failed round yet: the per-round fix_tier is the base, unfloored.
+	o.fixBarSteps = 0
+	got = o.fixSizing(fixRequest{Round: 1, FixTier: "simple"})
+	assert.Equal(t, registry.TierSimple, got.Bar)
+
+	// A non-escalating cleanup pass ignores the floor.
+	o.fixBarSteps = 1
+	got = o.fixSizing(fixRequest{Round: 2, FixTier: "simple", NoEscalate: true})
+	assert.Equal(t, registry.TierSimple, got.Bar)
+}
+
+// The climb and the floor compose by taking the higher, not by stacking. The
+// floor already contains every rung the failed round had climbed, so re-climbing
+// the steps on top of it charges one failure twice: a round is sized at the
+// higher of the climb from its own base and one rung above the bar that failed.
+func TestFixSizingTakesTheHigherOfTheClimbAndTheFloor(t *testing.T) {
+	tests := []struct {
+		name       string
+		lastFixBar registry.Tier
+		steps      int
+		wantBar    registry.Tier
+		wantBudget int
+	}{
+		{
+			// Two failures from a simple base reach complex; the moderate bar
+			// the second one ran at is already inside that climb.
+			name:       "the climb already covers the bar that failed",
+			lastFixBar: registry.TierModerate,
+			steps:      2,
+			wantBar:    registry.TierComplex,
+			wantBudget: 1,
+		},
+		{
+			// One failure from a simple base reaches moderate, below the
+			// complex bar that failed, so the floor decides.
+			name:       "the floor outruns the climb",
+			lastFixBar: registry.TierComplex,
+			steps:      1,
+			wantBar:    registry.TierCritical,
+			wantBudget: 2,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			o := &run{cardSizing: sizing{Bar: registry.TierSimple}}
+			o.fixBarSteps = tt.steps
+			o.lastFixBar = tt.lastFixBar
+
+			got := o.fixSizing(fixRequest{Round: tt.steps + 1, FixTier: "simple"})
+			assert.Equal(t, tt.wantBar, got.Bar)
+			assert.Equal(t, tt.wantBudget, got.Budget, "the window follows the bar the round actually runs at")
+		})
+	}
+}
+
+// The floor rises only for a round that FAILED its gate. markFixFailed is the
+// single promotion point - the same trigger that charges the bar axis - so a
+// green escalated round leaves nothing behind and one failure buys exactly one
+// rung. runFixModel needs the full harness deps, so the round's own bar is set
+// directly here; the promotion under test runs through markFixFailed.
+func TestFixSizingFloorRisesOnlyWhenTheRoundFailed(t *testing.T) {
+	t.Run("a failed round promotes its bar into the floor", func(t *testing.T) {
+		o := &run{cardSizing: sizing{Bar: registry.TierModerate}}
+		o.pendingFixBar = registry.TierComplex
+
+		o.markFixFailed("left the verify red")
+
+		assert.Equal(t, registry.TierComplex, o.lastFixBar)
+		assert.Equal(t, registry.TierCritical, o.fixSizing(fixRequest{Round: 2, FixTier: "simple"}).Bar)
+	})
+
+	t.Run("a green round leaves no floor", func(t *testing.T) {
+		// fixBarSteps is 1 from an EARLIER failure, so the floor read is live
+		// and the probe discriminates: the complex round that just went green
+		// earned no floor, so the climb starts from the synthesizer's simple.
+		// Promoting on every round instead would make this critical.
+		o := &run{cardSizing: sizing{Bar: registry.TierModerate}}
+		o.fixBarSteps = 1
+		o.pendingFixBar = registry.TierComplex
+
+		assert.Equal(t, registry.TierModerate, o.fixSizing(fixRequest{Round: 2, FixTier: "simple"}).Bar)
+	})
+}

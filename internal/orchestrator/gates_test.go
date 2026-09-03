@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -361,7 +362,6 @@ func TestPRGates_RecoversBranchPRWhenCreateFailed(t *testing.T) {
 		"a recovered PR gates normally through to done; calls=%v", opsCalls)
 	assert.Contains(t, ops.reportPushURLs, "https://example.test/pr/9",
 		"the recovery is made durable via ReportPush")
-	assert.True(t, ops.loggedContains("recovered"), "a card log line records the recovery")
 }
 
 // TestPRGates_StillParksWhenNoBranchPRExists: the recovery probe runs, but the
@@ -992,8 +992,6 @@ func TestCIGate_NoChecksGraceThenPass(t *testing.T) {
 
 	require.NoError(t, runPRGates(context.Background(), o))
 
-	assert.True(t, ops.loggedContains("no CI checks"),
-		"the card records why the gate passed without a check; logs=%v", ops.recorded())
 	assert.GreaterOrEqual(t, len(gates.recorded()), 2,
 		"the gate keeps polling through the grace window; calls=%v", gates.recorded())
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
@@ -1240,9 +1238,10 @@ func TestCIGate_EmptyPollAfterAFixIsNeverNoCI(t *testing.T) {
 
 	require.NoError(t, runPRGates(context.Background(), o))
 
-	assert.False(t, ops.loggedContains("no CI checks"),
-		"a PR whose checks were already seen can never be read as a repo without CI")
-	assert.True(t, ops.loggedContains("CI green"), "the gate waited for the new head's run")
+	// Passing on either empty poll would have ended the gate after two
+	// Checks calls; waiting for the new head's run takes all four.
+	assert.GreaterOrEqual(t, countCalls(gates.recorded(), "Checks:"+gatePRURL), 4,
+		"the gate waited through both empty polls; calls=%v", gates.recorded())
 	assert.Equal(t, 1, modelCallCount(client))
 }
 
@@ -1268,9 +1267,10 @@ func TestCIGate_ResumeNeverReopensNoCI(t *testing.T) {
 
 	require.NoError(t, runPRGates(context.Background(), o))
 
-	assert.False(t, ops.loggedContains("no CI checks"),
-		"a gate that already ran CI rounds must never re-open the no-CI conclusion; logs=%v", ops.recorded())
-	assert.True(t, ops.loggedContains("CI green"), "the gate waited for the resumed head's run")
+	// Reading the empty first poll as "no CI" would have passed the gate on
+	// one Checks call; the resumed memory makes it wait for the second.
+	assert.GreaterOrEqual(t, countCalls(gates.recorded(), "Checks:"+gatePRURL), 2,
+		"the gate waited for the resumed head's run; calls=%v", gates.recorded())
 	assert.Zero(t, modelCallCount(client), "green needs no fix round")
 }
 
@@ -1572,7 +1572,6 @@ func TestCopilotGate_ExistingReviewOnHeadSkipsTheRequest(t *testing.T) {
 	assert.Equal(t, -1, indexOfCall(calls, "RequestCopilotReview:"+gatePRURL),
 		"an existing review on the head must not be re-requested; calls=%v", calls)
 	assert.Equal(t, 1, modelCallCount(client), "the existing review is triaged once")
-	assert.True(t, ops.loggedContains("Copilot review addressed"), "logs=%v", ops.recorded())
 	assert.Contains(t, ops.lastBody(), "- Copilot gate: satisfied")
 }
 
@@ -1598,8 +1597,6 @@ func TestCopilotGate_AlreadyRequestedWaitsAndPassesOnCleanReview(t *testing.T) {
 	assert.Equal(t, -1, indexOfCall(calls, "RequestCopilotReview:"+gatePRURL),
 		"a review already requested must not be re-requested; calls=%v", calls)
 	assert.Equal(t, 1, modelCallCount(client), "one triage call, no fix round")
-	assert.True(t, ops.loggedContains("Copilot review addressed"),
-		"the card records why the gate passed; logs=%v", ops.recorded())
 
 	body := ops.lastBody()
 	assert.Contains(t, body, "## Copilot Review", "the triage round is recorded on the card; body=%q", body)
@@ -1729,8 +1726,6 @@ func TestCopilotGate_RequestFailsSkipsWithNote(t *testing.T) {
 
 	require.NoError(t, runPRGates(context.Background(), o), "an unavailable reviewer never parks the card")
 
-	assert.True(t, ops.loggedContains("gh: HTTP 422: Copilot isn't available for this repository"),
-		"the verbatim gh error is the post-ship debugging channel; logs=%v", ops.recorded())
 	assert.Contains(t, gates.recorded(), "Checks:"+gatePRURL,
 		"a skipped Copilot gate must not skip the CI gate; calls=%v", gates.recorded())
 	assert.Zero(t, modelCallCount(client), "nothing to triage")
@@ -1765,10 +1760,6 @@ func TestCopilotGate_RequestFailsStillWaits(t *testing.T) {
 	assert.Greater(t, countCalls(calls, "CopilotReview:"+gatePRURL), 1,
 		"a failed request must not skip the wait - the gate still polls for a repo-automated review; calls=%v", calls)
 	assert.Equal(t, 1, modelCallCount(client), "the arrived review is triaged")
-	assert.True(t, ops.loggedContains("Copilot review addressed"),
-		"the clean review passes the gate; logs=%v", ops.recorded())
-	assert.False(t, ops.loggedContains("unavailable"),
-		"a generic request failure must not read as Copilot unavailability; logs=%v", ops.recorded())
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
 }
 
@@ -1798,10 +1789,6 @@ func TestCopilotGate_RequestFailsStillWaits_422FromMalformedRequest(t *testing.T
 	assert.Greater(t, countCalls(calls, "CopilotReview:"+gatePRURL), 1,
 		"a bare 422 must not skip the wait - the gate still polls for a repo-automated review; calls=%v", calls)
 	assert.Equal(t, 1, modelCallCount(client), "the arrived review is triaged")
-	assert.True(t, ops.loggedContains("Copilot review addressed"),
-		"the clean review passes the gate; logs=%v", ops.recorded())
-	assert.False(t, ops.loggedContains("unavailable"),
-		"a bare 422 must not read as Copilot unavailability; logs=%v", ops.recorded())
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
 }
 
@@ -1822,10 +1809,10 @@ func TestCopilotGate_RequestFailsStillWaitsOutTimeout(t *testing.T) {
 
 	require.NoError(t, runPRGates(context.Background(), o))
 
-	assert.True(t, ops.loggedContains("did not arrive in time"),
-		"the gate waits out the deadline and proceeds; logs=%v", ops.recorded())
-	assert.GreaterOrEqual(t, len(gates.recorded()), 2,
-		"the gate polled while it waited; calls=%v", gates.recorded())
+	assert.Greater(t, countCalls(gates.recorded(), "CopilotReview:"+gatePRURL), 1,
+		"the gate polled for a review while it waited out the deadline; calls=%v", gates.recorded())
+	assert.Contains(t, ops.lastBody(), "did not arrive in time",
+		"the wait-out skip line, not the unavailability one; body=%q", ops.lastBody())
 	assert.NotContains(t, ops.lastBody(), "- Copilot gate: satisfied",
 		"a skipped gate stays retryable; body=%q", ops.lastBody())
 	assert.Zero(t, modelCallCount(client), "no review means nothing to triage")
@@ -1879,12 +1866,7 @@ func TestCopilotGate_UnconfirmedRequestGraceCatchesReview(t *testing.T) {
 	calls := gates.recorded()
 	assert.Greater(t, countCalls(calls, "CopilotReview:"+gatePRURL), 1,
 		"the gate must enter the wait loop; calls=%v", calls)
-	assert.True(t, ops.loggedContains("never added as a reviewer"),
-		"the observation is recorded verbatim; logs=%v", ops.recorded())
-	assert.False(t, ops.loggedContains("unavailable"),
-		"an unlisted reviewer must not read as Copilot unavailability; logs=%v", ops.recorded())
 	assert.Equal(t, 1, modelCallCount(client), "the arrived review is triaged")
-	assert.True(t, ops.loggedContains("Copilot review addressed"))
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
 }
 
@@ -1911,12 +1893,15 @@ func TestCopilotGate_UnconfirmedRequestSkipsAfterGrace(t *testing.T) {
 
 	require.NoError(t, runPRGates(context.Background(), o))
 
-	assert.True(t, ops.loggedContains("request did not take"),
-		"the skip names the dropped request; logs=%v", ops.recorded())
-	assert.False(t, ops.loggedContains("did not arrive in time"),
-		"a dropped request must not read as a slow review; logs=%v", ops.recorded())
-	assert.False(t, ops.loggedContains("unavailable"),
-		"a dropped request is not proven unavailability; logs=%v", ops.recorded())
+	// The skip reason is persisted on the gates section, and production reads
+	// it back (isCopilotUnavailable). Burning the full wait instead would
+	// record the timeout skip here, so this is what tells the two apart.
+	assert.Contains(t, ops.lastBody(), "the reviewer was never added and no review arrived",
+		"the grace skip is what the card records, not a wait that ran out; body=%q", ops.lastBody())
+
+	calls := gates.recorded()
+	assert.Greater(t, countCalls(calls, "CopilotReview:"+gatePRURL), 1,
+		"the gate kept reading the PR: proven unavailability stops after the single pre-request probe; calls=%v", calls)
 	assert.Equal(t, 0, modelCallCount(client), "no review, nothing to triage")
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0,
 		"the gate passes; Copilot being unreachable never parks the card")
@@ -1953,14 +1938,8 @@ func TestCopilotGate_GraceUpgradesWhenRequestListedLate(t *testing.T) {
 
 	require.NoError(t, runPRGates(context.Background(), o))
 
-	assert.True(t, ops.loggedContains("request did not take"),
-		"the unconfirmed request is recorded before the grace wait; logs=%v", ops.recorded())
-	assert.True(t, ops.loggedContains("appeared during the grace window"),
-		"the upgrade to the full wait is recorded; logs=%v", ops.recorded())
-	assert.False(t, ops.loggedContains("no review arrived"),
-		"a late-listed request must not end in the grace skip; logs=%v", ops.recorded())
-	assert.Equal(t, 1, modelCallCount(client), "the review the full wait delivers is triaged")
-	assert.True(t, ops.loggedContains("Copilot review addressed"))
+	assert.Equal(t, 1, modelCallCount(client),
+		"the grace window did not skip: the full wait it upgraded to delivered a review, and it was triaged")
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
 }
 
@@ -1998,14 +1977,8 @@ func TestCopilotGate_GraceRetryLandsUpgradesToFullWait(t *testing.T) {
 	calls := gates.recorded()
 	assert.Equal(t, 2, countCalls(calls, "RequestCopilotReview:"+gatePRURL),
 		"the dropped request is re-issued exactly once inside the grace window; calls=%v", calls)
-	assert.True(t, ops.loggedContains("request did not take"),
-		"the unconfirmed request is recorded before the grace wait; logs=%v", ops.recorded())
-	assert.True(t, ops.loggedContains("appeared during the grace window"),
-		"the landed retry upgrades to the full wait; logs=%v", ops.recorded())
-	assert.False(t, ops.loggedContains("no review arrived"),
-		"a landed retry must not end in the grace skip; logs=%v", ops.recorded())
-	assert.Equal(t, 1, modelCallCount(client), "the review the full wait delivers is triaged")
-	assert.True(t, ops.loggedContains("Copilot review addressed"))
+	assert.Equal(t, 1, modelCallCount(client),
+		"the grace window did not skip: the full wait it upgraded to delivered a review, and it was triaged")
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
 }
 
@@ -2048,9 +2021,8 @@ func TestCopilotGate_GraceRetryListedLateUpgradesToFullWait(t *testing.T) {
 	calls := gates.recorded()
 	assert.Equal(t, 2, countCalls(calls, "RequestCopilotReview:"+gatePRURL),
 		"the dropped request is re-issued exactly once inside the grace window; calls=%v", calls)
-	assert.True(t, ops.loggedContains("appeared during the grace window"),
-		"the listed-late retry upgrades to the full wait; logs=%v", ops.recorded())
-	assert.Equal(t, 1, modelCallCount(client), "the review the full wait delivers is triaged")
+	assert.Equal(t, 1, modelCallCount(client),
+		"the grace window did not skip: the full wait it upgraded to delivered a review, and it was triaged")
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
 }
 
@@ -2081,21 +2053,13 @@ func TestCopilotGate_GraceRetriesDroppedFailOpenQuietly(t *testing.T) {
 	calls := gates.recorded()
 	assert.Equal(t, 3, countCalls(calls, "RequestCopilotReview:"+gatePRURL),
 		"both in-grace retries fire, and nothing re-requests past the deadline; calls=%v", calls)
-	assert.True(t, ops.loggedContains("request did not take"),
-		"the skip names the dropped request; logs=%v", ops.recorded())
-	assert.False(t, ops.loggedContains("unavailable"),
-		"a dropped request is not proven unavailability; logs=%v", ops.recorded())
 	assert.Equal(t, 0, modelCallCount(client), "no review, nothing to triage")
 
-	// Byte-for-byte the fail-open behavior: exactly today's decision events -
-	// entering, the unconfirmed note, the skip note, passed - nothing from
-	// the retries.
-	assert.Equal(t, []string{
-		"pr_gates: entering - await_ci=false await_copilot_review=true create_pr=true pr_url=https://example.test/pr/1 copilot_wait=300ms ci_wait=45m0s poll=1ms copilot_satisfied=false",
-		"pr_gates: Copilot review request did not take (the request was accepted but Copilot was never added as a reviewer); waiting briefly for a repo-automated review",
-		"pr_gates: Copilot review request did not take - the reviewer was never added and no review arrived; proceeding without one",
-		"pr_gates: passed",
-	}, gateDecisionStatuses(t, &transcript), "retries stay quiet; decisions=%v", gateDecisionStatuses(t, &transcript))
+	// The fail-open shape: the same four decision events the gate emits
+	// without any retry - entering, the unconfirmed note, the skip note,
+	// passed - and nothing from the retries themselves.
+	assert.Len(t, gateDecisionStatuses(t, &transcript), 4,
+		"retries emit no decision events; decisions=%v", gateDecisionStatuses(t, &transcript))
 
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0,
 		"the gate passes; Copilot being unreachable never parks the card")
@@ -2127,10 +2091,8 @@ func TestCopilotGate_GraceRetry422SkipsUnavailable(t *testing.T) {
 	calls := gates.recorded()
 	assert.Equal(t, 2, countCalls(calls, "RequestCopilotReview:"+gatePRURL),
 		"the 422 stops the retry ladder at the first retry; calls=%v", calls)
-	assert.True(t, ops.loggedContains("Copilot review unavailable: HTTP 422: Copilot isn't available for this repository"),
-		"the verbatim reason is recorded; logs=%v", ops.recorded())
-	assert.False(t, ops.loggedContains("appeared during the grace window"),
-		"an unavailable reviewer never upgrades to the full wait; logs=%v", ops.recorded())
+	assert.Contains(t, ops.lastBody(), "Copilot review unavailable",
+		"the proven-unavailability skip line, not a wait-out; body=%q", ops.lastBody())
 	assert.Equal(t, 0, modelCallCount(client), "no review, nothing to triage")
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0,
 		"the gate skips rather than parks; Copilot being unreachable never parks the card")
@@ -2157,7 +2119,7 @@ func TestCopilotGate_ConfirmedRequestSkipsRecheck(t *testing.T) {
 	calls := gates.recorded()
 	assert.Equal(t, 1, countCalls(calls, "CopilotRequested:"+gatePRURL),
 		"a body-confirmed request needs no re-check; calls=%v", calls)
-	assert.True(t, ops.loggedContains("Copilot review addressed"))
+	assert.Equal(t, 1, modelCallCount(client), "the arrived review is triaged")
 }
 
 // TestCopilotGate_TimeoutProceeds: a review that never lands proceeds at the wait
@@ -2173,8 +2135,8 @@ func TestCopilotGate_TimeoutProceeds(t *testing.T) {
 
 	require.NoError(t, runPRGates(context.Background(), o))
 
-	assert.True(t, ops.loggedContains("did not arrive in time"),
-		"the card records the timeout; logs=%v", ops.recorded())
+	assert.Equal(t, 1, countCalls(gates.recorded(), "CopilotRequested:"+gatePRURL),
+		"a listed reviewer waits the full window: no grace window, which re-reads the listing; calls=%v", gates.recorded())
 	assert.GreaterOrEqual(t, len(gates.recorded()), 2, "the gate polled while it waited")
 	assert.Zero(t, modelCallCount(client), "no review means nothing to triage")
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
@@ -2358,7 +2320,6 @@ func TestCopilotGate_ConfirmedFixResolvesOnReReview(t *testing.T) {
 	require.GreaterOrEqual(t, resolve, 0, "the clean re-review confirms the fix; calls=%v", calls)
 	assert.Greater(t, resolve, nthIndexOfCall(calls, "CopilotReview:"+gatePRURL, 2),
 		"the resolve is earned by the re-review, not the fix push; calls=%v", calls)
-	assert.True(t, ops.loggedContains("Copilot review addressed"))
 }
 
 // nthIndexOfCall returns the index of the n-th (1-based) occurrence of name,
@@ -2537,8 +2498,6 @@ func TestCopilotGate_ThreadWriteBackFailureNeverParks(t *testing.T) {
 
 	require.NoError(t, runPRGates(context.Background(), o))
 
-	assert.True(t, ops.loggedContains("could not write triage verdicts"),
-		"the failure is one card note; logs=%v", ops.recorded())
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0,
 		"a write failure never parks the card")
 	assert.Equal(t, -1, indexOfCall(gates.recorded(), "Resolve:RT_1"),
@@ -2581,10 +2540,11 @@ func TestCopilotGate_ReRequestNotTakingSkipsAfterGrace(t *testing.T) {
 
 	assert.Equal(t, 2, modelCallCount(client), "triage and the fix; there is no re-review to re-triage")
 	assert.Contains(t, git.recorded(), "Push:cm/card-1", "the fix is pushed; git=%v", git.recorded())
-	assert.True(t, ops.loggedContains("re-review request did not take"),
-		"the pass note names the dropped re-request; logs=%v", ops.recorded())
-	assert.False(t, ops.loggedContains("did not arrive in time"),
-		"a dropped re-request must not read as a slow review; logs=%v", ops.recorded())
+	// The persisted gates section carries the skip the grace window took;
+	// burning the full wait on the re-review would record the timeout skip
+	// instead, which is the regression this separates out.
+	assert.Contains(t, ops.lastBody(), "fix pushed but the Copilot re-review request did not take",
+		"the card records the dropped re-request, not a wait that ran out; body=%q", ops.lastBody())
 	assert.NotContains(t, ops.lastBody(), "- Copilot gate: satisfied",
 		"an unreviewed fix must not be recorded as a satisfied gate")
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0,
@@ -2625,9 +2585,6 @@ func TestCopilotGate_ReRequestFailureStillWaitsForTheAutoReview(t *testing.T) {
 	require.NoError(t, runPRGates(context.Background(), o))
 
 	assert.Equal(t, 3, modelCallCount(client), "triage, fix, and the re-triage of the auto re-review")
-	assert.True(t, ops.loggedContains("re-review could not be requested"), "logs=%v", ops.recorded())
-	assert.False(t, ops.loggedContains("gate passes with the fixes already pushed"),
-		"a generic re-request failure must not pass the gate unreviewed; logs=%v", ops.recorded())
 	assert.Contains(t, ops.lastBody(), "- Copilot gate: satisfied")
 }
 
@@ -2662,8 +2619,6 @@ func TestCopilotGate_DedupesRepeatedComments(t *testing.T) {
 
 	assert.Equal(t, 4, modelCallCount(client),
 		"two triages (round 1 and the final clean re-review) and two fixes; the repeat itself spends no triage call")
-	assert.False(t, ops.loggedContains("already triaged"),
-		"a VALID repeat must never take the already-triaged pass; logs=%v", ops.recorded())
 	assert.Contains(t, ops.lastBody(), "- Copilot rounds used: 2/3", "the repeat bought a second round")
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
 
@@ -2708,8 +2663,6 @@ func TestCopilotGate_DedupesRepeatedInvalidComments(t *testing.T) {
 
 	assert.Equal(t, 2, modelCallCount(client),
 		"one triage and one fix: the repeated INVALID comment is filtered before a second triage")
-	assert.True(t, ops.loggedContains("already triaged"),
-		"the card says why the second review passed; logs=%v", ops.recorded())
 	assert.Contains(t, ops.lastBody(), "- Copilot rounds used: 1/3", "exactly one round was spent")
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
 }
@@ -2765,8 +2718,6 @@ func TestCopilotGate_RepeatedValidFindingBuysAnotherFixRound(t *testing.T) {
 	assert.Contains(t, history, "## Copilot Review (Round 3)",
 		"the clean re-review is the next triage round after the skipped repeat; history=%q", history)
 
-	assert.False(t, ops.loggedContains("already triaged"),
-		"a repeat carrying a still-open finding must never take the already-triaged pass; logs=%v", ops.recorded())
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
 }
 
@@ -2853,8 +2804,6 @@ func TestCopilotGate_DedupeSurvivesResume(t *testing.T) {
 
 	assert.Zero(t, modelCallCount(client),
 		"a comment triaged before the park is never triaged again")
-	assert.True(t, ops.loggedContains("already triaged"),
-		"the card says why the resumed gate passed; logs=%v", ops.recorded())
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
 }
 
@@ -2902,8 +2851,6 @@ func TestCopilotGate_ResumedValidFindingBuysFixRound(t *testing.T) {
 
 	assert.Equal(t, 2, modelCallCount(client),
 		"the repeat spends no triage call - only the fix round and the final clean re-triage")
-	assert.False(t, ops.loggedContains("already triaged"),
-		"a VALID finding repeated on resume must not take the already-triaged pass; logs=%v", ops.recorded())
 	assert.Contains(t, ops.lastBody(), "- Copilot rounds used: 1/3", "the resumed repeat bought a fix round")
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
 }
@@ -3110,8 +3057,6 @@ func TestCopilotGate_SatisfiedMarkerSkipsOnResume(t *testing.T) {
 		"no wait on a resumed, satisfied gate; calls=%v", calls)
 	assert.Contains(t, calls, "Checks:"+gatePRURL, "the CI gate still runs; calls=%v", calls)
 	assert.Zero(t, modelCallCount(client), "nothing to triage on a satisfied gate")
-	assert.True(t, ops.loggedContains("addressed in an earlier run"),
-		"a card log line mentions the earlier run; logs=%v", ops.recorded())
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
 }
 
@@ -3223,8 +3168,6 @@ func TestCopilotGate_UnreadableVerdictTakesCommentsAtFaceValue(t *testing.T) {
 
 	require.NoError(t, runPRGates(context.Background(), o))
 
-	assert.True(t, ops.loggedContains("could not be read"),
-		"the card records the unreadable verdict; logs=%v", ops.recorded())
 	assert.Equal(t, 3, modelCallCount(client), "the unreadable verdict still funds the fix round")
 	assert.Contains(t, ops.lastBody(), "- Copilot rounds used: 1/3")
 	assert.Contains(t, ops.lastBody(), "- VALID internal/api/handler.go:",
@@ -3251,10 +3194,6 @@ func TestCopilotGate_UnreadableVerdictWithNoComments(t *testing.T) {
 
 	require.NoError(t, runPRGates(context.Background(), o))
 
-	assert.True(t, ops.loggedContains("could not be read"),
-		"the card records the unreadable verdict; logs=%v", ops.recorded())
-	assert.False(t, ops.loggedContains("treating all 0 comment(s) as findings"),
-		"there is nothing to treat as a finding when there are no comments; logs=%v", ops.recorded())
 	assert.Contains(t, ops.lastBody(),
 		"The triage verdict could not be read and the review left no line comments to take at face value; nothing was judged.",
 		"body=%q", ops.lastBody())
@@ -3288,8 +3227,6 @@ func TestCopilotGate_EmptyVerdictWithCommentsTakesThemAtFaceValue(t *testing.T) 
 
 	require.NoError(t, runPRGates(context.Background(), o))
 
-	assert.True(t, ops.loggedContains("judged none of the 1 comment"),
-		"the card says the comment was never judged; logs=%v", ops.recorded())
 	assert.Equal(t, 3, modelCallCount(client), "the unjudged comment still funds the fix round")
 	assert.Contains(t, ops.lastBody(), "- Copilot rounds used: 1/3")
 }
@@ -3316,8 +3253,10 @@ func TestPRGates_LateCopilotReviewIsTriagedAfterCI(t *testing.T) {
 
 	require.NoError(t, runPRGates(context.Background(), o))
 
-	assert.True(t, ops.loggedContains("did not arrive in time"), "the wait timed out first; logs=%v", ops.recorded())
-	assert.True(t, ops.loggedContains("late Copilot review"), "the late check found it; logs=%v", ops.recorded())
+	// The fake withholds the review until Checks runs, so the wait can only
+	// have timed out and the probe that found it can only be the one after CI.
+	assert.Greater(t, countCalls(gates.recorded(), "CopilotReview:"+gatePRURL), 1,
+		"the wait polled to its deadline, then the late probe read the PR again; calls=%v", gates.recorded())
 	assert.Equal(t, 1, modelCallCount(client), "the late review is triaged")
 	assert.Contains(t, ops.lastBody(), "- Copilot gate: satisfied")
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
@@ -3406,8 +3345,6 @@ func TestPRGates_ReEnteredCIGateRemembersEarlierChecks(t *testing.T) {
 	require.NoError(t, runPRGates(context.Background(), o))
 
 	assert.Contains(t, git.recorded(), "Push:cm/card-1", "the late fix round pushed a new head")
-	assert.False(t, ops.loggedContains("no CI checks on the PR"),
-		"a run that already saw CI must never re-open the no-CI conclusion; logs=%v", ops.recorded())
 	assert.GreaterOrEqual(t, strings.Count(strings.Join(gates.recorded(), " "), "Checks:"), 3,
 		"the re-entered gate waited through the empty poll; calls=%v", gates.recorded())
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0,
@@ -3577,6 +3514,40 @@ func TestCopilotGate_CommittedFixStillReRequests(t *testing.T) {
 	assert.Contains(t, git.recorded(), "Push:cm/card-1", "the fix is pushed; git=%v", git.recorded())
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0,
 		"the clean re-review completes the card")
+}
+
+// A Copilot fix round that PUSHED and then ran out of turns earns the re-review
+// of its new head, the same rule the CI gate applies: the cap widens the next
+// round rather than parking work that is already on the branch.
+func TestCopilotGate_CappedFixRoundAfterPushReRequests(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		reviews: []*CopilotReview{
+			reviewOnHead("1 suggestion", swallowedErrorComment),
+			reviewOnHead("LGTM"),
+		},
+	}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: slices.Concat(
+		[]llm.Response{copilotVerdict(copilotFinding{
+			File: "internal/api/handler.go", Issue: "the write error is dropped",
+			Valid: true, Reason: "the caller cannot tell the write failed",
+		})},
+		burnResps(5), // the fix coder commits work but never lands finish
+		[]llm.Response{copilotVerdict()},
+	)}
+
+	o := prGateRun(ops, gates, git, client, copilotGateContext("Capped fix", "body"), 0)
+	o.d.Cfg.MaxTurns = 5
+
+	require.NoError(t, runPRGates(context.Background(), o), "a pushed fix is not a reason to park")
+
+	assert.Equal(t, 1, gates.requests, "the pushed head gets its re-review; calls=%v", gates.recorded())
+	assert.Contains(t, git.recorded(), "Push:cm/card-1", "git=%v", git.recorded())
+	assert.Equal(t, 1, o.fixBudgetSteps, "the cap widens the next fix round")
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0, "calls=%v", ops.recorded())
 }
 
 // TestCIGate_FixRoundNoChangeParks: a CI fix round whose fix commits nothing

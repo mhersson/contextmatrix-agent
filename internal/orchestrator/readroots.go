@@ -28,24 +28,11 @@ func NewReadRootsLog() *ReadRootsLog {
 	return &ReadRootsLog{logged: make(map[string]struct{})}
 }
 
-// Log records one read/grep/glob tool construction's sanitizeReadRoots
-// outcome: the extra read-only roots that survived, and for each one
-// dropped, why. The harness drops a widening root silently (see
-// tools.ReadRoots in the harness's jail.go), so this is the only place an
-// operator whose declared prefix is wrong for the image sees it.
-//
-// cardID attributes the line to a run and is part of the dedup key: every
-// caller building tools for the same run must pass the SAME cardID (the
-// worker's Config.CardID, threaded to the review panel too) or their lines
-// for an identical declaration will never collapse. Nothing is logged when
-// no roots were declared - matches the behavior of the logReadOnlyRoots
-// function this replaces. Logs at warn when anything was dropped, info
-// otherwise.
-//
-// A nil receiver performs no dedup - every call logs. Production always
-// threads a real instance (via runFSM); this only matters for a caller that
-// has no run-scoped tracker to hand in, where an occasional repeat line is
-// the honest cost of not tracking it.
+// Log records one tool construction's sanitizeReadRoots outcome: surviving
+// roots and, per dropped root, why - warn when anything was dropped, info
+// otherwise, nothing when no roots were declared. Deduped per (cardID,
+// workspace, outcome), so every caller for one run must pass the same cardID.
+// A nil receiver logs without dedup.
 func (l *ReadRootsLog) Log(cardID, workspace string, rr tools.ReadRoots) {
 	if len(rr.Effective) == 0 && len(rr.Dropped) == 0 {
 		return

@@ -148,7 +148,6 @@ type Pick struct {
 	// MEASURED for every Source - a pin that clears nothing reports "".
 	MetTier      Tier
 	RequestedBar float64
-	MetBar       float64
 	Prior        float64
 	HasPrior     bool // separates "prior is 0" from "no prior"
 	Source       PickSource
@@ -246,13 +245,6 @@ type SelectInput struct {
 	// ExcludeVendors is a hard filter in candidates(); the panel walk applies
 	// it softly (vendor-filtered attempt first, retry without on an empty pool).
 	ExcludeVendors map[string]bool
-}
-
-// NewRegistry builds a priors-only registry with the given capable default.
-// Selection is payload-driven: with no priors injected, SelectByComplexity
-// always falls back to the capable default.
-func NewRegistry(capableDefault string, catalog llm.Catalog) *Registry {
-	return NewRegistryFromParts(catalog, Priors{}, nil, nil, capableDefault)
 }
 
 // WithCreators attaches the slug -> creator map behind the vendor-diversity
@@ -387,27 +379,27 @@ func (r *Registry) descent(requested Tier) []Tier {
 // bar prior clears; "" when none does or the model has no prior. Every Pick
 // gets its MetTier from here, so a pin and a walked-down auto pick are
 // reported on the same scale and an aggregate over MetTier is meaningful.
-func (r *Registry) metTierFor(prior float64, hasPrior bool, requested Tier) (Tier, float64) {
+func (r *Registry) metTierFor(prior float64, hasPrior bool, requested Tier) Tier {
 	if !hasPrior {
-		return "", 0
+		return ""
 	}
 
 	bars := r.bars()
 
 	for _, rung := range r.descent(requested) {
 		if prior >= bars[rung] {
-			return rung, bars[rung]
+			return rung
 		}
 	}
 
-	return "", 0
+	return ""
 }
 
 // pickFor assembles a Pick for a chosen model, measuring MetTier from the
 // model's own prior rather than from the rung it was found on.
 func (r *Registry) pickFor(id string, in SelectInput, src PickSource) Pick {
 	prior, has := r.priors.ForRole(id, in.Role)
-	met, metBar := r.metTierFor(prior, has, in.Tier)
+	met := r.metTierFor(prior, has, in.Tier)
 
 	return Pick{
 		ModelSpec:     r.specFor(id),
@@ -415,7 +407,6 @@ func (r *Registry) pickFor(id string, in SelectInput, src PickSource) Pick {
 		RequestedTier: in.Tier,
 		MetTier:       met,
 		RequestedBar:  r.barFor(in.Tier),
-		MetBar:        metBar,
 		Prior:         prior,
 		HasPrior:      has,
 		Source:        src,
@@ -711,14 +702,6 @@ func classifyPool(cands []candidate, band float64, winnerIdx int) []PoolOutcome 
 	return outcomes
 }
 
-// bestValue returns the id of the best-value candidate, the rule
-// valuePick applies.
-func bestValue(cands []candidate, headroom float64, maxCapability bool) string {
-	best, _ := valuePick(cands, priceBand(cands, headroom, maxCapability))
-
-	return best.id
-}
-
 // candidates returns the models passing every filter for the given input.
 // Quality is the normalized prior for the role; a model with no prior for the
 // role, a prior below the tier bar, no tool support, an exclusion, a blacklist
@@ -816,22 +799,11 @@ func (r *Registry) classify(in SelectInput) ([]candidate, []FilteredOutEntry) {
 	return cands, filtered
 }
 
-// favoriteAmong returns the first operator favorite for (tier, role) - then
-// (tier, any role) - present in cands. Favorites are looked up at the tier
-// the pick is being MADE on, never at a different one: a moderate favorite
-// is an operator statement about moderate work, so it must not be promoted
-// onto a higher rung whose bar it does not clear, and must not be skipped
-// when a higher request clamps down onto the moderate rung.
-//
-// cands is the caller's already-computed pool, so eligibility (bar,
-// blacklist, exclusions, window) is enforced by construction and the filter
-// work is not repeated. pickAt passes the vendor-blind pool: explicit
-// operator intent beats the emergent diversity heuristic.
-//
-// A favorite bypasses the price band, so it is the declared exception to
-// the tier-monotonicity invariant - the same exemption a pin gets, for the
-// same reason: both are operator intent, which outranks a rule the selector
-// derived.
+// favoriteAmong returns the first operator favorite for (tier, role), then
+// (tier, any role), present in cands. cands is the caller's already-filtered
+// pool for the rung the pick is being made on, so eligibility is enforced by
+// construction and a favorite is only ever consulted at its own tier.
+// Favorites bypass the price band (see SelectByComplexity).
 func (r *Registry) favoriteAmong(cands []candidate, tier Tier, role Role) string {
 	if len(r.favorites) == 0 || len(cands) == 0 {
 		return ""
@@ -851,37 +823,6 @@ func (r *Registry) favoriteAmong(cands []candidate, tier Tier, role Role) string
 	}
 
 	return ""
-}
-
-// SelectReviewPanel returns exactly n seats for the review specialists:
-// distinct models chosen by repeated SelectByComplexity with a growing
-// Exclude set, each seat softly preferring vendors not yet seated. Because
-// each pick walks the tier ladder, a seat that cannot stay at the requested
-// tier takes a distinct model one rung down rather than duplicating the
-// seat above it: for a panel, independent judgement from a lower-bar
-// reviewer is worth more than a second copy of the higher-bar one, and
-// costs less.
-//
-// Duplicate fill is the last resort. It duplicates the previous seat and
-// sets Duplicate on the copy: three identical slugs with no Duplicate flag
-// are indistinguishable from three independent judgements, and the
-// synthesizer would read that as agreement.
-//
-// The panel is always n seats: callers index it positionally against a
-// fixed lens list, so a short panel deletes a lens rather than thinning
-// the panel.
-func (r *Registry) SelectReviewPanel(in SelectInput, n int) []Pick {
-	seats := r.SelectReviewPanelReport(in, n)
-	if seats == nil {
-		return nil
-	}
-
-	picks := make([]Pick, 0, len(seats))
-	for _, s := range seats {
-		picks = append(picks, s.Pick)
-	}
-
-	return picks
 }
 
 // SeatReport pairs one panel or candidate seat with the SelectionReport of
@@ -908,10 +849,11 @@ func SeatPicks(seats []SeatReport) []Pick {
 	return picks
 }
 
-// SelectReviewPanelReport is SelectReviewPanel with each seat's competing
-// pool. Seats chosen by the selector carry the report of the selection that
-// made them; duplicated or default seats carry an empty report, exactly like
-// the picks that never consult a rung.
+// SelectReviewPanelReport returns exactly n seats for the review specialists.
+// Distinct models first, each seat preferring an unseated vendor and walking a
+// rung down rather than repeating the seat above it; a duplicate is the last
+// resort, flagged so the synthesizer cannot read it as agreement. Always n
+// seats. Only selector-chosen seats carry a report; duplicates carry none.
 func (r *Registry) SelectReviewPanelReport(in SelectInput, n int) []SeatReport {
 	if n <= 0 {
 		return nil
@@ -1001,46 +943,22 @@ func (r *Registry) SelectReviewPanelReport(in SelectInput, n int) []SeatReport {
 	return panel
 }
 
-// SelectDiscussionPanel returns n seats for mob session discussion, honoring
-// the caller's exclusions (review discussions exclude the models that coded
-// the card). It is the review-panel selection by construction - distinct
-// models first, a flagged repeat of the last seat as the last resort, nil
-// when nothing is selectable at all - named as its own seam so discussion
-// selection can diverge from review selection without touching call sites.
-func (r *Registry) SelectDiscussionPanel(in SelectInput, n int) []Pick {
-	return r.SelectReviewPanel(in, n)
-}
-
-// SelectDiscussionPanelReport is SelectDiscussionPanel with each seat's
-// competing pool, as SelectReviewPanelReport produces it.
+// SelectDiscussionPanelReport returns n seats for mob session discussion,
+// honoring the caller's exclusions (review discussions exclude the models
+// that coded the card). It is the review-panel selection by construction -
+// distinct models first, a flagged repeat of the last seat as the last
+// resort, nil when nothing is selectable at all - named as its own seam so
+// discussion selection can diverge from review selection without touching
+// call sites.
 func (r *Registry) SelectDiscussionPanelReport(in SelectInput, n int) []SeatReport {
 	return r.SelectReviewPanelReport(in, n)
 }
 
-// SelectCandidateModels picks n coder models for a Best-of-N fan-out. pin, if
-// non-empty, occupies slot 1 and is never degraded away; the remaining slots
-// follow SelectReviewPanel's contract (distinct models first, a flagged
-// repeat as the last resort). With no pin, an unselectable pool returns nil
-// like SelectReviewPanel; with a pin, an unselectable auto pool instead fills
-// the remaining slots with the pin itself, flagged as a repeat, so a pinned
-// fan-out still gets n candidates.
-func (r *Registry) SelectCandidateModels(in SelectInput, n int, pin string) []Pick {
-	seats := r.SelectCandidateModelsReport(in, n, pin)
-	if seats == nil {
-		return nil
-	}
-
-	picks := make([]Pick, 0, len(seats))
-	for _, s := range seats {
-		picks = append(picks, s.Pick)
-	}
-
-	return picks
-}
-
-// SelectCandidateModelsReport is SelectCandidateModels with each seat's
-// competing pool, as SelectReviewPanelReport produces it. The pinned slot
-// carries no report: pins never consult a rung.
+// SelectCandidateModelsReport picks n coder models for a Best-of-N fan-out with
+// each seat's competing pool, on SelectReviewPanelReport's contract. A non-empty
+// pin occupies slot 1, is never degraded away and carries no report; with a pin
+// an unselectable auto pool fills the rest with flagged repeats of the pin, so a
+// pinned fan-out still gets n candidates. With no pin it returns nil instead.
 func (r *Registry) SelectCandidateModelsReport(in SelectInput, n int, pin string) []SeatReport {
 	if n <= 0 {
 		return nil

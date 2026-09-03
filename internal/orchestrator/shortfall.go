@@ -11,29 +11,11 @@ import (
 	"github.com/mhersson/contextmatrix-harness/events"
 )
 
-// noteShortfall records what one selection was actually worth. Every pick is
-// traced to the process log and emitted to the run transcript; a pick that did
-// not clear the tier bar it asked for also reaches the operator, as a warning,
-// a state-change event and one entry on the card's activity log.
-//
-// rep is the competing-pool report the registry returned for this pick, empty
-// for the paths that never consulted a rung (pins, off-ladder capable-default
-// picks). A non-empty report earns exactly one "selector: pool" line beside
-// the pick line, so every pick correlates with the field it was chosen from.
-//
-// It is the single wiring point for the transcript event, so a phase that
-// selects a model on a tier records that selection by construction. subtaskID
-// is empty for the card-level phases.
-//
-// The card entry is deduped per (phase, role, requested -> met): the
-// fixed-tier callers ask for the same tier on every call and the activity log
-// is capped, so an undeduped advisory would evict the card's real history. A
-// different requested bar, or a different bar actually met, is a different
-// fact and earns its own line.
-//
-// It takes o.shortfallMu, never o.selMu: the Best-of-N candidate resolver
-// holds selMu across a selection, so an advisory reaching for selMu would
-// deadlock the fan-out.
+// noteShortfall records one selection: the model_selected event and the
+// `selector: pick` line unconditionally, a `selector: pool` line when the pick
+// consulted a rung, then - below the bar it asked for - a warning, a state
+// change and one card line, deduped per (phase, role, requested -> met). Takes
+// shortfallMu, never selMu: the Best-of-N resolver holds selMu and would deadlock.
 func (o *run) noteShortfall(ctx context.Context, phase, subtaskID string, p registry.Pick, rep registry.SelectionReport) {
 	// Unconditional, and above every gate below: the transcript records what
 	// ran, not only what fell short, and the shortfall dedupe must never

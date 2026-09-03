@@ -1,7 +1,6 @@
 package registry
 
 import (
-	"encoding/json"
 	"testing"
 
 	protocol "github.com/mhersson/contextmatrix-protocol"
@@ -78,38 +77,6 @@ func TestFromSelectionThreadsMaxCapability(t *testing.T) {
 		"maxCapability=true must pick the premium (more capable) model regardless of price")
 }
 
-// TestFromSelectionIgnoresOutcomeStats pins the priors-only contract at the
-// wire level: an older CM may still send per-candidate "outcomes" and
-// "outcome_floor" JSON (removed from the protocol in v0.17.0), and those keys
-// must be silently ignored - the priors pass through untouched, and recorded
-// outcomes never bias a pick.
-func TestFromSelectionIgnoresOutcomeStats(t *testing.T) {
-	payload := `{
-		"outcome_floor": 20,
-		"candidates": [
-			{"slug": "model/a", "prompt_price_per_tok": 1e-6, "completion_price_per_tok": 1e-6,
-			 "context_window": 200000, "coder_prior": 0.80, "reviewer_prior": 0.80,
-			 "outcomes": {"samples": 30, "wins": 20, "expected_wins": 10}},
-			{"slug": "model/b", "prompt_price_per_tok": 1e-6, "completion_price_per_tok": 1e-6,
-			 "context_window": 200000, "coder_prior": 0.80, "reviewer_prior": 0.80,
-			 "outcomes": {"samples": 30, "wins": 4, "expected_wins": 10}}
-		]
-	}`
-
-	var sc protocol.SelectionContext
-	require.NoError(t, json.Unmarshal([]byte(payload), &sc))
-
-	r := FromSelection(&sc, "fallback/capable", 0, false)
-
-	a, ok := r.priors.ForRole("model/a", RoleCoder)
-	require.True(t, ok)
-	assert.InDelta(t, 0.80, a, 1e-9, "coder prior must pass through unbiased")
-
-	b, ok := r.priors.ForRole("model/b", RoleCoder)
-	require.True(t, ok)
-	assert.InDelta(t, 0.80, b, 1e-9, "coder prior must pass through unbiased")
-}
-
 func TestFromSelectionThreadsCreators(t *testing.T) {
 	// The incident scenario end-to-end: an OpenAI-endpoint payload (bare
 	// slugs, creators supplied by CM) must come out of FromSelection with the
@@ -124,7 +91,7 @@ func TestFromSelectionThreadsCreators(t *testing.T) {
 	}
 	r := FromSelection(sc, "capable-default", 0, false)
 
-	panel := r.SelectDiscussionPanel(SelectInput{Role: RoleReviewer, Tier: TierComplex, EstTokens: 50000}, 3)
+	panel := SeatPicks(r.SelectDiscussionPanelReport(SelectInput{Role: RoleReviewer, Tier: TierComplex, EstTokens: 50000}, 3))
 	require.Len(t, panel, 3)
 	assert.Equal(t, "gpt-a", panel[0].Model)
 	assert.Equal(t, "claude-x", panel[1].Model, "creators from the payload must drive vendor diversity")
@@ -137,7 +104,7 @@ func TestFromSelectionThreadsCreators(t *testing.T) {
 
 	rBlind := FromSelection(sc, "capable-default", 0, false)
 
-	panel = rBlind.SelectDiscussionPanel(SelectInput{Role: RoleReviewer, Tier: TierComplex, EstTokens: 50000}, 3)
+	panel = SeatPicks(rBlind.SelectDiscussionPanelReport(SelectInput{Role: RoleReviewer, Tier: TierComplex, EstTokens: 50000}, 3))
 	require.Len(t, panel, 3)
 	assert.Equal(t, "gpt-a", panel[0].Model)
 	assert.Equal(t, "gpt-b", panel[1].Model)

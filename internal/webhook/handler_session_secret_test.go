@@ -3,10 +3,8 @@ package webhook
 import (
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/executor"
-	"github.com/mhersson/contextmatrix-backendkit/logbridge"
 	protocol "github.com/mhersson/contextmatrix-protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -319,55 +317,4 @@ func TestFailedLaunchRemovesSessionSecrets(t *testing.T) {
 
 	assert.Empty(t, registry.keys(SessionID("p", "C1", "corr")), "secrets removed after launch failure")
 	assert.Contains(t, registry.removedIDs(), SessionID("p", "C1", "corr"), "remove call recorded on launch failure")
-}
-
-// TestRebuildTrap_StaticKeyStillMaskedAfterRunRegisters validates the interface
-// contract: after a run is registered AND the static config-level keys (the
-// API key, MCP key) were registered independently (simulating the serve.go
-// wiring), a line containing the static API key is still masked. This mimics
-// what happens when serve.go registers cfg.APIKey and cfg.MCPAPIKey under a
-// reserved id, and then per-run secrets are added - the static keys must
-// survive the rebuild.
-//
-// The assertion runs through the real path: a hub subscriber receives the entry
-// BridgeLine publishes, so it pins the masking the /logs stream actually gets.
-func TestRebuildTrap_StaticKeyStillMaskedAfterRunRegisters(t *testing.T) {
-	hub := logbridge.NewHub(func(e protocol.LogEntry) string { return e.Project }, nil)
-	bridge := logbridge.NewBridge(logbridge.BridgeConfig{
-		Hub:                  hub,
-		Redactor:             nil, // start with no redactor
-		SurfaceAwaitingHuman: false,
-	})
-
-	registry := logbridge.NewRedactorRegistry(bridge)
-
-	// Register static config-level keys (simulating the serve.go wiring with a
-	// reserved pseudo-session id as described in the parent card).
-	registry.AddSessionKey("__static__", "cfg-static-api-key")
-	registry.AddSessionKey("__static__", "cfg-mcp-api-key")
-
-	// Now register a per-run secret (simulating what addSessionSecrets does).
-	registry.AddSessionKey("p/C1", "run-secret-123")
-
-	// The bridge's redactor must carry all three keys after the per-run add.
-	// The Bridge exposes no redactor getter, so assert the effect: publish a
-	// line through BridgeLine and read what the hub subscriber receives.
-	subID, ch := hub.Subscribe("p")
-	defer hub.Unsubscribe(subID)
-
-	bridge.BridgeLine(
-		logbridge.Key{Project: "p", CardID: "C1"},
-		[]byte("line containing cfg-static-api-key and run-secret-123 and cfg-mcp-api-key"),
-		true, // stderr - directly redacted
-	)
-
-	select {
-	case entry := <-ch:
-		assert.NotContains(t, entry.Content, "cfg-static-api-key", "static API key must still be masked after per-run add")
-		assert.NotContains(t, entry.Content, "run-secret-123", "per-run secret must be masked")
-		assert.NotContains(t, entry.Content, "cfg-mcp-api-key", "static MCP key must still be masked after per-run add")
-		assert.Contains(t, entry.Content, "[REDACTED]", "masked values replaced")
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for bridged entry")
-	}
 }

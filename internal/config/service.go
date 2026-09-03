@@ -92,12 +92,11 @@ type ServiceConfig struct {
 	ReasoningEffort           string
 	LogLevel                  string
 
-	// LogDir is an optional directory on the serve host for per-card raw
-	// container-output logs. When set, the agent writes one append file per
-	// card, <log_dir>/<project>/<card_id>.log, holding everything the container
-	// printed (as `docker logs -f` shows it). Files are 0600 and MAY contain
-	// unredacted secrets from model/tool output. Empty (the default) disables
-	// the feature. Logs are kept indefinitely - use an external logrotate.
+	// LogDir is an optional directory on the serve host for per-card raw container
+	// output (as `docker logs -f` shows it): one append file per card at
+	// <log_dir>/<project>/<card_id>.log, 0600. CM-provisioned secrets are masked;
+	// operator-supplied values (worker_extra_env, verify.env pass-throughs) and
+	// anything the model prints are not. Empty disables it; use external logrotate.
 	LogDir string
 
 	// ReviewAttemptsCap is the number of review rounds the worker runs before
