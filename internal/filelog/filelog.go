@@ -132,8 +132,8 @@ func (l *Logger) Begin(project, cardID, containerID, correlationID string) {
 }
 
 // Write appends one line (with a trailing newline) to the run's file. No-op if
-// the run has no open file - including when a stale run id writes after its
-// own End or Begin, which can never reach another run's writer.
+// the run has no open file - a stale run id writing after its own End can never
+// reach another run's writer, because writers are keyed by correlation id.
 func (l *Logger) Write(project, cardID, correlationID string, line []byte, _ bool) {
 	if !l.enabled() {
 		return

@@ -64,7 +64,9 @@ log_level: info
 # Directory on the agent host for per-card container-output logs. When set, the
 # agent writes one append file per card, <log_dir>/<project>/<card_id>.log,
 # containing the raw container output (as `docker logs -f` would show it). Files
-# are 0600: CM-provisioned secrets are masked, worker_extra_env values are not.
+# are 0600: CM-provisioned secrets are masked; operator-supplied values
+# (worker_extra_env, verify.env pass-throughs) and anything the model prints are
+# not.
 # Empty (the default) disables file logging. Logs are kept indefinitely; use an
 # external logrotate for retention. If this path is outside /var/run/cm-agent,
 # ~/.cm-agent, or ~/.contextmatrix, add it to ReadWritePaths in the systemd

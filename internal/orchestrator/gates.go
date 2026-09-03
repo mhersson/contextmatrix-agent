@@ -1263,13 +1263,12 @@ func (o *run) triageCopilot(
 	return findings, nil
 }
 
-// copilotFixRound spends one Copilot fix round on the findings triaged as valid.
-// The round is counted and persisted BEFORE any work, so a crash mid-fix cannot
-// buy a free retry on resume. It returns a park error when the rounds cap is
-// spent, the fix runs out of budget, or it runs out of turns without pushing,
-// and reports whether the fix committed a change: nil with committed=false
-// means the gateNoChangeRetry-funded retry was granted, so HEAD has not moved
-// and the caller must not re-request the review.
+// copilotFixRound spends one Copilot fix round on the valid triaged findings, counted
+// and persisted BEFORE any work so a crash cannot buy a free retry. It parks when the
+// rounds cap is spent, the fix runs out of budget, or turns run out without pushing -
+// or after pushing when no wider window or further round is left, unlike the review
+// loop, which never parks a committed capped round. committed=false with a nil error
+// means the no-change retry was granted: HEAD has not moved, so do not re-request.
 func (o *run) copilotFixRound(ctx context.Context, st *gatesState, findings []copilotFinding) (bool, error) {
 	st.CopilotDetail = copilotFindingLines(findings)
 

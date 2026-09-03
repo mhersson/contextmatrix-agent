@@ -92,11 +92,11 @@ type ServiceConfig struct {
 	ReasoningEffort           string
 	LogLevel                  string
 
-	// LogDir is an optional directory on the serve host for per-card raw
-	// container-output logs: one append file per card at
-	// <log_dir>/<project>/<card_id>.log, 0600, holding what the container printed
-	// (as `docker logs -f` shows it). CM-provisioned secrets are masked,
-	// worker_extra_env values are not. Empty disables it; use external logrotate.
+	// LogDir is an optional directory on the serve host for per-card raw container
+	// output (as `docker logs -f` shows it): one append file per card at
+	// <log_dir>/<project>/<card_id>.log, 0600. CM-provisioned secrets are masked;
+	// operator-supplied values (worker_extra_env, verify.env pass-throughs) and
+	// anything the model prints are not. Empty disables it; use external logrotate.
 	LogDir string
 
 	// ReviewAttemptsCap is the number of review rounds the worker runs before

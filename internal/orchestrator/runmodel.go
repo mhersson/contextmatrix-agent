@@ -25,17 +25,11 @@ func (e *ContextLimitError) Error() string {
 	return fmt.Sprintf("context limit reached for model %q (window %d tokens)", e.Model, e.ContextWindow)
 }
 
-// MaxTurnsError marks a phase stopping because the harness exhausted its turn
-// cap (Reason "max_turns", Completed=false, err==nil). It is normalized to a
-// typed error at the runModelCfg choke point so NO phase treats truncated work
-// as success. Park-on-cap is no longer unconditional: two salvage paths rescue a
-// capped subtask whose committed work passes an authoritative verify - a
-// Best-of-N candidate capped on its FINAL subtask, deferred to the judge's
-// verify gate (see salvageCapped), and a single-solver (parent / mob session)
-// subtask, which has no judge and so runs the verify inline before completing (see
-// salvageSoloCapped). Every other cap parks: the worker maps it like the
-// context-limit park (push WIP, release, fail) so the partial work survives for
-// resume.
+// MaxTurnsError marks a phase stopping because the harness exhausted its turn cap
+// (Reason "max_turns", Completed=false, err==nil), typed at the runModelCfg choke point
+// so NO phase reads truncated work as success. Each call site decides what the cap means
+// for the tree it left: salvage on a passing verify, re-verify, continue with the verdict
+// deferred, or re-request. Only a cap that escapes the FSM is parked by the worker.
 type MaxTurnsError struct {
 	Model string
 	Turns int

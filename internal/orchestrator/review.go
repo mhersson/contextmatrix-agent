@@ -389,11 +389,11 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 			// one non-escalating cleanup pass and finish either way. This is not
 			// another review round - it never increments review attempts, never
 			// loops back into the panel, and a transport error or a no-op commit
-			// can never un-approve a verdict that already cleared review. A PARK
-			// is the exception: budget, context limit, turn cap and missing
-			// toolchain are not opinions about the change, they are the points at
-			// which the worker learns the run must stop and push its WIP, so they
-			// propagate instead of being swallowed here.
+			// can never un-approve a verdict that already cleared review. A park
+			// is the exception: budget, context limit and missing toolchain are
+			// the points at which the worker learns the run must stop and push its
+			// WIP, so they propagate. A turn cap on this optional pass does not -
+			// cleanupPass keeps or drops whatever the capped coder committed.
 			if len(fixes) > 0 {
 				// Findings reach the PR body framed as open until a pass lands
 				// them: an approval carrying raw findings text lets the PR model
