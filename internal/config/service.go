@@ -229,6 +229,24 @@ func serviceDefaults() serviceRaw {
 	}
 }
 
+// DefaultsYAML renders serviceDefaults() as YAML through the same koanf
+// pipeline LoadService uses, so the printed key set is exactly what the
+// loader accepts. Required keys print empty; contextmatrix-setup fills them.
+func DefaultsYAML() ([]byte, error) {
+	k := koanf.New(".")
+
+	if err := k.Load(structs.Provider(serviceDefaults(), "koanf"), nil); err != nil {
+		return nil, fmt.Errorf("load service defaults: %w", err)
+	}
+
+	out, err := k.Marshal(yaml.Parser())
+	if err != nil {
+		return nil, fmt.Errorf("marshal service defaults: %w", err)
+	}
+
+	return out, nil
+}
+
 // LoadService merges defaults < file (if it loads) < env (CMX_*). A nonexistent
 // path is not an error: the file layer is skipped and the result is
 // defaults+env, matching config.go's Load behavior.

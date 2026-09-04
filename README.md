@@ -223,11 +223,13 @@ worker images (full + variants), pin the new full-image digest into
 
 ## Commands
 
-| Command | Purpose                                                                     |
-| ------- | --------------------------------------------------------------------------- |
-| `serve` | Run the task backend: host CM lifecycle webhooks, launch worker containers. |
-| `work`  | Container entrypoint (hidden): execute one card under CM control.           |
-| `run`   | Run the harness on a workspace with a free-form task (standalone).          |
+| Command                                    | Purpose                                                                            |
+| ------------------------------------------ | ---------------------------------------------------------------------------------- |
+| `serve`                                    | Run the task backend: host CM lifecycle webhooks, launch worker containers.        |
+| `work`                                     | Container entrypoint (hidden): execute one card under CM control.                  |
+| `run`                                      | Run the harness on a workspace with a free-form task (standalone).                 |
+| `contextmatrix-agent config defaults`      | Print the complete default service config as YAML (schema for contextmatrix-setup) |
+| `contextmatrix-agent config validate FILE` | Load `FILE` as `serve` would; exit 1 on the first error                            |
 
 ## Model selection
 
