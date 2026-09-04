@@ -1,6 +1,6 @@
 module github.com/mhersson/contextmatrix-agent
 
-go 1.26.7
+go 1.26.8
 
 require (
 	github.com/a2aproject/a2a-go/v2 v2.5.0
