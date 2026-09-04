@@ -159,8 +159,11 @@ file only - never via flags or committed YAML.
 
 - Document the CURRENT STATE, not changed state: what exists NOW and WHY, not
   how we got here.
-- Do not write doc comments on simple functions - if what it does is
-  straightforward, the code itself is the documentation.
+- Comments explain only non-obvious decisions, constraints, safety invariants,
+  or workarounds. Do not narrate what code does or record change history; git
+  holds history. Keep comments to one or two tight lines unless a longer
+  explanation is genuinely necessary. Rewrite or delete if you find comments
+  that don't follow this rule.
 - Never use em-dashes; use hyphens (-).
 - Never reference plan phases, task numbers, or private card IDs in doc comments.
 
