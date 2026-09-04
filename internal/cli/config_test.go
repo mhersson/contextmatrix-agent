@@ -4,11 +4,28 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// clearCMXEnv unsets any CMX_-prefixed variables so validation does not pick
+// up the loader's CMX_ environment layer from a developer's shell or runner.
+func clearCMXEnv(t *testing.T) {
+	t.Helper()
+
+	for _, kv := range os.Environ() {
+		name, _, ok := strings.Cut(kv, "=")
+		if !ok || !strings.HasPrefix(name, "CMX_") {
+			continue
+		}
+
+		t.Setenv(name, "")
+		require.NoError(t, os.Unsetenv(name))
+	}
+}
 
 func runConfig(t *testing.T, args ...string) (string, error) {
 	t.Helper()
@@ -33,6 +50,8 @@ func TestConfigDefaults(t *testing.T) {
 }
 
 func TestConfigValidate(t *testing.T) {
+	clearCMXEnv(t)
+
 	dir := t.TempDir()
 	good := filepath.Join(dir, "good.yaml")
 	require.NoError(t, os.WriteFile(good, []byte(

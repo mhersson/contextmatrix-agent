@@ -13,6 +13,8 @@ import (
 // loader accepts is printed, empty maps and lists print as {} and [], and
 // the output loads back through LoadService unchanged.
 func TestDefaultsYAML(t *testing.T) {
+	clearServiceEnv(t)
+
 	out, err := DefaultsYAML()
 	require.NoError(t, err)
 
