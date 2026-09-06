@@ -34,6 +34,14 @@ The work branch is `cm/<card-id>` (card ID lowercased); the ID is validated
 against `^[A-Za-z][A-Za-z0-9-]*-[0-9]+$` (PREFIX-NNN) before it reaches any
 refspec.
 
+A playbook run arrives with `CM_CREATE_BASE_BRANCH=true`. When its base branch
+is missing on the remote, the worker clones `CM_BASE_BRANCH_FROM` (or the
+default branch), publishes the base with a create-only push
+(`--force-with-lease=<ref>:`), fetches it, and only then cuts the card branch.
+Only `playbook/` names can be created this way; every other push still goes
+through the card-branch guard, and a base that already exists is cloned as
+before and never moved.
+
 ## One container per top-level card
 
 All subagents - subtask workers and reviewers - run in-process inside that one

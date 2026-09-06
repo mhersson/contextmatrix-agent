@@ -178,7 +178,10 @@ Summaries only - full detail lives in the reference documents above.
 2. **Git workflow.** One commit per subtask; push after every subtask and every
    review round. Review fixes are `--fixup` commits; integrate autosquashes and
    force-pushes with lease. Work branch `cm/<card-id>`; the ID is validated
-   before it reaches any refspec.
+   before it reaches any refspec. A playbook run may create its missing
+   `playbook/` base branch from a source branch with a create-only push before
+   cutting the card branch; that is the only push allowed outside the card-branch
+   guard.
 3. **One container per top-level card.** All subagents run in-process on one
    shared workspace; only the read-only review panel fans out in parallel.
 4. **Review = 3 specialists** behind a spec/test gate, looping to the

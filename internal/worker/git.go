@@ -36,7 +36,10 @@ var ErrRebaseConflict = orchestrator.ErrRebaseConflict
 // The branch-policy fields (cardBranch, baseBranch, remoteDefault) gate every
 // push through guardPush. They are a hard safety invariant: no config or env
 // can loosen them, and the zero value (cardBranch == "") is fail-closed - a Git
-// whose policy was never set refuses every push.
+// whose policy was never set refuses every push. The one push outside that
+// gate is CreateRemoteBranch, which publishes a playbook base branch before the
+// policy is set and carries its own narrower guard (playbook/ namespace only,
+// create-only push that git refuses the moment the ref exists).
 type Git struct {
 	dir string
 
@@ -653,6 +656,70 @@ func (g *Git) RemoteTip(ctx context.Context, branch string) (string, error) {
 
 	// ls-remote output: "<hash>\trefs/heads/<branch>"
 	return strings.Fields(line)[0], nil
+}
+
+// RemoteBranchExists reports whether branch exists on the remote at url. It
+// runs from the workspace parent, like Clone, so it works before the clone
+// exists. An unreachable remote is an error, never a false.
+func (g *Git) RemoteBranchExists(ctx context.Context, url, branch string) (bool, error) {
+	env, err := g.credEnv()
+	if err != nil {
+		return false, fmt.Errorf("git ls-remote: %w", err)
+	}
+
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--heads", url, "refs/heads/"+branch)
+	cmd.Dir = filepath.Dir(g.dir)
+	cmd.Env = env
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("git ls-remote: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+
+	return strings.TrimSpace(string(out)) != "", nil
+}
+
+// guardCreateBranch is the narrow guard for the one push that may target a
+// branch other than the card branch: publishing a playbook base branch. Only
+// the playbook/ namespace is allowed, so main, master, the remote default and
+// every other ref stay unreachable. The push itself carries an empty lease
+// expectation, so an existing ref is refused by git before anything moves.
+func (g *Git) guardCreateBranch(branch string) error {
+	if !strings.HasPrefix(branch, "playbook/") || len(branch) == len("playbook/") {
+		return fmt.Errorf("refusing to create %q: only playbook/ branches may be created", branch)
+	}
+
+	return nil
+}
+
+// CreateRemoteBranch cuts branch from the current HEAD, publishes it with a
+// create-only push, and fetches it so origin/<branch> exists locally for the
+// integrate rebase. Refuses to run after SetBranchPolicy on a fresh clone of
+// the source branch; the workspace is left on the new branch.
+func (g *Git) CreateRemoteBranch(ctx context.Context, branch string) error {
+	if g.cardBranch != "" {
+		return fmt.Errorf("refusing to create %q: push policy already locked to %s", branch, g.cardBranch)
+	}
+
+	if err := g.guardCreateBranch(branch); err != nil {
+		return err
+	}
+
+	if err := g.CreateBranch(ctx, branch); err != nil {
+		return fmt.Errorf("create %s: %w", branch, err)
+	}
+
+	// --force-with-lease=<ref>: with an empty expectation means the ref must
+	// not exist on the remote; a concurrent creator makes this push fail.
+	if _, err := g.run(ctx, "push", "--force-with-lease=refs/heads/"+branch+":", "origin", "HEAD:refs/heads/"+branch); err != nil {
+		return fmt.Errorf("publish %s: %w", branch, err)
+	}
+
+	if err := g.Fetch(ctx, branch); err != nil {
+		return fmt.Errorf("fetch %s: %w", branch, err)
+	}
+
+	return nil
 }
 
 // MergeBase returns the merge-base commit hash between a and b.

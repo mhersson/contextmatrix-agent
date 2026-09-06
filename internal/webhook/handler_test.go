@@ -2286,3 +2286,40 @@ func TestBuildLaunchSpec_AttemptEnv(t *testing.T) {
 		assert.Contains(t, spec.Env, "CMX_ATTEMPT=2")
 	})
 }
+
+func TestBuildLaunchSpec_PlaybookBaseBranchEnvEmitted(t *testing.T) {
+	s := NewServer(Config{
+		APIKey:    "k",
+		Executor:  &fakeExecutor{},
+		Tracker:   executor.NewTracker(1),
+		LaunchEnv: LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"},
+	})
+
+	spec := s.buildLaunchSpec(protocol.TriggerPayload{
+		CardID:           "C1",
+		Project:          "p",
+		BaseBranch:       "playbook/rollout",
+		CreateBaseBranch: true,
+		BaseBranchFrom:   "main",
+	}, "corr", "")
+
+	assert.Contains(t, spec.Env, "CM_BASE_BRANCH=playbook/rollout")
+	assert.Contains(t, spec.Env, "CM_CREATE_BASE_BRANCH=true")
+	assert.Contains(t, spec.Env, "CM_BASE_BRANCH_FROM=main")
+}
+
+func TestBuildLaunchSpec_PlaybookBaseBranchEnvAbsentByDefault(t *testing.T) {
+	s := NewServer(Config{
+		APIKey:    "k",
+		Executor:  &fakeExecutor{},
+		Tracker:   executor.NewTracker(1),
+		LaunchEnv: LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"},
+	})
+
+	spec := s.buildLaunchSpec(protocol.TriggerPayload{CardID: "C1", Project: "p", BaseBranch: "main"}, "corr", "")
+
+	for _, e := range spec.Env {
+		assert.NotContains(t, e, "CM_CREATE_BASE_BRANCH=")
+		assert.NotContains(t, e, "CM_BASE_BRANCH_FROM=")
+	}
+}
