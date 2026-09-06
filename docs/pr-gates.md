@@ -12,8 +12,9 @@ Copilot gate first, then the CI gate. Each gate spends up to 3 fix rounds
 
 ## Logging
 
-Entering the phase writes a `pr_gates: entering ...` line naming both flags,
-`create_pr`, the PR URL, and the effective Copilot/CI/poll waits. Every gate
+Entering the phase writes a `pr_gates: entering ...` line naming the three
+flags (`await_ci`, `await_copilot_review`, `merge_pr`), `create_pr`, the PR
+URL, and the effective Copilot/CI/poll waits. Every gate
 decision after that - a pass, a skip, a fix round, a park - goes out through
 the same path: a `gate_progress` event plus a slog line plus a card log entry,
 so the run log carries the full decision sequence and not just the polls.

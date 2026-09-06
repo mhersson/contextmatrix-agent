@@ -1009,6 +1009,8 @@ func TestPRGates_MergesAfterGreenCI(t *testing.T) {
 	assert.Equal(t, []string{"Checks:" + gatePRURL, "MergePullRequest:" + gatePRURL}, gates.recorded())
 
 	calls := ops.recorded()
+	assert.GreaterOrEqual(t, indexOfCall(calls, "AddLog:pr_gates: merged "+gatePRURL), 0,
+		"the merge is logged; calls=%v", calls)
 	assert.Less(t, indexOfCall(calls, "AddLog:pr_gates: merged "+gatePRURL), indexOfCall(calls, "TransitionCard:done"),
 		"the merge is logged before the card completes; calls=%v", calls)
 	assert.Contains(t, ops.lastBody(), "- Merge: merged")
@@ -1122,6 +1124,34 @@ func TestPRGates_MergeFlagWithoutAwaitCIIsIgnored(t *testing.T) {
 
 	assert.Empty(t, gates.recorded())
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+}
+
+// TestPRGates_CopilotOnlyCardNeverMerges: a card gated on Copilot review alone
+// (await_ci false) must never merge even with merge_pr set - the merge is
+// gated on the CI gate's own pass rules, and a Copilot pass is not one of
+// them. Binding rule: merge_pr only ever fires behind AwaitCI.
+func TestPRGates_CopilotOnlyCardNeverMerges(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		reviews:   []*CopilotReview{reviewOnHead("LGTM")},
+	}
+	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
+
+	tc := copilotGateContext("Copilot only", "body")
+	tc.MergePR = true
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, tc, 0)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	calls := ops.recorded()
+	assert.GreaterOrEqual(t, indexOfCall(calls, "TransitionCard:done"), 0)
+
+	gateCalls := gates.recorded()
+	assert.Equal(t, -1, indexOfCallPrefix(gateCalls, "MergePullRequest"),
+		"a Copilot-only card must never merge; calls=%v", gateCalls)
 }
 
 // TestGatesState_MergedRoundTrips: the merged marker survives recordGates /

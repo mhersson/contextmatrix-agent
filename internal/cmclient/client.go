@@ -208,7 +208,8 @@ type TaskContext struct {
 	AwaitCI            bool
 	AwaitCopilotReview bool
 	// MergePR asks the pr_gates phase to merge the PR into its base branch
-	// once the CI gate saw green checks. Human-only, read with AwaitCI.
+	// once the CI gate passed, a repo with no checks included. Human-only,
+	// read with AwaitCI.
 	MergePR bool
 	// PRUrl is the PR recorded by an earlier run's report_push; a resumed
 	// pr_gates phase re-reads it instead of re-creating the PR.
