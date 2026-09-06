@@ -143,6 +143,7 @@ const taskContextPayload = `{
     "create_pr": true,
     "await_ci": true,
     "await_copilot_review": true,
+    "merge_pr": true,
     "pr_url": "https://github.com/org/repo/pull/7",
     "base_branch": "main",
     "review_attempts": 2,
@@ -382,6 +383,7 @@ func TestGetTaskContext(t *testing.T) {
 	assert.True(t, tc.CreatePR)
 	assert.True(t, tc.AwaitCI)
 	assert.True(t, tc.AwaitCopilotReview)
+	assert.True(t, tc.MergePR)
 	assert.Equal(t, "https://github.com/org/repo/pull/7", tc.PRUrl)
 	assert.Equal(t, 2, tc.ReviewAttempts)
 	assert.Equal(t, "claude-opus-4-5", tc.ModelOrchestrator)
