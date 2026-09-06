@@ -1433,6 +1433,33 @@ func TestCreateRemoteBranchRefusesExistingRef(t *testing.T) {
 	assert.Equal(t, before, remoteTipOf(t, remote, "playbook/rollout"))
 }
 
+// TestCreateRemoteBranchRefusesFastForwardableRef pins the lease itself, not
+// just non-fast-forward git behavior. The existing base sits at an ancestor
+// of the local HEAD (main moved on after the base was cut), so a plain push
+// would fast-forward the base and succeed with or without the lease; only the
+// empty-expectation lease refuses it because the ref already exists.
+func TestCreateRemoteBranchRefusesFastForwardableRef(t *testing.T) {
+	t.Parallel()
+
+	remote := setupBareRemote(t)
+
+	// Cut playbook/rollout at the seed commit, then move main ahead so the
+	// base is an ancestor of the local HEAD the push will carry.
+	runGit(t, remote, "branch", "playbook/rollout", "main")
+	pushFileToBranch(t, remote, "second.txt", "main")
+	before := remoteTipOf(t, remote, "playbook/rollout")
+
+	ws := filepath.Join(t.TempDir(), "ws")
+	g := NewGit(ws, "", "", "")
+	ctx := context.Background()
+
+	require.NoError(t, g.Clone(ctx, remote, "main"))
+
+	err := g.CreateRemoteBranch(ctx, "playbook/rollout")
+	require.Error(t, err, "a fast-forwardable existing ref must still be refused")
+	assert.Equal(t, before, remoteTipOf(t, remote, "playbook/rollout"))
+}
+
 func TestCreateRemoteBranchGuard(t *testing.T) {
 	t.Parallel()
 
