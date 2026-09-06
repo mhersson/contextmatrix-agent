@@ -1128,3 +1128,20 @@ func (p *PRCreator) FindPRURL(ctx context.Context) (string, error) {
 
 	return parsePRViewURL(out)
 }
+
+// mergeArgs builds the gh pr merge invocation: a merge commit, addressed by
+// URL (never the current branch), and no --delete-branch so gh leaves the
+// local checkout alone. gh requires an explicit method when non-interactive.
+func mergeArgs(prURL string) []string {
+	return []string{"pr", "merge", prURL, "--merge"}
+}
+
+// MergePullRequest merges the PR with a merge commit. gh's stderr (the
+// GitHub refusal text) is folded into the error by runGH.
+func (p *PRCreator) MergePullRequest(ctx context.Context, prURL string) error {
+	if _, err := p.runGH(ctx, "", false, mergeArgs(prURL)...); err != nil {
+		return fmt.Errorf("merge pull request: %w", err)
+	}
+
+	return nil
+}

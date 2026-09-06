@@ -12,8 +12,9 @@ Copilot gate first, then the CI gate. Each gate spends up to 3 fix rounds
 
 ## Logging
 
-Entering the phase writes a `pr_gates: entering ...` line naming both flags,
-`create_pr`, the PR URL, and the effective Copilot/CI/poll waits. Every gate
+Entering the phase writes a `pr_gates: entering ...` line naming the three
+flags (`await_ci`, `await_copilot_review`, `merge_pr`), `create_pr`, the PR
+URL, and the effective Copilot/CI/poll waits. Every gate
 decision after that - a pass, a skip, a fix round, a park - goes out through
 the same path: a `gate_progress` event plus a slog line plus a card log entry,
 so the run log carries the full decision sequence and not just the polls.
@@ -147,3 +148,21 @@ bounded by the 3-round cap per gate. The one exception: when the Copilot gate
 recorded proven unavailability this run, the probe is skipped - a repo that
 refused a review cannot have one sitting on the head, so the extra probe would
 only read an empty result.
+
+## Merge
+
+With `merge_pr` (human-only, meaningful only with `await_ci`), the phase merges
+the PR into its base branch with a merge commit (`gh pr merge <url> --merge`)
+after every enabled gate passed, then completes the card. The CI gate's own
+pass rules decide: a repo with no checks passes after the grace window and is
+merged like any other pass. Having checks is the user's responsibility.
+
+The merge is recorded as `- Merge: merged` in the `## PR Gates` section, so a
+resumed run never merges twice. A refused merge - branch protection, required
+reviews, a conflict that appeared after CI - parks the card with gh's text under
+`Merge refused:`; the branch is pushed and a human merges or re-triggers. A run
+torn down mid-merge returns the cancellation instead of parking; the resumed run
+merges.
+
+The token needs nothing beyond PR creation and push (Pull requests: read &
+write, Contents: read & write).

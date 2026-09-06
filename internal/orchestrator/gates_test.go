@@ -97,6 +97,7 @@ type fakeGates struct {
 	// FindPRURL scripting: the recovery probe's result for a fail-closed gate.
 	findPRURL    string
 	findPRURLErr error
+	mergeErr     error
 
 	calls []string
 	i     int
@@ -257,6 +258,15 @@ func (f *fakeGates) FindPRURL(_ context.Context) (string, error) {
 	defer f.mu.Unlock()
 
 	return f.findPRURL, f.findPRURLErr
+}
+
+func (f *fakeGates) MergePullRequest(_ context.Context, prURL string) error {
+	f.record("MergePullRequest:" + prURL)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.mergeErr
 }
 
 // compile-time assertion that the fake satisfies the consumer interface.
@@ -976,6 +986,184 @@ func TestCIGate_GreenImmediately(t *testing.T) {
 	assert.Equal(t, []string{"Checks:" + gatePRURL}, gates.recorded(),
 		"green on the first poll needs exactly one Checks call")
 	assert.Zero(t, modelCallCount(client), "a green gate spends nothing")
+}
+
+// mergeGateContext is a CI-gated card that also asks for the merge.
+func mergeGateContext(title, body string) cmclient.TaskContext {
+	tc := ciGateContext(title, body)
+	tc.MergePR = true
+
+	return tc
+}
+
+// TestPRGates_MergesAfterGreenCI: with merge_pr, a green CI gate is followed by
+// exactly one merge, the merge is recorded on the card, and the card completes.
+func TestPRGates_MergesAfterGreenCI(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{checks: [][]CheckResult{{{Name: "build", Bucket: "pass"}}}}
+
+	o := prGateRun(ops, gates, &fakeGit{}, &planLLM{}, mergeGateContext("Merge", "body"), 0)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	assert.Equal(t, []string{"Checks:" + gatePRURL, "MergePullRequest:" + gatePRURL}, gates.recorded())
+
+	calls := ops.recorded()
+	assert.GreaterOrEqual(t, indexOfCall(calls, "AddLog:pr_gates: merged "+gatePRURL), 0,
+		"the merge is logged; calls=%v", calls)
+	assert.Less(t, indexOfCall(calls, "AddLog:pr_gates: merged "+gatePRURL), indexOfCall(calls, "TransitionCard:done"),
+		"the merge is logged before the card completes; calls=%v", calls)
+	assert.Contains(t, ops.lastBody(), "- Merge: merged")
+	assert.Contains(t, ops.lastBody(), "- Status: passed")
+}
+
+// TestPRGates_MergeRefusedParks: a refused merge (branch protection, required
+// reviews) parks the card with gh's text instead of completing it.
+func TestPRGates_MergeRefusedParks(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		checks:   [][]CheckResult{{{Name: "build", Bucket: "pass"}}},
+		mergeErr: errors.New("gh pr merge: exit status 1: Pull Request is not mergeable: 1 approving review is required"),
+	}
+
+	o := prGateRun(ops, gates, &fakeGit{}, &planLLM{}, mergeGateContext("Merge", "body"), 0)
+
+	err := runPRGates(context.Background(), o)
+
+	var parked *GatesParkedError
+	require.ErrorAs(t, err, &parked)
+	assert.Contains(t, parked.Reason, "merge refused")
+
+	calls := ops.recorded()
+	assert.Negative(t, indexOfCall(calls, "TransitionCard:done"), "a refused merge never completes the card; calls=%v", calls)
+	assert.Contains(t, ops.lastBody(), "- Status: parked: merge refused")
+	assert.Contains(t, ops.lastBody(), "approving review is required")
+	assert.NotContains(t, ops.lastBody(), "- Merge: merged")
+}
+
+// TestPRGates_MergeDuringTeardownDoesNotPark: a merge killed by routine
+// container teardown is not a refusal - it returns the cancellation so the
+// resumed run merges, instead of blaming the repo for a refusal it never made.
+// gh reports the kill in its own words ("signal: killed"), so the guard is on
+// the context, not on the error's identity.
+func TestPRGates_MergeDuringTeardownDoesNotPark(t *testing.T) {
+	ops := &fakeOps{}
+	base := &fakeGates{
+		checks:   [][]CheckResult{{{Name: "build", Bucket: "pass"}}},
+		mergeErr: errors.New("gh pr merge: signal: killed"),
+	}
+
+	o := prGateRun(ops, base, &fakeGit{}, &planLLM{}, mergeGateContext("Merge", "body"), 0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	o.d.PRGates = &cancelingGates{fakeGates: base, cancel: cancel}
+
+	err := runPRGates(ctx, o)
+
+	require.ErrorIs(t, err, context.Canceled,
+		"a torn-down merge returns the cancellation, never a park")
+	require.ErrorContains(t, err, "signal: killed", "gh's own text survives the wrap")
+
+	var parked *GatesParkedError
+	require.NotErrorAs(t, err, &parked, "teardown is not a park")
+
+	calls := ops.recorded()
+	assert.Negative(t, indexOfCall(calls, "TransitionCard:done"), "a torn-down merge never completes the card; calls=%v", calls)
+	assert.NotContains(t, ops.lastBody(), "parked: merge refused")
+	assert.NotContains(t, ops.lastBody(), "- Merge: merged")
+}
+
+// TestPRGates_NoChecksPassStillMerges: a repo without CI passes the gate after
+// the grace window and is merged like any other pass - having checks is the
+// user's responsibility, not the gate's.
+func TestPRGates_NoChecksPassStillMerges(t *testing.T) {
+	shrinkNoChecksGrace(t, 5*time.Millisecond)
+
+	ops := &fakeOps{}
+	gates := &fakeGates{checks: [][]CheckResult{{}, {}, {}}}
+
+	o := prGateRun(ops, gates, &fakeGit{}, &planLLM{}, mergeGateContext("Merge", "body"), 0)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	recorded := gates.recorded()
+	assert.Equal(t, "MergePullRequest:"+gatePRURL, recorded[len(recorded)-1],
+		"the grace pass merges after its last poll; gates=%v", recorded)
+	assert.Contains(t, ops.lastBody(), "- Merge: merged")
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+}
+
+// TestPRGates_ResumeAfterMergeDoesNotReMerge: a run resumed after the merge
+// landed (the section already says merged) completes without a second merge.
+func TestPRGates_ResumeAfterMergeDoesNotReMerge(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{checks: [][]CheckResult{{{Name: "build", Bucket: "pass"}}}}
+
+	body := "body\n\n## PR Gates\n\n- Copilot rounds used: 0/3\n- CI rounds used: 0/3\n- Merge: merged\n- Status: passed\n"
+	o := prGateRun(ops, gates, &fakeGit{}, &planLLM{}, mergeGateContext("Merge", body), 0)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	assert.Equal(t, []string{"Checks:" + gatePRURL}, gates.recorded(), "no second merge on resume")
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+}
+
+// TestPRGates_MergeFlagWithoutAwaitCIIsIgnored: merge_pr alone (no await_ci)
+// is a plain pass-through - the UI hides it, the agent never merges blind.
+func TestPRGates_MergeFlagWithoutAwaitCIIsIgnored(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{}
+
+	tc := mergeGateContext("Merge", "body")
+	tc.AwaitCI = false
+	o := prGateRun(ops, gates, &fakeGit{}, &planLLM{}, tc, 0)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	assert.Empty(t, gates.recorded())
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+}
+
+// TestPRGates_CopilotOnlyCardNeverMerges: a card gated on Copilot review alone
+// (await_ci false) must never merge even with merge_pr set - the merge is
+// gated on the CI gate's own pass rules, and a Copilot pass is not one of
+// them. Binding rule: merge_pr only ever fires behind AwaitCI.
+func TestPRGates_CopilotOnlyCardNeverMerges(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		reviews:   []*CopilotReview{reviewOnHead("LGTM")},
+	}
+	client := &planLLM{responses: []llm.Response{copilotVerdict()}}
+
+	tc := copilotGateContext("Copilot only", "body")
+	tc.MergePR = true
+
+	o := prGateRun(ops, gates, &fakeGit{}, client, tc, 0)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+
+	calls := ops.recorded()
+	assert.GreaterOrEqual(t, indexOfCall(calls, "TransitionCard:done"), 0)
+
+	gateCalls := gates.recorded()
+	assert.Equal(t, -1, indexOfCallPrefix(gateCalls, "MergePullRequest"),
+		"a Copilot-only card must never merge; calls=%v", gateCalls)
+}
+
+// TestGatesState_MergedRoundTrips: the merged marker survives recordGates /
+// loadGatesState like the Copilot satisfied marker.
+func TestGatesState_MergedRoundTrips(t *testing.T) {
+	ops := &fakeOps{}
+	o := prGateRun(ops, &fakeGates{}, &fakeGit{}, &planLLM{}, mergeGateContext("Merge", "body"), 0)
+
+	o.recordGates(context.Background(), gatesState{Merged: true, Status: "passed"})
+	o.body = ops.lastBody()
+
+	assert.True(t, o.loadGatesState().Merged)
 }
 
 // TestCIGate_NoChecksGraceThenPass: a PR that never grows a check is a repo

@@ -207,6 +207,10 @@ type TaskContext struct {
 	// review. Read by the pr_gates phase.
 	AwaitCI            bool
 	AwaitCopilotReview bool
+	// MergePR asks the pr_gates phase to merge the PR into its base branch
+	// once the CI gate passed, a repo with no checks included. Human-only,
+	// read with AwaitCI.
+	MergePR bool
 	// PRUrl is the PR recorded by an earlier run's report_push; a resumed
 	// pr_gates phase re-reads it instead of re-creating the PR.
 	PRUrl             string
@@ -357,6 +361,7 @@ func (c *Client) GetTaskContext(ctx context.Context, cardID string, includeImage
 			CreatePR           bool     `json:"create_pr"`
 			AwaitCI            bool     `json:"await_ci"`
 			AwaitCopilotReview bool     `json:"await_copilot_review"`
+			MergePR            bool     `json:"merge_pr"`
 			PRUrl              string   `json:"pr_url"`
 			ReviewAttempts     int      `json:"review_attempts"`
 			ModelOrchestrator  string   `json:"model_orchestrator"`
@@ -382,6 +387,7 @@ func (c *Client) GetTaskContext(ctx context.Context, cardID string, includeImage
 		CreatePR:           payload.Card.CreatePR,
 		AwaitCI:            payload.Card.AwaitCI,
 		AwaitCopilotReview: payload.Card.AwaitCopilotReview,
+		MergePR:            payload.Card.MergePR,
 		PRUrl:              payload.Card.PRUrl,
 		ReviewAttempts:     payload.Card.ReviewAttempts,
 		ModelOrchestrator:  payload.Card.ModelOrchestrator,
