@@ -280,16 +280,39 @@ func Run(ctx context.Context, spec RunSpec, ops CardOps, client llm.LLM, emit *e
 
 // prepareWorkspace creates the clone parent, clones the repo, and cuts the work
 // branch. Clone requires the parent dir to exist and the workspace itself to
-// not exist yet, so the per-card workspace path stays fresh. It returns the
-// resolved base branch (the spec base, or the clone's default when the spec
-// base is empty) so the caller can propagate it to the FSM.
+// not exist yet, so the per-card workspace path stays fresh. On a playbook run
+// (CreateBaseBranch) a base branch missing on the remote is created from
+// BaseBranchFrom first, so later cards of the playbook clone the shared base.
+// It returns the resolved base branch (the spec base, or the clone's default
+// when the spec base is empty) so the caller can propagate it to the FSM.
 func prepareWorkspace(ctx context.Context, git *Git, spec RunSpec, branch string) (string, error) {
 	if err := os.MkdirAll(spec.Workspace, 0o755); err != nil {
 		return "", fmt.Errorf("create workspace parent: %w", err)
 	}
 
-	if err := git.Clone(ctx, spec.RepoURL, spec.BaseBranch); err != nil {
+	cloneBranch := spec.BaseBranch
+	createBase := false
+
+	if spec.CreateBaseBranch && spec.BaseBranch != "" {
+		exists, err := git.RemoteBranchExists(ctx, spec.RepoURL, spec.BaseBranch)
+		if err != nil {
+			return "", fmt.Errorf("probe base branch %s: %w", spec.BaseBranch, err)
+		}
+
+		if !exists {
+			cloneBranch = spec.BaseBranchFrom
+			createBase = true
+		}
+	}
+
+	if err := git.Clone(ctx, spec.RepoURL, cloneBranch); err != nil {
 		return "", fmt.Errorf("clone %s: %w", spec.RepoURL, err)
+	}
+
+	if createBase {
+		if err := git.CreateRemoteBranch(ctx, spec.BaseBranch); err != nil {
+			return "", fmt.Errorf("create base branch %s: %w", spec.BaseBranch, err)
+		}
 	}
 
 	if err := git.CreateBranch(ctx, branch); err != nil {

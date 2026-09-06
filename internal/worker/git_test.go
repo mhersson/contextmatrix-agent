@@ -1445,3 +1445,111 @@ func TestCreateRemoteBranchGuard(t *testing.T) {
 		assert.Contains(t, err.Error(), "refusing", branch)
 	}
 }
+
+// currentBranch returns the checked-out branch of the workspace at ws.
+func currentBranch(t *testing.T, ws string) string {
+	t.Helper()
+
+	cmd := exec.Command("git", "branch", "--show-current")
+	cmd.Dir = ws
+	cmd.Env = gitEnv()
+
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err)
+
+	return strings.TrimSpace(string(out))
+}
+
+func TestPrepareWorkspaceCreatesMissingBaseBranch(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	bare := setupBareRemote(t)
+
+	spec := RunSpec{
+		CardID: "CARD-1", Project: "proj", RepoURL: bare, Workspace: t.TempDir(),
+		BaseBranch: "playbook/rollout", CreateBaseBranch: true,
+	}
+	ws := filepath.Join(spec.Workspace, "card-1")
+	g := NewGit(ws, "", "", "")
+
+	base, err := prepareWorkspace(ctx, g, spec, "cm/card-1")
+	require.NoError(t, err)
+	assert.Equal(t, "playbook/rollout", base)
+
+	assert.True(t, remoteHasBranch(t, bare, "playbook/rollout"))
+	assert.Equal(t, remoteTipOf(t, bare, "main"), remoteTipOf(t, bare, "playbook/rollout"), "empty source means the remote default")
+	assert.Equal(t, "cm/card-1", currentBranch(t, ws))
+
+	cmd := exec.Command("git", "rev-parse", "--verify", "refs/remotes/origin/playbook/rollout")
+	cmd.Dir = ws
+	cmd.Env = gitEnv()
+	_, err = cmd.CombinedOutput()
+	require.NoError(t, err, "origin/playbook/rollout must exist for the integrate rebase")
+
+	// The policy is locked to the card branch with the new base protected.
+	require.Error(t, g.Push(ctx, "playbook/rollout"))
+	require.Error(t, g.Push(ctx, "main"))
+}
+
+func TestPrepareWorkspaceCreatesBaseFromSourceBranch(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	bare := setupBareRemote(t)
+	pushFileToBranch(t, bare, "dev.txt", "develop")
+
+	spec := RunSpec{
+		CardID: "CARD-1", Project: "proj", RepoURL: bare, Workspace: t.TempDir(),
+		BaseBranch: "playbook/rollout", CreateBaseBranch: true, BaseBranchFrom: "develop",
+	}
+	ws := filepath.Join(spec.Workspace, "card-1")
+	g := NewGit(ws, "", "", "")
+
+	_, err := prepareWorkspace(ctx, g, spec, "cm/card-1")
+	require.NoError(t, err)
+
+	assert.Equal(t, remoteTipOf(t, bare, "develop"), remoteTipOf(t, bare, "playbook/rollout"))
+	assert.FileExists(t, filepath.Join(ws, "dev.txt"))
+}
+
+func TestPrepareWorkspaceUsesExistingBaseBranch(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	bare := setupBareRemote(t)
+	pushFileToBranch(t, bare, "existing.txt", "playbook/rollout")
+	before := remoteTipOf(t, bare, "playbook/rollout")
+
+	spec := RunSpec{
+		CardID: "CARD-1", Project: "proj", RepoURL: bare, Workspace: t.TempDir(),
+		BaseBranch: "playbook/rollout", CreateBaseBranch: true, BaseBranchFrom: "main",
+	}
+	ws := filepath.Join(spec.Workspace, "card-1")
+	g := NewGit(ws, "", "", "")
+
+	base, err := prepareWorkspace(ctx, g, spec, "cm/card-1")
+	require.NoError(t, err)
+	assert.Equal(t, "playbook/rollout", base)
+
+	assert.Equal(t, before, remoteTipOf(t, bare, "playbook/rollout"), "an existing base is never moved")
+	assert.FileExists(t, filepath.Join(ws, "existing.txt"), "the clone is of the base, not the source")
+	assert.Equal(t, "cm/card-1", currentBranch(t, ws))
+}
+
+func TestPrepareWorkspaceWithoutCreateFlagStillFailsOnMissingBase(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	bare := setupBareRemote(t)
+
+	spec := RunSpec{
+		CardID: "CARD-1", Project: "proj", RepoURL: bare, Workspace: t.TempDir(),
+		BaseBranch: "playbook/missing",
+	}
+	g := NewGit(filepath.Join(spec.Workspace, "card-1"), "", "", "")
+
+	_, err := prepareWorkspace(ctx, g, spec, "cm/card-1")
+	require.Error(t, err)
+	assert.False(t, remoteHasBranch(t, bare, "playbook/missing"))
+}
