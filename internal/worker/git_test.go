@@ -1346,3 +1346,102 @@ func TestFoldUntrackedUnreadableFileKeepsGoing(t *testing.T) {
 	assert.NotEqual(t, present.Sum(nil), withGap.Sum(nil),
 		"the missing file still contributes to the fingerprint")
 }
+
+// remoteTipOf returns the commit hash of branch in the bare remote.
+func remoteTipOf(t *testing.T, remote, branch string) string {
+	t.Helper()
+
+	//nolint:gosec // G204: test-controlled branch/path, reading from a temp bare repo
+	cmd := exec.Command("git", "rev-parse", "refs/heads/"+branch)
+	cmd.Dir = remote
+	cmd.Env = gitEnv()
+
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "rev-parse %s: %s", branch, out)
+
+	return strings.TrimSpace(string(out))
+}
+
+func TestRemoteBranchExistsProbesBeforeClone(t *testing.T) {
+	t.Parallel()
+
+	remote := setupBareRemote(t)
+	pushFileToBranch(t, remote, "dev.txt", "develop")
+
+	// The workspace does not exist yet: the probe must not need a clone.
+	ws := filepath.Join(t.TempDir(), "ws")
+	g := NewGit(ws, "", "", "")
+	ctx := context.Background()
+
+	exists, err := g.RemoteBranchExists(ctx, remote, "develop")
+	require.NoError(t, err)
+	assert.True(t, exists)
+
+	exists, err = g.RemoteBranchExists(ctx, remote, "playbook/rollout")
+	require.NoError(t, err)
+	assert.False(t, exists)
+
+	_, err = g.RemoteBranchExists(ctx, filepath.Join(t.TempDir(), "nowhere"), "main")
+	require.Error(t, err, "an unreachable remote is an error, not a missing branch")
+}
+
+func TestCreateRemoteBranchPublishesAndFetches(t *testing.T) {
+	t.Parallel()
+
+	remote := setupBareRemote(t)
+	ws := filepath.Join(t.TempDir(), "ws")
+	g := NewGit(ws, "", "", "")
+	ctx := context.Background()
+
+	require.NoError(t, g.Clone(ctx, remote, "main"))
+	require.NoError(t, g.CreateRemoteBranch(ctx, "playbook/rollout"))
+
+	assert.True(t, remoteHasBranch(t, remote, "playbook/rollout"))
+	assert.Equal(t, remoteTipOf(t, remote, "main"), remoteTipOf(t, remote, "playbook/rollout"), "cut from HEAD")
+
+	// origin/<base> must exist locally: integrate rebases onto that literal ref.
+	cmd := exec.Command("git", "rev-parse", "--verify", "refs/remotes/origin/playbook/rollout")
+	cmd.Dir = ws
+	cmd.Env = gitEnv()
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "origin/playbook/rollout missing after create: %s", out)
+
+	// The workspace is left on the new branch, ready for the card branch cut.
+	cmd = exec.Command("git", "branch", "--show-current")
+	cmd.Dir = ws
+	cmd.Env = gitEnv()
+	out, err = cmd.CombinedOutput()
+	require.NoError(t, err)
+	assert.Equal(t, "playbook/rollout", strings.TrimSpace(string(out)))
+}
+
+func TestCreateRemoteBranchRefusesExistingRef(t *testing.T) {
+	t.Parallel()
+
+	remote := setupBareRemote(t)
+	pushFileToBranch(t, remote, "first.txt", "playbook/rollout")
+	before := remoteTipOf(t, remote, "playbook/rollout")
+
+	ws := filepath.Join(t.TempDir(), "ws")
+	g := NewGit(ws, "", "", "")
+	ctx := context.Background()
+
+	require.NoError(t, g.Clone(ctx, remote, "main"))
+
+	err := g.CreateRemoteBranch(ctx, "playbook/rollout")
+	require.Error(t, err, "a lost race must fail, never move the existing branch")
+	assert.Equal(t, before, remoteTipOf(t, remote, "playbook/rollout"))
+}
+
+func TestCreateRemoteBranchGuard(t *testing.T) {
+	t.Parallel()
+
+	g := NewGit(t.TempDir(), "", "", "")
+	ctx := context.Background()
+
+	for _, branch := range []string{"", "main", "master", "develop", "cm/cmx-001", "playbook/", "feature/playbook/x"} {
+		err := g.CreateRemoteBranch(ctx, branch)
+		require.Error(t, err, branch)
+		assert.Contains(t, err.Error(), "refusing", branch)
+	}
+}
