@@ -694,9 +694,13 @@ func (g *Git) guardCreateBranch(branch string) error {
 
 // CreateRemoteBranch cuts branch from the current HEAD, publishes it with a
 // create-only push, and fetches it so origin/<branch> exists locally for the
-// integrate rebase. Meant to run before SetBranchPolicy on a fresh clone of
+// integrate rebase. Refuses to run after SetBranchPolicy on a fresh clone of
 // the source branch; the workspace is left on the new branch.
 func (g *Git) CreateRemoteBranch(ctx context.Context, branch string) error {
+	if g.cardBranch != "" {
+		return fmt.Errorf("refusing to create %q: push policy already locked to %s", branch, g.cardBranch)
+	}
+
 	if err := g.guardCreateBranch(branch); err != nil {
 		return err
 	}

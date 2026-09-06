@@ -1473,6 +1473,21 @@ func TestCreateRemoteBranchGuard(t *testing.T) {
 	}
 }
 
+// TestCreateRemoteBranchRefusesAfterPolicyLocked pins that CreateRemoteBranch
+// no longer relies on call-site convention to run before SetBranchPolicy: once
+// the push policy is locked to a card branch, it refuses outright rather than
+// depending on the caller never invoking it afterward.
+func TestCreateRemoteBranchRefusesAfterPolicyLocked(t *testing.T) {
+	t.Parallel()
+
+	g := NewGit(t.TempDir(), "", "", "")
+	g.SetBranchPolicy("cm/x", "main", "main")
+
+	err := g.CreateRemoteBranch(context.Background(), "playbook/rollout")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "refusing")
+}
+
 // currentBranch returns the checked-out branch of the workspace at ws.
 func currentBranch(t *testing.T, ws string) string {
 	t.Helper()
