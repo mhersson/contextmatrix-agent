@@ -290,6 +290,10 @@ func prepareWorkspace(ctx context.Context, git *Git, spec RunSpec, branch string
 		return "", fmt.Errorf("create workspace parent: %w", err)
 	}
 
+	if spec.CreateBaseBranch && spec.BaseBranch == "" {
+		return "", errors.New("create base branch requested without a base branch")
+	}
+
 	cloneBranch := spec.BaseBranch
 	createBase := false
 

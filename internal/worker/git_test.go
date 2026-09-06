@@ -1553,3 +1553,21 @@ func TestPrepareWorkspaceWithoutCreateFlagStillFailsOnMissingBase(t *testing.T) 
 	require.Error(t, err)
 	assert.False(t, remoteHasBranch(t, bare, "playbook/missing"))
 }
+
+func TestPrepareWorkspaceRefusesCreateWithoutBase(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	bare := setupBareRemote(t)
+
+	spec := RunSpec{
+		CardID: "CARD-1", Project: "proj", RepoURL: bare, Workspace: t.TempDir(),
+		CreateBaseBranch: true,
+	}
+	ws := filepath.Join(spec.Workspace, "card-1")
+	g := NewGit(ws, "", "", "")
+
+	_, err := prepareWorkspace(ctx, g, spec, "cm/card-1")
+	require.Error(t, err, "create base branch requested without a base branch must be refused")
+	assert.NoDirExists(t, ws)
+}
