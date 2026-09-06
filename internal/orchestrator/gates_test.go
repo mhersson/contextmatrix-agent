@@ -97,6 +97,7 @@ type fakeGates struct {
 	// FindPRURL scripting: the recovery probe's result for a fail-closed gate.
 	findPRURL    string
 	findPRURLErr error
+	mergeErr     error
 
 	calls []string
 	i     int
@@ -257,6 +258,15 @@ func (f *fakeGates) FindPRURL(_ context.Context) (string, error) {
 	defer f.mu.Unlock()
 
 	return f.findPRURL, f.findPRURLErr
+}
+
+func (f *fakeGates) MergePullRequest(_ context.Context, prURL string) error {
+	f.record("MergePullRequest:" + prURL)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.mergeErr
 }
 
 // compile-time assertion that the fake satisfies the consumer interface.

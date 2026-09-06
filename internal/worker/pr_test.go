@@ -1002,6 +1002,16 @@ func TestPRViewURLArgs(t *testing.T) {
 	assert.Equal(t, []string{"pr", "view", "--json", "url,state"}, prViewURLArgs())
 }
 
+// TestMergeArgs pins the merge invocation: a merge commit, addressed by URL so
+// it never depends on the workspace's checked-out branch, and no
+// --delete-branch so gh never touches the local checkout.
+func TestMergeArgs(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, []string{"pr", "merge", "https://github.com/o/r/pull/7", "--merge"},
+		mergeArgs("https://github.com/o/r/pull/7"))
+}
+
 // TestParsePRViewURL unmarshals gh pr view's --json url,state output,
 // returning the URL only for an OPEN PR - gh pr view falls back to the
 // branch's most recent CLOSED or MERGED PR when none is open, so the state

@@ -84,4 +84,9 @@ type PRGates interface {
 	// branch, or "" when the branch has none. Recovery probe for a gated card
 	// whose recorded PR creation failed - a PR may exist anyway.
 	FindPRURL(ctx context.Context) (string, error)
+
+	// MergePullRequest merges the PR into its base branch with a merge commit.
+	// The error carries gh's verbatim text (branch protection, required
+	// reviews, conflicts) so the caller can put it on the card.
+	MergePullRequest(ctx context.Context, prURL string) error
 }
