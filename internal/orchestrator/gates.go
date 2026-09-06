@@ -217,6 +217,10 @@ type gatesState struct {
 	// it - a re-trigger retries those.
 	CopilotSatisfied bool
 
+	// Merged records that the PR was merged in this or an earlier run; a
+	// resumed run completes without merging again.
+	Merged bool
+
 	Status string
 	Detail string // human-facing lines: failing checks, park reasons
 
@@ -251,11 +255,14 @@ func runPRGates(ctx context.Context, o *run) error {
 	if gated {
 		st := o.loadGatesState()
 		o.gateNote(ctx, "pr_gates", fmt.Sprintf(
-			"pr_gates: entering - await_ci=%t await_copilot_review=%t create_pr=%t pr_url=%s copilot_wait=%s ci_wait=%s poll=%s copilot_satisfied=%t",
-			o.tc.AwaitCI, o.tc.AwaitCopilotReview, o.tc.CreatePR, prURL,
+			"pr_gates: entering - await_ci=%t await_copilot_review=%t merge_pr=%t create_pr=%t pr_url=%s copilot_wait=%s ci_wait=%s poll=%s copilot_satisfied=%t",
+			o.tc.AwaitCI, o.tc.AwaitCopilotReview, o.tc.MergePR, o.tc.CreatePR, prURL,
 			o.copilotWait(), o.ciWait(), o.gatesPoll(), st.CopilotSatisfied,
 		),
-			map[string]any{"await_ci": o.tc.AwaitCI, "await_copilot_review": o.tc.AwaitCopilotReview, "pr_url": prURL})
+			map[string]any{
+				"await_ci": o.tc.AwaitCI, "await_copilot_review": o.tc.AwaitCopilotReview,
+				"merge_pr": o.tc.MergePR, "pr_url": prURL,
+			})
 	}
 
 	if gated && o.tc.CreatePR && prURL == "" {
@@ -339,6 +346,12 @@ func runPRGates(ctx context.Context, o *run) error {
 		st.Status = "passed"
 		o.recordGates(ctx, st)
 		o.gateNote(ctx, "pr_gates", "pr_gates: passed", nil)
+
+		if o.tc.AwaitCI && o.tc.MergePR {
+			if err := o.mergeAfterGates(ctx, prURL, &st); err != nil {
+				return err
+			}
+		}
 	}
 
 	if err := d.Ops.TransitionCard(ctx, cfg.CardID, "done"); err != nil {
@@ -2069,6 +2082,31 @@ func (o *run) parkGates(ctx context.Context, st *gatesState, reason string) erro
 	return &GatesParkedError{Reason: reason}
 }
 
+// mergeAfterGates merges the PR once every enabled gate has passed - the CI
+// gate's own pass rules decide, a repo with no checks included. It never merges
+// twice: a resumed run whose section already records the merge skips it. A
+// refused merge (branch protection, required reviews, conflicts) parks the card
+// with gh's text; the work is pushed and a human decides.
+func (o *run) mergeAfterGates(ctx context.Context, prURL string, st *gatesState) error {
+	if st.Merged {
+		o.gateNote(ctx, "pr_gates", "pr_gates: already merged "+prURL, nil)
+
+		return nil
+	}
+
+	if err := o.d.PRGates.MergePullRequest(ctx, prURL); err != nil {
+		st.Detail = "Merge refused:\n" + err.Error()
+
+		return o.parkGates(ctx, st, "merge refused")
+	}
+
+	st.Merged = true
+	o.recordGates(ctx, *st)
+	o.gateNote(ctx, "pr_gates", "pr_gates: merged "+prURL, map[string]any{"pr_url": prURL})
+
+	return nil
+}
+
 // sleepPoll waits one poll interval before the next gate poll.
 func (o *run) sleepPoll(ctx context.Context) error {
 	return o.sleepGate(ctx, o.gatesPoll())
@@ -2099,6 +2137,10 @@ func (o *run) recordGates(ctx context.Context, st gatesState) {
 		b.WriteString("- Copilot gate: satisfied\n")
 	}
 
+	if st.Merged {
+		b.WriteString("- Merge: merged\n")
+	}
+
 	if st.Status != "" {
 		fmt.Fprintf(&b, "- Status: %s\n", st.Status)
 	}
@@ -2114,13 +2156,15 @@ func (o *run) recordGates(ctx context.Context, st gatesState) {
 	o.recordSection(ctx, gatesSectionHeading, b.String())
 }
 
-// copilotRoundsRe, ciRoundsRe and copilotSatisfiedRe match the "rounds used"
-// counters and the satisfied marker recordGates writes, so a resumed run
-// recovers them from the card body. Keep in sync with recordGates.
+// copilotRoundsRe, ciRoundsRe, copilotSatisfiedRe and mergedRe match the
+// "rounds used" counters and the satisfied/merged markers recordGates writes,
+// so a resumed run recovers them from the card body. Keep in sync with
+// recordGates.
 var (
 	copilotRoundsRe    = regexp.MustCompile(`(?m)^- Copilot rounds used: (\d+)/`)
 	ciRoundsRe         = regexp.MustCompile(`(?m)^- CI rounds used: (\d+)/`)
 	copilotSatisfiedRe = regexp.MustCompile(`(?m)^- Copilot gate: satisfied$`)
+	mergedRe           = regexp.MustCompile(`(?m)^- Merge: merged$`)
 )
 
 // loadGatesState reads the persisted round counters back out of the card body.
@@ -2136,6 +2180,7 @@ func (o *run) loadGatesState() gatesState {
 		CopilotRounds:    firstSubmatchInt(copilotRoundsRe, section),
 		CIRounds:         firstSubmatchInt(ciRoundsRe, section),
 		CopilotSatisfied: copilotSatisfiedRe.MatchString(section),
+		Merged:           mergedRe.MatchString(section),
 	}
 }
 
