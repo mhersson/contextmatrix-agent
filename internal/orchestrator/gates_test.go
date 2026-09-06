@@ -1039,6 +1039,40 @@ func TestPRGates_MergeRefusedParks(t *testing.T) {
 	assert.NotContains(t, ops.lastBody(), "- Merge: merged")
 }
 
+// TestPRGates_MergeDuringTeardownDoesNotPark: a merge killed by routine
+// container teardown is not a refusal - it returns the cancellation so the
+// resumed run merges, instead of blaming the repo for a refusal it never made.
+// gh reports the kill in its own words ("signal: killed"), so the guard is on
+// the context, not on the error's identity.
+func TestPRGates_MergeDuringTeardownDoesNotPark(t *testing.T) {
+	ops := &fakeOps{}
+	base := &fakeGates{
+		checks:   [][]CheckResult{{{Name: "build", Bucket: "pass"}}},
+		mergeErr: errors.New("gh pr merge: signal: killed"),
+	}
+
+	o := prGateRun(ops, base, &fakeGit{}, &planLLM{}, mergeGateContext("Merge", "body"), 0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	o.d.PRGates = &cancelingGates{fakeGates: base, cancel: cancel}
+
+	err := runPRGates(ctx, o)
+
+	require.ErrorIs(t, err, context.Canceled,
+		"a torn-down merge returns the cancellation, never a park")
+	require.ErrorContains(t, err, "signal: killed", "gh's own text survives the wrap")
+
+	var parked *GatesParkedError
+	require.NotErrorAs(t, err, &parked, "teardown is not a park")
+
+	calls := ops.recorded()
+	assert.Negative(t, indexOfCall(calls, "TransitionCard:done"), "a torn-down merge never completes the card; calls=%v", calls)
+	assert.NotContains(t, ops.lastBody(), "parked: merge refused")
+	assert.NotContains(t, ops.lastBody(), "- Merge: merged")
+}
+
 // TestPRGates_NoChecksPassStillMerges: a repo without CI passes the gate after
 // the grace window and is merged like any other pass - having checks is the
 // user's responsibility, not the gate's.

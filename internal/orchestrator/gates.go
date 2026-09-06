@@ -2086,7 +2086,8 @@ func (o *run) parkGates(ctx context.Context, st *gatesState, reason string) erro
 // gate's own pass rules decide, a repo with no checks included. It never merges
 // twice: a resumed run whose section already records the merge skips it. A
 // refused merge (branch protection, required reviews, conflicts) parks the card
-// with gh's text; the work is pushed and a human decides.
+// with gh's text; the work is pushed and a human decides. A cancelled context
+// is teardown, not a refusal: the resumed run merges.
 func (o *run) mergeAfterGates(ctx context.Context, prURL string, st *gatesState) error {
 	if st.Merged {
 		o.gateNote(ctx, "pr_gates", "pr_gates: already merged "+prURL, nil)
@@ -2095,6 +2096,15 @@ func (o *run) mergeAfterGates(ctx context.Context, prURL string, st *gatesState)
 	}
 
 	if err := o.d.PRGates.MergePullRequest(ctx, prURL); err != nil {
+		// Routine container teardown kills the gh call (see sleepGate's doc
+		// comment). Parking on that would blame the repo for a refusal it
+		// never made, and would write the park through a dead context. The
+		// cancellation is wrapped alongside gh's text so the worker's
+		// teardown check still sees it when gh reports only "signal: killed".
+		if ctx.Err() != nil {
+			return fmt.Errorf("merge pull request: %w: %w", ctx.Err(), err)
+		}
+
 		st.Detail = "Merge refused:\n" + err.Error()
 
 		return o.parkGates(ctx, st, "merge refused")
