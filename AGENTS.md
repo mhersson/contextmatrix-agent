@@ -207,7 +207,8 @@ Summaries only - full detail lives in the reference documents above.
     mounted read-only). Distinct from `workflow-skills`.
 12. **PR gates.** `pr_gates` gates on `await_ci` / `await_copilot_review`, up
     to 3 fix rounds per gate, then parks in review. Copilot verdicts land on
-    the card and (best-effort) on the PR threads.
+    the card and (best-effort) on the PR threads. `merge_pr` merges once the CI
+    gate passes, else parks.
 13. **Plan-time deliverable split.** The planner can emit `followup_cards`
     (independent deliverables only; cap 4, overflow parks) and
     `unreachable_criteria` (review verifies each claim and exempts VERIFIED
