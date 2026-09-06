@@ -419,6 +419,8 @@ func specFromEnv() (worker.RunSpec, error) {
 		MCPAPIKey:                 mcpAPIKey,
 		SecretsEnvPath:            cmEnvFile,
 		BaseBranch:                os.Getenv("CM_BASE_BRANCH"),
+		CreateBaseBranch:          os.Getenv("CM_CREATE_BASE_BRANCH") == "true",
+		BaseBranchFrom:            os.Getenv("CM_BASE_BRANCH_FROM"),
 		Model:                     os.Getenv("CM_MODEL"),
 		Interactive:               os.Getenv("CM_INTERACTIVE") == "true",
 		MaxCapability:             os.Getenv("CM_MAX_CAPABILITY") == "true",

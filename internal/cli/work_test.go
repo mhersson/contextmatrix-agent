@@ -892,3 +892,39 @@ func TestSpecFromEnv_Attempt(t *testing.T) {
 		assert.Contains(t, err.Error(), "CMX_ATTEMPT")
 	})
 }
+
+func TestSpecFromEnv_PlaybookBaseBranchVars(t *testing.T) {
+	t.Run("set", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("CM_BASE_BRANCH", "playbook/rollout")
+		t.Setenv("CM_CREATE_BASE_BRANCH", "true")
+		t.Setenv("CM_BASE_BRANCH_FROM", "main")
+
+		spec, err := specFromEnv()
+		require.NoError(t, err)
+
+		assert.Equal(t, "playbook/rollout", spec.BaseBranch)
+		assert.True(t, spec.CreateBaseBranch)
+		assert.Equal(t, "main", spec.BaseBranchFrom)
+	})
+
+	t.Run("absent", func(t *testing.T) {
+		setRequired(t)
+
+		spec, err := specFromEnv()
+		require.NoError(t, err)
+
+		assert.False(t, spec.CreateBaseBranch)
+		assert.Empty(t, spec.BaseBranchFrom)
+	})
+
+	t.Run("only exact true creates", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("CM_CREATE_BASE_BRANCH", "TRUE")
+
+		spec, err := specFromEnv()
+		require.NoError(t, err)
+
+		assert.False(t, spec.CreateBaseBranch)
+	})
+}

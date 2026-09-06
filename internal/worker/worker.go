@@ -48,13 +48,20 @@ const gatesFinalizeMargin = 10 * time.Minute
 // RunSpec is the container-side contract: populated from CM_* env by the
 // work command.
 type RunSpec struct {
-	CardID      string // CM_CARD_ID (required)
-	Project     string // CM_PROJECT (required)
-	RepoURL     string // CM_REPO_URL (required)
-	BaseBranch  string // CM_BASE_BRANCH (optional)
-	Interactive bool   // CM_INTERACTIVE ("true")
-	BestOfN     int    // CM_BEST_OF_N; >= 2 races N candidate implementations (0 = normal run)
-	Model       string // CM_MODEL (optional; honored if catalog-resolvable; also the first-choice selector fallback in buildRegistry)
+	CardID     string // CM_CARD_ID (required)
+	Project    string // CM_PROJECT (required)
+	RepoURL    string // CM_REPO_URL (required)
+	BaseBranch string // CM_BASE_BRANCH (optional)
+	// CreateBaseBranch and BaseBranchFrom arrive together on playbook runs:
+	// when BaseBranch is missing on the remote, prepareWorkspace creates it
+	// from BaseBranchFrom (empty = the remote default) before cutting the card
+	// branch. A normal run never sets them, so a mistyped base still fails at
+	// clone.
+	CreateBaseBranch bool   // CM_CREATE_BASE_BRANCH ("true")
+	BaseBranchFrom   string // CM_BASE_BRANCH_FROM (optional)
+	Interactive      bool   // CM_INTERACTIVE ("true")
+	BestOfN          int    // CM_BEST_OF_N; >= 2 races N candidate implementations (0 = normal run)
+	Model            string // CM_MODEL (optional; honored if catalog-resolvable; also the first-choice selector fallback in buildRegistry)
 
 	// Attempt is this container's ordinal for the card: 1 for the first run, 2
 	// for a container that replaced it, and so on (CMX_ATTEMPT). It is stamped

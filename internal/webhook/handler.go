@@ -684,6 +684,12 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 		env = append(env, "CM_MAX_CAPABILITY=true")
 	}
 
+	// Emitted only when set: an older worker image ignores the pair and fails
+	// the clone of a missing base exactly as before.
+	if p.CreateBaseBranch {
+		env = append(env, "CM_CREATE_BASE_BRANCH=true", "CM_BASE_BRANCH_FROM="+p.BaseBranchFrom)
+	}
+
 	// A container that replaces a dead one writes into the same per-card log,
 	// with an event sequence that starts over at 1. The ordinal is what tells
 	// the two apart. The first attempt is left unmarked in the container env:
