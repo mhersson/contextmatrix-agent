@@ -1,7 +1,6 @@
 package config
 
 import (
-	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -285,27 +284,6 @@ func TestServiceValidate(t *testing.T) {
 	t.Run("exactly 1.0 selector_price_headroom passes (no band)", func(t *testing.T) {
 		cfg := validServiceConfig()
 		cfg.SelectorPriceHeadroom = 1.0
-		require.NoError(t, cfg.Validate())
-	})
-
-	t.Run("inverted selector_tier_bars errors", func(t *testing.T) {
-		cfg := validServiceConfig()
-		cfg.SelectorTierBars = map[string]float64{"simple": 0.90, "critical": 0.10}
-		err := cfg.Validate()
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "selector_tier_bars")
-	})
-
-	t.Run("NaN selector_tier_bars errors", func(t *testing.T) {
-		cfg := validServiceConfig()
-		cfg.SelectorTierBars = map[string]float64{"critical": math.NaN()}
-		err := cfg.Validate()
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "selector_tier_bars")
-	})
-
-	t.Run("empty selector_tier_bars passes (built-in bars)", func(t *testing.T) {
-		cfg := validServiceConfig()
 		require.NoError(t, cfg.Validate())
 	})
 
@@ -805,6 +783,7 @@ func clearServiceEnv(t *testing.T) {
 		"CMX_CA_CERT_FILE",
 		"CMX_LOG_DIR",
 		"CMX_MAX_CARD_COST", "CMX_SELECTOR_PRICE_HEADROOM",
+		"CMX_SELECTOR_TIER_BARS", "CMX_SELECTOR_TIER_BARS__CRITICAL",
 		"CMX_ADMIN_PORT", "CMX_ADMIN_BIND_ADDR", "CMX_METRICS_TOKEN",
 		"CMX_COMPACTION_ENABLED", "CMX_COMPACTION_THRESHOLD",
 		"CMX_COMPACTION_KEEP_RECENT_TURNS",
@@ -855,4 +834,64 @@ func TestServiceMetricsToken_FromEnv(t *testing.T) {
 	cfg, err := LoadService(filepath.Join(t.TempDir(), "nope.yaml"))
 	require.NoError(t, err)
 	assert.Equal(t, "scrape-token", cfg.MetricsToken)
+}
+
+// TestServiceLoadRefusesTheRemovedSelectorTierBarsKey pins the cut-over:
+// the ladder moved to ContextMatrix, and a serve.yaml that still carries the
+// key must stop startup with a message naming where the ladder lives now,
+// whatever shape the leftover has. Ignoring it would let an operator believe
+// their bars still apply.
+func TestServiceLoadRefusesTheRemovedSelectorTierBarsKey(t *testing.T) {
+	clearServiceEnv(t)
+
+	const want = "selector_tier_bars is no longer read here: the tier ladders are set on the ContextMatrix admin page (Model selection) and arrive with each run"
+
+	write := func(t *testing.T, body string) string {
+		t.Helper()
+
+		path := filepath.Join(t.TempDir(), "serve.yaml")
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+
+		return path
+	}
+
+	t.Run("a ladder in the file", func(t *testing.T) {
+		_, err := LoadService(write(t, "contextmatrix_url: http://cm:8080\nselector_tier_bars:\n  critical: 0.95\n"))
+		require.Error(t, err)
+		assert.Equal(t, want, err.Error())
+	})
+
+	t.Run("an empty map from an older generated file", func(t *testing.T) {
+		_, err := LoadService(write(t, "contextmatrix_url: http://cm:8080\nselector_tier_bars: {}\n"))
+		require.Error(t, err)
+		assert.Equal(t, want, err.Error())
+	})
+
+	t.Run("a null value", func(t *testing.T) {
+		_, err := LoadService(write(t, "contextmatrix_url: http://cm:8080\nselector_tier_bars:\n"))
+		require.Error(t, err)
+		assert.Equal(t, want, err.Error())
+	})
+
+	t.Run("the nested env override", func(t *testing.T) {
+		t.Setenv("CMX_SELECTOR_TIER_BARS__CRITICAL", "0.95")
+
+		_, err := LoadService(write(t, "contextmatrix_url: http://cm:8080\n"))
+		require.Error(t, err)
+		assert.Equal(t, want, err.Error())
+	})
+
+	t.Run("the flat env form", func(t *testing.T) {
+		t.Setenv("CMX_SELECTOR_TIER_BARS", `{"critical":0.95}`)
+
+		_, err := LoadService(write(t, "contextmatrix_url: http://cm:8080\n"))
+		require.Error(t, err)
+		assert.Equal(t, want, err.Error())
+	})
+
+	t.Run("a file without the key loads and keeps the headroom", func(t *testing.T) {
+		cfg, err := LoadService(write(t, "contextmatrix_url: http://cm:8080\nselector_price_headroom: 2.0\n"))
+		require.NoError(t, err)
+		assert.InDelta(t, 2.0, cfg.SelectorPriceHeadroom, 1e-9)
+	})
 }

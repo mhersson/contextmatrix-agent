@@ -23,7 +23,7 @@ func TestDefaultsYAML(t *testing.T) {
 	for _, key := range []string{
 		"contextmatrix_url:", "container_contextmatrix_url:", "api_key:", "mcp_api_key:",
 		"port: 9092", "base_image:", "image_pull_policy: if-not-present", "secrets_dir:",
-		"log_dir:", "default_model:", "review_attempts_cap:", "selector_tier_bars:",
+		"log_dir:", "default_model:", "review_attempts_cap:",
 	} {
 		assert.Contains(t, text, key)
 	}

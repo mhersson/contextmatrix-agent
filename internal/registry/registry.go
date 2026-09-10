@@ -66,16 +66,6 @@ func DistinctModels(picks []Pick) int { return selection.DistinctModels(picks) }
 // panel positionally.
 func SeatPicks(seats []SeatReport) []Pick { return selection.SeatPicks(seats) }
 
-// DefaultTierBars is the built-in ladder. Read by the serve config's
-// validation until the ladder key leaves serve.yaml.
-func DefaultTierBars() map[Tier]float64 { return selection.DefaultTierBars() }
-
-// TierBarsFromStrings validates one ladder with the shared rule. Read by the
-// serve config's validation until the ladder key leaves serve.yaml.
-func TierBarsFromStrings(in map[string]float64) (map[Tier]float64, error) {
-	return selection.TierBarsFromStrings(in)
-}
-
 // favKey indexes favorites by complexity tier and optional role, the shape
 // NewRegistryFromParts has always taken. A zero Role applies the favorite
 // list to every role at that tier. FromSelection never builds one: the wire
