@@ -237,8 +237,13 @@ Decompose the task into subtasks following these rules:
 - Small batched items ("a few lines each", "batch them") become the fewest
   subtasks that keep files disjoint - group by file - not one subtask per
   bullet.
-- Do not include documentation subtasks - documentation is handled
-  separately after execution.
+- Documentation: when the acceptance criteria name docs that must change
+  (files under docs/, a README, specific claims), that is a deliverable -
+  plan it into the subtask that changes the code it describes, on that
+  subtask's "Files:" line, under the same file-grouping rules as any other
+  item; a docs-only subtask only when no code changes alongside it. Docs
+  the card does not require are never a subtask - the document phase
+  decides after execution.
 - Do not create subtasks for release mechanics - tagging, versioning,
   pushing, publishing, deploying. If the parent card's acceptance
   mentions a release step, note it as out-of-scope for the plan rather
@@ -884,8 +889,11 @@ When documentation IS warranted:
 - Be concrete: include examples and command invocations where they help.
 - Keep it concise - match the scope of the docs to the scope of the change.
 - Match the project's existing tone and formatting conventions.
-- Be accurate: the BRANCH DIFF below is the ground truth. Document only what was
-  actually built; never document features that were not implemented.
+- Be accurate and present-tense: the PARENT CARD's stated behaviour and
+  the BRANCH DIFF below are the ground truth. Document the current state -
+  what exists now and why, not how it got here: no change narratives,
+  nothing that was not built. Documentation the branch already changed
+  for the card's own criteria is done - do not rewrite or restate it.
 
 Do NOT run git yourself (no commit, no push, no branch) - the orchestrator
 commits and pushes your changes after you finish.
