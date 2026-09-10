@@ -94,10 +94,6 @@ type RunSpec struct {
 	MaxCardCost           float64 // CMX_MAX_CARD_COST; 0 disables
 	SelectorPriceHeadroom float64 // CMX_SELECTOR_PRICE_HEADROOM; 0 uses worker default
 
-	// SelectorTierBars is the operator's quality ladder (CMX_SELECTOR_TIER_BARS,
-	// JSON-encoded). Empty uses registry.DefaultTierBars.
-	SelectorTierBars map[string]float64
-
 	// ContainerTimeout is serve's hard kill ceiling for this run's container
 	// (CMX_CONTAINER_TIMEOUT_SECONDS). 0 = unknown - an older serve, or a host
 	// that never configured it - so a phase that must park before the kill
