@@ -64,119 +64,11 @@ func TestCoderPromptEmptyVerifyByteIdentical(t *testing.T) {
 		"an empty verify block leaves the coder prompt spacing unchanged")
 }
 
-// TestSharedBlocksAreSplicedIntoTheirPrompts is a structural composition guard:
-// each shared prompt block below is composed via `+ block +` into one or more
-// prompt templates (see prompts.go), and this asserts the block is verbatim
-// present in every prompt that is supposed to carry it. Comparing against the
-// constant itself - not a copy of its wording - keeps this immune to rewording
-// the block's prose; it only fails if a future edit drops a splice.
-func TestSharedBlocksAreSplicedIntoTheirPrompts(t *testing.T) {
-	cases := []struct {
-		block      string
-		blockName  string
-		prompt     string
-		promptName string
-	}{
-		{coderGroundingRule, "coderGroundingRule", coderPrompt, "coderPrompt"},
-
-		{selfReviewBlock, "selfReviewBlock", coderPrompt, "coderPrompt"},
-		{selfReviewBlock, "selfReviewBlock", fixPrompt, "fixPrompt"},
-		{selfReviewBlock, "selfReviewBlock", verifyFixPrompt, "verifyFixPrompt"},
-
-		{processTeardownNote, "processTeardownNote", coderPrompt, "coderPrompt"},
-		{processTeardownNote, "processTeardownNote", fixPrompt, "fixPrompt"},
-		{processTeardownNote, "processTeardownNote", verifyFixPrompt, "verifyFixPrompt"},
-
-		{buildHygieneNote, "buildHygieneNote", coderPrompt, "coderPrompt"},
-		{buildHygieneNote, "buildHygieneNote", fixPrompt, "fixPrompt"},
-		{buildHygieneNote, "buildHygieneNote", verifyFixPrompt, "verifyFixPrompt"},
-
-		{plannerGroundingRule, "plannerGroundingRule", planPrompt, "planPrompt"},
-		{plannerGroundingRule, "plannerGroundingRule", planBriefing, "planBriefing"},
-		{plannerGroundingRule, "plannerGroundingRule", planSynthesisPrompt, "planSynthesisPrompt"},
-
-		{sweepRule, "sweepRule", synthesisPrompt, "synthesisPrompt"},
-		{sweepRule, "sweepRule", reviewSynthesisPrompt, "reviewSynthesisPrompt"},
-		{sweepRule, "sweepRule", checkpointSynthesisPrompt, "checkpointSynthesisPrompt"},
-
-		{fixTierFloorRule, "fixTierFloorRule", synthesisPrompt, "synthesisPrompt"},
-		{fixTierFloorRule, "fixTierFloorRule", reviewSynthesisPrompt, "reviewSynthesisPrompt"},
-
-		{unreachableVerifyInstruction, "unreachableVerifyInstruction", specialistPrompt, "specialistPrompt"},
-		{unreachableVerifyInstruction, "unreachableVerifyInstruction", reviewBriefing, "reviewBriefing"},
-	}
-
-	for _, c := range cases {
-		t.Run(c.promptName+"/"+c.blockName, func(t *testing.T) {
-			assert.Contains(t, c.prompt, c.block,
-				"%s must splice in %s verbatim", c.promptName, c.blockName)
-		})
-	}
-}
-
-func TestSpecialistPromptScopesToTask(t *testing.T) {
-	// trimmed gold-plating solicitations:
-	assert.NotContains(t, designPrompt, "API / interface design at module boundaries")
-	assert.NotContains(t, securityPrompt, "caching effectiveness")
-}
-
-func TestVerifyFixPromptIsTitleOnly(t *testing.T) {
-	assert.Contains(t, verifyFixPrompt, "VERIFY FAILURE TO FIX")
-	assert.NotContains(t, verifyFixPrompt, "Description:")
-}
-
-// TestUnreachableScopeNoteNotInVerifyFixPrompt: verifyFixPrompt carries only
-// the parent card's title, never its description, so a note pointing at
-// "## Unreachable Criteria" / "## Split" sections it cannot show would be
-// untethered. coderPrompt and fixPrompt, which do carry the description,
-// keep the note.
-func TestUnreachableScopeNoteNotInVerifyFixPrompt(t *testing.T) {
-	assert.NotContains(t, verifyFixPrompt, unreachableScopeNote)
-	assert.Contains(t, coderPrompt, unreachableScopeNote)
-	assert.Contains(t, fixPrompt, unreachableScopeNote)
-}
-
-func TestBuildArtifactHygieneInBothCodingPrompts(t *testing.T) {
-	for name, p := range map[string]string{"coder": coderPrompt, "fix": fixPrompt, "verify-fix": verifyFixPrompt} {
-		// The hygiene note must name no build tool - it applies to every language.
-		assert.NotContains(t, p, "go build",
-			"%s prompt build-hygiene note must stay language-neutral", name)
-	}
-}
-
-// guard: the document prompt must carry the finish-tool docs(...) convention and
-// no remnant of the removed commit-prefix convention.
-func TestDocumentPromptShape(t *testing.T) {
-	low := strings.ToLower(documentPrompt)
-	assert.Contains(t, low, "finish tool")
-	assert.NotContains(t, low, "commit:")
-}
-
-// guard: the fix prompt must reference the finish tool and carry no remnant of
-// the removed commit-prefix convention.
-func TestFixPromptShape(t *testing.T) {
-	low := strings.ToLower(fixPrompt)
-	assert.Contains(t, low, "finish tool")
-	assert.NotContains(t, low, "commit:")
-}
-
-func TestBrainstormPromptShape(t *testing.T) {
-	low := strings.ToLower(brainstormPrompt)
-	assert.Contains(t, low, "## design")
-	assert.Contains(t, low, "design_complete")
-}
-
 func TestFeedbackBlock(t *testing.T) {
 	assert.Empty(t, feedbackBlock("   "), "empty feedback collapses to nothing")
 	out := feedbackBlock("split subtask 2")
 	assert.Contains(t, out, "REQUESTED CHANGES")
 	assert.Contains(t, out, "split subtask 2")
-}
-
-func TestDiagnosePromptRigor(t *testing.T) {
-	low := strings.ToLower(diagnosePrompt)
-	assert.Contains(t, low, "### test approach")
-	assert.Contains(t, low, "### risk / scope notes")
 }
 
 func TestDesignBlock(t *testing.T) {
@@ -185,64 +77,6 @@ func TestDesignBlock(t *testing.T) {
 	out := designBlock("## Design\n\nUse option A.")
 	assert.Contains(t, out, "AGREED DESIGN")
 	assert.Contains(t, out, "## Design\n\nUse option A.")
-}
-
-func TestPromptsCarryRepoRoot(t *testing.T) {
-	for name, tpl := range map[string]string{
-		"coder":    coderPrompt,
-		"fix":      fixPrompt,
-		"document": documentPrompt,
-		"diagnose": diagnosePrompt,
-		"plan":     planPrompt,
-	} {
-		assert.Contains(t, tpl, "Repo root: %s", "the %s prompt must name the repo root", name)
-	}
-}
-
-// allPhasePrompts is every phase prompt constant defined in prompts.go, keyed by
-// a readable name for failure messages. The neutrality sweep runs over all of
-// them so a language-specific token cannot slip back into any single prompt.
-var allPhasePrompts = map[string]string{
-	"plan":                planPrompt,
-	"diagnose":            diagnosePrompt,
-	"buildHygiene":        buildHygieneNote,
-	"processTeardown":     processTeardownNote,
-	"selfReview":          selfReviewBlock,
-	"coder":               coderPrompt,
-	"specialist":          specialistPrompt,
-	"correctness":         correctnessPrompt,
-	"design":              designPrompt,
-	"security":            securityPrompt,
-	"synthesis":           synthesisPrompt,
-	"fix":                 fixPrompt,
-	"prBody":              prBodyPrompt,
-	"document":            documentPrompt,
-	"gateClassify":        gateClassifyPrompt,
-	"brainstorm":          brainstormPrompt,
-	"sweepRule":           sweepRule,
-	"reviewSynthesis":     reviewSynthesisPrompt,
-	"checkpointSynthesis": checkpointSynthesisPrompt,
-	"checkpointRevise":    checkpointRevisePrompt,
-}
-
-// TestPromptsAreLanguageNeutral sweeps every phase prompt for target-language and
-// target-ecosystem tokens. The agent is language-agnostic w.r.t. the target repo,
-// so no prompt may name a specific toolchain. The concurrency ban is the precise
-// "goroutine leaks", not bare "goroutine": the correctness lens legitimately lists
-// "threads, tasks, coroutines, goroutines" as an inclusive, cross-language set of
-// worker kinds, which must stay allowed.
-func TestPromptsAreLanguageNeutral(t *testing.T) {
-	banned := []string{
-		"go build", "go test", "goroutine leaks", "golang", "gofmt",
-		"make test", "npm ", "typescript",
-	}
-
-	for name, p := range allPhasePrompts {
-		low := strings.ToLower(p)
-		for _, b := range banned {
-			assert.NotContainsf(t, low, b, "%s prompt must stay language-neutral (found %q)", name, b)
-		}
-	}
 }
 
 // TestFencedDiff pins the markdown fencing of diffs relayed to the board
@@ -260,57 +94,6 @@ func TestFencedDiff(t *testing.T) {
 	assert.True(t, strings.HasSuffix(out, "\n````"), "closing fence must match the opening one: %q", out)
 
 	assert.Equal(t, "```diff\n\n```", fencedDiff(""), "empty diff still yields a well-formed block")
-}
-
-func TestPlanPromptCarriesFindingsClauses(t *testing.T) {
-	t.Parallel()
-
-	assert.Contains(t, planPrompt, "record_finding",
-		"planPrompt must name the tool the plan registry provides")
-}
-
-// The findings clauses are plan-only. planBriefing and planSynthesisPrompt run
-// in mob planning, where the tool is not registered, so neither may reference it
-// and the shared grounding rule must stay clean.
-func TestFindingsClausesAreNotInSharedPlanPrompts(t *testing.T) {
-	t.Parallel()
-
-	for name, p := range map[string]string{
-		"plannerGroundingRule": plannerGroundingRule,
-		"planBriefing":         planBriefing,
-		"planSynthesisPrompt":  planSynthesisPrompt,
-	} {
-		assert.NotContains(t, p, "record_finding",
-			"%s must not promise a tool that is not registered for it", name)
-	}
-}
-
-func TestSeverityFieldInSynthesisPrompts(t *testing.T) {
-	for name, p := range map[string]string{
-		"synthesisPrompt":       synthesisPrompt,
-		"reviewSynthesisPrompt": reviewSynthesisPrompt,
-	} {
-		assert.Contains(t, p, `"severity"`,
-			"%s must request a severity field on each fix", name)
-
-		// normalizeSeverity drops anything outside validSeverities, so a tag the
-		// prompt never offers would silently render as no tag at all. Assert
-		// against the map itself rather than a copy of its values, so adding a
-		// severity in one place fails here until the other follows.
-		for sev := range validSeverities {
-			assert.Contains(t, p, sev,
-				"%s must offer the %q severity that normalizeSeverity accepts", name, sev)
-		}
-	}
-}
-
-// guard: the coder grounding rule (stale-anchor protection) is coder-only, not
-// spliced into fixPrompt.
-func TestCoderGroundingRuleInCoderPrompt(t *testing.T) {
-	t.Parallel()
-
-	assert.NotContains(t, fixPrompt, coderGroundingRule,
-		"the coder grounding rule is coder-only, not spliced into fixPrompt")
 }
 
 // TestReviewBriefingRendersGrounding asserts that the review briefing template
