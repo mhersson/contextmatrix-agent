@@ -1,58 +1,96 @@
 package registry
 
 import (
-	"github.com/mhersson/contextmatrix-harness/llm"
+	"errors"
+	"fmt"
+	"maps"
+	"slices"
+
 	protocol "github.com/mhersson/contextmatrix-protocol"
+	"github.com/mhersson/contextmatrix-protocol/selection"
 )
 
-// FromSelection builds a payload-driven Registry from CM's SelectionContext.
-// All candidates are tool-capable by construction (CM filtered on it), so the
-// synthesized catalog marks them so.
-func FromSelection(sc *protocol.SelectionContext, capable string, priceHeadroom float64, maxCapability bool) *Registry {
-	cat := make(llm.Catalog, 0)
-	priors := Priors{Models: map[string]PriorEntry{}}
-	creators := map[string]string{}
+// LadderFault is one role's payload ladder that did not validate. The
+// registry has already fallen back to the built-in bars for that role; the
+// worker turns each fault into a card log line so the operator learns that
+// the ladder they saved is not the one running. Role is the wire name, so
+// an unknown role is reported by the name CM sent.
+type LadderFault struct {
+	Role   string
+	Reason error
+}
+
+func (f LadderFault) Error() string {
+	return fmt.Sprintf("%s tier ladder from the payload did not validate (%v)", f.Role, f.Reason)
+}
+
+// FromSelection builds the registry CM's SelectionContext describes: the
+// candidates, favorites, blacklist and per-role tier ladders on the wire,
+// plus the operator's per-run knobs. It always returns a usable registry.
+// A role whose ladder does not validate falls back to the built-in bars for
+// that role alone and is reported as a LadderFault; the other role's ladder
+// still applies. A nil sc is an empty selection: every pick is the capable
+// default.
+func FromSelection(sc *protocol.SelectionContext, capable string, priceHeadroom float64, maxCapability bool) (*Registry, []LadderFault) {
+	in := selection.Input{Capable: capable, PriceHeadroom: priceHeadroom, MaxCapability: maxCapability}
+
+	var faults []LadderFault
 
 	if sc != nil {
-		for _, c := range sc.Candidates {
-			cat = append(cat, llm.CatalogEntry{
-				ID:                    c.Slug,
-				PromptPricePerTok:     c.PromptPricePerTok,
-				CompletionPricePerTok: c.CompletionPricePerTok,
-				ContextLength:         c.ContextWindow,
-				SupportedParameters:   []string{"tools"},
-			})
+		in.Candidates = sc.Candidates
+		in.Favorites = sc.Favorites
+		in.Blacklist = sc.Blacklist
+		in.Ladders, faults = laddersFromPayload(sc.TierBars)
+	}
 
-			coder, rev := c.CoderPrior, c.ReviewerPrior
-			priors.Models[c.Slug] = PriorEntry{Coder: &coder, Reviewer: &rev}
+	return &Registry{Selector: selection.New(in)}, faults
+}
 
-			if c.Creator != "" {
-				creators[c.Slug] = c.Creator
-			}
+// wireRoles is the closed set of roles a payload ladder may name.
+var wireRoles = map[string]Role{string(RoleCoder): RoleCoder, string(RoleReviewer): RoleReviewer}
+
+// laddersFromPayload validates SelectionContext.TierBars one role at a time.
+// selection.LaddersFromWire rejects the whole map on the first bad role; the
+// agent must not, because one mistyped rung on the reviewer ladder must not
+// silently reset the coder ladder too. Each role goes through the shared
+// rule (merge over the built-in bars, monotone, every bar in [0,1]); a role
+// that fails is left out of the result, which the selector reads as the
+// built-in bars, and named in a fault. An unknown role is a fault as well: a
+// typo that quietly left a role on the defaults is the failure the operator
+// cannot see. Faults are ordered by role name so the card lines are stable.
+// Empty input is nil, nil.
+func laddersFromPayload(in map[string]map[string]float64) (selection.Ladders, []LadderFault) {
+	if len(in) == 0 {
+		return nil, nil
+	}
+
+	ladders := selection.Ladders{}
+
+	var faults []LadderFault
+
+	for _, name := range slices.Sorted(maps.Keys(in)) {
+		role, ok := wireRoles[name]
+		if !ok {
+			faults = append(faults, LadderFault{Role: name, Reason: errors.New("unknown role (known: coder, reviewer)")})
+
+			continue
+		}
+
+		bars, err := selection.TierBarsFromStrings(in[name])
+		if err != nil {
+			faults = append(faults, LadderFault{Role: name, Reason: err})
+
+			continue
+		}
+
+		if bars != nil {
+			ladders[role] = bars
 		}
 	}
 
-	blacklist := map[string]bool{}
-	favorites := map[favKey][]string{}
-
-	if sc != nil {
-		for _, s := range sc.Blacklist {
-			blacklist[s] = true
-		}
-
-		for _, fr := range sc.Favorites {
-			favorites[favKey{Tier: Tier(fr.Tier), Role: Role(fr.Role)}] = fr.Models
-		}
+	if len(ladders) == 0 {
+		ladders = nil
 	}
 
-	r := NewRegistryFromParts(cat, priors, blacklist, favorites, capable).WithCreators(creators)
-	if priceHeadroom > 0 {
-		// Honor the operator's selector_price_headroom; 0 means "use the worker
-		// default", which NewRegistryFromParts already set to defaultPriceHeadroom.
-		r.sel.PriceHeadroom = priceHeadroom
-	}
-
-	r.sel.MaxCapability = maxCapability
-
-	return r
+	return ladders, faults
 }
