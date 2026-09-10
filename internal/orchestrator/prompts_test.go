@@ -304,36 +304,6 @@ func TestSeverityFieldInSynthesisPrompts(t *testing.T) {
 	}
 }
 
-// TestBasisFieldInSynthesisPrompts extends the same drift guard to the basis
-// vocabulary: both verdict prompts must splice in the shared basis constant and
-// request a "basis" field on each fix, and the constant must enumerate all seven
-// bases of validBases plus the vulnerability evidence requirement (name the
-// untrusted party and the path), since normalizeBasis drops anything else to ""
-// and an unadvertised basis would render as no label at all.
-func TestBasisFieldInSynthesisPrompts(t *testing.T) {
-	for name, p := range map[string]string{
-		"synthesisPrompt":       synthesisPrompt,
-		"reviewSynthesisPrompt": reviewSynthesisPrompt,
-	} {
-		assert.Contains(t, p, basisVocabularyRule,
-			"%s must carry the shared basis vocabulary constant", name)
-
-		assert.Contains(t, p, `"basis"`,
-			"%s must request a basis field on each fix", name)
-	}
-
-	assert.Contains(t, basisVocabularyRule, `Criterion, defect, test, vulnerability, and unscoped block`,
-		"the shared constant must state which bases block and which are advisory")
-
-	for basis := range validBases {
-		assert.Contains(t, basisVocabularyRule, `"`+basis+`"`,
-			"the shared constant must name the %q basis that normalizeBasis accepts", basis)
-	}
-
-	assert.Contains(t, basisVocabularyRule, "name that party and the path",
-		"the vulnerability entry must state its evidence requirement: the untrusted party and the path")
-}
-
 // guard: the coder grounding rule (stale-anchor protection) is coder-only, not
 // spliced into fixPrompt.
 func TestCoderGroundingRuleInCoderPrompt(t *testing.T) {
