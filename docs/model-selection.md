@@ -10,8 +10,8 @@ never names a model, and there is no measured-capability gate.
 The selector's inputs arrive at run start from CM's `SelectionContext` payload
 (`registry.FromSelection`): the candidate set, per-role quality priors,
 operator favorites, the blacklist, and the per-role tier ladders
-(`tier_bars`). Nothing is embedded in the binary and nothing about selection
-is configured on the agent host beyond `selector_price_headroom`; the
+(`tier_bars`). Nothing is embedded in the binary, and the only host-side
+selection settings are `selector_price_headroom` and `default_model`; the
 Artificial-Analysis sourcing, normalization, and the ladders live on the
 ContextMatrix side. The selection rule itself is the `selection` package of
 `contextmatrix-protocol`, shared with CM so its admin preview and the agent's

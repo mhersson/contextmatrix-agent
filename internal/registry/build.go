@@ -1,10 +1,10 @@
 package registry
 
 import (
-	"errors"
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 
 	protocol "github.com/mhersson/contextmatrix-protocol"
 	"github.com/mhersson/contextmatrix-protocol/selection"
@@ -71,7 +71,10 @@ func laddersFromPayload(in map[string]map[string]float64) (selection.Ladders, []
 	for _, name := range slices.Sorted(maps.Keys(in)) {
 		role, ok := wireRoles[name]
 		if !ok {
-			faults = append(faults, LadderFault{Role: name, Reason: errors.New("unknown role (known: coder, reviewer)")})
+			faults = append(faults, LadderFault{
+				Role:   name,
+				Reason: fmt.Errorf("unknown role (known: %s)", strings.Join(slices.Sorted(maps.Keys(wireRoles)), ", ")),
+			})
 
 			continue
 		}
