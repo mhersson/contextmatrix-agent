@@ -72,6 +72,25 @@ that evidence it is Minor at most. This evidence bar, and the convergence
 rule described below, are worded identically in the solo synthesis prompt
 and the mob moderator prompt, so the two review paths cannot drift.
 
+Every finding also states the basis it blocks on, from a closed seven-word
+vocabulary (`normalizeBasis` drops anything else to empty):
+
+- `criterion` - the change fails a stated acceptance criterion; the issue quotes the criterion.
+- `defect` - a demonstrated correctness bug in delivered code; the issue gives the input or state and the wrong outcome.
+- `test` - a broken or vacuous test.
+- `vulnerability` - exploitable by a party the project's documented trust model does not trust; the issue names that party and the path. Input from a caller the trust model already lets write the same data is `hardening`, not `vulnerability`.
+- `unscoped` - the diff added something the task did not ask for; the fix is to remove it.
+- `hardening` - validation, limits, headers, defensive checks, or stricter tests the task did not ask for.
+- `polish` - style, naming, or comment/doc wording that does not change meaning.
+
+`criterion`, `defect`, `test`, `vulnerability`, and `unscoped` block;
+`hardening` and `polish` are advisory and never block. Both verdict prompts
+share one constant naming the vocabulary and its evidence requirements, so the
+solo synthesis and the mob moderator paths cannot drift, and each specialist
+states the basis of every concern. `formatFixes` renders a populated basis
+after the severity as `[important, criterion]`; an empty basis renders exactly
+as before.
+
 The loop runs to the `review_attempts` cap - default 3, set per deployment via
 `review_attempts_cap` in `serve.yaml` or `CMX_REVIEW_ATTEMPTS_CAP`. Valid
 range 1-6; 6 is the ceiling because the loop leaves the server's
@@ -125,7 +144,13 @@ verdict already carries every surviving finding forward, and an unbounded
 history is what pushes synthesis past its own turn budget over a
 long-running review.
 
-The synthesis verdict is severity-gated in both directions. An approved
+The synthesis verdict is severity-gated. First `capAdvisorySeverity` rewrites
+any finding whose basis is `hardening` or `polish` and whose severity is
+`critical` or `important` to `minor`, logging the demotion per finding (file,
+basis, original severity) on the card, because an advisory finding can never
+block a verdict. The cap fails open deliberately: an empty basis is never
+capped - a model that omits the field must not have its finding waved through -
+and every demotion is logged. An approved
 verdict cannot carry a critical- or important-severity finding: when one
 parses out, `demoteContradictoryApproval` forces `Approved = false` (logged
 on the card as an override) so the round routes through the not-approved fix
@@ -136,9 +161,9 @@ runs the other direction: a revise verdict whose every fix is minor or nit is
 forced to `Approved = true`, since minors and nits never block by the
 verdict's own rules and looping the review on findings it already calls
 non-blocking would never converge; a revise with no fixes at all, or with an
-unlabelled severity, is left alone rather than promoted. Both gates run at
-`settleVerdict`, the single choke point the solo synthesis path and the mob
-moderator path both return through, so neither can drift from the other.
+unlabelled severity, is left alone rather than promoted. All three gates run
+at `settleVerdict`, the single choke point the solo synthesis path and the
+mob moderator path both return through, so neither can drift from the other.
 
 The verdict also carries `prior_findings_resolved`, the synthesizer's own
 report of whether every finding under PRIOR FINDINGS is resolved or
