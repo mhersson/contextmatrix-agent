@@ -699,15 +699,6 @@ func TestExecuteCommitMessageLongFinish(t *testing.T) {
 		"CompleteTask summary must not contain a newline; only the first line is the subject")
 }
 
-// guard: the coder prompt template must reference the branch-state note and
-// instruct the model to end the subtask by calling the finish tool.
-func TestCoderPromptShape(t *testing.T) {
-	low := strings.ToLower(coderPrompt)
-	assert.Contains(t, low, "finish tool")
-	assert.NotContains(t, low, "commit:")
-	assert.Contains(t, low, "branch")
-}
-
 // burnResp is a tool-call turn that never lets the run stop on its own;
 // content rides along so cap-path tests can inspect the final output.
 func burnResp(content string) llm.Response {

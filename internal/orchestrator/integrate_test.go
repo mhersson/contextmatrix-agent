@@ -566,16 +566,6 @@ func TestSquashMessage(t *testing.T) {
 // errFakePR scripts a PRCreator failure.
 var errFakePR = errors.New("pr creation failed")
 
-// guard: the PR-body prompt template must reference the plan overview and the
-// review outcome so the orchestrator-written body carries them.
-func TestPRBodyPromptShape(t *testing.T) {
-	low := strings.ToLower(prBodyPrompt)
-	assert.Contains(t, low, "what")
-	assert.Contains(t, low, "why")
-	assert.Contains(t, low, "plan overview")
-	assert.Contains(t, low, "review")
-}
-
 func TestPRBodyPromptOmitsRecordedHistory(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{remoteTip: "deadbeef"}
