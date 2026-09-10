@@ -154,6 +154,23 @@ const fixScopedSeverityRule = `- Code introduced by the PREVIOUS ROUND'S FIX (se
   fix-introduced observation is Minor at most. With it, the severity stands -
   a fix can introduce a real defect, and this rule never protects one.`
 
+// basisVocabularyRule is the closed basis vocabulary every finding carries:
+// what the finding blocks on. The first five are blocking bases; hardening and
+// polish are advisory and never block (the code-side capAdvisorySeverity gate
+// demotes their Critical/Important labels to minor). Shared by
+// synthesisPrompt and reviewSynthesisPrompt so both verdict paths carry the
+// same enumerated rule.
+const basisVocabularyRule = `Basis - every finding states what it blocks on, one of:
+- "criterion" - the change fails a stated acceptance criterion; quote the criterion in issue.
+- "defect" - a demonstrated correctness bug in delivered code; give the input or state and the wrong outcome.
+- "test" - a broken or vacuous test.
+- "vulnerability" - exploitable by a party the project's documented trust model does not trust; name that party and the path. Input from a caller the trust model already lets write the same data is "hardening", not "vulnerability".
+- "unscoped" - the diff added something the task did not ask for; the fix is to remove it.
+- "hardening" - validation, limits, headers, defensive checks or stricter tests the task did not ask for.
+- "polish" - style, naming, comment or doc wording that does not change meaning.
+Criterion, defect, test, vulnerability, and unscoped block; hardening and polish
+are advisory and never block - cap them at Minor severity.`
+
 // convergenceRule is the verdict's exit condition: a round that resolved
 // everything it was asked to resolve and found only new polish has converged.
 // Without it the review has no way to stop - each fix feeds the next round's
@@ -540,6 +557,11 @@ Severity scale (use Nits sparingly - only pure polish):
 - Nit: pure polish (spelling, formatting, naming preference) with no functional
   or design impact.
 
+State the basis for every concern: what it blocks on - a stated acceptance
+criterion it fails, a demonstrated correctness bug, a broken or vacuous test, a
+vulnerability exploitable by an untrusted party (name that party), unrequested
+hardening, or polish.
+
 PARENT CARD
 Title: %s
 
@@ -612,11 +634,6 @@ Decision rule:
   a genuine correctness bug, a real vulnerability, a broken or vacuous test, or
   it makes the change fail the task's stated acceptance criteria - promote it
   even if a specialist filed it as Minor. Return each blocker as a concrete fix.
-- Unrequested hardening is never blocking - error handling the task did not
-  require, added input or version validation, missing headers, defensive checks
-  on operations that cannot realistically fail, stricter-than-asked tests, and
-  style or naming are Minor at most, even if a specialist marked them Critical
-  or Important.
 - Weigh a passing verify run and passing tests as evidence: a "this could break" or
   toolchain/version concern they contradict is Minor.
 - Also judge the change against the task: if it does NOT satisfy the acceptance criteria
@@ -629,6 +646,7 @@ Decision rule:
   in fixes.
 - An approved verdict must not carry Critical or Important findings: if your
   judgement says a finding is that severe, return approved:false.
+` + basisVocabularyRule + `
 ` + fixScopedSeverityRule + `
 ` + convergenceRule + `
 ` + unreachableVerdictRule + `
@@ -653,7 +671,7 @@ Respond with ONLY a JSON object, no prose:
  "summary":"<one-line overall verdict>",
  "fix_tier":"simple|moderate|complex",
  "prior_findings_resolved":true|false,
- "fixes":[{"file":"...","issue":"...","suggestion":"...","severity":"critical|important|minor|nit"}]}
+ "fixes":[{"file":"...","issue":"...","suggestion":"...","severity":"critical|important|minor|nit","basis":"criterion|defect|test|vulnerability|unscoped|hardening|polish"}]}
 
 fix_tier is the difficulty of APPLYING these fixes (default to the card's tier if unsure).
 ` + fixTierFloorRule + `
@@ -1305,7 +1323,6 @@ Decision rule:
 - A genuine correctness bug, a real vulnerability, a broken or vacuous test,
   or a missed acceptance criterion blocks the change (not approved) - return
   each blocker as a concrete fix citing a file in the change set.
-- Unrequested hardening, style, and naming are Minor at most and never block.
 - Work added outside the task's scope means not approved, and the fix is to
   remove it.
 - approved governs ONLY whether the change may merge: any blocker above forces
@@ -1314,6 +1331,7 @@ Decision rule:
   in fixes.
 - An approved verdict must not carry Critical or Important findings: if your
   judgement says a finding is that severe, return approved:false.
+` + basisVocabularyRule + `
 ` + fixScopedSeverityRule + `
 ` + convergenceRule + `
 ` + unreachableVerdictRule + `
@@ -1331,7 +1349,7 @@ Respond with ONLY a JSON object, no prose:
  "summary":"<one-line overall verdict>",
  "fix_tier":"simple|moderate|complex",
  "prior_findings_resolved":true|false,
- "fixes":[{"file":"...","issue":"...","suggestion":"...","severity":"critical|important|minor|nit"}]}
+ "fixes":[{"file":"...","issue":"...","suggestion":"...","severity":"critical|important|minor|nit","basis":"criterion|defect|test|vulnerability|unscoped|hardening|polish"}]}
 
 fix_tier is the difficulty of APPLYING these fixes (default to the card's tier if unsure).
 ` + fixTierFloorRule + `
