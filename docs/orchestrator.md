@@ -20,6 +20,14 @@ give crash-resume: a fresh container re-clones and re-enters at the stored
 phase. A run parked at `judge` re-enters at `execute`, since judge state is
 container-local.
 
+Documentation the card's acceptance criteria require (named files under
+`docs/`, a README, specific claims that must change) is planned as a
+deliverable in the plan phase - either alongside the code subtask that changes
+what it describes, or as a docs-only subtask when no code changes accompany
+it. The best-effort document phase runs after execution and decides only
+whether unrequested documentation is warranted; it never rewrites or restates
+documentation the branch already changed for the card's own criteria.
+
 ## Git workflow
 
 The worker commits incrementally (one commit per subtask) and pushes after
