@@ -108,6 +108,10 @@ type fix struct {
 	Issue      string `json:"issue"`
 	Suggestion string `json:"suggestion"`
 	Severity   string `json:"severity"`
+	// Basis is what the finding blocks on - see validBases. Empty on older
+	// persisted records and on model output outside the vocabulary; both are
+	// left uncapped by capAdvisorySeverity.
+	Basis string `json:"basis"`
 }
 
 // ReviewParkedError marks the review phase stopping and leaving the card for a
@@ -2130,12 +2134,72 @@ func recentReviewFindingsHistory(body string) string {
 // severityNit is the one severity that does not earn a cleanup fix pass.
 const severityNit = "nit"
 
+// validBases is the closed vocabulary a finding's basis (what the finding
+// blocks on) normalizes into, mirroring validSeverities. The first five are
+// blocking bases; hardening and polish are advisory and never block - see
+// capAdvisorySeverity.
+var validBases = map[string]bool{
+	"criterion":     true,
+	"defect":        true,
+	"test":          true,
+	"vulnerability": true,
+	"unscoped":      true,
+	"hardening":     true,
+	"polish":        true,
+}
+
+// advisoryBases are the bases whose critical/important severities are demoted
+// by capAdvisorySeverity. Deliberately closed: widening it would demote
+// findings whose blocking severity is the only protection a real defect has.
+var advisoryBases = map[string]bool{
+	"hardening": true,
+	"polish":    true,
+}
+
 // severityCritical and severityImportant are the severities that contradict an
 // approved verdict - see demoteContradictoryApproval.
 const (
 	severityCritical  = "critical"
 	severityImportant = "important"
+	severityMinor     = "minor"
 )
+
+// capAdvisorySeverity is the basis gate on the review verdict: a finding whose
+// basis says it is advisory (hardening or polish) can never carry a blocking
+// severity. When it does, the severity is rewritten to minor and the demotion
+// is logged per fix on the card - a hardening or polish finding at critical or
+// important would otherwise force a fix round and can loop a card on work its
+// own rules call non-blocking. The failure direction is fail-open: a real
+// defect mislabelled hardening is capped and merges after a cleanup pass,
+// which is why an EMPTY basis is never capped (a model that omits the field
+// must not have its finding waved through, mirroring how
+// promoteConsistentRevise treats an empty severity) and why every demotion is
+// logged.
+//
+// Called at the single choke point both verdict paths return through
+// (settleVerdict, covering the solo fan-out and the mob discussion), BEFORE
+// the two severity gates, so they judge the capped severities. Vulnerability,
+// criterion, and minor-or-empty severities are left untouched.
+func (o *run) capAdvisorySeverity(ctx context.Context, v *verdict) {
+	for i := range v.Fixes {
+		f := &v.Fixes[i]
+
+		if !advisoryBases[normalizeBasis(f.Basis)] {
+			continue
+		}
+
+		sev := normalizeSeverity(f.Severity)
+
+		if sev != severityCritical && sev != severityImportant {
+			continue
+		}
+
+		o.d.logCard(ctx, "review: severity capped - %s's %q finding is advisory (hardening/polish never block): %s -> minor",
+			f.File, f.Basis, sev)
+
+		f.Severity = severityMinor
+	}
+}
 
 // demoteContradictoryApproval is the severity gate on the review verdict: an
 // approved verdict cannot carry a critical- or important-severity fix. When it
@@ -2175,13 +2239,14 @@ func (o *run) demoteContradictoryApproval(ctx context.Context, v *verdict) {
 }
 
 // settleVerdict is the single post-verdict choke point both paths (solo
-// synthesis and mob moderator) pass through: the two severity gates run
-// first - demote an approval that carries a blocker, promote a revise that
-// carries none - then the convergence signal is captured and, when a revise
-// verdict itself reports every prior finding resolved, called out on the
-// card, so the operator can tell a failed fix from a review that only found
-// new things.
+// synthesis and mob moderator) pass through: advisory severities are capped
+// first, so the two severity gates run on the capped values - demote an
+// approval that carries a blocker, promote a revise that carries none - then
+// the convergence signal is captured and, when a revise verdict itself reports
+// every prior finding resolved, called out on the card, so the operator can
+// tell a failed fix from a review that only found new things.
 func (o *run) settleVerdict(ctx context.Context, v *verdict, round int) {
+	o.capAdvisorySeverity(ctx, v)
 	o.demoteContradictoryApproval(ctx, v)
 	o.promoteConsistentRevise(ctx, v)
 
@@ -2259,6 +2324,19 @@ func normalizeSeverity(s string) string {
 	return s
 }
 
+// normalizeBasis lower-cases and trims s, returning "" for anything outside
+// validBases, so capAdvisorySeverity and the rendered findings text always see
+// one of the seven known words - or empty, which the cap deliberately never
+// touches.
+func normalizeBasis(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if !validBases[s] {
+		return ""
+	}
+
+	return s
+}
+
 // collapseLines folds newlines in model-authored fix text into spaces. Every
 // field on a fix reaches findings text that formatFixes renders one line per
 // finding and fixFiles re-parses line-by-line, cutting at the first colon: an
@@ -2272,8 +2350,8 @@ func collapseLines(s string) string {
 // fences) and unmarshals it. A missing object or malformed JSON is an error so
 // the synthesis caller can take its single repair turn. It is the single choke
 // point for the verdict type - mobReviewVerdict and synthesize both route
-// through it - so normalizing Severity here covers both the mob and solo
-// review paths with one call site. parseCheckpointVerdict (checkpoint.go) is
+// through it - so normalizing Severity and Basis here covers both the mob and
+// solo review paths with one call site. parseCheckpointVerdict (checkpoint.go) is
 // deliberately NOT covered: its fixes reach neither fixFiles nor the PR body,
 // and its File/Issue/Suggestion are equally unvalidated, so validating only
 // its severity would be inconsistent.
@@ -2290,6 +2368,7 @@ func parseVerdict(s string) (verdict, error) {
 
 	for i := range v.Fixes {
 		v.Fixes[i].Severity = normalizeSeverity(v.Fixes[i].Severity)
+		v.Fixes[i].Basis = normalizeBasis(v.Fixes[i].Basis)
 		v.Fixes[i].File = collapseLines(v.Fixes[i].File)
 		v.Fixes[i].Issue = collapseLines(v.Fixes[i].Issue)
 		v.Fixes[i].Suggestion = collapseLines(v.Fixes[i].Suggestion)
@@ -2301,8 +2380,10 @@ func parseVerdict(s string) (verdict, error) {
 // formatFixes renders a verdict's fix list as the findings text carried into the
 // fix run and (on cap exhaustion) the activity log. The
 // "- <file>: [<severity>] <issue> - <suggestion>" line shape - severity's
-// bracket is omitted entirely when empty - is a contract with fixFiles, which
-// parses the file path back out for fixup targeting - keep the two in sync.
+// bracket is omitted entirely when empty, and basis joins severity inside it
+// ("<severity>, <basis>") only when non-empty - is a contract with fixFiles,
+// which parses the file path back out for fixup targeting - keep the two in
+// sync.
 func formatFixes(v verdict) string {
 	var b strings.Builder
 
@@ -2316,9 +2397,18 @@ func formatFixes(v verdict) string {
 		b.WriteString(f.File)
 		b.WriteString(": ")
 
-		if f.Severity != "" {
+		if f.Severity != "" || f.Basis != "" {
 			b.WriteString("[")
 			b.WriteString(f.Severity)
+
+			if f.Basis != "" {
+				if f.Severity != "" {
+					b.WriteString(", ")
+				}
+
+				b.WriteString(f.Basis)
+			}
+
 			b.WriteString("] ")
 		}
 

@@ -206,6 +206,255 @@ func TestParseVerdictNormalizesSeverity(t *testing.T) {
 		"the malicious severity must not inject a synthetic fixFiles-parsed file path; got=%v", files)
 }
 
+// TestParseVerdictNormalizesBasis proves Basis is validated at parse-verdict
+// time the same way Severity is: a recognized value, title-cased or padded,
+// lower-cases into the closed seven-word vocabulary, and a value outside it -
+// including one crafted with an embedded newline - normalizes to "" so
+// capAdvisorySeverity leaves the finding uncapped rather than trusting a
+// garbage label.
+func TestParseVerdictNormalizesBasis(t *testing.T) {
+	for _, basis := range []string{"criterion", "defect", "test", "vulnerability", "unscoped", "hardening", "polish"} {
+		t.Run(basis, func(t *testing.T) {
+			v, err := parseVerdict(`{"approved":false,"summary":"s","fixes":[{"file":"a.go","issue":"i","basis":"` + basis + `"}]}`)
+			require.NoError(t, err)
+			require.Len(t, v.Fixes, 1)
+
+			assert.Equal(t, basis, v.Fixes[0].Basis)
+		})
+	}
+
+	t.Run("case and padding fold into the vocabulary", func(t *testing.T) {
+		v, err := parseVerdict(`{"approved":false,"summary":"s","fixes":[{"file":"a.go","issue":"i","basis":"  Hardening "}]}`)
+		require.NoError(t, err)
+
+		assert.Equal(t, "hardening", v.Fixes[0].Basis)
+	})
+
+	t.Run("unknown value becomes empty", func(t *testing.T) {
+		v, err := parseVerdict(`{"approved":false,"summary":"s","fixes":[{"file":"a.go","issue":"i","basis":"style"}]}`)
+		require.NoError(t, err)
+
+		assert.Empty(t, v.Fixes[0].Basis)
+	})
+
+	t.Run("omitted stays empty", func(t *testing.T) {
+		v, err := parseVerdict(`{"approved":false,"summary":"s","fixes":[{"file":"a.go","issue":"i"}]}`)
+		require.NoError(t, err)
+
+		assert.Empty(t, v.Fixes[0].Basis)
+	})
+}
+
+// TestCapAdvisorySeverity covers the basis gate finding by finding: an
+// advisory-basis (hardening/polish) finding at critical or important is
+// demoted to minor with exactly one card-log line naming the file, the basis,
+// and the original severity; every untouched case - blocking bases, empty
+// basis, already-minor - logs nothing.
+func TestCapAdvisorySeverity(t *testing.T) {
+	tests := []struct {
+		name        string
+		fixes       []fix
+		wantSev     string
+		wantCapped  bool
+		wantLogPart string // substring the demotion line must carry
+	}{
+		{
+			name:        "hardening important demoted",
+			fixes:       []fix{{File: "a.go", Issue: "validate the field", Severity: "important", Basis: "hardening"}},
+			wantSev:     severityMinor,
+			wantCapped:  true,
+			wantLogPart: "a.go",
+		},
+		{
+			name:        "polish critical demoted",
+			fixes:       []fix{{File: "b.go", Issue: "rename the helper", Severity: "critical", Basis: "polish"}},
+			wantSev:     severityMinor,
+			wantCapped:  true,
+			wantLogPart: "b.go",
+		},
+		{
+			name:       "vulnerability important untouched",
+			fixes:      []fix{{File: "a.go", Issue: "sql injection", Severity: "important", Basis: "vulnerability"}},
+			wantSev:    severityImportant,
+			wantCapped: false,
+		},
+		{
+			name:       "criterion important untouched",
+			fixes:      []fix{{File: "a.go", Issue: "misses AC 2", Severity: "important", Basis: "criterion"}},
+			wantSev:    severityImportant,
+			wantCapped: false,
+		},
+		{
+			name:       "empty basis important untouched",
+			fixes:      []fix{{File: "a.go", Issue: "unlabelled", Severity: "important"}},
+			wantSev:    severityImportant,
+			wantCapped: false,
+		},
+		{
+			name:       "hardening minor untouched",
+			fixes:      []fix{{File: "a.go", Issue: "validate the field", Severity: "minor", Basis: "hardening"}},
+			wantSev:    severityMinor,
+			wantCapped: false,
+		},
+		{
+			name:       "defect important untouched",
+			fixes:      []fix{{File: "a.go", Issue: "off-by-one", Severity: "important", Basis: "defect"}},
+			wantSev:    severityImportant,
+			wantCapped: false,
+		},
+		{
+			name:       "unscoped critical untouched",
+			fixes:      []fix{{File: "extra.go", Issue: "added abstraction", Severity: "critical", Basis: "unscoped"}},
+			wantSev:    severityCritical,
+			wantCapped: false,
+		},
+		{
+			name:       "test critical untouched",
+			fixes:      []fix{{File: "a.go", Issue: "vacuous test", Severity: "critical", Basis: "test"}},
+			wantSev:    severityCritical,
+			wantCapped: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			d := reviewTestDeps(t, ops, &fakeGit{}, &planLLM{}, reviewerRegistry())
+
+			tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
+			o := newReviewRun(d, tc, 0)
+
+			v := verdict{Approved: false, Summary: "revise", Fixes: tt.fixes}
+			o.settleVerdict(context.Background(), &v, 1)
+
+			require.Len(t, v.Fixes, 1)
+			assert.Equal(t, tt.wantSev, v.Fixes[0].Severity)
+
+			capped := capLogLines(ops.logs)
+
+			if tt.wantCapped {
+				require.Len(t, capped, 1, "exactly one card-log line per demotion; logs=%v", ops.logs)
+
+				assert.Contains(t, capped[0], tt.wantLogPart)
+				assert.Contains(t, capped[0], tt.fixes[0].Basis)
+				assert.Contains(t, capped[0], severityMinor)
+			} else {
+				assert.Empty(t, capped, "an uncapped finding must not log; logs=%v", ops.logs)
+			}
+		})
+	}
+}
+
+// capLogLines filters a fakeOps log set to the capAdvisorySeverity demotion
+// lines, so assertions on demotion logging are not confused by the sibling
+// severity gates' own lines in settleVerdict.
+func capLogLines(logs []string) []string {
+	var out []string
+
+	for _, m := range logs {
+		if strings.Contains(m, "severity capped") {
+			out = append(out, m)
+		}
+	}
+
+	return out
+}
+
+// TestCapAdvisorySeverityPolishCriticalLogsExactlyOneLine pins the demotion
+// line's content for the polish case: file, basis, and original severity all
+// appear, exactly once.
+func TestCapAdvisorySeverityPolishCriticalLogsExactlyOneLine(t *testing.T) {
+	ops := &fakeOps{}
+	d := reviewTestDeps(t, ops, &fakeGit{}, &planLLM{}, reviewerRegistry())
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
+	o := newReviewRun(d, tc, 0)
+
+	v := verdict{Approved: false, Summary: "revise", Fixes: []fix{
+		{File: "style.go", Issue: "reorder imports", Severity: "critical", Basis: "polish"},
+	}}
+	o.settleVerdict(context.Background(), &v, 1)
+
+	assert.Equal(t, severityMinor, v.Fixes[0].Severity)
+	require.Len(t, capLogLines(ops.logs), 1, "exactly one demotion line; logs=%v", ops.logs)
+
+	line := capLogLines(ops.logs)[0]
+
+	assert.Contains(t, line, "style.go")
+	assert.Contains(t, line, "polish")
+	assert.Contains(t, line, "critical")
+}
+
+// TestSettleVerdictCapsBeforeGates proves the cap runs BEFORE the two existing
+// severity gates: a revise verdict whose only important finding is advisory
+// (hardening) is capped to minor first, and promoteConsistentRevise then sees
+// an all-minor fix list and promotes the verdict to approval. Settle through
+// reviewRound's real paths instead of calling the gates by hand so the order
+// is pinned, not assumed.
+func TestSettleVerdictCapsBeforeGates(t *testing.T) {
+	ops := &fakeOps{}
+	d := reviewTestDeps(t, ops, &fakeGit{}, &planLLM{}, reviewerRegistry())
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
+	o := newReviewRun(d, tc, 0)
+
+	v := verdict{Approved: false, Summary: "revise", PriorFindingsResolved: false, Fixes: []fix{
+		{File: "a.go", Issue: "validate the field", Suggestion: "add a length check", Severity: "important", Basis: "hardening"},
+	}}
+	o.settleVerdict(context.Background(), &v, 1)
+
+	assert.True(t, v.Approved,
+		"the hardening cap must land before promoteConsistentRevise so the revise promotes to approval")
+	assert.Equal(t, severityMinor, v.Fixes[0].Severity)
+}
+
+// TestFormatFixesRendersBasis proves a populated basis joins the severity
+// bracket as "<severity>, <basis>", while basis-only (empty severity) renders
+// as just "[<basis>]" without a leading comma or trailing space, and a finding
+// with neither label still renders without a bracket.
+func TestFormatFixesRendersBasis(t *testing.T) {
+	v := verdict{
+		Summary: "needs work",
+		Fixes: []fix{
+			{File: "a.go", Issue: "off-by-one", Suggestion: "use <=", Severity: "important", Basis: "criterion"},
+			{File: "b.go", Issue: "validate", Severity: "minor", Basis: "hardening"},
+			{File: "c.go", Issue: "no labels at all"},
+		},
+	}
+
+	rendered := formatFixes(v)
+
+	assert.Contains(t, rendered, "- a.go: [important, criterion] off-by-one - use <=",
+		"a populated basis renders after the severity inside the same bracket")
+	assert.Contains(t, rendered, "- b.go: [minor, hardening] validate")
+	assert.Contains(t, rendered, "- c.go: no labels at all",
+		"a finding with neither label still renders without a bracket")
+
+	assert.Equal(t, []string{"a.go", "b.go", "c.go"}, fixFiles(rendered),
+		"file paths survive the formatFixes -> fixFiles round trip with basis rendered")
+}
+
+// TestFormatFixesBasisOnlyBracket proves a basis-only finding (empty severity
+// with a non-empty basis) renders as "[<basis>]" - no preceding comma, no
+// empty severity placeholder - preserving the audit trail so a reader sees
+// the basis classification without a severity tag the model never provided.
+func TestFormatFixesBasisOnlyBracket(t *testing.T) {
+	v := verdict{
+		Summary: "findings summary",
+		Fixes: []fix{
+			{File: "d.go", Issue: "validate input", Basis: "hardening"},
+		},
+	}
+
+	rendered := formatFixes(v)
+
+	assert.Contains(t, rendered, "- d.go: [hardening] validate input",
+		"a basis-only finding renders as [<basis>] without a leading comma or empty severity")
+
+	assert.Equal(t, []string{"d.go"}, fixFiles(rendered),
+		"file paths survive the formatFixes -> fixFiles round trip with basis-only bracket")
+}
+
 // fixTierCoder is measured between the default simple bar (0.65) and the
 // moderate (0.76) and complex (0.82) bars; fixTierFallback is the capable
 // default and carries no prior at all. Every fix-model test below reads that
