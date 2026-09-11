@@ -120,12 +120,6 @@ type ServiceConfig struct {
 	// absent-vs-zero, so an explicit 0 in YAML or env also disables the ceiling.
 	MaxCardCost float64
 
-	// SelectorPriceHeadroom is the best-value band multiplier used by the model
-	// selector. Workers receive it as CMX_SELECTOR_PRICE_HEADROOM. Zero is
-	// omitted from the container env (worker uses its own default); the default
-	// (1.5) applies when the key is absent from config and env.
-	SelectorPriceHeadroom float64
-
 	// AdminPort is the admin listener that serves Prometheus /metrics. Zero
 	// disables it (the default). Workers never see it; it is host-side only.
 	AdminPort int
@@ -184,7 +178,6 @@ type serviceRaw struct {
 	ReasoningEffort           string            `koanf:"reasoning_effort"`
 	LogLevel                  string            `koanf:"log_level"`
 	MaxCardCost               float64           `koanf:"max_card_cost"`
-	SelectorPriceHeadroom     float64           `koanf:"selector_price_headroom"`
 	CompactionEnabled         bool              `koanf:"compaction_enabled"`
 	CompactionThreshold       float64           `koanf:"compaction_threshold"`
 	CompactionKeepRecentTurns int               `koanf:"compaction_keep_recent_turns"`
@@ -213,7 +206,6 @@ func serviceDefaults() serviceRaw {
 		BashTimeoutMaxSeconds:  600,
 		ToolOutputMaxBytes:     131072,
 		MaxCardCost:            5.0,
-		SelectorPriceHeadroom:  1.5,
 		// CompactionEnabled defaults to false (behavior-neutral); threshold and
 		// keep-recent carry sane values for when an operator opts in.
 		CompactionThreshold:       0.85,
@@ -221,16 +213,27 @@ func serviceDefaults() serviceRaw {
 	}
 }
 
-// removedTierBarsKey is the serve.yaml key the tier ladder lived under before
-// it moved to ContextMatrix. The loader refuses it in any form - a map, an
-// empty map, a null, the flat or nested CMX_ override - rather than ignore
-// it: an operator who still has it set would believe their bars apply.
-const removedTierBarsKey = "selector_tier_bars"
+// removedKey is a serve.yaml key whose setting moved to ContextMatrix. The
+// loader refuses each in any form - a map, an empty map, a null, a scalar,
+// the flat or nested CMX_ override - rather than ignore it: an operator who
+// still has one set would believe their value applies. Err names where the
+// setting lives now.
+type removedKey struct {
+	key string
+	err error
+}
 
-// errSelectorTierBarsRemoved is the startup failure for a leftover
-// selector_tier_bars key. The text names where the ladder lives now.
-var errSelectorTierBarsRemoved = errors.New(
-	"selector_tier_bars is no longer read here: the tier ladders are set on the ContextMatrix admin page (Model selection) and arrive with each run")
+// removedKeys is checked in order, so the first leftover names the failure.
+var removedKeys = []removedKey{
+	{
+		key: "selector_tier_bars",
+		err: errors.New("selector_tier_bars is no longer read here: the tier ladders are set on the ContextMatrix admin page (Model selection) and arrive with each run"),
+	},
+	{
+		key: "selector_price_headroom",
+		err: errors.New("selector_price_headroom is no longer read here: the price headroom is set on the ContextMatrix admin page (Model selection) and arrives with each run"),
+	},
+}
 
 // DefaultsYAML renders serviceDefaults() as YAML through the same koanf
 // pipeline LoadService uses, so the printed key set is exactly what the
@@ -281,8 +284,10 @@ func LoadService(path string) (*ServiceConfig, error) {
 
 	// Checked on the merged key set, before the unmarshal that would silently
 	// drop a key serviceRaw no longer declares.
-	if k.Exists(removedTierBarsKey) {
-		return nil, errSelectorTierBarsRemoved
+	for _, r := range removedKeys {
+		if k.Exists(r.key) {
+			return nil, r.err
+		}
 	}
 
 	var raw serviceRaw
@@ -349,7 +354,6 @@ func (r serviceRaw) toConfig() (*ServiceConfig, error) {
 		ReasoningEffort:           r.ReasoningEffort,
 		LogLevel:                  r.LogLevel,
 		MaxCardCost:               r.MaxCardCost,
-		SelectorPriceHeadroom:     r.SelectorPriceHeadroom,
 		ReviewAttemptsCap:         r.ReviewAttemptsCap,
 		Compaction: CompactionConfig{
 			Enabled:         r.CompactionEnabled,
@@ -504,13 +508,6 @@ func (c *ServiceConfig) Validate() error {
 
 	if c.MaxCardCost < 0 {
 		return fmt.Errorf("max_card_cost must be >= 0 (0 disables the ceiling), got %g", c.MaxCardCost)
-	}
-
-	if c.SelectorPriceHeadroom < 0 || (c.SelectorPriceHeadroom > 0 && c.SelectorPriceHeadroom < 1) {
-		return fmt.Errorf(
-			"selector_price_headroom must be 0 (use worker default) or >= 1 (band multiplier), got %g",
-			c.SelectorPriceHeadroom,
-		)
 	}
 
 	if c.CACertFile != "" {

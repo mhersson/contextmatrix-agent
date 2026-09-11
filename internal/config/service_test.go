@@ -259,34 +259,6 @@ func TestServiceValidate(t *testing.T) {
 		require.NoError(t, cfg.Validate())
 	})
 
-	t.Run("negative selector_price_headroom errors", func(t *testing.T) {
-		cfg := validServiceConfig()
-		cfg.SelectorPriceHeadroom = -0.5
-		err := cfg.Validate()
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "selector_price_headroom")
-	})
-
-	t.Run("zero selector_price_headroom passes (worker default)", func(t *testing.T) {
-		cfg := validServiceConfig()
-		cfg.SelectorPriceHeadroom = 0
-		require.NoError(t, cfg.Validate())
-	})
-
-	t.Run("sub-unit selector_price_headroom errors (0 < h < 1 is meaningless)", func(t *testing.T) {
-		cfg := validServiceConfig()
-		cfg.SelectorPriceHeadroom = 0.5
-		err := cfg.Validate()
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "selector_price_headroom")
-	})
-
-	t.Run("exactly 1.0 selector_price_headroom passes (no band)", func(t *testing.T) {
-		cfg := validServiceConfig()
-		cfg.SelectorPriceHeadroom = 1.0
-		require.NoError(t, cfg.Validate())
-	})
-
 	t.Run("enabled compaction with valid values passes", func(t *testing.T) {
 		cfg := validServiceConfig()
 		cfg.Compaction = CompactionConfig{Enabled: true, Threshold: 0.85, KeepRecentTurns: 6}
@@ -384,24 +356,21 @@ func TestServiceValidate_ReasoningEffort(t *testing.T) {
 }
 
 func TestServiceBudgetDefaults(t *testing.T) {
-	// max_card_cost and selector_price_headroom must default to 5.0 and 1.5
-	// when the keys are absent from config and env.
+	// max_card_cost must default to 5.0 when the key is absent from config
+	// and env.
 	clearServiceEnv(t)
 
 	cfg, err := LoadService(filepath.Join(t.TempDir(), "does-not-exist.yaml"))
 	require.NoError(t, err)
 
 	assert.InDelta(t, 5.0, cfg.MaxCardCost, 1e-9, "max_card_cost default must be 5.0")
-	assert.InDelta(t, 1.5, cfg.SelectorPriceHeadroom, 1e-9, "selector_price_headroom default must be 1.5")
 }
 
 func TestServiceBudgetFromFile(t *testing.T) {
-	// max_card_cost: 8.0, selector_price_headroom: 2.0 loaded from file.
 	clearServiceEnv(t)
 
 	content := `
 max_card_cost: 8.0
-selector_price_headroom: 2.0
 `
 	path := filepath.Join(t.TempDir(), "serve.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
@@ -410,32 +379,26 @@ selector_price_headroom: 2.0
 	require.NoError(t, err)
 
 	assert.InDelta(t, 8.0, cfg.MaxCardCost, 1e-9)
-	assert.InDelta(t, 2.0, cfg.SelectorPriceHeadroom, 1e-9)
 }
 
 func TestServiceBudgetFromEnv(t *testing.T) {
-	// CMX_MAX_CARD_COST and CMX_SELECTOR_PRICE_HEADROOM override file values.
+	// CMX_MAX_CARD_COST overrides the file value.
 	clearServiceEnv(t)
 
 	t.Setenv("CMX_MAX_CARD_COST", "3.5")
-	t.Setenv("CMX_SELECTOR_PRICE_HEADROOM", "1.2")
 
 	cfg, err := LoadService(filepath.Join(t.TempDir(), "does-not-exist.yaml"))
 	require.NoError(t, err)
 
 	assert.InDelta(t, 3.5, cfg.MaxCardCost, 1e-9)
-	assert.InDelta(t, 1.2, cfg.SelectorPriceHeadroom, 1e-9)
 }
 
 func TestServiceBudgetZeroIsLegal(t *testing.T) {
 	// max_card_cost: 0 is a legal explicit value (disables the per-card ceiling).
-	// selector_price_headroom: 0 is also legal (0 = omit when passed to workers,
-	// worker applies its own default).
 	clearServiceEnv(t)
 
 	content := `
 max_card_cost: 0
-selector_price_headroom: 0
 `
 	path := filepath.Join(t.TempDir(), "serve.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
@@ -444,7 +407,6 @@ selector_price_headroom: 0
 	require.NoError(t, err)
 
 	assert.InDelta(t, 0.0, cfg.MaxCardCost, 1e-9)
-	assert.InDelta(t, 0.0, cfg.SelectorPriceHeadroom, 1e-9)
 }
 
 // TestServiceReviewAttemptsCap covers the two layers the operator actually
@@ -889,9 +851,54 @@ func TestServiceLoadRefusesTheRemovedSelectorTierBarsKey(t *testing.T) {
 		assert.Equal(t, want, err.Error())
 	})
 
-	t.Run("a file without the key loads and keeps the headroom", func(t *testing.T) {
-		cfg, err := LoadService(write(t, "contextmatrix_url: http://cm:8080\nselector_price_headroom: 2.0\n"))
+	t.Run("a file without the key loads", func(t *testing.T) {
+		cfg, err := LoadService(write(t, "contextmatrix_url: http://cm:8080\nmax_card_cost: 2.0\n"))
 		require.NoError(t, err)
-		assert.InDelta(t, 2.0, cfg.SelectorPriceHeadroom, 1e-9)
+		assert.InDelta(t, 2.0, cfg.MaxCardCost, 1e-9)
+	})
+}
+
+// The price headroom moved to ContextMatrix after the ladders did. A serve.yaml
+// that still carries the key must stop startup, whatever the leftover holds
+// (a value, the built-in 1.5, a 0, a null) and whichever surface set it.
+func TestServiceLoadRefusesTheRemovedSelectorPriceHeadroomKey(t *testing.T) {
+	clearServiceEnv(t)
+
+	const want = "selector_price_headroom is no longer read here: the price headroom is set on the ContextMatrix admin page (Model selection) and arrives with each run"
+
+	write := func(t *testing.T, body string) string {
+		t.Helper()
+
+		path := filepath.Join(t.TempDir(), "serve.yaml")
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+
+		return path
+	}
+
+	for name, body := range map[string]string{
+		"a value in the file": "contextmatrix_url: http://cm:8080\nselector_price_headroom: 2.0\n",
+		"the old default":     "contextmatrix_url: http://cm:8080\nselector_price_headroom: 1.5\n",
+		"an explicit zero":    "contextmatrix_url: http://cm:8080\nselector_price_headroom: 0\n",
+		"a null value":        "contextmatrix_url: http://cm:8080\nselector_price_headroom:\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := LoadService(write(t, body))
+			require.Error(t, err)
+			assert.Equal(t, want, err.Error())
+		})
+	}
+
+	t.Run("the env form", func(t *testing.T) {
+		t.Setenv("CMX_SELECTOR_PRICE_HEADROOM", "1.5")
+
+		_, err := LoadService(write(t, "contextmatrix_url: http://cm:8080\n"))
+		require.Error(t, err)
+		assert.Equal(t, want, err.Error())
+	})
+
+	t.Run("the tier-bars refusal still wins when both are present", func(t *testing.T) {
+		_, err := LoadService(write(t, "contextmatrix_url: http://cm:8080\nselector_tier_bars: {}\nselector_price_headroom: 1.5\n"))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "selector_tier_bars is no longer read here")
 	})
 }
