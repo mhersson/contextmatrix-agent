@@ -1447,10 +1447,10 @@ func TestBuildLaunchSpec_ReviewAttemptsCapEnv(t *testing.T) {
 	})
 }
 
-func TestBuildLaunchSpec_NeverEmitsATierLadder(t *testing.T) {
-	// The ladder travels on the selection payload CM sends per run; serve has
-	// no ladder of its own to forward, so the env var must be gone even from
-	// a launch that forwards every other worker knob.
+func TestBuildLaunchSpec_NeverEmitsASelectorKnob(t *testing.T) {
+	// The ladder and headroom travel on the selection payload CM sends per run;
+	// serve has no selector setting of its own to forward, so no CMX_SELECTOR_
+	// env var must appear in any launch.
 	s := NewServer(Config{
 		APIKey:   "k",
 		Executor: &fakeExecutor{},
