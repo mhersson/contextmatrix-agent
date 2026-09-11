@@ -1145,8 +1145,8 @@ func TestDrainGate_TriggerRefusedWhileDraining(t *testing.T) {
 
 // ---- budget env threading ---------------------------------------------------
 
-// newHarnessWithBudget builds a Server with the budget knobs set.
-func newHarnessWithBudget(t *testing.T, maxCardCost, headroom float64) *harness {
+// newHarnessWithBudget builds a Server with the per-card cost ceiling set.
+func newHarnessWithBudget(t *testing.T, maxCardCost float64) *harness {
 	t.Helper()
 
 	tracker := executor.NewTracker(4)
@@ -1165,11 +1165,10 @@ func newHarnessWithBudget(t *testing.T, maxCardCost, headroom float64) *harness 
 		Reporter:      reporter,
 		Verifier:      verifier,
 		LaunchEnv: LaunchEnv{
-			BaseImage:             "base:image",
-			MCPURL:                "http://cm:8080/mcp",
-			MCPAPIKey:             "cfg-mcp-key",
-			MaxCardCost:           maxCardCost,
-			SelectorPriceHeadroom: headroom,
+			BaseImage:   "base:image",
+			MCPURL:      "http://cm:8080/mcp",
+			MCPAPIKey:   "cfg-mcp-key",
+			MaxCardCost: maxCardCost,
 		},
 	})
 
@@ -1184,9 +1183,9 @@ func newHarnessWithBudget(t *testing.T, maxCardCost, headroom float64) *harness 
 }
 
 func TestBuildLaunchSpec_BudgetEnvEmitted(t *testing.T) {
-	// When MaxCardCost and SelectorPriceHeadroom are non-zero, both CMX_* vars
-	// must appear in the launched container env.
-	h := newHarnessWithBudget(t, 5.0, 1.5)
+	// A non-zero MaxCardCost reaches the container env; the selector's price
+	// headroom is not a launch knob any more, it arrives on the payload.
+	h := newHarnessWithBudget(t, 5.0)
 
 	w := h.do(t, http.MethodPost, "/trigger", provisionedPayload("PROJ-010"))
 	require.Equal(t, http.StatusAccepted, w.Code)
@@ -1197,7 +1196,10 @@ func TestBuildLaunchSpec_BudgetEnvEmitted(t *testing.T) {
 
 	spec := h.exec.launchedSpecs()[0]
 	assert.Contains(t, spec.Env, "CMX_MAX_CARD_COST=5", "max_card_cost must be formatted without trailing decimal")
-	assert.Contains(t, spec.Env, "CMX_SELECTOR_PRICE_HEADROOM=1.5", "selector_price_headroom must appear")
+
+	for _, e := range spec.Env {
+		assert.NotContains(t, e, "CMX_SELECTOR_", "no selector setting travels as env: they arrive on the payload")
+	}
 }
 
 func TestBuildLaunchSpec_VerifyEnvEmitted(t *testing.T) {
@@ -1315,9 +1317,8 @@ func TestValidateTaskSkills(t *testing.T) {
 }
 
 func TestBuildLaunchSpec_BudgetEnvOmittedWhenZero(t *testing.T) {
-	// When MaxCardCost and SelectorPriceHeadroom are zero, the CMX_* vars must
-	// be omitted so workers apply their own defaults.
-	h := newHarnessWithBudget(t, 0, 0)
+	// A zero MaxCardCost must be omitted so the worker applies its own default.
+	h := newHarnessWithBudget(t, 0)
 
 	w := h.do(t, http.MethodPost, "/trigger", provisionedPayload("PROJ-011"))
 	require.Equal(t, http.StatusAccepted, w.Code)
@@ -1330,7 +1331,6 @@ func TestBuildLaunchSpec_BudgetEnvOmittedWhenZero(t *testing.T) {
 
 	for _, e := range spec.Env {
 		assert.NotContains(t, e, "CMX_MAX_CARD_COST", "zero max_card_cost must not be emitted")
-		assert.NotContains(t, e, "CMX_SELECTOR_PRICE_HEADROOM", "zero headroom must not be emitted")
 	}
 }
 
@@ -1447,27 +1447,24 @@ func TestBuildLaunchSpec_ReviewAttemptsCapEnv(t *testing.T) {
 	})
 }
 
-func TestBuildLaunchSpec_NeverEmitsATierLadder(t *testing.T) {
-	// The ladder travels on the selection payload CM sends per run; serve has
-	// no ladder of its own to forward, so the env var must be gone even from
-	// a launch that forwards every other worker knob.
+func TestBuildLaunchSpec_NeverEmitsASelectorKnob(t *testing.T) {
+	// The ladder and headroom travel on the selection payload CM sends per run;
+	// serve has no selector setting of its own to forward, so no CMX_SELECTOR_
+	// env var must appear in any launch.
 	s := NewServer(Config{
 		APIKey:   "k",
 		Executor: &fakeExecutor{},
 		Tracker:  executor.NewTracker(1),
 		LaunchEnv: LaunchEnv{
-			BaseImage:             "img",
-			MCPURL:                "http://mcp",
-			SelectorPriceHeadroom: 1.5,
+			BaseImage: "img",
+			MCPURL:    "http://mcp",
 		},
 	})
 
 	spec := s.buildLaunchSpec(protocol.TriggerPayload{CardID: "C1", Project: "p"}, "corr", "")
 
-	assert.Contains(t, spec.Env, "CMX_SELECTOR_PRICE_HEADROOM=1.5", "the headroom still travels")
-
 	for _, e := range spec.Env {
-		assert.NotContains(t, e, "CMX_SELECTOR_TIER_BARS")
+		assert.NotContains(t, e, "CMX_SELECTOR_", "neither the ladder nor the headroom is a launch knob")
 	}
 }
 

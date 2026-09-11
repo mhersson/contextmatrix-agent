@@ -88,11 +88,10 @@ type RunSpec struct {
 	// host rotates on disk reaches a long-running worker without a restart.
 	SecretsEnvPath string
 
-	BashTimeoutMax        int     // CMX_BASH_TIMEOUT_MAX_SECONDS; default 600
-	ToolOutputMax         int     // CMX_TOOL_OUTPUT_MAX_BYTES; default 131072 (128 KB)
-	MaxTurns              int     // CMX_MAX_TURNS
-	MaxCardCost           float64 // CMX_MAX_CARD_COST; 0 disables
-	SelectorPriceHeadroom float64 // CMX_SELECTOR_PRICE_HEADROOM; 0 uses worker default
+	BashTimeoutMax int     // CMX_BASH_TIMEOUT_MAX_SECONDS; default 600
+	ToolOutputMax  int     // CMX_TOOL_OUTPUT_MAX_BYTES; default 131072 (128 KB)
+	MaxTurns       int     // CMX_MAX_TURNS
+	MaxCardCost    float64 // CMX_MAX_CARD_COST; 0 disables
 
 	// ContainerTimeout is serve's hard kill ceiling for this run's container
 	// (CMX_CONTAINER_TIMEOUT_SECONDS). 0 = unknown - an older serve, or a host
@@ -1011,7 +1010,7 @@ func buildRegistry(spec RunSpec) (*registry.Registry, []registry.LadderFault) {
 		capable = config.DefaultCapableModel
 	}
 
-	return registry.FromSelection(spec.Selection, capable, spec.SelectorPriceHeadroom, spec.MaxCapability)
+	return registry.FromSelection(spec.Selection, capable, spec.MaxCapability)
 }
 
 // logLadderFaults puts each payload ladder that failed validation on the

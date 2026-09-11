@@ -25,14 +25,16 @@ func (f LadderFault) Error() string {
 }
 
 // FromSelection builds the registry CM's SelectionContext describes: the
-// candidates, favorites, blacklist and per-role tier ladders on the wire,
-// plus the operator's per-run knobs. It always returns a usable registry.
-// A role whose ladder does not validate falls back to the built-in bars for
-// that role alone and is reported as a LadderFault; the other role's ladder
-// still applies. A nil sc is an empty selection: every pick is the capable
-// default.
-func FromSelection(sc *protocol.SelectionContext, capable string, priceHeadroom float64, maxCapability bool) (*Registry, []LadderFault) {
-	in := selection.Input{Capable: capable, PriceHeadroom: priceHeadroom, MaxCapability: maxCapability}
+// candidates, favorites, blacklist, per-role tier ladders and price headroom
+// on the wire, plus the run's max-capability flag. It always returns a
+// usable registry. A role whose ladder does not validate falls back to the
+// built-in bars for that role alone and is reported as a LadderFault; the
+// other role's ladder still applies. A headroom below 1 on the wire reads as
+// the built-in one inside the selection package; CM refuses to store one,
+// so there is nothing to report. A nil sc is an empty selection: every pick
+// is the capable default.
+func FromSelection(sc *protocol.SelectionContext, capable string, maxCapability bool) (*Registry, []LadderFault) {
+	in := selection.Input{Capable: capable, MaxCapability: maxCapability}
 
 	var faults []LadderFault
 
@@ -40,6 +42,7 @@ func FromSelection(sc *protocol.SelectionContext, capable string, priceHeadroom 
 		in.Candidates = sc.Candidates
 		in.Favorites = sc.Favorites
 		in.Blacklist = sc.Blacklist
+		in.PriceHeadroom = sc.PriceHeadroom
 		in.Ladders, faults = laddersFromPayload(sc.TierBars)
 	}
 

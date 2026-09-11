@@ -189,14 +189,6 @@ secrets_dir: /var/run/cm-agent/secrets
 # CMX_MAX_CARD_COST
 max_card_cost: 5.0
 
-# Best-value band multiplier for the model selector. Workers receive this as
-# CMX_SELECTOR_PRICE_HEADROOM. A value of 1.5 means "consider any model whose
-# cost is within 1.5× of the cheapest option in the target capability band."
-# 0 omits the env var so workers apply their own default.
-# Default: 1.5
-# CMX_SELECTOR_PRICE_HEADROOM
-selector_price_headroom: 1.5
-
 # --- Webhook replay protection ------------------------------------------------
 
 # Maximum clock skew (in seconds) tolerated between ContextMatrix and the agent

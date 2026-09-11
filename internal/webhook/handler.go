@@ -138,10 +138,6 @@ type LaunchEnv struct {
 	// CMX_MAX_CARD_COST. Zero is omitted (worker applies its own default).
 	MaxCardCost float64
 
-	// SelectorPriceHeadroom is the best-value band multiplier passed as
-	// CMX_SELECTOR_PRICE_HEADROOM. Zero is omitted (worker applies its own default).
-	SelectorPriceHeadroom float64
-
 	// CompactionEnabled, CompactionThreshold, and CompactionKeepRecentTurns
 	// configure the worker harness loop's in-window compaction. When disabled
 	// (the default) the CMX_COMPACTION_* vars are omitted so the worker keeps the
@@ -761,10 +757,6 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 
 	if s.launchEnv.MaxCardCost != 0 {
 		env = append(env, "CMX_MAX_CARD_COST="+formatFloat(s.launchEnv.MaxCardCost))
-	}
-
-	if s.launchEnv.SelectorPriceHeadroom != 0 {
-		env = append(env, "CMX_SELECTOR_PRICE_HEADROOM="+formatFloat(s.launchEnv.SelectorPriceHeadroom))
 	}
 
 	if s.launchEnv.CompactionEnabled {
