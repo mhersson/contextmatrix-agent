@@ -10,10 +10,10 @@ never names a model, and there is no measured-capability gate.
 The selector's inputs arrive at run start from CM's `SelectionContext` payload
 (`registry.FromSelection`): the candidate set, per-role quality priors,
 operator favorites, the blacklist, and the per-role tier ladders
-(`tier_bars`). Nothing is embedded in the binary, and the only host-side
-selection settings are `selector_price_headroom` and `default_model`; the
-Artificial-Analysis sourcing, normalization, and the ladders live on the
-ContextMatrix side. The selection rule itself is the `selection` package of
+(`tier_bars`) and the price headroom (`price_headroom`). Nothing is embedded
+in the binary, and the only host-side selection setting is `default_model`;
+the Artificial-Analysis sourcing, normalization, the ladders and the headroom
+live on the ContextMatrix side. The selection rule itself is the `selection` package of
 `contextmatrix-protocol`, shared with CM so its admin preview and the agent's
 real pick are one implementation; `internal/registry` is the agent's adapter
 over it.
@@ -24,8 +24,10 @@ A candidate must not be blacklisted, must fit the context window, and must
 carry a per-role quality prior clearing the tier bar of that role's ladder.
 Every candidate CM ships is tool-capable, so the selector has no tool gate.
 Among eligible candidates, an operator favorite wins outright; otherwise the
-selector picks the most capable candidate within a price headroom (default
-1.5x, `selector_price_headroom`) of the cheapest.
+selector picks the most capable candidate within a price headroom of the
+cheapest. The headroom is the operator's value from the payload
+(`price_headroom`, set on the ContextMatrix Model selection admin page);
+absent or below 1 it is the built-in 1.5x.
 
 ## Tier ladders
 

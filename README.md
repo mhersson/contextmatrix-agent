@@ -242,7 +242,9 @@ and carry an external quality **prior** for the role that clears the tier's bar
 (the bar rises with the tier, from 0.65 for simple up to 0.90 for critical).
 Among those, an eligible operator favorite wins outright; otherwise the selector
 picks the most capable candidate whose blended price is within a headroom band of
-the cheapest. Selection is **priors-only - there is no measured-capability
+the cheapest (the band width is set on the ContextMatrix Model selection admin
+page and arrives with each run; built-in 1.5x). Selection is **priors-only -
+there is no measured-capability
 gate.** An explicit model pin on the card always overrides.
 
 When no candidate survives - nothing clears the tier bar, the candidate pool is
