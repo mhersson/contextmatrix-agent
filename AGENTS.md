@@ -45,7 +45,7 @@ cmd/contextmatrix-agent/main.go → entrypoint; builds the cobra root command
 
 internal/cli/        → cobra commands: run, serve, work
 internal/config/     → koanf config; Config (harness) and ServiceConfig (serve); CMX_* env tags
-internal/registry/   → adapter over contextmatrix-protocol/selection: FromSelection builds the shared selector from the run payload (candidates, priors, favorites, blacklist, per-role tier ladders); reachability and pool logging stay agent-side
+internal/registry/   → adapter over contextmatrix-protocol/selection: FromSelection builds the shared selector from the run payload (candidates, priors, favorites, blacklist, per-role tier ladders, price headroom); reachability and pool logging stay agent-side
 
 # Autonomous executor - the FSM and its container lifecycle
 internal/orchestrator/ → hand-written FSM plan → execute → judge → document → review → integrate → pr_gates → done; phase persistence; git finalize
@@ -244,9 +244,9 @@ keep it clean.
 These are gitignored point-in-time records - never commit them: `*-RESULTS.md`,
 `capabilities-*.json`, `capabilities-*.md`, `transcripts/`, `eval-out/`,
 `.envrc`. Nothing model-related is embedded in the binary: priors, favorites,
-the blacklist and the per-role tier ladders all arrive at run start from CM's
-`SelectionContext` payload (`registry.FromSelection`), so there is no tracked
-baseline to keep in sync.
+the blacklist, the per-role tier ladders and the price headroom all arrive at
+run start from CM's `SelectionContext` payload (`registry.FromSelection`), so
+there is no tracked baseline to keep in sync.
 
 ## Mandatory verification before proceeding
 
