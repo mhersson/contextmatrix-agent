@@ -94,10 +94,6 @@ type RunSpec struct {
 	MaxCardCost           float64 // CMX_MAX_CARD_COST; 0 disables
 	SelectorPriceHeadroom float64 // CMX_SELECTOR_PRICE_HEADROOM; 0 uses worker default
 
-	// SelectorTierBars is the operator's quality ladder (CMX_SELECTOR_TIER_BARS,
-	// JSON-encoded). Empty uses registry.DefaultTierBars.
-	SelectorTierBars map[string]float64
-
 	// ContainerTimeout is serve's hard kill ceiling for this run's container
 	// (CMX_CONTAINER_TIMEOUT_SECONDS). 0 = unknown - an older serve, or a host
 	// that never configured it - so a phase that must park before the kill
@@ -420,17 +416,13 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 		deadline = time.Now().Add(a.spec.ContainerTimeout - gatesFinalizeMargin)
 	}
 
-	// An invalid operator tier ladder fails here, before any phase runs: no
-	// work has been done yet, so this releases the claim and reports the
-	// error rather than parking or pushing anything.
-	reg, err := buildRegistry(a.spec)
-	if err != nil {
-		releaseQuietly(ctx, a.ops, a.spec.CardID)
-
-		return Result{Reason: "error"}, err
-	}
+	// The registry is built from the payload alone and cannot fail: a role
+	// whose ladder does not validate runs on the built-in bars and is
+	// reported on the card here, before any phase runs.
+	reg, faults := buildRegistry(a.spec)
 
 	orchOps := ops2orchestrator(a.ops)
+	logLadderFaults(ctx, faults, orchOps, a.spec.CardID)
 	logReachability(ctx, reg, orchOps, a.spec.CardID)
 
 	d := orchestrator.Deps{
@@ -501,7 +493,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 		},
 	}
 
-	err = runOrchestrator(runCtx, d)
+	err := runOrchestrator(runCtx, d)
 
 	return mapFSMResult(ctx, a, err)
 }
@@ -993,21 +985,22 @@ func buildSkillTool(spec RunSpec, ops CardOps) tools.Tool {
 	return st
 }
 
-// buildRegistry assembles the model registry the FSM selects from. When a
-// SelectionContext is present on the spec (injected by CM at trigger time), it
-// is the authoritative source - the registry is built entirely from the
-// payload-injected catalog, priors, favorites, and blacklist. No live catalog
-// fetch or embedded baseline is consulted.
+// buildRegistry assembles the model registry the FSM selects from. The
+// SelectionContext on the spec (injected by CM at trigger time) is the only
+// source: candidates, priors, favorites, blacklist and the per-role tier
+// ladders all come from the payload. No live catalog fetch or embedded
+// baseline is consulted, and nothing on the agent host configures the
+// ladder.
 //
 // The capable default (the fallback when the candidate pool is empty) resolves
 // with precedence: (1) spec.Model (the trigger's default_model), when non-empty;
 // (2) spec.DefaultModel (the serve-config default); (3) config.DefaultCapableModel
 // (a compiled-in guard).
 //
-// spec.SelectorTierBars carries the operator's quality ladder. An invalid
-// ladder is returned as an error so the worker exits rather than running the
-// card on a half-understood ladder.
-func buildRegistry(spec RunSpec) (*registry.Registry, error) {
+// A payload ladder that does not validate cannot fail the run: the registry
+// falls back to the built-in bars for that role and reports it as a fault
+// the caller puts on the card.
+func buildRegistry(spec RunSpec) (*registry.Registry, []registry.LadderFault) {
 	capable := spec.Model
 
 	if capable == "" {
@@ -1018,13 +1011,24 @@ func buildRegistry(spec RunSpec) (*registry.Registry, error) {
 		capable = config.DefaultCapableModel
 	}
 
-	bars, err := registry.TierBarsFromStrings(spec.SelectorTierBars)
-	if err != nil {
-		return nil, fmt.Errorf("build registry: %w", err)
-	}
+	return registry.FromSelection(spec.Selection, capable, spec.SelectorPriceHeadroom, spec.MaxCapability)
+}
 
-	return registry.FromSelection(spec.Selection, capable, spec.SelectorPriceHeadroom, spec.MaxCapability).
-		WithTierBars(bars), nil
+// logLadderFaults puts each payload ladder that failed validation on the
+// card, one line per role, so the operator learns that the built-in bars
+// ran instead of the ladder they saved. Advisory only: the run continues on
+// the fallback. ops is nil in tests that only implement the worker's
+// narrower CardOps (see ops2orchestrator); the card line is then skipped
+// and the slog warning still fires.
+func logLadderFaults(ctx context.Context, faults []registry.LadderFault, ops orchestrator.Ops, cardID string) {
+	for _, f := range faults {
+		slog.Warn("selector: payload tier ladder did not validate; using the built-in bars",
+			"card_id", cardID, "role", f.Role, "error", f.Reason)
+
+		if ops != nil {
+			_ = ops.AddLog(ctx, cardID, "selector: "+f.Error()+" - using the built-in bars") //nolint:errcheck // advisory
+		}
+	}
 }
 
 // logReachability reports structural tier unreachability BEFORE the first

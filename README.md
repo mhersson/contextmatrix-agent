@@ -259,9 +259,10 @@ model. Use it for cards where the outcome matters more than cost.
 
 The selector's inputs are supplied by ContextMatrix, not embedded in the binary.
 Each trigger payload carries a `SelectionContext` with the candidate set, their
-per-role priors, the operator favorites, and a self-learning blacklist;
-`registry.FromSelection` consumes it at run start. The Artificial-Analysis
-sourcing, normalization, and tier-bar tuning all live on the ContextMatrix side.
+per-role priors, the operator favorites, a self-learning blacklist, and the
+per-role tier ladders; `registry.FromSelection` consumes it at run start. The
+Artificial-Analysis sourcing, normalization, and the ladders (edited on CM's
+admin page, Model selection) all live on the ContextMatrix side.
 
 The blacklist is self-learning: when a model proves harness-incapable mid-run
 (for example, it cannot reliably call tools), the agent reports it back so it is

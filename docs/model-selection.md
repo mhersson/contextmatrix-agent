@@ -9,18 +9,46 @@ never names a model, and there is no measured-capability gate.
 
 The selector's inputs arrive at run start from CM's `SelectionContext` payload
 (`registry.FromSelection`): the candidate set, per-role quality priors,
-operator favorites, and the blacklist. Nothing is embedded in the binary; the
-Artificial-Analysis sourcing, normalization, and tier-bar tuning live on the
-ContextMatrix side.
+operator favorites, the blacklist, and the per-role tier ladders
+(`tier_bars`). Nothing is embedded in the binary, and the only host-side
+selection settings are `selector_price_headroom` and `default_model`; the
+Artificial-Analysis sourcing, normalization, and the ladders live on the
+ContextMatrix side. The selection rule itself is the `selection` package of
+`contextmatrix-protocol`, shared with CM so its admin preview and the agent's
+real pick are one implementation; `internal/registry` is the agent's adapter
+over it.
 
 ## Eligibility and choice
 
-A candidate must be tool-capable, not blacklisted, fit the context window, and
-carry a per-role quality prior clearing the tier bar (`DefaultTierBars`:
-simple 0.65, moderate 0.76, complex 0.82, critical 0.90). Among eligible
-candidates, an operator favorite wins outright; otherwise the selector picks
-the most capable candidate within a price headroom (default 1.5x) of the
-cheapest.
+A candidate must not be blacklisted, must fit the context window, and must
+carry a per-role quality prior clearing the tier bar of that role's ladder.
+Every candidate CM ships is tool-capable, so the selector has no tool gate.
+Among eligible candidates, an operator favorite wins outright; otherwise the
+selector picks the most capable candidate within a price headroom (default
+1.5x, `selector_price_headroom`) of the cheapest.
+
+## Tier ladders
+
+There is one ladder per role, coder and reviewer, because the two priors come
+from different indices with different shapes. The operator edits both on
+ContextMatrix's admin page (Model selection); CM sends them with each run as
+`SelectionContext.TierBars`, role name to tier name to bar. A role CM sends
+nothing for uses the built-in bars: simple 0.65, moderate 0.76, complex 0.82,
+critical 0.90. A partial ladder merges over the built-in bars.
+
+The agent validates each role's ladder with the shared rule (known tier
+names, every bar in [0,1], non-decreasing from simple to critical). A ladder
+that fails falls back to the built-in bars for that role only, the other
+role's ladder still applies, the run never fails on it, and the card gets
+one log line per failed role:
+
+```text
+selector: reviewer tier ladder from the payload did not validate (tier bars: ladder must not decrease: moderate 0.76 is below simple 0.9) - using the built-in bars
+```
+
+The ladder is not configurable on the agent host. A `serve.yaml` that still
+carries the old `selector_tier_bars` key fails startup with a message naming
+the admin page.
 
 ## Vendor diversity on multi-seat picks
 
@@ -32,8 +60,8 @@ is picked vendor-blind. Favorites bypass the preference.
 
 ## max_capability
 
-A per-card `max_capability` flag (trigger payload, exposed as
-`registry.Selection.MaxCapability`) overrides both favorites and the price
+A per-card `max_capability` flag (trigger payload, the `maxCapability` argument of
+`registry.FromSelection`) overrides both favorites and the price
 band: every pick chooses the most capable candidate in the tier regardless of
 price. It keeps the tier bar, blacklist, in-run exclude set, window fit, and
 vendor-diversity preference intact; equal quality still tie-breaks to the
@@ -81,7 +109,7 @@ with its prior, per-token price, and outcome:
 
 Catalog models that never reached the pool are aggregated by reason
 (`filtered_<reason>="slug1,slug2"`), in catalog order: `prior-below-bar`,
-`no-prior-for-role`, `not-tools-capable`, `excluded`, `blacklisted`,
+`no-prior-for-role`, `excluded`, `blacklisted`,
 `vendor-excluded`, `window-too-small`. A growing in-run exclude set shows up
 as one growing `filtered_excluded` entry, so a panel seat's pool reflects the
 seats already seated. Exactly one pool line per pick; a pin or an off-ladder

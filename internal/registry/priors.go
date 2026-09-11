@@ -1,40 +1,19 @@
 package registry
 
-// PriorEntry holds external quality scores for a model (e.g. from Artificial
-// Analysis). Role scores are pointers so an omitted role is distinguishable
-// from an explicit zero: absent/null decodes to nil, meaning no prior exists.
+// PriorEntry holds a model's normalised quality scores per role, the shape
+// the test-facing constructor takes. Role scores are pointers for source
+// compatibility with existing fixtures; a nil score and a zero score mean
+// the same thing to the selector, no measured prior for that role, because
+// the shared package reads 0 as unmeasured (CM encodes a missing Artificial
+// Analysis index as 0 on the wire and a normalised index is never genuinely
+// 0).
 type PriorEntry struct {
 	Coder    *float64 `json:"coder"`
 	Reviewer *float64 `json:"reviewer"`
 }
 
-// Priors is the parsed model-priors document.
+// Priors is the per-model priors table NewRegistryFromParts converts into
+// wire candidates. A model absent from Models has no prior for either role.
 type Priors struct {
 	Models map[string]PriorEntry `json:"models"`
-}
-
-// ForRole returns the prior score for the given model and role, and whether one
-// exists. A role omitted from the model's JSON entry has no prior - (0, false);
-// an explicit 0 in the file is a real prior and returns (0, true). Only
-// RoleCoder and RoleReviewer are tracked in priors; other roles return (0, false).
-func (p Priors) ForRole(model string, role Role) (float64, bool) {
-	entry, ok := p.Models[model]
-	if !ok {
-		return 0, false
-	}
-
-	var score *float64
-
-	switch role {
-	case RoleCoder:
-		score = entry.Coder
-	case RoleReviewer:
-		score = entry.Reviewer
-	}
-
-	if score == nil {
-		return 0, false
-	}
-
-	return *score, true
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -1775,8 +1776,8 @@ func TestBuildRegistryFallbackPrecedence(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r, err := buildRegistry(tt.spec)
-			require.NoError(t, err)
+			r, faults := buildRegistry(tt.spec)
+			require.Empty(t, faults)
 
 			got := r.SelectByComplexity(in)
 			assert.Equal(t, tt.want, got.Model,
@@ -1785,75 +1786,145 @@ func TestBuildRegistryFallbackPrecedence(t *testing.T) {
 	}
 }
 
-// TestBuildRegistryThreadsTierBars proves the operator ladder actually reaches
-// the registry buildRegistry returns, not just the FromSelection call: the
-// registry-level tests never exercise buildRegistry, so a build that parses
-// SelectorTierBars but drops the WithTierBars chain passes every test in
-// that package while the knob does nothing.
-func TestBuildRegistryThreadsTierBars(t *testing.T) {
-	spec := RunSpec{
-		Selection: &protocol.SelectionContext{
-			Candidates: []protocol.CandidateModel{
-				{
-					Slug:                  "mid/model",
-					PromptPricePerTok:     0.000001,
-					CompletionPricePerTok: 0.000002,
-					ContextWindow:         200000,
-					CoderPrior:            0.85,
-					ReviewerPrior:         0.85,
-				},
-			},
-		},
-		// Raising complex above the model's 0.85 prior (and critical to match,
-		// keeping the ladder monotone) means a complex request cannot be met
-		// directly and must clamp down to moderate (default bar 0.76, which
-		// 0.85 clears).
-		SelectorTierBars: map[string]float64{"complex": 0.99, "critical": 0.99},
-	}
-
-	r, err := buildRegistry(spec)
-	require.NoError(t, err)
-
-	got := r.SelectByComplexity(registry.SelectInput{Role: registry.RoleCoder, Tier: registry.TierComplex})
-
-	require.True(t, got.OK)
-	assert.False(t, got.AtBar(),
-		"the operator's elevated complex bar must not be silently satisfied by an unthreaded default ladder")
-	assert.Equal(t, registry.TierModerate, got.MetTier)
+// ladderSpec is a one-candidate payload with the given per-role ladders.
+// mid/model carries 0.85 for both roles, so a complex request (built-in bar
+// 0.82) is met directly, and a coder ladder raised to 0.99 (critical raised
+// with it to keep the ladder monotone) forces a clamp to moderate.
+func ladderSpec(bars map[string]map[string]float64) RunSpec {
+	return RunSpec{Selection: &protocol.SelectionContext{
+		Candidates: []protocol.CandidateModel{{
+			Slug:                  "mid/model",
+			PromptPricePerTok:     0.000001,
+			CompletionPricePerTok: 0.000002,
+			ContextWindow:         200000,
+			CoderPrior:            0.85,
+			ReviewerPrior:         0.85,
+		}},
+		TierBars: bars,
+	}}
 }
 
-// TestRunReleasesClaimOnInvalidTierLadder proves an invalid operator ladder
-// stops the worker before any orchestrator phase runs: the claim taken by
-// Run is released, the orchestrator is never invoked, and the error message
-// carries the underlying reason exactly once rather than being wrapped a
-// second time on its way out of runFSM.
-func TestRunReleasesClaimOnInvalidTierLadder(t *testing.T) {
+// TestBuildRegistryAppliesPayloadLaddersPerRole proves the ladders on the
+// payload reach the registry buildRegistry returns, role by role: the
+// registry-level tests never exercise buildRegistry, so a build that dropped
+// the wire field would pass every test in that package while the admin page
+// changed nothing.
+func TestBuildRegistryAppliesPayloadLaddersPerRole(t *testing.T) {
+	r, faults := buildRegistry(ladderSpec(map[string]map[string]float64{
+		"coder": {"complex": 0.99, "critical": 0.99},
+	}))
+	require.Empty(t, faults)
+
+	coder := r.SelectByComplexity(registry.SelectInput{Role: registry.RoleCoder, Tier: registry.TierComplex})
+	require.True(t, coder.OK)
+	assert.False(t, coder.AtBar(), "the raised coder bar must not be silently satisfied by the built-in ladder")
+	assert.Equal(t, registry.TierModerate, coder.MetTier)
+
+	reviewer := r.SelectByComplexity(registry.SelectInput{Role: registry.RoleReviewer, Tier: registry.TierComplex})
+	require.True(t, reviewer.OK)
+	assert.True(t, reviewer.AtBar(), "the reviewer ladder is not on the wire and stays built-in")
+}
+
+// TestBuildRegistryFallsBackPerRoleOnAnInvalidPayloadLadder proves an
+// invalid ladder can no longer stop the worker: the role it belongs to runs
+// on the built-in bars, the other role's ladder still applies, and the
+// fault comes back for the card log.
+func TestBuildRegistryFallsBackPerRoleOnAnInvalidPayloadLadder(t *testing.T) {
+	r, faults := buildRegistry(ladderSpec(map[string]map[string]float64{
+		"coder":    {"complex": 0.99, "critical": 0.99},
+		"reviewer": {"simple": 0.90, "critical": 0.10}, // inverted: fails the monotone check
+	}))
+	require.Len(t, faults, 1)
+	assert.Equal(t, "reviewer", faults[0].Role)
+	assert.Contains(t, faults[0].Error(), "ladder must not decrease")
+
+	coder := r.SelectByComplexity(registry.SelectInput{Role: registry.RoleCoder, Tier: registry.TierComplex})
+	assert.Equal(t, registry.TierModerate, coder.MetTier, "the valid coder ladder still applies")
+
+	reviewer := r.SelectByComplexity(registry.SelectInput{Role: registry.RoleReviewer, Tier: registry.TierComplex})
+	assert.True(t, reviewer.AtBar(), "the failed reviewer ladder is the built-in bars")
+}
+
+// addLogs returns the message of every recorded AddLog call, in order.
+func (s *stubOps) addLogs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var out []string
+
+	for _, c := range s.log {
+		if c.op != "AddLog" || len(c.args) != 2 {
+			continue
+		}
+
+		if msg, ok := c.args[1].(string); ok {
+			out = append(out, msg)
+		}
+	}
+
+	return out
+}
+
+// TestLogLadderFaultsWritesOneCardLinePerRole pins the wording the operator
+// reads on the card, one line per failed role, in fault order.
+func TestLogLadderFaultsWritesOneCardLinePerRole(t *testing.T) {
+	ops := newStubOps()
+	faults := []registry.LadderFault{
+		{Role: "coder", Reason: errors.New(`tier bars: unknown tier "epic"`)},
+		{Role: "reviewer", Reason: errors.New("tier bars: ladder must not decrease: critical 0.1 is below complex 0.82")},
+	}
+
+	logLadderFaults(context.Background(), faults, ops, "CMX-001")
+
+	lines := ops.addLogs()
+	require.Len(t, lines, 2)
+	assert.Equal(t, `selector: coder tier ladder from the payload did not validate (tier bars: unknown tier "epic") - using the built-in bars`, lines[0])
+	assert.Equal(t, "selector: reviewer tier ladder from the payload did not validate (tier bars: ladder must not decrease: critical 0.1 is below complex 0.82) - using the built-in bars", lines[1])
+}
+
+// TestLogLadderFaultsToleratesNilOpsAndNoFaults mirrors logReachability: a
+// CardOps-only fake yields nil ops and the card line is skipped; no faults
+// means no line at all.
+func TestLogLadderFaultsToleratesNilOpsAndNoFaults(t *testing.T) {
+	assert.NotPanics(t, func() {
+		logLadderFaults(context.Background(), []registry.LadderFault{{Role: "coder", Reason: errors.New("x")}}, nil, "CMX-001")
+	})
+
+	ops := newStubOps()
+	logLadderFaults(context.Background(), nil, ops, "CMX-001")
+	assert.Equal(t, 0, ops.count("AddLog"))
+}
+
+// TestRunLogsAnInvalidPayloadLadderOnTheCard proves the wiring in Run: the
+// fault buildRegistry returns reaches the card before any phase runs, and
+// the run itself proceeds (the orchestrator is swapped out and returns nil).
+// stubOps implements orchestrator.Ops, so ops2orchestrator hands the real
+// AddLog back; the reachability preflight writes its own line beside it.
+func TestRunLogsAnInvalidPayloadLadderOnTheCard(t *testing.T) {
 	remote := setupBareRemote(t)
 	wsParent := t.TempDir()
-	ops := newFakeOps()
+	ops := newStubOps()
 
-	swapRunOrchestrator(t, func(context.Context, orchestrator.Deps) error {
-		t.Fatal("orchestrator must not run when the tier ladder fails to build")
-
-		return nil
-	})
+	swapRunOrchestrator(t, func(context.Context, orchestrator.Deps) error { return nil })
 
 	emit := events.NewEmitter(io.Discard, io.Discard)
 
 	spec := baseSpec(t, remote, wsParent)
-	// Inverted ladder: simple above critical fails the monotone check.
-	spec.SelectorTierBars = map[string]float64{"simple": 0.90, "critical": 0.10}
+	spec.Selection = &protocol.SelectionContext{
+		TierBars: map[string]map[string]float64{"reviewer": {"simple": 0.90, "critical": 0.10}},
+	}
 
 	res, err := Run(context.Background(), spec, ops, &scriptedLLM{}, emit, openStdin(t))
+	require.NoError(t, err)
+	assert.Equal(t, "completed", res.Reason)
 
-	require.Error(t, err)
-	assert.Equal(t, "error", res.Reason)
-	assert.Equal(t, 1, ops.count("ReleaseCard"))
-
-	msg := err.Error()
-	assert.Contains(t, msg, "ladder must not decrease")
-	assert.Equal(t, 1, strings.Count(msg, "build registry:"),
-		"the error must be wrapped with context exactly once, not doubled on the way out of runFSM")
+	lines := ops.addLogs()
+	idx := slices.IndexFunc(lines, func(l string) bool {
+		return strings.HasPrefix(l, "selector: reviewer tier ladder from the payload did not validate (")
+	})
+	require.NotEqual(t, -1, idx, "the ladder fault must land on the card; logs=%v", lines)
+	assert.Contains(t, lines[idx], "ladder must not decrease")
+	assert.True(t, strings.HasSuffix(lines[idx], ") - using the built-in bars"), "line=%q", lines[idx])
 }
 
 // TestLogReachabilityLogsCardOnlyWhenSomeTierIsUnreachable pins the worker-side
