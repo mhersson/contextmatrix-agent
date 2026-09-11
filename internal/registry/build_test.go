@@ -30,7 +30,7 @@ func TestFromSelectionBuildsCandidatesPriorsAndFavorites(t *testing.T) {
 		Favorites: []protocol.FavoriteRule{{Tier: "complex", Models: []string{"z-ai/glm-5.2"}}},
 		Blacklist: []string{"bad/model"},
 	}
-	r, faults := FromSelection(sc, "capable/default", 0, false)
+	r, faults := FromSelection(sc, "capable/default", false)
 	require.Empty(t, faults)
 
 	got := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierComplex})
@@ -42,7 +42,7 @@ func TestFromSelectionBuildsCandidatesPriorsAndFavorites(t *testing.T) {
 }
 
 func TestFromSelectionNilReturnsCapableDefault(t *testing.T) {
-	r, faults := FromSelection(nil, "capable/default", 0, false)
+	r, faults := FromSelection(nil, "capable/default", false)
 	require.Empty(t, faults)
 
 	got := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierComplex})
@@ -50,9 +50,10 @@ func TestFromSelectionNilReturnsCapableDefault(t *testing.T) {
 	assert.False(t, got.HasPrior, "the default sits outside the candidate set and has no prior")
 }
 
-func TestFromSelectionThreadsPriceHeadroom(t *testing.T) {
+func TestFromSelectionAppliesThePayloadHeadroom(t *testing.T) {
 	// premium is higher quality but priced >1.5x and <3x the cheapest, so the
-	// applied headroom decides the winner: 1.5 -> cheap wins; 3.0 -> premium wins.
+	// headroom on the wire decides the winner: absent -> cheap wins; 3.0 ->
+	// premium wins.
 	sc := &protocol.SelectionContext{
 		Candidates: []protocol.CandidateModel{
 			{Slug: "cheap/model", PromptPricePerTok: 1, CompletionPricePerTok: 1, ContextWindow: 200000, CoderPrior: 0.80, ReviewerPrior: 0.80},
@@ -61,12 +62,14 @@ func TestFromSelectionThreadsPriceHeadroom(t *testing.T) {
 	}
 	in := SelectInput{Role: RoleCoder, Tier: TierModerate}
 
-	rDefault, _ := FromSelection(sc, "capable/default", 0, false) // 0 -> worker default (1.5)
-	assert.Equal(t, "cheap/model", rDefault.SelectByComplexity(in).Model)
+	rDefault, _ := FromSelection(sc, "capable/default", false)
+	assert.Equal(t, "cheap/model", rDefault.SelectByComplexity(in).Model, "no headroom on the wire is the built-in 1.5")
 
-	rWide, _ := FromSelection(sc, "capable/default", 3.0, false)
+	sc.PriceHeadroom = 3.0
+
+	rWide, _ := FromSelection(sc, "capable/default", false)
 	assert.Equal(t, "premium/model", rWide.SelectByComplexity(in).Model,
-		"a non-default headroom must widen the best-value band")
+		"the payload headroom must widen the best-value band")
 }
 
 func TestFromSelectionThreadsMaxCapability(t *testing.T) {
@@ -78,10 +81,10 @@ func TestFromSelectionThreadsMaxCapability(t *testing.T) {
 	}
 	in := SelectInput{Role: RoleCoder, Tier: TierModerate}
 
-	rDefault, _ := FromSelection(sc, "capable/default", 0, false)
+	rDefault, _ := FromSelection(sc, "capable/default", false)
 	assert.Equal(t, "cheap/model", rDefault.SelectByComplexity(in).Model, "default must pick the cheaper model")
 
-	rMax, _ := FromSelection(sc, "capable/default", 0, true)
+	rMax, _ := FromSelection(sc, "capable/default", true)
 	assert.Equal(t, "premium/model", rMax.SelectByComplexity(in).Model,
 		"maxCapability=true must pick the premium (more capable) model regardless of price")
 }
@@ -98,7 +101,7 @@ func TestFromSelectionThreadsCreators(t *testing.T) {
 			{Slug: "claude-x", PromptPricePerTok: 1e-6, CompletionPricePerTok: 2e-6, ContextWindow: 200000, ReviewerPrior: 0.85, Creator: "anthropic"},
 		},
 	}
-	r, _ := FromSelection(sc, "capable-default", 0, false)
+	r, _ := FromSelection(sc, "capable-default", false)
 
 	panel := SeatPicks(r.SelectDiscussionPanelReport(SelectInput{Role: RoleReviewer, Tier: TierComplex, EstTokens: 50000}, 3))
 	require.Len(t, panel, 3)
@@ -111,7 +114,7 @@ func TestFromSelectionThreadsCreators(t *testing.T) {
 		sc.Candidates[i].Creator = ""
 	}
 
-	rBlind, _ := FromSelection(sc, "capable-default", 0, false)
+	rBlind, _ := FromSelection(sc, "capable-default", false)
 
 	panel = SeatPicks(rBlind.SelectDiscussionPanelReport(SelectInput{Role: RoleReviewer, Tier: TierComplex, EstTokens: 50000}, 3))
 	require.Len(t, panel, 3)
@@ -128,7 +131,7 @@ func TestFromSelectionAppliesPayloadLaddersPerRole(t *testing.T) {
 	sc := twoModels()
 	sc.TierBars = map[string]map[string]float64{"coder": {"complex": 0.93, "critical": 0.95}}
 
-	r, faults := FromSelection(sc, "capable/default", 0, false)
+	r, faults := FromSelection(sc, "capable/default", false)
 	require.Empty(t, faults)
 
 	assert.InDelta(t, 0.93, r.BarFor(RoleCoder, TierComplex), 1e-9)
@@ -142,7 +145,7 @@ func TestFromSelectionAppliesPayloadLaddersPerRole(t *testing.T) {
 	assert.Equal(t, "z-ai/glm-5.3", reviewer.Model)
 	assert.True(t, reviewer.AtBar())
 
-	rDefault, _ := FromSelection(twoModels(), "capable/default", 0, false)
+	rDefault, _ := FromSelection(twoModels(), "capable/default", false)
 	assert.Equal(t, "z-ai/glm-5.3", rDefault.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierComplex}).Model,
 		"without a ladder the coder pick is the band winner")
 }
@@ -157,7 +160,7 @@ func TestFromSelectionFallsBackOnlyTheRoleWhoseLadderFailed(t *testing.T) {
 		"reviewer": {"complex": 0.5},
 	}
 
-	r, faults := FromSelection(sc, "capable/default", 0, false)
+	r, faults := FromSelection(sc, "capable/default", false)
 	require.Len(t, faults, 1)
 	assert.Equal(t, "reviewer", faults[0].Role)
 	assert.Contains(t, faults[0].Error(), "reviewer tier ladder from the payload did not validate (")

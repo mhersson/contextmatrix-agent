@@ -266,11 +266,6 @@ func specFromEnv() (worker.RunSpec, error) {
 		return worker.RunSpec{}, err
 	}
 
-	selectorPriceHeadroom, err := envFloat("CMX_SELECTOR_PRICE_HEADROOM", 0)
-	if err != nil {
-		return worker.RunSpec{}, err
-	}
-
 	compactionThreshold, err := envFloat("CMX_COMPACTION_THRESHOLD", 0.85)
 	if err != nil {
 		return worker.RunSpec{}, err
@@ -423,7 +418,6 @@ func specFromEnv() (worker.RunSpec, error) {
 		ToolOutputMax:             toolOutputMax,
 		MaxTurns:                  maxTurns,
 		MaxCardCost:               maxCardCost,
-		SelectorPriceHeadroom:     selectorPriceHeadroom,
 		ContainerTimeout:          time.Duration(containerTimeoutSeconds) * time.Second,
 		GatesPollInterval:         time.Duration(gatesPollSeconds) * time.Second,
 		GatesCIWaitTimeout:        time.Duration(gatesCIWaitSeconds) * time.Second,
