@@ -15,9 +15,8 @@ and the only host-side selection setting is `default_model`; the
 Artificial-Analysis sourcing, normalization, the ladders and the headroom live
 on the ContextMatrix side. The selection rule itself is the `selection`
 package of `contextmatrix-protocol`, shared with CM so its admin preview and
-the agent's
-real pick are one implementation; `internal/registry` is the agent's adapter
-over it.
+the agent's real pick are one implementation; `internal/registry` is the
+agent's adapter over it.
 
 ## Eligibility and choice
 
