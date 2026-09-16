@@ -14,7 +14,7 @@ require (
 	github.com/mhersson/contextmatrix-backendkit v0.4.4
 	github.com/mhersson/contextmatrix-harness v0.20.0
 	github.com/mhersson/contextmatrix-protocol v0.20.0
-	github.com/modelcontextprotocol/go-sdk v1.7.0
+	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/prometheus/client_golang v1.24.1
 	github.com/spf13/cobra v1.10.2
