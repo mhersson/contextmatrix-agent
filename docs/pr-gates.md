@@ -114,11 +114,10 @@ The triage call runs under its own turn cap (`copilotTriageMaxTurns`, 15,
 min'd with the configured base) rather than inheriting the flat per-phase
 budget, with a wrap-up nudge at `wrapUpTurns` remaining that asks the triage
 to emit the findings JSON before the cap lands, the way the review
-synthesizer emits its
-verdict. A triage that still hits the cap parks the card with a triage-specific
-reason ("Copilot triage hit its turn cap"), distinct from the fix round's own
-cap park ("Copilot fix run hit its turn cap"), so the card names the phase that
-ran out. The triage prompt itself notes that Copilot comment line numbers are
+synthesizer emits its verdict. A triage that still hits the cap parks the card
+with a triage-specific reason ("Copilot triage hit its turn cap"), distinct
+from the fix round's own cap park ("Copilot fix run hit its turn cap"), so the
+card names the phase that ran out. The triage prompt itself notes that Copilot comment line numbers are
 diff positions and need not match file line numbers - the model locates the
 code by its text and does not spend turns reconciling line numbers.
 

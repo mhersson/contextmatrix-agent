@@ -3397,6 +3397,8 @@ func TestCopilotGate_TriageTurnCapParksAsTriage(t *testing.T) {
 
 		assert.Equal(t, burns+3, modelCallCount(client),
 			"burn turns, the verdict, the fix, and the re-review triage; models=%v", client.models)
+		assert.Contains(t, strings.Join(client.tasks, "\n"), copilotTriageWrapUpMessage,
+			"the triage wrap-up nudge reaches the conversation as a user message")
 		assert.Contains(t, ops.lastBody(), "- VALID internal/api/handler.go:",
 			"the verdict is parsed and recorded; body=%q", ops.lastBody())
 		assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0,

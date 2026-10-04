@@ -331,10 +331,9 @@ func (o *run) runModelCoder(ctx context.Context, reg *tools.Registry, prompt, mo
 // finishes by emitting a JSON plan as its final message (there is no finish
 // tool), so it gets a plan-specific wrap-up nudge that asks for the emit
 // before the turn cap instead of letting the model explore straight into it.
-// Both the
-// first attempt and the repair turn get a bounded budget (planTurnCap): the
-// repair is tighter still, because the model already had a full exploration
-// pass and must re-emit a valid plan, not start over.
+// Both the first attempt and the repair turn get a bounded budget
+// (planTurnCap): the repair is tighter still, because the model already had a
+// full exploration pass and must re-emit a valid plan, not start over.
 func (o *run) runModelPlan(ctx context.Context, reg *tools.Registry, prompt, model string, images []llm.ImageURL, repair bool) (harness.Result, time.Duration, error) {
 	cfg := o.harnessConfig(model)
 	cfg.TaskImages = images
@@ -369,8 +368,7 @@ func (o *run) runModelDiagnose(ctx context.Context, reg *tools.Registry, prompt,
 // unwritten. GraceTurn is deliberately NOT set: the harness only grants the
 // grace call when the registry carries a Terminal tool (see the harness's
 // graceFinish), and the triage runs on d.ReadTools, which is read-only and
-// registers none - the same reason
-// runModelDiagnose omits it.
+// registers none - the same reason runModelDiagnose omits it.
 func (o *run) runModelTriage(ctx context.Context, reg *tools.Registry, prompt, model string) (harness.Result, time.Duration, error) {
 	cfg := o.harnessConfig(model)
 	cfg.WrapUpTurns = wrapUpTurns
