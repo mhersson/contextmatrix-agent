@@ -262,8 +262,7 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 	if _, ferr := o.runFixModel(ctx, prompt, req); ferr != nil {
 		// A cap is not a verdict on the tree the fix left behind: the re-run
 		// below decides, exactly as runFix does for the review rounds.
-		var mte *MaxTurnsError
-		if !errors.As(ferr, &mte) {
+		if _, ok := errors.AsType[*MaxTurnsError](ferr); !ok {
 			return ferr
 		}
 
@@ -509,8 +508,7 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 		// final failing output does - the same exemption the capped path
 		// takes - with a card-log line naming the classification so the log
 		// agrees with the suppression.
-		var vpe *VerifyParkedError
-		if errors.As(verr, &vpe) {
+		if vpe, ok := errors.AsType[*VerifyParkedError](verr); ok {
 			if vpe.Environmental {
 				o.logEnvironmentalVerify(ctx, sub)
 			} else {
@@ -694,8 +692,7 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 			Turns: res.Turns, Outcome: sizingOutcome(err, res.Turns, maxTurns), DurationMS: dur.Milliseconds(),
 		})
 
-		var ie *IncapableError
-		if errors.As(err, &ie) {
+		if ie, ok := errors.AsType[*IncapableError](err); ok {
 			// recoverIncapable blacklists + excludes the model and returns an error
 			// only when the per-card re-selection cap is exhausted - park then.
 			if rerr := o.recoverIncapable(ctx, ie); rerr != nil {
@@ -942,8 +939,7 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 		// line and the run parks as blocked, not as a plain turn cap. It is also
 		// left unreported to the leaderboard for the same reason - a missing
 		// toolchain is not evidence about the model.
-		var tme *ToolchainMissingError
-		if errors.As(verr, &tme) {
+		if _, ok := errors.AsType[*ToolchainMissingError](verr); ok {
 			return false, verr
 		}
 
@@ -969,8 +965,7 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 		// same shape as the ensureVerify arm above: propagate it unlogged so
 		// it supersedes the turn cap and reaches execute()'s dedicated
 		// toolchain arm instead of being read as a plain "did not pass".
-		var tme *ToolchainMissingError
-		if errors.As(rerr, &tme) {
+		if _, ok := errors.AsType[*ToolchainMissingError](rerr); ok {
 			return false, rerr
 		}
 	}

@@ -504,8 +504,7 @@ func (o *run) judgeOutcome(c *candidate) string {
 			return "win"
 		}
 	case c.err != nil:
-		var mte *MaxTurnsError
-		if errors.As(c.err, &mte) {
+		if _, ok := errors.AsType[*MaxTurnsError](c.err); ok {
 			return "failed (turn cap)"
 		}
 

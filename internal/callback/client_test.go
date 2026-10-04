@@ -129,10 +129,10 @@ func TestReportStatus_Retries(t *testing.T) {
 	t.Run("five_xx_retried_three_times", func(t *testing.T) {
 		apiKey := "retry-test-key"
 
-		var attempts int32
+		var attempts atomic.Int32
 
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			n := atomic.AddInt32(&attempts, 1)
+			n := attempts.Add(1)
 			if n < 3 {
 				w.WriteHeader(http.StatusInternalServerError)
 
@@ -148,16 +148,16 @@ func TestReportStatus_Retries(t *testing.T) {
 		err := c.ReportStatus(context.Background(), "CMX-001", "proj", "running", "")
 		require.NoError(t, err)
 
-		assert.Equal(t, int32(3), atomic.LoadInt32(&attempts), "expected exactly 3 attempts")
+		assert.Equal(t, int32(3), attempts.Load(), "expected exactly 3 attempts")
 	})
 
 	t.Run("four_xx_not_retried", func(t *testing.T) {
 		apiKey := "no-retry-key"
 
-		var attempts int32
+		var attempts atomic.Int32
 
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			atomic.AddInt32(&attempts, 1)
+			attempts.Add(1)
 			w.WriteHeader(http.StatusBadRequest)
 		}))
 		defer srv.Close()
@@ -167,7 +167,7 @@ func TestReportStatus_Retries(t *testing.T) {
 		err := c.ReportStatus(context.Background(), "CMX-001", "proj", "running", "")
 		require.Error(t, err)
 
-		assert.Equal(t, int32(1), atomic.LoadInt32(&attempts), "4xx must not be retried")
+		assert.Equal(t, int32(1), attempts.Load(), "4xx must not be retried")
 	})
 }
 

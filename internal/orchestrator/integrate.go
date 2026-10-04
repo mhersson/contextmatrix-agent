@@ -86,8 +86,7 @@ func runIntegrate(ctx context.Context, o *run) error {
 		if err != nil {
 			// Budget parks must surface so the worker can park the run; any other PR
 			// failure is non-fatal - the push already landed, so the work is safe.
-			var be *BudgetExceededError
-			if errors.As(err, &be) {
+			if _, ok := errors.AsType[*BudgetExceededError](err); ok {
 				return err
 			}
 

@@ -631,13 +631,11 @@ func parkBlocked(ctx context.Context, a fsmArgs, err error) (Result, error) {
 // parkReason renders the park sentinel's own message, unwrapped from any
 // orchestrator wrapping, for the board's parked report.
 func parkReason(err error) string {
-	var rp *orchestrator.ReviewParkedError
-	if errors.As(err, &rp) {
+	if rp, ok := errors.AsType[*orchestrator.ReviewParkedError](err); ok {
 		return rp.Error()
 	}
 
-	var gp *orchestrator.GatesParkedError
-	if errors.As(err, &gp) {
+	if gp, ok := errors.AsType[*orchestrator.GatesParkedError](err); ok {
 		return gp.Error()
 	}
 

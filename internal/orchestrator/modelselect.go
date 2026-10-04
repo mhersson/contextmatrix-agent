@@ -71,10 +71,8 @@ func walkedDown(p registry.Pick) bool {
 // shortfall advisory while still recording the choice on the transcript.
 func offLadderPick(reg *registry.Registry, model string, role registry.Role, tier registry.Tier, src registry.PickSource) registry.Pick {
 	return registry.Pick{
-		ModelSpec: registry.ModelSpec{
-			Model:         model,
-			ContextWindow: reg.ContextWindow(model),
-		},
+		Model:         model,
+		ContextWindow: reg.ContextWindow(model),
 		Role:          role,
 		RequestedTier: tier,
 		Source:        src,

@@ -1759,8 +1759,7 @@ func (o *run) ciGate(ctx context.Context, prURL string, st *gatesState) error {
 		polls++
 
 		if pollErr != nil {
-			var permanent *PermanentPollError
-			if errors.As(pollErr, &permanent) {
+			if permanent, ok := errors.AsType[*PermanentPollError](pollErr); ok {
 				// The seam says this failure repeats on every poll - looping to
 				// the deadline would only park later and blinder.
 				st.Detail = "- " + permanent.Err + "\n"

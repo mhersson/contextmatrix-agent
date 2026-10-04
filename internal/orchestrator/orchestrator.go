@@ -733,51 +733,44 @@ func (o *run) execute(ctx context.Context) error {
 		}
 
 		if err := o.phaseFnFor(phase)(ctx); err != nil {
-			var be *BudgetExceededError
-			if errors.As(err, &be) {
+			if be, ok := errors.AsType[*BudgetExceededError](err); ok {
 				// Park: record the numbers, then stop without entering the
 				// next phase. Log failure is best-effort - the budget error is
 				// the one that must surface to the worker.
 				o.d.logCard(ctx, "%s", budgetLogMessage(be))
 			}
 
-			var cle *ContextLimitError
-			if errors.As(err, &cle) {
+			if cle, ok := errors.AsType[*ContextLimitError](err); ok {
 				// Context-window park: same shape as the budget arm - log the
 				// numbers best-effort, then stop without entering the next phase.
 				o.d.logCard(ctx, "%s", contextLimitLogMessage(cle))
 			}
 
-			var mte *MaxTurnsError
-			if errors.As(err, &mte) {
+			if mte, ok := errors.AsType[*MaxTurnsError](err); ok {
 				// Turn-cap park: same shape as the budget/context arms - log
 				// best-effort, then stop without entering the next phase.
 				o.d.logCard(ctx, "%s", maxTurnsLogMessage(phase, mte))
 			}
 
-			var tme *ToolchainMissingError
-			if errors.As(err, &tme) {
+			if tme, ok := errors.AsType[*ToolchainMissingError](err); ok {
 				// Toolchain-missing park: same shape as the other arms - log
 				// best-effort, then stop without entering the next phase.
 				o.d.logCard(ctx, "%s", toolchainLogMessage(tme))
 			}
 
-			var nme *NoModelError
-			if errors.As(err, &nme) {
+			if nme, ok := errors.AsType[*NoModelError](err); ok {
 				// Model-selection park: same shape as the other arms - log
 				// best-effort, then stop without entering the next phase.
 				o.d.logCard(ctx, "%s", noModelLogMessage(nme))
 			}
 
-			var vpe *VerifyParkedError
-			if errors.As(err, &vpe) {
+			if vpe, ok := errors.AsType[*VerifyParkedError](err); ok {
 				// Pre-commit verify park: same shape as the other arms, with
 				// the failing output carried along - see verifyParkedLogMessage.
 				o.d.logCard(ctx, "%s", verifyParkedLogMessage(vpe))
 			}
 
-			var soe *SplitOverflowError
-			if errors.As(err, &soe) {
+			if soe, ok := errors.AsType[*SplitOverflowError](err); ok {
 				// Split-overflow park: same shape as the other arms - log
 				// best-effort, then stop without entering the next phase.
 				o.d.logCard(ctx, "%s", splitOverflowLogMessage(soe))

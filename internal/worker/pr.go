@@ -255,8 +255,7 @@ func (p *PRCreator) runGH(ctx context.Context, stdin string, jsonTolerant bool, 
 
 	detail := trimmed
 
-	var ee *exec.ExitError
-	if errors.As(runErr, &ee) {
+	if ee, ok := errors.AsType[*exec.ExitError](runErr); ok {
 		detail = strings.TrimSpace(trimmed + "\n" + string(ee.Stderr))
 	}
 
@@ -275,8 +274,7 @@ func (p *PRCreator) Create(ctx context.Context, title, body, base, head string) 
 	if err != nil {
 		detail := strings.TrimSpace(string(out))
 
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
+		if ee, ok := errors.AsType[*exec.ExitError](err); ok {
 			detail = strings.TrimSpace(detail + "\n" + string(ee.Stderr))
 		}
 

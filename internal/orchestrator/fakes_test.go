@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -898,9 +899,9 @@ func (p *planLLM) next(req llm.Request) (llm.Response, error) {
 	p.msgsPerCall = append(p.msgsPerCall, append([]llm.Message(nil), req.Messages...))
 
 	// Capture the last user message - the phase task prompt.
-	for j := len(req.Messages) - 1; j >= 0; j-- {
-		if req.Messages[j].Role == "user" {
-			p.tasks = append(p.tasks, req.Messages[j].Content)
+	for _, v := range slices.Backward(req.Messages) {
+		if v.Role == "user" {
+			p.tasks = append(p.tasks, v.Content)
 
 			break
 		}
@@ -1001,7 +1002,7 @@ func priorTestRegistry(coderPrior float64) *registry.Registry {
 // Pick would be neither at bar nor below it.
 func atBarPick(model string) registry.Pick {
 	return registry.Pick{
-		ModelSpec:     registry.ModelSpec{Model: model},
+		Model:         model,
 		Role:          registry.RoleCoder,
 		RequestedTier: registry.TierComplex,
 		MetTier:       registry.TierComplex,

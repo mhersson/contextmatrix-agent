@@ -258,8 +258,7 @@ func (o *run) ensureVerify(ctx context.Context) (verifyPlan, error) {
 		// to blocked for a human to read. Every other resolution error (budget,
 		// cancellation) leaves the section alone: those park without implicating
 		// the verify command at all.
-		var tme *ToolchainMissingError
-		if errors.As(err, &tme) {
+		if tme, ok := errors.AsType[*ToolchainMissingError](err); ok {
 			o.recordSection(ctx, "Verify Command", verifyToolchainSection(tme))
 		}
 
