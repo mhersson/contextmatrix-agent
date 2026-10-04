@@ -849,6 +849,10 @@ addressed in the change.
 Judge each comment on its own evidence. Do not invent findings the reviewer did
 not raise, and do not merge two comments into one.
 
+Copilot comment line numbers are diff positions and need not match file line
+numbers, so locate the code by its text and do not spend turns reconciling line
+numbers.
+
 PARENT CARD
 Title: %s
 
@@ -1148,6 +1152,11 @@ func fixWrapUpMessage(n int) string {
 // the specialists land their findings: an imperfect verdict beats a silent
 // max_turns death on a run that is otherwise green.
 const synthesisWrapUpMessage = "You are nearly out of turns. Stop investigating and respond with ONLY the verdict JSON object NOW, in the required format. A verdict based on what you have already read is useful; no verdict is not."
+
+// copilotTriageWrapUpMessage forces the Copilot triage to land its findings the
+// way the synthesizer lands its verdict: an imperfect verdict beats a silent
+// max_turns death on a gate whose comments then stand unjudged.
+const copilotTriageWrapUpMessage = "You are nearly out of turns. Stop investigating and respond with ONLY the {\"findings\":[...]} JSON object NOW, one entry per comment, based on what you have already read. A verdict based on what you have already read is useful; no verdict is not."
 
 const synthesisWrapUpTurns = 3
 

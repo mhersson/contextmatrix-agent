@@ -248,6 +248,18 @@ func synthesisTurnCap(base int) int {
 	return min(base, synthesisMaxTurns)
 }
 
+// copilotTriageMaxTurns caps the Copilot triage call. Triage is a verdict-only
+// read over a handful of comments, so a small fixed constant beats any
+// comment-count scale: 15 leaves room for a bounded look at the cited files
+// while staying above wrapUpTurns so the wrap-up nudge can fire.
+const copilotTriageMaxTurns = 15
+
+// copilotTriageTurnCap is the triage run's turn budget, min'd with base so a
+// smaller configured cap is never raised - mirrors synthesisTurnCap.
+func copilotTriageTurnCap(base int) int {
+	return min(base, copilotTriageMaxTurns)
+}
+
 // runModelSynthesis is the review synthesizer's model call: the flat base is
 // replaced by the synthesis phase cap and the emit-now wrap-up nudge, so an
 // over-investigating synthesizer is steered into emitting its verdict instead
@@ -346,6 +358,23 @@ func (o *run) runModelDiagnose(ctx context.Context, reg *tools.Registry, prompt,
 	cfg.WrapUpTurns = wrapUpTurns
 	cfg.WrapUpMessage = diagnoseWrapUpMessage
 	cfg.MaxTurns = diagnoseTurnCap(cfg.MaxTurns)
+
+	return o.runModelCfg(ctx, reg, prompt, model, cfg)
+}
+
+// runModelTriage is the Copilot triage call's model wrapper: the flat base is
+// replaced by the triage cap and the verdict-now wrap-up nudge, so a
+// line-number-chasing triage is steered into emitting its findings instead of
+// dying at the cap with the verdict unwritten. GraceTurn is deliberately NOT
+// set: the harness only grants the grace call when the registry carries a
+// Terminal tool (see the harness's graceFinish), and the triage runs on
+// d.ReadTools, which is read-only and registers none - the same reason
+// runModelDiagnose omits it.
+func (o *run) runModelTriage(ctx context.Context, reg *tools.Registry, prompt, model string) (harness.Result, time.Duration, error) {
+	cfg := o.harnessConfig(model)
+	cfg.WrapUpTurns = wrapUpTurns
+	cfg.WrapUpMessage = copilotTriageWrapUpMessage
+	cfg.MaxTurns = copilotTriageTurnCap(cfg.MaxTurns)
 
 	return o.runModelCfg(ctx, reg, prompt, model, cfg)
 }
