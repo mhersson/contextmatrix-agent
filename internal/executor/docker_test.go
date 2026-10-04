@@ -14,14 +14,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/api/types/network"
-	"github.com/docker/docker/client"
 	"github.com/mhersson/contextmatrix-agent/internal/metrics"
 	"github.com/mhersson/contextmatrix-backendkit/webhookcore"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/image"
+	"github.com/moby/moby/client"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -169,7 +166,7 @@ func TestContainerConfig_HostConfigResourcesAndHardening(t *testing.T) {
 	require.NotNil(t, host.Init)
 	assert.True(t, *host.Init, "docker-init must be PID 1 so orphaned children are reaped")
 
-	assert.Equal(t, []string{"ALL"}, []string(host.CapDrop))
+	assert.Equal(t, []string{"ALL"}, host.CapDrop)
 	assert.Equal(t, []string{"no-new-privileges"}, host.SecurityOpt)
 	assert.Equal(t, []string{"/srv/cm/secrets/demo:/run/cm-secrets:ro"}, host.Binds)
 }
@@ -336,7 +333,7 @@ func TestNewDockerExecutor_WiresOnStart(t *testing.T) {
 
 type fakeWaiter struct{ exits bool }
 
-func (f *fakeWaiter) ContainerWait(ctx context.Context, _ string, _ container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
+func (f *fakeWaiter) ContainerWait(ctx context.Context, _ string, _ client.ContainerWaitOptions) client.ContainerWaitResult {
 	wc := make(chan container.WaitResponse, 1)
 	ec := make(chan error, 1)
 
@@ -350,7 +347,7 @@ func (f *fakeWaiter) ContainerWait(ctx context.Context, _ string, _ container.Wa
 		}()
 	}
 
-	return wc, ec
+	return client.ContainerWaitResult{Result: wc, Error: ec}
 }
 
 func TestWaitForSelfExitExited(t *testing.T) {
@@ -432,39 +429,40 @@ type stubDocker struct {
 }
 
 func (s *stubDocker) ContainerWait(
-	ctx context.Context, _ string, _ container.WaitCondition,
-) (<-chan container.WaitResponse, <-chan error) {
-	return s.waitFn(ctx)
+	ctx context.Context, _ string, _ client.ContainerWaitOptions,
+) client.ContainerWaitResult {
+	result, errs := s.waitFn(ctx)
+
+	return client.ContainerWaitResult{Result: result, Error: errs}
 }
 
-func (s *stubDocker) ContainerKill(_ context.Context, id, _ string) error {
+func (s *stubDocker) ContainerKill(_ context.Context, id string, _ client.ContainerKillOptions) (client.ContainerKillResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	s.killed = append(s.killed, id)
 
-	return nil
+	return client.ContainerKillResult{}, nil
 }
 
-func (s *stubDocker) ContainerRemove(_ context.Context, id string, _ container.RemoveOptions) error {
+func (s *stubDocker) ContainerRemove(
+	_ context.Context, id string, _ client.ContainerRemoveOptions,
+) (client.ContainerRemoveResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	s.removed = append(s.removed, id)
 
-	return nil
+	return client.ContainerRemoveResult{}, nil
 }
 
-func (s *stubDocker) ContainerCreate(
-	_ context.Context, _ *container.Config, _ *container.HostConfig,
-	_ *network.NetworkingConfig, _ *ocispec.Platform, _ string,
-) (container.CreateResponse, error) {
-	return container.CreateResponse{ID: "container-1"}, nil
+func (s *stubDocker) ContainerCreate(_ context.Context, _ client.ContainerCreateOptions) (client.ContainerCreateResult, error) {
+	return client.ContainerCreateResult{ID: "container-1"}, nil
 }
 
 func (s *stubDocker) ContainerAttach(
-	_ context.Context, _ string, _ container.AttachOptions,
-) (types.HijackedResponse, error) {
+	_ context.Context, _ string, _ client.ContainerAttachOptions,
+) (client.ContainerAttachResult, error) {
 	r := s.attachR
 	if r == nil {
 		r = bytes.NewReader(nil)
@@ -473,11 +471,13 @@ func (s *stubDocker) ContainerAttach(
 	local, remote := net.Pipe()
 	_ = remote.Close()
 
-	return types.HijackedResponse{Conn: local, Reader: bufio.NewReader(r)}, nil
+	return client.ContainerAttachResult{
+		HijackedResponse: client.HijackedResponse{Conn: local, Reader: bufio.NewReader(r)},
+	}, nil
 }
 
-func (s *stubDocker) ContainerStart(_ context.Context, _ string, _ container.StartOptions) error {
-	return nil
+func (s *stubDocker) ContainerStart(_ context.Context, _ string, _ client.ContainerStartOptions) (client.ContainerStartResult, error) {
+	return client.ContainerStartResult{}, nil
 }
 
 // exitsWith yields a wait result carrying code, the shape of a container that
@@ -585,7 +585,7 @@ func TestWaitAndCleanupReportsExitCause(t *testing.T) {
 			close(pumpDone)
 
 			e.waitAndCleanup("proj", "CARD-1", "cid-1", 1, "corr-1", time.Now(),
-				types.HijackedResponse{Conn: conn}, make(chan struct{}), pumpDone,
+				client.HijackedResponse{Conn: conn}, make(chan struct{}), pumpDone,
 				slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 			select {

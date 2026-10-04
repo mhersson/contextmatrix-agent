@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/docker/api/types/container"
+	"github.com/moby/moby/client"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -179,12 +179,12 @@ func TestIntegration_LaunchEchoAndExit(t *testing.T) {
 	starts.mu.Unlock()
 
 	// Inspect: the container must carry the agent labels.
-	info, err := exec.docker.ContainerInspect(ctx, run.ContainerID)
+	info, err := exec.docker.ContainerInspect(ctx, run.ContainerID, client.ContainerInspectOptions{})
 	require.NoError(t, err)
-	assert.Equal(t, "true", info.Config.Labels[labelAgent])
-	assert.Equal(t, card, info.Config.Labels[labelCardID])
-	assert.Equal(t, project, info.Config.Labels[labelProject])
-	assert.Equal(t, "corr-echo", info.Config.Labels[labelCorrelationID])
+	assert.Equal(t, "true", info.Container.Config.Labels[labelAgent])
+	assert.Equal(t, card, info.Container.Config.Labels[labelCardID])
+	assert.Equal(t, project, info.Container.Config.Labels[labelProject])
+	assert.Equal(t, "corr-echo", info.Container.Config.Labels[labelCorrelationID])
 
 	// Drive stdin: the container reads one line, echoes it, then exits 0.
 	_, err = run.Stdin.Write([]byte("hello\n"))
@@ -239,7 +239,7 @@ func TestIntegration_LaunchEchoAndExit(t *testing.T) {
 		return exec.tracker.Count() == 0
 	}, 5*time.Second, 50*time.Millisecond)
 
-	_, err = exec.docker.ContainerInspect(ctx, run.ContainerID)
+	_, err = exec.docker.ContainerInspect(ctx, run.ContainerID, client.ContainerInspectOptions{})
 	assert.Error(t, err, "container must be removed after exit")
 }
 
@@ -360,7 +360,8 @@ func TestIntegration_IdleWatchdogSuspendedWhileAwaiting(t *testing.T) {
 	run, ok := exec.tracker.Get(project, card)
 	require.True(t, ok)
 
-	require.NoError(t, exec.docker.ContainerKill(ctx, run.ContainerID, "SIGKILL"))
+	_, err := exec.docker.ContainerKill(ctx, run.ContainerID, client.ContainerKillOptions{Signal: "SIGKILL"})
+	require.NoError(t, err)
 
 	// SIGKILL of a running process yields exit code 137 (128 + SIGKILL); the
 	// wait branch (not the timeout branch) surfaces it, so it is NOT -1.
@@ -412,10 +413,10 @@ func TestIntegration_StopAllAndCleanupOrphans(t *testing.T) {
 	// CleanupOrphans is a no-op now (nothing labeled remains) but must not error.
 	require.NoError(t, exec.CleanupOrphans(ctx))
 
-	left, err := exec.docker.ContainerList(ctx, container.ListOptions{All: true})
+	left, err := exec.docker.ContainerList(ctx, client.ContainerListOptions{All: true})
 	require.NoError(t, err)
 
-	for _, c := range left {
+	for _, c := range left.Items {
 		assert.NotEqual(t, "true", c.Labels[labelAgent], "no agent container should remain")
 	}
 }

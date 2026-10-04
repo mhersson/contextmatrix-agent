@@ -12,13 +12,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/filters"
-	"github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/api/types/network"
-	"github.com/docker/docker/client"
-	"github.com/docker/docker/pkg/stdcopy"
+	"github.com/moby/moby/api/pkg/stdcopy"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/image"
+	"github.com/moby/moby/api/types/network"
+	"github.com/moby/moby/client"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	"github.com/mhersson/contextmatrix-agent/internal/metrics"
@@ -115,7 +113,7 @@ const (
 // containerWaiter is the one-method slice of the Docker API Kill needs to
 // observe a self-exit, narrow so tests can fake it.
 type containerWaiter interface {
-	ContainerWait(ctx context.Context, containerID string, condition container.WaitCondition) (<-chan container.WaitResponse, <-chan error)
+	ContainerWait(ctx context.Context, containerID string, options client.ContainerWaitOptions) client.ContainerWaitResult
 }
 
 // waitForSelfExit reports whether the container left the running state on
@@ -125,12 +123,12 @@ func waitForSelfExit(ctx context.Context, docker containerWaiter, containerID st
 	waitCtx, cancel := context.WithTimeout(ctx, grace)
 	defer cancel()
 
-	waitCh, errCh := docker.ContainerWait(waitCtx, containerID, container.WaitConditionNotRunning)
+	wait := docker.ContainerWait(waitCtx, containerID, client.ContainerWaitOptions{Condition: container.WaitConditionNotRunning})
 
 	select {
-	case <-waitCh:
+	case <-wait.Result:
 		return true
-	case <-errCh:
+	case <-wait.Error:
 		return false
 	}
 }
@@ -329,11 +327,12 @@ func NewDockerExecutor(cfg Config) *DockerExecutor {
 	}
 }
 
-// NewClient builds a Docker API client from the environment with API version
-// negotiation. Returned as the concrete *client.Client; consumers depend on the
+// NewClient builds a Docker API client from the environment. The client
+// negotiates the API version on first use unless DOCKER_API_VERSION pins it.
+// Returned as the concrete *client.Client; consumers depend on the
 // client.APIClient interface.
 func NewClient() (*client.Client, error) {
-	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	cli, err := client.New(client.FromEnv)
 	if err != nil {
 		return nil, fmt.Errorf("new docker client: %w", err)
 	}
@@ -356,7 +355,13 @@ func (e *DockerExecutor) Launch(ctx context.Context, spec LaunchSpec) error {
 	host.ExtraHosts = buildExtraHosts(e.resolver, spec.MCPURL, log)
 	name := containerName(spec.Project, spec.CardID)
 
-	resp, err := e.docker.ContainerCreate(ctx, cfg, host, &network.NetworkingConfig{}, &ocispec.Platform{}, name)
+	resp, err := e.docker.ContainerCreate(ctx, client.ContainerCreateOptions{
+		Config:           cfg,
+		HostConfig:       host,
+		NetworkingConfig: &network.NetworkingConfig{},
+		Platform:         &ocispec.Platform{},
+		Name:             name,
+	})
 	if err != nil {
 		return fmt.Errorf("create container: %w", err)
 	}
@@ -364,7 +369,7 @@ func (e *DockerExecutor) Launch(ctx context.Context, spec LaunchSpec) error {
 	// Attach BEFORE start so no early output is missed and stdin is ready for
 	// the control frames (message/promote/end_session) the serve layer writes
 	// over the run.
-	attach, err := e.docker.ContainerAttach(ctx, resp.ID, container.AttachOptions{
+	attach, err := e.docker.ContainerAttach(ctx, resp.ID, client.ContainerAttachOptions{
 		Stream: true,
 		Stdin:  true,
 		Stdout: true,
@@ -391,7 +396,7 @@ func (e *DockerExecutor) Launch(ctx context.Context, spec LaunchSpec) error {
 		return ErrCapacity
 	}
 
-	if err := e.docker.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+	if _, err := e.docker.ContainerStart(ctx, resp.ID, client.ContainerStartOptions{}); err != nil {
 		e.tracker.Remove(spec.Project, spec.CardID)
 		attach.Close()
 		e.removeContainer(ctx, resp.ID, log)
@@ -419,7 +424,7 @@ func (e *DockerExecutor) Launch(ctx context.Context, spec LaunchSpec) error {
 	// a returned webhook handler would cancel a still-running container's wait
 	// and cleanup. The container timeout is the bound.
 	//nolint:gosec // G118: detached ctx is intentional; container outlives the request
-	go e.waitAndCleanup(spec.Project, spec.CardID, resp.ID, spec.Attempt, spec.CorrelationID, run.StartedAt, attach, done, pumpDone, log)
+	go e.waitAndCleanup(spec.Project, spec.CardID, resp.ID, spec.Attempt, spec.CorrelationID, run.StartedAt, attach.HijackedResponse, done, pumpDone, log)
 
 	log.Info("container launched", "container_id", truncateID(resp.ID), "name", name)
 
@@ -473,7 +478,7 @@ func (e *DockerExecutor) waitAndCleanup(
 	attempt int,
 	correlationID string,
 	startedAt time.Time,
-	attach types.HijackedResponse,
+	attach client.HijackedResponse,
 	done chan struct{},
 	pumpDone chan struct{},
 	log *slog.Logger,
@@ -487,17 +492,17 @@ func (e *DockerExecutor) waitAndCleanup(
 	waitCtx, cancel := context.WithTimeout(context.Background(), e.containerTimeout)
 	defer cancel()
 
-	waitCh, errCh := e.docker.ContainerWait(waitCtx, containerID, container.WaitConditionNotRunning)
+	wait := e.docker.ContainerWait(waitCtx, containerID, client.ContainerWaitOptions{Condition: container.WaitConditionNotRunning})
 
 	select {
-	case res := <-waitCh:
+	case res := <-wait.Result:
 		exitCode = res.StatusCode
 		if res.Error != nil {
 			log.Warn("container wait reported error", "error", res.Error.Message)
 
 			observed = ExitDaemonError
 		}
-	case err := <-errCh:
+	case err := <-wait.Error:
 		if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
 			log.Warn("container timed out, killing", "timeout", e.containerTimeout)
 
@@ -516,7 +521,7 @@ func (e *DockerExecutor) waitAndCleanup(
 	rmCtx, rmCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer rmCancel()
 
-	if err := e.docker.ContainerRemove(rmCtx, containerID, container.RemoveOptions{Force: true}); err != nil {
+	if _, err := e.docker.ContainerRemove(rmCtx, containerID, client.ContainerRemoveOptions{Force: true}); err != nil {
 		log.Warn("failed to remove container", "container_id", truncateID(containerID), "error", err)
 	}
 
@@ -621,7 +626,7 @@ func (e *DockerExecutor) Kill(ctx context.Context, project, cardID string) error
 
 	e.tracker.SetReason(project, cardID, metrics.OutcomeKilled)
 
-	if err := e.docker.ContainerKill(ctx, run.ContainerID, "SIGKILL"); err != nil {
+	if _, err := e.docker.ContainerKill(ctx, run.ContainerID, client.ContainerKillOptions{Signal: "SIGKILL"}); err != nil {
 		return fmt.Errorf("kill container %s/%s: %w", project, cardID, err)
 	}
 
@@ -671,15 +676,15 @@ func (e *DockerExecutor) StopAll(ctx context.Context, project string) ([]StopRes
 // daemon; a second executor process sharing the Docker daemon would have its
 // live containers swept.
 func (e *DockerExecutor) CleanupOrphans(ctx context.Context) error {
-	containers, err := e.docker.ContainerList(ctx, container.ListOptions{
+	containers, err := e.docker.ContainerList(ctx, client.ContainerListOptions{
 		All:     true,
-		Filters: filters.NewArgs(filters.Arg("label", labelAgent+"=true")),
+		Filters: make(client.Filters).Add("label", labelAgent+"=true"),
 	})
 	if err != nil {
 		return fmt.Errorf("list orphan containers: %w", err)
 	}
 
-	for _, ctr := range containers {
+	for _, ctr := range containers.Items {
 		log := e.logger.With(
 			"container_id", truncateID(ctr.ID),
 			"card_id", ctr.Labels[labelCardID],
@@ -687,7 +692,7 @@ func (e *DockerExecutor) CleanupOrphans(ctx context.Context) error {
 		)
 		log.Info("removing orphan container")
 
-		if err := e.docker.ContainerRemove(ctx, ctr.ID, container.RemoveOptions{Force: true}); err != nil {
+		if _, err := e.docker.ContainerRemove(ctx, ctr.ID, client.ContainerRemoveOptions{Force: true}); err != nil {
 			log.Warn("failed to remove orphan container", "error", err)
 		}
 	}
@@ -700,12 +705,12 @@ func (e *DockerExecutor) CleanupOrphans(ctx context.Context) error {
 // webhookcore.ImageSummary is the wire-shape the webhook layer filters and
 // maps.
 func (e *DockerExecutor) ListImages(ctx context.Context) ([]webhookcore.ImageSummary, error) {
-	summaries, err := e.docker.ImageList(ctx, image.ListOptions{})
+	summaries, err := e.docker.ImageList(ctx, client.ImageListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("image list: %w", err)
 	}
 
-	return imageSummaries(summaries), nil
+	return imageSummaries(summaries.Items), nil
 }
 
 // imageSummaries maps Docker image summaries to webhookcore.ImageSummary,
@@ -756,7 +761,7 @@ func (e *DockerExecutor) pull(ctx context.Context, img string, log *slog.Logger)
 		return fmt.Errorf("unknown image pull policy %q", e.pullPolicy)
 	}
 
-	reader, err := e.docker.ImagePull(ctx, img, image.PullOptions{})
+	reader, err := e.docker.ImagePull(ctx, img, client.ImagePullOptions{})
 	if err != nil {
 		return fmt.Errorf("image pull: %w", err)
 	}
@@ -776,7 +781,7 @@ func (e *DockerExecutor) kill(containerID string, log *slog.Logger) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := e.docker.ContainerKill(ctx, containerID, "SIGKILL"); err != nil {
+	if _, err := e.docker.ContainerKill(ctx, containerID, client.ContainerKillOptions{Signal: "SIGKILL"}); err != nil {
 		log.Warn("failed to kill container", "container_id", truncateID(containerID), "error", err)
 	}
 }
@@ -788,7 +793,7 @@ func (e *DockerExecutor) removeContainer(_ context.Context, containerID string, 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := e.docker.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true}); err != nil {
+	if _, err := e.docker.ContainerRemove(ctx, containerID, client.ContainerRemoveOptions{Force: true}); err != nil {
 		log.Warn("failed to remove container after launch failure",
 			"container_id", truncateID(containerID), "error", err)
 	}

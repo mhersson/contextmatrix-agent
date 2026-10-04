@@ -5,15 +5,6 @@
 # review on each worker-image / Go-dependency bump and delete entries whose fix
 # has shipped. Dependabot (.github/dependabot.yml) tracks the underlying bumps.
 
-# --- The agent binary embeds the Docker SDK (github.com/docker/docker
-# v28.5.2+incompatible); CVE-2026-34040 is a Moby *daemon* authorization-bypass,
-# fixed in v29.3.1. The agent uses only the Docker *client*, against a trusted
-# local daemon, so the daemon-side authz path is not reachable - govulncheck
-# (which is call-graph aware) reports no finding for it. The v28 -> v29 fix is a
-# major SDK bump; Dependabot will raise it as a reviewable PR. Accepted until
-# then.
-CVE-2026-34040
-
 # --- The apt-installed GitHub CLI (/usr/bin/gh, latest release v2.97.0) is a
 # prebuilt upstream binary compiled with Go 1.26.5; these are stdlib and
 # vendored x/net findings in that embedded toolchain, fixed in Go 1.26.6.
