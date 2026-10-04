@@ -96,7 +96,7 @@ board cards.
 
 ## Requirements
 
-- **Go 1.26+** to build.
+- **Go 1.27+** to build.
 - **Docker** on the host running `serve` (the worker runtime).
 - An **LLM endpoint API key** with access to the models you route to.
 - A reachable **ContextMatrix** instance (API + MCP) and its MCP API key.
