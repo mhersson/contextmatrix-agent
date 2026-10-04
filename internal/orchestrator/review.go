@@ -1774,8 +1774,7 @@ func (o *run) runFixModel(ctx context.Context, prompt string, req fixRequest) (s
 			Turns: res.Turns, Outcome: sizingOutcome(err, res.Turns, maxTurns), DurationMS: dur.Milliseconds(),
 		})
 
-		var ie *IncapableError
-		if errors.As(err, &ie) {
+		if ie, ok := errors.AsType[*IncapableError](err); ok {
 			if rerr := o.recoverIncapable(ctx, ie); rerr != nil {
 				return "", rerr
 			}

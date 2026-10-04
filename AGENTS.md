@@ -107,8 +107,8 @@ inspection), never a built-in ecosystem list.
 
 ## Tech stack
 
-Go 1.26+, **cobra** + **koanf** (not viper), the **Docker SDK**
-(`github.com/docker/docker`), the **Go MCP SDK**
+Go 1.27+, **cobra** + **koanf** (not viper), the **Docker SDK**
+(`github.com/moby/moby/client` + `github.com/moby/moby/api`), the **Go MCP SDK**
 (`github.com/modelcontextprotocol/go-sdk`) for card ops, and **testify**
 (`assert`/`require`). Three rules that are easy to get wrong:
 

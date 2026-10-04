@@ -40,7 +40,7 @@ type stubCM struct {
 	mu     sync.Mutex
 	calls  int
 	lastQ  string
-	verify int32 // atomic: number of requests that passed HMAC verification
+	verify atomic.Int32 // number of requests that passed HMAC verification
 }
 
 func (s *stubCM) handler(t *testing.T) http.HandlerFunc {
@@ -62,7 +62,7 @@ func (s *stubCM) handler(t *testing.T) http.HandlerFunc {
 			return
 		}
 
-		atomic.AddInt32(&s.verify, 1)
+		s.verify.Add(1)
 
 		s.mu.Lock()
 		s.calls++
@@ -189,7 +189,7 @@ func TestRunCredentialsRefreshesFromCM(t *testing.T) {
 	// The CM request carried the project and card_id query parameters.
 	assert.Contains(t, stub.lastQuery(), "project=proj")
 	assert.Contains(t, stub.lastQuery(), "card_id=CARD-1")
-	assert.Positive(t, int(atomic.LoadInt32(&stub.verify)), "at least one request must pass HMAC verification")
+	assert.Positive(t, int(stub.verify.Load()), "at least one request must pass HMAC verification")
 }
 
 // TestRunCredentialsPATNoRefresh verifies that a token without an expiry (PAT)

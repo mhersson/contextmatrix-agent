@@ -540,7 +540,7 @@ func resolveDecisionModel(
 	// selection to record: base comes back unbuilt (OK false) and the caller
 	// skips the note.
 	if reg == nil {
-		return registry.Pick{ModelSpec: registry.ModelSpec{Model: base}}, registry.SelectionReport{}
+		return registry.Pick{Model: base}, registry.SelectionReport{}
 	}
 
 	// A resolvable operator pin is authoritative - never floor over it.
@@ -1064,8 +1064,7 @@ func runPlan(ctx context.Context, o *run) error {
 		case isBudgetError(derr):
 			return derr // park: the FSM's execute() maps this to the budget log
 		default:
-			var ie *IncapableError
-			if errors.As(derr, &ie) {
+			if ie, ok := errors.AsType[*IncapableError](derr); ok {
 				// The model could not drive the tool loop. Blacklist and exclude
 				// it now so the planner, the mob seats and the first coder pick
 				// do not land on it again this run; the re-selection cap error
@@ -1228,7 +1227,7 @@ func parseSplitSection(body string) map[string]string {
 		return out
 	}
 
-	for _, line := range strings.Split(sec, "\n") {
+	for line := range strings.SplitSeq(sec, "\n") {
 		m := splitSectionEntry.FindStringSubmatch(strings.TrimSpace(line))
 		if m == nil {
 			continue

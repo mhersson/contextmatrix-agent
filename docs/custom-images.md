@@ -27,7 +27,7 @@ USER root
 # hadolint ignore=DL3008
 RUN curl -fsSL https://packages.adoptium.net/artifactory/api/gpg/key/public \
       -o /usr/share/keyrings/adoptium.asc \
-    && echo "deb [signed-by=/usr/share/keyrings/adoptium.asc] https://packages.adoptium.net/artifactory/deb bookworm main" \
+    && echo "deb [signed-by=/usr/share/keyrings/adoptium.asc] https://packages.adoptium.net/artifactory/deb trixie main" \
        > /etc/apt/sources.list.d/adoptium.list \
     && apt-get update && apt-get install -y --no-install-recommends temurin-21-jdk \
     && rm -rf /var/lib/apt/lists/*

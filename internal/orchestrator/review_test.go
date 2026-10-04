@@ -2514,7 +2514,7 @@ func TestRunSpecialistsMaxTurnsMarksTruncated(t *testing.T) {
 
 	var section string
 
-	for _, s := range strings.Split(out, "## ") {
+	for s := range strings.SplitSeq(out, "## ") {
 		if strings.HasPrefix(s, "correctness findings") {
 			section = s
 

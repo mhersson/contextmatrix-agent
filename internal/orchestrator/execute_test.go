@@ -2461,7 +2461,7 @@ func TestShortfallAdvisoryNeverTakesTheSelectionLock(t *testing.T) {
 		defer close(done)
 
 		o.noteShortfall(context.Background(), "probe", "", registry.Pick{
-			ModelSpec:     registry.ModelSpec{Model: "mid/model"},
+			Model:         "mid/model",
 			Role:          registry.RoleCoder,
 			RequestedTier: registry.TierComplex,
 			MetTier:       registry.TierModerate,

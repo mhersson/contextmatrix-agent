@@ -2,22 +2,22 @@
 
 # Pinned worker toolchain versions. Override on the command line
 # if a newer version has been vetted, e.g.
-#   make docker-worker GO_VERSION=1.26.4
+#   make docker-worker GO_VERSION=1.27.2
 # These values are passed into the Dockerfile as --build-args so the build is
 # reproducible from CI and local shells alike.
-GO_VERSION            ?= 1.26.8
-GO_SHA256_AMD64       ?= d0f743b33e8d8945e6b1f432edd15785c70507121d6e2a723b21285eddf8b57b
-GO_SHA256_ARM64       ?= 211ffced9dcb9633a55eac6364816ec0ddd951389a740e88fa8b3337971bdda0
-NPM_VERSION           ?= 11.19.0
-GOLANGCI_LINT_VERSION ?= v2.12.2
-GOFUMPT_VERSION       ?= v0.11.0
-RUST_VERSION          ?= 1.97.0
-RUSTUP_VERSION        ?= 1.29.0
-RUSTUP_SHA256_AMD64   ?= 4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10
-RUSTUP_SHA256_ARM64   ?= 9732d6c5e2a098d3521fca8145d826ae0aaa067ef2385ead08e6feac88fa5792
-PYTHON_VERSION        ?= 3.14.6
-TY_VERSION            ?= 0.0.57
-RUFF_VERSION          ?= 0.15.21
+GO_VERSION            ?= 1.27.1
+GO_SHA256_AMD64       ?= 63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445
+GO_SHA256_ARM64       ?= 3450b45a3f9ee8568792736a5c5e70a1f2e9b36c35a8f74958c03e51d7d92bec
+NPM_VERSION           ?= 12.2.0
+GOLANGCI_LINT_VERSION ?= v2.14.0
+GOFUMPT_VERSION       ?= v0.12.0
+RUST_VERSION          ?= 1.99.0
+RUSTUP_VERSION        ?= 1.29.1
+RUSTUP_SHA256_AMD64   ?= dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
+RUSTUP_SHA256_ARM64   ?= 15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433
+PYTHON_VERSION        ?= 3.14.8
+TY_VERSION            ?= 0.0.84
+RUFF_VERSION          ?= 0.16.10
 
 # Build args shared by every worker-image target.
 WORKER_BUILD_ARGS = \

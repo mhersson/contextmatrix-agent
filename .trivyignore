@@ -5,57 +5,20 @@
 # review on each worker-image / Go-dependency bump and delete entries whose fix
 # has shipped. Dependabot (.github/dependabot.yml) tracks the underlying bumps.
 
-# --- The agent binary embeds the Docker SDK (github.com/docker/docker
-# v28.5.2+incompatible); CVE-2026-34040 is a Moby *daemon* authorization-bypass,
-# fixed in v29.3.1. The agent uses only the Docker *client*, against a trusted
-# local daemon, so the daemon-side authz path is not reachable - govulncheck
-# (which is call-graph aware) reports no finding for it. The v28 -> v29 fix is a
-# major SDK bump; Dependabot will raise it as a reviewable PR. Accepted until
-# then.
-CVE-2026-34040
-
-# --- The apt-installed GitHub CLI (/usr/bin/gh, latest release v2.97.0) is a
-# prebuilt upstream binary compiled with Go 1.26.5; these are stdlib and
-# vendored x/net findings in that embedded toolchain, fixed in Go 1.26.6.
-# Everything this repo compiles is already on 1.26.8 (builder image, in-image
-# toolchain, agent binary - all scan clean); only GitHub's release pipeline can
-# rebuild gh. Inside the worker container repo-controlled code already executes
-# arbitrary bash, so these DoS/parsing issues add no marginal attack surface.
-# Clears when apt pulls a gh release built on Go >= 1.26.6. (The previous entry
-# here, CVE-2026-39822 against a Go 1.26.4 gh, cleared when v2.97.0 shipped.)
-CVE-2026-33818
-CVE-2026-39821
-CVE-2026-46600
-CVE-2026-56853
-CVE-2026-56858
-CVE-2026-56859
-CVE-2026-56860
-CVE-2026-56862
-
-# --- The bundled npm CLI ships brace-expansion 5.0.7
-# (/usr/lib/node_modules/npm/node_modules/brace-expansion); the fixes land in
-# 5.0.8 and 5.0.9. DoS via glob brace expansion inside the npm CLI - the
+# --- The bundled npm CLI (12.2.0, the latest release) ships brace-expansion
+# 5.0.9 (/usr/lib/node_modules/npm/node_modules/brace-expansion); the fixes land
+# in 5.0.10 and 5.0.11. DoS via crafted brace patterns inside the npm CLI - the
 # single-tenant worker only expands globs npm generates itself. npm's own
-# transitive dependency: 11.19.0 (the newest npm that supports Node 25) still
-# bundles 5.0.7 - clears when an npm upgrade pulls in >= 5.0.9.
-CVE-2026-14257
-CVE-2026-69152
+# transitive dependency - clears when an npm release pulls in >= 5.0.11.
+CVE-2026-102276
+CVE-2026-102278
 
-# --- The bundled npm CLI ships ip-address 10.2.0
-# (/usr/lib/node_modules/npm/node_modules/ip-address); the fix is 10.3.1.
-# SSRF-shaped parse inconsistency on npm's socks-proxy path, which the worker
-# does not configure. npm's own transitive dependency: 11.19.0 still bundles
-# 10.2.0 - clears when an npm upgrade pulls in >= 10.3.1.
-CVE-2026-69192
-
-# --- The bundled npm CLI ships tar 7.5.19
-# (/usr/lib/node_modules/npm/node_modules/tar); the fix is 7.5.21. DoS via a
-# crafted long-path tar archive - inside the npm CLI the only archives tar
-# reads are registry tarballs npm fetches itself on the single-tenant worker.
-# npm's own transitive dependency: 11.19.0 (the newest npm that supports
-# Node 25) and 12.0.2 both still bundle 7.5.19 - clears when an npm release
-# pulls in >= 7.5.21.
-CVE-2026-73566
+# --- The bundled npm CLI (12.2.0) ships undici 6.28.0
+# (/usr/lib/node_modules/npm/node_modules/undici); the fix is 6.28.1. DoS via an
+# unrequested WebSocket subprotocol - npm speaks plain HTTPS to the registry and
+# opens no WebSockets. npm's own transitive dependency - clears when an npm
+# release pulls in undici >= 6.28.1.
+CVE-2026-19534
 
 # --- The uv-managed CPython (/opt/python) bundles pip, whose _vendor tree pins
 # msgpack==1.1.2 and setuptools==70.3.0 (pip/_vendor/vendor.txt - Trivy reads
@@ -64,28 +27,17 @@ CVE-2026-73566
 # own local HTTP cache. CVE-2025-47273 (setuptools PackageIndex path traversal,
 # fixed in 78.1.1) lives in package_index.py, which pip's vendored copy does not
 # ship - only the pkg_resources subset of setuptools is vendored. The pins
-# cannot be raised independently of pip, and the latest pip (26.2) still carries
-# both - clears when a pip release re-vendors msgpack >= 1.2.1 and setuptools
-# >= 78.1.1.
+# cannot be raised independently of pip, and the latest pip (26.2.1) still
+# carries both - clears when a pip release re-vendors msgpack >= 1.2.1 and
+# setuptools >= 78.1.1.
 GHSA-6v7p-g79w-8964
 CVE-2025-47273
 
-# --- golang.org/x/text v0.36.0 inside the golangci-lint binary
-# (/usr/local/bin/golangci-lint); the fix is v0.39.0. DoS on invalid UTF-8
-# input to a lint binary running repo-controlled code that can already execute
-# arbitrary bash. The latest golangci-lint release (v2.12.2) pins v0.36.0 and
-# `go install pkg@version` cannot raise a module's own dependency pins -
-# clears when a golangci-lint release requires x/text >= v0.39.0.
-CVE-2026-56852
-
-# --- golang.org/x/mod v0.35.0 inside the golangci-lint binary
-# (/usr/local/bin/golangci-lint); the fix is v0.40.0. Both CVEs are
-# sumdb-related module-content forgery (CVE-2026-56864: malicious GOSUMDB
-# serves arbitrary module content; CVE-2026-56865: malicious GOPROXY forges
-# up to two sumdb entries). The linter runs repo-controlled code that can
-# already execute arbitrary bash, so these add no marginal attack surface.
-# The latest golangci-lint release (v2.12.2) pins v0.35.0 and `go install
-# pkg@version` cannot raise a module's own dependency pins - clears when a
-# golangci-lint release requires x/mod >= v0.40.0.
-CVE-2026-56864
-CVE-2026-56865
+# --- The same pip vendor tree pins urllib3==2.7.0; the fixes land in 2.8.0.
+# CVE-2026-97687 (HTTPS-proxy TLS configuration override) needs a configured
+# HTTPS proxy, which the worker does not set; CVE-2026-97689 (unbounded chunk
+# allocation) is a DoS against pip's own index downloads on a single-tenant
+# worker that already runs repo-controlled code. pip 26.2.1 still vendors
+# 2.7.0 - clears when a pip release re-vendors urllib3 >= 2.8.0.
+CVE-2026-97687
+CVE-2026-97689

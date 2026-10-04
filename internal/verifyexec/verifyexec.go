@@ -374,8 +374,7 @@ func execWithEnv(ctx context.Context, dir string, argv []string, timeout time.Du
 	case err == nil:
 		o.ExitCode = 0
 	default:
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
+		if ee, ok := errors.AsType[*exec.ExitError](err); ok {
 			o.ExitCode = ee.ExitCode()
 		} else {
 			// The process never started, so CombinedOutput captured nothing - the
