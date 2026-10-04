@@ -3332,6 +3332,109 @@ func TestCopilotGate_BudgetParkDuringTriage(t *testing.T) {
 	assert.Equal(t, -1, indexOfCall(ops.recorded(), "TransitionCard:done"))
 }
 
+// TestCopilotGate_TriageTurnCapParksAsTriage: the triage call's own turn cap
+// parks under a triage-specific reason, while a fix-round cap keeps the fix
+// run's message - two distinct phases, two distinct parks. A triage that burns
+// turns up to its wrap-up nudge and then emits its verdict is parsed and
+// recorded, never parked.
+func TestCopilotGate_TriageTurnCapParksAsTriage(t *testing.T) {
+	t.Run("triage cap parks with the triage reason", func(t *testing.T) {
+		ops := &fakeOps{}
+		gates := &fakeGates{
+			requested: true,
+			headSHA:   copilotHeadSHA,
+			reviews:   []*CopilotReview{reviewOnHead("1 suggestion", swallowedErrorComment)},
+		}
+		client := &planLLM{responses: burnResps(copilotTriageMaxTurns + 5)}
+
+		o := prGateRun(ops, gates, &fakeGit{}, client, copilotGateContext("Capped triage", "body"), 0)
+		// A base above the triage cap, so a triage that inherited the flat
+		// configured budget would keep burning instead of parking.
+		o.d.Cfg.MaxTurns = copilotTriageMaxTurns + 5
+
+		var parked *GatesParkedError
+
+		require.ErrorAs(t, runPRGates(context.Background(), o), &parked)
+
+		assert.Contains(t, parked.Reason, "triage",
+			"the park reason names the phase that ran out; reason=%q", parked.Reason)
+		assert.NotContains(t, parked.Reason, "fix run",
+			"the triage must not borrow the fix round's message; reason=%q", parked.Reason)
+		assert.Equal(t, copilotTriageMaxTurns, modelCallCount(client),
+			"the triage caps at its own constant, not the configured base")
+		assert.Equal(t, -1, indexOfCall(ops.recorded(), "TransitionCard:done"),
+			"a parked card must NOT reach done")
+	})
+
+	t.Run("wrap-up nudge lets the triage land its verdict", func(t *testing.T) {
+		ops := &fakeOps{}
+		gates := &fakeGates{
+			requested: true,
+			headSHA:   copilotHeadSHA,
+			reviews: []*CopilotReview{
+				reviewOnHead("1 suggestion", swallowedErrorComment),
+				reviewOnHead("LGTM"),
+			},
+		}
+		git := &fakeGit{committed: true}
+		burns := copilotTriageMaxTurns - wrapUpTurns // investigate until the nudge window opens
+		client := &planLLM{responses: slices.Concat(
+			burnResps(burns),
+			[]llm.Response{
+				copilotVerdict(copilotFinding{
+					File: "internal/api/handler.go", Issue: "the write error is dropped",
+					Valid: true, Reason: "the caller cannot tell the write failed",
+				}),
+				stopResp("coder: fixed", 0.01),
+				copilotVerdict(),
+			},
+		)}
+
+		o := prGateRun(ops, gates, git, client, copilotGateContext("Nudged triage", "body"), 0)
+		o.d.Cfg.MaxTurns = copilotTriageMaxTurns
+
+		require.NoError(t, runPRGates(context.Background(), o))
+
+		assert.Equal(t, burns+3, modelCallCount(client),
+			"burn turns, the verdict, the fix, and the re-review triage; models=%v", client.models)
+		assert.Contains(t, strings.Join(client.tasks, "\n"), copilotTriageWrapUpMessage,
+			"the triage wrap-up nudge reaches the conversation as a user message")
+		assert.Contains(t, ops.lastBody(), "- VALID internal/api/handler.go:",
+			"the verdict is parsed and recorded; body=%q", ops.lastBody())
+		assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0,
+			"the gate completes; calls=%v", ops.recorded())
+	})
+
+	t.Run("fix-round cap keeps the fix run's reason", func(t *testing.T) {
+		ops := &fakeOps{}
+		gates := &fakeGates{
+			requested: true,
+			headSHA:   copilotHeadSHA,
+			reviews:   []*CopilotReview{reviewOnHead("1 suggestion", swallowedErrorComment)},
+		}
+		git := &fakeGit{committed: false}
+		client := &planLLM{responses: slices.Concat(
+			[]llm.Response{copilotVerdict(copilotFinding{
+				File: "internal/api/handler.go", Issue: "the write error is dropped",
+				Valid: true, Reason: "the caller cannot tell the write failed",
+			})},
+			burnResps(copilotTriageMaxTurns+5), // the fix coder burns the whole window
+		)}
+
+		o := prGateRun(ops, gates, git, client, copilotGateContext("Capped fix", "body"), 0)
+		o.d.Cfg.MaxTurns = copilotTriageMaxTurns
+
+		var parked *GatesParkedError
+
+		require.ErrorAs(t, runPRGates(context.Background(), o), &parked)
+
+		assert.Equal(t, gatesCopilotTurnCapParkReason, parked.Reason,
+			"the fix round's cap keeps the fix run's message; reason=%q", parked.Reason)
+		assert.Equal(t, -1, indexOfCall(ops.recorded(), "TransitionCard:done"),
+			"a parked card must NOT reach done")
+	})
+}
+
 // TestCopilotGate_UnreadableVerdictTakesCommentsAtFaceValue: a triage response
 // that is not the JSON we asked for must never ship past the review. The gate
 // says so verbatim on the card and treats every comment as a finding - the

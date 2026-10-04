@@ -105,7 +105,7 @@ const mobSeatToolOutputMaxBytes = 16 * 1024
 
 // mobSeatWrapUpTurns is the remaining-turn threshold at which a seat run
 // gets the harness wrap-up nudge. Run 2 showed seats burning all 8 turns on
-// exploration and returning empty utterances; the nudge forces a position
+// exploration and returning empty utterances; the nudge asks for a position
 // while turns remain.
 const mobSeatWrapUpTurns = 2
 

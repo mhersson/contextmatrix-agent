@@ -62,9 +62,10 @@ const (
 	gatesBudgetParkReason  = "budget exhausted during CI fixes"
 	gatesTurnCapParkReason = "CI fix run hit its turn cap"
 
-	gatesCopilotTriageBudgetParkReason = "budget exhausted during Copilot triage"
-	gatesCopilotFixBudgetParkReason    = "budget exhausted during Copilot fixes"
-	gatesCopilotTurnCapParkReason      = "Copilot fix run hit its turn cap"
+	gatesCopilotTriageBudgetParkReason  = "budget exhausted during Copilot triage"
+	gatesCopilotTriageTurnCapParkReason = "Copilot triage hit its turn cap"
+	gatesCopilotFixBudgetParkReason     = "budget exhausted during Copilot fixes"
+	gatesCopilotTurnCapParkReason       = "Copilot fix run hit its turn cap"
 
 	gatesCopilotFixNoChangeParkReason = "Copilot fix produced no change"
 	gatesCIFixNoChangeParkReason      = "CI fix produced no change"
@@ -1225,13 +1226,13 @@ func (o *run) triageCopilot(
 	task := fmt.Sprintf(copilotTriagePrompt, o.grounding, o.tc.Title, o.taskDescription,
 		copilotReviewSummary(review), formatCopilotComments(comments))
 
-	res, dur, err := o.runModel(ctx, d.ReadTools, task, model)
+	res, dur, err := o.runModelTriage(ctx, d.ReadTools, task, model)
 
 	o.spendAndReport(ctx, o.ledger, cfg.CardID, "pr_gates: report Copilot triage usage failed",
 		res, model, "main", dur)
 
 	if err != nil {
-		if reason := gateResourcePark(err, gatesCopilotTriageBudgetParkReason, gatesCopilotTurnCapParkReason); reason != "" {
+		if reason := gateResourcePark(err, gatesCopilotTriageBudgetParkReason, gatesCopilotTriageTurnCapParkReason); reason != "" {
 			return nil, o.parkGates(ctx, st, reason)
 		}
 

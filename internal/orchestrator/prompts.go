@@ -849,6 +849,10 @@ addressed in the change.
 Judge each comment on its own evidence. Do not invent findings the reviewer did
 not raise, and do not merge two comments into one.
 
+Copilot comment line numbers are diff positions and need not match file line
+numbers, so locate the code by its text and do not spend turns reconciling line
+numbers.
+
 PARENT CARD
 Title: %s
 
@@ -1144,10 +1148,16 @@ func fixWrapUpMessage(n int) string {
 	return fmt.Sprintf("%d turns remain. If the findings are addressed and the tests pass, call the finish tool now and make no further tool calls. Do not re-run checks that already passed.", n)
 }
 
-// synthesisWrapUpMessage forces the synthesizer to land its verdict the way
+// synthesisWrapUpMessage asks the synthesizer to land its verdict the way
 // the specialists land their findings: an imperfect verdict beats a silent
 // max_turns death on a run that is otherwise green.
 const synthesisWrapUpMessage = "You are nearly out of turns. Stop investigating and respond with ONLY the verdict JSON object NOW, in the required format. A verdict based on what you have already read is useful; no verdict is not."
+
+// copilotTriageWrapUpMessage asks the Copilot triage to land its findings the
+// way the synthesizer lands its verdict: an imperfect verdict beats a silent
+// max_turns death on a gate whose comments then stand unjudged. Built from
+// wrapUpTurns so the stated count cannot drift from the threshold.
+var copilotTriageWrapUpMessage = fmt.Sprintf("%d turns remain. Stop investigating now and respond with ONLY the {\"findings\":[...]} JSON object, one entry per comment, built from what you have already read. Make no further tool calls. An incomplete findings list is useful; no findings is not.", wrapUpTurns)
 
 const synthesisWrapUpTurns = 3
 
@@ -1158,7 +1168,7 @@ const synthesisWrapUpTurns = 3
 // it, even with no doc changes, since the orchestrator only commits when files
 // actually changed). The planner and the diagnosis investigator have no finish
 // tool: each wraps up by emitting its final text (the JSON plan, or the
-// "## Diagnosis" block) as the last message, so their nudges force that emit
+// "## Diagnosis" block) as the last message, so their nudges ask for that emit
 // rather than a tool call.
 var (
 	documentWrapUpMessage = fmt.Sprintf("%d turns remain. Call the finish tool now with your docs commit message (whether or not you wrote documentation) and make no further tool calls.", wrapUpTurns)

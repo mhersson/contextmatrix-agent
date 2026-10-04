@@ -128,7 +128,7 @@ uncredited cliff exactly.
 Synthesis - the model call that reads the specialist findings and emits the
 verdict - runs under its own turn cap (`synthesisMaxTurns`, 12, min'd with
 the configured base) rather than inheriting the flat per-phase budget, with a
-wrap-up nudge at 3 turns remaining (`synthesisWrapUpTurns`) that forces an
+wrap-up nudge at 3 turns remaining (`synthesisWrapUpTurns`) that injects an
 emit-now instruction instead of letting the model keep investigating into
 the cap. An attempt that still hits the cap is retried once with an explicit
 emit-now repair block; a second cap, or a retry that lands but returns

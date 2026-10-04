@@ -239,13 +239,25 @@ func diagnoseTurnCap(base int) int {
 // the one phase left unguarded, and the one whose failure is fatal to a run
 // that is otherwise green. A healthy synthesis emits its verdict in a single
 // turn; the cap leaves room for a bounded skim of the findings, and the
-// wrap-up nudge forces the emit before the cap lands.
+// wrap-up nudge asks for the emit before the cap lands.
 const synthesisMaxTurns = 12
 
 // synthesisTurnCap is the synthesis run's turn budget, min'd with base so a
 // smaller configured cap is never raised - mirrors planTurnCap.
 func synthesisTurnCap(base int) int {
 	return min(base, synthesisMaxTurns)
+}
+
+// copilotTriageMaxTurns caps the Copilot triage call. Triage is a verdict-only
+// read over a handful of comments, so a small fixed constant beats any
+// comment-count scale: 15 leaves room for a bounded look at the cited files
+// while staying above wrapUpTurns so the wrap-up nudge can fire.
+const copilotTriageMaxTurns = 15
+
+// copilotTriageTurnCap is the triage run's turn budget, min'd with base so a
+// smaller configured cap is never raised - mirrors synthesisTurnCap.
+func copilotTriageTurnCap(base int) int {
+	return min(base, copilotTriageMaxTurns)
 }
 
 // runModelSynthesis is the review synthesizer's model call: the flat base is
@@ -317,11 +329,11 @@ func (o *run) runModelCoder(ctx context.Context, reg *tools.Registry, prompt, mo
 
 // runModelPlan is the planner's model call. Unlike the coder phases, the planner
 // finishes by emitting a JSON plan as its final message (there is no finish
-// tool), so it gets a plan-specific wrap-up nudge that forces the emit before
-// the turn cap instead of letting the model explore straight into it. Both the
-// first attempt and the repair turn get a bounded budget (planTurnCap): the
-// repair is tighter still, because the model already had a full exploration
-// pass and must re-emit a valid plan, not start over.
+// tool), so it gets a plan-specific wrap-up nudge that asks for the emit
+// before the turn cap instead of letting the model explore straight into it.
+// Both the first attempt and the repair turn get a bounded budget
+// (planTurnCap): the repair is tighter still, because the model already had a
+// full exploration pass and must re-emit a valid plan, not start over.
 func (o *run) runModelPlan(ctx context.Context, reg *tools.Registry, prompt, model string, images []llm.ImageURL, repair bool) (harness.Result, time.Duration, error) {
 	cfg := o.harnessConfig(model)
 	cfg.TaskImages = images
@@ -346,6 +358,22 @@ func (o *run) runModelDiagnose(ctx context.Context, reg *tools.Registry, prompt,
 	cfg.WrapUpTurns = wrapUpTurns
 	cfg.WrapUpMessage = diagnoseWrapUpMessage
 	cfg.MaxTurns = diagnoseTurnCap(cfg.MaxTurns)
+
+	return o.runModelCfg(ctx, reg, prompt, model, cfg)
+}
+
+// runModelTriage is the Copilot triage call's model wrapper: the flat base is
+// replaced by the triage cap and the findings-now wrap-up nudge, which asks
+// the triage to emit its findings instead of dying at the cap with them
+// unwritten. GraceTurn is deliberately NOT set: the harness only grants the
+// grace call when the registry carries a Terminal tool (see the harness's
+// graceFinish), and the triage runs on d.ReadTools, which is read-only and
+// registers none - the same reason runModelDiagnose omits it.
+func (o *run) runModelTriage(ctx context.Context, reg *tools.Registry, prompt, model string) (harness.Result, time.Duration, error) {
+	cfg := o.harnessConfig(model)
+	cfg.WrapUpTurns = wrapUpTurns
+	cfg.WrapUpMessage = copilotTriageWrapUpMessage
+	cfg.MaxTurns = copilotTriageTurnCap(cfg.MaxTurns)
 
 	return o.runModelCfg(ctx, reg, prompt, model, cfg)
 }
