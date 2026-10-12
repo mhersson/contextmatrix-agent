@@ -99,8 +99,8 @@ func (o *run) reconcile(ctx context.Context) error {
 			return fmt.Errorf("checkout resume branch %q: %w", cfg.Branch, err)
 		}
 
-		// prepareWorkspace already created a LOCAL branch of this name at base HEAD
-		// (git checkout -b), so the Checkout above merely switches to that
+		// The worker bootstrap already created a LOCAL branch of this name at base
+		// HEAD (git checkout -b), so the Checkout above merely switches to that
 		// base-pointing branch - git checkout does NOT fast-forward a pre-existing
 		// local branch to the fetched tip. Reset hard onto the probed remote tip so
 		// the local branch, index, and working tree all carry the pushed WIP.

@@ -1071,11 +1071,11 @@ func TestCheckout(t *testing.T) {
 
 // TestResumeAdoptsRemoteWIPTree is the real-git regression for the crash-resume
 // bug. Unlike TestCheckout (no local branch, so `git checkout` DWIMs a tracking
-// branch from origin), a real resume runs prepareWorkspace FIRST, which cuts a
-// LOCAL card branch from base HEAD. `git checkout <branch>` then merely switches
+// branch from origin), a real resume runs prepareWorkspace and cutCardBranch
+// FIRST, which cut a LOCAL card branch from base HEAD. `git checkout <branch>` then merely switches
 // to that base-pointing branch and does NOT fast-forward it to the pushed WIP -
 // so the orchestrator's reconcile must hard-reset onto the probed remote tip.
-// This drives the real *worker.Git through the exact prepareWorkspace + reconcile
+// This drives the real *worker.Git through the exact bootstrap + reconcile
 // git sequence and proves the pushed WIP is adopted and a follow-up WIP push
 // fast-forwards. Without the HardReset, the NoFileExists assertion would instead
 // hold through the end and the final Push would be rejected non-fast-forward -
@@ -1091,7 +1091,7 @@ func TestResumeAdoptsRemoteWIPTree(t *testing.T) {
 	// The ORIGINAL run pushed WIP onto the card branch, then "crashed".
 	pushFileToBranch(t, bare, "original_wip.txt", branch)
 
-	// The RESUME worker: the REAL prepareWorkspace clones base and cuts a LOCAL
+	// The RESUME worker: the REAL bootstrap clones base and cuts a LOCAL
 	// card branch from base HEAD (git checkout -b), exactly as every run does.
 	spec := RunSpec{
 		CardID:     "CARD-1",
@@ -1103,7 +1103,7 @@ func TestResumeAdoptsRemoteWIPTree(t *testing.T) {
 	ws := filepath.Join(spec.Workspace, "card-1")
 	g := NewGit(ws, "", "", "") // local path remote needs no token
 
-	_, err := prepareWorkspace(ctx, g, spec, branch)
+	_, err := prepareAndCut(ctx, t, g, spec, branch)
 	require.NoError(t, err)
 
 	// reconcile's resume sequence, driven through the real Git methods.
@@ -1114,7 +1114,7 @@ func TestResumeAdoptsRemoteWIPTree(t *testing.T) {
 	require.NoError(t, g.Fetch(ctx, branch))
 	require.NoError(t, g.Checkout(ctx, branch))
 
-	// The bug: prepareWorkspace already created a local branch of this name at
+	// The bug: cutCardBranch already created a local branch of this name at
 	// base, so the checkout above switches to that base-pointing branch and does
 	// NOT adopt the fetched tip. The pushed WIP is absent until the reset below.
 	assert.NoFileExists(t, filepath.Join(ws, "original_wip.txt"),
@@ -1555,6 +1555,17 @@ func TestCreateRemoteBranchRefusesAfterPolicyLocked(t *testing.T) {
 	assert.Contains(t, err.Error(), "refusing")
 }
 
+// prepareAndCut runs the bootstrap's two git steps in Run's order.
+func prepareAndCut(ctx context.Context, t *testing.T, g *Git, spec RunSpec, branch string) (string, error) {
+	t.Helper()
+
+	if err := prepareWorkspace(ctx, g, spec); err != nil {
+		return "", err
+	}
+
+	return cutCardBranch(ctx, g, spec, branch)
+}
+
 // currentBranch returns the checked-out branch of the workspace at ws.
 func currentBranch(t *testing.T, ws string) string {
 	t.Helper()
@@ -1582,7 +1593,7 @@ func TestPrepareWorkspaceCreatesMissingBaseBranch(t *testing.T) {
 	ws := filepath.Join(spec.Workspace, "card-1")
 	g := NewGit(ws, "", "", "")
 
-	base, err := prepareWorkspace(ctx, g, spec, "cm/card-1")
+	base, err := prepareAndCut(ctx, t, g, spec, "cm/card-1")
 	require.NoError(t, err)
 	assert.Equal(t, "playbook/rollout", base)
 
@@ -1615,7 +1626,7 @@ func TestPrepareWorkspaceCreatesBaseFromSourceBranch(t *testing.T) {
 	ws := filepath.Join(spec.Workspace, "card-1")
 	g := NewGit(ws, "", "", "")
 
-	_, err := prepareWorkspace(ctx, g, spec, "cm/card-1")
+	_, err := prepareAndCut(ctx, t, g, spec, "cm/card-1")
 	require.NoError(t, err)
 
 	assert.Equal(t, remoteTipOf(t, bare, "develop"), remoteTipOf(t, bare, "playbook/rollout"))
@@ -1637,7 +1648,7 @@ func TestPrepareWorkspaceUsesExistingBaseBranch(t *testing.T) {
 	ws := filepath.Join(spec.Workspace, "card-1")
 	g := NewGit(ws, "", "", "")
 
-	base, err := prepareWorkspace(ctx, g, spec, "cm/card-1")
+	base, err := prepareAndCut(ctx, t, g, spec, "cm/card-1")
 	require.NoError(t, err)
 	assert.Equal(t, "playbook/rollout", base)
 
@@ -1658,7 +1669,7 @@ func TestPrepareWorkspaceWithoutCreateFlagStillFailsOnMissingBase(t *testing.T) 
 	}
 	g := NewGit(filepath.Join(spec.Workspace, "card-1"), "", "", "")
 
-	_, err := prepareWorkspace(ctx, g, spec, "cm/card-1")
+	err := prepareWorkspace(ctx, g, spec)
 	require.Error(t, err)
 	assert.False(t, remoteHasBranch(t, bare, "playbook/missing"))
 }
@@ -1676,7 +1687,7 @@ func TestPrepareWorkspaceRefusesCreateWithoutBase(t *testing.T) {
 	ws := filepath.Join(spec.Workspace, "card-1")
 	g := NewGit(ws, "", "", "")
 
-	_, err := prepareWorkspace(ctx, g, spec, "cm/card-1")
+	err := prepareWorkspace(ctx, g, spec)
 	require.Error(t, err, "create base branch requested without a base branch must be refused")
 	assert.NoDirExists(t, ws)
 }

@@ -25,7 +25,7 @@ type candidate struct {
 	// the ladder walked down. Always written through setPick, so the slug and
 	// its provenance cannot drift apart across a re-selection.
 	pick      registry.Pick
-	branch    string // cm/<cardid>-cK, container-local only
+	branch    string // <card branch>-cK, container-local only
 	dir       string // <workspace>/.worktrees/cK - NOTE: workspace IS the clone dir
 	git       GitOps
 	ledger    *Ledger

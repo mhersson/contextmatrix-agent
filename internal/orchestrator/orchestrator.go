@@ -113,7 +113,7 @@ type GitOps interface {
 type Config struct {
 	Project           string
 	CardID            string
-	Branch            string // cm/<card-id-lower>
+	Branch            string // the card branch the worker derived; the FSM never re-derives it
 	BaseBranch        string
 	Workspace         string
 	MaxCardCost       float64

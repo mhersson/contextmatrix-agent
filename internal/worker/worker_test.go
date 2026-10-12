@@ -303,6 +303,20 @@ func remoteHasBranch(t *testing.T, remote, branch string) bool {
 	return strings.Contains(string(out), branch)
 }
 
+// remoteCardBranches lists the card branches on the bare remote by exact name.
+func remoteCardBranches(t *testing.T, remote string) []string {
+	t.Helper()
+
+	cmd := exec.Command("git", "for-each-ref", "--format=%(refname:short)", "refs/heads/cm/")
+	cmd.Dir = remote
+	cmd.Env = gitEnv()
+
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "for-each-ref: %s", out)
+
+	return strings.Fields(string(out))
+}
+
 // TestRunStalledCardRecoversDirectInProgress: a run whose GetTaskContext returns
 // State=="stalled" recovers via TransitionCard(cardID,"in_progress"), then
 // re-fetches context and proceeds into the FSM with state=="in_progress".
@@ -607,6 +621,98 @@ func TestRunCleanTree(t *testing.T) {
 
 	assert.Equal(t, 0, ops.count("ReportPush"), "worker does not push on the FSM happy path")
 	assert.False(t, remoteHasBranch(t, remote, "cm/cmx-001"), "no branch pushed by the worker")
+}
+
+// TestRunCutsBranchFromCardSource drives the real bootstrap against a bare
+// remote: the branch is named from the card's source, the workspace sits on it,
+// and the park path pushes and reports exactly that branch.
+func TestRunCutsBranchFromCardSource(t *testing.T) {
+	tests := []struct {
+		name   string
+		source cmclient.CardSource
+		want   string
+	}{
+		{"jira card carries its key", cmclient.CardSource{System: "jira", ExternalID: "PROJ-123"}, "cm/cmx-001-PROJ-123"},
+		{"card without a source", cmclient.CardSource{}, "cm/cmx-001"},
+		{"invalid jira key falls back", cmclient.CardSource{System: "jira", ExternalID: "proj-123"}, "cm/cmx-001"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			remote := setupBareRemote(t)
+			ops := newFakeOps()
+			ops.tcx.Source = tt.source
+
+			var seenBranch, checkedOut string
+
+			swapRunOrchestrator(t, func(_ context.Context, d orchestrator.Deps) error {
+				seenBranch = d.Cfg.Branch
+				checkedOut = currentBranch(t, d.Cfg.Workspace)
+
+				require.NoError(t, os.WriteFile(filepath.Join(d.Cfg.Workspace, "wip.txt"), []byte("partial\n"), 0o644))
+
+				return &orchestrator.BudgetExceededError{Spent: 1.50, Max: 1.00}
+			})
+
+			emit := events.NewEmitter(io.Discard, io.Discard)
+
+			_, err := Run(context.Background(), baseSpec(t, remote, t.TempDir()), ops, &scriptedLLM{}, emit, openStdin(t))
+			require.Error(t, err)
+
+			assert.Equal(t, tt.want, seenBranch, "the FSM runs on the derived branch")
+			assert.Equal(t, tt.want, checkedOut, "the workspace is checked out on it")
+			assert.Equal(t, []string{tt.want}, remoteCardBranches(t, remote), "only the derived branch reaches the remote")
+
+			push := ops.argsOf("ReportPush")
+			require.NotNil(t, push, "the WIP push is reported")
+			assert.Equal(t, tt.want, push[1], "report_push names the derived branch")
+		})
+	}
+}
+
+// TestRunResumeFindsTheSameBranch: a second container for the same Jira card
+// derives the same branch and finds the first run's pushed tip on it - the
+// probe the orchestrator's resume starts from.
+func TestRunResumeFindsTheSameBranch(t *testing.T) {
+	remote := setupBareRemote(t)
+	source := cmclient.CardSource{System: "jira", ExternalID: "PROJ-123"}
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	first := newFakeOps()
+	first.tcx.Source = source
+
+	swapRunOrchestrator(t, func(_ context.Context, d orchestrator.Deps) error {
+		require.NoError(t, os.WriteFile(filepath.Join(d.Cfg.Workspace, "wip.txt"), []byte("partial\n"), 0o644))
+
+		return &orchestrator.BudgetExceededError{Spent: 1.50, Max: 1.00}
+	})
+
+	_, err := Run(context.Background(), baseSpec(t, remote, t.TempDir()), first, &scriptedLLM{}, emit, openStdin(t))
+	require.Error(t, err)
+
+	pushedTip := remoteTipOf(t, remote, "cm/cmx-001-PROJ-123")
+
+	second := newFakeOps()
+	second.tcx.Source = source
+
+	var resumeBranch, resumeTip string
+
+	swapRunOrchestrator(t, func(ctx context.Context, d orchestrator.Deps) error {
+		resumeBranch = d.Cfg.Branch
+
+		tip, err := d.Git.RemoteTip(ctx, d.Cfg.Branch)
+		require.NoError(t, err)
+
+		resumeTip = tip
+
+		return nil
+	})
+
+	res, err := Run(context.Background(), baseSpec(t, remote, t.TempDir()), second, &scriptedLLM{}, emit, openStdin(t))
+	require.NoError(t, err)
+	assert.Equal(t, "completed", res.Reason)
+
+	assert.Equal(t, "cm/cmx-001-PROJ-123", resumeBranch)
+	assert.Equal(t, pushedTip, resumeTip, "the resumed run finds the first run's pushed work")
 }
 
 // --- shared test plumbing --------------------------------------------------
