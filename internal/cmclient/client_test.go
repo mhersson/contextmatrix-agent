@@ -150,6 +150,11 @@ const taskContextPayload = `{
     "model_orchestrator": "claude-opus-4-5",
     "model_coder": "claude-sonnet-4-5",
     "model_reviewer": "claude-opus-4-5",
+    "source": {
+      "system": "jira",
+      "external_id": "PROJ-123",
+      "external_url": "https://example.atlassian.net/browse/PROJ-123"
+    },
     "token_usage": {
       "prompt_tokens": 1000,
       "completion_tokens": 200,
@@ -389,6 +394,7 @@ func TestGetTaskContext(t *testing.T) {
 	assert.Equal(t, "claude-opus-4-5", tc.ModelOrchestrator)
 	assert.Equal(t, "claude-sonnet-4-5", tc.ModelCoder)
 	assert.Equal(t, "claude-opus-4-5", tc.ModelReviewer)
+	assert.Equal(t, CardSource{System: "jira", ExternalID: "PROJ-123"}, tc.Source)
 	assert.InDelta(t, 0.0045, tc.ReportedCostUSD, 1e-9)
 }
 
@@ -472,6 +478,7 @@ func TestGetTaskContext_OrchestratorFieldsDefaultWhenAbsent(t *testing.T) {
 	assert.Empty(t, tc.ModelOrchestrator)
 	assert.Empty(t, tc.ModelCoder)
 	assert.Empty(t, tc.ModelReviewer)
+	assert.Zero(t, tc.Source, "a card created in CM has no source")
 	assert.InDelta(t, 0.0, tc.ReportedCostUSD, 1e-9)
 }
 

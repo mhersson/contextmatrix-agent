@@ -183,6 +183,13 @@ type ImageBlob struct {
 	Data []byte
 }
 
+// CardSource is the external origin of an imported card. It is immutable once
+// the card exists and zero for a card created in ContextMatrix.
+type CardSource struct {
+	System     string
+	ExternalID string
+}
+
 // TaskContext is the subset of get_task_context the worker and orchestrator
 // need. Parent, siblings, and project config from the server response are
 // intentionally ignored.
@@ -197,6 +204,10 @@ type TaskContext struct {
 	// card JSON get_task_context already returns.
 	Type   string
 	Labels []string
+
+	// Source is the card's import origin; the worker derives the work branch
+	// from it.
+	Source CardSource
 
 	// Orchestrator fields - populated for autonomous cards; zero-valued when the
 	// card JSON omits them.
@@ -367,7 +378,11 @@ func (c *Client) GetTaskContext(ctx context.Context, cardID string, includeImage
 			ModelOrchestrator  string   `json:"model_orchestrator"`
 			ModelCoder         string   `json:"model_coder"`
 			ModelReviewer      string   `json:"model_reviewer"`
-			TokenUsage         *struct {
+			Source             struct {
+				System     string `json:"system"`
+				ExternalID string `json:"external_id"`
+			} `json:"source"`
+			TokenUsage *struct {
 				EstimatedCostUSD float64 `json:"estimated_cost_usd"`
 			} `json:"token_usage"`
 		} `json:"card"`
@@ -377,11 +392,15 @@ func (c *Client) GetTaskContext(ctx context.Context, cardID string, includeImage
 	}
 
 	tc := TaskContext{
-		Title:              payload.Card.Title,
-		Description:        payload.Card.Body,
-		State:              payload.Card.State,
-		Type:               payload.Card.Type,
-		Labels:             payload.Card.Labels,
+		Title:       payload.Card.Title,
+		Description: payload.Card.Body,
+		State:       payload.Card.State,
+		Type:        payload.Card.Type,
+		Labels:      payload.Card.Labels,
+		Source: CardSource{
+			System:     payload.Card.Source.System,
+			ExternalID: payload.Card.Source.ExternalID,
+		},
 		Phase:              payload.Card.Phase,
 		Autonomous:         payload.Card.Autonomous,
 		CreatePR:           payload.Card.CreatePR,
