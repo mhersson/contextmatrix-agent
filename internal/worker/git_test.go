@@ -1072,9 +1072,10 @@ func TestCheckout(t *testing.T) {
 // TestResumeAdoptsRemoteWIPTree is the real-git regression for the crash-resume
 // bug. Unlike TestCheckout (no local branch, so `git checkout` DWIMs a tracking
 // branch from origin), a real resume runs prepareWorkspace and cutCardBranch
-// FIRST, which cut a LOCAL card branch from base HEAD. `git checkout <branch>` then merely switches
-// to that base-pointing branch and does NOT fast-forward it to the pushed WIP -
-// so the orchestrator's reconcile must hard-reset onto the probed remote tip.
+// FIRST, which cut a LOCAL card branch from base HEAD. `git checkout <branch>`
+// then merely switches to that base-pointing branch and does NOT fast-forward
+// it to the pushed WIP - so the orchestrator's reconcile must hard-reset onto
+// the probed remote tip.
 // This drives the real *worker.Git through the exact bootstrap + reconcile
 // git sequence and proves the pushed WIP is adopted and a follow-up WIP push
 // fast-forwards. Without the HardReset, the NoFileExists assertion would instead

@@ -244,6 +244,11 @@ func Run(ctx context.Context, spec RunSpec, ops CardOps, client llm.LLM, emit *e
 	// context is known; nothing pushes between the clone and this point.
 	branchName := cardBranchName(spec.CardID, tcx.Source)
 
+	if _, ok := jiraKey(tcx.Source); !ok && tcx.Source.System == jiraSourceSystem {
+		slog.Warn("jira key unusable for branch name; using card ID only",
+			"card", spec.CardID, "external_id", tcx.Source.ExternalID)
+	}
+
 	resolvedBase, err := cutCardBranch(ctx, git, spec, branchName)
 	if err != nil {
 		return releaseWithError(ctx, ops, spec.CardID, err)
