@@ -595,8 +595,8 @@ func (g *Git) guardPush(branch string, force bool) error {
 			}
 		}
 
-		if !strings.HasPrefix(branch, "cm/") {
-			return fmt.Errorf("refusing to force-push %q: outside the cm/ namespace", branch)
+		if !strings.HasPrefix(branch, cardBranchPrefix) {
+			return fmt.Errorf("refusing to force-push %q: outside the %s namespace", branch, cardBranchPrefix)
 		}
 	}
 
@@ -887,8 +887,8 @@ func (g *Git) RemoveWorktree(ctx context.Context, path string) error {
 // DeleteBranch deletes a local candidate branch. Only cm/-namespaced branches
 // other than the run's own card branch may be deleted.
 func (g *Git) DeleteBranch(ctx context.Context, name string) error {
-	if !strings.HasPrefix(name, "cm/") {
-		return fmt.Errorf("refusing to delete %q: outside the cm/ namespace", name)
+	if !strings.HasPrefix(name, cardBranchPrefix) {
+		return fmt.Errorf("refusing to delete %q: outside the %s namespace", name, cardBranchPrefix)
 	}
 
 	if g.cardBranch != "" && name == g.cardBranch {

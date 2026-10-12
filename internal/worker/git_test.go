@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -592,6 +593,42 @@ func TestPushGuardDenylistRegardless(t *testing.T) {
 			err := g.guardPush(tt.cardBranch, true)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+// TestPushGuardOwnsTheDerivedBranch: once the policy is locked to a Jira-keyed
+// card branch, that exact name is pushable, plain and forced, while the
+// un-keyed name and a Best-of-N candidate branch are not.
+func TestPushGuardOwnsTheDerivedBranch(t *testing.T) {
+	t.Parallel()
+
+	branch := cardBranchName("CMX-001", cmclient.CardSource{System: "jira", ExternalID: "PROJ-123"})
+
+	g := NewGit(t.TempDir(), "", "", "")
+	g.SetBranchPolicy(branch, "main", "main")
+
+	tests := []struct {
+		name    string
+		branch  string
+		force   bool
+		allowed bool
+	}{
+		{"plain push to the derived branch", branch, false, true},
+		{"force push to the derived branch", branch, true, true},
+		{"plain push to the un-keyed name", "cm/cmx-001", false, false},
+		{"force push to a candidate branch", branch + "-c1", true, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := g.guardPush(tt.branch, tt.force)
+			if tt.allowed {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+			}
 		})
 	}
 }
@@ -1227,6 +1264,36 @@ func TestDeleteBranchGuards(t *testing.T) {
 	err = g.DeleteBranch(ctx, "cm/x-1")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "the run's own card branch")
+}
+
+// TestDeleteBranchWithDerivedNames: Best-of-N cleanup deletes a candidate cut
+// from a Jira-keyed card branch and still refuses the card branch itself.
+func TestDeleteBranchWithDerivedNames(t *testing.T) {
+	t.Parallel()
+
+	_, ws, _ := setupClonedRepo(t)
+	ctx := context.Background()
+	g := NewGit(ws, "", "", "")
+
+	branch := cardBranchName("CMX-001", cmclient.CardSource{System: "jira", ExternalID: "PROJ-123"})
+	require.NoError(t, g.CreateBranch(ctx, branch))
+	g.SetBranchPolicy(branch, "main", "main")
+
+	candidate := branch + "-c1"
+	wt := filepath.Join(t.TempDir(), "c1")
+	require.NoError(t, g.AddWorktree(ctx, wt, candidate, branch))
+	require.NoError(t, g.RemoveWorktree(ctx, wt))
+
+	require.NoError(t, g.DeleteBranch(ctx, candidate))
+	require.Error(t, g.DeleteBranch(ctx, branch), "the run's own card branch is never deleted")
+
+	out, err := g.run(ctx, "branch", "--list", candidate)
+	require.NoError(t, err)
+	assert.Empty(t, strings.TrimSpace(out), "the candidate branch is gone")
+
+	out, err = g.run(ctx, "branch", "--list", branch)
+	require.NoError(t, err)
+	assert.NotEmpty(t, strings.TrimSpace(out), "the card branch survives")
 }
 
 // TestCandidateGitCannotPush pins the structural safety property GitForDir
