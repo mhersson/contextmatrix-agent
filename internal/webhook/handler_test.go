@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -47,15 +48,17 @@ func nowTS() string {
 
 // ---- fakes ------------------------------------------------------------------
 
-// fakeExecutor records calls and lets a test inject a Launch error. On a
+// fakeExecutor records calls and lets a test inject a Launch or Kill error. On a
 // successful Launch it registers the run in the shared tracker so the handler's
-// capacity checks and /containers reflect it, mirroring the real executor.
+// capacity checks and /containers reflect it, and Kill answers ErrNotFound for
+// an untracked card, mirroring the real executor.
 type fakeExecutor struct {
 	mu sync.Mutex
 
 	tracker *executor.Tracker
 
 	launchErr      error
+	killErr        error
 	launched       []executor.LaunchSpec
 	killed         [][2]string // project, cardID
 	stopAllArg     string
@@ -96,7 +99,15 @@ func (f *fakeExecutor) Kill(_ context.Context, project, cardID string) error {
 
 	f.killed = append(f.killed, [2]string{project, cardID})
 
+	if f.killErr != nil {
+		return f.killErr
+	}
+
 	if f.tracker != nil {
+		if _, ok := f.tracker.Get(project, cardID); !ok {
+			return fmt.Errorf("%w: %s/%s", executor.ErrNotFound, project, cardID)
+		}
+
 		f.tracker.Remove(project, cardID)
 	}
 
@@ -641,13 +652,51 @@ func TestKill_TrackedReturns200(t *testing.T) {
 	h.exec.mu.Unlock()
 }
 
-func TestKill_UntrackedReturns404(t *testing.T) {
+// ContextMatrix treats any status >= 400 from /kill as a failed stop, so a card
+// with nothing left to kill must answer success.
+func TestKill_NothingToKillReturns200(t *testing.T) {
+	tests := []struct {
+		name    string
+		tracked bool
+		killErr error
+	}{
+		{name: "untracked card"},
+		{
+			name:    "run removed before the kill lands",
+			tracked: true,
+			killErr: fmt.Errorf("kill: %w", executor.ErrNotFound),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t, 4)
+			h.exec.killErr = tt.killErr
+
+			if tt.tracked {
+				h.addRun("PROJ-001", "proj")
+			}
+
+			w := h.do(t, http.MethodPost, "/kill", protocol.KillPayload{CardID: "PROJ-001", Project: "proj"})
+
+			require.Equal(t, http.StatusOK, w.Code)
+
+			var sr protocol.SuccessResponse
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &sr))
+			assert.True(t, sr.OK)
+		})
+	}
+}
+
+func TestKill_ExecutorErrorReturns500(t *testing.T) {
 	h := newHarness(t, 4)
+	h.exec.killErr = errors.New("docker unavailable")
+	h.addRun("PROJ-001", "proj")
 
-	w := h.do(t, http.MethodPost, "/kill", protocol.KillPayload{CardID: "ghost", Project: "proj"})
+	w := h.do(t, http.MethodPost, "/kill", protocol.KillPayload{CardID: "PROJ-001", Project: "proj"})
 
-	require.Equal(t, http.StatusNotFound, w.Code)
-	assert.Equal(t, protocol.CodeNotFound, decodeErr(t, w).Code)
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.Equal(t, protocol.CodeInternal, decodeErr(t, w).Code)
 }
 
 // ---- stop-all ---------------------------------------------------------------

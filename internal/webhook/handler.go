@@ -842,19 +842,10 @@ func (s *Server) handleKill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, ok := s.tracker.Get(payload.Project, payload.CardID); !ok {
-		webhookcore.WriteError(w, http.StatusNotFound, protocol.CodeNotFound, "no tracked container")
-
-		return
-	}
-
-	if err := s.executor.Kill(r.Context(), payload.Project, payload.CardID); err != nil {
-		if errors.Is(err, executor.ErrNotFound) {
-			webhookcore.WriteError(w, http.StatusNotFound, protocol.CodeNotFound, "no tracked container")
-
-			return
-		}
-
+	// Idempotent: ContextMatrix reads any status >= 400 as a failed stop, and a
+	// card with no tracked container is already stopped.
+	if err := s.executor.Kill(r.Context(), payload.Project, payload.CardID); err != nil &&
+		!errors.Is(err, executor.ErrNotFound) {
 		s.logger.Error("kill failed", "project", payload.Project, "card_id", payload.CardID, "error", err)
 		webhookcore.WriteError(w, http.StatusInternalServerError, protocol.CodeInternal, "kill failed")
 
