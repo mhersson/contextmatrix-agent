@@ -4451,12 +4451,11 @@ func TestFixModelRefusalNamesItsRealCause(t *testing.T) {
 		"no attempts cap was reached on this path; err=%v", err)
 }
 
-// The terminal, last-chance fix before a park is floored at TierComplex, which
-// buys it at least 1.5x the base turns. Sourcing the fix budget from the CARD's
-// budget would silently cut a third of the turns off the one fix whose cap ends
-// the run when it has committed nothing, rather than deferring to another
-// round - and would re-conflate exactly what the two-axis split exists to
-// separate.
+// The authoritative pass's fix, the last chance before a park, is floored at
+// TierComplex, which buys it at least 1.5x the base turns. Sourcing the fix
+// budget from the CARD's budget would silently cut a third of the turns off
+// that last-chance fix - and would re-conflate exactly what the two-axis split
+// exists to separate.
 func TestFixBudgetComesFromTheFixBarNotTheCard(t *testing.T) {
 	ops := &fakeOps{}
 	o := newReviewRun(reviewTestDeps(t, ops, &fakeGit{}, &planLLM{}, reviewerRegistry()),

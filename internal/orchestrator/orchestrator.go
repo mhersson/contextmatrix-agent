@@ -85,8 +85,9 @@ type GitOps interface {
 	LastCommitTouching(ctx context.Context, paths []string) (string, error)
 	RebaseAutosquash(ctx context.Context, onto string) error
 	SoftReset(ctx context.Context, to string) error
-	// MixedReset moves the index to ref and leaves the working tree alone, so
-	// a staged file HEAD does not hold becomes untracked again.
+	// MixedReset moves the index to ref and leaves the working tree alone:
+	// staged edits become unstaged and a staged file ref does not hold becomes
+	// untracked.
 	MixedReset(ctx context.Context, ref string) error
 	Head(ctx context.Context) (string, error)
 	Checkout(ctx context.Context, ref string) error

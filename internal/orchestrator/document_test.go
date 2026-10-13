@@ -232,23 +232,51 @@ func TestDocumentFailureDiscardsTheRunsEdits(t *testing.T) {
 }
 
 // TestDocumentFailureKeepsTrackedEditsWhenTheIndexCannotBeReset: a hard reset
-// over a still-staged index would delete untracked files the run did not
-// create, so without the index reset the tracked edits are kept instead; the
-// files the run created are still removed.
+// over an index that still holds staged files deletes any of them HEAD does
+// not hold, whoever created them, so when the index reset fails the tracked
+// edits are kept. What is removed follows the listing: after a model error the
+// file the run created is still untracked and goes; after a failed commit it
+// is staged like every other untracked file, so it and the index are kept.
 func TestDocumentFailureKeepsTrackedEditsWhenTheIndexCannotBeReset(t *testing.T) {
-	ops := &fakeOps{}
-	git := &fakeGit{
-		commitErr:      errors.New("index locked"),
-		mixedResetErr:  errors.New("index locked"),
-		untrackedFiles: [][]string{{"stray.bin"}, {"docs/new.md", "stray.bin"}},
+	before := []string{"stray.bin"}
+
+	tests := []struct {
+		name    string
+		client  llm.LLM
+		git     *fakeGit
+		removed [][]string
+	}{
+		{
+			name:   "model error",
+			client: &errLLM{err: errors.New("connection reset")},
+			git: &fakeGit{
+				mixedResetErr:  errors.New("index locked"),
+				untrackedFiles: [][]string{before, {"docs/new.md", "stray.bin"}},
+			},
+			removed: [][]string{{"docs/new.md"}},
+		},
+		{
+			name:   "commit error",
+			client: &planLLM{responses: []llm.Response{finishResp("docs: x", 0.02)}},
+			git: &fakeGit{
+				commitErr:      errors.New("pre-commit hook failed"),
+				mixedResetErr:  errors.New("index locked"),
+				untrackedFiles: [][]string{before, {}},
+			},
+		},
 	}
-	d := documentTestDeps(ops, git, &planLLM{responses: []llm.Response{finishResp("docs: x", 0.02)}})
-	o := newDocumentRun(d, cmclient.TaskContext{Title: "T", Description: "body"}, 0)
 
-	require.NoError(t, runDocument(context.Background(), o))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := documentTestDeps(&fakeOps{}, tt.git, tt.client)
+			o := newDocumentRun(d, cmclient.TaskContext{Title: "T", Description: "body"}, 0)
 
-	assert.Empty(t, git.hardResetRefs, "no hard reset over a staged index")
-	assert.Equal(t, [][]string{{"docs/new.md"}}, git.removedFiles)
+			require.NoError(t, runDocument(context.Background(), o))
+
+			assert.Empty(t, tt.git.hardResetRefs, "no hard reset over a staged index")
+			assert.Equal(t, tt.removed, tt.git.removedFiles)
+		})
+	}
 }
 
 // TestDocumentFailureKeepsUntrackedFilesWhenThePreRunListingFailed: without
