@@ -75,3 +75,19 @@ func TestConfigValidate(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing.yaml")
 }
+
+func TestConfigValidateRejectsUnknownKey(t *testing.T) {
+	clearCMXEnv(t)
+
+	path := filepath.Join(t.TempDir(), "serve.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(
+		"contextmatrix_url: http://localhost:18080\n"+
+			"container_contextmatrix_url: http://172.17.0.1:18080\n"+
+			"api_key: 0123456789abcdef0123456789abcdef\n"+
+			"base_image: contextmatrix-agent-worker:abc1234\n"+
+			"max_cost: 2.0\n"), 0o600))
+
+	_, err := runConfig(t, "validate", path)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "max_cost")
+}

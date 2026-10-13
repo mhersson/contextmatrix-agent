@@ -3,7 +3,10 @@
 # Copy to ~/.config/contextmatrix-agent/serve.yaml (the XDG default location)
 # and edit before starting the service. Every scalar field can also be set or
 # overridden with a CMX_* environment variable; list/map fields are YAML-only
-# or use the nested CMX_…__KEY form (see each field below).
+# or use the nested CMX_…__KEY form (see each field below). An unknown key (a
+# typo, or one a later version removed) stops startup and `config validate`
+# with an error naming it; worker_extra_env entries and CMX_* variables are not
+# checked.
 
 # --- ContextMatrix connectivity -----------------------------------------------
 

@@ -7,6 +7,9 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"reflect"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -255,7 +258,8 @@ func DefaultsYAML() ([]byte, error) {
 
 // LoadService merges defaults < file (if it loads) < env (CMX_*). A nonexistent
 // path is not an error: the file layer is skipped and the result is
-// defaults+env, matching config.go's Load behavior.
+// defaults+env, matching config.go's Load behavior. A file key the loader does
+// not declare is an error naming the key.
 func LoadService(path string) (*ServiceConfig, error) {
 	k := koanf.New(".")
 
@@ -263,12 +267,24 @@ func LoadService(path string) (*ServiceConfig, error) {
 		return nil, fmt.Errorf("load service defaults: %w", err)
 	}
 
+	// The file loads into its own instance so only its keys face the unknown-key
+	// check; the env layer stays lenient because `run` shares the CMX_ prefix.
+	var fileKeys []string
+
 	if path != "" {
+		fileLayer := koanf.New(".")
+
 		// A missing file is allowed (defaults+env only); other read/parse errors
 		// are not.
-		if err := k.Load(file.Provider(path), yaml.Parser()); err != nil && !isNotExist(err) {
+		if err := fileLayer.Load(file.Provider(path), yaml.Parser()); err != nil && !isNotExist(err) {
 			return nil, fmt.Errorf("load service config file %q: %w", path, err)
 		}
+
+		if err := k.Merge(fileLayer); err != nil {
+			return nil, fmt.Errorf("merge service config file %q: %w", path, err)
+		}
+
+		fileKeys = fileLayer.Keys()
 	}
 
 	// CMX_FOO_BAR -> "foo_bar"; nested keys use "__": CMX_WORKER_EXTRA_ENV__FOO
@@ -282,12 +298,26 @@ func LoadService(path string) (*ServiceConfig, error) {
 		return nil, fmt.Errorf("load service env: %w", err)
 	}
 
-	// Checked on the merged key set, before the unmarshal that would silently
-	// drop a key serviceRaw no longer declares.
+	// Checked on the merged key set (env included) and before the unknown-key
+	// check, so a leftover is told where its setting lives now.
 	for _, r := range removedKeys {
 		if k.Exists(r.key) {
 			return nil, r.err
 		}
+	}
+
+	if unknown := unknownFileKeys(fileKeys); len(unknown) > 0 {
+		noun := "key"
+		if len(unknown) > 1 {
+			noun = "keys"
+		}
+
+		quoted := make([]string, len(unknown))
+		for i, key := range unknown {
+			quoted[i] = strconv.Quote(key)
+		}
+
+		return nil, fmt.Errorf("service config file %q: unknown %s %s", path, noun, strings.Join(quoted, ", "))
 	}
 
 	var raw serviceRaw
@@ -296,6 +326,49 @@ func LoadService(path string) (*ServiceConfig, error) {
 	}
 
 	return raw.toConfig()
+}
+
+// unknownFileKeys returns the keys, in input order, that serviceRaw's koanf tags
+// do not declare. Matching is exact: the unmarshal prefers the defaults' exact
+// key, so a case variant is dropped too. Below a map-typed field the keys are
+// operator data (worker_extra_env's variable names), so only its root is checked.
+func unknownFileKeys(keys []string) []string {
+	declared := map[string]bool{}
+
+	var freeFormPrefixes []string
+
+	var walk func(t reflect.Type, prefix string)
+
+	walk = func(t reflect.Type, prefix string) {
+		for i := range t.NumField() {
+			field := t.Field(i)
+			key := prefix + field.Tag.Get("koanf")
+			declared[key] = true
+
+			switch field.Type.Kind() {
+			case reflect.Struct:
+				walk(field.Type, key+".")
+			case reflect.Map:
+				freeFormPrefixes = append(freeFormPrefixes, key+".")
+			}
+		}
+	}
+
+	walk(reflect.TypeFor[serviceRaw](), "")
+
+	var unknown []string
+
+	for _, key := range keys {
+		underFreeForm := slices.ContainsFunc(freeFormPrefixes, func(prefix string) bool {
+			return strings.HasPrefix(key, prefix)
+		})
+
+		if !declared[key] && !underFreeForm {
+			unknown = append(unknown, key)
+		}
+	}
+
+	return unknown
 }
 
 // toConfig parses the wire-form durations and assembles the typed config.
