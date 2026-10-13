@@ -578,6 +578,17 @@ type fakeGit struct {
 	// infoExcludeErr fails every call.
 	infoExcludes   []string
 	infoExcludeErr error
+
+	// UntrackedFiles scripting: untrackedFiles holds successive listings by
+	// call ordinal, the last one repeating; untrackedErrs fails ONE listing by
+	// the same ordinal (nil, or past the end, means that call succeeds).
+	// removedFiles captures each RemoveFiles call's paths; removeFilesErr fails
+	// every call.
+	untrackedFiles [][]string
+	untrackedErrs  []error
+	untrackedCalls int
+	removedFiles   [][]string
+	removeFilesErr error
 }
 
 // assertErr builds a sentinel error for fake scripting in tests.
@@ -837,6 +848,36 @@ func (g *fakeGit) AddInfoExclude(_ context.Context, pattern string) error {
 	g.record("AddInfoExclude:" + pattern)
 
 	return g.infoExcludeErr
+}
+
+func (g *fakeGit) UntrackedFiles(context.Context) ([]string, error) {
+	g.record("UntrackedFiles")
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	call := g.untrackedCalls
+	g.untrackedCalls++
+
+	if call < len(g.untrackedErrs) && g.untrackedErrs[call] != nil {
+		return nil, g.untrackedErrs[call]
+	}
+
+	if len(g.untrackedFiles) == 0 {
+		return nil, nil
+	}
+
+	return slices.Clone(g.untrackedFiles[min(call, len(g.untrackedFiles)-1)]), nil
+}
+
+func (g *fakeGit) RemoveFiles(_ context.Context, paths []string) error {
+	g.mu.Lock()
+	g.removedFiles = append(g.removedFiles, slices.Clone(paths))
+	g.mu.Unlock()
+
+	g.record("RemoveFiles:" + strings.Join(paths, ","))
+
+	return g.removeFilesErr
 }
 
 // compile-time assertion that the fake satisfies the consumer interface.

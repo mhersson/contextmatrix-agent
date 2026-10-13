@@ -1357,6 +1357,61 @@ func TestWorktreeStateTracksWritesAndIgnoresArtifacts(t *testing.T) {
 	assert.Equal(t, ignoring, state(), "an ignored build artifact must not read as a write")
 }
 
+// UntrackedFiles lists every untracked file individually and verbatim, and
+// nothing the repository ignores or already tracks.
+func TestUntrackedFilesListsOnlyUntrackedFiles(t *testing.T) {
+	t.Parallel()
+
+	remote := setupBareRemote(t)
+	ws := filepath.Join(t.TempDir(), "ws")
+	g := NewGit(ws, "", "", "")
+	ctx := context.Background()
+
+	require.NoError(t, g.Clone(ctx, remote, "main"))
+
+	none, err := g.UntrackedFiles(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, none, "a fresh clone has no untracked files")
+
+	writeFile(t, ws, ".gitignore", []byte("out/\n"), 0o644)
+	runGit(t, ws, "add", ".gitignore")
+	runGit(t, ws, "commit", "-m", "ignore output")
+
+	writeFile(t, ws, "README.md", []byte("edited\n"), 0o644)
+	writeFile(t, ws, "docs/new guide.md", []byte("new\n"), 0o644)
+	writeFile(t, ws, "notes.md", []byte("new\n"), 0o644)
+	writeFile(t, ws, "out/build.log", []byte("ignored\n"), 0o644)
+
+	got, err := g.UntrackedFiles(ctx)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"docs/new guide.md", "notes.md"}, got)
+}
+
+// RemoveFiles deletes exactly the named files, tolerates one already gone, and
+// never reaches outside the clone - through ".." or a symlinked directory.
+func TestRemoveFilesStaysInsideTheClone(t *testing.T) {
+	t.Parallel()
+
+	ws := t.TempDir()
+	outside := t.TempDir()
+	victim := filepath.Join(outside, "victim.md")
+
+	writeFile(t, ws, "docs/new.md", []byte("new\n"), 0o644)
+	writeFile(t, ws, "keep.md", []byte("keep\n"), 0o644)
+	require.NoError(t, os.WriteFile(victim, []byte("not ours\n"), 0o644))
+	require.NoError(t, os.Symlink(outside, filepath.Join(ws, "link")))
+
+	g := NewGit(ws, "", "", "")
+
+	require.NoError(t, g.RemoveFiles(context.Background(), []string{"docs/new.md", "already-gone.md"}))
+	assert.NoFileExists(t, filepath.Join(ws, "docs", "new.md"))
+	assert.FileExists(t, filepath.Join(ws, "keep.md"), "a file not named is left alone")
+
+	require.Error(t, g.RemoveFiles(context.Background(), []string{"link/victim.md"}))
+	require.Error(t, g.RemoveFiles(context.Background(), []string{"../" + filepath.Base(outside) + "/victim.md"}))
+	assert.FileExists(t, victim, "a path that escapes the clone is refused")
+}
+
 // foldUntracked is on the coder's critical path twice per verify call, so its
 // work has to be bounded: past the budget it degrades to an error, which the
 // fingerprint's only caller reads as "assume written".

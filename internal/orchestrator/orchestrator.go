@@ -106,6 +106,12 @@ type GitOps interface {
 	// error instead of fingerprinting a tree it cannot read cheaply; callers
 	// treat that as "assume written".
 	WorktreeState(ctx context.Context) (string, error)
+	// UntrackedFiles lists the worktree's untracked files, workspace-relative,
+	// under the repository's own ignore rules: an ignored path is never listed.
+	UntrackedFiles(ctx context.Context) ([]string, error)
+	// RemoveFiles deletes the named workspace-relative files, confined to the
+	// workspace. A path already gone is not an error.
+	RemoveFiles(ctx context.Context, paths []string) error
 }
 
 // Config carries the per-run parameters the FSM needs.

@@ -15,7 +15,8 @@ const fallbackDocCommitMessage = "docs: update documentation"
 // commits and pushes the result. It is modelled on writePRBody but with a
 // best-effort invariant: the ONLY failure that fails the run is a budget park
 // (o.ledger.Check at the top). Every other failure - model run, branch diff,
-// commit, push - is logged and the run proceeds to review. Most cards correctly
+// commit, push - is logged and the run proceeds to review; a failed model run
+// or commit first discards its edits (discardDocumentEdits). Most cards correctly
 // write nothing: the agent leaves a clean tree, CommitWithMessage reports
 // committed == false, and the phase is a no-op.
 //
@@ -44,6 +45,14 @@ func runDocument(ctx context.Context, o *run) error {
 		diff = "(branch diff unavailable)"
 	}
 
+	// A failed run may delete only the untracked files it created, so record
+	// what was already there. Without this listing it deletes none.
+	untrackedBefore, uerr := d.Git.UntrackedFiles(ctx)
+	if uerr != nil {
+		slog.Warn("document: listing untracked files failed; a failed run will keep any it creates",
+			"card_id", cfg.CardID, "error", uerr)
+	}
+
 	task := fmt.Sprintf(documentPrompt, o.skillEngage(), o.grounding, cfg.Workspace,
 		o.tc.Title, o.taskDescription, o.planOverview(), diff, o.verifyDocContext())
 
@@ -61,6 +70,7 @@ func runDocument(ctx context.Context, o *run) error {
 			"card_id", cfg.CardID, "error", err)
 
 		d.logCard(ctx, "document: model run failed, continuing without docs: %s", err.Error())
+		o.discardDocumentEdits(ctx, untrackedBefore, uerr == nil)
 
 		return nil
 	}
@@ -80,6 +90,7 @@ func runDocument(ctx context.Context, o *run) error {
 		slog.Warn("document: commit failed; continuing", "card_id", cfg.CardID, "error", cerr)
 
 		d.logCard(ctx, "document: committing docs failed, continuing: %s", cerr.Error())
+		o.discardDocumentEdits(ctx, untrackedBefore, uerr == nil)
 
 		return nil
 	}
@@ -105,4 +116,53 @@ func runDocument(ctx context.Context, o *run) error {
 	d.logCard(ctx, "document: wrote and pushed documentation (%s)", msg)
 
 	return nil
+}
+
+// discardDocumentEdits drops what a failed document run left in the tree, so a
+// later review fixup cannot sweep half-written docs in and integrate's rebase
+// does not refuse a dirty tree. The hard reset covers tracked and staged
+// edits; an untracked file is removed only when the pre-run listing proves the
+// run created it (listed is false when that listing failed). Best-effort like
+// the sibling swallowed-failure discards: a failure is warned, never fatal.
+func (o *run) discardDocumentEdits(ctx context.Context, before []string, listed bool) {
+	d := o.d
+
+	if err := d.Git.HardReset(ctx, "HEAD"); err != nil {
+		slog.Warn("document: failed to discard the failed run's tracked edits",
+			"card_id", d.Cfg.CardID, "error", err)
+	}
+
+	if !listed {
+		return
+	}
+
+	after, err := d.Git.UntrackedFiles(ctx)
+	if err != nil {
+		slog.Warn("document: listing untracked files failed; keeping any the failed run created",
+			"card_id", d.Cfg.CardID, "error", err)
+
+		return
+	}
+
+	existed := make(map[string]bool, len(before))
+	for _, p := range before {
+		existed[p] = true
+	}
+
+	var created []string
+
+	for _, p := range after {
+		if !existed[p] {
+			created = append(created, p)
+		}
+	}
+
+	if len(created) == 0 {
+		return
+	}
+
+	if err := d.Git.RemoveFiles(ctx, created); err != nil {
+		slog.Warn("document: failed to remove files the failed run created",
+			"card_id", d.Cfg.CardID, "error", err)
+	}
 }

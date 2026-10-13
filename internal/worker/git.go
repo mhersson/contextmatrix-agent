@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -287,6 +288,45 @@ func (g *Git) WorktreeState(ctx context.Context) (string, error) {
 	}
 
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// UntrackedFiles lists the worktree's untracked files, workspace-relative and
+// one entry per file. git status applies the repository's own ignore rules, so
+// an ignored path is never listed.
+func (g *Git) UntrackedFiles(ctx context.Context) ([]string, error) {
+	status, err := g.run(ctx, "status", "--porcelain=v1", "--untracked-files=all", "-z")
+	if err != nil {
+		return nil, fmt.Errorf("list untracked files: %w", err)
+	}
+
+	return untrackedPaths(status), nil
+}
+
+// RemoveFiles deletes the named workspace-relative files. Every removal goes
+// through an os.Root on the clone, so a path that escapes it - through ".." or
+// a symlinked directory - is refused rather than followed. A path already gone
+// is not an error; a non-empty directory is refused, never removed
+// recursively.
+func (g *Git) RemoveFiles(ctx context.Context, paths []string) error {
+	root, err := os.OpenRoot(g.dir)
+	if err != nil {
+		return fmt.Errorf("remove files: %w", err)
+	}
+	defer root.Close() //nolint:errcheck // nothing was written through the handle itself
+
+	var errs []error
+
+	for _, rel := range paths {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("remove files: %w", err)
+		}
+
+		if err := root.Remove(rel); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("remove %q: %w", rel, err))
+		}
+	}
+
+	return errors.Join(errs...)
 }
 
 // untrackedPaths pulls the untracked entries out of NUL-delimited porcelain v1
