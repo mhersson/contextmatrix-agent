@@ -5185,6 +5185,150 @@ func TestCappedReviewFixRoundWithNoCommitParksInsteadOfRetrying(t *testing.T) {
 	assert.Equal(t, -1, indexOfPrefix(git.recorded(), "Push:"), "an uncommitted round has nothing to push")
 }
 
+// cappedFixRows are the two outcomes every review fix site distinguishes when
+// its fix hits the turn cap: a round that committed pushed work no panel has
+// judged and earns the next review; a round that committed nothing has nothing
+// new to review and stops on the cap.
+var cappedFixRows = []struct {
+	name      string
+	committed bool
+}{
+	{name: "a committed capped fix is reviewed again", committed: true},
+	{name: "an uncommitted capped fix stops on the cap", committed: false},
+}
+
+// The authoritative pass's strong fix: a committed capped fix goes to the
+// strong re-review, which approves or parks on its own verdict.
+func TestAuthoritativeCappedFixIsReReviewedWhenItCommitted(t *testing.T) {
+	for _, tt := range cappedFixRows {
+		t.Run(tt.name, func(t *testing.T) {
+			git := &fakeGit{committed: tt.committed, lastCommitTarget: "abc123"}
+			client := &planLLM{}
+
+			d := reviewTestDeps(t, &fakeOps{}, git, client, reviewerRegistry())
+			d.Cfg.MaxTurns = 5
+			// Cap 1 sends round 1 straight to the authoritative pass.
+			d.Cfg.ReviewAttemptsCap = 1
+
+			strongTurns := turnBudget(d.Cfg.MaxTurns, seedBudgetStep(registry.TierComplex))
+
+			client.responses = slices.Concat(panelRejects("bug"), burnResps(strongTurns))
+			if tt.committed {
+				client.responses = append(client.responses, panelApproves()...)
+			}
+
+			scripted := len(client.responses)
+
+			o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}, 0)
+
+			err := runReview(context.Background(), o)
+
+			assert.Len(t, client.models, scripted, "every scripted call ran and nothing past them; models=%v", client.models)
+
+			if !tt.committed {
+				var mte *MaxTurnsError
+
+				require.ErrorAs(t, err, &mte)
+
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, "clean", o.reviewSummary, "the strong re-review's verdict decides the pass")
+		})
+	}
+}
+
+// The HITL adjust path: a committed capped fix goes back to the human with a
+// fresh review round instead of ending the session as a failed run.
+func TestRunReviewHITLCappedAdjustFixReturnsToTheHuman(t *testing.T) {
+	for _, tt := range cappedFixRows {
+		t.Run(tt.name, func(t *testing.T) {
+			git := &fakeGit{committed: tt.committed, lastCommitTarget: "abc123"}
+			inbox := &fakeInbox{msgs: []harness.UserMessage{
+				{Content: "tighten error handling in a.go"},
+				{Content: "approve"},
+			}}
+			client := &planLLM{}
+
+			d := hitlReviewDeps(&fakeOps{}, git, inbox, client)
+			d.Cfg.MaxTurns = 5
+
+			o := newRun(d, cmclient.TaskContext{Title: "T", Description: "b", State: "review"})
+			isolateVerify(o)
+
+			fixTurns := turnBudget(d.Cfg.MaxTurns, o.fixSizing(fixRequest{Round: 1}).Budget)
+
+			client.responses = slices.Concat(panelRejects("bug"),
+				[]llm.Response{stopResp(`{"verdict":"adjust","feedback":"tighten error handling in a.go"}`, 0.001)},
+				burnResps(fixTurns))
+			if tt.committed {
+				client.responses = slices.Concat(client.responses, panelApproves(),
+					[]llm.Response{stopResp(`{"verdict":"approve","feedback":""}`, 0.001)})
+			}
+
+			scripted := len(client.responses)
+
+			err := runReview(context.Background(), o)
+
+			assert.Len(t, client.models, scripted, "every scripted call ran and nothing past them; models=%v", client.models)
+
+			if !tt.committed {
+				var mte *MaxTurnsError
+
+				require.ErrorAs(t, err, &mte)
+
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, "clean", o.reviewSummary, "the human approved the round that reviewed the capped fix")
+		})
+	}
+}
+
+// The HITL path after a mid-run promotion: a committed capped fix hands over to
+// the autonomous loop, whose next round reviews it.
+func TestRunReviewHITLPromotedCappedFixContinuesAutonomously(t *testing.T) {
+	for _, tt := range cappedFixRows {
+		t.Run(tt.name, func(t *testing.T) {
+			git := &fakeGit{committed: tt.committed, lastCommitTarget: "abc123"}
+			// An empty inbox reports ErrInboxClosed, exactly what a promote frame produces.
+			client := &planLLM{}
+
+			d := hitlReviewDeps(&fakeOps{}, git, &fakeInbox{}, client)
+			d.Cfg.MaxTurns = 5
+
+			o := newRun(d, cmclient.TaskContext{Title: "T", Description: "b", State: "review"})
+			isolateVerify(o)
+
+			fixTurns := turnBudget(d.Cfg.MaxTurns, o.fixSizing(fixRequest{Round: 1}).Budget)
+
+			client.responses = slices.Concat(panelRejects("bug"), burnResps(fixTurns))
+			if tt.committed {
+				client.responses = append(client.responses, panelApproves()...)
+			}
+
+			scripted := len(client.responses)
+
+			err := runReview(context.Background(), o)
+
+			assert.Len(t, client.models, scripted, "every scripted call ran and nothing past them; models=%v", client.models)
+
+			if !tt.committed {
+				var mte *MaxTurnsError
+
+				require.ErrorAs(t, err, &mte)
+
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, "clean", o.reviewSummary, "the delegated round's approval decides the review")
+		})
+	}
+}
+
 // A turn cap widens the budget and says nothing about the fixer's quality, so
 // the round after a cap must not be reported to the operator as an escalation -
 // and a cap that follows a genuine quality failure must not overwrite the

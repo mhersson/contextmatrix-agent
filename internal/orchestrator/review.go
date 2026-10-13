@@ -630,7 +630,8 @@ func (o *run) runReviewHITL(ctx context.Context, plan verifyPlan) error {
 				return fmt.Errorf("increment review attempts: %w", err)
 			}
 
-			if _, err := o.runFix(ctx, fixRequest{Findings: findings, Round: round, FixTier: fixTier}); err != nil {
+			committed, ferr := o.runFix(ctx, fixRequest{Findings: findings, Round: round, FixTier: fixTier})
+			if err := o.continueCappedFix(ctx, round, committed, ferr); err != nil {
 				return err
 			}
 
@@ -649,12 +650,26 @@ func (o *run) runReviewHITL(ctx context.Context, plan verifyPlan) error {
 			return fmt.Errorf("increment review attempts: %w", err)
 		}
 
-		if _, err := o.runFix(ctx, fixRequest{Findings: mergeFeedback(findings, fb), Round: round, FixTier: fixTier}); err != nil {
+		committed, ferr := o.runFix(ctx, fixRequest{Findings: mergeFeedback(findings, fb), Round: round, FixTier: fixTier})
+		if err := o.continueCappedFix(ctx, round, committed, ferr); err != nil {
 			return err
 		}
 	}
 
 	return fmt.Errorf("HITL review exceeded the hard iteration cap of %d", hardReviewIterationCap)
+}
+
+// continueCappedFix drops a turn cap from a fix round that committed: the
+// pushed diff earns the next review, as reviewLoop's capped arm decides. A cap
+// on a round that committed nothing, and every other error, pass through.
+func (o *run) continueCappedFix(ctx context.Context, round int, committed bool, err error) error {
+	if _, capped := errors.AsType[*MaxTurnsError](err); !capped || !committed {
+		return err
+	}
+
+	o.d.logCard(ctx, "review: fix round %d hit its turn cap after committing - reviewing what it pushed", round)
+
+	return nil
 }
 
 // presentFindings is the chat message for the review-decision gate: the
@@ -990,7 +1005,7 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 	// Gated strong fix - runs only because the authoritative review confirmed
 	// real issues.
 	committed, err := o.runFix(ctx, fixRequest{Findings: findings, Round: round, FixTier: fixTier, Authoritative: true})
-	if err != nil {
+	if err := o.continueCappedFix(ctx, round, committed, err); err != nil {
 		return err
 	}
 
