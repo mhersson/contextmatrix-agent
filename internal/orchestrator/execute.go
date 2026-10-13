@@ -535,9 +535,9 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 		// the coder model even though the work still commits, pushes and
 		// completes below - `failed` is the model's verdict, not the card's.
 		// See reportSoloOutcome's doc for why this is the only choice that
-		// moves the leaderboard numerator, and gateEvidence's field docs for
-		// what verified/coderFailed mean (including the mob-checkpoint
-		// revise, which is deliberately not judged the same way).
+		// moves the outcome ledger's solo-failure count, and gateEvidence's
+		// field docs for what verified/coderFailed mean (including the
+		// mob-checkpoint revise, which is deliberately judged differently).
 		result, verifyPass := "win", sc.gate.verified
 		if sc.gate.coderFailed {
 			result, verifyPass = "failed", false
@@ -921,7 +921,7 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 		// coder added) is not a generic unresolvable-verify park: propagate it
 		// unlogged here so execute()'s dedicated arm writes the toolchain card-log
 		// line and the run parks as blocked, not as a plain turn cap. It is also
-		// left unreported to the leaderboard for the same reason - a missing
+		// left unreported to the outcome ledger for the same reason - a missing
 		// toolchain is not evidence about the model.
 		if _, ok := errors.AsType[*ToolchainMissingError](verr); ok {
 			return false, verr
@@ -959,9 +959,9 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 		// limit `go test` compiles, then its inner fork/exec dies with EAGAIN and
 		// go exits 1 - classified failed, surviving the single retry when the
 		// pressure persists. The signature check keeps that shape off the
-		// leaderboard below; a genuine failure whose output happens to print an
-		// exhaustion string loses one row - bounded, and the park itself still
-		// stands either way.
+		// outcome ledger below; a genuine failure whose output happens to print
+		// an exhaustion string loses one row - bounded, and the park itself
+		// still stands either way.
 		exhausted := vres.Status != verifySkipped && verifyexec.LooksResourceExhausted(vres.Output)
 
 		// Name the classification when there is one (e.g. a timeout or a missing
@@ -983,7 +983,7 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 		o.logSoloCapPark(ctx, sub.ID, reason)
 
 		// modelEvidence is whether this failure says anything about the MODEL.
-		// One binding read by both the bar raise and the leaderboard report, so
+		// One binding read by both the bar raise and the outcome report, so
 		// the card log, the outcome report and the bar cannot disagree about the
 		// cause. A skipped verify (a timeout or a missing tool - rerr != nil
 		// takes the same zero-value Status) is an environment problem, and so is
@@ -1258,7 +1258,7 @@ func (o *run) raiseSubtaskBudget(ctx context.Context, sub subtaskRef, why string
 }
 
 // logEnvironmentalVerify names, on the card, a verify failure that carried the
-// container resource-exhaustion signature: sizing and the leaderboard are
+// container resource-exhaustion signature: sizing and the outcome ledger are
 // untouched.
 func (o *run) logEnvironmentalVerify(ctx context.Context, sub subtaskRef) {
 	o.d.logCard(ctx, "subtask %s: the verify failed under container resource exhaustion - treated as environmental; sizing and model outcome unchanged", sub.ID)
