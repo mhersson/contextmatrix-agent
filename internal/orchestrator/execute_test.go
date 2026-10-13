@@ -1582,9 +1582,9 @@ func TestLogEnvironmentalCapBudgetNeverPersistsOrEmits(t *testing.T) {
 // passed, the model's work is proven correct within the cap, so a park caused
 // by a downstream infrastructure failure (here, the push) must NOT escalate
 // the tier - a resume at the SAME tier is the right economics, not a bigger
-// model - and must NOT report an outcome either: a "failed" row would
-// penalize the model at full weight for a fault that is not its own, the
-// same environmental exemption a skipped verify gets.
+// model - and must NOT report an outcome either: a "failed" row would record
+// against the model a fault that is not its own, the same environmental
+// exemption a skipped verify gets.
 func TestSalvageDeclineAfterVerifyPassKeepsTierAndReportsNoOutcome(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true, pushErr: errors.New("push boom")}
@@ -1988,11 +1988,9 @@ func TestSalvageDeclineSkippedVerifyLeavesBudgetUnchanged(t *testing.T) {
 }
 
 // TestSoloOutcomeKeyedOnSelectedSlug proves the outcome row is keyed on the
-// SELECTED catalog slug, not the gateway-echoed model name: CM attaches
-// outcome stats back onto candidates by the slug selection knows (the same
-// keying as Best-of-N rows), so a row keyed on a gateway's echoed alias would
-// never rejoin selection and the whole solo-learning loop would silently go
-// dark. Usage reporting deliberately differs - it bills the echoed name.
+// SELECTED catalog slug, not the gateway-echoed model name - the same keying
+// as Best-of-N rows, so the outcome ledger groups both under one model. Usage
+// reporting deliberately differs - it bills the echoed name.
 func TestSoloOutcomeKeyedOnSelectedSlug(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true}
@@ -3212,10 +3210,9 @@ func TestGateEvidenceDoesNotLeakBetweenSubtasks(t *testing.T) {
 		"the second subtask's gate was inconclusive and must not inherit the first's pass")
 }
 
-// TestRepairedSubtaskDoesNotRecordACoderWin is the judgment this change exists
-// to encode: a coder whose work was red and had to be repaired by a fix model
-// did not produce a winning result, and recording one feeds a false signal into
-// the coder prior. The row answers whether THIS model's work stood on its own.
+// TestRepairedSubtaskDoesNotRecordACoderWin pins that a coder whose red work had
+// to be repaired by a fix model records `failed`, not a win: the row answers
+// whether THIS model's work stood on its own.
 func TestRepairedSubtaskDoesNotRecordACoderWin(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true}
@@ -3494,7 +3491,7 @@ func TestStillRedGateOnAResolutionErrorReportsNothing(t *testing.T) {
 	require.ErrorAs(t, err, &tme, "an unreachable container runtime is a toolchain park, not a red gate")
 
 	assert.Empty(t, ops.reportOutcomes,
-		"the command never produced a code verdict - there is nothing for selection to learn")
+		"the command never produced a code verdict - there is nothing for the outcome ledger to record")
 	assert.Equal(t, 0, verifyFixPasses(client))
 }
 
@@ -3604,11 +3601,9 @@ func repairedResponses() []llm.Response {
 	}
 }
 
-// TestBelowBarFailureIsNotChargedToTheModel is the ratchet this suppression
-// exists to break. When the requested rung is empty the selector walks DOWN
-// and hands the work to a model rated for less. Charging that model a loss
-// lowers the prior that put it on its own rung, so that rung empties too and
-// the next selection walks down further - a self-reinforcing downgrade.
+// TestBelowBarFailureIsNotChargedToTheModel pins the suppression. When the
+// requested rung is empty the selector walks DOWN and hands the work to a model
+// rated for less; its failure is the search's shortfall, not the model's record.
 func TestBelowBarFailureIsNotChargedToTheModel(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true}
@@ -3645,10 +3640,10 @@ func TestBelowBarSubtaskStillCompletes(t *testing.T) {
 }
 
 // TestBelowBarWinIsStillRecorded pins the asymmetry. The suppression protects a
-// model from a penalty it did not earn; it is not a blanket exemption from
-// measurement. A model that succeeded ABOVE the rung it was rated for is the
-// most valuable evidence the leaderboard can collect, and dropping it would
-// make the rung it belongs to permanently unclimbable.
+// model from a failure record it did not earn; it is not a blanket exemption
+// from measurement. A model that succeeded ABOVE the rung it was rated for is
+// the most valuable evidence the outcome ledger can collect, and dropping it
+// would hide from the operator that the model outperforms its rating.
 func TestBelowBarWinIsStillRecorded(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true}
@@ -3758,10 +3753,9 @@ func TestAtBarCapFailureIsStillRecorded(t *testing.T) {
 // TestCapableDefaultIsNotAWalkDownSoItsFailureIsRecorded is the other half of
 // the boundary. The capable default is reached only when NO rung had anything,
 // so it clears no configured bar and reports BelowBar like the pins do - but it
-// sits in no rung, so charging it cannot empty one and cannot feed the ratchet
-// the suppression exists to break. Its rows are the only evidence that exists
-// about the operator's fallback model, and dropping them would leave a failing
-// fallback invisible.
+// sits in no rung, so it was never walked down to. Its rows are the only
+// evidence that exists about the operator's fallback model, and dropping them
+// would leave a failing fallback invisible.
 //
 // planTestRegistry carries no priors, so it resolves to exactly this shape.
 func TestCapableDefaultIsNotAWalkDownSoItsFailureIsRecorded(t *testing.T) {
