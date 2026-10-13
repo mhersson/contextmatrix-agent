@@ -485,29 +485,14 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 	}
 
 	if verr := o.preCommitVerify(ctx, sc, sub, windowExhausted(res.Turns, coderMaxTurns)); verr != nil {
-		// This report must fire HERE, while the claim is still held:
-		// executeSubtaskWith calls releaseSubtask on this error path, and a
-		// report_model_outcome against a released claim silently vanishes.
+		// Report while the claim is still held: executeSubtaskWith releases it on
+		// this error path, and an outcome against a released claim is dropped.
 		//
-		// Settled decision: a still-red park reports `failed` for the CODER
-		// model. This is the strongest negative evidence the solo path ever
-		// holds - the coder's work was red, a bounded fix pass ran, and it was
-		// still red - and `failed` is the only value that moves the numerator
-		// the coder prior is built from, since a solo row carries n_candidates
-		// 1 and a `win` therefore nets to zero. The row is cross-card
-		// down-weighting evidence and does not double-count against the
-		// per-card sizing correction applyPrecommitVerifyEvidence makes: that
-		// mechanism behaves exactly as before, and one failure feeding both is
-		// deliberate - one failure measured in two currencies, not counted
-		// twice. The cost delta matches the win/repaired rows' convention,
-		// folding the fix model's spend in - the subtask really cost that.
-		//
-		// An exhausted TURN WINDOW does NOT exempt: salvageSoloCapped reports
-		// failed on both its cap arms, so volume has never been an exemption
-		// in this taxonomy. A container RESOURCE-EXHAUSTION signature in the
-		// final failing output does - the same exemption the capped path
-		// takes - with a card-log line naming the classification so the log
-		// agrees with the suppression.
+		// Still red after the bounded fix pass is a `failed` row for the coder
+		// model, with the fix spend folded into its cost. The row feeds the
+		// operator's outcome ledger only; selection never reads it. Container
+		// resource exhaustion is exempt and logged instead; a used-up turn
+		// window is not, matching salvageSoloCapped.
 		if vpe, ok := errors.AsType[*VerifyParkedError](verr); ok {
 			if vpe.Environmental {
 				o.logEnvironmentalVerify(ctx, sub)
@@ -605,9 +590,8 @@ func (o *run) releaseSubtask(ctx context.Context, cardID string) {
 // recovery loop. Returns the successful run's result, alongside the PICK that
 // attempt ran on - so its Model is the SELECTED catalog slug, not the
 // gateway-echoed ModelUsed, because a caller reporting a model outcome must key
-// the row the way Best-of-N rows are keyed (candidates.go's setPick): CM
-// attaches outcome stats back onto candidates by that slug, so a row keyed on a
-// gateway's echoed name would never rejoin selection. The rest of the Pick is
+// the row the way Best-of-N rows are keyed (candidates.go's setPick), so the
+// outcome ledger groups both under one model. The rest of the Pick is
 // what tells that caller whether the selector got the bar it asked for, which
 // decides whether a failure may be charged to the model at all.
 //
@@ -1027,8 +1011,8 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 	// resume must not double-charge. No tier escalation and no outcome row below
 	// this point on a decline: the authoritative verify already confirmed the
 	// model's work is correct, so a park here is infrastructure (a push or a
-	// board-write hiccup), not a capability gap - a "failed" row would penalize
-	// the model at full weight for a fault that is not its own.
+	// board-write hiccup), not a capability gap - a "failed" row would record
+	// against the model a fault that is not its own.
 	if sc.push {
 		if perr := o.pushBranch(ctx); perr != nil {
 			slog.Warn("salvage: push failed after passing verify",
