@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -4449,8 +4450,8 @@ func TestFixModelRefusalNamesItsRealCause(t *testing.T) {
 		"no attempts cap was reached on this path; err=%v", err)
 }
 
-// The terminal, last-chance fix before a park runs at TierComplex
-// unconditionally, which today buys it 1.5x the base turns. Sourcing the fix
+// The terminal, last-chance fix before a park is floored at TierComplex, which
+// buys it at least 1.5x the base turns. Sourcing the fix
 // budget from the CARD's budget would silently cut a third of the turns off the
 // one run where running out ends the run rather than deferring it - and would
 // re-conflate exactly what the two-axis split exists to separate.
@@ -4474,6 +4475,163 @@ func TestFixBudgetComesFromTheFixBarNotTheCard(t *testing.T) {
 	plain := o.fixSizing(fixRequest{Round: 1})
 	assert.Equal(t, registry.TierModerate, plain.Bar, "an empty fix_tier falls back to the card bar")
 	assert.Equal(t, 45, turnBudget(45, plain.Budget))
+}
+
+// The synthesizer cannot see the card tier, so the critical-severity floor on
+// the fix bar is the code's to enforce: a critical finding never resolves below
+// the card bar, while a lower fix_tier on a round without one is honored.
+func TestFixBarBaseFloorsCriticalFindingsAtTheCardBar(t *testing.T) {
+	tests := []struct {
+		name string
+		card registry.Tier
+		req  fixRequest
+		want registry.Tier
+	}{
+		{
+			name: "a critical finding lifts a lower fix_tier to the card bar",
+			card: registry.TierComplex,
+			req:  fixRequest{FixTier: "simple", CriticalFinding: true},
+			want: registry.TierComplex,
+		},
+		{
+			name: "a lower fix_tier without a critical finding is honored",
+			card: registry.TierComplex,
+			req:  fixRequest{FixTier: "simple"},
+			want: registry.TierSimple,
+		},
+		{
+			name: "an omitted fix_tier falls back to the card bar",
+			card: registry.TierComplex,
+			req:  fixRequest{CriticalFinding: true},
+			want: registry.TierComplex,
+		},
+		{
+			name: "a critical finding never lowers a higher fix_tier",
+			card: registry.TierModerate,
+			req:  fixRequest{FixTier: "critical", CriticalFinding: true},
+			want: registry.TierCritical,
+		},
+		{
+			name: "a critical finding lifts the authoritative pass to a critical card bar",
+			card: registry.TierCritical,
+			req:  fixRequest{FixTier: "simple", Authoritative: true, CriticalFinding: true},
+			want: registry.TierCritical,
+		},
+		{
+			name: "the authoritative pass stays at complex without a critical finding",
+			card: registry.TierCritical,
+			req:  fixRequest{FixTier: "simple", Authoritative: true},
+			want: registry.TierComplex,
+		},
+		{
+			name: "a critical finding never lowers the authoritative pass below complex",
+			card: registry.TierSimple,
+			req:  fixRequest{FixTier: "simple", Authoritative: true, CriticalFinding: true},
+			want: registry.TierComplex,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			o := &run{cardSizing: seedSizing(string(tt.card))}
+
+			assert.Equal(t, tt.want, o.fixBarBase(tt.req))
+		})
+	}
+}
+
+// Every review fix site hands the verdict's critical finding to the fix bar:
+// the fix round's sizing observation reports the card bar, not the lower
+// fix_tier the synthesizer named.
+func TestReviewFixSitesFloorCriticalFindingsAtTheCardBar(t *testing.T) {
+	critical := []llm.Response{
+		stopResp("Correctness: bug", 0.01),
+		stopResp("Design: ok", 0.01),
+		stopResp("Security: ok", 0.01),
+		stopResp(`{"approved":false,"summary":"fix it","fix_tier":"simple","fixes":[{"file":"a.go","issue":"bug","suggestion":"patch","severity":"critical","basis":"defect"}]}`, 0.02),
+	}
+	fixed := []llm.Response{stopResp("Fixed.", 0.01)}
+
+	tests := []struct {
+		name string
+		card string
+		// attemptsCap 1 sends round 1 straight to the authoritative pass; 0
+		// keeps the deps default.
+		attemptsCap int
+		// inbox switches the run to HITL; nil runs it autonomously.
+		inbox  *fakeInbox
+		script []llm.Response
+		want   registry.Tier
+	}{
+		{
+			name:   "the autonomous loop",
+			card:   "complex",
+			script: slices.Concat(critical, fixed, panelApproves()),
+			want:   registry.TierComplex,
+		},
+		{
+			name:        "the authoritative pass",
+			card:        "critical",
+			attemptsCap: 1,
+			script:      slices.Concat(critical, fixed, panelApproves()),
+			want:        registry.TierCritical,
+		},
+		{
+			name: "the HITL adjust path",
+			card: "complex",
+			inbox: &fakeInbox{msgs: []harness.UserMessage{
+				{Content: "fix the critical bug"},
+				{Content: "approve"},
+			}},
+			script: slices.Concat(critical,
+				[]llm.Response{stopResp(`{"verdict":"adjust","feedback":"fix the critical bug"}`, 0.001)},
+				fixed, panelApproves(),
+				[]llm.Response{stopResp(`{"verdict":"approve","feedback":""}`, 0.001)}),
+			want: registry.TierComplex,
+		},
+		{
+			// An empty inbox reports ErrInboxClosed, exactly what a promote frame produces.
+			name:   "the HITL path after a mid-run promotion",
+			card:   "complex",
+			inbox:  &fakeInbox{},
+			script: slices.Concat(critical, fixed, panelApproves()),
+			want:   registry.TierComplex,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var transcript bytes.Buffer
+
+			git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+			d := reviewTestDeps(t, &fakeOps{}, git, &planLLM{responses: tt.script}, reviewerRegistry())
+			d.Emit = events.NewEmitter(nil, &transcript)
+
+			if tt.attemptsCap > 0 {
+				d.Cfg.ReviewAttemptsCap = tt.attemptsCap
+			}
+
+			if tt.inbox != nil {
+				d.Human = tt.inbox
+				d.Cfg.Interactive = true
+			}
+
+			o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}, 0)
+			o.cardSizing = seedSizing(tt.card)
+
+			require.NoError(t, runReview(context.Background(), o))
+
+			var bars []any
+
+			for _, rec := range eventsOfKind(t, &transcript, sizingObservationKind) {
+				if rec["solver"] == "fix" {
+					bars = append(bars, rec["bar"])
+				}
+			}
+
+			assert.Equal(t, []any{string(tt.want)}, bars, "the one fix round ran at the card bar")
+		})
+	}
 }
 
 // runFix is SHARED with pr_gates, which runs AFTER approval - so resetting the

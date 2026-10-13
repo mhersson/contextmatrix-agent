@@ -132,15 +132,14 @@ const unreachableVerdictRule = `- Unreachable acceptance criteria: when the card
   criteria. Scope listed under a "## Split" section was moved to other cards
   and is likewise out of scope for this verdict.`
 
-// fixTierFloorRule sets two unconditional floors on the fix_tier rating,
-// overriding the default-to-card-tier guidance when the criteria below are
-// met. Shared by synthesisPrompt and reviewSynthesisPrompt so the two verdict
-// templates cannot drift.
-const fixTierFloorRule = `Fix_tier floors (these override default-to-card-tier):
-- When any finding is critical severity, fix_tier is never below the card's tier.
-- Fixes that touch concurrency or synchronization - concurrent or parallel
-  execution, shared mutable state, locking, cancellation, and lifecycle or
-  ownership guards - are "complex" at minimum regardless of finding severity.`
+// fixTierFloorRule sets the concurrency floor on the fix_tier rating. Shared by
+// synthesisPrompt and reviewSynthesisPrompt so the two verdict templates
+// cannot drift. The critical-severity floor lives in fixBarBase instead: it
+// keys on the card tier, which neither prompt shows.
+const fixTierFloorRule = `Fix_tier floor: fixes that touch concurrency or synchronization - concurrent
+or parallel execution, shared mutable state, locking, cancellation, and
+lifecycle or ownership guards - are "complex" at minimum regardless of finding
+severity.`
 
 // fixScopedSeverityRule requires evidence before a finding about the previous
 // round's own fix can block. The severity gate on the verdict is right for
@@ -669,11 +668,11 @@ SPECIALIST FINDINGS
 Respond with ONLY a JSON object, no prose:
 {"approved":true|false,
  "summary":"<one-line overall verdict>",
- "fix_tier":"simple|moderate|complex",
+ "fix_tier":"simple|moderate|complex|critical",
  "prior_findings_resolved":true|false,
  "fixes":[{"file":"...","issue":"...","suggestion":"...","severity":"critical|important|minor|nit","basis":"criterion|defect|test|vulnerability|unscoped|hardening|polish"}]}
 
-fix_tier is the difficulty of APPLYING these fixes (default to the card's tier if unsure).
+fix_tier is the difficulty of APPLYING these fixes; omit it when unsure.
 ` + fixTierFloorRule + `
 prior_findings_resolved is true only when every finding under PRIOR FINDINGS is
 genuinely resolved or explicitly withdrawn; false when any remains open, and
@@ -1357,11 +1356,11 @@ Description:
 Respond with ONLY a JSON object, no prose:
 {"approved":true|false,
  "summary":"<one-line overall verdict>",
- "fix_tier":"simple|moderate|complex",
+ "fix_tier":"simple|moderate|complex|critical",
  "prior_findings_resolved":true|false,
  "fixes":[{"file":"...","issue":"...","suggestion":"...","severity":"critical|important|minor|nit","basis":"criterion|defect|test|vulnerability|unscoped|hardening|polish"}]}
 
-fix_tier is the difficulty of APPLYING these fixes (default to the card's tier if unsure).
+fix_tier is the difficulty of APPLYING these fixes; omit it when unsure.
 ` + fixTierFloorRule + `
 prior_findings_resolved is true only when every finding under PRIOR FINDINGS is
 genuinely resolved or explicitly withdrawn; false when any remains open, and

@@ -468,7 +468,7 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 			return err
 		}
 
-		req := fixRequest{Findings: findings, Round: round, FixTier: fixTier}
+		req := fixRequest{Findings: findings, Round: round, FixTier: fixTier, CriticalFinding: hasCriticalFinding(fixes)}
 
 		// The commit the branch sits on before this round's fix, read BEFORE it
 		// runs: a fix that takes the gate from green to red is reset back to
@@ -630,7 +630,9 @@ func (o *run) runReviewHITL(ctx context.Context, plan verifyPlan) error {
 				return err
 			}
 
-			committed, ferr := o.runFix(ctx, fixRequest{Findings: findings, Round: round, FixTier: fixTier})
+			committed, ferr := o.runFix(ctx, fixRequest{
+				Findings: findings, Round: round, FixTier: fixTier, CriticalFinding: hasCriticalFinding(fixes),
+			})
 			if err := o.continueCappedFix(ctx, round, committed, ferr); err != nil {
 				return err
 			}
@@ -652,7 +654,9 @@ func (o *run) runReviewHITL(ctx context.Context, plan verifyPlan) error {
 			return err
 		}
 
-		committed, ferr := o.runFix(ctx, fixRequest{Findings: mandate, Round: round, FixTier: fixTier})
+		committed, ferr := o.runFix(ctx, fixRequest{
+			Findings: mandate, Round: round, FixTier: fixTier, CriticalFinding: hasCriticalFinding(fixes),
+		})
 		if err := o.continueCappedFix(ctx, round, committed, ferr); err != nil {
 			return err
 		}
@@ -1006,7 +1010,9 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 
 	// Gated strong fix - runs only because the authoritative review confirmed
 	// real issues.
-	committed, err := o.runFix(ctx, fixRequest{Findings: findings, Round: round, FixTier: fixTier, Authoritative: true})
+	committed, err := o.runFix(ctx, fixRequest{
+		Findings: findings, Round: round, FixTier: fixTier, Authoritative: true, CriticalFinding: hasCriticalFinding(fixes),
+	})
 	if err := o.continueCappedFix(ctx, round, committed, err); err != nil {
 		return err
 	}
@@ -2045,6 +2051,9 @@ type fixRequest struct {
 	// FixTier is the synthesizer's fix_tier for this round. Empty falls back to
 	// the card bar, so the fixer is never under-sized.
 	FixTier string
+	// CriticalFinding marks a round whose verdict carries a critical-severity
+	// finding: its bar never resolves below the card bar.
+	CriticalFinding bool
 	// Subtask and PlannerBar name the unit a SUBTASK-SCOPED round runs on: the
 	// pre-commit verify fix is sized on one subtask's bar, not the card's, so
 	// its measurement row has to report that subtask's estimate rather than the
@@ -2063,17 +2072,26 @@ type fixRequest struct {
 // fixBarBase is the bar this round starts from, before any correction. The
 // authoritative pass is floored at complex: it is the last chance before a
 // park, and a stated policy constant is legitimate on a JUDGMENT-shaped call
-// where nothing in the run measures the right answer.
+// where nothing in the run measures the right answer. A critical finding
+// floors the bar at the card's here because the synthesizer never sees the
+// card tier, so it cannot apply that floor to the fix_tier it emits.
 func (o *run) fixBarBase(req fixRequest) registry.Tier {
-	if req.Authoritative {
-		return registry.TierComplex
+	var base registry.Tier
+
+	switch {
+	case req.Authoritative:
+		base = registry.TierComplex
+	case req.FixTier == "":
+		return o.cardSizing.Bar
+	default:
+		base = tierFromString(req.FixTier)
 	}
 
-	if req.FixTier == "" {
+	if req.CriticalFinding && tierRank(base) < tierRank(o.cardSizing.Bar) {
 		return o.cardSizing.Bar
 	}
 
-	return tierFromString(req.FixTier)
+	return base
 }
 
 // fixSizing is the bar and budget this fix round runs at: the base bar climbed
@@ -2304,6 +2322,14 @@ func (o *run) promoteConsistentRevise(ctx context.Context, v *verdict) {
 	v.Approved = true
 
 	o.d.logCard(ctx, "review: revise verdict carried only minor/nit findings - promoted to approval with open findings (minors and nits never block)")
+}
+
+// hasCriticalFinding reports whether a verdict's fix list carries a
+// critical-severity finding, which floors the fix bar at the card's.
+func hasCriticalFinding(fixes []fix) bool {
+	return slices.ContainsFunc(fixes, func(f fix) bool {
+		return normalizeSeverity(f.Severity) == severityCritical
+	})
 }
 
 // validSeverities is the vocabulary the synthesis prompts ask for (see
