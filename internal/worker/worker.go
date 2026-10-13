@@ -26,10 +26,11 @@ import (
 )
 
 // Compile-time proof that the concrete worker collaborators satisfy the
-// orchestrator's consumer-side interfaces. The import edge is one-way (worker
-// imports orchestrator, never the reverse), so these asserts belong here.
+// consumer-side interfaces. The import edge is one-way (worker imports
+// orchestrator, never the reverse), so these asserts belong here; CardOps
+// embeds orchestrator.Ops, so the first covers the FSM's surface too.
 var (
-	_ orchestrator.Ops    = (*cmclient.Client)(nil)
+	_ CardOps             = (*cmclient.Client)(nil)
 	_ orchestrator.GitOps = (*Git)(nil)
 )
 
@@ -163,17 +164,11 @@ type RunSpec struct {
 }
 
 // CardOps is the slice of cmclient the worker needs (interface here, where
-// it's consumed, so tests fake it without MCP).
+// it's consumed, so tests fake it without MCP). It embeds the orchestrator's
+// full Ops so the FSM is handed a complete surface checked at compile time.
 type CardOps interface {
-	ClaimCard(ctx context.Context, cardID string) error
-	GetTaskContext(ctx context.Context, cardID string, includeImages bool) (cmclient.TaskContext, error)
-	Heartbeat(ctx context.Context, cardID string) error
-	ReportUsage(ctx context.Context, cardID string, u cmclient.UsageReport) (float64, error)
-	ReportPush(ctx context.Context, cardID, branch, prURL string) error
+	orchestrator.Ops
 	ReportParked(ctx context.Context, cardID, reason string) error
-	CompleteTask(ctx context.Context, cardID, summary string) error
-	ReleaseCard(ctx context.Context, cardID string) error
-	TransitionCard(ctx context.Context, cardID, state string) error
 	RecordSkillEngaged(ctx context.Context, cardID, skillName string) error
 }
 
@@ -435,12 +430,11 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 	// reported on the card here, before any phase runs.
 	reg, faults := buildRegistry(a.spec)
 
-	orchOps := ops2orchestrator(a.ops)
-	logLadderFaults(ctx, faults, orchOps, a.spec.CardID)
-	logReachability(ctx, reg, orchOps, a.spec.CardID)
+	logLadderFaults(ctx, faults, a.ops, a.spec.CardID)
+	logReachability(ctx, reg, a.ops, a.spec.CardID)
 
 	d := orchestrator.Deps{
-		Ops: orchOps,
+		Ops: a.ops,
 		Git: a.git,
 		GitForDir: func(dir string) orchestrator.GitOps {
 			return NewGit(dir, secretsPathForAuth(a.spec), hostFromRepoURL(a.spec.RepoURL), a.spec.CACertFile)
@@ -632,15 +626,9 @@ const runFailureLogMax = 1500
 
 // logRunFailure writes why the run failed onto the card, while the claim is
 // still held: serve's failed callback carries only the exit code, and no park
-// sentinel logged anything for this error. Best-effort; ops is nil for a
-// CardOps-only test fake (see ops2orchestrator).
+// sentinel logged anything for this error. Best-effort.
 func logRunFailure(ctx context.Context, a fsmArgs, redact func(string) string, err error) {
-	ops := ops2orchestrator(a.ops)
-	if ops == nil {
-		return
-	}
-
-	if lerr := ops.AddLog(ctx, a.spec.CardID, runFailureLine(redact, err)); lerr != nil {
+	if lerr := a.ops.AddLog(ctx, a.spec.CardID, runFailureLine(redact, err)); lerr != nil {
 		slog.Warn("add_log failed; the run's failure reason is missing from the card",
 			"card", a.spec.CardID, "error", lerr)
 	}
@@ -931,18 +919,6 @@ func releaseQuietly(ctx context.Context, ops CardOps, cardID string) {
 	}
 }
 
-// ops2orchestrator widens the worker's narrow CardOps to the orchestrator's Ops
-// surface. In production ops is *cmclient.Client, which satisfies both; the
-// assertion is comma-ok so a test fake that only implements CardOps yields a nil
-// Ops (harmless: such tests swap runOrchestrator and never touch Deps.Ops).
-func ops2orchestrator(ops CardOps) orchestrator.Ops {
-	if oo, ok := ops.(orchestrator.Ops); ok {
-		return oo
-	}
-
-	return nil
-}
-
 // writeToolsFor is the full model-facing toolset rooted at dir. It is the
 // one source of truth behind both the main workspace's WriteTools registry and
 // Best-of-N's per-candidate WriteToolsForDir factory: the root dir and the
@@ -1065,25 +1041,19 @@ func buildRegistry(spec RunSpec) (*registry.Registry, []registry.LadderFault) {
 // logLadderFaults puts each payload ladder that failed validation on the
 // card, one line per role, so the operator learns that the built-in bars
 // ran instead of the ladder they saved. Advisory only: the run continues on
-// the fallback. ops is nil in tests that only implement the worker's
-// narrower CardOps (see ops2orchestrator); the card line is then skipped
-// and the slog warning still fires.
+// the fallback.
 func logLadderFaults(ctx context.Context, faults []registry.LadderFault, ops orchestrator.Ops, cardID string) {
 	for _, f := range faults {
 		slog.Warn("selector: payload tier ladder did not validate; using the built-in bars",
 			"card_id", cardID, "role", f.Role, "error", f.Reason)
 
-		if ops != nil {
-			_ = ops.AddLog(ctx, cardID, "selector: "+f.Error()+" - using the built-in bars") //nolint:errcheck // advisory
-		}
+		_ = ops.AddLog(ctx, cardID, "selector: "+f.Error()+" - using the built-in bars") //nolint:errcheck // advisory
 	}
 }
 
 // logReachability reports structural tier unreachability BEFORE the first
 // model call. It never gates the run: refusing to start because `critical`
-// is unreachable would block every `simple` card too. ops is nil in tests
-// that only implement the worker's narrower CardOps (see ops2orchestrator);
-// the card-log line is then simply skipped.
+// is unreachable would block every `simple` card too.
 func logReachability(ctx context.Context, reg *registry.Registry, ops orchestrator.Ops, cardID string) {
 	var unreachable []string
 
@@ -1103,7 +1073,7 @@ func logReachability(ctx context.Context, reg *registry.Registry, ops orchestrat
 			"card_id", cardID, "tier", string(t))
 	}
 
-	if len(unreachable) > 0 && ops != nil {
+	if len(unreachable) > 0 {
 		_ = ops.AddLog(ctx, cardID, //nolint:errcheck // advisory
 			"model catalog cannot reach every tier: "+strings.Join(unreachable, ", "))
 	}

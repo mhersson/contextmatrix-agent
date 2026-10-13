@@ -160,7 +160,7 @@ func TestE2EHITLFullFlow(t *testing.T) {
 
 	// A creative, non-autonomous card: brainstorm runs (no ## Design yet), then
 	// the plan-approval and review-decision gates. stubOps is reused from
-	// e2e_orchestrator_test.go (it satisfies CardOps + orchestrator.Ops).
+	// e2e_orchestrator_test.go (it satisfies CardOps).
 	ops := newStubOps()
 	ops.tcx = cmclient.TaskContext{
 		Title:       "Add a configurable palette",

@@ -269,6 +269,74 @@ func (f *fakeOps) RecordSkillEngaged(_ context.Context, cardID, skillName string
 	return nil
 }
 
+func (f *fakeOps) CreateCard(_ context.Context, project, parent, title, _ string, dependsOn []string) (string, error) {
+	f.record("CreateCard", project, parent, title, dependsOn)
+
+	return "", nil
+}
+
+func (f *fakeOps) CreateTopLevelCard(_ context.Context, project, title, _ string, dependsOn []string) (string, error) {
+	f.record("CreateTopLevelCard", project, title, dependsOn)
+
+	return "", nil
+}
+
+func (f *fakeOps) SetPhase(_ context.Context, cardID, phase string) error {
+	f.record("SetPhase", cardID, phase)
+
+	return nil
+}
+
+func (f *fakeOps) UpdateCardBody(_ context.Context, cardID, _ string) error {
+	f.record("UpdateCardBody", cardID)
+
+	return nil
+}
+
+func (f *fakeOps) SetAutonomous(_ context.Context, cardID string, autonomous bool) error {
+	f.record("SetAutonomous", cardID, autonomous)
+
+	return nil
+}
+
+func (f *fakeOps) StartReview(_ context.Context, cardID string) error {
+	f.record("StartReview", cardID)
+
+	return nil
+}
+
+func (f *fakeOps) IncrementReviewAttempts(_ context.Context, cardID string) (int, error) {
+	f.record("IncrementReviewAttempts", cardID)
+
+	return f.count("IncrementReviewAttempts"), nil
+}
+
+func (f *fakeOps) SubtaskStates(_ context.Context, project, parentID string) ([]cmclient.SubtaskState, error) {
+	f.record("SubtaskStates", project, parentID)
+
+	return nil, nil
+}
+
+func (f *fakeOps) AddLog(_ context.Context, cardID, message string) error {
+	f.record("AddLog", cardID, message)
+
+	return nil
+}
+
+func (f *fakeOps) ReportModelOutcomes(_ context.Context, cardID string, outcomes []cmclient.ModelOutcome) error {
+	f.record("ReportModelOutcomes", cardID, outcomes)
+
+	return nil
+}
+
+func (f *fakeOps) BlacklistModel(_ context.Context, cardID, model, reason string) error {
+	f.record("BlacklistModel", cardID, model, reason)
+
+	return nil
+}
+
+var _ CardOps = (*fakeOps)(nil)
+
 // --- helpers ---------------------------------------------------------------
 
 // baseSpec returns a RunSpec wired for a local file:// remote with no tokens.
@@ -1325,10 +1393,11 @@ func TestToolchainMissingMapsToBlocked(t *testing.T) {
 	require.GreaterOrEqual(t, releaseIdx, 0)
 	assert.Less(t, transitionIdx, releaseIdx, "TransitionCard must happen before ReleaseCard: ownership may be required")
 
-	// No model-outcome/blacklist call is recorded for this arm - CardOps
-	// exposes no such method for the worker to call in the first place, so the
-	// full call list mirrors the other park arms exactly.
-	assert.ElementsMatch(t, []string{"ClaimCard", "GetTaskContext", "ReportPush", "TransitionCard", "ReleaseCard"}, calls)
+	// No model-outcome/blacklist call is recorded for this arm, so the full
+	// call list mirrors the other park arms exactly. The one AddLog is the
+	// reachability preflight: baseSpec carries no catalog, so no tier is
+	// reachable.
+	assert.ElementsMatch(t, []string{"ClaimCard", "GetTaskContext", "AddLog", "ReportPush", "TransitionCard", "ReleaseCard"}, calls)
 
 	args := ops.argsOf("TransitionCard")
 	require.Len(t, args, 2)
@@ -2047,14 +2116,8 @@ func TestLogLadderFaultsWritesOneCardLinePerRole(t *testing.T) {
 	assert.Equal(t, "selector: reviewer tier ladder from the payload did not validate (tier bars: ladder must not decrease: critical 0.1 is below complex 0.82) - using the built-in bars", lines[1])
 }
 
-// TestLogLadderFaultsToleratesNilOpsAndNoFaults mirrors logReachability: a
-// CardOps-only fake yields nil ops and the card line is skipped; no faults
-// means no line at all.
-func TestLogLadderFaultsToleratesNilOpsAndNoFaults(t *testing.T) {
-	assert.NotPanics(t, func() {
-		logLadderFaults(context.Background(), []registry.LadderFault{{Role: "coder", Reason: errors.New("x")}}, nil, "CMX-001")
-	})
-
+// TestLogLadderFaultsWritesNothingWithoutFaults: no faults means no card line.
+func TestLogLadderFaultsWritesNothingWithoutFaults(t *testing.T) {
 	ops := newStubOps()
 	logLadderFaults(context.Background(), nil, ops, "CMX-001")
 	assert.Equal(t, 0, ops.count("AddLog"))
@@ -2063,8 +2126,7 @@ func TestLogLadderFaultsToleratesNilOpsAndNoFaults(t *testing.T) {
 // TestRunLogsAnInvalidPayloadLadderOnTheCard proves the wiring in Run: the
 // fault buildRegistry returns reaches the card before any phase runs, and
 // the run itself proceeds (the orchestrator is swapped out and returns nil).
-// stubOps implements orchestrator.Ops, so ops2orchestrator hands the real
-// AddLog back; the reachability preflight writes its own line beside it.
+// The reachability preflight writes its own line beside it.
 func TestRunLogsAnInvalidPayloadLadderOnTheCard(t *testing.T) {
 	remote := setupBareRemote(t)
 	wsParent := t.TempDir()
@@ -2117,16 +2179,6 @@ func TestLogReachabilityLogsCardOnlyWhenSomeTierIsUnreachable(t *testing.T) {
 	ops2 := newStubOps()
 	logReachability(context.Background(), unreachable, ops2, "CMX-001")
 	assert.Equal(t, 1, ops2.count("AddLog"), "an unreachable tier logs exactly one card line")
-}
-
-// TestLogReachabilityToleratesNilOps proves the worker-side call is safe when
-// ops2orchestrator hands back nil, which it does for a test fake that only
-// implements CardOps: such tests swap runOrchestrator and never touch
-// Deps.Ops, but logReachability runs before that swap takes effect.
-func TestLogReachabilityToleratesNilOps(t *testing.T) {
-	assert.NotPanics(t, func() {
-		logReachability(context.Background(), registry.NewRegistryFromParts(nil, registry.Priors{}, nil, nil, "top/one"), nil, "CMX-001")
-	})
 }
 
 // stubVerifyTool stands in for the orchestrator's verify tool. writeToolsFor
