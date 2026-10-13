@@ -3,9 +3,9 @@
 # Pinned toolchain versions, declared once as global ARGs and re-declared in the
 # stages that consume them. Override any of them at build time with --build-arg
 # when a newer release has been vetted; the Makefile passes matching values.
-ARG GO_VERSION=1.27.1
-ARG GO_SHA256_AMD64=63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445
-ARG GO_SHA256_ARM64=3450b45a3f9ee8568792736a5c5e70a1f2e9b36c35a8f74958c03e51d7d92bec
+ARG GO_VERSION=1.27.2
+ARG GO_SHA256_AMD64=ecbadb99091a3f46e31f5f934b068b1864eafa7995211b39eaddf76996045fe5
+ARG GO_SHA256_ARM64=94f3e30b8e374bc285e7dadc11e0865726b9bc6e85b841ccceaabc0214c6b7c8
 ARG NPM_VERSION=12.2.0
 ARG GOLANGCI_LINT_VERSION=v2.14.0
 ARG GOFUMPT_VERSION=v0.12.0
@@ -20,7 +20,7 @@ ARG RUFF_VERSION=0.16.10
 # ---------------------------------------------------------------------------
 # build - compile the agent binary.
 # ---------------------------------------------------------------------------
-FROM golang:1.27.1-trixie@sha256:3b77fc618ec235a1ab412de7737f120dd507c57e8d87de4cbb7994fb94275ed5 AS build
+FROM golang:1.27.2-trixie@sha256:47667934874913a449b96faa7ef4777fa285d9ec29126ee80ed61c45b7cccf0e AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
