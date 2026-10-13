@@ -215,6 +215,22 @@ worker images (full + variants), pin the new full-image digest into
 ./redeploy.sh
 ```
 
+A stop or restart drains rather than drops running cards: on SIGTERM `serve`
+refuses new work, sends every running worker an end-session so it pushes its
+work in progress and releases its card, waits up to 30 seconds for the workers
+to exit, then kills the rest. The kill sweep runs one card at a time: each
+worker still running after the wait adds about 3 seconds of kill grace, and
+each card running at shutdown adds one status callback (at most 10 seconds). At
+the default `max_concurrent` of 5 with ContextMatrix answering promptly, the
+sequence fits the unit's `TimeoutStopSec=60`; ten or more stragglers can
+outlast it. A second signal skips the wait.
+
+> **Run as UID 1000 on rootful Docker.** Per-run secrets are staged readable
+> only by the UID `serve` runs as, and the worker container runs as UID 1000, so
+> the service user must be host UID 1000 and Docker must not be rootless;
+> otherwise every run fails to read its secrets. `serve` warns at startup on
+> Linux when its UID is not 1000. Details in [`docs/secrets.md`](docs/secrets.md).
+
 > **Writable runtime dir.** The agent writes secrets under `secrets_dir`
 > (default `/var/run/cm-agent/secrets`). `/var/run` is root-owned and not created
 > for a user service - either pre-create `/var/run/cm-agent` and `chown` it to

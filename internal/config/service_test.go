@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 	"time"
 
@@ -901,4 +902,109 @@ func TestServiceLoadRefusesTheRemovedSelectorPriceHeadroomKey(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "selector_tier_bars is no longer read here")
 	})
+}
+
+// A file key the loader does not declare would be dropped by the unmarshal and
+// its default applied, so startup must stop and name every such key.
+func TestServiceLoadRefusesUnknownFileKeys(t *testing.T) {
+	clearServiceEnv(t)
+
+	for name, tc := range map[string]struct {
+		body string
+		keys []string
+	}{
+		"a misspelled top-level key": {
+			body: "contextmatrix_url: http://cm:8080\nmax_cost: 2.0\n",
+			keys: []string{"max_cost"},
+		},
+		"a near miss of a known key": {
+			body: "review_attempt_cap: 4\n",
+			keys: []string{"review_attempt_cap"},
+		},
+		"a key nested under an unknown parent": {
+			body: "compaction:\n  enabled: true\n",
+			keys: []string{"compaction.enabled"},
+		},
+		"a known key in the wrong case": {
+			body: "Port: 9000\n",
+			keys: []string{"Port"},
+		},
+		"several unknown keys": {
+			body: "zeta_setting: 1\nalpha_setting: 2\n",
+			keys: []string{"alpha_setting", "zeta_setting"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := LoadService(writeServeYAML(t, tc.body))
+			require.Error(t, err)
+
+			for _, key := range tc.keys {
+				assert.ErrorContains(t, err, key)
+			}
+		})
+	}
+}
+
+// worker_extra_env's keys are variable names the operator chooses, so nothing
+// below it is checked against the schema.
+func TestServiceLoadAcceptsFreeFormWorkerExtraEnv(t *testing.T) {
+	clearServiceEnv(t)
+
+	for name, tc := range map[string]struct {
+		body string
+		want map[string]string
+	}{
+		"operator-chosen names": {
+			body: "worker_extra_env:\n  HTTP_PROXY: http://proxy:3128\n  some_lower_name: x\n",
+			want: map[string]string{"HTTP_PROXY": "http://proxy:3128", "some_lower_name": "x"},
+		},
+		"an empty map": {body: "worker_extra_env: {}\n"},
+		"a null value": {body: "worker_extra_env:\n"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg, err := LoadService(writeServeYAML(t, tc.body))
+			require.NoError(t, err)
+
+			if tc.want != nil {
+				assert.Equal(t, tc.want, cfg.WorkerExtraEnv)
+			}
+		})
+	}
+}
+
+// The run command's Config shares the CMX_ prefix, so the env layer must keep
+// accepting variables the serve config does not declare.
+func TestServiceLoadAcceptsUnknownEnvVars(t *testing.T) {
+	clearServiceEnv(t)
+
+	t.Setenv("CMX_PROVIDER__SORT", "price")
+	t.Setenv("CMX_NOT_A_SERVE_SETTING", "x")
+
+	cfg, err := LoadService(writeServeYAML(t, "max_concurrent: 7\n"))
+	require.NoError(t, err)
+	assert.Equal(t, 7, cfg.MaxConcurrent)
+}
+
+// The shipped example must load as shipped and with every commented-out key
+// enabled, so an operator who uncomments one never hits the unknown-key check.
+func TestServeYAMLExampleLoads(t *testing.T) {
+	clearServiceEnv(t)
+
+	examplePath := filepath.Join("..", "..", "serve.yaml.example")
+
+	_, err := LoadService(examplePath)
+	require.NoError(t, err, "serve.yaml.example as shipped")
+
+	example, err := os.ReadFile(examplePath)
+	require.NoError(t, err)
+
+	commentedKey := regexp.MustCompile(`(?m)^# ([a-z][a-z0-9_]*:(?: .*)?|  \S.*)$`)
+	enabledPath := filepath.Join(t.TempDir(), "serve.yaml")
+	//nolint:gosec // G703: a temp path; the taint is the repository's own example file
+	require.NoError(t, os.WriteFile(enabledPath, commentedKey.ReplaceAll(example, []byte("$1")), 0o600))
+
+	cfg, err := LoadService(enabledPath)
+	require.NoError(t, err, "serve.yaml.example with every commented key enabled")
+	assert.Contains(t, cfg.WorkerExtraEnv, "HTTP_PROXY", "the commented worker_extra_env block was enabled")
+	assert.NotEmpty(t, cfg.CACertFile, "the commented ca_cert_file was enabled")
 }

@@ -748,3 +748,20 @@ func stdioFrame(s string) []byte {
 
 	return append(out, s...)
 }
+
+// TestPumpCountsUnbridgedLinesAsActivity pins that the idle clock advances on
+// every stdout line, including event kinds the log bridge drops: the worker's
+// model_progress marker exists only to feed this clock during a long turn.
+func TestPumpCountsUnbridgedLinesAsActivity(t *testing.T) {
+	tracker := NewTracker(1)
+	require.True(t, tracker.AddIfUnderLimit(&Run{Project: "p", CardID: "A"}))
+
+	e := &DockerExecutor{tracker: tracker}
+	line := `{"seq":7,"kind":"model_progress","time":"2026-01-01T00:00:00Z"}` + "\n"
+	pumpDone := make(chan struct{})
+
+	e.pump("p", "A", "", bytes.NewReader(stdioFrame(line)), pumpDone, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	<-pumpDone
+
+	assert.False(t, tracker.LastActivity("p", "A").IsZero())
+}

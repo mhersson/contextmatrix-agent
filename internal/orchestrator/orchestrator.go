@@ -12,7 +12,6 @@ package orchestrator
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -140,13 +139,6 @@ type Config struct {
 	// model runs. Disabled (the zero value) preserves the hard context_limit
 	// stop, which is the agent's default behavior.
 	Compaction Compaction
-
-	// Provider is the raw OpenRouter provider-routing object (e.g.
-	// require_parameters/order/sort) applied to every phase model run via
-	// harnessConfig and inherited by review subagents. nil = default routing.
-	// No serve/work env knob populates it yet; it is the orchestrator-level
-	// seam mirroring the standalone run command's provider config.
-	Provider json.RawMessage
 
 	// Verify is the operator-declared verify gate (CM's card-over-project
 	// resolution), delivered via CMX_VERIFY. nil means nothing declared - the
@@ -329,6 +321,10 @@ type run struct {
 	// across the run's Copilot cycles: one broken permission fails the same
 	// way in every cycle, and one card note says everything the fifth would.
 	threadWriteFailNoted bool
+
+	// progress marks streaming model turns on the transcript so the idle
+	// watchdog sees output during a long reasoning turn. nil without an emitter.
+	progress *progressMarker
 
 	// body is the live parent-card body the FSM accumulates run history into
 	// (## Diagnosis, ## Plan, ## Review Findings ...). Seeded from the task
@@ -651,6 +647,10 @@ func newRun(d Deps, tc cmclient.TaskContext) *run {
 	o.seatDebug = d.SeatDebugWriter
 	if o.seatDebug == nil {
 		o.seatDebug = io.Discard
+	}
+
+	if d.Emit != nil {
+		o.progress = newProgressMarker(d.Emit, time.Now)
 	}
 
 	o.planFn = func(ctx context.Context) error { return runPlan(ctx, o) }

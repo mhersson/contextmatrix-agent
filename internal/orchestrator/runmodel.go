@@ -69,7 +69,6 @@ func (o *run) harnessConfig(model string) harness.Config {
 		ToolOutputMaxBytes: o.d.Cfg.ToolOutputMax,
 		RedactToolOutput:   o.d.Redact,
 		ContextWindow:      o.d.Registry.ContextWindow(model),
-		Provider:           o.d.Cfg.Provider,
 	}
 
 	// Opt into in-window compaction only when enabled; otherwise leave
@@ -84,6 +83,10 @@ func (o *run) harnessConfig(model string) harness.Config {
 	// Reasoning is nil when effort is empty (off) so the field is omitted and
 	// models that don't support it are unaffected.
 	cfg.Reasoning = reasoningRaw(o.d.Cfg.ReasoningEffort)
+
+	if o.progress != nil {
+		cfg.OnDelta = o.progress.onDelta
+	}
 
 	return cfg
 }

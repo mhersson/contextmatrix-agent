@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -502,4 +503,36 @@ func TestExitPathSurvivesAnUnwritableTranscript(t *testing.T) {
 	assert.Equal(t, "failed", h.rep.status)
 	assert.Equal(t, "worker exited with code 137", h.rep.message)
 	require.Len(t, drainStream(h.stream), 1, "the live stream still gets the terminal event")
+}
+
+func TestWarnIfNotWorkerUID(t *testing.T) {
+	tests := []struct {
+		name     string
+		goos     string
+		uid      int
+		wantWarn bool
+	}{
+		{name: "linux as the worker UID", goos: "linux", uid: executor.WorkerUID},
+		{name: "linux as root", goos: "linux", uid: 0, wantWarn: true},
+		{name: "linux as another user", goos: "linux", uid: executor.WorkerUID + 1, wantWarn: true},
+		{name: "not linux", goos: "darwin", uid: 501},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+
+			warnIfNotWorkerUID(slog.New(slog.NewJSONHandler(&buf, nil)), tt.goos, tt.uid)
+
+			if !tt.wantWarn {
+				assert.Empty(t, buf.String())
+
+				return
+			}
+
+			var record map[string]any
+			require.NoError(t, json.Unmarshal(buf.Bytes(), &record))
+			assert.Equal(t, slog.LevelWarn.String(), record["level"])
+		})
+	}
 }

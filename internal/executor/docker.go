@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,6 +36,10 @@ const (
 // secretsMountPath is where the per-project secrets dir is mounted read-only
 // inside the container.
 const secretsMountPath = "/run/cm-secrets" //nolint:gosec // path, not a credential
+
+// WorkerUID is the UID and GID the worker container runs as. The per-run
+// secrets it mounts are readable only by serve's own UID, so serve must match.
+const WorkerUID = 1000
 
 // skillsMountPath is where the resolved task-skills dir is mounted read-only
 // inside the container. The worker reads it via CMX_TASK_SKILLS_DIR.
@@ -209,7 +214,7 @@ func containerConfig(spec LaunchSpec) (*container.Config, *container.HostConfig)
 		Env:         spec.Env,
 		Labels:      labels,
 		Cmd:         spec.Cmd,
-		User:        "1000:1000",
+		User:        strconv.Itoa(WorkerUID) + ":" + strconv.Itoa(WorkerUID),
 		OpenStdin:   true,
 		AttachStdin: true,
 		StdinOnce:   false,

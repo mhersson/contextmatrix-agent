@@ -3,7 +3,10 @@
 # Copy to ~/.config/contextmatrix-agent/serve.yaml (the XDG default location)
 # and edit before starting the service. Every scalar field can also be set or
 # overridden with a CMX_* environment variable; list/map fields are YAML-only
-# or use the nested CMX_…__KEY form (see each field below).
+# or use the nested CMX_…__KEY form (see each field below). An unknown key (a
+# typo, or one a later version removed) stops startup and `config validate`
+# with an error naming it; worker_extra_env entries and CMX_* variables are not
+# checked.
 
 # --- ContextMatrix connectivity -----------------------------------------------
 
@@ -261,8 +264,10 @@ tool_output_max_bytes: 131072
 # CMX_COMPACTION_THRESHOLD
 # compaction_threshold: 0.85
 
-# Number of most-recent turns kept verbatim when compacting. Must be >= 1 when
-# compaction is enabled. Default: 6.
+# Number of most-recent messages kept verbatim when compacting - messages, not
+# turns, despite the key name: a tool-using turn is an assistant message plus
+# one message per tool result. Must be >= 1 when compaction is enabled.
+# Default: 6.
 # CMX_COMPACTION_KEEP_RECENT_TURNS
 # compaction_keep_recent_turns: 6
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -47,15 +48,17 @@ func nowTS() string {
 
 // ---- fakes ------------------------------------------------------------------
 
-// fakeExecutor records calls and lets a test inject a Launch error. On a
+// fakeExecutor records calls and lets a test inject a Launch or Kill error. On a
 // successful Launch it registers the run in the shared tracker so the handler's
-// capacity checks and /containers reflect it, mirroring the real executor.
+// capacity checks and /containers reflect it, and Kill answers ErrNotFound for
+// an untracked card, mirroring the real executor.
 type fakeExecutor struct {
 	mu sync.Mutex
 
 	tracker *executor.Tracker
 
 	launchErr      error
+	killErr        error
 	launched       []executor.LaunchSpec
 	killed         [][2]string // project, cardID
 	stopAllArg     string
@@ -96,7 +99,15 @@ func (f *fakeExecutor) Kill(_ context.Context, project, cardID string) error {
 
 	f.killed = append(f.killed, [2]string{project, cardID})
 
+	if f.killErr != nil {
+		return f.killErr
+	}
+
 	if f.tracker != nil {
+		if _, ok := f.tracker.Get(project, cardID); !ok {
+			return fmt.Errorf("%w: %s/%s", executor.ErrNotFound, project, cardID)
+		}
+
 		f.tracker.Remove(project, cardID)
 	}
 
@@ -641,13 +652,51 @@ func TestKill_TrackedReturns200(t *testing.T) {
 	h.exec.mu.Unlock()
 }
 
-func TestKill_UntrackedReturns404(t *testing.T) {
+// ContextMatrix treats any status >= 400 from /kill as a failed stop, so a card
+// with nothing left to kill must answer success.
+func TestKill_NothingToKillReturns200(t *testing.T) {
+	tests := []struct {
+		name    string
+		tracked bool
+		killErr error
+	}{
+		{name: "untracked card"},
+		{
+			name:    "run removed before the kill lands",
+			tracked: true,
+			killErr: fmt.Errorf("kill: %w", executor.ErrNotFound),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t, 4)
+			h.exec.killErr = tt.killErr
+
+			if tt.tracked {
+				h.addRun("PROJ-001", "proj")
+			}
+
+			w := h.do(t, http.MethodPost, "/kill", protocol.KillPayload{CardID: "PROJ-001", Project: "proj"})
+
+			require.Equal(t, http.StatusOK, w.Code)
+
+			var sr protocol.SuccessResponse
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &sr))
+			assert.True(t, sr.OK)
+		})
+	}
+}
+
+func TestKill_ExecutorErrorReturns500(t *testing.T) {
 	h := newHarness(t, 4)
+	h.exec.killErr = errors.New("docker unavailable")
+	h.addRun("PROJ-001", "proj")
 
-	w := h.do(t, http.MethodPost, "/kill", protocol.KillPayload{CardID: "ghost", Project: "proj"})
+	w := h.do(t, http.MethodPost, "/kill", protocol.KillPayload{CardID: "PROJ-001", Project: "proj"})
 
-	require.Equal(t, http.StatusNotFound, w.Code)
-	assert.Equal(t, protocol.CodeNotFound, decodeErr(t, w).Code)
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.Equal(t, protocol.CodeInternal, decodeErr(t, w).Code)
 }
 
 // ---- stop-all ---------------------------------------------------------------
@@ -932,6 +981,131 @@ func TestMessage_DuplicateAfterDeliveryAcksWithoutSecondFrame(t *testing.T) {
 	require.Equal(t, http.StatusOK, w2.Code, "duplicate ack is 200, not 202")
 
 	assert.Equal(t, first, stdin.String(), "delivered duplicate must not re-write stdin")
+}
+
+// gatedStdin is a tracked run's stdin whose first Write blocks until release
+// is closed and then returns firstErr; later writes land at once.
+type gatedStdin struct {
+	entered  chan struct{}
+	release  chan struct{}
+	firstErr error
+
+	mu     sync.Mutex
+	writes int
+	buf    strings.Builder
+}
+
+func newGatedStdin(firstErr error) *gatedStdin {
+	return &gatedStdin{entered: make(chan struct{}), release: make(chan struct{}), firstErr: firstErr}
+}
+
+func (g *gatedStdin) Write(p []byte) (int, error) {
+	g.mu.Lock()
+	g.writes++
+	first := g.writes == 1
+	g.mu.Unlock()
+
+	if first {
+		close(g.entered)
+		<-g.release
+
+		if g.firstErr != nil {
+			return 0, g.firstErr
+		}
+	}
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	return g.buf.Write(p)
+}
+
+func (g *gatedStdin) Close() error { return nil }
+
+func (g *gatedStdin) String() string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	return g.buf.String()
+}
+
+// retryDuringBlockedWrite sends a message whose stdin write blocks, sends a
+// same-message_id retry while it is blocked, then lets the first write finish.
+// It returns both response codes, first request first.
+func retryDuringBlockedWrite(t *testing.T, h *harness, stdin *gatedStdin) (int, int) {
+	t.Helper()
+
+	payload := protocol.MessagePayload{CardID: "PROJ-001", Project: "proj", Content: "hi", MessageID: "m1"}
+	body, err := json.Marshal(payload)
+	require.NoError(t, err)
+
+	// A real retry carries a fresh timestamp, so the replay cache admits it.
+	request := func(ts string) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "/message", bytes.NewReader(body))
+		signReq(t, r, testAPIKey, body, ts)
+
+		return r
+	}
+	first := request(strconv.FormatInt(time.Now().Add(-2*time.Second).Unix(), 10))
+	retry := request(nowTS())
+	mux := h.server.Routes()
+
+	var firstW, retryW *httptest.ResponseRecorder
+
+	var wg sync.WaitGroup
+
+	wg.Go(func() {
+		firstW = httptest.NewRecorder()
+		mux.ServeHTTP(firstW, first)
+	})
+
+	<-stdin.entered
+
+	wg.Go(func() {
+		retryW = httptest.NewRecorder()
+		mux.ServeHTTP(retryW, retry)
+	})
+
+	// Let the retry reach the handler's dedup and lock points before the first
+	// write returns. Correct code holds under every interleaving; the pause only
+	// gives a check-before-lock handler the chance to show its race.
+	time.Sleep(50 * time.Millisecond)
+	close(stdin.release)
+	wg.Wait()
+
+	return firstW.Code, retryW.Code
+}
+
+// TestMessage_RetryDuringBlockedWriteDeliversOnce: a retry that arrives while
+// the first delivery is still writing is acked as a duplicate, never written a
+// second time.
+func TestMessage_RetryDuringBlockedWriteDeliversOnce(t *testing.T) {
+	h := newHarness(t, 4)
+	stdin := newGatedStdin(nil)
+	h.tracker.AddIfUnderLimit(&executor.Run{ContainerID: "ctr-PROJ-001", CardID: "PROJ-001", Project: "proj", StartedAt: time.Now(), Stdin: stdin})
+
+	firstCode, retryCode := retryDuringBlockedWrite(t, h, stdin)
+
+	assert.Equal(t, http.StatusAccepted, firstCode)
+	assert.Equal(t, http.StatusOK, retryCode, "the retry is a duplicate ack")
+	assert.Equal(t, 1, strings.Count(stdin.String(), `"message_id":"m1"`), "the frame is written exactly once")
+}
+
+// TestMessage_RetryDuringFailingWriteDelivers: when the first delivery fails
+// while a retry waits on the stdin lock, the retry delivers instead of being
+// acked as a duplicate of a frame that never arrived. It catches a dedup check
+// made outside the lock; it cannot tell Rollback-then-Unlock from the reverse,
+// whose window is too narrow for the waiting retry to land in.
+func TestMessage_RetryDuringFailingWriteDelivers(t *testing.T) {
+	h := newHarness(t, 4)
+	stdin := newGatedStdin(errors.New("pipe closed"))
+	h.tracker.AddIfUnderLimit(&executor.Run{ContainerID: "ctr-PROJ-001", CardID: "PROJ-001", Project: "proj", StartedAt: time.Now(), Stdin: stdin})
+
+	firstCode, retryCode := retryDuringBlockedWrite(t, h, stdin)
+
+	assert.Equal(t, http.StatusInternalServerError, firstCode)
+	assert.Equal(t, http.StatusAccepted, retryCode, "the retry delivers")
+	assert.Equal(t, 1, strings.Count(stdin.String(), `"message_id":"m1"`), "the retry's frame reached stdin")
 }
 
 // ---- promote ----------------------------------------------------------------

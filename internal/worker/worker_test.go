@@ -1687,21 +1687,6 @@ func TestBuildSkillToolPresentAndAbsent(t *testing.T) {
 	assert.Nil(t, buildSkillTool(RunSpec{CardID: "C1", TaskSkillsDir: skillsDir, TaskSkillsSet: true, TaskSkills: nil}, nil))
 }
 
-func TestPlanToolsRegistryCarriesFindingsTool(t *testing.T) {
-	t.Parallel()
-
-	ws := t.TempDir()
-	plan := tools.NewRegistry(append(tools.ReadOnlyTools(ws), orchestrator.NewFindingsTool())...)
-
-	_, ok := plan.Get("record_finding")
-	assert.True(t, ok, "the plan registry must carry the findings tool")
-
-	_, ok = tools.NewReadOnlyRegistry(ws).Get("record_finding")
-	assert.False(t, ok, "the shared read-only registry must NOT carry it: gate, review, judge, verify-propose and mob planning seats all use it, and mob round 0 is blind")
-
-	assert.Len(t, plan.All(), len(tools.ReadOnlyTools(ws))+1)
-}
-
 func TestWriteToolsForThreadsExtraEnv(t *testing.T) {
 	t.Parallel()
 
@@ -2292,6 +2277,12 @@ func TestReadRootsComeOnlyFromResolvedConfig(t *testing.T) {
 		"the orchestrator's roots must be the resolved spec's list verbatim")
 
 	require.NotNil(t, captured.PlanTools)
+
+	_, ok := captured.PlanTools().Get("record_finding")
+	assert.True(t, ok, "the planner's registry must carry the findings tool")
+
+	_, ok = captured.ReadTools.Get("record_finding")
+	assert.False(t, ok, "the shared read-only registry must not carry it: gate, review, judge, verify-propose and mob planning seats all use it, and mob round 0 is blind")
 
 	registries := map[string]*tools.Registry{
 		"diagnosis": captured.ReadTools,

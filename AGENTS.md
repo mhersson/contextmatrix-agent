@@ -56,7 +56,7 @@ internal/executor/     → Executor interface + DockerExecutor; Tracker (concurr
 internal/secrets/      → Source (static env file) + RunCredentials (stages per-run CM-provisioned credentials)
 
 # serve plumbing
-internal/webhook/    → HTTP server for lifecycle webhooks; embeds backendkit's webhookcore.Core (HMAC auth, drain gate, request metrics, SSE /logs, health/readyz/images) and adds the agent-only lifecycle handlers plus message dedup
+internal/webhook/    → HTTP server for lifecycle webhooks; embeds backendkit's webhookcore.Core (HMAC auth, drain gate, request metrics, SSE /logs, health/readyz/images) and adds the agent-only lifecycle handlers plus /message dedup over webhookcore's DedupCache
 internal/callback/   → status callbacks to /api/agent/status; VerifyAutonomous (fail-closed)
 internal/cmclient/   → MCP client for CM card operations (one agent identity per card)
 internal/filelog/    → per-card raw container-output file logs (<log_dir>/<project>/<card_id>.log; empty log_dir no-ops)
@@ -105,6 +105,11 @@ config - is the single source of truth for what to ignore, stage, or read; when
 you must exclude or classify a path, ask the repo (git, `.gitignore`, content
 inspection), never a built-in ecosystem list.
 
+The only sanctioned ecosystem knowledge is the verify-resolution convention
+tables (`detectRows` in `internal/orchestrator/verify.go`), the nested verify
+scan's skip list (`nestedSkipDirs` in `verify_nested.go`), and the checkpoint
+environment probes (`envProbes` in `envfacts.go`).
+
 ## Tech stack
 
 Go 1.27+, **cobra** + **koanf** (not viper), the **Docker SDK**
@@ -134,6 +139,7 @@ Go 1.27+, **cobra** + **koanf** (not viper), the **Docker SDK**
   paths; in-container events go through the event stream, not stdout.
 - Tests sit next to code (`harness.go` → `harness_test.go`), table-driven, with
   `t.Helper()` in helpers and `t.TempDir()` for scratch dirs.
+- Tests must exercise behavior. A test that only fails when someone rewords a string, renames a heading, or edits prose is not a test - do not write it, and delete it when found. Asserting exact text is legitimate only where the text is a wire contract a consumer parses; if no code reads it, no test should pin it.
 - **Format with `gofumpt -w .` (`make fmt`), not `gofmt`.** CI flags the
   difference.
 - **Spell names out.** Use "agent", never "cmr". No abbreviations in config
@@ -155,10 +161,17 @@ tag-driven under the `CMX_*` prefix; nested keys use `__`
 (`CMX_PROVIDER__SORT` → `provider.sort`). Secrets arrive via env or a mounted
 file only - never via flags or committed YAML.
 
+- Card-lifecycle knobs are a `ServiceConfig` key, relayed by `buildLaunchSpec`
+  (`internal/webhook/handler.go`) as `CMX_*` container env and parsed in
+  `internal/cli/work.go` `specFromEnv` into `RunSpec`; never a `Config` field
+  or a `run` flag.
+
 ### Documentation
 
-- Document the CURRENT STATE, not changed state: what exists NOW and WHY, not
-  how we got here.
+- Documentation must always be true: every statement matches the code at
+  HEAD, and a change that makes a doc line false updates it in the same
+  commit.
+- Document the current state - what exists now and why, not how it got here.
 - Comments explain only non-obvious decisions, constraints, safety invariants,
   or workarounds. Do not narrate what code does or record change history; git
   holds history. Keep comments to one or two tight lines unless a longer
@@ -184,7 +197,9 @@ Summaries only - full detail lives in the reference documents above.
    a create-only push before cutting the card branch; that is the only push
    allowed outside the card-branch guard.
 3. **One container per top-level card.** All subagents run in-process on one
-   shared workspace; only the read-only review panel fans out in parallel.
+   shared workspace; the main solver writes sequentially, Best-of-N candidates
+   write concurrently in isolated worktrees, and review panels and mob seats
+   are read-only fan-outs.
 4. **Review = 3 specialists** behind a spec/test gate, looping to the
    `review_attempts` cap (default 3, range 1-6). The synthesis verdict is
    severity-gated: approval cannot carry a critical or important finding.
@@ -269,7 +284,9 @@ make lint      # clean before every commit
 make build     # must build
 ```
 
-**NEVER** commit code without manual approval from the user. No exceptions.
+- **Never commit to `main`.** Work on a feature branch; tasks of a plan or
+  scope the user approved commit there without asking again. Never push
+  without explicit user approval.
 
 **NEVER** reference a plan phase, slice ID, task number, or a private
 ContextMatrix card ID in commit messages, comments, or code - they are

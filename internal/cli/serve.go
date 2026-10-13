@@ -11,6 +11,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -44,6 +46,13 @@ const (
 	// onExitTimeout bounds the detached status callback fired when a container
 	// exits. The supervision goroutine that calls it has no request context.
 	onExitTimeout = 30 * time.Second
+	// parkWaitTimeout bounds how long shutdown waits for workers to park before
+	// the serial kill sweep, which adds a kill grace per straggler and a status
+	// callback per run. At the default max_concurrent of 5 the sequence fits
+	// svc.sh's TimeoutStopSec=60; ten or more stragglers can outlast it.
+	parkWaitTimeout = 30 * time.Second
+	// parkPollInterval is how often the park wait rechecks the tracker.
+	parkPollInterval = 250 * time.Millisecond
 
 	// staticSecretsID is the reserved pseudo-session id under which
 	// process-lifetime config-level secrets (MCP API key, agent API key) are
@@ -94,6 +103,8 @@ func runServe(ctx context.Context, configPath string) error {
 
 	logger := newServeLogger(cfg.LogLevel)
 	slog.SetDefault(logger)
+
+	warnIfNotWorkerUID(logger, runtime.GOOS, os.Getuid())
 
 	mx := metrics.New()
 
@@ -168,7 +179,7 @@ func runServe(ctx context.Context, configPath string) error {
 	var draining atomic.Bool
 
 	replay := webhookcore.NewReplayCache(cfg.ReplaySkew, cfg.ReplayCacheSize)
-	dedup := webhook.NewDedupCache(cfg.MessageDedupTTL, cfg.MessageDedupCacheSize)
+	dedup := webhookcore.NewDedupCache(cfg.MessageDedupTTL, cfg.MessageDedupCacheSize)
 
 	srv := webhook.NewServer(webhook.Config{
 		APIKey:           cfg.APIKey,
@@ -246,30 +257,55 @@ func runServe(ctx context.Context, configPath string) error {
 		logger.Info("context cancelled, shutting down")
 	}
 
-	gracefulShutdown(httpServer, adminSrv, exec, tracker, cbClient, &draining, logger)
+	// Detached from ctx, which may be the already-done shutdown trigger; a
+	// second signal cuts the park wait short instead.
+	shutdownCtx, cancelShutdown := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelShutdown()
+
+	go func() {
+		select {
+		case sig := <-sigCh:
+			logger.Warn("second signal: killing workers without waiting for them to park", "signal", sig.String())
+			cancelShutdown()
+		case <-shutdownCtx.Done():
+		}
+	}()
+
+	gracefulShutdown(shutdownCtx, httpServer, adminSrv, workerDrain{
+		tracker:  tracker,
+		sessions: srv,
+		exec:     exec,
+		reporter: cbClient,
+		logger:   logger,
+		wait:     parkWaitTimeout,
+		poll:     parkPollInterval,
+	}, &draining, logger)
 	cbClient.Close()
 	logger.Info("agent service stopped")
 
 	return nil
 }
 
-// gracefulShutdown drains the HTTP listener, kills every tracked worker, and
-// reports each as failed to ContextMatrix. Structure:
-//  1. flip draining so /readyz returns 503 and mutating routes refuse new work
-//  2. Shutdown the HTTP server with a bounded budget
-//  3. Shutdown the admin server if enabled
-//  4. for each tracked run: Kill the container and report "failed"
+// gracefulShutdown flips draining, ends every tracked worker's session so it
+// pushes its WIP and releases its card, drains the HTTP listeners, waits for
+// the workers to exit, then kills the rest. The park window opens at the
+// end_session write and overlaps the HTTP drain; ctx ends it early.
 func gracefulShutdown(
+	ctx context.Context,
 	httpServer *http.Server,
 	adminServer *http.Server,
-	exec executor.Executor,
-	tracker *executor.Tracker,
-	reporter webhook.StatusReporter,
+	workers workerDrain,
 	draining *atomic.Bool,
 	logger *slog.Logger,
 ) {
 	draining.Store(true)
 	logger.Info("draining: readyz now returns 503, mutating routes refuse new work")
+
+	parkCtx, parkCancel := context.WithTimeout(ctx, workers.wait)
+	defer parkCancel()
+
+	live := workers.tracker.List()
+	ended := workers.endSessions(live)
 
 	httpCtx, httpCancel := context.WithTimeout(context.Background(), httpShutdownTimeout)
 	defer httpCancel()
@@ -288,28 +324,124 @@ func gracefulShutdown(
 		adminCancel()
 	}
 
-	for _, run := range tracker.List() {
-		logger.Info("killing container on shutdown", "project", run.Project, "card_id", run.CardID)
+	workers.awaitPark(parkCtx, ended)
+	workers.sweep(live)
+}
 
-		// Kill's self-exit grace window applies here too, bounded by this
-		// per-container killCtx (callbackShutdownTimeout).
-		killCtx, killCancel := context.WithTimeout(context.Background(), callbackShutdownTimeout)
-		if err := exec.Kill(killCtx, run.Project, run.CardID); err != nil &&
-			!errors.Is(err, executor.ErrNotFound) {
-			logger.Warn("failed to kill container on shutdown",
-				"project", run.Project, "card_id", run.CardID, "error", err)
+// sessionEnder delivers an end_session frame to a tracked run.
+// *webhook.Server satisfies it.
+type sessionEnder interface {
+	EndSession(project, cardID string) error
+}
+
+// workerDrain stops the tracked worker runs on shutdown.
+type workerDrain struct {
+	tracker  *executor.Tracker
+	sessions sessionEnder
+	exec     executor.Executor
+	reporter webhook.StatusReporter
+	logger   *slog.Logger
+
+	// wait bounds the park window; poll is how often it rechecks the tracker.
+	wait time.Duration
+	poll time.Duration
+}
+
+// endSessions sends end_session to each run and returns the runs it reached.
+func (d workerDrain) endSessions(runs []*executor.Run) []*executor.Run {
+	ended := make([]*executor.Run, 0, len(runs))
+
+	for _, run := range runs {
+		if err := d.sessions.EndSession(run.Project, run.CardID); err != nil {
+			// A run that exited since the snapshot has nothing to end or kill.
+			if !errors.Is(err, executor.ErrNotFound) {
+				d.logger.Warn("could not end session on shutdown; the run will be killed",
+					"project", run.Project, "card_id", run.CardID, "error", err)
+			}
+
+			continue
 		}
 
-		killCancel()
+		ended = append(ended, run)
+	}
+
+	return ended
+}
+
+// awaitPark returns once none of runs is still tracked or ctx ends.
+func (d workerDrain) awaitPark(ctx context.Context, runs []*executor.Run) {
+	ticker := time.NewTicker(d.poll)
+	defer ticker.Stop()
+
+	for d.anyTracked(runs) {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (d workerDrain) anyTracked(runs []*executor.Run) bool {
+	return slices.ContainsFunc(runs, d.tracked)
+}
+
+// tracked compares by identity so a successor run under the same key is not
+// mistaken for the one shutdown asked to park.
+func (d workerDrain) tracked(run *executor.Run) bool {
+	current, ok := d.tracker.Get(run.Project, run.CardID)
+
+	return ok && current == run
+}
+
+// sweep kills every run still tracked and reports each of live, plus any run
+// admitted since, as failed. A parked run is reported too: the process can
+// exit before that run's own exit callback reaches ContextMatrix.
+func (d workerDrain) sweep(live []*executor.Run) {
+	runs := live
+
+	for _, run := range d.tracker.List() {
+		if !slices.Contains(runs, run) {
+			runs = append(runs, run)
+		}
+	}
+
+	for _, run := range runs {
+		if d.tracked(run) {
+			d.logger.Info("killing container on shutdown", "project", run.Project, "card_id", run.CardID)
+
+			// Kill's self-exit grace window applies here too, bounded by this
+			// per-container killCtx (callbackShutdownTimeout).
+			killCtx, killCancel := context.WithTimeout(context.Background(), callbackShutdownTimeout)
+			if err := d.exec.Kill(killCtx, run.Project, run.CardID); err != nil &&
+				!errors.Is(err, executor.ErrNotFound) {
+				d.logger.Warn("failed to kill container on shutdown",
+					"project", run.Project, "card_id", run.CardID, "error", err)
+			}
+
+			killCancel()
+		}
 
 		cbCtx, cbCancel := context.WithTimeout(context.Background(), callbackShutdownTimeout)
-		if err := reporter.ReportStatus(cbCtx, run.CardID, run.Project, "failed", "service shutting down"); err != nil {
-			logger.Warn("failed to report shutdown status",
+		if err := d.reporter.ReportStatus(cbCtx, run.CardID, run.Project, "failed", "service shutting down"); err != nil {
+			d.logger.Warn("failed to report shutdown status",
 				"project", run.Project, "card_id", run.CardID, "error", err)
 		}
 
 		cbCancel()
 	}
+}
+
+// warnIfNotWorkerUID warns when serve's UID differs from the worker
+// container's: the per-run secrets file is 0600 to serve's UID, so no run could
+// read it. Only Linux is checked; Docker Desktop translates bind-mount owners.
+func warnIfNotWorkerUID(logger *slog.Logger, goos string, uid int) {
+	if goos != "linux" || uid == executor.WorkerUID {
+		return
+	}
+
+	logger.Warn("serve is not running as the worker container's UID; workers cannot read their per-run secrets and every run will fail",
+		"uid", uid, "worker_uid", executor.WorkerUID)
 }
 
 // newRedactorRegistry composes the bridge's redactor. Config-level secrets are
