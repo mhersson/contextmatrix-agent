@@ -6567,6 +6567,37 @@ func TestTryAdoptApproval_RedVerifyIgnoresRecord(t *testing.T) {
 	assert.Empty(t, ops.bodyFor("CARD-1"))
 }
 
+// TestTryAdoptApproval_SkippedVerifyIgnoresRecord proves an inconclusive
+// verify on the recorded HEAD refuses adoption like a red one: only a gate
+// that passes lets a recorded approval stand in for a fresh review.
+func TestTryAdoptApproval_SkippedVerifyIgnoresRecord(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{headSHA: "abc123"}
+	client := &planLLM{}
+
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+
+	o.body = "## Review Approval\n\nCommit: abc123\n\n```json\n{\"head_sha\":\"abc123\",\"summary\":\"stale\",\"fixes\":[]}\n```"
+
+	o.verify = &verifyPlan{Argv: []string{"verify"}, Display: "verify", Source: verifySourceDetected, Timeout: time.Minute}
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		return verifyexec.Outcome{TimedOut: true, ExitCode: -1}
+	}
+
+	adopted, err := o.tryAdoptApproval(context.Background(), *o.verify)
+	require.NoError(t, err)
+	require.Equal(t, verifySkipped, o.lastVerify.Status, "the timed-out gate must classify as skipped")
+	assert.False(t, adopted,
+		"adoption must be refused when the verify gate is skipped")
+
+	// No model calls, no cleanup, no body change.
+	assert.Zero(t, modelCallCount(client))
+	assert.Empty(t, ops.bodyFor("CARD-1"))
+}
+
 // TestTryAdoptApproval_NoRecordReturnsFalse proves tryAdoptApproval returns
 // false when no approval section exists on the body.
 func TestTryAdoptApproval_NoRecordReturnsFalse(t *testing.T) {
