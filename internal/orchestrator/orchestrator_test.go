@@ -463,6 +463,28 @@ func TestRunWalksDocumentBetweenExecuteAndReview(t *testing.T) {
 		"document runs immediately after execute and before review")
 }
 
+// TestExecuteAttributesAPhaseErrorToItsPhase: the worker names the failed
+// phase on the card, so a phase body's error leaves execute carrying that
+// phase - while keeping its own message and every sentinel check intact.
+func TestExecuteAttributesAPhaseErrorToItsPhase(t *testing.T) {
+	cause := errors.New("rebase refused")
+
+	ops := &fakeOps{taskContext: cmclient.TaskContext{Phase: "review"}}
+	d := Deps{Ops: ops, Git: &fakeGit{remoteTip: "tip-1"}, Cfg: Config{CardID: "CARD-1", Branch: "cm/card-1"}}
+	o := newRun(d, ops.taskContext)
+
+	o.reviewFn = func(context.Context) error { return nil }
+	o.integrateFn = func(context.Context) error { return fmt.Errorf("integrate: %w", cause) }
+
+	err := o.execute(context.Background())
+
+	pe, ok := errors.AsType[*PhaseError](err)
+	require.True(t, ok, "a phase body's error carries its phase; err=%v", err)
+	assert.Equal(t, "integrate", pe.Phase)
+	require.ErrorIs(t, err, cause, "the wrapped cause stays reachable")
+	assert.Equal(t, "integrate: rebase refused", err.Error(), "the message is the phase body's own")
+}
+
 func TestRunSeedsLedgerFromReportedCost(t *testing.T) {
 	ops := &fakeOps{
 		taskContext: cmclient.TaskContext{ReportedCostUSD: 0.90},

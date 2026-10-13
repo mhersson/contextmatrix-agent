@@ -1300,9 +1300,10 @@ func (o *run) copilotFixRound(ctx context.Context, st *gatesState, findings []co
 		map[string]any{"round": st.CopilotRounds, "cap": gatesRoundsCap, "findings": len(findings)})
 
 	// FixTier is deliberately left empty: a gate finding is not scoped to one
-	// review round, so the card bar is the right fallback.
+	// review round, so the card bar is the right fallback. The fixer's response
+	// is dropped: the gate, not a review round, judges what it pushed.
 	req := fixRequest{Findings: copilotFixFindings(findings), Round: st.CopilotRounds}
-	committed, err := o.runFix(ctx, req)
+	committed, _, err := o.runFix(ctx, req)
 
 	var mte *MaxTurnsError
 
@@ -1948,9 +1949,10 @@ func (o *run) ciFixRound(ctx context.Context, prURL string, st *gatesState, fail
 	}
 
 	// FixTier is deliberately left empty: a gate finding is not scoped to one
-	// review round, so the card bar is the right fallback.
+	// review round, so the card bar is the right fallback. The fixer's response
+	// is dropped: the gate, not a review round, judges what it pushed.
 	req := fixRequest{Findings: ciFixFindings(digest), Round: st.CIRounds}
-	committed, err := o.runFix(ctx, req)
+	committed, _, err := o.runFix(ctx, req)
 
 	var mte *MaxTurnsError
 

@@ -14,7 +14,6 @@ import (
 	"testing"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
-	"github.com/mhersson/contextmatrix-agent/internal/orchestrator"
 	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/mhersson/contextmatrix-harness/llm"
 	protocol "github.com/mhersson/contextmatrix-protocol"
@@ -25,7 +24,7 @@ import (
 // This file drives the REAL autonomous orchestrator FSM end-to-end in-process:
 // plan -> execute -> document -> review -> integrate -> pr_gates -> done. The only stubbed boundaries
 // are OpenRouter (a content-aware httptest SSE server) and the CM card-ops
-// surface (an in-process recorder satisfying both worker.CardOps and the wider
+// surface (an in-process recorder satisfying worker.CardOps, which embeds
 // orchestrator.Ops). Git is REAL - a temp clone against a local bare origin -
 // and so is the SSE wire client, the harness loop, the registry/selector, and
 // the verify-command subprocess. runOrchestrator is NOT swapped here: the true
@@ -308,14 +307,13 @@ func jsonNumber(f float64) string {
 	return string(b)
 }
 
-// --- in-process CM ops recorder (worker.CardOps + orchestrator.Ops) --------
+// --- in-process CM ops recorder (worker.CardOps) --------------------------
 
 // stubOps records every card-ops call in order and serves the scripted task
-// context and subtask IDs the orchestrator needs. It satisfies the wide
-// orchestrator.Ops surface (so ops2orchestrator hands the real FSM a live Ops)
-// AND the narrow worker.CardOps the worker's Run consumes. All state is mutex
-// guarded: the heartbeat goroutine and parallel review subagents call
-// concurrently.
+// context and subtask IDs the orchestrator needs. It satisfies worker.CardOps,
+// whose embedded orchestrator.Ops is the surface the real FSM drives. All
+// state is mutex guarded: the heartbeat goroutine and parallel review
+// subagents call concurrently.
 type stubOps struct {
 	mu  sync.Mutex
 	log []opRecord
@@ -990,11 +988,4 @@ func TestOrchestratorEndToEndFixLoop(t *testing.T) {
 	assertRealSelectorSeats(t, ops)
 }
 
-// compile-time proof the recorder satisfies BOTH surfaces: the worker's narrow
-// CardOps (what Run consumes) and the wider orchestrator.Ops the FSM drives via
-// ops2orchestrator. The wide fit is load-bearing - a nil Ops would panic the
-// real FSM this test exercises.
-var (
-	_ CardOps          = (*stubOps)(nil)
-	_ orchestrator.Ops = (*stubOps)(nil)
-)
+var _ CardOps = (*stubOps)(nil)

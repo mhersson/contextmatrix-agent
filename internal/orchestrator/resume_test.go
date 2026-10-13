@@ -167,6 +167,36 @@ func TestReconcileExecuteQueuesUnfinished(t *testing.T) {
 	git.assertOrder(t, "Fetch:cm/card-1", "Checkout:cm/card-1")
 }
 
+// TestReconcileCountsPriorSubtaskSpend: subtask runs report usage against the
+// subtask cards, never into the parent's total, so a resumed run must count
+// every subtask's reported cost - finished ones included - before any phase
+// spends, or the prior coder spend comes back as fresh headroom.
+func TestReconcileCountsPriorSubtaskSpend(t *testing.T) {
+	ops := &fakeOps{
+		subtaskStates: []cmclient.SubtaskState{
+			{CardID: "SUB-1", Title: "done one", State: "done", ReportedCostUSD: 2.0},
+			{CardID: "SUB-2", Title: "cancelled", State: "not_planned", ReportedCostUSD: 0.5},
+			{CardID: "SUB-3", Title: "queued", State: "todo", ReportedCostUSD: 1.0},
+		},
+	}
+	d := Deps{
+		Ops: ops,
+		Git: &fakeGit{remoteTip: "tip-1"},
+		Cfg: Config{Project: "proj", CardID: "CARD-1", Branch: "cm/card-1", BaseBranch: "main", MaxCardCost: 5.0},
+	}
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", Phase: "execute", ReportedCostUSD: 1.5}
+
+	o := newRun(d, tc)
+	require.NoError(t, o.ledger.Check(), "the parent's own spend alone is under the ceiling")
+
+	require.NoError(t, o.reconcile(context.Background()))
+
+	assert.InDelta(t, 5.0, o.ledger.Spent(), 1e-9, "the parent's spend plus every subtask's")
+
+	var be *BudgetExceededError
+	require.ErrorAs(t, o.ledger.Check(), &be, "prior spend at the ceiling parks before the first model call")
+}
+
 func TestReconcileSortsSubtasksByCardID(t *testing.T) {
 	// list_cards returns subtasks in nondeterministic (map-iteration) order and
 	// carries no dependency edges, so reconcile must impose a stable, dependency-

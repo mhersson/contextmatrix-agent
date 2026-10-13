@@ -983,6 +983,37 @@ func TestCommitWithMessage(t *testing.T) {
 	assert.Equal(t, "my exact message", strings.TrimSpace(out))
 }
 
+// A commit that fails after stageForCommit leaves every untracked file
+// staged, and a hard reset deletes a staged file HEAD does not hold. Resetting
+// the index first keeps an untracked file that was there before, while the
+// hard reset still discards the tracked edit.
+func TestMixedResetKeepsUntrackedFilesAFailedCommitStaged(t *testing.T) {
+	t.Parallel()
+
+	_, ws, _ := setupClonedRepo(t)
+	g := NewGit(ws, "", "", "")
+	ctx := context.Background()
+
+	original, err := os.ReadFile(filepath.Join(ws, "README.md"))
+	require.NoError(t, err)
+
+	writeFile(t, ws, "notes.md", []byte("was here before the run\n"), 0o644)
+	writeFile(t, ws, "README.md", []byte("edited\n"), 0o644)
+	writeFile(t, ws, filepath.Join(".git", "hooks", "pre-commit"), []byte("#!/bin/sh\nexit 1\n"), 0o755)
+
+	_, err = g.CommitWithMessage(ctx, "docs: x")
+	require.Error(t, err, "the hook refuses the commit after everything was staged")
+
+	require.NoError(t, g.MixedReset(ctx, "HEAD"))
+	require.NoError(t, g.HardReset(ctx, "HEAD"))
+
+	assert.FileExists(t, filepath.Join(ws, "notes.md"), "an untracked file survives the discard")
+
+	readme, err := os.ReadFile(filepath.Join(ws, "README.md"))
+	require.NoError(t, err)
+	assert.Equal(t, string(original), string(readme), "the tracked edit is discarded")
+}
+
 func TestCommitWithMessageCleanTree(t *testing.T) {
 	t.Parallel()
 
@@ -1355,6 +1386,61 @@ func TestWorktreeStateTracksWritesAndIgnoresArtifacts(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(ws, "artifacts"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(ws, "artifacts", "out"), []byte("build output\n"), 0o644))
 	assert.Equal(t, ignoring, state(), "an ignored build artifact must not read as a write")
+}
+
+// UntrackedFiles lists every untracked file individually and verbatim, and
+// nothing the repository ignores or already tracks.
+func TestUntrackedFilesListsOnlyUntrackedFiles(t *testing.T) {
+	t.Parallel()
+
+	remote := setupBareRemote(t)
+	ws := filepath.Join(t.TempDir(), "ws")
+	g := NewGit(ws, "", "", "")
+	ctx := context.Background()
+
+	require.NoError(t, g.Clone(ctx, remote, "main"))
+
+	none, err := g.UntrackedFiles(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, none, "a fresh clone has no untracked files")
+
+	writeFile(t, ws, ".gitignore", []byte("out/\n"), 0o644)
+	runGit(t, ws, "add", ".gitignore")
+	runGit(t, ws, "commit", "-m", "ignore output")
+
+	writeFile(t, ws, "README.md", []byte("edited\n"), 0o644)
+	writeFile(t, ws, "docs/new guide.md", []byte("new\n"), 0o644)
+	writeFile(t, ws, "notes.md", []byte("new\n"), 0o644)
+	writeFile(t, ws, "out/build.log", []byte("ignored\n"), 0o644)
+
+	got, err := g.UntrackedFiles(ctx)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"docs/new guide.md", "notes.md"}, got)
+}
+
+// RemoveFiles deletes exactly the named files, tolerates one already gone, and
+// never reaches outside the clone - through ".." or a symlinked directory.
+func TestRemoveFilesStaysInsideTheClone(t *testing.T) {
+	t.Parallel()
+
+	ws := t.TempDir()
+	outside := t.TempDir()
+	victim := filepath.Join(outside, "victim.md")
+
+	writeFile(t, ws, "docs/new.md", []byte("new\n"), 0o644)
+	writeFile(t, ws, "keep.md", []byte("keep\n"), 0o644)
+	require.NoError(t, os.WriteFile(victim, []byte("not ours\n"), 0o644))
+	require.NoError(t, os.Symlink(outside, filepath.Join(ws, "link")))
+
+	g := NewGit(ws, "", "", "")
+
+	require.NoError(t, g.RemoveFiles(context.Background(), []string{"docs/new.md", "already-gone.md"}))
+	assert.NoFileExists(t, filepath.Join(ws, "docs", "new.md"))
+	assert.FileExists(t, filepath.Join(ws, "keep.md"), "a file not named is left alone")
+
+	require.Error(t, g.RemoveFiles(context.Background(), []string{"link/victim.md"}))
+	require.Error(t, g.RemoveFiles(context.Background(), []string{"../" + filepath.Base(outside) + "/victim.md"}))
+	assert.FileExists(t, victim, "a path that escapes the clone is refused")
 }
 
 // foldUntracked is on the coder's critical path twice per verify call, so its

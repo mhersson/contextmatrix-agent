@@ -85,6 +85,10 @@ type GitOps interface {
 	LastCommitTouching(ctx context.Context, paths []string) (string, error)
 	RebaseAutosquash(ctx context.Context, onto string) error
 	SoftReset(ctx context.Context, to string) error
+	// MixedReset moves the index to ref and leaves the working tree alone:
+	// staged edits become unstaged and a staged file ref does not hold becomes
+	// untracked.
+	MixedReset(ctx context.Context, ref string) error
 	Head(ctx context.Context) (string, error)
 	Checkout(ctx context.Context, ref string) error
 	Diff(ctx context.Context, base string) (string, error)
@@ -106,6 +110,12 @@ type GitOps interface {
 	// error instead of fingerprinting a tree it cannot read cheaply; callers
 	// treat that as "assume written".
 	WorktreeState(ctx context.Context) (string, error)
+	// UntrackedFiles lists the worktree's untracked files, workspace-relative,
+	// under the repository's own ignore rules: an ignored path is never listed.
+	UntrackedFiles(ctx context.Context) ([]string, error)
+	// RemoveFiles deletes the named workspace-relative files, confined to the
+	// workspace. A path already gone is not an error.
+	RemoveFiles(ctx context.Context, paths []string) error
 }
 
 // Config carries the per-run parameters the FSM needs.
@@ -504,6 +514,14 @@ type run struct {
 	// which would otherwise erase the mandate a regressing fix was chasing.
 	lastPanelFindings string
 
+	// lastFixResponse is the most recent review fix round's finish message,
+	// and lastPanelFixResponse that of the fix that answered lastPanelFindings,
+	// so each rides beside the findings it answered (priorContext). Empty when
+	// the fixer gave none. Not seeded on resume: the recorded history that
+	// seeds lastFindings already carries each round's response in its section.
+	lastFixResponse      string
+	lastPanelFixResponse string
+
 	// lastPriorResolved is the most recent verdict's own report of whether
 	// every prior finding was resolved or withdrawn (settleVerdict). The
 	// authoritative pass's park head reads it to tell an operator a failed
@@ -691,6 +709,18 @@ func (o *run) phaseFnFor(phase string) phaseFn {
 	}
 }
 
+// PhaseError attributes a run's terminal error to the FSM phase that returned
+// it, so the worker can name where a run failed. Its message is the wrapped
+// error's own, and it unwraps, so every sentinel check sees through it.
+type PhaseError struct {
+	Phase string
+	Err   error
+}
+
+func (e *PhaseError) Error() string { return e.Err.Error() }
+
+func (e *PhaseError) Unwrap() error { return e.Err }
+
 // execute drives the FSM from the card's persisted phase to done. For every
 // phase it persists the phase to the card BEFORE running the body, so an
 // interrupted run leaves the stored phase pointing at the in-progress step.
@@ -776,7 +806,7 @@ func (o *run) execute(ctx context.Context) error {
 				o.d.logCard(ctx, "%s", splitOverflowLogMessage(soe))
 			}
 
-			return err
+			return &PhaseError{Phase: phase, Err: err}
 		}
 	}
 

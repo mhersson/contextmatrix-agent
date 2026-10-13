@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/config"
@@ -267,6 +268,74 @@ func (f *fakeOps) RecordSkillEngaged(_ context.Context, cardID, skillName string
 
 	return nil
 }
+
+func (f *fakeOps) CreateCard(_ context.Context, project, parent, title, _ string, dependsOn []string) (string, error) {
+	f.record("CreateCard", project, parent, title, dependsOn)
+
+	return "", nil
+}
+
+func (f *fakeOps) CreateTopLevelCard(_ context.Context, project, title, _ string, dependsOn []string) (string, error) {
+	f.record("CreateTopLevelCard", project, title, dependsOn)
+
+	return "", nil
+}
+
+func (f *fakeOps) SetPhase(_ context.Context, cardID, phase string) error {
+	f.record("SetPhase", cardID, phase)
+
+	return nil
+}
+
+func (f *fakeOps) UpdateCardBody(_ context.Context, cardID, _ string) error {
+	f.record("UpdateCardBody", cardID)
+
+	return nil
+}
+
+func (f *fakeOps) SetAutonomous(_ context.Context, cardID string, autonomous bool) error {
+	f.record("SetAutonomous", cardID, autonomous)
+
+	return nil
+}
+
+func (f *fakeOps) StartReview(_ context.Context, cardID string) error {
+	f.record("StartReview", cardID)
+
+	return nil
+}
+
+func (f *fakeOps) IncrementReviewAttempts(_ context.Context, cardID string) (int, error) {
+	f.record("IncrementReviewAttempts", cardID)
+
+	return f.count("IncrementReviewAttempts"), nil
+}
+
+func (f *fakeOps) SubtaskStates(_ context.Context, project, parentID string) ([]cmclient.SubtaskState, error) {
+	f.record("SubtaskStates", project, parentID)
+
+	return nil, nil
+}
+
+func (f *fakeOps) AddLog(_ context.Context, cardID, message string) error {
+	f.record("AddLog", cardID, message)
+
+	return nil
+}
+
+func (f *fakeOps) ReportModelOutcomes(_ context.Context, cardID string, outcomes []cmclient.ModelOutcome) error {
+	f.record("ReportModelOutcomes", cardID, outcomes)
+
+	return nil
+}
+
+func (f *fakeOps) BlacklistModel(_ context.Context, cardID, model, reason string) error {
+	f.record("BlacklistModel", cardID, model, reason)
+
+	return nil
+}
+
+var _ CardOps = (*fakeOps)(nil)
 
 // --- helpers ---------------------------------------------------------------
 
@@ -574,6 +643,123 @@ func TestRunFSMGenericError(t *testing.T) {
 
 	assert.Equal(t, 1, ops.count("ReleaseCard"))
 	assert.Equal(t, 0, ops.count("CompleteTask"))
+}
+
+// TestRunFSMGenericErrorLogsTheReasonOnTheCard: serve's failed callback carries
+// only the exit code, so the default arm writes why the run failed onto the
+// card - naming the phase, while the claim is still held, with every run
+// secret redacted, and bounded under the board's activity-log field limit.
+func TestRunFSMGenericErrorLogsTheReasonOnTheCard(t *testing.T) {
+	const (
+		secret = "llm-key-0123456789"
+		// CM's activity-log field limit, in bytes.
+		activityLogLimit = 2000
+	)
+
+	remote := setupBareRemote(t)
+	ops := newStubOps()
+
+	cause := "push rejected for https://user:" + secret + "@example.com: " +
+		strings.Repeat("remote output ", 500) + "final cause"
+
+	swapRunOrchestrator(t, func(context.Context, orchestrator.Deps) error {
+		return &orchestrator.PhaseError{Phase: "integrate", Err: errors.New(cause)}
+	})
+
+	spec := baseSpec(t, remote, t.TempDir())
+	spec.LLMKey = secret
+
+	res, err := Run(context.Background(), spec, ops, &scriptedLLM{}, events.NewEmitter(io.Discard, io.Discard), openStdin(t))
+	require.Error(t, err)
+	assert.Equal(t, "error", res.Reason)
+
+	ops.mu.Lock()
+	logAt, releaseAt := -1, -1
+
+	var line string
+
+	for i, c := range ops.log {
+		switch {
+		case c.op == "AddLog" && len(c.args) == 2 && strings.Contains(fmt.Sprint(c.args[1]), "integrate"):
+			logAt, line = i, fmt.Sprint(c.args[1])
+		case c.op == "ReleaseCard" && releaseAt < 0:
+			releaseAt = i
+		}
+	}
+	ops.mu.Unlock()
+
+	require.NotEqual(t, -1, logAt, "the failure reason, naming its phase, lands on the card")
+	require.NotEqual(t, -1, releaseAt, "the claim is still released")
+	assert.Less(t, logAt, releaseAt, "the reason is logged while the claim is still held")
+
+	assert.NotContains(t, line, secret, "a run secret in the error is redacted")
+	assert.LessOrEqual(t, len(line), activityLogLimit, "a long error is bounded")
+	assert.Contains(t, line, "push rejected", "the head of the error survives the bound")
+	assert.Contains(t, line, "final cause", "the tail of the error survives the bound")
+}
+
+// TestRunFailureLineRedactsBeforeTheCut: a secret straddling either cut of the
+// head-and-tail bound is redacted whole first. Bounding first would leave a
+// fragment on each side that the redactor no longer recognizes.
+func TestRunFailureLineRedactsBeforeTheCut(t *testing.T) {
+	t.Parallel()
+
+	const (
+		secret  = "Zq9vSecretTokenXy7Wm"
+		overlap = 6
+		prefix  = len("run failed: ")
+	)
+
+	head := runFailureLogMax * 2 / 3
+	tail := runFailureLogMax - head
+
+	redact := func(s string) string { return strings.ReplaceAll(s, secret, "[REDACTED]") }
+
+	rows := []struct {
+		name  string
+		cause string
+	}{
+		{
+			name:  "across the head cut",
+			cause: strings.Repeat("a", head-prefix-overlap) + secret + strings.Repeat("b", 2*runFailureLogMax),
+		},
+		{
+			name:  "across the tail cut",
+			cause: strings.Repeat("a", 2*runFailureLogMax) + secret + strings.Repeat("b", tail+overlap-len(secret)),
+		},
+	}
+
+	for _, tt := range rows {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			line := runFailureLine(redact, errors.New(tt.cause))
+
+			for i := 0; i+overlap <= len(secret); i++ {
+				assert.NotContains(t, line, secret[i:i+overlap])
+			}
+		})
+	}
+}
+
+// TestRunFailureLineStaysValidUTF8: the bound cuts on byte offsets, so a cut
+// inside a multi-byte character must not leave invalid UTF-8 on the card. The
+// three pad widths land the head cut inside a character at least once; the
+// tail cut, 500 bytes back from a run of 3-byte characters, always does.
+func TestRunFailureLineStaysValidUTF8(t *testing.T) {
+	t.Parallel()
+
+	for pad := range 3 {
+		err := &orchestrator.PhaseError{
+			Phase: "review",
+			Err:   errors.New(strings.Repeat("a", pad) + strings.Repeat("\u20ac", 2000)),
+		}
+
+		line := runFailureLine(func(s string) string { return s }, err)
+
+		assert.True(t, utf8.ValidString(line), "pad %d", pad)
+		assert.LessOrEqual(t, len(line), 2000, "pad %d", pad)
+	}
 }
 
 func TestRunHeartbeats(t *testing.T) {
@@ -1251,10 +1437,11 @@ func TestToolchainMissingMapsToBlocked(t *testing.T) {
 	require.GreaterOrEqual(t, releaseIdx, 0)
 	assert.Less(t, transitionIdx, releaseIdx, "TransitionCard must happen before ReleaseCard: ownership may be required")
 
-	// No model-outcome/blacklist call is recorded for this arm - CardOps
-	// exposes no such method for the worker to call in the first place, so the
-	// full call list mirrors the other park arms exactly.
-	assert.ElementsMatch(t, []string{"ClaimCard", "GetTaskContext", "ReportPush", "TransitionCard", "ReleaseCard"}, calls)
+	// No model-outcome/blacklist call is recorded for this arm, so the full
+	// call list mirrors the other park arms exactly. The one AddLog is the
+	// reachability preflight: baseSpec carries no catalog, so no tier is
+	// reachable.
+	assert.ElementsMatch(t, []string{"ClaimCard", "GetTaskContext", "AddLog", "ReportPush", "TransitionCard", "ReleaseCard"}, calls)
 
 	args := ops.argsOf("TransitionCard")
 	require.Len(t, args, 2)
@@ -1973,14 +2160,8 @@ func TestLogLadderFaultsWritesOneCardLinePerRole(t *testing.T) {
 	assert.Equal(t, "selector: reviewer tier ladder from the payload did not validate (tier bars: ladder must not decrease: critical 0.1 is below complex 0.82) - using the built-in bars", lines[1])
 }
 
-// TestLogLadderFaultsToleratesNilOpsAndNoFaults mirrors logReachability: a
-// CardOps-only fake yields nil ops and the card line is skipped; no faults
-// means no line at all.
-func TestLogLadderFaultsToleratesNilOpsAndNoFaults(t *testing.T) {
-	assert.NotPanics(t, func() {
-		logLadderFaults(context.Background(), []registry.LadderFault{{Role: "coder", Reason: errors.New("x")}}, nil, "CMX-001")
-	})
-
+// TestLogLadderFaultsWritesNothingWithoutFaults: no faults means no card line.
+func TestLogLadderFaultsWritesNothingWithoutFaults(t *testing.T) {
 	ops := newStubOps()
 	logLadderFaults(context.Background(), nil, ops, "CMX-001")
 	assert.Equal(t, 0, ops.count("AddLog"))
@@ -1989,8 +2170,7 @@ func TestLogLadderFaultsToleratesNilOpsAndNoFaults(t *testing.T) {
 // TestRunLogsAnInvalidPayloadLadderOnTheCard proves the wiring in Run: the
 // fault buildRegistry returns reaches the card before any phase runs, and
 // the run itself proceeds (the orchestrator is swapped out and returns nil).
-// stubOps implements orchestrator.Ops, so ops2orchestrator hands the real
-// AddLog back; the reachability preflight writes its own line beside it.
+// The reachability preflight writes its own line beside it.
 func TestRunLogsAnInvalidPayloadLadderOnTheCard(t *testing.T) {
 	remote := setupBareRemote(t)
 	wsParent := t.TempDir()
@@ -2043,16 +2223,6 @@ func TestLogReachabilityLogsCardOnlyWhenSomeTierIsUnreachable(t *testing.T) {
 	ops2 := newStubOps()
 	logReachability(context.Background(), unreachable, ops2, "CMX-001")
 	assert.Equal(t, 1, ops2.count("AddLog"), "an unreachable tier logs exactly one card line")
-}
-
-// TestLogReachabilityToleratesNilOps proves the worker-side call is safe when
-// ops2orchestrator hands back nil, which it does for a test fake that only
-// implements CardOps: such tests swap runOrchestrator and never touch
-// Deps.Ops, but logReachability runs before that swap takes effect.
-func TestLogReachabilityToleratesNilOps(t *testing.T) {
-	assert.NotPanics(t, func() {
-		logReachability(context.Background(), registry.NewRegistryFromParts(nil, registry.Priors{}, nil, nil, "top/one"), nil, "CMX-001")
-	})
 }
 
 // stubVerifyTool stands in for the orchestrator's verify tool. writeToolsFor
