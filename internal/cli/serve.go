@@ -46,9 +46,10 @@ const (
 	// onExitTimeout bounds the detached status callback fired when a container
 	// exits. The supervision goroutine that calls it has no request context.
 	onExitTimeout = 30 * time.Second
-	// parkWaitTimeout bounds how long shutdown waits for workers to park on
-	// end_session before the kill sweep. It fits svc.sh's TimeoutStopSec=60
-	// with room for the sweep (a kill grace per straggler) and process exit.
+	// parkWaitTimeout bounds how long shutdown waits for workers to park before
+	// the serial kill sweep, which adds a kill grace per straggler and a status
+	// callback per run. At the default max_concurrent of 5 the sequence fits
+	// svc.sh's TimeoutStopSec=60; ten or more stragglers can outlast it.
 	parkWaitTimeout = 30 * time.Second
 	// parkPollInterval is how often the park wait rechecks the tracker.
 	parkPollInterval = 250 * time.Millisecond

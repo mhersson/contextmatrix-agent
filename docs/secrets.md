@@ -19,8 +19,9 @@ runs as, while the worker container runs as UID 1000 with every capability
 dropped. **`serve` must therefore run as host UID 1000 on rootful Docker.**
 Under any other host UID, or under rootless Docker (where container UID 1000
 maps to a subordinate host UID), every run exits 1 with
-`read secrets: open env file: permission denied`. On Linux, `serve` logs a
-warning at startup when its UID is not 1000; it cannot detect rootless Docker.
+`read secrets: open env file: open /run/cm-secrets/env: permission denied`. On
+Linux, `serve` logs a warning at startup when its UID is not 1000; it cannot
+detect rootless Docker.
 
 ## Subprocess scrubbing
 
