@@ -246,7 +246,11 @@ One cumulative USD ceiling (`CMX_MAX_CARD_COST`, default 5.0) spans the
 orchestrator and every subagent. A breach parks the card - WIP pushed, card
 released, failed callback - it does not kill mid-turn. The ledger's floor is
 CM's server-priced card totals, synced from every `report_usage` response -
-the ceiling holds even when the gateway reports no per-call cost.
+the ceiling holds even when the gateway reports no per-call cost. Subtask runs
+report against the subtask cards, and CM does not roll that spend into the
+parent's total, so a resumed run also floors the ledger on the parent's and
+every subtask's reported total, finished subtasks included, before the first
+phase runs.
 
 ## Verify resolution
 

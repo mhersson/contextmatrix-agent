@@ -191,8 +191,10 @@ const createCardPayload = `{
 // {cards: [...]}.
 const listCardsSubtaskPayload = `{
   "cards": [
-    {"id": "CMX-002", "title": "First subtask",  "state": "done"},
-    {"id": "CMX-003", "title": "Second subtask", "state": "in_progress"},
+    {"id": "CMX-002", "title": "First subtask",  "state": "done",
+     "token_usage": {"prompt_tokens": 900, "completion_tokens": 300, "estimated_cost_usd": 1.25}},
+    {"id": "CMX-003", "title": "Second subtask", "state": "in_progress",
+     "token_usage": {"prompt_tokens": 100, "completion_tokens": 20, "estimated_cost_usd": 0.5}},
     {"id": "CMX-004", "title": "Third subtask",  "state": "todo"}
   ]
 }`
@@ -893,8 +895,10 @@ func TestSubtaskStates(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, states, 3)
 
-	assert.Equal(t, SubtaskState{CardID: "CMX-002", Title: "First subtask", State: "done"}, states[0])
-	assert.Equal(t, SubtaskState{CardID: "CMX-003", Title: "Second subtask", State: "in_progress"}, states[1])
+	// Each subtask carries its own reported cost; a card that never reported
+	// usage has no token_usage and reads as zero.
+	assert.Equal(t, SubtaskState{CardID: "CMX-002", Title: "First subtask", State: "done", ReportedCostUSD: 1.25}, states[0])
+	assert.Equal(t, SubtaskState{CardID: "CMX-003", Title: "Second subtask", State: "in_progress", ReportedCostUSD: 0.5}, states[1])
 	assert.Equal(t, SubtaskState{CardID: "CMX-004", Title: "Third subtask", State: "todo"}, states[2])
 
 	args, ok := rec.get("list_cards")

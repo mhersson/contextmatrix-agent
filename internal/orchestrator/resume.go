@@ -26,11 +26,12 @@ import (
 //     inline rationale below.
 //
 // Subtask loading (resume only): SubtaskStates -> o.subtasks, sorted by card ID.
-// Dependency edges are NOT persisted (list_cards returns only id/title/state), so
-// reconcile sorts by the server-assigned, zero-padded, creation-ordered card ID;
-// because the planner only makes a subtask depend on an earlier one, that ID order
-// is a valid topological order. The execute phase skips "done" refs and runs the
-// rest in that order; the plan phase reuses the titles.
+// Dependency edges are NOT persisted (list_cards returns only id/title/state/
+// cost), so reconcile sorts by the server-assigned, zero-padded, creation-ordered
+// card ID; because the planner only makes a subtask depend on an earlier one,
+// that ID order is a valid topological order. The execute phase skips "done"
+// refs and runs the rest in that order; the plan phase reuses the titles. Each
+// subtask's reported cost floors the budget ledger alongside the parent's.
 //
 // reconcile has NO side effects beyond git (fetch/checkout) and reads
 // (RemoteTip/SubtaskStates) plus the one advisory AddLog: it never creates or
@@ -123,8 +124,16 @@ func (o *run) reconcile(ctx context.Context) error {
 		return fmt.Errorf("load subtask states for resume: %w", err)
 	}
 
+	// Subtask runs report usage against the subtask cards and CM never rolls it
+	// into the parent's total. Floor the ledger on the parent's and every
+	// subtask's reported total - finished subtasks included - so a resume does
+	// not get the prior coder spend back as fresh headroom.
+	o.ledger.SyncServerTotal(cfg.CardID, o.tc.ReportedCostUSD)
+
 	o.subtasks = make([]subtaskRef, 0, len(states))
 	for _, st := range states {
+		o.ledger.SyncServerTotal(st.CardID, st.ReportedCostUSD)
+
 		ref := subtaskRef{ID: st.CardID, Title: st.Title, State: st.State, Sizing: defaultSizing()}
 
 		// Pending refs get their persisted sizing and planner body back from the

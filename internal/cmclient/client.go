@@ -230,8 +230,8 @@ type TaskContext struct {
 	ModelCoder        string
 	ModelReviewer     string
 	// ReportedCostUSD is seeded from token_usage.estimated_cost_usd at context
-	// fetch time. The orchestrator uses this as the budget ledger's starting
-	// value so prior sub-agent spend is included in cost accounting.
+	// fetch time: the card's own reported spend, excluding its subtasks'. The
+	// orchestrator uses it as the budget ledger's starting value.
 	ReportedCostUSD float64
 
 	// Images are the primary card body's inline images, fetched with
@@ -244,6 +244,9 @@ type SubtaskState struct {
 	CardID string
 	Title  string
 	State  string
+	// ReportedCostUSD is the subtask card's own server-priced total
+	// (token_usage.estimated_cost_usd); CM does not roll it into the parent's.
+	ReportedCostUSD float64
 }
 
 // call invokes a tool and surfaces both transport errors and tool-level
@@ -816,9 +819,10 @@ func classifyIncrementError(err error) error {
 	return err
 }
 
-// SubtaskStates returns the per-card state for every subtask of the given
-// parent card. It uses list_cards with a parent filter so the orchestrator
-// can determine which subtasks are done without loading the full card bodies.
+// SubtaskStates returns the per-card state and reported cost for every subtask
+// of the given parent card. It uses list_cards with a parent filter so the
+// orchestrator can determine which subtasks are done, and what they already
+// spent, without loading the full card bodies.
 // project is mandatory: list_cards declares it as a required schema field
 // with no card-ID resolution fallback.
 func (c *Client) SubtaskStates(ctx context.Context, project, parentID string) ([]SubtaskState, error) {
@@ -833,9 +837,12 @@ func (c *Client) SubtaskStates(ctx context.Context, project, parentID string) ([
 	// list_cards returns {cards: [...]}.
 	var payload struct {
 		Cards []struct {
-			ID    string `json:"id"`
-			Title string `json:"title"`
-			State string `json:"state"`
+			ID         string `json:"id"`
+			Title      string `json:"title"`
+			State      string `json:"state"`
+			TokenUsage *struct {
+				EstimatedCostUSD float64 `json:"estimated_cost_usd"`
+			} `json:"token_usage"`
 		} `json:"cards"`
 	}
 	if err := json.Unmarshal([]byte(text), &payload); err != nil {
@@ -844,11 +851,16 @@ func (c *Client) SubtaskStates(ctx context.Context, project, parentID string) ([
 
 	states := make([]SubtaskState, 0, len(payload.Cards))
 	for _, card := range payload.Cards {
-		states = append(states, SubtaskState{
+		st := SubtaskState{
 			CardID: card.ID,
 			Title:  card.Title,
 			State:  card.State,
-		})
+		}
+		if card.TokenUsage != nil {
+			st.ReportedCostUSD = card.TokenUsage.EstimatedCostUSD
+		}
+
+		states = append(states, st)
 	}
 
 	return states, nil

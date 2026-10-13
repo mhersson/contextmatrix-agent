@@ -17,7 +17,8 @@ func (e *BudgetExceededError) Error() string {
 }
 
 // Ledger enforces the cumulative per-card USD ceiling. It is seeded with the
-// card's already-reported total so a resumed run never resets the meter: the
+// card's already-reported total, and a resumed run floors it on every
+// subtask's reported total too, so a resume never resets the meter: the
 // ceiling spans every model-bearing step the card has ever taken, not just the
 // current process.
 //
