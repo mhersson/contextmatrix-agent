@@ -1934,6 +1934,23 @@ func TestCreateFollowupsOverflowParks(t *testing.T) {
 	assert.True(t, isParkError(err), "the FSM must stop the run on this sentinel like the other park errors")
 }
 
+// TestCreateFollowupsAtCapSplits: the cap is inclusive - a plan proposing
+// exactly maxFollowupCards followups splits them all instead of parking.
+func TestCreateFollowupsAtCapSplits(t *testing.T) {
+	ops := &fakeOps{}
+	o := newRun(planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: true})
+
+	followups := make([]planFollowup, 0, maxFollowupCards)
+	for i := range maxFollowupCards {
+		followups = append(followups, planFollowup{Title: fmt.Sprintf("Followup %d", i+1), Description: "d"})
+	}
+
+	err := o.createFollowups(context.Background(), plan{FollowupCards: followups})
+	require.NoError(t, err, "a split at the cap must not park")
+
+	assert.Len(t, ops.createTopLevelCardArgs, maxFollowupCards, "every followup at the cap becomes a card")
+}
+
 // TestCreateFollowupsNoneIsNoop: a plan with no followups must not touch Ops
 // at all - the common case (no split) stays byte-identical to before.
 func TestCreateFollowupsNoneIsNoop(t *testing.T) {
