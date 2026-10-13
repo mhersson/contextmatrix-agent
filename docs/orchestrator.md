@@ -61,8 +61,9 @@ before and never moved.
 ## One container per top-level card
 
 All subagents - subtask workers and reviewers - run in-process inside that one
-container on one shared workspace. Writers run sequentially or on disjoint
-paths; only the read-only review panel fans out in parallel.
+container on one shared workspace. The main solver writes sequentially,
+Best-of-N candidates write concurrently in isolated worktrees, and review
+panels and mob seats are read-only fan-outs.
 
 The container's output is the serve-side idle watchdog's proof of life. While
 a model turn streams text or reasoning, the run emits a `model_progress` event
