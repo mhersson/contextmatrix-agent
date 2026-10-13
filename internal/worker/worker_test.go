@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/config"
@@ -574,6 +575,79 @@ func TestRunFSMGenericError(t *testing.T) {
 
 	assert.Equal(t, 1, ops.count("ReleaseCard"))
 	assert.Equal(t, 0, ops.count("CompleteTask"))
+}
+
+// TestRunFSMGenericErrorLogsTheReasonOnTheCard: serve's failed callback carries
+// only the exit code, so the default arm writes why the run failed onto the
+// card - naming the phase, while the claim is still held, with every run
+// secret redacted, and bounded under the board's activity-log field limit.
+func TestRunFSMGenericErrorLogsTheReasonOnTheCard(t *testing.T) {
+	const (
+		secret = "llm-key-0123456789"
+		// CM's activity-log field limit, in bytes.
+		activityLogLimit = 2000
+	)
+
+	remote := setupBareRemote(t)
+	ops := newStubOps()
+
+	cause := "push rejected for https://user:" + secret + "@example.com: " +
+		strings.Repeat("remote output ", 500) + "final cause"
+
+	swapRunOrchestrator(t, func(context.Context, orchestrator.Deps) error {
+		return &orchestrator.PhaseError{Phase: "integrate", Err: errors.New(cause)}
+	})
+
+	spec := baseSpec(t, remote, t.TempDir())
+	spec.LLMKey = secret
+
+	res, err := Run(context.Background(), spec, ops, &scriptedLLM{}, events.NewEmitter(io.Discard, io.Discard), openStdin(t))
+	require.Error(t, err)
+	assert.Equal(t, "error", res.Reason)
+
+	ops.mu.Lock()
+	logAt, releaseAt := -1, -1
+
+	var line string
+
+	for i, c := range ops.log {
+		switch {
+		case c.op == "AddLog" && len(c.args) == 2 && strings.Contains(fmt.Sprint(c.args[1]), "integrate"):
+			logAt, line = i, fmt.Sprint(c.args[1])
+		case c.op == "ReleaseCard" && releaseAt < 0:
+			releaseAt = i
+		}
+	}
+	ops.mu.Unlock()
+
+	require.NotEqual(t, -1, logAt, "the failure reason, naming its phase, lands on the card")
+	require.NotEqual(t, -1, releaseAt, "the claim is still released")
+	assert.Less(t, logAt, releaseAt, "the reason is logged while the claim is still held")
+
+	assert.NotContains(t, line, secret, "a run secret in the error is redacted")
+	assert.LessOrEqual(t, len(line), activityLogLimit, "a long error is bounded")
+	assert.Contains(t, line, "push rejected", "the head of the error survives the bound")
+	assert.Contains(t, line, "final cause", "the tail of the error survives the bound")
+}
+
+// TestRunFailureLineStaysValidUTF8: the bound cuts on byte offsets, so a cut
+// inside a multi-byte character must not leave invalid UTF-8 on the card. The
+// three pad widths land the head cut inside a character at least once; the
+// tail cut, 500 bytes back from a run of 3-byte characters, always does.
+func TestRunFailureLineStaysValidUTF8(t *testing.T) {
+	t.Parallel()
+
+	for pad := range 3 {
+		err := &orchestrator.PhaseError{
+			Phase: "review",
+			Err:   errors.New(strings.Repeat("a", pad) + strings.Repeat("\u20ac", 2000)),
+		}
+
+		line := runFailureLine(func(s string) string { return s }, err)
+
+		assert.True(t, utf8.ValidString(line), "pad %d", pad)
+		assert.LessOrEqual(t, len(line), 2000, "pad %d", pad)
+	}
 }
 
 func TestRunHeartbeats(t *testing.T) {

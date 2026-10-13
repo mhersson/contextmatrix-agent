@@ -697,6 +697,18 @@ func (o *run) phaseFnFor(phase string) phaseFn {
 	}
 }
 
+// PhaseError attributes a run's terminal error to the FSM phase that returned
+// it, so the worker can name where a run failed. Its message is the wrapped
+// error's own, and it unwraps, so every sentinel check sees through it.
+type PhaseError struct {
+	Phase string
+	Err   error
+}
+
+func (e *PhaseError) Error() string { return e.Err.Error() }
+
+func (e *PhaseError) Unwrap() error { return e.Err }
+
 // execute drives the FSM from the card's persisted phase to done. For every
 // phase it persists the phase to the card BEFORE running the body, so an
 // interrupted run leaves the stored phase pointing at the in-progress step.
@@ -782,7 +794,7 @@ func (o *run) execute(ctx context.Context) error {
 				o.d.logCard(ctx, "%s", splitOverflowLogMessage(soe))
 			}
 
-			return err
+			return &PhaseError{Phase: phase, Err: err}
 		}
 	}
 

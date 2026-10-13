@@ -509,12 +509,13 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 
 	err := runOrchestrator(runCtx, d)
 
-	return mapFSMResult(ctx, a, err)
+	return mapFSMResult(ctx, a, red.Apply, err)
 }
 
 // mapFSMResult turns the orchestrator's terminal error into the worker outcome
-// per the error-mapping contract. Split out for direct unit coverage.
-func mapFSMResult(ctx context.Context, a fsmArgs, err error) (Result, error) {
+// per the error-mapping contract. redact masks the run's secrets in anything
+// written to the card. Split out for direct unit coverage.
+func mapFSMResult(ctx context.Context, a fsmArgs, redact func(string) string, err error) (Result, error) {
 	switch {
 	case err == nil:
 		// The done phase completed the card itself; nothing more to do.
@@ -618,10 +619,45 @@ func mapFSMResult(ctx context.Context, a fsmArgs, err error) (Result, error) {
 		return parkBlocked(ctx, a, err)
 
 	default:
+		logRunFailure(ctx, a, redact, err)
 		releaseQuietly(ctx, a.ops, a.spec.CardID)
 
 		return Result{Reason: "error"}, fmt.Errorf("orchestrator: %w", err)
 	}
+}
+
+// runFailureLogMax bounds the failure line well under CM's 2000-byte
+// activity-log field, so the client's head-only clamp never cuts the tail.
+const runFailureLogMax = 1500
+
+// logRunFailure writes why the run failed onto the card, while the claim is
+// still held: serve's failed callback carries only the exit code, and no park
+// sentinel logged anything for this error. Best-effort; ops is nil for a
+// CardOps-only test fake (see ops2orchestrator).
+func logRunFailure(ctx context.Context, a fsmArgs, redact func(string) string, err error) {
+	ops := ops2orchestrator(a.ops)
+	if ops == nil {
+		return
+	}
+
+	if lerr := ops.AddLog(ctx, a.spec.CardID, runFailureLine(redact, err)); lerr != nil {
+		slog.Warn("add_log failed; the run's failure reason is missing from the card",
+			"card", a.spec.CardID, "error", lerr)
+	}
+}
+
+// runFailureLine renders the card line for a failed run, naming the phase when
+// the orchestrator attributed one. The error is redacted before it is bounded,
+// so the cut cannot leave half a secret; the bound keeps the head and the tail,
+// where a wrapped cause usually sits, and drops any character the byte-offset
+// cut split.
+func runFailureLine(redact func(string) string, err error) string {
+	msg := "run failed: " + err.Error()
+	if pe, ok := errors.AsType[*orchestrator.PhaseError](err); ok {
+		msg = fmt.Sprintf("run failed in phase %s: %s", pe.Phase, pe.Err)
+	}
+
+	return strings.ToValidUTF8(tools.HeadTail(redact(msg), runFailureLogMax), "")
 }
 
 // parkBlocked maps one of the environmental park arms (toolchain-missing,
