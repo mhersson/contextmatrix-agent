@@ -14,6 +14,14 @@ refreshed from ContextMatrix ahead of each git-token expiry and bind-mounted
 read-only at `/run/cm-secrets/env`; the per-run dir is torn down with the run.
 The worker reads the LLM endpoint key and `CM_GIT_TOKEN` from it.
 
+The per-run dir is `0700` and the env file `0600`, both owned by the UID `serve`
+runs as, while the worker container runs as UID 1000 with every capability
+dropped. **`serve` must therefore run as host UID 1000 on rootful Docker.**
+Under any other host UID, or under rootless Docker (where container UID 1000
+maps to a subordinate host UID), every run exits 1 with
+`read secrets: open env file: permission denied`. On Linux, `serve` logs a
+warning at startup when its UID is not 1000; it cannot detect rootless Docker.
+
 ## Subprocess scrubbing
 
 Tool subprocesses get an allowlisted `cmd.Env` (`tools.ScrubbedEnv`) - secrets

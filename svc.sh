@@ -5,12 +5,13 @@
 # -------------------------------------------------
 # The agent is installed as a *user* unit under ~/.config/systemd/user.
 # Rationale:
-#   - The agent needs to talk to the user's Docker socket and uses
+#   - The agent needs to talk to the (rootful) Docker socket and uses
 #     secrets that belong to the operator's home dir.
 #   - Running as a user unit avoids requiring root for install/update
 #     and naturally scopes the service to a single operator.
-#   - Per-operator isolation (each operator gets their own unit) is a
-#     feature, not a limitation.
+#   - That operator must be host UID 1000: workers run as UID 1000 and
+#     read per-run secrets staged readable only by serve's UID (see
+#     docs/secrets.md).
 #
 # Because this is a user unit, gating on `After=docker.service` does not
 # work: the per-user systemd manager cannot observe system units. We

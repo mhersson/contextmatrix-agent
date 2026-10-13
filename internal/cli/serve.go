@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -101,6 +102,8 @@ func runServe(ctx context.Context, configPath string) error {
 
 	logger := newServeLogger(cfg.LogLevel)
 	slog.SetDefault(logger)
+
+	warnIfNotWorkerUID(logger, runtime.GOOS, os.Getuid())
 
 	mx := metrics.New()
 
@@ -423,6 +426,18 @@ func (d workerDrain) sweep(live []*executor.Run) {
 
 		cbCancel()
 	}
+}
+
+// warnIfNotWorkerUID warns when serve's UID differs from the worker
+// container's: the per-run secrets file is 0600 to serve's UID, so no run could
+// read it. Only Linux is checked; Docker Desktop translates bind-mount owners.
+func warnIfNotWorkerUID(logger *slog.Logger, goos string, uid int) {
+	if goos != "linux" || uid == executor.WorkerUID {
+		return
+	}
+
+	logger.Warn("serve is not running as the worker container's UID; workers cannot read their per-run secrets and every run will fail",
+		"uid", uid, "worker_uid", executor.WorkerUID)
 }
 
 // newRedactorRegistry composes the bridge's redactor. Config-level secrets are
