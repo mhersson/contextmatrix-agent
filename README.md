@@ -215,6 +215,12 @@ worker images (full + variants), pin the new full-image digest into
 ./redeploy.sh
 ```
 
+A stop or restart drains rather than drops running cards: on SIGTERM `serve`
+refuses new work, sends every running worker an end-session so it pushes its
+work in progress and releases its card, waits up to 30 seconds for the workers
+to exit, then kills the rest. The unit's `TimeoutStopSec=60` covers that
+sequence; a second signal skips the wait.
+
 > **Writable runtime dir.** The agent writes secrets under `secrets_dir`
 > (default `/var/run/cm-agent/secrets`). `/var/run` is root-owned and not created
 > for a user service - either pre-create `/var/run/cm-agent` and `chown` it to

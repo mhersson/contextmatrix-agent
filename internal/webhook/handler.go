@@ -1062,20 +1062,14 @@ func (s *Server) handleEndSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	run, ok := s.tracker.Get(payload.Project, payload.CardID)
-	if !ok {
-		// Idempotent: nothing to end is a success, not a 404.
-		webhookcore.WriteJSON(w, http.StatusOK, protocol.SuccessResponse{OK: true})
+	if err := s.EndSession(payload.Project, payload.CardID); err != nil {
+		if errors.Is(err, executor.ErrNotFound) {
+			// Idempotent: nothing to end is a success, not a 404.
+			webhookcore.WriteJSON(w, http.StatusOK, protocol.SuccessResponse{OK: true})
 
-		return
-	}
+			return
+		}
 
-	mu := s.stdinLock(payload.Project, payload.CardID)
-	mu.Lock()
-	err := frames.Write(run.Stdin, frames.Frame{Type: frames.TypeEndSession})
-	mu.Unlock()
-
-	if err != nil {
 		s.logger.Error("end-session stdin write failed",
 			"project", payload.Project, "card_id", payload.CardID, "error", err)
 		webhookcore.WriteError(w, http.StatusInternalServerError, protocol.CodeInternal, "write failed")
@@ -1084,6 +1078,27 @@ func (s *Server) handleEndSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	webhookcore.WriteJSON(w, http.StatusAccepted, protocol.SuccessResponse{OK: true})
+}
+
+// EndSession writes an end_session frame to the card's tracked run under the
+// per-card stdin lock; the worker then pushes its WIP, releases the card and
+// exits. Serve shutdown shares this path with /end-session. It returns
+// executor.ErrNotFound when no run is tracked.
+func (s *Server) EndSession(project, cardID string) error {
+	run, ok := s.tracker.Get(project, cardID)
+	if !ok {
+		return fmt.Errorf("end session: %w: %s/%s", executor.ErrNotFound, project, cardID)
+	}
+
+	mu := s.stdinLock(project, cardID)
+	mu.Lock()
+	defer mu.Unlock()
+
+	if err := frames.Write(run.Stdin, frames.Frame{Type: frames.TypeEndSession}); err != nil {
+		return fmt.Errorf("write end_session frame: %w", err)
+	}
+
+	return nil
 }
 
 // ---- containers -------------------------------------------------------------
