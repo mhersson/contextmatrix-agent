@@ -1337,7 +1337,7 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 	// drift. Only Reasoning is read from parentCfg.
 	parentCfg := o.harnessConfig(cfg.DefaultModel)
 
-	results, _ := harness.SpawnSubagents(ctx, d.Client, cfg.Workspace, d.Emit, specs,
+	results, err := harness.SpawnSubagents(ctx, d.Client, cfg.Workspace, d.Emit, specs,
 		harness.SubagentOpts{
 			DefaultModel:       cfg.DefaultModel,
 			ToolOutputMaxBytes: cfg.ToolOutputMax,
@@ -1345,6 +1345,9 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 			ExtraReadOnlyTools: reviewSubagentTools(cfg.CardID, cfg.Workspace, d.ReadRoots, d.SkillTool, d.ReadRootsLog),
 			Reasoning:          parentCfg.Reasoning,
 		})
+	if err != nil {
+		return "", fmt.Errorf("spawn review specialists: %w", err)
+	}
 
 	var b strings.Builder
 

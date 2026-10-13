@@ -8,7 +8,8 @@ import (
 	"github.com/mhersson/contextmatrix-harness/llm"
 )
 
-// modelProgressKind is the liveness event a streaming model turn emits. The
+// modelProgressKind is the liveness event a model turn emits while it streams
+// text or reasoning; the harness reports no tool-call argument fragments. The
 // container's output is the serve-side idle watchdog's only proof of life, and
 // a long reasoning turn is otherwise silent until it ends. Not a harness kind:
 // the log bridge has no arm for it, so it stays off the live stream and never

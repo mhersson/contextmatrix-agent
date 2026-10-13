@@ -65,12 +65,13 @@ container on one shared workspace. Writers run sequentially or on disjoint
 paths; only the read-only review panel fans out in parallel.
 
 The container's output is the serve-side idle watchdog's proof of life. While
-a model turn streams, the run emits a `model_progress` event at most every 30
-seconds, so a long reasoning turn is not reaped as idle. The event carries no
-model text - streamed fragments are unredacted - and the log bridge keeps it
-off the live stream; the durable run log records it. The review panel's
-fan-out takes no progress callback, so a specialist's turn stays silent until
-it ends.
+a model turn streams text or reasoning, the run emits a `model_progress` event
+at most every 30 seconds, so a long reasoning turn is not reaped as idle. A
+turn that streams only tool-call arguments emits none: the harness reports
+just text and reasoning fragments. The event carries no model text - streamed
+fragments are unredacted - and the log bridge keeps it off the live stream;
+the durable run log records it. The review panel's fan-out takes no progress
+callback, so a specialist's turn stays silent until it ends.
 
 ## Review
 

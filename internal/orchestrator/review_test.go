@@ -103,11 +103,11 @@ func reviewerRegistry() *registry.Registry {
 	return registry.NewRegistryFromParts(reviewerCatalog(), priors, nil, nil, "default/model")
 }
 
-// TestReviewSubagentsInheritRouting pins the propagation contract: the three
+// TestReviewSubagentsInheritReasoning pins the propagation contract: the three
 // review specialists (SubagentOpts) and the synthesis call (harnessConfig) all
 // carry the parent run's reasoning config, derived from the same builder so
 // they can never drift.
-func TestReviewSubagentsInheritRouting(t *testing.T) {
+func TestReviewSubagentsInheritReasoning(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{}
 	client := &planLLM{responses: []llm.Response{

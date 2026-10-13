@@ -174,15 +174,20 @@ func TestRunModelSignalsProgressDuringReasoningTurn(t *testing.T) {
 
 	var out lockedBuffer
 
-	clock := newStepClock()
-	client := &reasoningOnlyLLM{clock: clock, gap: time.Second, fragments: 95, out: &out}
+	client := &reasoningOnlyLLM{gap: time.Second, fragments: 95, out: &out}
 
 	ops := &fakeOps{taskContext: cmclient.TaskContext{}}
 	d := planTestDeps(ops, client)
 	d.Emit = events.NewEmitter(nil, &out)
 
 	o := newRun(d, ops.taskContext)
-	o.progress = newProgressMarker(d.Emit, clock.now)
+	require.NotNil(t, o.progress, "newRun builds the marker from Deps.Emit")
+
+	// Only the clock is swapped, so the run keeps the marker newRun built. It
+	// starts at the real now because that marker seeded its throttle from it.
+	clock := &stepClock{t: time.Now()}
+	o.progress.now = clock.now
+	client.clock = clock
 
 	_, _, err := o.runModel(context.Background(), d.ReadTools, "think hard", "default/model")
 	require.NoError(t, err)
