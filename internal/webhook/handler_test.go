@@ -934,6 +934,130 @@ func TestMessage_DuplicateAfterDeliveryAcksWithoutSecondFrame(t *testing.T) {
 	assert.Equal(t, first, stdin.String(), "delivered duplicate must not re-write stdin")
 }
 
+// gatedStdin is a tracked run's stdin whose first Write blocks until release
+// is closed and then returns firstErr; later writes land at once.
+type gatedStdin struct {
+	entered  chan struct{}
+	release  chan struct{}
+	firstErr error
+
+	mu     sync.Mutex
+	writes int
+	buf    strings.Builder
+}
+
+func newGatedStdin(firstErr error) *gatedStdin {
+	return &gatedStdin{entered: make(chan struct{}), release: make(chan struct{}), firstErr: firstErr}
+}
+
+func (g *gatedStdin) Write(p []byte) (int, error) {
+	g.mu.Lock()
+	g.writes++
+	first := g.writes == 1
+	g.mu.Unlock()
+
+	if first {
+		close(g.entered)
+		<-g.release
+
+		if g.firstErr != nil {
+			return 0, g.firstErr
+		}
+	}
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	return g.buf.Write(p)
+}
+
+func (g *gatedStdin) Close() error { return nil }
+
+func (g *gatedStdin) String() string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	return g.buf.String()
+}
+
+// retryDuringBlockedWrite sends a message whose stdin write blocks, sends a
+// same-message_id retry while it is blocked, then lets the first write finish.
+// It returns both response codes, first request first.
+func retryDuringBlockedWrite(t *testing.T, h *harness, stdin *gatedStdin) (int, int) {
+	t.Helper()
+
+	payload := protocol.MessagePayload{CardID: "PROJ-001", Project: "proj", Content: "hi", MessageID: "m1"}
+	body, err := json.Marshal(payload)
+	require.NoError(t, err)
+
+	// A real retry carries a fresh timestamp, so the replay cache admits it.
+	request := func(ts string) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "/message", bytes.NewReader(body))
+		signReq(t, r, testAPIKey, body, ts)
+
+		return r
+	}
+	first := request(strconv.FormatInt(time.Now().Add(-2*time.Second).Unix(), 10))
+	retry := request(nowTS())
+	mux := h.server.Routes()
+
+	var firstW, retryW *httptest.ResponseRecorder
+
+	var wg sync.WaitGroup
+
+	wg.Go(func() {
+		firstW = httptest.NewRecorder()
+		mux.ServeHTTP(firstW, first)
+	})
+
+	<-stdin.entered
+
+	wg.Go(func() {
+		retryW = httptest.NewRecorder()
+		mux.ServeHTTP(retryW, retry)
+	})
+
+	// Let the retry reach the handler's dedup and lock points before the first
+	// write returns. Correct code holds under every interleaving; the pause only
+	// gives a check-before-lock handler the chance to show its race.
+	time.Sleep(50 * time.Millisecond)
+	close(stdin.release)
+	wg.Wait()
+
+	return firstW.Code, retryW.Code
+}
+
+// TestMessage_RetryDuringBlockedWriteDeliversOnce: a retry that arrives while
+// the first delivery is still writing is acked as a duplicate, never written a
+// second time.
+func TestMessage_RetryDuringBlockedWriteDeliversOnce(t *testing.T) {
+	h := newHarness(t, 4)
+	stdin := newGatedStdin(nil)
+	h.tracker.AddIfUnderLimit(&executor.Run{ContainerID: "ctr-PROJ-001", CardID: "PROJ-001", Project: "proj", StartedAt: time.Now(), Stdin: stdin})
+
+	firstCode, retryCode := retryDuringBlockedWrite(t, h, stdin)
+
+	assert.Equal(t, http.StatusAccepted, firstCode)
+	assert.Equal(t, http.StatusOK, retryCode, "the retry is a duplicate ack")
+	assert.Equal(t, 1, strings.Count(stdin.String(), `"message_id":"m1"`), "the frame is written exactly once")
+}
+
+// TestMessage_RetryDuringFailingWriteDelivers: when the first delivery fails
+// while a retry waits, the rollback lands before the retry's check, so the
+// retry delivers instead of being acked as a duplicate of a frame that never
+// arrived.
+func TestMessage_RetryDuringFailingWriteDelivers(t *testing.T) {
+	h := newHarness(t, 4)
+	stdin := newGatedStdin(errors.New("pipe closed"))
+	h.tracker.AddIfUnderLimit(&executor.Run{ContainerID: "ctr-PROJ-001", CardID: "PROJ-001", Project: "proj", StartedAt: time.Now(), Stdin: stdin})
+
+	firstCode, retryCode := retryDuringBlockedWrite(t, h, stdin)
+
+	assert.Equal(t, http.StatusInternalServerError, firstCode)
+	assert.Equal(t, http.StatusAccepted, retryCode, "the retry delivers")
+	assert.Equal(t, 1, strings.Count(stdin.String(), `"message_id":"m1"`), "the retry's frame reached stdin")
+}
+
 // ---- promote ----------------------------------------------------------------
 
 func TestPromote_AutonomousWritesFrame(t *testing.T) {

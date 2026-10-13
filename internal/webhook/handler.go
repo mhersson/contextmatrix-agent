@@ -199,7 +199,7 @@ type Config struct {
 	NextAttempt func(project, cardID string) int
 
 	Replay *webhookcore.ReplayCache
-	Dedup  *DedupCache
+	Dedup  *webhookcore.DedupCache
 
 	Draining *atomic.Bool
 
@@ -238,7 +238,7 @@ type Server struct {
 	// attempt.
 	nextAttempt func(project, cardID string) int
 
-	dedup *DedupCache
+	dedup *webhookcore.DedupCache
 
 	logger *slog.Logger
 
@@ -295,7 +295,7 @@ func NewServer(cfg Config) *Server {
 
 	dedup := cfg.Dedup
 	if dedup == nil {
-		dedup = NewDedupCache(10*time.Minute, 4096)
+		dedup = webhookcore.NewDedupCache(10*time.Minute, 4096)
 	}
 
 	return &Server{
@@ -345,8 +345,7 @@ func (s *Server) Routes() *http.ServeMux {
 // mutex per card ever seen is a tiny, process-bounded footprint, and skipping
 // deletion avoids delete/recreate races with in-flight writers.
 func (s *Server) stdinLock(project, cardID string) *sync.Mutex {
-	k := project + "/" + cardID
-	v, _ := s.stdinMu.LoadOrStore(k, &sync.Mutex{})
+	v, _ := s.stdinMu.LoadOrStore(cardKey(project, cardID), &sync.Mutex{})
 
 	return v.(*sync.Mutex)
 }
@@ -354,10 +353,15 @@ func (s *Server) stdinLock(project, cardID string) *sync.Mutex {
 // launchLock returns the per-card admission mutex, creating it on first use.
 // See the launchMu field comment for why launch serializes per card.
 func (s *Server) launchLock(project, cardID string) *sync.Mutex {
-	k := project + "/" + cardID
-	v, _ := s.launchMu.LoadOrStore(k, &sync.Mutex{})
+	v, _ := s.launchMu.LoadOrStore(cardKey(project, cardID), &sync.Mutex{})
 
 	return v.(*sync.Mutex)
+}
+
+// cardKey keys the per-card locks and the message dedup scope. CM-validated
+// project names and card IDs carry no NUL, which the dedup cache requires.
+func cardKey(project, cardID string) string {
+	return project + "/" + cardID
 }
 
 // ---- trigger ----------------------------------------------------------------
@@ -919,11 +923,23 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Retried request whose first attempt already DELIVERED: return a cached ack
-	// without re-writing the user frame to stdin. The record happens only after a
-	// successful write below, so a 404 or a failed write never poisons the cache -
-	// a retry then re-attempts delivery instead of getting a false duplicate ack.
-	if s.dedup.Contains(payload.Project, payload.CardID, payload.MessageID) {
+	run, ok := s.tracker.Get(payload.Project, payload.CardID)
+	if !ok {
+		webhookcore.WriteError(w, http.StatusNotFound, protocol.CodeNotFound, "no tracked container")
+
+		return
+	}
+
+	// One per-card lock spans the check-and-record, the write and the rollback.
+	// A retry arriving mid-write waits for it, then either finds the delivered
+	// record (duplicate ack) or, after a failed write rolled it back, delivers.
+	scope := cardKey(payload.Project, payload.CardID)
+	mu := s.stdinLock(payload.Project, payload.CardID)
+	mu.Lock()
+
+	if s.dedup.CheckAndRecord(scope, payload.MessageID) {
+		mu.Unlock()
+
 		webhookcore.WriteJSON(w, http.StatusOK, protocol.SuccessResponse{
 			OK:        true,
 			Message:   "duplicate message acknowledged",
@@ -933,20 +949,15 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	run, ok := s.tracker.Get(payload.Project, payload.CardID)
-	if !ok {
-		webhookcore.WriteError(w, http.StatusNotFound, protocol.CodeNotFound, "no tracked container")
-
-		return
-	}
-
-	mu := s.stdinLock(payload.Project, payload.CardID)
-	mu.Lock()
 	err := frames.Write(run.Stdin, frames.Frame{
 		Type:      frames.TypeUserMessage,
 		Content:   payload.Content,
 		MessageID: payload.MessageID,
 	})
+	if err != nil {
+		s.dedup.Rollback(scope, payload.MessageID)
+	}
+
 	mu.Unlock()
 
 	if err != nil {
@@ -965,10 +976,7 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Delivered: publish to the chat stream and record the message_id so a retry
-	// is deduped, then clear the awaiting flag and touch the run.
 	publishUser(s.hub, payload.Project, payload.CardID, payload.Content)
-	s.dedup.Record(payload.Project, payload.CardID, payload.MessageID)
 	s.tracker.SetAwaiting(payload.Project, payload.CardID, false)
 	s.tracker.Touch(payload.Project, payload.CardID)
 

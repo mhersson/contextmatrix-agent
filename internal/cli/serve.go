@@ -168,7 +168,7 @@ func runServe(ctx context.Context, configPath string) error {
 	var draining atomic.Bool
 
 	replay := webhookcore.NewReplayCache(cfg.ReplaySkew, cfg.ReplayCacheSize)
-	dedup := webhook.NewDedupCache(cfg.MessageDedupTTL, cfg.MessageDedupCacheSize)
+	dedup := webhookcore.NewDedupCache(cfg.MessageDedupTTL, cfg.MessageDedupCacheSize)
 
 	srv := webhook.NewServer(webhook.Config{
 		APIKey:           cfg.APIKey,
