@@ -120,14 +120,20 @@ func runDocument(ctx context.Context, o *run) error {
 
 // discardDocumentEdits drops what a failed document run left in the tree, so a
 // later review fixup cannot sweep half-written docs in and integrate's rebase
-// does not refuse a dirty tree. The hard reset covers tracked and staged
-// edits; an untracked file is removed only when the pre-run listing proves the
-// run created it (listed is false when that listing failed). Best-effort like
-// the sibling swallowed-failure discards: a failure is warned, never fatal.
+// does not refuse a dirty tree. The index is reset first: a failed commit
+// leaves the untracked files it staged in the index, and a hard reset deletes a
+// staged file HEAD does not hold, whoever created it. The hard reset then
+// covers tracked edits, and is skipped when the index reset fails; an untracked
+// file is removed only when the pre-run listing proves the run created it
+// (listed is false when that listing failed). Best-effort like the sibling
+// swallowed-failure discards: a failure is warned, never fatal.
 func (o *run) discardDocumentEdits(ctx context.Context, before []string, listed bool) {
 	d := o.d
 
-	if err := d.Git.HardReset(ctx, "HEAD"); err != nil {
+	if err := d.Git.MixedReset(ctx, "HEAD"); err != nil {
+		slog.Warn("document: failed to unstage the failed run's edits; keeping its tracked edits",
+			"card_id", d.Cfg.CardID, "error", err)
+	} else if err := d.Git.HardReset(ctx, "HEAD"); err != nil {
 		slog.Warn("document: failed to discard the failed run's tracked edits",
 			"card_id", d.Cfg.CardID, "error", err)
 	}

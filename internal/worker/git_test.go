@@ -983,6 +983,37 @@ func TestCommitWithMessage(t *testing.T) {
 	assert.Equal(t, "my exact message", strings.TrimSpace(out))
 }
 
+// A commit that fails after stageForCommit leaves every untracked file
+// staged, and a hard reset deletes a staged file HEAD does not hold. Resetting
+// the index first keeps an untracked file that was there before, while the
+// hard reset still discards the tracked edit.
+func TestMixedResetKeepsUntrackedFilesAFailedCommitStaged(t *testing.T) {
+	t.Parallel()
+
+	_, ws, _ := setupClonedRepo(t)
+	g := NewGit(ws, "", "", "")
+	ctx := context.Background()
+
+	original, err := os.ReadFile(filepath.Join(ws, "README.md"))
+	require.NoError(t, err)
+
+	writeFile(t, ws, "notes.md", []byte("was here before the run\n"), 0o644)
+	writeFile(t, ws, "README.md", []byte("edited\n"), 0o644)
+	writeFile(t, ws, filepath.Join(".git", "hooks", "pre-commit"), []byte("#!/bin/sh\nexit 1\n"), 0o755)
+
+	_, err = g.CommitWithMessage(ctx, "docs: x")
+	require.Error(t, err, "the hook refuses the commit after everything was staged")
+
+	require.NoError(t, g.MixedReset(ctx, "HEAD"))
+	require.NoError(t, g.HardReset(ctx, "HEAD"))
+
+	assert.FileExists(t, filepath.Join(ws, "notes.md"), "an untracked file survives the discard")
+
+	readme, err := os.ReadFile(filepath.Join(ws, "README.md"))
+	require.NoError(t, err)
+	assert.Equal(t, string(original), string(readme), "the tracked edit is discarded")
+}
+
 func TestCommitWithMessageCleanTree(t *testing.T) {
 	t.Parallel()
 

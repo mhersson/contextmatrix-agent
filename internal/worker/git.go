@@ -940,6 +940,15 @@ func (g *Git) DeleteBranch(ctx context.Context, name string) error {
 	return err
 }
 
+// MixedReset moves the index to ref, leaving the work tree unchanged: staged
+// edits become unstaged and a staged file ref does not hold becomes untracked.
+// A hard reset after it discards tracked edits without deleting such a file.
+func (g *Git) MixedReset(ctx context.Context, ref string) error {
+	_, err := g.run(ctx, "reset", "--quiet", "--mixed", ref)
+
+	return err
+}
+
 // HardReset moves the checked-out branch to ref, discarding the work tree.
 // Used to adopt the Best-of-N winner onto the card branch, to drop a resumed
 // run's diverged local tip, and to discard work a verify gate refused.

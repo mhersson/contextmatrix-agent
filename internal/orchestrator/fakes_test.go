@@ -564,11 +564,13 @@ type fakeGit struct {
 
 	// Worktree/branch lifecycle scripting (Best-of-N candidate fan-out):
 	// worktreeErr fails AddWorktree and RemoveWorktree; deleteBranchErr fails
-	// DeleteBranch; hardResetErr fails HardReset. removedWorktrees,
-	// deletedBranches, and hardResetRefs capture each call's argument, in order.
+	// DeleteBranch; hardResetErr fails HardReset; mixedResetErr fails
+	// MixedReset. removedWorktrees, deletedBranches, and hardResetRefs capture
+	// each call's argument, in order.
 	worktreeErr      error
 	deleteBranchErr  error
 	hardResetErr     error
+	mixedResetErr    error
 	removedWorktrees []string
 	deletedBranches  []string
 	hardResetRefs    []string
@@ -801,6 +803,12 @@ func (g *fakeGit) HardReset(_ context.Context, ref string) error {
 	g.record("HardReset:" + ref)
 
 	return g.hardResetErr
+}
+
+func (g *fakeGit) MixedReset(_ context.Context, ref string) error {
+	g.record("MixedReset:" + ref)
+
+	return g.mixedResetErr
 }
 
 func (g *fakeGit) DiffStat(_ context.Context, base string) (string, error) {

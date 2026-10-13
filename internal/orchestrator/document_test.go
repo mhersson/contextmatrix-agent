@@ -221,11 +221,34 @@ func TestDocumentFailureDiscardsTheRunsEdits(t *testing.T) {
 			require.NoError(t, runDocument(context.Background(), o), "a failed document run never fails the run")
 
 			assert.Equal(t, []string{"HEAD"}, tt.git.hardResetRefs, "tracked edits are reset to HEAD")
+			// A failed commit leaves stray.bin staged; only an index reset
+			// ahead of the hard reset keeps the hard reset from deleting it.
+			tt.git.assertOrder(t, "MixedReset:HEAD", "HardReset:HEAD")
 			assert.Equal(t, [][]string{{"docs/guide/setup.md", "docs/new.md"}}, tt.git.removedFiles,
 				"only the files the run created are removed")
 			assert.Empty(t, tt.git.pushBranches)
 		})
 	}
+}
+
+// TestDocumentFailureKeepsTrackedEditsWhenTheIndexCannotBeReset: a hard reset
+// over a still-staged index would delete untracked files the run did not
+// create, so without the index reset the tracked edits are kept instead; the
+// files the run created are still removed.
+func TestDocumentFailureKeepsTrackedEditsWhenTheIndexCannotBeReset(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{
+		commitErr:      errors.New("index locked"),
+		mixedResetErr:  errors.New("index locked"),
+		untrackedFiles: [][]string{{"stray.bin"}, {"docs/new.md", "stray.bin"}},
+	}
+	d := documentTestDeps(ops, git, &planLLM{responses: []llm.Response{finishResp("docs: x", 0.02)}})
+	o := newDocumentRun(d, cmclient.TaskContext{Title: "T", Description: "body"}, 0)
+
+	require.NoError(t, runDocument(context.Background(), o))
+
+	assert.Empty(t, git.hardResetRefs, "no hard reset over a staged index")
+	assert.Equal(t, [][]string{{"docs/new.md"}}, git.removedFiles)
 }
 
 // TestDocumentFailureKeepsUntrackedFilesWhenThePreRunListingFailed: without
