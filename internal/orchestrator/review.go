@@ -484,7 +484,7 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 			o.preFixHead = sha
 		}
 
-		committed, err := o.runFix(ctx, req)
+		committed, response, err := o.runFix(ctx, req)
 
 		var mte *MaxTurnsError
 
@@ -500,6 +500,7 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 			return err
 		}
 
+		o.recordFixResponse(ctx, req, response)
 		o.recordLastFixBase(committed)
 
 		// A round that spent its whole window - a hard MaxTurnsError or a
@@ -630,12 +631,16 @@ func (o *run) runReviewHITL(ctx context.Context, plan verifyPlan) error {
 				return err
 			}
 
-			committed, ferr := o.runFix(ctx, fixRequest{
+			req := fixRequest{
 				Findings: findings, Round: round, FixTier: fixTier, CriticalFinding: hasCriticalFinding(fixes),
-			})
+			}
+
+			committed, response, ferr := o.runFix(ctx, req)
 			if err := o.continueCappedFix(ctx, round, committed, ferr); err != nil {
 				return err
 			}
+
+			o.recordFixResponse(ctx, req, response)
 
 			d.logCard(ctx, "review: promoted mid-run with outstanding findings - continuing autonomously from round %d", round+1)
 
@@ -654,12 +659,16 @@ func (o *run) runReviewHITL(ctx context.Context, plan verifyPlan) error {
 			return err
 		}
 
-		committed, ferr := o.runFix(ctx, fixRequest{
+		req := fixRequest{
 			Findings: mandate, Round: round, FixTier: fixTier, CriticalFinding: hasCriticalFinding(fixes),
-		})
+		}
+
+		committed, response, ferr := o.runFix(ctx, req)
 		if err := o.continueCappedFix(ctx, round, committed, ferr); err != nil {
 			return err
 		}
+
+		o.recordFixResponse(ctx, req, response)
 	}
 
 	return fmt.Errorf("HITL review exceeded the hard iteration cap of %d", hardReviewIterationCap)
@@ -741,7 +750,8 @@ func (o *run) cleanupPass(ctx context.Context, plan verifyPlan, req fixRequest, 
 		pre = ""
 	}
 
-	committed, ferr := o.runFix(ctx, req)
+	// No review round follows this pass, so its response has no reader.
+	committed, _, ferr := o.runFix(ctx, req)
 
 	var mte *MaxTurnsError
 
@@ -1010,13 +1020,16 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 
 	// Gated strong fix - runs only because the authoritative review confirmed
 	// real issues.
-	committed, err := o.runFix(ctx, fixRequest{
+	req := fixRequest{
 		Findings: findings, Round: round, FixTier: fixTier, Authoritative: true, CriticalFinding: hasCriticalFinding(fixes),
-	})
+	}
+
+	committed, response, err := o.runFix(ctx, req)
 	if err := o.continueCappedFix(ctx, round, committed, err); err != nil {
 		return err
 	}
 
+	o.recordFixResponse(ctx, req, response)
 	o.recordLastFixBase(committed)
 
 	// One strong re-review of the full change.
@@ -1107,6 +1120,24 @@ func (o *run) recordRoundFindings(findings string) {
 	if !strings.HasPrefix(findings, verifyFailedPrefix) {
 		o.lastPanelFindings = findings
 	}
+}
+
+// priorContext is the cross-round context a review round's panel and
+// synthesis receive: the prior findings, then the response of the fix round
+// that answered exactly those findings. The authoritative pass reads the
+// recorded history instead, where each round's response already sits inside
+// its own section, so it gets no separate slot to repeat it.
+func (o *run) priorContext(authoritative bool) string {
+	if authoritative {
+		return priorFindingsBlock(recentReviewFindingsHistory(o.body))
+	}
+
+	findings, response := o.lastPanelFindings, o.lastPanelFixResponse
+	if findings == "" {
+		findings, response = o.lastFindings, o.lastFixResponse
+	}
+
+	return priorFindingsBlock(findings) + fixResponseBlock(response)
 }
 
 // incrementReviewAttempt calls IncrementReviewAttempts and treats
@@ -1323,19 +1354,8 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 	}
 
 	// Prior findings are constant across the three lenses: the same previous-round
-	// context goes to every specialist (cross-round memory). The authoritative pass
-	// gets the recent recorded history (reviewHistoryWindow rounds), not just the
-	// last round.
-	priorText := o.lastPanelFindings
-	if priorText == "" {
-		priorText = o.lastFindings
-	}
-
-	if authoritative {
-		priorText = recentReviewFindingsHistory(o.body)
-	}
-
-	prior := priorFindingsBlock(priorText)
+	// context goes to every specialist (cross-round memory).
+	prior := o.priorContext(authoritative)
 
 	// Constant across the three lenses, same as prior: the fix delta is
 	// per-round context, not per-specialty.
@@ -1575,7 +1595,9 @@ func (o *run) mobReviewVerdict(ctx context.Context) (verdict, bool) {
 }
 
 // mobReviewBriefing assembles the discussion briefing: the branch diff against
-// the base branch plus the prior round's findings. The diff is never scoped to
+// the base branch plus the prior round's findings and the response of the fix
+// that answered them. The moderator reads the briefing as the transcript's
+// first entry, so its verdict sees the same context. The diff is never scoped to
 // a review snapshot, because a fix can land code outside the delta it targeted
 // and every mob round after the first follows a fix. The solo fan-out does
 // scope to the snapshot on those rounds, so it carries that gap.
@@ -1585,15 +1607,8 @@ func (o *run) mobReviewBriefing(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("review diff: %w", err)
 	}
 
-	priorText := o.lastPanelFindings
-	if priorText == "" {
-		priorText = o.lastFindings
-	}
-
-	prior := priorFindingsBlock(priorText)
-
 	return fmt.Sprintf(reviewBriefing, o.grounding, readRootsBlock(o.d.ReadRoots),
-		o.tc.Title, o.taskDescription, fencedDiff(diff), prior, o.fixDeltaBlock(ctx)), nil
+		o.tc.Title, o.taskDescription, fencedDiff(diff), o.priorContext(false), o.fixDeltaBlock(ctx)), nil
 }
 
 // synthesize runs ONE orchestrator-model call that reads the three specialists'
@@ -1645,18 +1660,8 @@ func (o *run) synthesize(ctx context.Context, findings string, round int, author
 			repair = repairBlock(lastErr.Error())
 		}
 
-		priorText := o.lastPanelFindings
-		if priorText == "" {
-			priorText = o.lastFindings
-		}
-
-		if authoritative {
-			priorText = recentReviewFindingsHistory(o.body)
-		}
-
-		prior := priorFindingsBlock(priorText)
-
-		task := fmt.Sprintf(synthesisPrompt, o.grounding, o.tc.Title, o.taskDescription, prior, findings, repair)
+		task := fmt.Sprintf(synthesisPrompt, o.grounding, o.tc.Title, o.taskDescription,
+			o.priorContext(authoritative), findings, repair)
 
 		res, dur, err := o.runModelSynthesis(ctx, d.ReadTools, task, model)
 
@@ -1717,16 +1722,34 @@ func (o *run) parkSynthesisCap(ctx context.Context, round int, findings string) 
 	return &ReviewParkedError{Reason: reviewParkedSynthesisCap}
 }
 
+// fixResponseMaxBytes bounds a fixer's response: it is persisted in the round's
+// card section and re-sent to the next round's panel and synthesis.
+const fixResponseMaxBytes = 4096
+
+// fixResponseText renders a fix run's finish message for the card and the next
+// round's prompts: redacted before anything else sees it (a truncation could
+// split a secret past the redactor), bounded, and with any markdown heading
+// escaped so it cannot end the round section it is recorded in.
+func (o *run) fixResponseText(args json.RawMessage) string {
+	msg := finishCommitMessage(args)
+
+	if o.d.Redact != nil {
+		msg = o.d.Redact(msg)
+	}
+
+	return sanitizeSummary(strings.TrimSpace(truncateBytes(msg, fixResponseMaxBytes)))
+}
+
 // runFixModel runs the fix coder harness with the same in-run incapable recovery
 // as the subtask coder: it resolves the fix model (skipping the per-card exclude
 // set), logs the pick, runs, and accounts for spend each attempt. An incapable
 // model is blacklisted/excluded via recoverIncapable and the next-best fix model
 // re-selected for the SAME round; the cap (shared with the coder path via
 // o.reselects) parks the run when exhausted. A non-incapable run error returns
-// immediately. The successful run's output is consumed inside the harness loop
-// (the fixup targets files parsed from the findings, not the model output), so
-// it returns only the model that ran and the error.
-func (o *run) runFixModel(ctx context.Context, prompt string, req fixRequest) (string, error) {
+// immediately. It returns the model that ran and, from a run that finished, its
+// finish message as fixResponseText renders it; the fixup targets files parsed
+// from the findings, not the model output.
+func (o *run) runFixModel(ctx context.Context, prompt string, req fixRequest) (string, string, error) {
 	d := o.d
 	cfg := d.Cfg
 	fs := o.fixSizing(req)
@@ -1742,7 +1765,7 @@ func (o *run) runFixModel(ctx context.Context, prompt string, req fixRequest) (s
 	for attempt := 0; attempt <= reselectCap; attempt++ {
 		fp, rerr := o.resolveFixModel(ctx, req)
 		if rerr != nil {
-			return "", rerr
+			return "", "", rerr
 		}
 
 		p := fp.Pick
@@ -1802,7 +1825,7 @@ func (o *run) runFixModel(ctx context.Context, prompt string, req fixRequest) (s
 
 		if ie, ok := errors.AsType[*IncapableError](err); ok {
 			if rerr := o.recoverIncapable(ctx, ie); rerr != nil {
-				return "", rerr
+				return "", "", rerr
 			}
 
 			continue
@@ -1812,14 +1835,14 @@ func (o *run) runFixModel(ctx context.Context, prompt string, req fixRequest) (s
 			// The slug rides out with the error: the caller attributes the round
 			// to the model that ran it, and a failed round that reported no model
 			// leaves the exclusion set empty forever.
-			return model, fmt.Errorf("fix run: %w", err)
+			return model, "", fmt.Errorf("fix run: %w", err)
 		}
 
-		return model, nil
+		return model, o.fixResponseText(res.CompletionArgs), nil
 	}
 
 	// Unreachable: recoverIncapable errors at the cap before the loop exhausts.
-	return "", fmt.Errorf("review fix (card=%s): re-selection loop exhausted", o.d.Cfg.CardID)
+	return "", "", fmt.Errorf("review fix (card=%s): re-selection loop exhausted", o.d.Cfg.CardID)
 }
 
 // runFix runs one coder fix pass against the outstanding findings, lands the
@@ -1828,10 +1851,12 @@ func (o *run) runFixModel(ctx context.Context, prompt string, req fixRequest) (s
 // whether the fix landed a commit - a round that landed nothing is a failed
 // round to the review loop - and returns a turn cap ALONGSIDE that verdict, so
 // the caller learns the round was truncated without the round's edits being
-// thrown away. After a failed round it parks instead of running when no fix
-// model other than the ones that failed is available; a request that says
-// NoEscalate is exempt from that park.
-func (o *run) runFix(ctx context.Context, req fixRequest) (bool, error) {
+// thrown away. It also returns the fixer's response (see runFixModel) from a
+// round that got as far as its commit, whether or not anything landed. After a
+// failed round it parks instead of running when no fix model other than the
+// ones that failed is available; a request that says NoEscalate is exempt from
+// that park.
+func (o *run) runFix(ctx context.Context, req fixRequest) (bool, string, error) {
 	d := o.d
 	cfg := d.Cfg
 	findings := req.Findings
@@ -1846,15 +1871,15 @@ func (o *run) runFix(ctx context.Context, req fixRequest) (bool, error) {
 					o.fixFailReason, strings.Join(sortedKeys(o.fixFailed), ", ")), findings))
 
 			if rerr != nil {
-				return false, fmt.Errorf("resolve fix model: %w", rerr)
+				return false, "", fmt.Errorf("resolve fix model: %w", rerr)
 			}
 
-			return false, &ReviewParkedError{Reason: reviewParkedFixExhausted}
+			return false, "", &ReviewParkedError{Reason: reviewParkedFixExhausted}
 		}
 	}
 
 	if err := o.ledger.Check(); err != nil {
-		return false, err
+		return false, "", err
 	}
 
 	var prompt string
@@ -1869,7 +1894,7 @@ func (o *run) runFix(ctx context.Context, req fixRequest) (bool, error) {
 			fixVerifyLine(o.resolvedVerifyPlan()), o.tc.Title, o.taskDescription, findings)
 	}
 
-	model, ferr := o.runFixModel(ctx, prompt, req)
+	model, response, ferr := o.runFixModel(ctx, prompt, req)
 
 	// A cap is not a reason to throw the round's edits away. The model ran out of
 	// room, but what it wrote is the only evidence the round produced, and
@@ -1880,7 +1905,7 @@ func (o *run) runFix(ctx context.Context, req fixRequest) (bool, error) {
 	var mte *MaxTurnsError
 
 	if ferr != nil && !errors.As(ferr, &mte) {
-		return false, ferr
+		return false, "", ferr
 	}
 
 	// The slug is only ever recorded, never cleared: the next markFixFailed keys
@@ -1902,7 +1927,7 @@ func (o *run) runFix(ctx context.Context, req fixRequest) (bool, error) {
 
 	committed, err := d.Git.CommitFixup(ctx, target)
 	if err != nil {
-		return false, fmt.Errorf("commit review fixup: %w", err)
+		return false, "", fmt.Errorf("commit review fixup: %w", err)
 	}
 
 	if !committed {
@@ -1914,14 +1939,14 @@ func (o *run) runFix(ctx context.Context, req fixRequest) (bool, error) {
 		// the full base-branch diff and actually re-examines the outstanding work.
 		o.lastReviewBase = ""
 
-		return false, ferr
+		return false, response, ferr
 	}
 
 	if err := d.Git.Push(ctx, cfg.Branch); err != nil {
-		return false, fmt.Errorf("push review fixup: %w", err)
+		return false, "", fmt.Errorf("push review fixup: %w", err)
 	}
 
-	return true, ferr
+	return true, response, ferr
 }
 
 // markFixFailed records that the most recent fix round failed for the given

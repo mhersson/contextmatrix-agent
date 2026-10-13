@@ -510,6 +510,14 @@ type run struct {
 	// which would otherwise erase the mandate a regressing fix was chasing.
 	lastPanelFindings string
 
+	// lastFixResponse is the most recent review fix round's finish message,
+	// and lastPanelFixResponse that of the fix that answered lastPanelFindings,
+	// so each rides beside the findings it answered (priorContext). Empty when
+	// the fixer gave none. Not seeded on resume: the recorded history that
+	// seeds lastFindings already carries each round's response in its section.
+	lastFixResponse      string
+	lastPanelFixResponse string
+
 	// lastPriorResolved is the most recent verdict's own report of whether
 	// every prior finding was resolved or withdrawn (settleVerdict). The
 	// authoritative pass's park head reads it to tell an operator a failed

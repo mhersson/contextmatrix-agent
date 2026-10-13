@@ -161,7 +161,7 @@ func TestFixRoundsEmitTheirOwnObservation(t *testing.T) {
 		o.cardPlannerBar = "moderate"
 		o.curPhase = "review"
 
-		_, err := o.runFix(context.Background(), fixRequest{Findings: "- a.go: x", Round: 1, FixTier: "complex"})
+		_, _, err := o.runFix(context.Background(), fixRequest{Findings: "- a.go: x", Round: 1, FixTier: "complex"})
 		require.NoError(t, err)
 
 		rec := onlyEvent(t, &transcript, sizingObservationKind)

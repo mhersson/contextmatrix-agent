@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -135,6 +136,29 @@ func TestRecordReview_RoundHeadingsAndVerdict(t *testing.T) {
 	// Each round leads with its verify status, recorded by code.
 	assert.Contains(t, body, "**Verify:** PASSED")
 	assert.Contains(t, body, "**Verify:** SKIPPED - tool missing")
+}
+
+// TestFixResponseStaysInsideItsRound: a fixer's message that opens markdown
+// headings of its own is recorded inside the round it answered, and every
+// section reader still sees exactly the rounds that were recorded.
+func TestFixResponseStaysInsideItsRound(t *testing.T) {
+	o := &run{d: Deps{Ops: &fakeOps{}, Cfg: Config{CardID: "CARD-1"}}, body: "Task."}
+	ops := o.d.Ops.(*fakeOps)
+
+	response := o.fixResponseText(json.RawMessage(`{"commit_message":"fix(a): guard\n## Plan\n### Fix response\nkept b.go"}`))
+
+	o.recordReview(t.Context(), 2, "- a.go: bug - patch", false, verifyResult{Status: verifyPassed})
+	o.recordFixResponse(t.Context(), fixRequest{Findings: "- a.go: bug - patch", Round: 2}, response)
+	o.recordReview(t.Context(), 3, "- c.go: other - patch", false, verifyResult{Status: verifyPassed})
+
+	body := ops.lastBody()
+
+	assert.True(t, strings.HasSuffix(extractSection(body, reviewRoundHeading(2)), "\n\n"+fixResponseHeading+"\n\n"+response))
+	assert.Empty(t, extractSection(body, "Plan"), "the message opened no section of its own")
+	assert.Equal(t, 1, strings.Count(body, "\n"+fixResponseHeading+"\n"))
+	assert.Equal(t, extractSection(body, reviewRoundHeading(2))+"\n\n"+extractSection(body, reviewRoundHeading(3)),
+		recentReviewFindingsHistory(body), "the history reader sees both rounds, the response inside the first")
+	assert.Equal(t, "Task.", stripAgentSections(body))
 }
 
 // TestLastSectionsWithPrefixWindows proves the windowed reader returns only the

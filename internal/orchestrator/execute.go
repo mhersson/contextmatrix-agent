@@ -257,9 +257,10 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 
 	// Round 0: this is not a review round and has no round number. The subtask
 	// rides along because this round is sized on ITS bar, so its measurement row
-	// must report its estimate rather than the card's.
+	// must report its estimate rather than the card's. Its response is dropped:
+	// the verify re-run below judges it, and no review round reads it.
 	req := fixRequest{Round: 0, FixTier: string(sub.Sizing.Bar), Subtask: sub.ID, PlannerBar: sub.PlannerBar}
-	if _, ferr := o.runFixModel(ctx, prompt, req); ferr != nil {
+	if _, _, ferr := o.runFixModel(ctx, prompt, req); ferr != nil {
 		// A cap is not a verdict on the tree the fix left behind: the re-run
 		// below decides, exactly as runFix does for the review rounds.
 		if _, ok := errors.AsType[*MaxTurnsError](ferr); !ok {

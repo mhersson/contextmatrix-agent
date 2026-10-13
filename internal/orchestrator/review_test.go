@@ -1360,7 +1360,7 @@ func TestFixRunTierScalesTurnBudget(t *testing.T) {
 	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
 	o := newReviewRun(d, tc, 0)
 
-	_, err := o.runFixModel(context.Background(), "fix prompt", fixRequest{Round: 1, FixTier: "complex"})
+	_, _, err := o.runFixModel(context.Background(), "fix prompt", fixRequest{Round: 1, FixTier: "complex"})
 	require.NoError(t, err, "a complex fix tier scales the budget above the base, so 25 turns do not cap")
 }
 
@@ -1376,7 +1376,7 @@ func TestFixRunSimpleTierCapsAtBase(t *testing.T) {
 	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
 	o := newReviewRun(d, tc, 0)
 
-	_, err := o.runFixModel(context.Background(), "fix prompt", fixRequest{Round: 1, FixTier: "simple"})
+	_, _, err := o.runFixModel(context.Background(), "fix prompt", fixRequest{Round: 1, FixTier: "simple"})
 	require.Error(t, err, "a simple fix tier keeps the flat base, so 25 turns cap")
 
 	var mte *MaxTurnsError
@@ -2705,7 +2705,7 @@ func TestRunFixRoutesByFindingsOrigin(t *testing.T) {
 		require.NoError(t, err)
 		assert.False(t, approved)
 
-		committed, err := o.runFix(context.Background(), fixRequest{Findings: findings, Round: 1, FixTier: fixTier})
+		committed, _, err := o.runFix(context.Background(), fixRequest{Findings: findings, Round: 1, FixTier: fixTier})
 		require.NoError(t, err)
 		assert.True(t, committed)
 
@@ -2733,7 +2733,7 @@ func TestRunFixRoutesByFindingsOrigin(t *testing.T) {
 		require.NoError(t, err)
 		assert.False(t, approved)
 
-		committed, err := o.runFix(context.Background(), fixRequest{Findings: findings, Round: 1, FixTier: fixTier})
+		committed, _, err := o.runFix(context.Background(), fixRequest{Findings: findings, Round: 1, FixTier: fixTier})
 		require.NoError(t, err)
 		assert.True(t, committed)
 
@@ -4274,7 +4274,7 @@ func TestFixEscalationThatBuysNothingIsRecorded(t *testing.T) {
 	assert.Equal(t, registry.TierComplex, climbed.Pick.RequestedTier)
 	assert.Equal(t, registry.TierModerate, climbed.Pick.MetTier)
 
-	model, err := o.runFixModel(context.Background(), "fix it", fixRequest{Round: 2, FixTier: "moderate"})
+	model, _, err := o.runFixModel(context.Background(), "fix it", fixRequest{Round: 2, FixTier: "moderate"})
 	require.NoError(t, err)
 	assert.Equal(t, "mid/coder", model)
 
@@ -4374,7 +4374,7 @@ func TestPinnedFixModelReportsNoFabricatedShortfall(t *testing.T) {
 	o.fixBarSteps = 1
 	o.fixFailReason = "landed no commit"
 
-	model, err := o.runFixModel(context.Background(), "fix it", fixRequest{Round: 2, FixTier: "moderate"})
+	model, _, err := o.runFixModel(context.Background(), "fix it", fixRequest{Round: 2, FixTier: "moderate"})
 	require.NoError(t, err)
 	assert.Equal(t, "pinned/model", model)
 
@@ -4403,7 +4403,7 @@ func TestFixEscalationNoOpReportsNoPriorRatherThanZero(t *testing.T) {
 	o.fixBarSteps = 1
 	o.fixFailReason = "landed no commit"
 
-	_, err := o.runFixModel(context.Background(), "fix it", fixRequest{Round: 2, FixTier: "moderate"})
+	_, _, err := o.runFixModel(context.Background(), "fix it", fixRequest{Round: 2, FixTier: "moderate"})
 	require.NoError(t, err)
 
 	require.True(t, ops.loggedContains("bought nothing"), "logs=%v", ops.logs)
@@ -4436,7 +4436,7 @@ func TestFixModelRefusalNamesItsRealCause(t *testing.T) {
 	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reg)
 	o := newReviewRun(d, cmclient.TaskContext{Title: "Parent"}, 0)
 
-	committed, err := o.runFix(context.Background(), fixRequest{Findings: "- a.go: something", Round: 2, FixTier: "moderate"})
+	committed, _, err := o.runFix(context.Background(), fixRequest{Findings: "- a.go: something", Round: 2, FixTier: "moderate"})
 	require.Error(t, err)
 	assert.False(t, committed)
 
@@ -4749,7 +4749,7 @@ func TestCleanupPassRunsDespiteExhaustedFixers(t *testing.T) {
 	t.Run("an ordinary round parks", func(t *testing.T) {
 		o := newRunWithFailedPin(t, &fakeOps{}, &fakeGit{committed: true})
 
-		committed, err := o.runFix(context.Background(), fixRequest{Findings: "- a.go: something", Round: 2})
+		committed, _, err := o.runFix(context.Background(), fixRequest{Findings: "- a.go: something", Round: 2})
 		assert.False(t, committed)
 
 		var parked *ReviewParkedError
@@ -4762,7 +4762,7 @@ func TestCleanupPassRunsDespiteExhaustedFixers(t *testing.T) {
 		git := &fakeGit{committed: true}
 		o := newRunWithFailedPin(t, &fakeOps{}, git)
 
-		committed, err := o.runFix(context.Background(), fixRequest{Findings: "- a.go: something", Round: 3, NoEscalate: true})
+		committed, _, err := o.runFix(context.Background(), fixRequest{Findings: "- a.go: something", Round: 3, NoEscalate: true})
 		require.NoError(t, err, "the cleanup pass must not be refused by the exhausted-fixers park")
 		assert.True(t, committed)
 	})
@@ -4784,7 +4784,7 @@ func TestCappedRoundDoesNotClaimTheFixersAreExhausted(t *testing.T) {
 	o.lastFixModel = "pinned/model"
 	o.markFixCapped()
 
-	committed, err := o.runFix(context.Background(), fixRequest{Findings: "- a.go: something", Round: 2})
+	committed, _, err := o.runFix(context.Background(), fixRequest{Findings: "- a.go: something", Round: 2})
 	require.NoError(t, err, "a cap is not evidence that any fixer was too weak")
 	assert.True(t, committed, "the widened round runs the same model again instead of parking")
 }
@@ -4843,7 +4843,7 @@ func TestCappedFixRoundKeepsTheModelAndCommitsItsWork(t *testing.T) {
 	o.cardSizing = sizing{Bar: registry.TierModerate, Budget: 0}
 	o.lastFixModel = "vendor/prior"
 
-	committed, err := o.runFix(context.Background(), fixRequest{Findings: "- a.go: something", Round: 1})
+	committed, _, err := o.runFix(context.Background(), fixRequest{Findings: "- a.go: something", Round: 1})
 
 	var mte *MaxTurnsError
 
@@ -6872,4 +6872,345 @@ func TestAdoptedApprovalCleanupPromptNamesEachFindingOnce(t *testing.T) {
 	// keeps targeting the commits that last touched the named files.
 	require.Len(t, git.lastCommitPaths, 1)
 	assert.Equal(t, []string{"a.go", "b.go"}, git.lastCommitPaths[0])
+}
+
+// fixResponseSecret is a credential a fixer might quote back in its finish
+// message; fixResponseRedact stands in for the run's redactor.
+const fixResponseSecret = "sk-live-0123456789"
+
+func fixResponseRedact(s string) string {
+	return strings.ReplaceAll(s, fixResponseSecret, "[REDACTED]")
+}
+
+// fixResponsePushback is a fix coder's finish message that pushes back on a
+// finding and quotes a secret while doing it.
+const fixResponsePushback = "fix(a): guard the pointer\n\nNot fixed: the b.go finding - TestB already covers the nil case (seen with token " + fixResponseSecret + ")"
+
+// TestFixResponseReachesTheCardAndTheNextRound drives every review fix path
+// with a fixer that pushes back in its finish message: the redacted message is
+// recorded inside the round's section on the card, and the next round's three
+// specialists and its synthesis all carry it.
+func TestFixResponseReachesTheCardAndTheNextRound(t *testing.T) {
+	want := fixResponseRedact(fixResponsePushback)
+
+	rows := []struct {
+		name      string
+		deps      func(t *testing.T, ops *fakeOps, git *fakeGit, client *planLLM) Deps
+		responses []llm.Response
+		// fixCall is the fix coder's call index; nextRound are the next
+		// round's specialist and synthesis call indexes.
+		fixCall   int
+		nextRound []int
+		// slot is whether the next round reads the response from its own
+		// block; the authoritative pass reads it inside the recorded history.
+		slot bool
+	}{
+		{
+			name: "review loop",
+			deps: func(t *testing.T, ops *fakeOps, git *fakeGit, client *planLLM) Deps {
+				t.Helper()
+
+				return reviewTestDeps(t, ops, git, client, reviewerRegistry())
+			},
+			responses: slices.Concat(panelRejects("bug"), []llm.Response{finishResp(fixResponsePushback, 0.05)}, panelApproves()),
+			fixCall:   4,
+			nextRound: []int{5, 6, 7, 8},
+			slot:      true,
+		},
+		{
+			name: "authoritative pass",
+			deps: func(t *testing.T, ops *fakeOps, git *fakeGit, client *planLLM) Deps {
+				t.Helper()
+
+				d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+				// Cap 1 sends round 1 straight to the authoritative pass.
+				d.Cfg.ReviewAttemptsCap = 1
+
+				return d
+			},
+			responses: slices.Concat(panelRejects("bug"), []llm.Response{finishResp(fixResponsePushback, 0.05)}, panelApproves()),
+			fixCall:   4,
+			nextRound: []int{5, 6, 7, 8},
+		},
+		{
+			name: "HITL adjust",
+			deps: func(t *testing.T, ops *fakeOps, git *fakeGit, client *planLLM) Deps {
+				t.Helper()
+
+				return hitlReviewDeps(ops, git, &fakeInbox{msgs: []harness.UserMessage{
+					{Content: "fix the bug"},
+					{Content: "approve"},
+				}}, client)
+			},
+			responses: slices.Concat(panelRejects("bug"),
+				[]llm.Response{
+					stopResp(`{"verdict":"adjust","feedback":"fix the bug"}`, 0.001),
+					finishResp(fixResponsePushback, 0.05),
+				},
+				panelApproves(),
+				[]llm.Response{stopResp(`{"verdict":"approve","feedback":""}`, 0.001)}),
+			fixCall:   5,
+			nextRound: []int{6, 7, 8, 9},
+			slot:      true,
+		},
+		{
+			name: "HITL promoted",
+			deps: func(t *testing.T, ops *fakeOps, git *fakeGit, client *planLLM) Deps {
+				t.Helper()
+
+				// An empty, non-blocking inbox reports a promotion at the gate.
+				return hitlReviewDeps(ops, git, &fakeInbox{}, client)
+			},
+			responses: slices.Concat(panelRejects("bug"), []llm.Response{finishResp(fixResponsePushback, 0.05)}, panelApproves()),
+			fixCall:   4,
+			nextRound: []int{5, 6, 7, 8},
+			slot:      true,
+		},
+	}
+
+	for _, tt := range rows {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+			client := &planLLM{responses: tt.responses}
+
+			d := tt.deps(t, ops, git, client)
+			d.WriteTools = testWriteTools()
+			d.Redact = fixResponseRedact
+
+			o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}, 0)
+
+			require.NoError(t, runReview(context.Background(), o))
+			require.Len(t, client.tasks, len(tt.responses), "every scripted call ran")
+
+			body := ops.lastBody()
+			assert.True(t, strings.HasSuffix(extractSection(body, reviewRoundHeading(1)), "\n\n"+fixResponseHeading+"\n\n"+want),
+				"the fix response closes the section of the round it answered; body=%s", body)
+			assert.NotContains(t, body, fixResponseSecret)
+
+			for i := range tt.fixCall + 1 {
+				assert.NotContains(t, client.tasks[i], want, "call %d runs before the fix responded", i)
+			}
+
+			for _, i := range tt.nextRound {
+				assert.Equal(t, 1, strings.Count(client.tasks[i], want),
+					"call %d is the next round's panel or synthesis: it carries the response exactly once", i)
+
+				if tt.slot {
+					assert.Contains(t, client.tasks[i], fixResponseBlock(want), "call %d", i)
+				}
+			}
+
+			for i, task := range client.tasks {
+				assert.NotContains(t, task, fixResponseSecret, "call %d", i)
+			}
+		})
+	}
+}
+
+// TestFixResponseIsReadBackFromTheCardOnResume: a run that dies after a fix
+// round leaves the fixer's response on the card, and the resumed run's next
+// round carries it to every specialist and to synthesis.
+func TestFixResponseIsReadBackFromTheCardOnResume(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+	// Round 1 rejects and the fix answers; every call from round 2's panel on
+	// fails, so the run dies in round 2's synthesis.
+	client := &planLLM{
+		responses: slices.Concat(panelRejects("bug"), []llm.Response{finishResp(fixResponsePushback, 0.05)}),
+		errAfter:  6,
+	}
+
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+	d.WriteTools = testWriteTools()
+	d.Redact = fixResponseRedact
+
+	o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}, 0)
+	require.Error(t, runReview(context.Background(), o))
+
+	resumedClient := &planLLM{responses: panelApproves()}
+	resumedDeps := reviewTestDeps(t, &fakeOps{}, &fakeGit{committed: true}, resumedClient, reviewerRegistry())
+	resumed := newReviewRun(resumedDeps, cmclient.TaskContext{
+		Title: "Parent", Description: ops.lastBody(), State: "review", ReviewAttempts: 1,
+	}, 0)
+
+	require.NoError(t, runReview(context.Background(), resumed))
+	require.Len(t, resumedClient.tasks, 4, "one panel round and its synthesis")
+
+	want := fixResponseRedact(fixResponsePushback)
+
+	for i, task := range resumedClient.tasks {
+		assert.Equal(t, 1, strings.Count(task, want), "resumed call %d carries the response exactly once", i)
+	}
+}
+
+// TestMobReviewBriefingCarriesTheFixResponse: on the mob path the next
+// round's briefing - which the moderator reads as the transcript's first
+// entry - carries the fixer's response beside the findings it answered.
+func TestMobReviewBriefingCarriesTheFixResponse(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+	client := &planLLM{responses: []llm.Response{finishResp(fixResponsePushback, 0.05)}}
+	eng := &scriptedEngine{outcomes: []mob.Outcome{
+		{Synthesis: `{"approved":false,"summary":"fix it","fix_tier":"simple",` +
+			`"fixes":[{"file":"a.go","issue":"bug","suggestion":"patch"}]}`},
+		{Synthesis: mobApprovedVerdict, Consensus: true},
+	}}
+
+	o := mobReviewRun(t, ops, git, client, eng)
+	o.d.WriteTools = testWriteTools()
+	o.d.Redact = fixResponseRedact
+
+	require.NoError(t, runReview(context.Background(), o))
+	require.Len(t, eng.topics, 2)
+
+	want := fixResponseRedact(fixResponsePushback)
+
+	assert.NotContains(t, eng.topics[0].Briefing, want, "round 1 follows no fix")
+	assert.Contains(t, eng.topics[1].Briefing, fixResponseBlock(want))
+	assert.Equal(t, 1, strings.Count(eng.topics[1].Briefing, want))
+}
+
+// TestEmptyFixResponseRecordsNothing: a fixer that finishes with an empty
+// message, or never calls finish, leaves no response on the card and no slot
+// in the next round.
+func TestEmptyFixResponseRecordsNothing(t *testing.T) {
+	rows := []struct {
+		name string
+		fix  llm.Response
+	}{
+		{name: "empty finish message", fix: finishResp("", 0.05)},
+		{name: "no finish call", fix: stopResp("coder: fixed", 0.05)},
+	}
+
+	for _, tt := range rows {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+			client := &planLLM{responses: slices.Concat(panelRejects("bug"), []llm.Response{tt.fix}, panelApproves())}
+
+			d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+			d.WriteTools = testWriteTools()
+
+			o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}, 0)
+
+			require.NoError(t, runReview(context.Background(), o))
+
+			assert.NotContains(t, ops.lastBody(), fixResponseHeading)
+			assert.Empty(t, o.lastPanelFixResponse)
+			assert.Equal(t, priorFindingsBlock(o.lastPanelFindings), o.priorContext(false),
+				"the next round's prior context is the findings alone")
+		})
+	}
+}
+
+// TestFixResponseRidesWithTheFindingsItAnswered: the next round's prior context
+// pairs the findings with the response of the fix that answered exactly them.
+// A verify-red round's fix answers a build failure, so it never replaces the
+// response beside the panel verdict that a later panel round re-reads.
+func TestFixResponseRidesWithTheFindingsItAnswered(t *testing.T) {
+	const (
+		panel = "fix it\n- a.go: [important, defect] bug - patch"
+		tail  = verifyFailedPrefix + "make test"
+	)
+
+	rows := []struct {
+		name string
+		// seed runs the rounds before the one under test.
+		seed func(o *run)
+		want string
+	}{
+		{
+			name: "a panel fix's response follows the panel findings",
+			seed: func(o *run) {
+				o.recordRoundFindings(panel)
+				o.recordFixResponse(t.Context(), fixRequest{Findings: panel, Round: 1}, "kept b.go: TestB covers it")
+			},
+			want: priorFindingsBlock(panel) + fixResponseBlock("kept b.go: TestB covers it"),
+		},
+		{
+			name: "a verify-red fix leaves the panel fix's response in place",
+			seed: func(o *run) {
+				o.recordRoundFindings(panel)
+				o.recordFixResponse(t.Context(), fixRequest{Findings: panel, Round: 1}, "kept b.go: TestB covers it")
+				o.recordRoundFindings(tail)
+				o.recordFixResponse(t.Context(), fixRequest{Findings: tail, Round: 2}, "fix(test): correct the expectation")
+			},
+			want: priorFindingsBlock(panel) + fixResponseBlock("kept b.go: TestB covers it"),
+		},
+		{
+			name: "before any panel verdict the verify fix's response follows the verify findings",
+			seed: func(o *run) {
+				o.recordRoundFindings(tail)
+				o.recordFixResponse(t.Context(), fixRequest{Findings: tail, Round: 1}, "fix(test): correct the expectation")
+			},
+			want: priorFindingsBlock(tail) + fixResponseBlock("fix(test): correct the expectation"),
+		},
+		{
+			name: "an empty response clears an earlier one",
+			seed: func(o *run) {
+				o.recordRoundFindings(panel)
+				o.recordFixResponse(t.Context(), fixRequest{Findings: panel, Round: 1}, "kept b.go: TestB covers it")
+				o.recordRoundFindings(panel)
+				o.recordFixResponse(t.Context(), fixRequest{Findings: panel, Round: 2}, "")
+			},
+			want: priorFindingsBlock(panel),
+		},
+	}
+
+	for _, tt := range rows {
+		t.Run(tt.name, func(t *testing.T) {
+			o := &run{d: Deps{Ops: &fakeOps{}, Cfg: Config{CardID: "CARD-1"}}, body: "Task."}
+
+			tt.seed(o)
+
+			assert.Equal(t, tt.want, o.priorContext(false))
+		})
+	}
+}
+
+// TestFixResponseTextIsSafeToRecord: the finish message is redacted, bounded,
+// and cannot open a markdown heading of its own.
+func TestFixResponseTextIsSafeToRecord(t *testing.T) {
+	finish := func(msg string) json.RawMessage {
+		args, err := json.Marshal(map[string]string{"commit_message": msg})
+		require.NoError(t, err)
+
+		return args
+	}
+
+	o := &run{d: Deps{Redact: fixResponseRedact}}
+
+	t.Run("redacted", func(t *testing.T) {
+		got := o.fixResponseText(finish(fixResponsePushback))
+
+		assert.Equal(t, fixResponseRedact(fixResponsePushback), got)
+	})
+
+	t.Run("bounded", func(t *testing.T) {
+		got := o.fixResponseText(finish(strings.Repeat("x", 3*fixResponseMaxBytes)))
+
+		assert.Len(t, got, fixResponseMaxBytes)
+	})
+
+	t.Run("redacted before it is bounded", func(t *testing.T) {
+		// The secret straddles the bound: cutting first would leave a prefix
+		// of it that the redactor no longer recognizes.
+		msg := strings.Repeat("x", fixResponseMaxBytes-4) + fixResponseSecret
+
+		assert.NotContains(t, o.fixResponseText(finish(msg)), fixResponseSecret[:4])
+	})
+
+	t.Run("headings escaped", func(t *testing.T) {
+		got := o.fixResponseText(finish("fix(a): x\n## Plan\n  ### Fix response"))
+
+		for line := range strings.SplitSeq(got, "\n") {
+			assert.False(t, strings.HasPrefix(strings.TrimSpace(line), "#"), "line %q", line)
+		}
+	})
+
+	t.Run("absent", func(t *testing.T) {
+		assert.Empty(t, o.fixResponseText(nil))
+		assert.Empty(t, o.fixResponseText(finish("   ")))
+	})
 }

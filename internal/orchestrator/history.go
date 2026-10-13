@@ -63,6 +63,37 @@ func (o *run) recordReviewVerifyCorrection(ctx context.Context, round int, findi
 	o.recordSection(ctx, heading, reviewRoundSection(heading, line, findings, "approve"))
 }
 
+// fixResponseHeading opens the subsection a review fix round's response is
+// recorded under. A "### " heading, never "## ": every section reader ends a
+// section at the next column-0 "## ", so the response stays inside its round.
+const fixResponseHeading = "### Fix response"
+
+// recordFixResponse carries a review fix round's finish message forward: it
+// becomes the slot beside the findings it answered (priorContext), and a
+// non-empty one is appended to the round's recorded section. response must
+// already be fixResponseText's output. An empty response records nothing and
+// clears the slot, so an earlier round's response never answers later findings.
+func (o *run) recordFixResponse(ctx context.Context, req fixRequest, response string) {
+	o.lastFixResponse = response
+
+	if !strings.HasPrefix(req.Findings, verifyFailedPrefix) {
+		o.lastPanelFixResponse = response
+	}
+
+	if response == "" {
+		return
+	}
+
+	heading := reviewRoundHeading(req.Round)
+
+	section := extractSection(o.body, heading)
+	if section == "" {
+		return
+	}
+
+	o.recordSection(ctx, heading, section+"\n\n"+fixResponseHeading+"\n\n"+response)
+}
+
 // reviewRoundHeading is the card-body heading for one review round: round 1
 // takes the bare heading (matching CM's review-task workflow skill), later
 // rounds carry their number, which is what makes the upsert an append.

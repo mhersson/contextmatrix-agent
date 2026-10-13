@@ -527,9 +527,10 @@ Description:
 // read-only-roots block, the lens block (one of the three below), parent card
 // title, parent card description, the full branch diff against base, an
 // optional prior-findings block (the previous round's findings on delta
-// rounds), and an optional fix-delta block (what the previous round's
-// COMMITTED fix changed, labeled as context rather than review scope). Both
-// optional blocks collapse to nothing when empty.
+// rounds, followed by the fix round's response to them when it gave one), and
+// an optional fix-delta block (what the previous round's COMMITTED fix
+// changed, labeled as context rather than review scope). Both optional blocks
+// collapse to nothing when empty.
 const specialistPrompt = `%s%sYou are a code-review specialist. You have read-only tools (read, grep, glob, git)
 to inspect the codebase. Git is available read-only (status, diff, log, show,
 branch). You do NOT create or modify cards or files. Produce a findings report as TEXT - another agent synthesizes the
@@ -618,9 +619,9 @@ Stay strictly within security and performance; do not opine outside it.`
 //
 // The trailing %s slots are filled by synthesize: parent card title, parent
 // card description, an optional prior-findings block (the previous round's
-// findings on delta rounds), the concatenated specialist findings, and an
-// optional repair block (the previous parse error). Empty optional blocks
-// collapse to nothing.
+// findings on delta rounds, followed by the fix round's response to them when
+// it gave one), the concatenated specialist findings, and an optional repair
+// block (the previous parse error). Empty optional blocks collapse to nothing.
 const synthesisPrompt = `%sYou are the review synthesizer. Three specialists (correctness, design,
 security) reviewed a change and produced the findings below, each with a
 suggested severity. Merge duplicates and decide a single verdict. Severity is
@@ -718,7 +719,9 @@ commits your changes as a fixup and pushes after you finish.
 
 When you have addressed the findings and the tests pass, call the finish tool
 with a short conventional-commit message summarizing the fixes, then make no
-further tool calls.
+further tool calls. If you did not fix a finding, name it in the message body
+and say why - the evidence that it is not a defect, or what blocked the fix.
+The next review round reads this message.
 
 PARENT CARD (context)
 Title: %s
@@ -1108,6 +1111,18 @@ func priorFindingsBlock(findings string) string {
 	return "\nPRIOR FINDINGS (already raised - verify resolution, do not import new scope):\n" + findings + "\n"
 }
 
+// fixResponseBlock renders the fix round's own account of the PRIOR FINDINGS -
+// what it changed, and which findings it did not fix and why - as an optional
+// block beside them, or "" when the fixer gave none. A pushed-back or deferred
+// finding is then judged on the evidence the fixer stated, not re-raised blind.
+func fixResponseBlock(response string) string {
+	if strings.TrimSpace(response) == "" {
+		return ""
+	}
+
+	return "\nFIX RESPONSE (the fix round's own account of the PRIOR FINDINGS. Where it did not fix a finding, weigh the reason it gives before raising that finding again):\n" + response + "\n"
+}
+
 // fencedDiff wraps a git diff in a ```diff code fence so markdown surfaces -
 // the mob session briefing relayed to the board chat in particular - render
 // it as one code block instead of interpreting -/+ lines as bullet lists. The fence
@@ -1292,10 +1307,10 @@ unreachable_criteria when empty):
 // diff-and-prior-findings scope the specialist fan-out reviews. Slots:
 // grounding, an optional read-only-roots block, title, description, branch
 // diff (pre-wrapped by fencedDiff - the briefing is relayed to the board chat,
-// where a bare diff renders as bullet soup), prior-findings block, and an
-// optional fix-delta block (what the previous round's COMMITTED fix changed,
-// labeled as context rather than review scope - collapses to nothing when
-// empty).
+// where a bare diff renders as bullet soup), prior-findings block (with the fix
+// round's response to them when it gave one), and an optional fix-delta block
+// (what the previous round's COMMITTED fix changed, labeled as context rather
+// than review scope - collapses to nothing when empty).
 const reviewBriefing = `%sYou are discussing a code review. Review only the change set in the diff
 below; read surrounding code for context as needed. Every finding must cite a
 file in the change set. Commit status is never a review concern. Judge the
