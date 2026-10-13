@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -24,9 +25,9 @@ const modelProgressInterval = 30 * time.Second
 // progressMarker turns streamed model fragments into a throttled liveness
 // signal. Fragments are raw model output - unredacted, and a secret can span
 // two of them - so the marker never reads them and its event carries no data.
-// One marker serves the whole run: mob seats and Best-of-N candidates stream
-// concurrently, and the watchdog needs one signal per container, not one per
-// model run.
+// One marker serves the whole run: mob seats, review specialists and Best-of-N
+// candidates stream concurrently, and the watchdog needs one signal per
+// container, not one per model run.
 type progressMarker struct {
 	emit *events.Emitter
 	now  func() time.Time
@@ -56,4 +57,21 @@ func (p *progressMarker) onDelta(llm.Delta) {
 	if due {
 		p.emit.Emit(events.Kind(modelProgressKind), nil)
 	}
+}
+
+// progressClient hands the run's progress marker to streamed calls that carry
+// no callback: harness.SubagentOpts has no OnDelta, so the review specialists
+// would otherwise stream in silence. A caller's own callback is left alone.
+type progressClient struct {
+	llm.LLM
+
+	onDelta func(llm.Delta)
+}
+
+func (c progressClient) SendStream(ctx context.Context, req llm.Request, onDelta func(llm.Delta)) (llm.Response, error) {
+	if onDelta == nil {
+		onDelta = c.onDelta
+	}
+
+	return c.LLM.SendStream(ctx, req, onDelta)
 }

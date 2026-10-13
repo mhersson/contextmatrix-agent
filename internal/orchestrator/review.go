@@ -1337,7 +1337,12 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 	// drift. Only Reasoning is read from parentCfg.
 	parentCfg := o.harnessConfig(cfg.DefaultModel)
 
-	results, err := harness.SpawnSubagents(ctx, d.Client, cfg.Workspace, d.Emit, specs,
+	client := d.Client
+	if o.progress != nil {
+		client = progressClient{LLM: d.Client, onDelta: o.progress.onDelta}
+	}
+
+	results, err := harness.SpawnSubagents(ctx, client, cfg.Workspace, d.Emit, specs,
 		harness.SubagentOpts{
 			DefaultModel:       cfg.DefaultModel,
 			ToolOutputMaxBytes: cfg.ToolOutputMax,

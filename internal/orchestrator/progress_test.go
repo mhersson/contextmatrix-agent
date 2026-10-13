@@ -196,3 +196,93 @@ func TestRunModelSignalsProgressDuringReasoningTurn(t *testing.T) {
 		"the watchdog-facing stream must advance while the reasoning turn is still running")
 	assert.NotContains(t, out.String(), progressSentinel, "no raw fragment text reaches the transcript")
 }
+
+// fragmentLLM streams sentinel-carrying reasoning and content fragments on
+// every streamed call, advancing clock between them. It is safe for the
+// review panel's concurrent specialists.
+type fragmentLLM struct {
+	clock     *stepClock
+	gap       time.Duration
+	fragments int
+}
+
+func (f *fragmentLLM) Send(context.Context, llm.Request) (llm.Response, error) {
+	return llm.Response{Content: "sent", FinishReason: "stop"}, nil
+}
+
+func (f *fragmentLLM) SendStream(_ context.Context, _ llm.Request, onDelta func(llm.Delta)) (llm.Response, error) {
+	for range f.fragments {
+		f.clock.advance(f.gap)
+
+		if onDelta != nil {
+			onDelta(llm.Delta{Reasoning: progressSentinel})
+			onDelta(llm.Delta{Content: progressSentinel})
+		}
+	}
+
+	return llm.Response{Content: "no findings", FinishReason: "stop"}, nil
+}
+
+func TestReviewSpecialistsSignalProgress(t *testing.T) {
+	var out lockedBuffer
+
+	client := &fragmentLLM{gap: time.Second, fragments: 40}
+	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, client, reviewerRegistry())
+	d.Emit = events.NewEmitter(nil, &out)
+
+	o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}, 0)
+	require.NotNil(t, o.progress)
+
+	clock := &stepClock{t: time.Now()}
+	o.progress.now = clock.now
+	client.clock = clock
+
+	_, err := o.runSpecialists(context.Background(), false)
+	require.NoError(t, err)
+
+	assert.NotEmpty(t, progressLines(t, out.String()), "a streaming specialist must feed the idle watchdog")
+	assert.NotContains(t, out.String(), progressSentinel, "no raw fragment text reaches the transcript")
+}
+
+func TestProgressClient(t *testing.T) {
+	t.Parallel()
+
+	newMarker := func(out *lockedBuffer) (*progressMarker, *stepClock) {
+		clock := newStepClock()
+
+		return newProgressMarker(events.NewEmitter(nil, out), clock.now), clock
+	}
+
+	t.Run("a caller's own callback is kept and the marker stays quiet", func(t *testing.T) {
+		t.Parallel()
+
+		var out lockedBuffer
+
+		marker, clock := newMarker(&out)
+		client := progressClient{LLM: &fragmentLLM{clock: clock, gap: time.Second, fragments: 95}, onDelta: marker.onDelta}
+
+		seen := 0
+		_, err := client.SendStream(context.Background(), llm.Request{}, func(llm.Delta) { seen++ })
+		require.NoError(t, err)
+
+		assert.Equal(t, 190, seen, "every fragment reaches the caller's callback")
+		assert.Empty(t, progressLines(t, out.String()))
+	})
+
+	t.Run("Send passes through", func(t *testing.T) {
+		t.Parallel()
+
+		var out lockedBuffer
+
+		marker, _ := newMarker(&out)
+		inner := &planLLM{responses: []llm.Response{{Content: "sent", FinishReason: "stop"}}}
+		client := progressClient{LLM: inner, onDelta: marker.onDelta}
+
+		resp, err := client.Send(context.Background(), llm.Request{Model: "rev/alpha"})
+		require.NoError(t, err)
+
+		assert.Equal(t, "sent", resp.Content)
+		assert.Equal(t, []string{"rev/alpha"}, inner.models)
+		assert.Empty(t, out.String())
+	})
+}

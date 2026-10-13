@@ -71,7 +71,7 @@ turn that streams only tool-call arguments emits none: the harness reports
 just text and reasoning fragments. The event carries no model text - streamed
 fragments are unredacted - and the log bridge keeps it off the live stream;
 the durable run log records it. The review panel's fan-out takes no progress
-callback, so a specialist's turn stays silent until it ends.
+callback, so the specialists get the same marker through their model client.
 
 ## Review
 
