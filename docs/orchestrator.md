@@ -173,21 +173,27 @@ long-running review.
 A fix round's own account travels with its findings. The fixup commit carries
 no message (integrate's autosquash would drop it anyway), so the fix coder's
 `finish` message - which the fix prompt asks to name every finding it did not
-fix, and why - is redacted with the run's redactor, bounded to 4 KiB
-(`fixResponseMaxBytes`), escaped so no line opens a markdown heading, and
-appended to the round's recorded section as a `### Fix response` subsection: a
-`## ` heading would end the section for every reader. The next round's
-specialists and synthesis, and the mob briefing the moderator reads, receive it
-as a labelled block beside the prior findings it answered, so a pushed-back or
-deferred finding is judged on the fixer's stated reason rather than re-raised
-blind. The response to the last panel verdict stays beside that verdict across
-verify-red rounds, the same way `lastPanelFindings` does. The authoritative
-pass and a resumed run read the recorded history instead, where each response
-already sits inside its own round's section, so no separate block repeats it.
-An empty message records nothing and adds no block. The review loop, the HITL
-rounds and the authoritative pass record a response; the post-approval cleanup
-pass, the `pr_gates` fix rounds and the pre-commit verify fix drop it, since no
-review round reads what they answer.
+fix, and why - is redacted with the run's redactor, then escaped: a backslash
+goes in front of every line whose first non-whitespace characters are `#`,
+three backticks or three tildes (whitespace as `strings.TrimSpace` counts it,
+the same rule the section readers use). The response therefore can neither
+start nor end a card section for those readers, nor leave a code fence open for
+a fence-aware reader such as ContextMatrix's, on the card or in a prompt. The
+escaped text is then bounded to 4 KiB (`fixResponseMaxBytes`) as stored, ending
+in a truncation marker when cut, and appended to the round's recorded section
+as a `### Fix response` subsection, since a `## ` heading would end the section
+for every reader. The next round's specialists and synthesis, and the mob
+briefing the moderator reads, receive it as a labelled block beside the prior
+findings it answered, so a pushed-back or deferred finding is judged on the
+fixer's stated reason rather than re-raised blind. The response to the last
+panel verdict stays beside that verdict across verify-red rounds, the same way
+`lastPanelFindings` does. The authoritative pass and a resumed run read the
+recorded history instead, where each response already sits inside its own
+round's section, so no separate block repeats it. An empty message records
+nothing and adds no block. The review loop, the HITL rounds and the
+authoritative pass record a response; the post-approval cleanup pass, the
+`pr_gates` fix rounds and the pre-commit verify fix drop it, since no review
+round reads what they answer.
 
 The synthesis verdict is severity-gated. First `capAdvisorySeverity` rewrites
 any finding whose basis is `hardening` or `polish` and whose severity is

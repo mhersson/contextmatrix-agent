@@ -1722,14 +1722,18 @@ func (o *run) parkSynthesisCap(ctx context.Context, round int, findings string) 
 	return &ReviewParkedError{Reason: reviewParkedSynthesisCap}
 }
 
-// fixResponseMaxBytes bounds a fixer's response: it is persisted in the round's
-// card section and re-sent to the next round's panel and synthesis.
+// fixResponseMaxBytes bounds a fixer's response as stored: it is persisted in
+// the round's card section and re-sent to the next round's panel and synthesis.
 const fixResponseMaxBytes = 4096
+
+// fixResponseTruncated ends a response cut at fixResponseMaxBytes.
+const fixResponseTruncated = "\n[response truncated]"
 
 // fixResponseText renders a fix run's finish message for the card and the next
 // round's prompts: redacted before anything else sees it (a truncation could
-// split a secret past the redactor), bounded, and with any markdown heading
-// escaped so it cannot end the round section it is recorded in.
+// split a secret past the redactor), escaped so no line opens a heading or a
+// code fence, then bounded with a marker when cut. Cutting escaped text cannot
+// re-open either: every surviving line keeps its own first characters.
 func (o *run) fixResponseText(args json.RawMessage) string {
 	msg := finishCommitMessage(args)
 
@@ -1737,7 +1741,12 @@ func (o *run) fixResponseText(args json.RawMessage) string {
 		msg = o.d.Redact(msg)
 	}
 
-	return sanitizeSummary(strings.TrimSpace(truncateBytes(msg, fixResponseMaxBytes)))
+	msg = escapeHeadingsAndFences(strings.TrimSpace(msg))
+	if len(msg) <= fixResponseMaxBytes {
+		return msg
+	}
+
+	return strings.TrimSpace(truncateBytes(msg, fixResponseMaxBytes-len(fixResponseTruncated))) + fixResponseTruncated
 }
 
 // runFixModel runs the fix coder harness with the same in-run incapable recovery

@@ -721,7 +721,6 @@ When you have addressed the findings and the tests pass, call the finish tool
 with a short conventional-commit message summarizing the fixes, then make no
 further tool calls. If you did not fix a finding, name it in the message body
 and say why - the evidence that it is not a defect, or what blocked the fix.
-The next review round reads this message.
 
 PARENT CARD (context)
 Title: %s

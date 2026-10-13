@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"unicode"
 )
 
 // recordSection upserts a "## <heading>" markdown section into the parent card
@@ -67,6 +68,24 @@ func (o *run) recordReviewVerifyCorrection(ctx context.Context, round int, findi
 // recorded under. A "### " heading, never "## ": every section reader ends a
 // section at the next column-0 "## ", so the response stays inside its round.
 const fixResponseHeading = "### Fix response"
+
+// escapeHeadingsAndFences backslash-escapes every line whose first
+// non-whitespace characters open a markdown heading or a code fence, dropping
+// that whitespace. Whitespace is judged by unicode.IsSpace, as the section
+// readers' strings.TrimSpace judges it, so escaped text can neither start nor
+// end a section for them, nor leave a fence open for a fence-aware reader.
+func escapeHeadingsAndFences(s string) string {
+	lines := strings.Split(s, "\n")
+
+	for i, l := range lines {
+		t := strings.TrimLeftFunc(l, unicode.IsSpace)
+		if strings.HasPrefix(t, "#") || strings.HasPrefix(t, "```") || strings.HasPrefix(t, "~~~") {
+			lines[i] = "\\" + t
+		}
+	}
+
+	return strings.Join(lines, "\n")
+}
 
 // recordFixResponse carries a review fix round's finish message forward: it
 // becomes the slot beside the findings it answered (priorContext), and a

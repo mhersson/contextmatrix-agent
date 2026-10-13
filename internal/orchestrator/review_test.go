@@ -13,6 +13,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/mob"
@@ -7169,8 +7170,8 @@ func TestFixResponseRidesWithTheFindingsItAnswered(t *testing.T) {
 	}
 }
 
-// TestFixResponseTextIsSafeToRecord: the finish message is redacted, bounded,
-// and cannot open a markdown heading of its own.
+// TestFixResponseTextIsSafeToRecord: the finish message is redacted, bounded
+// as stored, and cannot open a markdown heading or code fence of its own.
 func TestFixResponseTextIsSafeToRecord(t *testing.T) {
 	finish := func(msg string) json.RawMessage {
 		args, err := json.Marshal(map[string]string{"commit_message": msg})
@@ -7187,26 +7188,42 @@ func TestFixResponseTextIsSafeToRecord(t *testing.T) {
 		assert.Equal(t, fixResponseRedact(fixResponsePushback), got)
 	})
 
-	t.Run("bounded", func(t *testing.T) {
+	t.Run("bounded and marked", func(t *testing.T) {
 		got := o.fixResponseText(finish(strings.Repeat("x", 3*fixResponseMaxBytes)))
 
-		assert.Len(t, got, fixResponseMaxBytes)
+		assert.LessOrEqual(t, len(got), fixResponseMaxBytes)
+		assert.True(t, strings.HasSuffix(got, fixResponseTruncated), "a cut response says so")
+	})
+
+	t.Run("bounded after escaping", func(t *testing.T) {
+		// Exactly at the bound before escaping; every line grows by one byte.
+		got := o.fixResponseText(finish(strings.Repeat("#\n", fixResponseMaxBytes/2)))
+
+		assert.LessOrEqual(t, len(got), fixResponseMaxBytes)
 	})
 
 	t.Run("redacted before it is bounded", func(t *testing.T) {
-		// The secret straddles the bound: cutting first would leave a prefix
-		// of it that the redactor no longer recognizes.
-		msg := strings.Repeat("x", fixResponseMaxBytes-4) + fixResponseSecret
+		// The secret straddles the cut: cutting first would leave a prefix of
+		// it that the redactor no longer recognizes.
+		msg := strings.Repeat("x", fixResponseMaxBytes-len(fixResponseTruncated)-4) + fixResponseSecret +
+			strings.Repeat("y", fixResponseMaxBytes)
 
 		assert.NotContains(t, o.fixResponseText(finish(msg)), fixResponseSecret[:4])
 	})
 
-	t.Run("headings escaped", func(t *testing.T) {
-		got := o.fixResponseText(finish("fix(a): x\n## Plan\n  ### Fix response"))
+	t.Run("headings and fences escaped", func(t *testing.T) {
+		got := o.fixResponseText(finish("fix(a): x\n## Plan\n  ### Fix response\n\u00a0## Review Approval\n\v# x\n" +
+			"```go\n  ~~~\n\u2003```\nkept b.go"))
 
 		for line := range strings.SplitSeq(got, "\n") {
-			assert.False(t, strings.HasPrefix(strings.TrimSpace(line), "#"), "line %q", line)
+			opened := strings.TrimLeftFunc(line, unicode.IsSpace)
+
+			for _, markup := range []string{"#", "```", "~~~"} {
+				assert.False(t, strings.HasPrefix(opened, markup), "line %q opens %q", line, markup)
+			}
 		}
+
+		assert.True(t, strings.HasSuffix(got, "\nkept b.go"), "plain lines are kept as they are")
 	})
 
 	t.Run("absent", func(t *testing.T) {
