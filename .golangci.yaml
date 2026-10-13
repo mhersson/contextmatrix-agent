@@ -75,3 +75,4 @@ issues:
 formatters:
   enable:
   - goimports
+  - gofumpt
