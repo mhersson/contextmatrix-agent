@@ -4452,10 +4452,11 @@ func TestFixModelRefusalNamesItsRealCause(t *testing.T) {
 }
 
 // The terminal, last-chance fix before a park is floored at TierComplex, which
-// buys it at least 1.5x the base turns. Sourcing the fix
-// budget from the CARD's budget would silently cut a third of the turns off the
-// one run where running out ends the run rather than deferring it - and would
-// re-conflate exactly what the two-axis split exists to separate.
+// buys it at least 1.5x the base turns. Sourcing the fix budget from the CARD's
+// budget would silently cut a third of the turns off the one fix whose cap ends
+// the run when it has committed nothing, rather than deferring to another
+// round - and would re-conflate exactly what the two-axis split exists to
+// separate.
 func TestFixBudgetComesFromTheFixBarNotTheCard(t *testing.T) {
 	ops := &fakeOps{}
 	o := newReviewRun(reviewTestDeps(t, ops, &fakeGit{}, &planLLM{}, reviewerRegistry()),
@@ -4503,7 +4504,7 @@ func TestFixBarBaseFloorsCriticalFindingsAtTheCardBar(t *testing.T) {
 		{
 			name: "an omitted fix_tier falls back to the card bar",
 			card: registry.TierComplex,
-			req:  fixRequest{CriticalFinding: true},
+			req:  fixRequest{},
 			want: registry.TierComplex,
 		},
 		{
@@ -7146,6 +7147,16 @@ func TestFixResponseRidesWithTheFindingsItAnswered(t *testing.T) {
 				o.recordFixResponse(t.Context(), fixRequest{Findings: tail, Round: 1}, "fix(test): correct the expectation")
 			},
 			want: priorFindingsBlock(tail) + fixResponseBlock("fix(test): correct the expectation"),
+		},
+		{
+			name: "an empty verify fix response clears the earlier verify fix's",
+			seed: func(o *run) {
+				o.recordRoundFindings(tail)
+				o.recordFixResponse(t.Context(), fixRequest{Findings: tail, Round: 1}, "fix(test): correct the expectation")
+				o.recordRoundFindings(tail)
+				o.recordFixResponse(t.Context(), fixRequest{Findings: tail, Round: 2}, "")
+			},
+			want: priorFindingsBlock(tail),
 		},
 		{
 			name: "an empty response clears an earlier one",

@@ -698,6 +698,50 @@ func TestRunFSMGenericErrorLogsTheReasonOnTheCard(t *testing.T) {
 	assert.Contains(t, line, "final cause", "the tail of the error survives the bound")
 }
 
+// TestRunFailureLineRedactsBeforeTheCut: a secret straddling either cut of the
+// head-and-tail bound is redacted whole first. Bounding first would leave a
+// fragment on each side that the redactor no longer recognizes.
+func TestRunFailureLineRedactsBeforeTheCut(t *testing.T) {
+	t.Parallel()
+
+	const (
+		secret  = "Zq9vSecretTokenXy7Wm"
+		overlap = 6
+		prefix  = len("run failed: ")
+	)
+
+	head := runFailureLogMax * 2 / 3
+	tail := runFailureLogMax - head
+
+	redact := func(s string) string { return strings.ReplaceAll(s, secret, "[REDACTED]") }
+
+	rows := []struct {
+		name  string
+		cause string
+	}{
+		{
+			name:  "across the head cut",
+			cause: strings.Repeat("a", head-prefix-overlap) + secret + strings.Repeat("b", 2*runFailureLogMax),
+		},
+		{
+			name:  "across the tail cut",
+			cause: strings.Repeat("a", 2*runFailureLogMax) + secret + strings.Repeat("b", tail+overlap-len(secret)),
+		},
+	}
+
+	for _, tt := range rows {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			line := runFailureLine(redact, errors.New(tt.cause))
+
+			for i := 0; i+overlap <= len(secret); i++ {
+				assert.NotContains(t, line, secret[i:i+overlap])
+			}
+		})
+	}
+}
+
 // TestRunFailureLineStaysValidUTF8: the bound cuts on byte offsets, so a cut
 // inside a multi-byte character must not leave invalid UTF-8 on the card. The
 // three pad widths land the head cut inside a character at least once; the

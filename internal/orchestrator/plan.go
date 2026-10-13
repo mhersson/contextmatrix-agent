@@ -130,7 +130,7 @@ func parsePlan(s string) (plan, error) {
 	titleIndex := make(map[string]int, len(p.Subtasks))
 
 	for i, st := range p.Subtasks {
-		title := strings.ToLower(strings.TrimSpace(st.Title))
+		title := normalizeCardTitle(st.Title)
 		if title == "" {
 			return plan{}, fmt.Errorf("subtask %d has an empty title", i)
 		}
@@ -1219,11 +1219,12 @@ func presentPlan(p plan) string {
 // "## Split" section - the format formatSplitSection writes.
 var splitSectionEntry = regexp.MustCompile(`^-\s+(\S+):\s+(.+)$`)
 
-// normalizeFollowupTitle trims and lowercases a followup title for dedupe
-// comparison, matching CM's own subtask-dedupe normalization (trimmed,
-// case-insensitive) so a re-planned followup with the identical title is
-// recognized as the same card regardless of casing or stray whitespace.
-func normalizeFollowupTitle(title string) string {
+// normalizeCardTitle trims and lowercases a card title for dedupe comparison,
+// matching CM's own subtask-dedupe normalization (trimmed, case-insensitive).
+// The plan's duplicate-subtask check and the followup dedupe share it, so a
+// re-planned followup with the identical title is recognized as the same card,
+// and two subtasks CM would merge are refused, by the same rule.
+func normalizeCardTitle(title string) string {
 	return strings.ToLower(strings.TrimSpace(title))
 }
 
@@ -1245,7 +1246,7 @@ func parseSplitSection(body string) map[string]string {
 			continue
 		}
 
-		out[normalizeFollowupTitle(m[2])] = m[1]
+		out[normalizeCardTitle(m[2])] = m[1]
 	}
 
 	return out
@@ -1314,7 +1315,7 @@ func (o *run) createFollowups(ctx context.Context, p plan) error {
 			depIDs = append(depIDs, ids[dep])
 		}
 
-		id, reused := existing[normalizeFollowupTitle(fc.Title)]
+		id, reused := existing[normalizeCardTitle(fc.Title)]
 		if !reused {
 			var err error
 
