@@ -12,7 +12,6 @@ package orchestrator
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -140,13 +139,6 @@ type Config struct {
 	// model runs. Disabled (the zero value) preserves the hard context_limit
 	// stop, which is the agent's default behavior.
 	Compaction Compaction
-
-	// Provider is the raw OpenRouter provider-routing object (e.g.
-	// require_parameters/order/sort) applied to every phase model run via
-	// harnessConfig and inherited by review subagents. nil = default routing.
-	// No serve/work env knob populates it yet; it is the orchestrator-level
-	// seam mirroring the standalone run command's provider config.
-	Provider json.RawMessage
 
 	// Verify is the operator-declared verify gate (CM's card-over-project
 	// resolution), delivered via CMX_VERIFY. nil means nothing declared - the

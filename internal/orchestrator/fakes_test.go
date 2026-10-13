@@ -855,10 +855,8 @@ type planLLM struct {
 	models    []string
 	i         int
 
-	// providers/reasonings capture each request's raw routing objects
-	// (index-aligned with models) so propagation tests can assert children
-	// inherit the parent routing.
-	providers  []json.RawMessage
+	// reasonings captures each request's raw reasoning object (index-aligned
+	// with models) so propagation tests can assert children inherit it.
 	reasonings []json.RawMessage
 
 	// toolCounts captures len(req.Tools) for every call, index-aligned with
@@ -893,7 +891,6 @@ func (p *planLLM) next(req llm.Request) (llm.Response, error) {
 	call := len(p.models) + 1
 
 	p.models = append(p.models, req.Model)
-	p.providers = append(p.providers, req.Provider)
 	p.reasonings = append(p.reasonings, req.Reasoning)
 	p.toolCounts = append(p.toolCounts, len(req.Tools))
 	p.msgsPerCall = append(p.msgsPerCall, append([]llm.Message(nil), req.Messages...))

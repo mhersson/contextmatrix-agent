@@ -103,10 +103,10 @@ func reviewerRegistry() *registry.Registry {
 	return registry.NewRegistryFromParts(reviewerCatalog(), priors, nil, nil, "default/model")
 }
 
-// TestReviewSubagentsInheritRouting pins the harness v0.7.x propagation
-// contract: the three review specialists (SubagentOpts) and the synthesis call
-// (harnessConfig) all carry the parent run's provider and reasoning routing,
-// derived from the same builder so they can never drift.
+// TestReviewSubagentsInheritRouting pins the propagation contract: the three
+// review specialists (SubagentOpts) and the synthesis call (harnessConfig) all
+// carry the parent run's reasoning config, derived from the same builder so
+// they can never drift.
 func TestReviewSubagentsInheritRouting(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{}
@@ -118,7 +118,6 @@ func TestReviewSubagentsInheritRouting(t *testing.T) {
 	}}
 	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
 	d.Cfg.ReasoningEffort = "high"
-	d.Cfg.Provider = json.RawMessage(`{"require_parameters":true}`)
 
 	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
 	o := newReviewRun(d, tc, 0)
@@ -128,10 +127,9 @@ func TestReviewSubagentsInheritRouting(t *testing.T) {
 	client.mu.Lock()
 	defer client.mu.Unlock()
 
-	require.Len(t, client.providers, 4, "3 specialists + 1 synthesis")
+	require.Len(t, client.reasonings, 4, "3 specialists + 1 synthesis")
 
-	for i := range client.providers {
-		assert.JSONEq(t, `{"require_parameters":true}`, string(client.providers[i]), "call %d must carry the provider routing", i)
+	for i := range client.reasonings {
 		assert.JSONEq(t, `{"effort":"high"}`, string(client.reasonings[i]), "call %d must carry the reasoning config", i)
 	}
 }
