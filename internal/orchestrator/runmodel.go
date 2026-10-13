@@ -85,6 +85,10 @@ func (o *run) harnessConfig(model string) harness.Config {
 	// models that don't support it are unaffected.
 	cfg.Reasoning = reasoningRaw(o.d.Cfg.ReasoningEffort)
 
+	if o.progress != nil {
+		cfg.OnDelta = o.progress.onDelta
+	}
+
 	return cfg
 }
 

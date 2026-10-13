@@ -278,6 +278,15 @@ func TestAgentMapExtra(t *testing.T) {
 			wantOK: false,
 		},
 		{
+			// The worker's idle-watchdog liveness marker: the output pump counts
+			// the line, and an arm here would put a content-free row on the live
+			// stream every half minute of a long turn.
+			name:   "model_progress kind is not mapped",
+			kind:   "model_progress",
+			data:   nil,
+			wantOK: false,
+		},
+		{
 			name:   "unknown kind is not mapped",
 			kind:   "unknown",
 			data:   nil,

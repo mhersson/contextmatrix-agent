@@ -64,6 +64,14 @@ All subagents - subtask workers and reviewers - run in-process inside that one
 container on one shared workspace. Writers run sequentially or on disjoint
 paths; only the read-only review panel fans out in parallel.
 
+The container's output is the serve-side idle watchdog's proof of life. While
+a model turn streams, the run emits a `model_progress` event at most every 30
+seconds, so a long reasoning turn is not reaped as idle. The event carries no
+model text - streamed fragments are unredacted - and the log bridge keeps it
+off the live stream; the durable run log records it. The review panel's
+fan-out takes no progress callback, so a specialist's turn stays silent until
+it ends.
+
 ## Review
 
 Three specialists - Correctness, Design & Maintainability, Security &

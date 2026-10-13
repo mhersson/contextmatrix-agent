@@ -330,6 +330,10 @@ type run struct {
 	// way in every cycle, and one card note says everything the fifth would.
 	threadWriteFailNoted bool
 
+	// progress marks streaming model turns on the transcript so the idle
+	// watchdog sees output during a long reasoning turn. nil without an emitter.
+	progress *progressMarker
+
 	// body is the live parent-card body the FSM accumulates run history into
 	// (## Diagnosis, ## Plan, ## Review Findings ...). Seeded from the task
 	// context at newRun; recordSection upserts a section and pushes the updated
@@ -651,6 +655,10 @@ func newRun(d Deps, tc cmclient.TaskContext) *run {
 	o.seatDebug = d.SeatDebugWriter
 	if o.seatDebug == nil {
 		o.seatDebug = io.Discard
+	}
+
+	if d.Emit != nil {
+		o.progress = newProgressMarker(d.Emit, time.Now)
 	}
 
 	o.planFn = func(ctx context.Context) error { return runPlan(ctx, o) }
