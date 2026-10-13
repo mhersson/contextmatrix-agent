@@ -1227,7 +1227,7 @@ func TestSalvageDeclineOnVerifyFailureRaisesBothInOneWrite(t *testing.T) {
 // the work did not fit in the turns it had; it says nothing at all about
 // whether the model was capable of doing it. The earliest decline branch, where
 // a capped subtask committed nothing, carries the rest of the park consequences
-// too - the leaderboard still gets its "failed" row.
+// too - the outcome ledger still gets its "failed" row.
 func TestSalvageDeclineOnCleanTreeRaisesBudgetNeverBar(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: false} // clean tree: nothing committed
@@ -1358,7 +1358,7 @@ func TestResizePreservesForeignMarkerKeys(t *testing.T) {
 // about quality AND volume, and gets the same composed correction the capped
 // path already makes - a window exhausted without raising *MaxTurnsError must
 // not buy a weaker correction than one that raised it. The exhaustion signature
-// is the same exemption the capped path's leaderboard report takes: a test
+// is the same exemption the capped path's outcome report takes: a test
 // command whose inner fork dies under a pids limit exits non-zero and is
 // classified failed, and that is the container, not the model.
 func TestPrecommitVerifyEvidenceMovesTheAxisTheEvidenceIsAbout(t *testing.T) {
@@ -1909,7 +1909,7 @@ func TestSoloTurnCapSalvageReportsWinOutcome(t *testing.T) {
 // the turn budget and the marker is left untouched, so a pids-limit incident
 // cannot buy the card a permanently (or even temporarily) wider window - there
 // is no in-process retry to spend a wider figure on anyway. The bar never
-// moves and the leaderboard row is withheld either way.
+// moves and the outcome row is withheld either way.
 func TestSalvageDeclineExhaustedVerifyLeavesBudgetUnchanged(t *testing.T) {
 	withFastVerifyRetryWait(t)
 
@@ -3249,7 +3249,7 @@ func TestRepairedSubtaskDoesNotRecordACoderWin(t *testing.T) {
 
 // TestRepairedSubtaskStillCompletes guards against over-correcting. A failed
 // MODEL outcome is not a failed subtask: the work was repaired, committed and
-// pushed, and the card still completes. Only the leaderboard row changes.
+// pushed, and the card still completes. Only the outcome row changes.
 func TestRepairedSubtaskStillCompletes(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true}
@@ -3454,7 +3454,7 @@ func TestStillRedGateUnderResourceExhaustionReportsNothing(t *testing.T) {
 // TestStillRedGateBudgetParkBeforeTheFixPassReportsNothing pins one of the
 // non-reporting arms: a ledger breach between the first red verify and the fix
 // pass parks the run with the bounded second chance never having run, so the
-// leaderboard claim "a fix pass could not rescue this work" was never earned.
+// outcome claim "a fix pass could not rescue this work" was never earned.
 // gateEvidence carries nothing on this exit and no row is written.
 func TestStillRedGateBudgetParkBeforeTheFixPassReportsNothing(t *testing.T) {
 	o, ops, _, client := stillRedFixture(t, 0.005)
@@ -3500,7 +3500,7 @@ func TestStillRedGateOnAResolutionErrorReportsNothing(t *testing.T) {
 // gate red is reported, not excused. Volume has never been an exemption in this
 // taxonomy - salvageSoloCapped reports failed on both its cap arms - and the
 // exhaustion flag's job is choosing which sizing axes applyPrecommitVerifyEvidence
-// raises, not whether the leaderboard hears about it.
+// raises, not whether the outcome ledger hears about it.
 //
 // Without this, an exemption keyed on the spent window would restore the exact
 // silence this reporting exists to end, and nothing else in the suite objects.
@@ -3621,7 +3621,7 @@ func TestBelowBarFailureIsNotChargedToTheModel(t *testing.T) {
 }
 
 // TestBelowBarSubtaskStillCompletes guards against over-correcting: skipping
-// the leaderboard row changes nothing about the work itself.
+// the outcome row changes nothing about the work itself.
 func TestBelowBarSubtaskStillCompletes(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true}
@@ -3635,7 +3635,7 @@ func TestBelowBarSubtaskStillCompletes(t *testing.T) {
 	require.NoError(t, runExecute(context.Background(), o))
 
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "CompleteTask:SUB-1"), 0,
-		"the repaired work still ships; only the leaderboard row changes")
+		"the repaired work still ships; only the outcome row is skipped")
 	assert.NotEmpty(t, git.pushBranches, "the subtask is still pushed")
 }
 

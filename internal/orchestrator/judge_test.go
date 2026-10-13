@@ -959,7 +959,7 @@ func TestDroppedAtBarCandidateStillReportsFailed(t *testing.T) {
 // TestBelowBarCandidateLossIsStillRecorded pins the edge of the suppression on
 // the judge path. A `loss` is not a failure: the model produced a real
 // implementation and another candidate's was judged better. That is a
-// comparative measurement the leaderboard is built to absorb, and it is the
+// comparative measurement the outcome ledger is built to absorb, and it is the
 // only signal a below-bar candidate that finished its work ever produces -
 // dropping it would leave the whole race unmeasured.
 func TestBelowBarCandidateLossIsStillRecorded(t *testing.T) {
