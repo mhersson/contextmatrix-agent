@@ -626,8 +626,8 @@ func (o *run) runReviewHITL(ctx context.Context, plan verifyPlan) error {
 
 			o.recordRoundFindings(findings)
 
-			if _, err := d.Ops.IncrementReviewAttempts(ctx, cfg.CardID); err != nil {
-				return fmt.Errorf("increment review attempts: %w", err)
+			if _, err := o.incrementReviewAttempt(ctx, findings); err != nil {
+				return err
 			}
 
 			committed, ferr := o.runFix(ctx, fixRequest{Findings: findings, Round: round, FixTier: fixTier})
@@ -646,11 +646,13 @@ func (o *run) runReviewHITL(ctx context.Context, plan verifyPlan) error {
 
 		o.recordRoundFindings(findings)
 
-		if _, err := d.Ops.IncrementReviewAttempts(ctx, cfg.CardID); err != nil {
-			return fmt.Errorf("increment review attempts: %w", err)
+		mandate := mergeFeedback(findings, fb)
+
+		if _, err := o.incrementReviewAttempt(ctx, mandate); err != nil {
+			return err
 		}
 
-		committed, ferr := o.runFix(ctx, fixRequest{Findings: mergeFeedback(findings, fb), Round: round, FixTier: fixTier})
+		committed, ferr := o.runFix(ctx, fixRequest{Findings: mandate, Round: round, FixTier: fixTier})
 		if err := o.continueCappedFix(ctx, round, committed, ferr); err != nil {
 			return err
 		}

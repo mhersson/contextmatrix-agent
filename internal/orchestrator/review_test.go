@@ -3669,6 +3669,51 @@ func TestReviewAuthoritativeSecondIncrementParksAtServerCap(t *testing.T) {
 	assert.Equal(t, 2, ops.incrementCalls, "the first increment must have succeeded")
 }
 
+// TestRunReviewHITLParksAtServerCap pins that both HITL fix sites absorb
+// ContextMatrix's review_attempts ceiling rejection as a review park, like
+// every autonomous increment site: the human's adjust and a mid-run promotion.
+func TestRunReviewHITLParksAtServerCap(t *testing.T) {
+	tests := []struct {
+		name  string
+		inbox *fakeInbox
+		// gate is the review-decision classification; nil when a promotion
+		// closes the inbox and the gate makes no model call.
+		gate []llm.Response
+	}{
+		{
+			name:  "the human asks for an adjustment",
+			inbox: &fakeInbox{msgs: []harness.UserMessage{{Content: "tighten error handling in a.go"}}},
+			gate:  []llm.Response{stopResp(`{"verdict":"adjust","feedback":"tighten error handling in a.go"}`, 0.001)},
+		},
+		{
+			// An empty inbox reports ErrInboxClosed, exactly what a promote frame produces.
+			name:  "the card was promoted mid-run",
+			inbox: &fakeInbox{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			capped := fmt.Errorf("increment review attempts: review attempts capped at 7: %w",
+				cmclient.ErrReviewAttemptsCapped)
+			ops := &fakeOps{incrementErr: capped}
+			git := &fakeGit{committed: true}
+			client := &planLLM{responses: slices.Concat(panelRejects("bug"), tt.gate)}
+
+			o := newRun(hitlReviewDeps(ops, git, tt.inbox, client), cmclient.TaskContext{Title: "T", Description: "b", State: "review"})
+			isolateVerify(o)
+
+			err := runReview(context.Background(), o)
+
+			var parked *ReviewParkedError
+
+			require.ErrorAs(t, err, &parked, "a ceiling rejection must park, not fail the run; got %v", err)
+			assert.Equal(t, reviewParkedServerCap, parked.Reason)
+			assert.Equal(t, -1, indexOfPrefix(git.recorded(), "CommitFixup:"), "no fix runs past the ceiling; git=%v", git.recorded())
+		})
+	}
+}
+
 // escalationRegistry seeds three coder candidates across two vendors at equal
 // price: every one clears the moderate bar (0.76) and alpha/coder wins on
 // quality; only alpha/second and beta/coder clear the complex bar (0.82), so an
