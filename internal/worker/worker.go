@@ -127,7 +127,7 @@ type RunSpec struct {
 
 	CompactionEnabled         bool    // CMX_COMPACTION_ENABLED; false (default) keeps the hard context_limit stop
 	CompactionThreshold       float64 // CMX_COMPACTION_THRESHOLD; fraction of the context window (default 0.85)
-	CompactionKeepRecentTurns int     // CMX_COMPACTION_KEEP_RECENT_TURNS; recent turns kept verbatim (default 6)
+	CompactionKeepRecentTurns int     // CMX_COMPACTION_KEEP_RECENT_TURNS; recent messages kept verbatim (default 6)
 
 	DefaultModel    string // CMX_DEFAULT_MODEL; fallback when Model is absent/unresolvable
 	ReasoningEffort string // CMX_REASONING_EFFORT; empty = off (no reasoning overhead)

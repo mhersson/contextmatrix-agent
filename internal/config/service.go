@@ -56,8 +56,8 @@ const defaultSecretsDir = "/var/run/cm-agent/secrets" //nolint:gosec // path, no
 // CompactionConfig configures the worker harness loop's optional in-window
 // context compaction. Enabled=false (the default) preserves the hard
 // context_limit stop; Threshold is the fraction of the context window at which
-// compaction fires, and KeepRecentTurns is how many recent turns to keep
-// verbatim.
+// compaction fires, and KeepRecentTurns is how many recent messages to keep
+// verbatim (messages, not turns, despite the name).
 type CompactionConfig struct {
 	Enabled         bool
 	Threshold       float64

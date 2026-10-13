@@ -264,8 +264,10 @@ tool_output_max_bytes: 131072
 # CMX_COMPACTION_THRESHOLD
 # compaction_threshold: 0.85
 
-# Number of most-recent turns kept verbatim when compacting. Must be >= 1 when
-# compaction is enabled. Default: 6.
+# Number of most-recent messages kept verbatim when compacting - messages, not
+# turns, despite the key name: a tool-using turn is an assistant message plus
+# one message per tool result. Must be >= 1 when compaction is enabled.
+# Default: 6.
 # CMX_COMPACTION_KEEP_RECENT_TURNS
 # compaction_keep_recent_turns: 6
 
