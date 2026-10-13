@@ -25,7 +25,7 @@ func TestCardBranchName(t *testing.T) {
 		want   string
 	}{
 		{"no source", "CMX-001", cmclient.CardSource{}, "cm/cmx-001"},
-		{"jira key appended uppercase", "CTXMAX-801", jira("PROJ-123"), "cm/ctxmax-801-PROJ-123"},
+		{"jira key appended uppercase", "CMX-002", jira("PROJ-123"), "cm/cmx-002-PROJ-123"},
 		{"jira key with digits and underscore", "CMX-001", jira("MY_PROJ2-7"), "cm/cmx-001-MY_PROJ2-7"},
 		{"lowercase card id stays lowercase", "cmx-001", jira("ABC-1"), "cm/cmx-001-ABC-1"},
 		{"key at the length cap", "CMX-001", jira(atCap), "cm/cmx-001-" + atCap},

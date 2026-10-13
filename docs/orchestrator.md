@@ -43,7 +43,7 @@ against `^[A-Za-z][A-Za-z0-9-]*-[0-9]+$` (PREFIX-NNN) before it reaches any
 refspec. A card imported from Jira (`source.system` is `jira`) whose
 `source.external_id` matches `^[A-Z][A-Z0-9_]+-[1-9][0-9]*$` and is at most 64
 bytes runs on `cm/<card-id>-<KEY>` instead, for example
-`cm/ctxmax-801-PROJ-123`. The key stays uppercase because GitHub for Jira links
+`cm/cmx-002-PROJ-123`. The key stays uppercase because GitHub for Jira links
 a branch to an issue only on an uppercase key; any other source or key keeps the
 plain name. The name derives only from the immutable card ID and source, so
 every run of a card, resumed or not, uses the same branch. The worker cuts it
