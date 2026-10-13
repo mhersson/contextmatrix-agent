@@ -108,6 +108,40 @@ func TestParsePlan(t *testing.T) {
 	})
 }
 
+// TestParsePlanRejectsDuplicateSubtaskTitles: CM's duplicate-subtask guard
+// returns the first card's ID for a second card of the same title, so a plan
+// whose titles collide would run one card twice and skip the other's work.
+func TestParsePlanRejectsDuplicateSubtaskTitles(t *testing.T) {
+	tests := []struct {
+		name    string
+		second  string
+		wantErr bool
+	}{
+		{name: "identical titles", second: "Add the parser", wantErr: true},
+		{name: "titles differing only in case", second: "add THE parser", wantErr: true},
+		{name: "titles differing only in surrounding space", second: "  Add the parser\t", wantErr: true},
+		{name: "distinct titles", second: "Wire the parser", wantErr: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := fmt.Sprintf(`{"card_tier":"simple","subtasks":[`+
+				`{"title":"Add the parser","description":"d","depends_on":[],"tier":"simple"},`+
+				`{"title":%q,"description":"d","depends_on":[0],"tier":"simple"}]}`, tt.second)
+
+			p, err := parsePlan(input)
+			if tt.wantErr {
+				require.Error(t, err)
+
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Len(t, p.Subtasks, 2)
+		})
+	}
+}
+
 func TestParsePlanFollowupsAndUnreachable(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -469,6 +503,36 @@ func TestPlanPhaseRepairLoop(t *testing.T) {
 	// Subtask created from the repaired plan.
 	require.Len(t, ops.createCardArgs, 1)
 	assert.Equal(t, "Only", ops.createCardArgs[0].title)
+}
+
+// TestPlanPhaseRepairsDuplicateSubtaskTitles: a plan whose subtask titles
+// collide takes the repair turn, and only the repaired plan's distinct
+// subtasks reach the board.
+func TestPlanPhaseRepairsDuplicateSubtaskTitles(t *testing.T) {
+	ops := &fakeOps{
+		taskContext: cmclient.TaskContext{Title: "Parent", Description: "body"},
+		createdIDs:  []string{"SUB-1", "SUB-2"},
+	}
+	duplicated := `{"card_tier":"simple","subtasks":[` +
+		`{"title":"Update the docs","description":"d","depends_on":[],"tier":"simple"},` +
+		`{"title":"update the docs","description":"d","depends_on":[0],"tier":"simple"}]}`
+	distinct := `{"card_tier":"simple","subtasks":[` +
+		`{"title":"Update the README","description":"d","depends_on":[],"tier":"simple"},` +
+		`{"title":"Update the guide","description":"d","depends_on":[0],"tier":"simple"}]}`
+	llmFake := &planLLM{responses: []llm.Response{
+		stopResp(duplicated, 0.01),
+		stopResp(distinct, 0.01),
+	}}
+	d := planTestDeps(ops, llmFake)
+
+	o := newRun(d, ops.taskContext)
+	require.NoError(t, runPlan(context.Background(), o))
+
+	assert.Len(t, llmFake.tasks, 2, "the duplicate-title plan takes the repair turn")
+
+	require.Len(t, ops.createCardArgs, 2)
+	assert.Equal(t, "Update the README", ops.createCardArgs[0].title)
+	assert.Equal(t, "Update the guide", ops.createCardArgs[1].title)
 }
 
 func TestPlanPhaseRepairExhausted(t *testing.T) {

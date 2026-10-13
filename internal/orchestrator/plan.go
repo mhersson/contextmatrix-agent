@@ -94,13 +94,14 @@ type subtaskRef struct {
 }
 
 // parsePlan extracts a JSON object from s (tolerating prose / code-fence wrap)
-// and validates it: 1..maxSubtasks subtasks, valid card and subtask tiers,
-// depends_on indices that reference only earlier subtasks (no self/forward
-// refs), non-empty followup_cards titles/descriptions with depends_on
-// indices referencing only earlier followup entries, and non-empty
-// unreachable_criteria criterion text. followup_cards and
-// unreachable_criteria are both optional and unvalidated against
-// maxFollowupCards - the cap is enforced where the plan is consumed, not here.
+// and validates it: 1..maxSubtasks subtasks with distinct titles (trimmed,
+// case-insensitive), valid card and subtask tiers, depends_on indices that
+// reference only earlier subtasks (no self/forward refs), non-empty
+// followup_cards titles/descriptions with depends_on indices referencing only
+// earlier followup entries, and non-empty unreachable_criteria criterion text.
+// followup_cards and unreachable_criteria are both optional and unvalidated
+// against maxFollowupCards - the cap is enforced where the plan is consumed,
+// not here.
 func parsePlan(s string) (plan, error) {
 	raw, ok := extractJSON(s)
 	if !ok {
@@ -124,10 +125,21 @@ func parsePlan(s string) (plan, error) {
 		return plan{}, fmt.Errorf("plan has %d subtasks, max %d", len(p.Subtasks), maxSubtasks)
 	}
 
+	// CM's duplicate-subtask guard hands back the first card's ID for a second
+	// card of the same title, so colliding titles would run one card twice.
+	titleIndex := make(map[string]int, len(p.Subtasks))
+
 	for i, st := range p.Subtasks {
-		if strings.TrimSpace(st.Title) == "" {
+		title := strings.ToLower(strings.TrimSpace(st.Title))
+		if title == "" {
 			return plan{}, fmt.Errorf("subtask %d has an empty title", i)
 		}
+
+		if first, ok := titleIndex[title]; ok {
+			return plan{}, fmt.Errorf("subtask %d repeats the title of subtask %d (%q); every subtask title must be distinct", i, first, strings.TrimSpace(st.Title))
+		}
+
+		titleIndex[title] = i
 
 		if !validTiers[st.Tier] {
 			return plan{}, fmt.Errorf("subtask %d has invalid tier %q (want simple|moderate|complex|critical)", i, st.Tier)
