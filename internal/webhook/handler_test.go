@@ -1043,9 +1043,10 @@ func TestMessage_RetryDuringBlockedWriteDeliversOnce(t *testing.T) {
 }
 
 // TestMessage_RetryDuringFailingWriteDelivers: when the first delivery fails
-// while a retry waits, the rollback lands before the retry's check, so the
-// retry delivers instead of being acked as a duplicate of a frame that never
-// arrived.
+// while a retry waits on the stdin lock, the retry delivers instead of being
+// acked as a duplicate of a frame that never arrived. It catches a dedup check
+// made outside the lock; it cannot tell Rollback-then-Unlock from the reverse,
+// whose window is too narrow for the waiting retry to land in.
 func TestMessage_RetryDuringFailingWriteDelivers(t *testing.T) {
 	h := newHarness(t, 4)
 	stdin := newGatedStdin(errors.New("pipe closed"))
