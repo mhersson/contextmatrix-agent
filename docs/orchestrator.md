@@ -40,7 +40,15 @@ back to soft-reset-to-merge-base plus a single squashed recommit.
 
 The work branch is `cm/<card-id>` (card ID lowercased); the ID is validated
 against `^[A-Za-z][A-Za-z0-9-]*-[0-9]+$` (PREFIX-NNN) before it reaches any
-refspec.
+refspec. A card imported from Jira (`source.system` is `jira`) whose
+`source.external_id` matches `^[A-Z][A-Z0-9_]+-[1-9][0-9]*$` and is at most 64
+bytes runs on `cm/<card-id>-<KEY>` instead, for example
+`cm/cmx-002-PROJ-123`. The key stays uppercase because GitHub for Jira links
+a branch to an issue only on an uppercase key; any other source or key keeps the
+plain name. The name derives only from the immutable card ID and source, so
+every run of a card, resumed or not, uses the same branch. The worker cuts it
+after reading the card context, and the FSM never re-derives it. Best-of-N
+candidates branch as `<card branch>-cK` and are never pushed.
 
 A playbook run arrives with `CM_CREATE_BASE_BRANCH=true`. When its base branch
 is missing on the remote, the worker clones `CM_BASE_BRANCH_FROM` (or the

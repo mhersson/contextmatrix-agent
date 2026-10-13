@@ -32,10 +32,10 @@ const cmEnvFile = "/run/cm-secrets/env"
 // and lower-case letters): a letter-led prefix of letters, digits, and dashes
 // (CM only requires the project prefix to be non-empty, so MY-PROJ-001 is a
 // legitimate ID), ending in a dash and a numeric suffix - exactly what CM's
-// server-side ID generator produces. The card ID becomes the cm/<id> work branch name, so this
-// conservative shape keeps crafted refs (colons, slashes, dots, spaces,
-// leading dashes) out of the push path entirely instead of relying on git's
-// refspec parser to reject them.
+// server-side ID generator produces. The card ID becomes part of the cm/ work
+// branch name, so this conservative shape keeps crafted refs (colons, slashes,
+// dots, spaces, leading dashes) out of the push path entirely instead of
+// relying on git's refspec parser to reject them.
 var cardIDPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9-]*-[0-9]+$`)
 
 // mcpCloseTimeout bounds the MCP client teardown: a slow or dead tunnel

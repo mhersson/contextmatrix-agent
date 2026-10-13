@@ -834,6 +834,49 @@ func cardLogMessages(ops *stubOps) []string {
 	return msgs
 }
 
+// TestOrchestratorEndToEndJiraKeyedBranch drives the full FSM for a card
+// imported from Jira: subtask pushes, the review round and the integrate lease
+// push all land on the keyed branch, and every report_push names it.
+func TestOrchestratorEndToEndJiraKeyedBranch(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in-process orchestrator e2e in -short mode")
+	}
+
+	t.Parallel()
+
+	remote := setupBareRemote(t)
+
+	backend := &scriptedBackend{
+		approveImmediately: true,
+		planCost:           0.0100,
+		coderCost:          0.0200,
+		documentCost:       0.0030,
+		specialistCost:     0.0050,
+		synthesisCost:      0.0100,
+	}
+
+	ops := newStubOps()
+	ops.tcx.Source = cmclient.CardSource{System: "jira", ExternalID: "PROJ-123"}
+
+	res, err := runOrchestratorE2E(t, remote, backend, ops)
+	require.NoError(t, err)
+	assert.Equal(t, "completed", res.Reason)
+
+	const branch = "cm/cmx-001-PROJ-123"
+
+	assert.Equal(t, []string{branch}, remoteCardBranches(t, remote), "the keyed branch is the only card branch on origin")
+
+	subjects := gitLog(t, remote, branch)
+	assert.Contains(t, subjects, "feat(app): add feature a")
+	assert.Contains(t, subjects, "feat(app): add feature b")
+
+	require.NotEmpty(t, ops.pushCalls, "integrate reports the push")
+
+	for _, p := range ops.pushCalls {
+		assert.Equal(t, branch, p.branch, "every reported push names the keyed branch")
+	}
+}
+
 // --- Test: gate-positive + one review fix loop -----------------------------
 
 // TestOrchestratorEndToEndFixLoop drives the FSM with a real verify gate (a

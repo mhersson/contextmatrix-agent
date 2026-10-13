@@ -192,8 +192,8 @@ const (
 	defaultWorkspace      = "/home/user/workspace"
 )
 
-// Run executes the card-scoped sequence for one container: clone the repo on
-// a work branch, claim the card, fetch its context, drive the FSM, then
+// Run executes the card-scoped sequence for one container: clone the repo,
+// claim the card, fetch its context, cut the work branch, drive the FSM, then
 // finalize. It builds the Inbox and the run-scoped context internally so the
 // inbox liveness contract holds: an end_session frame cancels runCtx, waking
 // any parked Wait.
@@ -221,33 +221,44 @@ func Run(ctx context.Context, spec RunSpec, ops CardOps, client llm.LLM, emit *e
 
 	go inbox.Pump(stdin)
 
-	branchName := "cm/" + strings.ToLower(spec.CardID)
-
 	ws := filepath.Join(spec.Workspace, strings.ToLower(spec.CardID))
 
 	git := NewGit(ws, secretsPathForAuth(spec), hostFromRepoURL(spec.RepoURL), spec.CACertFile)
 
-	resolvedBase, err := prepareWorkspace(ctx, git, spec, branchName)
-	if err != nil {
+	if err := prepareWorkspace(ctx, git, spec); err != nil {
 		return releaseWithError(ctx, ops, spec.CardID, err)
 	}
-
-	// prepareWorkspace resolved an empty base to the remote default and locked
-	// the push policy to it. Propagate the resolved base so the FSM's review
-	// diff and integrate rebase target a real ref (an empty base makes
-	// `git merge-base "" HEAD` fail).
-	spec.BaseBranch = resolvedBase
 
 	if err := ops.ClaimCard(ctx, spec.CardID); err != nil {
 		return releaseWithError(ctx, ops, spec.CardID, fmt.Errorf("claim card: %w", err))
 	}
 
-	// Worker bootstrap reads only scalar fields (Autonomous, Title); images are
-	// not used here and would be wasted bytes on this run-gating call.
+	// Worker bootstrap reads only scalar fields (Autonomous, Title, Source);
+	// images are not used here and would be wasted bytes on this run-gating call.
 	tcx, err := ops.GetTaskContext(ctx, spec.CardID, false)
 	if err != nil {
 		return releaseWithError(ctx, ops, spec.CardID, fmt.Errorf("get task context: %w", err))
 	}
+
+	// The branch name depends on the card's source, so it is cut only once the
+	// context is known; nothing pushes between the clone and this point.
+	branchName := cardBranchName(spec.CardID, tcx.Source)
+
+	if _, ok := jiraKey(tcx.Source); !ok && tcx.Source.System == jiraSourceSystem {
+		slog.Warn("jira key unusable for branch name; using card ID only",
+			"card", spec.CardID, "external_id", tcx.Source.ExternalID)
+	}
+
+	resolvedBase, err := cutCardBranch(ctx, git, spec, branchName)
+	if err != nil {
+		return releaseWithError(ctx, ops, spec.CardID, err)
+	}
+
+	// cutCardBranch resolved an empty base to the remote default and locked
+	// the push policy to it. Propagate the resolved base so the FSM's review
+	// diff and integrate rebase target a real ref (an empty base makes
+	// `git merge-base "" HEAD` fail).
+	spec.BaseBranch = resolvedBase
 
 	// Stalled-card recovery: the server's heartbeat-timeout sweep sets a card
 	// to "stalled" and clears its claim (e.g. after a mid-run MCP outage
@@ -273,20 +284,18 @@ func Run(ctx context.Context, spec RunSpec, ops CardOps, client llm.LLM, emit *e
 	})
 }
 
-// prepareWorkspace creates the clone parent, clones the repo, and cuts the work
-// branch. Clone requires the parent dir to exist and the workspace itself to
-// not exist yet, so the per-card workspace path stays fresh. On a playbook run
-// (CreateBaseBranch) a base branch missing on the remote is created from
-// BaseBranchFrom first, so later cards of the playbook clone the shared base.
-// It returns the resolved base branch (the spec base, or the clone's default
-// when the spec base is empty) so the caller can propagate it to the FSM.
-func prepareWorkspace(ctx context.Context, git *Git, spec RunSpec, branch string) (string, error) {
+// prepareWorkspace creates the clone parent and clones the repo. Clone requires
+// the parent dir to exist and the workspace itself to not exist yet, so the
+// per-card workspace path stays fresh. On a playbook run (CreateBaseBranch) a
+// base branch missing on the remote is created from BaseBranchFrom first, so
+// later cards of the playbook clone the shared base.
+func prepareWorkspace(ctx context.Context, git *Git, spec RunSpec) error {
 	if err := os.MkdirAll(spec.Workspace, 0o755); err != nil {
-		return "", fmt.Errorf("create workspace parent: %w", err)
+		return fmt.Errorf("create workspace parent: %w", err)
 	}
 
 	if spec.CreateBaseBranch && spec.BaseBranch == "" {
-		return "", errors.New("create base branch requested without a base branch")
+		return errors.New("create base branch requested without a base branch")
 	}
 
 	cloneBranch := spec.BaseBranch
@@ -295,7 +304,7 @@ func prepareWorkspace(ctx context.Context, git *Git, spec RunSpec, branch string
 	if spec.CreateBaseBranch && spec.BaseBranch != "" {
 		exists, err := git.RemoteBranchExists(ctx, spec.RepoURL, spec.BaseBranch)
 		if err != nil {
-			return "", fmt.Errorf("probe base branch %s: %w", spec.BaseBranch, err)
+			return fmt.Errorf("probe base branch %s: %w", spec.BaseBranch, err)
 		}
 
 		if !exists {
@@ -305,15 +314,23 @@ func prepareWorkspace(ctx context.Context, git *Git, spec RunSpec, branch string
 	}
 
 	if err := git.Clone(ctx, spec.RepoURL, cloneBranch); err != nil {
-		return "", fmt.Errorf("clone %s: %w", spec.RepoURL, err)
+		return fmt.Errorf("clone %s: %w", spec.RepoURL, err)
 	}
 
 	if createBase {
 		if err := git.CreateRemoteBranch(ctx, spec.BaseBranch); err != nil {
-			return "", fmt.Errorf("create base branch %s: %w", spec.BaseBranch, err)
+			return fmt.Errorf("create base branch %s: %w", spec.BaseBranch, err)
 		}
 	}
 
+	return nil
+}
+
+// cutCardBranch cuts the run's work branch from the cloned base and locks the
+// push policy to it. It returns the resolved base branch (the spec base, or the
+// clone's default when the spec base is empty) so the caller can propagate it
+// to the FSM.
+func cutCardBranch(ctx context.Context, git *Git, spec RunSpec, branch string) (string, error) {
 	if err := git.CreateBranch(ctx, branch); err != nil {
 		return "", fmt.Errorf("create branch %s: %w", branch, err)
 	}
@@ -330,8 +347,6 @@ func prepareWorkspace(ctx context.Context, git *Git, spec RunSpec, branch string
 
 	git.SetBranchPolicy(branch, baseBranch, remoteDefault)
 
-	// Return the resolved base so the FSM's review diff / integrate rebase
-	// target a real ref - an empty base makes `git merge-base "" HEAD` fail.
 	return baseBranch, nil
 }
 
