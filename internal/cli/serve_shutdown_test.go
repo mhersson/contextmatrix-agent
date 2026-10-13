@@ -1,12 +1,15 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"maps"
 	"net/http"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -276,4 +279,34 @@ func TestGracefulShutdownWaitEndsWithTheShutdownContext(t *testing.T) {
 
 	assert.Contains(t, h.exec.killedAt(), "CARD-1", "a cancelled wait goes straight to the kill sweep")
 	assert.Equal(t, 1, h.stdins["CARD-1"].endSessions())
+}
+
+func TestEndSessionsWarnsOnlyForARunItCouldNotReach(t *testing.T) {
+	tests := []struct {
+		name     string
+		behavior workerBehavior
+		exited   bool
+		wantWarn bool
+	}{
+		{name: "run exited before its end_session", behavior: ignores, exited: true},
+		{name: "run whose stdin refuses the frame", behavior: unreachable, wantWarn: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newShutdownHarness(t, time.Hour, map[string]workerBehavior{"CARD-1": tt.behavior})
+			live := h.drain.tracker.List()
+
+			if tt.exited {
+				h.drain.tracker.Remove("proj", "CARD-1")
+			}
+
+			var buf bytes.Buffer
+
+			h.drain.logger = slog.New(slog.NewJSONHandler(&buf, nil))
+
+			assert.Empty(t, h.drain.endSessions(live), "an unreached run is not waited on")
+			assert.Equal(t, tt.wantWarn, strings.Contains(buf.String(), `"level":"WARN"`))
+		})
+	}
 }
