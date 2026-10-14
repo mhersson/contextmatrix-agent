@@ -1002,7 +1002,7 @@ func (p *planLLM) next(req llm.Request) (llm.Response, error) {
 	}
 
 	if p.i >= len(p.responses) {
-		return llm.Response{FinishReason: "stop"}, nil
+		return llm.Response{Content: "done", FinishReason: "stop"}, nil
 	}
 
 	r := p.responses[p.i]

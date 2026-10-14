@@ -141,8 +141,8 @@ func TestProgressMarkerCarriesNoModelText(t *testing.T) {
 }
 
 // reasoningOnlyLLM streams reasoning fragments for one long turn and answers
-// with no content and no tool calls. Mid-stream it snapshots the transcript, so
-// a test can tell what the stream carried before the turn ended.
+// with a short final message and no tool calls. Mid-stream it snapshots the
+// transcript, so a test can tell what the stream carried before the turn ended.
 type reasoningOnlyLLM struct {
 	clock     *stepClock
 	gap       time.Duration
@@ -166,7 +166,7 @@ func (r *reasoningOnlyLLM) SendStream(_ context.Context, _ llm.Request, onDelta 
 
 	r.midTurn = r.out.String()
 
-	return llm.Response{FinishReason: "stop"}, nil
+	return llm.Response{Content: "done", FinishReason: "stop"}, nil
 }
 
 func TestRunModelSignalsProgressDuringReasoningTurn(t *testing.T) {
