@@ -10,6 +10,7 @@ import (
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-harness/events"
+	"github.com/mhersson/contextmatrix-harness/harness"
 	"github.com/mhersson/contextmatrix-harness/llm"
 	"github.com/mhersson/contextmatrix-harness/tools"
 	"github.com/stretchr/testify/assert"
@@ -344,6 +345,55 @@ func TestWritePRBodyAppendsVerificationTrailer(t *testing.T) {
 			assert.Contains(t, body, "**Verification:** "+tc.want, "the trailer is appended by code")
 		})
 	}
+}
+
+// TestOpenPRFallsBackOnEmptyBodyReplies: a PR-body model that only ever replies
+// empty must not fail a finished run. The PR opens on a body built from the
+// prompt's own inputs, and the empty calls' spend is still reported.
+func TestOpenPRFallsBackOnEmptyBodyReplies(t *testing.T) {
+	ops := &fakeOps{}
+	pr := &fakePR{url: "https://example.test/pr/9"}
+	empty := llm.Response{FinishReason: "stop", Usage: llm.Usage{Cost: 0.01}}
+	client := &planLLM{responses: []llm.Response{empty, empty, empty}}
+	d := integrateTestDeps(ops, &fakeGit{}, pr, client)
+
+	o := newIntegrateRun(d, cmclient.TaskContext{Title: "Add retries", Description: "b"}, 0)
+	o.subtasks = []subtaskRef{{ID: "SUB-1", Title: "Wire the retry loop"}}
+	o.reviewSummary = "approved: retries are bounded"
+	o.lastVerify = verifyResult{Status: verifyPassed}
+	o.verify = &verifyPlan{Argv: []string{"x"}, Display: "make test", Source: verifySourceDeclared}
+
+	url, err := o.openPR(context.Background())
+	require.NoError(t, err, "an empty PR-body model must not fail the run")
+	assert.Equal(t, pr.url, url)
+
+	require.Len(t, pr.calls, 1)
+	body := pr.calls[0].body
+	assert.Contains(t, body, o.planOverview(), "the fallback body carries the plan overview")
+	assert.Contains(t, body, o.reviewOutcome(), "the fallback body carries the review outcome")
+	assert.Contains(t, body, verifyStatusLine(o.lastVerify, o.resolvedVerifyPlan()),
+		"the verification line is still appended by code")
+
+	require.Len(t, ops.usageReports, 1, "the PR-body call's spend is reported")
+	assert.InDelta(t, 0.03, ops.usageReports[0].ActualCostUSD, 1e-9, "every empty reply is charged")
+	assert.InDelta(t, 0.03, o.ledger.Spent(), 1e-9)
+}
+
+// TestOpenPRFailsOnOtherBodyErrors: only an empty-reply failure falls back; any
+// other PR-body run error still fails openPR before a PR is created.
+func TestOpenPRFailsOnOtherBodyErrors(t *testing.T) {
+	ops := &fakeOps{}
+	pr := &fakePR{url: "https://example.test/pr/9"}
+	client := &planLLM{errAfter: 1}
+	d := integrateTestDeps(ops, &fakeGit{}, pr, client)
+
+	o := newIntegrateRun(d, cmclient.TaskContext{Title: "Add retries", Description: "b"}, 0)
+
+	_, err := o.openPR(context.Background())
+	require.ErrorIs(t, err, errPlanLLM)
+	require.NotErrorIs(t, err, harness.ErrEmptyResponse)
+	assert.Empty(t, pr.calls, "no PR is opened on a failed body run")
+	assert.Len(t, ops.usageReports, 1, "the failed call is still reported")
 }
 
 // TestWritePRBodyModelSelectionEmitted tests that writePRBody emits a

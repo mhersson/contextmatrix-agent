@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
+	"github.com/mhersson/contextmatrix-harness/harness"
 )
 
 // runIntegrate is the integrate phase: pure code with one optional model call
@@ -133,7 +134,9 @@ func (o *run) openPR(ctx context.Context) (string, error) {
 
 // writePRBody runs ONE orchestrator-model call that drafts the PR description
 // from the task, the plan overview, and the review outcome. Budget is checked
-// before the call and the spend is reported after.
+// before the call and the spend is reported after. A model that only replies
+// empty gets a mechanical body instead: the work is done and pushed by now, so
+// a missing description must not fail the run.
 func (o *run) writePRBody(ctx context.Context) (string, error) {
 	d := o.d
 	cfg := d.Cfg
@@ -150,16 +153,30 @@ func (o *run) writePRBody(ctx context.Context) (string, error) {
 
 	o.spendAndReport(ctx, o.ledger, cfg.CardID, "integrate: report PR-body usage failed", res, model, "main", dur)
 
-	if err != nil {
+	body := strings.TrimSpace(res.Output)
+
+	switch {
+	case errors.Is(err, harness.ErrEmptyResponse):
+		slog.Warn("integrate: PR-body model replied empty; using a mechanical body",
+			"card_id", cfg.CardID, "model", model, "error", err)
+		d.logCard(ctx, "integrate: PR-body model %s replied empty; the PR body lists the plan and review outcome instead", model)
+
+		body = o.mechanicalPRBody()
+	case err != nil:
 		return "", fmt.Errorf("PR-body run: %w", err)
 	}
 
 	// Mechanically append the verify status: the model-written body is not a
 	// guaranteed surface, so the honest verification line is added BY CODE and
 	// cannot be omitted or softened by the model.
-	body := strings.TrimSpace(res.Output)
-
 	return body + "\n\n---\n**Verification:** " + verifyStatusLine(o.lastVerify, o.resolvedVerifyPlan()) + "\n", nil
+}
+
+// mechanicalPRBody is the PR body built from the PR-body prompt's own inputs,
+// in the section layout that prompt asks the model for.
+func (o *run) mechanicalPRBody() string {
+	return "## What\n" + o.tc.Title + "\n\n## Plan overview\n" + strings.TrimSpace(o.planOverview()) +
+		"\n\n## Review\n" + o.reviewOutcome()
 }
 
 // planOverview renders the subtask titles as the PR body's plan-overview block.
