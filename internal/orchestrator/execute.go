@@ -431,9 +431,9 @@ func subtaskGateContext(subID string) string {
 // (boardOps false) holds no claim, so it runs no heartbeat and no complete.
 //
 // A solo attempt that leaves nothing to keep (*unproductiveAttempt) is charged
-// as failed, discarded, and re-run once one bar higher with its model excluded
-// for the rest of the run; a second one parks the card with
-// *UnproductiveSubtaskError. Both attempts run inside the claimed span.
+// as failed, discarded, and - budget permitting - re-run once one bar higher
+// with its model excluded for the rest of the run; a second one parks the card
+// with *UnproductiveSubtaskError. Both attempts run inside the claimed span.
 func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtaskRef) error {
 	if sc.boardOps {
 		stopHeartbeat := startSubtaskHeartbeat(ctx, o.d.Ops, sub.ID)
@@ -444,8 +444,10 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 
 	pick, err := o.attemptSubtask(ctx, sc, sub, start)
 
+	// Solo only: the handling below reports against the subtask claim and
+	// writes run-wide selection state, neither of which a candidate may touch.
 	first, ok := errors.AsType[*unproductiveAttempt](err)
-	if !ok {
+	if !ok || !sc.boardOps {
 		return err
 	}
 
@@ -457,6 +459,12 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 	}
 
 	o.coderFailed[pick.Model] = true
+
+	// The retry is a whole coder run: park before spending it, not after. Solo,
+	// so sc.ledger is the run ledger and one check covers both.
+	if err := sc.ledger.Check(); err != nil {
+		return err
+	}
 
 	// The same re-seed fixSizing applies to an escalating fix round: a climbed
 	// bar carries the window it would have opened at.
@@ -485,7 +493,7 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 
 	reason := unproductiveReason(first.reason, pick.Model, second.reason, retryPick.Model)
 
-	o.raiseSubtaskBar(ctx, sub, reason)
+	o.raiseSubtaskBarPastRetry(ctx, sub, reason)
 
 	return &UnproductiveSubtaskError{Subtask: sub.ID, Reason: reason}
 }
@@ -1305,9 +1313,9 @@ const sizingEscalationKind = "sizing_escalation"
 // Does not mutate sub.Sizing: this run is ending, and the marker is read back
 // only on the NEXT run.
 //
-// The axis carries both the transform and the words for it, chosen together in
-// one literal per trigger, so a mismatch between them is one visible edit rather
-// than two files apart.
+// The axis carries both the transform and the words for it, chosen together
+// per axis, so a mismatch between them is one visible edit rather than two
+// files apart.
 func (o *run) resizeSubtask(ctx context.Context, sub subtaskRef, why string, axis resizeAxis) {
 	tc, err := o.d.Ops.GetTaskContext(ctx, sub.ID, false)
 	if err != nil {
@@ -1352,10 +1360,11 @@ func (o *run) resizeSubtask(ctx context.Context, sub subtaskRef, why string, axi
 // resizeAxis pairs the transform one trigger applies with the words the card
 // log uses for it: the noun phrase that names the axis, and what a human can
 // still do about THAT axis once it is exhausted. Nothing here type-checks the
-// pairing - what the struct buys is co-location: all three are chosen together
-// in one literal per trigger, so a line naming the axis its trigger did not
-// move is one visible edit rather than two functions apart. Each trigger's
-// pairing is pinned by its own test case, and a fourth trigger needs one too.
+// pairing - what the struct buys is co-location: an axis's words live in one
+// literal with its transform (barAxis serves both bar triggers, which differ
+// only in how far they climb), so a line naming the axis its trigger did not
+// move is one visible edit rather than two functions apart. Each axis's pairing
+// is pinned by its own test case, and a new axis needs one too.
 type resizeAxis struct {
 	name   string
 	advice string
@@ -1468,13 +1477,27 @@ func (o *run) logEnvironmentalCapBudget(ctx context.Context, sub subtaskRef) {
 // The turn budget is untouched - a model that finished and was wrong did not
 // run out of room.
 func (o *run) raiseSubtaskBar(ctx context.Context, sub subtaskRef, why string) {
-	o.resizeSubtask(ctx, sub, why, resizeAxis{
+	o.resizeSubtask(ctx, sub, why, barAxis(sizing.raiseBar))
+}
+
+// raiseSubtaskBarPastRetry is raiseSubtaskBar after a failed escalated retry.
+// The retry already ran one rung up, and the model exclusion that steered it
+// ends with this run, so the next run opens one rung above the retry's bar
+// rather than on the bar that just failed.
+func (o *run) raiseSubtaskBarPastRetry(ctx context.Context, sub subtaskRef, why string) {
+	o.resizeSubtask(ctx, sub, why, barAxis(func(s sizing) sizing { return s.raiseBar().raiseBar() }))
+}
+
+// barAxis is the model-bar axis with the given climb, so every bar trigger
+// shares one name and one piece of advice.
+func barAxis(raise func(sizing) sizing) resizeAxis {
+	return resizeAxis{
 		name: "model bar",
 		// The top rung has no stronger tier above it, so the remaining lever is an
 		// explicit coder pin - the one selection path that ignores the ladder.
 		advice: "Split the subtask or pin a coder model for it.",
-		raise:  sizing.raiseBar,
-	})
+		raise:  raise,
+	}
 }
 
 // raiseSubtaskBoth records volume AND quality evidence arriving together: the

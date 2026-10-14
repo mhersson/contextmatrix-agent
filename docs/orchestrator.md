@@ -41,16 +41,18 @@ back to soft-reset-to-merge-base plus a single squashed recommit.
 A solo subtask whose attempt leaves HEAD where it started - nothing committed
 after the coder run, the pre-commit verify and its fix pass - did not do the
 subtask, since the planner gives every subtask files to touch and concrete
-actions. The attempt is reported `failed` for its model, its leftovers are
-discarded (index and tree reset to the attempt's start, untracked files it
-created removed), and the subtask re-runs once one bar higher with that model
-excluded from coder picks for the rest of the run (a pinned coder is still
-reused). A coder that ran `git commit` itself moved HEAD and is not caught
-here. If the retry also leaves no change, the run persists a raised bar on the
-subtask and parks the card as blocked with `UnproductiveSubtaskError`; a
-subtask whose work landed in an earlier session parks the same way, and a
-human marks it done and re-triggers. Best-of-N candidates are exempt: the
-judge verifies each candidate instead.
+actions. The attempt is reported `failed` for its model (unless the ladder
+walked down to that model), its leftovers are discarded (index and tree reset
+to the attempt's start, untracked files it created removed), and, budget
+permitting, the subtask re-runs once one bar higher - at critical, the same
+bar - with that model excluded from coder picks for the rest of the run (a
+pinned coder is still reused). A coder that ran `git commit` itself moved HEAD
+and is not caught here. If the retry also leaves no change, the run persists
+the subtask's bar one rung above the retry's (capped at critical; a critical
+subtask keeps its bar) and parks the card as blocked with
+`UnproductiveSubtaskError`; a subtask whose work landed in an earlier session
+parks the same way, and a human marks it done and re-triggers. Best-of-N
+candidates are exempt: the judge verifies each candidate instead.
 
 The work branch is `cm/<card-id>` (card ID lowercased); the ID is validated
 against `^[A-Za-z][A-Za-z0-9-]*-[0-9]+$` (PREFIX-NNN) before it reaches any

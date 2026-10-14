@@ -3828,9 +3828,11 @@ func TestUnproductiveAttemptRetriesOnceAtTheNextBar(t *testing.T) {
 
 // TestUnproductiveRetryParksTheCard: a retry that also leaves nothing parks the
 // card through the typed sentinel, charges both models, never completes the
-// subtask, and persists a raised bar for the next run. At critical the bar
-// cannot climb, so the retry differs only in its model; a pinned coder is
-// reused because pins always override.
+// subtask, and persists a bar one rung above the retry's: the exclusion that
+// steered the retry ends with the run, so the next run must not reopen on the
+// bar that just failed. The persisted bar stops at critical, where the retry
+// differs only in its model; a pinned coder is reused because pins always
+// override.
 func TestUnproductiveRetryParksTheCard(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -3842,8 +3844,16 @@ func TestUnproductiveRetryParksTheCard(t *testing.T) {
 		wantWrite  bool
 	}{
 		{
-			name: "moderate climbs and persists complex", tier: "moderate", registry: tierNamingRegistry(),
-			wantModels: []string{"tier/moderate", "tier/complex"}, wantBar: registry.TierComplex, wantWrite: true,
+			name: "moderate retries at complex and persists critical", tier: "moderate", registry: tierNamingRegistry(),
+			wantModels: []string{"tier/moderate", "tier/complex"}, wantBar: registry.TierCritical, wantWrite: true,
+		},
+		{
+			name: "simple retries at moderate and persists complex", tier: "simple", registry: tierNamingRegistry(),
+			wantModels: []string{"tier/simple", "tier/moderate"}, wantBar: registry.TierComplex, wantWrite: true,
+		},
+		{
+			name: "complex persists the critical cap", tier: "complex", registry: criticalPairRegistry(),
+			wantModels: []string{"critical/first", "critical/second"}, wantBar: registry.TierCritical, wantWrite: true,
 		},
 		{
 			name: "critical retries on another model", tier: "critical", registry: criticalPairRegistry(),
@@ -3851,7 +3861,7 @@ func TestUnproductiveRetryParksTheCard(t *testing.T) {
 		},
 		{
 			name: "a pinned coder is reused", tier: "moderate", registry: planTestRegistry(), pin: "pinned/model",
-			wantModels: []string{"pinned/model", "pinned/model"}, wantBar: registry.TierComplex, wantWrite: true,
+			wantModels: []string{"pinned/model", "pinned/model"}, wantBar: registry.TierCritical, wantWrite: true,
 		},
 	}
 
@@ -4079,6 +4089,77 @@ func TestUnreadableHeadJudgesTheAttemptByItsCommit(t *testing.T) {
 
 			assert.Len(t, client.models, 2, "the attempt that committed nothing is retried")
 			assert.Equal(t, tt.wantReset, git.hardResetRefs)
+		})
+	}
+}
+
+// TestUnproductiveRetryChecksTheBudgetFirst: the retry is a whole coder run, so
+// a first attempt that crossed the card's ceiling parks the run before the
+// retry spends anything - with the failed attempt already reported and
+// discarded.
+func TestUnproductiveRetryChecksTheBudgetFirst(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{commitResults: []bool{false, true}, headSHA: "base"}
+	client := &planLLM{responses: []llm.Response{
+		finishResp("feat: nothing", 0.10),
+		finishResp("feat: the work", 0.10),
+	}}
+	d := execTestDeps(ops, git, client)
+	d.Registry = tierNamingRegistry()
+
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("moderate")}}, 0.05)
+
+	err := runExecute(context.Background(), o)
+
+	var be *BudgetExceededError
+	require.ErrorAs(t, err, &be)
+
+	assert.Len(t, client.models, 1, "the retry never starts")
+
+	rows := soloRows(t, ops)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "failed", rows[0].Result)
+	assert.Equal(t, []string{"base"}, git.hardResetRefs, "the failed attempt is discarded before the park")
+	assert.Equal(t, -1, indexOfCall(ops.recorded(), "CompleteTask:SUB-1"))
+}
+
+// TestUnproductiveRetryReseedsItsTurnWindow: a climbed bar carries the window it
+// would have opened at, the rule fixSizing applies to an escalating fix round,
+// and never narrows a window the subtask already had.
+func TestUnproductiveRetryReseedsItsTurnWindow(t *testing.T) {
+	tests := []struct {
+		name       string
+		sizing     sizing
+		wantBudget int
+		wantTurns  int
+	}{
+		{name: "the base window widens with the bar", sizing: seedSizing("moderate"), wantBudget: 1, wantTurns: 15},
+		{name: "a wider window is kept", sizing: sizing{registry.TierModerate, 2}, wantBudget: 2, wantTurns: 20},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var transcript bytes.Buffer
+
+			ops := &fakeOps{}
+			git := &fakeGit{commitResults: []bool{false, true}, headSHA: "base"}
+			client := &planLLM{responses: []llm.Response{
+				finishResp("feat: nothing", 0.01),
+				finishResp("feat: the work", 0.02),
+			}}
+			d := execTestDeps(ops, git, client)
+			d.Registry = tierNamingRegistry()
+			d.Emit = events.NewEmitter(nil, &transcript)
+			d.Cfg.MaxTurns = 10
+
+			o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: tt.sizing}}, 0)
+			require.NoError(t, runExecute(context.Background(), o))
+
+			rows := eventsOfKind(t, &transcript, sizingObservationKind)
+			require.Len(t, rows, 2, "one observation per attempt")
+			assert.Equal(t, "complex", rows[1]["bar"])
+			assert.EqualValues(t, tt.wantBudget, rows[1]["budget_step"])
+			assert.EqualValues(t, tt.wantTurns, rows[1]["max_turns"])
 		})
 	}
 }
