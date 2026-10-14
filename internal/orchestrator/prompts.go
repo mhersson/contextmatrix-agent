@@ -459,7 +459,7 @@ discrepancy in your finish message, and stop - a confirmed absence discharges a
 // searches for work that never landed.
 func priorSubtasksBlock(prior []priorSubtask) string {
 	if len(prior) == 0 {
-		return "PRIOR SUBTASKS\nThis is the first subtask; nothing has been committed before it."
+		return "PRIOR SUBTASKS\nThis is the first subtask this run has reached."
 	}
 
 	var b strings.Builder
