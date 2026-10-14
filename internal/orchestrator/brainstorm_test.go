@@ -133,3 +133,13 @@ func TestBrainstormPromptOmitsRecordedHistory(t *testing.T) {
 	assert.Contains(t, client.tasks[0], "Add a palette.")
 	assert.NotContains(t, client.tasks[0], "old note", "recorded history stays out of the dialogue prompt")
 }
+
+func TestBrainstormEmptyReplyStreakKeepsWaiting(t *testing.T) {
+	inbox := &fakeInbox{} // closed inbox ends the dialogue after the turn
+	o := brainstormRun(&fakeOps{}, inbox, &planLLM{responses: emptyReplies()}, 0, 0)
+
+	design, err := o.runBrainstorm(context.Background(), fixedGateModel("payload/model"))
+
+	require.NoError(t, err)
+	assert.Empty(t, design)
+}

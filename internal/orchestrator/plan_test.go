@@ -2481,3 +2481,15 @@ func TestPlanDecisionReresolvesOffAnIncapableDiagnoseModel(t *testing.T) {
 	assert.Equal(t, []string{"rev/alpha"}, entryAnnouncements(ops),
 		"the phase announces its model once, at entry; the re-resolution does not re-announce")
 }
+
+func TestPlanPhaseEmptyReplyStreakTakesRepairTurn(t *testing.T) {
+	ops := &fakeOps{
+		taskContext: cmclient.TaskContext{Title: "Parent", Description: "body"},
+		createdIDs:  []string{"SUB-1"},
+	}
+	valid := `{"card_tier":"simple","subtasks":[{"title":"Only","description":"d","depends_on":[],"tier":"simple"}]}`
+	llmFake := &planLLM{responses: append(emptyReplies(), stopResp(valid, 0.03))}
+
+	require.NoError(t, runPlan(context.Background(), newRun(planTestDeps(ops, llmFake), ops.taskContext)))
+	assert.Len(t, ops.createCardArgs, 1)
+}
