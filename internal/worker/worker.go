@@ -603,6 +603,13 @@ func mapFSMResult(ctx context.Context, a fsmArgs, redact func(string) string, er
 		// failing command and output; the worker duplicates neither.
 		return parkBlocked(ctx, a, err)
 
+	case isUnproductiveSubtask(err):
+		// Unproductive-subtask park: a solo subtask left nothing to keep on its
+		// attempt and on the escalated retry. Mapped like the verify park; the
+		// orchestrator already reported both attempts while it held the subtask
+		// claim and wrote the card log line, so the worker duplicates neither.
+		return parkBlocked(ctx, a, err)
+
 	case isSplitOverflow(err):
 		// Split-overflow park: the plan phase refused to auto-create a
 		// follow-up split larger than the cap. Environmental-shaped like the
@@ -648,13 +655,13 @@ func runFailureLine(redact func(string) string, err error) string {
 	return strings.ToValidUTF8(tools.HeadTail(redact(msg), runFailureLogMax), "")
 }
 
-// parkBlocked maps one of the environmental park arms (toolchain-missing,
-// no-model, verify-parked) onto the shared blocked-park sequence. The genuinely
-// distinguishing step: transition the card to blocked BEFORE releasing the
-// claim, since ownership may be required for the transition. blocked is
-// project-configurable (not every .board.yaml declares in_progress ->
-// blocked), so a failure here is logged and the park still completes - never
-// fatal.
+// parkBlocked maps one of the blocked park arms (toolchain-missing, no-model,
+// verify-parked, unproductive-subtask, split-overflow) onto the shared
+// blocked-park sequence. The genuinely distinguishing step: transition the
+// card to blocked BEFORE releasing the claim, since ownership may be required
+// for the transition. blocked is project-configurable (not every .board.yaml
+// declares in_progress -> blocked), so a failure here is logged and the park
+// still completes - never fatal.
 func parkBlocked(ctx context.Context, a fsmArgs, err error) (Result, error) {
 	if terr := a.ops.TransitionCard(ctx, a.spec.CardID, "blocked"); terr != nil {
 		slog.Warn("transition to blocked failed; leaving card state as-is",
@@ -749,6 +756,14 @@ func isVerifyParked(err error) bool {
 	var vpe *orchestrator.VerifyParkedError
 
 	return errors.As(err, &vpe)
+}
+
+// isUnproductiveSubtask reports whether err is (or wraps) the orchestrator's
+// unproductive-subtask sentinel.
+func isUnproductiveSubtask(err error) bool {
+	var ue *orchestrator.UnproductiveSubtaskError
+
+	return errors.As(err, &ue)
 }
 
 // isSplitOverflow reports whether err is (or wraps) the orchestrator's

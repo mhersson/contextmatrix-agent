@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"strings"
 	"time"
 
@@ -208,6 +209,18 @@ type VerifyParkedError struct {
 
 func (e *VerifyParkedError) Error() string {
 	return fmt.Sprintf("subtask %s: `%s` still fails after one fix pass", e.Subtask, e.Command)
+}
+
+// UnproductiveSubtaskError parks a run whose solo subtask left nothing to keep
+// on its first attempt and again on the escalated retry. The worker maps it
+// like the verify park: blocked, WIP push, release.
+type UnproductiveSubtaskError struct {
+	Subtask string
+	Reason  string // what each attempt left behind, naming both models
+}
+
+func (e *UnproductiveSubtaskError) Error() string {
+	return fmt.Sprintf("subtask %s: %s", e.Subtask, e.Reason)
 }
 
 // preCommitVerify gates the coder's uncommitted work on the run's verify plan.
@@ -416,7 +429,165 @@ func subtaskGateContext(subID string) string {
 // for it to actually exit on every exit path (complete, error, park), so it can
 // never outlive the claim - or this function's return. A candidate solver
 // (boardOps false) holds no claim, so it runs no heartbeat and no complete.
+//
+// A solo attempt that leaves nothing to keep (*unproductiveAttempt) is charged
+// as failed, discarded, and re-run once one bar higher with its model excluded
+// for the rest of the run; a second one parks the card with
+// *UnproductiveSubtaskError. Both attempts run inside the claimed span.
 func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtaskRef) error {
+	if sc.boardOps {
+		stopHeartbeat := startSubtaskHeartbeat(ctx, o.d.Ops, sub.ID)
+		defer stopHeartbeat()
+	}
+
+	start := o.captureAttemptStart(ctx, sc)
+
+	pick, err := o.attemptSubtask(ctx, sc, sub, start)
+
+	first, ok := errors.AsType[*unproductiveAttempt](err)
+	if !ok {
+		return err
+	}
+
+	o.reportSoloOutcome(ctx, sub.ID, pick, "failed", false, sc.ledger.Spent()-start.spent)
+	o.discardAttempt(ctx, sc, start)
+
+	if o.coderFailed == nil {
+		o.coderFailed = map[string]bool{}
+	}
+
+	o.coderFailed[pick.Model] = true
+
+	// The same re-seed fixSizing applies to an escalating fix round: a climbed
+	// bar carries the window it would have opened at.
+	retry := sub
+	retry.Sizing = sub.Sizing.raiseBar()
+	retry.Sizing.Budget = max(retry.Sizing.Budget, seedBudgetStep(retry.Sizing.Bar))
+
+	reuse := ""
+	if pick.Source == registry.SourcePinned {
+		reuse = fmt.Sprintf(" (the coder model is pinned to %s, so the retry reuses it)", pick.Model)
+	}
+
+	o.d.logCard(ctx, "subtask %s: %s on model %s - discarding the attempt and retrying once at bar %s%s",
+		sub.ID, first.reason, pick.Model, retry.Sizing.Bar, reuse)
+
+	start = o.captureAttemptStart(ctx, sc)
+
+	retryPick, err := o.attemptSubtask(ctx, sc, retry, start)
+
+	second, ok := errors.AsType[*unproductiveAttempt](err)
+	if !ok {
+		return err
+	}
+
+	o.reportSoloOutcome(ctx, sub.ID, retryPick, "failed", false, sc.ledger.Spent()-start.spent)
+
+	reason := unproductiveReason(first.reason, pick.Model, second.reason, retryPick.Model)
+
+	o.raiseSubtaskBar(ctx, sub, reason)
+
+	return &UnproductiveSubtaskError{Subtask: sub.ID, Reason: reason}
+}
+
+// unproductiveAttempt marks a solo attempt that left nothing the run may keep.
+// executeClaimedWith treats every one alike, whatever produced it: report the
+// attempt failed, discard it, retry once, then park. reason is the card-log
+// phrase for what the attempt left behind.
+type unproductiveAttempt struct {
+	reason string
+}
+
+func (e *unproductiveAttempt) Error() string { return e.reason }
+
+// unproductiveReason names what each attempt left behind and the model it ran
+// on, folding the two into one phrase when they agree.
+func unproductiveReason(first, firstModel, second, secondModel string) string {
+	if first == second {
+		return fmt.Sprintf("%s on two attempts (%s, then %s)", first, firstModel, secondModel)
+	}
+
+	return fmt.Sprintf("%s (%s), then %s (%s)", first, firstModel, second, secondModel)
+}
+
+// attemptStart is the state one attempt began from: the ledger total its
+// outcome rows are measured against, and - solo only - the HEAD its result is
+// judged against and the untracked files a discard must leave alone.
+type attemptStart struct {
+	// spent is the ledger total before the attempt, so every solo outcome row
+	// carries only that attempt's cost - not the run's cumulative total, which
+	// would inflate every later row with every earlier attempt's spend (and, on
+	// a resumed run, whole prior sessions' spend). Known limit: Spent()
+	// reconciles local and server-reported totals via max(), not an additive
+	// meter, so against a cost-less gateway a resumed run's deltas can
+	// under-report (down to 0). Accepted: CostUSD is advisory.
+	spent float64
+
+	head    string
+	headErr error
+
+	untracked []string
+	listed    bool // false when the listing failed: a discard then removes no untracked file
+}
+
+// captureAttemptStart records where an attempt begins. A candidate reads no
+// git state: the guard and the checkpoint that consume it are solo-only.
+func (o *run) captureAttemptStart(ctx context.Context, sc *solverCtx) attemptStart {
+	start := attemptStart{spent: sc.ledger.Spent()}
+
+	if !sc.boardOps {
+		return start
+	}
+
+	start.head, start.headErr = sc.git.Head(ctx)
+
+	untracked, err := sc.git.UntrackedFiles(ctx)
+	if err != nil {
+		slog.Warn("execute: listing untracked files failed; a discarded attempt will keep any it creates",
+			"card_id", o.d.Cfg.CardID, "error", err)
+	}
+
+	start.untracked, start.listed = untracked, err == nil
+
+	return start
+}
+
+// headUnmoved reports whether HEAD is still where the attempt started. A coder
+// that ran git commit itself moved it and did produce work. An unreadable HEAD
+// at either end reads as unmoved, so the commit result alone decides.
+func (o *run) headUnmoved(ctx context.Context, sc *solverCtx, start attemptStart) bool {
+	err := start.headErr
+	if err == nil {
+		var head string
+
+		if head, err = sc.git.Head(ctx); err == nil {
+			return head == start.head
+		}
+	}
+
+	slog.Warn("execute: head read failed; judging the attempt by its commit alone",
+		"card_id", o.d.Cfg.CardID, "error", err)
+
+	return true
+}
+
+// discardAttempt returns the tree to the attempt's start, so the retry neither
+// builds on nor commits what the failed attempt left behind.
+func (o *run) discardAttempt(ctx context.Context, sc *solverCtx, start attemptStart) {
+	ref := start.head
+	if start.headErr != nil {
+		ref = "HEAD"
+	}
+
+	o.discardEdits(ctx, sc.git, ref, "execute", start.untracked, start.listed)
+}
+
+// attemptSubtask is one attempt at a claimed subtask: coder run, pre-commit
+// gate, commit, push, complete. A solo attempt that commits nothing and leaves
+// HEAD where it started returns *unproductiveAttempt with nothing reported or
+// completed, so the caller decides between a retry and a park. It returns the
+// coder pick the attempt ran on alongside any error.
+func (o *run) attemptSubtask(ctx context.Context, sc *solverCtx, sub subtaskRef, start attemptStart) (registry.Pick, error) {
 	d := o.d
 
 	// A tool verdict belongs to the subtask that earned it. Belt and braces on
@@ -426,32 +597,17 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 	// verdict from a subtask that is over.
 	sc.toolVerify = verifyToolPass{}
 
-	// Snapshot the ledger before this subtask's own spend, so every solo
-	// outcome report below carries only THIS subtask's cost delta - not the
-	// run's cumulative total, which would inflate every later subtask's row
-	// with every earlier subtask's spend (and, on a resumed run, with whole
-	// prior sessions' spend too). Known limit: Spent() reconciles local and
-	// server-reported totals via max(), not an additive meter, so against a
-	// cost-less gateway a resumed run's deltas can under-report (down to 0).
-	// Accepted: the result is the signal selection needs; CostUSD is advisory.
-	spendBefore := sc.ledger.Spent()
-
-	if sc.boardOps {
-		stopHeartbeat := startSubtaskHeartbeat(ctx, d.Ops, sub.ID)
-		defer stopHeartbeat()
-	}
-
-	// Capture the pre-run head when this subtask will checkpoint, so the
-	// discussion sees exactly the diff this subtask introduced. Solo path
-	// only - candidates never checkpoint (race isolation).
+	// The checkpoint diffs against the attempt's start head, so the discussion
+	// sees exactly the diff this subtask introduced. Solo path only -
+	// candidates never checkpoint (race isolation).
 	var checkpointBase string
 
 	if sc.boardOps && o.checkpointEligible(sub) {
-		if head, herr := sc.git.Head(ctx); herr == nil {
-			checkpointBase = head
+		if start.headErr == nil {
+			checkpointBase = start.head
 		} else {
 			slog.Warn("mob checkpoint: head read failed; skipping this checkpoint",
-				"card_id", o.d.Cfg.CardID, "subtask_id", sub.ID, "error", herr)
+				"card_id", o.d.Cfg.CardID, "subtask_id", sub.ID, "error", start.headErr)
 		}
 	}
 
@@ -461,12 +617,12 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 	res, pick, coderMaxTurns, err := o.runCoderWith(ctx, sc, sub, prompt)
 	if err != nil {
 		if o.salvageCapped(ctx, sc, sub, res, err) {
-			return nil
+			return pick, nil
 		}
 
-		salvaged, serr := o.salvageSoloCapped(ctx, sc, sub, pick, spendBefore, res, err)
+		salvaged, serr := o.salvageSoloCapped(ctx, sc, sub, pick, start.spent, res, err)
 		if salvaged {
-			return nil
+			return pick, nil
 		}
 
 		// serr is set only when verify resolution itself raised a sentinel
@@ -474,10 +630,10 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 		// MaxTurnsError so it reaches execute()'s dedicated park arm instead of
 		// parking as a plain turn-cap.
 		if serr != nil {
-			return serr
+			return pick, serr
 		}
 
-		return err
+		return pick, err
 	}
 
 	commitMsg := finishCommitMessage(res.CompletionArgs)
@@ -498,16 +654,22 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 			if vpe.Environmental {
 				o.logEnvironmentalVerify(ctx, sub)
 			} else {
-				o.reportSoloOutcome(ctx, sub.ID, pick, "failed", false, sc.ledger.Spent()-spendBefore)
+				o.reportSoloOutcome(ctx, sub.ID, pick, "failed", false, sc.ledger.Spent()-start.spent)
 			}
 		}
 
-		return verr
+		return pick, verr
 	}
 
 	committed, err := sc.git.CommitWithMessage(ctx, commitMsg)
 	if err != nil {
-		return fmt.Errorf("commit subtask %s: %w", sub.ID, err)
+		return pick, fmt.Errorf("commit subtask %s: %w", sub.ID, err)
+	}
+
+	// The planner gives every subtask files to touch and concrete actions, so a
+	// solo attempt that changed nothing did not do the subtask.
+	if sc.boardOps && !committed && o.headUnmoved(ctx, sc, start) {
+		return pick, &unproductiveAttempt{reason: "the coder left no change"}
 	}
 
 	// Execute checkpoint: the mob critiques the committed diff (and may run
@@ -518,13 +680,14 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 	}
 
 	// Push after every subtask so each unit of work is durable and the next
-	// subtask builds on a pushed base. A clean tree (nothing committed) skips the
-	// push but still completes the card. A push failure aborts the run - the
-	// spend has already been reported, so retry/resume must not double-charge.
-	// A candidate solver (sc.push false) never pushes: its work is judged in place.
+	// subtask builds on a pushed base. Only a commit made here pushes: a solo
+	// coder that committed on its own rides the next push. A push failure
+	// aborts the run - the spend has already been reported, so retry/resume
+	// must not double-charge. A candidate solver (sc.push false) never pushes:
+	// its work is judged in place.
 	if committed && sc.push {
 		if err := o.pushBranch(ctx); err != nil {
-			return fmt.Errorf("push after subtask %s: %w", sub.ID, err)
+			return pick, fmt.Errorf("push after subtask %s: %w", sub.ID, err)
 		}
 	}
 
@@ -544,14 +707,14 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 			result, verifyPass = "failed", false
 		}
 
-		o.reportSoloOutcome(ctx, sub.ID, pick, result, verifyPass, sc.ledger.Spent()-spendBefore)
+		o.reportSoloOutcome(ctx, sub.ID, pick, result, verifyPass, sc.ledger.Spent()-start.spent)
 
 		if err := d.Ops.CompleteTask(ctx, sub.ID, commitSubject(commitMsg, sub.Title)); err != nil {
-			return fmt.Errorf("complete subtask %s: %w", sub.ID, err)
+			return pick, fmt.Errorf("complete subtask %s: %w", sub.ID, err)
 		}
 	}
 
-	return nil
+	return pick, nil
 }
 
 // startSubtaskHeartbeat ticks ops.Heartbeat for cardID on
@@ -750,7 +913,7 @@ func (o *run) resolveCoderModel(ctx context.Context, sub subtaskRef, prompt stri
 	tier := sub.Sizing.Bar
 
 	if resolvePin(o.d.Registry, o.tc.ModelCoder) {
-		// A pinned model is returned even if it is in o.excluded: we never override
+		// A pinned model is returned even if it is excluded: we never override
 		// an explicit operator pin with an auto-selected substitute. A pinned model
 		// that is harness-incapable therefore keeps being re-selected, exhausts the
 		// re-selection cap, and parks - the blacklist still records it.
@@ -769,7 +932,7 @@ func (o *run) resolveCoderModel(ctx context.Context, sub subtaskRef, prompt stri
 		Role:      registry.RoleCoder,
 		Tier:      tier,
 		EstTokens: estimateTokens(prompt),
-		Exclude:   o.excluded,
+		Exclude:   o.coderExclusions(),
 	}
 
 	p, rep := o.d.Registry.SelectByComplexityReport(in)
@@ -780,6 +943,16 @@ func (o *run) resolveCoderModel(ctx context.Context, sub subtaskRef, prompt stri
 	o.noteShortfall(ctx, "coder", sub.ID, p, rep)
 
 	return p, nil
+}
+
+// coderExclusions is the solo coder pick's exclusion set: models proven
+// incapable this run plus models whose attempt left nothing to keep.
+func (o *run) coderExclusions() map[string]bool {
+	out := make(map[string]bool, len(o.excluded)+len(o.coderFailed))
+	maps.Copy(out, o.excluded)
+	maps.Copy(out, o.coderFailed)
+
+	return out
 }
 
 // subtaskBody returns the description text for a subtask: the planner's
@@ -880,9 +1053,9 @@ func (o *run) salvageCapped(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 // on reportSoloOutcome) - once it fires, a subsequent CompleteTask failure
 // gets no report of its own: the model's work already earned its win, and a
 // board-write hiccup afterward is not a second, contradictory outcome.
-// spendBefore is the run ledger's total at this subtask's start (captured by
+// spendBefore is the run ledger's total at this attempt's start (captured by
 // the caller before the coder run), so every report below carries this
-// subtask's own cost delta, not the run's cumulative spend.
+// attempt's own cost delta, not the run's cumulative spend.
 //
 // One more exemption applies underneath all of these and is NOT enumerated per
 // arm: a failure from a pick the ladder walked down is dropped inside
@@ -1066,7 +1239,7 @@ func (o *run) logSoloCapPark(ctx context.Context, subID, reason string) {
 //
 // Ledger semantics: the ledger is observability only - selection never reads
 // it - and a solo completion is not a comparative win; only a solo failure
-// carries signal. That is why the call site in executeClaimedWith reports
+// carries signal. That is why the call site in attemptSubtask reports
 // `failed` for a subtask the fix pass had to repair, even though the subtask
 // still ships.
 //
@@ -1269,7 +1442,7 @@ func (o *run) logEnvironmentalVerify(ctx context.Context, sub subtaskRef) {
 // verify outcome was environmental (resource-exhausted or skipped) left the
 // turn budget exactly where it was. Unlike raiseSubtaskBudget this makes no
 // board write and computes no raised value: salvageSoloCapped runs after the
-// attempt that hit the cap has already ended - the solo path has no
+// attempt that hit the cap has already ended - a capped attempt gets no
 // in-process retry - so nothing in this run or any future one would ever read
 // an in-run-only figure. Naming a target the budget "widened to" would be a
 // card-log claim with nothing behind it; naming the UNCHANGED value is the
@@ -1320,7 +1493,7 @@ func (o *run) raiseSubtaskBoth(ctx context.Context, sub subtaskRef, why string) 
 // applyPrecommitVerifyEvidence raises the subtask's sizing after a still-red
 // gate: a genuine failure is quality evidence (bar); a failure by a coder that
 // also spent its whole window is volume evidence too (bar and budget). An
-// environmental failure raises nothing, matching executeClaimedWith's
+// environmental failure raises nothing, matching attemptSubtask's
 // suppression of the outcome row. The raised marker is read by the next run.
 func (o *run) applyPrecommitVerifyEvidence(ctx context.Context, sub subtaskRef, environmental, exhausted bool) {
 	if environmental {

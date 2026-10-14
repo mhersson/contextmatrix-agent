@@ -406,25 +406,6 @@ func TestExecutePlainPushWhenNoStaleTip(t *testing.T) {
 	assert.Equal(t, "cm/card-1", git.pushBranches[0])
 }
 
-func TestExecuteCleanTreeSkipsPush(t *testing.T) {
-	ops := &fakeOps{}
-	git := &fakeGit{committed: false} // clean tree: nothing committed
-	llmFake := &planLLM{responses: []llm.Response{
-		finishResp("chore: noop", 0.02),
-	}}
-	d := execTestDeps(ops, git, llmFake)
-
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")}}, 0)
-	require.NoError(t, runExecute(context.Background(), o))
-
-	gitCalls := git.recorded()
-	assert.GreaterOrEqual(t, indexOfCall(gitCalls, "CommitWithMessage"), 0)
-	assert.Equal(t, -1, indexOfCall(gitCalls, "Push:cm/card-1"), "clean tree must skip push; git=%v", gitCalls)
-
-	// Subtask still completes.
-	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "CompleteTask:SUB-1"), 0)
-}
-
 func TestExecuteModelSelectionPin(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true}
@@ -1544,7 +1525,7 @@ func TestResizeAtTheCeilingEmitsNothing(t *testing.T) {
 // target it was raised to, because nothing raises it - never writes the card
 // body, and never emits a sizing_escalation event. There is no in-run
 // consumer for a raised figure (salvageSoloCapped runs after the attempt
-// that hit the cap has already ended, and the solo path has no in-process
+// that hit the cap has already ended, and a capped attempt gets no in-process
 // retry), so a raise here would be a log-line fiction; the event's own
 // contract is "the corrected bar is read by the NEXT run" (see
 // sizingEscalationKind), which nothing would ever satisfy.
@@ -3774,4 +3755,330 @@ func TestCapableDefaultIsNotAWalkDownSoItsFailureIsRecorded(t *testing.T) {
 	require.Len(t, rows, 1)
 	assert.Equal(t, "failed", rows[0].Result)
 	assert.Equal(t, "default/model", rows[0].Model, "the operator's fallback is what ran and what is measured")
+}
+
+// criticalPairRegistry has two coder models that both clear the critical bar,
+// the cheaper one picked first. The bar cannot climb past critical, so a
+// second pick can only differ from the first through the exclusion.
+func criticalPairRegistry() *registry.Registry {
+	return registry.NewRegistryFromParts(
+		llm.Catalog{
+			{ID: "critical/first", ContextLength: 200000, PromptPricePerTok: 1e-6, CompletionPricePerTok: 1e-6, SupportedParameters: []string{"tools"}},
+			{ID: "critical/second", ContextLength: 200000, PromptPricePerTok: 2e-6, CompletionPricePerTok: 2e-6, SupportedParameters: []string{"tools"}},
+			{ID: "capable/default", ContextLength: 200000, SupportedParameters: []string{"tools"}},
+		},
+		registry.Priors{Models: map[string]registry.PriorEntry{
+			"critical/first":  coderPrior(0.95),
+			"critical/second": coderPrior(0.95),
+		}},
+		nil, nil, "capable/default")
+}
+
+// soloRows flattens the solo outcome reports into one row per call, in order.
+func soloRows(t *testing.T, ops *fakeOps) []cmclient.ModelOutcome {
+	t.Helper()
+
+	var rows []cmclient.ModelOutcome
+
+	for _, batch := range ops.reportOutcomes {
+		require.Len(t, batch, 1, "a solo report carries exactly one row")
+		rows = append(rows, batch[0])
+	}
+
+	return rows
+}
+
+// TestUnproductiveAttemptRetriesOnceAtTheNextBar: a solo attempt that commits
+// nothing and leaves HEAD where it started is not a finished subtask. The
+// attempt is charged as failed on its own spend, and the subtask runs again
+// one bar higher; a retry that commits completes as normal.
+func TestUnproductiveAttemptRetriesOnceAtTheNextBar(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{commitResults: []bool{false, true}, headSHA: "base"}
+	client := &planLLM{responses: []llm.Response{
+		finishResp("feat: nothing", 0.01),
+		finishResp("feat: the work", 0.02),
+	}}
+	d := execTestDeps(ops, git, client)
+	d.Registry = tierNamingRegistry()
+
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("moderate")}}, 0)
+	require.NoError(t, runExecute(context.Background(), o))
+
+	assert.Equal(t, []string{"tier/moderate", "tier/complex"}, client.models,
+		"the retry runs one bar higher on a different model")
+
+	rows := soloRows(t, ops)
+	require.Len(t, rows, 2)
+	assert.Equal(t, "tier/moderate", rows[0].Model)
+	assert.Equal(t, "failed", rows[0].Result)
+	assert.InDelta(t, 0.01, rows[0].CostUSD, 1e-9, "the failed row carries only its own attempt's spend")
+	assert.Equal(t, "tier/complex", rows[1].Model)
+	assert.Equal(t, "win", rows[1].Result)
+	assert.InDelta(t, 0.02, rows[1].CostUSD, 1e-9, "the retry's row carries only its own spend")
+
+	calls := ops.recorded()
+	require.Equal(t, 1, countCalls(calls, "CompleteTask:SUB-1"))
+	assert.Equal(t, 2, countCalls(calls[:indexOfCall(calls, "CompleteTask:SUB-1")], "ReportModelOutcomes:SUB-1"),
+		"both rows are reported while the claim is held")
+	assert.Equal(t, []string{"cm/card-1"}, git.pushBranches, "the retry's commit is pushed")
+	assert.Zero(t, countCalls(calls, "UpdateCardBody:SUB-1"), "a retry that delivers persists no correction")
+	assert.Equal(t, -1, indexOfCall(calls, "ReleaseCard:SUB-1"), "the claim is held across the retry")
+}
+
+// TestUnproductiveRetryParksTheCard: a retry that also leaves nothing parks the
+// card through the typed sentinel, charges both models, never completes the
+// subtask, and persists a raised bar for the next run. At critical the bar
+// cannot climb, so the retry differs only in its model; a pinned coder is
+// reused because pins always override.
+func TestUnproductiveRetryParksTheCard(t *testing.T) {
+	tests := []struct {
+		name       string
+		tier       string
+		registry   *registry.Registry
+		pin        string
+		wantModels []string
+		wantBar    registry.Tier
+		wantWrite  bool
+	}{
+		{
+			name: "moderate climbs and persists complex", tier: "moderate", registry: tierNamingRegistry(),
+			wantModels: []string{"tier/moderate", "tier/complex"}, wantBar: registry.TierComplex, wantWrite: true,
+		},
+		{
+			name: "critical retries on another model", tier: "critical", registry: criticalPairRegistry(),
+			wantModels: []string{"critical/first", "critical/second"}, wantBar: registry.TierCritical,
+		},
+		{
+			name: "a pinned coder is reused", tier: "moderate", registry: planTestRegistry(), pin: "pinned/model",
+			wantModels: []string{"pinned/model", "pinned/model"}, wantBar: registry.TierComplex, wantWrite: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{taskContext: cmclient.TaskContext{
+				Description: legacyTierMarker("Implement the thing.", tt.tier),
+			}}
+			git := &fakeGit{headSHA: "base"}
+			client := &planLLM{responses: []llm.Response{
+				finishResp("feat: nothing", 0.01),
+				finishResp("feat: still nothing", 0.02),
+			}}
+			d := execTestDeps(ops, git, client)
+			d.Registry = tt.registry
+
+			o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing(tt.tier)}}, 0)
+			o.tc.ModelCoder = tt.pin
+
+			err := runExecute(context.Background(), o)
+
+			var ue *UnproductiveSubtaskError
+			require.ErrorAs(t, err, &ue)
+			assert.Equal(t, "SUB-1", ue.Subtask)
+			assert.True(t, isParkError(err), "the run must stop at a park arm")
+
+			assert.Equal(t, tt.wantModels, client.models)
+
+			rows := soloRows(t, ops)
+			require.Len(t, rows, 2)
+
+			for i, row := range rows {
+				assert.Equal(t, tt.wantModels[i], row.Model)
+				assert.Equal(t, "failed", row.Result)
+			}
+
+			assert.InDelta(t, 0.01, rows[0].CostUSD, 1e-9)
+			assert.InDelta(t, 0.02, rows[1].CostUSD, 1e-9)
+
+			calls := ops.recorded()
+			assert.Equal(t, -1, indexOfCall(calls, "CompleteTask:SUB-1"), "an unproductive subtask is never completed")
+
+			release := indexOfCall(calls, "ReleaseCard:SUB-1")
+			require.GreaterOrEqual(t, release, 0, "the claim is released on the park; calls=%v", calls)
+			assert.Equal(t, 2, countCalls(calls[:release], "ReportModelOutcomes:SUB-1"),
+				"both rows are reported while the claim is held")
+			assert.Empty(t, git.pushBranches)
+
+			if tt.wantWrite {
+				_, got := readMeta(ops.bodyFor("SUB-1"))
+				assert.Equal(t, tt.wantBar, got.Bar, "the next run starts from a raised bar")
+			} else {
+				assert.Zero(t, countCalls(calls, "UpdateCardBody:SUB-1"), "the bar is at its ceiling")
+			}
+		})
+	}
+}
+
+// TestCoderCommitOnItsOwnIsNotUnproductive: a coder that ran git commit itself
+// leaves nothing for CommitWithMessage, but HEAD moved, so the subtask did
+// produce work and completes as it always has.
+func TestCoderCommitOnItsOwnIsNotUnproductive(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{headSHAs: []string{"base", "moved"}}
+	client := &planLLM{responses: []llm.Response{finishResp("feat: x", 0.01)}}
+	d := execTestDeps(ops, git, client)
+
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")}}, 0)
+	require.NoError(t, runExecute(context.Background(), o))
+
+	assert.Len(t, client.models, 1, "one attempt, no retry")
+	assert.Equal(t, 1, countCalls(ops.recorded(), "CompleteTask:SUB-1"))
+
+	rows := soloRows(t, ops)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "win", rows[0].Result)
+	assert.Empty(t, git.hardResetRefs, "nothing is discarded")
+	assert.Empty(t, git.pushBranches, "only a commit the run made pushes; the coder's own rides the next push")
+}
+
+// TestUnproductiveAttemptIsDiscardedBeforeTheRetry: the retry starts from the
+// state the failed attempt started from. Index and tree go back to the start
+// HEAD and the untracked files the attempt created are removed, but a file
+// that predates the attempt is not its to delete - and without a pre-attempt
+// listing nothing untracked is removed at all.
+func TestUnproductiveAttemptIsDiscardedBeforeTheRetry(t *testing.T) {
+	tests := []struct {
+		name        string
+		untracked   [][]string
+		untrackErrs []error
+		wantRemoved [][]string
+	}{
+		{
+			name:        "only files the attempt created are removed",
+			untracked:   [][]string{{"pre.txt"}, {"pre.txt", "new.txt"}, {"pre.txt"}},
+			wantRemoved: [][]string{{"new.txt"}},
+		},
+		{
+			name:        "an unlisted start removes nothing untracked",
+			untracked:   [][]string{nil, {"pre.txt", "new.txt"}, {"pre.txt"}},
+			untrackErrs: []error{assertErr("status failed")},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			git := &fakeGit{
+				commitResults:  []bool{false, true},
+				headSHA:        "base",
+				untrackedFiles: tt.untracked,
+				untrackedErrs:  tt.untrackErrs,
+			}
+			client := &planLLM{responses: []llm.Response{
+				finishResp("feat: nothing", 0.01),
+				finishResp("feat: the work", 0.02),
+			}}
+			d := execTestDeps(ops, git, client)
+			d.Registry = tierNamingRegistry()
+
+			o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("moderate")}}, 0)
+			require.NoError(t, runExecute(context.Background(), o))
+
+			assert.Equal(t, tt.wantRemoved, git.removedFiles)
+			assert.Equal(t, []string{"base"}, git.hardResetRefs, "the tree goes back to the attempt's start")
+
+			calls := git.recorded()
+			require.Equal(t, 2, countCalls(calls, "CommitWithMessage"))
+
+			firstCommit := indexOfCall(calls, "CommitWithMessage")
+			lastCommit := firstCommit + 1 + indexOfCall(calls[firstCommit+1:], "CommitWithMessage")
+
+			for _, step := range []string{"MixedReset:base", "HardReset:base"} {
+				idx := indexOfCall(calls, step)
+				assert.Greater(t, idx, firstCommit, "%s follows the failed attempt; git=%v", step, calls)
+				assert.Less(t, idx, lastCommit, "%s precedes the retry; git=%v", step, calls)
+			}
+		})
+	}
+}
+
+// TestCandidateCleanTreeIsNotUnproductive: the guard is solo-only. A Best-of-N
+// candidate that commits nothing is judged later, so it finishes the subtask
+// exactly as before - one coder run, no head read, no discard.
+func TestCandidateCleanTreeIsNotUnproductive(t *testing.T) {
+	ops := &fakeOps{}
+	client := &planLLM{responses: []llm.Response{finishResp("feat: x", 0.02)}}
+	d := execTestDeps(ops, &fakeGit{committed: true}, client)
+	o := newExecRun(d, nil, 0)
+
+	cg := &fakeGit{}
+	sc := &solverCtx{
+		git: cg, ledger: NewLedger(0, 0), tools: d.WriteTools,
+		workspace: "ws", coderModel: o.resolveCoderModel,
+		boardOps: false, push: false, tag: "candidate 1/1",
+	}
+
+	sub := subtaskRef{ID: "SUB-1", Title: "Work", Sizing: seedSizing("simple")}
+	require.NoError(t, o.executeSubtaskWith(context.Background(), sc, sub))
+
+	assert.Len(t, client.models, 1, "no retry for a candidate")
+	assert.Equal(t, []subtaskRef{sub}, sc.completed)
+	assert.Equal(t, []string{"CommitWithMessage"}, cg.recorded(), "a candidate reads no head and discards nothing")
+	assert.Empty(t, ops.reportOutcomes)
+}
+
+// TestUnproductiveModelStaysExcludedForTheRun: the model that left nothing is
+// kept off every later coder pick in the run, while the fix rounds' own
+// exclusions are untouched.
+func TestUnproductiveModelStaysExcludedForTheRun(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{commitResults: []bool{false, true, true}, headSHA: "base"}
+	client := &planLLM{responses: []llm.Response{
+		finishResp("feat: nothing", 0.01),
+		finishResp("feat: one", 0.01),
+		finishResp("feat: two", 0.01),
+	}}
+	d := execTestDeps(ops, git, client)
+	d.Registry = tierNamingRegistry()
+
+	o := newExecRun(d, []subtaskRef{
+		{ID: "SUB-1", Title: "First", Sizing: seedSizing("moderate")},
+		{ID: "SUB-2", Title: "Second", Sizing: seedSizing("moderate")},
+	}, 0)
+	require.NoError(t, runExecute(context.Background(), o))
+
+	assert.Equal(t, []string{"tier/moderate", "tier/complex", "tier/complex"}, client.models,
+		"the later subtask's moderate pick skips the excluded model")
+	assert.NotContains(t, o.fixExclusions(), "tier/moderate", "fix rounds keep their own exclusions")
+}
+
+// TestUnreadableHeadJudgesTheAttemptByItsCommit: when HEAD cannot be read at
+// the attempt's start or after its commit, nothing proves the coder committed
+// on its own, so an attempt that committed nothing is still unproductive. A
+// start that was never read resets to HEAD rather than to a guessed commit.
+func TestUnreadableHeadJudgesTheAttemptByItsCommit(t *testing.T) {
+	tests := []struct {
+		name      string
+		headErr   error
+		headErrs  []error
+		wantReset []string
+	}{
+		{name: "start unreadable", headErr: assertErr("rev-parse failed"), wantReset: []string{"HEAD"}},
+		{name: "end unreadable", headErrs: []error{nil, assertErr("rev-parse failed")}, wantReset: []string{"base"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			git := &fakeGit{
+				commitResults: []bool{false, true},
+				headSHA:       "base",
+				headErr:       tt.headErr,
+				headErrs:      tt.headErrs,
+			}
+			client := &planLLM{responses: []llm.Response{
+				finishResp("feat: nothing", 0.01),
+				finishResp("feat: the work", 0.02),
+			}}
+			d := execTestDeps(ops, git, client)
+			d.Registry = tierNamingRegistry()
+
+			o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("moderate")}}, 0)
+			require.NoError(t, runExecute(context.Background(), o))
+
+			assert.Len(t, client.models, 2, "the attempt that committed nothing is retried")
+			assert.Equal(t, tt.wantReset, git.hardResetRefs)
+		})
+	}
 }

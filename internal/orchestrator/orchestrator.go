@@ -471,6 +471,12 @@ type run struct {
 	// from seeing the last one that landed.
 	lastFixBase string
 
+	// coderFailed is the set of coder models whose solo attempt left nothing
+	// to keep this run; later coder picks exclude them (coderExclusions), the
+	// way fixFailed feeds the fix picks. Neither the review panel nor the fix
+	// rounds read it.
+	coderFailed map[string]bool
+
 	// excluded is the per-card set of models proven harness-incapable on this run.
 	// It is threaded into every SelectInput.Exclude (coder selection and the review
 	// panel) so a model that could not drive the tool loop is never re-picked.
@@ -800,6 +806,12 @@ func (o *run) execute(ctx context.Context) error {
 				o.d.logCard(ctx, "%s", verifyParkedLogMessage(vpe))
 			}
 
+			if ue, ok := errors.AsType[*UnproductiveSubtaskError](err); ok {
+				// Unproductive-subtask park: same shape as the other arms - log
+				// best-effort, then stop without entering the next phase.
+				o.d.logCard(ctx, "%s", unproductiveLogMessage(ue))
+			}
+
 			if soe, ok := errors.AsType[*SplitOverflowError](err); ok {
 				// Split-overflow park: same shape as the other arms - log
 				// best-effort, then stop without entering the next phase.
@@ -912,6 +924,17 @@ func verifyParkOutputTail(out string, n int) string {
 	}
 
 	return verifyParkOutputElision + tail
+}
+
+// unproductiveLogMessage is the canonical card-log line for an
+// unproductive-subtask park. A resumed subtask whose work landed in an earlier
+// session parks here too, hence the way out it names. The reason takes the room
+// the fixed text leaves, so the line always fits the board's log cap.
+func unproductiveLogMessage(ue *UnproductiveSubtaskError) string {
+	head := fmt.Sprintf("subtask %s: ", ue.Subtask)
+	tail := "; parking card as blocked. If the subtask's work is already on the branch, mark the subtask done and re-trigger."
+
+	return head + truncateBytes(ue.Reason, max(verifyParkNoteMax-len(head)-len(tail), 0)) + tail
 }
 
 // splitOverflowLogMessage is the canonical card-log line for a split-overflow

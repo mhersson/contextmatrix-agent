@@ -272,6 +272,41 @@ func TestRunVerifyParkedParks(t *testing.T) {
 	assert.Equal(t, -1, indexOfCall(calls, "SetPhase:execute"))
 }
 
+func TestRunUnproductiveSubtaskParks(t *testing.T) {
+	ops := &fakeOps{
+		taskContext: cmclient.TaskContext{},
+	}
+	d := Deps{Ops: ops, Git: &fakeGit{}, Cfg: Config{CardID: "CARD-1"}}
+
+	o := newRun(d, ops.taskContext)
+	ue := &UnproductiveSubtaskError{Subtask: "SUB-1", Reason: "the coder left no change on two attempts (a, then b)"}
+	o.planFn = func(context.Context) error { return ue }
+
+	err := o.execute(context.Background())
+
+	var got *UnproductiveSubtaskError
+	require.ErrorAs(t, err, &got)
+	assert.Equal(t, "SUB-1", got.Subtask)
+
+	calls := ops.recorded()
+	assert.GreaterOrEqual(t, indexOfCall(calls, "AddLog:"+unproductiveLogMessage(ue)), 0,
+		"the unproductive park must AddLog the reason; calls=%v", calls)
+	assert.Equal(t, -1, indexOfCall(calls, "SetPhase:execute"), "no further phase entered after the park")
+}
+
+// TestUnproductiveLogMessageFitsTheBoardsLogCap: ContextMatrix rejects an
+// activity-log message over 2000 bytes instead of clipping it, so a long
+// reason must be trimmed rather than lose the whole park note.
+func TestUnproductiveLogMessageFitsTheBoardsLogCap(t *testing.T) {
+	got := unproductiveLogMessage(&UnproductiveSubtaskError{
+		Subtask: "SUB-1",
+		Reason:  strings.Repeat("✗ removed tests ", 400),
+	})
+
+	assert.LessOrEqual(t, len(got), 1900)
+	assert.True(t, utf8.ValidString(got), "the trim must not split a rune")
+}
+
 // bigVerifyOutput builds a numbered multi-line verify output far larger than
 // any card-log entry can carry, so a truncation test can tell the head of the
 // output from its tail.

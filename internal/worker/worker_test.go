@@ -1567,6 +1567,54 @@ func TestVerifyParkedTransitionFailureDegradesGracefully(t *testing.T) {
 	assert.Equal(t, 0, ops.count("CompleteTask"))
 }
 
+// TestUnproductiveSubtaskMapsToBlocked: an UnproductiveSubtaskError takes the
+// verify park's path - transition the card to blocked BEFORE releasing the
+// claim, push the WIP, surface a non-nil error - and adds no outcome report of
+// its own: the orchestrator reported both attempts while it held the subtask
+// claim.
+func TestUnproductiveSubtaskMapsToBlocked(t *testing.T) {
+	remote := setupBareRemote(t)
+	wsParent := t.TempDir()
+	ops := newFakeOps()
+
+	swapRunOrchestrator(t, func(_ context.Context, d orchestrator.Deps) error {
+		require.NoError(t, os.WriteFile(filepath.Join(d.Cfg.Workspace, "wip.txt"), []byte("leftover\n"), 0o644))
+
+		return &orchestrator.UnproductiveSubtaskError{
+			Subtask: "SUB-1",
+			Reason:  "the coder left no change on two attempts (model-a, then model-b)",
+		}
+	})
+
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	res, err := Run(context.Background(), baseSpec(t, remote, wsParent), ops, &scriptedLLM{}, emit, openStdin(t))
+	require.Error(t, err)
+	assert.Equal(t, "error", res.Reason)
+
+	assert.True(t, remoteHasBranch(t, remote, "cm/cmx-001"), "the park pushes WIP")
+	assert.GreaterOrEqual(t, ops.count("ReportPush"), 1, "WIP push reported")
+	assert.Equal(t, 1, ops.count("TransitionCard"), "card transitioned to blocked")
+	assert.Equal(t, 1, ops.count("ReleaseCard"), "claim released on the park")
+	assert.Equal(t, 0, ops.count("CompleteTask"))
+
+	calls := ops.ops()
+	transitionIdx := slices.Index(calls, "TransitionCard")
+	releaseIdx := slices.Index(calls, "ReleaseCard")
+
+	require.GreaterOrEqual(t, transitionIdx, 0)
+	require.GreaterOrEqual(t, releaseIdx, 0)
+	assert.Less(t, transitionIdx, releaseIdx, "TransitionCard must happen before ReleaseCard: ownership may be required")
+
+	// No outcome row and no failure log of the worker's own: the one AddLog is
+	// the reachability preflight (baseSpec carries no catalog).
+	assert.ElementsMatch(t, []string{"ClaimCard", "GetTaskContext", "AddLog", "ReportPush", "TransitionCard", "ReleaseCard"}, calls)
+
+	args := ops.argsOf("TransitionCard")
+	require.Len(t, args, 2)
+	assert.Equal(t, "blocked", args[1])
+}
+
 // TestSplitOverflowMapsToBlocked: a SplitOverflowError takes the verify park's
 // path - transition the card to blocked BEFORE releasing the claim, push the
 // WIP, surface a non-nil error. The plan phase refused to auto-create a

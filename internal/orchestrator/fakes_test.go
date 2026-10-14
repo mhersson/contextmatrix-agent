@@ -498,9 +498,12 @@ type fakeGit struct {
 	// CommitWithMessage scripting: committed is the returned "something was
 	// committed" flag; commitErr fails the call. commitMsgs captures each
 	// message passed so tests can assert the extracted commit line.
-	committed  bool
-	commitErr  error
-	commitMsgs []string
+	// commitResults scripts successive flags by call ordinal, the last one
+	// repeating; empty falls back to committed.
+	committed     bool
+	commitErr     error
+	commitMsgs    []string
+	commitResults []bool
 
 	// headAfterFixup, when set, is the SHA a successful CommitFixup advances
 	// headSHA to, so a test can tell a head read before the fixup from one read
@@ -616,12 +619,18 @@ func (g *fakeGit) recorded() []string {
 
 func (g *fakeGit) CommitWithMessage(_ context.Context, message string) (bool, error) {
 	g.mu.Lock()
+	call := len(g.commitMsgs)
 	g.commitMsgs = append(g.commitMsgs, message)
+
+	committed := g.committed
+	if len(g.commitResults) > 0 {
+		committed = g.commitResults[min(call, len(g.commitResults)-1)]
+	}
 	g.mu.Unlock()
 
 	g.record("CommitWithMessage")
 
-	return g.committed, g.commitErr
+	return committed, g.commitErr
 }
 
 func (g *fakeGit) Push(_ context.Context, branch string) error {
