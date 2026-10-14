@@ -78,6 +78,25 @@ func TestBrainstormRecordsDesignOnMarker(t *testing.T) {
 	assert.Contains(t, design, "Approach A", "returned design carries the recorded design text")
 }
 
+// TestBrainstormEmptyReplyWaitsForTheHuman: an empty-reply streak carries no
+// design, like any reply without the marker, so the dialogue waits for the
+// human instead of failing the run.
+func TestBrainstormEmptyReplyWaitsForTheHuman(t *testing.T) {
+	ops := &fakeOps{}
+	inbox := &fakeInbox{msgs: []harness.UserMessage{{Content: "approach A, please"}}}
+	empty := llm.Response{FinishReason: "stop", Usage: llm.Usage{Cost: 0.01}}
+	client := &planLLM{responses: []llm.Response{
+		empty, empty, empty,
+		stopResp("## Design\n\nApproach A: a palette config.\n\nDESIGN_COMPLETE", 0.01),
+	}}
+	o := brainstormRun(ops, inbox, client, 0, 0)
+
+	design, err := o.runBrainstorm(context.Background(), fixedGateModel("payload/model"))
+	require.NoError(t, err, "an empty reply must not fail the dialogue")
+	assert.NotEmpty(t, design, "the next turn after the human's reply records the design")
+	assert.True(t, hasDesignSection(o.body))
+}
+
 func TestBrainstormPromoteEndsWithoutDesign(t *testing.T) {
 	ops := &fakeOps{}
 	inbox := &fakeInbox{} // no messages, not blocking -> ErrInboxClosed after turn 1 (promote)
