@@ -346,6 +346,26 @@ func TestWritePRBodyAppendsVerificationTrailer(t *testing.T) {
 	}
 }
 
+// TestOpenPRKeepsBodyWhenModelRepliesEmpty: an empty PR-body reply (which the
+// harness fails with ErrEmptyResponse after its retries) must not fail a
+// finished run; the PR is still opened with the code-appended verification line.
+func TestOpenPRKeepsBodyWhenModelRepliesEmpty(t *testing.T) {
+	pr := &fakePR{url: "https://example.test/pr/9"}
+	empty := llm.Response{FinishReason: "stop"}
+	client := &planLLM{responses: []llm.Response{empty, empty, empty, empty}}
+	d := integrateTestDeps(&fakeOps{}, &fakeGit{}, pr, client)
+	o := newIntegrateRun(d, cmclient.TaskContext{Title: "T", Description: "b", CreatePR: true}, 0)
+	o.lastVerify = verifyResult{Status: verifyPassed}
+	o.verify = &verifyPlan{Argv: []string{"x"}, Display: "go test ./...", Source: verifySourceDetected}
+
+	url, err := o.openPR(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "https://example.test/pr/9", url)
+
+	require.Len(t, pr.calls, 1)
+	assert.Contains(t, pr.calls[0].body, "**Verification:** PASSED - `go test ./...` (detected)")
+}
+
 // TestWritePRBodyModelSelectionEmitted tests that writePRBody emits a
 // model_selected event for the "integrate" phase, covering the pin, payload-
 // default, and serve-default provenance cases as thin smoke coverage. The full

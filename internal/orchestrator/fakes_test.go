@@ -958,7 +958,7 @@ func (p *planLLM) next(req llm.Request) (llm.Response, error) {
 	}
 
 	if p.i >= len(p.responses) {
-		return llm.Response{FinishReason: "stop"}, nil
+		return llm.Response{Content: "done", FinishReason: "stop"}, nil
 	}
 
 	r := p.responses[p.i]
@@ -1240,4 +1240,10 @@ func batchNudgeCounts(t *testing.T, transcript *bytes.Buffer) []int {
 // producing it after the writer that made it is gone.
 func legacyTierMarker(body, tier string) string {
 	return strings.TrimRight(body, "\n") + "\n\n<!-- cm:tier=" + tier + " -->"
+}
+
+// emptyReplies is the shortest empty-reply streak that makes the harness fail
+// with ErrEmptyResponse: the initial reply plus its two retries.
+func emptyReplies() []llm.Response {
+	return []llm.Response{{FinishReason: "stop"}, {FinishReason: "stop"}, {FinishReason: "stop"}}
 }

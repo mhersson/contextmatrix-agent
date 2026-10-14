@@ -7241,3 +7241,15 @@ func TestFixResponseTextIsSafeToRecord(t *testing.T) {
 		assert.Empty(t, o.fixResponseText(finish("   ")))
 	})
 }
+
+func TestSynthesisEmptyReplyStreakTakesRepairTurn(t *testing.T) {
+	client := &planLLM{responses: append(emptyReplies(),
+		stopResp(`{"approved":true,"summary":"clean","fix_tier":"simple","fixes":[]}`, 0.01))}
+	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{committed: true}, client, reviewerRegistry())
+	o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}, 0)
+
+	v, err := o.synthesize(context.Background(), "specialist findings", 1, false)
+
+	require.NoError(t, err)
+	assert.True(t, v.Approved)
+}

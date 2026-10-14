@@ -4025,3 +4025,14 @@ func TestCIGate_ExhaustedFixModelsParksInsteadOfFailing(t *testing.T) {
 	assert.Equal(t, -1, indexOfCall(ops.recorded(), "TransitionCard:done"),
 		"a parked card must NOT reach done")
 }
+
+func TestCopilotGate_EmptyTriageStreakReadsAsUnreadableVerdict(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{requested: true, headSHA: copilotHeadSHA, reviews: []*CopilotReview{reviewOnHead("LGTM overall")}}
+	client := &planLLM{responses: emptyReplies()}
+
+	o := prGateRun(ops, gates, &fakeGit{committed: true}, client, copilotGateContext("Empty triage", "body"), 0)
+
+	require.NoError(t, runPRGates(context.Background(), o))
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+}

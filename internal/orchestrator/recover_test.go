@@ -64,7 +64,7 @@ func (m *modelAwareLLM) next(req llm.Request) llm.Response {
 	}
 
 	if m.i >= len(m.responses) {
-		return llm.Response{FinishReason: "stop"}
+		return llm.Response{Content: "done", FinishReason: "stop"}
 	}
 
 	r := m.responses[m.i]

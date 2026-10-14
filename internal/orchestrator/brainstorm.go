@@ -93,7 +93,9 @@ func (o *run) runBrainstorm(ctx context.Context, model func(context.Context) str
 
 		o.spendAndReport(ctx, o.ledger, cfg.CardID, "brainstorm: report usage failed", res, slug, "brainstorm", dur)
 
-		if err != nil {
+		// An empty-reply streak falls through: its empty output carries no design,
+		// so the dialogue waits for the human as for any other unfinished turn.
+		if err != nil && !errors.Is(err, harness.ErrEmptyResponse) {
 			return "", fmt.Errorf("brainstorm run: %w", err)
 		}
 

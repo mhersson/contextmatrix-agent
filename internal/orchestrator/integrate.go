@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
+	"github.com/mhersson/contextmatrix-harness/harness"
 )
 
 // runIntegrate is the integrate phase: pure code with one optional model call
@@ -150,14 +151,22 @@ func (o *run) writePRBody(ctx context.Context) (string, error) {
 
 	o.spendAndReport(ctx, o.ledger, cfg.CardID, "integrate: report PR-body usage failed", res, model, "main", dur)
 
-	if err != nil {
+	var body string
+
+	switch {
+	case errors.Is(err, harness.ErrEmptyResponse):
+		// An empty reply must not fail a finished run: describe it from what we hold.
+		body = fmt.Sprintf("%s\n\n%s\n%s", o.tc.Title, o.planOverview(), o.reviewOutcome())
+	case err != nil:
 		return "", fmt.Errorf("PR-body run: %w", err)
+	default:
+		body = res.Output
 	}
 
 	// Mechanically append the verify status: the model-written body is not a
 	// guaranteed surface, so the honest verification line is added BY CODE and
 	// cannot be omitted or softened by the model.
-	body := strings.TrimSpace(res.Output)
+	body = strings.TrimSpace(body)
 
 	return body + "\n\n---\n**Verification:** " + verifyStatusLine(o.lastVerify, o.resolvedVerifyPlan()) + "\n", nil
 }
