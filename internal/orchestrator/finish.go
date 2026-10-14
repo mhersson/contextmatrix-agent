@@ -58,9 +58,14 @@ type finishArgs struct {
 	CommitMessage string `json:"commit_message"`
 }
 
+// leakedMarkupMarkers open reasoning or tool-call markup that some models emit
+// inside a tool argument. Everything from the first one on is not commit text.
+var leakedMarkupMarkers = []string{"<think>", "</think>", "<\uff5cDSML\uff5c", "<|DSML|"}
+
 // finishCommitMessage returns the trimmed commit_message from a finish call's
-// arguments (harness.Result.CompletionArgs), or "" when the args are absent,
-// empty, or unparseable.
+// arguments (harness.Result.CompletionArgs), cut at the first leaked reasoning
+// or tool-call marker, or "" when the args are absent, empty, unparseable, or
+// nothing precedes a marker.
 func finishCommitMessage(args json.RawMessage) string {
 	if len(args) == 0 {
 		return ""
@@ -71,5 +76,12 @@ func finishCommitMessage(args json.RawMessage) string {
 		return ""
 	}
 
-	return strings.TrimSpace(fa.CommitMessage)
+	msg := fa.CommitMessage
+	for _, marker := range leakedMarkupMarkers {
+		if i := strings.Index(msg, marker); i >= 0 {
+			msg = msg[:i]
+		}
+	}
+
+	return strings.TrimSpace(msg)
 }

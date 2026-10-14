@@ -45,6 +45,15 @@ func TestFinishCommitMessage(t *testing.T) {
 		{"nil", nil, ""},
 		{"json null", json.RawMessage("null"), ""},
 		{"malformed", json.RawMessage(`{bad`), ""},
+		{
+			"leaked reasoning and tool-call markup",
+			json.RawMessage(`{"commit_message":"feat(api): add health endpoint\n\n</think>\n\nNow I will verify it.\n\n<\uff5cDSML\uff5ctool_calls>\n<\uff5cDSML\uff5cinvoke name=\"bash\">"}`),
+			"feat(api): add health endpoint",
+		},
+		{"open think marker", json.RawMessage(`{"commit_message":"fix(x): y <think>hmm"}`), "fix(x): y"},
+		{"ascii DSML marker", json.RawMessage(`{"commit_message":"fix(x): y <|DSML|tool_calls>"}`), "fix(x): y"},
+		{"marker first", json.RawMessage(`{"commit_message":"</think>feat: x"}`), ""},
+		{"DSML marker first", json.RawMessage(`{"commit_message":"<\uff5cDSML\uff5ctool_calls>"}`), ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
