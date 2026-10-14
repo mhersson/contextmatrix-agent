@@ -749,8 +749,10 @@ REVIEW FINDINGS TO FIX
 const verifyFixPrompt = `%s%sYou are the coding agent addressing review feedback on the current branch.
 You have the full write toolset (read, grep, glob, edit, write, bash) rooted at
 the workspace. Apply fixes for EXACTLY the findings below - apply only the literal
-fix, add no new abstractions, middleware, interfaces, or dependencies. If a finding
-demands new architecture, flag it, don't build it.
+fix, add no new abstractions, middleware, interfaces, or dependencies. Code that a
+failing test needs and that is missing or wrong is part of that fix: write it. If
+a fix would need new architecture beyond that, flag it, don't build it - and
+flagging it never means removing the test that exposed it.
 One exception: if a finding's suggestion instructs a repo-wide sweep for an
 incorrect claim (a doc line, code comment, or error message), you MUST search the
 whole repo using the harness grep tool and fix every occurrence, not just the
@@ -779,7 +781,7 @@ Title: %s
 
 SCOPE
 The card's work is already in the working tree.
-The ONLY item in scope is the failure below - do not re-audit or re-implement other card items. If the failing test was added on this branch and its expectation is wrong, fix the expectation or delete the test; if the failure is in code the branch changed, fix the code. Make the smallest edit that turns the verify command green, run it, then finish.
+The ONLY item in scope is the failure below - do not re-audit or re-implement other card items. When the failure is missing or wrong code, implement or fix the code: the tests this branch adds define the work. Change a test only when its expectation is provably wrong, and then say in your finish message which test you changed and why. Never delete, skip, or disable a test or a test file to make the command pass. Make the smallest edit within these rules that turns the verify command green, run it, then finish.
 
 VERIFY FAILURE TO FIX
 %s
