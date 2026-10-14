@@ -13,6 +13,9 @@ import (
 	"github.com/mhersson/contextmatrix-harness/harness"
 )
 
+// errCandidateNoChange drops a candidate whose diff against the base is empty.
+var errCandidateNoChange = errors.New("best-of-n: candidate left no change against the base")
+
 // judgeDiffCap bounds a candidate diff carried whole into the judge prompt; a
 // larger diff is summarized as a --stat so one huge candidate cannot blow the
 // prompt window.
@@ -99,12 +102,22 @@ func runJudge(ctx context.Context, o *run) error {
 		d.logCard(ctx, "best-of-n: verifying candidate %d (%s) - %d of %d", c.idx, c.model, i+1, len(survivors))
 
 		diff, diffErr := c.git.Diff(ctx, cfg.BaseBranch)
-		if diffErr != nil {
+
+		switch {
+		case diffErr != nil:
 			slog.Warn("judge: diff failed",
 				"card_id", cfg.CardID, "candidate", c.idx, "model", c.model, "error", diffErr)
 			d.logCard(ctx, "best-of-n: diff failed for candidate %d (%s) - %v", c.idx, c.model, diffErr)
 			c.diff = "(diff unavailable - could not read changes)"
-		} else {
+		case strings.TrimSpace(diff) == "":
+			// A candidate that changed nothing passes verify on a green base, and a
+			// winner's subtasks are replayed as done, so it must never reach the pool.
+			c.err = errCandidateNoChange
+
+			d.logCard(ctx, "best-of-n: candidate %d (%s) left no change against %s - dropped", c.idx, c.model, cfg.BaseBranch)
+
+			continue
+		default:
 			c.diff = diff
 		}
 
@@ -129,6 +142,9 @@ func runJudge(ctx context.Context, o *run) error {
 		d.logCard(ctx, "best-of-n: candidate %d (%s) verify %s", c.idx, c.model, verifyStatusWord(res.Status))
 	}
 
+	// The loop marked every empty candidate failed; drop them.
+	survivors = survivingCandidates(survivors)
+
 	// Verify failures are eliminated only when at least one candidate passes;
 	// when none pass, every UNCAPPED survivor stays in so the judge still picks
 	// the least broken one. A capped candidate may enter the pool ONLY through
@@ -140,10 +156,10 @@ func runJudge(ctx context.Context, o *run) error {
 		pool = uncappedCandidates(survivors)
 	}
 
-	// Reachable when every survivor is capped with a failing verify (plus, as
-	// refactor insurance, an empty survivor set). The run is parking with
-	// first-arrival claims still held: release them, mirroring runFanout's
-	// all-failed exit, so the board shows the truth now.
+	// Reachable when every survivor is capped with a failing verify or left no
+	// change (plus, as refactor insurance, an empty survivor set). The run is
+	// parking with first-arrival claims still held: release them, mirroring
+	// runFanout's all-failed exit, so the board shows the truth now.
 	if len(pool) == 0 {
 		o.stopFanoutHeartbeat()
 

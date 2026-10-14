@@ -410,6 +410,57 @@ func TestJudgeRunErrorStillFails(t *testing.T) {
 	assert.Nil(t, o.winner, "no winner is adopted on a failed judge run")
 }
 
+// TestJudgeDropsACandidateThatChangedNothing: a candidate with an empty diff
+// passes verify on a green base, but it did none of the work, so it is dropped
+// before the pool is built and the candidate that changed something wins.
+func TestJudgeDropsACandidateThatChangedNothing(t *testing.T) {
+	ops := &fakeOps{}
+	empty := judgeCandidate(1, "coder/one", "dir-c1", "")
+	empty.completed = []subtaskRef{{ID: "SUB-1"}}
+	worked := judgeCandidate(2, "coder/two", "dir-c2", "DIFF_TWO")
+	worked.completed = []subtaskRef{{ID: "SUB-1"}}
+	verify := map[string]bool{"dir-c1": true} // only the untouched tree is green
+	o := newJudgeRun(t, ops, &fakeGit{}, &planLLM{}, []*candidate{empty, worked}, verify)
+
+	require.NoError(t, runJudge(context.Background(), o))
+
+	require.NotNil(t, o.winner)
+	assert.Equal(t, 2, o.winner.idx, "the candidate that changed something wins")
+	require.ErrorIs(t, empty.err, errCandidateNoChange, "the empty candidate is dropped as failed")
+	assert.Equal(t, 1, countCalls(ops.recorded(), "CompleteTask:SUB-1"))
+}
+
+// TestJudgeAllCandidatesEmptyTakesTheNoSurvivorPath: when no candidate changed
+// anything, nothing is adopted and no subtask is completed.
+func TestJudgeAllCandidatesEmptyTakesTheNoSurvivorPath(t *testing.T) {
+	ops := &fakeOps{}
+	c1 := judgeCandidate(1, "coder/one", "dir-c1", "")
+	c1.completed = []subtaskRef{{ID: "SUB-1"}}
+	c2 := judgeCandidate(2, "coder/two", "dir-c2", "")
+	c2.completed = []subtaskRef{{ID: "SUB-1"}}
+	verify := map[string]bool{"dir-c1": true, "dir-c2": true}
+	o := newJudgeRun(t, ops, &fakeGit{}, &planLLM{}, []*candidate{c1, c2}, verify)
+
+	require.Error(t, runJudge(context.Background(), o), "no candidate did the work")
+
+	assert.Nil(t, o.winner)
+	assert.Zero(t, countCalls(ops.recorded(), "CompleteTask:SUB-1"), "no subtask is completed")
+}
+
+// TestJudgeKeepsACandidateWhoseDiffCannotBeRead: an unreadable diff is not
+// evidence of an empty candidate, so it stays in the pool as before.
+func TestJudgeKeepsACandidateWhoseDiffCannotBeRead(t *testing.T) {
+	ops := &fakeOps{}
+	c := &candidate{idx: 1, dir: "dir-c1", git: &errDiffGit{fakeGit: &fakeGit{}}, ledger: NewLedger(0, 0)}
+	c.setPick(atBarPick("coder/one"))
+	o := newJudgeRun(t, ops, &fakeGit{}, &planLLM{}, []*candidate{c}, map[string]bool{"dir-c1": true})
+
+	require.NoError(t, runJudge(context.Background(), o))
+
+	require.NoError(t, c.err)
+	assert.Same(t, c, o.winner)
+}
+
 // TestJudgeExcludesCandidateModels proves the judge never runs a candidate's own
 // coder model (a model must not judge its own work): with both candidate models
 // recorded in o.coderModels, the reviewer selection falls past them.

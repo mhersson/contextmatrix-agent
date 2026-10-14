@@ -61,7 +61,9 @@ critical; a critical subtask keeps its bar), and the card parks as blocked with
 a subtask whose work landed in an earlier session leaves no change and parks
 that way, and a human marks it done and re-triggers; a test removal points the
 human at the subtask's tests and the production code they need instead.
-Best-of-N candidates are exempt: the judge verifies each candidate instead.
+Best-of-N candidates are exempt: the judge verifies each candidate instead,
+and drops a candidate whose diff against the base branch is empty before it
+builds the pool.
 
 The work branch is `cm/<card-id>` (card ID lowercased); the ID is validated
 against `^[A-Za-z][A-Za-z0-9-]*-[0-9]+$` (PREFIX-NNN) before it reaches any
