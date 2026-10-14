@@ -178,7 +178,7 @@ func runJudge(ctx context.Context, o *run) error {
 		Tier:      registry.TierComplex,
 		EstTokens: estimateTokens(prompt),
 		// The judge reviews the candidates, so exclude every candidate's coder model
-		// (a model must not judge its own work) plus the per-card incapable set -
+		// (a model must not judge its own work) plus the per-card exclusion set -
 		// exactly the authoritative-review exclusions. Candidates register their
 		// models in o.coderModels before judging.
 		Exclude: o.reviewExclusions(),

@@ -187,16 +187,16 @@ func (o *run) mobDiscuss(ctx context.Context, t mob.Topic) (mob.Outcome, bool) {
 
 // buildEngineConfig assembles the discussion engine's configuration for one
 // topic: registry-selected seat models (every topic excludes the run's
-// incapable models; review topics also exclude the models that coded the
+// excluded models; review topics also exclude the models that coded the
 // card), operator guests, the harness-backed seat runner, the decision-model
 // moderator, live "discussion" events, the human inbox, and the mob session
 // budget term. SeatEndpoint is NOT set here - the caller
 // wires it once the loopback server has started (the server is built from
 // this config's Seats/Runner, so it cannot exist before this call returns).
 func buildEngineConfig(ctx context.Context, o *run, t mob.Topic, bearer string) (mob.EngineConfig, bool) {
-	// No topic may seat a model proven harness-incapable this run. Review and
-	// checkpoint topics judge code this run wrote, so they exclude the models
-	// that coded it as well (reviewExclusions folds in the incapable set).
+	// No topic may seat a model excluded this run (incapable or empty-reply).
+	// Review and checkpoint topics judge code this run wrote, so they exclude the
+	// models that coded it as well (reviewExclusions folds in the exclusion set).
 	exclude := o.excludedModels()
 	if t.Kind == "review" || t.Kind == "checkpoint" {
 		exclude = o.reviewExclusions()

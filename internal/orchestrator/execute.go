@@ -932,22 +932,22 @@ func (o *run) releaseSubtask(ctx context.Context, cardID string) {
 }
 
 // runCoderWith runs the subtask's coder harness through the solver, with in-run
-// recovery from a harness-incapable model: it resolves the coder model via
+// recovery from a model that cannot do the work: it resolves the coder model via
 // sc.coderModel (skipping any model already excluded this run), logs the pick,
 // runs the harness on sc.tools, and accounts for spend on sc.ledger for every
-// attempt. If the model proves incapable (*IncapableError) it
-// blacklists/excludes it via recoverIncapable and RE-SELECTS the next-best model
-// for the SAME subtask - the incapable model wrote nothing, so re-running is
-// clean (no git reset). The loop is bounded by recoverIncapable's per-card cap:
-// once exhausted it returns the wrapped park error. Any non-incapable run error
-// (transport, context limit, budget) is returned immediately, unwrapped of the
-// recovery loop. Returns the successful run's result, alongside the PICK that
-// attempt ran on - so its Model is the SELECTED catalog slug, not the
-// gateway-echoed ModelUsed, because a caller reporting a model outcome must key
-// the row the way Best-of-N rows are keyed (candidates.go's setPick), so the
-// outcome ledger groups both under one model. The rest of the Pick is
-// what tells that caller whether the selector got the bar it asked for, which
-// decides whether a failure may be charged to the model at all.
+// attempt. If the model proves incapable (*IncapableError) or keeps replying
+// empty (*EmptyResponseError), recoverModel excludes it and the loop RE-SELECTS
+// the next-best model for the SAME subtask, with no git reset. The loop is
+// bounded by the per-card re-selection cap: once exhausted it returns the
+// wrapped park error. Any other run error (transport, context limit, budget) is
+// returned immediately, unwrapped of the recovery loop. Returns the successful
+// run's result, alongside the PICK that attempt ran on - so its Model is the
+// SELECTED catalog slug, not the gateway-echoed ModelUsed, because a caller
+// reporting a model outcome must key the row the way Best-of-N rows are keyed
+// (candidates.go's setPick), so the outcome ledger groups both under one model.
+// The rest of the Pick is what tells that caller whether the selector got the
+// bar it asked for, which decides whether a failure may be charged to the model
+// at all.
 //
 // The third return is the turn window the run was configured with. A caller that
 // judges res.Turns against a window - the pre-commit gate does, to tell a coder
@@ -965,7 +965,7 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 	// window is derived on this side of runModelCoder.
 	maxTurns, wrapUp := coderTurnCfg(cfg.MaxTurns, sub.Sizing.Budget)
 
-	// At most one initial attempt plus reselectCap re-selections; recoverIncapable
+	// At most one initial attempt plus reselectCap re-selections; recoverModel
 	// is the authoritative bound (it errors at the cap), the +1 is a belt-and-braces
 	// ceiling so a logic slip can never spin.
 	for attempt := 0; attempt <= reselectCap; attempt++ {
@@ -989,7 +989,7 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 		res, dur, err := o.runModelCoder(ctx, sc.tools, prompt, model, coderWrapUpMessage, sub.Sizing.Budget)
 
 		// Record the resolved coder slug so the review panel excludes it: a capable
-		// model must not review its own code. This runs BEFORE the incapable check
+		// model must not review its own code. This runs BEFORE the recovery check
 		// below, so an incapable model (which produced no code) is also recorded
 		// here - harmless, and it keeps that model out of its own review via this
 		// set plus o.excluded. Keyed on the slug we configured, which is what
@@ -1015,7 +1015,7 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 
 		// One row per ATTEMPT. It sits here rather than after the loop because
 		// the three exits below - an exhausted re-selection cap, a run error,
-		// and success - would each need their own copy, and the incapable
+		// and success - would each need their own copy, and the recovered
 		// attempts that continue past them would get none at all.
 		solver := "solo"
 
@@ -1030,15 +1030,15 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 			Turns: res.Turns, Outcome: sizingOutcome(err, res.Turns, maxTurns), DurationMS: dur.Milliseconds(),
 		})
 
-		if ie, ok := errors.AsType[*IncapableError](err); ok {
-			// recoverIncapable blacklists + excludes the model and returns an error
-			// only when the per-card re-selection cap is exhausted - park then.
-			if rerr := o.recoverIncapable(ctx, ie); rerr != nil {
+		if ok, rerr := o.recoverModel(ctx, err); ok {
+			// recoverModel excludes the model and returns an error only when the
+			// per-card re-selection cap is exhausted - park then.
+			if rerr != nil {
 				return res, pick, maxTurns, rerr
 			}
 
 			// Re-select (the failed model is now excluded) and re-run the SAME
-			// subtask: a clean restart since the incapable model committed nothing.
+			// subtask on the tree as the failed attempt left it.
 			continue
 		}
 
@@ -1049,7 +1049,7 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 		return res, pick, maxTurns, nil
 	}
 
-	// Unreachable in practice: recoverIncapable errors at the cap before the loop
+	// Unreachable in practice: recoverModel errors at the cap before the loop
 	// can exhaust its iterations. Defensive guard against an infinite loop.
 	return harness.Result{}, registry.Pick{}, maxTurns, fmt.Errorf("coder for %s: re-selection loop exhausted", sub.ID)
 }
@@ -1136,7 +1136,8 @@ func (o *run) resolveCoderModel(ctx context.Context, sub subtaskRef, prompt stri
 }
 
 // coderExclusions is the solo coder pick's exclusion set: models proven
-// incapable this run plus models whose attempt left nothing to keep.
+// incapable or empty-reply this run plus models whose attempt left nothing to
+// keep.
 func (o *run) coderExclusions() map[string]bool {
 	out := make(map[string]bool, len(o.excluded)+len(o.coderFailed))
 	maps.Copy(out, o.excluded)

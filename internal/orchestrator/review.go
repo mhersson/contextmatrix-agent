@@ -1497,8 +1497,8 @@ func (o *run) reviewPanel(ctx context.Context, estTokens int, authoritative bool
 		Tier:      tier,
 		EstTokens: estTokens,
 		// Exclude both the models that coded this run (a model must not review its
-		// own work) and any model proven harness-incapable this run (recoverIncapable
-		// records it). Merged so neither set masks the other.
+		// own work) and any model excluded this run (recoverModel records incapable
+		// and empty-reply models). Merged so neither set masks the other.
 		Exclude: o.reviewExclusions(),
 	}, reviewPanelSize)
 
@@ -1512,8 +1512,9 @@ func (o *run) reviewPanel(ctx context.Context, estTokens int, authoritative bool
 }
 
 // reviewExclusions is the union of the coder models (a model must not review its
-// own code) and the per-card incapable set (models that could not drive the tool
-// loop). Both feed the review panel's diversity Exclude so neither is re-picked.
+// own code) and the per-card exclusion set (models that could not drive the tool
+// loop or kept replying empty). Both feed the review panel's diversity Exclude
+// so neither is re-picked.
 func (o *run) reviewExclusions() map[string]bool {
 	excl := make(map[string]bool, len(o.coderModels)+len(o.excluded))
 	for m := range o.coderModels {
@@ -1749,12 +1750,12 @@ func (o *run) fixResponseText(args json.RawMessage) string {
 	return strings.TrimSpace(truncateBytes(msg, fixResponseMaxBytes-len(fixResponseTruncated))) + fixResponseTruncated
 }
 
-// runFixModel runs the fix coder harness with the same in-run incapable recovery
-// as the subtask coder: it resolves the fix model (skipping the per-card exclude
+// runFixModel runs the fix coder harness with the same in-run model recovery as
+// the subtask coder: it resolves the fix model (skipping the per-card exclude
 // set), logs the pick, runs, and accounts for spend each attempt. An incapable
-// model is blacklisted/excluded via recoverIncapable and the next-best fix model
+// or empty-reply model is excluded via recoverModel and the next-best fix model
 // re-selected for the SAME round; the cap (shared with the coder path via
-// o.reselects) parks the run when exhausted. A non-incapable run error returns
+// o.reselects) parks the run when exhausted. Any other run error returns
 // immediately. It returns the model that ran and, from a run that finished, its
 // finish message as fixResponseText renders it; the fixup targets files parsed
 // from the findings, not the model output.
@@ -1832,8 +1833,8 @@ func (o *run) runFixModel(ctx context.Context, prompt string, req fixRequest) (s
 			Turns: res.Turns, Outcome: sizingOutcome(err, res.Turns, maxTurns), DurationMS: dur.Milliseconds(),
 		})
 
-		if ie, ok := errors.AsType[*IncapableError](err); ok {
-			if rerr := o.recoverIncapable(ctx, ie); rerr != nil {
+		if ok, rerr := o.recoverModel(ctx, err); ok {
+			if rerr != nil {
 				return "", "", rerr
 			}
 
@@ -1850,7 +1851,7 @@ func (o *run) runFixModel(ctx context.Context, prompt string, req fixRequest) (s
 		return model, o.fixResponseText(res.CompletionArgs), nil
 	}
 
-	// Unreachable: recoverIncapable errors at the cap before the loop exhausts.
+	// Unreachable: recoverModel errors at the cap before the loop exhausts.
 	return "", "", fmt.Errorf("review fix (card=%s): re-selection loop exhausted", o.d.Cfg.CardID)
 }
 
@@ -1981,8 +1982,8 @@ func (o *run) markFixFailed(reason string) {
 	o.fixFailReason = reason
 }
 
-// fixExclusions is the fix pick's exclusion set: models proven incapable this
-// run plus models whose fix round failed.
+// fixExclusions is the fix pick's exclusion set: models proven incapable or
+// empty-reply this run plus models whose fix round failed.
 func (o *run) fixExclusions() map[string]bool {
 	out := make(map[string]bool, len(o.excluded)+len(o.fixFailed))
 	maps.Copy(out, o.excluded)

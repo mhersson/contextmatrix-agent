@@ -243,6 +243,28 @@ func TestRunModelNormalizesIncapableEmptyDetail(t *testing.T) {
 	assert.Equal(t, "cannot drive the tool loop", ie.Reason)
 }
 
+// TestRunModelNormalizesEmptyResponse: a model that only replies empty surfaces
+// as an *EmptyResponseError naming the model, and errors.Is still finds the
+// harness sentinel for callers that only need the fact.
+func TestRunModelNormalizesEmptyResponse(t *testing.T) {
+	ops := &fakeOps{taskContext: cmclient.TaskContext{}}
+
+	empty := llm.Response{FinishReason: "stop", Usage: llm.Usage{Cost: 0.01}}
+	llmFake := &planLLM{responses: []llm.Response{empty, empty, empty}}
+	d := planTestDeps(ops, llmFake)
+
+	o := newRun(d, ops.taskContext)
+
+	res, _, err := o.runModel(context.Background(), d.ReadTools, "do the thing", "default/model")
+
+	var ee *EmptyResponseError
+	require.ErrorAs(t, err, &ee)
+	assert.Equal(t, "default/model", ee.Model)
+	require.ErrorIs(t, err, harness.ErrEmptyResponse)
+
+	assert.InDelta(t, 0.03, res.TotalCostUSD, 1e-9, "the result rides along so the caller can charge it")
+}
+
 // TestRunModelNormalizesMaxTurns pins that a run stopping at the turn cap
 // (Reason "max_turns", Completed=false, err==nil from the harness) surfaces as
 // a *MaxTurnsError, so no phase can treat truncated work as success.

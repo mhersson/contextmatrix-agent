@@ -285,7 +285,9 @@ ContextMatrix side.
 
 The blacklist is self-learning: when a model proves harness-incapable mid-run
 (for example, it cannot reliably call tools), the agent reports it back so it is
-excluded and a replacement is re-selected.
+excluded and a replacement is re-selected. A model that keeps replying empty is
+excluded and replaced for the rest of the run but not reported, since an empty
+streak can be a transient provider fault.
 
 Full policy detail - tier bars, vendor diversity, fallback precedence - lives
 in [`docs/model-selection.md`](docs/model-selection.md).

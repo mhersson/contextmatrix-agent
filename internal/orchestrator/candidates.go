@@ -414,7 +414,7 @@ func lastSubtaskID(subs []subtaskRef) string {
 // candidateCoderModel builds candidate c's reselection-aware coder resolver.
 // Unlike the fan-out's one-shot selection, it is consulted before EVERY coder
 // attempt: while c's current model is viable it is returned unchanged, but once
-// recoverIncapable has excluded it (o.excluded) the resolver re-picks the
+// recoverModel has excluded it (o.excluded) the resolver re-picks the
 // next-best coder model for the card tier - mirroring the fan-out selection with
 // every dropped model merged into the exclude set - and updates c.model, so a
 // candidate that drew a dud model continues on a different one instead of

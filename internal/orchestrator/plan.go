@@ -1078,17 +1078,17 @@ func runPlan(ctx context.Context, o *run) error {
 		case isBudgetError(derr):
 			return derr // park: the FSM's execute() maps this to the budget log
 		default:
-			if ie, ok := errors.AsType[*IncapableError](derr); ok {
-				// The model could not drive the tool loop. Blacklist and exclude
-				// it now so the planner, the mob seats and the first coder pick
-				// do not land on it again this run; the re-selection cap error
+			if ok, rerr := o.recoverModel(ctx, derr); ok {
+				// The model could not drive the tool loop or kept replying empty.
+				// Exclude it now so the planner, the mob seats and the first coder
+				// pick do not land on it again this run; the re-selection cap error
 				// is advisory here - planning continues without a diagnosis.
-				if rerr := o.recoverIncapable(ctx, ie); rerr != nil {
-					slog.Warn("plan: diagnose model incapable and re-selection cap exhausted",
+				if rerr != nil {
+					slog.Warn("plan: diagnose model unusable and re-selection cap exhausted",
 						"card_id", cfg.CardID, "error", rerr)
 				}
 
-				// recoverIncapable extended the exclusion set; the resolver's
+				// recoverModel extended the exclusion set; the resolver's
 				// resolve-once cache must be invalidated so the next call
 				// re-selects off the excluded slug. The announced flag stays
 				// set: this forced re-resolution speaks through one of the two

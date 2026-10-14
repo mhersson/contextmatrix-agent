@@ -9,6 +9,7 @@ import (
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
+	"github.com/mhersson/contextmatrix-harness/harness"
 	"github.com/mhersson/contextmatrix-harness/llm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -19,7 +20,9 @@ import (
 // harness counts as unproductive and - after IncapableThreshold turns - reports
 // as Reason "incapable" (the signal runModel turns into *IncapableError). An
 // incapable call does NOT consume the response queue, so the script stays aligned
-// to the CAPABLE calls only.
+// to the CAPABLE calls only. Any model in empty replies with nothing every turn,
+// which the harness retries and then fails with harness.ErrEmptyResponse; it
+// consumes no queue entry either.
 //
 // Capable calls return responses in order: from the queued responses slice when
 // set (the review path needs distinct specialist/verdict payloads), else a
@@ -29,6 +32,7 @@ import (
 type modelAwareLLM struct {
 	mu        sync.Mutex
 	incapable map[string]bool
+	empty     map[string]bool
 	responses []llm.Response // capable-call script; empty -> canned coder finish
 	i         int
 	models    []string
@@ -57,6 +61,10 @@ func (m *modelAwareLLM) next(req llm.Request) llm.Response {
 			Type:     "function",
 			Function: llm.FunctionCall{Name: "read", Arguments: `{ this is not json`},
 		}}}
+	}
+
+	if m.empty[req.Model] {
+		return llm.Response{FinishReason: "stop", Usage: llm.Usage{Cost: 0.001}}
 	}
 
 	if len(m.responses) == 0 {
@@ -391,4 +399,126 @@ func TestRecoverIncapableLogsReason(t *testing.T) {
 	for _, r := range blacklisted {
 		assert.Equal(t, reason, r, "BlacklistModel receives the same reason on every call, including the cap-exhausting one")
 	}
+}
+
+// TestExecuteFailsOverFromEmptyReplyCoder: a coder model that only replies empty
+// is excluded for the rest of the run and the same subtask re-runs on the next
+// pick, on the shared re-selection budget. It is not blacklisted on the board:
+// an empty streak can be a transient provider fault.
+func TestExecuteFailsOverFromEmptyReplyCoder(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	llmFake := &modelAwareLLM{empty: map[string]bool{"alpha/coder": true}}
+
+	d := execTestDeps(ops, git, llmFake)
+	d.Registry = twoCoderRegistry()
+
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("moderate")}}, 0)
+	require.NoError(t, runExecute(context.Background(), o), "the run must fail over to the second model")
+
+	assert.Empty(t, ops.blacklistReasons(), "an empty-reply model is not blacklisted")
+	assert.Equal(t, 1, o.reselects, "the failover spends one re-selection")
+	assert.True(t, o.excluded["alpha/coder"], "the empty-reply model is excluded for the rest of the run")
+
+	models := llmFake.recordedModels()
+	require.NotEmpty(t, models)
+	assert.Equal(t, "alpha/coder", models[0], "the first attempt uses the best-value pick")
+	assert.Equal(t, "beta/coder", models[len(models)-1], "the failover runs on the next-best pick")
+
+	assert.Contains(t, ops.recorded(), "CompleteTask:SUB-1")
+}
+
+// TestExecuteEmptyReplyAndIncapableShareTheReselectCap: both failovers draw on
+// the one re-selection budget, and only the incapable model is blacklisted.
+func TestExecuteEmptyReplyAndIncapableShareTheReselectCap(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	llmFake := &modelAwareLLM{
+		incapable: map[string]bool{"alpha/coder": true},
+		empty:     map[string]bool{"beta/coder": true},
+	}
+
+	d := execTestDeps(ops, git, llmFake)
+	d.Registry = twoCoderRegistry()
+
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("moderate")}}, 0)
+	require.NoError(t, runExecute(context.Background(), o))
+
+	assert.Equal(t, 2, o.reselects, "both failovers count against the shared cap")
+	assert.Contains(t, ops.recorded(), "BlacklistModel:CARD-1/alpha/coder")
+	assert.NotContains(t, ops.recorded(), "BlacklistModel:CARD-1/beta/coder")
+	assert.True(t, o.excluded["alpha/coder"])
+	assert.True(t, o.excluded["beta/coder"])
+
+	models := llmFake.recordedModels()
+	require.NotEmpty(t, models)
+	assert.Equal(t, "capable/default", models[len(models)-1])
+	assert.Contains(t, ops.recorded(), "CompleteTask:SUB-1")
+}
+
+// TestExecutePinnedEmptyReplyCoderExhaustsTheCap: a pinned coder is re-handed
+// after every empty-reply failover, so the shared cap is what parks it, and the
+// park keeps the empty-reply cause.
+func TestExecutePinnedEmptyReplyCoderExhaustsTheCap(t *testing.T) {
+	const pin = "alpha/coder"
+
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	llmFake := &modelAwareLLM{empty: map[string]bool{pin: true}}
+
+	d := execTestDeps(ops, git, llmFake)
+	d.Registry = twoCoderRegistry()
+
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("moderate")}}, 0)
+	o.tc.ModelCoder = pin
+
+	err := runExecute(context.Background(), o)
+	require.ErrorIs(t, err, harness.ErrEmptyResponse)
+
+	var ee *EmptyResponseError
+	require.ErrorAs(t, err, &ee, "the cap park wraps the model that spent the last attempt")
+	assert.Equal(t, pin, ee.Model)
+	assert.Equal(t, reselectCap, o.reselects, "the counter stops at the cap")
+	assert.Empty(t, ops.blacklistReasons(), "the cap-exhausting empty-reply model is not blacklisted either")
+	assert.False(t, modelsUsed(llmFake, "beta/coder"), "an auto-selected substitute never replaces a pin")
+	assert.NotContains(t, ops.recorded(), "CompleteTask:SUB-1")
+}
+
+// TestReviewFailsOverFromEmptyReplyFixCoder: the review fix run fails over the
+// same way: the empty-reply fix coder is excluded, not blacklisted, and the
+// next-best fix coder lands the round.
+func TestReviewFailsOverFromEmptyReplyFixCoder(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+
+	client := &modelAwareLLM{
+		empty: map[string]bool{"fix/alpha": true},
+		responses: []llm.Response{
+			stopResp("Correctness: bug", 0.01),
+			stopResp("Design: ok", 0.01),
+			stopResp("Security: ok", 0.01),
+			stopResp(`{"approved":false,"summary":"fix it","fixes":[{"file":"a.go","issue":"bug","suggestion":"patch"}]}`, 0.02),
+			stopResp("coder: fixed the bug", 0.05),
+			stopResp("Correctness: ok now", 0.01),
+			stopResp("Design: ok", 0.01),
+			stopResp("Security: ok", 0.01),
+			stopResp(`{"approved":true,"summary":"clean now","fixes":[]}`, 0.02),
+		},
+	}
+
+	d := reviewTestDeps(t, ops, git, client, reviewFixRegistry())
+
+	o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}, 0)
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	assert.Empty(t, ops.blacklistReasons(), "an empty-reply fix coder is not blacklisted")
+	assert.Equal(t, 1, o.reselects, "exactly one re-selection")
+	assert.True(t, o.excluded["fix/alpha"])
+
+	gitCalls := git.recorded()
+	assert.GreaterOrEqual(t, indexOfPrefix(gitCalls, "CommitFixup:"), 0,
+		"the failed-over fix coder must commit a fixup; git=%v", gitCalls)
+	assert.True(t, modelsUsed(client, "fix/alpha"))
+	assert.True(t, modelsUsed(client, "fix/beta"))
 }

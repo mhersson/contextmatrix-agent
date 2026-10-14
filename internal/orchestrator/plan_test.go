@@ -2481,3 +2481,27 @@ func TestPlanDecisionReresolvesOffAnIncapableDiagnoseModel(t *testing.T) {
 	assert.Equal(t, []string{"rev/alpha"}, entryAnnouncements(ops),
 		"the phase announces its model once, at entry; the re-resolution does not re-announce")
 }
+
+// TestPlanDecisionReresolvesOffAnEmptyReplyDiagnoseModel: a diagnose model that
+// only replies empty is excluded for the rest of the run, not blacklisted, and
+// the plan is drafted on the next decision pick.
+func TestPlanDecisionReresolvesOffAnEmptyReplyDiagnoseModel(t *testing.T) {
+	ops := &fakeOps{}
+	client := &modelAwareLLM{
+		empty:     map[string]bool{"rev/alpha": true},
+		responses: []llm.Response{stopResp(onePlanJSON, 0.01)},
+	}
+	o := bugPlanRun(ops, client, &bytes.Buffer{})
+
+	require.NoError(t, runPlan(context.Background(), o), "a failed diagnosis must not fail planning")
+	require.Len(t, ops.createCardArgs, 1, "planning continued without a diagnosis")
+
+	assert.True(t, o.excluded["rev/alpha"], "the empty-reply model is excluded for the rest of the run")
+	assert.Empty(t, ops.blacklistReasons(), "an empty-reply model is not blacklisted")
+	assert.Equal(t, 1, o.reselects, "the re-selection draws on the shared cap")
+
+	models := client.recordedModels()
+	require.NotEmpty(t, models)
+	assert.Equal(t, "rev/alpha", models[0], "the diagnose pass ran on the first pick")
+	assert.Equal(t, "rev/beta", models[len(models)-1], "the planner ran on the replacement")
+}

@@ -825,3 +825,61 @@ func TestFanoutPinnedSeatReportsItsMeasuredShortfall(t *testing.T) {
 			"the pin was chosen by hand, so no search happened to report on; logs=%v", ops.logs)
 	}
 }
+
+// TestFanoutCandidateFailsOverOnEmptyReply: a candidate whose model only replies
+// empty re-picks the next-best coder model and completes on it, without
+// blacklisting the empty-reply model.
+func TestFanoutCandidateFailsOverOnEmptyReply(t *testing.T) {
+	ops := &fakeOps{}
+	mainGit := &fakeGit{}
+	client := &modelAwareLLM{empty: map[string]bool{"solo/coder": true}}
+	d, pdg, _ := fanoutDeps(t, ops, mainGit, client, 1)
+	d.Registry = registry.NewRegistryFromParts(
+		llm.Catalog{
+			{ID: "solo/coder", ContextLength: 200000, SupportedParameters: []string{"tools"}, PromptPricePerTok: 1e-6},
+			{ID: "capgood/default", ContextLength: 200000, SupportedParameters: []string{"tools"}},
+		},
+		registry.Priors{Models: map[string]registry.PriorEntry{"solo/coder": coderPrior(0.9)}},
+		nil, nil, "capgood/default",
+	)
+
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("moderate")}}, 0)
+
+	require.NoError(t, o.runFanout(context.Background()))
+	require.Len(t, o.candidates, 1)
+
+	c := o.candidates[0]
+	require.NoError(t, c.err, "the candidate must fail over to a different model, not drop")
+	assert.Equal(t, "capgood/default", c.model)
+	assert.Empty(t, ops.blacklistReasons(), "an empty-reply model is not blacklisted")
+
+	fg := pdg.fakeGitFor(c.dir)
+	require.NotNil(t, fg)
+	assert.Positive(t, countCalls(fg.recorded(), "CommitWithMessage"), "the failed-over candidate committed its work")
+}
+
+// TestFanoutEmptyReplyRecoveryRaceSafe fans out three candidates when every
+// coder model only replies empty, so each candidate drives the shared recovery
+// state concurrently. Run under -race, it proves the failover keeps the selMu
+// discipline; with no usable model anywhere every candidate fails.
+func TestFanoutEmptyReplyRecoveryRaceSafe(t *testing.T) {
+	ops := &fakeOps{}
+	mainGit := &fakeGit{}
+	client := &modelAwareLLM{empty: map[string]bool{
+		"alpha/coder": true, "beta/coder": true, "capable/default": true,
+	}}
+	d, _, _ := fanoutDeps(t, ops, mainGit, client, 3)
+	d.Registry = twoCoderRegistry()
+
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("moderate")}}, 0)
+
+	require.Error(t, o.runFanout(context.Background()), "no usable model exists, so every candidate fails")
+	require.Len(t, o.candidates, 3)
+
+	for i, c := range o.candidates {
+		require.Error(t, c.err, "candidate %d must fail", i+1)
+	}
+
+	assert.Empty(t, ops.blacklistReasons(), "no empty-reply model is blacklisted")
+	assert.LessOrEqual(t, o.reselects, reselectCap, "the shared cap bounds every candidate's failovers")
+}

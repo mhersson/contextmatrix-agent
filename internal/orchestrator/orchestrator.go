@@ -401,7 +401,7 @@ type run struct {
 
 	// selMu guards the shared model-selection state (coderModels, reselects,
 	// excluded) so the Best-of-N fan-out's parallel candidate goroutines - which
-	// all run through runCoderWith and recoverIncapable - never race on it. The
+	// all run through runCoderWith and recoverModel - never race on it. The
 	// single-threaded parent execute path acquires it uncontended (a no-op).
 	selMu sync.Mutex
 
@@ -412,10 +412,10 @@ type run struct {
 	coderModels map[string]bool
 
 	// reselects counts in-run model re-selections triggered by a harness-incapable
-	// model (one per recoverIncapable). It is capped at 3 per card across BOTH the
-	// execute (coder) and review (synthesis/fix) recovery paths - a shared budget,
-	// so a card that keeps drawing dud models parks rather than burning re-selections
-	// forever.
+	// or empty-reply model (one per recoverModel). It is capped at reselectCap per
+	// card across the plan (diagnose), execute (coder) and review (fix) recovery
+	// paths - a shared budget, so a card that keeps drawing dud models parks rather
+	// than burning re-selections forever.
 	reselects int
 
 	// fixFailed is the set of fix models whose round failed this run; later picks
@@ -482,10 +482,10 @@ type run struct {
 	// rounds read it.
 	coderFailed map[string]bool
 
-	// excluded is the per-card set of models proven harness-incapable on this run.
-	// It is threaded into every SelectInput.Exclude (coder selection and the review
-	// panel) so a model that could not drive the tool loop is never re-picked.
-	// Initialized in newRun.
+	// excluded is the per-card set of models proven harness-incapable, or that
+	// kept replying empty, on this run. It is threaded into every
+	// SelectInput.Exclude (coder selection and the review panel) so such a model
+	// is never re-picked. Initialized in newRun.
 	excluded map[string]bool
 
 	// coderPinWarned and reviewerPinWarned guard the once-per-run advisory
@@ -986,9 +986,51 @@ func truncateBytes(s string, n int) string {
 
 // reselectCap bounds in-run model re-selections per card. A model that emits
 // tool calls every turn but never forms valid arguments (harness-incapable) is
-// blacklisted and swapped for the next-best pick; after this many swaps the run
+// blacklisted and swapped for the next-best pick, and one that keeps replying
+// empty is swapped without the blacklist; after this many swaps in all the run
 // parks rather than churning through the catalog indefinitely.
 const reselectCap = 3
+
+// recoverModel recovers a re-selecting phase from a model it can swap out: a
+// harness-incapable one or one that kept replying empty. ok is false for any
+// other error. When ok, a non-nil error means the shared re-selection cap is
+// exhausted and the caller parks; otherwise it re-selects and re-runs the unit.
+func (o *run) recoverModel(ctx context.Context, err error) (ok bool, rerr error) {
+	if ie, isIncapable := errors.AsType[*IncapableError](err); isIncapable {
+		return true, o.recoverIncapable(ctx, ie)
+	}
+
+	if ee, isEmpty := errors.AsType[*EmptyResponseError](err); isEmpty {
+		return true, o.recoverEmptyResponse(ctx, ee)
+	}
+
+	return false, nil
+}
+
+// excludeForReselect excludes model for the rest of the run and takes one
+// re-selection from the shared cap, returning the attempt it took, or
+// exhausted when the cap was already spent.
+func (o *run) excludeForReselect(model string) (attempt int, exhausted bool) {
+	// Exclusion and the cap check must be atomic: under a Best-of-N fan-out,
+	// parallel candidates share o.reselects and o.excluded, and the cap is a
+	// single shared budget. The caller's advisory I/O runs after the release.
+	o.selMu.Lock()
+	defer o.selMu.Unlock()
+
+	if o.excluded == nil {
+		o.excluded = map[string]bool{}
+	}
+
+	o.excluded[model] = true
+
+	if o.reselects >= reselectCap {
+		return 0, true
+	}
+
+	o.reselects++
+
+	return o.reselects, false
+}
 
 // recoverIncapable handles a harness-incapable model encountered mid-phase: it
 // blacklists the model on CM (best-effort), records the exclusion so the next
@@ -998,27 +1040,7 @@ const reselectCap = 3
 // the caller can simply re-select and re-run the same unit; no git reset is
 // needed.
 func (o *run) recoverIncapable(ctx context.Context, ie *IncapableError) error {
-	// Exclusion and the cap check must be atomic: under a Best-of-N fan-out,
-	// parallel candidates share o.reselects and o.excluded, and the cap is a
-	// single shared budget. Hold selMu across the whole mutation, then release
-	// before the advisory I/O.
-	o.selMu.Lock()
-
-	if o.excluded == nil {
-		o.excluded = map[string]bool{}
-	}
-
-	o.excluded[ie.Model] = true
-
-	attempt := 0
-
-	exhausted := o.reselects >= reselectCap
-	if !exhausted {
-		o.reselects++
-		attempt = o.reselects
-	}
-
-	o.selMu.Unlock()
+	attempt, exhausted := o.excludeForReselect(ie.Model)
 
 	// Best-effort, and done for the cap-exhausting model too: a proven
 	// incapable model must not be the first pick of the next run just because
@@ -1032,6 +1054,25 @@ func (o *run) recoverIncapable(ctx context.Context, ie *IncapableError) error {
 	}
 
 	o.d.logCard(ctx, "model %q harness-incapable; blacklisted and re-selecting (attempt %d/%d): %s", ie.Model, attempt, reselectCap, ie.Reason)
+
+	return nil
+}
+
+// recoverEmptyResponse handles a model that kept replying empty the way
+// recoverIncapable handles an incapable one, minus the blacklist: an empty
+// streak can be a transient provider fault, so the model is excluded for this
+// run only. Unlike an incapable model it may have edited the tree before the
+// streak; the re-run builds on whatever it left.
+func (o *run) recoverEmptyResponse(ctx context.Context, ee *EmptyResponseError) error {
+	attempt, exhausted := o.excludeForReselect(ee.Model)
+
+	if exhausted {
+		o.d.logCard(ctx, "model %q replied empty; excluded for this run - re-selection cap (%d) exhausted", ee.Model, reselectCap)
+
+		return fmt.Errorf("re-selection cap (%d) exhausted after model %q: %w", reselectCap, ee.Model, ee)
+	}
+
+	o.d.logCard(ctx, "model %q replied empty; excluded for this run and re-selecting (attempt %d/%d)", ee.Model, attempt, reselectCap)
 
 	return nil
 }

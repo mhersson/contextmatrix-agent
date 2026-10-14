@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -53,6 +54,21 @@ type IncapableError struct {
 func (e *IncapableError) Error() string {
 	return fmt.Sprintf("model %q is harness-incapable: %s", e.Model, e.Reason)
 }
+
+// EmptyResponseError marks a phase stopping because the model kept replying
+// with no content, reasoning or tool calls after the harness's retries. The
+// re-selecting phases fail over to another model for the rest of the run
+// (recoverEmptyResponse); Unwrap keeps errors.Is(err, harness.ErrEmptyResponse)
+// true for callers that only need the fact.
+type EmptyResponseError struct {
+	Model string
+}
+
+func (e *EmptyResponseError) Error() string {
+	return fmt.Sprintf("model %q replied empty: %v", e.Model, harness.ErrEmptyResponse)
+}
+
+func (e *EmptyResponseError) Unwrap() error { return harness.ErrEmptyResponse }
 
 // harnessConfig builds the per-phase harness.Config with the run-wide safety
 // fields (size cap, secret redaction) plus the model's own context window.
@@ -135,6 +151,10 @@ func (o *run) runModelCfg(ctx context.Context, reg *tools.Registry, prompt, mode
 
 	if err == nil && res.Reason == "max_turns" {
 		return res, dur, &MaxTurnsError{Model: model, Turns: res.Turns}
+	}
+
+	if errors.Is(err, harness.ErrEmptyResponse) {
+		return res, dur, &EmptyResponseError{Model: model}
 	}
 
 	return res, dur, err
