@@ -4229,6 +4229,72 @@ func TestVerifyFixThatRemovesTheSubtasksTestsIsRetried(t *testing.T) {
 	assert.Equal(t, 1, countCalls(ops.recorded(), "CompleteTask:SUB-1"))
 }
 
+// TestPreCommitFixResponseReachesTheCard: the verify fix prompt makes the
+// finish message account for any test the fix changed, and no review round
+// reads this pass's response, so it lands on the card in one line within the
+// board's log cap.
+func TestPreCommitFixResponseReachesTheCard(t *testing.T) {
+	const marker = "FIX-RESPONSE-MARKER"
+
+	ops := &fakeOps{}
+	client := &planLLM{responses: []llm.Response{
+		finishResp("feat: the work", 0.01),
+		finishResp(marker+" "+strings.Repeat("changed an expectation in TestThing. ", 200), 0.02),
+	}}
+	git := &fakeGit{committed: true}
+	d := execTestDeps(ops, git, client)
+
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")}}, 0)
+	seedResolvedVerifyPlan(o)
+	o.runVerify = verifyExits(1, 0)
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	var carried []string
+
+	for _, line := range ops.logs {
+		if strings.Contains(line, marker) {
+			carried = append(carried, line)
+		}
+	}
+
+	require.Len(t, carried, 1, "one card line carries the fix response")
+	assert.LessOrEqual(t, len(carried[0]), 2000, "the line fits the board's log cap")
+}
+
+// TestTestRemovalExcludesTheFixModel: the fix model whose pass cut the
+// subtask's tests is the one that failed, so the retry's fix pass runs on
+// another model. The trip does not raise the card's fix sizing: the round was
+// scoped to one subtask.
+func TestTestRemovalExcludesTheFixModel(t *testing.T) {
+	ops := &fakeOps{}
+	client := &modelAwareLLM{responses: []llm.Response{
+		finishResp("feat: the work", 0.01),
+		stopResp("fix: removed the failing test", 0.02),
+		finishResp("feat: the work, again", 0.04),
+		stopResp("fix: repaired the code", 0.02),
+	}}
+	tests := map[string]int{"pkg/thing_test.go": 40}
+	git := &fakeGit{
+		committed: true, headSHA: "base",
+		netLines: []map[string]int{tests, {}, tests, tests},
+	}
+	d := execTestDeps(ops, git, client)
+	d.Registry = twoCoderRegistry()
+
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("moderate")}}, 0)
+	seedResolvedVerifyPlan(o)
+	o.runVerify = verifyExits(1, 0, 1, 0)
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	models := client.recordedModels()
+	require.Len(t, models, 4, "coder, fix, retry coder, retry fix")
+	assert.NotEqual(t, models[1], models[3], "the retry's fix pass runs on a different model")
+	assert.True(t, o.fixFailed[models[1]], "the fix model that cut the tests is excluded from later fix picks")
+	assert.Zero(t, o.fixBarSteps, "a subtask-scoped round does not size the review loop")
+}
+
 // TestVerifyFixTestRemovalGuardTrips pins what counts as removing the
 // subtask's tests: a test file the uncommitted work grew that the fix pass
 // deletes or cuts back by more than the tidy tolerance. Anything else - a

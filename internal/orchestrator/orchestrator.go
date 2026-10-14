@@ -418,11 +418,12 @@ type run struct {
 	// than burning re-selections forever.
 	reselects int
 
-	// fixFailed is the set of fix models whose round failed this run; later picks
-	// exclude them. fixBarSteps (quality) and fixBudgetSteps (volume) are monotone
-	// for the whole run because runFix is shared with pr_gates; a call site opts
-	// out per call via fixRequest.NoEscalate. fixFailReason and fixCapReason are
-	// the card-log wording for the last failure of each kind; lastFixModel ran last.
+	// fixFailed is the set of fix models whose round failed this run, or whose
+	// pre-commit fix pass removed a subtask's tests; later picks exclude them.
+	// fixBarSteps (quality) and fixBudgetSteps (volume) are monotone for the
+	// whole run because runFix is shared with pr_gates; a call site opts out per
+	// call via fixRequest.NoEscalate. fixFailReason and fixCapReason are the
+	// card-log wording for the last failure of each kind; lastFixModel ran last.
 	fixFailed      map[string]bool
 	fixBarSteps    int
 	fixBudgetSteps int

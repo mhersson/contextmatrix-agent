@@ -53,7 +53,8 @@ its leftovers are discarded (index and tree reset to the attempt's start,
 untracked files it created removed), and, budget permitting, the subtask
 re-runs once one bar higher - at critical, the same bar - with that model
 excluded from coder picks for the rest of the run (a pinned coder is still
-reused). A coder that ran `git commit` itself moved HEAD and is not caught by
+reused). After a test removal the fix model that ran the pass is excluded from
+later fix picks too (a pin still wins), without raising the card's fix sizing. A coder that ran `git commit` itself moved HEAD and is not caught by
 the no-change check. If the retry is unproductive too, it is discarded the same
 way, the run persists the subtask's bar one rung above the retry's (capped at
 critical; a critical subtask keeps its bar), and the card parks as blocked with
@@ -218,9 +219,11 @@ panel verdict stays beside that verdict across verify-red rounds, the same way
 recorded history instead, where each response already sits inside its own
 round's section, so no separate block repeats it. An empty message records
 nothing and adds no block. The review loop, the HITL rounds and the
-authoritative pass record a response; the post-approval cleanup pass, the
-`pr_gates` fix rounds and the pre-commit verify fix drop it, since no review
-round reads what they answer.
+authoritative pass record a response; the post-approval cleanup pass and the
+`pr_gates` fix rounds drop it, since no review round reads what they answer.
+The pre-commit verify fix writes a non-empty response to the card as one
+activity-log line, cut to fit the board's 2000-byte cap, because its prompt
+makes the response name any test the fix changed.
 
 The synthesis verdict is severity-gated. First `capAdvisorySeverity` rewrites
 any finding whose basis is `hardening` or `polish` and whose severity is

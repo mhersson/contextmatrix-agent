@@ -326,10 +326,11 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 
 	// Round 0: this is not a review round and has no round number. The subtask
 	// rides along because this round is sized on ITS bar, so its measurement row
-	// must report its estimate rather than the card's. Its response is dropped:
-	// the verify re-run below judges it, and no review round reads it.
+	// must report its estimate rather than the card's.
 	req := fixRequest{Round: 0, FixTier: string(sub.Sizing.Bar), Subtask: sub.ID, PlannerBar: sub.PlannerBar}
-	if _, _, ferr := o.runFixModel(ctx, prompt, req); ferr != nil {
+
+	fixModel, fixResponse, ferr := o.runFixModel(ctx, prompt, req)
+	if ferr != nil {
 		// A cap is not a verdict on the tree the fix left behind: the re-run
 		// below decides, exactly as runFix does for the review rounds.
 		if _, ok := errors.AsType[*MaxTurnsError](ferr); !ok {
@@ -337,6 +338,13 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 		}
 
 		o.d.logCard(ctx, "subtask %s: the fix pass hit its turn cap - verifying what it left", sub.ID)
+	}
+
+	// The prompt makes this message name any test the fix changed, and no review
+	// round reads it, so the card is the only place it can be read.
+	if fixResponse != "" {
+		o.d.logCard(ctx, "%s", truncateBytes(
+			fmt.Sprintf("subtask %s: the verify fix pass reported: %s", sub.ID, fixResponse), verifyParkNoteMax))
 	}
 
 	// A direct run, not the shared gate: the fix coder holds no verify tool, so
@@ -369,6 +377,17 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 	if vres.Status == verifyPassed {
 		if removed := o.removedTests(ctx, sc, tests); len(removed) > 0 {
 			paths := pathList(removed)
+
+			// The fix model cut the tests, so later fix picks skip it. Not
+			// markFixFailed: that would size the card's review loop from a
+			// round scoped to one subtask.
+			if fixModel != "" {
+				if o.fixFailed == nil {
+					o.fixFailed = map[string]bool{}
+				}
+
+				o.fixFailed[fixModel] = true
+			}
 
 			o.d.logCard(ctx, "subtask %s: the fix pass made verify pass but removed tests the subtask added (%s) - the attempt is not kept",
 				sub.ID, paths)
