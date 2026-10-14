@@ -175,18 +175,9 @@ func (o *run) executeSubtaskWith(ctx context.Context, sc *solverCtx, sub subtask
 		return nil
 	}
 
-	// Budget gate BEFORE claiming, so a parked subtask is never owned. A
-	// candidate solver checks its own sub-ledger AND the run ledger:
-	// server-priced totals sync only into the run ledger, so a run-wide breach
-	// must park the fan-out here rather than at the next phase boundary.
-	if err := sc.ledger.Check(); err != nil {
+	// Budget gate BEFORE claiming, so a parked subtask is never owned.
+	if err := o.checkSolverBudget(sc); err != nil {
 		return err
-	}
-
-	if sc.ledger != o.ledger {
-		if err := o.ledger.Check(); err != nil {
-			return err
-		}
 	}
 
 	// Claim conflicts mean another agent owns the subtask - abort the run rather
@@ -936,18 +927,18 @@ func (o *run) releaseSubtask(ctx context.Context, cardID string) {
 // sc.coderModel (skipping any model already excluded this run), logs the pick,
 // runs the harness on sc.tools, and accounts for spend on sc.ledger for every
 // attempt. If the model proves incapable (*IncapableError) or keeps replying
-// empty (*EmptyResponseError), recoverModel excludes it and the loop RE-SELECTS
-// the next-best model for the SAME subtask, with no git reset. The loop is
-// bounded by the per-card re-selection cap: once exhausted it returns the
-// wrapped park error. Any other run error (transport, context limit, budget) is
-// returned immediately, unwrapped of the recovery loop. Returns the successful
-// run's result, alongside the PICK that attempt ran on - so its Model is the
-// SELECTED catalog slug, not the gateway-echoed ModelUsed, because a caller
-// reporting a model outcome must key the row the way Best-of-N rows are keyed
-// (candidates.go's setPick), so the outcome ledger groups both under one model.
-// The rest of the Pick is what tells that caller whether the selector got the
-// bar it asked for, which decides whether a failure may be charged to the model
-// at all.
+// empty (*EmptyResponseError), recoverModel excludes it and, budget permitting,
+// the loop RE-SELECTS the next-best model for the SAME subtask, with no git
+// reset. The loop is bounded by the per-card re-selection cap: once exhausted
+// it returns the wrapped park error. Any other run error (transport, context
+// limit, budget) is returned immediately, unwrapped of the recovery loop.
+// Returns the successful run's result, alongside the PICK that attempt ran on -
+// so its Model is the SELECTED catalog slug, not the gateway-echoed ModelUsed,
+// because a caller reporting a model outcome must key the row the way Best-of-N
+// rows are keyed (candidates.go's setPick), so the outcome ledger groups both
+// under one model. The rest of the Pick is what tells that caller whether the
+// selector got the bar it asked for, which decides whether a failure may be
+// charged to the model at all.
 //
 // The third return is the turn window the run was configured with. A caller that
 // judges res.Turns against a window - the pre-commit gate does, to tell a coder
@@ -1035,6 +1026,11 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 			// per-card re-selection cap is exhausted - park then.
 			if rerr != nil {
 				return res, pick, maxTurns, rerr
+			}
+
+			// The next model's run is a whole coder run: park before spending it.
+			if err := o.checkSolverBudget(sc); err != nil {
+				return res, pick, maxTurns, err
 			}
 
 			// Re-select (the failed model is now excluded) and re-run the SAME
@@ -1134,6 +1130,22 @@ func (o *run) resolveCoderModel(ctx context.Context, sub subtaskRef, prompt stri
 	o.noteShortfall(ctx, "coder", sub.ID, p, rep)
 
 	return p, nil
+}
+
+// checkSolverBudget is the budget gate before a coder run. A candidate solver
+// checks its own sub-ledger AND the run ledger: server-priced totals sync only
+// into the run ledger, so a run-wide breach must park the fan-out here rather
+// than at the next phase boundary.
+func (o *run) checkSolverBudget(sc *solverCtx) error {
+	if err := sc.ledger.Check(); err != nil {
+		return err
+	}
+
+	if sc.ledger != o.ledger {
+		return o.ledger.Check()
+	}
+
+	return nil
 }
 
 // coderExclusions is the solo coder pick's exclusion set: models proven

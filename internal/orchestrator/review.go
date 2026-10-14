@@ -1755,10 +1755,10 @@ func (o *run) fixResponseText(args json.RawMessage) string {
 // runFixModel runs the fix coder harness with the same in-run model recovery as
 // the subtask coder: it resolves the fix model (skipping the per-card exclude
 // set), logs the pick, runs, and accounts for spend each attempt. An incapable
-// or empty-reply model is excluded via recoverModel and the next-best fix model
-// re-selected for the SAME round; the cap (shared with the coder path via
-// o.reselects) parks the run when exhausted. Any other run error returns
-// immediately. It returns the model that ran and, from a run that finished, its
+// or empty-reply model is excluded via recoverModel and, budget permitting, the
+// next-best fix model re-selected for the SAME round; the cap (shared with the
+// coder path via o.reselects) parks the run when exhausted. Any other run error
+// returns immediately. It returns the model that ran and, from a run that finished, its
 // finish message as fixResponseText renders it; the fixup targets files parsed
 // from the findings, not the model output.
 func (o *run) runFixModel(ctx context.Context, prompt string, req fixRequest) (string, string, error) {
@@ -1838,6 +1838,11 @@ func (o *run) runFixModel(ctx context.Context, prompt string, req fixRequest) (s
 		if ok, rerr := o.recoverModel(ctx, err); ok {
 			if rerr != nil {
 				return "", "", rerr
+			}
+
+			// The next model's run is a whole fix run: park before spending it.
+			if err := o.ledger.Check(); err != nil {
+				return "", "", err
 			}
 
 			// No reset, deliberately: the next fix model builds on what this one left.

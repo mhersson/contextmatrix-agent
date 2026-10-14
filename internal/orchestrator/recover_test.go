@@ -522,3 +522,42 @@ func TestReviewFailsOverFromEmptyReplyFixCoder(t *testing.T) {
 	assert.True(t, modelsUsed(client, "fix/alpha"))
 	assert.True(t, modelsUsed(client, "fix/beta"))
 }
+
+// TestExecuteFailoverChecksTheBudgetFirst: a failover is a whole new coder
+// run, so a ceiling the failed attempt crossed parks the run before the next
+// model is tried.
+func TestExecuteFailoverChecksTheBudgetFirst(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	llmFake := &modelAwareLLM{empty: map[string]bool{"alpha/coder": true}}
+
+	d := execTestDeps(ops, git, llmFake)
+	d.Registry = twoCoderRegistry()
+
+	// The empty attempt's calls cost 0.001 each, so the attempt alone crosses it.
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("moderate")}}, 0.002)
+
+	var be *BudgetExceededError
+
+	require.ErrorAs(t, runExecute(context.Background(), o), &be)
+	assert.False(t, modelsUsed(llmFake, "beta/coder"), "no second model runs past the ceiling")
+	assert.NotContains(t, ops.recorded(), "CompleteTask:SUB-1")
+}
+
+// TestFixFailoverChecksTheBudgetFirst: the fix loop parks the same way.
+func TestFixFailoverChecksTheBudgetFirst(t *testing.T) {
+	ops := &fakeOps{}
+	client := &modelAwareLLM{empty: map[string]bool{"fix/alpha": true}}
+
+	d := reviewTestDeps(t, ops, &fakeGit{committed: true}, client, reviewFixRegistry())
+
+	o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}, 0.002)
+
+	_, _, err := o.runFixModel(context.Background(), "fix it", fixRequest{Round: 1})
+
+	var be *BudgetExceededError
+
+	require.ErrorAs(t, err, &be)
+	assert.Equal(t, []string{"fix/alpha"}, slices.Compact(client.recordedModels()),
+		"only the empty-reply fix model ran")
+}
