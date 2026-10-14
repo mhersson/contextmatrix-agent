@@ -354,6 +354,62 @@ func TestJudgeUnparsableVerdictFallsBack(t *testing.T) {
 	assert.True(t, ops.loggedContains("falling back"), "the fallback is logged; logs=%v", ops.logs)
 }
 
+// TestJudgeEmptyReplyFallsBack: a judge model that only replies empty must not
+// fail a run whose candidates are all finished. It takes the unparsable-verdict
+// path - one repair attempt, then the first verifying candidate - and every
+// empty call is still charged.
+func TestJudgeEmptyReplyFallsBack(t *testing.T) {
+	ops := &fakeOps{}
+	empty := llm.Response{FinishReason: "stop", Usage: llm.Usage{Cost: 0.01}}
+	client := &planLLM{responses: []llm.Response{empty, empty, empty, empty, empty, empty}}
+	cands := []*candidate{
+		judgeCandidate(1, "coder/one", "dir-c1", "DIFF_ONE"),
+		judgeCandidate(2, "coder/two", "dir-c2", "DIFF_TWO"),
+	}
+	verify := map[string]bool{"dir-c1": true, "dir-c2": true}
+	o := newJudgeRun(t, ops, &fakeGit{}, client, cands, verify)
+
+	require.NoError(t, runJudge(context.Background(), o), "an empty judge must degrade, not fail the run")
+
+	require.NotNil(t, o.winner)
+	assert.Equal(t, 1, o.winner.idx, "fallback picks pool[0], the first verifying candidate")
+	assert.Empty(t, o.judgeModel, "no usable verdict means no recorded judge model")
+
+	var judgeReports []cmclient.UsageReport
+
+	for _, u := range ops.usageReports {
+		if u.Step == "judge" {
+			judgeReports = append(judgeReports, u)
+		}
+	}
+
+	require.Len(t, judgeReports, 2, "the judge takes one repair attempt before falling back")
+
+	spent := 0.0
+	for _, u := range judgeReports {
+		spent += u.ActualCostUSD
+	}
+
+	assert.InDelta(t, 0.06, spent, 1e-9, "every empty reply is charged")
+}
+
+// TestJudgeRunErrorStillFails: only an empty-reply streak degrades; any other
+// judge run error still fails the phase without adopting a winner.
+func TestJudgeRunErrorStillFails(t *testing.T) {
+	ops := &fakeOps{}
+	client := &planLLM{errAfter: 1}
+	cands := []*candidate{
+		judgeCandidate(1, "coder/one", "dir-c1", "DIFF_ONE"),
+		judgeCandidate(2, "coder/two", "dir-c2", "DIFF_TWO"),
+	}
+	verify := map[string]bool{"dir-c1": true, "dir-c2": true}
+	o := newJudgeRun(t, ops, &fakeGit{}, client, cands, verify)
+
+	err := runJudge(context.Background(), o)
+	require.ErrorIs(t, err, errPlanLLM)
+	assert.Nil(t, o.winner, "no winner is adopted on a failed judge run")
+}
+
 // TestJudgeExcludesCandidateModels proves the judge never runs a candidate's own
 // coder model (a model must not judge its own work): with both candidate models
 // recorded in o.coderModels, the reviewer selection falls past them.

@@ -1038,7 +1038,8 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 			}
 
 			// Re-select (the failed model is now excluded) and re-run the SAME
-			// subtask on the tree as the failed attempt left it.
+			// subtask. No reset, deliberately: the tree keeps any work done before
+			// an empty-reply streak.
 			continue
 		}
 

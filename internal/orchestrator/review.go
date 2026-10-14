@@ -1838,6 +1838,7 @@ func (o *run) runFixModel(ctx context.Context, prompt string, req fixRequest) (s
 				return "", "", rerr
 			}
 
+			// No reset, deliberately: the next fix model builds on what this one left.
 			continue
 		}
 

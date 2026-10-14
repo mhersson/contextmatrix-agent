@@ -10,6 +10,7 @@ import (
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
+	"github.com/mhersson/contextmatrix-harness/harness"
 )
 
 // judgeDiffCap bounds a candidate diff carried whole into the judge prompt; a
@@ -223,8 +224,9 @@ func runJudge(ctx context.Context, o *run) error {
 // call: up to two attempts (a repair turn on a parse failure), spending on and
 // reporting through the shared parent ledger each attempt. It returns
 // (verdict, true, nil) on a parsed+validated verdict; (_, false, nil) after two
-// parse failures (the caller falls back); and (_, false, err) on a budget park
-// or transport error (the caller propagates it).
+// parse failures, an empty-reply streak counting as one (the caller falls
+// back); and (_, false, err) on a budget park or any other run error (the
+// caller propagates it).
 func (o *run) runJudgeVerdict(ctx context.Context, model, prompt string, poolLen int) (judgeVerdict, bool, error) {
 	d := o.d
 	cfg := d.Cfg
@@ -248,7 +250,9 @@ func (o *run) runJudgeVerdict(ctx context.Context, model, prompt string, poolLen
 
 		o.spendAndReport(ctx, o.ledger, cfg.CardID, "judge: report usage failed", res, model, "judge", dur)
 
-		if err != nil {
+		// An empty-reply streak falls through to the parse below and fails it like
+		// any unparsable verdict, so it repairs once and then degrades.
+		if err != nil && !errors.Is(err, harness.ErrEmptyResponse) {
 			return judgeVerdict{}, false, fmt.Errorf("judge run: %w", err)
 		}
 
