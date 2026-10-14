@@ -482,10 +482,11 @@ waste it.
 
 ` + coderGroundingRule + `
 
-Work happens on the current branch. Prior subtasks have already been committed
-and their changes are visible in the working tree; build on them, do not redo
-them. Do NOT run git yourself (no commit, no push, no branch) - the orchestrator
-commits and pushes your changes after you finish.
+Work happens on the current branch. Prior subtasks may have changed the tree;
+build on what is there. If something this subtask depends on is missing, say so
+in your finish message instead of searching for it. Do NOT run git yourself
+(no commit, no push, no branch) - the orchestrator commits and pushes your
+changes after you finish.
 
 Write tests alongside the code and run them. Once the acceptance criteria
 pass, finish immediately - do not repeat verification that already passed.%s
@@ -779,7 +780,7 @@ Title: %s
 
 SCOPE
 The card's work is already in the working tree.
-The ONLY item in scope is the failure below - do not re-audit or re-implement other card items. If the failing test was added on this branch and its expectation is wrong, fix the expectation or delete the test; if the failure is in code the branch changed, fix the code. Make the smallest edit that turns the verify command green, run it, then finish.
+The ONLY item in scope is the failure below - do not re-audit or re-implement other card items. Fix the code. A test's expectation may change only when it is provably wrong, and your finish message must say which test changed and why. Never delete a test to make the command pass. Make the smallest edit that turns the verify command green, run it, then finish.
 
 VERIFY FAILURE TO FIX
 %s
