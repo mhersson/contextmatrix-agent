@@ -800,6 +800,11 @@ func (o *run) execute(ctx context.Context) error {
 				o.d.logCard(ctx, "%s", verifyParkedLogMessage(vpe))
 			}
 
+			if ese, ok := errors.AsType[*EmptySubtaskError](err); ok {
+				// Empty-subtask park: same shape as the other arms.
+				o.d.logCard(ctx, "%s", emptySubtaskLogMessage(ese))
+			}
+
 			if soe, ok := errors.AsType[*SplitOverflowError](err); ok {
 				// Split-overflow park: same shape as the other arms - log
 				// best-effort, then stop without entering the next phase.
@@ -889,6 +894,13 @@ func verifyParkedLogMessage(vpe *VerifyParkedError) string {
 	}
 
 	return header + label + verifyParkOutputTail(vpe.Output, room)
+}
+
+// emptySubtaskLogMessage is the canonical card-log line for an empty-subtask park.
+func emptySubtaskLogMessage(ese *EmptySubtaskError) string {
+	return fmt.Sprintf("subtask %s: the coder (and its verify fix, if one ran) left nothing to commit; "+
+		"parking card as blocked. Re-trigger the card, or mark the subtask done if its work is already on the branch",
+		ese.Subtask)
 }
 
 // verifyParkOutputTail returns at most n bytes of out's tail, cut on a rune

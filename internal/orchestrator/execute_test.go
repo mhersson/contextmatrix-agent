@@ -406,23 +406,47 @@ func TestExecutePlainPushWhenNoStaleTip(t *testing.T) {
 	assert.Equal(t, "cm/card-1", git.pushBranches[0])
 }
 
-func TestExecuteCleanTreeSkipsPush(t *testing.T) {
-	ops := &fakeOps{}
-	git := &fakeGit{committed: false} // clean tree: nothing committed
-	llmFake := &planLLM{responses: []llm.Response{
-		finishResp("chore: noop", 0.02),
-	}}
-	d := execTestDeps(ops, git, llmFake)
+func TestExecuteEmptySubtaskParks(t *testing.T) {
+	tests := []struct {
+		name     string
+		headSHAs []string
+		headErr  error
+		wantPark bool
+	}{
+		{name: "nothing committed and head unmoved parks", headSHAs: []string{"aaa"}, wantPark: true},
+		{name: "head read error judges by committed alone and parks", headErr: errors.New("boom"), wantPark: true},
+		{name: "coder moved head still completes", headSHAs: []string{"aaa", "bbb"}},
+	}
 
-	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")}}, 0)
-	require.NoError(t, runExecute(context.Background(), o))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			git := &fakeGit{committed: false, headSHAs: tt.headSHAs, headErr: tt.headErr}
+			llmFake := &planLLM{responses: []llm.Response{finishResp("chore: noop", 0.02)}}
+			d := execTestDeps(ops, git, llmFake)
 
-	gitCalls := git.recorded()
-	assert.GreaterOrEqual(t, indexOfCall(gitCalls, "CommitWithMessage"), 0)
-	assert.Equal(t, -1, indexOfCall(gitCalls, "Push:cm/card-1"), "clean tree must skip push; git=%v", gitCalls)
+			o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")}}, 0)
+			err := runExecute(context.Background(), o)
 
-	// Subtask still completes.
-	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "CompleteTask:SUB-1"), 0)
+			opCalls := ops.recorded()
+			gitCalls := git.recorded()
+
+			if !tt.wantPark {
+				require.NoError(t, err)
+				assert.GreaterOrEqual(t, indexOfCall(opCalls, "CompleteTask:SUB-1"), 0)
+
+				return
+			}
+
+			var ese *EmptySubtaskError
+
+			require.ErrorAs(t, err, &ese)
+			assert.Equal(t, "SUB-1", ese.Subtask)
+			assert.Equal(t, -1, indexOfCall(opCalls, "CompleteTask:SUB-1"))
+			assert.Equal(t, -1, indexOfCall(gitCalls, "Push:cm/card-1"))
+			assert.GreaterOrEqual(t, indexOfCall(opCalls, "ReleaseCard:SUB-1"), 0)
+		})
+	}
 }
 
 func TestExecuteModelSelectionPin(t *testing.T) {

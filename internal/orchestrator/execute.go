@@ -210,6 +210,17 @@ func (e *VerifyParkedError) Error() string {
 	return fmt.Sprintf("subtask %s: `%s` still fails after one fix pass", e.Subtask, e.Command)
 }
 
+// EmptySubtaskError marks a solo subtask whose coder run (and verify fix, if
+// one ran) left nothing to commit and did not move HEAD. Completing it would
+// mark unfinished work done, so it parks like the verify park.
+type EmptySubtaskError struct {
+	Subtask string
+}
+
+func (e *EmptySubtaskError) Error() string {
+	return fmt.Sprintf("subtask %s: the coder left nothing to commit", e.Subtask)
+}
+
 // preCommitVerify gates the coder's uncommitted work on the run's verify plan.
 // nil means commit: passed, no command resolved, or inconclusive (a timeout or
 // missing tool is not evidence of a defect). A failure gets exactly one fix pass
@@ -446,12 +457,21 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 	// only - candidates never checkpoint (race isolation).
 	var checkpointBase string
 
-	if sc.boardOps && o.checkpointEligible(sub) {
-		if head, herr := sc.git.Head(ctx); herr == nil {
-			checkpointBase = head
-		} else {
-			slog.Warn("mob checkpoint: head read failed; skipping this checkpoint",
+	// headBefore also tells an empty subtask from one whose coder committed
+	// itself; one read serves both.
+	var headBefore string
+
+	if sc.boardOps {
+		head, herr := sc.git.Head(ctx)
+		if herr != nil {
+			slog.Warn("head read failed before the coder run; checkpoint and empty-subtask checks fall back",
 				"card_id", o.d.Cfg.CardID, "subtask_id", sub.ID, "error", herr)
+		} else {
+			headBefore = head
+
+			if o.checkpointEligible(sub) {
+				checkpointBase = head
+			}
 		}
 	}
 
@@ -510,6 +530,13 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 		return fmt.Errorf("commit subtask %s: %w", sub.ID, err)
 	}
 
+	if sc.boardOps && !committed && o.headUnmoved(ctx, sc, headBefore) {
+		// Report while the claim is still held, as the verify park does.
+		o.reportSoloOutcome(ctx, sub.ID, pick, "failed", false, sc.ledger.Spent()-spendBefore)
+
+		return &EmptySubtaskError{Subtask: sub.ID}
+	}
+
 	// Execute checkpoint: the mob critiques the committed diff (and may run
 	// one revise pass) BEFORE the push, so a revise commit rides the same
 	// push and the next subtask builds on the revised base.
@@ -518,8 +545,8 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 	}
 
 	// Push after every subtask so each unit of work is durable and the next
-	// subtask builds on a pushed base. A clean tree (nothing committed) skips the
-	// push but still completes the card. A push failure aborts the run - the
+	// subtask builds on a pushed base. A candidate with a clean tree (nothing
+	// committed) skips the push. A push failure aborts the run - the
 	// spend has already been reported, so retry/resume must not double-charge.
 	// A candidate solver (sc.push false) never pushes: its work is judged in place.
 	if committed && sc.push {
@@ -552,6 +579,19 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 	}
 
 	return nil
+}
+
+// headUnmoved reports whether HEAD still equals before. Either read failing
+// (before is empty) leaves the judgement to the committed flag alone, so it
+// counts as unmoved.
+func (o *run) headUnmoved(ctx context.Context, sc *solverCtx, before string) bool {
+	if before == "" {
+		return true
+	}
+
+	head, err := sc.git.Head(ctx)
+
+	return err != nil || head == before
 }
 
 // startSubtaskHeartbeat ticks ops.Heartbeat for cardID on

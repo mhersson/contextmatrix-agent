@@ -617,10 +617,12 @@ func isParkError(err error) bool {
 		nme *NoModelError
 		vpe *VerifyParkedError
 		soe *SplitOverflowError
+		ese *EmptySubtaskError
 	)
 
 	return errors.As(err, &be) || errors.As(err, &cle) || errors.As(err, &mte) ||
-		errors.As(err, &tme) || errors.As(err, &nme) || errors.As(err, &vpe) || errors.As(err, &soe)
+		errors.As(err, &tme) || errors.As(err, &nme) || errors.As(err, &vpe) || errors.As(err, &soe) ||
+		errors.As(err, &ese)
 }
 
 // runDiagnose runs one read-only investigation pass on the orchestrator model

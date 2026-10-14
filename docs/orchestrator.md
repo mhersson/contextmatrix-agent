@@ -381,12 +381,12 @@ record instead of orphaned.
 
 More than `maxFollowupCards` (4) proposed followups parks the run instead of
 mutating the board at scale: `SplitOverflowError` joins the other park
-sentinels (Budget/Context/MaxTurns/Toolchain/NoModel/VerifyParked) that stop
-execute rather than advance to the next phase, logging the count, the cap, and
-the proposed titles so a human can re-cut the card without re-running the
-planner. This is an overflow guard on the split path, not a trigger of its
-own - a card with many subtasks and no independent deliverable never reaches
-it.
+sentinels (Budget/Context/MaxTurns/Toolchain/NoModel/VerifyParked/
+EmptySubtask) that stop execute rather than advance to the next phase, logging
+the count, the cap, and the proposed titles so a human can re-cut the card
+without re-running the planner. This is an overflow guard on the split path,
+not a trigger of its own - a card with many subtasks and no independent
+deliverable never reaches it.
 
 ### Unreachable criteria
 
