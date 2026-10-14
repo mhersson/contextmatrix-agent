@@ -4163,3 +4163,347 @@ func TestUnproductiveRetryReseedsItsTurnWindow(t *testing.T) {
 		})
 	}
 }
+
+// verifyExits scripts successive verify runs by exit code, the last one
+// repeating; a non-zero exit is a test failure.
+func verifyExits(codes ...int) func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+	runs := 0
+
+	return func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		code := codes[min(runs, len(codes)-1)]
+		runs++
+
+		if code != 0 {
+			return verifyexec.Outcome{ExitCode: code, Output: "--- FAIL: TestThing"}
+		}
+
+		return verifyexec.Outcome{}
+	}
+}
+
+// TestVerifyFixThatRemovesTheSubtasksTestsIsRetried: a fix pass that turns the
+// gate green by deleting the test file the coder wrote has removed the
+// subtask's work, not repaired it. The attempt is charged as failed with the
+// fix spend folded in, discarded, and retried one bar higher; a retry whose
+// own gate passes commits and completes.
+func TestVerifyFixThatRemovesTheSubtasksTestsIsRetried(t *testing.T) {
+	ops := &fakeOps{}
+	client := &planLLM{responses: []llm.Response{
+		finishResp("feat: the work", 0.01),
+		stopResp("fix: removed the failing test", 0.02),
+		finishResp("feat: the work, again", 0.04),
+	}}
+	// The tree as the scripted models leave it: the coder's test file exists
+	// until the fix pass, the second model call, has run.
+	git := &fakeGit{
+		committed: true,
+		headSHA:   "base",
+		netLinesFn: func() map[string]int {
+			if modelCallCount(client) < 2 {
+				return map[string]int{"pkg/thing_test.go": 40, "pkg/thing.go": 3}
+			}
+
+			return map[string]int{"pkg/thing.go": 3}
+		},
+	}
+	d := execTestDeps(ops, git, client)
+	d.Registry = tierNamingRegistry()
+
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("moderate")}}, 0)
+	seedResolvedVerifyPlan(o)
+
+	o.runVerify = verifyExits(1, 0)
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	rows := soloRows(t, ops)
+	require.Len(t, rows, 2)
+	assert.Equal(t, "tier/moderate", rows[0].Model)
+	assert.Equal(t, "failed", rows[0].Result)
+	assert.InDelta(t, 0.03, rows[0].CostUSD, 1e-9, "the failed row folds in the fix pass's spend")
+	assert.Equal(t, "tier/complex", rows[1].Model)
+	assert.Equal(t, "win", rows[1].Result)
+
+	assert.Equal(t, []string{"feat: the work, again"}, git.commitMsgs, "only the retry commits")
+	assert.Equal(t, []string{"base"}, git.hardResetRefs, "the attempt is discarded before the retry")
+	assert.Equal(t, 1, countCalls(ops.recorded(), "CompleteTask:SUB-1"))
+}
+
+// TestVerifyFixTestRemovalGuardTrips pins what counts as removing the
+// subtask's tests: a test file the uncommitted work grew that the fix pass
+// deletes or cuts back by more than the tidy tolerance. Anything else - a
+// tidy within the tolerance, edits to non-test files, a test file the work
+// shrank, or a measurement git could not take - commits as it did before the
+// guard.
+func TestVerifyFixTestRemovalGuardTrips(t *testing.T) {
+	tests := []struct {
+		name     string
+		before   map[string]int
+		after    map[string]int
+		errs     []error
+		wantTrip bool
+	}{
+		{
+			name:   "a test file the coder created is deleted",
+			before: map[string]int{"pkg/thing_test.go": 40}, after: map[string]int{},
+			wantTrip: true,
+		},
+		{
+			name:   "a test file the coder extended loses 12 lines",
+			before: map[string]int{"tests/thing.py": 20}, after: map[string]int{"tests/thing.py": 8},
+			wantTrip: true,
+		},
+		{
+			name:   "one line past the tolerance",
+			before: map[string]int{"thing.spec.ts": 20}, after: map[string]int{"thing.spec.ts": 20 - testTidyTolerance - 1},
+			wantTrip: true,
+		},
+		{
+			name:   "an unused import is dropped",
+			before: map[string]int{"pkg/thing_test.go": 20}, after: map[string]int{"pkg/thing_test.go": 19},
+		},
+		{
+			name:   "exactly the tolerance",
+			before: map[string]int{"pkg/thing_test.go": 20}, after: map[string]int{"pkg/thing_test.go": 20 - testTidyTolerance},
+		},
+		{
+			name:   "the fix pass adds to the tests",
+			before: map[string]int{"pkg/thing_test.go": 20}, after: map[string]int{"pkg/thing_test.go": 31},
+		},
+		{
+			name:   "only non-test files change",
+			before: map[string]int{"pkg/thing_test.go": 20, "pkg/thing.go": 30},
+			after:  map[string]int{"pkg/thing_test.go": 20},
+		},
+		{
+			name:   "a test file the coder shrank is not the subtask's to guard",
+			before: map[string]int{"pkg/old_test.go": -5}, after: map[string]int{},
+		},
+		{
+			name:   "the measurement before the fix pass fails",
+			before: map[string]int{}, after: map[string]int{},
+			errs: []error{assertErr("git diff failed")},
+		},
+		{
+			name:   "the measurement after the fix pass fails",
+			before: map[string]int{"pkg/thing_test.go": 20}, after: map[string]int{},
+			errs: []error{nil, assertErr("git diff failed")},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			git := &fakeGit{
+				committed:    true,
+				headSHA:      "base",
+				netLines:     []map[string]int{tt.before, tt.after},
+				netLinesErrs: tt.errs,
+			}
+			client := &planLLM{responses: []llm.Response{
+				finishResp("feat: the work", 0.01),
+				stopResp("fix: made it pass", 0.02),
+				finishResp("feat: the work, again", 0.04),
+			}}
+			d := execTestDeps(ops, git, client)
+			d.Registry = tierNamingRegistry()
+
+			o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("moderate")}}, 0)
+			seedResolvedVerifyPlan(o)
+			o.runVerify = verifyExits(1, 0)
+
+			require.NoError(t, runExecute(context.Background(), o))
+			assert.Equal(t, 1, countCalls(ops.recorded(), "CompleteTask:SUB-1"))
+
+			if tt.wantTrip {
+				assert.Len(t, soloRows(t, ops), 2, "the tripped attempt is charged and the retry reports its own row")
+				assert.Equal(t, []string{"base"}, git.hardResetRefs, "the tripped attempt is discarded")
+				assert.Equal(t, []string{"feat: the work, again"}, git.commitMsgs)
+
+				return
+			}
+
+			assert.Len(t, soloRows(t, ops), 1, "one attempt: the repaired subtask commits as before")
+			assert.Empty(t, git.hardResetRefs, "nothing is discarded")
+			assert.Equal(t, []string{"feat: the work"}, git.commitMsgs, "the coder's own work commits")
+		})
+	}
+}
+
+// TestTestRemovalGuardRunsOnlyAroundAFixPassThatWentGreen: the tree is
+// measured before a fix pass and again only when the re-run passed. A green
+// first gate spends no measurement, a re-run that stays red parks through the
+// verify sentinel exactly as before, and an inconclusive re-run commits as
+// before - neither is a pass the fix pass could have bought.
+func TestTestRemovalGuardRunsOnlyAroundAFixPassThatWentGreen(t *testing.T) {
+	red := verifyexec.Outcome{ExitCode: 1, Output: "--- FAIL: TestThing"}
+
+	tests := []struct {
+		name      string
+		outcomes  []verifyexec.Outcome
+		wantParks bool
+		wantReads int
+	}{
+		{name: "a green first gate measures nothing", outcomes: []verifyexec.Outcome{{}}},
+		{name: "a still-red re-run keeps the verify park", outcomes: []verifyexec.Outcome{red}, wantParks: true, wantReads: 1},
+		{
+			name:      "an inconclusive re-run commits",
+			outcomes:  []verifyexec.Outcome{red, {TimedOut: true, ExitCode: -1}},
+			wantReads: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			o, _, git, _ := stillRedFixture(t, 0)
+			git.netLines = []map[string]int{{"pkg/thing_test.go": 40}, {}}
+
+			runs := 0
+			o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+				out := tt.outcomes[min(runs, len(tt.outcomes)-1)]
+				runs++
+
+				return out
+			}
+
+			err := runExecute(context.Background(), o)
+
+			if tt.wantParks {
+				var vpe *VerifyParkedError
+				require.ErrorAs(t, err, &vpe)
+			} else {
+				require.NoError(t, err)
+				assert.Len(t, git.commitMsgs, 1, "the coder's work commits")
+			}
+
+			assert.Equal(t, tt.wantReads, git.netLinesCalls)
+		})
+	}
+}
+
+// TestUnproductiveParkDiscardsTheFinalAttempt: the park pushes the tree as WIP,
+// so the attempt that parks is discarded like the one before it, whatever made
+// it unproductive. The park line's way out follows the trigger of that final
+// attempt: marking the subtask done fits an attempt that changed nothing, not
+// one whose fix pass deleted the subtask's tests.
+func TestUnproductiveParkDiscardsTheFinalAttempt(t *testing.T) {
+	untracked := [][]string{{"pre.txt"}, {"pre.txt", "one.txt"}, {"pre.txt"}, {"pre.txt", "two.txt"}}
+	removal := map[string]int{"pkg/thing_test.go": 40}
+
+	tests := []struct {
+		name       string
+		git        *fakeGit
+		responses  []llm.Response
+		verify     []int // nil: no verify command resolves
+		wantAdvice string
+	}{
+		{
+			name: "no change twice",
+			git:  &fakeGit{headSHA: "base", untrackedFiles: untracked},
+			responses: []llm.Response{
+				finishResp("feat: nothing", 0.01),
+				finishResp("feat: still nothing", 0.02),
+			},
+			wantAdvice: noChangeAdvice,
+		},
+		{
+			name: "tests removed twice",
+			git: &fakeGit{
+				committed: true, headSHA: "base", untrackedFiles: untracked,
+				netLines: []map[string]int{removal, {}, removal, {}},
+			},
+			responses: []llm.Response{
+				finishResp("feat: the work", 0.01),
+				stopResp("fix: removed the failing test", 0.02),
+				finishResp("feat: the work, again", 0.04),
+				stopResp("fix: removed it again", 0.02),
+			},
+			verify:     []int{1, 0, 1, 0},
+			wantAdvice: testsRemovedAdvice,
+		},
+		{
+			name: "tests removed, then no change",
+			git: &fakeGit{
+				headSHA: "base", untrackedFiles: untracked,
+				netLines: []map[string]int{removal, {}},
+			},
+			responses: []llm.Response{
+				finishResp("feat: the work", 0.01),
+				stopResp("fix: removed the failing test", 0.02),
+				finishResp("feat: nothing", 0.04),
+			},
+			verify:     []int{1, 0, 0},
+			wantAdvice: noChangeAdvice,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{taskContext: cmclient.TaskContext{
+				Description: legacyTierMarker("Implement the thing.", "moderate"),
+			}}
+			client := &planLLM{responses: tt.responses}
+			d := execTestDeps(ops, tt.git, client)
+			d.Registry = tierNamingRegistry()
+
+			o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("moderate")}}, 0)
+
+			if tt.verify != nil {
+				seedResolvedVerifyPlan(o)
+				o.runVerify = verifyExits(tt.verify...)
+			}
+
+			err := runExecute(context.Background(), o)
+
+			var ue *UnproductiveSubtaskError
+			require.ErrorAs(t, err, &ue)
+			assert.Equal(t, tt.wantAdvice, ue.advice, "the final attempt's trigger picks the way out")
+
+			assert.Equal(t, []string{"base", "base"}, tt.git.hardResetRefs, "both attempts are discarded")
+			assert.Equal(t, [][]string{{"one.txt"}, {"two.txt"}}, tt.git.removedFiles,
+				"each attempt's own untracked files are removed")
+			assert.Empty(t, tt.git.pushBranches)
+		})
+	}
+}
+
+// TestTestRemovalLinesFitTheBoardsLogCap: ContextMatrix rejects an
+// activity-log message over 2000 bytes rather than clipping it, so a fix pass
+// that deletes many long-named test files must still leave every line about
+// it on the card - the trip, the retry, and the park.
+func TestTestRemovalLinesFitTheBoardsLogCap(t *testing.T) {
+	before := map[string]int{}
+
+	for i := range 40 {
+		before[strings.Repeat("deeply/nested/", 20)+"case_"+strconv.Itoa(i)+"_test.go"] = 30
+	}
+
+	ops := &fakeOps{taskContext: cmclient.TaskContext{
+		Description: legacyTierMarker("Implement the thing.", "moderate"),
+	}}
+	git := &fakeGit{
+		committed: true, headSHA: "base",
+		netLines: []map[string]int{before, {}, before, {}},
+	}
+	client := &planLLM{responses: []llm.Response{
+		finishResp("feat: the work", 0.01),
+		stopResp("fix: removed the failing tests", 0.02),
+		finishResp("feat: the work, again", 0.04),
+		stopResp("fix: removed them again", 0.02),
+	}}
+	d := execTestDeps(ops, git, client)
+	d.Registry = tierNamingRegistry()
+
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("moderate")}}, 0)
+	seedResolvedVerifyPlan(o)
+	o.runVerify = verifyExits(1, 0, 1, 0)
+
+	err := runExecute(context.Background(), o)
+
+	var ue *UnproductiveSubtaskError
+	require.ErrorAs(t, err, &ue)
+
+	for _, line := range append(ops.logs, unproductiveLogMessage(ue)) {
+		assert.LessOrEqual(t, len(line), 2000, "line: %.120s...", line)
+	}
+}

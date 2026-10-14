@@ -41,18 +41,27 @@ back to soft-reset-to-merge-base plus a single squashed recommit.
 A solo subtask whose attempt leaves HEAD where it started - nothing committed
 after the coder run, the pre-commit verify and its fix pass - did not do the
 subtask, since the planner gives every subtask files to touch and concrete
-actions. The attempt is reported `failed` for its model (unless the ladder
-walked down to that model), its leftovers are discarded (index and tree reset
-to the attempt's start, untracked files it created removed), and, budget
-permitting, the subtask re-runs once one bar higher - at critical, the same
-bar - with that model excluded from coder picks for the rest of the run (a
-pinned coder is still reused). A coder that ran `git commit` itself moved HEAD
-and is not caught here. If the retry also leaves no change, the run persists
-the subtask's bar one rung above the retry's (capped at critical; a critical
-subtask keeps its bar) and parks the card as blocked with
-`UnproductiveSubtaskError`; a subtask whose work landed in an earlier session
-parks the same way, and a human marks it done and re-triggers. Best-of-N
-candidates are exempt: the judge verifies each candidate instead.
+actions. Neither did one whose pre-commit fix pass made the verify pass by
+removing tests the subtask added: before the fix pass the run measures the net
+lines the uncommitted work adds to each test file it grows (test files are
+named by the planner's test-path heuristic), and when the re-run passes, a
+file from that set that no longer differs from HEAD or lost more than 2 net
+lines makes the attempt unproductive too. A failed measurement skips that
+check, and review-round fix passes are not checked. An unproductive attempt is
+reported `failed` for its model (unless the ladder walked down to that model),
+its leftovers are discarded (index and tree reset to the attempt's start,
+untracked files it created removed), and, budget permitting, the subtask
+re-runs once one bar higher - at critical, the same bar - with that model
+excluded from coder picks for the rest of the run (a pinned coder is still
+reused). A coder that ran `git commit` itself moved HEAD and is not caught by
+the no-change check. If the retry is unproductive too, it is discarded the same
+way, the run persists the subtask's bar one rung above the retry's (capped at
+critical; a critical subtask keeps its bar), and the card parks as blocked with
+`UnproductiveSubtaskError`. The park line's advice follows the retry's trigger:
+a subtask whose work landed in an earlier session leaves no change and parks
+that way, and a human marks it done and re-triggers; a test removal points the
+human at the subtask's tests and the production code they need instead.
+Best-of-N candidates are exempt: the judge verifies each candidate instead.
 
 The work branch is `cm/<card-id>` (card ID lowercased); the ID is validated
 against `^[A-Za-z][A-Za-z0-9-]*-[0-9]+$` (PREFIX-NNN) before it reaches any

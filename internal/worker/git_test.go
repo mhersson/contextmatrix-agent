@@ -1418,6 +1418,53 @@ func TestUntrackedFilesListsOnlyUntrackedFiles(t *testing.T) {
 	assert.ElementsMatch(t, []string{"docs/new guide.md", "notes.md"}, got)
 }
 
+// WorktreeNetLines measures each changed path against HEAD the way git's
+// numstat counts lines: edited tracked files net out their additions and
+// deletions, a moved file reads as its old path removed and its new path
+// added, an untracked file counts whole, and a binary file, an ignored file,
+// an untracked file too large to count, and an unchanged file are absent.
+func TestWorktreeNetLinesMeasuresEveryChangedPath(t *testing.T) {
+	t.Parallel()
+
+	remote := setupBareRemote(t)
+	ws := filepath.Join(t.TempDir(), "ws")
+	g := NewGit(ws, "", "", "")
+	ctx := context.Background()
+
+	require.NoError(t, g.Clone(ctx, remote, "main"))
+
+	writeFile(t, ws, ".gitignore", []byte("out/\n"), 0o644)
+	writeFile(t, ws, "grown.txt", []byte("1\n2\n3\n"), 0o644)
+	writeFile(t, ws, "shrunk_test.txt", []byte("1\n2\n3\n4\n5\n6\n"), 0o644)
+	writeFile(t, ws, "deleted.txt", []byte("1\n2\n"), 0o644)
+	writeFile(t, ws, "moved.txt", []byte("1\n2\n3\n4\n"), 0o644)
+	writeFile(t, ws, "blob.dat", []byte("bin\x00ary"), 0o644)
+	runGit(t, ws, "add", ".")
+	runGit(t, ws, "commit", "-m", "seed")
+
+	runGit(t, ws, "mv", "moved.txt", "renamed.txt")
+
+	writeFile(t, ws, "grown.txt", []byte("1\n2\n3\n4\n5\n"), 0o644)
+	writeFile(t, ws, "shrunk_test.txt", []byte("1\n6\n"), 0o644)
+	require.NoError(t, os.Remove(filepath.Join(ws, "deleted.txt")))
+	writeFile(t, ws, "blob.dat", []byte("bin\x00ary, edited"), 0o644)
+	writeFile(t, ws, "pkg/new_test.txt", []byte("a\nb\nno trailing newline"), 0o644)
+	writeFile(t, ws, "new.bin", []byte("x\x00y\n"), 0o644)
+	writeFile(t, ws, "huge.txt", []byte(strings.Repeat("line\n", netLinesFileMax/5+1)), 0o644)
+	writeFile(t, ws, "out/build.log", []byte("ignored\n"), 0o644)
+
+	got, err := g.WorktreeNetLines(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]int{
+		"grown.txt":        2,
+		"shrunk_test.txt":  -4,
+		"deleted.txt":      -2,
+		"moved.txt":        -4,
+		"renamed.txt":      4,
+		"pkg/new_test.txt": 3,
+	}, got)
+}
+
 // RemoveFiles deletes exactly the named files, tolerates one already gone, and
 // never reaches outside the clone - through ".." or a symlinked directory.
 func TestRemoveFilesStaysInsideTheClone(t *testing.T) {

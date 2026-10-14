@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"slices"
 	"strings"
 	"time"
 
@@ -212,11 +213,13 @@ func (e *VerifyParkedError) Error() string {
 }
 
 // UnproductiveSubtaskError parks a run whose solo subtask left nothing to keep
-// on its first attempt and again on the escalated retry. The worker maps it
-// like the verify park: blocked, WIP push, release.
+// on its first attempt and again on the escalated retry. Both attempts are
+// discarded first. The worker maps it like the verify park: blocked, WIP push,
+// release.
 type UnproductiveSubtaskError struct {
 	Subtask string
 	Reason  string // what each attempt left behind, naming both models
+	advice  string // the way out the final attempt's trigger calls for
 }
 
 func (e *UnproductiveSubtaskError) Error() string {
@@ -227,8 +230,10 @@ func (e *UnproductiveSubtaskError) Error() string {
 // nil means commit: passed, no command resolved, or inconclusive (a timeout or
 // missing tool is not evidence of a defect). A failure gets exactly one fix pass
 // and one re-run; still red returns *VerifyParkedError, whose park path pushes
-// the refused tree as WIP. Solo only - candidates are verified by the judge.
-// exhausted (the coder spent its whole window) picks which sizing axes rise.
+// the refused tree as WIP, and a pass the fix pass bought by removing tests the
+// subtask added returns *unproductiveAttempt. Solo only - candidates are
+// verified by the judge. exhausted (the coder spent its whole window) picks
+// which sizing axes rise.
 func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef, exhausted bool) error {
 	// One assignment point, before any early return, so a verdict from an
 	// earlier subtask can never stand in for this one.
@@ -262,6 +267,9 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 	o.d.logCard(ctx, "subtask %s: verify failed before the commit - running one fix pass", sub.ID)
 
 	sc.gate.coderFailed = true
+
+	// The subtask's tests as the coder left them, for the guard after the re-run.
+	tests := o.testFootprint(ctx, sc)
 
 	// The subtask's own tier sizes the fix, the way it sized the coder that wrote
 	// the work; an unset tier falls back to the card tier inside the fix path.
@@ -308,12 +316,113 @@ func (o *run) preCommitVerify(ctx context.Context, sc *solverCtx, sub subtaskRef
 		}
 	}
 
+	// A pass bought by cutting the subtask's own tests removed its work rather
+	// than repairing it.
+	if vres.Status == verifyPassed {
+		if removed := o.removedTests(ctx, sc, tests); len(removed) > 0 {
+			paths := pathList(removed)
+
+			o.d.logCard(ctx, "subtask %s: the fix pass made verify pass but removed tests the subtask added (%s) - the attempt is not kept",
+				sub.ID, paths)
+
+			return &unproductiveAttempt{
+				reason: "the verify fix removed tests the subtask added (" + paths + ")",
+				advice: testsRemovedAdvice,
+			}
+		}
+	}
+
 	// Symmetry with the first-run arm, not a live value: reaching here means
 	// the gate went red, so coderFailed is set and the report site overrides
 	// verifyPass to false whatever this assigns.
 	sc.gate.verified = vres.Status == verifyPassed
 
 	return nil
+}
+
+// testTidyTolerance is how many net lines the fix pass may take out of a test
+// file the subtask grew: room to drop an unused import or fold a line, less
+// than any test case.
+const testTidyTolerance = 2
+
+// A trip's path list is bounded in count and bytes, so the card-log lines that
+// carry it stay under the board's log cap.
+const (
+	pathListShown = 5
+	pathListMax   = 1000
+)
+
+// testFootprint is the net lines the uncommitted work adds to each test file it
+// grows. Test files are named by the planner's test-path heuristic
+// (isTestFilePath), not an ecosystem list. A failed read returns nil, and the
+// guard stands down.
+func (o *run) testFootprint(ctx context.Context, sc *solverCtx) map[string]int {
+	nets, err := o.measureNetLines(ctx, sc)
+	if err != nil {
+		return nil
+	}
+
+	tests := map[string]int{}
+
+	for path, n := range nets {
+		if n > 0 && isTestFilePath(path) {
+			tests[path] = n
+		}
+	}
+
+	return tests
+}
+
+// removedTests names, sorted, the files from the footprint that no longer
+// differ from HEAD or whose net added lines fell by more than
+// testTidyTolerance. A failed read names none.
+func (o *run) removedTests(ctx context.Context, sc *solverCtx, before map[string]int) []string {
+	if len(before) == 0 {
+		return nil
+	}
+
+	nets, err := o.measureNetLines(ctx, sc)
+	if err != nil {
+		return nil
+	}
+
+	var removed []string
+
+	for path, n := range before {
+		if after, ok := nets[path]; !ok || n-after > testTidyTolerance {
+			removed = append(removed, path)
+		}
+	}
+
+	slices.Sort(removed)
+
+	return removed
+}
+
+// measureNetLines reads the tree's net lines under the same bound as the
+// worktree identity read. A failure is warned and returned: the guard is
+// evidence, not a gate on git.
+func (o *run) measureNetLines(ctx context.Context, sc *solverCtx) (map[string]int, error) {
+	mctx, cancel := context.WithTimeout(ctx, worktreeStateTimeout)
+	defer cancel()
+
+	nets, err := sc.git.WorktreeNetLines(mctx)
+	if err != nil {
+		slog.Warn("verify fix guard: measuring the tree failed; not checking the fix pass for removed tests",
+			"card_id", o.d.Cfg.CardID, "error", err)
+	}
+
+	return nets, err
+}
+
+// pathList names paths for a card-log line, at most pathListShown of them.
+func pathList(paths []string) string {
+	list := strings.Join(paths[:min(len(paths), pathListShown)], ", ")
+	if len(paths) > pathListShown {
+		list += fmt.Sprintf(" and %d more", len(paths)-pathListShown)
+	}
+
+	return truncateBytes(list, pathListMax)
 }
 
 // runGate is the one verify gate the pre-commit and checkpoint-revise callers
@@ -432,8 +541,9 @@ func subtaskGateContext(subID string) string {
 //
 // A solo attempt that leaves nothing to keep (*unproductiveAttempt) is charged
 // as failed, discarded, and - budget permitting - re-run once one bar higher
-// with its model excluded for the rest of the run; a second one parks the card
-// with *UnproductiveSubtaskError. Both attempts run inside the claimed span.
+// with its model excluded for the rest of the run; a second one is charged and
+// discarded the same way and parks the card with *UnproductiveSubtaskError.
+// Both attempts run inside the claimed span.
 func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtaskRef) error {
 	if sc.boardOps {
 		stopHeartbeat := startSubtaskHeartbeat(ctx, o.d.Ops, sub.ID)
@@ -491,19 +601,24 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 
 	o.reportSoloOutcome(ctx, sub.ID, retryPick, "failed", false, sc.ledger.Spent()-start.spent)
 
+	// The park pushes the tree as WIP, and none of this attempt may ride along.
+	o.discardAttempt(ctx, sc, start)
+
 	reason := unproductiveReason(first.reason, pick.Model, second.reason, retryPick.Model)
 
 	o.raiseSubtaskBarPastRetry(ctx, sub, reason)
 
-	return &UnproductiveSubtaskError{Subtask: sub.ID, Reason: reason}
+	return &UnproductiveSubtaskError{Subtask: sub.ID, Reason: reason, advice: second.advice}
 }
 
 // unproductiveAttempt marks a solo attempt that left nothing the run may keep.
 // executeClaimedWith treats every one alike, whatever produced it: report the
 // attempt failed, discard it, retry once, then park. reason is the card-log
-// phrase for what the attempt left behind.
+// phrase for what the attempt left behind; advice is the park line's way out
+// when this attempt is the one that parks.
 type unproductiveAttempt struct {
 	reason string
+	advice string
 }
 
 func (e *unproductiveAttempt) Error() string { return e.reason }
@@ -677,7 +792,7 @@ func (o *run) attemptSubtask(ctx context.Context, sc *solverCtx, sub subtaskRef,
 	// The planner gives every subtask files to touch and concrete actions, so a
 	// solo attempt that changed nothing did not do the subtask.
 	if sc.boardOps && !committed && o.headUnmoved(ctx, sc, start) {
-		return pick, &unproductiveAttempt{reason: "the coder left no change"}
+		return pick, &unproductiveAttempt{reason: "the coder left no change", advice: noChangeAdvice}
 	}
 
 	// Execute checkpoint: the mob critiques the committed diff (and may run

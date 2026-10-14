@@ -279,7 +279,11 @@ func TestRunUnproductiveSubtaskParks(t *testing.T) {
 	d := Deps{Ops: ops, Git: &fakeGit{}, Cfg: Config{CardID: "CARD-1"}}
 
 	o := newRun(d, ops.taskContext)
-	ue := &UnproductiveSubtaskError{Subtask: "SUB-1", Reason: "the coder left no change on two attempts (a, then b)"}
+	ue := &UnproductiveSubtaskError{
+		Subtask: "SUB-1",
+		Reason:  "the coder left no change on two attempts (a, then b)",
+		advice:  noChangeAdvice,
+	}
 	o.planFn = func(context.Context) error { return ue }
 
 	err := o.execute(context.Background())
@@ -296,15 +300,20 @@ func TestRunUnproductiveSubtaskParks(t *testing.T) {
 
 // TestUnproductiveLogMessageFitsTheBoardsLogCap: ContextMatrix rejects an
 // activity-log message over 2000 bytes instead of clipping it, so a long
-// reason must be trimmed rather than lose the whole park note.
+// reason must be trimmed rather than lose the whole park note - and the trim
+// takes it from the reason, never from the way out the line ends on.
 func TestUnproductiveLogMessageFitsTheBoardsLogCap(t *testing.T) {
-	got := unproductiveLogMessage(&UnproductiveSubtaskError{
-		Subtask: "SUB-1",
-		Reason:  strings.Repeat("✗ removed tests ", 400),
-	})
+	for _, advice := range []string{noChangeAdvice, testsRemovedAdvice} {
+		got := unproductiveLogMessage(&UnproductiveSubtaskError{
+			Subtask: "SUB-1",
+			Reason:  strings.Repeat("✗ removed tests ", 400),
+			advice:  advice,
+		})
 
-	assert.LessOrEqual(t, len(got), 1900)
-	assert.True(t, utf8.ValidString(got), "the trim must not split a rune")
+		assert.LessOrEqual(t, len(got), 1900)
+		assert.True(t, utf8.ValidString(got), "the trim must not split a rune")
+		assert.True(t, strings.HasSuffix(got, advice), "the park line ends on its trigger's way out")
+	}
 }
 
 // bigVerifyOutput builds a numbered multi-line verify output far larger than

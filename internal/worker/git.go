@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -300,6 +301,136 @@ func (g *Git) UntrackedFiles(ctx context.Context) ([]string, error) {
 	}
 
 	return untrackedPaths(status), nil
+}
+
+// WorktreeNetLines maps every path whose working-tree content differs from
+// HEAD to the lines it adds net of the lines it removes, counted as git's
+// numstat counts them. Rename detection is off, so a moved file reads as one
+// path removed and one added. Untracked files, under the same ignore rules as
+// UntrackedFiles, count as wholly added. Binary files are omitted, and so is
+// an untracked file past netLinesFileMax.
+func (g *Git) WorktreeNetLines(ctx context.Context) (map[string]int, error) {
+	numstat, err := g.output(ctx, "diff", "--numstat", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", "HEAD")
+	if err != nil {
+		return nil, fmt.Errorf("worktree net lines: %w", err)
+	}
+
+	nets := parseNumstat(numstat)
+
+	status, err := g.output(ctx, "status", "--porcelain=v1", "--untracked-files=all", "-z")
+	if err != nil {
+		return nil, fmt.Errorf("worktree net lines: %w", err)
+	}
+
+	for _, rel := range untrackedPaths(status) {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("worktree net lines: %w", err)
+		}
+
+		n, ok, err := countTextLines(filepath.Join(g.dir, rel))
+		if err != nil {
+			return nil, fmt.Errorf("worktree net lines: %w", err)
+		}
+
+		if ok {
+			nets[rel] = n
+		}
+	}
+
+	return nets, nil
+}
+
+// output runs git for output that is parsed, keeping stderr out of it: a
+// warning git prints there (line-ending conversion, say) would otherwise land
+// inside a record.
+func (g *Git) output(ctx context.Context, args ...string) (string, error) {
+	env, err := g.credEnv()
+	if err != nil {
+		return "", fmt.Errorf("git %s: %w", args[0], err)
+	}
+
+	var stderr bytes.Buffer
+
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = g.dir
+	cmd.Env = env
+	cmd.Stderr = &stderr
+
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git %s: %w: %s", args[0], err, strings.TrimSpace(stderr.String()))
+	}
+
+	return string(out), nil
+}
+
+// parseNumstat reads `git diff --numstat -z --no-renames` output into net
+// added lines per path. numstat reports a binary path as "-", which omits it.
+func parseNumstat(out string) map[string]int {
+	nets := map[string]int{}
+
+	for rec := range strings.SplitSeq(out, "\x00") {
+		added, rest, ok := strings.Cut(rec, "\t")
+		if !ok {
+			continue
+		}
+
+		deleted, path, ok := strings.Cut(rest, "\t")
+		if !ok || path == "" {
+			continue
+		}
+
+		a, aerr := strconv.Atoi(added)
+		d, derr := strconv.Atoi(deleted)
+
+		if aerr != nil || derr != nil {
+			continue
+		}
+
+		nets[path] = a - d
+	}
+
+	return nets
+}
+
+// netLinesFileMax caps the untracked file WorktreeNetLines will count. One
+// past it is generated output, not authored lines, and counting it would
+// stall the gate that asks.
+const netLinesFileMax = 1 << 20
+
+// countTextLines counts a file's lines the way numstat does: a last line
+// without a newline still counts. ok is false for a binary file (one holding a
+// NUL byte) and for one that is not a regular file, is past netLinesFileMax, or
+// vanished since it was listed.
+func countTextLines(absPath string) (int, bool, error) {
+	info, err := os.Lstat(absPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, false, nil
+	}
+
+	if err != nil {
+		return 0, false, err
+	}
+
+	if !info.Mode().IsRegular() || info.Size() > netLinesFileMax {
+		return 0, false, nil
+	}
+
+	data, err := os.ReadFile(absPath) //nolint:gosec // path is a workspace-relative entry from git status
+	if err != nil {
+		return 0, false, err
+	}
+
+	if bytes.IndexByte(data, 0) >= 0 {
+		return 0, false, nil
+	}
+
+	n := bytes.Count(data, []byte{'\n'})
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		n++
+	}
+
+	return n, true, nil
 }
 
 // RemoveFiles deletes the named workspace-relative files. Every removal goes

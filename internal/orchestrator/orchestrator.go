@@ -113,6 +113,11 @@ type GitOps interface {
 	// UntrackedFiles lists the worktree's untracked files, workspace-relative,
 	// under the repository's own ignore rules: an ignored path is never listed.
 	UntrackedFiles(ctx context.Context) ([]string, error)
+	// WorktreeNetLines maps every path whose working-tree content differs from
+	// HEAD to the lines it adds net of the lines it removes. Untracked files,
+	// under the same ignore rules as UntrackedFiles, count as wholly added;
+	// binary files are omitted, and so is an untracked file too large to count.
+	WorktreeNetLines(ctx context.Context) (map[string]int, error)
 	// RemoveFiles deletes the named workspace-relative files, confined to the
 	// workspace. A path already gone is not an error.
 	RemoveFiles(ctx context.Context, paths []string) error
@@ -926,13 +931,22 @@ func verifyParkOutputTail(out string, n int) string {
 	return verifyParkOutputElision + tail
 }
 
+// The unproductive park's way out, one per trigger: the advice that fits one
+// misleads on the other.
+const (
+	// A resumed subtask whose work landed in an earlier session leaves no change too.
+	noChangeAdvice = "If the subtask's work is already on the branch, mark the subtask done and re-trigger."
+
+	testsRemovedAdvice = "The subtask's tests define its work: check that their expectations are right and that the production code they need is within the subtask's scope, then re-trigger."
+)
+
 // unproductiveLogMessage is the canonical card-log line for an
-// unproductive-subtask park. A resumed subtask whose work landed in an earlier
-// session parks here too, hence the way out it names. The reason takes the room
-// the fixed text leaves, so the line always fits the board's log cap.
+// unproductive-subtask park, ending on the way out the final attempt's trigger
+// calls for. The reason takes the room the fixed text leaves, so the line
+// always fits the board's log cap.
 func unproductiveLogMessage(ue *UnproductiveSubtaskError) string {
 	head := fmt.Sprintf("subtask %s: ", ue.Subtask)
-	tail := "; parking card as blocked. If the subtask's work is already on the branch, mark the subtask done and re-trigger."
+	tail := "; parking card as blocked. " + ue.advice
 
 	return head + truncateBytes(ue.Reason, max(verifyParkNoteMax-len(head)-len(tail), 0)) + tail
 }

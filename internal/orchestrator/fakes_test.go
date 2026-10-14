@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -594,6 +595,15 @@ type fakeGit struct {
 	untrackedCalls int
 	removedFiles   [][]string
 	removeFilesErr error
+
+	// WorktreeNetLines scripting: netLines holds successive measurements by
+	// call ordinal, the last one repeating; netLinesErrs fails ONE measurement
+	// by the same ordinal. netLinesFn, when set, replaces both, for a test that
+	// derives the tree from what has run so far. netLinesCalls counts the reads.
+	netLines      []map[string]int
+	netLinesErrs  []error
+	netLinesFn    func() map[string]int
+	netLinesCalls int
 }
 
 // assertErr builds a sentinel error for fake scripting in tests.
@@ -885,6 +895,31 @@ func (g *fakeGit) UntrackedFiles(context.Context) ([]string, error) {
 	}
 
 	return slices.Clone(g.untrackedFiles[min(call, len(g.untrackedFiles)-1)]), nil
+}
+
+// WorktreeNetLines returns the scripted measurements in order. Like
+// WorktreeState it records no call: a measurement is not a git operation the
+// run performs.
+func (g *fakeGit) WorktreeNetLines(context.Context) (map[string]int, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	call := g.netLinesCalls
+	g.netLinesCalls++
+
+	if g.netLinesFn != nil {
+		return g.netLinesFn(), nil
+	}
+
+	if call < len(g.netLinesErrs) && g.netLinesErrs[call] != nil {
+		return nil, g.netLinesErrs[call]
+	}
+
+	if len(g.netLines) == 0 {
+		return nil, nil
+	}
+
+	return maps.Clone(g.netLines[min(call, len(g.netLines)-1)]), nil
 }
 
 func (g *fakeGit) RemoveFiles(_ context.Context, paths []string) error {
