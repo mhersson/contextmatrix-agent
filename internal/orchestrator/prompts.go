@@ -454,6 +454,42 @@ fewer than claimed), trust the code: satisfy the requirement's intent, note the
 discrepancy in your finish message, and stop - a confirmed absence discharges a
 "find all N" criterion. Do not keep searching to prove a negative.`
 
+// priorSubtasksBlock renders the solver's ledger for the coder prompt: what each
+// earlier subtask actually left, so the coder neither redoes committed work nor
+// searches for work that never landed.
+func priorSubtasksBlock(prior []priorSubtask) string {
+	if len(prior) == 0 {
+		return "PRIOR SUBTASKS\nThis is the first subtask; nothing has been committed before it."
+	}
+
+	var b strings.Builder
+
+	b.WriteString("PRIOR SUBTASKS (in execution order)\n")
+
+	for _, p := range prior {
+		fmt.Fprintf(&b, "- %s %q: ", p.ID, p.Title)
+
+		switch p.Kind {
+		case priorCommitted:
+			if p.SHA != "" {
+				fmt.Fprintf(&b, "committed %s %s\n", p.SHA, p.Subject)
+			} else {
+				fmt.Fprintf(&b, "committed %s\n", p.Subject)
+			}
+		case priorNoCommit:
+			b.WriteString("no commit - its work is not in the tree\n")
+		case priorDoneEarlier:
+			b.WriteString("done in an earlier run - its changes are on the branch\n")
+		case priorNotPlanned:
+			b.WriteString("not planned - never implemented\n")
+		}
+	}
+
+	b.WriteString("Build on what is listed as committed or done; do not redo it. Do not assume work listed as missing exists.")
+
+	return b.String()
+}
+
 // coderPrompt is the per-subtask coder instruction block. The coder runs with
 // the FULL write toolset rooted at the shared workspace and implements exactly
 // one subtask on the current branch, where prior subtasks' commits are already
@@ -461,9 +497,10 @@ discrepancy in your finish message, and stop - a confirmed absence discharges a
 // NOT run git itself - it ends the subtask by calling the finish tool with the
 // commit message, which the orchestrator reads from the tool call arguments.
 //
-// The trailing %s slots are filled by runExecute: workspace root, the verify
-// command block (empty when none resolved), subtask title, subtask description,
-// parent card title, parent card body.
+// The trailing %s slots are filled by attemptSubtask: workspace root, the
+// prior-subtasks block (priorSubtasksBlock), the verify command block (empty
+// when none resolved), subtask title, subtask description, parent card title,
+// parent card body.
 const coderPrompt = `%s%sYou are the coding agent for one subtask of a larger task. You have the full
 write toolset (read, grep, glob, edit, write, bash) rooted at the workspace.
 Implement EXACTLY this subtask - nothing from sibling subtasks, nothing
@@ -482,9 +519,11 @@ waste it.
 
 ` + coderGroundingRule + `
 
-Work happens on the current branch. Prior subtasks have already been committed
-and their changes are visible in the working tree; build on them, do not redo
-them. Do NOT run git yourself (no commit, no push, no branch) - the orchestrator
+Work happens on the current branch.
+
+%s
+
+Do NOT run git yourself (no commit, no push, no branch) - the orchestrator
 commits and pushes your changes after you finish.
 
 Write tests alongside the code and run them. Once the acceptance criteria

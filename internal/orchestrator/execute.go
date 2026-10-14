@@ -35,13 +35,17 @@ type solverCtx struct {
 	// Pick, not the slug: the outcome report has to know whether the selector
 	// got the bar it asked for, and a slug cannot carry that.
 	coderModel func(ctx context.Context, sub subtaskRef, prompt string) (registry.Pick, error)
-	boardOps   bool         // false: no subtask claim/heartbeat/complete (candidate mode)
-	push       bool         // false: never push (candidate mode)
-	tag        string       // "" parent; "candidate 2/3 (slug)" for candidate log lines
-	completed  []subtaskRef // subtasks this solver actually executed
-	lastSubID  string       // final subtask ID in execution order; "" disables turn-cap salvage (parent/single-solver)
-	capped     bool         // the final subtask hit the turn cap; its work was salvage-committed for judge verification
-	gate       gateEvidence // what the pre-commit and checkpoint gates learned about this subtask's coder work and its revise
+	boardOps   bool           // false: no subtask claim/heartbeat/complete (candidate mode)
+	push       bool           // false: never push (candidate mode)
+	tag        string         // "" parent; "candidate 2/3 (slug)" for candidate log lines
+	completed  []subtaskRef   // subtasks this solver actually executed
+	prior      []priorSubtask // what each subtask this solver has passed left behind, in execution order
+	// attemptCommit is the commit the current attempt made, read right after its
+	// own commit; reset per attempt so a discarded one never reaches the ledger.
+	attemptCommit *priorSubtask
+	lastSubID     string       // final subtask ID in execution order; "" disables turn-cap salvage (parent/single-solver)
+	capped        bool         // the final subtask hit the turn cap; its work was salvage-committed for judge verification
+	gate          gateEvidence // what the pre-commit and checkpoint gates learned about this subtask's coder work and its revise
 	// toolVerify is the verdict of the coder verify tool's last actual run and
 	// the worktree identity it was measured against, republished by the tool on
 	// every run. Zero until the coder calls the tool, and for a candidate
@@ -50,6 +54,28 @@ type solverCtx struct {
 	// goroutine that drives the subtask.
 	toolVerify verifyToolPass
 }
+
+// priorKind says what a passed subtask left in the tree.
+type priorKind int
+
+const (
+	priorCommitted   priorKind = iota // the subtask's own commit is in the tree
+	priorNoCommit                     // completed with a clean tree: nothing of it is in the tree
+	priorDoneEarlier                  // terminal done on resume: on the branch, sha unknown
+	priorNotPlanned                   // terminal not_planned: never implemented
+)
+
+// priorSubtask is one ledger entry the coder prompt renders, so the coder is
+// told what earlier subtasks actually left rather than assuming they committed.
+type priorSubtask struct {
+	ID      string
+	Title   string
+	Kind    priorKind
+	SHA     string // priorCommitted: first priorShaLen hex chars of HEAD after the commit
+	Subject string // priorCommitted: the commit subject
+}
+
+const priorShaLen = 7
 
 // gateEvidence is what the pre-commit gate learned about this subtask. It
 // lives on the solver because mobCheckpoint may replace the tree between the
@@ -134,11 +160,17 @@ func (o *run) executeSubtaskWith(ctx context.Context, sc *solverCtx, sub subtask
 
 	// Resume: a terminal subtask (done or not_planned) is not re-run.
 	if isTerminal(sub.State) {
+		kind := priorDoneEarlier
+
 		if sub.State == "not_planned" {
+			kind = priorNotPlanned
+
 			slog.Info("execute: cancelled subtask, not re-run", "card_id", sub.ID)
 		} else {
 			slog.Info("execute: skipping completed subtask", "card_id", sub.ID)
 		}
+
+		sc.prior = append(sc.prior, priorSubtask{ID: sub.ID, Title: sub.Title, Kind: kind})
 
 		return nil
 	}
@@ -185,7 +217,32 @@ func (o *run) executeSubtaskWith(ctx context.Context, sc *solverCtx, sub subtask
 
 	sc.completed = append(sc.completed, sub)
 
+	entry := priorSubtask{ID: sub.ID, Title: sub.Title, Kind: priorNoCommit}
+	if sc.attemptCommit != nil {
+		entry = *sc.attemptCommit
+		entry.ID, entry.Title = sub.ID, sub.Title
+	}
+
+	sc.prior = append(sc.prior, entry)
+
 	return nil
+}
+
+// recordAttemptCommit notes the commit the current attempt just made. HEAD is
+// read now, not at completion, so a mob-checkpoint revise commit never stands
+// in for the coder's own. An unreadable HEAD still records the subject.
+func (o *run) recordAttemptCommit(ctx context.Context, sc *solverCtx, msg string, sub subtaskRef) {
+	entry := &priorSubtask{Kind: priorCommitted, Subject: commitSubject(msg, sub.Title)}
+
+	head, err := sc.git.Head(ctx)
+	if err != nil {
+		slog.Warn("execute: head read failed; recording the commit without its sha",
+			"card_id", o.d.Cfg.CardID, "subtask_id", sub.ID, "error", err)
+	} else {
+		entry.SHA = head[:min(len(head), priorShaLen)]
+	}
+
+	sc.attemptCommit = entry
 }
 
 // subtaskHeartbeatInterval matches the worker's parent-card cadence (5m against
@@ -719,6 +776,7 @@ func (o *run) attemptSubtask(ctx context.Context, sc *solverCtx, sub subtaskRef,
 	// committed, and clearing it here means the gate is never even offered a
 	// verdict from a subtask that is over.
 	sc.toolVerify = verifyToolPass{}
+	sc.attemptCommit = nil
 
 	// The checkpoint diffs against the attempt's start head, so the discussion
 	// sees exactly the diff this subtask introduced. Solo path only -
@@ -735,7 +793,7 @@ func (o *run) attemptSubtask(ctx context.Context, sc *solverCtx, sub subtaskRef,
 	}
 
 	prompt := fmt.Sprintf(coderPrompt, o.skillEngage(), o.grounding, sc.workspace,
-		verifyCommandBlock(o.resolvedVerifyPlan()), sub.Title, subtaskBody(sub), o.tc.Title, o.taskDescription)
+		priorSubtasksBlock(sc.prior), verifyCommandBlock(o.resolvedVerifyPlan()), sub.Title, subtaskBody(sub), o.tc.Title, o.taskDescription)
 
 	res, pick, coderMaxTurns, err := o.runCoderWith(ctx, sc, sub, prompt)
 	if err != nil {
@@ -793,6 +851,15 @@ func (o *run) attemptSubtask(ctx context.Context, sc *solverCtx, sub subtaskRef,
 	// solo attempt that changed nothing did not do the subtask.
 	if sc.boardOps && !committed && o.headUnmoved(ctx, sc, start) {
 		return pick, &unproductiveAttempt{reason: "the coder left no change", advice: noChangeAdvice}
+	}
+
+	switch {
+	case committed:
+		o.recordAttemptCommit(ctx, sc, commitMsg, sub)
+	case sc.boardOps:
+		// Past the unproductive guard with nothing to commit: the coder moved
+		// HEAD itself, and its own message is unknown.
+		o.recordAttemptCommit(ctx, sc, "", sub)
 	}
 
 	// Execute checkpoint: the mob critiques the committed diff (and may run
@@ -1133,6 +1200,8 @@ func (o *run) salvageCapped(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 
 	sc.capped = true
 
+	o.recordAttemptCommit(ctx, sc, commitMsg, sub)
+
 	o.d.logCard(ctx, "%s: turn cap on final subtask %s - work committed; the judge's verify decides", sc.tag, sub.ID)
 
 	return true
@@ -1207,6 +1276,8 @@ func (o *run) salvageSoloCapped(ctx context.Context, sc *solverCtx, sub subtaskR
 
 		return false, nil
 	}
+
+	o.recordAttemptCommit(ctx, sc, commitMsg, sub)
 
 	// The authoritative verify: with no judge, the project's verify command - not
 	// the model's self-report - is the completion authority. A budget park during
