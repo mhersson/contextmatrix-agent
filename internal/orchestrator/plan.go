@@ -12,6 +12,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/mob"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-harness/events"
+	"github.com/mhersson/contextmatrix-harness/harness"
 	"github.com/mhersson/contextmatrix-harness/tools"
 )
 
@@ -713,7 +714,9 @@ func (o *run) draftPlan(ctx context.Context, model func(context.Context) string,
 
 		o.spendAndReport(ctx, o.ledger, cfg.CardID, "plan: report usage failed", res, slug, "main", dur)
 
-		if err != nil {
+		// An empty-reply streak falls through to the parse below and fails it like
+		// any unparseable plan, so it takes the repair turn.
+		if err != nil && !errors.Is(err, harness.ErrEmptyResponse) {
 			return plan{}, fmt.Errorf("planner run: %w", err)
 		}
 

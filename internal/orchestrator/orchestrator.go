@@ -1032,6 +1032,12 @@ func (o *run) excludeForReselect(model string) (attempt int, exhausted bool) {
 	return o.reselects, false
 }
 
+// reselectCapError is the park error for a model that failed once the shared
+// re-selection cap was already spent; it wraps the model's own typed error.
+func reselectCapError(model string, cause error) error {
+	return fmt.Errorf("re-selection cap (%d) exhausted after model %q: %w", reselectCap, model, cause)
+}
+
 // recoverIncapable handles a harness-incapable model encountered mid-phase: it
 // blacklists the model on CM (best-effort), records the exclusion so the next
 // selection skips it, and logs the swap. It returns an error - wrapping the
@@ -1050,7 +1056,7 @@ func (o *run) recoverIncapable(ctx context.Context, ie *IncapableError) error {
 	if exhausted {
 		o.d.logCard(ctx, "model %q harness-incapable; blacklisted - re-selection cap (%d) exhausted: %s", ie.Model, reselectCap, ie.Reason)
 
-		return fmt.Errorf("re-selection cap (%d) exhausted after model %q: %w", reselectCap, ie.Model, ie)
+		return reselectCapError(ie.Model, ie)
 	}
 
 	o.d.logCard(ctx, "model %q harness-incapable; blacklisted and re-selecting (attempt %d/%d): %s", ie.Model, attempt, reselectCap, ie.Reason)
@@ -1069,7 +1075,7 @@ func (o *run) recoverEmptyResponse(ctx context.Context, ee *EmptyResponseError) 
 	if exhausted {
 		o.d.logCard(ctx, "model %q replied empty; excluded for this run - re-selection cap (%d) exhausted", ee.Model, reselectCap)
 
-		return fmt.Errorf("re-selection cap (%d) exhausted after model %q: %w", reselectCap, ee.Model, ee)
+		return reselectCapError(ee.Model, ee)
 	}
 
 	o.d.logCard(ctx, "model %q replied empty; excluded for this run and re-selecting (attempt %d/%d)", ee.Model, attempt, reselectCap)

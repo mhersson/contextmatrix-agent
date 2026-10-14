@@ -3465,6 +3465,35 @@ func TestCopilotGate_UnreadableVerdictTakesCommentsAtFaceValue(t *testing.T) {
 		"the untriaged comment is recorded as taken at face value; body=%q", ops.lastBody())
 }
 
+// TestCopilotGate_EmptyTriageTakesCommentsAtFaceValue: a triage model that only
+// replies empty must not fail the gate after the PR is open. Its verdict is
+// unreadable like any other, so every comment funds the fix round.
+func TestCopilotGate_EmptyTriageTakesCommentsAtFaceValue(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		reviews: []*CopilotReview{
+			reviewOnHead("one suggestion", swallowedErrorComment),
+			reviewOnHead("LGTM"),
+		},
+	}
+	empty := llm.Response{FinishReason: "stop", Usage: llm.Usage{Cost: 0.01}}
+	client := &planLLM{responses: []llm.Response{
+		empty, empty, empty,
+		stopResp("coder: returned the write error", 0.02),
+		copilotVerdict(),
+	}}
+
+	o := prGateRun(ops, gates, &fakeGit{committed: true}, client, copilotGateContext("Empty triage", "body"), 0)
+
+	require.NoError(t, runPRGates(context.Background(), o), "an empty triage must not fail the gate")
+
+	assert.Equal(t, 5, modelCallCount(client), "the empty triage still funds the fix round and the re-review triage")
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0,
+		"the gate completes; calls=%v", ops.recorded())
+}
+
 // TestCopilotGate_UnreadableVerdictWithNoComments: a body-only review (zero
 // line comments) paired with an unreadable triage verdict must not be
 // recorded as "the reviewer raised nothing to address" - that phrasing

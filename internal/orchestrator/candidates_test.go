@@ -881,5 +881,7 @@ func TestFanoutEmptyReplyRecoveryRaceSafe(t *testing.T) {
 	}
 
 	assert.Empty(t, ops.blacklistReasons(), "no empty-reply model is blacklisted")
-	assert.LessOrEqual(t, o.reselects, reselectCap, "the shared cap bounds every candidate's failovers")
+	// A candidate stops on the spent cap or on a drained pool, and draining three
+	// models takes three failovers, so in any interleaving the counter ends at the cap.
+	assert.Equal(t, reselectCap, o.reselects, "every candidate's failovers draw on the one shared cap")
 }

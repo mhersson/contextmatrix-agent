@@ -121,8 +121,9 @@ func reasoningRaw(effort string) json.RawMessage {
 }
 
 // runModel routes a phase model-call through the centralized config and
-// normalizes a context_limit/incapable result into a typed error. The returned
-// duration is the wall time of the harness step, threaded to spendAndReport.
+// normalizes a context_limit, incapable or max_turns result, or an empty-reply
+// streak, into a typed error. The returned duration is the wall time of the
+// harness step, threaded to spendAndReport.
 func (o *run) runModel(ctx context.Context, reg *tools.Registry, prompt, model string) (harness.Result, time.Duration, error) {
 	return o.runModelCfg(ctx, reg, prompt, model, o.harnessConfig(model))
 }

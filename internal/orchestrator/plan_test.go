@@ -505,6 +505,27 @@ func TestPlanPhaseRepairLoop(t *testing.T) {
 	assert.Equal(t, "Only", ops.createCardArgs[0].title)
 }
 
+// TestPlanPhaseEmptyReplyTakesTheRepairTurn: a planner that only replies empty
+// has produced no plan, the same as an unparseable one, so the run takes the
+// repair turn rather than failing outright, and every call is charged.
+func TestPlanPhaseEmptyReplyTakesTheRepairTurn(t *testing.T) {
+	ops := &fakeOps{
+		taskContext: cmclient.TaskContext{Title: "Parent", Description: "body"},
+		createdIDs:  []string{"SUB-1"},
+	}
+	valid := `{"card_tier":"simple","subtasks":[{"title":"Only","description":"d","depends_on":[],"tier":"simple"}]}`
+	empty := llm.Response{FinishReason: "stop", Usage: llm.Usage{Cost: 0.01}}
+	llmFake := &planLLM{responses: []llm.Response{empty, empty, empty, stopResp(valid, 0.03)}}
+	d := planTestDeps(ops, llmFake)
+
+	o := newRun(d, ops.taskContext)
+	require.NoError(t, runPlan(context.Background(), o), "an empty planner must take the repair turn")
+
+	require.Len(t, ops.createCardArgs, 1, "the subtask comes from the repaired plan")
+	assert.Equal(t, "Only", ops.createCardArgs[0].title)
+	assert.InDelta(t, 0.06, o.ledger.Spent(), 1e-9, "the empty calls and the repair are all charged")
+}
+
 // TestPlanPhaseRepairsDuplicateSubtaskTitles: a plan whose subtask titles
 // collide takes the repair turn, and only the repaired plan's distinct
 // subtasks reach the board.

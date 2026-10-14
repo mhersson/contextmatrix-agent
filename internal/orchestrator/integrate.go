@@ -172,8 +172,9 @@ func (o *run) writePRBody(ctx context.Context) (string, error) {
 	return body + "\n\n---\n**Verification:** " + verifyStatusLine(o.lastVerify, o.resolvedVerifyPlan()) + "\n", nil
 }
 
-// mechanicalPRBody is the PR body built from the PR-body prompt's own inputs,
-// in the section layout that prompt asks the model for.
+// mechanicalPRBody is the PR body built from the PR-body prompt's own inputs:
+// its What, Plan overview and Review sections. Why is left out because only a
+// model can condense the task description into one.
 func (o *run) mechanicalPRBody() string {
 	return "## What\n" + o.tc.Title + "\n\n## Plan overview\n" + strings.TrimSpace(o.planOverview()) +
 		"\n\n## Review\n" + o.reviewOutcome()

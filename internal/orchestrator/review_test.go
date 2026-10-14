@@ -1551,6 +1551,54 @@ func TestSynthesisCapThenUnparseableParks(t *testing.T) {
 		"preserved under this round's heading so a re-run of the round replaces it")
 }
 
+// TestSynthesisCapThenEmptyParks: a cap on attempt 0 followed by an empty-reply
+// streak on the retry parks with the findings preserved, the same as a
+// capped-then-unparseable retry, instead of failing the run.
+func TestSynthesisCapThenEmptyParks(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+
+	empty := llm.Response{FinishReason: "stop", Usage: llm.Usage{Cost: 0.01}}
+	responses := slices.Concat(burnResps(synthesisMaxTurns), []llm.Response{empty, empty, empty})
+
+	client := &planLLM{responses: responses}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
+	o := newReviewRun(d, tc, 0)
+
+	_, err := o.synthesize(context.Background(), "the specialist findings text", 2, false)
+
+	var park *ReviewParkedError
+
+	require.ErrorAs(t, err, &park, "a capped-then-empty synthesis parks, it does not fail the run")
+	assert.Equal(t, reviewParkedSynthesisCap, park.Reason)
+	assert.Contains(t, o.body, "the specialist findings text",
+		"the round's paid-for specialist findings must be preserved on the body for resume")
+}
+
+// TestSynthesisEmptyReplyTakesTheRepairTurn: an empty-reply streak is an
+// unparseable verdict, so the synthesis takes its repair turn and uses the
+// verdict it returns.
+func TestSynthesisEmptyReplyTakesTheRepairTurn(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+
+	empty := llm.Response{FinishReason: "stop", Usage: llm.Usage{Cost: 0.01}}
+	client := &planLLM{responses: []llm.Response{
+		empty, empty, empty,
+		stopResp(`{"approved":true,"summary":"clean","fix_tier":"simple","fixes":[]}`, 0.02),
+	}}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "review"}
+	o := newReviewRun(d, tc, 0)
+
+	v, err := o.synthesize(context.Background(), "findings", 1, false)
+	require.NoError(t, err)
+	assert.True(t, v.Approved)
+}
+
 // TestSynthesisCapRetrySucceeds proves one cap is recoverable: the retry runs
 // with the emit-now instruction and its verdict is used.
 func TestSynthesisCapRetrySucceeds(t *testing.T) {

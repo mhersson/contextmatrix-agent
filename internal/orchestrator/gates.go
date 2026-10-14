@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/mhersson/contextmatrix-harness/events"
+	"github.com/mhersson/contextmatrix-harness/harness"
 )
 
 // gatesRoundsCap bounds how many times each gate may push a fix round before it
@@ -1231,7 +1232,9 @@ func (o *run) triageCopilot(
 	o.spendAndReport(ctx, o.ledger, cfg.CardID, "pr_gates: report Copilot triage usage failed",
 		res, model, "main", dur)
 
-	if err != nil {
+	// An empty-reply streak falls through to the parse below and reads as an
+	// unreadable verdict, so the comments are taken at face value.
+	if err != nil && !errors.Is(err, harness.ErrEmptyResponse) {
 		if reason := gateResourcePark(err, gatesCopilotTriageBudgetParkReason, gatesCopilotTriageTurnCapParkReason); reason != "" {
 			return nil, o.parkGates(ctx, st, reason)
 		}

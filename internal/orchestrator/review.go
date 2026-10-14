@@ -1681,7 +1681,9 @@ func (o *run) synthesize(ctx context.Context, findings string, round int, author
 			continue
 		case errors.As(err, &mte):
 			return verdict{}, o.parkSynthesisCap(ctx, round, findings)
-		case err != nil:
+		case err != nil && !errors.Is(err, harness.ErrEmptyResponse):
+			// An empty-reply streak is not returned: it fails the parse below like
+			// any unparseable verdict, so it repairs, or parks after a cap.
 			return verdict{}, fmt.Errorf("synthesis run: %w", err)
 		}
 
