@@ -18,6 +18,9 @@ RUSTUP_SHA256_ARM64   ?= 15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef
 PYTHON_VERSION        ?= 3.14.8
 TY_VERSION            ?= 0.0.84
 RUFF_VERSION          ?= 0.16.10
+YARN_VERSION          ?= 1.22.22
+MAVEN_VERSION         ?= 3.9.16
+MAVEN_SHA512          ?= 831a8591fe20c8243b1dbe7d71e3244f31d1665b0804b2e825e38cbbe5ce0cafb8338851f90780735568773e0a6cd07bbec107cda0b896b008b861075358b6f6
 
 # Build args shared by every worker-image target.
 WORKER_BUILD_ARGS = \
@@ -33,7 +36,10 @@ WORKER_BUILD_ARGS = \
 	--build-arg RUSTUP_SHA256_ARM64=$(RUSTUP_SHA256_ARM64) \
 	--build-arg PYTHON_VERSION=$(PYTHON_VERSION) \
 	--build-arg TY_VERSION=$(TY_VERSION) \
-	--build-arg RUFF_VERSION=$(RUFF_VERSION)
+	--build-arg RUFF_VERSION=$(RUFF_VERSION) \
+	--build-arg YARN_VERSION=$(YARN_VERSION) \
+	--build-arg MAVEN_VERSION=$(MAVEN_VERSION) \
+	--build-arg MAVEN_SHA512=$(MAVEN_SHA512)
 
 build:
 	go build ./...
@@ -55,8 +61,8 @@ docker-worker: ## Build the default (full) worker image
 		$(WORKER_BUILD_ARGS) \
 		-t contextmatrix-agent-worker:dev \
 		.
-docker-worker-variants: ## Build the slim worker variants (go-node, python, rust)
-	for target in go-node python rust; do \
+docker-worker-variants: ## Build the slim worker variants (go-node, python, rust, jvm-node)
+	for target in go-node python rust jvm-node; do \
 		docker build \
 			-f docker/Dockerfile.worker \
 			--target $$target \

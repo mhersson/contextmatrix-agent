@@ -245,7 +245,7 @@ make test-race      # CGO_ENABLED=1 go test -race ./...
 make lint           # golangci-lint run
 make fmt            # gofumpt -w .
 make docker-worker           # build the default (full) worker image
-make docker-worker-variants  # build the go-node / python / rust variants
+make docker-worker-variants  # build the go-node / python / rust / jvm-node variants
 ```
 
 To drive the harness standalone against a local workspace (no ContextMatrix
