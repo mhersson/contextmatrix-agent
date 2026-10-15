@@ -136,19 +136,20 @@ export LLM_API_KEY=<your-api-key>
    make docker-worker          # tags contextmatrix-agent-worker:dev (full)
    ```
 
-   The image ships in four variants, selectable per project via the board's
+   The image ships in five variants, selectable per project via the board's
    `remote_execution.worker_image`:
 
-   | Variant   | Toolchains                                                             |
-   | --------- | ---------------------------------------------------------------------- |
-   | `full`    | Go, Node, Python, Rust toolchains - the default (`:dev` / `:latest`).  |
-   | `go-node` | Go (+ golangci-lint, gofumpt) + Node.                                  |
-   | `python`  | Node + uv/uvx + CPython + ty + ruff.                                   |
-   | `rust`    | rustup/cargo (+ clippy, rustfmt). No Node.                             |
+   | Variant    | Toolchains                                                            |
+   | ---------- | --------------------------------------------------------------------- |
+   | `full`     | Go, Node, Python, Rust toolchains - the default (`:dev` / `:latest`). |
+   | `go-node`  | Go (+ golangci-lint, gofumpt) + Node.                                 |
+   | `python`   | Node + uv/uvx + CPython + ty + ruff.                                  |
+   | `rust`     | rustup/cargo (+ clippy, rustfmt). No Node.                            |
+   | `jvm-node` | OpenJDK 21 + Maven + Node 24 + yarn (defers to a repo's Yarn Berry).  |
 
    Every variant also carries the baseline CLIs (`git`, `gh`, `rg`, `fd`). Build
    the slim variants with `make docker-worker-variants` (tags
-   `contextmatrix-agent-worker:go-node`, `:python`, `:rust`).
+   `contextmatrix-agent-worker:go-node`, `:python`, `:rust`, `:jvm-node`).
 
    **Any other ecosystem ⇒ set the project's `remote_execution.worker_image` to
    a custom image** - see `docs/custom-images.md`.
@@ -298,7 +299,7 @@ make test           # go test ./...
 make lint           # golangci-lint run
 make fmt            # gofumpt -w .
 make docker-worker           # build the default (full) worker image
-make docker-worker-variants  # build the go-node / python / rust variants
+make docker-worker-variants  # build the go-node / python / rust / jvm-node variants
 ```
 
 CI gates every pull request on `go test`, `go test -race`, `golangci-lint`, and

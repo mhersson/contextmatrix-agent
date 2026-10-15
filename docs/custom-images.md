@@ -1,17 +1,18 @@
 # Custom worker images
 
-The published worker image ships four variants (see the README): the default
-`full` (Go, Node, Python, Rust) and the slim `go-node`, `python`, and `rust`
-variants. Together they cover the toolchains ContextMatrix builds and tests
-against directly. **Any other ecosystem - a JVM, Ruby, .NET, a system library a
-crate links against - needs a custom image that carries that toolchain.**
+The published worker image ships five variants (see the README): the default
+`full` (Go, Node, Python, Rust) and the slim `go-node`, `python`, `rust`, and
+`jvm-node` (JDK 21, Maven, Node 24, yarn) variants. Together they cover the
+toolchains ContextMatrix builds and tests against directly. **Any other ecosystem - Ruby,
+.NET, a system library a crate links against, another JDK release - needs a
+custom image that carries that toolchain.**
 
 A custom image is the published worker image plus your toolchain. Build `FROM`
 one of the published variants so the agent binary, entrypoint, unprivileged
 `user` (UID 1000), and baseline CLIs (`git`, `gh`, `rg`, `fd`) are inherited
 unchanged - then `apt-get install` (or otherwise add) what your project needs.
 
-## Worked example - add a JDK
+## Worked example - add Ruby
 
 ```dockerfile
 # Start from a published variant. Pick the slimmest one that still carries the
@@ -23,13 +24,9 @@ FROM ghcr.io/mhersson/contextmatrix-agent:go-node
 # ENTRYPOINT).
 USER root
 
-# Temurin (Adoptium) JDK from the Adoptium apt repo.
+# Ruby and Bundler from Debian main.
 # hadolint ignore=DL3008
-RUN curl -fsSL https://packages.adoptium.net/artifactory/api/gpg/key/public \
-      -o /usr/share/keyrings/adoptium.asc \
-    && echo "deb [signed-by=/usr/share/keyrings/adoptium.asc] https://packages.adoptium.net/artifactory/deb trixie main" \
-       > /etc/apt/sources.list.d/adoptium.list \
-    && apt-get update && apt-get install -y --no-install-recommends temurin-21-jdk \
+RUN apt-get update && apt-get install -y --no-install-recommends ruby-full ruby-bundler \
     && rm -rf /var/lib/apt/lists/*
 
 # Hand control back to the base image: it already sets USER user, WORKDIR, and
@@ -38,9 +35,9 @@ RUN curl -fsSL https://packages.adoptium.net/artifactory/api/gpg/key/public \
 USER user
 ```
 
-The same shape works for any apt-installable toolchain - for example Ruby is a
-one-liner (`apt-get install -y --no-install-recommends ruby-full`) in place of
-the Temurin block.
+The same shape works for any apt-installable toolchain. One from a third-party
+apt repo adds its keyring and source list in the same `RUN`, the way the base
+image installs `gh` from GitHub's repo.
 
 ## Keep these intact
 
@@ -65,22 +62,25 @@ the Temurin block.
     environment of every subprocess it runs for the model down to `PATH`,
     `HOME`, `USER`, `LANG`, `LC_ALL`, `TMPDIR` and `TERM`, so a cache-prefix
     variable you set with `ENV` does not reach the tool and it falls back to its
-    own default under `$HOME`. A JDK worker declares `/home/user/.m2/repository`
-    for the same reason the Rust variant declares `/home/user/.cargo/registry`.
+    own default under `$HOME`. That is why the Rust variant declares cargo's
+    default `/home/user/.cargo/registry`: a `CARGO_HOME` set with `ENV` would
+    not reach cargo at runtime.
     If the toolchain must see that variable, name it in a project's
     `verify.env`, which is the allowlist the scrub honours; the value itself
     still has to be in the container, from the image or `worker_extra_env`.
-  - Declare only source trees. Writes are never widened: `edit`, `write` and
-    `bash` stay inside the workspace whatever this is set to.
+  - Declare only source trees. Dependency caches that hold archives, such as
+    the jars under `~/.gradle` or `~/.m2`, give the tools nothing to read, which
+    is why `jvm-node` declares none. Writes are never widened: `edit`, `write`
+    and `bash` stay inside the workspace whatever this is set to.
 
 ## Publish and point a project at it
 
 Build, push, and **pin by digest** so runs are reproducible:
 
 ```bash
-docker build -t ghcr.io/you/my-worker:jdk .
-docker push ghcr.io/you/my-worker:jdk
-docker buildx imagetools inspect ghcr.io/you/my-worker:jdk   # copy the index digest
+docker build -t ghcr.io/you/my-worker:ruby .
+docker push ghcr.io/you/my-worker:ruby
+docker buildx imagetools inspect ghcr.io/you/my-worker:ruby   # copy the index digest
 ```
 
 Then set the project's `remote_execution.worker_image` on its board to

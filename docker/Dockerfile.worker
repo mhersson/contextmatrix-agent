@@ -16,6 +16,9 @@ ARG RUSTUP_SHA256_ARM64=15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef6
 ARG PYTHON_VERSION=3.14.8
 ARG TY_VERSION=0.0.84
 ARG RUFF_VERSION=0.16.10
+ARG YARN_VERSION=1.22.22
+ARG MAVEN_VERSION=3.9.16
+ARG MAVEN_SHA512=831a8591fe20c8243b1dbe7d71e3244f31d1665b0804b2e825e38cbbe5ce0cafb8338851f90780735568773e0a6cd07bbec107cda0b896b008b861075358b6f6
 
 # ---------------------------------------------------------------------------
 # build - compile the agent binary.
@@ -87,7 +90,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_26.x | bash - \
     && rm -rf /var/lib/apt/lists/* \
     && npm install -g "npm@${NPM_VERSION}" \
     && npm cache clean --force \
-    && rm -rf /root/.npm
+    && rm -rf /root/.npm /tmp/node-compile-cache
 
 # ---------------------------------------------------------------------------
 # go-node-toolchain - node + the Go toolchain, golangci-lint, and gofumpt.
@@ -117,15 +120,15 @@ RUN set -eux; \
     rm -f "/tmp/${TARBALL}"
 
 # Install golangci-lint from source so it is compiled against the pinned Go
-# toolchain. Running go clean -modcache drops the ~350MB shared module cache
-# in the same layer.
+# toolchain. Running go clean -cache -modcache drops the ~650MB build cache and
+# the ~350MB shared module cache in the same layer.
 RUN CGO_ENABLED=0 GOBIN=/usr/local/bin go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}" \
-    && go clean -modcache
+    && go clean -cache -modcache
 
 # Install gofumpt from source - same approach, compiled against the pinned Go
 # toolchain.
 RUN CGO_ENABLED=0 GOBIN=/usr/local/bin go install "mvdan.cc/gofumpt@${GOFUMPT_VERSION}" \
-    && go clean -modcache
+    && go clean -cache -modcache
 
 # ---------------------------------------------------------------------------
 # rust-toolchain - base + Rust via rustup (minimal profile + clippy + rustfmt).
@@ -186,9 +189,10 @@ COPY --from=uv /uv /uvx /usr/local/bin/
 # Managed CPython via uv. UV_PYTHON_INSTALL_DIR points the download at a
 # root-owned prefix for the pinned version only; it is deliberately NOT persisted
 # as ENV so that at runtime uv installs any alternate version into the user's
-# writable home instead of failing on this root-owned directory.
+# writable home instead of failing on this root-owned directory. UV_NO_CACHE
+# keeps the download cache out of the layer.
 RUN set -eux; \
-    export UV_PYTHON_INSTALL_DIR=/opt/python; \
+    export UV_PYTHON_INSTALL_DIR=/opt/python UV_NO_CACHE=1; \
     uv python install "${PYTHON_VERSION}"; \
     PYBIN="$(uv python find "${PYTHON_VERSION}")"; \
     ln -s "${PYBIN}" /usr/local/bin/python3; \
@@ -198,9 +202,56 @@ RUN set -eux; \
 # PATH. One layer for both; a version bump here never invalidates the CPython
 # layer above.
 RUN set -eux; \
-    export UV_PYTHON_INSTALL_DIR=/opt/python UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin; \
+    export UV_PYTHON_INSTALL_DIR=/opt/python UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin UV_NO_CACHE=1; \
     uv tool install --python "${PYTHON_VERSION}" "ty==${TY_VERSION}"; \
     uv tool install --python "${PYTHON_VERSION}" "ruff==${RUFF_VERSION}"
+
+# ---------------------------------------------------------------------------
+# jvm-node-toolchain - base + JDK 21 + Maven + Node.js 24 + yarn, for Kotlin/Java
+# projects with a Node frontend. Node 24 needs its own stage because a stage
+# builds once per build, so the node stage cannot also be built at 24.
+# ---------------------------------------------------------------------------
+FROM base AS jvm-node-toolchain
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ARG NPM_VERSION
+ARG YARN_VERSION
+ARG MAVEN_VERSION
+ARG MAVEN_SHA512
+
+# Same hygiene as the node stage. The pinned npm supports Node 24. Yarn classic
+# is the global yarn because it defers to a repository's committed Yarn Berry
+# release (yarnPath) with no runtime download, where corepack would fetch the
+# packageManager version from the registry on first use.
+# hadolint ignore=DL3008
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install -g "npm@${NPM_VERSION}" "yarn@${YARN_VERSION}" \
+    && npm cache clean --force \
+    && rm -rf /root/.npm /tmp/node-compile-cache
+
+# JDK 21 from Debian main; /usr/bin/java resolves through alternatives, so no
+# JAVA_HOME is needed. The postinst fails on slim images without the man1 dir.
+# The version check fails the build if a different JDK became the default.
+# hadolint ignore=DL3008
+RUN mkdir -p /usr/share/man/man1 \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends openjdk-21-jdk-headless \
+    && rm -rf /var/lib/apt/lists/* \
+    && java -version 2>&1 | grep -q 'version "21\.'
+
+# Maven from the upstream binary tarball, SHA512-verified like the Go tarball.
+# Debian's package pulls in dozens of library packages and lags upstream. The
+# mvn script resolves its own home through the /usr/local/bin symlink, so no
+# MAVEN_HOME is needed. Gradle projects use their committed wrapper instead.
+RUN set -eux; \
+    TARBALL="apache-maven-${MAVEN_VERSION}-bin.tar.gz"; \
+    curl -fsSL "https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/${TARBALL}" -o "/tmp/${TARBALL}"; \
+    echo "${MAVEN_SHA512}  /tmp/${TARBALL}" | sha512sum -c -; \
+    mkdir -p /opt/maven; \
+    tar -C /opt/maven --strip-components=1 -xzf "/tmp/${TARBALL}"; \
+    rm -f "/tmp/${TARBALL}"; \
+    ln -s /opt/maven/bin/mvn /usr/local/bin/mvn
 
 # ---------------------------------------------------------------------------
 # Read-only roots. Each final stage declares in CMX_READ_ONLY_ROOTS the absolute
@@ -264,6 +315,20 @@ WORKDIR /home/user
 # The managed CPython install prefix, holding the standard library source. A
 # project's own dependencies live in its in-workspace virtualenv.
 ENV CMX_READ_ONLY_ROOTS=/opt/python
+RUN mkdir -p /home/user/workspace
+HEALTHCHECK NONE
+ENTRYPOINT ["contextmatrix-agent", "work"]
+
+# ---------------------------------------------------------------------------
+# jvm-node - the Kotlin/Java + Node worker variant.
+# ---------------------------------------------------------------------------
+FROM jvm-node-toolchain AS jvm-node
+COPY --from=build /out/contextmatrix-agent /usr/local/bin/contextmatrix-agent
+RUN useradd -m -u 1000 -s /bin/bash user
+USER 1000:1000
+WORKDIR /home/user
+# No read-only roots: the Gradle and Maven caches hold jars the read tools
+# cannot open, plus POMs that carry no API.
 RUN mkdir -p /home/user/workspace
 HEALTHCHECK NONE
 ENTRYPOINT ["contextmatrix-agent", "work"]
