@@ -6,6 +6,8 @@
 #
 # Paired with CI (.github/workflows/ci.yaml). Dependabot bump PRs must pass the
 # same gates as any other PR. Minor/patch bumps are grouped to cut PR noise.
+# Every contextmatrix repo runs Dependabot at the same day and time, so
+# bumps to shared base images and modules land the same night.
 
 version: 2
 
@@ -14,6 +16,9 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+      day: saturday
+      time: "02:00"
+      timezone: Europe/Oslo
     open-pull-requests-limit: 10
     groups:
       minor-and-patch:
@@ -28,6 +33,9 @@ updates:
     directory: "/docker"
     schedule:
       interval: weekly
+      day: saturday
+      time: "02:00"
+      timezone: Europe/Oslo
     open-pull-requests-limit: 5
     labels:
       - dependencies
@@ -37,6 +45,9 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+      day: saturday
+      time: "02:00"
+      timezone: Europe/Oslo
     open-pull-requests-limit: 10
     groups:
       minor-and-patch:
