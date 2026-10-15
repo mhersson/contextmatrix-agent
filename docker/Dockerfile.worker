@@ -87,7 +87,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_26.x | bash - \
     && rm -rf /var/lib/apt/lists/* \
     && npm install -g "npm@${NPM_VERSION}" \
     && npm cache clean --force \
-    && rm -rf /root/.npm
+    && rm -rf /root/.npm /tmp/node-compile-cache
 
 # ---------------------------------------------------------------------------
 # go-node-toolchain - node + the Go toolchain, golangci-lint, and gofumpt.
@@ -117,15 +117,15 @@ RUN set -eux; \
     rm -f "/tmp/${TARBALL}"
 
 # Install golangci-lint from source so it is compiled against the pinned Go
-# toolchain. Running go clean -modcache drops the ~350MB shared module cache
-# in the same layer.
+# toolchain. Running go clean -cache -modcache drops the ~650MB build cache and
+# the ~350MB shared module cache in the same layer.
 RUN CGO_ENABLED=0 GOBIN=/usr/local/bin go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}" \
-    && go clean -modcache
+    && go clean -cache -modcache
 
 # Install gofumpt from source - same approach, compiled against the pinned Go
 # toolchain.
 RUN CGO_ENABLED=0 GOBIN=/usr/local/bin go install "mvdan.cc/gofumpt@${GOFUMPT_VERSION}" \
-    && go clean -modcache
+    && go clean -cache -modcache
 
 # ---------------------------------------------------------------------------
 # rust-toolchain - base + Rust via rustup (minimal profile + clippy + rustfmt).
@@ -186,9 +186,10 @@ COPY --from=uv /uv /uvx /usr/local/bin/
 # Managed CPython via uv. UV_PYTHON_INSTALL_DIR points the download at a
 # root-owned prefix for the pinned version only; it is deliberately NOT persisted
 # as ENV so that at runtime uv installs any alternate version into the user's
-# writable home instead of failing on this root-owned directory.
+# writable home instead of failing on this root-owned directory. UV_NO_CACHE
+# keeps the download cache out of the layer.
 RUN set -eux; \
-    export UV_PYTHON_INSTALL_DIR=/opt/python; \
+    export UV_PYTHON_INSTALL_DIR=/opt/python UV_NO_CACHE=1; \
     uv python install "${PYTHON_VERSION}"; \
     PYBIN="$(uv python find "${PYTHON_VERSION}")"; \
     ln -s "${PYBIN}" /usr/local/bin/python3; \
@@ -198,7 +199,7 @@ RUN set -eux; \
 # PATH. One layer for both; a version bump here never invalidates the CPython
 # layer above.
 RUN set -eux; \
-    export UV_PYTHON_INSTALL_DIR=/opt/python UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin; \
+    export UV_PYTHON_INSTALL_DIR=/opt/python UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin UV_NO_CACHE=1; \
     uv tool install --python "${PYTHON_VERSION}" "ty==${TY_VERSION}"; \
     uv tool install --python "${PYTHON_VERSION}" "ruff==${RUFF_VERSION}"
 
