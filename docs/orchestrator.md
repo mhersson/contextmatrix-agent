@@ -322,11 +322,14 @@ and the activity log carry the same truth.
 
 HITL cards run the same FSM as autonomous, mode-gated on `Config.Interactive`:
 a brainstorming dialogue for creative cards plus plan-approval and
-review-decision gates that wait on the inbox. Autonomous is the same FSM with
-the gates auto-passed and brainstorming skipped. A `promote` frame closes the
-inbox, so every later gate passes through and the run finishes autonomously at
-the persisted phase. Awaiting-human is live, not stalled - the idle watchdog
-suspends for a parked gate so a human-blocked container is not reaped.
+review-decision gates that wait on the inbox. A card whose body already
+carries a non-empty `## Design` or `## Solution` section (a recorded design or
+a decided approach) skips the brainstorm and goes straight to planning.
+Autonomous is the same FSM with the gates auto-passed and brainstorming
+skipped. A `promote` frame closes the inbox, so every later gate passes through
+and the run finishes autonomously at the persisted phase. Awaiting-human is
+live, not stalled - the idle watchdog suspends for a parked gate so a
+human-blocked container is not reaped.
 
 ## Task skills
 
