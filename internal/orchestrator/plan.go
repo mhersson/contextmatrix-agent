@@ -1044,15 +1044,16 @@ func runPlan(ctx context.Context, o *run) error {
 	}
 
 	// Creative HITL cards get a design dialogue before planning (create-plan
-	// Phase 0 Branch C). Skipped in autonomous, for non-creative cards, and when
-	// a design already exists on the claim-time body - a prior brainstorm's
-	// record or a human-authored one - which is recovered here so it reaches
-	// the planner through the same AGREED DESIGN channel a fresh brainstorm
-	// uses. Branch C and the bug Branch B are mutually exclusive (isCreative
-	// excludes bug-like cards).
+	// Phase 0 Branch C). Skipped in autonomous, for non-creative cards, when the
+	// body carries a decided "## Solution" (it reaches the planner in the
+	// description itself), and when a design already exists on the claim-time
+	// body - a prior brainstorm's record or a human-authored one - which is
+	// recovered here so it reaches the planner through the same AGREED DESIGN
+	// channel a fresh brainstorm uses. Branch C and the bug Branch B are
+	// mutually exclusive (isCreative excludes bug-like cards).
 	design := recordedDesign(o.tc.Description)
 
-	if cfg.Interactive && isCreative(o.tc) && design == "" {
+	if cfg.Interactive && isCreative(o.tc) && design == "" && !hasDecidedSolution(o.tc.Description) {
 		d, err := o.runBrainstorm(ctx, decisionModel)
 		if err != nil {
 			return err
@@ -1493,6 +1494,15 @@ func recordedDesign(description string) string {
 	}
 
 	return strings.TrimSpace(strings.TrimPrefix(sec, "## Design"))
+}
+
+// hasDecidedSolution reports whether the claim-time body carries a non-empty
+// "## Solution" section: the decided approach a design-first card records in
+// place of "## Design".
+func hasDecidedSolution(description string) bool {
+	_, content, _ := strings.Cut(extractSection(description, "Solution"), "\n")
+
+	return strings.TrimSpace(content) != ""
 }
 
 // plannerDescription is the description slot for the planner prompts: the

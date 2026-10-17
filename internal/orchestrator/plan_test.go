@@ -1258,10 +1258,9 @@ func TestRunPlanHITLAdjustRedraftsThenApproves(t *testing.T) {
 	assert.True(t, sawFeedback, "the re-draft prompt includes the adjust feedback")
 }
 
-// creativePlanRun builds a *run for the design-grounding test: a creative HITL
-// card with NO ## Design yet, so brainstorm runs and the produced design must
-// reach the planner prompt.
-func creativePlanRun(ops *fakeOps, inbox *fakeInbox, client llm.LLM) *run {
+// creativePlanRun builds a *run for a creative HITL card with the given
+// claim-time description.
+func creativePlanRun(ops *fakeOps, inbox *fakeInbox, client llm.LLM, description string) *run {
 	d := Deps{
 		Ops:       ops,
 		Client:    client,
@@ -1278,7 +1277,7 @@ func creativePlanRun(ops *fakeOps, inbox *fakeInbox, client llm.LLM) *run {
 
 	tc := cmclient.TaskContext{
 		Title:       "Add a palette",
-		Description: "Add colour-scheme support.", // no ## Design → brainstorm runs
+		Description: description,
 	}
 
 	return newRun(d, tc)
@@ -1308,7 +1307,8 @@ func TestRunPlanHITLDesignReachesPlanner(t *testing.T) {
 		stopResp(`{"verdict":"approve","feedback":""}`, 0.001),
 	}}
 
-	o := creativePlanRun(ops, inbox, llmFake)
+	// No ## Design or ## Solution on the body, so brainstorm runs.
+	o := creativePlanRun(ops, inbox, llmFake, "Add colour-scheme support.")
 	require.NoError(t, runPlan(context.Background(), o))
 
 	// Subtasks created after approval.
@@ -1324,6 +1324,53 @@ func TestRunPlanHITLDesignReachesPlanner(t *testing.T) {
 		"planner prompt must contain the AGREED DESIGN block")
 	assert.Contains(t, planDraftPrompt, "Approach A",
 		"planner prompt must contain the brainstormed design text")
+}
+
+// architectCardBody is a design-first card body: the approach is decided under
+// "## Solution" and there is no "## Design" section.
+const architectCardBody = "## Context\n\nUsers want named colour schemes.\n\n" +
+	"## Solution\n\nAdd a palette config with four named slots.\n\n" +
+	"## Acceptance criteria\n\n1. The palette config loads four named slots."
+
+// TestRunPlanHITLDecidedSolutionSkipsBrainstorm pins that a creative HITL card
+// carrying a decided "## Solution" goes straight to the planner: the only model
+// calls are the plan draft and the plan-gate classification.
+func TestRunPlanHITLDecidedSolutionSkipsBrainstorm(t *testing.T) {
+	ops := &fakeOps{}
+	inbox := &fakeInbox{msgs: []harness.UserMessage{{Content: "approve"}}}
+	client := &planLLM{responses: []llm.Response{
+		stopResp(onePlanJSON, 0.01),                            // draft
+		stopResp(`{"verdict":"approve","feedback":""}`, 0.001), // gate classify
+	}}
+	o := creativePlanRun(ops, inbox, client, architectCardBody)
+
+	require.NoError(t, runPlan(context.Background(), o))
+	assert.Len(t, client.models, 2, "no brainstorm turn ran before the plan draft")
+	assert.Len(t, ops.createCardArgs, 1, "the approved plan created its subtask")
+}
+
+func TestHasDecidedSolution(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"solution section between others", architectCardBody, true},
+		{"solution section last in body", "## Solution\n\nAdd a palette config.", true},
+		{"trailing spaces on heading", "## Solution  \n\nAdd a palette config.", true},
+		{"crlf line endings", "## Context\r\n\r\nWhy.\r\n\r\n## Solution\r\n\r\nAdd a palette config.\r\n", true},
+		{"no solution section", "## Context\n\nWhy.\n\n## Acceptance criteria\n\n1. Loads.", false},
+		{"empty solution section", "## Solution\n\n   \n## Acceptance criteria\n\n1. Loads.", false},
+		{"heading only at end of body", "Intro.\n\n## Solution", false},
+		{"plural heading", "## Solutions\n\nAdd a palette config.", false},
+		{"level-three heading", "## Context\n\n### Solution\n\nAdd a palette config.", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, hasDecidedSolution(tt.body))
+		})
+	}
 }
 
 // mobPlanRun builds an autonomous run with mob session plan enabled and a
