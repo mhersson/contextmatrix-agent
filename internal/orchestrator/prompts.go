@@ -191,12 +191,13 @@ const convergenceRule = `- Convergence: when every finding under PRIOR FINDINGS 
 // The leading %s is the grounding block; the second %s is the repo-snapshot
 // block (bounded tracked-file list + README head; "" when not a git repo). The
 // trailing %s slots are filled by draftPlan: workspace root, an optional
-// read-only-roots block, the POC test-scope bullet (pocTestScope), card title, card description, an optional diagnosis
-// block (root-cause investigation for bug-like cards), an optional design block
-// (brainstormed design for creative HITL cards), an optional resume block
-// (existing subtasks), an optional feedback block (HITL reviewer's requested
-// changes on a re-draft), and an optional repair block (the previous parse
-// error). Empty optional blocks collapse to nothing.
+// read-only-roots block, the POC test-scope bullet (pocTestScope), card title,
+// card description, an optional diagnosis block (root-cause investigation for
+// bug-like cards), an optional design block (brainstormed design for creative
+// HITL cards), an optional resume block (existing subtasks), an optional
+// feedback block (HITL reviewer's requested changes on a re-draft), and an
+// optional repair block (the previous parse error). Empty optional blocks
+// collapse to nothing.
 const planPrompt = `%s%sYou are the planning agent for a software task. You have read-only
 tools (read, grep, glob, git) to inspect the codebase, plus record_finding to
 save durable notes as you go. You do NOT create or modify cards or files - you
@@ -482,8 +483,8 @@ discrepancy in your finish message, and stop - a confirmed absence discharges a
 //
 // The trailing %s slots are filled by runExecute: workspace root, the verify
 // command block (empty when none resolved), the POC test-scope paragraph
-// (pocTestScope), subtask title, subtask description,
-// parent card title, parent card body.
+// (pocTestScope), subtask title, subtask description, parent card title, parent
+// card body.
 const coderPrompt = `%s%sYou are the coding agent for one subtask of a larger task. You have the full
 write toolset (read, grep, glob, edit, write, bash) rooted at the workspace.
 Implement EXACTLY this subtask - nothing from sibling subtasks, nothing
@@ -545,13 +546,13 @@ Description:
 // never a review concern.
 //
 // The trailing %s slots are filled by runSpecialists: an optional
-// read-only-roots block, the lens block (a specialist lens below, or genericReviewPrompt), parent card
-// title, parent card description, the full branch diff against base, an
-// optional prior-findings block (the previous round's findings on delta
-// rounds, followed by the fix round's response to them when it gave one), and
-// an optional fix-delta block (what the previous round's COMMITTED fix
-// changed, labeled as context rather than review scope). Both optional blocks
-// collapse to nothing when empty.
+// read-only-roots block, the lens block (a specialist lens below, or
+// genericReviewPrompt), parent card title, parent card description, the full
+// branch diff against base, an optional prior-findings block (the previous
+// round's findings on delta rounds, followed by the fix round's response to
+// them when it gave one), and an optional fix-delta block (what the previous
+// round's COMMITTED fix changed, labeled as context rather than review scope).
+// Both optional blocks collapse to nothing when empty.
 const specialistPrompt = `%s%sYou are a code-review specialist. You have read-only tools (read, grep, glob, git)
 to inspect the codebase. Git is available read-only (status, diff, log, show,
 branch). You do NOT create or modify cards or files. Produce a findings report as TEXT - another agent synthesizes the
@@ -654,12 +655,12 @@ Focus on:
 
 // synthesisRules is the solo synthesizer's decision rule and finding
 // discipline, shared by synthesisPrompt and genericSynthesisPrompt so the two
-// cannot drift.
+// cannot drift. Its one %s slot names the reviewer a finding may come from.
 const synthesisRules = `Decision rule:
 - A finding blocks the change (not approved) when, in your own judgement, it is
   a genuine correctness bug, a real vulnerability, a broken or vacuous test, or
   it makes the change fail the task's stated acceptance criteria - promote it
-  even if a specialist filed it as Minor. Return each blocker as a concrete fix.
+  even if %s filed it as Minor. Return each blocker as a concrete fix.
 - Weigh a passing verify run and passing tests as evidence: a "this could break" or
   toolchain/version concern they contradict is Minor.
 - Also judge the change against the task: if it does NOT satisfy the acceptance criteria
@@ -713,11 +714,12 @@ array asserts that nothing survived the critique round - never a default.
 // survived the critique round, tagged with its own severity, regardless of
 // approved.
 //
-// The trailing %s slots are filled by synthesize: parent card title, parent
-// card description, an optional prior-findings block (the previous round's
-// findings on delta rounds, followed by the fix round's response to them when
-// it gave one), the concatenated specialist findings, and an optional repair
-// block (the previous parse error). Empty optional blocks collapse to nothing.
+// The %s slots are filled by synthesisTask: grounding, the reviewer noun in
+// synthesisRules ("a specialist"), parent card title, parent card description,
+// an optional prior-findings block (the previous round's findings on delta
+// rounds, followed by the fix round's response to them when it gave one), the
+// concatenated specialist findings, and an optional repair block (the previous
+// parse error). Empty optional blocks collapse to nothing.
 const synthesisPrompt = `%sYou are the review synthesizer. Three specialists (correctness, design,
 security) reviewed a change and produced the findings below, each with a
 suggested severity. Merge duplicates and decide a single verdict. Severity is
@@ -740,7 +742,8 @@ SPECIALIST FINDINGS
 
 // genericSynthesisPrompt is synthesisPrompt for a POC review: one generic
 // reviewer's findings judged against pocReviewBar under the same rules and
-// verdict contract. Its slots match synthesisPrompt's.
+// verdict contract. Its slots match synthesisPrompt's; the reviewer noun is
+// neutral.
 const genericSynthesisPrompt = `%sYou are the review synthesizer. One generic reviewer reviewed a change and
 produced the findings below, each with a suggested severity. Decide a single
 verdict. Severity is yours to set: weigh each finding's actual impact on the
@@ -1324,7 +1327,8 @@ Description:
 // carries the SAME strict JSON contract as planPrompt and instructs the
 // moderator to keep unresolved dissent as explicit risk notes on the
 // affected subtasks. The engine appends the rendered transcript after it.
-// Slots: grounding, workspace, the POC test-scope bullet (pocTestScope), title, description.
+// Slots: grounding, workspace, the POC test-scope bullet (pocTestScope), title,
+// description.
 const planSynthesisPrompt = `%sYou are the moderator of a planning discussion between software agents.
 Repo root: %s - paths are relative to it.
 

@@ -26,13 +26,6 @@ const reviewPanelSize = 3
 // reviewLens is one solo review seat: its role and the lens block its prompt carries.
 type reviewLens struct{ role, prompt string }
 
-// specialistLenses is the production review panel.
-var specialistLenses = [reviewPanelSize]reviewLens{
-	{"correctness", correctnessPrompt},
-	{"design", designPrompt},
-	{"security", securityPrompt},
-}
-
 // pocReview reports whether this run reviews the POC way. A card with mob
 // review keeps the full review in a POC project: its explicit setting wins.
 func (o *run) pocReview() bool {
@@ -46,7 +39,11 @@ func (o *run) panelLenses() []reviewLens {
 		return []reviewLens{{"generic", genericReviewPrompt}}
 	}
 
-	return specialistLenses[:]
+	return []reviewLens{
+		{"correctness", correctnessPrompt},
+		{"design", designPrompt},
+		{"security", securityPrompt},
+	}
 }
 
 // hardReviewIterationCap is a defensive ceiling on the review loop independent
@@ -1751,10 +1748,10 @@ func (o *run) synthesisTask(authoritative bool, findings, repair string) string 
 	prior := o.priorContext(authoritative)
 
 	if o.pocReview() {
-		return fmt.Sprintf(genericSynthesisPrompt, o.grounding, o.tc.Title, o.taskDescription, prior, findings, repair)
+		return fmt.Sprintf(genericSynthesisPrompt, o.grounding, "the reviewer", o.tc.Title, o.taskDescription, prior, findings, repair)
 	}
 
-	return fmt.Sprintf(synthesisPrompt, o.grounding, o.tc.Title, o.taskDescription, prior, findings, repair)
+	return fmt.Sprintf(synthesisPrompt, o.grounding, "a specialist", o.tc.Title, o.taskDescription, prior, findings, repair)
 }
 
 // parkSynthesisCap preserves the round's specialist findings on the card body -

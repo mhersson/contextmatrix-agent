@@ -247,14 +247,13 @@ adopts the approval only when the current branch HEAD equals the recorded SHA
 and the resolved verify gate still passes - a red or erroring verify refuses
 adoption, so an approval never bypasses a red gate. Adoption skips the
 specialist panel and synthesis, runs the recorded surviving fixes as the usual
-non-escalating cleanup pass (skipped when the list is empty or nit-only, or
-on a POC review, and
-gated by the same verify-or-discard of the fixup as a live approval), logs
-`adopted recorded approval` on the card, then clears the record before the FSM
-proceeds to the next phase. Any mismatch - no record, a different HEAD, a red
-verify, a POC review's approval on a run that reviews at the full bar - falls
-through to the normal review loop unchanged, and only approvals are persisted:
-a rejected verdict never produces a record.
+non-escalating cleanup pass (skipped when the list is empty or nit-only, or on
+a POC review, and gated by the same verify-or-discard of the fixup as a live
+approval), logs `adopted recorded approval` on the card, then clears the record
+before the FSM proceeds to the next phase. Any mismatch - no record, a different
+HEAD, a red verify, a POC review's approval on a run that reviews at the full
+bar - falls through to the normal review loop unchanged, and only approvals are
+persisted: a rejected verdict never produces a record.
 
 In a mob review discussion, the correctness seat's lens is a briefing that
 judges the change - and the plan decisions behind it - against the card's

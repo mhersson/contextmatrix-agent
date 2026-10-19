@@ -6904,10 +6904,15 @@ func TestTryAdoptApprovalRefusesAPOCApprovalOnAFullBarRun(t *testing.T) {
 	tests := []struct {
 		name        string
 		poc         bool
+		mob         MobConfig
 		wantAdopted bool
 	}{
 		{name: "poc run adopts it", poc: true, wantAdopted: true},
 		{name: "full-bar run refuses it", poc: false, wantAdopted: false},
+		{
+			name: "mob-review run on a poc project refuses it",
+			poc:  true, mob: MobConfig{Participants: 3, Review: true}, wantAdopted: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -6916,6 +6921,7 @@ func TestTryAdoptApprovalRefusesAPOCApprovalOnAFullBarRun(t *testing.T) {
 			client := &planLLM{}
 			d := reviewTestDeps(t, ops, &fakeGit{headSHA: "abc1234"}, client, reviewerRegistry())
 			d.Cfg.POC = tt.poc
+			d.Cfg.Mob = tt.mob
 
 			tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
 			o := newReviewRun(d, tc, 0)
