@@ -6897,6 +6897,39 @@ func TestTryAdoptApproval_NoRecordReturnsFalse(t *testing.T) {
 		"adoption must return false when no approval record exists")
 }
 
+// TestTryAdoptApprovalRefusesAPOCApprovalOnAFullBarRun covers the flag being
+// switched off between runs: the recorded POC verdict cleared a lower bar,
+// so a full-bar run reviews again instead of adopting it.
+func TestTryAdoptApprovalRefusesAPOCApprovalOnAFullBarRun(t *testing.T) {
+	tests := []struct {
+		name        string
+		poc         bool
+		wantAdopted bool
+	}{
+		{name: "poc run adopts it", poc: true, wantAdopted: true},
+		{name: "full-bar run refuses it", poc: false, wantAdopted: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			client := &planLLM{}
+			d := reviewTestDeps(t, ops, &fakeGit{headSHA: "abc1234"}, client, reviewerRegistry())
+			d.Cfg.POC = tt.poc
+
+			tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+			o := newReviewRun(d, tc, 0)
+			o.body = formatApproval(approval{HeadSHA: "abc1234", Summary: "works", POC: true})
+			o.verify = &verifyPlan{Source: verifySourceNone}
+
+			adopted, err := o.tryAdoptApproval(context.Background(), *o.verify)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantAdopted, adopted)
+			assert.Zero(t, modelCallCount(client))
+		})
+	}
+}
+
 // TestTryAdoptApproval_NitOnlySkipsCleanupPass proves a recorded approval
 // whose fixes are all nits skips the cleanup pass (worthCleanupPass is false).
 func TestTryAdoptApproval_NitOnlySkipsCleanupPass(t *testing.T) {

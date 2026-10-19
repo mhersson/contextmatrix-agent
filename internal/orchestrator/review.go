@@ -274,6 +274,12 @@ func (o *run) tryAdoptApproval(ctx context.Context, plan verifyPlan) (bool, erro
 		return false, nil
 	}
 
+	if rec.POC && !o.pocReview() {
+		d.logCard(ctx, "review: the recorded approval came from a POC review - reviewing again at the full bar")
+
+		return false, nil
+	}
+
 	// When a verify command is configured, re-run it. An approval never bypasses
 	// a red verify.
 	if len(plan.Argv) > 0 {

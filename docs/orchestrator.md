@@ -252,8 +252,9 @@ on a POC review, and
 gated by the same verify-or-discard of the fixup as a live approval), logs
 `adopted recorded approval` on the card, then clears the record before the FSM
 proceeds to the next phase. Any mismatch - no record, a different HEAD, a red
-verify - falls through to the normal review loop unchanged, and only approvals
-are persisted: a rejected verdict never produces a record.
+verify, a POC review's approval on a run that reviews at the full bar - falls
+through to the normal review loop unchanged, and only approvals are persisted:
+a rejected verdict never produces a record.
 
 In a mob review discussion, the correctness seat's lens is a briefing that
 judges the change - and the plan decisions behind it - against the card's
@@ -298,6 +299,10 @@ one card-log line instead, so neither the fixer, the next round's prior
 findings nor a park note carries them. An approval's surviving findings
 reach the PR body as open and are never fixed: the post-approval cleanup
 pass does not run, live or on an adopted approval.
+
+A POC review's approval record carries `"poc": true`. A run that reviews at
+the full bar never adopts it, so switching the flag off between runs
+re-reviews the branch instead of carrying the POC verdict into production.
 
 ## Context bounds
 
