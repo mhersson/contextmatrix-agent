@@ -300,16 +300,17 @@ cleanup pass and unfiltered fix requests. The card's explicit mob setting
 wins over the project flag.
 
 On a POC review a revise verdict reaches the fix round with its blockers
-only: critical, important and unlabelled findings (`withholdAdvisoryFixes`,
+only: critical, important and unlabelled findings (`withholdNonBlockingFixes`,
 right after `settleVerdict`). The minor and nit findings it withholds go to
 one card-log line instead, so neither the fixer, the next round's prior
 findings nor a park note carries them. An approval's surviving findings
 reach the PR body as open and are never fixed: the post-approval cleanup
 pass does not run, live or on an adopted approval.
 
-A POC review's approval record carries `"poc": true`. A run that reviews at
-the full bar never adopts it, so switching the flag off between runs
-re-reviews the branch instead of carrying the POC verdict into production.
+A POC review's approval record carries `"poc": true`. A run that enters
+review at the full bar never adopts it: after the flag is switched off, a
+card that reaches review again is re-reviewed rather than adopting the POC
+verdict. A card already past review resumes where it stopped.
 
 Every POC card, mob review or not, narrows what tests are asked for
 (`pocTestScope`): the planner, the plan moderator and the subtask coder

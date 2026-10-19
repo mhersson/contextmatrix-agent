@@ -25,8 +25,8 @@ type approval struct {
 	// Fixes are the surviving fixes from the approving verdict, whether
 	// actionable (the cleanup pass will address them) or nit-only.
 	Fixes []fix `json:"fixes"`
-	// POC marks an approval a POC review made. A run reviewing at the full bar
-	// never adopts it, so switching the flag off re-reviews the branch.
+	// POC marks an approval a POC review made. A run entering review at the
+	// full bar never adopts it, so switching the flag off re-reviews the branch.
 	POC bool `json:"poc,omitempty"`
 }
 

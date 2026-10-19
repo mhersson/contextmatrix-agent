@@ -19,10 +19,6 @@ import (
 	"github.com/mhersson/contextmatrix-harness/tools"
 )
 
-// reviewPanelSize is the production panel's seat count: Correctness, Design &
-// Maintainability, Security & Performance.
-const reviewPanelSize = 3
-
 // reviewLens is one solo review seat: its role and the lens block its prompt carries.
 type reviewLens struct{ role, prompt string }
 
@@ -1283,7 +1279,7 @@ func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, autho
 	}
 
 	o.settleVerdict(ctx, &v, round)
-	o.withholdAdvisoryFixes(ctx, &v)
+	o.withholdNonBlockingFixes(ctx, &v)
 
 	if v.Approved {
 		return strings.TrimSpace(formatFixes(v)), v.FixTier, true, vres, v.Fixes, nil
@@ -2411,11 +2407,11 @@ func blocking(f fix) bool {
 	return false
 }
 
-// withholdAdvisoryFixes trims a POC review's revise verdict to its blockers,
+// withholdNonBlockingFixes trims a POC review's revise verdict to its blockers,
 // so the fixer, the next round's prior findings and any park note see only
 // what blocks. The withheld findings go to the card log; an approval keeps
 // its list, which is reported and never fixed.
-func (o *run) withholdAdvisoryFixes(ctx context.Context, v *verdict) {
+func (o *run) withholdNonBlockingFixes(ctx context.Context, v *verdict) {
 	if !o.pocReview() || v.Approved {
 		return
 	}
@@ -2437,7 +2433,7 @@ func (o *run) withholdAdvisoryFixes(ctx context.Context, v *verdict) {
 	v.Fixes = kept
 
 	o.d.logCard(ctx, "%s", truncateBytes(
-		fmt.Sprintf("review: POC card - %d advisory finding(s) kept out of the fix request:\n", len(withheld))+
+		fmt.Sprintf("review: POC card - %d non-blocking finding(s) kept out of the fix request:\n", len(withheld))+
 			formatFixes(verdict{Fixes: withheld}), verifyParkNoteMax))
 }
 

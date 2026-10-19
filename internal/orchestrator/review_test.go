@@ -27,6 +27,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// reviewPanelSize is the specialist panel's seat count: Correctness, Design &
+// Maintainability, Security & Performance.
+const reviewPanelSize = 3
+
 // reviewTestDeps builds Deps wired for the review phase: scripted ops + git, the
 // supplied LLM (specialist fan-out + synthesis), read+write tools, and the
 // supplied registry. The workspace is a temp dir so the verify gate, when it
@@ -2557,7 +2561,10 @@ func TestPOCReviewRoundRunsOneReviewer(t *testing.T) {
 
 	require.NoError(t, runReview(context.Background(), o))
 	assert.Equal(t, 2, modelCallCount(client), "one generic reviewer and one synthesis; tasks=%v", client.tasks)
-	assert.False(t, ops.loggedContains("collapsed"), "a one-seat panel is not a collapsed panel")
+
+	for key := range o.shortfallWarned {
+		assert.False(t, strings.HasPrefix(key, "panel-collapsed/"), "a one-seat panel is not a collapsed panel: %s", key)
+	}
 }
 
 func TestPOCAuthoritativePassRunsOneReviewerAtComplex(t *testing.T) {

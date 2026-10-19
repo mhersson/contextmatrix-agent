@@ -648,7 +648,8 @@ reviewer runs - so review all of it rather than one specialty.
 ` + pocReviewBar + `
 Focus on:
 - Does the change do what the parent card asks? Check every acceptance criterion.
-- Does it work? Bugs and logic errors on the paths the card names, swallowed errors.
+- Does it work? Bugs and logic errors on the paths the card names and in
+  existing behaviour the change touches, swallowed errors.
 - Tests: do they exercise the main behaviour, or are they broken or vacuous?
 - Exploitable vulnerabilities, committed secrets included.
 - Work the card did not ask for.`
