@@ -304,6 +304,13 @@ A POC review's approval record carries `"poc": true`. A run that reviews at
 the full bar never adopts it, so switching the flag off between runs
 re-reviews the branch instead of carrying the POC verdict into production.
 
+Every POC card, mob review or not, narrows what tests are asked for
+(`pocTestScope`): the planner, the plan moderator and the subtask coder
+(Best-of-N candidates included) are told to test the main behaviour the card
+names and add no edge-case, error-path or coverage tests an acceptance
+criterion does not require, overriding any task skill's push for more. Fix
+rounds address their findings as written.
+
 ## Context bounds
 
 Subagent isolation, `--max-turns` caps, and window-aware selection bound

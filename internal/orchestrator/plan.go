@@ -706,7 +706,7 @@ func (o *run) draftPlan(ctx context.Context, model func(context.Context) string,
 		}
 
 		task := fmt.Sprintf(planPrompt, o.grounding, snapshot, cfg.Workspace, readRootsBlock(o.d.ReadRoots),
-			o.tc.Title, o.plannerDescription(), diagBlock, dsnBlock, resume, fbBlock, repair)
+			o.pocTestScope("\n- "), o.tc.Title, o.plannerDescription(), diagBlock, dsnBlock, resume, fbBlock, repair)
 
 		slug := model(ctx)
 
@@ -774,7 +774,7 @@ func (o *run) reviseTestSplit(
 	}
 
 	task := fmt.Sprintf(planPrompt, o.grounding, snapshot, cfg.Workspace, readRootsBlock(o.d.ReadRoots),
-		o.tc.Title, o.plannerDescription(), diagBlock, dsnBlock, resume, fbBlock,
+		o.pocTestScope("\n- "), o.tc.Title, o.plannerDescription(), diagBlock, dsnBlock, resume, fbBlock,
 		testSplitRevisionBlock(title, prev))
 
 	res, dur, err := o.runModelPlan(ctx, reg, task, model, o.taskImages, true)
@@ -863,7 +863,7 @@ func (o *run) mobDraftPlan(ctx context.Context, diagnosis, design, feedback stri
 		Blind:    true,
 		Briefing: o.mobPlanBriefing(diagnosis, design),
 		SynthesisPrompt: fmt.Sprintf(planSynthesisPrompt,
-			o.grounding, o.d.Cfg.Workspace, o.tc.Title, o.plannerDescription()),
+			o.grounding, o.d.Cfg.Workspace, o.pocTestScope("\n- "), o.tc.Title, o.plannerDescription()),
 	}
 
 	if prior != nil {

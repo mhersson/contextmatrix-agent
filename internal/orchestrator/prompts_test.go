@@ -59,7 +59,7 @@ func TestFixVerifyLine(t *testing.T) {
 // TestCoderPromptEmptyVerifyByteIdentical proves the empty-verify coder prompt is
 // byte-identical to the pre-verify wording, so no-gate runs are unaffected.
 func TestCoderPromptEmptyVerifyByteIdentical(t *testing.T) {
-	withEmpty := fmt.Sprintf(coderPrompt, "", "", "/ws", verifyCommandBlock(verifyPlan{}), "st", "sb", "pt", "pb")
+	withEmpty := fmt.Sprintf(coderPrompt, "", "", "/ws", verifyCommandBlock(verifyPlan{}), "", "st", "sb", "pt", "pb")
 	assert.Contains(t, withEmpty, "that already passed.\n\n"+buildHygieneNote,
 		"an empty verify block leaves the coder prompt spacing unchanged")
 }
@@ -122,7 +122,7 @@ func TestCheckpointBriefingRendersGrounding(t *testing.T) {
 func TestReadRootsBlockEmptyKeepsPromptSpacing(t *testing.T) {
 	assert.Empty(t, readRootsBlock(nil))
 
-	plan := fmt.Sprintf(planPrompt, "", "", "/ws", readRootsBlock(nil), "t", "b", "", "", "", "", "")
+	plan := fmt.Sprintf(planPrompt, "", "", "/ws", readRootsBlock(nil), "", "t", "b", "", "", "", "", "")
 	assert.Contains(t, plan, "paths are relative to it.\n\nFirst understand",
 		"an empty roots block leaves the plan prompt spacing unchanged")
 

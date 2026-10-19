@@ -191,7 +191,7 @@ const convergenceRule = `- Convergence: when every finding under PRIOR FINDINGS 
 // The leading %s is the grounding block; the second %s is the repo-snapshot
 // block (bounded tracked-file list + README head; "" when not a git repo). The
 // trailing %s slots are filled by draftPlan: workspace root, an optional
-// read-only-roots block, card title, card description, an optional diagnosis
+// read-only-roots block, the POC test-scope bullet (pocTestScope), card title, card description, an optional diagnosis
 // block (root-cause investigation for bug-like cards), an optional design block
 // (brainstormed design for creative HITL cards), an optional resume block
 // (existing subtasks), an optional feedback block (HITL reviewer's requested
@@ -249,7 +249,7 @@ Decompose the task into subtasks following these rules:
 - Tests: each subtask tests what the card names for that item and nothing
   more - one behavioural test per item by default, never one per code path,
   and never a new test for a branch or path the card does not name. When the
-  card names a specific test or assertion to add, the subtask is exactly that.
+  card names a specific test or assertion to add, the subtask is exactly that.%s
 - Small batched items ("a few lines each", "batch them") become the fewest
   subtasks that keep files disjoint - group by file - not one subtask per
   bullet.
@@ -426,6 +426,25 @@ memory. For each change verify:
 - Every exit path is correct: each early return and error branch releases what it acquired and stops where it should - no fall-through after writing an error response.
 Fix anything you find before finishing.`
 
+// pocTestScopeRule narrows test demands on a POC card to the main behaviour,
+// for the planner, the plan moderator and the coder. Task skills are generic
+// and operator-provided, so the rule states that it wins over them.
+const pocTestScopeRule = `This card belongs to a proof-of-concept project: tests cover the main behaviour
+the card names, and nothing more. Add no edge-case, error-path or coverage
+tests that an acceptance criterion does not explicitly require. This overrides
+any task skill's guidance on test coverage.`
+
+// pocTestScope is pocTestScopeRule behind sep on a POC card, else "" so a
+// production card's prompts stay byte-identical. It follows Config.POC alone:
+// a card's mob settings change its review, never its test scope.
+func (o *run) pocTestScope(sep string) string {
+	if !o.d.Cfg.POC {
+		return ""
+	}
+
+	return sep + pocTestScopeRule
+}
+
 // unreachableScopeNote tells the coder that acceptance criteria the planner
 // flagged unreachable, and scope split into other cards, are both out of
 // bounds to implement. Shared by coderPrompt and fixPrompt so the two cannot
@@ -462,7 +481,8 @@ discrepancy in your finish message, and stop - a confirmed absence discharges a
 // commit message, which the orchestrator reads from the tool call arguments.
 //
 // The trailing %s slots are filled by runExecute: workspace root, the verify
-// command block (empty when none resolved), subtask title, subtask description,
+// command block (empty when none resolved), the POC test-scope paragraph
+// (pocTestScope), subtask title, subtask description,
 // parent card title, parent card body.
 const coderPrompt = `%s%sYou are the coding agent for one subtask of a larger task. You have the full
 write toolset (read, grep, glob, edit, write, bash) rooted at the workspace.
@@ -489,7 +509,7 @@ in your finish message instead of searching for it. Do NOT run git yourself
 changes after you finish.
 
 Write tests alongside the code and run them. Once the acceptance criteria
-pass, finish immediately - do not repeat verification that already passed.%s
+pass, finish immediately - do not repeat verification that already passed.%s%s
 
 ` + buildHygieneNote + `
 
@@ -1304,7 +1324,7 @@ Description:
 // carries the SAME strict JSON contract as planPrompt and instructs the
 // moderator to keep unresolved dissent as explicit risk notes on the
 // affected subtasks. The engine appends the rendered transcript after it.
-// Slots: grounding, workspace, title, description.
+// Slots: grounding, workspace, the POC test-scope bullet (pocTestScope), title, description.
 const planSynthesisPrompt = `%sYou are the moderator of a planning discussion between software agents.
 Repo root: %s - paths are relative to it.
 
@@ -1317,7 +1337,7 @@ notes ("Risk: ...") - never drop dissent silently.
 The plan must follow these rules:
 - Each subtask must be completable by a single agent in one focused session.
 - Each subtask includes its own tests; never emit separate "write tests"
-  subtasks.
+  subtasks.%s
 - depends_on lists the indices of EARLIER subtasks in the array only.
 - Each subtask description states concrete actions, the files touched
   ("Files:" line), and acceptance criteria - no placeholders.
