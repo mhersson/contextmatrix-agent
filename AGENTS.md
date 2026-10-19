@@ -18,7 +18,7 @@ Read the relevant one before working in its area:
 
 | Document                  | Read before working on                                                                                          |
 | ------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `docs/orchestrator.md`    | The FSM: phases, git workflow, review loop, verify resolution, plan split, HITL gates, budget/context bounds, repo grounding, task skills. |
+| `docs/orchestrator.md`    | The FSM: phases, git workflow, review loop, verify resolution, plan split, HITL gates, budget/context bounds, repo grounding, task skills, POC projects. |
 | `docs/pr-gates.md`        | The `pr_gates` phase: CI gate, Copilot gate, triage verdicts, thread replies.                                    |
 | `docs/model-selection.md` | Selection policy: tier bars, favorites, vendor diversity, `max_capability`, fallback precedence.                 |
 | `docs/secrets.md`         | Credential staging, env scrubbing, redaction, `verify.env` pass-throughs.                                        |
@@ -200,7 +200,8 @@ Summaries only - full detail lives in the reference documents above.
    shared workspace; the main solver writes sequentially, Best-of-N candidates
    write concurrently in isolated worktrees, and review panels and mob seats
    are read-only fan-outs.
-4. **Review = 3 specialists** behind a spec/test gate, looping to the
+4. **Review = 3 specialists** (one generic reviewer on a POC card without
+   mob review) behind a spec/test gate, looping to the
    `review_attempts` cap (default 3, range 1-6). The synthesis verdict is
    severity-gated: approval cannot carry a critical or important finding.
 5. **Model selection is priors-only.** The planner emits a complexity tier per

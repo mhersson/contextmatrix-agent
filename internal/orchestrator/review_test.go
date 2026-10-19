@@ -2402,14 +2402,10 @@ func TestResolveFixModelUnresolvablePinDeduplicates(t *testing.T) {
 	require.Len(t, ops.logs, 1, "resolvedFixModel must deduplicate with the coderPinWarned guard")
 }
 
-// TestReviewPanelEscalatesWhenAuthoritative proves the authoritative pass sizes
-// the panel on the complex tier, not the card tier. Three cheap-but-weak
-// reviewers clear the moderate bar (0.6) but not the complex bar (0.8); one
-// expensive strong reviewer clears both. At moderate the cheap trio fills the
-// three slots (the strong model is priced out of the band), so it never appears.
-// At complex the weak trio is gated out, forcing the strong model in - a model
-// the moderate panel does not select.
-func TestReviewPanelEscalatesWhenAuthoritative(t *testing.T) {
+// tierSplitReviewerRegistry is a reviewer pool split by tier: three cheap
+// models clear moderate (0.76) but not complex (0.82), and the returned strong
+// model clears complex. One vendor keeps vendor diversity out of the picture.
+func tierSplitReviewerRegistry() (*registry.Registry, string) {
 	const strong = "acme/strong-reviewer"
 
 	catalog := llm.Catalog{
@@ -2419,11 +2415,7 @@ func TestReviewPanelEscalatesWhenAuthoritative(t *testing.T) {
 		{ID: strong, ContextLength: 200000, PromptPricePerTok: 0.000005, CompletionPricePerTok: 0.000005, SupportedParameters: []string{"tools"}},
 		{ID: "default/model", ContextLength: 131072, SupportedParameters: []string{"tools"}},
 	}
-	// The weak trio clears the default moderate bar (0.76) but not complex (0.82);
-	// the strong model clears complex (0.82). So the moderate panel is the cheap
-	// trio and the complex escalation forces the strong model in. A single
-	// vendor prefix keeps the vendor-diversity preference out of the picture -
-	// this test isolates tier escalation.
+
 	w1, w2, w3, st := 0.77, 0.78, 0.79, 0.90
 	priors := registry.Priors{
 		Models: map[string]registry.PriorEntry{
@@ -2433,7 +2425,19 @@ func TestReviewPanelEscalatesWhenAuthoritative(t *testing.T) {
 			strong:            {Reviewer: &st},
 		},
 	}
-	reg := registry.NewRegistryFromParts(catalog, priors, nil, nil, "default/model")
+
+	return registry.NewRegistryFromParts(catalog, priors, nil, nil, "default/model"), strong
+}
+
+// TestReviewPanelEscalatesWhenAuthoritative proves the authoritative pass sizes
+// the panel on the complex tier, not the card tier. Three cheap-but-weak
+// reviewers clear the moderate bar (0.6) but not the complex bar (0.8); one
+// expensive strong reviewer clears both. At moderate the cheap trio fills the
+// three slots (the strong model is priced out of the band), so it never appears.
+// At complex the weak trio is gated out, forcing the strong model in - a model
+// the moderate panel does not select.
+func TestReviewPanelEscalatesWhenAuthoritative(t *testing.T) {
+	reg, strong := tierSplitReviewerRegistry()
 
 	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reg)
 	o := newReviewRun(d, cmclient.TaskContext{}, 0)
@@ -2471,6 +2475,135 @@ func TestReviewPanelEscalatesWhenAuthoritative(t *testing.T) {
 		moderatePanel, complexPanel)
 	assert.Contains(t, []string{complexPanel[0].Model, complexPanel[1].Model, complexPanel[2].Model}, strong,
 		"complex bar gates out the weak trio, forcing the strong model in; complex=%v", complexPanel)
+}
+
+func TestPanelLensesFollowPOCAndMobReview(t *testing.T) {
+	specialists := []string{"correctness", "design", "security"}
+
+	tests := []struct {
+		name string
+		poc  bool
+		mob  MobConfig
+		want []string
+	}{
+		{name: "production", want: specialists},
+		{name: "poc", poc: true, want: []string{"generic"}},
+		{name: "poc with mob review", poc: true, mob: MobConfig{Participants: 3, Review: true}, want: specialists},
+		{name: "poc with mob planning only", poc: true, mob: MobConfig{Participants: 3, Plan: true}, want: []string{"generic"}},
+		{name: "poc with a review phase but mob off", poc: true, mob: MobConfig{Review: true}, want: []string{"generic"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reviewerRegistry())
+			d.Cfg.POC = tt.poc
+			d.Cfg.Mob = tt.mob
+			o := newReviewRun(d, cmclient.TaskContext{}, 0)
+
+			var roles []string
+			for _, l := range o.panelLenses() {
+				roles = append(roles, l.role)
+			}
+
+			assert.Equal(t, tt.want, roles)
+		})
+	}
+}
+
+func TestPOCReviewPanelIsOneSeatAtTheUsualTier(t *testing.T) {
+	reg, strong := tierSplitReviewerRegistry()
+
+	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reg)
+	d.Cfg.POC = true
+	o := newReviewRun(d, cmclient.TaskContext{}, 0)
+
+	est := estimateTokens("diff")
+
+	cheap := o.reviewPanel(context.Background(), est, false)
+	require.Len(t, cheap, 1, "a POC round runs one reviewer")
+	assert.NotEqual(t, strong, cheap[0].Model, "a cheap POC round sits at the card tier")
+
+	authoritative := o.reviewPanel(context.Background(), est, true)
+	require.Len(t, authoritative, 1, "the authoritative pass runs one reviewer too")
+	assert.Equal(t, strong, authoritative[0].Model, "the authoritative reviewer sits at complex")
+}
+
+func TestPOCPinnedReviewerIsOneSeat(t *testing.T) {
+	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reviewerRegistry())
+	d.Cfg.POC = true
+	o := newReviewRun(d, cmclient.TaskContext{ModelReviewer: "pinned/model"}, 0)
+
+	panel := o.reviewPanel(context.Background(), estimateTokens("diff"), false)
+	require.Len(t, panel, 1)
+	assert.Equal(t, "pinned/model", panel[0].Model)
+	assert.False(t, panel[0].Duplicate, "a single pinned seat repeats nothing")
+}
+
+// TestPOCReviewRoundRunsOneReviewer drives a whole review on a POC card. The
+// script holds one reviewer reply and one verdict: a three-seat panel would
+// feed the verdict to a specialist and leave synthesis unparseable.
+func TestPOCReviewRoundRunsOneReviewer(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{}
+	client := &planLLM{responses: []llm.Response{
+		stopResp("Generic: does what the card asks", 0.01),
+		stopResp(`{"approved":true,"summary":"works","fixes":[]}`, 0.02),
+	}}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+	d.Cfg.POC = true
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+
+	require.NoError(t, runReview(context.Background(), o))
+	assert.Equal(t, 2, modelCallCount(client), "one generic reviewer and one synthesis; tasks=%v", client.tasks)
+	assert.False(t, ops.loggedContains("collapsed"), "a one-seat panel is not a collapsed panel")
+}
+
+func TestPOCAuthoritativePassRunsOneReviewerAtComplex(t *testing.T) {
+	var transcript bytes.Buffer
+
+	ops := &fakeOps{reviewAttempts: 4}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: []llm.Response{
+		stopResp("Generic: works", 0.01),
+		stopResp(`{"approved":true,"summary":"works","fixes":[]}`, 0.02),
+	}}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+	d.Cfg.POC = true
+	d.Emit = events.NewEmitter(nil, &transcript)
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress", ReviewAttempts: 4}
+	o := newReviewRun(d, tc, 0)
+
+	require.NoError(t, runReview(context.Background(), o))
+	assert.Equal(t, 2, modelCallCount(client), "one generic reviewer and one synthesis; tasks=%v", client.tasks)
+
+	sels := selectionsForPhase(modelSelections(t, &transcript), "review panel")
+	require.Len(t, sels, 1, "the authoritative pass selected one seat")
+	assert.Equal(t, "complex", sels[0].TierRequested)
+}
+
+// TestPOCWithMobReviewFallsBackToTheSpecialists proves a POC card's explicit
+// mob review wins: when the discussion degrades, the solo fallback is the
+// three-specialist panel. A generic panel would hand the verdict slot a
+// specialist reply and fail synthesis.
+func TestPOCWithMobReviewFallsBackToTheSpecialists(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{}
+	llmFake := &planLLM{responses: []llm.Response{
+		stopResp("Correctness: looks fine", 0.01),
+		stopResp("Design: looks fine", 0.01),
+		stopResp("Security: looks fine", 0.01),
+		stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.02),
+	}}
+	eng := &scriptedEngine{outcomes: []mob.Outcome{{}}, errs: []error{mob.ErrNoQuorum}}
+
+	o := mobReviewRun(t, ops, git, llmFake, eng)
+	o.d.Cfg.POC = true
+
+	require.NoError(t, runReview(context.Background(), o))
+	assert.Equal(t, 4, modelCallCount(llmFake), "three specialists and one synthesis; tasks=%v", llmFake.tasks)
 }
 
 // TestRunSpecialistsNoReviewerParksInstead pins that an empty review panel

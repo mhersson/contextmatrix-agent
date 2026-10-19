@@ -521,11 +521,11 @@ Description:
 // from the review-task workflow skill's three-specialist design: the same review
 // lenses and severity discipline, but the specialist has NO card tools - it reads
 // code (read/grep/glob) and produces findings TEXT only. The orchestrator
-// (synthesis) decides approve-or-fix from the three findings. Commit status is
+// (synthesis) decides approve-or-fix from the panel's findings. Commit status is
 // never a review concern.
 //
 // The trailing %s slots are filled by runSpecialists: an optional
-// read-only-roots block, the lens block (one of the three below), parent card
+// read-only-roots block, the lens block (a specialist lens below, or genericReviewPrompt), parent card
 // title, parent card description, the full branch diff against base, an
 // optional prior-findings block (the previous round's findings on delta
 // rounds, followed by the fix round's response to them when it gave one), and
@@ -535,7 +535,7 @@ Description:
 const specialistPrompt = `%s%sYou are a code-review specialist. You have read-only tools (read, grep, glob, git)
 to inspect the codebase. Git is available read-only (status, diff, log, show,
 branch). You do NOT create or modify cards or files. Produce a findings report as TEXT - another agent synthesizes the
-three specialist reports into a single verdict.
+review reports into a single verdict.
 
 ` + unreachableVerifyInstruction + `
 
@@ -608,29 +608,34 @@ const securityPrompt = `Your specialty is SECURITY & PERFORMANCE. Focus on:
 - Memory / resource leaks (real ones in the change), not speculative caching or allocation tuning the task did not call for.
 Stay strictly within security and performance; do not opine outside it.`
 
-// synthesisPrompt is the orchestrator-model synthesis instruction. It reads the
-// three specialist findings and emits the structured verdict. The synthesizer
-// sets each finding's severity itself - a specialist's label and the number of
-// specialists raising it are inputs, not the verdict - and blocks only on a real
-// bug, a real vulnerability, a broken test, or a missed acceptance criterion;
-// unrequested hardening is Minor. approved governs merge eligibility only - it
-// never gates whether a finding is reported: fixes carries every finding that
-// survived the critique round, tagged with its own severity, regardless of
-// approved.
-//
-// The trailing %s slots are filled by synthesize: parent card title, parent
-// card description, an optional prior-findings block (the previous round's
-// findings on delta rounds, followed by the fix round's response to them when
-// it gave one), the concatenated specialist findings, and an optional repair
-// block (the previous parse error). Empty optional blocks collapse to nothing.
-const synthesisPrompt = `%sYou are the review synthesizer. Three specialists (correctness, design,
-security) reviewed a change and produced the findings below, each with a
-suggested severity. Merge duplicates and decide a single verdict. Severity is
-yours to set: weigh each finding's actual impact on the task yourself - a
-specialist's label, and how many specialists raised it, are inputs, not the
-verdict.
+// pocReviewBar is the bar of a POC review, shared by genericReviewPrompt and
+// genericSynthesisPrompt so the two cannot drift. It files what never blocks
+// under the advisory bases, which capAdvisorySeverity caps in code.
+const pocReviewBar = `This card belongs to a proof-of-concept project. The bar is: does the change do
+what the card asks, and does it work. These block: a real correctness bug, an
+exploitable vulnerability (a committed secret included), a broken or vacuous
+test, a missed acceptance criterion, and work the card did not ask for. These
+never block: missing edge-case or error-path tests, coverage, maintainability
+and design preferences, and security hardening - their basis is "hardening"
+(tests, validation, defensive checks) or "polish" (design, structure, naming).
+This bar overrides any task skill's review checklist.`
 
-Decision rule:
+// genericReviewPrompt is the lens of a POC review's single generic reviewer,
+// which replaces the three specialists.
+const genericReviewPrompt = `Your role is GENERIC: you are the only reviewer of this change - no other
+reviewer runs - so review all of it rather than one specialty.
+` + pocReviewBar + `
+Focus on:
+- Does the change do what the parent card asks? Check every acceptance criterion.
+- Does it work? Bugs and logic errors on the paths the card names, swallowed errors.
+- Tests: do they exercise the main behaviour, or are they broken or vacuous?
+- Exploitable vulnerabilities, committed secrets included.
+- Work the card did not ask for.`
+
+// synthesisRules is the solo synthesizer's decision rule and finding
+// discipline, shared by synthesisPrompt and genericSynthesisPrompt so the two
+// cannot drift.
+const synthesisRules = `Decision rule:
 - A finding blocks the change (not approved) when, in your own judgement, it is
   a genuine correctness bug, a real vulnerability, a broken or vacuous test, or
   it makes the change fail the task's stated acceptance criteria - promote it
@@ -656,18 +661,12 @@ Be specific and actionable. Every fix must cite a file in the change set and
 give a concrete suggestion - no vague hand-waves. Commit status is never an
 issue.
 
-` + sweepRule + `
+` + sweepRule
 
-PARENT CARD
-Title: %s
-
-Description:
-%s
-%s
-SPECIALIST FINDINGS
-%s
-%s
-Respond with ONLY a JSON object, no prose:
+// verdictContract is the verdict JSON contract and its field rules, shared by
+// synthesisPrompt, genericSynthesisPrompt and reviewSynthesisPrompt so the
+// three cannot drift.
+const verdictContract = `Respond with ONLY a JSON object, no prose:
 {"approved":true|false,
  "summary":"<one-line overall verdict>",
  "fix_tier":"simple|moderate|complex|critical",
@@ -683,6 +682,64 @@ fixes is independent of approved: it carries every finding a seat raised and did
 not withdraw, whatever its severity. An approved verdict with an empty fixes
 array asserts that nothing survived the critique round - never a default.
 `
+
+// synthesisPrompt is the orchestrator-model synthesis instruction. It reads the
+// three specialist findings and emits the structured verdict. The synthesizer
+// sets each finding's severity itself - a specialist's label and the number of
+// specialists raising it are inputs, not the verdict - and blocks only on a real
+// bug, a real vulnerability, a broken test, or a missed acceptance criterion;
+// unrequested hardening is Minor. approved governs merge eligibility only - it
+// never gates whether a finding is reported: fixes carries every finding that
+// survived the critique round, tagged with its own severity, regardless of
+// approved.
+//
+// The trailing %s slots are filled by synthesize: parent card title, parent
+// card description, an optional prior-findings block (the previous round's
+// findings on delta rounds, followed by the fix round's response to them when
+// it gave one), the concatenated specialist findings, and an optional repair
+// block (the previous parse error). Empty optional blocks collapse to nothing.
+const synthesisPrompt = `%sYou are the review synthesizer. Three specialists (correctness, design,
+security) reviewed a change and produced the findings below, each with a
+suggested severity. Merge duplicates and decide a single verdict. Severity is
+yours to set: weigh each finding's actual impact on the task yourself - a
+specialist's label, and how many specialists raised it, are inputs, not the
+verdict.
+
+` + synthesisRules + `
+
+PARENT CARD
+Title: %s
+
+Description:
+%s
+%s
+SPECIALIST FINDINGS
+%s
+%s
+` + verdictContract
+
+// genericSynthesisPrompt is synthesisPrompt for a POC review: one generic
+// reviewer's findings judged against pocReviewBar under the same rules and
+// verdict contract. Its slots match synthesisPrompt's.
+const genericSynthesisPrompt = `%sYou are the review synthesizer. One generic reviewer reviewed a change and
+produced the findings below, each with a suggested severity. Decide a single
+verdict. Severity is yours to set: weigh each finding's actual impact on the
+task yourself - the reviewer's label is an input, not the verdict.
+
+` + pocReviewBar + `
+
+` + synthesisRules + `
+
+PARENT CARD
+Title: %s
+
+Description:
+%s
+%s
+REVIEWER FINDINGS
+%s
+%s
+` + verdictContract
 
 // fixPrompt is the coder fix-run instruction for a review round that returned
 // findings. The coder runs with the FULL write toolset and addresses exactly the
@@ -1368,22 +1425,7 @@ Title: %s
 Description:
 %s
 
-Respond with ONLY a JSON object, no prose:
-{"approved":true|false,
- "summary":"<one-line overall verdict>",
- "fix_tier":"simple|moderate|complex|critical",
- "prior_findings_resolved":true|false,
- "fixes":[{"file":"...","issue":"...","suggestion":"...","severity":"critical|important|minor|nit","basis":"criterion|defect|test|vulnerability|unscoped|hardening|polish"}]}
-
-fix_tier is the difficulty of APPLYING these fixes; omit it when unsure.
-` + fixTierFloorRule + `
-prior_findings_resolved is true only when every finding under PRIOR FINDINGS is
-genuinely resolved or explicitly withdrawn; false when any remains open, and
-false when there is no PRIOR FINDINGS block.
-fixes is independent of approved: it carries every finding a seat raised and did
-not withdraw, whatever its severity. An approved verdict with an empty fixes
-array asserts that nothing survived the critique round - never a default.
-`
+` + verdictContract
 
 // checkpointBriefing opens an execute-checkpoint discussion: the just-
 // committed subtask diff under critique before the run builds on it. Slots:

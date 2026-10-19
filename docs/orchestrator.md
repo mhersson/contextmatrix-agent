@@ -80,6 +80,8 @@ Three specialists - Correctness, Design & Maintainability, Security &
 Performance - run in parallel, read-only, behind a spec/test gate that
 short-circuits to the fix loop before spending reviewer tokens; the
 orchestrator synthesizes the report.
+A POC card without mob review runs one generic reviewer instead - see
+[POC projects](#poc-projects).
 
 The mob discussion briefing always diffs the full branch against the base
 branch; the solo panel does too on round 1 and the authoritative pass, but on
@@ -255,6 +257,37 @@ In a mob review discussion, the correctness seat's lens is a briefing that
 judges the change - and the plan decisions behind it - against the card's
 stated requirements, challenging choices the plan made rather than treating
 the plan as the spec.
+
+## POC projects
+
+A card in a project flagged as a proof of concept runs with `Config.POC` set.
+The flag lowers the review and test bar and nothing else: models and tiers,
+the budget, turn limits, the review attempts cap, the verify gates, the
+document phase, Best-of-N, mob checkpoints and `pr_gates` run as on any card.
+A POC card still has to work: the verify gate still gates every round.
+
+A POC card without mob review (`pocReview`: `Config.POC` set and
+`Mob.reviews()` false) runs one generic reviewer per review round instead of
+the three specialists, and so does the authoritative pass at the cliff
+(`panelLenses`). The seat is selected like a specialist seat: at the card
+tier on a cheap round, at complex on the authoritative pass, and on the
+pinned model when the card pins a reviewer. Its bar is whether the change
+does what the card asks and works. A real bug, an exploitable vulnerability
+(a committed secret included), a broken or vacuous test, a missed acceptance
+criterion and unscoped work block. Missing edge-case tests, coverage,
+maintainability and design taste, and security hardening never block. The
+reviewer and synthesis prompts file those under the advisory `hardening` and
+`polish` bases, so `capAdvisorySeverity` caps them as on any card; the
+verdict code has no POC branch. The synthesis call still runs, on a
+single-reviewer prompt (`genericSynthesisPrompt`) that shares the verdict
+rules and JSON contract with the specialist one. That keeps the parse repair,
+the turn-cap park, and an independent severity judgement over the one
+reviewer's labels.
+
+A POC card with mob review reviews exactly as a production card: the mob
+discussion, the three-specialist authoritative pass and solo fallback, the
+cleanup pass and unfiltered fix requests. The card's explicit mob setting
+wins over the project flag.
 
 ## Context bounds
 
