@@ -87,8 +87,8 @@ func isCreative(tc cmclient.TaskContext) bool {
 
 // isBugLike reports whether the card warrants a read-only debug investigation
 // before planning (create-plan Phase 0 Branch B): type==bug, a bug label, a
-// bug-verb title, or defect language in the body. Pure-maintenance cards are
-// excluded (Branch A wins).
+// bug-verb title, or defect language in the body outside mockup blocks.
+// Pure-maintenance cards are excluded (Branch A wins).
 func isBugLike(tc cmclient.TaskContext) bool {
 	if isPureMaintenance(tc) {
 		return false
@@ -106,5 +106,38 @@ func isBugLike(tc cmclient.TaskContext) bool {
 		return true
 	}
 
-	return hasMarker(tc.Description, bugBodyMarkers)
+	return hasMarker(withoutMockups(tc.Description), bugBodyMarkers)
+}
+
+// withoutMockups drops fenced mockup blocks: their HTML source holds UI copy such
+// as "error:", not a defect report. The grammar is shared with CM's card lint and
+// the architect's contract check: an opening line of 3+ backticks then "mockup" at
+// column 0, closed by a line of at least as many backticks, else running to the
+// end; tilde and indented fences are not mockup blocks.
+func withoutMockups(body string) string {
+	var b strings.Builder
+
+	fence := 0
+
+	for _, line := range strings.SplitAfter(body, "\n") {
+		text := strings.TrimRight(strings.TrimSuffix(line, "\n"), " \t")
+
+		if fence > 0 {
+			if len(text) >= fence && strings.Trim(text, "`") == "" {
+				fence = 0
+			}
+
+			continue
+		}
+
+		if rest := strings.TrimLeft(text, "`"); rest == "mockup" && len(text)-len(rest) >= 3 {
+			fence = len(text) - len(rest)
+
+			continue
+		}
+
+		b.WriteString(line)
+	}
+
+	return b.String()
 }
