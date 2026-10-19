@@ -209,7 +209,8 @@ parses out, `demoteContradictoryApproval` forces `Approved = false` (logged
 on the card as an override) so the round routes through the not-approved fix
 + re-review loop instead of the unreviewed post-approval cleanup pass.
 Approval carrying only `minor` (cleanup fix pass) or `nit` (report-only)
-findings keeps the normal behavior. Its mirror, `promoteConsistentRevise`,
+findings keeps the normal behavior (a POC review reports both and fixes
+neither - see [POC projects](#poc-projects)). Its mirror, `promoteConsistentRevise`,
 runs the other direction: a revise verdict whose every fix is minor or nit is
 forced to `Approved = true`, since minors and nits never block by the
 verdict's own rules and looping the review on findings it already calls
@@ -246,7 +247,8 @@ adopts the approval only when the current branch HEAD equals the recorded SHA
 and the resolved verify gate still passes - a red or erroring verify refuses
 adoption, so an approval never bypasses a red gate. Adoption skips the
 specialist panel and synthesis, runs the recorded surviving fixes as the usual
-non-escalating cleanup pass (skipped when the list is empty or nit-only, and
+non-escalating cleanup pass (skipped when the list is empty or nit-only, or
+on a POC review, and
 gated by the same verify-or-discard of the fixup as a live approval), logs
 `adopted recorded approval` on the card, then clears the record before the FSM
 proceeds to the next phase. Any mismatch - no record, a different HEAD, a red
@@ -288,6 +290,14 @@ A POC card with mob review reviews exactly as a production card: the mob
 discussion, the three-specialist authoritative pass and solo fallback, the
 cleanup pass and unfiltered fix requests. The card's explicit mob setting
 wins over the project flag.
+
+On a POC review a revise verdict reaches the fix round with its blockers
+only: critical, important and unlabelled findings (`withholdAdvisoryFixes`,
+right after `settleVerdict`). The minor and nit findings it withholds go to
+one card-log line instead, so neither the fixer, the next round's prior
+findings nor a park note carries them. An approval's surviving findings
+reach the PR body as open and are never fixed: the post-approval cleanup
+pass does not run, live or on an adopted approval.
 
 ## Context bounds
 

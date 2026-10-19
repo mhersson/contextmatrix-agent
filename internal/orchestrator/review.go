@@ -754,9 +754,16 @@ func approvedWithFixesApplied(findings string) string {
 // non-escalating fix pass and proves or drops the fixup. summary is the same
 // findings text as req.Findings, framed by the approvedWith* helpers for the
 // PR body. Only a park propagates; a turn cap and every other failure leave
-// the run approved.
+// the run approved. A POC review never runs it: the surviving findings are
+// reported only.
 func (o *run) cleanupPass(ctx context.Context, plan verifyPlan, req fixRequest, summary string, fixes []fix) error {
 	d := o.d
+
+	if o.pocReview() {
+		d.logCard(ctx, "review: approved with %d surviving finding(s) - a POC card reports them and runs no cleanup pass", len(fixes))
+
+		return nil
+	}
 
 	if !worthCleanupPass(fixes) {
 		d.logCard(ctx, "review: approved with %d surviving nit-only finding(s) - reported, no cleanup pass", len(fixes))
@@ -1273,6 +1280,7 @@ func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, autho
 	}
 
 	o.settleVerdict(ctx, &v, round)
+	o.withholdAdvisoryFixes(ctx, &v)
 
 	if v.Approved {
 		return strings.TrimSpace(formatFixes(v)), v.FixTier, true, vres, v.Fixes, nil
@@ -2380,20 +2388,54 @@ func (o *run) settleVerdict(ctx context.Context, v *verdict, round int) {
 // as actionable: a model that omits severity must not have its findings
 // silently waved through.
 func (o *run) promoteConsistentRevise(ctx context.Context, v *verdict) {
-	if v.Approved || len(v.Fixes) == 0 {
+	if v.Approved || len(v.Fixes) == 0 || slices.ContainsFunc(v.Fixes, blocking) {
 		return
-	}
-
-	for _, f := range v.Fixes {
-		switch normalizeSeverity(f.Severity) {
-		case severityCritical, severityImportant, "":
-			return
-		}
 	}
 
 	v.Approved = true
 
 	o.d.logCard(ctx, "review: revise verdict carried only minor/nit findings - promoted to approval with open findings (minors and nits never block)")
+}
+
+// blocking reports whether a finding's severity blocks a verdict: critical,
+// important, or unlabelled, which must never be waved through.
+func blocking(f fix) bool {
+	switch normalizeSeverity(f.Severity) {
+	case severityCritical, severityImportant, "":
+		return true
+	}
+
+	return false
+}
+
+// withholdAdvisoryFixes trims a POC review's revise verdict to its blockers,
+// so the fixer, the next round's prior findings and any park note see only
+// what blocks. The withheld findings go to the card log; an approval keeps
+// its list, which is reported and never fixed.
+func (o *run) withholdAdvisoryFixes(ctx context.Context, v *verdict) {
+	if !o.pocReview() || v.Approved {
+		return
+	}
+
+	var kept, withheld []fix
+
+	for _, f := range v.Fixes {
+		if blocking(f) {
+			kept = append(kept, f)
+		} else {
+			withheld = append(withheld, f)
+		}
+	}
+
+	if len(withheld) == 0 {
+		return
+	}
+
+	v.Fixes = kept
+
+	o.d.logCard(ctx, "%s", truncateBytes(
+		fmt.Sprintf("review: POC card - %d advisory finding(s) kept out of the fix request:\n", len(withheld))+
+			formatFixes(verdict{Fixes: withheld}), verifyParkNoteMax))
 }
 
 // hasCriticalFinding reports whether a verdict's fix list carries a

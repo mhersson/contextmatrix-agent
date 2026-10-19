@@ -2606,6 +2606,152 @@ func TestPOCWithMobReviewFallsBackToTheSpecialists(t *testing.T) {
 	assert.Equal(t, 4, modelCallCount(llmFake), "three specialists and one synthesis; tasks=%v", llmFake.tasks)
 }
 
+// mixedReviseVerdict carries one finding at every severity, each in its own
+// file, so the fixup's target lookup shows which ones reached the fixer.
+const mixedReviseVerdict = `{"approved":false,"summary":"fix the bug","fixes":[` +
+	`{"file":"bug.go","issue":"crashes on the main path","suggestion":"guard it","severity":"important","basis":"defect"},` +
+	`{"file":"unlabelled.go","issue":"returns the wrong total","suggestion":"sum every row"},` +
+	`{"file":"edge.go","issue":"no test for an empty input","suggestion":"add one","severity":"minor","basis":"hardening"},` +
+	`{"file":"style.go","issue":"long function","suggestion":"split it","severity":"nit","basis":"polish"}]}`
+
+// reviewRoundResponses scripts one solo round: one reply per panel seat, then
+// the verdict.
+func reviewRoundResponses(seats int, verdictJSON string) []llm.Response {
+	out := make([]llm.Response, 0, seats+1)
+	for range seats {
+		out = append(out, stopResp("reviewer: findings", 0.01))
+	}
+
+	return append(out, stopResp(verdictJSON, 0.02))
+}
+
+func TestPOCFixRequestCarriesOnlyBlockingFindings(t *testing.T) {
+	tests := []struct {
+		name      string
+		poc       bool
+		seats     int
+		wantPaths []string
+		withheld  []string
+	}{
+		{name: "production", seats: reviewPanelSize, wantPaths: []string{"bug.go", "unlabelled.go", "edge.go", "style.go"}},
+		{
+			name: "poc", poc: true, seats: 1,
+			wantPaths: []string{"bug.go", "unlabelled.go"},
+			withheld:  []string{"no test for an empty input", "long function"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+
+			responses := reviewRoundResponses(tt.seats, mixedReviseVerdict)
+			responses = append(responses, stopResp("coder: fixed", 0.05))
+			responses = append(responses, reviewRoundResponses(tt.seats, `{"approved":true,"summary":"fixed","fixes":[]}`)...)
+
+			client := &planLLM{responses: responses}
+			d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+			d.Cfg.POC = tt.poc
+
+			tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+			o := newReviewRun(d, tc, 0)
+
+			require.NoError(t, runReview(context.Background(), o))
+
+			require.NotEmpty(t, git.lastCommitPaths, "the fix round looked up its fixup target")
+			assert.Equal(t, tt.wantPaths, git.lastCommitPaths[0], "the files the fix request names")
+
+			fixTask := client.tasks[tt.seats+1]
+			for _, issue := range tt.withheld {
+				assert.NotContains(t, fixTask, issue, "a non-blocking finding reached the fixer")
+				assert.True(t, ops.loggedContains(issue), "the withheld finding stays on the card log")
+			}
+		})
+	}
+}
+
+func TestPOCWithMobReviewFixesStayUnfiltered(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+	llmFake := &planLLM{responses: []llm.Response{stopResp("coder: fixed", 0.05)}}
+	eng := &scriptedEngine{outcomes: []mob.Outcome{
+		{Synthesis: mixedReviseVerdict},
+		{Synthesis: mobApprovedVerdict, Consensus: true},
+	}}
+
+	o := mobReviewRun(t, ops, git, llmFake, eng)
+	o.d.Cfg.POC = true
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	require.NotEmpty(t, git.lastCommitPaths)
+	assert.Equal(t, []string{"bug.go", "unlabelled.go", "edge.go", "style.go"}, git.lastCommitPaths[0],
+		"a mob-review card's fix request carries every finding")
+}
+
+func TestPOCApprovalReportsSurvivingFindingsWithoutACleanupPass(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+	client := &planLLM{responses: []llm.Response{
+		stopResp("Generic: works, one missing edge-case test", 0.01),
+		stopResp(`{"approved":true,"summary":"works","fixes":[`+
+			`{"file":"edge.go","issue":"no test for an empty input","suggestion":"add one","severity":"minor","basis":"hardening"}]}`, 0.02),
+	}}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+	d.Cfg.POC = true
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	assert.Equal(t, 2, modelCallCount(client), "reviewer and synthesis only, no fix coder; tasks=%v", client.tasks)
+	assert.Equal(t, -1, indexOfPrefix(git.recorded(), "CommitFixup:"), "no cleanup fixup; git=%v", git.recorded())
+	assert.True(t, strings.HasPrefix(o.reviewSummary, approvedWithOpenFindings("")),
+		"the PR body reports the finding as open; summary=%q", o.reviewSummary)
+}
+
+func TestPOCWithMobReviewKeepsTheCleanupPass(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+	llmFake := &planLLM{responses: []llm.Response{stopResp("coder: tidied", 0.05)}}
+	verdictJSON := `{"approved":true,"summary":"clean","fix_tier":"",` +
+		`"fixes":[{"file":"a.go","issue":"missing edge-case test","suggestion":"add one","severity":"minor"}]}`
+	eng := &scriptedEngine{outcomes: []mob.Outcome{{Synthesis: verdictJSON, Consensus: true}}}
+
+	o := mobReviewRun(t, ops, git, llmFake, eng)
+	o.d.Cfg.POC = true
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	assert.GreaterOrEqual(t, indexOfPrefix(git.recorded(), "CommitFixup:"), 0,
+		"a mob-review card keeps its cleanup pass; git=%v", git.recorded())
+}
+
+func TestPOCAdoptedApprovalRunsNoCleanupPass(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{headSHA: "abc1234", committed: true}
+	client := &planLLM{}
+
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+	d.Cfg.POC = true
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+	o.body = formatApproval(approval{HeadSHA: "abc1234", Summary: "works", Fixes: []fix{
+		{File: "edge.go", Issue: "no test for an empty input", Suggestion: "add one", Severity: "minor"},
+	}})
+	o.verify = &verifyPlan{Source: verifySourceNone}
+
+	adopted, err := o.tryAdoptApproval(context.Background(), *o.verify)
+	require.NoError(t, err)
+	require.True(t, adopted)
+
+	assert.Zero(t, modelCallCount(client), "an adopted POC approval runs no fixer; tasks=%v", client.tasks)
+	assert.Equal(t, -1, indexOfPrefix(git.recorded(), "CommitFixup:"), "no cleanup fixup; git=%v", git.recorded())
+}
+
 // TestRunSpecialistsNoReviewerParksInstead pins that an empty review panel
 // parks the card for a human rather than indexing into it. No prior clears
 // any bar and there is no capable default, so the panel is empty on the very
