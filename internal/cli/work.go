@@ -411,6 +411,7 @@ func specFromEnv() (worker.RunSpec, error) {
 		Model:                     os.Getenv("CM_MODEL"),
 		Interactive:               os.Getenv("CM_INTERACTIVE") == "true",
 		MaxCapability:             os.Getenv("CM_MAX_CAPABILITY") == "true",
+		POC:                       os.Getenv("CM_POC") == "true",
 		BestOfN:                   bestOfN,
 		Attempt:                   attemptOrdinal,
 		Mob:                       mobSpec,

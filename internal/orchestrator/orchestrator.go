@@ -145,6 +145,10 @@ type Config struct {
 	// Mob configures mob session discussions (spec 2026-07-10). Zero value = off.
 	Mob MobConfig
 
+	// POC marks a card in a proof-of-concept project (CM_POC). False is the
+	// production workflow.
+	POC bool
+
 	// Compaction configures optional in-window context compaction for phase
 	// model runs. Disabled (the zero value) preserves the hard context_limit
 	// stop, which is the agent's default behavior.

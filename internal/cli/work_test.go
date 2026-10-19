@@ -317,6 +317,34 @@ func TestSpecFromEnv_MaxCapability(t *testing.T) {
 	})
 }
 
+func TestSpecFromEnv_POC(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		set   bool
+		want  bool
+	}{
+		{name: "true", value: "true", set: true, want: true},
+		{name: "false", value: "false", set: true, want: false},
+		{name: "absent", want: false},
+		{name: "non-true", value: "1", set: true, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setRequired(t)
+
+			if tt.set {
+				t.Setenv("CM_POC", tt.value)
+			}
+
+			spec, err := specFromEnv()
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, spec.POC)
+		})
+	}
+}
+
 // TestSpecFromEnv_ReviewAttemptsCap covers the env hop this knob depends on:
 // serve forwards the operator's serve.yaml value as CMX_REVIEW_ATTEMPTS_CAP,
 // and specFromEnv is the only place the worker reads it.

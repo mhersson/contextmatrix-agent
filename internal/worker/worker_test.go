@@ -1779,6 +1779,35 @@ func TestReviewAttemptsCapReachesOrchestrator(t *testing.T) {
 	assert.Equal(t, 5, got, "the configured cap must reach orchestrator.Config")
 }
 
+// TestPOCReachesOrchestrator proves RunSpec.POC is what the orchestrator reads.
+// Swaps runOrchestrator, so it must not run in parallel.
+func TestPOCReachesOrchestrator(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		poc  bool
+	}{{"poc", true}, {"production", false}} {
+		t.Run(tt.name, func(t *testing.T) {
+			remote := setupBareRemote(t)
+			spec := baseSpec(t, remote, t.TempDir())
+			spec.POC = tt.poc
+
+			got := !tt.poc
+
+			swapRunOrchestrator(t, func(_ context.Context, d orchestrator.Deps) error {
+				got = d.Cfg.POC
+
+				return nil
+			})
+
+			emit := events.NewEmitter(io.Discard, io.Discard)
+
+			_, err := Run(context.Background(), spec, newFakeOps(), &scriptedLLM{}, emit, openStdin(t))
+			require.NoError(t, err)
+			assert.Equal(t, tt.poc, got, "RunSpec.POC must reach orchestrator.Config")
+		})
+	}
+}
+
 // --- pushWIP direct tests ---------------------------------------------------
 
 // TestPushWIPPushesStrandedCleanTreeCommit is the direct regression for the
