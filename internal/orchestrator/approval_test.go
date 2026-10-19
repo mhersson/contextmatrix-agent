@@ -132,6 +132,35 @@ func TestRecordApprovalOnApproval(t *testing.T) {
 	assert.Contains(t, opsCalls, "UpdateCardBody:CARD-1")
 }
 
+func TestRecordApprovalMarksAPOCReview(t *testing.T) {
+	tests := []struct {
+		name string
+		poc  bool
+		mob  MobConfig
+		want bool
+	}{
+		{name: "production", want: false},
+		{name: "poc", poc: true, want: true},
+		{name: "poc with mob review", poc: true, mob: MobConfig{Participants: 3, Review: true}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			d := reviewTestDeps(t, ops, &fakeGit{headSHA: "abc1234"}, &planLLM{}, reviewerRegistry())
+			d.Cfg.POC = tt.poc
+			d.Cfg.Mob = tt.mob
+			o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body"}, 0)
+
+			o.recordApproval(t.Context(), "works", nil)
+
+			rec, ok := extractApproval(ops.bodyFor("CARD-1"))
+			require.True(t, ok)
+			assert.Equal(t, tt.want, rec.POC)
+		})
+	}
+}
+
 // TestRecordApprovalNoFixes records an approval with an empty fix list.
 func TestRecordApprovalNoFixes(t *testing.T) {
 	ops := &fakeOps{}

@@ -120,6 +120,8 @@ type RunSpec struct {
 
 	MaxCapability bool // CM_MAX_CAPABILITY; every pick chooses the most capable model in the tier regardless of price
 
+	POC bool // CM_POC ("true"); the card's project is a proof of concept
+
 	// ReviewAttemptsCap is the number of review rounds before the card parks in
 	// review. Zero or negative means unset and resolves to
 	// config.DefaultReviewAttemptsCap; values above config.MaxReviewAttemptsCap
@@ -486,6 +488,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 			Interactive:       hitl,
 			BestOfN:           resolveBestOfN(a.spec.BestOfN, mob),
 			Mob:               mob,
+			POC:               a.spec.POC,
 			Compaction: orchestrator.Compaction{
 				Enabled:         a.spec.CompactionEnabled,
 				Threshold:       a.spec.CompactionThreshold,

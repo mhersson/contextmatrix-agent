@@ -19,9 +19,28 @@ import (
 	"github.com/mhersson/contextmatrix-harness/tools"
 )
 
-// reviewPanelSize is the fixed number of review specialists fanned out per
-// round: Correctness, Design & Maintainability, Security & Performance.
-const reviewPanelSize = 3
+// reviewLens is one solo review seat: its role and the lens block its prompt carries.
+type reviewLens struct{ role, prompt string }
+
+// pocReview reports whether this run reviews the POC way. A card with mob
+// review keeps the full review in a POC project: its explicit setting wins.
+func (o *run) pocReview() bool {
+	return o.d.Cfg.POC && !o.d.Cfg.Mob.reviews()
+}
+
+// panelLenses is the solo panel this run fans out, and the seat count
+// reviewPanel selects: the specialists, or one generic reviewer on a POC review.
+func (o *run) panelLenses() []reviewLens {
+	if o.pocReview() {
+		return []reviewLens{{"generic", genericReviewPrompt}}
+	}
+
+	return []reviewLens{
+		{"correctness", correctnessPrompt},
+		{"design", designPrompt},
+		{"security", securityPrompt},
+	}
+}
 
 // hardReviewIterationCap is a defensive ceiling on the review loop independent
 // of the configured attempts cap, so a misbehaving IncrementReviewAttempts (or
@@ -244,6 +263,12 @@ func (o *run) tryAdoptApproval(ctx context.Context, plan verifyPlan) (bool, erro
 	if err != nil || head == "" || head != rec.HeadSHA {
 		slog.Debug("review: recorded approval HEAD does not match current branch - ignoring",
 			"card_id", d.Cfg.CardID, "recorded", rec.HeadSHA, "current", head, "error", err)
+
+		return false, nil
+	}
+
+	if rec.POC && !o.pocReview() {
+		d.logCard(ctx, "review: the recorded approval came from a POC review - reviewing again at the full bar")
 
 		return false, nil
 	}
@@ -552,7 +577,7 @@ func (o *run) reviewLoop(ctx context.Context, plan verifyPlan, consumed int) err
 }
 
 // runReviewHITL is the HITL review loop: each round produces specialist findings
-// (verify gate + 3 specialists + synthesis), records them, and presents them to
+// (verify gate + review panel + synthesis), records them, and presents them to
 // the human, who decides. Approve -> proceed to integrate; adjust -> apply the
 // findings plus the human's feedback as a fix, then re-review. The human is the
 // decision-maker, so there is no authoritative pass or auto-park; the hard
@@ -728,9 +753,16 @@ func approvedWithFixesApplied(findings string) string {
 // non-escalating fix pass and proves or drops the fixup. summary is the same
 // findings text as req.Findings, framed by the approvedWith* helpers for the
 // PR body. Only a park propagates; a turn cap and every other failure leave
-// the run approved.
+// the run approved. A POC review never runs it: the surviving findings are
+// reported only.
 func (o *run) cleanupPass(ctx context.Context, plan verifyPlan, req fixRequest, summary string, fixes []fix) error {
 	d := o.d
+
+	if o.pocReview() {
+		d.logCard(ctx, "review: approved with %d surviving finding(s) - a POC card reports them and runs no cleanup pass", len(fixes))
+
+		return nil
+	}
 
 	if !worthCleanupPass(fixes) {
 		d.logCard(ctx, "review: approved with %d surviving nit-only finding(s) - reported, no cleanup pass", len(fixes))
@@ -1172,7 +1204,7 @@ func (o *run) incrementReviewAttempt(ctx context.Context, findings string) (int,
 // output tail as the finding) WITHOUT spending reviewer tokens; SKIPPED logs
 // loudly and proceeds to the specialists WITHOUT the fix loop (a
 // missing/timed-out gate is not a defect to fix); PASSED (or no command)
-// proceeds. On any gate outcome that reaches them, the three specialists fan
+// proceeds. On any gate outcome that reaches them, the review panel fans
 // out and the synthesis verdict decides.
 func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, authoritative bool) (findings string, fixTier string, approved bool, vres verifyResult, fixes []fix, err error) {
 	// lastPriorResolved reflects ONLY the most recent round that actually
@@ -1220,7 +1252,7 @@ func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, autho
 	// review on, a panel discussion replaces the specialist pass for
 	// non-authoritative rounds (the authoritative pass keeps the proven solo
 	// machinery); a failed discussion degrades to the fan-out below.
-	if o.d.Cfg.Mob.enabled() && o.d.Cfg.Mob.Review && !authoritative {
+	if o.d.Cfg.Mob.reviews() && !authoritative {
 		if v, ok := o.mobReviewVerdict(ctx); ok {
 			o.settleVerdict(ctx, &v, round)
 
@@ -1247,6 +1279,7 @@ func (o *run) reviewRound(ctx context.Context, plan verifyPlan, round int, autho
 	}
 
 	o.settleVerdict(ctx, &v, round)
+	o.withholdNonBlockingFixes(ctx, &v)
 
 	if v.Approved {
 		return strings.TrimSpace(formatFixes(v)), v.FixTier, true, vres, v.Fixes, nil
@@ -1304,9 +1337,9 @@ func (o *run) fixDeltaBlock(ctx context.Context) string {
 		fencedDiff(truncateBytes(delta, fixDeltaMaxBytes)) + "\n"
 }
 
-// runSpecialists fans the three review lenses out as parallel read-only child
-// agents over the branch diff and returns their concatenated findings. Each
-// child's spend is recorded on the ledger and reported per result.
+// runSpecialists fans the panel's lenses (panelLenses) out as parallel
+// read-only child agents over the branch diff and returns their concatenated
+// findings. Each child's spend is recorded on the ledger and reported per result.
 func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, error) {
 	d := o.d
 	cfg := d.Cfg
@@ -1333,7 +1366,7 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 
 	d.logCard(ctx, "review panel: %s", panelSummary(panel))
 
-	if distinct := registry.DistinctModels(panel); distinct < 2 &&
+	if distinct := registry.DistinctModels(panel); len(panel) > 1 && distinct < 2 &&
 		o.firstNote(fmt.Sprintf("panel-collapsed/%s/%d", panel[0].RequestedTier, distinct)) {
 		d.logCard(ctx, "review panel collapsed to %d distinct model(s) - an approval from it is single-model evidence", distinct)
 	}
@@ -1347,18 +1380,14 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 			panel[0].RequestedTier, registry.DistinctModels(panel))
 	}
 
-	lenses := []struct{ role, prompt string }{
-		{"correctness", correctnessPrompt},
-		{"design", designPrompt},
-		{"security", securityPrompt},
-	}
+	lenses := o.panelLenses()
 
-	// Prior findings are constant across the three lenses: the same previous-round
-	// context goes to every specialist (cross-round memory).
+	// Prior findings are constant across the lenses: the same previous-round
+	// context goes to every seat (cross-round memory).
 	prior := o.priorContext(authoritative)
 
-	// Constant across the three lenses, same as prior: the fix delta is
-	// per-round context, not per-specialty.
+	// Constant across the lenses, same as prior: the fix delta is per-round
+	// context, not per-seat.
 	fixDelta := o.fixDeltaBlock(ctx)
 
 	specs := make([]harness.SubagentSpec, len(lenses))
@@ -1455,14 +1484,16 @@ func (o *run) specialistSection(ctx context.Context, res harness.SubagentResult)
 	return b.String()
 }
 
-// reviewPanel returns the three specialist seats. An explicit,
-// catalog-resolvable reviewer pin overrides the entire panel: all three run on
-// the pinned model, and every seat after the first is flagged as a repeat so
-// one model's opinion cannot read as three agreeing ones. Otherwise the
-// registry selects a diverse panel for the card tier, excluding every model
-// that coded a subtask on this run, and any seat that could not be served at
-// that tier reports its shortfall.
+// reviewPanel returns one seat per panel lens. An explicit, catalog-resolvable
+// reviewer pin overrides the entire panel: every seat runs on the pinned model,
+// and every seat after the first is flagged as a repeat so one model's opinion
+// cannot read as several agreeing ones. Otherwise the registry selects a
+// diverse panel for the card tier, excluding every model that coded a subtask
+// on this run, and any seat that could not be served at that tier reports its
+// shortfall.
 func (o *run) reviewPanel(ctx context.Context, estTokens int, authoritative bool) []registry.Pick {
+	size := len(o.panelLenses())
+
 	// The authoritative pass escalates the panel to the complex tier so the
 	// strongest models judge the change before parking.
 	tier := o.cardSizing.Bar
@@ -1473,7 +1504,7 @@ func (o *run) reviewPanel(ctx context.Context, estTokens int, authoritative bool
 	if resolvePin(o.d.Registry, o.tc.ModelReviewer) {
 		seat := offLadderPick(o.d.Registry, o.tc.ModelReviewer, registry.RoleReviewer, tier, registry.SourcePinned)
 
-		panel := make([]registry.Pick, reviewPanelSize)
+		panel := make([]registry.Pick, size)
 		for i := range panel {
 			panel[i] = seat
 			// Every seat after the first repeats seat 1. Flagged, so the card
@@ -1500,7 +1531,7 @@ func (o *run) reviewPanel(ctx context.Context, estTokens int, authoritative bool
 		// own work) and any model proven harness-incapable this run (recoverIncapable
 		// records it). Merged so neither set masks the other.
 		Exclude: o.reviewExclusions(),
-	}, reviewPanelSize)
+	}, size)
 
 	// One label for the whole panel: seats that fell the same distance are one
 	// fact, and the panel summary below carries the per-seat detail.
@@ -1611,8 +1642,8 @@ func (o *run) mobReviewBriefing(ctx context.Context) (string, error) {
 		o.tc.Title, o.taskDescription, fencedDiff(diff), o.priorContext(false), o.fixDeltaBlock(ctx)), nil
 }
 
-// synthesize runs ONE orchestrator-model call that reads the three specialists'
-// findings and emits the structured verdict. The verdict JSON is parsed with the
+// synthesize runs ONE orchestrator-model call that reads the panel's findings
+// and emits the structured verdict. The verdict JSON is parsed with the
 // same extractJSON + one repair turn the planner uses. A turn-capped attempt is
 // retried once with an emit-now instruction; a second cap, or a retry that lands
 // but produces unparseable output, both park the card with the specialist
@@ -1660,8 +1691,7 @@ func (o *run) synthesize(ctx context.Context, findings string, round int, author
 			repair = repairBlock(lastErr.Error())
 		}
 
-		task := fmt.Sprintf(synthesisPrompt, o.grounding, o.tc.Title, o.taskDescription,
-			o.priorContext(authoritative), findings, repair)
+		task := o.synthesisTask(authoritative, findings, repair)
 
 		res, dur, err := o.runModelSynthesis(ctx, d.ReadTools, task, model)
 
@@ -1705,6 +1735,19 @@ func (o *run) synthesize(ctx context.Context, findings string, round int, author
 	}
 
 	return verdict{}, fmt.Errorf("verdict parse failed after repair: %w", lastErr)
+}
+
+// synthesisTask renders this round's synthesis prompt: the specialist variant,
+// or the single-reviewer one on a POC review. Two literal calls keep vet's
+// printf check on both templates.
+func (o *run) synthesisTask(authoritative bool, findings, repair string) string {
+	prior := o.priorContext(authoritative)
+
+	if o.pocReview() {
+		return fmt.Sprintf(genericSynthesisPrompt, o.grounding, "the reviewer", o.tc.Title, o.taskDescription, prior, findings, repair)
+	}
+
+	return fmt.Sprintf(synthesisPrompt, o.grounding, "a specialist", o.tc.Title, o.taskDescription, prior, findings, repair)
 }
 
 // parkSynthesisCap preserves the round's specialist findings on the card body -
@@ -2344,20 +2387,54 @@ func (o *run) settleVerdict(ctx context.Context, v *verdict, round int) {
 // as actionable: a model that omits severity must not have its findings
 // silently waved through.
 func (o *run) promoteConsistentRevise(ctx context.Context, v *verdict) {
-	if v.Approved || len(v.Fixes) == 0 {
+	if v.Approved || len(v.Fixes) == 0 || slices.ContainsFunc(v.Fixes, blocking) {
 		return
-	}
-
-	for _, f := range v.Fixes {
-		switch normalizeSeverity(f.Severity) {
-		case severityCritical, severityImportant, "":
-			return
-		}
 	}
 
 	v.Approved = true
 
 	o.d.logCard(ctx, "review: revise verdict carried only minor/nit findings - promoted to approval with open findings (minors and nits never block)")
+}
+
+// blocking reports whether a finding's severity blocks a verdict: critical,
+// important, or unlabelled, which must never be waved through.
+func blocking(f fix) bool {
+	switch normalizeSeverity(f.Severity) {
+	case severityCritical, severityImportant, "":
+		return true
+	}
+
+	return false
+}
+
+// withholdNonBlockingFixes trims a POC review's revise verdict to its blockers,
+// so the fixer, the next round's prior findings and any park note see only
+// what blocks. The withheld findings go to the card log; an approval keeps
+// its list, which is reported and never fixed.
+func (o *run) withholdNonBlockingFixes(ctx context.Context, v *verdict) {
+	if !o.pocReview() || v.Approved {
+		return
+	}
+
+	var kept, withheld []fix
+
+	for _, f := range v.Fixes {
+		if blocking(f) {
+			kept = append(kept, f)
+		} else {
+			withheld = append(withheld, f)
+		}
+	}
+
+	if len(withheld) == 0 {
+		return
+	}
+
+	v.Fixes = kept
+
+	o.d.logCard(ctx, "%s", truncateBytes(
+		fmt.Sprintf("review: POC card - %d non-blocking finding(s) kept out of the fix request:\n", len(withheld))+
+			formatFixes(verdict{Fixes: withheld}), verifyParkNoteMax))
 }
 
 // hasCriticalFinding reports whether a verdict's fix list carries a

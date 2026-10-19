@@ -80,6 +80,8 @@ Three specialists - Correctness, Design & Maintainability, Security &
 Performance - run in parallel, read-only, behind a spec/test gate that
 short-circuits to the fix loop before spending reviewer tokens; the
 orchestrator synthesizes the report.
+A POC card without mob review runs one generic reviewer instead - see
+[POC projects](#poc-projects).
 
 The mob discussion briefing always diffs the full branch against the base
 branch; the solo panel does too on round 1 and the authoritative pass, but on
@@ -207,7 +209,8 @@ parses out, `demoteContradictoryApproval` forces `Approved = false` (logged
 on the card as an override) so the round routes through the not-approved fix
 + re-review loop instead of the unreviewed post-approval cleanup pass.
 Approval carrying only `minor` (cleanup fix pass) or `nit` (report-only)
-findings keeps the normal behavior. Its mirror, `promoteConsistentRevise`,
+findings keeps the normal behavior (a POC review reports both and fixes
+neither - see [POC projects](#poc-projects)). Its mirror, `promoteConsistentRevise`,
 runs the other direction: a revise verdict whose every fix is minor or nit is
 forced to `Approved = true`, since minors and nits never block by the
 verdict's own rules and looping the review on findings it already calls
@@ -244,17 +247,77 @@ adopts the approval only when the current branch HEAD equals the recorded SHA
 and the resolved verify gate still passes - a red or erroring verify refuses
 adoption, so an approval never bypasses a red gate. Adoption skips the
 specialist panel and synthesis, runs the recorded surviving fixes as the usual
-non-escalating cleanup pass (skipped when the list is empty or nit-only, and
-gated by the same verify-or-discard of the fixup as a live approval), logs
-`adopted recorded approval` on the card, then clears the record before the FSM
-proceeds to the next phase. Any mismatch - no record, a different HEAD, a red
-verify - falls through to the normal review loop unchanged, and only approvals
-are persisted: a rejected verdict never produces a record.
+non-escalating cleanup pass (skipped when the list is empty or nit-only, or on
+a POC review, and gated by the same verify-or-discard of the fixup as a live
+approval), logs `adopted recorded approval` on the card, then clears the record
+before the FSM proceeds to the next phase. Any mismatch - no record, a different
+HEAD, a red verify, a POC review's approval on a run that reviews at the full
+bar - falls through to the normal review loop unchanged, and only approvals are
+persisted: a rejected verdict never produces a record.
 
 In a mob review discussion, the correctness seat's lens is a briefing that
 judges the change - and the plan decisions behind it - against the card's
 stated requirements, challenging choices the plan made rather than treating
 the plan as the spec.
+
+## POC projects
+
+ContextMatrix flags a project with `poc` on its project config and sets `poc`
+on every trigger payload it launches for that project
+(`protocol.TriggerPayload.POC`, contextmatrix-protocol v0.33.0); the agent
+never reads the project config itself. `serve` relays the flag as
+`CM_POC=true`, which the worker reads into `RunSpec.POC` and `Config.POC`. It
+is read once, at container start: a run in flight finishes with the setting
+it started with, and the next run of any card picks up a change.
+
+A card in a project flagged as a proof of concept runs with `Config.POC` set.
+The flag lowers the review and test bar and nothing else: models and tiers,
+the budget, turn limits, the review attempts cap, the verify gates, the
+document phase, Best-of-N, mob checkpoints and `pr_gates` run as on any card.
+A POC card still has to work: the verify gate still gates every round.
+
+A POC card without mob review (`pocReview`: `Config.POC` set and
+`Mob.reviews()` false) runs one generic reviewer per review round instead of
+the three specialists, and so does the authoritative pass at the cliff
+(`panelLenses`). The seat is selected like a specialist seat: at the card
+tier on a cheap round, at complex on the authoritative pass, and on the
+pinned model when the card pins a reviewer. Its bar is whether the change
+does what the card asks and works. A real bug, an exploitable vulnerability
+(a committed secret included), a broken or vacuous test, a missed acceptance
+criterion and unscoped work block. Missing edge-case tests, coverage,
+maintainability and design taste, and security hardening never block. The
+reviewer and synthesis prompts file those under the advisory `hardening` and
+`polish` bases, so `capAdvisorySeverity` caps them as on any card; the
+verdict code has no POC branch. The synthesis call still runs, on a
+single-reviewer prompt (`genericSynthesisPrompt`) that shares the verdict
+rules and JSON contract with the specialist one. That keeps the parse repair,
+the turn-cap park, and an independent severity judgement over the one
+reviewer's labels.
+
+A POC card with mob review reviews exactly as a production card: the mob
+discussion, the three-specialist authoritative pass and solo fallback, the
+cleanup pass and unfiltered fix requests. The card's explicit mob setting
+wins over the project flag.
+
+On a POC review a revise verdict reaches the fix round with its blockers
+only: critical, important and unlabelled findings (`withholdNonBlockingFixes`,
+right after `settleVerdict`). The minor and nit findings it withholds go to
+one card-log line instead, so neither the fixer, the next round's prior
+findings nor a park note carries them. An approval's surviving findings
+reach the PR body as open and are never fixed: the post-approval cleanup
+pass does not run, live or on an adopted approval.
+
+A POC review's approval record carries `"poc": true`. A run that enters
+review at the full bar never adopts it: after the flag is switched off, a
+card that reaches review again is re-reviewed rather than adopting the POC
+verdict. A card already past review resumes where it stopped.
+
+Every POC card, mob review or not, narrows what tests are asked for
+(`pocTestScope`): the planner, the plan moderator and the subtask coder
+(Best-of-N candidates included) are told to test the main behaviour the card
+names and add no edge-case, error-path or coverage tests an acceptance
+criterion does not require, overriding any task skill's push for more. Fix
+rounds address their findings as written.
 
 ## Context bounds
 

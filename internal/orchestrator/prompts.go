@@ -191,12 +191,13 @@ const convergenceRule = `- Convergence: when every finding under PRIOR FINDINGS 
 // The leading %s is the grounding block; the second %s is the repo-snapshot
 // block (bounded tracked-file list + README head; "" when not a git repo). The
 // trailing %s slots are filled by draftPlan: workspace root, an optional
-// read-only-roots block, card title, card description, an optional diagnosis
-// block (root-cause investigation for bug-like cards), an optional design block
-// (brainstormed design for creative HITL cards), an optional resume block
-// (existing subtasks), an optional feedback block (HITL reviewer's requested
-// changes on a re-draft), and an optional repair block (the previous parse
-// error). Empty optional blocks collapse to nothing.
+// read-only-roots block, the POC test-scope bullet (pocTestScope), card title,
+// card description, an optional diagnosis block (root-cause investigation for
+// bug-like cards), an optional design block (brainstormed design for creative
+// HITL cards), an optional resume block (existing subtasks), an optional
+// feedback block (HITL reviewer's requested changes on a re-draft), and an
+// optional repair block (the previous parse error). Empty optional blocks
+// collapse to nothing.
 const planPrompt = `%s%sYou are the planning agent for a software task. You have read-only
 tools (read, grep, glob, git) to inspect the codebase, plus record_finding to
 save durable notes as you go. You do NOT create or modify cards or files - you
@@ -249,7 +250,7 @@ Decompose the task into subtasks following these rules:
 - Tests: each subtask tests what the card names for that item and nothing
   more - one behavioural test per item by default, never one per code path,
   and never a new test for a branch or path the card does not name. When the
-  card names a specific test or assertion to add, the subtask is exactly that.
+  card names a specific test or assertion to add, the subtask is exactly that.%s
 - Small batched items ("a few lines each", "batch them") become the fewest
   subtasks that keep files disjoint - group by file - not one subtask per
   bullet.
@@ -426,6 +427,25 @@ memory. For each change verify:
 - Every exit path is correct: each early return and error branch releases what it acquired and stops where it should - no fall-through after writing an error response.
 Fix anything you find before finishing.`
 
+// pocTestScopeRule narrows test demands on a POC card to the main behaviour,
+// for the planner, the plan moderator and the coder. Task skills are generic
+// and operator-provided, so the rule states that it wins over them.
+const pocTestScopeRule = `This card belongs to a proof-of-concept project: tests cover the main behaviour
+the card names, and nothing more. Add no edge-case, error-path or coverage
+tests that an acceptance criterion does not explicitly require. This overrides
+any task skill's guidance on test coverage.`
+
+// pocTestScope is pocTestScopeRule behind sep on a POC card, else "" so a
+// production card's prompts stay byte-identical. It follows Config.POC alone:
+// a card's mob settings change its review, never its test scope.
+func (o *run) pocTestScope(sep string) string {
+	if !o.d.Cfg.POC {
+		return ""
+	}
+
+	return sep + pocTestScopeRule
+}
+
 // unreachableScopeNote tells the coder that acceptance criteria the planner
 // flagged unreachable, and scope split into other cards, are both out of
 // bounds to implement. Shared by coderPrompt and fixPrompt so the two cannot
@@ -462,8 +482,9 @@ discrepancy in your finish message, and stop - a confirmed absence discharges a
 // commit message, which the orchestrator reads from the tool call arguments.
 //
 // The trailing %s slots are filled by runExecute: workspace root, the verify
-// command block (empty when none resolved), subtask title, subtask description,
-// parent card title, parent card body.
+// command block (empty when none resolved), the POC test-scope paragraph
+// (pocTestScope), subtask title, subtask description, parent card title, parent
+// card body.
 const coderPrompt = `%s%sYou are the coding agent for one subtask of a larger task. You have the full
 write toolset (read, grep, glob, edit, write, bash) rooted at the workspace.
 Implement EXACTLY this subtask - nothing from sibling subtasks, nothing
@@ -489,7 +510,7 @@ in your finish message instead of searching for it. Do NOT run git yourself
 changes after you finish.
 
 Write tests alongside the code and run them. Once the acceptance criteria
-pass, finish immediately - do not repeat verification that already passed.%s
+pass, finish immediately - do not repeat verification that already passed.%s%s
 
 ` + buildHygieneNote + `
 
@@ -521,21 +542,21 @@ Description:
 // from the review-task workflow skill's three-specialist design: the same review
 // lenses and severity discipline, but the specialist has NO card tools - it reads
 // code (read/grep/glob) and produces findings TEXT only. The orchestrator
-// (synthesis) decides approve-or-fix from the three findings. Commit status is
+// (synthesis) decides approve-or-fix from the panel's findings. Commit status is
 // never a review concern.
 //
 // The trailing %s slots are filled by runSpecialists: an optional
-// read-only-roots block, the lens block (one of the three below), parent card
-// title, parent card description, the full branch diff against base, an
-// optional prior-findings block (the previous round's findings on delta
-// rounds, followed by the fix round's response to them when it gave one), and
-// an optional fix-delta block (what the previous round's COMMITTED fix
-// changed, labeled as context rather than review scope). Both optional blocks
-// collapse to nothing when empty.
+// read-only-roots block, the lens block (a specialist lens below, or
+// genericReviewPrompt), parent card title, parent card description, the full
+// branch diff against base, an optional prior-findings block (the previous
+// round's findings on delta rounds, followed by the fix round's response to
+// them when it gave one), and an optional fix-delta block (what the previous
+// round's COMMITTED fix changed, labeled as context rather than review scope).
+// Both optional blocks collapse to nothing when empty.
 const specialistPrompt = `%s%sYou are a code-review specialist. You have read-only tools (read, grep, glob, git)
 to inspect the codebase. Git is available read-only (status, diff, log, show,
 branch). You do NOT create or modify cards or files. Produce a findings report as TEXT - another agent synthesizes the
-three specialist reports into a single verdict.
+review reports into a single verdict.
 
 ` + unreachableVerifyInstruction + `
 
@@ -608,33 +629,39 @@ const securityPrompt = `Your specialty is SECURITY & PERFORMANCE. Focus on:
 - Memory / resource leaks (real ones in the change), not speculative caching or allocation tuning the task did not call for.
 Stay strictly within security and performance; do not opine outside it.`
 
-// synthesisPrompt is the orchestrator-model synthesis instruction. It reads the
-// three specialist findings and emits the structured verdict. The synthesizer
-// sets each finding's severity itself - a specialist's label and the number of
-// specialists raising it are inputs, not the verdict - and blocks only on a real
-// bug, a real vulnerability, a broken test, or a missed acceptance criterion;
-// unrequested hardening is Minor. approved governs merge eligibility only - it
-// never gates whether a finding is reported: fixes carries every finding that
-// survived the critique round, tagged with its own severity, regardless of
-// approved.
-//
-// The trailing %s slots are filled by synthesize: parent card title, parent
-// card description, an optional prior-findings block (the previous round's
-// findings on delta rounds, followed by the fix round's response to them when
-// it gave one), the concatenated specialist findings, and an optional repair
-// block (the previous parse error). Empty optional blocks collapse to nothing.
-const synthesisPrompt = `%sYou are the review synthesizer. Three specialists (correctness, design,
-security) reviewed a change and produced the findings below, each with a
-suggested severity. Merge duplicates and decide a single verdict. Severity is
-yours to set: weigh each finding's actual impact on the task yourself - a
-specialist's label, and how many specialists raised it, are inputs, not the
-verdict.
+// pocReviewBar is the bar of a POC review, shared by genericReviewPrompt and
+// genericSynthesisPrompt so the two cannot drift. It files what never blocks
+// under the advisory bases, which capAdvisorySeverity caps in code.
+const pocReviewBar = `This card belongs to a proof-of-concept project. The bar is: does the change do
+what the card asks, and does it work. These block: a real correctness bug, an
+exploitable vulnerability (a committed secret included), a broken or vacuous
+test, a missed acceptance criterion, and work the card did not ask for. These
+never block: missing edge-case or error-path tests, coverage, maintainability
+and design preferences, and security hardening - their basis is "hardening"
+(tests, validation, defensive checks) or "polish" (design, structure, naming).
+This bar overrides any task skill's review checklist.`
 
-Decision rule:
+// genericReviewPrompt is the lens of a POC review's single generic reviewer,
+// which replaces the three specialists.
+const genericReviewPrompt = `Your role is GENERIC: you are the only reviewer of this change - no other
+reviewer runs - so review all of it rather than one specialty.
+` + pocReviewBar + `
+Focus on:
+- Does the change do what the parent card asks? Check every acceptance criterion.
+- Does it work? Bugs and logic errors on the paths the card names and in
+  existing behaviour the change touches, swallowed errors.
+- Tests: do they exercise the main behaviour, or are they broken or vacuous?
+- Exploitable vulnerabilities, committed secrets included.
+- Work the card did not ask for.`
+
+// synthesisRules is the solo synthesizer's decision rule and finding
+// discipline, shared by synthesisPrompt and genericSynthesisPrompt so the two
+// cannot drift. Its one %s slot names the reviewer a finding may come from.
+const synthesisRules = `Decision rule:
 - A finding blocks the change (not approved) when, in your own judgement, it is
   a genuine correctness bug, a real vulnerability, a broken or vacuous test, or
   it makes the change fail the task's stated acceptance criteria - promote it
-  even if a specialist filed it as Minor. Return each blocker as a concrete fix.
+  even if %s filed it as Minor. Return each blocker as a concrete fix.
 - Weigh a passing verify run and passing tests as evidence: a "this could break" or
   toolchain/version concern they contradict is Minor.
 - Also judge the change against the task: if it does NOT satisfy the acceptance criteria
@@ -656,18 +683,12 @@ Be specific and actionable. Every fix must cite a file in the change set and
 give a concrete suggestion - no vague hand-waves. Commit status is never an
 issue.
 
-` + sweepRule + `
+` + sweepRule
 
-PARENT CARD
-Title: %s
-
-Description:
-%s
-%s
-SPECIALIST FINDINGS
-%s
-%s
-Respond with ONLY a JSON object, no prose:
+// verdictContract is the verdict JSON contract and its field rules, shared by
+// synthesisPrompt, genericSynthesisPrompt and reviewSynthesisPrompt so the
+// three cannot drift.
+const verdictContract = `Respond with ONLY a JSON object, no prose:
 {"approved":true|false,
  "summary":"<one-line overall verdict>",
  "fix_tier":"simple|moderate|complex|critical",
@@ -683,6 +704,66 @@ fixes is independent of approved: it carries every finding a seat raised and did
 not withdraw, whatever its severity. An approved verdict with an empty fixes
 array asserts that nothing survived the critique round - never a default.
 `
+
+// synthesisPrompt is the orchestrator-model synthesis instruction. It reads the
+// three specialist findings and emits the structured verdict. The synthesizer
+// sets each finding's severity itself - a specialist's label and the number of
+// specialists raising it are inputs, not the verdict - and blocks only on a real
+// bug, a real vulnerability, a broken test, or a missed acceptance criterion;
+// unrequested hardening is Minor. approved governs merge eligibility only - it
+// never gates whether a finding is reported: fixes carries every finding that
+// survived the critique round, tagged with its own severity, regardless of
+// approved.
+//
+// The %s slots are filled by synthesisTask: grounding, the reviewer noun in
+// synthesisRules ("a specialist"), parent card title, parent card description,
+// an optional prior-findings block (the previous round's findings on delta
+// rounds, followed by the fix round's response to them when it gave one), the
+// concatenated specialist findings, and an optional repair block (the previous
+// parse error). Empty optional blocks collapse to nothing.
+const synthesisPrompt = `%sYou are the review synthesizer. Three specialists (correctness, design,
+security) reviewed a change and produced the findings below, each with a
+suggested severity. Merge duplicates and decide a single verdict. Severity is
+yours to set: weigh each finding's actual impact on the task yourself - a
+specialist's label, and how many specialists raised it, are inputs, not the
+verdict.
+
+` + synthesisRules + `
+
+PARENT CARD
+Title: %s
+
+Description:
+%s
+%s
+SPECIALIST FINDINGS
+%s
+%s
+` + verdictContract
+
+// genericSynthesisPrompt is synthesisPrompt for a POC review: one generic
+// reviewer's findings judged against pocReviewBar under the same rules and
+// verdict contract. Its slots match synthesisPrompt's; the reviewer noun is
+// neutral.
+const genericSynthesisPrompt = `%sYou are the review synthesizer. One generic reviewer reviewed a change and
+produced the findings below, each with a suggested severity. Decide a single
+verdict. Severity is yours to set: weigh each finding's actual impact on the
+task yourself - the reviewer's label is an input, not the verdict.
+
+` + pocReviewBar + `
+
+` + synthesisRules + `
+
+PARENT CARD
+Title: %s
+
+Description:
+%s
+%s
+REVIEWER FINDINGS
+%s
+%s
+` + verdictContract
 
 // fixPrompt is the coder fix-run instruction for a review round that returned
 // findings. The coder runs with the FULL write toolset and addresses exactly the
@@ -1247,7 +1328,8 @@ Description:
 // carries the SAME strict JSON contract as planPrompt and instructs the
 // moderator to keep unresolved dissent as explicit risk notes on the
 // affected subtasks. The engine appends the rendered transcript after it.
-// Slots: grounding, workspace, title, description.
+// Slots: grounding, workspace, the POC test-scope bullet (pocTestScope), title,
+// description.
 const planSynthesisPrompt = `%sYou are the moderator of a planning discussion between software agents.
 Repo root: %s - paths are relative to it.
 
@@ -1260,7 +1342,7 @@ notes ("Risk: ...") - never drop dissent silently.
 The plan must follow these rules:
 - Each subtask must be completable by a single agent in one focused session.
 - Each subtask includes its own tests; never emit separate "write tests"
-  subtasks.
+  subtasks.%s
 - depends_on lists the indices of EARLIER subtasks in the array only.
 - Each subtask description states concrete actions, the files touched
   ("Files:" line), and acceptance criteria - no placeholders.
@@ -1368,22 +1450,7 @@ Title: %s
 Description:
 %s
 
-Respond with ONLY a JSON object, no prose:
-{"approved":true|false,
- "summary":"<one-line overall verdict>",
- "fix_tier":"simple|moderate|complex|critical",
- "prior_findings_resolved":true|false,
- "fixes":[{"file":"...","issue":"...","suggestion":"...","severity":"critical|important|minor|nit","basis":"criterion|defect|test|vulnerability|unscoped|hardening|polish"}]}
-
-fix_tier is the difficulty of APPLYING these fixes; omit it when unsure.
-` + fixTierFloorRule + `
-prior_findings_resolved is true only when every finding under PRIOR FINDINGS is
-genuinely resolved or explicitly withdrawn; false when any remains open, and
-false when there is no PRIOR FINDINGS block.
-fixes is independent of approved: it carries every finding a seat raised and did
-not withdraw, whatever its severity. An approved verdict with an empty fixes
-array asserts that nothing survived the critique round - never a default.
-`
+` + verdictContract
 
 // checkpointBriefing opens an execute-checkpoint discussion: the just-
 // committed subtask diff under critique before the run builds on it. Slots:

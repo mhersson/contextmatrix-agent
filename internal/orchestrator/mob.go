@@ -48,6 +48,9 @@ type MobConfig struct {
 
 func (c MobConfig) enabled() bool { return c.Participants >= 2 }
 
+// reviews reports whether a mob discussion replaces the solo review panel.
+func (c MobConfig) reviews() bool { return c.enabled() && c.Review }
+
 // mobSeatStep maps a discussion topic kind to the report_usage step tag for its
 // seat runs: checkpoint discussions report as "checkpoint"; plan and review
 // discussions report as "mob_seat".

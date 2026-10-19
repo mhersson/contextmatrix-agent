@@ -27,6 +27,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// reviewPanelSize is the specialist panel's seat count: Correctness, Design &
+// Maintainability, Security & Performance.
+const reviewPanelSize = 3
+
 // reviewTestDeps builds Deps wired for the review phase: scripted ops + git, the
 // supplied LLM (specialist fan-out + synthesis), read+write tools, and the
 // supplied registry. The workspace is a temp dir so the verify gate, when it
@@ -2402,14 +2406,10 @@ func TestResolveFixModelUnresolvablePinDeduplicates(t *testing.T) {
 	require.Len(t, ops.logs, 1, "resolvedFixModel must deduplicate with the coderPinWarned guard")
 }
 
-// TestReviewPanelEscalatesWhenAuthoritative proves the authoritative pass sizes
-// the panel on the complex tier, not the card tier. Three cheap-but-weak
-// reviewers clear the moderate bar (0.6) but not the complex bar (0.8); one
-// expensive strong reviewer clears both. At moderate the cheap trio fills the
-// three slots (the strong model is priced out of the band), so it never appears.
-// At complex the weak trio is gated out, forcing the strong model in - a model
-// the moderate panel does not select.
-func TestReviewPanelEscalatesWhenAuthoritative(t *testing.T) {
+// tierSplitReviewerRegistry is a reviewer pool split by tier: three cheap
+// models clear moderate (0.76) but not complex (0.82), and the returned strong
+// model clears complex. One vendor keeps vendor diversity out of the picture.
+func tierSplitReviewerRegistry() (*registry.Registry, string) {
 	const strong = "acme/strong-reviewer"
 
 	catalog := llm.Catalog{
@@ -2419,11 +2419,7 @@ func TestReviewPanelEscalatesWhenAuthoritative(t *testing.T) {
 		{ID: strong, ContextLength: 200000, PromptPricePerTok: 0.000005, CompletionPricePerTok: 0.000005, SupportedParameters: []string{"tools"}},
 		{ID: "default/model", ContextLength: 131072, SupportedParameters: []string{"tools"}},
 	}
-	// The weak trio clears the default moderate bar (0.76) but not complex (0.82);
-	// the strong model clears complex (0.82). So the moderate panel is the cheap
-	// trio and the complex escalation forces the strong model in. A single
-	// vendor prefix keeps the vendor-diversity preference out of the picture -
-	// this test isolates tier escalation.
+
 	w1, w2, w3, st := 0.77, 0.78, 0.79, 0.90
 	priors := registry.Priors{
 		Models: map[string]registry.PriorEntry{
@@ -2433,7 +2429,19 @@ func TestReviewPanelEscalatesWhenAuthoritative(t *testing.T) {
 			strong:            {Reviewer: &st},
 		},
 	}
-	reg := registry.NewRegistryFromParts(catalog, priors, nil, nil, "default/model")
+
+	return registry.NewRegistryFromParts(catalog, priors, nil, nil, "default/model"), strong
+}
+
+// TestReviewPanelEscalatesWhenAuthoritative proves the authoritative pass sizes
+// the panel on the complex tier, not the card tier. Three cheap-but-weak
+// reviewers clear the moderate bar (0.6) but not the complex bar (0.8); one
+// expensive strong reviewer clears both. At moderate the cheap trio fills the
+// three slots (the strong model is priced out of the band), so it never appears.
+// At complex the weak trio is gated out, forcing the strong model in - a model
+// the moderate panel does not select.
+func TestReviewPanelEscalatesWhenAuthoritative(t *testing.T) {
+	reg, strong := tierSplitReviewerRegistry()
 
 	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reg)
 	o := newReviewRun(d, cmclient.TaskContext{}, 0)
@@ -2471,6 +2479,284 @@ func TestReviewPanelEscalatesWhenAuthoritative(t *testing.T) {
 		moderatePanel, complexPanel)
 	assert.Contains(t, []string{complexPanel[0].Model, complexPanel[1].Model, complexPanel[2].Model}, strong,
 		"complex bar gates out the weak trio, forcing the strong model in; complex=%v", complexPanel)
+}
+
+func TestPanelLensesFollowPOCAndMobReview(t *testing.T) {
+	specialists := []string{"correctness", "design", "security"}
+
+	tests := []struct {
+		name string
+		poc  bool
+		mob  MobConfig
+		want []string
+	}{
+		{name: "production", want: specialists},
+		{name: "poc", poc: true, want: []string{"generic"}},
+		{name: "poc with mob review", poc: true, mob: MobConfig{Participants: 3, Review: true}, want: specialists},
+		{name: "poc with mob planning only", poc: true, mob: MobConfig{Participants: 3, Plan: true}, want: []string{"generic"}},
+		{name: "poc with a review phase but mob off", poc: true, mob: MobConfig{Review: true}, want: []string{"generic"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reviewerRegistry())
+			d.Cfg.POC = tt.poc
+			d.Cfg.Mob = tt.mob
+			o := newReviewRun(d, cmclient.TaskContext{}, 0)
+
+			var roles []string
+			for _, l := range o.panelLenses() {
+				roles = append(roles, l.role)
+			}
+
+			assert.Equal(t, tt.want, roles)
+		})
+	}
+}
+
+func TestPOCReviewPanelIsOneSeatAtTheUsualTier(t *testing.T) {
+	reg, strong := tierSplitReviewerRegistry()
+
+	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reg)
+	d.Cfg.POC = true
+	o := newReviewRun(d, cmclient.TaskContext{}, 0)
+
+	est := estimateTokens("diff")
+
+	cheap := o.reviewPanel(context.Background(), est, false)
+	require.Len(t, cheap, 1, "a POC round runs one reviewer")
+	assert.NotEqual(t, strong, cheap[0].Model, "a cheap POC round sits at the card tier")
+
+	authoritative := o.reviewPanel(context.Background(), est, true)
+	require.Len(t, authoritative, 1, "the authoritative pass runs one reviewer too")
+	assert.Equal(t, strong, authoritative[0].Model, "the authoritative reviewer sits at complex")
+}
+
+func TestPOCPinnedReviewerIsOneSeat(t *testing.T) {
+	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reviewerRegistry())
+	d.Cfg.POC = true
+	o := newReviewRun(d, cmclient.TaskContext{ModelReviewer: "pinned/model"}, 0)
+
+	panel := o.reviewPanel(context.Background(), estimateTokens("diff"), false)
+	require.Len(t, panel, 1)
+	assert.Equal(t, "pinned/model", panel[0].Model)
+	assert.False(t, panel[0].Duplicate, "a single pinned seat repeats nothing")
+}
+
+// TestPOCReviewRoundRunsOneReviewer drives a whole review on a POC card. The
+// script holds one reviewer reply and one verdict: a three-seat panel would
+// feed the verdict to a specialist and leave synthesis unparseable.
+func TestPOCReviewRoundRunsOneReviewer(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{}
+	client := &planLLM{responses: []llm.Response{
+		stopResp("Generic: does what the card asks", 0.01),
+		stopResp(`{"approved":true,"summary":"works","fixes":[]}`, 0.02),
+	}}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+	d.Cfg.POC = true
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+
+	require.NoError(t, runReview(context.Background(), o))
+	assert.Equal(t, 2, modelCallCount(client), "one generic reviewer and one synthesis; tasks=%v", client.tasks)
+
+	for key := range o.shortfallWarned {
+		assert.False(t, strings.HasPrefix(key, "panel-collapsed/"), "a one-seat panel is not a collapsed panel: %s", key)
+	}
+}
+
+func TestPOCAuthoritativePassRunsOneReviewerAtComplex(t *testing.T) {
+	var transcript bytes.Buffer
+
+	ops := &fakeOps{reviewAttempts: 4}
+	git := &fakeGit{committed: true}
+	client := &planLLM{responses: []llm.Response{
+		stopResp("Generic: works", 0.01),
+		stopResp(`{"approved":true,"summary":"works","fixes":[]}`, 0.02),
+	}}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+	d.Cfg.POC = true
+	d.Emit = events.NewEmitter(nil, &transcript)
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress", ReviewAttempts: 4}
+	o := newReviewRun(d, tc, 0)
+
+	require.NoError(t, runReview(context.Background(), o))
+	assert.Equal(t, 2, modelCallCount(client), "one generic reviewer and one synthesis; tasks=%v", client.tasks)
+
+	sels := selectionsForPhase(modelSelections(t, &transcript), "review panel")
+	require.Len(t, sels, 1, "the authoritative pass selected one seat")
+	assert.Equal(t, "complex", sels[0].TierRequested)
+}
+
+// TestPOCWithMobReviewFallsBackToTheSpecialists proves a POC card's explicit
+// mob review wins: when the discussion degrades, the solo fallback is the
+// three-specialist panel. A generic panel would hand the verdict slot a
+// specialist reply and fail synthesis.
+func TestPOCWithMobReviewFallsBackToTheSpecialists(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{}
+	llmFake := &planLLM{responses: []llm.Response{
+		stopResp("Correctness: looks fine", 0.01),
+		stopResp("Design: looks fine", 0.01),
+		stopResp("Security: looks fine", 0.01),
+		stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.02),
+	}}
+	eng := &scriptedEngine{outcomes: []mob.Outcome{{}}, errs: []error{mob.ErrNoQuorum}}
+
+	o := mobReviewRun(t, ops, git, llmFake, eng)
+	o.d.Cfg.POC = true
+
+	require.NoError(t, runReview(context.Background(), o))
+	assert.Equal(t, 4, modelCallCount(llmFake), "three specialists and one synthesis; tasks=%v", llmFake.tasks)
+}
+
+// mixedReviseVerdict carries one finding at every severity, each in its own
+// file, so the fixup's target lookup shows which ones reached the fixer.
+const mixedReviseVerdict = `{"approved":false,"summary":"fix the bug","fixes":[` +
+	`{"file":"bug.go","issue":"crashes on the main path","suggestion":"guard it","severity":"important","basis":"defect"},` +
+	`{"file":"unlabelled.go","issue":"returns the wrong total","suggestion":"sum every row"},` +
+	`{"file":"edge.go","issue":"no test for an empty input","suggestion":"add one","severity":"minor","basis":"hardening"},` +
+	`{"file":"style.go","issue":"long function","suggestion":"split it","severity":"nit","basis":"polish"}]}`
+
+// reviewRoundResponses scripts one solo round: one reply per panel seat, then
+// the verdict.
+func reviewRoundResponses(seats int, verdictJSON string) []llm.Response {
+	out := make([]llm.Response, 0, seats+1)
+	for range seats {
+		out = append(out, stopResp("reviewer: findings", 0.01))
+	}
+
+	return append(out, stopResp(verdictJSON, 0.02))
+}
+
+func TestPOCFixRequestCarriesOnlyBlockingFindings(t *testing.T) {
+	tests := []struct {
+		name      string
+		poc       bool
+		seats     int
+		wantPaths []string
+		withheld  []string
+	}{
+		{name: "production", seats: reviewPanelSize, wantPaths: []string{"bug.go", "unlabelled.go", "edge.go", "style.go"}},
+		{
+			name: "poc", poc: true, seats: 1,
+			wantPaths: []string{"bug.go", "unlabelled.go"},
+			withheld:  []string{"no test for an empty input", "long function"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+
+			responses := reviewRoundResponses(tt.seats, mixedReviseVerdict)
+			responses = append(responses, stopResp("coder: fixed", 0.05))
+			responses = append(responses, reviewRoundResponses(tt.seats, `{"approved":true,"summary":"fixed","fixes":[]}`)...)
+
+			client := &planLLM{responses: responses}
+			d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+			d.Cfg.POC = tt.poc
+
+			tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+			o := newReviewRun(d, tc, 0)
+
+			require.NoError(t, runReview(context.Background(), o))
+
+			require.NotEmpty(t, git.lastCommitPaths, "the fix round looked up its fixup target")
+			assert.Equal(t, tt.wantPaths, git.lastCommitPaths[0], "the files the fix request names")
+
+			fixTask := client.tasks[tt.seats+1]
+			for _, issue := range tt.withheld {
+				assert.NotContains(t, fixTask, issue, "a non-blocking finding reached the fixer")
+				assert.True(t, ops.loggedContains(issue), "the withheld finding stays on the card log")
+			}
+		})
+	}
+}
+
+func TestPOCWithMobReviewFixesStayUnfiltered(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+	llmFake := &planLLM{responses: []llm.Response{stopResp("coder: fixed", 0.05)}}
+	eng := &scriptedEngine{outcomes: []mob.Outcome{
+		{Synthesis: mixedReviseVerdict},
+		{Synthesis: mobApprovedVerdict, Consensus: true},
+	}}
+
+	o := mobReviewRun(t, ops, git, llmFake, eng)
+	o.d.Cfg.POC = true
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	require.NotEmpty(t, git.lastCommitPaths)
+	assert.Equal(t, []string{"bug.go", "unlabelled.go", "edge.go", "style.go"}, git.lastCommitPaths[0],
+		"a mob-review card's fix request carries every finding")
+}
+
+func TestPOCApprovalReportsSurvivingFindingsWithoutACleanupPass(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+	client := &planLLM{responses: []llm.Response{
+		stopResp("Generic: works, one missing edge-case test", 0.01),
+		stopResp(`{"approved":true,"summary":"works","fixes":[`+
+			`{"file":"edge.go","issue":"no test for an empty input","suggestion":"add one","severity":"minor","basis":"hardening"}]}`, 0.02),
+	}}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+	d.Cfg.POC = true
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	assert.Equal(t, 2, modelCallCount(client), "reviewer and synthesis only, no fix coder; tasks=%v", client.tasks)
+	assert.Equal(t, -1, indexOfPrefix(git.recorded(), "CommitFixup:"), "no cleanup fixup; git=%v", git.recorded())
+	assert.True(t, strings.HasPrefix(o.reviewSummary, approvedWithOpenFindings("")),
+		"the PR body reports the finding as open; summary=%q", o.reviewSummary)
+}
+
+func TestPOCWithMobReviewKeepsTheCleanupPass(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, lastCommitTarget: "abc123"}
+	llmFake := &planLLM{responses: []llm.Response{stopResp("coder: tidied", 0.05)}}
+	verdictJSON := `{"approved":true,"summary":"clean","fix_tier":"",` +
+		`"fixes":[{"file":"a.go","issue":"missing edge-case test","suggestion":"add one","severity":"minor"}]}`
+	eng := &scriptedEngine{outcomes: []mob.Outcome{{Synthesis: verdictJSON, Consensus: true}}}
+
+	o := mobReviewRun(t, ops, git, llmFake, eng)
+	o.d.Cfg.POC = true
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	assert.GreaterOrEqual(t, indexOfPrefix(git.recorded(), "CommitFixup:"), 0,
+		"a mob-review card keeps its cleanup pass; git=%v", git.recorded())
+}
+
+func TestPOCAdoptedApprovalRunsNoCleanupPass(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{headSHA: "abc1234", committed: true}
+	client := &planLLM{}
+
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+	d.Cfg.POC = true
+
+	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+	o := newReviewRun(d, tc, 0)
+	o.body = formatApproval(approval{HeadSHA: "abc1234", Summary: "works", Fixes: []fix{
+		{File: "edge.go", Issue: "no test for an empty input", Suggestion: "add one", Severity: "minor"},
+	}})
+	o.verify = &verifyPlan{Source: verifySourceNone}
+
+	adopted, err := o.tryAdoptApproval(context.Background(), *o.verify)
+	require.NoError(t, err)
+	require.True(t, adopted)
+
+	assert.Zero(t, modelCallCount(client), "an adopted POC approval runs no fixer; tasks=%v", client.tasks)
+	assert.Equal(t, -1, indexOfPrefix(git.recorded(), "CommitFixup:"), "no cleanup fixup; git=%v", git.recorded())
 }
 
 // TestRunSpecialistsNoReviewerParksInstead pins that an empty review panel
@@ -6616,6 +6902,45 @@ func TestTryAdoptApproval_NoRecordReturnsFalse(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, adopted,
 		"adoption must return false when no approval record exists")
+}
+
+// TestTryAdoptApprovalRefusesAPOCApprovalOnAFullBarRun covers the flag being
+// switched off between runs: the recorded POC verdict cleared a lower bar,
+// so a full-bar run reviews again instead of adopting it.
+func TestTryAdoptApprovalRefusesAPOCApprovalOnAFullBarRun(t *testing.T) {
+	tests := []struct {
+		name        string
+		poc         bool
+		mob         MobConfig
+		wantAdopted bool
+	}{
+		{name: "poc run adopts it", poc: true, wantAdopted: true},
+		{name: "full-bar run refuses it", poc: false, wantAdopted: false},
+		{
+			name: "mob-review run on a poc project refuses it",
+			poc:  true, mob: MobConfig{Participants: 3, Review: true}, wantAdopted: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			client := &planLLM{}
+			d := reviewTestDeps(t, ops, &fakeGit{headSHA: "abc1234"}, client, reviewerRegistry())
+			d.Cfg.POC = tt.poc
+			d.Cfg.Mob = tt.mob
+
+			tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
+			o := newReviewRun(d, tc, 0)
+			o.body = formatApproval(approval{HeadSHA: "abc1234", Summary: "works", POC: true})
+			o.verify = &verifyPlan{Source: verifySourceNone}
+
+			adopted, err := o.tryAdoptApproval(context.Background(), *o.verify)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantAdopted, adopted)
+			assert.Zero(t, modelCallCount(client))
+		})
+	}
 }
 
 // TestTryAdoptApproval_NitOnlySkipsCleanupPass proves a recorded approval

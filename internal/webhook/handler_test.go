@@ -1682,6 +1682,29 @@ func TestBuildLaunchSpec_MaxCapabilityEnvAbsentWhenFalse(t *testing.T) {
 	}
 }
 
+// TestBuildLaunchSpec_POCEnv pins the POC relay: the payload flag becomes
+// CM_POC=true, and a production payload emits no CM_POC entry.
+func TestBuildLaunchSpec_POCEnv(t *testing.T) {
+	s := NewServer(Config{
+		APIKey:    "k",
+		Executor:  &fakeExecutor{},
+		Tracker:   executor.NewTracker(1),
+		LaunchEnv: LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"},
+	})
+
+	t.Run("poc", func(t *testing.T) {
+		spec := s.buildLaunchSpec(protocol.TriggerPayload{CardID: "C1", Project: "p", POC: true}, "corr", "")
+		assert.Contains(t, spec.Env, "CM_POC=true")
+	})
+
+	t.Run("production", func(t *testing.T) {
+		spec := s.buildLaunchSpec(protocol.TriggerPayload{CardID: "C1", Project: "p"}, "corr", "")
+		for _, e := range spec.Env {
+			assert.NotContains(t, e, "CM_POC=")
+		}
+	})
+}
+
 // TestBuildLaunchSpec_BestOfN pins the CM_BEST_OF_N env emission and pids-limit
 // scaling: BestOfN > 1 emits the env var and multiplies PidsLimit by N;
 // BestOfN <= 1 (the default) emits nothing and leaves PidsLimit unchanged. The

@@ -87,6 +87,13 @@ card fields set in ContextMatrix:
   path rather than failing the run, and mob session composes freely with a
   Best-of-N execute race.
 
+A project flagged as a **proof of concept** in ContextMatrix (`poc` on the
+trigger payload) runs its cards on a lighter bar: tests cover the main
+behaviour, and unless the card has mob review, one generic reviewer replaces
+the three specialists and non-blocking findings are reported rather than
+fixed. The verify gates are unchanged. See
+[`docs/orchestrator.md`](docs/orchestrator.md#poc-projects).
+
 The inner loop lives in the standalone `github.com/mhersson/contextmatrix-harness`
 module (`events`, `llm`, `tools`, `harness`, `redact`) - FSM-free and
 dependency-free, shared with the

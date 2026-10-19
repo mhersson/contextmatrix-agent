@@ -355,6 +355,55 @@ func TestExecuteCoderPromptBody(t *testing.T) {
 	})
 }
 
+// TestPOCTestScopeReachesPlannerAndCoderPrompts guards the wiring: the same
+// card yields a different task prompt with the POC flag on, at both call sites.
+func TestPOCTestScopeReachesPlannerAndCoderPrompts(t *testing.T) {
+	plannerPrompt := func(t *testing.T, poc bool) string {
+		t.Helper()
+
+		ops := &fakeOps{
+			taskContext: cmclient.TaskContext{Title: "Parent", Description: "body"},
+			createdIDs:  []string{"SUB-1", "SUB-2"},
+		}
+		llmFake := &planLLM{responses: []llm.Response{stopResp(goodPlanJSON, 0.01)}}
+		d := planTestDeps(ops, llmFake)
+		d.Cfg.POC = poc
+
+		require.NoError(t, runPlan(context.Background(), newRun(d, ops.taskContext)))
+		require.NotEmpty(t, llmFake.tasks)
+
+		return llmFake.tasks[0]
+	}
+
+	coderPrompt := func(t *testing.T, poc bool) string {
+		t.Helper()
+
+		ops := &fakeOps{}
+		llmFake := &planLLM{responses: []llm.Response{finishResp("feat: x", 0.01)}}
+		d := execTestDeps(ops, &fakeGit{committed: true}, llmFake)
+		d.Cfg.POC = poc
+
+		o := newExecRun(d, []subtaskRef{{
+			ID:     "SUB-1",
+			Title:  "Add health endpoint",
+			Body:   "do it",
+			Sizing: seedSizing("simple"),
+		}}, 0)
+		require.NoError(t, runExecute(context.Background(), o))
+		require.NotEmpty(t, llmFake.tasks)
+
+		return llmFake.tasks[0]
+	}
+
+	t.Run("planner prompt", func(t *testing.T) {
+		assert.NotEqual(t, plannerPrompt(t, false), plannerPrompt(t, true))
+	})
+
+	t.Run("coder prompt", func(t *testing.T) {
+		assert.NotEqual(t, coderPrompt(t, false), coderPrompt(t, true))
+	})
+}
+
 func TestExecuteFirstPushLeasesStaleBranch(t *testing.T) {
 	// Fresh run + stale remote branch: reconcile recorded staleRemoteTip, so the
 	// FIRST subtask push overwrites the stale branch with a force-with-lease, and

@@ -25,6 +25,9 @@ type approval struct {
 	// Fixes are the surviving fixes from the approving verdict, whether
 	// actionable (the cleanup pass will address them) or nit-only.
 	Fixes []fix `json:"fixes"`
+	// POC marks an approval a POC review made. A run entering review at the
+	// full bar never adopts it, so switching the flag off re-reviews the branch.
+	POC bool `json:"poc,omitempty"`
 }
 
 // recordApproval writes the approval section onto the parent card body, binding
@@ -50,7 +53,7 @@ func (o *run) recordApproval(ctx context.Context, summary string, fixes []fix) {
 		return
 	}
 
-	body := formatApproval(approval{HeadSHA: sha, Summary: summary, Fixes: fixes})
+	body := formatApproval(approval{HeadSHA: sha, Summary: summary, Fixes: fixes, POC: o.pocReview()})
 
 	o.recordSection(ctx, approvalHeading, body)
 }

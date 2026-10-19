@@ -679,6 +679,10 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 		env = append(env, "CM_MAX_CAPABILITY=true")
 	}
 
+	if p.POC {
+		env = append(env, "CM_POC=true")
+	}
+
 	// Emitted only when set: an older worker image ignores the pair and fails
 	// the clone of a missing base exactly as before.
 	if p.CreateBaseBranch {
