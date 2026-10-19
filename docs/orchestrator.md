@@ -262,6 +262,14 @@ the plan as the spec.
 
 ## POC projects
 
+ContextMatrix flags a project with `poc` on its project config and sets `poc`
+on every trigger payload it launches for that project
+(`protocol.TriggerPayload.POC`, contextmatrix-protocol v0.33.0); the agent
+never reads the project config itself. `serve` relays the flag as
+`CM_POC=true`, which the worker reads into `RunSpec.POC` and `Config.POC`. It
+is read once, at container start: a run in flight finishes with the setting
+it started with, and the next run of any card picks up a change.
+
 A card in a project flagged as a proof of concept runs with `Config.POC` set.
 The flag lowers the review and test bar and nothing else: models and tiers,
 the budget, turn limits, the review attempts cap, the verify gates, the

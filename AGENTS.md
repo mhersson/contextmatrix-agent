@@ -236,6 +236,10 @@ Summaries only - full detail lives in the reference documents above.
 14. **Repo grounding.** The workspace root's `AGENTS.md`/`CLAUDE.md` is
     injected verbatim into every model-driven phase; nested instruction files
     are enumerated as paths only, never embedded.
+15. **POC projects.** `TriggerPayload.POC` → `CM_POC` → `Config.POC`, read
+    once per run. Every POC card asks for main-behaviour tests only; without
+    mob review it also gets one generic reviewer, blockers-only fix requests
+    and no cleanup pass. The verdict code has no POC branch.
 
 ## Running and testing
 

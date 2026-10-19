@@ -12,7 +12,7 @@ require (
 	github.com/knadh/koanf/v2 v2.3.7
 	github.com/mhersson/contextmatrix-backendkit v0.7.0
 	github.com/mhersson/contextmatrix-harness v0.25.0
-	github.com/mhersson/contextmatrix-protocol v0.21.0
+	github.com/mhersson/contextmatrix-protocol v0.33.0
 	github.com/moby/moby/api v1.56.1
 	github.com/moby/moby/client v0.6.1
 	github.com/modelcontextprotocol/go-sdk v1.8.0
