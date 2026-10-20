@@ -188,6 +188,13 @@ type Config struct {
 	// default; an empty slice yields an empty list, never "everything".
 	ImageListFilters []string
 
+	// Build is copied into every /health answer.
+	Build protocol.BuildInfo
+
+	// ImageLabels reads LaunchEnv.BaseImage's revision label for /health; nil
+	// leaves worker_image_revision out.
+	ImageLabels webhookcore.ImageLabeler
+
 	LaunchEnv LaunchEnv
 
 	// NextAttempt returns the ordinal of the run about to start for a card: 1
@@ -288,6 +295,9 @@ func NewServer(cfg Config) *Server {
 		MaxConcurrent:     cfg.MaxConcurrent,
 		Images:            cfg.Images,
 		ImageListFilters:  cfg.ImageListFilters,
+		Build:             cfg.Build,
+		// Only the default image is inspected, never a payload's worker_image.
+		WorkerImageRevision: webhookcore.ImageRevisionHook(cfg.ImageLabels, cfg.LaunchEnv.BaseImage),
 	}
 	if cfg.Metrics != nil {
 		coreCfg.Metrics = cfg.Metrics.Metrics

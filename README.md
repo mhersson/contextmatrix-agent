@@ -140,7 +140,7 @@ export LLM_API_KEY=<your-api-key>
    SHA256-verified.
 
    ```bash
-   make docker-worker          # tags contextmatrix-agent-worker:dev (full)
+   make docker-worker          # tags contextmatrix-agent-worker:dev (full), labelled with the commit
    ```
 
    The image ships in five variants, selectable per project via the board's
@@ -244,6 +244,23 @@ outlast it. A second signal skips the wait.
 > for a user service - either pre-create `/var/run/cm-agent` and `chown` it to
 > your user, or set `secrets_dir` to a path under your home (e.g.
 > `~/.cm-agent/secrets`); the unit whitelists both.
+
+### Health and build info
+
+`GET /health` is unauthenticated and returns `ok`, `running_containers`,
+`max_concurrent`, `build` and `worker_image_revision`:
+
+- `build` holds `version` (the exact tag the binary was built on, else
+  omitted), `commit` (the full sha), `build_time` (RFC 3339, UTC) and
+  `changes`: up to 20 merged PRs, newest first, leaving out Dependabot PRs and
+  the `ci`, `docs`, `chore`, `build`, `test`, `refactor` and `style` types.
+  `make build` and `make install` stamp these. A bare `go build` reports no
+  commit and embeds whatever `internal/buildinfo/history/merges.log` the tree
+  holds, so in a fresh clone it reports `changes: []`.
+- `worker_image_revision` is `base_image`'s `org.opencontainers.image.revision`
+  label, which `make docker-worker` and `make docker-worker-variants` stamp. It
+  is omitted when the image is not local, has no label, or Docker does not
+  answer within half a second. A per-project `worker_image` is not inspected.
 
 ## Commands
 
