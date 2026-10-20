@@ -99,6 +99,14 @@ type fakeGates struct {
 	findPRURLErr error
 	mergeErr     error
 
+	ciConfigFiles []string
+	ciConfigErr   error
+	baseRef       string
+	baseActive    bool
+	baseErr       error
+	mergedActive  bool
+	mergedErr     error
+
 	calls []string
 	i     int
 	r     int
@@ -267,6 +275,33 @@ func (f *fakeGates) MergePullRequest(_ context.Context, prURL string) error {
 	defer f.mu.Unlock()
 
 	return f.mergeErr
+}
+
+func (f *fakeGates) CIConfigFiles(_ context.Context, prURL string) ([]string, error) {
+	f.record("CIConfigFiles:" + prURL)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.ciConfigFiles, f.ciConfigErr
+}
+
+func (f *fakeGates) BaseCIActivity(_ context.Context, prURL string) (string, bool, error) {
+	f.record("BaseCIActivity:" + prURL)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.baseRef, f.baseActive, f.baseErr
+}
+
+func (f *fakeGates) LastMergedCIActivity(_ context.Context, prURL string) (bool, error) {
+	f.record("LastMergedCIActivity:" + prURL)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.mergedActive, f.mergedErr
 }
 
 // compile-time assertion that the fake satisfies the consumer interface.

@@ -85,6 +85,18 @@ type PRGates interface {
 	// whose recorded PR creation failed - a PR may exist anyway.
 	FindPRURL(ctx context.Context) (string, error)
 
+	// CIConfigFiles lists the known CI config in the PR head tree (a directory
+	// as "name/"); empty with a nil error when there is none.
+	CIConfigFiles(ctx context.Context, prURL string) ([]string, error)
+
+	// BaseCIActivity reports the PR's base branch and whether its head commit
+	// carries any check run or commit status.
+	BaseCIActivity(ctx context.Context, prURL string) (base string, active bool, err error)
+
+	// LastMergedCIActivity reports whether the newest PR merged into the same
+	// base has any check run or commit status on its head SHA.
+	LastMergedCIActivity(ctx context.Context, prURL string) (bool, error)
+
 	// MergePullRequest merges the PR into its base branch with a merge commit.
 	// The error carries gh's verbatim text (branch protection, required
 	// reviews, conflicts) so the caller can put it on the card.
