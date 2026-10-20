@@ -1,4 +1,4 @@
-.PHONY: build test test-race fmt lint docker-worker docker-worker-variants
+.PHONY: build install history test test-race fmt lint docker-worker docker-worker-variants
 
 # Pinned worker toolchain versions. Override on the command line
 # if a newer version has been vetted, e.g.
@@ -22,6 +22,14 @@ YARN_VERSION          ?= 1.22.22
 MAVEN_VERSION         ?= 3.9.16
 MAVEN_SHA512          ?= 831a8591fe20c8243b1dbe7d71e3244f31d1665b0804b2e825e38cbbe5ce0cafb8338851f90780735568773e0a6cd07bbec107cda0b896b008b861075358b6f6
 
+# Build info stamped into the binary and read back on /health.
+VERSION    ?= $(shell git describe --tags --exact-match 2>/dev/null)
+GIT_COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null)
+BUILD_TIME ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+BUILDINFO  := github.com/mhersson/contextmatrix-agent/internal/buildinfo
+LDFLAGS    := -X $(BUILDINFO).version=$(VERSION) -X $(BUILDINFO).commit=$(GIT_COMMIT) -X $(BUILDINFO).buildTime=$(BUILD_TIME)
+HISTORY    := internal/buildinfo/history/merges.log
+
 # Build args shared by every worker-image target.
 WORKER_BUILD_ARGS = \
 	--build-arg GO_VERSION=$(GO_VERSION) \
@@ -41,11 +49,15 @@ WORKER_BUILD_ARGS = \
 	--build-arg MAVEN_VERSION=$(MAVEN_VERSION) \
 	--build-arg MAVEN_SHA512=$(MAVEN_SHA512)
 
-build:
+# Rerun on every build because HEAD moves; outside a git repo it leaves an
+# empty file, so a build never fails for want of history.
+history:
+	git log --no-show-signature --first-parent --merges -n 100 --format=%cI%x1f%s%x1f%b%x1e > $(HISTORY) 2>/dev/null || : > $(HISTORY)
+build: history
 	go build ./...
-	go build -trimpath -o contextmatrix-agent ./cmd/contextmatrix-agent
-install:
-	go install ./cmd/contextmatrix-agent
+	go build -trimpath -ldflags "$(LDFLAGS)" -o contextmatrix-agent ./cmd/contextmatrix-agent
+install: history
+	go install -ldflags "$(LDFLAGS)" ./cmd/contextmatrix-agent
 test:
 	go test ./...
 test-race:

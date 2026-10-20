@@ -13,3 +13,6 @@ eval-out
 *-RESULTS.md
 capabilities-*.json
 capabilities-*.md
+
+# Worker images carry no build history.
+internal/buildinfo/history/merges.log
