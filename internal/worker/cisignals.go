@@ -9,21 +9,10 @@ import (
 	"time"
 )
 
-// The CI-config table (root files and dirs plus the .circleci and
-// .github/workflows rules) is the one place the worker names CI systems: a repo
-// carrying none of it and showing no CI activity is treated as having no CI.
-var (
-	ciConfigRootFiles = []string{
-		"Jenkinsfile", ".travis.yml", "azure-pipelines.yml", ".drone.yml", ".woodpecker.yml",
-		"appveyor.yml", ".appveyor.yml", ".cirrus.yml", ".woodpecker.yaml",
-		"cloudbuild.yaml", "cloudbuild.yml", "buildspec.yml",
-	}
-	ciConfigRootDirs = []string{".buildkite", ".woodpecker", ".semaphore", ".teamcity"}
-)
-
+// The no-CI probe reads GitHub Actions workflow files only: every other CI
+// service reports to GitHub as check runs or commit statuses, which the base
+// and merged-PR signals already see.
 const (
-	ciCircleDir      = ".circleci"
-	ciCircleFile     = "config.yml"
 	ciGitHubDir      = ".github"
 	ciWorkflowsDir   = "workflows"
 	mergedPullsLimit = "30"
@@ -68,7 +57,7 @@ type gitTreeEntry struct {
 }
 
 // readTree reads one git tree. A truncated listing is an error: absence of a
-// CI file cannot be concluded from a partial tree.
+// workflow file cannot be concluded from a partial tree.
 func (p *PRCreator) readTree(ctx context.Context, owner, repo, sha string) ([]gitTreeEntry, error) {
 	out, err := p.runGH(ctx, "", false, treeArgs(owner, repo, sha)...)
 	if err != nil {
@@ -101,18 +90,18 @@ func findEntry(entries []gitTreeEntry, name, typ string) (gitTreeEntry, bool) {
 	return gitTreeEntry{}, false
 }
 
-// CIConfigFiles lists the known CI config present in the PR head tree. A
-// directory entry is reported with a trailing slash.
-func (p *PRCreator) CIConfigFiles(ctx context.Context, prURL string) ([]string, error) {
-	files, err := p.ciConfigFiles(ctx, prURL)
+// WorkflowFiles lists the GitHub Actions workflow files
+// (.github/workflows/*.yml|*.yaml) in the PR head tree.
+func (p *PRCreator) WorkflowFiles(ctx context.Context, prURL string) ([]string, error) {
+	files, err := p.workflowFilesOf(ctx, prURL)
 	if err != nil {
-		return nil, fmt.Errorf("gh api ci config: %w", err)
+		return nil, fmt.Errorf("gh api workflow files: %w", err)
 	}
 
 	return files, nil
 }
 
-func (p *PRCreator) ciConfigFiles(ctx context.Context, prURL string) ([]string, error) {
+func (p *PRCreator) workflowFilesOf(ctx context.Context, prURL string) ([]string, error) {
 	owner, repo, _, err := parsePRPath(prURL)
 	if err != nil {
 		return nil, err
@@ -128,37 +117,7 @@ func (p *PRCreator) ciConfigFiles(ctx context.Context, prURL string) ([]string, 
 		return nil, err
 	}
 
-	var found []string
-
-	for _, name := range ciConfigRootFiles {
-		if _, ok := findEntry(root, name, "blob"); ok {
-			found = append(found, name)
-		}
-	}
-
-	for _, name := range ciConfigRootDirs {
-		if _, ok := findEntry(root, name, "tree"); ok {
-			found = append(found, name+"/")
-		}
-	}
-
-	if dir, ok := findEntry(root, ciCircleDir, "tree"); ok {
-		entries, err := p.readTree(ctx, owner, repo, dir.SHA)
-		if err != nil {
-			return nil, err
-		}
-
-		if _, ok := findEntry(entries, ciCircleFile, "blob"); ok {
-			found = append(found, ciCircleDir+"/"+ciCircleFile)
-		}
-	}
-
-	workflows, err := p.workflowFiles(ctx, owner, repo, root)
-	if err != nil {
-		return nil, err
-	}
-
-	return append(found, workflows...), nil
+	return p.workflowFiles(ctx, owner, repo, root)
 }
 
 // workflowFiles returns the .github/workflows/*.yml|*.yaml files of root.

@@ -1744,18 +1744,18 @@ func classifyChecks(checks []CheckResult) ciBuckets {
 	return b
 }
 
-// noCIConfigured reports whether the PR's repo shows no CI signal: no CI config
-// in the PR head tree and no checks or statuses on the base head or the last
-// merged PR. A lookup error answers false so the grace window still applies.
+// noCIConfigured reports whether the PR's repo shows no CI signal: no workflow
+// files in the PR head tree and no checks or statuses on the base head or the
+// last merged PR. A lookup error answers false so the grace window still applies.
 func (o *run) noCIConfigured(ctx context.Context, prURL string) (base string, ok bool) {
 	warn := func(what string, err error) {
 		slog.Warn("pr_gates: CI signal lookup failed; keeping the no-checks grace",
 			"card_id", o.d.Cfg.CardID, "pr_url", prURL, "signal", what, "error", err)
 	}
 
-	files, err := o.d.PRGates.CIConfigFiles(ctx, prURL)
+	files, err := o.d.PRGates.WorkflowFiles(ctx, prURL)
 	if err != nil {
-		warn("config files", err)
+		warn("workflow files", err)
 
 		return "", false
 	}
@@ -1860,7 +1860,7 @@ func (o *run) ciGate(ctx context.Context, prURL string, st *gatesState) error {
 				if base, ok := o.noCIConfigured(ctx, prURL); ok {
 					st.Detail = ""
 
-					o.gateNote(ctx, "ci", fmt.Sprintf("pr_gates: no CI configured (no CI config files, no checks on %s or the last merged PR); gate passes", base), nil)
+					o.gateNote(ctx, "ci", fmt.Sprintf("pr_gates: no CI configured (no workflow files, no checks on %s or the last merged PR); gate passes", base), nil)
 
 					return nil
 				}

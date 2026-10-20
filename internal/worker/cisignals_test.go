@@ -67,7 +67,7 @@ func subtree(path, sha string) string {
 	return fmt.Sprintf(`{"path":%q,"type":"tree","sha":%q}`, path, sha)
 }
 
-func TestCIConfigFiles(t *testing.T) {
+func TestWorkflowFiles(t *testing.T) {
 	prView := ghRule{match: "pr view", stdout: ciPRViewReply}
 	root := func(entries ...string) ghRule {
 		return ghRule{match: "git/trees/abc123", stdout: treeJSON(entries...)}
@@ -79,32 +79,6 @@ func TestCIConfigFiles(t *testing.T) {
 		want    []string
 		wantErr string
 	}{
-		{"jenkinsfile", []ghRule{prView, root(blob("Jenkinsfile"))}, []string{"Jenkinsfile"}, ""},
-		{"travis", []ghRule{prView, root(blob(".travis.yml"))}, []string{".travis.yml"}, ""},
-		{"azure", []ghRule{prView, root(blob("azure-pipelines.yml"))}, []string{"azure-pipelines.yml"}, ""},
-		{"drone", []ghRule{prView, root(blob(".drone.yml"))}, []string{".drone.yml"}, ""},
-		{"woodpecker file", []ghRule{prView, root(blob(".woodpecker.yml"))}, []string{".woodpecker.yml"}, ""},
-		{"appveyor", []ghRule{prView, root(blob("appveyor.yml"))}, []string{"appveyor.yml"}, ""},
-		{"dot appveyor", []ghRule{prView, root(blob(".appveyor.yml"))}, []string{".appveyor.yml"}, ""},
-		{"cirrus", []ghRule{prView, root(blob(".cirrus.yml"))}, []string{".cirrus.yml"}, ""},
-		{"woodpecker yaml", []ghRule{prView, root(blob(".woodpecker.yaml"))}, []string{".woodpecker.yaml"}, ""},
-		{"cloudbuild yaml", []ghRule{prView, root(blob("cloudbuild.yaml"))}, []string{"cloudbuild.yaml"}, ""},
-		{"cloudbuild yml", []ghRule{prView, root(blob("cloudbuild.yml"))}, []string{"cloudbuild.yml"}, ""},
-		{"buildspec", []ghRule{prView, root(blob("buildspec.yml"))}, []string{"buildspec.yml"}, ""},
-		{"semaphore dir", []ghRule{prView, root(subtree(".semaphore", "t1"))}, []string{".semaphore/"}, ""},
-		{"teamcity dir", []ghRule{prView, root(subtree(".teamcity", "t1"))}, []string{".teamcity/"}, ""},
-		{"near-miss backup blob", []ghRule{prView, root(blob("appveyor.yml.bak"))}, nil, ""},
-		{"buildkite dir", []ghRule{prView, root(subtree(".buildkite", "t1"))}, []string{".buildkite/"}, ""},
-		{"woodpecker dir", []ghRule{prView, root(subtree(".woodpecker", "t1"))}, []string{".woodpecker/"}, ""},
-		{
-			"circleci",
-			[]ghRule{
-				prView, root(subtree(".circleci", "t1")),
-				{match: "git/trees/t1", stdout: treeJSON(blob("config.yml"))},
-			},
-			[]string{".circleci/config.yml"},
-			"",
-		},
 		{
 			"github workflow yml",
 			[]ghRule{
@@ -144,14 +118,13 @@ func TestCIConfigFiles(t *testing.T) {
 			nil, "",
 		},
 		{
-			"circleci other file",
+			"other CI config is no signal",
 			[]ghRule{
-				prView, root(subtree(".circleci", "t1")),
-				{match: "git/trees/t1", stdout: treeJSON(blob("other.yml"))},
+				prView, root(blob("Jenkinsfile"), subtree(".circleci", "t1")),
+				{match: "git/trees/t1", stdout: treeJSON(blob("config.yml"))},
 			},
 			nil, "",
 		},
-		{"lookalike blob", []ghRule{prView, root(blob("jenkinsfile.txt"))}, nil, ""},
 		{
 			"root 404",
 			[]ghRule{prView, {match: "git/trees/abc123", stderr: "gh: Not Found (HTTP 404)", code: 1}},
@@ -170,7 +143,7 @@ func TestCIConfigFiles(t *testing.T) {
 		{
 			"subtree failure",
 			[]ghRule{
-				prView, root(subtree(".circleci", "t1")),
+				prView, root(subtree(".github", "t1")),
 				{match: "git/trees/t1", stderr: "HTTP 502", code: 1},
 			},
 			nil, "502",
@@ -189,7 +162,7 @@ func TestCIConfigFiles(t *testing.T) {
 
 			pc := NewPRCreator(t.TempDir(), "", "", "")
 
-			got, err := pc.CIConfigFiles(t.Context(), ciTestPR)
+			got, err := pc.WorkflowFiles(t.Context(), ciTestPR)
 			if tc.wantErr != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.wantErr)

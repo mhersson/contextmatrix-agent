@@ -108,9 +108,8 @@ inspection), never a built-in ecosystem list.
 The only sanctioned ecosystem knowledge is the verify-resolution convention
 tables (`detectRows` in `internal/orchestrator/verify.go`), the nested verify
 scan's skip list (`nestedSkipDirs` in `verify_nested.go`), the checkpoint
-environment probes (`envProbes` in `envfacts.go`), and the CI gate's CI-config
-table (root files and dirs plus the `.circleci` and `.github/workflows` rules
-in `internal/worker/cisignals.go`).
+environment probes (`envProbes` in `envfacts.go`), and the CI gate's
+workflow-file probe (`.github/workflows` in `internal/worker/cisignals.go`).
 
 ## Tech stack
 

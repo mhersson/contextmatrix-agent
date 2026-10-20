@@ -85,9 +85,10 @@ type PRGates interface {
 	// whose recorded PR creation failed - a PR may exist anyway.
 	FindPRURL(ctx context.Context) (string, error)
 
-	// CIConfigFiles lists the known CI config in the PR head tree (a directory
-	// as "name/"); empty with a nil error when there is none.
-	CIConfigFiles(ctx context.Context, prURL string) ([]string, error)
+	// WorkflowFiles lists the GitHub Actions workflow files
+	// (`.github/workflows/*.yml|*.yaml`) in the PR head tree; empty when there
+	// are none.
+	WorkflowFiles(ctx context.Context, prURL string) ([]string, error)
 
 	// BaseCIActivity reports the PR's base branch and whether its head commit
 	// carries any check run or commit status.

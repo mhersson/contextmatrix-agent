@@ -99,13 +99,13 @@ type fakeGates struct {
 	findPRURLErr error
 	mergeErr     error
 
-	ciConfigFiles []string
-	ciConfigErr   error
-	baseRef       string
-	baseActive    bool
-	baseErr       error
-	mergedActive  bool
-	mergedErr     error
+	workflowFiles    []string
+	workflowFilesErr error
+	baseRef          string
+	baseActive       bool
+	baseErr          error
+	mergedActive     bool
+	mergedErr        error
 
 	calls []string
 	i     int
@@ -277,13 +277,13 @@ func (f *fakeGates) MergePullRequest(_ context.Context, prURL string) error {
 	return f.mergeErr
 }
 
-func (f *fakeGates) CIConfigFiles(_ context.Context, prURL string) ([]string, error) {
-	f.record("CIConfigFiles:" + prURL)
+func (f *fakeGates) WorkflowFiles(_ context.Context, prURL string) ([]string, error) {
+	f.record("WorkflowFiles:" + prURL)
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	return f.ciConfigFiles, f.ciConfigErr
+	return f.workflowFiles, f.workflowFilesErr
 }
 
 func (f *fakeGates) BaseCIActivity(_ context.Context, prURL string) (string, bool, error) {
@@ -1214,7 +1214,7 @@ func TestCIGate_NoCISignalsPassesAtOnce(t *testing.T) {
 
 	calls := gates.recorded()
 	assert.Equal(t, 1, countCalls(calls, "Checks:"+gatePRURL), "calls=%v", calls)
-	assert.Equal(t, 1, countCalls(calls, "CIConfigFiles:"+gatePRURL), "calls=%v", calls)
+	assert.Equal(t, 1, countCalls(calls, "WorkflowFiles:"+gatePRURL), "calls=%v", calls)
 	assert.Equal(t, 1, countCalls(calls, "BaseCIActivity:"+gatePRURL), "calls=%v", calls)
 	assert.Equal(t, 1, countCalls(calls, "LastMergedCIActivity:"+gatePRURL), "calls=%v", calls)
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
@@ -1228,10 +1228,10 @@ func TestCIGate_CISignalsKeepTheGrace(t *testing.T) {
 		name  string
 		setup func(*fakeGates)
 	}{
-		{"config file", func(g *fakeGates) { g.ciConfigFiles = []string{"Jenkinsfile"} }},
+		{"workflow file", func(g *fakeGates) { g.workflowFiles = []string{".github/workflows/ci.yml"} }},
 		{"base activity", func(g *fakeGates) { g.baseActive = true }},
 		{"merged activity", func(g *fakeGates) { g.mergedActive = true }},
-		{"config read error", func(g *fakeGates) { g.ciConfigErr = errors.New("HTTP 502") }},
+		{"workflow read error", func(g *fakeGates) { g.workflowFilesErr = errors.New("HTTP 502") }},
 		{"base read error", func(g *fakeGates) { g.baseErr = errors.New("HTTP 502") }},
 		{"merged read error", func(g *fakeGates) { g.mergedErr = errors.New("HTTP 502") }},
 	}
@@ -1253,7 +1253,7 @@ func TestCIGate_CISignalsKeepTheGrace(t *testing.T) {
 			calls := gates.recorded()
 			assert.GreaterOrEqual(t, countCalls(calls, "Checks:"+gatePRURL), 2,
 				"the gate waits out the grace; calls=%v", calls)
-			assert.Equal(t, 1, countCalls(calls, "CIConfigFiles:"+gatePRURL),
+			assert.Equal(t, 1, countCalls(calls, "WorkflowFiles:"+gatePRURL),
 				"one probe per gate entry; calls=%v", calls)
 			assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
 			assert.Zero(t, modelCallCount(client))
