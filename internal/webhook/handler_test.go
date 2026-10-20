@@ -1286,6 +1286,83 @@ func TestHealth_Unauthenticated(t *testing.T) {
 	assert.Equal(t, 7, hr.MaxConcurrent)
 }
 
+// fakeImageLabeler records the refs it is asked for. With block set it waits
+// for the context to end, as a hung Docker daemon would.
+type fakeImageLabeler struct {
+	labels map[string]string
+	block  bool
+	refs   []string
+}
+
+func (f *fakeImageLabeler) ImageLabels(ctx context.Context, ref string) (map[string]string, error) {
+	f.refs = append(f.refs, ref)
+
+	if f.block {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(5 * time.Second):
+			return nil, errors.New("lookup context never ended")
+		}
+	}
+
+	return f.labels, nil
+}
+
+func newHealthServer(t *testing.T, build protocol.BuildInfo, labeler webhookcore.ImageLabeler) *Server {
+	t.Helper()
+
+	return NewServer(Config{
+		Tracker:     executor.NewTracker(1),
+		LaunchEnv:   LaunchEnv{BaseImage: "base:image"},
+		Build:       build,
+		ImageLabels: labeler,
+	})
+}
+
+func getHealth(t *testing.T, s *Server) (*httptest.ResponseRecorder, protocol.HealthResponse) {
+	t.Helper()
+
+	w := httptest.NewRecorder()
+	s.Routes().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/health", nil))
+
+	var hr protocol.HealthResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &hr))
+
+	return w, hr
+}
+
+func TestHealth_ReportsBuildAndWorkerImageRevision(t *testing.T) {
+	build := protocol.BuildInfo{
+		Commit:  "0123456789abcdef0123456789abcdef01234567",
+		Changes: []protocol.Change{{Number: 236, Kind: protocol.ChangeKindFix, Title: "x", MergedAt: "2026-10-20T08:00:00Z"}},
+	}
+	labeler := &fakeImageLabeler{labels: map[string]string{
+		webhookcore.ImageRevisionLabel: "89abcdef0123456789abcdef0123456789abcdef",
+	}}
+
+	w, hr := getHealth(t, newHealthServer(t, build, labeler))
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, &build, hr.Build)
+	assert.Equal(t, "89abcdef0123456789abcdef0123456789abcdef", hr.WorkerImageRevision)
+	assert.Equal(t, []string{"base:image"}, labeler.refs, "only the default worker image is inspected")
+}
+
+func TestHealth_WorkerImageRevisionBoundedWhenDockerHangs(t *testing.T) {
+	labeler := &fakeImageLabeler{block: true}
+	s := newHealthServer(t, protocol.BuildInfo{}, labeler)
+
+	start := time.Now()
+	w, hr := getHealth(t, s)
+	elapsed := time.Since(start)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Empty(t, hr.WorkerImageRevision)
+	assert.Less(t, elapsed, 2*time.Second)
+	assert.Equal(t, []string{"base:image"}, labeler.refs)
+}
+
 func TestReadyz_OKAndDraining(t *testing.T) {
 	h := newHarness(t, 4)
 

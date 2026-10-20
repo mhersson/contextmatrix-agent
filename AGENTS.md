@@ -61,6 +61,7 @@ internal/callback/   → status callbacks to /api/agent/status; VerifyAutonomous
 internal/cmclient/   → MCP client for CM card operations (one agent identity per card)
 internal/filelog/    → per-card raw container-output file logs (<log_dir>/<project>/<card_id>.log; empty log_dir no-ops)
 internal/metrics/    → thin wrapper over backendkit's shared metrics bundle (cm_agent_* collectors, NormalizeEndpoint label allowlist); keeps the agent-only callback-retries counter
+internal/buildinfo/  → the build /health reports: ldflags-stamped version, commit and build time plus the embedded merge history (history/merges.log, parsed by protocol's changelog)
 
 internal/kata/       → embedded throwaway kata fixture used by tests
 
@@ -245,7 +246,7 @@ Summaries only - full detail lives in the reference documents above.
 ## Running and testing
 
 ```bash
-make build          # go build ./... + the contextmatrix-agent binary
+make build          # write the merge history, go build ./... + the stamped contextmatrix-agent binary
 make test           # go test ./...
 make test-race      # CGO_ENABLED=1 go test -race ./...
 make lint           # golangci-lint run
@@ -265,7 +266,8 @@ keep it clean.
 
 These are gitignored point-in-time records - never commit them: `*-RESULTS.md`,
 `capabilities-*.json`, `capabilities-*.md`, `transcripts/`, `eval-out/`,
-`.envrc`. Nothing model-related is embedded in the binary: priors, favorites,
+`.envrc`, and `internal/buildinfo/history/merges.log`, which `make build` and
+`make install` rewrite from `git log` for the binary to embed. Nothing model-related is embedded in the binary: priors, favorites,
 the blacklist, the per-role tier ladders and the price headroom all arrive at
 run start from CM's `SelectionContext` payload (`registry.FromSelection`), so
 there is no tracked baseline to keep in sync.

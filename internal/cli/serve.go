@@ -24,6 +24,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mhersson/contextmatrix-agent/internal/attempt"
+	"github.com/mhersson/contextmatrix-agent/internal/buildinfo"
 	"github.com/mhersson/contextmatrix-agent/internal/callback"
 	"github.com/mhersson/contextmatrix-agent/internal/config"
 	"github.com/mhersson/contextmatrix-agent/internal/executor"
@@ -196,6 +197,8 @@ func runServe(ctx context.Context, configPath string) error {
 		SessionSecrets:   registry,
 		Images:           exec,
 		ImageListFilters: cfg.ImageListFilters,
+		Build:            buildinfo.Info(),
+		ImageLabels:      exec,
 		LaunchEnv:        launchEnv(cfg, filepath.Join(cfg.SecretsDir, "shared")),
 		NextAttempt:      files.NextAttempt,
 		Replay:           replay,

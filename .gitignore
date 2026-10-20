@@ -9,3 +9,6 @@ eval-out/
 *-RESULTS.md
 capabilities-*.json
 capabilities-*.md
+
+# Build history written by make build; embedded by internal/buildinfo.
+internal/buildinfo/history/merges.log

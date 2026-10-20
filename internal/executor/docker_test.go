@@ -16,9 +16,11 @@ import (
 
 	"github.com/mhersson/contextmatrix-agent/internal/metrics"
 	"github.com/mhersson/contextmatrix-backendkit/webhookcore"
+	dockerspec "github.com/moby/docker-image-spec/specs-go/v1"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/image"
 	"github.com/moby/moby/client"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -764,4 +766,69 @@ func TestPumpCountsUnbridgedLinesAsActivity(t *testing.T) {
 	<-pumpDone
 
 	assert.False(t, tracker.LastActivity("p", "A").IsZero())
+}
+
+// inspectDocker fakes ImageInspect only, recording the ref it was asked for.
+type inspectDocker struct {
+	client.APIClient
+
+	res    client.ImageInspectResult
+	err    error
+	gotRef string
+}
+
+func (s *inspectDocker) ImageInspect(
+	_ context.Context, ref string, _ ...client.ImageInspectOption,
+) (client.ImageInspectResult, error) {
+	s.gotRef = ref
+
+	return s.res, s.err
+}
+
+func TestImageLabels(t *testing.T) {
+	errNoSuchImage := errors.New("no such image")
+	labels := map[string]string{webhookcore.ImageRevisionLabel: "0123456789abcdef0123456789abcdef01234567"}
+
+	tests := []struct {
+		name    string
+		res     client.ImageInspectResult
+		err     error
+		want    map[string]string
+		wantErr error
+	}{
+		{
+			name: "labels present",
+			res: client.ImageInspectResult{InspectResponse: image.InspectResponse{
+				Config: &dockerspec.DockerOCIImageConfig{ImageConfig: ocispec.ImageConfig{Labels: labels}},
+			}},
+			want: labels,
+		},
+		{
+			name: "no config",
+			res:  client.ImageInspectResult{InspectResponse: image.InspectResponse{Config: nil}},
+		},
+		{
+			name:    "inspect fails",
+			err:     errNoSuchImage,
+			wantErr: errNoSuchImage,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			docker := &inspectDocker{res: tc.res, err: tc.err}
+			e := &DockerExecutor{docker: docker, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+			got, err := e.ImageLabels(context.Background(), "base:image")
+
+			assert.Equal(t, "base:image", docker.gotRef)
+			assert.Equal(t, tc.want, got)
+
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }
