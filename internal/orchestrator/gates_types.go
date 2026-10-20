@@ -85,6 +85,20 @@ type PRGates interface {
 	// whose recorded PR creation failed - a PR may exist anyway.
 	FindPRURL(ctx context.Context) (string, error)
 
+	// WorkflowFiles lists the GitHub Actions workflow files
+	// (`.github/workflows/*.yml|*.yaml`) in the PR head tree; empty when there
+	// are none.
+	WorkflowFiles(ctx context.Context, prURL string) ([]string, error)
+
+	// BaseCIActivity reports the PR's base branch and whether its head commit
+	// carries any check run or commit status.
+	BaseCIActivity(ctx context.Context, prURL string) (base string, active bool, err error)
+
+	// LastMergedCIActivity reports whether the newest PR merged into the same
+	// base has any check run or commit status on its head SHA. A base with no
+	// merged PR falls back to the default branch's newest merged PR.
+	LastMergedCIActivity(ctx context.Context, prURL string) (bool, error)
+
 	// MergePullRequest merges the PR into its base branch with a merge commit.
 	// The error carries gh's verbatim text (branch protection, required
 	// reviews, conflicts) so the caller can put it on the card.

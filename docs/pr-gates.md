@@ -47,6 +47,23 @@ card detail instead of looping to the wait deadline. A transient poll failure
 keeps looping and, if the wait runs out, its last error text is the park
 detail.
 
+A first poll that shows no checks starts a 3-minute grace window for the first
+check to register. The gate skips the window and passes at once when the repo
+shows no CI signal at all: no workflow files in the PR head tree (`*.yml` or
+`*.yaml` files in `.github/workflows`), no check runs or commit statuses on the
+base branch head, and none on the head of the newest PR merged into the same
+base (among the 30 most recently updated closed PRs). A base with no merged PR
+(a freshly cut one) uses the newest merged PR of the repo's default branch
+instead. Other CI services are seen through the check runs and commit statuses
+they report to GitHub, which is why no other config files are read. Any signal,
+or a failed read of one, keeps the grace (external CI, or a PR adding the
+repo's first workflow). CI with no workflow files that has reported to GitHub
+neither on the base head nor on that newest merged PR still gets the fast pass,
+for example an external service enabled only for PRs on a repo whose recent
+merged PRs carry no checks. The reads use the gate's existing permissions:
+Contents: read, Pull requests: read, Checks or, in fallback, Actions: read, and
+Commit statuses: read.
+
 A fix round is started only with enough wait left for the coder run, the push,
 and a fresh CI cycle: at least 5 minutes and, once the gate has watched one
 cycle settle, that cycle plus a 2-minute coder allowance - so a repo whose CI
@@ -165,8 +182,9 @@ only read an empty result.
 With `merge_pr` (human-only, meaningful only with `await_ci`), the phase merges
 the PR into its base branch with a merge commit (`gh pr merge <url> --merge`)
 after every enabled gate passed, then completes the card. The CI gate's own
-pass rules decide: a repo with no checks passes after the grace window and is
-merged like any other pass. Having checks is the user's responsibility.
+pass rules decide: a repo with no checks passes (at once when the repo shows no
+CI signals, else after the grace window) and is merged like any other pass.
+Having checks is the user's responsibility.
 
 The merge is recorded as `- Merge: merged` in the `## PR Gates` section, so a
 resumed run never merges twice. A refused merge - branch protection, required

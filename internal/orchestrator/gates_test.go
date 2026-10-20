@@ -99,6 +99,14 @@ type fakeGates struct {
 	findPRURLErr error
 	mergeErr     error
 
+	workflowFiles    []string
+	workflowFilesErr error
+	baseRef          string
+	baseActive       bool
+	baseErr          error
+	mergedActive     bool
+	mergedErr        error
+
 	calls []string
 	i     int
 	r     int
@@ -267,6 +275,33 @@ func (f *fakeGates) MergePullRequest(_ context.Context, prURL string) error {
 	defer f.mu.Unlock()
 
 	return f.mergeErr
+}
+
+func (f *fakeGates) WorkflowFiles(_ context.Context, prURL string) ([]string, error) {
+	f.record("WorkflowFiles:" + prURL)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.workflowFiles, f.workflowFilesErr
+}
+
+func (f *fakeGates) BaseCIActivity(_ context.Context, prURL string) (string, bool, error) {
+	f.record("BaseCIActivity:" + prURL)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.baseRef, f.baseActive, f.baseErr
+}
+
+func (f *fakeGates) LastMergedCIActivity(_ context.Context, prURL string) (bool, error) {
+	f.record("LastMergedCIActivity:" + prURL)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.mergedActive, f.mergedErr
 }
 
 // compile-time assertion that the fake satisfies the consumer interface.
@@ -1075,14 +1110,12 @@ func TestPRGates_MergeDuringTeardownDoesNotPark(t *testing.T) {
 	assert.NotContains(t, ops.lastBody(), "- Merge: merged")
 }
 
-// TestPRGates_NoChecksPassStillMerges: a repo without CI passes the gate after
-// the grace window and is merged like any other pass - having checks is the
-// user's responsibility, not the gate's.
+// TestPRGates_NoChecksPassStillMerges: a repo without CI passes the gate and is
+// merged like any other pass - having checks is the user's responsibility, not
+// the gate's.
 func TestPRGates_NoChecksPassStillMerges(t *testing.T) {
-	shrinkNoChecksGrace(t, 5*time.Millisecond)
-
 	ops := &fakeOps{}
-	gates := &fakeGates{checks: [][]CheckResult{{}, {}, {}}}
+	gates := &fakeGates{checks: [][]CheckResult{{}}}
 
 	o := prGateRun(ops, gates, &fakeGit{}, &planLLM{}, mergeGateContext("Merge", "body"), 0)
 
@@ -1090,7 +1123,7 @@ func TestPRGates_NoChecksPassStillMerges(t *testing.T) {
 
 	recorded := gates.recorded()
 	assert.Equal(t, "MergePullRequest:"+gatePRURL, recorded[len(recorded)-1],
-		"the grace pass merges after its last poll; gates=%v", recorded)
+		"a repo without CI passes the gate and is merged; gates=%v", recorded)
 	assert.Contains(t, ops.lastBody(), "- Merge: merged")
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
 }
@@ -1166,24 +1199,66 @@ func TestGatesState_MergedRoundTrips(t *testing.T) {
 	assert.True(t, o.loadGatesState().Merged)
 }
 
-// TestCIGate_NoChecksGraceThenPass: a PR that never grows a check is a repo
-// without CI - the gate waits out the grace window, says so on the card, and
-// passes rather than blocking the card forever.
-func TestCIGate_NoChecksGraceThenPass(t *testing.T) {
-	shrinkNoChecksGrace(t, 5*time.Millisecond)
-
+// TestCIGate_NoCISignalsPassesAtOnce: a repo showing no CI signal passes the
+// gate on the first empty poll, well inside the no-checks grace window.
+func TestCIGate_NoCISignalsPassesAtOnce(t *testing.T) {
 	ops := &fakeOps{}
-	gates := &fakeGates{checks: [][]CheckResult{{}, {}, {}}}
+	gates := &fakeGates{checks: [][]CheckResult{{}}, baseRef: "main"}
 	client := &planLLM{}
 
 	o := prGateRun(ops, gates, &fakeGit{}, client, ciGateContext("No CI", "body"), 0)
+	// A regression waits for the grace and parks at this deadline instead of passing.
+	o.d.Cfg.GatesCIWaitTimeout = 50 * time.Millisecond
 
 	require.NoError(t, runPRGates(context.Background(), o))
 
-	assert.GreaterOrEqual(t, len(gates.recorded()), 2,
-		"the gate keeps polling through the grace window; calls=%v", gates.recorded())
+	calls := gates.recorded()
+	assert.Equal(t, 1, countCalls(calls, "Checks:"+gatePRURL), "calls=%v", calls)
+	assert.Equal(t, 1, countCalls(calls, "WorkflowFiles:"+gatePRURL), "calls=%v", calls)
+	assert.Equal(t, 1, countCalls(calls, "BaseCIActivity:"+gatePRURL), "calls=%v", calls)
+	assert.Equal(t, 1, countCalls(calls, "LastMergedCIActivity:"+gatePRURL), "calls=%v", calls)
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
-	assert.Zero(t, modelCallCount(client), "no checks means no fix round")
+	assert.Zero(t, modelCallCount(client), "no CI means no fix round")
+}
+
+// TestCIGate_CISignalsKeepTheGrace: any CI signal, or a failed read of one,
+// keeps the grace window, after which the still-empty gate passes.
+func TestCIGate_CISignalsKeepTheGrace(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*fakeGates)
+	}{
+		{"workflow file", func(g *fakeGates) { g.workflowFiles = []string{".github/workflows/ci.yml"} }},
+		{"base activity", func(g *fakeGates) { g.baseActive = true }},
+		{"merged activity", func(g *fakeGates) { g.mergedActive = true }},
+		{"workflow read error", func(g *fakeGates) { g.workflowFilesErr = errors.New("HTTP 502") }},
+		{"base read error", func(g *fakeGates) { g.baseErr = errors.New("HTTP 502") }},
+		{"merged read error", func(g *fakeGates) { g.mergedErr = errors.New("HTTP 502") }},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			shrinkNoChecksGrace(t, 20*time.Millisecond)
+
+			ops := &fakeOps{}
+			gates := &fakeGates{checks: [][]CheckResult{{}}, baseRef: "main"}
+			tc.setup(gates)
+
+			client := &planLLM{}
+
+			o := prGateRun(ops, gates, &fakeGit{}, client, ciGateContext("Some CI", "body"), 0)
+
+			require.NoError(t, runPRGates(context.Background(), o))
+
+			calls := gates.recorded()
+			assert.GreaterOrEqual(t, countCalls(calls, "Checks:"+gatePRURL), 2,
+				"the gate waits out the grace; calls=%v", calls)
+			assert.Equal(t, 1, countCalls(calls, "WorkflowFiles:"+gatePRURL),
+				"one probe per gate entry; calls=%v", calls)
+			assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+			assert.Zero(t, modelCallCount(client))
+		})
+	}
 }
 
 // TestCIGate_RedFixGreen: a failing check funds one fix round - failure logs in,
