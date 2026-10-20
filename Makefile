@@ -49,6 +49,9 @@ WORKER_BUILD_ARGS = \
 	--build-arg MAVEN_VERSION=$(MAVEN_VERSION) \
 	--build-arg MAVEN_SHA512=$(MAVEN_SHA512)
 
+# The revision label serve reads back for /health's worker_image_revision.
+WORKER_LABELS = --label org.opencontainers.image.revision=$(GIT_COMMIT)
+
 # Rerun on every build because HEAD moves; outside a git repo it leaves an
 # empty file, so a build never fails for want of history.
 history:
@@ -71,6 +74,7 @@ docker-worker: ## Build the default (full) worker image
 		-f docker/Dockerfile.worker \
 		--target full \
 		$(WORKER_BUILD_ARGS) \
+		$(WORKER_LABELS) \
 		-t contextmatrix-agent-worker:dev \
 		.
 docker-worker-variants: ## Build the slim worker variants (go-node, python, rust, jvm-node)
@@ -79,6 +83,7 @@ docker-worker-variants: ## Build the slim worker variants (go-node, python, rust
 			-f docker/Dockerfile.worker \
 			--target $$target \
 			$(WORKER_BUILD_ARGS) \
+			$(WORKER_LABELS) \
 			-t contextmatrix-agent-worker:$$target \
 			. || exit 1; \
 	done

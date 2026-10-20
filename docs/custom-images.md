@@ -93,3 +93,10 @@ the backend's `image_list_filters` substrings matches one of its tags (see
 push under your own name - `ghcr.io/you/my-worker` - add a matching substring
 (e.g. `my-worker`) to `image_list_filters` in `serve.yaml`, or the dropdown
 will not list it even though `worker_image` still works when set directly.
+
+`make docker-worker` and `make docker-worker-variants` label every variant with
+`org.opencontainers.image.revision` (the commit it was built from), and an image
+built `FROM` a variant inherits that label. If such an image is the backend's
+`base_image`, `/health` reports the label as `worker_image_revision`; a build
+step that sets its own revision label, such as `docker/metadata-action`,
+overrides it. A per-project `worker_image` is never inspected.
