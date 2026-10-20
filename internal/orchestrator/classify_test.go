@@ -25,12 +25,37 @@ func TestIsBugLike(t *testing.T) {
 		{"maintenance wins over bug label", cmclient.TaskContext{
 			Type: "bug", Labels: []string{"dependencies"}, Title: "Bump go-git to v5.13",
 		}, false},
+		{"error: inside a mockup block is no bug", cmclient.TaskContext{Type: "feature", Title: "Add the booking screen", Description: "## Solution\nBuild it.\n\n```mockup\n<p>error: that slot is taken</p>\n```\n"}, false},
+		{"error: after a mockup block is", cmclient.TaskContext{Type: "feature", Title: "Add the booking screen", Description: "```mockup\n<p>x</p>\n```\nIt throws error: on save.\n"}, true},
+		{"a longer fence holds a shorter backtick line", cmclient.TaskContext{Type: "feature", Title: "Add the list", Description: "````mockup\n```\npanic\n````\n"}, false},
+		{"an unclosed mockup block runs to the end", cmclient.TaskContext{Type: "feature", Title: "Add the list", Description: "```mockup\nstack trace\n"}, false},
+		{"a tilde fence hides nothing", cmclient.TaskContext{Type: "feature", Title: "Add the list", Description: "~~~mockup\npanic\n~~~\n"}, true},
+		{"another language hides nothing", cmclient.TaskContext{Type: "feature", Title: "Add the list", Description: "```html\npanic\n```\n"}, true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, isBugLike(tt.tc))
 		})
+	}
+}
+
+func TestWithoutMockups(t *testing.T) {
+	tests := []struct{ name, in, want string }{
+		{"no block", "## Context\nwhy\n", "## Context\nwhy\n"},
+		{"a block", "a\n```mockup\nerror: x\n```\nb\n", "a\nb\n"},
+		{"trailing spaces on the fences", "a\n```mockup  \nx\n```\t\nb\n", "a\nb\n"},
+		{"a longer fence holds a shorter backtick line", "a\n````mockup\n```\nx\n````\nb\n", "a\nb\n"},
+		{"an unclosed block runs to the end", "a\n```mockup\nx\npanic\n", "a\n"},
+		{"two blocks", "a\n```mockup\nx\n```\nb\n```mockup\ny\n```\nc\n", "a\nb\nc\n"},
+		{"a tilde fence is no block", "a\n~~~mockup\nx\n~~~\n", "a\n~~~mockup\nx\n~~~\n"},
+		{"an indented fence is no block", "a\n  ```mockup\nx\n  ```\n", "a\n  ```mockup\nx\n  ```\n"},
+		{"another language is no block", "a\n```html\nx\n```\n", "a\n```html\nx\n```\n"},
+		{"mockup plus words is no block", "a\n```mockup two\nx\n```\n", "a\n```mockup two\nx\n```\n"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) { assert.Equal(t, tt.want, withoutMockups(tt.in)) })
 	}
 }
 
