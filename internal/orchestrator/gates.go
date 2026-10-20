@@ -80,7 +80,8 @@ const (
 )
 
 // gatesNoChecksGrace is how long the CI gate waits for the first check to appear
-// before concluding the repo has no CI. A var so tests can shrink it.
+// before concluding the repo has no CI. It applies only when the repo shows a CI
+// signal; noCIConfigured skips it otherwise. A var so tests can shrink it.
 var gatesNoChecksGrace = 3 * time.Minute
 
 // gatesFixRoundReserve is the least wait a CI fix round must have left on the
@@ -1743,6 +1744,51 @@ func classifyChecks(checks []CheckResult) ciBuckets {
 	return b
 }
 
+// noCIConfigured reports whether the PR's repo shows no CI signal: no CI config
+// in the PR head tree and no checks or statuses on the base head or the last
+// merged PR. A lookup error answers false so the grace window still applies.
+func (o *run) noCIConfigured(ctx context.Context, prURL string) (base string, ok bool) {
+	warn := func(what string, err error) {
+		slog.Warn("pr_gates: CI signal lookup failed; keeping the no-checks grace",
+			"card_id", o.d.Cfg.CardID, "pr_url", prURL, "signal", what, "error", err)
+	}
+
+	files, err := o.d.PRGates.CIConfigFiles(ctx, prURL)
+	if err != nil {
+		warn("config files", err)
+
+		return "", false
+	}
+
+	if len(files) > 0 {
+		return "", false
+	}
+
+	base, active, err := o.d.PRGates.BaseCIActivity(ctx, prURL)
+	if err != nil {
+		warn("base activity", err)
+
+		return "", false
+	}
+
+	if active {
+		return "", false
+	}
+
+	merged, err := o.d.PRGates.LastMergedCIActivity(ctx, prURL)
+	if err != nil {
+		warn("merged activity", err)
+
+		return "", false
+	}
+
+	if merged {
+		return "", false
+	}
+
+	return base, true
+}
+
 // ciGate holds the card until the PR's CI checks are green: it polls the rollup,
 // spends up to gatesRoundsCap fix rounds on failures, and parks the card in
 // review when the checks stay red, never settle, or the budget runs out.
@@ -1758,6 +1804,7 @@ func (o *run) ciGate(ctx context.Context, prURL string, st *gatesState) error {
 	// sends the gate round again, and the new head's run has not registered yet.
 	sawChecks := st.CIRounds > 0 || o.ciSawChecks
 	polls := 0
+	probed := false
 
 	for {
 		checks, pollErr := o.d.PRGates.Checks(ctx, prURL)
@@ -1806,6 +1853,19 @@ func (o *run) ciGate(ctx context.Context, prURL string, st *gatesState) error {
 
 		switch {
 		case pollErr == nil && len(checks) == 0 && !sawChecks:
+			// One probe per gate entry: a repo with no CI signal has nothing to wait for.
+			if !probed {
+				probed = true
+
+				if base, ok := o.noCIConfigured(ctx, prURL); ok {
+					st.Detail = ""
+
+					o.gateNote(ctx, "ci", fmt.Sprintf("pr_gates: no CI configured (no CI config files, no checks on %s or the last merged PR); gate passes", base), nil)
+
+					return nil
+				}
+			}
+
 			// No check has ever appeared on this PR. Past the grace window that
 			// means the repo has no CI, not that CI is slow to register.
 			if time.Since(start) >= gatesNoChecksGrace {

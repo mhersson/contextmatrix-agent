@@ -1201,24 +1201,66 @@ func TestGatesState_MergedRoundTrips(t *testing.T) {
 	assert.True(t, o.loadGatesState().Merged)
 }
 
-// TestCIGate_NoChecksGraceThenPass: a PR that never grows a check is a repo
-// without CI - the gate waits out the grace window, says so on the card, and
-// passes rather than blocking the card forever.
-func TestCIGate_NoChecksGraceThenPass(t *testing.T) {
-	shrinkNoChecksGrace(t, 5*time.Millisecond)
-
+// TestCIGate_NoCISignalsPassesAtOnce: a repo showing no CI signal passes the
+// gate on the first empty poll, well inside the no-checks grace window.
+func TestCIGate_NoCISignalsPassesAtOnce(t *testing.T) {
 	ops := &fakeOps{}
-	gates := &fakeGates{checks: [][]CheckResult{{}, {}, {}}}
+	gates := &fakeGates{checks: [][]CheckResult{{}}, baseRef: "main"}
 	client := &planLLM{}
 
 	o := prGateRun(ops, gates, &fakeGit{}, client, ciGateContext("No CI", "body"), 0)
+	// A regression waits for the grace and parks at this deadline instead of passing.
+	o.d.Cfg.GatesCIWaitTimeout = 50 * time.Millisecond
 
 	require.NoError(t, runPRGates(context.Background(), o))
 
-	assert.GreaterOrEqual(t, len(gates.recorded()), 2,
-		"the gate keeps polling through the grace window; calls=%v", gates.recorded())
+	calls := gates.recorded()
+	assert.Equal(t, 1, countCalls(calls, "Checks:"+gatePRURL), "calls=%v", calls)
+	assert.Equal(t, 1, countCalls(calls, "CIConfigFiles:"+gatePRURL), "calls=%v", calls)
+	assert.Equal(t, 1, countCalls(calls, "BaseCIActivity:"+gatePRURL), "calls=%v", calls)
+	assert.Equal(t, 1, countCalls(calls, "LastMergedCIActivity:"+gatePRURL), "calls=%v", calls)
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
-	assert.Zero(t, modelCallCount(client), "no checks means no fix round")
+	assert.Zero(t, modelCallCount(client), "no CI means no fix round")
+}
+
+// TestCIGate_CISignalsKeepTheGrace: any CI signal, or a failed read of one,
+// keeps the grace window, after which the still-empty gate passes.
+func TestCIGate_CISignalsKeepTheGrace(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*fakeGates)
+	}{
+		{"config file", func(g *fakeGates) { g.ciConfigFiles = []string{"Jenkinsfile"} }},
+		{"base activity", func(g *fakeGates) { g.baseActive = true }},
+		{"merged activity", func(g *fakeGates) { g.mergedActive = true }},
+		{"config read error", func(g *fakeGates) { g.ciConfigErr = errors.New("HTTP 502") }},
+		{"base read error", func(g *fakeGates) { g.baseErr = errors.New("HTTP 502") }},
+		{"merged read error", func(g *fakeGates) { g.mergedErr = errors.New("HTTP 502") }},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			shrinkNoChecksGrace(t, 20*time.Millisecond)
+
+			ops := &fakeOps{}
+			gates := &fakeGates{checks: [][]CheckResult{{}}, baseRef: "main"}
+			tc.setup(gates)
+
+			client := &planLLM{}
+
+			o := prGateRun(ops, gates, &fakeGit{}, client, ciGateContext("Some CI", "body"), 0)
+
+			require.NoError(t, runPRGates(context.Background(), o))
+
+			calls := gates.recorded()
+			assert.GreaterOrEqual(t, countCalls(calls, "Checks:"+gatePRURL), 2,
+				"the gate waits out the grace; calls=%v", calls)
+			assert.Equal(t, 1, countCalls(calls, "CIConfigFiles:"+gatePRURL),
+				"one probe per gate entry; calls=%v", calls)
+			assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+			assert.Zero(t, modelCallCount(client))
+		})
+	}
 }
 
 // TestCIGate_RedFixGreen: a failing check funds one fix round - failure logs in,
