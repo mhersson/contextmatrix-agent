@@ -84,6 +84,16 @@ func TestCIConfigFiles(t *testing.T) {
 		{"azure", []ghRule{prView, root(blob("azure-pipelines.yml"))}, []string{"azure-pipelines.yml"}, ""},
 		{"drone", []ghRule{prView, root(blob(".drone.yml"))}, []string{".drone.yml"}, ""},
 		{"woodpecker file", []ghRule{prView, root(blob(".woodpecker.yml"))}, []string{".woodpecker.yml"}, ""},
+		{"appveyor", []ghRule{prView, root(blob("appveyor.yml"))}, []string{"appveyor.yml"}, ""},
+		{"dot appveyor", []ghRule{prView, root(blob(".appveyor.yml"))}, []string{".appveyor.yml"}, ""},
+		{"cirrus", []ghRule{prView, root(blob(".cirrus.yml"))}, []string{".cirrus.yml"}, ""},
+		{"woodpecker yaml", []ghRule{prView, root(blob(".woodpecker.yaml"))}, []string{".woodpecker.yaml"}, ""},
+		{"cloudbuild yaml", []ghRule{prView, root(blob("cloudbuild.yaml"))}, []string{"cloudbuild.yaml"}, ""},
+		{"cloudbuild yml", []ghRule{prView, root(blob("cloudbuild.yml"))}, []string{"cloudbuild.yml"}, ""},
+		{"buildspec", []ghRule{prView, root(blob("buildspec.yml"))}, []string{"buildspec.yml"}, ""},
+		{"semaphore dir", []ghRule{prView, root(subtree(".semaphore", "t1"))}, []string{".semaphore/"}, ""},
+		{"teamcity dir", []ghRule{prView, root(subtree(".teamcity", "t1"))}, []string{".teamcity/"}, ""},
+		{"near-miss backup blob", []ghRule{prView, root(blob("appveyor.yml.bak"))}, nil, ""},
 		{"buildkite dir", []ghRule{prView, root(subtree(".buildkite", "t1"))}, []string{".buildkite/"}, ""},
 		{"woodpecker dir", []ghRule{prView, root(subtree(".woodpecker", "t1"))}, []string{".woodpecker/"}, ""},
 		{
@@ -302,6 +312,11 @@ func TestLastMergedCIActivity(t *testing.T) {
 {"number":1,"merged_at":"2026-10-02T00:00:00Z","head":{"sha":"new111"}}]`
 	pullsOne := `[{"number":1,"merged_at":"2026-10-02T00:00:00Z","head":{"sha":"new111"}}]`
 	pulls := func(body string) ghRule { return ghRule{match: "/pulls", stdout: body} }
+	defaultBranch := ghRule{match: "api repos/org/repo", stdout: `{"default_branch":"main"}`}
+	basePulls := func(body string) ghRule { return ghRule{match: "base=playbook/x", stdout: body} }
+	mainPulls := func(body string) ghRule { return ghRule{match: "base=main", stdout: body} }
+	mainMerged := `[{"number":9,"merged_at":"2026-10-03T00:00:00Z","head":{"sha":"main111"}}]`
+	zeroChecks := ghRule{match: "check-runs", stdout: `{"total_count":0}`}
 
 	cases := []struct {
 		name       string
@@ -311,6 +326,47 @@ func TestLastMergedCIActivity(t *testing.T) {
 		wantLog    []string
 		wantAbsent []string
 	}{
+		{
+			"fresh base falls back to default branch",
+			[]ghRule{
+				prView, basePulls(`[]`), mainPulls(mainMerged),
+				{match: "commits/main111/check-runs", stdout: `{"total_count":1}`},
+				defaultBranch,
+			},
+			true, "",
+			[]string{"base=main", "commits/main111/check-runs"},
+			nil,
+		},
+		{
+			"default branch newest merged has no checks",
+			[]ghRule{prView, basePulls(`[]`), mainPulls(mainMerged), zeroChecks, noStatus, defaultBranch},
+			false, "",
+			[]string{"commits/main111/check-runs"},
+			nil,
+		},
+		{
+			"default branch has no merged PR either",
+			[]ghRule{prView, basePulls(`[]`), mainPulls(`[]`), defaultBranch},
+			false, "", nil,
+			[]string{"commits/"},
+		},
+		{
+			"base with merged PR skips default branch read",
+			[]ghRule{prView, basePulls(pullsOne), zeroChecks, noStatus},
+			false, "", nil,
+			[]string{"api repos/org/repo\n", "base=main"},
+		},
+		{
+			"base equals default branch",
+			[]ghRule{
+				{match: "pr view", stdout: `{"baseRefName":"main","baseRefOid":"def456"}`},
+				mainPulls(`[]`), defaultBranch,
+			},
+			false, "", nil,
+			[]string{"commits/"},
+		},
+		{"default branch read fails", []ghRule{prView, basePulls(`[]`), {match: "api repos/org/repo", stderr: "HTTP 502", code: 1}}, false, "502", nil, nil},
+		{"fallback pulls read fails", []ghRule{prView, basePulls(`[]`), {match: "base=main", stderr: "HTTP 502", code: 1}, defaultBranch}, false, "502", nil, nil},
 		{
 			"picks newest merged",
 			[]ghRule{prView, pulls(pullsMixed), {match: "commits/new111/check-runs", stdout: `{"total_count":1}`}, {match: "check-runs", stdout: `{"total_count":0}`}, noStatus},
@@ -328,16 +384,16 @@ func TestLastMergedCIActivity(t *testing.T) {
 			[]ghRule{prView, pulls(pullsOne), {match: "check-runs", stdout: `{"total_count":0}`}, noStatus},
 			false, "", nil, nil,
 		},
-		{"no pulls", []ghRule{prView, pulls(`[]`)}, false, "", nil, []string{"commits/"}},
+		{"no pulls", []ghRule{prView, pulls(`[]`), defaultBranch}, false, "", nil, []string{"commits/"}},
 		{
 			"none merged",
-			[]ghRule{prView, pulls(`[{"number":3,"merged_at":null,"head":{"sha":"open333"}}]`)},
+			[]ghRule{prView, pulls(`[{"number":3,"merged_at":null,"head":{"sha":"open333"}}]`), defaultBranch},
 			false, "", nil,
 			[]string{"commits/"},
 		},
 		{
 			"slashed base is a field",
-			[]ghRule{prView, pulls(`[]`)},
+			[]ghRule{prView, pulls(`[]`), defaultBranch},
 			false, "",
 			[]string{"-f base=playbook/x", "--method GET"},
 			[]string{"pulls/playbook", "playbook/x/"},
@@ -392,4 +448,20 @@ func TestLastMergedCIActivity(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLastMergedCIActivityBaseIsDefaultBranch(t *testing.T) {
+	stubGHRules(t,
+		ghRule{match: "pr view", stdout: `{"baseRefName":"main","baseRefOid":"def456"}`},
+		ghRule{match: "base=main", stdout: `[]`},
+		ghRule{match: "api repos/org/repo", stdout: `{"default_branch":"main"}`},
+	)
+
+	workspace := t.TempDir()
+	pc := NewPRCreator(workspace, "", "", "")
+
+	active, err := pc.LastMergedCIActivity(t.Context(), ciTestPR)
+	require.NoError(t, err)
+	assert.False(t, active)
+	assert.Equal(t, 1, strings.Count(readGHLog(t, workspace), "base=main"), "the default branch is not listed twice")
 }

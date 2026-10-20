@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path"
 	"time"
@@ -12,8 +13,12 @@ import (
 // .github/workflows rules) is the one place the worker names CI systems: a repo
 // carrying none of it and showing no CI activity is treated as having no CI.
 var (
-	ciConfigRootFiles = []string{"Jenkinsfile", ".travis.yml", "azure-pipelines.yml", ".drone.yml", ".woodpecker.yml"}
-	ciConfigRootDirs  = []string{".buildkite", ".woodpecker"}
+	ciConfigRootFiles = []string{
+		"Jenkinsfile", ".travis.yml", "azure-pipelines.yml", ".drone.yml", ".woodpecker.yml",
+		"appveyor.yml", ".appveyor.yml", ".cirrus.yml", ".woodpecker.yaml",
+		"cloudbuild.yaml", "cloudbuild.yml", "buildspec.yml",
+	}
+	ciConfigRootDirs = []string{".buildkite", ".woodpecker", ".semaphore", ".teamcity"}
 )
 
 const (
@@ -48,6 +53,12 @@ func mergedPullsArgs(owner, repo, base string) []string {
 		"-f", "sort=updated", "-f", "direction=desc", "-f", "per_page=" + mergedPullsLimit,
 		fmt.Sprintf("repos/%s/%s/pulls", owner, repo),
 	}
+}
+
+// defaultBranchArgs builds the gh api invocation that reads the repo, whose
+// default_branch field names its default branch.
+func defaultBranchArgs(owner, repo string) []string {
+	return []string{"api", fmt.Sprintf("repos/%s/%s", owner, repo)}
 }
 
 type gitTreeEntry struct {
@@ -223,7 +234,9 @@ func (p *PRCreator) baseRef(ctx context.Context, prURL string) (name, sha string
 }
 
 // LastMergedCIActivity reports whether the newest PR merged into the same base
-// has any check run or commit status on its head SHA; false when none merged.
+// has any check run or commit status on its head SHA. A base with no merged PR
+// (a freshly cut one) falls back to the repo's default branch; false when
+// neither has one.
 func (p *PRCreator) LastMergedCIActivity(ctx context.Context, prURL string) (bool, error) {
 	active, err := p.lastMergedCIActivity(ctx, prURL)
 	if err != nil {
@@ -244,9 +257,61 @@ func (p *PRCreator) lastMergedCIActivity(ctx context.Context, prURL string) (boo
 		return false, err
 	}
 
-	out, err := p.runGH(ctx, "", false, mergedPullsArgs(owner, repo, base)...)
+	sha, found, err := p.newestMergedHead(ctx, owner, repo, base)
 	if err != nil {
 		return false, err
+	}
+
+	if !found {
+		defaultBranch, err := p.defaultBranch(ctx, owner, repo)
+		if err != nil {
+			return false, err
+		}
+
+		if defaultBranch == base {
+			return false, nil
+		}
+
+		sha, found, err = p.newestMergedHead(ctx, owner, repo, defaultBranch)
+		if err != nil {
+			return false, err
+		}
+
+		if !found {
+			return false, nil
+		}
+	}
+
+	return p.commitCIActivity(ctx, owner, repo, sha)
+}
+
+func (p *PRCreator) defaultBranch(ctx context.Context, owner, repo string) (string, error) {
+	out, err := p.runGH(ctx, "", false, defaultBranchArgs(owner, repo)...)
+	if err != nil {
+		return "", err
+	}
+
+	var doc struct {
+		DefaultBranch string `json:"default_branch"`
+	}
+
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		return "", fmt.Errorf("parse repo: %w", err)
+	}
+
+	if doc.DefaultBranch == "" {
+		return "", errors.New("repo reports no default branch")
+	}
+
+	return doc.DefaultBranch, nil
+}
+
+// newestMergedHead returns the head SHA of the PR with the greatest merged_at
+// among the first page of closed PRs into base.
+func (p *PRCreator) newestMergedHead(ctx context.Context, owner, repo, base string) (sha string, found bool, err error) {
+	out, err := p.runGH(ctx, "", false, mergedPullsArgs(owner, repo, base)...)
+	if err != nil {
+		return "", false, err
 	}
 
 	var pulls []struct {
@@ -257,7 +322,7 @@ func (p *PRCreator) lastMergedCIActivity(ctx context.Context, prURL string) (boo
 	}
 
 	if err := json.Unmarshal([]byte(out), &pulls); err != nil {
-		return false, fmt.Errorf("parse pulls: %w", err)
+		return "", false, fmt.Errorf("parse pulls: %w", err)
 	}
 
 	newest := -1
@@ -269,10 +334,10 @@ func (p *PRCreator) lastMergedCIActivity(ctx context.Context, prURL string) (boo
 	}
 
 	if newest < 0 {
-		return false, nil
+		return "", false, nil
 	}
 
-	return p.commitCIActivity(ctx, owner, repo, pulls[newest].Head.SHA)
+	return pulls[newest].Head.SHA, true, nil
 }
 
 // commitCIActivity reports whether sha has any check run, Actions run or commit

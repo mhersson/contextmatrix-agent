@@ -50,16 +50,22 @@ detail.
 A first poll that shows no checks starts a 3-minute grace window for the first
 check to register. The gate skips the window and passes at once when the repo
 shows no CI signal at all: no CI config in the PR head tree (`*.yml` or `*.yaml`
-files in `.github/workflows`, `.circleci/config.yml`, `Jenkinsfile`, `.travis.yml`, `azure-pipelines.yml`,
-`.drone.yml`, `.woodpecker.yml` or `.woodpecker/`, `.buildkite/`), no check runs
-or commit statuses on the base branch head, and none on the head of the newest
-PR merged into the same base (among the 30 most recently updated closed PRs).
-Any signal, or a failed read of one, keeps the grace (external CI, or a PR
-adding the repo's first CI config). On a base with no merged PR yet (a freshly
-cut base), only the config files and the base head are checked, so CI configured
-outside the listed files that reports only on PRs gets the fast pass. The reads use the gate's existing
-permissions: Contents: read, Pull requests: read, Checks or, in fallback,
-Actions: read, and Commit statuses: read.
+files in `.github/workflows`, `.circleci/config.yml`, or at the root
+`Jenkinsfile`, `.travis.yml`, `azure-pipelines.yml`, `.drone.yml`,
+`.woodpecker.yml`, `.woodpecker.yaml`, `appveyor.yml`, `.appveyor.yml`,
+`.cirrus.yml`, `cloudbuild.yaml`, `cloudbuild.yml`, `buildspec.yml`, or the
+directories `.woodpecker/`, `.buildkite/`, `.semaphore/`, `.teamcity/`), no
+check runs or commit statuses on the base branch head, and none on the head of
+the newest PR merged into the same base (among the 30 most recently updated
+closed PRs). A base with no merged PR (a freshly cut one) uses the newest
+merged PR of the repo's default branch instead. Any signal, or a failed read of
+one, keeps the grace (external CI, or a PR adding the repo's first CI config).
+CI whose trigger and build config live only on the CI service side, with no
+file in the repo, and that reports neither on the base head nor on that newest
+merged PR still gets the fast pass, as does CI configured by a file outside the
+list. The reads use the gate's existing permissions: Contents: read, Pull
+requests: read, Checks or, in fallback, Actions: read, and Commit statuses:
+read.
 
 A fix round is started only with enough wait left for the coder run, the push,
 and a fresh CI cycle: at least 5 minutes and, once the gate has watched one

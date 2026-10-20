@@ -94,7 +94,8 @@ type PRGates interface {
 	BaseCIActivity(ctx context.Context, prURL string) (base string, active bool, err error)
 
 	// LastMergedCIActivity reports whether the newest PR merged into the same
-	// base has any check run or commit status on its head SHA.
+	// base has any check run or commit status on its head SHA. A base with no
+	// merged PR falls back to the default branch's newest merged PR.
 	LastMergedCIActivity(ctx context.Context, prURL string) (bool, error)
 
 	// MergePullRequest merges the PR into its base branch with a merge commit.
