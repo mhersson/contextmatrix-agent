@@ -49,12 +49,15 @@ detail.
 
 A first poll that shows no checks starts a 3-minute grace window for the first
 check to register. The gate skips the window and passes at once when the repo
-shows no CI signal at all: no CI config in the PR head tree (`.github/workflows`,
-`.circleci/config.yml`, `Jenkinsfile`, `.travis.yml`, `azure-pipelines.yml`,
+shows no CI signal at all: no CI config in the PR head tree (`*.yml` or `*.yaml`
+files in `.github/workflows`, `.circleci/config.yml`, `Jenkinsfile`, `.travis.yml`, `azure-pipelines.yml`,
 `.drone.yml`, `.woodpecker.yml` or `.woodpecker/`, `.buildkite/`), no check runs
 or commit statuses on the base branch head, and none on the head of the newest
-merged PR. Any signal, or a failed read of one, keeps the grace (external CI, or
-a PR adding the repo's first CI config). The reads use the gate's existing
+PR merged into the same base (among the 30 most recently updated closed PRs).
+Any signal, or a failed read of one, keeps the grace (external CI, or a PR
+adding the repo's first CI config). On a base with no merged PR yet (a freshly
+cut base), only the config files and the base head are checked, so CI configured
+outside the listed files that reports only on PRs gets the fast pass. The reads use the gate's existing
 permissions: Contents: read, Pull requests: read, Checks or, in fallback,
 Actions: read, and Commit statuses: read.
 
@@ -176,8 +179,9 @@ only read an empty result.
 With `merge_pr` (human-only, meaningful only with `await_ci`), the phase merges
 the PR into its base branch with a merge commit (`gh pr merge <url> --merge`)
 after every enabled gate passed, then completes the card. The CI gate's own
-pass rules decide: a repo with no checks passes (at once when the repo shows no CI
-signals, else after the grace window) and is merged like any other pass. Having checks is the user's responsibility.
+pass rules decide: a repo with no checks passes (at once when the repo shows no
+CI signals, else after the grace window) and is merged like any other pass.
+Having checks is the user's responsibility.
 
 The merge is recorded as `- Merge: merged` in the `## PR Gates` section, so a
 resumed run never merges twice. A refused merge - branch protection, required

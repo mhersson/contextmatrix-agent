@@ -1110,14 +1110,12 @@ func TestPRGates_MergeDuringTeardownDoesNotPark(t *testing.T) {
 	assert.NotContains(t, ops.lastBody(), "- Merge: merged")
 }
 
-// TestPRGates_NoChecksPassStillMerges: a repo without CI passes the gate after
-// the grace window and is merged like any other pass - having checks is the
-// user's responsibility, not the gate's.
+// TestPRGates_NoChecksPassStillMerges: a repo without CI passes the gate and is
+// merged like any other pass - having checks is the user's responsibility, not
+// the gate's.
 func TestPRGates_NoChecksPassStillMerges(t *testing.T) {
-	shrinkNoChecksGrace(t, 5*time.Millisecond)
-
 	ops := &fakeOps{}
-	gates := &fakeGates{checks: [][]CheckResult{{}, {}, {}}}
+	gates := &fakeGates{checks: [][]CheckResult{{}}}
 
 	o := prGateRun(ops, gates, &fakeGit{}, &planLLM{}, mergeGateContext("Merge", "body"), 0)
 
@@ -1125,7 +1123,7 @@ func TestPRGates_NoChecksPassStillMerges(t *testing.T) {
 
 	recorded := gates.recorded()
 	assert.Equal(t, "MergePullRequest:"+gatePRURL, recorded[len(recorded)-1],
-		"the grace pass merges after its last poll; gates=%v", recorded)
+		"a repo without CI passes the gate and is merged; gates=%v", recorded)
 	assert.Contains(t, ops.lastBody(), "- Merge: merged")
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
 }

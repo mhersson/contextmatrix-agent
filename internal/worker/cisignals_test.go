@@ -199,13 +199,13 @@ func TestBaseCIActivity(t *testing.T) {
 	noStatus := ghRule{match: "/status", stdout: `{"statuses":[]}`}
 
 	cases := []struct {
-		name         string
-		fallback     bool
-		rules        []ghRule
-		wantActive   bool
-		wantErr      string
-		wantLog      []string
-		wantLogAbsnt []string
+		name       string
+		fallback   bool
+		rules      []ghRule
+		wantActive bool
+		wantErr    string
+		wantLog    []string
+		wantAbsent []string
 	}{
 		{"check runs", false, []ghRule{prView, {match: "check-runs", stdout: `{"total_count":2}`}, noStatus}, true, "", nil, nil},
 		{
@@ -277,7 +277,7 @@ func TestBaseCIActivity(t *testing.T) {
 				assert.Contains(t, log, s)
 			}
 
-			for _, s := range tc.wantLogAbsnt {
+			for _, s := range tc.wantAbsent {
 				assert.NotContains(t, log, s)
 			}
 

@@ -8,8 +8,9 @@ import (
 	"time"
 )
 
-// The CI-config table is the one place the worker names CI systems: a repo that
-// carries none of these and shows no CI activity is treated as having no CI.
+// The CI-config table (root files and dirs plus the .circleci and
+// .github/workflows rules) is the one place the worker names CI systems: a repo
+// carrying none of it and showing no CI activity is treated as having no CI.
 var (
 	ciConfigRootFiles = []string{"Jenkinsfile", ".travis.yml", "azure-pipelines.yml", ".drone.yml", ".woodpecker.yml"}
 	ciConfigRootDirs  = []string{".buildkite", ".woodpecker"}
