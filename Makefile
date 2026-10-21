@@ -2,12 +2,12 @@
 
 # Pinned worker toolchain versions. Override on the command line
 # if a newer version has been vetted, e.g.
-#   make docker-worker GO_VERSION=1.27.3
+#   make docker-worker GO_VERSION=1.27.4
 # These values are passed into the Dockerfile as --build-args so the build is
 # reproducible from CI and local shells alike.
-GO_VERSION            ?= 1.27.2
-GO_SHA256_AMD64       ?= ecbadb99091a3f46e31f5f934b068b1864eafa7995211b39eaddf76996045fe5
-GO_SHA256_ARM64       ?= 94f3e30b8e374bc285e7dadc11e0865726b9bc6e85b841ccceaabc0214c6b7c8
+GO_VERSION            ?= 1.27.3
+GO_SHA256_AMD64       ?= 65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40
+GO_SHA256_ARM64       ?= a06e99309dbcbdca1a8ccd2282c3ee146e55930886e26b4f1193269587165f49
 NPM_VERSION           ?= 12.2.0
 GOLANGCI_LINT_VERSION ?= v2.14.0
 GOFUMPT_VERSION       ?= v0.12.0
@@ -16,6 +16,7 @@ RUSTUP_VERSION        ?= 1.29.1
 RUSTUP_SHA256_AMD64   ?= dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
 RUSTUP_SHA256_ARM64   ?= 15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433
 PYTHON_VERSION        ?= 3.14.8
+PIP_VERSION           ?= 26.2.2
 TY_VERSION            ?= 0.0.84
 RUFF_VERSION          ?= 0.16.10
 YARN_VERSION          ?= 1.22.22
@@ -43,6 +44,7 @@ WORKER_BUILD_ARGS = \
 	--build-arg RUSTUP_SHA256_AMD64=$(RUSTUP_SHA256_AMD64) \
 	--build-arg RUSTUP_SHA256_ARM64=$(RUSTUP_SHA256_ARM64) \
 	--build-arg PYTHON_VERSION=$(PYTHON_VERSION) \
+	--build-arg PIP_VERSION=$(PIP_VERSION) \
 	--build-arg TY_VERSION=$(TY_VERSION) \
 	--build-arg RUFF_VERSION=$(RUFF_VERSION) \
 	--build-arg YARN_VERSION=$(YARN_VERSION) \
