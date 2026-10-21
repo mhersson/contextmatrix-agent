@@ -5,19 +5,6 @@
 # review on each worker-image / Go-dependency bump and delete entries whose fix
 # has shipped. Dependabot (.github/dependabot.yml) tracks the underlying bumps.
 
-# --- The apt-installed GitHub CLI (/usr/bin/gh, latest release v2.102.0) is a
-# prebuilt upstream binary compiled with Go 1.27.1 and golang.org/x/net v0.58.0;
-# these are net/http, http2 and crypto/tls DoS findings in that embedded stdlib
-# and x/net, fixed in Go 1.27.2 and x/net 0.60.0. Everything this repo compiles
-# is already on 1.27.2 (builder image, in-image toolchain, agent binary - all
-# scan clean); only GitHub's release pipeline can rebuild gh. Inside the worker
-# container repo-controlled code already executes arbitrary bash, so these DoS
-# issues add no marginal attack surface. Clears when apt pulls a gh release
-# built on Go >= 1.27.2 with x/net >= 0.60.0.
-CVE-2026-78667
-CVE-2026-78669
-CVE-2026-97031
-
 # --- The bundled npm CLI (12.2.0, the latest release) ships brace-expansion
 # 5.0.9 (/usr/lib/node_modules/npm/node_modules/brace-expansion); the fixes land
 # in 5.0.10 and 5.0.11. DoS via crafted brace patterns inside the npm CLI - the
