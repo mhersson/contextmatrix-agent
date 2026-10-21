@@ -14,6 +14,7 @@ ARG RUSTUP_VERSION=1.29.1
 ARG RUSTUP_SHA256_AMD64=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
 ARG RUSTUP_SHA256_ARM64=15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433
 ARG PYTHON_VERSION=3.14.8
+ARG PIP_VERSION=26.2.2
 ARG TY_VERSION=0.0.84
 ARG RUFF_VERSION=0.16.10
 ARG YARN_VERSION=1.22.22
@@ -181,6 +182,7 @@ RUN set -eux; \
 # ---------------------------------------------------------------------------
 FROM node AS python-toolchain
 ARG PYTHON_VERSION
+ARG PIP_VERSION
 ARG TY_VERSION
 ARG RUFF_VERSION
 
@@ -190,11 +192,14 @@ COPY --from=uv /uv /uvx /usr/local/bin/
 # root-owned prefix for the pinned version only; it is deliberately NOT persisted
 # as ENV so that at runtime uv installs any alternate version into the user's
 # writable home instead of failing on this root-owned directory. UV_NO_CACHE
-# keeps the download cache out of the layer.
+# keeps the download cache out of the layer. The pip this CPython build bundles
+# is replaced with PIP_VERSION so pip's vendored certifi CA bundle stays current;
+# uv marks the install externally managed, hence --break-system-packages.
 RUN set -eux; \
     export UV_PYTHON_INSTALL_DIR=/opt/python UV_NO_CACHE=1; \
     uv python install "${PYTHON_VERSION}"; \
     PYBIN="$(uv python find "${PYTHON_VERSION}")"; \
+    uv pip install --python "${PYBIN}" --break-system-packages "pip==${PIP_VERSION}"; \
     ln -s "${PYBIN}" /usr/local/bin/python3; \
     ln -s "${PYBIN}" /usr/local/bin/python
 
