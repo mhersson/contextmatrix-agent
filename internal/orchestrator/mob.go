@@ -283,10 +283,12 @@ func buildEngineConfig(ctx context.Context, o *run, t mob.Topic, bearer string) 
 }
 
 // seatContextMaxBytes bounds the accumulated seat conversation, reasoning
-// included, carried between rounds. Positions and round prompts are never dropped; oldest
-// tool outputs are blanked first. At the spec round counts (blind + <=2
-// critique rounds x 8 turns x 16 KB tool cap) the bound is rarely hit - it
-// is insurance against pathological accumulation, not compaction.
+// included, carried between rounds. Positions and round prompts are never
+// dropped; reasoning goes first, then the oldest tool outputs are blanked.
+// At the spec round counts (blind + <=2 critique rounds x 8 turns x 16 KB
+// tool cap) the content alone rarely reaches the bound - it is insurance
+// against pathological accumulation, not compaction; replayed reasoning can
+// reach it, and is dropped first.
 const seatContextMaxBytes = 384 * 1024
 
 // trimmedToolMarker replaces a tool output dropped by trimSeatContext.
