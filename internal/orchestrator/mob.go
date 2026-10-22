@@ -282,11 +282,13 @@ func buildEngineConfig(ctx context.Context, o *run, t mob.Topic, bearer string) 
 	}, true
 }
 
-// seatContextMaxBytes bounds the accumulated seat conversation carried
-// between rounds. Positions and round prompts are never dropped; oldest
-// tool outputs are blanked first. At the spec round counts (blind + <=2
-// critique rounds x 8 turns x 16 KB tool cap) the bound is rarely hit - it
-// is insurance against pathological accumulation, not compaction.
+// seatContextMaxBytes bounds the accumulated seat conversation, reasoning
+// included, carried between rounds. Positions and round prompts are never
+// dropped; reasoning goes first, then the oldest tool outputs are blanked.
+// At the spec round counts (blind + <=2 critique rounds x 8 turns x 16 KB
+// tool cap) the content alone rarely reaches the bound - it is insurance
+// against pathological accumulation, not compaction; replayed reasoning can
+// reach it, and is dropped first.
 const seatContextMaxBytes = 384 * 1024
 
 // trimmedToolMarker replaces a tool output dropped by trimSeatContext.
@@ -294,8 +296,10 @@ const trimmedToolMarker = "[tool output dropped to bound seat context - re-read 
 
 // trimSeatContext prepares a finished seat run's messages for reuse as the
 // next round's history: it drops the leading system message (seatConfig
-// re-adds it every run) and, while the total size exceeds
-// seatContextMaxBytes, blanks tool outputs oldest-first.
+// re-adds it every run). Over seatContextMaxBytes it first drops reasoning
+// oldest-first, then blanks tool outputs oldest-first: replay never costs a
+// seat a tool output it would keep without replay, and a blanked output never
+// precedes kept reasoning.
 func trimSeatContext(msgs []llm.Message) []llm.Message {
 	if len(msgs) > 0 && msgs[0].Role == "system" {
 		msgs = msgs[1:]
@@ -303,7 +307,12 @@ func trimSeatContext(msgs []llm.Message) []llm.Message {
 
 	total := 0
 	for i := range msgs {
-		total += len(msgs[i].Content)
+		total += len(msgs[i].Content) + len(msgs[i].ReasoningDetails)
+	}
+
+	for i := 0; total > seatContextMaxBytes && i < len(msgs); i++ {
+		total -= len(msgs[i].ReasoningDetails)
+		msgs[i].ReasoningDetails = nil
 	}
 
 	for i := 0; total > seatContextMaxBytes && i < len(msgs); i++ {
@@ -318,10 +327,17 @@ func trimSeatContext(msgs []llm.Message) []llm.Message {
 	return msgs
 }
 
+// seatSession is a seat's stored transcript and the model that wrote it.
+type seatSession struct {
+	model string
+	msgs  []llm.Message
+}
+
 // mobSeatRunner returns the SeatRunner: each turn is a fresh harness run on
 // the seat's model with read-only tools, the seat persona system prompt, and
 // the per-turn cost cap. sessions carries each seat's full message
-// transcript (tool calls and results included) across rounds of one
+// transcript (tool calls and results included) and the model that wrote it,
+// whose reasoning goes back only to that model, across rounds of one
 // discussion, so a seat argues round N from what it read in rounds 0..N-1
 // instead of re-exploring. The text-only A2A history remains the fallback
 // for the first round and for replacement tasks. Events go to the
@@ -330,16 +346,20 @@ func trimSeatContext(msgs []llm.Message) []llm.Message {
 func (o *run) mobSeatRunner(sink *seatDebugSink, perTurnCap float64, step string) mob.SeatRunner {
 	var (
 		mu       sync.Mutex
-		sessions = map[string][]llm.Message{}
+		sessions = map[string]seatSession{}
 	)
 
 	return func(ctx context.Context, seat mob.SeatConfig, history []mob.Turn, prompt string) (string, float64, error) {
 		mu.Lock()
-		seeded := sessions[seat.Name]
+		s := sessions[seat.Name]
 		mu.Unlock()
 
-		if seeded == nil {
+		seeded := s.msgs
+		switch {
+		case seeded == nil:
 			seeded = mobHistory(history)
+		case s.model != seat.Model:
+			seeded = withoutReasoning(s.msgs)
 		}
 
 		cfg := seatConfig(o.harnessConfig(seat.Model), seat, perTurnCap, seeded)
@@ -397,7 +417,7 @@ func (o *run) mobSeatRunner(sink *seatDebugSink, perTurnCap float64, step string
 		}
 
 		mu.Lock()
-		sessions[seat.Name] = trimSeatContext(msgs)
+		sessions[seat.Name] = seatSession{model: seat.Model, msgs: trimSeatContext(msgs)}
 		mu.Unlock()
 
 		return out, res.TotalCostUSD, nil

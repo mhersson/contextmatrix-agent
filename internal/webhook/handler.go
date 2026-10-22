@@ -134,6 +134,9 @@ type LaunchEnv struct {
 	DefaultModel          string
 	ReasoningEffort       string
 
+	// ReplayReasoning is relayed as CMX_REPLAY_REASONING=true and omitted when false.
+	ReplayReasoning bool
+
 	// MaxCardCost is the cumulative USD ceiling per card passed as
 	// CMX_MAX_CARD_COST. Zero is omitted (worker applies its own default).
 	MaxCardCost float64
@@ -771,6 +774,10 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 
 	if s.launchEnv.ReasoningEffort != "" {
 		env = append(env, "CMX_REASONING_EFFORT="+s.launchEnv.ReasoningEffort)
+	}
+
+	if s.launchEnv.ReplayReasoning {
+		env = append(env, "CMX_REPLAY_REASONING=true")
 	}
 
 	if s.launchEnv.MaxCardCost != 0 {

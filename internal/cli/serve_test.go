@@ -117,6 +117,7 @@ func TestLaunchEnvMCPURL(t *testing.T) {
 			ToolOutputMaxBytes:    40000,
 			DefaultModel:          "deepseek/deepseek-v4",
 			ReviewAttemptsCap:     5,
+			ReplayReasoning:       true,
 		}
 		env := launchEnv(cfg, "/secrets/shared")
 		assert.Equal(t, "mcp-key", env.MCPAPIKey)
@@ -127,6 +128,7 @@ func TestLaunchEnvMCPURL(t *testing.T) {
 		assert.Equal(t, 40000, env.ToolOutputMaxBytes)
 		assert.Equal(t, "deepseek/deepseek-v4", env.DefaultModel)
 		assert.Equal(t, 5, env.ReviewAttemptsCap)
+		assert.True(t, env.ReplayReasoning)
 	})
 
 	t.Run("forwards compaction settings", func(t *testing.T) {

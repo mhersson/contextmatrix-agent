@@ -624,6 +624,25 @@ func TestSpecFromEnv_OptionalVars(t *testing.T) {
 	assert.Equal(t, "anthropic/claude-3-5-sonnet", spec.Model)
 }
 
+func TestSpecFromEnv_ReplayReasoning(t *testing.T) {
+	t.Run("off by default", func(t *testing.T) {
+		setRequired(t)
+
+		spec, err := specFromEnv()
+		require.NoError(t, err)
+		assert.False(t, spec.ReplayReasoning)
+	})
+
+	t.Run("from the launch env", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("CMX_REPLAY_REASONING", "true")
+
+		spec, err := specFromEnv()
+		require.NoError(t, err)
+		assert.True(t, spec.ReplayReasoning)
+	})
+}
+
 func TestSpecFromEnv_Compaction(t *testing.T) {
 	t.Run("defaults_disabled", func(t *testing.T) {
 		setRequired(t)

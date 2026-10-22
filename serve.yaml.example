@@ -172,7 +172,7 @@ secrets_dir: /var/run/cm-agent/secrets
 # CMX_DEFAULT_MODEL
 # default_model: deepseek/deepseek-v4-flash
 
-# Reasoning effort for every worker phase: "" (off) | low | medium | high |
+# Reasoning effort for every worker phase: "" (no effort sent: each model reasons at its own default) | low | medium | high |
 # provider-specific tiers (e.g. xhigh). CMX_REASONING_EFFORT
 # Sent to every selected model - the endpoint must accept reasoning_effort on
 # ALL served models, or leave this empty. (Per-model gating is a follow-up.)
@@ -180,6 +180,19 @@ secrets_dir: /var/run/cm-agent/secrets
 # the provider as-is; the agent logs a startup warning so a typo doesn't go
 # unnoticed.
 # reasoning_effort: ""
+
+# Reasoning replay: each reply's reasoning goes back with every later request of
+# its harness run, so the model continues from its own thinking instead of
+# working it out again. Replayed reasoning bills as input and fills the context
+# window sooner, so a model whose catalog window is under 400000 tokens, or
+# unknown, never replays. A mob seat's next round gets its reasoning only on the
+# model that wrote it. A model whose endpoint rejects the reasoning costs one
+# rejected request per turn and runs on without it. This knob is read inside the
+# worker container, so it takes effect only after the worker image is rebuilt.
+# Set false to turn replay off.
+# Default: true.
+# CMX_REPLAY_REASONING
+# replay_reasoning: true
 
 # --- Per-card budget ----------------------------------------------------------
 

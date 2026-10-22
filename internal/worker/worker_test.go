@@ -1167,6 +1167,27 @@ func TestHITLEntersOrchestrator(t *testing.T) {
 	assert.True(t, gotHuman, "HITL card must inject the live inbox as Deps.Human")
 }
 
+// TestReplaySettingsReachTheFSM swaps runOrchestrator, so it must not run in parallel.
+func TestReplaySettingsReachTheFSM(t *testing.T) {
+	remote := setupBareRemote(t)
+	wsParent := t.TempDir()
+
+	var got orchestrator.Config
+
+	swapRunOrchestrator(t, func(_ context.Context, d orchestrator.Deps) error {
+		got = d.Cfg
+
+		return nil
+	})
+
+	spec := baseSpec(t, remote, wsParent)
+	spec.ReplayReasoning = true
+
+	_, err := Run(context.Background(), spec, newFakeOps(), &scriptedLLM{}, events.NewEmitter(io.Discard, io.Discard), openStdin(t))
+	require.NoError(t, err)
+	assert.True(t, got.ReplayReasoning)
+}
+
 // TestReviewParkedMapsToCompleted: a ReviewParkedError from the FSM is a
 // graceful completion - exit-0 path, completed reason, no CompleteTask call.
 func TestReviewParkedMapsToCompleted(t *testing.T) {

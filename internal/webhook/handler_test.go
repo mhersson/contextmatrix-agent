@@ -1610,8 +1610,8 @@ func TestBuildLaunchSpec_CompactionEnvEmittedWhenEnabled(t *testing.T) {
 
 // TestBuildLaunchSpecEmitsReasoningEffort pins the CMX_REASONING_EFFORT env
 // threading: when LaunchEnv.ReasoningEffort is set the var must appear in the
-// container env; when empty (the default) it must be absent so workers use their
-// own default (no reasoning overhead).
+// container env; when empty (the default) it must be absent so workers send no
+// effort.
 func TestBuildLaunchSpecEmitsReasoningEffort(t *testing.T) {
 	t.Run("emits when set", func(t *testing.T) {
 		s := NewServer(Config{
@@ -1660,6 +1660,25 @@ func TestBuildLaunchSpec_CompactionEnvOmittedWhenDisabled(t *testing.T) {
 
 	for _, e := range spec.Env {
 		assert.NotContains(t, e, "CMX_COMPACTION_", "disabled compaction must emit no CMX_COMPACTION_* env")
+	}
+}
+
+func TestBuildLaunchSpec_ReplayReasoningEnv(t *testing.T) {
+	envFor := func(on bool) []string {
+		s := NewServer(Config{
+			APIKey:    "k",
+			Executor:  &fakeExecutor{},
+			Tracker:   executor.NewTracker(1),
+			LaunchEnv: LaunchEnv{BaseImage: "img", MCPURL: "http://mcp", ReplayReasoning: on},
+		})
+
+		return s.buildLaunchSpec(protocol.TriggerPayload{CardID: "C1", Project: "p"}, "corr", "").Env
+	}
+
+	assert.Contains(t, envFor(true), "CMX_REPLAY_REASONING=true")
+
+	for _, e := range envFor(false) {
+		assert.NotContains(t, e, "CMX_REPLAY_REASONING", "off emits nothing")
 	}
 }
 

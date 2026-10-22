@@ -80,15 +80,22 @@ func (o *run) harnessConfig(model string) harness.Config {
 		}
 	}
 
-	// Reasoning is nil when effort is empty (off) so the field is omitted and
-	// models that don't support it are unaffected.
-	cfg.Reasoning = reasoningRaw(o.d.Cfg.ReasoningEffort)
+	// Reasoning is nil when effort is empty: the field is omitted, so each model
+	// reasons at its own default, and a model that always reasons still does.
+	cfg.Reasoning = o.reasoning()
+	cfg.ReplayReasoning = o.replays(model)
 
 	if o.progress != nil {
 		cfg.OnDelta = o.progress.onDelta
 	}
 
 	return cfg
+}
+
+// reasoning is the run's reasoning object, the one source every model call and
+// review child reads. It makes no replay decision.
+func (o *run) reasoning() json.RawMessage {
+	return reasoningRaw(o.d.Cfg.ReasoningEffort)
 }
 
 // reasoningRaw renders an effort string to the OpenRouter reasoning object the

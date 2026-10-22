@@ -7578,3 +7578,69 @@ func TestSynthesisEmptyReplyStreakTakesRepairTurn(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, v.Approved)
 }
+
+// TestReviewPanelReportsNoExclusionForAnUnusedDefault pins that the panel's
+// reasoning lookup does not decide replay for the default model: when every
+// seat runs a wide-window model, a narrow default is never reported excluded.
+func TestReviewPanelReportsNoExclusionForAnUnusedDefault(t *testing.T) {
+	cat := reviewerCatalog()
+	for i := range cat {
+		if strings.HasPrefix(cat[i].ID, "rev/") {
+			cat[i].ContextLength = 500_000
+		}
+	}
+
+	alpha, beta, gamma, delta := 0.90, 0.88, 0.86, 0.84
+	priors := registry.Priors{Models: map[string]registry.PriorEntry{
+		"rev/alpha": {Reviewer: &alpha},
+		"rev/beta":  {Reviewer: &beta},
+		"rev/gamma": {Reviewer: &gamma},
+		"rev/delta": {Reviewer: &delta},
+	}}
+	reg := registry.NewRegistryFromParts(cat, priors, nil, nil, "default/model")
+
+	client := &planLLM{responses: []llm.Response{
+		stopResp("Correctness: fine", 0.01),
+		stopResp("Design: fine", 0.01),
+		stopResp("Security: fine", 0.01),
+	}}
+
+	var transcript bytes.Buffer
+
+	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, client, reg)
+	d.Cfg.ReplayReasoning = true
+	d.Cfg.ReasoningEffort = "high"
+	d.Emit = events.NewEmitter(nil, &transcript)
+
+	o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}, 0)
+
+	_, err := o.runSpecialists(context.Background(), false)
+	require.NoError(t, err)
+
+	client.mu.Lock()
+	ran := slices.Clone(client.models)
+	client.mu.Unlock()
+
+	require.Len(t, ran, reviewPanelSize)
+
+	for _, m := range ran {
+		assert.True(t, strings.HasPrefix(m, "rev/"), "specialist ran on %q, want a wide-window panel model", m)
+	}
+
+	for line := range strings.SplitSeq(strings.TrimSpace(transcript.String()), "\n") {
+		if line == "" {
+			continue
+		}
+
+		var ev struct {
+			Kind string         `json:"kind"`
+			Data map[string]any `json:"data"`
+		}
+
+		require.NoError(t, json.Unmarshal([]byte(line), &ev), line)
+
+		if ev.Kind == string(events.StateChange) && ev.Data["event"] == "replay_excluded" {
+			assert.NotEqual(t, "default/model", ev.Data["model"], "default model never ran in the panel")
+		}
+	}
+}
