@@ -83,6 +83,7 @@ func (o *run) harnessConfig(model string) harness.Config {
 	// Reasoning is nil when effort is empty (off) so the field is omitted and
 	// models that don't support it are unaffected.
 	cfg.Reasoning = reasoningRaw(o.d.Cfg.ReasoningEffort)
+	cfg.ReplayReasoning = o.replays(model)
 
 	if o.progress != nil {
 		cfg.OnDelta = o.progress.onDelta

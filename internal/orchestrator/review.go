@@ -1414,7 +1414,7 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 		client = progressClient{LLM: d.Client, onDelta: o.progress.onDelta}
 	}
 
-	results, err := harness.SpawnSubagents(ctx, client, cfg.Workspace, d.Emit, specs,
+	results, err := o.spawnSubagents(ctx, client, cfg.Workspace, specs,
 		harness.SubagentOpts{
 			DefaultModel:       cfg.DefaultModel,
 			ToolOutputMaxBytes: cfg.ToolOutputMax,

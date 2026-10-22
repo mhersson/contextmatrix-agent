@@ -129,6 +129,7 @@ type Config struct {
 	PayloadModel      string // CM's default_model from the trigger; "" = serve default
 	DefaultModel      string // serve-config default
 	ReasoningEffort   string // CMX_REASONING_EFFORT; empty = off
+	ReplayReasoning   bool   // resend each reply's reasoning on later requests of its run, for models replays admits
 	MaxTurns          int
 	ToolOutputMax     int
 	ReviewAttemptsCap int // review rounds before the card parks; <=0 falls back to config.DefaultReviewAttemptsCap
