@@ -133,7 +133,7 @@ func waitForSelfExit(ctx context.Context, docker containerWaiter, containerID st
 	select {
 	case <-wait.Result:
 		return true
-	case <-wait.Error:
+	case <-wait.Error: //nolint:errcheck // any wait error means no self-exit; the caller kills
 		return false
 	}
 }
