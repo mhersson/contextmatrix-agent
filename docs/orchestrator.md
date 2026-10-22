@@ -328,6 +328,22 @@ failed subtask, never a silent truncation. An opt-in in-window compactor
 exists behind `CMX_COMPACTION_ENABLED` (default off;
 `CMX_COMPACTION_THRESHOLD` 0.85, `CMX_COMPACTION_KEEP_RECENT_TURNS` 6).
 
+Reasoning replay (`replay_reasoning`, on by default; `false` turns it off;
+`CMX_REPLAY_REASONING`)
+sends each reply's reasoning back with every later request of its harness run,
+so a model continues from its own thinking. Each run decides once, from its
+model: replay applies unless the model's catalog window is under 400,000
+tokens (an uncatalogued model counts as under). The context stop reads the
+provider's prompt tokens, which include the
+replayed reasoning, so the floor keeps a small-window model parking where it
+parks without replay. A review panel decides per specialist. Reasoning never
+crosses runs: phases start without history and crash resume restores no
+conversation. A mob seat's history carries reasoning into its next round only
+on the model that wrote it, and over the 384 KiB seat budget its reasoning is
+dropped oldest-first before any tool output. The harness pins a replaying run's
+later requests to the provider that served its reasoning, and retries a
+rejected request once without it (a `replay_dropped` state change).
+
 ## Per-card budget
 
 One cumulative USD ceiling (`CMX_MAX_CARD_COST`, default 5.0) spans the

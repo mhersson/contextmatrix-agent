@@ -74,6 +74,12 @@ func newWorkCmd() *cobra.Command {
 				return err
 			}
 
+			if spec.ReplayReasoning {
+				slog.Info("reasoning replay: on")
+			} else {
+				slog.Info("reasoning replay: off")
+			}
+
 			src, err := secrets.Open(cmEnvFile)
 			if err != nil {
 				return fmt.Errorf("read secrets: %w", err)
@@ -429,6 +435,7 @@ func specFromEnv() (worker.RunSpec, error) {
 		CompactionKeepRecentTurns: compactionKeepRecentTurns,
 		DefaultModel:              defaultModel,
 		ReasoningEffort:           os.Getenv("CMX_REASONING_EFFORT"),
+		ReplayReasoning:           os.Getenv("CMX_REPLAY_REASONING") == "true",
 		Workspace:                 workspace,
 		CACertFile:                os.Getenv("CMX_CA_CERT_FILE"),
 		Selection:                 selection,

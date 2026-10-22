@@ -93,7 +93,10 @@ type ServiceConfig struct {
 	ToolOutputMaxBytes        int
 	DefaultModel              string
 	ReasoningEffort           string
-	LogLevel                  string
+	// ReplayReasoning sends each reply's reasoning back with every later request
+	// of its harness run; read inside the worker (CMX_REPLAY_REASONING).
+	ReplayReasoning bool
+	LogLevel        string
 
 	// LogDir is an optional directory on the serve host for per-card raw container
 	// output (as `docker logs -f` shows it): one append file per card at
@@ -179,6 +182,7 @@ type serviceRaw struct {
 	ToolOutputMaxBytes        int               `koanf:"tool_output_max_bytes"`
 	DefaultModel              string            `koanf:"default_model"`
 	ReasoningEffort           string            `koanf:"reasoning_effort"`
+	ReplayReasoning           bool              `koanf:"replay_reasoning"`
 	LogLevel                  string            `koanf:"log_level"`
 	MaxCardCost               float64           `koanf:"max_card_cost"`
 	CompactionEnabled         bool              `koanf:"compaction_enabled"`
@@ -208,6 +212,7 @@ func serviceDefaults() serviceRaw {
 		MessageDedupCacheSize:  1000,
 		BashTimeoutMaxSeconds:  600,
 		ToolOutputMaxBytes:     131072,
+		ReplayReasoning:        true,
 		MaxCardCost:            5.0,
 		// CompactionEnabled defaults to false (behavior-neutral); threshold and
 		// keep-recent carry sane values for when an operator opts in.
@@ -425,6 +430,7 @@ func (r serviceRaw) toConfig() (*ServiceConfig, error) {
 		ToolOutputMaxBytes:        r.ToolOutputMaxBytes,
 		DefaultModel:              r.DefaultModel,
 		ReasoningEffort:           r.ReasoningEffort,
+		ReplayReasoning:           r.ReplayReasoning,
 		LogLevel:                  r.LogLevel,
 		MaxCardCost:               r.MaxCardCost,
 		ReviewAttemptsCap:         r.ReviewAttemptsCap,

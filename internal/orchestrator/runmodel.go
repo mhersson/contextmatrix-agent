@@ -80,8 +80,8 @@ func (o *run) harnessConfig(model string) harness.Config {
 		}
 	}
 
-	// Reasoning is nil when effort is empty (off) so the field is omitted and
-	// models that don't support it are unaffected.
+	// Reasoning is nil when effort is empty: the field is omitted, so each model
+	// reasons at its own default, and a model that always reasons still does.
 	cfg.Reasoning = reasoningRaw(o.d.Cfg.ReasoningEffort)
 	cfg.ReplayReasoning = o.replays(model)
 

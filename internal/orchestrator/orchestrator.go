@@ -128,7 +128,7 @@ type Config struct {
 	MaxCardCost       float64
 	PayloadModel      string // CM's default_model from the trigger; "" = serve default
 	DefaultModel      string // serve-config default
-	ReasoningEffort   string // CMX_REASONING_EFFORT; empty = off
+	ReasoningEffort   string // CMX_REASONING_EFFORT; empty sends no effort (the model's default)
 	ReplayReasoning   bool   // resend each reply's reasoning on later requests of its run, for models replays admits
 	MaxTurns          int
 	ToolOutputMax     int

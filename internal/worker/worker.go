@@ -133,7 +133,8 @@ type RunSpec struct {
 	CompactionKeepRecentTurns int     // CMX_COMPACTION_KEEP_RECENT_TURNS; recent messages kept verbatim (default 6)
 
 	DefaultModel    string // CMX_DEFAULT_MODEL; fallback when Model is absent/unresolvable
-	ReasoningEffort string // CMX_REASONING_EFFORT; empty = off (no reasoning overhead)
+	ReasoningEffort string // CMX_REASONING_EFFORT; empty sends no effort: each model reasons at its own default
+	ReplayReasoning bool   // CMX_REPLAY_REASONING; exactly "true" turns replay on
 	Workspace       string // CMX_WORKSPACE; parent dir for the clone (default /home/user/workspace)
 	CACertFile      string // CMX_CA_CERT_FILE; in-container path to an extra CA PEM (empty = disabled)
 
@@ -482,6 +483,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 			PayloadModel:      a.spec.Model,
 			DefaultModel:      a.spec.DefaultModel,
 			ReasoningEffort:   a.spec.ReasoningEffort,
+			ReplayReasoning:   a.spec.ReplayReasoning,
 			MaxTurns:          a.spec.MaxTurns,
 			ToolOutputMax:     a.spec.ToolOutputMax,
 			ReviewAttemptsCap: a.spec.ReviewAttemptsCap,

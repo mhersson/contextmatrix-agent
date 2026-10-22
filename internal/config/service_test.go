@@ -749,7 +749,7 @@ func clearServiceEnv(t *testing.T) {
 		"CMX_SELECTOR_TIER_BARS", "CMX_SELECTOR_TIER_BARS__CRITICAL",
 		"CMX_ADMIN_PORT", "CMX_ADMIN_BIND_ADDR", "CMX_METRICS_TOKEN",
 		"CMX_COMPACTION_ENABLED", "CMX_COMPACTION_THRESHOLD",
-		"CMX_COMPACTION_KEEP_RECENT_TURNS",
+		"CMX_COMPACTION_KEEP_RECENT_TURNS", "CMX_REPLAY_REASONING",
 	} {
 		if _, ok := os.LookupEnv(e); ok {
 			t.Setenv(e, "")
@@ -1007,4 +1007,34 @@ func TestServeYAMLExampleLoads(t *testing.T) {
 	require.NoError(t, err, "serve.yaml.example with every commented key enabled")
 	assert.Contains(t, cfg.WorkerExtraEnv, "HTTP_PROXY", "the commented worker_extra_env block was enabled")
 	assert.NotEmpty(t, cfg.CACertFile, "the commented ca_cert_file was enabled")
+}
+
+func TestServiceReplayReasoning(t *testing.T) {
+	t.Run("on by default", func(t *testing.T) {
+		clearServiceEnv(t)
+
+		cfg, err := LoadService(filepath.Join(t.TempDir(), "does-not-exist.yaml"))
+		require.NoError(t, err)
+		assert.True(t, cfg.ReplayReasoning)
+	})
+
+	t.Run("file", func(t *testing.T) {
+		clearServiceEnv(t)
+
+		path := filepath.Join(t.TempDir(), "serve.yaml")
+		require.NoError(t, os.WriteFile(path, []byte("replay_reasoning: false\n"), 0o600))
+
+		cfg, err := LoadService(path)
+		require.NoError(t, err)
+		assert.False(t, cfg.ReplayReasoning)
+	})
+
+	t.Run("env", func(t *testing.T) {
+		clearServiceEnv(t)
+		t.Setenv("CMX_REPLAY_REASONING", "false")
+
+		cfg, err := LoadService(filepath.Join(t.TempDir(), "does-not-exist.yaml"))
+		require.NoError(t, err)
+		assert.False(t, cfg.ReplayReasoning)
+	})
 }

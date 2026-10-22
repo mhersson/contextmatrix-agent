@@ -636,6 +636,7 @@ func launchEnv(cfg *config.ServiceConfig, secretsHostDir string) webhook.LaunchE
 		ToolOutputMaxBytes:        cfg.ToolOutputMaxBytes,
 		DefaultModel:              cfg.DefaultModel,
 		ReasoningEffort:           cfg.ReasoningEffort,
+		ReplayReasoning:           cfg.ReplayReasoning,
 		MaxCardCost:               cfg.MaxCardCost,
 		ReviewAttemptsCap:         cfg.ReviewAttemptsCap,
 		CompactionEnabled:         cfg.Compaction.Enabled,
