@@ -566,6 +566,78 @@ func TestTrimSeatContextUnderCapUntouched(t *testing.T) {
 	assert.Equal(t, "output", got[1].Content)
 }
 
+func TestTrimSeatContextDropsReasoningBeforeToolOutputs(t *testing.T) {
+	// The content alone fits the 384 KiB cap; with the old reasoning it does not.
+	output := strings.Repeat("x", 200_000)
+	old := json.RawMessage(`[{"type":"reasoning.text","text":"` + strings.Repeat("r", 200_000) + `"}]`)
+	recent := json.RawMessage(`[{"type":"reasoning.text","text":"recent"}]`)
+
+	got := trimSeatContext([]llm.Message{
+		{Role: "user", Content: "briefing"},
+		{Role: "assistant", Content: "reading", ReasoningDetails: old},
+		{Role: "tool", Content: output},
+		{Role: "assistant", Content: "position", ReasoningDetails: recent},
+	})
+
+	require.Len(t, got, 4)
+	assert.Nil(t, got[1].ReasoningDetails, "the oldest reasoning goes first, whole")
+	assert.Equal(t, output, got[2].Content, "no tool output is blanked while dropping reasoning suffices")
+	assert.Equal(t, recent, got[3].ReasoningDetails, "newer reasoning stays once under the cap")
+}
+
+func TestTrimSeatContextBlanksToolOutputsOnlyWithoutReasoning(t *testing.T) {
+	recent := json.RawMessage(`[{"type":"reasoning.text","text":"recent"}]`)
+
+	got := trimSeatContext([]llm.Message{
+		{Role: "user", Content: "briefing"},
+		{Role: "tool", Content: strings.Repeat("x", seatContextMaxBytes)},
+		{Role: "assistant", Content: "position", ReasoningDetails: recent},
+	})
+
+	require.Len(t, got, 3)
+	assert.Equal(t, trimmedToolMarker, got[1].Content)
+	assert.Nil(t, got[2].ReasoningDetails, "a blanked output never precedes kept reasoning")
+}
+
+func TestMobSeatRunnerReplaysReasoningOnlyToTheSeatsModel(t *testing.T) {
+	tests := []struct {
+		name   string
+		second string
+		want   bool
+	}{
+		{"the same model", "wide/model", true},
+		{"another model", "other/model", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &planLLM{responses: []llm.Response{
+				{Content: "position A", FinishReason: "stop", ReasoningDetails: replayedThinking, Provider: "Provider A"},
+				stopResp("critique B", 0),
+			}}
+			o := mobTestRun(&fakeOps{}, MobConfig{Participants: 2}, 10)
+			o.d.Client = client
+			o.d.Registry = replayTestRegistry()
+			o.d.Cfg.ReplayReasoning = true
+
+			runner := o.mobSeatRunner(&seatDebugSink{w: io.Discard}, 0, "mob_seat")
+
+			_, _, err := runner(t.Context(), mob.SeatConfig{Name: "seat-1", Lens: "risk", Model: "wide/model"}, nil, "round 0 briefing")
+			require.NoError(t, err)
+
+			_, _, err = runner(t.Context(), mob.SeatConfig{Name: "seat-1", Lens: "risk", Model: tt.second}, nil, "round 1 delta")
+			require.NoError(t, err)
+
+			got := assistantDetails(client.messagesOf(1))
+			if tt.want {
+				assert.Equal(t, replayedThinking, got, "a seat's next round gets its own reasoning back")
+			} else {
+				assert.Empty(t, got, "reasoning never goes to a model that did not write it")
+			}
+		})
+	}
+}
+
 // TestBuildEngineConfigContinuesSoloWhenNoSeatIsSelectable pins mob's refusal
 // arm: a discussion is an enhancement over the normal path, so a topic that
 // cannot be seated at all falls back to it instead of failing the run.

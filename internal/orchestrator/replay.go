@@ -83,3 +83,20 @@ func (o *run) spawnSubagents(ctx context.Context, client llm.LLM, root string, s
 
 	return results, nil
 }
+
+// withoutReasoning copies msgs with every ReasoningDetails dropped, leaving
+// msgs untouched.
+func withoutReasoning(msgs []llm.Message) []llm.Message {
+	if len(msgs) == 0 {
+		return nil
+	}
+
+	out := make([]llm.Message, len(msgs))
+	copy(out, msgs)
+
+	for i := range out {
+		out[i].ReasoningDetails = nil
+	}
+
+	return out
+}
