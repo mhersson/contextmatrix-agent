@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 
+	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/mhersson/contextmatrix-harness/harness"
 	"github.com/mhersson/contextmatrix-harness/llm"
 )
@@ -14,9 +15,48 @@ import (
 const replayMinContextWindow = 400_000
 
 // replays reports whether a harness run on model sends back each reply's
-// reasoning with its later requests.
+// reasoning with its later requests. A model the window floor excludes is
+// reported once per run.
 func (o *run) replays(model string) bool {
-	return o.d.Cfg.ReplayReasoning && o.d.Registry.ContextWindow(model) >= replayMinContextWindow
+	if !o.d.Cfg.ReplayReasoning {
+		return false
+	}
+
+	window := o.d.Registry.ContextWindow(model)
+	if window >= replayMinContextWindow {
+		return true
+	}
+
+	o.replayMu.Lock()
+
+	if o.replayExcluded[model] {
+		o.replayMu.Unlock()
+
+		return false
+	}
+
+	if o.replayExcluded == nil {
+		o.replayExcluded = map[string]bool{}
+	}
+
+	o.replayExcluded[model] = true
+	o.replayMu.Unlock()
+
+	if o.d.Emit != nil {
+		reason := "under_window_floor"
+		if window == 0 {
+			reason = "uncatalogued"
+		}
+
+		o.d.Emit.Emit(events.StateChange, map[string]any{
+			"event":          "replay_excluded",
+			"model":          model,
+			"reason":         reason,
+			"context_window": window,
+		})
+	}
+
+	return false
 }
 
 // spawnSubagents fans specs out, splitting them by replay decision because the

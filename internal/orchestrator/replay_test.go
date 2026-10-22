@@ -192,3 +192,81 @@ func TestSpawnSubagentsFanOutCount(t *testing.T) {
 		})
 	}
 }
+
+// replayExclusions returns the data of every replay_excluded state change in a
+// JSON-lines transcript.
+func replayExclusions(t *testing.T, transcript string) []map[string]any {
+	t.Helper()
+
+	var out []map[string]any
+
+	for line := range strings.SplitSeq(strings.TrimSpace(transcript), "\n") {
+		if line == "" {
+			continue
+		}
+
+		var ev events.Event
+		require.NoError(t, json.Unmarshal([]byte(line), &ev))
+
+		if ev.Kind == events.StateChange && ev.Data["event"] == "replay_excluded" {
+			out = append(out, ev.Data)
+		}
+	}
+
+	return out
+}
+
+func TestReplayExclusionReported(t *testing.T) {
+	t.Run("harnessConfig", func(t *testing.T) {
+		for _, on := range []bool{true, false} {
+			t.Run(fmt.Sprintf("replay=%t", on), func(t *testing.T) {
+				var transcript bytes.Buffer
+
+				o := replayRun(&planLLM{}, on)
+				o.d.Emit = events.NewEmitter(nil, &transcript)
+
+				for _, m := range []string{"narrow/model", "ghost/model", "narrow/model", "wide/model", "edge/model"} {
+					o.harnessConfig(m)
+				}
+
+				got := replayExclusions(t, transcript.String())
+				if !on {
+					assert.Empty(t, got)
+
+					return
+				}
+
+				require.Len(t, got, 2)
+				assert.Equal(t, "narrow/model", got[0]["model"])
+				assert.Equal(t, "under_window_floor", got[0]["reason"])
+				assert.EqualValues(t, 262_144, got[0]["context_window"])
+				assert.Equal(t, "ghost/model", got[1]["model"])
+				assert.Equal(t, "uncatalogued", got[1]["reason"])
+				assert.EqualValues(t, 0, got[1]["context_window"])
+			})
+		}
+	})
+
+	t.Run("concurrent calls report once", func(t *testing.T) {
+		var transcript bytes.Buffer
+
+		o := replayRun(&planLLM{}, true)
+		o.d.Emit = events.NewEmitter(nil, &transcript)
+
+		var wg sync.WaitGroup
+
+		for range 16 {
+			wg.Add(1)
+
+			go func() {
+				defer wg.Done()
+
+				assert.False(t, o.replays("narrow/model"))
+			}()
+		}
+
+		wg.Wait()
+
+		assert.Len(t, replayExclusions(t, transcript.String()), 1)
+	})
+}

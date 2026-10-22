@@ -342,7 +342,9 @@ conversation. A mob seat's history carries reasoning into its next round only
 on the model that wrote it, and over the 384 KiB seat budget its reasoning is
 dropped oldest-first before any tool output. The harness pins a replaying run's
 later requests to the provider that served its reasoning, and retries a
-rejected request once without it (a `replay_dropped` state change).
+rejected request once without it (a `replay_dropped` state change). With replay
+on, each model the floor excludes, or whose window is unknown, is reported once
+per run as a `replay_excluded` state change naming the model and the reason.
 
 ## Per-card budget
 

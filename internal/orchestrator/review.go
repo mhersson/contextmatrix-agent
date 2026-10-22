@@ -1404,11 +1404,6 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 		}
 	}
 
-	// Children inherit the parent phase-run reasoning config from the same
-	// builder every parent model call uses, so parent and children can never
-	// drift. Only Reasoning is read from parentCfg.
-	parentCfg := o.harnessConfig(cfg.DefaultModel)
-
 	client := d.Client
 	if o.progress != nil {
 		client = progressClient{LLM: d.Client, onDelta: o.progress.onDelta}
@@ -1420,7 +1415,10 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 			ToolOutputMaxBytes: cfg.ToolOutputMax,
 			RedactToolOutput:   d.Redact,
 			ExtraReadOnlyTools: reviewSubagentTools(cfg.CardID, cfg.Workspace, d.ReadRoots, d.SkillTool, d.ReadRootsLog),
-			Reasoning:          parentCfg.Reasoning,
+			// Same helper every phase run uses, so children never drift. Not
+			// harnessConfig: it would decide replay for a default model the
+			// panel may never run.
+			Reasoning: o.reasoning(),
 		})
 	if err != nil {
 		return "", fmt.Errorf("spawn review specialists: %w", err)

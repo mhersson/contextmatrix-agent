@@ -489,6 +489,11 @@ type run struct {
 	coderPinWarned    bool
 	reviewerPinWarned bool
 
+	// replayExcluded holds the models already reported as excluded from
+	// reasoning replay; replayMu guards it for concurrent seats.
+	replayMu       sync.Mutex
+	replayExcluded map[string]bool
+
 	// shortfallWarned guards the once-per-run advisory for a selection that
 	// could not be served at the tier it asked for, keyed per phase, role and
 	// the requested -> met bar pair. shortfallMu guards it and NOTHING else:
