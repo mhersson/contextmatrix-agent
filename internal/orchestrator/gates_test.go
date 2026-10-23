@@ -1143,6 +1143,65 @@ func TestPRGates_ResumeAfterMergeDoesNotReMerge(t *testing.T) {
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
 }
 
+// TestPRGates_FreshRunIgnoresFinishedRunsGates: a reopened card's fresh run
+// (phase "") must not inherit the finished run's "## PR Gates" progress - its new
+// PR still gets merged - while a crash-resumed run keeps reading it.
+func TestPRGates_FreshRunIgnoresFinishedRunsGates(t *testing.T) {
+	stale := "body\n\n## PR Gates\n\n- Copilot rounds used: 3/3\n- CI rounds used: 2/3\n- Copilot gate: satisfied\n- Merge: merged\n- Status: passed\n"
+
+	for _, tt := range []struct {
+		name      string
+		phase     string
+		wantGates []string
+	}{
+		{"fresh run merges its new PR", "", []string{"Checks:" + gatePRURL, "MergePullRequest:" + gatePRURL}},
+		{"resumed run does not merge again", "pr_gates", []string{"Checks:" + gatePRURL}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			gates := &fakeGates{checks: [][]CheckResult{{{Name: "build", Bucket: "pass"}}}}
+
+			tc := mergeGateContext("Merge", stale)
+			tc.Phase = tt.phase
+			o := prGateRun(ops, gates, &fakeGit{}, &planLLM{}, tc, 0)
+
+			ctx := context.Background()
+			require.NoError(t, o.reconcile(ctx))
+
+			if tt.phase == "" {
+				assert.Equal(t, gatesState{}, o.loadGatesState(), "no rounds, satisfied or merged marker carried over")
+				require.NotEmpty(t, ops.bodyUpdates, "the cleaned body is pushed before any phase runs")
+				assert.NotContains(t, ops.bodyUpdates[0], "## PR Gates")
+				assert.Contains(t, ops.bodyUpdates[0], "body", "the rest of the body is kept")
+
+				o.prURL = gatePRURL // integrate opened the new PR
+			}
+
+			require.NoError(t, runPRGates(ctx, o))
+			assert.Equal(t, tt.wantGates, gates.recorded())
+		})
+	}
+}
+
+// TestPRGates_FreshRunNeverGatesFinishedRunsPR: a reopened card's task context
+// still carries the finished run's PR URL. A fresh run whose integrate opened no
+// PR must not fall back to it and gate, or merge, the old PR.
+func TestPRGates_FreshRunNeverGatesFinishedRunsPR(t *testing.T) {
+	ops := &fakeOps{}
+	gates := &fakeGates{checks: [][]CheckResult{{{Name: "build", Bucket: "pass"}}}}
+
+	tc := mergeGateContext("Merge", "body")
+	tc.Phase = ""
+	o := prGateRun(ops, gates, &fakeGit{}, &planLLM{}, tc, 0)
+
+	ctx := context.Background()
+	require.NoError(t, o.reconcile(ctx))
+
+	var parked *GatesParkedError
+	require.ErrorAs(t, runPRGates(ctx, o), &parked, "nothing of this run's to gate on")
+	assert.Equal(t, []string{"FindPRURL"}, gates.recorded(), "the old PR is never polled or merged")
+}
+
 // TestPRGates_MergeFlagWithoutAwaitCIIsIgnored: merge_pr alone (no await_ci)
 // is a plain pass-through - the UI hides it, the agent never merges blind.
 func TestPRGates_MergeFlagWithoutAwaitCIIsIgnored(t *testing.T) {
@@ -3067,6 +3126,54 @@ func TestCopilotGate_DedupeSurvivesResume(t *testing.T) {
 
 	assert.Zero(t, modelCallCount(client),
 		"a comment triaged before the park is never triaged again")
+	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+}
+
+// TestCopilotGate_FreshRunTriagesRepeatedComment: a reopened card's fresh run
+// opens a new PR, so a comment repeating one the finished run triaged INVALID is
+// triaged again, not skipped by the finished run's dedupe record.
+func TestCopilotGate_FreshRunTriagesRepeatedComment(t *testing.T) {
+	repeated := ReviewComment{
+		Path: "internal/api/handler.go",
+		Body: "This error is swallowed - the caller\ncan never see it.",
+	}
+
+	seed := &fakeOps{}
+	recorder := prGateRun(seed, &fakeGates{}, &fakeGit{}, &planLLM{},
+		copilotGateContext("Finished", "Task body."), 0)
+
+	recorder.recordCopilotRound(context.Background(), 1, []ReviewComment{repeated},
+		[]copilotFinding{{
+			File: repeated.Path, Issue: "the write error is dropped",
+			Valid: false, Reason: "not a defect",
+		}}, false)
+
+	body := seed.lastBody()
+	require.Contains(t, body, "### Comments triaged", "the finished run recorded its dedupe keys; body=%q", body)
+
+	ops := &fakeOps{}
+	gates := &fakeGates{
+		requested: true,
+		headSHA:   copilotHeadSHA,
+		reviews:   []*CopilotReview{reviewOnHead("one suggestion", repeated)},
+	}
+	client := &planLLM{responses: []llm.Response{copilotVerdict(copilotFinding{
+		File: repeated.Path, Issue: "the write error is dropped",
+		Valid: false, Reason: "not a defect",
+	})}}
+
+	tc := copilotGateContext("Reopened", body)
+	tc.Phase = ""
+	o := prGateRun(ops, gates, &fakeGit{}, client, tc, 0)
+
+	ctx := context.Background()
+	require.NoError(t, o.reconcile(ctx))
+
+	o.prURL = gatePRURL // integrate opened the new PR
+
+	require.NoError(t, runPRGates(ctx, o))
+
+	assert.Equal(t, 1, modelCallCount(client), "the repeated comment is triaged on the new PR")
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
 }
 

@@ -34,12 +34,14 @@ import (
 // subtask's reported cost floors the budget ledger alongside the parent's.
 //
 // reconcile has NO side effects beyond git (fetch/checkout) and reads
-// (RemoteTip/SubtaskStates) plus the one advisory AddLog: it never creates or
-// claims cards.
+// (RemoteTip/SubtaskStates) plus the one advisory AddLog and forgetFinishedRun's
+// body write: it never creates or claims cards.
 func (o *run) reconcile(ctx context.Context) error {
 	cfg := o.d.Cfg
 
 	if o.tc.Phase == "" {
+		o.forgetFinishedRun(ctx)
+
 		// FRESH run (§5.7 row ""): no SubtaskStates needed. Record the stale remote
 		// tip for the first-push overwrite lease; the value lives on o.staleRemoteTip
 		// and is consumed by the execute phase's first Push.
@@ -168,4 +170,27 @@ func (o *run) reconcile(ctx context.Context) error {
 	})
 
 	return nil
+}
+
+// forgetFinishedRun clears what a finished run left for pr_gates from a fresh
+// run (phase ""), as on a reopened card: its PR URL, its "## PR Gates" progress
+// and its "## Copilot Review" triage records. Read back, they would gate the old
+// PR, skip the new PR's merge and Copilot triage, and spend its round caps. The
+// cleaned body is pushed at once so a crash-resume of this run, which keeps
+// reading those sections, never sees the old ones. Best-effort, like
+// recordSection.
+func (o *run) forgetFinishedRun(ctx context.Context) {
+	o.tc.PRUrl = ""
+
+	body := removeSectionsWithPrefix(removeSection(o.body, gatesSectionHeading), copilotSectionHeading)
+	if body == o.body {
+		return
+	}
+
+	o.body = body
+
+	if err := o.d.Ops.UpdateCardBody(ctx, o.d.Cfg.CardID, o.body); err != nil {
+		slog.Warn("reconcile: clear finished run's PR gate records failed",
+			"card_id", o.d.Cfg.CardID, "error", err)
+	}
 }

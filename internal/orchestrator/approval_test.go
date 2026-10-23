@@ -357,12 +357,12 @@ func TestReviewRejectionNoApproval(t *testing.T) {
 	assert.NotContains(t, body, "## Review Approval")
 }
 
-// TestRemoveSection_RemovesApprovalBlock proves removeApprovalSection strips a
+// TestRemoveSection_RemovesApprovalBlock proves removeSection strips a
 // "## Review Approval" block from the body, including its JSON payload.
 func TestRemoveSection_RemovesApprovalBlock(t *testing.T) {
 	body := "Intro.\n\n## Review Approval\n\nCommit: abc123\n\n```json\n{\"head_sha\":\"abc123\"}\n```\n\n## Keep\n\nhuman text"
 
-	got := removeApprovalSection(body)
+	got := removeSection(body, approvalHeading)
 
 	assert.NotContains(t, got, "## Review Approval")
 	assert.NotContains(t, got, "abc123")
@@ -376,23 +376,23 @@ func TestRemoveSection_RemovesApprovalBlock(t *testing.T) {
 func TestRemoveSection_AbsentHeading(t *testing.T) {
 	body := "## Plan\n\nplain body"
 
-	got := removeApprovalSection(body)
+	got := removeSection(body, approvalHeading)
 
-	assert.Equal(t, body, got, "removeApprovalSection on an absent heading must return the body unchanged")
+	assert.Equal(t, body, got, "removeSection on an absent heading must return the body unchanged")
 }
 
 // TestRemoveSection_LastSection proves removing the final section works.
 func TestRemoveSection_LastSection(t *testing.T) {
 	body := "## Review Approval\n\nCommit: abc\n\n```json\n{}\n```"
 
-	got := removeApprovalSection(body)
+	got := removeSection(body, approvalHeading)
 
 	assert.Empty(t, strings.TrimSpace(got), "removing the only section must leave an empty body")
 }
 
 // TestRemoveSection_EmptyBody returns empty.
 func TestRemoveSection_EmptyBody(t *testing.T) {
-	got := removeApprovalSection("")
+	got := removeSection("", approvalHeading)
 
 	assert.Empty(t, got)
 }

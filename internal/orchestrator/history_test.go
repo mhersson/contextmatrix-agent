@@ -349,3 +349,24 @@ func TestStripAgentSections(t *testing.T) {
 		})
 	}
 }
+
+func TestRemoveSectionsWithPrefix(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			"every round goes, other sections stay",
+			"intro\n\n## Copilot Review\n\n- a\n\n## Plan\n\nsteps\n\n## Copilot Review (Round 2)\n\n- b\n",
+			"intro\n\n## Plan\n\nsteps\n",
+		},
+		{"none recorded is unchanged", "intro\n\n## Plan\n\nsteps\n", "intro\n\n## Plan\n\nsteps\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := removeSectionsWithPrefix(tt.body, "Copilot Review")
+			assert.Equal(t, tt.want, got)
+			assert.Empty(t, sectionsWithPrefix(got, "Copilot Review"), "nothing left for the reader")
+		})
+	}
+}
