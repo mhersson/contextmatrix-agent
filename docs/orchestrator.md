@@ -35,8 +35,11 @@ every subtask and every review round - `git commit` alone does not survive an
 ephemeral container. Review fixes land as `git commit --fixup=<sha>` targeting
 the commit that last touched the changed files. Integrate runs
 `RebaseAutosquash` with `GIT_SEQUENCE_EDITOR=true`, then `--force-with-lease`
-guarded by the remote tip recorded before the rebase. A rebase conflict falls
-back to soft-reset-to-merge-base plus a single squashed recommit.
+guarded by the remote tip recorded before the rebase. Uncommitted changes to
+tracked files, such as a verify run rebuilding a committed `.pyc`, are stashed
+first and left in the stash, so they neither block the rebase nor reach a
+commit. A rebase conflict falls back to soft-reset-to-merge-base plus a single
+squashed recommit.
 
 The work branch is `cm/<card-id>` (card ID lowercased); the ID is validated
 against `^[A-Za-z][A-Za-z0-9-]*-[0-9]+$` (PREFIX-NNN) before it reaches any
