@@ -56,11 +56,15 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 # The upgrade applies Debian security fixes published after the pinned base
 # digest was cut, so the image does not wait on an upstream base rebuild.
+# kubectl and kustomize come from Debian too and lag upstream: they render and
+# validate manifests, but a cluster more than one minor newer is outside
+# kubectl's version-skew policy.
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends \
       bash ca-certificates build-essential curl git jq \
       libgcc-s1 libstdc++6 openssh-client ripgrep fd-find \
+      shellcheck shfmt kubectl kustomize \
     && ln -s "$(command -v fdfind)" /usr/local/bin/fd \
     && rm -rf /var/lib/apt/lists/*
 

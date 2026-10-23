@@ -9,8 +9,9 @@ custom image that carries that toolchain.**
 
 A custom image is the published worker image plus your toolchain. Build `FROM`
 one of the published variants so the agent binary, entrypoint, unprivileged
-`user` (UID 1000), and baseline CLIs (`git`, `gh`, `rg`, `fd`) are inherited
-unchanged - then `apt-get install` (or otherwise add) what your project needs.
+`user` (UID 1000), and baseline CLIs (`git`, `gh`, `rg`, `fd`, `shellcheck`,
+`shfmt`, `kubectl`, `kustomize`) are inherited unchanged - then `apt-get install`
+(or otherwise add) what your project needs.
 
 ## Worked example - add Ruby
 

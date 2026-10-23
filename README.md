@@ -154,8 +154,9 @@ export LLM_API_KEY=<your-api-key>
    | `rust`     | rustup/cargo (+ clippy, rustfmt). No Node.                            |
    | `jvm-node` | OpenJDK 21 + Maven + Node 24 + yarn (defers to a repo's Yarn Berry).  |
 
-   Every variant also carries the baseline CLIs (`git`, `gh`, `rg`, `fd`). Build
-   the slim variants with `make docker-worker-variants` (tags
+   Every variant also carries the baseline CLIs (`git`, `gh`, `rg`, `fd`,
+   `shellcheck`, `shfmt`, `kubectl`, `kustomize`). Build the slim variants with
+   `make docker-worker-variants` (tags
    `contextmatrix-agent-worker:go-node`, `:python`, `:rust`, `:jvm-node`).
 
    **Any other ecosystem ⇒ set the project's `remote_execution.worker_image` to
