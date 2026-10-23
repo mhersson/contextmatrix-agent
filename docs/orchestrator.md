@@ -18,7 +18,10 @@ The current phase is persisted to the card via MCP before each phase,
 orthogonal to board state. Persisted phase plus an incrementally pushed branch
 give crash-resume: a fresh container re-clones and re-enters at the stored
 phase. A run parked at `judge` re-enters at `execute`, since judge state is
-container-local.
+container-local. CM launches a card only from `todo`, so a run that re-enters
+at `integrate` or `pr_gates` with the card outside `review` first moves it back
+there with `start_review`; on the default board only `review` may move to
+`done`.
 
 Documentation the card's acceptance criteria require (named files under
 `docs/`, a README, specific claims that must change) is planned as a
