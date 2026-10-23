@@ -155,6 +155,58 @@ func TestRunEntersAtPersistedPhase(t *testing.T) {
 	assert.GreaterOrEqual(t, indexOfCall(calls, "SetPhase:review"), 0)
 }
 
+// TestRunResumedPastReviewReentersReview: CM launches only todo cards, so a run
+// resumed at integrate or pr_gates starts with the card in in_progress, which
+// cannot move to done. The entry phase must already run with the card in
+// review, and a card still in review is not moved again.
+func TestRunResumedPastReviewReentersReview(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		phase string
+		state string
+	}{
+		{"relaunched at integrate", "integrate", "in_progress"},
+		{"relaunched at pr_gates", "pr_gates", "in_progress"},
+		{"resumed at pr_gates still in review", "pr_gates", "review"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{
+				taskContext: cmclient.TaskContext{Phase: tt.phase, State: tt.state},
+				cardState:   tt.state,
+			}
+			d := Deps{Ops: ops, Git: &fakeGit{}, Cfg: Config{CardID: "CARD-1"}}
+
+			o := newRun(d, ops.taskContext)
+
+			var entryState string
+
+			o.integrateFn = func(context.Context) error {
+				entryState = ops.cardState
+
+				return nil
+			}
+			o.prGatesFn = func(ctx context.Context) error {
+				if tt.phase == "pr_gates" {
+					entryState = ops.cardState
+				}
+
+				return runPRGates(ctx, o)
+			}
+			o.doneFn = func(context.Context) error { return nil }
+
+			require.NoError(t, o.execute(context.Background()))
+
+			calls := ops.recorded()
+			assert.Equal(t, "review", entryState, "the entry phase runs with the card in review; calls=%v", calls)
+			assert.Equal(t, "done", ops.cardState, "calls=%v", calls)
+
+			if tt.state == "review" {
+				assert.Equal(t, -1, indexOfCall(calls, "StartReview:CARD-1"), "a card in review is not moved again")
+			}
+		})
+	}
+}
+
 func TestRunBudgetBreachParks(t *testing.T) {
 	ops := &fakeOps{
 		taskContext: cmclient.TaskContext{},

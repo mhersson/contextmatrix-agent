@@ -765,6 +765,15 @@ func (o *run) execute(ctx context.Context) error {
 		return fmt.Errorf("reconcile: %w", err)
 	}
 
+	// CM launches only todo cards, so a run resumed past review arrives in
+	// in_progress; integrate and pr_gates hold the card in review, and on the
+	// default board only review may move to done.
+	if (start == "integrate" || start == "pr_gates") && o.tc.State != "review" {
+		if err := o.d.Ops.StartReview(ctx, o.d.Cfg.CardID); err != nil {
+			return fmt.Errorf("re-enter review on resume at %s: %w", start, err)
+		}
+	}
+
 	for _, phase := range phaseOrder[from:] {
 		o.curPhase = phase
 

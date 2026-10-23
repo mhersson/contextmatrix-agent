@@ -40,6 +40,11 @@ type fakeOps struct {
 	// the single-value taskContext/taskCtxErr behaviour above.
 	taskContexts map[string]cmclient.TaskContext
 
+	// cardState, when set, is the parent card's board state under CM's default
+	// transitions: TransitionCard and StartReview move it and refuse a move the
+	// default board does not allow, as CM does. A same-state move is a no-op.
+	cardState string
+
 	setPhaseErr           error
 	addLogErr             error
 	claimErr              error
@@ -305,11 +310,40 @@ func (f *fakeOps) bodyFor(cardID string) string {
 func (f *fakeOps) TransitionCard(_ context.Context, cardID, state string) error {
 	f.record("TransitionCard:" + state)
 
-	return nil
+	return f.moveCard(state)
 }
 
 func (f *fakeOps) StartReview(_ context.Context, cardID string) error {
 	f.record("StartReview:" + cardID)
+
+	return f.moveCard("review")
+}
+
+// defaultTransitions is CM's default .board.yaml transition table.
+var defaultTransitions = map[string][]string{
+	"todo":        {"in_progress", "not_planned"},
+	"in_progress": {"blocked", "review", "todo"},
+	"blocked":     {"in_progress", "todo"},
+	"review":      {"done", "in_progress"},
+	"done":        {"todo"},
+	"stalled":     {"todo", "in_progress"},
+	"not_planned": {"todo"},
+}
+
+// moveCard applies a transition to cardState when the fake models it.
+func (f *fakeOps) moveCard(to string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.cardState == "" || f.cardState == to {
+		return nil
+	}
+
+	if !slices.Contains(defaultTransitions[f.cardState], to) {
+		return fmt.Errorf("cannot transition from %q to %q; valid targets: %v", f.cardState, to, defaultTransitions[f.cardState])
+	}
+
+	f.cardState = to
 
 	return nil
 }
