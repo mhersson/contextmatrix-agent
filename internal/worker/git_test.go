@@ -912,6 +912,119 @@ func TestRebaseAutosquash(t *testing.T) {
 		_, statErr := os.Stat(filepath.Join(ws, ".git", "rebase-merge"))
 		assert.True(t, os.IsNotExist(statErr), "rebase-merge dir should not exist after abort")
 	})
+
+	t.Run("tracked file a verify run rewrote is stashed, not a blocker", func(t *testing.T) {
+		t.Parallel()
+
+		_, ws, _ := setupClonedRepo(t)
+		g := NewGit(ws, "", "", "")
+		ctx := context.Background()
+
+		ontoOut, err := g.run(ctx, "rev-parse", "origin/main")
+		require.NoError(t, err)
+
+		onto := strings.TrimSpace(ontoOut)
+
+		// A build cache committed before any .gitignore covered it, the way a
+		// Python project's __pycache__/*.pyc can be.
+		require.NoError(t, os.WriteFile(filepath.Join(ws, "app.src"), []byte("v1\n"), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(ws, "app.cache"), []byte("built from v1\n"), 0o644))
+		runGit(t, ws, "add", "app.src", "app.cache")
+		runGit(t, ws, "commit", "-m", "add app")
+
+		target, err := g.Head(ctx)
+		require.NoError(t, err)
+
+		require.NoError(t, os.WriteFile(filepath.Join(ws, "app.src"), []byte("v2\n"), 0o644))
+
+		_, err = g.CommitFixup(ctx, target)
+		require.NoError(t, err)
+
+		// The verify run after the fixup rebuilds the cache in place.
+		require.NoError(t, os.WriteFile(filepath.Join(ws, "app.cache"), []byte("built from v2\n"), 0o644))
+
+		require.NoError(t, g.RebaseAutosquash(ctx, onto))
+
+		out, err := g.run(ctx, "rev-list", onto+"..HEAD")
+		require.NoError(t, err)
+		assert.Len(t, strings.Fields(strings.TrimSpace(out)), 1, "fixup squashed")
+
+		src, err := g.run(ctx, "show", "HEAD:app.src")
+		require.NoError(t, err)
+		assert.Equal(t, "v2\n", src)
+
+		cache, err := g.run(ctx, "show", "HEAD:app.cache")
+		require.NoError(t, err)
+		assert.Equal(t, "built from v1\n", cache, "the uncommitted rewrite never reaches a commit")
+
+		stashed, err := g.run(ctx, "show", "stash@{0}:app.cache")
+		require.NoError(t, err)
+		assert.Equal(t, "built from v2\n", stashed, "the uncommitted rewrite is kept in the stash")
+	})
+
+	t.Run("conflict leaves the stashed rewrite out of the tree for the fallback", func(t *testing.T) {
+		t.Parallel()
+
+		bare, ws, _ := setupClonedRepo(t)
+		g := NewGit(ws, "", "", "")
+		ctx := context.Background()
+
+		require.NoError(t, os.WriteFile(filepath.Join(ws, "conflict.txt"), []byte("ours\n"), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(ws, "app.cache"), []byte("built\n"), 0o644))
+		runGit(t, ws, "add", "conflict.txt", "app.cache")
+		runGit(t, ws, "commit", "-m", "our change")
+
+		pushFileToBranch(t, bare, "conflict.txt", "main")
+		require.NoError(t, g.Fetch(ctx, "main"))
+
+		require.NoError(t, os.WriteFile(filepath.Join(ws, "app.cache"), []byte("rebuilt\n"), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(ws, "notes.tmp"), []byte("untracked\n"), 0o644))
+
+		err := g.RebaseAutosquash(ctx, "origin/main")
+		require.ErrorIs(t, err, ErrRebaseConflict)
+
+		status, err := g.run(ctx, "status", "--porcelain", "--untracked-files=no")
+		require.NoError(t, err)
+		assert.Empty(t, strings.TrimSpace(status), "the conflict fallback starts from the committed tracked content")
+
+		stashed, err := g.run(ctx, "show", "stash@{0}:app.cache")
+		require.NoError(t, err)
+		assert.Equal(t, "rebuilt\n", stashed)
+
+		assert.FileExists(t, filepath.Join(ws, "notes.tmp"), "untracked files are not stashed")
+	})
+
+	t.Run("refused start returns the rebase's own error, not a conflict", func(t *testing.T) {
+		t.Parallel()
+
+		_, ws, _ := setupClonedRepo(t)
+		g := NewGit(ws, "", "", "")
+		ctx := context.Background()
+
+		ontoOut, err := g.run(ctx, "rev-parse", "origin/main")
+		require.NoError(t, err)
+
+		onto := strings.TrimSpace(ontoOut)
+
+		require.NoError(t, os.WriteFile(filepath.Join(ws, "foo.txt"), []byte("ours\n"), 0o644))
+		runGit(t, ws, "add", "foo.txt")
+		runGit(t, ws, "commit", "-m", "add foo")
+
+		// A pre-rebase hook that refuses makes git exit 1 before any rebase state
+		// exists - there is nothing to abort. hooksPath is pinned so a global one
+		// cannot hide the hook.
+		hooks := t.TempDir()
+		runGit(t, ws, "config", "core.hooksPath", hooks)
+		require.NoError(t, os.WriteFile(filepath.Join(hooks, "pre-rebase"), []byte("#!/bin/sh\nexit 1\n"), 0o755))
+
+		err = g.RebaseAutosquash(ctx, onto)
+		require.Error(t, err)
+		require.NotErrorIs(t, err, ErrRebaseConflict)
+
+		var exitErr *exec.ExitError
+		require.ErrorAs(t, err, &exitErr)
+		assert.Equal(t, 1, exitErr.ExitCode(), "the rebase's refusal, not a failed abort (exit 128): %v", err)
+	})
 }
 
 func TestSoftResetSquash(t *testing.T) {

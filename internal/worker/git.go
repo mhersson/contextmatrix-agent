@@ -837,10 +837,21 @@ func (g *Git) LastCommitTouching(ctx context.Context, paths []string) (string, e
 
 // RebaseAutosquash rebases the current branch onto onto with --autosquash,
 // collapsing any fixup! commits. If the rebase encounters a conflict it aborts,
-// leaving the repo clean, and returns ErrRebaseConflict.
+// leaving the repo clean, and returns ErrRebaseConflict; a rebase git refused to
+// start returns git's own error instead.
+//
+// Uncommitted tracked changes are stashed first and left in the stash: a verify
+// run rebuilding a committed cache file (a .pyc) would otherwise make git refuse
+// to start, and every coder path commits its work before integrate, so the
+// rebase and the caller's conflict fallback must see the committed tracked
+// content.
 //
 // GIT_SEQUENCE_EDITOR=true skips the interactive editor prompt.
 func (g *Git) RebaseAutosquash(ctx context.Context, onto string) error {
+	if err := g.stashTracked(ctx); err != nil {
+		return fmt.Errorf("rebase: %w", err)
+	}
+
 	env, err := g.credEnv()
 	if err != nil {
 		return fmt.Errorf("rebase: %w", err)
@@ -857,13 +868,73 @@ func (g *Git) RebaseAutosquash(ctx context.Context, onto string) error {
 		return nil
 	}
 
-	// Rebase failed - abort to leave the repo clean.
+	stopped, serr := g.rebaseInProgress(ctx)
+	if serr != nil {
+		// Unknown state: abort as if stopped, so a live rebase is never left behind.
+		slog.Warn("rebase: cannot read rebase state; aborting as if stopped", "error", serr)
+
+		stopped = true
+	}
+
+	if !stopped {
+		return fmt.Errorf("git rebase: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+
+	// Rebase stopped mid-way - abort to leave the repo clean.
 	_, abortErr := g.run(ctx, "rebase", "--abort")
 	if abortErr != nil {
 		return fmt.Errorf("rebase abort after conflict: %w (original: %s)", abortErr, strings.TrimSpace(string(out)))
 	}
 
 	return fmt.Errorf("%w: %s", ErrRebaseConflict, strings.TrimSpace(string(out)))
+}
+
+// stashTracked stashes uncommitted changes to tracked files, staged or not, and
+// leaves untracked files in place. A tree with no tracked changes is a no-op.
+func (g *Git) stashTracked(ctx context.Context) error {
+	out, err := g.run(ctx, "status", "--porcelain=v1", "--untracked-files=no")
+	if err != nil {
+		return fmt.Errorf("check tracked changes: %w", err)
+	}
+
+	changed := strings.Split(strings.TrimSpace(out), "\n")
+	if changed[0] == "" {
+		return nil
+	}
+
+	slog.Warn("stashing uncommitted tracked changes before rebase",
+		"count", len(changed), "first", changed[:min(len(changed), 10)])
+
+	if _, err := g.run(ctx, "stash", "push", "--quiet", "--message", "uncommitted tracked changes before rebase"); err != nil {
+		return fmt.Errorf("stash tracked changes: %w", err)
+	}
+
+	return nil
+}
+
+// rebaseInProgress reports whether a rebase stopped mid-way and left its state
+// behind. rebase -i always uses the merge backend, so rebase-merge is the marker.
+func (g *Git) rebaseInProgress(ctx context.Context) (bool, error) {
+	out, err := g.run(ctx, "rev-parse", "--git-path", "rebase-merge")
+	if err != nil {
+		return false, fmt.Errorf("resolve rebase state: %w", err)
+	}
+
+	state := strings.TrimSpace(out)
+	if !filepath.IsAbs(state) {
+		state = filepath.Join(g.dir, state)
+	}
+
+	_, err = os.Stat(state)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+
+	if err != nil {
+		return false, fmt.Errorf("stat rebase state: %w", err)
+	}
+
+	return true, nil
 }
 
 // SoftReset moves HEAD to to, leaving the index and working tree unchanged.
