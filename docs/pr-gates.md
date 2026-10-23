@@ -166,6 +166,12 @@ re-trigger skips the paid re-review and goes straight to the CI gate. The
 unavailability and timeout skips never write the marker, so those stay
 retryable.
 
+A resumed run (persisted phase set) reads these records back. A fresh run
+(empty phase, as on a reopened card) drops the `## PR Gates` and
+`## Copilot Review` sections and ignores the recorded PR URL before any phase
+runs, so a finished run's round counts, markers, triaged comments and PR never
+carry over to the new PR.
+
 ## Final probe
 
 After the enabled gates have run, the phase probes once more for a Copilot

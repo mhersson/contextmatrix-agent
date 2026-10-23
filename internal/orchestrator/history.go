@@ -334,6 +334,61 @@ func upsertSection(body, heading, section string) string {
 	return b.String()
 }
 
+// removeSection removes the "## <heading>" block from body and returns the
+// result. Heading matching is exact, matching upsertSection/extractSection.
+// Returns the input byte-identical when the heading is absent.
+func removeSection(body, heading string) string {
+	marker := "## " + heading
+
+	lines := strings.Split(body, "\n")
+
+	start := -1
+
+	for i, l := range lines {
+		if strings.TrimSpace(l) == marker {
+			start = i
+
+			break
+		}
+	}
+
+	if start < 0 {
+		return body
+	}
+
+	// Find the end of the existing block: the next "## " heading after start.
+	end := len(lines)
+
+	for i := start + 1; i < len(lines); i++ {
+		if strings.HasPrefix(lines[i], "## ") {
+			end = i
+
+			break
+		}
+	}
+
+	before := strings.TrimRight(strings.Join(lines[:start], "\n"), "\n")
+	after := strings.TrimLeft(strings.Join(lines[end:], "\n"), "\n")
+
+	var b strings.Builder
+
+	if before != "" {
+		b.WriteString(before)
+	}
+
+	if after != "" {
+		if before != "" {
+			b.WriteString("\n\n")
+		}
+
+		b.WriteString(after)
+	}
+
+	b.WriteString("\n")
+
+	return b.String()
+}
+
 // extractSection returns the "## <heading>" block in body, from that heading
 // line through the line before the next "## " heading (or the end of the body),
 // trimmed of trailing newlines. It returns "" when the heading is absent. The
@@ -419,6 +474,33 @@ func isAgentHeading(trimmed string) bool {
 	}
 
 	return false
+}
+
+// removeSectionsWithPrefix drops every section sectionsWithPrefix returns for
+// heading and keeps the rest of body in order. Returns the input byte-identical
+// when there is none.
+func removeSectionsWithPrefix(body, heading string) string {
+	marker := "## " + heading
+
+	lines := strings.Split(body, "\n")
+	kept := make([]string, 0, len(lines))
+	in := false
+
+	for _, line := range lines {
+		if strings.HasPrefix(line, "## ") {
+			in = strings.HasPrefix(line, marker)
+		}
+
+		if !in {
+			kept = append(kept, line)
+		}
+	}
+
+	if len(kept) == len(lines) {
+		return body
+	}
+
+	return strings.Join(kept, "\n")
 }
 
 // sectionsWithPrefix returns every "## <heading>..." section recorded on the
