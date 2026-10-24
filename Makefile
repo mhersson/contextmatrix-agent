@@ -22,6 +22,12 @@ RUFF_VERSION          ?= 0.16.10
 YARN_VERSION          ?= 1.22.22
 MAVEN_VERSION         ?= 3.9.16
 MAVEN_SHA512          ?= 831a8591fe20c8243b1dbe7d71e3244f31d1665b0804b2e825e38cbbe5ce0cafb8338851f90780735568773e0a6cd07bbec107cda0b896b008b861075358b6f6
+YQ_VERSION            ?= 4.54.1
+YQ_SHA256_AMD64       ?= 8e34fc298390875de416e6a4afcb8cabeceb25d9aa8506c1a2f9353cf702ea5f
+YQ_SHA256_ARM64       ?= 189088da0c6429ec5178dfaab1a114805f6cab0b61b165ab236efedf1d57a71b
+TASK_VERSION          ?= 3.54.0
+TASK_SHA256_AMD64     ?= 680859dbb4d881a9c72d4d9a8f510825450849af8567deacd7302c01124416fb
+TASK_SHA256_ARM64     ?= d7189d439d4a6058e39e1b2acd7c8b27acd4856691b408f23b242e4294e1df5b
 
 # Build info stamped into the binary and read back on /health.
 VERSION    ?= $(shell git describe --tags --exact-match 2>/dev/null)
@@ -49,7 +55,13 @@ WORKER_BUILD_ARGS = \
 	--build-arg RUFF_VERSION=$(RUFF_VERSION) \
 	--build-arg YARN_VERSION=$(YARN_VERSION) \
 	--build-arg MAVEN_VERSION=$(MAVEN_VERSION) \
-	--build-arg MAVEN_SHA512=$(MAVEN_SHA512)
+	--build-arg MAVEN_SHA512=$(MAVEN_SHA512) \
+	--build-arg YQ_VERSION=$(YQ_VERSION) \
+	--build-arg YQ_SHA256_AMD64=$(YQ_SHA256_AMD64) \
+	--build-arg YQ_SHA256_ARM64=$(YQ_SHA256_ARM64) \
+	--build-arg TASK_VERSION=$(TASK_VERSION) \
+	--build-arg TASK_SHA256_AMD64=$(TASK_SHA256_AMD64) \
+	--build-arg TASK_SHA256_ARM64=$(TASK_SHA256_ARM64)
 
 # The revision label serve reads back for /health's worker_image_revision.
 WORKER_LABELS = --label org.opencontainers.image.revision=$(GIT_COMMIT)
