@@ -5,6 +5,24 @@
 # review on each worker-image / Go-dependency bump and delete entries whose fix
 # has shipped. Dependabot (.github/dependabot.yml) tracks the underlying bumps.
 
+# --- The yq v4.54.1 (/usr/local/bin/yq) and Task v3.54.0 (/usr/local/bin/task)
+# binaries are prebuilt upstream releases compiled with Go 1.27.1 and
+# golang.org/x/net v0.59.0. Both are the latest releases; only their upstream
+# release pipelines can rebuild them. yq links no net/http or crypto/tls code
+# and makes no network calls. Task runs no server; it reaches the network only
+# to fetch remote Taskfiles (http, https or git includes), and without a TTY it
+# refuses an unpinned remote Taskfile unless run with --yes or a trusted host.
+# CVE-2026-111943: x509 intermediate denylist; exposes only Task's https fetch.
+# CVE-2026-78667: Range-header DoS in http.ServeContent; neither serves HTTP.
+# CVE-2026-78669: HTTP/2 CPU DoS; exposes only Task's remote-Taskfile fetch.
+# CVE-2026-97031: ECH memory DoS in a TLS server; neither runs a TLS server.
+# Clears when yq and Task both ship release builds on Go >= 1.27.3 and
+# golang.org/x/net >= 0.60.0.
+CVE-2026-111943
+CVE-2026-78667
+CVE-2026-78669
+CVE-2026-97031
+
 # --- The bundled npm CLI (12.2.1, the worker's pin and the latest release)
 # ships undici 6.29.0 (/usr/lib/node_modules/npm/node_modules/undici); the fix
 # is 6.29.1. CVE-2026-109869 is a DoS via an unhandled stream error in npm's own
