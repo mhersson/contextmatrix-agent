@@ -5,25 +5,12 @@
 # review on each worker-image / Go-dependency bump and delete entries whose fix
 # has shipped. Dependabot (.github/dependabot.yml) tracks the underlying bumps.
 
-# --- The bundled npm CLI (12.2.0, the worker's pin) ships brace-expansion
-# 5.0.9 (/usr/lib/node_modules/npm/node_modules/brace-expansion); the fixes land
-# in 5.0.10 and 5.0.11. DoS via crafted brace patterns inside the npm CLI - the
-# single-tenant worker only expands globs npm generates itself. npm's own
-# transitive dependency - npm 12.2.1, the latest release, bundles 5.0.12, so
-# moving the worker to it clears both.
-CVE-2026-102276
-CVE-2026-102278
-
-# --- The bundled npm CLI (12.2.0) ships undici 6.28.0
-# (/usr/lib/node_modules/npm/node_modules/undici). CVE-2026-19534 (fixed in
-# 6.28.1) is a DoS via an unrequested WebSocket subprotocol - npm speaks plain
-# HTTPS to the registry and opens no WebSockets. CVE-2026-109869 (fixed in
-# 6.29.1) is a DoS via an unhandled stream error in npm's own registry client -
-# the worst case is one failed npm command on the single-tenant worker. npm's
-# own transitive dependency - npm 12.2.1 bundles undici 6.29.0, which clears
-# CVE-2026-19534 only; CVE-2026-109869 clears when an npm release bundles
-# undici >= 6.29.1.
-CVE-2026-19534
+# --- The bundled npm CLI (12.2.1, the worker's pin and the latest release)
+# ships undici 6.29.0 (/usr/lib/node_modules/npm/node_modules/undici); the fix
+# is 6.29.1. CVE-2026-109869 is a DoS via an unhandled stream error in npm's own
+# registry client - the worst case is one failed npm command on the
+# single-tenant worker. npm's own transitive dependency - clears when an npm
+# release bundles undici >= 6.29.1.
 CVE-2026-109869
 
 # --- The uv-managed CPython (/opt/python) bundles pip, whose _vendor tree pins
