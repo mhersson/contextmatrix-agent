@@ -572,6 +572,23 @@ func TestWorktreeDirtyDegradesToWrittenOnError(t *testing.T) {
 	})
 }
 
+// prohibitionSentence returns the sentence of s that forbids something, so a
+// test can assert on the scope of a prohibition without pinning the rest of the
+// prose around it.
+func prohibitionSentence(t *testing.T, s string) string {
+	t.Helper()
+
+	for sentence := range strings.SplitSeq(s, ". ") {
+		if strings.Contains(sentence, "not run") {
+			return sentence
+		}
+	}
+
+	t.Fatalf("no prohibition sentence in %q", s)
+
+	return ""
+}
+
 // The schema's prohibition is scoped the same way the prompt's is, and for the
 // same reason: this tool runs one command, so the coder must stay free to run
 // the checks it does not reach.
