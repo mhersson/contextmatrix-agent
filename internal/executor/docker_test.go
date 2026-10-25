@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/metrics"
@@ -932,4 +933,54 @@ func TestStopAllKillsConcurrently(t *testing.T) {
 	defer docker.mu.Unlock()
 
 	assert.NotContains(t, docker.killed, "ctr-x", "another project's run is left alone")
+}
+
+// TestIdleWatchdogSparesARunAwaitingAHuman: a run whose output has gone stale
+// is left alone while it awaits human input, however long that takes, and is
+// killed on the first poll after it stops awaiting.
+func TestIdleWatchdogSparesARunAwaitingAHuman(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		docker := &stubDocker{}
+		tracker := NewTracker(1)
+		require.True(t, tracker.AddIfUnderLimit(&Run{Project: "proj", CardID: "CARD-1", ContainerID: "ctr-1"}))
+		tracker.Touch("proj", "CARD-1")
+		tracker.SetAwaiting("proj", "CARD-1", true)
+
+		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+		e := NewDockerExecutor(Config{
+			Docker:       docker,
+			Tracker:      tracker,
+			IdleTimeout:  time.Minute,
+			PollInterval: 10 * time.Second,
+			Logger:       logger,
+		})
+
+		returned := make(chan struct{})
+
+		go func() {
+			defer close(returned)
+
+			e.runIdleWatchdog("proj", "CARD-1", "ctr-1", make(chan struct{}), logger)
+		}()
+
+		time.Sleep(time.Hour)
+		synctest.Wait()
+
+		docker.mu.Lock()
+		assert.Empty(t, docker.killed, "a run awaiting a human is not killed for silence")
+		docker.mu.Unlock()
+
+		tracker.SetAwaiting("proj", "CARD-1", false)
+		time.Sleep(10 * time.Second)
+		synctest.Wait()
+
+		select {
+		case <-returned:
+		default:
+			t.Fatal("the watchdog is still polling after the awaiting flag cleared")
+		}
+
+		assert.Equal(t, []string{"ctr-1"}, docker.killed)
+		assert.Equal(t, metrics.OutcomeIdleTimeout, tracker.Reason("proj", "CARD-1"))
+	})
 }
