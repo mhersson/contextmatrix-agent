@@ -72,6 +72,13 @@ type RunCredentials struct {
 	// this rotation from a fresh run reusing the same project/card.
 	OnTokenRefresh func(project, cardID, correlationID, token string)
 
+	// OnDisplace is an optional hook fired when Provision displaces another
+	// run's handle (same card, different correlationID). The displaced run
+	// never gets a Teardown, so per-run state keyed by its correlationID, such
+	// as its LLM proxy token, must be dropped here. Runs under the manager
+	// lock, so it must not call back into RunCredentials. Nil-safe.
+	OnDisplace func(project, cardID, correlationID string)
+
 	mu   sync.Mutex
 	runs map[string]*runHandle // keyed by runKey (project/cardID/correlationID)
 }
@@ -79,9 +86,10 @@ type RunCredentials struct {
 // runHandle tracks one provisioned run so Teardown can stop its refresh loop
 // (when it has one) and remove its directory.
 type runHandle struct {
-	dir    string
-	cancel context.CancelFunc // nil for PAT runs (no refresh loop)
-	done   chan struct{}      // closed when the refresh goroutine returns; nil for PAT runs
+	dir           string
+	correlationID string
+	cancel        context.CancelFunc // nil for PAT runs (no refresh loop)
+	done          chan struct{}      // closed when the refresh goroutine returns; nil for PAT runs
 }
 
 // stop cancels the handle's refresh goroutine and waits for it to exit. Safe on
@@ -164,6 +172,10 @@ func (m *RunCredentials) Provision(project, cardID, correlationID, token, expire
 		if old.dir == dir {
 			delete(m.runs, k)
 			old.stop()
+
+			if m.OnDisplace != nil && old.correlationID != correlationID {
+				m.OnDisplace(project, cardID, old.correlationID)
+			}
 		}
 	}
 
@@ -173,7 +185,7 @@ func (m *RunCredentials) Provision(project, cardID, correlationID, token, expire
 		return fmt.Errorf("write per-run env file: %w", err)
 	}
 
-	h := &runHandle{dir: dir}
+	h := &runHandle{dir: dir, correlationID: correlationID}
 
 	if expiry, ok := parseExpiry(expiresAt); ok {
 		//nolint:gosec // G118: cancel is stored on the run handle and called by Teardown or a displacing Provision; the loop must outlive Provision

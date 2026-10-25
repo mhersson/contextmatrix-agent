@@ -723,3 +723,48 @@ func TestOnTokenRefreshNeverFiresForPAT(t *testing.T) {
 	assert.Zero(t, fireCount.Load(), "a PAT token must never fire the refresh hook")
 	assert.Zero(t, stub.callCount(), "a PAT token must not trigger a CM call")
 }
+
+type displacedRun struct{ project, cardID, correlationID string }
+
+// displacementRecorder installs an OnDisplace hook that records each call.
+func displacementRecorder(m *RunCredentials) *[]displacedRun {
+	calls := &[]displacedRun{}
+
+	m.OnDisplace = func(project, cardID, correlationID string) {
+		*calls = append(*calls, displacedRun{project, cardID, correlationID})
+	}
+
+	return calls
+}
+
+// TestProvisionReportsTheDisplacedRun verifies a newer run of the same card
+// reports the run it displaced, which never gets a Teardown.
+func TestProvisionReportsTheDisplacedRun(t *testing.T) {
+	t.Parallel()
+
+	m := newTestManager(t, "http://unused.invalid", "test-key")
+	calls := displacementRecorder(m)
+
+	require.NoError(t, m.Provision("proj", "CARD-1", "run-A", "pat-token", "", EndpointSecrets{}))
+	assert.Empty(t, *calls, "the first run displaces nothing")
+
+	require.NoError(t, m.Provision("proj", "CARD-1", "run-B", "pat-token", "", EndpointSecrets{}))
+	t.Cleanup(func() { m.Teardown("proj", "CARD-1", "run-B") })
+
+	assert.Equal(t, []displacedRun{{"proj", "CARD-1", "run-A"}}, *calls)
+}
+
+// TestProvisionOfTheSameRunReportsNoDisplacement verifies re-provisioning one
+// run never reports itself, so its fresh state is not dropped.
+func TestProvisionOfTheSameRunReportsNoDisplacement(t *testing.T) {
+	t.Parallel()
+
+	m := newTestManager(t, "http://unused.invalid", "test-key")
+	calls := displacementRecorder(m)
+
+	require.NoError(t, m.Provision("proj", "CARD-1", "run-A", "pat-token", "", EndpointSecrets{}))
+	require.NoError(t, m.Provision("proj", "CARD-1", "run-A", "pat-token", "", EndpointSecrets{}))
+	t.Cleanup(func() { m.Teardown("proj", "CARD-1", "run-A") })
+
+	assert.Empty(t, *calls)
+}
