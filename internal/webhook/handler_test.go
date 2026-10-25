@@ -70,9 +70,19 @@ type fakeExecutor struct {
 	killed         [][2]string // project, cardID
 	stopAllArg     string
 	stopAllResults []executor.StopResult
+
+	// launchHook, when set, runs first in Launch and outside mu, so it may
+	// block on the launch context; an error it returns fails the launch.
+	launchHook func(ctx context.Context, spec executor.LaunchSpec) error
 }
 
-func (f *fakeExecutor) Launch(_ context.Context, spec executor.LaunchSpec) error {
+func (f *fakeExecutor) Launch(ctx context.Context, spec executor.LaunchSpec) error {
+	if f.launchHook != nil {
+		if err := f.launchHook(ctx, spec); err != nil {
+			return err
+		}
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -199,6 +209,9 @@ type fakeCredentials struct {
 	provisionErr error
 	provisions   []provisionCall
 	teardowns    [][3]string // project, cardID, correlationID
+
+	// provisionHook, when set, runs first in Provision and outside mu.
+	provisionHook func()
 }
 
 type provisionCall struct {
@@ -211,6 +224,10 @@ func (f *fakeCredentials) HostDir(project, cardID string) string {
 }
 
 func (f *fakeCredentials) Provision(project, cardID, correlationID, token, expiresAt string, endpoint secrets.EndpointSecrets) error {
+	if f.provisionHook != nil {
+		f.provisionHook()
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -444,6 +461,22 @@ func (h *harness) do(t *testing.T, method, target string, payload any) *httptest
 func (h *harness) doAt(t *testing.T, method, target string, payload any, ts string) *httptest.ResponseRecorder {
 	t.Helper()
 
+	return h.serve(h.request(t, method, target, payload, ts))
+}
+
+// serve dispatches r through the server's mux. It asserts nothing, so a test
+// may call it off the test goroutine.
+func (h *harness) serve(r *http.Request) *httptest.ResponseRecorder {
+	w := httptest.NewRecorder()
+	h.server.Routes().ServeHTTP(w, r)
+
+	return w
+}
+
+// request builds a request signed with ts.
+func (h *harness) request(t *testing.T, method, target string, payload any, ts string) *http.Request {
+	t.Helper()
+
 	var body []byte
 
 	if payload != nil {
@@ -456,10 +489,7 @@ func (h *harness) doAt(t *testing.T, method, target string, payload any, ts stri
 	r := httptest.NewRequest(method, target, strings.NewReader(string(body)))
 	signReq(t, r, testAPIKey, body, ts)
 
-	w := httptest.NewRecorder()
-	h.server.Routes().ServeHTTP(w, r)
-
-	return w
+	return r
 }
 
 // addRun directly registers a tracked run with a capturable stdin, simulating a
@@ -475,6 +505,13 @@ func (h *harness) addRun(cardID, project string) *nopWriteCloser {
 	})
 
 	return stdin
+}
+
+// launchNow admits and launches spec synchronously, as the goroutine
+// handleTrigger starts would.
+func (s *Server) launchNow(spec executor.LaunchSpec, p protocol.TriggerPayload) {
+	adm, ctx := s.beginAdmission(context.Background(), p.Project, p.CardID)
+	s.launch(ctx, adm, spec, p)
 }
 
 // awaitStatuses waits for n status callbacks; launch reports only after
@@ -2310,7 +2347,7 @@ func TestLaunch_ProvisionsPerRunCredentials(t *testing.T) {
 	}
 	spec := s.buildLaunchSpec(payload, "corr", "")
 
-	s.launch(spec, payload)
+	s.launchNow(spec, payload)
 
 	calls := creds.provisionCalls()
 	require.Len(t, calls, 1)
@@ -2350,7 +2387,7 @@ func TestLaunch_TearsDownPerRunCredentialsOnLaunchFailure(t *testing.T) {
 		GitTokenExpiresAt: "2026-07-05T12:00:00Z",
 		LLMEndpoint:       &protocol.LLMEndpoint{Type: "openai", APIKey: "cm-llm-key"},
 	}
-	s.launch(s.buildLaunchSpec(payload, "corr", ""), payload)
+	s.launchNow(s.buildLaunchSpec(payload, "corr", ""), payload)
 
 	assert.Len(t, creds.provisionCalls(), 1)
 	assert.Equal(t, [][3]string{{"p", "C1", "corr"}}, creds.teardownCalls(),
@@ -2383,7 +2420,7 @@ func TestLaunch_ProvisionFailureReportsFailedWithoutLaunching(t *testing.T) {
 		GitTokenExpiresAt: "2026-07-05T12:00:00Z",
 		LLMEndpoint:       &protocol.LLMEndpoint{Type: "openai", APIKey: "cm-llm-key"},
 	}
-	s.launch(s.buildLaunchSpec(payload, "corr", ""), payload)
+	s.launchNow(s.buildLaunchSpec(payload, "corr", ""), payload)
 
 	assert.Empty(t, exec.launchedSpecs(), "container must not launch when provisioning fails")
 	assert.Equal(t, [][3]string{{"C1", "failed", "credential provisioning failed"}}, reporter.statuses())
@@ -2424,8 +2461,8 @@ func TestLaunch_DuplicateTriggerDoesNotClobberWinnerCredentials(t *testing.T) {
 	}
 	spec := s.buildLaunchSpec(payload, "corr", "")
 
-	s.launch(spec, payload) // winner: provisions and launches
-	s.launch(spec, payload) // duplicate: must be rejected up front, before provisioning
+	s.launchNow(spec, payload) // winner: provisions and launches
+	s.launchNow(spec, payload) // duplicate: must be rejected up front, before provisioning
 
 	assert.Len(t, creds.provisionCalls(), 1,
 		"the duplicate must not re-provision over the winner")
@@ -2468,7 +2505,7 @@ func TestLaunch_ConcurrentDuplicateTriggersSerialized(t *testing.T) {
 
 	for range 2 {
 		wg.Go(func() {
-			s.launch(spec, payload)
+			s.launchNow(spec, payload)
 		})
 	}
 
@@ -2523,7 +2560,7 @@ func TestLaunch_GitTokenAloneDoesNotSatisfyLLMGuard(t *testing.T) {
 	})
 
 	payload := protocol.TriggerPayload{CardID: "C1", Project: "p", GitToken: "cm-git-token"}
-	s.launch(s.buildLaunchSpec(payload, "corr", ""), payload)
+	s.launchNow(s.buildLaunchSpec(payload, "corr", ""), payload)
 
 	assert.Empty(t, exec.launchedSpecs())
 	assert.Equal(t,
@@ -2554,7 +2591,7 @@ func TestLaunch_LLMEndpointAloneDoesNotSatisfyGitTokenGuard(t *testing.T) {
 		Project:     "p",
 		LLMEndpoint: &protocol.LLMEndpoint{Type: "openai", APIKey: "cm-llm-key"},
 	}
-	s.launch(s.buildLaunchSpec(payload, "corr", ""), payload)
+	s.launchNow(s.buildLaunchSpec(payload, "corr", ""), payload)
 
 	assert.Empty(t, exec.launchedSpecs())
 	assert.Equal(t,
@@ -2587,7 +2624,7 @@ func TestLaunch_GuardsDoNotFireWhenPayloadProvisionsBoth(t *testing.T) {
 		GitToken:    "cm-git-token",
 		LLMEndpoint: &protocol.LLMEndpoint{Type: "openai", APIKey: "cm-llm-key"},
 	}
-	s.launch(s.buildLaunchSpec(payload, "corr", ""), payload)
+	s.launchNow(s.buildLaunchSpec(payload, "corr", ""), payload)
 
 	assert.Len(t, creds.provisionCalls(), 1, "a fully-provisioned payload must launch regardless of local config")
 	assert.Equal(t, [][3]string{{"C1", "running", ""}}, reporter.statuses())

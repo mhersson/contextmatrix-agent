@@ -62,8 +62,9 @@ run.
   revoked token gets 401. The route sits outside the webhook HMAC check and
   drain gate, so the token is its only credential.
 - **Revocation.** The token is revoked when the container exits, when
-  credential provisioning or the launch fails, when a newer run of the same
-  card displaces the run's credentials, and in the shutdown sweep.
+  credential provisioning or the launch fails or times out, when a kill or
+  stop-all stops the launch, when a newer run of the same card displaces the
+  run's credentials, and in the shutdown sweep.
 - **URL.** `container_serve_url` defaults to
   `http://host.docker.internal:<port>`: every worker maps
   `host.docker.internal` to the host gateway, and `serve` listens on all

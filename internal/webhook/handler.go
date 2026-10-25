@@ -38,6 +38,16 @@ const (
 	// dir at (must match executor.skillsMountPath). Passed to the worker as
 	// CMX_TASK_SKILLS_DIR.
 	skillsMountPathEnv = "/run/cm-skills"
+
+	// launchTimeout bounds one trigger's admission, image pull included. It is
+	// sized for a cold pull of the full worker image, several gigabytes, over a
+	// slow link; a launch still running past it has stalled, and failing it
+	// frees the card's admission lock.
+	launchTimeout = 15 * time.Minute
+
+	// killTimeout bounds a kill made on its own context: the executor's
+	// self-exit grace plus the SIGKILL round trip, with headroom.
+	killTimeout = 10 * time.Second
 )
 
 // LLMProxyPrefix is where Routes mounts the LLM proxy.
@@ -288,6 +298,14 @@ type Server struct {
 	// reclaimed (one bare mutex per card ever seen).
 	launchMu sync.Map // map[string]*sync.Mutex
 
+	// launchTimeout bounds each admission; tests shrink it.
+	launchTimeout time.Duration
+
+	// admissionsMu guards admissions and each admission's stopped flag. It is a
+	// leaf lock, taken under launchMu but never the other way round.
+	admissionsMu sync.Mutex
+	admissions   map[*admission]struct{}
+
 	// sessionRegistry manages per-session secrets registered with the log bridge
 	// redactor. Nil-tolerant: a nil value makes all calls a no-op.
 	sessionRegistry SessionSecretRegistry
@@ -348,6 +366,8 @@ func NewServer(cfg Config) *Server {
 		nextAttempt:     cfg.NextAttempt,
 		dedup:           dedup,
 		logger:          logger,
+		launchTimeout:   launchTimeout,
+		admissions:      make(map[*admission]struct{}),
 	}
 }
 
@@ -462,40 +482,126 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 
 	spec := s.buildLaunchSpec(payload, correlationID, skillsDir)
 
+	// Registered before the 202 so a /kill that follows it always finds the
+	// admission. Detached from the request: the launch outlives it.
+	adm, ctx := s.beginAdmission(context.WithoutCancel(r.Context()), payload.Project, payload.CardID)
+
 	// Respond 202 first, then launch asynchronously: /trigger must return fast,
 	// and the eventual outcome is carried by the running/failed status callback.
 	webhookcore.WriteJSON(w, http.StatusAccepted, protocol.SuccessResponse{OK: true})
 
-	go s.launch(spec, payload) //nolint:gosec // G118: launch is fire-and-forget and outlives the request; a request-scoped context would cancel the worker
+	go s.launch(ctx, adm, spec, payload) //nolint:gosec // G118: the launch outlives the request on its admission context, detached from the request and bounded by the launch timeout
 }
 
-// launch runs on a detached context so the container's lifecycle outlives the
-// HTTP request that triggered it. It provisions the per-run credential file when
-// the payload carried a git token, launches the container, and reports running
-// on success and failed on a provisioning or launch error. Status callbacks run
-// outside the admission lock so a slow ContextMatrix response cannot serialize
-// later triggers for the card.
-func (s *Server) launch(spec executor.LaunchSpec, p protocol.TriggerPayload) {
-	ctx := context.Background()
+// launch provisions the per-run credential file, launches the container, and
+// reports running on success and failed on a provisioning or launch error,
+// including the launch timeout. A stopped admission reports nothing. Status
+// callbacks run outside the admission lock so a slow ContextMatrix response
+// cannot serialize later triggers for the card.
+func (s *Server) launch(ctx context.Context, adm *admission, spec executor.LaunchSpec, p protocol.TriggerPayload) {
+	defer adm.cancel()
+
 	project, cardID := p.Project, p.CardID
 
-	if failure := s.admitAndLaunch(ctx, spec, p); failure != "" {
-		if rerr := s.reporter.ReportStatus(ctx, cardID, project, "failed", failure); rerr != nil {
+	failure, stopped := s.admitAndLaunch(ctx, adm, spec, p)
+	close(adm.done)
+
+	if stopped {
+		return
+	}
+
+	// ctx may have expired; the callback client bounds its own requests.
+	if failure != "" {
+		if err := s.reporter.ReportStatus(context.Background(), cardID, project, "failed", failure); err != nil {
 			s.logger.Error("report failed-status callback failed",
-				"project", project, "card_id", cardID, "error", rerr)
+				"project", project, "card_id", cardID, "error", err)
 		}
 
 		return
 	}
 
-	if err := s.reporter.ReportStatus(ctx, cardID, project, "running", ""); err != nil {
+	if err := s.reporter.ReportStatus(context.Background(), cardID, project, "running", ""); err != nil {
 		s.logger.Error("report running-status callback failed",
 			"project", project, "card_id", cardID, "error", err)
 	}
 }
 
+// admission is one trigger's launch in flight, from before its 202 until
+// admitAndLaunch returns. A /kill or /stop-all that finds it sets stopped and
+// cancels its context; the launch then aborts, or kills the run it has just
+// launched, and reports nothing. ContextMatrix records the card as killed once
+// the stop answers and writes any later status over that, so neither running
+// nor a failure may follow.
+type admission struct {
+	project, cardID string
+	cancel          context.CancelFunc
+
+	// stopped is guarded by Server.admissionsMu.
+	stopped bool
+
+	// done is closed once admitAndLaunch has returned.
+	done chan struct{}
+}
+
+// beginAdmission registers a trigger's admission and returns its context,
+// which the launch timeout and a stop both end.
+func (s *Server) beginAdmission(parent context.Context, project, cardID string) (*admission, context.Context) {
+	ctx, cancel := context.WithTimeout(parent, s.launchTimeout)
+	adm := &admission{project: project, cardID: cardID, cancel: cancel, done: make(chan struct{})}
+
+	s.admissionsMu.Lock()
+	s.admissions[adm] = struct{}{}
+	s.admissionsMu.Unlock()
+
+	return adm, ctx
+}
+
+// endAdmission deregisters adm and reports whether a stop reached it. The flag
+// is read under the lock a stop sets it under, so a stop either lands here or
+// finds no admission and kills the tracked run instead.
+func (s *Server) endAdmission(adm *admission) bool {
+	s.admissionsMu.Lock()
+	defer s.admissionsMu.Unlock()
+
+	delete(s.admissions, adm)
+
+	return adm.stopped
+}
+
+// stopAdmissions stops every admission in flight that match selects, then
+// waits, bounded by ctx, for each to return, so none launches or reports
+// after the caller has killed the card's tracked runs and answered.
+func (s *Server) stopAdmissions(ctx context.Context, match func(project, cardID string) bool) {
+	var stopping []*admission
+
+	s.admissionsMu.Lock()
+
+	for adm := range s.admissions {
+		if match(adm.project, adm.cardID) {
+			adm.stopped = true
+			adm.cancel()
+			stopping = append(stopping, adm)
+		}
+	}
+
+	s.admissionsMu.Unlock()
+
+	for _, adm := range stopping {
+		select {
+		case <-adm.done:
+		case <-ctx.Done():
+			s.logger.Warn("stopped admission still running when the stop answered",
+				"project", adm.project, "card_id", adm.cardID)
+
+			return
+		}
+	}
+}
+
 // admitAndLaunch provisions the per-run credentials and launches the container,
-// serialized per card. Returns "" on success or a client-safe failure message.
+// serialized per card. Returns "" on success or a client-safe failure message;
+// stopped reports that a stop reached the admission, whose launched run it then
+// kills, and the caller reports nothing.
 //
 // The serialization plus the early tracked-run rejection close the
 // duplicate-trigger window: two concurrent triggers for one card both reach
@@ -516,12 +622,50 @@ func (s *Server) launch(spec executor.LaunchSpec, p protocol.TriggerPayload) {
 // endpoint. A server without a usable LLM proxy fails closed the same way: the
 // worker gets a per-run proxy token, never the real key, and a run that does
 // not launch has its token revoked.
-func (s *Server) admitAndLaunch(ctx context.Context, spec executor.LaunchSpec, p protocol.TriggerPayload) string {
-	project, cardID := p.Project, p.CardID
-
-	mu := s.launchLock(project, cardID)
+func (s *Server) admitAndLaunch(ctx context.Context, adm *admission, spec executor.LaunchSpec, p protocol.TriggerPayload) (failure string, stopped bool) {
+	mu := s.launchLock(p.Project, p.CardID)
 	mu.Lock()
 	defer mu.Unlock()
+
+	failure = s.provisionAndLaunch(ctx, spec, p)
+
+	if !s.endAdmission(adm) {
+		return failure, false
+	}
+
+	if failure == "" {
+		s.stopLaunchedRun(spec)
+	}
+
+	s.logger.Info("launch stopped", "project", p.Project, "card_id", p.CardID)
+
+	return "", true
+}
+
+// stopLaunchedRun kills a run whose admission was stopped after the executor
+// had launched it. Its token is revoked first so it cannot reach the LLM
+// during the kill grace; its session secrets stay registered until its exit
+// path removes them after the output drains, as for any run.
+func (s *Server) stopLaunchedRun(spec executor.LaunchSpec) {
+	s.llmProxy.Revoke(spec.CorrelationID)
+
+	if s.credentials != nil {
+		s.credentials.Teardown(spec.Project, spec.CardID, spec.CorrelationID)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), killTimeout)
+	defer cancel()
+
+	if err := s.executor.Kill(ctx, spec.Project, spec.CardID); err != nil && !errors.Is(err, executor.ErrNotFound) {
+		s.logger.Error("kill of a stopped launch failed",
+			"project", spec.Project, "card_id", spec.CardID, "error", err)
+	}
+}
+
+// provisionAndLaunch is admitAndLaunch's admission: the guards, the per-run
+// provisioning and the launch. The caller holds the card's admission lock.
+func (s *Server) provisionAndLaunch(ctx context.Context, spec executor.LaunchSpec, p protocol.TriggerPayload) string {
+	project, cardID := p.Project, p.CardID
 
 	if _, tracked := s.tracker.Get(project, cardID); tracked {
 		s.logger.Warn("trigger rejected: card already running",
@@ -551,6 +695,11 @@ func (s *Server) admitAndLaunch(ctx context.Context, spec executor.LaunchSpec, p
 		return "LLM proxy not configured"
 	}
 
+	// The timeout or a stop can land while the admission waits for the lock.
+	if ctx.Err() != nil {
+		return s.launchFailure(ctx)
+	}
+
 	token, err := s.llmProxy.Register(spec.CorrelationID, *p.LLMEndpoint)
 	if err != nil {
 		s.logger.Error("LLM proxy registration failed",
@@ -577,7 +726,14 @@ func (s *Server) admitAndLaunch(ctx context.Context, spec executor.LaunchSpec, p
 
 	s.addSessionSecrets(project, cardID, spec.CorrelationID, p, token)
 
-	if err := s.executor.Launch(ctx, spec); err != nil {
+	// A stop or the timeout that landed during provisioning skips the launch
+	// and takes the failure path's teardown.
+	err = ctx.Err()
+	if err == nil {
+		err = s.executor.Launch(ctx, spec)
+	}
+
+	if err != nil {
 		// Tear down only what THIS launch provisioned: a duplicate that skipped
 		// provisioning must not touch the winner's credentials.
 		if provisioned {
@@ -589,10 +745,20 @@ func (s *Server) admitAndLaunch(ctx context.Context, spec executor.LaunchSpec, p
 
 		s.logger.Error("launch failed", "project", project, "card_id", cardID, "error", err)
 
-		return "launch failed"
+		return s.launchFailure(ctx)
 	}
 
 	return ""
+}
+
+// launchFailure is the client-safe message for a launch that did not happen;
+// the launch timeout names itself so a stalled pull reads as one.
+func (s *Server) launchFailure(ctx context.Context) string {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Sprintf("launch timed out after %s", s.launchTimeout)
+	}
+
+	return "launch failed"
 }
 
 // SessionID composes the id AddSessionKey/RemoveSessionKey register secrets
@@ -909,6 +1075,10 @@ func (s *Server) handleKill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.stopAdmissions(r.Context(), func(project, cardID string) bool {
+		return project == payload.Project && cardID == payload.CardID
+	})
+
 	// Idempotent: ContextMatrix reads any status >= 400 as a failed stop, and a
 	// card with no tracked container is already stopped.
 	if err := s.executor.Kill(r.Context(), payload.Project, payload.CardID); err != nil &&
@@ -929,6 +1099,11 @@ func (s *Server) handleStopAll(w http.ResponseWriter, r *http.Request) {
 	if !webhookcore.Decode(w, r, &payload) {
 		return
 	}
+
+	// An empty project stops every project, as StopAll reads it.
+	s.stopAdmissions(r.Context(), func(project, _ string) bool {
+		return payload.Project == "" || project == payload.Project
+	})
 
 	stopResults, err := s.executor.StopAll(r.Context(), payload.Project)
 	if err != nil {
