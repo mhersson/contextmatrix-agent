@@ -642,8 +642,13 @@ func newRun(d Deps, tc cmclient.TaskContext) *run {
 	// would delete the marker on the next recordSection push.
 	o.body = tc.Description
 	o.taskDescription = stripAgentSections(stripMeta(tc.Description))
-	o.lastFindings = recentReviewFindingsHistory(tc.Description)
 	o.taskImages = dataURLs(tc.Images)
+
+	// A fresh run's body may still hold a finished run's findings, kept as
+	// history; this run's review must not start from them.
+	if tc.Phase != "" {
+		o.lastFindings = recentReviewFindingsHistory(tc.Description)
+	}
 
 	// The parent solver binds the execute seam to today's exact collaborators:
 	// the main workspace git/tools, the run ledger (o.ledger IS its ledger), and

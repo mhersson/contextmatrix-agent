@@ -1510,11 +1510,17 @@ func hasDecidedSolution(description string) bool {
 }
 
 // plannerDescription is the description slot for the planner prompts: the
-// stripped description plus the prior run's recorded "## Plan". The prior plan
-// has no other resume channel - resumeBlock carries subtask titles only. Reads
-// the immutable claim-time snapshot, not the live body, so a fresh run's
-// adjust loop never sees its own in-flight draft.
+// stripped description plus, on a resumed run, the prior run's recorded
+// "## Plan". The prior plan has no other resume channel - resumeBlock carries
+// subtask titles only. A fresh run's body may still hold a finished run's plan,
+// kept as history, which the new plan must not build on. Reads the immutable
+// claim-time snapshot, not the live body, so the adjust loop never sees its
+// own in-flight draft.
 func (o *run) plannerDescription() string {
+	if o.tc.Phase == "" {
+		return o.taskDescription
+	}
+
 	prior := extractSection(o.tc.Description, "Plan")
 	if prior == "" {
 		return o.taskDescription

@@ -3622,7 +3622,7 @@ func TestReviewPromptsUseFilteredDescriptionAndSeededFindings(t *testing.T) {
 	}}
 	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
 
-	tc := cmclient.TaskContext{Title: "Parent", Description: grownDescription, State: "in_progress"}
+	tc := cmclient.TaskContext{Title: "Parent", Description: grownDescription, State: "in_progress", Phase: "review"}
 	o := newReviewRun(d, tc, 0)
 
 	require.NoError(t, runReview(context.Background(), o))
@@ -7505,7 +7505,7 @@ func TestFixResponseIsReadBackFromTheCardOnResume(t *testing.T) {
 	resumedClient := &planLLM{responses: panelApproves()}
 	resumedDeps := reviewTestDeps(t, &fakeOps{}, &fakeGit{committed: true}, resumedClient, reviewerRegistry())
 	resumed := newReviewRun(resumedDeps, cmclient.TaskContext{
-		Title: "Parent", Description: ops.lastBody(), State: "review", ReviewAttempts: 1,
+		Title: "Parent", Description: ops.lastBody(), State: "review", Phase: "review", ReviewAttempts: 1,
 	}, 0)
 
 	require.NoError(t, runReview(context.Background(), resumed))

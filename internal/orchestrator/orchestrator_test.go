@@ -558,19 +558,35 @@ func TestRunSeedsLedgerFromReportedCost(t *testing.T) {
 	assert.InDelta(t, 1.10, be.Spent, 1e-9)
 }
 
+// TestNewRunSeedsFilteredDescriptionAndFindings proves a resumed run's prior
+// findings re-enter through the cross-round memory channel, while a fresh run -
+// a reopened card whose body still holds the finished run's history - starts
+// its review without them.
 func TestNewRunSeedsFilteredDescriptionAndFindings(t *testing.T) {
 	grown := "Original task.\n\n## Diagnosis\n\nroot cause\n\n## Plan\n\n1. SUBTASK: fix\n\n## Review Findings\n\n- a.go: bug - fix it\n\n### Recommendation\n\nrevise\n"
-	d := Deps{Ops: &fakeOps{}, Cfg: Config{CardID: "CARD-1"}}
 
-	o := newRun(d, cmclient.TaskContext{Title: "Parent", Description: grown})
+	tests := []struct {
+		name         string
+		phase        string
+		wantFindings string
+	}{
+		{name: "resume", phase: "review", wantFindings: recentReviewFindingsHistory(grown)},
+		{name: "fresh run", phase: ""},
+	}
 
-	// The write-back body stays raw - recordSection must never lose history.
-	assert.Equal(t, grown, o.body)
-	// Prompt sites read the stripped view.
-	assert.Equal(t, "Original task.", o.taskDescription)
-	// Prior findings re-enter through the cross-round memory channel.
-	assert.Equal(t, recentReviewFindingsHistory(grown), o.lastFindings)
-	assert.Contains(t, o.lastFindings, "- a.go: bug - fix it")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := Deps{Ops: &fakeOps{}, Cfg: Config{CardID: "CARD-1"}}
+
+			o := newRun(d, cmclient.TaskContext{Title: "Parent", Description: grown, Phase: tt.phase})
+
+			// The write-back body stays raw - recordSection must never lose history.
+			assert.Equal(t, grown, o.body)
+			// Prompt sites read the stripped view.
+			assert.Equal(t, "Original task.", o.taskDescription)
+			assert.Equal(t, tt.wantFindings, o.lastFindings)
+		})
+	}
 }
 
 // TestNewRunSeedsBoundedFindingsOnResume proves the resume seed at newRun is
@@ -587,7 +603,7 @@ func TestNewRunSeedsBoundedFindingsOnResume(t *testing.T) {
 		"## Review Findings (Round 4)\n\nround four text\n"
 	d := Deps{Ops: &fakeOps{}, Cfg: Config{CardID: "CARD-1"}}
 
-	o := newRun(d, cmclient.TaskContext{Title: "Parent", Description: grown})
+	o := newRun(d, cmclient.TaskContext{Title: "Parent", Description: grown, Phase: "review"})
 
 	assert.Contains(t, o.lastFindings, "round four text")
 	assert.Contains(t, o.lastFindings, "round three text")

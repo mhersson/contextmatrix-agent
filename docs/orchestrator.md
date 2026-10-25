@@ -23,6 +23,11 @@ at `integrate` or `pr_gates` with the card outside `review` first moves it back
 there with `start_review`; on the default board only `review` may move to
 `done`.
 
+A fresh run (no persisted phase, as on a card reopened from `done`) keeps the
+finished run's recorded sections on the card body as history but does not
+build on them: the planner gets no prior `## Plan`, and review starts without
+prior findings. A resumed run gets both back.
+
 A subtask whose coder leaves nothing to commit and does not move HEAD parks
 the card as empty. A park mid-subtask, though, pushes the unfinished tree as
 WIP, so a resumed coder can rightly find nothing left to change. A subtask

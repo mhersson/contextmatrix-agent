@@ -1556,7 +1556,7 @@ func resumedAutoPlanRun(ops *fakeOps, client llm.LLM) *run {
 		},
 	}
 
-	tc := cmclient.TaskContext{Title: "Add a config flag", Description: grownDescription}
+	tc := cmclient.TaskContext{Title: "Add a config flag", Description: grownDescription, Phase: "plan"}
 
 	return newRun(d, tc)
 }
@@ -1618,18 +1618,33 @@ func TestRunDiagnosePromptOmitsRecordedHistory(t *testing.T) {
 	assert.NotContains(t, diagnoseTask, "naming could improve", "history stripped from diagnose")
 }
 
+// TestPlannerDescription proves a resumed planner gets the recorded plan back,
+// while a fresh run of a reopened card plans without the finished run's plan.
 func TestPlannerDescription(t *testing.T) {
-	o := &run{
-		tc:              cmclient.TaskContext{Description: grownDescription},
-		taskDescription: stripAgentSections(grownDescription),
+	tests := []struct {
+		name     string
+		phase    string
+		wantPlan bool
+	}{
+		{name: "resume", phase: "plan", wantPlan: true},
+		{name: "fresh run", phase: ""},
 	}
 
-	got := o.plannerDescription()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			o := &run{
+				tc:              cmclient.TaskContext{Description: grownDescription, Phase: tt.phase},
+				taskDescription: stripAgentSections(grownDescription),
+			}
 
-	assert.Contains(t, got, "Add a config flag to toggle the feature.")
-	assert.Contains(t, got, "## Plan\n\n1. SUBTASK: Add the flag")
-	assert.NotContains(t, got, "Review Findings")
-	assert.NotContains(t, got, "## Design", "design flows via the design block, not the description")
+			got := o.plannerDescription()
+
+			assert.Contains(t, got, "Add a config flag to toggle the feature.")
+			assert.Equal(t, tt.wantPlan, strings.Contains(got, "1. SUBTASK: Add the flag"))
+			assert.NotContains(t, got, "Review Findings")
+			assert.NotContains(t, got, "## Design", "design flows via the design block, not the description")
+		})
+	}
 }
 
 func TestDraftPlanUsesPlanToolsOncePerCall(t *testing.T) {
