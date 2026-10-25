@@ -1173,7 +1173,7 @@ func (o *run) recordRoundFindings(findings string) {
 // its own section, so it gets no separate slot to repeat it.
 func (o *run) priorContext(authoritative bool) string {
 	if authoritative {
-		return priorFindingsBlock(recentReviewFindingsHistory(o.body))
+		return priorFindingsBlock(o.authoritativeHistory())
 	}
 
 	findings, response := o.lastPanelFindings, o.lastPanelFixResponse
@@ -1182,6 +1182,28 @@ func (o *run) priorContext(authoritative bool) string {
 	}
 
 	return priorFindingsBlock(findings) + fixResponseBlock(response)
+}
+
+// authoritativeHistory is the recorded review history the authoritative pass
+// reads. A fresh run's body may still hold a finished run's rounds, kept as
+// history, so it reads only the rounds this run recorded.
+func (o *run) authoritativeHistory() string {
+	if o.tc.Phase != "" {
+		return recentReviewFindingsHistory(o.body)
+	}
+
+	rounds := slices.Sorted(maps.Keys(o.reviewRounds))
+	rounds = rounds[max(0, len(rounds)-reviewHistoryWindow):]
+
+	sections := make([]string, 0, len(rounds))
+
+	for _, r := range rounds {
+		if sec := extractSection(o.body, reviewRoundHeading(r)); sec != "" {
+			sections = append(sections, sec)
+		}
+	}
+
+	return strings.Join(sections, "\n\n")
 }
 
 // incrementReviewAttempt calls IncrementReviewAttempts and treats

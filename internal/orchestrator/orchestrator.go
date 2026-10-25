@@ -538,6 +538,10 @@ type run struct {
 	// fix from a review that only surfaced new findings.
 	lastPriorResolved bool
 
+	// reviewRounds is the set of review rounds this run recorded on the body.
+	// A fresh run's authoritative pass reads only these (authoritativeHistory).
+	reviewRounds map[int]bool
+
 	// grounding is the prebuilt REPO GROUNDING block (root + nested
 	// AGENTS.md/CLAUDE.md), injected into model phases. Built once in
 	// newRun; "" when the workspace has no instruction files.

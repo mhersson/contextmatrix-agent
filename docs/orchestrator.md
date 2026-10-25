@@ -25,8 +25,9 @@ there with `start_review`; on the default board only `review` may move to
 
 A fresh run (no persisted phase, as on a card reopened from `done`) keeps the
 finished run's recorded sections on the card body as history but does not
-build on them: the planner gets no prior `## Plan`, and review starts without
-prior findings. A resumed run gets both back.
+build on them: the planner gets no prior `## Plan`, review starts without
+prior findings, and the authoritative pass reads only the review rounds this
+run recorded. A resumed run gets all of them back.
 
 A subtask whose coder leaves nothing to commit and does not move HEAD parks
 the card as empty. A park mid-subtask, though, pushes the unfinished tree as
@@ -203,8 +204,9 @@ back to the most recent round's raw output (`lastFindings`) instead. The
 authoritative pass, and the value a resumed run seeds at start (`newRun`
 reading the card body before any round runs), both use the
 `reviewHistoryWindow` (3) most recently recorded `## Review Findings`
-sections concatenated (`recentReviewFindingsHistory`) instead of the full
-history - rounds older than the window are redundant, since each recorded
+sections concatenated (`recentReviewFindingsHistory`; on a fresh run the
+authoritative pass windows only the rounds this run recorded) instead of the
+full history - rounds older than the window are redundant, since each recorded
 verdict already carries every surviving finding forward, and an unbounded
 history is what pushes synthesis past its own turn budget over a
 long-running review.

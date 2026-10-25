@@ -53,6 +53,12 @@ func (o *run) recordReview(ctx context.Context, round int, findings string, appr
 
 	heading := reviewRoundHeading(round)
 
+	if o.reviewRounds == nil {
+		o.reviewRounds = map[int]bool{}
+	}
+
+	o.reviewRounds[round] = true
+
 	o.recordSection(ctx, heading,
 		reviewRoundSection(heading, verifyRoundLine(vres, o.resolvedVerifyPlan()), findings, verdict))
 }

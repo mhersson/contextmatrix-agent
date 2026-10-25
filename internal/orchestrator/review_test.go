@@ -3876,6 +3876,85 @@ func TestRunReviewRestartsRoundsAfterACapPark(t *testing.T) {
 	}
 }
 
+// TestAuthoritativePassOnAFreshRunReadsOnlyItsOwnRounds proves a reopened
+// card's authoritative pass does not build on the finished run's recorded
+// rounds, which the body keeps as history. A finished run that approved below
+// the cap sends the fresh run straight to the authoritative pass; one that
+// parked at the cap leaves its authoritative section last in the body after
+// the fresh run's restart.
+func TestAuthoritativePassOnAFreshRunReadsOnlyItsOwnRounds(t *testing.T) {
+	const oldFinding = "old run finding"
+
+	oldRounds := func(rounds ...int) string {
+		body := "body"
+		for _, r := range rounds {
+			body += "\n\n" + reviewRoundSection(reviewRoundHeading(r), "**Verify:** PASSED", "- a.go: "+oldFinding, "revise")
+		}
+
+		return body
+	}
+
+	approve := []llm.Response{
+		stopResp("Correctness: clean", 0.01),
+		stopResp("Design: clean", 0.01),
+		stopResp("Security: clean", 0.01),
+		stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.02),
+	}
+
+	tests := []struct {
+		name      string
+		cap       int
+		attempts  int
+		body      string
+		responses []llm.Response
+		// wantOwn is a finding this run recorded that the authoritative pass
+		// must carry; empty when it records none before that pass.
+		wantOwn string
+	}{
+		{
+			name:      "approved below the cap",
+			cap:       5,
+			attempts:  4,
+			body:      oldRounds(3, 4, 5),
+			responses: approve,
+		},
+		{
+			name:     "parked at the cap",
+			cap:      2,
+			attempts: 3,
+			body:     oldRounds(1, 2, 3),
+			responses: slices.Concat([]llm.Response{
+				stopResp("Correctness: bug", 0.01),
+				stopResp("Design: ok", 0.01),
+				stopResp("Security: ok", 0.01),
+				stopResp(`{"approved":false,"summary":"fix it","fixes":[{"file":"b.go","issue":"new run finding","suggestion":"patch"}]}`, 0.02),
+				stopResp("coder: fixed", 0.05),
+			}, approve),
+			wantOwn: "new run finding",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &planLLM{responses: tt.responses}
+			d := reviewTestDeps(t, &fakeOps{reviewAttempts: tt.attempts}, &fakeGit{committed: true}, client, reviewerRegistry())
+			d.Cfg.ReviewAttemptsCap = tt.cap
+
+			tc := cmclient.TaskContext{Title: "Parent", Description: tt.body, State: "in_progress", ReviewAttempts: tt.attempts}
+			require.NoError(t, runReview(context.Background(), newReviewRun(d, tc, 0)))
+
+			authoritative := client.tasks[len(client.tasks)-4:]
+			for i, task := range authoritative {
+				assert.NotContains(t, task, oldFinding, "authoritative call %d replays the finished run", i)
+
+				if tt.wantOwn != "" {
+					assert.Contains(t, task, tt.wantOwn, "authoritative call %d carries this run's round", i)
+				}
+			}
+		})
+	}
+}
+
 // TestRunReviewPreservesCrashResumeCounter proves that a card whose review
 // counter is below the cap (e.g. 1 of 5) is NOT reset: the round numbering
 // continues from where it left off, so a crash-resume at round 2 (counter 1)
