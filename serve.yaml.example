@@ -32,7 +32,9 @@ container_contextmatrix_url: http://172.17.0.1:8080
 # because workers always get host.docker.internal mapped to the host gateway.
 # Must be http or https, carry no path, and not be a loopback host. Workers
 # must reach this URL, so a host firewall must allow container-to-host traffic
-# on its port.
+# on its port. The host must resolve inside the worker container: unlike the
+# MCP hostname it is not pinned into the container's /etc/hosts, so use an IP
+# or the host.docker.internal default if in-container DNS cannot resolve it.
 # CMX_CONTAINER_SERVE_URL
 container_serve_url: ""
 
@@ -154,6 +156,8 @@ secrets_dir: /var/run/cm-agent/secrets
 # model-invoked bash tools (curl/pip/npm), whose env the harness scrubs;
 # covering those needs a harness change. This service's other outbound calls
 # use the OS trust store, so install the CA there separately if needed.
+# serve reads the file at start-up as its own user, so an unreadable file, or
+# one holding no PEM certificate, stops serve from starting.
 # Empty = disabled.
 # CMX_CA_CERT_FILE
 # ca_cert_file: /etc/contextmatrix-agent/extra-ca.pem

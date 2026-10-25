@@ -38,4 +38,11 @@ allowlist (`NormalizeEndpoint`); unknown paths collapse to `other`. No
 | `cm_agent_callback_retries_total`           | counter   | `endpoint` (`status`/`verify-autonomous`)                         |
 | `cm_agent_broadcaster_drops_total`          | counter   | -                                                                 |
 
+The request metrics' `endpoint` label includes `llm/chat/completions` and
+`llm/models`, the LLM proxy's routes. Their
+`cm_agent_webhook_request_duration_seconds` observations span whole streams,
+often longer than the histogram's top bucket, so filter latency alerts by
+endpoint. `code="aborted"` counts a handler that panicked, for example the
+proxy aborting a stream after the worker dropped it.
+
 Deferred: panic-recovery counting and OTEL tracing.

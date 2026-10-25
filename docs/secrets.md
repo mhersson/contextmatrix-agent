@@ -3,8 +3,8 @@
 All credentials are CM-provisioned per run: ContextMatrix mints git tokens and
 the LLM endpoint credentials per run and sends them on the trigger payload
 (and on the task-skills pointer for the skills clone). The agent carries no
-local credential config and mints no git or LLM credentials itself; never read
-raw tokens from config or env.
+local credential config and mints no git tokens or upstream LLM keys itself;
+never read raw tokens from config or env.
 
 ## Staging
 
@@ -73,7 +73,7 @@ Operator notes:
 
 - Upstream LLM calls leave from `serve`, so its own `HTTP(S)_PROXY`/`NO_PROXY`
   environment applies to them and `ca_cert_file` is trusted for their TLS. An
-  egress proxy set only in `worker_extra_env` no longer reaches LLM traffic;
+  egress proxy set only in `worker_extra_env` does not reach LLM traffic;
   set it on the `serve` process or its service unit.
 - Workers must reach `serve`'s port at `container_serve_url`, so a host
   firewall must allow container-to-host traffic on that port.

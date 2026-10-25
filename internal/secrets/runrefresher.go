@@ -73,9 +73,9 @@ type RunCredentials struct {
 	OnTokenRefresh func(project, cardID, correlationID, token string)
 
 	// OnDisplace is an optional hook fired when Provision displaces another
-	// run's handle (same card, different correlationID). The displaced run
-	// never gets a Teardown, so per-run state keyed by its correlationID, such
-	// as its LLM proxy token, must be dropped here. Runs under the manager
+	// run's handle (same card, different correlationID). The displaced handle
+	// gets no Teardown, so the run's per-run state, such as its LLM proxy
+	// token, is dropped here early. Runs under the manager
 	// lock, so it must not call back into RunCredentials. Nil-safe.
 	OnDisplace func(project, cardID, correlationID string)
 

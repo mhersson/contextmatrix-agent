@@ -450,11 +450,11 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 	// Correlation ID travels in the X-Correlation-ID header, not the trigger
 	// body. A header is namespaced, never trusted verbatim: the value feeds
 	// the per-run keying that SessionID, RunCredentials, the LLM proxy, and
-	// the filelog all lean on, so a re-trigger reusing a trace id must still mint a distinct
-	// run id - cardID plus a short random suffix keeps every admitted run
-	// unique, while the header stays recognizable inside the id for trace
-	// stitching. CM does not send this header today, so the mint below is the
-	// common path regardless.
+	// the filelog all lean on, so a re-trigger reusing a trace id must still
+	// mint a distinct run id - cardID plus a short random suffix keeps every
+	// admitted run unique, while the header stays recognizable inside the id
+	// for trace stitching. CM does not send this header today, so the mint
+	// below is the common path regardless.
 	correlationID := mintRunID(payload.CardID)
 	if supplied := r.Header.Get(correlationHeader); supplied != "" {
 		correlationID += "-" + supplied
@@ -628,8 +628,9 @@ func mintRunID(cardID string) string {
 // but stays registered as defence in depth. Registration happens before
 // Launch so no container output can precede it; removeSessionSecrets
 // unregisters on container exit and on a failed launch, so a re-trigger never
-// inherits stale keys. It is nil-safe against a nil registry, a nil endpoint, and a nil mob,
-// so callers never nil-guard, and AddSessionKey ignores empty values.
+// inherits stale keys. It is nil-safe against a nil registry, a nil endpoint,
+// and a nil mob, so callers never nil-guard, and AddSessionKey ignores empty
+// values.
 //
 // Operator-supplied worker_extra_env is deliberately not registered. Those
 // values are appended verbatim to the container environment and AGENTS.md

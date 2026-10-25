@@ -40,8 +40,8 @@ import (
 )
 
 const (
-	// httpShutdownTimeout bounds each listener's graceful HTTP drain, the last
-	// step of gracefulShutdown.
+	// httpShutdownTimeout bounds the graceful HTTP drain, shared by the webhook
+	// and admin listeners, the last step of gracefulShutdown.
 	httpShutdownTimeout = 10 * time.Second
 	// callbackShutdownTimeout bounds each per-container kill + status callback
 	// during shutdown so one slow ContextMatrix response cannot starve the rest.
@@ -51,9 +51,10 @@ const (
 	onExitTimeout = 30 * time.Second
 	// parkWaitTimeout bounds how long shutdown waits for workers to park before
 	// the serial kill sweep, which adds a kill grace per straggler and a status
-	// callback per run; each listener's HTTP drain then adds up to
-	// httpShutdownTimeout. At the default max_concurrent of 5 the sequence fits
-	// svc.sh's TimeoutStopSec=60; seven or more stragglers can outlast it.
+	// callback per run; the HTTP drain, one bound shared by the webhook and
+	// admin listeners, then adds up to httpShutdownTimeout. At the default
+	// max_concurrent of 5 the sequence fits svc.sh's TimeoutStopSec=60; seven
+	// or more stragglers can outlast it.
 	parkWaitTimeout = 30 * time.Second
 	// parkPollInterval is how often the park wait rechecks the tracker.
 	parkPollInterval = 250 * time.Millisecond
@@ -333,13 +334,9 @@ func gracefulShutdown(
 	}
 
 	if adminServer != nil {
-		adminCtx, adminCancel := context.WithTimeout(context.Background(), httpShutdownTimeout)
-
-		if err := adminServer.Shutdown(adminCtx); err != nil {
+		if err := adminServer.Shutdown(httpCtx); err != nil {
 			logger.Error("admin server shutdown error", "error", err)
 		}
-
-		adminCancel()
 	}
 }
 

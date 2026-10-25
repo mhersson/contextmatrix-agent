@@ -21,7 +21,7 @@ Read the relevant one before working in its area:
 | `docs/orchestrator.md`    | The FSM: phases, git workflow, review loop, verify resolution, plan split, HITL gates, budget/context bounds, repo grounding, task skills, POC projects. |
 | `docs/pr-gates.md`        | The `pr_gates` phase: CI gate, Copilot gate, triage verdicts, thread replies.                                    |
 | `docs/model-selection.md` | Selection policy: tier bars, favorites, vendor diversity, `max_capability`, fallback precedence.                 |
-| `docs/secrets.md`         | Credential staging, env scrubbing, redaction, `verify.env` pass-throughs.                                        |
+| `docs/secrets.md`         | Credential staging, the LLM proxy, env scrubbing, redaction, `verify.env` pass-throughs.                         |
 | `docs/observability.md`   | Prometheus metrics and the admin listener.                                                                       |
 | `docs/custom-images.md`   | Custom worker images and `CMX_READ_ONLY_ROOTS`.                                                                  |
 
@@ -122,8 +122,8 @@ Go 1.27+, **cobra** + **koanf** (not viper), the **Docker SDK**
 
 - HMAC is `contextmatrix-protocol`'s job - do not re-implement it locally.
 - Git tokens and the LLM endpoint are CM-provisioned per run - the agent
-  carries no local credential config and mints no git or LLM credentials
-  itself.
+  carries no local credential config and mints no git tokens or upstream
+  LLM keys itself.
 - The LLM endpoint (OpenAI-compatible `/chat/completions`) is spoken over **raw
   HTTP** behind a narrow `Send`/`SendStream` interface - no SDK in the hot path.
 

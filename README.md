@@ -239,7 +239,7 @@ to exit, then kills the rest. The kill sweep runs one card at a time: each
 worker still running after the wait adds about 3 seconds of kill grace, and
 each card running at shutdown adds one status callback (at most 10 seconds).
 The webhook listener closes only after the sweep, because parking workers reach
-the LLM proxy on it; its drain adds at most 10 seconds. At the default
+the LLM proxy on it; the HTTP drain, shared with the admin listener, adds at most 10 seconds. At the default
 `max_concurrent` of 5 with ContextMatrix answering promptly, the sequence fits
 the unit's `TimeoutStopSec=60`; seven or more stragglers can outlast it. A
 second signal skips the wait.
