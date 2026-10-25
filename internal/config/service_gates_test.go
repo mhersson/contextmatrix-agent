@@ -1,6 +1,8 @@
 package config
 
 import (
+	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -185,5 +187,82 @@ func TestLogLevelAndImageFilterDefaults(t *testing.T) {
 		err := bad.Validate()
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "log_level")
+	})
+}
+
+// recordingHandler collects slog records; the attributes are flattened so a
+// test asserts them without matching message prose.
+type recordingHandler struct {
+	records *[]map[string]string
+}
+
+func (recordingHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h recordingHandler) Handle(_ context.Context, r slog.Record) error {
+	attrs := map[string]string{}
+
+	r.Attrs(func(a slog.Attr) bool {
+		attrs[a.Key] = a.Value.String()
+
+		return true
+	})
+
+	*h.records = append(*h.records, attrs)
+
+	return nil
+}
+
+func (h recordingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h recordingHandler) WithGroup(string) slog.Handler      { return h }
+
+func captureWarnings(t *testing.T) *[]map[string]string {
+	t.Helper()
+
+	var records []map[string]string
+
+	prev := slog.Default()
+
+	slog.SetDefault(slog.New(recordingHandler{records: &records}))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	return &records
+}
+
+func TestGatesExtraEnvWarnsNamingServeKey(t *testing.T) {
+	t.Run("folded entry", func(t *testing.T) {
+		clearServiceEnv(t)
+
+		records := captureWarnings(t)
+
+		_, err := LoadService(gatesServiceYAML(t, "worker_extra_env:\n  CMX_GATES_POLL_INTERVAL_SECONDS: \"15\"\n"))
+		require.NoError(t, err)
+
+		require.Len(t, *records, 1)
+		assert.Equal(t, "CMX_GATES_POLL_INTERVAL_SECONDS", (*records)[0]["worker_extra_env"])
+		assert.Equal(t, "gates_poll_interval_seconds", (*records)[0]["serve_key"])
+	})
+
+	t.Run("serve key also set", func(t *testing.T) {
+		clearServiceEnv(t)
+
+		records := captureWarnings(t)
+
+		_, err := LoadService(gatesServiceYAML(t, "gates_ci_wait_timeout_seconds: 500\n"+
+			"worker_extra_env:\n  CMX_GATES_CI_WAIT_TIMEOUT_SECONDS: \"99\"\n"))
+		require.NoError(t, err)
+
+		require.Len(t, *records, 1)
+		assert.Equal(t, "CMX_GATES_CI_WAIT_TIMEOUT_SECONDS", (*records)[0]["worker_extra_env"])
+		assert.Equal(t, "gates_ci_wait_timeout_seconds", (*records)[0]["serve_key"])
+	})
+
+	t.Run("no entry no warning", func(t *testing.T) {
+		clearServiceEnv(t)
+
+		records := captureWarnings(t)
+
+		_, err := LoadService(gatesServiceYAML(t, ""))
+		require.NoError(t, err)
+		assert.Empty(t, *records)
 	})
 }
