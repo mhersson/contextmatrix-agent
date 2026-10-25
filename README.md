@@ -136,8 +136,8 @@ export LLM_API_KEY=<your-api-key>
 ## Running as a ContextMatrix backend
 
 1. **Build the worker image.** The worker image bundles the agent binary plus
-   the CLIs the harness expects; toolchain versions are pinned and
-   SHA256-verified.
+   the CLIs the harness expects; Debian packages come from Debian's signed
+   repositories and every other tool is pinned and SHA256-verified.
 
    ```bash
    make docker-worker          # tags contextmatrix-agent-worker:dev (full), labelled with the commit
