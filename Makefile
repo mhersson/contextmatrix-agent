@@ -1,4 +1,4 @@
-.PHONY: build install history test test-race fmt lint docker-worker docker-worker-variants
+.PHONY: build install history test test-race test-docker fmt lint docker-worker docker-worker-variants
 
 # Pinned worker toolchain versions. Override on the command line
 # if a newer version has been vetted, e.g.
@@ -79,6 +79,10 @@ test:
 	go test ./...
 test-race:
 	CGO_ENABLED=1 go test -race ./...
+# Needs a Docker daemon and pulls alpine. It force-removes every agent-labelled
+# container on the daemon, so never run it next to a live serve.
+test-docker:
+	CMX_TEST_DOCKER=1 go test -count=1 -run '^TestIntegration_' ./internal/executor/
 fmt:
 	gofumpt -w .
 lint:

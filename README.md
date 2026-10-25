@@ -331,11 +331,16 @@ in [`docs/model-selection.md`](docs/model-selection.md).
 ```bash
 make build          # go build ./... + the binary
 make test           # go test ./...
+make test-docker    # Docker integration suite (see below)
 make lint           # golangci-lint run
 make fmt            # gofumpt -w .
 make docker-worker           # build the default (full) worker image
 make docker-worker-variants  # build the go-node / python / rust / jvm-node variants
 ```
+
+`make test-docker` needs a local Docker daemon and force-removes every
+agent-labelled container on it, so never run it on a host where a live `serve`
+has workers running.
 
 CI gates every pull request on `go test`, `go test -race`, `golangci-lint`, and
 `go build`, plus `govulncheck` and a worker-image scan.

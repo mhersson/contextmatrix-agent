@@ -256,6 +256,7 @@ Summaries only - full detail lives in the reference documents above.
 make build          # write the merge history, go build ./... + the stamped contextmatrix-agent binary
 make test           # go test ./...
 make test-race      # CGO_ENABLED=1 go test -race ./...
+make test-docker    # Docker integration suite; see the warning below
 make lint           # golangci-lint run
 make fmt            # gofumpt -w .
 make docker-worker           # build the default (full) worker image
@@ -268,6 +269,10 @@ needed), use `contextmatrix-agent run` - see the README's quick start.
 Tests that shell out to `git`/`rg`/`fd` skip when those binaries are absent;
 install them locally to exercise the full suite. `go test -race` runs in CI -
 keep it clean.
+
+`make test-docker` runs the executor's Docker integration suite against the
+local daemon. It force-removes every agent-labelled container on that daemon,
+so never run it on a host where a live `serve` has workers running.
 
 ### Uncommitted artifacts
 
