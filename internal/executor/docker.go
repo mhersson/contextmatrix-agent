@@ -348,8 +348,9 @@ func NewClient() (*client.Client, error) {
 
 // Launch pulls (per policy), creates, attaches stdin+stdout+stderr, admits the
 // run to the tracker, starts the container, and spawns the supervision
-// goroutines. On any failure after create, the container is removed so nothing
-// leaks. ErrCapacity is returned when the tracker is full.
+// goroutines. On any failure after create, or a create ctx cut short, the
+// container is removed so nothing leaks. ErrCapacity is returned when the
+// tracker is full.
 func (e *DockerExecutor) Launch(ctx context.Context, spec LaunchSpec) error {
 	log := e.logger.With("project", spec.Project, "card_id", spec.CardID)
 
@@ -369,6 +370,13 @@ func (e *DockerExecutor) Launch(ctx context.Context, spec LaunchSpec) error {
 		Name:             name,
 	})
 	if err != nil {
+		// A create the launch context cut short may still have made the
+		// container on the daemon, where its name would refuse the card's
+		// next launch.
+		if ctx.Err() != nil {
+			e.removeContainer(ctx, name, log)
+		}
+
 		return fmt.Errorf("create container: %w", err)
 	}
 

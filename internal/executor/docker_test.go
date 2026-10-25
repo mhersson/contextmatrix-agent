@@ -432,6 +432,9 @@ type stubDocker struct {
 	// recorded.
 	killHook func(ctx context.Context) error
 
+	// createErr, when set, fails ContainerCreate with what it returns.
+	createErr func(ctx context.Context) error
+
 	mu      sync.Mutex
 	killed  []string
 	removed []string
@@ -468,7 +471,13 @@ func (s *stubDocker) ContainerRemove(
 	return client.ContainerRemoveResult{}, nil
 }
 
-func (s *stubDocker) ContainerCreate(_ context.Context, _ client.ContainerCreateOptions) (client.ContainerCreateResult, error) {
+func (s *stubDocker) ContainerCreate(ctx context.Context, _ client.ContainerCreateOptions) (client.ContainerCreateResult, error) {
+	if s.createErr != nil {
+		if err := s.createErr(ctx); err != nil {
+			return client.ContainerCreateResult{}, err
+		}
+	}
+
 	return client.ContainerCreateResult{ID: "container-1"}, nil
 }
 
@@ -983,4 +992,50 @@ func TestIdleWatchdogSparesARunAwaitingAHuman(t *testing.T) {
 		assert.Equal(t, []string{"ctr-1"}, docker.killed)
 		assert.Equal(t, metrics.OutcomeIdleTimeout, tracker.Reason("proj", "CARD-1"))
 	})
+}
+
+// TestLaunchRemovesACreateCutShort: a create the launch context ends may
+// still have made the container on the daemon, where its name would refuse
+// the card's next launch, so Launch removes it by name. A create that fails
+// on its own made nothing to remove.
+func TestLaunchRemovesACreateCutShort(t *testing.T) {
+	tests := []struct {
+		name        string
+		cutShort    bool
+		wantRemoved []string
+	}{
+		{name: "cut short by the launch context", cutShort: true, wantRemoved: []string{containerName("proj", "CARD-1")}},
+		{name: "refused by the daemon"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+
+			docker := &stubDocker{createErr: func(ctx context.Context) error {
+				if tt.cutShort {
+					cancel()
+
+					return ctx.Err()
+				}
+
+				return errors.New("conflict: invalid mount config")
+			}}
+
+			e := NewDockerExecutor(Config{
+				Docker:     docker,
+				Tracker:    NewTracker(1),
+				PullPolicy: PullNever,
+				Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+			})
+
+			require.Error(t, e.Launch(ctx, LaunchSpec{Project: "proj", CardID: "CARD-1", Image: "alpine:3"}))
+
+			docker.mu.Lock()
+			defer docker.mu.Unlock()
+
+			assert.Equal(t, tt.wantRemoved, docker.removed)
+		})
+	}
 }
