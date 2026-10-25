@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -293,36 +294,51 @@ func TestStopAllSparesOtherProjectsAdmissions(t *testing.T) {
 }
 
 // TestLaunchTimeoutFailsAndFreesTheCard: a launch that never finishes, such as
-// a stalled image pull, is failed at the launch timeout with its token and
-// credentials torn down, and the card's admission lock is free for the next
-// trigger.
+// a stalled image pull, holds until the launch timeout, is then failed with
+// its token and credentials torn down, and leaves the card's admission lock
+// free for the next trigger. Virtual time makes the timeout the production
+// one and lets it fire only once the launch is blocked on it.
 func TestLaunchTimeoutFailsAndFreesTheCard(t *testing.T) {
-	h := newHarness(t, 4)
-	h.server.launchTimeout = 20 * time.Millisecond
+	synctest.Test(t, func(t *testing.T) {
+		h := newHarness(t, 4)
 
-	var calls atomic.Int32
+		var calls atomic.Int32
 
-	h.exec.launchHook = func(ctx context.Context, _ executor.LaunchSpec) error {
-		if calls.Add(1) == 1 {
-			<-ctx.Done()
+		h.exec.launchHook = func(ctx context.Context, _ executor.LaunchSpec) error {
+			if calls.Add(1) == 1 {
+				<-ctx.Done()
 
-			return ctx.Err()
+				return ctx.Err()
+			}
+
+			return nil
 		}
 
-		return nil
-	}
+		payload := provisionedPayload("PROJ-STALL")
 
-	ts := time.Now().Unix()
-	payload := provisionedPayload("PROJ-STALL")
+		require.Equal(t, http.StatusAccepted, h.do(t, http.MethodPost, "/trigger", payload).Code)
 
-	require.Equal(t, http.StatusAccepted, h.doAt(t, http.MethodPost, "/trigger", payload, strconv.FormatInt(ts, 10)).Code)
-	require.Equal(t, "failed", h.awaitStatuses(t, 1)[0][1])
+		time.Sleep(launchTimeout - time.Second)
+		synctest.Wait()
+		assert.Empty(t, h.reporter.statuses(), "the stalled launch holds until its timeout")
 
-	registers := h.proxy.registerCalls()
-	require.Len(t, registers, 1)
-	assert.Equal(t, []string{registers[0].runKey}, h.proxy.revokeCalls())
-	assert.Equal(t, [][3]string{{"proj", "PROJ-STALL", registers[0].runKey}}, h.creds.teardownCalls())
+		time.Sleep(2 * time.Second)
+		synctest.Wait()
 
-	require.Equal(t, http.StatusAccepted, h.doAt(t, http.MethodPost, "/trigger", payload, strconv.FormatInt(ts+1, 10)).Code)
-	assert.Equal(t, "running", h.awaitStatuses(t, 2)[1][1])
+		statuses := h.reporter.statuses()
+		require.Len(t, statuses, 1)
+		assert.Equal(t, "failed", statuses[0][1])
+
+		registers := h.proxy.registerCalls()
+		require.Len(t, registers, 1)
+		assert.Equal(t, []string{registers[0].runKey}, h.proxy.revokeCalls())
+		assert.Equal(t, [][3]string{{"proj", "PROJ-STALL", registers[0].runKey}}, h.creds.teardownCalls())
+
+		require.Equal(t, http.StatusAccepted, h.do(t, http.MethodPost, "/trigger", payload).Code)
+		synctest.Wait()
+
+		statuses = h.reporter.statuses()
+		require.Len(t, statuses, 2)
+		assert.Equal(t, "running", statuses[1][1])
+	})
 }

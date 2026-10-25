@@ -299,9 +299,6 @@ type Server struct {
 	// reclaimed (one bare mutex per card ever seen).
 	launchMu sync.Map // map[string]*sync.Mutex
 
-	// launchTimeout bounds each admission; tests shrink it.
-	launchTimeout time.Duration
-
 	// afterLaunch, when set, runs between a successful launch and the
 	// admission's stop check: a test synchronization hook, never set in
 	// production.
@@ -372,7 +369,6 @@ func NewServer(cfg Config) *Server {
 		nextAttempt:     cfg.NextAttempt,
 		dedup:           dedup,
 		logger:          logger,
-		launchTimeout:   launchTimeout,
 		admissions:      make(map[*admission]struct{}),
 	}
 }
@@ -551,7 +547,7 @@ type admission struct {
 // beginAdmission registers a trigger's admission and returns its context,
 // which the launch timeout and a stop both end.
 func (s *Server) beginAdmission(parent context.Context, project, cardID string) (*admission, context.Context) {
-	ctx, cancel := context.WithTimeout(parent, s.launchTimeout)
+	ctx, cancel := context.WithTimeout(parent, launchTimeout)
 	adm := &admission{project: project, cardID: cardID, cancel: cancel, done: make(chan struct{})}
 
 	s.admissionsMu.Lock()
@@ -764,7 +760,7 @@ func (s *Server) provisionAndLaunch(ctx context.Context, spec executor.LaunchSpe
 // the launch timeout names itself so a stalled pull reads as one.
 func (s *Server) launchFailure(ctx context.Context) string {
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return fmt.Sprintf("launch timed out after %s", s.launchTimeout)
+		return fmt.Sprintf("launch timed out after %s", launchTimeout)
 	}
 
 	return "launch failed"
