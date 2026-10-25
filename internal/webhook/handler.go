@@ -302,6 +302,11 @@ type Server struct {
 	// launchTimeout bounds each admission; tests shrink it.
 	launchTimeout time.Duration
 
+	// afterLaunch, when set, runs between a successful launch and the
+	// admission's stop check: a test synchronization hook, never set in
+	// production.
+	afterLaunch func()
+
 	// admissionsMu guards admissions and each admission's stopped flag. It is a
 	// leaf lock, taken under launchMu but never the other way round.
 	admissionsMu sync.Mutex
@@ -628,6 +633,10 @@ func (s *Server) admitAndLaunch(ctx context.Context, adm *admission, spec execut
 	defer mu.Unlock()
 
 	failure = s.provisionAndLaunch(ctx, spec, p)
+
+	if failure == "" && s.afterLaunch != nil {
+		s.afterLaunch()
+	}
 
 	if !s.endAdmission(adm) {
 		return failure, false

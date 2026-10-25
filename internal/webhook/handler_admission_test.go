@@ -47,41 +47,6 @@ func gatedLaunch(entered chan<- struct{}, release <-chan struct{}, onCancel func
 	}
 }
 
-// TestStopDuringAdmissionReportsNothing: ContextMatrix records the card as
-// killed once /kill or /stop-all answers, and writes any status that arrives
-// later over it. A launch the stop catches therefore reports neither running
-// nor a failure, and leaves no tracked run or live proxy token behind.
-func TestStopDuringAdmissionReportsNothing(t *testing.T) {
-	launches := []struct {
-		name     string
-		onCancel func(ctx context.Context) error
-	}{
-		{name: "launch fails on the cancel", onCancel: func(ctx context.Context) error { return ctx.Err() }},
-		{name: "launch completes despite the cancel", onCancel: func(context.Context) error { return nil }},
-	}
-
-	for _, launch := range launches {
-		for _, stop := range stopRequests("PROJ-STOP") {
-			t.Run(launch.name+"/"+stop.name, func(t *testing.T) {
-				h := newHarness(t, 4)
-				entered := make(chan struct{}, 1)
-				release := make(chan struct{})
-				h.exec.launchHook = gatedLaunch(entered, release, launch.onCancel)
-
-				require.Equal(t, http.StatusAccepted, h.do(t, http.MethodPost, "/trigger", provisionedPayload("PROJ-STOP")).Code)
-				<-entered
-
-				w := h.do(t, http.MethodPost, stop.path, stop.body)
-
-				close(release)
-
-				require.Equal(t, http.StatusOK, w.Code)
-				assertStoppedAdmission(t, h, "PROJ-STOP")
-			})
-		}
-	}
-}
-
 // stopRequested reports whether a stop has reached an admission in flight for
 // the card.
 func (s *Server) stopRequested(project, cardID string) bool {
@@ -97,63 +62,161 @@ func (s *Server) stopRequested(project, cardID string) bool {
 	return false
 }
 
-// TestStopBeforeLaunchSkipsTheLaunch: a stop that lands while the run is
-// still being provisioned keeps the executor from ever being called.
-func TestStopBeforeLaunchSkipsTheLaunch(t *testing.T) {
-	for _, stop := range stopRequests("PROJ-STOP") {
-		t.Run(stop.name, func(t *testing.T) {
-			h := newHarness(t, 4)
-			entered := make(chan struct{}, 1)
-			release := make(chan struct{})
-			h.creds.provisionHook = func() {
-				entered <- struct{}{}
+// admissionOrdering is where a stop lands in an admission: block installs a
+// blocking point that signals entered once the admission reaches it, then
+// waits for release, or for the stop's cancel when cancelled is set.
+type admissionOrdering struct {
+	name      string
+	block     func(h *harness, entered chan<- struct{}, release <-chan struct{})
+	cancelled bool  // the stop's cancel, not release, unblocks the admission
+	launches  int32 // Launch calls the admission makes
+	launched  bool  // whether a run started, which the admission must kill
+}
 
-				<-release
-			}
+func admissionOrderings() []admissionOrdering {
+	return []admissionOrdering{
+		{
+			name: "before launch",
+			block: func(h *harness, entered chan<- struct{}, release <-chan struct{}) {
+				h.creds.provisionHook = func() {
+					entered <- struct{}{}
 
-			var launches atomic.Int32
+					<-release
+				}
+			},
+		},
+		{
+			name: "while launch blocks, which fails on the cancel",
+			block: func(h *harness, entered chan<- struct{}, _ <-chan struct{}) {
+				h.exec.launchHook = func(ctx context.Context, _ executor.LaunchSpec) error {
+					entered <- struct{}{}
 
-			h.exec.launchHook = func(context.Context, executor.LaunchSpec) error {
-				launches.Add(1)
+					<-ctx.Done()
 
-				return nil
-			}
+					return ctx.Err()
+				}
+			},
+			cancelled: true,
+			launches:  1,
+		},
+		{
+			name: "while launch blocks, which completes despite the cancel",
+			block: func(h *harness, entered chan<- struct{}, _ <-chan struct{}) {
+				h.exec.launchHook = func(ctx context.Context, _ executor.LaunchSpec) error {
+					entered <- struct{}{}
 
-			require.Equal(t, http.StatusAccepted, h.do(t, http.MethodPost, "/trigger", provisionedPayload("PROJ-STOP")).Code)
-			<-entered
+					<-ctx.Done()
 
-			answered := make(chan *httptest.ResponseRecorder, 1)
+					return nil
+				}
+			},
+			cancelled: true,
+			launches:  1,
+			launched:  true,
+		},
+		{
+			name: "just after launch returns",
+			block: func(h *harness, entered chan<- struct{}, release <-chan struct{}) {
+				h.server.afterLaunch = func() {
+					entered <- struct{}{}
 
-			stopRequest := h.request(t, http.MethodPost, stop.path, stop.body, nowTS())
-
-			go func() { answered <- h.serve(stopRequest) }()
-
-			require.Eventually(t, func() bool { return h.server.stopRequested("proj", "PROJ-STOP") },
-				time.Second, time.Millisecond)
-			close(release)
-
-			require.Equal(t, http.StatusOK, (<-answered).Code)
-			assert.Zero(t, launches.Load(), "the executor is never asked to launch")
-			assertStoppedAdmission(t, h, "PROJ-STOP")
-		})
+					<-release
+				}
+			},
+			launches: 1,
+			launched: true,
+		},
 	}
 }
 
-// assertStoppedAdmission checks what a stopped admission leaves behind: no
-// status callback, no tracked run, and its token and credentials gone.
-func assertStoppedAdmission(t *testing.T, h *harness, cardID string) {
-	t.Helper()
+// TestStopDuringAdmission: ContextMatrix records the card as killed once
+// /kill or /stop-all answers, and writes any status that arrives later over
+// it. Wherever the stop lands in the admission, the launch therefore reports
+// neither running nor a failure, and by the time the stop answers its token is
+// revoked, its credentials are torn down and no run is left tracked. A run the
+// executor already started is killed; its session secrets stay registered for
+// its exit path to remove once its output has drained, while a launch that
+// never started removes them before the answer.
+func TestStopDuringAdmission(t *testing.T) {
+	for _, ordering := range admissionOrderings() {
+		for _, stop := range stopRequests("PROJ-STOP") {
+			t.Run(ordering.name+"/"+stop.name, func(t *testing.T) {
+				h := newHarness(t, 4)
+				registry := newFakeSessionSecretRegistry()
+				h.server.sessionRegistry = registry
 
-	assert.Never(t, func() bool { return len(h.reporter.statuses()) > 0 },
-		50*time.Millisecond, 5*time.Millisecond, "a stopped admission reports nothing")
+				entered := make(chan struct{}, 1)
+				release := make(chan struct{})
 
-	_, tracked := h.tracker.Get("proj", cardID)
-	assert.False(t, tracked, "a stopped admission leaves no tracked run")
+				ordering.block(h, entered, release)
 
-	registers := h.proxy.registerCalls()
-	require.Len(t, registers, 1)
-	assert.Contains(t, h.proxy.revokeCalls(), registers[0].runKey)
-	assert.Contains(t, h.creds.teardownCalls(), [3]string{"proj", cardID, registers[0].runKey})
+				var launches atomic.Int32
+
+				blockLaunch := h.exec.launchHook
+				h.exec.launchHook = func(ctx context.Context, spec executor.LaunchSpec) error {
+					launches.Add(1)
+
+					if blockLaunch != nil {
+						return blockLaunch(ctx, spec)
+					}
+
+					return nil
+				}
+
+				require.Equal(t, http.StatusAccepted, h.do(t, http.MethodPost, "/trigger", provisionedPayload("PROJ-STOP")).Code)
+				<-entered
+
+				stopRequest := h.request(t, http.MethodPost, stop.path, stop.body, nowTS())
+				answered := make(chan *httptest.ResponseRecorder, 1)
+
+				go func() { answered <- h.serve(stopRequest) }()
+
+				// An admission held on release waits for the stop to reach it.
+				if !ordering.cancelled {
+					require.Eventually(t, func() bool { return h.server.stopRequested("proj", "PROJ-STOP") },
+						time.Second, time.Millisecond)
+					close(release)
+				}
+
+				var w *httptest.ResponseRecorder
+
+				select {
+				case w = <-answered:
+				case <-time.After(5 * time.Second):
+					t.Fatal("the stop never answered")
+				}
+
+				require.Equal(t, http.StatusOK, w.Code)
+				assert.Equal(t, ordering.launches, launches.Load(), "launch calls")
+
+				registers := h.proxy.registerCalls()
+				require.Len(t, registers, 1)
+
+				runKey := registers[0].runKey
+				session := SessionID("proj", "PROJ-STOP", runKey)
+
+				assert.Contains(t, h.proxy.revokeCalls(), runKey, "the token is revoked before the answer")
+				assert.Contains(t, h.creds.teardownCalls(), [3]string{"proj", "PROJ-STOP", runKey},
+					"the credentials are torn down before the answer")
+
+				_, tracked := h.tracker.Get("proj", "PROJ-STOP")
+				assert.False(t, tracked, "no run is left tracked")
+
+				if ordering.launched {
+					h.exec.mu.Lock()
+					assert.Contains(t, h.exec.killed, [2]string{"proj", "PROJ-STOP"}, "the started run is killed")
+					h.exec.mu.Unlock()
+
+					assert.NotEmpty(t, registry.keys(session), "the exit path removes a started run's secrets after its output drains")
+				} else {
+					assert.Contains(t, registry.removedIDs(), session, "the session secrets are removed before the answer")
+				}
+
+				assert.Never(t, func() bool { return len(h.reporter.statuses()) > 0 },
+					50*time.Millisecond, 5*time.Millisecond, "a stopped admission reports nothing")
+			})
+		}
+	}
 }
 
 // TestStopAllSparesOtherProjectsAdmissions: a stop-all scoped to one project
