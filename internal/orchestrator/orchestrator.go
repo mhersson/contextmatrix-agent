@@ -1026,7 +1026,9 @@ func (o *run) recoverIncapable(ctx context.Context, ie *IncapableError) error {
 	// Best-effort, and done for the cap-exhausting model too: a proven
 	// incapable model must not be the first pick of the next run just because
 	// it happened to be the one that spent the last re-selection.
-	_ = o.d.Ops.BlacklistModel(ctx, o.d.Cfg.CardID, ie.Model, ie.Reason) //nolint:errcheck
+	if err := o.d.Ops.BlacklistModel(ctx, o.d.Cfg.CardID, ie.Model, ie.Reason); err != nil {
+		o.d.logCard(ctx, "blacklist model %q failed: %v", ie.Model, err)
+	}
 
 	if exhausted {
 		o.d.logCard(ctx, "model %q harness-incapable; blacklisted - re-selection cap (%d) exhausted: %s", ie.Model, reselectCap, ie.Reason)

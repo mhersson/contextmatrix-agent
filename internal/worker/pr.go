@@ -237,11 +237,9 @@ func ghSucceeded(err error, stdout string, jsonTolerant bool) bool {
 // runGH executes a gh invocation and returns trimmed stdout. Exit errors carry
 // stderr in the message. jsonTolerant, when true, returns stdout despite a
 // non-zero exit if stdout parses as JSON - gh pr checks exits 1 on failing
-// checks and 8 on pending while still printing the JSON report. stdin mirrors
-// ghCmd's parameter for callers that need to feed a request body; no current
-// PRGates call needs one.
-func (p *PRCreator) runGH(ctx context.Context, stdin string, jsonTolerant bool, args ...string) (string, error) { //nolint:unparam // seam signature; see doc comment
-	cmd, err := p.ghCmd(ctx, stdin, args...)
+// checks and 8 on pending while still printing the JSON report.
+func (p *PRCreator) runGH(ctx context.Context, jsonTolerant bool, args ...string) (string, error) {
+	cmd, err := p.ghCmd(ctx, "", args...)
 	if err != nil {
 		return "", err
 	}
@@ -597,7 +595,7 @@ func (p *PRCreator) ReviewThreads(ctx context.Context, prURL string) ([]orchestr
 		return nil, fmt.Errorf("review threads: %w", err)
 	}
 
-	out, err := p.runGH(ctx, "", false, "api", "graphql",
+	out, err := p.runGH(ctx, false, "api", "graphql",
 		"-f", "query="+reviewThreadsQuery,
 		"-f", "owner="+owner, "-f", "repo="+repo, "-F", "number="+strconv.Itoa(number))
 	if err != nil {
@@ -673,7 +671,7 @@ func (p *PRCreator) ReplyToReviewComment(ctx context.Context, prURL string, comm
 	}
 
 	path := fmt.Sprintf("repos/%s/%s/pulls/%d/comments/%d/replies", owner, repo, number, commentID)
-	if _, err := p.runGH(ctx, "", false, "api", path, "--method", "POST", "-f", "body="+body); err != nil {
+	if _, err := p.runGH(ctx, false, "api", path, "--method", "POST", "-f", "body="+body); err != nil {
 		return fmt.Errorf("reply to review comment: %w", err)
 	}
 
@@ -687,7 +685,7 @@ const resolveThreadMutation = `mutation($threadId:ID!){
 
 // ResolveReviewThread marks one review thread resolved by its node id.
 func (p *PRCreator) ResolveReviewThread(ctx context.Context, threadID string) error {
-	if _, err := p.runGH(ctx, "", false, "api", "graphql",
+	if _, err := p.runGH(ctx, false, "api", "graphql",
 		"-f", "query="+resolveThreadMutation, "-f", "threadId="+threadID); err != nil {
 		return fmt.Errorf("resolve review thread: %w", err)
 	}
@@ -787,7 +785,7 @@ func (p *PRCreator) Checks(ctx context.Context, prURL string) ([]orchestrator.Ch
 // translated into an empty result - callers distinguish "this repo has no CI"
 // from "the poll failed" only by the error being nil.
 func (p *PRCreator) checksViaRollup(ctx context.Context, prURL string) ([]orchestrator.CheckResult, error) {
-	out, err := p.runGH(ctx, "", true, checksArgs(prURL)...)
+	out, err := p.runGH(ctx, true, checksArgs(prURL)...)
 	if err != nil {
 		if noChecksReportedPattern.MatchString(err.Error()) {
 			return nil, nil
@@ -820,7 +818,7 @@ func (p *PRCreator) checksViaRuns(ctx context.Context, prURL string) ([]orchestr
 		return nil, fmt.Errorf("checks via runs: %w", err)
 	}
 
-	runsOut, err := p.runGH(ctx, "", false, runListArgs(owner, repo, sha)...)
+	runsOut, err := p.runGH(ctx, false, runListArgs(owner, repo, sha)...)
 	if err != nil {
 		// A gh without the run list flags, or a token without Actions: read,
 		// fails this way on every poll: tell the gate to stop waiting.
@@ -836,7 +834,7 @@ func (p *PRCreator) checksViaRuns(ctx context.Context, prURL string) ([]orchestr
 		return nil, fmt.Errorf("gh run list: %w", err)
 	}
 
-	statusOut, err := p.runGH(ctx, "", false, combinedStatusArgs(owner, repo, sha)...)
+	statusOut, err := p.runGH(ctx, false, combinedStatusArgs(owner, repo, sha)...)
 	if err != nil {
 		// Commit statuses: read is missing and there is nothing left to fall
 		// back to. Say so now rather than on every poll until the deadline - and
@@ -975,7 +973,7 @@ func statusBucket(state string) string {
 
 // HeadSHA returns the PR's current head commit SHA.
 func (p *PRCreator) HeadSHA(ctx context.Context, prURL string) (string, error) {
-	out, err := p.runGH(ctx, "", false, headSHAArgs(prURL)...)
+	out, err := p.runGH(ctx, false, headSHAArgs(prURL)...)
 	if err != nil {
 		return "", fmt.Errorf("gh pr view head sha: %w", err)
 	}
@@ -999,7 +997,7 @@ func (p *PRCreator) CopilotRequested(ctx context.Context, prURL string) (bool, e
 		return false, fmt.Errorf("gh api review requests: %w", err)
 	}
 
-	out, err := p.runGH(ctx, "", false, args...)
+	out, err := p.runGH(ctx, false, args...)
 	if err != nil {
 		return false, fmt.Errorf("gh api review requests: %w", err)
 	}
@@ -1023,7 +1021,7 @@ func (p *PRCreator) RequestCopilotReview(ctx context.Context, prURL string) (boo
 		return false, fmt.Errorf("gh api request copilot reviewer: %w", err)
 	}
 
-	out, err := p.runGH(ctx, "", false, args...)
+	out, err := p.runGH(ctx, false, args...)
 	if err != nil {
 		return false, fmt.Errorf("gh api request copilot reviewer: %w", err)
 	}
@@ -1051,7 +1049,7 @@ func (p *PRCreator) CopilotReview(ctx context.Context, prURL string) (*orchestra
 
 	base := "repos/" + owner + "/" + repo + "/pulls/" + strconv.Itoa(number)
 
-	out, err := p.runGH(ctx, "", false, paginatedGetArgs(base+"/reviews")...)
+	out, err := p.runGH(ctx, false, paginatedGetArgs(base+"/reviews")...)
 	if err != nil {
 		return nil, fmt.Errorf("copilot review: %w", err)
 	}
@@ -1065,7 +1063,7 @@ func (p *PRCreator) CopilotReview(ctx context.Context, prURL string) (*orchestra
 		return nil, nil
 	}
 
-	commentsOut, err := p.runGH(ctx, "", false,
+	commentsOut, err := p.runGH(ctx, false,
 		paginatedGetArgs(base+"/reviews/"+strconv.FormatInt(reviewID, 10)+"/comments")...)
 	if err != nil {
 		return nil, fmt.Errorf("copilot review comments: %w", err)
@@ -1099,7 +1097,7 @@ func (p *PRCreator) FailureLogs(ctx context.Context, _ string, failed []orchestr
 		logBody := ""
 
 		if runID := parseRunID(check.Link); runID != "" {
-			out, err := p.runGH(ctx, "", false, "run", "view", runID, "--log-failed")
+			out, err := p.runGH(ctx, false, "run", "view", runID, "--log-failed")
 			if err != nil {
 				description += " (log fetch failed: " + err.Error() + ")"
 			} else {
@@ -1115,7 +1113,7 @@ func (p *PRCreator) FailureLogs(ctx context.Context, _ string, failed []orchestr
 
 // FindPRURL probes for an open PR on the workspace's current branch.
 func (p *PRCreator) FindPRURL(ctx context.Context) (string, error) {
-	out, err := p.runGH(ctx, "", false, prViewURLArgs()...)
+	out, err := p.runGH(ctx, false, prViewURLArgs()...)
 	if err != nil {
 		if noPRForBranchPattern.MatchString(err.Error()) {
 			return "", nil
@@ -1137,7 +1135,7 @@ func mergeArgs(prURL string) []string {
 // MergePullRequest merges the PR with a merge commit. gh's stderr (the
 // GitHub refusal text) is folded into the error by runGH.
 func (p *PRCreator) MergePullRequest(ctx context.Context, prURL string) error {
-	if _, err := p.runGH(ctx, "", false, mergeArgs(prURL)...); err != nil {
+	if _, err := p.runGH(ctx, false, mergeArgs(prURL)...); err != nil {
 		return fmt.Errorf("merge pull request: %w", err)
 	}
 

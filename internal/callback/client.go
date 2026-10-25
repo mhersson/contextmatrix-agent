@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -408,18 +409,11 @@ func (e *callbackError) Error() string {
 	return fmt.Sprintf("callback returned status %d", e.statusCode)
 }
 
-// isClientError reports whether err represents a 4xx response or a
-// context cancellation/deadline. Both are non-retryable.
+// isClientError reports whether err is a 4xx response, which is not retried.
 func isClientError(err error) bool {
-	if err == nil {
-		return false
-	}
+	ce, ok := errors.AsType[*callbackError](err)
 
-	if ce, ok := err.(*callbackError); ok { //nolint:errorlint
-		return ce.statusCode >= 400 && ce.statusCode < 500
-	}
-
-	return false
+	return ok && ce.statusCode >= 400 && ce.statusCode < 500
 }
 
 // deriveURI returns the request-target (path + raw query) for fullURL.

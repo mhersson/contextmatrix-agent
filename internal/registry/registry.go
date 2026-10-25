@@ -1,12 +1,12 @@
 // Package registry is the agent's seam onto the shared model selector in
 // contextmatrix-protocol/selection. It builds a selection.Selector from CM's
 // SelectionContext (FromSelection) or from harness catalog parts in tests
-// (NewRegistryFromParts), and re-exports the selection vocabulary under the
-// names the orchestrator and worker have always used. The rule itself - tier
-// ladders per role, descent, price band, favorites, panel seats,
-// reachability - lives in the shared package so CM's admin preview and the
-// agent's real pick are one implementation. What stays here is agent policy
-// on top of it: the per-role ladder fallback.
+// (NewRegistryFromParts), and re-exports the selection vocabulary the
+// orchestrator and worker use. The rule itself - tier ladders per role,
+// descent, price band, favorites, panel seats, reachability - lives in the
+// shared package so CM's admin preview and the agent's real pick are one
+// implementation. What stays here is agent policy on top of it: the per-role
+// ladder fallback.
 package registry
 
 import (
@@ -17,19 +17,13 @@ import (
 
 // The selection vocabulary, aliased so every call site keeps its name.
 type (
-	Role             = selection.Role
-	Tier             = selection.Tier
-	PickSource       = selection.PickSource
-	ModelSpec        = selection.ModelSpec
-	Pick             = selection.Pick
-	SelectInput      = selection.SelectInput
-	SelectionReport  = selection.SelectionReport
-	PoolOutcome      = selection.PoolOutcome
-	PoolEntry        = selection.PoolEntry
-	FilterReason     = selection.FilterReason
-	FilteredOutEntry = selection.FilteredOutEntry
-	SeatReport       = selection.SeatReport
-	TierReach        = selection.TierReach
+	Role            = selection.Role
+	Tier            = selection.Tier
+	PickSource      = selection.PickSource
+	Pick            = selection.Pick
+	SelectInput     = selection.SelectInput
+	SelectionReport = selection.SelectionReport
+	SeatReport      = selection.SeatReport
 )
 
 const (
@@ -45,17 +39,6 @@ const (
 	SourceFavorite = selection.SourceFavorite
 	SourcePinned   = selection.SourcePinned
 	SourceDefault  = selection.SourceDefault
-
-	PoolSelected  = selection.PoolSelected
-	PoolInBand    = selection.PoolInBand
-	PoolOutOfBand = selection.PoolOutOfBand
-
-	FilterPriorBelowBar  = selection.FilterPriorBelowBar
-	FilterNoPrior        = selection.FilterNoPrior
-	FilterExcluded       = selection.FilterExcluded
-	FilterBlacklisted    = selection.FilterBlacklisted
-	FilterVendorExcluded = selection.FilterVendorExcluded
-	FilterWindowTooSmall = selection.FilterWindowTooSmall
 )
 
 // DistinctModels counts the distinct models across picks; a panel whose
@@ -67,7 +50,7 @@ func DistinctModels(picks []Pick) int { return selection.DistinctModels(picks) }
 func SeatPicks(seats []SeatReport) []Pick { return selection.SeatPicks(seats) }
 
 // favKey indexes favorites by complexity tier and optional role, the shape
-// NewRegistryFromParts has always taken. A zero Role applies the favorite
+// NewRegistryFromParts takes. A zero Role applies the favorite
 // list to every role at that tier. FromSelection never builds one: the wire
 // FavoriteRule goes straight to the shared selector.
 type favKey struct {

@@ -118,7 +118,7 @@ func reasoningRaw(effort string) json.RawMessage {
 		return nil
 	}
 
-	raw, _ := (llm.Reasoning{Effort: &effort}).Raw() //nolint:errcheck
+	raw, _ := (llm.Reasoning{Effort: &effort}).Raw()
 
 	return raw
 }

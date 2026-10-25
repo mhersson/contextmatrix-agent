@@ -59,7 +59,7 @@ type gitTreeEntry struct {
 // readTree reads one git tree. A truncated listing is an error: absence of a
 // workflow file cannot be concluded from a partial tree.
 func (p *PRCreator) readTree(ctx context.Context, owner, repo, sha string) ([]gitTreeEntry, error) {
-	out, err := p.runGH(ctx, "", false, treeArgs(owner, repo, sha)...)
+	out, err := p.runGH(ctx, false, treeArgs(owner, repo, sha)...)
 	if err != nil {
 		return nil, err
 	}
@@ -175,7 +175,7 @@ func (p *PRCreator) BaseCIActivity(ctx context.Context, prURL string) (string, b
 }
 
 func (p *PRCreator) baseRef(ctx context.Context, prURL string) (name, sha string, err error) {
-	out, err := p.runGH(ctx, "", false, baseRefArgs(prURL)...)
+	out, err := p.runGH(ctx, false, baseRefArgs(prURL)...)
 	if err != nil {
 		return "", "", err
 	}
@@ -245,7 +245,7 @@ func (p *PRCreator) lastMergedCIActivity(ctx context.Context, prURL string) (boo
 }
 
 func (p *PRCreator) defaultBranch(ctx context.Context, owner, repo string) (string, error) {
-	out, err := p.runGH(ctx, "", false, defaultBranchArgs(owner, repo)...)
+	out, err := p.runGH(ctx, false, defaultBranchArgs(owner, repo)...)
 	if err != nil {
 		return "", err
 	}
@@ -268,7 +268,7 @@ func (p *PRCreator) defaultBranch(ctx context.Context, owner, repo string) (stri
 // newestMergedHead returns the head SHA of the PR with the greatest merged_at
 // among the first page of closed PRs into base.
 func (p *PRCreator) newestMergedHead(ctx context.Context, owner, repo, base string) (sha string, found bool, err error) {
-	out, err := p.runGH(ctx, "", false, mergedPullsArgs(owner, repo, base)...)
+	out, err := p.runGH(ctx, false, mergedPullsArgs(owner, repo, base)...)
 	if err != nil {
 		return "", false, err
 	}
@@ -309,7 +309,7 @@ func (p *PRCreator) commitCIActivity(ctx context.Context, owner, repo, sha strin
 		return active, err
 	}
 
-	out, err := p.runGH(ctx, "", false, combinedStatusArgs(owner, repo, sha)...)
+	out, err := p.runGH(ctx, false, combinedStatusArgs(owner, repo, sha)...)
 	if err != nil {
 		return false, fmt.Errorf("commit status: %w", err)
 	}
@@ -326,7 +326,7 @@ func (p *PRCreator) commitCIActivity(ctx context.Context, owner, repo, sha strin
 // refused it or the sticky fallback is already armed.
 func (p *PRCreator) checkRunsActive(ctx context.Context, owner, repo, sha string) (bool, error) {
 	if !p.checksFallback {
-		out, err := p.runGH(ctx, "", false, checkRunsArgs(owner, repo, sha)...)
+		out, err := p.runGH(ctx, false, checkRunsArgs(owner, repo, sha)...)
 		if err == nil {
 			var doc struct {
 				TotalCount int `json:"total_count"`
@@ -344,7 +344,7 @@ func (p *PRCreator) checkRunsActive(ctx context.Context, owner, repo, sha string
 		}
 	}
 
-	out, err := p.runGH(ctx, "", false, runListArgs(owner, repo, sha)...)
+	out, err := p.runGH(ctx, false, runListArgs(owner, repo, sha)...)
 	if err != nil {
 		return false, fmt.Errorf("run list: %w", err)
 	}
