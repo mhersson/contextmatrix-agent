@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/moby/moby/api/pkg/stdcopy"
@@ -647,30 +648,39 @@ func (e *DockerExecutor) List(_ context.Context) ([]*Run, error) {
 // StopAll kills every tracked run, filtered to project when non-empty (empty
 // project means all), and returns a per-card outcome for every run attempted.
 // Failures are included in the results (Err != nil) rather than swallowed, so
-// the caller can surface partial failures to the CM operator. Runs are killed
-// serially and each Kill inherits the self-exit grace window, so stopping N
-// still-running containers can block up to N x killGraceTimeout - accepted,
-// since N is small and this is the operator bulk-stop path, not a hot path.
+// the caller can surface partial failures to the CM operator. The kills run
+// concurrently, so the self-exit grace each one waits out overlaps and the
+// sweep takes about one grace however many runs it stops.
 func (e *DockerExecutor) StopAll(ctx context.Context, project string) ([]StopResult, error) {
-	var results []StopResult
+	var runs []*Run
 
 	for _, run := range e.tracker.List() {
-		if project != "" && run.Project != project {
-			continue
+		if project == "" || run.Project == project {
+			runs = append(runs, run)
 		}
-
-		err := e.Kill(ctx, run.Project, run.CardID)
-		if errors.Is(err, ErrNotFound) {
-			err = nil // already gone is a success
-		}
-
-		if err != nil {
-			e.logger.Warn("stop-all kill failed",
-				"project", run.Project, "card_id", run.CardID, "error", err)
-		}
-
-		results = append(results, StopResult{Run: run, Err: err})
 	}
+
+	results := make([]StopResult, len(runs))
+
+	var wg sync.WaitGroup
+
+	for i, run := range runs {
+		wg.Go(func() {
+			err := e.Kill(ctx, run.Project, run.CardID)
+			if errors.Is(err, ErrNotFound) {
+				err = nil // already gone is a success
+			}
+
+			if err != nil {
+				e.logger.Warn("stop-all kill failed",
+					"project", run.Project, "card_id", run.CardID, "error", err)
+			}
+
+			results[i] = StopResult{Run: run, Err: err}
+		})
+	}
+
+	wg.Wait()
 
 	return results, nil
 }

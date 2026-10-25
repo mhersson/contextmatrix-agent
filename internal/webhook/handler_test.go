@@ -71,6 +71,10 @@ type fakeExecutor struct {
 	stopAllArg     string
 	stopAllResults []executor.StopResult
 
+	// stopAllCtxErr and stopAllBounded record the context StopAll was handed.
+	stopAllCtxErr  error
+	stopAllBounded bool
+
 	// launchHook, when set, runs first in Launch and outside mu, so it may
 	// block on the launch context; an error it returns fails the launch.
 	launchHook func(ctx context.Context, spec executor.LaunchSpec) error
@@ -139,11 +143,13 @@ func (f *fakeExecutor) List(_ context.Context) ([]*executor.Run, error) {
 	return nil, nil
 }
 
-func (f *fakeExecutor) StopAll(_ context.Context, project string) ([]executor.StopResult, error) {
+func (f *fakeExecutor) StopAll(ctx context.Context, project string) ([]executor.StopResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	f.stopAllArg = project
+	f.stopAllCtxErr = ctx.Err()
+	_, f.stopAllBounded = ctx.Deadline()
 
 	return f.stopAllResults, nil
 }
@@ -1093,6 +1099,26 @@ func TestStopAll_ReturnsResults(t *testing.T) {
 	h.exec.mu.Lock()
 	assert.Equal(t, "proj", h.exec.stopAllArg)
 	h.exec.mu.Unlock()
+}
+
+// TestStopAllOutlivesTheCaller: ContextMatrix gives up on a webhook after 10
+// seconds, and a stop-all abandoned mid-sweep must not leave kills half done,
+// so the kills run on a context the request's end does not cancel but a
+// deadline still bounds.
+func TestStopAllOutlivesTheCaller(t *testing.T) {
+	h := newHarness(t, 4)
+
+	gone, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	r := h.request(t, http.MethodPost, "/stop-all", protocol.StopAllPayload{Project: "proj"}, nowTS())
+	require.Equal(t, http.StatusOK, h.serve(r.WithContext(gone)).Code)
+
+	h.exec.mu.Lock()
+	defer h.exec.mu.Unlock()
+
+	require.NoError(t, h.exec.stopAllCtxErr, "the caller leaving does not cancel the kills")
+	assert.True(t, h.exec.stopAllBounded, "the kills still have a deadline")
 }
 
 // TestStopAllReportsFailures: when one of two kills fails the handler must

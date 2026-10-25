@@ -9,8 +9,10 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -425,6 +427,10 @@ type stubDocker struct {
 	waitFn  func(ctx context.Context) (<-chan container.WaitResponse, <-chan error)
 	attachR io.Reader // if non-nil, the container output stream the pump reads
 
+	// killHook, when set, decides ContainerKill's error after the kill is
+	// recorded.
+	killHook func(ctx context.Context) error
+
 	mu      sync.Mutex
 	killed  []string
 	removed []string
@@ -438,11 +444,14 @@ func (s *stubDocker) ContainerWait(
 	return client.ContainerWaitResult{Result: result, Error: errs}
 }
 
-func (s *stubDocker) ContainerKill(_ context.Context, id string, _ client.ContainerKillOptions) (client.ContainerKillResult, error) {
+func (s *stubDocker) ContainerKill(ctx context.Context, id string, _ client.ContainerKillOptions) (client.ContainerKillResult, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	s.killed = append(s.killed, id)
+	s.mu.Unlock()
+
+	if s.killHook != nil {
+		return client.ContainerKillResult{}, s.killHook(ctx)
+	}
 
 	return client.ContainerKillResult{}, nil
 }
@@ -871,4 +880,56 @@ func TestImageLabels(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestStopAllKillsConcurrently: the runs' kills overlap, so a stop-all ends
+// within one kill's bound however many runs it stops. Each kill here returns
+// only once every kill in the project has started.
+func TestStopAllKillsConcurrently(t *testing.T) {
+	const runs = 4
+
+	var arrivals atomic.Int32
+
+	all := make(chan struct{})
+	docker := &stubDocker{
+		waitFn: failsImmediately,
+		killHook: func(ctx context.Context) error {
+			if arrivals.Add(1) == runs {
+				close(all)
+			}
+
+			select {
+			case <-all:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		},
+	}
+
+	tracker := NewTracker(runs + 1)
+	for i := range runs {
+		require.True(t, tracker.AddIfUnderLimit(&Run{Project: "proj", CardID: "CARD-" + strconv.Itoa(i), ContainerID: "ctr-" + strconv.Itoa(i)}))
+	}
+
+	require.True(t, tracker.AddIfUnderLimit(&Run{Project: "other", CardID: "CARD-X", ContainerID: "ctr-x"}))
+
+	e := NewDockerExecutor(Config{Docker: docker, Tracker: tracker, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+
+	results, err := e.StopAll(ctx, "proj")
+	require.NoError(t, err)
+	require.Len(t, results, runs)
+
+	for _, r := range results {
+		assert.Equal(t, "proj", r.Run.Project)
+		require.NoError(t, r.Err, "%s is killed", r.Run.CardID)
+	}
+
+	docker.mu.Lock()
+	defer docker.mu.Unlock()
+
+	assert.NotContains(t, docker.killed, "ctr-x", "another project's run is left alone")
 }

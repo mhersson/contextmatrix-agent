@@ -46,7 +46,8 @@ const (
 	launchTimeout = 15 * time.Minute
 
 	// killTimeout bounds a kill made on its own context: the executor's
-	// self-exit grace plus the SIGKILL round trip, with headroom.
+	// self-exit grace plus the SIGKILL round trip, with headroom. Stop-all
+	// kills concurrently, so the run count does not stretch it.
 	killTimeout = 10 * time.Second
 )
 
@@ -1100,12 +1101,16 @@ func (s *Server) handleStopAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Detached so a caller that gives up mid-stop does not cut the kills short.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), killTimeout)
+	defer cancel()
+
 	// An empty project stops every project, as StopAll reads it.
-	s.stopAdmissions(r.Context(), func(project, _ string) bool {
+	s.stopAdmissions(ctx, func(project, _ string) bool {
 		return payload.Project == "" || project == payload.Project
 	})
 
-	stopResults, err := s.executor.StopAll(r.Context(), payload.Project)
+	stopResults, err := s.executor.StopAll(ctx, payload.Project)
 	if err != nil {
 		s.logger.Error("stop-all failed", "project", payload.Project, "error", err)
 		webhookcore.WriteError(w, http.StatusInternalServerError, protocol.CodeInternal, "stop-all failed")
