@@ -1482,7 +1482,7 @@ func (o *run) createSubtasks(ctx context.Context, p plan) error {
 	// "## Unreachable Criteria" onto o.body. Re-derive it once, here, so those
 	// two sections (which stripAgentSections deliberately does not strip)
 	// reach every downstream prompt, while "## Plan" and the sizing marker -
-	// both agent-recorded / meta - stay stripped exactly as before.
+	// both agent-recorded / meta - stay stripped.
 	o.taskDescription = stripAgentSections(stripMeta(o.body))
 
 	return nil

@@ -741,7 +741,7 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 			model, sub.Title, sub.Sizing.Bar, budgetLabel(sub.Sizing.Budget))
 		if sc.tag != "" {
 			// A candidate solver tags its log line so parallel selections are
-			// distinguishable; the parent (tag "") logs the bare line as before.
+			// distinguishable; the parent (tag "") logs the bare line.
 			logMsg = sc.tag + ": " + logMsg
 		}
 
@@ -765,7 +765,7 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 		// report_usage is not claim-gated, and folding candidate spend onto the
 		// parent's token_usage is what lets a resumed run's trigger context (and thus
 		// degradeN) see it. The parent/single-solver solver (boardOps) reports on the
-		// subtask as before.
+		// subtask.
 		target := sub.ID
 		if !sc.boardOps {
 			target = cfg.CardID
@@ -945,7 +945,7 @@ func (o *run) salvageCapped(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 	if cerr != nil || !committed {
 		// No commit (error or clean tree), no salvage: the diff is the only
 		// completion evidence a capped run has - an empty tree has none.
-		// The candidate drops exactly as before.
+		// The candidate drops.
 		return false
 	}
 

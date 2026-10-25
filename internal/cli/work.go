@@ -141,7 +141,7 @@ func newWorkCmd() *cobra.Command {
 // withRunID attaches the run's correlation id (CM_RUN_ID) as a default
 // attribute, so every worker slog line carries it and can be joined to
 // serve-side per-run records. An empty id - an older serve, or tests - leaves
-// the logger unchanged and the output byte-identical to today.
+// the logger unchanged.
 func withRunID(logger *slog.Logger, runID string) *slog.Logger {
 	if runID == "" {
 		return logger

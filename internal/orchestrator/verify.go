@@ -303,7 +303,7 @@ const containerRuntimeUnavailableMarker = "container runtime (unavailable)"
 // ToolchainMissingError instead of the silent skip when Tier 1 or Tier 2 - or
 // the seeded verify-config error above - implicated a toolchain that never
 // became runnable at any tier; otherwise (nothing ever implicated a toolchain,
-// e.g. a pure docs repo) it degrades to the skip exactly as before. A canceled
+// e.g. a pure docs repo) it degrades to the skip. A canceled
 // context at the fall-through is inconclusive rather than a sentinel-worthy
 // signal - see the Tier 4 comment.
 func (o *run) resolveVerify(ctx context.Context) (verifyPlan, error) {
@@ -1089,7 +1089,7 @@ func execFileExists(path string) bool {
 // detail beneath the failing test's name.
 const verifyFailBlockWindow = 12
 
-// verifyFailureMarkers are the language-neutral, line-anchored substrings
+// verifyFailureMarkers are the line-anchored substrings
 // (besides "--- FAIL", handled separately below for its context window, and
 // the two-part Rust "thread '...' panicked" rule) that flag a line of verify
 // output as part of a failure.
@@ -1179,7 +1179,7 @@ func appendFailBlock(excerpt *strings.Builder, lines []string, i int) int {
 }
 
 // verifyFailureExcerpt scans a verify command's captured output for
-// language-neutral failure markers and returns the lines around them - a
+// failure markers and returns the lines around them - a
 // noisy suite that keeps logging after the failure leaves a plain
 // verifyOutputTail-byte tail ending in "FAIL <pkg>" with no test name at all,
 // and the fix coder has to re-run the whole suite just to learn what broke.
@@ -1187,7 +1187,7 @@ func appendFailBlock(excerpt *strings.Builder, lines []string, i int) int {
 // verifyFailBlockWindow following lines of context. The collected excerpt is
 // capped at verifyOutputTail bytes (keeping the first matches), followed by
 // the plain tail of the last 1500 bytes. When no marker matches at all, it
-// returns lastChars(output, verifyOutputTail) exactly as before.
+// returns lastChars(output, verifyOutputTail).
 func verifyFailureExcerpt(output string) string {
 	lines := strings.Split(output, "\n")
 

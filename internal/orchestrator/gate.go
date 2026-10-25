@@ -46,8 +46,7 @@ type gateModel func(ctx context.Context) string
 // gate presents `presentation` to the human and blocks for their verdict.
 //
 // Autonomous (Cfg.Interactive == false) is pure pass-through: it returns
-// gateApprove without emitting anything or touching the inbox, so the autonomous
-// phase flow is byte-for-byte unchanged.
+// gateApprove without emitting anything or touching the inbox.
 //
 // HITL emits the presentation (a model_response event -> chat) and the
 // awaiting-human signal, then blocks on the inbox:

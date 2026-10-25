@@ -141,7 +141,7 @@ type fix struct {
 // an accurate line of their own before returning it, but the cleanup fix pass
 // renders Error() straight onto the card, so a fixed string would state a
 // cause that is false there. The zero value keeps the attempts-cap wording,
-// which is what a bare construction has always meant.
+// which is what a bare construction means.
 type ReviewParkedError struct {
 	Reason string
 }

@@ -135,15 +135,14 @@ type Config struct {
 	ReviewAttemptsCap int // review rounds before the card parks; <=0 falls back to config.DefaultReviewAttemptsCap
 	// Interactive is the sole mode flag: true => HITL (gates wait on Human and
 	// brainstorming runs for creative cards); false => autonomous (gates pass
-	// through, brainstorming skipped). Autonomous behavior is byte-for-byte the
-	// pre-HITL behavior.
+	// through, brainstorming skipped).
 	Interactive bool
 
 	// BestOfN, when >= 2, fans execute out into N candidate implementations
 	// judged before document. 0/1 = normal single-solver run.
 	BestOfN int
 
-	// Mob configures mob session discussions (spec 2026-07-10). Zero value = off.
+	// Mob configures mob session discussions. Zero value = off.
 	Mob MobConfig
 
 	// POC marks a card in a proof-of-concept project (CM_POC). False is the

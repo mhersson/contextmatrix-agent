@@ -743,7 +743,7 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 	}
 
 	// Emitted only when set: an older worker image ignores the pair and fails
-	// the clone of a missing base exactly as before.
+	// the clone of a missing base.
 	if p.CreateBaseBranch {
 		env = append(env, "CM_CREATE_BASE_BRANCH=true", "CM_BASE_BRANCH_FROM="+p.BaseBranchFrom)
 	}
