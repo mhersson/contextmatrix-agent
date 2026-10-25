@@ -8,7 +8,9 @@ released by CM); a re-trigger resumes.
 The phase gates on whichever combination of `await_ci` and
 `await_copilot_review` the trigger's `TaskContext` carries, running the
 Copilot gate first, then the CI gate. Each gate spends up to 3 fix rounds
-(`gatesRoundsCap`) on what it finds before parking the card in review.
+(`gatesRoundsCap`) on what it finds before parking the card in review. A fix
+round lands a normal commit, not a fixup: integrate has already autosquashed
+the branch.
 
 ## Logging
 

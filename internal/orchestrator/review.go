@@ -1835,9 +1835,9 @@ func (o *run) fixResponseText(args json.RawMessage) string {
 // re-selected for the SAME round; the cap (shared with the coder path via
 // o.reselects) parks the run when exhausted. A non-incapable run error returns
 // immediately. It returns the model that ran and, from a run that finished, its
-// finish message as fixResponseText renders it; the fixup targets files parsed
-// from the findings, not the model output.
-func (o *run) runFixModel(ctx context.Context, prompt string, req fixRequest) (string, string, error) {
+// finish call's arguments; the fixup targets files parsed from the findings,
+// not the model output.
+func (o *run) runFixModel(ctx context.Context, prompt string, req fixRequest) (string, json.RawMessage, error) {
 	d := o.d
 	cfg := d.Cfg
 	fs := o.fixSizing(req)
@@ -1853,7 +1853,7 @@ func (o *run) runFixModel(ctx context.Context, prompt string, req fixRequest) (s
 	for attempt := 0; attempt <= reselectCap; attempt++ {
 		fp, rerr := o.resolveFixModel(ctx, req)
 		if rerr != nil {
-			return "", "", rerr
+			return "", nil, rerr
 		}
 
 		p := fp.Pick
@@ -1913,7 +1913,7 @@ func (o *run) runFixModel(ctx context.Context, prompt string, req fixRequest) (s
 
 		if ie, ok := errors.AsType[*IncapableError](err); ok {
 			if rerr := o.recoverIncapable(ctx, ie); rerr != nil {
-				return "", "", rerr
+				return "", nil, rerr
 			}
 
 			continue
@@ -1923,27 +1923,26 @@ func (o *run) runFixModel(ctx context.Context, prompt string, req fixRequest) (s
 			// The slug rides out with the error: the caller attributes the round
 			// to the model that ran it, and a failed round that reported no model
 			// leaves the exclusion set empty forever.
-			return model, "", fmt.Errorf("fix run: %w", err)
+			return model, nil, fmt.Errorf("fix run: %w", err)
 		}
 
-		return model, o.fixResponseText(res.CompletionArgs), nil
+		return model, res.CompletionArgs, nil
 	}
 
 	// Unreachable: recoverIncapable errors at the cap before the loop exhausts.
-	return "", "", fmt.Errorf("review fix (card=%s): re-selection loop exhausted", o.d.Cfg.CardID)
+	return "", nil, fmt.Errorf("review fix (card=%s): re-selection loop exhausted", o.d.Cfg.CardID)
 }
 
 // runFix runs one coder fix pass against the outstanding findings, lands the
-// changes as a fixup onto the commit that last touched the fixed files (HEAD
-// fallback), and pushes. Budget is checked before the model call. It reports
-// whether the fix landed a commit - a round that landed nothing is a failed
-// round to the review loop - and returns a turn cap ALONGSIDE that verdict, so
-// the caller learns the round was truncated without the round's edits being
-// thrown away. It also returns the fixer's response (see runFixModel) from a
-// round that got as far as its commit, whether or not anything landed. After a
-// failed round it parks instead of running when no fix model other than the
-// ones that failed is available; a request that says NoEscalate is exempt from
-// that park.
+// changes (see commitFix), and pushes. Budget is checked before the model
+// call. It reports whether the fix landed a commit - a round that landed
+// nothing is a failed round to the review loop - and returns a turn cap
+// ALONGSIDE that verdict, so the caller learns the round was truncated without
+// the round's edits being thrown away. It also returns the fixer's finish
+// message as fixResponseText renders it, from a round that got as far as its
+// commit, whether or not anything landed. After a failed round it parks
+// instead of running when no fix model other than the ones that failed is
+// available; a request that says NoEscalate is exempt from that park.
 func (o *run) runFix(ctx context.Context, req fixRequest) (bool, string, error) {
 	d := o.d
 	cfg := d.Cfg
@@ -1982,7 +1981,8 @@ func (o *run) runFix(ctx context.Context, req fixRequest) (bool, string, error) 
 			fixVerifyLine(o.resolvedVerifyPlan()), o.tc.Title, o.taskDescription, findings)
 	}
 
-	model, response, ferr := o.runFixModel(ctx, prompt, req)
+	model, args, ferr := o.runFixModel(ctx, prompt, req)
+	response := o.fixResponseText(args)
 
 	// A cap is not a reason to throw the round's edits away. The model ran out of
 	// room, but what it wrote is the only evidence the round produced, and
@@ -2005,17 +2005,9 @@ func (o *run) runFix(ctx context.Context, req fixRequest) (bool, string, error) 
 		o.lastFixModel = model
 	}
 
-	// Target the commit that last touched the fixed files so the fixup autosquashes
-	// onto the right change; HEAD is the fallback when the path lookup yields
-	// nothing (untracked files, or no path match).
-	target, lerr := d.Git.LastCommitTouching(ctx, fixFiles(findings))
-	if lerr != nil || target == "" {
-		target = "HEAD"
-	}
-
-	committed, err := d.Git.CommitFixup(ctx, target)
+	committed, err := o.commitFix(ctx, req, args)
 	if err != nil {
-		return false, "", fmt.Errorf("commit review fixup: %w", err)
+		return false, "", err
 	}
 
 	if !committed {
@@ -2031,10 +2023,45 @@ func (o *run) runFix(ctx context.Context, req fixRequest) (bool, string, error) 
 	}
 
 	if err := d.Git.Push(ctx, cfg.Branch); err != nil {
-		return false, "", fmt.Errorf("push review fixup: %w", err)
+		return false, "", fmt.Errorf("push fix: %w", err)
 	}
 
 	return true, response, ferr
+}
+
+// commitFix lands a fix round's changes. A review round's fix is a fixup onto
+// the commit that last touched the fixed files (HEAD when the lookup yields
+// nothing), for integrate to autosquash. A pr_gates round runs after that
+// autosquash and its PR merges with a merge commit, so it commits normally,
+// with the fixer's finish message or one naming the gate.
+func (o *run) commitFix(ctx context.Context, req fixRequest, args json.RawMessage) (bool, error) {
+	d := o.d
+
+	if req.Gate != "" {
+		msg := finishCommitMessage(args)
+		if msg == "" {
+			msg = fmt.Sprintf("fix: address %s findings", req.Gate)
+		}
+
+		committed, err := d.Git.CommitWithMessage(ctx, msg)
+		if err != nil {
+			return false, fmt.Errorf("commit %s fix: %w", req.Gate, err)
+		}
+
+		return committed, nil
+	}
+
+	target, lerr := d.Git.LastCommitTouching(ctx, fixFiles(req.Findings))
+	if lerr != nil || target == "" {
+		target = "HEAD"
+	}
+
+	committed, err := d.Git.CommitFixup(ctx, target)
+	if err != nil {
+		return false, fmt.Errorf("commit review fixup: %w", err)
+	}
+
+	return committed, nil
 }
 
 // markFixFailed records that the most recent fix round failed for the given
@@ -2180,6 +2207,9 @@ type fixRequest struct {
 	// at the un-escalated sizing on a card that has already been approved, and
 	// must still run on a card whose earlier rounds failed.
 	NoEscalate bool
+	// Gate names the pr_gates gate a round fixes for ("CI", "Copilot review");
+	// empty on every other round. See commitFix.
+	Gate string
 }
 
 // fixBarBase is the bar this round starts from, before any correction. The

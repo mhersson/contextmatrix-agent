@@ -50,7 +50,9 @@ guarded by the remote tip recorded before the rebase. Uncommitted changes to
 tracked files, such as a verify run rebuilding a committed `.pyc`, are stashed
 first and left in the stash, so they neither block the rebase nor reach a
 commit. A rebase conflict falls back to soft-reset-to-merge-base plus a single
-squashed recommit.
+squashed recommit. A `pr_gates` fix round runs after that autosquash, and
+`merge_pr` merges with a merge commit, so it commits normally, with the fix
+coder's `finish` message or, when it gives none, one naming the gate.
 
 The work branch is `cm/<card-id>` (card ID lowercased); the ID is validated
 against `^[A-Za-z][A-Za-z0-9-]*-[0-9]+$` (PREFIX-NNN) before it reaches any

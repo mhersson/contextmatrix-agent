@@ -1321,7 +1321,7 @@ func TestCIGate_CISignalsKeepTheGrace(t *testing.T) {
 }
 
 // TestCIGate_RedFixGreen: a failing check funds one fix round - failure logs in,
-// coder out, fixup pushed - and the next poll sees the new head green.
+// coder out, fix pushed - and the next poll sees the new head green.
 func TestCIGate_RedFixGreen(t *testing.T) {
 	ops := &fakeOps{}
 	gates := &fakeGates{
@@ -1341,12 +1341,56 @@ func TestCIGate_RedFixGreen(t *testing.T) {
 	assert.Contains(t, gates.recorded(), "FailureLogs:"+gatePRURL,
 		"the fix round is fed the real failure digest; calls=%v", gates.recorded())
 	assert.Equal(t, 1, modelCallCount(client), "exactly one fix round ran")
-	assert.Contains(t, git.recorded(), "Push:cm/card-1", "the fixup is pushed; calls=%v", git.recorded())
+	assert.Contains(t, git.recorded(), "Push:cm/card-1", "the fix is pushed; calls=%v", git.recorded())
 
 	body := ops.lastBody()
 	assert.Contains(t, body, "- CI rounds used: 1/3")
 	assert.Contains(t, body, "- Status: passed")
 	assert.GreaterOrEqual(t, indexOfCall(ops.recorded(), "TransitionCard:done"), 0)
+}
+
+// TestCIGate_FixRoundCommitsNormally: integrate has already autosquashed when a
+// gate fix round runs, and merge_pr merges with a merge commit, so a fixup
+// commit here would reach the base branch as a "fixup!" subject. The round
+// commits normally, with the fixer's finish message when it gives one.
+func TestCIGate_FixRoundCommitsNormally(t *testing.T) {
+	tests := []struct {
+		name    string
+		fixer   llm.Response
+		wantMsg string
+	}{
+		{name: "the fixer's finish message", fixer: finishResp("fix(build): restore the helper", 0.05), wantMsg: "fix(build): restore the helper"},
+		{name: "no finish message", fixer: stopResp("coder: fixed the build", 0.05)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gates := &fakeGates{
+				checks: [][]CheckResult{
+					{failingCheck()},
+					{{Name: "build", Bucket: "pass"}},
+				},
+				logs: "build failed: undefined: helper",
+			}
+			git := &fakeGit{committed: true}
+			client := &planLLM{responses: []llm.Response{tt.fixer}}
+
+			o := prGateRun(&fakeOps{}, gates, git, client, ciGateContext("Red then green", "body"), 0)
+			o.d.WriteTools = testWriteTools()
+
+			require.NoError(t, runPRGates(context.Background(), o))
+
+			assert.Equal(t, -1, indexOfPrefix(git.recorded(), "CommitFixup:"),
+				"a gate fix round never lands a fixup; git=%v", git.recorded())
+			require.Len(t, git.commitMsgs, 1, "the fix round lands one commit")
+
+			if tt.wantMsg != "" {
+				assert.Equal(t, tt.wantMsg, git.commitMsgs[0])
+			} else {
+				assert.NotEmpty(t, git.commitMsgs[0], "a fix round without a finish message still gets a message")
+			}
+		})
+	}
 }
 
 // TestCIGate_WaitsForTheRunToSettleBeforeFixing: a check that fails while its
