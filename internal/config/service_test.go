@@ -1054,6 +1054,13 @@ func TestValidateContainerServeURL(t *testing.T) {
 		{"loopback address", "http://127.0.0.1:9092", true},
 		{"localhost", "http://localhost:9092", true},
 		{"uppercase localhost", "http://LOCALHOST:9092", true},
+		{"query string", "http://serve.example:9092?x=1", true},
+		{"bare query marker", "http://serve.example:9092?", true},
+		{"bare query marker after root", "http://serve.example:9092/?", true},
+		{"fragment", "http://serve.example:9092#f", true},
+		{"bare fragment marker after root", "http://serve.example:9092/#", true},
+		{"unspecified IPv4 address", "http://0.0.0.0:9092", true},
+		{"unspecified IPv6 address", "http://[::]:9092", true},
 	}
 
 	for _, tt := range tests {

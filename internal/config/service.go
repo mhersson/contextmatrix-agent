@@ -491,7 +491,8 @@ func isLoopbackURL(rawURL string) bool {
 }
 
 // validateContainerServeURL checks the worker-to-serve base URL. Empty is valid
-// (the host-gateway default); a loopback host would point workers at themselves.
+// (the host-gateway default); a loopback or unspecified host would point workers
+// at themselves.
 func validateContainerServeURL(raw string) error {
 	if raw == "" {
 		return nil
@@ -512,6 +513,16 @@ func validateContainerServeURL(raw string) error {
 
 	if u.Path != "" && u.Path != "/" {
 		return fmt.Errorf("container_serve_url must not carry a path, got %q", raw)
+	}
+
+	// The raw check catches a bare "?" or "#", which url.Parse leaves with an
+	// empty query or fragment but which would still corrupt the appended "/llm".
+	if strings.ContainsAny(raw, "?#") {
+		return fmt.Errorf("container_serve_url must not carry a query or fragment, got %q", raw)
+	}
+
+	if ip := net.ParseIP(u.Hostname()); ip != nil && ip.IsUnspecified() {
+		return fmt.Errorf("container_serve_url must not be an unspecified address (0.0.0.0 or ::), got %q", raw)
 	}
 
 	if isLoopbackURL(raw) {
