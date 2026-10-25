@@ -230,17 +230,17 @@ func specFromEnv() (worker.RunSpec, error) {
 		return worker.RunSpec{}, err
 	}
 
-	gatesPollSeconds, err := envInt("CMX_GATES_POLL_INTERVAL_SECONDS", 60)
+	gatesPollSeconds, err := envInt("CMX_GATES_POLL_INTERVAL_SECONDS", config.DefaultGatesPollIntervalSeconds)
 	if err != nil {
 		return worker.RunSpec{}, err
 	}
 
-	gatesCIWaitSeconds, err := envInt("CMX_GATES_CI_WAIT_TIMEOUT_SECONDS", 2700)
+	gatesCIWaitSeconds, err := envInt("CMX_GATES_CI_WAIT_TIMEOUT_SECONDS", config.DefaultGatesCIWaitTimeoutSeconds)
 	if err != nil {
 		return worker.RunSpec{}, err
 	}
 
-	gatesCopilotWaitSeconds, err := envInt("CMX_GATES_COPILOT_WAIT_TIMEOUT_SECONDS", 1200)
+	gatesCopilotWaitSeconds, err := envInt("CMX_GATES_COPILOT_WAIT_TIMEOUT_SECONDS", config.DefaultGatesCopilotWaitTimeoutSeconds)
 	if err != nil {
 		return worker.RunSpec{}, err
 	}

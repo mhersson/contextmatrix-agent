@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
 	"net/url"
 	"os"
@@ -47,6 +48,18 @@ const DefaultReviewAttemptsCap = 3
 // can approve and finish, but parks as soon as ContextMatrix refuses the next
 // increment rather than running its configured budget.
 const MaxReviewAttemptsCap = 6
+
+// Defaults for the pr_gates knobs. The orchestrator applies the same values
+// when a run carries none (tests, standalone runs), so there is one set.
+const (
+	DefaultGatesPollIntervalSeconds       = 60
+	DefaultGatesCIWaitTimeoutSeconds      = 2700
+	DefaultGatesCopilotWaitTimeoutSeconds = 1200
+	gatesPollIntervalKey                  = "gates_poll_interval_seconds"
+	gatesCIWaitTimeoutKey                 = "gates_ci_wait_timeout_seconds"
+	gatesCopilotWaitTimeoutKey            = "gates_copilot_wait_timeout_seconds"
+	gatesCopilotThreadRepliesKey          = "gates_copilot_thread_replies"
+)
 
 // defaultSecretsDir is a filesystem PATH, not a credential. Naming it via a
 // const avoids the gosec G101 false-positive that fires on the path literal
@@ -98,6 +111,13 @@ type ServiceConfig struct {
 	// of its harness run; read inside the worker (CMX_REPLAY_REASONING).
 	ReplayReasoning bool
 	LogLevel        string
+
+	// The pr_gates knobs, relayed to workers as CMX_GATES_* (the serve key
+	// upper-cased). Seconds fields must be positive.
+	GatesPollIntervalSeconds       int
+	GatesCIWaitTimeoutSeconds      int
+	GatesCopilotWaitTimeoutSeconds int
+	GatesCopilotThreadReplies      bool
 
 	// LogDir is an optional directory on the serve host for per-card raw container
 	// output (as `docker logs -f` shows it): one append file per card at
@@ -192,6 +212,11 @@ type serviceRaw struct {
 	CompactionThreshold       float64           `koanf:"compaction_threshold"`
 	CompactionKeepRecentTurns int               `koanf:"compaction_keep_recent_turns"`
 	ReviewAttemptsCap         int               `koanf:"review_attempts_cap"`
+
+	GatesPollIntervalSeconds       int  `koanf:"gates_poll_interval_seconds"`
+	GatesCIWaitTimeoutSeconds      int  `koanf:"gates_ci_wait_timeout_seconds"`
+	GatesCopilotWaitTimeoutSeconds int  `koanf:"gates_copilot_wait_timeout_seconds"`
+	GatesCopilotThreadReplies      bool `koanf:"gates_copilot_thread_replies"`
 }
 
 // serviceDefaults is the lowest-precedence layer. Durations are wire-form
@@ -217,6 +242,13 @@ func serviceDefaults() serviceRaw {
 		ToolOutputMaxBytes:     131072,
 		ReplayReasoning:        true,
 		MaxCardCost:            5.0,
+		LogLevel:               "info",
+		ImageListFilters:       []string{"contextmatrix-agent"},
+
+		GatesPollIntervalSeconds:       DefaultGatesPollIntervalSeconds,
+		GatesCIWaitTimeoutSeconds:      DefaultGatesCIWaitTimeoutSeconds,
+		GatesCopilotWaitTimeoutSeconds: DefaultGatesCopilotWaitTimeoutSeconds,
+		GatesCopilotThreadReplies:      true,
 		// CompactionEnabled defaults to false (behavior-neutral); threshold and
 		// keep-recent carry sane values for when an operator opts in.
 		CompactionThreshold:       0.85,
@@ -333,7 +365,101 @@ func LoadService(path string) (*ServiceConfig, error) {
 		return nil, fmt.Errorf("unmarshal service config: %w", err)
 	}
 
+	if err := foldGatesExtraEnv(&raw, func(key string) bool {
+		if slices.Contains(fileKeys, key) {
+			return true
+		}
+
+		_, ok := os.LookupEnv(envPrefix + strings.ToUpper(key))
+
+		return ok
+	}); err != nil {
+		return nil, err
+	}
+
 	return raw.toConfig()
+}
+
+// foldGatesExtraEnv honours a pr_gates knob set through worker_extra_env, where
+// operators were told to put it before the knobs became serve keys. An entry is
+// folded into its serve key unless that key is explicitly set (file or process
+// env), then dropped from worker_extra_env so exactly one value reaches the
+// container. Each entry logs a warning naming the serve key.
+func foldGatesExtraEnv(raw *serviceRaw, explicit func(serveKey string) bool) error {
+	var folded map[string]string
+
+	for _, serveKey := range []string{
+		gatesPollIntervalKey, gatesCIWaitTimeoutKey, gatesCopilotWaitTimeoutKey, gatesCopilotThreadRepliesKey,
+	} {
+		envName := envPrefix + strings.ToUpper(serveKey)
+
+		var (
+			entryName string
+			value     string
+			found     bool
+		)
+
+		for name, v := range raw.WorkerExtraEnv {
+			if strings.EqualFold(name, envName) {
+				entryName, value, found = name, v, true
+
+				break
+			}
+		}
+
+		if !found {
+			continue
+		}
+
+		if folded == nil {
+			folded = maps.Clone(raw.WorkerExtraEnv)
+		}
+
+		delete(folded, entryName)
+
+		if explicit(serveKey) {
+			slog.Warn("worker_extra_env sets a pr_gates knob that is also set as a serve key; "+
+				"the serve key wins and the worker_extra_env entry is ignored",
+				"worker_extra_env", entryName, "serve_key", serveKey)
+
+			continue
+		}
+
+		slog.Warn("worker_extra_env sets a pr_gates knob; set the serve key instead, "+
+			"worker_extra_env support for it will be removed",
+			"worker_extra_env", entryName, "serve_key", serveKey)
+
+		if serveKey == gatesCopilotThreadRepliesKey {
+			b, err := strconv.ParseBool(value)
+			if err != nil {
+				return fmt.Errorf("worker_extra_env %s: %s must be true or false, got %q", entryName, serveKey, value)
+			}
+
+			raw.GatesCopilotThreadReplies = b
+
+			continue
+		}
+
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 1 {
+			return fmt.Errorf("worker_extra_env %s: %s must be a positive integer, got %q", entryName, serveKey, value)
+		}
+
+		switch serveKey {
+		case gatesPollIntervalKey:
+			raw.GatesPollIntervalSeconds = n
+		case gatesCIWaitTimeoutKey:
+			raw.GatesCIWaitTimeoutSeconds = n
+		case gatesCopilotWaitTimeoutKey:
+			raw.GatesCopilotWaitTimeoutSeconds = n
+		}
+	}
+
+	if folded != nil {
+		raw.WorkerExtraEnv = folded
+	}
+
+	return nil
 }
 
 // unknownFileKeys returns the keys, in input order, that serviceRaw's koanf tags
@@ -437,7 +563,12 @@ func (r serviceRaw) toConfig() (*ServiceConfig, error) {
 		ReplayReasoning:           r.ReplayReasoning,
 		LogLevel:                  r.LogLevel,
 		MaxCardCost:               r.MaxCardCost,
-		ReviewAttemptsCap:         r.ReviewAttemptsCap,
+
+		GatesPollIntervalSeconds:       r.GatesPollIntervalSeconds,
+		GatesCIWaitTimeoutSeconds:      r.GatesCIWaitTimeoutSeconds,
+		GatesCopilotWaitTimeoutSeconds: r.GatesCopilotWaitTimeoutSeconds,
+		GatesCopilotThreadReplies:      r.GatesCopilotThreadReplies,
+		ReviewAttemptsCap:              r.ReviewAttemptsCap,
 		Compaction: CompactionConfig{
 			Enabled:         r.CompactionEnabled,
 			Threshold:       r.CompactionThreshold,
@@ -614,12 +745,41 @@ func (c *ServiceConfig) Validate() error {
 		c.AdminBindAddr = "127.0.0.1"
 	}
 
+	if c.ContainerTimeout <= 0 {
+		return fmt.Errorf("container_timeout must be positive, got %s: the watchdog would kill every container at launch",
+			c.ContainerTimeout)
+	}
+
 	if c.ContainerTimeout > reconcileCap {
 		return fmt.Errorf(
 			"container_timeout %s exceeds the 150m reconcile cap: ContextMatrix force-kills "+
 				"containers older than 150m externally, so the agent's own watchdog must fire first",
 			c.ContainerTimeout,
 		)
+	}
+
+	// Zero is valid: the webhook layer then applies its default skew.
+	if c.ReplaySkew < 0 {
+		return fmt.Errorf("webhook_replay_skew_seconds must be >= 0 (0 uses the protocol default), got %s", c.ReplaySkew)
+	}
+
+	switch strings.ToLower(c.LogLevel) {
+	case "", "debug", "info", "warn", "error":
+	default:
+		return fmt.Errorf("log_level must be debug|info|warn|error, got %q", c.LogLevel)
+	}
+
+	for _, g := range []struct {
+		key   string
+		value int
+	}{
+		{gatesPollIntervalKey, c.GatesPollIntervalSeconds},
+		{gatesCIWaitTimeoutKey, c.GatesCIWaitTimeoutSeconds},
+		{gatesCopilotWaitTimeoutKey, c.GatesCopilotWaitTimeoutSeconds},
+	} {
+		if g.value < 1 {
+			return fmt.Errorf("%s must be a positive integer, got %d", g.key, g.value)
+		}
 	}
 
 	if c.ReviewAttemptsCap < 0 {

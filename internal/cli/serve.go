@@ -767,6 +767,11 @@ func launchEnv(cfg *config.ServiceConfig, secretsHostDir string) webhook.LaunchE
 		CompactionThreshold:       cfg.Compaction.Threshold,
 		CompactionKeepRecentTurns: cfg.Compaction.KeepRecentTurns,
 		WorkerExtraEnv:            flattenEnv(cfg.WorkerExtraEnv),
+
+		GatesPollIntervalSeconds:       cfg.GatesPollIntervalSeconds,
+		GatesCIWaitTimeoutSeconds:      cfg.GatesCIWaitTimeoutSeconds,
+		GatesCopilotWaitTimeoutSeconds: cfg.GatesCopilotWaitTimeoutSeconds,
+		GatesCopilotThreadReplies:      cfg.GatesCopilotThreadReplies,
 	}
 }
 

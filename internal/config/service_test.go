@@ -22,6 +22,11 @@ func validServiceConfig() ServiceConfig {
 		MaxConcurrent:    5,
 		Port:             9092,
 		ContainerTimeout: 150 * time.Minute,
+
+		GatesPollIntervalSeconds:       DefaultGatesPollIntervalSeconds,
+		GatesCIWaitTimeoutSeconds:      DefaultGatesCIWaitTimeoutSeconds,
+		GatesCopilotWaitTimeoutSeconds: DefaultGatesCopilotWaitTimeoutSeconds,
+		GatesCopilotThreadReplies:      true,
 	}
 }
 
@@ -750,6 +755,9 @@ func clearServiceEnv(t *testing.T) {
 		"CMX_ADMIN_PORT", "CMX_ADMIN_BIND_ADDR", "CMX_METRICS_TOKEN",
 		"CMX_COMPACTION_ENABLED", "CMX_COMPACTION_THRESHOLD",
 		"CMX_COMPACTION_KEEP_RECENT_TURNS", "CMX_REPLAY_REASONING",
+		"CMX_GATES_POLL_INTERVAL_SECONDS", "CMX_GATES_CI_WAIT_TIMEOUT_SECONDS",
+		"CMX_GATES_COPILOT_WAIT_TIMEOUT_SECONDS", "CMX_GATES_COPILOT_THREAD_REPLIES",
+		"CMX_LOG_LEVEL",
 	} {
 		if _, ok := os.LookupEnv(e); ok {
 			t.Setenv(e, "")

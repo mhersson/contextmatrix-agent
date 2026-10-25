@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mhersson/contextmatrix-agent/internal/config"
 	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/mhersson/contextmatrix-harness/harness"
 )
@@ -26,11 +27,11 @@ const gatesRoundsCap = 3
 // A Deps built directly (tests, standalone runs) carries no knobs, so the gates
 // must never derive a zero poll interval or a zero wait from it.
 const (
-	defaultGatesPollInterval  = 60 * time.Second
-	defaultGatesCIWaitTimeout = 45 * time.Minute
+	defaultGatesPollInterval  = config.DefaultGatesPollIntervalSeconds * time.Second
+	defaultGatesCIWaitTimeout = config.DefaultGatesCIWaitTimeoutSeconds * time.Second
 	// Copilot typically posts 5-10 minutes after the request on a mid-size PR;
 	// 10 minutes left reviews at the top of that range unread.
-	defaultGatesCopilotWaitTimeout = 20 * time.Minute
+	defaultGatesCopilotWaitTimeout = config.DefaultGatesCopilotWaitTimeoutSeconds * time.Second
 )
 
 // gatesSectionHeading is the card-body section the pr_gates phase owns.

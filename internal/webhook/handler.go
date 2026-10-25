@@ -182,6 +182,13 @@ type LaunchEnv struct {
 	// validates the range, so anything non-zero reaching here is in bounds.
 	ReviewAttemptsCap int
 
+	// The pr_gates knobs, relayed as CMX_GATES_*. Zero seconds are omitted so
+	// the worker applies its defaults; the thread-replies flag is always sent.
+	GatesPollIntervalSeconds       int
+	GatesCIWaitTimeoutSeconds      int
+	GatesCopilotWaitTimeoutSeconds int
+	GatesCopilotThreadReplies      bool
+
 	// WorkerExtraEnv is appended verbatim to every container's environment
 	// (KEY=VALUE strings). Used for operator-supplied passthrough.
 	WorkerExtraEnv []string
@@ -1017,6 +1024,20 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 	if s.launchEnv.ContainerTimeoutSeconds > 0 {
 		env = append(env, "CMX_CONTAINER_TIMEOUT_SECONDS="+strconv.Itoa(s.launchEnv.ContainerTimeoutSeconds))
 	}
+
+	if s.launchEnv.GatesPollIntervalSeconds > 0 {
+		env = append(env, "CMX_GATES_POLL_INTERVAL_SECONDS="+strconv.Itoa(s.launchEnv.GatesPollIntervalSeconds))
+	}
+
+	if s.launchEnv.GatesCIWaitTimeoutSeconds > 0 {
+		env = append(env, "CMX_GATES_CI_WAIT_TIMEOUT_SECONDS="+strconv.Itoa(s.launchEnv.GatesCIWaitTimeoutSeconds))
+	}
+
+	if s.launchEnv.GatesCopilotWaitTimeoutSeconds > 0 {
+		env = append(env, "CMX_GATES_COPILOT_WAIT_TIMEOUT_SECONDS="+strconv.Itoa(s.launchEnv.GatesCopilotWaitTimeoutSeconds))
+	}
+
+	env = append(env, "CMX_GATES_COPILOT_THREAD_REPLIES="+strconv.FormatBool(s.launchEnv.GatesCopilotThreadReplies))
 
 	if p.Selection != nil {
 		if b, err := json.Marshal(p.Selection); err == nil {

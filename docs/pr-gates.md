@@ -12,6 +12,15 @@ Copilot gate first, then the CI gate. Each gate spends up to 3 fix rounds
 round lands a normal commit, not a fixup: integrate has already autosquashed
 the branch.
 
+## Configuration
+
+Four serve keys tune the phase, each relayed to the worker as the
+`CMX_GATES_*` variable of the same name: `gates_poll_interval_seconds` (60),
+`gates_ci_wait_timeout_seconds` (2700), `gates_copilot_wait_timeout_seconds`
+(1200) and `gates_copilot_thread_replies` (true). The seconds must be positive
+integers. A `CMX_GATES_*` entry in `worker_extra_env` is still folded into its
+serve key with a startup warning, and loses to the serve key when both are set.
+
 ## Logging
 
 Entering the phase writes a `pr_gates: entering ...` line naming the three
@@ -120,7 +129,7 @@ the same re-tried confirm-or-grace treatment.
 
 A confirmed request that never produces a review is recorded and passed at the
 wait deadline, 20 minutes by default
-(`CMX_GATES_COPILOT_WAIT_TIMEOUT_SECONDS`).
+(serve key `gates_copilot_wait_timeout_seconds`).
 
 ### Triage
 
@@ -149,10 +158,10 @@ through another fix round rather than waved through, bounded by the same
 
 ### Thread replies
 
-The verdicts also reach the PR itself (`CMX_GATES_COPILOT_THREAD_REPLIES`, on
-unless set to exactly "false"): each triaged comment's thread gets one reply -
-the dismissal reasoning for INVALID, and for VALID the reasoning plus the head
-the fix pushed. A dismissed thread is resolved at once; a VALID thread is
+The verdicts also reach the PR itself (serve key `gates_copilot_thread_replies`, on
+by default): each triaged comment's thread gets one reply - the dismissal
+reasoning for INVALID, and for VALID the reasoning plus the head the fix
+pushed. A dismissed thread is resolved at once; a VALID thread is
 resolved only when a re-review stops repeating its comment, so the still-open
 reopen logic keeps working. All of it is best-effort: threads are matched by
 comment id with the card's dedupe digest as the fallback, a thread already

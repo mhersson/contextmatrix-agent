@@ -187,8 +187,9 @@ type Config struct {
 
 	// GatesCopilotThreadReplies posts the Copilot gate's triage verdicts back
 	// to the PR's review threads and resolves settled ones. The worker wires
-	// it from CMX_GATES_COPILOT_THREAD_REPLIES (on unless exactly "false"); a
-	// Deps built directly leaves it false and writes nothing.
+	// it from CMX_GATES_COPILOT_THREAD_REPLIES (serve's
+	// gates_copilot_thread_replies; on unless exactly "false"); a Deps built
+	// directly leaves it false and writes nothing.
 	GatesCopilotThreadReplies bool
 }
 

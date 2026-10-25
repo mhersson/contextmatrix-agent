@@ -617,3 +617,17 @@ func TestWarnIfNotWorkerUID(t *testing.T) {
 		})
 	}
 }
+
+func TestLaunchEnvForwardsGates(t *testing.T) {
+	env := launchEnv(&config.ServiceConfig{
+		GatesPollIntervalSeconds:       30,
+		GatesCIWaitTimeoutSeconds:      900,
+		GatesCopilotWaitTimeoutSeconds: 600,
+		GatesCopilotThreadReplies:      true,
+	}, "/secrets/shared")
+
+	assert.Equal(t, 30, env.GatesPollIntervalSeconds)
+	assert.Equal(t, 900, env.GatesCIWaitTimeoutSeconds)
+	assert.Equal(t, 600, env.GatesCopilotWaitTimeoutSeconds)
+	assert.True(t, env.GatesCopilotThreadReplies)
+}

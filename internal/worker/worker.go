@@ -101,21 +101,25 @@ type RunSpec struct {
 	ContainerTimeout time.Duration
 
 	// GatesPollInterval is how often the pr_gates phase polls CI and Copilot
-	// review status. CMX_GATES_POLL_INTERVAL_SECONDS; default 60s.
+	// review status. CMX_GATES_POLL_INTERVAL_SECONDS, relayed from serve's
+	// gates_poll_interval_seconds.
 	GatesPollInterval time.Duration
 
 	// GatesCIWaitTimeout bounds how long the pr_gates phase waits for CI to
-	// finish before parking. CMX_GATES_CI_WAIT_TIMEOUT_SECONDS; default 45m.
+	// finish before parking. CMX_GATES_CI_WAIT_TIMEOUT_SECONDS, relayed from serve's
+	// gates_ci_wait_timeout_seconds.
 	GatesCIWaitTimeout time.Duration
 
 	// GatesCopilotWaitTimeout bounds how long the pr_gates phase waits for the
 	// requested Copilot review before proceeding without one.
-	// CMX_GATES_COPILOT_WAIT_TIMEOUT_SECONDS; default 20m.
+	// CMX_GATES_COPILOT_WAIT_TIMEOUT_SECONDS, relayed from serve's
+	// gates_copilot_wait_timeout_seconds.
 	GatesCopilotWaitTimeout time.Duration
 
 	// GatesCopilotThreadReplies posts the Copilot gate's triage verdicts back
 	// to the PR's review threads and resolves settled ones.
-	// CMX_GATES_COPILOT_THREAD_REPLIES; on unless set to exactly "false".
+	// CMX_GATES_COPILOT_THREAD_REPLIES, relayed from serve's
+	// gates_copilot_thread_replies; on unless set to exactly "false".
 	GatesCopilotThreadReplies bool
 
 	MaxCapability bool // CM_MAX_CAPABILITY; every pick chooses the most capable model in the tier regardless of price

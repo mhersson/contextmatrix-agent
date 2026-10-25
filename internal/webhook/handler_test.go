@@ -2990,3 +2990,64 @@ func TestBuildLaunchSpec_PlaybookBaseBranchEnvAbsentByDefault(t *testing.T) {
 		assert.NotContains(t, e, "CM_BASE_BRANCH_FROM=")
 	}
 }
+
+func TestBuildLaunchSpec_GatesEnv(t *testing.T) {
+	newServer := func(env LaunchEnv) *Server {
+		env.BaseImage = "img"
+		env.MCPURL = "http://mcp"
+
+		return NewServer(Config{
+			APIKey:    "k",
+			Executor:  &fakeExecutor{},
+			Tracker:   executor.NewTracker(1),
+			LaunchEnv: env,
+		})
+	}
+
+	t.Run("configured values are relayed once each", func(t *testing.T) {
+		spec := newServer(LaunchEnv{
+			GatesPollIntervalSeconds:       30,
+			GatesCIWaitTimeoutSeconds:      900,
+			GatesCopilotWaitTimeoutSeconds: 600,
+			GatesCopilotThreadReplies:      false,
+		}).buildLaunchSpec(protocol.TriggerPayload{CardID: "C1", Project: "p"}, "corr", "")
+
+		for _, want := range []string{
+			"CMX_GATES_POLL_INTERVAL_SECONDS=30",
+			"CMX_GATES_CI_WAIT_TIMEOUT_SECONDS=900",
+			"CMX_GATES_COPILOT_WAIT_TIMEOUT_SECONDS=600",
+			"CMX_GATES_COPILOT_THREAD_REPLIES=false",
+		} {
+			assert.Equal(t, 1, countEnv(spec.Env, want), want)
+		}
+	})
+
+	t.Run("thread replies true is relayed", func(t *testing.T) {
+		spec := newServer(LaunchEnv{GatesCopilotThreadReplies: true}).
+			buildLaunchSpec(protocol.TriggerPayload{CardID: "C1", Project: "p"}, "corr", "")
+
+		assert.Contains(t, spec.Env, "CMX_GATES_COPILOT_THREAD_REPLIES=true")
+	})
+
+	t.Run("zero seconds are omitted", func(t *testing.T) {
+		spec := newServer(LaunchEnv{}).buildLaunchSpec(protocol.TriggerPayload{CardID: "C1", Project: "p"}, "corr", "")
+
+		for _, e := range spec.Env {
+			assert.NotContains(t, e, "CMX_GATES_POLL_INTERVAL_SECONDS")
+			assert.NotContains(t, e, "CMX_GATES_CI_WAIT_TIMEOUT_SECONDS")
+			assert.NotContains(t, e, "CMX_GATES_COPILOT_WAIT_TIMEOUT_SECONDS")
+		}
+	})
+}
+
+func countEnv(env []string, entry string) int {
+	n := 0
+
+	for _, e := range env {
+		if e == entry {
+			n++
+		}
+	}
+
+	return n
+}
