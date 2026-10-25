@@ -432,7 +432,7 @@ func subtaskGateContext(subID string) string {
 // for it to actually exit on every exit path (complete, error, park), so it can
 // never outlive the claim - or this function's return. A candidate solver
 // (boardOps false) holds no claim, so it runs no heartbeat and no complete.
-func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtaskRef) error {
+func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtaskRef) (err error) {
 	d := o.d
 
 	// A tool verdict belongs to the subtask that earned it. Belt and braces on
@@ -478,6 +478,16 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 				checkpointBase = head
 			}
 		}
+	}
+
+	// A park pushes this subtask's unfinished tree as WIP; recording where the
+	// run started lets a resumed run tell that WIP from no work at all.
+	if headBefore != "" && sub.StartHead == "" {
+		defer func() {
+			if err != nil {
+				o.recordSubtaskStart(ctx, sub, headBefore)
+			}
+		}()
 	}
 
 	prompt := fmt.Sprintf(coderPrompt, o.skillEngage(), o.grounding, sc.workspace,
@@ -537,10 +547,14 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 	}
 
 	if sc.boardOps && !committed && o.headUnmoved(ctx, sc, headBefore) {
-		// Report while the claim is still held, as the verify park does.
-		o.reportSoloOutcome(ctx, sub.ID, pick, "failed", false, sc.ledger.Spent()-spendBefore)
+		if !o.earlierWorkVerified(ctx, sc, sub, headBefore) {
+			// Report while the claim is still held, as the verify park does.
+			o.reportSoloOutcome(ctx, sub.ID, pick, "failed", false, sc.ledger.Spent()-spendBefore)
 
-		return &EmptySubtaskError{Subtask: sub.ID}
+			return &EmptySubtaskError{Subtask: sub.ID}
+		}
+
+		o.d.logCard(ctx, "subtask %s: nothing left to change, and the work an earlier run left on the branch passes verify - completing it", sub.ID)
 	}
 
 	// Execute checkpoint: the mob critiques the committed diff (and may run
@@ -585,6 +599,60 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 	}
 
 	return nil
+}
+
+// startHeadKey is the subtask marker key recording the HEAD an unfinished
+// run of the subtask started from. Write-once: a later run starts on top of the
+// WIP an earlier park pushed, so only the first start marks where the
+// subtask's own work begins.
+const startHeadKey = "start"
+
+// recordSubtaskStart writes head as the subtask's start unless its marker
+// already carries one. Best-effort, and on WithoutCancel so a kill still
+// records it: a missing start only means a resumed coder that finds nothing
+// left to change parks as empty.
+func (o *run) recordSubtaskStart(ctx context.Context, sub subtaskRef, head string) {
+	ctx = context.WithoutCancel(ctx)
+
+	tc, err := o.d.Ops.GetTaskContext(ctx, sub.ID, false)
+	if err != nil {
+		slog.Warn("record subtask start: body fetch failed",
+			"card_id", o.d.Cfg.CardID, "subtask_id", sub.ID, "error", err)
+
+		return
+	}
+
+	kv, _ := readMeta(tc.Description)
+	if kv[startHeadKey] != "" {
+		return
+	}
+
+	kv[startHeadKey] = head
+
+	if err := o.d.Ops.UpdateCardBody(ctx, sub.ID, writeMeta(tc.Description, kv)); err != nil {
+		slog.Warn("record subtask start: body update failed",
+			"card_id", o.d.Cfg.CardID, "subtask_id", sub.ID, "error", err)
+	}
+}
+
+// earlierWorkVerified reports whether a coder that left nothing to commit found
+// its subtask already done: HEAD strictly descends from where an earlier,
+// unfinished run of this subtask started, and the pre-commit gate passed on
+// that tree. Anything unprovable reads as false, so the subtask parks as empty.
+func (o *run) earlierWorkVerified(ctx context.Context, sc *solverCtx, sub subtaskRef, head string) bool {
+	if !sc.gate.verified || sub.StartHead == "" || head == "" || head == sub.StartHead {
+		return false
+	}
+
+	base, err := sc.git.MergeBase(ctx, head, sub.StartHead)
+	if err != nil {
+		slog.Warn("empty subtask: merge base with its earlier start unreadable; parking",
+			"card_id", o.d.Cfg.CardID, "subtask_id", sub.ID, "error", err)
+
+		return false
+	}
+
+	return base == sub.StartHead
 }
 
 // headUnmoved reports whether HEAD still equals before. Either read failing

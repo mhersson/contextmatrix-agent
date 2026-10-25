@@ -89,7 +89,11 @@ type subtaskRef struct {
 	// marker's write-once seed key. Kept separate from Sizing.Bar because an
 	// escalation overwrites the bar, and the estimate a later analysis is
 	// testing must stay recoverable after the correction that replaced it.
-	PlannerBar   string
+	PlannerBar string
+	// StartHead is the HEAD an earlier, unfinished run of this subtask started
+	// from, restored from the marker's write-once start key; "" when no earlier
+	// run left it unfinished.
+	StartHead    string
 	State        string
 	DependsOnIDs []string
 }

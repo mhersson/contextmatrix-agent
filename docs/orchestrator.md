@@ -23,6 +23,14 @@ at `integrate` or `pr_gates` with the card outside `review` first moves it back
 there with `start_review`; on the default board only `review` may move to
 `done`.
 
+A subtask whose coder leaves nothing to commit and does not move HEAD parks
+the card as empty. A park mid-subtask, though, pushes the unfinished tree as
+WIP, so a resumed coder can rightly find nothing left to change. A subtask
+that ends unfinished therefore records, once, the HEAD its run started from
+(a `start` key in its card's sizing marker); a resumed run completes it
+instead of parking when HEAD has moved past that start and the pre-commit
+verify passes.
+
 Documentation the card's acceptance criteria require (named files under
 `docs/`, a README, specific claims that must change) is planned as a
 deliverable in the plan phase - either alongside the code subtask that changes

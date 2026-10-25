@@ -498,6 +498,120 @@ func TestExecuteEmptySubtaskParks(t *testing.T) {
 	}
 }
 
+// A park mid-subtask pushes the unfinished tree as WIP, so the resumed coder
+// can rightly find nothing left to change. Only work an earlier run of THIS
+// subtask left on the branch, passing the pre-commit gate, completes it; every
+// other empty result still parks.
+func TestExecuteResumedSubtaskCompletesOnItsEarlierWork(t *testing.T) {
+	tests := []struct {
+		name      string
+		startHead string // the head an earlier run of the subtask started from
+		mergeBase string // MergeBase(HEAD, startHead)
+		verified  bool
+		wantPark  bool
+	}{
+		{name: "earlier work on the branch passes verify and completes", startHead: "aaa", mergeBase: "aaa", verified: true},
+		{name: "fresh subtask with nothing to commit parks", verified: true, wantPark: true},
+		{name: "no commits beyond the earlier start parks", startHead: "bbb", mergeBase: "bbb", verified: true, wantPark: true},
+		{name: "head not descended from the earlier start parks", startHead: "aaa", mergeBase: "zzz", verified: true, wantPark: true},
+		{name: "unverified earlier work parks", startHead: "aaa", mergeBase: "aaa", wantPark: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			git := &fakeGit{committed: false, headSHA: "bbb", mergeBaseValue: tt.mergeBase}
+			llmFake := &planLLM{responses: []llm.Response{finishResp("chore: noop", 0.02)}}
+			d := execTestDeps(ops, git, llmFake)
+
+			o := newExecRun(d, []subtaskRef{{
+				ID: "SUB-1", Title: "First", State: "in_progress", Sizing: seedSizing("simple"), StartHead: tt.startHead,
+			}}, 0)
+
+			if tt.verified {
+				seedResolvedVerifyPlan(o)
+				o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+					return verifyexec.Outcome{ExitCode: 0}
+				}
+			}
+
+			err := runExecute(context.Background(), o)
+
+			opCalls := ops.recorded()
+
+			if tt.wantPark {
+				var ese *EmptySubtaskError
+
+				require.ErrorAs(t, err, &ese)
+				assert.Equal(t, -1, indexOfCall(opCalls, "CompleteTask:SUB-1"))
+
+				return
+			}
+
+			require.NoError(t, err)
+			assert.GreaterOrEqual(t, indexOfCall(opCalls, "CompleteTask:SUB-1"), 0)
+			assert.Empty(t, git.pushBranches, "nothing new was committed, so nothing is pushed")
+		})
+	}
+}
+
+// A claimed subtask that ends without completing records the head its run
+// started from, once, so a later run can tell the WIP the park pushes from no
+// work at all. Keys the marker already carries survive the write.
+func TestExecuteRecordsTheStartOfAnUnfinishedSubtask(t *testing.T) {
+	tests := []struct {
+		name      string
+		body      string
+		committed bool
+		wantStart string // "" = no write to the subtask card
+	}{
+		{
+			name:      "an unfinished subtask records its start",
+			body:      writeMeta("Do it.", metaKV{"bar": "complex", "budget": "2", "seed": "simple"}),
+			wantStart: "aaa",
+		},
+		{
+			name: "an earlier start is kept",
+			body: writeMeta("Do it.", metaKV{"bar": "complex", "budget": "2", "seed": "simple", "start": "zzz"}),
+		},
+		{
+			name:      "a completed subtask records nothing",
+			body:      writeMeta("Do it.", metaKV{"bar": "complex", "budget": "2", "seed": "simple"}),
+			committed: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{taskContexts: map[string]cmclient.TaskContext{"SUB-1": {Description: tt.body}}}
+			git := &fakeGit{committed: tt.committed, headSHA: "aaa"}
+			llmFake := &planLLM{responses: []llm.Response{finishResp("chore: noop", 0.02)}}
+			d := execTestDeps(ops, git, llmFake)
+
+			o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")}}, 0)
+			err := runExecute(context.Background(), o)
+
+			body, written := ops.bodyByCard["SUB-1"]
+			if tt.wantStart == "" {
+				assert.False(t, written, "the subtask card must not be rewritten")
+
+				return
+			}
+
+			var ese *EmptySubtaskError
+
+			require.ErrorAs(t, err, &ese)
+			require.True(t, written, "the unfinished subtask must record where it started")
+
+			kv, sz := readMeta(body)
+			assert.Equal(t, tt.wantStart, kv["start"])
+			assert.Equal(t, "simple", kv["seed"], "the marker's other keys survive")
+			assert.Equal(t, sizing{registry.TierComplex, 2}, sz, "the sizing survives")
+			assert.Equal(t, "Do it.", stripMeta(body))
+		})
+	}
+}
+
 func TestExecuteModelSelectionPin(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true}

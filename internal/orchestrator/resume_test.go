@@ -491,13 +491,16 @@ func TestReconcileReadsLegacyAndNewMarkers(t *testing.T) {
 		// write-once seed key. It is the estimate a later analysis pairs its
 		// turn measurements against, so a resumed run has to recover it.
 		wantSeed string
+		// wantStart is the head an earlier unfinished run started from.
+		wantStart string
 	}{
-		"legacy": {legacyTierMarker("Do it.", "complex"), sizing{registry.TierComplex, 1}, "complex"},
+		"legacy": {legacyTierMarker("Do it.", "complex"), sizing{registry.TierComplex, 1}, "complex", ""},
 		// A card corrected on BOTH axes: the bar climbed off the planner's word
 		// and the budget widened off that bar's seed, so no restored field can
 		// be read out of another one.
-		"new":     {writeMeta("Do it.", metaKV{"bar": "complex", "budget": "2", "seed": "simple"}), sizing{registry.TierComplex, 2}, "simple"},
-		"no mark": {"Do it.", defaultSizing(), ""},
+		"new":        {writeMeta("Do it.", metaKV{"bar": "complex", "budget": "2", "seed": "simple"}), sizing{registry.TierComplex, 2}, "simple", ""},
+		"no mark":    {"Do it.", defaultSizing(), "", ""},
+		"unfinished": {writeMeta("Do it.", metaKV{"bar": "complex", "budget": "2", "seed": "simple", "start": "abc123"}), sizing{registry.TierComplex, 2}, "simple", "abc123"},
 	}
 
 	for name, tc := range cases {
@@ -512,6 +515,7 @@ func TestReconcileReadsLegacyAndNewMarkers(t *testing.T) {
 			require.Len(t, o.subtasks, 1)
 			assert.Equal(t, tc.want, o.subtasks[0].Sizing)
 			assert.Equal(t, tc.wantSeed, o.subtasks[0].PlannerBar, "the planner's own word survives the resume")
+			assert.Equal(t, tc.wantStart, o.subtasks[0].StartHead, "an earlier unfinished run's start survives the resume")
 			assert.Equal(t, "Do it.", o.subtasks[0].Body, "the restored body is marker-free")
 		})
 	}
