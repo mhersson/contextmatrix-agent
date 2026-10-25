@@ -1760,10 +1760,10 @@ func (o *run) synthesisTask(authoritative bool, findings, repair string) string 
 	prior := o.priorContext(authoritative)
 
 	if o.pocReview() {
-		return fmt.Sprintf(genericSynthesisPrompt, o.grounding, "the reviewer", o.tc.Title, o.taskDescription, prior, findings, repair)
+		return fmt.Sprintf(genericSynthesisPrompt, o.grounding, o.tc.Title, o.taskDescription, prior, findings, repair)
 	}
 
-	return fmt.Sprintf(synthesisPrompt, o.grounding, "a specialist", o.tc.Title, o.taskDescription, prior, findings, repair)
+	return fmt.Sprintf(synthesisPrompt, o.grounding, o.tc.Title, o.taskDescription, prior, findings, repair)
 }
 
 // parkSynthesisCap preserves the round's specialist findings on the card body -

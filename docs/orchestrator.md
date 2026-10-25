@@ -121,17 +121,18 @@ vocabulary (`normalizeBasis` drops anything else to empty):
 - `defect` - a demonstrated correctness bug in delivered code; the issue gives the input or state and the wrong outcome.
 - `test` - a broken or vacuous test.
 - `vulnerability` - exploitable by a party the project's documented trust model does not trust; the issue names that party and the path. Input from a caller the trust model already lets write the same data is `hardening`, not `vulnerability`.
-- `unscoped` - the diff added something the task did not ask for; the fix is to remove it.
-- `hardening` - validation, limits, headers, defensive checks, or stricter tests the task did not ask for.
+- `unscoped` - the diff added a feature or behaviour the task did not ask for; the fix is to remove it.
+- `hardening` - validation, limits, headers, defensive checks, or stricter tests the task did not ask for. Unrequested hardening is always `hardening`, never `unscoped`, whether the diff added it or a reviewer asks for it.
 - `polish` - style, naming, or comment/doc wording that does not change meaning.
 
 `criterion`, `defect`, `test`, `vulnerability`, and `unscoped` block;
-`hardening` and `polish` are advisory and never block. Both verdict prompts
-share one constant naming the vocabulary and its evidence requirements, so the
-solo synthesis and the mob moderator paths cannot drift, and each specialist
-states the basis of every concern. `formatFixes` renders a populated basis
-after the severity as `[important, criterion]`; an empty basis renders exactly
-as before.
+`hardening` and `polish` are advisory and never block. The solo synthesis
+prompts and the mob moderator prompt share one decision-rule constant
+(`verdictDecisionRule`) carrying the blocking rule, the vocabulary and its
+evidence requirements, worded without naming either review path, so the paths
+cannot drift, and each specialist states the basis of every concern.
+`formatFixes` renders a populated basis after the severity as
+`[important, criterion]`; an empty basis renders exactly as before.
 
 The loop runs to the `review_attempts` cap - default 3, set per deployment via
 `review_attempts_cap` in `serve.yaml` or `CMX_REVIEW_ATTEMPTS_CAP`. Valid
