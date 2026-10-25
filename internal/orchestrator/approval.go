@@ -116,10 +116,5 @@ func extractApproval(body string) (approval, bool) {
 // approval clears it before the FSM proceeds to integrate. Best-effort: a
 // failure is logged, not fatal.
 func (o *run) clearApproval(ctx context.Context) {
-	o.body = removeSection(o.body, approvalHeading)
-
-	if err := o.d.Ops.UpdateCardBody(ctx, o.d.Cfg.CardID, o.body); err != nil {
-		slog.Warn("review: failed to clear approval record",
-			"card_id", o.d.Cfg.CardID, "error", err)
-	}
+	o.clearSection(ctx, approvalHeading)
 }

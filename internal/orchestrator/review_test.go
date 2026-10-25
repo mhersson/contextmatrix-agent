@@ -3678,9 +3678,9 @@ func TestReviewGateFailureFindingsKeepTheTail(t *testing.T) {
 	assert.Empty(t, client.tasks, "a gate failure short-circuits before any reviewer model call")
 }
 
-// TestRunReviewResetsExhaustedCounterApprove proves that a card whose persisted
-// ReviewAttempts exceeds the cap (cap+1, from a prior parked run) gets the
-// counter reset to zero at the start of runReview. The first review round uses
+// TestRunReviewResetsExhaustedCounterApprove proves that a fresh run (no
+// persisted phase, as on a reopened card) whose ReviewAttempts exceeds the cap
+// gets the counter reset to zero at the start of runReview. The first review round uses
 // the normal cheap path (round 1, not authoritative) and, on approval, does not
 // call IncrementReviewAttempts.
 func TestRunReviewResetsExhaustedCounterApprove(t *testing.T) {
@@ -3693,8 +3693,8 @@ func TestRunReviewResetsExhaustedCounterApprove(t *testing.T) {
 		stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.02),
 	}}
 	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
-	// cap is 5; seed ReviewAttempts at cap+1 (6) to simulate a card that
-	// actually parked (authoritative pass increments past the cap).
+	// cap is 5; seed ReviewAttempts at cap+1 (6), where a finished
+	// authoritative pass leaves it.
 	tc := cmclient.TaskContext{
 		Title: "Parent", Description: "body",
 		State: "in_progress", ReviewAttempts: 6,
@@ -3714,7 +3714,7 @@ func TestRunReviewResetsExhaustedCounterApprove(t *testing.T) {
 }
 
 // TestRunReviewResetsExhaustedCounterFixThenApprove proves that an exhausted
-// counter (cap+1, from a prior parked run) reset followed by a reject-and-fix
+// counter (cap+1) reset on a fresh run followed by a reject-and-fix
 // cycle correctly increments attempts from 1 (not 7) and the second round uses
 // normal numbering.
 func TestRunReviewResetsExhaustedCounterFixThenApprove(t *testing.T) {
@@ -3763,11 +3763,11 @@ func TestRunReviewResetsExhaustedCounterFixThenApprove(t *testing.T) {
 	assert.Less(t, fixupIdx, pushIdx, "fixup before push")
 }
 
-// TestRunReviewDoesNotResetOnInterruptedAuthoritative proves that a card
-// whose ReviewAttempts is exactly at the cap (5) with State "review" (an
-// interrupted authoritative pass) is NOT reset: the counter stays at the cap,
-// round numbering continues from where it left off, and the authoritative pass
-// runs (round 6). This distinguishes crash-resume from a fresh rerun from todo.
+// TestRunReviewDoesNotResetOnInterruptedAuthoritative proves that a resumed
+// review whose counter sits at the cap keeps it when the previous run left no
+// cap-park record: an interrupted authoritative pass resumes at its round
+// (6) rather than restarting at 1. CM launches every run from todo, so the
+// card is never in review at this point.
 func TestRunReviewDoesNotResetOnInterruptedAuthoritative(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{}
@@ -3779,28 +3779,101 @@ func TestRunReviewDoesNotResetOnInterruptedAuthoritative(t *testing.T) {
 		stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.02),
 	}}
 	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
-	// cap is 5; seed ReviewAttempts at the cap (5) with State "review" to
-	// simulate an interrupted authoritative pass.
+	// cap is 5; the counter at the cap with the phase persisted as review is
+	// an authoritative pass that was interrupted.
 	tc := cmclient.TaskContext{
 		Title: "Parent", Description: "body",
-		State: "review", ReviewAttempts: 5,
+		State: "in_progress", Phase: "review", ReviewAttempts: 5,
 	}
 	o := newReviewRun(d, tc, 0)
 
 	require.NoError(t, runReview(context.Background(), o))
-
-	// StartReview must NOT be called (already in review).
-	assert.Equal(t, -1, indexOfCall(ops.recorded(), "StartReview:CARD-1"),
-		"interrupted authoritative: StartReview must be skipped; calls=%v", ops.recorded())
 
 	// The counter was NOT reset, so the round goes to authoritative (round 6).
 	// On approval, no IncrementReviewAttempts is called.
 	assert.Equal(t, -1, indexOfCall(ops.recorded(), "IncrementReviewAttempts:CARD-1"),
 		"interrupted authoritative: approval must not increment; calls=%v", ops.recorded())
 
-	// The round 6 heading must be recorded (not round 1).
 	body := ops.lastBody()
 	assert.Contains(t, body, "## Review Findings (Round 6)", "interrupted authoritative at counter 5 must record round 6; body=%q", body)
+	assert.Empty(t, extractSection(body, "Review Findings"), "no round-1 section; body=%q", body)
+}
+
+// TestRunReviewRestartsRoundsAfterACapPark proves the other side: a review
+// loop that parked at the attempts cap or the board's server cap records it on
+// the card, and the next run - resumed at the review phase with the counter
+// past the cap - restarts at round 1 and clears the record.
+func TestRunReviewRestartsRoundsAfterACapPark(t *testing.T) {
+	capped := fmt.Errorf("increment review attempts: review attempts capped at 7: %w",
+		cmclient.ErrReviewAttemptsCapped)
+
+	tests := []struct {
+		name       string
+		ops        *fakeOps
+		wantReason string
+	}{
+		{
+			name:       "attempts cap",
+			ops:        &fakeOps{reviewAttempts: 4},
+			wantReason: reviewParkedAttemptsCap,
+		},
+		{
+			name:       "server cap",
+			ops:        &fakeOps{reviewAttempts: 4, incrementErr: capped, incrementErrAfter: 1},
+			wantReason: reviewParkedServerCap,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// First run: the authoritative pass rejects, fixes, rejects again and parks.
+			client := &planLLM{responses: []llm.Response{
+				stopResp("Correctness: bug", 0.01),
+				stopResp("Design: ok", 0.01),
+				stopResp("Security: ok", 0.01),
+				stopResp(`{"approved":false,"summary":"fix it","fixes":[{"file":"x.go","issue":"first","suggestion":"patch"}]}`, 0.02),
+				stopResp("coder: attempted fix", 0.05),
+				stopResp("Correctness: still bug", 0.01),
+				stopResp("Design: ok", 0.01),
+				stopResp("Security: ok", 0.01),
+				stopResp(`{"approved":false,"summary":"still broken","fixes":[{"file":"a.go","issue":"bug","suggestion":"patch"}]}`, 0.02),
+			}}
+			d := reviewTestDeps(t, tt.ops, &fakeGit{committed: true}, client, reviewerRegistry())
+			tc := cmclient.TaskContext{
+				Title: "Parent", Description: "body",
+				State: "in_progress", Phase: "review", ReviewAttempts: 4,
+			}
+
+			var parked *ReviewParkedError
+
+			require.ErrorAs(t, runReview(context.Background(), newReviewRun(d, tc, 0)), &parked)
+			require.Equal(t, tt.wantReason, parked.Reason)
+
+			parkedBody := tt.ops.lastBody()
+			require.NotEmpty(t, extractSection(parkedBody, reviewCapParkHeading),
+				"the park must leave its record on the card; body=%q", parkedBody)
+
+			// Second run: resumed at the review phase on the parked card's body.
+			ops := &fakeOps{reviewAttempts: tt.ops.reviewAttempts}
+			client = &planLLM{responses: []llm.Response{
+				stopResp("Correctness: clean", 0.01),
+				stopResp("Design: clean", 0.01),
+				stopResp("Security: clean", 0.01),
+				stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.02),
+			}}
+			d = reviewTestDeps(t, ops, &fakeGit{}, client, reviewerRegistry())
+			tc = cmclient.TaskContext{
+				Title: "Parent", Description: parkedBody,
+				State: "in_progress", Phase: "review", ReviewAttempts: tt.ops.reviewAttempts,
+			}
+
+			require.NoError(t, runReview(context.Background(), newReviewRun(d, tc, 0)))
+
+			body := ops.lastBody()
+			assert.NotEmpty(t, extractSection(body, "Review Findings"), "the re-run starts at round 1; body=%q", body)
+			assert.Empty(t, extractSection(body, reviewCapParkHeading), "the re-run clears the record; body=%q", body)
+		})
+	}
 }
 
 // TestRunReviewPreservesCrashResumeCounter proves that a card whose review
@@ -3852,8 +3925,8 @@ func TestRunReviewHITLResetsExhaustedCounter(t *testing.T) {
 	}}
 	d := hitlReviewDeps(ops, git, inbox, client)
 	// hitlReviewDeps sets ReviewAttemptsCap: 3 and Interactive: true.
-	// Seed at cap+1 (4) with State "in_progress" to simulate a card that
-	// actually parked on a prior run and was moved back to an active state.
+	// Seed at cap+1 (4) on a fresh run (no persisted phase), as on a
+	// reopened card.
 	tc := cmclient.TaskContext{
 		Title: "T", Description: "b",
 		State: "in_progress", ReviewAttempts: 4,

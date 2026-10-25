@@ -23,6 +23,17 @@ func (o *run) recordSection(ctx context.Context, heading, section string) {
 	}
 }
 
+// clearSection removes the "## <heading>" section from the parent card body
+// and pushes the body to CM. Best-effort, like recordSection.
+func (o *run) clearSection(ctx context.Context, heading string) {
+	o.body = removeSection(o.body, heading)
+
+	if err := o.d.Ops.UpdateCardBody(ctx, o.d.Cfg.CardID, o.body); err != nil {
+		slog.Warn("clear parent card section failed",
+			"card_id", o.d.Cfg.CardID, "heading", heading, "error", err)
+	}
+}
+
 // recordReview records one review round on the parent card body, matching
 // CM's review-task workflow skill: round 1 uses the bare "## Review Findings"
 // heading, later rounds use "## Review Findings (Round N)". Each round is
@@ -439,6 +450,7 @@ var agentSectionHeadings = []string{
 	"Best-of-N Report",
 	"Verify Command",
 	"Review Approval",
+	"Review Parked",
 	"PR Gates",
 }
 

@@ -143,6 +143,15 @@ before a round would start, since a verify run, a panel, and a fix round need
 that much to finish without being killed mid-work; a re-trigger resumes at the
 same round.
 
+Round numbering follows the card's `review_attempts` counter, so any
+interrupted review resumes at its round. Only a finished loop restarts at
+round 1 once the counter is at or past the cap: a loop that parks at the
+attempts cap or at the server's cap records a `## Review Parked` section on the
+card, which the next run to enter review clears, and a fresh run of a reopened
+card counts as finished too. CM launches every run from `todo`, so the card's
+state cannot tell the two apart. The restart is local to the run; the server's
+counter keeps counting.
+
 A verify-red round - the gate fails before any specialist runs - produces no
 verdict, so charging it against the attempts cap would spend review budget on
 a build failure rather than a critique. Each verify-red round instead extends

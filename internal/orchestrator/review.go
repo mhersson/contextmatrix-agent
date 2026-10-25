@@ -167,6 +167,12 @@ const (
 	reviewParkedSynthesisCap = "the synthesis verdict could not be produced within its turn cap"
 )
 
+// reviewCapParkHeading is the card-body record that the review loop ended at
+// its attempts cap or the board's server cap. CM launches every run from todo,
+// so the card's state cannot tell a finished loop from an interrupted one;
+// this record does.
+const reviewCapParkHeading = "Review Parked"
+
 // reviewCoderOnlyFallbackLog is the card line written when the panel reviews
 // with a coder's own model because no other model is selectable.
 const reviewCoderOnlyFallbackLog = "review panel: no model other than this run's coders is selectable - reviewing with %s, a model that coded this card"
@@ -211,20 +217,22 @@ func runReview(ctx context.Context, o *run) error {
 		}
 	}
 
-	// Resolve the effective attempts cap. When the persisted counter already
-	// meets or exceeds the cap AND the card is entering review from a non-review
-	// state (e.g., moved back to todo), the card was parked on a prior run with
-	// the counter left at the cap. Reset it to zero so round numbering in the
-	// fresh run restarts at 1 - a local reset only; the server's review_attempts
-	// counter is monotonic and unaffected. Cards still in review (crash-resume
-	// from an interrupted authoritative pass) keep their counter so round
-	// numbering continues from where it left off.
+	// A counter at the cap restarts round numbering at 1 only when the previous
+	// loop finished: it parked at a cap and recorded so, or this is a fresh run
+	// of a reopened card. Any other resume is an interrupted loop and keeps its
+	// counter, so it resumes at the same round. The reset is local; the
+	// server's review_attempts counter is monotonic.
 	attemptsCap := cfg.ReviewAttemptsCap
 	if attemptsCap <= 0 {
 		attemptsCap = config.DefaultReviewAttemptsCap
 	}
 
-	if o.tc.ReviewAttempts >= attemptsCap && o.tc.State != "review" {
+	capParked := extractSection(o.body, reviewCapParkHeading) != ""
+	if capParked {
+		o.clearSection(ctx, reviewCapParkHeading)
+	}
+
+	if o.tc.ReviewAttempts >= attemptsCap && (capParked || o.tc.Phase == "") {
 		o.tc.ReviewAttempts = 0
 	}
 
@@ -1139,7 +1147,7 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 
 	d.logCard(ctx, "%s", reviewParkNote(head, parkFindings))
 
-	return &ReviewParkedError{Reason: reviewParkedAttemptsCap}
+	return o.capPark(ctx, reviewParkedAttemptsCap)
 }
 
 // recordRoundFindings sets lastFindings (this round's raw output, always) and
@@ -1191,10 +1199,20 @@ func (o *run) incrementReviewAttempt(ctx context.Context, findings string) (int,
 	if errors.Is(err, cmclient.ErrReviewAttemptsCapped) {
 		o.d.logCard(ctx, "%s", reviewParkNote("review parked at server cap - outstanding findings:\n", findings))
 
-		return 0, &ReviewParkedError{Reason: reviewParkedServerCap}
+		return 0, o.capPark(ctx, reviewParkedServerCap)
 	}
 
 	return 0, fmt.Errorf("increment review attempts: %w", err)
+}
+
+// capPark records on the card that the review loop ended at a cap, so the next
+// run restarts round numbering instead of resuming, and returns the park.
+func (o *run) capPark(ctx context.Context, reason string) error {
+	park := &ReviewParkedError{Reason: reason}
+
+	o.recordSection(ctx, reviewCapParkHeading, "## "+reviewCapParkHeading+"\n\n"+park.Error())
+
+	return park
 }
 
 // reviewRound runs one review pass and returns the outstanding findings text,
