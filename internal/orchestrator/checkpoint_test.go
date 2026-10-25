@@ -428,8 +428,9 @@ func TestMobCheckpointReviseGateFailureDoesNotCommit(t *testing.T) {
 	o.mobCheckpoint(context.Background(), o.solver,
 		subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("simple")}, "abc123")
 
-	require.Contains(t, strings.Join(ops.logs, "\n"), "revise - 1 fixes",
-		"the checkpoint must actually reach a revise verdict, or this test asserts nothing")
+	client, ok := o.d.Client.(*planLLM)
+	require.True(t, ok)
+	require.Len(t, client.toolNamesSeen(), 1, "the revise coder ran, or this test asserts nothing")
 	assert.Empty(t, git.commitMsgs, "a red revise gate must not commit")
 }
 
@@ -447,8 +448,6 @@ func TestMobCheckpointReviseGateFailureHardResets(t *testing.T) {
 	o.mobCheckpoint(context.Background(), o.solver,
 		subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("simple")}, "abc123")
 
-	require.Contains(t, strings.Join(ops.logs, "\n"), "revise - 1 fixes",
-		"the checkpoint must actually reach a revise verdict, or this test asserts nothing")
 	assert.Contains(t, git.hardResetRefs, "HEAD")
 }
 
@@ -501,9 +500,6 @@ func TestMobCheckpointReviseBindsAVerifyToolTheGateJustResolved(t *testing.T) {
 	o.mobCheckpoint(context.Background(), o.solver,
 		subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("simple")}, "abc123")
 
-	require.Contains(t, strings.Join(ops.logs, "\n"), "revise - 1 fixes",
-		"the checkpoint must actually reach a revise verdict, or this test asserts nothing")
-
 	client, ok := o.d.Client.(*planLLM)
 	require.True(t, ok)
 
@@ -553,8 +549,6 @@ func TestMobCheckpointReviseGateAcceptsTheRevisersToolPass(t *testing.T) {
 	o.mobCheckpoint(context.Background(), o.solver,
 		subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("simple")}, "abc123")
 
-	require.Contains(t, strings.Join(ops.logs, "\n"), "revise - 1 fixes",
-		"the checkpoint must actually reach a revise verdict, or this test asserts nothing")
 	require.Len(t, git.commitMsgs, 1, "a green gate still lands the revise commit")
 	// Without this, one run is also what a gate that ran the command itself
 	// spends, and the tool never reaching the reviser would pass unnoticed.

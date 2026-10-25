@@ -1774,7 +1774,7 @@ func TestLogEnvironmentalCapBudgetNeverPersistsOrEmits(t *testing.T) {
 // exemption a skipped verify gets.
 func TestSalvageDeclineAfterVerifyPassKeepsTierAndReportsNoOutcome(t *testing.T) {
 	ops := &fakeOps{}
-	git := &fakeGit{committed: true, pushErr: errors.New("push boom")}
+	git := &fakeGit{committed: true, headSHA: "aaa", pushErr: errors.New("push boom")}
 	client := &planLLM{responses: burnResps(5)}
 	d := execTestDeps(ops, git, client)
 	d.Cfg.MaxTurns = 5
@@ -1794,9 +1794,12 @@ func TestSalvageDeclineAfterVerifyPassKeepsTierAndReportsNoOutcome(t *testing.T)
 	var mte *MaxTurnsError
 	require.ErrorAs(t, err, &mte)
 
-	assert.Equal(t, -1, indexOfCall(ops.recorded(), "UpdateCardBody:SUB-1"),
-		"a park after a passing verify must not touch the subtask body at all")
-	assert.Empty(t, ops.bodyFor("SUB-1"), "no sizing-marker write on a post-verify-pass park")
+	kv, sz := readMeta(ops.bodyFor("SUB-1"))
+	assert.Equal(t, "aaa", kv[startHeadKey], "the park records where the run started")
+
+	_, wantSizing := readMeta(legacyTierMarker("Implement the thing.", "moderate"))
+	assert.Equal(t, wantSizing, sz,
+		"a park after a passing verify leaves the sizing marker unchanged")
 	assert.Empty(t, ops.reportOutcomes,
 		"an infrastructure park after a passing verify is not evidence about the model")
 }
@@ -1812,7 +1815,7 @@ func TestSalvageDeclineAfterVerifyPassKeepsTierAndReportsNoOutcome(t *testing.T)
 // contradictory report of its own.
 func TestSalvageDeclineAfterCompleteTaskFailKeepsTierAndWinRow(t *testing.T) {
 	ops := &fakeOps{completeTaskErr: errors.New("complete task boom")}
-	git := &fakeGit{committed: true}
+	git := &fakeGit{committed: true, headSHA: "aaa"}
 	client := &planLLM{responses: burnResps(5)}
 	d := execTestDeps(ops, git, client)
 	d.Cfg.MaxTurns = 5
@@ -1832,9 +1835,12 @@ func TestSalvageDeclineAfterCompleteTaskFailKeepsTierAndWinRow(t *testing.T) {
 	var mte *MaxTurnsError
 	require.ErrorAs(t, err, &mte)
 
-	assert.Equal(t, -1, indexOfCall(ops.recorded(), "UpdateCardBody:SUB-1"),
-		"a park after a passing verify must not touch the subtask body at all")
-	assert.Empty(t, ops.bodyFor("SUB-1"), "no sizing-marker write on a post-verify-pass park")
+	kv, sz := readMeta(ops.bodyFor("SUB-1"))
+	assert.Equal(t, "aaa", kv[startHeadKey], "the park records where the run started")
+
+	_, wantSizing := readMeta(legacyTierMarker("Implement the thing.", "moderate"))
+	assert.Equal(t, wantSizing, sz,
+		"a park after a passing verify leaves the sizing marker unchanged")
 	require.Len(t, ops.reportOutcomes, 1, "exactly one outcome row - no duplicate report on the CompleteTask failure")
 	rows := ops.reportOutcomes[0]
 	require.Len(t, rows, 1)
