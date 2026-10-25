@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"maps"
+	"net"
 	"net/http"
 	"slices"
 	"strings"
@@ -33,7 +34,16 @@ const (
 	ignores
 	// unreachable has a stdin that refuses every write.
 	unreachable
+	// callsThenParks finishes its turn after end_session: it calls proxyURL,
+	// the way a worker reaches the LLM proxy on serve's listener, then exits.
+	callsThenParks
 )
+
+// proxyCall is the outcome of a callsThenParks worker's request.
+type proxyCall struct {
+	status int
+	err    error
+}
 
 // workerStdin is a tracked run's stdin. It records end_session frames and, for
 // a parking worker, drops the run from the tracker as the executor does once
@@ -45,6 +55,8 @@ type workerStdin struct {
 	tracker  *executor.Tracker
 	project  string
 	cardID   string
+	proxyURL string
+	calls    chan proxyCall
 }
 
 func (w *workerStdin) Write(p []byte) (int, error) {
@@ -65,11 +77,34 @@ func (w *workerStdin) Write(p []byte) (int, error) {
 	w.ends++
 	w.mu.Unlock()
 
-	if w.behavior == parks {
+	switch w.behavior {
+	case parks:
 		go w.tracker.Remove(w.project, w.cardID)
+	case callsThenParks:
+		go w.callThenPark()
 	}
 
 	return len(p), nil
+}
+
+func (w *workerStdin) callThenPark() {
+	time.Sleep(50 * time.Millisecond)
+
+	var call proxyCall
+
+	client := &http.Client{Timeout: time.Second}
+
+	resp, err := client.Get(w.proxyURL)
+	if err != nil {
+		call.err = err
+	} else {
+		call.status = resp.StatusCode
+		_ = resp.Body.Close()
+	}
+
+	w.calls <- call
+
+	w.tracker.Remove(w.project, w.cardID)
 }
 
 func (w *workerStdin) Close() error { return nil }
@@ -135,29 +170,40 @@ type shutdownHarness struct {
 	drain    workerDrain
 	exec     *killRecorder
 	reporter *statusRecorder
+	revoker  *recordingRevoker
 	stdins   map[string]*workerStdin
+	server   *http.Server
 }
 
 // newShutdownHarness tracks one run per card, each answering end_session as
-// its behavior says, and wires the real webhook end-session path.
+// its behavior says, and wires the real webhook end-session path. A card
+// CARD-n runs under correlation id run-n.
 func newShutdownHarness(t *testing.T, wait time.Duration, workers map[string]workerBehavior) *shutdownHarness {
 	t.Helper()
 
 	tracker := executor.NewTracker(len(workers))
 	exec := &killRecorder{tracker: tracker, killed: map[string]time.Time{}}
 	reporter := &statusRecorder{statuses: map[string][]string{}}
+	revoker := &recordingRevoker{}
 	stdins := make(map[string]*workerStdin, len(workers))
 
 	for cardID, behavior := range workers {
-		stdin := &workerStdin{behavior: behavior, tracker: tracker, project: "proj", cardID: cardID}
+		stdin := &workerStdin{
+			behavior: behavior,
+			tracker:  tracker,
+			project:  "proj",
+			cardID:   cardID,
+			calls:    make(chan proxyCall, 1),
+		}
 		stdins[cardID] = stdin
 
 		require.True(t, tracker.AddIfUnderLimit(&executor.Run{
-			ContainerID: "ctr-" + cardID,
-			CardID:      cardID,
-			Project:     "proj",
-			StartedAt:   time.Now(),
-			Stdin:       stdin,
+			ContainerID:   "ctr-" + cardID,
+			CardID:        cardID,
+			Project:       "proj",
+			CorrelationID: "run-" + strings.TrimPrefix(cardID, "CARD-"),
+			StartedAt:     time.Now(),
+			Stdin:         stdin,
 		}))
 	}
 
@@ -167,18 +213,22 @@ func newShutdownHarness(t *testing.T, wait time.Duration, workers map[string]wor
 			sessions: webhook.NewServer(webhook.Config{Tracker: tracker, Logger: testLogger()}),
 			exec:     exec,
 			reporter: reporter,
+			revoker:  revoker,
 			logger:   testLogger(),
 			wait:     wait,
 			poll:     time.Millisecond,
 		},
 		exec:     exec,
 		reporter: reporter,
+		revoker:  revoker,
 		stdins:   stdins,
+		server:   &http.Server{ReadHeaderTimeout: time.Second},
 	}
 }
 
-// shutdown runs gracefulShutdown against unstarted servers and fails the test
-// when it does not return within limit.
+// shutdown runs gracefulShutdown against h.server (unstarted unless a test
+// starts one) and fails the test when it does not return within limit. Its
+// return orders every write the shutdown made before the caller's reads.
 func (h *shutdownHarness) shutdown(ctx context.Context, t *testing.T, limit time.Duration) {
 	t.Helper()
 
@@ -187,7 +237,7 @@ func (h *shutdownHarness) shutdown(ctx context.Context, t *testing.T, limit time
 	go func() {
 		defer close(done)
 
-		gracefulShutdown(ctx, &http.Server{ReadHeaderTimeout: time.Second}, nil, h.drain, &atomic.Bool{}, testLogger())
+		gracefulShutdown(ctx, h.server, nil, h.drain, &atomic.Bool{}, testLogger())
 	}()
 
 	select {
@@ -279,6 +329,58 @@ func TestGracefulShutdownWaitEndsWithTheShutdownContext(t *testing.T) {
 
 	assert.Contains(t, h.exec.killedAt(), "CARD-1", "a cancelled wait goes straight to the kill sweep")
 	assert.Equal(t, 1, h.stdins["CARD-1"].endSessions())
+}
+
+// TestGracefulShutdownServesTheProxyUntilWorkersPark: the LLM proxy shares the
+// webhook listener, so a worker finishing its turn while it parks must still
+// reach it, and the listener closes only once the worker has exited.
+func TestGracefulShutdownServesTheProxyUntilWorkersPark(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	server := &http.Server{
+		Handler:           http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }),
+		ReadHeaderTimeout: time.Second,
+	}
+
+	go func() { _ = server.Serve(ln) }()
+
+	t.Cleanup(func() { _ = server.Close() })
+
+	h := newShutdownHarness(t, time.Hour, map[string]workerBehavior{"CARD-1": callsThenParks})
+	h.server = server
+	h.stdins["CARD-1"].proxyURL = "http://" + ln.Addr().String()
+
+	trackedAtShutdown := make(chan int, 1)
+
+	server.RegisterOnShutdown(func() { trackedAtShutdown <- h.drain.tracker.Count() })
+
+	h.shutdown(context.Background(), t, 5*time.Second)
+
+	select {
+	case call := <-h.stdins["CARD-1"].calls:
+		require.NoError(t, call.err, "the parking worker reaches the listener")
+		assert.Equal(t, http.StatusOK, call.status)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the worker never made its call")
+	}
+
+	select {
+	case count := <-trackedAtShutdown:
+		assert.Zero(t, count, "the listener shuts down only after every worker has exited")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the listener was never shut down")
+	}
+}
+
+// TestGracefulShutdownRevokesEverySweptRun: a killed straggler and a parked run
+// whose own exit callback may not have fired both lose their proxy token.
+func TestGracefulShutdownRevokesEverySweptRun(t *testing.T) {
+	h := newShutdownHarness(t, 50*time.Millisecond, map[string]workerBehavior{"CARD-1": ignores, "CARD-2": parks})
+
+	h.shutdown(context.Background(), t, 5*time.Second)
+
+	assert.ElementsMatch(t, []string{"run-1", "run-2"}, h.revoker.revoked)
 }
 
 func TestEndSessionsWarnsOnlyForARunItCouldNotReach(t *testing.T) {

@@ -32,6 +32,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/metrics"
 	"github.com/mhersson/contextmatrix-agent/internal/secrets"
 	"github.com/mhersson/contextmatrix-agent/internal/webhook"
+	"github.com/mhersson/contextmatrix-backendkit/llmproxy"
 	"github.com/mhersson/contextmatrix-backendkit/logbridge"
 	"github.com/mhersson/contextmatrix-backendkit/taskskills"
 	"github.com/mhersson/contextmatrix-backendkit/webhookcore"
@@ -39,7 +40,8 @@ import (
 )
 
 const (
-	// httpShutdownTimeout bounds the graceful HTTP drain after draining flips.
+	// httpShutdownTimeout bounds the graceful HTTP drain, shared by the webhook
+	// and admin listeners, the last step of gracefulShutdown.
 	httpShutdownTimeout = 10 * time.Second
 	// callbackShutdownTimeout bounds each per-container kill + status callback
 	// during shutdown so one slow ContextMatrix response cannot starve the rest.
@@ -49,8 +51,10 @@ const (
 	onExitTimeout = 30 * time.Second
 	// parkWaitTimeout bounds how long shutdown waits for workers to park before
 	// the serial kill sweep, which adds a kill grace per straggler and a status
-	// callback per run. At the default max_concurrent of 5 the sequence fits
-	// svc.sh's TimeoutStopSec=60; ten or more stragglers can outlast it.
+	// callback per run; the HTTP drain, one bound shared by the webhook and
+	// admin listeners, then adds up to httpShutdownTimeout. At the default
+	// max_concurrent of 5 the sequence fits svc.sh's TimeoutStopSec=60; seven
+	// or more stragglers can outlast it.
 	parkWaitTimeout = 30 * time.Second
 	// parkPollInterval is how often the park wait rechecks the tracker.
 	parkPollInterval = 250 * time.Millisecond
@@ -107,7 +111,14 @@ func runServe(ctx context.Context, configPath string) error {
 
 	warnIfNotWorkerUID(logger, runtime.GOOS, os.Getuid())
 
-	mx := metrics.New()
+	// The proxy keeps every run's real LLM key in this process; a worker only
+	// ever holds its run's stand-in token.
+	proxy, err := llmproxy.New(llmproxy.Config{Prefix: webhook.LLMProxyPrefix, CACertFile: cfg.CACertFile, Logger: logger})
+	if err != nil {
+		return fmt.Errorf("llm proxy: %w", err)
+	}
+
+	mx := metrics.New(llmproxy.Paths(webhook.LLMProxyPrefix)...)
 
 	skillsCache := filepath.Join(cfg.SecretsDir, "task-skills-cache")
 	skillsResolver := taskskills.NewResolver(cfg.ContextMatrixURL, cfg.APIKey, skillsCache, "/api/agent/task-skills-source")
@@ -148,6 +159,7 @@ func runServe(ctx context.Context, configPath string) error {
 	// redactor set. Appending is correct - both the original and the rotated
 	// token can appear in output.
 	credentials.OnTokenRefresh = onTokenRefreshHook(registry)
+	credentials.OnDisplace = onDisplaceHook(proxy)
 
 	exec := executor.NewDockerExecutor(executor.Config{
 		Docker:           docker,
@@ -160,7 +172,7 @@ func runServe(ctx context.Context, configPath string) error {
 			files.Begin(project, cardID, containerID, correlationID)
 		},
 		OnLog:   containerLogSink(bridge, files, registry),
-		OnExit:  onContainerExit(cbClient, credentials, files, registry, bridge, logger),
+		OnExit:  onContainerExit(cbClient, credentials, proxy, files, registry, bridge, logger),
 		Logger:  logger,
 		Metrics: mx,
 	})
@@ -195,6 +207,7 @@ func runServe(ctx context.Context, configPath string) error {
 		SkillsResolver:   skillsResolver,
 		Credentials:      credentials,
 		SessionSecrets:   registry,
+		LLMProxy:         proxy,
 		Images:           exec,
 		ImageListFilters: cfg.ImageListFilters,
 		Build:            buildinfo.Info(),
@@ -279,6 +292,7 @@ func runServe(ctx context.Context, configPath string) error {
 		sessions: srv,
 		exec:     exec,
 		reporter: cbClient,
+		revoker:  proxy,
 		logger:   logger,
 		wait:     parkWaitTimeout,
 		poll:     parkPollInterval,
@@ -290,9 +304,9 @@ func runServe(ctx context.Context, configPath string) error {
 }
 
 // gracefulShutdown flips draining, ends every tracked worker's session so it
-// pushes its WIP and releases its card, drains the HTTP listeners, waits for
-// the workers to exit, then kills the rest. The park window opens at the
-// end_session write and overlaps the HTTP drain; ctx ends it early.
+// pushes its WIP and releases its card, waits for the workers to exit, kills
+// the rest, then drains the HTTP listeners. The webhook listener also serves
+// the LLM proxy, so it stays up until the workers park; ctx ends the wait early.
 func gracefulShutdown(
 	ctx context.Context,
 	httpServer *http.Server,
@@ -308,7 +322,9 @@ func gracefulShutdown(
 	defer parkCancel()
 
 	live := workers.tracker.List()
-	ended := workers.endSessions(live)
+
+	workers.awaitPark(parkCtx, workers.endSessions(live))
+	workers.sweep(live)
 
 	httpCtx, httpCancel := context.WithTimeout(context.Background(), httpShutdownTimeout)
 	defer httpCancel()
@@ -318,17 +334,10 @@ func gracefulShutdown(
 	}
 
 	if adminServer != nil {
-		adminCtx, adminCancel := context.WithTimeout(context.Background(), httpShutdownTimeout)
-
-		if err := adminServer.Shutdown(adminCtx); err != nil {
+		if err := adminServer.Shutdown(httpCtx); err != nil {
 			logger.Error("admin server shutdown error", "error", err)
 		}
-
-		adminCancel()
 	}
-
-	workers.awaitPark(parkCtx, ended)
-	workers.sweep(live)
 }
 
 // sessionEnder delivers an end_session frame to a tracked run.
@@ -343,6 +352,7 @@ type workerDrain struct {
 	sessions sessionEnder
 	exec     executor.Executor
 	reporter webhook.StatusReporter
+	revoker  tokenRevoker
 	logger   *slog.Logger
 
 	// wait bounds the park window; poll is how often it rechecks the tracker.
@@ -397,9 +407,9 @@ func (d workerDrain) tracked(run *executor.Run) bool {
 	return ok && current == run
 }
 
-// sweep kills every run still tracked and reports each of live, plus any run
-// admitted since, as failed. A parked run is reported too: the process can
-// exit before that run's own exit callback reaches ContextMatrix.
+// sweep kills every run still tracked. Each of live, plus any run admitted
+// since, then has its proxy token revoked and is reported as failed, a parked
+// run too: the process can exit before that run's own exit callback lands.
 func (d workerDrain) sweep(live []*executor.Run) {
 	runs := live
 
@@ -424,6 +434,8 @@ func (d workerDrain) sweep(live []*executor.Run) {
 
 			killCancel()
 		}
+
+		d.revoker.Revoke(run.CorrelationID)
 
 		cbCtx, cbCancel := context.WithTimeout(context.Background(), callbackShutdownTimeout)
 		if err := d.reporter.ReportStatus(cbCtx, run.CardID, run.Project, "failed", "service shutting down"); err != nil {
@@ -472,6 +484,20 @@ func onTokenRefreshHook(registry *logbridge.RedactorRegistry) func(project, card
 	}
 }
 
+// tokenRevoker ends a run's LLM proxy token, keyed by the run's correlation
+// id. *llmproxy.Proxy satisfies it; tests supply a fake.
+type tokenRevoker interface {
+	Revoke(runKey string)
+}
+
+// onDisplaceHook builds the RunCredentials.OnDisplace callback: once a newer
+// run of the card takes over the credentials, the displaced run's token dies.
+func onDisplaceHook(proxy tokenRevoker) func(project, cardID, correlationID string) {
+	return func(_, _, correlationID string) {
+		proxy.Revoke(correlationID)
+	}
+}
+
 // containerLogSink returns the executor OnLog callback: it fans out one
 // worker output line to the live SSE bridge and the durable per-card file
 // log. The file log receives the line masked by the registry's RedactLine -
@@ -494,13 +520,15 @@ func containerLogSink(
 }
 
 // onContainerExit builds the executor OnExit hook. Order matters: the run_end
-// event goes out before files.End (End closes the writer), and End, Teardown
-// and RemoveSessionKey all run before the status callback that lets CM admit
-// a re-trigger. Every cleanup is keyed by this run's correlation id, so a stale
-// exit racing a re-trigger inside the pump-drain window touches only its own run.
+// event goes out before files.End (End closes the writer), and End, Teardown,
+// the proxy-token Revoke and RemoveSessionKey all run before the status
+// callback that lets CM admit a re-trigger. Every cleanup is keyed by this
+// run's correlation id, so a stale exit racing a re-trigger inside the
+// pump-drain window touches only its own run.
 func onContainerExit(
 	reporter webhook.StatusReporter,
 	credentials *secrets.RunCredentials,
+	proxy tokenRevoker,
 	files *filelog.Logger,
 	registry *logbridge.RedactorRegistry,
 	bridge *logbridge.Bridge,
@@ -511,6 +539,7 @@ func onContainerExit(
 
 		files.End(project, cardID, correlationID, exitCode, string(cause))
 		credentials.Teardown(project, cardID, correlationID)
+		proxy.Revoke(correlationID)
 
 		// Remove the session secrets after credential teardown but before
 		// the status callback so a re-trigger does not inherit stale keys.
@@ -628,6 +657,7 @@ func launchEnv(cfg *config.ServiceConfig, secretsHostDir string) webhook.LaunchE
 		MCPURL:                    composeMCPURL(base),
 		MCPAPIKey:                 cfg.MCPAPIKey,
 		SecretsHostDir:            secretsHostDir,
+		LLMBaseURL:                containerLLMBaseURL(cfg),
 		CACertFile:                cfg.CACertFile,
 		MemoryBytes:               cfg.ContainerMemoryBytes,
 		PidsLimit:                 cfg.ContainerPidsLimit,
@@ -651,6 +681,19 @@ func launchEnv(cfg *config.ServiceConfig, secretsHostDir string) webhook.LaunchE
 // double slash.
 func composeMCPURL(base string) string {
 	return strings.TrimRight(base, "/") + "/mcp"
+}
+
+// containerLLMBaseURL is the LLM proxy URL as workers reach it. It is never
+// empty: an empty LLM_BASE_URL would send the token to the type's default
+// upstream, so an unset container_serve_url falls back to the host gateway
+// every worker maps host.docker.internal to.
+func containerLLMBaseURL(cfg *config.ServiceConfig) string {
+	base := cfg.ContainerServeURL
+	if base == "" {
+		base = "http://" + net.JoinHostPort("host.docker.internal", strconv.Itoa(cfg.Port))
+	}
+
+	return strings.TrimRight(base, "/") + webhook.LLMProxyPrefix
 }
 
 // flattenEnv renders a KEY:VALUE map into the KEY=VALUE slice the container

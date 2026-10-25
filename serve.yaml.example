@@ -26,6 +26,19 @@ contextmatrix_url: http://localhost:8080
 # CMX_CONTAINER_CONTEXTMATRIX_URL
 container_contextmatrix_url: http://172.17.0.1:8080
 
+# URL of this service as seen from inside worker containers: workers reach
+# this service's LLM proxy at this URL. Optional. When empty it defaults to
+# http://host.docker.internal:<port>, with port as set below; that works
+# because workers always get host.docker.internal mapped to the host gateway.
+# Must be http or https, carry no path, query or fragment, and not be a
+# loopback or unspecified (0.0.0.0, ::) host. Workers must reach this URL, so
+# a host firewall must allow container-to-host traffic on its port. The host
+# must resolve inside the worker container: unlike the MCP hostname it is not
+# pinned into the container's /etc/hosts, so use an IP or the
+# host.docker.internal default if in-container DNS cannot resolve it.
+# CMX_CONTAINER_SERVE_URL
+container_serve_url: ""
+
 # Shared secret between ContextMatrix and the agent service.
 # Must be at least 32 characters. Required.
 # CMX_API_KEY
@@ -128,25 +141,38 @@ idle_watchdog_interval: 30s
 
 # Host directory holding per-run credential files, each bind-mounted read-only
 # into its container at /run/cm-secrets. The agent stages the CM-provisioned
-# git token and LLM endpoint key into <secrets_dir>/runs/<project>/<card_id>/env
-# and refreshes the token from ContextMatrix until the run is torn down.
+# git token and the LLM proxy's stand-in token (the real LLM key stays in this
+# service's memory) into <secrets_dir>/runs/<project>/<card_id>/env and
+# refreshes the git token from ContextMatrix until the run is torn down.
 # Default: /var/run/cm-agent/secrets.
 # CMX_SECRETS_DIR
 secrets_dir: /var/run/cm-agent/secrets
 
 # Optional host path to a PEM file of extra CA certificates (corporate TLS
-# interception / Zscaler, or a private-CA GitHub Enterprise). Container-only:
-# it is bind-mounted read-only into each worker at /run/cm-ca/ca.crt and the
+# interception / Zscaler, or a private-CA GitHub Enterprise). This service's
+# LLM proxy trusts it, on top of the system pool, for its upstream TLS. It is
+# also bind-mounted read-only into each worker at /run/cm-ca/ca.crt and the
 # worker trusts it for its OWN outbound TLS - the harness LLM client, the
 # MCP/cmclient connection, and the git/gh subprocesses. It does NOT cover
 # model-invoked bash tools (curl/pip/npm), whose env the harness scrubs;
-# covering those needs a harness change. The serve host itself uses the OS
-# trust store, so install the CA there separately if needed. Empty = disabled.
+# covering those needs a harness change. This service's other outbound calls
+# use the OS trust store, so install the CA there separately if needed.
+# serve reads the file at start-up as its own user, so an unreadable file, or
+# one holding no PEM certificate, stops serve from starting.
+# Empty = disabled.
 # CMX_CA_CERT_FILE
 # ca_cert_file: /etc/contextmatrix-agent/extra-ca.pem
 
 # Additional environment variables injected verbatim into every worker
 # container. Useful for operator-specific passthrough.
+#
+# Container env beats the staged secrets file, so an LLM_API_KEY or
+# LLM_BASE_URL here overrides the LLM proxy values: setting both bypasses the
+# proxy and puts that key in the container, and setting only one breaks the
+# run (the proxy answers a real key with 401). An HTTP proxy here needs the
+# serve host (host.docker.internal by default) in NO_PROXY, and does not reach
+# LLM calls: those leave from this service, so its own HTTP(S)_PROXY /
+# NO_PROXY environment applies (set it on the process or its service unit).
 #
 # CMX_READ_ONLY_ROOTS belongs here when the image's own declaration is wrong for
 # your deployment. It is a colon-separated list of absolute trees the worker's
@@ -161,7 +187,7 @@ secrets_dir: /var/run/cm-agent/secrets
 #
 # worker_extra_env:
 #   HTTP_PROXY: http://proxy.example.com:3128
-#   NO_PROXY: localhost,127.0.0.1
+#   NO_PROXY: localhost,127.0.0.1,host.docker.internal
 #   CMX_READ_ONLY_ROOTS: /home/user/go/pkg/mod:/opt/python
 
 # Default model slug used when a trigger does not specify a model or

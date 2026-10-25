@@ -12,17 +12,20 @@ import (
 )
 
 // Run is the in-memory record of one live container. ContainerID is the Docker
-// ID; Stdin is the attached stdin stream (control frames flow over it for the
-// container's whole life) and is nil in unit tests that exercise the tracker
-// without Docker. Stdin is single-writer: callers must serialize writes per
-// run - concurrent writers (e.g. webhook handlers on separate HTTP goroutines)
-// would interleave frame bytes on the wire.
+// ID; CorrelationID is the launch spec's per-trigger id, which keys the run's
+// proxy token and other per-run state; Stdin is the attached stdin stream
+// (control frames flow over it for the container's whole life) and is nil in
+// unit tests that exercise the tracker without Docker. Stdin is single-writer:
+// callers must serialize writes per run - concurrent writers (e.g. webhook
+// handlers on separate HTTP goroutines) would interleave frame bytes on the
+// wire.
 type Run struct {
-	ContainerID string
-	CardID      string
-	Project     string
-	StartedAt   time.Time
-	Stdin       io.WriteCloser
+	ContainerID   string
+	CardID        string
+	Project       string
+	CorrelationID string
+	StartedAt     time.Time
+	Stdin         io.WriteCloser
 }
 
 // Tracker is the concurrency gate and run registry. It is safe for concurrent

@@ -181,6 +181,14 @@ export LLM_API_KEY=<your-api-key>
    the trigger payload - the agent carries no local credential config, and a
    trigger without CM-provisioned credentials is rejected.
 
+   The real LLM key stays in `serve`: each worker gets a per-run stand-in token
+   and calls `serve`'s LLM proxy at `container_serve_url` (default
+   `http://host.docker.internal:<port>`), so a host firewall must allow
+   container-to-host traffic on that port. Upstream LLM calls leave from
+   `serve`, so they use `serve`'s own `HTTP(S)_PROXY`/`NO_PROXY` environment;
+   an egress proxy set only in `worker_extra_env` does not reach them. See
+   [`docs/secrets.md`](docs/secrets.md#llm-proxy).
+
    `container_contextmatrix_url` is required in practice - workers resolve their
    MCP URL from it; without it they point at their own localhost and fail to
    connect. For Docker bridge networking it is typically the bridge gateway
@@ -229,10 +237,12 @@ refuses new work, sends every running worker an end-session so it pushes its
 work in progress and releases its card, waits up to 30 seconds for the workers
 to exit, then kills the rest. The kill sweep runs one card at a time: each
 worker still running after the wait adds about 3 seconds of kill grace, and
-each card running at shutdown adds one status callback (at most 10 seconds). At
-the default `max_concurrent` of 5 with ContextMatrix answering promptly, the
-sequence fits the unit's `TimeoutStopSec=60`; ten or more stragglers can
-outlast it. A second signal skips the wait.
+each card running at shutdown adds one status callback (at most 10 seconds).
+The webhook listener closes only after the sweep, because parking workers reach
+the LLM proxy on it; the HTTP drain, shared with the admin listener, adds at most 10 seconds. At the default
+`max_concurrent` of 5 with ContextMatrix answering promptly, the sequence fits
+the unit's `TimeoutStopSec=60`; seven or more stragglers can outlast it. A
+second signal skips the wait.
 
 > **Run as UID 1000 on rootful Docker.** Per-run secrets are staged readable
 > only by the UID `serve` runs as, and the worker container runs as UID 1000, so
@@ -340,7 +350,7 @@ working **on** this codebase live in [`AGENTS.md`](AGENTS.md).
   git workflow, review, verify resolution, plan split, repo grounding.
 - [`docs/pr-gates.md`](docs/pr-gates.md) - the CI and Copilot gates.
 - [`docs/model-selection.md`](docs/model-selection.md) - the selection policy.
-- [`docs/secrets.md`](docs/secrets.md) - credential staging and redaction.
+- [`docs/secrets.md`](docs/secrets.md) - credential staging, the LLM proxy, and redaction.
 - [`docs/observability.md`](docs/observability.md) - metrics and the admin listener.
 - [`docs/custom-images.md`](docs/custom-images.md) - custom worker images.
 - [`serve.yaml.example`](serve.yaml.example) - every service config field, documented.

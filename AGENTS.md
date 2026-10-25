@@ -21,7 +21,7 @@ Read the relevant one before working in its area:
 | `docs/orchestrator.md`    | The FSM: phases, git workflow, review loop, verify resolution, plan split, HITL gates, budget/context bounds, repo grounding, task skills, POC projects. |
 | `docs/pr-gates.md`        | The `pr_gates` phase: CI gate, Copilot gate, triage verdicts, thread replies.                                    |
 | `docs/model-selection.md` | Selection policy: tier bars, favorites, vendor diversity, `max_capability`, fallback precedence.                 |
-| `docs/secrets.md`         | Credential staging, env scrubbing, redaction, `verify.env` pass-throughs.                                        |
+| `docs/secrets.md`         | Credential staging, the LLM proxy, env scrubbing, redaction, `verify.env` pass-throughs.                         |
 | `docs/observability.md`   | Prometheus metrics and the admin listener.                                                                       |
 | `docs/custom-images.md`   | Custom worker images and `CMX_READ_ONLY_ROOTS`.                                                                  |
 
@@ -56,7 +56,7 @@ internal/executor/     → Executor interface + DockerExecutor; Tracker (concurr
 internal/secrets/      → Source (static env file) + RunCredentials (stages per-run CM-provisioned credentials)
 
 # serve plumbing
-internal/webhook/    → HTTP server for lifecycle webhooks; embeds backendkit's webhookcore.Core (HMAC auth, drain gate, request metrics, SSE /logs, health/readyz/images) and adds the agent-only lifecycle handlers plus /message dedup over webhookcore's DedupCache
+internal/webhook/    → HTTP server for lifecycle webhooks; embeds backendkit's webhookcore.Core (HMAC auth, drain gate, request metrics, SSE /logs, health/readyz/images) and adds the agent-only lifecycle handlers plus /message dedup over webhookcore's DedupCache; mounts backendkit's llmproxy at /llm
 internal/callback/   → status callbacks to /api/agent/status; VerifyAutonomous (fail-closed)
 internal/cmclient/   → MCP client for CM card operations (one agent identity per card)
 internal/filelog/    → per-card raw container-output file logs (<log_dir>/<project>/<card_id>.log; empty log_dir no-ops)
@@ -73,9 +73,10 @@ docker/Dockerfile.worker → multi-target worker image family (agent binary + gi
 # redaction. This repo depends on it; it takes no dependency on this repo.
 
 # Shared serve plumbing - the external github.com/mhersson/contextmatrix-backendkit
-# module (frames, webhookcore, logbridge, metrics, taskskills): the transport
-# core (HMAC auth, drain gate, SSE /logs), the shared metrics bundle, the log
-# bridge, and the task-skills resolver, shared with contextmatrix-chat.
+# module (frames, webhookcore, logbridge, metrics, taskskills, llmproxy): the
+# transport core (HMAC auth, drain gate, SSE /logs), the shared metrics bundle,
+# the log bridge, the task-skills resolver, and the LLM proxy, shared with
+# contextmatrix-chat.
 ```
 
 ## Boundary discipline (the load-bearing invariant)
@@ -121,7 +122,8 @@ Go 1.27+, **cobra** + **koanf** (not viper), the **Docker SDK**
 
 - HMAC is `contextmatrix-protocol`'s job - do not re-implement it locally.
 - Git tokens and the LLM endpoint are CM-provisioned per run - the agent
-  carries no local credential config and mints no tokens itself.
+  carries no local credential config and mints no git tokens or upstream
+  LLM keys itself.
 - The LLM endpoint (OpenAI-compatible `/chat/completions`) is spoken over **raw
   HTTP** behind a narrow `Send`/`SendStream` interface - no SDK in the hot path.
 
@@ -219,6 +221,7 @@ Summaries only - full detail lives in the reference documents above.
    implicated but unrunnable; the card transitions to the board's `blocked`
    state. An environmental park, not a model failure.
 9. **Secrets.** Per-run CM-provisioned credentials, bind-mounted read-only;
+   the real LLM key stays on `serve` and workers get a per-run proxy token;
    tool subprocesses get a scrubbed env; every secret a run receives must be
    registered with the host-side log-bridge redactor.
 10. **HITL gates + promote.** Same FSM, mode-gated on `Config.Interactive`; a

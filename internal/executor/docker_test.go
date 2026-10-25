@@ -741,6 +741,46 @@ func TestLaunchCarriesTheCorrelationIDToOnStartAndOnLog(t *testing.T) {
 	}
 }
 
+// TestLaunchTracksTheRunUnderItsCorrelationID pins the key the shutdown sweep
+// revokes a run's proxy token by: the tracked run carries the launch spec's
+// correlation id for as long as the container lives.
+func TestLaunchTracksTheRunUnderItsCorrelationID(t *testing.T) {
+	exit := make(chan container.WaitResponse, 1)
+	docker := &stubDocker{waitFn: func(context.Context) (<-chan container.WaitResponse, <-chan error) {
+		return exit, make(chan error, 1)
+	}}
+	tracker := NewTracker(1)
+	exited := make(chan struct{})
+
+	e := NewDockerExecutor(Config{
+		Docker:           docker,
+		Tracker:          tracker,
+		PullPolicy:       PullNever,
+		ContainerTimeout: time.Minute,
+		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+		OnExit:           func(string, string, int64, ExitCause, int, string) { close(exited) },
+	})
+
+	require.NoError(t, e.Launch(t.Context(), LaunchSpec{
+		Project:       "proj",
+		CardID:        "CARD-1",
+		Image:         "alpine:3",
+		CorrelationID: "trace-run",
+	}))
+
+	run, ok := tracker.Get("proj", "CARD-1")
+	require.True(t, ok, "the run is tracked while its container lives")
+	assert.Equal(t, "trace-run", run.CorrelationID)
+
+	exit <- container.WaitResponse{}
+
+	select {
+	case <-exited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("onExit never fired")
+	}
+}
+
 // stdioFrame wraps s in the docker std-multiplexing header stdcopy expects
 // for the stdout stream.
 func stdioFrame(s string) []byte {

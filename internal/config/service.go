@@ -71,6 +71,7 @@ type CompactionConfig struct {
 type ServiceConfig struct {
 	ContextMatrixURL          string
 	ContainerContextMatrixURL string
+	ContainerServeURL         string
 	APIKey                    string
 	MCPAPIKey                 string
 	Port                      int
@@ -114,10 +115,11 @@ type ServiceConfig struct {
 
 	// CACertFile is an optional path (on the serve host) to a PEM file of extra
 	// CA certificates for corporate TLS interception / a private-CA GitHub
-	// Enterprise. When set, it is bind-mounted read-only into each worker
-	// container and the worker trusts it for its own outbound TLS (harness LLM
+	// Enterprise. Serve's LLM proxy trusts it, on top of the system pool, for
+	// its upstream TLS. It is also bind-mounted read-only into each worker
+	// container, and the worker trusts it for its own outbound TLS (harness LLM
 	// client, MCP/cmclient) and its git/gh subprocesses. Empty disables the
-	// feature. Container-only: the serve host itself uses the OS trust store.
+	// feature. Serve's other outbound calls use the OS trust store.
 	CACertFile string
 
 	// MaxCardCost is the cumulative USD ceiling per card. Workers receive it as
@@ -155,6 +157,7 @@ type ServiceConfig struct {
 type serviceRaw struct {
 	ContextMatrixURL          string            `koanf:"contextmatrix_url"`
 	ContainerContextMatrixURL string            `koanf:"container_contextmatrix_url"`
+	ContainerServeURL         string            `koanf:"container_serve_url"`
 	APIKey                    string            `koanf:"api_key"`
 	MCPAPIKey                 string            `koanf:"mcp_api_key"`
 	Port                      int               `koanf:"port"`
@@ -403,6 +406,7 @@ func (r serviceRaw) toConfig() (*ServiceConfig, error) {
 	return &ServiceConfig{
 		ContextMatrixURL:          r.ContextMatrixURL,
 		ContainerContextMatrixURL: r.ContainerContextMatrixURL,
+		ContainerServeURL:         r.ContainerServeURL,
 		APIKey:                    r.APIKey,
 		MCPAPIKey:                 r.MCPAPIKey,
 		Port:                      r.Port,
@@ -475,7 +479,7 @@ func isLoopbackURL(rawURL string) bool {
 	}
 
 	hostname := u.Hostname()
-	if hostname == "localhost" {
+	if strings.EqualFold(hostname, "localhost") {
 		return true
 	}
 
@@ -484,6 +488,48 @@ func isLoopbackURL(rawURL string) bool {
 	}
 
 	return false
+}
+
+// validateContainerServeURL checks the worker-to-serve base URL. Empty is valid
+// (the host-gateway default); a loopback or unspecified host would point workers
+// at themselves.
+func validateContainerServeURL(raw string) error {
+	if raw == "" {
+		return nil
+	}
+
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("container_serve_url: %w", err)
+	}
+
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("container_serve_url must use http or https, got %q", raw)
+	}
+
+	if u.Hostname() == "" {
+		return fmt.Errorf("container_serve_url must include a host, got %q", raw)
+	}
+
+	if u.Path != "" && u.Path != "/" {
+		return fmt.Errorf("container_serve_url must not carry a path, got %q", raw)
+	}
+
+	// The raw check catches a bare "?" or "#", which url.Parse leaves with an
+	// empty query or fragment but which would still corrupt the appended "/llm".
+	if strings.ContainsAny(raw, "?#") {
+		return fmt.Errorf("container_serve_url must not carry a query or fragment, got %q", raw)
+	}
+
+	if ip := net.ParseIP(u.Hostname()); ip != nil && ip.IsUnspecified() {
+		return fmt.Errorf("container_serve_url must not be an unspecified address (0.0.0.0 or ::), got %q", raw)
+	}
+
+	if isLoopbackURL(raw) {
+		return fmt.Errorf("container_serve_url must not be a loopback host, got %q: workers would reach themselves", raw)
+	}
+
+	return nil
 }
 
 // Validate checks the service config invariants after merging. A non-digest
@@ -530,6 +576,10 @@ func (c *ServiceConfig) Validate() error {
 					"host: workers would point at their own loopback and fail at MCP connect",
 			)
 		}
+	}
+
+	if err := validateContainerServeURL(c.ContainerServeURL); err != nil {
+		return err
 	}
 
 	switch c.ReasoningEffort {

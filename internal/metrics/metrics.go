@@ -9,6 +9,8 @@
 package metrics
 
 import (
+	"slices"
+
 	backendkitmetrics "github.com/mhersson/contextmatrix-backendkit/metrics"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -26,7 +28,8 @@ const (
 // endpointAllowlist enumerates the request paths the agent serves. Any inbound
 // path outside this set collapses to "other" via NormalizeEndpoint so a stray
 // probe cannot inflate metric label cardinality. Keep this in lockstep with
-// webhook.Server.Routes() (the main mux) plus the admin /metrics path.
+// webhook.Server.Routes() (the main mux) plus the admin /metrics path; the LLM
+// proxy's paths arrive through New's extraEndpoints.
 var endpointAllowlist = []string{
 	"/trigger",
 	"/kill",
@@ -51,11 +54,12 @@ type Metrics struct {
 }
 
 // New registers the agent metrics on a fresh registry and returns the bundle.
-// The dedicated registry also carries the standard Go runtime + Process
-// collectors so /metrics exposes go_* / process_* alongside the cm_agent_*
-// series - the dedicated-registry shape would otherwise drop them.
-func New() *Metrics {
-	base := backendkitmetrics.New("cm_agent", endpointAllowlist)
+// extraEndpoints extend the allowlist. The dedicated registry also carries the
+// standard Go runtime + Process collectors so /metrics exposes go_* /
+// process_* alongside the cm_agent_* series - the dedicated-registry shape
+// would otherwise drop them.
+func New(extraEndpoints ...string) *Metrics {
+	base := backendkitmetrics.New("cm_agent", slices.Concat(endpointAllowlist, extraEndpoints))
 
 	return &Metrics{
 		Metrics: base,

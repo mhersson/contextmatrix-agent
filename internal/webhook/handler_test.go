@@ -1,6 +1,7 @@
 package webhook
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -18,11 +19,14 @@ import (
 	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/executor"
+	"github.com/mhersson/contextmatrix-agent/internal/metrics"
 	"github.com/mhersson/contextmatrix-agent/internal/secrets"
 	"github.com/mhersson/contextmatrix-backendkit/frames"
+	"github.com/mhersson/contextmatrix-backendkit/llmproxy"
 	"github.com/mhersson/contextmatrix-backendkit/logbridge"
 	"github.com/mhersson/contextmatrix-backendkit/webhookcore"
 	protocol "github.com/mhersson/contextmatrix-protocol"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -30,6 +34,9 @@ import (
 // ---- signing helpers --------------------------------------------------------
 
 const testAPIKey = "test-secret-key"
+
+// testLLMBaseURL stands in for the container-reachable proxy URL serve stages.
+const testLLMBaseURL = "http://serve.internal:9092/llm"
 
 // signReq stamps r with a valid HMAC signature for the given key over
 // METHOD\nURI\nTS.BODY using the supplied timestamp.
@@ -243,6 +250,78 @@ func (f *fakeCredentials) teardownCalls() [][3]string {
 	return out
 }
 
+// fakeLLMProxy records registrations and revocations, hands out "tok-"+runKey
+// unless registerErr is set, and answers every request it serves with
+// StatusTeapot, a status no middleware writes. It satisfies LLMProxy.
+type fakeLLMProxy struct {
+	mu sync.Mutex
+
+	registerErr error
+	registers   []registerCall
+	revokes     []string
+	served      int
+}
+
+type registerCall struct {
+	runKey string
+	up     protocol.LLMEndpoint
+}
+
+func (f *fakeLLMProxy) Register(runKey string, up protocol.LLMEndpoint) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.registerErr != nil {
+		return "", f.registerErr
+	}
+
+	f.registers = append(f.registers, registerCall{runKey, up})
+
+	return "tok-" + runKey, nil
+}
+
+func (f *fakeLLMProxy) Revoke(runKey string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.revokes = append(f.revokes, runKey)
+}
+
+func (f *fakeLLMProxy) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
+	f.mu.Lock()
+	f.served++
+	f.mu.Unlock()
+
+	w.WriteHeader(http.StatusTeapot)
+}
+
+func (f *fakeLLMProxy) registerCalls() []registerCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	out := make([]registerCall, len(f.registers))
+	copy(out, f.registers)
+
+	return out
+}
+
+func (f *fakeLLMProxy) revokeCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	out := make([]string, len(f.revokes))
+	copy(out, f.revokes)
+
+	return out
+}
+
+func (f *fakeLLMProxy) servedCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.served
+}
+
 // fakeImageLister returns a fixed set of image summaries or an error. It
 // satisfies webhookcore.ImageLister.
 type fakeImageLister struct {
@@ -294,6 +373,8 @@ type harness struct {
 	tracker  *executor.Tracker
 	reporter *fakeReporter
 	verifier *fakeVerifier
+	creds    *fakeCredentials
+	proxy    *fakeLLMProxy
 	hub      *logbridge.Hub
 	images   *fakeImageLister
 	draining *atomic.Bool
@@ -306,6 +387,8 @@ func newHarness(t *testing.T, maxConcurrent int) *harness {
 	exec := &fakeExecutor{tracker: tracker}
 	reporter := &fakeReporter{}
 	verifier := &fakeVerifier{autonomous: true}
+	creds := &fakeCredentials{}
+	proxy := &fakeLLMProxy{}
 	hub := logbridge.NewHub(func(e protocol.LogEntry) string { return e.Project }, nil)
 	images := &fakeImageLister{}
 	draining := &atomic.Bool{}
@@ -319,15 +402,19 @@ func newHarness(t *testing.T, maxConcurrent int) *harness {
 		Hub:           hub,
 		Reporter:      reporter,
 		Verifier:      verifier,
+		Credentials:   creds,
+		LLMProxy:      proxy,
 		LaunchEnv: LaunchEnv{
 			BaseImage:               "base:image",
 			MCPURL:                  "http://cm:8080/mcp",
 			MCPAPIKey:               "cfg-mcp-key",
+			LLMBaseURL:              testLLMBaseURL,
 			ContainerTimeoutSeconds: 9000, // mirrors config.Defaults()'s 2h30m container_timeout
 		},
 		Images:           images,
 		ImageListFilters: []string{"contextmatrix-agent"},
 		Draining:         draining,
+		Logger:           quietLogger(),
 	})
 
 	return &harness{
@@ -336,6 +423,8 @@ func newHarness(t *testing.T, maxConcurrent int) *harness {
 		tracker:  tracker,
 		reporter: reporter,
 		verifier: verifier,
+		creds:    creds,
+		proxy:    proxy,
 		hub:      hub,
 		images:   images,
 		draining: draining,
@@ -386,6 +475,18 @@ func (h *harness) addRun(cardID, project string) *nopWriteCloser {
 	})
 
 	return stdin
+}
+
+// awaitStatuses waits for n status callbacks; launch reports only after
+// admission has provisioned, launched or rolled back.
+func (h *harness) awaitStatuses(t *testing.T, n int) [][3]string {
+	t.Helper()
+
+	require.Eventually(t, func() bool {
+		return len(h.reporter.statuses()) >= n
+	}, time.Second, 5*time.Millisecond)
+
+	return h.reporter.statuses()
 }
 
 func decodeErr(t *testing.T, w *httptest.ResponseRecorder) protocol.ErrorResponse {
@@ -630,6 +731,235 @@ func TestTrigger_SuppliedCorrelationIDIsNamespacedNotTrusted(t *testing.T) {
 		"a repeated X-Correlation-ID must not collapse two runs onto one id")
 	assert.Contains(t, specs[1].CorrelationID, "static-trace-id",
 		"the supplied id stays recognizable inside the namespaced run id")
+}
+
+// ---- LLM proxy --------------------------------------------------------------
+
+// TestTriggerStagesProxyTokenNotRealKey: the worker's credential file carries
+// the run's stand-in token and serve's proxy URL, so the real key reaches
+// neither that file nor the container env.
+func TestTriggerStagesProxyTokenNotRealKey(t *testing.T) {
+	tests := []struct {
+		name     string
+		endpoint protocol.LLMEndpoint
+	}{
+		{
+			name:     "gateway endpoint",
+			endpoint: protocol.LLMEndpoint{Type: "openai", BaseURL: "https://llm.example/v1", APIKey: "cm-llm-key"},
+		},
+		{
+			name:     "keyless openrouter endpoint",
+			endpoint: protocol.LLMEndpoint{Type: "openrouter"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t, 4)
+
+			payload := provisionedPayload("PROJ-PROXY")
+			payload.LLMEndpoint = &tt.endpoint
+
+			w := h.do(t, http.MethodPost, "/trigger", payload)
+			require.Equal(t, http.StatusAccepted, w.Code)
+			require.Equal(t, "running", h.awaitStatuses(t, 1)[0][1])
+
+			provisions := h.creds.provisionCalls()
+			require.Len(t, provisions, 1)
+			assert.Equal(t, secrets.EndpointSecrets{
+				Type:    tt.endpoint.Type,
+				BaseURL: testLLMBaseURL,
+				APIKey:  "tok-" + provisions[0].correlationID,
+			}, provisions[0].endpoint)
+
+			specs := h.exec.launchedSpecs()
+			require.Len(t, specs, 1)
+
+			if tt.endpoint.APIKey != "" {
+				assert.NotContains(t, strings.Join(specs[0].Env, "\n"), tt.endpoint.APIKey)
+			}
+		})
+	}
+}
+
+// TestTriggerRegistersPayloadEndpointUnderRunID: the proxy holds the payload's
+// real endpoint under the run's correlation id, so a re-trigger of the card
+// registers a run of its own instead of replacing the earlier one.
+func TestTriggerRegistersPayloadEndpointUnderRunID(t *testing.T) {
+	h := newHarness(t, 4)
+
+	payload := provisionedPayload("PROJ-RUNKEY")
+	ts := time.Now().Unix()
+
+	w := h.doAt(t, http.MethodPost, "/trigger", payload, strconv.FormatInt(ts, 10))
+	require.Equal(t, http.StatusAccepted, w.Code)
+	h.awaitStatuses(t, 1)
+
+	// The first run exits; a fresh timestamp keeps the replay cache out of it.
+	h.tracker.Remove("proj", "PROJ-RUNKEY")
+
+	w = h.doAt(t, http.MethodPost, "/trigger", payload, strconv.FormatInt(ts+1, 10))
+	require.Equal(t, http.StatusAccepted, w.Code)
+	h.awaitStatuses(t, 2)
+
+	registers := h.proxy.registerCalls()
+	require.Len(t, registers, 2)
+
+	provisions := h.creds.provisionCalls()
+	require.Len(t, provisions, 2)
+
+	for i := range registers {
+		assert.Equal(t, provisions[i].correlationID, registers[i].runKey)
+		assert.Equal(t, *payload.LLMEndpoint, registers[i].up)
+	}
+
+	assert.NotEqual(t, registers[0].runKey, registers[1].runKey)
+}
+
+// TestTriggerRevokesTokenOnLaunchFailure: a run that never starts leaves no
+// live token behind, while a launched run keeps its token.
+func TestTriggerRevokesTokenOnLaunchFailure(t *testing.T) {
+	tests := []struct {
+		name         string
+		provisionErr error
+		launchErr    error
+		wantStatus   string
+		wantRevoked  bool
+	}{
+		{name: "provision error", provisionErr: errors.New("disk full"), wantStatus: "failed", wantRevoked: true},
+		{name: "executor error", launchErr: errors.New("boom"), wantStatus: "failed", wantRevoked: true},
+		{name: "launched", wantStatus: "running"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t, 4)
+			h.creds.provisionErr = tt.provisionErr
+			h.exec.launchErr = tt.launchErr
+
+			w := h.do(t, http.MethodPost, "/trigger", provisionedPayload("PROJ-REVOKE"))
+			require.Equal(t, http.StatusAccepted, w.Code)
+			require.Equal(t, tt.wantStatus, h.awaitStatuses(t, 1)[0][1])
+
+			registers := h.proxy.registerCalls()
+			require.Len(t, registers, 1)
+
+			if tt.wantRevoked {
+				assert.Equal(t, []string{registers[0].runKey}, h.proxy.revokeCalls())
+			} else {
+				assert.Empty(t, h.proxy.revokeCalls())
+			}
+		})
+	}
+}
+
+// TestTriggerFailsClosedWithoutUsableProxy: with no proxy token to stage, the
+// only thing left to stage would be the real key, so nothing is provisioned or
+// launched.
+func TestTriggerFailsClosedWithoutUsableProxy(t *testing.T) {
+	tests := []struct {
+		name    string
+		disable func(h *harness)
+	}{
+		{name: "no proxy", disable: func(h *harness) { h.server.llmProxy = nil }},
+		{name: "register error", disable: func(h *harness) { h.proxy.registerErr = errors.New("invalid upstream base URL") }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t, 4)
+			tt.disable(h)
+
+			w := h.do(t, http.MethodPost, "/trigger", provisionedPayload("PROJ-NOPROXY"))
+			require.Equal(t, http.StatusAccepted, w.Code)
+
+			assert.Equal(t, "failed", h.awaitStatuses(t, 1)[0][1])
+			assert.Empty(t, h.creds.provisionCalls())
+			assert.Empty(t, h.exec.launchedSpecs())
+		})
+	}
+}
+
+// TestProxyRouteSkipsAuthAndDrainGate: workers authenticate to the proxy with
+// their run token rather than the ContextMatrix signature, and a worker
+// parking during a drain still needs its LLM calls answered.
+func TestProxyRouteSkipsAuthAndDrainGate(t *testing.T) {
+	h := newHarness(t, 4)
+	h.draining.Store(true)
+
+	r := httptest.NewRequest(http.MethodPost, LLMProxyPrefix+"/chat/completions", strings.NewReader("{}"))
+	w := httptest.NewRecorder()
+	h.server.Routes().ServeHTTP(w, r)
+
+	assert.Equal(t, http.StatusTeapot, w.Code)
+	assert.Equal(t, 1, h.proxy.servedCount())
+}
+
+// TestProxyRouteStreamsThroughMetrics drives the real proxy through Routes: a
+// streamed completion reaches the worker event by event rather than once the
+// upstream finishes, and the request counts under its own endpoint label.
+func TestProxyRouteStreamsThroughMetrics(t *testing.T) {
+	release := make(chan struct{})
+
+	var releaseOnce sync.Once
+
+	releaseUpstream := func() { releaseOnce.Do(func() { close(release) }) }
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"x\":1}\n\n")
+		w.(http.Flusher).Flush()
+
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(upstream.Close)
+
+	proxy, err := llmproxy.New(llmproxy.Config{Prefix: LLMProxyPrefix, Logger: quietLogger()})
+	require.NoError(t, err)
+
+	token, err := proxy.Register("run-1", protocol.LLMEndpoint{Type: "openai", BaseURL: upstream.URL})
+	require.NoError(t, err)
+
+	m := metrics.New(llmproxy.Paths(LLMProxyPrefix)...)
+	s := NewServer(Config{APIKey: testAPIKey, LLMProxy: proxy, Metrics: m, Logger: quietLogger()})
+
+	ts := httptest.NewServer(s.Routes())
+	t.Cleanup(ts.Close)
+	// Registered last so it runs first: a blocked upstream never wedges Close.
+	t.Cleanup(releaseUpstream)
+
+	// The deadline bounds both the headers and the first event, so a route
+	// that buffers the stream fails here instead of hanging.
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ts.URL+LLMProxyPrefix+"/chat/completions", strings.NewReader("{}"))
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body := bufio.NewReader(resp.Body)
+	first, err := body.ReadString('\n')
+	require.NoError(t, err, "the first event must arrive while the upstream is still streaming")
+	assert.Equal(t, "data: {\"x\":1}\n", first)
+
+	releaseUpstream()
+
+	_, err = io.Copy(io.Discard, body)
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		return testutil.ToFloat64(m.WebhookRequestsTotal.WithLabelValues("llm/chat/completions", "200", "success")) == 1
+	}, time.Second, 5*time.Millisecond)
 }
 
 // ---- kill -------------------------------------------------------------------
@@ -1414,6 +1744,7 @@ func newHarnessWithBudget(t *testing.T, maxCardCost float64) *harness {
 		Tracker:       tracker,
 		Hub:           hub,
 		Reporter:      reporter,
+		LLMProxy:      &fakeLLMProxy{},
 		Verifier:      verifier,
 		LaunchEnv: LaunchEnv{
 			BaseImage:   "base:image",
@@ -1964,8 +2295,9 @@ func TestLaunch_ProvisionsPerRunCredentials(t *testing.T) {
 		Executor:    &fakeExecutor{tracker: tracker},
 		Tracker:     tracker,
 		Reporter:    reporter,
+		LLMProxy:    &fakeLLMProxy{},
 		Credentials: creds,
-		LaunchEnv:   LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"},
+		LaunchEnv:   LaunchEnv{BaseImage: "img", MCPURL: "http://mcp", LLMBaseURL: testLLMBaseURL},
 		Logger:      quietLogger(),
 	})
 
@@ -1988,7 +2320,7 @@ func TestLaunch_ProvisionsPerRunCredentials(t *testing.T) {
 		correlationID: "corr",
 		token:         "cm-git-token",
 		expiresAt:     "2026-07-05T12:00:00Z",
-		endpoint:      secrets.EndpointSecrets{Type: "openai", BaseURL: "https://llm.example/v1", APIKey: "cm-llm-key"},
+		endpoint:      secrets.EndpointSecrets{Type: "openai", BaseURL: testLLMBaseURL, APIKey: "tok-corr"},
 	}, calls[0])
 	assert.Empty(t, creds.teardownCalls(), "no teardown on a successful launch")
 	assert.Equal(t, [][3]string{{"C1", "running", ""}}, reporter.statuses())
@@ -2005,6 +2337,7 @@ func TestLaunch_TearsDownPerRunCredentialsOnLaunchFailure(t *testing.T) {
 		Executor:    &fakeExecutor{launchErr: errors.New("boom")},
 		Tracker:     executor.NewTracker(1),
 		Reporter:    reporter,
+		LLMProxy:    &fakeLLMProxy{},
 		Credentials: creds,
 		LaunchEnv:   LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"},
 		Logger:      quietLogger(),
@@ -2037,6 +2370,7 @@ func TestLaunch_ProvisionFailureReportsFailedWithoutLaunching(t *testing.T) {
 		Executor:    exec,
 		Tracker:     executor.NewTracker(1),
 		Reporter:    reporter,
+		LLMProxy:    &fakeLLMProxy{},
 		Credentials: creds,
 		LaunchEnv:   LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"},
 		Logger:      quietLogger(),
@@ -2075,6 +2409,7 @@ func TestLaunch_DuplicateTriggerDoesNotClobberWinnerCredentials(t *testing.T) {
 		Executor:    &fakeExecutor{tracker: tracker},
 		Tracker:     tracker,
 		Reporter:    reporter,
+		LLMProxy:    &fakeLLMProxy{},
 		Credentials: creds,
 		LaunchEnv:   LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"},
 		Logger:      quietLogger(),
@@ -2114,6 +2449,7 @@ func TestLaunch_ConcurrentDuplicateTriggersSerialized(t *testing.T) {
 		Executor:    &fakeExecutor{tracker: tracker},
 		Tracker:     tracker,
 		Reporter:    reporter,
+		LLMProxy:    &fakeLLMProxy{},
 		Credentials: creds,
 		LaunchEnv:   LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"},
 		Logger:      quietLogger(),
@@ -2180,6 +2516,7 @@ func TestLaunch_GitTokenAloneDoesNotSatisfyLLMGuard(t *testing.T) {
 		Executor:    exec,
 		Tracker:     tracker,
 		Reporter:    reporter,
+		LLMProxy:    &fakeLLMProxy{},
 		Credentials: &fakeCredentials{},
 		LaunchEnv:   LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"}, // no local fallback at all
 		Logger:      quietLogger(),
@@ -2207,6 +2544,7 @@ func TestLaunch_LLMEndpointAloneDoesNotSatisfyGitTokenGuard(t *testing.T) {
 		Executor:  exec,
 		Tracker:   tracker,
 		Reporter:  reporter,
+		LLMProxy:  &fakeLLMProxy{},
 		LaunchEnv: LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"}, // no local fallback at all
 		Logger:    quietLogger(),
 	})
@@ -2237,6 +2575,7 @@ func TestLaunch_GuardsDoNotFireWhenPayloadProvisionsBoth(t *testing.T) {
 		Executor:    &fakeExecutor{tracker: tracker},
 		Tracker:     tracker,
 		Reporter:    reporter,
+		LLMProxy:    &fakeLLMProxy{},
 		Credentials: creds,
 		LaunchEnv:   LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"}, // deliberately no local fallback
 		Logger:      quietLogger(),
@@ -2272,6 +2611,7 @@ func TestTrigger_RejectsAndReportsFailedWhenNoCredentialSourceAtAll(t *testing.T
 		Tracker:       tracker,
 		Hub:           hub,
 		Reporter:      reporter,
+		LLMProxy:      &fakeLLMProxy{},
 		Verifier:      &fakeVerifier{autonomous: true},
 		LaunchEnv: LaunchEnv{
 			BaseImage: "base:image",
@@ -2377,33 +2717,20 @@ func TestRunEndpointCarriesMobGuests(t *testing.T) {
 
 	t.Run("guests marshal alongside the llm endpoint", func(t *testing.T) {
 		e := s.runEndpoint(protocol.TriggerPayload{
-			LLMEndpoint: &protocol.LLMEndpoint{Type: "openai", BaseURL: "https://llm.example/v1", APIKey: "key"},
 			Mob: &protocol.MobSpec{
 				Participants: 3,
 				Guests:       []protocol.GuestSpec{{Name: "laptop", URL: "http://10.0.0.5:8484", Token: "guest-secret"}},
 			},
-		})
+		}, protocol.LLMEndpoint{Type: "openai", BaseURL: testLLMBaseURL, APIKey: "tok-run"})
 
-		assert.Equal(t, "key", e.APIKey)
+		assert.Equal(t, "tok-run", e.APIKey)
 		assert.JSONEq(t,
 			`[{"name":"laptop","url":"http://10.0.0.5:8484","token":"guest-secret"}]`,
 			e.MobGuests)
 	})
 
-	t.Run("guests survive a nil llm endpoint", func(t *testing.T) {
-		e := s.runEndpoint(protocol.TriggerPayload{
-			Mob: &protocol.MobSpec{
-				Participants: 2,
-				Guests:       []protocol.GuestSpec{{Name: "laptop", URL: "http://10.0.0.5:8484"}},
-			},
-		})
-
-		assert.Empty(t, e.APIKey)
-		assert.NotEmpty(t, e.MobGuests)
-	})
-
 	t.Run("no guests yields empty string", func(t *testing.T) {
-		e := s.runEndpoint(protocol.TriggerPayload{Mob: &protocol.MobSpec{Participants: 3}})
+		e := s.runEndpoint(protocol.TriggerPayload{Mob: &protocol.MobSpec{Participants: 3}}, protocol.LLMEndpoint{})
 		assert.Empty(t, e.MobGuests)
 	})
 }

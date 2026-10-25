@@ -743,7 +743,7 @@ func clearServiceEnv(t *testing.T) {
 	for _, e := range []string{
 		"CMX_CONTEXTMATRIX_URL", "CMX_PORT",
 		"CMX_API_KEY", "CMX_BASE_IMAGE", "CMX_MAX_CONCURRENT",
-		"CMX_CA_CERT_FILE",
+		"CMX_CA_CERT_FILE", "CMX_CONTAINER_SERVE_URL",
 		"CMX_LOG_DIR",
 		"CMX_MAX_CARD_COST", "CMX_SELECTOR_PRICE_HEADROOM",
 		"CMX_SELECTOR_TIER_BARS", "CMX_SELECTOR_TIER_BARS__CRITICAL",
@@ -1037,4 +1037,55 @@ func TestServiceReplayReasoning(t *testing.T) {
 		require.NoError(t, err)
 		assert.False(t, cfg.ReplayReasoning)
 	})
+}
+
+func TestValidateContainerServeURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		url     string
+		wantErr bool
+	}{
+		{"empty uses the host gateway default", "", false},
+		{"routable http", "http://172.17.0.1:9092", false},
+		{"https with trailing slash", "https://serve.example:9092/", false},
+		{"non-http scheme", "ftp://serve.example:1", true},
+		{"missing host", "http://", true},
+		{"path other than root", "http://serve.example:9092/llm", true},
+		{"loopback address", "http://127.0.0.1:9092", true},
+		{"localhost", "http://localhost:9092", true},
+		{"uppercase localhost", "http://LOCALHOST:9092", true},
+		{"query string", "http://serve.example:9092?x=1", true},
+		{"bare query marker", "http://serve.example:9092?", true},
+		{"bare query marker after root", "http://serve.example:9092/?", true},
+		{"fragment", "http://serve.example:9092#f", true},
+		{"bare fragment marker after root", "http://serve.example:9092/#", true},
+		{"unspecified IPv4 address", "http://0.0.0.0:9092", true},
+		{"unspecified IPv6 address", "http://[::]:9092", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validServiceConfig()
+			cfg.ContainerServeURL = tt.url
+
+			err := cfg.Validate()
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "container_serve_url")
+
+				return
+			}
+
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestLoadServiceContainerServeURLEnv(t *testing.T) {
+	clearServiceEnv(t)
+	t.Setenv("CMX_CONTAINER_SERVE_URL", "http://172.17.0.1:9092")
+
+	cfg, err := LoadService(filepath.Join(t.TempDir(), "missing.yaml"))
+	require.NoError(t, err)
+	assert.Equal(t, "http://172.17.0.1:9092", cfg.ContainerServeURL)
 }
