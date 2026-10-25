@@ -18,3 +18,7 @@ func setupProcessGroup(cmd *exec.Cmd) {
 		return cmd.Process.Kill()
 	}
 }
+
+// killProcessGroup is a no-op on Windows: there is no process group to reach
+// once the direct child has exited.
+func killProcessGroup(*exec.Cmd) error { return nil }

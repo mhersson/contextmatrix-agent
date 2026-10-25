@@ -67,3 +67,45 @@ func TestExecTimeoutKillsProcessGroup(t *testing.T) {
 	}, 3*time.Second, 50*time.Millisecond,
 		"grandchild %d survived the verify timeout: the process group was not killed", pid)
 }
+
+// TestExecReapsBackgroundedDescendants pins that a command which exits on its
+// own while a backgrounded descendant still holds the output pipe reports the
+// command's real exit status, not a start error, and that the descendant does
+// not outlive the call. A short wait delay keeps the pipe hand-off fast.
+func TestExecReapsBackgroundedDescendants(t *testing.T) {
+	tests := []struct {
+		name     string
+		exitCode int
+	}{
+		{name: "success", exitCode: 0},
+		{name: "failure", exitCode: 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			pidFile := filepath.Join(dir, "background.pid")
+
+			out := execWithEnv(context.Background(), dir, []string{
+				"sh", "-c", "sleep 30 & echo $! > " + pidFile + "; echo ok; exit " + strconv.Itoa(tt.exitCode),
+			}, time.Minute, 100*time.Millisecond, os.Environ())
+
+			assert.False(t, out.StartErr, "a command that ran must not read as a start error")
+			assert.False(t, out.TimedOut)
+			assert.Equal(t, tt.exitCode, out.ExitCode)
+			assert.Contains(t, out.Output, "ok")
+
+			raw, err := os.ReadFile(pidFile)
+			require.NoError(t, err, "the shell must have recorded the background pid")
+
+			pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+			require.NoError(t, err, "background pid must parse")
+			require.Positive(t, pid)
+
+			require.Eventually(t, func() bool {
+				return syscall.Kill(pid, 0) != nil
+			}, 3*time.Second, 50*time.Millisecond,
+				"background process %d outlived the verify command", pid)
+		})
+	}
+}

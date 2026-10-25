@@ -15,12 +15,16 @@ import (
 func setupProcessGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return nil
-		}
+	cmd.Cancel = func() error { return killProcessGroup(cmd) }
+}
 
-		// Negated pgid kills every process in the group.
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+// killProcessGroup SIGKILLs every process in cmd's group. It is a no-op for a
+// command that never started.
+func killProcessGroup(cmd *exec.Cmd) error {
+	if cmd.Process == nil {
+		return nil
 	}
+
+	// Negated pgid kills every process in the group.
+	return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 }
