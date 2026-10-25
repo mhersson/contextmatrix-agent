@@ -28,15 +28,24 @@ import (
 type workerBehavior int
 
 const (
-	// parks exits on end_session, the way the worker does after pushing WIP.
+	// parks exits on end_session, the way the worker does after pushing WIP,
+	// and its exit callback reports completed.
 	parks workerBehavior = iota
 	// ignores keeps running, so only the kill sweep stops it.
 	ignores
 	// unreachable has a stdin that refuses every write.
 	unreachable
 	// callsThenParks finishes its turn after end_session: it calls proxyURL,
-	// the way a worker reaches the LLM proxy on serve's listener, then exits.
+	// the way a worker reaches the LLM proxy on serve's listener, then parks.
 	callsThenParks
+	// exitsSilently exits on end_session, but its exit callback never reports
+	// before the process exits.
+	exitsSilently
+	// admitsAnotherThenParks parks, and another card's run is admitted first.
+	admitsAnotherThenParks
+	// parksAndIsReplaced parks, and a successor run of the same card is
+	// admitted at once under the same key.
+	parksAndIsReplaced
 )
 
 // proxyCall is the outcome of a callsThenParks worker's request.
@@ -45,16 +54,54 @@ type proxyCall struct {
 	err    error
 }
 
-// workerStdin is a tracked run's stdin. It records end_session frames and, for
-// a parking worker, drops the run from the tracker as the executor does once
-// the container exits.
+// fleet is what the fake workers share with the drain: the tracker the
+// executor keeps, the status callbacks their exits report, and the claims
+// that keep those reports to one per run.
+type fleet struct {
+	tracker  *executor.Tracker
+	reporter *statusRecorder
+	reports  *exitReports
+}
+
+// admit tracks a run for cardID under correlationID, answering end_session
+// as behavior says.
+func (f *fleet) admit(cardID, correlationID string, behavior workerBehavior) (*workerStdin, bool) {
+	stdin := &workerStdin{behavior: behavior, fleet: f, calls: make(chan proxyCall, 1)}
+	stdin.run = &executor.Run{
+		ContainerID:   "ctr-" + correlationID,
+		CardID:        cardID,
+		Project:       "proj",
+		CorrelationID: correlationID,
+		StartedAt:     time.Now(),
+		Stdin:         stdin,
+	}
+
+	return stdin, f.tracker.AddIfUnderLimit(stdin.run)
+}
+
+// exit is a run's own exit path: the executor drops the run, then its exit
+// callback reports.
+func (f *fleet) exit(run *executor.Run, status string) {
+	f.tracker.Remove(run.Project, run.CardID)
+	f.report(run, status)
+}
+
+// report is the run's exit callback reporting status, as onContainerExit
+// does: not at all when the sweep has reported the run.
+func (f *fleet) report(run *executor.Run, status string) {
+	f.reports.report(run.CorrelationID, func() {
+		_ = f.reporter.ReportStatus(context.Background(), run.CardID, run.Project, status, "")
+	})
+}
+
+// workerStdin is a tracked run's stdin. It records end_session frames and acts
+// out the run's behavior.
 type workerStdin struct {
 	mu       sync.Mutex
 	ends     int
 	behavior workerBehavior
-	tracker  *executor.Tracker
-	project  string
-	cardID   string
+	fleet    *fleet
+	run      *executor.Run
 	proxyURL string
 	calls    chan proxyCall
 }
@@ -79,9 +126,21 @@ func (w *workerStdin) Write(p []byte) (int, error) {
 
 	switch w.behavior {
 	case parks:
-		go w.tracker.Remove(w.project, w.cardID)
+		go w.fleet.exit(w.run, "completed")
 	case callsThenParks:
 		go w.callThenPark()
+	case exitsSilently:
+		go w.fleet.tracker.Remove(w.run.Project, w.run.CardID)
+	case admitsAnotherThenParks:
+		w.fleet.admit("CARD-9", "run-9", ignores)
+
+		go w.fleet.exit(w.run, "completed")
+	case parksAndIsReplaced:
+		go func() {
+			w.fleet.tracker.Remove(w.run.Project, w.run.CardID)
+			w.fleet.admit(w.run.CardID, w.run.CorrelationID+"-successor", ignores)
+			w.fleet.report(w.run, "completed")
+		}()
 	}
 
 	return len(p), nil
@@ -104,7 +163,7 @@ func (w *workerStdin) callThenPark() {
 
 	w.calls <- call
 
-	w.tracker.Remove(w.project, w.cardID)
+	w.fleet.exit(w.run, "completed")
 }
 
 func (w *workerStdin) Close() error { return nil }
@@ -116,27 +175,76 @@ func (w *workerStdin) endSessions() int {
 	return w.ends
 }
 
-// killRecorder is an executor whose Kill records when each card was killed and
-// removes the run, standing in for the SIGKILL and the exit cleanup.
+// barrier holds every caller until n have arrived or the caller's context
+// ends, so a test can tell concurrent calls from serial ones.
+type barrier struct {
+	n       int32
+	arrived atomic.Int32
+	all     chan struct{}
+}
+
+func newBarrier(n int) *barrier {
+	return &barrier{n: int32(n), all: make(chan struct{})}
+}
+
+func (b *barrier) wait(ctx context.Context) error {
+	if b.arrived.Add(1) == b.n {
+		close(b.all)
+	}
+
+	select {
+	case <-b.all:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// killRecorder is an executor whose Kill records when each card was killed
+// and drops the run, standing in for the SIGKILL and the exit cleanup. When
+// exitReports is set, the killed run's exit callback then races the sweep to
+// report it.
 type killRecorder struct {
-	mu      sync.Mutex
-	tracker *executor.Tracker
-	killed  map[string]time.Time
+	mu          sync.Mutex
+	fleet       *fleet
+	killed      map[string]time.Time
+	exitReports bool
+
+	// gate, when set, holds each kill until it lets the kill through or the
+	// kill's context ends.
+	gate func(ctx context.Context) error
 }
 
 func (k *killRecorder) Launch(context.Context, executor.LaunchSpec) error { return nil }
 
-func (k *killRecorder) Kill(_ context.Context, project, cardID string) error {
+func (k *killRecorder) Kill(ctx context.Context, project, cardID string) error {
+	if k.gate != nil {
+		if err := k.gate(ctx); err != nil {
+			return err
+		}
+	}
+
 	k.mu.Lock()
 	k.killed[cardID] = time.Now()
 	k.mu.Unlock()
 
-	k.tracker.Remove(project, cardID)
+	run, ok := k.fleet.tracker.Get(project, cardID)
+	if !ok {
+		return executor.ErrNotFound
+	}
+
+	if k.exitReports {
+		go k.fleet.exit(run, "failed")
+	} else {
+		k.fleet.tracker.Remove(project, cardID)
+	}
 
 	return nil
 }
 
-func (k *killRecorder) List(context.Context) ([]*executor.Run, error) { return k.tracker.List(), nil }
+func (k *killRecorder) List(context.Context) ([]*executor.Run, error) {
+	return k.fleet.tracker.List(), nil
+}
 
 func (k *killRecorder) StopAll(context.Context, string) ([]executor.StopResult, error) {
 	return nil, nil
@@ -155,9 +263,19 @@ func (k *killRecorder) killedAt() map[string]time.Time {
 type statusRecorder struct {
 	mu       sync.Mutex
 	statuses map[string][]string
+
+	// gate, when set, holds each callback until it lets it through or the
+	// callback's context ends.
+	gate func(ctx context.Context) error
 }
 
-func (s *statusRecorder) ReportStatus(_ context.Context, cardID, _, status, _ string) error {
+func (s *statusRecorder) ReportStatus(ctx context.Context, cardID, _, status, _ string) error {
+	if s.gate != nil {
+		if err := s.gate(ctx); err != nil {
+			return err
+		}
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -168,6 +286,7 @@ func (s *statusRecorder) ReportStatus(_ context.Context, cardID, _, status, _ st
 
 type shutdownHarness struct {
 	drain    workerDrain
+	fleet    *fleet
 	exec     *killRecorder
 	reporter *statusRecorder
 	revoker  *recordingRevoker
@@ -177,47 +296,38 @@ type shutdownHarness struct {
 
 // newShutdownHarness tracks one run per card, each answering end_session as
 // its behavior says, and wires the real webhook end-session path. A card
-// CARD-n runs under correlation id run-n.
+// CARD-n runs under correlation id run-n. The tracker has room for one more
+// run than workers.
 func newShutdownHarness(t *testing.T, wait time.Duration, workers map[string]workerBehavior) *shutdownHarness {
 	t.Helper()
 
-	tracker := executor.NewTracker(len(workers))
-	exec := &killRecorder{tracker: tracker, killed: map[string]time.Time{}}
 	reporter := &statusRecorder{statuses: map[string][]string{}}
+	f := &fleet{tracker: executor.NewTracker(len(workers) + 1), reporter: reporter, reports: newExitReports()}
+	exec := &killRecorder{fleet: f, killed: map[string]time.Time{}, exitReports: true}
 	revoker := &recordingRevoker{}
 	stdins := make(map[string]*workerStdin, len(workers))
 
 	for cardID, behavior := range workers {
-		stdin := &workerStdin{
-			behavior: behavior,
-			tracker:  tracker,
-			project:  "proj",
-			cardID:   cardID,
-			calls:    make(chan proxyCall, 1),
-		}
-		stdins[cardID] = stdin
+		stdin, admitted := f.admit(cardID, "run-"+strings.TrimPrefix(cardID, "CARD-"), behavior)
+		require.True(t, admitted)
 
-		require.True(t, tracker.AddIfUnderLimit(&executor.Run{
-			ContainerID:   "ctr-" + cardID,
-			CardID:        cardID,
-			Project:       "proj",
-			CorrelationID: "run-" + strings.TrimPrefix(cardID, "CARD-"),
-			StartedAt:     time.Now(),
-			Stdin:         stdin,
-		}))
+		stdins[cardID] = stdin
 	}
 
 	return &shutdownHarness{
 		drain: workerDrain{
-			tracker:  tracker,
-			sessions: webhook.NewServer(webhook.Config{Tracker: tracker, Logger: testLogger()}),
-			exec:     exec,
-			reporter: reporter,
-			revoker:  revoker,
-			logger:   testLogger(),
-			wait:     wait,
-			poll:     time.Millisecond,
+			tracker:      f.tracker,
+			sessions:     webhook.NewServer(webhook.Config{Tracker: f.tracker, Logger: testLogger()}),
+			exec:         exec,
+			reporter:     reporter,
+			reports:      f.reports,
+			revoker:      revoker,
+			logger:       testLogger(),
+			wait:         wait,
+			poll:         time.Millisecond,
+			sweepTimeout: 5 * time.Second,
 		},
+		fleet:    f,
 		exec:     exec,
 		reporter: reporter,
 		revoker:  revoker,
@@ -247,35 +357,55 @@ func (h *shutdownHarness) shutdown(ctx context.Context, t *testing.T, limit time
 	}
 }
 
-func TestGracefulShutdownKillsOnlyRunsThatDoNotPark(t *testing.T) {
+// statuses returns the status callbacks each card received.
+func (h *shutdownHarness) statuses() map[string][]string {
+	h.reporter.mu.Lock()
+	defer h.reporter.mu.Unlock()
+
+	return maps.Clone(h.reporter.statuses)
+}
+
+// TestGracefulShutdownReportsEachRunOnce: a run reports one terminal status.
+// A parked run keeps the completed its own exit callback reports, a killed
+// straggler is reported failed once whichever of the sweep and its exit
+// callback gets there first, and a run whose exit callback never reports is
+// reported failed by the sweep.
+func TestGracefulShutdownReportsEachRunOnce(t *testing.T) {
 	tests := []struct {
-		name       string
-		wait       time.Duration
-		workers    map[string]workerBehavior
-		wantKilled []string
+		name    string
+		wait    time.Duration
+		workers map[string]workerBehavior
+		want    map[string][]string
 	}{
 		{
 			name:    "every run parks within the wait",
 			wait:    time.Hour,
 			workers: map[string]workerBehavior{"CARD-1": parks, "CARD-2": parks},
+			want:    map[string][]string{"CARD-1": {"completed"}, "CARD-2": {"completed"}},
 		},
 		{
-			name:       "no run parks",
-			wait:       50 * time.Millisecond,
-			workers:    map[string]workerBehavior{"CARD-1": ignores, "CARD-2": ignores},
-			wantKilled: []string{"CARD-1", "CARD-2"},
+			name:    "no run parks",
+			wait:    50 * time.Millisecond,
+			workers: map[string]workerBehavior{"CARD-1": ignores, "CARD-2": ignores},
+			want:    map[string][]string{"CARD-1": {"failed"}, "CARD-2": {"failed"}},
 		},
 		{
-			name:       "a straggler among parked runs",
-			wait:       50 * time.Millisecond,
-			workers:    map[string]workerBehavior{"CARD-1": parks, "CARD-2": ignores},
-			wantKilled: []string{"CARD-2"},
+			name:    "a straggler among parked runs",
+			wait:    50 * time.Millisecond,
+			workers: map[string]workerBehavior{"CARD-1": parks, "CARD-2": ignores},
+			want:    map[string][]string{"CARD-1": {"completed"}, "CARD-2": {"failed"}},
 		},
 		{
-			name:       "an unreachable run is killed without holding the wait",
-			wait:       time.Hour,
-			workers:    map[string]workerBehavior{"CARD-1": parks, "CARD-2": unreachable},
-			wantKilled: []string{"CARD-2"},
+			name:    "an unreachable run is killed without holding the wait",
+			wait:    time.Hour,
+			workers: map[string]workerBehavior{"CARD-1": parks, "CARD-2": unreachable},
+			want:    map[string][]string{"CARD-1": {"completed"}, "CARD-2": {"failed"}},
+		},
+		{
+			name:    "a run whose exit callback never reports",
+			wait:    50 * time.Millisecond,
+			workers: map[string]workerBehavior{"CARD-1": parks, "CARD-2": exitsSilently},
+			want:    map[string][]string{"CARD-1": {"completed"}, "CARD-2": {"failed"}},
 		},
 	}
 
@@ -293,12 +423,16 @@ func TestGracefulShutdownKillsOnlyRunsThatDoNotPark(t *testing.T) {
 				assert.Equal(t, 1, h.stdins[cardID].endSessions(), "%s gets one end_session frame", cardID)
 			}
 
-			assert.ElementsMatch(t, tt.wantKilled, slices.Collect(maps.Keys(h.exec.killedAt())))
+			var wantKilled []string
 
-			for cardID := range tt.workers {
-				assert.Equal(t, []string{"failed"}, h.reporter.statuses[cardID],
-					"%s gets one terminal status even if its own exit callback never lands", cardID)
+			for cardID, behavior := range tt.workers {
+				if behavior == ignores || behavior == unreachable {
+					wantKilled = append(wantKilled, cardID)
+				}
 			}
+
+			assert.ElementsMatch(t, wantKilled, slices.Collect(maps.Keys(h.exec.killedAt())))
+			assert.Equal(t, tt.want, h.statuses())
 		})
 	}
 }
@@ -329,6 +463,66 @@ func TestGracefulShutdownWaitEndsWithTheShutdownContext(t *testing.T) {
 
 	assert.Contains(t, h.exec.killedAt(), "CARD-1", "a cancelled wait goes straight to the kill sweep")
 	assert.Equal(t, 1, h.stdins["CARD-1"].endSessions())
+}
+
+// TestGracefulShutdownSweepsConcurrently: every straggler's kill and every
+// status callback overlap, so the sweep's length does not grow with the run
+// count. Each kill and each callback here returns only once all of them have
+// started.
+func TestGracefulShutdownSweepsConcurrently(t *testing.T) {
+	workers := map[string]workerBehavior{"CARD-1": ignores, "CARD-2": ignores, "CARD-3": ignores}
+
+	h := newShutdownHarness(t, time.Millisecond, workers)
+	h.exec.exitReports = false
+	h.exec.gate = newBarrier(len(workers)).wait
+	h.reporter.gate = newBarrier(len(workers)).wait
+
+	h.shutdown(context.Background(), t, 5*time.Second)
+
+	assert.Len(t, h.exec.killedAt(), len(workers))
+	assert.Equal(t, map[string][]string{"CARD-1": {"failed"}, "CARD-2": {"failed"}, "CARD-3": {"failed"}}, h.statuses())
+}
+
+// TestGracefulShutdownSweepEndsAtItsDeadline: kills that never return cannot
+// hold the shutdown past the one deadline the sweep runs under.
+func TestGracefulShutdownSweepEndsAtItsDeadline(t *testing.T) {
+	h := newShutdownHarness(t, time.Millisecond, map[string]workerBehavior{"CARD-1": ignores, "CARD-2": ignores})
+	h.drain.sweepTimeout = 50 * time.Millisecond
+	h.exec.gate = func(ctx context.Context) error {
+		<-ctx.Done()
+
+		return ctx.Err()
+	}
+
+	h.shutdown(context.Background(), t, 5*time.Second)
+
+	assert.Empty(t, h.exec.killedAt())
+}
+
+// TestGracefulShutdownSweepsARunAdmittedAfterTheSnapshot: a run that enters
+// the tracker after shutdown listed the live runs is still killed, revoked
+// and reported.
+func TestGracefulShutdownSweepsARunAdmittedAfterTheSnapshot(t *testing.T) {
+	h := newShutdownHarness(t, 50*time.Millisecond, map[string]workerBehavior{"CARD-1": admitsAnotherThenParks})
+
+	h.shutdown(context.Background(), t, 5*time.Second)
+
+	assert.Contains(t, h.exec.killedAt(), "CARD-9")
+	assert.Contains(t, h.revoker.revoked, "run-9")
+	assert.Equal(t, []string{"failed"}, h.statuses()["CARD-9"])
+}
+
+// TestGracefulShutdownParkWaitIgnoresASuccessor: a run of the same card
+// admitted after the parked one exited is not mistaken for it, so the park
+// wait ends, and the successor is swept like any other run.
+func TestGracefulShutdownParkWaitIgnoresASuccessor(t *testing.T) {
+	h := newShutdownHarness(t, time.Hour, map[string]workerBehavior{"CARD-1": parksAndIsReplaced})
+
+	h.shutdown(context.Background(), t, 5*time.Second)
+
+	assert.Contains(t, h.exec.killedAt(), "CARD-1", "the successor is killed")
+	assert.ElementsMatch(t, []string{"completed", "failed"}, h.statuses()["CARD-1"])
+	assert.ElementsMatch(t, []string{"run-1", "run-1-successor"}, h.revoker.revoked)
 }
 
 // TestGracefulShutdownServesTheProxyUntilWorkersPark: the LLM proxy shares the

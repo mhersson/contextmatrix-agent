@@ -235,14 +235,14 @@ worker images (full + variants), pin the new full-image digest into
 A stop or restart drains rather than drops running cards: on SIGTERM `serve`
 refuses new work, sends every running worker an end-session so it pushes its
 work in progress and releases its card, waits up to 30 seconds for the workers
-to exit, then kills the rest. The kill sweep runs one card at a time: each
-worker still running after the wait adds about 3 seconds of kill grace, and
-each card running at shutdown adds one status callback (at most 10 seconds).
-The webhook listener closes only after the sweep, because parking workers reach
-the LLM proxy on it; the HTTP drain, shared with the admin listener, adds at most 10 seconds. At the default
-`max_concurrent` of 5 with ContextMatrix answering promptly, the sequence fits
-the unit's `TimeoutStopSec=60`; seven or more stragglers can outlast it. A
-second signal skips the wait.
+to exit, then kills the rest. The kill sweep handles every card at once under
+one 15-second deadline: it kills each worker still running (about 3 seconds of
+kill grace) and reports each card failed that its own exit has not already
+reported, so a parked card keeps its completed status. The webhook listener
+closes only after the sweep, because parking workers reach the LLM proxy on
+it; the HTTP drain, shared with the admin listener, adds at most 10 seconds.
+The sequence fits the unit's `TimeoutStopSec=60` however many cards are
+running. A second signal skips the wait.
 
 > **Run as UID 1000 on rootful Docker.** Per-run secrets are staged readable
 > only by the UID `serve` runs as, and the worker container runs as UID 1000, so

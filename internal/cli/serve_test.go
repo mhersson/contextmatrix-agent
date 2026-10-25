@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -199,10 +200,19 @@ func TestContainerLLMBaseURL(t *testing.T) {
 	}
 }
 
-// recordingRevoker records every run key it is asked to revoke.
-type recordingRevoker struct{ revoked []string }
+// recordingRevoker records every run key it is asked to revoke. Read revoked
+// only once the revoking goroutines are done.
+type recordingRevoker struct {
+	mu      sync.Mutex
+	revoked []string
+}
 
-func (r *recordingRevoker) Revoke(runKey string) { r.revoked = append(r.revoked, runKey) }
+func (r *recordingRevoker) Revoke(runKey string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.revoked = append(r.revoked, runKey)
+}
 
 // TestOnDisplaceHookRevokesTheDisplacedRun: a newer run of the same card
 // displaces the older run's credentials handle, so the older run's proxy token
@@ -254,7 +264,7 @@ func TestOnContainerExitClosesLogFile(t *testing.T) {
 	bridge := logbridge.NewBridge(logbridge.BridgeConfig{Hub: hub})
 	registry := logbridge.NewRedactorRegistry(bridge)
 
-	onExit := onContainerExit(rep, creds, &recordingRevoker{}, files, registry, bridge, logger)
+	onExit := onContainerExit(rep, newExitReports(), creds, &recordingRevoker{}, files, registry, bridge, logger)
 	onExit("proj", "CARD-1", 0, executor.ExitNormal, 1, "corr-1")
 
 	data, err := os.ReadFile(filepath.Join(dir, "proj", "card-1.log"))
@@ -348,7 +358,7 @@ func newExitHarness(t *testing.T, logDir string) *exitHarness {
 		rep:      rep,
 		stream:   ch,
 		registry: registry,
-		onExit:   onContainerExit(rep, creds, revoker, files, registry, bridge, logger),
+		onExit:   onContainerExit(rep, newExitReports(), creds, revoker, files, registry, bridge, logger),
 	}
 }
 
