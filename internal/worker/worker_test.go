@@ -103,6 +103,9 @@ type fakeOps struct {
 	tcx                      cmclient.TaskContext
 	lastGetTaskContextImages bool             // captured from GetTaskContext's includeImages arg
 	transitionCardErr        map[string]error // keyed by target state; returned by TransitionCard when set
+	// refusedFrom refuses a move to the keyed target state while the card
+	// sits in the mapped state, as a board without that edge does.
+	refusedFrom map[string]string
 }
 
 func newFakeOps() *fakeOps {
@@ -257,8 +260,13 @@ func (f *fakeOps) TransitionCard(_ context.Context, cardID, state string) error 
 
 	// A successful transition updates the canned state.
 	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if from, ok := f.refusedFrom[state]; ok && from == f.tcx.State {
+		return fmt.Errorf("call transition_card: cannot transition from %s to %s", from, state)
+	}
+
 	f.tcx.State = state
-	f.mu.Unlock()
 
 	return nil
 }
@@ -301,6 +309,10 @@ func (f *fakeOps) SetAutonomous(_ context.Context, cardID string, autonomous boo
 
 func (f *fakeOps) StartReview(_ context.Context, cardID string) error {
 	f.record("StartReview", cardID)
+
+	f.mu.Lock()
+	f.tcx.State = "review"
+	f.mu.Unlock()
 
 	return nil
 }
@@ -1656,6 +1668,42 @@ func TestToolchainMissingTransitionFailureDegradesGracefully(t *testing.T) {
 	assert.Equal(t, 1, ops.count("TransitionCard"), "transition was attempted")
 	assert.Equal(t, 1, ops.count("ReleaseCard"), "claim still released despite the transition failure")
 	assert.Equal(t, 0, ops.count("CompleteTask"))
+}
+
+// TestBlockedParkFromReviewRoutesThroughInProgress: a review round's verify can
+// park on a missing toolchain after the card entered review, and the default
+// board refuses review -> blocked. The park must still land the card in blocked
+// by way of in_progress, before the claim is released.
+func TestBlockedParkFromReviewRoutesThroughInProgress(t *testing.T) {
+	remote := setupBareRemote(t)
+	wsParent := t.TempDir()
+	ops := newFakeOps()
+	ops.refusedFrom = map[string]string{"blocked": "review"}
+
+	swapRunOrchestrator(t, func(ctx context.Context, d orchestrator.Deps) error {
+		require.NoError(t, d.Ops.StartReview(ctx, d.Cfg.CardID))
+
+		return &orchestrator.ToolchainMissingError{Tier: "runtime", Subject: "container runtime (unavailable)", Reason: "no Docker"}
+	})
+
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	res, err := Run(context.Background(), baseSpec(t, remote, wsParent), ops, &scriptedLLM{}, emit, openStdin(t))
+	require.Error(t, err)
+	assert.Equal(t, "error", res.Reason)
+
+	var targets []string
+	for _, args := range ops.allArgsOf("TransitionCard") {
+		targets = append(targets, args[1].(string))
+	}
+
+	assert.Equal(t, []string{"blocked", "in_progress", "blocked"}, targets)
+	assert.Equal(t, "blocked", ops.state())
+
+	calls := ops.ops()
+	assert.Less(t, slices.Index(calls, "TransitionCard"), slices.Index(calls, "ReleaseCard"),
+		"the transitions need the claim, so they precede the release")
+	assert.Equal(t, 1, ops.count("ReleaseCard"))
 }
 
 // TestToolchainMissingDuringEndSessionMapsToEndSession: an end_session frame

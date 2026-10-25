@@ -667,15 +667,50 @@ func runFailureLine(redact func(string) string, err error) string {
 // in_progress -> blocked), so a failure here is logged and the park still
 // completes - never fatal.
 func parkBlocked(ctx context.Context, a fsmArgs, err error) (Result, error) {
-	if terr := a.ops.TransitionCard(ctx, a.spec.CardID, "blocked"); terr != nil {
-		slog.Warn("transition to blocked failed; leaving card state as-is",
-			"card", a.spec.CardID, "error", terr)
-	}
-
+	transitionToBlocked(ctx, a.ops, a.spec.CardID)
 	pushWIP(ctx, a)
 	releaseQuietly(ctx, a.ops, a.spec.CardID)
 
 	return Result{Reason: "error"}, fmt.Errorf("orchestrator: %w", err)
+}
+
+// transitionToBlocked moves the card to blocked. A review round can park after
+// the card entered review, which the default board lets move only to done or
+// in_progress, so a card that is in review goes by way of in_progress. Every
+// failure is logged and leaves the card where the last move that succeeded put
+// it.
+func transitionToBlocked(ctx context.Context, ops CardOps, cardID string) {
+	err := ops.TransitionCard(ctx, cardID, "blocked")
+	if err == nil {
+		return
+	}
+
+	tcx, terr := ops.GetTaskContext(ctx, cardID, false)
+	if terr != nil {
+		slog.Warn("transition to blocked failed and the card state is unreadable; leaving card state as-is",
+			"card", cardID, "error", err, "state_error", terr)
+
+		return
+	}
+
+	if tcx.State != "review" {
+		slog.Warn("transition to blocked failed; leaving card state as-is",
+			"card", cardID, "error", err)
+
+		return
+	}
+
+	if ierr := ops.TransitionCard(ctx, cardID, "in_progress"); ierr != nil {
+		slog.Warn("transition to blocked failed and the card cannot leave review; leaving it in review",
+			"card", cardID, "blocked_error", err, "in_progress_error", ierr)
+
+		return
+	}
+
+	if berr := ops.TransitionCard(ctx, cardID, "blocked"); berr != nil {
+		slog.Warn("transition to blocked failed after leaving review; leaving card in in_progress",
+			"card", cardID, "error", berr)
+	}
 }
 
 // parkReason renders the park sentinel's own message, unwrapped from any
