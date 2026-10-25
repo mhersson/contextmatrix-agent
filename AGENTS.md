@@ -66,7 +66,7 @@ internal/buildinfo/  → the build /health reports: ldflags-stamped version, com
 
 internal/kata/       → embedded throwaway kata fixture used by tests
 
-docker/Dockerfile.worker → multi-target worker image family (agent binary + git/rg/fd/gh/shellcheck/shfmt/kubectl/kustomize/yq/task/zip/unzip baseline; default `full` = Go/Node/Python/Rust toolchains; slim `go-node`/`python`/`rust`/`jvm-node` variants; Debian packages come from Debian's signed repos, every other tool is pinned + SHA-verified)
+docker/Dockerfile.worker → multi-target worker image family (agent binary + git/rg/fd/gh/shellcheck/shfmt/kubectl/kustomize/yq/task/zip/unzip baseline; default `full` = Go/Node/Python/Rust toolchains; slim `go-node`/`python`/`rust`/`jvm-node` variants; Debian packages come from Debian's signed repos; downloaded Go/Node/rustup/Maven/gh/yq/task are pinned + SHA-verified; npm/yarn/pip/ty/ruff are version-pinned from their registries)
 
 # Inner loop - the external github.com/mhersson/contextmatrix-harness module
 # (events, llm, tools, harness, redact): the FSM-free loop, the LLM client, the
