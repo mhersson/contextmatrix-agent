@@ -273,11 +273,9 @@ func TestRemoveSessionSecrets_DifferentCorrelationIDDoesNotCollide(t *testing.T)
 		"run 2's secrets must survive run 1's stale removal")
 }
 
-// TestMintRunID_ProducesDistinctIDsForTheSameCardID pins the primitive
-// handleTrigger's X-Correlation-ID fallback relies on: since CM does not send
-// that header today, mintRunID is what actually gives two re-triggers of the
-// same card distinct redaction-session ids. A cardID-only fallback (the
-// pre-fix behavior) would return the identical string both times.
+// TestMintRunID_ProducesDistinctIDsForTheSameCardID pins the primitive every
+// admitted run's id starts from: two triggers of the same card get distinct
+// redaction-session ids whatever X-Correlation-ID they carry.
 func TestMintRunID_ProducesDistinctIDsForTheSameCardID(t *testing.T) {
 	first := mintRunID("CARD-1")
 	second := mintRunID("CARD-1")

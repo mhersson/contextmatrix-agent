@@ -469,13 +469,12 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Correlation ID travels in the X-Correlation-ID header, not the trigger
-	// body. A header is namespaced, never trusted verbatim: the value feeds
-	// the per-run keying that SessionID, RunCredentials, the LLM proxy, and
-	// the filelog all lean on, so a re-trigger reusing a trace id must still
-	// mint a distinct run id - cardID plus a short random suffix keeps every
-	// admitted run unique, while the header stays recognizable inside the id
-	// for trace stitching. CM does not send this header, so the mint
-	// below is the common path regardless.
+	// body; ContextMatrix sends a fresh one on every trigger attempt. The
+	// header is namespaced, never trusted verbatim: the value feeds the
+	// per-run keying that SessionID, RunCredentials, the LLM proxy, and the
+	// filelog all lean on, so cardID plus a short random suffix keeps every
+	// admitted run unique whatever a caller sends, while the header stays
+	// recognizable inside the id for trace stitching.
 	correlationID := mintRunID(payload.CardID)
 	if supplied := r.Header.Get(correlationHeader); supplied != "" {
 		correlationID += "-" + supplied

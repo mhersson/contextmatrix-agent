@@ -689,12 +689,9 @@ func TestTrigger_LaunchErrorReportsFailed(t *testing.T) {
 	}, time.Second, 5*time.Millisecond)
 }
 
-// TestTrigger_MintsDistinctCorrelationIDsAcrossReTriggers pins the fix's real
-// effectiveness: CM does not send X-Correlation-ID today, so the fallback in
-// handleTrigger is the common path, not a rare edge case. Two triggers of the
-// same card without the header must still resolve to distinct correlation
-// ids, or redaction-session isolation (SessionID) stays inert for every
-// real-world trigger, which is exactly the bug this fix closes.
+// TestTrigger_MintsDistinctCorrelationIDsAcrossReTriggers: two triggers of
+// the same card without X-Correlation-ID still resolve to distinct
+// correlation ids, which redaction-session isolation (SessionID) keys on.
 func TestTrigger_MintsDistinctCorrelationIDsAcrossReTriggers(t *testing.T) {
 	h := newHarness(t, 4)
 
