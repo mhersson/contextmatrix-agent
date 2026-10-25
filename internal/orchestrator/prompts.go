@@ -260,8 +260,8 @@ const decompositionRules = `- Each subtask must be completable by a single agent
 // planPrompt is the read-only planner's instruction block. It is adapted from
 // the create-plan workflow skill's task-decomposition guidance: the same
 // rules for splitting work, dependency thinking, and right-sizing apply, but
-// the planner has NO card tools - it only reads code (read/grep/glob) and
-// emits a strict JSON plan. Card creation happens in code from the parsed JSON.
+// the planner has NO card tools - it only reads code with its read-only tools
+// and emits a strict JSON plan. Card creation happens in code from the parsed JSON.
 //
 // The leading %s is the grounding block; the second %s is the repo-snapshot
 // block (bounded tracked-file list + README head; "" when not a git repo). The
@@ -540,7 +540,7 @@ Description:
 // specialistPrompt is the read-only review specialist wrapper. It is adapted
 // from the review-task workflow skill's three-specialist design: the same review
 // lenses and severity discipline, but the specialist has NO card tools - it reads
-// code (read/grep/glob) and produces findings TEXT only. The orchestrator
+// code with its read-only tools and produces findings TEXT only. The orchestrator
 // (synthesis) decides approve-or-fix from the panel's findings. Commit status is
 // never a review concern.
 //
@@ -767,10 +767,10 @@ REVIEWER FINDINGS
 %s
 ` + verdictContract
 
-// fixPrompt is the coder fix-run instruction for a review round that returned
-// findings. The coder runs with the FULL write toolset and addresses exactly the
-// listed findings - nothing speculative. The orchestrator commits the result as
-// a fixup and pushes; the coder does NOT run git.
+// fixPrompt is the coder fix-run instruction for findings from a review round
+// or a pr_gates gate. The coder runs with the FULL write toolset and addresses
+// exactly the listed findings - nothing speculative. The orchestrator commits
+// the result (see commitFix) and pushes; the coder does NOT run git.
 //
 // The trailing %s slots are filled by runFix: workspace root, the verify
 // instruction line, parent card title, parent card description, and the findings
@@ -791,7 +791,7 @@ Repo root: %s - bash commands already execute there; use paths relative to the
 repo root.
 
 Do NOT run git yourself (no commit, no push, no branch) - the orchestrator
-commits your changes as a fixup and pushes after you finish.
+commits and pushes your changes after you finish.
 
 ` + selfReviewBlock + `
 
