@@ -26,6 +26,14 @@ contextmatrix_url: http://localhost:8080
 # CMX_CONTAINER_CONTEXTMATRIX_URL
 container_contextmatrix_url: http://172.17.0.1:8080
 
+# URL of this service as seen from inside worker containers: workers reach
+# this service's LLM proxy at this URL. Optional. When empty it defaults to
+# http://host.docker.internal:<port>, with port as set below; that works
+# because workers always get host.docker.internal mapped to the host gateway.
+# Must be http or https, carry no path, and not be a loopback host.
+# CMX_CONTAINER_SERVE_URL
+container_serve_url: ""
+
 # Shared secret between ContextMatrix and the agent service.
 # Must be at least 32 characters. Required.
 # CMX_API_KEY
