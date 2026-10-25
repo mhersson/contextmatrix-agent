@@ -40,7 +40,8 @@ import (
 )
 
 const (
-	// httpShutdownTimeout bounds the graceful HTTP drain after draining flips.
+	// httpShutdownTimeout bounds each listener's graceful HTTP drain, the last
+	// step of gracefulShutdown.
 	httpShutdownTimeout = 10 * time.Second
 	// callbackShutdownTimeout bounds each per-container kill + status callback
 	// during shutdown so one slow ContextMatrix response cannot starve the rest.
@@ -50,8 +51,9 @@ const (
 	onExitTimeout = 30 * time.Second
 	// parkWaitTimeout bounds how long shutdown waits for workers to park before
 	// the serial kill sweep, which adds a kill grace per straggler and a status
-	// callback per run. At the default max_concurrent of 5 the sequence fits
-	// svc.sh's TimeoutStopSec=60; ten or more stragglers can outlast it.
+	// callback per run; each listener's HTTP drain then adds up to
+	// httpShutdownTimeout. At the default max_concurrent of 5 the sequence fits
+	// svc.sh's TimeoutStopSec=60; seven or more stragglers can outlast it.
 	parkWaitTimeout = 30 * time.Second
 	// parkPollInterval is how often the park wait rechecks the tracker.
 	parkPollInterval = 250 * time.Millisecond
@@ -289,6 +291,7 @@ func runServe(ctx context.Context, configPath string) error {
 		sessions: srv,
 		exec:     exec,
 		reporter: cbClient,
+		revoker:  proxy,
 		logger:   logger,
 		wait:     parkWaitTimeout,
 		poll:     parkPollInterval,
@@ -300,9 +303,9 @@ func runServe(ctx context.Context, configPath string) error {
 }
 
 // gracefulShutdown flips draining, ends every tracked worker's session so it
-// pushes its WIP and releases its card, drains the HTTP listeners, waits for
-// the workers to exit, then kills the rest. The park window opens at the
-// end_session write and overlaps the HTTP drain; ctx ends it early.
+// pushes its WIP and releases its card, waits for the workers to exit, kills
+// the rest, then drains the HTTP listeners. The webhook listener also serves
+// the LLM proxy, so it stays up until the workers park; ctx ends the wait early.
 func gracefulShutdown(
 	ctx context.Context,
 	httpServer *http.Server,
@@ -318,7 +321,9 @@ func gracefulShutdown(
 	defer parkCancel()
 
 	live := workers.tracker.List()
-	ended := workers.endSessions(live)
+
+	workers.awaitPark(parkCtx, workers.endSessions(live))
+	workers.sweep(live)
 
 	httpCtx, httpCancel := context.WithTimeout(context.Background(), httpShutdownTimeout)
 	defer httpCancel()
@@ -336,9 +341,6 @@ func gracefulShutdown(
 
 		adminCancel()
 	}
-
-	workers.awaitPark(parkCtx, ended)
-	workers.sweep(live)
 }
 
 // sessionEnder delivers an end_session frame to a tracked run.
@@ -353,6 +355,7 @@ type workerDrain struct {
 	sessions sessionEnder
 	exec     executor.Executor
 	reporter webhook.StatusReporter
+	revoker  tokenRevoker
 	logger   *slog.Logger
 
 	// wait bounds the park window; poll is how often it rechecks the tracker.
@@ -407,9 +410,9 @@ func (d workerDrain) tracked(run *executor.Run) bool {
 	return ok && current == run
 }
 
-// sweep kills every run still tracked and reports each of live, plus any run
-// admitted since, as failed. A parked run is reported too: the process can
-// exit before that run's own exit callback reaches ContextMatrix.
+// sweep kills every run still tracked. Each of live, plus any run admitted
+// since, then has its proxy token revoked and is reported as failed, a parked
+// run too: the process can exit before that run's own exit callback lands.
 func (d workerDrain) sweep(live []*executor.Run) {
 	runs := live
 
@@ -434,6 +437,8 @@ func (d workerDrain) sweep(live []*executor.Run) {
 
 			killCancel()
 		}
+
+		d.revoker.Revoke(run.CorrelationID)
 
 		cbCtx, cbCancel := context.WithTimeout(context.Background(), callbackShutdownTimeout)
 		if err := d.reporter.ReportStatus(cbCtx, run.CardID, run.Project, "failed", "service shutting down"); err != nil {

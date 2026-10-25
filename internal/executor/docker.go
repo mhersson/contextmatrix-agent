@@ -387,11 +387,12 @@ func (e *DockerExecutor) Launch(ctx context.Context, spec LaunchSpec) error {
 	}
 
 	run := &Run{
-		ContainerID: resp.ID,
-		CardID:      spec.CardID,
-		Project:     spec.Project,
-		StartedAt:   time.Now(),
-		Stdin:       attach.Conn,
+		ContainerID:   resp.ID,
+		CardID:        spec.CardID,
+		Project:       spec.Project,
+		CorrelationID: spec.CorrelationID,
+		StartedAt:     time.Now(),
+		Stdin:         attach.Conn,
 	}
 
 	if !e.tracker.AddIfUnderLimit(run) {
