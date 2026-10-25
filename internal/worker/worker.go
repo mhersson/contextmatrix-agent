@@ -676,9 +676,10 @@ func parkBlocked(ctx context.Context, a fsmArgs, err error) (Result, error) {
 
 // transitionToBlocked moves the card to blocked. A review round can park after
 // the card entered review, which the default board lets move only to done or
-// in_progress, so a card that is in review goes by way of in_progress. Every
-// failure is logged and leaves the card where the last move that succeeded put
-// it.
+// in_progress, so a card that is in review goes by way of in_progress; a board
+// that refuses blocked from there too gets the card back in review rather than
+// in a lane that says work is still going on. Every failure is logged, never
+// fatal.
 func transitionToBlocked(ctx context.Context, ops CardOps, cardID string) {
 	err := ops.TransitionCard(ctx, cardID, "blocked")
 	if err == nil {
@@ -707,10 +708,22 @@ func transitionToBlocked(ctx context.Context, ops CardOps, cardID string) {
 		return
 	}
 
-	if berr := ops.TransitionCard(ctx, cardID, "blocked"); berr != nil {
-		slog.Warn("transition to blocked failed after leaving review; leaving card in in_progress",
-			"card", cardID, "error", berr)
+	berr := ops.TransitionCard(ctx, cardID, "blocked")
+	if berr == nil {
+		return
 	}
+
+	// review, not start_review: the worker needs the move, not the review skill
+	// start_review returns.
+	if rerr := ops.TransitionCard(ctx, cardID, "review"); rerr != nil {
+		slog.Warn("transition to blocked failed after leaving review, and the card could not return to review; leaving it in in_progress",
+			"card", cardID, "blocked_error", berr, "review_error", rerr)
+
+		return
+	}
+
+	slog.Warn("transition to blocked failed after leaving review; returned the card to review",
+		"card", cardID, "error", berr)
 }
 
 // parkReason renders the park sentinel's own message, unwrapped from any

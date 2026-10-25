@@ -104,8 +104,8 @@ type fakeOps struct {
 	lastGetTaskContextImages bool             // captured from GetTaskContext's includeImages arg
 	transitionCardErr        map[string]error // keyed by target state; returned by TransitionCard when set
 	// refusedFrom refuses a move to the keyed target state while the card
-	// sits in the mapped state, as a board without that edge does.
-	refusedFrom map[string]string
+	// sits in one of the mapped states, as a board without that edge does.
+	refusedFrom map[string][]string
 }
 
 func newFakeOps() *fakeOps {
@@ -262,8 +262,8 @@ func (f *fakeOps) TransitionCard(_ context.Context, cardID, state string) error 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	if from, ok := f.refusedFrom[state]; ok && from == f.tcx.State {
-		return fmt.Errorf("call transition_card: cannot transition from %s to %s", from, state)
+	if slices.Contains(f.refusedFrom[state], f.tcx.State) {
+		return fmt.Errorf("call transition_card: cannot transition from %s to %s", f.tcx.State, state)
 	}
 
 	f.tcx.State = state
@@ -1672,38 +1672,66 @@ func TestToolchainMissingTransitionFailureDegradesGracefully(t *testing.T) {
 
 // TestBlockedParkFromReviewRoutesThroughInProgress: a review round's verify can
 // park on a missing toolchain after the card entered review, and the default
-// board refuses review -> blocked. The park must still land the card in blocked
-// by way of in_progress, before the claim is released.
+// board refuses review -> blocked. The park lands the card in blocked by way of
+// in_progress, before the claim is released. A board that refuses blocked from
+// in_progress too gets the card back in review rather than in a lane that says
+// work is still going on.
 func TestBlockedParkFromReviewRoutesThroughInProgress(t *testing.T) {
-	remote := setupBareRemote(t)
-	wsParent := t.TempDir()
-	ops := newFakeOps()
-	ops.refusedFrom = map[string]string{"blocked": "review"}
-
-	swapRunOrchestrator(t, func(ctx context.Context, d orchestrator.Deps) error {
-		require.NoError(t, d.Ops.StartReview(ctx, d.Cfg.CardID))
-
-		return &orchestrator.ToolchainMissingError{Tier: "runtime", Subject: "container runtime (unavailable)", Reason: "no Docker"}
-	})
-
-	emit := events.NewEmitter(io.Discard, io.Discard)
-
-	res, err := Run(context.Background(), baseSpec(t, remote, wsParent), ops, &scriptedLLM{}, emit, openStdin(t))
-	require.Error(t, err)
-	assert.Equal(t, "error", res.Reason)
-
-	var targets []string
-	for _, args := range ops.allArgsOf("TransitionCard") {
-		targets = append(targets, args[1].(string))
+	tests := []struct {
+		name        string
+		refusedFrom []string
+		wantMoves   []string
+		wantState   string
+	}{
+		{
+			name:        "default board",
+			refusedFrom: []string{"review"},
+			wantMoves:   []string{"blocked", "in_progress", "blocked"},
+			wantState:   "blocked",
+		},
+		{
+			name:        "board without a way into blocked",
+			refusedFrom: []string{"review", "in_progress"},
+			wantMoves:   []string{"blocked", "in_progress", "blocked", "review"},
+			wantState:   "review",
+		},
 	}
 
-	assert.Equal(t, []string{"blocked", "in_progress", "blocked"}, targets)
-	assert.Equal(t, "blocked", ops.state())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			remote := setupBareRemote(t)
+			wsParent := t.TempDir()
+			ops := newFakeOps()
+			ops.refusedFrom = map[string][]string{"blocked": tt.refusedFrom}
 
-	calls := ops.ops()
-	assert.Less(t, slices.Index(calls, "TransitionCard"), slices.Index(calls, "ReleaseCard"),
-		"the transitions need the claim, so they precede the release")
-	assert.Equal(t, 1, ops.count("ReleaseCard"))
+			swapRunOrchestrator(t, func(ctx context.Context, d orchestrator.Deps) error {
+				require.NoError(t, d.Ops.StartReview(ctx, d.Cfg.CardID))
+
+				return &orchestrator.ToolchainMissingError{Tier: "runtime", Subject: "container runtime (unavailable)", Reason: "no Docker"}
+			})
+
+			emit := events.NewEmitter(io.Discard, io.Discard)
+
+			res, err := Run(context.Background(), baseSpec(t, remote, wsParent), ops, &scriptedLLM{}, emit, openStdin(t))
+			require.Error(t, err)
+			assert.Equal(t, "error", res.Reason)
+
+			var moves []string
+			for _, args := range ops.allArgsOf("TransitionCard") {
+				moves = append(moves, args[1].(string))
+			}
+
+			assert.Equal(t, tt.wantMoves, moves)
+			assert.Equal(t, tt.wantState, ops.state())
+
+			calls := ops.ops()
+			releaseIdx := slices.Index(calls, "ReleaseCard")
+			require.GreaterOrEqual(t, releaseIdx, 0)
+			assert.NotContains(t, calls[releaseIdx:], "TransitionCard",
+				"the transitions need the claim, so they precede the release")
+			assert.Equal(t, 1, ops.count("ReleaseCard"))
+		})
+	}
 }
 
 // TestToolchainMissingDuringEndSessionMapsToEndSession: an end_session frame
