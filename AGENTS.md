@@ -53,6 +53,7 @@ internal/mob/          → A2A mob-session engine: seats, moderator, loopback JS
 internal/verifyexec/   → verify-command probing + bounded exec; used by cli run and the orchestrator verify gate
 internal/worker/       → the `work` lifecycle: clone, claim, run the FSM (HITL-gated or autonomous), commit/push, PR; wires the orchestrator deps
 internal/executor/     → Executor interface + DockerExecutor; Tracker (concurrency + awaiting-human gate); watchdogs
+internal/attempt/      → stamps the per-card container-run ordinal onto the transcript envelope, so a restarted card's overlapping event sequences stay distinguishable
 internal/secrets/      → Source (static env file) + RunCredentials (stages per-run CM-provisioned credentials)
 
 # serve plumbing
@@ -69,7 +70,7 @@ docker/Dockerfile.worker → multi-target worker image family (agent binary + gi
 
 # Inner loop - the external github.com/mhersson/contextmatrix-harness module
 # (events, llm, tools, harness, redact): the FSM-free loop, the LLM client, the
-# jailed tool registry (including the Skill tool), the event stream, and secret
+# jailed tool registry (including the `skill` tool), the event stream, and secret
 # redaction. This repo depends on it; it takes no dependency on this repo.
 
 # Shared serve plumbing - the external github.com/mhersson/contextmatrix-backendkit
@@ -109,7 +110,9 @@ inspection), never a built-in ecosystem list.
 
 The only sanctioned ecosystem knowledge is the verify-resolution convention
 tables (`detectRows` in `internal/orchestrator/verify.go`), the nested verify
-scan's skip list (`nestedSkipDirs` in `verify_nested.go`), the checkpoint
+scan's skip list (`nestedSkipDirs` in `verify_nested.go`), the verify-failure
+excerpt markers (`verifyFailureMarkers` in `verify.go`), the JVM toolchain
+probe (`probeJava` in `internal/verifyexec/verifyexec.go`), the checkpoint
 environment probes (`envProbes` in `envfacts.go`), and the CI gate's
 workflow-file probe (`.github/workflows` in `internal/worker/cisignals.go`).
 
@@ -227,7 +230,7 @@ Summaries only - full detail lives in the reference documents above.
 10. **HITL gates + promote.** Same FSM, mode-gated on `Config.Interactive`; a
     `promote` frame closes the inbox so later gates auto-pass. Awaiting-human
     is live, not stalled.
-11. **Task-skills.** Model-driven `Skill` tool, filtered to the per-card
+11. **Task-skills.** Model-driven `skill` tool, filtered to the per-card
     `task_skills` subset; delivery is config-free (CM pointer, cloned once,
     mounted read-only). Distinct from `workflow-skills`.
 12. **PR gates.** `pr_gates` gates on `await_ci` / `await_copilot_review`, up
@@ -239,8 +242,9 @@ Summaries only - full detail lives in the reference documents above.
     `unreachable_criteria` (review verifies each claim and exempts VERIFIED
     ones from the verdict).
 14. **Repo grounding.** The workspace root's `AGENTS.md`/`CLAUDE.md` is
-    injected verbatim into every model-driven phase; nested instruction files
-    are enumerated as paths only, never embedded.
+    injected verbatim into the model-driven phases (all but the Best-of-N
+    judge and the integrate PR-body call); nested instruction files are
+    enumerated as paths only, never embedded.
 15. **POC projects.** `TriggerPayload.POC` → `CM_POC` → `Config.POC`, read
     once per run. Every POC card asks for main-behaviour tests only; without
     mob review it also gets one generic reviewer, blockers-only fix requests
@@ -270,34 +274,28 @@ keep it clean.
 These are gitignored point-in-time records - never commit them: `*-RESULTS.md`,
 `capabilities-*.json`, `capabilities-*.md`, `transcripts/`, `eval-out/`,
 `.envrc`, and `internal/buildinfo/history/merges.log`, which `make build` and
-`make install` rewrite from `git log` for the binary to embed. Nothing model-related is embedded in the binary: priors, favorites,
-the blacklist, the per-role tier ladders and the price headroom all arrive at
-run start from CM's `SelectionContext` payload (`registry.FromSelection`), so
-there is no tracked baseline to keep in sync.
+`make install` rewrite from `git log` for the binary to embed.
 
 ## Mandatory verification before proceeding
 
-Every change is fully tested and verified before the next:
+Every change is fully tested and verified before the next, and before every
+commit:
 
-1. `go build ./...` - zero errors.
-2. `make test` - no regressions; `make test-race` clean.
-3. `make lint` - clean.
-4. `gofumpt -l .` - empty.
+1. `make fmt` - gofumpt, not gofmt; CI flags the difference.
+2. `make build` - zero errors.
+3. `make test` - no regressions.
+4. `make test-race` - clean.
+5. `make lint` - clean.
+6. `gofumpt -l .` - empty.
 
 Fix any failure before moving on.
 
 ## Commit discipline
 
-```bash
-make fmt       # gofumpt -w . - CI flags any gofmt-vs-gofumpt difference
-make test      # clean before every commit
-make lint      # clean before every commit
-make build     # must build
-```
-
 - **Never commit to `main`.** Work on a feature branch; tasks of a plan or
   scope the user approved commit there without asking again. Never push
   without explicit user approval.
+- No session links in commits or PRs.
 
 **NEVER** reference a plan phase, slice ID, task number, or a private
 ContextMatrix card ID in commit messages, comments, or code - they are

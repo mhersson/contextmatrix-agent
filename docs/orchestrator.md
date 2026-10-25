@@ -140,7 +140,7 @@ prompts and the mob moderator prompt share one decision-rule constant
 evidence requirements, worded without naming either review path, so the paths
 cannot drift, and each specialist states the basis of every concern.
 `formatFixes` renders a populated basis after the severity as
-`[important, criterion]`; an empty basis renders exactly as before.
+`[important, criterion]`; an empty basis renders the severity alone.
 
 The loop runs to the `review_attempts` cap - default 3, set per deployment via
 `review_attempts_cap` in `serve.yaml` or `CMX_REVIEW_ATTEMPTS_CAP`. Valid
@@ -567,9 +567,11 @@ a later resumed one.
 
 At run start (`newRun`) the orchestrator discovers the repo's instruction
 files (`discoverGrounding`), formats a `REPO GROUNDING` block once
-(`groundingBlock`), and caches it on `run.grounding`. All eight model-driven
-phases - plan, diagnose, brainstorm, coder, fix, specialist, synthesis,
-document - inject the cached block; there is no per-phase re-scan.
+(`groundingBlock`), and caches it on `run.grounding`. The
+model-driven phases - plan, diagnose, brainstorm, coder, fix, specialist,
+synthesis, document, the checkpoint discussions, Copilot triage and
+verify-propose - inject the cached block; there is no per-phase re-scan. The
+Best-of-N judge and the integrate PR-body call do not.
 
 Two tiers, so a committed third-party tree can never masquerade as the repo's
 own rules:
@@ -591,7 +593,4 @@ own rules:
   ≤ `groundingMaxDocs` (24, `slog.Warn` on overflow), sorted shallow → deep.
 
 Best-effort: a missing, empty, or non-directory workspace yields an empty
-block and phases run unchanged - grounding never fails a run.
-
-Deferred: v2 proximity-scoping (the coder sees only the instruction file for
-its subtask's subtree) and prompt-caching the block.
+block and phases run without it - grounding never fails a run.

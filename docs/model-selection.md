@@ -90,8 +90,8 @@ serve-config default.
 
 Every rung selection writes two `slog` INFO lines with the same identifying
 fields (`card_id`, `phase`, `model`, `requested_tier`), so a pick and its
-field correlate in the log. The existing `selector: pick` line reports the
-winner; the new `selector: pool` line explains why it won.
+field correlate in the log. The `selector: pick` line reports the winner;
+the `selector: pool` line explains why it won.
 
 ```text
 selector: pick card_id=... phase=coder model=high/one \
@@ -153,4 +153,4 @@ shared decision tier; `subtask` is empty for these card-level phases and
 `met_tier` is empty because nothing scored the model against a bar. These
 picks consult no rung, so they also produce no `selector: pick` or
 `selector: pool` line. The event is observability only - resolution behavior
-and the pin-fallback warning path are unchanged.
+and the pin-fallback warning path do not depend on it.
