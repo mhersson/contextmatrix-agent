@@ -219,6 +219,52 @@ func TestStopDuringAdmission(t *testing.T) {
 	}
 }
 
+// TestStopReachesEveryAdmissionOfTheCard: a second trigger for the card waits
+// on the card's launch lock while the first holds it. The stop cancels both
+// and waits for both without holding any lock they need, so the first
+// releases the lock, the second gives up before it provisions, and the stop
+// answers.
+func TestStopReachesEveryAdmissionOfTheCard(t *testing.T) {
+	h := newHarness(t, 4)
+	entered := make(chan struct{}, 2)
+
+	var launches atomic.Int32
+
+	h.exec.launchHook = func(ctx context.Context, _ executor.LaunchSpec) error {
+		launches.Add(1)
+
+		entered <- struct{}{}
+
+		<-ctx.Done()
+
+		return ctx.Err()
+	}
+
+	ts := time.Now().Unix()
+	payload := provisionedPayload("PROJ-TWICE")
+
+	require.Equal(t, http.StatusAccepted, h.doAt(t, http.MethodPost, "/trigger", payload, strconv.FormatInt(ts, 10)).Code)
+	<-entered
+	require.Equal(t, http.StatusAccepted, h.doAt(t, http.MethodPost, "/trigger", payload, strconv.FormatInt(ts+1, 10)).Code)
+
+	stopRequest := h.request(t, http.MethodPost, "/kill", protocol.KillPayload{CardID: "PROJ-TWICE", Project: "proj"}, nowTS())
+	answered := make(chan *httptest.ResponseRecorder, 1)
+
+	go func() { answered <- h.serve(stopRequest) }()
+
+	select {
+	case w := <-answered:
+		require.Equal(t, http.StatusOK, w.Code)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stop never answered")
+	}
+
+	assert.Equal(t, int32(1), launches.Load(), "the waiting admission never launches")
+	assert.Len(t, h.proxy.registerCalls(), 1, "the waiting admission never provisions")
+	assert.Never(t, func() bool { return len(h.reporter.statuses()) > 0 },
+		50*time.Millisecond, 5*time.Millisecond, "neither admission reports")
+}
+
 // TestStopAllSparesOtherProjectsAdmissions: a stop-all scoped to one project
 // leaves another project's launch to run.
 func TestStopAllSparesOtherProjectsAdmissions(t *testing.T) {
