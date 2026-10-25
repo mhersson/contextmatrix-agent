@@ -201,8 +201,8 @@ export LLM_API_KEY=<your-api-key>
    ```
 
    `serve` reads `--config` (default `~/.config/contextmatrix-agent/serve.yaml`)
-   and validates it on startup. To inspect effective harness config with secrets
-   redacted, use `run --print-config`.
+   and validates it on startup. To check a config file use `config validate`, and
+   `config defaults` prints every serve key with its default.
 
 4. **Point ContextMatrix at it.** Enable the `backends.agent` entry in
    ContextMatrix's config (URL + shared `api_key` + `enabled: true`); the
@@ -343,7 +343,8 @@ agent-labelled container on it, so never run it against a daemon a live
 `serve` uses.
 
 CI gates every pull request on `go test`, `go test -race`, `golangci-lint`, and
-`go build`, plus `govulncheck` and a worker-image scan.
+`go build`, plus `govulncheck`, `hadolint` on the worker Dockerfile and a
+worker-image scan.
 
 Conventions, package boundaries, the git workflow, and commit discipline for
 working **on** this codebase live in [`AGENTS.md`](AGENTS.md).
