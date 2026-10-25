@@ -1,3 +1,5 @@
+# Shared lint baseline; sibling repos copy this file.
+# repos that write no workspace files drop the G301/G302/G306 rule
 version: "2"
 linters:
   default: none
@@ -42,11 +44,12 @@ linters:
     # linter and its suppressions are deliberate per-line nolint directives.
     - linters: [gosec]
       text: "G104"
-    # G301/G302/G306: files written into agent workspaces are repo source files,
-    # not secrets - git checkouts use 0644/0755 and the worked code must keep
-    # standard modes. Secrets never go through these write paths.
+    # G301/G302/G306 in tests: fixtures build throwaway workspaces with standard
+    # repo modes. Production writes (secrets, logs) stay checked; the few
+    # workspace writes carry a per-line nolint.
     - linters: [gosec]
       text: "G301|G302|G306"
+      path: "_test\\.go$"
     # Test fixtures legitimately use hardcoded credentials, variable URLs, and int conversions
     - linters: [gosec]
       text: "G101|G107|G115"

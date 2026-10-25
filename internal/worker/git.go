@@ -177,7 +177,7 @@ case "$1" in
 esac
 `, secretsEnvPath)
 
-	if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {
+	if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil { //nolint:gosec // G306: the askpass script must be executable; it holds no secret
 		return "", fmt.Errorf("write git credential helper: %w", err)
 	}
 
@@ -1087,11 +1087,11 @@ func (g *Git) AddInfoExclude(ctx context.Context, pattern string) error {
 		}
 	}
 
-	if err := os.MkdirAll(filepath.Dir(excludePath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(excludePath), 0o755); err != nil { //nolint:gosec // G301: .git/info lives in a git checkout, which uses 0755
 		return fmt.Errorf("ensure info dir: %w", err)
 	}
 
-	f, err := os.OpenFile(excludePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(excludePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644) //nolint:gosec // G302: .git/info/exclude is a git checkout file, which uses 0644
 	if err != nil {
 		return fmt.Errorf("open exclude file: %w", err)
 	}

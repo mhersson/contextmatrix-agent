@@ -292,7 +292,7 @@ func Run(ctx context.Context, spec RunSpec, ops CardOps, client llm.LLM, emit *e
 // base branch missing on the remote is created from BaseBranchFrom first, so
 // later cards of the playbook clone the shared base.
 func prepareWorkspace(ctx context.Context, git *Git, spec RunSpec) error {
-	if err := os.MkdirAll(spec.Workspace, 0o755); err != nil {
+	if err := os.MkdirAll(spec.Workspace, 0o755); err != nil { //nolint:gosec // G301: the workspace is a git checkout, which uses 0755
 		return fmt.Errorf("create workspace parent: %w", err)
 	}
 
