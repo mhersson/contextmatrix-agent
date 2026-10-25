@@ -970,7 +970,7 @@ func (o *run) salvageCapped(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 //
 // Return contract: (true, nil) means salvaged - the caller returns nil. (false,
 // nil) means not salvaged - the caller returns the original MaxTurnsError
-// unchanged, today's park. (false, err) means not salvaged AND err must replace
+// unchanged. (false, err) means not salvaged AND err must replace
 // the original error on the caller's return path: these are the
 // *ToolchainMissingError cases below, whether raised while RESOLVING the plan
 // (ensureVerify) or while RUNNING it (runVerifyPlan, e.g. a container runtime

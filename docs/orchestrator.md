@@ -160,7 +160,7 @@ card counts as finished too. CM launches every run from `todo`, so the card's
 state cannot tell the two apart. The restart is local to the run - the
 server's counter keeps counting - and nothing records it: when a restarted run
 stops before its loop ends, by a crash or by any park other than at a cap, the
-next run finds the counter past the cap and no `## Review Parked` section, and
+next run finds the counter at or past the cap and no `## Review Parked` section, and
 numbers on from it - on an autonomous card, straight into the authoritative
 pass.
 

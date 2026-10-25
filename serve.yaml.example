@@ -309,8 +309,8 @@ tool_output_max_bytes: 131072
 
 # The pr_gates phase (between integrate and done) polls a PR's Copilot review
 # and CI status when the card requests them. Serve relays each knob to the
-# worker as the CMX_GATES_* variable of the same name; every value must be a
-# positive integer. A CMX_GATES_* entry in worker_extra_env is still honoured
+# worker as the CMX_GATES_* variable of the same name; every seconds value must
+# be a positive integer. A CMX_GATES_* entry in worker_extra_env is still honoured
 # for now, with a startup warning naming the key to use instead; when the serve
 # key is also set, the serve key wins.
 
