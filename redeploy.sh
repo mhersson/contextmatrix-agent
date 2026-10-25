@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Rebuild the agent binary + all worker images (full + variants), pin the
 # new full-image digest in serve.yaml, and restart the user service.
-# Intended for a local bumblebee-style single-host deployment. Run from
-# the agent repo root.
+# Intended for a local single-host deployment. Run from the agent repo root.
 #
 # Overridable env vars:
 #   AGENT_CONFIG       path to serve.yaml
