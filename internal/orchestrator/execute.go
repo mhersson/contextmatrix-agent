@@ -394,7 +394,7 @@ func (o *run) emitAcceptedToolPass(sub subtaskRef) {
 //
 // Every other direction runs the gate, which is what makes this safe to skip:
 // every read error degrades to "assume moved", so a gate that cannot prove the
-// trees are identical behaves exactly as it did before.
+// trees are identical runs as usual.
 //
 // What the gate gives up is a re-run of the same command over the same bytes.
 // The tool ran it through runVerifyCommand, the same executor runVerifyPlan

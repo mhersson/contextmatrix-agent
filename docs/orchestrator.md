@@ -463,7 +463,7 @@ human-blocked container is not reaped.
 
 Coder, fix-coder, the review panel, and the document phase can engage
 ContextMatrix task-skills (`go-development`, `code-review`, ...) via the
-model-driven `Skill` tool (in the external harness module, constructed as
+model-driven `skill` tool (in the external harness module, constructed as
 `tools.NewSkillTool`): it lists the available skills by description and loads
 a chosen `SKILL.md` on demand, filtered to the per-card `task_skills` subset.
 

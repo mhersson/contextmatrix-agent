@@ -453,7 +453,7 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 	// the filelog all lean on, so a re-trigger reusing a trace id must still
 	// mint a distinct run id - cardID plus a short random suffix keeps every
 	// admitted run unique, while the header stays recognizable inside the id
-	// for trace stitching. CM does not send this header today, so the mint
+	// for trace stitching. CM does not send this header, so the mint
 	// below is the common path regardless.
 	correlationID := mintRunID(payload.CardID)
 	if supplied := r.Header.Get(correlationHeader); supplied != "" {

@@ -918,9 +918,9 @@ func (o *run) discardCleanupFixup(ctx context.Context, pre, findings, reason str
 // that made it, so the remote is taken back with a lease against it.
 //
 // It reports whether the fixup is actually gone. Every failure path leaves the
-// branch exactly as it found it and the caller falls back to today's behavior -
-// the round charged "left the verify red", with the verify tail still the next
-// fix's mandate, which is correct precisely because the failure is still there.
+// branch exactly as it found it and the caller falls back to charging the round
+// "left the verify red", with the verify tail still the next fix's mandate,
+// which is correct precisely because the failure is still there.
 //
 // fixRound is the round whose fix pass is being discarded - the round BEHIND
 // the red gate that detected it, not the one detecting it. mandate is what that
@@ -1106,8 +1106,7 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 	// loop's arm discards, on the route that actually parks. Discarding it here
 	// is what puts the mergeable commit under the operator's park instead of one
 	// revision behind it, with nothing saying the green commit exists. Every git
-	// failure inside leaves the branch alone and parks on the red tree exactly as
-	// before.
+	// failure inside leaves the branch alone and parks on the red tree.
 	parkFindings := findings2
 	discarded := false
 
@@ -2462,7 +2461,7 @@ func (o *run) capAdvisorySeverity(ctx context.Context, v *verdict) {
 // Called at the single choke point both verdict paths return through
 // (reviewRound, covering the solo fan-out and the mob discussion), and only
 // mutates the verdict when the contradiction exists: approval carrying only
-// minor and/or nit fixes keeps today's behavior - minor earns the post-approval
+// minor and/or nit fixes stays approved - minor earns the post-approval
 // cleanup fix pass (worthCleanupPass), nit-only stays report-only.
 func (o *run) demoteContradictoryApproval(ctx context.Context, v *verdict) {
 	if !v.Approved {
@@ -2771,12 +2770,12 @@ func tierFromString(tier string) registry.Tier {
 
 // reviewSubagentTools is what the specialist panel gets on top of the
 // workspace-confined read-only set harness.SpawnSubagents registers for it: the
-// optional Skill tool, plus read, grep and glob widened to the operator's
+// optional skill tool, plus read, grep and glob widened to the operator's
 // declared read-only roots. SpawnSubagents builds its child registry as
 // tools.NewRegistry(append(tools.ReadOnlyTools(root), extras...)...), and
 // NewRegistry keeps the LAST registration for a duplicate name, so the widened
 // three replace the confined ones without a harness change. With no roots
-// declared the panel gets exactly what it got before. cardID must match the
+// declared the panel gets the skill tool alone. cardID must match the
 // identity the worker's own construction sites log with (Config.CardID) -
 // rrLog's dedup key is (cardID, workspace, outcome), so a mismatched cardID
 // (e.g. "") would never collapse with the run's earlier worker-path line for
@@ -2801,7 +2800,7 @@ func reviewSubagentTools(cardID, workspace string, roots []string, skill tools.T
 	)
 }
 
-// skillToolSlice wraps an optional Skill tool as a SubagentOpts.ExtraReadOnlyTools
+// skillToolSlice wraps an optional skill tool as a SubagentOpts.ExtraReadOnlyTools
 // slice. Nil tool → nil slice.
 func skillToolSlice(t tools.Tool) []tools.Tool {
 	if t == nil {

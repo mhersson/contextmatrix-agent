@@ -1047,10 +1047,10 @@ func readOnlyToolsWithRoots(rrLog *orchestrator.ReadRootsLog, cardID, ws string,
 	}
 }
 
-// buildSkillTool constructs the per-run Skill tool from the mounted skills dir
+// buildSkillTool constructs the per-run skill tool from the mounted skills dir
 // and the per-card subset, wiring onEngage to report engagement on the
 // top-level card. Returns nil when no skills are available, so no-skills runs
-// register no Skill tool and stay byte-identical.
+// register no skill tool.
 func buildSkillTool(spec RunSpec, ops CardOps) tools.Tool {
 	if spec.TaskSkillsDir == "" {
 		return nil

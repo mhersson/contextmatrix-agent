@@ -5464,7 +5464,7 @@ func TestReviewSubagentReadToolsCarryExtraRoots(t *testing.T) {
 }
 
 // TestReviewSubagentToolsKeepTheSkillTool: widening the panel's read tools must
-// not cost it the Skill tool - both ride the same ExtraReadOnlyTools slice.
+// not cost it the skill tool - both ride the same ExtraReadOnlyTools slice.
 func TestReviewSubagentToolsKeepTheSkillTool(t *testing.T) {
 	t.Parallel()
 
@@ -5486,7 +5486,7 @@ func TestReviewSubagentToolsKeepTheSkillTool(t *testing.T) {
 
 	assert.Subset(t, names, []string{"skill", "read", "grep", "glob"})
 
-	// No declaration: the panel gets exactly what it got before, the Skill tool alone.
+	// No declaration: the panel gets exactly what it got without a declaration, the skill tool alone.
 	names = nil
 	for _, tl := range reviewSubagentTools("", ws, nil, skill, nil) {
 		names = append(names, tl.Name())

@@ -288,7 +288,7 @@ type run struct {
 	// solver is the parent run's implementation seam: the collaborators the
 	// execute phase writes each subtask through (main-workspace git and tools,
 	// the run ledger, the run's coder-model resolver) plus the board-ops/push
-	// flags. Built in newRun bound to today's exact collaborators; Best-of-N
+	// flags. Built in newRun bound to the run's own collaborators; Best-of-N
 	// derives additional candidate solvers that target worktrees and stay off
 	// the board.
 	solver *solverCtx
@@ -632,7 +632,7 @@ func newRun(ctx context.Context, d Deps, tc cmclient.TaskContext) *run {
 		// The run ledger spans the shared phases; effectiveCeiling scales it for
 		// Best-of-N (N execute allowances plus one for plan/judge/document/review/
 		// integrate). For BestOfN < 2 effectiveCeiling degenerates to MaxCardCost,
-		// so a single-solver run is byte-identical to before.
+		// so a single-solver run keeps the plain ceiling.
 		ledger: NewLedger(effectiveCeiling(d.Cfg), tc.ReportedCostUSD),
 	}
 
@@ -653,7 +653,7 @@ func newRun(ctx context.Context, d Deps, tc cmclient.TaskContext) *run {
 		o.lastFindings = recentReviewFindingsHistory(tc.Description)
 	}
 
-	// The parent solver binds the execute seam to today's exact collaborators:
+	// The parent solver binds the execute seam to the run's own collaborators:
 	// the main workspace git/tools, the run ledger (o.ledger IS its ledger), and
 	// the run's coder-model resolver, driving the board and pushing.
 	o.solver = &solverCtx{

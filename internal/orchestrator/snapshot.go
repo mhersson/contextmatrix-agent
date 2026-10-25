@@ -17,9 +17,9 @@ const (
 
 // repoSnapshot renders a bounded picture of the workspace for planning
 // discussions: the tracked file list (capped) and the README head, so planners
-// and seats spend zero turns discovering repo shape, and a greenfield repo is stated outright instead of being
-// triple-discovered by every seat. Returns "" when the root is empty or not a
-// git repo (the briefing then simply omits the block, no worse than before).
+// and seats spend zero turns discovering repo shape, and a greenfield repo is
+// stated outright instead of being triple-discovered by every seat. Returns ""
+// when the root is empty or not a git repo (the briefing then omits the block).
 func repoSnapshot(ctx context.Context, root string) string {
 	if root == "" {
 		return ""

@@ -152,5 +152,5 @@ call in `pr_gates`. They record their choice with the same event shape:
 shared decision tier; `subtask` is empty for these card-level phases and
 `met_tier` is empty because nothing scored the model against a bar. These
 picks consult no rung, so they also produce no `selector: pick` or
-`selector: pool` line. The event is observability only - resolution behavior
-and the pin-fallback warning path do not depend on it.
+`selector: pool` line. Emitting the event does not change which model is
+chosen or whether the pin-fallback warning fires.

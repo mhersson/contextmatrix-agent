@@ -1124,7 +1124,7 @@ func runPlan(ctx context.Context, o *run) error {
 
 	// Autonomous: draft once and create the subtasks. With the mob session on,
 	// the draft comes from a panel discussion; any discussion failure degrades
-	// to the solo draftPlan path, byte-identical to before.
+	// to the solo draftPlan path.
 	if !cfg.Interactive {
 		if mobPlan {
 			if p, out, ok := o.mobDraftPlan(ctx, diagnosis, design, "", nil); ok {

@@ -1098,7 +1098,7 @@ func TestRunFSMWiresPerDirFactories(t *testing.T) {
 }
 
 // TestRunFSMWiresSkillToolIntoCandidateRegistries: when a skills dir is
-// mounted, WriteToolsForDir must include the same Skill tool the main
+// mounted, WriteToolsForDir must include the same skill tool the main
 // WriteTools registry gets - Best-of-N candidates race with full tool parity
 // instead of a skill-less write set. Swaps runOrchestrator, so it must not
 // run in parallel.
