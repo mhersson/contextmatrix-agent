@@ -25,13 +25,13 @@ import (
 )
 
 const (
-	// correlationHeader carries the client's trace ID. The agent backend reads
-	// it on /trigger and threads it into executor.LaunchSpec.CorrelationID (the
-	// container label) so host and worker logs stitch to the same CM trace.
-	// It is also the discriminator SessionID keys redaction sessions by (see
-	// handleTrigger's fallback and addSessionSecrets/removeSessionSecrets) -
-	// distinct values for two runs of the same card is what lets a stale
-	// run's exit remove only its own redaction keys.
+	// correlationHeader carries ContextMatrix's trace ID, fresh on every
+	// trigger attempt. handleTrigger appends it to the run id it mints, which
+	// becomes executor.LaunchSpec.CorrelationID (the container label), so host
+	// and worker logs stitch to the same CM trace. That run id is also what
+	// SessionID keys redaction sessions by (see addSessionSecrets and
+	// removeSessionSecrets): distinct ids for two runs of the same card let a
+	// stale run's exit remove only its own redaction keys.
 	correlationHeader = "X-Correlation-ID"
 
 	// skillsMountPathEnv is the in-container path the executor mounts the skills
@@ -1110,6 +1110,9 @@ func (s *Server) handleStopAll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Detached so a caller that gives up mid-stop does not cut the kills short.
+	// One killTimeout covers two steps in turn, each about one kill grace: the
+	// wait for stopped admissions, one of which may be killing a run it had
+	// just launched, then the kills of the tracked runs.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), killTimeout)
 	defer cancel()
 
