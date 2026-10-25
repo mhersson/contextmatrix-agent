@@ -1448,12 +1448,27 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 
 	var b strings.Builder
 
+	incapable := map[string]bool{}
+
 	for i, res := range results {
 		// The read-only specialist panel runs via harness.SpawnSubagents, which
 		// exposes no per-subagent wall time, so duration is 0 (omitted on the
 		// wire); phase and step still ride the report.
 		o.spendAndReport(ctx, o.ledger, cfg.CardID, "review: report specialist usage failed",
 			res.Result, specs[i].Model, "main", 0, "role", res.Role)
+
+		// The seat keeps its truncated section this round; the blacklist and
+		// exclusion keep its model off later panels and the decision model. A
+		// pinned panel repeats one model, so it is recovered once. The cap is
+		// advisory here: no seat re-runs, and the exclusion holds either way.
+		if res.Err == nil && res.Result.Reason == harness.ReasonIncapable && !incapable[specs[i].Model] {
+			incapable[specs[i].Model] = true
+
+			if rerr := o.recoverIncapable(ctx, incapableError(specs[i].Model, res.Result)); rerr != nil {
+				slog.Warn("review: specialist model incapable and re-selection cap exhausted",
+					"card_id", cfg.CardID, "error", rerr)
+			}
+		}
 
 		b.WriteString(o.specialistSection(ctx, res))
 	}
@@ -1689,14 +1704,7 @@ func (o *run) synthesize(ctx context.Context, findings string, round int, author
 	d := o.d
 	cfg := d.Cfg
 
-	pick, rep := resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
-		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels())
-
-	if pick.OK {
-		o.noteShortfall(ctx, "review synthesis", "", pick, rep)
-	}
-
-	model := pick.Model
+	model := o.synthesisModel(ctx)
 
 	var (
 		v       verdict
@@ -1709,6 +1717,9 @@ func (o *run) synthesize(ctx context.Context, findings string, round int, author
 		// park with the specialist findings preserved, the same as a second cap,
 		// not fail the run.
 		wasCapped bool
+		// reselected is whether an incapable model has already been replaced:
+		// the synthesis retries on a re-selected model once.
+		reselected bool
 	)
 
 	for attempt := range 2 {
@@ -1727,9 +1738,26 @@ func (o *run) synthesize(ctx context.Context, findings string, round int, author
 
 		task := o.synthesisTask(authoritative, findings, repair)
 
-		res, dur, err := o.runModelSynthesis(ctx, d.ReadTools, task, model)
+		res, err := o.synthesisRun(ctx, task, model)
 
-		o.spendAndReport(ctx, o.ledger, cfg.CardID, "review: report synthesis usage failed", res, model, "main", dur)
+		// The incapable model ran no tools, so the same attempt reruns on the
+		// re-selected model, once.
+		if ie, ok := errors.AsType[*IncapableError](err); ok && !reselected {
+			reselected = true
+
+			if rerr := o.recoverIncapable(ctx, ie); rerr != nil {
+				return verdict{}, fmt.Errorf("synthesis run: %w", rerr)
+			}
+
+			if next := o.synthesisModel(ctx); next != model {
+				if lerr := o.ledger.Check(); lerr != nil {
+					return verdict{}, lerr
+				}
+
+				model = next
+				res, err = o.synthesisRun(ctx, task, model)
+			}
+		}
 
 		var mte *MaxTurnsError
 
@@ -1769,6 +1797,30 @@ func (o *run) synthesize(ctx context.Context, findings string, round int, author
 	}
 
 	return verdict{}, fmt.Errorf("verdict parse failed after repair: %w", lastErr)
+}
+
+// synthesisModel resolves the decision model synthesis runs on, skipping the
+// models excluded this run.
+func (o *run) synthesisModel(ctx context.Context) string {
+	d := o.d
+
+	pick, rep := resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, d.Cfg.CardID,
+		o.tc.ModelOrchestrator, d.Cfg.PayloadModel, d.Cfg.DefaultModel, o.excludedModels())
+
+	if pick.OK {
+		o.noteShortfall(ctx, "review synthesis", "", pick, rep)
+	}
+
+	return pick.Model
+}
+
+// synthesisRun runs one synthesis call on model and accounts for its spend.
+func (o *run) synthesisRun(ctx context.Context, task, model string) (harness.Result, error) {
+	res, dur, err := o.runModelSynthesis(ctx, o.d.ReadTools, task, model)
+
+	o.spendAndReport(ctx, o.ledger, o.d.Cfg.CardID, "review: report synthesis usage failed", res, model, "main", dur)
+
+	return res, err
 }
 
 // synthesisTask renders this round's synthesis prompt: the specialist variant,

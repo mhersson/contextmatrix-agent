@@ -189,6 +189,12 @@ already paid for are recorded on the card body under the round's own
 duplicates them) before the park. Only a parse failure with no cap anywhere
 in the call is fatal to the run.
 
+A specialist or synthesis model that proves harness-incapable is blacklisted
+and excluded for the rest of the run, as a coder's is. The specialist's
+section stays flagged as truncated for that round; synthesis reruns the
+attempt once on a re-selected model, and fails the run when no other decision
+model is selectable.
+
 Cross-round context is bounded, not unbounded. A non-authoritative round
 carries forward only the most recently synthesized panel verdict
 (`lastPanelFindings`); when no panel verdict has synthesized yet in this run

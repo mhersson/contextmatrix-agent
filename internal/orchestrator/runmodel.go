@@ -54,6 +54,18 @@ func (e *IncapableError) Error() string {
 	return fmt.Sprintf("model %q is harness-incapable: %s", e.Model, e.Reason)
 }
 
+// incapableError is the IncapableError for an incapable harness result: the
+// harness's own IncapableDetail when it classified the failure, else the
+// generic reason.
+func incapableError(model string, res harness.Result) *IncapableError {
+	reason := res.IncapableDetail
+	if reason == "" {
+		reason = "cannot drive the tool loop"
+	}
+
+	return &IncapableError{Model: model, Reason: reason}
+}
+
 // harnessConfig builds the per-phase harness.Config with the run-wide safety
 // fields (size cap, secret redaction) plus the model's own context window.
 // Centralizing this is the guard against a new phase forgetting the hardening.
@@ -132,12 +144,7 @@ func (o *run) runModelCfg(ctx context.Context, reg *tools.Registry, prompt, mode
 	}
 
 	if err == nil && res.Reason == harness.ReasonIncapable {
-		reason := res.IncapableDetail
-		if reason == "" {
-			reason = "cannot drive the tool loop"
-		}
-
-		return res, dur, &IncapableError{Model: model, Reason: reason}
+		return res, dur, incapableError(model, res)
 	}
 
 	if err == nil && res.Reason == "max_turns" {
