@@ -374,6 +374,34 @@ func TestReviewRecoversFromIncapableReviewModels(t *testing.T) {
 	}
 }
 
+// TestPinnedIncapableReviewerIsRecoveredOnce: a pinned reviewer keeps its seats
+// whatever the exclusion set holds, so it runs incapable every round. It is
+// blacklisted once; later rounds neither report it again nor spend the shared
+// re-selection budget on a model nothing re-selects.
+func TestPinnedIncapableReviewerIsRecoveredOnce(t *testing.T) {
+	ops := &fakeOps{}
+	client := &modelAwareLLM{
+		incapable: map[string]bool{"rev/alpha": true},
+		responses: []llm.Response{
+			stopResp(`{"approved":false,"summary":"fix it","fixes":[{"file":"a.go","issue":"bug","suggestion":"patch"}]}`, 0.02),
+			stopResp("coder: fixed", 0.05),
+			stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.02),
+		},
+	}
+	d := reviewTestDeps(t, ops, &fakeGit{committed: true}, client, reviewerRegistry())
+	tc := cmclient.TaskContext{
+		Title: "Parent", Description: "body", State: "in_progress",
+		ModelReviewer: "rev/alpha", ModelOrchestrator: "rev/beta",
+	}
+	o := newReviewRun(d, tc, 0)
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	assert.Equal(t, 1, countCall(ops.recorded(), "BlacklistModel:CARD-1/rev/alpha"),
+		"blacklisted once across both rounds; calls=%v", ops.recorded())
+	assert.Equal(t, 1, o.reselects, "the budget is spent once")
+}
+
 // modelsUsed reports whether the model-aware stub ran the given model at least
 // once.
 func modelsUsed(m *modelAwareLLM, model string) bool {

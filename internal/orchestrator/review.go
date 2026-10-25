@@ -1470,8 +1470,6 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 
 	var b strings.Builder
 
-	incapable := map[string]bool{}
-
 	for i, res := range results {
 		// The read-only specialist panel runs via harness.SpawnSubagents, which
 		// exposes no per-subagent wall time, so duration is 0 (omitted on the
@@ -1481,11 +1479,10 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 
 		// The seat keeps its truncated section this round; the blacklist and
 		// exclusion keep its model off later panels and the decision model. A
-		// pinned panel repeats one model, so it is recovered once. The cap is
-		// advisory here: no seat re-runs, and the exclusion holds either way.
-		if res.Err == nil && res.Result.Reason == harness.ReasonIncapable && !incapable[specs[i].Model] {
-			incapable[specs[i].Model] = true
-
+		// pin seats its model whatever the exclusion set holds, so a model
+		// already excluded is not recovered again. The cap is advisory here: no
+		// seat re-runs, and the exclusion holds either way.
+		if res.Err == nil && res.Result.Reason == harness.ReasonIncapable && !o.excludedModels()[specs[i].Model] {
 			if rerr := o.recoverIncapable(ctx, incapableError(specs[i].Model, res.Result)); rerr != nil {
 				slog.Warn("review: specialist model incapable and re-selection cap exhausted",
 					"card_id", cfg.CardID, "error", rerr)
