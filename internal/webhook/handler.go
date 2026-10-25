@@ -40,6 +40,9 @@ const (
 	skillsMountPathEnv = "/run/cm-skills"
 )
 
+// LLMProxyPrefix is where Routes mounts the LLM proxy.
+const LLMProxyPrefix = "/llm"
+
 // StatusReporter reports a task's worker-status transition back to
 // ContextMatrix. *callback.Client satisfies it; tests supply a fake.
 type StatusReporter interface {
@@ -55,6 +58,15 @@ type StatusReporter interface {
 type SessionSecretRegistry interface {
 	AddSessionKey(id, key string)
 	RemoveSessionKey(id string)
+}
+
+// LLMProxy keeps each run's real LLM key on serve: Register returns the
+// stand-in token the worker presents, Revoke ends it. *llmproxy.Proxy
+// satisfies it; tests supply a fake.
+type LLMProxy interface {
+	http.Handler
+	Register(runKey string, up protocol.LLMEndpoint) (string, error)
+	Revoke(runKey string)
 }
 
 // AutonomousVerifier confirms a card's autonomous flag before /promote writes
@@ -104,6 +116,10 @@ type LaunchEnv struct {
 	// MCPAPIKey is the fallback when the payload omits mcp_api_key.
 	MCPURL    string
 	MCPAPIKey string
+
+	// LLMBaseURL is the container-reachable LLM proxy URL (<serve>/llm), staged
+	// as the worker's LLM base URL in place of the upstream one.
+	LLMBaseURL string
 
 	// SecretsHostDir is the fallback host directory bind-mounted read-only into
 	// a container at /run/cm-secrets when the launch spec is built for a payload
@@ -182,6 +198,10 @@ type Config struct {
 	Credentials    CredentialProvisioner
 	SessionSecrets SessionSecretRegistry
 
+	// LLMProxy holds each run's real LLM key behind a stand-in token. Nil fails
+	// every trigger closed, so a wiring slip can never stage the real key.
+	LLMProxy LLMProxy
+
 	// Images lists the node's tagged images for GET /images. Nil disables the
 	// endpoint (500 internal).
 	Images webhookcore.ImageLister
@@ -241,6 +261,7 @@ type Server struct {
 	verifier       AutonomousVerifier
 	skillsResolver SkillsResolver
 	credentials    CredentialProvisioner
+	llmProxy       LLMProxy
 
 	launchEnv LaunchEnv
 
@@ -321,6 +342,7 @@ func NewServer(cfg Config) *Server {
 		verifier:        cfg.Verifier,
 		skillsResolver:  cfg.SkillsResolver,
 		credentials:     cfg.Credentials,
+		llmProxy:        cfg.LLMProxy,
 		sessionRegistry: cfg.SessionSecrets,
 		launchEnv:       cfg.LaunchEnv,
 		nextAttempt:     cfg.NextAttempt,
@@ -332,8 +354,10 @@ func NewServer(cfg Config) *Server {
 // Routes returns the mux with every webhook route mounted. The mutating
 // lifecycle routes are gated on drain; /kill, /stop-all, /logs, /containers,
 // /images, /health, /readyz stay reachable during shutdown so operators can
-// read state and stop work. The transport middlewares and the
-// health/readiness/images/logs handlers are promoted from the embedded Core.
+// read state and stop work. The LLM proxy sits outside Auth and DrainGate: it
+// authenticates workers by their run token, and workers parking during a drain
+// still need it. The transport middlewares and the health/readiness/images/logs
+// handlers are promoted from the embedded Core.
 func (s *Server) Routes() *http.ServeMux {
 	mux := http.NewServeMux()
 
@@ -348,6 +372,10 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /logs", s.RecordMetrics(s.Auth(s.HandleLogs)))
 	mux.HandleFunc("GET /health", s.RecordMetrics(s.HandleHealth))
 	mux.HandleFunc("GET /readyz", s.RecordMetrics(s.HandleReadyz))
+
+	if s.llmProxy != nil {
+		mux.HandleFunc(LLMProxyPrefix+"/", s.RecordMetrics(s.llmProxy.ServeHTTP))
+	}
 
 	return mux
 }
@@ -421,8 +449,8 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 
 	// Correlation ID travels in the X-Correlation-ID header, not the trigger
 	// body. A header is namespaced, never trusted verbatim: the value feeds
-	// the per-run keying that SessionID, RunCredentials, and the filelog all
-	// lean on, so a re-trigger reusing a trace id must still mint a distinct
+	// the per-run keying that SessionID, RunCredentials, the LLM proxy, and
+	// the filelog all lean on, so a re-trigger reusing a trace id must still mint a distinct
 	// run id - cardID plus a short random suffix keeps every admitted run
 	// unique, while the header stays recognizable inside the id for trace
 	// stitching. CM does not send this header today, so the mint below is the
@@ -485,7 +513,9 @@ func (s *Server) launch(spec executor.LaunchSpec, p protocol.TriggerPayload) {
 // per run - there is no local fallback. A payload missing the git token or the
 // llm_endpoint is fail-closed rejected here, before any provisioning or
 // executor call, rather than launched with a dud mount or an empty LLM
-// endpoint.
+// endpoint. A server without a usable LLM proxy fails closed the same way: the
+// worker gets a per-run proxy token, never the real key, and a run that does
+// not launch has its token revoked.
 func (s *Server) admitAndLaunch(ctx context.Context, spec executor.LaunchSpec, p protocol.TriggerPayload) string {
 	project, cardID := p.Project, p.CardID
 
@@ -514,11 +544,28 @@ func (s *Server) admitAndLaunch(ctx context.Context, spec executor.LaunchSpec, p
 		return "CM did not provision an llm_endpoint"
 	}
 
+	if s.llmProxy == nil {
+		s.logger.Error("trigger rejected: LLM proxy not configured",
+			"project", project, "card_id", cardID)
+
+		return "LLM proxy not configured"
+	}
+
+	token, err := s.llmProxy.Register(spec.CorrelationID, *p.LLMEndpoint)
+	if err != nil {
+		s.logger.Error("LLM proxy registration failed",
+			"project", project, "card_id", cardID, "error", err)
+
+		return "LLM proxy registration failed"
+	}
+
 	provisioned := false
 
 	// The fail-closed guard above already rejected empty-GitToken payloads.
 	if s.credentials != nil {
-		if err := s.credentials.Provision(project, cardID, spec.CorrelationID, p.GitToken, p.GitTokenExpiresAt, s.runEndpoint(p)); err != nil {
+		proxied := protocol.LLMEndpoint{Type: p.LLMEndpoint.Type, BaseURL: s.launchEnv.LLMBaseURL, APIKey: token}
+		if err := s.credentials.Provision(project, cardID, spec.CorrelationID, p.GitToken, p.GitTokenExpiresAt, s.runEndpoint(p, proxied)); err != nil {
+			s.llmProxy.Revoke(spec.CorrelationID)
 			s.logger.Error("provision per-run credentials failed",
 				"project", project, "card_id", cardID, "error", err)
 
@@ -528,7 +575,7 @@ func (s *Server) admitAndLaunch(ctx context.Context, spec executor.LaunchSpec, p
 		provisioned = true
 	}
 
-	s.addSessionSecrets(project, cardID, spec.CorrelationID, p)
+	s.addSessionSecrets(project, cardID, spec.CorrelationID, p, token)
 
 	if err := s.executor.Launch(ctx, spec); err != nil {
 		// Tear down only what THIS launch provisioned: a duplicate that skipped
@@ -537,6 +584,7 @@ func (s *Server) admitAndLaunch(ctx context.Context, spec executor.LaunchSpec, p
 			s.credentials.Teardown(project, cardID, spec.CorrelationID)
 		}
 
+		s.llmProxy.Revoke(spec.CorrelationID)
 		s.removeSessionSecrets(project, cardID, spec.CorrelationID)
 
 		s.logger.Error("launch failed", "project", project, "card_id", cardID, "error", err)
@@ -563,23 +611,24 @@ func SessionID(project, cardID, correlationID string) string {
 // mintRunID builds a per-run correlation id: cardID plus a short random
 // suffix, so two triggers for the same card always get distinct ids - the
 // X-Correlation-ID header is namespaced onto this base, never trusted
-// verbatim, because SessionID, the RunCredentials teardown, and the filelog
-// writer registry all key per-run state by this id. crypto/rand.Text cannot
-// fail, so this always returns a fresh, non-empty value - handleTrigger never
-// needs an error path for it.
+// verbatim, because SessionID, the RunCredentials teardown, the LLM proxy, and
+// the filelog writer registry all key per-run state by this id.
+// crypto/rand.Text cannot fail, so this always returns a fresh, non-empty
+// value - handleTrigger never needs an error path for it.
 func mintRunID(cardID string) string {
 	return cardID + "-" + strings.ToLower(rand.Text()[:8])
 }
 
-// addSessionSecrets registers every CM-provisioned secret in the session
+// addSessionSecrets registers every secret a run receives in the session
 // secret registry under SessionID(project, cardID, correlationID): the git
-// token, the LLM endpoint key, the resolved MCP API key (the payload
-// override, else the configured one - the same expression buildLaunchSpec
-// uses, so the key the worker actually sends is the key that gets masked),
-// and every mob guest bearer token. Registration happens before Launch so no
-// container output can precede it; removeSessionSecrets unregisters on
-// container exit and on a failed launch, so a re-trigger never inherits stale
-// keys. It is nil-safe against a nil registry, a nil endpoint, and a nil mob,
+// token, the LLM proxy token, the resolved MCP API key (the payload override,
+// else the configured one - the same expression buildLaunchSpec uses, so the
+// key the worker actually sends is the key that gets masked), and every mob
+// guest bearer token. The real LLM endpoint key never reaches the container
+// but stays registered as defence in depth. Registration happens before
+// Launch so no container output can precede it; removeSessionSecrets
+// unregisters on container exit and on a failed launch, so a re-trigger never
+// inherits stale keys. It is nil-safe against a nil registry, a nil endpoint, and a nil mob,
 // so callers never nil-guard, and AddSessionKey ignores empty values.
 //
 // Operator-supplied worker_extra_env is deliberately not registered. Those
@@ -588,7 +637,7 @@ func mintRunID(cardID string) string {
 // transcripts, so masking only the /logs copy would be a false assurance.
 // (The chat backend does register its worker_extra_env LLM_API_KEY, which is
 // why the two backends differ here.)
-func (s *Server) addSessionSecrets(project, cardID, correlationID string, p protocol.TriggerPayload) {
+func (s *Server) addSessionSecrets(project, cardID, correlationID string, p protocol.TriggerPayload, llmToken string) {
 	if s.sessionRegistry == nil {
 		return
 	}
@@ -596,6 +645,7 @@ func (s *Server) addSessionSecrets(project, cardID, correlationID string, p prot
 	id := SessionID(project, cardID, correlationID)
 
 	s.sessionRegistry.AddSessionKey(id, p.GitToken)
+	s.sessionRegistry.AddSessionKey(id, llmToken)
 
 	if p.LLMEndpoint != nil {
 		s.sessionRegistry.AddSessionKey(id, p.LLMEndpoint.APIKey)
@@ -625,22 +675,17 @@ func (s *Server) removeSessionSecrets(project, cardID, correlationID string) {
 	s.sessionRegistry.RemoveSessionKey(SessionID(project, cardID, correlationID))
 }
 
-// runEndpoint maps the payload's llm_endpoint - plus the mob session guest
-// specs, which carry bearer tokens and therefore ride the secrets file - into
-// the per-run credential file's shape. Guests are set regardless of the LLM
-// endpoint so an endpoint-less payload still delivers them.
-func (s *Server) runEndpoint(p protocol.TriggerPayload) secrets.EndpointSecrets {
-	e := secrets.EndpointSecrets{MobGuests: s.mobGuestsJSON(p)}
-
-	if p.LLMEndpoint == nil {
-		return e
+// runEndpoint maps the LLM endpoint the worker is to call - the proxy's, never
+// the payload's - plus the payload's mob session guest specs, which carry
+// bearer tokens and therefore ride the secrets file, into the per-run
+// credential file's shape.
+func (s *Server) runEndpoint(p protocol.TriggerPayload, llm protocol.LLMEndpoint) secrets.EndpointSecrets {
+	return secrets.EndpointSecrets{
+		APIKey:    llm.APIKey,
+		BaseURL:   llm.BaseURL,
+		Type:      llm.Type,
+		MobGuests: s.mobGuestsJSON(p),
 	}
-
-	e.APIKey = p.LLMEndpoint.APIKey
-	e.BaseURL = p.LLMEndpoint.BaseURL
-	e.Type = p.LLMEndpoint.Type
-
-	return e
 }
 
 // mobGuestsJSON compact-encodes the payload's guest specs for the per-run
@@ -748,7 +793,7 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 		}
 	}
 
-	// CM-provisioned credentials (git token + LLM values) travel via a per-run
+	// The run's credentials (git token + LLM proxy values) travel via a per-run
 	// secrets FILE (written and refreshed by the credential provisioner, mounted
 	// at /run/cm-secrets), never plain container env - the worker reads them
 	// only from that file, and plain env would go stale as the refresh loop

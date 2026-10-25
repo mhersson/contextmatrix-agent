@@ -65,7 +65,8 @@ func (f *fakeSessionSecretRegistry) removedIDs() []string {
 
 // TestAddSessionSecrets_FullyProvisionedTrigger registers a payload with a git
 // token, an LLM endpoint key, a payload MCP key override, and two mob guest
-// tokens, and asserts all four classes of secret land under the correct id.
+// tokens, plus the run's proxy token, and asserts every class of secret lands
+// under the correct id.
 func TestAddSessionSecrets_FullyProvisionedTrigger(t *testing.T) {
 	registry := newFakeSessionSecretRegistry()
 
@@ -102,13 +103,14 @@ func TestAddSessionSecrets_FullyProvisionedTrigger(t *testing.T) {
 		},
 	}
 
-	s.addSessionSecrets("p", "C1", "corr-1", payload)
+	s.addSessionSecrets("p", "C1", "corr-1", payload, "proxy-token")
 
 	got := registry.keys(SessionID("p", "C1", "corr-1"))
-	require.Len(t, got, 5, "five entries: git token, llm key, mcp key, and two guest tokens (one entry each)")
+	require.Len(t, got, 6, "six entries: git token, proxy token, llm key, mcp key, and two guest tokens (one entry each)")
 
 	// Check each class is present (order is append-order from addSessionSecrets)
 	assert.Contains(t, got, "cm-git-token", "git token must be registered")
+	assert.Contains(t, got, "proxy-token", "LLM proxy token must be registered")
 	assert.Contains(t, got, "cm-llm-key", "LLM endpoint key must be registered")
 	assert.Contains(t, got, "payload-mcp-key", "payload MCP key override must be registered")
 	assert.Contains(t, got, "guest-token-1", "first mob guest token must be registered")
@@ -141,7 +143,7 @@ func TestAddSessionSecrets_UsesConfigMCPKey(t *testing.T) {
 		// No MCPAPIKey override - should use config default
 	}
 
-	s.addSessionSecrets("p", "C1", "corr-1", payload)
+	s.addSessionSecrets("p", "C1", "corr-1", payload, "")
 
 	got := registry.keys(SessionID("p", "C1", "corr-1"))
 	assert.Contains(t, got, "cfg-mcp-key", "config-level MCP key must be registered when no payload override")
@@ -168,7 +170,7 @@ func TestAddSessionSecrets_NilEndpointAndMob(t *testing.T) {
 		GitToken: "cm-git-token",
 	}
 
-	s.addSessionSecrets("p", "C1", "corr-1", payload)
+	s.addSessionSecrets("p", "C1", "corr-1", payload, "")
 
 	got := registry.keys(SessionID("p", "C1", "corr-1"))
 	require.Len(t, got, 2, "git token and config MCP key only")
@@ -199,7 +201,7 @@ func TestAddSessionSecrets_NilRegistryIsNoOp(t *testing.T) {
 	}
 
 	// Must not panic
-	s.addSessionSecrets("p", "C1", "corr-1", payload)
+	s.addSessionSecrets("p", "C1", "corr-1", payload, "")
 	s.removeSessionSecrets("p", "C1", "corr-1")
 }
 
@@ -224,7 +226,7 @@ func TestRemoveSessionSecrets(t *testing.T) {
 		LLMEndpoint: &protocol.LLMEndpoint{Type: "openai", APIKey: "cm-llm-key"},
 	}
 
-	s.addSessionSecrets("p", "C1", "corr-1", payload)
+	s.addSessionSecrets("p", "C1", "corr-1", payload, "")
 	require.Len(t, registry.keys(SessionID("p", "C1", "corr-1")), 3, "secrets registered")
 
 	s.removeSessionSecrets("p", "C1", "corr-1")
@@ -260,8 +262,8 @@ func TestRemoveSessionSecrets_DifferentCorrelationIDDoesNotCollide(t *testing.T)
 
 	// Run 1 registers, then is superseded by a re-trigger (run 2) of the same
 	// card before its own exit-path removal fires.
-	s.addSessionSecrets("p", "C1", "corr-1", payload)
-	s.addSessionSecrets("p", "C1", "corr-2", payload)
+	s.addSessionSecrets("p", "C1", "corr-1", payload, "")
+	s.addSessionSecrets("p", "C1", "corr-2", payload, "")
 
 	// Run 1's stale exit removes only its own bucket.
 	s.removeSessionSecrets("p", "C1", "corr-1")
@@ -296,6 +298,7 @@ func TestFailedLaunchRemovesSessionSecrets(t *testing.T) {
 		Tracker:        executor.NewTracker(1),
 		Credentials:    &fakeCredentials{},
 		Reporter:       &fakeReporter{},
+		LLMProxy:       &fakeLLMProxy{},
 		SessionSecrets: registry,
 		LaunchEnv: LaunchEnv{
 			BaseImage: "img",
@@ -317,4 +320,37 @@ func TestFailedLaunchRemovesSessionSecrets(t *testing.T) {
 
 	assert.Empty(t, registry.keys(SessionID("p", "C1", "corr")), "secrets removed after launch failure")
 	assert.Contains(t, registry.removedIDs(), SessionID("p", "C1", "corr"), "remove call recorded on launch failure")
+}
+
+// TestSessionSecretsRegisterProxyToken: the stand-in token is what a worker can
+// print, so admission masks it under the run's session; the real key stays
+// registered as defence in depth.
+func TestSessionSecretsRegisterProxyToken(t *testing.T) {
+	registry := newFakeSessionSecretRegistry()
+	tracker := executor.NewTracker(1)
+
+	s := NewServer(Config{
+		APIKey:         "k",
+		Executor:       &fakeExecutor{tracker: tracker},
+		Tracker:        tracker,
+		Credentials:    &fakeCredentials{},
+		Reporter:       &fakeReporter{},
+		LLMProxy:       &fakeLLMProxy{},
+		SessionSecrets: registry,
+		LaunchEnv:      LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"},
+		Logger:         quietLogger(),
+	})
+
+	payload := protocol.TriggerPayload{
+		CardID:      "C1",
+		Project:     "p",
+		GitToken:    "cm-git-token",
+		LLMEndpoint: &protocol.LLMEndpoint{Type: "openai", APIKey: "cm-llm-key"},
+	}
+
+	s.launch(s.buildLaunchSpec(payload, "corr", ""), payload)
+
+	got := registry.keys(SessionID("p", "C1", "corr"))
+	assert.Contains(t, got, "tok-corr", "the proxy token must be registered")
+	assert.Contains(t, got, "cm-llm-key", "the real key must stay registered")
 }
