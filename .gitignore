@@ -12,3 +12,7 @@ capabilities-*.md
 
 # Build history written by make build; embedded by internal/buildinfo.
 internal/buildinfo/history/merges.log
+
+# Local agent worktrees and planning scratch.
+/.worktrees/
+/.superpowers/
