@@ -85,9 +85,9 @@ func newWorkCmd() *cobra.Command {
 				return fmt.Errorf("read secrets: %w", err)
 			}
 
-			// LLM values resolve env-first-then-file: the llm-only-payload delivery
-			// sets LLM_* as container env, which wins (set-but-empty counts as set),
-			// falling back to the mounted file otherwise. The git token is NOT
+			// LLM values resolve env-first-then-file, so an operator
+			// worker_extra_env LLM_* override wins over the staged proxy values
+			// (set-but-empty counts as set). The git token is NOT
 			// resolved from env - the credential helper re-reads CM_GIT_TOKEN from the
 			// file per git op so host-side rotation reaches a long-running worker.
 			spec.LLMKey = resolveLLMValue("LLM_API_KEY", src)
@@ -452,11 +452,12 @@ func specFromEnv() (worker.RunSpec, error) {
 }
 
 // resolveLLMValue resolves an LLM endpoint value env-first-then-file: a
-// container env var set by the llm-only-payload delivery wins (os.LookupEnv, so
-// set-but-empty counts as set - an empty LLM_BASE_URL means "the type's
-// canonical default"), falling back to the mounted secrets file when the var is
-// unset. Used only for the LLM_* values; the git token stays file-only so the
-// credential helper picks up host-side rotation.
+// container env var, such as an operator worker_extra_env entry, wins over the
+// staged proxy values (os.LookupEnv, so set-but-empty counts as set -
+// an empty LLM_BASE_URL means "the type's canonical default"), falling back to
+// the mounted secrets file when the var is unset. Used only for the LLM_*
+// values; the git token stays file-only so the credential helper picks up
+// host-side rotation.
 func resolveLLMValue(name string, src *secrets.Source) string {
 	if v, ok := os.LookupEnv(name); ok {
 		return v

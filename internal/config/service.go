@@ -115,10 +115,11 @@ type ServiceConfig struct {
 
 	// CACertFile is an optional path (on the serve host) to a PEM file of extra
 	// CA certificates for corporate TLS interception / a private-CA GitHub
-	// Enterprise. When set, it is bind-mounted read-only into each worker
-	// container and the worker trusts it for its own outbound TLS (harness LLM
+	// Enterprise. Serve's LLM proxy trusts it, on top of the system pool, for
+	// its upstream TLS. It is also bind-mounted read-only into each worker
+	// container, and the worker trusts it for its own outbound TLS (harness LLM
 	// client, MCP/cmclient) and its git/gh subprocesses. Empty disables the
-	// feature. Container-only: the serve host itself uses the OS trust store.
+	// feature. Serve's other outbound calls use the OS trust store.
 	CACertFile string
 
 	// MaxCardCost is the cumulative USD ceiling per card. Workers receive it as

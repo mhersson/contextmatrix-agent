@@ -181,6 +181,14 @@ export LLM_API_KEY=<your-api-key>
    the trigger payload - the agent carries no local credential config, and a
    trigger without CM-provisioned credentials is rejected.
 
+   The real LLM key stays in `serve`: each worker gets a per-run stand-in token
+   and calls `serve`'s LLM proxy at `container_serve_url` (default
+   `http://host.docker.internal:<port>`), so a host firewall must allow
+   container-to-host traffic on that port. Upstream LLM calls leave from
+   `serve`, so they use `serve`'s own `HTTP(S)_PROXY`/`NO_PROXY` environment;
+   an egress proxy set only in `worker_extra_env` does not reach them. See
+   [`docs/secrets.md`](docs/secrets.md#llm-proxy).
+
    `container_contextmatrix_url` is required in practice - workers resolve their
    MCP URL from it; without it they point at their own localhost and fail to
    connect. For Docker bridge networking it is typically the bridge gateway
@@ -340,7 +348,7 @@ working **on** this codebase live in [`AGENTS.md`](AGENTS.md).
   git workflow, review, verify resolution, plan split, repo grounding.
 - [`docs/pr-gates.md`](docs/pr-gates.md) - the CI and Copilot gates.
 - [`docs/model-selection.md`](docs/model-selection.md) - the selection policy.
-- [`docs/secrets.md`](docs/secrets.md) - credential staging and redaction.
+- [`docs/secrets.md`](docs/secrets.md) - credential staging, the LLM proxy, and redaction.
 - [`docs/observability.md`](docs/observability.md) - metrics and the admin listener.
 - [`docs/custom-images.md`](docs/custom-images.md) - custom worker images.
 - [`serve.yaml.example`](serve.yaml.example) - every service config field, documented.

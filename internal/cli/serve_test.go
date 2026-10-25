@@ -106,6 +106,16 @@ func TestLaunchEnvMCPURL(t *testing.T) {
 		assert.Equal(t, "http://public:8080/mcp", env.MCPURL)
 	})
 
+	t.Run("stages the container-reachable LLM proxy URL", func(t *testing.T) {
+		cfg := &config.ServiceConfig{
+			ContextMatrixURL:  "http://public:8080",
+			ContainerServeURL: "http://10.0.0.5:19092",
+			Port:              9092,
+		}
+		env := launchEnv(cfg, "/secrets/shared")
+		assert.Equal(t, "http://10.0.0.5:19092/llm", env.LLMBaseURL)
+	})
+
 	t.Run("forwards worker knobs", func(t *testing.T) {
 		cfg := &config.ServiceConfig{
 			ContextMatrixURL:      "http://public:8080",
@@ -159,9 +169,69 @@ func TestFlattenEnv(t *testing.T) {
 	})
 }
 
-type stubReporter struct{ status, message string }
+func TestContainerLLMBaseURL(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  config.ServiceConfig
+		want string
+	}{
+		{
+			"unset falls back to the host gateway on serve's port",
+			config.ServiceConfig{Port: 9092},
+			"http://host.docker.internal:9092/llm",
+		},
+		{
+			"trailing slash trimmed",
+			config.ServiceConfig{Port: 9092, ContainerServeURL: "http://10.0.0.5:19092/"},
+			"http://10.0.0.5:19092/llm",
+		},
+		{
+			"https kept",
+			config.ServiceConfig{Port: 9092, ContainerServeURL: "https://serve.example:9092"},
+			"https://serve.example:9092/llm",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, containerLLMBaseURL(&tt.cfg))
+		})
+	}
+}
+
+// recordingRevoker records every run key it is asked to revoke.
+type recordingRevoker struct{ revoked []string }
+
+func (r *recordingRevoker) Revoke(runKey string) { r.revoked = append(r.revoked, runKey) }
+
+// TestOnDisplaceHookRevokesTheDisplacedRun: a newer run of the same card
+// displaces the older run's credentials handle, so the older run's proxy token
+// is revoked there, and the newer run's token is left alone.
+func TestOnDisplaceHookRevokesTheDisplacedRun(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	creds := secrets.NewRunCredentials(t.TempDir(), "http://cm", "key", logger)
+	revoker := &recordingRevoker{}
+	creds.OnDisplace = onDisplaceHook(revoker)
+
+	require.NoError(t, creds.Provision("proj", "CARD-1", "corr-1", "run1-token", "", secrets.EndpointSecrets{}))
+	require.NoError(t, creds.Provision("proj", "CARD-1", "corr-2", "run2-token", "", secrets.EndpointSecrets{}))
+	t.Cleanup(func() { creds.Teardown("proj", "CARD-1", "corr-2") })
+
+	assert.Equal(t, []string{"corr-1"}, revoker.revoked)
+}
+
+type stubReporter struct {
+	status, message string
+
+	// onReport, when set, runs as the status callback fires.
+	onReport func()
+}
 
 func (s *stubReporter) ReportStatus(_ context.Context, _, _, status, message string) error {
+	if s.onReport != nil {
+		s.onReport()
+	}
+
 	s.status = status
 	s.message = message
 
@@ -184,7 +254,7 @@ func TestOnContainerExitClosesLogFile(t *testing.T) {
 	bridge := logbridge.NewBridge(logbridge.BridgeConfig{Hub: hub})
 	registry := logbridge.NewRedactorRegistry(bridge)
 
-	onExit := onContainerExit(rep, creds, files, registry, bridge, logger)
+	onExit := onContainerExit(rep, creds, &recordingRevoker{}, files, registry, bridge, logger)
 	onExit("proj", "CARD-1", 0, executor.ExitNormal, 1, "corr-1")
 
 	data, err := os.ReadFile(filepath.Join(dir, "proj", "card-1.log"))
@@ -246,6 +316,7 @@ type exitHarness struct {
 	dir      string
 	files    *filelog.Logger
 	creds    *secrets.RunCredentials
+	revoker  *recordingRevoker
 	rep      *stubReporter
 	stream   <-chan protocol.LogEntry
 	registry *logbridge.RedactorRegistry
@@ -258,6 +329,7 @@ func newExitHarness(t *testing.T, logDir string) *exitHarness {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	files := filelog.New(logDir, logger)
 	creds := secrets.NewRunCredentials(t.TempDir(), "http://cm", "key", logger)
+	revoker := &recordingRevoker{}
 	rep := &stubReporter{}
 
 	hub := logbridge.NewHub(func(e protocol.LogEntry) string { return e.Project }, nil)
@@ -272,10 +344,11 @@ func newExitHarness(t *testing.T, logDir string) *exitHarness {
 		dir:      logDir,
 		files:    files,
 		creds:    creds,
+		revoker:  revoker,
 		rep:      rep,
 		stream:   ch,
 		registry: registry,
-		onExit:   onContainerExit(rep, creds, files, registry, bridge, logger),
+		onExit:   onContainerExit(rep, creds, revoker, files, registry, bridge, logger),
 	}
 }
 
@@ -429,6 +502,21 @@ func TestOnContainerExit_StaleTeardownSparesSuccessorCredentials(t *testing.T) {
 
 	_, err = os.Stat(credsDir)
 	assert.True(t, os.IsNotExist(err), "run 2's own exit must remove the credentials dir")
+}
+
+// TestOnContainerExitRevokesTheRunsToken: the run's LLM proxy token dies with
+// its container, and before the status callback lets CM admit a re-trigger.
+func TestOnContainerExitRevokesTheRunsToken(t *testing.T) {
+	h := newExitHarness(t, t.TempDir())
+
+	revokedAtCallback := -1
+	h.rep.onReport = func() { revokedAtCallback = len(h.revoker.revoked) }
+
+	h.files.Begin("proj", "CARD-1", "abcdef012345", "corr-1")
+	h.onExit("proj", "CARD-1", 0, executor.ExitNormal, 1, "corr-1")
+
+	assert.Equal(t, []string{"corr-1"}, h.revoker.revoked)
+	assert.Equal(t, 1, revokedAtCallback, "the token must already be revoked when the status callback fires")
 }
 
 // TestTerminalEventCarriesTheAttemptOrdinal keeps a restarted container's
