@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -159,12 +160,16 @@ func TestExecuteBindsVerifyToolForTheSoloSolver(t *testing.T) {
 		verifies []tools.Tool
 	)
 
-	d := execTestDeps(&fakeOps{}, &fakeGit{}, &planLLM{})
+	inner := &planLLM{}
+	d := execTestDeps(&fakeOps{}, &fakeGit{committed: true}, inner)
 	d.Cfg.Workspace = "/ws"
 	d.WriteToolsForDir = recordingWriteTools(&dirs, &verifies)
 
-	o := newExecRun(d, nil, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
 	seedResolvedVerifyPlan(o)
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 0}
+	}
 
 	require.NoError(t, runExecute(context.Background(), o))
 
@@ -172,8 +177,9 @@ func TestExecuteBindsVerifyToolForTheSoloSolver(t *testing.T) {
 	require.NotNil(t, verifies[0])
 	assert.Equal(t, "verify", verifies[0].Name())
 
-	_, ok := o.solver.tools.Get("verify")
-	assert.True(t, ok, "the coder must be able to call the verify tool")
+	offered := inner.toolNamesSeen()
+	require.Len(t, offered, 1, "one coder call")
+	assert.Contains(t, offered[0], "verify", "the coder must be able to call the verify tool")
 }
 
 // A run with no resolvable command leaves the solver's registry untouched, so
@@ -184,18 +190,60 @@ func TestExecuteBindsNoVerifyToolWithoutACommand(t *testing.T) {
 		verifies []tools.Tool
 	)
 
-	d := execTestDeps(&fakeOps{}, &fakeGit{}, &planLLM{})
-	d.Cfg.Workspace = "/ws"
+	inner := &planLLM{}
+	d := execTestDeps(&fakeOps{}, &fakeGit{committed: true}, inner)
+	d.Cfg.Workspace = t.TempDir()
 	d.WriteToolsForDir = recordingWriteTools(&dirs, &verifies)
 
-	o := newExecRun(d, nil, 0)
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 0)
 
 	require.NoError(t, runExecute(context.Background(), o))
 
 	assert.Empty(t, dirs, "no command resolved: the registry must not be rebuilt")
 
-	_, ok := o.solver.tools.Get("verify")
-	assert.False(t, ok, "a run with nothing to verify must offer no verify tool")
+	offered := inner.toolNamesSeen()
+	require.Len(t, offered, 1, "one coder call")
+	assert.NotContains(t, offered[0], "verify", "a run with nothing to verify must offer no verify tool")
+}
+
+// A greenfield run resolves no command at execute entry. Once a subtask adds a
+// toolchain marker the gate resolves one, and the later coders - whose prompt
+// now names the tool - must be able to call it.
+func TestExecuteBindsVerifyToolOnceASubtaskMakesACommandResolvable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("exec-bit probing is POSIX-only")
+	}
+
+	stubTools(t, "go")
+
+	var (
+		dirs     []string
+		verifies []tools.Tool
+	)
+
+	dir := t.TempDir()
+	inner := &planLLM{}
+	client := &markerMidRunLLM{inner: inner, t: t, dir: dir, marker: "go.mod", content: "module example.com/x\n"}
+
+	d := execTestDeps(&fakeOps{}, &fakeGit{committed: true}, client)
+	d.Cfg.Workspace = dir
+	d.WriteToolsForDir = recordingWriteTools(&dirs, &verifies)
+
+	o := newExecRun(d, []subtaskRef{
+		{ID: "SUB-1", Title: "Scaffold", Sizing: seedSizing("simple")},
+		{ID: "SUB-2", Title: "Build", DependsOnIDs: []string{"SUB-1"}, Sizing: seedSizing("simple")},
+	}, 0)
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 0}
+	}
+
+	require.NoError(t, runExecute(context.Background(), o))
+
+	offered := inner.toolNamesSeen()
+	require.Len(t, offered, 2, "one coder call per subtask")
+	assert.NotContains(t, offered[0], "verify", "nothing was resolvable when the first coder ran")
+	assert.Contains(t, offered[1], "verify", "the second coder must be offered the tool its prompt names")
+	assert.Len(t, dirs, 1, "the registry is rebuilt once, not before every subtask")
 }
 
 // Every Best-of-N candidate gets its own verify tool, rooted at its own

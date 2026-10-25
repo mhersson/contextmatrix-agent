@@ -946,6 +946,10 @@ type planLLM struct {
 	// models, so tests can assert a caller offered no tools.
 	toolCounts []int
 
+	// toolNames captures the offered tool names for every call, index-aligned
+	// with models, so tests can assert which tools a call was offered.
+	toolNames [][]string
+
 	// msgsPerCall captures each request's full message slice, index-aligned
 	// with models, so tests can assert on carried seat context.
 	msgsPerCall [][]llm.Message
@@ -976,6 +980,13 @@ func (p *planLLM) next(req llm.Request) (llm.Response, error) {
 	p.models = append(p.models, req.Model)
 	p.reasonings = append(p.reasonings, req.Reasoning)
 	p.toolCounts = append(p.toolCounts, len(req.Tools))
+
+	names := make([]string, 0, len(req.Tools))
+	for _, tl := range req.Tools {
+		names = append(names, tl.Function.Name)
+	}
+
+	p.toolNames = append(p.toolNames, names)
 	p.msgsPerCall = append(p.msgsPerCall, append([]llm.Message(nil), req.Messages...))
 
 	// Capture the last user message - the phase task prompt.
@@ -1006,6 +1017,13 @@ func (p *planLLM) toolCountsSeen() []int {
 	defer p.mu.Unlock()
 
 	return append([]int(nil), p.toolCounts...)
+}
+
+func (p *planLLM) toolNamesSeen() [][]string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return append([][]string(nil), p.toolNames...)
 }
 
 func (p *planLLM) messagesOf(call int) []llm.Message {

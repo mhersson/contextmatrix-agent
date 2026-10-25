@@ -47,6 +47,8 @@ type solverCtx struct {
 	// harness run and read by the pre-commit gate after it returns, on the
 	// goroutine that drives the subtask.
 	toolVerify verifyToolPass
+	// verifyBound: bindVerifyTool has registered the verify tool on tools.
+	verifyBound bool
 }
 
 // gateEvidence is what the pre-commit gate learned about this subtask. It
@@ -69,8 +71,7 @@ func runExecute(ctx context.Context, o *run) error {
 	// Resolve the verify plan once at execute entry (the first phase to reach the
 	// gate on a fresh run), so the resolution log fires early and the coder prompt
 	// can name the command. A budget park during the proposal tier propagates.
-	plan, err := o.ensureVerify(ctx)
-	if err != nil {
+	if _, err := o.ensureVerify(ctx); err != nil {
 		return err
 	}
 
@@ -82,14 +83,16 @@ func runExecute(ctx context.Context, o *run) error {
 		return o.runFanout(ctx)
 	}
 
-	o.bindVerifyTool(o.solver, plan)
-
 	ordered, err := topoOrder(o.subtasks)
 	if err != nil {
 		return fmt.Errorf("order subtasks: %w", err)
 	}
 
 	for _, sub := range ordered {
+		// Every subtask's gate re-resolves a skipped plan, so a subtask that adds
+		// a toolchain marker makes a command resolvable for the ones after it.
+		o.bindVerifyTool(o.solver, o.resolvedVerifyPlan())
+
 		if err := o.executeSubtaskWith(ctx, o.solver, sub); err != nil {
 			return err
 		}
@@ -100,17 +103,18 @@ func runExecute(ctx context.Context, o *run) error {
 
 // bindVerifyTool rebuilds the solver's registry with the run's verify tool, so
 // the coder calls the resolved command instead of guessing shell commands for
-// it. It binds here rather than in newRun because the plan resolves at this
-// point, not at construction. A run with no resolvable command leaves the
-// registry exactly as it was.
+// it. It binds in execute rather than in newRun because the plan resolves
+// there, not at construction. A plan with no command, or a solver that already
+// holds the tool, leaves the registry exactly as it was; a resolved command is
+// cached for the rest of the run, so one binding stays current.
 //
-// Ordering, since this mutates solver state mid-run: it runs after the plan has
-// resolved and before the first coder harness starts, on the goroutine that
-// drives the phase. Nothing reads sc.tools in between. A Best-of-N fan-out
-// cannot observe it at all - that branch returns above, o.solver is untouched by
-// the fan-out, and each candidate binds its own tool inside runCandidate.
+// Ordering, since this mutates solver state mid-run: it runs between coder
+// harness runs, on the goroutine that drives the phase, so nothing reads
+// sc.tools concurrently. A Best-of-N fan-out cannot observe it at all - that
+// branch returns above, o.solver is untouched by the fan-out, and each
+// candidate binds its own tool inside runCandidate.
 func (o *run) bindVerifyTool(sc *solverCtx, plan verifyPlan) {
-	if o.d.WriteToolsForDir == nil {
+	if sc.verifyBound || o.d.WriteToolsForDir == nil {
 		return
 	}
 
@@ -120,6 +124,7 @@ func (o *run) bindVerifyTool(sc *solverCtx, plan verifyPlan) {
 	}
 
 	sc.tools = o.d.WriteToolsForDir(sc.workspace, vt)
+	sc.verifyBound = true
 }
 
 // executeSubtaskWith runs one subtask end to end through the given solver:

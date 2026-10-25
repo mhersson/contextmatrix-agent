@@ -1730,13 +1730,15 @@ func TestSalvageDeclineAfterCompleteTaskFailKeepsTierAndWinRow(t *testing.T) {
 
 // markerMidRunLLM wraps a scripted LLM and writes a toolchain marker file into
 // dir the first time it is called, simulating a coder run that introduces
-// project scaffolding (e.g. a pom.xml) mid-run: the run's FIRST verify
-// resolution (before the coder loop starts) sees nothing, but a SECOND
-// resolution after that point sees the marker.
+// project scaffolding mid-run: the run's FIRST verify resolution (before the
+// coder loop starts) sees nothing, but a SECOND resolution after that point
+// sees the marker.
 type markerMidRunLLM struct {
 	inner   llm.LLM
 	t       *testing.T
 	dir     string
+	marker  string // file name written into dir
+	content string
 	written bool
 }
 
@@ -1747,7 +1749,7 @@ func (m *markerMidRunLLM) writeMarkerOnce() {
 
 	m.written = true
 
-	writeFile(m.t, m.dir, "pom.xml", "<project></project>\n")
+	writeFile(m.t, m.dir, m.marker, m.content)
 }
 
 func (m *markerMidRunLLM) Send(ctx context.Context, req llm.Request) (llm.Response, error) {
@@ -1781,7 +1783,7 @@ func TestSoloTurnCapPropagatesToolchainSentinel(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true} // a dirty tree the salvage commit captures
 	inner := &planLLM{responses: burnResps(5)}
-	client := &markerMidRunLLM{inner: inner, t: t, dir: dir}
+	client := &markerMidRunLLM{inner: inner, t: t, dir: dir, marker: "pom.xml", content: "<project></project>\n"}
 	d := execTestDeps(ops, git, client)
 	d.Cfg.MaxTurns = 5
 	d.Cfg.Workspace = dir
@@ -2104,7 +2106,7 @@ func TestSoloTurnCapToolchainSentinelReportsNoOutcome(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true}
 	inner := &planLLM{responses: burnResps(5)}
-	client := &markerMidRunLLM{inner: inner, t: t, dir: dir}
+	client := &markerMidRunLLM{inner: inner, t: t, dir: dir, marker: "pom.xml", content: "<project></project>\n"}
 	d := execTestDeps(ops, git, client)
 	d.Cfg.MaxTurns = 5
 	d.Cfg.Workspace = dir

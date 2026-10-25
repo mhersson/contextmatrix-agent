@@ -486,6 +486,32 @@ func TestMobCheckpointReviseGatePassCommitsAsToday(t *testing.T) {
 	assert.True(t, o.solver.gate.verified, "a passing gate is evidence the revise is good")
 }
 
+// A greenfield subtask's pre-commit gate can resolve the run's first verify
+// command after the execute phase bound the solver's tools. The revise prompt
+// then names the verify tool, so the reviser must be offered it.
+func TestMobCheckpointReviseBindsAVerifyToolTheGateJustResolved(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	o := checkpointReviseGateRun(ops, git)
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 0}
+	}
+
+	o.mobCheckpoint(context.Background(), o.solver,
+		subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("simple")}, "abc123")
+
+	require.Contains(t, strings.Join(ops.logs, "\n"), "revise - 1 fixes",
+		"the checkpoint must actually reach a revise verdict, or this test asserts nothing")
+
+	client, ok := o.d.Client.(*planLLM)
+	require.True(t, ok)
+
+	offered := client.toolNamesSeen()
+	require.Len(t, offered, 1, "one revise coder call")
+	assert.Contains(t, offered[0], "verify", "the reviser must be able to call the tool its prompt names")
+}
+
 // TestMobCheckpointReviseGateAcceptsTheRevisersToolPass proves the checkpoint
 // revise gate buys no second subprocess when the revise coder's own verify tool
 // already passed against the tree the gate is about to certify: it takes that
