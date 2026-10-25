@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -583,8 +584,9 @@ func TestEndSessionsWarnsOnlyForARunItCouldNotReach(t *testing.T) {
 		behavior workerBehavior
 		exited   bool
 		wantWarn bool
+		wantWait bool
 	}{
-		{name: "run exited before its end_session", behavior: ignores, exited: true},
+		{name: "run exited before its end_session", behavior: ignores, exited: true, wantWait: true},
 		{name: "run whose stdin refuses the frame", behavior: unreachable, wantWarn: true},
 	}
 
@@ -601,8 +603,53 @@ func TestEndSessionsWarnsOnlyForARunItCouldNotReach(t *testing.T) {
 
 			h.drain.logger = slog.New(slog.NewJSONHandler(&buf, nil))
 
-			assert.Empty(t, h.drain.endSessions(live), "an unreached run is not waited on")
+			waitOn := h.drain.endSessions(live)
+			if tt.wantWait {
+				assert.Equal(t, live, waitOn, "an exited run is still waited on for its report")
+			} else {
+				assert.Empty(t, waitOn, "an unreachable run is killed, not waited on")
+			}
+
 			assert.Equal(t, tt.wantWarn, strings.Contains(buf.String(), `"level":"WARN"`))
 		})
 	}
+}
+
+// TestParkWaitCoversARunThatExitedBeforeItsEndSession: a run gone from the
+// tracker whose exit callback has not claimed its report yet must hold the park
+// wait, or the sweep reports "failed" over the run's own status.
+func TestParkWaitCoversARunThatExitedBeforeItsEndSession(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := newShutdownHarness(t, time.Hour, map[string]workerBehavior{"CARD-1": ignores})
+		live := h.drain.tracker.List()
+		require.Len(t, live, 1)
+
+		h.drain.reports.beginShutdown()
+		h.drain.tracker.Remove("proj", "CARD-1")
+
+		waitOn := h.drain.endSessions(live)
+
+		parked := make(chan struct{})
+
+		go func() {
+			defer close(parked)
+
+			h.drain.awaitPark(context.Background(), waitOn)
+		}()
+
+		synctest.Wait()
+
+		select {
+		case <-parked:
+			t.Fatal("the park wait returned before the exited run's exit callback claimed its report")
+		default:
+		}
+
+		h.fleet.report(live[0], "completed")
+		<-parked
+
+		h.drain.sweep(live)
+
+		assert.Equal(t, []string{"completed"}, h.statuses()["CARD-1"])
+	})
 }

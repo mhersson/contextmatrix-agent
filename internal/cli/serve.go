@@ -371,19 +371,20 @@ type workerDrain struct {
 	sweepTimeout time.Duration
 }
 
-// endSessions sends end_session to each run and returns the runs it reached.
+// endSessions sends end_session to each run and returns the runs to wait on:
+// those it reached, and those that exited since the snapshot, whose exit
+// callback may not have claimed their report yet.
 func (d workerDrain) endSessions(runs []*executor.Run) []*executor.Run {
 	ended := make([]*executor.Run, 0, len(runs))
 
 	for _, run := range runs {
 		if err := d.sessions.EndSession(run.Project, run.CardID); err != nil {
-			// A run that exited since the snapshot has nothing to end or kill.
 			if !errors.Is(err, executor.ErrNotFound) {
 				d.logger.Warn("could not end session on shutdown; the run will be killed",
 					"project", run.Project, "card_id", run.CardID, "error", err)
-			}
 
-			continue
+				continue
+			}
 		}
 
 		ended = append(ended, run)
