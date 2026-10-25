@@ -26,7 +26,7 @@ func reconcileTestRun(ops *fakeOps, git *fakeGit, phase string) *run {
 	}
 	tc := cmclient.TaskContext{Title: "Parent", Description: "body", Phase: phase}
 
-	return newRun(d, tc)
+	return newRun(context.Background(), d, tc)
 }
 
 func TestReconcileFreshRecordsStaleTip(t *testing.T) {
@@ -186,7 +186,7 @@ func TestReconcileCountsPriorSubtaskSpend(t *testing.T) {
 	}
 	tc := cmclient.TaskContext{Title: "Parent", Description: "body", Phase: "execute", ReportedCostUSD: 1.5}
 
-	o := newRun(d, tc)
+	o := newRun(t.Context(), d, tc)
 	require.NoError(t, o.ledger.Check(), "the parent's own spend alone is under the ceiling")
 
 	require.NoError(t, o.reconcile(context.Background()))
@@ -411,7 +411,7 @@ func TestExecuteCalledFromExecuteDriver(t *testing.T) {
 		Cfg: Config{Project: "proj", CardID: "CARD-1", Branch: "cm/card-1", BaseBranch: "main"},
 	}
 
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 	// Stub the phase bodies so the driver only exercises reconcile + persistence.
 	o.planFn = func(context.Context) error { return nil }
 	o.executeFn = func(context.Context) error { return nil }

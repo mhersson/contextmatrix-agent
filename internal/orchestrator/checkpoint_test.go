@@ -343,7 +343,7 @@ func TestMobCheckpointReviseGateSkippedLeavesVerifiedFalse(t *testing.T) {
 			Mob:      MobConfig{Participants: 2, Execute: true, CheckpointMinTier: "simple", CheckpointRounds: 1},
 		},
 	}
-	o := newRun(d, cmclient.TaskContext{Title: "Parent", Description: "body"})
+	o := newRun(t.Context(), d, cmclient.TaskContext{Title: "Parent", Description: "body"})
 	o.solver.git = &diffGit{fakeGit: &fakeGit{committed: true}, diff: "diff --git a/a.go b/a.go\n+lgtm\n"}
 	isolateVerify(o)
 
@@ -397,7 +397,7 @@ func checkpointReviseGateRun(ops *fakeOps, git *fakeGit, before ...llm.Response)
 			Mob:      MobConfig{Participants: 2, Execute: true, CheckpointMinTier: "simple", CheckpointRounds: 1},
 		},
 	}
-	o := newRun(d, cmclient.TaskContext{Title: "Parent", Description: "body"})
+	o := newRun(context.Background(), d, cmclient.TaskContext{Title: "Parent", Description: "body"})
 	o.solver.git = &diffGit{fakeGit: git, diff: "diff --git a/a.go b/a.go\n+lgtm\n"}
 
 	eng := &scriptedEngine{outcomes: []mob.Outcome{{

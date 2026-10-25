@@ -59,7 +59,7 @@ func documentTestDeps(ops *fakeOps, git *fakeGit, client llm.LLM) Deps {
 func newDocumentRun(d Deps, tc cmclient.TaskContext, maxCost float64) *run {
 	d.Cfg.MaxCardCost = maxCost
 
-	return newRun(d, tc)
+	return newRun(context.Background(), d, tc)
 }
 
 func TestDocumentNoOpWhenNoDocsNeeded(t *testing.T) {

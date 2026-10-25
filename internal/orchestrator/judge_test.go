@@ -144,7 +144,7 @@ func newJudgeRun(t *testing.T, ops *fakeOps, mainGit *fakeGit, client llm.LLM, c
 	d.Cfg.BaseBranch = "main"
 	d.Cfg.Workspace = t.TempDir()
 
-	o := newRun(d, cmclient.TaskContext{Title: "Parent", Description: "body"})
+	o := newRun(t.Context(), d, cmclient.TaskContext{Title: "Parent", Description: "body"})
 	o.cardSizing = seedSizing("moderate")
 	o.candidates = cands
 	// Pre-resolve a non-empty plan so runVerifyPlan invokes the stub on each
@@ -167,7 +167,7 @@ func TestJudgeNoopWhenOff(t *testing.T) {
 	d := planTestDeps(ops, client)
 	d.Git = &fakeGit{}
 	// BestOfN unset (0): the judge is a strict no-op.
-	o := newRun(d, cmclient.TaskContext{Title: "P", Description: "b"})
+	o := newRun(t.Context(), d, cmclient.TaskContext{Title: "P", Description: "b"})
 
 	require.NoError(t, runJudge(context.Background(), o))
 	assert.Nil(t, o.winner, "no winner picked when best-of-n is off")
@@ -240,7 +240,7 @@ func TestJudgeOutcomeLabels(t *testing.T) {
 func TestJudgeResumeRemap(t *testing.T) {
 	ops := &fakeOps{taskContext: cmclient.TaskContext{Phase: "judge"}}
 	d := Deps{Ops: ops, Git: &fakeGit{}, Cfg: Config{CardID: "CARD-1", Branch: "cm/card-1", BaseBranch: "main"}}
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 
 	noop := func(context.Context) error { return nil }
 	o.planFn, o.executeFn, o.judgeFn = noop, noop, noop

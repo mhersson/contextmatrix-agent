@@ -93,7 +93,7 @@ func TestMobBriefingsNameReadRoots(t *testing.T) {
 		o := mobPlanRun(&fakeOps{}, &planLLM{}, &scriptedEngine{})
 		o.d.ReadRoots = []string{root}
 
-		assert.Contains(t, o.mobPlanBriefing("", ""), root)
+		assert.Contains(t, o.mobPlanBriefing(t.Context(), "", ""), root)
 	})
 
 	t.Run("review", func(t *testing.T) {

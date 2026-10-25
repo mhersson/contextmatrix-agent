@@ -71,7 +71,7 @@ func reviewTestDeps(t *testing.T, ops *fakeOps, git *fakeGit, client llm.LLM, re
 // plan and override runVerify.
 func newReviewRun(d Deps, tc cmclient.TaskContext, maxCost float64) *run {
 	d.Cfg.MaxCardCost = maxCost
-	o := newRun(d, tc)
+	o := newRun(context.Background(), d, tc)
 	o.cardSizing = seedSizing("moderate")
 	// Default: pre-resolved skip, so ensureVerify is a cached no-op and no gate runs.
 	isolateVerify(o)
@@ -3249,7 +3249,7 @@ func TestRunReviewHITLApproveProceeds(t *testing.T) {
 		stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.001),
 		stopResp(`{"verdict":"approve","feedback":""}`, 0.001),
 	}}
-	o := newRun(hitlReviewDeps(ops, git, inbox, client), cmclient.TaskContext{Title: "T", Description: "b", State: "review"})
+	o := newRun(t.Context(), hitlReviewDeps(ops, git, inbox, client), cmclient.TaskContext{Title: "T", Description: "b", State: "review"})
 	isolateVerify(o)
 
 	require.NoError(t, runReview(context.Background(), o))
@@ -3274,7 +3274,7 @@ func TestRunReviewHITLAdjustFixesThenApproves(t *testing.T) {
 		stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.001),
 		stopResp(`{"verdict":"approve","feedback":""}`, 0.001),
 	}}
-	o := newRun(hitlReviewDeps(ops, git, inbox, client), cmclient.TaskContext{Title: "T", Description: "b", State: "review"})
+	o := newRun(t.Context(), hitlReviewDeps(ops, git, inbox, client), cmclient.TaskContext{Title: "T", Description: "b", State: "review"})
 	isolateVerify(o)
 
 	require.NoError(t, runReview(context.Background(), o))
@@ -3302,7 +3302,7 @@ func TestRunReviewHITLPromotedRejectFixesThenApproves(t *testing.T) {
 		stopResp("Correctness: ok now", 0.001), stopResp("Design: ok", 0.001), stopResp("Security: ok", 0.001),
 		stopResp(`{"approved":true,"summary":"clean now","fixes":[]}`, 0.001),
 	}}
-	o := newRun(hitlReviewDeps(ops, git, inbox, client), cmclient.TaskContext{Title: "T", Description: "b", State: "review"})
+	o := newRun(t.Context(), hitlReviewDeps(ops, git, inbox, client), cmclient.TaskContext{Title: "T", Description: "b", State: "review"})
 	isolateVerify(o)
 
 	require.NoError(t, runReview(context.Background(), o))
@@ -3346,7 +3346,7 @@ func TestRunReviewHITLPromotedRejectPersistsParks(t *testing.T) {
 		stopResp("Correctness: STILL bug", 0.001), stopResp("Design: ok", 0.001), stopResp("Security: ok", 0.001),
 		stopResp(reject, 0.001),
 	}}
-	o := newRun(hitlReviewDeps(ops, git, inbox, client),
+	o := newRun(t.Context(), hitlReviewDeps(ops, git, inbox, client),
 		cmclient.TaskContext{Title: "T", Description: "b", State: "review", ReviewAttempts: 1})
 	isolateVerify(o)
 
@@ -3375,7 +3375,7 @@ func TestRunReviewHITLPromotedAutoApproveNoFix(t *testing.T) {
 		stopResp("No concerns.", 0.001), stopResp("No concerns.", 0.001), stopResp("No concerns.", 0.001),
 		stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.001),
 	}}
-	o := newRun(hitlReviewDeps(ops, git, inbox, client), cmclient.TaskContext{Title: "T", Description: "b", State: "review"})
+	o := newRun(t.Context(), hitlReviewDeps(ops, git, inbox, client), cmclient.TaskContext{Title: "T", Description: "b", State: "review"})
 	isolateVerify(o)
 
 	require.NoError(t, runReview(context.Background(), o))
@@ -3397,7 +3397,7 @@ func TestRunReviewHITLHumanApproveDespiteFindingsFramesSummary(t *testing.T) {
 		stopResp(`{"approved":false,"summary":"needs work","fixes":[{"file":"a.go","issue":"bug","suggestion":"patch"}]}`, 0.001),
 		stopResp(`{"verdict":"approve","feedback":""}`, 0.001), // the human overrides the revise recommendation
 	}}
-	o := newRun(hitlReviewDeps(ops, git, inbox, client), cmclient.TaskContext{Title: "T", Description: "b", State: "review"})
+	o := newRun(t.Context(), hitlReviewDeps(ops, git, inbox, client), cmclient.TaskContext{Title: "T", Description: "b", State: "review"})
 	isolateVerify(o)
 
 	require.NoError(t, runReview(context.Background(), o))
@@ -4010,7 +4010,7 @@ func TestRunReviewHITLResetsExhaustedCounter(t *testing.T) {
 		Title: "T", Description: "b",
 		State: "in_progress", ReviewAttempts: 4,
 	}
-	o := newRun(d, tc)
+	o := newRun(t.Context(), d, tc)
 	isolateVerify(o)
 
 	require.NoError(t, runReview(context.Background(), o))
@@ -4215,7 +4215,7 @@ func TestRunReviewHITLParksAtServerCap(t *testing.T) {
 			git := &fakeGit{committed: true}
 			client := &planLLM{responses: slices.Concat(panelRejects("bug"), tt.gate)}
 
-			o := newRun(hitlReviewDeps(ops, git, tt.inbox, client), cmclient.TaskContext{Title: "T", Description: "b", State: "review"})
+			o := newRun(t.Context(), hitlReviewDeps(ops, git, tt.inbox, client), cmclient.TaskContext{Title: "T", Description: "b", State: "review"})
 			isolateVerify(o)
 
 			err := runReview(context.Background(), o)
@@ -4575,7 +4575,7 @@ func TestRunReviewHITLAutoApprovedWithFindingsFramesSummary(t *testing.T) {
 		stopResp(`{"approved":true,"summary":"clean","fixes":[{"file":"a.go","issue":"bug","suggestion":"patch","severity":"minor"}]}`, 0.001),
 		stopResp(`{"verdict":"approve","feedback":""}`, 0.001),
 	}}
-	o := newRun(hitlReviewDeps(ops, git, inbox, client), cmclient.TaskContext{Title: "T", Description: "b", State: "review"})
+	o := newRun(t.Context(), hitlReviewDeps(ops, git, inbox, client), cmclient.TaskContext{Title: "T", Description: "b", State: "review"})
 	isolateVerify(o)
 
 	require.NoError(t, runReview(context.Background(), o))
@@ -5971,7 +5971,7 @@ func TestRunReviewHITLCappedAdjustFixReturnsToTheHuman(t *testing.T) {
 			d := hitlReviewDeps(&fakeOps{}, git, inbox, client)
 			d.Cfg.MaxTurns = 5
 
-			o := newRun(d, cmclient.TaskContext{Title: "T", Description: "b", State: "review"})
+			o := newRun(t.Context(), d, cmclient.TaskContext{Title: "T", Description: "b", State: "review"})
 			isolateVerify(o)
 
 			fixTurns := turnBudget(d.Cfg.MaxTurns, o.fixSizing(fixRequest{Round: 1}).Budget)
@@ -6016,7 +6016,7 @@ func TestRunReviewHITLPromotedCappedFixContinuesAutonomously(t *testing.T) {
 			d := hitlReviewDeps(&fakeOps{}, git, &fakeInbox{}, client)
 			d.Cfg.MaxTurns = 5
 
-			o := newRun(d, cmclient.TaskContext{Title: "T", Description: "b", State: "review"})
+			o := newRun(t.Context(), d, cmclient.TaskContext{Title: "T", Description: "b", State: "review"})
 			isolateVerify(o)
 
 			fixTurns := turnBudget(d.Cfg.MaxTurns, o.fixSizing(fixRequest{Round: 1}).Budget)

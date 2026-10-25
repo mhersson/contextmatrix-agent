@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 )
 
@@ -16,22 +15,17 @@ const (
 	snapshotGreenfieldMax = 3   // <= this many tracked files reads as effectively empty
 )
 
-// snapshotManifests are the build-manifest basenames the snapshot reports the
-// presence of, so planners learn the repo's toolchain without a discovery turn.
-var snapshotManifests = []string{"go.mod", "package.json", "Makefile", "pyproject.toml", "Cargo.toml"}
-
 // repoSnapshot renders a bounded picture of the workspace for planning
-// discussions: the tracked file list (capped), the README head, and which
-// build manifests exist - so planners and seats spend zero turns discovering
-// repo shape, and a greenfield repo is stated outright instead of being
+// discussions: the tracked file list (capped) and the README head, so planners
+// and seats spend zero turns discovering repo shape, and a greenfield repo is stated outright instead of being
 // triple-discovered by every seat. Returns "" when the root is empty or not a
 // git repo (the briefing then simply omits the block, no worse than before).
-func repoSnapshot(root string) string {
+func repoSnapshot(ctx context.Context, root string) string {
 	if root == "" {
 		return ""
 	}
 
-	files, ok := gitTrackedFiles(root)
+	files, ok := gitTrackedFiles(ctx, root)
 	if !ok {
 		return ""
 	}
@@ -58,8 +52,6 @@ func repoSnapshot(root string) string {
 		}
 
 		b.WriteString("\n")
-		b.WriteString(manifestLine(files))
-		b.WriteString("\n")
 	}
 
 	if head := readmeHead(root, snapshotReadmeLines); head != "" {
@@ -76,8 +68,8 @@ func repoSnapshot(root string) string {
 // briefing then omits the block. Non-empty results are wrapped in surrounding
 // blank lines so the block sits apart from the grounding above and the task
 // text below.
-func (o *run) repoSnapshotBlock() string {
-	snap := repoSnapshot(o.d.Cfg.Workspace)
+func (o *run) repoSnapshotBlock(ctx context.Context) string {
+	snap := repoSnapshot(ctx, o.d.Cfg.Workspace)
 	if snap == "" {
 		return ""
 	}
@@ -94,8 +86,8 @@ func (o *run) repoSnapshotBlock() string {
 // gitTrackedNested's direct-exec pattern. Returned paths are slash-separated and
 // relative to root. ok is false when root is not a git repo or git is
 // unavailable (ls-files exits non-zero), signalling graceful degradation.
-func gitTrackedFiles(root string) ([]string, bool) {
-	cmd := exec.CommandContext(context.Background(), "git", "-C", root,
+func gitTrackedFiles(ctx context.Context, root string) ([]string, bool) {
+	cmd := exec.CommandContext(ctx, "git", "-C", root,
 		"ls-files", "-z") //nolint:gosec // fixed args; root is the workspace path
 
 	out, err := cmd.Output()
@@ -112,25 +104,6 @@ func gitTrackedFiles(root string) ([]string, bool) {
 	}
 
 	return files, true
-}
-
-// manifestLine reports which build manifests are present at the repo root among
-// snapshotManifests, so the plan can name the real toolchain. "none found" when
-// the repo carries none of them.
-func manifestLine(files []string) string {
-	var present []string
-
-	for _, m := range snapshotManifests {
-		if slices.Contains(files, m) {
-			present = append(present, m)
-		}
-	}
-
-	if len(present) == 0 {
-		return "Build manifests present: none found"
-	}
-
-	return "Build manifests present: " + strings.Join(present, ", ")
 }
 
 // readmeHead returns the first n lines of the workspace's README.md, or "" when

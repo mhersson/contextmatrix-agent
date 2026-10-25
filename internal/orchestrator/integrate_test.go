@@ -71,7 +71,7 @@ func integrateTestDeps(ops *fakeOps, git *fakeGit, pr PRCreator, client llm.LLM)
 func newIntegrateRun(d Deps, tc cmclient.TaskContext, maxCost float64) *run {
 	d.Cfg.MaxCardCost = maxCost
 
-	return newRun(d, tc)
+	return newRun(context.Background(), d, tc)
 }
 
 func TestIntegrateHappyPath(t *testing.T) {
@@ -456,7 +456,7 @@ func TestDonePhase(t *testing.T) {
 	ops := &fakeOps{rejectLogAfterRelease: true}
 	d := Deps{Ops: ops, Cfg: Config{CardID: "CARD-1"}}
 	tc := cmclient.TaskContext{Title: "All done"}
-	o := newRun(d, tc)
+	o := newRun(t.Context(), d, tc)
 
 	require.NoError(t, runDone(context.Background(), o))
 
@@ -483,7 +483,7 @@ func TestRunDoneToleratesReleaseError(t *testing.T) {
 		ops := &fakeOps{releaseCardErr: cmclient.ErrCardNotClaimed}
 		d := Deps{Ops: ops, Cfg: Config{CardID: "CARD-1"}}
 		tc := cmclient.TaskContext{Title: "All done"}
-		o := newRun(d, tc)
+		o := newRun(t.Context(), d, tc)
 
 		err := runDone(context.Background(), o)
 		require.NoError(t, err, "ErrCardNotClaimed must not fail runDone")
@@ -506,7 +506,7 @@ func TestRunDoneToleratesReleaseError(t *testing.T) {
 		ops := &fakeOps{releaseCardErr: errors.New("network timeout")}
 		d := Deps{Ops: ops, Cfg: Config{CardID: "CARD-1"}}
 		tc := cmclient.TaskContext{Title: "All done"}
-		o := newRun(d, tc)
+		o := newRun(t.Context(), d, tc)
 
 		err := runDone(context.Background(), o)
 		require.NoError(t, err, "transient release error must not fail runDone")
@@ -556,7 +556,7 @@ func TestRunDoneReleasesUnderCanceledContext(t *testing.T) {
 	ops := &fakeOps{}
 	d := Deps{Ops: ctxHonoringOps{ops}, Cfg: Config{CardID: "CARD-1"}}
 	tc := cmclient.TaskContext{Title: "All done"}
-	o := newRun(d, tc)
+	o := newRun(t.Context(), d, tc)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // the run context is already dead when done runs

@@ -685,7 +685,7 @@ func (o *run) draftPlan(ctx context.Context, model func(context.Context) string,
 	diagBlock := diagnosisBlock(diagnosis)
 	dsnBlock := designBlock(design)
 	fbBlock := feedbackBlock(feedback)
-	snapshot := o.repoSnapshotBlock()
+	snapshot := o.repoSnapshotBlock(ctx)
 
 	// Resolved once so both the first attempt and its repair share one findings
 	// list: the repair must re-emit a plan from analysis it already has.
@@ -865,7 +865,7 @@ func (o *run) mobDraftPlan(ctx context.Context, diagnosis, design, feedback stri
 		Lenses:   planLenses[:seats],
 		Rounds:   o.d.Cfg.Mob.Rounds,
 		Blind:    true,
-		Briefing: o.mobPlanBriefing(diagnosis, design),
+		Briefing: o.mobPlanBriefing(ctx, diagnosis, design),
 		SynthesisPrompt: fmt.Sprintf(planSynthesisPrompt,
 			o.grounding, o.d.Cfg.Workspace, o.pocTestScope("\n- "), o.tc.Title, o.plannerDescription()),
 	}
@@ -911,7 +911,7 @@ func (o *run) mobDraftPlan(ctx context.Context, diagnosis, design, feedback stri
 // block. The seats discuss rather than emit, so the briefing carries none of
 // the solo planner's decomposition rules or JSON contract - the moderator's
 // synthesis prompt owns those.
-func (o *run) mobPlanBriefing(diagnosis, design string) string {
+func (o *run) mobPlanBriefing(ctx context.Context, diagnosis, design string) string {
 	var existingTitles []string
 
 	for _, sub := range o.subtasks {
@@ -924,7 +924,7 @@ func (o *run) mobPlanBriefing(diagnosis, design string) string {
 	diagBlock := diagnosisBlock(diagnosis)
 	dsnBlock := designBlock(design)
 
-	return fmt.Sprintf(planBriefing, o.grounding, o.repoSnapshotBlock(), o.d.Cfg.Workspace,
+	return fmt.Sprintf(planBriefing, o.grounding, o.repoSnapshotBlock(ctx), o.d.Cfg.Workspace,
 		readRootsBlock(o.d.ReadRoots), o.tc.Title, o.plannerDescription(),
 		diagBlock, dsnBlock, resume)
 }

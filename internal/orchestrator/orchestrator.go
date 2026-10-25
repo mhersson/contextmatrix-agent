@@ -626,7 +626,7 @@ func dataURLs(blobs []cmclient.ImageBlob) []llm.ImageURL {
 
 // newRun builds a run seeded from the task context, with the budget ledger
 // pre-loaded from the card's already-reported cost.
-func newRun(d Deps, tc cmclient.TaskContext) *run {
+func newRun(ctx context.Context, d Deps, tc cmclient.TaskContext) *run {
 	o := &run{
 		d:  d,
 		tc: tc,
@@ -667,7 +667,7 @@ func newRun(d Deps, tc cmclient.TaskContext) *run {
 		push:       true,
 	}
 
-	grounding := groundingBlock(discoverGrounding(d.Cfg.Workspace))
+	grounding := groundingBlock(discoverGrounding(ctx, d.Cfg.Workspace))
 	if d.Redact != nil {
 		// The seed prompt is NOT covered by the harness redactor (it masks only
 		// tool output/events), so a secret reaching the grounding block would go to
@@ -1087,5 +1087,5 @@ func Run(ctx context.Context, d Deps) error {
 		return fmt.Errorf("get task context: %w", err)
 	}
 
-	return newRun(d, tc).execute(ctx)
+	return newRun(ctx, d, tc).execute(ctx)
 }

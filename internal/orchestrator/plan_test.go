@@ -428,7 +428,7 @@ func TestPlanRunGetsNoBatchNudge(t *testing.T) {
 	d := planTestDeps(ops, llmFake)
 	d.Emit = events.NewEmitter(nil, &transcript)
 
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 	require.NoError(t, runPlan(context.Background(), o))
 
 	assert.Empty(t, batchNudgeCounts(t, &transcript),
@@ -443,7 +443,7 @@ func TestPlanPhaseCreatesSubtasks(t *testing.T) {
 	llmFake := &planLLM{responses: []llm.Response{stopResp(goodPlanJSON, 0.01)}}
 	d := planTestDeps(ops, llmFake)
 
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 	require.NoError(t, runPlan(context.Background(), o))
 
 	require.Len(t, ops.createCardArgs, 2, "two subtasks must be created")
@@ -488,7 +488,7 @@ func TestPlanPhaseRepairLoop(t *testing.T) {
 	}}
 	d := planTestDeps(ops, llmFake)
 
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 	require.NoError(t, runPlan(context.Background(), o))
 
 	// Two harness invocations: the original + one repair turn.
@@ -525,7 +525,7 @@ func TestPlanPhaseRepairsDuplicateSubtaskTitles(t *testing.T) {
 	}}
 	d := planTestDeps(ops, llmFake)
 
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 	require.NoError(t, runPlan(context.Background(), o))
 
 	assert.Len(t, llmFake.tasks, 2, "the duplicate-title plan takes the repair turn")
@@ -546,7 +546,7 @@ func TestPlanPhaseRepairExhausted(t *testing.T) {
 	}}
 	d := planTestDeps(ops, llmFake)
 
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 	err := runPlan(context.Background(), o)
 	require.Error(t, err)
 
@@ -579,7 +579,7 @@ func TestPlanPhaseTestSplitRevisionSucceeds(t *testing.T) {
 	}}
 	d := planTestDeps(ops, llmFake)
 
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 	require.NoError(t, runPlan(context.Background(), o))
 
 	// Exactly one revision round: the original draft plus one re-prompt.
@@ -634,7 +634,7 @@ func TestReviseTestSplitUsesDraftPlanRegistry(t *testing.T) {
 	planReg := tools.NewRegistry(tools.NewReadTool("."), NewFindingsTool())
 	d.PlanTools = func() *tools.Registry { return planReg }
 
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 	require.NoError(t, runPlan(context.Background(), o))
 
 	require.Len(t, llmFake.tasks, 2, "draft + one revision")
@@ -668,7 +668,7 @@ func TestPlanPhaseTestSplitRevisionWarnsAndProceedsOnRepeatViolation(t *testing.
 	}}
 	d := planTestDeps(ops, llmFake)
 
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 	require.NoError(t, runPlan(context.Background(), o), "a repeat heuristic violation must never fail the run")
 
 	// No third model call - one revision attempt, then give up.
@@ -698,7 +698,7 @@ func TestReviseTestSplitBudgetCheckFailureKeepsOriginalPlan(t *testing.T) {
 		taskContext: cmclient.TaskContext{Title: "Parent", Description: "body"},
 	}
 	d := planTestDeps(ops, &planLLM{})
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 	// Seed the ledger already at its ceiling so the revision call's pre-check parks.
 	o.ledger = NewLedger(0.01, 0.02)
 
@@ -812,7 +812,7 @@ func TestPlanPhaseResume(t *testing.T) {
 	llmFake := &planLLM{responses: []llm.Response{stopResp(goodPlanJSON, 0.01)}}
 	d := planTestDeps(ops, llmFake)
 
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 	// The planner reuse list is fed from the RECONCILED refs (set by reconcile in
 	// the plan-resume case), NOT a fresh SubtaskStates call inside runPlan.
 	o.subtasks = []subtaskRef{
@@ -850,7 +850,7 @@ func TestPlanPhaseDiagnosesBugLikeCard(t *testing.T) {
 	}}
 	d := planTestDeps(ops, llmFake)
 
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 	require.NoError(t, runPlan(context.Background(), o))
 
 	// Two model calls: diagnose then plan.
@@ -876,7 +876,7 @@ func TestPlanPhaseSkipsDiagnoseForFeatureCard(t *testing.T) {
 	llmFake := &planLLM{responses: []llm.Response{stopResp(goodPlanJSON, 0.01)}}
 	d := planTestDeps(ops, llmFake)
 
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 	require.NoError(t, runPlan(context.Background(), o))
 
 	// A non-bug card skips the diagnose step: exactly one model call (the plan).
@@ -916,7 +916,7 @@ func TestPlanPhaseDiagnoseIncapableModelIsRecovered(t *testing.T) {
 	}
 	d.Client = llmFake
 
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 	require.NoError(t, runPlan(context.Background(), o))
 
 	assert.Contains(t, ops.recorded(), "BlacklistModel:CARD-1/"+first,
@@ -1147,7 +1147,7 @@ func hitlPlanRun(ops *fakeOps, inbox *fakeInbox, client llm.LLM) *run {
 		Description: "## Design\n\nA palette config.", // present -> brainstorm skipped
 	}
 
-	return newRun(d, tc)
+	return newRun(context.Background(), d, tc)
 }
 
 const onePlanJSON = `{"card_tier":"simple","subtasks":[{"title":"Add the flag","description":"Files: a.go","depends_on":[],"tier":"simple"}]}`
@@ -1204,7 +1204,7 @@ func autoPlanRun(ops *fakeOps, client llm.LLM, maxTurns int) *run {
 		Description: "Add a config flag to toggle the feature.",
 	}
 
-	return newRun(d, tc)
+	return newRun(context.Background(), d, tc)
 }
 
 // TestRunPlanGetsWrapUpNudge proves the planner opts into the wrap-up nudge:
@@ -1280,7 +1280,7 @@ func creativePlanRun(ops *fakeOps, inbox *fakeInbox, client llm.LLM, description
 		Description: description,
 	}
 
-	return newRun(d, tc)
+	return newRun(context.Background(), d, tc)
 }
 
 // TestRunPlanHITLDesignReachesPlanner proves the fresh-run/resume asymmetry is
@@ -1396,7 +1396,7 @@ func mobPlanRun(ops *fakeOps, client llm.LLM, eng *scriptedEngine) *run {
 		Description: "Add a config flag to toggle the feature.",
 	}
 
-	o := newRun(d, tc)
+	o := newRun(context.Background(), d, tc)
 	o.mobEngine = eng.run
 
 	return o
@@ -1558,7 +1558,7 @@ func resumedAutoPlanRun(ops *fakeOps, client llm.LLM) *run {
 
 	tc := cmclient.TaskContext{Title: "Add a config flag", Description: grownDescription, Phase: "plan"}
 
-	return newRun(d, tc)
+	return newRun(context.Background(), d, tc)
 }
 
 func TestRunPlanResumeCarriesPlanAndDesignNotHistory(t *testing.T) {
@@ -1708,7 +1708,7 @@ func TestPlanReuseListExcludesCancelled(t *testing.T) {
 		llmFake := &planLLM{responses: []llm.Response{stopResp(onePlanJSON, 0.01)}}
 		d := planTestDeps(ops, llmFake)
 
-		o := newRun(d, ops.taskContext)
+		o := newRun(t.Context(), d, ops.taskContext)
 		o.subtasks = []subtaskRef{
 			{ID: "SUB-CANCELLED", Title: "Cancelled subtask", State: "not_planned", Sizing: seedSizing("simple")},
 			{ID: "SUB-ACTIVE", Title: "Active subtask", State: "in_progress", Sizing: seedSizing("simple")},
@@ -1759,7 +1759,7 @@ func TestPlanReuseListExcludesCancelled(t *testing.T) {
 		llmFake := &planLLM{responses: []llm.Response{stopResp(onePlanJSON, 0.01)}}
 		d := planTestDeps(ops, llmFake)
 
-		o := newRun(d, ops.taskContext)
+		o := newRun(t.Context(), d, ops.taskContext)
 		o.subtasks = []subtaskRef{
 			{ID: "SUB-DONE", Title: "Done subtask", State: "done", Sizing: seedSizing("simple")},
 			{ID: "SUB-ACTIVE", Title: "Active subtask", State: "in_progress", Sizing: seedSizing("simple")},
@@ -1835,7 +1835,7 @@ func TestReadRootsReachThePlanningPrompts(t *testing.T) {
 			d := planTestDeps(ops, llmFake)
 			d.ReadRoots = tc.roots
 
-			o := newRun(d, ops.taskContext)
+			o := newRun(t.Context(), d, ops.taskContext)
 			require.NoError(t, runPlan(context.Background(), o))
 			require.Len(t, llmFake.tasks, 2, "a bug-like card runs diagnose then plan")
 
@@ -1861,7 +1861,7 @@ func TestReadRootsReachThePlanningPrompts(t *testing.T) {
 // the planner called critical.
 func TestCardSizingSurvivesResume(t *testing.T) {
 	ops := &fakeOps{}
-	first := newRun(planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Description: "parent body"})
+	first := newRun(t.Context(), planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Description: "parent body"})
 
 	require.NoError(t, first.createSubtasks(context.Background(), plan{
 		CardTier: "critical",
@@ -1872,7 +1872,7 @@ func TestCardSizingSurvivesResume(t *testing.T) {
 	parentBody := ops.bodyFor("CARD-1")
 	require.NotEmpty(t, parentBody, "createSubtasks must push a parent body carrying the marker")
 
-	resumed := newRun(planTestDeps(ops, &planLLM{}),
+	resumed := newRun(t.Context(), planTestDeps(ops, &planLLM{}),
 		cmclient.TaskContext{Title: "Parent", Description: parentBody})
 
 	assert.Equal(t, registry.TierCritical, resumed.cardSizing.Bar,
@@ -1886,7 +1886,7 @@ func TestCardSizingSurvivesResume(t *testing.T) {
 // and the persisted budget must reproduce the pre-split turn cap.
 func TestCreateSubtasksPersistsBothAxes(t *testing.T) {
 	ops := &fakeOps{}
-	o := newRun(planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Description: "parent body"})
+	o := newRun(t.Context(), planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Description: "parent body"})
 
 	require.NoError(t, o.createSubtasks(context.Background(), plan{
 		CardTier: "moderate",
@@ -1912,7 +1912,7 @@ func TestCreateSubtasksPersistsBothAxes(t *testing.T) {
 // must inherit the flag, and the parent card body records the split.
 func TestCreateFollowups(t *testing.T) {
 	ops := &fakeOps{createdTopLevelIDs: []string{"CARD-2", "CARD-3"}}
-	o := newRun(planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: true})
+	o := newRun(t.Context(), planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: true})
 
 	p := plan{
 		FollowupCards: []planFollowup{
@@ -1954,7 +1954,7 @@ func TestCreateFollowups(t *testing.T) {
 // flip the flag on the split-out cards - they stay HITL like the original.
 func TestCreateFollowupsNotAutonomous(t *testing.T) {
 	ops := &fakeOps{createdTopLevelIDs: []string{"CARD-2"}}
-	o := newRun(planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: false})
+	o := newRun(t.Context(), planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: false})
 
 	p := plan{
 		FollowupCards: []planFollowup{
@@ -1973,7 +1973,7 @@ func TestCreateFollowupsNotAutonomous(t *testing.T) {
 // is created, and the returned error is a park sentinel.
 func TestCreateFollowupsOverflowParks(t *testing.T) {
 	ops := &fakeOps{}
-	o := newRun(planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: true})
+	o := newRun(t.Context(), planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: true})
 
 	followups := []planFollowup{
 		{Title: "Followup 1", Description: "d1"},
@@ -2000,7 +2000,7 @@ func TestCreateFollowupsOverflowParks(t *testing.T) {
 // exactly maxFollowupCards followups splits them all instead of parking.
 func TestCreateFollowupsAtCapSplits(t *testing.T) {
 	ops := &fakeOps{}
-	o := newRun(planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: true})
+	o := newRun(t.Context(), planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: true})
 
 	followups := make([]planFollowup, 0, maxFollowupCards)
 	for i := range maxFollowupCards {
@@ -2017,7 +2017,7 @@ func TestCreateFollowupsAtCapSplits(t *testing.T) {
 // at all - the common case (no split) stays byte-identical to before.
 func TestCreateFollowupsNoneIsNoop(t *testing.T) {
 	ops := &fakeOps{}
-	o := newRun(planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: true})
+	o := newRun(t.Context(), planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: true})
 
 	require.NoError(t, o.createFollowups(context.Background(), plan{}))
 
@@ -2048,7 +2048,7 @@ func splitSectionBody(entries ...string) string {
 func TestCreateFollowupsResumeDedupesByTitle(t *testing.T) {
 	ops := &fakeOps{createdTopLevelIDs: []string{"CARD-3"}}
 	desc := splitSectionBody("CARD-2: Extract config loader")
-	o := newRun(planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Description: desc, Autonomous: true})
+	o := newRun(t.Context(), planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Description: desc, Autonomous: true})
 
 	p := plan{
 		FollowupCards: []planFollowup{
@@ -2081,7 +2081,7 @@ func TestCreateFollowupsPartialFailureRecordsCreatedSoFar(t *testing.T) {
 		createTopLevelCardErr:      errors.New("board unreachable"),
 		createTopLevelCardErrAfter: 1, // the 1st call succeeds, the 2nd fails
 	}
-	o := newRun(planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: true})
+	o := newRun(t.Context(), planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: true})
 
 	p := plan{
 		FollowupCards: []planFollowup{
@@ -2105,7 +2105,7 @@ func TestCreateFollowupsPartialFailureRecordsCreatedSoFar(t *testing.T) {
 // section on the parent body containing both criterion strings.
 func TestRecordUnreachable(t *testing.T) {
 	ops := &fakeOps{}
-	o := newRun(planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: true})
+	o := newRun(t.Context(), planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: true})
 
 	p := plan{
 		Unreachable: []planUnreachable{
@@ -2140,7 +2140,7 @@ func TestRecordUnreachable(t *testing.T) {
 // capped - it lists every entry regardless.
 func TestRecordUnreachableCapsLogLines(t *testing.T) {
 	ops := &fakeOps{}
-	o := newRun(planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: true})
+	o := newRun(t.Context(), planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: true})
 
 	const n = 12
 
@@ -2179,7 +2179,7 @@ func TestRecordUnreachableCapsLogLines(t *testing.T) {
 // to before.
 func TestRecordUnreachableNoneIsNoop(t *testing.T) {
 	ops := &fakeOps{}
-	o := newRun(planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: true})
+	o := newRun(t.Context(), planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: true})
 
 	o.recordUnreachable(context.Background(), plan{})
 
@@ -2194,7 +2194,7 @@ func TestRecordUnreachableNoneIsNoop(t *testing.T) {
 // agent-recorded section.
 func TestCreateSubtasksRefreshesTaskDescription(t *testing.T) {
 	ops := &fakeOps{createdIDs: []string{"SUB-1"}, createdTopLevelIDs: []string{"CARD-2"}}
-	o := newRun(planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: true})
+	o := newRun(t.Context(), planTestDeps(ops, &planLLM{}), cmclient.TaskContext{Title: "Parent", Autonomous: true})
 
 	p := plan{
 		CardTier: "moderate",
@@ -2259,7 +2259,7 @@ func mobHITLPlanRun(ops *fakeOps, inbox *fakeInbox, client llm.LLM, transcript *
 		Description: "## Design\n\nA palette config.", // present -> brainstorm skipped
 	}
 
-	return newRun(d, tc)
+	return newRun(context.Background(), d, tc)
 }
 
 // bugPlanRun builds an autonomous run for a bug-like card on the reviewer-prior
@@ -2285,7 +2285,7 @@ func bugPlanRun(ops *fakeOps, client llm.LLM, transcript *bytes.Buffer) *run {
 		Description: "The worker crashes on start.",
 	}
 
-	return newRun(d, tc)
+	return newRun(context.Background(), d, tc)
 }
 
 // The two card-log fragments the plan phase uses to distinguish an entry
@@ -2552,6 +2552,6 @@ func TestPlanPhaseEmptyReplyStreakTakesRepairTurn(t *testing.T) {
 	valid := `{"card_tier":"simple","subtasks":[{"title":"Only","description":"d","depends_on":[],"tier":"simple"}]}`
 	llmFake := &planLLM{responses: append(emptyReplies(), stopResp(valid, 0.03))}
 
-	require.NoError(t, runPlan(context.Background(), newRun(planTestDeps(ops, llmFake), ops.taskContext)))
+	require.NoError(t, runPlan(context.Background(), newRun(t.Context(), planTestDeps(ops, llmFake), ops.taskContext)))
 	assert.Len(t, ops.createCardArgs, 1)
 }

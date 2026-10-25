@@ -414,7 +414,7 @@ func modelsUsed(m *modelAwareLLM, model string) bool {
 func TestRecoverIncapableCapsAtThree(t *testing.T) {
 	ops := &fakeOps{}
 	d := execTestDeps(ops, &fakeGit{}, &planLLM{})
-	o := newRun(d, cmclient.TaskContext{})
+	o := newRun(t.Context(), d, cmclient.TaskContext{})
 
 	for i := 1; i <= 3; i++ {
 		err := o.recoverIncapable(context.Background(), &IncapableError{Model: "m", Reason: "cannot drive the tool loop"})
@@ -454,7 +454,7 @@ func TestRecoverIncapableLogsReason(t *testing.T) {
 
 	ops := &fakeOps{}
 	d := execTestDeps(ops, &fakeGit{}, &planLLM{})
-	o := newRun(d, cmclient.TaskContext{})
+	o := newRun(t.Context(), d, cmclient.TaskContext{})
 
 	err := o.recoverIncapable(context.Background(), &IncapableError{Model: "m", Reason: reason})
 	require.NoError(t, err, "recovery within the cap must succeed")

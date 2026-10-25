@@ -40,7 +40,7 @@ func TestHarnessConfigPopulatesTriad(t *testing.T) {
 		return s
 	}
 
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 
 	// "default/model" is in planTestCatalog with ContextLength 131072.
 	cfg := o.harnessConfig("default/model")
@@ -61,7 +61,7 @@ func TestHarnessConfigUnknownModelZeroWindow(t *testing.T) {
 	ops := &fakeOps{taskContext: cmclient.TaskContext{}}
 	d := planTestDeps(ops, &planLLM{})
 
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 
 	cfg := o.harnessConfig("ghost/model")
 	assert.Equal(t, 0, cfg.ContextWindow)
@@ -78,7 +78,7 @@ func TestHarnessConfigCompactionGate(t *testing.T) {
 		d := planTestDeps(ops, &planLLM{})
 		d.Cfg.Compaction = Compaction{Enabled: true, Threshold: 0.8, KeepRecentTurns: 4}
 
-		o := newRun(d, ops.taskContext)
+		o := newRun(t.Context(), d, ops.taskContext)
 		cfg := o.harnessConfig("default/model")
 
 		require.NotNil(t, cfg.Compaction)
@@ -90,7 +90,7 @@ func TestHarnessConfigCompactionGate(t *testing.T) {
 		d := planTestDeps(ops, &planLLM{})
 		d.Cfg.Compaction = Compaction{Enabled: false, Threshold: 0.8, KeepRecentTurns: 4}
 
-		o := newRun(d, ops.taskContext)
+		o := newRun(t.Context(), d, ops.taskContext)
 		cfg := o.harnessConfig("default/model")
 
 		assert.Nil(t, cfg.Compaction)
@@ -134,7 +134,7 @@ func TestRunModelNormalizesContextLimit(t *testing.T) {
 			llmFake := &planLLM{responses: []llm.Response{resp}}
 			d := planTestDeps(ops, llmFake)
 
-			o := newRun(d, ops.taskContext)
+			o := newRun(t.Context(), d, ops.taskContext)
 
 			res, _, err := o.runModel(context.Background(), d.ReadTools, "do the thing", "default/model")
 
@@ -188,7 +188,7 @@ func TestRunModelNormalizesIncapable(t *testing.T) {
 	llmFake := &planLLM{responses: []llm.Response{badResp, badResp, badResp, badResp, badResp}}
 	d := planTestDeps(ops, llmFake)
 
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 
 	res, _, err := o.runModel(context.Background(), d.ReadTools, "do the thing", "default/model")
 
@@ -230,7 +230,7 @@ func TestRunModelNormalizesIncapableEmptyDetail(t *testing.T) {
 	}}
 	d := planTestDeps(ops, llmFake)
 
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 
 	res, _, err := o.runModel(context.Background(), d.ReadTools, "do the thing", "default/model")
 
@@ -260,7 +260,7 @@ func TestRunModelNormalizesMaxTurns(t *testing.T) {
 	d := planTestDeps(ops, llmFake)
 	d.Cfg.MaxTurns = 1
 
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 
 	res, _, err := o.runModel(context.Background(), d.ReadTools, "do the thing", "default/model")
 
@@ -341,7 +341,7 @@ func TestSpendAndReport(t *testing.T) {
 			ops := &fakeOps{taskContext: cmclient.TaskContext{}, reportUsageErr: tt.reportErr}
 			d := planTestDeps(ops, &planLLM{})
 
-			o := newRun(d, ops.taskContext)
+			o := newRun(t.Context(), d, ops.taskContext)
 			o.curPhase = "review"
 
 			res := harness.Result{
@@ -377,7 +377,7 @@ func TestRunModelPassesThroughNormalResult(t *testing.T) {
 	llmFake := &planLLM{responses: []llm.Response{stopResp("all good", 0.02)}}
 	d := planTestDeps(ops, llmFake)
 
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 
 	res, _, err := o.runModel(context.Background(), d.ReadTools, "do the thing", "default/model")
 	require.NoError(t, err)
@@ -390,7 +390,7 @@ func TestRunModelPassesThroughNormalResult(t *testing.T) {
 func TestSpendAndReportSyncsRunLedger(t *testing.T) {
 	ops := &fakeOps{taskContext: cmclient.TaskContext{}, reportUsageTotal: 3.5}
 	d := planTestDeps(ops, &planLLM{})
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 
 	res := harness.Result{PromptTokens: 10, CompletionTokens: 5, TotalCostUSD: 0}
 
@@ -407,7 +407,7 @@ func TestSpendAndReportSyncsRunLedger(t *testing.T) {
 func TestSpendAndReportCandidateLedgerRouting(t *testing.T) {
 	ops := &fakeOps{taskContext: cmclient.TaskContext{}, reportUsageTotal: 3.5}
 	d := planTestDeps(ops, &planLLM{})
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 
 	cand := NewLedger(2.0, 0)
 	res := harness.Result{PromptTokens: 10, CompletionTokens: 5, TotalCostUSD: 0.25}
@@ -427,7 +427,7 @@ func TestSpendAndReportNoSyncOnReportFailure(t *testing.T) {
 		reportUsageErr: errors.New("report boom"),
 	}
 	d := planTestDeps(ops, &planLLM{})
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 
 	res := harness.Result{TotalCostUSD: 0.25}
 
@@ -452,7 +452,7 @@ func TestDiagnoseConfigCarriesWrapUpNudge(t *testing.T) {
 	}}
 	d := planTestDeps(ops, client)
 	d.Cfg.MaxTurns = 8
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 
 	_, err := o.runDiagnose(context.Background(), fixedGateModel("default/model"))
 	require.NoError(t, err)

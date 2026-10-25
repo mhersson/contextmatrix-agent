@@ -73,7 +73,7 @@ func execTestDeps(ops *fakeOps, git *fakeGit, client llm.LLM) Deps {
 func newExecRun(d Deps, subs []subtaskRef, maxCost float64) *run {
 	d.Cfg.MaxCardCost = maxCost
 	tc := cmclient.TaskContext{Title: "Parent card", Description: "parent body"}
-	o := newRun(d, tc)
+	o := newRun(context.Background(), d, tc)
 	o.subtasks = subs
 	// Pre-resolve a skip plan so runExecute's ensureVerify is a cached no-op -
 	// execute tests exercise the coder loop, not verify resolution.
@@ -369,7 +369,7 @@ func TestPOCTestScopeReachesPlannerAndCoderPrompts(t *testing.T) {
 		d := planTestDeps(ops, llmFake)
 		d.Cfg.POC = poc
 
-		require.NoError(t, runPlan(context.Background(), newRun(d, ops.taskContext)))
+		require.NoError(t, runPlan(context.Background(), newRun(t.Context(), d, ops.taskContext)))
 		require.NotEmpty(t, llmFake.tasks)
 
 		return llmFake.tasks[0]
@@ -620,7 +620,7 @@ func TestExecuteModelSelectionPin(t *testing.T) {
 	// The card pins a catalog-resolvable coder model.
 	tc := cmclient.TaskContext{Title: "Parent", Description: "body", ModelCoder: "pinned/model"}
 	d.Cfg.MaxCardCost = 0
-	o := newRun(d, tc)
+	o := newRun(t.Context(), d, tc)
 	isolateVerify(o)
 	o.subtasks = []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("complex")}}
 
@@ -653,7 +653,7 @@ func TestExecuteModelSelectionByComplexity(t *testing.T) {
 	// No coder pin -> complexity selection path.
 	tc := cmclient.TaskContext{Title: "Parent", Description: "body"}
 	d.Cfg.MaxCardCost = 0
-	o := newRun(d, tc)
+	o := newRun(t.Context(), d, tc)
 	isolateVerify(o)
 	o.subtasks = []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("moderate")}}
 
@@ -758,7 +758,7 @@ func TestExecuteBudget(t *testing.T) {
 	d := execTestDeps(ops, git, llmFake)
 	tc := cmclient.TaskContext{Title: "Parent", Description: "body", ReportedCostUSD: 0.50}
 	d.Cfg.MaxCardCost = 1.00
-	o := newRun(d, tc)
+	o := newRun(t.Context(), d, tc)
 	isolateVerify(o)
 	o.subtasks = []subtaskRef{
 		{ID: "SUB-1", Title: "One", Sizing: seedSizing("simple")},

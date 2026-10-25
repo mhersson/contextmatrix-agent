@@ -180,7 +180,7 @@ func TestRunModelSignalsProgressDuringReasoningTurn(t *testing.T) {
 	d := planTestDeps(ops, client)
 	d.Emit = events.NewEmitter(nil, &out)
 
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 	require.NotNil(t, o.progress, "newRun builds the marker from Deps.Emit")
 
 	// Only the clock is swapped, so the run keeps the marker newRun built. It

@@ -88,7 +88,7 @@ func replayRun(client llm.LLM, on bool) *run {
 	d.Registry = replayTestRegistry()
 	d.Cfg.ReplayReasoning = on
 
-	return newRun(d, cmclient.TaskContext{})
+	return newRun(context.Background(), d, cmclient.TaskContext{})
 }
 
 func TestReplaysByModel(t *testing.T) {

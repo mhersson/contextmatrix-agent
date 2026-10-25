@@ -57,7 +57,7 @@ func TestRunPersistsPhaseBeforeWork(t *testing.T) {
 	d := Deps{Ops: ops, Git: &fakeGit{}, Cfg: Config{CardID: "CARD-1"}}
 
 	// Stub the plan phase to fail; SetPhase("plan") must still come FIRST.
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 	planErr := errors.New("plan boom")
 	o.planFn = func(context.Context) error { return planErr }
 
@@ -77,7 +77,7 @@ func TestRunUnknownPhaseReturnsError(t *testing.T) {
 	}
 	d := Deps{Ops: ops, Cfg: Config{CardID: "CARD-1"}}
 
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 
 	err := o.execute(context.Background())
 	require.Error(t, err)
@@ -96,7 +96,7 @@ func TestRunSetPhaseFailureSkipsWork(t *testing.T) {
 	}
 	d := Deps{Ops: ops, Git: &fakeGit{}, Cfg: Config{CardID: "CARD-1"}}
 
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 
 	var planRan bool
 
@@ -120,7 +120,7 @@ func TestRunEntersAtPersistedPhase(t *testing.T) {
 	}
 	d := Deps{Ops: ops, Git: &fakeGit{}, Cfg: Config{CardID: "CARD-1"}}
 
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 
 	var planRan, executeRan, reviewRan bool
 
@@ -176,7 +176,7 @@ func TestRunResumedPastReviewReentersReview(t *testing.T) {
 			}
 			d := Deps{Ops: ops, Git: &fakeGit{}, Cfg: Config{CardID: "CARD-1"}}
 
-			o := newRun(d, ops.taskContext)
+			o := newRun(t.Context(), d, ops.taskContext)
 
 			var entryState string
 
@@ -213,7 +213,7 @@ func TestRunBudgetBreachParks(t *testing.T) {
 	}
 	d := Deps{Ops: ops, Git: &fakeGit{}, Cfg: Config{CardID: "CARD-1", MaxCardCost: 1.00}}
 
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 	// Plan spends past the cap, then trips the ledger.
 	o.planFn = func(context.Context) error {
 		o.ledger.Spend(1.50)
@@ -242,7 +242,7 @@ func TestRunContextLimitParks(t *testing.T) {
 	}
 	d := Deps{Ops: ops, Git: &fakeGit{}, Cfg: Config{CardID: "CARD-1"}}
 
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 	// Plan stops because the model neared its context window.
 	o.planFn = func(context.Context) error {
 		return &ContextLimitError{Model: "anthropic/claude-x", ContextWindow: 200000}
@@ -269,7 +269,7 @@ func TestRunToolchainMissingParks(t *testing.T) {
 	}
 	d := Deps{Ops: ops, Git: &fakeGit{}, Cfg: Config{CardID: "CARD-1"}}
 
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 	// Execute stops because verify resolution found a toolchain that cannot run.
 	o.planFn = func(context.Context) error {
 		return &ToolchainMissingError{Tier: "detected", Subject: "pom.xml", Reason: "java: not found"}
@@ -296,7 +296,7 @@ func TestRunVerifyParkedParks(t *testing.T) {
 	}
 	d := Deps{Ops: ops, Git: &fakeGit{}, Cfg: Config{CardID: "CARD-1"}}
 
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 	// Execute stops because the pre-commit verify stayed red after its one fix pass.
 	vpe := &VerifyParkedError{
 		Subtask: "SUB-1",
@@ -490,7 +490,7 @@ func TestPhaseOrderPlacesDocumentBetweenExecuteAndReview(t *testing.T) {
 func TestRunWalksDocumentBetweenExecuteAndReview(t *testing.T) {
 	ops := &fakeOps{taskContext: cmclient.TaskContext{}}
 	d := Deps{Ops: ops, Git: &fakeGit{}, Cfg: Config{CardID: "CARD-1"}}
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 
 	var order []string
 
@@ -523,7 +523,7 @@ func TestExecuteAttributesAPhaseErrorToItsPhase(t *testing.T) {
 
 	ops := &fakeOps{taskContext: cmclient.TaskContext{Phase: "review"}}
 	d := Deps{Ops: ops, Git: &fakeGit{remoteTip: "tip-1"}, Cfg: Config{CardID: "CARD-1", Branch: "cm/card-1"}}
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 
 	o.reviewFn = func(context.Context) error { return nil }
 	o.integrateFn = func(context.Context) error { return fmt.Errorf("integrate: %w", cause) }
@@ -543,7 +543,7 @@ func TestRunSeedsLedgerFromReportedCost(t *testing.T) {
 	}
 	d := Deps{Ops: ops, Git: &fakeGit{}, Cfg: Config{CardID: "CARD-1", MaxCardCost: 1.00}}
 
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 	// A tiny additional spend tips the already-reported total past the cap.
 	o.planFn = func(context.Context) error {
 		o.ledger.Spend(0.20)
@@ -578,7 +578,7 @@ func TestNewRunSeedsFilteredDescriptionAndFindings(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			d := Deps{Ops: &fakeOps{}, Cfg: Config{CardID: "CARD-1"}}
 
-			o := newRun(d, cmclient.TaskContext{Title: "Parent", Description: grown, Phase: tt.phase})
+			o := newRun(t.Context(), d, cmclient.TaskContext{Title: "Parent", Description: grown, Phase: tt.phase})
 
 			// The write-back body stays raw - recordSection must never lose history.
 			assert.Equal(t, grown, o.body)
@@ -603,7 +603,7 @@ func TestNewRunSeedsBoundedFindingsOnResume(t *testing.T) {
 		"## Review Findings (Round 4)\n\nround four text\n"
 	d := Deps{Ops: &fakeOps{}, Cfg: Config{CardID: "CARD-1"}}
 
-	o := newRun(d, cmclient.TaskContext{Title: "Parent", Description: grown, Phase: "review"})
+	o := newRun(t.Context(), d, cmclient.TaskContext{Title: "Parent", Description: grown, Phase: "review"})
 
 	assert.Contains(t, o.lastFindings, "round four text")
 	assert.Contains(t, o.lastFindings, "round three text")
@@ -614,7 +614,7 @@ func TestNewRunSeedsBoundedFindingsOnResume(t *testing.T) {
 func TestNewRunFreshDescriptionSeedsEmptyFindings(t *testing.T) {
 	d := Deps{Ops: &fakeOps{}, Cfg: Config{CardID: "CARD-1"}}
 
-	o := newRun(d, cmclient.TaskContext{Title: "Parent", Description: "Just the task."})
+	o := newRun(t.Context(), d, cmclient.TaskContext{Title: "Parent", Description: "Just the task."})
 
 	assert.Equal(t, "Just the task.", o.body)
 	assert.Equal(t, "Just the task.", o.taskDescription)
