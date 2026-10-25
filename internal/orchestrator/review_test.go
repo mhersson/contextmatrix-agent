@@ -2350,24 +2350,21 @@ func TestReviewPanelCoderOnlyFallback(t *testing.T) {
 			panel := o.reviewPanel(context.Background(), estimateTokens("diff"), false)
 			require.Len(t, panel, tt.wantSeats)
 
+			logged := false
+
 			for _, seat := range panel {
 				if tt.wantModel != "" {
 					assert.Equal(t, tt.wantModel, seat.Model)
 				}
 
-				for coder := range tt.coders {
-					if !tt.wantFallback {
-						assert.NotEqual(t, coder, seat.Model, "the coder model must not review while another model can")
-					}
+				if !tt.wantFallback {
+					assert.False(t, tt.coders[seat.Model], "a coder model must not review while another model can")
 				}
+
+				logged = logged || slices.Contains(ops.logs, fmt.Sprintf(reviewCoderOnlyFallbackLog, seat.Model))
 			}
 
-			fallbackLine := fmt.Sprintf(reviewCoderOnlyFallbackLog, only)
-			if tt.wantFallback {
-				assert.Contains(t, ops.logs, fallbackLine)
-			} else {
-				assert.NotContains(t, ops.logs, fallbackLine)
-			}
+			assert.Equal(t, tt.wantFallback, logged, "the fallback card line is written exactly when the fallback fires")
 		})
 	}
 }
