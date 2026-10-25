@@ -2294,6 +2294,84 @@ func TestReviewPanelDiversity(t *testing.T) {
 	}
 }
 
+// TestReviewPanelCoderOnlyFallback pins when the coder exclusion yields: only
+// when no other model is selectable, and never past an incapable or
+// blacklisted model.
+func TestReviewPanelCoderOnlyFallback(t *testing.T) {
+	const only = "stub/model"
+
+	tests := []struct {
+		name         string
+		reg          *registry.Registry
+		coders       map[string]bool
+		incapable    map[string]bool
+		wantSeats    int
+		wantModel    string
+		wantFallback bool
+	}{
+		{
+			name:         "coder model is the only one: it reviews",
+			reg:          registry.NewRegistryFromParts(llm.Catalog{}, registry.Priors{}, nil, nil, only),
+			coders:       map[string]bool{only: true},
+			wantSeats:    3,
+			wantModel:    only,
+			wantFallback: true,
+		},
+		{
+			name:      "coder model is incapable: still parks",
+			reg:       registry.NewRegistryFromParts(llm.Catalog{}, registry.Priors{}, nil, nil, only),
+			coders:    map[string]bool{only: true},
+			incapable: map[string]bool{only: true},
+			wantSeats: 0,
+		},
+		{
+			name:      "coder model is blacklisted: still parks",
+			reg:       registry.NewRegistryFromParts(llm.Catalog{}, registry.Priors{}, map[string]bool{only: true}, nil, only),
+			coders:    map[string]bool{only: true},
+			wantSeats: 0,
+		},
+		{
+			name:      "alternatives exist: coder stays excluded",
+			reg:       reviewerRegistry(),
+			coders:    map[string]bool{"rev/alpha": true},
+			wantSeats: 3,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			d := reviewTestDeps(t, ops, &fakeGit{}, &planLLM{}, tt.reg)
+
+			o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}, 0)
+			o.coderModels = tt.coders
+			o.excluded = tt.incapable
+
+			panel := o.reviewPanel(context.Background(), estimateTokens("diff"), false)
+			require.Len(t, panel, tt.wantSeats)
+
+			for _, seat := range panel {
+				if tt.wantModel != "" {
+					assert.Equal(t, tt.wantModel, seat.Model)
+				}
+
+				for coder := range tt.coders {
+					if !tt.wantFallback {
+						assert.NotEqual(t, coder, seat.Model, "the coder model must not review while another model can")
+					}
+				}
+			}
+
+			fallbackLine := fmt.Sprintf(reviewCoderOnlyFallbackLog, only)
+			if tt.wantFallback {
+				assert.Contains(t, ops.logs, fallbackLine)
+			} else {
+				assert.NotContains(t, ops.logs, fallbackLine)
+			}
+		})
+	}
+}
+
 func TestReviewPinOverridesPanel(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{}

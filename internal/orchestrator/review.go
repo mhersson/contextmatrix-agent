@@ -167,6 +167,10 @@ const (
 	reviewParkedSynthesisCap = "the synthesis verdict could not be produced within its turn cap"
 )
 
+// reviewCoderOnlyFallbackLog is the card line written when the panel reviews
+// with a coder's own model because no other model is selectable.
+const reviewCoderOnlyFallbackLog = "review panel: no model other than the coder's is selectable - reviewing with %s, the model that wrote the code"
+
 // reviewTimeLeft parks the review when less than reviewRoundReserve remains on
 // the container deadline, before a verify run, panel, or fix round can be
 // started that has no chance of finishing. round names the round a re-trigger
@@ -1521,7 +1525,7 @@ func (o *run) reviewPanel(ctx context.Context, estTokens int, authoritative bool
 		o.warnUnresolvablePin(ctx, "reviewer", o.tc.ModelReviewer)
 	}
 
-	seats := o.d.Registry.SelectReviewPanelReport(registry.SelectInput{
+	in := registry.SelectInput{
 		Role:      registry.RoleReviewer,
 		Tier:      tier,
 		EstTokens: estTokens,
@@ -1529,7 +1533,19 @@ func (o *run) reviewPanel(ctx context.Context, estTokens int, authoritative bool
 		// own work) and any model proven harness-incapable this run (recoverIncapable
 		// records it). Merged so neither set masks the other.
 		Exclude: o.reviewExclusions(),
-	}, size)
+	}
+
+	seats := o.d.Registry.SelectReviewPanelReport(in, size)
+
+	// The coder exclusion yields only when nothing else is selectable, so a
+	// one-model catalog reviews instead of parking every card. Incapable and
+	// blacklisted models stay barred.
+	if len(seats) == 0 && len(o.coderModels) > 0 {
+		in.Exclude = o.excluded
+		if seats = o.d.Registry.SelectReviewPanelReport(in, size); len(seats) > 0 && o.firstNote("review-coder-only") {
+			o.d.logCard(ctx, reviewCoderOnlyFallbackLog, seats[0].Pick.Model)
+		}
+	}
 
 	// One label for the whole panel: seats that fell the same distance are one
 	// fact, and the panel summary below carries the per-seat detail.
