@@ -116,6 +116,19 @@ func TestGateClassificationParseFailureIsAdjust(t *testing.T) {
 	assert.Equal(t, "hmm, not sure", fb, "feedback falls back to the raw reply")
 }
 
+func TestGateClassificationModelErrorIsAdjust(t *testing.T) {
+	ops := &fakeOps{}
+	inbox := &fakeInbox{msgs: []harness.UserMessage{{Content: "approve"}}}
+	// The scripted reply would approve; the failing call must keep it from counting.
+	client := &planLLM{responses: []llm.Response{stopResp(`{"verdict":"approve"}`, 0.001)}, errAfter: 1}
+	o := gateRun(ops, inbox, true, client, nil, 0, 0)
+
+	outcome, fb, err := o.gate(context.Background(), gatePlanApproval, fixedGateModel("payload/model"), "plan?")
+	require.NoError(t, err)
+	assert.Equal(t, gateAdjust, outcome, "a classification error is never an approval")
+	assert.Equal(t, "approve", fb, "feedback falls back to the raw reply")
+}
+
 func TestGateEmitsAwaitingHuman(t *testing.T) {
 	ops := &fakeOps{}
 	inbox := &fakeInbox{msgs: []harness.UserMessage{{Content: "approve"}}}
