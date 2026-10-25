@@ -272,7 +272,7 @@ keep it clean.
 
 `make test-docker` runs the executor's Docker integration suite against the
 local daemon. It force-removes every agent-labelled container on that daemon,
-so never run it on a host where a live `serve` has workers running.
+so never run it against a daemon a live `serve` uses.
 
 ### Uncommitted artifacts
 

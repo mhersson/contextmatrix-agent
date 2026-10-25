@@ -237,8 +237,8 @@ refuses new work, sends every running worker an end-session so it pushes its
 work in progress and releases its card, waits up to 30 seconds for the workers
 to exit, then kills the rest. The kill sweep handles every card at once under
 one 15-second deadline: it kills each worker still running (about 3 seconds of
-kill grace) and reports each card failed that its own exit has not already
-reported, so a parked card keeps its completed status. The webhook listener
+kill grace) and reports each card failed unless the card's own exit reports
+it, so a parked card keeps its completed status. The webhook listener
 closes only after the sweep, because parking workers reach the LLM proxy on
 it; the HTTP drain, shared with the admin listener, adds at most 10 seconds.
 The sequence fits the unit's `TimeoutStopSec=60` however many cards are
@@ -339,8 +339,8 @@ make docker-worker-variants  # build the go-node / python / rust / jvm-node vari
 ```
 
 `make test-docker` needs a local Docker daemon and force-removes every
-agent-labelled container on it, so never run it on a host where a live `serve`
-has workers running.
+agent-labelled container on it, so never run it against a daemon a live
+`serve` uses.
 
 CI gates every pull request on `go test`, `go test -race`, `golangci-lint`, and
 `go build`, plus `govulncheck` and a worker-image scan.
