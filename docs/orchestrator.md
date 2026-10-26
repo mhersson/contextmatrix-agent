@@ -368,8 +368,11 @@ Subagent isolation, `--max-turns` caps, and window-aware selection bound
 context growth. By default there is no compactor: a reply that nears the
 window mid-run emits a `context_limit` event and returns incomplete - the
 orchestrator treats it as a failed subtask, never a silent truncation. A final
-reply (text with no tool calls) ends the run at any size. An opt-in in-window
-compactor exists behind `CMX_COMPACTION_ENABLED` (default off;
+reply (text with no tool calls) ends the run at any size, but in a phase run one
+the provider cut at its token limit (`finish_reason` `length`) returns
+incomplete the same way; review specialists and mob seats keep a cut reply as
+their output. An opt-in in-window compactor exists behind
+`CMX_COMPACTION_ENABLED` (default off;
 `CMX_COMPACTION_THRESHOLD` 0.85, `CMX_COMPACTION_KEEP_RECENT_TURNS` 6).
 
 Reasoning replay (`replay_reasoning`, on by default; `false` turns it off;

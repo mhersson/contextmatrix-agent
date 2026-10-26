@@ -14,14 +14,22 @@ import (
 )
 
 // ContextLimitError marks a phase stopping because the model neared its context
-// window. The worker maps it like the budget park: push WIP, release, fail - so
-// in-flight work survives and a human can split the subtask or pin a larger-window model.
+// window, or because its final reply was cut at the token limit. The worker maps
+// it like the budget park: push WIP, release, fail - so in-flight work survives
+// and a human can split the subtask or pin another model.
 type ContextLimitError struct {
 	Model         string
 	ContextWindow int
+	// Truncated marks a final reply cut at the token limit (finish_reason
+	// "length") rather than a reply that neared the window mid-run.
+	Truncated bool
 }
 
 func (e *ContextLimitError) Error() string {
+	if e.Truncated {
+		return fmt.Sprintf("final reply from model %q was cut at the token limit", e.Model)
+	}
+
 	return fmt.Sprintf("context limit reached for model %q (window %d tokens)", e.Model, e.ContextWindow)
 }
 
@@ -124,8 +132,9 @@ func reasoningRaw(effort string) json.RawMessage {
 }
 
 // runModel routes a phase model-call through the centralized config and
-// normalizes a context_limit/incapable result into a typed error. The returned
-// duration is the wall time of the harness step, threaded to spendAndReport.
+// normalizes a context_limit/incapable result, or a final reply cut at the token
+// limit, into a typed error. The returned duration is the wall time of the
+// harness step, threaded to spendAndReport.
 func (o *run) runModel(ctx context.Context, reg *tools.Registry, prompt, model string) (harness.Result, time.Duration, error) {
 	return o.runModelCfg(ctx, reg, prompt, model, o.harnessConfig(model))
 }
@@ -135,12 +144,20 @@ func (o *run) runModel(ctx context.Context, reg *tools.Registry, prompt, model s
 // can report it to CM by return value - never via a shared field on run, which
 // concurrent Best-of-N candidates and mob seats would race on.
 func (o *run) runModelCfg(ctx context.Context, reg *tools.Registry, prompt, model string, cfg harness.Config) (harness.Result, time.Duration, error) {
+	client := &finishReasonClient{LLM: o.d.Client}
+
 	start := time.Now()
-	res, err := harness.Run(ctx, o.d.Client, reg, o.d.Emit, prompt, cfg)
+	res, err := harness.Run(ctx, client, reg, o.d.Emit, prompt, cfg)
 	dur := time.Since(start)
 
 	if err == nil && res.Reason == "context_limit" {
 		return res, dur, &ContextLimitError{Model: model, ContextWindow: o.d.Registry.ContextWindow(model)}
+	}
+
+	// The harness completes a final reply as done even when the provider cut it
+	// at the token limit; CompletionArgs is nil only for a run ended by a reply.
+	if err == nil && res.Reason == "done" && res.CompletionArgs == nil && client.last == "length" {
+		return res, dur, &ContextLimitError{Model: model, ContextWindow: o.d.Registry.ContextWindow(model), Truncated: true}
 	}
 
 	if err == nil && res.Reason == harness.ReasonIncapable {
@@ -152,6 +169,29 @@ func (o *run) runModelCfg(ctx context.Context, reg *tools.Registry, prompt, mode
 	}
 
 	return res, dur, err
+}
+
+// finishReasonClient records the finish_reason of the last reply one harness
+// run received, which harness.Result does not carry. harness.Run calls its
+// client sequentially, so a client per run needs no lock.
+type finishReasonClient struct {
+	llm.LLM
+
+	last string
+}
+
+func (c *finishReasonClient) Send(ctx context.Context, req llm.Request) (llm.Response, error) {
+	resp, err := c.LLM.Send(ctx, req)
+	c.last = resp.FinishReason
+
+	return resp, err
+}
+
+func (c *finishReasonClient) SendStream(ctx context.Context, req llm.Request, onDelta func(llm.Delta)) (llm.Response, error) {
+	resp, err := c.LLM.SendStream(ctx, req, onDelta)
+	c.last = resp.FinishReason
+
+	return resp, err
 }
 
 // spendAndReport is the shared accounting tail of every model call: it charges

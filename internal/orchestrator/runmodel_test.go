@@ -175,6 +175,53 @@ func TestRunModelNormalizesContextLimit(t *testing.T) {
 	}
 }
 
+// TestRunModelParksTruncatedFinalReply pins that a final reply the provider cut
+// at its token limit parks like a context-window stop instead of completing the
+// phase on part of an answer, and that only the reply that ended the run counts.
+func TestRunModelParksTruncatedFinalReply(t *testing.T) {
+	tests := []struct {
+		name          string
+		responses     []llm.Response
+		wantTruncated bool
+	}{
+		{
+			name:          "final reply cut at the token limit parks",
+			responses:     []llm.Response{{Content: "partial", FinishReason: "length", Usage: llm.Usage{PromptTokens: 1000, Cost: 0.01}}},
+			wantTruncated: true,
+		},
+		{
+			name: "complete final reply after a cut empty reply completes",
+			responses: []llm.Response{
+				{FinishReason: "length", Usage: llm.Usage{PromptTokens: 1000}},
+				stopResp("complete answer", 0.01),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{taskContext: cmclient.TaskContext{}}
+			d := planTestDeps(ops, &planLLM{responses: tt.responses})
+			o := newRun(t.Context(), d, ops.taskContext)
+
+			res, _, err := o.runModel(context.Background(), d.ReadTools, "do the thing", "default/model")
+
+			if !tt.wantTruncated {
+				require.NoError(t, err)
+				assert.Equal(t, "complete answer", res.Output)
+
+				return
+			}
+
+			var cle *ContextLimitError
+			require.ErrorAs(t, err, &cle, "a truncated final reply must park")
+			assert.True(t, cle.Truncated)
+			assert.Equal(t, "default/model", cle.Model)
+			assert.InDelta(t, 0.01, res.TotalCostUSD, 1e-9, "the result still carries the spend")
+		})
+	}
+}
+
 // TestRunModelNormalizesIncapable pins that when the harness returns
 // Reason == "incapable" (model emits tool calls every turn but none parse),
 // runModel surfaces it as an *IncapableError carrying the model name and, when

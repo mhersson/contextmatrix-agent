@@ -180,6 +180,20 @@ func TestDocumentBestEffortOnModelError(t *testing.T) {
 		assert.Empty(t, git.commitMsgs, "no commit after a context-limit model error")
 		assert.Empty(t, git.pushBranches, "no push after a context-limit model error")
 	})
+
+	t.Run("final reply cut at the token limit commits no docs", func(t *testing.T) {
+		ops := &fakeOps{}
+		git := &fakeGit{committed: true}
+		resp := llm.Response{Content: "Wrote half the docs", FinishReason: "length", Usage: llm.Usage{Cost: 0.01}}
+		d := documentTestDeps(ops, git, &planLLM{responses: []llm.Response{resp}})
+
+		o := newDocumentRun(d, cmclient.TaskContext{Title: "T", Description: "body"}, 0)
+
+		require.NoError(t, runDocument(context.Background(), o), "a truncated doc reply is best-effort, never a park")
+		assert.Empty(t, git.commitMsgs, "no docs committed from a truncated reply")
+		assert.Empty(t, git.pushBranches, "no push after a truncated reply")
+		assert.Equal(t, []string{"HEAD"}, git.hardResetRefs, "the run's edits are discarded")
+	})
 }
 
 func TestDocumentBestEffortOnCommitFailure(t *testing.T) {

@@ -853,6 +853,10 @@ func budgetLogMessage(be *BudgetExceededError) string {
 
 // contextLimitLogMessage is the canonical card-log line for a context-window park.
 func contextLimitLogMessage(cle *ContextLimitError) string {
+	if cle.Truncated {
+		return fmt.Sprintf("final reply from model %q was cut at the token limit - parking work; split the subtask or pin another model", cle.Model)
+	}
+
 	return fmt.Sprintf("context window reached on model %q (%d tokens) - parking work; split the subtask or pin a larger-window model", cle.Model, cle.ContextWindow)
 }
 
