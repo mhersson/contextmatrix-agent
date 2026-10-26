@@ -368,6 +368,11 @@ func TestMobCheckpointReviseGateSkippedLeavesVerifiedFalse(t *testing.T) {
 		"a skipped revise gate is not evidence the revised tree passed, even though the pre-commit gate on the original tree was")
 }
 
+// reviseFinishMessage is the revise coder's scripted commit message, distinct
+// from the production fallback so an assertion on it proves the message passed
+// through.
+const reviseFinishMessage = "fix(a): cover the missed case"
+
 // checkpointReviseGateRun builds a run wired to drive a real revise verdict
 // through mobCheckpoint end to end - mob discussion, fix coder run, the
 // checkpointReviseVerify gate, and commitRevise - the same path
@@ -376,7 +381,7 @@ func TestMobCheckpointReviseGateSkippedLeavesVerifiedFalse(t *testing.T) {
 // outcome before invoking mobCheckpoint. before is scripted ahead of the revise
 // coder's finish turn, for a caller whose coder must call a tool first.
 func checkpointReviseGateRun(ops *fakeOps, git *fakeGit, before ...llm.Response) *run {
-	client := &planLLM{responses: append(before, finishResp("fix: address checkpoint findings", 0.01))}
+	client := &planLLM{responses: append(before, finishResp(reviseFinishMessage, 0.01))}
 	d := Deps{
 		Ops:        ops,
 		Git:        git,
@@ -467,7 +472,7 @@ func TestMobCheckpointReviseGatePassCommitsAsToday(t *testing.T) {
 		subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("simple")}, "abc123")
 
 	require.Len(t, git.commitMsgs, 1)
-	assert.Equal(t, "fix: address checkpoint findings", git.commitMsgs[0])
+	assert.Equal(t, reviseFinishMessage, git.commitMsgs[0])
 	assert.True(t, o.solver.gate.verified, "a passing gate is evidence the revise is good")
 }
 
@@ -607,7 +612,7 @@ func TestMobCheckpointReviseGateSkippedStillCommits(t *testing.T) {
 				subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("simple")}, "abc123")
 
 			require.Len(t, git.commitMsgs, 1, "an inconclusive or skipped gate is not evidence of a defect")
-			assert.Equal(t, "fix: address checkpoint findings", git.commitMsgs[0])
+			assert.Equal(t, reviseFinishMessage, git.commitMsgs[0])
 		})
 	}
 }

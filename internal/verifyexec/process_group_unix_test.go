@@ -87,13 +87,13 @@ func TestExecReapsBackgroundedDescendants(t *testing.T) {
 			pidFile := filepath.Join(dir, "background.pid")
 
 			out := execWithEnv(context.Background(), dir, []string{
-				"sh", "-c", "sleep 30 & echo $! > " + pidFile + "; echo ok; exit " + strconv.Itoa(tt.exitCode),
+				"sh", "-c", "sleep 30 & echo $! > " + pidFile + "; echo verify-output-marker; exit " + strconv.Itoa(tt.exitCode),
 			}, time.Minute, 100*time.Millisecond, os.Environ())
 
 			assert.False(t, out.StartErr, "a command that ran must not read as a start error")
 			assert.False(t, out.TimedOut)
 			assert.Equal(t, tt.exitCode, out.ExitCode)
-			assert.Contains(t, out.Output, "ok")
+			assert.Contains(t, out.Output, "verify-output-marker")
 
 			raw, err := os.ReadFile(pidFile)
 			require.NoError(t, err, "the shell must have recorded the background pid")
