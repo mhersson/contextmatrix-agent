@@ -1808,7 +1808,7 @@ func TestSalvageDeclineAfterVerifyPassKeepsTierAndReportsNoOutcome(t *testing.T)
 // TestSalvageDeclineAfterVerifyPassKeepsTierAndReportsNoOutcome for the OTHER
 // post-verify-pass park cause: the push succeeds but the board's CompleteTask
 // call fails. Same tier contract - the model's work is proven correct, so
-// this is an infrastructure park that must not touch the marker. The
+// this is an infrastructure park that must not change the sizing. The
 // outcome differs from the push case only because the win report fires
 // BEFORE the doomed CompleteTask attempt (claim-gating requires it): exactly
 // one "win" row stands, and the CompleteTask failure gets no second,

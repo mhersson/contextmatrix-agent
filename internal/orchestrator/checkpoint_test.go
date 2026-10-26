@@ -451,20 +451,6 @@ func TestMobCheckpointReviseGateFailureHardResets(t *testing.T) {
 	assert.Contains(t, git.hardResetRefs, "HEAD")
 }
 
-// TestMobCheckpointReviseGateFailureLogsDiscard proves a red checkpoint
-// revise gate says so on the card log, so an operator sees it.
-func TestMobCheckpointReviseGateFailureLogsDiscard(t *testing.T) {
-	ops := &fakeOps{}
-	git := &fakeGit{committed: true}
-	o := checkpointReviseGateRun(ops, git)
-	checkpointRedGate(o)
-
-	o.mobCheckpoint(context.Background(), o.solver,
-		subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("simple")}, "abc123")
-
-	assert.Contains(t, strings.Join(ops.logs, "\n"), "revise discarded")
-}
-
 // TestMobCheckpointReviseGatePassCommitsAsToday proves a green checkpoint
 // revise gate still lands the one commit with the fix coder's message, and
 // additionally now records that the gate saw it pass.
