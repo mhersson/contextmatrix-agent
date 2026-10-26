@@ -97,11 +97,13 @@ func TestHarnessConfigCompactionGate(t *testing.T) {
 	})
 }
 
-// TestRunModelNormalizesContextLimit pins the 0.85 threshold tightly: exactly
-// int(0.85*window) prompt tokens trips context_limit (surfaced by runModel as an
-// error so a phase never proceeds on truncated output), and one token below does
-// NOT. A boundary-precise pair catches a drifted threshold constant - a loose
-// "well over the limit" prompt would still pass against e.g. 0.95.
+// TestRunModelNormalizesContextLimit pins the 0.85 threshold tightly: a reply
+// that would continue the run, at exactly int(0.85*window) prompt tokens, trips
+// context_limit (surfaced by runModel as an error so a phase never carries on
+// past its window), and one token below does NOT. A final reply ends the run at
+// any size, so it never trips. A boundary-precise pair catches a drifted
+// threshold constant - a loose "well over the limit" prompt would still pass
+// against e.g. 0.95.
 func TestRunModelNormalizesContextLimit(t *testing.T) {
 	// "default/model" is in planTestCatalog with ContextLength 131072. The harness
 	// trips when prompt_tokens >= int(contextLimitThreshold * window); mirror that
@@ -114,24 +116,38 @@ func TestRunModelNormalizesContextLimit(t *testing.T) {
 
 	tripAt := int(threshold * float64(window)) // 111411
 
+	toolCall := func(promptTokens int) llm.Response {
+		return llm.Response{
+			ToolCalls: []llm.ToolCall{{
+				ID:       "read-1",
+				Type:     "function",
+				Function: llm.FunctionCall{Name: "read", Arguments: `{"path":"no-such-file.txt"}`},
+			}},
+			FinishReason: "tool_calls",
+			Usage:        llm.Usage{PromptTokens: promptTokens, Cost: 0.01},
+		}
+	}
+
+	finalReply := llm.Response{
+		Content:      "complete answer",
+		FinishReason: "stop",
+		Usage:        llm.Usage{PromptTokens: tripAt, Cost: 0.01},
+	}
+
 	tests := []struct {
-		name         string
-		promptTokens int
-		wantTrip     bool
+		name     string
+		resp     llm.Response
+		wantTrip bool
 	}{
-		{"exactly at threshold trips", tripAt, true},
-		{"one token below does not trip", tripAt - 1, false},
+		{"tool call exactly at threshold trips", toolCall(tripAt), true},
+		{"tool call one token below does not trip", toolCall(tripAt - 1), false},
+		{"final reply at threshold completes", finalReply, false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ops := &fakeOps{taskContext: cmclient.TaskContext{}}
-			resp := llm.Response{
-				Content:      "partial",
-				FinishReason: "stop",
-				Usage:        llm.Usage{PromptTokens: tt.promptTokens, Cost: 0.01},
-			}
-			llmFake := &planLLM{responses: []llm.Response{resp}}
+			llmFake := &planLLM{responses: []llm.Response{tt.resp}}
 			d := planTestDeps(ops, llmFake)
 
 			o := newRun(t.Context(), d, ops.taskContext)
@@ -152,8 +168,8 @@ func TestRunModelNormalizesContextLimit(t *testing.T) {
 				assert.Equal(t, "context_limit", res.Reason)
 				assert.InDelta(t, 0.01, res.TotalCostUSD, 1e-9)
 			} else {
-				require.NoError(t, err, "one token below the threshold must NOT trip")
-				assert.NotEqual(t, "context_limit", res.Reason)
+				require.NoError(t, err, "the run must NOT trip the context limit")
+				assert.Equal(t, "done", res.Reason)
 			}
 		})
 	}

@@ -288,8 +288,8 @@ tool_output_max_bytes: 131072
 # --- Context compaction ---------------------------------------------------------
 
 # Opt-in in-window compaction in the worker loop. When disabled (the default),
-# nearing the context window emits a context_limit event and the subtask
-# returns incomplete - never a silent truncation. Default: false.
+# a reply that nears the context window mid-run emits a context_limit event and
+# the subtask returns incomplete - never a silent truncation. Default: false.
 # CMX_COMPACTION_ENABLED
 # compaction_enabled: false
 

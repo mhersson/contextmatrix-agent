@@ -214,8 +214,8 @@ Summaries only - full detail lives in the reference documents above.
 5. **Model selection is priors-only.** The planner emits a complexity tier per
    subtask; deterministic code maps the tier to a model. The LLM never names a
    model; there is no measured-capability gate. Pins always override.
-6. **Context bounds.** No compactor by default: nearing the window returns
-   incomplete - a failed subtask, never a silent truncation.
+6. **Context bounds.** No compactor by default: a reply that nears the window
+   mid-run returns incomplete - a failed subtask, never a silent truncation.
 7. **Per-card budget.** One cumulative USD ceiling (`CMX_MAX_CARD_COST`) spans
    the orchestrator and every subagent; a breach parks the card, never kills
    mid-turn.
