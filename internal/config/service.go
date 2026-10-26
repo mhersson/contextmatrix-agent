@@ -19,6 +19,7 @@ import (
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/providers/structs"
 	"github.com/knadh/koanf/v2"
+	"github.com/mhersson/contextmatrix-backendkit/llmproxy"
 )
 
 // reconcileCap is the ceiling on ContainerTimeout. ContextMatrix's reconcile
@@ -621,48 +622,6 @@ func isLoopbackURL(rawURL string) bool {
 	return false
 }
 
-// validateContainerServeURL checks the worker-to-serve base URL. Empty is valid
-// (the host-gateway default); a loopback or unspecified host would point workers
-// at themselves.
-func validateContainerServeURL(raw string) error {
-	if raw == "" {
-		return nil
-	}
-
-	u, err := url.Parse(raw)
-	if err != nil {
-		return fmt.Errorf("container_serve_url: %w", err)
-	}
-
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Errorf("container_serve_url must use http or https, got %q", raw)
-	}
-
-	if u.Hostname() == "" {
-		return fmt.Errorf("container_serve_url must include a host, got %q", raw)
-	}
-
-	if u.Path != "" && u.Path != "/" {
-		return fmt.Errorf("container_serve_url must not carry a path, got %q", raw)
-	}
-
-	// The raw check catches a bare "?" or "#", which url.Parse leaves with an
-	// empty query or fragment but which would still corrupt the appended "/llm".
-	if strings.ContainsAny(raw, "?#") {
-		return fmt.Errorf("container_serve_url must not carry a query or fragment, got %q", raw)
-	}
-
-	if ip := net.ParseIP(u.Hostname()); ip != nil && ip.IsUnspecified() {
-		return fmt.Errorf("container_serve_url must not be an unspecified address (0.0.0.0 or ::), got %q", raw)
-	}
-
-	if isLoopbackURL(raw) {
-		return fmt.Errorf("container_serve_url must not be a loopback host, got %q: workers would reach themselves", raw)
-	}
-
-	return nil
-}
-
 // Validate checks the service config invariants after merging. A non-digest
 // BaseImage and a non-canonical ReasoningEffort tier are both permitted but
 // warn via slog so operators notice tag drift or provider-specific values.
@@ -709,9 +668,12 @@ func (c *ServiceConfig) Validate() error {
 		}
 	}
 
-	if err := validateContainerServeURL(c.ContainerServeURL); err != nil {
-		return err
+	serveURL, err := llmproxy.ValidateContainerURL(c.ContainerServeURL)
+	if err != nil {
+		return fmt.Errorf("container_serve_url: %w", err)
 	}
+
+	c.ContainerServeURL = serveURL
 
 	switch c.ReasoningEffort {
 	case "", "low", "medium", "high":

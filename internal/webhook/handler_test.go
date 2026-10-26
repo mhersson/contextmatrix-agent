@@ -927,7 +927,7 @@ func TestProxyRouteSkipsAuthAndDrainGate(t *testing.T) {
 	h := newHarness(t, 4)
 	h.draining.Store(true)
 
-	r := httptest.NewRequest(http.MethodPost, LLMProxyPrefix+"/chat/completions", strings.NewReader("{}"))
+	r := httptest.NewRequest(http.MethodPost, llmproxy.DefaultPrefix+"/chat/completions", strings.NewReader("{}"))
 	w := httptest.NewRecorder()
 	h.server.Routes().ServeHTTP(w, r)
 
@@ -957,13 +957,13 @@ func TestProxyRouteStreamsThroughMetrics(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	proxy, err := llmproxy.New(llmproxy.Config{Prefix: LLMProxyPrefix, Logger: quietLogger()})
+	proxy, err := llmproxy.New(llmproxy.Config{Prefix: llmproxy.DefaultPrefix, Logger: quietLogger()})
 	require.NoError(t, err)
 
 	token, err := proxy.Register("run-1", protocol.LLMEndpoint{Type: "openai", BaseURL: upstream.URL})
 	require.NoError(t, err)
 
-	m := metrics.New(llmproxy.Paths(LLMProxyPrefix)...)
+	m := metrics.New(llmproxy.Paths(llmproxy.DefaultPrefix)...)
 	s := NewServer(Config{APIKey: testAPIKey, LLMProxy: proxy, Metrics: m, Logger: quietLogger()})
 
 	ts := httptest.NewServer(s.Routes())
@@ -976,7 +976,7 @@ func TestProxyRouteStreamsThroughMetrics(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ts.URL+LLMProxyPrefix+"/chat/completions", strings.NewReader("{}"))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ts.URL+llmproxy.DefaultPrefix+"/chat/completions", strings.NewReader("{}"))
 	require.NoError(t, err)
 	req.Header.Set("Authorization", "Bearer "+token)
 

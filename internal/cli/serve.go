@@ -111,12 +111,12 @@ func runServe(ctx context.Context, configPath string) error {
 
 	// The proxy keeps every run's real LLM key in this process; a worker only
 	// ever holds its run's stand-in token.
-	proxy, err := llmproxy.New(llmproxy.Config{Prefix: webhook.LLMProxyPrefix, CACertFile: cfg.CACertFile, Logger: logger})
+	proxy, err := llmproxy.New(llmproxy.Config{Prefix: llmproxy.DefaultPrefix, CACertFile: cfg.CACertFile, Logger: logger})
 	if err != nil {
 		return fmt.Errorf("llm proxy: %w", err)
 	}
 
-	mx := metrics.New(llmproxy.Paths(webhook.LLMProxyPrefix)...)
+	mx := metrics.New(llmproxy.Paths(llmproxy.DefaultPrefix)...)
 
 	skillsCache := filepath.Join(cfg.SecretsDir, "task-skills-cache")
 	skillsResolver := taskskills.NewResolver(cfg.ContextMatrixURL, cfg.APIKey, skillsCache, "/api/agent/task-skills-source")
@@ -752,7 +752,7 @@ func launchEnv(cfg *config.ServiceConfig, secretsHostDir string) webhook.LaunchE
 		MCPURL:                    composeMCPURL(base),
 		MCPAPIKey:                 cfg.MCPAPIKey,
 		SecretsHostDir:            secretsHostDir,
-		LLMBaseURL:                containerLLMBaseURL(cfg),
+		LLMBaseURL:                llmproxy.WorkerBaseURL(cfg.ContainerServeURL, cfg.Port, llmproxy.DefaultPrefix),
 		CACertFile:                cfg.CACertFile,
 		MemoryBytes:               cfg.ContainerMemoryBytes,
 		PidsLimit:                 cfg.ContainerPidsLimit,
@@ -781,19 +781,6 @@ func launchEnv(cfg *config.ServiceConfig, secretsHostDir string) webhook.LaunchE
 // double slash.
 func composeMCPURL(base string) string {
 	return strings.TrimRight(base, "/") + "/mcp"
-}
-
-// containerLLMBaseURL is the LLM proxy URL as workers reach it. It is never
-// empty: an empty LLM_BASE_URL would send the token to the type's default
-// upstream, so an unset container_serve_url falls back to the host gateway
-// every worker maps host.docker.internal to.
-func containerLLMBaseURL(cfg *config.ServiceConfig) string {
-	base := cfg.ContainerServeURL
-	if base == "" {
-		base = "http://" + net.JoinHostPort("host.docker.internal", strconv.Itoa(cfg.Port))
-	}
-
-	return strings.TrimRight(base, "/") + webhook.LLMProxyPrefix
 }
 
 // flattenEnv renders a KEY:VALUE map into the KEY=VALUE slice the container

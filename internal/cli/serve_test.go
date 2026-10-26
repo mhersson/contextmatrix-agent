@@ -117,6 +117,12 @@ func TestLaunchEnvMCPURL(t *testing.T) {
 		assert.Equal(t, "http://10.0.0.5:19092/llm", env.LLMBaseURL)
 	})
 
+	t.Run("stages the host gateway on serve's port when container_serve_url is unset", func(t *testing.T) {
+		cfg := &config.ServiceConfig{ContextMatrixURL: "http://public:8080", Port: 9092, AdminPort: 9093}
+		env := launchEnv(cfg, "/secrets/shared")
+		assert.Equal(t, "http://host.docker.internal:9092/llm", env.LLMBaseURL)
+	})
+
 	t.Run("forwards worker knobs", func(t *testing.T) {
 		cfg := &config.ServiceConfig{
 			ContextMatrixURL:      "http://public:8080",
@@ -168,36 +174,6 @@ func TestFlattenEnv(t *testing.T) {
 		sort.Strings(got)
 		assert.Equal(t, []string{"BAZ=qux", "FOO=bar"}, got)
 	})
-}
-
-func TestContainerLLMBaseURL(t *testing.T) {
-	tests := []struct {
-		name string
-		cfg  config.ServiceConfig
-		want string
-	}{
-		{
-			"unset falls back to the host gateway on serve's port",
-			config.ServiceConfig{Port: 9092},
-			"http://host.docker.internal:9092/llm",
-		},
-		{
-			"trailing slash trimmed",
-			config.ServiceConfig{Port: 9092, ContainerServeURL: "http://10.0.0.5:19092/"},
-			"http://10.0.0.5:19092/llm",
-		},
-		{
-			"https kept",
-			config.ServiceConfig{Port: 9092, ContainerServeURL: "https://serve.example:9092"},
-			"https://serve.example:9092/llm",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, containerLLMBaseURL(&tt.cfg))
-		})
-	}
 }
 
 // recordingRevoker records every run key it is asked to revoke. Read revoked

@@ -19,6 +19,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/metrics"
 	"github.com/mhersson/contextmatrix-agent/internal/secrets"
 	"github.com/mhersson/contextmatrix-backendkit/frames"
+	"github.com/mhersson/contextmatrix-backendkit/llmproxy"
 	"github.com/mhersson/contextmatrix-backendkit/logbridge"
 	"github.com/mhersson/contextmatrix-backendkit/webhookcore"
 	protocol "github.com/mhersson/contextmatrix-protocol"
@@ -50,9 +51,6 @@ const (
 	// kills concurrently, so the run count does not stretch it.
 	killTimeout = 10 * time.Second
 )
-
-// LLMProxyPrefix is where Routes mounts the LLM proxy.
-const LLMProxyPrefix = "/llm"
 
 // StatusReporter reports a task's worker-status transition back to
 // ContextMatrix. *callback.Client satisfies it; tests supply a fake.
@@ -403,7 +401,7 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /readyz", s.RecordMetrics(s.HandleReadyz))
 
 	if s.llmProxy != nil {
-		mux.HandleFunc(LLMProxyPrefix+"/", s.RecordMetrics(s.llmProxy.ServeHTTP))
+		mux.HandleFunc(llmproxy.DefaultPrefix+"/", s.RecordMetrics(s.llmProxy.ServeHTTP))
 	}
 
 	return mux
