@@ -505,6 +505,31 @@ func TestPlanPhaseRepairLoop(t *testing.T) {
 	assert.Equal(t, "Only", ops.createCardArgs[0].title)
 }
 
+// TestPlanPhaseRepairsAPlanCutBelowTheHardStop: a plan the provider cut at its
+// output limit, well inside the window, is no context park. It fails the parse
+// like any broken plan, and the repair turn recovers it.
+func TestPlanPhaseRepairsAPlanCutBelowTheHardStop(t *testing.T) {
+	ops := &fakeOps{
+		taskContext: cmclient.TaskContext{Title: "Parent", Description: "body"},
+		createdIDs:  []string{"SUB-1"},
+	}
+	cut := llm.Response{
+		Content:      `{"card_tier":"simple","subtasks":[{"title":"On`,
+		FinishReason: "length",
+		Usage:        llm.Usage{PromptTokens: 2000, Cost: 0.02},
+	}
+	valid := `{"card_tier":"simple","subtasks":[{"title":"Only","description":"d","depends_on":[],"tier":"simple"}]}`
+	llmFake := &planLLM{responses: []llm.Response{cut, stopResp(valid, 0.03)}}
+	d := planTestDeps(ops, llmFake)
+
+	o := newRun(t.Context(), d, ops.taskContext)
+	require.NoError(t, runPlan(context.Background(), o))
+
+	assert.Len(t, llmFake.tasks, 2, "the cut plan takes the repair turn")
+	require.Len(t, ops.createCardArgs, 1)
+	assert.Equal(t, "Only", ops.createCardArgs[0].title)
+}
+
 // TestPlanPhaseRepairsDuplicateSubtaskTitles: a plan whose subtask titles
 // collide takes the repair turn, and only the repaired plan's distinct
 // subtasks reach the board.

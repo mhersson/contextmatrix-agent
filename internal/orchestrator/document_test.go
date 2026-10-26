@@ -181,10 +181,13 @@ func TestDocumentBestEffortOnModelError(t *testing.T) {
 		assert.Empty(t, git.pushBranches, "no push after a context-limit model error")
 	})
 
-	t.Run("final reply cut at the token limit commits no docs", func(t *testing.T) {
+	t.Run("final reply cut at the hard stop commits no docs", func(t *testing.T) {
 		ops := &fakeOps{}
 		git := &fakeGit{committed: true}
-		resp := llm.Response{Content: "Wrote half the docs", FinishReason: "length", Usage: llm.Usage{Cost: 0.01}}
+
+		const tripAt = 111411 // int(0.85 * 131072)
+
+		resp := llm.Response{Content: "Wrote half the docs", FinishReason: "length", Usage: llm.Usage{PromptTokens: tripAt, Cost: 0.01}}
 		d := documentTestDeps(ops, git, &planLLM{responses: []llm.Response{resp}})
 
 		o := newDocumentRun(d, cmclient.TaskContext{Title: "T", Description: "body"}, 0)

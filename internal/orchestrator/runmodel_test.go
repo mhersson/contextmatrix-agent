@@ -175,47 +175,62 @@ func TestRunModelNormalizesContextLimit(t *testing.T) {
 	}
 }
 
-// TestRunModelParksTruncatedFinalReply pins that a final reply the provider cut
-// at its token limit parks like a context-window stop instead of completing the
-// phase on part of an answer, and that only the reply that ended the run counts.
-func TestRunModelParksTruncatedFinalReply(t *testing.T) {
+// TestRunModelParksACutFinalReplyAtTheHardStop pins that a final reply the
+// provider cut at its token limit parks like the context stop only when its
+// prompt reached the harness's hard stop, where such a run stopped before final
+// replies were let through. Below the stop the cut is the output cap: the run
+// completes and the caller handles the partial reply.
+func TestRunModelParksACutFinalReplyAtTheHardStop(t *testing.T) {
+	const window = 131072
+
+	threshold := 0.85
+
+	tripAt := int(threshold * float64(window)) // 111411
+
+	cut := func(promptTokens int) llm.Response {
+		return llm.Response{Content: "partial", FinishReason: "length", Usage: llm.Usage{PromptTokens: promptTokens, Cost: 0.01}}
+	}
+
 	tests := []struct {
-		name          string
-		responses     []llm.Response
-		wantTruncated bool
+		name       string
+		resp       llm.Response
+		compaction Compaction
+		wantPark   bool
 	}{
+		{name: "cut at the hard stop parks", resp: cut(tripAt), wantPark: true},
+		{name: "cut one token below the hard stop completes", resp: cut(tripAt - 1)},
 		{
-			name:          "final reply cut at the token limit parks",
-			responses:     []llm.Response{{Content: "partial", FinishReason: "length", Usage: llm.Usage{PromptTokens: 1000, Cost: 0.01}}},
-			wantTruncated: true,
+			// min(0.95*window, window-8192) = 122880 raises the stop above tripAt.
+			name:       "cut below a stop raised by compaction completes",
+			resp:       cut(tripAt),
+			compaction: Compaction{Enabled: true, Threshold: 0.95, KeepRecentTurns: 4},
 		},
 		{
-			name: "complete final reply after a cut empty reply completes",
-			responses: []llm.Response{
-				{FinishReason: "length", Usage: llm.Usage{PromptTokens: 1000}},
-				stopResp("complete answer", 0.01),
-			},
+			name:       "cut at a stop raised by compaction parks",
+			resp:       cut(window - 8192),
+			compaction: Compaction{Enabled: true, Threshold: 0.95, KeepRecentTurns: 4},
+			wantPark:   true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ops := &fakeOps{taskContext: cmclient.TaskContext{}}
-			d := planTestDeps(ops, &planLLM{responses: tt.responses})
+			d := planTestDeps(ops, &planLLM{responses: []llm.Response{tt.resp}})
+			d.Cfg.Compaction = tt.compaction
 			o := newRun(t.Context(), d, ops.taskContext)
 
 			res, _, err := o.runModel(context.Background(), d.ReadTools, "do the thing", "default/model")
 
-			if !tt.wantTruncated {
+			if !tt.wantPark {
 				require.NoError(t, err)
-				assert.Equal(t, "complete answer", res.Output)
+				assert.Equal(t, "done", res.Reason)
 
 				return
 			}
 
 			var cle *ContextLimitError
-			require.ErrorAs(t, err, &cle, "a truncated final reply must park")
-			assert.True(t, cle.Truncated)
+			require.ErrorAs(t, err, &cle, "a cut final reply at the hard stop must park")
 			assert.Equal(t, "default/model", cle.Model)
 			assert.InDelta(t, 0.01, res.TotalCostUSD, 1e-9, "the result still carries the spend")
 		})
