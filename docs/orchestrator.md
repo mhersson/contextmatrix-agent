@@ -369,14 +369,17 @@ context growth. By default there is no compactor: a reply that reaches the
 hard stop (85% of the window; with compaction on, the effective compaction
 threshold when that is higher) mid-run emits a `context_limit` event and
 returns incomplete - the orchestrator treats it as a failed subtask, never a
-silent truncation. A final reply (text with no tool calls) ends the run at any
+silent truncation. With compaction on, that holds only when compaction cannot
+shrink the history: a reply whose history it shrinks skips the stop, and the
+run carries on. A final reply (text with no tool calls) ends the run at any
 size, unless it reached the hard stop and the provider cut it at the token
 limit (`finish_reason` `length`): a phase run then returns incomplete the same
-way. A reply cut below the stop hit the output cap, not the window: a phase
-that expects JSON treats it as any unparseable reply (the planner and the
-review synthesis take their repair turn), and any other phase proceeds. Review
-specialists and mob seats keep a cut reply as their output. An opt-in
-in-window compactor exists behind `CMX_COMPACTION_ENABLED` (default off;
+way, though no `context_limit` event is emitted. A reply cut below the stop hit
+the output cap, not the window: a phase that expects JSON treats it as any
+unparseable reply (the planner and the review synthesis take their repair
+turn), and any other phase proceeds. Review specialists, mob seats and the mob
+moderator keep a cut reply as their output. An opt-in in-window compactor
+exists behind `CMX_COMPACTION_ENABLED` (default off;
 `CMX_COMPACTION_THRESHOLD` 0.85, `CMX_COMPACTION_KEEP_RECENT_TURNS` 6).
 
 Reasoning replay (`replay_reasoning`, on by default; `false` turns it off;
