@@ -100,8 +100,8 @@ func TestHarnessConfigCompactionGate(t *testing.T) {
 // TestRunModelNormalizesContextLimit pins the 0.85 threshold tightly: a reply
 // that would continue the run, at exactly int(0.85*window) prompt tokens, trips
 // context_limit (surfaced by runModel as an error so a phase never carries on
-// past its window), and one token below does NOT. A final reply ends the run at
-// any size, so it never trips. A boundary-precise pair catches a drifted
+// past its window), and one token below does NOT. A complete final reply ends
+// the run at any size, so it never trips. A boundary-precise pair catches a drifted
 // threshold constant - a loose "well over the limit" prompt would still pass
 // against e.g. 0.95.
 func TestRunModelNormalizesContextLimit(t *testing.T) {
@@ -177,9 +177,9 @@ func TestRunModelNormalizesContextLimit(t *testing.T) {
 
 // TestRunModelParksACutFinalReplyAtTheHardStop pins that a final reply the
 // provider cut at its token limit parks like the context stop only when its
-// prompt reached the harness's hard stop, where such a run stopped before final
-// replies were let through. Below the stop the cut is the output cap: the run
-// completes and the caller handles the partial reply.
+// prompt reached the harness's hard stop, and that only the reply that ended
+// the run counts. Below the stop the cut is the output cap: the run completes
+// and the caller handles the partial reply.
 func TestRunModelParksACutFinalReplyAtTheHardStop(t *testing.T) {
 	const window = 131072
 
@@ -191,32 +191,49 @@ func TestRunModelParksACutFinalReplyAtTheHardStop(t *testing.T) {
 		return llm.Response{Content: "partial", FinishReason: "length", Usage: llm.Usage{PromptTokens: promptTokens, Cost: 0.01}}
 	}
 
+	cutToolCall := llm.Response{
+		ToolCalls: []llm.ToolCall{{
+			ID:       "read-1",
+			Type:     "function",
+			Function: llm.FunctionCall{Name: "read", Arguments: `{"path":"no-such-file.txt"}`},
+		}},
+		FinishReason: "length",
+		Usage:        llm.Usage{PromptTokens: 1000},
+	}
+
 	tests := []struct {
 		name       string
-		resp       llm.Response
+		responses  []llm.Response
 		compaction Compaction
 		wantPark   bool
 	}{
-		{name: "cut at the hard stop parks", resp: cut(tripAt), wantPark: true},
-		{name: "cut one token below the hard stop completes", resp: cut(tripAt - 1)},
+		{name: "cut at the hard stop parks", responses: []llm.Response{cut(tripAt)}, wantPark: true},
+		{name: "cut one token below the hard stop completes", responses: []llm.Response{cut(tripAt - 1)}},
 		{
 			// min(0.95*window, window-8192) = 122880 raises the stop above tripAt.
 			name:       "cut below a stop raised by compaction completes",
-			resp:       cut(tripAt),
+			responses:  []llm.Response{cut(tripAt)},
 			compaction: Compaction{Enabled: true, Threshold: 0.95, KeepRecentTurns: 4},
 		},
 		{
 			name:       "cut at a stop raised by compaction parks",
-			resp:       cut(window - 8192),
+			responses:  []llm.Response{cut(window - 8192)},
 			compaction: Compaction{Enabled: true, Threshold: 0.95, KeepRecentTurns: 4},
 			wantPark:   true,
+		},
+		{
+			name: "an earlier cut reply does not park a complete final reply at the stop",
+			responses: []llm.Response{
+				cutToolCall,
+				{Content: "complete answer", FinishReason: "stop", Usage: llm.Usage{PromptTokens: tripAt, Cost: 0.01}},
+			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ops := &fakeOps{taskContext: cmclient.TaskContext{}}
-			d := planTestDeps(ops, &planLLM{responses: []llm.Response{tt.resp}})
+			d := planTestDeps(ops, &planLLM{responses: tt.responses})
 			d.Cfg.Compaction = tt.compaction
 			o := newRun(t.Context(), d, ops.taskContext)
 
