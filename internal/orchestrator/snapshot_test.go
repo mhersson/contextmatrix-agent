@@ -29,7 +29,7 @@ func TestRepoSnapshotGreenfield(t *testing.T) {
 	root := t.TempDir()
 	initGitRepo(t, root)
 
-	s := repoSnapshot(root)
+	s := repoSnapshot(t.Context(), root)
 	assert.Contains(t, s, "effectively EMPTY")
 	assert.Contains(t, s, "README.md")
 	assert.Contains(t, s, "greenfield")
@@ -46,11 +46,11 @@ func TestRepoSnapshotCapsFileList(t *testing.T) {
 
 	gitAddAll(t, root)
 
-	s := repoSnapshot(root)
+	s := repoSnapshot(t.Context(), root)
 	assert.Contains(t, s, "and 50 more")
 	assert.LessOrEqual(t, strings.Count(s, "\n"), 270)
 }
 
 func TestRepoSnapshotNoGit(t *testing.T) {
-	assert.Empty(t, repoSnapshot(t.TempDir()))
+	assert.Empty(t, repoSnapshot(t.Context(), t.TempDir()))
 }

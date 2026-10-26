@@ -121,12 +121,12 @@ out-of-repo write target must genuinely point outside the repo. Report each
 claim in your findings as VERIFIED or REFUTED with one line of evidence.`
 
 // unreachableVerdictRule is the decision-rule bullet that exempts an
-// unreachable acceptance criterion the specialists VERIFIED from blocking the
+// unreachable acceptance criterion the reviewers VERIFIED from blocking the
 // verdict, while a REFUTED one stays an ordinary unmet criterion, and notes
 // that "## Split" scope is out of bounds too. Shared by synthesisPrompt and
 // reviewSynthesisPrompt so the two verdict contracts cannot drift.
 const unreachableVerdictRule = `- Unreachable acceptance criteria: when the card carries an "## Unreachable
-  Criteria" section, exclude entries the specialists VERIFIED from the
+  Criteria" section, exclude entries the reviewers VERIFIED from the
   approve/revise decision - do not fail the work for not meeting them; they
   remain visible to the human. Treat REFUTED entries as ordinary unmet
   criteria. Scope listed under a "## Split" section was moved to other cards
@@ -146,7 +146,7 @@ severity.`
 // defects in the delivered work; applied to unevidenced observations about
 // the fix it just requested, it is a loop with no exit. Shared by
 // synthesisPrompt and reviewSynthesisPrompt so the two cannot drift.
-const fixScopedSeverityRule = `- Code introduced by the PREVIOUS ROUND'S FIX (seats flag such findings): an
+const fixScopedSeverityRule = `- Code introduced by the PREVIOUS ROUND'S FIX (reviewers flag such findings): an
   Important or Critical label there requires concrete evidence of real impact -
   a demonstrated correctness bug, a real vulnerability, a broken or vacuous
   test, or a missed acceptance criterion. Without that evidence a
@@ -156,16 +156,15 @@ const fixScopedSeverityRule = `- Code introduced by the PREVIOUS ROUND'S FIX (se
 // basisVocabularyRule is the closed basis vocabulary every finding carries:
 // what the finding blocks on. The first five are blocking bases; hardening and
 // polish are advisory and never block (the code-side capAdvisorySeverity gate
-// demotes their Critical/Important labels to minor). Shared by
-// synthesisPrompt and reviewSynthesisPrompt so both verdict paths carry the
-// same enumerated rule.
+// demotes their Critical/Important labels to minor). Shared through
+// verdictDecisionRule so both verdict paths carry the same enumerated rule.
 const basisVocabularyRule = `Basis - every finding states what it blocks on, one of:
 - "criterion" - the change fails a stated acceptance criterion; quote the criterion in issue.
 - "defect" - a demonstrated correctness bug in delivered code; give the input or state and the wrong outcome.
 - "test" - a broken or vacuous test.
 - "vulnerability" - exploitable by a party the project's documented trust model does not trust; name that party and the path. Input from a caller the trust model already lets write the same data is "hardening", not "vulnerability".
-- "unscoped" - the diff added something the task did not ask for; the fix is to remove it.
-- "hardening" - validation, limits, headers, defensive checks or stricter tests the task did not ask for.
+- "unscoped" - the diff added a feature or behaviour the task did not ask for; the fix is to remove it.
+- "hardening" - validation, limits, headers, defensive checks or stricter tests the task did not ask for. Unrequested hardening is always this basis, never "unscoped", whether the diff added it or a reviewer asks for it.
 - "polish" - style, naming, comment or doc wording that does not change meaning.
 Criterion, defect, test, vulnerability, and unscoped block; hardening and polish
 are advisory and never block - cap them at Minor severity.`
@@ -182,37 +181,11 @@ const convergenceRule = `- Convergence: when every finding under PRIOR FINDINGS 
   resolves everything it was asked to fix and surfaces only new polish has
   converged - do not send it around again.`
 
-// planPrompt is the read-only planner's instruction block. It is adapted from
-// the create-plan workflow skill's task-decomposition guidance: the same
-// rules for splitting work, dependency thinking, and right-sizing apply, but
-// the planner has NO card tools - it only reads code (read/grep/glob) and
-// emits a strict JSON plan. Card creation happens in code from the parsed JSON.
-//
-// The leading %s is the grounding block; the second %s is the repo-snapshot
-// block (bounded tracked-file list + README head; "" when not a git repo). The
-// trailing %s slots are filled by draftPlan: workspace root, an optional
-// read-only-roots block, the POC test-scope bullet (pocTestScope), card title,
-// card description, an optional diagnosis block (root-cause investigation for
-// bug-like cards), an optional design block (brainstormed design for creative
-// HITL cards), an optional resume block (existing subtasks), an optional
-// feedback block (HITL reviewer's requested changes on a re-draft), and an
-// optional repair block (the previous parse error). Empty optional blocks
-// collapse to nothing.
-const planPrompt = `%s%sYou are the planning agent for a software task. You have read-only
-tools (read, grep, glob, git) to inspect the codebase, plus record_finding to
-save durable notes as you go. You do NOT create or modify cards or files - you
-only read code and output a plan as JSON.
-
-Repo root: %s - paths are relative to it.
-
-%sFirst understand the task deeply, then decompose it. If a ROOT-CAUSE DIAGNOSIS
-is provided below, ground the plan in it - the subtasks must implement that fix
-approach. For feature work with no diagnosis, read the relevant code and settle
-on the simplest approach that solves the problem before decomposing.
-
-Decompose the task into subtasks following these rules:
-
-- Each subtask must be completable by a single agent in one focused session
+// decompositionRules is the subtask decomposition rule list, shared by
+// planPrompt and planSynthesisPrompt so the solo planner and the plan moderator
+// cut work by the same rules. Its one %s slot is the POC test-scope bullet
+// (pocTestScope).
+const decompositionRules = `- Each subtask must be completable by a single agent in one focused session
   (~2 hours of work or less).
 - Each subtask should touch at most 4-5 files. If it touches more, split it.
 - Subtasks must be independently verifiable - each one produces a testable
@@ -234,9 +207,6 @@ Decompose the task into subtasks following these rules:
   must declare the dependency. depends_on lists the indices of EARLIER
   subtasks in this array (a subtask may only depend on subtasks that appear
   before it). Index 0 is the first subtask.
-- Order subtasks so independent ones can run in parallel. Parallel-eligible
-  siblings (same dependency level) MUST touch disjoint files. If two subtasks
-  need the same file, merge them or sequence them via depends_on.
 - Write clear, specific titles - an agent reading only the title should
   understand the scope.
 - Each subtask description must specify concrete actions, the files touched
@@ -252,8 +222,7 @@ Decompose the task into subtasks following these rules:
   and never a new test for a branch or path the card does not name. When the
   card names a specific test or assertion to add, the subtask is exactly that.%s
 - Small batched items ("a few lines each", "batch them") become the fewest
-  subtasks that keep files disjoint - group by file - not one subtask per
-  bullet.
+  subtasks - group them by file - not one subtask per bullet.
 - Documentation: when the acceptance criteria name docs that must change
   (files under docs/, a README, specific claims), that is a deliverable -
   plan it into the subtask that changes the code it describes, on that
@@ -286,7 +255,39 @@ Decompose the task into subtasks following these rules:
   exist yet but is CREATED inside this repo by the work itself is NOT
   unreachable - the absence is the work. Emit each unreachable criterion as
   an unreachable_criteria entry quoting the criterion with a one-line
-  reason, and do not plan subtasks that attempt it.
+  reason, and do not plan subtasks that attempt it.`
+
+// planPrompt is the read-only planner's instruction block. It is adapted from
+// the create-plan workflow skill's task-decomposition guidance: the same
+// rules for splitting work, dependency thinking, and right-sizing apply, but
+// the planner has NO card tools - it only reads code with its read-only tools
+// and emits a strict JSON plan. Card creation happens in code from the parsed JSON.
+//
+// The leading %s is the grounding block; the second %s is the repo-snapshot
+// block (bounded tracked-file list + README head; "" when not a git repo). The
+// trailing %s slots are filled by draftPlan: workspace root, an optional
+// read-only-roots block, the POC test-scope bullet (pocTestScope), card title,
+// card description, an optional diagnosis block (root-cause investigation for
+// bug-like cards), an optional design block (brainstormed design for creative
+// HITL cards), an optional resume block (existing subtasks), an optional
+// feedback block (HITL reviewer's requested changes on a re-draft), and an
+// optional repair block (the previous parse error). Empty optional blocks
+// collapse to nothing.
+const planPrompt = `%s%sYou are the planning agent for a software task. You have read-only
+tools to inspect the codebase, plus record_finding to save durable notes as you
+go. You do NOT create or modify cards or files - you only read code and output
+a plan as JSON.
+
+Repo root: %s - paths are relative to it.
+
+%sFirst understand the task deeply, then decompose it. If a ROOT-CAUSE DIAGNOSIS
+is provided below, ground the plan in it - the subtasks must implement that fix
+approach. For feature work with no diagnosis, read the relevant code and settle
+on the simplest approach that solves the problem before decomposing.
+
+Decompose the task into subtasks following these rules:
+
+` + decompositionRules + `
 
 ` + plannerGroundingRule + `
 
@@ -333,10 +334,9 @@ unreachable_criteria when empty):
 // the plan. The trailing %s slots are filled by runDiagnose: workspace root, an
 // optional read-only-roots block, card title, body.
 const diagnosePrompt = `%sYou are a read-only debugging investigator for a task that looks like a bug.
-You have read-only tools (read, grep, glob, git) to inspect the codebase. Git is
-available read-only (status, diff, log, show, branch). You do NOT modify files or
-create cards. Find the ROOT CAUSE - a fix is planned
-separately, after you finish.
+You have read-only tools to inspect the codebase. You do NOT modify files or
+create cards. Find the ROOT CAUSE - a fix is planned separately, after you
+finish.
 
 Repo root: %s - paths are relative to it.
 
@@ -485,12 +485,11 @@ discrepancy in your finish message, and stop - a confirmed absence discharges a
 // command block (empty when none resolved), the POC test-scope paragraph
 // (pocTestScope), subtask title, subtask description, parent card title, parent
 // card body.
-const coderPrompt = `%s%sYou are the coding agent for one subtask of a larger task. You have the full
-write toolset (read, grep, glob, edit, write, bash) rooted at the workspace.
-Implement EXACTLY this subtask - nothing from sibling subtasks, nothing
-speculative. The parent card's description and acceptance criteria may cover
-work assigned to other subtasks - do only what YOUR subtask's description
-assigns, even when the parent lists more.
+const coderPrompt = `%s%sYou are the coding agent for one subtask of a larger task. Your write
+toolset is rooted at the workspace. Implement EXACTLY this subtask - nothing
+from sibling subtasks, nothing speculative. The parent card's description and
+acceptance criteria may cover work assigned to other subtasks - do only what
+YOUR subtask's description assigns, even when the parent lists more.
 
 ` + unreachableScopeNote + `
 
@@ -541,7 +540,7 @@ Description:
 // specialistPrompt is the read-only review specialist wrapper. It is adapted
 // from the review-task workflow skill's three-specialist design: the same review
 // lenses and severity discipline, but the specialist has NO card tools - it reads
-// code (read/grep/glob) and produces findings TEXT only. The orchestrator
+// code with its read-only tools and produces findings TEXT only. The orchestrator
 // (synthesis) decides approve-or-fix from the panel's findings. Commit status is
 // never a review concern.
 //
@@ -553,10 +552,10 @@ Description:
 // them when it gave one), and an optional fix-delta block (what the previous
 // round's COMMITTED fix changed, labeled as context rather than review scope).
 // Both optional blocks collapse to nothing when empty.
-const specialistPrompt = `%s%sYou are a code-review specialist. You have read-only tools (read, grep, glob, git)
-to inspect the codebase. Git is available read-only (status, diff, log, show,
-branch). You do NOT create or modify cards or files. Produce a findings report as TEXT - another agent synthesizes the
-review reports into a single verdict.
+const specialistPrompt = `%s%sYou are a code-review specialist. You have read-only tools to inspect the
+codebase. You do NOT create or modify cards or files. Produce a findings
+report as TEXT - another agent synthesizes the review reports into a single
+verdict.
 
 ` + unreachableVerifyInstruction + `
 
@@ -568,9 +567,9 @@ NOT a review concern - never flag uncommitted or untracked files.
 
 Judge the change against what the task requires (see PARENT CARD), not an idealized production service.
 Missing speculative abstractions, premature generalization, or hardening the task did not ask for
-(added timeouts, rate-limiting, caching, pluggable interfaces) are NOT defects. Genuine correctness
-bugs, real vulnerabilities (injection, secret exposure, path traversal), and broken or vacuous tests
-remain in scope.
+(timeouts, rate-limiting, caching, pluggable interfaces) are NOT defects - do not ask for them. Genuine
+correctness bugs, real vulnerabilities (injection, secret exposure, path traversal), and broken or
+vacuous tests remain in scope.
 
 Severity scale (use Nits sparingly - only pure polish):
 - Critical: broken or unsafe.
@@ -581,8 +580,8 @@ Severity scale (use Nits sparingly - only pure polish):
 
 State the basis for every concern: what it blocks on - a stated acceptance
 criterion it fails, a demonstrated correctness bug, a broken or vacuous test, a
-vulnerability exploitable by an untrusted party (name that party), unrequested
-hardening, or polish.
+vulnerability exploitable by an untrusted party (name that party), a feature or
+behaviour added outside the task, unrequested hardening, or polish.
 
 PARENT CARD
 Title: %s
@@ -654,20 +653,20 @@ Focus on:
 - Exploitable vulnerabilities, committed secrets included.
 - Work the card did not ask for.`
 
-// synthesisRules is the solo synthesizer's decision rule and finding
-// discipline, shared by synthesisPrompt and genericSynthesisPrompt so the two
-// cannot drift. Its one %s slot names the reviewer a finding may come from.
-const synthesisRules = `Decision rule:
-- A finding blocks the change (not approved) when, in your own judgement, it is
-  a genuine correctness bug, a real vulnerability, a broken or vacuous test, or
-  it makes the change fail the task's stated acceptance criteria - promote it
-  even if %s filed it as Minor. Return each blocker as a concrete fix.
+// verdictDecisionRule is the approve/revise decision rule and the rules every
+// finding is judged by, shared by synthesisRules (the solo and POC
+// synthesizers) and reviewSynthesisPrompt (the mob moderator) so the verdict
+// paths cannot drift. Its wording names no review path: a finding may come
+// from a specialist, the generic reviewer or a discussion seat.
+const verdictDecisionRule = `Decision rule:
+- A finding blocks the change (not approved) when, in your own judgement, it
+  has a blocking basis below: a missed acceptance criterion, a genuine
+  correctness bug, a broken or vacuous test, a real vulnerability, or a feature
+  or behaviour added outside the task's scope. Promote it even if the reviewer
+  who raised it filed it as Minor, and return each blocker as a concrete fix
+  citing a file in the change set.
 - Weigh a passing verify run and passing tests as evidence: a "this could break" or
   toolchain/version concern they contradict is Minor.
-- Also judge the change against the task: if it does NOT satisfy the acceptance criteria
-  (incomplete) → not approved. If it ADDED things outside the task's scope (new
-  abstractions, middleware, caching, hardening the task didn't ask for) → not
-  approved, and the fix is to remove them.
 - approved governs ONLY whether the change may merge: any blocker above forces
   approved:false.
 - Minor concerns and Nits never block - approved stays true - but they still go
@@ -677,7 +676,12 @@ const synthesisRules = `Decision rule:
 ` + basisVocabularyRule + `
 ` + fixScopedSeverityRule + `
 ` + convergenceRule + `
-` + unreachableVerdictRule + `
+` + unreachableVerdictRule
+
+// synthesisRules is the solo synthesizer's decision rule and finding
+// discipline, shared by synthesisPrompt and genericSynthesisPrompt so the two
+// cannot drift.
+const synthesisRules = verdictDecisionRule + `
 
 Be specific and actionable. Every fix must cite a file in the change set and
 give a concrete suggestion - no vague hand-waves. Commit status is never an
@@ -700,27 +704,26 @@ fix_tier is the difficulty of APPLYING these fixes; omit it when unsure.
 prior_findings_resolved is true only when every finding under PRIOR FINDINGS is
 genuinely resolved or explicitly withdrawn; false when any remains open, and
 false when there is no PRIOR FINDINGS block.
-fixes is independent of approved: it carries every finding a seat raised and did
-not withdraw, whatever its severity. An approved verdict with an empty fixes
-array asserts that nothing survived the critique round - never a default.
+fixes is independent of approved: it carries every finding a reviewer raised and
+did not withdraw, whatever its severity. An approved verdict with an empty fixes
+array asserts that no finding survived - never a default.
 `
 
 // synthesisPrompt is the orchestrator-model synthesis instruction. It reads the
 // three specialist findings and emits the structured verdict. The synthesizer
 // sets each finding's severity itself - a specialist's label and the number of
-// specialists raising it are inputs, not the verdict - and blocks only on a real
-// bug, a real vulnerability, a broken test, or a missed acceptance criterion;
-// unrequested hardening is Minor. approved governs merge eligibility only - it
-// never gates whether a finding is reported: fixes carries every finding that
-// survived the critique round, tagged with its own severity, regardless of
-// approved.
+// specialists raising it are inputs, not the verdict - and blocks only on a
+// blocking basis; unrequested hardening is advisory. approved governs merge
+// eligibility only - it never gates whether a finding is reported: fixes
+// carries every finding that survived synthesis, tagged with its own severity,
+// regardless of approved.
 //
-// The %s slots are filled by synthesisTask: grounding, the reviewer noun in
-// synthesisRules ("a specialist"), parent card title, parent card description,
-// an optional prior-findings block (the previous round's findings on delta
-// rounds, followed by the fix round's response to them when it gave one), the
-// concatenated specialist findings, and an optional repair block (the previous
-// parse error). Empty optional blocks collapse to nothing.
+// The %s slots are filled by synthesisTask: grounding, parent card title,
+// parent card description, an optional prior-findings block (the previous
+// round's findings on delta rounds, followed by the fix round's response to
+// them when it gave one), the concatenated specialist findings, and an
+// optional repair block (the previous parse error). Empty optional blocks
+// collapse to nothing.
 const synthesisPrompt = `%sYou are the review synthesizer. Three specialists (correctness, design,
 security) reviewed a change and produced the findings below, each with a
 suggested severity. Merge duplicates and decide a single verdict. Severity is
@@ -743,8 +746,7 @@ SPECIALIST FINDINGS
 
 // genericSynthesisPrompt is synthesisPrompt for a POC review: one generic
 // reviewer's findings judged against pocReviewBar under the same rules and
-// verdict contract. Its slots match synthesisPrompt's; the reviewer noun is
-// neutral.
+// verdict contract. Its slots match synthesisPrompt's.
 const genericSynthesisPrompt = `%sYou are the review synthesizer. One generic reviewer reviewed a change and
 produced the findings below, each with a suggested severity. Decide a single
 verdict. Severity is yours to set: weigh each finding's actual impact on the
@@ -765,19 +767,19 @@ REVIEWER FINDINGS
 %s
 ` + verdictContract
 
-// fixPrompt is the coder fix-run instruction for a review round that returned
-// findings. The coder runs with the FULL write toolset and addresses exactly the
-// listed findings - nothing speculative. The orchestrator commits the result as
-// a fixup and pushes; the coder does NOT run git.
+// fixPrompt is the coder fix-run instruction for findings from a review round
+// or a pr_gates gate. The coder runs with the FULL write toolset and addresses
+// exactly the listed findings - nothing speculative. The orchestrator commits
+// the result (see commitFix) and pushes; the coder does NOT run git.
 //
 // The trailing %s slots are filled by runFix: workspace root, the verify
 // instruction line, parent card title, parent card description, and the findings
 // list.
 const fixPrompt = `%s%sYou are the coding agent addressing review feedback on the current branch.
-You have the full write toolset (read, grep, glob, edit, write, bash) rooted at
-the workspace. Apply fixes for EXACTLY the findings below - apply only the literal
-fix, add no new abstractions, middleware, interfaces, or dependencies. If a finding
-demands new architecture, flag it, don't build it.
+Your write toolset is rooted at the workspace. Apply fixes for EXACTLY the
+findings below - apply only the literal fix, add no new abstractions,
+middleware, interfaces, or dependencies. If a finding demands new architecture,
+flag it, don't build it.
 One exception: if a finding's suggestion instructs a repo-wide sweep for an
 incorrect claim (a doc line, code comment, or error message), you MUST search the
 whole repo using the harness grep tool and fix every occurrence, not just the
@@ -789,7 +791,7 @@ Repo root: %s - bash commands already execute there; use paths relative to the
 repo root.
 
 Do NOT run git yourself (no commit, no push, no branch) - the orchestrator
-commits your changes as a fixup and pushes after you finish.
+commits and pushes your changes after you finish.
 
 ` + selfReviewBlock + `
 
@@ -828,15 +830,11 @@ REVIEW FINDINGS TO FIX
 //
 // The trailing %s slots are filled by the caller: workspace root, the verify
 // instruction line, parent card title, and the verify failure text.
-const verifyFixPrompt = `%s%sYou are the coding agent addressing review feedback on the current branch.
-You have the full write toolset (read, grep, glob, edit, write, bash) rooted at
-the workspace. Apply fixes for EXACTLY the findings below - apply only the literal
-fix, add no new abstractions, middleware, interfaces, or dependencies. If a finding
+const verifyFixPrompt = `%s%sYou are the coding agent fixing a failed verify run: the project's verify
+command failed on the card's work. Your write toolset is rooted at the
+workspace. Fix EXACTLY the failure below - apply only the literal fix, add no
+new abstractions, middleware, interfaces, or dependencies. If the failure
 demands new architecture, flag it, don't build it.
-One exception: if a finding's suggestion instructs a repo-wide sweep for an
-incorrect claim (a doc line, code comment, or error message), you MUST search the
-whole repo using the harness grep tool and fix every occurrence, not just the
-cited file.
 
 Repo root: %s - bash commands already execute there; use paths relative to the
 repo root.
@@ -852,8 +850,8 @@ commits and pushes your changes after you finish.
 
 ` + processTeardownNote + `
 
-When you have addressed the findings and the tests pass, call the finish tool
-with a short conventional-commit message summarizing the fixes, then make no
+When the failure is fixed and the verify command passes, call the finish tool
+with a short conventional-commit message summarizing the fix, then make no
 further tool calls.
 
 PARENT CARD (context)
@@ -876,9 +874,8 @@ VERIFY FAILURE TO FIX
 // The trailing %s slots are filled by writePRBody: parent card title, parent
 // card description, the plan overview (subtask titles), and the review outcome.
 const prBodyPrompt = `You are writing the pull request description for completed, reviewed work. You
-have read-only tools (read, grep, glob, git) to inspect the branch. Git is
-available read-only (status, diff, log, show, branch). Write the PR body
-as Markdown prose - do NOT modify files.
+have read-only tools to inspect the branch. Write the PR body as Markdown prose -
+do NOT modify files.
 
 Structure the body with these sections:
 - "## What" - a concise summary of what this change does.
@@ -916,8 +913,8 @@ Respond with ONLY the Markdown PR body - no surrounding prose, no code fences.
 // parent card title, the parent card description, the review summary, and the
 // numbered comment list.
 const copilotTriagePrompt = `%sYou are triaging an automated code review left by GitHub Copilot on the pull
-request for the task below. You have read-only tools (read, grep, glob, git) - open
-the cited files and check each comment against the actual code before judging it.
+request for the task below. You have read-only tools - open the cited files and
+check each comment against the actual code before judging it.
 
 A comment is VALID only when it names a genuine defect in this change: a
 correctness bug, a real vulnerability, a broken or vacuous test, or a failure to
@@ -970,10 +967,10 @@ reason is why you judged it valid or invalid.
 // title, parent card description, the plan overview (subtask titles), the branch
 // diff, and the run's verify context (advisory - not a guaranteed surface).
 const documentPrompt = `%s%sYou are the documentation agent for completed work that review will inspect
-next. You have the full write toolset (read, grep, glob, edit, write, bash)
-rooted at the workspace. Decide whether external documentation is needed for
-this change and, if so, write the minimum effective documentation. You write
-DOCUMENTATION ONLY - do not modify source code, tests, or configuration.
+next. Your write toolset is rooted at the workspace. Decide whether external
+documentation is needed for this change and, if so, write the minimum effective
+documentation. You write DOCUMENTATION ONLY - do not modify source code, tests,
+or configuration.
 
 Repo root: %s - bash commands already execute there; use paths relative to the
 repo root.
@@ -1058,9 +1055,9 @@ Respond with ONLY a JSON object, no prose:
 // runBrainstorm: card title, card
 // description, and the conversation-so-far block.
 const brainstormPrompt = `%sYou are a design facilitator turning a card's stated intent into a fully-formed
-design through dialogue with a human teammate. You have read-only tools (read, grep, glob, git) to explore the codebase. Git is
-available read-only (status, diff, log, show, branch). You do NOT write files -
-the agreed design is captured from your final message.
+design through dialogue with a human teammate. You have read-only tools to
+explore the codebase. You do NOT write files - the agreed design is captured
+from your final message.
 
 Process:
 - Understand the intent. Read the card and the files it references; explore the
@@ -1284,11 +1281,10 @@ working the same task. Your assigned lens: %s. Argue from this lens; do not
 restate points other seats already made.
 
 Rules:
-- You have read-only tools (read, grep, glob, git) on the repo. Verify NEW claims
-  you introduce against the code; do not re-verify facts already established
-  in the discussion. Batch independent lookups in one turn. Git is available
-  read-only (status, diff, log, show, branch). You never modify files, cards,
-  or git state.
+- You have read-only tools on the repo. Verify NEW claims you introduce
+  against the code; do not re-verify facts already established in the
+  discussion. Batch independent lookups in one turn. You never modify files,
+  cards, or git state.
 - When asked to propose (round 0), give your independent position.
 - In critique rounds: critique, defend, revise, or concede - say which,
   explicitly. Conceding to a better argument is good work, not failure.
@@ -1303,8 +1299,8 @@ Rules:
 // workspace, an optional read-only-roots block, title, description, diagnosis
 // block, design block, resume block.
 const planBriefing = `%s%sYou are discussing how to plan a software task. Repo root: %s - paths are
-relative to it. You have read-only tools (read, grep, glob) - ground your
-positions in the real code structure.
+relative to it. You have read-only tools - ground your positions in the real
+code structure.
 
 %sPropose how to decompose the task into subtasks: the overall approach, the
 split, ordering and dependencies, risks, and the complexity tier. Each
@@ -1325,9 +1321,10 @@ Description:
 %s%s%s`
 
 // planSynthesisPrompt is the moderator's plan-synthesis instruction: it
-// carries the SAME strict JSON contract as planPrompt and instructs the
-// moderator to keep unresolved dissent as explicit risk notes on the
-// affected subtasks. The engine appends the rendered transcript after it.
+// carries the SAME decomposition rules and strict JSON contract as planPrompt
+// and instructs the moderator to keep unresolved dissent as explicit risk
+// notes on the affected subtasks. The engine appends the rendered transcript
+// after it.
 // Slots: grounding, workspace, the POC test-scope bullet (pocTestScope), title,
 // description.
 const planSynthesisPrompt = `%sYou are the moderator of a planning discussion between software agents.
@@ -1340,34 +1337,13 @@ dissenting concern into the affected subtask descriptions as explicit risk
 notes ("Risk: ...") - never drop dissent silently.
 
 The plan must follow these rules:
-- Each subtask must be completable by a single agent in one focused session.
-- Each subtask includes its own tests; never emit separate "write tests"
-  subtasks.%s
-- depends_on lists the indices of EARLIER subtasks in the array only.
-- Each subtask description states concrete actions, the files touched
-  ("Files:" line), and acceptance criteria - no placeholders.
+` + decompositionRules + `
 - Assign an overall card_tier and a per-subtask tier: "simple", "moderate",
   "complex", or "critical". Work that changes the signature or contract of a
   widely-called function, method, or interface - anything that forces edits
   across many call sites, implementations, or test fakes - is "complex" at
   minimum, no matter how small the central diff is; price the work by the
   count of affected seams, not the line count of the core change.
-- If the card is really MULTIPLE INDEPENDENT deliverables - groups of
-  subtasks that are not slices of one deliverable - synthesize ONLY the
-  first deliverable and emit each extra deliverable as a followup_cards
-  entry: a title plus a SELF-CONTAINED description (inline everything its
-  future executor needs - it runs later in a fresh container holding only
-  this repo, without this card or this plan). Set depends_on_original true
-  only when the deliverable builds on this card's work; depends_on lists
-  indices of earlier followup entries. More than 4 followup entries parks
-  the card for a human to re-cut - if you count more than 4, the card
-  itself is mis-scoped; emit them anyway rather than cramming.
-- Check every acceptance criterion for reachability. A criterion is
-  UNREACHABLE when it requires READING an input that does not exist in
-  this repo or WRITING outside this repo - not when its artifact is simply
-  CREATED inside this repo by the work itself. Emit each unreachable
-  criterion as an unreachable_criteria entry quoting the criterion with a
-  one-line reason, and do not synthesize subtasks that attempt it.
 
 ` + plannerGroundingRule + `
 
@@ -1425,22 +1401,7 @@ yourself - how many seats raised it is an input, not the verdict. Findings a
 seat explicitly withdrew under rebuttal are resolved; findings that survived
 rebuttal are retained even without consensus.
 
-Decision rule:
-- A genuine correctness bug, a real vulnerability, a broken or vacuous test,
-  or a missed acceptance criterion blocks the change (not approved) - return
-  each blocker as a concrete fix citing a file in the change set.
-- Work added outside the task's scope means not approved, and the fix is to
-  remove it.
-- approved governs ONLY whether the change may merge: any blocker above forces
-  approved:false.
-- Minor concerns and Nits never block - approved stays true - but they still go
-  in fixes.
-- An approved verdict must not carry Critical or Important findings: if your
-  judgement says a finding is that severe, return approved:false.
-` + basisVocabularyRule + `
-` + fixScopedSeverityRule + `
-` + convergenceRule + `
-` + unreachableVerdictRule + `
+` + verdictDecisionRule + `
 
 ` + sweepRule + `
 
@@ -1536,9 +1497,8 @@ Subtask: %s
 Address each finding below; change nothing else. One exception: if a
 finding's suggestion instructs a repo-wide sweep for an incorrect claim (a doc
 line, code comment, or error message), you MUST search the whole repo using the
-harness grep tool and fix every occurrence, not just the cited file. Run the verify command if
-one is declared. When done, call the finish tool with a commit message
-describing the fixes.
+harness grep tool and fix every occurrence, not just the cited file. When done,
+call the finish tool with a commit message describing the fixes.
 
 If concrete evidence in the repository or environment contradicts a
 finding's premise (for example, the toolchain reports exactly the version

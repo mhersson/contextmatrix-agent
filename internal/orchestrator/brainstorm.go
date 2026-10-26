@@ -41,19 +41,6 @@ func extractDesign(output string) (string, bool) {
 	return text, true
 }
 
-// hasDesignSection reports whether body already carries a "## Design" heading, so
-// a card that arrives with a design (a prior brainstorm pass, or a
-// thoroughly-written description) skips the dialogue.
-func hasDesignSection(body string) bool {
-	for line := range strings.SplitSeq(body, "\n") {
-		if strings.TrimSpace(line) == "## Design" {
-			return true
-		}
-	}
-
-	return false
-}
-
 // maxBrainstormTurns bounds a dialogue that never converges on DESIGN_COMPLETE,
 // so a stuck conversation proceeds to planning instead of looping forever. The
 // budget ledger is the other bound.

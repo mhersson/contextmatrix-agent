@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/mhersson/contextmatrix-harness/llm"
+	"github.com/mhersson/contextmatrix-protocol/selection"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -21,8 +22,8 @@ func entry(id string, promptPerM, completionPerM float64, window int) llm.Catalo
 }
 
 // filteredByReason indexes a report's filtered-out entries by reason.
-func filteredByReason(rep SelectionReport) map[FilterReason][]string {
-	out := make(map[FilterReason][]string, len(rep.FilteredOut))
+func filteredByReason(rep SelectionReport) map[selection.FilterReason][]string {
+	out := make(map[selection.FilterReason][]string, len(rep.FilteredOut))
 	for _, e := range rep.FilteredOut {
 		out[e.Reason] = e.Models
 	}
@@ -80,7 +81,7 @@ func TestNewRegistryFromPartsNilRolePriorIsUnmeasured(t *testing.T) {
 	assert.Equal(t, "both/roles", got.Model, "only/coder is cheaper but carries no reviewer prior")
 	assert.True(t, got.HasPrior)
 	assert.InDelta(t, 0.9, got.Prior, 1e-9)
-	assert.Equal(t, []string{"only/coder"}, filteredByReason(rep)[FilterNoPrior])
+	assert.Equal(t, []string{"only/coder"}, filteredByReason(rep)[selection.FilterNoPrior])
 
 	in.Exclude = map[string]bool{"both/roles": true}
 	got = r.SelectByComplexity(in)
@@ -124,7 +125,7 @@ func TestNewRegistryFromPartsThreadsBlacklistFavoritesAndExclusions(t *testing.T
 	pick, rep := r.SelectByComplexityReport(SelectInput{Role: RoleCoder, Tier: TierModerate})
 	assert.Equal(t, "fav/model", pick.Model, "the favorite wins at its tier")
 	assert.Equal(t, SourceFavorite, pick.Source)
-	assert.Equal(t, []string{"cheap/blacklisted"}, filteredByReason(rep)[FilterBlacklisted])
+	assert.Equal(t, []string{"cheap/blacklisted"}, filteredByReason(rep)[selection.FilterBlacklisted])
 
 	// At complex the favorite is below the bar and value/model is excluded,
 	// so the walk lands on moderate, where the favorite applies again.
@@ -132,7 +133,7 @@ func TestNewRegistryFromPartsThreadsBlacklistFavoritesAndExclusions(t *testing.T
 	assert.Equal(t, "fav/model", pick.Model)
 	assert.Equal(t, TierModerate, pick.MetTier)
 	assert.Equal(t, TierModerate, rep.Rung)
-	assert.Equal(t, []string{"value/model"}, filteredByReason(rep)[FilterExcluded], "the per-call exclude set reaches the shared selector")
+	assert.Equal(t, []string{"value/model"}, filteredByReason(rep)[selection.FilterExcluded], "the per-call exclude set reaches the shared selector")
 }
 
 func TestNewRegistryFromPartsVendorFallsBackToTheSlugPrefix(t *testing.T) {

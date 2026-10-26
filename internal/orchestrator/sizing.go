@@ -143,7 +143,7 @@ func turnBudget(base, step int) int {
 // then says "finish now" far too late. Holding the reserve at a constant SHARE
 // of the window keeps the nudge where it was designed to land. Clamped strictly
 // below the window, because a reserve at or above the cap is a nudge that never
-// fires. An unwidened window keeps exactly today's constant.
+// fires. An unwidened window uses the constant.
 func wrapUpFor(base, eff int) int {
 	if base <= 0 || eff <= base {
 		return wrapUpTurns

@@ -141,7 +141,7 @@ type fix struct {
 // an accurate line of their own before returning it, but the cleanup fix pass
 // renders Error() straight onto the card, so a fixed string would state a
 // cause that is false there. The zero value keeps the attempts-cap wording,
-// which is what a bare construction has always meant.
+// which is what a bare construction means.
 type ReviewParkedError struct {
 	Reason string
 }
@@ -166,6 +166,12 @@ const (
 	reviewParkedFixExhausted = "no fix model other than the ones that already failed"
 	reviewParkedSynthesisCap = "the synthesis verdict could not be produced within its turn cap"
 )
+
+// reviewCapParkHeading is the card-body record that the review loop ended at
+// its attempts cap or the board's server cap. CM launches every run from todo,
+// so the card's state cannot tell a finished loop from an interrupted one;
+// this record does.
+const reviewCapParkHeading = "Review Parked"
 
 // reviewCoderOnlyFallbackLog is the card line written when the panel reviews
 // with a coder's own model because no other model is selectable.
@@ -211,20 +217,22 @@ func runReview(ctx context.Context, o *run) error {
 		}
 	}
 
-	// Resolve the effective attempts cap. When the persisted counter already
-	// meets or exceeds the cap AND the card is entering review from a non-review
-	// state (e.g., moved back to todo), the card was parked on a prior run with
-	// the counter left at the cap. Reset it to zero so round numbering in the
-	// fresh run restarts at 1 - a local reset only; the server's review_attempts
-	// counter is monotonic and unaffected. Cards still in review (crash-resume
-	// from an interrupted authoritative pass) keep their counter so round
-	// numbering continues from where it left off.
+	// A counter at the cap restarts round numbering at 1 only when the previous
+	// loop finished: it parked at a cap and recorded so, or this is a fresh run
+	// of a reopened card. Any other resume is an interrupted loop and keeps its
+	// counter, so it resumes at the same round. The reset is local; the
+	// server's review_attempts counter is monotonic.
 	attemptsCap := cfg.ReviewAttemptsCap
 	if attemptsCap <= 0 {
 		attemptsCap = config.DefaultReviewAttemptsCap
 	}
 
-	if o.tc.ReviewAttempts >= attemptsCap && o.tc.State != "review" {
+	capParked := extractSection(o.body, reviewCapParkHeading) != ""
+	if capParked {
+		o.clearSection(ctx, reviewCapParkHeading)
+	}
+
+	if o.tc.ReviewAttempts >= attemptsCap && (capParked || o.tc.Phase == "") {
 		o.tc.ReviewAttempts = 0
 	}
 
@@ -910,9 +918,9 @@ func (o *run) discardCleanupFixup(ctx context.Context, pre, findings, reason str
 // that made it, so the remote is taken back with a lease against it.
 //
 // It reports whether the fixup is actually gone. Every failure path leaves the
-// branch exactly as it found it and the caller falls back to today's behavior -
-// the round charged "left the verify red", with the verify tail still the next
-// fix's mandate, which is correct precisely because the failure is still there.
+// branch exactly as it found it and the caller falls back to charging the round
+// "left the verify red", with the verify tail still the next fix's mandate,
+// which is correct precisely because the failure is still there.
 //
 // fixRound is the round whose fix pass is being discarded - the round BEHIND
 // the red gate that detected it, not the one detecting it. mandate is what that
@@ -1098,8 +1106,7 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 	// loop's arm discards, on the route that actually parks. Discarding it here
 	// is what puts the mergeable commit under the operator's park instead of one
 	// revision behind it, with nothing saying the green commit exists. Every git
-	// failure inside leaves the branch alone and parks on the red tree exactly as
-	// before.
+	// failure inside leaves the branch alone and parks on the red tree.
 	parkFindings := findings2
 	discarded := false
 
@@ -1139,7 +1146,7 @@ func (o *run) authoritativeReview(ctx context.Context, plan verifyPlan, round in
 
 	d.logCard(ctx, "%s", reviewParkNote(head, parkFindings))
 
-	return &ReviewParkedError{Reason: reviewParkedAttemptsCap}
+	return o.capPark(ctx, reviewParkedAttemptsCap)
 }
 
 // recordRoundFindings sets lastFindings (this round's raw output, always) and
@@ -1165,7 +1172,7 @@ func (o *run) recordRoundFindings(findings string) {
 // its own section, so it gets no separate slot to repeat it.
 func (o *run) priorContext(authoritative bool) string {
 	if authoritative {
-		return priorFindingsBlock(recentReviewFindingsHistory(o.body))
+		return priorFindingsBlock(o.authoritativeHistory())
 	}
 
 	findings, response := o.lastPanelFindings, o.lastPanelFixResponse
@@ -1174,6 +1181,28 @@ func (o *run) priorContext(authoritative bool) string {
 	}
 
 	return priorFindingsBlock(findings) + fixResponseBlock(response)
+}
+
+// authoritativeHistory is the recorded review history the authoritative pass
+// reads. A fresh run's body may still hold a finished run's rounds, kept as
+// history, so it reads only the rounds this run recorded.
+func (o *run) authoritativeHistory() string {
+	if o.tc.Phase != "" {
+		return recentReviewFindingsHistory(o.body)
+	}
+
+	rounds := slices.Sorted(maps.Keys(o.reviewRounds))
+	rounds = rounds[max(0, len(rounds)-reviewHistoryWindow):]
+
+	sections := make([]string, 0, len(rounds))
+
+	for _, r := range rounds {
+		if sec := extractSection(o.body, reviewRoundHeading(r)); sec != "" {
+			sections = append(sections, sec)
+		}
+	}
+
+	return strings.Join(sections, "\n\n")
 }
 
 // incrementReviewAttempt calls IncrementReviewAttempts and treats
@@ -1191,10 +1220,20 @@ func (o *run) incrementReviewAttempt(ctx context.Context, findings string) (int,
 	if errors.Is(err, cmclient.ErrReviewAttemptsCapped) {
 		o.d.logCard(ctx, "%s", reviewParkNote("review parked at server cap - outstanding findings:\n", findings))
 
-		return 0, &ReviewParkedError{Reason: reviewParkedServerCap}
+		return 0, o.capPark(ctx, reviewParkedServerCap)
 	}
 
 	return 0, fmt.Errorf("increment review attempts: %w", err)
+}
+
+// capPark records on the card that the review loop ended at a cap, so the next
+// run restarts round numbering instead of resuming, and returns the park.
+func (o *run) capPark(ctx context.Context, reason string) error {
+	park := &ReviewParkedError{Reason: reason}
+
+	o.recordSection(ctx, reviewCapParkHeading, "## "+reviewCapParkHeading+"\n\n"+park.Error())
+
+	return park
 }
 
 // reviewRound runs one review pass and returns the outstanding findings text,
@@ -1437,6 +1476,18 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 		o.spendAndReport(ctx, o.ledger, cfg.CardID, "review: report specialist usage failed",
 			res.Result, specs[i].Model, "main", 0, "role", res.Role)
 
+		// The seat keeps its truncated section this round; the blacklist and
+		// exclusion keep its model off later panels and the decision model. A
+		// pin seats its model whatever the exclusion set holds, so a model
+		// already excluded is not recovered again. The cap is advisory here: no
+		// seat re-runs, and the exclusion holds either way.
+		if res.Err == nil && res.Result.Reason == harness.ReasonIncapable && !o.excludedModels()[specs[i].Model] {
+			if rerr := o.recoverIncapable(ctx, incapableError(specs[i].Model, res.Result)); rerr != nil {
+				slog.Warn("review: specialist model incapable and re-selection cap exhausted",
+					"card_id", cfg.CardID, "error", rerr)
+			}
+		}
+
 		b.WriteString(o.specialistSection(ctx, res))
 	}
 
@@ -1671,14 +1722,7 @@ func (o *run) synthesize(ctx context.Context, findings string, round int, author
 	d := o.d
 	cfg := d.Cfg
 
-	pick, rep := resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, cfg.CardID,
-		o.tc.ModelOrchestrator, cfg.PayloadModel, cfg.DefaultModel, o.excludedModels())
-
-	if pick.OK {
-		o.noteShortfall(ctx, "review synthesis", "", pick, rep)
-	}
-
-	model := pick.Model
+	model := o.synthesisModel(ctx)
 
 	var (
 		v       verdict
@@ -1691,6 +1735,9 @@ func (o *run) synthesize(ctx context.Context, findings string, round int, author
 		// park with the specialist findings preserved, the same as a second cap,
 		// not fail the run.
 		wasCapped bool
+		// reselected is whether an incapable model has already been replaced:
+		// the synthesis retries on a re-selected model once.
+		reselected bool
 	)
 
 	for attempt := range 2 {
@@ -1709,9 +1756,26 @@ func (o *run) synthesize(ctx context.Context, findings string, round int, author
 
 		task := o.synthesisTask(authoritative, findings, repair)
 
-		res, dur, err := o.runModelSynthesis(ctx, d.ReadTools, task, model)
+		res, err := o.synthesisRun(ctx, task, model)
 
-		o.spendAndReport(ctx, o.ledger, cfg.CardID, "review: report synthesis usage failed", res, model, "main", dur)
+		// The incapable model ran no tools, so the same attempt reruns on the
+		// re-selected model, once.
+		if ie, ok := errors.AsType[*IncapableError](err); ok && !reselected {
+			reselected = true
+
+			if rerr := o.recoverIncapable(ctx, ie); rerr != nil {
+				return verdict{}, fmt.Errorf("synthesis run: %w", rerr)
+			}
+
+			if next := o.synthesisModel(ctx); next != model {
+				if lerr := o.ledger.Check(); lerr != nil {
+					return verdict{}, lerr
+				}
+
+				model = next
+				res, err = o.synthesisRun(ctx, task, model)
+			}
+		}
 
 		var mte *MaxTurnsError
 
@@ -1753,6 +1817,30 @@ func (o *run) synthesize(ctx context.Context, findings string, round int, author
 	return verdict{}, fmt.Errorf("verdict parse failed after repair: %w", lastErr)
 }
 
+// synthesisModel resolves the decision model synthesis runs on, skipping the
+// models excluded this run.
+func (o *run) synthesisModel(ctx context.Context) string {
+	d := o.d
+
+	pick, rep := resolveDecisionModel(ctx, d.Registry, d.Emit, d.Ops, d.Cfg.CardID,
+		o.tc.ModelOrchestrator, d.Cfg.PayloadModel, d.Cfg.DefaultModel, o.excludedModels())
+
+	if pick.OK {
+		o.noteShortfall(ctx, "review synthesis", "", pick, rep)
+	}
+
+	return pick.Model
+}
+
+// synthesisRun runs one synthesis call on model and accounts for its spend.
+func (o *run) synthesisRun(ctx context.Context, task, model string) (harness.Result, error) {
+	res, dur, err := o.runModelSynthesis(ctx, o.d.ReadTools, task, model)
+
+	o.spendAndReport(ctx, o.ledger, o.d.Cfg.CardID, "review: report synthesis usage failed", res, model, "main", dur)
+
+	return res, err
+}
+
 // synthesisTask renders this round's synthesis prompt: the specialist variant,
 // or the single-reviewer one on a POC review. Two literal calls keep vet's
 // printf check on both templates.
@@ -1760,10 +1848,10 @@ func (o *run) synthesisTask(authoritative bool, findings, repair string) string 
 	prior := o.priorContext(authoritative)
 
 	if o.pocReview() {
-		return fmt.Sprintf(genericSynthesisPrompt, o.grounding, "the reviewer", o.tc.Title, o.taskDescription, prior, findings, repair)
+		return fmt.Sprintf(genericSynthesisPrompt, o.grounding, o.tc.Title, o.taskDescription, prior, findings, repair)
 	}
 
-	return fmt.Sprintf(synthesisPrompt, o.grounding, "a specialist", o.tc.Title, o.taskDescription, prior, findings, repair)
+	return fmt.Sprintf(synthesisPrompt, o.grounding, o.tc.Title, o.taskDescription, prior, findings, repair)
 }
 
 // parkSynthesisCap preserves the round's specialist findings on the card body -
@@ -1817,9 +1905,9 @@ func (o *run) fixResponseText(args json.RawMessage) string {
 // re-selected for the SAME round; the cap (shared with the coder path via
 // o.reselects) parks the run when exhausted. A non-incapable run error returns
 // immediately. It returns the model that ran and, from a run that finished, its
-// finish message as fixResponseText renders it; the fixup targets files parsed
-// from the findings, not the model output.
-func (o *run) runFixModel(ctx context.Context, prompt string, req fixRequest) (string, string, error) {
+// finish call's arguments; the fixup targets files parsed from the findings,
+// not the model output.
+func (o *run) runFixModel(ctx context.Context, prompt string, req fixRequest) (string, json.RawMessage, error) {
 	d := o.d
 	cfg := d.Cfg
 	fs := o.fixSizing(req)
@@ -1835,7 +1923,7 @@ func (o *run) runFixModel(ctx context.Context, prompt string, req fixRequest) (s
 	for attempt := 0; attempt <= reselectCap; attempt++ {
 		fp, rerr := o.resolveFixModel(ctx, req)
 		if rerr != nil {
-			return "", "", rerr
+			return "", nil, rerr
 		}
 
 		p := fp.Pick
@@ -1895,7 +1983,7 @@ func (o *run) runFixModel(ctx context.Context, prompt string, req fixRequest) (s
 
 		if ie, ok := errors.AsType[*IncapableError](err); ok {
 			if rerr := o.recoverIncapable(ctx, ie); rerr != nil {
-				return "", "", rerr
+				return "", nil, rerr
 			}
 
 			continue
@@ -1905,27 +1993,26 @@ func (o *run) runFixModel(ctx context.Context, prompt string, req fixRequest) (s
 			// The slug rides out with the error: the caller attributes the round
 			// to the model that ran it, and a failed round that reported no model
 			// leaves the exclusion set empty forever.
-			return model, "", fmt.Errorf("fix run: %w", err)
+			return model, nil, fmt.Errorf("fix run: %w", err)
 		}
 
-		return model, o.fixResponseText(res.CompletionArgs), nil
+		return model, res.CompletionArgs, nil
 	}
 
 	// Unreachable: recoverIncapable errors at the cap before the loop exhausts.
-	return "", "", fmt.Errorf("review fix (card=%s): re-selection loop exhausted", o.d.Cfg.CardID)
+	return "", nil, fmt.Errorf("review fix (card=%s): re-selection loop exhausted", o.d.Cfg.CardID)
 }
 
 // runFix runs one coder fix pass against the outstanding findings, lands the
-// changes as a fixup onto the commit that last touched the fixed files (HEAD
-// fallback), and pushes. Budget is checked before the model call. It reports
-// whether the fix landed a commit - a round that landed nothing is a failed
-// round to the review loop - and returns a turn cap ALONGSIDE that verdict, so
-// the caller learns the round was truncated without the round's edits being
-// thrown away. It also returns the fixer's response (see runFixModel) from a
-// round that got as far as its commit, whether or not anything landed. After a
-// failed round it parks instead of running when no fix model other than the
-// ones that failed is available; a request that says NoEscalate is exempt from
-// that park.
+// changes (see commitFix), and pushes. Budget is checked before the model
+// call. It reports whether the fix landed a commit - a round that landed
+// nothing is a failed round to the review loop - and returns a turn cap
+// ALONGSIDE that verdict, so the caller learns the round was truncated without
+// the round's edits being thrown away. It also returns the fixer's finish
+// message as fixResponseText renders it, from a round that got as far as its
+// commit, whether or not anything landed. After a failed round it parks
+// instead of running when no fix model other than the ones that failed is
+// available; a request that says NoEscalate is exempt from that park.
 func (o *run) runFix(ctx context.Context, req fixRequest) (bool, string, error) {
 	d := o.d
 	cfg := d.Cfg
@@ -1964,7 +2051,8 @@ func (o *run) runFix(ctx context.Context, req fixRequest) (bool, string, error) 
 			fixVerifyLine(o.resolvedVerifyPlan()), o.tc.Title, o.taskDescription, findings)
 	}
 
-	model, response, ferr := o.runFixModel(ctx, prompt, req)
+	model, args, ferr := o.runFixModel(ctx, prompt, req)
+	response := o.fixResponseText(args)
 
 	// A cap is not a reason to throw the round's edits away. The model ran out of
 	// room, but what it wrote is the only evidence the round produced, and
@@ -1987,17 +2075,9 @@ func (o *run) runFix(ctx context.Context, req fixRequest) (bool, string, error) 
 		o.lastFixModel = model
 	}
 
-	// Target the commit that last touched the fixed files so the fixup autosquashes
-	// onto the right change; HEAD is the fallback when the path lookup yields
-	// nothing (untracked files, or no path match).
-	target, lerr := d.Git.LastCommitTouching(ctx, fixFiles(findings))
-	if lerr != nil || target == "" {
-		target = "HEAD"
-	}
-
-	committed, err := d.Git.CommitFixup(ctx, target)
+	committed, err := o.commitFix(ctx, req, args)
 	if err != nil {
-		return false, "", fmt.Errorf("commit review fixup: %w", err)
+		return false, "", err
 	}
 
 	if !committed {
@@ -2013,10 +2093,45 @@ func (o *run) runFix(ctx context.Context, req fixRequest) (bool, string, error) 
 	}
 
 	if err := d.Git.Push(ctx, cfg.Branch); err != nil {
-		return false, "", fmt.Errorf("push review fixup: %w", err)
+		return false, "", fmt.Errorf("push fix: %w", err)
 	}
 
 	return true, response, ferr
+}
+
+// commitFix lands a fix round's changes. A review round's fix is a fixup onto
+// the commit that last touched the fixed files (HEAD when the lookup yields
+// nothing), for integrate to autosquash. A pr_gates round runs after that
+// autosquash and its PR merges with a merge commit, so it commits normally,
+// with the fixer's finish message or one naming the gate.
+func (o *run) commitFix(ctx context.Context, req fixRequest, args json.RawMessage) (bool, error) {
+	d := o.d
+
+	if req.Gate != "" {
+		msg := finishCommitMessage(args)
+		if msg == "" {
+			msg = fmt.Sprintf("fix: address %s findings", req.Gate)
+		}
+
+		committed, err := d.Git.CommitWithMessage(ctx, msg)
+		if err != nil {
+			return false, fmt.Errorf("commit %s fix: %w", req.Gate, err)
+		}
+
+		return committed, nil
+	}
+
+	target, lerr := d.Git.LastCommitTouching(ctx, fixFiles(req.Findings))
+	if lerr != nil || target == "" {
+		target = "HEAD"
+	}
+
+	committed, err := d.Git.CommitFixup(ctx, target)
+	if err != nil {
+		return false, fmt.Errorf("commit review fixup: %w", err)
+	}
+
+	return committed, nil
 }
 
 // markFixFailed records that the most recent fix round failed for the given
@@ -2162,6 +2277,9 @@ type fixRequest struct {
 	// at the un-escalated sizing on a card that has already been approved, and
 	// must still run on a card whose earlier rounds failed.
 	NoEscalate bool
+	// Gate names the pr_gates gate a round fixes for ("CI", "Copilot review");
+	// empty on every other round. See commitFix.
+	Gate string
 }
 
 // fixBarBase is the bar this round starts from, before any correction. The
@@ -2343,7 +2461,7 @@ func (o *run) capAdvisorySeverity(ctx context.Context, v *verdict) {
 // Called at the single choke point both verdict paths return through
 // (reviewRound, covering the solo fan-out and the mob discussion), and only
 // mutates the verdict when the contradiction exists: approval carrying only
-// minor and/or nit fixes keeps today's behavior - minor earns the post-approval
+// minor and/or nit fixes stays approved - minor earns the post-approval
 // cleanup fix pass (worthCleanupPass), nit-only stays report-only.
 func (o *run) demoteContradictoryApproval(ctx context.Context, v *verdict) {
 	if !v.Approved {
@@ -2652,12 +2770,12 @@ func tierFromString(tier string) registry.Tier {
 
 // reviewSubagentTools is what the specialist panel gets on top of the
 // workspace-confined read-only set harness.SpawnSubagents registers for it: the
-// optional Skill tool, plus read, grep and glob widened to the operator's
+// optional skill tool, plus read, grep and glob widened to the operator's
 // declared read-only roots. SpawnSubagents builds its child registry as
 // tools.NewRegistry(append(tools.ReadOnlyTools(root), extras...)...), and
 // NewRegistry keeps the LAST registration for a duplicate name, so the widened
 // three replace the confined ones without a harness change. With no roots
-// declared the panel gets exactly what it got before. cardID must match the
+// declared the panel gets the skill tool alone. cardID must match the
 // identity the worker's own construction sites log with (Config.CardID) -
 // rrLog's dedup key is (cardID, workspace, outcome), so a mismatched cardID
 // (e.g. "") would never collapse with the run's earlier worker-path line for
@@ -2682,7 +2800,7 @@ func reviewSubagentTools(cardID, workspace string, roots []string, skill tools.T
 	)
 }
 
-// skillToolSlice wraps an optional Skill tool as a SubagentOpts.ExtraReadOnlyTools
+// skillToolSlice wraps an optional skill tool as a SubagentOpts.ExtraReadOnlyTools
 // slice. Nil tool → nil slice.
 func skillToolSlice(t tools.Tool) []tools.Tool {
 	if t == nil {

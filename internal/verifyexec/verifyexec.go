@@ -315,7 +315,7 @@ func ShellArgv(cmd string) []string {
 // This is the CONTAINER path: the agent's verify subprocesses must never inherit
 // the model-run environment. An empty argv is a start error, never a vacuous pass.
 func Exec(ctx context.Context, dir string, argv []string, timeout time.Duration, extraEnv []string) Outcome {
-	return execWithEnv(ctx, dir, argv, timeout, tools.ScrubbedEnv(extraEnv))
+	return execWithEnv(ctx, dir, argv, timeout, verifyWaitDelay, tools.ScrubbedEnv(extraEnv))
 }
 
 // ExecInherit runs argv like Exec but with the CALLER's FULL environment. It is
@@ -323,7 +323,7 @@ func Exec(ctx context.Context, dir string, argv []string, timeout time.Duration,
 // boundary and is expected to see the developer's environment (DATABASE_URL and
 // the like). The orchestrator/container paths must keep Exec (scrubbed env).
 func ExecInherit(ctx context.Context, dir string, argv []string, timeout time.Duration) Outcome {
-	return execWithEnv(ctx, dir, argv, timeout, os.Environ())
+	return execWithEnv(ctx, dir, argv, timeout, verifyWaitDelay, os.Environ())
 }
 
 // appendOutput adds extra to captured, separated by a newline when captured is
@@ -336,12 +336,16 @@ func appendOutput(captured, extra string) string {
 	return captured + "\n" + extra
 }
 
+// verifyWaitDelay bounds how long a finished verify command's output pipe may
+// stay held open by a descendant before the capture gives up on it.
+const verifyWaitDelay = 2 * time.Second
+
 // execWithEnv is the shared core: it runs argv in dir with its own timeout
 // context and the given process environment, capturing combined output. It
 // disambiguates its own timeout (TimedOut) from a parent-context cancellation:
 // on cancellation it returns an ordinary Outcome and the caller detects the abort
 // via the parent ctx.
-func execWithEnv(ctx context.Context, dir string, argv []string, timeout time.Duration, env []string) Outcome {
+func execWithEnv(ctx context.Context, dir string, argv []string, timeout, waitDelay time.Duration, env []string) Outcome {
 	if len(argv) == 0 {
 		return Outcome{ExitCode: -1, StartErr: true}
 	}
@@ -353,7 +357,7 @@ func execWithEnv(ctx context.Context, dir string, argv []string, timeout time.Du
 	cmd.Dir = dir
 	cmd.Env = env
 
-	cmd.WaitDelay = 2 * time.Second
+	cmd.WaitDelay = waitDelay
 
 	// Process group so we can kill the whole tree on timeout: Plain
 	// CommandContext kills only the direct child, leaving grandchildren
@@ -361,6 +365,11 @@ func execWithEnv(ctx context.Context, dir string, argv []string, timeout time.Du
 	setupProcessGroup(cmd)
 
 	out, err := cmd.CombinedOutput()
+
+	// A command that exits on its own leaves anything it backgrounded running;
+	// the group kill stops it outliving the gate. An error means the group is
+	// already gone, the common case.
+	_ = killProcessGroup(cmd)
 
 	o := Outcome{Output: tools.HeadTail(string(out), captureCapBytes)}
 
@@ -373,6 +382,10 @@ func execWithEnv(ctx context.Context, dir string, argv []string, timeout time.Du
 		o.ExitCode = -1
 	case err == nil:
 		o.ExitCode = 0
+	case errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil:
+		// The command exited on its own but a descendant held the output pipe
+		// past WaitDelay; the command's own status is still the result.
+		o.ExitCode = cmd.ProcessState.ExitCode()
 	default:
 		if ee, ok := errors.AsType[*exec.ExitError](err); ok {
 			o.ExitCode = ee.ExitCode()

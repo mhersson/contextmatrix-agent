@@ -136,7 +136,6 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&verify, "verify", "", "shell command run after the loop with your full environment; exit 0 = success")
 	cmd.Flags().StringVar(&configFile, "config", "", "path to a YAML config file")
 	cmd.Flags().BoolVar(&printConfig, "print-config", false, "print the effective config (secrets redacted) and exit")
-	cmd.Flags().Bool("local", true, "run standalone without CM callbacks (always true)")
 
 	return cmd
 }

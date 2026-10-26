@@ -22,6 +22,11 @@ func validServiceConfig() ServiceConfig {
 		MaxConcurrent:    5,
 		Port:             9092,
 		ContainerTimeout: 150 * time.Minute,
+
+		GatesPollIntervalSeconds:       DefaultGatesPollIntervalSeconds,
+		GatesCIWaitTimeoutSeconds:      DefaultGatesCIWaitTimeoutSeconds,
+		GatesCopilotWaitTimeoutSeconds: DefaultGatesCopilotWaitTimeoutSeconds,
+		GatesCopilotThreadReplies:      true,
 	}
 }
 
@@ -750,6 +755,9 @@ func clearServiceEnv(t *testing.T) {
 		"CMX_ADMIN_PORT", "CMX_ADMIN_BIND_ADDR", "CMX_METRICS_TOKEN",
 		"CMX_COMPACTION_ENABLED", "CMX_COMPACTION_THRESHOLD",
 		"CMX_COMPACTION_KEEP_RECENT_TURNS", "CMX_REPLAY_REASONING",
+		"CMX_GATES_POLL_INTERVAL_SECONDS", "CMX_GATES_CI_WAIT_TIMEOUT_SECONDS",
+		"CMX_GATES_COPILOT_WAIT_TIMEOUT_SECONDS", "CMX_GATES_COPILOT_THREAD_REPLIES",
+		"CMX_LOG_LEVEL",
 	} {
 		if _, ok := os.LookupEnv(e); ok {
 			t.Setenv(e, "")
@@ -1039,28 +1047,19 @@ func TestServiceReplayReasoning(t *testing.T) {
 	})
 }
 
+// TestValidateContainerServeURL covers the agent's wiring of the shared
+// validator: a rejected URL names the key, and an accepted one is stored as the
+// validator normalized it. The URL rules themselves are the validator's.
 func TestValidateContainerServeURL(t *testing.T) {
 	tests := []struct {
 		name    string
 		url     string
+		want    string
 		wantErr bool
 	}{
-		{"empty uses the host gateway default", "", false},
-		{"routable http", "http://172.17.0.1:9092", false},
-		{"https with trailing slash", "https://serve.example:9092/", false},
-		{"non-http scheme", "ftp://serve.example:1", true},
-		{"missing host", "http://", true},
-		{"path other than root", "http://serve.example:9092/llm", true},
-		{"loopback address", "http://127.0.0.1:9092", true},
-		{"localhost", "http://localhost:9092", true},
-		{"uppercase localhost", "http://LOCALHOST:9092", true},
-		{"query string", "http://serve.example:9092?x=1", true},
-		{"bare query marker", "http://serve.example:9092?", true},
-		{"bare query marker after root", "http://serve.example:9092/?", true},
-		{"fragment", "http://serve.example:9092#f", true},
-		{"bare fragment marker after root", "http://serve.example:9092/#", true},
-		{"unspecified IPv4 address", "http://0.0.0.0:9092", true},
-		{"unspecified IPv6 address", "http://[::]:9092", true},
+		{name: "empty uses the host gateway default", url: "", want: ""},
+		{name: "trailing slash is stored without it", url: "https://serve.example:9092/", want: "https://serve.example:9092"},
+		{name: "loopback host is rejected", url: "http://127.0.0.1:9092", wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -1077,6 +1076,7 @@ func TestValidateContainerServeURL(t *testing.T) {
 			}
 
 			require.NoError(t, err)
+			assert.Equal(t, tt.want, cfg.ContainerServeURL)
 		})
 	}
 }

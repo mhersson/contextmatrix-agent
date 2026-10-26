@@ -59,7 +59,7 @@ func documentTestDeps(ops *fakeOps, git *fakeGit, client llm.LLM) Deps {
 func newDocumentRun(d Deps, tc cmclient.TaskContext, maxCost float64) *run {
 	d.Cfg.MaxCardCost = maxCost
 
-	return newRun(d, tc)
+	return newRun(context.Background(), d, tc)
 }
 
 func TestDocumentNoOpWhenNoDocsNeeded(t *testing.T) {
@@ -155,12 +155,21 @@ func TestDocumentBestEffortOnModelError(t *testing.T) {
 	t.Run("context limit is caught, not parked", func(t *testing.T) {
 		ops := &fakeOps{}
 		git := &fakeGit{committed: true}
-		// PromptTokens >= int(0.85*131072) trips context_limit on payload/model,
-		// which runModel surfaces as *ContextLimitError. document MUST catch it
-		// (return nil) - propagating would make execute() park an otherwise-good run.
+		// A tool-call reply at PromptTokens >= int(0.85*131072) trips context_limit
+		// on payload/model, which runModel surfaces as *ContextLimitError. document
+		// MUST catch it (return nil) - propagating would make execute() park an
+		// otherwise-good run.
 		const tripAt = 111411 // int(0.85 * 131072)
 
-		resp := llm.Response{Content: "partial", FinishReason: "stop", Usage: llm.Usage{PromptTokens: tripAt, Cost: 0.01}}
+		resp := llm.Response{
+			ToolCalls: []llm.ToolCall{{
+				ID:       "read-1",
+				Type:     "function",
+				Function: llm.FunctionCall{Name: "read", Arguments: `{"path":"no-such-file.txt"}`},
+			}},
+			FinishReason: "tool_calls",
+			Usage:        llm.Usage{PromptTokens: tripAt, Cost: 0.01},
+		}
 		d := documentTestDeps(ops, git, &planLLM{responses: []llm.Response{resp}})
 
 		tc := cmclient.TaskContext{Title: "T", Description: "body"}
@@ -168,7 +177,25 @@ func TestDocumentBestEffortOnModelError(t *testing.T) {
 
 		// NoError proves the *ContextLimitError did not propagate.
 		require.NoError(t, runDocument(context.Background(), o), "a doc-phase context limit is best-effort, never a park")
+		assert.Empty(t, git.commitMsgs, "no commit after a context-limit model error")
 		assert.Empty(t, git.pushBranches, "no push after a context-limit model error")
+	})
+
+	t.Run("final reply cut at the hard stop commits no docs", func(t *testing.T) {
+		ops := &fakeOps{}
+		git := &fakeGit{committed: true}
+
+		const tripAt = 111411 // int(0.85 * 131072)
+
+		resp := llm.Response{Content: "Wrote half the docs", FinishReason: "length", Usage: llm.Usage{PromptTokens: tripAt, Cost: 0.01}}
+		d := documentTestDeps(ops, git, &planLLM{responses: []llm.Response{resp}})
+
+		o := newDocumentRun(d, cmclient.TaskContext{Title: "T", Description: "body"}, 0)
+
+		require.NoError(t, runDocument(context.Background(), o), "a truncated doc reply is best-effort, never a park")
+		assert.Empty(t, git.commitMsgs, "no docs committed from a truncated reply")
+		assert.Empty(t, git.pushBranches, "no push after a truncated reply")
+		assert.Equal(t, []string{"HEAD"}, git.hardResetRefs, "the run's edits are discarded")
 	})
 }
 

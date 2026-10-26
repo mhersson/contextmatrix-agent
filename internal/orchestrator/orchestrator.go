@@ -135,15 +135,14 @@ type Config struct {
 	ReviewAttemptsCap int // review rounds before the card parks; <=0 falls back to config.DefaultReviewAttemptsCap
 	// Interactive is the sole mode flag: true => HITL (gates wait on Human and
 	// brainstorming runs for creative cards); false => autonomous (gates pass
-	// through, brainstorming skipped). Autonomous behavior is byte-for-byte the
-	// pre-HITL behavior.
+	// through, brainstorming skipped).
 	Interactive bool
 
 	// BestOfN, when >= 2, fans execute out into N candidate implementations
 	// judged before document. 0/1 = normal single-solver run.
 	BestOfN int
 
-	// Mob configures mob session discussions (spec 2026-07-10). Zero value = off.
+	// Mob configures mob session discussions. Zero value = off.
 	Mob MobConfig
 
 	// POC marks a card in a proof-of-concept project (CM_POC). False is the
@@ -188,8 +187,9 @@ type Config struct {
 
 	// GatesCopilotThreadReplies posts the Copilot gate's triage verdicts back
 	// to the PR's review threads and resolves settled ones. The worker wires
-	// it from CMX_GATES_COPILOT_THREAD_REPLIES (on unless exactly "false"); a
-	// Deps built directly leaves it false and writes nothing.
+	// it from CMX_GATES_COPILOT_THREAD_REPLIES (serve's
+	// gates_copilot_thread_replies; on unless exactly "false"); a Deps built
+	// directly leaves it false and writes nothing.
 	GatesCopilotThreadReplies bool
 }
 
@@ -289,7 +289,7 @@ type run struct {
 	// solver is the parent run's implementation seam: the collaborators the
 	// execute phase writes each subtask through (main-workspace git and tools,
 	// the run ledger, the run's coder-model resolver) plus the board-ops/push
-	// flags. Built in newRun bound to today's exact collaborators; Best-of-N
+	// flags. Built in newRun bound to the run's own collaborators; Best-of-N
 	// derives additional candidate solvers that target worktrees and stay off
 	// the board.
 	solver *solverCtx
@@ -538,6 +538,10 @@ type run struct {
 	// fix from a review that only surfaced new findings.
 	lastPriorResolved bool
 
+	// reviewRounds is the set of review rounds this run recorded on the body.
+	// A fresh run's authoritative pass reads only these (authoritativeHistory).
+	reviewRounds map[int]bool
+
 	// grounding is the prebuilt REPO GROUNDING block (root + nested
 	// AGENTS.md/CLAUDE.md), injected into model phases. Built once in
 	// newRun; "" when the workspace has no instruction files.
@@ -622,14 +626,14 @@ func dataURLs(blobs []cmclient.ImageBlob) []llm.ImageURL {
 
 // newRun builds a run seeded from the task context, with the budget ledger
 // pre-loaded from the card's already-reported cost.
-func newRun(d Deps, tc cmclient.TaskContext) *run {
+func newRun(ctx context.Context, d Deps, tc cmclient.TaskContext) *run {
 	o := &run{
 		d:  d,
 		tc: tc,
 		// The run ledger spans the shared phases; effectiveCeiling scales it for
 		// Best-of-N (N execute allowances plus one for plan/judge/document/review/
 		// integrate). For BestOfN < 2 effectiveCeiling degenerates to MaxCardCost,
-		// so a single-solver run is byte-identical to before.
+		// so a single-solver run keeps the plain ceiling.
 		ledger: NewLedger(effectiveCeiling(d.Cfg), tc.ReportedCostUSD),
 	}
 
@@ -642,10 +646,15 @@ func newRun(d Deps, tc cmclient.TaskContext) *run {
 	// would delete the marker on the next recordSection push.
 	o.body = tc.Description
 	o.taskDescription = stripAgentSections(stripMeta(tc.Description))
-	o.lastFindings = recentReviewFindingsHistory(tc.Description)
 	o.taskImages = dataURLs(tc.Images)
 
-	// The parent solver binds the execute seam to today's exact collaborators:
+	// A fresh run's body may still hold a finished run's findings, kept as
+	// history; this run's review must not start from them.
+	if tc.Phase != "" {
+		o.lastFindings = recentReviewFindingsHistory(tc.Description)
+	}
+
+	// The parent solver binds the execute seam to the run's own collaborators:
 	// the main workspace git/tools, the run ledger (o.ledger IS its ledger), and
 	// the run's coder-model resolver, driving the board and pushing.
 	o.solver = &solverCtx{
@@ -658,7 +667,7 @@ func newRun(d Deps, tc cmclient.TaskContext) *run {
 		push:       true,
 	}
 
-	grounding := groundingBlock(discoverGrounding(d.Cfg.Workspace))
+	grounding := groundingBlock(discoverGrounding(ctx, d.Cfg.Workspace))
 	if d.Redact != nil {
 		// The seed prompt is NOT covered by the harness redactor (it masks only
 		// tool output/events), so a secret reaching the grounding block would go to
@@ -1017,7 +1026,9 @@ func (o *run) recoverIncapable(ctx context.Context, ie *IncapableError) error {
 	// Best-effort, and done for the cap-exhausting model too: a proven
 	// incapable model must not be the first pick of the next run just because
 	// it happened to be the one that spent the last re-selection.
-	_ = o.d.Ops.BlacklistModel(ctx, o.d.Cfg.CardID, ie.Model, ie.Reason) //nolint:errcheck
+	if err := o.d.Ops.BlacklistModel(ctx, o.d.Cfg.CardID, ie.Model, ie.Reason); err != nil {
+		o.d.logCard(ctx, "blacklist model %q failed: %v", ie.Model, err)
+	}
 
 	if exhausted {
 		o.d.logCard(ctx, "model %q harness-incapable; blacklisted - re-selection cap (%d) exhausted: %s", ie.Model, reselectCap, ie.Reason)
@@ -1078,5 +1089,5 @@ func Run(ctx context.Context, d Deps) error {
 		return fmt.Errorf("get task context: %w", err)
 	}
 
-	return newRun(d, tc).execute(ctx)
+	return newRun(ctx, d, tc).execute(ctx)
 }

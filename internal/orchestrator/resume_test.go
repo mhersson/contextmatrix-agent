@@ -26,7 +26,7 @@ func reconcileTestRun(ops *fakeOps, git *fakeGit, phase string) *run {
 	}
 	tc := cmclient.TaskContext{Title: "Parent", Description: "body", Phase: phase}
 
-	return newRun(d, tc)
+	return newRun(context.Background(), d, tc)
 }
 
 func TestReconcileFreshRecordsStaleTip(t *testing.T) {
@@ -186,7 +186,7 @@ func TestReconcileCountsPriorSubtaskSpend(t *testing.T) {
 	}
 	tc := cmclient.TaskContext{Title: "Parent", Description: "body", Phase: "execute", ReportedCostUSD: 1.5}
 
-	o := newRun(d, tc)
+	o := newRun(t.Context(), d, tc)
 	require.NoError(t, o.ledger.Check(), "the parent's own spend alone is under the ceiling")
 
 	require.NoError(t, o.reconcile(context.Background()))
@@ -411,7 +411,7 @@ func TestExecuteCalledFromExecuteDriver(t *testing.T) {
 		Cfg: Config{Project: "proj", CardID: "CARD-1", Branch: "cm/card-1", BaseBranch: "main"},
 	}
 
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 	// Stub the phase bodies so the driver only exercises reconcile + persistence.
 	o.planFn = func(context.Context) error { return nil }
 	o.executeFn = func(context.Context) error { return nil }
@@ -491,13 +491,16 @@ func TestReconcileReadsLegacyAndNewMarkers(t *testing.T) {
 		// write-once seed key. It is the estimate a later analysis pairs its
 		// turn measurements against, so a resumed run has to recover it.
 		wantSeed string
+		// wantStart is the head an earlier unfinished run started from.
+		wantStart string
 	}{
-		"legacy": {legacyTierMarker("Do it.", "complex"), sizing{registry.TierComplex, 1}, "complex"},
+		"legacy": {legacyTierMarker("Do it.", "complex"), sizing{registry.TierComplex, 1}, "complex", ""},
 		// A card corrected on BOTH axes: the bar climbed off the planner's word
 		// and the budget widened off that bar's seed, so no restored field can
 		// be read out of another one.
-		"new":     {writeMeta("Do it.", metaKV{"bar": "complex", "budget": "2", "seed": "simple"}), sizing{registry.TierComplex, 2}, "simple"},
-		"no mark": {"Do it.", defaultSizing(), ""},
+		"new":        {writeMeta("Do it.", metaKV{"bar": "complex", "budget": "2", "seed": "simple"}), sizing{registry.TierComplex, 2}, "simple", ""},
+		"no mark":    {"Do it.", defaultSizing(), "", ""},
+		"unfinished": {writeMeta("Do it.", metaKV{"bar": "complex", "budget": "2", "seed": "simple", "start": "abc123"}), sizing{registry.TierComplex, 2}, "simple", "abc123"},
 	}
 
 	for name, tc := range cases {
@@ -512,6 +515,7 @@ func TestReconcileReadsLegacyAndNewMarkers(t *testing.T) {
 			require.Len(t, o.subtasks, 1)
 			assert.Equal(t, tc.want, o.subtasks[0].Sizing)
 			assert.Equal(t, tc.wantSeed, o.subtasks[0].PlannerBar, "the planner's own word survives the resume")
+			assert.Equal(t, tc.wantStart, o.subtasks[0].StartHead, "an earlier unfinished run's start survives the resume")
 			assert.Equal(t, "Do it.", o.subtasks[0].Body, "the restored body is marker-free")
 		})
 	}

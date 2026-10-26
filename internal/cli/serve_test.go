@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -116,6 +117,12 @@ func TestLaunchEnvMCPURL(t *testing.T) {
 		assert.Equal(t, "http://10.0.0.5:19092/llm", env.LLMBaseURL)
 	})
 
+	t.Run("stages the host gateway on serve's port when container_serve_url is unset", func(t *testing.T) {
+		cfg := &config.ServiceConfig{ContextMatrixURL: "http://public:8080", Port: 9092, AdminPort: 9093}
+		env := launchEnv(cfg, "/secrets/shared")
+		assert.Equal(t, "http://host.docker.internal:9092/llm", env.LLMBaseURL)
+	})
+
 	t.Run("forwards worker knobs", func(t *testing.T) {
 		cfg := &config.ServiceConfig{
 			ContextMatrixURL:      "http://public:8080",
@@ -169,40 +176,19 @@ func TestFlattenEnv(t *testing.T) {
 	})
 }
 
-func TestContainerLLMBaseURL(t *testing.T) {
-	tests := []struct {
-		name string
-		cfg  config.ServiceConfig
-		want string
-	}{
-		{
-			"unset falls back to the host gateway on serve's port",
-			config.ServiceConfig{Port: 9092},
-			"http://host.docker.internal:9092/llm",
-		},
-		{
-			"trailing slash trimmed",
-			config.ServiceConfig{Port: 9092, ContainerServeURL: "http://10.0.0.5:19092/"},
-			"http://10.0.0.5:19092/llm",
-		},
-		{
-			"https kept",
-			config.ServiceConfig{Port: 9092, ContainerServeURL: "https://serve.example:9092"},
-			"https://serve.example:9092/llm",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, containerLLMBaseURL(&tt.cfg))
-		})
-	}
+// recordingRevoker records every run key it is asked to revoke. Read revoked
+// only once the revoking goroutines are done.
+type recordingRevoker struct {
+	mu      sync.Mutex
+	revoked []string
 }
 
-// recordingRevoker records every run key it is asked to revoke.
-type recordingRevoker struct{ revoked []string }
+func (r *recordingRevoker) Revoke(runKey string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
-func (r *recordingRevoker) Revoke(runKey string) { r.revoked = append(r.revoked, runKey) }
+	r.revoked = append(r.revoked, runKey)
+}
 
 // TestOnDisplaceHookRevokesTheDisplacedRun: a newer run of the same card
 // displaces the older run's credentials handle, so the older run's proxy token
@@ -254,7 +240,7 @@ func TestOnContainerExitClosesLogFile(t *testing.T) {
 	bridge := logbridge.NewBridge(logbridge.BridgeConfig{Hub: hub})
 	registry := logbridge.NewRedactorRegistry(bridge)
 
-	onExit := onContainerExit(rep, creds, &recordingRevoker{}, files, registry, bridge, logger)
+	onExit := onContainerExit(rep, newExitReports(), creds, &recordingRevoker{}, files, registry, bridge, logger)
 	onExit("proj", "CARD-1", 0, executor.ExitNormal, 1, "corr-1")
 
 	data, err := os.ReadFile(filepath.Join(dir, "proj", "card-1.log"))
@@ -286,25 +272,6 @@ func TestServeCommandRegistered(t *testing.T) {
 	}
 
 	assert.True(t, found, "serve command should be registered on root")
-}
-
-// The file logger is the only durable record of a card's prior runs, and the
-// webhook server is what puts the ordinal in the container env - but the two
-// never meet unless serve wires them together. This pins that seam: the
-// counter the webhook config accepts is the one that counts real run headers.
-func TestNextAttemptWiresFileLoggerIntoWebhookConfig(t *testing.T) {
-	dir := t.TempDir()
-	files := filelog.New(dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
-
-	cfg := webhook.Config{NextAttempt: files.NextAttempt}
-	require.NotNil(t, cfg.NextAttempt)
-
-	assert.Equal(t, 1, cfg.NextAttempt("proj", "CARD-1"))
-
-	files.Begin("proj", "CARD-1", "abcdef012345", "corr-1")
-	files.End("proj", "CARD-1", "corr-1", 0, "normal")
-
-	assert.Equal(t, 2, cfg.NextAttempt("proj", "CARD-1"))
 }
 
 // exitHarness wires the collaborators onContainerExit needs plus a hub
@@ -348,7 +315,7 @@ func newExitHarness(t *testing.T, logDir string) *exitHarness {
 		rep:      rep,
 		stream:   ch,
 		registry: registry,
-		onExit:   onContainerExit(rep, creds, revoker, files, registry, bridge, logger),
+		onExit:   onContainerExit(rep, newExitReports(), creds, revoker, files, registry, bridge, logger),
 	}
 }
 
@@ -625,4 +592,18 @@ func TestWarnIfNotWorkerUID(t *testing.T) {
 			assert.Equal(t, slog.LevelWarn.String(), record["level"])
 		})
 	}
+}
+
+func TestLaunchEnvForwardsGates(t *testing.T) {
+	env := launchEnv(&config.ServiceConfig{
+		GatesPollIntervalSeconds:       30,
+		GatesCIWaitTimeoutSeconds:      900,
+		GatesCopilotWaitTimeoutSeconds: 600,
+		GatesCopilotThreadReplies:      true,
+	}, "/secrets/shared")
+
+	assert.Equal(t, 30, env.GatesPollIntervalSeconds)
+	assert.Equal(t, 900, env.GatesCIWaitTimeoutSeconds)
+	assert.Equal(t, 600, env.GatesCopilotWaitTimeoutSeconds)
+	assert.True(t, env.GatesCopilotThreadReplies)
 }

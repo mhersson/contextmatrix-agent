@@ -46,11 +46,11 @@ func gitAddAll(t *testing.T, dir string) {
 
 func TestDiscoverGrounding(t *testing.T) {
 	t.Run("empty or missing root yields nil", func(t *testing.T) {
-		root, nested := discoverGrounding("")
+		root, nested := discoverGrounding(t.Context(), "")
 		assert.Nil(t, root)
 		assert.Nil(t, nested)
 
-		root, nested = discoverGrounding(filepath.Join(t.TempDir(), "nope"))
+		root, nested = discoverGrounding(t.Context(), filepath.Join(t.TempDir(), "nope"))
 		assert.Nil(t, root)
 		assert.Nil(t, nested)
 	})
@@ -60,7 +60,7 @@ func TestDiscoverGrounding(t *testing.T) {
 		writeNestedFile(t, root, "AGENTS.md", "# agents")
 		writeNestedFile(t, root, "CLAUDE.md", "# claude")
 
-		doc, nested := discoverGrounding(root)
+		doc, nested := discoverGrounding(t.Context(), root)
 		require.NotNil(t, doc)
 		assert.Equal(t, "AGENTS.md", doc.name)
 		assert.Contains(t, doc.content, "# agents")
@@ -71,7 +71,7 @@ func TestDiscoverGrounding(t *testing.T) {
 		root := t.TempDir()
 		writeNestedFile(t, root, "CLAUDE.md", "# claude")
 
-		doc, _ := discoverGrounding(root)
+		doc, _ := discoverGrounding(t.Context(), root)
 		require.NotNil(t, doc)
 		assert.Equal(t, "CLAUDE.md", doc.name)
 	})
@@ -90,7 +90,7 @@ func TestDiscoverGrounding(t *testing.T) {
 		writeNestedFile(t, root, "node_modules/pkg/CLAUDE.md", "# vendored")
 		gitAddAll(t, root)
 
-		doc, nested := discoverGrounding(root)
+		doc, nested := discoverGrounding(t.Context(), root)
 		require.NotNil(t, doc)
 		assert.Equal(t, "CLAUDE.md", doc.name)
 		assert.Contains(t, doc.content, "# root rules")
@@ -119,7 +119,7 @@ func TestDiscoverGrounding(t *testing.T) {
 		writeNestedFile(t, root, "vendor/github.com/x/CLAUDE.md", "# THIRD-PARTY do not inject")
 		gitAddAll(t, root)
 
-		doc, nested := discoverGrounding(root)
+		doc, nested := discoverGrounding(t.Context(), root)
 		require.NotNil(t, doc)
 		assert.Contains(t, nested, "vendor/github.com/x/CLAUDE.md", "a tracked nested doc is enumerated as a path")
 
@@ -137,7 +137,7 @@ func TestDiscoverGrounding(t *testing.T) {
 		// Deeper than the depth cap: skipped before any read.
 		writeNestedFile(t, root, "a/b/c/d/e/CLAUDE.md", "# too deep")
 
-		doc, nested := discoverGrounding(root)
+		doc, nested := discoverGrounding(t.Context(), root)
 		require.NotNil(t, doc)
 		assert.Contains(t, doc.content, "# root rules")
 
@@ -156,7 +156,7 @@ func TestDiscoverGrounding(t *testing.T) {
 			writeNestedFile(t, root, filepath.Join(fmt.Sprintf("pkg%02d", i), "CLAUDE.md"), "# content")
 		}
 
-		_, nested := discoverGrounding(root)
+		_, nested := discoverGrounding(t.Context(), root)
 		assert.Len(t, nested, groundingMaxDocs)
 	})
 }
@@ -171,7 +171,7 @@ func TestReadGroundingDirRejectsOutOfTreeSymlink(t *testing.T) {
 	require.NoError(t, os.WriteFile(outside, []byte("CM_MCP_API_KEY=supersecret"), 0o600))
 	require.NoError(t, os.Symlink(outside, filepath.Join(root, "AGENTS.md")))
 
-	doc, _ := discoverGrounding(root)
+	doc, _ := discoverGrounding(t.Context(), root)
 
 	assert.Nil(t, doc, "the root instruction file escapes the workspace; nothing grounded")
 
@@ -189,7 +189,7 @@ func TestReadGroundingDirFollowsInRepoSymlink(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(root, "rules.md"), []byte("# real rules"), 0o644))
 	require.NoError(t, os.Symlink(filepath.Join(root, "rules.md"), filepath.Join(root, "AGENTS.md")))
 
-	doc, _ := discoverGrounding(root)
+	doc, _ := discoverGrounding(t.Context(), root)
 	require.NotNil(t, doc, "in-tree symlinked root instruction file must be grounded")
 	assert.Equal(t, "AGENTS.md", doc.name)
 	assert.Contains(t, doc.content, "# real rules", "in-repo symlink must be followed")
@@ -200,7 +200,7 @@ func TestGroundingTruncationIsRuneSafe(t *testing.T) {
 	root := t.TempDir()
 	writeNestedFile(t, root, "AGENTS.md", strings.Repeat("a", groundingByteCap-1)+"…tail")
 
-	doc, _ := discoverGrounding(root)
+	doc, _ := discoverGrounding(t.Context(), root)
 	require.NotNil(t, doc)
 	assert.True(t, utf8.ValidString(doc.content), "truncated grounding must be valid UTF-8")
 	assert.Contains(t, doc.content, "[... truncated at 64 KB ...]")

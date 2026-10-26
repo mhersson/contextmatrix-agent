@@ -89,7 +89,11 @@ type subtaskRef struct {
 	// marker's write-once seed key. Kept separate from Sizing.Bar because an
 	// escalation overwrites the bar, and the estimate a later analysis is
 	// testing must stay recoverable after the correction that replaced it.
-	PlannerBar   string
+	PlannerBar string
+	// StartHead is the HEAD an earlier, unfinished run of this subtask started
+	// from, restored from the marker's write-once start key; "" when no earlier
+	// run left it unfinished.
+	StartHead    string
 	State        string
 	DependsOnIDs []string
 }
@@ -681,7 +685,7 @@ func (o *run) draftPlan(ctx context.Context, model func(context.Context) string,
 	diagBlock := diagnosisBlock(diagnosis)
 	dsnBlock := designBlock(design)
 	fbBlock := feedbackBlock(feedback)
-	snapshot := o.repoSnapshotBlock()
+	snapshot := o.repoSnapshotBlock(ctx)
 
 	// Resolved once so both the first attempt and its repair share one findings
 	// list: the repair must re-emit a plan from analysis it already has.
@@ -861,7 +865,7 @@ func (o *run) mobDraftPlan(ctx context.Context, diagnosis, design, feedback stri
 		Lenses:   planLenses[:seats],
 		Rounds:   o.d.Cfg.Mob.Rounds,
 		Blind:    true,
-		Briefing: o.mobPlanBriefing(diagnosis, design),
+		Briefing: o.mobPlanBriefing(ctx, diagnosis, design),
 		SynthesisPrompt: fmt.Sprintf(planSynthesisPrompt,
 			o.grounding, o.d.Cfg.Workspace, o.pocTestScope("\n- "), o.tc.Title, o.plannerDescription()),
 	}
@@ -907,7 +911,7 @@ func (o *run) mobDraftPlan(ctx context.Context, diagnosis, design, feedback stri
 // block. The seats discuss rather than emit, so the briefing carries none of
 // the solo planner's decomposition rules or JSON contract - the moderator's
 // synthesis prompt owns those.
-func (o *run) mobPlanBriefing(diagnosis, design string) string {
+func (o *run) mobPlanBriefing(ctx context.Context, diagnosis, design string) string {
 	var existingTitles []string
 
 	for _, sub := range o.subtasks {
@@ -920,7 +924,7 @@ func (o *run) mobPlanBriefing(diagnosis, design string) string {
 	diagBlock := diagnosisBlock(diagnosis)
 	dsnBlock := designBlock(design)
 
-	return fmt.Sprintf(planBriefing, o.grounding, o.repoSnapshotBlock(), o.d.Cfg.Workspace,
+	return fmt.Sprintf(planBriefing, o.grounding, o.repoSnapshotBlock(ctx), o.d.Cfg.Workspace,
 		readRootsBlock(o.d.ReadRoots), o.tc.Title, o.plannerDescription(),
 		diagBlock, dsnBlock, resume)
 }
@@ -1120,7 +1124,7 @@ func runPlan(ctx context.Context, o *run) error {
 
 	// Autonomous: draft once and create the subtasks. With the mob session on,
 	// the draft comes from a panel discussion; any discussion failure degrades
-	// to the solo draftPlan path, byte-identical to before.
+	// to the solo draftPlan path.
 	if !cfg.Interactive {
 		if mobPlan {
 			if p, out, ok := o.mobDraftPlan(ctx, diagnosis, design, "", nil); ok {
@@ -1478,7 +1482,7 @@ func (o *run) createSubtasks(ctx context.Context, p plan) error {
 	// "## Unreachable Criteria" onto o.body. Re-derive it once, here, so those
 	// two sections (which stripAgentSections deliberately does not strip)
 	// reach every downstream prompt, while "## Plan" and the sizing marker -
-	// both agent-recorded / meta - stay stripped exactly as before.
+	// both agent-recorded / meta - stay stripped.
 	o.taskDescription = stripAgentSections(stripMeta(o.body))
 
 	return nil
@@ -1506,11 +1510,17 @@ func hasDecidedSolution(description string) bool {
 }
 
 // plannerDescription is the description slot for the planner prompts: the
-// stripped description plus the prior run's recorded "## Plan". The prior plan
-// has no other resume channel - resumeBlock carries subtask titles only. Reads
-// the immutable claim-time snapshot, not the live body, so a fresh run's
-// adjust loop never sees its own in-flight draft.
+// stripped description plus, on a resumed run, the prior run's recorded
+// "## Plan". The prior plan has no other resume channel - resumeBlock carries
+// subtask titles only. A fresh run's body may still hold a finished run's plan,
+// kept as history, which the new plan must not build on. Reads the immutable
+// claim-time snapshot, not the live body, so the adjust loop never sees its
+// own in-flight draft.
 func (o *run) plannerDescription() string {
+	if o.tc.Phase == "" {
+		return o.taskDescription
+	}
+
 	prior := extractSection(o.tc.Description, "Plan")
 	if prior == "" {
 		return o.taskDescription

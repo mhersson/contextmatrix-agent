@@ -23,6 +23,20 @@ at `integrate` or `pr_gates` with the card outside `review` first moves it back
 there with `start_review`; on the default board only `review` may move to
 `done`.
 
+A fresh run (no persisted phase, as on a card reopened from `done`) keeps the
+finished run's recorded sections on the card body as history but does not
+build on them: the planner gets no prior `## Plan`, review starts without
+prior findings, and the authoritative pass reads only the review rounds this
+run recorded. A resumed run gets all of them back.
+
+A subtask whose coder leaves nothing to commit and does not move HEAD parks
+the card as empty. A park mid-subtask, though, pushes the unfinished tree as
+WIP, so a resumed coder can rightly find nothing left to change. A subtask
+that ends unfinished therefore records, once, the HEAD its run started from
+(a `start` key in its card's sizing marker); a resumed run completes it
+instead of parking when HEAD has moved past that start and the pre-commit
+verify passes.
+
 Documentation the card's acceptance criteria require (named files under
 `docs/`, a README, specific claims that must change) is planned as a
 deliverable in the plan phase - either alongside the code subtask that changes
@@ -42,7 +56,9 @@ guarded by the remote tip recorded before the rebase. Uncommitted changes to
 tracked files, such as a verify run rebuilding a committed `.pyc`, are stashed
 first and left in the stash, so they neither block the rebase nor reach a
 commit. A rebase conflict falls back to soft-reset-to-merge-base plus a single
-squashed recommit.
+squashed recommit. A `pr_gates` fix round runs after that autosquash, and
+`merge_pr` merges with a merge commit, so it commits normally, with the fix
+coder's `finish` message or, when it gives none, one naming the gate.
 
 The work branch is `cm/<card-id>` (card ID lowercased); the ID is validated
 against `^[A-Za-z][A-Za-z0-9-]*-[0-9]+$` (PREFIX-NNN) before it reaches any
@@ -113,17 +129,18 @@ vocabulary (`normalizeBasis` drops anything else to empty):
 - `defect` - a demonstrated correctness bug in delivered code; the issue gives the input or state and the wrong outcome.
 - `test` - a broken or vacuous test.
 - `vulnerability` - exploitable by a party the project's documented trust model does not trust; the issue names that party and the path. Input from a caller the trust model already lets write the same data is `hardening`, not `vulnerability`.
-- `unscoped` - the diff added something the task did not ask for; the fix is to remove it.
-- `hardening` - validation, limits, headers, defensive checks, or stricter tests the task did not ask for.
+- `unscoped` - the diff added a feature or behaviour the task did not ask for; the fix is to remove it.
+- `hardening` - validation, limits, headers, defensive checks, or stricter tests the task did not ask for. Unrequested hardening is always `hardening`, never `unscoped`, whether the diff added it or a reviewer asks for it.
 - `polish` - style, naming, or comment/doc wording that does not change meaning.
 
 `criterion`, `defect`, `test`, `vulnerability`, and `unscoped` block;
-`hardening` and `polish` are advisory and never block. Both verdict prompts
-share one constant naming the vocabulary and its evidence requirements, so the
-solo synthesis and the mob moderator paths cannot drift, and each specialist
-states the basis of every concern. `formatFixes` renders a populated basis
-after the severity as `[important, criterion]`; an empty basis renders exactly
-as before.
+`hardening` and `polish` are advisory and never block. The solo synthesis
+prompts and the mob moderator prompt share one decision-rule constant
+(`verdictDecisionRule`) carrying the blocking rule, the vocabulary and its
+evidence requirements, worded without naming either review path, so the paths
+cannot drift, and each specialist states the basis of every concern.
+`formatFixes` renders a populated basis after the severity as
+`[important, criterion]`; an empty basis renders the severity alone.
 
 The loop runs to the `review_attempts` cap - default 3, set per deployment via
 `review_attempts_cap` in `serve.yaml` or `CMX_REVIEW_ATTEMPTS_CAP`. Valid
@@ -133,6 +150,19 @@ cap, the loop also parks when less than 20 minutes of container time remain
 before a round would start, since a verify run, a panel, and a fix round need
 that much to finish without being killed mid-work; a re-trigger resumes at the
 same round.
+
+Round numbering follows the card's `review_attempts` counter, so an
+interrupted review resumes at its round. Only a finished loop restarts at
+round 1 once the counter is at or past the cap: a loop that parks at the
+attempts cap or at the server's cap records a `## Review Parked` section on the
+card, which the next run to enter review clears, and a fresh run of a reopened
+card counts as finished too. CM launches every run from `todo`, so the card's
+state cannot tell the two apart. The restart is local to the run - the
+server's counter keeps counting - and nothing records it: when a restarted run
+stops before its loop ends, by a crash or by any park other than at a cap, the
+next run finds the counter at or past the cap and no `## Review Parked` section, and
+numbers on from it - on an autonomous card, straight into the authoritative
+pass.
 
 A verify-red round - the gate fails before any specialist runs - produces no
 verdict, so charging it against the attempts cap would spend review budget on
@@ -164,6 +194,12 @@ already paid for are recorded on the card body under the round's own
 duplicates them) before the park. Only a parse failure with no cap anywhere
 in the call is fatal to the run.
 
+A specialist or synthesis model that proves harness-incapable is blacklisted
+and excluded for the rest of the run, as a coder's is. The specialist's
+section stays flagged as truncated for that round; synthesis reruns the
+attempt once on a re-selected model, and fails the run when no other decision
+model is selectable.
+
 Cross-round context is bounded, not unbounded. A non-authoritative round
 carries forward only the most recently synthesized panel verdict
 (`lastPanelFindings`); when no panel verdict has synthesized yet in this run
@@ -172,8 +208,9 @@ back to the most recent round's raw output (`lastFindings`) instead. The
 authoritative pass, and the value a resumed run seeds at start (`newRun`
 reading the card body before any round runs), both use the
 `reviewHistoryWindow` (3) most recently recorded `## Review Findings`
-sections concatenated (`recentReviewFindingsHistory`) instead of the full
-history - rounds older than the window are redundant, since each recorded
+sections concatenated (`recentReviewFindingsHistory`; on a fresh run the
+authoritative pass windows only the rounds this run recorded) instead of the
+full history - rounds older than the window are redundant, since each recorded
 verdict already carries every surviving finding forward, and an unbounded
 history is what pushes synthesis past its own turn budget over a
 long-running review.
@@ -328,9 +365,20 @@ rounds address their findings as written.
 ## Context bounds
 
 Subagent isolation, `--max-turns` caps, and window-aware selection bound
-context growth. By default there is no compactor: nearing the window emits a
-`context_limit` event and returns incomplete - the orchestrator treats it as a
-failed subtask, never a silent truncation. An opt-in in-window compactor
+context growth. By default there is no compactor: a reply that reaches the
+hard stop (85% of the window; with compaction on, the effective compaction
+threshold when that is higher) mid-run emits a `context_limit` event and
+returns incomplete - the orchestrator treats it as a failed subtask, never a
+silent truncation. With compaction on, that holds only when compaction cannot
+shrink the history: a reply whose history it shrinks skips the stop, and the
+run carries on. A final reply (text with no tool calls) ends the run at any
+size, unless it reached the hard stop and the provider cut it at the token
+limit (`finish_reason` `length`): a phase run then returns incomplete the same
+way, though no `context_limit` event is emitted. A reply cut below the stop hit
+the output cap, not the window: a phase that expects JSON treats it as any
+unparseable reply (the planner and the review synthesis take their repair
+turn), and any other phase proceeds. Review specialists, mob seats and the mob
+moderator keep a cut reply as their output. An opt-in in-window compactor
 exists behind `CMX_COMPACTION_ENABLED` (default off;
 `CMX_COMPACTION_THRESHOLD` 0.85, `CMX_COMPACTION_KEEP_RECENT_TURNS` 6).
 
@@ -398,8 +446,12 @@ stops the run like the other park sentinels (Budget/Context/MaxTurns). Unlike
 those, `mapFSMResult` also transitions the card to the board's `blocked` state
 before releasing the claim, so the park is visible on the board, not just in
 the log; a project whose `.board.yaml` lacks `in_progress -> blocked` degrades
-to the same silent WIP-push-and-release park as the others. This is an
-environmental park, not a model failure - no outcome/blacklist reporting.
+to the same silent WIP-push-and-release park as the others. A review round can
+park this way after the card entered review, which the default board refuses
+to move straight to `blocked`, so a card in review goes by way of
+`in_progress`; when the board refuses `blocked` from there too, the card
+returns to `review`. This is an environmental park, not a model failure - no
+outcome/blacklist reporting.
 
 Every code-resolved outcome - a command, the unverified skip, or the park - is
 also upserted as a `## Verify Command` section on the card body, so the card
@@ -422,7 +474,7 @@ human-blocked container is not reaped.
 
 Coder, fix-coder, the review panel, and the document phase can engage
 ContextMatrix task-skills (`go-development`, `code-review`, ...) via the
-model-driven `Skill` tool (in the external harness module, constructed as
+model-driven `skill` tool (in the external harness module, constructed as
 `tools.NewSkillTool`): it lists the available skills by description and loads
 a chosen `SKILL.md` on demand, filtered to the per-card `task_skills` subset.
 
@@ -526,9 +578,11 @@ a later resumed one.
 
 At run start (`newRun`) the orchestrator discovers the repo's instruction
 files (`discoverGrounding`), formats a `REPO GROUNDING` block once
-(`groundingBlock`), and caches it on `run.grounding`. All eight model-driven
-phases - plan, diagnose, brainstorm, coder, fix, specialist, synthesis,
-document - inject the cached block; there is no per-phase re-scan.
+(`groundingBlock`), and caches it on `run.grounding`. The
+model-driven phases - plan, diagnose, brainstorm, coder, fix, specialist,
+synthesis, document, the checkpoint discussions, Copilot triage and
+verify-propose - inject the cached block; there is no per-phase re-scan. The
+Best-of-N judge and the integrate PR-body call do not.
 
 Two tiers, so a committed third-party tree can never masquerade as the repo's
 own rules:
@@ -550,7 +604,4 @@ own rules:
   ≤ `groundingMaxDocs` (24, `slog.Warn` on overflow), sorted shallow → deep.
 
 Best-effort: a missing, empty, or non-directory workspace yields an empty
-block and phases run unchanged - grounding never fails a run.
-
-Deferred: v2 proximity-scoping (the coder sees only the instruction file for
-its subtask's subtree) and prompt-caching the block.
+block and phases run without it - grounding never fails a run.

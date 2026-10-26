@@ -43,20 +43,18 @@ const (
 	// httpShutdownTimeout bounds the graceful HTTP drain, shared by the webhook
 	// and admin listeners, the last step of gracefulShutdown.
 	httpShutdownTimeout = 10 * time.Second
-	// callbackShutdownTimeout bounds each per-container kill + status callback
-	// during shutdown so one slow ContextMatrix response cannot starve the rest.
-	callbackShutdownTimeout = 10 * time.Second
+	// sweepTimeout is the one deadline the shutdown sweep runs under: every
+	// straggler's kill, self-exit grace included, and every run's status
+	// callback run concurrently within it, however many runs there are.
+	sweepTimeout = 15 * time.Second
 	// onExitTimeout bounds the detached status callback fired when a container
 	// exits. The supervision goroutine that calls it has no request context.
 	onExitTimeout = 30 * time.Second
-	// parkWaitTimeout bounds how long shutdown waits for workers to park before
-	// the serial kill sweep, which adds a kill grace per straggler and a status
-	// callback per run; the HTTP drain, one bound shared by the webhook and
-	// admin listeners, then adds up to httpShutdownTimeout. At the default
-	// max_concurrent of 5 the sequence fits svc.sh's TimeoutStopSec=60; seven
-	// or more stragglers can outlast it.
+	// parkWaitTimeout bounds how long shutdown waits for workers to park. The
+	// sweep (sweepTimeout) and the HTTP drain (httpShutdownTimeout) follow it,
+	// and the three fit svc.sh's TimeoutStopSec=60 at any run count.
 	parkWaitTimeout = 30 * time.Second
-	// parkPollInterval is how often the park wait rechecks the tracker.
+	// parkPollInterval is how often the park wait rechecks the runs.
 	parkPollInterval = 250 * time.Millisecond
 
 	// staticSecretsID is the reserved pseudo-session id under which
@@ -113,12 +111,12 @@ func runServe(ctx context.Context, configPath string) error {
 
 	// The proxy keeps every run's real LLM key in this process; a worker only
 	// ever holds its run's stand-in token.
-	proxy, err := llmproxy.New(llmproxy.Config{Prefix: webhook.LLMProxyPrefix, CACertFile: cfg.CACertFile, Logger: logger})
+	proxy, err := llmproxy.New(llmproxy.Config{Prefix: llmproxy.DefaultPrefix, CACertFile: cfg.CACertFile, Logger: logger})
 	if err != nil {
 		return fmt.Errorf("llm proxy: %w", err)
 	}
 
-	mx := metrics.New(llmproxy.Paths(webhook.LLMProxyPrefix)...)
+	mx := metrics.New(llmproxy.Paths(llmproxy.DefaultPrefix)...)
 
 	skillsCache := filepath.Join(cfg.SecretsDir, "task-skills-cache")
 	skillsResolver := taskskills.NewResolver(cfg.ContextMatrixURL, cfg.APIKey, skillsCache, "/api/agent/task-skills-source")
@@ -161,6 +159,10 @@ func runServe(ctx context.Context, configPath string) error {
 	credentials.OnTokenRefresh = onTokenRefreshHook(registry)
 	credentials.OnDisplace = onDisplaceHook(proxy)
 
+	// Settles which of the shutdown sweep and a run's own exit callback
+	// reports the run, so it is reported once.
+	reports := newExitReports()
+
 	exec := executor.NewDockerExecutor(executor.Config{
 		Docker:           docker,
 		Tracker:          tracker,
@@ -172,7 +174,7 @@ func runServe(ctx context.Context, configPath string) error {
 			files.Begin(project, cardID, containerID, correlationID)
 		},
 		OnLog:   containerLogSink(bridge, files, registry),
-		OnExit:  onContainerExit(cbClient, credentials, proxy, files, registry, bridge, logger),
+		OnExit:  onContainerExit(cbClient, reports, credentials, proxy, files, registry, bridge, logger),
 		Logger:  logger,
 		Metrics: mx,
 	})
@@ -288,14 +290,16 @@ func runServe(ctx context.Context, configPath string) error {
 	}()
 
 	gracefulShutdown(shutdownCtx, httpServer, adminSrv, workerDrain{
-		tracker:  tracker,
-		sessions: srv,
-		exec:     exec,
-		reporter: cbClient,
-		revoker:  proxy,
-		logger:   logger,
-		wait:     parkWaitTimeout,
-		poll:     parkPollInterval,
+		tracker:      tracker,
+		sessions:     srv,
+		exec:         exec,
+		reporter:     cbClient,
+		reports:      reports,
+		revoker:      proxy,
+		logger:       logger,
+		wait:         parkWaitTimeout,
+		poll:         parkPollInterval,
+		sweepTimeout: sweepTimeout,
 	}, &draining, logger)
 	cbClient.Close()
 	logger.Info("agent service stopped")
@@ -320,6 +324,9 @@ func gracefulShutdown(
 
 	parkCtx, parkCancel := context.WithTimeout(ctx, workers.wait)
 	defer parkCancel()
+
+	// Before the snapshot, so every listed run's exit callback is recorded.
+	workers.reports.beginShutdown()
 
 	live := workers.tracker.List()
 
@@ -352,27 +359,32 @@ type workerDrain struct {
 	sessions sessionEnder
 	exec     executor.Executor
 	reporter webhook.StatusReporter
+	reports  *exitReports
 	revoker  tokenRevoker
 	logger   *slog.Logger
 
-	// wait bounds the park window; poll is how often it rechecks the tracker.
+	// wait bounds the park window; poll is how often it rechecks the runs.
 	wait time.Duration
 	poll time.Duration
+
+	// sweepTimeout bounds the whole kill-and-report sweep.
+	sweepTimeout time.Duration
 }
 
-// endSessions sends end_session to each run and returns the runs it reached.
+// endSessions sends end_session to each run and returns the runs to wait on:
+// those it reached, and those that exited since the snapshot, whose exit
+// callback may not have claimed their report yet.
 func (d workerDrain) endSessions(runs []*executor.Run) []*executor.Run {
 	ended := make([]*executor.Run, 0, len(runs))
 
 	for _, run := range runs {
 		if err := d.sessions.EndSession(run.Project, run.CardID); err != nil {
-			// A run that exited since the snapshot has nothing to end or kill.
 			if !errors.Is(err, executor.ErrNotFound) {
 				d.logger.Warn("could not end session on shutdown; the run will be killed",
 					"project", run.Project, "card_id", run.CardID, "error", err)
-			}
 
-			continue
+				continue
+			}
 		}
 
 		ended = append(ended, run)
@@ -381,12 +393,13 @@ func (d workerDrain) endSessions(runs []*executor.Run) []*executor.Run {
 	return ended
 }
 
-// awaitPark returns once none of runs is still tracked or ctx ends.
+// awaitPark returns once every one of runs has exited and its exit callback
+// has taken over its report, or ctx ends.
 func (d workerDrain) awaitPark(ctx context.Context, runs []*executor.Run) {
 	ticker := time.NewTicker(d.poll)
 	defer ticker.Stop()
 
-	for d.anyTracked(runs) {
+	for slices.ContainsFunc(runs, d.parking) {
 		select {
 		case <-ctx.Done():
 			return
@@ -395,8 +408,10 @@ func (d workerDrain) awaitPark(ctx context.Context, runs []*executor.Run) {
 	}
 }
 
-func (d workerDrain) anyTracked(runs []*executor.Run) bool {
-	return slices.ContainsFunc(runs, d.tracked)
+// parking reports whether run has yet to exit or yet to reach its exit
+// callback's report; the executor drops a run before that callback runs.
+func (d workerDrain) parking(run *executor.Run) bool {
+	return d.tracked(run) || !d.reports.claimed(run.CorrelationID)
 }
 
 // tracked compares by identity so a successor run under the same key is not
@@ -407,9 +422,8 @@ func (d workerDrain) tracked(run *executor.Run) bool {
 	return ok && current == run
 }
 
-// sweep kills every run still tracked. Each of live, plus any run admitted
-// since, then has its proxy token revoked and is reported as failed, a parked
-// run too: the process can exit before that run's own exit callback lands.
+// sweep settles each of live, plus any run admitted since, concurrently under
+// one deadline.
 func (d workerDrain) sweep(live []*executor.Run) {
 	runs := live
 
@@ -419,32 +433,109 @@ func (d workerDrain) sweep(live []*executor.Run) {
 		}
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), d.sweepTimeout)
+	defer cancel()
+
+	var wg sync.WaitGroup
+
 	for _, run := range runs {
-		if d.tracked(run) {
-			d.logger.Info("killing container on shutdown", "project", run.Project, "card_id", run.CardID)
+		wg.Go(func() { d.settle(ctx, run) })
+	}
 
-			// Kill's self-exit grace window applies here too, bounded by this
-			// per-container killCtx (callbackShutdownTimeout).
-			killCtx, killCancel := context.WithTimeout(context.Background(), callbackShutdownTimeout)
-			if err := d.exec.Kill(killCtx, run.Project, run.CardID); err != nil &&
-				!errors.Is(err, executor.ErrNotFound) {
-				d.logger.Warn("failed to kill container on shutdown",
-					"project", run.Project, "card_id", run.CardID, "error", err)
-			}
+	wg.Wait()
+}
 
-			killCancel()
+// settle kills run if it is still tracked and revokes its token. It reports
+// the run failed unless its own exit callback has taken the report, since the
+// process can exit before that callback runs; when the callback has, settle
+// waits for its report to land instead.
+func (d workerDrain) settle(ctx context.Context, run *executor.Run) {
+	if d.tracked(run) {
+		d.logger.Info("killing container on shutdown", "project", run.Project, "card_id", run.CardID)
+
+		if err := d.exec.Kill(ctx, run.Project, run.CardID); err != nil &&
+			!errors.Is(err, executor.ErrNotFound) {
+			d.logger.Warn("failed to kill container on shutdown",
+				"project", run.Project, "card_id", run.CardID, "error", err)
 		}
+	}
 
-		d.revoker.Revoke(run.CorrelationID)
+	d.revoker.Revoke(run.CorrelationID)
 
-		cbCtx, cbCancel := context.WithTimeout(context.Background(), callbackShutdownTimeout)
-		if err := d.reporter.ReportStatus(cbCtx, run.CardID, run.Project, "failed", "service shutting down"); err != nil {
+	reported, owned := d.reports.report(run.CorrelationID, func() {
+		if err := d.reporter.ReportStatus(ctx, run.CardID, run.Project, "failed", "service shutting down"); err != nil {
 			d.logger.Warn("failed to report shutdown status",
 				"project", run.Project, "card_id", run.CardID, "error", err)
 		}
-
-		cbCancel()
+	})
+	if owned {
+		return
 	}
+
+	select {
+	case <-reported:
+	case <-ctx.Done():
+	}
+}
+
+// exitReports settles which of the shutdown sweep and a run's own exit
+// callback reports the run's terminal status, so a parked run's completed is
+// never chased by the sweep's failed. Claims are recorded only once shutdown
+// begins; until then every exit callback owns its report and nothing is kept
+// per run.
+type exitReports struct {
+	mu       sync.Mutex
+	shutdown bool
+	claims   map[string]chan struct{} // correlation id -> closed once its report returns
+}
+
+func newExitReports() *exitReports {
+	return &exitReports{claims: make(map[string]chan struct{})}
+}
+
+// beginShutdown starts recording claims.
+func (e *exitReports) beginShutdown() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	e.shutdown = true
+}
+
+// report runs send unless the run's report is already claimed, and returns
+// the channel closed once the claimed report returns, with whether this call
+// was the one that sent it.
+func (e *exitReports) report(correlationID string, send func()) (<-chan struct{}, bool) {
+	e.mu.Lock()
+
+	if reported, ok := e.claims[correlationID]; ok {
+		e.mu.Unlock()
+
+		return reported, false
+	}
+
+	reported := make(chan struct{})
+	if e.shutdown {
+		e.claims[correlationID] = reported
+	}
+
+	e.mu.Unlock()
+
+	defer close(reported)
+
+	send()
+
+	return reported, true
+}
+
+// claimed reports whether the run's report has been claimed since shutdown
+// began.
+func (e *exitReports) claimed(correlationID string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	_, ok := e.claims[correlationID]
+
+	return ok
 }
 
 // warnIfNotWorkerUID warns when serve's UID differs from the worker
@@ -524,9 +615,11 @@ func containerLogSink(
 // the proxy-token Revoke and RemoveSessionKey all run before the status
 // callback that lets CM admit a re-trigger. Every cleanup is keyed by this
 // run's correlation id, so a stale exit racing a re-trigger inside the
-// pump-drain window touches only its own run.
+// pump-drain window touches only its own run. The callback is skipped when the
+// shutdown sweep has already reported the run.
 func onContainerExit(
 	reporter webhook.StatusReporter,
+	reports *exitReports,
 	credentials *secrets.RunCredentials,
 	proxy tokenRevoker,
 	files *filelog.Logger,
@@ -547,13 +640,15 @@ func onContainerExit(
 
 		status, message := exitStatus(exitCode, cause)
 
-		ctx, cancel := context.WithTimeout(context.Background(), onExitTimeout)
-		defer cancel()
+		reports.report(correlationID, func() {
+			ctx, cancel := context.WithTimeout(context.Background(), onExitTimeout)
+			defer cancel()
 
-		if err := reporter.ReportStatus(ctx, cardID, project, status, message); err != nil {
-			logger.Error("report exit status callback failed",
-				"project", project, "card_id", cardID, "status", status, "error", err)
-		}
+			if err := reporter.ReportStatus(ctx, cardID, project, status, message); err != nil {
+				logger.Error("report exit status callback failed",
+					"project", project, "card_id", cardID, "status", status, "error", err)
+			}
+		})
 	}
 }
 
@@ -657,7 +752,7 @@ func launchEnv(cfg *config.ServiceConfig, secretsHostDir string) webhook.LaunchE
 		MCPURL:                    composeMCPURL(base),
 		MCPAPIKey:                 cfg.MCPAPIKey,
 		SecretsHostDir:            secretsHostDir,
-		LLMBaseURL:                containerLLMBaseURL(cfg),
+		LLMBaseURL:                llmproxy.WorkerBaseURL(cfg.ContainerServeURL, cfg.Port, llmproxy.DefaultPrefix),
 		CACertFile:                cfg.CACertFile,
 		MemoryBytes:               cfg.ContainerMemoryBytes,
 		PidsLimit:                 cfg.ContainerPidsLimit,
@@ -673,6 +768,11 @@ func launchEnv(cfg *config.ServiceConfig, secretsHostDir string) webhook.LaunchE
 		CompactionThreshold:       cfg.Compaction.Threshold,
 		CompactionKeepRecentTurns: cfg.Compaction.KeepRecentTurns,
 		WorkerExtraEnv:            flattenEnv(cfg.WorkerExtraEnv),
+
+		GatesPollIntervalSeconds:       cfg.GatesPollIntervalSeconds,
+		GatesCIWaitTimeoutSeconds:      cfg.GatesCIWaitTimeoutSeconds,
+		GatesCopilotWaitTimeoutSeconds: cfg.GatesCopilotWaitTimeoutSeconds,
+		GatesCopilotThreadReplies:      cfg.GatesCopilotThreadReplies,
 	}
 }
 
@@ -681,19 +781,6 @@ func launchEnv(cfg *config.ServiceConfig, secretsHostDir string) webhook.LaunchE
 // double slash.
 func composeMCPURL(base string) string {
 	return strings.TrimRight(base, "/") + "/mcp"
-}
-
-// containerLLMBaseURL is the LLM proxy URL as workers reach it. It is never
-// empty: an empty LLM_BASE_URL would send the token to the type's default
-// upstream, so an unset container_serve_url falls back to the host gateway
-// every worker maps host.docker.internal to.
-func containerLLMBaseURL(cfg *config.ServiceConfig) string {
-	base := cfg.ContainerServeURL
-	if base == "" {
-		base = "http://" + net.JoinHostPort("host.docker.internal", strconv.Itoa(cfg.Port))
-	}
-
-	return strings.TrimRight(base, "/") + webhook.LLMProxyPrefix
 }
 
 // flattenEnv renders a KEY:VALUE map into the KEY=VALUE slice the container

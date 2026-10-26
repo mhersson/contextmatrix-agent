@@ -47,6 +47,8 @@ type solverCtx struct {
 	// harness run and read by the pre-commit gate after it returns, on the
 	// goroutine that drives the subtask.
 	toolVerify verifyToolPass
+	// verifyBound: bindVerifyTool has registered the verify tool on tools.
+	verifyBound bool
 }
 
 // gateEvidence is what the pre-commit gate learned about this subtask. It
@@ -69,8 +71,7 @@ func runExecute(ctx context.Context, o *run) error {
 	// Resolve the verify plan once at execute entry (the first phase to reach the
 	// gate on a fresh run), so the resolution log fires early and the coder prompt
 	// can name the command. A budget park during the proposal tier propagates.
-	plan, err := o.ensureVerify(ctx)
-	if err != nil {
+	if _, err := o.ensureVerify(ctx); err != nil {
 		return err
 	}
 
@@ -82,14 +83,16 @@ func runExecute(ctx context.Context, o *run) error {
 		return o.runFanout(ctx)
 	}
 
-	o.bindVerifyTool(o.solver, plan)
-
 	ordered, err := topoOrder(o.subtasks)
 	if err != nil {
 		return fmt.Errorf("order subtasks: %w", err)
 	}
 
 	for _, sub := range ordered {
+		// Every subtask's gate re-resolves a skipped plan, so a subtask that adds
+		// a toolchain marker makes a command resolvable for the ones after it.
+		o.bindVerifyTool(o.solver, o.resolvedVerifyPlan())
+
 		if err := o.executeSubtaskWith(ctx, o.solver, sub); err != nil {
 			return err
 		}
@@ -100,17 +103,18 @@ func runExecute(ctx context.Context, o *run) error {
 
 // bindVerifyTool rebuilds the solver's registry with the run's verify tool, so
 // the coder calls the resolved command instead of guessing shell commands for
-// it. It binds here rather than in newRun because the plan resolves at this
-// point, not at construction. A run with no resolvable command leaves the
-// registry exactly as it was.
+// it. It binds in execute rather than in newRun because the plan resolves
+// there, not at construction. A plan with no command, or a solver that already
+// holds the tool, leaves the registry exactly as it was; a resolved command is
+// cached for the rest of the run, so one binding stays current.
 //
-// Ordering, since this mutates solver state mid-run: it runs after the plan has
-// resolved and before the first coder harness starts, on the goroutine that
-// drives the phase. Nothing reads sc.tools in between. A Best-of-N fan-out
-// cannot observe it at all - that branch returns above, o.solver is untouched by
-// the fan-out, and each candidate binds its own tool inside runCandidate.
+// Ordering, since this mutates solver state mid-run: it runs between coder
+// harness runs, on the goroutine that drives the phase, so nothing reads
+// sc.tools concurrently. A Best-of-N fan-out cannot observe it at all - that
+// branch returns above, o.solver is untouched by the fan-out, and each
+// candidate binds its own tool inside runCandidate.
 func (o *run) bindVerifyTool(sc *solverCtx, plan verifyPlan) {
-	if o.d.WriteToolsForDir == nil {
+	if sc.verifyBound || o.d.WriteToolsForDir == nil {
 		return
 	}
 
@@ -120,6 +124,7 @@ func (o *run) bindVerifyTool(sc *solverCtx, plan verifyPlan) {
 	}
 
 	sc.tools = o.d.WriteToolsForDir(sc.workspace, vt)
+	sc.verifyBound = true
 }
 
 // executeSubtaskWith runs one subtask end to end through the given solver:
@@ -389,7 +394,7 @@ func (o *run) emitAcceptedToolPass(sub subtaskRef) {
 //
 // Every other direction runs the gate, which is what makes this safe to skip:
 // every read error degrades to "assume moved", so a gate that cannot prove the
-// trees are identical behaves exactly as it did before.
+// trees are identical runs as usual.
 //
 // What the gate gives up is a re-run of the same command over the same bytes.
 // The tool ran it through runVerifyCommand, the same executor runVerifyPlan
@@ -427,7 +432,7 @@ func subtaskGateContext(subID string) string {
 // for it to actually exit on every exit path (complete, error, park), so it can
 // never outlive the claim - or this function's return. A candidate solver
 // (boardOps false) holds no claim, so it runs no heartbeat and no complete.
-func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtaskRef) error {
+func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtaskRef) (err error) {
 	d := o.d
 
 	// A tool verdict belongs to the subtask that earned it. Belt and braces on
@@ -473,6 +478,16 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 				checkpointBase = head
 			}
 		}
+	}
+
+	// A park pushes this subtask's unfinished tree as WIP; recording where the
+	// run started lets a resumed run tell that WIP from no work at all.
+	if headBefore != "" && sub.StartHead == "" {
+		defer func() {
+			if err != nil {
+				o.recordSubtaskStart(ctx, sub, headBefore)
+			}
+		}()
 	}
 
 	prompt := fmt.Sprintf(coderPrompt, o.skillEngage(), o.grounding, sc.workspace,
@@ -532,10 +547,14 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 	}
 
 	if sc.boardOps && !committed && o.headUnmoved(ctx, sc, headBefore) {
-		// Report while the claim is still held, as the verify park does.
-		o.reportSoloOutcome(ctx, sub.ID, pick, "failed", false, sc.ledger.Spent()-spendBefore)
+		if !o.earlierWorkVerified(ctx, sc, sub, headBefore) {
+			// Report while the claim is still held, as the verify park does.
+			o.reportSoloOutcome(ctx, sub.ID, pick, "failed", false, sc.ledger.Spent()-spendBefore)
 
-		return &EmptySubtaskError{Subtask: sub.ID}
+			return &EmptySubtaskError{Subtask: sub.ID}
+		}
+
+		o.d.logCard(ctx, "subtask %s: nothing left to change, and the work an earlier run left on the branch passes verify - completing it", sub.ID)
 	}
 
 	// Execute checkpoint: the mob critiques the committed diff (and may run
@@ -580,6 +599,60 @@ func (o *run) executeClaimedWith(ctx context.Context, sc *solverCtx, sub subtask
 	}
 
 	return nil
+}
+
+// startHeadKey is the subtask marker key recording the HEAD an unfinished
+// run of the subtask started from. Write-once: a later run starts on top of the
+// WIP an earlier park pushed, so only the first start marks where the
+// subtask's own work begins.
+const startHeadKey = "start"
+
+// recordSubtaskStart writes head as the subtask's start unless its marker
+// already carries one. Best-effort, and on WithoutCancel so a kill still
+// records it: a missing start only means a resumed coder that finds nothing
+// left to change parks as empty.
+func (o *run) recordSubtaskStart(ctx context.Context, sub subtaskRef, head string) {
+	ctx = context.WithoutCancel(ctx)
+
+	tc, err := o.d.Ops.GetTaskContext(ctx, sub.ID, false)
+	if err != nil {
+		slog.Warn("record subtask start: body fetch failed",
+			"card_id", o.d.Cfg.CardID, "subtask_id", sub.ID, "error", err)
+
+		return
+	}
+
+	kv, _ := readMeta(tc.Description)
+	if kv[startHeadKey] != "" {
+		return
+	}
+
+	kv[startHeadKey] = head
+
+	if err := o.d.Ops.UpdateCardBody(ctx, sub.ID, writeMeta(tc.Description, kv)); err != nil {
+		slog.Warn("record subtask start: body update failed",
+			"card_id", o.d.Cfg.CardID, "subtask_id", sub.ID, "error", err)
+	}
+}
+
+// earlierWorkVerified reports whether a coder that left nothing to commit found
+// its subtask already done: HEAD strictly descends from where an earlier,
+// unfinished run of this subtask started, and the pre-commit gate passed on
+// that tree. Anything unprovable reads as false, so the subtask parks as empty.
+func (o *run) earlierWorkVerified(ctx context.Context, sc *solverCtx, sub subtaskRef, head string) bool {
+	if !sc.gate.verified || sub.StartHead == "" || head == "" || head == sub.StartHead {
+		return false
+	}
+
+	base, err := sc.git.MergeBase(ctx, head, sub.StartHead)
+	if err != nil {
+		slog.Warn("empty subtask: merge base with its earlier start unreadable; parking",
+			"card_id", o.d.Cfg.CardID, "subtask_id", sub.ID, "error", err)
+
+		return false
+	}
+
+	return base == sub.StartHead
 }
 
 // headUnmoved reports whether HEAD still equals before. Either read failing
@@ -668,7 +741,7 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 			model, sub.Title, sub.Sizing.Bar, budgetLabel(sub.Sizing.Budget))
 		if sc.tag != "" {
 			// A candidate solver tags its log line so parallel selections are
-			// distinguishable; the parent (tag "") logs the bare line as before.
+			// distinguishable; the parent (tag "") logs the bare line.
 			logMsg = sc.tag + ": " + logMsg
 		}
 
@@ -692,7 +765,7 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 		// report_usage is not claim-gated, and folding candidate spend onto the
 		// parent's token_usage is what lets a resumed run's trigger context (and thus
 		// degradeN) see it. The parent/single-solver solver (boardOps) reports on the
-		// subtask as before.
+		// subtask.
 		target := sub.ID
 		if !sc.boardOps {
 			target = cfg.CardID
@@ -872,7 +945,7 @@ func (o *run) salvageCapped(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 	if cerr != nil || !committed {
 		// No commit (error or clean tree), no salvage: the diff is the only
 		// completion evidence a capped run has - an empty tree has none.
-		// The candidate drops exactly as before.
+		// The candidate drops.
 		return false
 	}
 
@@ -897,7 +970,7 @@ func (o *run) salvageCapped(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 //
 // Return contract: (true, nil) means salvaged - the caller returns nil. (false,
 // nil) means not salvaged - the caller returns the original MaxTurnsError
-// unchanged, today's park. (false, err) means not salvaged AND err must replace
+// unchanged. (false, err) means not salvaged AND err must replace
 // the original error on the caller's return path: these are the
 // *ToolchainMissingError cases below, whether raised while RESOLVING the plan
 // (ensureVerify) or while RUNNING it (runVerifyPlan, e.g. a container runtime

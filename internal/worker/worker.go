@@ -101,21 +101,25 @@ type RunSpec struct {
 	ContainerTimeout time.Duration
 
 	// GatesPollInterval is how often the pr_gates phase polls CI and Copilot
-	// review status. CMX_GATES_POLL_INTERVAL_SECONDS; default 60s.
+	// review status. CMX_GATES_POLL_INTERVAL_SECONDS, relayed from serve's
+	// gates_poll_interval_seconds.
 	GatesPollInterval time.Duration
 
 	// GatesCIWaitTimeout bounds how long the pr_gates phase waits for CI to
-	// finish before parking. CMX_GATES_CI_WAIT_TIMEOUT_SECONDS; default 45m.
+	// finish before parking. CMX_GATES_CI_WAIT_TIMEOUT_SECONDS, relayed from serve's
+	// gates_ci_wait_timeout_seconds.
 	GatesCIWaitTimeout time.Duration
 
 	// GatesCopilotWaitTimeout bounds how long the pr_gates phase waits for the
 	// requested Copilot review before proceeding without one.
-	// CMX_GATES_COPILOT_WAIT_TIMEOUT_SECONDS; default 20m.
+	// CMX_GATES_COPILOT_WAIT_TIMEOUT_SECONDS, relayed from serve's
+	// gates_copilot_wait_timeout_seconds.
 	GatesCopilotWaitTimeout time.Duration
 
 	// GatesCopilotThreadReplies posts the Copilot gate's triage verdicts back
 	// to the PR's review threads and resolves settled ones.
-	// CMX_GATES_COPILOT_THREAD_REPLIES; on unless set to exactly "false".
+	// CMX_GATES_COPILOT_THREAD_REPLIES, relayed from serve's
+	// gates_copilot_thread_replies; on unless set to exactly "false".
 	GatesCopilotThreadReplies bool
 
 	MaxCapability bool // CM_MAX_CAPABILITY; every pick chooses the most capable model in the tier regardless of price
@@ -288,7 +292,7 @@ func Run(ctx context.Context, spec RunSpec, ops CardOps, client llm.LLM, emit *e
 // base branch missing on the remote is created from BaseBranchFrom first, so
 // later cards of the playbook clone the shared base.
 func prepareWorkspace(ctx context.Context, git *Git, spec RunSpec) error {
-	if err := os.MkdirAll(spec.Workspace, 0o755); err != nil {
+	if err := os.MkdirAll(spec.Workspace, 0o755); err != nil { //nolint:gosec // G301: the workspace is a git checkout, which uses 0755
 		return fmt.Errorf("create workspace parent: %w", err)
 	}
 
@@ -667,15 +671,63 @@ func runFailureLine(redact func(string) string, err error) string {
 // in_progress -> blocked), so a failure here is logged and the park still
 // completes - never fatal.
 func parkBlocked(ctx context.Context, a fsmArgs, err error) (Result, error) {
-	if terr := a.ops.TransitionCard(ctx, a.spec.CardID, "blocked"); terr != nil {
-		slog.Warn("transition to blocked failed; leaving card state as-is",
-			"card", a.spec.CardID, "error", terr)
-	}
-
+	transitionToBlocked(ctx, a.ops, a.spec.CardID)
 	pushWIP(ctx, a)
 	releaseQuietly(ctx, a.ops, a.spec.CardID)
 
 	return Result{Reason: "error"}, fmt.Errorf("orchestrator: %w", err)
+}
+
+// transitionToBlocked moves the card to blocked. A review round can park after
+// the card entered review, which the default board lets move only to done or
+// in_progress, so a card that is in review goes by way of in_progress; a board
+// that refuses blocked from there too gets the card back in review rather than
+// in a lane that says work is still going on. Every failure is logged, never
+// fatal.
+func transitionToBlocked(ctx context.Context, ops CardOps, cardID string) {
+	err := ops.TransitionCard(ctx, cardID, "blocked")
+	if err == nil {
+		return
+	}
+
+	tcx, terr := ops.GetTaskContext(ctx, cardID, false)
+	if terr != nil {
+		slog.Warn("transition to blocked failed and the card state is unreadable; leaving card state as-is",
+			"card", cardID, "error", err, "state_error", terr)
+
+		return
+	}
+
+	if tcx.State != "review" {
+		slog.Warn("transition to blocked failed; leaving card state as-is",
+			"card", cardID, "error", err)
+
+		return
+	}
+
+	if ierr := ops.TransitionCard(ctx, cardID, "in_progress"); ierr != nil {
+		slog.Warn("transition to blocked failed and the card cannot leave review; leaving it in review",
+			"card", cardID, "blocked_error", err, "in_progress_error", ierr)
+
+		return
+	}
+
+	berr := ops.TransitionCard(ctx, cardID, "blocked")
+	if berr == nil {
+		return
+	}
+
+	// review, not start_review: the worker needs the move, not the review skill
+	// start_review returns.
+	if rerr := ops.TransitionCard(ctx, cardID, "review"); rerr != nil {
+		slog.Warn("transition to blocked failed after leaving review, and the card could not return to review; leaving it in in_progress",
+			"card", cardID, "blocked_error", berr, "review_error", rerr)
+
+		return
+	}
+
+	slog.Warn("transition to blocked failed after leaving review; returned the card to review",
+		"card", cardID, "error", berr)
 }
 
 // parkReason renders the park sentinel's own message, unwrapped from any
@@ -999,10 +1051,10 @@ func readOnlyToolsWithRoots(rrLog *orchestrator.ReadRootsLog, cardID, ws string,
 	}
 }
 
-// buildSkillTool constructs the per-run Skill tool from the mounted skills dir
+// buildSkillTool constructs the per-run skill tool from the mounted skills dir
 // and the per-card subset, wiring onEngage to report engagement on the
 // top-level card. Returns nil when no skills are available, so no-skills runs
-// register no Skill tool and stay byte-identical.
+// register no skill tool.
 func buildSkillTool(spec RunSpec, ops CardOps) tools.Tool {
 	if spec.TaskSkillsDir == "" {
 		return nil

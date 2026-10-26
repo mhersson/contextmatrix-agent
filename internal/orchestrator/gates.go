@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mhersson/contextmatrix-agent/internal/config"
 	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/mhersson/contextmatrix-harness/harness"
 )
@@ -26,11 +27,11 @@ const gatesRoundsCap = 3
 // A Deps built directly (tests, standalone runs) carries no knobs, so the gates
 // must never derive a zero poll interval or a zero wait from it.
 const (
-	defaultGatesPollInterval  = 60 * time.Second
-	defaultGatesCIWaitTimeout = 45 * time.Minute
+	defaultGatesPollInterval  = config.DefaultGatesPollIntervalSeconds * time.Second
+	defaultGatesCIWaitTimeout = config.DefaultGatesCIWaitTimeoutSeconds * time.Second
 	// Copilot typically posts 5-10 minutes after the request on a mid-size PR;
 	// 10 minutes left reviews at the top of that range unread.
-	defaultGatesCopilotWaitTimeout = 20 * time.Minute
+	defaultGatesCopilotWaitTimeout = config.DefaultGatesCopilotWaitTimeoutSeconds * time.Second
 )
 
 // gatesSectionHeading is the card-body section the pr_gates phase owns.
@@ -1306,7 +1307,7 @@ func (o *run) copilotFixRound(ctx context.Context, st *gatesState, findings []co
 	// FixTier is deliberately left empty: a gate finding is not scoped to one
 	// review round, so the card bar is the right fallback. The fixer's response
 	// is dropped: the gate, not a review round, judges what it pushed.
-	req := fixRequest{Findings: copilotFixFindings(findings), Round: st.CopilotRounds}
+	req := fixRequest{Findings: copilotFixFindings(findings), Round: st.CopilotRounds, Gate: "Copilot review"}
 	committed, _, err := o.runFix(ctx, req)
 
 	var mte *MaxTurnsError
@@ -1535,8 +1536,8 @@ func validCopilotFindings(findings []copilotFinding) []copilotFinding {
 }
 
 // copilotFindingLines renders findings in the "- <file>: <issue>" line shape
-// fixFiles parses the paths back out of for fixup targeting (formatFixes'
-// contract - keep the three in sync).
+// formatFixes gives review findings, for the card's detail line and the fix
+// prompt.
 func copilotFindingLines(findings []copilotFinding) string {
 	var b strings.Builder
 
@@ -2014,7 +2015,7 @@ func (o *run) ciFixRound(ctx context.Context, prURL string, st *gatesState, fail
 	// FixTier is deliberately left empty: a gate finding is not scoped to one
 	// review round, so the card bar is the right fallback. The fixer's response
 	// is dropped: the gate, not a review round, judges what it pushed.
-	req := fixRequest{Findings: ciFixFindings(digest), Round: st.CIRounds}
+	req := fixRequest{Findings: ciFixFindings(digest), Round: st.CIRounds, Gate: "CI"}
 	committed, _, err := o.runFix(ctx, req)
 
 	var mte *MaxTurnsError

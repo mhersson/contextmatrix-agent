@@ -3,10 +3,7 @@
 // optional operator-registered guests discuss a topic under a code-driven
 // moderator. The engine is phase-agnostic: callers set the briefing, lenses,
 // rounds, and synthesis instruction; the engine owns rounds, quorum,
-// convergence, budget, and transcript wiring. Wire and behavior spec:
-// docs/superpowers/specs/2026-07-10-a2a-coop-design.md (contextmatrix repo);
-// naming rename spec: docs/superpowers/specs/2026-07-12-mob-session-rename-design.md
-// (contextmatrix repo).
+// convergence, budget, and transcript wiring.
 package mob
 
 import (

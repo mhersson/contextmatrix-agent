@@ -73,7 +73,7 @@ func execTestDeps(ops *fakeOps, git *fakeGit, client llm.LLM) Deps {
 func newExecRun(d Deps, subs []subtaskRef, maxCost float64) *run {
 	d.Cfg.MaxCardCost = maxCost
 	tc := cmclient.TaskContext{Title: "Parent card", Description: "parent body"}
-	o := newRun(d, tc)
+	o := newRun(context.Background(), d, tc)
 	o.subtasks = subs
 	// Pre-resolve a skip plan so runExecute's ensureVerify is a cached no-op -
 	// execute tests exercise the coder loop, not verify resolution.
@@ -369,7 +369,7 @@ func TestPOCTestScopeReachesPlannerAndCoderPrompts(t *testing.T) {
 		d := planTestDeps(ops, llmFake)
 		d.Cfg.POC = poc
 
-		require.NoError(t, runPlan(context.Background(), newRun(d, ops.taskContext)))
+		require.NoError(t, runPlan(context.Background(), newRun(t.Context(), d, ops.taskContext)))
 		require.NotEmpty(t, llmFake.tasks)
 
 		return llmFake.tasks[0]
@@ -498,6 +498,120 @@ func TestExecuteEmptySubtaskParks(t *testing.T) {
 	}
 }
 
+// A park mid-subtask pushes the unfinished tree as WIP, so the resumed coder
+// can rightly find nothing left to change. Only work an earlier run of THIS
+// subtask left on the branch, passing the pre-commit gate, completes it; every
+// other empty result still parks.
+func TestExecuteResumedSubtaskCompletesOnItsEarlierWork(t *testing.T) {
+	tests := []struct {
+		name      string
+		startHead string // the head an earlier run of the subtask started from
+		mergeBase string // MergeBase(HEAD, startHead)
+		verified  bool
+		wantPark  bool
+	}{
+		{name: "earlier work on the branch passes verify and completes", startHead: "aaa", mergeBase: "aaa", verified: true},
+		{name: "fresh subtask with nothing to commit parks", verified: true, wantPark: true},
+		{name: "no commits beyond the earlier start parks", startHead: "bbb", mergeBase: "bbb", verified: true, wantPark: true},
+		{name: "head not descended from the earlier start parks", startHead: "aaa", mergeBase: "zzz", verified: true, wantPark: true},
+		{name: "unverified earlier work parks", startHead: "aaa", mergeBase: "aaa", wantPark: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			git := &fakeGit{committed: false, headSHA: "bbb", mergeBaseValue: tt.mergeBase}
+			llmFake := &planLLM{responses: []llm.Response{finishResp("chore: noop", 0.02)}}
+			d := execTestDeps(ops, git, llmFake)
+
+			o := newExecRun(d, []subtaskRef{{
+				ID: "SUB-1", Title: "First", State: "in_progress", Sizing: seedSizing("simple"), StartHead: tt.startHead,
+			}}, 0)
+
+			if tt.verified {
+				seedResolvedVerifyPlan(o)
+				o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+					return verifyexec.Outcome{ExitCode: 0}
+				}
+			}
+
+			err := runExecute(context.Background(), o)
+
+			opCalls := ops.recorded()
+
+			if tt.wantPark {
+				var ese *EmptySubtaskError
+
+				require.ErrorAs(t, err, &ese)
+				assert.Equal(t, -1, indexOfCall(opCalls, "CompleteTask:SUB-1"))
+
+				return
+			}
+
+			require.NoError(t, err)
+			assert.GreaterOrEqual(t, indexOfCall(opCalls, "CompleteTask:SUB-1"), 0)
+			assert.Empty(t, git.pushBranches, "nothing new was committed, so nothing is pushed")
+		})
+	}
+}
+
+// A claimed subtask that ends without completing records the head its run
+// started from, once, so a later run can tell the WIP the park pushes from no
+// work at all. Keys the marker already carries survive the write.
+func TestExecuteRecordsTheStartOfAnUnfinishedSubtask(t *testing.T) {
+	tests := []struct {
+		name      string
+		body      string
+		committed bool
+		wantStart string // "" = no write to the subtask card
+	}{
+		{
+			name:      "an unfinished subtask records its start",
+			body:      writeMeta("Do it.", metaKV{"bar": "complex", "budget": "2", "seed": "simple"}),
+			wantStart: "aaa",
+		},
+		{
+			name: "an earlier start is kept",
+			body: writeMeta("Do it.", metaKV{"bar": "complex", "budget": "2", "seed": "simple", "start": "zzz"}),
+		},
+		{
+			name:      "a completed subtask records nothing",
+			body:      writeMeta("Do it.", metaKV{"bar": "complex", "budget": "2", "seed": "simple"}),
+			committed: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{taskContexts: map[string]cmclient.TaskContext{"SUB-1": {Description: tt.body}}}
+			git := &fakeGit{committed: tt.committed, headSHA: "aaa"}
+			llmFake := &planLLM{responses: []llm.Response{finishResp("chore: noop", 0.02)}}
+			d := execTestDeps(ops, git, llmFake)
+
+			o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")}}, 0)
+			err := runExecute(context.Background(), o)
+
+			body, written := ops.bodyByCard["SUB-1"]
+			if tt.wantStart == "" {
+				assert.False(t, written, "the subtask card must not be rewritten")
+
+				return
+			}
+
+			var ese *EmptySubtaskError
+
+			require.ErrorAs(t, err, &ese)
+			require.True(t, written, "the unfinished subtask must record where it started")
+
+			kv, sz := readMeta(body)
+			assert.Equal(t, tt.wantStart, kv["start"])
+			assert.Equal(t, "simple", kv["seed"], "the marker's other keys survive")
+			assert.Equal(t, sizing{registry.TierComplex, 2}, sz, "the sizing survives")
+			assert.Equal(t, "Do it.", stripMeta(body))
+		})
+	}
+}
+
 func TestExecuteModelSelectionPin(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true}
@@ -506,7 +620,7 @@ func TestExecuteModelSelectionPin(t *testing.T) {
 	// The card pins a catalog-resolvable coder model.
 	tc := cmclient.TaskContext{Title: "Parent", Description: "body", ModelCoder: "pinned/model"}
 	d.Cfg.MaxCardCost = 0
-	o := newRun(d, tc)
+	o := newRun(t.Context(), d, tc)
 	isolateVerify(o)
 	o.subtasks = []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("complex")}}
 
@@ -539,7 +653,7 @@ func TestExecuteModelSelectionByComplexity(t *testing.T) {
 	// No coder pin -> complexity selection path.
 	tc := cmclient.TaskContext{Title: "Parent", Description: "body"}
 	d.Cfg.MaxCardCost = 0
-	o := newRun(d, tc)
+	o := newRun(t.Context(), d, tc)
 	isolateVerify(o)
 	o.subtasks = []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("moderate")}}
 
@@ -644,7 +758,7 @@ func TestExecuteBudget(t *testing.T) {
 	d := execTestDeps(ops, git, llmFake)
 	tc := cmclient.TaskContext{Title: "Parent", Description: "body", ReportedCostUSD: 0.50}
 	d.Cfg.MaxCardCost = 1.00
-	o := newRun(d, tc)
+	o := newRun(t.Context(), d, tc)
 	isolateVerify(o)
 	o.subtasks = []subtaskRef{
 		{ID: "SUB-1", Title: "One", Sizing: seedSizing("simple")},
@@ -1660,7 +1774,7 @@ func TestLogEnvironmentalCapBudgetNeverPersistsOrEmits(t *testing.T) {
 // exemption a skipped verify gets.
 func TestSalvageDeclineAfterVerifyPassKeepsTierAndReportsNoOutcome(t *testing.T) {
 	ops := &fakeOps{}
-	git := &fakeGit{committed: true, pushErr: errors.New("push boom")}
+	git := &fakeGit{committed: true, headSHA: "aaa", pushErr: errors.New("push boom")}
 	client := &planLLM{responses: burnResps(5)}
 	d := execTestDeps(ops, git, client)
 	d.Cfg.MaxTurns = 5
@@ -1680,9 +1794,12 @@ func TestSalvageDeclineAfterVerifyPassKeepsTierAndReportsNoOutcome(t *testing.T)
 	var mte *MaxTurnsError
 	require.ErrorAs(t, err, &mte)
 
-	assert.Equal(t, -1, indexOfCall(ops.recorded(), "UpdateCardBody:SUB-1"),
-		"a park after a passing verify must not touch the subtask body at all")
-	assert.Empty(t, ops.bodyFor("SUB-1"), "no sizing-marker write on a post-verify-pass park")
+	kv, sz := readMeta(ops.bodyFor("SUB-1"))
+	assert.Equal(t, "aaa", kv[startHeadKey], "the park records where the run started")
+
+	_, wantSizing := readMeta(legacyTierMarker("Implement the thing.", "moderate"))
+	assert.Equal(t, wantSizing, sz,
+		"a park after a passing verify leaves the sizing marker unchanged")
 	assert.Empty(t, ops.reportOutcomes,
 		"an infrastructure park after a passing verify is not evidence about the model")
 }
@@ -1691,14 +1808,14 @@ func TestSalvageDeclineAfterVerifyPassKeepsTierAndReportsNoOutcome(t *testing.T)
 // TestSalvageDeclineAfterVerifyPassKeepsTierAndReportsNoOutcome for the OTHER
 // post-verify-pass park cause: the push succeeds but the board's CompleteTask
 // call fails. Same tier contract - the model's work is proven correct, so
-// this is an infrastructure park that must not touch the marker. The
+// this is an infrastructure park that must not change the sizing. The
 // outcome differs from the push case only because the win report fires
 // BEFORE the doomed CompleteTask attempt (claim-gating requires it): exactly
 // one "win" row stands, and the CompleteTask failure gets no second,
 // contradictory report of its own.
 func TestSalvageDeclineAfterCompleteTaskFailKeepsTierAndWinRow(t *testing.T) {
 	ops := &fakeOps{completeTaskErr: errors.New("complete task boom")}
-	git := &fakeGit{committed: true}
+	git := &fakeGit{committed: true, headSHA: "aaa"}
 	client := &planLLM{responses: burnResps(5)}
 	d := execTestDeps(ops, git, client)
 	d.Cfg.MaxTurns = 5
@@ -1718,9 +1835,12 @@ func TestSalvageDeclineAfterCompleteTaskFailKeepsTierAndWinRow(t *testing.T) {
 	var mte *MaxTurnsError
 	require.ErrorAs(t, err, &mte)
 
-	assert.Equal(t, -1, indexOfCall(ops.recorded(), "UpdateCardBody:SUB-1"),
-		"a park after a passing verify must not touch the subtask body at all")
-	assert.Empty(t, ops.bodyFor("SUB-1"), "no sizing-marker write on a post-verify-pass park")
+	kv, sz := readMeta(ops.bodyFor("SUB-1"))
+	assert.Equal(t, "aaa", kv[startHeadKey], "the park records where the run started")
+
+	_, wantSizing := readMeta(legacyTierMarker("Implement the thing.", "moderate"))
+	assert.Equal(t, wantSizing, sz,
+		"a park after a passing verify leaves the sizing marker unchanged")
 	require.Len(t, ops.reportOutcomes, 1, "exactly one outcome row - no duplicate report on the CompleteTask failure")
 	rows := ops.reportOutcomes[0]
 	require.Len(t, rows, 1)
@@ -1730,13 +1850,15 @@ func TestSalvageDeclineAfterCompleteTaskFailKeepsTierAndWinRow(t *testing.T) {
 
 // markerMidRunLLM wraps a scripted LLM and writes a toolchain marker file into
 // dir the first time it is called, simulating a coder run that introduces
-// project scaffolding (e.g. a pom.xml) mid-run: the run's FIRST verify
-// resolution (before the coder loop starts) sees nothing, but a SECOND
-// resolution after that point sees the marker.
+// project scaffolding mid-run: the run's FIRST verify resolution (before the
+// coder loop starts) sees nothing, but a SECOND resolution after that point
+// sees the marker.
 type markerMidRunLLM struct {
 	inner   llm.LLM
 	t       *testing.T
 	dir     string
+	marker  string // file name written into dir
+	content string
 	written bool
 }
 
@@ -1747,7 +1869,7 @@ func (m *markerMidRunLLM) writeMarkerOnce() {
 
 	m.written = true
 
-	writeFile(m.t, m.dir, "pom.xml", "<project></project>\n")
+	writeFile(m.t, m.dir, m.marker, m.content)
 }
 
 func (m *markerMidRunLLM) Send(ctx context.Context, req llm.Request) (llm.Response, error) {
@@ -1781,7 +1903,7 @@ func TestSoloTurnCapPropagatesToolchainSentinel(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true} // a dirty tree the salvage commit captures
 	inner := &planLLM{responses: burnResps(5)}
-	client := &markerMidRunLLM{inner: inner, t: t, dir: dir}
+	client := &markerMidRunLLM{inner: inner, t: t, dir: dir, marker: "pom.xml", content: "<project></project>\n"}
 	d := execTestDeps(ops, git, client)
 	d.Cfg.MaxTurns = 5
 	d.Cfg.Workspace = dir
@@ -2104,7 +2226,7 @@ func TestSoloTurnCapToolchainSentinelReportsNoOutcome(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true}
 	inner := &planLLM{responses: burnResps(5)}
-	client := &markerMidRunLLM{inner: inner, t: t, dir: dir}
+	client := &markerMidRunLLM{inner: inner, t: t, dir: dir, marker: "pom.xml", content: "<project></project>\n"}
 	d := execTestDeps(ops, git, client)
 	d.Cfg.MaxTurns = 5
 	d.Cfg.Workspace = dir

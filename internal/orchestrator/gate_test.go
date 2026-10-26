@@ -42,7 +42,7 @@ func gateRun(ops *fakeOps, inbox *fakeInbox, interactive bool, client llm.LLM, t
 		},
 	}
 
-	return newRun(d, cmclient.TaskContext{Title: "T", Description: "body", ReportedCostUSD: reported})
+	return newRun(context.Background(), d, cmclient.TaskContext{Title: "T", Description: "body", ReportedCostUSD: reported})
 }
 
 func TestGateAutonomousPassesThrough(t *testing.T) {
@@ -114,6 +114,19 @@ func TestGateClassificationParseFailureIsAdjust(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, gateAdjust, outcome, "an unparseable verdict is never an approval")
 	assert.Equal(t, "hmm, not sure", fb, "feedback falls back to the raw reply")
+}
+
+func TestGateClassificationModelErrorIsAdjust(t *testing.T) {
+	ops := &fakeOps{}
+	inbox := &fakeInbox{msgs: []harness.UserMessage{{Content: "approve"}}}
+	// The scripted reply would approve; the failing call must keep it from counting.
+	client := &planLLM{responses: []llm.Response{stopResp(`{"verdict":"approve"}`, 0.001)}, errAfter: 1}
+	o := gateRun(ops, inbox, true, client, nil, 0, 0)
+
+	outcome, fb, err := o.gate(context.Background(), gatePlanApproval, fixedGateModel("payload/model"), "plan?")
+	require.NoError(t, err)
+	assert.Equal(t, gateAdjust, outcome, "a classification error is never an approval")
+	assert.Equal(t, "approve", fb, "feedback falls back to the raw reply")
 }
 
 func TestGateEmitsAwaitingHuman(t *testing.T) {

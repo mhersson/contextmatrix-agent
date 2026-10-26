@@ -3,7 +3,8 @@
 # The worker-image-scan job fails on CRITICAL/HIGH vulnerabilities that have an
 # upstream fix (ignore-unfixed: true). Every entry must carry a justification;
 # review on each worker-image / Go-dependency bump and delete entries whose fix
-# has shipped. Dependabot (.github/dependabot.yml) tracks the underlying bumps.
+# has shipped. Dependabot tracks the Go modules, GitHub Actions and base images;
+# the yq, Task, gh, Node and npm pins are bumped by hand (see Dockerfile.worker).
 
 # --- The yq v4.54.1 (/usr/local/bin/yq) and Task v3.54.0 (/usr/local/bin/task)
 # binaries are prebuilt upstream releases compiled with Go 1.27.1 and
@@ -24,7 +25,7 @@ CVE-2026-78669
 CVE-2026-97031
 
 # --- The bundled npm CLI (12.2.1, the worker's pin and the latest release)
-# ships undici 6.29.0 (/usr/lib/node_modules/npm/node_modules/undici); the fix
+# ships undici 6.29.0 (/usr/local/lib/node_modules/npm/node_modules/undici); the fix
 # is 6.29.1. CVE-2026-109869 is a DoS via an unhandled stream error in npm's own
 # registry client - the worst case is one failed npm command on the
 # single-tenant worker. npm's own transitive dependency - clears when an npm

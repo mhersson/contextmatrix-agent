@@ -1,18 +1,10 @@
-# Keep the build context to what the multi-stage build actually needs
+# Allowlist: the build context is only what the multi-stage build COPYs
 # (go.mod, go.sum, cmd/, internal/).
-.git
-docker
-.dockerignore
-
-# Built binary and local artifacts (mirrors .gitignore).
-contextmatrix-agent
-*.test
-.envrc
-transcripts
-eval-out
-*-RESULTS.md
-capabilities-*.json
-capabilities-*.md
+*
+!go.mod
+!go.sum
+!cmd/
+!internal/
 
 # Worker images carry no build history.
 internal/buildinfo/history/merges.log

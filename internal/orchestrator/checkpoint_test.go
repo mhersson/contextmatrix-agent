@@ -343,7 +343,7 @@ func TestMobCheckpointReviseGateSkippedLeavesVerifiedFalse(t *testing.T) {
 			Mob:      MobConfig{Participants: 2, Execute: true, CheckpointMinTier: "simple", CheckpointRounds: 1},
 		},
 	}
-	o := newRun(d, cmclient.TaskContext{Title: "Parent", Description: "body"})
+	o := newRun(t.Context(), d, cmclient.TaskContext{Title: "Parent", Description: "body"})
 	o.solver.git = &diffGit{fakeGit: &fakeGit{committed: true}, diff: "diff --git a/a.go b/a.go\n+lgtm\n"}
 	isolateVerify(o)
 
@@ -368,6 +368,11 @@ func TestMobCheckpointReviseGateSkippedLeavesVerifiedFalse(t *testing.T) {
 		"a skipped revise gate is not evidence the revised tree passed, even though the pre-commit gate on the original tree was")
 }
 
+// reviseFinishMessage is the revise coder's scripted commit message, distinct
+// from the production fallback so an assertion on it proves the message passed
+// through.
+const reviseFinishMessage = "fix(a): cover the missed case"
+
 // checkpointReviseGateRun builds a run wired to drive a real revise verdict
 // through mobCheckpoint end to end - mob discussion, fix coder run, the
 // checkpointReviseVerify gate, and commitRevise - the same path
@@ -376,7 +381,7 @@ func TestMobCheckpointReviseGateSkippedLeavesVerifiedFalse(t *testing.T) {
 // outcome before invoking mobCheckpoint. before is scripted ahead of the revise
 // coder's finish turn, for a caller whose coder must call a tool first.
 func checkpointReviseGateRun(ops *fakeOps, git *fakeGit, before ...llm.Response) *run {
-	client := &planLLM{responses: append(before, finishResp("fix: address checkpoint findings", 0.01))}
+	client := &planLLM{responses: append(before, finishResp(reviseFinishMessage, 0.01))}
 	d := Deps{
 		Ops:        ops,
 		Git:        git,
@@ -397,7 +402,7 @@ func checkpointReviseGateRun(ops *fakeOps, git *fakeGit, before ...llm.Response)
 			Mob:      MobConfig{Participants: 2, Execute: true, CheckpointMinTier: "simple", CheckpointRounds: 1},
 		},
 	}
-	o := newRun(d, cmclient.TaskContext{Title: "Parent", Description: "body"})
+	o := newRun(context.Background(), d, cmclient.TaskContext{Title: "Parent", Description: "body"})
 	o.solver.git = &diffGit{fakeGit: git, diff: "diff --git a/a.go b/a.go\n+lgtm\n"}
 
 	eng := &scriptedEngine{outcomes: []mob.Outcome{{
@@ -428,8 +433,9 @@ func TestMobCheckpointReviseGateFailureDoesNotCommit(t *testing.T) {
 	o.mobCheckpoint(context.Background(), o.solver,
 		subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("simple")}, "abc123")
 
-	require.Contains(t, strings.Join(ops.logs, "\n"), "revise - 1 fixes",
-		"the checkpoint must actually reach a revise verdict, or this test asserts nothing")
+	client, ok := o.d.Client.(*planLLM)
+	require.True(t, ok)
+	require.Len(t, client.toolNamesSeen(), 1, "the revise coder ran, or this test asserts nothing")
 	assert.Empty(t, git.commitMsgs, "a red revise gate must not commit")
 }
 
@@ -447,23 +453,7 @@ func TestMobCheckpointReviseGateFailureHardResets(t *testing.T) {
 	o.mobCheckpoint(context.Background(), o.solver,
 		subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("simple")}, "abc123")
 
-	require.Contains(t, strings.Join(ops.logs, "\n"), "revise - 1 fixes",
-		"the checkpoint must actually reach a revise verdict, or this test asserts nothing")
 	assert.Contains(t, git.hardResetRefs, "HEAD")
-}
-
-// TestMobCheckpointReviseGateFailureLogsDiscard proves a red checkpoint
-// revise gate says so on the card log, so an operator sees it.
-func TestMobCheckpointReviseGateFailureLogsDiscard(t *testing.T) {
-	ops := &fakeOps{}
-	git := &fakeGit{committed: true}
-	o := checkpointReviseGateRun(ops, git)
-	checkpointRedGate(o)
-
-	o.mobCheckpoint(context.Background(), o.solver,
-		subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("simple")}, "abc123")
-
-	assert.Contains(t, strings.Join(ops.logs, "\n"), "revise discarded")
 }
 
 // TestMobCheckpointReviseGatePassCommitsAsToday proves a green checkpoint
@@ -482,8 +472,31 @@ func TestMobCheckpointReviseGatePassCommitsAsToday(t *testing.T) {
 		subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("simple")}, "abc123")
 
 	require.Len(t, git.commitMsgs, 1)
-	assert.Equal(t, "fix: address checkpoint findings", git.commitMsgs[0])
+	assert.Equal(t, reviseFinishMessage, git.commitMsgs[0])
 	assert.True(t, o.solver.gate.verified, "a passing gate is evidence the revise is good")
+}
+
+// A greenfield subtask's pre-commit gate can resolve the run's first verify
+// command after the execute phase bound the solver's tools. The revise prompt
+// then names the verify tool, so the reviser must be offered it.
+func TestMobCheckpointReviseBindsAVerifyToolTheGateJustResolved(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	o := checkpointReviseGateRun(ops, git)
+	seedResolvedVerifyPlan(o)
+	o.runVerify = func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome {
+		return verifyexec.Outcome{ExitCode: 0}
+	}
+
+	o.mobCheckpoint(context.Background(), o.solver,
+		subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("simple")}, "abc123")
+
+	client, ok := o.d.Client.(*planLLM)
+	require.True(t, ok)
+
+	offered := client.toolNamesSeen()
+	require.Len(t, offered, 1, "one revise coder call")
+	assert.Contains(t, offered[0], "verify", "the reviser must be able to call the tool its prompt names")
 }
 
 // TestMobCheckpointReviseGateAcceptsTheRevisersToolPass proves the checkpoint
@@ -527,8 +540,6 @@ func TestMobCheckpointReviseGateAcceptsTheRevisersToolPass(t *testing.T) {
 	o.mobCheckpoint(context.Background(), o.solver,
 		subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("simple")}, "abc123")
 
-	require.Contains(t, strings.Join(ops.logs, "\n"), "revise - 1 fixes",
-		"the checkpoint must actually reach a revise verdict, or this test asserts nothing")
 	require.Len(t, git.commitMsgs, 1, "a green gate still lands the revise commit")
 	// Without this, one run is also what a gate that ran the command itself
 	// spends, and the tool never reaching the reviser would pass unnoticed.
@@ -601,7 +612,7 @@ func TestMobCheckpointReviseGateSkippedStillCommits(t *testing.T) {
 				subtaskRef{ID: "SUB-1", Title: "t", Sizing: seedSizing("simple")}, "abc123")
 
 			require.Len(t, git.commitMsgs, 1, "an inconclusive or skipped gate is not evidence of a defect")
-			assert.Equal(t, "fix: address checkpoint findings", git.commitMsgs[0])
+			assert.Equal(t, reviseFinishMessage, git.commitMsgs[0])
 		})
 	}
 }

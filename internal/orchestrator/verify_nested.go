@@ -11,8 +11,8 @@ import (
 )
 
 // One level of nesting: a monorepo with backend/pom.xml + frontend/package.json
-// and no root markers previously resolved NOTHING, so the review gate ran with
-// no machine verification at all. detectNested scans first-level subdirectories
+// and no root markers would otherwise resolve NOTHING, leaving the review gate
+// with no machine verification. detectNested scans first-level subdirectories
 // with the same marker priorities and emits WORKSPACE-ROOTED scoped commands
 // (mvn -f, npm --prefix, go test -C, ...), composing several modules with &&.
 

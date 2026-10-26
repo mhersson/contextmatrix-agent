@@ -13,12 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestHasDesignSection(t *testing.T) {
-	assert.True(t, hasDesignSection("intro\n\n## Design\n\nstuff"))
-	assert.False(t, hasDesignSection("intro\n\n## Plan\n\nstuff"))
-	assert.False(t, hasDesignSection(""))
-}
-
 func TestExtractDesign(t *testing.T) {
 	t.Run("no marker", func(t *testing.T) {
 		_, done := extractDesign("Let's discuss. What palette sizes do you need?")
@@ -29,7 +23,7 @@ func TestExtractDesign(t *testing.T) {
 		out := "Great.\n\n## Design\n\nA palette config with N slots.\n\nDESIGN_COMPLETE"
 		design, done := extractDesign(out)
 		assert.True(t, done)
-		assert.True(t, hasDesignSection(design), "the captured text is the design section")
+		assert.NotEmpty(t, recordedDesign(design), "the captured text is the design section")
 		assert.NotContains(t, design, "DESIGN_COMPLETE", "the marker line is stripped")
 		assert.Contains(t, design, "A palette config")
 	})
@@ -44,7 +38,9 @@ func TestExtractDesign(t *testing.T) {
 
 // brainstormRun builds a *run wired for brainstorm tests: scripted ops, a planLLM
 // serving the model turns, and an injected inbox serving the human turns.
-func brainstormRun(ops *fakeOps, inbox *fakeInbox, client llm.LLM, maxCost, reported float64) *run {
+func brainstormRun(t *testing.T, ops *fakeOps, inbox *fakeInbox, client llm.LLM, maxCost, reported float64) *run {
+	t.Helper()
+
 	d := Deps{
 		Ops:       ops,
 		Client:    client,
@@ -59,7 +55,7 @@ func brainstormRun(ops *fakeOps, inbox *fakeInbox, client llm.LLM, maxCost, repo
 		},
 	}
 
-	return newRun(d, cmclient.TaskContext{Title: "Add a palette", Description: "body", ReportedCostUSD: reported})
+	return newRun(t.Context(), d, cmclient.TaskContext{Title: "Add a palette", Description: "body", ReportedCostUSD: reported})
 }
 
 func TestBrainstormRecordsDesignOnMarker(t *testing.T) {
@@ -69,11 +65,11 @@ func TestBrainstormRecordsDesignOnMarker(t *testing.T) {
 		stopResp("Which approach: A or B?", 0.01),
 		stopResp("## Design\n\nApproach A: a palette config.\n\nDESIGN_COMPLETE", 0.01),
 	}}
-	o := brainstormRun(ops, inbox, client, 0, 0)
+	o := brainstormRun(t, ops, inbox, client, 0, 0)
 
 	design, err := o.runBrainstorm(context.Background(), fixedGateModel("payload/model"))
 	require.NoError(t, err)
-	assert.True(t, hasDesignSection(o.body), "## Design recorded on the card body; body=%q", o.body)
+	assert.NotEmpty(t, recordedDesign(o.body), "## Design recorded on the card body; body=%q", o.body)
 	assert.Contains(t, ops.lastBody(), "Approach A")
 	assert.Contains(t, design, "Approach A", "returned design carries the recorded design text")
 }
@@ -82,12 +78,12 @@ func TestBrainstormPromoteEndsWithoutDesign(t *testing.T) {
 	ops := &fakeOps{}
 	inbox := &fakeInbox{} // no messages, not blocking -> ErrInboxClosed after turn 1 (promote)
 	client := &planLLM{responses: []llm.Response{stopResp("What sizes do you need?", 0.01)}}
-	o := brainstormRun(ops, inbox, client, 0, 0)
+	o := brainstormRun(t, ops, inbox, client, 0, 0)
 
 	design, err := o.runBrainstorm(context.Background(), fixedGateModel("payload/model"))
 	require.NoError(t, err)
 	assert.Empty(t, design, "no design returned on a mid-dialogue promote")
-	assert.False(t, hasDesignSection(o.body), "no design recorded on a mid-dialogue promote")
+	assert.Empty(t, recordedDesign(o.body), "no design recorded on a mid-dialogue promote")
 	assert.True(t, ops.loggedContains("promoted"), "promote logged; logs=%v", ops.logs)
 }
 
@@ -95,7 +91,7 @@ func TestBrainstormEndSessionParks(t *testing.T) {
 	ops := &fakeOps{}
 	inbox := &fakeInbox{block: true}
 	client := &planLLM{responses: []llm.Response{stopResp("What sizes do you need?", 0.01)}}
-	o := brainstormRun(ops, inbox, client, 0, 0)
+	o := brainstormRun(t, ops, inbox, client, 0, 0)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -107,7 +103,7 @@ func TestBrainstormEndSessionParks(t *testing.T) {
 func TestBrainstormBudgetParks(t *testing.T) {
 	ops := &fakeOps{}
 	inbox := &fakeInbox{}
-	o := brainstormRun(ops, inbox, &planLLM{}, 1.0, 2.0) // already over budget
+	o := brainstormRun(t, ops, inbox, &planLLM{}, 1.0, 2.0) // already over budget
 
 	_, err := o.runBrainstorm(context.Background(), fixedGateModel("payload/model"))
 
@@ -122,7 +118,7 @@ func TestBrainstormPromptOmitsRecordedHistory(t *testing.T) {
 		stopResp("Which approach?", 0.01),
 		stopResp("## Design\n\nApproach A.\n\nDESIGN_COMPLETE", 0.01),
 	}}
-	o := brainstormRun(ops, inbox, client, 0, 0)
+	o := brainstormRun(t, ops, inbox, client, 0, 0)
 	o.tc.Description = "Add a palette.\n\n## Plan\n\n1. SUBTASK: old\n\n## Review Findings\n\n- old note\n"
 	o.taskDescription = stripAgentSections(o.tc.Description)
 
@@ -136,7 +132,7 @@ func TestBrainstormPromptOmitsRecordedHistory(t *testing.T) {
 
 func TestBrainstormEmptyReplyStreakKeepsWaiting(t *testing.T) {
 	inbox := &fakeInbox{} // closed inbox ends the dialogue after the turn
-	o := brainstormRun(&fakeOps{}, inbox, &planLLM{responses: emptyReplies()}, 0, 0)
+	o := brainstormRun(t, &fakeOps{}, inbox, &planLLM{responses: emptyReplies()}, 0, 0)
 
 	design, err := o.runBrainstorm(context.Background(), fixedGateModel("payload/model"))
 

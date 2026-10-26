@@ -151,6 +151,7 @@ func (o *run) reconcile(ctx context.Context) error {
 				kv, s := readMeta(tc.Description)
 				ref.Sizing = s
 				ref.PlannerBar = kv["seed"]
+				ref.StartHead = kv[startHeadKey]
 
 				if body := stripMeta(tc.Description); body != "" {
 					ref.Body = body

@@ -141,7 +141,7 @@ func newWorkCmd() *cobra.Command {
 // withRunID attaches the run's correlation id (CM_RUN_ID) as a default
 // attribute, so every worker slog line carries it and can be joined to
 // serve-side per-run records. An empty id - an older serve, or tests - leaves
-// the logger unchanged and the output byte-identical to today.
+// the logger unchanged.
 func withRunID(logger *slog.Logger, runID string) *slog.Logger {
 	if runID == "" {
 		return logger
@@ -230,17 +230,17 @@ func specFromEnv() (worker.RunSpec, error) {
 		return worker.RunSpec{}, err
 	}
 
-	gatesPollSeconds, err := envInt("CMX_GATES_POLL_INTERVAL_SECONDS", 60)
+	gatesPollSeconds, err := envInt("CMX_GATES_POLL_INTERVAL_SECONDS", config.DefaultGatesPollIntervalSeconds)
 	if err != nil {
 		return worker.RunSpec{}, err
 	}
 
-	gatesCIWaitSeconds, err := envInt("CMX_GATES_CI_WAIT_TIMEOUT_SECONDS", 2700)
+	gatesCIWaitSeconds, err := envInt("CMX_GATES_CI_WAIT_TIMEOUT_SECONDS", config.DefaultGatesCIWaitTimeoutSeconds)
 	if err != nil {
 		return worker.RunSpec{}, err
 	}
 
-	gatesCopilotWaitSeconds, err := envInt("CMX_GATES_COPILOT_WAIT_TIMEOUT_SECONDS", 1200)
+	gatesCopilotWaitSeconds, err := envInt("CMX_GATES_COPILOT_WAIT_TIMEOUT_SECONDS", config.DefaultGatesCopilotWaitTimeoutSeconds)
 	if err != nil {
 		return worker.RunSpec{}, err
 	}

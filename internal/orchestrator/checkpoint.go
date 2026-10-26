@@ -157,6 +157,10 @@ func (o *run) mobCheckpoint(ctx context.Context, sc *solverCtx, sub subtaskRef, 
 		return
 	}
 
+	// This subtask's pre-commit gate may have resolved the run's first command
+	// after execute bound the solver's tools; the revise prompt names the tool.
+	o.bindVerifyTool(sc, o.resolvedVerifyPlan())
+
 	findings := formatFixes(verdict{Fixes: v.Fixes})
 	prompt := fmt.Sprintf(checkpointRevisePrompt, o.skillEngage(), o.grounding, sc.workspace,
 		verifyCommandBlock(o.resolvedVerifyPlan()), sub.Title, findings)

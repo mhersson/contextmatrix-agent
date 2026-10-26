@@ -44,5 +44,3 @@ The request metrics' `endpoint` label includes `llm/chat/completions` and
 often longer than the histogram's top bucket, so filter latency alerts by
 endpoint. `code="aborted"` counts a handler that panicked, for example the
 proxy aborting a stream after the worker dropped it.
-
-Deferred: panic-recovery counting and OTEL tracing.

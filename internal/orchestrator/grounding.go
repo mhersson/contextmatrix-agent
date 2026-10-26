@@ -36,7 +36,7 @@ const (
 // rules". Listing a nested doc's path lets the model read it on demand without
 // that masquerade. Best-effort: a missing or non-directory root yields nils and
 // the run proceeds ungrounded.
-func discoverGrounding(root string) (*groundingDoc, []string) {
+func discoverGrounding(ctx context.Context, root string) (*groundingDoc, []string) {
 	if root == "" {
 		return nil, nil
 	}
@@ -55,7 +55,7 @@ func discoverGrounding(root string) (*groundingDoc, []string) {
 	// Nested docs: one subprocess in a git workspace (tracked files only, so
 	// gitignored and untracked trees are structurally excluded); a filesystem
 	// walk otherwise. Both feed the same post-filter for uniform semantics.
-	candidates, ok := gitTrackedNested(root)
+	candidates, ok := gitTrackedNested(ctx, root)
 	if !ok {
 		candidates = walkNested(root)
 	}
@@ -70,8 +70,8 @@ func discoverGrounding(root string) (*groundingDoc, []string) {
 // non-zero), signalling the caller to fall back to a filesystem walk. Returned
 // paths are slash-separated and relative to root; filtering happens in
 // filterNested.
-func gitTrackedNested(root string) ([]string, bool) {
-	cmd := exec.CommandContext(context.Background(), "git", "-C", root,
+func gitTrackedNested(ctx context.Context, root string) ([]string, bool) {
+	cmd := exec.CommandContext(ctx, "git", "-C", root,
 		"ls-files", "-z", "--", "*/AGENTS.md", "*/CLAUDE.md") //nolint:gosec // fixed args; root is the workspace path
 
 	out, err := cmd.Output()

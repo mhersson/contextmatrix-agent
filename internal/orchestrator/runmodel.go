@@ -54,6 +54,18 @@ func (e *IncapableError) Error() string {
 	return fmt.Sprintf("model %q is harness-incapable: %s", e.Model, e.Reason)
 }
 
+// incapableError is the IncapableError for an incapable harness result: the
+// harness's own IncapableDetail when it classified the failure, else the
+// generic reason.
+func incapableError(model string, res harness.Result) *IncapableError {
+	reason := res.IncapableDetail
+	if reason == "" {
+		reason = "cannot drive the tool loop"
+	}
+
+	return &IncapableError{Model: model, Reason: reason}
+}
+
 // harnessConfig builds the per-phase harness.Config with the run-wide safety
 // fields (size cap, secret redaction) plus the model's own context window.
 // Centralizing this is the guard against a new phase forgetting the hardening.
@@ -106,14 +118,15 @@ func reasoningRaw(effort string) json.RawMessage {
 		return nil
 	}
 
-	raw, _ := (llm.Reasoning{Effort: &effort}).Raw() //nolint:errcheck
+	raw, _ := (llm.Reasoning{Effort: &effort}).Raw()
 
 	return raw
 }
 
 // runModel routes a phase model-call through the centralized config and
-// normalizes a context_limit/incapable result into a typed error. The returned
-// duration is the wall time of the harness step, threaded to spendAndReport.
+// normalizes a context_limit/incapable result, or a final reply cut at the token
+// limit at the context hard stop, into a typed error. The returned duration is
+// the wall time of the harness step, threaded to spendAndReport.
 func (o *run) runModel(ctx context.Context, reg *tools.Registry, prompt, model string) (harness.Result, time.Duration, error) {
 	return o.runModelCfg(ctx, reg, prompt, model, o.harnessConfig(model))
 }
@@ -123,21 +136,27 @@ func (o *run) runModel(ctx context.Context, reg *tools.Registry, prompt, model s
 // can report it to CM by return value - never via a shared field on run, which
 // concurrent Best-of-N candidates and mob seats would race on.
 func (o *run) runModelCfg(ctx context.Context, reg *tools.Registry, prompt, model string, cfg harness.Config) (harness.Result, time.Duration, error) {
+	client := &lastReplyClient{LLM: o.d.Client}
+
 	start := time.Now()
-	res, err := harness.Run(ctx, o.d.Client, reg, o.d.Emit, prompt, cfg)
+	res, err := harness.Run(ctx, client, reg, o.d.Emit, prompt, cfg)
 	dur := time.Since(start)
 
 	if err == nil && res.Reason == "context_limit" {
 		return res, dur, &ContextLimitError{Model: model, ContextWindow: o.d.Registry.ContextWindow(model)}
 	}
 
-	if err == nil && res.Reason == harness.ReasonIncapable {
-		reason := res.IncapableDetail
-		if reason == "" {
-			reason = "cannot drive the tool loop"
-		}
+	// A final reply skips the hard stop and completes as done, so one the
+	// provider cut at its token limit with the prompt already at that stop parks
+	// as the stop would. A cut below it is the output cap, left to the caller.
+	// CompletionArgs is nil only for a run ended by a reply.
+	if err == nil && res.Reason == "done" && res.CompletionArgs == nil &&
+		client.finishReason == "length" && cfg.ContextWindow > 0 && client.promptTokens >= hardStopTokens(cfg) {
+		return res, dur, &ContextLimitError{Model: model, ContextWindow: o.d.Registry.ContextWindow(model)}
+	}
 
-		return res, dur, &IncapableError{Model: model, Reason: reason}
+	if err == nil && res.Reason == harness.ReasonIncapable {
+		return res, dur, incapableError(model, res)
 	}
 
 	if err == nil && res.Reason == "max_turns" {
@@ -145,6 +164,60 @@ func (o *run) runModelCfg(ctx context.Context, reg *tools.Registry, prompt, mode
 	}
 
 	return res, dur, err
+}
+
+// hardStopRatio and compactionHeadroomTokens mirror the harness's unexported
+// contextLimitThreshold and reservedHeadroomTokens, which place its hard stop.
+const (
+	hardStopRatio            = 0.85
+	compactionHeadroomTokens = 8192
+)
+
+// hardStopTokens is the prompt size at which the harness stops a run that would
+// continue: hardStopRatio of the window, raised to the effective compaction
+// threshold when compaction is on.
+func hardStopTokens(cfg harness.Config) int {
+	stop := int(hardStopRatio * float64(cfg.ContextWindow))
+
+	if cfg.Compaction != nil {
+		eff := int(cfg.Compaction.Threshold * float64(cfg.ContextWindow))
+		if floor := cfg.ContextWindow - compactionHeadroomTokens; floor > 0 && floor < eff {
+			eff = floor
+		}
+
+		stop = max(stop, eff)
+	}
+
+	return stop
+}
+
+// lastReplyClient records the finish_reason and prompt size of the last reply
+// one harness run received, which harness.Result does not carry. harness.Run
+// calls its client sequentially, so a client per run needs no lock.
+type lastReplyClient struct {
+	llm.LLM
+
+	finishReason string
+	promptTokens int
+}
+
+func (c *lastReplyClient) Send(ctx context.Context, req llm.Request) (llm.Response, error) {
+	resp, err := c.LLM.Send(ctx, req)
+	c.record(resp)
+
+	return resp, err
+}
+
+func (c *lastReplyClient) SendStream(ctx context.Context, req llm.Request, onDelta func(llm.Delta)) (llm.Response, error) {
+	resp, err := c.LLM.SendStream(ctx, req, onDelta)
+	c.record(resp)
+
+	return resp, err
+}
+
+func (c *lastReplyClient) record(resp llm.Response) {
+	c.finishReason = resp.FinishReason
+	c.promptTokens = resp.Usage.PromptTokens
 }
 
 // spendAndReport is the shared accounting tail of every model call: it charges

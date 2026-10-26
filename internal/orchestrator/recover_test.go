@@ -314,6 +314,94 @@ func TestReviewRecoversFromIncapableFixCoder(t *testing.T) {
 	assert.True(t, modelsUsed(client, "fix/beta"), "the recovered fix coder fix/beta must run")
 }
 
+// TestReviewRecoversFromIncapableReviewModels pins the review's in-run recovery
+// for the two read-only roles. A specialist seat whose model is harness-incapable
+// is blacklisted and excluded, so later panels and the decision model skip it.
+// An incapable synthesis model is blacklisted, excluded and replaced for one
+// retry of the same attempt. Each case pins the other role away from the
+// incapable model, so only the path under test can report it.
+func TestReviewRecoversFromIncapableReviewModels(t *testing.T) {
+	approve := stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.02)
+
+	tests := []struct {
+		name      string
+		tc        cmclient.TaskContext
+		responses []llm.Response
+		wantRan   string
+	}{
+		{
+			// The panel seats rev/alpha; synthesis is pinned to rev/beta.
+			name: "specialist",
+			tc:   cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress", ModelOrchestrator: "rev/beta"},
+			responses: []llm.Response{
+				stopResp("Design: ok", 0.01),
+				stopResp("Security: ok", 0.01),
+				approve,
+			},
+		},
+		{
+			// Every seat is pinned to rev/gamma; synthesis selects rev/alpha first.
+			name: "synthesis",
+			tc:   cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress", ModelReviewer: "rev/gamma"},
+			responses: []llm.Response{
+				stopResp("Correctness: ok", 0.01),
+				stopResp("Design: ok", 0.01),
+				stopResp("Security: ok", 0.01),
+				approve,
+			},
+			wantRan: "rev/beta",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{}
+			client := &modelAwareLLM{incapable: map[string]bool{"rev/alpha": true}, responses: tt.responses}
+			d := reviewTestDeps(t, ops, &fakeGit{}, client, reviewerRegistry())
+			o := newReviewRun(d, tt.tc, 0)
+
+			require.NoError(t, runReview(context.Background(), o))
+
+			assert.True(t, modelsUsed(client, "rev/alpha"), "the incapable model ran first")
+			assert.Contains(t, ops.recorded(), "BlacklistModel:CARD-1/rev/alpha",
+				"the incapable model must be reported to CM")
+			assert.True(t, o.excluded["rev/alpha"], "the incapable model is excluded for the rest of the run")
+
+			if tt.wantRan != "" {
+				assert.True(t, modelsUsed(client, tt.wantRan), "the retry runs on the re-selected model")
+			}
+		})
+	}
+}
+
+// TestPinnedIncapableReviewerIsRecoveredOnce: a pinned reviewer keeps its seats
+// whatever the exclusion set holds, so it runs incapable every round. It is
+// blacklisted once; later rounds neither report it again nor spend the shared
+// re-selection budget on a model nothing re-selects.
+func TestPinnedIncapableReviewerIsRecoveredOnce(t *testing.T) {
+	ops := &fakeOps{}
+	client := &modelAwareLLM{
+		incapable: map[string]bool{"rev/alpha": true},
+		responses: []llm.Response{
+			stopResp(`{"approved":false,"summary":"fix it","fixes":[{"file":"a.go","issue":"bug","suggestion":"patch"}]}`, 0.02),
+			stopResp("coder: fixed", 0.05),
+			stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.02),
+		},
+	}
+	d := reviewTestDeps(t, ops, &fakeGit{committed: true}, client, reviewerRegistry())
+	tc := cmclient.TaskContext{
+		Title: "Parent", Description: "body", State: "in_progress",
+		ModelReviewer: "rev/alpha", ModelOrchestrator: "rev/beta",
+	}
+	o := newReviewRun(d, tc, 0)
+
+	require.NoError(t, runReview(context.Background(), o))
+
+	assert.Equal(t, 1, countCall(ops.recorded(), "BlacklistModel:CARD-1/rev/alpha"),
+		"blacklisted once across both rounds; calls=%v", ops.recorded())
+	assert.Equal(t, 1, o.reselects, "the budget is spent once")
+}
+
 // modelsUsed reports whether the model-aware stub ran the given model at least
 // once.
 func modelsUsed(m *modelAwareLLM, model string) bool {
@@ -326,7 +414,7 @@ func modelsUsed(m *modelAwareLLM, model string) bool {
 func TestRecoverIncapableCapsAtThree(t *testing.T) {
 	ops := &fakeOps{}
 	d := execTestDeps(ops, &fakeGit{}, &planLLM{})
-	o := newRun(d, cmclient.TaskContext{})
+	o := newRun(t.Context(), d, cmclient.TaskContext{})
 
 	for i := 1; i <= 3; i++ {
 		err := o.recoverIncapable(context.Background(), &IncapableError{Model: "m", Reason: "cannot drive the tool loop"})
@@ -366,7 +454,7 @@ func TestRecoverIncapableLogsReason(t *testing.T) {
 
 	ops := &fakeOps{}
 	d := execTestDeps(ops, &fakeGit{}, &planLLM{})
-	o := newRun(d, cmclient.TaskContext{})
+	o := newRun(t.Context(), d, cmclient.TaskContext{})
 
 	err := o.recoverIncapable(context.Background(), &IncapableError{Model: "m", Reason: reason})
 	require.NoError(t, err, "recovery within the cap must succeed")

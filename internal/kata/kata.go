@@ -27,8 +27,9 @@ func Copy(dest string) error {
 			return err
 		}
 
-		name := strings.TrimSuffix(e.Name(), ".txt") // go.mod.txt -> go.mod
-		if err := os.WriteFile(filepath.Join(dest, name), data, 0o644); err != nil {
+		// go.mod.txt -> go.mod
+		name := strings.TrimSuffix(e.Name(), ".txt")
+		if err := os.WriteFile(filepath.Join(dest, name), data, 0o644); err != nil { //nolint:gosec // G306: fixture copied into a workspace; repo files keep standard modes
 			return fmt.Errorf("write %s: %w", name, err)
 		}
 	}

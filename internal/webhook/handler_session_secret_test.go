@@ -273,11 +273,9 @@ func TestRemoveSessionSecrets_DifferentCorrelationIDDoesNotCollide(t *testing.T)
 		"run 2's secrets must survive run 1's stale removal")
 }
 
-// TestMintRunID_ProducesDistinctIDsForTheSameCardID pins the primitive
-// handleTrigger's X-Correlation-ID fallback relies on: since CM does not send
-// that header today, mintRunID is what actually gives two re-triggers of the
-// same card distinct redaction-session ids. A cardID-only fallback (the
-// pre-fix behavior) would return the identical string both times.
+// TestMintRunID_ProducesDistinctIDsForTheSameCardID pins the primitive every
+// admitted run's id starts from: two triggers of the same card get distinct
+// redaction-session ids whatever X-Correlation-ID they carry.
 func TestMintRunID_ProducesDistinctIDsForTheSameCardID(t *testing.T) {
 	first := mintRunID("CARD-1")
 	second := mintRunID("CARD-1")
@@ -316,7 +314,7 @@ func TestFailedLaunchRemovesSessionSecrets(t *testing.T) {
 	}
 
 	// Use the launch goroutine which goes through admitAndLaunch
-	s.launch(s.buildLaunchSpec(payload, "corr", ""), payload)
+	s.launchNow(s.buildLaunchSpec(payload, "corr", ""), payload)
 
 	assert.Empty(t, registry.keys(SessionID("p", "C1", "corr")), "secrets removed after launch failure")
 	assert.Contains(t, registry.removedIDs(), SessionID("p", "C1", "corr"), "remove call recorded on launch failure")
@@ -348,7 +346,7 @@ func TestSessionSecretsRegisterProxyToken(t *testing.T) {
 		LLMEndpoint: &protocol.LLMEndpoint{Type: "openai", APIKey: "cm-llm-key"},
 	}
 
-	s.launch(s.buildLaunchSpec(payload, "corr", ""), payload)
+	s.launchNow(s.buildLaunchSpec(payload, "corr", ""), payload)
 
 	got := registry.keys(SessionID("p", "C1", "corr"))
 	assert.Contains(t, got, "tok-corr", "the proxy token must be registered")

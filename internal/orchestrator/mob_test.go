@@ -73,7 +73,7 @@ func mobTestRun(ops *fakeOps, mobCfg MobConfig, maxCost float64) *run {
 		},
 	}
 
-	return newRun(d, cmclient.TaskContext{Title: "Parent", Description: "body"})
+	return newRun(context.Background(), d, cmclient.TaskContext{Title: "Parent", Description: "body"})
 }
 
 func TestMobConfigEnabled(t *testing.T) {

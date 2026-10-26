@@ -399,7 +399,7 @@ func TestReviewGateSelectionIsRecordedWhenTheGateModelRuns(t *testing.T) {
 
 	d := hitlReviewDeps(ops, &fakeGit{}, inbox, client)
 	d.Emit = events.NewEmitter(nil, &transcript)
-	o := newRun(d, cmclient.TaskContext{Title: "T", Description: "b", State: "review"})
+	o := newRun(t.Context(), d, cmclient.TaskContext{Title: "T", Description: "b", State: "review"})
 	isolateVerify(o)
 
 	require.NoError(t, runReview(context.Background(), o))
@@ -430,7 +430,7 @@ func TestPromotedReviewGateRecordsNoSelection(t *testing.T) {
 
 	d := hitlReviewDeps(ops, &fakeGit{committed: true, lastCommitTarget: "abc123"}, inbox, client)
 	d.Emit = events.NewEmitter(nil, &transcript)
-	o := newRun(d, cmclient.TaskContext{Title: "T", Description: "b", State: "review"})
+	o := newRun(t.Context(), d, cmclient.TaskContext{Title: "T", Description: "b", State: "review"})
 	isolateVerify(o)
 
 	require.NoError(t, runReview(context.Background(), o))

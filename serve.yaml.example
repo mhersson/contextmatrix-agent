@@ -105,8 +105,8 @@ image_pull_policy: if-not-present
 # An image tag is listed when it contains any of these substrings; images with
 # no matching tag are omitted. Default: [contextmatrix-agent]. YAML only - the
 # CMX_ env layer cannot express list values.
-# image_list_filters:
-#   - contextmatrix-agent
+image_list_filters:
+  - contextmatrix-agent
 
 # Maximum number of concurrent worker containers. Default: 5.
 # CMX_MAX_CONCURRENT
@@ -201,7 +201,7 @@ secrets_dir: /var/run/cm-agent/secrets
 # Reasoning effort for every worker phase: "" (no effort sent: each model reasons at its own default) | low | medium | high |
 # provider-specific tiers (e.g. xhigh). CMX_REASONING_EFFORT
 # Sent to every selected model - the endpoint must accept reasoning_effort on
-# ALL served models, or leave this empty. (Per-model gating is a follow-up.)
+# ALL served models, or leave this empty.
 # Non-canonical values (anything outside low|medium|high|"") are forwarded to
 # the provider as-is; the agent logs a startup warning so a typo doesn't go
 # unnoticed.
@@ -213,9 +213,7 @@ secrets_dir: /var/run/cm-agent/secrets
 # window sooner, so a model whose catalog window is under 400000 tokens, or
 # unknown, never replays. A mob seat's next round gets its reasoning only on the
 # model that wrote it. A model whose endpoint rejects the reasoning costs one
-# rejected request per turn and runs on without it. This knob is read inside the
-# worker container, so it takes effect only after the worker image is rebuilt.
-# Set false to turn replay off.
+# rejected request per turn and runs on without it. Set false to turn replay off.
 # Default: true.
 # CMX_REPLAY_REASONING
 # replay_reasoning: true
@@ -284,17 +282,14 @@ tool_output_max_bytes: 131072
 # if that strong review approves, nothing parks. It has the highest MINIMUM cost
 # per card, not the most expensive overall: every card pays for a strong panel,
 # with no chance of a cheap round settling it first.
-#
-# This knob is read inside the worker container, so it takes effect only after
-# the worker image is rebuilt. An older image silently keeps its built-in 3.
 # CMX_REVIEW_ATTEMPTS_CAP
 # review_attempts_cap: 3
 
 # --- Context compaction ---------------------------------------------------------
 
 # Opt-in in-window compaction in the worker loop. When disabled (the default),
-# nearing the context window emits a context_limit event and the subtask
-# returns incomplete - never a silent truncation. Default: false.
+# a reply that nears the context window mid-run emits a context_limit event and
+# the subtask returns incomplete - never a silent truncation. Default: false.
 # CMX_COMPACTION_ENABLED
 # compaction_enabled: false
 
@@ -313,10 +308,11 @@ tool_output_max_bytes: 131072
 # --- PR gates -------------------------------------------------------------------
 
 # The pr_gates phase (between integrate and done) polls a PR's Copilot review
-# and CI status when the card requests them. These three vars are read
-# directly by the worker container with built-in defaults - there is no
-# serve config field for them, so override per-deployment via
-# worker_extra_env.
+# and CI status when the card requests them. Serve relays each knob to the
+# worker as the CMX_GATES_* variable of the same name; every seconds value must
+# be a positive integer. A CMX_GATES_* entry in worker_extra_env is still honoured
+# for now, with a startup warning naming the key to use instead; when the serve
+# key is also set, the serve key wins.
 
 # Under fine-grained PAT auth the CI gate automatically polls the Actions
 # runs API instead of the Checks API (which GitHub grants to Apps only);
@@ -324,20 +320,23 @@ tool_output_max_bytes: 131072
 
 # How often the gate re-polls CI checks and the Copilot review. Default: 60.
 # CMX_GATES_POLL_INTERVAL_SECONDS
+# gates_poll_interval_seconds: 60
 
 # How long the CI gate waits for checks to settle before parking. A value
 # below roughly 300 (the fix-round reserve a coder run, its push, and a fresh
 # CI cycle need) means the gate parks on the first red poll instead of ever
 # attempting a fix round. Default: 2700.
 # CMX_GATES_CI_WAIT_TIMEOUT_SECONDS
+# gates_ci_wait_timeout_seconds: 2700
 
 # How long the Copilot gate waits for a review to land before proceeding
 # without one - it never parks on this timeout. Default: 1200.
 # CMX_GATES_COPILOT_WAIT_TIMEOUT_SECONDS
+# gates_copilot_wait_timeout_seconds: 1200
 
 # Whether the Copilot gate posts its triage verdicts back to the PR's review
 # threads (a reply per triaged comment; dismissed threads resolved at once,
 # fixed ones once a re-review confirms). Best-effort - a write failure is a
-# card note, never a park. Set to exactly "false" to disable; anything else
-# leaves it on.
+# card note, never a park. Default: true.
 # CMX_GATES_COPILOT_THREAD_REPLIES
+# gates_copilot_thread_replies: true

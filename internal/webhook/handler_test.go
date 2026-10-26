@@ -70,9 +70,23 @@ type fakeExecutor struct {
 	killed         [][2]string // project, cardID
 	stopAllArg     string
 	stopAllResults []executor.StopResult
+
+	// stopAllCtxErr and stopAllBounded record the context StopAll was handed.
+	stopAllCtxErr  error
+	stopAllBounded bool
+
+	// launchHook, when set, runs first in Launch and outside mu, so it may
+	// block on the launch context; an error it returns fails the launch.
+	launchHook func(ctx context.Context, spec executor.LaunchSpec) error
 }
 
-func (f *fakeExecutor) Launch(_ context.Context, spec executor.LaunchSpec) error {
+func (f *fakeExecutor) Launch(ctx context.Context, spec executor.LaunchSpec) error {
+	if f.launchHook != nil {
+		if err := f.launchHook(ctx, spec); err != nil {
+			return err
+		}
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -129,11 +143,13 @@ func (f *fakeExecutor) List(_ context.Context) ([]*executor.Run, error) {
 	return nil, nil
 }
 
-func (f *fakeExecutor) StopAll(_ context.Context, project string) ([]executor.StopResult, error) {
+func (f *fakeExecutor) StopAll(ctx context.Context, project string) ([]executor.StopResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	f.stopAllArg = project
+	f.stopAllCtxErr = ctx.Err()
+	_, f.stopAllBounded = ctx.Deadline()
 
 	return f.stopAllResults, nil
 }
@@ -199,6 +215,9 @@ type fakeCredentials struct {
 	provisionErr error
 	provisions   []provisionCall
 	teardowns    [][3]string // project, cardID, correlationID
+
+	// provisionHook, when set, runs first in Provision and outside mu.
+	provisionHook func()
 }
 
 type provisionCall struct {
@@ -211,6 +230,10 @@ func (f *fakeCredentials) HostDir(project, cardID string) string {
 }
 
 func (f *fakeCredentials) Provision(project, cardID, correlationID, token, expiresAt string, endpoint secrets.EndpointSecrets) error {
+	if f.provisionHook != nil {
+		f.provisionHook()
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -444,6 +467,22 @@ func (h *harness) do(t *testing.T, method, target string, payload any) *httptest
 func (h *harness) doAt(t *testing.T, method, target string, payload any, ts string) *httptest.ResponseRecorder {
 	t.Helper()
 
+	return h.serve(h.request(t, method, target, payload, ts))
+}
+
+// serve dispatches r through the server's mux. It asserts nothing, so a test
+// may call it off the test goroutine.
+func (h *harness) serve(r *http.Request) *httptest.ResponseRecorder {
+	w := httptest.NewRecorder()
+	h.server.Routes().ServeHTTP(w, r)
+
+	return w
+}
+
+// request builds a request signed with ts.
+func (h *harness) request(t *testing.T, method, target string, payload any, ts string) *http.Request {
+	t.Helper()
+
 	var body []byte
 
 	if payload != nil {
@@ -456,10 +495,7 @@ func (h *harness) doAt(t *testing.T, method, target string, payload any, ts stri
 	r := httptest.NewRequest(method, target, strings.NewReader(string(body)))
 	signReq(t, r, testAPIKey, body, ts)
 
-	w := httptest.NewRecorder()
-	h.server.Routes().ServeHTTP(w, r)
-
-	return w
+	return r
 }
 
 // addRun directly registers a tracked run with a capturable stdin, simulating a
@@ -475,6 +511,13 @@ func (h *harness) addRun(cardID, project string) *nopWriteCloser {
 	})
 
 	return stdin
+}
+
+// launchNow admits and launches spec synchronously, as the goroutine
+// handleTrigger starts would.
+func (s *Server) launchNow(spec executor.LaunchSpec, p protocol.TriggerPayload) {
+	adm, ctx := s.beginAdmission(context.Background(), p.Project, p.CardID)
+	s.launch(ctx, adm, spec, p)
 }
 
 // awaitStatuses waits for n status callbacks; launch reports only after
@@ -646,12 +689,9 @@ func TestTrigger_LaunchErrorReportsFailed(t *testing.T) {
 	}, time.Second, 5*time.Millisecond)
 }
 
-// TestTrigger_MintsDistinctCorrelationIDsAcrossReTriggers pins the fix's real
-// effectiveness: CM does not send X-Correlation-ID today, so the fallback in
-// handleTrigger is the common path, not a rare edge case. Two triggers of the
-// same card without the header must still resolve to distinct correlation
-// ids, or redaction-session isolation (SessionID) stays inert for every
-// real-world trigger, which is exactly the bug this fix closes.
+// TestTrigger_MintsDistinctCorrelationIDsAcrossReTriggers: two triggers of
+// the same card without X-Correlation-ID still resolve to distinct
+// correlation ids, which redaction-session isolation (SessionID) keys on.
 func TestTrigger_MintsDistinctCorrelationIDsAcrossReTriggers(t *testing.T) {
 	h := newHarness(t, 4)
 
@@ -887,7 +927,7 @@ func TestProxyRouteSkipsAuthAndDrainGate(t *testing.T) {
 	h := newHarness(t, 4)
 	h.draining.Store(true)
 
-	r := httptest.NewRequest(http.MethodPost, LLMProxyPrefix+"/chat/completions", strings.NewReader("{}"))
+	r := httptest.NewRequest(http.MethodPost, llmproxy.DefaultPrefix+"/chat/completions", strings.NewReader("{}"))
 	w := httptest.NewRecorder()
 	h.server.Routes().ServeHTTP(w, r)
 
@@ -917,13 +957,13 @@ func TestProxyRouteStreamsThroughMetrics(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	proxy, err := llmproxy.New(llmproxy.Config{Prefix: LLMProxyPrefix, Logger: quietLogger()})
+	proxy, err := llmproxy.New(llmproxy.Config{Prefix: llmproxy.DefaultPrefix, Logger: quietLogger()})
 	require.NoError(t, err)
 
 	token, err := proxy.Register("run-1", protocol.LLMEndpoint{Type: "openai", BaseURL: upstream.URL})
 	require.NoError(t, err)
 
-	m := metrics.New(llmproxy.Paths(LLMProxyPrefix)...)
+	m := metrics.New(llmproxy.Paths(llmproxy.DefaultPrefix)...)
 	s := NewServer(Config{APIKey: testAPIKey, LLMProxy: proxy, Metrics: m, Logger: quietLogger()})
 
 	ts := httptest.NewServer(s.Routes())
@@ -936,7 +976,7 @@ func TestProxyRouteStreamsThroughMetrics(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ts.URL+LLMProxyPrefix+"/chat/completions", strings.NewReader("{}"))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ts.URL+llmproxy.DefaultPrefix+"/chat/completions", strings.NewReader("{}"))
 	require.NoError(t, err)
 	req.Header.Set("Authorization", "Bearer "+token)
 
@@ -1056,6 +1096,26 @@ func TestStopAll_ReturnsResults(t *testing.T) {
 	h.exec.mu.Lock()
 	assert.Equal(t, "proj", h.exec.stopAllArg)
 	h.exec.mu.Unlock()
+}
+
+// TestStopAllOutlivesTheCaller: ContextMatrix gives up on a webhook after 10
+// seconds, and a stop-all abandoned mid-sweep must not leave kills half done,
+// so the kills run on a context the request's end does not cancel but a
+// deadline still bounds.
+func TestStopAllOutlivesTheCaller(t *testing.T) {
+	h := newHarness(t, 4)
+
+	gone, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	r := h.request(t, http.MethodPost, "/stop-all", protocol.StopAllPayload{Project: "proj"}, nowTS())
+	require.Equal(t, http.StatusOK, h.serve(r.WithContext(gone)).Code)
+
+	h.exec.mu.Lock()
+	defer h.exec.mu.Unlock()
+
+	require.NoError(t, h.exec.stopAllCtxErr, "the caller leaving does not cancel the kills")
+	assert.True(t, h.exec.stopAllBounded, "the kills still have a deadline")
 }
 
 // TestStopAllReportsFailures: when one of two kills fails the handler must
@@ -2310,7 +2370,7 @@ func TestLaunch_ProvisionsPerRunCredentials(t *testing.T) {
 	}
 	spec := s.buildLaunchSpec(payload, "corr", "")
 
-	s.launch(spec, payload)
+	s.launchNow(spec, payload)
 
 	calls := creds.provisionCalls()
 	require.Len(t, calls, 1)
@@ -2350,7 +2410,7 @@ func TestLaunch_TearsDownPerRunCredentialsOnLaunchFailure(t *testing.T) {
 		GitTokenExpiresAt: "2026-07-05T12:00:00Z",
 		LLMEndpoint:       &protocol.LLMEndpoint{Type: "openai", APIKey: "cm-llm-key"},
 	}
-	s.launch(s.buildLaunchSpec(payload, "corr", ""), payload)
+	s.launchNow(s.buildLaunchSpec(payload, "corr", ""), payload)
 
 	assert.Len(t, creds.provisionCalls(), 1)
 	assert.Equal(t, [][3]string{{"p", "C1", "corr"}}, creds.teardownCalls(),
@@ -2383,7 +2443,7 @@ func TestLaunch_ProvisionFailureReportsFailedWithoutLaunching(t *testing.T) {
 		GitTokenExpiresAt: "2026-07-05T12:00:00Z",
 		LLMEndpoint:       &protocol.LLMEndpoint{Type: "openai", APIKey: "cm-llm-key"},
 	}
-	s.launch(s.buildLaunchSpec(payload, "corr", ""), payload)
+	s.launchNow(s.buildLaunchSpec(payload, "corr", ""), payload)
 
 	assert.Empty(t, exec.launchedSpecs(), "container must not launch when provisioning fails")
 	assert.Equal(t, [][3]string{{"C1", "failed", "credential provisioning failed"}}, reporter.statuses())
@@ -2424,8 +2484,8 @@ func TestLaunch_DuplicateTriggerDoesNotClobberWinnerCredentials(t *testing.T) {
 	}
 	spec := s.buildLaunchSpec(payload, "corr", "")
 
-	s.launch(spec, payload) // winner: provisions and launches
-	s.launch(spec, payload) // duplicate: must be rejected up front, before provisioning
+	s.launchNow(spec, payload) // winner: provisions and launches
+	s.launchNow(spec, payload) // duplicate: must be rejected up front, before provisioning
 
 	assert.Len(t, creds.provisionCalls(), 1,
 		"the duplicate must not re-provision over the winner")
@@ -2468,7 +2528,7 @@ func TestLaunch_ConcurrentDuplicateTriggersSerialized(t *testing.T) {
 
 	for range 2 {
 		wg.Go(func() {
-			s.launch(spec, payload)
+			s.launchNow(spec, payload)
 		})
 	}
 
@@ -2523,7 +2583,7 @@ func TestLaunch_GitTokenAloneDoesNotSatisfyLLMGuard(t *testing.T) {
 	})
 
 	payload := protocol.TriggerPayload{CardID: "C1", Project: "p", GitToken: "cm-git-token"}
-	s.launch(s.buildLaunchSpec(payload, "corr", ""), payload)
+	s.launchNow(s.buildLaunchSpec(payload, "corr", ""), payload)
 
 	assert.Empty(t, exec.launchedSpecs())
 	assert.Equal(t,
@@ -2554,7 +2614,7 @@ func TestLaunch_LLMEndpointAloneDoesNotSatisfyGitTokenGuard(t *testing.T) {
 		Project:     "p",
 		LLMEndpoint: &protocol.LLMEndpoint{Type: "openai", APIKey: "cm-llm-key"},
 	}
-	s.launch(s.buildLaunchSpec(payload, "corr", ""), payload)
+	s.launchNow(s.buildLaunchSpec(payload, "corr", ""), payload)
 
 	assert.Empty(t, exec.launchedSpecs())
 	assert.Equal(t,
@@ -2587,7 +2647,7 @@ func TestLaunch_GuardsDoNotFireWhenPayloadProvisionsBoth(t *testing.T) {
 		GitToken:    "cm-git-token",
 		LLMEndpoint: &protocol.LLMEndpoint{Type: "openai", APIKey: "cm-llm-key"},
 	}
-	s.launch(s.buildLaunchSpec(payload, "corr", ""), payload)
+	s.launchNow(s.buildLaunchSpec(payload, "corr", ""), payload)
 
 	assert.Len(t, creds.provisionCalls(), 1, "a fully-provisioned payload must launch regardless of local config")
 	assert.Equal(t, [][3]string{{"C1", "running", ""}}, reporter.statuses())
@@ -2929,4 +2989,65 @@ func TestBuildLaunchSpec_PlaybookBaseBranchEnvAbsentByDefault(t *testing.T) {
 		assert.NotContains(t, e, "CM_CREATE_BASE_BRANCH=")
 		assert.NotContains(t, e, "CM_BASE_BRANCH_FROM=")
 	}
+}
+
+func TestBuildLaunchSpec_GatesEnv(t *testing.T) {
+	newServer := func(env LaunchEnv) *Server {
+		env.BaseImage = "img"
+		env.MCPURL = "http://mcp"
+
+		return NewServer(Config{
+			APIKey:    "k",
+			Executor:  &fakeExecutor{},
+			Tracker:   executor.NewTracker(1),
+			LaunchEnv: env,
+		})
+	}
+
+	t.Run("configured values are relayed once each", func(t *testing.T) {
+		spec := newServer(LaunchEnv{
+			GatesPollIntervalSeconds:       30,
+			GatesCIWaitTimeoutSeconds:      900,
+			GatesCopilotWaitTimeoutSeconds: 600,
+			GatesCopilotThreadReplies:      false,
+		}).buildLaunchSpec(protocol.TriggerPayload{CardID: "C1", Project: "p"}, "corr", "")
+
+		for _, want := range []string{
+			"CMX_GATES_POLL_INTERVAL_SECONDS=30",
+			"CMX_GATES_CI_WAIT_TIMEOUT_SECONDS=900",
+			"CMX_GATES_COPILOT_WAIT_TIMEOUT_SECONDS=600",
+			"CMX_GATES_COPILOT_THREAD_REPLIES=false",
+		} {
+			assert.Equal(t, 1, countEnv(spec.Env, want), want)
+		}
+	})
+
+	t.Run("thread replies true is relayed", func(t *testing.T) {
+		spec := newServer(LaunchEnv{GatesCopilotThreadReplies: true}).
+			buildLaunchSpec(protocol.TriggerPayload{CardID: "C1", Project: "p"}, "corr", "")
+
+		assert.Contains(t, spec.Env, "CMX_GATES_COPILOT_THREAD_REPLIES=true")
+	})
+
+	t.Run("zero seconds are omitted", func(t *testing.T) {
+		spec := newServer(LaunchEnv{}).buildLaunchSpec(protocol.TriggerPayload{CardID: "C1", Project: "p"}, "corr", "")
+
+		for _, e := range spec.Env {
+			assert.NotContains(t, e, "CMX_GATES_POLL_INTERVAL_SECONDS")
+			assert.NotContains(t, e, "CMX_GATES_CI_WAIT_TIMEOUT_SECONDS")
+			assert.NotContains(t, e, "CMX_GATES_COPILOT_WAIT_TIMEOUT_SECONDS")
+		}
+	})
+}
+
+func countEnv(env []string, entry string) int {
+	n := 0
+
+	for _, e := range env {
+		if e == entry {
+			n++
+		}
+	}
+
+	return n
 }

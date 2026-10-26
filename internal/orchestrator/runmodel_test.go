@@ -40,7 +40,7 @@ func TestHarnessConfigPopulatesTriad(t *testing.T) {
 		return s
 	}
 
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 
 	// "default/model" is in planTestCatalog with ContextLength 131072.
 	cfg := o.harnessConfig("default/model")
@@ -61,7 +61,7 @@ func TestHarnessConfigUnknownModelZeroWindow(t *testing.T) {
 	ops := &fakeOps{taskContext: cmclient.TaskContext{}}
 	d := planTestDeps(ops, &planLLM{})
 
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 
 	cfg := o.harnessConfig("ghost/model")
 	assert.Equal(t, 0, cfg.ContextWindow)
@@ -78,7 +78,7 @@ func TestHarnessConfigCompactionGate(t *testing.T) {
 		d := planTestDeps(ops, &planLLM{})
 		d.Cfg.Compaction = Compaction{Enabled: true, Threshold: 0.8, KeepRecentTurns: 4}
 
-		o := newRun(d, ops.taskContext)
+		o := newRun(t.Context(), d, ops.taskContext)
 		cfg := o.harnessConfig("default/model")
 
 		require.NotNil(t, cfg.Compaction)
@@ -90,18 +90,20 @@ func TestHarnessConfigCompactionGate(t *testing.T) {
 		d := planTestDeps(ops, &planLLM{})
 		d.Cfg.Compaction = Compaction{Enabled: false, Threshold: 0.8, KeepRecentTurns: 4}
 
-		o := newRun(d, ops.taskContext)
+		o := newRun(t.Context(), d, ops.taskContext)
 		cfg := o.harnessConfig("default/model")
 
 		assert.Nil(t, cfg.Compaction)
 	})
 }
 
-// TestRunModelNormalizesContextLimit pins the 0.85 threshold tightly: exactly
-// int(0.85*window) prompt tokens trips context_limit (surfaced by runModel as an
-// error so a phase never proceeds on truncated output), and one token below does
-// NOT. A boundary-precise pair catches a drifted threshold constant - a loose
-// "well over the limit" prompt would still pass against e.g. 0.95.
+// TestRunModelNormalizesContextLimit pins the 0.85 threshold tightly: a reply
+// that would continue the run, at exactly int(0.85*window) prompt tokens, trips
+// context_limit (surfaced by runModel as an error so a phase never carries on
+// past its window), and one token below does NOT. A complete final reply ends
+// the run at any size, so it never trips. A boundary-precise pair catches a drifted
+// threshold constant - a loose "well over the limit" prompt would still pass
+// against e.g. 0.95.
 func TestRunModelNormalizesContextLimit(t *testing.T) {
 	// "default/model" is in planTestCatalog with ContextLength 131072. The harness
 	// trips when prompt_tokens >= int(contextLimitThreshold * window); mirror that
@@ -114,27 +116,41 @@ func TestRunModelNormalizesContextLimit(t *testing.T) {
 
 	tripAt := int(threshold * float64(window)) // 111411
 
+	toolCall := func(promptTokens int) llm.Response {
+		return llm.Response{
+			ToolCalls: []llm.ToolCall{{
+				ID:       "read-1",
+				Type:     "function",
+				Function: llm.FunctionCall{Name: "read", Arguments: `{"path":"no-such-file.txt"}`},
+			}},
+			FinishReason: "tool_calls",
+			Usage:        llm.Usage{PromptTokens: promptTokens, Cost: 0.01},
+		}
+	}
+
+	finalReply := llm.Response{
+		Content:      "complete answer",
+		FinishReason: "stop",
+		Usage:        llm.Usage{PromptTokens: tripAt, Cost: 0.01},
+	}
+
 	tests := []struct {
-		name         string
-		promptTokens int
-		wantTrip     bool
+		name     string
+		resp     llm.Response
+		wantTrip bool
 	}{
-		{"exactly at threshold trips", tripAt, true},
-		{"one token below does not trip", tripAt - 1, false},
+		{"tool call exactly at threshold trips", toolCall(tripAt), true},
+		{"tool call one token below does not trip", toolCall(tripAt - 1), false},
+		{"final reply at threshold completes", finalReply, false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ops := &fakeOps{taskContext: cmclient.TaskContext{}}
-			resp := llm.Response{
-				Content:      "partial",
-				FinishReason: "stop",
-				Usage:        llm.Usage{PromptTokens: tt.promptTokens, Cost: 0.01},
-			}
-			llmFake := &planLLM{responses: []llm.Response{resp}}
+			llmFake := &planLLM{responses: []llm.Response{tt.resp}}
 			d := planTestDeps(ops, llmFake)
 
-			o := newRun(d, ops.taskContext)
+			o := newRun(t.Context(), d, ops.taskContext)
 
 			res, _, err := o.runModel(context.Background(), d.ReadTools, "do the thing", "default/model")
 
@@ -152,9 +168,88 @@ func TestRunModelNormalizesContextLimit(t *testing.T) {
 				assert.Equal(t, "context_limit", res.Reason)
 				assert.InDelta(t, 0.01, res.TotalCostUSD, 1e-9)
 			} else {
-				require.NoError(t, err, "one token below the threshold must NOT trip")
-				assert.NotEqual(t, "context_limit", res.Reason)
+				require.NoError(t, err, "the run must NOT trip the context limit")
+				assert.Equal(t, "done", res.Reason)
 			}
+		})
+	}
+}
+
+// TestRunModelParksACutFinalReplyAtTheHardStop pins that a final reply the
+// provider cut at its token limit parks like the context stop only when its
+// prompt reached the harness's hard stop, and that only the reply that ended
+// the run counts. Below the stop the cut is the output cap: the run completes
+// and the caller handles the partial reply.
+func TestRunModelParksACutFinalReplyAtTheHardStop(t *testing.T) {
+	const window = 131072
+
+	threshold := 0.85
+
+	tripAt := int(threshold * float64(window)) // 111411
+
+	cut := func(promptTokens int) llm.Response {
+		return llm.Response{Content: "partial", FinishReason: "length", Usage: llm.Usage{PromptTokens: promptTokens, Cost: 0.01}}
+	}
+
+	cutToolCall := llm.Response{
+		ToolCalls: []llm.ToolCall{{
+			ID:       "read-1",
+			Type:     "function",
+			Function: llm.FunctionCall{Name: "read", Arguments: `{"path":"no-such-file.txt"}`},
+		}},
+		FinishReason: "length",
+		Usage:        llm.Usage{PromptTokens: 1000},
+	}
+
+	tests := []struct {
+		name       string
+		responses  []llm.Response
+		compaction Compaction
+		wantPark   bool
+	}{
+		{name: "cut at the hard stop parks", responses: []llm.Response{cut(tripAt)}, wantPark: true},
+		{name: "cut one token below the hard stop completes", responses: []llm.Response{cut(tripAt - 1)}},
+		{
+			// min(0.95*window, window-8192) = 122880 raises the stop above tripAt.
+			name:       "cut below a stop raised by compaction completes",
+			responses:  []llm.Response{cut(tripAt)},
+			compaction: Compaction{Enabled: true, Threshold: 0.95, KeepRecentTurns: 4},
+		},
+		{
+			name:       "cut at a stop raised by compaction parks",
+			responses:  []llm.Response{cut(window - 8192)},
+			compaction: Compaction{Enabled: true, Threshold: 0.95, KeepRecentTurns: 4},
+			wantPark:   true,
+		},
+		{
+			name: "an earlier cut reply does not park a complete final reply at the stop",
+			responses: []llm.Response{
+				cutToolCall,
+				{Content: "complete answer", FinishReason: "stop", Usage: llm.Usage{PromptTokens: tripAt, Cost: 0.01}},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := &fakeOps{taskContext: cmclient.TaskContext{}}
+			d := planTestDeps(ops, &planLLM{responses: tt.responses})
+			d.Cfg.Compaction = tt.compaction
+			o := newRun(t.Context(), d, ops.taskContext)
+
+			res, _, err := o.runModel(context.Background(), d.ReadTools, "do the thing", "default/model")
+
+			if !tt.wantPark {
+				require.NoError(t, err)
+				assert.Equal(t, "done", res.Reason)
+
+				return
+			}
+
+			var cle *ContextLimitError
+			require.ErrorAs(t, err, &cle, "a cut final reply at the hard stop must park")
+			assert.Equal(t, "default/model", cle.Model)
+			assert.InDelta(t, 0.01, res.TotalCostUSD, 1e-9, "the result still carries the spend")
 		})
 	}
 }
@@ -188,7 +283,7 @@ func TestRunModelNormalizesIncapable(t *testing.T) {
 	llmFake := &planLLM{responses: []llm.Response{badResp, badResp, badResp, badResp, badResp}}
 	d := planTestDeps(ops, llmFake)
 
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 
 	res, _, err := o.runModel(context.Background(), d.ReadTools, "do the thing", "default/model")
 
@@ -230,7 +325,7 @@ func TestRunModelNormalizesIncapableEmptyDetail(t *testing.T) {
 	}}
 	d := planTestDeps(ops, llmFake)
 
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 
 	res, _, err := o.runModel(context.Background(), d.ReadTools, "do the thing", "default/model")
 
@@ -260,7 +355,7 @@ func TestRunModelNormalizesMaxTurns(t *testing.T) {
 	d := planTestDeps(ops, llmFake)
 	d.Cfg.MaxTurns = 1
 
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 
 	res, _, err := o.runModel(context.Background(), d.ReadTools, "do the thing", "default/model")
 
@@ -341,7 +436,7 @@ func TestSpendAndReport(t *testing.T) {
 			ops := &fakeOps{taskContext: cmclient.TaskContext{}, reportUsageErr: tt.reportErr}
 			d := planTestDeps(ops, &planLLM{})
 
-			o := newRun(d, ops.taskContext)
+			o := newRun(t.Context(), d, ops.taskContext)
 			o.curPhase = "review"
 
 			res := harness.Result{
@@ -377,7 +472,7 @@ func TestRunModelPassesThroughNormalResult(t *testing.T) {
 	llmFake := &planLLM{responses: []llm.Response{stopResp("all good", 0.02)}}
 	d := planTestDeps(ops, llmFake)
 
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 
 	res, _, err := o.runModel(context.Background(), d.ReadTools, "do the thing", "default/model")
 	require.NoError(t, err)
@@ -390,7 +485,7 @@ func TestRunModelPassesThroughNormalResult(t *testing.T) {
 func TestSpendAndReportSyncsRunLedger(t *testing.T) {
 	ops := &fakeOps{taskContext: cmclient.TaskContext{}, reportUsageTotal: 3.5}
 	d := planTestDeps(ops, &planLLM{})
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 
 	res := harness.Result{PromptTokens: 10, CompletionTokens: 5, TotalCostUSD: 0}
 
@@ -407,7 +502,7 @@ func TestSpendAndReportSyncsRunLedger(t *testing.T) {
 func TestSpendAndReportCandidateLedgerRouting(t *testing.T) {
 	ops := &fakeOps{taskContext: cmclient.TaskContext{}, reportUsageTotal: 3.5}
 	d := planTestDeps(ops, &planLLM{})
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 
 	cand := NewLedger(2.0, 0)
 	res := harness.Result{PromptTokens: 10, CompletionTokens: 5, TotalCostUSD: 0.25}
@@ -427,7 +522,7 @@ func TestSpendAndReportNoSyncOnReportFailure(t *testing.T) {
 		reportUsageErr: errors.New("report boom"),
 	}
 	d := planTestDeps(ops, &planLLM{})
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 
 	res := harness.Result{TotalCostUSD: 0.25}
 
@@ -452,7 +547,7 @@ func TestDiagnoseConfigCarriesWrapUpNudge(t *testing.T) {
 	}}
 	d := planTestDeps(ops, client)
 	d.Cfg.MaxTurns = 8
-	o := newRun(d, ops.taskContext)
+	o := newRun(t.Context(), d, ops.taskContext)
 
 	_, err := o.runDiagnose(context.Background(), fixedGateModel("default/model"))
 	require.NoError(t, err)

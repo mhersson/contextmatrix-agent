@@ -29,7 +29,7 @@ func TestDefaultsYAML(t *testing.T) {
 	}
 
 	assert.Contains(t, text, "worker_extra_env: {}")
-	assert.Contains(t, text, "image_list_filters: []")
+	assert.Contains(t, text, "image_list_filters:\n    - contextmatrix-agent")
 	assert.NotContains(t, text, "null")
 
 	path := filepath.Join(t.TempDir(), "serve.yaml")

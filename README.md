@@ -136,8 +136,12 @@ export LLM_API_KEY=<your-api-key>
 ## Running as a ContextMatrix backend
 
 1. **Build the worker image.** The worker image bundles the agent binary plus
-   the CLIs the harness expects; toolchain versions are pinned and
-   SHA256-verified.
+   the CLIs the harness expects; Debian packages come from Debian's signed
+   repositories; the downloaded Go, Node, rustup, Maven, gh, yq and Task
+   archives and binaries are pinned and SHA-verified; the uv image is
+   digest-pinned; golangci-lint and gofumpt are built from source at pinned
+   versions; npm, yarn, pip, ty and ruff are pinned by version and fetched
+   from their registries.
 
    ```bash
    make docker-worker          # tags contextmatrix-agent-worker:dev (full), labelled with the commit
@@ -201,8 +205,8 @@ export LLM_API_KEY=<your-api-key>
    ```
 
    `serve` reads `--config` (default `~/.config/contextmatrix-agent/serve.yaml`)
-   and validates it on startup. To inspect effective harness config with secrets
-   redacted, use `run --print-config`.
+   and validates it on startup. To check a config file use `config validate`, and
+   `config defaults` prints every serve key with its default.
 
 4. **Point ContextMatrix at it.** Enable the `backends.agent` entry in
    ContextMatrix's config (URL + shared `api_key` + `enabled: true`); the
@@ -235,14 +239,14 @@ worker images (full + variants), pin the new full-image digest into
 A stop or restart drains rather than drops running cards: on SIGTERM `serve`
 refuses new work, sends every running worker an end-session so it pushes its
 work in progress and releases its card, waits up to 30 seconds for the workers
-to exit, then kills the rest. The kill sweep runs one card at a time: each
-worker still running after the wait adds about 3 seconds of kill grace, and
-each card running at shutdown adds one status callback (at most 10 seconds).
-The webhook listener closes only after the sweep, because parking workers reach
-the LLM proxy on it; the HTTP drain, shared with the admin listener, adds at most 10 seconds. At the default
-`max_concurrent` of 5 with ContextMatrix answering promptly, the sequence fits
-the unit's `TimeoutStopSec=60`; seven or more stragglers can outlast it. A
-second signal skips the wait.
+to exit, then kills the rest. The kill sweep handles every card at once under
+one 15-second deadline: it kills each worker still running (about 3 seconds of
+kill grace) and reports each card failed unless the card's own exit reports
+it, so a parked card keeps its completed status. The webhook listener
+closes only after the sweep, because parking workers reach the LLM proxy on
+it; the HTTP drain, shared with the admin listener, adds at most 10 seconds.
+The sequence fits the unit's `TimeoutStopSec=60` however many cards are
+running. A second signal skips the wait.
 
 > **Run as UID 1000 on rootful Docker.** Per-run secrets are staged readable
 > only by the UID `serve` runs as, and the worker container runs as UID 1000, so
@@ -331,14 +335,20 @@ in [`docs/model-selection.md`](docs/model-selection.md).
 ```bash
 make build          # go build ./... + the binary
 make test           # go test ./...
+make test-docker    # Docker integration suite (see below)
 make lint           # golangci-lint run
 make fmt            # gofumpt -w .
 make docker-worker           # build the default (full) worker image
 make docker-worker-variants  # build the go-node / python / rust / jvm-node variants
 ```
 
+`make test-docker` needs a local Docker daemon and force-removes every
+agent-labelled container on it, so never run it against a daemon a live
+`serve` uses.
+
 CI gates every pull request on `go test`, `go test -race`, `golangci-lint`, and
-`go build`, plus `govulncheck` and a worker-image scan.
+`go build`, plus `govulncheck`, `hadolint` on the worker Dockerfile and a
+worker-image scan.
 
 Conventions, package boundaries, the git workflow, and commit discipline for
 working **on** this codebase live in [`AGENTS.md`](AGENTS.md).

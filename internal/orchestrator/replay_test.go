@@ -88,7 +88,7 @@ func replayRun(client llm.LLM, on bool) *run {
 	d.Registry = replayTestRegistry()
 	d.Cfg.ReplayReasoning = on
 
-	return newRun(d, cmclient.TaskContext{})
+	return newRun(context.Background(), d, cmclient.TaskContext{})
 }
 
 func TestReplaysByModel(t *testing.T) {
@@ -135,30 +135,46 @@ func TestRunModelReplaysReasoningOnTheWire(t *testing.T) {
 }
 
 func TestSpawnSubagentsReplaysPerChildModel(t *testing.T) {
-	models := []string{"wide/model", "narrow/model", "ghost/model"}
-	client := &modelLLM{scripts: map[string][]llm.Response{}, seen: map[string][][]llm.Message{}}
-	specs := make([]harness.SubagentSpec, len(models))
-
-	for i, m := range models {
-		client.scripts[m] = []llm.Response{thinkingToolCall(), stopResp("review by "+m, 0)}
-		specs[i] = harness.SubagentSpec{Role: m, Prompt: "review", Model: m, MaxTurns: 4}
+	tests := []struct {
+		name   string
+		models []string
+		replay []bool // per model: whether its second request carries the reasoning
+	}{
+		{"mixed", []string{"wide/model", "narrow/model", "ghost/model"}, []bool{true, false, false}},
+		{"every child wide", []string{"wide/model", "other/model"}, []bool{true, true}},
+		{"every child narrow", []string{"narrow/model", "ghost/model"}, []bool{false, false}},
 	}
 
-	o := replayRun(client, true)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &modelLLM{scripts: map[string][]llm.Response{}, seen: map[string][][]llm.Message{}}
+			specs := make([]harness.SubagentSpec, len(tt.models))
 
-	results, err := o.spawnSubagents(t.Context(), client, t.TempDir(), specs, harness.SubagentOpts{})
-	require.NoError(t, err)
-	require.Len(t, results, len(models))
+			for i, m := range tt.models {
+				client.scripts[m] = []llm.Response{thinkingToolCall(), stopResp("review by "+m, 0)}
+				specs[i] = harness.SubagentSpec{Role: m, Prompt: "review", Model: m, MaxTurns: 4}
+			}
 
-	for i, m := range models {
-		assert.Equal(t, m, results[i].Role, "results keep spec order")
-		assert.Equal(t, "review by "+m, results[i].Output)
-		require.Len(t, client.seen[m], 2, "%s took two turns", m)
+			o := replayRun(client, true)
+
+			results, err := o.spawnSubagents(t.Context(), client, t.TempDir(), specs, harness.SubagentOpts{})
+			require.NoError(t, err)
+			require.Len(t, results, len(tt.models))
+
+			for i, m := range tt.models {
+				assert.Equal(t, m, results[i].Role, "results keep spec order")
+				assert.Equal(t, "review by "+m, results[i].Output)
+				require.Len(t, client.seen[m], 2, "%s took two turns", m)
+
+				got := assistantDetails(client.seen[m][1])
+				if tt.replay[i] {
+					assert.Equal(t, replayedThinking, got, "%s replays its reasoning", m)
+				} else {
+					assert.Empty(t, got, "%s gets none", m)
+				}
+			}
+		})
 	}
-
-	assert.Equal(t, replayedThinking, assistantDetails(client.seen["wide/model"][1]), "a replaying child gets its reasoning back")
-	assert.Empty(t, assistantDetails(client.seen["narrow/model"][1]), "a child under the window floor gets none")
-	assert.Empty(t, assistantDetails(client.seen["ghost/model"][1]), "an uncatalogued child gets none")
 }
 
 func TestSpawnSubagentsFanOutCount(t *testing.T) {

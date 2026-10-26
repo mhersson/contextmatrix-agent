@@ -9,9 +9,12 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/metrics"
@@ -425,6 +428,13 @@ type stubDocker struct {
 	waitFn  func(ctx context.Context) (<-chan container.WaitResponse, <-chan error)
 	attachR io.Reader // if non-nil, the container output stream the pump reads
 
+	// killHook, when set, decides ContainerKill's error after the kill is
+	// recorded.
+	killHook func(ctx context.Context) error
+
+	// createErr, when set, fails ContainerCreate with what it returns.
+	createErr func(ctx context.Context) error
+
 	mu      sync.Mutex
 	killed  []string
 	removed []string
@@ -438,11 +448,14 @@ func (s *stubDocker) ContainerWait(
 	return client.ContainerWaitResult{Result: result, Error: errs}
 }
 
-func (s *stubDocker) ContainerKill(_ context.Context, id string, _ client.ContainerKillOptions) (client.ContainerKillResult, error) {
+func (s *stubDocker) ContainerKill(ctx context.Context, id string, _ client.ContainerKillOptions) (client.ContainerKillResult, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	s.killed = append(s.killed, id)
+	s.mu.Unlock()
+
+	if s.killHook != nil {
+		return client.ContainerKillResult{}, s.killHook(ctx)
+	}
 
 	return client.ContainerKillResult{}, nil
 }
@@ -458,7 +471,13 @@ func (s *stubDocker) ContainerRemove(
 	return client.ContainerRemoveResult{}, nil
 }
 
-func (s *stubDocker) ContainerCreate(_ context.Context, _ client.ContainerCreateOptions) (client.ContainerCreateResult, error) {
+func (s *stubDocker) ContainerCreate(ctx context.Context, _ client.ContainerCreateOptions) (client.ContainerCreateResult, error) {
+	if s.createErr != nil {
+		if err := s.createErr(ctx); err != nil {
+			return client.ContainerCreateResult{}, err
+		}
+	}
+
 	return client.ContainerCreateResult{ID: "container-1"}, nil
 }
 
@@ -869,6 +888,154 @@ func TestImageLabels(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 			}
+		})
+	}
+}
+
+// TestStopAllKillsConcurrently: the runs' kills overlap, so a stop-all ends
+// within one kill's bound however many runs it stops. Each kill here returns
+// only once every kill in the project has started.
+func TestStopAllKillsConcurrently(t *testing.T) {
+	const runs = 4
+
+	var arrivals atomic.Int32
+
+	all := make(chan struct{})
+	docker := &stubDocker{
+		waitFn: failsImmediately,
+		killHook: func(ctx context.Context) error {
+			if arrivals.Add(1) == runs {
+				close(all)
+			}
+
+			select {
+			case <-all:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		},
+	}
+
+	tracker := NewTracker(runs + 1)
+	for i := range runs {
+		require.True(t, tracker.AddIfUnderLimit(&Run{Project: "proj", CardID: "CARD-" + strconv.Itoa(i), ContainerID: "ctr-" + strconv.Itoa(i)}))
+	}
+
+	require.True(t, tracker.AddIfUnderLimit(&Run{Project: "other", CardID: "CARD-X", ContainerID: "ctr-x"}))
+
+	e := NewDockerExecutor(Config{Docker: docker, Tracker: tracker, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+
+	results, err := e.StopAll(ctx, "proj")
+	require.NoError(t, err)
+	require.Len(t, results, runs)
+
+	for _, r := range results {
+		assert.Equal(t, "proj", r.Run.Project)
+		require.NoError(t, r.Err, "%s is killed", r.Run.CardID)
+	}
+
+	docker.mu.Lock()
+	defer docker.mu.Unlock()
+
+	assert.NotContains(t, docker.killed, "ctr-x", "another project's run is left alone")
+}
+
+// TestIdleWatchdogSparesARunAwaitingAHuman: a run whose output has gone stale
+// is left alone while it awaits human input, however long that takes, and is
+// killed on the first poll after it stops awaiting.
+func TestIdleWatchdogSparesARunAwaitingAHuman(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		docker := &stubDocker{}
+		tracker := NewTracker(1)
+		require.True(t, tracker.AddIfUnderLimit(&Run{Project: "proj", CardID: "CARD-1", ContainerID: "ctr-1"}))
+		tracker.Touch("proj", "CARD-1")
+		tracker.SetAwaiting("proj", "CARD-1", true)
+
+		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+		e := NewDockerExecutor(Config{
+			Docker:       docker,
+			Tracker:      tracker,
+			IdleTimeout:  time.Minute,
+			PollInterval: 10 * time.Second,
+			Logger:       logger,
+		})
+
+		returned := make(chan struct{})
+
+		go func() {
+			defer close(returned)
+
+			e.runIdleWatchdog("proj", "CARD-1", "ctr-1", make(chan struct{}), logger)
+		}()
+
+		time.Sleep(time.Hour)
+		synctest.Wait()
+
+		docker.mu.Lock()
+		assert.Empty(t, docker.killed, "a run awaiting a human is not killed for silence")
+		docker.mu.Unlock()
+
+		tracker.SetAwaiting("proj", "CARD-1", false)
+		time.Sleep(10 * time.Second)
+		synctest.Wait()
+
+		select {
+		case <-returned:
+		default:
+			t.Fatal("the watchdog is still polling after the awaiting flag cleared")
+		}
+
+		assert.Equal(t, []string{"ctr-1"}, docker.killed)
+		assert.Equal(t, metrics.OutcomeIdleTimeout, tracker.Reason("proj", "CARD-1"))
+	})
+}
+
+// TestLaunchRemovesACreateCutShort: a create the launch context ends may
+// still have made the container on the daemon, where its name would refuse
+// the card's next launch, so Launch removes it by name. A create that fails
+// on its own made nothing to remove.
+func TestLaunchRemovesACreateCutShort(t *testing.T) {
+	tests := []struct {
+		name        string
+		cutShort    bool
+		wantRemoved []string
+	}{
+		{name: "cut short by the launch context", cutShort: true, wantRemoved: []string{containerName("proj", "CARD-1")}},
+		{name: "refused by the daemon"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+
+			docker := &stubDocker{createErr: func(ctx context.Context) error {
+				if tt.cutShort {
+					cancel()
+
+					return ctx.Err()
+				}
+
+				return errors.New("conflict: invalid mount config")
+			}}
+
+			e := NewDockerExecutor(Config{
+				Docker:     docker,
+				Tracker:    NewTracker(1),
+				PullPolicy: PullNever,
+				Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+			})
+
+			require.Error(t, e.Launch(ctx, LaunchSpec{Project: "proj", CardID: "CARD-1", Image: "alpine:3"}))
+
+			docker.mu.Lock()
+			defer docker.mu.Unlock()
+
+			assert.Equal(t, tt.wantRemoved, docker.removed)
 		})
 	}
 }

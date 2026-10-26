@@ -1,16 +1,24 @@
-.PHONY: build install history test test-race fmt lint docker-worker docker-worker-variants
+.PHONY: build install history test test-race test-docker fmt lint docker-worker docker-worker-variants
 
 # Pinned worker toolchain versions. Override on the command line
 # if a newer version has been vetted, e.g.
 #   make docker-worker GO_VERSION=1.27.4
 # These values are passed into the Dockerfile as --build-args so the build is
-# reproducible from CI and local shells alike.
+# reproducible from CI and local shells alike. GOVULNCHECK_VERSION is not a
+# build arg: only CI (.github/workflows/ci.yaml) reads it.
 GO_VERSION            ?= 1.27.3
 GO_SHA256_AMD64       ?= 65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40
 GO_SHA256_ARM64       ?= a06e99309dbcbdca1a8ccd2282c3ee146e55930886e26b4f1193269587165f49
+NODE_VERSION          ?= 26.12.1
+NODE_SHA256_AMD64     ?= 0fd1eb7770598f52a21995edf6ed35fc690400fa437c2386af329519e9143132
+NODE_SHA256_ARM64     ?= a6c01af459dd8972ab3fb08ee5da81244d26ba8c4944a62d5bbba8c597ae154f
+NODE_LTS_VERSION      ?= 24.22.1
+NODE_LTS_SHA256_AMD64 ?= eb6728e77c576a35162c122c45ccadf224d89ff00abc8dae46cc2897c6002d7c
+NODE_LTS_SHA256_ARM64 ?= 33c37be234ba8bee041961047b19160f4d7d0f164e8e246f78bdd10feff148b3
 NPM_VERSION           ?= 12.2.1
 GOLANGCI_LINT_VERSION ?= v2.14.0
 GOFUMPT_VERSION       ?= v0.12.0
+GOVULNCHECK_VERSION   ?= v1.9.0
 RUST_VERSION          ?= 1.99.0
 RUSTUP_VERSION        ?= 1.29.1
 RUSTUP_SHA256_AMD64   ?= dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
@@ -28,6 +36,9 @@ YQ_SHA256_ARM64       ?= 189088da0c6429ec5178dfaab1a114805f6cab0b61b165ab236efed
 TASK_VERSION          ?= 3.54.0
 TASK_SHA256_AMD64     ?= 680859dbb4d881a9c72d4d9a8f510825450849af8567deacd7302c01124416fb
 TASK_SHA256_ARM64     ?= d7189d439d4a6058e39e1b2acd7c8b27acd4856691b408f23b242e4294e1df5b
+GH_VERSION            ?= 2.103.2
+GH_SHA256_AMD64       ?= 62ccf747115ddc61237efffdde66a3c8f70ba249433dc64f70801089b59c59c8
+GH_SHA256_ARM64       ?= 4c3e99a50bd8b181a3fe9d69b25dd978bac768148d88f01507c6b4d1ef61a443
 
 # Build info stamped into the binary and read back on /health.
 VERSION    ?= $(shell git describe --tags --exact-match 2>/dev/null)
@@ -42,6 +53,12 @@ WORKER_BUILD_ARGS = \
 	--build-arg GO_VERSION=$(GO_VERSION) \
 	--build-arg GO_SHA256_AMD64=$(GO_SHA256_AMD64) \
 	--build-arg GO_SHA256_ARM64=$(GO_SHA256_ARM64) \
+	--build-arg NODE_VERSION=$(NODE_VERSION) \
+	--build-arg NODE_SHA256_AMD64=$(NODE_SHA256_AMD64) \
+	--build-arg NODE_SHA256_ARM64=$(NODE_SHA256_ARM64) \
+	--build-arg NODE_LTS_VERSION=$(NODE_LTS_VERSION) \
+	--build-arg NODE_LTS_SHA256_AMD64=$(NODE_LTS_SHA256_AMD64) \
+	--build-arg NODE_LTS_SHA256_ARM64=$(NODE_LTS_SHA256_ARM64) \
 	--build-arg NPM_VERSION=$(NPM_VERSION) \
 	--build-arg GOLANGCI_LINT_VERSION=$(GOLANGCI_LINT_VERSION) \
 	--build-arg GOFUMPT_VERSION=$(GOFUMPT_VERSION) \
@@ -61,7 +78,10 @@ WORKER_BUILD_ARGS = \
 	--build-arg YQ_SHA256_ARM64=$(YQ_SHA256_ARM64) \
 	--build-arg TASK_VERSION=$(TASK_VERSION) \
 	--build-arg TASK_SHA256_AMD64=$(TASK_SHA256_AMD64) \
-	--build-arg TASK_SHA256_ARM64=$(TASK_SHA256_ARM64)
+	--build-arg TASK_SHA256_ARM64=$(TASK_SHA256_ARM64) \
+	--build-arg GH_VERSION=$(GH_VERSION) \
+	--build-arg GH_SHA256_AMD64=$(GH_SHA256_AMD64) \
+	--build-arg GH_SHA256_ARM64=$(GH_SHA256_ARM64)
 
 # The revision label serve reads back for /health's worker_image_revision.
 WORKER_LABELS = --label org.opencontainers.image.revision=$(GIT_COMMIT)
@@ -79,6 +99,10 @@ test:
 	go test ./...
 test-race:
 	CGO_ENABLED=1 go test -race ./...
+# Needs a Docker daemon and pulls alpine. It force-removes every agent-labelled
+# container on the daemon, so never run it next to a live serve.
+test-docker:
+	CMX_TEST_DOCKER=1 go test -count=1 -run '^TestIntegration_' ./internal/executor/
 fmt:
 	gofumpt -w .
 lint:
