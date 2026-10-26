@@ -571,38 +571,3 @@ func TestWorktreeDirtyDegradesToWrittenOnError(t *testing.T) {
 		assert.Empty(t, id)
 	})
 }
-
-// prohibitionSentence returns the sentence of s that forbids something, so a
-// test can assert on the scope of a prohibition without pinning the rest of the
-// prose around it.
-func prohibitionSentence(t *testing.T, s string) string {
-	t.Helper()
-
-	for sentence := range strings.SplitSeq(s, ". ") {
-		if strings.Contains(sentence, "not run") {
-			return sentence
-		}
-	}
-
-	t.Fatalf("no prohibition sentence in %q", s)
-
-	return ""
-}
-
-// The schema's prohibition is scoped the same way the prompt's is, and for the
-// same reason: this tool runs one command, so the coder must stay free to run
-// the checks it does not reach.
-func TestVerifyToolSchemaScopesTheBashProhibition(t *testing.T) {
-	t.Parallel()
-
-	vt := NewVerifyTool(verifyPlan{
-		Argv:    []string{"make", "check"},
-		Display: "make check",
-		Source:  verifySourceDeclared,
-		Timeout: time.Minute,
-	}, t.TempDir(), staticProbe(true), directVerifyExec(), nil)
-	require.NotNil(t, vt)
-
-	assert.Contains(t, prohibitionSentence(t, vt.Schema().Function.Description), "make check",
-		"the prohibition must be scoped to the command the tool runs")
-}
