@@ -24,25 +24,42 @@ CVE-2026-78667
 CVE-2026-78669
 CVE-2026-97031
 
+# --- Task v3.54.0 (/usr/local/bin/task) links go-jose v4.1.4 through
+# hashicorp/go-getter's GCS getter (cloud.google.com/go/storage, grpc,
+# go-spiffe). CVE-2026-116587 (CPU DoS parsing a crafted RSA JWK, fixed in
+# 4.1.6) needs a JWK parse on that path; Task forces a git:: source on
+# go-getter, so the GCS getter never runs. Task v3.54.0 is the latest release
+# - clears when a Task release links go-jose >= 4.1.6.
+CVE-2026-116587
+
 # --- The bundled npm CLI (12.2.1, the worker's pin and the latest release)
-# ships undici 6.29.0 (/usr/local/lib/node_modules/npm/node_modules/undici); the fix
-# is 6.29.1. CVE-2026-109869 is a DoS via an unhandled stream error in npm's own
-# registry client - the worst case is one failed npm command on the
-# single-tenant worker. npm's own transitive dependency - clears when an npm
-# release bundles undici >= 6.29.1.
+# ships undici 6.29.0 (/usr/local/lib/node_modules/npm/node_modules/undici); the
+# fixes are in 6.29.1. Only node-gyp's header download uses it - npm's registry
+# client runs on minipass-fetch. CVE-2026-109869 (DoS via an unhandled stream
+# error) and CVE-2026-87018 (crash on a TLS 1.2 renegotiation to a mismatched
+# certificate) need a hostile header server; the worst case is one failed
+# native-addon build on the single-tenant worker. CVE-2026-109383 (Agent drops
+# a function-valued tls option such as checkServerIdentity) needs a tls
+# callback, and node-gyp passes TLS settings only through connect, requestTls
+# and proxyTls. Clears when an npm release bundles undici >= 6.29.1.
 CVE-2026-109869
+CVE-2026-87018
+CVE-2026-109383
 
 # --- The uv-managed CPython (/opt/python) bundles pip, whose _vendor tree pins
 # msgpack==1.1.2 and setuptools==70.3.0 (pip/_vendor/vendor.txt - Trivy reads
 # the pins as installed packages). GHSA-6v7p-g79w-8964 (msgpack Unpacker-reuse
 # out-of-bounds read, fixed in 1.2.1) touches only pip's deserialization of its
-# own local HTTP cache. CVE-2025-47273 (setuptools PackageIndex path traversal,
-# fixed in 78.1.1) lives in package_index.py, which pip's vendored copy does not
-# ship - only the pkg_resources subset of setuptools is vendored. The pins
-# cannot be raised independently of pip, and the latest pip (26.2.2) still
-# carries both - clears when a pip release re-vendors msgpack >= 1.2.1 and
-# setuptools >= 78.1.1.
+# own local HTTP cache. CVE-2026-114613 (map-deserialization memory leak, fixed
+# in 1.2.3) lives in msgpack's C extension; pip vendors only the pure-Python
+# fallback. CVE-2025-47273 (setuptools PackageIndex path traversal, fixed in
+# 78.1.1) lives in package_index.py, which pip's vendored copy does not ship -
+# only the pkg_resources subset of setuptools is vendored. The pins cannot be
+# raised independently of pip, and the latest pip (26.2.2) still carries both -
+# clears when a pip release re-vendors msgpack >= 1.2.3 and setuptools
+# >= 78.1.1.
 GHSA-6v7p-g79w-8964
+CVE-2026-114613
 CVE-2025-47273
 
 # --- The same pip vendor tree pins urllib3==2.7.0; the fixes land in 2.8.0.
