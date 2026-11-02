@@ -369,3 +369,122 @@ func TestReportStatus_TerminalBackgroundRetry(t *testing.T) {
 		assert.EqualValues(t, 3, hits.Load(), "Close must cancel before another attempt lands")
 	})
 }
+
+// redirectPair returns a redirector that answers 307 (with a body that would
+// decode as success) to a path on a second server, plus counters for both.
+func redirectPair(t *testing.T, body string) (redirector *httptest.Server, redirectorHits, otherHits *atomic.Int32, sigSeen *atomic.Value) {
+	t.Helper()
+
+	redirectorHits, otherHits, sigSeen = new(atomic.Int32), new(atomic.Int32), new(atomic.Value)
+
+	// Same hostname, different port: Go's own header stripping would not protect this hop.
+	other := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		otherHits.Add(1)
+	}))
+	t.Cleanup(other.Close)
+
+	redirector = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirectorHits.Add(1)
+		sigSeen.Store(r.Header.Get(protocol.SignatureHeader))
+		w.Header().Set("Location", other.URL+r.URL.Path)
+		w.WriteHeader(http.StatusTemporaryRedirect)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(redirector.Close)
+
+	return redirector, redirectorHits, otherHits, sigSeen
+}
+
+func TestReportStatus_RefusesRedirects(t *testing.T) {
+	const apiKey = "redirect-hmac-key-long-enough"
+
+	redirector, hits, otherHits, sigSeen := redirectPair(t, "")
+
+	c := newFastClient(redirector.URL, apiKey)
+	c.backgroundDelay = func(int) time.Duration { return 0 }
+	attempted := make(chan struct{}, 8)
+	c.bgAttempted = attempted
+
+	defer c.Close()
+
+	err := c.ReportStatus(context.Background(), "CMX-001", "proj", "completed", "")
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), apiKey)
+	assert.NotContains(t, err.Error(), sigSeen.Load().(string))
+	assert.EqualValues(t, 1, hits.Load(), "a redirect is not retried")
+
+	select {
+	case <-attempted:
+		t.Fatal("a redirect must not schedule a background retry")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	assert.EqualValues(t, 1, hits.Load())
+	assert.Zero(t, otherHits.Load(), "the redirect target must never be dialed")
+}
+
+func TestVerifyAutonomous_RefusesRedirects(t *testing.T) {
+	const apiKey = "redirect-hmac-key-long-enough"
+
+	redirector, hits, otherHits, sigSeen := redirectPair(t, `{"autonomous":true}`)
+
+	c := newFastClient(redirector.URL, apiKey)
+
+	defer c.Close()
+
+	autonomous, err := c.VerifyAutonomous(context.Background(), "proj", "CMX-001")
+	require.Error(t, err)
+	assert.False(t, autonomous, "fail closed")
+	assert.NotContains(t, err.Error(), apiKey)
+	assert.NotContains(t, err.Error(), sigSeen.Load().(string))
+	assert.EqualValues(t, 1, hits.Load(), "a redirect is not retried")
+	assert.Zero(t, otherHits.Load(), "the redirect target must never be dialed")
+}
+
+func TestReportStatus_BackgroundRetryStopsOnRedirect(t *testing.T) {
+	const apiKey = "redirect-hmac-key-long-enough"
+
+	var hits, otherHits atomic.Int32
+
+	other := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		otherHits.Add(1)
+	}))
+	t.Cleanup(other.Close)
+
+	// The three synchronous attempts see 503; the first background attempt sees a redirect.
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hits.Add(1) <= 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+
+			return
+		}
+
+		w.Header().Set("Location", other.URL+r.URL.Path)
+		w.WriteHeader(http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(redirector.Close)
+
+	c := newFastClient(redirector.URL, apiKey)
+	c.backgroundDelay = func(int) time.Duration { return 0 }
+	attempted := make(chan struct{}, 8)
+	c.bgAttempted = attempted
+
+	defer c.Close()
+
+	require.Error(t, c.ReportStatus(context.Background(), "CMX-001", "proj", "completed", ""))
+
+	select {
+	case <-attempted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("background retry did not fire in time")
+	}
+
+	select {
+	case <-attempted:
+		t.Fatal("a redirect must end the background retry")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	assert.EqualValues(t, 4, hits.Load())
+	assert.Zero(t, otherHits.Load(), "the redirect target must never be dialed")
+}

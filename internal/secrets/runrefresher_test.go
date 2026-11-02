@@ -768,3 +768,37 @@ func TestProvisionOfTheSameRunReportsNoDisplacement(t *testing.T) {
 
 	assert.Empty(t, *calls)
 }
+
+func TestFetchGitCredentialsRefusesRedirects(t *testing.T) {
+	t.Parallel()
+
+	const apiKey = "redirect-hmac-key-long-enough"
+
+	var (
+		otherHits atomic.Int32
+		sigSeen   atomic.Value
+	)
+
+	// Same hostname, different port: Go's own header stripping would not protect this hop.
+	other := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		otherHits.Add(1)
+	}))
+	defer other.Close()
+
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sigSeen.Store(r.Header.Get(protocol.SignatureHeader))
+		w.Header().Set("Location", other.URL+r.URL.Path)
+		w.WriteHeader(http.StatusTemporaryRedirect)
+		_, _ = w.Write([]byte(`{"token":"ghs_fake","expires_at":""}`))
+	}))
+	defer redirector.Close()
+
+	m := newTestManager(t, redirector.URL, apiKey)
+
+	token, _, err := m.fetchGitCredentials(t.Context(), "proj", "CMX-001")
+	require.Error(t, err)
+	assert.Empty(t, token)
+	assert.NotContains(t, err.Error(), apiKey)
+	assert.NotContains(t, err.Error(), sigSeen.Load().(string))
+	assert.Zero(t, otherHits.Load(), "the redirect target must never be dialed")
+}

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"unicode/utf8"
 
@@ -1219,4 +1220,26 @@ func TestUsageTotal(t *testing.T) {
 			assert.InDelta(t, tt.want, usageTotal("X-1", tt.text), 1e-9)
 		})
 	}
+}
+
+func TestNew_RefusesRedirects(t *testing.T) {
+	const key = "redirect-secret-key"
+
+	var received atomic.Int32
+
+	// Same hostname, different port: Go's own header stripping would not protect this hop.
+	other := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		received.Add(1)
+	}))
+	t.Cleanup(other.Close)
+
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+"/mcp", http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(redirector.Close)
+
+	_, err := New(context.Background(), redirector.URL+"/mcp", key, "agent-1")
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), key)
+	assert.Zero(t, received.Load(), "the redirect target must never be dialed")
 }
