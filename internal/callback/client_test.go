@@ -440,3 +440,51 @@ func TestVerifyAutonomous_RefusesRedirects(t *testing.T) {
 	assert.EqualValues(t, 1, hits.Load(), "a redirect is not retried")
 	assert.Zero(t, otherHits.Load(), "the redirect target must never be dialed")
 }
+
+func TestReportStatus_BackgroundRetryStopsOnRedirect(t *testing.T) {
+	const apiKey = "redirect-hmac-key-long-enough"
+
+	var hits, otherHits atomic.Int32
+
+	other := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		otherHits.Add(1)
+	}))
+	t.Cleanup(other.Close)
+
+	// The three synchronous attempts see 503; the first background attempt sees a redirect.
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hits.Add(1) <= 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+
+			return
+		}
+
+		w.Header().Set("Location", other.URL+r.URL.Path)
+		w.WriteHeader(http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(redirector.Close)
+
+	c := newFastClient(redirector.URL, apiKey)
+	c.backgroundDelay = func(int) time.Duration { return 0 }
+	attempted := make(chan struct{}, 8)
+	c.bgAttempted = attempted
+
+	defer c.Close()
+
+	require.Error(t, c.ReportStatus(context.Background(), "CMX-001", "proj", "completed", ""))
+
+	select {
+	case <-attempted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("background retry did not fire in time")
+	}
+
+	select {
+	case <-attempted:
+		t.Fatal("a redirect must end the background retry")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	assert.EqualValues(t, 4, hits.Load())
+	assert.Zero(t, otherHits.Load(), "the redirect target must never be dialed")
+}

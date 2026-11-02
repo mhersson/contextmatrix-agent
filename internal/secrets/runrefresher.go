@@ -117,7 +117,7 @@ func NewRunCredentials(secretsDir, cmURL, apiKey string, logger *slog.Logger) *R
 		http: &http.Client{
 			Timeout: credentialsRequestTimeout,
 			// Go does not strip the custom signature headers on redirect, so a
-			// followed 307/308 would forward the signed request to any host.
+			// followed redirect would forward them to any host.
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
 		logger:        logger,

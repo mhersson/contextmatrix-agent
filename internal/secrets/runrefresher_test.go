@@ -770,6 +770,8 @@ func TestProvisionOfTheSameRunReportsNoDisplacement(t *testing.T) {
 }
 
 func TestFetchGitCredentialsRefusesRedirects(t *testing.T) {
+	t.Parallel()
+
 	const apiKey = "redirect-hmac-key-long-enough"
 
 	var (

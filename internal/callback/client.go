@@ -30,10 +30,10 @@ const (
 	// backoff a TERMINAL (completed/failed) status callback falls back to
 	// once the fast synchronous attempts above are exhausted: 5s, 10s, 20s,
 	// 40s, 80s, then capped at 2m - retried indefinitely until it succeeds,
-	// is rejected with a non-retryable 3xx or 4xx, or the client is Closed (process
-	// shutdown). A terminal callback is the only signal that clears a card's
-	// parent claim / worker_status in ContextMatrix, so it must not be
-	// silently dropped by a brief CM outage.
+	// is rejected with a non-retryable 3xx or 4xx, or the client is Closed
+	// (process shutdown). A terminal callback is the only signal that
+	// clears a card's parent claim / worker_status in ContextMatrix, so it
+	// must not be silently dropped by a brief CM outage.
 	backgroundBaseDelay = 5 * time.Second
 	backgroundMaxDelay  = 2 * time.Minute
 )
@@ -98,7 +98,7 @@ func New(baseURL, apiKey string, logger *slog.Logger) *Client {
 		http: &http.Client{
 			Timeout: requestTimeout,
 			// Go does not strip the custom signature headers on redirect, so a
-			// followed 307/308 would forward the signed request to any host.
+			// followed redirect would forward them to any host.
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
 		logger:          logger,
