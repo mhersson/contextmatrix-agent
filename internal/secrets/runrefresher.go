@@ -111,10 +111,15 @@ func NewRunCredentials(secretsDir, cmURL, apiKey string, logger *slog.Logger) *R
 	}
 
 	return &RunCredentials{
-		runsDir:       filepath.Join(secretsDir, runsSubdir),
-		cmURL:         strings.TrimRight(cmURL, "/"),
-		apiKey:        apiKey,
-		http:          &http.Client{Timeout: credentialsRequestTimeout},
+		runsDir: filepath.Join(secretsDir, runsSubdir),
+		cmURL:   strings.TrimRight(cmURL, "/"),
+		apiKey:  apiKey,
+		http: &http.Client{
+			Timeout: credentialsRequestTimeout,
+			// Go does not strip the custom signature headers on redirect, so a
+			// followed 307/308 would forward the signed request to any host.
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
 		logger:        logger,
 		refreshBefore: defaultRefreshBefore,
 		minSleep:      defaultMinSleep,
@@ -363,7 +368,7 @@ func (m *RunCredentials) fetchGitCredentials(ctx context.Context, project, cardI
 	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return "", time.Time{}, fmt.Errorf("git-credentials returned %d", resp.StatusCode)
 	}
 

@@ -30,7 +30,7 @@ const (
 	// backoff a TERMINAL (completed/failed) status callback falls back to
 	// once the fast synchronous attempts above are exhausted: 5s, 10s, 20s,
 	// 40s, 80s, then capped at 2m - retried indefinitely until it succeeds,
-	// is rejected with a non-retryable 4xx, or the client is Closed (process
+	// is rejected with a non-retryable 3xx or 4xx, or the client is Closed (process
 	// shutdown). A terminal callback is the only signal that clears a card's
 	// parent claim / worker_status in ContextMatrix, so it must not be
 	// silently dropped by a brief CM outage.
@@ -93,9 +93,14 @@ func New(baseURL, apiKey string, logger *slog.Logger) *Client {
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 
 	return &Client{
-		baseURL:         strings.TrimRight(baseURL, "/"),
-		apiKey:          apiKey,
-		http:            &http.Client{Timeout: requestTimeout},
+		baseURL: strings.TrimRight(baseURL, "/"),
+		apiKey:  apiKey,
+		http: &http.Client{
+			Timeout: requestTimeout,
+			// Go does not strip the custom signature headers on redirect, so a
+			// followed 307/308 would forward the signed request to any host.
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
 		logger:          logger,
 		delays:          defaultDelays,
 		bgCtx:           bgCtx,
@@ -186,7 +191,7 @@ func (c *Client) ReportStatus(ctx context.Context, cardID, project, status, mess
 			return nil
 		}
 
-		if isClientError(lastErr) {
+		if isRefusal(lastErr) {
 			return lastErr
 		}
 
@@ -226,7 +231,7 @@ func (c *Client) sendStatusOnce(ctx context.Context, uri, path string, body []by
 
 // scheduleBackgroundRetry starts a goroutine that keeps retrying a failed
 // terminal status callback with exponential backoff until it succeeds, is
-// rejected with a non-retryable 4xx, or the client is Closed. CM's
+// rejected with a non-retryable 3xx or 4xx, or the client is Closed. CM's
 // worker-status handler safely re-applies the same idempotent field writes
 // for a duplicate terminal status, so replaying the same payload is safe.
 func (c *Client) scheduleBackgroundRetry(cardID, project, status, uri, path string, body []byte) {
@@ -272,7 +277,7 @@ func (c *Client) scheduleBackgroundRetry(cardID, project, status, uri, path stri
 				return
 			}
 
-			if isClientError(err) {
+			if isRefusal(err) {
 				c.logger.Error("terminal status callback rejected, giving up background retry",
 					"card_id", cardID, "project", project, "status", status, "error", err)
 
@@ -333,7 +338,7 @@ func (c *Client) VerifyAutonomous(ctx context.Context, project, cardID string) (
 
 		lastErr = err
 
-		if isClientError(err) {
+		if isRefusal(err) {
 			return false, err
 		}
 
@@ -364,7 +369,7 @@ func (c *Client) doVerifyAutonomous(req *http.Request) (bool, error) {
 		return false, fmt.Errorf("read verify-autonomous response: %w", err)
 	}
 
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return false, &callbackError{statusCode: resp.StatusCode}
 	}
 
@@ -393,7 +398,7 @@ func (c *Client) doRoundTrip(req *http.Request) error {
 		return fmt.Errorf("drain response body: %w", err)
 	}
 
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return &callbackError{statusCode: resp.StatusCode}
 	}
 
@@ -409,11 +414,12 @@ func (e *callbackError) Error() string {
 	return fmt.Sprintf("callback returned status %d", e.statusCode)
 }
 
-// isClientError reports whether err is a 4xx response, which is not retried.
-func isClientError(err error) bool {
+// isRefusal reports whether err is a 3xx or 4xx response, which is not
+// retried: a redirect is refused, never followed.
+func isRefusal(err error) bool {
 	ce, ok := errors.AsType[*callbackError](err)
 
-	return ok && ce.statusCode >= 400 && ce.statusCode < 500
+	return ok && ce.statusCode >= 300 && ce.statusCode < 500
 }
 
 // deriveURI returns the request-target (path + raw query) for fullURL.

@@ -104,6 +104,9 @@ func New(ctx context.Context, mcpURL, apiKey, agentID string, opts ...Option) (*
 
 	httpClient := &http.Client{
 		Transport: &bearerTransport{apiKey: apiKey, base: o.base},
+		// bearerTransport sets the key on every hop, so a followed redirect
+		// would hand it to whatever host the redirect names.
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 
 	dial := func(ctx context.Context) (*mcp.ClientSession, error) {
