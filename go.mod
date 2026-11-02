@@ -10,7 +10,7 @@ require (
 	github.com/knadh/koanf/providers/posflag v1.0.2
 	github.com/knadh/koanf/providers/structs v1.0.1
 	github.com/knadh/koanf/v2 v2.4.1
-	github.com/mhersson/contextmatrix-backendkit v0.15.0
+	github.com/mhersson/contextmatrix-backendkit v0.15.1
 	github.com/mhersson/contextmatrix-harness v0.29.0
 	github.com/mhersson/contextmatrix-protocol v0.38.0
 	github.com/moby/docker-image-spec v1.3.1
