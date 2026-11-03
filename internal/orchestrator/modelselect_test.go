@@ -235,21 +235,49 @@ func TestReviewPanelSelectionsReachTheTranscript(t *testing.T) {
 }
 
 // TestAuthoritativeReviewPanelRecordsItsEscalatedTier proves the requested tier
-// on the event is the one actually asked of the selector, not the card's.
+// on the event is the one actually asked of the selector: one tier above the
+// card's and never below complex, critical capped at critical, on the selected
+// and the pinned path.
 func TestAuthoritativeReviewPanelRecordsItsEscalatedTier(t *testing.T) {
-	var transcript bytes.Buffer
+	tests := []struct {
+		card string
+		want string
+	}{
+		{"simple", "complex"},
+		{"moderate", "complex"},
+		{"complex", "critical"},
+		{"critical", "critical"},
+	}
 
-	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reviewerRegistry())
-	d.Emit = events.NewEmitter(nil, &transcript)
-	o := newReviewRun(d, cmclient.TaskContext{}, 0)
+	for _, tt := range tests {
+		for _, pinned := range []bool{false, true} {
+			name := tt.card
+			if pinned {
+				name += "/pinned"
+			}
 
-	o.reviewPanel(context.Background(), 1000, true)
+			t.Run(name, func(t *testing.T) {
+				var transcript bytes.Buffer
 
-	sels := selectionsForPhase(modelSelections(t, &transcript), "review panel")
-	require.NotEmpty(t, sels)
+				d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reviewerRegistry())
+				d.Emit = events.NewEmitter(nil, &transcript)
+				o := newReviewRun(d, cmclient.TaskContext{}, 0)
+				o.cardSizing = seedSizing(tt.card)
 
-	for _, s := range sels {
-		assert.Equal(t, "complex", s.TierRequested)
+				if pinned {
+					o.tc.ModelReviewer = "pinned/model"
+				}
+
+				o.reviewPanel(context.Background(), 1000, true)
+
+				sels := selectionsForPhase(modelSelections(t, &transcript), "review panel")
+				require.NotEmpty(t, sels)
+
+				for _, s := range sels {
+					assert.Equal(t, tt.want, s.TierRequested)
+				}
+			})
+		}
 	}
 }
 

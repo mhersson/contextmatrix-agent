@@ -108,6 +108,16 @@ func escalateTier(t registry.Tier) registry.Tier {
 	}
 }
 
+// authoritativeTier is the tier the authoritative review pass runs at: one
+// above the card's, never below complex.
+func authoritativeTier(card registry.Tier) registry.Tier {
+	if up := escalateTier(card); tierRank(up) > tierRank(registry.TierComplex) {
+		return up
+	}
+
+	return registry.TierComplex
+}
+
 // tierRank orders the ladder for comparisons: simple < moderate < complex < critical.
 func tierRank(t registry.Tier) int {
 	switch t {

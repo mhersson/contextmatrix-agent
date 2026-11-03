@@ -102,8 +102,8 @@ Three specialists - Correctness, Design & Maintainability, Security &
 Performance - run in parallel, read-only, behind a spec/test gate that
 short-circuits to the fix loop before spending reviewer tokens; the
 orchestrator synthesizes the report.
-A POC card without mob review runs one generic reviewer instead - see
-[POC projects](#poc-projects).
+A POC card without mob review runs one generic reviewer instead - see [POC
+projects](#poc-projects).
 
 The mob discussion briefing always diffs the full branch against the base
 branch; the solo panel does too on round 1 and the authoritative pass, but on
@@ -323,8 +323,9 @@ A POC card without mob review (`pocReview`: `Config.POC` set and
 `Mob.reviews()` false) runs one generic reviewer per review round instead of
 the three specialists, and so does the authoritative pass at the cliff
 (`panelLenses`). The seat is selected like a specialist seat: at the card
-tier on a cheap round, at complex on the authoritative pass, and on the
-pinned model when the card pins a reviewer. Its bar is whether the change
+tier on a cheap round, one tier above the card tier on the authoritative
+pass (at least complex, at most critical), and on the pinned model when
+the card pins a reviewer. Its bar is whether the change
 does what the card asks and works. A real bug, an exploitable vulnerability
 (a committed secret included), a broken or vacuous test, a missed acceptance
 criterion and unscoped work block. Missing edge-case tests, coverage,

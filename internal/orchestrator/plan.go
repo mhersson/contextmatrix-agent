@@ -518,19 +518,19 @@ func resolveOrchestratorModel(
 // gets a calibrated judge.
 const decisionTier = registry.TierComplex
 
-// resolveDecisionModel resolves the model an orchestrator DECISION phase runs on
-// (plan decomposition, review synthesis). These phases are reasoning- and
+// resolveDecisionModel resolves the model an orchestrator DECISION phase runs
+// on (plan decomposition, review synthesis). These phases are reasoning- and
 // calibration-sensitive - a weak model emits malformed plans and mis-calibrated
-// verdicts - so, unlike the low-stakes docs phase, they are floored to a capable
-// judgment model. A catalog-resolvable ModelOrchestrator pin still wins (operator
-// override; an unresolvable pin already warned inside resolveOrchestratorModel).
-// Otherwise the floor is the same best-value selection the authoritative review
-// panel uses - RoleReviewer @ TierComplex - the measured proxy for orchestrator-
-// level judgment (the live catalog measures only coder/reviewer; reviewer is the
-// closer fit for both decomposing and judging). Fixed at TierComplex for EVERY
-// call: decision quality does not scale with task complexity, so even a trivial
-// card gets a calibrated judge. The floor only ever RAISES base, never lowers
-// it: a selection that did not clear the complex bar has no claim over an
+// verdicts - so, unlike the low-stakes docs phase, they are floored to a
+// capable judgment model. A catalog-resolvable ModelOrchestrator pin still wins
+// (operator override; an unresolvable pin already warned inside
+// resolveOrchestratorModel). Otherwise the floor is a best-value RoleReviewer
+// selection at TierComplex, the measured proxy for orchestrator-level judgment
+// (the live catalog measures only coder/reviewer; reviewer is the closer fit
+// for both decomposing and judging). Fixed at TierComplex for EVERY call:
+// decision quality does not scale with task complexity, so even a trivial card
+// gets a calibrated judge. The floor only ever RAISES base, never lowers it: a
+// selection that did not clear the complex bar has no claim over an
 // operator-configured orchestrator model, so base is kept. Degrades to the base
 // resolution when no registry is present.
 //
