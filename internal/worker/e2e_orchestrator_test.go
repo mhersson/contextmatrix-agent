@@ -656,6 +656,11 @@ func e2eSelection() *protocol.SelectionContext {
 			{Slug: "e2e/reviewer-b", ContextWindow: window, PromptPricePerTok: price, CompletionPricePerTok: price, ReviewerPrior: 0.86},
 			{Slug: "e2e/reviewer-c", ContextWindow: window, PromptPricePerTok: price, CompletionPricePerTok: price, ReviewerPrior: 0.84},
 		},
+		// Pinned so the panel composition does not move with a retune of the built-ins.
+		TierBars: map[string]map[string]float64{
+			"coder":    {"simple": 0.65, "moderate": 0.76, "complex": 0.82, "critical": 0.90},
+			"reviewer": {"simple": 0.65, "moderate": 0.76, "complex": 0.82, "critical": 0.90},
+		},
 	}
 }
 

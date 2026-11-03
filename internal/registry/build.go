@@ -27,8 +27,8 @@ func (f LadderFault) Error() string {
 // FromSelection builds the registry CM's SelectionContext describes: the
 // candidates, favorites, blacklist, per-role tier ladders and price headroom
 // on the wire, plus the run's max-capability flag. It always returns a
-// usable registry. A role whose ladder does not validate falls back to the
-// built-in bars for that role alone and is reported as a LadderFault; the
+// usable registry. A role whose ladder does not validate falls back to that
+// role's built-in bars alone and is reported as a LadderFault; the
 // other role's ladder still applies. A headroom below 1 on the wire reads as
 // the built-in one inside the selection package; CM refuses to store one,
 // so there is nothing to report. A nil sc is an empty selection: every pick
@@ -56,8 +56,8 @@ var wireRoles = map[string]Role{string(RoleCoder): RoleCoder, string(RoleReviewe
 // selection.LaddersFromWire rejects the whole map on the first bad role; the
 // agent must not, because one mistyped rung on the reviewer ladder must not
 // silently reset the coder ladder too. Each role goes through the shared
-// rule (merge over the built-in bars, monotone, every bar in [0,1]); a role
-// that fails is left out of the result, which the selector reads as the
+// rule (merge over that role's built-in bars, monotone, every bar in [0,1]);
+// a role that fails is left out of the result, which the selector reads as the
 // built-in bars, and named in a fault. An unknown role is a fault as well: a
 // typo that quietly left a role on the defaults is the failure the operator
 // cannot see. Faults are ordered by role name so the card lines are stable.
@@ -82,7 +82,7 @@ func laddersFromPayload(in map[string]map[string]float64) (selection.Ladders, []
 			continue
 		}
 
-		bars, err := selection.TierBarsFromStrings(in[name])
+		bars, err := selection.TierBarsFromStrings(role, in[name])
 		if err != nil {
 			faults = append(faults, LadderFault{Role: name, Reason: err})
 

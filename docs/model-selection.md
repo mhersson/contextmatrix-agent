@@ -36,21 +36,26 @@ same error, so a live file can be checked before a deploy.
 
 ## Tier ladders
 
-There is one ladder per role, coder and reviewer, because the two priors come
-from different indices with different shapes. The operator edits both on
-ContextMatrix's admin page (Model selection); CM sends them with each run as
-`SelectionContext.TierBars`, role name to tier name to bar. A role CM sends
-nothing for uses the built-in bars: simple 0.65, moderate 0.76, complex 0.82,
-critical 0.90. A partial ladder merges over the built-in bars.
+There is one ladder per role, coder and reviewer, each with its own built-in
+bars. The operator edits both on ContextMatrix's admin page (Model
+selection); CM sends them with each run as `SelectionContext.TierBars`, role
+name to tier name to bar. A role CM sends nothing for uses its built-in bars:
+
+| Role     | simple | moderate | complex | critical |
+| -------- | ------ | -------- | ------- | -------- |
+| coder    | 0.65   | 0.75     | 0.84    | 0.94     |
+| reviewer | 0.90   | 0.90     | 0.90    | 0.92     |
+
+A partial ladder merges over that role's built-in bars.
 
 The agent validates each role's ladder with the shared rule (known tier
 names, every bar in [0,1], non-decreasing from simple to critical). A ladder
-that fails falls back to the built-in bars for that role only, the other
+that fails falls back to that role's built-in bars only, the other
 role's ladder still applies, the run never fails on it, and the card gets
 one log line per failed role:
 
 ```text
-selector: reviewer tier ladder from the payload did not validate (tier bars: ladder must not decrease: moderate 0.76 is below simple 0.9) - using the built-in bars
+selector: reviewer tier ladder from the payload did not validate (tier bars: ladder must not decrease: moderate 0.9 is below simple 0.95) - using the built-in bars
 ```
 
 The ladder is not configurable on the agent host. A `serve.yaml` that still
@@ -95,12 +100,12 @@ the `selector: pool` line explains why it won.
 
 ```text
 selector: pick card_id=... phase=coder model=high/one \
-  requested_tier=complex met_tier=complex bar=0.82 prior=0.85 has_prior=true source=auto
+  requested_tier=complex met_tier=complex bar=0.84 prior=0.85 has_prior=true source=auto
 selector: pool card_id=... phase=coder model=high/one \
-  requested_tier=complex rung=complex rung_bar=0.82 role=coder \
+  requested_tier=complex rung=complex rung_bar=0.84 role=coder \
   pool_top/one="prior=0.93 price=1.5e-05 outcome=out-of-band" \
   pool_high/one="prior=0.85 price=3e-06 outcome=selected" \
-  pool_high/two="prior=0.83 price=3.3e-06 outcome=in-band" \
+  pool_high/two="prior=0.84 price=3.3e-06 outcome=in-band" \
   filtered_prior-below-bar="mid/one,mid/two,low/one"
 ```
 

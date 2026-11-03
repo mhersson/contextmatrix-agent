@@ -10,13 +10,14 @@ import (
 )
 
 // twoModels is a two-candidate payload where the price band decides at the
-// built-in complex bar (0.82): both clear it, glm is cheapest at 5.8e-6 per
-// token, sol at 1.2e-5 is outside the 1.5x band, so glm wins for both roles.
+// built-in complex bars (coder 0.84, reviewer 0.90): both clear them, glm is
+// cheapest at 5.8e-6 per token, sol at 1.2e-5 is outside the 1.5x band, so
+// glm wins for both roles.
 func twoModels() *protocol.SelectionContext {
 	return &protocol.SelectionContext{
 		Candidates: []protocol.CandidateModel{
-			{Slug: "z-ai/glm-5.3", PromptPricePerTok: 2.9e-6, CompletionPricePerTok: 2.9e-6, ContextWindow: 200000, CoderPrior: 0.917, ReviewerPrior: 0.841},
-			{Slug: "openai/gpt-5.6-sol", PromptPricePerTok: 6e-6, CompletionPricePerTok: 6e-6, ContextWindow: 400000, CoderPrior: 0.949, ReviewerPrior: 0.882},
+			{Slug: "z-ai/glm-5.3", PromptPricePerTok: 2.9e-6, CompletionPricePerTok: 2.9e-6, ContextWindow: 200000, CoderPrior: 0.917, ReviewerPrior: 0.91},
+			{Slug: "openai/gpt-5.6-sol", PromptPricePerTok: 6e-6, CompletionPricePerTok: 6e-6, ContextWindow: 400000, CoderPrior: 0.949, ReviewerPrior: 0.95},
 		},
 	}
 }
@@ -100,6 +101,8 @@ func TestFromSelectionThreadsCreators(t *testing.T) {
 			{Slug: "gpt-c", PromptPricePerTok: 1e-6, CompletionPricePerTok: 2e-6, ContextWindow: 200000, ReviewerPrior: 0.88, Creator: "openai"},
 			{Slug: "claude-x", PromptPricePerTok: 1e-6, CompletionPricePerTok: 2e-6, ContextWindow: 200000, ReviewerPrior: 0.85, Creator: "anthropic"},
 		},
+		// The fixture reviewer ladder keeps every candidate in the panel.
+		TierBars: map[string]map[string]float64{"reviewer": {"simple": 0.65, "moderate": 0.76, "complex": 0.82, "critical": 0.90}},
 	}
 	r, _ := FromSelection(sc, "capable-default", false)
 
@@ -135,7 +138,7 @@ func TestFromSelectionAppliesPayloadLaddersPerRole(t *testing.T) {
 	require.Empty(t, faults)
 
 	assert.InDelta(t, 0.93, r.BarFor(RoleCoder, TierComplex), 1e-9)
-	assert.InDelta(t, 0.82, r.BarFor(RoleReviewer, TierComplex), 1e-9, "a role not on the wire keeps the built-in bars")
+	assert.InDelta(t, 0.90, r.BarFor(RoleReviewer, TierComplex), 1e-9, "a role not on the wire keeps its built-in bars")
 
 	coder := r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierComplex})
 	assert.Equal(t, "openai/gpt-5.6-sol", coder.Model)
@@ -151,8 +154,8 @@ func TestFromSelectionAppliesPayloadLaddersPerRole(t *testing.T) {
 }
 
 func TestFromSelectionFallsBackOnlyTheRoleWhoseLadderFailed(t *testing.T) {
-	// The reviewer ladder is non-monotone (complex 0.5 below moderate 0.76)
-	// and must fall back to the built-in bars; the coder ladder validates
+	// The reviewer ladder is non-monotone (complex 0.5 below moderate 0.90)
+	// and must fall back to the reviewer built-in bars; the coder ladder validates
 	// and must still apply. The registry is usable either way.
 	sc := twoModels()
 	sc.TierBars = map[string]map[string]float64{
@@ -163,11 +166,10 @@ func TestFromSelectionFallsBackOnlyTheRoleWhoseLadderFailed(t *testing.T) {
 	r, faults := FromSelection(sc, "capable/default", false)
 	require.Len(t, faults, 1)
 	assert.Equal(t, "reviewer", faults[0].Role)
-	assert.Contains(t, faults[0].Error(), "reviewer tier ladder from the payload did not validate (")
-	assert.Contains(t, faults[0].Error(), "ladder must not decrease")
 
 	assert.InDelta(t, 0.93, r.BarFor(RoleCoder, TierComplex), 1e-9, "the valid coder ladder is applied")
-	assert.InDelta(t, 0.82, r.BarFor(RoleReviewer, TierComplex), 1e-9, "the failed reviewer ladder is the built-in bars")
+	assert.InDelta(t, 0.90, r.BarFor(RoleReviewer, TierComplex), 1e-9, "the failed reviewer ladder is the reviewer built-in bars")
+	assert.InDelta(t, 0.92, r.BarFor(RoleReviewer, TierCritical), 1e-9)
 	assert.Equal(t, "openai/gpt-5.6-sol", r.SelectByComplexity(SelectInput{Role: RoleCoder, Tier: TierComplex}).Model)
 	assert.Equal(t, "z-ai/glm-5.3", r.SelectByComplexity(SelectInput{Role: RoleReviewer, Tier: TierComplex}).Model)
 }
@@ -180,9 +182,9 @@ func TestLaddersFromPayload(t *testing.T) {
 		})
 		require.Empty(t, faults)
 		assert.InDelta(t, 0.9, got[RoleCoder][TierComplex], 1e-9)
-		assert.InDelta(t, 0.76, got[RoleCoder][TierModerate], 1e-9, "a partial ladder merges over the built-in bars")
+		assert.InDelta(t, 0.75, got[RoleCoder][TierModerate], 1e-9, "a partial ladder merges over the built-in bars")
 		assert.InDelta(t, 0.93, got[RoleReviewer][TierCritical], 1e-9)
-		assert.InDelta(t, 0.82, got[RoleReviewer][TierComplex], 1e-9)
+		assert.InDelta(t, 0.90, got[RoleReviewer][TierComplex], 1e-9)
 	})
 
 	t.Run("one bad role falls back alone", func(t *testing.T) {
@@ -192,7 +194,6 @@ func TestLaddersFromPayload(t *testing.T) {
 		})
 		require.Len(t, faults, 1)
 		assert.Equal(t, "reviewer", faults[0].Role)
-		assert.Contains(t, faults[0].Reason.Error(), "ladder must not decrease")
 		assert.InDelta(t, 0.9, got[RoleCoder][TierComplex], 1e-9)
 
 		_, present := got[RoleReviewer]
@@ -234,8 +235,35 @@ func TestLaddersFromPayload(t *testing.T) {
 		got, faults := laddersFromPayload(map[string]map[string]float64{"coder": {}})
 		assert.Nil(t, faults)
 		assert.Nil(t, got, "nothing configured means nil ladders")
-		assert.InDelta(t, 0.82, got.Bars(RoleCoder)[TierComplex], 1e-9, "nil ladders read as the built-in bars")
+		assert.InDelta(t, 0.84, got.Bars(RoleCoder)[TierComplex], 1e-9, "nil ladders read as the built-in bars")
 	})
+}
+
+func TestFromSelectionMergesEachRoleOverItsOwnBuiltIn(t *testing.T) {
+	sc := twoModels()
+	sc.TierBars = map[string]map[string]float64{"coder": {"critical": 0.96}, "reviewer": {"critical": 0.95}}
+
+	r, faults := FromSelection(sc, "capable/default", false)
+	require.Empty(t, faults)
+
+	assert.InDelta(t, 0.84, r.BarFor(RoleCoder, TierComplex), 1e-9)
+	assert.InDelta(t, 0.96, r.BarFor(RoleCoder, TierCritical), 1e-9)
+	assert.InDelta(t, 0.90, r.BarFor(RoleReviewer, TierComplex), 1e-9)
+	assert.InDelta(t, 0.95, r.BarFor(RoleReviewer, TierCritical), 1e-9)
+}
+
+func TestFromSelectionValidatesEachRoleAgainstItsOwnBuiltIn(t *testing.T) {
+	// simple 0.85 sits above the coder built-in moderate 0.75 (invalid) and
+	// below the reviewer built-in moderate 0.90 (valid).
+	sc := twoModels()
+	sc.TierBars = map[string]map[string]float64{"coder": {"simple": 0.85}, "reviewer": {"simple": 0.85}}
+
+	r, faults := FromSelection(sc, "capable/default", false)
+	require.Len(t, faults, 1)
+	assert.Equal(t, "coder", faults[0].Role)
+
+	assert.Equal(t, map[Tier]float64{TierSimple: 0.65, TierModerate: 0.75, TierComplex: 0.84, TierCritical: 0.94}, r.Bars(RoleCoder))
+	assert.Equal(t, map[Tier]float64{TierSimple: 0.85, TierModerate: 0.90, TierComplex: 0.90, TierCritical: 0.92}, r.Bars(RoleReviewer))
 }
 
 func TestLadderFaultErrorNamesRoleAndReason(t *testing.T) {

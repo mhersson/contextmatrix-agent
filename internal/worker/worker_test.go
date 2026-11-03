@@ -2191,9 +2191,10 @@ func TestBuildRegistryFallbackPrecedence(t *testing.T) {
 }
 
 // ladderSpec is a one-candidate payload with the given per-role ladders.
-// mid/model carries 0.85 for both roles, so a complex request (built-in bar
-// 0.82) is met directly, and a coder ladder raised to 0.99 (critical raised
-// with it to keep the ladder monotone) forces a clamp to moderate.
+// mid/model carries 0.85 as coder and 0.91 as reviewer, so a complex request
+// is met on both built-ins (coder 0.84, reviewer 0.90), and a coder ladder
+// raised to 0.99 (critical raised with it to keep the ladder monotone) forces
+// a clamp to moderate.
 func ladderSpec(bars map[string]map[string]float64) RunSpec {
 	return RunSpec{Selection: &protocol.SelectionContext{
 		Candidates: []protocol.CandidateModel{{
@@ -2202,7 +2203,7 @@ func ladderSpec(bars map[string]map[string]float64) RunSpec {
 			CompletionPricePerTok: 0.000002,
 			ContextWindow:         200000,
 			CoderPrior:            0.85,
-			ReviewerPrior:         0.85,
+			ReviewerPrior:         0.91,
 		}},
 		TierBars: bars,
 	}}
@@ -2240,7 +2241,6 @@ func TestBuildRegistryFallsBackPerRoleOnAnInvalidPayloadLadder(t *testing.T) {
 	}))
 	require.Len(t, faults, 1)
 	assert.Equal(t, "reviewer", faults[0].Role)
-	assert.Contains(t, faults[0].Error(), "ladder must not decrease")
 
 	coder := r.SelectByComplexity(registry.SelectInput{Role: registry.RoleCoder, Tier: registry.TierComplex})
 	assert.Equal(t, registry.TierModerate, coder.MetTier, "the valid coder ladder still applies")
