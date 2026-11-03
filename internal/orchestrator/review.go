@@ -1541,17 +1541,18 @@ func (o *run) specialistSection(ctx context.Context, res harness.SubagentResult)
 // reviewer pin overrides the entire panel: every seat runs on the pinned model,
 // and every seat after the first is flagged as a repeat so one model's opinion
 // cannot read as several agreeing ones. Otherwise the registry selects a
-// diverse panel for the card tier, excluding every model that coded on this run
-// unless no other model is selectable, and any seat that could not be served at
-// that tier reports its shortfall.
+// diverse panel for the requested tier (the card's, or the authoritative
+// mapping on that pass), excluding every model that coded on this run unless no
+// other model is selectable, and any seat that could not be served at that tier
+// reports its shortfall.
 func (o *run) reviewPanel(ctx context.Context, estTokens int, authoritative bool) []registry.Pick {
 	size := len(o.panelLenses())
 
-	// The authoritative pass escalates the panel to the complex tier so the
-	// strongest models judge the change before parking.
+	// The authoritative pass sits one tier above the card, at least complex, so
+	// it never judges below the card's own bar before parking.
 	tier := o.cardSizing.Bar
 	if authoritative {
-		tier = registry.TierComplex
+		tier = authoritativeTier(o.cardSizing.Bar)
 	}
 
 	if resolvePin(o.d.Registry, o.tc.ModelReviewer) {
@@ -2283,17 +2284,18 @@ type fixRequest struct {
 }
 
 // fixBarBase is the bar this round starts from, before any correction. The
-// authoritative pass is floored at complex: it is the last chance before a
-// park, and a stated policy constant is legitimate on a JUDGMENT-shaped call
-// where nothing in the run measures the right answer. A critical finding
-// floors the bar at the card's here because the synthesizer never sees the
-// card tier, so it cannot apply that floor to the fix_tier it emits.
+// authoritative pass runs one tier above the card, at least complex: it is the
+// last chance before a park, and a stated policy rule is legitimate on a
+// JUDGMENT-shaped call where nothing in the run measures the right answer. A
+// critical finding floors the bar at the card's here because the synthesizer
+// never sees the card tier, so it cannot apply that floor to the fix_tier it
+// emits.
 func (o *run) fixBarBase(req fixRequest) registry.Tier {
 	var base registry.Tier
 
 	switch {
 	case req.Authoritative:
-		base = registry.TierComplex
+		base = authoritativeTier(o.cardSizing.Bar)
 	case req.FixTier == "":
 		return o.cardSizing.Bar
 	default:
@@ -2312,8 +2314,8 @@ func (o *run) fixBarBase(req fixRequest) registry.Tier {
 // at, and a budget seeded from the bar the round ACTUALLY RUNS AT, then widened
 // once per capped round.
 //
-// The budget is seeded from the fix bar so the authoritative pass, floored at
-// complex, keeps its wider window.
+// The budget is seeded from the fix bar so the authoritative pass, which starts
+// at complex or above, keeps its wider window.
 //
 // The two axes stay separate in the direction that matters: a turn cap widens
 // the budget and never touches the bar, so running out of room can never buy a

@@ -2509,12 +2509,12 @@ func tierSplitReviewerRegistry() (*registry.Registry, string) {
 }
 
 // TestReviewPanelEscalatesWhenAuthoritative proves the authoritative pass sizes
-// the panel on the complex tier, not the card tier. Three cheap-but-weak
-// reviewers clear the moderate bar (0.6) but not the complex bar (0.8); one
-// expensive strong reviewer clears both. At moderate the cheap trio fills the
-// three slots (the strong model is priced out of the band), so it never appears.
-// At complex the weak trio is gated out, forcing the strong model in - a model
-// the moderate panel does not select.
+// the panel above the card tier (complex for this moderate fixture). Three
+// cheap-but-weak reviewers clear the moderate bar (0.6) but not the complex bar
+// (0.8); one expensive strong reviewer clears both. At moderate the cheap trio
+// fills the three slots (the strong model is priced out of the band), so it
+// never appears. At complex the weak trio is gated out, forcing the strong
+// model in - a model the moderate panel does not select.
 func TestReviewPanelEscalatesWhenAuthoritative(t *testing.T) {
 	reg, strong := tierSplitReviewerRegistry()
 
@@ -5026,16 +5026,34 @@ func TestFixBarBaseFloorsCriticalFindingsAtTheCardBar(t *testing.T) {
 			want: registry.TierCritical,
 		},
 		{
-			name: "a critical finding lifts the authoritative pass to a critical card bar",
+			name: "a critical finding leaves the authoritative pass on a critical card at critical",
 			card: registry.TierCritical,
 			req:  fixRequest{FixTier: "simple", Authoritative: true, CriticalFinding: true},
 			want: registry.TierCritical,
 		},
 		{
-			name: "the authoritative pass stays at complex without a critical finding",
-			card: registry.TierCritical,
+			name: "the authoritative pass on a simple card starts at complex",
+			card: registry.TierSimple,
 			req:  fixRequest{FixTier: "simple", Authoritative: true},
 			want: registry.TierComplex,
+		},
+		{
+			name: "the authoritative pass on a moderate card starts at complex",
+			card: registry.TierModerate,
+			req:  fixRequest{FixTier: "simple", Authoritative: true},
+			want: registry.TierComplex,
+		},
+		{
+			name: "the authoritative pass on a complex card starts at critical",
+			card: registry.TierComplex,
+			req:  fixRequest{FixTier: "simple", Authoritative: true},
+			want: registry.TierCritical,
+		},
+		{
+			name: "the authoritative pass on a critical card stays at critical",
+			card: registry.TierCritical,
+			req:  fixRequest{FixTier: "simple", Authoritative: true},
+			want: registry.TierCritical,
 		},
 		{
 			name: "a critical finding never lowers the authoritative pass below complex",
