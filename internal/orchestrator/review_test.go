@@ -106,7 +106,7 @@ func reviewerRegistry() *registry.Registry {
 		},
 	}
 
-	return registry.NewRegistryFromParts(reviewerCatalog(), priors, nil, nil, "default/model")
+	return registry.NewRegistryFromParts(reviewerCatalog(), priors, nil, nil, "default/model", fixtureLadders())
 }
 
 // TestReviewSubagentsInheritReasoning pins the propagation contract: the three
@@ -486,7 +486,7 @@ func fixTierPriors() registry.Priors {
 func fixTierRun(t *testing.T) *run {
 	t.Helper()
 
-	reg := registry.NewRegistryFromParts(fixTierCatalog(), fixTierPriors(), nil, nil, fixTierFallback)
+	reg := registry.NewRegistryFromParts(fixTierCatalog(), fixTierPriors(), nil, nil, fixTierFallback, fixtureLadders())
 	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reg)
 
 	// No coder pin, so every case goes down the complexity-selection path.
@@ -1882,7 +1882,7 @@ func verifyRedFixRegistry() *registry.Registry {
 		{ID: "coder/beta", ContextLength: 200000, SupportedParameters: []string{"tools"}},
 	}
 
-	return registry.NewRegistryFromParts(catalog, priors, nil, nil, "coder/alpha")
+	return registry.NewRegistryFromParts(catalog, priors, nil, nil, "coder/alpha", fixtureLadders())
 }
 
 // TestReviewPanelMandateSurvivesVerifyRedRound reproduces the cross-round
@@ -2311,7 +2311,7 @@ func TestReviewPanelCoderOnlyFallback(t *testing.T) {
 	}{
 		{
 			name:         "coder model is the only one: it reviews",
-			reg:          registry.NewRegistryFromParts(llm.Catalog{}, registry.Priors{}, nil, nil, only),
+			reg:          registry.NewRegistryFromParts(llm.Catalog{}, registry.Priors{}, nil, nil, only, fixtureLadders()),
 			coders:       map[string]bool{only: true},
 			wantSeats:    3,
 			wantModel:    only,
@@ -2319,14 +2319,14 @@ func TestReviewPanelCoderOnlyFallback(t *testing.T) {
 		},
 		{
 			name:      "coder model is incapable: still parks",
-			reg:       registry.NewRegistryFromParts(llm.Catalog{}, registry.Priors{}, nil, nil, only),
+			reg:       registry.NewRegistryFromParts(llm.Catalog{}, registry.Priors{}, nil, nil, only, fixtureLadders()),
 			coders:    map[string]bool{only: true},
 			incapable: map[string]bool{only: true},
 			wantSeats: 0,
 		},
 		{
 			name:      "coder model is blacklisted: still parks",
-			reg:       registry.NewRegistryFromParts(llm.Catalog{}, registry.Priors{}, map[string]bool{only: true}, nil, only),
+			reg:       registry.NewRegistryFromParts(llm.Catalog{}, registry.Priors{}, map[string]bool{only: true}, nil, only, fixtureLadders()),
 			coders:    map[string]bool{only: true},
 			wantSeats: 0,
 		},
@@ -2505,7 +2505,7 @@ func tierSplitReviewerRegistry() (*registry.Registry, string) {
 		},
 	}
 
-	return registry.NewRegistryFromParts(catalog, priors, nil, nil, "default/model"), strong
+	return registry.NewRegistryFromParts(catalog, priors, nil, nil, "default/model", fixtureLadders()), strong
 }
 
 // TestReviewPanelEscalatesWhenAuthoritative proves the authoritative pass sizes
@@ -2839,7 +2839,7 @@ func TestPOCAdoptedApprovalRunsNoCleanupPass(t *testing.T) {
 // any bar and there is no capable default, so the panel is empty on the very
 // first seat.
 func TestRunSpecialistsNoReviewerParksInstead(t *testing.T) {
-	reg := registry.NewRegistryFromParts(reviewerCatalog(), registry.Priors{}, nil, nil, "")
+	reg := registry.NewRegistryFromParts(reviewerCatalog(), registry.Priors{}, nil, nil, "", fixtureLadders())
 	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reg)
 
 	tc := cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}
@@ -4250,7 +4250,7 @@ func escalationRegistry() *registry.Registry {
 		},
 	}
 
-	return registry.NewRegistryFromParts(catalog, priors, nil, nil, "capable/default")
+	return registry.NewRegistryFromParts(catalog, priors, nil, nil, "capable/default", fixtureLadders())
 }
 
 // panelRejects scripts one specialist round (three specialists + synthesis)
@@ -4347,7 +4347,7 @@ func TestReviewFixNoAlternativeModelParks(t *testing.T) {
 	single := registry.NewRegistryFromParts(
 		llm.Catalog{{ID: "only/coder", ContextLength: 200000, SupportedParameters: []string{"tools"}}},
 		registry.Priors{Models: map[string]registry.PriorEntry{"only/coder": {Coder: &only}}},
-		nil, nil, "only/coder")
+		nil, nil, "only/coder", fixtureLadders())
 
 	cases := []struct {
 		name string
@@ -4708,7 +4708,7 @@ func TestReviewPanelIsEmptyWhenNoReviewerIsSelectable(t *testing.T) {
 	reg := registry.NewRegistryFromParts(
 		llm.Catalog{{ID: "weak/model", ContextLength: 200000, SupportedParameters: []string{"tools"}}},
 		registry.Priors{Models: map[string]registry.PriorEntry{"weak/model": reviewerPrior(0.30)}},
-		nil, nil, "") // no capable default: nothing is employable at all
+		nil, nil, "", fixtureLadders()) // no capable default: nothing is employable at all
 	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reg)
 	o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", State: "in_progress"}, 0)
 
@@ -4721,7 +4721,7 @@ func TestReviewPanelIsEmptyWhenNoReviewerIsSelectable(t *testing.T) {
 // (blocked park), no fix model means the code is already written and pushed, so
 // a human taking it from review is the right destination.
 func TestRefusalSentinelsDifferByPhase(t *testing.T) {
-	reg := registry.NewRegistryFromParts(llm.Catalog{}, registry.Priors{}, nil, nil, "")
+	reg := registry.NewRegistryFromParts(llm.Catalog{}, registry.Priors{}, nil, nil, "", fixtureLadders())
 
 	t.Run("coder refusal parks the card as blocked", func(t *testing.T) {
 		d := execTestDeps(&fakeOps{}, &fakeGit{}, &planLLM{})
@@ -4768,7 +4768,7 @@ func TestFixEscalationThatBuysNothingIsRecorded(t *testing.T) {
 	reg := registry.NewRegistryFromParts(
 		llm.Catalog{{ID: "mid/coder", ContextLength: 200000, SupportedParameters: []string{"tools"}}},
 		registry.Priors{Models: map[string]registry.PriorEntry{"mid/coder": coderPrior(0.78)}},
-		nil, nil, "capable/default")
+		nil, nil, "capable/default", fixtureLadders())
 	client := &planLLM{responses: []llm.Response{stopResp("Applied the fix.", 0.01)}}
 	d := reviewTestDeps(t, ops, &fakeGit{}, client, reg)
 	o := newReviewRun(d, cmclient.TaskContext{}, 0)
@@ -4814,7 +4814,7 @@ func belowComplexReviewerRegistry() *registry.Registry {
 			"acme/two":   reviewerPrior(0.78),
 			"acme/three": reviewerPrior(0.79),
 		}},
-		nil, nil, "default/model")
+		nil, nil, "default/model", fixtureLadders())
 }
 
 // TestAuthoritativeReviewBelowItsBarRunsAndRecords pins the escalation gate on
@@ -4911,7 +4911,7 @@ func TestFixEscalationNoOpReportsNoPriorRatherThanZero(t *testing.T) {
 	ops := &fakeOps{}
 	client := &planLLM{responses: []llm.Response{stopResp("Applied the fix.", 0.01)}}
 	// No priors: the escalated pick can only be the capable default.
-	reg := registry.NewRegistryFromParts(reviewerCatalog(), registry.Priors{}, nil, nil, "default/model")
+	reg := registry.NewRegistryFromParts(reviewerCatalog(), registry.Priors{}, nil, nil, "default/model", fixtureLadders())
 	d := reviewTestDeps(t, ops, &fakeGit{}, client, reg)
 	o := newReviewRun(d, cmclient.TaskContext{}, 0)
 	o.fixBarSteps = 1
@@ -4946,7 +4946,7 @@ func TestReviewParkedErrorNamesItsCause(t *testing.T) {
 // attempts-cap string there would tell the operator the cap was exhausted when
 // it was not, and hide the real cause entirely.
 func TestFixModelRefusalNamesItsRealCause(t *testing.T) {
-	reg := registry.NewRegistryFromParts(llm.Catalog{}, registry.Priors{}, nil, nil, "")
+	reg := registry.NewRegistryFromParts(llm.Catalog{}, registry.Priors{}, nil, nil, "", fixtureLadders())
 	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reg)
 	o := newReviewRun(d, cmclient.TaskContext{Title: "Parent"}, 0)
 
@@ -5320,7 +5320,7 @@ func TestCleanupPassTakesThePlainPick(t *testing.T) {
 			"acme/cheap":  coderPrior(0.80),
 			"bravo/dear":  coderPrior(0.80),
 		}},
-		nil, nil, "")
+		nil, nil, "", fixtureLadders())
 	d := reviewTestDeps(t, &fakeOps{}, &fakeGit{}, &planLLM{}, reg)
 	o := newReviewRun(d, cmclient.TaskContext{Title: "Parent"}, 0)
 	o.lastFixModel = "acme/failed"
@@ -5793,7 +5793,7 @@ func criticalCoderEscalationRegistry() *registry.Registry {
 		},
 	}
 
-	return registry.NewRegistryFromParts(reviewerCatalog(), priors, nil, nil, "default/model")
+	return registry.NewRegistryFromParts(reviewerCatalog(), priors, nil, nil, "default/model", fixtureLadders())
 }
 
 func TestGraceLandedFixRoundAtTopRungDoesNotChargeBudgetAgain(t *testing.T) {
@@ -7824,7 +7824,7 @@ func TestReviewPanelReportsNoExclusionForAnUnusedDefault(t *testing.T) {
 		"rev/gamma": {Reviewer: &gamma},
 		"rev/delta": {Reviewer: &delta},
 	}}
-	reg := registry.NewRegistryFromParts(cat, priors, nil, nil, "default/model")
+	reg := registry.NewRegistryFromParts(cat, priors, nil, nil, "default/model", fixtureLadders())
 
 	client := &planLLM{responses: []llm.Response{
 		stopResp("Correctness: fine", 0.01),

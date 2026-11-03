@@ -1074,7 +1074,7 @@ func planTestCatalog() llm.Catalog {
 }
 
 func planTestRegistry() *registry.Registry {
-	return registry.NewRegistryFromParts(planTestCatalog(), registry.Priors{}, nil, nil, "default/model")
+	return registry.NewRegistryFromParts(planTestCatalog(), registry.Priors{}, nil, nil, "default/model", fixtureLadders())
 }
 
 // priorTestRegistry builds a registry whose only laddered candidate is
@@ -1092,7 +1092,7 @@ func priorTestRegistry(coderPrior float64) *registry.Registry {
 		registry.Priors{Models: map[string]registry.PriorEntry{
 			"default/model": {Coder: &coderPrior, Reviewer: &coderPrior},
 		}},
-		nil, nil, "default/model")
+		nil, nil, "default/model", fixtureLadders())
 }
 
 // atBarPick is a selection that got exactly the tier it asked for - the normal
@@ -1298,4 +1298,17 @@ func legacyTierMarker(body, tier string) string {
 // with ErrEmptyResponse: the initial reply plus its two retries.
 func emptyReplies() []llm.Response {
 	return []llm.Response{{FinishReason: "stop"}, {FinishReason: "stop"}, {FinishReason: "stop"}}
+}
+
+// fixtureLadders is the ladder the orchestrator fixtures' bar arithmetic is
+// written against, pinned so a retune of the built-ins does not move them.
+func fixtureLadders() registry.Ladders {
+	ladder := func() map[registry.Tier]float64 {
+		return map[registry.Tier]float64{
+			registry.TierSimple: 0.65, registry.TierModerate: 0.76,
+			registry.TierComplex: 0.82, registry.TierCritical: 0.90,
+		}
+	}
+
+	return registry.Ladders{registry.RoleCoder: ladder(), registry.RoleReviewer: ladder()}
 }

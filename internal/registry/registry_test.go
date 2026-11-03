@@ -44,7 +44,7 @@ func TestNewRegistryFromPartsDropsEntriesWithoutToolSupport(t *testing.T) {
 		"tools/yes": {Coder: new(0.9), Reviewer: new(0.9)},
 		"tools/no":  {Coder: new(0.9), Reviewer: new(0.9)},
 	}}
-	r := NewRegistryFromParts(cat, pr, nil, nil, "capable/default")
+	r := NewRegistryFromParts(cat, pr, nil, nil, "capable/default", nil)
 
 	assert.True(t, r.Has("tools/yes"))
 	assert.Equal(t, 200000, r.ContextWindow("tools/yes"))
@@ -73,7 +73,7 @@ func TestNewRegistryFromPartsNilRolePriorIsUnmeasured(t *testing.T) {
 		"only/coder": {Coder: new(0.9)},
 		"both/roles": {Coder: new(0.9), Reviewer: new(0.9)},
 	}}
-	r := NewRegistryFromParts(cat, pr, nil, nil, "capable/default")
+	r := NewRegistryFromParts(cat, pr, nil, nil, "capable/default", nil)
 
 	in := SelectInput{Role: RoleReviewer, Tier: TierSimple}
 
@@ -120,7 +120,7 @@ func TestNewRegistryFromPartsThreadsBlacklistFavoritesAndExclusions(t *testing.T
 	}}
 	blacklist := map[string]bool{"cheap/blacklisted": true, "value/model": false}
 	favorites := map[favKey][]string{{Tier: TierModerate, Role: RoleCoder}: {"fav/model"}}
-	r := NewRegistryFromParts(cat, pr, blacklist, favorites, "capable/default")
+	r := NewRegistryFromParts(cat, pr, blacklist, favorites, "capable/default", nil)
 
 	pick, rep := r.SelectByComplexityReport(SelectInput{Role: RoleCoder, Tier: TierModerate})
 	assert.Equal(t, "fav/model", pick.Model, "the favorite wins at its tier")
@@ -139,8 +139,25 @@ func TestNewRegistryFromPartsThreadsBlacklistFavoritesAndExclusions(t *testing.T
 func TestNewRegistryFromPartsVendorFallsBackToTheSlugPrefix(t *testing.T) {
 	// The test constructor carries no creators (only the payload does), so
 	// the vendor-diversity preference reads the namespace prefix.
-	r := NewRegistryFromParts(llm.Catalog{entry("z-ai/glm", 1, 1, 200000), entry("bare-slug", 1, 1, 200000)}, Priors{}, nil, nil, "x")
+	r := NewRegistryFromParts(llm.Catalog{entry("z-ai/glm", 1, 1, 200000), entry("bare-slug", 1, 1, 200000)}, Priors{}, nil, nil, "x", nil)
 
 	assert.Equal(t, "z-ai", r.Vendor("z-ai/glm"))
 	assert.Empty(t, r.Vendor("bare-slug"))
+}
+
+func TestNewRegistryFromPartsAppliesTheGivenLadders(t *testing.T) {
+	cat := llm.Catalog{entry("tools/yes", 1, 1, 200000)}
+	ladders := Ladders{RoleCoder: {
+		TierSimple: 0.65, TierModerate: 0.76, TierComplex: 0.95, TierCritical: 0.97,
+	}}
+
+	r := NewRegistryFromParts(cat, Priors{}, nil, nil, "capable/default", ladders)
+
+	assert.InDelta(t, 0.95, r.BarFor(RoleCoder, TierComplex), 1e-9)
+	assert.Equal(t, selection.Ladders(nil).Bars(RoleReviewer), r.Bars(RoleReviewer), "an absent role reads as its built-in")
+
+	rNil := NewRegistryFromParts(cat, Priors{}, nil, nil, "capable/default", nil)
+	for _, role := range []Role{RoleCoder, RoleReviewer} {
+		assert.Equal(t, selection.Ladders(nil).Bars(role), rNil.Bars(role))
+	}
 }

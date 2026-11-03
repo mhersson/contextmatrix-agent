@@ -164,7 +164,7 @@ func TestBuildEngineConfigExcludesASeatTheBriefingCannotFit(t *testing.T) {
 			"small/window": reviewerPrior(0.90),
 			"large/window": reviewerPrior(0.88),
 		}},
-		nil, nil, "")
+		nil, nil, "", fixtureLadders())
 
 	// estimateTokens(briefing) = len/4 + 24000 = 124000: over small/window's
 	// 40000 but within large/window's 200000.
@@ -196,7 +196,7 @@ func TestBuildEngineConfigSeatsUnchangedWhenBriefingFits(t *testing.T) {
 			"small/window": reviewerPrior(0.90),
 			"large/window": reviewerPrior(0.88),
 		}},
-		nil, nil, "")
+		nil, nil, "", fixtureLadders())
 
 	topic := mob.Topic{Kind: "review", Briefing: "small review briefing", Lenses: reviewLenses[:2], Rounds: 1, Blind: true}
 
@@ -266,7 +266,7 @@ func TestMobDiscussQuorumFallback(t *testing.T) {
 func TestMobDiscussNoPanelSelectableRunsSolo(t *testing.T) {
 	ops := &fakeOps{}
 	o := mobTestRun(ops, MobConfig{Participants: 2, Plan: true, Rounds: 2, BudgetFactor: 0.75}, 2.0)
-	o.d.Registry = registry.NewRegistryFromParts(llm.Catalog{}, registry.Priors{}, nil, nil, "")
+	o.d.Registry = registry.NewRegistryFromParts(llm.Catalog{}, registry.Priors{}, nil, nil, "", fixtureLadders())
 
 	out, ok := o.mobDiscuss(context.Background(), mob.Topic{
 		Kind: "plan", Lenses: planLenses[:2], Rounds: 2, Blind: true, Briefing: "b",
@@ -644,7 +644,7 @@ func TestMobSeatRunnerReplaysReasoningOnlyToTheSeatsModel(t *testing.T) {
 func TestBuildEngineConfigContinuesSoloWhenNoSeatIsSelectable(t *testing.T) {
 	ops := &fakeOps{}
 	o := mobTestRun(ops, MobConfig{Participants: 3, Plan: true, Rounds: 2, BudgetFactor: 0.75}, 2.0)
-	o.d.Registry = registry.NewRegistryFromParts(llm.Catalog{}, registry.Priors{}, nil, nil, "")
+	o.d.Registry = registry.NewRegistryFromParts(llm.Catalog{}, registry.Priors{}, nil, nil, "", fixtureLadders())
 
 	_, ok := buildEngineConfig(context.Background(), o, mob.Topic{Kind: "plan", Lenses: planLenses[:3], Rounds: 2}, "b")
 	assert.False(t, ok, "an unseatable topic continues on the normal path")
@@ -661,7 +661,7 @@ func TestBuildEngineConfigRecordsADependentDiscussion(t *testing.T) {
 	o.d.Registry = registry.NewRegistryFromParts(
 		llm.Catalog{{ID: "only/reviewer", ContextLength: 200000, SupportedParameters: []string{"tools"}}},
 		registry.Priors{Models: map[string]registry.PriorEntry{"only/reviewer": reviewerPrior(0.90)}},
-		nil, nil, "")
+		nil, nil, "", fixtureLadders())
 
 	cfg, ok := buildEngineConfig(context.Background(), o, mob.Topic{Kind: "plan", Lenses: planLenses[:3], Rounds: 2}, "b")
 	require.True(t, ok, "a collapsed panel still seats the discussion")

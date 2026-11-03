@@ -2338,13 +2338,13 @@ func TestLogReachabilityLogsCardOnlyWhenSomeTierIsUnreachable(t *testing.T) {
 		"top/one": {Coder: prior, Reviewer: prior},
 	}}
 
-	reachable := registry.NewRegistryFromParts(catalog, priors, nil, nil, "top/one")
+	reachable := registry.NewRegistryFromParts(catalog, priors, nil, nil, "top/one", nil)
 
 	ops := newStubOps()
 	logReachability(context.Background(), reachable, ops, "CMX-001")
 	assert.Equal(t, 0, ops.count("AddLog"), "every tier reachable means no card log")
 
-	unreachable := registry.NewRegistryFromParts(nil, registry.Priors{}, nil, nil, "top/one")
+	unreachable := registry.NewRegistryFromParts(nil, registry.Priors{}, nil, nil, "top/one", nil)
 
 	ops2 := newStubOps()
 	logReachability(context.Background(), unreachable, ops2, "CMX-001")

@@ -82,7 +82,7 @@ func coderPriorRegistry() *registry.Registry {
 		{ID: "pinned/model", ContextLength: 200000, SupportedParameters: []string{"tools"}},
 	}
 
-	return registry.NewRegistryFromParts(catalog, priors, nil, nil, "default/model")
+	return registry.NewRegistryFromParts(catalog, priors, nil, nil, "default/model", fixtureLadders())
 }
 
 // offCatalogDefaultRegistry gives the operator a capable default the live
@@ -91,7 +91,7 @@ func coderPriorRegistry() *registry.Registry {
 func offCatalogDefaultRegistry(capable string) *registry.Registry {
 	return registry.NewRegistryFromParts(llm.Catalog{
 		{ID: "cat/model", ContextLength: 131072, SupportedParameters: []string{"tools"}},
-	}, registry.Priors{}, nil, nil, capable)
+	}, registry.Priors{}, nil, nil, capable, fixtureLadders())
 }
 
 // TestCoderSelectionReachesTheTranscript is the core of this event: a subtask
@@ -496,6 +496,7 @@ func TestCandidateRepickRecordsTheSubtaskItRepickedFor(t *testing.T) {
 		},
 		registry.Priors{Models: map[string]registry.PriorEntry{"solo/coder": coderPrior(0.9)}},
 		nil, nil, "capgood/default",
+		fixtureLadders(),
 	)
 	d.Emit = events.NewEmitter(nil, &transcript)
 

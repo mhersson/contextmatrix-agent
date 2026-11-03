@@ -193,7 +193,7 @@ func TestProposeVerifySkipsWhenNoModelIsSelectable(t *testing.T) {
 	ops := &fakeOps{}
 	client := &planLLM{responses: []llm.Response{stopResp(`{"command":"cargo test"}`, 0.01)}}
 	o := newProposeRun(t, ops, client, t.TempDir())
-	o.d.Registry = registry.NewRegistryFromParts(llm.Catalog{}, registry.Priors{}, nil, nil, "")
+	o.d.Registry = registry.NewRegistryFromParts(llm.Catalog{}, registry.Priors{}, nil, nil, "", fixtureLadders())
 
 	plan, err := o.proposeVerify(context.Background())
 	require.NoError(t, err, "an unproposed gate is safe; the run must not park here")

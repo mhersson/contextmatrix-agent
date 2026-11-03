@@ -104,7 +104,7 @@ func twoCoderRegistry() *registry.Registry {
 		},
 	}
 
-	return registry.NewRegistryFromParts(catalog, priors, nil, nil, "capable/default")
+	return registry.NewRegistryFromParts(catalog, priors, nil, nil, "capable/default", fixtureLadders())
 }
 
 // TestExecuteRecoversFromIncapableCoder pins the in-run recovery: the first
@@ -258,7 +258,7 @@ func reviewFixRegistry() *registry.Registry {
 		},
 	}
 
-	return registry.NewRegistryFromParts(catalog, priors, nil, nil, "capable/default")
+	return registry.NewRegistryFromParts(catalog, priors, nil, nil, "capable/default", fixtureLadders())
 }
 
 // TestReviewRecoversFromIncapableFixCoder pins that the review fix run shares the

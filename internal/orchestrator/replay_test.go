@@ -29,7 +29,7 @@ func replayTestRegistry() *registry.Registry {
 		{ID: "other/model", ContextLength: 1_048_576, SupportedParameters: []string{"tools"}},
 		{ID: "edge/model", ContextLength: 400_000, SupportedParameters: []string{"tools"}},
 		{ID: "narrow/model", ContextLength: 262_144, SupportedParameters: []string{"tools"}},
-	}, registry.Priors{}, nil, nil, "wide/model")
+	}, registry.Priors{}, nil, nil, "wide/model", fixtureLadders())
 }
 
 // thinkingToolCall reasons, then calls a tool no registry has, so the run

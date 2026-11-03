@@ -496,6 +496,7 @@ func TestFanoutCandidateReselectsOnIncapable(t *testing.T) {
 		},
 		registry.Priors{Models: map[string]registry.PriorEntry{"solo/coder": coderPrior(0.9)}},
 		nil, nil, "capgood/default",
+		fixtureLadders(),
 	)
 
 	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("moderate")}}, 0)
@@ -533,6 +534,7 @@ func TestFanoutCandidateDropsWhenPoolExhausted(t *testing.T) {
 		},
 		registry.Priors{Models: map[string]registry.PriorEntry{"bad1/coder": coderPrior(0.8)}},
 		nil, nil, "bad2/default",
+		fixtureLadders(),
 	)
 
 	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("moderate")}}, 0)
@@ -566,6 +568,7 @@ func TestFanoutNoCoderModelParksInsteadOfPanicking(t *testing.T) {
 	d.Registry = registry.NewRegistryFromParts(
 		llm.Catalog{{ID: "solo/coder", ContextLength: 200000, SupportedParameters: []string{"tools"}}},
 		registry.Priors{}, nil, nil, "",
+		fixtureLadders(),
 	)
 
 	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("moderate")}}, 0)
@@ -704,7 +707,7 @@ func belowComplexRegistry() *registry.Registry {
 			"mid/model":   coderPrior(0.78),
 			"other/model": coderPrior(0.77),
 		}},
-		nil, nil, "capable/default")
+		nil, nil, "capable/default", fixtureLadders())
 }
 
 // TestCandidateCoderModelAdvisesOutsideTheSelectionLock pins both halves of the

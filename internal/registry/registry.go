@@ -24,6 +24,7 @@ type (
 	SelectInput     = selection.SelectInput
 	SelectionReport = selection.SelectionReport
 	SeatReport      = selection.SeatReport
+	Ladders         = selection.Ladders
 )
 
 const (
@@ -70,9 +71,10 @@ type Registry struct {
 // conversion to the wire shape drops entries without tool support (the
 // shared selector has no tools gate because CM ships only tool-capable
 // candidates) and writes a nil role prior as 0, which the shared selector
-// reads as "no measured prior" - the same convention CM uses on the wire.
-func NewRegistryFromParts(cat llm.Catalog, pr Priors, blacklist map[string]bool, favorites map[favKey][]string, capable string) *Registry {
-	in := selection.Input{Capable: capable}
+// reads as "no measured prior" - the same convention CM uses on the wire. Nil
+// ladders read as each role's built-in.
+func NewRegistryFromParts(cat llm.Catalog, pr Priors, blacklist map[string]bool, favorites map[favKey][]string, capable string, ladders Ladders) *Registry {
+	in := selection.Input{Capable: capable, Ladders: ladders}
 
 	for _, e := range cat {
 		if !e.SupportsTools() {

@@ -646,7 +646,7 @@ func TestExecuteModelSelectionByComplexity(t *testing.T) {
 			"the/coder": {Coder: &coderScore},
 		},
 	}
-	reg := registry.NewRegistryFromParts(catalog, priors, nil, nil, "fallback/default")
+	reg := registry.NewRegistryFromParts(catalog, priors, nil, nil, "fallback/default", fixtureLadders())
 
 	d := execTestDeps(ops, git, llmFake)
 	d.Registry = reg
@@ -2411,7 +2411,7 @@ func subFloorCoderRegistry() *registry.Registry {
 	return registry.NewRegistryFromParts(
 		llm.Catalog{{ID: "weak/model", ContextLength: 200000, SupportedParameters: []string{"tools"}}},
 		registry.Priors{Models: map[string]registry.PriorEntry{"weak/model": coderPrior(0.30)}},
-		nil, nil, "operator/default")
+		nil, nil, "operator/default", fixtureLadders())
 }
 
 // TestResolveCoderModelParksOnlyWhenEvenTheDefaultIsBarred pins the narrow
@@ -2468,7 +2468,7 @@ func TestNoModelErrorNamesTheWindowWhenThatIsTheCause(t *testing.T) {
 			{ID: "tiny/default", ContextLength: 8000, SupportedParameters: []string{"tools"}},
 		},
 		registry.Priors{Models: map[string]registry.PriorEntry{"small/window": coderPrior(0.90)}},
-		nil, nil, "tiny/default")
+		nil, nil, "tiny/default", fixtureLadders())
 	o := newExecRun(d, nil, 5)
 
 	in := registry.SelectInput{
@@ -2492,7 +2492,7 @@ func midTierCoderDeps(ops *fakeOps) Deps {
 	d.Registry = registry.NewRegistryFromParts(
 		llm.Catalog{{ID: "mid/model", ContextLength: 200000, SupportedParameters: []string{"tools"}}},
 		registry.Priors{Models: map[string]registry.PriorEntry{"mid/model": coderPrior(0.78)}},
-		nil, nil, "capable/default")
+		nil, nil, "capable/default", fixtureLadders())
 
 	return d
 }
@@ -2552,7 +2552,7 @@ func tierNamingRegistry() *registry.Registry {
 			"tier/moderate": coderPrior(0.80),
 			"tier/complex":  coderPrior(0.90),
 		}},
-		nil, nil, "capable/default")
+		nil, nil, "capable/default", fixtureLadders())
 }
 
 // TestCoderTierIsAlwaysDerivedFromTheWork guards the distinction this whole

@@ -844,7 +844,7 @@ func TestJudgeDegradesWhenNoJudgeModelIsSelectable(t *testing.T) {
 		judgeCandidate(2, "beta/coder", "dir-c2", "DIFF_TWO"),
 	}
 	o := newJudgeRun(t, ops, &fakeGit{}, client, cands, map[string]bool{"dir-c1": true, "dir-c2": true})
-	o.d.Registry = registry.NewRegistryFromParts(llm.Catalog{}, registry.Priors{}, nil, nil, "")
+	o.d.Registry = registry.NewRegistryFromParts(llm.Catalog{}, registry.Priors{}, nil, nil, "", fixtureLadders())
 
 	require.NoError(t, runJudge(context.Background(), o))
 

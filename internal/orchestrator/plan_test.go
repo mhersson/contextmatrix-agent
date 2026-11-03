@@ -1073,7 +1073,7 @@ func TestResolveDecisionModelNilRegistryFallsBack(t *testing.T) {
 // TestResolveDecisionModelKeepsBaseWhenTheFloorFallsShort covers the other
 // case, where the pick is measured but lands on a lower rung.
 func TestResolveDecisionModelKeepsBaseOverTheCapableDefault(t *testing.T) {
-	reg := registry.NewRegistryFromParts(reviewerCatalog(), registry.Priors{}, nil, nil, "default/model")
+	reg := registry.NewRegistryFromParts(reviewerCatalog(), registry.Priors{}, nil, nil, "default/model", fixtureLadders())
 	emit := events.NewEmitter(nil, nil)
 	ops := &fakeOps{}
 
@@ -1822,7 +1822,7 @@ func TestResolveDecisionModelKeepsBaseWhenTheFloorFallsShort(t *testing.T) {
 				llm.Catalog{{ID: "strong/reviewer", ContextLength: 200000, SupportedParameters: []string{"tools"}}},
 				registry.Priors{Models: map[string]registry.PriorEntry{
 					"strong/reviewer": {Reviewer: &tt.reviewer},
-				}}, nil, nil, "capable/default")
+				}}, nil, nil, "capable/default", fixtureLadders())
 
 			got, _ := resolveDecisionModel(context.Background(), reg, nil, &fakeOps{},
 				"CARD-1", "", "payload/default", "serve/fallback", nil)
