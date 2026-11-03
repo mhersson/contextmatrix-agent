@@ -36,12 +36,12 @@ same error, so a live file can be checked before a deploy.
 
 ## Tier ladders
 
-There is one ladder per role, coder and reviewer, because the two priors come
-from different indices with different shapes. The operator edits both on
+There is one ladder per role, coder and reviewer. The operator edits both on
 ContextMatrix's admin page (Model selection); CM sends them with each run as
 `SelectionContext.TierBars`, role name to tier name to bar. A role CM sends
-nothing for uses the built-in bars: simple 0.65, moderate 0.76, complex 0.82,
-critical 0.90. A partial ladder merges over the built-in bars.
+nothing for uses the built-in bars, which both roles share: simple 0.50,
+moderate 0.76, complex 0.82, critical 0.90. A partial ladder merges over the
+built-in bars.
 
 The agent validates each role's ladder with the shared rule (known tier
 names, every bar in [0,1], non-decreasing from simple to critical). A ladder

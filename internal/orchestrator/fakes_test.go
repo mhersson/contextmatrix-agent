@@ -1081,7 +1081,7 @@ func planTestRegistry() *registry.Registry {
 // "default/model", carrying coderPrior for the coder role. It is what lets a
 // test decide whether a subtask's selection lands AT the tier it asked for or
 // gets walked down below it: a prior above the complex bar (0.82) is picked at
-// complex, one between the simple bar (0.65) and the moderate bar (0.76) is
+// complex, one between the simple bar (0.50) and the moderate bar (0.76) is
 // picked at simple whatever was requested.
 //
 // The slug matches planTestRegistry's capable default deliberately, so the
