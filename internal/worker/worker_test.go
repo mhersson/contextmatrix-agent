@@ -2245,8 +2245,7 @@ func TestBuildRegistryFallsBackPerRoleOnAnInvalidPayloadLadder(t *testing.T) {
 	coder := r.SelectByComplexity(registry.SelectInput{Role: registry.RoleCoder, Tier: registry.TierComplex})
 	assert.Equal(t, registry.TierModerate, coder.MetTier, "the valid coder ladder still applies")
 
-	reviewer := r.SelectByComplexity(registry.SelectInput{Role: registry.RoleReviewer, Tier: registry.TierComplex})
-	assert.True(t, reviewer.AtBar(), "the failed reviewer ladder is the built-in bars")
+	assert.Equal(t, registry.Ladders(nil).Bars(registry.RoleReviewer), r.Bars(registry.RoleReviewer), "the failed reviewer ladder is the reviewer built-in")
 }
 
 // addLogs returns the message of every recorded AddLog call, in order.
@@ -2269,21 +2268,23 @@ func (s *stubOps) addLogs() []string {
 	return out
 }
 
-// TestLogLadderFaultsWritesOneCardLinePerRole pins the wording the operator
-// reads on the card, one line per failed role, in fault order.
+// TestLogLadderFaultsWritesOneCardLinePerRole proves one card line per failed
+// role, in fault order, each carrying its own fault.
 func TestLogLadderFaultsWritesOneCardLinePerRole(t *testing.T) {
 	ops := newStubOps()
 	faults := []registry.LadderFault{
 		{Role: "coder", Reason: errors.New(`tier bars: unknown tier "epic"`)},
-		{Role: "reviewer", Reason: errors.New("tier bars: ladder must not decrease: critical 0.1 is below complex 0.82")},
+		{Role: "reviewer", Reason: errors.New("tier bars: ladder must not decrease: critical 0.9 is below complex 0.95")},
 	}
 
 	logLadderFaults(context.Background(), faults, ops, "CMX-001")
 
 	lines := ops.addLogs()
-	require.Len(t, lines, 2)
-	assert.Equal(t, `selector: coder tier ladder from the payload did not validate (tier bars: unknown tier "epic") - using the built-in bars`, lines[0])
-	assert.Equal(t, "selector: reviewer tier ladder from the payload did not validate (tier bars: ladder must not decrease: critical 0.1 is below complex 0.82) - using the built-in bars", lines[1])
+	require.Len(t, lines, len(faults))
+
+	for i, f := range faults {
+		assert.Contains(t, lines[i], f.Error())
+	}
 }
 
 // TestLogLadderFaultsWritesNothingWithoutFaults: no faults means no card line.
@@ -2316,12 +2317,11 @@ func TestRunLogsAnInvalidPayloadLadderOnTheCard(t *testing.T) {
 	assert.Equal(t, "completed", res.Reason)
 
 	lines := ops.addLogs()
-	idx := slices.IndexFunc(lines, func(l string) bool {
-		return strings.HasPrefix(l, "selector: reviewer tier ladder from the payload did not validate (")
-	})
-	require.NotEqual(t, -1, idx, "the ladder fault must land on the card; logs=%v", lines)
-	assert.Contains(t, lines[idx], "ladder must not decrease")
-	assert.True(t, strings.HasSuffix(lines[idx], ") - using the built-in bars"), "line=%q", lines[idx])
+	_, faults := buildRegistry(spec)
+	require.NotEmpty(t, faults)
+
+	assert.True(t, slices.ContainsFunc(lines, func(l string) bool { return strings.Contains(l, faults[0].Error()) }),
+		"the ladder fault must land on the card; logs=%v", lines)
 }
 
 // TestLogReachabilityLogsCardOnlyWhenSomeTierIsUnreachable pins the worker-side

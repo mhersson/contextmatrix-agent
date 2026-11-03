@@ -398,7 +398,7 @@ func TestTestSplitViolation(t *testing.T) {
 func TestTierStringToRegistryTier(t *testing.T) {
 	// Lock the card-level mapping: the planner tier strings parsePlan accepts
 	// must convert to the matching registry.Tier at selection time. "critical"
-	// must reach registry.TierCritical (the 0.90 bar), not the moderate default.
+	// must reach registry.TierCritical, not the moderate default.
 	t.Run("tierFromString maps each card tier string", func(t *testing.T) {
 		assert.Equal(t, registry.TierSimple, tierFromString("simple"))
 		assert.Equal(t, registry.TierModerate, tierFromString("moderate"))

@@ -295,7 +295,7 @@ simple / moderate / complex / critical; deterministic code then maps each tier
 to the cost-optimal model. A
 candidate must be tool-capable, not blacklisted, fit the work's context window,
 and carry an external quality **prior** for the role that clears the tier's bar
-(the bar rises with the tier, from 0.65 for simple up to 0.90 for critical).
+(each role has its own built-in ladder; see docs/model-selection.md, Tier ladders).
 Among those, an eligible operator favorite wins outright; otherwise the selector
 picks the most capable candidate whose blended price is within a headroom band of
 the cheapest (the band width is set on the ContextMatrix Model selection admin
