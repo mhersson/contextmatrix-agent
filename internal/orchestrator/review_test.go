@@ -459,7 +459,7 @@ func TestFormatFixesBasisOnlyBracket(t *testing.T) {
 		"file paths survive the formatFixes -> fixFiles round trip with basis-only bracket")
 }
 
-// fixTierCoder is measured between the default simple bar (0.65) and the
+// fixTierCoder is measured between the default simple bar (0.50) and the
 // moderate (0.76) and complex (0.82) bars; fixTierFallback is the capable
 // default and carries no prior at all. Every fix-model test below reads that
 // one relationship, so it is stated once here.

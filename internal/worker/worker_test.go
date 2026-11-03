@@ -1495,7 +1495,7 @@ func TestNoModelMapsToBlocked(t *testing.T) {
 	swapRunOrchestrator(t, func(_ context.Context, d orchestrator.Deps) error {
 		require.NoError(t, os.WriteFile(filepath.Join(d.Cfg.Workspace, "wip.txt"), []byte("partial\n"), 0o644))
 
-		return &orchestrator.NoModelError{Role: "coder", Tier: "moderate", RequestedBar: 0.76, LowestBar: 0.65, Excluded: 3}
+		return &orchestrator.NoModelError{Role: "coder", Tier: "moderate", RequestedBar: 0.76, LowestBar: 0.50, Excluded: 3}
 	})
 
 	llmClient := &scriptedLLM{}
