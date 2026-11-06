@@ -203,6 +203,14 @@ const decompositionRules = `- Each subtask must be completable by a single agent
   that each leave the tree broken are not. Do NOT invent artificial staging
   (dead fields, temporary shims, "zero out now / delete later") solely to satisfy
   the file cap.
+- Each subtask is committed on its own, and the run's verify command must pass
+  on the tree a subtask leaves before its commit lands; a subtask that leaves it
+  failing parks the card. Cut and order subtasks so the verify command passes
+  after every one. In an empty or near-empty repository, the first subtask
+  therefore sets the project up far enough for the verify command to run and
+  pass, including a first test when the test runner fails on finding none.
+  Work the card wants "first" or "in the first commit" goes into that same
+  subtask, never into a subtask of its own that the verify command cannot pass.
 - Set depends_on correctly: a subtask that needs another subtask's output
   must declare the dependency. depends_on lists the indices of EARLIER
   subtasks in this array (a subtask may only depend on subtasks that appear

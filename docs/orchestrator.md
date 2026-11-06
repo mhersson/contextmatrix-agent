@@ -37,6 +37,12 @@ that ends unfinished therefore records, once, the HEAD its run started from
 instead of parking when HEAD has moved past that start and the pre-commit
 verify passes.
 
+The planner is told that every subtask commits only once the pre-commit verify
+passes, so it cuts subtasks that each leave the verify command green. In an
+empty repository the first subtask sets the project up far enough for the
+verify command to pass, and work the card wants "first" rides in that subtask
+rather than in one the verify command cannot pass.
+
 Documentation the card's acceptance criteria require (named files under
 `docs/`, a README, specific claims that must change) is planned as a
 deliverable in the plan phase - either alongside the code subtask that changes
