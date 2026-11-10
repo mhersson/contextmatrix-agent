@@ -6,23 +6,31 @@
 # has shipped. Dependabot tracks the Go modules, GitHub Actions and base images;
 # the yq, Task, gh, Node and npm pins are bumped by hand (see Dockerfile.worker).
 
-# --- The yq v4.54.1 (/usr/local/bin/yq) and Task v3.54.0 (/usr/local/bin/task)
-# binaries are prebuilt upstream releases compiled with Go 1.27.1 and
-# golang.org/x/net v0.59.0. Both are the latest releases; only their upstream
-# release pipelines can rebuild them. yq links no net/http or crypto/tls code
-# and makes no network calls. Task runs no server; it reaches the network only
-# to fetch remote Taskfiles (http, https or git includes), and without a TTY it
-# refuses an unpinned remote Taskfile unless run with --yes or a trusted host.
-# CVE-2026-111943: x509 intermediate denylist; exposes only Task's https fetch.
-# CVE-2026-78667: Range-header DoS in http.ServeContent; neither serves HTTP.
-# CVE-2026-78669: HTTP/2 CPU DoS; exposes only Task's remote-Taskfile fetch.
-# CVE-2026-97031: ECH memory DoS in a TLS server; neither runs a TLS server.
-# Clears when yq and Task both ship release builds on Go >= 1.27.3 and
-# golang.org/x/net >= 0.60.0.
+# --- Task v3.54.0 (/usr/local/bin/task) is a prebuilt upstream release
+# compiled with Go 1.27.1 and golang.org/x/net v0.59.0. It is the latest
+# release; only Task's release pipeline can rebuild it. Task runs no server; it
+# reaches the network only to fetch remote Taskfiles (http, https or git
+# includes), and without a TTY it refuses an unpinned remote Taskfile unless
+# run with --yes or a trusted host.
+# CVE-2026-111943: x509 intermediate denylist; exposes only the https fetch.
+# CVE-2026-78667: Range-header DoS in http.ServeContent; Task serves no HTTP.
+# CVE-2026-78669: HTTP/2 CPU DoS; exposes only the remote-Taskfile fetch.
+# CVE-2026-97031: ECH memory DoS in a TLS server; Task runs no TLS server.
+# Clears when a Task release builds on Go >= 1.27.3 and golang.org/x/net
+# >= 0.60.0.
 CVE-2026-111943
 CVE-2026-78667
 CVE-2026-78669
 CVE-2026-97031
+
+# --- CVE-2026-78661 (quadratic text-node coalescing in the
+# golang.org/x/net/html parser, fixed in 0.62.0) is reported against gh
+# v2.103.3 (/usr/local/bin/gh, x/net v0.60.0) and Task v3.54.0 (x/net v0.59.0),
+# both the latest releases.
+# Neither binary contains the vulnerable code: gh links only the html
+# tokenizer, not html.Parse or the parser, and Task links no x/net/html at all.
+# Clears when gh and Task releases link golang.org/x/net >= 0.62.0.
+CVE-2026-78661
 
 # --- Task v3.54.0 (/usr/local/bin/task) links go-jose v4.1.4 through
 # hashicorp/go-getter's GCS getter (cloud.google.com/go/storage, grpc,
