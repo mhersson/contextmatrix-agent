@@ -3,9 +3,9 @@
 # Pinned toolchain versions, declared once as global ARGs and re-declared in the
 # stages that consume them. Override any of them at build time with --build-arg
 # when a newer release has been vetted; the Makefile passes matching values.
-ARG GO_VERSION=1.27.3
-ARG GO_SHA256_AMD64=65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40
-ARG GO_SHA256_ARM64=a06e99309dbcbdca1a8ccd2282c3ee146e55930886e26b4f1193269587165f49
+ARG GO_VERSION=1.27.4
+ARG GO_SHA256_AMD64=7226736c2339719cda28fbf3a54d71aa63bcefe376e98cef00034268dab24840
+ARG GO_SHA256_ARM64=3392582988a273a87ab5043ee1b2c9c17a2c3c00580bf9326c47a2e0aaaeac92
 ARG NODE_VERSION=26.12.1
 ARG NODE_SHA256_AMD64=0fd1eb7770598f52a21995edf6ed35fc690400fa437c2386af329519e9143132
 ARG NODE_SHA256_ARM64=a6c01af459dd8972ab3fb08ee5da81244d26ba8c4944a62d5bbba8c597ae154f
@@ -42,7 +42,7 @@ ARG GH_SHA256_ARM64=ee32df2323c8847f5fac6cb6b4b69ca75828e9329a8f22f677021f7b3306
 # ---------------------------------------------------------------------------
 # build - compile the agent binary.
 # ---------------------------------------------------------------------------
-FROM golang:1.27.3-trixie@sha256:604106102d33b1084e37ca08adf98ac0813624ae8595bd0d7f3965ecebded09c AS build
+FROM golang:1.27.4-trixie@sha256:b54b2639de8c1bfe538ec5ffc45f29b1932235ac5f6d63c059853646677112d9 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
