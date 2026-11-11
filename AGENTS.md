@@ -227,7 +227,8 @@ Summaries only - full detail lives in the reference documents above.
 9. **Secrets.** Per-run CM-provisioned credentials, bind-mounted read-only;
    the real LLM key stays on `serve` and workers get a per-run proxy token;
    tool subprocesses get a scrubbed env; every secret a run receives must be
-   registered with the host-side log-bridge redactor.
+   registered with the host-side log-bridge redactor. In `claude_code` mode the
+   subscription token itself is staged for the worker.
 10. **HITL gates + promote.** Same FSM, mode-gated on `Config.Interactive`; a
     `promote` frame closes the inbox so later gates auto-pass. Awaiting-human
     is live, not stalled.

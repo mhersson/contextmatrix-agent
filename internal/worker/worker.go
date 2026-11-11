@@ -82,7 +82,11 @@ type RunSpec struct {
 	LLMKey     string // from /run/cm-secrets/env via the secrets source
 	LLMBaseURL string // from /run/cm-secrets/env via the secrets source
 	LLMType    string // from /run/cm-secrets/env via the secrets source
-	GitToken   string // from /run/cm-secrets/env via the secrets source; startup value, used for redaction and to gate credential injection
+
+	// LLMOAuthToken is the Claude Code subscription token, read from the
+	// secrets file only (claude_code mode); redacted from run output.
+	LLMOAuthToken string
+	GitToken      string // from /run/cm-secrets/env via the secrets source; startup value, used for redaction and to gate credential injection
 
 	// SecretsEnvPath is the KEY=value secrets file (/run/cm-secrets/env) that git
 	// and gh re-read the current CM_GIT_TOKEN from per operation, so a token the
@@ -388,7 +392,7 @@ type fsmArgs struct {
 func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, error) {
 	// Guest bearer tokens are known at worker start, so they join the
 	// immutable redactor alongside the endpoint credentials.
-	red := redact.New(append([]string{a.spec.LLMKey, a.spec.MCPAPIKey, a.spec.GitToken},
+	red := redact.New(append([]string{a.spec.LLMKey, a.spec.LLMOAuthToken, a.spec.MCPAPIKey, a.spec.GitToken},
 		mobGuestTokens(a.spec.Mob)...))
 
 	hitl := a.spec.Interactive && !a.tcx.Autonomous

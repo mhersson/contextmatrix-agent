@@ -698,6 +698,15 @@ func (s *Server) provisionAndLaunch(ctx context.Context, spec executor.LaunchSpe
 		return "CM did not provision an llm_endpoint"
 	}
 
+	claude := p.LLMEndpoint.Type == protocol.LLMEndpointTypeClaudeCode
+
+	if claude && p.LLMEndpoint.OAuthToken == "" {
+		s.logger.Warn("trigger rejected: claude_code endpoint without an oauth token",
+			"project", project, "card_id", cardID)
+
+		return "CM did not provision a Claude Code oauth token"
+	}
+
 	if s.llmProxy == nil {
 		s.logger.Error("trigger rejected: LLM proxy not configured",
 			"project", project, "card_id", cardID)
@@ -710,20 +719,33 @@ func (s *Server) provisionAndLaunch(ctx context.Context, spec executor.LaunchSpe
 		return s.launchFailure(ctx)
 	}
 
-	token, err := s.llmProxy.Register(spec.CorrelationID, *p.LLMEndpoint)
-	if err != nil {
-		s.logger.Error("LLM proxy registration failed",
-			"project", project, "card_id", cardID, "error", err)
+	// A claude_code run is never proxied: the claude binary holds the
+	// subscription token itself, so Register is skipped and the token stays "".
+	var (
+		token string
+		err   error
+	)
 
-		return "LLM proxy registration failed"
+	if !claude {
+		token, err = s.llmProxy.Register(spec.CorrelationID, *p.LLMEndpoint)
+		if err != nil {
+			s.logger.Error("LLM proxy registration failed",
+				"project", project, "card_id", cardID, "error", err)
+
+			return "LLM proxy registration failed"
+		}
 	}
 
 	provisioned := false
 
 	// The fail-closed guard above already rejected empty-GitToken payloads.
 	if s.credentials != nil {
-		proxied := protocol.LLMEndpoint{Type: p.LLMEndpoint.Type, BaseURL: s.launchEnv.LLMBaseURL, APIKey: token}
-		if err := s.credentials.Provision(project, cardID, spec.CorrelationID, p.GitToken, p.GitTokenExpiresAt, s.runEndpoint(p, proxied)); err != nil {
+		staged := protocol.LLMEndpoint{Type: p.LLMEndpoint.Type, BaseURL: s.launchEnv.LLMBaseURL, APIKey: token}
+		if claude {
+			staged = protocol.LLMEndpoint{Type: p.LLMEndpoint.Type, OAuthToken: p.LLMEndpoint.OAuthToken}
+		}
+
+		if err := s.credentials.Provision(project, cardID, spec.CorrelationID, p.GitToken, p.GitTokenExpiresAt, s.runEndpoint(p, staged)); err != nil {
 			s.llmProxy.Revoke(spec.CorrelationID)
 			s.logger.Error("provision per-run credentials failed",
 				"project", project, "card_id", cardID, "error", err)
@@ -826,6 +848,7 @@ func (s *Server) addSessionSecrets(project, cardID, correlationID string, p prot
 
 	if p.LLMEndpoint != nil {
 		s.sessionRegistry.AddSessionKey(id, p.LLMEndpoint.APIKey)
+		s.sessionRegistry.AddSessionKey(id, p.LLMEndpoint.OAuthToken)
 	}
 
 	mcpKey := s.launchEnv.MCPAPIKey
@@ -858,10 +881,11 @@ func (s *Server) removeSessionSecrets(project, cardID, correlationID string) {
 // credential file's shape.
 func (s *Server) runEndpoint(p protocol.TriggerPayload, llm protocol.LLMEndpoint) secrets.EndpointSecrets {
 	return secrets.EndpointSecrets{
-		APIKey:    llm.APIKey,
-		BaseURL:   llm.BaseURL,
-		Type:      llm.Type,
-		MobGuests: s.mobGuestsJSON(p),
+		APIKey:     llm.APIKey,
+		BaseURL:    llm.BaseURL,
+		Type:       llm.Type,
+		OAuthToken: llm.OAuthToken,
+		MobGuests:  s.mobGuestsJSON(p),
 	}
 }
 

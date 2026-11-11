@@ -352,3 +352,27 @@ func TestSessionSecretsRegisterProxyToken(t *testing.T) {
 	assert.Contains(t, got, "tok-corr", "the proxy token must be registered")
 	assert.Contains(t, got, "cm-llm-key", "the real key must stay registered")
 }
+
+func TestAddSessionSecrets_RegistersTheOAuthToken(t *testing.T) {
+	registry := newFakeSessionSecretRegistry()
+
+	s := NewServer(Config{
+		APIKey:         "k",
+		Executor:       &fakeExecutor{},
+		Tracker:        executor.NewTracker(1),
+		SessionSecrets: registry,
+		LaunchEnv:      LaunchEnv{BaseImage: "img", MCPURL: "http://mcp", MCPAPIKey: "cfg-mcp-key"},
+		Logger:         quietLogger(),
+	})
+
+	payload := protocol.TriggerPayload{
+		CardID:      "C1",
+		Project:     "p",
+		GitToken:    "cm-git-token",
+		LLMEndpoint: &protocol.LLMEndpoint{Type: protocol.LLMEndpointTypeClaudeCode, OAuthToken: "oat-secret"},
+	}
+
+	s.addSessionSecrets("p", "C1", "corr-1", payload, "")
+
+	assert.Contains(t, registry.keys(SessionID("p", "C1", "corr-1")), "oat-secret")
+}

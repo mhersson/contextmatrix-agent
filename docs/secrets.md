@@ -13,7 +13,9 @@ never read raw tokens from config or env.
 refreshed from ContextMatrix ahead of each git-token expiry and bind-mounted
 read-only at `/run/cm-secrets/env`; the per-run dir is torn down with the run.
 The worker reads the stand-in token and URL for the [LLM proxy](#llm-proxy)
-and `CM_GIT_TOKEN` from it.
+and `CM_GIT_TOKEN` from it. In `claude_code` mode the file carries
+`LLM_TYPE=claude_code` and `LLM_OAUTH_TOKEN` instead, with no `LLM_API_KEY` or
+`LLM_BASE_URL`; the worker reads the token from the file only, never from env.
 
 The per-run dir is `0700` and the env file `0600`, both owned by the UID `serve`
 runs as, while the worker container runs as UID 1000 with every capability
@@ -30,6 +32,10 @@ The real LLM key never enters a worker container. `serve` keeps it in memory
 behind backendkit's `llmproxy`, mounted on `serve`'s own listener at `/llm`,
 and gives each run a stand-in token that works only there and only for that
 run.
+
+The one exception is a `claude_code` endpoint: it is never registered with the
+proxy because the `claude` binary must hold the subscription token itself, so
+the token is staged into the run's env file.
 
 ```
  CM ──trigger (real key)──▶ serve (host)
@@ -117,4 +123,5 @@ The in-worker redactor never sees container stderr, so worker stderr and
 unparsable stdout are masked host-side by the log bridge alone: every
 CM-provisioned secret a run receives MUST be registered with the bridge's
 `logbridge.RedactorRegistry` before launch and unregistered when the run ends.
-Mechanics in the `serve.go` and `admitAndLaunch` doc comments.
+The `claude_code` subscription token is registered with the session redactor
+and with the worker's run redactor. Mechanics in the `serve.go` and `admitAndLaunch` doc comments.

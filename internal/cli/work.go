@@ -90,9 +90,7 @@ func newWorkCmd() *cobra.Command {
 			// (set-but-empty counts as set). The git token is NOT
 			// resolved from env - the credential helper re-reads CM_GIT_TOKEN from the
 			// file per git op so host-side rotation reaches a long-running worker.
-			spec.LLMKey = resolveLLMValue("LLM_API_KEY", src)
-			spec.LLMBaseURL = resolveLLMValue("LLM_BASE_URL", src)
-			spec.LLMType = resolveLLMValue("LLM_TYPE", src)
+			spec = readLLMSecrets(spec, src)
 			spec.GitToken = src.Get("CM_GIT_TOKEN")
 
 			// Guest specs carry bearer tokens, so they ride the secrets file -
@@ -449,6 +447,18 @@ func specFromEnv() (worker.RunSpec, error) {
 	}
 
 	return spec, nil
+}
+
+// readLLMSecrets fills the spec's LLM values. The OAuth token is file-only:
+// only CM provisions it and only the staged value is registered for redaction,
+// so an env copy would go unmasked.
+func readLLMSecrets(spec worker.RunSpec, src *secrets.Source) worker.RunSpec {
+	spec.LLMKey = resolveLLMValue("LLM_API_KEY", src)
+	spec.LLMBaseURL = resolveLLMValue("LLM_BASE_URL", src)
+	spec.LLMType = resolveLLMValue("LLM_TYPE", src)
+	spec.LLMOAuthToken = src.Get("LLM_OAUTH_TOKEN")
+
+	return spec
 }
 
 // resolveLLMValue resolves an LLM endpoint value env-first-then-file: a

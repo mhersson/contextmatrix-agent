@@ -2692,3 +2692,23 @@ func TestSharedTrackerDedupesAcrossConstructionSites(t *testing.T) {
 	assert.Empty(t, buf.String(),
 		"the shared tracker must dedupe an identical outcome reached through a different construction site")
 }
+
+func TestRunFSMRedactorMasksTheOAuthToken(t *testing.T) {
+	remote := setupBareRemote(t)
+
+	var redact func(string) string
+
+	swapRunOrchestrator(t, func(_ context.Context, d orchestrator.Deps) error {
+		redact = d.Redact
+
+		return nil
+	})
+
+	spec := baseSpec(t, remote, t.TempDir())
+	spec.LLMOAuthToken = "oat-secret-123"
+
+	_, err := Run(context.Background(), spec, newFakeOps(), &scriptedLLM{}, events.NewEmitter(io.Discard, io.Discard), openStdin(t))
+	require.NoError(t, err)
+	require.NotNil(t, redact)
+	assert.NotContains(t, redact("x oat-secret-123 y"), "oat-secret-123")
+}
