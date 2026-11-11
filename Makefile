@@ -2,13 +2,13 @@
 
 # Pinned worker toolchain versions. Override on the command line
 # if a newer version has been vetted, e.g.
-#   make docker-worker GO_VERSION=1.27.4
+#   make docker-worker GO_VERSION=1.27.5
 # These values are passed into the Dockerfile as --build-args so the build is
 # reproducible from CI and local shells alike. GOVULNCHECK_VERSION is not a
 # build arg: only CI (.github/workflows/ci.yaml) reads it.
-GO_VERSION            ?= 1.27.3
-GO_SHA256_AMD64       ?= 65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40
-GO_SHA256_ARM64       ?= a06e99309dbcbdca1a8ccd2282c3ee146e55930886e26b4f1193269587165f49
+GO_VERSION            ?= 1.27.4
+GO_SHA256_AMD64       ?= 7226736c2339719cda28fbf3a54d71aa63bcefe376e98cef00034268dab24840
+GO_SHA256_ARM64       ?= 3392582988a273a87ab5043ee1b2c9c17a2c3c00580bf9326c47a2e0aaaeac92
 NODE_VERSION          ?= 26.12.1
 NODE_SHA256_AMD64     ?= 0fd1eb7770598f52a21995edf6ed35fc690400fa437c2386af329519e9143132
 NODE_SHA256_ARM64     ?= a6c01af459dd8972ab3fb08ee5da81244d26ba8c4944a62d5bbba8c597ae154f
