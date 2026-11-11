@@ -49,6 +49,7 @@ internal/registry/   → adapter over contextmatrix-protocol/selection: FromSele
 
 # Autonomous executor - the FSM and its container lifecycle
 internal/orchestrator/ → hand-written FSM plan → execute → judge → document → review → integrate → pr_gates → done; phase persistence; git finalize
+internal/modelexec/   → the model executors behind orchestrator.Executor: Harness forwards to harness.Run / SpawnSubagents over the run's LLM client
 internal/mob/          → A2A mob-session engine: seats, moderator, loopback JSON-RPC server, transcripts - discussions for plan/review/execute checkpoints
 internal/verifyexec/   → verify-command probing + bounded exec; used by cli run and the orchestrator verify gate
 internal/worker/       → the `work` lifecycle: clone, claim, run the FSM (HITL-gated or autonomous), commit/push, PR; wires the orchestrator deps
@@ -88,9 +89,9 @@ The harness core lives in the standalone `contextmatrix-harness` module; its own
 
 - `internal/orchestrator` imports the harness module (`harness`, `llm`, `tools`,
   `events`) plus `registry`, `cmclient`, `config`, `mob`, and `verifyexec`. It
-  **never** imports `worker`; the git and card-ops surfaces are injected as
-  interfaces (`Ops`, `GitOps`, `PRCreator`) declared in the orchestrator
-  package.
+  **never** imports `worker` or `modelexec`; the git and card-ops surfaces
+  (`Ops`, `GitOps`, `PRCreator`) and model runs (`Executor`) are injected as
+  interfaces declared in the orchestrator package.
 - `internal/worker` is the only place that wires the full stack together.
 
 If a change tempts you to push orchestration, protocol, or policy down into the

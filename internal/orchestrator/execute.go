@@ -51,6 +51,9 @@ type solverCtx struct {
 	verifyBound bool
 }
 
+// scope is the directory this solver's tools are rooted at and the ledger it is charged to.
+func (sc *solverCtx) scope() runScope { return runScope{dir: sc.workspace, ledger: sc.ledger} }
+
 // gateEvidence is what the pre-commit gate learned about this subtask. It
 // lives on the solver because mobCheckpoint may replace the tree between the
 // gate and the report site. verified: the command ran and passed on the tree
@@ -747,7 +750,7 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 
 		d.logCard(ctx, "%s", logMsg)
 
-		res, dur, err := o.runModelCoder(ctx, sc.tools, prompt, model, coderWrapUpMessage, sub.Sizing.Budget)
+		res, dur, err := o.runModelCoder(ctx, sc.scope(), sc.tools, prompt, model, coderWrapUpMessage, sub.Sizing.Budget)
 
 		// Record the resolved coder slug so the review panel excludes it: a capable
 		// model must not review its own code. This runs BEFORE the incapable check

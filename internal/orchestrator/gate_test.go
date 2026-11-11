@@ -31,6 +31,7 @@ func gateRun(ops *fakeOps, inbox *fakeInbox, interactive bool, client llm.LLM, t
 	d := Deps{
 		Ops:       ops,
 		Client:    client,
+		Executor:  harnessExec{},
 		Emit:      events.NewEmitter(nil, transcript),
 		Registry:  planTestRegistry(),
 		ReadTools: tools.NewRegistry(tools.NewReadTool(".")),

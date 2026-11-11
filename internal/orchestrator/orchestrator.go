@@ -220,10 +220,13 @@ type Deps struct {
 	// GitForDir returns a GitOps rooted at dir with NO branch policy set -
 	// guardPush fails closed, so candidate handles structurally cannot push.
 	// Used by Best-of-N to hand each candidate worktree its own git handle.
-	GitForDir  func(dir string) GitOps
-	PR         PRCreator // opens the pull request in the integrate phase (gh CLI seam)
-	PRGates    PRGates   // checks/review polling in the pr_gates phase (gh CLI seam)
-	Client     llm.LLM
+	GitForDir func(dir string) GitOps
+	PR        PRCreator // opens the pull request in the integrate phase (gh CLI seam)
+	PRGates   PRGates   // checks/review polling in the pr_gates phase (gh CLI seam)
+	Client    llm.LLM
+	// Executor runs every model run; required whenever a model runs. Client stays
+	// for the harness path.
+	Executor   Executor
 	Emit       *events.Emitter
 	Registry   *registry.Registry
 	WriteTools *tools.Registry // full toolset rooted at the workspace

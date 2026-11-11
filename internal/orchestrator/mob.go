@@ -370,7 +370,7 @@ func (o *run) mobSeatRunner(sink *seatDebugSink, perTurnCap float64, step string
 		// call locally; the duration travels by value here because seats fan out
 		// concurrently under the loopback server.
 		start := time.Now()
-		res, err := harness.Run(ctx, o.d.Client, o.d.ReadTools, emit, prompt, cfg)
+		res, err := o.execRun(ctx, o.ledger, RunRequest{Client: o.d.Client, Registry: o.d.ReadTools, Emit: emit, Task: prompt, Config: cfg, Dir: o.d.Cfg.Workspace})
 		dur := time.Since(start)
 
 		used := o.spendAndReport(ctx, o.ledger, o.d.Cfg.CardID, "mob: report seat usage failed",
@@ -397,7 +397,7 @@ func (o *run) mobSeatRunner(sink *seatDebugSink, perTurnCap float64, step string
 			finalCfg.WrapUpMessage = ""
 
 			bstart := time.Now()
-			fres, ferr := harness.Run(ctx, o.d.Client, tools.NewRegistry(), emit, seatForcedFinalPrompt, finalCfg)
+			fres, ferr := o.execRun(ctx, o.ledger, RunRequest{Client: o.d.Client, Registry: tools.NewRegistry(), Emit: emit, Task: seatForcedFinalPrompt, Config: finalCfg, Dir: o.d.Cfg.Workspace})
 			bdur := time.Since(bstart)
 
 			// Report on the first call's resolved model: clearing ModelUsed keeps
@@ -464,7 +464,7 @@ func (o *run) mobModeratorRunner(sink *seatDebugSink, step string) mob.Moderator
 		// The moderator bypasses runModelCfg (toolless harness.Run), so time it
 		// locally and thread the duration to the usage report by value.
 		start := time.Now()
-		res, err := harness.Run(ctx, o.d.Client, tools.NewRegistry(), emit, prompt, cfg)
+		res, err := o.execRun(ctx, o.ledger, RunRequest{Client: o.d.Client, Registry: tools.NewRegistry(), Emit: emit, Task: prompt, Config: cfg, Dir: o.d.Cfg.Workspace})
 		dur := time.Since(start)
 
 		used := o.spendAndReport(ctx, o.ledger, o.d.Cfg.CardID, "mob: report moderator usage failed", res, model, step, dur)

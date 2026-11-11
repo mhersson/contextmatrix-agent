@@ -286,3 +286,34 @@ func TestReplayExclusionReported(t *testing.T) {
 		assert.Len(t, replayExclusions(t, transcript.String()), 1)
 	})
 }
+
+func TestSpawnSubagentsFansOutThroughTheExecutor(t *testing.T) {
+	rec := &recordingExec{}
+	o := replayRun(&planLLM{}, true)
+	o.d.Executor = rec
+
+	specs := []harness.SubagentSpec{
+		{Role: "a", Model: "wide/model"},
+		{Role: "b", Model: "narrow/model"},
+		{Role: "c", Model: "wide/model"},
+	}
+
+	results, err := o.spawnSubagents(t.Context(), &planLLM{}, "/ws/main", specs, harness.SubagentOpts{})
+	require.NoError(t, err)
+
+	var roles []string
+
+	for _, f := range rec.fanouts {
+		assert.Equal(t, "/ws/main", f.Root)
+
+		for _, s := range f.Specs {
+			roles = append(roles, s.Role)
+		}
+	}
+
+	assert.ElementsMatch(t, []string{"a", "b", "c"}, roles)
+	require.Len(t, results, 3)
+	assert.Equal(t, "a", results[0].Role)
+	assert.Equal(t, "b", results[1].Role)
+	assert.Equal(t, "c", results[2].Role)
+}

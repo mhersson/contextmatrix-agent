@@ -51,6 +51,7 @@ func integrateTestDeps(ops *fakeOps, git *fakeGit, pr PRCreator, client llm.LLM)
 		Git:        git,
 		PR:         pr,
 		Client:     client,
+		Executor:   harnessExec{},
 		Emit:       events.NewEmitter(nil, nil),
 		Registry:   planTestRegistry(),
 		WriteTools: tools.NewRegistry(tools.NewReadTool(".")),

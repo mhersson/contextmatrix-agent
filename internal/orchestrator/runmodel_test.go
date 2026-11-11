@@ -627,3 +627,37 @@ func TestGuardedPhasesUnchanged(t *testing.T) {
 			"the plan's own cap is untouched and stays distinct from diagnoseMaxTurns")
 	})
 }
+
+func TestRunModelRunsInTheMainWorkspace(t *testing.T) {
+	rec := &recordingExec{}
+	d := planTestDeps(&fakeOps{}, nil)
+	d.Executor = rec
+	d.Cfg.Workspace = "/ws/main"
+	o := newRun(t.Context(), d, cmclient.TaskContext{})
+
+	_, _, err := o.runModel(t.Context(), d.ReadTools, "task", "m/1")
+	require.NoError(t, err)
+	require.Len(t, rec.runs, 1)
+
+	r := rec.runs[0]
+	assert.Equal(t, "/ws/main", r.Dir)
+	assert.Same(t, d.ReadTools, r.Registry)
+	assert.Equal(t, "task", r.Task)
+	assert.Equal(t, "m/1", r.Config.Model)
+	assert.Same(t, d.Emit, r.Emit)
+	assert.Empty(t, r.SessionID)
+	assert.Empty(t, r.Resume)
+}
+
+func TestRunModelCoderRunsInTheGivenScope(t *testing.T) {
+	rec := &recordingExec{}
+	d := planTestDeps(&fakeOps{}, nil)
+	d.Executor = rec
+	d.Cfg.Workspace = "/ws/main"
+	o := newRun(t.Context(), d, cmclient.TaskContext{})
+
+	_, _, err := o.runModelCoder(t.Context(), runScope{dir: "/ws/c2", ledger: NewLedger(0, 0)}, d.ReadTools, "p", "m/1", coderWrapUpMessage, 0)
+	require.NoError(t, err)
+	require.Len(t, rec.runs, 1)
+	assert.Equal(t, "/ws/c2", rec.runs[0].Dir)
+}

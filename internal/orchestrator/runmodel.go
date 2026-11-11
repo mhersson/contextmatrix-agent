@@ -128,18 +128,25 @@ func reasoningRaw(effort string) json.RawMessage {
 // limit at the context hard stop, into a typed error. The returned duration is
 // the wall time of the harness step, threaded to spendAndReport.
 func (o *run) runModel(ctx context.Context, reg *tools.Registry, prompt, model string) (harness.Result, time.Duration, error) {
-	return o.runModelCfg(ctx, reg, prompt, model, o.harnessConfig(model))
+	return o.runModelCfg(ctx, o.mainScope(), reg, prompt, model, o.harnessConfig(model))
 }
 
 // runModelCfg is the single choke point wrapping harness.Run. It times the
 // call and returns the wall-clock duration alongside the result so every caller
 // can report it to CM by return value - never via a shared field on run, which
 // concurrent Best-of-N candidates and mob seats would race on.
-func (o *run) runModelCfg(ctx context.Context, reg *tools.Registry, prompt, model string, cfg harness.Config) (harness.Result, time.Duration, error) {
+func (o *run) runModelCfg(ctx context.Context, scope runScope, reg *tools.Registry, prompt, model string, cfg harness.Config) (harness.Result, time.Duration, error) {
 	client := &lastReplyClient{LLM: o.d.Client}
 
 	start := time.Now()
-	res, err := harness.Run(ctx, client, reg, o.d.Emit, prompt, cfg)
+	res, err := o.execRun(ctx, scope.ledger, RunRequest{
+		Client:   client,
+		Registry: reg,
+		Emit:     o.d.Emit,
+		Task:     prompt,
+		Config:   cfg,
+		Dir:      scope.dir,
+	})
 	dur := time.Since(start)
 
 	if err == nil && res.Reason == "context_limit" {
@@ -353,7 +360,7 @@ func (o *run) runModelSynthesis(ctx context.Context, reg *tools.Registry, prompt
 	cfg.WrapUpMessage = synthesisWrapUpMessage
 	cfg.MaxTurns = synthesisTurnCap(cfg.MaxTurns)
 
-	return o.runModelCfg(ctx, reg, prompt, model, cfg)
+	return o.runModelCfg(ctx, o.mainScope(), reg, prompt, model, cfg)
 }
 
 // coderBatchNudgeTurns arms the harness batching nudge for the coder family:
@@ -372,7 +379,7 @@ func (o *run) runModelWrapUp(ctx context.Context, reg *tools.Registry, prompt, m
 	cfg.WrapUpTurns = wrapUpTurns
 	cfg.WrapUpMessage = msg
 
-	return o.runModelCfg(ctx, reg, prompt, model, cfg)
+	return o.runModelCfg(ctx, o.mainScope(), reg, prompt, model, cfg)
 }
 
 // runModelCoder is runModelWrapUp with a laddered turn budget and the batching
@@ -391,7 +398,7 @@ func (o *run) runModelWrapUp(ctx context.Context, reg *tools.Registry, prompt, m
 // Used by the execute-phase coder and the review-phase fix run - both laddered
 // coder work. document.go keeps runModelWrapUp: its work carries no sizing and
 // is not read-heavy.
-func (o *run) runModelCoder(ctx context.Context, reg *tools.Registry, prompt, model string,
+func (o *run) runModelCoder(ctx context.Context, scope runScope, reg *tools.Registry, prompt, model string,
 	msg func(int) string, budget int,
 ) (harness.Result, time.Duration, error) {
 	cfg := o.harnessConfig(model)
@@ -407,7 +414,7 @@ func (o *run) runModelCoder(ctx context.Context, reg *tools.Registry, prompt, mo
 	// mode). This is the first net; the verify-gated salvage remains the second.
 	cfg.GraceTurn = true
 
-	return o.runModelCfg(ctx, reg, prompt, model, cfg)
+	return o.runModelCfg(ctx, scope, reg, prompt, model, cfg)
 }
 
 // runModelPlan is the planner's model call. Unlike the coder phases, the planner
@@ -424,7 +431,7 @@ func (o *run) runModelPlan(ctx context.Context, reg *tools.Registry, prompt, mod
 	cfg.WrapUpMessage = planWrapUpMessage
 	cfg.MaxTurns = planTurnCap(cfg.MaxTurns, repair)
 
-	return o.runModelCfg(ctx, reg, prompt, model, cfg)
+	return o.runModelCfg(ctx, o.mainScope(), reg, prompt, model, cfg)
 }
 
 // runModelDiagnose is the diagnosis phase's model call. Like the planner it
@@ -442,7 +449,7 @@ func (o *run) runModelDiagnose(ctx context.Context, reg *tools.Registry, prompt,
 	cfg.WrapUpMessage = diagnoseWrapUpMessage
 	cfg.MaxTurns = diagnoseTurnCap(cfg.MaxTurns)
 
-	return o.runModelCfg(ctx, reg, prompt, model, cfg)
+	return o.runModelCfg(ctx, o.mainScope(), reg, prompt, model, cfg)
 }
 
 // runModelTriage is the Copilot triage call's model wrapper: the flat base is
@@ -458,5 +465,5 @@ func (o *run) runModelTriage(ctx context.Context, reg *tools.Registry, prompt, m
 	cfg.WrapUpMessage = copilotTriageWrapUpMessage
 	cfg.MaxTurns = copilotTriageTurnCap(cfg.MaxTurns)
 
-	return o.runModelCfg(ctx, reg, prompt, model, cfg)
+	return o.runModelCfg(ctx, o.mainScope(), reg, prompt, model, cfg)
 }

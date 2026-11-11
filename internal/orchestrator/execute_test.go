@@ -49,6 +49,7 @@ func execTestDeps(ops *fakeOps, git *fakeGit, client llm.LLM) Deps {
 		Ops:        ops,
 		Git:        git,
 		Client:     client,
+		Executor:   harnessExec{},
 		Emit:       events.NewEmitter(nil, nil),
 		Registry:   planTestRegistry(),
 		WriteTools: testWriteTools(),
@@ -3969,4 +3970,36 @@ func TestCapableDefaultIsNotAWalkDownSoItsFailureIsRecorded(t *testing.T) {
 	require.Len(t, rows, 1)
 	assert.Equal(t, "failed", rows[0].Result)
 	assert.Equal(t, "default/model", rows[0].Model, "the operator's fallback is what ran and what is measured")
+}
+
+func TestSolverScopeIsItsWorkspaceAndLedger(t *testing.T) {
+	l := NewLedger(1, 0)
+	sc := &solverCtx{workspace: "/ws/c3", ledger: l}
+
+	assert.Equal(t, runScope{dir: "/ws/c3", ledger: l}, sc.scope())
+}
+
+func TestRunCoderWithRunsInTheSolverWorkspace(t *testing.T) {
+	rec := &recordingExec{results: []execResult{{res: harness.Result{
+		Completed: true, Reason: "done", CompletionArgs: []byte(`{"summary":"s"}`),
+	}}}}
+
+	d := execTestDeps(&fakeOps{}, &fakeGit{committed: true}, nil)
+	d.Executor = rec
+	d.Cfg.Workspace = "/ws/main"
+	o := newExecRun(d, nil, 0)
+	o.curPhase = "execute"
+
+	sc := &solverCtx{
+		git: &fakeGit{committed: true}, ledger: NewLedger(0, 0), tools: d.WriteTools,
+		workspace: "/ws/cand-1", coderModel: o.resolveCoderModel,
+		tag: "candidate 1/2",
+	}
+	sub := subtaskRef{ID: "SUB-1", Title: "Only", Sizing: seedSizing("moderate"), PlannerBar: "moderate"}
+
+	_, _, _, err := o.runCoderWith(t.Context(), sc, sub, "p")
+	require.NoError(t, err)
+	require.Len(t, rec.runs, 1)
+	assert.Equal(t, "/ws/cand-1", rec.runs[0].Dir)
+	assert.Same(t, sc.tools, rec.runs[0].Registry)
 }

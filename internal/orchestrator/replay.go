@@ -80,7 +80,7 @@ func (o *run) spawnSubagents(ctx context.Context, client llm.LLM, root string, s
 	if len(on) == 0 || len(off) == 0 {
 		opts.ReplayReasoning = len(on) > 0
 
-		return harness.SpawnSubagents(ctx, client, root, o.d.Emit, specs, opts)
+		return o.execFanout(ctx, FanoutRequest{Client: client, Root: root, Emit: o.d.Emit, Specs: specs, Opts: opts})
 	}
 
 	results := make([]harness.SubagentResult, len(specs))
@@ -102,7 +102,7 @@ func (o *run) spawnSubagents(ctx context.Context, client llm.LLM, root string, s
 			side := opts
 			side.ReplayReasoning = n == 0
 
-			res, err := harness.SpawnSubagents(ctx, client, root, o.d.Emit, sub, side)
+			res, err := o.execFanout(ctx, FanoutRequest{Client: client, Root: root, Emit: o.d.Emit, Specs: sub, Opts: side})
 			errs[n] = err
 
 			for j, i := range idx {

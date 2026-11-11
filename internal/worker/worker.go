@@ -15,6 +15,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/attempt"
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/config"
+	"github.com/mhersson/contextmatrix-agent/internal/modelexec"
 	"github.com/mhersson/contextmatrix-agent/internal/orchestrator"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-harness/events"
@@ -453,6 +454,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 		PR:         pr,
 		PRGates:    pr,
 		Client:     a.client,
+		Executor:   modelexec.Harness{},
 		Emit:       a.emit,
 		Registry:   reg,
 		WriteTools: tools.NewRegistry(wt...),

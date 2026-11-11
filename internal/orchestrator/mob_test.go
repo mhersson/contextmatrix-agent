@@ -63,6 +63,7 @@ func mobTestRun(ops *fakeOps, mobCfg MobConfig, maxCost float64) *run {
 		Ops:       ops,
 		Git:       &fakeGit{},
 		Client:    &planLLM{},
+		Executor:  harnessExec{},
 		Emit:      events.NewEmitter(nil, nil),
 		Registry:  reviewerRegistry(),
 		ReadTools: tools.NewRegistry(tools.NewReadTool(".")),
@@ -406,6 +407,7 @@ func TestMobModeratorRunnerIsToolless(t *testing.T) {
 	client := &planLLM{responses: []llm.Response{stopResp("VERDICT", 0.01)}}
 	o := mobTestRun(&fakeOps{}, MobConfig{Participants: 2}, 10)
 	o.d.Client = client
+	o.d.Executor = harnessExec{}
 
 	runner := o.mobModeratorRunner(&seatDebugSink{w: io.Discard}, "mob_moderator")
 
@@ -427,6 +429,7 @@ func TestMobSeatRunnerPersistsContextAcrossRounds(t *testing.T) {
 	}}
 	o := mobTestRun(&fakeOps{}, MobConfig{Participants: 2}, 10)
 	o.d.Client = client
+	o.d.Executor = harnessExec{}
 
 	runner := o.mobSeatRunner(&seatDebugSink{w: io.Discard}, 0, "mob_seat")
 	seat := mob.SeatConfig{Name: "seat-1", Lens: "risk", Model: "m/1"}
@@ -483,6 +486,7 @@ func TestMobSeatRunnerForcesFinalAnswerOnEmptyOutput(t *testing.T) {
 	client := &planLLM{responses: []llm.Response{burn, stopResp("forced position", 0.01)}}
 	o := mobTestRun(&fakeOps{}, MobConfig{Participants: 2}, 10)
 	o.d.Client = client
+	o.d.Executor = harnessExec{}
 
 	runner := o.mobSeatRunner(&seatDebugSink{w: io.Discard}, 0.25, "mob_seat")
 
@@ -515,6 +519,7 @@ func TestMobSeatRunnerBackstopFailureFallsBackToAbsence(t *testing.T) {
 	client := &planLLM{responses: []llm.Response{burn}, errAfter: 2}
 	o := mobTestRun(&fakeOps{}, MobConfig{Participants: 2}, 10)
 	o.d.Client = client
+	o.d.Executor = harnessExec{}
 
 	runner := o.mobSeatRunner(&seatDebugSink{w: io.Discard}, 0.25, "mob_seat")
 
@@ -617,6 +622,7 @@ func TestMobSeatRunnerReplaysReasoningOnlyToTheSeatsModel(t *testing.T) {
 			}}
 			o := mobTestRun(&fakeOps{}, MobConfig{Participants: 2}, 10)
 			o.d.Client = client
+			o.d.Executor = harnessExec{}
 			o.d.Registry = replayTestRegistry()
 			o.d.Cfg.ReplayReasoning = true
 
@@ -669,4 +675,57 @@ func TestBuildEngineConfigRecordsADependentDiscussion(t *testing.T) {
 
 	assert.True(t, ops.loggedContains("not fully independent"),
 		"a discussion whose seats share a model must say so; logs=%v", ops.logs)
+}
+
+func TestMobRunsRouteThroughTheExecutor(t *testing.T) {
+	t.Run("seat", func(t *testing.T) {
+		rec := &recordingExec{results: []execResult{{res: harness.Result{Completed: true, Reason: "done", Output: "position"}}}}
+		o := mobTestRun(&fakeOps{}, MobConfig{Participants: 2}, 10)
+		o.d.Executor = rec
+		o.d.Cfg.Workspace = "/ws/main"
+
+		runner := o.mobSeatRunner(&seatDebugSink{w: io.Discard}, 0, "mob_seat")
+		out, _, err := runner(t.Context(), mob.SeatConfig{Name: "seat-1", Lens: "risk", Model: "m/1"}, nil, "brief")
+		require.NoError(t, err)
+		assert.Equal(t, "position", out)
+		require.Len(t, rec.runs, 1)
+
+		r := rec.runs[0]
+		assert.Same(t, o.d.ReadTools, r.Registry)
+		assert.NotEmpty(t, r.Config.SystemPrompt)
+		assert.Equal(t, mobSeatMaxTurns, r.Config.MaxTurns)
+		assert.Equal(t, "/ws/main", r.Dir)
+	})
+
+	t.Run("backstop", func(t *testing.T) {
+		rec := &recordingExec{results: []execResult{
+			{res: harness.Result{Completed: true, Reason: "done", Output: ""}},
+			{res: harness.Result{Completed: true, Reason: "done", Output: "late"}},
+		}}
+		o := mobTestRun(&fakeOps{}, MobConfig{Participants: 2}, 10)
+		o.d.Executor = rec
+
+		runner := o.mobSeatRunner(&seatDebugSink{w: io.Discard}, 0, "mob_seat")
+		out, _, err := runner(t.Context(), mob.SeatConfig{Name: "seat-1", Lens: "risk", Model: "m/1"}, nil, "brief")
+		require.NoError(t, err)
+		assert.Equal(t, "late", out)
+		require.Len(t, rec.runs, 2)
+		assert.Equal(t, seatForcedFinalPrompt, rec.runs[1].Task)
+		assert.Empty(t, rec.runs[1].Registry.All())
+		assert.Equal(t, 1, rec.runs[1].Config.MaxTurns)
+	})
+
+	t.Run("moderator", func(t *testing.T) {
+		rec := &recordingExec{results: []execResult{{res: harness.Result{Completed: true, Reason: "done", Output: "VERDICT"}}}}
+		o := mobTestRun(&fakeOps{}, MobConfig{Participants: 2}, 10)
+		o.d.Executor = rec
+
+		runner := o.mobModeratorRunner(&seatDebugSink{w: io.Discard}, "mob_moderator")
+		out, _, _, err := runner(t.Context(), "synthesize")
+		require.NoError(t, err)
+		assert.Equal(t, "VERDICT", out)
+		require.Len(t, rec.runs, 1)
+		assert.Empty(t, rec.runs[0].Registry.All())
+		assert.Equal(t, mobModeratorMaxTurns, rec.runs[0].Config.MaxTurns)
+	})
 }
