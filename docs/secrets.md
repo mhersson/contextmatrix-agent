@@ -90,12 +90,16 @@ Operator notes:
   `NO_PROXY` still needs the hosts the container reaches directly, as below.
   `HTTP_PROXY` alone also carries Claude Code's HTTPS API traffic.
   `ca_cert_file` reaches `claude` as `NODE_EXTRA_CA_CERTS`.
-- Workers must reach `serve`'s port at `container_serve_url`, so a host
-  firewall must allow container-to-host traffic on that port.
-- An HTTP proxy in `worker_extra_env` needs the serve host
-  (`host.docker.internal` by default) in `NO_PROXY`, and the ContextMatrix
-  host of `container_contextmatrix_url` too when the proxy cannot reach it
-  (the worker's MCP connection honours the proxy variables in both modes).
+- In endpoint mode workers must reach `serve`'s port at `container_serve_url`
+  (the LLM proxy), so a host firewall must allow container-to-host traffic on
+  that port. A `claude_code` worker never contacts `serve`: it stages no
+  `LLM_BASE_URL`, and `claude` calls Anthropic directly.
+- An HTTP proxy in `worker_extra_env` needs the ContextMatrix host of
+  `container_contextmatrix_url` in `NO_PROXY` when the proxy cannot reach it
+  (the worker's MCP connection honours the proxy variables in both modes). In
+  endpoint mode it also needs the serve host (`host.docker.internal` by
+  default), because the worker's LLM client calls the proxy there. In
+  `claude_code` mode the serve host is not needed; loopback is added for you.
 - An operator `LLM_*` in `worker_extra_env` wins over the staged values, since
   container env beats the secrets file (`resolveLLMValue`): setting both
   `LLM_API_KEY` and `LLM_BASE_URL` bypasses the proxy and puts that key in the

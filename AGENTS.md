@@ -49,7 +49,7 @@ internal/registry/   → adapter over contextmatrix-protocol/selection: FromSele
 
 # Autonomous executor - the FSM and its container lifecycle
 internal/orchestrator/ → hand-written FSM plan → execute → judge → document → review → integrate → pr_gates → done; phase persistence; git finalize
-internal/modelexec/   → the model executors behind orchestrator.Executor: Harness forwards to harness.Run / SpawnSubagents over the run's LLM client; Claude runs contextmatrix-vendorkit's `claudecode.Run` (the pinned `claude` binary on the operator's subscription), selected for `claude_code` runs
+internal/modelexec/   → the model executors behind orchestrator.Executor: Harness forwards to harness.Run / SpawnSubagents over the run's LLM client; Claude runs contextmatrix-vendorkit's `claudecode.Run` (the `claude` binary on the operator's subscription; worker images install 2.1.322, the release vendorkit tested), selected for `claude_code` runs
 internal/mob/          → A2A mob-session engine: seats, moderator, loopback JSON-RPC server, transcripts - discussions for plan/review/execute checkpoints
 internal/verifyexec/   → verify-command probing + bounded exec; used by cli run and the orchestrator verify gate
 internal/worker/       → the `work` lifecycle: clone, claim, run the FSM (HITL-gated or autonomous), commit/push, PR; wires the orchestrator deps
@@ -134,8 +134,10 @@ Go 1.27+, **cobra** + **koanf** (not viper), the **Docker SDK**
   LLM keys itself.
 - The LLM endpoint (OpenAI-compatible `/chat/completions`) is spoken over **raw
   HTTP** behind a narrow `Send`/`SendStream` interface - no SDK in the hot path.
-  In `claude_code` mode the pinned `claude` binary (contextmatrix-vendorkit)
-  replaces it.
+  In `claude_code` mode the `claude` binary (contextmatrix-vendorkit) replaces
+  it. Worker images install 2.1.322, the release vendorkit tested
+  (`claudecode.Version`), not a hard pin: another version on the host or in a
+  custom image only warns at worker start.
 
 ## Coding conventions
 
