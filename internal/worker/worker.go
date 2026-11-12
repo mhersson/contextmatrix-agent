@@ -40,6 +40,27 @@ var (
 // outcome without spinning up the real phase loop.
 var runOrchestrator = orchestrator.Run
 
+// checkClaudeCode is the start-of-run `claude` probe seam; tests swap it.
+var checkClaudeCode = modelexec.CheckClaudeCode
+
+func claudeCodeMode(spec RunSpec) bool {
+	return spec.LLMType == protocol.LLMEndpointTypeClaudeCode
+}
+
+// newExecutor builds the run's executor: the Claude Code executor in claude_code
+// mode, else the harness. The token reaches only NewClaude.
+func newExecutor(spec RunSpec, bashEnv []string) (orchestrator.Executor, error) {
+	if !claudeCodeMode(spec) {
+		return modelexec.Harness{}, nil
+	}
+
+	return modelexec.NewClaude(modelexec.ClaudeConfig{
+		OAuthToken: spec.LLMOAuthToken,
+		Env:        modelexec.ClaudeEnv(bashEnv, spec.CACertFile),
+		Effort:     spec.ReasoningEffort,
+	})
+}
+
 // gatesFinalizeMargin is how much of the container's lifetime the pr_gates
 // deadline leaves unspent, so a gate that runs out of patience still has room to
 // write its park note and exit cleanly before serve kills the container. A
@@ -231,6 +252,16 @@ func Run(ctx context.Context, spec RunSpec, ops CardOps, client llm.LLM, emit *e
 	ws := filepath.Join(spec.Workspace, strings.ToLower(spec.CardID))
 
 	git := NewGit(ws, secretsPathForAuth(spec), hostFromRepoURL(spec.RepoURL), spec.CACertFile)
+
+	if claudeCodeMode(spec) {
+		if spec.LLMOAuthToken == "" {
+			return releaseWithError(ctx, ops, spec.CardID, errors.New("claude_code mode needs LLM_OAUTH_TOKEN"))
+		}
+
+		if err := checkClaudeCode(ctx, slog.Default()); err != nil {
+			return releaseWithError(ctx, ops, spec.CardID, err)
+		}
+	}
 
 	if err := prepareWorkspace(ctx, git, spec); err != nil {
 		return releaseWithError(ctx, ops, spec.CardID, err)
@@ -445,6 +476,11 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 	logLadderFaults(ctx, faults, a.ops, a.spec.CardID)
 	logReachability(ctx, reg, a.ops, a.spec.CardID)
 
+	exec, err := newExecutor(a.spec, tools.ScrubbedEnv(verifyEnv))
+	if err != nil {
+		return releaseWithError(ctx, a.ops, a.spec.CardID, fmt.Errorf("build executor: %w", err))
+	}
+
 	d := orchestrator.Deps{
 		Ops: a.ops,
 		Git: a.git,
@@ -454,7 +490,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 		PR:         pr,
 		PRGates:    pr,
 		Client:     a.client,
-		Executor:   modelexec.Harness{},
+		Executor:   exec,
 		Emit:       a.emit,
 		Registry:   reg,
 		WriteTools: tools.NewRegistry(wt...),
@@ -501,6 +537,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 			BestOfN:           resolveBestOfN(a.spec.BestOfN, mob),
 			Mob:               mob,
 			POC:               a.spec.POC,
+			ClaudeCode:        claudeCodeMode(a.spec),
 			Compaction: orchestrator.Compaction{
 				Enabled:         a.spec.CompactionEnabled,
 				Threshold:       a.spec.CompactionThreshold,
@@ -516,7 +553,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 		},
 	}
 
-	err := runOrchestrator(runCtx, d)
+	err = runOrchestrator(runCtx, d)
 
 	return mapFSMResult(ctx, a, red.Apply, err)
 }

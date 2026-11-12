@@ -73,6 +73,8 @@ docker/Dockerfile.worker → multi-target worker image family (agent binary + gi
 # (events, llm, tools, harness, redact): the FSM-free loop, the LLM client, the
 # jailed tool registry (including the `skill` tool), the event stream, and secret
 # redaction. This repo depends on it; it takes no dependency on this repo.
+# In claude_code mode the pinned `claude` binary (contextmatrix-vendorkit)
+# replaces the raw-HTTP endpoint client.
 
 # Claude Code runs - the external github.com/mhersson/contextmatrix-vendorkit
 # module (claudecode): drives `claude -p` over a loopback tool bridge for the

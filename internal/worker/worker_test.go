@@ -21,6 +21,7 @@ import (
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/config"
+	"github.com/mhersson/contextmatrix-agent/internal/modelexec"
 	"github.com/mhersson/contextmatrix-agent/internal/orchestrator"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-backendkit/frames"
@@ -2757,6 +2758,133 @@ func TestMapFSMResultParksOnUsageLimit(t *testing.T) {
 			got, ok := args[2].(time.Time)
 			require.True(t, ok)
 			assert.True(t, tt.reset.Equal(got))
+		})
+	}
+}
+
+func swapCheckClaudeCode(t *testing.T, fn func(context.Context, *slog.Logger) error) {
+	t.Helper()
+
+	prev := checkClaudeCode
+	checkClaudeCode = fn
+
+	t.Cleanup(func() { checkClaudeCode = prev })
+}
+
+func claudeSpec(t *testing.T, remote, wsParent, token string) RunSpec {
+	t.Helper()
+
+	spec := baseSpec(t, remote, wsParent)
+	spec.LLMType = protocol.LLMEndpointTypeClaudeCode
+	spec.LLMOAuthToken = token
+
+	return spec
+}
+
+func TestRunClaudeCodeStopsBeforeClaimWithoutTheBinary(t *testing.T) {
+	errSentinel := errors.New("no claude")
+
+	swapCheckClaudeCode(t, func(context.Context, *slog.Logger) error { return errSentinel })
+
+	ops := newFakeOps()
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	_, err := Run(context.Background(), claudeSpec(t, setupBareRemote(t), t.TempDir(), "t"), ops, &scriptedLLM{}, emit, openStdin(t))
+	require.ErrorIs(t, err, errSentinel)
+	assert.NotContains(t, ops.ops(), "ClaimCard")
+}
+
+func TestRunClaudeCodeNeedsAToken(t *testing.T) {
+	called := false
+
+	swapCheckClaudeCode(t, func(context.Context, *slog.Logger) error {
+		called = true
+
+		return nil
+	})
+
+	ops := newFakeOps()
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	_, err := Run(context.Background(), claudeSpec(t, setupBareRemote(t), t.TempDir(), ""), ops, &scriptedLLM{}, emit, openStdin(t))
+	require.Error(t, err)
+	assert.NotContains(t, ops.ops(), "ClaimCard")
+	assert.False(t, called)
+}
+
+func TestRunEndpointModeSkipsTheClaudeCheck(t *testing.T) {
+	called := false
+
+	swapCheckClaudeCode(t, func(context.Context, *slog.Logger) error {
+		called = true
+
+		return errors.New("must not run")
+	})
+	swapRunOrchestrator(t, func(context.Context, orchestrator.Deps) error { return nil })
+
+	spec := baseSpec(t, setupBareRemote(t), t.TempDir())
+	spec.LLMType = "openrouter"
+
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	_, err := Run(context.Background(), spec, newFakeOps(), &scriptedLLM{}, emit, openStdin(t))
+	require.NoError(t, err)
+	assert.False(t, called)
+}
+
+func TestNewExecutorPicksByEndpointType(t *testing.T) {
+	tests := []struct {
+		name string
+		spec RunSpec
+		want any
+	}{
+		{"openrouter", RunSpec{LLMType: "openrouter"}, modelexec.Harness{}},
+		{"claude_code", RunSpec{LLMType: protocol.LLMEndpointTypeClaudeCode, LLMOAuthToken: "t"}, &modelexec.Claude{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ex, err := newExecutor(tt.spec, []string{"PATH=/usr/bin"})
+			require.NoError(t, err)
+			assert.IsType(t, tt.want, ex)
+		})
+	}
+}
+
+func TestRunFSMWiresClaudeCodeMode(t *testing.T) {
+	swapCheckClaudeCode(t, func(context.Context, *slog.Logger) error { return nil })
+
+	tests := []struct {
+		name     string
+		llmType  string
+		token    string
+		wantCC   bool
+		wantExec any
+	}{
+		{"claude_code", protocol.LLMEndpointTypeClaudeCode, "t", true, &modelexec.Claude{}},
+		{"openrouter", "openrouter", "", false, modelexec.Harness{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got orchestrator.Deps
+
+			swapRunOrchestrator(t, func(_ context.Context, d orchestrator.Deps) error {
+				got = d
+
+				return nil
+			})
+
+			spec := baseSpec(t, setupBareRemote(t), t.TempDir())
+			spec.LLMType = tt.llmType
+			spec.LLMOAuthToken = tt.token
+
+			emit := events.NewEmitter(io.Discard, io.Discard)
+
+			_, err := Run(context.Background(), spec, newFakeOps(), &scriptedLLM{}, emit, openStdin(t))
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantCC, got.Cfg.ClaudeCode)
+			assert.IsType(t, tt.wantExec, got.Executor)
 		})
 	}
 }

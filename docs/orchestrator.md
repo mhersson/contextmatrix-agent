@@ -99,8 +99,9 @@ at most every 30 seconds, so a long reasoning turn is not reaped as idle. A
 turn that streams only tool-call arguments emits none: the harness reports
 just text and reasoning fragments. The event carries no model text - streamed
 fragments are unredacted - and the log bridge keeps it off the live stream;
-the durable run log records it. The review panel's fan-out takes no progress
-callback, so the specialists get the same marker through their model client.
+the durable run log records it. On the harness the review panel's fan-out takes
+no progress callback, so the specialists get the same marker through their
+model client; under Claude Code the fan-out takes it as a callback.
 
 ## Review
 
@@ -420,6 +421,36 @@ every subtask's reported total, finished subtasks included, before the first
 phase runs.
 
 ## Claude Code subscription mode
+
+The mode is on when the trigger's endpoint type is `claude_code`. Every phase
+run, mob seat, backstop, moderator and review specialist then goes through
+vendorkit's `claudecode.Run`: one `claude -p` process each. The worker checks
+for a runnable `claude` before it clones or claims the card, and a missing
+binary or token fails the run there. It logs the found version at start and
+warns when it is not the tested 2.1.322. All runs share the worker user's HOME,
+so Bash commands see the same git, gh and toolchain config as on the harness.
+The phase registry splits into Claude Code built-ins (Read, Write, Edit, Bash)
+and Go tools served over a loopback bridge (grep, glob, git, finish, verify,
+record_finding, skill); `finish` stays terminal. `MaxTurns` becomes
+`--max-turns`, and streamed fragments feed the `model_progress` liveness
+marker. Repo grounding reaches the model inside the phase prompts, and
+`claude` runs with `--setting-sources user`, so project settings are not
+loaded.
+
+Lost in this mode:
+
+- the wrap-up and batch nudges and the grace turn
+- the 0.85 context stop and opt-in compaction (Claude Code compacts itself)
+- incapable-model detection
+- reasoning replay
+- redaction of tool output before the model sees it (events and transcripts
+  are still redacted)
+- keeping the credential out of the worker (see [secrets](secrets.md))
+- vendor diversity: every model is a Claude model
+- the tool-output byte cap and the bash timeout cap (Claude Code's own limits
+  apply)
+- the workspace jail and read-only roots for the built-ins (the container is
+  the boundary; bridged tools keep their jail)
 
 ### Budget
 

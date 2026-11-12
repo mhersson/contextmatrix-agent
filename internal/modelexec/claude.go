@@ -241,7 +241,8 @@ func (c *Claude) SpawnSubagents(ctx context.Context, req orchestrator.FanoutRequ
 }
 
 // CheckClaudeCode checks the `claude` on PATH. It fails only when no runnable
-// binary is found; a different version logs one warning and returns nil.
+// binary is found; it logs the found version, as a warning when it differs
+// from the tested one.
 func CheckClaudeCode(ctx context.Context, logger *slog.Logger) error {
 	return checkClaudeCode(ctx, logger, claudecode.CheckVersion)
 }
@@ -254,7 +255,11 @@ func checkClaudeCode(ctx context.Context, logger *slog.Logger, check func(contex
 
 	if !tested {
 		logger.Warn("claude version differs from the tested one", "found", found, "tested", claudecode.Version)
+
+		return nil
 	}
+
+	logger.Info("claude found", "version", found)
 
 	return nil
 }

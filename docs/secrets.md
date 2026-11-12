@@ -99,6 +99,14 @@ Limits:
 - The token is readable inside the container, so the run can spend through
   the proxy until its token is revoked.
 
+## Claude Code token
+
+In `claude_code` mode the worker hands the subscription token to the `claude`
+process environment, where the commands its Bash tool runs can read it: a
+prompt-injected agent could exfiltrate it. Other secrets stay out of that
+environment, which starts from the scrubbed allowlist (plus the proxy variables
+and `NODE_EXTRA_CA_CERTS`).
+
 ## Subprocess scrubbing
 
 Tool subprocesses get an allowlisted `cmd.Env` (`tools.ScrubbedEnv`) - secrets

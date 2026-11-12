@@ -495,6 +495,8 @@ func TestCheckClaudeCode(t *testing.T) {
 				assert.Contains(t, buf.String(), claudecode.Version)
 			} else {
 				assert.NotContains(t, buf.String(), "WARN")
+				assert.Contains(t, buf.String(), "level=INFO")
+				assert.Contains(t, buf.String(), tt.found)
 			}
 		})
 	}

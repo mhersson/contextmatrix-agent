@@ -63,7 +63,8 @@ flowchart LR
 
 - **`serve`** is the task backend. It owns container lifecycle, resource limits,
   idle/timeout watchdogs, secret refresh, and graceful drain.
-- **`work`** is the in-container agent. It runs the inner loop, fans out
+- **`work`** is the in-container agent. It runs the inner loop (the harness, or
+  the Claude Code executor when the endpoint type is `claude_code`), fans out
   read-only review subagents, commits and pushes incrementally, and finalizes
   with an autosquash + force-push.
 
@@ -105,7 +106,8 @@ board cards.
 
 - **Go 1.27+** to build.
 - **Docker** on the host running `serve` (the worker runtime).
-- An **LLM endpoint API key** with access to the models you route to.
+- An **LLM endpoint API key** with access to the models you route to, or a
+  **Claude Code subscription token** configured in ContextMatrix.
 - A reachable **ContextMatrix** instance (API + MCP) and its MCP API key.
 - **GitHub auth configured in ContextMatrix** (a GitHub App or a fine-grained
   PAT) - ContextMatrix mints per-run tokens for cloning and pushing target
