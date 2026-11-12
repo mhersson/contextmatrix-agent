@@ -11,6 +11,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/mhersson/contextmatrix-harness/harness"
+	"github.com/mhersson/contextmatrix-harness/llm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -59,17 +60,6 @@ func TestExecRunClaudeCodeCapsTheRunAtTheRemainingBudget(t *testing.T) {
 	}
 }
 
-func TestExecRunClaudeCodeFeedsTheLivenessMarker(t *testing.T) {
-	rec := &recordingExec{}
-	o := execTestRun(true, rec)
-	o.progress = newProgressMarker(events.NewEmitter(nil, &bytes.Buffer{}), time.Now)
-
-	_, err := o.execRun(t.Context(), NewLedger(0, 0), RunRequest{Task: "t"})
-	require.NoError(t, err)
-	require.Len(t, rec.runs, 1)
-	assert.NotNil(t, rec.runs[0].Config.OnDelta)
-}
-
 func TestExecRunEndpointModeIsUnchanged(t *testing.T) {
 	rec := &recordingExec{}
 	o := execTestRun(false, rec)
@@ -79,7 +69,6 @@ func TestExecRunEndpointModeIsUnchanged(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, rec.runs, 1)
 	assert.Zero(t, rec.runs[0].Config.MaxCostUSD)
-	assert.Nil(t, rec.runs[0].Config.OnDelta)
 }
 
 func TestExecRunRefusesEveryRunAfterAUsageLimit(t *testing.T) {
@@ -113,13 +102,21 @@ func TestExecFanoutClaudeCodeCapsAndRecords(t *testing.T) {
 		rec := &recordingExec{}
 		o := execTestRun(true, rec)
 		o.ledger = NewLedger(5, 2)
-		o.progress = newProgressMarker(events.NewEmitter(nil, &bytes.Buffer{}), time.Now)
+
+		var out bytes.Buffer
+
+		clock := newStepClock()
+		o.progress = newProgressMarker(events.NewEmitter(nil, &out), clock.now)
 
 		_, err := o.execFanout(t.Context(), FanoutRequest{Specs: specs})
 		require.NoError(t, err)
 		require.Len(t, rec.fanouts, 1)
 		assert.InDelta(t, 1.0, rec.fanouts[0].BudgetUSD, 1e-9)
-		assert.NotNil(t, rec.fanouts[0].OnDelta)
+		require.NotNil(t, rec.fanouts[0].OnDelta)
+
+		clock.advance(modelProgressInterval)
+		rec.fanouts[0].OnDelta(llm.Delta{})
+		assert.Len(t, progressLines(t, out.String()), 1, "a panel child's stream feeds the marker")
 	})
 
 	t.Run("uncapped ledger", func(t *testing.T) {
@@ -229,4 +226,19 @@ func TestExecRunClaudeCodeHonoursTheCardLedgerForCandidates(t *testing.T) {
 		assert.True(t, ok)
 		assert.Empty(t, rec.runs)
 	})
+}
+
+func TestHarnessConfigFeedsTheLivenessMarker(t *testing.T) {
+	var out bytes.Buffer
+
+	o := execTestRun(true, &recordingExec{})
+	clock := newStepClock()
+	o.progress = newProgressMarker(events.NewEmitter(nil, &out), clock.now)
+
+	cfg := o.harnessConfig("default/model")
+	require.NotNil(t, cfg.OnDelta)
+
+	clock.advance(modelProgressInterval)
+	cfg.OnDelta(llm.Delta{})
+	assert.Len(t, progressLines(t, out.String()), 1)
 }

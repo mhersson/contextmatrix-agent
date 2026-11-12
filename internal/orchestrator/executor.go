@@ -122,10 +122,6 @@ func (o *run) execRun(ctx context.Context, ledger *Ledger, req RunRequest) (harn
 		if req.Config.MaxCostUSD <= 0 {
 			req.Config.MaxCostUSD = remaining
 		}
-
-		if req.Config.OnDelta == nil && o.progress != nil {
-			req.Config.OnDelta = o.progress.onDelta
-		}
 	}
 
 	res, err := o.d.Executor.Run(ctx, req)
