@@ -441,84 +441,10 @@ func TestClaudeEnv(t *testing.T) {
 	for _, e := range ClaudeEnv([]string{"PATH=/usr/bin"}, "") {
 		assert.False(t, strings.HasPrefix(e, "NODE_EXTRA_CA_CERTS="))
 	}
-}
 
-func TestClaudeEnvKeepsLoopbackOffTheProxy(t *testing.T) {
-	tests := []struct {
-		name      string
-		env       map[string]string
-		scrubbed  []string
-		wantUpper string // "" = NO_PROXY absent
-		wantLower string // "" = no_proxy absent
-	}{
-		{
-			name:      "proxy without NO_PROXY",
-			env:       map[string]string{"HTTPS_PROXY": "http://p:3128"},
-			wantUpper: "127.0.0.1,localhost,::1",
-			wantLower: "127.0.0.1,localhost,::1",
-		},
-		{
-			name:      "existing NO_PROXY kept and extended",
-			env:       map[string]string{"http_proxy": "http://p:3128", "NO_PROXY": "host.docker.internal,LOCALHOST"},
-			wantUpper: "host.docker.internal,LOCALHOST,127.0.0.1,::1",
-			wantLower: "host.docker.internal,LOCALHOST,127.0.0.1,::1",
-		},
-		{
-			name:      "each variable keeps its own value",
-			env:       map[string]string{"HTTP_PROXY": "http://p:3128", "NO_PROXY": "a.internal", "no_proxy": "b.internal,::1"},
-			wantUpper: "a.internal,127.0.0.1,localhost,::1",
-			wantLower: "b.internal,::1,127.0.0.1,localhost",
-		},
-		{
-			name: "no proxy adds nothing",
-			env:  map[string]string{},
-		},
-		{
-			name:      "no proxy passes NO_PROXY through as is",
-			env:       map[string]string{"NO_PROXY": "a.internal"},
-			wantUpper: "a.internal",
-		},
-		{
-			name:      "every key once",
-			env:       map[string]string{"HTTPS_PROXY": "http://p:3128", "NO_PROXY": "a.internal"},
-			scrubbed:  []string{"PATH=/usr/bin", "NO_PROXY=stale", "HTTPS_PROXY=http://old:1"},
-			wantUpper: "a.internal,127.0.0.1,localhost,::1",
-			wantLower: "a.internal,127.0.0.1,localhost,::1",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			for _, k := range claudeEnvPassthrough {
-				t.Setenv(k, "")
-				require.NoError(t, os.Unsetenv(k))
-			}
-
-			for k, v := range tt.env {
-				t.Setenv(k, v)
-			}
-
-			got := map[string]string{}
-
-			for _, e := range ClaudeEnv(tt.scrubbed, "") {
-				k, v, _ := strings.Cut(e, "=")
-				_, dup := got[k]
-				assert.False(t, dup, "%s appears twice", k)
-				got[k] = v
-			}
-
-			for k, want := range map[string]string{"NO_PROXY": tt.wantUpper, "no_proxy": tt.wantLower} {
-				v, ok := got[k]
-				if want == "" {
-					assert.False(t, ok, "%s=%q", k, v)
-
-					continue
-				}
-
-				assert.Equal(t, want, v, k)
-			}
-		})
-	}
+	dup := ClaudeEnv([]string{"PATH=/usr/bin", "HTTPS_PROXY=http://old:1"}, "")
+	assert.Contains(t, dup, "HTTPS_PROXY=http://p:3128")
+	assert.NotContains(t, dup, "HTTPS_PROXY=http://old:1")
 }
 
 func TestClaudeRunNormalizesEffort(t *testing.T) {

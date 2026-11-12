@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"slices"
 	"strings"
 	"sync"
 
@@ -43,15 +42,10 @@ type ClaudeConfig struct {
 // Anthropic, beyond the scrubbed bash env.
 var claudeEnvPassthrough = []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"}
 
-// claudeLoopback must bypass any proxy: claude's MCP bridge and its stop hook
-// listen on loopback.
-var claudeLoopback = []string{"127.0.0.1", "localhost", "::1"}
-
 // ClaudeEnv returns the scrubbed bash env plus each set passthrough variable,
-// plus NODE_EXTRA_CA_CERTS=<caFile> when the worker has a CA bundle. With a
-// proxy set, NO_PROXY and no_proxy both gain the loopback hosts they lack; an
-// unset one starts from the other's value. Every key appears once; a later
-// value wins.
+// plus NODE_EXTRA_CA_CERTS=<caFile> when the worker has a CA bundle. Every key
+// appears once; a later value wins. vendorkit adds the loopback hosts to
+// NO_PROXY when it builds the child env.
 func ClaudeEnv(scrubbed []string, caFile string) []string {
 	add := make([]string, 0, len(scrubbed)+len(claudeEnvPassthrough)+1)
 	add = append(add, scrubbed...)
@@ -81,77 +75,7 @@ func ClaudeEnv(scrubbed []string, caFile string) []string {
 		out = append(out, e)
 	}
 
-	return withLoopbackNoProxy(out, idx)
-}
-
-// withLoopbackNoProxy extends env's NO_PROXY and no_proxy with claudeLoopback
-// when a proxy is set. idx maps each key of env to its index.
-func withLoopbackNoProxy(env []string, idx map[string]int) []string {
-	value := func(k string) (string, bool) {
-		i, ok := idx[k]
-		if !ok {
-			return "", false
-		}
-
-		_, v, _ := strings.Cut(env[i], "=")
-
-		return v, true
-	}
-
-	proxied := false
-
-	for _, k := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"} {
-		if v, _ := value(k); v != "" {
-			proxied = true
-		}
-	}
-
-	if !proxied {
-		return env
-	}
-
-	upper, hasUpper := value("NO_PROXY")
-	lower, hasLower := value("no_proxy")
-
-	if !hasUpper {
-		upper = lower
-	}
-
-	if !hasLower {
-		lower = upper
-	}
-
-	for _, kv := range [][2]string{{"NO_PROXY", upper}, {"no_proxy", lower}} {
-		e := kv[0] + "=" + appendNoProxy(kv[1], claudeLoopback)
-		if i, ok := idx[kv[0]]; ok {
-			env[i] = e
-
-			continue
-		}
-
-		env = append(env, e)
-	}
-
-	return env
-}
-
-// appendNoProxy appends each host list lacks, compared case-insensitively.
-func appendNoProxy(list string, hosts []string) string {
-	entries := make([]string, 0, len(hosts)+1)
-
-	for e := range strings.SplitSeq(list, ",") {
-		if e = strings.TrimSpace(e); e != "" {
-			entries = append(entries, e)
-		}
-	}
-
-	for _, h := range hosts {
-		if !slices.ContainsFunc(entries, func(e string) bool { return strings.EqualFold(e, h) }) {
-			entries = append(entries, h)
-		}
-	}
-
-	return strings.Join(entries, ",")
+	return out
 }
 
 // Claude runs model work through contextmatrix-vendorkit's claudecode.Run: the
