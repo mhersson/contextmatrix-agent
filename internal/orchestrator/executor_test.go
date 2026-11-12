@@ -189,3 +189,27 @@ func TestMaxCostStopParksOnTheNextRun(t *testing.T) {
 	assert.True(t, ok)
 	assert.Len(t, rec.runs, 1)
 }
+
+func TestExecRunClaudeCodeHonoursTheCardLedgerForCandidates(t *testing.T) {
+	t.Run("capped at the smaller remainder", func(t *testing.T) {
+		rec := &recordingExec{}
+		o := execTestRun(true, rec)
+		o.ledger = NewLedger(5, 4.5)
+
+		_, err := o.execRun(t.Context(), NewLedger(5, 0), RunRequest{Task: "t"})
+		require.NoError(t, err)
+		require.Len(t, rec.runs, 1)
+		assert.InDelta(t, 0.5, rec.runs[0].Config.MaxCostUSD, 1e-9)
+	})
+
+	t.Run("exhausted card ledger refuses", func(t *testing.T) {
+		rec := &recordingExec{}
+		o := execTestRun(true, rec)
+		o.ledger = NewLedger(5, 5)
+
+		_, err := o.execRun(t.Context(), NewLedger(5, 0), RunRequest{Task: "t"})
+		_, ok := errors.AsType[*BudgetExceededError](err)
+		assert.True(t, ok)
+		assert.Empty(t, rec.runs)
+	})
+}

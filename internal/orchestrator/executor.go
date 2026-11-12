@@ -96,12 +96,27 @@ func (o *run) execRun(ctx context.Context, ledger *Ledger, req RunRequest) (harn
 			ledger = o.ledger
 		}
 
-		if err := ledger.Check(); err != nil {
-			return harness.Result{}, err
+		// Each ledger is read once: a second read could see it exhausted and
+		// hand vendorkit a 0 cap, which it treats as "no cap".
+		remaining, capped := 0.0, false
+
+		for _, l := range []*Ledger{ledger, o.ledger} {
+			r, c := l.Remaining()
+			if !c {
+				continue
+			}
+
+			if r <= 0 {
+				return harness.Result{}, &BudgetExceededError{Spent: l.Spent(), Max: l.max}
+			}
+
+			if !capped || r < remaining {
+				remaining, capped = r, true
+			}
 		}
 
 		if req.Config.MaxCostUSD <= 0 {
-			req.Config.MaxCostUSD, _ = ledger.Remaining()
+			req.Config.MaxCostUSD = remaining
 		}
 
 		if req.Config.OnDelta == nil && o.progress != nil {

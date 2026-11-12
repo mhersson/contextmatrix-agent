@@ -424,10 +424,12 @@ phase runs.
 ### Budget
 
 Each Claude Code run is capped (`--max-budget-usd`) at the remaining card
-budget on notional cost unless its caller set a cap (mob seats keep their
-per-turn cap; the review specialists, which run concurrently, go out as one
-fan-out and split the remainder equally); a run never starts with the ledger
-exhausted.
+budget on notional cost unless its caller set a cap. A Best-of-N candidate,
+which has its own ledger, is capped by the smaller of its own and the card's
+remainder; a mob seat keeps its per-turn cap, and the seat's final-answer
+backstop sets none, so it gets the remaining budget. The review specialists run
+concurrently, go out as one fan-out and split the remainder equally. A run
+never starts with either ledger exhausted.
 
 ### Usage limit
 
