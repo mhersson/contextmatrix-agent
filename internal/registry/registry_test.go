@@ -144,3 +144,13 @@ func TestNewRegistryFromPartsVendorFallsBackToTheSlugPrefix(t *testing.T) {
 	assert.Equal(t, "z-ai", r.Vendor("z-ai/glm"))
 	assert.Empty(t, r.Vendor("bare-slug"))
 }
+
+func TestClaudeCodeModelID(t *testing.T) {
+	id, ok := ClaudeCodeModelID("anthropic/claude-opus-5.5")
+	assert.True(t, ok)
+	assert.Equal(t, "claude-opus-5-5", id)
+
+	id, ok = ClaudeCodeModelID("openai/gpt-6")
+	assert.False(t, ok)
+	assert.Empty(t, id)
+}

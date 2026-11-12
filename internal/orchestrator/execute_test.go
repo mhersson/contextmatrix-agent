@@ -49,6 +49,7 @@ func execTestDeps(ops *fakeOps, git *fakeGit, client llm.LLM) Deps {
 		Ops:        ops,
 		Git:        git,
 		Client:     client,
+		Executor:   harnessExec{},
 		Emit:       events.NewEmitter(nil, nil),
 		Registry:   planTestRegistry(),
 		WriteTools: testWriteTools(),
@@ -316,6 +317,49 @@ func TestExecuteSubtaskMaxTurnsNeverCompletes(t *testing.T) {
 	_, got := readMeta(ops.bodyFor("SUB-1"))
 	assert.Equal(t, 1, got.Budget, "the cap widened the turn budget one rung")
 	assert.Equal(t, registry.TierModerate, got.Bar, "a missing verify command is not evidence about the model")
+}
+
+// TestExecuteSubtaskMaxCostNeverCompletes: a Claude Code coder stopped by its
+// cost cap left a truncated tree, which must park like the turn cap does.
+func TestExecuteSubtaskMaxCostNeverCompletes(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	d := execTestDeps(ops, git, nil)
+	d.Executor = &recordingExec{results: []execResult{{res: harness.Result{Reason: "max_cost", TotalCostUSD: 1.0}}}}
+	d.Cfg.ClaudeCode = true
+
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")}}, 1.0)
+	err := runExecute(context.Background(), o)
+
+	be, ok := errors.AsType[*BudgetExceededError](err)
+	require.True(t, ok, "err=%v", err)
+	assert.InDelta(t, 1.0, be.Spent, 1e-9)
+	assert.InDelta(t, 1.0, be.Max, 1e-9)
+
+	calls := ops.recorded()
+	assert.Equal(t, -1, indexOfCall(calls, "CompleteTask:SUB-1"), "budget-truncated work marked done; calls=%v", calls)
+	assert.Equal(t, -1, indexOfCall(calls, "ReportModelOutcomes:SUB-1"), "a truncated run is no win; calls=%v", calls)
+	assert.Empty(t, git.pushBranches, "budget-truncated work must not be pushed")
+	assert.GreaterOrEqual(t, indexOfCall(calls, "ReleaseCard:SUB-1"), 0, "parked subtask claim must be released")
+}
+
+// TestExecuteSubtaskNeverClaimedAfterAUsageLimit: once a usage limit is
+// recorded, the next subtask is not claimed, so the board never shows it started.
+func TestExecuteSubtaskNeverClaimedAfterAUsageLimit(t *testing.T) {
+	ops := &fakeOps{}
+	rec := &recordingExec{}
+	d := execTestDeps(ops, &fakeGit{committed: true}, nil)
+	d.Executor = rec
+
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")}}, 0)
+	o.usageLimit.Store(&UsageLimitError{Window: "five_hour"})
+
+	err := runExecute(context.Background(), o)
+
+	_, ok := errors.AsType[*UsageLimitError](err)
+	require.True(t, ok, "err=%v", err)
+	assert.Equal(t, -1, indexOfCall(ops.recorded(), "ClaimCard:SUB-1"), "calls=%v", ops.recorded())
+	assert.Empty(t, rec.runs)
 }
 
 func TestExecuteCoderPromptBody(t *testing.T) {
@@ -3969,4 +4013,36 @@ func TestCapableDefaultIsNotAWalkDownSoItsFailureIsRecorded(t *testing.T) {
 	require.Len(t, rows, 1)
 	assert.Equal(t, "failed", rows[0].Result)
 	assert.Equal(t, "default/model", rows[0].Model, "the operator's fallback is what ran and what is measured")
+}
+
+func TestSolverScopeIsItsWorkspaceAndLedger(t *testing.T) {
+	l := NewLedger(1, 0)
+	sc := &solverCtx{workspace: "/ws/c3", ledger: l}
+
+	assert.Equal(t, runScope{dir: "/ws/c3", ledger: l}, sc.scope())
+}
+
+func TestRunCoderWithRunsInTheSolverWorkspace(t *testing.T) {
+	rec := &recordingExec{results: []execResult{{res: harness.Result{
+		Completed: true, Reason: "done", CompletionArgs: []byte(`{"summary":"s"}`),
+	}}}}
+
+	d := execTestDeps(&fakeOps{}, &fakeGit{committed: true}, nil)
+	d.Executor = rec
+	d.Cfg.Workspace = "/ws/main"
+	o := newExecRun(d, nil, 0)
+	o.curPhase = "execute"
+
+	sc := &solverCtx{
+		git: &fakeGit{committed: true}, ledger: NewLedger(0, 0), tools: d.WriteTools,
+		workspace: "/ws/cand-1", coderModel: o.resolveCoderModel,
+		tag: "candidate 1/2",
+	}
+	sub := subtaskRef{ID: "SUB-1", Title: "Only", Sizing: seedSizing("moderate"), PlannerBar: "moderate"}
+
+	_, _, _, err := o.runCoderWith(t.Context(), sc, sub, "p")
+	require.NoError(t, err)
+	require.Len(t, rec.runs, 1)
+	assert.Equal(t, "/ws/cand-1", rec.runs[0].Dir)
+	assert.Same(t, sc.tools, rec.runs[0].Registry)
 }

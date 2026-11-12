@@ -627,7 +627,8 @@ func (s *Server) stopAdmissions(ctx context.Context, match func(project, cardID 
 // executor call, rather than launched with a dud mount or an empty LLM
 // endpoint. A server without a usable LLM proxy fails closed the same way: the
 // worker gets a per-run proxy token, never the real key, and a run that does
-// not launch has its token revoked.
+// not launch has its token revoked. A claude_code run is the exception: its
+// worker is staged the subscription token.
 func (s *Server) admitAndLaunch(ctx context.Context, adm *admission, spec executor.LaunchSpec, p protocol.TriggerPayload) (failure string, stopped bool) {
 	mu := s.launchLock(p.Project, p.CardID)
 	mu.Lock()
@@ -698,6 +699,15 @@ func (s *Server) provisionAndLaunch(ctx context.Context, spec executor.LaunchSpe
 		return "CM did not provision an llm_endpoint"
 	}
 
+	claude := p.LLMEndpoint.Type == protocol.LLMEndpointTypeClaudeCode
+
+	if claude && p.LLMEndpoint.OAuthToken == "" {
+		s.logger.Warn("trigger rejected: claude_code endpoint without an oauth token",
+			"project", project, "card_id", cardID)
+
+		return "CM did not provision a Claude Code oauth token"
+	}
+
 	if s.llmProxy == nil {
 		s.logger.Error("trigger rejected: LLM proxy not configured",
 			"project", project, "card_id", cardID)
@@ -710,20 +720,33 @@ func (s *Server) provisionAndLaunch(ctx context.Context, spec executor.LaunchSpe
 		return s.launchFailure(ctx)
 	}
 
-	token, err := s.llmProxy.Register(spec.CorrelationID, *p.LLMEndpoint)
-	if err != nil {
-		s.logger.Error("LLM proxy registration failed",
-			"project", project, "card_id", cardID, "error", err)
+	// A claude_code run is never proxied: the claude binary holds the
+	// subscription token itself, so Register is skipped and the token stays "".
+	var (
+		token string
+		err   error
+	)
 
-		return "LLM proxy registration failed"
+	if !claude {
+		token, err = s.llmProxy.Register(spec.CorrelationID, *p.LLMEndpoint)
+		if err != nil {
+			s.logger.Error("LLM proxy registration failed",
+				"project", project, "card_id", cardID, "error", err)
+
+			return "LLM proxy registration failed"
+		}
 	}
 
 	provisioned := false
 
 	// The fail-closed guard above already rejected empty-GitToken payloads.
 	if s.credentials != nil {
-		proxied := protocol.LLMEndpoint{Type: p.LLMEndpoint.Type, BaseURL: s.launchEnv.LLMBaseURL, APIKey: token}
-		if err := s.credentials.Provision(project, cardID, spec.CorrelationID, p.GitToken, p.GitTokenExpiresAt, s.runEndpoint(p, proxied)); err != nil {
+		staged := protocol.LLMEndpoint{Type: p.LLMEndpoint.Type, BaseURL: s.launchEnv.LLMBaseURL, APIKey: token}
+		if claude {
+			staged = protocol.LLMEndpoint{Type: p.LLMEndpoint.Type, OAuthToken: p.LLMEndpoint.OAuthToken}
+		}
+
+		if err := s.credentials.Provision(project, cardID, spec.CorrelationID, p.GitToken, p.GitTokenExpiresAt, s.runEndpoint(p, staged)); err != nil {
 			s.llmProxy.Revoke(spec.CorrelationID)
 			s.logger.Error("provision per-run credentials failed",
 				"project", project, "card_id", cardID, "error", err)
@@ -800,8 +823,9 @@ func mintRunID(cardID string) string {
 // token, the LLM proxy token, the resolved MCP API key (the payload override,
 // else the configured one - the same expression buildLaunchSpec uses, so the
 // key the worker actually sends is the key that gets masked), and every mob
-// guest bearer token. The real LLM endpoint key never reaches the container
-// but stays registered as defence in depth. Registration happens before
+// guest bearer token. In endpoint mode the real LLM endpoint key never reaches
+// the container but stays registered as defence in depth; a claude_code
+// worker holds the subscription token, which is registered too. Registration happens before
 // Launch so no container output can precede it; removeSessionSecrets
 // unregisters on container exit and on a failed launch, so a re-trigger never
 // inherits stale keys. It is nil-safe against a nil registry, a nil endpoint,
@@ -826,6 +850,7 @@ func (s *Server) addSessionSecrets(project, cardID, correlationID string, p prot
 
 	if p.LLMEndpoint != nil {
 		s.sessionRegistry.AddSessionKey(id, p.LLMEndpoint.APIKey)
+		s.sessionRegistry.AddSessionKey(id, p.LLMEndpoint.OAuthToken)
 	}
 
 	mcpKey := s.launchEnv.MCPAPIKey
@@ -853,15 +878,17 @@ func (s *Server) removeSessionSecrets(project, cardID, correlationID string) {
 }
 
 // runEndpoint maps the LLM endpoint the worker is to call - the proxy's, never
-// the payload's - plus the payload's mob session guest specs, which carry
+// the payload's, except a claude_code run, which stages the subscription
+// token - plus the payload's mob session guest specs, which carry
 // bearer tokens and therefore ride the secrets file, into the per-run
 // credential file's shape.
 func (s *Server) runEndpoint(p protocol.TriggerPayload, llm protocol.LLMEndpoint) secrets.EndpointSecrets {
 	return secrets.EndpointSecrets{
-		APIKey:    llm.APIKey,
-		BaseURL:   llm.BaseURL,
-		Type:      llm.Type,
-		MobGuests: s.mobGuestsJSON(p),
+		APIKey:     llm.APIKey,
+		BaseURL:    llm.BaseURL,
+		Type:       llm.Type,
+		OAuthToken: llm.OAuthToken,
+		MobGuests:  s.mobGuestsJSON(p),
 	}
 }
 

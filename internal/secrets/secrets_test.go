@@ -149,3 +149,15 @@ func TestEnvFileCarriesMobGuests(t *testing.T) {
 	_, present := valsNone["CM_MOB_GUESTS"]
 	assert.False(t, present, "empty guests must not write an empty CM_MOB_GUESTS line")
 }
+
+func TestEndpointValsStagesTheOAuthToken(t *testing.T) {
+	t.Parallel()
+
+	vals := endpointVals("git-tok", EndpointSecrets{Type: "claude_code", OAuthToken: "oat"})
+	assert.Equal(t, "claude_code", vals["LLM_TYPE"])
+	assert.Equal(t, "oat", vals["LLM_OAUTH_TOKEN"])
+	assert.NotContains(t, vals, "LLM_API_KEY")
+	assert.NotContains(t, vals, "LLM_BASE_URL")
+
+	assert.NotContains(t, endpointVals("git-tok", EndpointSecrets{Type: "openai", APIKey: "k"}), "LLM_OAUTH_TOKEN")
+}

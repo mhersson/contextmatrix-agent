@@ -15,9 +15,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"maps"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -126,6 +128,7 @@ type Config struct {
 	BaseBranch        string
 	Workspace         string
 	MaxCardCost       float64
+	ClaudeCode        bool   // the run's endpoint type is claude_code: model runs go to the Claude Code executor
 	PayloadModel      string // CM's default_model from the trigger; "" = serve default
 	DefaultModel      string // serve-config default
 	ReasoningEffort   string // CMX_REASONING_EFFORT; empty sends no effort (the model's default)
@@ -220,10 +223,13 @@ type Deps struct {
 	// GitForDir returns a GitOps rooted at dir with NO branch policy set -
 	// guardPush fails closed, so candidate handles structurally cannot push.
 	// Used by Best-of-N to hand each candidate worktree its own git handle.
-	GitForDir  func(dir string) GitOps
-	PR         PRCreator // opens the pull request in the integrate phase (gh CLI seam)
-	PRGates    PRGates   // checks/review polling in the pr_gates phase (gh CLI seam)
-	Client     llm.LLM
+	GitForDir func(dir string) GitOps
+	PR        PRCreator // opens the pull request in the integrate phase (gh CLI seam)
+	PRGates   PRGates   // checks/review polling in the pr_gates phase (gh CLI seam)
+	Client    llm.LLM
+	// Executor runs every model run; required whenever a model runs. Client stays
+	// for the harness path.
+	Executor   Executor
 	Emit       *events.Emitter
 	Registry   *registry.Registry
 	WriteTools *tools.Registry // full toolset rooted at the workspace
@@ -340,6 +346,10 @@ type run struct {
 	// progress marks streaming model turns on the transcript so the idle
 	// watchdog sees output during a long reasoning turn. nil without an emitter.
 	progress *progressMarker
+
+	// usageLimit is the first subscription usage limit any run hit; candidates,
+	// seats and panel children record into it concurrently.
+	usageLimit atomic.Pointer[UsageLimitError]
 
 	// body is the live parent-card body the FSM accumulates run history into
 	// (## Diagnosis, ## Plan, ## Review Findings ...). Seeded from the task
@@ -637,6 +647,10 @@ func newRun(ctx context.Context, d Deps, tc cmclient.TaskContext) *run {
 		ledger: NewLedger(effectiveCeiling(d.Cfg), tc.ReportedCostUSD),
 	}
 
+	if d.Cfg.ClaudeCode {
+		o.claudeCodePins(ctx)
+	}
+
 	o.coderModels = map[string]bool{}
 	o.excluded = map[string]bool{}
 	kv, s := readMeta(tc.Description)
@@ -784,6 +798,10 @@ func (o *run) execute(ctx context.Context) error {
 	}
 
 	for _, phase := range phaseOrder[from:] {
+		if ule := o.usageLimitHit(); ule != nil {
+			return &PhaseError{Phase: o.curPhase, Err: ule}
+		}
+
 		o.curPhase = phase
 
 		if err := o.d.Ops.SetPhase(ctx, o.d.Cfg.CardID, phase); err != nil {
@@ -791,6 +809,14 @@ func (o *run) execute(ctx context.Context) error {
 		}
 
 		if err := o.phaseFnFor(phase)(ctx); err != nil {
+			if ule := o.usageLimitHit(); ule != nil {
+				if _, ok := errors.AsType[*UsageLimitError](err); !ok {
+					slog.Warn("phase failed after a usage limit; reporting the limit", "phase", phase, "error", err)
+
+					err = ule
+				}
+			}
+
 			if be, ok := errors.AsType[*BudgetExceededError](err); ok {
 				// Park: record the numbers, then stop without entering the
 				// next phase. Log failure is best-effort - the budget error is

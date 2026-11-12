@@ -822,6 +822,42 @@ func TestTriggerStagesProxyTokenNotRealKey(t *testing.T) {
 	}
 }
 
+func TestTriggerClaudeCodeStagesTheSubscriptionToken(t *testing.T) {
+	h := newHarness(t, 4)
+
+	payload := provisionedPayload("PROJ-CC")
+	payload.LLMEndpoint = &protocol.LLMEndpoint{Type: protocol.LLMEndpointTypeClaudeCode, OAuthToken: "oat-secret"}
+
+	w := h.do(t, http.MethodPost, "/trigger", payload)
+	require.Equal(t, http.StatusAccepted, w.Code)
+	require.Equal(t, "running", h.awaitStatuses(t, 1)[0][1])
+
+	assert.Empty(t, h.proxy.registerCalls(), "a claude_code endpoint is never proxied")
+
+	provisions := h.creds.provisionCalls()
+	require.Len(t, provisions, 1)
+	assert.Equal(t, secrets.EndpointSecrets{Type: "claude_code", OAuthToken: "oat-secret"}, provisions[0].endpoint)
+
+	specs := h.exec.launchedSpecs()
+	require.Len(t, specs, 1)
+	assert.NotContains(t, strings.Join(specs[0].Env, "\n"), "oat-secret", "the token rides the secrets file only")
+}
+
+func TestTriggerClaudeCodeWithoutATokenIsRejected(t *testing.T) {
+	h := newHarness(t, 4)
+
+	payload := provisionedPayload("PROJ-CC-NOTOK")
+	payload.LLMEndpoint = &protocol.LLMEndpoint{Type: protocol.LLMEndpointTypeClaudeCode}
+
+	w := h.do(t, http.MethodPost, "/trigger", payload)
+	require.Equal(t, http.StatusAccepted, w.Code)
+
+	assert.Equal(t, "failed", h.awaitStatuses(t, 1)[0][1])
+	assert.Empty(t, h.creds.provisionCalls())
+	assert.Empty(t, h.exec.launchedSpecs())
+	assert.Empty(t, h.proxy.registerCalls())
+}
+
 // TestTriggerRegistersPayloadEndpointUnderRunID: the proxy holds the payload's
 // real endpoint under the run's correlation id, so a re-trigger of the card
 // registers a run of its own instead of replacing the earlier one.

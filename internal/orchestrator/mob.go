@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -331,9 +332,27 @@ func trimSeatContext(msgs []llm.Message) []llm.Message {
 type seatSession struct {
 	model string
 	msgs  []llm.Message
+	// claudeSession is the seat's Claude Code session, "" before its first
+	// successful run.
+	claudeSession string
 }
 
-// mobSeatRunner returns the SeatRunner: each turn is a fresh harness run on
+// newSessionID returns a random RFC 4122 version 4 UUID in lowercase hex.
+func newSessionID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(fmt.Sprintf("session id: %v", err))
+	}
+
+	b[6] = b[6]&0x0f | 0x40
+	b[8] = b[8]&0x3f | 0x80
+
+	h := hex.EncodeToString(b[:])
+
+	return h[:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:]
+}
+
+// mobSeatRunner returns the SeatRunner: each turn is one executor run on
 // the seat's model with read-only tools, the seat persona system prompt, and
 // the per-turn cost cap. sessions carries each seat's full message
 // transcript (tool calls and results included) and the model that wrote it,
@@ -366,11 +385,23 @@ func (o *run) mobSeatRunner(sink *seatDebugSink, perTurnCap float64, step string
 
 		emit := events.NewEmitter(io.Discard, sink.named(seat.Name))
 
-		// Seats bypass runModelCfg and call harness.Run directly, so time the
+		// Seats bypass runModelCfg and call execRun directly, so time the
 		// call locally; the duration travels by value here because seats fan out
 		// concurrently under the loopback server.
 		start := time.Now()
-		res, err := harness.Run(ctx, o.d.Client, o.d.ReadTools, emit, prompt, cfg)
+		req := RunRequest{Client: o.d.Client, Registry: o.d.ReadTools, Emit: emit, Task: prompt, Config: cfg, Dir: o.d.Cfg.Workspace}
+
+		session := s.claudeSession
+		if o.d.Cfg.ClaudeCode {
+			if session == "" {
+				req.SessionID = newSessionID()
+				session = req.SessionID
+			} else {
+				req.Resume = session
+			}
+		}
+
+		res, err := o.execRun(ctx, o.ledger, req)
 		dur := time.Since(start)
 
 		used := o.spendAndReport(ctx, o.ledger, o.d.Cfg.CardID, "mob: report seat usage failed",
@@ -383,11 +414,19 @@ func (o *run) mobSeatRunner(sink *seatDebugSink, perTurnCap float64, step string
 		out := res.Output
 		msgs := res.Messages
 
+		if o.d.Cfg.ClaudeCode {
+			// Claude Code's Messages hold only this process, so the seat's
+			// transcript is the stored one plus this run's.
+			msgs = slices.Concat(s.msgs, res.Messages)
+		}
+
 		// Budget stops mid-exploration leave res.Output empty with a nil
 		// error; posting "" gave run 2 its empty bubbles and starved the
-		// moderator. One toolless single-turn call, seeded with the run's
-		// own transcript, converts the exploration already paid for into a
+		// moderator. One toolless single-turn call, seeded with the seat's
+		// transcript, converts the exploration already paid for into a
 		// position. Covers max_cost stops, which the wrap-up nudge cannot.
+		// It never resumes the seat's Claude Code session: that replays tool
+		// blocks into a toolless request, while History goes as a text primer.
 		if strings.TrimSpace(out) == "" {
 			finalCfg := cfg
 			finalCfg.History = trimSeatContext(msgs)
@@ -397,7 +436,7 @@ func (o *run) mobSeatRunner(sink *seatDebugSink, perTurnCap float64, step string
 			finalCfg.WrapUpMessage = ""
 
 			bstart := time.Now()
-			fres, ferr := harness.Run(ctx, o.d.Client, tools.NewRegistry(), emit, seatForcedFinalPrompt, finalCfg)
+			fres, ferr := o.execRun(ctx, o.ledger, RunRequest{Client: o.d.Client, Registry: tools.NewRegistry(), Emit: emit, Task: seatForcedFinalPrompt, Config: finalCfg, Dir: o.d.Cfg.Workspace})
 			bdur := time.Since(bstart)
 
 			// Report on the first call's resolved model: clearing ModelUsed keeps
@@ -409,6 +448,17 @@ func (o *run) mobSeatRunner(sink *seatDebugSink, perTurnCap float64, step string
 			if ferr == nil {
 				out = fres.Output
 				msgs = fres.Messages
+
+				if o.d.Cfg.ClaudeCode {
+					// fres.Messages open with the whole primer: keep the exchange only.
+					msgs = slices.Concat(finalCfg.History, []llm.Message{
+						{Role: "user", Content: seatForcedFinalPrompt},
+						{Role: "assistant", Content: fres.Output},
+					})
+					// The old session never saw this answer; the next round starts
+					// fresh from the stored transcript, which holds it.
+					session = ""
+				}
 			}
 
 			// Billed either way; keep the engine's discussion budget coherent
@@ -417,7 +467,7 @@ func (o *run) mobSeatRunner(sink *seatDebugSink, perTurnCap float64, step string
 		}
 
 		mu.Lock()
-		sessions[seat.Name] = seatSession{model: seat.Model, msgs: trimSeatContext(msgs)}
+		sessions[seat.Name] = seatSession{model: seat.Model, msgs: trimSeatContext(msgs), claudeSession: session}
 		mu.Unlock()
 
 		return out, res.TotalCostUSD, nil
@@ -461,10 +511,10 @@ func (o *run) mobModeratorRunner(sink *seatDebugSink, step string) mob.Moderator
 		cfg := o.harnessConfig(model)
 		cfg.MaxTurns = mobModeratorMaxTurns
 
-		// The moderator bypasses runModelCfg (toolless harness.Run), so time it
+		// The moderator bypasses runModelCfg (a toolless execRun), so time it
 		// locally and thread the duration to the usage report by value.
 		start := time.Now()
-		res, err := harness.Run(ctx, o.d.Client, tools.NewRegistry(), emit, prompt, cfg)
+		res, err := o.execRun(ctx, o.ledger, RunRequest{Client: o.d.Client, Registry: tools.NewRegistry(), Emit: emit, Task: prompt, Config: cfg, Dir: o.d.Cfg.Workspace})
 		dur := time.Since(start)
 
 		used := o.spendAndReport(ctx, o.ledger, o.d.Cfg.CardID, "mob: report moderator usage failed", res, model, step, dur)

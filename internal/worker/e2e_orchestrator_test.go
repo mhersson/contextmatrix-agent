@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-harness/events"
@@ -525,8 +526,8 @@ func (s *stubOps) ReportPush(_ context.Context, cardID, branch, prURL string) er
 	return nil
 }
 
-func (s *stubOps) ReportParked(_ context.Context, cardID, reason string) error {
-	s.record("ReportParked", cardID, reason)
+func (s *stubOps) ReportParked(_ context.Context, cardID, reason, window string, resetsAt time.Time) error {
+	s.record("ReportParked", cardID, reason, window, resetsAt)
 
 	return nil
 }

@@ -51,6 +51,9 @@ type solverCtx struct {
 	verifyBound bool
 }
 
+// scope is the directory this solver's tools are rooted at and the ledger it is charged to.
+func (sc *solverCtx) scope() runScope { return runScope{dir: sc.workspace, ledger: sc.ledger} }
+
 // gateEvidence is what the pre-commit gate learned about this subtask. It
 // lives on the solver because mobCheckpoint may replace the tree between the
 // gate and the report site. verified: the command ran and passed on the tree
@@ -149,7 +152,12 @@ func (o *run) executeSubtaskWith(ctx context.Context, sc *solverCtx, sub subtask
 	// Budget gate BEFORE claiming, so a parked subtask is never owned. A
 	// candidate solver checks its own sub-ledger AND the run ledger:
 	// server-priced totals sync only into the run ledger, so a run-wide breach
-	// must park the fan-out here rather than at the next phase boundary.
+	// must park the fan-out here rather than at the next phase boundary. A
+	// recorded usage limit parks here for the same reason.
+	if ule := o.usageLimitHit(); ule != nil {
+		return ule
+	}
+
 	if err := sc.ledger.Check(); err != nil {
 		return err
 	}
@@ -747,7 +755,7 @@ func (o *run) runCoderWith(ctx context.Context, sc *solverCtx, sub subtaskRef, p
 
 		d.logCard(ctx, "%s", logMsg)
 
-		res, dur, err := o.runModelCoder(ctx, sc.tools, prompt, model, coderWrapUpMessage, sub.Sizing.Budget)
+		res, dur, err := o.runModelCoder(ctx, sc.scope(), sc.tools, prompt, model, coderWrapUpMessage, sub.Sizing.Budget)
 
 		// Record the resolved coder slug so the review panel excludes it: a capable
 		// model must not review its own code. This runs BEFORE the incapable check

@@ -63,6 +63,8 @@ type EndpointSecrets struct {
 	APIKey  string
 	BaseURL string
 	Type    string
+	// OAuthToken is the Claude Code subscription token (claude_code mode only).
+	OAuthToken string
 	// MobGuests is the compact JSON guest-spec list ([]protocol.GuestSpec on
 	// the wire) for mob session discussions. Guests carry bearer tokens, so
 	// they ride the secrets file - and living here (not a one-off append)
@@ -87,6 +89,10 @@ func endpointVals(token string, e EndpointSecrets) map[string]string {
 
 	if e.Type != "" {
 		vals["LLM_TYPE"] = e.Type
+	}
+
+	if e.OAuthToken != "" {
+		vals["LLM_OAUTH_TOKEN"] = e.OAuthToken
 	}
 
 	if e.MobGuests != "" {

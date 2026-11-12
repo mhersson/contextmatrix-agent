@@ -806,7 +806,7 @@ func (o *run) cleanupPass(ctx context.Context, plan verifyPlan, req fixRequest, 
 		// the run nothing beyond whatever the coder did not get to. What it
 		// committed is proven or dropped by the gate below like any other fixup.
 		d.logCard(ctx, "review: the cleanup fix pass hit its turn cap - keeping what it committed, if anything")
-	case isParkError(ferr):
+	case isParkError(ferr) || isBudgetOrUsageLimit(ferr):
 		d.logCard(ctx, "review: approved with %d surviving finding(s), but the cleanup fix pass parked - stopping: %s", len(fixes), ferr)
 
 		return ferr
@@ -1470,7 +1470,7 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 	var b strings.Builder
 
 	for i, res := range results {
-		// The read-only specialist panel runs via harness.SpawnSubagents, which
+		// The read-only specialist panel runs via execFanout, which
 		// exposes no per-subagent wall time, so duration is 0 (omitted on the
 		// wire); phase and step still ride the report.
 		o.spendAndReport(ctx, o.ledger, cfg.CardID, "review: report specialist usage failed",
@@ -1954,7 +1954,7 @@ func (o *run) runFixModel(ctx context.Context, prompt string, req fixRequest) (s
 				fs.Bar, model, priorClause(p))
 		}
 
-		res, dur, err := o.runModelCoder(ctx, d.WriteTools, prompt, model, fixWrapUpMessage, fs.Budget)
+		res, dur, err := o.runModelCoder(ctx, o.mainScope(), d.WriteTools, prompt, model, fixWrapUpMessage, fs.Budget)
 
 		o.spendAndReport(ctx, o.ledger, cfg.CardID, "review: report fix usage failed", res, model, "main", dur)
 

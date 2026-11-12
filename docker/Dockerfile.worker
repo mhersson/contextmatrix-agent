@@ -38,6 +38,12 @@ ARG TASK_SHA256_ARM64=d7189d439d4a6058e39e1b2acd7c8b27acd4856691b408f23b242e4294
 ARG GH_VERSION=2.103.3
 ARG GH_SHA256_AMD64=4c806978ffce1cec70853302a56d70ac6da4f19bae7adca4e1a8ab00633dd91d
 ARG GH_SHA256_ARM64=ee32df2323c8847f5fac6cb6b4b69ca75828e9329a8f22f677021f7b3306ce63
+# Claude Code is hand-bumped (Dependabot cannot track it), always together with
+# vendorkit's claudecode.Version, which the worker checks at start. The sha512
+# is the hex of the registry's dist.integrity for each platform tarball.
+ARG CLAUDE_CODE_VERSION=2.1.322
+ARG CLAUDE_CODE_SHA512_AMD64=d03a1a3405cb58261820669c85604291352c4bc74e3a0be4e11d9f14a76b2de8cef579514f069650c0fd38d7439afd1cb1da70c63e2a2d437acd631a1b64b3ea
+ARG CLAUDE_CODE_SHA512_ARM64=618369d68a7ced659c04413a8c2d6778e8cc0cf767e08cbe9141f215c2351ac2e5e08c07ec48d997054a729b19a956c4d085c415a3a5766c8e1c2d72de3d7c02
 
 # ---------------------------------------------------------------------------
 # build - compile the agent binary.
@@ -119,6 +125,28 @@ RUN set -eux; \
     echo "${GH_SHA256}  /tmp/${GH_TARBALL}" | sha256sum -c -; \
     tar -C /usr/local/bin --no-same-owner --strip-components=2 -xzf "/tmp/${GH_TARBALL}" "gh_${GH_VERSION}_linux_${ARCH}/bin/gh"; \
     rm -f /tmp/yq "/tmp/${TARBALL}" "/tmp/${GH_TARBALL}"
+
+# ---------------------------------------------------------------------------
+# claude-code - the pinned native Claude Code binary, from the npm registry's
+# platform tarball and SHA-512-verified. Every worker target copies it out.
+# ---------------------------------------------------------------------------
+FROM base AS claude-code
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ARG CLAUDE_CODE_VERSION
+ARG CLAUDE_CODE_SHA512_AMD64
+ARG CLAUDE_CODE_SHA512_ARM64
+RUN set -eux; \
+    case "$(uname -m)" in \
+      x86_64) PLATFORM=x64; SHA512="${CLAUDE_CODE_SHA512_AMD64}" ;; \
+      aarch64) PLATFORM=arm64; SHA512="${CLAUDE_CODE_SHA512_ARM64}" ;; \
+      *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-${PLATFORM}/-/claude-code-linux-${PLATFORM}-${CLAUDE_CODE_VERSION}.tgz" -o /tmp/claude.tgz; \
+    echo "${SHA512}  /tmp/claude.tgz" | sha512sum -c -; \
+    tar -xzf /tmp/claude.tgz -C /tmp package/claude; \
+    install -m 0755 /tmp/package/claude /usr/local/bin/claude; \
+    rm -rf /tmp/claude.tgz /tmp/package; \
+    claude --version | grep -F "${CLAUDE_CODE_VERSION}"
 
 # ---------------------------------------------------------------------------
 # node - base + Node.js 26. Shared by the go-node, python, and full variants.
@@ -353,7 +381,9 @@ RUN set -eux; \
 # ---------------------------------------------------------------------------
 FROM go-node-toolchain AS go-node
 COPY --from=build /out/contextmatrix-agent /usr/local/bin/contextmatrix-agent
-RUN useradd -m -u 1000 -s /bin/bash user
+COPY --from=claude-code /usr/local/bin/claude /usr/local/bin/claude
+RUN useradd -m -u 1000 -s /bin/bash user \
+    && claude --version
 USER 1000:1000
 WORKDIR /home/user
 # GOPATH is unset, so the module cache resolves to $HOME/go/pkg/mod.
@@ -367,7 +397,9 @@ ENTRYPOINT ["contextmatrix-agent", "work"]
 # ---------------------------------------------------------------------------
 FROM rust-toolchain AS rust
 COPY --from=build /out/contextmatrix-agent /usr/local/bin/contextmatrix-agent
-RUN useradd -m -u 1000 -s /bin/bash user
+COPY --from=claude-code /usr/local/bin/claude /usr/local/bin/claude
+RUN useradd -m -u 1000 -s /bin/bash user \
+    && claude --version
 USER 1000:1000
 WORKDIR /home/user
 # CARGO_HOME is not on the harness subprocess allowlist, so cargo falls back to
@@ -383,7 +415,9 @@ ENTRYPOINT ["contextmatrix-agent", "work"]
 # ---------------------------------------------------------------------------
 FROM python-toolchain AS python
 COPY --from=build /out/contextmatrix-agent /usr/local/bin/contextmatrix-agent
-RUN useradd -m -u 1000 -s /bin/bash user
+COPY --from=claude-code /usr/local/bin/claude /usr/local/bin/claude
+RUN useradd -m -u 1000 -s /bin/bash user \
+    && claude --version
 USER 1000:1000
 WORKDIR /home/user
 # The managed CPython install prefix, holding the standard library source. A
@@ -398,7 +432,9 @@ ENTRYPOINT ["contextmatrix-agent", "work"]
 # ---------------------------------------------------------------------------
 FROM jvm-node-toolchain AS jvm-node
 COPY --from=build /out/contextmatrix-agent /usr/local/bin/contextmatrix-agent
-RUN useradd -m -u 1000 -s /bin/bash user
+COPY --from=claude-code /usr/local/bin/claude /usr/local/bin/claude
+RUN useradd -m -u 1000 -s /bin/bash user \
+    && claude --version
 USER 1000:1000
 WORKDIR /home/user
 # No read-only roots: the Gradle and Maven caches hold jars the read tools
@@ -439,6 +475,7 @@ COPY --chmod=0777 --from=rust-toolchain /home/user/.rustup /home/user/.rustup
 COPY --chmod=0777 --from=rust-toolchain /home/user/.cargo /home/user/.cargo
 
 COPY --from=build /out/contextmatrix-agent /usr/local/bin/contextmatrix-agent
+COPY --from=claude-code /usr/local/bin/claude /usr/local/bin/claude
 # The runtime home is laid out in one root step: the caches the read-only roots
 # name must exist before the worker starts, and UID 1000 has to write into them
 # and into CARGO_HOME itself, where cargo takes its package-cache lock. The
@@ -450,7 +487,8 @@ RUN useradd -m -u 1000 -s /bin/bash user \
     && chown -R 1000:1000 /home/user/workspace /home/user/go \
     && chown 1000:1000 /home/user /home/user/.rustup /home/user/.cargo \
          /home/user/.cargo/registry /home/user/.cargo/git \
-    && chmod 0755 /home/user /home/user/.rustup /home/user/.cargo
+    && chmod 0755 /home/user /home/user/.rustup /home/user/.cargo \
+    && claude --version
 USER 1000:1000
 WORKDIR /home/user
 # Every toolchain's own roots, joined: Go, Rust, Python.

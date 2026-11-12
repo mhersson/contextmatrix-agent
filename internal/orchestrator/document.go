@@ -63,8 +63,8 @@ func runDocument(ctx context.Context, o *run) error {
 	// Best-effort on any model error (transport, context-limit, incapable). A
 	// *ContextLimitError is deliberately caught HERE, not propagated - otherwise
 	// the execute() FSM loop would park an otherwise-good run on a doc overflow.
-	// Budget was gated above and a mid-call overspend is caught by the next phase's
-	// ledger.Check, so no model error reaching this arm is ever a budget park.
+	// Budget was gated above; a mid-call overspend, or a Claude Code run stopped at
+	// its cost cap, is parked by the next phase's ledger.Check.
 	if err != nil {
 		slog.Warn("document: model run failed; continuing without docs",
 			"card_id", cfg.CardID, "error", err)

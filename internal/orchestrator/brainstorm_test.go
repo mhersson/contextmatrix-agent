@@ -44,6 +44,7 @@ func brainstormRun(t *testing.T, ops *fakeOps, inbox *fakeInbox, client llm.LLM,
 	d := Deps{
 		Ops:       ops,
 		Client:    client,
+		Executor:  harnessExec{},
 		Emit:      events.NewEmitter(nil, nil),
 		Registry:  planTestRegistry(),
 		ReadTools: tools.NewRegistry(tools.NewReadTool(".")),

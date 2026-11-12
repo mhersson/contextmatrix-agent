@@ -88,19 +88,22 @@ before and never moved.
 
 ## One container per top-level card
 
-All subagents - subtask workers and reviewers - run in-process inside that one
-container on one shared workspace. The main solver writes sequentially,
-Best-of-N candidates write concurrently in isolated worktrees, and review
-panels and mob seats are read-only fan-outs.
+All subagents - subtask workers and reviewers - run inside that one container on
+one shared workspace (in-process in endpoint mode, each as a `claude` process in
+claude_code mode). The main solver writes sequentially, Best-of-N candidates
+write concurrently in isolated worktrees, and review panels and mob seats are
+read-only fan-outs.
 
 The container's output is the serve-side idle watchdog's proof of life. While
 a model turn streams text or reasoning, the run emits a `model_progress` event
-at most every 30 seconds, so a long reasoning turn is not reaped as idle. A
-turn that streams only tool-call arguments emits none: the harness reports
-just text and reasoning fragments. The event carries no model text - streamed
+at most every 30 seconds, so a long reasoning turn is not reaped as idle. On
+the harness, a turn that streams only tool-call arguments emits none: it
+reports just text and reasoning fragments. Under Claude Code, tool-input
+fragments count too. The event carries no model text - streamed
 fragments are unredacted - and the log bridge keeps it off the live stream;
-the durable run log records it. The review panel's fan-out takes no progress
-callback, so the specialists get the same marker through their model client.
+the durable run log records it. On the harness the review panel's fan-out takes
+no progress callback, so the specialists get the same marker through their
+model client; under Claude Code the fan-out takes it as a callback.
 
 ## Review
 
@@ -418,6 +421,99 @@ report against the subtask cards, and CM does not roll that spend into the
 parent's total, so a resumed run also floors the ledger on the parent's and
 every subtask's reported total, finished subtasks included, before the first
 phase runs.
+
+## Claude Code subscription mode
+
+The mode is on when the trigger's endpoint type is `claude_code`. Every phase
+run, mob seat, backstop, moderator and review specialist then goes through
+vendorkit's `claudecode.Run`: one `claude -p` process each. The worker checks
+for a runnable `claude` before it clones or claims the card, and a missing
+binary or token fails the run there. So does a capable default (the trigger's
+`default_model`, else `CMX_DEFAULT_MODEL`, else the compiled-in
+`deepseek/deepseek-v4-flash`) that has no Claude Code id, since every
+fallback run would fail on it. The worker logs the found `claude` version at
+start and warns when it is not the tested 2.1.322. All runs share the worker
+user's HOME, so Bash commands see the same git, gh and toolchain config as on
+the harness.
+`CMX_BASH_TIMEOUT_MAX_SECONDS` becomes Claude Code's Bash ceiling
+(`BASH_MAX_TIMEOUT_MS`), and below 2 minutes also its default timeout.
+The phase registry splits into Claude Code built-ins (Read, Write, Edit, Bash)
+and Go tools served over a loopback bridge (grep, glob, git, finish, verify,
+record_finding, skill); `finish` stays terminal. `MaxTurns` becomes
+`--max-turns`, and streamed fragments feed the `model_progress` liveness
+marker. Repo grounding reaches the model inside the phase prompts, while
+Claude Code's own CLAUDE.md loading, the repo's settings hooks and its
+`.mcp.json` servers are off (vendorkit passes `--setting-sources user
+--strict-mcp-config`).
+
+Lost in this mode:
+
+- the wrap-up and batch nudges and the grace turn
+- the 0.85 context stop and opt-in compaction (Claude Code compacts itself)
+- incapable-model detection
+- reasoning replay
+- redaction of the built-in tools' output before the model sees it (events and
+  transcripts are still redacted; bridged Go tools are redacted as on the
+  harness)
+- keeping the credential out of the worker (see [secrets](secrets.md))
+- vendor diversity: every model is a Claude model
+- the tool-output byte cap for the built-ins (Claude Code's own limits apply;
+  bridged Go tools are capped as on the harness: `tool_output_max_bytes`, 16 KiB
+  for mob seats)
+- the workspace jail and read-only roots for the built-ins (the container is
+  the boundary; bridged tools keep their jail)
+
+### Budget
+
+Each Claude Code run is capped (`--max-budget-usd`) at what remains of the
+run's ceiling, on notional cost, unless its caller set a cap. That ceiling is
+`CMX_MAX_CARD_COST`, or (N+1) x `CMX_MAX_CARD_COST` for a Best-of-N card (N
+candidate allowances plus one for the shared phases), plus the mob discussion
+allowance when the card runs mob sessions. A Best-of-N candidate, which has its
+own ledger of one `CMX_MAX_CARD_COST`, is capped by the smaller of its own
+remainder and the run's; a mob seat keeps its per-turn cap, and the seat's
+final-answer backstop sets none, so it gets the remaining budget. The review
+specialists run concurrently, go out as one fan-out and split the run's
+remainder equally. A run never starts with either ledger exhausted. A phase
+run stopped at its cap is never treated as finished work: a subtask it was
+coding is not completed and parks on the budget with its tree pushed as WIP,
+and a Best-of-N candidate drops out of the judge pool. A run whose final answer
+crosses its cap still ends done with that answer, and the next run refuses on
+the exhausted ledger, as on the harness.
+
+### Mob sessions
+
+A mob seat keeps its conversation across rounds by resuming its own Claude Code
+session: the first run of a seat starts one, later runs resume it. A failed
+first run leaves nothing to resume, so the next round starts fresh. The
+seat's final-answer backstop never resumes that session: it is a fresh,
+toolless one-shot call given the seat's transcript from every round as a text
+primer. The moderator is a one-shot call.
+
+### Card pins
+
+The card's `model_orchestrator`, `model_coder` and `model_reviewer` pins map an
+`anthropic/claude-*` slug to its Claude Code id and use it when it is one of
+the run's candidates. Any other pin is ignored for the run, with a card note,
+and the ladder decides.
+
+### Usage reports
+
+Usage is reported with `cost_basis: subscription` and the last-seen limit
+windows (`subscription_usage`), never a billed cost. The card budget meters
+Claude Code's notional (list-price) cost.
+
+### Usage limit
+
+Once any run reports the subscription's usage limit, every later model run of
+the card run is refused without starting, no further subtask is claimed, no
+further phase is entered, and the run ends parked on the limit. The verify
+proposal, the bug diagnosis and the PR body return a refusal as that park
+instead of degrading past it as their own failure. The worker pushes the WIP
+and reports the park with the limit window (`window`) and the reset time
+(`resets_at`); each is omitted when unknown.
+The card stays in its lane, keeps its persisted phase, and resumes by a human
+trigger after the reset.
 
 ## Verify resolution
 

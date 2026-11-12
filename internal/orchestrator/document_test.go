@@ -36,6 +36,7 @@ func documentTestDeps(ops *fakeOps, git *fakeGit, client llm.LLM) Deps {
 		Ops:        ops,
 		Git:        git,
 		Client:     client,
+		Executor:   harnessExec{},
 		Emit:       events.NewEmitter(nil, nil),
 		Registry:   planTestRegistry(),
 		WriteTools: testWriteTools(),

@@ -589,11 +589,15 @@ func resolveDecisionModel(
 	return p, rep
 }
 
-// isBudgetError reports whether err is (or wraps) the budget-ceiling sentinel.
-func isBudgetError(err error) bool {
-	var be *BudgetExceededError
+// isBudgetOrUsageLimit reports whether err is (or wraps) the budget-ceiling or
+// the usage-limit sentinel: a best-effort caller surfaces both as parks.
+func isBudgetOrUsageLimit(err error) bool {
+	var (
+		be  *BudgetExceededError
+		ule *UsageLimitError
+	)
 
-	return errors.As(err, &be)
+	return errors.As(err, &be) || errors.As(err, &ule)
 }
 
 // SplitOverflowError parks a run whose plan proposes more follow-up cards
@@ -1083,8 +1087,8 @@ func runPlan(ctx context.Context, o *run) error {
 				// like CM's systematic-debugging workflow skill writes ## Diagnosis.
 				o.recordSection(ctx, "Diagnosis", sectionFrom("Diagnosis", diag))
 			}
-		case isBudgetError(derr):
-			return derr // park: the FSM's execute() maps this to the budget log
+		case isBudgetOrUsageLimit(derr):
+			return derr // park: the FSM's execute() maps this to the budget log or the usage limit
 		default:
 			if ie, ok := errors.AsType[*IncapableError](derr); ok {
 				// The model could not drive the tool loop. Blacklist and exclude

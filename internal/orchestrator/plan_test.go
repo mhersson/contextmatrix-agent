@@ -940,6 +940,7 @@ func TestPlanPhaseDiagnoseIncapableModelIsRecovered(t *testing.T) {
 		responses: []llm.Response{stopResp(goodPlanJSON, 0.03)},
 	}
 	d.Client = llmFake
+	d.Executor = harnessExec{}
 
 	o := newRun(t.Context(), d, ops.taskContext)
 	require.NoError(t, runPlan(context.Background(), o))
@@ -1156,6 +1157,7 @@ func hitlPlanRun(ops *fakeOps, inbox *fakeInbox, client llm.LLM) *run {
 	d := Deps{
 		Ops:       ops,
 		Client:    client,
+		Executor:  harnessExec{},
 		Emit:      events.NewEmitter(nil, nil),
 		Registry:  planTestRegistry(),
 		ReadTools: tools.NewRegistry(tools.NewReadTool(".")),
@@ -1214,6 +1216,7 @@ func autoPlanRun(ops *fakeOps, client llm.LLM, maxTurns int) *run {
 	d := Deps{
 		Ops:       ops,
 		Client:    client,
+		Executor:  harnessExec{},
 		Emit:      events.NewEmitter(nil, nil),
 		Registry:  planTestRegistry(),
 		ReadTools: tools.NewRegistry(tools.NewReadTool(".")),
@@ -1289,6 +1292,7 @@ func creativePlanRun(ops *fakeOps, inbox *fakeInbox, client llm.LLM, description
 	d := Deps{
 		Ops:       ops,
 		Client:    client,
+		Executor:  harnessExec{},
 		Emit:      events.NewEmitter(nil, nil),
 		Registry:  planTestRegistry(),
 		ReadTools: tools.NewRegistry(tools.NewReadTool(".")),
@@ -1405,6 +1409,7 @@ func mobPlanRun(ops *fakeOps, client llm.LLM, eng *scriptedEngine) *run {
 		Ops:       ops,
 		Git:       &fakeGit{},
 		Client:    client,
+		Executor:  harnessExec{},
 		Emit:      events.NewEmitter(nil, nil),
 		Registry:  reviewerRegistry(),
 		ReadTools: tools.NewRegistry(tools.NewReadTool(".")),
@@ -1571,6 +1576,7 @@ func resumedAutoPlanRun(ops *fakeOps, client llm.LLM) *run {
 	d := Deps{
 		Ops:       ops,
 		Client:    client,
+		Executor:  harnessExec{},
 		Emit:      events.NewEmitter(nil, nil),
 		Registry:  planTestRegistry(),
 		ReadTools: tools.NewRegistry(tools.NewReadTool(".")),
@@ -2267,6 +2273,7 @@ func mobHITLPlanRun(ops *fakeOps, inbox *fakeInbox, client llm.LLM, transcript *
 		Ops:       ops,
 		Git:       &fakeGit{},
 		Client:    client,
+		Executor:  harnessExec{},
 		Emit:      events.NewEmitter(nil, transcript),
 		Registry:  reviewerRegistry(),
 		ReadTools: tools.NewRegistry(tools.NewReadTool(".")),
@@ -2294,6 +2301,7 @@ func bugPlanRun(ops *fakeOps, client llm.LLM, transcript *bytes.Buffer) *run {
 	d := Deps{
 		Ops:       ops,
 		Client:    client,
+		Executor:  harnessExec{},
 		Emit:      events.NewEmitter(nil, transcript),
 		Registry:  reviewerRegistry(),
 		ReadTools: tools.NewRegistry(tools.NewReadTool(".")),

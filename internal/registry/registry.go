@@ -45,6 +45,10 @@ const (
 // seats collapse onto one model is not a panel.
 func DistinctModels(picks []Pick) int { return selection.DistinctModels(picks) }
 
+// ClaudeCodeModelID maps a catalog slug to its Claude Code model id; ok is
+// false for a slug that is not a Claude model.
+func ClaudeCodeModelID(slug string) (id string, ok bool) { return selection.ClaudeCodeModelID(slug) }
+
 // SeatPicks strips a seat list to its picks, for callers that consume a
 // panel positionally.
 func SeatPicks(seats []SeatReport) []Pick { return selection.SeatPicks(seats) }

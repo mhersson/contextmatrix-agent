@@ -627,3 +627,71 @@ func TestGuardedPhasesUnchanged(t *testing.T) {
 			"the plan's own cap is untouched and stays distinct from diagnoseMaxTurns")
 	})
 }
+
+func TestRunModelRunsInTheMainWorkspace(t *testing.T) {
+	rec := &recordingExec{}
+	d := planTestDeps(&fakeOps{}, nil)
+	d.Executor = rec
+	d.Cfg.Workspace = "/ws/main"
+	o := newRun(t.Context(), d, cmclient.TaskContext{})
+
+	_, _, err := o.runModel(t.Context(), d.ReadTools, "task", "m/1")
+	require.NoError(t, err)
+	require.Len(t, rec.runs, 1)
+
+	r := rec.runs[0]
+	assert.Equal(t, "/ws/main", r.Dir)
+	assert.Same(t, d.ReadTools, r.Registry)
+	assert.Equal(t, "task", r.Task)
+	assert.Equal(t, "m/1", r.Config.Model)
+	assert.Same(t, d.Emit, r.Emit)
+	assert.Empty(t, r.SessionID)
+	assert.Empty(t, r.Resume)
+}
+
+func TestRunModelCoderRunsInTheGivenScope(t *testing.T) {
+	rec := &recordingExec{}
+	d := planTestDeps(&fakeOps{}, nil)
+	d.Executor = rec
+	d.Cfg.Workspace = "/ws/main"
+	o := newRun(t.Context(), d, cmclient.TaskContext{})
+
+	_, _, err := o.runModelCoder(t.Context(), runScope{dir: "/ws/c2", ledger: NewLedger(0, 0)}, d.ReadTools, "p", "m/1", coderWrapUpMessage, 0)
+	require.NoError(t, err)
+	require.Len(t, rec.runs, 1)
+	assert.Equal(t, "/ws/c2", rec.runs[0].Dir)
+}
+
+func TestSpendAndReportSubscriptionRun(t *testing.T) {
+	ops := &fakeOps{taskContext: cmclient.TaskContext{}}
+	rec := &recordingExec{windows: []cmclient.SubscriptionUsage{{Window: "seven_day", Utilization: 0.2}}}
+	d := planTestDeps(ops, &planLLM{})
+	d.Executor = rec
+	d.Cfg.ClaudeCode = true
+	o := newRun(t.Context(), d, ops.taskContext)
+
+	o.spendAndReport(context.Background(), o.ledger, "TARGET-1",
+		"warn", harness.Result{TotalCostUSD: 0.4, PromptTokens: 10}, "m", "main", time.Second)
+
+	require.Len(t, ops.usageReports, 1)
+	u := ops.usageReports[0]
+	assert.Zero(t, u.ActualCostUSD)
+	assert.Equal(t, cmclient.CostBasisSubscription, u.CostBasis)
+	assert.Equal(t, rec.windows, u.SubscriptionUsage)
+	assert.InDelta(t, 0.4, o.ledger.Spent(), 1e-9, "the budget still meters notional cost")
+}
+
+func TestSpendAndReportMeteredRunUnchanged(t *testing.T) {
+	ops := &fakeOps{taskContext: cmclient.TaskContext{}}
+	d := planTestDeps(ops, &planLLM{})
+	o := newRun(t.Context(), d, ops.taskContext)
+
+	o.spendAndReport(context.Background(), o.ledger, "TARGET-1",
+		"warn", harness.Result{TotalCostUSD: 0.4, PromptTokens: 10}, "m", "main", time.Second)
+
+	require.Len(t, ops.usageReports, 1)
+	u := ops.usageReports[0]
+	assert.InDelta(t, 0.4, u.ActualCostUSD, 1e-9)
+	assert.Empty(t, u.CostBasis)
+	assert.Nil(t, u.SubscriptionUsage)
+}

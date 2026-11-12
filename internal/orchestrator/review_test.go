@@ -42,6 +42,7 @@ func reviewTestDeps(t *testing.T, ops *fakeOps, git *fakeGit, client llm.LLM, re
 		Ops:        ops,
 		Git:        git,
 		Client:     client,
+		Executor:   harnessExec{},
 		Emit:       events.NewEmitter(nil, nil),
 		Registry:   reg,
 		WriteTools: tools.NewRegistry(tools.NewReadTool(".")),
@@ -3220,6 +3221,7 @@ func hitlReviewDeps(ops *fakeOps, git *fakeGit, inbox *fakeInbox, client llm.LLM
 		Ops:        ops,
 		Git:        git,
 		Client:     client,
+		Executor:   harnessExec{},
 		Emit:       events.NewEmitter(nil, nil),
 		Registry:   planTestRegistry(),
 		WriteTools: tools.NewRegistry(tools.NewReadTool(".")),
@@ -3254,6 +3256,28 @@ func TestRunReviewHITLApproveProceeds(t *testing.T) {
 
 	require.NoError(t, runReview(context.Background(), o))
 	assert.Equal(t, 0, countCall(ops.recorded(), "IncrementReviewAttempts:CARD-1"), "approve does not increment attempts")
+}
+
+// A usage limit stopping the gate classification must park the card: the
+// human's reply is never turned into a fix mandate and no attempt is spent.
+func TestRunReviewHITLGateLimitParksWithoutFix(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	inbox := &fakeInbox{msgs: []harness.UserMessage{{Content: "approve"}}}
+	client := &planLLM{responses: []llm.Response{
+		stopResp("No concerns.", 0.001), stopResp("No concerns.", 0.001), stopResp("No concerns.", 0.001),
+		stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.001),
+	}, errAfter: 5, errWith: &UsageLimitError{Window: "five_hour"}}
+	o := newRun(t.Context(), hitlReviewDeps(ops, git, inbox, client), cmclient.TaskContext{Title: "T", Description: "b", State: "review"})
+	isolateVerify(o)
+
+	err := runReview(context.Background(), o)
+
+	_, ok := errors.AsType[*UsageLimitError](err)
+	require.True(t, ok, "the limit error reaches the worker; err=%v", err)
+	assert.Equal(t, 0, countCall(ops.recorded(), "IncrementReviewAttempts:CARD-1"), "no attempt spent; calls=%v", ops.recorded())
+	assert.Empty(t, git.pushBranches, "no fix run pushed anything")
+	assert.Len(t, client.tasks, 5, "specialists, synthesis and the classification only; no fix run")
 }
 
 func TestRunReviewHITLAdjustFixesThenApproves(t *testing.T) {
@@ -4661,6 +4685,26 @@ func TestReviewApprovedCleanupPassPropagatesParks(t *testing.T) {
 
 	var bee *BudgetExceededError
 	assert.ErrorAs(t, err, &bee, "the worker parks on this sentinel and pushes the WIP; nil would integrate a dirty tree")
+}
+
+// TestCleanupPassSurfacesAUsageLimit: a cleanup fix run refused by a recorded
+// usage limit parks the approved run on the limit, not "proceeding approved".
+func TestCleanupPassSurfacesAUsageLimit(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, headSHA: "approved-sha"}
+	client := &planLLM{}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}, 0)
+	o.usageLimit.Store(&UsageLimitError{Window: "five_hour"})
+
+	fixes := []fix{{File: "a.go", Issue: "bug", Suggestion: "patch", Severity: "minor"}}
+	err := o.cleanupPass(context.Background(), verifyPlan{}, fixRequest{Findings: "a.go: bug", NoEscalate: true}, "a.go: bug", fixes)
+
+	_, ok := errors.AsType[*UsageLimitError](err)
+	require.True(t, ok, "err=%v", err)
+	assert.Empty(t, client.tasks, "the refused fix run never reached the model")
+	assert.NotContains(t, git.hardResetRefs, "HEAD", "a park keeps the tree for the WIP push")
 }
 
 // TestReviewAuthoritativeApprovedWithFindingsFramesSummary covers the honesty

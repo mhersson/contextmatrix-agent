@@ -12,6 +12,9 @@ one of the published variants so the agent binary, entrypoint, unprivileged
 `user` (UID 1000), and baseline CLIs (`git`, `gh`, `rg`, `fd`, `shellcheck`,
 `shfmt`, `kubectl`, `kustomize`, `yq`, `task`, `zip`, `unzip`) are inherited
 unchanged - then `apt-get install` (or otherwise add) what your project needs.
+Keep a runnable `claude` on `PATH`: a project image without one fails the
+start-up check of every `claude_code` run, and a version other than the tested
+one only logs a warning.
 
 ## Worked example - add Ruby
 
@@ -59,20 +62,26 @@ image installs `gh` from GitHub's repo.
   - Use absolute paths, and `mkdir -p` each one in the image. A root that does
     not exist when the worker starts is dropped silently, and the phases then
     behave exactly as they did before, with nothing in the run to say why.
-  - Point at where the toolchain writes *at runtime*. The agent scrubs the
-    environment of every subprocess it runs for the model down to `PATH`,
-    `HOME`, `USER`, `LANG`, `LC_ALL`, `TMPDIR` and `TERM`, so a cache-prefix
-    variable you set with `ENV` does not reach the tool and it falls back to its
-    own default under `$HOME`. That is why the Rust variant declares cargo's
-    default `/home/user/.cargo/registry`: a `CARGO_HOME` set with `ENV` would
-    not reach cargo at runtime.
+  - Point at where the toolchain writes *at runtime*. On the harness, the
+    agent scrubs the environment of every subprocess it runs for the model down
+    to `PATH`, `HOME`, `USER`, `LANG`, `LC_ALL`, `TMPDIR` and `TERM`, so a
+    cache-prefix variable you set with `ENV` does not reach the tool and it
+    falls back to its own default under `$HOME`. That is why the Rust variant
+    declares cargo's default `/home/user/.cargo/registry`: a `CARGO_HOME` set
+    with `ENV` would not reach cargo at runtime.
     If the toolchain must see that variable, name it in a project's
     `verify.env`, which is the allowlist the scrub honours; the value itself
     still has to be in the container, from the image or `worker_extra_env`.
+    In `claude_code` mode the Bash children of `claude` get the same list plus
+    the subscription token and the variables `claude` itself is given (see
+    [Claude Code subscription mode](orchestrator.md#claude-code-subscription-mode)).
   - Declare only source trees. Dependency caches that hold archives, such as
     the jars under `~/.gradle` or `~/.m2`, give the tools nothing to read, which
-    is why `jvm-node` declares none. Writes are never widened: `edit`, `write`
-    and `bash` stay inside the workspace whatever this is set to.
+    is why `jvm-node` declares none. On the harness, writes are never widened:
+    `edit`, `write` and `bash` stay inside the workspace whatever this is set
+    to. In `claude_code` mode Claude Code's own Read, Write, Edit and Bash are
+    not jailed at all and the container is the boundary (see
+    [Claude Code subscription mode](orchestrator.md#claude-code-subscription-mode)).
 
 ## Publish and point a project at it
 

@@ -113,3 +113,30 @@ func TestLedgerServerFloorConcurrency(t *testing.T) {
 
 	assert.InDelta(t, 49.0, l.Spent(), 1e-9, "highest synced total wins over the 0.50 local sum")
 }
+
+func TestLedgerRemaining(t *testing.T) {
+	tests := []struct {
+		name       string
+		ledger     func() *Ledger
+		wantUSD    float64
+		wantCapped bool
+	}{
+		{"disabled ceiling", func() *Ledger { return NewLedger(0, 3) }, 0, false},
+		{"seeded spend", func() *Ledger { return NewLedger(5, 2) }, 3, true},
+		{"server floor wins", func() *Ledger {
+			l := NewLedger(5, 1)
+			l.SyncServerTotal("C", 4.5)
+
+			return l
+		}, 0.5, true},
+		{"overspent floors at zero", func() *Ledger { return NewLedger(5, 6) }, 0, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			usd, capped := tt.ledger().Remaining()
+			assert.InDelta(t, tt.wantUSD, usd, 1e-9)
+			assert.Equal(t, tt.wantCapped, capped)
+		})
+	}
+}

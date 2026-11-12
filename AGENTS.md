@@ -49,6 +49,7 @@ internal/registry/   → adapter over contextmatrix-protocol/selection: FromSele
 
 # Autonomous executor - the FSM and its container lifecycle
 internal/orchestrator/ → hand-written FSM plan → execute → judge → document → review → integrate → pr_gates → done; phase persistence; git finalize
+internal/modelexec/   → the model executors behind orchestrator.Executor: Harness forwards to harness.Run / SpawnSubagents over the run's LLM client; Claude runs contextmatrix-vendorkit's `claudecode.Run` (the `claude` binary on the operator's subscription; worker images install 2.1.322, the release vendorkit tested), selected for `claude_code` runs
 internal/mob/          → A2A mob-session engine: seats, moderator, loopback JSON-RPC server, transcripts - discussions for plan/review/execute checkpoints
 internal/verifyexec/   → verify-command probing + bounded exec; used by cli run and the orchestrator verify gate
 internal/worker/       → the `work` lifecycle: clone, claim, run the FSM (HITL-gated or autonomous), commit/push, PR; wires the orchestrator deps
@@ -66,12 +67,16 @@ internal/buildinfo/  → the build /health reports: ldflags-stamped version, com
 
 internal/kata/       → embedded throwaway kata fixture used by tests
 
-docker/Dockerfile.worker → multi-target worker image family (agent binary + git/rg/fd/gh/shellcheck/shfmt/kubectl/kustomize/yq/task/zip/unzip baseline; default `full` = Go/Node/Python/Rust toolchains; slim `go-node`/`python`/`rust`/`jvm-node` variants; Debian packages come from Debian's signed repos; downloaded Go/Node/rustup/Maven/gh/yq/task are pinned + SHA-verified; npm/yarn/pip/ty/ruff are version-pinned from their registries)
+docker/Dockerfile.worker → multi-target worker image family (agent binary + git/rg/fd/gh/shellcheck/shfmt/kubectl/kustomize/yq/task/zip/unzip baseline; default `full` = Go/Node/Python/Rust toolchains; slim `go-node`/`python`/`rust`/`jvm-node` variants; Debian packages come from Debian's signed repos; downloaded Go/Node/rustup/Maven/gh/yq/task/claude are pinned + SHA-verified; npm/yarn/pip/ty/ruff are version-pinned from their registries)
 
 # Inner loop - the external github.com/mhersson/contextmatrix-harness module
 # (events, llm, tools, harness, redact): the FSM-free loop, the LLM client, the
 # jailed tool registry (including the `skill` tool), the event stream, and secret
 # redaction. This repo depends on it; it takes no dependency on this repo.
+
+# Claude Code runs - the external github.com/mhersson/contextmatrix-vendorkit
+# module (claudecode): drives `claude -p` over a loopback tool bridge for the
+# Claude Code executor in internal/modelexec.
 
 # Shared serve plumbing - the external github.com/mhersson/contextmatrix-backendkit
 # module (frames, webhookcore, logbridge, metrics, taskskills, llmproxy): the
@@ -88,9 +93,9 @@ The harness core lives in the standalone `contextmatrix-harness` module; its own
 
 - `internal/orchestrator` imports the harness module (`harness`, `llm`, `tools`,
   `events`) plus `registry`, `cmclient`, `config`, `mob`, and `verifyexec`. It
-  **never** imports `worker`; the git and card-ops surfaces are injected as
-  interfaces (`Ops`, `GitOps`, `PRCreator`) declared in the orchestrator
-  package.
+  **never** imports `worker` or `modelexec`; the git and card-ops surfaces
+  (`Ops`, `GitOps`, `PRCreator`) and model runs (`Executor`) are injected as
+  interfaces declared in the orchestrator package.
 - `internal/worker` is the only place that wires the full stack together.
 
 If a change tempts you to push orchestration, protocol, or policy down into the
@@ -129,6 +134,10 @@ Go 1.27+, **cobra** + **koanf** (not viper), the **Docker SDK**
   LLM keys itself.
 - The LLM endpoint (OpenAI-compatible `/chat/completions`) is spoken over **raw
   HTTP** behind a narrow `Send`/`SendStream` interface - no SDK in the hot path.
+  In `claude_code` mode the `claude` binary (contextmatrix-vendorkit) replaces
+  it. Worker images install 2.1.322, the release vendorkit tested
+  (`claudecode.Version`), not a hard pin: another version on the host or in a
+  custom image only warns at worker start.
 
 ## Coding conventions
 
@@ -203,8 +212,9 @@ Summaries only - full detail lives in the reference documents above.
    run may create its missing `playbook/` base branch from a source branch with
    a create-only push before cutting the card branch; that is the only push
    allowed outside the card-branch guard.
-3. **One container per top-level card.** All subagents run in-process on one
-   shared workspace; the main solver writes sequentially, Best-of-N candidates
+3. **One container per top-level card.** On the harness all subagents run in-process
+   on one shared workspace (in `claude_code` mode each run is a `claude` process
+   in the same container); the main solver writes sequentially, Best-of-N candidates
    write concurrently in isolated worktrees, and review panels and mob seats
    are read-only fan-outs.
 4. **Review = 3 specialists** (one generic reviewer on a POC card without
@@ -214,7 +224,8 @@ Summaries only - full detail lives in the reference documents above.
 5. **Model selection is priors-only.** The planner emits a complexity tier per
    subtask; deterministic code maps the tier to a model. The LLM never names a
    model; there is no measured-capability gate. Pins always override.
-6. **Context bounds.** No compactor by default: a reply that nears the window
+6. **Context bounds.** On the harness, no compactor by default (in `claude_code`
+   mode Claude Code compacts itself): a reply that nears the window
    mid-run, or a phase's final reply that nears it and is cut at the token
    limit, returns incomplete - a failed subtask, never a silent truncation.
 7. **Per-card budget.** One cumulative USD ceiling (`CMX_MAX_CARD_COST`) spans
@@ -227,7 +238,8 @@ Summaries only - full detail lives in the reference documents above.
 9. **Secrets.** Per-run CM-provisioned credentials, bind-mounted read-only;
    the real LLM key stays on `serve` and workers get a per-run proxy token;
    tool subprocesses get a scrubbed env; every secret a run receives must be
-   registered with the host-side log-bridge redactor.
+   registered with the host-side log-bridge redactor. In `claude_code` mode the
+   subscription token itself is staged for the worker.
 10. **HITL gates + promote.** Same FSM, mode-gated on `Config.Interactive`; a
     `promote` frame closes the inbox so later gates auto-pass. Awaiting-human
     is live, not stalled.

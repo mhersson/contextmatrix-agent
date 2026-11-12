@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -63,6 +65,7 @@ func mobTestRun(ops *fakeOps, mobCfg MobConfig, maxCost float64) *run {
 		Ops:       ops,
 		Git:       &fakeGit{},
 		Client:    &planLLM{},
+		Executor:  harnessExec{},
 		Emit:      events.NewEmitter(nil, nil),
 		Registry:  reviewerRegistry(),
 		ReadTools: tools.NewRegistry(tools.NewReadTool(".")),
@@ -406,6 +409,7 @@ func TestMobModeratorRunnerIsToolless(t *testing.T) {
 	client := &planLLM{responses: []llm.Response{stopResp("VERDICT", 0.01)}}
 	o := mobTestRun(&fakeOps{}, MobConfig{Participants: 2}, 10)
 	o.d.Client = client
+	o.d.Executor = harnessExec{}
 
 	runner := o.mobModeratorRunner(&seatDebugSink{w: io.Discard}, "mob_moderator")
 
@@ -427,6 +431,7 @@ func TestMobSeatRunnerPersistsContextAcrossRounds(t *testing.T) {
 	}}
 	o := mobTestRun(&fakeOps{}, MobConfig{Participants: 2}, 10)
 	o.d.Client = client
+	o.d.Executor = harnessExec{}
 
 	runner := o.mobSeatRunner(&seatDebugSink{w: io.Discard}, 0, "mob_seat")
 	seat := mob.SeatConfig{Name: "seat-1", Lens: "risk", Model: "m/1"}
@@ -483,6 +488,7 @@ func TestMobSeatRunnerForcesFinalAnswerOnEmptyOutput(t *testing.T) {
 	client := &planLLM{responses: []llm.Response{burn, stopResp("forced position", 0.01)}}
 	o := mobTestRun(&fakeOps{}, MobConfig{Participants: 2}, 10)
 	o.d.Client = client
+	o.d.Executor = harnessExec{}
 
 	runner := o.mobSeatRunner(&seatDebugSink{w: io.Discard}, 0.25, "mob_seat")
 
@@ -515,6 +521,7 @@ func TestMobSeatRunnerBackstopFailureFallsBackToAbsence(t *testing.T) {
 	client := &planLLM{responses: []llm.Response{burn}, errAfter: 2}
 	o := mobTestRun(&fakeOps{}, MobConfig{Participants: 2}, 10)
 	o.d.Client = client
+	o.d.Executor = harnessExec{}
 
 	runner := o.mobSeatRunner(&seatDebugSink{w: io.Discard}, 0.25, "mob_seat")
 
@@ -617,6 +624,7 @@ func TestMobSeatRunnerReplaysReasoningOnlyToTheSeatsModel(t *testing.T) {
 			}}
 			o := mobTestRun(&fakeOps{}, MobConfig{Participants: 2}, 10)
 			o.d.Client = client
+			o.d.Executor = harnessExec{}
 			o.d.Registry = replayTestRegistry()
 			o.d.Cfg.ReplayReasoning = true
 
@@ -669,4 +677,277 @@ func TestBuildEngineConfigRecordsADependentDiscussion(t *testing.T) {
 
 	assert.True(t, ops.loggedContains("not fully independent"),
 		"a discussion whose seats share a model must say so; logs=%v", ops.logs)
+}
+
+func TestMobRunsRouteThroughTheExecutor(t *testing.T) {
+	t.Run("seat", func(t *testing.T) {
+		rec := &recordingExec{results: []execResult{{res: harness.Result{Completed: true, Reason: "done", Output: "position"}}}}
+		o := mobTestRun(&fakeOps{}, MobConfig{Participants: 2}, 10)
+		o.d.Executor = rec
+		o.d.Cfg.Workspace = "/ws/main"
+
+		runner := o.mobSeatRunner(&seatDebugSink{w: io.Discard}, 0, "mob_seat")
+		out, _, err := runner(t.Context(), mob.SeatConfig{Name: "seat-1", Lens: "risk", Model: "m/1"}, nil, "brief")
+		require.NoError(t, err)
+		assert.Equal(t, "position", out)
+		require.Len(t, rec.runs, 1)
+
+		r := rec.runs[0]
+		assert.Same(t, o.d.ReadTools, r.Registry)
+		assert.NotEmpty(t, r.Config.SystemPrompt)
+		assert.Equal(t, mobSeatMaxTurns, r.Config.MaxTurns)
+		assert.Equal(t, "/ws/main", r.Dir)
+	})
+
+	t.Run("backstop", func(t *testing.T) {
+		rec := &recordingExec{results: []execResult{
+			{res: harness.Result{Completed: true, Reason: "done", Output: ""}},
+			{res: harness.Result{Completed: true, Reason: "done", Output: "late"}},
+		}}
+		o := mobTestRun(&fakeOps{}, MobConfig{Participants: 2}, 10)
+		o.d.Executor = rec
+
+		runner := o.mobSeatRunner(&seatDebugSink{w: io.Discard}, 0, "mob_seat")
+		out, _, err := runner(t.Context(), mob.SeatConfig{Name: "seat-1", Lens: "risk", Model: "m/1"}, nil, "brief")
+		require.NoError(t, err)
+		assert.Equal(t, "late", out)
+		require.Len(t, rec.runs, 2)
+		assert.Equal(t, seatForcedFinalPrompt, rec.runs[1].Task)
+		assert.Empty(t, rec.runs[1].Registry.All())
+		assert.Equal(t, 1, rec.runs[1].Config.MaxTurns)
+	})
+
+	t.Run("moderator", func(t *testing.T) {
+		rec := &recordingExec{results: []execResult{{res: harness.Result{Completed: true, Reason: "done", Output: "VERDICT"}}}}
+		o := mobTestRun(&fakeOps{}, MobConfig{Participants: 2}, 10)
+		o.d.Executor = rec
+
+		runner := o.mobModeratorRunner(&seatDebugSink{w: io.Discard}, "mob_moderator")
+		out, _, _, err := runner(t.Context(), "synthesize")
+		require.NoError(t, err)
+		assert.Equal(t, "VERDICT", out)
+		require.Len(t, rec.runs, 1)
+		assert.Empty(t, rec.runs[0].Registry.All())
+		assert.Equal(t, mobModeratorMaxTurns, rec.runs[0].Config.MaxTurns)
+	})
+}
+
+func claudeSeatRun(t *testing.T, rec *recordingExec, claude bool) mob.SeatRunner {
+	t.Helper()
+
+	o := mobTestRun(&fakeOps{}, MobConfig{Participants: 2}, 0)
+	o.d.Cfg.ClaudeCode = claude
+	o.d.Executor = rec
+
+	return o.mobSeatRunner(&seatDebugSink{w: io.Discard}, 0, "mob_seat")
+}
+
+func TestNewSessionIDIsAUUID(t *testing.T) {
+	re := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+	a, b := newSessionID(), newSessionID()
+	assert.Regexp(t, re, a)
+	assert.Regexp(t, re, b)
+	assert.NotEqual(t, a, b)
+}
+
+func TestMobSeatRunnerResumesEachSeatsSessionInClaudeCodeMode(t *testing.T) {
+	rec := &recordingExec{results: []execResult{
+		{res: harness.Result{Output: "position"}}, {res: harness.Result{Output: "position"}}, {res: harness.Result{Output: "position"}},
+	}}
+	runner := claudeSeatRun(t, rec, true)
+	s1 := mob.SeatConfig{Name: "seat-1", Lens: "risk", Model: "claude-opus-5-5"}
+	s2 := mob.SeatConfig{Name: "seat-2", Lens: "risk", Model: "claude-opus-5-5"}
+
+	for _, s := range []mob.SeatConfig{s1, s1, s2} {
+		_, _, err := runner(t.Context(), s, nil, "go")
+		require.NoError(t, err)
+	}
+
+	require.Len(t, rec.runs, 3)
+	assert.NotEmpty(t, rec.runs[0].SessionID)
+	assert.Empty(t, rec.runs[0].Resume)
+	assert.Empty(t, rec.runs[1].SessionID)
+	assert.Equal(t, rec.runs[0].SessionID, rec.runs[1].Resume)
+	assert.NotEmpty(t, rec.runs[2].SessionID)
+	assert.NotEqual(t, rec.runs[0].SessionID, rec.runs[2].SessionID)
+	assert.Empty(t, rec.runs[2].Resume)
+}
+
+func TestMobSeatFailedFirstRunStartsAFreshSession(t *testing.T) {
+	rec := &recordingExec{results: []execResult{
+		{err: errors.New("boom")}, {res: harness.Result{Output: "position"}},
+	}}
+	runner := claudeSeatRun(t, rec, true)
+	s := mob.SeatConfig{Name: "seat-1", Lens: "risk", Model: "claude-opus-5-5"}
+
+	_, _, err := runner(t.Context(), s, nil, "go")
+	require.Error(t, err)
+
+	_, _, err = runner(t.Context(), s, nil, "go")
+	require.NoError(t, err)
+
+	require.Len(t, rec.runs, 2)
+	assert.NotEmpty(t, rec.runs[1].SessionID)
+	assert.NotEqual(t, rec.runs[0].SessionID, rec.runs[1].SessionID)
+	assert.Empty(t, rec.runs[1].Resume)
+}
+
+// historyText joins every message's content, for fixture-marker checks.
+func historyText(msgs []llm.Message) string {
+	parts := make([]string, len(msgs))
+	for i, m := range msgs {
+		parts[i] = m.Content
+	}
+
+	return strings.Join(parts, "\n")
+}
+
+// TestMobBackstopSeesEverySeatRoundInClaudeCodeMode: vendorkit's Messages hold
+// only the current process, so the seat stores its transcript across rounds and
+// the backstop, a fresh run, gets all of it as History. Resuming instead would
+// replay tool blocks into a toolless request.
+func TestMobBackstopSeesEverySeatRoundInClaudeCodeMode(t *testing.T) {
+	m1 := []llm.Message{{Role: "user", Content: "brief"}, {Role: "assistant", Content: "ROUND-ONE-MARKER"}}
+	m2 := []llm.Message{{Role: "user", Content: "again"}, {Role: "assistant", Content: "ROUND-TWO-MARKER"}}
+	rec := &recordingExec{results: []execResult{
+		{res: harness.Result{Output: "position", Messages: m1}},
+		{res: harness.Result{Output: "", Messages: m2}},
+		{res: harness.Result{Output: "late", Messages: []llm.Message{{Role: "user", Content: "PRIMER"}}}},
+		{res: harness.Result{Output: "round three"}},
+		{res: harness.Result{Output: `{}`}},
+	}}
+	o := mobTestRun(&fakeOps{}, MobConfig{Participants: 2}, 0)
+	o.d.Cfg.ClaudeCode = true
+	o.d.Executor = rec
+
+	runner := o.mobSeatRunner(&seatDebugSink{w: io.Discard}, 0, "mob_seat")
+	seat := mob.SeatConfig{Name: "seat-1", Lens: "risk", Model: "claude-opus-5-5"}
+
+	for i, want := range []string{"position", "late", "round three"} {
+		out, _, err := runner(t.Context(), seat, nil, "go")
+		require.NoError(t, err, "round %d", i+1)
+		assert.Equal(t, want, out, "round %d", i+1)
+	}
+
+	require.Len(t, rec.runs, 4)
+	session := rec.runs[0].SessionID
+	require.NotEmpty(t, session)
+	assert.Equal(t, session, rec.runs[1].Resume)
+
+	backstop := rec.runs[2]
+	assert.Equal(t, seatForcedFinalPrompt, backstop.Task)
+	assert.Empty(t, backstop.SessionID)
+	assert.Empty(t, backstop.Resume)
+	assert.Empty(t, backstop.Registry.All())
+	assert.Equal(t, 1, backstop.Config.MaxTurns)
+	assert.Zero(t, backstop.Config.WrapUpTurns)
+
+	primer := historyText(backstop.Config.History)
+	assert.Contains(t, primer, "ROUND-ONE-MARKER")
+	assert.Contains(t, primer, "ROUND-TWO-MARKER")
+
+	// The answered backstop retires the seat's session; the next round starts
+	// fresh and the stored transcript gains the backstop exchange, never the
+	// backstop's own primer.
+	assert.Empty(t, rec.runs[3].Resume)
+	assert.NotEmpty(t, rec.runs[3].SessionID)
+
+	stored := rec.runs[3].Config.History
+	text := historyText(stored)
+	assert.Equal(t, 1, strings.Count(text, "ROUND-ONE-MARKER"), "stored=%q", text)
+	assert.NotContains(t, text, "PRIMER")
+	require.GreaterOrEqual(t, len(stored), 2)
+	assert.Equal(t, []llm.Message{
+		{Role: "user", Content: seatForcedFinalPrompt},
+		{Role: "assistant", Content: "late"},
+	}, stored[len(stored)-2:])
+
+	_, _, _, _ = o.mobModeratorRunner(&seatDebugSink{w: io.Discard}, "mob_moderator")(t.Context(), "decide")
+
+	require.Len(t, rec.runs, 5)
+	assert.Empty(t, rec.runs[4].SessionID)
+	assert.Empty(t, rec.runs[4].Resume)
+}
+
+func TestMobBackstopEndpointModeSeedsTheRunsMessages(t *testing.T) {
+	msgs := []llm.Message{{Role: "user", Content: "brief"}, {Role: "assistant", Content: "EXPLORED-MARKER"}}
+	rec := &recordingExec{results: []execResult{
+		{res: harness.Result{Completed: true, Reason: "done", Output: "", Messages: msgs}},
+		{res: harness.Result{Completed: true, Reason: "done", Output: "late"}},
+	}}
+	runner := claudeSeatRun(t, rec, false)
+
+	out, _, err := runner(t.Context(), mob.SeatConfig{Name: "seat-1", Lens: "risk", Model: "m/1"}, nil, "go")
+	require.NoError(t, err)
+	assert.Equal(t, "late", out)
+
+	require.Len(t, rec.runs, 2)
+	assert.Equal(t, seatForcedFinalPrompt, rec.runs[1].Task)
+	assert.Equal(t, trimSeatContext(slices.Clone(msgs)), rec.runs[1].Config.History)
+	assert.Empty(t, rec.runs[1].SessionID)
+	assert.Empty(t, rec.runs[1].Resume)
+}
+
+func TestMobSeatRunnerEndpointModeHasNoSession(t *testing.T) {
+	rec := &recordingExec{}
+	runner := claudeSeatRun(t, rec, false)
+	s := mob.SeatConfig{Name: "seat-1", Lens: "risk", Model: "m/1"}
+
+	for range 2 {
+		_, _, err := runner(t.Context(), s, nil, "go")
+		require.NoError(t, err)
+	}
+
+	for _, r := range rec.runs {
+		assert.Empty(t, r.SessionID)
+		assert.Empty(t, r.Resume)
+	}
+}
+
+// TestMobSeatSessionAfterClaudeCodeBackstop: a session resumed after an
+// answered backstop never saw that answer, so the next round starts fresh from
+// the stored transcript, which holds it. A failed backstop keeps the session.
+func TestMobSeatSessionAfterClaudeCodeBackstop(t *testing.T) {
+	seat := mob.SeatConfig{Name: "seat-1", Lens: "risk", Model: "claude-opus-5-5"}
+
+	t.Run("answered backstop starts a fresh session", func(t *testing.T) {
+		rec := &recordingExec{results: []execResult{
+			{res: harness.Result{Output: "position"}},
+			{res: harness.Result{Output: ""}},
+			{res: harness.Result{Output: "late-answer"}},
+			{res: harness.Result{Output: "round three"}},
+		}}
+		runner := claudeSeatRun(t, rec, true)
+
+		for i := range 3 {
+			_, _, err := runner(t.Context(), seat, nil, "go")
+			require.NoError(t, err, "round %d", i+1)
+		}
+
+		require.Len(t, rec.runs, 4)
+		r3 := rec.runs[3]
+		assert.Empty(t, r3.Resume)
+		assert.NotEmpty(t, r3.SessionID)
+		assert.NotEqual(t, rec.runs[0].SessionID, r3.SessionID)
+		assert.Contains(t, historyText(r3.Config.History), "late-answer")
+	})
+
+	t.Run("failed backstop keeps the session", func(t *testing.T) {
+		rec := &recordingExec{results: []execResult{
+			{res: harness.Result{Output: "position"}},
+			{res: harness.Result{Output: ""}},
+			{err: errors.New("boom")},
+			{res: harness.Result{Output: "round three"}},
+		}}
+		runner := claudeSeatRun(t, rec, true)
+
+		for i := range 3 {
+			_, _, err := runner(t.Context(), seat, nil, "go")
+			require.NoError(t, err, "round %d", i+1)
+		}
+
+		require.Len(t, rec.runs, 4)
+		assert.Equal(t, rec.runs[0].SessionID, rec.runs[3].Resume)
+		assert.Empty(t, rec.runs[3].SessionID)
+	})
 }

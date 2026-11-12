@@ -18,7 +18,8 @@ const replayMinContextWindow = 400_000
 // reasoning with its later requests. A model the window floor excludes is
 // reported once per run.
 func (o *run) replays(model string) bool {
-	if !o.d.Cfg.ReplayReasoning {
+	// Replay is a harness-only setting; Claude Code runs have no decision to report.
+	if !o.d.Cfg.ReplayReasoning || o.d.Cfg.ClaudeCode {
 		return false
 	}
 
@@ -62,6 +63,12 @@ func (o *run) replays(model string) bool {
 // spawnSubagents fans specs out, splitting them by replay decision because the
 // harness takes one replay setting per fan-out. Results keep spec order.
 func (o *run) spawnSubagents(ctx context.Context, client llm.LLM, root string, specs []harness.SubagentSpec, opts harness.SubagentOpts) ([]harness.SubagentResult, error) {
+	// Replay is a harness-only setting, so Claude Code sends one fan-out: the
+	// panel's equal budget share is computed over every spec.
+	if o.d.Cfg.ClaudeCode {
+		return o.execFanout(ctx, FanoutRequest{Client: client, Root: root, Emit: o.d.Emit, Specs: specs, Opts: opts})
+	}
+
 	var on, off []int
 
 	for i, s := range specs {
@@ -80,7 +87,7 @@ func (o *run) spawnSubagents(ctx context.Context, client llm.LLM, root string, s
 	if len(on) == 0 || len(off) == 0 {
 		opts.ReplayReasoning = len(on) > 0
 
-		return harness.SpawnSubagents(ctx, client, root, o.d.Emit, specs, opts)
+		return o.execFanout(ctx, FanoutRequest{Client: client, Root: root, Emit: o.d.Emit, Specs: specs, Opts: opts})
 	}
 
 	results := make([]harness.SubagentResult, len(specs))
@@ -102,7 +109,7 @@ func (o *run) spawnSubagents(ctx context.Context, client llm.LLM, root string, s
 			side := opts
 			side.ReplayReasoning = n == 0
 
-			res, err := harness.SpawnSubagents(ctx, client, root, o.d.Emit, sub, side)
+			res, err := o.execFanout(ctx, FanoutRequest{Client: client, Root: root, Emit: o.d.Emit, Specs: sub, Opts: side})
 			errs[n] = err
 
 			for j, i := range idx {

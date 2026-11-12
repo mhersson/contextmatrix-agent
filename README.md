@@ -63,7 +63,8 @@ flowchart LR
 
 - **`serve`** is the task backend. It owns container lifecycle, resource limits,
   idle/timeout watchdogs, secret refresh, and graceful drain.
-- **`work`** is the in-container agent. It runs the inner loop, fans out
+- **`work`** is the in-container agent. It runs the inner loop (the harness, or
+  the Claude Code executor when the endpoint type is `claude_code`), fans out
   read-only review subagents, commits and pushes incrementally, and finalizes
   with an autosquash + force-push.
 
@@ -105,7 +106,8 @@ board cards.
 
 - **Go 1.27+** to build.
 - **Docker** on the host running `serve` (the worker runtime).
-- An **LLM endpoint API key** with access to the models you route to.
+- An **LLM endpoint API key** with access to the models you route to, or a
+  **Claude Code subscription token** configured in ContextMatrix.
 - A reachable **ContextMatrix** instance (API + MCP) and its MCP API key.
 - **GitHub auth configured in ContextMatrix** (a GitHub App or a fine-grained
   PAT) - ContextMatrix mints per-run tokens for cloning and pushing target
@@ -138,10 +140,12 @@ export LLM_API_KEY=<your-api-key>
 1. **Build the worker image.** The worker image bundles the agent binary plus
    the CLIs the harness expects; Debian packages come from Debian's signed
    repositories; the downloaded Go, Node, rustup, Maven, gh, yq and Task
-   archives and binaries are pinned and SHA-verified; the uv image is
-   digest-pinned; golangci-lint and gofumpt are built from source at pinned
+   archives and binaries are pinned and SHA-verified; the Claude Code binary is
+   fetched from the npm registry's platform tarball at a pinned version and
+   SHA-512-verified; the uv image is digest-pinned; golangci-lint and gofumpt are built from source at pinned
    versions; npm, yarn, pip, ty and ruff are pinned by version and fetched
-   from their registries.
+   from their registries. The images bundle Anthropic's proprietary Claude Code,
+   so do not push them to a public registry.
 
    ```bash
    make docker-worker          # tags contextmatrix-agent-worker:dev (full), labelled with the commit
@@ -185,12 +189,16 @@ export LLM_API_KEY=<your-api-key>
    the trigger payload - the agent carries no local credential config, and a
    trigger without CM-provisioned credentials is rejected.
 
-   The real LLM key stays in `serve`: each worker gets a per-run stand-in token
-   and calls `serve`'s LLM proxy at `container_serve_url` (default
-   `http://host.docker.internal:<port>`), so a host firewall must allow
-   container-to-host traffic on that port. Upstream LLM calls leave from
-   `serve`, so they use `serve`'s own `HTTP(S)_PROXY`/`NO_PROXY` environment;
-   an egress proxy set only in `worker_extra_env` does not reach them. See
+   In endpoint mode the real LLM key stays in `serve`: each worker gets a
+   per-run stand-in token and calls `serve`'s LLM proxy at
+   `container_serve_url` (default `http://host.docker.internal:<port>`), so a
+   host firewall must allow container-to-host traffic on that port. Upstream
+   LLM calls leave from `serve`, so they use `serve`'s own
+   `HTTP(S)_PROXY`/`NO_PROXY` environment; an egress proxy set only in
+   `worker_extra_env` does not reach them. In `claude_code` mode the
+   subscription token is staged into the worker, `claude` calls Anthropic from
+   the worker and never contacts `serve`, so its egress proxy goes in
+   `worker_extra_env` and `serve`'s proxy environment does not apply. See
    [`docs/secrets.md`](docs/secrets.md#llm-proxy).
 
    `container_contextmatrix_url` is required in practice - workers resolve their

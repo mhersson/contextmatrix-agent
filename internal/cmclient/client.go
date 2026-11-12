@@ -13,7 +13,9 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
+	protocol "github.com/mhersson/contextmatrix-protocol"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -445,6 +447,14 @@ func (c *Client) Heartbeat(ctx context.Context, cardID string) error {
 // the caller (spendAndReport), never fatal. Phase and Step are omitted when
 // empty; DurationMS is omitted when non-positive.
 type UsageReport struct {
+	// CostBasis is "subscription" on a subscription run, "" when metered. With
+	// it set ActualCostUSD is never sent: CM rejects the combination. It and
+	// SubscriptionUsage need a CM whose report_usage schema has them, so they
+	// ride only subscription runs.
+	CostBasis string
+	// SubscriptionUsage holds the last-seen limit windows; sent only with CostBasis.
+	SubscriptionUsage []SubscriptionUsage
+
 	Model               string
 	PromptTokens        int64
 	CompletionTokens    int64
@@ -455,12 +465,19 @@ type UsageReport struct {
 	Step                string // bounded call kind (main, gate, checkpoint, ...)
 	DurationMS          int64  // wall time of the harness step in milliseconds
 	// Source marks who produced the token counts. The orchestrator always
-	// sends "collector": every count comes from gateway usage frames, never
-	// estimation. Requires a CM deployment whose report_usage schema has the
+	// sends "collector": counts come from gateway usage frames in endpoint
+	// mode and from the claude result in claude_code mode, never estimation.
+	// Requires a CM deployment whose report_usage schema has the
 	// source field (additionalProperties:false rejects it otherwise) - CM
 	// deploys first, same contract as Phase/Step/DurationMS.
 	Source string
 }
+
+// SubscriptionUsage is one subscription limit window as CM's report_usage takes it.
+type SubscriptionUsage = protocol.SubscriptionUsage
+
+// CostBasisSubscription marks usage that drew on a subscription, never billed per token.
+const CostBasisSubscription = protocol.CostBasisSubscription
 
 // ReportUsage records token usage for cost tracking against a card. It returns
 // the card's updated server-priced cumulative cost (token_usage
@@ -485,8 +502,16 @@ func (c *Client) ReportUsage(ctx context.Context, cardID string, u UsageReport) 
 		args["cache_creation_tokens"] = u.CacheCreationTokens
 	}
 
-	if u.ActualCostUSD != 0 {
+	if u.ActualCostUSD != 0 && u.CostBasis == "" {
 		args["actual_cost_usd"] = u.ActualCostUSD
+	}
+
+	if u.CostBasis != "" {
+		args["cost_basis"] = u.CostBasis
+	}
+
+	if len(u.SubscriptionUsage) > 0 {
+		args["subscription_usage"] = u.SubscriptionUsage
 	}
 
 	if u.Phase != "" {
@@ -560,12 +585,23 @@ func (c *Client) ReportPush(ctx context.Context, cardID, branch, prURL string) e
 // ReportParked reports that this run parked the card - review or PR gates
 // left for a human. CM records worker_status "parked" so the board can show
 // it (the completed callback that follows preserves it) and appends the
-// reason to the card's activity log.
-func (c *Client) ReportParked(ctx context.Context, cardID, reason string) error {
-	_, err := c.call(ctx, "report_parked", map[string]any{
+// reason to the card's activity log. window is the usage limit's window,
+// omitted when empty. resetsAt is when a usage limit lifts; it is sent as
+// RFC 3339 UTC and omitted when zero.
+func (c *Client) ReportParked(ctx context.Context, cardID, reason, window string, resetsAt time.Time) error {
+	args := map[string]any{
 		"card_id": cardID,
 		"reason":  reason,
-	})
+	}
+	if window != "" {
+		args["window"] = window
+	}
+
+	if !resetsAt.IsZero() {
+		args["resets_at"] = resetsAt.UTC().Format(time.RFC3339)
+	}
+
+	_, err := c.call(ctx, "report_parked", args)
 
 	return err
 }

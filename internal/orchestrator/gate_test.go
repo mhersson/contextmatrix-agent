@@ -2,6 +2,8 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"sync"
 	"testing"
@@ -31,6 +33,7 @@ func gateRun(ops *fakeOps, inbox *fakeInbox, interactive bool, client llm.LLM, t
 	d := Deps{
 		Ops:       ops,
 		Client:    client,
+		Executor:  harnessExec{},
 		Emit:      events.NewEmitter(nil, transcript),
 		Registry:  planTestRegistry(),
 		ReadTools: tools.NewRegistry(tools.NewReadTool(".")),
@@ -127,6 +130,66 @@ func TestGateClassificationModelErrorIsAdjust(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, gateAdjust, outcome, "a classification error is never an approval")
 	assert.Equal(t, "approve", fb, "feedback falls back to the raw reply")
+}
+
+func TestGateClassificationLimitErrorParks(t *testing.T) {
+	for name, limit := range map[string]error{
+		"usage limit":   &UsageLimitError{Window: "five_hour"},
+		"wrapped limit": fmt.Errorf("model: %w", &UsageLimitError{Window: "seven_day"}),
+		"budget breach": &BudgetExceededError{Spent: 2, Max: 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ops := &fakeOps{}
+			inbox := &fakeInbox{msgs: []harness.UserMessage{{Content: "approve"}}}
+			client := &planLLM{errAfter: 1, errWith: limit}
+			o := gateRun(ops, inbox, true, client, nil, 0, 0)
+
+			_, _, err := o.gate(context.Background(), gatePlanApproval, fixedGateModel("payload/model"), "plan?")
+			require.Error(t, err, "a limit stopping the classification must surface, not become adjust")
+			assert.True(t, isBudgetOrUsageLimit(err), "err=%v", err)
+		})
+	}
+}
+
+// gateClaudeRun is a gate run on the Claude Code executor with a 1.00 ceiling
+// and 0.20 already spent, so a classification run is capped at 0.80.
+func gateClaudeRun(ops *fakeOps, rec *recordingExec) *run {
+	inbox := &fakeInbox{msgs: []harness.UserMessage{{Content: "looks good"}}}
+	o := gateRun(ops, inbox, true, &planLLM{}, nil, 1.0, 0.2)
+	o.d.Executor = rec
+	o.d.Cfg.ClaudeCode = true
+
+	return o
+}
+
+func TestGateClassificationStoppedAtTheBudgetCapParks(t *testing.T) {
+	ops := &fakeOps{}
+	rec := &recordingExec{results: []execResult{{res: harness.Result{Reason: "max_cost", TotalCostUSD: 0.8}}}}
+	o := gateClaudeRun(ops, rec)
+
+	outcome, _, err := o.gate(t.Context(), gateReviewDecision, fixedGateModel("payload/model"), "findings?")
+
+	_, ok := errors.AsType[*BudgetExceededError](err)
+	require.True(t, ok, "err=%v", err)
+	assert.NotEqual(t, gateAdjust, outcome, "a truncated classification never becomes an adjust")
+}
+
+func TestGateClassificationDonePastTheCapIsApplied(t *testing.T) {
+	ops := &fakeOps{}
+	rec := &recordingExec{results: []execResult{{res: harness.Result{
+		Completed: true, Reason: "done", Output: `{"verdict":"approve"}`, TotalCostUSD: 0.9,
+	}}}}
+	o := gateClaudeRun(ops, rec)
+
+	outcome, _, err := o.gate(t.Context(), gateReviewDecision, fixedGateModel("payload/model"), "findings?")
+	require.NoError(t, err)
+	assert.Equal(t, gateApprove, outcome, "an answer that crossed the cap is acted on as finished")
+	assert.InDelta(t, 1.1, o.ledger.Spent(), 1e-9, "the overspend is recorded")
+
+	_, err = o.execRun(t.Context(), o.ledger, RunRequest{Task: "next"})
+	_, ok := errors.AsType[*BudgetExceededError](err)
+	assert.True(t, ok, "the next run refuses on the exhausted ledger")
+	assert.Len(t, rec.runs, 1)
 }
 
 func TestGateEmitsAwaitingHuman(t *testing.T) {

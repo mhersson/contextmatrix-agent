@@ -13,7 +13,9 @@ never read raw tokens from config or env.
 refreshed from ContextMatrix ahead of each git-token expiry and bind-mounted
 read-only at `/run/cm-secrets/env`; the per-run dir is torn down with the run.
 The worker reads the stand-in token and URL for the [LLM proxy](#llm-proxy)
-and `CM_GIT_TOKEN` from it.
+and `CM_GIT_TOKEN` from it. In `claude_code` mode the file carries
+`LLM_TYPE=claude_code` and `LLM_OAUTH_TOKEN` instead, with no `LLM_API_KEY` or
+`LLM_BASE_URL`; the worker reads the token from the file only, never from env.
 
 The per-run dir is `0700` and the env file `0600`, both owned by the UID `serve`
 runs as, while the worker container runs as UID 1000 with every capability
@@ -30,6 +32,10 @@ The real LLM key never enters a worker container. `serve` keeps it in memory
 behind backendkit's `llmproxy`, mounted on `serve`'s own listener at `/llm`,
 and gives each run a stand-in token that works only there and only for that
 run.
+
+The one exception is a `claude_code` endpoint: it is never registered with the
+proxy because the `claude` binary must hold the subscription token itself, so
+the token is staged into the run's env file.
 
 ```
  CM ──trigger (real key)──▶ serve (host)
@@ -76,15 +82,33 @@ Operator notes:
   environment applies to them and `ca_cert_file` is trusted for their TLS. An
   egress proxy set only in `worker_extra_env` does not reach LLM traffic;
   set it on the `serve` process or its service unit.
-- Workers must reach `serve`'s port at `container_serve_url`, so a host
-  firewall must allow container-to-host traffic on that port.
-- An HTTP proxy in `worker_extra_env` needs the serve host
-  (`host.docker.internal` by default) in `NO_PROXY`.
-- An operator `LLM_*` in `worker_extra_env` wins over the staged values, since
-  container env beats the secrets file (`resolveLLMValue`): setting both
-  `LLM_API_KEY` and `LLM_BASE_URL` bypasses the proxy and puts that key in the
-  container, and setting only one breaks the run (the proxy answers a real key
-  with 401, and an upstream has never seen the token).
+- A `claude_code` endpoint is the exception: `claude` calls Anthropic from the
+  worker, so `serve`'s proxy environment does not apply. Set its egress proxy
+  in `worker_extra_env`; `claude` gets the worker's `HTTP(S)_PROXY`/`NO_PROXY`,
+  with `127.0.0.1`, `localhost` and `::1` added to both `NO_PROXY` and
+  `no_proxy` so its loopback tool bridge never goes through the proxy.
+  `NO_PROXY` still needs the hosts the container reaches directly, as below.
+  `HTTP_PROXY` alone also carries Claude Code's HTTPS API traffic.
+  `ca_cert_file` reaches `claude` as `NODE_EXTRA_CA_CERTS`.
+- In endpoint mode workers must reach `serve`'s port at `container_serve_url`
+  (the LLM proxy), so a host firewall must allow container-to-host traffic on
+  that port. A `claude_code` worker never contacts `serve`: it stages no
+  `LLM_BASE_URL`, and `claude` calls Anthropic directly.
+- An HTTP proxy in `worker_extra_env` needs the ContextMatrix host of
+  `container_contextmatrix_url` in `NO_PROXY` when the proxy cannot reach it
+  (the worker's MCP connection honours the proxy variables in both modes). In
+  endpoint mode it also needs the serve host (`host.docker.internal` by
+  default), because the worker's LLM client calls the proxy there. In
+  `claude_code` mode the serve host is not needed; loopback is added for you.
+- An operator `LLM_API_KEY`, `LLM_BASE_URL` or `LLM_TYPE` in
+  `worker_extra_env` wins over the staged values, since container env beats the
+  secrets file (`resolveLLMValue`): setting both `LLM_API_KEY` and
+  `LLM_BASE_URL` bypasses the proxy and puts that key in the container, and
+  setting only one breaks the run (the proxy answers a real key with 401, and
+  an upstream has never seen the token). An `LLM_TYPE` overrides the trigger's
+  endpoint type, a `claude_code` one included, so leave it unset.
+  `LLM_OAUTH_TOKEN` is read only from the staged file; a value in
+  `worker_extra_env` is ignored.
 
 Limits:
 
@@ -93,11 +117,32 @@ Limits:
 - The token is readable inside the container, so the run can spend through
   the proxy until its token is revoked.
 
+## Claude Code token
+
+In `claude_code` mode the worker hands the subscription token to the `claude`
+process environment, where the commands its Bash tool runs can read it: a
+prompt-injected agent could exfiltrate it. Other secrets stay out of that
+environment, which starts from the scrubbed allowlist (plus the proxy variables
+and `NODE_EXTRA_CA_CERTS`).
+
+This is an accepted risk, and the agent does not harden it. Inside the worker
+container everything runs as UID 1000, so the model's Bash can read the token
+from its own environment (inherited from `claude`) and from the bind-mounted
+`/run/cm-secrets/env`. The token is not in the container's launch environment,
+so `/proc/1/environ` and the worker's own environment do not carry it.
+
+The MCP key carries the same accepted risk, in both modes: `CM_MCP_API_KEY` is
+in the container's launch environment, so any process in the container, the
+model's Bash included, can read it from `/proc/1/environ`. The scrubbed
+allowlist keeps it out of the model's subprocess environment, not out of
+`/proc`.
+
 ## Subprocess scrubbing
 
 Tool subprocesses get an allowlisted `cmd.Env` (`tools.ScrubbedEnv`) - secrets
-are not inheritable by model-driven commands - and known secret values are
-redacted from events and transcripts.
+are not inheritable by model-driven commands, except the subscription token in
+`claude_code` mode (see above) - and known secret values are redacted from
+events and transcripts.
 
 ## verify.env pass-throughs
 
@@ -117,4 +162,5 @@ The in-worker redactor never sees container stderr, so worker stderr and
 unparsable stdout are masked host-side by the log bridge alone: every
 CM-provisioned secret a run receives MUST be registered with the bridge's
 `logbridge.RedactorRegistry` before launch and unregistered when the run ends.
-Mechanics in the `serve.go` and `admitAndLaunch` doc comments.
+The `claude_code` subscription token is registered with the session redactor
+and with the worker's run redactor. Mechanics in the `serve.go` and `admitAndLaunch` doc comments.

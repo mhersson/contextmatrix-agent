@@ -15,6 +15,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/attempt"
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/config"
+	"github.com/mhersson/contextmatrix-agent/internal/modelexec"
 	"github.com/mhersson/contextmatrix-agent/internal/orchestrator"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-harness/events"
@@ -38,6 +39,30 @@ var (
 // tests swap this var to observe the Deps the worker built and script the FSM's
 // outcome without spinning up the real phase loop.
 var runOrchestrator = orchestrator.Run
+
+// checkClaudeCode is the start-of-run `claude` probe seam; tests swap it.
+var checkClaudeCode = modelexec.CheckClaudeCode
+
+// newClaude is the Claude executor constructor seam; tests swap it.
+var newClaude = modelexec.NewClaude
+
+func claudeCodeMode(spec RunSpec) bool {
+	return spec.LLMType == protocol.LLMEndpointTypeClaudeCode
+}
+
+// newExecutor builds the run's executor: the Claude Code executor in claude_code
+// mode, else the harness. Within this function the token reaches only NewClaude.
+func newExecutor(spec RunSpec, bashEnv []string) (orchestrator.Executor, error) {
+	if !claudeCodeMode(spec) {
+		return modelexec.Harness{}, nil
+	}
+
+	return newClaude(modelexec.ClaudeConfig{
+		OAuthToken: spec.LLMOAuthToken,
+		Env:        modelexec.ClaudeEnv(bashEnv, spec.CACertFile, spec.BashTimeoutMax),
+		Effort:     spec.ReasoningEffort,
+	})
+}
 
 // gatesFinalizeMargin is how much of the container's lifetime the pr_gates
 // deadline leaves unspent, so a gate that runs out of patience still has room to
@@ -82,7 +107,11 @@ type RunSpec struct {
 	LLMKey     string // from /run/cm-secrets/env via the secrets source
 	LLMBaseURL string // from /run/cm-secrets/env via the secrets source
 	LLMType    string // from /run/cm-secrets/env via the secrets source
-	GitToken   string // from /run/cm-secrets/env via the secrets source; startup value, used for redaction and to gate credential injection
+
+	// LLMOAuthToken is the Claude Code subscription token, read from the
+	// secrets file only (claude_code mode); redacted from run output.
+	LLMOAuthToken string
+	GitToken      string // from /run/cm-secrets/env via the secrets source; startup value, used for redaction and to gate credential injection
 
 	// SecretsEnvPath is the KEY=value secrets file (/run/cm-secrets/env) that git
 	// and gh re-read the current CM_GIT_TOKEN from per operation, so a token the
@@ -175,7 +204,7 @@ type RunSpec struct {
 // full Ops so the FSM is handed a complete surface checked at compile time.
 type CardOps interface {
 	orchestrator.Ops
-	ReportParked(ctx context.Context, cardID, reason string) error
+	ReportParked(ctx context.Context, cardID, reason, window string, resetsAt time.Time) error
 	RecordSkillEngaged(ctx context.Context, cardID, skillName string) error
 }
 
@@ -226,6 +255,22 @@ func Run(ctx context.Context, spec RunSpec, ops CardOps, client llm.LLM, emit *e
 	ws := filepath.Join(spec.Workspace, strings.ToLower(spec.CardID))
 
 	git := NewGit(ws, secretsPathForAuth(spec), hostFromRepoURL(spec.RepoURL), spec.CACertFile)
+
+	if claudeCodeMode(spec) {
+		if spec.LLMOAuthToken == "" {
+			return releaseWithError(ctx, ops, spec.CardID, errors.New("claude_code mode needs LLM_OAUTH_TOKEN"))
+		}
+
+		// Every fallback run would otherwise fail mid-phase on this model.
+		if m := capableDefault(spec); !claudeCodeModel(m) {
+			return releaseWithError(ctx, ops, spec.CardID,
+				fmt.Errorf("claude_code mode: the default model %q has no Claude Code id", m))
+		}
+
+		if err := checkClaudeCode(ctx, slog.Default()); err != nil {
+			return releaseWithError(ctx, ops, spec.CardID, err)
+		}
+	}
 
 	if err := prepareWorkspace(ctx, git, spec); err != nil {
 		return releaseWithError(ctx, ops, spec.CardID, err)
@@ -388,7 +433,7 @@ type fsmArgs struct {
 func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, error) {
 	// Guest bearer tokens are known at worker start, so they join the
 	// immutable redactor alongside the endpoint credentials.
-	red := redact.New(append([]string{a.spec.LLMKey, a.spec.MCPAPIKey, a.spec.GitToken},
+	red := redact.New(append([]string{a.spec.LLMKey, a.spec.LLMOAuthToken, a.spec.MCPAPIKey, a.spec.GitToken},
 		mobGuestTokens(a.spec.Mob)...))
 
 	hitl := a.spec.Interactive && !a.tcx.Autonomous
@@ -440,6 +485,11 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 	logLadderFaults(ctx, faults, a.ops, a.spec.CardID)
 	logReachability(ctx, reg, a.ops, a.spec.CardID)
 
+	exec, err := newExecutor(a.spec, tools.ScrubbedEnv(verifyEnv))
+	if err != nil {
+		return releaseWithError(ctx, a.ops, a.spec.CardID, fmt.Errorf("build executor: %w", err))
+	}
+
 	d := orchestrator.Deps{
 		Ops: a.ops,
 		Git: a.git,
@@ -449,6 +499,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 		PR:         pr,
 		PRGates:    pr,
 		Client:     a.client,
+		Executor:   exec,
 		Emit:       a.emit,
 		Registry:   reg,
 		WriteTools: tools.NewRegistry(wt...),
@@ -495,6 +546,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 			BestOfN:           resolveBestOfN(a.spec.BestOfN, mob),
 			Mob:               mob,
 			POC:               a.spec.POC,
+			ClaudeCode:        claudeCodeMode(a.spec),
 			Compaction: orchestrator.Compaction{
 				Enabled:         a.spec.CompactionEnabled,
 				Threshold:       a.spec.CompactionThreshold,
@@ -510,7 +562,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 		},
 	}
 
-	err := runOrchestrator(runCtx, d)
+	err = runOrchestrator(runCtx, d)
 
 	return mapFSMResult(ctx, a, red.Apply, err)
 }
@@ -528,7 +580,7 @@ func mapFSMResult(ctx context.Context, a fsmArgs, redact func(string) string, er
 		// Parked, not failed: the card stays in review for a human. No
 		// CompleteTask, no release.
 		slog.Info("review parked; leaving card in review", "card", a.spec.CardID)
-		reportParkedQuietly(ctx, a, parkReason(err))
+		reportParkedQuietly(ctx, a, parkReason(err), "", time.Time{})
 
 		return Result{Reason: "completed"}, nil
 
@@ -536,7 +588,7 @@ func mapFSMResult(ctx context.Context, a fsmArgs, redact func(string) string, er
 		// Parked, not failed: the card stays in review with a ## PR Gates
 		// note. No CompleteTask, no release - same shape as review parking.
 		slog.Info("pr gates parked; leaving card in review", "card", a.spec.CardID)
-		reportParkedQuietly(ctx, a, parkReason(err))
+		reportParkedQuietly(ctx, a, parkReason(err), "", time.Time{})
 
 		return Result{Reason: "completed"}, nil
 
@@ -569,6 +621,17 @@ func mapFSMResult(ctx context.Context, a fsmArgs, redact func(string) string, er
 		releaseQuietly(ctx, a.ops, a.spec.CardID)
 
 		return Result{Reason: "error"}, fmt.Errorf("orchestrator: %w", err)
+
+	case isUsageLimit(err):
+		// Usage-limit park: push WIP, keep the claim so report_parked is accepted
+		// and CM's completed callback keeps the park (review-park shape).
+		ule, _ := errors.AsType[*orchestrator.UsageLimitError](err)
+
+		slog.Info("usage limit reached; parking", "card", a.spec.CardID)
+		pushWIP(ctx, a)
+		reportParkedQuietly(ctx, a, usageLimitReason(ule), ule.Window, ule.ResetsAt)
+
+		return Result{Reason: "completed"}, nil
 
 	case a.endSession.Load() || ctx.Err() != nil || errorsIsCanceled(err):
 		// end_session / kill mid-FSM: the graceful park. Checked BEFORE the
@@ -747,8 +810,8 @@ func parkReason(err error) string {
 // reportParkedQuietly reports the park to CM so the board shows the parked
 // status. Best-effort: the park itself must never fail on a reporting error
 // (an older server without the tool just misses the board signal).
-func reportParkedQuietly(ctx context.Context, a fsmArgs, reason string) {
-	if err := a.ops.ReportParked(ctx, a.spec.CardID, reason); err != nil {
+func reportParkedQuietly(ctx context.Context, a fsmArgs, reason, window string, resetsAt time.Time) {
+	if err := a.ops.ReportParked(ctx, a.spec.CardID, reason, window, resetsAt); err != nil {
 		slog.Warn("report parked failed; board will not show the park",
 			"card", a.spec.CardID, "reason_head", reason[:min(len(reason), 120)], "error", err)
 	}
@@ -781,6 +844,27 @@ func isContextLimit(err error) bool {
 	var cle *orchestrator.ContextLimitError
 
 	return errors.As(err, &cle)
+}
+
+// isUsageLimit reports whether err is (or wraps) the orchestrator's usage-limit sentinel.
+func isUsageLimit(err error) bool {
+	_, ok := errors.AsType[*orchestrator.UsageLimitError](err)
+
+	return ok
+}
+
+// usageLimitReason is the board-facing park reason: the window and the reset time.
+func usageLimitReason(ule *orchestrator.UsageLimitError) string {
+	msg := "usage limit reached"
+	if ule.Window != "" {
+		msg += " (" + ule.Window + ")"
+	}
+
+	if ule.ResetsAt.IsZero() {
+		return msg + "; no reset time reported"
+	}
+
+	return msg + "; resets at " + ule.ResetsAt.UTC().Format(time.RFC3339)
 }
 
 // isMaxTurns reports whether err is (or wraps) the orchestrator's turn-cap sentinel.
@@ -1096,17 +1180,25 @@ func buildSkillTool(spec RunSpec, ops CardOps) tools.Tool {
 // falls back to the built-in bars for that role and reports it as a fault
 // the caller puts on the card.
 func buildRegistry(spec RunSpec) (*registry.Registry, []registry.LadderFault) {
-	capable := spec.Model
+	return registry.FromSelection(spec.Selection, capableDefault(spec), spec.MaxCapability)
+}
 
-	if capable == "" {
-		capable = spec.DefaultModel
+// capableDefault is the capable default buildRegistry resolves.
+func capableDefault(spec RunSpec) string {
+	switch {
+	case spec.Model != "":
+		return spec.Model
+	case spec.DefaultModel != "":
+		return spec.DefaultModel
+	default:
+		return config.DefaultCapableModel
 	}
+}
 
-	if capable == "" {
-		capable = config.DefaultCapableModel
-	}
+func claudeCodeModel(slug string) bool {
+	_, ok := registry.ClaudeCodeModelID(slug)
 
-	return registry.FromSelection(spec.Selection, capable, spec.MaxCapability)
+	return ok
 }
 
 // logLadderFaults puts each payload ladder that failed validation on the

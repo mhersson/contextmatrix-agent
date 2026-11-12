@@ -958,6 +958,9 @@ type planLLM struct {
 	// later call) return errPlanLLM instead of a scripted/default response.
 	// 0 (default) disables - every call succeeds.
 	errAfter int
+
+	// errWith, when set, replaces errPlanLLM as the error returned from errAfter.
+	errWith error
 }
 
 // errPlanLLM is the scripted failure returned once errAfter is reached.
@@ -999,6 +1002,10 @@ func (p *planLLM) next(req llm.Request) (llm.Response, error) {
 	}
 
 	if p.errAfter > 0 && call >= p.errAfter {
+		if p.errWith != nil {
+			return llm.Response{}, p.errWith
+		}
+
 		return llm.Response{}, errPlanLLM
 	}
 
@@ -1157,6 +1164,7 @@ func planTestDeps(ops *fakeOps, client llm.LLM) Deps {
 	return Deps{
 		Ops:       ops,
 		Client:    client,
+		Executor:  harnessExec{},
 		Emit:      events.NewEmitter(nil, nil),
 		Registry:  planTestRegistry(),
 		ReadTools: tools.NewRegistry(tools.NewReadTool(".")),
@@ -1298,4 +1306,65 @@ func legacyTierMarker(body, tier string) string {
 // with ErrEmptyResponse: the initial reply plus its two retries.
 func emptyReplies() []llm.Response {
 	return []llm.Response{{FinishReason: "stop"}, {FinishReason: "stop"}, {FinishReason: "stop"}}
+}
+
+// harnessExec forwards to the harness like modelexec.Harness, which this package
+// cannot import.
+type harnessExec struct{}
+
+func (harnessExec) Run(ctx context.Context, req RunRequest) (harness.Result, error) {
+	return harness.Run(ctx, req.Client, req.Registry, req.Emit, req.Task, req.Config)
+}
+
+func (harnessExec) SubscriptionUsage() []cmclient.SubscriptionUsage { return nil }
+
+func (harnessExec) SpawnSubagents(ctx context.Context, req FanoutRequest) ([]harness.SubagentResult, error) {
+	return harness.SpawnSubagents(ctx, req.Client, req.Root, req.Emit, req.Specs, req.Opts)
+}
+
+type execResult struct {
+	res harness.Result
+	err error
+}
+
+// recordingExec records every request and answers results in order; once they
+// are exhausted a run completes with "done". Safe for concurrent use.
+type recordingExec struct {
+	mu      sync.Mutex
+	runs    []RunRequest
+	fanouts []FanoutRequest
+	results []execResult
+	windows []cmclient.SubscriptionUsage
+}
+
+func (r *recordingExec) SubscriptionUsage() []cmclient.SubscriptionUsage { return r.windows }
+
+func (r *recordingExec) Run(_ context.Context, req RunRequest) (harness.Result, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.runs = append(r.runs, req)
+
+	if len(r.results) == 0 {
+		return harness.Result{Completed: true, Reason: "done"}, nil
+	}
+
+	next := r.results[0]
+	r.results = r.results[1:]
+
+	return next.res, next.err
+}
+
+func (r *recordingExec) SpawnSubagents(_ context.Context, req FanoutRequest) ([]harness.SubagentResult, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.fanouts = append(r.fanouts, req)
+
+	out := make([]harness.SubagentResult, len(req.Specs))
+	for i, s := range req.Specs {
+		out[i] = harness.SubagentResult{Role: s.Role, Output: s.Role}
+	}
+
+	return out, nil
 }

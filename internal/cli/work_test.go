@@ -975,3 +975,17 @@ func TestSpecFromEnv_PlaybookBaseBranchVars(t *testing.T) {
 		assert.False(t, spec.CreateBaseBranch)
 	})
 }
+
+func TestReadLLMSecretsTakesTheOAuthTokenFromTheFileOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "env")
+	require.NoError(t, os.WriteFile(path, []byte("LLM_TYPE=claude_code\nLLM_OAUTH_TOKEN=file-tok\n"), 0o600))
+
+	src, err := secrets.Open(path)
+	require.NoError(t, err)
+
+	t.Setenv("LLM_OAUTH_TOKEN", "env-tok")
+
+	spec := readLLMSecrets(worker.RunSpec{}, src)
+	assert.Equal(t, "file-tok", spec.LLMOAuthToken)
+	assert.Equal(t, "claude_code", spec.LLMType)
+}

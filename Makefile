@@ -39,6 +39,9 @@ TASK_SHA256_ARM64     ?= d7189d439d4a6058e39e1b2acd7c8b27acd4856691b408f23b242e4
 GH_VERSION            ?= 2.103.3
 GH_SHA256_AMD64       ?= 4c806978ffce1cec70853302a56d70ac6da4f19bae7adca4e1a8ab00633dd91d
 GH_SHA256_ARM64       ?= ee32df2323c8847f5fac6cb6b4b69ca75828e9329a8f22f677021f7b3306ce63
+CLAUDE_CODE_VERSION   ?= 2.1.322
+CLAUDE_CODE_SHA512_AMD64 ?= d03a1a3405cb58261820669c85604291352c4bc74e3a0be4e11d9f14a76b2de8cef579514f069650c0fd38d7439afd1cb1da70c63e2a2d437acd631a1b64b3ea
+CLAUDE_CODE_SHA512_ARM64 ?= 618369d68a7ced659c04413a8c2d6778e8cc0cf767e08cbe9141f215c2351ac2e5e08c07ec48d997054a729b19a956c4d085c415a3a5766c8e1c2d72de3d7c02
 
 # Build info stamped into the binary and read back on /health.
 VERSION    ?= $(shell git describe --tags --exact-match 2>/dev/null)
@@ -81,7 +84,10 @@ WORKER_BUILD_ARGS = \
 	--build-arg TASK_SHA256_ARM64=$(TASK_SHA256_ARM64) \
 	--build-arg GH_VERSION=$(GH_VERSION) \
 	--build-arg GH_SHA256_AMD64=$(GH_SHA256_AMD64) \
-	--build-arg GH_SHA256_ARM64=$(GH_SHA256_ARM64)
+	--build-arg GH_SHA256_ARM64=$(GH_SHA256_ARM64) \
+	--build-arg CLAUDE_CODE_VERSION=$(CLAUDE_CODE_VERSION) \
+	--build-arg CLAUDE_CODE_SHA512_AMD64=$(CLAUDE_CODE_SHA512_AMD64) \
+	--build-arg CLAUDE_CODE_SHA512_ARM64=$(CLAUDE_CODE_SHA512_ARM64)
 
 # The revision label serve reads back for /health's worker_image_revision.
 WORKER_LABELS = --label org.opencontainers.image.revision=$(GIT_COMMIT)

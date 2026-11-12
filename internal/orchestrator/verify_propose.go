@@ -110,14 +110,15 @@ func (o *run) proposeVerify(ctx context.Context) (verifyPlan, error) {
 	hc := o.harnessConfig(model)
 	hc.MaxTurns = min(cfg.MaxTurns, proposeTurnCap)
 
-	res, dur, err := o.runModelCfg(ctx, d.ReadTools, task, model, hc)
+	res, dur, err := o.runModelCfg(ctx, o.mainScope(), d.ReadTools, task, model, hc)
 
 	used := o.spendAndReport(ctx, o.ledger, cfg.CardID, "verify: report propose usage failed", res, model, "verify_propose", dur)
 
 	if err != nil {
-		// A budget overspend during the call parks; any other model error (transport,
-		// context limit, incapable) degrades to skip - an unproposed gate is safe.
-		if isBudgetError(err) {
+		// A budget overspend or a usage limit during the call parks; any other model
+		// error (transport, context limit, incapable) degrades to skip - an
+		// unproposed gate is safe.
+		if isBudgetOrUsageLimit(err) {
 			return verifyPlan{}, err
 		}
 

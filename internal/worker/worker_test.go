@@ -21,6 +21,7 @@ import (
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/config"
+	"github.com/mhersson/contextmatrix-agent/internal/modelexec"
 	"github.com/mhersson/contextmatrix-agent/internal/orchestrator"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-backendkit/frames"
@@ -231,8 +232,8 @@ func (f *fakeOps) ReportPush(_ context.Context, cardID, branch, prURL string) er
 	return nil
 }
 
-func (f *fakeOps) ReportParked(_ context.Context, cardID, reason string) error {
-	f.record("ReportParked", cardID, reason)
+func (f *fakeOps) ReportParked(_ context.Context, cardID, reason, window string, resetsAt time.Time) error {
+	f.record("ReportParked", cardID, reason, window, resetsAt)
 
 	return nil
 }
@@ -1225,6 +1226,7 @@ func TestReviewParkedMapsToCompleted(t *testing.T) {
 	require.Equal(t, 1, ops.count("ReportParked"), "the park must be reported to CM so the board can show it")
 	args := ops.argsOf("ReportParked")
 	assert.Equal(t, "review parked: attempts cap exhausted without approval", args[1])
+	assert.Empty(t, args[2], "a review park carries no usage-limit window")
 }
 
 // TestMapFSMResult_GatesParked: a GatesParkedError is the same graceful shape as
@@ -1251,6 +1253,7 @@ func TestMapFSMResult_GatesParked(t *testing.T) {
 	require.Equal(t, 1, ops.count("ReportParked"), "the park must be reported to CM so the board can show it")
 	args := ops.argsOf("ReportParked")
 	assert.Equal(t, "pr gates parked: PR creation failed - nothing to gate on", args[1])
+	assert.Empty(t, args[2], "a gates park carries no usage-limit window")
 }
 
 // TestFSMDepsCarryGateWiring: the worker hands the FSM the gh gates seam and the
@@ -2691,4 +2694,280 @@ func TestSharedTrackerDedupesAcrossConstructionSites(t *testing.T) {
 	readOnlyToolsWithRoots(rrLog, "CMX-001", ws, []string{present})
 	assert.Empty(t, buf.String(),
 		"the shared tracker must dedupe an identical outcome reached through a different construction site")
+}
+
+func TestRunFSMRedactorMasksTheOAuthToken(t *testing.T) {
+	remote := setupBareRemote(t)
+
+	var redact func(string) string
+
+	swapRunOrchestrator(t, func(_ context.Context, d orchestrator.Deps) error {
+		redact = d.Redact
+
+		return nil
+	})
+
+	spec := baseSpec(t, remote, t.TempDir())
+	spec.LLMOAuthToken = "oat-secret-123"
+
+	_, err := Run(context.Background(), spec, newFakeOps(), &scriptedLLM{}, events.NewEmitter(io.Discard, io.Discard), openStdin(t))
+	require.NoError(t, err)
+	require.NotNil(t, redact)
+	assert.NotContains(t, redact("x oat-secret-123 y"), "oat-secret-123")
+}
+
+// TestMapFSMResultParksOnUsageLimit: a usage limit pushes WIP and reports the
+// park with the reset time; the claim stays so CM's completed callback keeps it.
+func TestMapFSMResultParksOnUsageLimit(t *testing.T) {
+	reset := time.Date(2026, 11, 18, 7, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name  string
+		reset time.Time
+	}{
+		{"with reset time", reset},
+		{"without reset time", time.Time{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			remote := setupBareRemote(t)
+			wsParent := t.TempDir()
+			ops := newFakeOps()
+
+			swapRunOrchestrator(t, func(_ context.Context, d orchestrator.Deps) error {
+				require.NoError(t, os.WriteFile(filepath.Join(d.Cfg.Workspace, "wip.txt"), []byte("partial\n"), 0o644))
+
+				return fmt.Errorf("orchestrator: %w", &orchestrator.PhaseError{
+					Phase: "execute",
+					Err:   &orchestrator.UsageLimitError{Window: "seven_day", ResetsAt: tt.reset},
+				})
+			})
+
+			res, err := Run(context.Background(), baseSpec(t, remote, wsParent), ops, &scriptedLLM{},
+				events.NewEmitter(io.Discard, io.Discard), openStdin(t))
+			require.NoError(t, err)
+			assert.Equal(t, "completed", res.Reason)
+
+			assert.True(t, remoteHasBranch(t, remote, "cm/cmx-001"), "usage limit pushes WIP")
+			assert.Equal(t, 0, ops.count("ReleaseCard"), "the claim stays for the completed callback")
+			assert.Equal(t, 0, ops.count("CompleteTask"))
+
+			require.Equal(t, 1, ops.count("ReportParked"))
+			args := ops.argsOf("ReportParked")
+			assert.Contains(t, args[1], "seven_day")
+
+			assert.Equal(t, "seven_day", args[2])
+
+			got, ok := args[3].(time.Time)
+			require.True(t, ok)
+			assert.True(t, tt.reset.Equal(got))
+		})
+	}
+}
+
+func swapCheckClaudeCode(t *testing.T, fn func(context.Context, *slog.Logger) error) {
+	t.Helper()
+
+	prev := checkClaudeCode
+	checkClaudeCode = fn
+
+	t.Cleanup(func() { checkClaudeCode = prev })
+}
+
+func claudeSpec(t *testing.T, remote, wsParent, token string) RunSpec {
+	t.Helper()
+
+	spec := baseSpec(t, remote, wsParent)
+	spec.LLMType = protocol.LLMEndpointTypeClaudeCode
+	spec.LLMOAuthToken = token
+	spec.Model = "anthropic/claude-opus-5.5"
+
+	return spec
+}
+
+func TestRunClaudeCodeNeedsAClaudeDefaultModel(t *testing.T) {
+	tests := []struct {
+		name         string
+		model        string
+		defaultModel string
+		wantErrModel string // "" = the run starts
+	}{
+		{"serve default is not a Claude model", "", "default/model", "default/model"},
+		{"compiled-in fallback is not a Claude model", "", "", config.DefaultCapableModel},
+		{"trigger default is not a Claude model", "openai/gpt-6", "claude-sonnet-5-5", "openai/gpt-6"},
+		{"trigger default maps", "anthropic/claude-opus-5.5", "default/model", ""},
+		{"serve default maps", "", "claude-sonnet-5-5", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			checked := false
+
+			swapCheckClaudeCode(t, func(context.Context, *slog.Logger) error {
+				checked = true
+
+				return nil
+			})
+			swapRunOrchestrator(t, func(context.Context, orchestrator.Deps) error { return nil })
+
+			spec := claudeSpec(t, setupBareRemote(t), t.TempDir(), "t")
+			spec.Model = tt.model
+			spec.DefaultModel = tt.defaultModel
+
+			ops := newFakeOps()
+			_, err := Run(context.Background(), spec, ops, &scriptedLLM{}, events.NewEmitter(io.Discard, io.Discard), openStdin(t))
+
+			if tt.wantErrModel == "" {
+				require.NoError(t, err)
+				assert.Contains(t, ops.ops(), "ClaimCard")
+
+				return
+			}
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErrModel)
+			assert.NotContains(t, ops.ops(), "ClaimCard")
+			assert.False(t, checked, "the model check needs no claude binary")
+		})
+	}
+}
+
+func TestRunClaudeCodeStopsBeforeClaimWithoutTheBinary(t *testing.T) {
+	errSentinel := errors.New("no claude")
+
+	swapCheckClaudeCode(t, func(context.Context, *slog.Logger) error { return errSentinel })
+
+	ops := newFakeOps()
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	_, err := Run(context.Background(), claudeSpec(t, setupBareRemote(t), t.TempDir(), "t"), ops, &scriptedLLM{}, emit, openStdin(t))
+	require.ErrorIs(t, err, errSentinel)
+	assert.NotContains(t, ops.ops(), "ClaimCard")
+}
+
+func TestRunClaudeCodeNeedsAToken(t *testing.T) {
+	called := false
+
+	swapCheckClaudeCode(t, func(context.Context, *slog.Logger) error {
+		called = true
+
+		return nil
+	})
+
+	ops := newFakeOps()
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	_, err := Run(context.Background(), claudeSpec(t, setupBareRemote(t), t.TempDir(), ""), ops, &scriptedLLM{}, emit, openStdin(t))
+	require.Error(t, err)
+	assert.NotContains(t, ops.ops(), "ClaimCard")
+	assert.False(t, called)
+}
+
+func TestRunEndpointModeSkipsTheClaudeCheck(t *testing.T) {
+	called := false
+
+	swapCheckClaudeCode(t, func(context.Context, *slog.Logger) error {
+		called = true
+
+		return errors.New("must not run")
+	})
+	swapRunOrchestrator(t, func(context.Context, orchestrator.Deps) error { return nil })
+
+	spec := baseSpec(t, setupBareRemote(t), t.TempDir())
+	spec.LLMType = "openrouter"
+
+	emit := events.NewEmitter(io.Discard, io.Discard)
+
+	_, err := Run(context.Background(), spec, newFakeOps(), &scriptedLLM{}, emit, openStdin(t))
+	require.NoError(t, err)
+	assert.False(t, called)
+}
+
+func TestNewExecutorPicksByEndpointType(t *testing.T) {
+	tests := []struct {
+		name string
+		spec RunSpec
+		want any
+	}{
+		{"openrouter", RunSpec{LLMType: "openrouter"}, modelexec.Harness{}},
+		{"claude_code", RunSpec{LLMType: protocol.LLMEndpointTypeClaudeCode, LLMOAuthToken: "t"}, &modelexec.Claude{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ex, err := newExecutor(tt.spec, []string{"PATH=/usr/bin"})
+			require.NoError(t, err)
+			assert.IsType(t, tt.want, ex)
+		})
+	}
+}
+
+func TestRunFSMWiresClaudeCodeMode(t *testing.T) {
+	swapCheckClaudeCode(t, func(context.Context, *slog.Logger) error { return nil })
+
+	tests := []struct {
+		name     string
+		llmType  string
+		token    string
+		wantCC   bool
+		wantExec any
+	}{
+		{"claude_code", protocol.LLMEndpointTypeClaudeCode, "t", true, &modelexec.Claude{}},
+		{"openrouter", "openrouter", "", false, modelexec.Harness{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got orchestrator.Deps
+
+			swapRunOrchestrator(t, func(_ context.Context, d orchestrator.Deps) error {
+				got = d
+
+				return nil
+			})
+
+			spec := baseSpec(t, setupBareRemote(t), t.TempDir())
+			spec.LLMType = tt.llmType
+			spec.LLMOAuthToken = tt.token
+			spec.Model = "anthropic/claude-opus-5.5"
+
+			emit := events.NewEmitter(io.Discard, io.Discard)
+
+			_, err := Run(context.Background(), spec, newFakeOps(), &scriptedLLM{}, emit, openStdin(t))
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantCC, got.Cfg.ClaudeCode)
+			assert.IsType(t, tt.wantExec, got.Executor)
+		})
+	}
+}
+
+func TestNewExecutorPassesCAAndScrubbedEnvToClaude(t *testing.T) {
+	var got modelexec.ClaudeConfig
+
+	called := 0
+	orig := newClaude
+	newClaude = func(cfg modelexec.ClaudeConfig) (*modelexec.Claude, error) {
+		called++
+		got = cfg
+
+		return orig(cfg)
+	}
+
+	t.Cleanup(func() { newClaude = orig })
+
+	spec := RunSpec{LLMType: protocol.LLMEndpointTypeClaudeCode, LLMOAuthToken: "t", CACertFile: "/run/cm-ca/ca.crt", BashTimeoutMax: 300}
+
+	_, err := newExecutor(spec, []string{"PATH=/usr/bin"})
+	require.NoError(t, err)
+	require.Equal(t, 1, called)
+	assert.Contains(t, got.Env, "NODE_EXTRA_CA_CERTS=/run/cm-ca/ca.crt")
+	assert.Contains(t, got.Env, "PATH=/usr/bin")
+	assert.Contains(t, got.Env, "BASH_MAX_TIMEOUT_MS=300000")
+
+	called = 0
+
+	_, err = newExecutor(RunSpec{LLMType: "openrouter", CACertFile: "/run/cm-ca/ca.crt"}, []string{"PATH=/usr/bin"})
+	require.NoError(t, err)
+	assert.Zero(t, called)
 }
