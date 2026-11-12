@@ -806,7 +806,7 @@ func (o *run) cleanupPass(ctx context.Context, plan verifyPlan, req fixRequest, 
 		// the run nothing beyond whatever the coder did not get to. What it
 		// committed is proven or dropped by the gate below like any other fixup.
 		d.logCard(ctx, "review: the cleanup fix pass hit its turn cap - keeping what it committed, if anything")
-	case isParkError(ferr):
+	case isParkError(ferr) || isBudgetOrUsageLimit(ferr):
 		d.logCard(ctx, "review: approved with %d surviving finding(s), but the cleanup fix pass parked - stopping: %s", len(fixes), ferr)
 
 		return ferr

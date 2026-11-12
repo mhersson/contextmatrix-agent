@@ -4665,6 +4665,26 @@ func TestReviewApprovedCleanupPassPropagatesParks(t *testing.T) {
 	assert.ErrorAs(t, err, &bee, "the worker parks on this sentinel and pushes the WIP; nil would integrate a dirty tree")
 }
 
+// TestCleanupPassSurfacesAUsageLimit: a cleanup fix run refused by a recorded
+// usage limit parks the approved run on the limit, not "proceeding approved".
+func TestCleanupPassSurfacesAUsageLimit(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true, headSHA: "approved-sha"}
+	client := &planLLM{}
+	d := reviewTestDeps(t, ops, git, client, reviewerRegistry())
+
+	o := newReviewRun(d, cmclient.TaskContext{Title: "Parent", Description: "body", State: "in_progress"}, 0)
+	o.usageLimit.Store(&UsageLimitError{Window: "five_hour"})
+
+	fixes := []fix{{File: "a.go", Issue: "bug", Suggestion: "patch", Severity: "minor"}}
+	err := o.cleanupPass(context.Background(), verifyPlan{}, fixRequest{Findings: "a.go: bug", NoEscalate: true}, "a.go: bug", fixes)
+
+	_, ok := errors.AsType[*UsageLimitError](err)
+	require.True(t, ok, "err=%v", err)
+	assert.Empty(t, client.tasks, "the refused fix run never reached the model")
+	assert.NotContains(t, git.hardResetRefs, "HEAD", "a park keeps the tree for the WIP push")
+}
+
 // TestReviewAuthoritativeApprovedWithFindingsFramesSummary covers the honesty
 // contract on the cliff path, which had none: the authoritative pass
 // deliberately runs no cleanup, so an approving verdict that still carries

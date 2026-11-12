@@ -153,10 +153,13 @@ secrets_dir: /var/run/cm-agent/secrets
 # LLM proxy trusts it, on top of the system pool, for its upstream TLS. It is
 # also bind-mounted read-only into each worker at /run/cm-ca/ca.crt and the
 # worker trusts it for its OWN outbound TLS - the harness LLM client, the
-# MCP/cmclient connection, and the git/gh subprocesses. It does NOT cover
-# model-invoked bash tools (curl/pip/npm), whose env the harness scrubs;
-# covering those needs a harness change. This service's other outbound calls
-# use the OS trust store, so install the CA there separately if needed.
+# MCP/cmclient connection, and the git/gh subprocesses. On the harness it does
+# NOT cover model-invoked bash tools (curl/pip/npm), whose env the harness
+# scrubs; covering those needs a harness change. In claude_code mode claude
+# gets it as NODE_EXTRA_CA_CERTS, which its Bash children inherit, so
+# Node-based tools (npm) trust it there while curl and pip still do not.
+# This service's other outbound calls use the OS trust store, so install the
+# CA there separately if needed.
 # serve reads the file at start-up as its own user, so an unreadable file, or
 # one holding no PEM certificate, stops serve from starting.
 # Empty = disabled.
