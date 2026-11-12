@@ -2937,3 +2937,32 @@ func TestRunFSMWiresClaudeCodeMode(t *testing.T) {
 		})
 	}
 }
+
+func TestNewExecutorPassesCAAndScrubbedEnvToClaude(t *testing.T) {
+	var got modelexec.ClaudeConfig
+
+	called := 0
+	orig := newClaude
+	newClaude = func(cfg modelexec.ClaudeConfig) (*modelexec.Claude, error) {
+		called++
+		got = cfg
+
+		return orig(cfg)
+	}
+
+	t.Cleanup(func() { newClaude = orig })
+
+	spec := RunSpec{LLMType: protocol.LLMEndpointTypeClaudeCode, LLMOAuthToken: "t", CACertFile: "/run/cm-ca/ca.crt"}
+
+	_, err := newExecutor(spec, []string{"PATH=/usr/bin"})
+	require.NoError(t, err)
+	require.Equal(t, 1, called)
+	assert.Contains(t, got.Env, "NODE_EXTRA_CA_CERTS=/run/cm-ca/ca.crt")
+	assert.Contains(t, got.Env, "PATH=/usr/bin")
+
+	called = 0
+
+	_, err = newExecutor(RunSpec{LLMType: "openrouter", CACertFile: "/run/cm-ca/ca.crt"}, []string{"PATH=/usr/bin"})
+	require.NoError(t, err)
+	assert.Zero(t, called)
+}

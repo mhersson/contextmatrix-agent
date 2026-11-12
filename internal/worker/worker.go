@@ -43,18 +43,21 @@ var runOrchestrator = orchestrator.Run
 // checkClaudeCode is the start-of-run `claude` probe seam; tests swap it.
 var checkClaudeCode = modelexec.CheckClaudeCode
 
+// newClaude is the Claude executor constructor seam; tests swap it.
+var newClaude = modelexec.NewClaude
+
 func claudeCodeMode(spec RunSpec) bool {
 	return spec.LLMType == protocol.LLMEndpointTypeClaudeCode
 }
 
 // newExecutor builds the run's executor: the Claude Code executor in claude_code
-// mode, else the harness. The token reaches only NewClaude.
+// mode, else the harness. Within this function the token reaches only NewClaude.
 func newExecutor(spec RunSpec, bashEnv []string) (orchestrator.Executor, error) {
 	if !claudeCodeMode(spec) {
 		return modelexec.Harness{}, nil
 	}
 
-	return modelexec.NewClaude(modelexec.ClaudeConfig{
+	return newClaude(modelexec.ClaudeConfig{
 		OAuthToken: spec.LLMOAuthToken,
 		Env:        modelexec.ClaudeEnv(bashEnv, spec.CACertFile),
 		Effort:     spec.ReasoningEffort,
