@@ -1470,7 +1470,7 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 	var b strings.Builder
 
 	for i, res := range results {
-		// The read-only specialist panel runs via harness.SpawnSubagents, which
+		// The read-only specialist panel runs via execFanout, which
 		// exposes no per-subagent wall time, so duration is 0 (omitted on the
 		// wire); phase and step still ride the report.
 		o.spendAndReport(ctx, o.ledger, cfg.CardID, "review: report specialist usage failed",

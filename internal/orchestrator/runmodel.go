@@ -131,7 +131,7 @@ func (o *run) runModel(ctx context.Context, reg *tools.Registry, prompt, model s
 	return o.runModelCfg(ctx, o.mainScope(), reg, prompt, model, o.harnessConfig(model))
 }
 
-// runModelCfg is the single choke point wrapping harness.Run. It times the
+// runModelCfg is the phase-run choke point wrapping execRun. It times the
 // call and returns the wall-clock duration alongside the result so every caller
 // can report it to CM by return value - never via a shared field on run, which
 // concurrent Best-of-N candidates and mob seats would race on.

@@ -136,11 +136,13 @@ func TestExecFanoutClaudeCodeCapsAndRecords(t *testing.T) {
 	t.Run("exhausted ledger never starts", func(t *testing.T) {
 		rec := &recordingExec{}
 		o := execTestRun(true, rec)
-		o.ledger = NewLedger(2, 2)
+		o.ledger = NewLedger(2, 2.5)
 
 		_, err := o.execFanout(t.Context(), FanoutRequest{Specs: specs})
-		_, ok := errors.AsType[*BudgetExceededError](err)
-		assert.True(t, ok)
+		be, ok := errors.AsType[*BudgetExceededError](err)
+		require.True(t, ok)
+		assert.InDelta(t, 2.5, be.Spent, 1e-9)
+		assert.InDelta(t, 2.0, be.Max, 1e-9, "the refusal names the ceiling")
 		assert.Empty(t, rec.fanouts)
 	})
 

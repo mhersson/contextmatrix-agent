@@ -343,6 +343,25 @@ func TestExecuteSubtaskMaxCostNeverCompletes(t *testing.T) {
 	assert.GreaterOrEqual(t, indexOfCall(calls, "ReleaseCard:SUB-1"), 0, "parked subtask claim must be released")
 }
 
+// TestExecuteSubtaskNeverClaimedAfterAUsageLimit: once a usage limit is
+// recorded, the next subtask is not claimed, so the board never shows it started.
+func TestExecuteSubtaskNeverClaimedAfterAUsageLimit(t *testing.T) {
+	ops := &fakeOps{}
+	rec := &recordingExec{}
+	d := execTestDeps(ops, &fakeGit{committed: true}, nil)
+	d.Executor = rec
+
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")}}, 0)
+	o.usageLimit.Store(&UsageLimitError{Window: "five_hour"})
+
+	err := runExecute(context.Background(), o)
+
+	_, ok := errors.AsType[*UsageLimitError](err)
+	require.True(t, ok, "err=%v", err)
+	assert.Equal(t, -1, indexOfCall(ops.recorded(), "ClaimCard:SUB-1"), "calls=%v", ops.recorded())
+	assert.Empty(t, rec.runs)
+}
+
 func TestExecuteCoderPromptBody(t *testing.T) {
 	t.Run("planner description reaches the coder prompt", func(t *testing.T) {
 		ops := &fakeOps{}

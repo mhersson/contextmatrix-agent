@@ -74,7 +74,9 @@ func TestWarnUnresolvablePin_CoderAndReviewerAreIndependent(t *testing.T) {
 	require.Len(t, ops.logs, 2, "repeated reviewer call must not produce additional log entry")
 }
 
-func TestClaudeCodePins(t *testing.T) {
+func claudePinRegistry(t *testing.T) *registry.Registry {
+	t.Helper()
+
 	reg, faults := registry.FromSelection(&protocol.SelectionContext{
 		Candidates: []protocol.CandidateModel{
 			{Slug: "claude-opus-5-5", ContextWindow: 200000, CoderPrior: 0.9, ReviewerPrior: 0.9},
@@ -83,19 +85,23 @@ func TestClaudeCodePins(t *testing.T) {
 	}, "claude-opus-5-5", false)
 	require.Empty(t, faults)
 
+	return reg
+}
+
+func TestClaudeCodePins(t *testing.T) {
+	reg := claudePinRegistry(t)
+
 	tests := []struct {
-		name       string
-		claudeCode bool
-		pin        func(tc *cmclient.TaskContext) *string
-		in         string
-		want       string
-		logged     string
+		name   string
+		pin    func(tc *cmclient.TaskContext) *string
+		in     string
+		want   string
+		logged string
 	}{
-		{"mapped coder", true, func(tc *cmclient.TaskContext) *string { return &tc.ModelCoder }, "anthropic/claude-opus-5.5", "claude-opus-5-5", ""},
-		{"native reviewer", true, func(tc *cmclient.TaskContext) *string { return &tc.ModelReviewer }, "claude-sonnet-5-5", "claude-sonnet-5-5", ""},
-		{"foreign orchestrator", true, func(tc *cmclient.TaskContext) *string { return &tc.ModelOrchestrator }, "openai/gpt-6", "", "openai/gpt-6"},
-		{"non-candidate coder", true, func(tc *cmclient.TaskContext) *string { return &tc.ModelCoder }, "anthropic/claude-haiku-5.5", "", "anthropic/claude-haiku-5.5"},
-		{"endpoint mode untouched", false, func(tc *cmclient.TaskContext) *string { return &tc.ModelCoder }, "anthropic/claude-opus-5.5", "anthropic/claude-opus-5.5", ""},
+		{"mapped coder", func(tc *cmclient.TaskContext) *string { return &tc.ModelCoder }, "anthropic/claude-opus-5.5", "claude-opus-5-5", ""},
+		{"native reviewer", func(tc *cmclient.TaskContext) *string { return &tc.ModelReviewer }, "claude-sonnet-5-5", "claude-sonnet-5-5", ""},
+		{"foreign orchestrator", func(tc *cmclient.TaskContext) *string { return &tc.ModelOrchestrator }, "openai/gpt-6", "", "openai/gpt-6"},
+		{"non-candidate coder", func(tc *cmclient.TaskContext) *string { return &tc.ModelCoder }, "anthropic/claude-haiku-5.5", "", "anthropic/claude-haiku-5.5"},
 	}
 
 	for _, tt := range tests {
@@ -103,12 +109,10 @@ func TestClaudeCodePins(t *testing.T) {
 			ops := &fakeOps{}
 			o := mobTestRun(ops, MobConfig{}, 0)
 			o.d.Registry = reg
-			o.d.Cfg.ClaudeCode = tt.claudeCode
+			o.d.Cfg.ClaudeCode = true
 			*tt.pin(&o.tc) = tt.in
 
-			if tt.claudeCode {
-				o.claudeCodePins(t.Context())
-			}
+			o.claudeCodePins(t.Context())
 
 			assert.Equal(t, tt.want, *tt.pin(&o.tc))
 
@@ -122,4 +126,31 @@ func TestClaudeCodePins(t *testing.T) {
 			assert.Contains(t, ops.logs[0], tt.logged)
 		})
 	}
+}
+
+func TestNewRunMapsPinsOnlyInClaudeCodeMode(t *testing.T) {
+	tc := cmclient.TaskContext{ModelCoder: "anthropic/claude-opus-5.5", ModelReviewer: "openai/gpt-6"}
+
+	t.Run("claude code", func(t *testing.T) {
+		ops := &fakeOps{}
+		d := execTestDeps(ops, &fakeGit{}, &planLLM{})
+		d.Registry = claudePinRegistry(t)
+		d.Cfg.ClaudeCode = true
+
+		o := newRun(t.Context(), d, tc)
+		assert.Equal(t, "claude-opus-5-5", o.tc.ModelCoder)
+		assert.Empty(t, o.tc.ModelReviewer)
+		assert.True(t, ops.loggedContains("openai/gpt-6"), "the cleared pin gets a card note; logs=%v", ops.logs)
+	})
+
+	t.Run("endpoint", func(t *testing.T) {
+		ops := &fakeOps{}
+		d := execTestDeps(ops, &fakeGit{}, &planLLM{})
+		d.Registry = claudePinRegistry(t)
+
+		o := newRun(t.Context(), d, tc)
+		assert.Equal(t, tc.ModelCoder, o.tc.ModelCoder)
+		assert.Equal(t, tc.ModelReviewer, o.tc.ModelReviewer)
+		assert.False(t, ops.loggedContains("openai/gpt-6"), "logs=%v", ops.logs)
+	})
 }

@@ -85,9 +85,10 @@ func runIntegrate(ctx context.Context, o *run) error {
 	if o.tc.CreatePR {
 		url, err := o.openPR(ctx)
 		if err != nil {
-			// Budget parks must surface so the worker can park the run; any other PR
-			// failure is non-fatal - the push already landed, so the work is safe.
-			if _, ok := errors.AsType[*BudgetExceededError](err); ok {
+			// Budget and usage-limit parks must surface so the worker can park the
+			// run; any other PR failure is non-fatal - the push already landed, so
+			// the work is safe.
+			if isBudgetOrUsageLimit(err) {
 				return err
 			}
 

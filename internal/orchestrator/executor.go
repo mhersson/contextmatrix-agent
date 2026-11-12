@@ -157,17 +157,15 @@ func (o *run) execFanout(ctx context.Context, req FanoutRequest) ([]harness.Suba
 	}
 
 	if o.d.Cfg.ClaudeCode {
-		if err := o.ledger.Check(); err != nil {
-			return nil, err
-		}
-
 		req.BudgetUSD = 0
 
+		// One read, as in execRun: a 0 share would be vendorkit's "no cap".
 		if remaining, capped := o.ledger.Remaining(); capped {
-			req.BudgetUSD = remaining / float64(max(len(req.Specs), 1))
-			if req.BudgetUSD <= 0 {
-				return nil, &BudgetExceededError{Spent: o.ledger.Spent(), Max: o.ledger.Spent()}
+			if remaining <= 0 {
+				return nil, &BudgetExceededError{Spent: o.ledger.Spent(), Max: o.ledger.max}
 			}
+
+			req.BudgetUSD = remaining / float64(max(len(req.Specs), 1))
 		}
 
 		if req.OnDelta == nil && o.progress != nil {

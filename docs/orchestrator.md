@@ -495,11 +495,13 @@ Claude Code's notional (list-price) cost.
 ### Usage limit
 
 Once any run reports the subscription's usage limit, every later model run of
-the card run is refused without starting, no further phase is entered, and the
-run ends parked on the limit. The worker pushes the WIP and reports the park
-with the reset time (`resets_at`, omitted when unknown). The card stays in its
-lane, keeps its persisted phase, and resumes by a human trigger after the
-reset.
+the card run is refused without starting, no further subtask is claimed, no
+further phase is entered, and the run ends parked on the limit. The verify
+proposal, the bug diagnosis and the PR body return a refusal as that park
+instead of degrading past it as their own failure. The worker pushes the WIP
+and reports the park with the reset time (`resets_at`, omitted when unknown).
+The card stays in its lane, keeps its persisted phase, and resumes by a human
+trigger after the reset.
 
 ## Verify resolution
 

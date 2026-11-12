@@ -351,7 +351,7 @@ func newSessionID() string {
 	return h[:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:]
 }
 
-// mobSeatRunner returns the SeatRunner: each turn is a fresh harness run on
+// mobSeatRunner returns the SeatRunner: each turn is one executor run on
 // the seat's model with read-only tools, the seat persona system prompt, and
 // the per-turn cost cap. sessions carries each seat's full message
 // transcript (tool calls and results included) and the model that wrote it,
@@ -384,7 +384,7 @@ func (o *run) mobSeatRunner(sink *seatDebugSink, perTurnCap float64, step string
 
 		emit := events.NewEmitter(io.Discard, sink.named(seat.Name))
 
-		// Seats bypass runModelCfg and call harness.Run directly, so time the
+		// Seats bypass runModelCfg and call execRun directly, so time the
 		// call locally; the duration travels by value here because seats fan out
 		// concurrently under the loopback server.
 		start := time.Now()
@@ -498,7 +498,7 @@ func (o *run) mobModeratorRunner(sink *seatDebugSink, step string) mob.Moderator
 		cfg := o.harnessConfig(model)
 		cfg.MaxTurns = mobModeratorMaxTurns
 
-		// The moderator bypasses runModelCfg (toolless harness.Run), so time it
+		// The moderator bypasses runModelCfg (a toolless execRun), so time it
 		// locally and thread the duration to the usage report by value.
 		start := time.Now()
 		res, err := o.execRun(ctx, o.ledger, RunRequest{Client: o.d.Client, Registry: tools.NewRegistry(), Emit: emit, Task: prompt, Config: cfg, Dir: o.d.Cfg.Workspace})

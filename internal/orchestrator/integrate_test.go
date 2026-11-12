@@ -252,6 +252,26 @@ func TestIntegrateBudgetGate(t *testing.T) {
 	assert.Equal(t, -1, indexOfCall(calls, "TransitionCard:done"), "no transition to done after a budget park; calls=%v", calls)
 }
 
+// TestIntegrateSurfacesAUsageLimit: a PR-body run refused by a recorded usage
+// limit parks the run on the limit instead of reading as a PR failure.
+func TestIntegrateSurfacesAUsageLimit(t *testing.T) {
+	ops := &fakeOps{}
+	pr := &fakePR{url: "https://example.test/pr/1"}
+	llmFake := &planLLM{responses: []llm.Response{stopResp("body", 0.01)}}
+	d := integrateTestDeps(ops, &fakeGit{remoteTip: "deadbeef"}, pr, llmFake)
+
+	o := newIntegrateRun(d, cmclient.TaskContext{Title: "Limited", CreatePR: true}, 0)
+	o.usageLimit.Store(&UsageLimitError{Window: "seven_day"})
+
+	err := runIntegrate(context.Background(), o)
+
+	_, ok := errors.AsType[*UsageLimitError](err)
+	require.True(t, ok, "err=%v", err)
+	assert.Empty(t, llmFake.tasks)
+	assert.Empty(t, pr.calls)
+	assert.Equal(t, -1, indexOfCall(ops.recorded(), "ReportPush:CARD-1"), "calls=%v", ops.recorded())
+}
+
 func TestIntegrateIdempotentResume(t *testing.T) {
 	ops := &fakeOps{}
 	// Resume after a prior successful push: the remote tip is non-empty, so the
