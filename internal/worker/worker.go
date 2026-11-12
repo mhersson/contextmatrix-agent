@@ -60,7 +60,7 @@ func newExecutor(spec RunSpec, bashEnv []string) (orchestrator.Executor, error) 
 	return newClaude(modelexec.ClaudeConfig{
 		OAuthToken: spec.LLMOAuthToken,
 		Env:        modelexec.ClaudeEnv(bashEnv, spec.CACertFile, spec.BashTimeoutMax),
-		Effort:     spec.ReasoningEffort,
+		Effort:     spec.LLMEffort,
 	})
 }
 
@@ -111,7 +111,10 @@ type RunSpec struct {
 	// LLMOAuthToken is the Claude Code subscription token, read from the
 	// secrets file only (claude_code mode); redacted from run output.
 	LLMOAuthToken string
-	GitToken      string // from /run/cm-secrets/env via the secrets source; startup value, used for redaction and to gate credential injection
+	// LLMEffort is the claude_code endpoint's Claude Code --effort level, read
+	// from the secrets file only; empty sends no --effort.
+	LLMEffort string
+	GitToken  string // from /run/cm-secrets/env via the secrets source; startup value, used for redaction and to gate credential injection
 
 	// SecretsEnvPath is the KEY=value secrets file (/run/cm-secrets/env) that git
 	// and gh re-read the current CM_GIT_TOKEN from per operation, so a token the
@@ -166,7 +169,7 @@ type RunSpec struct {
 	CompactionKeepRecentTurns int     // CMX_COMPACTION_KEEP_RECENT_TURNS; recent messages kept verbatim (default 6)
 
 	DefaultModel    string // CMX_DEFAULT_MODEL; fallback when Model is absent/unresolvable
-	ReasoningEffort string // CMX_REASONING_EFFORT; empty sends no effort: each model reasons at its own default
+	ReasoningEffort string // CMX_REASONING_EFFORT, endpoint mode only; empty sends no effort: each model reasons at its own default
 	ReplayReasoning bool   // CMX_REPLAY_REASONING; exactly "true" turns replay on
 	Workspace       string // CMX_WORKSPACE; parent dir for the clone (default /home/user/workspace)
 	CACertFile      string // CMX_CA_CERT_FILE; in-container path to an extra CA PEM (empty = disabled)

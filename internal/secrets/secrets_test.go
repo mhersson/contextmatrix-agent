@@ -161,3 +161,12 @@ func TestEndpointValsStagesTheOAuthToken(t *testing.T) {
 
 	assert.NotContains(t, endpointVals("git-tok", EndpointSecrets{Type: "openai", APIKey: "k"}), "LLM_OAUTH_TOKEN")
 }
+
+func TestEndpointValsStagesTheClaudeCodeEffort(t *testing.T) {
+	t.Parallel()
+
+	vals := endpointVals("git-tok", EndpointSecrets{Type: "claude_code", OAuthToken: "oat", Effort: "high"})
+	assert.Equal(t, "high", vals["LLM_EFFORT"])
+
+	assert.NotContains(t, endpointVals("git-tok", EndpointSecrets{Type: "claude_code", OAuthToken: "oat"}), "LLM_EFFORT")
+}

@@ -493,6 +493,12 @@ func TestClaudeRunNormalizesEffort(t *testing.T) {
 	_, err = c2.Run(t.Context(), baseReq())
 	require.NoError(t, err)
 	assert.Empty(t, f2.recorded()[0].Effort)
+
+	f3 := &fakeRunner{}
+	c3 := newTestClaude(t, ClaudeConfig{}, f3)
+	_, err = c3.Run(t.Context(), baseReq())
+	require.NoError(t, err)
+	assert.Empty(t, f3.recorded()[0].Effort, "no effort means no --effort")
 }
 
 func TestCheckClaudeCode(t *testing.T) {

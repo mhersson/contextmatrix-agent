@@ -989,3 +989,15 @@ func TestReadLLMSecretsTakesTheOAuthTokenFromTheFileOnly(t *testing.T) {
 	assert.Equal(t, "file-tok", spec.LLMOAuthToken)
 	assert.Equal(t, "claude_code", spec.LLMType)
 }
+
+func TestReadLLMSecretsTakesTheClaudeCodeEffortFromTheFileOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "env")
+	require.NoError(t, os.WriteFile(path, []byte("LLM_TYPE=claude_code\nLLM_EFFORT=high\n"), 0o600))
+
+	src, err := secrets.Open(path)
+	require.NoError(t, err)
+
+	t.Setenv("LLM_EFFORT", "low")
+
+	assert.Equal(t, "high", readLLMSecrets(worker.RunSpec{}, src).LLMEffort)
+}

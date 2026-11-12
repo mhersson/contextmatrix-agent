@@ -826,7 +826,7 @@ func TestTriggerClaudeCodeStagesTheSubscriptionToken(t *testing.T) {
 	h := newHarness(t, 4)
 
 	payload := provisionedPayload("PROJ-CC")
-	payload.LLMEndpoint = &protocol.LLMEndpoint{Type: protocol.LLMEndpointTypeClaudeCode, OAuthToken: "oat-secret"}
+	payload.LLMEndpoint = &protocol.LLMEndpoint{Type: protocol.LLMEndpointTypeClaudeCode, OAuthToken: "oat-secret", Effort: "high"}
 
 	w := h.do(t, http.MethodPost, "/trigger", payload)
 	require.Equal(t, http.StatusAccepted, w.Code)
@@ -836,7 +836,7 @@ func TestTriggerClaudeCodeStagesTheSubscriptionToken(t *testing.T) {
 
 	provisions := h.creds.provisionCalls()
 	require.Len(t, provisions, 1)
-	assert.Equal(t, secrets.EndpointSecrets{Type: "claude_code", OAuthToken: "oat-secret"}, provisions[0].endpoint)
+	assert.Equal(t, secrets.EndpointSecrets{Type: "claude_code", OAuthToken: "oat-secret", Effort: "high"}, provisions[0].endpoint)
 
 	specs := h.exec.launchedSpecs()
 	require.Len(t, specs, 1)

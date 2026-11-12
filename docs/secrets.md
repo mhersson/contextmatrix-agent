@@ -15,7 +15,9 @@ read-only at `/run/cm-secrets/env`; the per-run dir is torn down with the run.
 The worker reads the stand-in token and URL for the [LLM proxy](#llm-proxy)
 and `CM_GIT_TOKEN` from it. In `claude_code` mode the file carries
 `LLM_TYPE=claude_code` and `LLM_OAUTH_TOKEN` instead, with no `LLM_API_KEY` or
-`LLM_BASE_URL`; the worker reads the token from the file only, never from env.
+`LLM_BASE_URL`, plus `LLM_EFFORT` when the endpoint carries a Claude Code
+effort level; the worker reads the token and the effort from the file only,
+never from env.
 
 The per-run dir is `0700` and the env file `0600`, both owned by the UID `serve`
 runs as, while the worker container runs as UID 1000 with every capability
@@ -107,8 +109,8 @@ Operator notes:
   setting only one breaks the run (the proxy answers a real key with 401, and
   an upstream has never seen the token). An `LLM_TYPE` overrides the trigger's
   endpoint type, a `claude_code` one included, so leave it unset.
-  `LLM_OAUTH_TOKEN` is read only from the staged file; a value in
-  `worker_extra_env` is ignored.
+  `LLM_OAUTH_TOKEN` and `LLM_EFFORT` are read only from the staged file; a
+  value in `worker_extra_env` is ignored.
 
 Limits:
 
