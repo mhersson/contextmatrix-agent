@@ -214,8 +214,9 @@ secrets_dir: /var/run/cm-agent/secrets
 # CMX_DEFAULT_MODEL
 # default_model: deepseek/deepseek-v4-flash
 
-# Reasoning effort for every worker phase in endpoint mode: "" (no effort sent: each model reasons at its own default) | low | medium | high |
-# provider-specific tiers (e.g. xhigh). CMX_REASONING_EFFORT
+# Reasoning effort for every worker phase in endpoint mode:
+# "" (no effort sent: each model reasons at its own default) | low | medium |
+# high | provider-specific tiers (e.g. xhigh). CMX_REASONING_EFFORT
 # Sent to every selected model - the endpoint must accept reasoning_effort on
 # ALL served models, or leave this empty.
 # Non-canonical values (anything outside low|medium|high|"") are forwarded to

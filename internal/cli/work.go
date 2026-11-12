@@ -81,9 +81,10 @@ func newWorkCmd() *cobra.Command {
 
 			// LLM_API_KEY, LLM_BASE_URL and LLM_TYPE resolve env-first-then-file, so
 			// an operator worker_extra_env override wins over the staged values
-			// (set-but-empty counts as set); LLM_OAUTH_TOKEN and LLM_EFFORT are file-only. The git token is NOT
-			// resolved from env - the credential helper re-reads CM_GIT_TOKEN from the
-			// file per git op so host-side rotation reaches a long-running worker.
+			// (set-but-empty counts as set); LLM_OAUTH_TOKEN and LLM_EFFORT are
+			// file-only. The git token is NOT resolved from env - the credential
+			// helper re-reads CM_GIT_TOKEN from the file per git op so host-side
+			// rotation reaches a long-running worker.
 			spec = readLLMSecrets(spec, src)
 			spec.GitToken = src.Get("CM_GIT_TOKEN")
 
