@@ -95,9 +95,10 @@ panels and mob seats are read-only fan-outs.
 
 The container's output is the serve-side idle watchdog's proof of life. While
 a model turn streams text or reasoning, the run emits a `model_progress` event
-at most every 30 seconds, so a long reasoning turn is not reaped as idle. A
-turn that streams only tool-call arguments emits none: the harness reports
-just text and reasoning fragments. The event carries no model text - streamed
+at most every 30 seconds, so a long reasoning turn is not reaped as idle. On
+the harness, a turn that streams only tool-call arguments emits none: it
+reports just text and reasoning fragments. Under Claude Code, tool-input
+fragments count too. The event carries no model text - streamed
 fragments are unredacted - and the log bridge keeps it off the live stream;
 the durable run log records it. On the harness the review panel's fan-out takes
 no progress callback, so the specialists get the same marker through their
@@ -433,9 +434,10 @@ The phase registry splits into Claude Code built-ins (Read, Write, Edit, Bash)
 and Go tools served over a loopback bridge (grep, glob, git, finish, verify,
 record_finding, skill); `finish` stays terminal. `MaxTurns` becomes
 `--max-turns`, and streamed fragments feed the `model_progress` liveness
-marker. Repo grounding reaches the model inside the phase prompts, and
-`claude` runs with `--setting-sources user`, so project settings are not
-loaded.
+marker. Repo grounding reaches the model inside the phase prompts, while
+Claude Code's own CLAUDE.md loading, the repo's settings hooks and its
+`.mcp.json` servers are off (vendorkit passes `--setting-sources user
+--strict-mcp-config`).
 
 Lost in this mode:
 

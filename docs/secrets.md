@@ -110,8 +110,9 @@ and `NODE_EXTRA_CA_CERTS`).
 ## Subprocess scrubbing
 
 Tool subprocesses get an allowlisted `cmd.Env` (`tools.ScrubbedEnv`) - secrets
-are not inheritable by model-driven commands - and known secret values are
-redacted from events and transcripts.
+are not inheritable by model-driven commands, except the subscription token in
+`claude_code` mode (see above) - and known secret values are redacted from
+events and transcripts.
 
 ## verify.env pass-throughs
 
