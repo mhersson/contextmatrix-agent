@@ -13,7 +13,7 @@ require (
 	github.com/mhersson/contextmatrix-backendkit v0.16.0
 	github.com/mhersson/contextmatrix-harness v0.29.0
 	github.com/mhersson/contextmatrix-protocol v0.41.0
-	github.com/mhersson/contextmatrix-vendorkit v0.1.1
+	github.com/mhersson/contextmatrix-vendorkit v0.1.2
 	github.com/moby/docker-image-spec v1.3.1
 	github.com/moby/moby/api v1.56.1
 	github.com/moby/moby/client v0.6.2
