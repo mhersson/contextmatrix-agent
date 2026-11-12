@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -148,6 +149,50 @@ func TestGateClassificationLimitErrorParks(t *testing.T) {
 			assert.True(t, isBudgetOrUsageLimit(err), "err=%v", err)
 		})
 	}
+}
+
+// gateClaudeRun is a gate run on the Claude Code executor with a 1.00 ceiling
+// and 0.20 already spent, so a classification run is capped at 0.80.
+func gateClaudeRun(ops *fakeOps, rec *recordingExec) *run {
+	inbox := &fakeInbox{msgs: []harness.UserMessage{{Content: "looks good"}}}
+	o := gateRun(ops, inbox, true, &planLLM{}, nil, 1.0, 0.2)
+	o.d.Executor = rec
+	o.d.Cfg.ClaudeCode = true
+
+	return o
+}
+
+func TestGateClassificationStoppedAtTheBudgetCapParks(t *testing.T) {
+	ops := &fakeOps{}
+	rec := &recordingExec{results: []execResult{{res: harness.Result{Reason: "max_cost", TotalCostUSD: 0.8}}}}
+	o := gateClaudeRun(ops, rec)
+
+	outcome, _, err := o.gate(t.Context(), gateReviewDecision, fixedGateModel("payload/model"), "findings?")
+
+	_, ok := errors.AsType[*BudgetExceededError](err)
+	require.True(t, ok, "err=%v", err)
+	assert.NotEqual(t, gateAdjust, outcome, "a truncated classification never becomes an adjust")
+	assert.Equal(t, -1, indexOfCall(ops.recorded(), "IncrementReviewAttempts:CARD-1"),
+		"no review attempt is spent; calls=%v", ops.recorded())
+	assert.Len(t, rec.runs, 1, "no fix run follows")
+}
+
+func TestGateClassificationDonePastTheCapIsApplied(t *testing.T) {
+	ops := &fakeOps{}
+	rec := &recordingExec{results: []execResult{{res: harness.Result{
+		Completed: true, Reason: "done", Output: `{"verdict":"approve"}`, TotalCostUSD: 0.9,
+	}}}}
+	o := gateClaudeRun(ops, rec)
+
+	outcome, _, err := o.gate(t.Context(), gateReviewDecision, fixedGateModel("payload/model"), "findings?")
+	require.NoError(t, err)
+	assert.Equal(t, gateApprove, outcome, "an answer that crossed the cap is acted on as finished")
+	assert.InDelta(t, 1.1, o.ledger.Spent(), 1e-9, "the overspend is recorded")
+
+	_, err = o.execRun(t.Context(), o.ledger, RunRequest{Task: "next"})
+	_, ok := errors.AsType[*BudgetExceededError](err)
+	assert.True(t, ok, "the next run refuses on the exhausted ledger")
+	assert.Len(t, rec.runs, 1)
 }
 
 func TestGateEmitsAwaitingHuman(t *testing.T) {
