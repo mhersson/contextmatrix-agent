@@ -87,7 +87,7 @@ func (o *run) gate(ctx context.Context, kind gateKind, model gateModel, presenta
 // an approve/adjust verdict plus the feedback to fold into the next round. A
 // parse failure or any non-"approve" verdict is treated as adjust with the raw
 // reply as feedback - adjust is the fail-safe default, never an accidental
-// approval. A budget breach returns the *BudgetExceededError so execute() parks.
+// approval. A budget breach or usage limit returns its error so execute() parks.
 func (o *run) classifyVerdict(ctx context.Context, kind gateKind, model gateModel, reply string) (gateOutcome, string, error) {
 	if err := o.ledger.Check(); err != nil {
 		return gateApprove, "", err
@@ -104,6 +104,12 @@ func (o *run) classifyVerdict(ctx context.Context, kind gateKind, model gateMode
 	o.spendAndReport(ctx, o.ledger, o.d.Cfg.CardID, "gate: report classification usage failed", res, m, "gate", dur)
 
 	if err != nil {
+		// A limit must park: adjust here would turn an approval into a fix
+		// mandate and spend a review attempt.
+		if isBudgetOrUsageLimit(err) {
+			return gateApprove, "", err
+		}
+
 		// A classification model error must not silently approve.
 		slog.Warn("gate: classification model run failed; treating as adjust",
 			"card_id", o.d.Cfg.CardID, "gate", kind, "error", err)

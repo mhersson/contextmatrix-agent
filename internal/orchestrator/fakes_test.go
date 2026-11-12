@@ -958,6 +958,9 @@ type planLLM struct {
 	// later call) return errPlanLLM instead of a scripted/default response.
 	// 0 (default) disables - every call succeeds.
 	errAfter int
+
+	// errWith, when set, replaces errPlanLLM as the error returned from errAfter.
+	errWith error
 }
 
 // errPlanLLM is the scripted failure returned once errAfter is reached.
@@ -999,6 +1002,10 @@ func (p *planLLM) next(req llm.Request) (llm.Response, error) {
 	}
 
 	if p.errAfter > 0 && call >= p.errAfter {
+		if p.errWith != nil {
+			return llm.Response{}, p.errWith
+		}
+
 		return llm.Response{}, errPlanLLM
 	}
 

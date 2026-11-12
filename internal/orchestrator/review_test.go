@@ -3258,6 +3258,28 @@ func TestRunReviewHITLApproveProceeds(t *testing.T) {
 	assert.Equal(t, 0, countCall(ops.recorded(), "IncrementReviewAttempts:CARD-1"), "approve does not increment attempts")
 }
 
+// A usage limit stopping the gate classification must park the card: the
+// human's reply is never turned into a fix mandate and no attempt is spent.
+func TestRunReviewHITLGateLimitParksWithoutFix(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	inbox := &fakeInbox{msgs: []harness.UserMessage{{Content: "approve"}}}
+	client := &planLLM{responses: []llm.Response{
+		stopResp("No concerns.", 0.001), stopResp("No concerns.", 0.001), stopResp("No concerns.", 0.001),
+		stopResp(`{"approved":true,"summary":"clean","fixes":[]}`, 0.001),
+	}, errAfter: 5, errWith: &UsageLimitError{Window: "five_hour"}}
+	o := newRun(t.Context(), hitlReviewDeps(ops, git, inbox, client), cmclient.TaskContext{Title: "T", Description: "b", State: "review"})
+	isolateVerify(o)
+
+	err := runReview(context.Background(), o)
+
+	_, ok := errors.AsType[*UsageLimitError](err)
+	require.True(t, ok, "the limit error reaches the worker; err=%v", err)
+	assert.Equal(t, 0, countCall(ops.recorded(), "IncrementReviewAttempts:CARD-1"), "no attempt spent; calls=%v", ops.recorded())
+	assert.Empty(t, git.pushBranches, "no fix run pushed anything")
+	assert.Len(t, client.tasks, 5, "specialists, synthesis and the classification only; no fix run")
+}
+
 func TestRunReviewHITLAdjustFixesThenApproves(t *testing.T) {
 	ops := &fakeOps{}
 	git := &fakeGit{committed: true}

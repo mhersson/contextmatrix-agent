@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"sync"
 	"testing"
@@ -128,6 +129,25 @@ func TestGateClassificationModelErrorIsAdjust(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, gateAdjust, outcome, "a classification error is never an approval")
 	assert.Equal(t, "approve", fb, "feedback falls back to the raw reply")
+}
+
+func TestGateClassificationLimitErrorParks(t *testing.T) {
+	for name, limit := range map[string]error{
+		"usage limit":   &UsageLimitError{Window: "five_hour"},
+		"wrapped limit": fmt.Errorf("model: %w", &UsageLimitError{Window: "seven_day"}),
+		"budget breach": &BudgetExceededError{Spent: 2, Max: 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ops := &fakeOps{}
+			inbox := &fakeInbox{msgs: []harness.UserMessage{{Content: "approve"}}}
+			client := &planLLM{errAfter: 1, errWith: limit}
+			o := gateRun(ops, inbox, true, client, nil, 0, 0)
+
+			_, _, err := o.gate(context.Background(), gatePlanApproval, fixedGateModel("payload/model"), "plan?")
+			require.Error(t, err, "a limit stopping the classification must surface, not become adjust")
+			assert.True(t, isBudgetOrUsageLimit(err), "err=%v", err)
+		})
+	}
 }
 
 func TestGateEmitsAwaitingHuman(t *testing.T) {
