@@ -620,3 +620,49 @@ func TestNewRunFreshDescriptionSeedsEmptyFindings(t *testing.T) {
 	assert.Equal(t, "Just the task.", o.taskDescription)
 	assert.Empty(t, o.lastFindings)
 }
+
+func TestPhaseLoopEntersNoPhaseAfterAUsageLimit(t *testing.T) {
+	ops := &fakeOps{taskContext: cmclient.TaskContext{}}
+	d := Deps{Ops: ops, Git: &fakeGit{}, Cfg: Config{CardID: "CARD-1"}}
+
+	o := newRun(t.Context(), d, ops.taskContext)
+	o.planFn = func(context.Context) error {
+		o.noteUsageLimit(&UsageLimitError{Window: "five_hour"})
+
+		return nil
+	}
+
+	executed := false
+	o.executeFn = func(context.Context) error {
+		executed = true
+
+		return nil
+	}
+
+	err := o.execute(t.Context())
+
+	pe, ok := errors.AsType[*PhaseError](err)
+	require.True(t, ok)
+	assert.Equal(t, "plan", pe.Phase)
+
+	_, ok = errors.AsType[*UsageLimitError](err)
+	assert.True(t, ok)
+	assert.False(t, executed)
+}
+
+func TestPhaseErrorAfterAUsageLimitBecomesTheLimit(t *testing.T) {
+	ops := &fakeOps{taskContext: cmclient.TaskContext{}}
+	d := Deps{Ops: ops, Git: &fakeGit{}, Cfg: Config{CardID: "CARD-1"}}
+
+	o := newRun(t.Context(), d, ops.taskContext)
+	o.planFn = func(context.Context) error {
+		o.noteUsageLimit(&UsageLimitError{Window: "five_hour"})
+
+		return errors.New("synthesis failed")
+	}
+
+	err := o.execute(t.Context())
+
+	_, ok := errors.AsType[*UsageLimitError](err)
+	assert.True(t, ok)
+}

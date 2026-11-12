@@ -317,3 +317,30 @@ func TestSpawnSubagentsFansOutThroughTheExecutor(t *testing.T) {
 	assert.Equal(t, "b", results[1].Role)
 	assert.Equal(t, "c", results[2].Role)
 }
+
+func TestSpawnSubagentsClaudeCodeSendsOneFanout(t *testing.T) {
+	rec := &recordingExec{}
+	o := replayRun(&planLLM{}, true)
+	o.d.Executor = rec
+	o.d.Cfg.ClaudeCode = true
+	o.ledger = NewLedger(6, 0)
+
+	specs := []harness.SubagentSpec{
+		{Role: "a", Model: "wide/model"},
+		{Role: "b", Model: "narrow/model"},
+		{Role: "c", Model: "wide/model"},
+	}
+
+	results, err := o.spawnSubagents(t.Context(), &planLLM{}, "/ws/main", specs, harness.SubagentOpts{})
+	require.NoError(t, err)
+	require.Len(t, rec.fanouts, 1)
+	assert.Len(t, rec.fanouts[0].Specs, 3)
+	assert.InDelta(t, 2.0, rec.fanouts[0].BudgetUSD, 1e-9)
+
+	var roles []string
+	for _, r := range results {
+		roles = append(roles, r.Role)
+	}
+
+	assert.Equal(t, []string{"a", "b", "c"}, roles)
+}

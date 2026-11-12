@@ -419,6 +419,22 @@ parent's total, so a resumed run also floors the ledger on the parent's and
 every subtask's reported total, finished subtasks included, before the first
 phase runs.
 
+## Claude Code subscription mode
+
+### Budget
+
+Each Claude Code run is capped (`--max-budget-usd`) at the remaining card
+budget on notional cost unless its caller set a cap (mob seats keep their
+per-turn cap; the review specialists, which run concurrently, go out as one
+fan-out and split the remainder equally); a run never starts with the ledger
+exhausted.
+
+### Usage limit
+
+Once any run reports the subscription's usage limit, every later model run of
+the card run is refused without starting, no further phase is entered, and the
+run ends parked on the limit.
+
 ## Verify resolution
 
 The verify-resolution ladder (declared command, then repo-convention

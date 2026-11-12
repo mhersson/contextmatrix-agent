@@ -97,3 +97,16 @@ func (l *Ledger) Spent() float64 {
 
 	return l.effectiveLocked()
 }
+
+// Remaining is the ceiling minus the enforced total, floored at 0; capped is
+// false when the ceiling is disabled.
+func (l *Ledger) Remaining() (usd float64, capped bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.max <= 0 {
+		return 0, false
+	}
+
+	return max(l.max-l.effectiveLocked(), 0), true
+}
