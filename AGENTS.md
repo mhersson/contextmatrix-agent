@@ -49,7 +49,7 @@ internal/registry/   → adapter over contextmatrix-protocol/selection: FromSele
 
 # Autonomous executor - the FSM and its container lifecycle
 internal/orchestrator/ → hand-written FSM plan → execute → judge → document → review → integrate → pr_gates → done; phase persistence; git finalize
-internal/modelexec/   → the model executors behind orchestrator.Executor: Harness forwards to harness.Run / SpawnSubagents over the run's LLM client
+internal/modelexec/   → the model executors behind orchestrator.Executor: Harness forwards to harness.Run / SpawnSubagents over the run's LLM client; Claude runs contextmatrix-vendorkit's `claudecode.Run` (the pinned `claude` binary on the operator's subscription), selected for `claude_code` runs
 internal/mob/          → A2A mob-session engine: seats, moderator, loopback JSON-RPC server, transcripts - discussions for plan/review/execute checkpoints
 internal/verifyexec/   → verify-command probing + bounded exec; used by cli run and the orchestrator verify gate
 internal/worker/       → the `work` lifecycle: clone, claim, run the FSM (HITL-gated or autonomous), commit/push, PR; wires the orchestrator deps
@@ -73,6 +73,10 @@ docker/Dockerfile.worker → multi-target worker image family (agent binary + gi
 # (events, llm, tools, harness, redact): the FSM-free loop, the LLM client, the
 # jailed tool registry (including the `skill` tool), the event stream, and secret
 # redaction. This repo depends on it; it takes no dependency on this repo.
+
+# Claude Code runs - the external github.com/mhersson/contextmatrix-vendorkit
+# module (claudecode): drives `claude -p` over a loopback tool bridge for the
+# Claude Code executor in internal/modelexec.
 
 # Shared serve plumbing - the external github.com/mhersson/contextmatrix-backendkit
 # module (frames, webhookcore, logbridge, metrics, taskskills, llmproxy): the
