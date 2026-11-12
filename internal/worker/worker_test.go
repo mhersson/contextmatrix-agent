@@ -2777,8 +2777,56 @@ func claudeSpec(t *testing.T, remote, wsParent, token string) RunSpec {
 	spec := baseSpec(t, remote, wsParent)
 	spec.LLMType = protocol.LLMEndpointTypeClaudeCode
 	spec.LLMOAuthToken = token
+	spec.Model = "anthropic/claude-opus-5.5"
 
 	return spec
+}
+
+func TestRunClaudeCodeNeedsAClaudeDefaultModel(t *testing.T) {
+	tests := []struct {
+		name         string
+		model        string
+		defaultModel string
+		wantErrModel string // "" = the run starts
+	}{
+		{"serve default is not a Claude model", "", "default/model", "default/model"},
+		{"compiled-in fallback is not a Claude model", "", "", config.DefaultCapableModel},
+		{"trigger default is not a Claude model", "openai/gpt-6", "claude-sonnet-5-5", "openai/gpt-6"},
+		{"trigger default maps", "anthropic/claude-opus-5.5", "default/model", ""},
+		{"serve default maps", "", "claude-sonnet-5-5", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			checked := false
+
+			swapCheckClaudeCode(t, func(context.Context, *slog.Logger) error {
+				checked = true
+
+				return nil
+			})
+			swapRunOrchestrator(t, func(context.Context, orchestrator.Deps) error { return nil })
+
+			spec := claudeSpec(t, setupBareRemote(t), t.TempDir(), "t")
+			spec.Model = tt.model
+			spec.DefaultModel = tt.defaultModel
+
+			ops := newFakeOps()
+			_, err := Run(context.Background(), spec, ops, &scriptedLLM{}, events.NewEmitter(io.Discard, io.Discard), openStdin(t))
+
+			if tt.wantErrModel == "" {
+				require.NoError(t, err)
+				assert.Contains(t, ops.ops(), "ClaimCard")
+
+				return
+			}
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErrModel)
+			assert.NotContains(t, ops.ops(), "ClaimCard")
+			assert.False(t, checked, "the model check needs no claude binary")
+		})
+	}
 }
 
 func TestRunClaudeCodeStopsBeforeClaimWithoutTheBinary(t *testing.T) {
@@ -2878,6 +2926,7 @@ func TestRunFSMWiresClaudeCodeMode(t *testing.T) {
 			spec := baseSpec(t, setupBareRemote(t), t.TempDir())
 			spec.LLMType = tt.llmType
 			spec.LLMOAuthToken = tt.token
+			spec.Model = "anthropic/claude-opus-5.5"
 
 			emit := events.NewEmitter(io.Discard, io.Discard)
 

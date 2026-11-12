@@ -258,6 +258,12 @@ func Run(ctx context.Context, spec RunSpec, ops CardOps, client llm.LLM, emit *e
 			return releaseWithError(ctx, ops, spec.CardID, errors.New("claude_code mode needs LLM_OAUTH_TOKEN"))
 		}
 
+		// Every fallback run would otherwise fail mid-phase on this model.
+		if m := capableDefault(spec); !claudeCodeModel(m) {
+			return releaseWithError(ctx, ops, spec.CardID,
+				fmt.Errorf("claude_code mode: the default model %q has no Claude Code id", m))
+		}
+
 		if err := checkClaudeCode(ctx, slog.Default()); err != nil {
 			return releaseWithError(ctx, ops, spec.CardID, err)
 		}
@@ -1171,17 +1177,25 @@ func buildSkillTool(spec RunSpec, ops CardOps) tools.Tool {
 // falls back to the built-in bars for that role and reports it as a fault
 // the caller puts on the card.
 func buildRegistry(spec RunSpec) (*registry.Registry, []registry.LadderFault) {
-	capable := spec.Model
+	return registry.FromSelection(spec.Selection, capableDefault(spec), spec.MaxCapability)
+}
 
-	if capable == "" {
-		capable = spec.DefaultModel
+// capableDefault is the capable default buildRegistry resolves.
+func capableDefault(spec RunSpec) string {
+	switch {
+	case spec.Model != "":
+		return spec.Model
+	case spec.DefaultModel != "":
+		return spec.DefaultModel
+	default:
+		return config.DefaultCapableModel
 	}
+}
 
-	if capable == "" {
-		capable = config.DefaultCapableModel
-	}
+func claudeCodeModel(slug string) bool {
+	_, ok := registry.ClaudeCodeModelID(slug)
 
-	return registry.FromSelection(spec.Selection, capable, spec.MaxCapability)
+	return ok
 }
 
 // logLadderFaults puts each payload ladder that failed validation on the

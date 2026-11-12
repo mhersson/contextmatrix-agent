@@ -427,9 +427,13 @@ The mode is on when the trigger's endpoint type is `claude_code`. Every phase
 run, mob seat, backstop, moderator and review specialist then goes through
 vendorkit's `claudecode.Run`: one `claude -p` process each. The worker checks
 for a runnable `claude` before it clones or claims the card, and a missing
-binary or token fails the run there. It logs the found version at start and
-warns when it is not the tested 2.1.322. All runs share the worker user's HOME,
-so Bash commands see the same git, gh and toolchain config as on the harness.
+binary or token fails the run there. So does a capable default (the trigger's
+`default_model`, else `CMX_DEFAULT_MODEL`, else the compiled-in
+`deepseek/deepseek-v4-flash`) that has no Claude Code id, since every
+fallback run would fail on it. The worker logs the found `claude` version at
+start and warns when it is not the tested 2.1.322. All runs share the worker
+user's HOME, so Bash commands see the same git, gh and toolchain config as on
+the harness.
 The phase registry splits into Claude Code built-ins (Read, Write, Edit, Bash)
 and Go tools served over a loopback bridge (grep, glob, git, finish, verify,
 record_finding, skill); `finish` stays terminal. `MaxTurns` becomes
