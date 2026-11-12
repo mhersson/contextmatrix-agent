@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/mhersson/contextmatrix-harness/harness"
 	"github.com/mhersson/contextmatrix-harness/llm"
@@ -16,6 +17,9 @@ import (
 type Executor interface {
 	Run(ctx context.Context, req RunRequest) (harness.Result, error)
 	SpawnSubagents(ctx context.Context, req FanoutRequest) ([]harness.SubagentResult, error)
+	// SubscriptionUsage returns the last-seen subscription limit windows; nil
+	// when none or when the run is metered.
+	SubscriptionUsage() []cmclient.SubscriptionUsage
 }
 
 // RunRequest is one harness.Run call plus what only the Claude Code executor reads.

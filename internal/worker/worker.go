@@ -180,7 +180,7 @@ type RunSpec struct {
 // full Ops so the FSM is handed a complete surface checked at compile time.
 type CardOps interface {
 	orchestrator.Ops
-	ReportParked(ctx context.Context, cardID, reason string) error
+	ReportParked(ctx context.Context, cardID, reason string, resetsAt time.Time) error
 	RecordSkillEngaged(ctx context.Context, cardID, skillName string) error
 }
 
@@ -534,7 +534,7 @@ func mapFSMResult(ctx context.Context, a fsmArgs, redact func(string) string, er
 		// Parked, not failed: the card stays in review for a human. No
 		// CompleteTask, no release.
 		slog.Info("review parked; leaving card in review", "card", a.spec.CardID)
-		reportParkedQuietly(ctx, a, parkReason(err))
+		reportParkedQuietly(ctx, a, parkReason(err), time.Time{})
 
 		return Result{Reason: "completed"}, nil
 
@@ -542,7 +542,7 @@ func mapFSMResult(ctx context.Context, a fsmArgs, redact func(string) string, er
 		// Parked, not failed: the card stays in review with a ## PR Gates
 		// note. No CompleteTask, no release - same shape as review parking.
 		slog.Info("pr gates parked; leaving card in review", "card", a.spec.CardID)
-		reportParkedQuietly(ctx, a, parkReason(err))
+		reportParkedQuietly(ctx, a, parkReason(err), time.Time{})
 
 		return Result{Reason: "completed"}, nil
 
@@ -575,6 +575,17 @@ func mapFSMResult(ctx context.Context, a fsmArgs, redact func(string) string, er
 		releaseQuietly(ctx, a.ops, a.spec.CardID)
 
 		return Result{Reason: "error"}, fmt.Errorf("orchestrator: %w", err)
+
+	case isUsageLimit(err):
+		// Usage-limit park: push WIP, keep the claim so report_parked is accepted
+		// and CM's completed callback keeps the park (review-park shape).
+		ule, _ := errors.AsType[*orchestrator.UsageLimitError](err)
+
+		slog.Info("usage limit reached; parking", "card", a.spec.CardID)
+		pushWIP(ctx, a)
+		reportParkedQuietly(ctx, a, usageLimitReason(ule), ule.ResetsAt)
+
+		return Result{Reason: "completed"}, nil
 
 	case a.endSession.Load() || ctx.Err() != nil || errorsIsCanceled(err):
 		// end_session / kill mid-FSM: the graceful park. Checked BEFORE the
@@ -753,8 +764,8 @@ func parkReason(err error) string {
 // reportParkedQuietly reports the park to CM so the board shows the parked
 // status. Best-effort: the park itself must never fail on a reporting error
 // (an older server without the tool just misses the board signal).
-func reportParkedQuietly(ctx context.Context, a fsmArgs, reason string) {
-	if err := a.ops.ReportParked(ctx, a.spec.CardID, reason); err != nil {
+func reportParkedQuietly(ctx context.Context, a fsmArgs, reason string, resetsAt time.Time) {
+	if err := a.ops.ReportParked(ctx, a.spec.CardID, reason, resetsAt); err != nil {
 		slog.Warn("report parked failed; board will not show the park",
 			"card", a.spec.CardID, "reason_head", reason[:min(len(reason), 120)], "error", err)
 	}
@@ -787,6 +798,27 @@ func isContextLimit(err error) bool {
 	var cle *orchestrator.ContextLimitError
 
 	return errors.As(err, &cle)
+}
+
+// isUsageLimit reports whether err is (or wraps) the orchestrator's usage-limit sentinel.
+func isUsageLimit(err error) bool {
+	_, ok := errors.AsType[*orchestrator.UsageLimitError](err)
+
+	return ok
+}
+
+// usageLimitReason is the board-facing park reason: the window and the reset time.
+func usageLimitReason(ule *orchestrator.UsageLimitError) string {
+	msg := "usage limit reached"
+	if ule.Window != "" {
+		msg += " (" + ule.Window + ")"
+	}
+
+	if ule.ResetsAt.IsZero() {
+		return msg + "; no reset time reported"
+	}
+
+	return msg + "; resets at " + ule.ResetsAt.UTC().Format(time.RFC3339)
 }
 
 // isMaxTurns reports whether err is (or wraps) the orchestrator's turn-cap sentinel.

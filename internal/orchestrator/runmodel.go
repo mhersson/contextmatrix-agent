@@ -251,7 +251,7 @@ func (o *run) spendAndReport(ctx context.Context, ledger *Ledger, targetCardID, 
 		used = configuredModel
 	}
 
-	total, reportErr := o.d.Ops.ReportUsage(ctx, targetCardID, cmclient.UsageReport{
+	report := cmclient.UsageReport{
 		Model:               used,
 		PromptTokens:        res.PromptTokens,
 		CompletionTokens:    res.CompletionTokens,
@@ -262,7 +262,15 @@ func (o *run) spendAndReport(ctx context.Context, ledger *Ledger, targetCardID, 
 		Step:                step,
 		DurationMS:          dur.Milliseconds(),
 		Source:              "collector",
-	})
+	}
+	if o.d.Cfg.ClaudeCode {
+		// A subscription is never billed per token: the cost stays notional.
+		report.ActualCostUSD = 0
+		report.CostBasis = cmclient.CostBasisSubscription
+		report.SubscriptionUsage = o.d.Executor.SubscriptionUsage()
+	}
+
+	total, reportErr := o.d.Ops.ReportUsage(ctx, targetCardID, report)
 	if reportErr != nil {
 		attrs := make([]any, 0, len(extraAttrs)+4)
 		attrs = append(attrs, "card_id", targetCardID)

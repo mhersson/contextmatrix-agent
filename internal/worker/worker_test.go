@@ -231,8 +231,8 @@ func (f *fakeOps) ReportPush(_ context.Context, cardID, branch, prURL string) er
 	return nil
 }
 
-func (f *fakeOps) ReportParked(_ context.Context, cardID, reason string) error {
-	f.record("ReportParked", cardID, reason)
+func (f *fakeOps) ReportParked(_ context.Context, cardID, reason string, resetsAt time.Time) error {
+	f.record("ReportParked", cardID, reason, resetsAt)
 
 	return nil
 }
@@ -2711,4 +2711,52 @@ func TestRunFSMRedactorMasksTheOAuthToken(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, redact)
 	assert.NotContains(t, redact("x oat-secret-123 y"), "oat-secret-123")
+}
+
+// TestMapFSMResultParksOnUsageLimit: a usage limit pushes WIP and reports the
+// park with the reset time; the claim stays so CM's completed callback keeps it.
+func TestMapFSMResultParksOnUsageLimit(t *testing.T) {
+	reset := time.Date(2026, 11, 18, 7, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name  string
+		reset time.Time
+	}{
+		{"with reset time", reset},
+		{"without reset time", time.Time{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			remote := setupBareRemote(t)
+			wsParent := t.TempDir()
+			ops := newFakeOps()
+
+			swapRunOrchestrator(t, func(_ context.Context, d orchestrator.Deps) error {
+				require.NoError(t, os.WriteFile(filepath.Join(d.Cfg.Workspace, "wip.txt"), []byte("partial\n"), 0o644))
+
+				return fmt.Errorf("orchestrator: %w", &orchestrator.PhaseError{
+					Phase: "execute",
+					Err:   &orchestrator.UsageLimitError{Window: "seven_day", ResetsAt: tt.reset},
+				})
+			})
+
+			res, err := Run(context.Background(), baseSpec(t, remote, wsParent), ops, &scriptedLLM{},
+				events.NewEmitter(io.Discard, io.Discard), openStdin(t))
+			require.NoError(t, err)
+			assert.Equal(t, "completed", res.Reason)
+
+			assert.True(t, remoteHasBranch(t, remote, "cm/cmx-001"), "usage limit pushes WIP")
+			assert.Equal(t, 0, ops.count("ReleaseCard"), "the claim stays for the completed callback")
+			assert.Equal(t, 0, ops.count("CompleteTask"))
+
+			require.Equal(t, 1, ops.count("ReportParked"))
+			args := ops.argsOf("ReportParked")
+			assert.Contains(t, args[1], "seven_day")
+
+			got, ok := args[2].(time.Time)
+			require.True(t, ok)
+			assert.True(t, tt.reset.Equal(got))
+		})
+	}
 }

@@ -1309,6 +1309,8 @@ func (harnessExec) Run(ctx context.Context, req RunRequest) (harness.Result, err
 	return harness.Run(ctx, req.Client, req.Registry, req.Emit, req.Task, req.Config)
 }
 
+func (harnessExec) SubscriptionUsage() []cmclient.SubscriptionUsage { return nil }
+
 func (harnessExec) SpawnSubagents(ctx context.Context, req FanoutRequest) ([]harness.SubagentResult, error) {
 	return harness.SpawnSubagents(ctx, req.Client, req.Root, req.Emit, req.Specs, req.Opts)
 }
@@ -1325,7 +1327,10 @@ type recordingExec struct {
 	runs    []RunRequest
 	fanouts []FanoutRequest
 	results []execResult
+	windows []cmclient.SubscriptionUsage
 }
+
+func (r *recordingExec) SubscriptionUsage() []cmclient.SubscriptionUsage { return r.windows }
 
 func (r *recordingExec) Run(_ context.Context, req RunRequest) (harness.Result, error) {
 	r.mu.Lock()

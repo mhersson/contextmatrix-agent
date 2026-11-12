@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -244,6 +245,7 @@ func startStubServer(t *testing.T, rec *recorder, failTool string) *httptest.Ser
 	addStub(server, rec, "heartbeat", `{"ok": true}`, failTool == "heartbeat")
 	addStub(server, rec, "report_usage", reportUsagePayload, failTool == "report_usage")
 	addStub(server, rec, "report_push", `{"ok": true}`, failTool == "report_push")
+	addStub(server, rec, "report_parked", `{"ok": true}`, failTool == "report_parked")
 	addStub(server, rec, "complete_task", `{"ok": true}`, failTool == "complete_task")
 	addStub(server, rec, "release_card", `{"ok": true}`, failTool == "release_card")
 	addStub(server, rec, "create_card", createCardPayload, failTool == "create_card", "project")
@@ -1242,4 +1244,81 @@ func TestNew_RefusesRedirects(t *testing.T) {
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), key)
 	assert.Zero(t, received.Load(), "the redirect target must never be dialed")
+}
+
+func TestReportUsage_SubscriptionRun(t *testing.T) {
+	rec := newRecorder()
+	c := newTestClient(t, rec, "")
+
+	_, err := c.ReportUsage(context.Background(), "CMX-001", UsageReport{
+		Model: "claude-sonnet-5-5", PromptTokens: 4, CompletionTokens: 125, ActualCostUSD: 0.5,
+		CostBasis: CostBasisSubscription,
+		SubscriptionUsage: []SubscriptionUsage{{
+			Window: "seven_day", Utilization: 0.13, Status: "allowed",
+			ResetsAt: time.Date(2026, 11, 18, 7, 0, 0, 0, time.UTC),
+		}},
+	})
+	require.NoError(t, err)
+
+	args, ok := rec.get("report_usage")
+	require.True(t, ok)
+	assert.Equal(t, "subscription", args["cost_basis"])
+	assert.NotContains(t, args, "actual_cost_usd", "CM rejects a cost alongside the subscription basis")
+
+	su, ok := args["subscription_usage"].([]any)
+	require.True(t, ok)
+	require.Len(t, su, 1)
+
+	w, ok := su[0].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "seven_day", w["window"])
+	assert.InDelta(t, 0.13, w["utilization"], 1e-9)
+	assert.Equal(t, "2026-11-18T07:00:00Z", w["resets_at"])
+}
+
+func TestReportUsage_MeteredSendsNoSubscriptionArgs(t *testing.T) {
+	rec := newRecorder()
+	c := newTestClient(t, rec, "")
+
+	_, err := c.ReportUsage(context.Background(), "CMX-001", UsageReport{
+		Model: "some/model", PromptTokens: 1, CompletionTokens: 2, ActualCostUSD: 0.1,
+	})
+	require.NoError(t, err)
+
+	args, ok := rec.get("report_usage")
+	require.True(t, ok)
+	assert.NotContains(t, args, "cost_basis")
+	assert.NotContains(t, args, "subscription_usage")
+}
+
+func TestReportParked_ResetsAt(t *testing.T) {
+	tests := []struct {
+		name string
+		at   time.Time
+		want string // "" = omitted
+	}{
+		{"non-UTC zone is sent as UTC", time.Date(2026, 11, 18, 8, 0, 0, 0, time.FixedZone("CET", 3600)), "2026-11-18T07:00:00Z"},
+		{"zero time is omitted", time.Time{}, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := newRecorder()
+			c := newTestClient(t, rec, "")
+
+			require.NoError(t, c.ReportParked(context.Background(), "CMX-001", "limit", tt.at))
+
+			args, ok := rec.get("report_parked")
+			require.True(t, ok)
+			assert.Equal(t, "limit", args["reason"])
+
+			if tt.want == "" {
+				assert.NotContains(t, args, "resets_at")
+
+				return
+			}
+
+			assert.Equal(t, tt.want, args["resets_at"])
+		})
+	}
 }

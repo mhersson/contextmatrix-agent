@@ -445,11 +445,20 @@ The card's `model_orchestrator`, `model_coder` and `model_reviewer` pins map an
 the run's candidates. Any other pin is ignored for the run, with a card note,
 and the ladder decides.
 
+### Usage reports
+
+Usage is reported with `cost_basis: subscription` and the last-seen limit
+windows (`subscription_usage`), never a billed cost. The card budget meters
+Claude Code's notional (list-price) cost.
+
 ### Usage limit
 
 Once any run reports the subscription's usage limit, every later model run of
 the card run is refused without starting, no further phase is entered, and the
-run ends parked on the limit.
+run ends parked on the limit. The worker pushes the WIP and reports the park
+with the reset time (`resets_at`, omitted when unknown). The card stays in its
+lane, keeps its persisted phase, and resumes by a human trigger after the
+reset.
 
 ## Verify resolution
 
