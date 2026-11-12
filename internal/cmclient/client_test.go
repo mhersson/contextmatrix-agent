@@ -1293,12 +1293,13 @@ func TestReportUsage_MeteredSendsNoSubscriptionArgs(t *testing.T) {
 
 func TestReportParked_ResetsAt(t *testing.T) {
 	tests := []struct {
-		name string
-		at   time.Time
-		want string // "" = omitted
+		name   string
+		window string // "" = omitted
+		at     time.Time
+		want   string // "" = omitted
 	}{
-		{"non-UTC zone is sent as UTC", time.Date(2026, 11, 18, 8, 0, 0, 0, time.FixedZone("CET", 3600)), "2026-11-18T07:00:00Z"},
-		{"zero time is omitted", time.Time{}, ""},
+		{"non-UTC zone is sent as UTC", "five_hour", time.Date(2026, 11, 18, 8, 0, 0, 0, time.FixedZone("CET", 3600)), "2026-11-18T07:00:00Z"},
+		{"zero time is omitted", "", time.Time{}, ""},
 	}
 
 	for _, tt := range tests {
@@ -1306,11 +1307,17 @@ func TestReportParked_ResetsAt(t *testing.T) {
 			rec := newRecorder()
 			c := newTestClient(t, rec, "")
 
-			require.NoError(t, c.ReportParked(context.Background(), "CMX-001", "limit", tt.at))
+			require.NoError(t, c.ReportParked(context.Background(), "CMX-001", "limit", tt.window, tt.at))
 
 			args, ok := rec.get("report_parked")
 			require.True(t, ok)
 			assert.Equal(t, "limit", args["reason"])
+
+			if tt.window == "" {
+				assert.NotContains(t, args, "window")
+			} else {
+				assert.Equal(t, tt.window, args["window"])
+			}
 
 			if tt.want == "" {
 				assert.NotContains(t, args, "resets_at")

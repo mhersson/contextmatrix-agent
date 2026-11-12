@@ -232,8 +232,8 @@ func (f *fakeOps) ReportPush(_ context.Context, cardID, branch, prURL string) er
 	return nil
 }
 
-func (f *fakeOps) ReportParked(_ context.Context, cardID, reason string, resetsAt time.Time) error {
-	f.record("ReportParked", cardID, reason, resetsAt)
+func (f *fakeOps) ReportParked(_ context.Context, cardID, reason, window string, resetsAt time.Time) error {
+	f.record("ReportParked", cardID, reason, window, resetsAt)
 
 	return nil
 }
@@ -1226,6 +1226,7 @@ func TestReviewParkedMapsToCompleted(t *testing.T) {
 	require.Equal(t, 1, ops.count("ReportParked"), "the park must be reported to CM so the board can show it")
 	args := ops.argsOf("ReportParked")
 	assert.Equal(t, "review parked: attempts cap exhausted without approval", args[1])
+	assert.Empty(t, args[2], "a review park carries no usage-limit window")
 }
 
 // TestMapFSMResult_GatesParked: a GatesParkedError is the same graceful shape as
@@ -1252,6 +1253,7 @@ func TestMapFSMResult_GatesParked(t *testing.T) {
 	require.Equal(t, 1, ops.count("ReportParked"), "the park must be reported to CM so the board can show it")
 	args := ops.argsOf("ReportParked")
 	assert.Equal(t, "pr gates parked: PR creation failed - nothing to gate on", args[1])
+	assert.Empty(t, args[2], "a gates park carries no usage-limit window")
 }
 
 // TestFSMDepsCarryGateWiring: the worker hands the FSM the gh gates seam and the
@@ -2755,7 +2757,9 @@ func TestMapFSMResultParksOnUsageLimit(t *testing.T) {
 			args := ops.argsOf("ReportParked")
 			assert.Contains(t, args[1], "seven_day")
 
-			got, ok := args[2].(time.Time)
+			assert.Equal(t, "seven_day", args[2])
+
+			got, ok := args[3].(time.Time)
 			require.True(t, ok)
 			assert.True(t, tt.reset.Equal(got))
 		})

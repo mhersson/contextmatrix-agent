@@ -526,8 +526,8 @@ func (s *stubOps) ReportPush(_ context.Context, cardID, branch, prURL string) er
 	return nil
 }
 
-func (s *stubOps) ReportParked(_ context.Context, cardID, reason string, resetsAt time.Time) error {
-	s.record("ReportParked", cardID, reason, resetsAt)
+func (s *stubOps) ReportParked(_ context.Context, cardID, reason, window string, resetsAt time.Time) error {
+	s.record("ReportParked", cardID, reason, window, resetsAt)
 
 	return nil
 }

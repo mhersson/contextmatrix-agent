@@ -584,13 +584,18 @@ func (c *Client) ReportPush(ctx context.Context, cardID, branch, prURL string) e
 // ReportParked reports that this run parked the card - review or PR gates
 // left for a human. CM records worker_status "parked" so the board can show
 // it (the completed callback that follows preserves it) and appends the
-// reason to the card's activity log. resetsAt is when a usage limit lifts; it
-// is sent as RFC 3339 UTC and omitted when zero.
-func (c *Client) ReportParked(ctx context.Context, cardID, reason string, resetsAt time.Time) error {
+// reason to the card's activity log. window is the usage limit's window,
+// omitted when empty. resetsAt is when a usage limit lifts; it is sent as
+// RFC 3339 UTC and omitted when zero.
+func (c *Client) ReportParked(ctx context.Context, cardID, reason, window string, resetsAt time.Time) error {
 	args := map[string]any{
 		"card_id": cardID,
 		"reason":  reason,
 	}
+	if window != "" {
+		args["window"] = window
+	}
+
 	if !resetsAt.IsZero() {
 		args["resets_at"] = resetsAt.UTC().Format(time.RFC3339)
 	}
