@@ -434,6 +434,8 @@ fallback run would fail on it. The worker logs the found `claude` version at
 start and warns when it is not the tested 2.1.322. All runs share the worker
 user's HOME, so Bash commands see the same git, gh and toolchain config as on
 the harness.
+`CMX_BASH_TIMEOUT_MAX_SECONDS` becomes Claude Code's Bash ceiling
+(`BASH_MAX_TIMEOUT_MS`), and below 2 minutes also its default timeout.
 The phase registry splits into Claude Code built-ins (Read, Write, Edit, Bash)
 and Go tools served over a loopback bridge (grep, glob, git, finish, verify,
 record_finding, skill); `finish` stays terminal. `MaxTurns` becomes
@@ -453,8 +455,7 @@ Lost in this mode:
   are still redacted)
 - keeping the credential out of the worker (see [secrets](secrets.md))
 - vendor diversity: every model is a Claude model
-- the tool-output byte cap and the bash timeout cap (Claude Code's own limits
-  apply)
+- the tool-output byte cap (Claude Code's own limits apply)
 - the workspace jail and read-only roots for the built-ins (the container is
   the boundary; bridged tools keep their jail)
 

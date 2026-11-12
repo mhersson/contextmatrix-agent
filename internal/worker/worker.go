@@ -59,7 +59,7 @@ func newExecutor(spec RunSpec, bashEnv []string) (orchestrator.Executor, error) 
 
 	return newClaude(modelexec.ClaudeConfig{
 		OAuthToken: spec.LLMOAuthToken,
-		Env:        modelexec.ClaudeEnv(bashEnv, spec.CACertFile),
+		Env:        modelexec.ClaudeEnv(bashEnv, spec.CACertFile, spec.BashTimeoutMax),
 		Effort:     spec.ReasoningEffort,
 	})
 }

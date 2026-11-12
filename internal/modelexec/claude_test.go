@@ -423,7 +423,7 @@ func TestClaudeEnv(t *testing.T) {
 	t.Setenv("HTTPS_PROXY", "http://p:3128")
 	t.Setenv("LLM_OAUTH_TOKEN", "secret-000000")
 
-	env := ClaudeEnv([]string{"PATH=/usr/bin"}, "/run/cm-ca/ca.crt")
+	env := ClaudeEnv([]string{"PATH=/usr/bin"}, "/run/cm-ca/ca.crt", 0)
 	assert.Contains(t, env, "PATH=/usr/bin")
 	assert.Contains(t, env, "HTTPS_PROXY=http://p:3128")
 	assert.Contains(t, env, "NODE_EXTRA_CA_CERTS=/run/cm-ca/ca.crt")
@@ -438,13 +438,47 @@ func TestClaudeEnv(t *testing.T) {
 		seen[k] = true
 	}
 
-	for _, e := range ClaudeEnv([]string{"PATH=/usr/bin"}, "") {
+	for _, e := range ClaudeEnv([]string{"PATH=/usr/bin"}, "", 0) {
 		assert.False(t, strings.HasPrefix(e, "NODE_EXTRA_CA_CERTS="))
 	}
 
-	dup := ClaudeEnv([]string{"PATH=/usr/bin", "HTTPS_PROXY=http://old:1"}, "")
+	dup := ClaudeEnv([]string{"PATH=/usr/bin", "HTTPS_PROXY=http://old:1"}, "", 0)
 	assert.Contains(t, dup, "HTTPS_PROXY=http://p:3128")
 	assert.NotContains(t, dup, "HTTPS_PROXY=http://old:1")
+}
+
+func TestClaudeEnvBashTimeouts(t *testing.T) {
+	tests := []struct {
+		name        string
+		seconds     int
+		wantMax     string
+		wantDefault string
+	}{
+		{"above the default", 600, "BASH_MAX_TIMEOUT_MS=600000", ""},
+		{"below the default", 60, "BASH_MAX_TIMEOUT_MS=60000", "BASH_DEFAULT_TIMEOUT_MS=60000"},
+		{"at the default", 120, "BASH_MAX_TIMEOUT_MS=120000", ""},
+		{"unset", 0, "", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := ClaudeEnv([]string{"PATH=/usr/bin"}, "", tt.seconds)
+
+			var gotMax, gotDefault string
+
+			for _, e := range env {
+				switch {
+				case strings.HasPrefix(e, "BASH_MAX_TIMEOUT_MS="):
+					gotMax = e
+				case strings.HasPrefix(e, "BASH_DEFAULT_TIMEOUT_MS="):
+					gotDefault = e
+				}
+			}
+
+			assert.Equal(t, tt.wantMax, gotMax)
+			assert.Equal(t, tt.wantDefault, gotDefault)
+		})
+	}
 }
 
 func TestClaudeRunNormalizesEffort(t *testing.T) {

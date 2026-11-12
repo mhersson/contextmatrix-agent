@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -22,7 +23,7 @@ import (
 type ClaudeConfig struct {
 	OAuthToken string // required
 	// Env is the base env of claude and its Bash children: the scrubbed bash env
-	// plus the passthrough variables (see ClaudeEnv). A nil Env leaves the child
+	// plus the passthrough variables and the bash timeout mapping (see ClaudeEnv). A nil Env leaves the child
 	// without PATH, so production always passes ClaudeEnv(...).
 	Env    []string
 	Effort string // the worker's reasoning effort; NewClaude passes it through claudecode.NormalizeEffort
@@ -38,16 +39,21 @@ type ClaudeConfig struct {
 	Home string
 }
 
+// bashDefaultCeilingMS is Claude Code's default Bash timeout.
+const bashDefaultCeilingMS = 120000
+
 // claudeEnvPassthrough is the worker env claude itself needs to reach
 // Anthropic, beyond the scrubbed bash env.
 var claudeEnvPassthrough = []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"}
 
 // ClaudeEnv returns the scrubbed bash env plus each set passthrough variable,
-// plus NODE_EXTRA_CA_CERTS=<caFile> when the worker has a CA bundle. Every key
+// plus NODE_EXTRA_CA_CERTS=<caFile> when the worker has a CA bundle, plus the
+// bash timeout knob as Claude Code's Bash ceiling (BASH_MAX_TIMEOUT_MS) and,
+// below its 2-minute default, its default (BASH_DEFAULT_TIMEOUT_MS). Every key
 // appears once; a later value wins. vendorkit adds the loopback hosts to
 // NO_PROXY when it builds the child env.
-func ClaudeEnv(scrubbed []string, caFile string) []string {
-	add := make([]string, 0, len(scrubbed)+len(claudeEnvPassthrough)+1)
+func ClaudeEnv(scrubbed []string, caFile string, bashTimeoutMaxSeconds int) []string {
+	add := make([]string, 0, len(scrubbed)+len(claudeEnvPassthrough)+3)
 	add = append(add, scrubbed...)
 
 	for _, k := range claudeEnvPassthrough {
@@ -58,6 +64,17 @@ func ClaudeEnv(scrubbed []string, caFile string) []string {
 
 	if caFile != "" {
 		add = append(add, "NODE_EXTRA_CA_CERTS="+caFile)
+	}
+
+	if bashTimeoutMaxSeconds > 0 {
+		ms := bashTimeoutMaxSeconds * 1000
+		add = append(add, "BASH_MAX_TIMEOUT_MS="+strconv.Itoa(ms))
+
+		// A ceiling below Claude Code's 2-minute default has no effect unless
+		// the default is lowered with it.
+		if ms < bashDefaultCeilingMS {
+			add = append(add, "BASH_DEFAULT_TIMEOUT_MS="+strconv.Itoa(ms))
+		}
 	}
 
 	idx := make(map[string]int, len(add))

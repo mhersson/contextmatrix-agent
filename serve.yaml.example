@@ -257,6 +257,8 @@ message_dedup_cache_size: 1000
 # --- Worker CMX_* knobs -------------------------------------------------------
 
 # Maximum wall-clock seconds a bash tool call may run inside a worker container.
+# Also applies in claude_code mode, as the Bash built-in's timeout ceiling
+# (BASH_MAX_TIMEOUT_MS); below 2 minutes it also lowers the default timeout.
 # Default: 600.
 # CMX_BASH_TIMEOUT_MAX_SECONDS
 bash_timeout_max_seconds: 600
