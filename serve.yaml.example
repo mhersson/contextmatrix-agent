@@ -214,16 +214,17 @@ secrets_dir: /var/run/cm-agent/secrets
 # CMX_DEFAULT_MODEL
 # default_model: deepseek/deepseek-v4-flash
 
-# Reasoning effort for every worker phase: "" (no effort sent: each model reasons at its own default) | low | medium | high |
-# provider-specific tiers (e.g. xhigh). CMX_REASONING_EFFORT
+# Reasoning effort for every worker phase in endpoint mode:
+# "" (no effort sent: each model reasons at its own default) | low | medium |
+# high | provider-specific tiers (e.g. xhigh). CMX_REASONING_EFFORT
 # Sent to every selected model - the endpoint must accept reasoning_effort on
 # ALL served models, or leave this empty.
 # Non-canonical values (anything outside low|medium|high|"") are forwarded to
 # the provider as-is; the agent logs a startup warning so a typo doesn't go
 # unnoticed.
-# In claude_code mode the value becomes Claude Code's effort through vendorkit's
-# normalization; a value Claude Code does not accept falls back to its default
-# with a startup warning.
+# claude_code mode ignores it: Claude Code's effort comes only from the effort
+# ContextMatrix sends on the claude_code endpoint (its claude_code.effort), and
+# none means Claude Code's default.
 # reasoning_effort: ""
 
 # Reasoning replay: each reply's reasoning goes back with every later request of

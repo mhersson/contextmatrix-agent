@@ -743,7 +743,7 @@ func (s *Server) provisionAndLaunch(ctx context.Context, spec executor.LaunchSpe
 	if s.credentials != nil {
 		staged := protocol.LLMEndpoint{Type: p.LLMEndpoint.Type, BaseURL: s.launchEnv.LLMBaseURL, APIKey: token}
 		if claude {
-			staged = protocol.LLMEndpoint{Type: p.LLMEndpoint.Type, OAuthToken: p.LLMEndpoint.OAuthToken}
+			staged = protocol.LLMEndpoint{Type: p.LLMEndpoint.Type, OAuthToken: p.LLMEndpoint.OAuthToken, Effort: p.LLMEndpoint.Effort}
 		}
 
 		if err := s.credentials.Provision(project, cardID, spec.CorrelationID, p.GitToken, p.GitTokenExpiresAt, s.runEndpoint(p, staged)); err != nil {
@@ -888,6 +888,7 @@ func (s *Server) runEndpoint(p protocol.TriggerPayload, llm protocol.LLMEndpoint
 		BaseURL:    llm.BaseURL,
 		Type:       llm.Type,
 		OAuthToken: llm.OAuthToken,
+		Effort:     llm.Effort,
 		MobGuests:  s.mobGuestsJSON(p),
 	}
 }

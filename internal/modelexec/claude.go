@@ -26,7 +26,7 @@ type ClaudeConfig struct {
 	// plus the passthrough variables and the bash timeout mapping (see ClaudeEnv). A nil Env leaves the child
 	// without PATH, so production always passes ClaudeEnv(...).
 	Env    []string
-	Effort string // the worker's reasoning effort; NewClaude passes it through claudecode.NormalizeEffort
+	Effort string // the claude_code endpoint's effort; NewClaude passes it through claudecode.NormalizeEffort
 	// Home is Spec.Home of every run; "" = os.UserHomeDir(). It is the worker
 	// user's real HOME, not a temp dir: the commands the Bash tool runs inherit
 	// it, and a temp HOME would hide git's global config (credential helper),
@@ -133,7 +133,7 @@ func newClaude(cfg ClaudeConfig, run func(context.Context, claudecode.Spec) (har
 
 	effort := claudecode.NormalizeEffort(cfg.Effort)
 	if effort == "" && strings.TrimSpace(cfg.Effort) != "" {
-		slog.Warn("claude executor: reasoning effort not accepted by Claude Code, using its default", "effort", cfg.Effort)
+		slog.Warn("claude executor: effort not accepted by Claude Code, using its default", "effort", cfg.Effort)
 	}
 
 	return &Claude{token: cfg.OAuthToken, env: cfg.Env, effort: effort, home: home, run: run}, nil

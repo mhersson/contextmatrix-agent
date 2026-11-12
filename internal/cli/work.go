@@ -81,9 +81,10 @@ func newWorkCmd() *cobra.Command {
 
 			// LLM_API_KEY, LLM_BASE_URL and LLM_TYPE resolve env-first-then-file, so
 			// an operator worker_extra_env override wins over the staged values
-			// (set-but-empty counts as set); LLM_OAUTH_TOKEN is file-only. The git token is NOT
-			// resolved from env - the credential helper re-reads CM_GIT_TOKEN from the
-			// file per git op so host-side rotation reaches a long-running worker.
+			// (set-but-empty counts as set); LLM_OAUTH_TOKEN and LLM_EFFORT are
+			// file-only. The git token is NOT resolved from env - the credential
+			// helper re-reads CM_GIT_TOKEN from the file per git op so host-side
+			// rotation reaches a long-running worker.
 			spec = readLLMSecrets(spec, src)
 			spec.GitToken = src.Get("CM_GIT_TOKEN")
 
@@ -452,12 +453,14 @@ func specFromEnv() (worker.RunSpec, error) {
 
 // readLLMSecrets fills the spec's LLM values. The OAuth token is file-only:
 // only CM provisions it and only the staged value is registered for redaction,
-// so an env copy would go unmasked.
+// so an env copy would go unmasked. The Claude Code effort is file-only too, so
+// the claude_code endpoint stays its only source.
 func readLLMSecrets(spec worker.RunSpec, src *secrets.Source) worker.RunSpec {
 	spec.LLMKey = resolveLLMValue("LLM_API_KEY", src)
 	spec.LLMBaseURL = resolveLLMValue("LLM_BASE_URL", src)
 	spec.LLMType = resolveLLMValue("LLM_TYPE", src)
 	spec.LLMOAuthToken = src.Get("LLM_OAUTH_TOKEN")
+	spec.LLMEffort = src.Get("LLM_EFFORT")
 
 	return spec
 }

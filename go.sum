@@ -66,8 +66,8 @@ github.com/mhersson/contextmatrix-backendkit v0.16.0 h1:wxekhtqWfMGIVI4kkg1ry7e1
 github.com/mhersson/contextmatrix-backendkit v0.16.0/go.mod h1:a+nKv3Bm12sfrqNBzQjWEY1QMxioKgFrfWTDtuAS0Rs=
 github.com/mhersson/contextmatrix-harness v0.29.0 h1:vWIZiTRnFCPP95jGM2N/yQQ9a0Jky/mtrarGFlJNNIw=
 github.com/mhersson/contextmatrix-harness v0.29.0/go.mod h1:+wjbJPFZEeKAitnDmb86ZwPhDHDARiHYa5gvWOSpg2g=
-github.com/mhersson/contextmatrix-protocol v0.41.0 h1:k3KbKBq4doc8fFAXvFeev752CSPAVroWOk5z/zcTVFc=
-github.com/mhersson/contextmatrix-protocol v0.41.0/go.mod h1:Z1YmeMaBJlQut/hCOOoCAkVj6P2LRh9yjqG7F7jQ9gs=
+github.com/mhersson/contextmatrix-protocol v0.44.0 h1:myvwgo1a8Bqu9qrHdn7Ib+cZtIgClvXS8HuMVub/J2g=
+github.com/mhersson/contextmatrix-protocol v0.44.0/go.mod h1:Z1YmeMaBJlQut/hCOOoCAkVj6P2LRh9yjqG7F7jQ9gs=
 github.com/mhersson/contextmatrix-vendorkit v0.1.4 h1:Hb8hISEZ8ZO8pYnY3HpNX5Cx3YWIp4zSg5e9yttRFtk=
 github.com/mhersson/contextmatrix-vendorkit v0.1.4/go.mod h1:WaR+gt5CvIOwVFpG1z02bqnfJccZNiBRbRGK7OokbR8=
 github.com/mitchellh/copystructure v1.2.0 h1:vpKXTN4ewci03Vljg/q9QvCGUDttBOGBIa15WveJJGw=

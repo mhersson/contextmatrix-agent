@@ -437,6 +437,9 @@ user's HOME, so Bash commands see the same git, gh and toolchain config as on
 the harness.
 `CMX_BASH_TIMEOUT_MAX_SECONDS` becomes Claude Code's Bash ceiling
 (`BASH_MAX_TIMEOUT_MS`), and below 2 minutes also its default timeout.
+Claude Code's `--effort` is the endpoint's `effort`, staged as `LLM_EFFORT`;
+`CMX_REASONING_EFFORT` does not apply, and no effort leaves Claude Code at its
+default.
 The phase registry splits into Claude Code built-ins (Read, Write, Edit, Bash)
 and Go tools served over a loopback bridge (grep, glob, git, finish, verify,
 record_finding, skill); `finish` stays terminal. `MaxTurns` becomes

@@ -2942,6 +2942,46 @@ func TestRunFSMWiresClaudeCodeMode(t *testing.T) {
 	}
 }
 
+func TestNewExecutorTakesClaudeEffortFromTheEndpoint(t *testing.T) {
+	var (
+		got    modelexec.ClaudeConfig
+		called int
+	)
+
+	orig := newClaude
+	newClaude = func(cfg modelexec.ClaudeConfig) (*modelexec.Claude, error) {
+		called++
+		got = cfg
+
+		return orig(cfg)
+	}
+
+	t.Cleanup(func() { newClaude = orig })
+
+	tests := []struct {
+		name      string
+		llmEffort string
+		want      string
+	}{
+		{"endpoint effort wins over serve's reasoning effort", "high", "high"},
+		{"no endpoint effort sends none", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, called = modelexec.ClaudeConfig{Effort: "unset"}, 0
+			spec := RunSpec{
+				LLMType: protocol.LLMEndpointTypeClaudeCode, LLMOAuthToken: "t",
+				LLMEffort: tt.llmEffort, ReasoningEffort: "low",
+			}
+
+			_, err := newExecutor(spec, []string{"PATH=/usr/bin"})
+			require.NoError(t, err)
+			require.Equal(t, 1, called)
+			assert.Equal(t, tt.want, got.Effort)
+		})
+	}
+}
+
 func TestNewExecutorPassesCAAndScrubbedEnvToClaude(t *testing.T) {
 	var got modelexec.ClaudeConfig
 

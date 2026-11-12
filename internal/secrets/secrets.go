@@ -65,6 +65,9 @@ type EndpointSecrets struct {
 	Type    string
 	// OAuthToken is the Claude Code subscription token (claude_code mode only).
 	OAuthToken string
+	// Effort is the claude_code endpoint's Claude Code effort level; empty =
+	// Claude Code's default.
+	Effort string
 	// MobGuests is the compact JSON guest-spec list ([]protocol.GuestSpec on
 	// the wire) for mob session discussions. Guests carry bearer tokens, so
 	// they ride the secrets file - and living here (not a one-off append)
@@ -93,6 +96,10 @@ func endpointVals(token string, e EndpointSecrets) map[string]string {
 
 	if e.OAuthToken != "" {
 		vals["LLM_OAUTH_TOKEN"] = e.OAuthToken
+	}
+
+	if e.Effort != "" {
+		vals["LLM_EFFORT"] = e.Effort
 	}
 
 	if e.MobGuests != "" {
