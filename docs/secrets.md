@@ -82,6 +82,12 @@ Operator notes:
   environment applies to them and `ca_cert_file` is trusted for their TLS. An
   egress proxy set only in `worker_extra_env` does not reach LLM traffic;
   set it on the `serve` process or its service unit.
+- A `claude_code` endpoint is the exception: `claude` calls Anthropic from the
+  worker, so `serve`'s proxy environment does not apply. Set its egress proxy
+  in `worker_extra_env`; `claude` gets the worker's `HTTP(S)_PROXY`/`NO_PROXY`,
+  with `127.0.0.1`, `localhost` and `::1` added to both `NO_PROXY` and
+  `no_proxy` so its loopback tool bridge never goes through the proxy.
+  `ca_cert_file` reaches `claude` as `NODE_EXTRA_CA_CERTS`.
 - Workers must reach `serve`'s port at `container_serve_url`, so a host
   firewall must allow container-to-host traffic on that port.
 - An HTTP proxy in `worker_extra_env` needs the serve host

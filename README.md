@@ -193,7 +193,10 @@ export LLM_API_KEY=<your-api-key>
    `http://host.docker.internal:<port>`), so a host firewall must allow
    container-to-host traffic on that port. Upstream LLM calls leave from
    `serve`, so they use `serve`'s own `HTTP(S)_PROXY`/`NO_PROXY` environment;
-   an egress proxy set only in `worker_extra_env` does not reach them. See
+   an egress proxy set only in `worker_extra_env` does not reach them. A
+   `claude_code` endpoint is the exception: `claude` calls Anthropic from the
+   worker, so its egress proxy goes in `worker_extra_env` and `serve`'s proxy
+   environment does not apply. See
    [`docs/secrets.md`](docs/secrets.md#llm-proxy).
 
    `container_contextmatrix_url` is required in practice - workers resolve their
