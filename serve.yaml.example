@@ -141,8 +141,10 @@ idle_watchdog_interval: 30s
 
 # Host directory holding per-run credential files, each bind-mounted read-only
 # into its container at /run/cm-secrets. The agent stages the CM-provisioned
-# git token and the LLM proxy's stand-in token (the real LLM key stays in this
-# service's memory) into <secrets_dir>/runs/<project>/<card_id>/env and
+# git token and, in endpoint mode, the LLM proxy's stand-in token (the real LLM
+# key stays in this service's memory) into
+# <secrets_dir>/runs/<project>/<card_id>/env; a claude_code run stages the
+# subscription token (LLM_OAUTH_TOKEN) instead of the stand-in. It also
 # refreshes the git token from ContextMatrix until the run is torn down.
 # Default: /var/run/cm-agent/secrets.
 # CMX_SECRETS_DIR
@@ -169,13 +171,22 @@ secrets_dir: /var/run/cm-agent/secrets
 # Additional environment variables injected verbatim into every worker
 # container. Useful for operator-specific passthrough.
 #
-# Container env beats the staged secrets file, so an LLM_API_KEY or
-# LLM_BASE_URL here overrides the LLM proxy values: setting both bypasses the
-# proxy and puts that key in the container, and setting only one breaks the
-# run (the proxy answers a real key with 401). An HTTP proxy here needs the
-# serve host (host.docker.internal by default) in NO_PROXY, and does not reach
-# LLM calls: those leave from this service, so its own HTTP(S)_PROXY /
-# NO_PROXY environment applies (set it on the process or its service unit).
+# Container env beats the staged secrets file, so in endpoint mode an
+# LLM_API_KEY or LLM_BASE_URL here overrides the LLM proxy values: setting both
+# bypasses the proxy and puts that key in the container, and setting only one
+# breaks the run (the proxy answers a real key with 401). LLM_OAUTH_TOKEN is
+# read only from the staged file, so a value here is ignored. An LLM_TYPE here
+# overrides the trigger's endpoint type (a claude_code one included), so leave
+# it unset.
+#
+# Endpoint mode: an HTTP proxy here needs the serve host (host.docker.internal
+# by default) in NO_PROXY, and does not reach LLM calls: those leave from this
+# service, so its own HTTP(S)_PROXY / NO_PROXY environment applies (set it on
+# the process or its service unit). claude_code mode: `claude` calls Anthropic
+# from the worker, so the proxy here applies to it; loopback (127.0.0.1,
+# localhost, ::1) is added to its NO_PROXY automatically and the serve host is
+# not needed. NO_PROXY still needs the host of container_contextmatrix_url in
+# both modes. See docs/secrets.md.
 #
 # CMX_READ_ONLY_ROOTS belongs here when the image's own declaration is wrong for
 # your deployment. It is a colon-separated list of absolute trees the worker's
@@ -184,7 +195,9 @@ secrets_dir: /var/run/cm-agent/secrets
 # dependency source instead of guessing at an API. Every worker image already
 # declares where its own toolchain caches source; a value set here replaces that
 # declaration. Writes are never widened - edit, write and bash stay inside the
-# workspace - and a root that is relative, unresolvable, the filesystem root, or
+# workspace - for the harness tools. In claude_code mode Claude Code's
+# built-ins (Read, Write, Edit, Bash) are not jailed (the container is the
+# boundary) and the roots apply only to the bridged Go tools. A root that is relative, unresolvable, the filesystem root, or
 # a parent of the workspace is dropped, so a mistake here narrows access, never
 # widens it.
 #
@@ -208,6 +221,9 @@ secrets_dir: /var/run/cm-agent/secrets
 # Non-canonical values (anything outside low|medium|high|"") are forwarded to
 # the provider as-is; the agent logs a startup warning so a typo doesn't go
 # unnoticed.
+# In claude_code mode the value becomes Claude Code's effort through vendorkit's
+# normalization; a value Claude Code does not accept falls back to its default
+# with a startup warning.
 # reasoning_effort: ""
 
 # Reasoning replay: each reply's reasoning goes back with every later request of

@@ -100,11 +100,15 @@ Operator notes:
   endpoint mode it also needs the serve host (`host.docker.internal` by
   default), because the worker's LLM client calls the proxy there. In
   `claude_code` mode the serve host is not needed; loopback is added for you.
-- An operator `LLM_*` in `worker_extra_env` wins over the staged values, since
-  container env beats the secrets file (`resolveLLMValue`): setting both
-  `LLM_API_KEY` and `LLM_BASE_URL` bypasses the proxy and puts that key in the
-  container, and setting only one breaks the run (the proxy answers a real key
-  with 401, and an upstream has never seen the token).
+- An operator `LLM_API_KEY`, `LLM_BASE_URL` or `LLM_TYPE` in
+  `worker_extra_env` wins over the staged values, since container env beats the
+  secrets file (`resolveLLMValue`): setting both `LLM_API_KEY` and
+  `LLM_BASE_URL` bypasses the proxy and puts that key in the container, and
+  setting only one breaks the run (the proxy answers a real key with 401, and
+  an upstream has never seen the token). An `LLM_TYPE` overrides the trigger's
+  endpoint type, a `claude_code` one included, so leave it unset.
+  `LLM_OAUTH_TOKEN` is read only from the staged file; a value in
+  `worker_extra_env` is ignored.
 
 Limits:
 

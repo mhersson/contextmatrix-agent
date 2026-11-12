@@ -627,7 +627,8 @@ func (s *Server) stopAdmissions(ctx context.Context, match func(project, cardID 
 // executor call, rather than launched with a dud mount or an empty LLM
 // endpoint. A server without a usable LLM proxy fails closed the same way: the
 // worker gets a per-run proxy token, never the real key, and a run that does
-// not launch has its token revoked.
+// not launch has its token revoked. A claude_code run is the exception: its
+// worker is staged the subscription token.
 func (s *Server) admitAndLaunch(ctx context.Context, adm *admission, spec executor.LaunchSpec, p protocol.TriggerPayload) (failure string, stopped bool) {
 	mu := s.launchLock(p.Project, p.CardID)
 	mu.Lock()
@@ -822,8 +823,9 @@ func mintRunID(cardID string) string {
 // token, the LLM proxy token, the resolved MCP API key (the payload override,
 // else the configured one - the same expression buildLaunchSpec uses, so the
 // key the worker actually sends is the key that gets masked), and every mob
-// guest bearer token. The real LLM endpoint key never reaches the container
-// but stays registered as defence in depth. Registration happens before
+// guest bearer token. In endpoint mode the real LLM endpoint key never reaches
+// the container but stays registered as defence in depth; a claude_code
+// worker holds the subscription token, which is registered too. Registration happens before
 // Launch so no container output can precede it; removeSessionSecrets
 // unregisters on container exit and on a failed launch, so a re-trigger never
 // inherits stale keys. It is nil-safe against a nil registry, a nil endpoint,
@@ -876,7 +878,8 @@ func (s *Server) removeSessionSecrets(project, cardID, correlationID string) {
 }
 
 // runEndpoint maps the LLM endpoint the worker is to call - the proxy's, never
-// the payload's - plus the payload's mob session guest specs, which carry
+// the payload's, except a claude_code run, which stages the subscription
+// token - plus the payload's mob session guest specs, which carry
 // bearer tokens and therefore ride the secrets file, into the per-run
 // credential file's shape.
 func (s *Server) runEndpoint(p protocol.TriggerPayload, llm protocol.LLMEndpoint) secrets.EndpointSecrets {
