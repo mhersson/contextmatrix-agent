@@ -150,6 +150,8 @@ func (c *Claude) Run(ctx context.Context, req orchestrator.RunRequest) (harness.
 
 	builtins, bridged := claudecode.SplitRegistry(req.Registry)
 
+	bridged = wrapBridged(bridged, req.Config.RedactToolOutput, req.Config.ToolOutputMaxBytes)
+
 	task := req.Task
 	if len(req.Config.History) > 0 && req.Resume == "" {
 		task = claudecode.RenderTranscript(req.Config.History) + "\n\n" + req.Task
@@ -189,6 +191,56 @@ func (c *Claude) Run(ctx context.Context, req orchestrator.RunRequest) (harness.
 	}
 
 	return res, nil
+}
+
+// wrapBridged redacts and caps the output of every bridged tool: the bridge
+// hands results to claude whole, and the harness loop that does this in
+// endpoint mode does not run.
+func wrapBridged(reg *tools.Registry, redact func(string) string, maxBytes int) *tools.Registry {
+	if reg == nil {
+		return nil
+	}
+
+	if redact == nil {
+		redact = func(s string) string { return s }
+	}
+
+	all := reg.All()
+	wrapped := make([]tools.Tool, len(all))
+
+	for i, t := range all {
+		wrapped[i] = bridgedTool{Tool: t, redact: redact, maxBytes: maxBytes}
+	}
+
+	return tools.NewRegistry(wrapped...)
+}
+
+type bridgedTool struct {
+	tools.Tool
+
+	redact   func(string) string
+	maxBytes int
+}
+
+func (b bridgedTool) Execute(ctx context.Context, args map[string]any) (tools.Result, error) {
+	res, err := b.Tool.Execute(ctx, args)
+	res.Text = tools.HeadTail(b.redact(res.Text), b.maxBytes)
+
+	if err != nil {
+		// An unchanged error keeps its wrapping.
+		if msg := tools.HeadTail(b.redact(err.Error()), b.maxBytes); msg != err.Error() {
+			err = errors.New(msg)
+		}
+	}
+
+	return res, err
+}
+
+// Terminal forwards the inner tool's, which the bridge reads to end the run.
+func (b bridgedTool) Terminal() bool {
+	term, ok := b.Tool.(tools.Terminal)
+
+	return ok && term.Terminal()
 }
 
 // storeRateLimit only stores a copy: vendorkit calls it on the stream reader.
@@ -242,11 +294,12 @@ func (c *Claude) SpawnSubagents(ctx context.Context, req orchestrator.FanoutRequ
 				Task:     spec.Prompt,
 				Dir:      req.Root,
 				Config: harness.Config{
-					Model:            model,
-					MaxTurns:         spec.MaxTurns,
-					RedactToolOutput: req.Opts.RedactToolOutput,
-					OnDelta:          req.OnDelta,
-					MaxCostUSD:       req.BudgetUSD,
+					Model:              model,
+					MaxTurns:           spec.MaxTurns,
+					RedactToolOutput:   req.Opts.RedactToolOutput,
+					ToolOutputMaxBytes: req.Opts.ToolOutputMaxBytes,
+					OnDelta:            req.OnDelta,
+					MaxCostUSD:         req.BudgetUSD,
 				},
 			})
 			results[i] = harness.SubagentResult{Role: spec.Role, Output: res.Output, Result: res, Err: err}

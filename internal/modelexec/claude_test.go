@@ -539,3 +539,144 @@ func TestCheckClaudeCode(t *testing.T) {
 		})
 	}
 }
+
+// scriptedTool returns a fixed result and optionally ends the run.
+type scriptedTool struct {
+	name     string
+	res      tools.Result
+	err      error
+	terminal bool
+}
+
+func (s scriptedTool) Name() string     { return s.name }
+func (s scriptedTool) Schema() llm.Tool { return llm.Tool{} }
+func (s scriptedTool) Execute(context.Context, map[string]any) (tools.Result, error) {
+	return s.res, s.err
+}
+func (s scriptedTool) Terminal() bool { return s.terminal }
+
+const bridgeSecret = "SYNTHETIC-SECRET-MARKER"
+
+func redactSecret(s string) string { return strings.ReplaceAll(s, bridgeSecret, "[REDACTED]") }
+
+func bridgedSpec(t *testing.T, cfg harness.Config, reg *tools.Registry) claudecode.Spec {
+	t.Helper()
+
+	f := &fakeRunner{}
+	c := newTestClaude(t, ClaudeConfig{}, f)
+
+	req := baseReq()
+	req.Registry = reg
+	cfg.Model = req.Config.Model
+	req.Config = cfg
+
+	_, err := c.Run(t.Context(), req)
+	require.NoError(t, err)
+
+	specs := f.recorded()
+	require.Len(t, specs, 1)
+	require.NotNil(t, specs[0].Tools)
+
+	return specs[0]
+}
+
+func TestClaudeBridgedToolOutputIsRedactedAndCapped(t *testing.T) {
+	const limit = 200
+
+	body := bridgeSecret + strings.Repeat("x", 5000) + "TAIL-END"
+	reg := tools.NewRegistry(scriptedTool{name: "grep", res: tools.Result{Text: body}})
+	spec := bridgedSpec(t, harness.Config{RedactToolOutput: redactSecret, ToolOutputMaxBytes: limit}, reg)
+
+	tool, ok := spec.Tools.Get("grep")
+	require.True(t, ok)
+
+	res, err := tool.Execute(t.Context(), nil)
+	require.NoError(t, err)
+
+	assert.NotContains(t, res.Text, bridgeSecret)
+	assert.Equal(t, tools.HeadTail(redactSecret(body), limit), res.Text)
+	assert.Less(t, len(res.Text), len(body))
+	assert.Contains(t, res.Text, "[REDACTED]")
+	assert.True(t, strings.HasSuffix(res.Text, "TAIL-END"))
+}
+
+func TestClaudeBridgedToolErrorIsRedacted(t *testing.T) {
+	inner := errors.New("failed with " + bridgeSecret)
+	reg := tools.NewRegistry(scriptedTool{name: "grep", err: inner})
+	spec := bridgedSpec(t, harness.Config{RedactToolOutput: redactSecret}, reg)
+
+	tool, _ := spec.Tools.Get("grep")
+	_, err := tool.Execute(t.Context(), nil)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), bridgeSecret)
+	assert.NotErrorIs(t, err, inner)
+
+	clean := fmt.Errorf("wrapped: %w", os.ErrNotExist)
+	reg = tools.NewRegistry(scriptedTool{name: "grep", err: clean})
+	spec = bridgedSpec(t, harness.Config{RedactToolOutput: redactSecret}, reg)
+
+	tool, _ = spec.Tools.Get("grep")
+	_, err = tool.Execute(t.Context(), nil)
+	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestClaudeBridgedToolKeepsTerminal(t *testing.T) {
+	reg := tools.NewRegistry(
+		scriptedTool{name: "finish", terminal: true},
+		scriptedTool{name: "grep"},
+		stubTool{"plain"},
+	)
+	spec := bridgedSpec(t, harness.Config{}, reg)
+
+	for name, want := range map[string]bool{"finish": true, "grep": false, "plain": false} {
+		tool, ok := spec.Tools.Get(name)
+		require.True(t, ok, name)
+
+		term, ok := tool.(tools.Terminal)
+		require.True(t, ok, name)
+		assert.Equal(t, want, term.Terminal(), name)
+	}
+}
+
+func TestClaudeBridgedToolWithoutRedactorOrCapIsUnchanged(t *testing.T) {
+	body := strings.Repeat("y", 1000)
+	reg := tools.NewRegistry(scriptedTool{name: "grep", res: tools.Result{Text: body}})
+	spec := bridgedSpec(t, harness.Config{}, reg)
+
+	tool, _ := spec.Tools.Get("grep")
+	res, err := tool.Execute(t.Context(), nil)
+	require.NoError(t, err)
+	assert.Equal(t, body, res.Text)
+}
+
+func TestClaudeSpawnSubagentsCapsBridgedOutput(t *testing.T) {
+	const limit = 100
+
+	f := &fakeRunner{}
+	c := newTestClaude(t, ClaudeConfig{}, f)
+
+	body := bridgeSecret + strings.Repeat("z", 3000)
+	_, err := c.SpawnSubagents(t.Context(), orchestrator.FanoutRequest{
+		Root:  t.TempDir(),
+		Emit:  events.NewEmitter(nil, nil),
+		Specs: []harness.SubagentSpec{{Role: "a", Prompt: "p"}},
+		Opts: harness.SubagentOpts{
+			DefaultModel:       "anthropic/claude-sonnet-5.5",
+			ExtraReadOnlyTools: []tools.Tool{scriptedTool{name: "extra", res: tools.Result{Text: body}}},
+			ToolOutputMaxBytes: limit,
+			RedactToolOutput:   redactSecret,
+		},
+	})
+	require.NoError(t, err)
+
+	specs := f.recorded()
+	require.Len(t, specs, 1)
+
+	tool, ok := specs[0].Tools.Get("extra")
+	require.True(t, ok)
+
+	res, err := tool.Execute(t.Context(), nil)
+	require.NoError(t, err)
+	assert.NotContains(t, res.Text, bridgeSecret)
+	assert.Equal(t, tools.HeadTail(redactSecret(body), limit), res.Text)
+}

@@ -452,11 +452,13 @@ Lost in this mode:
 - the 0.85 context stop and opt-in compaction (Claude Code compacts itself)
 - incapable-model detection
 - reasoning replay
-- redaction of tool output before the model sees it (events and transcripts
-  are still redacted)
+- redaction of the built-in tools' output before the model sees it (events and
+  transcripts are still redacted; bridged Go tools are redacted as on the
+  harness)
 - keeping the credential out of the worker (see [secrets](secrets.md))
 - vendor diversity: every model is a Claude model
-- the tool-output byte cap (Claude Code's own limits apply)
+- the tool-output byte cap for the built-ins (Claude Code's own limits apply;
+  bridged Go tools are capped by `tool_output_max_bytes` as on the harness)
 - the workspace jail and read-only roots for the built-ins (the container is
   the boundary; bridged tools keep their jail)
 
