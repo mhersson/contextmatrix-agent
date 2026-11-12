@@ -609,7 +609,7 @@ func TestClaudeBridgedToolErrorIsRedacted(t *testing.T) {
 	_, err := tool.Execute(t.Context(), nil)
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), bridgeSecret)
-	assert.NotErrorIs(t, err, inner)
+	require.NotErrorIs(t, err, inner)
 
 	clean := fmt.Errorf("wrapped: %w", os.ErrNotExist)
 	reg = tools.NewRegistry(scriptedTool{name: "grep", err: clean})
