@@ -74,12 +74,6 @@ func newWorkCmd() *cobra.Command {
 				return err
 			}
 
-			if spec.ReplayReasoning {
-				slog.Info("reasoning replay: on")
-			} else {
-				slog.Info("reasoning replay: off")
-			}
-
 			src, err := secrets.Open(cmEnvFile)
 			if err != nil {
 				return fmt.Errorf("read secrets: %w", err)
@@ -92,6 +86,13 @@ func newWorkCmd() *cobra.Command {
 			// file per git op so host-side rotation reaches a long-running worker.
 			spec = readLLMSecrets(spec, src)
 			spec.GitToken = src.Get("CM_GIT_TOKEN")
+
+			// Replay never applies to claude_code runs.
+			if spec.ReplayReasoning && spec.LLMType != protocol.LLMEndpointTypeClaudeCode {
+				slog.Info("reasoning replay: on")
+			} else {
+				slog.Info("reasoning replay: off")
+			}
 
 			// Guest specs carry bearer tokens, so they ride the secrets file -
 			// same delivery as the git token, never plain container env.
