@@ -431,6 +431,20 @@ backstop sets none, so it gets the remaining budget. The review specialists run
 concurrently, go out as one fan-out and split the remainder equally. A run
 never starts with either ledger exhausted.
 
+### Mob sessions
+
+A mob seat keeps its conversation across rounds by resuming its own Claude Code
+session: the first run of a seat starts one, later runs resume it. A failed
+first run leaves nothing to resume, so the next round starts fresh. The
+seat's final-answer backstop and the moderator are one-shot calls.
+
+### Card pins
+
+The card's `model_orchestrator`, `model_coder` and `model_reviewer` pins map an
+`anthropic/claude-*` slug to its Claude Code id and use it when it is one of
+the run's candidates. Any other pin is ignored for the run, with a card note,
+and the ladder decides.
+
 ### Usage limit
 
 Once any run reports the subscription's usage limit, every later model run of

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -728,4 +729,106 @@ func TestMobRunsRouteThroughTheExecutor(t *testing.T) {
 		assert.Empty(t, rec.runs[0].Registry.All())
 		assert.Equal(t, mobModeratorMaxTurns, rec.runs[0].Config.MaxTurns)
 	})
+}
+
+func claudeSeatRun(t *testing.T, rec *recordingExec, claude bool) mob.SeatRunner {
+	t.Helper()
+
+	o := mobTestRun(&fakeOps{}, MobConfig{Participants: 2}, 0)
+	o.d.Cfg.ClaudeCode = claude
+	o.d.Executor = rec
+
+	return o.mobSeatRunner(&seatDebugSink{w: io.Discard}, 0, "mob_seat")
+}
+
+func TestNewSessionIDIsAUUID(t *testing.T) {
+	re := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+	a, b := newSessionID(), newSessionID()
+	assert.Regexp(t, re, a)
+	assert.Regexp(t, re, b)
+	assert.NotEqual(t, a, b)
+}
+
+func TestMobSeatRunnerResumesEachSeatsSessionInClaudeCodeMode(t *testing.T) {
+	rec := &recordingExec{results: []execResult{
+		{res: harness.Result{Output: "position"}}, {res: harness.Result{Output: "position"}}, {res: harness.Result{Output: "position"}},
+	}}
+	runner := claudeSeatRun(t, rec, true)
+	s1 := mob.SeatConfig{Name: "seat-1", Lens: "risk", Model: "claude-opus-5-5"}
+	s2 := mob.SeatConfig{Name: "seat-2", Lens: "risk", Model: "claude-opus-5-5"}
+
+	for _, s := range []mob.SeatConfig{s1, s1, s2} {
+		_, _, err := runner(t.Context(), s, nil, "go")
+		require.NoError(t, err)
+	}
+
+	require.Len(t, rec.runs, 3)
+	assert.NotEmpty(t, rec.runs[0].SessionID)
+	assert.Empty(t, rec.runs[0].Resume)
+	assert.Empty(t, rec.runs[1].SessionID)
+	assert.Equal(t, rec.runs[0].SessionID, rec.runs[1].Resume)
+	assert.NotEmpty(t, rec.runs[2].SessionID)
+	assert.NotEqual(t, rec.runs[0].SessionID, rec.runs[2].SessionID)
+	assert.Empty(t, rec.runs[2].Resume)
+}
+
+func TestMobSeatFailedFirstRunStartsAFreshSession(t *testing.T) {
+	rec := &recordingExec{results: []execResult{
+		{err: errors.New("boom")}, {res: harness.Result{Output: "position"}},
+	}}
+	runner := claudeSeatRun(t, rec, true)
+	s := mob.SeatConfig{Name: "seat-1", Lens: "risk", Model: "claude-opus-5-5"}
+
+	_, _, err := runner(t.Context(), s, nil, "go")
+	require.Error(t, err)
+
+	_, _, err = runner(t.Context(), s, nil, "go")
+	require.NoError(t, err)
+
+	require.Len(t, rec.runs, 2)
+	assert.NotEmpty(t, rec.runs[1].SessionID)
+	assert.NotEqual(t, rec.runs[0].SessionID, rec.runs[1].SessionID)
+	assert.Empty(t, rec.runs[1].Resume)
+}
+
+func TestMobBackstopAndModeratorRunWithoutASession(t *testing.T) {
+	rec := &recordingExec{results: []execResult{
+		{res: harness.Result{Output: ""}},
+		{res: harness.Result{Output: "late"}},
+		{res: harness.Result{Output: `{}`}},
+	}}
+	o := mobTestRun(&fakeOps{}, MobConfig{Participants: 2}, 0)
+	o.d.Cfg.ClaudeCode = true
+	o.d.Executor = rec
+
+	runner := o.mobSeatRunner(&seatDebugSink{w: io.Discard}, 0, "mob_seat")
+	_, _, err := runner(t.Context(), mob.SeatConfig{Name: "seat-1", Lens: "risk", Model: "claude-opus-5-5"}, nil, "go")
+	require.NoError(t, err)
+
+	require.Len(t, rec.runs, 2)
+	assert.NotEmpty(t, rec.runs[0].SessionID)
+	assert.Empty(t, rec.runs[1].SessionID)
+	assert.Empty(t, rec.runs[1].Resume)
+
+	_, _, _, _ = o.mobModeratorRunner(&seatDebugSink{w: io.Discard}, "mob_moderator")(t.Context(), "decide")
+
+	require.Len(t, rec.runs, 3)
+	assert.Empty(t, rec.runs[2].SessionID)
+	assert.Empty(t, rec.runs[2].Resume)
+}
+
+func TestMobSeatRunnerEndpointModeHasNoSession(t *testing.T) {
+	rec := &recordingExec{}
+	runner := claudeSeatRun(t, rec, false)
+	s := mob.SeatConfig{Name: "seat-1", Lens: "risk", Model: "m/1"}
+
+	for range 2 {
+		_, _, err := runner(t.Context(), s, nil, "go")
+		require.NoError(t, err)
+	}
+
+	for _, r := range rec.runs {
+		assert.Empty(t, r.SessionID)
+		assert.Empty(t, r.Resume)
+	}
 }

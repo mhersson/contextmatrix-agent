@@ -647,6 +647,10 @@ func newRun(ctx context.Context, d Deps, tc cmclient.TaskContext) *run {
 		ledger: NewLedger(effectiveCeiling(d.Cfg), tc.ReportedCostUSD),
 	}
 
+	if d.Cfg.ClaudeCode {
+		o.claudeCodePins(ctx)
+	}
+
 	o.coderModels = map[string]bool{}
 	o.excluded = map[string]bool{}
 	kv, s := readMeta(tc.Description)

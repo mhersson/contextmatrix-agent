@@ -331,6 +331,24 @@ func trimSeatContext(msgs []llm.Message) []llm.Message {
 type seatSession struct {
 	model string
 	msgs  []llm.Message
+	// claudeSession is the seat's Claude Code session, "" before its first
+	// successful run.
+	claudeSession string
+}
+
+// newSessionID returns a random RFC 4122 version 4 UUID in lowercase hex.
+func newSessionID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(fmt.Sprintf("session id: %v", err))
+	}
+
+	b[6] = b[6]&0x0f | 0x40
+	b[8] = b[8]&0x3f | 0x80
+
+	h := hex.EncodeToString(b[:])
+
+	return h[:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:]
 }
 
 // mobSeatRunner returns the SeatRunner: each turn is a fresh harness run on
@@ -370,7 +388,19 @@ func (o *run) mobSeatRunner(sink *seatDebugSink, perTurnCap float64, step string
 		// call locally; the duration travels by value here because seats fan out
 		// concurrently under the loopback server.
 		start := time.Now()
-		res, err := o.execRun(ctx, o.ledger, RunRequest{Client: o.d.Client, Registry: o.d.ReadTools, Emit: emit, Task: prompt, Config: cfg, Dir: o.d.Cfg.Workspace})
+		req := RunRequest{Client: o.d.Client, Registry: o.d.ReadTools, Emit: emit, Task: prompt, Config: cfg, Dir: o.d.Cfg.Workspace}
+
+		session := s.claudeSession
+		if o.d.Cfg.ClaudeCode {
+			if session == "" {
+				req.SessionID = newSessionID()
+				session = req.SessionID
+			} else {
+				req.Resume = session
+			}
+		}
+
+		res, err := o.execRun(ctx, o.ledger, req)
 		dur := time.Since(start)
 
 		used := o.spendAndReport(ctx, o.ledger, o.d.Cfg.CardID, "mob: report seat usage failed",
@@ -417,7 +447,7 @@ func (o *run) mobSeatRunner(sink *seatDebugSink, perTurnCap float64, step string
 		}
 
 		mu.Lock()
-		sessions[seat.Name] = seatSession{model: seat.Model, msgs: trimSeatContext(msgs)}
+		sessions[seat.Name] = seatSession{model: seat.Model, msgs: trimSeatContext(msgs), claudeSession: session}
 		mu.Unlock()
 
 		return out, res.TotalCostUSD, nil

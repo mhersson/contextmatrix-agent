@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-harness/events"
 )
 
@@ -50,4 +51,32 @@ func (o *run) warnUnresolvablePin(ctx context.Context, pinType, requested string
 	}
 
 	o.d.logCard(ctx, "%s model pin %q not in catalog - falling back to tier selection", pinType, requested)
+}
+
+// claudeCodePins rewrites the card's model pins to Claude Code ids. A pin that
+// maps to a candidate of the run is replaced by its id; any other is cleared
+// so the ladder decides, with one card note.
+func (o *run) claudeCodePins(ctx context.Context) {
+	for _, p := range []struct {
+		field string
+		pin   *string
+	}{
+		{"model_orchestrator", &o.tc.ModelOrchestrator},
+		{"model_coder", &o.tc.ModelCoder},
+		{"model_reviewer", &o.tc.ModelReviewer},
+	} {
+		if *p.pin == "" {
+			continue
+		}
+
+		id, ok := registry.ClaudeCodeModelID(*p.pin)
+		if ok && o.d.Registry != nil && o.d.Registry.Has(id) {
+			*p.pin = id
+
+			continue
+		}
+
+		o.d.logCard(ctx, "%s %q is not a Claude Code model available to this run - ignoring the pin", p.field, *p.pin)
+		*p.pin = ""
+	}
 }
