@@ -12,6 +12,9 @@ one of the published variants so the agent binary, entrypoint, unprivileged
 `user` (UID 1000), and baseline CLIs (`git`, `gh`, `rg`, `fd`, `shellcheck`,
 `shfmt`, `kubectl`, `kustomize`, `yq`, `task`, `zip`, `unzip`) are inherited
 unchanged - then `apt-get install` (or otherwise add) what your project needs.
+Keep a runnable `claude` on `PATH`: a project image without one fails the
+start-up check of every `claude_code` run, and a version other than the tested
+one only logs a warning.
 
 ## Worked example - add Ruby
 

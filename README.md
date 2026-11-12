@@ -140,8 +140,9 @@ export LLM_API_KEY=<your-api-key>
 1. **Build the worker image.** The worker image bundles the agent binary plus
    the CLIs the harness expects; Debian packages come from Debian's signed
    repositories; the downloaded Go, Node, rustup, Maven, gh, yq and Task
-   archives and binaries are pinned and SHA-verified; the uv image is
-   digest-pinned; golangci-lint and gofumpt are built from source at pinned
+   archives and binaries are pinned and SHA-verified; the Claude Code binary is
+   fetched from the npm registry's platform tarball at a pinned version and
+   SHA-512-verified; the uv image is digest-pinned; golangci-lint and gofumpt are built from source at pinned
    versions; npm, yarn, pip, ty and ruff are pinned by version and fetched
    from their registries.
 
