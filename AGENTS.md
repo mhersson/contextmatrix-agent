@@ -212,8 +212,9 @@ Summaries only - full detail lives in the reference documents above.
    run may create its missing `playbook/` base branch from a source branch with
    a create-only push before cutting the card branch; that is the only push
    allowed outside the card-branch guard.
-3. **One container per top-level card.** All subagents run in-process on one
-   shared workspace; the main solver writes sequentially, Best-of-N candidates
+3. **One container per top-level card.** On the harness all subagents run in-process
+   on one shared workspace (in `claude_code` mode each run is a `claude` process
+   in the same container); the main solver writes sequentially, Best-of-N candidates
    write concurrently in isolated worktrees, and review panels and mob seats
    are read-only fan-outs.
 4. **Review = 3 specialists** (one generic reviewer on a POC card without
@@ -223,7 +224,8 @@ Summaries only - full detail lives in the reference documents above.
 5. **Model selection is priors-only.** The planner emits a complexity tier per
    subtask; deterministic code maps the tier to a model. The LLM never names a
    model; there is no measured-capability gate. Pins always override.
-6. **Context bounds.** No compactor by default: a reply that nears the window
+6. **Context bounds.** On the harness, no compactor by default (in `claude_code`
+   mode Claude Code compacts itself): a reply that nears the window
    mid-run, or a phase's final reply that nears it and is cut at the token
    limit, returns incomplete - a failed subtask, never a silent truncation.
 7. **Per-card budget.** One cumulative USD ceiling (`CMX_MAX_CARD_COST`) spans

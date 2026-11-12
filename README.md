@@ -144,7 +144,8 @@ export LLM_API_KEY=<your-api-key>
    fetched from the npm registry's platform tarball at a pinned version and
    SHA-512-verified; the uv image is digest-pinned; golangci-lint and gofumpt are built from source at pinned
    versions; npm, yarn, pip, ty and ruff are pinned by version and fetched
-   from their registries.
+   from their registries. The images bundle Anthropic's proprietary Claude Code,
+   so do not push them to a public registry.
 
    ```bash
    make docker-worker          # tags contextmatrix-agent-worker:dev (full), labelled with the commit

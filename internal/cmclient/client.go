@@ -448,9 +448,9 @@ func (c *Client) Heartbeat(ctx context.Context, cardID string) error {
 // empty; DurationMS is omitted when non-positive.
 type UsageReport struct {
 	// CostBasis is "subscription" on a subscription run, "" when metered. With
-	// it set ActualCostUSD is never sent: CM rejects the combination. Both new
-	// arguments need a CM whose report_usage schema has them, so they ride only
-	// subscription runs.
+	// it set ActualCostUSD is never sent: CM rejects the combination. It and
+	// SubscriptionUsage need a CM whose report_usage schema has them, so they
+	// ride only subscription runs.
 	CostBasis string
 	// SubscriptionUsage holds the last-seen limit windows; sent only with CostBasis.
 	SubscriptionUsage []SubscriptionUsage
