@@ -462,7 +462,10 @@ which has its own ledger, is capped by the smaller of its own and the card's
 remainder; a mob seat keeps its per-turn cap, and the seat's final-answer
 backstop sets none, so it gets the remaining budget. The review specialists run
 concurrently, go out as one fan-out and split the remainder equally. A run
-never starts with either ledger exhausted.
+never starts with either ledger exhausted. A phase run stopped at its cap is
+never treated as finished work: a subtask it was coding is not completed and
+parks on the budget with its tree pushed as WIP, and a Best-of-N candidate
+drops out of the judge pool.
 
 ### Mob sessions
 

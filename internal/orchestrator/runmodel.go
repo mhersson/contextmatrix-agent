@@ -170,6 +170,14 @@ func (o *run) runModelCfg(ctx context.Context, scope runScope, reg *tools.Regist
 		return res, dur, &MaxTurnsError{Model: model, Turns: res.Turns}
 	}
 
+	// No caller sets a cost cap, so this is execRun's ledger cap: the run's work
+	// is truncated and must park, never be acted on as finished.
+	if err == nil && res.Reason == "max_cost" {
+		l := o.bindingLedger(scope.ledger)
+
+		return res, dur, &BudgetExceededError{Spent: l.Spent() + res.TotalCostUSD, Max: l.max}
+	}
+
 	return res, dur, err
 }
 

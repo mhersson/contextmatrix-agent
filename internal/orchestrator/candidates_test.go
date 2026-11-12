@@ -691,6 +691,43 @@ func TestFanoutSalvagesCappedCandidates(t *testing.T) {
 	assert.True(t, ops.loggedContains("turn cap on final subtask"), "logs=%v", ops.logs)
 }
 
+// maxCostDirExec stops every run in dir at its cost cap; runs elsewhere finish.
+type maxCostDirExec struct {
+	recordingExec
+
+	dir string
+}
+
+func (m *maxCostDirExec) Run(ctx context.Context, req RunRequest) (harness.Result, error) {
+	if req.Dir == m.dir {
+		return harness.Result{Reason: "max_cost", TotalCostUSD: 1.0}, nil
+	}
+
+	return m.recordingExec.Run(ctx, req)
+}
+
+// TestFanoutDropsACandidateStoppedAtItsCostCap: a candidate whose coder hit
+// --max-budget-usd left truncated work, so it drops instead of reaching the judge.
+func TestFanoutDropsACandidateStoppedAtItsCostCap(t *testing.T) {
+	ops := &fakeOps{}
+	d, _, ws := fanoutDeps(t, ops, &fakeGit{}, nil, 2)
+	d.Cfg.ClaudeCode = true
+	d.Executor = &maxCostDirExec{dir: filepath.Join(ws, ".worktrees", "c2")}
+
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "Only", Sizing: seedSizing("simple")}}, 1.0)
+
+	require.NoError(t, o.runFanout(context.Background()), "the other candidate survives")
+	require.Len(t, o.candidates, 2)
+
+	require.NoError(t, o.candidates[0].err)
+	assert.Len(t, o.candidates[0].completed, 1)
+
+	_, ok := errors.AsType[*BudgetExceededError](o.candidates[1].err)
+	assert.True(t, ok, "the capped candidate drops on the budget; err=%v", o.candidates[1].err)
+	assert.Empty(t, o.candidates[1].completed)
+	assert.False(t, o.candidates[1].capped)
+}
+
 // belowComplexRegistry seeds two coder models that clear the moderate bar
 // (0.76) but neither the complex bar (0.82) nor anything above it, so a
 // complex-tier request is served one rung down and reports a shortfall.

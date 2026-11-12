@@ -174,20 +174,35 @@ func (l *limitFanoutExec) SpawnSubagents(_ context.Context, req FanoutRequest) (
 	return out, nil
 }
 
-func TestMaxCostStopParksOnTheNextRun(t *testing.T) {
+func TestMaxCostStopParksOnTheBudget(t *testing.T) {
 	rec := &recordingExec{results: []execResult{{res: harness.Result{Reason: "max_cost", TotalCostUSD: 1.0}}}}
 	o := execTestRun(true, rec)
 	o.ledger = NewLedger(1, 0)
 
 	res, dur, err := o.runModel(t.Context(), nil, "t", "m")
-	require.NoError(t, err)
+	be, ok := errors.AsType[*BudgetExceededError](err)
+	require.True(t, ok, "err=%v", err)
+	assert.InDelta(t, 1.0, be.Spent, 1e-9)
+	assert.InDelta(t, 1.0, be.Max, 1e-9)
 
 	o.spendAndReport(t.Context(), o.ledger, "CARD-1", "warn", res, "m", "step", dur)
 
 	_, _, err = o.runModel(t.Context(), nil, "t", "m")
-	_, ok := errors.AsType[*BudgetExceededError](err)
+	_, ok = errors.AsType[*BudgetExceededError](err)
 	assert.True(t, ok)
 	assert.Len(t, rec.runs, 1)
+}
+
+func TestMaxCostStopNamesTheBindingLedger(t *testing.T) {
+	rec := &recordingExec{results: []execResult{{res: harness.Result{Reason: "max_cost", TotalCostUSD: 0.5}}}}
+	o := execTestRun(true, rec)
+	o.ledger = NewLedger(10, 9.5)
+
+	_, _, err := o.runModelCfg(t.Context(), runScope{ledger: NewLedger(5, 0)}, nil, "t", "m", harness.Config{})
+	be, ok := errors.AsType[*BudgetExceededError](err)
+	require.True(t, ok, "err=%v", err)
+	assert.InDelta(t, 10.0, be.Spent, 1e-9)
+	assert.InDelta(t, 10.0, be.Max, 1e-9)
 }
 
 func TestExecRunClaudeCodeHonoursTheCardLedgerForCandidates(t *testing.T) {

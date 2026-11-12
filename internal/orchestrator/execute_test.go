@@ -319,6 +319,30 @@ func TestExecuteSubtaskMaxTurnsNeverCompletes(t *testing.T) {
 	assert.Equal(t, registry.TierModerate, got.Bar, "a missing verify command is not evidence about the model")
 }
 
+// TestExecuteSubtaskMaxCostNeverCompletes: a Claude Code coder stopped by its
+// cost cap left a truncated tree, which must park like the turn cap does.
+func TestExecuteSubtaskMaxCostNeverCompletes(t *testing.T) {
+	ops := &fakeOps{}
+	git := &fakeGit{committed: true}
+	d := execTestDeps(ops, git, nil)
+	d.Executor = &recordingExec{results: []execResult{{res: harness.Result{Reason: "max_cost", TotalCostUSD: 1.0}}}}
+	d.Cfg.ClaudeCode = true
+
+	o := newExecRun(d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")}}, 1.0)
+	err := runExecute(context.Background(), o)
+
+	be, ok := errors.AsType[*BudgetExceededError](err)
+	require.True(t, ok, "err=%v", err)
+	assert.InDelta(t, 1.0, be.Spent, 1e-9)
+	assert.InDelta(t, 1.0, be.Max, 1e-9)
+
+	calls := ops.recorded()
+	assert.Equal(t, -1, indexOfCall(calls, "CompleteTask:SUB-1"), "budget-truncated work marked done; calls=%v", calls)
+	assert.Equal(t, -1, indexOfCall(calls, "ReportModelOutcomes:SUB-1"), "a truncated run is no win; calls=%v", calls)
+	assert.Empty(t, git.pushBranches, "budget-truncated work must not be pushed")
+	assert.GreaterOrEqual(t, indexOfCall(calls, "ReleaseCard:SUB-1"), 0, "parked subtask claim must be released")
+}
+
 func TestExecuteCoderPromptBody(t *testing.T) {
 	t.Run("planner description reaches the coder prompt", func(t *testing.T) {
 		ops := &fakeOps{}

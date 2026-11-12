@@ -134,6 +134,21 @@ func (o *run) execRun(ctx context.Context, ledger *Ledger, req RunRequest) (harn
 	return res, err
 }
 
+// bindingLedger is whichever of l and the run ledger has the least budget left:
+// the one execRun capped a Claude Code run at. l itself when neither is capped.
+func (o *run) bindingLedger(l *Ledger) *Ledger {
+	if l == nil {
+		l = o.ledger
+	}
+
+	least, capped := l.Remaining()
+	if r, c := o.ledger.Remaining(); c && (!capped || r < least) {
+		return o.ledger
+	}
+
+	return l
+}
+
 // execFanout refuses like execRun. Claude Code children run concurrently, so
 // each is capped at an equal share of the remaining budget.
 func (o *run) execFanout(ctx context.Context, req FanoutRequest) ([]harness.SubagentResult, error) {
