@@ -426,8 +426,15 @@ func (o *run) mobSeatRunner(sink *seatDebugSink, perTurnCap float64, step string
 			finalCfg.WrapUpTurns = 0
 			finalCfg.WrapUpMessage = ""
 
+			freq := RunRequest{Client: o.d.Client, Registry: tools.NewRegistry(), Emit: emit, Task: seatForcedFinalPrompt, Config: finalCfg, Dir: o.d.Cfg.Workspace}
+			if o.d.Cfg.ClaudeCode {
+				// Claude Code's Messages hold only this process: the seat's
+				// earlier rounds live in its session.
+				freq.Resume = session
+			}
+
 			bstart := time.Now()
-			fres, ferr := o.execRun(ctx, o.ledger, RunRequest{Client: o.d.Client, Registry: tools.NewRegistry(), Emit: emit, Task: seatForcedFinalPrompt, Config: finalCfg, Dir: o.d.Cfg.Workspace})
+			fres, ferr := o.execRun(ctx, o.ledger, freq)
 			bdur := time.Since(bstart)
 
 			// Report on the first call's resolved model: clearing ModelUsed keeps

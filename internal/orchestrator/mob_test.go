@@ -791,10 +791,14 @@ func TestMobSeatFailedFirstRunStartsAFreshSession(t *testing.T) {
 	assert.Empty(t, rec.runs[1].Resume)
 }
 
-func TestMobBackstopAndModeratorRunWithoutASession(t *testing.T) {
+// TestMobBackstopResumesTheSeatSession: vendorkit's Messages hold only the
+// current process, so the backstop resumes the seat's session to see its
+// earlier rounds; the moderator stays one-shot.
+func TestMobBackstopResumesTheSeatSession(t *testing.T) {
 	rec := &recordingExec{results: []execResult{
 		{res: harness.Result{Output: ""}},
 		{res: harness.Result{Output: "late"}},
+		{res: harness.Result{Output: "round two"}},
 		{res: harness.Result{Output: `{}`}},
 	}}
 	o := mobTestRun(&fakeOps{}, MobConfig{Participants: 2}, 0)
@@ -802,19 +806,52 @@ func TestMobBackstopAndModeratorRunWithoutASession(t *testing.T) {
 	o.d.Executor = rec
 
 	runner := o.mobSeatRunner(&seatDebugSink{w: io.Discard}, 0, "mob_seat")
-	_, _, err := runner(t.Context(), mob.SeatConfig{Name: "seat-1", Lens: "risk", Model: "claude-opus-5-5"}, nil, "go")
+	seat := mob.SeatConfig{Name: "seat-1", Lens: "risk", Model: "claude-opus-5-5"}
+
+	out, _, err := runner(t.Context(), seat, nil, "go")
+	require.NoError(t, err)
+	assert.Equal(t, "late", out)
+
+	_, _, err = runner(t.Context(), seat, nil, "again")
 	require.NoError(t, err)
 
-	require.Len(t, rec.runs, 2)
-	assert.NotEmpty(t, rec.runs[0].SessionID)
-	assert.Empty(t, rec.runs[1].SessionID)
-	assert.Empty(t, rec.runs[1].Resume)
+	require.Len(t, rec.runs, 3)
+	session := rec.runs[0].SessionID
+	require.NotEmpty(t, session)
+
+	backstop := rec.runs[1]
+	assert.Equal(t, seatForcedFinalPrompt, backstop.Task)
+	assert.Equal(t, session, backstop.Resume)
+	assert.Empty(t, backstop.SessionID)
+	assert.Empty(t, backstop.Registry.All())
+	assert.Equal(t, 1, backstop.Config.MaxTurns)
+	assert.Zero(t, backstop.Config.WrapUpTurns)
+
+	assert.Equal(t, session, rec.runs[2].Resume, "the next round resumes the same session")
+	assert.Empty(t, rec.runs[2].SessionID)
 
 	_, _, _, _ = o.mobModeratorRunner(&seatDebugSink{w: io.Discard}, "mob_moderator")(t.Context(), "decide")
 
-	require.Len(t, rec.runs, 3)
-	assert.Empty(t, rec.runs[2].SessionID)
-	assert.Empty(t, rec.runs[2].Resume)
+	require.Len(t, rec.runs, 4)
+	assert.Empty(t, rec.runs[3].SessionID)
+	assert.Empty(t, rec.runs[3].Resume)
+}
+
+func TestMobBackstopEndpointModeHasNoSession(t *testing.T) {
+	rec := &recordingExec{results: []execResult{
+		{res: harness.Result{Completed: true, Reason: "done", Output: ""}},
+		{res: harness.Result{Completed: true, Reason: "done", Output: "late"}},
+	}}
+	runner := claudeSeatRun(t, rec, false)
+
+	out, _, err := runner(t.Context(), mob.SeatConfig{Name: "seat-1", Lens: "risk", Model: "m/1"}, nil, "go")
+	require.NoError(t, err)
+	assert.Equal(t, "late", out)
+
+	require.Len(t, rec.runs, 2)
+	assert.Equal(t, seatForcedFinalPrompt, rec.runs[1].Task)
+	assert.Empty(t, rec.runs[1].SessionID)
+	assert.Empty(t, rec.runs[1].Resume)
 }
 
 func TestMobSeatRunnerEndpointModeHasNoSession(t *testing.T) {
