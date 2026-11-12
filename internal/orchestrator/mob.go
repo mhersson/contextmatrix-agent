@@ -455,6 +455,9 @@ func (o *run) mobSeatRunner(sink *seatDebugSink, perTurnCap float64, step string
 						{Role: "user", Content: seatForcedFinalPrompt},
 						{Role: "assistant", Content: fres.Output},
 					})
+					// The old session never saw this answer; the next round starts
+					// fresh from the stored transcript, which holds it.
+					session = ""
 				}
 			}
 

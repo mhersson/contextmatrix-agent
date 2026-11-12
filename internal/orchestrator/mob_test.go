@@ -846,10 +846,11 @@ func TestMobBackstopSeesEverySeatRoundInClaudeCodeMode(t *testing.T) {
 	assert.Contains(t, primer, "ROUND-ONE-MARKER")
 	assert.Contains(t, primer, "ROUND-TWO-MARKER")
 
-	// The seat keeps resuming its own session; the stored transcript gains the
-	// backstop exchange, never the backstop's own primer.
-	assert.Equal(t, session, rec.runs[3].Resume)
-	assert.Empty(t, rec.runs[3].SessionID)
+	// The answered backstop retires the seat's session; the next round starts
+	// fresh and the stored transcript gains the backstop exchange, never the
+	// backstop's own primer.
+	assert.Empty(t, rec.runs[3].Resume)
+	assert.NotEmpty(t, rec.runs[3].SessionID)
 
 	stored := rec.runs[3].Config.History
 	text := historyText(stored)
@@ -901,4 +902,52 @@ func TestMobSeatRunnerEndpointModeHasNoSession(t *testing.T) {
 		assert.Empty(t, r.SessionID)
 		assert.Empty(t, r.Resume)
 	}
+}
+
+// TestMobSeatSessionAfterClaudeCodeBackstop: a session resumed after an
+// answered backstop never saw that answer, so the next round starts fresh from
+// the stored transcript, which holds it. A failed backstop keeps the session.
+func TestMobSeatSessionAfterClaudeCodeBackstop(t *testing.T) {
+	seat := mob.SeatConfig{Name: "seat-1", Lens: "risk", Model: "claude-opus-5-5"}
+
+	t.Run("answered backstop starts a fresh session", func(t *testing.T) {
+		rec := &recordingExec{results: []execResult{
+			{res: harness.Result{Output: "position"}},
+			{res: harness.Result{Output: ""}},
+			{res: harness.Result{Output: "late-answer"}},
+			{res: harness.Result{Output: "round three"}},
+		}}
+		runner := claudeSeatRun(t, rec, true)
+
+		for i := range 3 {
+			_, _, err := runner(t.Context(), seat, nil, "go")
+			require.NoError(t, err, "round %d", i+1)
+		}
+
+		require.Len(t, rec.runs, 4)
+		r3 := rec.runs[3]
+		assert.Empty(t, r3.Resume)
+		assert.NotEmpty(t, r3.SessionID)
+		assert.NotEqual(t, rec.runs[0].SessionID, r3.SessionID)
+		assert.Contains(t, historyText(r3.Config.History), "late-answer")
+	})
+
+	t.Run("failed backstop keeps the session", func(t *testing.T) {
+		rec := &recordingExec{results: []execResult{
+			{res: harness.Result{Output: "position"}},
+			{res: harness.Result{Output: ""}},
+			{err: errors.New("boom")},
+			{res: harness.Result{Output: "round three"}},
+		}}
+		runner := claudeSeatRun(t, rec, true)
+
+		for i := range 3 {
+			_, _, err := runner(t.Context(), seat, nil, "go")
+			require.NoError(t, err, "round %d", i+1)
+		}
+
+		require.Len(t, rec.runs, 4)
+		assert.Equal(t, rec.runs[0].SessionID, rec.runs[3].Resume)
+		assert.Empty(t, rec.runs[3].SessionID)
+	})
 }
