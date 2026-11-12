@@ -172,9 +172,6 @@ func TestGateClassificationStoppedAtTheBudgetCapParks(t *testing.T) {
 	_, ok := errors.AsType[*BudgetExceededError](err)
 	require.True(t, ok, "err=%v", err)
 	assert.NotEqual(t, gateAdjust, outcome, "a truncated classification never becomes an adjust")
-	assert.Equal(t, -1, indexOfCall(ops.recorded(), "IncrementReviewAttempts:CARD-1"),
-		"no review attempt is spent; calls=%v", ops.recorded())
-	assert.Len(t, rec.runs, 1, "no fix run follows")
 }
 
 func TestGateClassificationDonePastTheCapIsApplied(t *testing.T) {

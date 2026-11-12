@@ -605,7 +605,8 @@ func TestClaudeBridgedToolErrorIsRedacted(t *testing.T) {
 	reg := tools.NewRegistry(scriptedTool{name: "grep", err: inner})
 	spec := bridgedSpec(t, harness.Config{RedactToolOutput: redactSecret}, reg)
 
-	tool, _ := spec.Tools.Get("grep")
+	tool, ok := spec.Tools.Get("grep")
+	require.True(t, ok)
 	_, err := tool.Execute(t.Context(), nil)
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), bridgeSecret)
@@ -615,7 +616,8 @@ func TestClaudeBridgedToolErrorIsRedacted(t *testing.T) {
 	reg = tools.NewRegistry(scriptedTool{name: "grep", err: clean})
 	spec = bridgedSpec(t, harness.Config{RedactToolOutput: redactSecret}, reg)
 
-	tool, _ = spec.Tools.Get("grep")
+	tool, ok = spec.Tools.Get("grep")
+	require.True(t, ok)
 	_, err = tool.Execute(t.Context(), nil)
 	assert.ErrorIs(t, err, os.ErrNotExist)
 }
@@ -643,7 +645,8 @@ func TestClaudeBridgedToolWithoutRedactorOrCapIsUnchanged(t *testing.T) {
 	reg := tools.NewRegistry(scriptedTool{name: "grep", res: tools.Result{Text: body}})
 	spec := bridgedSpec(t, harness.Config{}, reg)
 
-	tool, _ := spec.Tools.Get("grep")
+	tool, ok := spec.Tools.Get("grep")
+	require.True(t, ok)
 	res, err := tool.Execute(t.Context(), nil)
 	require.NoError(t, err)
 	assert.Equal(t, body, res.Text)

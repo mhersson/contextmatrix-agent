@@ -458,7 +458,8 @@ Lost in this mode:
 - keeping the credential out of the worker (see [secrets](secrets.md))
 - vendor diversity: every model is a Claude model
 - the tool-output byte cap for the built-ins (Claude Code's own limits apply;
-  bridged Go tools are capped by `tool_output_max_bytes` as on the harness)
+  bridged Go tools are capped as on the harness: `tool_output_max_bytes`, 16 KiB
+  for mob seats)
 - the workspace jail and read-only roots for the built-ins (the container is
   the boundary; bridged tools keep their jail)
 
@@ -476,7 +477,9 @@ specialists run concurrently, go out as one fan-out and split the run's
 remainder equally. A run never starts with either ledger exhausted. A phase
 run stopped at its cap is never treated as finished work: a subtask it was
 coding is not completed and parks on the budget with its tree pushed as WIP,
-and a Best-of-N candidate drops out of the judge pool.
+and a Best-of-N candidate drops out of the judge pool. A run whose final answer
+crosses its cap still ends done with that answer, and the next run refuses on
+the exhausted ledger, as on the harness.
 
 ### Mob sessions
 
