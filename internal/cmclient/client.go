@@ -465,8 +465,9 @@ type UsageReport struct {
 	Step                string // bounded call kind (main, gate, checkpoint, ...)
 	DurationMS          int64  // wall time of the harness step in milliseconds
 	// Source marks who produced the token counts. The orchestrator always
-	// sends "collector": every count comes from gateway usage frames, never
-	// estimation. Requires a CM deployment whose report_usage schema has the
+	// sends "collector": counts come from gateway usage frames in endpoint
+	// mode and from the claude result in claude_code mode, never estimation.
+	// Requires a CM deployment whose report_usage schema has the
 	// source field (additionalProperties:false rejects it otherwise) - CM
 	// deploys first, same contract as Phase/Step/DurationMS.
 	Source string
