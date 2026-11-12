@@ -188,9 +188,10 @@ export LLM_API_KEY=<your-api-key>
    the trigger payload - the agent carries no local credential config, and a
    trigger without CM-provisioned credentials is rejected.
 
-   The real LLM key stays in `serve`: each worker gets a per-run stand-in token
-   and calls `serve`'s LLM proxy at `container_serve_url` (default
-   `http://host.docker.internal:<port>`), so a host firewall must allow
+   The real LLM key stays in `serve` (except in `claude_code` mode, where the
+   subscription token is staged into the worker): each worker gets a per-run
+   stand-in token and calls `serve`'s LLM proxy at `container_serve_url`
+   (default `http://host.docker.internal:<port>`), so a host firewall must allow
    container-to-host traffic on that port. Upstream LLM calls leave from
    `serve`, so they use `serve`'s own `HTTP(S)_PROXY`/`NO_PROXY` environment;
    an egress proxy set only in `worker_extra_env` does not reach them. A

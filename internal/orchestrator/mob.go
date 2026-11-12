@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -413,11 +414,19 @@ func (o *run) mobSeatRunner(sink *seatDebugSink, perTurnCap float64, step string
 		out := res.Output
 		msgs := res.Messages
 
+		if o.d.Cfg.ClaudeCode {
+			// Claude Code's Messages hold only this process, so the seat's
+			// transcript is the stored one plus this run's.
+			msgs = slices.Concat(s.msgs, res.Messages)
+		}
+
 		// Budget stops mid-exploration leave res.Output empty with a nil
 		// error; posting "" gave run 2 its empty bubbles and starved the
-		// moderator. One toolless single-turn call, seeded with the run's
-		// own transcript, converts the exploration already paid for into a
+		// moderator. One toolless single-turn call, seeded with the seat's
+		// transcript, converts the exploration already paid for into a
 		// position. Covers max_cost stops, which the wrap-up nudge cannot.
+		// It never resumes the seat's Claude Code session: that replays tool
+		// blocks into a toolless request, while History goes as a text primer.
 		if strings.TrimSpace(out) == "" {
 			finalCfg := cfg
 			finalCfg.History = trimSeatContext(msgs)
@@ -426,15 +435,8 @@ func (o *run) mobSeatRunner(sink *seatDebugSink, perTurnCap float64, step string
 			finalCfg.WrapUpTurns = 0
 			finalCfg.WrapUpMessage = ""
 
-			freq := RunRequest{Client: o.d.Client, Registry: tools.NewRegistry(), Emit: emit, Task: seatForcedFinalPrompt, Config: finalCfg, Dir: o.d.Cfg.Workspace}
-			if o.d.Cfg.ClaudeCode {
-				// Claude Code's Messages hold only this process: the seat's
-				// earlier rounds live in its session.
-				freq.Resume = session
-			}
-
 			bstart := time.Now()
-			fres, ferr := o.execRun(ctx, o.ledger, freq)
+			fres, ferr := o.execRun(ctx, o.ledger, RunRequest{Client: o.d.Client, Registry: tools.NewRegistry(), Emit: emit, Task: seatForcedFinalPrompt, Config: finalCfg, Dir: o.d.Cfg.Workspace})
 			bdur := time.Since(bstart)
 
 			// Report on the first call's resolved model: clearing ModelUsed keeps
@@ -446,6 +448,14 @@ func (o *run) mobSeatRunner(sink *seatDebugSink, perTurnCap float64, step string
 			if ferr == nil {
 				out = fres.Output
 				msgs = fres.Messages
+
+				if o.d.Cfg.ClaudeCode {
+					// fres.Messages open with the whole primer: keep the exchange only.
+					msgs = slices.Concat(finalCfg.History, []llm.Message{
+						{Role: "user", Content: seatForcedFinalPrompt},
+						{Role: "assistant", Content: fres.Output},
+					})
+				}
 			}
 
 			// Billed either way; keep the engine's discussion budget coherent

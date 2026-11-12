@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -791,14 +792,28 @@ func TestMobSeatFailedFirstRunStartsAFreshSession(t *testing.T) {
 	assert.Empty(t, rec.runs[1].Resume)
 }
 
-// TestMobBackstopResumesTheSeatSession: vendorkit's Messages hold only the
-// current process, so the backstop resumes the seat's session to see its
-// earlier rounds; the moderator stays one-shot.
-func TestMobBackstopResumesTheSeatSession(t *testing.T) {
+// historyText joins every message's content, for fixture-marker checks.
+func historyText(msgs []llm.Message) string {
+	parts := make([]string, len(msgs))
+	for i, m := range msgs {
+		parts[i] = m.Content
+	}
+
+	return strings.Join(parts, "\n")
+}
+
+// TestMobBackstopSeesEverySeatRoundInClaudeCodeMode: vendorkit's Messages hold
+// only the current process, so the seat stores its transcript across rounds and
+// the backstop, a fresh run, gets all of it as History. Resuming instead would
+// replay tool blocks into a toolless request.
+func TestMobBackstopSeesEverySeatRoundInClaudeCodeMode(t *testing.T) {
+	m1 := []llm.Message{{Role: "user", Content: "brief"}, {Role: "assistant", Content: "ROUND-ONE-MARKER"}}
+	m2 := []llm.Message{{Role: "user", Content: "again"}, {Role: "assistant", Content: "ROUND-TWO-MARKER"}}
 	rec := &recordingExec{results: []execResult{
-		{res: harness.Result{Output: ""}},
-		{res: harness.Result{Output: "late"}},
-		{res: harness.Result{Output: "round two"}},
+		{res: harness.Result{Output: "position", Messages: m1}},
+		{res: harness.Result{Output: "", Messages: m2}},
+		{res: harness.Result{Output: "late", Messages: []llm.Message{{Role: "user", Content: "PRIMER"}}}},
+		{res: harness.Result{Output: "round three"}},
 		{res: harness.Result{Output: `{}`}},
 	}}
 	o := mobTestRun(&fakeOps{}, MobConfig{Participants: 2}, 0)
@@ -808,38 +823,55 @@ func TestMobBackstopResumesTheSeatSession(t *testing.T) {
 	runner := o.mobSeatRunner(&seatDebugSink{w: io.Discard}, 0, "mob_seat")
 	seat := mob.SeatConfig{Name: "seat-1", Lens: "risk", Model: "claude-opus-5-5"}
 
-	out, _, err := runner(t.Context(), seat, nil, "go")
-	require.NoError(t, err)
-	assert.Equal(t, "late", out)
+	for i, want := range []string{"position", "late", "round three"} {
+		out, _, err := runner(t.Context(), seat, nil, "go")
+		require.NoError(t, err, "round %d", i+1)
+		assert.Equal(t, want, out, "round %d", i+1)
+	}
 
-	_, _, err = runner(t.Context(), seat, nil, "again")
-	require.NoError(t, err)
-
-	require.Len(t, rec.runs, 3)
+	require.Len(t, rec.runs, 4)
 	session := rec.runs[0].SessionID
 	require.NotEmpty(t, session)
+	assert.Equal(t, session, rec.runs[1].Resume)
 
-	backstop := rec.runs[1]
+	backstop := rec.runs[2]
 	assert.Equal(t, seatForcedFinalPrompt, backstop.Task)
-	assert.Equal(t, session, backstop.Resume)
 	assert.Empty(t, backstop.SessionID)
+	assert.Empty(t, backstop.Resume)
 	assert.Empty(t, backstop.Registry.All())
 	assert.Equal(t, 1, backstop.Config.MaxTurns)
 	assert.Zero(t, backstop.Config.WrapUpTurns)
 
-	assert.Equal(t, session, rec.runs[2].Resume, "the next round resumes the same session")
-	assert.Empty(t, rec.runs[2].SessionID)
+	primer := historyText(backstop.Config.History)
+	assert.Contains(t, primer, "ROUND-ONE-MARKER")
+	assert.Contains(t, primer, "ROUND-TWO-MARKER")
+
+	// The seat keeps resuming its own session; the stored transcript gains the
+	// backstop exchange, never the backstop's own primer.
+	assert.Equal(t, session, rec.runs[3].Resume)
+	assert.Empty(t, rec.runs[3].SessionID)
+
+	stored := rec.runs[3].Config.History
+	text := historyText(stored)
+	assert.Equal(t, 1, strings.Count(text, "ROUND-ONE-MARKER"), "stored=%q", text)
+	assert.NotContains(t, text, "PRIMER")
+	require.GreaterOrEqual(t, len(stored), 2)
+	assert.Equal(t, []llm.Message{
+		{Role: "user", Content: seatForcedFinalPrompt},
+		{Role: "assistant", Content: "late"},
+	}, stored[len(stored)-2:])
 
 	_, _, _, _ = o.mobModeratorRunner(&seatDebugSink{w: io.Discard}, "mob_moderator")(t.Context(), "decide")
 
-	require.Len(t, rec.runs, 4)
-	assert.Empty(t, rec.runs[3].SessionID)
-	assert.Empty(t, rec.runs[3].Resume)
+	require.Len(t, rec.runs, 5)
+	assert.Empty(t, rec.runs[4].SessionID)
+	assert.Empty(t, rec.runs[4].Resume)
 }
 
-func TestMobBackstopEndpointModeHasNoSession(t *testing.T) {
+func TestMobBackstopEndpointModeSeedsTheRunsMessages(t *testing.T) {
+	msgs := []llm.Message{{Role: "user", Content: "brief"}, {Role: "assistant", Content: "EXPLORED-MARKER"}}
 	rec := &recordingExec{results: []execResult{
-		{res: harness.Result{Completed: true, Reason: "done", Output: ""}},
+		{res: harness.Result{Completed: true, Reason: "done", Output: "", Messages: msgs}},
 		{res: harness.Result{Completed: true, Reason: "done", Output: "late"}},
 	}}
 	runner := claudeSeatRun(t, rec, false)
@@ -850,6 +882,7 @@ func TestMobBackstopEndpointModeHasNoSession(t *testing.T) {
 
 	require.Len(t, rec.runs, 2)
 	assert.Equal(t, seatForcedFinalPrompt, rec.runs[1].Task)
+	assert.Equal(t, trimSeatContext(slices.Clone(msgs)), rec.runs[1].Config.History)
 	assert.Empty(t, rec.runs[1].SessionID)
 	assert.Empty(t, rec.runs[1].Resume)
 }

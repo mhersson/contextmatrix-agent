@@ -479,9 +479,9 @@ and a Best-of-N candidate drops out of the judge pool.
 A mob seat keeps its conversation across rounds by resuming its own Claude Code
 session: the first run of a seat starts one, later runs resume it. A failed
 first run leaves nothing to resume, so the next round starts fresh. The
-seat's final-answer backstop resumes the seat's session too, so it answers
-from the seat's earlier rounds and its answer is there for the next one. The
-moderator is a one-shot call.
+seat's final-answer backstop never resumes that session: it is a fresh,
+toolless one-shot call given the seat's transcript from every round as a text
+primer. The moderator is a one-shot call.
 
 ### Card pins
 
