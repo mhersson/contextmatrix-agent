@@ -18,7 +18,8 @@ const replayMinContextWindow = 400_000
 // reasoning with its later requests. A model the window floor excludes is
 // reported once per run.
 func (o *run) replays(model string) bool {
-	if !o.d.Cfg.ReplayReasoning {
+	// Replay is a harness-only setting; Claude Code runs have no decision to report.
+	if !o.d.Cfg.ReplayReasoning || o.d.Cfg.ClaudeCode {
 		return false
 	}
 

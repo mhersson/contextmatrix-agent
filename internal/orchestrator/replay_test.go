@@ -287,6 +287,21 @@ func TestReplayExclusionReported(t *testing.T) {
 	})
 }
 
+func TestReplayDecisionSkippedInClaudeCodeMode(t *testing.T) {
+	var transcript bytes.Buffer
+
+	o := replayRun(&planLLM{}, true)
+	o.d.Cfg.ClaudeCode = true
+	o.d.Emit = events.NewEmitter(nil, &transcript)
+
+	for _, m := range []string{"narrow/model", "ghost/model"} {
+		assert.False(t, o.replays(m))
+		assert.False(t, o.harnessConfig(m).ReplayReasoning)
+	}
+
+	assert.Empty(t, replayExclusions(t, transcript.String()))
+}
+
 func TestSpawnSubagentsFansOutThroughTheExecutor(t *testing.T) {
 	rec := &recordingExec{}
 	o := replayRun(&planLLM{}, true)
