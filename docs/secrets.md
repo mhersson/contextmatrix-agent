@@ -87,11 +87,15 @@ Operator notes:
   in `worker_extra_env`; `claude` gets the worker's `HTTP(S)_PROXY`/`NO_PROXY`,
   with `127.0.0.1`, `localhost` and `::1` added to both `NO_PROXY` and
   `no_proxy` so its loopback tool bridge never goes through the proxy.
+  `NO_PROXY` still needs the hosts the container reaches directly, as below.
+  `HTTP_PROXY` alone also carries Claude Code's HTTPS API traffic.
   `ca_cert_file` reaches `claude` as `NODE_EXTRA_CA_CERTS`.
 - Workers must reach `serve`'s port at `container_serve_url`, so a host
   firewall must allow container-to-host traffic on that port.
 - An HTTP proxy in `worker_extra_env` needs the serve host
-  (`host.docker.internal` by default) in `NO_PROXY`.
+  (`host.docker.internal` by default) in `NO_PROXY`, and the ContextMatrix
+  host of `container_contextmatrix_url` too when the proxy cannot reach it
+  (the worker's MCP connection honours the proxy variables in both modes).
 - An operator `LLM_*` in `worker_extra_env` wins over the staged values, since
   container env beats the secrets file (`resolveLLMValue`): setting both
   `LLM_API_KEY` and `LLM_BASE_URL` bypasses the proxy and puts that key in the
@@ -112,6 +116,18 @@ process environment, where the commands its Bash tool runs can read it: a
 prompt-injected agent could exfiltrate it. Other secrets stay out of that
 environment, which starts from the scrubbed allowlist (plus the proxy variables
 and `NODE_EXTRA_CA_CERTS`).
+
+This is an accepted risk, and the agent does not harden it. Inside the worker
+container everything runs as UID 1000, so the model's Bash can read the token
+from its own environment (inherited from `claude`) and from the bind-mounted
+`/run/cm-secrets/env`. The token is not in the container's launch environment,
+so `/proc/1/environ` and the worker's own environment do not carry it.
+
+The MCP key carries the same accepted risk, in both modes: `CM_MCP_API_KEY` is
+in the container's launch environment, so any process in the container, the
+model's Bash included, can read it from `/proc/1/environ`. The scrubbed
+allowlist keeps it out of the model's subprocess environment, not out of
+`/proc`.
 
 ## Subprocess scrubbing
 
