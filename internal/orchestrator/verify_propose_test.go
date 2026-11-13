@@ -72,7 +72,7 @@ func TestAcceptProposedCommand(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			argv, ok := acceptProposedCommand(tt.cmd)
+			argv, ok := AcceptProposedCommand(tt.cmd)
 			assert.Equal(t, tt.wantOK, ok)
 			assert.Equal(t, tt.wantArgv, argv)
 		})
