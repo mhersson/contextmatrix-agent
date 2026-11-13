@@ -533,7 +533,7 @@ func (h *harness) addRunKind(cardID, project, kind string) *nopWriteCloser {
 // handleTrigger starts would.
 func (s *Server) launchNow(spec executor.LaunchSpec, p protocol.TriggerPayload) {
 	adm, ctx := s.beginAdmission(context.Background(), executor.RunKey{Project: p.Project, CardID: p.CardID})
-	s.launch(ctx, adm, spec, p)
+	s.launch(ctx, adm, s.cardLaunchRequest(p, spec))
 }
 
 // awaitStatuses waits for n status callbacks; launch reports only after
@@ -2925,12 +2925,13 @@ func TestRunEndpointCarriesMobGuests(t *testing.T) {
 	})
 
 	t.Run("guests marshal alongside the llm endpoint", func(t *testing.T) {
-		e := s.runEndpoint(protocol.TriggerPayload{
+		req := s.cardLaunchRequest(protocol.TriggerPayload{
 			Mob: &protocol.MobSpec{
 				Participants: 3,
 				Guests:       []protocol.GuestSpec{{Name: "laptop", URL: "http://10.0.0.5:8484", Token: "guest-secret"}},
 			},
-		}, protocol.LLMEndpoint{Type: "openai", BaseURL: testLLMBaseURL, APIKey: "tok-run"})
+		}, executor.LaunchSpec{})
+		e := s.runEndpoint(req, protocol.LLMEndpoint{Type: "openai", BaseURL: testLLMBaseURL, APIKey: "tok-run"})
 
 		assert.Equal(t, "tok-run", e.APIKey)
 		assert.JSONEq(t,
@@ -2939,7 +2940,7 @@ func TestRunEndpointCarriesMobGuests(t *testing.T) {
 	})
 
 	t.Run("no guests yields empty string", func(t *testing.T) {
-		e := s.runEndpoint(protocol.TriggerPayload{Mob: &protocol.MobSpec{Participants: 3}}, protocol.LLMEndpoint{})
+		e := s.runEndpoint(s.cardLaunchRequest(protocol.TriggerPayload{Mob: &protocol.MobSpec{Participants: 3}}, executor.LaunchSpec{}), protocol.LLMEndpoint{})
 		assert.Empty(t, e.MobGuests)
 	})
 }

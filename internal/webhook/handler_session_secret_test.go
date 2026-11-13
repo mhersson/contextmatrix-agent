@@ -103,7 +103,7 @@ func TestAddSessionSecrets_FullyProvisionedTrigger(t *testing.T) {
 		},
 	}
 
-	s.addSessionSecrets("p", "C1", "corr-1", payload, "proxy-token")
+	s.addSessionSecrets(s.cardLaunchRequest(payload, executor.LaunchSpec{Project: "p", CardID: "C1", CorrelationID: "corr-1"}), "proxy-token")
 
 	got := registry.keys(SessionID("p", "C1", "corr-1"))
 	require.Len(t, got, 6, "six entries: git token, proxy token, llm key, mcp key, and two guest tokens (one entry each)")
@@ -143,7 +143,7 @@ func TestAddSessionSecrets_UsesConfigMCPKey(t *testing.T) {
 		// No MCPAPIKey override - should use config default
 	}
 
-	s.addSessionSecrets("p", "C1", "corr-1", payload, "")
+	s.addSessionSecrets(s.cardLaunchRequest(payload, executor.LaunchSpec{Project: "p", CardID: "C1", CorrelationID: "corr-1"}), "")
 
 	got := registry.keys(SessionID("p", "C1", "corr-1"))
 	assert.Contains(t, got, "cfg-mcp-key", "config-level MCP key must be registered when no payload override")
@@ -170,7 +170,7 @@ func TestAddSessionSecrets_NilEndpointAndMob(t *testing.T) {
 		GitToken: "cm-git-token",
 	}
 
-	s.addSessionSecrets("p", "C1", "corr-1", payload, "")
+	s.addSessionSecrets(s.cardLaunchRequest(payload, executor.LaunchSpec{Project: "p", CardID: "C1", CorrelationID: "corr-1"}), "")
 
 	got := registry.keys(SessionID("p", "C1", "corr-1"))
 	require.Len(t, got, 2, "git token and config MCP key only")
@@ -201,7 +201,7 @@ func TestAddSessionSecrets_NilRegistryIsNoOp(t *testing.T) {
 	}
 
 	// Must not panic
-	s.addSessionSecrets("p", "C1", "corr-1", payload, "")
+	s.addSessionSecrets(s.cardLaunchRequest(payload, executor.LaunchSpec{Project: "p", CardID: "C1", CorrelationID: "corr-1"}), "")
 	s.removeSessionSecrets("p", "C1", "corr-1")
 }
 
@@ -226,7 +226,7 @@ func TestRemoveSessionSecrets(t *testing.T) {
 		LLMEndpoint: &protocol.LLMEndpoint{Type: "openai", APIKey: "cm-llm-key"},
 	}
 
-	s.addSessionSecrets("p", "C1", "corr-1", payload, "")
+	s.addSessionSecrets(s.cardLaunchRequest(payload, executor.LaunchSpec{Project: "p", CardID: "C1", CorrelationID: "corr-1"}), "")
 	require.Len(t, registry.keys(SessionID("p", "C1", "corr-1")), 3, "secrets registered")
 
 	s.removeSessionSecrets("p", "C1", "corr-1")
@@ -262,8 +262,8 @@ func TestRemoveSessionSecrets_DifferentCorrelationIDDoesNotCollide(t *testing.T)
 
 	// Run 1 registers, then is superseded by a re-trigger (run 2) of the same
 	// card before its own exit-path removal fires.
-	s.addSessionSecrets("p", "C1", "corr-1", payload, "")
-	s.addSessionSecrets("p", "C1", "corr-2", payload, "")
+	s.addSessionSecrets(s.cardLaunchRequest(payload, executor.LaunchSpec{Project: "p", CardID: "C1", CorrelationID: "corr-1"}), "")
+	s.addSessionSecrets(s.cardLaunchRequest(payload, executor.LaunchSpec{Project: "p", CardID: "C1", CorrelationID: "corr-2"}), "")
 
 	// Run 1's stale exit removes only its own bucket.
 	s.removeSessionSecrets("p", "C1", "corr-1")
@@ -372,7 +372,7 @@ func TestAddSessionSecrets_RegistersTheOAuthToken(t *testing.T) {
 		LLMEndpoint: &protocol.LLMEndpoint{Type: protocol.LLMEndpointTypeClaudeCode, OAuthToken: "oat-secret"},
 	}
 
-	s.addSessionSecrets("p", "C1", "corr-1", payload, "")
+	s.addSessionSecrets(s.cardLaunchRequest(payload, executor.LaunchSpec{Project: "p", CardID: "C1", CorrelationID: "corr-1"}), "")
 
 	assert.Contains(t, registry.keys(SessionID("p", "C1", "corr-1")), "oat-secret")
 }
