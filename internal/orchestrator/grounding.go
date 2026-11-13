@@ -293,6 +293,11 @@ func groundingDepth(root, path string) int {
 	return strings.Count(rel, string(os.PathSeparator)) + 1
 }
 
+// Grounding is the REPO GROUNDING prompt block for the repository at root.
+func Grounding(ctx context.Context, root string) string {
+	return groundingBlock(discoverGrounding(ctx, root))
+}
+
 // groundingBlock renders the root instruction file plus the nested-file listing
 // as a prompt block. The root doc's content is injected verbatim; nested files
 // are named as PATHS with an instruction to read them on demand - never their

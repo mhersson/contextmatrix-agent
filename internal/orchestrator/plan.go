@@ -566,6 +566,24 @@ func resolveDecisionModel(
 			registry.SelectionReport{}
 	}
 
+	return decisionPick(reg, base, exclude)
+}
+
+// DecisionModel is the model the diagnose pass's selection lands on over base,
+// without a card pin or a card log: base when reg is nil.
+func DecisionModel(reg *registry.Registry, base string) string {
+	if reg == nil {
+		return base
+	}
+
+	p, _ := decisionPick(reg, base, nil)
+
+	return p.Model
+}
+
+// decisionPick is the decision floor over base: the reviewer pick at the
+// decision tier when it meets its bar, else base. reg is not nil.
+func decisionPick(reg *registry.Registry, base string, exclude map[string]bool) (registry.Pick, registry.SelectionReport) {
 	p, rep := reg.SelectByComplexityReport(registry.SelectInput{
 		Role:    registry.RoleReviewer,
 		Tier:    decisionTier,
@@ -580,7 +598,7 @@ func resolveDecisionModel(
 	//
 	// The transcript names base, not p: p was proposed and discarded, and an
 	// event naming a model that never ran is worse than none. Its pool report is
-	// dropped with it - see the comment above.
+	// dropped with it - see resolveDecisionModel.
 	if !p.AtBar() {
 		return offLadderPick(reg, base, registry.RoleReviewer, decisionTier, registry.SourceDefault),
 			registry.SelectionReport{}
