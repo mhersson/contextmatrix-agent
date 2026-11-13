@@ -733,8 +733,9 @@ func runFailureLine(redact func(string) string, err error) string {
 
 // parkBlocked maps one of the park arms (toolchain-missing, no-model,
 // verify-parked, empty-subtask, split-overflow) onto the shared blocked-park
-// sequence, reporting the caller's stop cause. The genuinely distinguishing step: transition the card to blocked
-// BEFORE releasing the claim, since ownership may be required for the
+// sequence, reporting the caller's stop cause. The genuinely distinguishing
+// step: transition the card to blocked BEFORE releasing the claim, since
+// ownership may be required for the
 // transition. blocked is project-configurable (not every .board.yaml declares
 // in_progress -> blocked), so a failure here is logged and the park still
 // completes - never fatal.
