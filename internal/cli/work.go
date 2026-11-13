@@ -29,6 +29,12 @@ import (
 // cmEnvFile is the bind-mounted env file path the service injects secrets into.
 const cmEnvFile = "/run/cm-secrets/env"
 
+// The bash timeout cap and tool output cap when serve sets none.
+const (
+	defaultBashTimeoutMaxSeconds = 600
+	defaultToolOutputMaxBytes    = 131072
+)
+
 // mcpCloseTimeout bounds the MCP client teardown: a slow or dead tunnel
 // must not keep a finished worker alive past the backend's kill grace -
 // the process exit code is the run's success signal.
@@ -59,6 +65,10 @@ func newWorkCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Correlate before any parsing so specFromEnv's own diagnostics carry the run id.
 			slog.SetDefault(withRunID(slog.Default(), os.Getenv("CM_RUN_ID")))
+
+			if kind := os.Getenv("CM_RUN_KIND"); kind != "" {
+				return runKindMain(cmd, kind)
+			}
 
 			spec, err := specFromEnv()
 			if err != nil {
@@ -217,12 +227,12 @@ func specFromEnv() (worker.RunSpec, error) {
 		return worker.RunSpec{}, err
 	}
 
-	bashTimeoutMax, err := envInt("CMX_BASH_TIMEOUT_MAX_SECONDS", 600)
+	bashTimeoutMax, err := envInt("CMX_BASH_TIMEOUT_MAX_SECONDS", defaultBashTimeoutMaxSeconds)
 	if err != nil {
 		return worker.RunSpec{}, err
 	}
 
-	toolOutputMax, err := envInt("CMX_TOOL_OUTPUT_MAX_BYTES", 131072)
+	toolOutputMax, err := envInt("CMX_TOOL_OUTPUT_MAX_BYTES", defaultToolOutputMaxBytes)
 	if err != nil {
 		return worker.RunSpec{}, err
 	}
@@ -340,18 +350,6 @@ func specFromEnv() (worker.RunSpec, error) {
 		workspace = "/home/user/workspace"
 	}
 
-	var selection *protocol.SelectionContext
-
-	if raw := os.Getenv("CMX_SELECTION"); raw != "" {
-		var sc protocol.SelectionContext
-		if err := json.Unmarshal([]byte(raw), &sc); err != nil {
-			slog.Warn("CMX_SELECTION parse failed; will use default model",
-				"card_id", cardID, "project", project, "error", err)
-		} else {
-			selection = &sc
-		}
-	}
-
 	var (
 		verify    *protocol.VerifyConfig
 		verifyErr string
@@ -440,7 +438,7 @@ func specFromEnv() (worker.RunSpec, error) {
 		ReplayReasoning:           os.Getenv("CMX_REPLAY_REASONING") == "true",
 		Workspace:                 workspace,
 		CACertFile:                os.Getenv("CMX_CA_CERT_FILE"),
-		Selection:                 selection,
+		Selection:                 selectionFromEnv(cardID, project),
 		Verify:                    verify,
 		VerifyConfigError:         verifyErr,
 		ReviewAttemptsCap:         reviewAttemptsCap,
@@ -451,6 +449,25 @@ func specFromEnv() (worker.RunSpec, error) {
 	}
 
 	return spec, nil
+}
+
+// selectionFromEnv decodes CMX_SELECTION. An unset or unparseable value is
+// nil, so the run uses its default model.
+func selectionFromEnv(cardID, project string) *protocol.SelectionContext {
+	raw := os.Getenv("CMX_SELECTION")
+	if raw == "" {
+		return nil
+	}
+
+	var sc protocol.SelectionContext
+	if err := json.Unmarshal([]byte(raw), &sc); err != nil {
+		slog.Warn("CMX_SELECTION parse failed; will use default model",
+			"card_id", cardID, "project", project, "error", err)
+
+		return nil
+	}
+
+	return &sc
 }
 
 // readLLMSecrets fills the spec's LLM values. The OAuth token is file-only:

@@ -59,6 +59,7 @@ internal/attempt/      → stamps the per-card container-run ordinal onto the tr
 internal/runoutcome/   → the worker's last stdout line (run_outcome): why the run ended; written by work, read by serve
 internal/cardid/       → the card ID pattern shared by work and /run-kind
 internal/runinput/     → a run kind's input dir on disk (<log_dir>/.run-inputs/<run id>/), mounted read-only at /run/cm-input
+internal/runkind/      → sandboxed run kinds: one file per kind, no MCP; entered from work when CM_RUN_KIND is set
 internal/secrets/      → Source (static env file) + RunCredentials (stages per-run CM-provisioned credentials)
 
 # serve plumbing

@@ -101,7 +101,7 @@ func NewPRCreator(workspace, secretsEnvPath, caCertFile, repoURL string) *PRCrea
 		workspace:      workspace,
 		secretsEnvPath: secretsEnvPath,
 		caCertFile:     caCertFile,
-		host:           hostFromRepoURL(repoURL),
+		host:           HostFromRepoURL(repoURL),
 	}
 }
 
@@ -123,10 +123,10 @@ func (p *PRCreator) gitToken() (string, error) {
 	return src.Get("CM_GIT_TOKEN"), nil
 }
 
-// hostFromRepoURL returns the host[:port] of an https repo URL, or "" when
+// HostFromRepoURL returns the host[:port] of an https repo URL, or "" when
 // repoURL is empty or not a parseable URL with a host (e.g. an scp-style
 // remote). GIT_HOST is sliced off CM_REPO_URL this way.
-func hostFromRepoURL(repoURL string) string {
+func HostFromRepoURL(repoURL string) string {
 	if repoURL == "" {
 		return ""
 	}

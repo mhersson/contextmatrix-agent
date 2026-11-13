@@ -48,6 +48,10 @@ image installs `gh` from GitHub's repo.
 - **Do not** override `ENTRYPOINT` - the base image runs `contextmatrix-agent
   work`, which is what ContextMatrix launches.
 - **Do not** remove or relocate `/usr/local/bin/contextmatrix-agent`.
+- Build from a current agent. [Run kinds](run-kinds.md) run in the project's
+  worker image, so the image's agent binary must support them: an image built
+  from an agent that predates run kinds fails each one, and the run ends
+  without a result.
 - **Do not** change UID 1000 / the `user` account, or the harness loses its
   home and write permissions. End your Dockerfile on `USER user`.
 - Add your apt repo keyrings under `/usr/share/keyrings` and clean

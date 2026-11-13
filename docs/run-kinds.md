@@ -117,6 +117,66 @@ staging error fails it with stop cause `infrastructure`. Nothing launches in
 either case. A run kind writes its own `<card>-<kind>` log, never into the
 card's file.
 
+## In the worker
+
+`work` enters the run-kind path when `CM_RUN_KIND` is set (`runKindMain`,
+`internal/cli/runkind.go`). It needs no `CM_MCP_URL` or `CM_MCP_API_KEY`,
+reads its git token and LLM values from `/run/cm-secrets/env` as a card run
+does, and reads its input from `/run/cm-input/input.json`. `runkind.Run`
+(`internal/runkind/runkind.go`) clones the base branch, or the remote default
+when none is set, into `/home/user/workspace/<card id in lower case>`, decodes
+the input and runs the kind. Its stdout ends with one `run_outcome` line: the
+cause, and on `done` the result. Before it is written, the result is masked
+with the secrets the worker holds (the git token, the LLM key and the
+subscription token), then bounded to the size limits below. A run that cannot
+read its env or files, clone, or decode its input ends with cause `error` and
+no result. Any cause but `done` exits non-zero.
+
+## Check
+
+`check` runs no model. On the clone of the base branch it lists `candidates`:
+every runnable row of the verify detection the gate uses
+(`orchestrator.VerifyCandidates`), as the display string the gate would run, in
+detection order. That is the wrapper, then each convention row that resolves,
+in table order, or the nested scan's command when the root has no marker. The
+list is always present, `[]` when there are none.
+
+With `verify` in the input, the check trial-runs one command once
+(`trialCandidate`, `internal/runkind/check.go`). Commands compare by their
+whitespace-separated fields.
+
+- A command equal to `current_command` counts as declared: it runs as the gate
+  runs a declared command, under `bash -c` with pipefail, with no candidate or
+  plain-argv check.
+- A changed command runs only when it equals a candidate and is plain argv (no
+  shell metacharacter, not a no-op or read-only program); it then runs as that
+  candidate.
+- Anything else, an empty command included, is `rejected`, and nothing runs.
+
+The trial takes the input's timeout, clamped as the gate clamps it (10 minutes
+when unset, else 30 seconds to 2 hours), and its env names, filtered and read
+from the container as the gate does, and runs with the gate's protections
+(`orchestrator.TrialVerify`). Its outcome is one of:
+
+| `trial`          | When                                                                            |
+| ---------------- | ------------------------------------------------------------------------------- |
+| `finished`       | it exited within its timeout; failing tests count                               |
+| `timeout`        | it ran past its timeout                                                         |
+| `toolchain`      | exit 127, a start error, or a wrapper's tool-missing output                     |
+| `infrastructure` | resource exhaustion, a missing container runtime, or any other error running it |
+| `rejected`       | not run                                                                         |
+
+`trial` is absent when the input has no `verify`. While the trial runs, the
+check writes a `run_kind_progress` event every minute, so a long trial is not
+reaped as idle. After it, one `check_trial` event records the
+command, the outcome and the output, masked with the run's secrets. Both events
+reach the run kind's file log only.
+
+The limits (`limitCheck`, `internal/runkind/limits.go`): candidates over 512
+bytes are dropped, then the first 32 are kept; `absent_from_repo` is cut at 64
+entries, each truncated to 512 bytes at a rune boundary. Absent entries are
+never dropped for length, since a dropped entry could let the text check pass.
+
 ## Where it lives
 
 | File                                   | Responsibility                                                         |
@@ -133,3 +193,7 @@ card's file.
 | `internal/runoutcome/runoutcome.go`    | The `run_outcome` line, with a run kind's result and usage             |
 | `internal/cli/serve_outcome.go`        | The terminal status and its run-kind rules                             |
 | `internal/cli/serve.go`                | Input store wiring, the exit path, the live stream                     |
+| `internal/cli/runkind.go`              | The worker's run-kind entry: env, secrets and input, the outcome line  |
+| `internal/runkind/runkind.go`          | The spec, the clone, the kind switch, masking and the stop cause       |
+| `internal/runkind/check.go`            | The check kind: candidates, the trial rules, the trial and its events  |
+| `internal/runkind/limits.go`           | The result size limits                                                 |
