@@ -1,9 +1,9 @@
 // Package executor launches and supervises one Docker container per card run
-// and per run kind of the card. The
-// Tracker gates concurrency and records per-run state (awaiting-human, last
-// output activity) that the watchdogs consult; DockerExecutor owns the
-// container lifecycle behind the Executor interface so a future
-// KubernetesExecutor can slot in without touching the serve layer.
+// and per run kind of the card. The Tracker gates concurrency and records
+// per-run state (awaiting-human, last output activity) that the watchdogs
+// consult; DockerExecutor owns the container lifecycle behind the Executor
+// interface so a future KubernetesExecutor can slot in without touching the
+// serve layer.
 package executor
 
 import (
@@ -95,7 +95,7 @@ func (t *Tracker) AddIfUnderLimit(r *Run) bool {
 	return true
 }
 
-// Get returns the run for the run and whether it is tracked.
+// Get returns the run under k and whether it is tracked.
 func (t *Tracker) Get(k RunKey) (*Run, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -105,7 +105,7 @@ func (t *Tracker) Get(k RunKey) (*Run, bool) {
 	return r, ok
 }
 
-// Remove deletes the run and all auxiliary state for the run. It is
+// Remove deletes the run under k and all its auxiliary state. It is
 // idempotent: removing an absent key is a no-op.
 func (t *Tracker) Remove(k RunKey) {
 	t.mu.Lock()

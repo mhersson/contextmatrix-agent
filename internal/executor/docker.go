@@ -286,9 +286,10 @@ func containerConfig(spec LaunchSpec) (*container.Config, *container.HostConfig)
 	return cfg, host
 }
 
-// DockerExecutor launches one container per card run and run kind via the Docker SDK. It owns
-// the tracker and the per-run supervision goroutines (output pump, wait +
-// cleanup, idle watchdog). Dependencies are injected; there is no global state.
+// DockerExecutor launches one container per card run and run kind via the
+// Docker SDK. It owns the tracker and the per-run supervision goroutines
+// (output pump, wait + cleanup, idle watchdog). Dependencies are injected;
+// there is no global state.
 type DockerExecutor struct {
 	docker     client.APIClient
 	tracker    *Tracker
@@ -373,7 +374,7 @@ func NewClient() (*client.Client, error) {
 // container is removed so nothing leaks. ErrCapacity is returned when the
 // tracker is full.
 func (e *DockerExecutor) Launch(ctx context.Context, spec LaunchSpec) error {
-	log := e.logger.With("project", spec.Project, "card_id", spec.CardID)
+	log := e.logger.With("project", spec.Project, "card_id", spec.CardID, "kind", spec.Kind)
 
 	if err := e.pull(ctx, spec.Image, log); err != nil {
 		return fmt.Errorf("pull image %q: %w", spec.Image, err)
@@ -710,7 +711,7 @@ func (e *DockerExecutor) StopAll(ctx context.Context, project string) ([]StopRes
 
 			if err != nil {
 				e.logger.Warn("stop-all kill failed",
-					"project", run.Project, "card_id", run.CardID, "error", err)
+					"project", run.Project, "card_id", run.CardID, "kind", run.Kind, "error", err)
 			}
 
 			results[i] = StopResult{Run: run, Err: err}
@@ -741,6 +742,7 @@ func (e *DockerExecutor) CleanupOrphans(ctx context.Context) error {
 		log := e.logger.With(
 			"container_id", truncateID(ctr.ID),
 			"card_id", ctr.Labels[labelCardID],
+			"kind", ctr.Labels[labelKind],
 			"project", ctr.Labels[labelProject],
 		)
 		log.Info("removing orphan container")

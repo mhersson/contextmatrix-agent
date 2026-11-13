@@ -68,7 +68,7 @@ func stopCause(exit executor.ExitCause, reported string, shuttingDown bool) stri
 	return ""
 }
 
-// The run-kind status limits (wire contract 3.4).
+// The run-kind status limits ContextMatrix validates.
 const (
 	maxUsageRows   = 16
 	maxStatusBytes = 1 << 20

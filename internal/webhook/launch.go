@@ -182,7 +182,7 @@ func (s *Server) stopAdmissions(ctx context.Context, match func(executor.RunKey)
 		case <-adm.done:
 		case <-ctx.Done():
 			s.logger.Warn("stopped admission still running when the stop answered",
-				"project", adm.key.Project, "card_id", adm.key.CardID)
+				"project", adm.key.Project, "card_id", adm.key.CardID, "kind", adm.key.Kind)
 
 			return
 		}
@@ -190,16 +190,16 @@ func (s *Server) stopAdmissions(ctx context.Context, match func(executor.RunKey)
 }
 
 // admitAndLaunch provisions the per-run credentials and launches the container,
-// serialized per card. Returns the zero launchFailure on success or a client-safe failure;
-// stopped reports that a stop reached the admission, whose launched run it then
-// kills, and the caller reports nothing.
+// serialized per run key. Returns the zero launchFailure on success or a
+// client-safe failure; stopped reports that a stop reached the admission, whose
+// launched run it then kills, and the caller reports nothing.
 //
 // The serialization plus the early tracked-run rejection close the
-// duplicate-trigger window: two concurrent triggers for one card both reach
+// duplicate-trigger window: two concurrent triggers for one run key both reach
 // admission (no request dedup, and the capacity pre-check does not serialize
-// same-card admission), but under the lock the winner is admitted first and the
-// loser sees the card already tracked and fails closed HERE - before it can
-// provision or reach the executor. Proceeding to the executor on a tracked card
+// same-key admission), but under the lock the winner is admitted first and the
+// loser sees the key already tracked and fails closed HERE - before it can
+// provision or reach the executor. Proceeding to the executor on a tracked key
 // would race the asynchronous tracker.Remove on the old run's exit: if Remove
 // lands between the check and Launch, the executor would admit the duplicate - a
 // container mounting a per-run dir nothing provisioned, which the old run's
@@ -233,7 +233,7 @@ func (s *Server) admitAndLaunch(ctx context.Context, adm *admission, req launchR
 		s.stopLaunchedRun(req)
 	}
 
-	s.logger.Info("launch stopped", "project", req.Key.Project, "card_id", req.Key.CardID)
+	s.logger.Info("launch stopped", "project", req.Key.Project, "card_id", req.Key.CardID, "kind", req.Key.Kind)
 
 	return launchFailure{}, true
 }
@@ -254,26 +254,26 @@ func (s *Server) stopLaunchedRun(req launchRequest) {
 
 	if err := s.executor.Kill(ctx, req.Key); err != nil && !errors.Is(err, executor.ErrNotFound) {
 		s.logger.Error("kill of a stopped launch failed",
-			"project", req.Key.Project, "card_id", req.Key.CardID, "error", err)
+			"project", req.Key.Project, "card_id", req.Key.CardID, "kind", req.Key.Kind, "error", err)
 	}
 }
 
 // provisionAndLaunch is admitAndLaunch's admission: the guards, the per-run
-// provisioning and the launch. The caller holds the card's admission lock.
+// provisioning and the launch. The caller holds the run key's admission lock.
 func (s *Server) provisionAndLaunch(ctx context.Context, req launchRequest) launchFailure {
 	project, cardID := req.Key.Project, req.Key.CardID
 	spec := req.Spec
 
 	if _, tracked := s.tracker.Get(req.Key); tracked {
 		s.logger.Warn("launch rejected: card already running",
-			"project", project, "card_id", cardID)
+			"project", project, "card_id", cardID, "kind", req.Key.Kind)
 
 		return infraFailure("card already running")
 	}
 
 	if req.GitToken == "" {
 		s.logger.Warn("launch rejected: no git credential source",
-			"project", project, "card_id", cardID)
+			"project", project, "card_id", cardID, "kind", req.Key.Kind)
 
 		return infraFailure("CM did not provision a git token")
 	}
@@ -301,7 +301,7 @@ func (s *Server) provisionAndLaunch(ctx context.Context, req launchRequest) laun
 		if err := s.credentials.Provision(project, req.Key.Name(), spec.CorrelationID, req.GitToken, req.GitTokenExpiresAt, s.runEndpoint(req, staged)); err != nil {
 			s.revokeLLM(spec.CorrelationID)
 			s.logger.Error("provision per-run credentials failed",
-				"project", project, "card_id", cardID, "error", err)
+				"project", project, "card_id", cardID, "kind", req.Key.Kind, "error", err)
 
 			return infraFailure("credential provisioning failed")
 		}
@@ -328,7 +328,7 @@ func (s *Server) provisionAndLaunch(ctx context.Context, req launchRequest) laun
 		s.revokeLLM(spec.CorrelationID)
 		s.removeSessionSecrets(project, cardID, spec.CorrelationID)
 
-		s.logger.Error("launch failed", "project", project, "card_id", cardID, "error", err)
+		s.logger.Error("launch failed", "project", project, "card_id", cardID, "kind", req.Key.Kind, "error", err)
 
 		return s.contextFailure(ctx)
 	}
@@ -343,21 +343,21 @@ func (s *Server) llmGuard(req launchRequest) launchFailure {
 
 	if req.LLM == nil {
 		s.logger.Warn("launch rejected: no llm_endpoint credential source",
-			"project", project, "card_id", cardID)
+			"project", project, "card_id", cardID, "kind", req.Key.Kind)
 
 		return infraFailure("CM did not provision an llm_endpoint")
 	}
 
 	if req.LLM.Type == protocol.LLMEndpointTypeClaudeCode && req.LLM.OAuthToken == "" {
 		s.logger.Warn("launch rejected: claude_code endpoint without an oauth token",
-			"project", project, "card_id", cardID)
+			"project", project, "card_id", cardID, "kind", req.Key.Kind)
 
 		return infraFailure("CM did not provision a Claude Code oauth token")
 	}
 
 	if s.llmProxy == nil {
 		s.logger.Error("launch rejected: LLM proxy not configured",
-			"project", project, "card_id", cardID)
+			"project", project, "card_id", cardID, "kind", req.Key.Kind)
 
 		return infraFailure("LLM proxy not configured")
 	}
@@ -380,7 +380,7 @@ func (s *Server) stageLLM(req launchRequest) (string, protocol.LLMEndpoint, laun
 	token, err := s.llmProxy.Register(req.Spec.CorrelationID, *req.LLM)
 	if err != nil {
 		s.logger.Error("LLM proxy registration failed",
-			"project", req.Key.Project, "card_id", req.Key.CardID, "error", err)
+			"project", req.Key.Project, "card_id", req.Key.CardID, "kind", req.Key.Kind, "error", err)
 
 		return "", protocol.LLMEndpoint{}, infraFailure("LLM proxy registration failed")
 	}

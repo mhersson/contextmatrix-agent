@@ -799,7 +799,7 @@ func (s *Server) handleKill(w http.ResponseWriter, r *http.Request) {
 	// card with no tracked container is already stopped.
 	if err := s.executor.Kill(r.Context(), k); err != nil &&
 		!errors.Is(err, executor.ErrNotFound) {
-		s.logger.Error("kill failed", "project", payload.Project, "card_id", payload.CardID, "error", err)
+		s.logger.Error("kill failed", "project", k.Project, "card_id", k.CardID, "kind", k.Kind, "error", err)
 		webhookcore.WriteError(w, http.StatusInternalServerError, protocol.CodeInternal, "kill failed")
 
 		return

@@ -472,12 +472,12 @@ func (d workerDrain) sweep(live []*executor.Run) {
 // waits for its report to land instead.
 func (d workerDrain) settle(ctx context.Context, run *executor.Run) {
 	if d.tracked(run) {
-		d.logger.Info("killing container on shutdown", "project", run.Project, "card_id", run.CardID)
+		d.logger.Info("killing container on shutdown", "project", run.Project, "card_id", run.CardID, "kind", run.Kind)
 
 		if err := d.exec.Kill(ctx, run.Key()); err != nil &&
 			!errors.Is(err, executor.ErrNotFound) {
 			d.logger.Warn("failed to kill container on shutdown",
-				"project", run.Project, "card_id", run.CardID, "error", err)
+				"project", run.Project, "card_id", run.CardID, "kind", run.Kind, "error", err)
 		}
 	}
 
@@ -495,7 +495,7 @@ func (d workerDrain) settle(ctx context.Context, run *executor.Run) {
 		})
 		if err != nil {
 			d.logger.Warn("failed to report shutdown status",
-				"project", run.Project, "card_id", run.CardID, "error", err)
+				"project", run.Project, "card_id", run.CardID, "kind", run.Kind, "error", err)
 		}
 	})
 	if owned {
@@ -707,7 +707,7 @@ func onContainerExit(
 
 			if err := reporter.ReportStatus(ctx, payload); err != nil {
 				logger.Error("report exit status callback failed",
-					"project", project, "card_id", cardID, "status", payload.WorkerStatus, "error", err)
+					"project", project, "card_id", cardID, "kind", k.Kind, "status", payload.WorkerStatus, "error", err)
 			}
 		})
 	}
@@ -738,7 +738,7 @@ func emitRunEnd(
 	line, err := json.Marshal(runEndEvent(exitCode, cause, ordinal))
 	if err != nil {
 		logger.Warn("could not build the run_end event",
-			"project", k.Project, "card_id", k.CardID, "error", err)
+			"project", k.Project, "card_id", k.CardID, "kind", k.Kind, "error", err)
 
 		return
 	}
