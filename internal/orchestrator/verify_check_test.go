@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -60,7 +61,7 @@ func TestTrialVerifyRunsTheCommandOnce(t *testing.T) {
 
 	c := VerifyCandidate{Argv: []string{"./ci/verify"}, Display: "./ci/verify"}
 
-	trial, _, err := TrialVerify(context.Background(), dir, c, time.Minute, nil, nil)
+	trial, _, err := TrialVerify(context.Background(), slog.Default(), dir, c, time.Minute, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, protocol.TrialFinished, trial)
 
@@ -68,11 +69,11 @@ func TestTrialVerifyRunsTheCommandOnce(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "x\n", string(data), "a failing command runs exactly once")
 
-	trial, _, err = TrialVerify(context.Background(), dir, c, time.Minute, []string{"CODE=127"}, nil)
+	trial, _, err = TrialVerify(context.Background(), slog.Default(), dir, c, time.Minute, []string{"CODE=127"}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, protocol.TrialToolchain, trial)
 
-	trial, _, err = TrialVerify(context.Background(), dir,
+	trial, _, err = TrialVerify(context.Background(), slog.Default(), dir,
 		VerifyCandidate{Argv: []string{"sleep", "5"}}, 100*time.Millisecond, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, protocol.TrialTimeout, trial)
@@ -80,7 +81,7 @@ func TestTrialVerifyRunsTheCommandOnce(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, _, err = TrialVerify(ctx, dir, c, time.Minute, nil, nil)
+	_, _, err = TrialVerify(ctx, slog.Default(), dir, c, time.Minute, nil, nil)
 	require.Error(t, err)
 }
 
@@ -110,6 +111,18 @@ func TestVerifyCandidatesListsEveryRunnableRow(t *testing.T) {
 		require.Len(t, got, 2)
 		assert.True(t, got[0].Wrapper)
 		assert.False(t, got[1].Wrapper)
+	})
+
+	t.Run("nested module when the root has no marker", func(t *testing.T) {
+		stubTools(t, "go")
+
+		dir := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, "svc"), 0o755))
+		writeFile(t, dir, "svc/go.mod", "module example.com/svc\n")
+
+		got := VerifyCandidates(dir)
+		require.Len(t, got, 1)
+		assert.Equal(t, "go test -C svc ./...", got[0].Display)
 	})
 
 	t.Run("empty workspace is non-nil", func(t *testing.T) {

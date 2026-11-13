@@ -505,13 +505,16 @@ func (o *run) runVerifyPlan(ctx context.Context, dir string, plan verifyPlan) (v
 // The output is redacted before the container-runtime check, so every caller
 // classifies the same bytes.
 func (o *run) runVerifyCommand(ctx context.Context, dir string, plan verifyPlan) (verifyResult, error) {
-	return execVerifyCommand(ctx, o.runVerify, dir, plan, o.d.Redact)
+	log := slog.Default().With("card_id", o.d.Cfg.CardID)
+
+	return execVerifyCommand(ctx, log, o.runVerify, dir, plan, o.d.Redact)
 }
 
 // execVerifyCommand is runVerifyCommand's body with the runner and redactor
 // injected, so the check run kind shares every protection above.
 func execVerifyCommand(
 	ctx context.Context,
+	log *slog.Logger,
 	run func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome,
 	dir string,
 	plan verifyPlan,
@@ -535,7 +538,7 @@ func execVerifyCommand(
 		// defect whose output happens to say e.g. "too many open files" is an
 		// accepted false positive here - one bounded duplicate run, and
 		// classification is unaffected since a failure stays a failure either way.
-		slog.Warn("verify: output looks resource-exhausted; retrying once")
+		log.Warn("verify: output looks resource-exhausted; retrying once")
 
 		select {
 		case <-ctx.Done():
@@ -570,7 +573,7 @@ func execVerifyCommand(
 	// error: the park reason is fixed, so it cannot leak whatever the verify
 	// command printed.
 	if res.Status != verifyPassed && verifyexec.LooksContainerRuntimeUnavailable(res.Output) {
-		return verifyResult{}, &ToolchainMissingError{
+		return verifyResult{Output: res.Output}, &ToolchainMissingError{
 			Tier:    "runtime",
 			Subject: containerRuntimeUnavailableMarker,
 			Reason:  "the verify command needs a container runtime, and the worker has none by design",
@@ -584,19 +587,21 @@ func execVerifyCommand(
 // clamped to [30s, 2h], or the default when none was declared.
 func (o *run) verifyTimeout() time.Duration {
 	if d := o.d.Cfg.Verify; d != nil {
-		return clampVerifyTimeout(d.Timeout)
+		return clampDeclaredTimeout(d.Timeout)
 	}
 
-	return clampVerifyTimeout(0)
+	return clampDeclaredTimeout(0)
 }
 
 // ClampVerifyTimeout turns a declared timeout in seconds into the gate's
 // duration: 0 is the default, anything else is clamped to [30s, 2h].
 func ClampVerifyTimeout(seconds int) time.Duration {
-	return clampVerifyTimeout(time.Duration(seconds) * time.Second)
+	return clampDeclaredTimeout(time.Duration(seconds) * time.Second)
 }
 
-func clampVerifyTimeout(declared time.Duration) time.Duration {
+// clampDeclaredTimeout keeps sub-second precision, so a tiny declared value
+// clamps to the floor instead of truncating to the default.
+func clampDeclaredTimeout(declared time.Duration) time.Duration {
 	t := defaultVerifyTimeout
 	if declared > 0 {
 		t = declared

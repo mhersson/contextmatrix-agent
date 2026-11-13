@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -77,10 +78,11 @@ func trialOutcome(res verifyResult, err error) string {
 	}
 }
 
-// TrialVerify runs candidate c once with the gate's protections. err is set
-// only for a canceled context.
+// TrialVerify runs candidate c once with the gate's protections, logging to
+// log. err is set only for a canceled context.
 func TrialVerify(
 	ctx context.Context,
+	log *slog.Logger,
 	dir string,
 	c VerifyCandidate,
 	timeout time.Duration,
@@ -89,9 +91,14 @@ func TrialVerify(
 ) (trial, output string, err error) {
 	plan := verifyPlan{Argv: c.Argv, Timeout: timeout, Env: env, Wrapper: c.Wrapper}
 
-	res, err := execVerifyCommand(ctx, verifyexec.Exec, dir, plan, redact)
+	res, err := execVerifyCommand(ctx, log, verifyexec.Exec, dir, plan, redact)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return "", "", ctxErr
+	}
+
+	var tm *ToolchainMissingError
+	if err != nil && !errors.As(err, &tm) {
+		return protocol.TrialInfrastructure, res.Output, nil
 	}
 
 	return trialOutcome(res, err), res.Output, nil
