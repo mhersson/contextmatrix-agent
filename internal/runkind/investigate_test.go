@@ -14,6 +14,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/orchestrator"
 	"github.com/mhersson/contextmatrix-harness/harness"
+	"github.com/mhersson/contextmatrix-harness/llm"
 	"github.com/mhersson/contextmatrix-harness/redact"
 	"github.com/mhersson/contextmatrix-harness/tools"
 	protocol "github.com/mhersson/contextmatrix-protocol"
@@ -132,6 +133,61 @@ func TestParseReport(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestReportFault(t *testing.T) {
+	finding := func(kind, text string) protocol.FrictionFinding {
+		return protocol.FrictionFinding{Kind: kind, Text: text, Evidence: "e"}
+	}
+
+	tests := []struct {
+		name   string
+		report protocol.InvestigateResult
+		fault  bool
+	}{
+		{"minimal", protocol.InvestigateResult{Diagnosis: "d", Cause: protocol.DiagnosisModel}, false},
+		{"every cause and finding kind", protocol.InvestigateResult{
+			Diagnosis: "d", Cause: protocol.DiagnosisEcosystem,
+			Findings: []protocol.FrictionFinding{
+				finding(protocol.FindingGuidance, "t"), finding(protocol.FindingCode, "t"),
+				finding(protocol.FindingCardAdvice, "t"), finding(protocol.FindingProjectVerify, "t"),
+				finding(protocol.FindingHardCard, "t"), finding(protocol.FindingEcosystem, "t"),
+			},
+		}, false},
+		{"card cause without a fix", protocol.InvestigateResult{Diagnosis: "d", Cause: protocol.DiagnosisCard}, false},
+		{"fix with no field set", protocol.InvestigateResult{Diagnosis: "d", Cause: protocol.DiagnosisCard, Fix: &protocol.CardFix{}}, false},
+		{"empty diagnosis", protocol.InvestigateResult{Cause: protocol.DiagnosisModel}, true},
+		{"blank diagnosis", protocol.InvestigateResult{Diagnosis: " \n\t", Cause: protocol.DiagnosisModel}, true},
+		{"no cause", protocol.InvestigateResult{Diagnosis: "d"}, true},
+		{"cause in the wrong case", protocol.InvestigateResult{Diagnosis: "d", Cause: "Card"}, true},
+		{"cause that is a finding kind", protocol.InvestigateResult{Diagnosis: "d", Cause: protocol.FindingCode}, true},
+		{"unknown finding kind", protocol.InvestigateResult{
+			Diagnosis: "d", Cause: protocol.DiagnosisModel,
+			Findings: []protocol.FrictionFinding{finding("bug", "t")},
+		}, true},
+		{"finding kind that is a cause", protocol.InvestigateResult{
+			Diagnosis: "d", Cause: protocol.DiagnosisModel,
+			Findings: []protocol.FrictionFinding{finding(protocol.DiagnosisModel, "t")},
+		}, true},
+		{"finding without text", protocol.InvestigateResult{
+			Diagnosis: "d", Cause: protocol.DiagnosisModel,
+			Findings: []protocol.FrictionFinding{finding(protocol.FindingCode, " ")},
+		}, true},
+		{"a later finding at fault", protocol.InvestigateResult{
+			Diagnosis: "d", Cause: protocol.DiagnosisModel,
+			Findings: []protocol.FrictionFinding{finding(protocol.FindingCode, "t"), finding("", "t")},
+		}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.fault {
+				assert.Error(t, reportFault(tt.report))
+			} else {
+				assert.NoError(t, reportFault(tt.report))
+			}
+		})
+	}
+}
+
 func TestReportToolEndsTheRunOnlyOnAValidReport(t *testing.T) {
 	tool := reportTool{}
 
@@ -144,6 +200,9 @@ func TestReportToolEndsTheRunOnlyOnAValidReport(t *testing.T) {
 
 	_, err = tool.Execute(t.Context(), map[string]any{"diagnosis": "d", "cause": "card", "fix": "rewrite the card"})
 	require.Error(t, err, "a malformed report is refused, so the model can correct it")
+
+	_, err = tool.Execute(t.Context(), map[string]any{"diagnosis": "d", "cause": "Card"})
+	require.Error(t, err, "a report ContextMatrix would reject is refused")
 }
 
 func TestReportToolSchemaMirrorsTheResult(t *testing.T) {
@@ -375,6 +434,53 @@ func TestInvestigateOnClaudeCode(t *testing.T) {
 	require.Len(t, usage, 1)
 	assert.Equal(t, protocol.CostBasisSubscription, usage[0].CostBasis)
 	assert.Equal(t, []protocol.SubscriptionUsage{window}, usage[0].Subscription)
+}
+
+// scriptedLLM answers each request with the next of replies, then repeats the
+// last.
+type scriptedLLM struct {
+	replies []llm.Response
+	calls   int
+}
+
+func (s *scriptedLLM) Send(context.Context, llm.Request) (llm.Response, error) {
+	r := s.replies[min(s.calls, len(s.replies)-1)]
+	s.calls++
+
+	return r, nil
+}
+
+func (s *scriptedLLM) SendStream(ctx context.Context, req llm.Request, _ func(llm.Delta)) (llm.Response, error) {
+	return s.Send(ctx, req)
+}
+
+func reportCall(id, args string) llm.Response {
+	return llm.Response{
+		ToolCalls: []llm.ToolCall{{
+			ID: id, Type: "function", Function: llm.FunctionCall{Name: reportToolName, Arguments: args},
+		}},
+		FinishReason: "tool_calls",
+		Usage:        llm.Usage{PromptTokens: 10, CompletionTokens: 5, Cost: 0.01},
+	}
+}
+
+func TestInvestigateContinuesAfterARefusedReport(t *testing.T) {
+	in := protocol.InvestigateInput{Card: "card\n"}
+	spec := investigateSpec(t, bareRepo(t, nil), in)
+	ws := clonedInvestigation(t, spec)
+
+	client := &scriptedLLM{replies: []llm.Response{
+		reportCall("call-1", `{"diagnosis":"d","cause":"Card"}`),
+		reportCall("call-2", `{"diagnosis":"d","cause":"model"}`),
+	}}
+
+	d, err := newInvestigateDeps(spec, client, func(s string) string { return s })
+	require.NoError(t, err)
+
+	got, _, err := investigate(t.Context(), ws, spec, in, d, discardEmitter())
+	require.NoError(t, err)
+	assert.Equal(t, protocol.DiagnosisModel, got.Cause, "the corrected report ends the run")
+	assert.Equal(t, 2, client.calls, "the refused report did not end the run")
 }
 
 func TestInvestigateWithoutAReportFails(t *testing.T) {

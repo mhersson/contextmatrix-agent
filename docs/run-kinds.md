@@ -252,14 +252,18 @@ run's secrets and capped by the tool output knob.
 The result is `report_investigation`'s arguments, a
 `protocol.InvestigateResult`: the `diagnosis`, one `cause` (`card`, `model`,
 `environment` or `ecosystem`), an optional `fix` (a `## Sentinel` section,
-verify fields, subtasks to retire), `forward_to` (sibling IDs the fix suits)
-and friction `findings`. The tool refuses arguments that do not decode, so the
-model can correct them. A run that ends without the call ends with cause
-`error`; one stopped at the turn cap, the context limit or the cost ceiling
-ends with `max_turns`, `context_limit` or `budget_exceeded`. Its usage row goes
-back on every path that ran the model. The fix and `forward_to` pass through as
-reported: ContextMatrix vets the fix and treats `card` without a fix, or a fix
-with another cause, as no fix.
+verify fields, subtasks to retire), `forward_to` (sibling IDs the fix suits) and
+friction `findings`. The tool refuses arguments that do not decode, and a report
+with an empty diagnosis, a cause outside the four, or a finding whose kind is
+not one of `guidance`, `code`, `card_advice`, `project_verify`, `hard_card` and
+`ecosystem` or whose text is empty (`reportFault`), so the model can correct
+them: ContextMatrix rejects a whole status over a bad cause or finding kind. A
+run that ends without the call ends with cause `error`; one stopped at the turn
+cap, the context limit or the cost ceiling ends with `max_turns`,
+`context_limit` or `budget_exceeded`. Its usage row goes back on every path that
+ran the model. The fix and `forward_to` pass through as reported: ContextMatrix
+vets the fix and treats `card` without a fix, or a fix with another cause, as no
+fix.
 
 The limits, applied after masking (`limitInvestigate` and `fitOutcome`,
 `internal/runkind/limits.go`):
@@ -319,7 +323,7 @@ rows never reach the card's budget.
 | `internal/runkind/textcheck.go`          | The text check: token extraction and the base-branch lookup           |
 | `internal/runkind/investigate.go`        | The investigate kind: model access, the model run                     |
 | `internal/runkind/investigate_inputs.go` | The card files written as read-only inputs, the work-branch lookup    |
-| `internal/runkind/investigate_tool.go`   | The `report_investigation` terminal tool and the report's decoding    |
+| `internal/runkind/investigate_tool.go`   | The `report_investigation` tool: decoding and checking the report     |
 | `internal/runkind/investigate_prompt.go` | The investigation's task prompt                                       |
 | `internal/runkind/spend.go`              | The metered client and the usage rows                                 |
 | `internal/runkind/limits.go`             | The result size limits and the outcome fit                            |

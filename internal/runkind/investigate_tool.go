@@ -3,7 +3,10 @@ package runkind
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/mhersson/contextmatrix-harness/llm"
 	"github.com/mhersson/contextmatrix-harness/tools"
@@ -13,8 +16,9 @@ import (
 const reportToolName = "report_investigation"
 
 // reportTool is the investigation's terminal tool. A call whose arguments
-// decode as a protocol.InvestigateResult ends the run with them on
-// Result.CompletionArgs; any other call is refused, so the model can correct it.
+// decode as a protocol.InvestigateResult that reportFault accepts ends the run
+// with them on Result.CompletionArgs; any other call is refused, so the model
+// can correct it.
 type reportTool struct{}
 
 func (reportTool) Name() string { return reportToolName }
@@ -84,12 +88,52 @@ func (reportTool) Execute(_ context.Context, args map[string]any) (tools.Result,
 
 func (reportTool) Terminal() bool { return true }
 
-// parseReport decodes a report call's arguments; unknown fields are ignored.
+// parseReport decodes a report call's arguments and refuses a report
+// reportFault faults; unknown fields are ignored.
 func parseReport(args json.RawMessage) (protocol.InvestigateResult, error) {
 	var r protocol.InvestigateResult
 	if err := json.Unmarshal(args, &r); err != nil {
 		return protocol.InvestigateResult{}, fmt.Errorf("parse report: %w", err)
 	}
 
+	if err := reportFault(r); err != nil {
+		return protocol.InvestigateResult{}, fmt.Errorf("invalid report: %w", err)
+	}
+
 	return r, nil
+}
+
+var (
+	diagnoses = []string{
+		protocol.DiagnosisCard, protocol.DiagnosisModel, protocol.DiagnosisEnvironment, protocol.DiagnosisEcosystem,
+	}
+	findingKinds = []string{
+		protocol.FindingGuidance, protocol.FindingCode, protocol.FindingCardAdvice,
+		protocol.FindingProjectVerify, protocol.FindingHardCard, protocol.FindingEcosystem,
+	}
+)
+
+// reportFault is the first value in r that ContextMatrix would reject with the
+// whole status, or nil. The fix and forward_to are left alone: ContextMatrix
+// treats a bad one as no fix.
+func reportFault(r protocol.InvestigateResult) error {
+	if strings.TrimSpace(r.Diagnosis) == "" {
+		return errors.New("diagnosis is empty")
+	}
+
+	if !slices.Contains(diagnoses, r.Cause) {
+		return fmt.Errorf("cause %q is not one of %s", r.Cause, strings.Join(diagnoses, ", "))
+	}
+
+	for i, f := range r.Findings {
+		if !slices.Contains(findingKinds, f.Kind) {
+			return fmt.Errorf("finding %d: kind %q is not one of %s", i+1, f.Kind, strings.Join(findingKinds, ", "))
+		}
+
+		if strings.TrimSpace(f.Text) == "" {
+			return fmt.Errorf("finding %d: text is empty", i+1)
+		}
+	}
+
+	return nil
 }
