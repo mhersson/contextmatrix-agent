@@ -71,5 +71,8 @@ echo "==> pinning base_image in ${CONFIG}"
 sed -i -E "s|^(base_image:[[:space:]]*).*|\\1${digest}|" "$CONFIG"
 grep -E '^base_image:' "$CONFIG"
 
+# The unit's ReadWritePaths entry is ignored while ~/.contextmatrix is missing.
+mkdir -p "${HOME}/.contextmatrix/agent/logs"
+
 echo "==> systemctl --user restart ${SERVICE}"
 systemctl --user restart "$SERVICE"

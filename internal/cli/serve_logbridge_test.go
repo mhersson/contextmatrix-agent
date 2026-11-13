@@ -23,13 +23,19 @@ import (
 func newTestSink(t *testing.T) (sink func(project, cardID, correlationID string, line []byte, stderr bool), registry *logbridge.RedactorRegistry, files *filelog.Logger, dir string) {
 	t.Helper()
 
+	return newTestSinkWithOutcomes(t, newRunOutcomes())
+}
+
+func newTestSinkWithOutcomes(t *testing.T, outcomes *runOutcomes) (sink func(project, cardID, correlationID string, line []byte, stderr bool), registry *logbridge.RedactorRegistry, files *filelog.Logger, dir string) {
+	t.Helper()
+
 	dir = t.TempDir()
 	files = filelog.New(dir, nil)
 	hub := logbridge.NewHub(func(e protocol.LogEntry) string { return e.Project }, nil)
 	bridge := logbridge.NewBridge(logbridge.BridgeConfig{Hub: hub})
 	registry = logbridge.NewRedactorRegistry(bridge)
 
-	return containerLogSink(bridge, files, registry), registry, files, dir
+	return containerLogSink(bridge, files, registry, outcomes), registry, files, dir
 }
 
 func readCardLog(t *testing.T, dir, project, cardID string) string {
@@ -90,7 +96,7 @@ func TestContainerLogSink_TeeForwardsToSSEBridgeToo(t *testing.T) {
 	hub := logbridge.NewHub(func(e protocol.LogEntry) string { return e.Project }, nil)
 	bridge := logbridge.NewBridge(logbridge.BridgeConfig{Hub: hub})
 	registry := logbridge.NewRedactorRegistry(bridge)
-	sink := containerLogSink(bridge, files, registry)
+	sink := containerLogSink(bridge, files, registry, newRunOutcomes())
 
 	subID, ch := hub.Subscribe("")
 	defer hub.Unsubscribe(subID)
@@ -151,7 +157,7 @@ func TestContainerLogSink_StaleExitCannotStripFreshRunKeys(t *testing.T) {
 	hub := logbridge.NewHub(func(e protocol.LogEntry) string { return e.Project }, nil)
 	bridge := logbridge.NewBridge(logbridge.BridgeConfig{Hub: hub})
 	registry := logbridge.NewRedactorRegistry(bridge)
-	sink := containerLogSink(bridge, files, registry)
+	sink := containerLogSink(bridge, files, registry, newRunOutcomes())
 
 	subID, ch := hub.Subscribe("proj")
 	defer hub.Unsubscribe(subID)

@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -169,24 +170,31 @@ func (f *fakeExecutor) launchedSpecs() []executor.LaunchSpec {
 // fakeReporter records status callbacks.
 type fakeReporter struct {
 	mu    sync.Mutex
-	calls [][3]string // cardID, status, message
+	calls []protocol.StatusCallbackPayload
 }
 
-func (f *fakeReporter) ReportStatus(_ context.Context, cardID, _, status, message string) error {
+func (f *fakeReporter) ReportStatus(_ context.Context, p protocol.StatusCallbackPayload) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	f.calls = append(f.calls, [3]string{cardID, status, message})
+	f.calls = append(f.calls, p)
 
 	return nil
 }
 
-func (f *fakeReporter) statuses() [][3]string {
+func (f *fakeReporter) payloads() []protocol.StatusCallbackPayload {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	out := make([][3]string, len(f.calls))
-	copy(out, f.calls)
+	return slices.Clone(f.calls)
+}
+
+func (f *fakeReporter) statuses() [][3]string {
+	var out [][3]string
+
+	for _, p := range f.payloads() {
+		out = append(out, [3]string{p.CardID, p.WorkerStatus, p.Message})
+	}
 
 	return out
 }
@@ -2625,6 +2633,48 @@ func TestLaunch_GitTokenAloneDoesNotSatisfyLLMGuard(t *testing.T) {
 	assert.Equal(t,
 		[][3]string{{"C1", "failed", "CM did not provision an llm_endpoint"}},
 		reporter.statuses())
+}
+
+func TestTriggerStatusesCarryTheRunID(t *testing.T) {
+	cases := []struct {
+		name          string
+		gitToken      string
+		wantStatus    string
+		wantStopCause string
+	}{
+		{"launched run reports running without a cause", "cm-git-token", "running", ""},
+		{"failed launch reports infrastructure", "", "failed", protocol.StopCauseInfrastructure},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tracker := executor.NewTracker(1)
+			reporter := &fakeReporter{}
+
+			s := NewServer(Config{
+				APIKey:      "k",
+				Executor:    &fakeExecutor{tracker: tracker},
+				Tracker:     tracker,
+				Reporter:    reporter,
+				LLMProxy:    &fakeLLMProxy{},
+				Credentials: &fakeCredentials{},
+				LaunchEnv:   LaunchEnv{BaseImage: "img", MCPURL: "http://mcp"},
+				Logger:      quietLogger(),
+			})
+
+			payload := protocol.TriggerPayload{
+				CardID: "C1", Project: "p", GitToken: tc.gitToken,
+				LLMEndpoint: &protocol.LLMEndpoint{Type: "openai", APIKey: "cm-llm-key"},
+			}
+			s.launchNow(s.buildLaunchSpec(payload, "corr-7", ""), payload)
+
+			got := reporter.payloads()
+			require.Len(t, got, 1)
+			assert.Equal(t, "corr-7", got[0].RunID)
+			assert.Equal(t, tc.wantStatus, got[0].WorkerStatus)
+			assert.Equal(t, tc.wantStopCause, got[0].StopCause)
+		})
+	}
 }
 
 // TestLaunch_LLMEndpointAloneDoesNotSatisfyGitTokenGuard mirrors the previous

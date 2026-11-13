@@ -208,18 +208,20 @@ func TestOnDisplaceHookRevokesTheDisplacedRun(t *testing.T) {
 
 type stubReporter struct {
 	status, message string
+	payload         protocol.StatusCallbackPayload
 
 	// onReport, when set, runs as the status callback fires.
 	onReport func()
 }
 
-func (s *stubReporter) ReportStatus(_ context.Context, _, _, status, message string) error {
+func (s *stubReporter) ReportStatus(_ context.Context, p protocol.StatusCallbackPayload) error {
 	if s.onReport != nil {
 		s.onReport()
 	}
 
-	s.status = status
-	s.message = message
+	s.payload = p
+	s.status = p.WorkerStatus
+	s.message = p.Message
 
 	return nil
 }
@@ -240,7 +242,7 @@ func TestOnContainerExitClosesLogFile(t *testing.T) {
 	bridge := logbridge.NewBridge(logbridge.BridgeConfig{Hub: hub})
 	registry := logbridge.NewRedactorRegistry(bridge)
 
-	onExit := onContainerExit(rep, newExitReports(), creds, &recordingRevoker{}, files, registry, bridge, logger)
+	onExit := onContainerExit(rep, newExitReports(), newRunOutcomes(), creds, &recordingRevoker{}, files, registry, bridge, logger)
 	onExit("proj", "CARD-1", 0, executor.ExitNormal, 1, "corr-1")
 
 	data, err := os.ReadFile(filepath.Join(dir, "proj", "card-1.log"))
@@ -285,6 +287,7 @@ type exitHarness struct {
 	creds    *secrets.RunCredentials
 	revoker  *recordingRevoker
 	rep      *stubReporter
+	outcomes *runOutcomes
 	stream   <-chan protocol.LogEntry
 	registry *logbridge.RedactorRegistry
 	onExit   func(project, cardID string, exitCode int64, cause executor.ExitCause, attempt int, correlationID string)
@@ -298,6 +301,7 @@ func newExitHarness(t *testing.T, logDir string) *exitHarness {
 	creds := secrets.NewRunCredentials(t.TempDir(), "http://cm", "key", logger)
 	revoker := &recordingRevoker{}
 	rep := &stubReporter{}
+	outcomes := newRunOutcomes()
 
 	hub := logbridge.NewHub(func(e protocol.LogEntry) string { return e.Project }, nil)
 	bridge := logbridge.NewBridge(logbridge.BridgeConfig{Hub: hub, MapExtra: agentMapExtra})
@@ -313,9 +317,10 @@ func newExitHarness(t *testing.T, logDir string) *exitHarness {
 		creds:    creds,
 		revoker:  revoker,
 		rep:      rep,
+		outcomes: outcomes,
 		stream:   ch,
 		registry: registry,
-		onExit:   onContainerExit(rep, newExitReports(), creds, revoker, files, registry, bridge, logger),
+		onExit:   onContainerExit(rep, newExitReports(), outcomes, creds, revoker, files, registry, bridge, logger),
 	}
 }
 
@@ -606,4 +611,54 @@ func TestLaunchEnvForwardsGates(t *testing.T) {
 	assert.Equal(t, 900, env.GatesCIWaitTimeoutSeconds)
 	assert.Equal(t, 600, env.GatesCopilotWaitTimeoutSeconds)
 	assert.True(t, env.GatesCopilotThreadReplies)
+}
+
+func TestContainerLogSinkRecordsOnlyStdoutOutcomes(t *testing.T) {
+	const line = `{"kind":"run_outcome","data":{"cause":"done"}}`
+
+	tests := []struct {
+		name   string
+		stderr bool
+		want   string
+	}{
+		{"stdout line is recorded", false, "done"},
+		{"stderr line is not", true, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			outcomes := newRunOutcomes()
+			sink, _, _, _ := newTestSinkWithOutcomes(t, outcomes)
+
+			sink("proj", "CARD-1", "corr-1", []byte(line), tt.stderr)
+
+			assert.Equal(t, tt.want, outcomes.take("corr-1").Cause)
+		})
+	}
+}
+
+func TestContainerLogSinkRecordsTheMaskedLine(t *testing.T) {
+	outcomes := newRunOutcomes()
+	sink, registry, _, _ := newTestSinkWithOutcomes(t, outcomes)
+
+	// The secret is the cause value: only a masked line records a cause that
+	// is not the secret.
+	registry.AddSessionKey("s", "verify_parked")
+
+	sink("proj", "CARD-1", "corr-1",
+		[]byte(`{"kind":"run_outcome","data":{"cause":"verify_parked"}}`), false)
+
+	assert.NotEqual(t, "verify_parked", outcomes.take("corr-1").Cause)
+}
+
+func TestOnContainerExitReportsTheRecordedOutcome(t *testing.T) {
+	h := newExitHarness(t, t.TempDir())
+	h.files.Begin("proj", "CARD-1", "abcdef012345", "corr-1")
+	h.outcomes.record("corr-1", []byte(`{"kind":"run_outcome","data":{"cause":"verify_parked"}}`))
+
+	h.onExit("proj", "CARD-1", 1, executor.ExitNormal, 1, "corr-1")
+
+	assert.Equal(t, "corr-1", h.rep.payload.RunID)
+	assert.Equal(t, protocol.StopCauseVerifyParked, h.rep.payload.StopCause)
+	assert.Empty(t, h.outcomes.take("corr-1").Cause, "the outcome is forgotten at exit")
 }

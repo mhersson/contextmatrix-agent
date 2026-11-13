@@ -78,7 +78,7 @@ func TestReportStatus_Success(t *testing.T) {
 
 	c := newFastClient(srv.URL, apiKey)
 
-	err := c.ReportStatus(context.Background(), "CMX-001", "alpha", "running", "task started")
+	err := c.ReportStatus(context.Background(), protocol.StatusCallbackPayload{CardID: "CMX-001", Project: "alpha", WorkerStatus: "running", Message: "task started"})
 	require.NoError(t, err)
 
 	assert.Equal(t, http.MethodPost, receivedMethod)
@@ -89,6 +89,50 @@ func TestReportStatus_Success(t *testing.T) {
 	assert.Equal(t, "alpha", receivedPayload.Project)
 	assert.Equal(t, "running", receivedPayload.WorkerStatus)
 	assert.Equal(t, "task started", receivedPayload.Message)
+}
+
+func TestReportStatusSendsRunIDAndStopCause(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload protocol.StatusCallbackPayload
+		want    map[string]any
+	}{
+		{
+			name: "both set",
+			payload: protocol.StatusCallbackPayload{
+				CardID: "CMX-001", Project: "alpha", WorkerStatus: "failed",
+				RunID: "CMX-001-abc", StopCause: protocol.StopCauseVerifyParked,
+			},
+			want: map[string]any{"run_id": "CMX-001-abc", "stop_cause": "verify_parked"},
+		},
+		{
+			name:    "neither set",
+			payload: protocol.StatusCallbackPayload{CardID: "CMX-001", Project: "alpha", WorkerStatus: "running"},
+			want:    map[string]any{},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var body map[string]any
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer srv.Close()
+
+			require.NoError(t, newFastClient(srv.URL, "test-secret-key-that-is-long-enough").
+				ReportStatus(context.Background(), tc.payload))
+
+			for _, key := range []string{"run_id", "stop_cause"} {
+				want, ok := tc.want[key]
+				got, present := body[key]
+				assert.Equal(t, ok, present, key)
+				assert.Equal(t, want, got, key)
+			}
+		})
+	}
 }
 
 // TestReportStatus_WorkerStatusWireTag pins the on-the-wire JSON tag: the status
@@ -116,7 +160,7 @@ func TestReportStatus_WorkerStatusWireTag(t *testing.T) {
 
 	c := newFastClient(srv.URL, apiKey)
 
-	err := c.ReportStatus(context.Background(), "CMX-001", "alpha", "running", "task started")
+	err := c.ReportStatus(context.Background(), protocol.StatusCallbackPayload{CardID: "CMX-001", Project: "alpha", WorkerStatus: "running", Message: "task started"})
 	require.NoError(t, err)
 
 	assert.Contains(t, rawBody, `"worker_status":"running"`)
@@ -145,7 +189,7 @@ func TestReportStatus_Retries(t *testing.T) {
 
 		c := newFastClient(srv.URL, apiKey)
 
-		err := c.ReportStatus(context.Background(), "CMX-001", "proj", "running", "")
+		err := c.ReportStatus(context.Background(), protocol.StatusCallbackPayload{CardID: "CMX-001", Project: "proj", WorkerStatus: "running"})
 		require.NoError(t, err)
 
 		assert.Equal(t, int32(3), attempts.Load(), "expected exactly 3 attempts")
@@ -164,7 +208,7 @@ func TestReportStatus_Retries(t *testing.T) {
 
 		c := newFastClient(srv.URL, apiKey)
 
-		err := c.ReportStatus(context.Background(), "CMX-001", "proj", "running", "")
+		err := c.ReportStatus(context.Background(), protocol.StatusCallbackPayload{CardID: "CMX-001", Project: "proj", WorkerStatus: "running"})
 		require.Error(t, err)
 
 		assert.Equal(t, int32(1), attempts.Load(), "4xx must not be retried")
@@ -248,7 +292,7 @@ func TestReportStatus_CountsRetries(t *testing.T) {
 	m := metrics.New()
 	c := newFastClient(srv.URL, apiKey).WithMetrics(m)
 
-	err := c.ReportStatus(context.Background(), "C-1", "proj", "running", "")
+	err := c.ReportStatus(context.Background(), protocol.StatusCallbackPayload{CardID: "C-1", Project: "proj", WorkerStatus: "running"})
 	require.Error(t, err, "all attempts fail")
 
 	assert.Equal(t, int32(3), hits.Load(), "three attempts were made")
@@ -286,7 +330,7 @@ func TestReportStatus_TerminalBackgroundRetry(t *testing.T) {
 
 		defer c.Close()
 
-		err := c.ReportStatus(context.Background(), "CMX-001", "proj", "completed", "")
+		err := c.ReportStatus(context.Background(), protocol.StatusCallbackPayload{CardID: "CMX-001", Project: "proj", WorkerStatus: "completed"})
 		require.Error(t, err, "the three fast attempts still fail")
 
 		// Deliberately NO hits==3 assertion here: with backgroundDelay=0 the
@@ -323,7 +367,7 @@ func TestReportStatus_TerminalBackgroundRetry(t *testing.T) {
 
 		defer c.Close()
 
-		err := c.ReportStatus(context.Background(), "CMX-001", "proj", "running", "")
+		err := c.ReportStatus(context.Background(), protocol.StatusCallbackPayload{CardID: "CMX-001", Project: "proj", WorkerStatus: "running"})
 		require.Error(t, err)
 		assert.EqualValues(t, 3, hits.Load())
 
@@ -349,7 +393,7 @@ func TestReportStatus_TerminalBackgroundRetry(t *testing.T) {
 		// A long delay: Close must interrupt the sleep, not race a real attempt.
 		c.backgroundDelay = func(int) time.Duration { return time.Hour }
 
-		err := c.ReportStatus(context.Background(), "CMX-001", "proj", "failed", "")
+		err := c.ReportStatus(context.Background(), protocol.StatusCallbackPayload{CardID: "CMX-001", Project: "proj", WorkerStatus: "failed"})
 		require.Error(t, err)
 		assert.EqualValues(t, 3, hits.Load())
 
@@ -407,7 +451,7 @@ func TestReportStatus_RefusesRedirects(t *testing.T) {
 
 	defer c.Close()
 
-	err := c.ReportStatus(context.Background(), "CMX-001", "proj", "completed", "")
+	err := c.ReportStatus(context.Background(), protocol.StatusCallbackPayload{CardID: "CMX-001", Project: "proj", WorkerStatus: "completed"})
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), apiKey)
 	assert.NotContains(t, err.Error(), sigSeen.Load().(string))
@@ -471,7 +515,7 @@ func TestReportStatus_BackgroundRetryStopsOnRedirect(t *testing.T) {
 
 	defer c.Close()
 
-	require.Error(t, c.ReportStatus(context.Background(), "CMX-001", "proj", "completed", ""))
+	require.Error(t, c.ReportStatus(context.Background(), protocol.StatusCallbackPayload{CardID: "CMX-001", Project: "proj", WorkerStatus: "completed"}))
 
 	select {
 	case <-attempted:

@@ -16,6 +16,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/attempt"
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/config"
+	"github.com/mhersson/contextmatrix-agent/internal/runoutcome"
 	"github.com/mhersson/contextmatrix-agent/internal/secrets"
 	"github.com/mhersson/contextmatrix-agent/internal/worker"
 	"github.com/mhersson/contextmatrix-harness/events"
@@ -108,7 +109,7 @@ func newWorkCmd() *cobra.Command {
 			// and share them across both clients.
 			caLLMOpts, caMCPOpts, err := caInjections(spec.CACertFile)
 			if err != nil {
-				return err
+				return finishWork(emit, worker.Result{}, err)
 			}
 
 			clientOpts := []llm.Option{llm.WithRetry(llm.DefaultRetryPolicy()), llm.WithDialect(dialectFromType(spec.LLMType))}
@@ -122,20 +123,31 @@ func newWorkCmd() *cobra.Command {
 
 			ops, err := cmclient.New(cmd.Context(), spec.MCPURL, spec.MCPAPIKey, "cmx-agent-"+strings.ToLower(spec.CardID), caMCPOpts...)
 			if err != nil {
-				return fmt.Errorf("connect mcp: %w", err)
+				return finishWork(emit, worker.Result{}, fmt.Errorf("connect mcp: %w", err))
 			}
 			defer closeBounded(ops, mcpCloseTimeout)
 
 			res, err := worker.Run(cmd.Context(), spec, ops, client, emit, cmd.InOrStdin())
-			if err != nil {
-				return err
+			if err == nil {
+				slog.Info("run finished", "reason", res.Reason)
 			}
 
-			slog.Info("run finished", "reason", res.Reason)
-
-			return nil
+			return finishWork(emit, res, err)
 		},
 	}
+}
+
+// finishWork writes the run's outcome line as the stream's last line and
+// returns err. A run that reported no cause failed before it could name one.
+func finishWork(emit *events.Emitter, res worker.Result, err error) error {
+	cause := res.Cause
+	if cause == "" {
+		cause = protocol.StopCauseError
+	}
+
+	runoutcome.Emit(emit, runoutcome.Data{Cause: cause})
+
+	return err
 }
 
 // withRunID attaches the run's correlation id (CM_RUN_ID) as a default

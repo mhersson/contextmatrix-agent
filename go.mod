@@ -12,7 +12,7 @@ require (
 	github.com/knadh/koanf/v2 v2.4.1
 	github.com/mhersson/contextmatrix-backendkit v0.16.0
 	github.com/mhersson/contextmatrix-harness v0.29.0
-	github.com/mhersson/contextmatrix-protocol v0.44.0
+	github.com/mhersson/contextmatrix-protocol v0.45.0
 	github.com/mhersson/contextmatrix-vendorkit v0.1.4
 	github.com/moby/docker-image-spec v1.3.1
 	github.com/moby/moby/api v1.56.1

@@ -3011,3 +3011,63 @@ func TestNewExecutorPassesCAAndScrubbedEnvToClaude(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, called)
 }
+
+func TestMapFSMResultStopCause(t *testing.T) {
+	cases := []struct {
+		name       string
+		err        error
+		endSession bool
+		want       string
+	}{
+		{"done", nil, false, protocol.StopCauseDone},
+		{"review cap", &orchestrator.ReviewParkedError{}, false, protocol.StopCauseReviewParked},
+		{"review park without a model", &orchestrator.ReviewParkedError{NoModel: true}, false, protocol.StopCauseNoModel},
+		{"gates", &orchestrator.GatesParkedError{}, false, protocol.StopCauseGatesParked},
+		{"budget", &orchestrator.BudgetExceededError{Spent: 5, Max: 5}, false, protocol.StopCauseBudgetExceeded},
+		{"context", &orchestrator.ContextLimitError{}, false, protocol.StopCauseContextLimit},
+		{"turns", &orchestrator.MaxTurnsError{}, false, protocol.StopCauseMaxTurns},
+		{"usage limit", &orchestrator.UsageLimitError{}, false, protocol.StopCauseUsageLimit},
+		{"toolchain", &orchestrator.ToolchainMissingError{}, false, protocol.StopCauseToolchainMissing},
+		{"no model", &orchestrator.NoModelError{}, false, protocol.StopCauseNoModel},
+		{"verify", &orchestrator.VerifyParkedError{}, false, protocol.StopCauseVerifyParked},
+		{"empty subtask", &orchestrator.EmptySubtaskError{}, false, protocol.StopCauseEmptySubtask},
+		{"split", &orchestrator.SplitOverflowError{}, false, protocol.StopCauseSplitOverflow},
+		{"end session", errors.New("canceled mid-turn"), true, protocol.StopCauseEnded},
+		{"generic", errors.New("boom"), false, protocol.StopCauseError},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			remote := setupBareRemote(t)
+			ws := filepath.Join(t.TempDir(), "ws")
+
+			g := NewGit(ws, "", "", "")
+			ctx := context.Background()
+
+			require.NoError(t, g.Clone(ctx, remote, "main"))
+			require.NoError(t, g.CreateBranch(ctx, "cm/cmx-001"))
+			g.SetBranchPolicy("cm/cmx-001", "main", "main")
+
+			var end atomic.Bool
+
+			end.Store(tc.endSession)
+
+			a := fsmArgs{
+				ops:        newFakeOps(),
+				git:        g,
+				spec:       RunSpec{CardID: "CMX-001"},
+				branch:     "cm/cmx-001",
+				endSession: &end,
+			}
+
+			res, _ := mapFSMResult(ctx, a, func(s string) string { return s }, tc.err)
+			assert.Equal(t, tc.want, res.Cause)
+		})
+	}
+}
+
+func TestReleaseWithErrorReportsErrorCause(t *testing.T) {
+	res, err := releaseWithError(context.Background(), newFakeOps(), "CMX-001", errors.New("clone failed"))
+	require.Error(t, err)
+	assert.Equal(t, protocol.StopCauseError, res.Cause)
+}

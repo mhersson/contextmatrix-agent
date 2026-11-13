@@ -54,10 +54,12 @@ type cardFile struct {
 	f           *os.File
 	path        string
 	containerID string
+	runID       string
 	closed      bool
 }
 
-// New builds a Logger rooted at dir. An empty dir disables file logging.
+// New builds a Logger rooted at dir. An empty dir builds a disabled Logger
+// whose every call no-ops.
 func New(dir string, logger *slog.Logger) *Logger {
 	if logger == nil {
 		logger = slog.Default()
@@ -102,9 +104,12 @@ func (l *Logger) Begin(project, cardID, containerID, correlationID string) {
 
 	p := l.path(project, cardID)
 
-	keepKey := runKey(project, cardID, correlationID)
+	l.closeCard(runKey(project, cardID, correlationID), -1, causeSuperseded) // supersede this run id's still-open entry, if any
 
-	l.closeCard(keepKey, -1, causeSuperseded) // supersede this run id's still-open entry, if any
+	// Held until the writer is registered: Prune takes the same lock, so it can
+	// never sweep a log between its open and its registration.
+	l.mu.Lock()
+	defer l.mu.Unlock()
 
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		l.logger.Warn("filelog: mkdir failed", "project", project, "card_id", cardID, "error", err)
@@ -119,16 +124,15 @@ func (l *Logger) Begin(project, cardID, containerID, correlationID string) {
 		return
 	}
 
-	header := fmt.Sprintf(runHeaderPrefix+"%s container=%s ====\n",
-		time.Now().UTC().Format(time.RFC3339), shortID(containerID))
+	// Readers cut a run's section out by its " run=<id>" header and footer fields.
+	header := fmt.Sprintf(runHeaderPrefix+"%s container=%s run=%s ====\n",
+		time.Now().UTC().Format(time.RFC3339), shortID(containerID), correlationID)
 	// Best-effort header: on failure keep capturing the run's output anyway.
 	if _, err := f.WriteString(header); err != nil {
 		l.logger.Warn("filelog: write header failed", "project", project, "card_id", cardID, "error", err)
 	}
 
-	l.mu.Lock()
-	l.files[runKey(project, cardID, correlationID)] = &cardFile{f: f, path: p, containerID: containerID}
-	l.mu.Unlock()
+	l.files[runKey(project, cardID, correlationID)] = &cardFile{f: f, path: p, containerID: containerID, runID: correlationID}
 }
 
 // Write appends one line (with a trailing newline) to the run's file. No-op if
@@ -190,8 +194,8 @@ func (l *Logger) footerAndClose(cf *cardFile, exitCode int64, cause string) {
 		return
 	}
 
-	footer := fmt.Sprintf("==== run ended %s container=%s exit=%d cause=%s ====\n",
-		time.Now().UTC().Format(time.RFC3339), shortID(cf.containerID), exitCode, cause)
+	footer := fmt.Sprintf("==== run ended %s container=%s run=%s exit=%d cause=%s ====\n",
+		time.Now().UTC().Format(time.RFC3339), shortID(cf.containerID), cf.runID, exitCode, cause)
 	if _, err := cf.f.WriteString(footer); err != nil {
 		l.logger.Warn("filelog: write footer failed", "path", cf.path, "error", err)
 	}

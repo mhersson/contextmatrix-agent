@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strconv"
@@ -67,6 +68,10 @@ const (
 // inside the defaults struct.
 const defaultSecretsDir = "/var/run/cm-agent/secrets" //nolint:gosec // path, not a credential
 
+// defaultLogDir is the durable card-log directory, kept in its unexpanded form
+// so DefaultsYAML prints it portably.
+const defaultLogDir = "~/.contextmatrix/agent/logs"
+
 // CompactionConfig configures the worker harness loop's optional in-window
 // context compaction. Enabled=false (the default) preserves the hard
 // context_limit stop; Threshold is the fraction of the context window at which
@@ -120,12 +125,17 @@ type ServiceConfig struct {
 	GatesCopilotWaitTimeoutSeconds int
 	GatesCopilotThreadReplies      bool
 
-	// LogDir is an optional directory on the serve host for per-card raw container
+	// LogDir is the directory on the serve host for per-card raw container
 	// output (as `docker logs -f` shows it): one append file per card at
 	// <log_dir>/<project>/<card_id>.log, 0600. CM-provisioned secrets are masked;
 	// operator-supplied values (worker_extra_env, verify.env pass-throughs) and
-	// anything the model prints are not. Empty disables it; use external logrotate.
+	// anything the model prints are not. Never empty: defaultLogDir when unset,
+	// with a leading ~ expanded.
 	LogDir string
+
+	// LogRetentionDays is how long a card log may go untouched before the
+	// pruner removes it. Must be >= 1.
+	LogRetentionDays int
 
 	// ReviewAttemptsCap is the number of review rounds the worker runs before
 	// parking the card in review. Workers receive it as
@@ -197,6 +207,7 @@ type serviceRaw struct {
 	SecretsDir                string            `koanf:"secrets_dir"`
 	CACertFile                string            `koanf:"ca_cert_file"`
 	LogDir                    string            `koanf:"log_dir"`
+	LogRetentionDays          int               `koanf:"log_retention_days"`
 	WorkerExtraEnv            map[string]string `koanf:"worker_extra_env"`
 	ReplaySkewSeconds         int               `koanf:"webhook_replay_skew_seconds"`
 	ReplayCacheSize           int               `koanf:"webhook_replay_cache_size"`
@@ -235,6 +246,8 @@ func serviceDefaults() serviceRaw {
 		IdleOutputTimeout:      "30m",
 		IdleWatchdogInterval:   "30s",
 		SecretsDir:             defaultSecretsDir,
+		LogDir:                 defaultLogDir,
+		LogRetentionDays:       30,
 		ReplaySkewSeconds:      330,
 		ReplayCacheSize:        10000,
 		MessageDedupTTLSeconds: 600,
@@ -506,6 +519,20 @@ func unknownFileKeys(keys []string) []string {
 	return unknown
 }
 
+// expandHome replaces a leading "~" or "~/" with the user's home directory.
+func expandHome(path string) (string, error) {
+	if path != "~" && !strings.HasPrefix(path, "~/") {
+		return path, nil
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+
+	return filepath.Join(home, path[1:]), nil
+}
+
 // toConfig parses the wire-form durations and assembles the typed config.
 func (r serviceRaw) toConfig() (*ServiceConfig, error) {
 	containerTimeout, err := parseDurationField("container_timeout", r.ContainerTimeout)
@@ -530,6 +557,16 @@ func (r serviceRaw) toConfig() (*ServiceConfig, error) {
 		imageListFilters = []string{"contextmatrix-agent"}
 	}
 
+	logDir := r.LogDir
+	if logDir == "" {
+		logDir = defaultLogDir
+	}
+
+	logDir, err = expandHome(logDir)
+	if err != nil {
+		return nil, fmt.Errorf("log_dir: %w", err)
+	}
+
 	return &ServiceConfig{
 		ContextMatrixURL:          r.ContextMatrixURL,
 		ContainerContextMatrixURL: r.ContainerContextMatrixURL,
@@ -551,7 +588,8 @@ func (r serviceRaw) toConfig() (*ServiceConfig, error) {
 		IdleWatchdogInterval:      idleWatchdog,
 		SecretsDir:                r.SecretsDir,
 		CACertFile:                r.CACertFile,
-		LogDir:                    r.LogDir,
+		LogDir:                    logDir,
+		LogRetentionDays:          r.LogRetentionDays,
 		WorkerExtraEnv:            r.WorkerExtraEnv,
 		ReplaySkew:                time.Duration(r.ReplaySkewSeconds) * time.Second,
 		ReplayCacheSize:           r.ReplayCacheSize,
@@ -765,6 +803,11 @@ func (c *ServiceConfig) Validate() error {
 		if _, err := os.Stat(c.CACertFile); err != nil {
 			return fmt.Errorf("ca_cert_file %q: %w", c.CACertFile, err)
 		}
+	}
+
+	// The upper bound keeps days*24h inside time.Duration.
+	if c.LogRetentionDays < 1 || c.LogRetentionDays > 36500 {
+		return fmt.Errorf("log_retention_days must be between 1 and 36500, got %d", c.LogRetentionDays)
 	}
 
 	if c.LogDir != "" {

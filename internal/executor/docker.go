@@ -486,8 +486,8 @@ func (e *DockerExecutor) pump(project, cardID, correlationID string, r io.Reader
 // attempt ordinal, and its correlation id. The correlation id lets a caller
 // key per-run state (the redaction-session registry) on this run alone: the
 // attempt ordinal cannot serve that purpose because it comes from counting
-// durable-log run headers, which is always 1 when file logging is disabled -
-// no discriminating power in that configuration.
+// durable-log run headers, which restarts at 1 once a card's log is pruned -
+// no discriminating power across that boundary.
 func (e *DockerExecutor) waitAndCleanup(
 	project, cardID, containerID string,
 	attempt int,

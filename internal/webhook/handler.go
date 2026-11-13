@@ -55,7 +55,7 @@ const (
 // StatusReporter reports a task's worker-status transition back to
 // ContextMatrix. *callback.Client satisfies it; tests supply a fake.
 type StatusReporter interface {
-	ReportStatus(ctx context.Context, cardID, project, status, message string) error
+	ReportStatus(ctx context.Context, p protocol.StatusCallbackPayload) error
 }
 
 // SessionSecretRegistry manages per-session secrets registered with the log
@@ -517,8 +517,14 @@ func (s *Server) launch(ctx context.Context, adm *admission, spec executor.Launc
 	}
 
 	// ctx may have expired; the callback client bounds its own requests.
+	status := protocol.StatusCallbackPayload{CardID: cardID, Project: project, RunID: spec.CorrelationID}
+
 	if failure != "" {
-		if err := s.reporter.ReportStatus(context.Background(), cardID, project, "failed", failure); err != nil {
+		status.WorkerStatus = "failed"
+		status.Message = failure
+		status.StopCause = protocol.StopCauseInfrastructure
+
+		if err := s.reporter.ReportStatus(context.Background(), status); err != nil {
 			s.logger.Error("report failed-status callback failed",
 				"project", project, "card_id", cardID, "error", err)
 		}
@@ -526,7 +532,9 @@ func (s *Server) launch(ctx context.Context, adm *admission, spec executor.Launc
 		return
 	}
 
-	if err := s.reporter.ReportStatus(context.Background(), cardID, project, "running", ""); err != nil {
+	status.WorkerStatus = "running"
+
+	if err := s.reporter.ReportStatus(context.Background(), status); err != nil {
 		s.logger.Error("report running-status callback failed",
 			"project", project, "card_id", cardID, "error", err)
 	}

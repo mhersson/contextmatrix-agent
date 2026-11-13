@@ -27,11 +27,11 @@ Read the relevant one before working in its area:
 
 ## Channels to ContextMatrix
 
-| Channel            | Direction    | Transport                          | Carries                                                            |
-| ------------------ | ------------ | ---------------------------------- | ------------------------------------------------------------------ |
-| Lifecycle webhooks | CM → `serve` | HMAC over `contextmatrix-protocol` | trigger / kill / stop-all / message / promote / end-session        |
-| Status callbacks   | `serve` → CM | HMAC, `POST /api/agent/status`     | running / completed / failed                                       |
-| Card operations    | `work` → CM  | **MCP tools** (`CM_MCP_API_KEY`)   | claim, heartbeat, report_usage, set phase, transition, complete, … |
+| Channel            | Direction    | Transport                          | Carries                                                                                |
+| ------------------ | ------------ | ---------------------------------- | -------------------------------------------------------------------------------------- |
+| Lifecycle webhooks | CM → `serve` | HMAC over `contextmatrix-protocol` | trigger / kill / stop-all / message / promote / end-session                            |
+| Status callbacks   | `serve` → CM | HMAC, `POST /api/agent/status`     | running / completed / failed, each with the run id; a terminal one with the stop cause |
+| Card operations    | `work` → CM  | **MCP tools** (`CM_MCP_API_KEY`)   | claim, heartbeat, report_usage, set phase, transition, complete, …                     |
 
 Card progress runs over **MCP, never raw HTTP** - the rule ContextMatrix
 enforces for agents. Before promoting an autonomous card, `serve` also makes one
@@ -55,13 +55,14 @@ internal/verifyexec/   → verify-command probing + bounded exec; used by cli ru
 internal/worker/       → the `work` lifecycle: clone, claim, run the FSM (HITL-gated or autonomous), commit/push, PR; wires the orchestrator deps
 internal/executor/     → Executor interface + DockerExecutor; Tracker (concurrency + awaiting-human gate); watchdogs
 internal/attempt/      → stamps the per-card container-run ordinal onto the transcript envelope, so a restarted card's overlapping event sequences stay distinguishable
+internal/runoutcome/   → the worker's last stdout line (run_outcome): why the run ended; written by work, read by serve
 internal/secrets/      → Source (static env file) + RunCredentials (stages per-run CM-provisioned credentials)
 
 # serve plumbing
 internal/webhook/    → HTTP server for lifecycle webhooks; embeds backendkit's webhookcore.Core (HMAC auth, drain gate, request metrics, SSE /logs, health/readyz/images) and adds the agent-only lifecycle handlers plus /message dedup over webhookcore's DedupCache; mounts backendkit's llmproxy at /llm
 internal/callback/   → status callbacks to /api/agent/status; VerifyAutonomous (fail-closed)
 internal/cmclient/   → MCP client for CM card operations (one agent identity per card)
-internal/filelog/    → per-card raw container-output file logs (<log_dir>/<project>/<card_id>.log; empty log_dir no-ops)
+internal/filelog/    → per-card raw container-output file logs (<log_dir>/<project>/<card_id>.log; always on, default ~/.contextmatrix/agent/logs; pruned after log_retention_days)
 internal/metrics/    → thin wrapper over backendkit's shared metrics bundle (cm_agent_* collectors, NormalizeEndpoint label allowlist); keeps the agent-only callback-retries counter
 internal/buildinfo/  → the build /health reports: ldflags-stamped version, commit and build time plus the embedded merge history (history/merges.log, parsed by protocol's changelog)
 

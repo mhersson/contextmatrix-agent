@@ -153,15 +153,8 @@ func (c *Client) WithMetrics(m *metrics.Metrics) *Client {
 
 // ReportStatus posts worker_status ∈ running|completed|failed to
 // /api/agent/status (the path ContextMatrix mounts for the agent backend).
-func (c *Client) ReportStatus(ctx context.Context, cardID, project, status, message string) error {
-	payload := protocol.StatusCallbackPayload{
-		CardID:       cardID,
-		Project:      project,
-		WorkerStatus: status,
-		Message:      message,
-	}
-
-	body, err := json.Marshal(payload)
+func (c *Client) ReportStatus(ctx context.Context, p protocol.StatusCallbackPayload) error {
+	body, err := json.Marshal(p)
 	if err != nil {
 		return fmt.Errorf("marshal status payload: %w", err)
 	}
@@ -198,13 +191,13 @@ func (c *Client) ReportStatus(ctx context.Context, cardID, project, status, mess
 		c.logger.Warn(
 			"status callback failed, retrying",
 			"attempt", attempt+1,
-			"card_id", cardID,
+			"card_id", p.CardID,
 			"error", lastErr,
 		)
 	}
 
-	if isTerminalStatus(status) {
-		c.scheduleBackgroundRetry(cardID, project, status, uri, path, body)
+	if isTerminalStatus(p.WorkerStatus) {
+		c.scheduleBackgroundRetry(p.CardID, p.Project, p.WorkerStatus, uri, path, body)
 	}
 
 	return fmt.Errorf("status callback failed after %d attempts: %w", maxAttempts, lastErr)

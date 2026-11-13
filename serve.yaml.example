@@ -77,18 +77,23 @@ port: 9092
 # CMX_LOG_LEVEL
 log_level: info
 
-# Directory on the agent host for per-card container-output logs. When set, the
-# agent writes one append file per card, <log_dir>/<project>/<card_id>.log,
-# containing the raw container output (as `docker logs -f` would show it). Files
-# are 0600: CM-provisioned secrets are masked; operator-supplied values
-# (worker_extra_env, verify.env pass-throughs) and anything the model prints are
-# not.
-# Empty (the default) disables file logging. Logs are kept indefinitely; use an
-# external logrotate for retention. If this path is outside /var/run/cm-agent,
-# ~/.cm-agent, or ~/.contextmatrix, add it to ReadWritePaths in the systemd
-# unit (see svc.sh).
+# Directory on the agent host for per-card container-output logs. Logging is
+# always on: the agent writes one append file per card,
+# <log_dir>/<project>/<card_id>.log, containing the raw container output (as
+# `docker logs -f` would show it). Files are 0600: CM-provisioned secrets are
+# masked; operator-supplied values (worker_extra_env, verify.env pass-throughs)
+# and anything the model prints are not.
+# A configured path overrides the default; a leading ~ is expanded to the home
+# directory; an empty value means the default. If the path is outside
+# /var/run/cm-agent, ~/.cm-agent, or ~/.contextmatrix, add it to ReadWritePaths
+# in the systemd unit (see svc.sh).
 # CMX_LOG_DIR
 # log_dir: ~/.contextmatrix/agent/logs
+
+# Days a card log may go untouched before it is removed, at agent start and once
+# a day. Must be 1 to 36500. External logrotate is not needed.
+# CMX_LOG_RETENTION_DAYS
+# log_retention_days: 30
 
 # --- Worker containers --------------------------------------------------------
 
