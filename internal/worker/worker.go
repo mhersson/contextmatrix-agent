@@ -1200,11 +1200,17 @@ func buildRegistry(spec RunSpec) (*registry.Registry, []registry.LadderFault) {
 
 // capableDefault is the capable default buildRegistry resolves.
 func capableDefault(spec RunSpec) string {
+	return CapableDefault(spec.Model, spec.DefaultModel)
+}
+
+// CapableDefault is the payload's model, else the serve default, else the
+// built-in capable default.
+func CapableDefault(model, defaultModel string) string {
 	switch {
-	case spec.Model != "":
-		return spec.Model
-	case spec.DefaultModel != "":
-		return spec.DefaultModel
+	case model != "":
+		return model
+	case defaultModel != "":
+		return defaultModel
 	default:
 		return config.DefaultCapableModel
 	}

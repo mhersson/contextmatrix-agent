@@ -2,14 +2,12 @@ package runkind
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
 	"strings"
 
-	"github.com/mhersson/contextmatrix-agent/internal/config"
 	"github.com/mhersson/contextmatrix-agent/internal/modelexec"
 	"github.com/mhersson/contextmatrix-agent/internal/orchestrator"
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
@@ -127,7 +125,7 @@ func investigate(
 // run's selection, with the ceiling on the binary on Claude Code. On an
 // endpoint the metered client holds it.
 func investigateConfig(spec Spec, redact func(string) string) harness.Config {
-	base := baseModel(spec)
+	base := worker.CapableDefault(spec.Model, spec.DefaultModel)
 
 	reg, faults := registry.FromSelection(spec.Selection, base, false)
 	for _, f := range faults {
@@ -139,7 +137,7 @@ func investigateConfig(spec Spec, redact func(string) string) harness.Config {
 
 	cfg := harness.Config{
 		Model:              model,
-		Reasoning:          reasoning(spec.ReasoningEffort),
+		Reasoning:          orchestrator.ReasoningRaw(spec.ReasoningEffort),
 		MaxTurns:           investigateMaxTurns,
 		WrapUpTurns:        investigateWrapUpTurns,
 		GraceTurn:          true,
@@ -153,31 +151,6 @@ func investigateConfig(spec Spec, redact func(string) string) harness.Config {
 	}
 
 	return cfg
-}
-
-// baseModel is the model the decision floor may raise: the payload's, else
-// the serve default, else the built-in capable default.
-func baseModel(spec Spec) string {
-	switch {
-	case spec.Model != "":
-		return spec.Model
-	case spec.DefaultModel != "":
-		return spec.DefaultModel
-	default:
-		return config.DefaultCapableModel
-	}
-}
-
-// reasoning is the harness reasoning object for effort; nil when it is empty,
-// so the model reasons at its own default.
-func reasoning(effort string) json.RawMessage {
-	if effort == "" {
-		return nil
-	}
-
-	raw, _ := (llm.Reasoning{Effort: &effort}).Raw()
-
-	return raw
 }
 
 // investigateTools are the diagnose pass's read-only tools on the workspace,

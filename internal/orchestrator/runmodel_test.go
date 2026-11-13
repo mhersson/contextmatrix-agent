@@ -372,13 +372,13 @@ func TestRunModelNormalizesMaxTurns(t *testing.T) {
 	assert.InDelta(t, 0.01, res.TotalCostUSD, 1e-9)
 }
 
-// TestReasoningRaw pins the reasoningRaw helper: empty effort returns nil so
+// TestReasoningRaw pins the ReasoningRaw helper: empty effort returns nil so
 // cfg.Reasoning is omitted; a non-empty effort marshals to the OpenRouter
 // reasoning object. Non-standard tiers (e.g. "xhigh") pass through verbatim.
 func TestReasoningRaw(t *testing.T) {
-	assert.Nil(t, reasoningRaw(""))
-	assert.JSONEq(t, `{"effort":"high"}`, string(reasoningRaw("high")))
-	assert.JSONEq(t, `{"effort":"xhigh"}`, string(reasoningRaw("xhigh"))) // non-standard tier passes through
+	assert.Nil(t, ReasoningRaw(""))
+	assert.JSONEq(t, `{"effort":"high"}`, string(ReasoningRaw("high")))
+	assert.JSONEq(t, `{"effort":"xhigh"}`, string(ReasoningRaw("xhigh"))) // non-standard tier passes through
 }
 
 func TestPlanTurnCap(t *testing.T) {

@@ -215,15 +215,20 @@ It reads:
 - the card, its subtasks and the siblings from the input, written read-only
   under `/home/user/investigation` as `card.md`, `subtasks/<id>.md` and
   `siblings/<id>.md` (`writeInputs`, `internal/runkind/investigate_inputs.go`).
-  A file whose frontmatter has no card ID is named by its 1-based position.
+  A file whose frontmatter has no valid card ID is named by its 1-based position.
 - the stopped run's whole log section, in place at `/run/cm-input/run.log` on
   the read-only input mount. The prompt names it and tells the model to search
-  it with grep and read it in ranges, never whole.
+  it with grep and read it in ranges, never whole. On the endpoint channel the
+  harness `read` refuses any file over 8 MiB, so a larger run log can only be
+  searched with `grep`, which has no context lines and prints whole matching
+  lines, at most 200. Claude Code's built-in Read pages a large file with
+  offset and limit.
 - the repository at the base branch, and the card's work branch fetched into
   `refs/remotes/origin/`: `cm/<card id in lower case>` when the remote has it,
   else the one `cm/<card id in lower case>-<Jira key>` branch (`workBranch`).
   With no work branch on the remote the investigation runs without one; a
-  failed fetch of one that exists ends the run with cause `error`. Git runs
+  failure to list the remote's branches, or to fetch one that exists, ends the
+  run with cause `error`. Git runs
   with the credential helper, so the token stays out of argv.
 
 Its tools are the diagnose pass's read-only set: `read`, `grep` and `glob` on

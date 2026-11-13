@@ -12,7 +12,6 @@ import (
 	"testing"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
-	"github.com/mhersson/contextmatrix-agent/internal/config"
 	"github.com/mhersson/contextmatrix-agent/internal/orchestrator"
 	"github.com/mhersson/contextmatrix-harness/harness"
 	"github.com/mhersson/contextmatrix-harness/redact"
@@ -189,24 +188,6 @@ func keys(m map[string]json.RawMessage) []string {
 	}
 
 	return out
-}
-
-func TestBaseModel(t *testing.T) {
-	tests := []struct {
-		name string
-		spec Spec
-		want string
-	}{
-		{"payload model", Spec{Model: "vendor/a", DefaultModel: "vendor/b"}, "vendor/a"},
-		{"default model", Spec{DefaultModel: "vendor/b"}, "vendor/b"},
-		{"capable default", Spec{}, config.DefaultCapableModel},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, baseModel(tt.spec))
-		})
-	}
 }
 
 func TestHarnessStop(t *testing.T) {
@@ -445,6 +426,39 @@ func TestInvestigateFetchesTheWorkBranch(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 1, ex.calls)
 	})
+
+	t.Run("list failure", func(t *testing.T) {
+		repoURL := bareRepo(t, nil)
+		spec := investigateSpec(t, repoURL, in)
+		ws := clonedInvestigation(t, spec)
+
+		require.NoError(t, os.RemoveAll(strings.TrimPrefix(repoURL, "file://")))
+
+		ex := &fakeExecutor{res: reported(`{"diagnosis":"d","cause":"model"}`)}
+
+		_, _, err := investigate(t.Context(), ws, spec, in, endpointDeps(ex), discardEmitter())
+		require.Error(t, err)
+		assert.Zero(t, ex.calls)
+	})
+
+	t.Run("fetch failure", func(t *testing.T) {
+		repoURL := bareRepo(t, nil)
+		spec := investigateSpec(t, repoURL, in)
+		ws := clonedInvestigation(t, spec)
+
+		gitCmd(t, strings.TrimPrefix(repoURL, "file://"), "branch", "cm/abc-012", "main")
+
+		// A held ref lock makes the fetch's ref update fail.
+		lock := filepath.Join(ws, ".git", "refs", "remotes", "origin", "cm", "abc-012.lock")
+		require.NoError(t, os.MkdirAll(filepath.Dir(lock), 0o755))
+		require.NoError(t, os.WriteFile(lock, nil, 0o644))
+
+		ex := &fakeExecutor{res: reported(`{"diagnosis":"d","cause":"model"}`)}
+
+		_, _, err := investigate(t.Context(), ws, spec, in, endpointDeps(ex), discardEmitter())
+		require.Error(t, err)
+		assert.Zero(t, ex.calls)
+	})
 }
 
 func gitCmd(t *testing.T, dir string, args ...string) {
@@ -496,9 +510,11 @@ func TestRunMasksAndBoundsTheInvestigation(t *testing.T) {
 		Diagnosis: token + strings.Repeat("d", 40<<10),
 		Cause:     protocol.DiagnosisCard,
 		Fix: &protocol.CardFix{
-			Section: "use " + token,
-			Verify:  &protocol.VerifyConfig{Command: "./ci/verify " + token},
+			Section:        "use " + token,
+			Verify:         &protocol.VerifyConfig{Command: "./ci/verify " + token, Env: []string{"E_" + token}},
+			RetireSubtasks: []string{"R-" + token},
 		},
+		ForwardTo: []string{"F-" + token},
 		Findings: []protocol.FrictionFinding{{
 			Kind: protocol.FindingCode, Title: "t " + token, Text: "x " + token, Evidence: "e " + token,
 		}},

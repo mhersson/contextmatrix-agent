@@ -1900,7 +1900,7 @@ func TestRemoteHeads(t *testing.T) {
 	}
 
 	bare, ws, _ := setupClonedRepo(t)
-	for _, b := range []string{"cm/abc-12", "cm/abc-12-PROJ-7", "other/cm/abc-12"} {
+	for _, b := range []string{"cm/abc-12", "cm/abc-12-PROJ-7", "x/refs/heads/cm/abc-12"} {
 		pushFileToBranch(t, bare, "f.txt", b)
 	}
 

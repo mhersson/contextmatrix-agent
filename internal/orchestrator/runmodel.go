@@ -107,13 +107,13 @@ func (o *run) harnessConfig(model string) harness.Config {
 // reasoning is the run's reasoning object, the one source every model call and
 // review child reads. It makes no replay decision.
 func (o *run) reasoning() json.RawMessage {
-	return reasoningRaw(o.d.Cfg.ReasoningEffort)
+	return ReasoningRaw(o.d.Cfg.ReasoningEffort)
 }
 
-// reasoningRaw renders an effort string to the OpenRouter reasoning object the
+// ReasoningRaw renders an effort string to the OpenRouter reasoning object the
 // harness carries. Returns nil for "" so the field is omitted. The L1 dialect
 // translates this to reasoning_effort for the openai endpoint.
-func reasoningRaw(effort string) json.RawMessage {
+func ReasoningRaw(effort string) json.RawMessage {
 	if effort == "" {
 		return nil
 	}

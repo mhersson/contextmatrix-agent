@@ -185,18 +185,22 @@ func maskResult(r protocol.RunKindResult, mask func(string) string) protocol.Run
 	return r
 }
 
-// maskInvestigate masks every text field of r: the diagnosis, the fix's section
-// and verify command, and each finding's title, text and evidence.
+// maskInvestigate masks every string in r, enums and IDs included: a token the
+// model echoed can land in any of them.
 func maskInvestigate(r protocol.InvestigateResult, mask func(string) string) protocol.InvestigateResult {
 	r.Diagnosis = mask(r.Diagnosis)
+	r.Cause = mask(r.Cause)
+	r.ForwardTo = mapStrings(r.ForwardTo, mask)
 
 	if r.Fix != nil {
 		fix := *r.Fix
 		fix.Section = mask(fix.Section)
+		fix.RetireSubtasks = mapStrings(fix.RetireSubtasks, mask)
 
 		if fix.Verify != nil {
 			v := *fix.Verify
 			v.Command = mask(v.Command)
+			v.Env = mapStrings(v.Env, mask)
 			fix.Verify = &v
 		}
 
@@ -206,6 +210,7 @@ func maskInvestigate(r protocol.InvestigateResult, mask func(string) string) pro
 	if r.Findings != nil {
 		findings := make([]protocol.FrictionFinding, len(r.Findings))
 		for i, f := range r.Findings {
+			f.Kind = mask(f.Kind)
 			f.Title, f.Text, f.Evidence = mask(f.Title), mask(f.Text), mask(f.Evidence)
 			findings[i] = f
 		}
