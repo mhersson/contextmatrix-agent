@@ -222,6 +222,9 @@ type Config struct {
 	// unmounted, as on an agent without run kinds.
 	RunInputs RunInputStore
 
+	// Sections supplies the stopped run's log section an investigate run reads.
+	Sections SectionSource
+
 	// Images lists the node's tagged images for GET /images. Nil disables the
 	// endpoint (500 internal).
 	Images webhookcore.ImageLister
@@ -283,6 +286,7 @@ type Server struct {
 	credentials    CredentialProvisioner
 	llmProxy       LLMProxy
 	runInputs      RunInputStore
+	sections       SectionSource
 
 	launchEnv LaunchEnv
 
@@ -375,6 +379,7 @@ func NewServer(cfg Config) *Server {
 		credentials:     cfg.Credentials,
 		llmProxy:        cfg.LLMProxy,
 		runInputs:       cfg.RunInputs,
+		sections:        cfg.Sections,
 		sessionRegistry: cfg.SessionSecrets,
 		launchEnv:       cfg.LaunchEnv,
 		nextAttempt:     cfg.NextAttempt,

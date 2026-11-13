@@ -102,6 +102,21 @@ kind's input there as `input.json` before the launch. The dir is removed when
 the run exits, before its status goes out, and when its launch fails; serve
 sweeps `.run-inputs` at start (`internal/cli/serve.go`).
 
+## The stopped run's log
+
+For `investigate`, serve finds the stopped run's section in the card's durable
+log by its `run=<id>` header and footer fields and copies all of it into
+`run.log` in the run's input dir, next to `input.json`, before the launch
+(`internal/filelog/section.go`, `stageRunLog` in `internal/webhook/runkind.go`).
+The dir is mounted read-only, so the model reads the section with its grep and
+read tools and never whole. A run still writing has its section copied up to the
+end of the file. A 256 MiB safety cap keeps the first 32 MiB and the last 224
+MiB, with a `==== <n> bytes cut ====` line between them. A missing section fails
+the investigation as `run log not found` with stop cause `error`; any other
+staging error fails it with stop cause `infrastructure`. Nothing launches in
+either case. A run kind writes its own `<card>-<kind>` log, never into the
+card's file.
+
 ## Where it lives
 
 | File                                   | Responsibility                                                         |
@@ -111,6 +126,7 @@ sweeps `.run-inputs` at start (`internal/cli/serve.go`).
 | `internal/webhook/runkind_spec.go`     | The run kind's launch spec and env                                     |
 | `internal/webhook/launch.go`           | One admission and launch path for card runs and run kinds              |
 | `internal/cardid/cardid.go`            | The card ID pattern, shared by `work` and `/run-kind`                  |
+| `internal/filelog/section.go`          | Finds one run's section of a card's log and copies it, capped          |
 | `internal/runinput/runinput.go`        | A run's input dir on disk: create, remove, start-up sweep; mount path  |
 | `internal/executor/tracker.go`         | `RunKey` and the tracker keyed by it                                   |
 | `internal/executor/docker.go`          | Container name and labels, the input mount, the per-line cut           |

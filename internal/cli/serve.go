@@ -225,6 +225,7 @@ func runServe(ctx context.Context, configPath string) error {
 		SessionSecrets:   registry,
 		LLMProxy:         proxy,
 		RunInputs:        inputs,
+		Sections:         files,
 		Images:           exec,
 		ImageListFilters: cfg.ImageListFilters,
 		Build:            buildinfo.Info(),

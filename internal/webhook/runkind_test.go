@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/mhersson/contextmatrix-agent/internal/executor"
+	"github.com/mhersson/contextmatrix-agent/internal/filelog"
 	"github.com/mhersson/contextmatrix-agent/internal/runinput"
 	"github.com/mhersson/contextmatrix-agent/internal/secrets"
 	protocol "github.com/mhersson/contextmatrix-protocol"
@@ -443,4 +445,82 @@ func assertInputFile(t *testing.T, dir string, want any) {
 	require.NoError(t, err)
 
 	assert.JSONEq(t, string(wantJSON), string(got))
+}
+
+// fakeSections is a SectionSource that writes body, or fails with err.
+type fakeSections struct {
+	body []byte
+	err  error
+}
+
+func (f *fakeSections) CopySection(_, _, _ string, w io.Writer) error {
+	if f.err != nil {
+		return f.err
+	}
+
+	_, err := w.Write(f.body)
+
+	return err
+}
+
+func TestInvestigateStagesTheWholeSection(t *testing.T) {
+	h := newHarness(t, 4)
+	h.sections.body = bytes.Repeat([]byte("0123456789abcdef"), 5<<16)
+
+	spec := h.runKindNow(investigatePayload())
+
+	launched := h.exec.launchedSpecs()
+	require.Len(t, launched, 1)
+	require.NotEmpty(t, launched[0].InputHostDir)
+	assert.Equal(t, spec.CorrelationID, launched[0].CorrelationID)
+
+	staged, err := os.ReadFile(filepath.Join(launched[0].InputHostDir, runinput.RunLogFile))
+	require.NoError(t, err)
+	assert.Equal(t, h.sections.body, staged)
+	assert.FileExists(t, filepath.Join(launched[0].InputHostDir, runinput.InputFile))
+
+	info, err := os.Stat(filepath.Join(launched[0].InputHostDir, runinput.RunLogFile))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+}
+
+func TestInvestigateStagingFailures(t *testing.T) {
+	cases := []struct {
+		name  string
+		err   error
+		cause string
+	}{
+		{name: "no section", err: filelog.ErrNoSection, cause: protocol.StopCauseError},
+		{name: "read fails", err: errors.New("disk error"), cause: protocol.StopCauseInfrastructure},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, 4)
+			h.sections.err = tc.err
+
+			spec := h.runKindNow(investigatePayload())
+
+			got := h.reporter.payloads()
+			require.Len(t, got, 1)
+			assert.Equal(t, "failed", got[0].WorkerStatus)
+			assert.Equal(t, protocol.RunKindInvestigate, got[0].Kind)
+			assert.Equal(t, spec.CorrelationID, got[0].RunID)
+			assert.Equal(t, tc.cause, got[0].StopCause)
+			assert.Empty(t, h.exec.launchedSpecs())
+			assert.Empty(t, h.creds.provisionCalls())
+			assert.Empty(t, h.inputDirs(t))
+			assert.Zero(t, h.openAdmissions())
+		})
+	}
+}
+
+func TestCheckStagesNoRunLog(t *testing.T) {
+	h := newHarness(t, 4)
+
+	h.runKindNow(checkPayload())
+
+	launched := h.exec.launchedSpecs()
+	require.Len(t, launched, 1)
+	assert.NoFileExists(t, filepath.Join(launched[0].InputHostDir, runinput.RunLogFile))
 }

@@ -3,12 +3,15 @@ package webhook
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 
 	"github.com/mhersson/contextmatrix-agent/internal/executor"
+	"github.com/mhersson/contextmatrix-agent/internal/filelog"
 	"github.com/mhersson/contextmatrix-agent/internal/runinput"
 	"github.com/mhersson/contextmatrix-backendkit/webhookcore"
 	protocol "github.com/mhersson/contextmatrix-protocol"
@@ -19,6 +22,12 @@ import (
 type RunInputStore interface {
 	Create(runID string) (string, error)
 	Remove(runID string)
+}
+
+// SectionSource copies one run's section of a card's durable log.
+// *filelog.Logger satisfies it.
+type SectionSource interface {
+	CopySection(project, cardID, runID string, w io.Writer) error
 }
 
 // handleRunKind admits a sandboxed run kind for one card: validate, refuse at
@@ -72,7 +81,7 @@ func (s *Server) launchRunKind(ctx context.Context, adm *admission, p protocol.R
 		LLMRequired: usesModel(p.Kind),
 	}
 
-	failure, stopped := s.admitRunKind(ctx, adm, req, runKindInput(p))
+	failure, stopped := s.admitRunKind(ctx, adm, req, p)
 	close(adm.done)
 
 	if failure.failed() || stopped {
@@ -86,22 +95,70 @@ func (s *Server) launchRunKind(ctx context.Context, adm *admission, p protocol.R
 
 // admitRunKind stages the run's input dir and admits the run with it mounted.
 // It returns as admitAndLaunch does.
-func (s *Server) admitRunKind(ctx context.Context, adm *admission, req launchRequest, input any) (launchFailure, bool) {
-	dir, err := s.stageRunInput(req.Spec.CorrelationID, input)
-	if err != nil {
+func (s *Server) admitRunKind(ctx context.Context, adm *admission, req launchRequest, p protocol.RunKindPayload) (launchFailure, bool) {
+	dir, failure := s.stageRunKind(req, p)
+	if failure.failed() {
 		s.logger.Error("run input staging failed",
-			"project", req.Key.Project, "card_id", req.Key.CardID, "kind", req.Key.Kind, "error", err)
+			"project", req.Key.Project, "card_id", req.Key.CardID, "kind", req.Key.Kind, "reason", failure.Message)
 
 		if s.endAdmission(adm) {
 			return launchFailure{}, true
 		}
 
-		return infraFailure("run input staging failed"), false
+		return failure, false
 	}
 
 	req.Spec.InputHostDir = dir
 
 	return s.admitAndLaunch(ctx, adm, req)
+}
+
+// stageRunKind writes the kind's input into the run's input dir, and for
+// investigate the stopped run's log section beside it.
+func (s *Server) stageRunKind(req launchRequest, p protocol.RunKindPayload) (string, launchFailure) {
+	runID := req.Spec.CorrelationID
+
+	dir, err := s.stageRunInput(runID, runKindInput(p))
+	if err != nil {
+		s.logger.Error("stage run input", "run_id", runID, "error", err)
+
+		return "", infraFailure("run input staging failed")
+	}
+
+	if p.Kind != protocol.RunKindInvestigate {
+		return dir, launchFailure{}
+	}
+
+	switch err := s.stageRunLog(dir, p); {
+	case errors.Is(err, filelog.ErrNoSection):
+		return "", launchFailure{Message: "run log not found", Cause: protocol.StopCauseError}
+	case err != nil:
+		s.logger.Error("stage run log", "run_id", runID, "error", err)
+
+		return "", infraFailure("run log staging failed")
+	}
+
+	return dir, launchFailure{}
+}
+
+// stageRunLog streams the stopped run's whole log section into run.log in dir.
+func (s *Server) stageRunLog(dir string, p protocol.RunKindPayload) (err error) {
+	if s.sections == nil {
+		return errors.New("no section source")
+	}
+
+	f, err := os.OpenFile(filepath.Join(dir, runinput.RunLogFile), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create run log: %w", err)
+	}
+
+	defer func() {
+		if cerr := f.Close(); err == nil && cerr != nil {
+			err = fmt.Errorf("close run log: %w", cerr)
+		}
+	}()
+
+	return s.sections.CopySection(p.Project, p.CardID, p.Investigate.RunID, f)
 }
 
 // stageRunInput creates the run's input dir and writes the kind's input into

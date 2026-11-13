@@ -405,6 +405,7 @@ func (e *errWriteCloser) Close() error { return nil }
 
 type harness struct {
 	server    *Server
+	sections  *fakeSections
 	exec      *fakeExecutor
 	tracker   *executor.Tracker
 	reporter  *fakeReporter
@@ -429,6 +430,7 @@ func newHarness(t *testing.T, maxConcurrent int) *harness {
 	proxy := &fakeLLMProxy{}
 	sessions := newFakeSessionSecretRegistry()
 	inputRoot := filepath.Join(t.TempDir(), ".run-inputs")
+	sections := &fakeSections{body: []byte("log\n")}
 	hub := logbridge.NewHub(func(e protocol.LogEntry) string { return e.Project }, nil)
 	images := &fakeImageLister{}
 	draining := &atomic.Bool{}
@@ -446,6 +448,7 @@ func newHarness(t *testing.T, maxConcurrent int) *harness {
 		SessionSecrets: sessions,
 		LLMProxy:       proxy,
 		RunInputs:      runinput.New(inputRoot, quietLogger()),
+		Sections:       sections,
 		LaunchEnv: LaunchEnv{
 			BaseImage:               "base:image",
 			MCPURL:                  "http://cm:8080/mcp",
@@ -468,6 +471,7 @@ func newHarness(t *testing.T, maxConcurrent int) *harness {
 		creds:     creds,
 		proxy:     proxy,
 		sessions:  sessions,
+		sections:  sections,
 		inputRoot: inputRoot,
 		hub:       hub,
 		images:    images,

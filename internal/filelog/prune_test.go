@@ -77,3 +77,14 @@ func TestPruneTreatsGlobMetacharactersInDirLiterally(t *testing.T) {
 	assert.NoFileExists(t, stale)
 	assert.FileExists(t, sibling)
 }
+
+func TestPruneLeavesRunInputsAlone(t *testing.T) {
+	now := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
+	dir := t.TempDir()
+	staged := filepath.Join(dir, ".run-inputs", "run1", "run.log")
+
+	touch(t, staged, now.Add(-40*24*time.Hour))
+
+	assert.Zero(t, New(dir, testLogger()).Prune(now, 30*24*time.Hour))
+	assert.FileExists(t, staged)
+}
