@@ -650,3 +650,15 @@ func TestContainerLogSinkRecordsTheMaskedLine(t *testing.T) {
 
 	assert.NotEqual(t, "verify_parked", outcomes.take("corr-1").Cause)
 }
+
+func TestOnContainerExitReportsTheRecordedOutcome(t *testing.T) {
+	h := newExitHarness(t, t.TempDir())
+	h.files.Begin("proj", "CARD-1", "abcdef012345", "corr-1")
+	h.outcomes.record("corr-1", []byte(`{"kind":"run_outcome","data":{"cause":"verify_parked"}}`))
+
+	h.onExit("proj", "CARD-1", 1, executor.ExitNormal, 1, "corr-1")
+
+	assert.Equal(t, "corr-1", h.rep.payload.RunID)
+	assert.Equal(t, protocol.StopCauseVerifyParked, h.rep.payload.StopCause)
+	assert.Empty(t, h.outcomes.take("corr-1").Cause, "the outcome is forgotten at exit")
+}

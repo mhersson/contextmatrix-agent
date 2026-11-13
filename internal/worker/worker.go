@@ -735,10 +735,9 @@ func runFailureLine(redact func(string) string, err error) string {
 // verify-parked, empty-subtask, split-overflow) onto the shared blocked-park
 // sequence, reporting the caller's stop cause. The genuinely distinguishing
 // step: transition the card to blocked BEFORE releasing the claim, since
-// ownership may be required for the
-// transition. blocked is project-configurable (not every .board.yaml declares
-// in_progress -> blocked), so a failure here is logged and the park still
-// completes - never fatal.
+// ownership may be required for the transition. blocked is
+// project-configurable (not every .board.yaml declares in_progress -> blocked),
+// so a failure here is logged and the park still completes - never fatal.
 func parkBlocked(ctx context.Context, a fsmArgs, err error, cause string) (Result, error) {
 	transitionToBlocked(ctx, a.ops, a.spec.CardID)
 	pushWIP(ctx, a)
