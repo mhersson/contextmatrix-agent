@@ -12,9 +12,12 @@ import (
 )
 
 // clearCMXEnv unsets any CMX_-prefixed variables so validation does not pick
-// up the loader's CMX_ environment layer from a developer's shell or runner.
+// up the loader's CMX_ environment layer from a developer's shell or runner. It
+// also points HOME at a temp dir, since validation creates the default log_dir.
 func clearCMXEnv(t *testing.T) {
 	t.Helper()
+
+	t.Setenv("HOME", t.TempDir())
 
 	for _, kv := range os.Environ() {
 		name, _, ok := strings.Cut(kv, "=")
