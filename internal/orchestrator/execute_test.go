@@ -413,7 +413,7 @@ func TestPOCTestScopeReachesPlannerAndCoderPrompts(t *testing.T) {
 		d := planTestDeps(ops, llmFake)
 		d.Cfg.POC = poc
 
-		require.NoError(t, runPlan(context.Background(), newRun(t.Context(), d, ops.taskContext)))
+		require.NoError(t, runPlanIsolated(context.Background(), newRun(t.Context(), d, ops.taskContext)))
 		require.NotEmpty(t, llmFake.tasks)
 
 		return llmFake.tasks[0]

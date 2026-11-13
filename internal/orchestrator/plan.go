@@ -1015,6 +1015,12 @@ func runPlan(ctx context.Context, o *run) error {
 	d := o.d
 	cfg := d.Cfg
 
+	// Resolve verify first: a toolchain or budget park must land before any
+	// planning model call spends.
+	if _, err := o.ensureVerify(ctx); err != nil {
+		return err
+	}
+
 	// The 'plan decision' model resolves lazily, on the first point the model
 	// certainly runs (a brainstorm turn, the diagnose pass, the solo planner,
 	// or a plan-gate classification), mirroring runReviewHITL's gate-model

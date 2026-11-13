@@ -1368,3 +1368,11 @@ func (r *recordingExec) SpawnSubagents(_ context.Context, req FanoutRequest) ([]
 
 	return out, nil
 }
+
+// runPlanIsolated runs the plan phase with verify pinned to a resolved skip, so
+// tests scripting only the planner's model calls never see a verify proposal.
+func runPlanIsolated(ctx context.Context, o *run) error {
+	isolateVerify(o)
+
+	return runPlan(ctx, o)
+}
