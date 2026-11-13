@@ -376,13 +376,18 @@ type workerDrain struct {
 	sweepTimeout time.Duration
 }
 
-// endSessions sends end_session to each run and returns the runs to wait on:
+// endSessions sends end_session to each card run (a run kind has no session,
+// so it goes straight to the sweep) and returns the runs to wait on:
 // those it reached, and those that exited since the snapshot, whose exit
 // callback may not have claimed their report yet.
 func (d workerDrain) endSessions(runs []*executor.Run) []*executor.Run {
 	ended := make([]*executor.Run, 0, len(runs))
 
 	for _, run := range runs {
+		if run.Kind != "" {
+			continue
+		}
+
 		if err := d.sessions.EndSession(run.Project, run.CardID); err != nil {
 			if !errors.Is(err, executor.ErrNotFound) {
 				d.logger.Warn("could not end session on shutdown; the run will be killed",
@@ -471,6 +476,7 @@ func (d workerDrain) settle(ctx context.Context, run *executor.Run) {
 		err := d.reporter.ReportStatus(ctx, protocol.StatusCallbackPayload{
 			CardID:       run.CardID,
 			Project:      run.Project,
+			Kind:         run.Kind,
 			WorkerStatus: "failed",
 			Message:      "service shutting down",
 			RunID:        run.CorrelationID,

@@ -684,3 +684,74 @@ func TestParkWaitCoversARunThatExitedBeforeItsEndSession(t *testing.T) {
 		assert.Equal(t, []string{"completed"}, h.statuses()["CARD-1"])
 	})
 }
+
+// keyedKiller kills by full run key and removes the run, as the executor does.
+type keyedKiller struct {
+	executor.Executor
+
+	tracker *executor.Tracker
+	mu      sync.Mutex
+	killed  []executor.RunKey
+}
+
+func (k *keyedKiller) Kill(_ context.Context, key executor.RunKey) error {
+	k.mu.Lock()
+	k.killed = append(k.killed, key)
+	k.mu.Unlock()
+
+	k.tracker.Remove(key)
+
+	return nil
+}
+
+type recordingEnder struct{ ended []string }
+
+func (r *recordingEnder) EndSession(_, cardID string) error {
+	r.ended = append(r.ended, cardID)
+
+	return nil
+}
+
+// TestShutdownEndsOnlyCardSessions: a card run gets end_session and is waited
+// on; a run kind gets none and is killed and reported failed with its kind.
+func TestShutdownEndsOnlyCardSessions(t *testing.T) {
+	tracker := executor.NewTracker(4)
+	cardRun := &executor.Run{Project: "proj", CardID: "CARD-1", CorrelationID: "run-card"}
+	kindRun := &executor.Run{Project: "proj", CardID: "CARD-1", Kind: "check", CorrelationID: "run-check"}
+
+	require.True(t, tracker.AddIfUnderLimit(cardRun))
+	require.True(t, tracker.AddIfUnderLimit(kindRun))
+
+	ender := &recordingEnder{}
+	killer := &keyedKiller{tracker: tracker}
+	reporter := &statusRecorder{payloads: map[string][]protocol.StatusCallbackPayload{}}
+	drain := workerDrain{
+		tracker:      tracker,
+		sessions:     ender,
+		exec:         killer,
+		reporter:     reporter,
+		reports:      newExitReports(),
+		revoker:      &recordingRevoker{},
+		logger:       testLogger(),
+		sweepTimeout: 5 * time.Second,
+	}
+
+	waitOn := drain.endSessions([]*executor.Run{cardRun, kindRun})
+
+	assert.Equal(t, []string{"CARD-1"}, ender.ended)
+	assert.Equal(t, []*executor.Run{cardRun}, waitOn)
+
+	drain.sweep([]*executor.Run{kindRun})
+
+	var kinds []string
+
+	for _, p := range reporter.payloads["CARD-1"] {
+		assert.Equal(t, "failed", p.WorkerStatus)
+		assert.Equal(t, protocol.StopCauseShutdown, p.StopCause)
+
+		kinds = append(kinds, p.Kind)
+	}
+
+	assert.ElementsMatch(t, []string{"", "check"}, kinds, "each run is reported with its own kind")
+	assert.Contains(t, killer.killed, kindRun.Key())
+}

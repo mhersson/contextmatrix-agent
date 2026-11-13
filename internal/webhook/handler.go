@@ -1135,7 +1135,9 @@ func (s *Server) handleKill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	k := executor.RunKey{Project: payload.Project, CardID: payload.CardID}
+	// An empty kind is the card run only; the key compares the kind too, so a
+	// run kind's admission and container are never touched by it.
+	k := executor.RunKey{Project: payload.Project, CardID: payload.CardID, Kind: payload.Kind}
 
 	s.stopAdmissions(r.Context(), func(adm executor.RunKey) bool {
 		return adm == k
@@ -1415,6 +1417,7 @@ func (s *Server) handleContainers(w http.ResponseWriter, _ *http.Request) {
 			ContainerID: run.ContainerID,
 			CardID:      run.CardID,
 			Project:     run.Project,
+			Kind:        run.Kind,
 			State:       "running",
 			StartedAt:   run.StartedAt.UTC().Format(time.RFC3339),
 			Tracked:     true,

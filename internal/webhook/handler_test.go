@@ -69,6 +69,7 @@ type fakeExecutor struct {
 	killErr        error
 	launched       []executor.LaunchSpec
 	killed         [][2]string // project, cardID
+	killedKeys     []executor.RunKey
 	stopAllArg     string
 	stopAllResults []executor.StopResult
 
@@ -120,6 +121,7 @@ func (f *fakeExecutor) Kill(_ context.Context, k executor.RunKey) error {
 	defer f.mu.Unlock()
 
 	f.killed = append(f.killed, [2]string{k.Project, k.CardID})
+	f.killedKeys = append(f.killedKeys, k)
 
 	if f.killErr != nil {
 		return f.killErr
@@ -509,11 +511,17 @@ func (h *harness) request(t *testing.T, method, target string, payload any, ts s
 // addRun directly registers a tracked run with a capturable stdin, simulating a
 // container the executor already launched.
 func (h *harness) addRun(cardID, project string) *nopWriteCloser {
+	return h.addRunKind(cardID, project, "")
+}
+
+// addRunKind tracks a run of the given kind; an empty kind is the card run.
+func (h *harness) addRunKind(cardID, project, kind string) *nopWriteCloser {
 	stdin := &nopWriteCloser{}
 	h.tracker.AddIfUnderLimit(&executor.Run{
-		ContainerID: "ctr-" + cardID,
+		ContainerID: "ctr-" + executor.RunKey{CardID: cardID, Kind: kind}.Name(),
 		CardID:      cardID,
 		Project:     project,
+		Kind:        kind,
 		StartedAt:   time.Now(),
 		Stdin:       stdin,
 	})
@@ -1113,6 +1121,42 @@ func TestKill_ExecutorErrorReturns500(t *testing.T) {
 	assert.Equal(t, protocol.CodeInternal, decodeErr(t, w).Code)
 }
 
+func TestKillScopesByKind(t *testing.T) {
+	card := executor.RunKey{Project: "proj", CardID: "PROJ-012"}
+	check := executor.RunKey{Project: "proj", CardID: "PROJ-012", Kind: "check"}
+
+	tests := []struct {
+		name string
+		kind string
+		want executor.RunKey
+	}{
+		{name: "no kind kills the card run only", want: card},
+		{name: "a kind kills that run kind only", kind: "check", want: check},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t, 4)
+			h.addRun("PROJ-012", "proj")
+			h.addRunKind("PROJ-012", "proj", "check")
+
+			w := h.do(t, http.MethodPost, "/kill",
+				protocol.KillPayload{CardID: "PROJ-012", Project: "proj", Kind: tt.kind})
+			require.Equal(t, http.StatusOK, w.Code)
+
+			h.exec.mu.Lock()
+			assert.Equal(t, []executor.RunKey{tt.want}, h.exec.killedKeys)
+			h.exec.mu.Unlock()
+
+			_, cardTracked := h.tracker.Get(card)
+			_, checkTracked := h.tracker.Get(check)
+
+			assert.Equal(t, tt.want != card, cardTracked)
+			assert.Equal(t, tt.want != check, checkTracked)
+		})
+	}
+}
+
 // ---- stop-all ---------------------------------------------------------------
 
 func TestStopAll_ReturnsResults(t *testing.T) {
@@ -1608,6 +1652,25 @@ func TestEndSession_UntrackedReturns200(t *testing.T) {
 }
 
 // ---- containers -------------------------------------------------------------
+
+func TestContainersListsTheKind(t *testing.T) {
+	h := newHarness(t, 4)
+	h.addRun("PROJ-012", "proj")
+	h.addRunKind("PROJ-012", "proj", "check")
+
+	w := h.do(t, http.MethodGet, "/containers", nil)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp protocol.ListContainersResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+
+	kinds := map[string]string{}
+	for _, item := range resp.Containers {
+		kinds[item.ContainerID] = item.Kind
+	}
+
+	assert.Equal(t, map[string]string{"ctr-PROJ-012": "", "ctr-PROJ-012.check": "check"}, kinds)
+}
 
 func TestContainers_ListsTrackedRuns(t *testing.T) {
 	h := newHarness(t, 4)

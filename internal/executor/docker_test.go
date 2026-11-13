@@ -969,6 +969,29 @@ func TestStopAllKillsConcurrently(t *testing.T) {
 	assert.NotContains(t, docker.killed, "ctr-x", "another project's run is left alone")
 }
 
+// TestStopAllStopsRunKinds: a card run and its run kind are both killed.
+func TestStopAllStopsRunKinds(t *testing.T) {
+	docker := &stubDocker{waitFn: failsImmediately}
+	tracker := NewTracker(3)
+	require.True(t, tracker.AddIfUnderLimit(&Run{Project: "proj", CardID: "CARD-1", ContainerID: "ctr-card"}))
+	require.True(t, tracker.AddIfUnderLimit(&Run{Project: "proj", CardID: "CARD-1", Kind: "check", ContainerID: "ctr-check"}))
+
+	e := NewDockerExecutor(Config{Docker: docker, Tracker: tracker, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+
+	results, err := e.StopAll(t.Context(), "proj")
+	require.NoError(t, err)
+	require.Len(t, results, 2)
+
+	for _, r := range results {
+		require.NoError(t, r.Err)
+	}
+
+	docker.mu.Lock()
+	defer docker.mu.Unlock()
+
+	assert.ElementsMatch(t, []string{"ctr-card", "ctr-check"}, docker.killed)
+}
+
 // TestIdleWatchdogSparesARunAwaitingAHuman: a run whose output has gone stale
 // is left alone while it awaits human input, however long that takes, and is
 // killed on the first poll after it stops awaiting.

@@ -342,3 +342,44 @@ func TestLaunchTimeoutFailsAndFreesTheCard(t *testing.T) {
 		assert.Equal(t, "running", statuses[1][1])
 	})
 }
+
+// TestKillStopsOnlyTheMatchingKindAdmission: a kill without a kind leaves a run
+// kind's in-flight admission alone, and a kill with the kind stops it and
+// leaves the card run's.
+func TestKillStopsOnlyTheMatchingKindAdmission(t *testing.T) {
+	card := executor.RunKey{Project: "proj", CardID: "PROJ-012"}
+	check := executor.RunKey{Project: "proj", CardID: "PROJ-012", Kind: "check"}
+
+	tests := []struct {
+		name        string
+		kind        string
+		wantStopped executor.RunKey
+		wantKept    executor.RunKey
+	}{
+		{name: "no kind", wantStopped: card, wantKept: check},
+		{name: "kind", kind: "check", wantStopped: check, wantKept: card},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t, 4)
+			stopped, stoppedCtx := h.server.beginAdmission(context.Background(), tt.wantStopped)
+			kept, keptCtx := h.server.beginAdmission(context.Background(), tt.wantKept)
+
+			go func() {
+				<-stoppedCtx.Done()
+				h.server.endAdmission(stopped)
+				close(stopped.done)
+			}()
+
+			w := h.do(t, http.MethodPost, "/kill",
+				protocol.KillPayload{CardID: "PROJ-012", Project: "proj", Kind: tt.kind})
+			require.Equal(t, http.StatusOK, w.Code)
+
+			require.Error(t, stoppedCtx.Err())
+			require.NoError(t, keptCtx.Err())
+
+			h.server.endAdmission(kept)
+		})
+	}
+}
