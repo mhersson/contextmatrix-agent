@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/orchestrator"
 	"github.com/mhersson/contextmatrix-agent/internal/runoutcome"
@@ -26,10 +25,6 @@ import (
 // progressKind is the event a run kind writes while a long step runs, so its
 // stream never looks idle.
 const progressKind events.Kind = "run_kind_progress"
-
-// progressInterval is how often a long step reports progress. A var so tests
-// can shrink it.
-var progressInterval = time.Minute
 
 // Spec is everything a run kind reads from its container.
 type Spec struct {
@@ -56,23 +51,22 @@ type Spec struct {
 // the run's secrets, then bounded, then fitted to the outcome limit. The LLM
 // client is for model kinds; check takes nil.
 func Run(ctx context.Context, spec Spec, client llm.LLM, emit *events.Emitter) runoutcome.Data {
-	log := slog.Default().With("card_id", spec.CardID, "kind", spec.Kind)
+	log := slog.Default().With("project", spec.Project, "card_id", spec.CardID, "kind", spec.Kind)
 	red := redact.New([]string{spec.GitToken, spec.LLMKey, spec.LLMOAuthToken})
 
-	inv, err := newInvestigateDeps(spec, client, red.Apply)
-	if err != nil {
-		log.Error("run kind could not start", "error", red.Apply(err.Error()))
-
-		return runoutcome.Data{Cause: protocol.StopCauseError}
-	}
-
-	return run(ctx, spec, log, red, emit, deps{check: newCheckDeps(log, red.Apply), investigate: inv})
+	return run(ctx, spec, log, red, emit, deps{
+		check: newCheckDeps(log, red.Apply),
+		investigate: func() (investigateDeps, error) {
+			return newInvestigateDeps(spec, client, red.Apply)
+		},
+	})
 }
 
-// deps are the kinds' effects, one field per kind.
+// deps are the kinds' effects, one field per kind. A kind whose effects can
+// fail to build gets a constructor, called only when that kind runs.
 type deps struct {
 	check       checkDeps
-	investigate investigateDeps
+	investigate func() (investigateDeps, error)
 }
 
 func run(ctx context.Context, spec Spec, log *slog.Logger, red *redact.Redactor, emit *events.Emitter, d deps) runoutcome.Data {
@@ -117,7 +111,12 @@ func runKind(ctx context.Context, spec Spec, ws string, emit *events.Emitter, d 
 			return protocol.RunKindResult{}, nil, fmt.Errorf("decode investigate input: %w", err)
 		}
 
-		r, usage, err := investigate(ctx, ws, spec, in, d.investigate, emit)
+		inv, err := d.investigate()
+		if err != nil {
+			return protocol.RunKindResult{}, nil, err
+		}
+
+		r, usage, err := investigate(ctx, ws, spec, in, inv, emit)
 		if err != nil {
 			return protocol.RunKindResult{}, usage, err
 		}

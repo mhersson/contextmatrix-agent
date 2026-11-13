@@ -18,12 +18,14 @@ import (
 const trialKind events.Kind = "check_trial"
 
 // checkDeps are the check's effects. trial returns its output masked; mask
-// masks anything else the check writes.
+// masks anything else the check writes; progressEvery paces the trial's
+// progress events.
 type checkDeps struct {
-	candidates func(ws string) []orchestrator.VerifyCandidate
-	trial      func(ctx context.Context, ws string, c orchestrator.VerifyCandidate, timeout time.Duration, env []string) (trial, output string, err error)
-	mask       func(string) string
-	absent     func(ctx context.Context, ws string, tokens, declared []string) ([]string, error)
+	candidates    func(ws string) []orchestrator.VerifyCandidate
+	trial         func(ctx context.Context, ws string, c orchestrator.VerifyCandidate, timeout time.Duration, env []string) (trial, output string, err error)
+	mask          func(string) string
+	absent        func(ctx context.Context, ws string, tokens, declared []string) ([]string, error)
+	progressEvery time.Duration
 }
 
 // newCheckDeps wires the check to the gate's detection and trial, logging to
@@ -34,8 +36,9 @@ func newCheckDeps(log *slog.Logger, mask func(string) string) checkDeps {
 		trial: func(ctx context.Context, ws string, c orchestrator.VerifyCandidate, timeout time.Duration, env []string) (string, string, error) {
 			return orchestrator.TrialVerify(ctx, log, ws, c, timeout, env, mask)
 		},
-		mask:   mask,
-		absent: absentFromRepo,
+		mask:          mask,
+		absent:        absentFromRepo,
+		progressEvery: time.Minute,
 	}
 }
 
@@ -93,7 +96,7 @@ func runTrial(
 	emit *events.Emitter,
 ) (string, error) {
 	start := time.Now()
-	stop := orchestrator.StartTicker(ctx, progressInterval, func(context.Context) {
+	stop := orchestrator.StartTicker(ctx, d.progressEvery, func(context.Context) {
 		emit.Emit(progressKind, map[string]any{"step": "trial", "elapsed_seconds": int(time.Since(start).Seconds())})
 	})
 

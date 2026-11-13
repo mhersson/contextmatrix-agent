@@ -97,9 +97,10 @@ func (f *trialFake) trial(_ context.Context, _ string, c orchestrator.VerifyCand
 
 func fakeDeps(cands []orchestrator.VerifyCandidate, f *trialFake) checkDeps {
 	return checkDeps{
-		candidates: func(string) []orchestrator.VerifyCandidate { return cands },
-		trial:      f.trial,
-		mask:       func(s string) string { return s },
+		candidates:    func(string) []orchestrator.VerifyCandidate { return cands },
+		trial:         f.trial,
+		mask:          func(s string) string { return s },
+		progressEvery: time.Minute,
 	}
 }
 
@@ -213,11 +214,6 @@ func (l *eventLog) kinds(t *testing.T) []string {
 }
 
 func TestCheckEmitsProgressDuringTheTrial(t *testing.T) {
-	old := progressInterval
-	progressInterval = 10 * time.Millisecond
-
-	t.Cleanup(func() { progressInterval = old })
-
 	log := &eventLog{kind: string(progressKind), want: 3, ready: make(chan struct{})}
 	f := &trialFake{block: func() {
 		select {
@@ -229,7 +225,10 @@ func TestCheckEmitsProgressDuringTheTrial(t *testing.T) {
 	cands := []orchestrator.VerifyCandidate{{Argv: []string{"./run", "test"}, Display: "./run test"}}
 	in := protocol.CheckInput{Verify: &protocol.VerifyConfig{Command: "./run test"}}
 
-	_, err := check(context.Background(), t.TempDir(), in, fakeDeps(cands, f), events.NewEmitter(io.Discard, log))
+	d := fakeDeps(cands, f)
+	d.progressEvery = 10 * time.Millisecond
+
+	_, err := check(context.Background(), t.TempDir(), in, d, events.NewEmitter(io.Discard, log))
 	require.NoError(t, err)
 
 	kinds := log.kinds(t)

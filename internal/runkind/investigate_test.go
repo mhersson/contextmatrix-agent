@@ -278,6 +278,11 @@ func endpointDeps(ex *fakeExecutor) investigateDeps {
 	return investigateDeps{executor: ex, client: &fakeLLM{}, redact: func(s string) string { return s }}
 }
 
+// built is a deps constructor that returns d.
+func built(d investigateDeps) func() (investigateDeps, error) {
+	return func() (investigateDeps, error) { return d, nil }
+}
+
 func resolvedDirs(t *testing.T, dirs ...string) []string {
 	t.Helper()
 
@@ -492,7 +497,7 @@ func TestInvestigateMapsHarnessStops(t *testing.T) {
 			spec := investigateSpec(t, repoURL, protocol.InvestigateInput{Card: "card\n"})
 			ex := &fakeExecutor{res: tt.res, err: tt.err}
 
-			d := run(t.Context(), spec, slog.Default(), redact.New(nil), discardEmitter(), deps{investigate: endpointDeps(ex)})
+			d := run(t.Context(), spec, slog.Default(), redact.New(nil), discardEmitter(), deps{investigate: built(endpointDeps(ex))})
 			assert.Equal(t, tt.want, d.Cause)
 			assert.Nil(t, d.Result)
 			assert.Len(t, d.Usage, 1, "the terminal status carries the usage")
@@ -525,7 +530,7 @@ func TestRunMasksAndBoundsTheInvestigation(t *testing.T) {
 	ex := &fakeExecutor{res: reported(string(args))}
 	red := redact.New([]string{token})
 
-	d := run(t.Context(), spec, slog.Default(), red, discardEmitter(), deps{investigate: endpointDeps(ex)})
+	d := run(t.Context(), spec, slog.Default(), red, discardEmitter(), deps{investigate: built(endpointDeps(ex))})
 	require.Equal(t, protocol.StopCauseDone, d.Cause)
 	require.NotNil(t, d.Result)
 	require.NotNil(t, d.Result.Investigate)

@@ -100,6 +100,8 @@ func checkSpec(t *testing.T, repoURL, input string) Spec {
 
 func TestRunCheckAgainstALocalRepo(t *testing.T) {
 	spec := checkSpec(t, bareRepo(t, nil), `{}`)
+	// Claude Code without a token: a check never builds model access.
+	spec.LLMType = protocol.LLMEndpointTypeClaudeCode
 
 	d := Run(context.Background(), spec, nil, discardEmitter())
 	require.Equal(t, protocol.StopCauseDone, d.Cause)
@@ -113,20 +115,26 @@ func TestRunCheckAgainstALocalRepo(t *testing.T) {
 func TestRunEndsInError(t *testing.T) {
 	repoURL := bareRepo(t, nil)
 
+	checking := func(t *testing.T) Spec { return checkSpec(t, repoURL, `{}`) }
+	investigating := func(t *testing.T) Spec {
+		return investigateSpec(t, repoURL, protocol.InvestigateInput{Card: "card\n"})
+	}
+
 	tests := []struct {
 		name string
+		spec func(*testing.T) Spec
 		edit func(*Spec)
 	}{
-		{"missing repo", func(s *Spec) { s.RepoURL = "file://" + filepath.Join(t.TempDir(), "nope.git") }},
-		{"missing branch", func(s *Spec) { s.BaseBranch = "no-such-branch" }},
-		{"bad input", func(s *Spec) { s.Input = []byte(`{"verify":`) }},
-		{"unknown kind", func(s *Spec) { s.Kind = "unknown" }},
-		{"claude code without a token", func(s *Spec) { s.LLMType = protocol.LLMEndpointTypeClaudeCode }},
+		{"missing repo", checking, func(s *Spec) { s.RepoURL = "file://" + filepath.Join(t.TempDir(), "nope.git") }},
+		{"missing branch", checking, func(s *Spec) { s.BaseBranch = "no-such-branch" }},
+		{"bad input", checking, func(s *Spec) { s.Input = []byte(`{"verify":`) }},
+		{"unknown kind", checking, func(s *Spec) { s.Kind = "unknown" }},
+		{"claude code without a token", investigating, func(s *Spec) { s.LLMType = protocol.LLMEndpointTypeClaudeCode }},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			spec := checkSpec(t, repoURL, `{}`)
+			spec := tt.spec(t)
 			tt.edit(&spec)
 
 			d := Run(context.Background(), spec, nil, discardEmitter())
