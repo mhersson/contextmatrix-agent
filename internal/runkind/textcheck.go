@@ -14,40 +14,88 @@ import (
 const urlTrim = ".,;:)]}'\"`"
 
 var (
-	urlPattern  = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://[^\s<>]+`)
-	spanPattern = regexp.MustCompile("`([^`\n]+)`")
-	labelRe     = regexp.MustCompile(`^[A-Za-z0-9-]+$`)
-	letters     = regexp.MustCompile(`^[A-Za-z]+$`)
+	urlPattern   = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://[^\s<>]+`)
+	spanPattern  = regexp.MustCompile("`{1,2}([^`\n]+)`{1,2}")
+	fieldPattern = regexp.MustCompile(`\S+`)
+	labelRe      = regexp.MustCompile(`^[A-Za-z0-9-]+$`)
+	letters      = regexp.MustCompile(`^[A-Za-z]+$`)
 )
 
 // textTokens returns the URLs, hostnames and commands text mentions, in
-// first-seen order within each group, without duplicates.
+// first-seen order, without duplicates (hostnames compare case-insensitively).
 func textTokens(text string) []string {
+	var found []positioned
+
+	found = append(found, urlTokens(text)...)
+	found = append(found, hostTokens(text)...)
+	found = append(found, commandTokens(text)...)
+
+	slices.SortStableFunc(found, func(a, b positioned) int { return a.pos - b.pos })
+
 	var out []string
 
-	add := func(tok string) {
-		if tok != "" && !slices.Contains(out, tok) {
-			out = append(out, tok)
+	seen := map[string]bool{}
+
+	for _, f := range found {
+		key := f.tok
+		if isHostname(key) {
+			key = strings.ToLower(key)
 		}
+
+		if f.tok == "" || seen[key] {
+			continue
+		}
+
+		seen[key] = true
+
+		out = append(out, f.tok)
 	}
 
-	for _, m := range urlPattern.FindAllString(text, -1) {
-		u := strings.TrimRight(m, urlTrim)
-		add(u)
+	return out
+}
+
+// positioned is a token and its byte offset in the text.
+type positioned struct {
+	pos int
+	tok string
+}
+
+// urlTokens returns each URL and its host.
+func urlTokens(text string) []positioned {
+	var out []positioned
+
+	for _, loc := range urlPattern.FindAllStringIndex(text, -1) {
+		u := strings.TrimRight(text[loc[0]:loc[1]], urlTrim)
+		out = append(out, positioned{loc[0], u})
 
 		if parsed, err := url.Parse(u); err == nil {
-			add(parsed.Hostname())
+			out = append(out, positioned{loc[0], parsed.Hostname()})
 		}
 	}
 
-	for _, f := range strings.Fields(urlPattern.ReplaceAllString(text, " ")) {
-		if h := strings.Trim(f, urlTrim); isHostname(h) {
-			add(h)
-		}
-	}
+	return out
+}
 
-	for _, c := range commandTokens(text) {
-		add(c)
+// hostTokens returns the bare hostnames outside URLs, also when written with a
+// user@ prefix, a port or a path.
+func hostTokens(text string) []positioned {
+	blanked := urlPattern.ReplaceAllStringFunc(text, func(m string) string { return strings.Repeat(" ", len(m)) })
+
+	var out []positioned
+
+	for _, loc := range fieldPattern.FindAllStringIndex(blanked, -1) {
+		f := strings.Trim(blanked[loc[0]:loc[1]], urlTrim+"([{<")
+		if i := strings.Index(f, "@"); i >= 0 {
+			f = f[i+1:]
+		}
+
+		if i := strings.IndexAny(f, ":/"); i >= 0 {
+			f = f[:i]
+		}
+
+		if isHostname(f) {
+			out = append(out, positioned{loc[0], f})
+		}
 	}
 
 	return out
@@ -66,28 +114,27 @@ func isHostname(s string) bool {
 
 // commandTokens returns each inline code span and each non-empty line of a
 // fenced block, trimmed, without a leading "$ ".
-func commandTokens(text string) []string {
-	var out []string
+func commandTokens(text string) []positioned {
+	var out []positioned
 
 	fenced := false
+	offset := 0
 
 	for line := range strings.Lines(text) {
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "```") {
+
+		switch {
+		case strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~"):
 			fenced = !fenced
-
-			continue
+		case fenced:
+			out = append(out, positioned{offset, cleanCommand(trimmed)})
+		default:
+			for _, m := range spanPattern.FindAllStringSubmatchIndex(line, -1) {
+				out = append(out, positioned{offset + m[0], cleanCommand(line[m[2]:m[3]])})
+			}
 		}
 
-		if fenced {
-			out = append(out, cleanCommand(trimmed))
-
-			continue
-		}
-
-		for _, m := range spanPattern.FindAllStringSubmatch(line, -1) {
-			out = append(out, cleanCommand(m[1]))
-		}
+		offset += len(line)
 	}
 
 	return out
@@ -101,10 +148,16 @@ func cleanCommand(s string) string {
 // in tracked content at HEAD, nor in a tracked path. Hostnames match
 // case-insensitively. Git runs in ws, with fixed strings and no shell.
 func absentFromRepo(ctx context.Context, ws string, tokens, declared []string) ([]string, error) {
-	paths, err := gitOutput(ctx, ws, "ls-files")
+	//nolint:gosec // G204: fixed git arguments
+	list := exec.CommandContext(ctx, "git", "ls-tree", "-r", "--name-only", "-z", "HEAD")
+	list.Dir = ws
+
+	out, err := list.Output()
 	if err != nil {
 		return nil, fmt.Errorf("list tracked paths: %w", err)
 	}
+
+	paths := string(out)
 
 	var absent []string
 
@@ -151,17 +204,4 @@ func trackedContains(ctx context.Context, ws, tok string) (bool, error) {
 	}
 
 	return false, fmt.Errorf("git grep: %w", err)
-}
-
-func gitOutput(ctx context.Context, ws string, args ...string) (string, error) {
-	//nolint:gosec // G204: fixed git subcommand and arguments
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = ws
-
-	out, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("git %s: %w", args[0], err)
-	}
-
-	return string(out), nil
 }

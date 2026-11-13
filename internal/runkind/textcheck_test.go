@@ -26,6 +26,11 @@ func TestTextTokens(t *testing.T) {
 		{"a bare host", "call api.internal.example directly", []string{"api.internal.example"}},
 		{"duplicates collapse", "`./x` and `./x` again", []string{"./x"}},
 		{"a url in a span", "use `https://a.example.com/p` now", []string{"https://a.example.com/p", "a.example.com"}},
+		{"first-seen order across kinds", "run `./run lint` against api.example.com then https://b.example.org", []string{"./run lint", "api.example.com", "https://b.example.org", "b.example.org"}},
+		{"a host with a port, a path or a user", "api.example.com:8080 and api.example.com/x and git@git.example.com:org/repo", []string{"api.example.com", "git.example.com"}},
+		{"a double-backtick span and a tilde fence", "``./a b`` then\n~~~\n./c\n~~~", []string{"./a b", "./c"}},
+		{"hosts dedupe case-insensitively", "Api.Example.com and api.example.com", []string{"Api.Example.com"}},
+		{"a markdown link", "[x](https://a.example.org/p)", []string{"https://a.example.org/p", "a.example.org"}},
 	}
 
 	for _, tt := range cases {
