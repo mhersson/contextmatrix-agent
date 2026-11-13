@@ -52,57 +52,79 @@ type Spec struct {
 }
 
 // Run clones spec's base branch, runs its kind and returns the outcome: the
-// cause, and on done the result masked with the run's secrets and then bounded.
-// The LLM client is for model kinds; check takes nil.
-func Run(ctx context.Context, spec Spec, _ llm.LLM, emit *events.Emitter) runoutcome.Data {
+// cause, the model usage of a model kind, and on done the result masked with
+// the run's secrets, then bounded, then fitted to the outcome limit. The LLM
+// client is for model kinds; check takes nil.
+func Run(ctx context.Context, spec Spec, client llm.LLM, emit *events.Emitter) runoutcome.Data {
 	log := slog.Default().With("card_id", spec.CardID, "kind", spec.Kind)
 	red := redact.New([]string{spec.GitToken, spec.LLMKey, spec.LLMOAuthToken})
 
-	return run(ctx, spec, log, red, emit, deps{check: newCheckDeps(log, red.Apply)})
+	inv, err := newInvestigateDeps(spec, client, red.Apply)
+	if err != nil {
+		log.Error("run kind could not start", "error", red.Apply(err.Error()))
+
+		return runoutcome.Data{Cause: protocol.StopCauseError}
+	}
+
+	return run(ctx, spec, log, red, emit, deps{check: newCheckDeps(log, red.Apply), investigate: inv})
 }
 
 // deps are the kinds' effects, one field per kind.
 type deps struct {
-	check checkDeps
+	check       checkDeps
+	investigate investigateDeps
 }
 
 func run(ctx context.Context, spec Spec, log *slog.Logger, red *redact.Redactor, emit *events.Emitter, d deps) runoutcome.Data {
 	ws := filepath.Join(spec.Workspace, strings.ToLower(spec.CardID))
 
-	res, err := runKind(ctx, spec, ws, emit, d)
+	res, usage, err := runKind(ctx, spec, ws, emit, d)
 	if err != nil {
 		cause := causeOf(err)
 		log.Error("run kind failed", "cause", cause, "error", red.Apply(err.Error()))
 
-		return runoutcome.Data{Cause: cause}
+		return runoutcome.Data{Cause: cause, Usage: usage}
 	}
 
 	res = limitResult(maskResult(res, red.Apply))
 
-	return runoutcome.Data{Cause: protocol.StopCauseDone, Result: &res}
+	return fitOutcome(runoutcome.Data{Cause: protocol.StopCauseDone, Result: &res, Usage: usage}, maxOutcomeBytes)
 }
 
-// runKind is the one place that names the kinds.
-func runKind(ctx context.Context, spec Spec, ws string, emit *events.Emitter, d deps) (protocol.RunKindResult, error) {
+// runKind is the one place that names the kinds. A model kind's usage comes
+// back on every path that ran the model.
+func runKind(ctx context.Context, spec Spec, ws string, emit *events.Emitter, d deps) (protocol.RunKindResult, []protocol.RunUsage, error) {
 	if err := clone(ctx, spec, ws); err != nil {
-		return protocol.RunKindResult{}, err
+		return protocol.RunKindResult{}, nil, err
 	}
 
 	switch spec.Kind {
 	case protocol.RunKindCheck:
 		var in protocol.CheckInput
 		if err := json.Unmarshal(spec.Input, &in); err != nil {
-			return protocol.RunKindResult{}, fmt.Errorf("decode check input: %w", err)
+			return protocol.RunKindResult{}, nil, fmt.Errorf("decode check input: %w", err)
 		}
 
 		r, err := check(ctx, ws, in, d.check, emit)
 		if err != nil {
-			return protocol.RunKindResult{}, err
+			return protocol.RunKindResult{}, nil, err
 		}
 
-		return protocol.RunKindResult{Check: &r}, nil
+		return protocol.RunKindResult{Check: &r}, nil, nil
+	case protocol.RunKindInvestigate:
+		var in protocol.InvestigateInput
+		if err := json.Unmarshal(spec.Input, &in); err != nil {
+			return protocol.RunKindResult{}, nil, fmt.Errorf("decode investigate input: %w", err)
+		}
+
+		r, usage, err := investigate(ctx, ws, spec, in, d.investigate, emit)
+		if err != nil {
+			return protocol.RunKindResult{}, usage, err
+		}
+
+		return protocol.RunKindResult{Investigate: &r}, usage, nil
 	default:
-		return protocol.RunKindResult{}, fmt.Errorf("unknown run kind %q", spec.Kind)
+		return protocol.RunKindResult{}, nil, fmt.Errorf("unknown run kind %q", spec.Kind)
 	}
 }
 
@@ -135,6 +157,14 @@ func causeOf(err error) string {
 		return protocol.StopCauseUsageLimit
 	}
 
+	if _, ok := errors.AsType[*orchestrator.MaxTurnsError](err); ok {
+		return protocol.StopCauseMaxTurns
+	}
+
+	if _, ok := errors.AsType[*orchestrator.ContextLimitError](err); ok {
+		return protocol.StopCauseContextLimit
+	}
+
 	return protocol.StopCauseError
 }
 
@@ -145,6 +175,42 @@ func maskResult(r protocol.RunKindResult, mask func(string) string) protocol.Run
 		c.Candidates = mapStrings(c.Candidates, mask)
 		c.AbsentFromRepo = mapStrings(c.AbsentFromRepo, mask)
 		r.Check = &c
+	}
+
+	if r.Investigate != nil {
+		i := maskInvestigate(*r.Investigate, mask)
+		r.Investigate = &i
+	}
+
+	return r
+}
+
+// maskInvestigate masks every text field of r: the diagnosis, the fix's section
+// and verify command, and each finding's title, text and evidence.
+func maskInvestigate(r protocol.InvestigateResult, mask func(string) string) protocol.InvestigateResult {
+	r.Diagnosis = mask(r.Diagnosis)
+
+	if r.Fix != nil {
+		fix := *r.Fix
+		fix.Section = mask(fix.Section)
+
+		if fix.Verify != nil {
+			v := *fix.Verify
+			v.Command = mask(v.Command)
+			fix.Verify = &v
+		}
+
+		r.Fix = &fix
+	}
+
+	if r.Findings != nil {
+		findings := make([]protocol.FrictionFinding, len(r.Findings))
+		for i, f := range r.Findings {
+			f.Title, f.Text, f.Evidence = mask(f.Title), mask(f.Text), mask(f.Evidence)
+			findings[i] = f
+		}
+
+		r.Findings = findings
 	}
 
 	return r

@@ -128,11 +128,13 @@ it builds the LLM client as a card run does; a `check` gets none. `runkind.Run`
 (`internal/runkind/runkind.go`) clones the base branch, or the remote default
 when none is set, into `/home/user/workspace/<card id in lower case>`, decodes
 the input and runs the kind. Its stdout ends with one `run_outcome` line: the
-cause, and on `done` the result. Before it is written, the result is masked
-with the secrets the worker holds (the git token, the LLM key and the
-subscription token), then bounded to the size limits below. A run that cannot
-read its env or files, clone, or decode its input ends with cause `error` and
-no result. Any cause but `done` exits non-zero.
+cause, a model kind's usage rows, and on `done` the result. Before it is
+written, the result is masked with the secrets the worker holds (the git token,
+the LLM key and the subscription token), then bounded to the size limits below,
+then fitted to the outcome limit (`fitOutcome`, `internal/runkind/limits.go`).
+A run that cannot read its env or files, build its model executor, clone, or
+decode its input ends with cause `error` and no result. Any cause but `done`
+exits non-zero.
 
 ## Check
 
@@ -202,6 +204,75 @@ hostnames), or is contained in a tracked path. Git runs in the clone with fixed
 strings and no shell. ContextMatrix subtracts the card's own text from
 `absent_from_repo` and decides the verdict.
 
+## Investigate
+
+`investigate` runs one model pass that diagnoses why a card's autonomous run
+stopped (`investigate`, `internal/runkind/investigate.go`). It never writes the
+card: its result, the fix included, is a proposal ContextMatrix vets.
+
+It reads:
+
+- the card, its subtasks and the siblings from the input, written read-only
+  under `/home/user/investigation` as `card.md`, `subtasks/<id>.md` and
+  `siblings/<id>.md` (`writeInputs`, `internal/runkind/investigate_inputs.go`).
+  A file whose frontmatter has no card ID is named by its 1-based position.
+- the stopped run's whole log section, in place at `/run/cm-input/run.log` on
+  the read-only input mount. The prompt names it and tells the model to search
+  it with grep and read it in ranges, never whole.
+- the repository at the base branch, and the card's work branch fetched into
+  `refs/remotes/origin/`: `cm/<card id in lower case>` when the remote has it,
+  else the one `cm/<card id in lower case>-<Jira key>` branch (`workBranch`).
+  With no work branch on the remote the investigation runs without one; a
+  failed fetch of one that exists ends the run with cause `error`. Git runs
+  with the credential helper, so the token stays out of argv.
+
+Its tools are the diagnose pass's read-only set: `read`, `grep` and `glob` on
+the workspace, with the inputs dir and the run log's dir as extra read-only
+roots, and the read-only `git` tool (status, diff, log, show, branch), plus the
+terminal `report_investigation` tool. There is no bash, edit or write. On
+Claude Code, `read` is the built-in Read, which is not confined to those roots,
+and the others are bridged.
+
+The model is the diagnose pass's decision floor (`orchestrator.DecisionModel`):
+the reviewer pick at the complex tier from the payload's selection when it
+meets its bar, else the base model: `CM_MODEL`, else `CMX_DEFAULT_MODEL`, else
+the built-in capable default. The executor is built as a card run's is: the
+harness over the metered client on an endpoint, the `claude` binary with the
+endpoint's effort on Claude Code. The run has an 80-turn cap. On an endpoint it
+also gets a wrap-up nudge 5 turns before the cap, one grace call for the
+report, the context window from the selection and the reasoning effort knob.
+The output of the harness tools, bridged ones included, is masked with the
+run's secrets and capped by the tool output knob.
+
+The result is `report_investigation`'s arguments, a
+`protocol.InvestigateResult`: the `diagnosis`, one `cause` (`card`, `model`,
+`environment` or `ecosystem`), an optional `fix` (a `## Sentinel` section,
+verify fields, subtasks to retire), `forward_to` (sibling IDs the fix suits)
+and friction `findings`. The tool refuses arguments that do not decode, so the
+model can correct them. A run that ends without the call ends with cause
+`error`; one stopped at the turn cap, the context limit or the cost ceiling
+ends with `max_turns`, `context_limit` or `budget_exceeded`. Its usage row goes
+back on every path that ran the model. The fix and `forward_to` pass through as
+reported: ContextMatrix vets the fix and treats `card` without a fix, or a fix
+with another cause, as no fix.
+
+The limits, applied after masking (`limitInvestigate` and `fitOutcome`,
+`internal/runkind/limits.go`):
+
+| Item                       | Limit         | Over the limit                            |
+| -------------------------- | ------------- | ----------------------------------------- |
+| `diagnosis`                | 32 KiB        | truncated at a rune boundary              |
+| `fix.section`              | 16 KiB        | the fix is dropped                        |
+| `fix.retire_subtasks`      | 50 IDs        | the fix is dropped                        |
+| `forward_to`               | 50 IDs        | the list is dropped                       |
+| finding `title`, `text`    | 200 B, 16 KiB | the finding is dropped                    |
+| `findings`                 | 50            | the first 50 are kept                     |
+| finding `evidence`         | 4 KiB         | truncated at a rune boundary              |
+| encoded `run_outcome` data | 1000 KiB      | the last finding is dropped until it fits |
+
+The fit leaves room for the event envelope under serve's 1 MiB status limit,
+and the diagnosis and the fix always survive it.
+
 ## Spend
 
 A model run kind has no MCP key, so it cannot report usage to the card.
@@ -223,22 +294,27 @@ rows never reach the card's budget.
 
 ## Where it lives
 
-| File                                   | Responsibility                                                         |
-| -------------------------------------- | ---------------------------------------------------------------------- |
-| `internal/webhook/runkind.go`          | `POST /run-kind`: admission, input staging, the launch                 |
-| `internal/webhook/runkind_validate.go` | Synchronous payload validation                                         |
-| `internal/webhook/runkind_spec.go`     | The run kind's launch spec and env                                     |
-| `internal/webhook/launch.go`           | One admission and launch path for card runs and run kinds              |
-| `internal/cardid/cardid.go`            | The card ID pattern, shared by `work` and `/run-kind`                  |
-| `internal/filelog/section.go`          | Finds one run's section of a card's log and copies it, capped          |
-| `internal/runinput/runinput.go`        | A run's input dir on disk: create, remove, start-up sweep; mount path  |
-| `internal/executor/tracker.go`         | `RunKey` and the tracker keyed by it                                   |
-| `internal/executor/docker.go`          | Container name and labels, the input mount, the per-line cut           |
-| `internal/runoutcome/runoutcome.go`    | The `run_outcome` line, with a run kind's result and usage             |
-| `internal/cli/serve_outcome.go`        | The terminal status and its run-kind rules                             |
-| `internal/cli/serve.go`                | Input store wiring, the exit path, the live stream                     |
-| `internal/cli/runkind.go`              | The worker's run-kind entry: env, secrets and input, the outcome line  |
-| `internal/runkind/runkind.go`          | The spec, the clone, the kind switch, masking and the stop cause       |
-| `internal/runkind/check.go`            | The check kind: candidates, the trial rules, the trial and its events  |
-| `internal/runkind/textcheck.go`        | The text check: token extraction and the base-branch lookup            |
-| `internal/runkind/limits.go`           | The result size limits                                                 |
+| File                                     | Responsibility                                                        |
+| ---------------------------------------- | --------------------------------------------------------------------- |
+| `internal/webhook/runkind.go`            | `POST /run-kind`: admission, input staging, the launch                |
+| `internal/webhook/runkind_validate.go`   | Synchronous payload validation                                        |
+| `internal/webhook/runkind_spec.go`       | The run kind's launch spec and env                                    |
+| `internal/webhook/launch.go`             | One admission and launch path for card runs and run kinds             |
+| `internal/cardid/cardid.go`              | The card ID pattern, shared by `work` and `/run-kind`                 |
+| `internal/filelog/section.go`            | Finds one run's section of a card's log and copies it, capped         |
+| `internal/runinput/runinput.go`          | A run's input dir on disk: create, remove, start-up sweep; mount path |
+| `internal/executor/tracker.go`           | `RunKey` and the tracker keyed by it                                  |
+| `internal/executor/docker.go`            | Container name and labels, the input mount, the per-line cut          |
+| `internal/runoutcome/runoutcome.go`      | The `run_outcome` line, with a run kind's result and usage            |
+| `internal/cli/serve_outcome.go`          | The terminal status and its run-kind rules                            |
+| `internal/cli/serve.go`                  | Input store wiring, the exit path, the live stream                    |
+| `internal/cli/runkind.go`                | The worker's run-kind entry: env, secrets and input, the outcome line |
+| `internal/runkind/runkind.go`            | The spec, the clone, the kind switch, masking and the stop cause      |
+| `internal/runkind/check.go`              | The check kind: candidates, the trial rules, the trial and its events |
+| `internal/runkind/textcheck.go`          | The text check: token extraction and the base-branch lookup           |
+| `internal/runkind/investigate.go`        | The investigate kind: model access, the work branch, the model run    |
+| `internal/runkind/investigate_inputs.go` | The card files written as read-only inputs                            |
+| `internal/runkind/investigate_tool.go`   | The `report_investigation` terminal tool and the report's decoding    |
+| `internal/runkind/investigate_prompt.go` | The investigation's task prompt                                       |
+| `internal/runkind/spend.go`              | The metered client and the usage rows                                 |
+| `internal/runkind/limits.go`             | The result size limits and the outcome fit                            |

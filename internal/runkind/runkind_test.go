@@ -31,6 +31,8 @@ func TestCauseOf(t *testing.T) {
 		{"nil", nil, protocol.StopCauseDone},
 		{"budget", fmt.Errorf("model call: %w", &orchestrator.BudgetExceededError{}), protocol.StopCauseBudgetExceeded},
 		{"usage limit", &orchestrator.UsageLimitError{}, protocol.StopCauseUsageLimit},
+		{"turn cap", fmt.Errorf("run: %w", &orchestrator.MaxTurnsError{}), protocol.StopCauseMaxTurns},
+		{"context limit", &orchestrator.ContextLimitError{}, protocol.StopCauseContextLimit},
 		{"anything else", errors.New("x"), protocol.StopCauseError},
 	}
 
@@ -119,6 +121,7 @@ func TestRunEndsInError(t *testing.T) {
 		{"missing branch", func(s *Spec) { s.BaseBranch = "no-such-branch" }},
 		{"bad input", func(s *Spec) { s.Input = []byte(`{"verify":`) }},
 		{"unknown kind", func(s *Spec) { s.Kind = "unknown" }},
+		{"claude code without a token", func(s *Spec) { s.LLMType = protocol.LLMEndpointTypeClaudeCode }},
 	}
 
 	for _, tt := range tests {
