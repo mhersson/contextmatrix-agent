@@ -122,7 +122,9 @@ card's file.
 `work` enters the run-kind path when `CM_RUN_KIND` is set (`runKindMain`,
 `internal/cli/runkind.go`). It needs no `CM_MCP_URL` or `CM_MCP_API_KEY`,
 reads its git token and LLM values from `/run/cm-secrets/env` as a card run
-does, and reads its input from `/run/cm-input/input.json`. `runkind.Run`
+does, and reads its input from `/run/cm-input/input.json`. When the secrets
+file carries LLM access, which serve stages only for a kind that needs a model,
+it builds the LLM client as a card run does; a `check` gets none. `runkind.Run`
 (`internal/runkind/runkind.go`) clones the base branch, or the remote default
 when none is set, into `/home/user/workspace/<card id in lower case>`, decodes
 the input and runs the kind. Its stdout ends with one `run_outcome` line: the

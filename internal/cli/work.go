@@ -112,14 +112,7 @@ func newWorkCmd() *cobra.Command {
 				return finishWork(emit, worker.Result{}, err)
 			}
 
-			clientOpts := []llm.Option{llm.WithRetry(llm.DefaultRetryPolicy()), llm.WithDialect(dialectFromType(spec.LLMType))}
-			clientOpts = append(clientOpts, caLLMOpts...)
-
-			if spec.LLMBaseURL != "" {
-				clientOpts = append(clientOpts, llm.WithBaseURL(spec.LLMBaseURL))
-			}
-
-			client := llm.NewClient(spec.LLMKey, clientOpts...)
+			client := newLLMClient(spec.LLMKey, spec.LLMBaseURL, spec.LLMType, caLLMOpts)
 
 			ops, err := cmclient.New(cmd.Context(), spec.MCPURL, spec.MCPAPIKey, "cmx-agent-"+strings.ToLower(spec.CardID), caMCPOpts...)
 			if err != nil {
@@ -562,6 +555,19 @@ func caInjections(certPath string) ([]llm.Option, []cmclient.Option, error) {
 	httpClient := &http.Client{Transport: transport.Clone()}
 
 	return []llm.Option{llm.WithHTTPClient(httpClient)}, []cmclient.Option{cmclient.WithBaseTransport(transport)}, nil
+}
+
+// newLLMClient builds a run's LLM client: retries, the type's dialect, the
+// extra-CA options and, when set, the base URL.
+func newLLMClient(key, baseURL, llmType string, caOpts []llm.Option) *llm.Client {
+	opts := []llm.Option{llm.WithRetry(llm.DefaultRetryPolicy()), llm.WithDialect(dialectFromType(llmType))}
+	opts = append(opts, caOpts...)
+
+	if baseURL != "" {
+		opts = append(opts, llm.WithBaseURL(baseURL))
+	}
+
+	return llm.NewClient(key, opts...)
 }
 
 // dialectFromType maps the LLM_TYPE string to the harness dialect. Defaults to

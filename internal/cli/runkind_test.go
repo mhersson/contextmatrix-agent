@@ -9,6 +9,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/runinput"
 	"github.com/mhersson/contextmatrix-agent/internal/runkind"
 	"github.com/mhersson/contextmatrix-agent/internal/runoutcome"
+	"github.com/mhersson/contextmatrix-agent/internal/secrets"
 	protocol "github.com/mhersson/contextmatrix-protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -74,20 +75,31 @@ func TestRunKindSpecFromEnvRejects(t *testing.T) {
 	}
 }
 
-func TestReadRunKindFiles(t *testing.T) {
-	dir := t.TempDir()
-	secretsPath := filepath.Join(dir, "env")
-	inputPath := filepath.Join(dir, "input.json")
+// openSecrets writes content as a secrets env file and opens it.
+func openSecrets(t *testing.T, content string) *secrets.Source {
+	t.Helper()
 
-	require.NoError(t, os.WriteFile(secretsPath, []byte(
-		"CM_GIT_TOKEN=ghs_tok\nLLM_API_KEY=file-key\nLLM_TYPE=claude_code\nLLM_OAUTH_TOKEN=file-oauth\nLLM_EFFORT=high\n"), 0o600))
+	path := filepath.Join(t.TempDir(), "env")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+
+	src, err := secrets.Open(path)
+	require.NoError(t, err)
+
+	return src
+}
+
+func TestReadRunKindFiles(t *testing.T) {
+	inputPath := filepath.Join(t.TempDir(), "input.json")
 	require.NoError(t, os.WriteFile(inputPath, []byte(`{"current_command":"./ci/verify"}`), 0o600))
+
+	src := openSecrets(t,
+		"CM_GIT_TOKEN=ghs_tok\nLLM_API_KEY=file-key\nLLM_TYPE=claude_code\nLLM_OAUTH_TOKEN=file-oauth\nLLM_EFFORT=high\n")
 
 	t.Setenv("LLM_API_KEY", "env-key")
 	t.Setenv("LLM_OAUTH_TOKEN", "env-oauth")
 	t.Setenv("CM_GIT_TOKEN", "env-tok")
 
-	spec, err := readRunKindFiles(runkind.Spec{SecretsPath: secretsPath}, inputPath)
+	spec, err := readRunKindFiles(runkind.Spec{}, src, inputPath)
 	require.NoError(t, err)
 
 	assert.Equal(t, "ghs_tok", spec.GitToken, "the git token is file-only")
@@ -97,11 +109,61 @@ func TestReadRunKindFiles(t *testing.T) {
 	assert.Equal(t, "high", spec.LLMEffort)
 	assert.JSONEq(t, `{"current_command":"./ci/verify"}`, string(spec.Input))
 
-	_, err = readRunKindFiles(runkind.Spec{SecretsPath: secretsPath}, filepath.Join(dir, "missing.json"))
+	_, err = readRunKindFiles(runkind.Spec{}, src, filepath.Join(t.TempDir(), "missing.json"))
 	require.Error(t, err)
+}
 
-	_, err = readRunKindFiles(runkind.Spec{SecretsPath: filepath.Join(dir, "missing-env")}, inputPath)
+func TestRunKindClientOnlyWithStagedLLMAccess(t *testing.T) {
+	tests := []struct {
+		name    string
+		secrets string
+		env     string
+		want    bool
+	}{
+		{"an endpoint", "CM_GIT_TOKEN=ghs_tok\nLLM_API_KEY=proxy-tok\nLLM_BASE_URL=http://proxy/llm\nLLM_TYPE=openai\n", "", true},
+		{"a subscription", "CM_GIT_TOKEN=ghs_tok\nLLM_TYPE=claude_code\nLLM_OAUTH_TOKEN=oauth-tok\n", "", true},
+		{"nothing staged", "CM_GIT_TOKEN=ghs_tok\n", "", false},
+		{"an env key alone is not staged", "CM_GIT_TOKEN=ghs_tok\n", "operator-key", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.env != "" {
+				t.Setenv("LLM_API_KEY", tt.env)
+			}
+
+			src := openSecrets(t, tt.secrets)
+
+			spec, err := readRunKindFiles(runkind.Spec{}, src, writeInput(t))
+			require.NoError(t, err)
+
+			client, err := runKindClient(spec, src)
+			require.NoError(t, err)
+
+			if tt.want {
+				assert.NotNil(t, client)
+			} else {
+				assert.Nil(t, client)
+			}
+		})
+	}
+}
+
+func TestRunKindClientFailsOnABadCA(t *testing.T) {
+	src := openSecrets(t, "LLM_TYPE=openai\nLLM_API_KEY=proxy-tok\n")
+
+	_, err := runKindClient(runkind.Spec{CACertFile: filepath.Join(t.TempDir(), "missing.pem")}, src)
 	require.Error(t, err)
+}
+
+// writeInput writes an empty check input and returns its path.
+func writeInput(t *testing.T) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "input.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{}`), 0o600))
+
+	return path
 }
 
 func TestWorkEntersTheRunKindPath(t *testing.T) {

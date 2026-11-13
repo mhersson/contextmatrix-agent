@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -15,6 +14,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/runoutcome"
 	"github.com/mhersson/contextmatrix-agent/internal/secrets"
 	"github.com/mhersson/contextmatrix-harness/events"
+	"github.com/mhersson/contextmatrix-harness/llm"
 	protocol "github.com/mhersson/contextmatrix-protocol"
 	"github.com/spf13/cobra"
 )
@@ -26,11 +26,19 @@ const (
 )
 
 // runKindMain runs one run kind and writes its outcome as the stream's last
-// line. Any cause but done exits non-zero.
+// line. A run that cannot start ends with cause error; any cause but done exits
+// non-zero.
 func runKindMain(cmd *cobra.Command, kind string) error {
 	emit := events.NewEmitter(io.Discard, cmd.OutOrStdout())
+	data := runoutcome.Data{Cause: protocol.StopCauseError}
 
-	data := startRunKind(cmd.Context(), kind, emit)
+	spec, client, err := prepareRunKind(kind, filepath.Join(runinput.MountPath, runinput.InputFile))
+	if err != nil {
+		slog.Error("run kind could not start", "kind", kind, "error", err)
+	} else {
+		data = runkind.Run(cmd.Context(), spec, client, emit)
+	}
+
 	runoutcome.Emit(emit, data)
 
 	if data.Cause != protocol.StopCauseDone {
@@ -40,21 +48,30 @@ func runKindMain(cmd *cobra.Command, kind string) error {
 	return nil
 }
 
-// startRunKind reads the run's spec and files, then runs it. A run that cannot
-// start ends with cause error.
-func startRunKind(ctx context.Context, kind string, emit *events.Emitter) runoutcome.Data {
+// prepareRunKind reads the run's spec, secrets and input, and builds its LLM
+// client when it was given LLM access.
+func prepareRunKind(kind, inputPath string) (runkind.Spec, llm.LLM, error) {
 	spec, err := runKindSpecFromEnv(kind)
-	if err == nil {
-		spec, err = readRunKindFiles(spec, filepath.Join(runinput.MountPath, runinput.InputFile))
-	}
-
 	if err != nil {
-		slog.Error("run kind could not start", "kind", kind, "error", err)
-
-		return runoutcome.Data{Cause: protocol.StopCauseError}
+		return runkind.Spec{}, nil, err
 	}
 
-	return runkind.Run(ctx, spec, nil, emit)
+	src, err := secrets.Open(spec.SecretsPath)
+	if err != nil {
+		return runkind.Spec{}, nil, fmt.Errorf("read secrets: %w", err)
+	}
+
+	spec, err = readRunKindFiles(spec, src, inputPath)
+	if err != nil {
+		return runkind.Spec{}, nil, err
+	}
+
+	client, err := runKindClient(spec, src)
+	if err != nil {
+		return runkind.Spec{}, nil, err
+	}
+
+	return spec, client, nil
 }
 
 // runKindSpecFromEnv builds a run kind's spec from the env serve writes. It
@@ -120,14 +137,9 @@ func runKindSpecFromEnv(kind string) (runkind.Spec, error) {
 	}, nil
 }
 
-// readRunKindFiles fills spec's secrets from its secrets file, read as work
-// reads them, and its input from inputPath.
-func readRunKindFiles(spec runkind.Spec, inputPath string) (runkind.Spec, error) {
-	src, err := secrets.Open(spec.SecretsPath)
-	if err != nil {
-		return spec, fmt.Errorf("read secrets: %w", err)
-	}
-
+// readRunKindFiles fills spec's secrets from src, read as work reads them, and
+// its input from inputPath.
+func readRunKindFiles(spec runkind.Spec, src *secrets.Source, inputPath string) (runkind.Spec, error) {
 	spec.GitToken = src.Get("CM_GIT_TOKEN")
 	spec.LLMKey = resolveLLMValue("LLM_API_KEY", src)
 	spec.LLMBaseURL = resolveLLMValue("LLM_BASE_URL", src)
@@ -143,4 +155,31 @@ func readRunKindFiles(spec runkind.Spec, inputPath string) (runkind.Spec, error)
 	spec.Input = input
 
 	return spec, nil
+}
+
+// runKindClient builds the run's LLM client as work does when serve staged LLM
+// access, which it does exactly for the kinds that need a model; otherwise nil.
+func runKindClient(spec runkind.Spec, src *secrets.Source) (llm.LLM, error) {
+	if !llmStaged(src) {
+		return nil, nil
+	}
+
+	caLLMOpts, _, err := caInjections(spec.CACertFile)
+	if err != nil {
+		return nil, err
+	}
+
+	return newLLMClient(spec.LLMKey, spec.LLMBaseURL, spec.LLMType, caLLMOpts), nil
+}
+
+// llmStaged reports whether the secrets file carries LLM access. Only the
+// file counts: an env value such as a worker_extra_env entry is not staged.
+func llmStaged(src *secrets.Source) bool {
+	for _, k := range []string{"LLM_TYPE", "LLM_BASE_URL", "LLM_API_KEY", "LLM_OAUTH_TOKEN"} {
+		if src.Get(k) != "" {
+			return true
+		}
+	}
+
+	return false
 }
