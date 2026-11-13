@@ -141,11 +141,7 @@ func runKindSpecFromEnv(kind string) (runkind.Spec, error) {
 // its input from inputPath.
 func readRunKindFiles(spec runkind.Spec, src *secrets.Source, inputPath string) (runkind.Spec, error) {
 	spec.GitToken = src.Get("CM_GIT_TOKEN")
-	spec.LLMKey = resolveLLMValue("LLM_API_KEY", src)
-	spec.LLMBaseURL = resolveLLMValue("LLM_BASE_URL", src)
-	spec.LLMType = resolveLLMValue("LLM_TYPE", src)
-	spec.LLMOAuthToken = src.Get("LLM_OAUTH_TOKEN")
-	spec.LLMEffort = src.Get("LLM_EFFORT")
+	spec.LLMKey, spec.LLMBaseURL, spec.LLMType, spec.LLMOAuthToken, spec.LLMEffort = llmValues(src)
 
 	input, err := os.ReadFile(inputPath) //nolint:gosec // G304: the fixed input mount path
 	if err != nil {

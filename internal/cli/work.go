@@ -86,7 +86,7 @@ func newWorkCmd() *cobra.Command {
 			// file-only. The git token is NOT resolved from env - the credential
 			// helper re-reads CM_GIT_TOKEN from the file per git op so host-side
 			// rotation reaches a long-running worker.
-			spec = readLLMSecrets(spec, src)
+			spec.LLMKey, spec.LLMBaseURL, spec.LLMType, spec.LLMOAuthToken, spec.LLMEffort = llmValues(src)
 			spec.GitToken = src.Get("CM_GIT_TOKEN")
 
 			// Replay never applies to claude_code runs.
@@ -463,18 +463,16 @@ func selectionFromEnv(cardID, project string) *protocol.SelectionContext {
 	return &sc
 }
 
-// readLLMSecrets fills the spec's LLM values. The OAuth token is file-only:
-// only CM provisions it and only the staged value is registered for redaction,
-// so an env copy would go unmasked. The Claude Code effort is file-only too, so
-// the claude_code endpoint stays its only source.
-func readLLMSecrets(spec worker.RunSpec, src *secrets.Source) worker.RunSpec {
-	spec.LLMKey = resolveLLMValue("LLM_API_KEY", src)
-	spec.LLMBaseURL = resolveLLMValue("LLM_BASE_URL", src)
-	spec.LLMType = resolveLLMValue("LLM_TYPE", src)
-	spec.LLMOAuthToken = src.Get("LLM_OAUTH_TOKEN")
-	spec.LLMEffort = src.Get("LLM_EFFORT")
-
-	return spec
+// llmValues reads a run's LLM values, for card runs and run kinds alike. The
+// OAuth token is file-only: only CM provisions it and only the staged value is
+// registered for redaction, so an env copy would go unmasked. The Claude Code
+// effort is file-only too, so the claude_code endpoint stays its only source.
+func llmValues(src *secrets.Source) (key, baseURL, llmType, oauthToken, effort string) {
+	return resolveLLMValue("LLM_API_KEY", src),
+		resolveLLMValue("LLM_BASE_URL", src),
+		resolveLLMValue("LLM_TYPE", src),
+		src.Get("LLM_OAUTH_TOKEN"),
+		src.Get("LLM_EFFORT")
 }
 
 // resolveLLMValue resolves an LLM endpoint value env-first-then-file: a

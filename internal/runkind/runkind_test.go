@@ -1,9 +1,12 @@
 package runkind
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -12,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/mhersson/contextmatrix-agent/internal/orchestrator"
+	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/mhersson/contextmatrix-harness/redact"
 	protocol "github.com/mhersson/contextmatrix-protocol"
 	"github.com/stretchr/testify/assert"
@@ -37,8 +41,9 @@ func TestCauseOf(t *testing.T) {
 	}
 }
 
-// bareRepo makes a bare repo with one commit on main and returns its file URL.
-func bareRepo(t *testing.T) string {
+// bareRepo makes a bare repo with one commit on main, holding a README and
+// the given executable scripts, and returns its file URL.
+func bareRepo(t *testing.T, scripts map[string]string) string {
 	t.Helper()
 
 	if _, err := exec.LookPath("git"); err != nil {
@@ -63,7 +68,14 @@ func bareRepo(t *testing.T) string {
 	require.NoError(t, os.MkdirAll(src, 0o755))
 	gitIn(src, "init", "-q", "-b", "main")
 	require.NoError(t, os.WriteFile(filepath.Join(src, "README.md"), []byte("hello\n"), 0o644))
-	gitIn(src, "add", "README.md")
+
+	for name, body := range scripts {
+		path := filepath.Join(src, name)
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o755))
+	}
+
+	gitIn(src, "add", ".")
 	gitIn(src, "commit", "-q", "-m", "init")
 	gitIn(root, "clone", "-q", "--bare", src, bare)
 
@@ -85,7 +97,7 @@ func checkSpec(t *testing.T, repoURL, input string) Spec {
 }
 
 func TestRunCheckAgainstALocalRepo(t *testing.T) {
-	spec := checkSpec(t, bareRepo(t), `{}`)
+	spec := checkSpec(t, bareRepo(t, nil), `{}`)
 
 	d := Run(context.Background(), spec, nil, discardEmitter())
 	require.Equal(t, protocol.StopCauseDone, d.Cause)
@@ -97,7 +109,7 @@ func TestRunCheckAgainstALocalRepo(t *testing.T) {
 }
 
 func TestRunEndsInError(t *testing.T) {
-	repoURL := bareRepo(t)
+	repoURL := bareRepo(t, nil)
 
 	tests := []struct {
 		name string
@@ -124,13 +136,13 @@ func TestRunEndsInError(t *testing.T) {
 func TestRunMasksTheResult(t *testing.T) {
 	const token = "ghs_secrettoken123"
 
-	spec := checkSpec(t, bareRepo(t), `{}`)
+	spec := checkSpec(t, bareRepo(t, nil), `{}`)
 	spec.GitToken = token
 
 	cands := []orchestrator.VerifyCandidate{{Argv: []string{"./run", token}, Display: "./run " + token}}
 
 	red := redact.New([]string{spec.GitToken})
-	d := run(context.Background(), spec, slog.Default(), red, discardEmitter(), fakeDeps(cands, &trialFake{}))
+	d := run(context.Background(), spec, slog.Default(), red, discardEmitter(), deps{check: fakeDeps(cands, &trialFake{})})
 	require.Equal(t, protocol.StopCauseDone, d.Cause)
 	require.NotNil(t, d.Result)
 	require.Len(t, d.Result.Check.Candidates, 1)
@@ -142,13 +154,49 @@ func TestRunMasksBeforeItLimits(t *testing.T) {
 	// kept: masking shortens it before the limit applies.
 	token := "ghs_" + strings.Repeat("x9", 300)
 
-	spec := checkSpec(t, bareRepo(t), `{}`)
+	spec := checkSpec(t, bareRepo(t, nil), `{}`)
 	spec.GitToken = token
 
 	cands := []orchestrator.VerifyCandidate{{Argv: []string{"./run", token}, Display: "./run " + token}}
 
-	d := run(context.Background(), spec, slog.Default(), redact.New([]string{token}), discardEmitter(), fakeDeps(cands, &trialFake{}))
+	d := run(context.Background(), spec, slog.Default(), redact.New([]string{token}), discardEmitter(), deps{check: fakeDeps(cands, &trialFake{})})
 	require.Equal(t, protocol.StopCauseDone, d.Cause)
 	require.Len(t, d.Result.Check.Candidates, 1)
 	assert.NotContains(t, d.Result.Check.Candidates[0], token)
+}
+
+func TestRunTrialsThroughTheProductionDeps(t *testing.T) {
+	const token = "ghs_trialsecret123"
+
+	repoURL := bareRepo(t, map[string]string{"ci/verify": "#!/bin/sh\necho \"token $1\"\n"})
+
+	cmd := "./ci/verify " + token
+	input, err := json.Marshal(protocol.CheckInput{Verify: &protocol.VerifyConfig{Command: cmd}, CurrentCommand: cmd})
+	require.NoError(t, err)
+
+	spec := checkSpec(t, repoURL, string(input))
+	spec.GitToken = token
+
+	var transcript bytes.Buffer
+
+	d := Run(context.Background(), spec, nil, events.NewEmitter(io.Discard, &transcript))
+	require.Equal(t, protocol.StopCauseDone, d.Cause)
+	require.NotNil(t, d.Result)
+	assert.Equal(t, protocol.TrialFinished, d.Result.Check.Trial)
+
+	result, err := json.Marshal(d.Result)
+	require.NoError(t, err)
+	assert.NotContains(t, string(result), token)
+
+	var ev struct {
+		Kind string            `json:"kind"`
+		Data map[string]string `json:"data"`
+	}
+
+	require.NoError(t, json.Unmarshal(bytes.TrimSpace(transcript.Bytes()), &ev))
+	require.Equal(t, string(trialKind), ev.Kind)
+	assert.Contains(t, ev.Data["output"], "token ", "the script ran")
+	assert.NotContains(t, ev.Data["output"], token)
+	assert.Contains(t, ev.Data["command"], "./ci/verify")
+	assert.NotContains(t, ev.Data["command"], token)
 }

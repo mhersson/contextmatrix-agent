@@ -43,6 +43,7 @@ func TestTrialCandidate(t *testing.T) {
 		{name: "an undeclared command is rejected", verify: "./other", current: "./ci/verify"},
 		{name: "an empty command is rejected", verify: "", current: "./ci/verify"},
 		{name: "a blank command never matches a blank current", verify: "  ", current: " "},
+		{name: "a re-segmented command is not unchanged", verify: "./run lint\n./run test", current: "./run lint ./run test"},
 	}
 
 	for _, tt := range tests {
@@ -57,9 +58,21 @@ func TestTrialCandidate(t *testing.T) {
 }
 
 func TestSameCommand(t *testing.T) {
-	assert.True(t, sameCommand("./run  test", " ./run test\n"))
-	assert.False(t, sameCommand("./run test", "./run tests"))
-	assert.False(t, sameCommand("./run test", "./run"))
+	tests := []struct {
+		a, b string
+		want bool
+	}{
+		{"./run  test", " ./run test\n", true},
+		{"./run lint\n\n./run test", "./run lint\n  ./run  test", true},
+		{"./run test", "./run tests", false},
+		{"./run test", "./run", false},
+		{"./run lint ./run test", "./run lint\n./run test", false},
+		{"./run lint\n./run test", "./run test\n./run lint", false},
+	}
+
+	for _, tt := range tests {
+		assert.Equal(t, tt.want, sameCommand(tt.a, tt.b), "%q vs %q", tt.a, tt.b)
+	}
 }
 
 // trialFake records its calls and returns a fixed trial.
@@ -86,6 +99,7 @@ func fakeDeps(cands []orchestrator.VerifyCandidate, f *trialFake) checkDeps {
 	return checkDeps{
 		candidates: func(string) []orchestrator.VerifyCandidate { return cands },
 		trial:      f.trial,
+		mask:       func(s string) string { return s },
 	}
 }
 

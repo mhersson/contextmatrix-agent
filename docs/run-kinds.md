@@ -144,8 +144,10 @@ in table order, or the nested scan's command when the root has no marker. The
 list is always present, `[]` when there are none.
 
 With `verify` in the input, the check trial-runs one command once
-(`trialCandidate`, `internal/runkind/check.go`). Commands compare by their
-whitespace-separated fields.
+(`trialCandidate`, `internal/runkind/check.go`). Commands compare line by line:
+the same non-empty lines, each with equal whitespace-separated fields. A
+newline is significant, since bash runs each line as its own command, so a
+command whose words are only split differently across lines is a changed one.
 
 - A command equal to `current_command` counts as declared: it runs as the gate
   runs a declared command, under `bash -c` with pipefail, with no candidate or
@@ -170,9 +172,9 @@ from the container as the gate does, and runs with the gate's protections
 
 `trial` is absent when the input has no `verify`. While the trial runs, the
 check writes a `run_kind_progress` event every minute, so a long trial is not
-reaped as idle. After it, one `check_trial` event records the
-command, the outcome and the output, masked with the run's secrets. Both events
-reach the run kind's file log only.
+reaped as idle. After it, one `check_trial` event records the outcome and the
+command and its output, both masked with the run's secrets. Both events reach
+the run kind's file log only.
 
 The limits (`limitCheck`, `internal/runkind/limits.go`): candidates over 512
 bytes are dropped, then the first 32 are kept; `absent_from_repo` is cut at 64

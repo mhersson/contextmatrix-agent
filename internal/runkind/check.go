@@ -3,6 +3,7 @@ package runkind
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"time"
@@ -16,10 +17,24 @@ import (
 // trialKind is the event that records the check's trial run.
 const trialKind events.Kind = "check_trial"
 
-// checkDeps are the check's effects.
+// checkDeps are the check's effects. trial returns its output masked; mask
+// masks anything else the check writes.
 type checkDeps struct {
 	candidates func(ws string) []orchestrator.VerifyCandidate
 	trial      func(ctx context.Context, ws string, c orchestrator.VerifyCandidate, timeout time.Duration, env []string) (trial, output string, err error)
+	mask       func(string) string
+}
+
+// newCheckDeps wires the check to the gate's detection and trial, logging to
+// log and masking with mask.
+func newCheckDeps(log *slog.Logger, mask func(string) string) checkDeps {
+	return checkDeps{
+		candidates: orchestrator.VerifyCandidates,
+		trial: func(ctx context.Context, ws string, c orchestrator.VerifyCandidate, timeout time.Duration, env []string) (string, string, error) {
+			return orchestrator.TrialVerify(ctx, log, ws, c, timeout, env, mask)
+		},
+		mask: mask,
+	}
 }
 
 // check lists the base branch's verify candidates and, when in has a Verify,
@@ -78,7 +93,7 @@ func runTrial(
 		return "", fmt.Errorf("trial verify: %w", err)
 	}
 
-	emit.Emit(trialKind, map[string]any{"command": c.Display, "trial": trial, "output": output})
+	emit.Emit(trialKind, map[string]any{"command": d.mask(c.Display), "trial": trial, "output": output})
 
 	return trial, nil
 }
@@ -113,7 +128,22 @@ func trialCandidate(in protocol.CheckInput, cands []orchestrator.VerifyCandidate
 	return orchestrator.VerifyCandidate{}, false
 }
 
-// sameCommand reports whether a and b have equal whitespace-separated fields.
+// sameCommand reports whether a and b have the same non-empty lines, each with
+// equal whitespace-separated fields. A newline is significant: bash runs each
+// line as its own command.
 func sameCommand(a, b string) bool {
-	return slices.Equal(strings.Fields(a), strings.Fields(b))
+	return slices.EqualFunc(commandLines(a), commandLines(b), slices.Equal[[]string])
+}
+
+// commandLines splits cmd into the fields of each non-empty line.
+func commandLines(cmd string) [][]string {
+	var out [][]string
+
+	for line := range strings.Lines(cmd) {
+		if f := strings.Fields(line); len(f) > 0 {
+			out = append(out, f)
+		}
+	}
+
+	return out
 }

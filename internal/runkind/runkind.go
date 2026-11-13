@@ -58,18 +58,18 @@ func Run(ctx context.Context, spec Spec, _ llm.LLM, emit *events.Emitter) runout
 	log := slog.Default().With("card_id", spec.CardID, "kind", spec.Kind)
 	red := redact.New([]string{spec.GitToken, spec.LLMKey, spec.LLMOAuthToken})
 
-	return run(ctx, spec, log, red, emit, checkDeps{
-		candidates: orchestrator.VerifyCandidates,
-		trial: func(ctx context.Context, ws string, c orchestrator.VerifyCandidate, timeout time.Duration, env []string) (string, string, error) {
-			return orchestrator.TrialVerify(ctx, log, ws, c, timeout, env, red.Apply)
-		},
-	})
+	return run(ctx, spec, log, red, emit, deps{check: newCheckDeps(log, red.Apply)})
 }
 
-func run(ctx context.Context, spec Spec, log *slog.Logger, red *redact.Redactor, emit *events.Emitter, cd checkDeps) runoutcome.Data {
+// deps are the kinds' effects, one field per kind.
+type deps struct {
+	check checkDeps
+}
+
+func run(ctx context.Context, spec Spec, log *slog.Logger, red *redact.Redactor, emit *events.Emitter, d deps) runoutcome.Data {
 	ws := filepath.Join(spec.Workspace, strings.ToLower(spec.CardID))
 
-	res, err := runKind(ctx, spec, ws, emit, cd)
+	res, err := runKind(ctx, spec, ws, emit, d)
 	if err != nil {
 		cause := causeOf(err)
 		log.Error("run kind failed", "cause", cause, "error", red.Apply(err.Error()))
@@ -83,7 +83,7 @@ func run(ctx context.Context, spec Spec, log *slog.Logger, red *redact.Redactor,
 }
 
 // runKind is the one place that names the kinds.
-func runKind(ctx context.Context, spec Spec, ws string, emit *events.Emitter, cd checkDeps) (protocol.RunKindResult, error) {
+func runKind(ctx context.Context, spec Spec, ws string, emit *events.Emitter, d deps) (protocol.RunKindResult, error) {
 	if err := clone(ctx, spec, ws); err != nil {
 		return protocol.RunKindResult{}, err
 	}
@@ -95,7 +95,7 @@ func runKind(ctx context.Context, spec Spec, ws string, emit *events.Emitter, cd
 			return protocol.RunKindResult{}, fmt.Errorf("decode check input: %w", err)
 		}
 
-		r, err := check(ctx, ws, in, cd, emit)
+		r, err := check(ctx, ws, in, d.check, emit)
 		if err != nil {
 			return protocol.RunKindResult{}, err
 		}
