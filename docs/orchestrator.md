@@ -524,6 +524,12 @@ The verify-resolution ladder (declared command, then repo-convention
 detection, then a model proposal, then skip -
 `internal/orchestrator/verify.go`) gives every tier a chance before giving up.
 
+Resolution runs at plan-phase entry, before any planning model call, so a
+toolchain or budget park lands before planning spends. Execute entry and the
+gates reuse a resolved command and re-resolve a cached skip; the proposal
+fires at most once per run. A run resumed past plan never enters the plan
+phase and resolves where it first reaches execute entry or a gate.
+
 Detection reads the workspace root. When the root resolves no test wrapper
 (make/just/task) and declares no marker at all, a one-level nested scan takes
 over (`internal/orchestrator/verify_nested.go`) and emits workspace-rooted

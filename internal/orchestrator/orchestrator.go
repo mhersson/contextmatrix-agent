@@ -561,8 +561,8 @@ type run struct {
 	// parts, attached to the planning-phase model calls only. nil when none.
 	taskImages []llm.ImageURL
 
-	// verify is the resolved verify plan for this run, cached by ensureVerify on
-	// the first phase to reach the gate (execute, judge, or review). nil until
+	// verify is the resolved verify plan for this run, cached by ensureVerify at
+	// plan entry, or wherever a run resumed past plan first calls it. nil until
 	// resolved. A resolved COMMAND is reused; a prior SKIP is re-resolved on
 	// re-entry, so a bootstrap task that adds the project's tooling is verified.
 	verify *verifyPlan

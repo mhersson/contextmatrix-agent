@@ -429,7 +429,7 @@ func TestPlanRunGetsNoBatchNudge(t *testing.T) {
 	d.Emit = events.NewEmitter(nil, &transcript)
 
 	o := newRun(t.Context(), d, ops.taskContext)
-	require.NoError(t, runPlan(context.Background(), o))
+	require.NoError(t, runPlanIsolated(context.Background(), o))
 
 	assert.Empty(t, batchNudgeCounts(t, &transcript),
 		"the planner is deliberately left unnudged")
@@ -444,7 +444,7 @@ func TestPlanPhaseCreatesSubtasks(t *testing.T) {
 	d := planTestDeps(ops, llmFake)
 
 	o := newRun(t.Context(), d, ops.taskContext)
-	require.NoError(t, runPlan(context.Background(), o))
+	require.NoError(t, runPlanIsolated(context.Background(), o))
 
 	require.Len(t, ops.createCardArgs, 2, "two subtasks must be created")
 
@@ -489,7 +489,7 @@ func TestPlanPhaseRepairLoop(t *testing.T) {
 	d := planTestDeps(ops, llmFake)
 
 	o := newRun(t.Context(), d, ops.taskContext)
-	require.NoError(t, runPlan(context.Background(), o))
+	require.NoError(t, runPlanIsolated(context.Background(), o))
 
 	// Two harness invocations: the original + one repair turn.
 	assert.Len(t, llmFake.tasks, 2, "expected exactly two model calls (original + repair)")
@@ -523,7 +523,7 @@ func TestPlanPhaseRepairsAPlanCutBelowTheHardStop(t *testing.T) {
 	d := planTestDeps(ops, llmFake)
 
 	o := newRun(t.Context(), d, ops.taskContext)
-	require.NoError(t, runPlan(context.Background(), o))
+	require.NoError(t, runPlanIsolated(context.Background(), o))
 
 	assert.Len(t, llmFake.tasks, 2, "the cut plan takes the repair turn")
 	require.Len(t, ops.createCardArgs, 1)
@@ -551,7 +551,7 @@ func TestPlanPhaseRepairsDuplicateSubtaskTitles(t *testing.T) {
 	d := planTestDeps(ops, llmFake)
 
 	o := newRun(t.Context(), d, ops.taskContext)
-	require.NoError(t, runPlan(context.Background(), o))
+	require.NoError(t, runPlanIsolated(context.Background(), o))
 
 	assert.Len(t, llmFake.tasks, 2, "the duplicate-title plan takes the repair turn")
 
@@ -572,7 +572,7 @@ func TestPlanPhaseRepairExhausted(t *testing.T) {
 	d := planTestDeps(ops, llmFake)
 
 	o := newRun(t.Context(), d, ops.taskContext)
-	err := runPlan(context.Background(), o)
+	err := runPlanIsolated(context.Background(), o)
 	require.Error(t, err)
 
 	// Exactly two model calls - no third attempt.
@@ -605,7 +605,7 @@ func TestPlanPhaseTestSplitRevisionSucceeds(t *testing.T) {
 	d := planTestDeps(ops, llmFake)
 
 	o := newRun(t.Context(), d, ops.taskContext)
-	require.NoError(t, runPlan(context.Background(), o))
+	require.NoError(t, runPlanIsolated(context.Background(), o))
 
 	// Exactly one revision round: the original draft plus one re-prompt.
 	require.Len(t, llmFake.tasks, 2, "expected exactly two model calls (draft + one revision)")
@@ -660,7 +660,7 @@ func TestReviseTestSplitUsesDraftPlanRegistry(t *testing.T) {
 	d.PlanTools = func() *tools.Registry { return planReg }
 
 	o := newRun(t.Context(), d, ops.taskContext)
-	require.NoError(t, runPlan(context.Background(), o))
+	require.NoError(t, runPlanIsolated(context.Background(), o))
 
 	require.Len(t, llmFake.tasks, 2, "draft + one revision")
 
@@ -694,7 +694,7 @@ func TestPlanPhaseTestSplitRevisionWarnsAndProceedsOnRepeatViolation(t *testing.
 	d := planTestDeps(ops, llmFake)
 
 	o := newRun(t.Context(), d, ops.taskContext)
-	require.NoError(t, runPlan(context.Background(), o), "a repeat heuristic violation must never fail the run")
+	require.NoError(t, runPlanIsolated(context.Background(), o), "a repeat heuristic violation must never fail the run")
 
 	// No third model call - one revision attempt, then give up.
 	require.Len(t, llmFake.tasks, 2)
@@ -845,7 +845,7 @@ func TestPlanPhaseResume(t *testing.T) {
 		{ID: "SUB-OLD-2", Title: "Existing subtask beta", State: "todo", Sizing: seedSizing("moderate")},
 	}
 
-	require.NoError(t, runPlan(context.Background(), o))
+	require.NoError(t, runPlanIsolated(context.Background(), o))
 
 	require.NotEmpty(t, llmFake.tasks)
 	prompt := llmFake.tasks[0]
@@ -876,7 +876,7 @@ func TestPlanPhaseDiagnosesBugLikeCard(t *testing.T) {
 	d := planTestDeps(ops, llmFake)
 
 	o := newRun(t.Context(), d, ops.taskContext)
-	require.NoError(t, runPlan(context.Background(), o))
+	require.NoError(t, runPlanIsolated(context.Background(), o))
 
 	// Two model calls: diagnose then plan.
 	require.Len(t, llmFake.tasks, 2, "bug-like card must run the diagnose step then the plan")
@@ -902,7 +902,7 @@ func TestPlanPhaseSkipsDiagnoseForFeatureCard(t *testing.T) {
 	d := planTestDeps(ops, llmFake)
 
 	o := newRun(t.Context(), d, ops.taskContext)
-	require.NoError(t, runPlan(context.Background(), o))
+	require.NoError(t, runPlanIsolated(context.Background(), o))
 
 	// A non-bug card skips the diagnose step: exactly one model call (the plan).
 	require.Len(t, llmFake.tasks, 1, "feature card must make exactly one model call (no diagnose)")
@@ -943,7 +943,7 @@ func TestPlanPhaseDiagnoseIncapableModelIsRecovered(t *testing.T) {
 	d.Executor = harnessExec{}
 
 	o := newRun(t.Context(), d, ops.taskContext)
-	require.NoError(t, runPlan(context.Background(), o))
+	require.NoError(t, runPlanIsolated(context.Background(), o))
 
 	assert.Contains(t, ops.recorded(), "BlacklistModel:CARD-1/"+first,
 		"the diagnose-incapable model is blacklisted; calls=%v", ops.recorded())
@@ -1188,7 +1188,7 @@ func TestRunPlanHITLApproveCreatesSubtasks(t *testing.T) {
 	}}
 	o := hitlPlanRun(ops, inbox, client)
 
-	require.NoError(t, runPlan(context.Background(), o))
+	require.NoError(t, runPlanIsolated(context.Background(), o))
 	assert.Len(t, ops.createCardArgs, 1, "subtasks created after approval")
 }
 
@@ -1204,7 +1204,7 @@ func TestRunPlanHITLPromoteContinuesAsApprove(t *testing.T) {
 	}}
 	o := hitlPlanRun(ops, inbox, client)
 
-	require.NoError(t, runPlan(context.Background(), o))
+	require.NoError(t, runPlanIsolated(context.Background(), o))
 	assert.Len(t, ops.createCardArgs, 1, "a promoted plan gate creates the subtasks")
 	assert.True(t, ops.loggedContains("promoted"), "promote logged; logs=%v", ops.logs)
 }
@@ -1249,7 +1249,7 @@ func TestRunPlanGetsWrapUpNudge(t *testing.T) {
 	}}
 	o := autoPlanRun(ops, client, 8)
 
-	require.NoError(t, runPlan(context.Background(), o))
+	require.NoError(t, runPlanIsolated(context.Background(), o))
 	assert.Len(t, ops.createCardArgs, 1, "the plan is emitted and its subtask created")
 
 	joined := strings.Join(client.tasks, "\n")
@@ -1271,7 +1271,7 @@ func TestRunPlanHITLAdjustRedraftsThenApproves(t *testing.T) {
 	}}
 	o := hitlPlanRun(ops, inbox, llmFake)
 
-	require.NoError(t, runPlan(context.Background(), o))
+	require.NoError(t, runPlanIsolated(context.Background(), o))
 	assert.Len(t, ops.createCardArgs, 1, "subtasks created only after the final approval")
 
 	// The re-draft prompt carried the human's feedback.
@@ -1338,7 +1338,7 @@ func TestRunPlanHITLDesignReachesPlanner(t *testing.T) {
 
 	// No ## Design or ## Solution on the body, so brainstorm runs.
 	o := creativePlanRun(ops, inbox, llmFake, "Add colour-scheme support.")
-	require.NoError(t, runPlan(context.Background(), o))
+	require.NoError(t, runPlanIsolated(context.Background(), o))
 
 	// Subtasks created after approval.
 	assert.Len(t, ops.createCardArgs, 1, "subtasks created after approval")
@@ -1373,7 +1373,7 @@ func TestRunPlanHITLDecidedSolutionSkipsBrainstorm(t *testing.T) {
 	}}
 	o := creativePlanRun(ops, inbox, client, architectCardBody)
 
-	require.NoError(t, runPlan(context.Background(), o))
+	require.NoError(t, runPlanIsolated(context.Background(), o))
 	assert.Len(t, client.models, 2, "no brainstorm turn ran before the plan draft")
 	assert.Len(t, ops.createCardArgs, 1, "the approved plan created its subtask")
 }
@@ -1446,7 +1446,7 @@ func TestRunPlanMobCreatesSubtasksFromSynthesis(t *testing.T) {
 	}}}
 
 	o := mobPlanRun(ops, llmFake, eng)
-	require.NoError(t, runPlan(context.Background(), o))
+	require.NoError(t, runPlanIsolated(context.Background(), o))
 
 	// Subtasks come from the synthesized JSON, through the normal parser.
 	require.Len(t, ops.createCardArgs, 2)
@@ -1481,7 +1481,7 @@ func TestRunPlanMobRepairSucceeds(t *testing.T) {
 	eng := &scriptedEngine{outcomes: []mob.Outcome{{Synthesis: "sorry, prose only", Consensus: true}}}
 
 	o := mobPlanRun(ops, llmFake, eng)
-	require.NoError(t, runPlan(context.Background(), o))
+	require.NoError(t, runPlanIsolated(context.Background(), o))
 
 	require.Len(t, ops.createCardArgs, 2, "subtasks created from the repaired synthesis")
 	require.Len(t, llmFake.tasks, 1, "exactly one moderator repair call")
@@ -1498,7 +1498,7 @@ func TestRunPlanMobParseFailureFallsBackToDraftPlan(t *testing.T) {
 	eng := &scriptedEngine{outcomes: []mob.Outcome{{Synthesis: "prose"}}}
 
 	o := mobPlanRun(ops, llmFake, eng)
-	require.NoError(t, runPlan(context.Background(), o))
+	require.NoError(t, runPlanIsolated(context.Background(), o))
 
 	require.Len(t, ops.createCardArgs, 2, "the solo fallback produced the plan")
 	assert.Len(t, llmFake.tasks, 2, "one repair attempt, then one solo planner call")
@@ -1513,7 +1513,7 @@ func TestRunPlanMobEngineFailureFallsBackToDraftPlan(t *testing.T) {
 	eng := &scriptedEngine{outcomes: []mob.Outcome{{}}, errs: []error{mob.ErrNoQuorum}}
 
 	o := mobPlanRun(ops, llmFake, eng)
-	require.NoError(t, runPlan(context.Background(), o))
+	require.NoError(t, runPlanIsolated(context.Background(), o))
 
 	require.Len(t, ops.createCardArgs, 2, "quorum failure degrades to the solo path")
 	assert.Len(t, llmFake.tasks, 1, "exactly the solo planner call")
@@ -1551,7 +1551,7 @@ func TestRunPlanMobHITLAdjustReopensDiscussion(t *testing.T) {
 	// messages reach the plan gate.
 	o.tc.Description = "## Design\n\nA config flag."
 
-	require.NoError(t, runPlan(context.Background(), o))
+	require.NoError(t, runPlanIsolated(context.Background(), o))
 
 	require.Len(t, eng.topics, 2, "the adjust re-opened the discussion")
 	reopen := eng.topics[1]
@@ -1597,7 +1597,7 @@ func TestRunPlanResumeCarriesPlanAndDesignNotHistory(t *testing.T) {
 	client := &planLLM{responses: []llm.Response{stopResp(onePlanJSON, 0.01)}}
 	o := resumedAutoPlanRun(ops, client)
 
-	require.NoError(t, runPlan(context.Background(), o))
+	require.NoError(t, runPlanIsolated(context.Background(), o))
 
 	task := client.tasks[0]
 	assert.Contains(t, task, "Add a config flag to toggle the feature.", "human intro kept")
@@ -1612,7 +1612,7 @@ func TestRunPlanFreshPromptHasNoResupplyBlocks(t *testing.T) {
 	client := &planLLM{responses: []llm.Response{stopResp(onePlanJSON, 0.01)}}
 	o := autoPlanRun(ops, client, 20)
 
-	require.NoError(t, runPlan(context.Background(), o))
+	require.NoError(t, runPlanIsolated(context.Background(), o))
 
 	task := client.tasks[0]
 	assert.Contains(t, task, "Add a config flag to toggle the feature.")
@@ -1628,7 +1628,7 @@ func TestRunPlanHumanDesignReachesPlannerViaDesignBlock(t *testing.T) {
 	}}
 	o := hitlPlanRun(ops, inbox, client)
 
-	require.NoError(t, runPlan(context.Background(), o))
+	require.NoError(t, runPlanIsolated(context.Background(), o))
 	assert.Contains(t, client.tasks[0], "AGREED DESIGN")
 	assert.Contains(t, client.tasks[0], "A palette config.")
 }
@@ -1642,7 +1642,7 @@ func TestRunDiagnosePromptOmitsRecordedHistory(t *testing.T) {
 	o := resumedAutoPlanRun(ops, client)
 	o.tc.Type = "bug"
 
-	require.NoError(t, runPlan(context.Background(), o))
+	require.NoError(t, runPlanIsolated(context.Background(), o))
 
 	diagnoseTask := client.tasks[0]
 	assert.Contains(t, diagnoseTask, "Add a config flag to toggle the feature.")
@@ -1697,7 +1697,7 @@ func TestDraftPlanUsesPlanToolsOncePerCall(t *testing.T) {
 		return reg
 	}
 
-	require.NoError(t, runPlan(context.Background(), o))
+	require.NoError(t, runPlanIsolated(context.Background(), o))
 
 	assert.Len(t, llmFake.tasks, 2, "one failed attempt, then the repair")
 	assert.Equal(t, 1, called,
@@ -1711,7 +1711,7 @@ func TestDraftPlanFallsBackToReadToolsWhenPlanToolsNil(t *testing.T) {
 	o := autoPlanRun(ops, llmFake, 20)
 	o.d.PlanTools = nil
 
-	require.NoError(t, runPlan(context.Background(), o),
+	require.NoError(t, runPlanIsolated(context.Background(), o),
 		"a nil PlanTools must degrade to ReadTools, not panic")
 	require.Len(t, ops.createCardArgs, 2)
 
@@ -1745,7 +1745,7 @@ func TestPlanReuseListExcludesCancelled(t *testing.T) {
 			{ID: "SUB-ACTIVE", Title: "Active subtask", State: "in_progress", Sizing: seedSizing("simple")},
 		}
 
-		require.NoError(t, runPlan(context.Background(), o))
+		require.NoError(t, runPlanIsolated(context.Background(), o))
 
 		require.NotEmpty(t, llmFake.tasks)
 		prompt := llmFake.tasks[0]
@@ -1774,7 +1774,7 @@ func TestPlanReuseListExcludesCancelled(t *testing.T) {
 			{ID: "SUB-ACTIVE", Title: "Active subtask", State: "todo", Sizing: seedSizing("simple")},
 		}
 
-		require.NoError(t, runPlan(context.Background(), o))
+		require.NoError(t, runPlanIsolated(context.Background(), o))
 
 		require.Len(t, eng.topics, 1)
 		briefing := eng.topics[0].Briefing
@@ -1796,7 +1796,7 @@ func TestPlanReuseListExcludesCancelled(t *testing.T) {
 			{ID: "SUB-ACTIVE", Title: "Active subtask", State: "in_progress", Sizing: seedSizing("simple")},
 		}
 
-		require.NoError(t, runPlan(context.Background(), o))
+		require.NoError(t, runPlanIsolated(context.Background(), o))
 
 		require.NotEmpty(t, llmFake.tasks)
 		prompt := llmFake.tasks[0]
@@ -1867,7 +1867,7 @@ func TestReadRootsReachThePlanningPrompts(t *testing.T) {
 			d.ReadRoots = tc.roots
 
 			o := newRun(t.Context(), d, ops.taskContext)
-			require.NoError(t, runPlan(context.Background(), o))
+			require.NoError(t, runPlanIsolated(context.Background(), o))
 			require.Len(t, llmFake.tasks, 2, "a bug-like card runs diagnose then plan")
 
 			for i, phase := range []string{"diagnosis", "plan"} {
@@ -2393,7 +2393,7 @@ func TestPlanDecisionSilentWhenTheMobDraftsThePlan(t *testing.T) {
 			o := mobPlanRun(ops, &planLLM{responses: tt.responses}, eng)
 			o.d.Emit = events.NewEmitter(nil, &transcript)
 
-			require.NoError(t, runPlan(context.Background(), o))
+			require.NoError(t, runPlanIsolated(context.Background(), o))
 			require.Len(t, ops.createCardArgs, 2, "the discussion produced the plan")
 
 			sels := modelSelections(t, &transcript)
@@ -2446,7 +2446,7 @@ func TestPlanGateDecisionRecordsOnlyTheClassificationThatRan(t *testing.T) {
 			o := mobHITLPlanRun(ops, &fakeInbox{msgs: tt.msgs}, &planLLM{responses: tt.responses}, &transcript)
 			o.mobEngine = eng.run
 
-			require.NoError(t, runPlan(context.Background(), o))
+			require.NoError(t, runPlanIsolated(context.Background(), o))
 			require.Len(t, ops.createCardArgs, 2, "the plan reached createSubtasks either way")
 
 			// Subtask creation alone does not separate the two cases: an
@@ -2493,7 +2493,7 @@ func TestPlanDecisionRecordedOnceAcrossTheHITLAdjustLoop(t *testing.T) {
 	o.d.Registry = reviewerRegistry()
 	o.d.Emit = events.NewEmitter(nil, &transcript)
 
-	require.NoError(t, runPlan(context.Background(), o))
+	require.NoError(t, runPlanIsolated(context.Background(), o))
 	require.Len(t, client.models, 4, "the adjust loop made four decision-model calls")
 
 	sels := selectionsForPhase(modelSelections(t, &transcript), "plan decision")
@@ -2519,7 +2519,7 @@ func TestPlanDecisionRecordedOnceForTheAutonomousSoloDraft(t *testing.T) {
 	o.d.Registry = reviewerRegistry()
 	o.d.Emit = events.NewEmitter(nil, &transcript)
 
-	require.NoError(t, runPlan(context.Background(), o))
+	require.NoError(t, runPlanIsolated(context.Background(), o))
 	require.Len(t, ops.createCardArgs, 1, "the solo draft produced the plan")
 	require.Len(t, client.models, 1, "exactly the planner call")
 
@@ -2556,7 +2556,7 @@ func TestPlanDecisionReresolvesOffAnIncapableDiagnoseModel(t *testing.T) {
 	}
 	o := bugPlanRun(ops, client, &transcript)
 
-	require.NoError(t, runPlan(context.Background(), o), "a failed diagnosis must not fail planning")
+	require.NoError(t, runPlanIsolated(context.Background(), o), "a failed diagnosis must not fail planning")
 	require.Len(t, ops.createCardArgs, 1, "planning continued without a diagnosis")
 	assert.True(t, o.excluded["rev/alpha"], "the incapable model is excluded for the rest of the run")
 
@@ -2585,6 +2585,6 @@ func TestPlanPhaseEmptyReplyStreakTakesRepairTurn(t *testing.T) {
 	valid := `{"card_tier":"simple","subtasks":[{"title":"Only","description":"d","depends_on":[],"tier":"simple"}]}`
 	llmFake := &planLLM{responses: append(emptyReplies(), stopResp(valid, 0.03))}
 
-	require.NoError(t, runPlan(context.Background(), newRun(t.Context(), planTestDeps(ops, llmFake), ops.taskContext)))
+	require.NoError(t, runPlanIsolated(context.Background(), newRun(t.Context(), planTestDeps(ops, llmFake), ops.taskContext)))
 	assert.Len(t, ops.createCardArgs, 1)
 }

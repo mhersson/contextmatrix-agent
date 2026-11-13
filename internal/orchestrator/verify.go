@@ -235,13 +235,13 @@ func classifyVerify(plan verifyPlan, out verifyexec.Outcome) verifyResult {
 	}
 }
 
-// ensureVerify resolves the verify plan for the phase that reached the gate. A
-// resolved COMMAND is stable and reused from cache; a prior SKIP is NOT final -
-// a phase (e.g. a bootstrap task that adds go.mod and tests) can make a command
-// resolvable, so a cached skip is re-resolved on re-entry (cheap: only the
-// declared/detection tiers re-run; the proposal fires at most once per run). A
-// budget park during resolution propagates and is not cached, so a resumed run
-// re-attempts.
+// ensureVerify resolves the verify plan; plan entry, execute entry and the gates
+// all call it. A resolved COMMAND is stable and reused from cache; a prior SKIP
+// is NOT final - a phase (e.g. a bootstrap task that adds go.mod and tests) can
+// make a command resolvable, so a cached skip is re-resolved on re-entry (cheap:
+// only the declared/detection tiers re-run; the proposal fires at most once per
+// run). A budget park during resolution propagates and is not cached, so a
+// resumed run re-attempts.
 func (o *run) ensureVerify(ctx context.Context) (verifyPlan, error) {
 	if o.verify != nil && len(o.verify.Argv) > 0 {
 		return *o.verify, nil

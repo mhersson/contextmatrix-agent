@@ -617,7 +617,7 @@ func TestGuardedPhasesUnchanged(t *testing.T) {
 		}}
 		o := autoPlanRun(ops, client, 8)
 
-		require.NoError(t, runPlan(context.Background(), o))
+		require.NoError(t, runPlanIsolated(context.Background(), o))
 		assert.Len(t, ops.createCardArgs, 1, "the plan still runs to completion")
 
 		joined := strings.Join(client.tasks, "\n")
