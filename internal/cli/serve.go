@@ -162,6 +162,7 @@ func runServe(ctx context.Context, configPath string) error {
 	// Settles which of the shutdown sweep and a run's own exit callback
 	// reports the run, so it is reported once.
 	reports := newExitReports()
+	outcomes := newRunOutcomes()
 
 	exec := executor.NewDockerExecutor(executor.Config{
 		Docker:           docker,
@@ -173,8 +174,8 @@ func runServe(ctx context.Context, configPath string) error {
 		OnStart: func(project, cardID, containerID, correlationID string) {
 			files.Begin(project, cardID, containerID, correlationID)
 		},
-		OnLog:   containerLogSink(bridge, files, registry),
-		OnExit:  onContainerExit(cbClient, reports, credentials, proxy, files, registry, bridge, logger),
+		OnLog:   containerLogSink(bridge, files, registry, outcomes),
+		OnExit:  onContainerExit(cbClient, reports, outcomes, credentials, proxy, files, registry, bridge, logger),
 		Logger:  logger,
 		Metrics: mx,
 	})
@@ -463,7 +464,15 @@ func (d workerDrain) settle(ctx context.Context, run *executor.Run) {
 	d.revoker.Revoke(run.CorrelationID)
 
 	reported, owned := d.reports.report(run.CorrelationID, func() {
-		if err := d.reporter.ReportStatus(ctx, run.CardID, run.Project, "failed", "service shutting down"); err != nil {
+		err := d.reporter.ReportStatus(ctx, protocol.StatusCallbackPayload{
+			CardID:       run.CardID,
+			Project:      run.Project,
+			WorkerStatus: "failed",
+			Message:      "service shutting down",
+			RunID:        run.CorrelationID,
+			StopCause:    protocol.StopCauseShutdown,
+		})
+		if err != nil {
 			d.logger.Warn("failed to report shutdown status",
 				"project", run.Project, "card_id", run.CardID, "error", err)
 		}
@@ -525,6 +534,14 @@ func (e *exitReports) report(correlationID string, send func()) (<-chan struct{}
 	send()
 
 	return reported, true
+}
+
+// shuttingDown reports whether shutdown has begun.
+func (e *exitReports) shuttingDown() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	return e.shutdown
 }
 
 // claimed reports whether the run's report has been claimed since shutdown
@@ -595,18 +612,25 @@ func onDisplaceHook(proxy tokenRevoker) func(project, cardID, correlationID stri
 // the identical composed redactor the SSE bridge applies - run over the full
 // raw line for both the stdout and stderr arms, so a CM-provisioned secret
 // never reaches disk in plaintext even in JSON fields the SSE bridge's
-// per-field redaction does not inspect.
+// per-field redaction does not inspect. Outcome lines are recorded from stdout
+// only, masked: a container's stderr cannot name its run's cause.
 func containerLogSink(
 	bridge *logbridge.Bridge,
 	files *filelog.Logger,
 	registry *logbridge.RedactorRegistry,
+	outcomes *runOutcomes,
 ) func(project, cardID, correlationID string, line []byte, stderr bool) {
 	return func(project, cardID, correlationID string, line []byte, stderr bool) {
 		// Bridge to the live /logs SSE stream first so the interactive
 		// stream is never gated on the durable-log disk write. BridgeLine
 		// does not mutate line and Write copies it, so the order is safe.
 		bridge.BridgeLine(logbridge.Key{Project: project, CardID: cardID}, line, stderr)
-		files.Write(project, cardID, correlationID, []byte(registry.RedactLine(string(line))), stderr)
+		masked := []byte(registry.RedactLine(string(line)))
+		files.Write(project, cardID, correlationID, masked, stderr)
+
+		if !stderr {
+			outcomes.record(correlationID, masked)
+		}
 	}
 }
 
@@ -620,6 +644,7 @@ func containerLogSink(
 func onContainerExit(
 	reporter webhook.StatusReporter,
 	reports *exitReports,
+	outcomes *runOutcomes,
 	credentials *secrets.RunCredentials,
 	proxy tokenRevoker,
 	files *filelog.Logger,
@@ -638,15 +663,17 @@ func onContainerExit(
 		// the status callback so a re-trigger does not inherit stale keys.
 		registry.RemoveSessionKey(webhook.SessionID(project, cardID, correlationID))
 
-		status, message := exitStatus(exitCode, cause)
+		// Taken on every exit, including one whose report the sweep owns.
+		payload := exitPayload(project, cardID, correlationID, exitCode, cause,
+			outcomes.take(correlationID), reports.shuttingDown())
 
 		reports.report(correlationID, func() {
 			ctx, cancel := context.WithTimeout(context.Background(), onExitTimeout)
 			defer cancel()
 
-			if err := reporter.ReportStatus(ctx, cardID, project, status, message); err != nil {
+			if err := reporter.ReportStatus(ctx, payload); err != nil {
 				logger.Error("report exit status callback failed",
-					"project", project, "card_id", cardID, "status", status, "error", err)
+					"project", project, "card_id", cardID, "status", payload.WorkerStatus, "error", err)
 			}
 		})
 	}

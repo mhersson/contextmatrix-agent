@@ -434,6 +434,13 @@ model-selection review parks (no reviewer model, no fix model, no fix model
 other than the ones that already failed) report `no_model`, not `review_parked`.
 The cause never changes the exit code or `worker_status`.
 
+`serve` keeps each run's last `run_outcome` line from its masked stdout and puts
+the cause on the terminal status, with the run id (every status carries it). The
+host's own values win over the worker's: `killed`, `shutdown`, `timeout` and
+`infrastructure` (also an admission failure) replace whatever the worker wrote.
+A worker line naming a host value, or a value `serve` does not know, gives no
+cause.
+
 ## Claude Code subscription mode
 
 The mode is on when the trigger's endpoint type is `claude_code`. Every phase

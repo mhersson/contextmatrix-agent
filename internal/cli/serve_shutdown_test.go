@@ -23,6 +23,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/executor"
 	"github.com/mhersson/contextmatrix-agent/internal/webhook"
 	"github.com/mhersson/contextmatrix-backendkit/frames"
+	protocol "github.com/mhersson/contextmatrix-protocol"
 )
 
 // workerBehavior is how a fake worker answers an end_session frame.
@@ -91,7 +92,9 @@ func (f *fleet) exit(run *executor.Run, status string) {
 // does: not at all when the sweep has reported the run.
 func (f *fleet) report(run *executor.Run, status string) {
 	f.reports.report(run.CorrelationID, func() {
-		_ = f.reporter.ReportStatus(context.Background(), run.CardID, run.Project, status, "")
+		_ = f.reporter.ReportStatus(context.Background(), protocol.StatusCallbackPayload{
+			CardID: run.CardID, Project: run.Project, WorkerStatus: status, RunID: run.CorrelationID,
+		})
 	})
 }
 
@@ -263,14 +266,14 @@ func (k *killRecorder) killedAt() map[string]time.Time {
 // statusRecorder records every status callback by card.
 type statusRecorder struct {
 	mu       sync.Mutex
-	statuses map[string][]string
+	payloads map[string][]protocol.StatusCallbackPayload
 
 	// gate, when set, holds each callback until it lets it through or the
 	// callback's context ends.
 	gate func(ctx context.Context) error
 }
 
-func (s *statusRecorder) ReportStatus(ctx context.Context, cardID, _, status, _ string) error {
+func (s *statusRecorder) ReportStatus(ctx context.Context, p protocol.StatusCallbackPayload) error {
 	if s.gate != nil {
 		if err := s.gate(ctx); err != nil {
 			return err
@@ -280,7 +283,7 @@ func (s *statusRecorder) ReportStatus(ctx context.Context, cardID, _, status, _ 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.statuses[cardID] = append(s.statuses[cardID], status)
+	s.payloads[p.CardID] = append(s.payloads[p.CardID], p)
 
 	return nil
 }
@@ -302,7 +305,7 @@ type shutdownHarness struct {
 func newShutdownHarness(t *testing.T, wait time.Duration, workers map[string]workerBehavior) *shutdownHarness {
 	t.Helper()
 
-	reporter := &statusRecorder{statuses: map[string][]string{}}
+	reporter := &statusRecorder{payloads: map[string][]protocol.StatusCallbackPayload{}}
 	f := &fleet{tracker: executor.NewTracker(len(workers) + 1), reporter: reporter, reports: newExitReports()}
 	exec := &killRecorder{fleet: f, killed: map[string]time.Time{}, exitReports: true}
 	revoker := &recordingRevoker{}
@@ -358,12 +361,25 @@ func (h *shutdownHarness) shutdown(ctx context.Context, t *testing.T, limit time
 	}
 }
 
-// statuses returns the status callbacks each card received.
-func (h *shutdownHarness) statuses() map[string][]string {
+// payloads returns the status callbacks each card received.
+func (h *shutdownHarness) payloads() map[string][]protocol.StatusCallbackPayload {
 	h.reporter.mu.Lock()
 	defer h.reporter.mu.Unlock()
 
-	return maps.Clone(h.reporter.statuses)
+	return maps.Clone(h.reporter.payloads)
+}
+
+// statuses returns the worker status of each callback each card received.
+func (h *shutdownHarness) statuses() map[string][]string {
+	out := map[string][]string{}
+
+	for cardID, ps := range h.payloads() {
+		for _, p := range ps {
+			out[cardID] = append(out[cardID], p.WorkerStatus)
+		}
+	}
+
+	return out
 }
 
 // TestGracefulShutdownReportsEachRunOnce: a run reports one terminal status.
@@ -498,6 +514,18 @@ func TestGracefulShutdownSweepEndsAtItsDeadline(t *testing.T) {
 	h.shutdown(context.Background(), t, 5*time.Second)
 
 	assert.Empty(t, h.exec.killedAt())
+}
+
+func TestSettleReportsShutdownWithRunID(t *testing.T) {
+	h := newShutdownHarness(t, 50*time.Millisecond, map[string]workerBehavior{"CARD-1": ignores})
+
+	h.shutdown(context.Background(), t, 5*time.Second)
+
+	require.Len(t, h.payloads()["CARD-1"], 1)
+	got := h.payloads()["CARD-1"][0]
+	assert.Equal(t, "failed", got.WorkerStatus)
+	assert.Equal(t, "run-1", got.RunID)
+	assert.Equal(t, protocol.StopCauseShutdown, got.StopCause)
 }
 
 // TestGracefulShutdownSweepsARunAdmittedAfterTheSnapshot: a run that enters
