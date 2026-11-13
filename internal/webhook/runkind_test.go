@@ -125,7 +125,10 @@ func TestBuildRunKindSpec(t *testing.T) {
 	})
 
 	t.Run("check", func(t *testing.T) {
-		spec := s.buildRunKindSpec(checkPayload(), "run-1")
+		p := checkPayload()
+		p.BaseBranch = "playbook/run-1"
+
+		spec := s.buildRunKindSpec(p, "run-1")
 
 		assert.Equal(t, protocol.RunKindCheck, spec.Kind)
 		assert.Equal(t, "base:image", spec.Image)
@@ -135,7 +138,9 @@ func TestBuildRunKindSpec(t *testing.T) {
 		assert.Empty(t, spec.SkillsHostDir)
 		assert.Contains(t, spec.Env, "CM_RUN_KIND=check")
 		assert.Contains(t, spec.Env, "CM_CARD_ID=ABC-12")
+		assert.Contains(t, spec.Env, "CM_PROJECT=proj")
 		assert.Contains(t, spec.Env, "CM_REPO_URL=https://example.com/r.git")
+		assert.Contains(t, spec.Env, "CM_BASE_BRANCH=playbook/run-1")
 		assert.Contains(t, spec.Env, "CMX_CONTAINER_TIMEOUT_SECONDS=9000")
 		assert.Contains(t, spec.Env, "EXTRA=1")
 
@@ -249,6 +254,100 @@ func TestRunKindAdmissionFailureReportsOnce(t *testing.T) {
 	assert.Equal(t, protocol.StopCauseInfrastructure, got[0].StopCause)
 	assert.Empty(t, h.exec.launchedSpecs())
 	assert.Empty(t, h.inputDirs(t), "a run that did not launch leaves no input dir")
+}
+
+// fakeRunInputs is a RunInputStore whose Create always fails. The launch calls
+// it on the test goroutine.
+type fakeRunInputs struct {
+	removed []string
+}
+
+func (f *fakeRunInputs) Create(string) (string, error) {
+	return "", errors.New("disk full")
+}
+
+func (f *fakeRunInputs) Remove(runID string) {
+	f.removed = append(f.removed, runID)
+}
+
+func (h *harness) openAdmissions() int {
+	h.server.admissionsMu.Lock()
+	defer h.server.admissionsMu.Unlock()
+
+	return len(h.server.admissions)
+}
+
+// TestRunKindStagingFailureReportsOnce: a run whose inputs cannot be staged
+// never reaches provisioning or the executor, ends its admission and sends its
+// one failed status.
+func TestRunKindStagingFailureReportsOnce(t *testing.T) {
+	h := newHarness(t, 4)
+	inputs := &fakeRunInputs{}
+	h.server.runInputs = inputs
+
+	spec := h.runKindNow(checkPayload())
+
+	got := h.reporter.payloads()
+	require.Len(t, got, 1)
+	assert.Equal(t, "failed", got[0].WorkerStatus)
+	assert.Equal(t, protocol.RunKindCheck, got[0].Kind)
+	assert.Equal(t, spec.CorrelationID, got[0].RunID)
+	assert.Equal(t, protocol.StopCauseInfrastructure, got[0].StopCause)
+	assert.Empty(t, h.creds.provisionCalls())
+	assert.Empty(t, h.exec.launchedSpecs())
+	assert.Equal(t, []string{spec.CorrelationID}, inputs.removed)
+	assert.Zero(t, h.openAdmissions(), "the admission is ended")
+}
+
+// TestRunKindStopDuringAdmission: ContextMatrix records a run kind as killed
+// once its kind-scoped /kill answers, so a stop that lands before the launch
+// leaves no status, no run and no input dir, whether staging succeeds or not.
+func TestRunKindStopDuringAdmission(t *testing.T) {
+	cases := []struct {
+		name   string
+		inputs *fakeRunInputs // nil keeps the harness's real store
+	}{
+		{name: "staged"},
+		{name: "staging fails", inputs: &fakeRunInputs{}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, 4)
+			if tc.inputs != nil {
+				h.server.runInputs = tc.inputs
+			}
+
+			p := checkPayload()
+			spec := h.server.buildRunKindSpec(p, mintRunID(p.CardID+"-"+p.Kind))
+			adm, ctx := h.server.beginAdmission(context.Background(), spec.Key())
+
+			kill := h.request(t, http.MethodPost, "/kill",
+				protocol.KillPayload{CardID: p.CardID, Project: p.Project, Kind: p.Kind}, nowTS())
+			answered := make(chan *httptest.ResponseRecorder, 1)
+
+			go func() { answered <- h.serve(kill) }()
+
+			require.Eventually(t, func() bool { return ctx.Err() != nil }, time.Second, time.Millisecond)
+			h.server.launchRunKind(ctx, adm, p, spec)
+
+			select {
+			case w := <-answered:
+				require.Equal(t, http.StatusOK, w.Code)
+			case <-time.After(5 * time.Second):
+				t.Fatal("the stop never answered")
+			}
+
+			assert.Empty(t, h.reporter.payloads(), "a stopped run kind reports nothing")
+			assert.Empty(t, h.exec.launchedSpecs())
+			assert.Empty(t, h.inputDirs(t))
+			assert.Zero(t, h.openAdmissions())
+
+			if tc.inputs != nil {
+				assert.Equal(t, []string{spec.CorrelationID}, tc.inputs.removed)
+			}
+		})
+	}
 }
 
 func TestRunKindLaunchFailureRemovesItsInputDir(t *testing.T) {

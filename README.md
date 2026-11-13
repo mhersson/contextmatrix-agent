@@ -43,10 +43,10 @@ flowchart LR
 
     subgraph serve["contextmatrix-agent serve · host service"]
         direction TB
-        S["Hosts CM lifecycle webhooks<br/>Launches one Docker worker per card<br/>Stages + refreshes CM-provisioned secrets<br/>Streams /logs · drains on SIGTERM"]
+        S["Hosts CM lifecycle webhooks<br/>Launches one Docker worker per card and per run kind<br/>Stages + refreshes CM-provisioned secrets<br/>Streams /logs · drains on SIGTERM"]
     end
 
-    subgraph work["contextmatrix-agent work · one Docker container per card"]
+    subgraph work["contextmatrix-agent work · one Docker container per card run"]
         direction TB
         W["Clone repo · claim the card<br/>Cut cm/&lt;card-id&gt; (Jira cards: cm/&lt;card-id&gt;-&lt;KEY&gt;)"]
         FSM["Orchestrator FSM - mode-gated on Cfg.Interactive<br/>plan → execute → judge → document → review → integrate → pr_gates → done"]

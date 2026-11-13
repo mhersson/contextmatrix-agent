@@ -135,7 +135,7 @@ func runServe(ctx context.Context, configPath string) error {
 
 	// Run-kind inputs are not secrets: they live on disk under the log dir,
 	// never in the secrets dir.
-	inputs := runinput.New(filepath.Join(cfg.LogDir, ".run-inputs"))
+	inputs := runinput.New(filepath.Join(cfg.LogDir, ".run-inputs"), logger)
 
 	stopLogPruner := startLogPruner(files, time.Duration(cfg.LogRetentionDays)*24*time.Hour, 24*time.Hour, logger)
 	defer stopLogPruner()
@@ -662,10 +662,10 @@ func containerLogSink(
 // onContainerExit builds the executor OnExit hook. Order matters: the run_end
 // event goes out before files.End (End closes the writer), and End, Teardown,
 // a run kind's input dir removal, the proxy-token Revoke and RemoveSessionKey
-// all run before the status callback that lets CM admit a re-trigger. Every cleanup is keyed by this
-// run's correlation id, so a stale exit racing a re-trigger inside the
-// pump-drain window touches only its own run. The callback is skipped when the
-// shutdown sweep has already reported the run.
+// all run before the status callback that lets CM admit a re-trigger. Every
+// cleanup is keyed by this run's correlation id, so a stale exit racing a
+// re-trigger inside the pump-drain window touches only its own run. The
+// callback is skipped when the shutdown sweep has already reported the run.
 func onContainerExit(
 	reporter webhook.StatusReporter,
 	reports *exitReports,

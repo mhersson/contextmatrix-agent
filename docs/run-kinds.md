@@ -82,15 +82,16 @@ status is `failed` with its kind and stop cause `shutdown`
 
 ## Credentials
 
-The git token is staged into the run's own credentials dir once and never
-refreshed: the payload carries no expiry, and the run clones once, at start.
-ContextMatrix narrows a GitHub App installation's token to read-only; a
-personal access token cannot be narrowed, so on a PAT installation the run
-gets the PAT with whatever scope the operator gave it. An `investigate` run gets its LLM
-access as a card run does: a stand-in token for serve's LLM proxy, or the
-subscription token for a `claude_code` endpoint. A `check` registers nothing
-with the proxy and stages no LLM values (`stageLLM`,
-`internal/webhook/launch.go`). Redaction and the env file: see
+The agent stages the payload's git token into the run's own credentials dir
+once, for the clone at start, and never refreshes it: the payload carries no
+expiry. The agent cannot narrow the token, so on a personal access token
+installation the run may carry the PAT's full scope. The run kinds give the
+model no tool that writes to git.
+
+An `investigate` run gets its LLM access as a card run does: a stand-in token
+for serve's LLM proxy, or the subscription token for a `claude_code` endpoint.
+A `check` registers nothing with the proxy and stages no LLM values
+(`stageLLM`, `internal/webhook/launch.go`). Redaction and the env file: see
 [secrets.md](secrets.md#run-kinds).
 
 ## Inputs

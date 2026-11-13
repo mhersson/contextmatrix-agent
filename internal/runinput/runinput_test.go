@@ -13,7 +13,7 @@ import (
 
 func TestStore(t *testing.T) {
 	root := filepath.Join(t.TempDir(), ".run-inputs")
-	s := runinput.New(root)
+	s := runinput.New(root, nil)
 
 	dir, err := s.Create("ABC-12-check-ab12cd34")
 	require.NoError(t, err)

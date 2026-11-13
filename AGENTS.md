@@ -6,9 +6,9 @@ see [`README.md`](README.md).
 
 ContextMatrix Agent is a Go agent harness that runs as ContextMatrix's **task
 backend**. One binary, two roles: **`serve`** hosts CM lifecycle webhooks and
-launches one Docker worker container per card; **`work`** is the container
-entrypoint that clones the target repo, claims the card, drives the harness
-(HITL or autonomous), then commits, pushes, and reports back. It edits target
+launches one Docker worker container per card and per run kind; **`work`** is
+the container entrypoint that clones the target repo, claims the card, drives
+the harness (HITL or autonomous), then commits, pushes, and reports back. It edits target
 repositories but treats ContextMatrix - reached over MCP - as the source of
 truth for card state. Backend selection lives in ContextMatrix, not here.
 
@@ -58,6 +58,7 @@ internal/executor/     → Executor interface + DockerExecutor; Tracker (concurr
 internal/attempt/      → stamps the per-card container-run ordinal onto the transcript envelope, so a restarted card's overlapping event sequences stay distinguishable
 internal/runoutcome/   → the worker's last stdout line (run_outcome): why the run ended; written by work, read by serve
 internal/cardid/       → the card ID pattern shared by work and /run-kind
+internal/runinput/     → a run kind's input dir on disk (<log_dir>/.run-inputs/<run id>/), mounted read-only at /run/cm-input
 internal/secrets/      → Source (static env file) + RunCredentials (stages per-run CM-provisioned credentials)
 
 # serve plumbing

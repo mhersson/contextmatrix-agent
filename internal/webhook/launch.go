@@ -265,14 +265,14 @@ func (s *Server) provisionAndLaunch(ctx context.Context, req launchRequest) laun
 	spec := req.Spec
 
 	if _, tracked := s.tracker.Get(req.Key); tracked {
-		s.logger.Warn("trigger rejected: card already running",
+		s.logger.Warn("launch rejected: card already running",
 			"project", project, "card_id", cardID)
 
 		return infraFailure("card already running")
 	}
 
 	if req.GitToken == "" {
-		s.logger.Warn("trigger rejected: no git credential source",
+		s.logger.Warn("launch rejected: no git credential source",
 			"project", project, "card_id", cardID)
 
 		return infraFailure("CM did not provision a git token")
@@ -342,21 +342,21 @@ func (s *Server) llmGuard(req launchRequest) launchFailure {
 	project, cardID := req.Key.Project, req.Key.CardID
 
 	if req.LLM == nil {
-		s.logger.Warn("trigger rejected: no llm_endpoint credential source",
+		s.logger.Warn("launch rejected: no llm_endpoint credential source",
 			"project", project, "card_id", cardID)
 
 		return infraFailure("CM did not provision an llm_endpoint")
 	}
 
 	if req.LLM.Type == protocol.LLMEndpointTypeClaudeCode && req.LLM.OAuthToken == "" {
-		s.logger.Warn("trigger rejected: claude_code endpoint without an oauth token",
+		s.logger.Warn("launch rejected: claude_code endpoint without an oauth token",
 			"project", project, "card_id", cardID)
 
 		return infraFailure("CM did not provision a Claude Code oauth token")
 	}
 
 	if s.llmProxy == nil {
-		s.logger.Error("trigger rejected: LLM proxy not configured",
+		s.logger.Error("launch rejected: LLM proxy not configured",
 			"project", project, "card_id", cardID)
 
 		return infraFailure("LLM proxy not configured")

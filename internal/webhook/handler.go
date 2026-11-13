@@ -27,7 +27,7 @@ import (
 
 const (
 	// correlationHeader carries ContextMatrix's trace ID, fresh on every
-	// trigger attempt. handleTrigger appends it to the run id it mints, which
+	// attempt. requestRunID appends it to the run id it mints, which
 	// becomes executor.LaunchSpec.CorrelationID (the container label), so host
 	// and worker logs stitch to the same CM trace. That run id is also what
 	// SessionID keys redaction sessions by (see addSessionSecrets and
@@ -510,13 +510,8 @@ func SessionID(project, cardID, correlationID string) string {
 	return project + "/" + cardID + "/" + correlationID
 }
 
-// requestRunID mints the run id for a request: base plus a random suffix, then
-// the X-Correlation-ID header, which ContextMatrix sends fresh on every
-// attempt. The header is namespaced, never trusted verbatim: the id feeds the
-// per-run keying that SessionID, RunCredentials, the LLM proxy and the filelog
-// all lean on, so the minted part keeps every admitted run unique whatever a
-// caller sends, while the header stays recognizable inside it for trace
-// stitching.
+// requestRunID is mintRunID(base) plus the X-Correlation-ID header: the
+// minted part keeps every run's per-run keying unique whatever a caller sends.
 func requestRunID(r *http.Request, base string) string {
 	id := mintRunID(base)
 	if supplied := r.Header.Get(correlationHeader); supplied != "" {
@@ -526,15 +521,10 @@ func requestRunID(r *http.Request, base string) string {
 	return id
 }
 
-// mintRunID builds a per-run correlation id: cardID plus a short random
-// suffix, so two triggers for the same card always get distinct ids - the
-// X-Correlation-ID header is namespaced onto this base, never trusted
-// verbatim, because SessionID, the RunCredentials teardown, the LLM proxy, and
-// the filelog writer registry all key per-run state by this id.
-// crypto/rand.Text cannot fail, so this always returns a fresh, non-empty
-// value - handleTrigger never needs an error path for it.
-func mintRunID(cardID string) string {
-	return cardID + "-" + strings.ToLower(rand.Text()[:8])
+// mintRunID appends a short random suffix to base, so every run gets a fresh
+// id; crypto/rand.Text cannot fail.
+func mintRunID(base string) string {
+	return base + "-" + strings.ToLower(rand.Text()[:8])
 }
 
 // mobGuestsJSON compact-encodes the payload's guest specs for the per-run
@@ -691,14 +681,7 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 
 	env = append(env, "CMX_GATES_COPILOT_THREAD_REPLIES="+strconv.FormatBool(s.launchEnv.GatesCopilotThreadReplies))
 
-	if p.Selection != nil {
-		if b, err := json.Marshal(p.Selection); err == nil {
-			env = append(env, "CMX_SELECTION="+string(b))
-		} else {
-			s.logger.Warn("failed to marshal selection context; container will use default model",
-				"project", p.Project, "card_id", p.CardID, "error", err)
-		}
-	}
+	env = append(env, s.selectionEnv(executor.RunKey{Project: p.Project, CardID: p.CardID}, p.Selection)...)
 
 	if p.Verify != nil {
 		if b, err := json.Marshal(p.Verify); err == nil {
@@ -743,6 +726,24 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 		MCPURL:         s.launchEnv.MCPURL,
 		Attempt:        ordinal,
 	}
+}
+
+// selectionEnv renders a run's selection context as CMX_SELECTION. A nil one,
+// or one that fails to encode, yields none and the worker uses its default model.
+func (s *Server) selectionEnv(k executor.RunKey, sel *protocol.SelectionContext) []string {
+	if sel == nil {
+		return nil
+	}
+
+	b, err := json.Marshal(sel)
+	if err != nil {
+		s.logger.Warn("failed to marshal selection context; container will use default model",
+			"project", k.Project, "card_id", k.CardID, "kind", k.Kind, "error", err)
+
+		return nil
+	}
+
+	return []string{"CMX_SELECTION=" + string(b)}
 }
 
 // workerKnobEnv is the CMX_* knobs card runs and run kinds both take. Zero and

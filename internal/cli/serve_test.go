@@ -243,7 +243,7 @@ func TestOnContainerExitClosesLogFile(t *testing.T) {
 	bridge := logbridge.NewBridge(logbridge.BridgeConfig{Hub: hub})
 	registry := logbridge.NewRedactorRegistry(bridge)
 
-	onExit := onContainerExit(rep, newExitReports(), newRunOutcomes(), creds, runinput.New(t.TempDir()), &recordingRevoker{}, files, registry, bridge, logger)
+	onExit := onContainerExit(rep, newExitReports(), newRunOutcomes(), creds, runinput.New(t.TempDir(), logger), &recordingRevoker{}, files, registry, bridge, logger)
 	onExit(executor.RunKey{Project: "proj", CardID: "CARD-1"}, 0, executor.ExitNormal, 1, "corr-1")
 
 	data, err := os.ReadFile(filepath.Join(dir, "proj", "card-1.log"))
@@ -305,7 +305,7 @@ func newExitHarness(t *testing.T, logDir string) *exitHarness {
 	revoker := &recordingRevoker{}
 	rep := &stubReporter{}
 	outcomes := newRunOutcomes()
-	inputs := runinput.New(t.TempDir())
+	inputs := runinput.New(t.TempDir(), logger)
 
 	hub := logbridge.NewHub(func(e protocol.LogEntry) string { return e.Project }, nil)
 	bridge := logbridge.NewBridge(logbridge.BridgeConfig{Hub: hub, MapExtra: agentMapExtra})

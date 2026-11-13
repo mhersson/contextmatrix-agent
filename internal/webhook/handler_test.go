@@ -445,7 +445,7 @@ func newHarness(t *testing.T, maxConcurrent int) *harness {
 		Credentials:    creds,
 		SessionSecrets: sessions,
 		LLMProxy:       proxy,
-		RunInputs:      runinput.New(inputRoot),
+		RunInputs:      runinput.New(inputRoot, quietLogger()),
 		LaunchEnv: LaunchEnv{
 			BaseImage:               "base:image",
 			MCPURL:                  "http://cm:8080/mcp",

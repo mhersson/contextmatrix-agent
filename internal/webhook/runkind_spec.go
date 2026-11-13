@@ -1,8 +1,6 @@
 package webhook
 
 import (
-	"encoding/json"
-
 	"github.com/mhersson/contextmatrix-agent/internal/executor"
 	protocol "github.com/mhersson/contextmatrix-protocol"
 )
@@ -30,15 +28,7 @@ func (s *Server) buildRunKindSpec(p protocol.RunKindPayload, correlationID strin
 
 	if usesModel(p.Kind) {
 		env = append(env, "CM_MODEL="+p.Model, "CM_MAX_COST_USD="+formatFloat(p.MaxCostUSD))
-
-		if p.Selection != nil {
-			if b, err := json.Marshal(p.Selection); err == nil {
-				env = append(env, "CMX_SELECTION="+string(b))
-			} else {
-				s.logger.Warn("failed to marshal selection context; container will use default model",
-					"project", p.Project, "card_id", p.CardID, "kind", p.Kind, "error", err)
-			}
-		}
+		env = append(env, s.selectionEnv(k, p.Selection)...)
 	}
 
 	env = append(env, s.workerKnobEnv()...)

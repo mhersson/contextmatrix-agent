@@ -24,12 +24,18 @@ var unsafe = regexp.MustCompile(`[^A-Za-z0-9_-]`)
 
 // Store owns the per-run input dirs under one root.
 type Store struct {
-	root string
+	root   string
+	logger *slog.Logger
 }
 
-// New returns a Store rooted at root, which it creates on first use.
-func New(root string) *Store {
-	return &Store{root: root}
+// New returns a Store rooted at root, which it creates on first use. A nil
+// logger uses the default.
+func New(root string, logger *slog.Logger) *Store {
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	return &Store{root: root, logger: logger}
 }
 
 func (s *Store) dir(runID string) string {
@@ -54,7 +60,7 @@ func (s *Store) Create(runID string) (string, error) {
 // Remove deletes the run's dir. Idempotent.
 func (s *Store) Remove(runID string) {
 	if err := os.RemoveAll(s.dir(runID)); err != nil {
-		slog.Warn("remove run input dir failed", "run_id", runID, "error", err)
+		s.logger.Warn("remove run input dir failed", "run_id", runID, "error", err)
 	}
 }
 
