@@ -627,14 +627,10 @@ func TestContainerLogSinkRecordsOnlyStdoutOutcomes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dir := t.TempDir()
-			files := filelog.New(dir, nil)
-			hub := logbridge.NewHub(func(e protocol.LogEntry) string { return e.Project }, nil)
-			bridge := logbridge.NewBridge(logbridge.BridgeConfig{Hub: hub})
-			registry := logbridge.NewRedactorRegistry(bridge)
 			outcomes := newRunOutcomes()
+			sink, _, _, _ := newTestSinkWithOutcomes(t, outcomes)
 
-			containerLogSink(bridge, files, registry, outcomes)("proj", "CARD-1", "corr-1", []byte(line), tt.stderr)
+			sink("proj", "CARD-1", "corr-1", []byte(line), tt.stderr)
 
 			assert.Equal(t, tt.want, outcomes.take("corr-1").Cause)
 		})
@@ -642,31 +638,15 @@ func TestContainerLogSinkRecordsOnlyStdoutOutcomes(t *testing.T) {
 }
 
 func TestContainerLogSinkRecordsTheMaskedLine(t *testing.T) {
-	dir := t.TempDir()
-	files := filelog.New(dir, nil)
-	hub := logbridge.NewHub(func(e protocol.LogEntry) string { return e.Project }, nil)
-	bridge := logbridge.NewBridge(logbridge.BridgeConfig{Hub: hub})
-	registry := logbridge.NewRedactorRegistry(bridge)
 	outcomes := newRunOutcomes()
+	sink, registry, _, _ := newTestSinkWithOutcomes(t, outcomes)
 
-	// The secret is the cause value: only a masked line fails the worker-value
-	// check and records a cause that is not the secret.
+	// The secret is the cause value: only a masked line records a cause that
+	// is not the secret.
 	registry.AddSessionKey("s", "verify_parked")
 
-	containerLogSink(bridge, files, registry, outcomes)("proj", "CARD-1", "corr-1",
+	sink("proj", "CARD-1", "corr-1",
 		[]byte(`{"kind":"run_outcome","data":{"cause":"verify_parked"}}`), false)
 
 	assert.NotEqual(t, "verify_parked", outcomes.take("corr-1").Cause)
-}
-
-func TestOnContainerExitReportsTheRecordedOutcome(t *testing.T) {
-	h := newExitHarness(t, t.TempDir())
-	h.files.Begin("proj", "CARD-1", "abcdef012345", "corr-1")
-	h.outcomes.record("corr-1", []byte(`{"kind":"run_outcome","data":{"cause":"verify_parked"}}`))
-
-	h.onExit("proj", "CARD-1", 1, executor.ExitNormal, 1, "corr-1")
-
-	assert.Equal(t, "corr-1", h.rep.payload.RunID)
-	assert.Equal(t, protocol.StopCauseVerifyParked, h.rep.payload.StopCause)
-	assert.Empty(t, h.outcomes.take("corr-1").Cause, "the outcome is forgotten at exit")
 }

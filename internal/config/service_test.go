@@ -741,8 +741,6 @@ func writeServeYAML(t *testing.T, body string) string {
 	return path
 }
 
-// clearServiceEnv unsets any CMX_* vars that could leak into a default/file
-// test from the developer's shell. t.Setenv restores them after the test.
 // clearServiceEnv scrubs the CMX_* overrides and points HOME at a temp dir, so
 // the default log_dir never resolves under the real home. It returns that HOME.
 func clearServiceEnv(t *testing.T) string {
