@@ -23,6 +23,7 @@ type checkDeps struct {
 	candidates func(ws string) []orchestrator.VerifyCandidate
 	trial      func(ctx context.Context, ws string, c orchestrator.VerifyCandidate, timeout time.Duration, env []string) (trial, output string, err error)
 	mask       func(string) string
+	absent     func(ctx context.Context, ws string, tokens, declared []string) ([]string, error)
 }
 
 // newCheckDeps wires the check to the gate's detection and trial, logging to
@@ -33,18 +34,31 @@ func newCheckDeps(log *slog.Logger, mask func(string) string) checkDeps {
 		trial: func(ctx context.Context, ws string, c orchestrator.VerifyCandidate, timeout time.Duration, env []string) (string, string, error) {
 			return orchestrator.TrialVerify(ctx, log, ws, c, timeout, env, mask)
 		},
-		mask: mask,
+		mask:   mask,
+		absent: absentFromRepo,
 	}
 }
 
 // check lists the base branch's verify candidates and, when in has a Verify,
-// trial-runs it once if trialCandidate accepts it.
+// trial-runs it once if trialCandidate accepts it. A Text adds the tokens it
+// mentions that the base branch lacks.
 func check(ctx context.Context, ws string, in protocol.CheckInput, d checkDeps, emit *events.Emitter) (protocol.CheckResult, error) {
 	cands := d.candidates(ws)
 
 	res := protocol.CheckResult{Candidates: make([]string, 0, len(cands))}
 	for _, c := range cands {
 		res.Candidates = append(res.Candidates, c.Display)
+	}
+
+	if in.Text != "" {
+		declared := append([]string{in.CurrentCommand}, res.Candidates...)
+
+		absent, err := d.absent(ctx, ws, textTokens(in.Text), declared)
+		if err != nil {
+			return protocol.CheckResult{}, fmt.Errorf("text check: %w", err)
+		}
+
+		res.AbsentFromRepo = absent
 	}
 
 	if in.Verify == nil {

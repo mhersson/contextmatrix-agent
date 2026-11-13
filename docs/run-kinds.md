@@ -181,6 +181,27 @@ bytes are dropped, then the first 32 are kept; `absent_from_repo` is cut at 64
 entries, each truncated to 512 bytes at a rune boundary. Absent entries are
 never dropped for length, since a dropped entry could let the text check pass.
 
+## Text check
+
+When the input has `text` (proposed `## Sentinel` content), `check` extracts
+what it mentions and reports the ones absent from the base branch in
+`absent_from_repo` (`textTokens` and `absentFromRepo`,
+`internal/runkind/textcheck.go`):
+
+- a URL is a `scheme://...` run with trailing `.,;:)]}'"` and backticks
+  trimmed; its host is a token too;
+- a hostname is a bare token of three or more dot-separated labels whose last
+  label is letters only, so a version or a two-label file name is not one;
+- a command is an inline code span or a non-empty line of a fenced block,
+  trimmed, without a leading `$ `.
+
+A token is present when it equals a declared command by fields (the current
+verify command or a candidate, compared as the trial compares commands),
+appears in tracked content at HEAD (`git grep -F`, case-insensitive for
+hostnames), or is contained in a tracked path. Git runs in the clone with fixed
+strings and no shell. ContextMatrix subtracts the card's own text from
+`absent_from_repo` and decides the verdict.
+
 ## Where it lives
 
 | File                                   | Responsibility                                                         |
@@ -200,4 +221,5 @@ never dropped for length, since a dropped entry could let the text check pass.
 | `internal/cli/runkind.go`              | The worker's run-kind entry: env, secrets and input, the outcome line  |
 | `internal/runkind/runkind.go`          | The spec, the clone, the kind switch, masking and the stop cause       |
 | `internal/runkind/check.go`            | The check kind: candidates, the trial rules, the trial and its events  |
+| `internal/runkind/textcheck.go`        | The text check: token extraction and the base-branch lookup            |
 | `internal/runkind/limits.go`           | The result size limits                                                 |
