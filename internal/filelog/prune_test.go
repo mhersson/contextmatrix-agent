@@ -61,3 +61,19 @@ func TestPruneNeverRemovesAnOpenLog(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(data), "after prune\n")
 }
+
+func TestPruneTreatsGlobMetacharactersInDirLiterally(t *testing.T) {
+	now := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
+	day := 24 * time.Hour
+	root := t.TempDir()
+	dir := filepath.Join(root, "logs[a-z]")
+	sibling := filepath.Join(root, "logsb", "p", "x.log")
+
+	stale := filepath.Join(dir, "p", "a.log")
+	touch(t, stale, now.Add(-31*day))
+	touch(t, sibling, now.Add(-31*day))
+
+	assert.Equal(t, 1, New(dir, testLogger()).Prune(now, 30*day))
+	assert.NoFileExists(t, stale)
+	assert.FileExists(t, sibling)
+}

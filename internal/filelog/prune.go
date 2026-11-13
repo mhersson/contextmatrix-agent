@@ -1,6 +1,7 @@
 package filelog
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
@@ -23,11 +24,17 @@ func (l *Logger) Prune(now time.Time, maxAge time.Duration) int {
 		open[cf.path] = true
 	}
 
-	paths, err := filepath.Glob(filepath.Join(l.dir, "*", "*.log"))
+	// fs.Glob over the dir keeps metacharacters in a configured log_dir literal.
+	matches, err := fs.Glob(os.DirFS(l.dir), "*/*.log")
 	if err != nil {
 		l.logger.Warn("filelog: prune glob failed", "error", err)
 
 		return 0
+	}
+
+	paths := make([]string, len(matches))
+	for i, m := range matches {
+		paths[i] = filepath.Join(l.dir, m)
 	}
 
 	cutoff := now.Add(-maxAge)
