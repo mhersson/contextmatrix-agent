@@ -22,6 +22,7 @@ func validServiceConfig() ServiceConfig {
 		MaxConcurrent:    5,
 		Port:             9092,
 		ContainerTimeout: 150 * time.Minute,
+		LogRetentionDays: 30,
 
 		GatesPollIntervalSeconds:       DefaultGatesPollIntervalSeconds,
 		GatesCIWaitTimeoutSeconds:      DefaultGatesCIWaitTimeoutSeconds,
@@ -62,7 +63,7 @@ func TestServiceDefaults(t *testing.T) {
 	assert.Equal(t, 1000, cfg.MessageDedupCacheSize)
 	assert.Equal(t, 600, cfg.BashTimeoutMaxSeconds)
 	assert.Equal(t, 131072, cfg.ToolOutputMaxBytes)
-	assert.Empty(t, cfg.LogDir, "log_dir is opt-in; empty by default")
+	assert.NotEmpty(t, cfg.LogDir, "the durable log is always on")
 }
 
 func TestServiceLoadFromFile(t *testing.T) {
@@ -742,8 +743,13 @@ func writeServeYAML(t *testing.T, body string) string {
 
 // clearServiceEnv unsets any CMX_* vars that could leak into a default/file
 // test from the developer's shell. t.Setenv restores them after the test.
-func clearServiceEnv(t *testing.T) {
+// clearServiceEnv scrubs the CMX_* overrides and points HOME at a temp dir, so
+// the default log_dir never resolves under the real home. It returns that HOME.
+func clearServiceEnv(t *testing.T) string {
 	t.Helper()
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 
 	for _, e := range []string{
 		"CMX_CONTEXTMATRIX_URL", "CMX_PORT",
@@ -757,13 +763,15 @@ func clearServiceEnv(t *testing.T) {
 		"CMX_COMPACTION_KEEP_RECENT_TURNS", "CMX_REPLAY_REASONING",
 		"CMX_GATES_POLL_INTERVAL_SECONDS", "CMX_GATES_CI_WAIT_TIMEOUT_SECONDS",
 		"CMX_GATES_COPILOT_WAIT_TIMEOUT_SECONDS", "CMX_GATES_COPILOT_THREAD_REPLIES",
-		"CMX_LOG_LEVEL",
+		"CMX_LOG_LEVEL", "CMX_LOG_RETENTION_DAYS",
 	} {
 		if _, ok := os.LookupEnv(e); ok {
 			t.Setenv(e, "")
 			require.NoError(t, os.Unsetenv(e))
 		}
 	}
+
+	return home
 }
 
 func TestServiceAdminBindAddr_DefaultLoopback(t *testing.T) {

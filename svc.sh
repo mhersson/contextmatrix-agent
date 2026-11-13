@@ -47,7 +47,7 @@
 # root-owned and not auto-created for a user service - either pre-create
 # /var/run/cm-agent and chown it to the operator, or set secrets_dir to a
 # path under %h (e.g. ~/.cm-agent/secrets). Both locations are whitelisted
-# in ReadWritePaths. The recommended log_dir (~/.contextmatrix/agent/logs)
+# in ReadWritePaths. The default log_dir (~/.contextmatrix/agent/logs)
 # is whitelisted via -%h/.contextmatrix; a log_dir elsewhere needs its own
 # ReadWritePaths entry.
 #

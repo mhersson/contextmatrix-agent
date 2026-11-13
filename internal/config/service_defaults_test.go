@@ -28,6 +28,8 @@ func TestDefaultsYAML(t *testing.T) {
 		assert.Contains(t, text, key)
 	}
 
+	assert.Contains(t, text, "log_dir: ~/.contextmatrix/agent/logs")
+	assert.Contains(t, text, "log_retention_days: 30")
 	assert.Contains(t, text, "worker_extra_env: {}")
 	assert.Contains(t, text, "image_list_filters:\n    - contextmatrix-agent")
 	assert.NotContains(t, text, "null")
@@ -44,4 +46,48 @@ func TestDefaultsYAML(t *testing.T) {
 	err = cfg.Validate()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "contextmatrix_url")
+}
+
+func TestLogDirDefaultsUnderHome(t *testing.T) {
+	home := clearServiceEnv(t)
+
+	cfg, err := LoadService("")
+	require.NoError(t, err)
+
+	assert.Equal(t, filepath.Join(home, ".contextmatrix", "agent", "logs"), cfg.LogDir)
+	assert.Equal(t, 30, cfg.LogRetentionDays)
+}
+
+func TestLogDirOverrides(t *testing.T) {
+	home := clearServiceEnv(t)
+
+	for name, tc := range map[string]struct{ yaml, want string }{
+		"tilde slash": {"log_dir: ~/elsewhere\n", filepath.Join(home, "elsewhere")},
+		"bare tilde":  {"log_dir: \"~\"\n", home},
+		"absolute":    {"log_dir: /abs/logs\n", "/abs/logs"},
+		"empty":       {"log_dir: \"\"\n", filepath.Join(home, ".contextmatrix", "agent", "logs")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "serve.yaml")
+			require.NoError(t, os.WriteFile(path, []byte(tc.yaml), 0o600))
+
+			cfg, err := LoadService(path)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, cfg.LogDir)
+		})
+	}
+}
+
+func TestLogRetentionDaysValidated(t *testing.T) {
+	for days, wantErr := range map[int]bool{-1: true, 0: true, 1: false} {
+		cfg := validServiceConfig()
+		cfg.LogRetentionDays = days
+
+		err := cfg.Validate()
+		if wantErr {
+			assert.ErrorContains(t, err, "log_retention_days", "days=%d", days)
+		} else {
+			assert.NoError(t, err, "days=%d", days)
+		}
+	}
 }

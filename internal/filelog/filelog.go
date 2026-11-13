@@ -58,7 +58,8 @@ type cardFile struct {
 	closed      bool
 }
 
-// New builds a Logger rooted at dir. An empty dir disables file logging.
+// New builds a Logger rooted at dir. An empty dir builds a disabled Logger
+// whose every call no-ops.
 func New(dir string, logger *slog.Logger) *Logger {
 	if logger == nil {
 		logger = slog.Default()
@@ -103,9 +104,12 @@ func (l *Logger) Begin(project, cardID, containerID, correlationID string) {
 
 	p := l.path(project, cardID)
 
-	keepKey := runKey(project, cardID, correlationID)
+	l.closeCard(runKey(project, cardID, correlationID), -1, causeSuperseded) // supersede this run id's still-open entry, if any
 
-	l.closeCard(keepKey, -1, causeSuperseded) // supersede this run id's still-open entry, if any
+	// Held until the writer is registered: Prune takes the same lock, so it can
+	// never sweep a log between its open and its registration.
+	l.mu.Lock()
+	defer l.mu.Unlock()
 
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		l.logger.Warn("filelog: mkdir failed", "project", project, "card_id", cardID, "error", err)
@@ -128,9 +132,7 @@ func (l *Logger) Begin(project, cardID, containerID, correlationID string) {
 		l.logger.Warn("filelog: write header failed", "project", project, "card_id", cardID, "error", err)
 	}
 
-	l.mu.Lock()
 	l.files[runKey(project, cardID, correlationID)] = &cardFile{f: f, path: p, containerID: containerID, runID: correlationID}
-	l.mu.Unlock()
 }
 
 // Write appends one line (with a trailing newline) to the run's file. No-op if

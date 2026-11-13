@@ -129,9 +129,11 @@ func runServe(ctx context.Context, configPath string) error {
 	// webhook launch guards.
 	credentials := secrets.NewRunCredentials(cfg.SecretsDir, cfg.ContextMatrixURL, cfg.APIKey, logger)
 
-	// Per-card container-output logs. Empty cfg.LogDir disables the feature; the
-	// returned logger no-ops every call, so wiring below stays unconditional.
+	// Per-card container-output logs, always on; cfg.LogDir is never empty.
 	files := filelog.New(cfg.LogDir, logger)
+
+	stopLogPruner := startLogPruner(files, time.Duration(cfg.LogRetentionDays)*24*time.Hour, 24*time.Hour, logger)
+	defer stopLogPruner()
 
 	docker, err := executor.NewClient()
 	if err != nil {
