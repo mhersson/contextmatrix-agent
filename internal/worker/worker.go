@@ -832,7 +832,7 @@ func isReviewParked(err error) bool {
 // reviewParkCause is the stop cause of a review park: the model-selection
 // reasons are a missing model, not review findings left.
 func reviewParkCause(err error) string {
-	if rp, ok := errors.AsType[*orchestrator.ReviewParkedError](err); ok && rp.NoModel() {
+	if rp, ok := errors.AsType[*orchestrator.ReviewParkedError](err); ok && rp.NoModel {
 		return protocol.StopCauseNoModel
 	}
 

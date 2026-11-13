@@ -2156,6 +2156,7 @@ func TestReviewLoopParksOnLowDeadline(t *testing.T) {
 				assert.Zero(t, modelCallCount(client), "no model call before the park")
 				assert.Equal(t, reviewParkedNoTime, parked.Reason,
 					"the park carries the deadline reserve as its cause")
+				assert.False(t, parked.NoModel)
 
 				return
 			}
@@ -2851,6 +2852,7 @@ func TestRunSpecialistsNoReviewerParksInstead(t *testing.T) {
 	var parked *ReviewParkedError
 
 	require.ErrorAs(t, err, &parked, "an empty panel must park rather than panic")
+	assert.True(t, parked.NoModel, "an empty panel is a model-selection park")
 }
 
 // TestRunSpecialistsMaxTurnsMarksTruncated proves a specialist that hits its
@@ -3872,6 +3874,7 @@ func TestRunReviewRestartsRoundsAfterACapPark(t *testing.T) {
 
 			require.ErrorAs(t, runReview(context.Background(), newReviewRun(d, tc, 0)), &parked)
 			require.Equal(t, tt.wantReason, parked.Reason)
+			assert.False(t, parked.NoModel, "a cap park is not a model-selection failure")
 
 			parkedBody := tt.ops.lastBody()
 			require.NotEmpty(t, extractSection(parkedBody, reviewCapParkHeading),
@@ -4408,6 +4411,7 @@ func TestReviewFixNoAlternativeModelParks(t *testing.T) {
 			require.ErrorAs(t, err, &parked, "no alternative fix model parks; err=%v", err)
 			assert.Equal(t, tc.wantReason, parked.Reason,
 				"the park names the cause this row exercises")
+			assert.True(t, parked.NoModel, "a model-selection park carries the typed flag")
 			assert.Equal(t, 1, countPrefix(git.recorded(), "CommitFixup:"), "exactly one fix round ran; git=%v", git.recorded())
 		})
 	}
@@ -5332,6 +5336,7 @@ func TestCleanupPassRunsDespiteExhaustedFixers(t *testing.T) {
 
 		require.ErrorAs(t, err, &parked)
 		assert.Equal(t, reviewParkedFixExhausted, parked.Reason)
+		assert.True(t, parked.NoModel)
 	})
 
 	t.Run("the cleanup pass still runs", func(t *testing.T) {
@@ -7931,25 +7936,5 @@ func TestReviewPanelReportsNoExclusionForAnUnusedDefault(t *testing.T) {
 		if ev.Kind == string(events.StateChange) && ev.Data["event"] == "replay_excluded" {
 			assert.NotEqual(t, "default/model", ev.Data["model"], "default model never ran in the panel")
 		}
-	}
-}
-
-func TestReviewParkedErrorNoModel(t *testing.T) {
-	cases := []struct {
-		reason string
-		want   bool
-	}{
-		{reviewParkedNoReviewer, true},
-		{reviewParkedNoFixModel, true},
-		{reviewParkedFixExhausted, true},
-		{reviewParkedAttemptsCap, false},
-		{reviewParkedServerCap, false},
-		{reviewParkedNoTime, false},
-		{reviewParkedSynthesisCap, false},
-		{"", false},
-	}
-
-	for _, tc := range cases {
-		assert.Equal(t, tc.want, (&ReviewParkedError{Reason: tc.reason}).NoModel(), tc.reason)
 	}
 }

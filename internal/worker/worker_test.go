@@ -3021,7 +3021,7 @@ func TestMapFSMResultStopCause(t *testing.T) {
 	}{
 		{"done", nil, false, protocol.StopCauseDone},
 		{"review cap", &orchestrator.ReviewParkedError{}, false, protocol.StopCauseReviewParked},
-		{"review park without a reviewer model", &orchestrator.ReviewParkedError{Reason: "no reviewer model is selectable"}, false, protocol.StopCauseNoModel},
+		{"review park without a model", &orchestrator.ReviewParkedError{NoModel: true}, false, protocol.StopCauseNoModel},
 		{"gates", &orchestrator.GatesParkedError{}, false, protocol.StopCauseGatesParked},
 		{"budget", &orchestrator.BudgetExceededError{Spent: 5, Max: 5}, false, protocol.StopCauseBudgetExceeded},
 		{"context", &orchestrator.ContextLimitError{}, false, protocol.StopCauseContextLimit},

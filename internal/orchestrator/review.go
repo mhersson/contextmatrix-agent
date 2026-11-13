@@ -144,6 +144,9 @@ type fix struct {
 // which is what a bare construction means.
 type ReviewParkedError struct {
 	Reason string
+	// NoModel is true when the park is a model-selection failure rather than
+	// findings left or a cap reached.
+	NoModel bool
 }
 
 func (e *ReviewParkedError) Error() string {
@@ -153,17 +156,6 @@ func (e *ReviewParkedError) Error() string {
 	}
 
 	return "review parked: " + reason
-}
-
-// NoModel reports whether the park is a model-selection failure rather than
-// review findings left or a cap reached.
-func (e *ReviewParkedError) NoModel() bool {
-	switch e.Reason {
-	case reviewParkedNoReviewer, reviewParkedNoFixModel, reviewParkedFixExhausted:
-		return true
-	}
-
-	return false
 }
 
 // The causes a review park can have. Each is the phrase that follows
@@ -1415,7 +1407,7 @@ func (o *run) runSpecialists(ctx context.Context, authoritative bool) (string, e
 	if len(panel) == 0 {
 		d.logCard(ctx, "review: no model is selectable for the reviewer role - parking the card in review for a human")
 
-		return "", &ReviewParkedError{Reason: reviewParkedNoReviewer}
+		return "", &ReviewParkedError{Reason: reviewParkedNoReviewer, NoModel: true}
 	}
 
 	d.logCard(ctx, "review panel: %s", panelSummary(panel))
@@ -2043,7 +2035,7 @@ func (o *run) runFix(ctx context.Context, req fixRequest) (bool, string, error) 
 				return false, "", fmt.Errorf("resolve fix model: %w", rerr)
 			}
 
-			return false, "", &ReviewParkedError{Reason: reviewParkedFixExhausted}
+			return false, "", &ReviewParkedError{Reason: reviewParkedFixExhausted, NoModel: true}
 		}
 	}
 
@@ -2258,7 +2250,7 @@ func (o *run) resolveFixModel(ctx context.Context, req fixRequest) (fixPick, err
 // pushed, so a human taking the card FROM REVIEW is the right destination.
 func (o *run) employableFixPick(p registry.Pick, rep registry.SelectionReport) (fixPick, error) {
 	if !p.OK {
-		return fixPick{}, &ReviewParkedError{Reason: reviewParkedNoFixModel}
+		return fixPick{}, &ReviewParkedError{Reason: reviewParkedNoFixModel, NoModel: true}
 	}
 
 	return fixPick{Pick: p, Selection: rep}, nil
