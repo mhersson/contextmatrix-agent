@@ -518,6 +518,7 @@ func TestGracefulShutdownSweepEndsAtItsDeadline(t *testing.T) {
 
 func TestSettleReportsShutdownWithRunID(t *testing.T) {
 	h := newShutdownHarness(t, 50*time.Millisecond, map[string]workerBehavior{"CARD-1": ignores})
+	h.exec.exitReports = false
 
 	h.shutdown(context.Background(), t, 5*time.Second)
 

@@ -287,6 +287,7 @@ type exitHarness struct {
 	creds    *secrets.RunCredentials
 	revoker  *recordingRevoker
 	rep      *stubReporter
+	outcomes *runOutcomes
 	stream   <-chan protocol.LogEntry
 	registry *logbridge.RedactorRegistry
 	onExit   func(project, cardID string, exitCode int64, cause executor.ExitCause, attempt int, correlationID string)
@@ -300,6 +301,7 @@ func newExitHarness(t *testing.T, logDir string) *exitHarness {
 	creds := secrets.NewRunCredentials(t.TempDir(), "http://cm", "key", logger)
 	revoker := &recordingRevoker{}
 	rep := &stubReporter{}
+	outcomes := newRunOutcomes()
 
 	hub := logbridge.NewHub(func(e protocol.LogEntry) string { return e.Project }, nil)
 	bridge := logbridge.NewBridge(logbridge.BridgeConfig{Hub: hub, MapExtra: agentMapExtra})
@@ -315,9 +317,10 @@ func newExitHarness(t *testing.T, logDir string) *exitHarness {
 		creds:    creds,
 		revoker:  revoker,
 		rep:      rep,
+		outcomes: outcomes,
 		stream:   ch,
 		registry: registry,
-		onExit:   onContainerExit(rep, newExitReports(), newRunOutcomes(), creds, revoker, files, registry, bridge, logger),
+		onExit:   onContainerExit(rep, newExitReports(), outcomes, creds, revoker, files, registry, bridge, logger),
 	}
 }
 
@@ -654,4 +657,16 @@ func TestContainerLogSinkRecordsTheMaskedLine(t *testing.T) {
 		[]byte(`{"kind":"run_outcome","data":{"cause":"verify_parked"}}`), false)
 
 	assert.NotEqual(t, "verify_parked", outcomes.take("corr-1").Cause)
+}
+
+func TestOnContainerExitReportsTheRecordedOutcome(t *testing.T) {
+	h := newExitHarness(t, t.TempDir())
+	h.files.Begin("proj", "CARD-1", "abcdef012345", "corr-1")
+	h.outcomes.record("corr-1", []byte(`{"kind":"run_outcome","data":{"cause":"verify_parked"}}`))
+
+	h.onExit("proj", "CARD-1", 1, executor.ExitNormal, 1, "corr-1")
+
+	assert.Equal(t, "corr-1", h.rep.payload.RunID)
+	assert.Equal(t, protocol.StopCauseVerifyParked, h.rep.payload.StopCause)
+	assert.Empty(t, h.outcomes.take("corr-1").Cause, "the outcome is forgotten at exit")
 }
