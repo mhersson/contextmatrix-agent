@@ -66,7 +66,7 @@ internal/secrets/      → Source (static env file) + RunCredentials (stages per
 internal/webhook/    → HTTP server for lifecycle webhooks; embeds backendkit's webhookcore.Core (HMAC auth, drain gate, request metrics, SSE /logs, health/readyz/images) and adds the agent-only lifecycle handlers plus /message dedup over webhookcore's DedupCache; mounts backendkit's llmproxy at /llm
 internal/callback/   → status callbacks to /api/agent/status; VerifyAutonomous (fail-closed)
 internal/cmclient/   → MCP client for CM card operations (one agent identity per card)
-internal/filelog/    → per-card raw container-output file logs (<log_dir>/<project>/<card_id>.log; always on, default ~/.contextmatrix/agent/logs; pruned after log_retention_days)
+internal/filelog/    → raw container-output file logs, one per card and one per run kind of the card (<log_dir>/<project>/<card_id>.log, <card_id>-<kind>.log; always on, default ~/.contextmatrix/agent/logs; pruned after log_retention_days); section.go copies one run's section of a card's log for investigate
 internal/metrics/    → thin wrapper over backendkit's shared metrics bundle (cm_agent_* collectors, NormalizeEndpoint label allowlist); keeps the agent-only callback-retries counter
 internal/buildinfo/  → the build /health reports: ldflags-stamped version, commit and build time plus the embedded merge history (history/merges.log, parsed by protocol's changelog)
 

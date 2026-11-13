@@ -77,12 +77,16 @@ port: 9092
 # CMX_LOG_LEVEL
 log_level: info
 
-# Directory on the agent host for per-card container-output logs. Logging is
-# always on: the agent writes one append file per card,
-# <log_dir>/<project>/<card_id>.log, containing the raw container output (as
-# `docker logs -f` would show it). Files are 0600: CM-provisioned secrets are
-# masked; operator-supplied values (worker_extra_env, verify.env pass-throughs)
-# and anything the model prints are not.
+# Directory on the agent host for container-output logs. Logging is always on,
+# and the agent writes one append file per card,
+# <log_dir>/<project>/<card_id>.log, and one per run kind of the card,
+# <log_dir>/<project>/<card_id>-<kind>.log, each containing the raw container
+# output (as `docker logs -f` would show it). Files are 0600: CM-provisioned
+# secrets are masked; operator-supplied values (worker_extra_env, verify.env
+# pass-throughs) and anything the model prints are not.
+# <log_dir>/.run-inputs/<run id>/ holds a run kind's staged inputs while it
+# runs; an investigation's include a copy of the stopped run's log section of
+# up to 256 MiB.
 # A configured path overrides the default; a leading ~ is expanded to the home
 # directory; an empty value means the default. If the path is outside
 # /var/run/cm-agent, ~/.cm-agent, or ~/.contextmatrix, add it to ReadWritePaths

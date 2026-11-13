@@ -32,7 +32,8 @@ ID and the kind plus a random suffix, then the `X-Correlation-ID` header, as
 `/trigger` does, and launches through the card runs' admission path
 (`admitAndLaunch`, `internal/webhook/launch.go`). A run kind sends no `running`
 status. A launch that fails sends one `failed` status with `kind`, `run_id` and
-stop cause `infrastructure`.
+the failure's stop cause: `infrastructure`, or `error` for a missing run log. A
+launch a `/kill` or `/stop-all` stopped sends none.
 
 `buildRunKindSpec` (`internal/webhook/runkind_spec.go`) gives the container
 `CM_RUN_KIND`, `CM_CARD_ID`, `CM_PROJECT`, `CM_REPO_URL` and `CM_BASE_BRANCH`;
@@ -91,7 +92,10 @@ model no tool that writes to git.
 An `investigate` run gets its LLM access as a card run does: a stand-in token
 for serve's LLM proxy, or the subscription token for a `claude_code` endpoint.
 A `check` registers nothing with the proxy and stages no LLM values
-(`stageLLM`, `internal/webhook/launch.go`). Redaction and the env file: see
+(`stageLLM`, `internal/webhook/launch.go`). On Claude Code the built-in Read is
+not confined to the read roots, so the model can read `/run/cm-secrets/env`,
+the git token and the subscription token included; both are masked in every
+output, and this is an accepted risk. Redaction and the env file: see
 [secrets.md](secrets.md#run-kinds).
 
 ## Inputs
@@ -291,7 +295,8 @@ before every call; a breach ends the run without making the call. Each call is
 charged at the gateway's cost, else at the list price from the payload's
 selection candidates (`callCost`) when the call's model is listed, else the run
 ends with cause `error`, so the ceiling never goes blind. A listed model with
-zero prices is free. A list-priced call charges cache tokens at the prompt price, an upper bound. On Claude Code there is no wrapper: the ceiling goes to
+zero prices is free. A list-priced call charges cache tokens at the prompt
+price, an upper bound. On Claude Code there is no wrapper: the ceiling goes to
 the `claude` binary through the harness config's `MaxCostUSD`, and it charges
 the notional cost.
 

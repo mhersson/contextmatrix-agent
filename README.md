@@ -46,7 +46,7 @@ flowchart LR
         S["Hosts CM lifecycle webhooks<br/>Launches one Docker worker per card and per run kind<br/>Stages + refreshes CM-provisioned secrets<br/>Streams /logs · drains on SIGTERM"]
     end
 
-    subgraph work["contextmatrix-agent work · one Docker container per card run"]
+    subgraph work["contextmatrix-agent work · one Docker container per card and per run kind"]
         direction TB
         W["Clone repo · claim the card<br/>Cut cm/&lt;card-id&gt; (Jira cards: cm/&lt;card-id&gt;-&lt;KEY&gt;)"]
         FSM["Orchestrator FSM - mode-gated on Cfg.Interactive<br/>plan → execute → judge → document → review → integrate → pr_gates → done"]
@@ -246,15 +246,16 @@ worker images (full + variants), pin the new full-image digest into
 ```
 
 A stop or restart drains rather than drops running cards: on SIGTERM `serve`
-refuses new work, sends every running worker an end-session so it pushes its
-work in progress and releases its card, waits up to 30 seconds for the workers
-to exit, then kills the rest. The kill sweep handles every card at once under
-one 15-second deadline: it kills each worker still running (about 3 seconds of
-kill grace) and reports each card failed unless the card's own exit reports
-it, so a parked card keeps its completed status. The webhook listener
-closes only after the sweep, because parking workers reach the LLM proxy on
-it; the HTTP drain, shared with the admin listener, adds at most 10 seconds.
-The sequence fits the unit's `TimeoutStopSec=60` however many cards are
+refuses new work, sends every running card worker an end-session so it pushes
+its work in progress and releases its card, waits up to 30 seconds for the
+workers to exit, then kills the rest. A run kind has no session: it gets no
+end-session and goes straight to the kill sweep. The kill sweep handles every
+card at once under one 15-second deadline: it kills each worker still running
+(about 3 seconds of kill grace) and reports each card failed unless the card's
+own exit reports it, so a parked card keeps its completed status. The webhook
+listener closes only after the sweep, because parking workers reach the LLM
+proxy on it; the HTTP drain, shared with the admin listener, adds at most 10
+seconds. The sequence fits the unit's `TimeoutStopSec=60` however many cards are
 running. A second signal skips the wait.
 
 > **Run as UID 1000 on rootful Docker.** Per-run secrets are staged readable

@@ -1,9 +1,9 @@
 // Package filelog writes raw worker-container output to one append file per
-// card on the agent host. It is the durable counterpart to the ephemeral /logs
-// SSE stream: a faithful, human-readable capture of everything a container
-// printed (stdout JSONL transcript + stderr slog), as `docker logs -f` would
-// show it. Logging failures are warned and swallowed so a run never fails
-// because its log could not be written.
+// card, and one per run kind of the card, on the agent host. It is the durable
+// counterpart to the ephemeral /logs SSE stream: a faithful, human-readable
+// capture of everything a container printed (stdout JSONL transcript + stderr
+// slog), as `docker logs -f` would show it. Logging failures are warned and
+// swallowed so a run never fails because its log could not be written.
 package filelog
 
 import (
