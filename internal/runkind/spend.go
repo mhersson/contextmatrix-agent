@@ -80,7 +80,10 @@ func callCost(u llm.Usage, prompt, completion float64, listed bool) (usd float64
 		return 0, false
 	}
 
-	return float64(u.PromptTokens)*prompt + float64(u.CompletionTokens)*completion, true
+	// Cache tokens are priced as plain input: an upper bound, never an undercount.
+	in, cacheRead, cacheCreation := u.Buckets()
+
+	return float64(in+cacheRead+cacheCreation)*prompt + float64(u.CompletionTokens)*completion, true
 }
 
 // usageRow is the terminal status's row for one model. On the endpoint the

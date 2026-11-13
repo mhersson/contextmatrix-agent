@@ -211,7 +211,7 @@ before every call; a breach ends the run without making the call. Each call is
 charged at the gateway's cost, else at the list price from the payload's
 selection candidates (`callCost`) when the call's model is listed, else the run
 ends with cause `error`, so the ceiling never goes blind. A listed model with
-zero prices is free. On Claude Code there is no wrapper: the ceiling goes to
+zero prices is free. A list-priced call charges cache tokens at the prompt price, an upper bound. On Claude Code there is no wrapper: the ceiling goes to
 the `claude` binary through the harness config's `MaxCostUSD`, and it charges
 the notional cost.
 

@@ -26,6 +26,13 @@ func TestCallCost(t *testing.T) {
 		{"gateway cost wins", llm.Usage{Cost: 0.02, PromptTokens: 1000}, true, 0.02, true},
 		{"gateway cost without a listing", llm.Usage{Cost: 0.02}, false, 0.02, true},
 		{"list price", tokens, true, 0.002, true},
+		{"cache buckets priced as input", llm.Usage{
+			PromptTokens: 1000, CompletionTokens: 500,
+			PromptTokensDetails: &llm.PromptTokensDetails{CachedTokens: 600, CacheWriteTokens: 100},
+		}, true, 0.002, true},
+		{"separate cache buckets", llm.Usage{
+			PromptTokens: 400, CompletionTokens: 500, CacheReadInputTokens: 500, CacheCreationInputTokens: 100,
+		}, true, 0.002, true},
 		{"unlisted and unreported", tokens, false, 0, false},
 		{"free listed model", llm.Usage{}, true, 0, true},
 	}
