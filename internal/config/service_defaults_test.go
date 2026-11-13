@@ -79,7 +79,7 @@ func TestLogDirOverrides(t *testing.T) {
 }
 
 func TestLogRetentionDaysValidated(t *testing.T) {
-	for days, wantErr := range map[int]bool{-1: true, 0: true, 1: false} {
+	for days, wantErr := range map[int]bool{-1: true, 0: true, 1: false, 36500: false, 36501: true} {
 		cfg := validServiceConfig()
 		cfg.LogRetentionDays = days
 

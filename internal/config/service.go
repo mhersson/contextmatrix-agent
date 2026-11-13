@@ -805,8 +805,9 @@ func (c *ServiceConfig) Validate() error {
 		}
 	}
 
-	if c.LogRetentionDays < 1 {
-		return fmt.Errorf("log_retention_days must be >= 1, got %d", c.LogRetentionDays)
+	// The upper bound keeps days*24h inside time.Duration.
+	if c.LogRetentionDays < 1 || c.LogRetentionDays > 36500 {
+		return fmt.Errorf("log_retention_days must be between 1 and 36500, got %d", c.LogRetentionDays)
 	}
 
 	if c.LogDir != "" {

@@ -91,7 +91,7 @@ log_level: info
 # log_dir: ~/.contextmatrix/agent/logs
 
 # Days a card log may go untouched before it is removed, at agent start and once
-# a day. Must be >= 1. External logrotate is not needed.
+# a day. Must be 1 to 36500. External logrotate is not needed.
 # CMX_LOG_RETENTION_DAYS
 # log_retention_days: 30
 
