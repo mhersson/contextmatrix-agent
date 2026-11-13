@@ -202,6 +202,25 @@ hostnames), or is contained in a tracked path. Git runs in the clone with fixed
 strings and no shell. ContextMatrix subtracts the card's own text from
 `absent_from_repo` and decides the verdict.
 
+## Spend
+
+A model run kind has no MCP key, so it cannot report usage to the card.
+`max_cost_usd` is the run's own ceiling. On an endpoint, the LLM client is
+wrapped (`meteredClient`, `internal/runkind/spend.go`) and checks the ceiling
+before every call; a breach ends the run without making the call. Each call is
+charged at the gateway's cost, else at the list price from the payload's
+selection candidates (`callCost`) when the call's model is listed, else the run
+ends with cause `error`, so the ceiling never goes blind. A listed model with
+zero prices is free. On Claude Code there is no wrapper: the ceiling goes to
+the `claude` binary through the harness config's `MaxCostUSD`, and it charges
+the notional cost.
+
+Usage goes back as per-model rows on the terminal status (`usageRow`). A row
+carries the model's tokens; on an endpoint its cost is the gateway's sum, and
+ContextMatrix applies its catalog estimate when that is 0. A Claude Code row
+carries the subscription cost basis and the usage windows, with no cost. The
+rows never reach the card's budget.
+
 ## Where it lives
 
 | File                                   | Responsibility                                                         |
