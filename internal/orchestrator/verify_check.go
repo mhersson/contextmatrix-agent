@@ -25,20 +25,9 @@ type VerifyCandidate struct {
 // scan's command when the root has no marker. Never nil.
 func VerifyCandidates(workspace string) []VerifyCandidate {
 	out := []VerifyCandidate{}
-	seen := map[string]bool{}
-
-	add := func(argv []string, display string, wrapper bool) {
-		if argv == nil || seen[display] {
-			return
-		}
-
-		seen[display] = true
-
-		out = append(out, VerifyCandidate{Argv: argv, Display: display, Wrapper: wrapper})
-	}
 
 	if a := detectWrapper(workspace); a != nil {
-		add(a, strings.Join(a, " "), true)
+		out = append(out, VerifyCandidate{Argv: a, Display: strings.Join(a, " "), Wrapper: true})
 	}
 
 	for _, row := range detectRows {
@@ -47,13 +36,14 @@ func VerifyCandidates(workspace string) []VerifyCandidate {
 		}
 
 		if a, _ := row.resolve(workspace); a != nil {
-			add(a, strings.Join(a, " "), false)
+			out = append(out, VerifyCandidate{Argv: a, Display: strings.Join(a, " ")})
 		}
 	}
 
 	if !anyMarkerPresent(workspace) {
-		det := detectNested(workspace)
-		add(det.Argv, det.Display, det.Wrapper)
+		if det := detectNested(workspace); det.Argv != nil {
+			out = append(out, VerifyCandidate{Argv: det.Argv, Display: det.Display, Wrapper: det.Wrapper})
+		}
 	}
 
 	return out
