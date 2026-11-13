@@ -225,7 +225,7 @@ It reads:
   offset and limit.
 - the repository at the base branch, and the card's work branch fetched into
   `refs/remotes/origin/`: `cm/<card id in lower case>` when the remote has it,
-  else the one `cm/<card id in lower case>-<Jira key>` branch (`workBranch`).
+  else the one `cm/<card id in lower case>-<Jira key>` branch (`workBranch`, `internal/runkind/investigate_inputs.go`).
   With no work branch on the remote the investigation runs without one; a
   failure to list the remote's branches, or to fetch one that exists, ends the
   run with cause `error`. Git runs
@@ -317,8 +317,8 @@ rows never reach the card's budget.
 | `internal/runkind/runkind.go`            | The spec, the clone, the kind switch, masking and the stop cause      |
 | `internal/runkind/check.go`              | The check kind: candidates, the trial rules, the trial and its events |
 | `internal/runkind/textcheck.go`          | The text check: token extraction and the base-branch lookup           |
-| `internal/runkind/investigate.go`        | The investigate kind: model access, the work branch, the model run    |
-| `internal/runkind/investigate_inputs.go` | The card files written as read-only inputs                            |
+| `internal/runkind/investigate.go`        | The investigate kind: model access, the model run                     |
+| `internal/runkind/investigate_inputs.go` | The card files written as read-only inputs, the work-branch lookup    |
 | `internal/runkind/investigate_tool.go`   | The `report_investigation` terminal tool and the report's decoding    |
 | `internal/runkind/investigate_prompt.go` | The investigation's task prompt                                       |
 | `internal/runkind/spend.go`              | The metered client and the usage rows                                 |

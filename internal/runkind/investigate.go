@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
-	"strings"
 
 	"github.com/mhersson/contextmatrix-agent/internal/modelexec"
 	"github.com/mhersson/contextmatrix-agent/internal/orchestrator"
@@ -182,55 +181,4 @@ func harnessStop(res harness.Result, cfg harness.Config) error {
 	default:
 		return fmt.Errorf("investigate run stopped: %s", res.Reason)
 	}
-}
-
-// fetchWorkBranch fetches the card's work branch into refs/remotes/origin/ and
-// returns its name; "" when the remote has none.
-func fetchWorkBranch(ctx context.Context, spec Spec, ws string) (string, error) {
-	git := worker.NewGit(ws, spec.SecretsPath, worker.HostFromRepoURL(spec.RepoURL), spec.CACertFile)
-
-	heads, err := git.RemoteHeads(ctx, cardBranch(spec.CardID))
-	if err != nil {
-		return "", fmt.Errorf("list work branches: %w", err)
-	}
-
-	branch := workBranch(spec.CardID, heads)
-	if branch == "" {
-		return "", nil
-	}
-
-	if err := git.Fetch(ctx, "+refs/heads/"+branch+":refs/remotes/origin/"+branch); err != nil {
-		return "", fmt.Errorf("fetch work branch: %w", err)
-	}
-
-	return branch, nil
-}
-
-// cardBranch is the card's plain work branch in the worker's cm/ namespace.
-func cardBranch(cardID string) string {
-	return "cm/" + strings.ToLower(cardID)
-}
-
-// workBranch picks the card's work branch among heads: the plain branch, else
-// the one branch suffixed with a Jira key; "" when neither is listed.
-func workBranch(cardID string, heads []string) string {
-	plain := cardBranch(cardID)
-
-	var keyed []string
-
-	for _, h := range heads {
-		if h == plain {
-			return plain
-		}
-
-		if key, ok := strings.CutPrefix(h, plain+"-"); ok && worker.BranchKey(key) {
-			keyed = append(keyed, h)
-		}
-	}
-
-	if len(keyed) == 1 {
-		return keyed[0]
-	}
-
-	return ""
 }
