@@ -410,3 +410,36 @@ func TestTwoRunsOnOneCardEachFooterTheirOwnWriter(t *testing.T) {
 	assert.Contains(t, s, "run one tail\n", "the draining run's tail reaches the durable log")
 	assert.Contains(t, s, "run two line\n")
 }
+
+func TestHeaderAndFooterCarryTheRunID(t *testing.T) {
+	dir := t.TempDir()
+	l := New(dir, testLogger())
+
+	l.Begin("proj", "CM-1", "0123456789abcdef", "CM-1-ab12cd34")
+	l.Write("proj", "CM-1", "CM-1-ab12cd34", []byte("output"), false)
+	l.End("proj", "CM-1", "CM-1-ab12cd34", 1, "normal")
+
+	data, err := os.ReadFile(filepath.Join(dir, "proj", "cm-1.log"))
+	require.NoError(t, err)
+
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	require.Len(t, lines, 3)
+
+	assert.True(t, strings.HasPrefix(lines[0], "==== run started "))
+	assert.True(t, strings.HasSuffix(lines[0], " run=CM-1-ab12cd34 ===="))
+	assert.Contains(t, lines[2], " run=CM-1-ab12cd34 exit=1 cause=normal ====")
+}
+
+func TestSupersededFooterCarriesTheRunID(t *testing.T) {
+	dir := t.TempDir()
+	l := New(dir, testLogger())
+
+	l.Begin("proj", "CM-1", "0123456789abcdef", "CM-1-ab12cd34")
+	l.Begin("proj", "CM-1", "0123456789abcdef", "CM-1-ab12cd34")
+	l.End("proj", "CM-1", "CM-1-ab12cd34", 0, "normal")
+
+	data, err := os.ReadFile(filepath.Join(dir, "proj", "cm-1.log"))
+	require.NoError(t, err)
+
+	assert.Contains(t, string(data), " run=CM-1-ab12cd34 exit=-1 cause=superseded ====")
+}
