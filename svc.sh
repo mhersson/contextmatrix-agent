@@ -41,15 +41,16 @@
 #   flaky Docker daemon.
 #   ReadWritePaths - narrow the filesystem to the runtime dirs the agent
 #   actually writes to (the secrets dir). Paths are prefixed with `-` so
-#   a missing dir is tolerated rather than blocking startup.
+#   a missing dir is tolerated rather than blocking startup (systemd then
+#   ignores the entry, so the dir must exist before the unit starts).
 #
 # NOTE: the default secrets_dir is /var/run/cm-agent/secrets. /var/run is
 # root-owned and not auto-created for a user service - either pre-create
 # /var/run/cm-agent and chown it to the operator, or set secrets_dir to a
 # path under %h (e.g. ~/.cm-agent/secrets). Both locations are whitelisted
 # in ReadWritePaths. The default log_dir (~/.contextmatrix/agent/logs)
-# is whitelisted via -%h/.contextmatrix; a log_dir elsewhere needs its own
-# ReadWritePaths entry.
+# is whitelisted via -%h/.contextmatrix, and `install` creates it; a log_dir
+# elsewhere needs its own ReadWritePaths entry and must already exist.
 #
 # Subcommands:
 #   install [--dry-run]  Write the unit file (or print to stdout), reload
@@ -105,9 +106,10 @@ TimeoutStopSec=60
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
-# Agent needs RW access to its secrets dir. Paths are prefixed with '-'
-# so a missing dir does not block startup; the agent creates them on
-# demand. Both the /var/run default and a %h override are whitelisted.
+# Agent needs RW access to its secrets dir and log dir. Paths are prefixed
+# with '-' so a missing dir does not block startup; the agent creates them
+# on demand, except ~/.contextmatrix, which install creates (a missing one
+# is ignored by systemd and leaves the log dir read-only).
 ReadWritePaths=-/var/run/cm-agent -%h/.cm-agent -%h/.contextmatrix
 PrivateTmp=yes
 PrivateDevices=yes
@@ -191,6 +193,7 @@ cmd_install() {
     fi
 
     mkdir -p "$(dirname "${SERVICE_FILE}")"
+    mkdir -p "${HOME}/.contextmatrix/agent/logs"
     generate_unit > "${SERVICE_FILE}"
     echo "Service file written to ${SERVICE_FILE}"
 
