@@ -449,6 +449,43 @@ func TestRunCredentialsProjectScopedIsolation(t *testing.T) {
 		"the other project's credentials must survive a sibling teardown")
 }
 
+// TestRunKindCredentialsDoNotDisplaceTheCardRun: a run kind's name is the card
+// ID plus its kind, so it gets its own dir and handle beside the card run's.
+func TestRunKindCredentialsDoNotDisplaceTheCardRun(t *testing.T) {
+	t.Parallel()
+
+	m := newTestManager(t, "http://cm.invalid", "key")
+	calls := displacementRecorder(m)
+
+	require.NoError(t, m.Provision("proj", "ABC-12", "run-a", "card-token", "", EndpointSecrets{}))
+	require.NoError(t, m.Provision("proj", "ABC-12.check", "run-b", "check-token", "", EndpointSecrets{}))
+
+	t.Cleanup(func() { m.Teardown("proj", "ABC-12", "run-a") })
+
+	assert.Empty(t, *calls, "a run kind never displaces the card run")
+
+	cardDir := m.HostDir("proj", "ABC-12")
+	checkDir := m.HostDir("proj", "ABC-12.check")
+	require.NotEqual(t, cardDir, checkDir)
+
+	card, err := Open(filepath.Join(cardDir, "env"))
+	require.NoError(t, err)
+	assert.Equal(t, "card-token", card.Get("CM_GIT_TOKEN"))
+
+	check, err := Open(filepath.Join(checkDir, "env"))
+	require.NoError(t, err)
+	assert.Equal(t, "check-token", check.Get("CM_GIT_TOKEN"))
+
+	m.Teardown("proj", "ABC-12.check", "run-b")
+
+	_, err = os.Stat(checkDir)
+	assert.True(t, os.IsNotExist(err), "the run kind's dir is removed")
+
+	card, err = Open(filepath.Join(cardDir, "env"))
+	require.NoError(t, err)
+	assert.Equal(t, "card-token", card.Get("CM_GIT_TOKEN"), "the card run's credentials survive")
+}
+
 // TestRunCredentialsCleanupOrphans verifies the boot-time sweep removes any
 // leftover run directories.
 func TestRunCredentialsCleanupOrphans(t *testing.T) {

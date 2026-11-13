@@ -32,7 +32,8 @@ const runHeaderPrefix = "==== run started "
 // timeout or a wait failure.
 const causeSuperseded = "superseded"
 
-// Logger writes per-card container output to <dir>/<project>/<cardID>.log.
+// Logger writes per-run container output to <dir>/<project>/<name>.log, where
+// the name is a card ID or a card ID plus run kind.
 // A nil *Logger, or one built with an empty dir, disables every operation.
 // Open writers are keyed by (project, cardID, correlationID), so two runs of
 // one card - a re-trigger racing the previous run's drain - append to the

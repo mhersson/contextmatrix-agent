@@ -225,13 +225,38 @@ func TestContainerName_Sanitized(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, containerName(tt.project, tt.cardID))
+			assert.Equal(t, tt.want, containerName(RunKey{Project: tt.project, CardID: tt.cardID}))
+		})
+	}
+}
+
+func TestContainerNameAndLabelsCarryTheKind(t *testing.T) {
+	tests := []struct {
+		name      string
+		kind      string
+		wantName  string
+		wantLabel bool
+	}{
+		{name: "card run", kind: "", wantName: "cm-agent-proj-abc-12"},
+		{name: "run kind", kind: "check", wantName: "cm-agent-proj-abc-12.check", wantLabel: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spec := LaunchSpec{Project: "proj", CardID: "ABC-12", Kind: tt.kind}
+			assert.Equal(t, tt.wantName, containerName(spec.Key()))
+
+			cfg, _ := containerConfig(spec)
+
+			label, ok := cfg.Labels[labelKind]
+			assert.Equal(t, tt.wantLabel, ok)
+			assert.Equal(t, tt.kind, label)
 		})
 	}
 }
 
 func TestContainerName_MatchesDockerCharset(t *testing.T) {
-	got := containerName("my/proj@v2", "ABC-1")
+	got := containerName(RunKey{Project: "my/proj@v2", CardID: "ABC-1"})
 	assert.Regexp(t, `^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`, got)
 }
 
@@ -327,12 +352,12 @@ func TestContainerConfigNoSkillsBindWhenUnset(t *testing.T) {
 func TestNewDockerExecutor_WiresOnStart(t *testing.T) {
 	called := false
 	e := NewDockerExecutor(Config{
-		OnStart: func(_, _, _, _ string) { called = true },
+		OnStart: func(RunKey, string, string) { called = true },
 	})
 
 	require.NotNil(t, e.onStart)
 
-	e.onStart("p", "c", "id", "corr")
+	e.onStart(RunKey{Project: "p", CardID: "c"}, "id", "corr")
 	assert.True(t, called)
 }
 
@@ -585,7 +610,7 @@ func TestWaitAndCleanupReportsExitCause(t *testing.T) {
 
 			if tc.reason != "" {
 				require.True(t, tracker.AddIfUnderLimit(&Run{Project: "proj", CardID: "CARD-1"}))
-				tracker.SetReason("proj", "CARD-1", tc.reason)
+				tracker.SetReason(RunKey{Project: "proj", CardID: "CARD-1"}, tc.reason)
 			}
 
 			e := NewDockerExecutor(Config{
@@ -593,7 +618,7 @@ func TestWaitAndCleanupReportsExitCause(t *testing.T) {
 				Tracker:          tracker,
 				ContainerTimeout: 30 * time.Millisecond,
 				Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
-				OnExit: func(_, _ string, code int64, cause ExitCause, attempt int, correlationID string) {
+				OnExit: func(_ RunKey, code int64, cause ExitCause, attempt int, correlationID string) {
 					got <- exitCall{exitCode: code, cause: cause, attempt: attempt, correlationID: correlationID}
 				},
 			})
@@ -605,7 +630,7 @@ func TestWaitAndCleanupReportsExitCause(t *testing.T) {
 			pumpDone := make(chan struct{})
 			close(pumpDone)
 
-			e.waitAndCleanup("proj", "CARD-1", "cid-1", 1, "corr-1", time.Now(),
+			e.waitAndCleanup(RunKey{Project: "proj", CardID: "CARD-1"}, "cid-1", 1, "corr-1", time.Now(),
 				client.HijackedResponse{Conn: conn}, make(chan struct{}), pumpDone,
 				slog.New(slog.NewTextHandler(io.Discard, nil)))
 
@@ -640,7 +665,7 @@ func TestLaunchCarriesTheAttemptOrdinalToOnExit(t *testing.T) {
 		PullPolicy:       PullNever,
 		ContainerTimeout: time.Second,
 		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
-		OnExit: func(_, _ string, code int64, cause ExitCause, attempt int, correlationID string) {
+		OnExit: func(_ RunKey, code int64, cause ExitCause, attempt int, correlationID string) {
 			got <- exitCall{exitCode: code, cause: cause, attempt: attempt, correlationID: correlationID}
 		},
 	})
@@ -677,7 +702,7 @@ func TestLaunchCarriesTheCorrelationIDToOnExit(t *testing.T) {
 		PullPolicy:       PullNever,
 		ContainerTimeout: time.Second,
 		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
-		OnExit: func(_, _ string, code int64, cause ExitCause, attempt int, correlationID string) {
+		OnExit: func(_ RunKey, code int64, cause ExitCause, attempt int, correlationID string) {
 			got <- exitCall{exitCode: code, cause: cause, attempt: attempt, correlationID: correlationID}
 		},
 	})
@@ -716,10 +741,10 @@ func TestLaunchCarriesTheCorrelationIDToOnStartAndOnLog(t *testing.T) {
 		PullPolicy:       PullNever,
 		ContainerTimeout: time.Second,
 		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
-		OnStart: func(_, _, _, correlationID string) {
+		OnStart: func(_ RunKey, _, correlationID string) {
 			starts <- startCall{correlationID: correlationID}
 		},
-		OnLog: func(_, _, correlationID string, _ []byte, _ bool) {
+		OnLog: func(_ RunKey, correlationID string, _ []byte, _ bool) {
 			logs <- correlationID
 		},
 	})
@@ -777,7 +802,7 @@ func TestLaunchTracksTheRunUnderItsCorrelationID(t *testing.T) {
 		PullPolicy:       PullNever,
 		ContainerTimeout: time.Minute,
 		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
-		OnExit:           func(string, string, int64, ExitCause, int, string) { close(exited) },
+		OnExit:           func(RunKey, int64, ExitCause, int, string) { close(exited) },
 	})
 
 	require.NoError(t, e.Launch(t.Context(), LaunchSpec{
@@ -787,7 +812,7 @@ func TestLaunchTracksTheRunUnderItsCorrelationID(t *testing.T) {
 		CorrelationID: "trace-run",
 	}))
 
-	run, ok := tracker.Get("proj", "CARD-1")
+	run, ok := tracker.Get(RunKey{Project: "proj", CardID: "CARD-1"})
 	require.True(t, ok, "the run is tracked while its container lives")
 	assert.Equal(t, "trace-run", run.CorrelationID)
 
@@ -821,10 +846,10 @@ func TestPumpCountsUnbridgedLinesAsActivity(t *testing.T) {
 	line := `{"seq":7,"kind":"model_progress","time":"2026-01-01T00:00:00Z"}` + "\n"
 	pumpDone := make(chan struct{})
 
-	e.pump("p", "A", "", bytes.NewReader(stdioFrame(line)), pumpDone, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	e.pump(RunKey{Project: "p", CardID: "A"}, "", bytes.NewReader(stdioFrame(line)), pumpDone, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	<-pumpDone
 
-	assert.False(t, tracker.LastActivity("p", "A").IsZero())
+	assert.False(t, tracker.LastActivity(RunKey{Project: "p", CardID: "A"}).IsZero())
 }
 
 // inspectDocker fakes ImageInspect only, recording the ref it was asked for.
@@ -952,8 +977,8 @@ func TestIdleWatchdogSparesARunAwaitingAHuman(t *testing.T) {
 		docker := &stubDocker{}
 		tracker := NewTracker(1)
 		require.True(t, tracker.AddIfUnderLimit(&Run{Project: "proj", CardID: "CARD-1", ContainerID: "ctr-1"}))
-		tracker.Touch("proj", "CARD-1")
-		tracker.SetAwaiting("proj", "CARD-1", true)
+		tracker.Touch(RunKey{Project: "proj", CardID: "CARD-1"})
+		tracker.SetAwaiting(RunKey{Project: "proj", CardID: "CARD-1"}, true)
 
 		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 		e := NewDockerExecutor(Config{
@@ -969,7 +994,7 @@ func TestIdleWatchdogSparesARunAwaitingAHuman(t *testing.T) {
 		go func() {
 			defer close(returned)
 
-			e.runIdleWatchdog("proj", "CARD-1", "ctr-1", make(chan struct{}), logger)
+			e.runIdleWatchdog(RunKey{Project: "proj", CardID: "CARD-1"}, "ctr-1", make(chan struct{}), logger)
 		}()
 
 		time.Sleep(time.Hour)
@@ -979,7 +1004,7 @@ func TestIdleWatchdogSparesARunAwaitingAHuman(t *testing.T) {
 		assert.Empty(t, docker.killed, "a run awaiting a human is not killed for silence")
 		docker.mu.Unlock()
 
-		tracker.SetAwaiting("proj", "CARD-1", false)
+		tracker.SetAwaiting(RunKey{Project: "proj", CardID: "CARD-1"}, false)
 		time.Sleep(10 * time.Second)
 		synctest.Wait()
 
@@ -990,7 +1015,7 @@ func TestIdleWatchdogSparesARunAwaitingAHuman(t *testing.T) {
 		}
 
 		assert.Equal(t, []string{"ctr-1"}, docker.killed)
-		assert.Equal(t, metrics.OutcomeIdleTimeout, tracker.Reason("proj", "CARD-1"))
+		assert.Equal(t, metrics.OutcomeIdleTimeout, tracker.Reason(RunKey{Project: "proj", CardID: "CARD-1"}))
 	})
 }
 
@@ -1004,7 +1029,7 @@ func TestLaunchRemovesACreateCutShort(t *testing.T) {
 		cutShort    bool
 		wantRemoved []string
 	}{
-		{name: "cut short by the launch context", cutShort: true, wantRemoved: []string{containerName("proj", "CARD-1")}},
+		{name: "cut short by the launch context", cutShort: true, wantRemoved: []string{containerName(RunKey{Project: "proj", CardID: "CARD-1"})}},
 		{name: "refused by the daemon"},
 	}
 

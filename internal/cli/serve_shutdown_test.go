@@ -84,7 +84,7 @@ func (f *fleet) admit(cardID, correlationID string, behavior workerBehavior) (*w
 // exit is a run's own exit path: the executor drops the run, then its exit
 // callback reports.
 func (f *fleet) exit(run *executor.Run, status string) {
-	f.tracker.Remove(run.Project, run.CardID)
+	f.tracker.Remove(executor.RunKey{Project: run.Project, CardID: run.CardID})
 	f.report(run, status)
 }
 
@@ -134,14 +134,14 @@ func (w *workerStdin) Write(p []byte) (int, error) {
 	case callsThenParks:
 		go w.callThenPark()
 	case exitsSilently:
-		go w.fleet.tracker.Remove(w.run.Project, w.run.CardID)
+		go w.fleet.tracker.Remove(executor.RunKey{Project: w.run.Project, CardID: w.run.CardID})
 	case admitsAnotherThenParks:
 		w.fleet.admit("CARD-9", "run-9", ignores)
 
 		go w.fleet.exit(w.run, "completed")
 	case parksAndIsReplaced:
 		go func() {
-			w.fleet.tracker.Remove(w.run.Project, w.run.CardID)
+			w.fleet.tracker.Remove(executor.RunKey{Project: w.run.Project, CardID: w.run.CardID})
 			w.fleet.admit(w.run.CardID, w.run.CorrelationID+"-successor", ignores)
 			w.fleet.report(w.run, "completed")
 		}()
@@ -221,7 +221,9 @@ type killRecorder struct {
 
 func (k *killRecorder) Launch(context.Context, executor.LaunchSpec) error { return nil }
 
-func (k *killRecorder) Kill(ctx context.Context, project, cardID string) error {
+func (k *killRecorder) Kill(ctx context.Context, key executor.RunKey) error {
+	project, cardID := key.Project, key.CardID
+
 	if k.gate != nil {
 		if err := k.gate(ctx); err != nil {
 			return err
@@ -232,7 +234,7 @@ func (k *killRecorder) Kill(ctx context.Context, project, cardID string) error {
 	k.killed[cardID] = time.Now()
 	k.mu.Unlock()
 
-	run, ok := k.fleet.tracker.Get(project, cardID)
+	run, ok := k.fleet.tracker.Get(executor.RunKey{Project: project, CardID: cardID})
 	if !ok {
 		return executor.ErrNotFound
 	}
@@ -240,7 +242,7 @@ func (k *killRecorder) Kill(ctx context.Context, project, cardID string) error {
 	if k.exitReports {
 		go k.fleet.exit(run, "failed")
 	} else {
-		k.fleet.tracker.Remove(project, cardID)
+		k.fleet.tracker.Remove(executor.RunKey{Project: project, CardID: cardID})
 	}
 
 	return nil
@@ -625,7 +627,7 @@ func TestEndSessionsWarnsOnlyForARunItCouldNotReach(t *testing.T) {
 			live := h.drain.tracker.List()
 
 			if tt.exited {
-				h.drain.tracker.Remove("proj", "CARD-1")
+				h.drain.tracker.Remove(executor.RunKey{Project: "proj", CardID: "CARD-1"})
 			}
 
 			var buf bytes.Buffer
@@ -654,7 +656,7 @@ func TestParkWaitCoversARunThatExitedBeforeItsEndSession(t *testing.T) {
 		require.Len(t, live, 1)
 
 		h.drain.reports.beginShutdown()
-		h.drain.tracker.Remove("proj", "CARD-1")
+		h.drain.tracker.Remove(executor.RunKey{Project: "proj", CardID: "CARD-1"})
 
 		waitOn := h.drain.endSessions(live)
 

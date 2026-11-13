@@ -115,22 +115,22 @@ func (f *fakeExecutor) Launch(ctx context.Context, spec executor.LaunchSpec) err
 	return nil
 }
 
-func (f *fakeExecutor) Kill(_ context.Context, project, cardID string) error {
+func (f *fakeExecutor) Kill(_ context.Context, k executor.RunKey) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	f.killed = append(f.killed, [2]string{project, cardID})
+	f.killed = append(f.killed, [2]string{k.Project, k.CardID})
 
 	if f.killErr != nil {
 		return f.killErr
 	}
 
 	if f.tracker != nil {
-		if _, ok := f.tracker.Get(project, cardID); !ok {
-			return fmt.Errorf("%w: %s/%s", executor.ErrNotFound, project, cardID)
+		if _, ok := f.tracker.Get(k); !ok {
+			return fmt.Errorf("%w: %s/%s", executor.ErrNotFound, k.Project, k.CardID)
 		}
 
-		f.tracker.Remove(project, cardID)
+		f.tracker.Remove(k)
 	}
 
 	return nil
@@ -524,7 +524,7 @@ func (h *harness) addRun(cardID, project string) *nopWriteCloser {
 // launchNow admits and launches spec synchronously, as the goroutine
 // handleTrigger starts would.
 func (s *Server) launchNow(spec executor.LaunchSpec, p protocol.TriggerPayload) {
-	adm, ctx := s.beginAdmission(context.Background(), p.Project, p.CardID)
+	adm, ctx := s.beginAdmission(context.Background(), executor.RunKey{Project: p.Project, CardID: p.CardID})
 	s.launch(ctx, adm, spec, p)
 }
 
@@ -718,7 +718,7 @@ func TestTrigger_MintsDistinctCorrelationIDsAcrossReTriggers(t *testing.T) {
 	// entry) so a re-trigger of the same card is admitted. A distinct
 	// timestamp (a real retry carries a fresh one) keeps the two identical
 	// payloads from colliding in the replay cache.
-	h.tracker.Remove("proj", "PROJ-MINT")
+	h.tracker.Remove(executor.RunKey{Project: "proj", CardID: "PROJ-MINT"})
 
 	w = h.doAt(t, http.MethodPost, "/trigger", payload, strconv.FormatInt(ts+1, 10))
 	require.Equal(t, http.StatusAccepted, w.Code)
@@ -754,7 +754,7 @@ func TestTrigger_SuppliedCorrelationIDIsNamespacedNotTrusted(t *testing.T) {
 		return len(h.exec.launchedSpecs()) == 1
 	}, time.Second, 5*time.Millisecond)
 
-	h.tracker.Remove("proj", "PROJ-NAMESPACED")
+	h.tracker.Remove(executor.RunKey{Project: "proj", CardID: "PROJ-NAMESPACED"})
 
 	// A distinct timestamp (a real retry carries a fresh one) keeps the two
 	// identical payloads from colliding in the replay cache. This time the
@@ -880,7 +880,7 @@ func TestTriggerRegistersPayloadEndpointUnderRunID(t *testing.T) {
 	h.awaitStatuses(t, 1)
 
 	// The first run exits; a fresh timestamp keeps the replay cache out of it.
-	h.tracker.Remove("proj", "PROJ-RUNKEY")
+	h.tracker.Remove(executor.RunKey{Project: "proj", CardID: "PROJ-RUNKEY"})
 
 	w = h.doAt(t, http.MethodPost, "/trigger", payload, strconv.FormatInt(ts+1, 10))
 	require.Equal(t, http.StatusAccepted, w.Code)
@@ -1215,7 +1215,7 @@ func TestStopAllReportsFailures(t *testing.T) {
 func TestMessage_WritesFrameAnd202(t *testing.T) {
 	h := newHarness(t, 4)
 	stdin := h.addRun("PROJ-001", "proj")
-	h.tracker.SetAwaiting("proj", "PROJ-001", true)
+	h.tracker.SetAwaiting(executor.RunKey{Project: "proj", CardID: "PROJ-001"}, true)
 
 	payload := protocol.MessagePayload{
 		CardID:    "PROJ-001",
@@ -1237,7 +1237,7 @@ func TestMessage_WritesFrameAnd202(t *testing.T) {
 	assert.Equal(t, "hello worker", frame.Content)
 	assert.Equal(t, "m1", frame.MessageID)
 
-	assert.False(t, h.tracker.Awaiting("proj", "PROJ-001"), "awaiting cleared after message")
+	assert.False(t, h.tracker.Awaiting(executor.RunKey{Project: "proj", CardID: "PROJ-001"}), "awaiting cleared after message")
 }
 
 // TestMessage_PublishesUnredactedUserEntry pins publishUser's only remaining
@@ -1353,7 +1353,7 @@ func TestMessage_WriteFailureRetryDelivers(t *testing.T) {
 	assert.Equal(t, protocol.CodeInternal, decodeErr(t, w1).Code)
 
 	// The container is replaced by a healthy one (same card) before the retry.
-	h.tracker.Remove("proj", "PROJ-001")
+	h.tracker.Remove(executor.RunKey{Project: "proj", CardID: "PROJ-001"})
 	healthy := h.addRun("PROJ-001", "proj")
 
 	// Retry with the SAME message_id: must NOT be deduped - it must deliver.

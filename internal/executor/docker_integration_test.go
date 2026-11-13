@@ -43,7 +43,7 @@ func newExitRecorder() *exitRecorder {
 	return &exitRecorder{done: make(chan struct{})}
 }
 
-func (r *exitRecorder) onExit(_, _ string, code int64, cause ExitCause, _ int, _ string) {
+func (r *exitRecorder) onExit(_ RunKey, code int64, cause ExitCause, _ int, _ string) {
 	r.mu.Lock()
 	r.code = code
 	r.cause = cause
@@ -78,13 +78,13 @@ type startRecorder struct {
 	correlationID string
 }
 
-func (r *startRecorder) onStart(project, cardID, containerID, correlationID string) {
+func (r *startRecorder) onStart(k RunKey, containerID, correlationID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	r.fired = true
-	r.project = project
-	r.cardID = cardID
+	r.project = k.Project
+	r.cardID = k.CardID
 	r.containerID = containerID
 	r.correlationID = correlationID
 }
@@ -97,7 +97,7 @@ type logCollector struct {
 	correlationID string
 }
 
-func (c *logCollector) onLog(_, _, correlationID string, line []byte, _ bool) {
+func (c *logCollector) onLog(_ RunKey, correlationID string, line []byte, _ bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -168,7 +168,7 @@ func TestIntegration_LaunchEchoAndExit(t *testing.T) {
 
 	require.NoError(t, exec.Launch(ctx, spec))
 
-	run, ok := exec.tracker.Get(project, card)
+	run, ok := exec.tracker.Get(RunKey{Project: project, CardID: card})
 	require.True(t, ok, "run must be tracked after launch")
 
 	starts.mu.Lock()
@@ -343,7 +343,7 @@ func TestIntegration_IdleWatchdogSuspendedWhileAwaiting(t *testing.T) {
 
 	// Mark awaiting-human BEFORE the idle window elapses; the watchdog must
 	// suspend and leave the silent container running.
-	exec.tracker.SetAwaiting(project, card, true)
+	exec.tracker.SetAwaiting(RunKey{Project: project, CardID: card}, true)
 
 	// Wait well past the idle window; the container must survive.
 	time.Sleep(1 * time.Second)
@@ -357,7 +357,7 @@ func TestIntegration_IdleWatchdogSuspendedWhileAwaiting(t *testing.T) {
 	assert.Equal(t, 1, exec.tracker.Count(), "awaiting container still tracked")
 
 	// Clean up: clearing awaiting lets the idle watchdog reap it.
-	run, ok := exec.tracker.Get(project, card)
+	run, ok := exec.tracker.Get(RunKey{Project: project, CardID: card})
 	require.True(t, ok)
 
 	_, err := exec.docker.ContainerKill(ctx, run.ContainerID, client.ContainerKillOptions{Signal: "SIGKILL"})

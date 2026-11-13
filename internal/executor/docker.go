@@ -32,6 +32,7 @@ const (
 	labelCardID        = "contextmatrix.card_id"
 	labelProject       = "contextmatrix.project"
 	labelCorrelationID = "contextmatrix.correlation_id"
+	labelKind          = "contextmatrix.kind"
 )
 
 // secretsMountPath is where the per-project secrets dir is mounted read-only
@@ -144,6 +145,7 @@ func waitForSelfExit(ctx context.Context, docker containerWaiter, containerID st
 // the secrets bind source.
 type LaunchSpec struct {
 	CardID, Project string
+	Kind            string // empty for a card run
 	Image           string // payload override already applied by the caller
 	Env             []string
 	SecretsHostDir  string // bind source; mounted read-only at /run/cm-secrets
@@ -170,6 +172,11 @@ type LaunchSpec struct {
 	Cmd []string
 }
 
+// Key returns the run key the launched container is tracked under.
+func (s LaunchSpec) Key() RunKey {
+	return RunKey{Project: s.Project, CardID: s.CardID, Kind: s.Kind}
+}
+
 // StopResult is the outcome of killing one tracked run in a StopAll sweep. Err
 // is nil when the kill succeeded or the container was already gone.
 type StopResult struct {
@@ -181,7 +188,7 @@ type StopResult struct {
 // depends on this interface, not on DockerExecutor.
 type Executor interface {
 	Launch(ctx context.Context, spec LaunchSpec) error
-	Kill(ctx context.Context, project, cardID string) error
+	Kill(ctx context.Context, k RunKey) error
 	List(ctx context.Context) ([]*Run, error)
 	StopAll(ctx context.Context, project string) ([]StopResult, error)
 	CleanupOrphans(ctx context.Context) error
@@ -189,11 +196,11 @@ type Executor interface {
 
 var containerNameRe = regexp.MustCompile(`[^a-zA-Z0-9_.-]`)
 
-// containerName builds a Docker-legal container name from project and cardID.
-// The card ID is lowercased and any character outside Docker's allowed set
-// [a-zA-Z0-9_.-] is replaced with a dash.
-func containerName(project, cardID string) string {
-	name := strings.ToLower(fmt.Sprintf("cm-agent-%s-%s", project, cardID))
+// containerName builds a Docker-legal container name from the run key. The name
+// is lowercased and any character outside Docker's allowed set [a-zA-Z0-9_.-]
+// is replaced with a dash.
+func containerName(k RunKey) string {
+	name := strings.ToLower(fmt.Sprintf("cm-agent-%s-%s", k.Project, k.Name()))
 
 	return containerNameRe.ReplaceAllString(name, "-")
 }
@@ -206,6 +213,10 @@ func containerConfig(spec LaunchSpec) (*container.Config, *container.HostConfig)
 		labelCardID:  spec.CardID,
 		labelProject: spec.Project,
 	}
+	if spec.Kind != "" {
+		labels[labelKind] = spec.Kind
+	}
+
 	if spec.CorrelationID != "" {
 		labels[labelCorrelationID] = spec.CorrelationID
 	}
@@ -265,7 +276,7 @@ func containerConfig(spec LaunchSpec) (*container.Config, *container.HostConfig)
 	return cfg, host
 }
 
-// DockerExecutor launches one container per card via the Docker SDK. It owns
+// DockerExecutor launches one container per card run and run kind via the Docker SDK. It owns
 // the tracker and the per-run supervision goroutines (output pump, wait +
 // cleanup, idle watchdog). Dependencies are injected; there is no global state.
 type DockerExecutor struct {
@@ -281,9 +292,9 @@ type DockerExecutor struct {
 	idleTimeout      time.Duration
 	pollInterval     time.Duration
 
-	onStart func(project, cardID, containerID, correlationID string)
-	onExit  func(project, cardID string, exitCode int64, cause ExitCause, attempt int, correlationID string)
-	onLog   func(project, cardID, correlationID string, line []byte, stderr bool)
+	onStart func(k RunKey, containerID, correlationID string)
+	onExit  func(k RunKey, exitCode int64, cause ExitCause, attempt int, correlationID string)
+	onLog   func(k RunKey, correlationID string, line []byte, stderr bool)
 
 	logger  *slog.Logger
 	metrics *metrics.Metrics
@@ -300,9 +311,9 @@ type Config struct {
 	IdleTimeout      time.Duration
 	PollInterval     time.Duration
 
-	OnStart func(project, cardID, containerID, correlationID string)
-	OnExit  func(project, cardID string, exitCode int64, cause ExitCause, attempt int, correlationID string)
-	OnLog   func(project, cardID, correlationID string, line []byte, stderr bool)
+	OnStart func(k RunKey, containerID, correlationID string)
+	OnExit  func(k RunKey, exitCode int64, cause ExitCause, attempt int, correlationID string)
+	OnLog   func(k RunKey, correlationID string, line []byte, stderr bool)
 
 	Logger *slog.Logger
 	// Metrics is the Prometheus bundle. Nil disables container-duration
@@ -360,7 +371,8 @@ func (e *DockerExecutor) Launch(ctx context.Context, spec LaunchSpec) error {
 
 	cfg, host := containerConfig(spec)
 	host.ExtraHosts = buildExtraHosts(e.resolver, spec.MCPURL, log)
-	name := containerName(spec.Project, spec.CardID)
+	k := spec.Key()
+	name := containerName(k)
 
 	resp, err := e.docker.ContainerCreate(ctx, client.ContainerCreateOptions{
 		Config:           cfg,
@@ -398,6 +410,7 @@ func (e *DockerExecutor) Launch(ctx context.Context, spec LaunchSpec) error {
 	run := &Run{
 		ContainerID:   resp.ID,
 		CardID:        spec.CardID,
+		Kind:          spec.Kind,
 		Project:       spec.Project,
 		CorrelationID: spec.CorrelationID,
 		StartedAt:     time.Now(),
@@ -412,7 +425,7 @@ func (e *DockerExecutor) Launch(ctx context.Context, spec LaunchSpec) error {
 	}
 
 	if _, err := e.docker.ContainerStart(ctx, resp.ID, client.ContainerStartOptions{}); err != nil {
-		e.tracker.Remove(spec.Project, spec.CardID)
+		e.tracker.Remove(k)
 		attach.Close()
 		e.removeContainer(ctx, resp.ID, log)
 
@@ -421,25 +434,25 @@ func (e *DockerExecutor) Launch(ctx context.Context, spec LaunchSpec) error {
 
 	// Seed the idle clock so a container that exits before any output is not
 	// flagged idle retroactively.
-	e.tracker.Touch(spec.Project, spec.CardID)
+	e.tracker.Touch(k)
 
 	// Signal the run started now that the container ID and card are both known,
 	// before the pump starts, so a per-card log header precedes any output.
 	if e.onStart != nil {
-		e.onStart(spec.Project, spec.CardID, resp.ID, spec.CorrelationID)
+		e.onStart(k, resp.ID, spec.CorrelationID)
 	}
 
 	done := make(chan struct{})
 	pumpDone := make(chan struct{})
 
-	go e.pump(spec.Project, spec.CardID, spec.CorrelationID, attach.Reader, pumpDone, log)
-	go e.runIdleWatchdog(spec.Project, spec.CardID, resp.ID, done, log)
+	go e.pump(k, spec.CorrelationID, attach.Reader, pumpDone, log)
+	go e.runIdleWatchdog(k, resp.ID, done, log)
 	// waitAndCleanup deliberately runs on a detached context: the container's
 	// supervision must outlive the request ctx that triggered Launch, otherwise
 	// a returned webhook handler would cancel a still-running container's wait
 	// and cleanup. The container timeout is the bound.
 	//nolint:gosec // G118: detached ctx is intentional; container outlives the request
-	go e.waitAndCleanup(spec.Project, spec.CardID, resp.ID, spec.Attempt, spec.CorrelationID, run.StartedAt, attach.HijackedResponse, done, pumpDone, log)
+	go e.waitAndCleanup(k, resp.ID, spec.Attempt, spec.CorrelationID, run.StartedAt, attach.HijackedResponse, done, pumpDone, log)
 
 	log.Info("container launched", "container_id", truncateID(resp.ID), "name", name)
 
@@ -451,21 +464,21 @@ func (e *DockerExecutor) Launch(ctx context.Context, spec LaunchSpec) error {
 // at launch time rather than re-read from the spec so the per-line hot path
 // carries no shared-state access. It closes pumpDone when both stream flushes
 // are complete so waitAndCleanup can synchronize on it before firing onExit.
-func (e *DockerExecutor) pump(project, cardID, correlationID string, r io.Reader, pumpDone chan struct{}, log *slog.Logger) {
+func (e *DockerExecutor) pump(k RunKey, correlationID string, r io.Reader, pumpDone chan struct{}, log *slog.Logger) {
 	defer close(pumpDone)
 
 	stdoutW := newLineWriter(func(line []byte) {
-		e.tracker.Touch(project, cardID)
+		e.tracker.Touch(k)
 
 		if e.onLog != nil {
-			e.onLog(project, cardID, correlationID, line, false)
+			e.onLog(k, correlationID, line, false)
 		}
 	})
 	stderrW := newLineWriter(func(line []byte) {
-		e.tracker.Touch(project, cardID)
+		e.tracker.Touch(k)
 
 		if e.onLog != nil {
-			e.onLog(project, cardID, correlationID, line, true)
+			e.onLog(k, correlationID, line, true)
 		}
 	})
 
@@ -489,7 +502,8 @@ func (e *DockerExecutor) pump(project, cardID, correlationID string, r io.Reader
 // durable-log run headers, which restarts at 1 once a card's log is pruned -
 // no discriminating power across that boundary.
 func (e *DockerExecutor) waitAndCleanup(
-	project, cardID, containerID string,
+	k RunKey,
+	containerID string,
 	attempt int,
 	correlationID string,
 	startedAt time.Time,
@@ -543,7 +557,7 @@ func (e *DockerExecutor) waitAndCleanup(
 	// Read the recorded kill reason before Remove clears it, and derive both
 	// the cause and the metrics label from it, so the two cannot disagree
 	// about how the run ended.
-	reason := e.tracker.Reason(project, cardID)
+	reason := e.tracker.Reason(k)
 	cause := resolveCause(observed, reason)
 
 	if e.metrics != nil {
@@ -551,7 +565,7 @@ func (e *DockerExecutor) waitAndCleanup(
 		e.metrics.ContainerDuration.WithLabelValues(outcome).Observe(time.Since(startedAt).Seconds())
 	}
 
-	e.tracker.Remove(project, cardID)
+	e.tracker.Remove(k)
 
 	log.Info("container exited", "exit_code", exitCode, "cause", string(cause))
 
@@ -565,7 +579,7 @@ func (e *DockerExecutor) waitAndCleanup(
 	}
 
 	if e.onExit != nil {
-		e.onExit(project, cardID, exitCode, cause, attempt, correlationID)
+		e.onExit(k, exitCode, cause, attempt, correlationID)
 	}
 }
 
@@ -586,7 +600,7 @@ func waitForPumpDrain(pumpDone <-chan struct{}, timeout time.Duration) bool {
 // runIdleWatchdog kills a container that produces no output for longer than the
 // idle timeout, unless the run is awaiting human input. It stops when done is
 // closed by waitAndCleanup. Disabled when idleTimeout or pollInterval <= 0.
-func (e *DockerExecutor) runIdleWatchdog(project, cardID, containerID string, done <-chan struct{}, log *slog.Logger) {
+func (e *DockerExecutor) runIdleWatchdog(k RunKey, containerID string, done <-chan struct{}, log *slog.Logger) {
 	if e.idleTimeout <= 0 || e.pollInterval <= 0 {
 		return
 	}
@@ -599,11 +613,11 @@ func (e *DockerExecutor) runIdleWatchdog(project, cardID, containerID string, do
 		case <-done:
 			return
 		case <-ticker.C:
-			if e.tracker.Awaiting(project, cardID) {
+			if e.tracker.Awaiting(k) {
 				continue
 			}
 
-			last := e.tracker.LastActivity(project, cardID)
+			last := e.tracker.LastActivity(k)
 			if last.IsZero() || time.Since(last) <= e.idleTimeout {
 				continue
 			}
@@ -613,7 +627,7 @@ func (e *DockerExecutor) runIdleWatchdog(project, cardID, containerID string, do
 				"idle_timeout", e.idleTimeout,
 				"last_activity", last.Format(time.RFC3339Nano),
 			)
-			e.tracker.SetReason(project, cardID, metrics.OutcomeIdleTimeout)
+			e.tracker.SetReason(k, metrics.OutcomeIdleTimeout)
 			e.kill(containerID, log)
 
 			return
@@ -621,16 +635,16 @@ func (e *DockerExecutor) runIdleWatchdog(project, cardID, containerID string, do
 	}
 }
 
-// Kill stops the tracked container for project/cardID. It first waits up to
+// Kill stops the tracked container for the run key. It first waits up to
 // killGraceTimeout for the container to exit on its own; if it does, Kill
 // returns nil without sending SIGKILL and without recording a kill reason.
 // Only when the grace window elapses without a self-exit does Kill record
 // the kill reason and send SIGKILL. Removal is handled by waitAndCleanup.
 // Returns ErrNotFound when no run is tracked.
-func (e *DockerExecutor) Kill(ctx context.Context, project, cardID string) error {
-	run, ok := e.tracker.Get(project, cardID)
+func (e *DockerExecutor) Kill(ctx context.Context, k RunKey) error {
+	run, ok := e.tracker.Get(k)
 	if !ok {
-		return fmt.Errorf("%w: %s/%s", ErrNotFound, project, cardID)
+		return fmt.Errorf("%w: %s/%s", ErrNotFound, k.Project, k.Name())
 	}
 
 	// Give the worker a short window to exit on its own; the reason is only
@@ -639,10 +653,10 @@ func (e *DockerExecutor) Kill(ctx context.Context, project, cardID string) error
 		return nil
 	}
 
-	e.tracker.SetReason(project, cardID, metrics.OutcomeKilled)
+	e.tracker.SetReason(k, metrics.OutcomeKilled)
 
 	if _, err := e.docker.ContainerKill(ctx, run.ContainerID, client.ContainerKillOptions{Signal: "SIGKILL"}); err != nil {
-		return fmt.Errorf("kill container %s/%s: %w", project, cardID, err)
+		return fmt.Errorf("kill container %s/%s: %w", k.Project, k.Name(), err)
 	}
 
 	return nil
@@ -674,7 +688,7 @@ func (e *DockerExecutor) StopAll(ctx context.Context, project string) ([]StopRes
 
 	for i, run := range runs {
 		wg.Go(func() {
-			err := e.Kill(ctx, run.Project, run.CardID)
+			err := e.Kill(ctx, run.Key())
 			if errors.Is(err, ErrNotFound) {
 				err = nil // already gone is a success
 			}

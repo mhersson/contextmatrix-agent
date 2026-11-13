@@ -129,9 +129,10 @@ func NewRunCredentials(secretsDir, cmURL, apiKey string, logger *slog.Logger) *R
 }
 
 // HostDir returns the per-run directory bind-mounted read-only at
-// /run/cm-secrets. Project and card ID are each sanitized and joined as separate
-// path components (<runs>/<project>/<card_id>) so two projects reusing the same
-// card ID map to distinct dirs and neither can escape the runs dir.
+// /run/cm-secrets. Project and run name (a card ID, or card ID plus run kind) are
+// each sanitized and joined as separate path components (<runs>/<project>/<name>)
+// so two projects reusing the same name map to distinct dirs and neither can
+// escape the runs dir.
 func (m *RunCredentials) HostDir(project, cardID string) string {
 	return filepath.Join(m.runsDir,
 		pathSanitize.ReplaceAllString(project, "-"),

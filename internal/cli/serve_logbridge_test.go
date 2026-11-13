@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mhersson/contextmatrix-agent/internal/executor"
 	"github.com/mhersson/contextmatrix-agent/internal/filelog"
 	"github.com/mhersson/contextmatrix-agent/internal/webhook"
 	"github.com/mhersson/contextmatrix-backendkit/logbridge"
@@ -20,13 +21,13 @@ import (
 // returns the OnLog callback plus the registry and the SAME *filelog.Logger the
 // callback writes through (a second Logger over the same directory would not
 // share its in-memory open-file state, so Begin/End must run on this one).
-func newTestSink(t *testing.T) (sink func(project, cardID, correlationID string, line []byte, stderr bool), registry *logbridge.RedactorRegistry, files *filelog.Logger, dir string) {
+func newTestSink(t *testing.T) (sink func(k executor.RunKey, correlationID string, line []byte, stderr bool), registry *logbridge.RedactorRegistry, files *filelog.Logger, dir string) {
 	t.Helper()
 
 	return newTestSinkWithOutcomes(t, newRunOutcomes())
 }
 
-func newTestSinkWithOutcomes(t *testing.T, outcomes *runOutcomes) (sink func(project, cardID, correlationID string, line []byte, stderr bool), registry *logbridge.RedactorRegistry, files *filelog.Logger, dir string) {
+func newTestSinkWithOutcomes(t *testing.T, outcomes *runOutcomes) (sink func(k executor.RunKey, correlationID string, line []byte, stderr bool), registry *logbridge.RedactorRegistry, files *filelog.Logger, dir string) {
 	t.Helper()
 
 	dir = t.TempDir()
@@ -54,8 +55,8 @@ func TestContainerLogSink_RedactsSecretInDurableFileLog(t *testing.T) {
 
 	files.Begin("proj", "card-1", "container-1", "corr-1")
 
-	sink("proj", "card-1", "corr-1", []byte(`{"kind":"tool_call","data":{"raw_args":"token=PLACEHOLDER-SECRET-AAAA"}}`), false)
-	sink("proj", "card-1", "corr-1", []byte("fatal: auth failed for PLACEHOLDER-SECRET-AAAA"), true)
+	sink(executor.RunKey{Project: "proj", CardID: "card-1"}, "corr-1", []byte(`{"kind":"tool_call","data":{"raw_args":"token=PLACEHOLDER-SECRET-AAAA"}}`), false)
+	sink(executor.RunKey{Project: "proj", CardID: "card-1"}, "corr-1", []byte("fatal: auth failed for PLACEHOLDER-SECRET-AAAA"), true)
 
 	files.End("proj", "card-1", "corr-1", 0, "exit")
 
@@ -74,11 +75,11 @@ func TestContainerLogSink_RotatedTokenRedactsFromRegistrationOnward(t *testing.T
 
 	// Before the rotated token is registered (simulating OnTokenRefresh
 	// firing mid-run), the redactor does not know it yet.
-	sink("proj", "card-2", "corr-1", []byte("using token ROTATED-PLACEHOLDER-BBBB"), true)
+	sink(executor.RunKey{Project: "proj", CardID: "card-2"}, "corr-1", []byte("using token ROTATED-PLACEHOLDER-BBBB"), true)
 
 	registry.AddSessionKey("proj/card-2", "ROTATED-PLACEHOLDER-BBBB")
 
-	sink("proj", "card-2", "corr-1", []byte("using token ROTATED-PLACEHOLDER-BBBB"), true)
+	sink(executor.RunKey{Project: "proj", CardID: "card-2"}, "corr-1", []byte("using token ROTATED-PLACEHOLDER-BBBB"), true)
 
 	files.End("proj", "card-2", "corr-1", 0, "exit")
 
@@ -104,7 +105,7 @@ func TestContainerLogSink_TeeForwardsToSSEBridgeToo(t *testing.T) {
 	registry.AddSessionKey("proj/card-3", "PLACEHOLDER-SECRET-CCCC")
 
 	files.Begin("proj", "card-3", "container-3", "corr-1")
-	sink("proj", "card-3", "corr-1", []byte("leaked PLACEHOLDER-SECRET-CCCC here"), true)
+	sink(executor.RunKey{Project: "proj", CardID: "card-3"}, "corr-1", []byte("leaked PLACEHOLDER-SECRET-CCCC here"), true)
 	files.End("proj", "card-3", "corr-1", 0, "exit")
 
 	select {
@@ -127,10 +128,10 @@ func TestContainerLogSink_RemoveSessionKeyStopsFileRedaction(t *testing.T) {
 	files.Begin("proj", "card-4", "container-4", "corr-1")
 
 	registry.AddSessionKey("proj/card-4", "PLACEHOLDER-SECRET-DDDD")
-	sink("proj", "card-4", "corr-1", []byte("first PLACEHOLDER-SECRET-DDDD"), true)
+	sink(executor.RunKey{Project: "proj", CardID: "card-4"}, "corr-1", []byte("first PLACEHOLDER-SECRET-DDDD"), true)
 
 	registry.RemoveSessionKey("proj/card-4")
-	sink("proj", "card-4", "corr-1", []byte("second PLACEHOLDER-SECRET-DDDD"), true)
+	sink(executor.RunKey{Project: "proj", CardID: "card-4"}, "corr-1", []byte("second PLACEHOLDER-SECRET-DDDD"), true)
 
 	files.End("proj", "card-4", "corr-1", 0, "exit")
 
@@ -176,7 +177,7 @@ func TestContainerLogSink_StaleExitCannotStripFreshRunKeys(t *testing.T) {
 	registry.RemoveSessionKey(webhook.SessionID("proj", "card-race", "corr-1"))
 
 	// Run 2's secret must still redact on the durable file log...
-	sink("proj", "card-race", "corr-1", []byte("leaked PLACEHOLDER-RUN2-SECRET here"), true)
+	sink(executor.RunKey{Project: "proj", CardID: "card-race"}, "corr-1", []byte("leaked PLACEHOLDER-RUN2-SECRET here"), true)
 	files.End("proj", "card-race", "corr-1", 0, "exit")
 
 	content := readCardLog(t, dir, "proj", "card-race")

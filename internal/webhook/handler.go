@@ -296,13 +296,13 @@ type Server struct {
 	// per-key lock is cheaper than a global one under concurrency.
 	stdinMu sync.Map // map[string]*sync.Mutex
 
-	// launchMu serializes per-card admission (credential provisioning + executor
+	// launchMu serializes per-run admission (credential provisioning + executor
 	// launch). /trigger has no request dedup, so two concurrent triggers for one
-	// card can both reach launch; without serialization the loser's provisioning
+	// run can both reach launch; without serialization the loser's provisioning
 	// and launch-failure teardown interleave with - and clobber - the winner's
-	// per-run credentials. Keyed like stdinMu; entries are likewise never
-	// reclaimed (one bare mutex per card ever seen).
-	launchMu sync.Map // map[string]*sync.Mutex
+	// per-run credentials. Keyed by executor.RunKey; entries are never
+	// reclaimed (one bare mutex per run key ever seen).
+	launchMu sync.Map // map[executor.RunKey]*sync.Mutex
 
 	// afterLaunch, when set, runs between a successful launch and the
 	// admission's stop check: a test synchronization hook, never set in
@@ -418,10 +418,10 @@ func (s *Server) stdinLock(project, cardID string) *sync.Mutex {
 	return v.(*sync.Mutex)
 }
 
-// launchLock returns the per-card admission mutex, creating it on first use.
-// See the launchMu field comment for why launch serializes per card.
-func (s *Server) launchLock(project, cardID string) *sync.Mutex {
-	v, _ := s.launchMu.LoadOrStore(cardKey(project, cardID), &sync.Mutex{})
+// launchLock returns the per-run admission mutex, creating it on first use.
+// See the launchMu field comment for why launch serializes per run.
+func (s *Server) launchLock(k executor.RunKey) *sync.Mutex {
+	v, _ := s.launchMu.LoadOrStore(k, &sync.Mutex{})
 
 	return v.(*sync.Mutex)
 }
@@ -490,7 +490,7 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 
 	// Registered before the 202 so a /kill that follows it always finds the
 	// admission. Detached from the request: the launch outlives it.
-	adm, ctx := s.beginAdmission(context.WithoutCancel(r.Context()), payload.Project, payload.CardID)
+	adm, ctx := s.beginAdmission(context.WithoutCancel(r.Context()), spec.Key())
 
 	// Respond 202 first, then launch asynchronously: /trigger must return fast,
 	// and the eventual outcome is carried by the running/failed status callback.
@@ -547,8 +547,8 @@ func (s *Server) launch(ctx context.Context, adm *admission, spec executor.Launc
 // the stop answers and writes any later status over that, so neither running
 // nor a failure may follow.
 type admission struct {
-	project, cardID string
-	cancel          context.CancelFunc
+	key    executor.RunKey
+	cancel context.CancelFunc
 
 	// stopped is guarded by Server.admissionsMu.
 	stopped bool
@@ -559,9 +559,9 @@ type admission struct {
 
 // beginAdmission registers a trigger's admission and returns its context,
 // which the launch timeout and a stop both end.
-func (s *Server) beginAdmission(parent context.Context, project, cardID string) (*admission, context.Context) {
+func (s *Server) beginAdmission(parent context.Context, k executor.RunKey) (*admission, context.Context) {
 	ctx, cancel := context.WithTimeout(parent, launchTimeout)
-	adm := &admission{project: project, cardID: cardID, cancel: cancel, done: make(chan struct{})}
+	adm := &admission{key: k, cancel: cancel, done: make(chan struct{})}
 
 	s.admissionsMu.Lock()
 	s.admissions[adm] = struct{}{}
@@ -585,13 +585,13 @@ func (s *Server) endAdmission(adm *admission) bool {
 // stopAdmissions stops every admission in flight that match selects, then
 // waits, bounded by ctx, for each to return, so none launches or reports
 // after the caller has killed the card's tracked runs and answered.
-func (s *Server) stopAdmissions(ctx context.Context, match func(project, cardID string) bool) {
+func (s *Server) stopAdmissions(ctx context.Context, match func(executor.RunKey) bool) {
 	var stopping []*admission
 
 	s.admissionsMu.Lock()
 
 	for adm := range s.admissions {
-		if match(adm.project, adm.cardID) {
+		if match(adm.key) {
 			adm.stopped = true
 			adm.cancel()
 			stopping = append(stopping, adm)
@@ -605,7 +605,7 @@ func (s *Server) stopAdmissions(ctx context.Context, match func(project, cardID 
 		case <-adm.done:
 		case <-ctx.Done():
 			s.logger.Warn("stopped admission still running when the stop answered",
-				"project", adm.project, "card_id", adm.cardID)
+				"project", adm.key.Project, "card_id", adm.key.CardID)
 
 			return
 		}
@@ -638,7 +638,7 @@ func (s *Server) stopAdmissions(ctx context.Context, match func(project, cardID 
 // not launch has its token revoked. A claude_code run is the exception: its
 // worker is staged the subscription token.
 func (s *Server) admitAndLaunch(ctx context.Context, adm *admission, spec executor.LaunchSpec, p protocol.TriggerPayload) (failure string, stopped bool) {
-	mu := s.launchLock(p.Project, p.CardID)
+	mu := s.launchLock(spec.Key())
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -669,13 +669,13 @@ func (s *Server) stopLaunchedRun(spec executor.LaunchSpec) {
 	s.llmProxy.Revoke(spec.CorrelationID)
 
 	if s.credentials != nil {
-		s.credentials.Teardown(spec.Project, spec.CardID, spec.CorrelationID)
+		s.credentials.Teardown(spec.Project, spec.Key().Name(), spec.CorrelationID)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), killTimeout)
 	defer cancel()
 
-	if err := s.executor.Kill(ctx, spec.Project, spec.CardID); err != nil && !errors.Is(err, executor.ErrNotFound) {
+	if err := s.executor.Kill(ctx, spec.Key()); err != nil && !errors.Is(err, executor.ErrNotFound) {
 		s.logger.Error("kill of a stopped launch failed",
 			"project", spec.Project, "card_id", spec.CardID, "error", err)
 	}
@@ -686,7 +686,7 @@ func (s *Server) stopLaunchedRun(spec executor.LaunchSpec) {
 func (s *Server) provisionAndLaunch(ctx context.Context, spec executor.LaunchSpec, p protocol.TriggerPayload) string {
 	project, cardID := p.Project, p.CardID
 
-	if _, tracked := s.tracker.Get(project, cardID); tracked {
+	if _, tracked := s.tracker.Get(spec.Key()); tracked {
 		s.logger.Warn("trigger rejected: card already running",
 			"project", project, "card_id", cardID)
 
@@ -754,7 +754,7 @@ func (s *Server) provisionAndLaunch(ctx context.Context, spec executor.LaunchSpe
 			staged = protocol.LLMEndpoint{Type: p.LLMEndpoint.Type, OAuthToken: p.LLMEndpoint.OAuthToken, Effort: p.LLMEndpoint.Effort}
 		}
 
-		if err := s.credentials.Provision(project, cardID, spec.CorrelationID, p.GitToken, p.GitTokenExpiresAt, s.runEndpoint(p, staged)); err != nil {
+		if err := s.credentials.Provision(project, spec.Key().Name(), spec.CorrelationID, p.GitToken, p.GitTokenExpiresAt, s.runEndpoint(p, staged)); err != nil {
 			s.llmProxy.Revoke(spec.CorrelationID)
 			s.logger.Error("provision per-run credentials failed",
 				"project", project, "card_id", cardID, "error", err)
@@ -778,7 +778,7 @@ func (s *Server) provisionAndLaunch(ctx context.Context, spec executor.LaunchSpe
 		// Tear down only what THIS launch provisioned: a duplicate that skipped
 		// provisioning must not touch the winner's credentials.
 		if provisioned {
-			s.credentials.Teardown(project, cardID, spec.CorrelationID)
+			s.credentials.Teardown(project, spec.Key().Name(), spec.CorrelationID)
 		}
 
 		s.llmProxy.Revoke(spec.CorrelationID)
@@ -1135,13 +1135,15 @@ func (s *Server) handleKill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.stopAdmissions(r.Context(), func(project, cardID string) bool {
-		return project == payload.Project && cardID == payload.CardID
+	k := executor.RunKey{Project: payload.Project, CardID: payload.CardID}
+
+	s.stopAdmissions(r.Context(), func(adm executor.RunKey) bool {
+		return adm == k
 	})
 
 	// Idempotent: ContextMatrix reads any status >= 400 as a failed stop, and a
 	// card with no tracked container is already stopped.
-	if err := s.executor.Kill(r.Context(), payload.Project, payload.CardID); err != nil &&
+	if err := s.executor.Kill(r.Context(), k); err != nil &&
 		!errors.Is(err, executor.ErrNotFound) {
 		s.logger.Error("kill failed", "project", payload.Project, "card_id", payload.CardID, "error", err)
 		webhookcore.WriteError(w, http.StatusInternalServerError, protocol.CodeInternal, "kill failed")
@@ -1168,8 +1170,8 @@ func (s *Server) handleStopAll(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	// An empty project stops every project, as StopAll reads it.
-	s.stopAdmissions(ctx, func(project, _ string) bool {
-		return payload.Project == "" || project == payload.Project
+	s.stopAdmissions(ctx, func(k executor.RunKey) bool {
+		return payload.Project == "" || k.Project == payload.Project
 	})
 
 	stopResults, err := s.executor.StopAll(ctx, payload.Project)
@@ -1223,7 +1225,7 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	run, ok := s.tracker.Get(payload.Project, payload.CardID)
+	run, ok := s.tracker.Get(executor.RunKey{Project: payload.Project, CardID: payload.CardID})
 	if !ok {
 		webhookcore.WriteError(w, http.StatusNotFound, protocol.CodeNotFound, "no tracked container")
 
@@ -1277,8 +1279,9 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	publishUser(s.hub, payload.Project, payload.CardID, payload.Content)
-	s.tracker.SetAwaiting(payload.Project, payload.CardID, false)
-	s.tracker.Touch(payload.Project, payload.CardID)
+	k := executor.RunKey{Project: payload.Project, CardID: payload.CardID}
+	s.tracker.SetAwaiting(k, false)
+	s.tracker.Touch(k)
 
 	webhookcore.WriteJSON(w, http.StatusAccepted, protocol.SuccessResponse{
 		OK:        true,
@@ -1306,7 +1309,7 @@ func (s *Server) handlePromote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	run, ok := s.tracker.Get(payload.Project, payload.CardID)
+	run, ok := s.tracker.Get(executor.RunKey{Project: payload.Project, CardID: payload.CardID})
 	if !ok {
 		webhookcore.WriteError(w, http.StatusNotFound, protocol.CodeNotFound, "no tracked container")
 
@@ -1385,7 +1388,7 @@ func (s *Server) handleEndSession(w http.ResponseWriter, r *http.Request) {
 // exits. Serve shutdown shares this path with /end-session. It returns
 // executor.ErrNotFound when no run is tracked.
 func (s *Server) EndSession(project, cardID string) error {
-	run, ok := s.tracker.Get(project, cardID)
+	run, ok := s.tracker.Get(executor.RunKey{Project: project, CardID: cardID})
 	if !ok {
 		return fmt.Errorf("end session: %w: %s/%s", executor.ErrNotFound, project, cardID)
 	}

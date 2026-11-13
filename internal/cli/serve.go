@@ -146,9 +146,11 @@ func runServe(ctx context.Context, configPath string) error {
 	cbClient := callback.New(cfg.ContextMatrixURL, cfg.APIKey, logger).WithMetrics(mx)
 
 	bridge := logbridge.NewBridge(logbridge.BridgeConfig{
-		Hub:                  hub,
-		Redactor:             nil, // set dynamically via RedactorRegistry below
-		OnAwaiting:           func(k logbridge.Key, v bool) { tracker.SetAwaiting(k.Project, k.CardID, v) },
+		Hub:      hub,
+		Redactor: nil, // set dynamically via RedactorRegistry below
+		OnAwaiting: func(k logbridge.Key, v bool) {
+			tracker.SetAwaiting(executor.RunKey{Project: k.Project, CardID: k.CardID}, v)
+		},
 		SurfaceAwaitingHuman: true,
 		MapExtra:             agentMapExtra,
 	})
@@ -173,8 +175,8 @@ func runServe(ctx context.Context, configPath string) error {
 		ContainerTimeout: cfg.ContainerTimeout,
 		IdleTimeout:      cfg.IdleOutputTimeout,
 		PollInterval:     cfg.IdleWatchdogInterval,
-		OnStart: func(project, cardID, containerID, correlationID string) {
-			files.Begin(project, cardID, containerID, correlationID)
+		OnStart: func(k executor.RunKey, containerID, correlationID string) {
+			files.Begin(k.Project, k.Name(), containerID, correlationID)
 		},
 		OnLog:   containerLogSink(bridge, files, registry, outcomes),
 		OnExit:  onContainerExit(cbClient, reports, outcomes, credentials, proxy, files, registry, bridge, logger),
@@ -420,7 +422,7 @@ func (d workerDrain) parking(run *executor.Run) bool {
 // tracked compares by identity so a successor run under the same key is not
 // mistaken for the one shutdown asked to park.
 func (d workerDrain) tracked(run *executor.Run) bool {
-	current, ok := d.tracker.Get(run.Project, run.CardID)
+	current, ok := d.tracker.Get(run.Key())
 
 	return ok && current == run
 }
@@ -456,7 +458,7 @@ func (d workerDrain) settle(ctx context.Context, run *executor.Run) {
 	if d.tracked(run) {
 		d.logger.Info("killing container on shutdown", "project", run.Project, "card_id", run.CardID)
 
-		if err := d.exec.Kill(ctx, run.Project, run.CardID); err != nil &&
+		if err := d.exec.Kill(ctx, run.Key()); err != nil &&
 			!errors.Is(err, executor.ErrNotFound) {
 			d.logger.Warn("failed to kill container on shutdown",
 				"project", run.Project, "card_id", run.CardID, "error", err)
@@ -621,14 +623,14 @@ func containerLogSink(
 	files *filelog.Logger,
 	registry *logbridge.RedactorRegistry,
 	outcomes *runOutcomes,
-) func(project, cardID, correlationID string, line []byte, stderr bool) {
-	return func(project, cardID, correlationID string, line []byte, stderr bool) {
+) func(k executor.RunKey, correlationID string, line []byte, stderr bool) {
+	return func(k executor.RunKey, correlationID string, line []byte, stderr bool) {
 		// Bridge to the live /logs SSE stream first so the interactive
 		// stream is never gated on the durable-log disk write. BridgeLine
 		// does not mutate line and Write copies it, so the order is safe.
-		bridge.BridgeLine(logbridge.Key{Project: project, CardID: cardID}, line, stderr)
+		bridge.BridgeLine(logbridge.Key{Project: k.Project, CardID: k.CardID}, line, stderr)
 		masked := []byte(registry.RedactLine(string(line)))
-		files.Write(project, cardID, correlationID, masked, stderr)
+		files.Write(k.Project, k.Name(), correlationID, masked, stderr)
 
 		if !stderr {
 			outcomes.record(correlationID, masked)
@@ -653,12 +655,14 @@ func onContainerExit(
 	registry *logbridge.RedactorRegistry,
 	bridge *logbridge.Bridge,
 	logger *slog.Logger,
-) func(project, cardID string, exitCode int64, cause executor.ExitCause, ordinal int, correlationID string) {
-	return func(project, cardID string, exitCode int64, cause executor.ExitCause, ordinal int, correlationID string) {
-		emitRunEnd(bridge, files, project, cardID, correlationID, exitCode, cause, ordinal, logger)
+) func(k executor.RunKey, exitCode int64, cause executor.ExitCause, ordinal int, correlationID string) {
+	return func(k executor.RunKey, exitCode int64, cause executor.ExitCause, ordinal int, correlationID string) {
+		project, cardID := k.Project, k.CardID
 
-		files.End(project, cardID, correlationID, exitCode, string(cause))
-		credentials.Teardown(project, cardID, correlationID)
+		emitRunEnd(bridge, files, k, correlationID, exitCode, cause, ordinal, logger)
+
+		files.End(project, k.Name(), correlationID, exitCode, string(cause))
+		credentials.Teardown(project, k.Name(), correlationID)
 		proxy.Revoke(correlationID)
 
 		// Remove the session secrets after credential teardown but before
@@ -696,7 +700,8 @@ const runEndKind = "run_end"
 func emitRunEnd(
 	bridge *logbridge.Bridge,
 	files *filelog.Logger,
-	project, cardID, correlationID string,
+	k executor.RunKey,
+	correlationID string,
 	exitCode int64,
 	cause executor.ExitCause,
 	ordinal int,
@@ -705,15 +710,15 @@ func emitRunEnd(
 	line, err := json.Marshal(runEndEvent(exitCode, cause, ordinal))
 	if err != nil {
 		logger.Warn("could not build the run_end event",
-			"project", project, "card_id", cardID, "error", err)
+			"project", k.Project, "card_id", k.CardID, "error", err)
 
 		return
 	}
 
 	// Same order as the output tee: the live stream is never gated on a disk
 	// write, BridgeLine does not mutate line and Write copies it.
-	bridge.BridgeLine(logbridge.Key{Project: project, CardID: cardID}, line, false)
-	files.Write(project, cardID, correlationID, line, false)
+	bridge.BridgeLine(logbridge.Key{Project: k.Project, CardID: k.CardID}, line, false)
+	files.Write(k.Project, k.Name(), correlationID, line, false)
 }
 
 // runEndEvent builds the terminal line in the envelope the worker's own events

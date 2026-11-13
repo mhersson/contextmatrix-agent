@@ -243,7 +243,7 @@ func TestOnContainerExitClosesLogFile(t *testing.T) {
 	registry := logbridge.NewRedactorRegistry(bridge)
 
 	onExit := onContainerExit(rep, newExitReports(), newRunOutcomes(), creds, &recordingRevoker{}, files, registry, bridge, logger)
-	onExit("proj", "CARD-1", 0, executor.ExitNormal, 1, "corr-1")
+	onExit(executor.RunKey{Project: "proj", CardID: "CARD-1"}, 0, executor.ExitNormal, 1, "corr-1")
 
 	data, err := os.ReadFile(filepath.Join(dir, "proj", "card-1.log"))
 	require.NoError(t, err)
@@ -290,7 +290,7 @@ type exitHarness struct {
 	outcomes *runOutcomes
 	stream   <-chan protocol.LogEntry
 	registry *logbridge.RedactorRegistry
-	onExit   func(project, cardID string, exitCode int64, cause executor.ExitCause, attempt int, correlationID string)
+	onExit   func(k executor.RunKey, exitCode int64, cause executor.ExitCause, attempt int, correlationID string)
 }
 
 func newExitHarness(t *testing.T, logDir string) *exitHarness {
@@ -377,7 +377,7 @@ func TestExitEmitsTerminalEventAndFooterFromOneCall(t *testing.T) {
 	h.files.Begin("proj", "CARD-1", "abcdef012345", "corr-1")
 	h.files.Write("proj", "CARD-1", "corr-1", []byte(`{"seq":1,"kind":"state_change"}`), false)
 
-	h.onExit("proj", "CARD-1", -1, executor.ExitTimeout, 2, "corr-1")
+	h.onExit(executor.RunKey{Project: "proj", CardID: "CARD-1"}, -1, executor.ExitTimeout, 2, "corr-1")
 
 	s := h.transcript(t)
 
@@ -428,7 +428,7 @@ func TestOnContainerExit_RemovalTargetsExactRegisteredID(t *testing.T) {
 	h.registry.AddSessionKey(webhook.SessionID("proj", "CARD-1", "corr-2"), "PLACEHOLDER-RUN2-SECRET")
 
 	h.files.Begin("proj", "CARD-1", "abcdef012345", "corr-1")
-	h.onExit("proj", "CARD-1", 0, executor.ExitNormal, 1, "corr-1")
+	h.onExit(executor.RunKey{Project: "proj", CardID: "CARD-1"}, 0, executor.ExitNormal, 1, "corr-1")
 
 	line := "PLACEHOLDER-RUN1-SECRET PLACEHOLDER-RUN1-ROTATED PLACEHOLDER-RUN2-SECRET"
 	redacted := h.registry.RedactLine(line)
@@ -462,7 +462,7 @@ func TestOnContainerExit_StaleTeardownSparesSuccessorCredentials(t *testing.T) {
 	require.NoError(t, h.creds.Provision("proj", "CARD-1", "corr-1", "run1-token", "", secrets.EndpointSecrets{APIKey: "llm-key"}))
 	require.NoError(t, h.creds.Provision("proj", "CARD-1", "corr-2", "run2-token", "", secrets.EndpointSecrets{APIKey: "llm-key"}))
 
-	h.onExit("proj", "CARD-1", 0, executor.ExitNormal, 1, "corr-1")
+	h.onExit(executor.RunKey{Project: "proj", CardID: "CARD-1"}, 0, executor.ExitNormal, 1, "corr-1")
 
 	src, err := secrets.Open(envPath)
 	require.NoError(t, err)
@@ -470,7 +470,7 @@ func TestOnContainerExit_StaleTeardownSparesSuccessorCredentials(t *testing.T) {
 		"run 1's stale exit must leave run 2's credentials dir and env file untouched")
 
 	// Run 2's own exit still tears the dir down.
-	h.onExit("proj", "CARD-1", 0, executor.ExitNormal, 2, "corr-2")
+	h.onExit(executor.RunKey{Project: "proj", CardID: "CARD-1"}, 0, executor.ExitNormal, 2, "corr-2")
 
 	_, err = os.Stat(credsDir)
 	assert.True(t, os.IsNotExist(err), "run 2's own exit must remove the credentials dir")
@@ -485,7 +485,7 @@ func TestOnContainerExitRevokesTheRunsToken(t *testing.T) {
 	h.rep.onReport = func() { revokedAtCallback = len(h.revoker.revoked) }
 
 	h.files.Begin("proj", "CARD-1", "abcdef012345", "corr-1")
-	h.onExit("proj", "CARD-1", 0, executor.ExitNormal, 1, "corr-1")
+	h.onExit(executor.RunKey{Project: "proj", CardID: "CARD-1"}, 0, executor.ExitNormal, 1, "corr-1")
 
 	assert.Equal(t, []string{"corr-1"}, h.revoker.revoked)
 	assert.Equal(t, 1, revokedAtCallback, "the token must already be revoked when the status callback fires")
@@ -499,7 +499,7 @@ func TestTerminalEventCarriesTheAttemptOrdinal(t *testing.T) {
 	t.Run("second attempt is stamped", func(t *testing.T) {
 		h := newExitHarness(t, t.TempDir())
 		h.files.Begin("proj", "CARD-1", "abcdef012345", "corr-1")
-		h.onExit("proj", "CARD-1", 0, executor.ExitNormal, 2, "corr-1")
+		h.onExit(executor.RunKey{Project: "proj", CardID: "CARD-1"}, 0, executor.ExitNormal, 2, "corr-1")
 
 		ev, _ := findRunEnd(t, h.transcript(t))
 		assert.InDelta(t, 2, ev[attempt.Field], 0)
@@ -508,7 +508,7 @@ func TestTerminalEventCarriesTheAttemptOrdinal(t *testing.T) {
 	t.Run("first attempt is left unmarked", func(t *testing.T) {
 		h := newExitHarness(t, t.TempDir())
 		h.files.Begin("proj", "CARD-1", "abcdef012345", "corr-1")
-		h.onExit("proj", "CARD-1", 0, executor.ExitNormal, 1, "corr-1")
+		h.onExit(executor.RunKey{Project: "proj", CardID: "CARD-1"}, 0, executor.ExitNormal, 1, "corr-1")
 
 		ev, _ := findRunEnd(t, h.transcript(t))
 		assert.NotContains(t, ev, attempt.Field, "an absent ordinal already reads as the first attempt")
@@ -538,7 +538,7 @@ func TestFooterAndTerminalEventWrittenOnEveryExitPath(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newExitHarness(t, t.TempDir())
 			h.files.Begin("proj", "CARD-1", "abcdef012345", "corr-1")
-			h.onExit("proj", "CARD-1", tc.exitCode, tc.cause, 1, "corr-1")
+			h.onExit(executor.RunKey{Project: "proj", CardID: "CARD-1"}, tc.exitCode, tc.cause, 1, "corr-1")
 
 			s := h.transcript(t)
 
@@ -560,7 +560,7 @@ func TestFooterAndTerminalEventWrittenOnEveryExitPath(t *testing.T) {
 func TestExitPathSurvivesAnUnwritableTranscript(t *testing.T) {
 	h := newExitHarness(t, "") // an empty dir disables the file logger entirely
 
-	h.onExit("proj", "CARD-1", 137, executor.ExitTimeout, 1, "corr-1")
+	h.onExit(executor.RunKey{Project: "proj", CardID: "CARD-1"}, 137, executor.ExitTimeout, 1, "corr-1")
 
 	assert.Equal(t, "failed", h.rep.status)
 	assert.Equal(t, "worker exited with code 137", h.rep.message)
@@ -630,7 +630,7 @@ func TestContainerLogSinkRecordsOnlyStdoutOutcomes(t *testing.T) {
 			outcomes := newRunOutcomes()
 			sink, _, _, _ := newTestSinkWithOutcomes(t, outcomes)
 
-			sink("proj", "CARD-1", "corr-1", []byte(line), tt.stderr)
+			sink(executor.RunKey{Project: "proj", CardID: "CARD-1"}, "corr-1", []byte(line), tt.stderr)
 
 			assert.Equal(t, tt.want, outcomes.take("corr-1").Cause)
 		})
@@ -645,7 +645,7 @@ func TestContainerLogSinkRecordsTheMaskedLine(t *testing.T) {
 	// is not the secret.
 	registry.AddSessionKey("s", "verify_parked")
 
-	sink("proj", "CARD-1", "corr-1",
+	sink(executor.RunKey{Project: "proj", CardID: "CARD-1"}, "corr-1",
 		[]byte(`{"kind":"run_outcome","data":{"cause":"verify_parked"}}`), false)
 
 	assert.NotEqual(t, "verify_parked", outcomes.take("corr-1").Cause)
@@ -656,7 +656,7 @@ func TestOnContainerExitReportsTheRecordedOutcome(t *testing.T) {
 	h.files.Begin("proj", "CARD-1", "abcdef012345", "corr-1")
 	h.outcomes.record("corr-1", []byte(`{"kind":"run_outcome","data":{"cause":"verify_parked"}}`))
 
-	h.onExit("proj", "CARD-1", 1, executor.ExitNormal, 1, "corr-1")
+	h.onExit(executor.RunKey{Project: "proj", CardID: "CARD-1"}, 1, executor.ExitNormal, 1, "corr-1")
 
 	assert.Equal(t, "corr-1", h.rep.payload.RunID)
 	assert.Equal(t, protocol.StopCauseVerifyParked, h.rep.payload.StopCause)
