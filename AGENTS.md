@@ -27,11 +27,11 @@ Read the relevant one before working in its area:
 
 ## Channels to ContextMatrix
 
-| Channel            | Direction    | Transport                          | Carries                                                            |
-| ------------------ | ------------ | ---------------------------------- | ------------------------------------------------------------------ |
-| Lifecycle webhooks | CM → `serve` | HMAC over `contextmatrix-protocol` | trigger / kill / stop-all / message / promote / end-session        |
+| Channel            | Direction    | Transport                          | Carries                                                                                |
+| ------------------ | ------------ | ---------------------------------- | -------------------------------------------------------------------------------------- |
+| Lifecycle webhooks | CM → `serve` | HMAC over `contextmatrix-protocol` | trigger / kill / stop-all / message / promote / end-session                            |
 | Status callbacks   | `serve` → CM | HMAC, `POST /api/agent/status`     | running / completed / failed, each with the run id; a terminal one with the stop cause |
-| Card operations    | `work` → CM  | **MCP tools** (`CM_MCP_API_KEY`)   | claim, heartbeat, report_usage, set phase, transition, complete, … |
+| Card operations    | `work` → CM  | **MCP tools** (`CM_MCP_API_KEY`)   | claim, heartbeat, report_usage, set phase, transition, complete, …                     |
 
 Card progress runs over **MCP, never raw HTTP** - the rule ContextMatrix
 enforces for agents. Before promoting an autonomous card, `serve` also makes one
