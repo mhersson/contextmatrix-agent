@@ -422,6 +422,18 @@ parent's total, so a resumed run also floors the ledger on the parent's and
 every subtask's reported total, finished subtasks included, before the first
 phase runs.
 
+## How a run ends
+
+Every park and failure names a stop cause, one of the values in
+`contextmatrix-protocol` `stopcause.go`. `mapFSMResult` sets it on
+`worker.Result.Cause`, and so does every setup failure before the FSM starts
+(cause `error`). The `work` command writes it as the last stdout line, a
+`run_outcome` event, after `worker.Run` returns and every subprocess has ended;
+a run that failed before it could name a cause writes `error`. The three
+model-selection review parks (no reviewer model, no fix model, no fix model
+other than the ones that already failed) report `no_model`, not `review_parked`.
+The cause never changes the exit code or `worker_status`.
+
 ## Claude Code subscription mode
 
 The mode is on when the trigger's endpoint type is `claude_code`. Every phase

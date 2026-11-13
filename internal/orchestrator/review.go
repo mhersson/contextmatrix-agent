@@ -155,6 +155,17 @@ func (e *ReviewParkedError) Error() string {
 	return "review parked: " + reason
 }
 
+// NoModel reports whether the park is a model-selection failure rather than
+// review findings left or a cap reached.
+func (e *ReviewParkedError) NoModel() bool {
+	switch e.Reason {
+	case reviewParkedNoReviewer, reviewParkedNoFixModel, reviewParkedFixExhausted:
+		return true
+	}
+
+	return false
+}
+
 // The causes a review park can have. Each is the phrase that follows
 // "review parked: " on the card.
 const (

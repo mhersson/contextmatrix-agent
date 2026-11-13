@@ -215,6 +215,8 @@ type CardOps interface {
 // an end-session park and a hard error.
 type Result struct {
 	Reason string // completed | end_session | error
+	// Cause is the protocol stop cause naming why the run ended.
+	Cause string
 }
 
 // heartbeatInterval is a var so tests can shrink it.
@@ -577,7 +579,7 @@ func mapFSMResult(ctx context.Context, a fsmArgs, redact func(string) string, er
 	switch {
 	case err == nil:
 		// The done phase completed the card itself; nothing more to do.
-		return Result{Reason: "completed"}, nil
+		return Result{Reason: "completed", Cause: protocol.StopCauseDone}, nil
 
 	case isReviewParked(err):
 		// Parked, not failed: the card stays in review for a human. No
@@ -585,7 +587,7 @@ func mapFSMResult(ctx context.Context, a fsmArgs, redact func(string) string, er
 		slog.Info("review parked; leaving card in review", "card", a.spec.CardID)
 		reportParkedQuietly(ctx, a, parkReason(err), "", time.Time{})
 
-		return Result{Reason: "completed"}, nil
+		return Result{Reason: "completed", Cause: reviewParkCause(err)}, nil
 
 	case isGatesParked(err):
 		// Parked, not failed: the card stays in review with a ## PR Gates
@@ -593,7 +595,7 @@ func mapFSMResult(ctx context.Context, a fsmArgs, redact func(string) string, er
 		slog.Info("pr gates parked; leaving card in review", "card", a.spec.CardID)
 		reportParkedQuietly(ctx, a, parkReason(err), "", time.Time{})
 
-		return Result{Reason: "completed"}, nil
+		return Result{Reason: "completed", Cause: protocol.StopCauseGatesParked}, nil
 
 	case isBudgetExceeded(err):
 		// Push the partial work so a human (or resume) can pick it up, then fail.
@@ -603,7 +605,7 @@ func mapFSMResult(ctx context.Context, a fsmArgs, redact func(string) string, er
 		pushWIP(ctx, a)
 		releaseQuietly(ctx, a.ops, a.spec.CardID)
 
-		return Result{Reason: "error"}, fmt.Errorf("orchestrator: %w", err)
+		return Result{Reason: "error", Cause: protocol.StopCauseBudgetExceeded}, fmt.Errorf("orchestrator: %w", err)
 
 	case isContextLimit(err):
 		// Context-window park: identical shape to the budget arm. Push the
@@ -613,7 +615,7 @@ func mapFSMResult(ctx context.Context, a fsmArgs, redact func(string) string, er
 		pushWIP(ctx, a)
 		releaseQuietly(ctx, a.ops, a.spec.CardID)
 
-		return Result{Reason: "error"}, fmt.Errorf("orchestrator: %w", err)
+		return Result{Reason: "error", Cause: protocol.StopCauseContextLimit}, fmt.Errorf("orchestrator: %w", err)
 
 	case isMaxTurns(err):
 		// Turn-cap park: the harness stopped mid-task, so the tree may hold
@@ -623,7 +625,7 @@ func mapFSMResult(ctx context.Context, a fsmArgs, redact func(string) string, er
 		pushWIP(ctx, a)
 		releaseQuietly(ctx, a.ops, a.spec.CardID)
 
-		return Result{Reason: "error"}, fmt.Errorf("orchestrator: %w", err)
+		return Result{Reason: "error", Cause: protocol.StopCauseMaxTurns}, fmt.Errorf("orchestrator: %w", err)
 
 	case isUsageLimit(err):
 		// Usage-limit park: push WIP, keep the claim so report_parked is accepted
@@ -634,7 +636,7 @@ func mapFSMResult(ctx context.Context, a fsmArgs, redact func(string) string, er
 		pushWIP(ctx, a)
 		reportParkedQuietly(ctx, a, usageLimitReason(ule), ule.Window, ule.ResetsAt)
 
-		return Result{Reason: "completed"}, nil
+		return Result{Reason: "completed", Cause: protocol.StopCauseUsageLimit}, nil
 
 	case a.endSession.Load() || ctx.Err() != nil || errorsIsCanceled(err):
 		// end_session / kill mid-FSM: the graceful park. Checked BEFORE the
@@ -647,7 +649,7 @@ func mapFSMResult(ctx context.Context, a fsmArgs, redact func(string) string, er
 		pushWIP(ctx, a)
 		releaseQuietly(ctx, a.ops, a.spec.CardID)
 
-		return Result{Reason: "end_session"}, nil
+		return Result{Reason: "end_session", Cause: protocol.StopCauseEnded}, nil
 
 	case isToolchainMissing(err):
 		// Toolchain-missing park: an environmental failure, not a model
@@ -655,7 +657,7 @@ func mapFSMResult(ctx context.Context, a fsmArgs, redact func(string) string, er
 		// mirroring the Budget/Context/MaxTurns arms above. The orchestrator
 		// already wrote the blocker reason to the card log; this path does not
 		// duplicate it.
-		return parkBlocked(ctx, a, err)
+		return parkBlocked(ctx, a, err, protocol.StopCauseToolchainMissing)
 
 	case isNoModel(err):
 		// Model-selection park: no catalogued model clears any configured bar
@@ -663,7 +665,7 @@ func mapFSMResult(ctx context.Context, a fsmArgs, redact func(string) string, er
 		// there is nothing to run the work on. Environmental like the
 		// toolchain arm above, and mapped identically. The orchestrator
 		// already wrote the reason to the card log.
-		return parkBlocked(ctx, a, err)
+		return parkBlocked(ctx, a, err, protocol.StopCauseNoModel)
 
 	case isVerifyParked(err):
 		// Pre-commit verify park: a subtask's verify stayed red through its one
@@ -676,13 +678,13 @@ func mapFSMResult(ctx context.Context, a fsmArgs, redact func(string) string, er
 		// orchestrator already reported that outcome row while it still held
 		// the subtask claim, and it wrote the card log line carrying the
 		// failing command and output; the worker duplicates neither.
-		return parkBlocked(ctx, a, err)
+		return parkBlocked(ctx, a, err, protocol.StopCauseVerifyParked)
 
 	case isEmptySubtask(err):
 		// Empty-subtask park: the coder left nothing to commit. The
 		// orchestrator already reported the outcome and wrote the card log
 		// line; the worker maps it like the verify park.
-		return parkBlocked(ctx, a, err)
+		return parkBlocked(ctx, a, err, protocol.StopCauseEmptySubtask)
 
 	case isSplitOverflow(err):
 		// Split-overflow park: the plan phase refused to auto-create a
@@ -691,13 +693,13 @@ func mapFSMResult(ctx context.Context, a fsmArgs, redact func(string) string, er
 		// output - and the orchestrator already wrote the proposed titles to
 		// the card log, so the worker duplicates neither the log nor a model
 		// outcome report.
-		return parkBlocked(ctx, a, err)
+		return parkBlocked(ctx, a, err, protocol.StopCauseSplitOverflow)
 
 	default:
 		logRunFailure(ctx, a, redact, err)
 		releaseQuietly(ctx, a.ops, a.spec.CardID)
 
-		return Result{Reason: "error"}, fmt.Errorf("orchestrator: %w", err)
+		return Result{Reason: "error", Cause: protocol.StopCauseError}, fmt.Errorf("orchestrator: %w", err)
 	}
 }
 
@@ -731,17 +733,17 @@ func runFailureLine(redact func(string) string, err error) string {
 
 // parkBlocked maps one of the park arms (toolchain-missing, no-model,
 // verify-parked, empty-subtask, split-overflow) onto the shared blocked-park
-// sequence. The genuinely distinguishing step: transition the card to blocked
+// sequence, reporting the caller's stop cause. The genuinely distinguishing step: transition the card to blocked
 // BEFORE releasing the claim, since ownership may be required for the
 // transition. blocked is project-configurable (not every .board.yaml declares
 // in_progress -> blocked), so a failure here is logged and the park still
 // completes - never fatal.
-func parkBlocked(ctx context.Context, a fsmArgs, err error) (Result, error) {
+func parkBlocked(ctx context.Context, a fsmArgs, err error, cause string) (Result, error) {
 	transitionToBlocked(ctx, a.ops, a.spec.CardID)
 	pushWIP(ctx, a)
 	releaseQuietly(ctx, a.ops, a.spec.CardID)
 
-	return Result{Reason: "error"}, fmt.Errorf("orchestrator: %w", err)
+	return Result{Reason: "error", Cause: cause}, fmt.Errorf("orchestrator: %w", err)
 }
 
 // transitionToBlocked moves the card to blocked. A review round can park after
@@ -825,6 +827,16 @@ func isReviewParked(err error) bool {
 	var rp *orchestrator.ReviewParkedError
 
 	return errors.As(err, &rp)
+}
+
+// reviewParkCause is the stop cause of a review park: the model-selection
+// reasons are a missing model, not review findings left.
+func reviewParkCause(err error) string {
+	if rp, ok := errors.AsType[*orchestrator.ReviewParkedError](err); ok && rp.NoModel() {
+		return protocol.StopCauseNoModel
+	}
+
+	return protocol.StopCauseReviewParked
 }
 
 // isGatesParked reports whether err is the orchestrator's pr-gates park sentinel.
@@ -1267,7 +1279,7 @@ func releaseWithError(ctx context.Context, ops CardOps, cardID string, err error
 		slog.Warn("release card failed", "card", cardID, "error", relErr)
 	}
 
-	return Result{Reason: "error"}, err
+	return Result{Reason: "error", Cause: protocol.StopCauseError}, err
 }
 
 // secretsPathForAuth returns the secrets env file path when the run started with

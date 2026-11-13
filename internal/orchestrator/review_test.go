@@ -7933,3 +7933,23 @@ func TestReviewPanelReportsNoExclusionForAnUnusedDefault(t *testing.T) {
 		}
 	}
 }
+
+func TestReviewParkedErrorNoModel(t *testing.T) {
+	cases := []struct {
+		reason string
+		want   bool
+	}{
+		{reviewParkedNoReviewer, true},
+		{reviewParkedNoFixModel, true},
+		{reviewParkedFixExhausted, true},
+		{reviewParkedAttemptsCap, false},
+		{reviewParkedServerCap, false},
+		{reviewParkedNoTime, false},
+		{reviewParkedSynthesisCap, false},
+		{"", false},
+	}
+
+	for _, tc := range cases {
+		assert.Equal(t, tc.want, (&ReviewParkedError{Reason: tc.reason}).NoModel(), tc.reason)
+	}
+}

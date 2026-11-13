@@ -9,6 +9,8 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
+	"io"
 	"log/slog"
 	"math/big"
 	"os"
@@ -18,6 +20,7 @@ import (
 	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/config"
+	"github.com/mhersson/contextmatrix-agent/internal/runoutcome"
 	"github.com/mhersson/contextmatrix-agent/internal/secrets"
 	"github.com/mhersson/contextmatrix-agent/internal/worker"
 	"github.com/mhersson/contextmatrix-harness/events"
@@ -1012,4 +1015,35 @@ func TestReadLLMSecretsTakesTheClaudeCodeEffortFromTheFileOnly(t *testing.T) {
 			assert.Equal(t, tt.want, readLLMSecrets(worker.RunSpec{}, src).LLMEffort)
 		})
 	}
+}
+
+func TestFinishWorkWritesTheOutcomeLast(t *testing.T) {
+	lastCause := func(buf *bytes.Buffer) string {
+		lines := bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n"))
+		d, ok := runoutcome.Parse(lines[len(lines)-1])
+		require.True(t, ok)
+
+		return d.Cause
+	}
+
+	t.Run("the worker's cause ends the stream and the error passes through", func(t *testing.T) {
+		var buf bytes.Buffer
+
+		emit := events.NewEmitter(io.Discard, &buf)
+		emit.Emit(events.ToolCallKind, map[string]any{"tool": "bash"})
+
+		errX := errors.New("x")
+		got := finishWork(emit, worker.Result{Cause: protocol.StopCauseEmptySubtask}, errX)
+		assert.Same(t, errX, got)
+		assert.Equal(t, protocol.StopCauseEmptySubtask, lastCause(&buf))
+	})
+
+	t.Run("no cause reads as error", func(t *testing.T) {
+		var buf bytes.Buffer
+
+		emit := events.NewEmitter(io.Discard, &buf)
+
+		require.NoError(t, finishWork(emit, worker.Result{}, nil))
+		assert.Equal(t, protocol.StopCauseError, lastCause(&buf))
+	})
 }

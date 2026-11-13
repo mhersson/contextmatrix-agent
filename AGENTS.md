@@ -55,6 +55,7 @@ internal/verifyexec/   → verify-command probing + bounded exec; used by cli ru
 internal/worker/       → the `work` lifecycle: clone, claim, run the FSM (HITL-gated or autonomous), commit/push, PR; wires the orchestrator deps
 internal/executor/     → Executor interface + DockerExecutor; Tracker (concurrency + awaiting-human gate); watchdogs
 internal/attempt/      → stamps the per-card container-run ordinal onto the transcript envelope, so a restarted card's overlapping event sequences stay distinguishable
+internal/runoutcome/   → the worker's last stdout line (run_outcome): why the run ended; written by work, read by serve
 internal/secrets/      → Source (static env file) + RunCredentials (stages per-run CM-provisioned credentials)
 
 # serve plumbing
