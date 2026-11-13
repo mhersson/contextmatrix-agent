@@ -24,12 +24,13 @@ Read the relevant one before working in its area:
 | `docs/secrets.md`         | Credential staging, the LLM proxy, env scrubbing, redaction, `verify.env` pass-throughs.                         |
 | `docs/observability.md`   | Prometheus metrics and the admin listener.                                                                       |
 | `docs/custom-images.md`   | Custom worker images and `CMX_READ_ONLY_ROOTS`.                                                                  |
+| `docs/run-kinds.md`       | Run kinds: `POST /run-kind`, keying, kill and listing, credentials, inputs, the terminal status.                 |
 
 ## Channels to ContextMatrix
 
 | Channel            | Direction    | Transport                          | Carries                                                                                |
 | ------------------ | ------------ | ---------------------------------- | -------------------------------------------------------------------------------------- |
-| Lifecycle webhooks | CM → `serve` | HMAC over `contextmatrix-protocol` | trigger / kill / stop-all / message / promote / end-session                            |
+| Lifecycle webhooks | CM → `serve` | HMAC over `contextmatrix-protocol` | trigger / run-kind / kill / stop-all / message / promote / end-session                 |
 | Status callbacks   | `serve` → CM | HMAC, `POST /api/agent/status`     | running / completed / failed, each with the run id; a terminal one with the stop cause |
 | Card operations    | `work` → CM  | **MCP tools** (`CM_MCP_API_KEY`)   | claim, heartbeat, report_usage, set phase, transition, complete, …                     |
 
@@ -56,6 +57,7 @@ internal/worker/       → the `work` lifecycle: clone, claim, run the FSM (HITL
 internal/executor/     → Executor interface + DockerExecutor; Tracker (concurrency + awaiting-human gate); watchdogs
 internal/attempt/      → stamps the per-card container-run ordinal onto the transcript envelope, so a restarted card's overlapping event sequences stay distinguishable
 internal/runoutcome/   → the worker's last stdout line (run_outcome): why the run ended; written by work, read by serve
+internal/cardid/       → the card ID pattern shared by work and /run-kind
 internal/secrets/      → Source (static env file) + RunCredentials (stages per-run CM-provisioned credentials)
 
 # serve plumbing
@@ -263,6 +265,9 @@ Summaries only - full detail lives in the reference documents above.
     once per run. Every POC card asks for main-behaviour tests only; without
     mob review it also gets one generic reviewer, blockers-only fix requests
     and no cleanup pass. The verdict code has no POC branch.
+16. **Run kinds.** `POST /run-kind` launches sandboxed check and investigate
+    runs for a card: keyed apart from its card run, no MCP key, one status at
+    the end with the result and usage. See `docs/run-kinds.md`.
 
 ## Running and testing
 

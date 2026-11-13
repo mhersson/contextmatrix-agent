@@ -313,3 +313,26 @@ func TestAgentMapExtra(t *testing.T) {
 		})
 	}
 }
+
+// TestRunKindOutputSkipsTheLiveStream: the live stream is keyed by card, so a
+// run kind's output and its run_end stay off it and reach only its file log.
+func TestRunKindOutputSkipsTheLiveStream(t *testing.T) {
+	h := newExitHarness(t, t.TempDir())
+	sink := containerLogSink(h.bridge, h.files, h.registry, h.outcomes)
+
+	check := executor.RunKey{Project: "proj", CardID: "CARD-1", Kind: protocol.RunKindCheck}
+
+	h.files.Begin("proj", check.Name(), "container-1", "corr-check")
+	sink(check, "corr-check", []byte("check output"), true)
+	h.onExit(check, 0, executor.ExitNormal, 1, "corr-check")
+
+	content := readCardLog(t, h.dir, "proj", "card-1-check")
+	assert.Contains(t, content, "check output")
+	findRunEnd(t, content)
+
+	sink(executor.RunKey{Project: "proj", CardID: "CARD-1"}, "corr-card", []byte("card output"), true)
+
+	entries := drainStream(h.stream)
+	require.Len(t, entries, 1, "only the card run's line reaches the live stream")
+	assert.Equal(t, "card output", entries[0].Content)
+}

@@ -24,8 +24,9 @@ implements `TaskBackend`.
 
 Two channels connect the agent to ContextMatrix:
 
-- **Lifecycle webhooks (CM → agent).** ContextMatrix calls `/trigger`, `/kill`,
-  `/stop-all`, `/message`, `/promote`, and `/end-session` over the
+- **Lifecycle webhooks (CM → agent).** ContextMatrix calls `/trigger`,
+  [`/run-kind`](docs/run-kinds.md), `/kill`, `/stop-all`, `/message`,
+  `/promote`, and `/end-session` over the
   [`contextmatrix-protocol`](https://github.com/mhersson/contextmatrix-protocol)
   HMAC contract. The agent reports status back to `/api/agent/*`.
 - **Card operations (worker → CM, over MCP).** Inside each container the worker

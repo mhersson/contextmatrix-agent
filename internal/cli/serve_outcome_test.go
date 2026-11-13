@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -72,7 +73,7 @@ func TestExitPayload(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := exitPayload("proj", "CM-1", "CM-1-abc", tc.exitCode, tc.exit, tc.reported, tc.shutdown)
+			got := exitPayload(executor.RunKey{Project: "proj", CardID: "CM-1"}, "CM-1-abc", tc.exitCode, tc.exit, tc.reported, tc.shutdown)
 
 			assert.Equal(t, protocol.StatusCallbackPayload{
 				CardID:       "CM-1",
@@ -82,6 +83,73 @@ func TestExitPayload(t *testing.T) {
 				RunID:        "CM-1-abc",
 				StopCause:    tc.wantStopCause,
 			}, got)
+		})
+	}
+}
+
+func TestExitPayloadForRunKinds(t *testing.T) {
+	investigate := executor.RunKey{Project: "proj", CardID: "CM-1", Kind: protocol.RunKindInvestigate}
+	card := executor.RunKey{Project: "proj", CardID: "CM-1"}
+
+	result := &protocol.RunKindResult{Investigate: &protocol.InvestigateResult{Diagnosis: "d", Cause: protocol.DiagnosisModel}}
+	huge := &protocol.RunKindResult{Investigate: &protocol.InvestigateResult{Diagnosis: strings.Repeat("x", 1<<20), Cause: protocol.DiagnosisModel}}
+	usage := []protocol.RunUsage{{Model: "vendor/model-a", LogTokenUsage: protocol.LogTokenUsage{InputTokens: 5}}}
+	sixteen := make([]protocol.RunUsage, 16)
+	seventeen := make([]protocol.RunUsage, 17)
+
+	cases := []struct {
+		name       string
+		key        executor.RunKey
+		exitCode   int64
+		reported   runoutcome.Data
+		wantStatus string
+		wantCause  string
+		wantKind   string
+		wantResult *protocol.RunKindResult
+		wantUsage  []protocol.RunUsage
+	}{
+		{
+			"completed and done keeps the result", investigate, 0,
+			runoutcome.Data{Cause: protocol.StopCauseDone, Result: result, Usage: usage},
+			"completed", protocol.StopCauseDone, protocol.RunKindInvestigate, result, usage,
+		},
+		{
+			"a failed run drops the result", investigate, 1,
+			runoutcome.Data{Cause: protocol.StopCauseBudgetExceeded, Result: result, Usage: usage},
+			"failed", protocol.StopCauseBudgetExceeded, protocol.RunKindInvestigate, nil, usage,
+		},
+		{
+			"a card run carries neither", card, 0,
+			runoutcome.Data{Cause: protocol.StopCauseDone, Result: result, Usage: usage},
+			"completed", protocol.StopCauseDone, "", nil, nil,
+		},
+		{
+			"16 usage rows are kept", investigate, 0,
+			runoutcome.Data{Cause: protocol.StopCauseDone, Result: result, Usage: sixteen},
+			"completed", protocol.StopCauseDone, protocol.RunKindInvestigate, result, sixteen,
+		},
+		{
+			"17 usage rows fail the run", investigate, 0,
+			runoutcome.Data{Cause: protocol.StopCauseDone, Result: result, Usage: seventeen},
+			"failed", protocol.StopCauseError, protocol.RunKindInvestigate, nil, nil,
+		},
+		{
+			"a status over 1 MiB fails the run", investigate, 0,
+			runoutcome.Data{Cause: protocol.StopCauseDone, Result: huge, Usage: usage},
+			"failed", protocol.StopCauseError, protocol.RunKindInvestigate, nil, usage,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := exitPayload(tc.key, "CM-1-abc", tc.exitCode, executor.ExitNormal, tc.reported, false)
+
+			assert.Equal(t, tc.wantStatus, got.WorkerStatus)
+			assert.Equal(t, tc.wantCause, got.StopCause)
+			assert.Equal(t, tc.wantKind, got.Kind)
+			assert.Equal(t, tc.wantResult, got.Result)
+			assert.Equal(t, tc.wantUsage, got.Usage)
+			assert.Equal(t, "CM-1-abc", got.RunID)
 		})
 	}
 }

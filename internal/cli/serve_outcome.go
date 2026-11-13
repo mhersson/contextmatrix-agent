@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"encoding/json"
+	"fmt"
 	"sync"
 
 	"github.com/mhersson/contextmatrix-agent/internal/executor"
@@ -66,9 +68,17 @@ func stopCause(exit executor.ExitCause, reported string, shuttingDown bool) stri
 	return ""
 }
 
-// exitPayload builds a run's terminal status from its container exit.
+// The run-kind status limits (wire contract 3.4).
+const (
+	maxUsageRows   = 16
+	maxStatusBytes = 1 << 20
+)
+
+// exitPayload builds a run's terminal status from its container exit. A card
+// run's status never carries a result or usage, whatever its line holds.
 func exitPayload(
-	project, cardID, correlationID string,
+	k executor.RunKey,
+	correlationID string,
 	exitCode int64,
 	exit executor.ExitCause,
 	reported runoutcome.Data,
@@ -76,12 +86,52 @@ func exitPayload(
 ) protocol.StatusCallbackPayload {
 	status, message := exitStatus(exitCode, exit)
 
-	return protocol.StatusCallbackPayload{
-		CardID:       cardID,
-		Project:      project,
+	p := protocol.StatusCallbackPayload{
+		CardID:       k.CardID,
+		Project:      k.Project,
 		WorkerStatus: status,
 		Message:      message,
 		RunID:        correlationID,
 		StopCause:    stopCause(exit, reported.Cause, shuttingDown),
 	}
+
+	if k.Kind == "" {
+		return p
+	}
+
+	return withRunKindOutcome(p, k.Kind, reported)
+}
+
+// withRunKindOutcome adds a run kind's kind, usage and result to its terminal
+// status. Usage goes on completed and failed alike; the result only on a
+// completed run that stopped done. A status that breaks a limit fails the run
+// with cause error rather than reach ContextMatrix, which would reject it.
+func withRunKindOutcome(p protocol.StatusCallbackPayload, kind string, reported runoutcome.Data) protocol.StatusCallbackPayload {
+	p.Kind = kind
+
+	if len(reported.Usage) > maxUsageRows {
+		return failedOverLimit(p, fmt.Sprintf("run reported %d usage rows, over the %d limit", len(reported.Usage), maxUsageRows))
+	}
+
+	p.Usage = reported.Usage
+
+	if p.WorkerStatus == "completed" && p.StopCause == protocol.StopCauseDone {
+		p.Result = reported.Result
+	}
+
+	if b, err := json.Marshal(p); err != nil || len(b) > maxStatusBytes {
+		p.Result = nil
+
+		return failedOverLimit(p, "run result over the status size limit")
+	}
+
+	return p
+}
+
+func failedOverLimit(p protocol.StatusCallbackPayload, message string) protocol.StatusCallbackPayload {
+	p.WorkerStatus = "failed"
+	p.Message = message
+	p.StopCause = protocol.StopCauseError
+
+	return p
 }

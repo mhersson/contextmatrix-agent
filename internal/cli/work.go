@@ -8,12 +8,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/attempt"
+	"github.com/mhersson/contextmatrix-agent/internal/cardid"
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/config"
 	"github.com/mhersson/contextmatrix-agent/internal/runoutcome"
@@ -28,16 +28,6 @@ import (
 
 // cmEnvFile is the bind-mounted env file path the service injects secrets into.
 const cmEnvFile = "/run/cm-secrets/env"
-
-// cardIDPattern matches ContextMatrix card IDs (PREFIX-NNN, accepting upper-
-// and lower-case letters): a letter-led prefix of letters, digits, and dashes
-// (CM only requires the project prefix to be non-empty, so MY-PROJ-001 is a
-// legitimate ID), ending in a dash and a numeric suffix - exactly what CM's
-// server-side ID generator produces. The card ID becomes part of the cm/ work
-// branch name, so this conservative shape keeps crafted refs (colons, slashes,
-// dots, spaces, leading dashes) out of the push path entirely instead of
-// relying on git's refspec parser to reject them.
-var cardIDPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9-]*-[0-9]+$`)
 
 // mcpCloseTimeout bounds the MCP client teardown: a slow or dead tunnel
 // must not keep a finished worker alive past the backend's kill grace -
@@ -203,7 +193,7 @@ func specFromEnv() (worker.RunSpec, error) {
 		return worker.RunSpec{}, err
 	}
 
-	if !cardIDPattern.MatchString(cardID) {
+	if !cardid.Valid(cardID) {
 		return worker.RunSpec{}, fmt.Errorf("env var CM_CARD_ID: invalid card ID %q (want PREFIX-NNN)", cardID)
 	}
 

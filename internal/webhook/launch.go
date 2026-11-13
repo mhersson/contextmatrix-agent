@@ -13,13 +13,16 @@ import (
 // launchRequest is everything one run needs to be admitted and launched: its
 // key, the resolved spec, the credentials CM provisioned, and any extra values
 // the host must mask. Secrets are extra masked values beyond the credentials
-// above (a card run's resolved MCP key and mob guest tokens).
+// above (a card run's resolved MCP key and mob guest tokens). LLMRequired is
+// false for a run that calls no model: it skips the LLM guards and the proxy,
+// and its env file stages nothing LLM.
 type launchRequest struct {
 	Key               executor.RunKey
 	Spec              executor.LaunchSpec
 	GitToken          string
 	GitTokenExpiresAt string
 	LLM               *protocol.LLMEndpoint
+	LLMRequired       bool
 	MobGuests         string
 	Secrets           []string
 }
@@ -54,6 +57,7 @@ func (s *Server) cardLaunchRequest(p protocol.TriggerPayload, spec executor.Laun
 		GitToken:          p.GitToken,
 		GitTokenExpiresAt: p.GitTokenExpiresAt,
 		LLM:               p.LLMEndpoint,
+		LLMRequired:       true,
 		MobGuests:         s.mobGuestsJSON(p),
 		Secrets:           extra,
 	}
@@ -67,8 +71,6 @@ func (s *Server) cardLaunchRequest(p protocol.TriggerPayload, spec executor.Laun
 func (s *Server) launch(ctx context.Context, adm *admission, req launchRequest) {
 	defer adm.cancel()
 
-	project, cardID := req.Key.Project, req.Key.CardID
-
 	failure, stopped := s.admitAndLaunch(ctx, adm, req)
 	close(adm.done)
 
@@ -76,27 +78,42 @@ func (s *Server) launch(ctx context.Context, adm *admission, req launchRequest) 
 		return
 	}
 
-	// ctx may have expired; the callback client bounds its own requests.
-	status := protocol.StatusCallbackPayload{CardID: cardID, Project: project, RunID: req.Spec.CorrelationID}
-
 	if failure.failed() {
-		status.WorkerStatus = "failed"
-		status.Message = failure.Message
-		status.StopCause = failure.Cause
-
-		if err := s.reporter.ReportStatus(context.Background(), status); err != nil {
-			s.logger.Error("report failed-status callback failed",
-				"project", project, "card_id", cardID, "error", err)
-		}
+		s.reportFailure(req, failure)
 
 		return
 	}
 
-	status.WorkerStatus = "running"
+	// ctx may have expired; the callback client bounds its own requests.
+	status := protocol.StatusCallbackPayload{
+		CardID:       req.Key.CardID,
+		Project:      req.Key.Project,
+		WorkerStatus: "running",
+		RunID:        req.Spec.CorrelationID,
+	}
 
 	if err := s.reporter.ReportStatus(context.Background(), status); err != nil {
 		s.logger.Error("report running-status callback failed",
-			"project", project, "card_id", cardID, "error", err)
+			"project", req.Key.Project, "card_id", req.Key.CardID, "error", err)
+	}
+}
+
+// reportFailure sends the one failed status of a run that did not launch.
+func (s *Server) reportFailure(req launchRequest, failure launchFailure) {
+	status := protocol.StatusCallbackPayload{
+		CardID:       req.Key.CardID,
+		Project:      req.Key.Project,
+		Kind:         req.Key.Kind,
+		WorkerStatus: "failed",
+		Message:      failure.Message,
+		RunID:        req.Spec.CorrelationID,
+		StopCause:    failure.Cause,
+	}
+
+	// The launch context may have expired; the callback client bounds its own requests.
+	if err := s.reporter.ReportStatus(context.Background(), status); err != nil {
+		s.logger.Error("report failed-status callback failed",
+			"project", req.Key.Project, "card_id", req.Key.CardID, "kind", req.Key.Kind, "error", err)
 	}
 }
 
@@ -190,13 +207,13 @@ func (s *Server) stopAdmissions(ctx context.Context, match func(executor.RunKey)
 // winner's refresh loop and mounted run dir stay intact.
 //
 // Credential-availability guards: ContextMatrix provisions both credentials
-// per run - there is no local fallback. A payload missing the git token or the
-// llm_endpoint is fail-closed rejected here, before any provisioning or
-// executor call, rather than launched with a dud mount or an empty LLM
-// endpoint. A server without a usable LLM proxy fails closed the same way: the
-// worker gets a per-run proxy token, never the real key, and a run that does
-// not launch has its token revoked. A claude_code run is the exception: its
-// worker is staged the subscription token.
+// per run - there is no local fallback. A payload missing the git token, or a
+// model run's llm_endpoint, is fail-closed rejected here, before any
+// provisioning or executor call, rather than launched with a dud mount or an
+// empty LLM endpoint. A model run on a server without a usable LLM proxy fails
+// closed the same way: the worker gets a per-run proxy token, never the real
+// key, and a run that does not launch has its token revoked. A claude_code run
+// is the exception: its worker is staged the subscription token.
 func (s *Server) admitAndLaunch(ctx context.Context, adm *admission, req launchRequest) (failure launchFailure, stopped bool) {
 	mu := s.launchLock(req.Key)
 	mu.Lock()
@@ -226,7 +243,7 @@ func (s *Server) admitAndLaunch(ctx context.Context, adm *admission, req launchR
 // during the kill grace; its session secrets stay registered until its exit
 // path removes them after the output drains, as for any run.
 func (s *Server) stopLaunchedRun(req launchRequest) {
-	s.llmProxy.Revoke(req.Spec.CorrelationID)
+	s.revokeLLM(req.Spec.CorrelationID)
 
 	if s.credentials != nil {
 		s.credentials.Teardown(req.Key.Project, req.Key.Name(), req.Spec.CorrelationID)
@@ -261,27 +278,10 @@ func (s *Server) provisionAndLaunch(ctx context.Context, req launchRequest) laun
 		return infraFailure("CM did not provision a git token")
 	}
 
-	if req.LLM == nil {
-		s.logger.Warn("trigger rejected: no llm_endpoint credential source",
-			"project", project, "card_id", cardID)
-
-		return infraFailure("CM did not provision an llm_endpoint")
-	}
-
-	claude := req.LLM.Type == protocol.LLMEndpointTypeClaudeCode
-
-	if claude && req.LLM.OAuthToken == "" {
-		s.logger.Warn("trigger rejected: claude_code endpoint without an oauth token",
-			"project", project, "card_id", cardID)
-
-		return infraFailure("CM did not provision a Claude Code oauth token")
-	}
-
-	if s.llmProxy == nil {
-		s.logger.Error("trigger rejected: LLM proxy not configured",
-			"project", project, "card_id", cardID)
-
-		return infraFailure("LLM proxy not configured")
+	if req.LLMRequired {
+		if failure := s.llmGuard(req); failure.failed() {
+			return failure
+		}
 	}
 
 	// The timeout or a stop can land while the admission waits for the lock.
@@ -289,34 +289,17 @@ func (s *Server) provisionAndLaunch(ctx context.Context, req launchRequest) laun
 		return s.contextFailure(ctx)
 	}
 
-	// A claude_code run is never proxied: the claude binary holds the
-	// subscription token itself, so Register is skipped and the token stays "".
-	var (
-		token string
-		err   error
-	)
-
-	if !claude {
-		token, err = s.llmProxy.Register(spec.CorrelationID, *req.LLM)
-		if err != nil {
-			s.logger.Error("LLM proxy registration failed",
-				"project", project, "card_id", cardID, "error", err)
-
-			return infraFailure("LLM proxy registration failed")
-		}
+	token, staged, failure := s.stageLLM(req)
+	if failure.failed() {
+		return failure
 	}
 
 	provisioned := false
 
 	// The fail-closed guard above already rejected empty-GitToken payloads.
 	if s.credentials != nil {
-		staged := protocol.LLMEndpoint{Type: req.LLM.Type, BaseURL: s.launchEnv.LLMBaseURL, APIKey: token}
-		if claude {
-			staged = protocol.LLMEndpoint{Type: req.LLM.Type, OAuthToken: req.LLM.OAuthToken, Effort: req.LLM.Effort}
-		}
-
 		if err := s.credentials.Provision(project, req.Key.Name(), spec.CorrelationID, req.GitToken, req.GitTokenExpiresAt, s.runEndpoint(req, staged)); err != nil {
-			s.llmProxy.Revoke(spec.CorrelationID)
+			s.revokeLLM(spec.CorrelationID)
 			s.logger.Error("provision per-run credentials failed",
 				"project", project, "card_id", cardID, "error", err)
 
@@ -330,7 +313,7 @@ func (s *Server) provisionAndLaunch(ctx context.Context, req launchRequest) laun
 
 	// A stop or the timeout that landed during provisioning skips the launch
 	// and takes the failure path's teardown.
-	err = ctx.Err()
+	err := ctx.Err()
 	if err == nil {
 		err = s.executor.Launch(ctx, spec)
 	}
@@ -342,7 +325,7 @@ func (s *Server) provisionAndLaunch(ctx context.Context, req launchRequest) laun
 			s.credentials.Teardown(project, req.Key.Name(), spec.CorrelationID)
 		}
 
-		s.llmProxy.Revoke(spec.CorrelationID)
+		s.revokeLLM(spec.CorrelationID)
 		s.removeSessionSecrets(project, cardID, spec.CorrelationID)
 
 		s.logger.Error("launch failed", "project", project, "card_id", cardID, "error", err)
@@ -351,6 +334,66 @@ func (s *Server) provisionAndLaunch(ctx context.Context, req launchRequest) laun
 	}
 
 	return launchFailure{}
+}
+
+// llmGuard fails a model run closed when it has no usable LLM endpoint or the
+// server has no LLM proxy.
+func (s *Server) llmGuard(req launchRequest) launchFailure {
+	project, cardID := req.Key.Project, req.Key.CardID
+
+	if req.LLM == nil {
+		s.logger.Warn("trigger rejected: no llm_endpoint credential source",
+			"project", project, "card_id", cardID)
+
+		return infraFailure("CM did not provision an llm_endpoint")
+	}
+
+	if req.LLM.Type == protocol.LLMEndpointTypeClaudeCode && req.LLM.OAuthToken == "" {
+		s.logger.Warn("trigger rejected: claude_code endpoint without an oauth token",
+			"project", project, "card_id", cardID)
+
+		return infraFailure("CM did not provision a Claude Code oauth token")
+	}
+
+	if s.llmProxy == nil {
+		s.logger.Error("trigger rejected: LLM proxy not configured",
+			"project", project, "card_id", cardID)
+
+		return infraFailure("LLM proxy not configured")
+	}
+
+	return launchFailure{}
+}
+
+// stageLLM returns the proxy token a model run is registered under and the LLM
+// values its env file stages. A claude_code run is never proxied: the claude
+// binary holds the subscription token itself, so its token stays "". A run
+// without a model gets neither.
+func (s *Server) stageLLM(req launchRequest) (string, protocol.LLMEndpoint, launchFailure) {
+	switch {
+	case !req.LLMRequired:
+		return "", protocol.LLMEndpoint{}, launchFailure{}
+	case req.LLM.Type == protocol.LLMEndpointTypeClaudeCode:
+		return "", protocol.LLMEndpoint{Type: req.LLM.Type, OAuthToken: req.LLM.OAuthToken, Effort: req.LLM.Effort}, launchFailure{}
+	}
+
+	token, err := s.llmProxy.Register(req.Spec.CorrelationID, *req.LLM)
+	if err != nil {
+		s.logger.Error("LLM proxy registration failed",
+			"project", req.Key.Project, "card_id", req.Key.CardID, "error", err)
+
+		return "", protocol.LLMEndpoint{}, infraFailure("LLM proxy registration failed")
+	}
+
+	return token, protocol.LLMEndpoint{Type: req.LLM.Type, BaseURL: s.launchEnv.LLMBaseURL, APIKey: token}, launchFailure{}
+}
+
+// revokeLLM ends the run's proxy token. A run without a model may launch on a
+// server with no proxy, and has no token to end there.
+func (s *Server) revokeLLM(runID string) {
+	if s.llmProxy != nil {
+		s.llmProxy.Revoke(runID)
+	}
 }
 
 // contextFailure is the client-safe message for a launch that did not happen;

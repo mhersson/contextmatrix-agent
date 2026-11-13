@@ -266,7 +266,7 @@ var _ Executor = (*DockerExecutor)(nil)
 func TestLineWriter_SplitsOnNewline(t *testing.T) {
 	var got []string
 
-	w := newLineWriter(func(line []byte) {
+	w := newLineWriter(scannerBufferMax, func(line []byte) {
 		got = append(got, string(line))
 	})
 
@@ -279,7 +279,7 @@ func TestLineWriter_SplitsOnNewline(t *testing.T) {
 func TestLineWriter_PartialLineHeldUntilFlush(t *testing.T) {
 	var got []string
 
-	w := newLineWriter(func(line []byte) {
+	w := newLineWriter(scannerBufferMax, func(line []byte) {
 		got = append(got, string(line))
 	})
 
@@ -295,7 +295,7 @@ func TestLineWriter_PartialLineHeldUntilFlush(t *testing.T) {
 func TestLineWriter_FlushOnEmptyBufferIsNoop(t *testing.T) {
 	called := false
 
-	w := newLineWriter(func([]byte) { called = true })
+	w := newLineWriter(scannerBufferMax, func([]byte) { called = true })
 	w.Flush()
 
 	assert.False(t, called)
@@ -304,7 +304,7 @@ func TestLineWriter_FlushOnEmptyBufferIsNoop(t *testing.T) {
 func TestLineWriter_TrimsCarriageReturn(t *testing.T) {
 	var got []string
 
-	w := newLineWriter(func(line []byte) {
+	w := newLineWriter(scannerBufferMax, func(line []byte) {
 		got = append(got, string(line))
 	})
 
@@ -316,7 +316,7 @@ func TestLineWriter_TrimsCarriageReturn(t *testing.T) {
 func TestLineWriter_BoundsLongLine(t *testing.T) {
 	var got []byte
 
-	w := newLineWriter(func(line []byte) {
+	w := newLineWriter(scannerBufferMax, func(line []byte) {
 		got = append([]byte(nil), line...)
 	})
 
@@ -326,6 +326,48 @@ func TestLineWriter_BoundsLongLine(t *testing.T) {
 
 	assert.LessOrEqual(t, len(got), scannerBufferMax,
 		"line buffer must not grow past the cap")
+}
+
+func TestContainerConfigMountsTheInputDirReadOnly(t *testing.T) {
+	_, host := containerConfig(LaunchSpec{CardID: "CARD-1", Project: "proj", Image: "img", InputHostDir: "/h/in"})
+	assert.Contains(t, host.Binds, "/h/in:/run/cm-input:ro")
+
+	_, host = containerConfig(LaunchSpec{CardID: "CARD-1", Project: "proj", Image: "img"})
+	assert.Empty(t, host.Binds)
+}
+
+// TestRunKindLinesAreCutAtTwoMiB: a run kind's output line may exceed the card
+// run's 1 MiB cut, so the 1 MiB status cap is the limit that binds for it.
+func TestRunKindLinesAreCutAtTwoMiB(t *testing.T) {
+	line := strings.Repeat("x", 3<<19) // 1.5 MiB
+
+	cases := []struct {
+		name string
+		key  RunKey
+		want int
+	}{
+		{"run kind passes it whole", RunKey{Project: "p", CardID: "A", Kind: "check"}, len(line)},
+		{"card run cuts it at 1 MiB", RunKey{Project: "p", CardID: "A"}, scannerBufferMax},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got []int
+
+			e := &DockerExecutor{
+				tracker: NewTracker(1),
+				onLog: func(_ RunKey, _ string, l []byte, _ bool) {
+					got = append(got, len(l))
+				},
+			}
+			pumpDone := make(chan struct{})
+
+			e.pump(tc.key, "", bytes.NewReader(stdioFrame(line+"\n")), pumpDone, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			<-pumpDone
+
+			assert.Equal(t, []int{tc.want}, got)
+		})
+	}
 }
 
 func TestContainerConfigMountsSkillsReadOnly(t *testing.T) {

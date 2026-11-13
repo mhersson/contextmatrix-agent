@@ -20,6 +20,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/config"
 	"github.com/mhersson/contextmatrix-agent/internal/executor"
 	"github.com/mhersson/contextmatrix-agent/internal/filelog"
+	"github.com/mhersson/contextmatrix-agent/internal/runinput"
 	"github.com/mhersson/contextmatrix-agent/internal/secrets"
 	"github.com/mhersson/contextmatrix-agent/internal/webhook"
 	"github.com/mhersson/contextmatrix-backendkit/logbridge"
@@ -242,7 +243,7 @@ func TestOnContainerExitClosesLogFile(t *testing.T) {
 	bridge := logbridge.NewBridge(logbridge.BridgeConfig{Hub: hub})
 	registry := logbridge.NewRedactorRegistry(bridge)
 
-	onExit := onContainerExit(rep, newExitReports(), newRunOutcomes(), creds, &recordingRevoker{}, files, registry, bridge, logger)
+	onExit := onContainerExit(rep, newExitReports(), newRunOutcomes(), creds, runinput.New(t.TempDir()), &recordingRevoker{}, files, registry, bridge, logger)
 	onExit(executor.RunKey{Project: "proj", CardID: "CARD-1"}, 0, executor.ExitNormal, 1, "corr-1")
 
 	data, err := os.ReadFile(filepath.Join(dir, "proj", "card-1.log"))
@@ -288,7 +289,9 @@ type exitHarness struct {
 	revoker  *recordingRevoker
 	rep      *stubReporter
 	outcomes *runOutcomes
+	inputs   *runinput.Store
 	stream   <-chan protocol.LogEntry
+	bridge   *logbridge.Bridge
 	registry *logbridge.RedactorRegistry
 	onExit   func(k executor.RunKey, exitCode int64, cause executor.ExitCause, attempt int, correlationID string)
 }
@@ -302,6 +305,7 @@ func newExitHarness(t *testing.T, logDir string) *exitHarness {
 	revoker := &recordingRevoker{}
 	rep := &stubReporter{}
 	outcomes := newRunOutcomes()
+	inputs := runinput.New(t.TempDir())
 
 	hub := logbridge.NewHub(func(e protocol.LogEntry) string { return e.Project }, nil)
 	bridge := logbridge.NewBridge(logbridge.BridgeConfig{Hub: hub, MapExtra: agentMapExtra})
@@ -318,9 +322,11 @@ func newExitHarness(t *testing.T, logDir string) *exitHarness {
 		revoker:  revoker,
 		rep:      rep,
 		outcomes: outcomes,
+		inputs:   inputs,
 		stream:   ch,
+		bridge:   bridge,
 		registry: registry,
-		onExit:   onContainerExit(rep, newExitReports(), outcomes, creds, revoker, files, registry, bridge, logger),
+		onExit:   onContainerExit(rep, newExitReports(), outcomes, creds, inputs, revoker, files, registry, bridge, logger),
 	}
 }
 
@@ -661,4 +667,24 @@ func TestOnContainerExitReportsTheRecordedOutcome(t *testing.T) {
 	assert.Equal(t, "corr-1", h.rep.payload.RunID)
 	assert.Equal(t, protocol.StopCauseVerifyParked, h.rep.payload.StopCause)
 	assert.Empty(t, h.outcomes.take("corr-1").Cause, "the outcome is forgotten at exit")
+}
+
+// TestRunKindExitRemovesItsInputDir: a run kind's inputs are gone before its
+// status lets ContextMatrix act on the run.
+func TestRunKindExitRemovesItsInputDir(t *testing.T) {
+	h := newExitHarness(t, t.TempDir())
+
+	dir, err := h.inputs.Create("corr-1")
+	require.NoError(t, err)
+
+	presentAtCallback := true
+	h.rep.onReport = func() {
+		_, err := os.Stat(dir)
+		presentAtCallback = !os.IsNotExist(err)
+	}
+
+	h.onExit(executor.RunKey{Project: "proj", CardID: "CARD-1", Kind: protocol.RunKindCheck}, 0, executor.ExitNormal, 1, "corr-1")
+
+	assert.False(t, presentAtCallback, "the input dir must be gone when the status callback fires")
+	assert.Equal(t, protocol.RunKindCheck, h.rep.payload.Kind)
 }

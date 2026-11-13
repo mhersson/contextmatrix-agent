@@ -215,8 +215,12 @@ type Config struct {
 	SessionSecrets SessionSecretRegistry
 
 	// LLMProxy holds each run's real LLM key behind a stand-in token. Nil fails
-	// every trigger closed, so a wiring slip can never stage the real key.
+	// every model run closed, so a wiring slip can never stage the real key.
 	LLMProxy LLMProxy
+
+	// RunInputs stages each run kind's input dir. Nil leaves /run-kind
+	// unmounted, as on an agent without run kinds.
+	RunInputs RunInputStore
 
 	// Images lists the node's tagged images for GET /images. Nil disables the
 	// endpoint (500 internal).
@@ -278,6 +282,7 @@ type Server struct {
 	skillsResolver SkillsResolver
 	credentials    CredentialProvisioner
 	llmProxy       LLMProxy
+	runInputs      RunInputStore
 
 	launchEnv LaunchEnv
 
@@ -369,6 +374,7 @@ func NewServer(cfg Config) *Server {
 		skillsResolver:  cfg.SkillsResolver,
 		credentials:     cfg.Credentials,
 		llmProxy:        cfg.LLMProxy,
+		runInputs:       cfg.RunInputs,
 		sessionRegistry: cfg.SessionSecrets,
 		launchEnv:       cfg.LaunchEnv,
 		nextAttempt:     cfg.NextAttempt,
@@ -399,6 +405,10 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /logs", s.RecordMetrics(s.Auth(s.HandleLogs)))
 	mux.HandleFunc("GET /health", s.RecordMetrics(s.HandleHealth))
 	mux.HandleFunc("GET /readyz", s.RecordMetrics(s.HandleReadyz))
+
+	if s.runInputs != nil {
+		mux.HandleFunc("POST /run-kind", s.RecordMetrics(s.Auth(s.DrainGate(s.handleRunKind))))
+	}
 
 	if s.llmProxy != nil {
 		mux.HandleFunc(llmproxy.DefaultPrefix+"/", s.RecordMetrics(s.llmProxy.ServeHTTP))
@@ -474,19 +484,7 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Correlation ID travels in the X-Correlation-ID header, not the trigger
-	// body; ContextMatrix sends a fresh one on every trigger attempt. The
-	// header is namespaced, never trusted verbatim: the value feeds the
-	// per-run keying that SessionID, RunCredentials, the LLM proxy, and the
-	// filelog all lean on, so cardID plus a short random suffix keeps every
-	// admitted run unique whatever a caller sends, while the header stays
-	// recognizable inside the id for trace stitching.
-	correlationID := mintRunID(payload.CardID)
-	if supplied := r.Header.Get(correlationHeader); supplied != "" {
-		correlationID += "-" + supplied
-	}
-
-	spec := s.buildLaunchSpec(payload, correlationID, skillsDir)
+	spec := s.buildLaunchSpec(payload, requestRunID(r, payload.CardID), skillsDir)
 
 	// Registered before the 202 so a /kill that follows it always finds the
 	// admission. Detached from the request: the launch outlives it.
@@ -510,6 +508,22 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 // independently-maintained copy that could drift from it.
 func SessionID(project, cardID, correlationID string) string {
 	return project + "/" + cardID + "/" + correlationID
+}
+
+// requestRunID mints the run id for a request: base plus a random suffix, then
+// the X-Correlation-ID header, which ContextMatrix sends fresh on every
+// attempt. The header is namespaced, never trusted verbatim: the id feeds the
+// per-run keying that SessionID, RunCredentials, the LLM proxy and the filelog
+// all lean on, so the minted part keeps every admitted run unique whatever a
+// caller sends, while the header stays recognizable inside it for trace
+// stitching.
+func requestRunID(r *http.Request, base string) string {
+	id := mintRunID(base)
+	if supplied := r.Header.Get(correlationHeader); supplied != "" {
+		id += "-" + supplied
+	}
+
+	return id
 }
 
 // mintRunID builds a per-run correlation id: cardID plus a short random
@@ -640,21 +654,7 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 		secretsHostDir = s.credentials.HostDir(p.Project, p.CardID)
 	}
 
-	if s.launchEnv.BashTimeoutMaxSeconds > 0 {
-		env = append(env, "CMX_BASH_TIMEOUT_MAX_SECONDS="+strconv.Itoa(s.launchEnv.BashTimeoutMaxSeconds))
-	}
-
-	if s.launchEnv.ToolOutputMaxBytes > 0 {
-		env = append(env, "CMX_TOOL_OUTPUT_MAX_BYTES="+strconv.Itoa(s.launchEnv.ToolOutputMaxBytes))
-	}
-
-	if s.launchEnv.DefaultModel != "" {
-		env = append(env, "CMX_DEFAULT_MODEL="+s.launchEnv.DefaultModel)
-	}
-
-	if s.launchEnv.ReasoningEffort != "" {
-		env = append(env, "CMX_REASONING_EFFORT="+s.launchEnv.ReasoningEffort)
-	}
+	env = append(env, s.workerKnobEnv()...)
 
 	if s.launchEnv.ReplayReasoning {
 		env = append(env, "CMX_REPLAY_REASONING=true")
@@ -675,10 +675,6 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 
 	if s.launchEnv.ReviewAttemptsCap > 0 {
 		env = append(env, "CMX_REVIEW_ATTEMPTS_CAP="+strconv.Itoa(s.launchEnv.ReviewAttemptsCap))
-	}
-
-	if s.launchEnv.ContainerTimeoutSeconds > 0 {
-		env = append(env, "CMX_CONTAINER_TIMEOUT_SECONDS="+strconv.Itoa(s.launchEnv.ContainerTimeoutSeconds))
 	}
 
 	if s.launchEnv.GatesPollIntervalSeconds > 0 {
@@ -747,6 +743,34 @@ func (s *Server) buildLaunchSpec(p protocol.TriggerPayload, correlationID, skill
 		MCPURL:         s.launchEnv.MCPURL,
 		Attempt:        ordinal,
 	}
+}
+
+// workerKnobEnv is the CMX_* knobs card runs and run kinds both take. Zero and
+// empty values are omitted so the worker applies its own defaults.
+func (s *Server) workerKnobEnv() []string {
+	var env []string
+
+	if s.launchEnv.DefaultModel != "" {
+		env = append(env, "CMX_DEFAULT_MODEL="+s.launchEnv.DefaultModel)
+	}
+
+	if s.launchEnv.ReasoningEffort != "" {
+		env = append(env, "CMX_REASONING_EFFORT="+s.launchEnv.ReasoningEffort)
+	}
+
+	if s.launchEnv.BashTimeoutMaxSeconds > 0 {
+		env = append(env, "CMX_BASH_TIMEOUT_MAX_SECONDS="+strconv.Itoa(s.launchEnv.BashTimeoutMaxSeconds))
+	}
+
+	if s.launchEnv.ToolOutputMaxBytes > 0 {
+		env = append(env, "CMX_TOOL_OUTPUT_MAX_BYTES="+strconv.Itoa(s.launchEnv.ToolOutputMaxBytes))
+	}
+
+	if s.launchEnv.ContainerTimeoutSeconds > 0 {
+		env = append(env, "CMX_CONTAINER_TIMEOUT_SECONDS="+strconv.Itoa(s.launchEnv.ContainerTimeoutSeconds))
+	}
+
+	return env
 }
 
 // ---- kill -------------------------------------------------------------------

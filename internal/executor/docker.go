@@ -22,6 +22,7 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	"github.com/mhersson/contextmatrix-agent/internal/metrics"
+	"github.com/mhersson/contextmatrix-agent/internal/runinput"
 	"github.com/mhersson/contextmatrix-backendkit/webhookcore"
 )
 
@@ -55,6 +56,10 @@ const caCertMountPath = "/run/cm-ca/ca.crt" //nolint:gosec // path, not a creden
 // scannerBufferMax bounds the per-line buffer of the stdout/stderr pump so a
 // pathological container cannot pin the host heap with one unbounded line.
 const scannerBufferMax = 1 << 20 // 1 MiB
+
+// runKindLineMax is a run kind's per-line cut: above the 1 MiB status cap, so
+// that cap is what binds for its run_outcome line.
+const runKindLineMax = 2 << 20 // 2 MiB
 
 // killGraceTimeout is how long Kill waits for a container to exit on its
 // own before SIGKILL. The terminal-state cleanup fires the moment a card
@@ -151,6 +156,7 @@ type LaunchSpec struct {
 	SecretsHostDir  string // bind source; mounted read-only at /run/cm-secrets
 	SkillsHostDir   string // bind source; mounted read-only at /run/cm-skills (empty = no skills)
 	CACertHostFile  string // bind source; mounted read-only at /run/cm-ca/ca.crt (empty = no extra CA)
+	InputHostDir    string // bind source; a run kind's inputs, mounted read-only at runinput.MountPath (empty = none)
 	MemoryBytes     int64
 	PidsLimit       int64
 	CorrelationID   string
@@ -255,6 +261,10 @@ func containerConfig(spec LaunchSpec) (*container.Config, *container.HostConfig)
 
 	if spec.SkillsHostDir != "" {
 		host.Binds = append(host.Binds, spec.SkillsHostDir+":"+skillsMountPath+":ro")
+	}
+
+	if spec.InputHostDir != "" {
+		host.Binds = append(host.Binds, spec.InputHostDir+":"+runinput.MountPath+":ro")
 	}
 
 	if spec.CACertHostFile != "" {
@@ -467,14 +477,19 @@ func (e *DockerExecutor) Launch(ctx context.Context, spec LaunchSpec) error {
 func (e *DockerExecutor) pump(k RunKey, correlationID string, r io.Reader, pumpDone chan struct{}, log *slog.Logger) {
 	defer close(pumpDone)
 
-	stdoutW := newLineWriter(func(line []byte) {
+	lineMax := scannerBufferMax
+	if k.Kind != "" {
+		lineMax = runKindLineMax
+	}
+
+	stdoutW := newLineWriter(lineMax, func(line []byte) {
 		e.tracker.Touch(k)
 
 		if e.onLog != nil {
 			e.onLog(k, correlationID, line, false)
 		}
 	})
-	stderrW := newLineWriter(func(line []byte) {
+	stderrW := newLineWriter(lineMax, func(line []byte) {
 		e.tracker.Touch(k)
 
 		if e.onLog != nil {
@@ -864,14 +879,15 @@ func truncateID(id string) string {
 
 // lineWriter is an io.Writer that splits its input on newlines and invokes emit
 // once per complete line (without the trailing newline). The final unterminated
-// line is delivered by Flush. Per-line length is bounded by scannerBufferMax.
+// line is delivered by Flush. Per-line length is bounded by maxLen.
 type lineWriter struct {
-	emit func(line []byte)
-	buf  bytes.Buffer
+	maxLen int
+	emit   func(line []byte)
+	buf    bytes.Buffer
 }
 
-func newLineWriter(emit func(line []byte)) *lineWriter {
-	return &lineWriter{emit: emit}
+func newLineWriter(maxLen int, emit func(line []byte)) *lineWriter {
+	return &lineWriter{maxLen: maxLen, emit: emit}
 }
 
 func (w *lineWriter) Write(p []byte) (int, error) {
@@ -897,7 +913,7 @@ func (w *lineWriter) Write(p []byte) (int, error) {
 // appendBounded appends to the line buffer, dropping bytes past the cap so one
 // runaway line cannot grow the buffer without bound.
 func (w *lineWriter) appendBounded(p []byte) {
-	if room := scannerBufferMax - w.buf.Len(); room > 0 {
+	if room := w.maxLen - w.buf.Len(); room > 0 {
 		if len(p) > room {
 			p = p[:room]
 		}

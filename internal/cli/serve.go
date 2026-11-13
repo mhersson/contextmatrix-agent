@@ -30,6 +30,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/executor"
 	"github.com/mhersson/contextmatrix-agent/internal/filelog"
 	"github.com/mhersson/contextmatrix-agent/internal/metrics"
+	"github.com/mhersson/contextmatrix-agent/internal/runinput"
 	"github.com/mhersson/contextmatrix-agent/internal/secrets"
 	"github.com/mhersson/contextmatrix-agent/internal/webhook"
 	"github.com/mhersson/contextmatrix-backendkit/llmproxy"
@@ -132,6 +133,10 @@ func runServe(ctx context.Context, configPath string) error {
 	// Per-card container-output logs, always on; cfg.LogDir is never empty.
 	files := filelog.New(cfg.LogDir, logger)
 
+	// Run-kind inputs are not secrets: they live on disk under the log dir,
+	// never in the secrets dir.
+	inputs := runinput.New(filepath.Join(cfg.LogDir, ".run-inputs"))
+
 	stopLogPruner := startLogPruner(files, time.Duration(cfg.LogRetentionDays)*24*time.Hour, 24*time.Hour, logger)
 	defer stopLogPruner()
 
@@ -179,7 +184,7 @@ func runServe(ctx context.Context, configPath string) error {
 			files.Begin(k.Project, k.Name(), containerID, correlationID)
 		},
 		OnLog:   containerLogSink(bridge, files, registry, outcomes),
-		OnExit:  onContainerExit(cbClient, reports, outcomes, credentials, proxy, files, registry, bridge, logger),
+		OnExit:  onContainerExit(cbClient, reports, outcomes, credentials, inputs, proxy, files, registry, bridge, logger),
 		Logger:  logger,
 		Metrics: mx,
 	})
@@ -194,6 +199,10 @@ func runServe(ctx context.Context, configPath string) error {
 	// runs, so any run dir on disk is stale secret material from a previous one.
 	if err := credentials.CleanupOrphans(); err != nil {
 		logger.Warn("per-run secrets cleanup failed", "error", err)
+	}
+
+	if err := inputs.CleanupOrphans(); err != nil {
+		logger.Warn("run input cleanup failed", "error", err)
 	}
 
 	var draining atomic.Bool
@@ -215,6 +224,7 @@ func runServe(ctx context.Context, configPath string) error {
 		Credentials:      credentials,
 		SessionSecrets:   registry,
 		LLMProxy:         proxy,
+		RunInputs:        inputs,
 		Images:           exec,
 		ImageListFilters: cfg.ImageListFilters,
 		Build:            buildinfo.Info(),
@@ -623,7 +633,9 @@ func onDisplaceHook(proxy tokenRevoker) func(project, cardID, correlationID stri
 // raw line for both the stdout and stderr arms, so a CM-provisioned secret
 // never reaches disk in plaintext even in JSON fields the SSE bridge's
 // per-field redaction does not inspect. Outcome lines are recorded from stdout
-// only, masked: a container's stderr cannot name its run's cause.
+// only, masked: a container's stderr cannot name its run's cause. A run kind's
+// output stays off the live stream, which is keyed by card and would mix it
+// into the card run's.
 func containerLogSink(
 	bridge *logbridge.Bridge,
 	files *filelog.Logger,
@@ -634,7 +646,10 @@ func containerLogSink(
 		// Bridge to the live /logs SSE stream first so the interactive
 		// stream is never gated on the durable-log disk write. BridgeLine
 		// does not mutate line and Write copies it, so the order is safe.
-		bridge.BridgeLine(logbridge.Key{Project: k.Project, CardID: k.CardID}, line, stderr)
+		if k.Kind == "" {
+			bridge.BridgeLine(logbridge.Key{Project: k.Project, CardID: k.CardID}, line, stderr)
+		}
+
 		masked := []byte(registry.RedactLine(string(line)))
 		files.Write(k.Project, k.Name(), correlationID, masked, stderr)
 
@@ -646,8 +661,8 @@ func containerLogSink(
 
 // onContainerExit builds the executor OnExit hook. Order matters: the run_end
 // event goes out before files.End (End closes the writer), and End, Teardown,
-// the proxy-token Revoke and RemoveSessionKey all run before the status
-// callback that lets CM admit a re-trigger. Every cleanup is keyed by this
+// a run kind's input dir removal, the proxy-token Revoke and RemoveSessionKey
+// all run before the status callback that lets CM admit a re-trigger. Every cleanup is keyed by this
 // run's correlation id, so a stale exit racing a re-trigger inside the
 // pump-drain window touches only its own run. The callback is skipped when the
 // shutdown sweep has already reported the run.
@@ -656,6 +671,7 @@ func onContainerExit(
 	reports *exitReports,
 	outcomes *runOutcomes,
 	credentials *secrets.RunCredentials,
+	inputs *runinput.Store,
 	proxy tokenRevoker,
 	files *filelog.Logger,
 	registry *logbridge.RedactorRegistry,
@@ -669,6 +685,11 @@ func onContainerExit(
 
 		files.End(project, k.Name(), correlationID, exitCode, string(cause))
 		credentials.Teardown(project, k.Name(), correlationID)
+
+		if k.Kind != "" {
+			inputs.Remove(correlationID)
+		}
+
 		proxy.Revoke(correlationID)
 
 		// Remove the session secrets after credential teardown but before
@@ -676,7 +697,7 @@ func onContainerExit(
 		registry.RemoveSessionKey(webhook.SessionID(project, cardID, correlationID))
 
 		// Taken on every exit, including one whose report the sweep owns.
-		payload := exitPayload(project, cardID, correlationID, exitCode, cause,
+		payload := exitPayload(k, correlationID, exitCode, cause,
 			outcomes.take(correlationID), reports.shuttingDown())
 
 		reports.report(correlationID, func() {
@@ -722,8 +743,12 @@ func emitRunEnd(
 	}
 
 	// Same order as the output tee: the live stream is never gated on a disk
-	// write, BridgeLine does not mutate line and Write copies it.
-	bridge.BridgeLine(logbridge.Key{Project: k.Project, CardID: k.CardID}, line, false)
+	// write, BridgeLine does not mutate line and Write copies it. A run kind's
+	// end stays off the live stream, as its output does.
+	if k.Kind == "" {
+		bridge.BridgeLine(logbridge.Key{Project: k.Project, CardID: k.CardID}, line, false)
+	}
+
 	files.Write(k.Project, k.Name(), correlationID, line, false)
 }
 

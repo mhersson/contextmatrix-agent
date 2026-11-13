@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/mhersson/contextmatrix-agent/internal/executor"
 	"github.com/mhersson/contextmatrix-agent/internal/metrics"
+	"github.com/mhersson/contextmatrix-agent/internal/runinput"
 	"github.com/mhersson/contextmatrix-agent/internal/secrets"
 	"github.com/mhersson/contextmatrix-backendkit/frames"
 	"github.com/mhersson/contextmatrix-backendkit/llmproxy"
@@ -100,9 +102,10 @@ func (f *fakeExecutor) Launch(ctx context.Context, spec executor.LaunchSpec) err
 	// a full tracker) is refused with ErrCapacity and the launch never happens.
 	if f.tracker != nil {
 		admitted := f.tracker.AddIfUnderLimit(&executor.Run{
-			ContainerID: "ctr-" + spec.CardID,
+			ContainerID: "ctr-" + spec.Key().Name(),
 			CardID:      spec.CardID,
 			Project:     spec.Project,
+			Kind:        spec.Kind,
 			StartedAt:   time.Now(),
 			Stdin:       &nopWriteCloser{},
 		})
@@ -401,16 +404,18 @@ func (e *errWriteCloser) Close() error { return nil }
 // ---- harness ----------------------------------------------------------------
 
 type harness struct {
-	server   *Server
-	exec     *fakeExecutor
-	tracker  *executor.Tracker
-	reporter *fakeReporter
-	verifier *fakeVerifier
-	creds    *fakeCredentials
-	proxy    *fakeLLMProxy
-	hub      *logbridge.Hub
-	images   *fakeImageLister
-	draining *atomic.Bool
+	server    *Server
+	exec      *fakeExecutor
+	tracker   *executor.Tracker
+	reporter  *fakeReporter
+	verifier  *fakeVerifier
+	creds     *fakeCredentials
+	proxy     *fakeLLMProxy
+	sessions  *fakeSessionSecretRegistry
+	inputRoot string
+	hub       *logbridge.Hub
+	images    *fakeImageLister
+	draining  *atomic.Bool
 }
 
 func newHarness(t *testing.T, maxConcurrent int) *harness {
@@ -422,21 +427,25 @@ func newHarness(t *testing.T, maxConcurrent int) *harness {
 	verifier := &fakeVerifier{autonomous: true}
 	creds := &fakeCredentials{}
 	proxy := &fakeLLMProxy{}
+	sessions := newFakeSessionSecretRegistry()
+	inputRoot := filepath.Join(t.TempDir(), ".run-inputs")
 	hub := logbridge.NewHub(func(e protocol.LogEntry) string { return e.Project }, nil)
 	images := &fakeImageLister{}
 	draining := &atomic.Bool{}
 
 	server := NewServer(Config{
-		APIKey:        testAPIKey,
-		Skew:          protocol.DefaultMaxClockSkew,
-		MaxConcurrent: maxConcurrent,
-		Executor:      exec,
-		Tracker:       tracker,
-		Hub:           hub,
-		Reporter:      reporter,
-		Verifier:      verifier,
-		Credentials:   creds,
-		LLMProxy:      proxy,
+		APIKey:         testAPIKey,
+		Skew:           protocol.DefaultMaxClockSkew,
+		MaxConcurrent:  maxConcurrent,
+		Executor:       exec,
+		Tracker:        tracker,
+		Hub:            hub,
+		Reporter:       reporter,
+		Verifier:       verifier,
+		Credentials:    creds,
+		SessionSecrets: sessions,
+		LLMProxy:       proxy,
+		RunInputs:      runinput.New(inputRoot),
 		LaunchEnv: LaunchEnv{
 			BaseImage:               "base:image",
 			MCPURL:                  "http://cm:8080/mcp",
@@ -451,16 +460,18 @@ func newHarness(t *testing.T, maxConcurrent int) *harness {
 	})
 
 	return &harness{
-		server:   server,
-		exec:     exec,
-		tracker:  tracker,
-		reporter: reporter,
-		verifier: verifier,
-		creds:    creds,
-		proxy:    proxy,
-		hub:      hub,
-		images:   images,
-		draining: draining,
+		server:    server,
+		exec:      exec,
+		tracker:   tracker,
+		reporter:  reporter,
+		verifier:  verifier,
+		creds:     creds,
+		proxy:     proxy,
+		sessions:  sessions,
+		inputRoot: inputRoot,
+		hub:       hub,
+		images:    images,
+		draining:  draining,
 	}
 }
 
