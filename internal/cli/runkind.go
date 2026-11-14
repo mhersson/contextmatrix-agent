@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cardid"
 	"github.com/mhersson/contextmatrix-agent/internal/config"
@@ -144,7 +145,22 @@ func runKindSpecFromEnv(kind string) (runkind.Spec, error) {
 		MaxCostUSD:      maxCost,
 		BashTimeoutMax:  bashTimeoutMax,
 		ToolOutputMax:   toolOutputMax,
+		OperatorValues:  operatorValues(os.Getenv("CM_OPERATOR_ENV_NAMES")),
 	}, nil
+}
+
+// operatorValues returns the non-empty values of the env vars named in the
+// comma-separated names.
+func operatorValues(names string) []string {
+	var out []string
+
+	for name := range strings.SplitSeq(names, ",") {
+		if v := os.Getenv(strings.TrimSpace(name)); v != "" {
+			out = append(out, v)
+		}
+	}
+
+	return out
 }
 
 // readRunKindFiles fills spec's secrets from src, read as work reads them, and

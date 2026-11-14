@@ -38,6 +38,9 @@ type Spec struct {
 	Input []byte
 	// RunLogPath is the stopped run's log section a model kind reads.
 	RunLogPath string
+	// OperatorValues are the operator's worker env values, masked in every
+	// result but a check's.
+	OperatorValues []string
 
 	Model, DefaultModel, ReasoningEffort                  string
 	Selection                                             *protocol.SelectionContext
@@ -60,6 +63,27 @@ func Run(ctx context.Context, spec Spec, client llm.LLM, emit *events.Emitter) r
 			return newInvestigateDeps(spec, client, red.Apply)
 		},
 	})
+}
+
+// minOperatorValueBytes is the shortest operator value masked: a shorter one
+// would mangle ordinary text.
+const minOperatorValueBytes = 8
+
+// resultMask masks the provisioned secrets in a check's result, which is repo
+// text, and also the operator values in any other kind's: a model's result can
+// reach git as cards, guidance, a park entry or a card section.
+func resultMask(spec Spec) func(string) string {
+	secrets := []string{spec.GitToken, spec.LLMKey, spec.LLMOAuthToken}
+
+	if spec.Kind != protocol.RunKindCheck {
+		for _, v := range spec.OperatorValues {
+			if len(v) >= minOperatorValueBytes {
+				secrets = append(secrets, v)
+			}
+		}
+	}
+
+	return redact.New(secrets).Apply
 }
 
 // deps are the kinds' effects, one field per kind. A kind whose effects can
@@ -90,7 +114,7 @@ func run(ctx context.Context, spec Spec, log *slog.Logger, red *redact.Redactor,
 		return runoutcome.Data{Cause: cause, Usage: usage}
 	}
 
-	res = limitResult(maskResult(res, red.Apply))
+	res = limitResult(maskResult(res, resultMask(spec)))
 
 	return fitOutcome(runoutcome.Data{Cause: protocol.StopCauseDone, Result: &res, Usage: usage}, maxOutcomeBytes)
 }
@@ -191,6 +215,12 @@ func maskResult(r protocol.RunKindResult, mask func(string) string) protocol.Run
 		r.Investigate = &i
 	}
 
+	if r.Analyse != nil {
+		a := *r.Analyse
+		a.Findings = maskFindings(a.Findings, mask)
+		r.Analyse = &a
+	}
+
 	return r
 }
 
@@ -216,16 +246,7 @@ func maskInvestigate(r protocol.InvestigateResult, mask func(string) string) pro
 		r.Fix = &fix
 	}
 
-	if r.Findings != nil {
-		findings := make([]protocol.FrictionFinding, len(r.Findings))
-		for i, f := range r.Findings {
-			f.Kind = mask(f.Kind)
-			f.Title, f.Text, f.Evidence = mask(f.Title), mask(f.Text), mask(f.Evidence)
-			findings[i] = f
-		}
-
-		r.Findings = findings
-	}
+	r.Findings = maskFindings(r.Findings, mask)
 
 	return r
 }

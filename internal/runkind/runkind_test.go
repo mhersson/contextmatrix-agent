@@ -216,3 +216,66 @@ func TestWorkspaceDir(t *testing.T) {
 	assert.Equal(t, "/w/alpha-001", workspaceDir(Spec{Workspace: "/w", CardID: "ALPHA-001"}))
 	assert.Equal(t, "/w/guidance_pr", workspaceDir(Spec{Workspace: "/w", Kind: protocol.RunKindGuidancePR}))
 }
+
+func TestRunMasksModelResultsWithOperatorValues(t *testing.T) {
+	const (
+		token = "ghs_operatortoken123"
+		long  = "op-secret-1"
+		short = "short77"
+	)
+
+	text := "a " + long + " b " + short + " c " + token
+
+	assertMasked := func(t *testing.T, s string) {
+		t.Helper()
+		assert.NotContains(t, s, long)
+		assert.NotContains(t, s, token)
+		assert.Contains(t, s, "[REDACTED]")
+		assert.Contains(t, s, short, "a value under 8 bytes is not masked")
+	}
+
+	t.Run("investigate through run", func(t *testing.T) {
+		spec := investigateSpec(t, bareRepo(t, nil), protocol.InvestigateInput{Card: "card\n"})
+		spec.GitToken = token
+		spec.OperatorValues = []string{long, short}
+
+		args, err := json.Marshal(protocol.InvestigateResult{
+			Diagnosis: text,
+			Cause:     protocol.DiagnosisCard,
+			Fix:       &protocol.CardFix{Section: text},
+			Findings:  []protocol.FrictionFinding{{Kind: protocol.FindingCode, Title: "t", Text: text}},
+		})
+		require.NoError(t, err)
+
+		ex := &fakeExecutor{res: reported(string(args))}
+		d := run(t.Context(), spec, slog.Default(), redact.New([]string{token}), discardEmitter(), deps{investigate: built(endpointDeps(ex))})
+		require.Equal(t, protocol.StopCauseDone, d.Cause)
+
+		inv := d.Result.Investigate
+		assertMasked(t, inv.Diagnosis)
+		assertMasked(t, inv.Fix.Section)
+		assertMasked(t, inv.Findings[0].Text)
+	})
+
+	t.Run("analyse through maskResult", func(t *testing.T) {
+		spec := Spec{Kind: protocol.RunKindAnalyse, GitToken: token, OperatorValues: []string{long, short}}
+		res := protocol.RunKindResult{Analyse: &protocol.AnalyseResult{Findings: []protocol.FrictionFinding{{Text: text}}}}
+
+		got := maskResult(res, resultMask(spec))
+
+		assertMasked(t, got.Analyse.Findings[0].Text)
+	})
+}
+
+func TestRunKeepsOperatorValuesInCheckResults(t *testing.T) {
+	const value = "op-secret-1"
+
+	spec := checkSpec(t, bareRepo(t, nil), `{}`)
+	spec.OperatorValues = []string{value}
+
+	cands := []orchestrator.VerifyCandidate{{Argv: []string{"./run", value}, Display: "./run " + value}}
+
+	d := run(context.Background(), spec, slog.Default(), redact.New(nil), discardEmitter(), deps{check: fakeDeps(cands, &trialFake{})})
+	require.Equal(t, protocol.StopCauseDone, d.Cause)
+	require.Equal(t, []string{"./run " + value}, d.Result.Check.Candidates)
+}

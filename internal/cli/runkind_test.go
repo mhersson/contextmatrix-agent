@@ -205,3 +205,11 @@ func TestWorkEntersTheRunKindPath(t *testing.T) {
 	assert.Equal(t, protocol.StopCauseError, d.Cause)
 	assert.Nil(t, d.Result)
 }
+
+func TestOperatorValues(t *testing.T) {
+	t.Setenv("A", "value-one")
+	t.Setenv("B", "")
+
+	assert.Equal(t, []string{"value-one"}, operatorValues("A,B,MISSING"))
+	assert.Empty(t, operatorValues(""))
+}

@@ -158,6 +158,10 @@ cause, a model kind's usage rows, and on `done` the result. Before it is
 written, the result is masked with the secrets the worker holds (the git token,
 the LLM key and the subscription token), then bounded to the size limits below,
 then fitted to the outcome limit (`fitOutcome`, `internal/runkind/limits.go`).
+A result other than a check's can reach git, so it is masked as well with each
+operator value of 8 bytes or more: the env vars named by `CM_OPERATOR_ENV_NAMES`
+(`resultMask`, `internal/runkind/runkind.go`). A check's result is repo text and
+keeps exact matching.
 A run that cannot read its env or files, build its model executor, clone, or
 decode its input ends with cause `error` and no result. Any cause but `done`
 exits non-zero.
@@ -291,8 +295,9 @@ ran the model. The fix and `forward_to` pass through as reported: ContextMatrix
 vets the fix and treats `card` without a fix, or a fix with another cause, as no
 fix.
 
-The limits, applied after masking (`limitInvestigate` and `fitOutcome`,
-`internal/runkind/limits.go`):
+The limits, applied after masking (`limitInvestigate`, `limitFindings` and
+`fitOutcome`, `internal/runkind/limits.go` and `findings.go`). The finding rows
+apply to every kind that reports findings:
 
 | Item                       | Limit         | Over the limit                            |
 | -------------------------- | ------------- | ----------------------------------------- |
@@ -354,3 +359,4 @@ rows never reach the card's budget.
 | `internal/runkind/investigate_prompt.go` | The investigation's task prompt                                       |
 | `internal/runkind/spend.go`              | The metered client and the usage rows                                 |
 | `internal/runkind/limits.go`             | The result size limits and the outcome fit                            |
+| `internal/runkind/findings.go`           | A finding's limit and mask, shared by the kinds that report findings  |
