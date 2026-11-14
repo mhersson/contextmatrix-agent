@@ -43,6 +43,13 @@ empty repository the first subtask sets the project up far enough for the
 verify command to pass, and work the card wants "first" rides in that subtask
 rather than in one the verify command cannot pass.
 
+A bug-like card gets a read-only diagnosis pass before planning, capped at
+40 turns (`diagnoseMaxTurns`). The planner's first attempt is capped at 40
+(`planMaxTurns`) and its repair turn at 12. A diagnosis that stops at its
+cap hands the planner the text it wrote so far, marked incomplete, and
+records it as `## Diagnosis`, so planning builds on it rather than starting
+over.
+
 Documentation the card's acceptance criteria require (named files under
 `docs/`, a README, specific claims that must change) is planned as a
 deliverable in the plan phase - either alongside the code subtask that changes

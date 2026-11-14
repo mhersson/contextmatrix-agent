@@ -687,3 +687,16 @@ func TestClaudeSpawnSubagentsCapsBridgedOutput(t *testing.T) {
 	assert.NotContains(t, res.Text, bridgeSecret)
 	assert.Equal(t, tools.HeadTail(redactSecret(body), limit), res.Text)
 }
+
+func TestClaudeRunReturnsATurnCappedRunWithItsMessages(t *testing.T) {
+	msgs := []llm.Message{{Role: "user", Content: "q"}, {Role: "assistant", Content: "found it"}}
+	f := &fakeRunner{script: func(claudecode.Spec) (harness.Result, error) {
+		return harness.Result{Reason: "max_turns", Turns: 40, Messages: msgs}, nil
+	}}
+	c := newTestClaude(t, ClaudeConfig{}, f)
+
+	res, err := c.Run(t.Context(), baseReq())
+	require.NoError(t, err)
+	assert.Equal(t, "max_turns", res.Reason)
+	assert.Equal(t, msgs, res.Messages)
+}

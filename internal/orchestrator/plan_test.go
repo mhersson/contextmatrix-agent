@@ -891,6 +891,65 @@ func TestPlanPhaseDiagnosesBugLikeCard(t *testing.T) {
 	assert.InDelta(t, 0.05, o.ledger.Spent(), 1e-9)
 }
 
+// cappedDiagnosisRun runs the plan phase for a bug-like card whose diagnose
+// pass stops at its turn cap with msgs, then a planner that returns a plan.
+func cappedDiagnosisRun(t *testing.T, msgs []llm.Message) (*fakeOps, *recordingExec) {
+	t.Helper()
+
+	ops := &fakeOps{
+		taskContext: cmclient.TaskContext{
+			Title: "Fix the broken parser", Description: "it throws on empty input",
+		},
+		createdIDs: []string{"SUB-1", "SUB-2"},
+	}
+	rec := &recordingExec{results: []execResult{
+		{res: harness.Result{Reason: "max_turns", Turns: 40, Messages: msgs}},
+		{res: harness.Result{Completed: true, Reason: "done", Output: goodPlanJSON}},
+	}}
+	d := planTestDeps(ops, nil)
+	d.Executor = rec
+
+	o := newRun(t.Context(), d, ops.taskContext)
+	require.NoError(t, runPlanIsolated(context.Background(), o))
+	require.Len(t, rec.runs, 2, "the diagnose pass then the planner")
+
+	return ops, rec
+}
+
+func TestPlanPhaseCappedDiagnosisReachesThePlanner(t *testing.T) {
+	first, second := "found the nil map in registry.go", "the writer races the reader"
+	ops, rec := cappedDiagnosisRun(t, []llm.Message{
+		{Role: "user", Content: "diagnose task text"},
+		{Role: "assistant", Content: first, ToolCalls: []llm.ToolCall{{ID: "c1"}}},
+		{Role: "tool", ToolCallID: "c1", Content: "tool output that must not leak"},
+		{Role: "assistant", Content: "  " + second + "\n"},
+	})
+
+	planner := rec.runs[1].Task
+	assert.Contains(t, planner, first)
+	assert.Contains(t, planner, second)
+	assert.NotContains(t, planner, "tool output that must not leak")
+
+	body := ops.lastBody()
+	assert.Contains(t, body, "## Diagnosis")
+	assert.Contains(t, body, first)
+	assert.Contains(t, body, second)
+	assert.True(t, ops.loggedContains("diagnosis stopped at its turn cap"), "logs=%v", ops.recorded())
+	assert.False(t, ops.loggedContains("diagnose step failed"))
+}
+
+func TestPlanPhaseCappedDiagnosisWithoutAssistantTextPlansWithoutOne(t *testing.T) {
+	ops, rec := cappedDiagnosisRun(t, []llm.Message{
+		{Role: "user", Content: "diagnose task text"},
+		{Role: "assistant", Content: "  ", ToolCalls: []llm.ToolCall{{ID: "c1"}}},
+		{Role: "tool", ToolCallID: "c1", Content: "tool output that must not leak"},
+	})
+
+	assert.NotContains(t, rec.runs[1].Task, "tool output that must not leak")
+	assert.NotContains(t, ops.lastBody(), "## Diagnosis")
+	assert.True(t, ops.loggedContains("diagnose step failed"), "logs=%v", ops.recorded())
+}
+
 func TestPlanPhaseSkipsDiagnoseForFeatureCard(t *testing.T) {
 	ops := &fakeOps{
 		taskContext: cmclient.TaskContext{
