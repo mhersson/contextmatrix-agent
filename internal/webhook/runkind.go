@@ -124,7 +124,7 @@ func (s *Server) admitRunKind(ctx context.Context, adm *admission, req launchReq
 }
 
 // stageRunKind writes the kind's input into the run's input dir, and for
-// investigate the stopped run's log section beside it.
+// investigate and analyse the stopped run's log section beside it.
 func (s *Server) stageRunKind(req launchRequest, p protocol.RunKindPayload) (string, launchFailure) {
 	runID := req.Spec.CorrelationID
 
@@ -135,7 +135,7 @@ func (s *Server) stageRunKind(req launchRequest, p protocol.RunKindPayload) (str
 		return "", infraFailure("run input staging failed")
 	}
 
-	if p.Kind != protocol.RunKindInvestigate {
+	if !usesModel(p.Kind) {
 		return dir, launchFailure{}
 	}
 
@@ -168,7 +168,7 @@ func (s *Server) stageRunLog(dir string, p protocol.RunKindPayload) (err error) 
 		}
 	}()
 
-	return s.sections.CopySection(p.Project, p.CardID, p.Investigate.RunID, f)
+	return s.sections.CopySection(p.Project, p.CardID, runLogID(p), f)
 }
 
 // stageRunInput creates the run's input dir and writes the kind's input into
@@ -193,8 +193,13 @@ func (s *Server) stageRunInput(runID string, input any) (string, error) {
 
 // runKindInput is the input the payload's kind runs on.
 func runKindInput(p protocol.RunKindPayload) any {
-	if p.Kind == protocol.RunKindCheck {
+	switch p.Kind {
+	case protocol.RunKindCheck:
 		return p.Check
+	case protocol.RunKindAnalyse:
+		return p.Analyse
+	case protocol.RunKindGuidancePR:
+		return p.GuidancePR
 	}
 
 	return p.Investigate

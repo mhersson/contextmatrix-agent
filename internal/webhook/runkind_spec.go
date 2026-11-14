@@ -1,6 +1,8 @@
 package webhook
 
 import (
+	"strings"
+
 	"github.com/mhersson/contextmatrix-agent/internal/executor"
 	protocol "github.com/mhersson/contextmatrix-protocol"
 )
@@ -34,6 +36,10 @@ func (s *Server) buildRunKindSpec(p protocol.RunKindPayload, correlationID strin
 	env = append(env, s.workerKnobEnv()...)
 	env = append(env, s.launchEnv.WorkerExtraEnv...)
 
+	if names := operatorEnvNames(s.launchEnv.WorkerExtraEnv); names != "" {
+		env = append(env, "CM_OPERATOR_ENV_NAMES="+names)
+	}
+
 	secretsHostDir := ""
 	if s.credentials != nil {
 		secretsHostDir = s.credentials.HostDir(p.Project, k.Name())
@@ -53,4 +59,18 @@ func (s *Server) buildRunKindSpec(p protocol.RunKindPayload, correlationID strin
 		MCPURL:         s.launchEnv.MCPURL,
 		Attempt:        1,
 	}
+}
+
+// operatorEnvNames joins the names of the KEY=value entries, never their
+// values; an entry without "=" has no name and is skipped.
+func operatorEnvNames(extra []string) string {
+	var names []string
+
+	for _, e := range extra {
+		if name, _, ok := strings.Cut(e, "="); ok {
+			names = append(names, name)
+		}
+	}
+
+	return strings.Join(names, ",")
 }

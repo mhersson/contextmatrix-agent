@@ -2,21 +2,35 @@
 
 ## What a run kind is
 
-A run kind is a sandboxed run ContextMatrix's Sentinel dispatches for one card:
-`check` (no model) and `investigate` (a model run). A run kind gets no MCP key,
-never writes the card, and reports only through its one terminal status. It
-runs in the project's worker image, beside the card's own run if one is live.
-`analyse` and `guidance_pr` are reserved names, refused until they ship.
+A run kind is a sandboxed run ContextMatrix's Sentinel dispatches: `check` (no
+model), `investigate` and `analyse` (model runs, each on one card's run log) and
+`guidance_pr` (no model; project-level, takes no card, and writes git). A run
+kind gets no MCP key, never writes the card, and reports only through its one
+terminal status. It runs in the project's worker image, beside the card's own
+run if one is live.
 
 ## Dispatch
 
 ContextMatrix calls `POST /run-kind` with a `protocol.RunKindPayload`. The
 route is HMAC-authenticated and drain-gated like `/trigger`.
 `runKindInvalidField` (`internal/webhook/runkind_validate.go`) checks, in
-order: the kind (`check` or `investigate`), the card ID (the pattern `work`
-enforces, `internal/cardid`), the git token, that exactly the kind's own input
-is set, that an `llm_endpoint` is set exactly for `investigate`, and that
-`investigate` has `max_cost_usd > 0`. The answers are:
+order, the first failure naming its field in the message:
+
+| Field                                  | Rejected when                                                                          |
+| -------------------------------------- | -------------------------------------------------------------------------------------- |
+| `kind`                                 | not `check`, `investigate`, `analyse` or `guidance_pr`                                 |
+| `card_id`                              | not empty for `guidance_pr`; not the pattern `work` enforces (`internal/cardid`) else  |
+| `git_token`                            | empty                                                                                  |
+| `check`, `investigate`, `analyse`, `guidance_pr` | set for another kind, or missing for its own                                 |
+| `llm_endpoint`                         | not set exactly for a model kind (`investigate`, `analyse`)                            |
+| `max_cost_usd`                         | not above 0 for a model kind, or not 0 for a kind without a model                      |
+| `guidance_pr.section`                  | empty, over 16 KiB, or containing `<!-- sentinel:`                                     |
+| `guidance_pr.title`                    | empty, over 256 bytes, or holding a newline or carriage return                         |
+| `guidance_pr.body`                     | over 60 KiB                                                                            |
+| `guidance_pr.allowed`                  | over 64 entries, or an entry over 512 bytes                                            |
+| `guidance_pr.expect_head`              | not empty and not 40 or 64 lower-case hex characters                                   |
+
+The answers are:
 
 | Status | Code            | When                                           |
 | ------ | --------------- | ---------------------------------------------- |
@@ -37,9 +51,12 @@ launch a `/kill` or `/stop-all` stopped sends none.
 
 `buildRunKindSpec` (`internal/webhook/runkind_spec.go`) gives the container
 `CM_RUN_KIND`, `CM_CARD_ID`, `CM_PROJECT`, `CM_REPO_URL` and `CM_BASE_BRANCH`;
-`investigate` adds `CM_MODEL`, `CM_MAX_COST_USD` and `CMX_SELECTION`. Then come
+a model kind adds `CM_MODEL`, `CM_MAX_COST_USD` and `CMX_SELECTION`. Then come
 the `CMX_*` knobs every run takes (default model, reasoning effort, bash
-timeout, tool output cap, container timeout) and `worker_extra_env`. The
+timeout, tool output cap, container timeout) and `worker_extra_env`, whose names
+(the text before the first `=`, in order, joined by `,`) also ride
+`CM_OPERATOR_ENV_NAMES`; never their values, and it is unset when there is no
+extra env. The
 payload's `worker_image` overrides `base_image`. There is no `CM_MCP_URL`,
 `CM_MCP_API_KEY`, `CMX_ATTEMPT` or `CMX_VERIFY`, and no task skills.
 
@@ -94,9 +111,9 @@ expiry. The agent cannot narrow the token, so on a personal access token
 installation the run may carry the PAT's full scope. The run kinds give the
 model no tool that writes to git.
 
-An `investigate` run gets its LLM access as a card run does: a stand-in token
+A model kind gets its LLM access as a card run does: a stand-in token
 for serve's LLM proxy, or the subscription token for a `claude_code` endpoint.
-A `check` registers nothing with the proxy and stages no LLM values
+A kind without a model registers nothing with the proxy and stages no LLM values
 (`stageLLM`, `internal/webhook/launch.go`). On Claude Code the built-in Read is
 not confined to the read roots, so the model can read `/run/cm-secrets/env`,
 the git token and the subscription token included; both are masked in every
@@ -113,7 +130,7 @@ sweeps `.run-inputs` at start (`internal/cli/serve.go`).
 
 ## The stopped run's log
 
-For `investigate`, serve finds the stopped run's section in the card's durable
+For `investigate` and `analyse`, serve finds the stopped run's section in the card's durable
 log by its `run=<id>` header and footer fields and copies all of it into
 `run.log` in the run's input dir, next to `input.json`, before the launch
 (`internal/filelog/section.go`, `stageRunLog` in `internal/webhook/runkind.go`).
@@ -121,7 +138,7 @@ The dir is mounted read-only, so the model reads the section with its grep and
 read tools and never whole. A run still writing has its section copied up to the
 end of the file. A 256 MiB safety cap keeps the first 32 MiB and the last 224
 MiB, with a `==== <n> bytes cut ====` line between them. A missing section fails
-the investigation as `run log not found` with stop cause `error`; any other
+the run as `run log not found` with stop cause `error`; any other
 staging error fails it with stop cause `infrastructure`. Nothing launches in
 either case. A run kind writes its own `<card>-<kind>` log, never into the
 card's file.

@@ -43,6 +43,24 @@ func investigatePayload() protocol.RunKindPayload {
 	}
 }
 
+func analysePayload() protocol.RunKindPayload {
+	p := investigatePayload()
+	p.Kind = protocol.RunKindAnalyse
+	p.MaxCostUSD = 1
+	p.Investigate = nil
+	p.Analyse = &protocol.AnalyseInput{RunID: "ABC-12-x", Card: "c"}
+
+	return p
+}
+
+func guidancePRPayload() protocol.RunKindPayload {
+	return protocol.RunKindPayload{
+		Kind: protocol.RunKindGuidancePR, Project: "proj",
+		RepoURL: "https://example.com/r.git", GitToken: "git-tok",
+		GuidancePR: &protocol.GuidancePRInput{Section: "do x", Title: "Add guidance", Body: "why"},
+	}
+}
+
 // runKindNow launches p synchronously, as the goroutine handleRunKind starts
 // would, and returns the spec it built.
 func (h *harness) runKindNow(p protocol.RunKindPayload) executor.LaunchSpec {
@@ -85,8 +103,31 @@ func TestRunKindInvalidField(t *testing.T) {
 	}{
 		{"valid check", func(*protocol.RunKindPayload) {}, checkPayload, ""},
 		{"valid investigate", func(*protocol.RunKindPayload) {}, investigatePayload, ""},
-		{"reserved analyse", func(p *protocol.RunKindPayload) { p.Kind = protocol.RunKindAnalyse }, checkPayload, "kind"},
-		{"reserved guidance_pr", func(p *protocol.RunKindPayload) { p.Kind = protocol.RunKindGuidancePR }, checkPayload, "kind"},
+		{"valid analyse", func(*protocol.RunKindPayload) {}, analysePayload, ""},
+		{"valid guidance_pr", func(*protocol.RunKindPayload) {}, guidancePRPayload, ""},
+		{"guidance_pr with a card", func(p *protocol.RunKindPayload) { p.CardID = "ALPHA-001" }, guidancePRPayload, "card_id"},
+		{"analyse without a card", func(p *protocol.RunKindPayload) { p.CardID = "" }, analysePayload, "card_id"},
+		{"analyse with a guidance_pr input", func(p *protocol.RunKindPayload) { p.GuidancePR = &protocol.GuidancePRInput{} }, analysePayload, "guidance_pr"},
+		{"analyse without its input", func(p *protocol.RunKindPayload) { p.Analyse = nil }, analysePayload, "analyse"},
+		{"analyse without an endpoint", func(p *protocol.RunKindPayload) { p.LLMEndpoint = nil }, analysePayload, "llm_endpoint"},
+		{"analyse without a budget", func(p *protocol.RunKindPayload) { p.MaxCostUSD = 0 }, analysePayload, "max_cost_usd"},
+		{"guidance_pr with a budget", func(p *protocol.RunKindPayload) { p.MaxCostUSD = 1 }, guidancePRPayload, "max_cost_usd"},
+		{"check with a budget", func(p *protocol.RunKindPayload) { p.MaxCostUSD = 1 }, checkPayload, "max_cost_usd"},
+		{"empty section", func(p *protocol.RunKindPayload) { p.GuidancePR.Section = "" }, guidancePRPayload, "guidance_pr.section"},
+		{"section at the limit", func(p *protocol.RunKindPayload) { p.GuidancePR.Section = strings.Repeat("a", 16<<10) }, guidancePRPayload, ""},
+		{"section over the limit", func(p *protocol.RunKindPayload) { p.GuidancePR.Section = strings.Repeat("a", 16<<10+1) }, guidancePRPayload, "guidance_pr.section"},
+		{"section with a block marker", func(p *protocol.RunKindPayload) { p.GuidancePR.Section = "a <!-- sentinel:x:end --> b" }, guidancePRPayload, "guidance_pr.section"},
+		{"empty title", func(p *protocol.RunKindPayload) { p.GuidancePR.Title = "" }, guidancePRPayload, "guidance_pr.title"},
+		{"long title", func(p *protocol.RunKindPayload) { p.GuidancePR.Title = strings.Repeat("a", 257) }, guidancePRPayload, "guidance_pr.title"},
+		{"title with a newline", func(p *protocol.RunKindPayload) { p.GuidancePR.Title = "a\nb" }, guidancePRPayload, "guidance_pr.title"},
+		{"title with a carriage return", func(p *protocol.RunKindPayload) { p.GuidancePR.Title = "a\rb" }, guidancePRPayload, "guidance_pr.title"},
+		{"long body", func(p *protocol.RunKindPayload) { p.GuidancePR.Body = strings.Repeat("a", 60<<10+1) }, guidancePRPayload, "guidance_pr.body"},
+		{"too many allowed", func(p *protocol.RunKindPayload) { p.GuidancePR.Allowed = make([]string, 65) }, guidancePRPayload, "guidance_pr.allowed"},
+		{"long allowed entry", func(p *protocol.RunKindPayload) { p.GuidancePR.Allowed = []string{strings.Repeat("a", 513)} }, guidancePRPayload, "guidance_pr.allowed"},
+		{"short expect_head", func(p *protocol.RunKindPayload) { p.GuidancePR.ExpectHead = "abc" }, guidancePRPayload, "guidance_pr.expect_head"},
+		{"upper-case expect_head", func(p *protocol.RunKindPayload) { p.GuidancePR.ExpectHead = strings.Repeat("A", 40) }, guidancePRPayload, "guidance_pr.expect_head"},
+		{"sha1 expect_head", func(p *protocol.RunKindPayload) { p.GuidancePR.ExpectHead = strings.Repeat("a", 40) }, guidancePRPayload, ""},
+		{"sha256 expect_head", func(p *protocol.RunKindPayload) { p.GuidancePR.ExpectHead = strings.Repeat("a", 64) }, guidancePRPayload, ""},
 		{"unknown kind", func(p *protocol.RunKindPayload) { p.Kind = "bogus" }, checkPayload, "kind"},
 		{"card id outside the pattern", func(p *protocol.RunKindPayload) { p.CardID = "../x" }, checkPayload, "card_id"},
 		{"no git token", func(p *protocol.RunKindPayload) { p.GitToken = "" }, checkPayload, "git_token"},
@@ -154,6 +195,53 @@ func TestBuildRunKindSpec(t *testing.T) {
 
 		card := s.buildLaunchSpec(protocol.TriggerPayload{CardID: "ABC-12", Project: "proj", GitToken: "git-tok"}, "run-0", "")
 		assert.NotEqual(t, card.SecretsHostDir, spec.SecretsHostDir)
+	})
+
+	t.Run("analyse and guidance_pr", func(t *testing.T) {
+		spec := s.buildRunKindSpec(analysePayload(), "run-3")
+		assert.Contains(t, spec.Env, "CM_RUN_KIND=analyse")
+		assert.Contains(t, spec.Env, "CM_MODEL=vendor/model-a")
+		assert.Contains(t, spec.Env, "CM_MAX_COST_USD=1")
+		assert.Contains(t, spec.Env, `CMX_SELECTION={"blacklist":["vendor/bad"]}`)
+
+		spec = s.buildRunKindSpec(guidancePRPayload(), "run-4")
+		assert.Contains(t, spec.Env, "CM_RUN_KIND=guidance_pr")
+		assert.Contains(t, spec.Env, "CM_CARD_ID=")
+
+		for _, e := range spec.Env {
+			for _, never := range []string{"CM_MODEL=", "CM_MAX_COST_USD=", "CMX_SELECTION="} {
+				assert.False(t, strings.HasPrefix(e, never), e)
+			}
+		}
+	})
+
+	t.Run("operator env names", func(t *testing.T) {
+		withExtra := NewServer(Config{
+			APIKey: "k", Executor: &fakeExecutor{}, Tracker: executor.NewTracker(1), Credentials: &fakeCredentials{},
+			LaunchEnv: LaunchEnv{BaseImage: "base:image", WorkerExtraEnv: []string{"GOFLAGS=-mod=mod", "API_TOKEN=s3cr3t-value", "BARE"}},
+			Logger:    quietLogger(),
+		})
+
+		for _, base := range []func() protocol.RunKindPayload{checkPayload, investigatePayload, analysePayload, guidancePRPayload} {
+			spec := withExtra.buildRunKindSpec(base(), "run-5")
+
+			assert.Contains(t, spec.Env, "CM_OPERATOR_ENV_NAMES=GOFLAGS,API_TOKEN")
+
+			for _, e := range spec.Env {
+				if e != "GOFLAGS=-mod=mod" && e != "API_TOKEN=s3cr3t-value" {
+					assert.NotContains(t, e, "s3cr3t-value")
+				}
+			}
+		}
+
+		bare := NewServer(Config{
+			APIKey: "k", Executor: &fakeExecutor{}, Tracker: executor.NewTracker(1), Credentials: &fakeCredentials{},
+			LaunchEnv: LaunchEnv{BaseImage: "base:image"}, Logger: quietLogger(),
+		})
+
+		for _, e := range bare.buildRunKindSpec(checkPayload(), "run-6").Env {
+			assert.False(t, strings.HasPrefix(e, "CM_OPERATOR_ENV_NAMES="), e)
+		}
 	})
 
 	t.Run("investigate", func(t *testing.T) {
@@ -528,4 +616,49 @@ func TestCheckStagesNoRunLog(t *testing.T) {
 func TestRunKindRunBase(t *testing.T) {
 	assert.Equal(t, "ALPHA-001-check", runKindRunBase(protocol.RunKindPayload{Kind: protocol.RunKindCheck, CardID: "ALPHA-001", Project: "alpha"}))
 	assert.Equal(t, "alpha-guidance_pr", runKindRunBase(protocol.RunKindPayload{Kind: protocol.RunKindGuidancePR, Project: "alpha"}))
+}
+
+func TestAnalyseStagesTheWholeSection(t *testing.T) {
+	h := newHarness(t, 4)
+	h.sections.body = bytes.Repeat([]byte("0123456789abcdef"), 1<<10)
+	p := analysePayload()
+
+	h.runKindNow(p)
+
+	launched := h.exec.launchedSpecs()
+	require.Len(t, launched, 1)
+
+	staged, err := os.ReadFile(filepath.Join(launched[0].InputHostDir, runinput.RunLogFile))
+	require.NoError(t, err)
+	assert.Equal(t, h.sections.body, staged)
+	assertInputFile(t, launched[0].InputHostDir, p.Analyse)
+}
+
+func TestAnalyseStagingFailures(t *testing.T) {
+	h := newHarness(t, 4)
+	h.sections.err = filelog.ErrNoSection
+
+	spec := h.runKindNow(analysePayload())
+
+	got := h.reporter.payloads()
+	require.Len(t, got, 1)
+	assert.Equal(t, "failed", got[0].WorkerStatus)
+	assert.Equal(t, protocol.RunKindAnalyse, got[0].Kind)
+	assert.Equal(t, spec.CorrelationID, got[0].RunID)
+	assert.Equal(t, protocol.StopCauseError, got[0].StopCause)
+	assert.Equal(t, "run log not found", got[0].Message)
+	assert.Empty(t, h.exec.launchedSpecs())
+	assert.Empty(t, h.inputDirs(t))
+}
+
+func TestGuidancePRStagesNoRunLog(t *testing.T) {
+	h := newHarness(t, 4)
+	p := guidancePRPayload()
+
+	h.runKindNow(p)
+
+	launched := h.exec.launchedSpecs()
+	require.Len(t, launched, 1)
+	assertInputFile(t, launched[0].InputHostDir, p.GuidancePR)
+	assert.NoFileExists(t, filepath.Join(launched[0].InputHostDir, runinput.RunLogFile))
 }
