@@ -906,12 +906,12 @@ func maxTurnsLogMessage(phase string, mte *MaxTurnsError) string {
 func toolchainLogMessage(tme *ToolchainMissingError) string {
 	switch tme.Subject {
 	case verifyConfigErrorMarker:
-		return fmt.Sprintf("declared verify config could not be read (%s); parking card as blocked", tme.Reason)
+		return fmt.Sprintf("declared verify config could not be read (%s); parking card", tme.Reason)
 	case containerRuntimeUnavailableMarker:
-		return fmt.Sprintf("verify needs a container runtime the worker does not have (%s); parking card as blocked", tme.Reason)
+		return fmt.Sprintf("verify needs a container runtime the worker does not have (%s); parking card", tme.Reason)
 	}
 
-	return fmt.Sprintf("verify toolchain cannot run here (%s: %s - %s); parking card as blocked", tme.Tier, tme.Subject, tme.Reason)
+	return fmt.Sprintf("verify toolchain cannot run here (%s: %s - %s); parking card", tme.Tier, tme.Subject, tme.Reason)
 }
 
 // verifyParkNoteMax bounds the whole park note. ContextMatrix REJECTS an
@@ -933,7 +933,7 @@ const verifyParkOutputElision = "[earlier output elided]\n"
 // even when nothing else fits; the output is then trimmed from the FRONT, since
 // a build tool's diagnostics are concentrated in its last bytes.
 func verifyParkedLogMessage(vpe *VerifyParkedError) string {
-	header := fmt.Sprintf("subtask %s: `%s` still failed after one fix pass; parking card as blocked",
+	header := fmt.Sprintf("subtask %s: `%s` still failed after one fix pass; parking card",
 		vpe.Subtask, vpe.Command)
 
 	const label = "\n\nVerify output (tail):\n\n"
@@ -953,7 +953,7 @@ func verifyParkedLogMessage(vpe *VerifyParkedError) string {
 // emptySubtaskLogMessage is the canonical card-log line for an empty-subtask park.
 func emptySubtaskLogMessage(ese *EmptySubtaskError) string {
 	return fmt.Sprintf("subtask %s: the coder (and its verify fix, if one ran) left nothing to commit; "+
-		"parking card as blocked. Re-trigger the card, or mark the subtask done if its work is already on the branch",
+		"parking card. Re-trigger the card, or mark the subtask done if its work is already on the branch",
 		ese.Subtask)
 }
 

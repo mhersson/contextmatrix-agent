@@ -239,7 +239,8 @@ Summaries only - full detail lives in the reference documents above.
 8. **Verify resolution can park as blocked.** The ladder (declared → detected →
    proposed → skip) returns `ToolchainMissingError` when a toolchain is
    implicated but unrunnable; the card transitions to the board's `blocked`
-   state. An environmental park, not a model failure.
+   state when the board allows it, and the card log says where the park left
+   it. An environmental park, not a model failure.
 9. **Secrets.** Per-run CM-provisioned credentials, bind-mounted read-only;
    the real LLM key stays on `serve` and workers get a per-run proxy token;
    tool subprocesses get a scrubbed env; every secret a run receives must be

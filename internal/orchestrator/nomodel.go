@@ -58,10 +58,10 @@ func (o *run) noModelError(in registry.SelectInput, p registry.Pick) *NoModelErr
 // cannot reach a bigger context window.
 func noModelLogMessage(nme *NoModelError) string {
 	if nme.WindowLimited {
-		return fmt.Sprintf("no model has a context window large enough for the %s work (%d model(s) excluded this run); parking card as blocked - narrow the card or add a larger-window model",
+		return fmt.Sprintf("no model has a context window large enough for the %s work (%d model(s) excluded this run); parking card - narrow the card or add a larger-window model",
 			nme.Role, nme.Excluded)
 	}
 
-	return fmt.Sprintf("no model clears any configured tier bar for role %s (asked for %s at %.2f, walked down to %.2f; %d model(s) excluded this run); parking card as blocked",
+	return fmt.Sprintf("no model clears any configured tier bar for role %s (asked for %s at %.2f, walked down to %.2f; %d model(s) excluded this run); parking card",
 		nme.Role, nme.Tier, nme.RequestedBar, nme.LowestBar, nme.Excluded)
 }

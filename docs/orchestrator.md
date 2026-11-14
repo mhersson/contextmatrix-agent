@@ -580,11 +580,12 @@ stops the run like the other park sentinels (Budget/Context/MaxTurns). Unlike
 those, `mapFSMResult` also transitions the card to the board's `blocked` state
 before releasing the claim, so the park is visible on the board, not just in
 the log; a project whose `.board.yaml` lacks `in_progress -> blocked` degrades
-to the same silent WIP-push-and-release park as the others. A review round can
-park this way after the card entered review, which the default board refuses
-to move straight to `blocked`, so a card in review goes by way of
-`in_progress`; when the board refuses `blocked` from there too, the card
-returns to `review`. This is an environmental park, not a model failure - no
+to the same WIP-push-and-release park as the others. Either way the card log
+gets one line saying where the park left the card: parked as blocked, or the
+state the board kept it in. A review round can park this way after the card
+entered review, which the default board refuses to move straight to `blocked`,
+so a card in review goes by way of `in_progress`; when the board refuses
+`blocked` from there too, the card returns to `review`. This is an environmental park, not a model failure - no
 outcome/blacklist reporting.
 
 Every code-resolved outcome - a command, the unverified skip, or the park - is
