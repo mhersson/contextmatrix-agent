@@ -54,7 +54,7 @@ func (s *Server) handleRunKind(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	spec := s.buildRunKindSpec(p, requestRunID(r, p.CardID+"-"+p.Kind))
+	spec := s.buildRunKindSpec(p, requestRunID(r, runKindRunBase(p)))
 
 	// Registered before the 202 so a kind-scoped /kill that follows it always
 	// finds the admission. Detached from the request: the launch outlives it.
@@ -63,6 +63,16 @@ func (s *Server) handleRunKind(w http.ResponseWriter, r *http.Request) {
 	webhookcore.WriteJSON(w, http.StatusAccepted, protocol.SuccessResponse{OK: true})
 
 	go s.launchRunKind(ctx, adm, p, spec) //nolint:gosec // G118: the launch outlives the request on its admission context, detached from the request and bounded by the launch timeout
+}
+
+// runKindRunBase is the run ID base: the card and kind, or the project and kind
+// for a project-level kind that has no card.
+func runKindRunBase(p protocol.RunKindPayload) string {
+	if p.CardID == "" {
+		return p.Project + "-" + p.Kind
+	}
+
+	return p.CardID + "-" + p.Kind
 }
 
 // launchRunKind stages the run's inputs, then admits and launches it through

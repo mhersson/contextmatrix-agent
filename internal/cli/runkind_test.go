@@ -52,6 +52,26 @@ func TestRunKindSpecFromEnv(t *testing.T) {
 	assert.Equal(t, "/home/user/investigation", spec.InputsDir)
 }
 
+func TestRunKindSpecFromEnvCardless(t *testing.T) {
+	setRunKindEnv(t)
+	t.Setenv("CM_CARD_ID", "")
+
+	spec, err := runKindSpecFromEnv(protocol.RunKindGuidancePR)
+	require.NoError(t, err)
+	assert.Empty(t, spec.CardID)
+	assert.Equal(t, "abc", spec.Project)
+
+	_, err = runKindSpecFromEnv(protocol.RunKindCheck)
+	require.Error(t, err, "a card-bound kind still needs a card")
+	assert.Contains(t, err.Error(), "CM_CARD_ID")
+
+	t.Setenv("CM_CARD_ID", "ALPHA-001")
+
+	_, err = runKindSpecFromEnv(protocol.RunKindGuidancePR)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "CM_CARD_ID: must be empty for guidance_pr")
+}
+
 func TestRunKindSpecFromEnvRejects(t *testing.T) {
 	tests := []struct {
 		name, key, value string

@@ -524,3 +524,8 @@ func TestCheckStagesNoRunLog(t *testing.T) {
 	require.Len(t, launched, 1)
 	assert.NoFileExists(t, filepath.Join(launched[0].InputHostDir, runinput.RunLogFile))
 }
+
+func TestRunKindRunBase(t *testing.T) {
+	assert.Equal(t, "ALPHA-001-check", runKindRunBase(protocol.RunKindPayload{Kind: protocol.RunKindCheck, CardID: "ALPHA-001", Project: "alpha"}))
+	assert.Equal(t, "alpha-guidance_pr", runKindRunBase(protocol.RunKindPayload{Kind: protocol.RunKindGuidancePR, Project: "alpha"}))
+}

@@ -211,3 +211,8 @@ func TestRunTrialsThroughTheProductionDeps(t *testing.T) {
 	assert.Contains(t, ev.Data["command"], "./ci/verify")
 	assert.NotContains(t, ev.Data["command"], token)
 }
+
+func TestWorkspaceDir(t *testing.T) {
+	assert.Equal(t, "/w/alpha-001", workspaceDir(Spec{Workspace: "/w", CardID: "ALPHA-001"}))
+	assert.Equal(t, "/w/guidance_pr", workspaceDir(Spec{Workspace: "/w", Kind: protocol.RunKindGuidancePR}))
+}

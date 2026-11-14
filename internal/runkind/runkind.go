@@ -69,8 +69,18 @@ type deps struct {
 	investigate func() (investigateDeps, error)
 }
 
+// workspaceDir is the run's clone directory: the card's, or the kind's for a
+// project-level kind that has no card.
+func workspaceDir(spec Spec) string {
+	if spec.CardID == "" {
+		return filepath.Join(spec.Workspace, spec.Kind)
+	}
+
+	return filepath.Join(spec.Workspace, strings.ToLower(spec.CardID))
+}
+
 func run(ctx context.Context, spec Spec, log *slog.Logger, red *redact.Redactor, emit *events.Emitter, d deps) runoutcome.Data {
-	ws := filepath.Join(spec.Workspace, strings.ToLower(spec.CardID))
+	ws := workspaceDir(spec)
 
 	res, usage, err := runKind(ctx, spec, ws, emit, d)
 	if err != nil {

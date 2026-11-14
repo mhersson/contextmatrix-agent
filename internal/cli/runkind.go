@@ -77,13 +77,23 @@ func prepareRunKind(kind, inputPath string) (runkind.Spec, llm.LLM, error) {
 // runKindSpecFromEnv builds a run kind's spec from the env serve writes. It
 // needs no CM_MCP_URL or CM_MCP_API_KEY: a run kind gets neither.
 func runKindSpecFromEnv(kind string) (runkind.Spec, error) {
-	cardID, err := requireEnv("CM_CARD_ID")
-	if err != nil {
-		return runkind.Spec{}, err
-	}
+	var cardID string
 
-	if !cardid.Valid(cardID) {
-		return runkind.Spec{}, fmt.Errorf("env var CM_CARD_ID: invalid card ID %q (want PREFIX-NNN)", cardID)
+	if kind == protocol.RunKindGuidancePR {
+		if os.Getenv("CM_CARD_ID") != "" {
+			return runkind.Spec{}, fmt.Errorf("env var CM_CARD_ID: must be empty for %s", kind)
+		}
+	} else {
+		var err error
+
+		cardID, err = requireEnv("CM_CARD_ID")
+		if err != nil {
+			return runkind.Spec{}, err
+		}
+
+		if !cardid.Valid(cardID) {
+			return runkind.Spec{}, fmt.Errorf("env var CM_CARD_ID: invalid card ID %q (want PREFIX-NNN)", cardID)
+		}
 	}
 
 	project, err := requireEnv("CM_PROJECT")

@@ -1687,6 +1687,32 @@ func TestContainersListsTheKind(t *testing.T) {
 	assert.Equal(t, map[string]string{"ctr-PROJ-012": "", "ctr-PROJ-012.check": "check"}, kinds)
 }
 
+func TestCardlessRunKindIsListedAndStopped(t *testing.T) {
+	h := newHarness(t, 4)
+	h.addRunKind("", "proj", protocol.RunKindGuidancePR)
+	h.exec.stopAllResults = []executor.StopResult{
+		{Run: &executor.Run{Project: "proj", Kind: protocol.RunKindGuidancePR}},
+	}
+
+	w := h.do(t, http.MethodGet, "/containers", nil)
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"kind":"guidance_pr"`)
+
+	var list protocol.ListContainersResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &list))
+	require.Len(t, list.Containers, 1)
+	assert.Empty(t, list.Containers[0].CardID)
+	assert.Equal(t, "ctr-guidance_pr", list.Containers[0].ContainerID)
+
+	w = h.do(t, http.MethodPost, "/stop-all", protocol.StopAllPayload{Project: "proj"})
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp protocol.StopAllResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, 1, resp.Stopped)
+	assert.Empty(t, resp.Results[0].CardID)
+}
+
 func TestContainers_ListsTrackedRuns(t *testing.T) {
 	h := newHarness(t, 4)
 	h.addRun("PROJ-001", "proj")

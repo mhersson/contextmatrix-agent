@@ -70,6 +70,11 @@ its run kinds coexist and never block each other. All of them share
 `<log_dir>/<project>/<card>-<kind>.log`, so a run kind's header never counts
 toward the card's attempt number.
 
+A project-level kind has no card. Its key's name is the kind, so its container
+is `cm-agent-<project>-<kind>`, its file log `<log_dir>/<project>/<kind>.log`
+and its run ID `<project>-<kind>-<suffix>`; there is one such run per project
+at a time.
+
 ## Kill and listing
 
 `/kill` with a `kind` stops that run kind's admission if one is in flight and

@@ -205,6 +205,8 @@ func TestTracker_SetAwaitingIgnoresAnUntrackedRun(t *testing.T) {
 func TestRunKeyName(t *testing.T) {
 	assert.Equal(t, "ABC-12", RunKey{Project: "p", CardID: "ABC-12"}.Name())
 	assert.Equal(t, "ABC-12.check", RunKey{Project: "p", CardID: "ABC-12", Kind: "check"}.Name())
+	assert.Equal(t, "guidance_pr", RunKey{Project: "alpha", Kind: "guidance_pr"}.Name())
+	assert.Equal(t, "ALPHA-001.check", RunKey{Project: "alpha", CardID: "ALPHA-001", Kind: "check"}.Name())
 }
 
 func TestTrackerKeepsRunKindsApart(t *testing.T) {
