@@ -412,15 +412,15 @@ per run as a `replay_excluded` state change naming the model and the reason.
 
 ## Per-card budget
 
-One cumulative USD ceiling (`CMX_MAX_CARD_COST`, default 5.0) spans the
-orchestrator and every subagent. A breach parks the card - WIP pushed, card
+On an endpoint, one cumulative USD ceiling (`CMX_MAX_CARD_COST`, default 5.0)
+spans the orchestrator and every subagent. A breach parks the card - WIP pushed, card
 released, failed callback - it does not kill mid-turn. The ledger's floor is
 CM's server-priced card totals, synced from every `report_usage` response -
 the ceiling holds even when the gateway reports no per-call cost. Subtask runs
 report against the subtask cards, and CM does not roll that spend into the
 parent's total, so a resumed run also floors the ledger on the parent's and
 every subtask's reported total, finished subtasks included, before the first
-phase runs.
+phase runs. Claude Code mode enforces no ceiling (see [Budget](#budget)).
 
 ## How a run ends
 
@@ -490,21 +490,12 @@ Lost in this mode:
 
 ### Budget
 
-Each Claude Code run is capped (`--max-budget-usd`) at what remains of the
-run's ceiling, on notional cost, unless its caller set a cap. That ceiling is
-`CMX_MAX_CARD_COST`, or (N+1) x `CMX_MAX_CARD_COST` for a Best-of-N card (N
-candidate allowances plus one for the shared phases), plus the mob discussion
-allowance when the card runs mob sessions. A Best-of-N candidate, which has its
-own ledger of one `CMX_MAX_CARD_COST`, is capped by the smaller of its own
-remainder and the run's; a mob seat keeps its per-turn cap, and the seat's
-final-answer backstop sets none, so it gets the remaining budget. The review
-specialists run concurrently, go out as one fan-out and split the run's
-remainder equally. A run never starts with either ledger exhausted. A phase
-run stopped at its cap is never treated as finished work: a subtask it was
-coding is not completed and parks on the budget with its tree pushed as WIP,
-and a Best-of-N candidate drops out of the judge pool. A run whose final answer
-crosses its cap still ends done with that answer, and the next run refuses on
-the exhausted ledger, as on the harness.
+Claude Code mode enforces no card budget, since the subscription is not billed
+per token. `CMX_MAX_CARD_COST` sets no ceiling: no run gets a
+`--max-budget-usd` cap, a Best-of-N card runs its configured N candidates, and
+mob discussions and the review specialists draw on no budget share. The usage
+limit (below), each phase's turn cap and the container timeout bound a run
+instead.
 
 ### Mob sessions
 
@@ -525,8 +516,8 @@ and the ladder decides.
 ### Usage reports
 
 Usage is reported with `cost_basis: subscription` and the last-seen limit
-windows (`subscription_usage`), never a billed cost. The card budget meters
-Claude Code's notional (list-price) cost.
+windows (`subscription_usage`), never a billed cost. The card total CM returns
+is notional (list-price) cost, and no ceiling applies to it.
 
 ### Usage limit
 

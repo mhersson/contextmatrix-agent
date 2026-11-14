@@ -334,7 +334,6 @@ func TestExecuteSubtaskMaxCostNeverCompletes(t *testing.T) {
 	be, ok := errors.AsType[*BudgetExceededError](err)
 	require.True(t, ok, "err=%v", err)
 	assert.InDelta(t, 1.0, be.Spent, 1e-9)
-	assert.InDelta(t, 1.0, be.Max, 1e-9)
 
 	calls := ops.recorded()
 	assert.Equal(t, -1, indexOfCall(calls, "CompleteTask:SUB-1"), "budget-truncated work marked done; calls=%v", calls)

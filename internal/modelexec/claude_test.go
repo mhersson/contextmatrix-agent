@@ -363,9 +363,8 @@ func TestClaudeSpawnSubagentsRunsOneRunPerSpec(t *testing.T) {
 			{Role: "b", Prompt: "prompt-b", Model: "anthropic/claude-opus-5.5"},
 			{Role: "c", Prompt: "prompt-c"},
 		},
-		Opts:      harness.SubagentOpts{DefaultModel: "anthropic/claude-sonnet-5.5", ExtraReadOnlyTools: []tools.Tool{extra}},
-		OnDelta:   func(llm.Delta) {},
-		BudgetUSD: 0.7,
+		Opts:    harness.SubagentOpts{DefaultModel: "anthropic/claude-sonnet-5.5", ExtraReadOnlyTools: []tools.Tool{extra}},
+		OnDelta: func(llm.Delta) {},
 	}
 
 	results, err := c.SpawnSubagents(t.Context(), req)
@@ -391,7 +390,6 @@ func TestClaudeSpawnSubagentsRunsOneRunPerSpec(t *testing.T) {
 			assert.True(t, ok, n)
 		}
 
-		assert.InDelta(t, 0.7, s.MaxBudgetUSD, 1e-9)
 		assert.NotNil(t, s.OnDelta)
 	}
 }

@@ -637,6 +637,12 @@ func dataURLs(blobs []cmclient.ImageBlob) []llm.ImageURL {
 // newRun builds a run seeded from the task context, with the budget ledger
 // pre-loaded from the card's already-reported cost.
 func newRun(ctx context.Context, d Deps, tc cmclient.TaskContext) *run {
+	// A subscription is not billed per token: Claude Code runs keep no card
+	// ceiling, and the usage limit, turn caps and container timeout bound them.
+	if d.Cfg.ClaudeCode {
+		d.Cfg.MaxCardCost = 0
+	}
+
 	o := &run{
 		d:  d,
 		tc: tc,

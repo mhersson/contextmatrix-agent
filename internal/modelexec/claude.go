@@ -299,7 +299,6 @@ func (c *Claude) SpawnSubagents(ctx context.Context, req orchestrator.FanoutRequ
 					RedactToolOutput:   req.Opts.RedactToolOutput,
 					ToolOutputMaxBytes: req.Opts.ToolOutputMaxBytes,
 					OnDelta:            req.OnDelta,
-					MaxCostUSD:         req.BudgetUSD,
 				},
 			})
 			results[i] = harness.SubagentResult{Role: spec.Role, Output: res.Output, Result: res, Err: err}
