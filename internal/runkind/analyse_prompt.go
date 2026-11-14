@@ -29,7 +29,11 @@ INPUTS - read them first:
 %s
 
 Report each piece of friction the run shows as a finding of one kind:
-- guidance: lines for the project's AGENTS.md or CLAUDE.md.
+- guidance: lines for the project's AGENTS.md or CLAUDE.md. Use code spans or
+  fenced blocks in them only for a command or path quoted exactly as the
+  repository has it, write any URL or host name exactly as the repository has
+  it, and describe everything else in prose: other code text makes the finding
+  fail the text check, and it is dropped.
 - code: friction in the project's code, as a card: a title and a body.
 - card_advice: advice on writing cards like this one.
 - project_verify: a proposal for the project's verify setting, for admins.
