@@ -107,6 +107,7 @@ type fakeOps struct {
 	// refusedFrom refuses a move to the keyed target state while the card
 	// sits in one of the mapped states, as a board without that edge does.
 	refusedFrom map[string][]string
+	tcxErr      error // returned by GetTaskContext when set
 }
 
 func newFakeOps() *fakeOps {
@@ -182,6 +183,16 @@ func (f *fakeOps) allArgsOf(op string) [][]any {
 	return out
 }
 
+// logMessages returns every AddLog message in order.
+func (f *fakeOps) logMessages() []string {
+	var out []string
+	for _, args := range f.allArgsOf("AddLog") {
+		out = append(out, args[1].(string))
+	}
+
+	return out
+}
+
 // state returns the fake's current card state.
 func (f *fakeOps) state() string {
 	f.mu.Lock()
@@ -211,7 +222,7 @@ func (f *fakeOps) GetTaskContext(_ context.Context, cardID string, includeImages
 
 	f.lastGetTaskContextImages = includeImages
 
-	return f.tcx, nil
+	return f.tcx, f.tcxErr
 }
 
 func (f *fakeOps) Heartbeat(_ context.Context, cardID string) error {
@@ -1474,10 +1485,11 @@ func TestToolchainMissingMapsToBlocked(t *testing.T) {
 	assert.Less(t, transitionIdx, releaseIdx, "TransitionCard must happen before ReleaseCard: ownership may be required")
 
 	// No model-outcome/blacklist call is recorded for this arm, so the full
-	// call list mirrors the other park arms exactly. The one AddLog is the
-	// reachability preflight: baseSpec carries no catalog, so no tier is
-	// reachable.
-	assert.ElementsMatch(t, []string{"ClaimCard", "GetTaskContext", "AddLog", "ReportPush", "TransitionCard", "ReleaseCard"}, calls)
+	// call list mirrors the other park arms exactly. The first AddLog is the
+	// reachability preflight (baseSpec carries no catalog, so no tier is
+	// reachable); the second says where the park left the card.
+	assert.ElementsMatch(t, []string{"ClaimCard", "GetTaskContext", "AddLog", "TransitionCard", "AddLog", "ReportPush", "ReleaseCard"}, calls)
+	assert.Contains(t, ops.logMessages(), parkLine(parkOutcome{blocked: true}))
 
 	args := ops.argsOf("TransitionCard")
 	require.Len(t, args, 2)
@@ -1601,6 +1613,10 @@ func TestVerifyParkedTransitionFailureDegradesGracefully(t *testing.T) {
 	assert.Equal(t, 1, ops.count("TransitionCard"), "transition was attempted")
 	assert.Equal(t, 1, ops.count("ReleaseCard"), "claim still released despite the transition failure")
 	assert.Equal(t, 0, ops.count("CompleteTask"))
+
+	logs := ops.logMessages()
+	assert.Contains(t, logs, parkLine(parkOutcome{state: "in_progress"}), "the card says it stayed where it was")
+	assert.NotContains(t, logs, parkLine(parkOutcome{blocked: true}), "no line claims a blocked park that never happened")
 }
 
 // TestSplitOverflowMapsToBlocked: a SplitOverflowError takes the verify park's
@@ -1671,6 +1687,10 @@ func TestToolchainMissingTransitionFailureDegradesGracefully(t *testing.T) {
 	assert.Equal(t, 1, ops.count("TransitionCard"), "transition was attempted")
 	assert.Equal(t, 1, ops.count("ReleaseCard"), "claim still released despite the transition failure")
 	assert.Equal(t, 0, ops.count("CompleteTask"))
+
+	logs := ops.logMessages()
+	assert.Contains(t, logs, parkLine(parkOutcome{state: "in_progress"}), "the card says it stayed where it was")
+	assert.NotContains(t, logs, parkLine(parkOutcome{blocked: true}), "no line claims a blocked park that never happened")
 }
 
 // TestBlockedParkFromReviewRoutesThroughInProgress: a review round's verify can
@@ -1685,18 +1705,21 @@ func TestBlockedParkFromReviewRoutesThroughInProgress(t *testing.T) {
 		refusedFrom []string
 		wantMoves   []string
 		wantState   string
+		wantOutcome parkOutcome
 	}{
 		{
 			name:        "default board",
 			refusedFrom: []string{"review"},
 			wantMoves:   []string{"blocked", "in_progress", "blocked"},
 			wantState:   "blocked",
+			wantOutcome: parkOutcome{blocked: true},
 		},
 		{
 			name:        "board without a way into blocked",
 			refusedFrom: []string{"review", "in_progress"},
 			wantMoves:   []string{"blocked", "in_progress", "blocked", "review"},
 			wantState:   "review",
+			wantOutcome: parkOutcome{state: "review"},
 		},
 	}
 
@@ -1726,6 +1749,7 @@ func TestBlockedParkFromReviewRoutesThroughInProgress(t *testing.T) {
 
 			assert.Equal(t, tt.wantMoves, moves)
 			assert.Equal(t, tt.wantState, ops.state())
+			assert.Contains(t, ops.logMessages(), parkLine(tt.wantOutcome))
 
 			calls := ops.ops()
 			releaseIdx := slices.Index(calls, "ReleaseCard")
@@ -1735,6 +1759,53 @@ func TestBlockedParkFromReviewRoutesThroughInProgress(t *testing.T) {
 			assert.Equal(t, 1, ops.count("ReleaseCard"))
 		})
 	}
+}
+
+// TestTransitionToBlockedReportsWhereTheCardStays pins the outcome each board
+// gives the blocked park, so the card line never claims a move that failed.
+func TestTransitionToBlockedReportsWhereTheCardStays(t *testing.T) {
+	tests := []struct {
+		name        string
+		state       string
+		refusedFrom []string
+		failReview  bool
+		tcxErr      error
+		want        parkOutcome
+	}{
+		{name: "blocked allowed", state: "in_progress", want: parkOutcome{blocked: true}},
+		{name: "no way into blocked", state: "in_progress", refusedFrom: []string{"in_progress"}, want: parkOutcome{state: "in_progress"}},
+		{name: "state unreadable", state: "in_progress", refusedFrom: []string{"in_progress"}, tcxErr: errors.New("unreachable"), want: parkOutcome{}},
+		{name: "from review by way of in_progress", state: "review", refusedFrom: []string{"review"}, want: parkOutcome{blocked: true}},
+		{name: "back to review", state: "review", refusedFrom: []string{"review", "in_progress"}, want: parkOutcome{state: "review"}},
+		{name: "stuck in in_progress", state: "review", refusedFrom: []string{"review", "in_progress"}, failReview: true, want: parkOutcome{state: "in_progress"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := newFakeOps()
+			ops.tcx.State = tt.state
+			ops.tcxErr = tt.tcxErr
+			ops.refusedFrom = map[string][]string{"blocked": tt.refusedFrom}
+
+			if tt.failReview {
+				ops.transitionCardErr = map[string]error{"review": errors.New("refused")}
+			}
+
+			assert.Equal(t, tt.want, transitionToBlocked(context.Background(), ops, "CMX-001"))
+		})
+	}
+}
+
+// TestParkLineTellsTheOutcomesApart: a refused move reads differently from a
+// blocked park and names the state the card stayed in.
+func TestParkLineTellsTheOutcomesApart(t *testing.T) {
+	blocked := parkLine(parkOutcome{blocked: true})
+	stayed := parkLine(parkOutcome{state: "in_progress"})
+	unknown := parkLine(parkOutcome{})
+
+	assert.NotEqual(t, blocked, stayed)
+	assert.NotEqual(t, blocked, unknown)
+	assert.Contains(t, stayed, "in_progress")
 }
 
 // TestToolchainMissingDuringEndSessionMapsToEndSession: an end_session frame

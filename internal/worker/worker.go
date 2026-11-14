@@ -737,9 +737,15 @@ func runFailureLine(redact func(string) string, err error) string {
 // step: transition the card to blocked BEFORE releasing the claim, since
 // ownership may be required for the transition. blocked is
 // project-configurable (not every .board.yaml declares in_progress -> blocked),
-// so a failure here is logged and the park still completes - never fatal.
+// so a failure here is logged, the card line says where the card stayed, and
+// the park still completes - never fatal.
 func parkBlocked(ctx context.Context, a fsmArgs, err error, cause string) (Result, error) {
-	transitionToBlocked(ctx, a.ops, a.spec.CardID)
+	out := transitionToBlocked(ctx, a.ops, a.spec.CardID)
+	if lerr := a.ops.AddLog(ctx, a.spec.CardID, parkLine(out)); lerr != nil {
+		slog.Warn("add_log failed; the card does not say where the park left it",
+			"card", a.spec.CardID, "error", lerr)
+	}
+
 	pushWIP(ctx, a)
 	releaseQuietly(ctx, a.ops, a.spec.CardID)
 
@@ -751,11 +757,11 @@ func parkBlocked(ctx context.Context, a fsmArgs, err error, cause string) (Resul
 // in_progress, so a card that is in review goes by way of in_progress; a board
 // that refuses blocked from there too gets the card back in review rather than
 // in a lane that says work is still going on. Every failure is logged, never
-// fatal.
-func transitionToBlocked(ctx context.Context, ops CardOps, cardID string) {
+// fatal; the outcome says where the card ended up.
+func transitionToBlocked(ctx context.Context, ops CardOps, cardID string) parkOutcome {
 	err := ops.TransitionCard(ctx, cardID, "blocked")
 	if err == nil {
-		return
+		return parkOutcome{blocked: true}
 	}
 
 	tcx, terr := ops.GetTaskContext(ctx, cardID, false)
@@ -763,26 +769,26 @@ func transitionToBlocked(ctx context.Context, ops CardOps, cardID string) {
 		slog.Warn("transition to blocked failed and the card state is unreadable; leaving card state as-is",
 			"card", cardID, "error", err, "state_error", terr)
 
-		return
+		return parkOutcome{}
 	}
 
 	if tcx.State != "review" {
 		slog.Warn("transition to blocked failed; leaving card state as-is",
 			"card", cardID, "error", err)
 
-		return
+		return parkOutcome{state: tcx.State}
 	}
 
 	if ierr := ops.TransitionCard(ctx, cardID, "in_progress"); ierr != nil {
 		slog.Warn("transition to blocked failed and the card cannot leave review; leaving it in review",
 			"card", cardID, "blocked_error", err, "in_progress_error", ierr)
 
-		return
+		return parkOutcome{state: "review"}
 	}
 
 	berr := ops.TransitionCard(ctx, cardID, "blocked")
 	if berr == nil {
-		return
+		return parkOutcome{blocked: true}
 	}
 
 	// review, not start_review: the worker needs the move, not the review skill
@@ -791,11 +797,34 @@ func transitionToBlocked(ctx context.Context, ops CardOps, cardID string) {
 		slog.Warn("transition to blocked failed after leaving review, and the card could not return to review; leaving it in in_progress",
 			"card", cardID, "blocked_error", berr, "review_error", rerr)
 
-		return
+		return parkOutcome{state: "in_progress"}
 	}
 
 	slog.Warn("transition to blocked failed after leaving review; returned the card to review",
 		"card", cardID, "error", berr)
+
+	return parkOutcome{state: "review"}
+}
+
+// parkOutcome is where a blocked park left the card: blocked, or the state the
+// board kept it in ("" when that state could not be read).
+type parkOutcome struct {
+	blocked bool
+	state   string
+}
+
+// parkLine is the card line that says where the park left the card, so a
+// failed move never reads as a blocked park. It names no cause: a board
+// without a way into blocked and a transient error look the same here.
+func parkLine(o parkOutcome) string {
+	switch {
+	case o.blocked:
+		return "parked the card as blocked"
+	case o.state == "":
+		return "could not move the card to blocked (the board may have no way into it), so it stays where it was"
+	default:
+		return fmt.Sprintf("could not move the card to blocked (the board may have no way into it), so it stays in %s", o.state)
+	}
 }
 
 // parkReason renders the park sentinel's own message, unwrapped from any
