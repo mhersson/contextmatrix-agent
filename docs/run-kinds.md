@@ -338,7 +338,8 @@ It reads:
 - the project's guidance branch, `cm/sentinel/<project>`
   (`protocol.GuidanceBranchPrefix`), fetched into `refs/remotes/origin/` when
   the remote has it (`fetchGuidanceBranch`, `internal/runkind/model_inputs.go`),
-  so the model sees guidance already merged or pending and does not repeat it.
+  so the model sees guidance already proposed, pending or rejected by a human,
+  and does not repeat it.
   A failure to look the branch up, or to fetch one that exists, ends the run
   with cause `error`.
 
