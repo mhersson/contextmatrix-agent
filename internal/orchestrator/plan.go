@@ -70,6 +70,7 @@ type planUnreachable struct {
 // index their own array) reference earlier entries only.
 type plan struct {
 	CardTier      string            `json:"card_tier"`
+	DesignChoice  string            `json:"design_choice,omitempty"`
 	Subtasks      []planSubtask     `json:"subtasks"`
 	FollowupCards []planFollowup    `json:"followup_cards"`
 	Unreachable   []planUnreachable `json:"unreachable_criteria"`
@@ -1532,7 +1533,7 @@ func (o *run) createSubtasks(ctx context.Context, p plan) error {
 	// Record the plan on the parent card body so it carries the full history
 	// (the subtask cards hold the detail; this is the consolidated view, like
 	// CM's create-plan workflow skill writes ## Plan).
-	o.recordSection(ctx, "Plan", sectionFrom("Plan", formatPlan(o.subtasks)))
+	o.recordSection(ctx, "Plan", sectionFrom("Plan", formatPlan(p.DesignChoice, o.subtasks)))
 
 	// Refresh the prompt-facing snapshot now that plan-phase board mutations
 	// have landed on o.body: taskDescription stayed frozen at its newRun value

@@ -623,8 +623,9 @@ from `workflow-skills` and the MCP `get_skill` tool.
 ## Plan-time deliverable split and unreachable criteria
 
 The planner's JSON contract adds two optional arrays alongside `card_tier` and
-`subtasks`: `followup_cards` and `unreachable_criteria`. Both are omitted from
-the response when empty and validated in `parsePlan` (non-empty
+`subtasks`: `followup_cards` and `unreachable_criteria`, and an optional
+`design_choice` string. All three are omitted from the response when empty; the
+arrays are validated in `parsePlan` (non-empty
 title/description, `depends_on` referencing only earlier entries in their own
 array) without a size check - the cap is enforced where the plan is consumed,
 not there.
@@ -638,7 +639,22 @@ single deliverable stays one plan. When the trigger fires, the planner plans
 only the first deliverable as subtasks and emits each extra deliverable as a
 `followup_cards` entry: a title plus a SELF-CONTAINED description, since its
 future executor runs later in a fresh container holding only the repo, without
-this card or this plan.
+this card or this plan. A split never moves the outcome the card exists for
+into a follow-up card.
+
+### Design choice
+
+When the card offers alternatives or its fix needs a design choice the card
+does not settle, the planner picks one option and plans it. `design_choice` names
+the chosen option and each rejected one, each with one line of why. It is
+recorded as the opening `### Design choice` block of `## Plan` (also shown at
+the HITL plan gate). The integrate phase reads it back from the card body and
+appends it to the PR body by code as `## Design choice`, so a resume keeps it.
+
+The planner never stops for a design choice: the PR review is the decision
+point. When every option breaks something the card or the project explicitly
+forbids, it plans the least-breaking one and names the conflict in
+`design_choice`.
 
 ### Follow-up creation
 

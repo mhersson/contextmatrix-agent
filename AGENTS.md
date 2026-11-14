@@ -257,9 +257,10 @@ Summaries only - full detail lives in the reference documents above.
     the card and (best-effort) on the PR threads. `merge_pr` merges once the CI
     gate passes, else parks.
 13. **Plan-time deliverable split.** The planner can emit `followup_cards`
-    (independent deliverables only; cap 4, overflow parks) and
-    `unreachable_criteria` (review verifies each claim and exempts VERIFIED
-    ones from the verdict).
+    (independent deliverables only; cap 4, overflow parks), an optional
+    `design_choice` (the chosen option and the rejected ones, carried to the PR
+    body), and `unreachable_criteria` (review verifies each claim and exempts
+    VERIFIED ones from the verdict).
 14. **Repo grounding.** The workspace root's `AGENTS.md`/`CLAUDE.md` is
     injected verbatim into the model-driven phases (all but the Best-of-N
     judge and the integrate PR-body call); nested instruction files are

@@ -181,6 +181,17 @@ const convergenceRule = `- Convergence: when every finding under PRIOR FINDINGS 
   resolves everything it was asked to fix and surfaces only new polish has
   converged - do not send it around again.`
 
+// planJSONContract is the strict JSON contract of the plan, shared by
+// planPrompt and planSynthesisPrompt. It has no format verbs.
+const planJSONContract = `Respond with ONLY a JSON object, no prose (omit design_choice, followup_cards
+and unreachable_criteria when empty):
+{"card_tier":"simple|moderate|complex|critical",
+ "design_choice":"...",
+ "subtasks":[{"title":"...","description":"...","depends_on":[<earlier indices>],"tier":"simple|moderate|complex|critical"}],
+ "followup_cards":[{"title":"...","description":"...","depends_on":[<earlier followup indices>],"depends_on_original":true|false}],
+ "unreachable_criteria":[{"criterion":"...","reason":"..."}]}
+`
+
 // decompositionRules is the subtask decomposition rule list, shared by
 // planPrompt and planSynthesisPrompt so the solo planner and the plan moderator
 // cut work by the same rules. Its one %s slot is the POC test-scope bullet
@@ -222,9 +233,16 @@ const decompositionRules = `- Each subtask must be completable by a single agent
   vague hand-waves like "implement appropriately".
 - Do not over-engineer: solve the problem at hand, no speculative
   abstractions or premature generalization.
-- When the card offers alternatives ("A or B", "optionally C"), choose exactly
-  one and say why in the subtask description; never plan both. "Optionally"
-  means omit unless it is a one-line addition.
+- When the card offers alternatives ("A or B", "optionally C"), or its fix
+  needs a design choice the card does not settle, choose the one option that
+  best delivers what the card asks for and plan it; never plan both.
+  "Optionally" means omit unless it is a one-line addition. Name the choice
+  in design_choice: the chosen option, then each rejected one, each with one
+  line of why. The PR review is where a human decides, so a project
+  instruction that reserves design choices for a maintainer is met by naming
+  the choice there: it is never a reason to stop, defer or ask. When every
+  option would break something the card or the project explicitly forbids,
+  plan the one that breaks least and name the conflict in design_choice.
 - Tests: each subtask tests what the card names for that item and nothing
   more - one behavioural test per item by default, never one per code path,
   and never a new test for a branch or path the card does not name. When the
@@ -256,6 +274,9 @@ const decompositionRules = `- Each subtask must be completable by a single agent
   than 4 followup entries parks the card for a human to re-cut - if you count
   more than 4, the card itself is mis-scoped; emit them anyway rather than
   cramming.
+  A split never moves the fix or outcome the card exists for into a
+  follow-up card, and never defers a design choice to one: plan that outcome
+  here as the first deliverable, and move only genuinely separate ones.
 - Check every acceptance criterion for reachability before planning it. A
   criterion is UNREACHABLE when it requires READING an input that does not
   exist in this repo (a file on someone's machine, another repo, an absent
@@ -327,13 +348,7 @@ Title: %s
 Description:
 %s
 %s%s%s%s%s
-Respond with ONLY a JSON object, no prose (omit followup_cards and
-unreachable_criteria when empty):
-{"card_tier":"simple|moderate|complex|critical",
- "subtasks":[{"title":"...","description":"...","depends_on":[<earlier indices>],"tier":"simple|moderate|complex|critical"}],
- "followup_cards":[{"title":"...","description":"...","depends_on":[<earlier followup indices>],"depends_on_original":true|false}],
- "unreachable_criteria":[{"criterion":"...","reason":"..."}]}
-`
+` + planJSONContract
 
 // diagnosePrompt is the read-only debug-investigation pass run for bug-like
 // cards before planning. Adapted from the systematic-debugging workflow skill:
@@ -1361,13 +1376,7 @@ Title: %s
 Description:
 %s
 
-Respond with ONLY a JSON object, no prose (omit followup_cards and
-unreachable_criteria when empty):
-{"card_tier":"simple|moderate|complex|critical",
- "subtasks":[{"title":"...","description":"...","depends_on":[<earlier indices>],"tier":"simple|moderate|complex|critical"}],
- "followup_cards":[{"title":"...","description":"...","depends_on":[<earlier followup indices>],"depends_on_original":true|false}],
- "unreachable_criteria":[{"criterion":"...","reason":"..."}]}
-`
+` + planJSONContract
 
 // reviewBriefing is the review-discussion problem statement: the SAME
 // diff-and-prior-findings scope the specialist fan-out reviews. Slots:

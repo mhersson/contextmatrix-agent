@@ -2673,3 +2673,34 @@ func TestDecisionModel(t *testing.T) {
 		})
 	}
 }
+
+func TestParsePlanDesignChoice(t *testing.T) {
+	base := `{"card_tier":"simple","subtasks":[{"title":"A","description":"d","depends_on":[],"tier":"simple"}]`
+
+	p, err := parsePlan(base + `,"design_choice":"Chose X; rejected Y."}`)
+	require.NoError(t, err)
+	assert.Equal(t, "Chose X; rejected Y.", p.DesignChoice)
+
+	p, err = parsePlan(base + `}`)
+	require.NoError(t, err)
+	assert.Empty(t, p.DesignChoice)
+}
+
+func TestPlanPhaseRecordsDesignChoice(t *testing.T) {
+	const choice = "Chose the cache over the queue: the queue adds a worker."
+
+	planJSON := strings.Replace(goodPlanJSON, `{"card_tier":"moderate",`,
+		`{"card_tier":"moderate","design_choice":"`+choice+`",`, 1)
+
+	ops := &fakeOps{
+		taskContext: cmclient.TaskContext{Title: "Parent", Description: "body"},
+		createdIDs:  []string{"SUB-1", "SUB-2"},
+	}
+	d := planTestDeps(ops, &planLLM{responses: []llm.Response{stopResp(planJSON, 0.01)}})
+
+	o := newRun(t.Context(), d, ops.taskContext)
+	require.NoError(t, runPlanIsolated(context.Background(), o))
+
+	assert.Equal(t, choice, designChoiceFromBody(ops.bodyFor("CARD-1")), "recorded card body carries the choice")
+	assert.Equal(t, choice, designChoiceFromBody(o.body), "the run's body, which integrate reads, carries it")
+}
