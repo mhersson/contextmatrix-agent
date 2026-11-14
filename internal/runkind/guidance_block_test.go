@@ -46,6 +46,9 @@ func TestWithGuidance(t *testing.T) {
 	filler := strings.Repeat("x", orchestrator.GroundingByteCap)
 	fit := strings.Repeat("y", orchestrator.GroundingByteCap-len("\n\n"+newBlock))
 
+	edited := aStart + head + "Run ./ci/verify first, always.\n"
+	moved := edited + "\nNew rule.\n" + aEnd
+
 	tests := []struct {
 		name    string
 		file    string
@@ -89,6 +92,16 @@ func TestWithGuidance(t *testing.T) {
 		{
 			"past the cap, after title", "# Repo\n" + filler, "New rule.",
 			"# Repo\n\n" + newBlock + "\n" + filler, false,
+		},
+		{
+			"existing block past the cap moves after title",
+			"# Repo\n\n" + filler + "\n\n" + edited + aEnd, "New rule.",
+			"# Repo\n\n" + moved + "\n\n" + filler + "\n", false,
+		},
+		{
+			"existing block past the cap moves to the top without title",
+			filler + "\n\n" + edited + aEnd, "New rule.",
+			moved + "\n" + filler + "\n", false,
 		},
 		{"past the cap, no title", filler, "New rule.", newBlock + "\n" + filler, false},
 	}

@@ -392,7 +392,10 @@ The run goes in this order, and stops at the first step that ends it:
 6. The new text is the base branch's file with `section` appended to the
    project's block (`<!-- sentinel:<project>:start -->` to `:end -->`, headed
    `## Sentinel guidance`), or a new block. Merged and human-edited guidance on
-   the base stays as it is. Unbalanced or repeated markers end the run with
+   the base stays as it is. Grounding injects only the first 64 KiB of the file,
+   so a new block that would end past that goes right after the file's first
+   `# ` line (or at the top), and an existing block whose revised end would pass
+   it moves there whole, byte for byte plus the new section. Unbalanced or repeated markers end the run with
    cause `error`.
 7. With `expect_head` the branch is cut from that commit, fetched from the
    remote; the instruction file must resolve to the same path there as on the

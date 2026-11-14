@@ -28,12 +28,15 @@ var errMalformedBlock = errors.New("guidance block markers are malformed")
 
 // withGuidance appends section to project's block in file, or adds the block.
 // Existing text is kept as is, except that a block-less file's trailing
-// newlines become one blank line before the new block.
+// newlines become one blank line before the new block. A block that would end
+// past the grounding cap moves, whole, to after the title.
 func withGuidance(file, project, section string) (string, error) {
 	start, end := blockMarkers(project)
 	section = strings.TrimRight(section, "\n")
 
 	var starts, ends []int
+
+	endLen := 0
 
 	off := 0
 
@@ -43,6 +46,7 @@ func withGuidance(file, project, section string) (string, error) {
 			starts = append(starts, off)
 		case end:
 			ends = append(ends, off)
+			endLen = len(line)
 		}
 
 		off += len(line)
@@ -54,7 +58,24 @@ func withGuidance(file, project, section string) (string, error) {
 	}
 
 	if len(ends) == 1 {
-		return file[:ends[0]] + "\n" + section + "\n" + file[ends[0]:], nil
+		appended := file[:ends[0]] + "\n" + section + "\n" + file[ends[0]:]
+
+		blockEnd := ends[0] + len(section) + 2 + endLen
+		if blockEnd <= orchestrator.GroundingByteCap {
+			return appended, nil
+		}
+
+		before := appended[:starts[0]]
+		if before == "\n" || strings.HasSuffix(before, "\n\n") {
+			before = before[:len(before)-1]
+		}
+
+		block := appended[starts[0]:blockEnd]
+		if !strings.HasSuffix(block, "\n") {
+			block += "\n"
+		}
+
+		return placeBlockNearTop(before+appended[blockEnd:], block), nil
 	}
 
 	block := start + "\n## Sentinel guidance\n\n" + section + "\n" + end + "\n"
