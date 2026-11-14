@@ -59,8 +59,8 @@ func Run(ctx context.Context, spec Spec, client llm.LLM, emit *events.Emitter) r
 
 	return run(ctx, spec, log, red, emit, deps{
 		check: newCheckDeps(log, red.Apply),
-		investigate: func() (investigateDeps, error) {
-			return newInvestigateDeps(spec, client, red.Apply)
+		model: func() (modelDeps, error) {
+			return newModelDeps(spec, client, red.Apply)
 		},
 	})
 }
@@ -89,8 +89,8 @@ func resultMask(spec Spec) func(string) string {
 // deps are the kinds' effects, one field per kind. A kind whose effects can
 // fail to build gets a constructor, called only when that kind runs.
 type deps struct {
-	check       checkDeps
-	investigate func() (investigateDeps, error)
+	check checkDeps
+	model func() (modelDeps, error)
 }
 
 // workspaceDir is the run's clone directory: the card's, or the kind's for a
@@ -145,17 +145,34 @@ func runKind(ctx context.Context, spec Spec, ws string, emit *events.Emitter, d 
 			return protocol.RunKindResult{}, nil, fmt.Errorf("decode investigate input: %w", err)
 		}
 
-		inv, err := d.investigate()
+		md, err := d.model()
 		if err != nil {
 			return protocol.RunKindResult{}, nil, err
 		}
 
-		r, usage, err := investigate(ctx, ws, spec, in, inv, emit)
+		r, usage, err := investigate(ctx, ws, spec, in, md, emit)
 		if err != nil {
 			return protocol.RunKindResult{}, usage, err
 		}
 
 		return protocol.RunKindResult{Investigate: &r}, usage, nil
+	case protocol.RunKindAnalyse:
+		var in protocol.AnalyseInput
+		if err := json.Unmarshal(spec.Input, &in); err != nil {
+			return protocol.RunKindResult{}, nil, fmt.Errorf("decode analyse input: %w", err)
+		}
+
+		md, err := d.model()
+		if err != nil {
+			return protocol.RunKindResult{}, nil, err
+		}
+
+		r, usage, err := analyse(ctx, ws, spec, in, md, emit)
+		if err != nil {
+			return protocol.RunKindResult{}, usage, err
+		}
+
+		return protocol.RunKindResult{Analyse: &r}, usage, nil
 	default:
 		return protocol.RunKindResult{}, nil, fmt.Errorf("unknown run kind %q", spec.Kind)
 	}

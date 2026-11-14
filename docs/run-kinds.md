@@ -244,7 +244,7 @@ It reads:
 
 - the card, its subtasks and the siblings from the input, written read-only
   under `/home/user/investigation` as `card.md`, `subtasks/<id>.md` and
-  `siblings/<id>.md` (`writeInputs`, `internal/runkind/investigate_inputs.go`).
+  `siblings/<id>.md` (`writeInputs`, `internal/runkind/model_inputs.go`).
   A file whose frontmatter has no valid card ID is named by its 1-based position.
 - the stopped run's whole log section, in place at `/run/cm-input/run.log` on
   the read-only input mount. The prompt names it and tells the model to search
@@ -255,13 +255,13 @@ It reads:
   offset and limit.
 - the repository at the base branch, and the card's work branch fetched into
   `refs/remotes/origin/`: `cm/<card id in lower case>` when the remote has it,
-  else the one `cm/<card id in lower case>-<Jira key>` branch (`workBranch`, `internal/runkind/investigate_inputs.go`).
+  else the one `cm/<card id in lower case>-<Jira key>` branch (`workBranch`, `internal/runkind/model_inputs.go`).
   With no work branch on the remote the investigation runs without one; a
   failure to list the remote's branches, or to fetch one that exists, ends the
   run with cause `error`. Git runs
   with the credential helper, so the token stays out of argv.
 
-Its tools are the diagnose pass's read-only set: `read`, `grep` and `glob` on
+Its tools are the diagnose pass's read-only set (`readOnlyTools`, `internal/runkind/model.go`, shared with `analyse`): `read`, `grep` and `glob` on
 the workspace, with the inputs dir and the run log's dir as extra read-only
 roots, and the read-only `git` tool (status, diff, log, show, branch), plus the
 terminal `report_investigation` tool. There is no bash, edit or write. On
@@ -273,7 +273,7 @@ the reviewer pick at the complex tier from the payload's selection when it
 meets its bar, else the base model: `CM_MODEL`, else `CMX_DEFAULT_MODEL`, else
 the built-in capable default. The executor is built as a card run's is: the
 harness over the metered client on an endpoint, the `claude` binary with the
-endpoint's effort on Claude Code. The run has an 80-turn cap. On an endpoint it
+endpoint's effort on Claude Code. The run has an 80-turn cap (`modelConfig`). On an endpoint it
 also gets a wrap-up nudge 5 turns before the cap, one grace call for the
 report, the context window from the selection and the reasoning effort knob.
 The output of the harness tools, bridged ones included, is masked with the
@@ -297,7 +297,7 @@ fix.
 
 The limits, applied after masking (`limitInvestigate`, `limitFindings` and
 `fitOutcome`, `internal/runkind/limits.go` and `findings.go`). The finding rows
-apply to every kind that reports findings:
+apply to every kind that reports findings, `analyse` included:
 
 | Item                       | Limit         | Over the limit                            |
 | -------------------------- | ------------- | ----------------------------------------- |
@@ -312,6 +312,41 @@ apply to every kind that reports findings:
 
 The fit leaves room for the event envelope under serve's 1 MiB status limit,
 and the diagnosis and the fix always survive it.
+
+## Analyse
+
+`analyse` runs one model pass over a finished card run and reports its friction
+findings (`analyse`, `internal/runkind/analyse.go`). It never writes anything:
+its findings are proposals ContextMatrix vets.
+
+It reads:
+
+- the card and its subtasks from the input, written read-only under the inputs
+  dir as `card.md` and `subtasks/<id>.md`, named as for investigate; it has no
+  siblings.
+- the run's whole log section, in place at `/run/cm-input/run.log`, searched and
+  read in ranges as for investigate.
+- the repository at the base branch with its grounding, and the card's work
+  branch fetched into `refs/remotes/origin/` as for investigate.
+- the project's guidance branch, `cm/sentinel/<project>`
+  (`protocol.GuidanceBranchPrefix`), fetched into `refs/remotes/origin/` when
+  the remote has it (`fetchGuidanceBranch`, `internal/runkind/model_inputs.go`),
+  so the model sees guidance already merged or pending and does not repeat it.
+  A failure to look the branch up, or to fetch one that exists, ends the run
+  with cause `error`.
+
+Its tools, its model and its executor are investigate's, with the terminal tool
+`report_analysis` in place of `report_investigation` and a 40-turn cap; the
+wrap-up nudge, grace call, context window and output masking are the same. The
+model is the decision model (`orchestrator.DecisionModel`).
+
+The result is `report_analysis`'s arguments, a `protocol.AnalyseResult`: the
+friction `findings`, which are `[]` when the run shows none. The tool refuses
+arguments that do not decode and a finding whose kind is not one of the six or
+whose text is empty (`findingFault`, `internal/runkind/findings.go`), so the
+model can correct them. A run that ends without the call ends with cause
+`error`, and the stop causes and usage rows are investigate's. The findings are
+masked and bounded by the finding limits in the table under Investigate.
 
 ## Spend
 
@@ -353,10 +388,14 @@ rows never reach the card's budget.
 | `internal/runkind/runkind.go`            | The spec, the clone, the kind switch, masking and the stop cause      |
 | `internal/runkind/check.go`              | The check kind: candidates, the trial rules, the trial and its events |
 | `internal/runkind/textcheck.go`          | The text check: token extraction and the base-branch lookup           |
-| `internal/runkind/investigate.go`        | The investigate kind: model access, the model run                     |
-| `internal/runkind/investigate_inputs.go` | The card files written as read-only inputs, the work-branch lookup    |
+| `internal/runkind/model.go`              | What the model kinds share: model access, config, tools, the run      |
+| `internal/runkind/model_inputs.go`       | The card files written as read-only inputs, the branch lookups        |
+| `internal/runkind/investigate.go`        | The investigate kind: its inputs and report                           |
 | `internal/runkind/investigate_tool.go`   | The `report_investigation` tool: decoding and checking the report     |
 | `internal/runkind/investigate_prompt.go` | The investigation's task prompt                                       |
+| `internal/runkind/analyse.go`            | The analyse kind: its inputs and findings                             |
+| `internal/runkind/analyse_tool.go`       | The `report_analysis` tool: decoding and checking the findings        |
+| `internal/runkind/analyse_prompt.go`     | The analysis's task prompt                                            |
 | `internal/runkind/spend.go`              | The metered client and the usage rows                                 |
 | `internal/runkind/limits.go`             | The result size limits and the outcome fit                            |
-| `internal/runkind/findings.go`           | A finding's limit and mask, shared by the kinds that report findings  |
+| `internal/runkind/findings.go`           | A finding's schema, check, limit and mask, shared by the kinds        |

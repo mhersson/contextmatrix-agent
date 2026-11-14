@@ -30,7 +30,7 @@ func (reportTool) Schema() llm.Tool {
 		Function: llm.ToolFunction{
 			Name:        reportToolName,
 			Description: "Report the investigation. Calling it ends the run; make no other call after it.",
-			Parameters: json.RawMessage(`{
+			Parameters: json.RawMessage(fmt.Sprintf(`{
 	"type": "object",
 	"properties": {
 		"diagnosis": {"type": "string", "description": "Why the run stopped, for a human to read. Names any check a verify fix drops, and why."},
@@ -53,22 +53,10 @@ func (reportTool) Schema() llm.Tool {
 			}
 		},
 		"forward_to": {"type": "array", "items": {"type": "string"}, "description": "IDs of sibling inputs the same fix suits."},
-		"findings": {
-			"type": "array",
-			"items": {
-				"type": "object",
-				"properties": {
-					"kind": {"type": "string", "enum": ["guidance", "code", "card_advice", "project_verify", "hard_card", "ecosystem"]},
-					"title": {"type": "string", "description": "code and ecosystem findings only."},
-					"text": {"type": "string"},
-					"evidence": {"type": "string", "description": "What in the run shows it. No card IDs."}
-				},
-				"required": ["kind", "text", "evidence"]
-			}
-		}
+		"findings": %s
 	},
 	"required": ["diagnosis", "cause"]
-}`),
+}`, findingsSchema)),
 		},
 	}
 }
@@ -103,15 +91,9 @@ func parseReport(args json.RawMessage) (protocol.InvestigateResult, error) {
 	return r, nil
 }
 
-var (
-	diagnoses = []string{
-		protocol.DiagnosisCard, protocol.DiagnosisModel, protocol.DiagnosisEnvironment, protocol.DiagnosisEcosystem,
-	}
-	findingKinds = []string{
-		protocol.FindingGuidance, protocol.FindingCode, protocol.FindingCardAdvice,
-		protocol.FindingProjectVerify, protocol.FindingHardCard, protocol.FindingEcosystem,
-	}
-)
+var diagnoses = []string{
+	protocol.DiagnosisCard, protocol.DiagnosisModel, protocol.DiagnosisEnvironment, protocol.DiagnosisEcosystem,
+}
 
 // reportFault is the first value in r that ContextMatrix would reject with the
 // whole status, or nil. The fix and forward_to are left alone: ContextMatrix
@@ -126,12 +108,8 @@ func reportFault(r protocol.InvestigateResult) error {
 	}
 
 	for i, f := range r.Findings {
-		if !slices.Contains(findingKinds, f.Kind) {
-			return fmt.Errorf("finding %d: kind %q is not one of %s", i+1, f.Kind, strings.Join(findingKinds, ", "))
-		}
-
-		if strings.TrimSpace(f.Text) == "" {
-			return fmt.Errorf("finding %d: text is empty", i+1)
+		if err := findingFault(i, f); err != nil {
+			return err
 		}
 	}
 

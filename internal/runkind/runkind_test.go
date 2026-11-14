@@ -248,7 +248,7 @@ func TestRunMasksModelResultsWithOperatorValues(t *testing.T) {
 		require.NoError(t, err)
 
 		ex := &fakeExecutor{res: reported(string(args))}
-		d := run(t.Context(), spec, slog.Default(), redact.New([]string{token}), discardEmitter(), deps{investigate: built(endpointDeps(ex))})
+		d := run(t.Context(), spec, slog.Default(), redact.New([]string{token}), discardEmitter(), deps{model: built(endpointDeps(ex))})
 		require.Equal(t, protocol.StopCauseDone, d.Cause)
 
 		inv := d.Result.Investigate
@@ -257,13 +257,21 @@ func TestRunMasksModelResultsWithOperatorValues(t *testing.T) {
 		assertMasked(t, inv.Findings[0].Text)
 	})
 
-	t.Run("analyse through maskResult", func(t *testing.T) {
-		spec := Spec{Kind: protocol.RunKindAnalyse, GitToken: token, OperatorValues: []string{long, short}}
-		res := protocol.RunKindResult{Analyse: &protocol.AnalyseResult{Findings: []protocol.FrictionFinding{{Text: text}}}}
+	t.Run("analyse through run", func(t *testing.T) {
+		spec := analyseSpec(t, bareRepo(t, nil), protocol.AnalyseInput{Card: "card\n"})
+		spec.GitToken = token
+		spec.OperatorValues = []string{long, short}
 
-		got := maskResult(res, resultMask(spec))
+		args, err := json.Marshal(protocol.AnalyseResult{
+			Findings: []protocol.FrictionFinding{{Kind: protocol.FindingGuidance, Text: text, Evidence: "e"}},
+		})
+		require.NoError(t, err)
 
-		assertMasked(t, got.Analyse.Findings[0].Text)
+		ex := &fakeExecutor{res: reported(string(args))}
+		d := run(t.Context(), spec, slog.Default(), redact.New([]string{token}), discardEmitter(), deps{model: built(endpointDeps(ex))})
+		require.Equal(t, protocol.StopCauseDone, d.Cause)
+
+		assertMasked(t, d.Result.Analyse.Findings[0].Text)
 	})
 }
 

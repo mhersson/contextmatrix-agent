@@ -1,6 +1,45 @@
 package runkind
 
-import protocol "github.com/mhersson/contextmatrix-protocol"
+import (
+	"fmt"
+	"slices"
+	"strings"
+
+	protocol "github.com/mhersson/contextmatrix-protocol"
+)
+
+// findingsSchema is the JSON schema of a terminal tool's findings array.
+const findingsSchema = `{
+			"type": "array",
+			"items": {
+				"type": "object",
+				"properties": {
+					"kind": {"type": "string", "enum": ["guidance", "code", "card_advice", "project_verify", "hard_card", "ecosystem"]},
+					"title": {"type": "string", "description": "code and ecosystem findings only."},
+					"text": {"type": "string"},
+					"evidence": {"type": "string", "description": "What in the run shows it. No card IDs."}
+				},
+				"required": ["kind", "text", "evidence"]
+			}
+		}`
+
+var findingKinds = []string{
+	protocol.FindingGuidance, protocol.FindingCode, protocol.FindingCardAdvice,
+	protocol.FindingProjectVerify, protocol.FindingHardCard, protocol.FindingEcosystem,
+}
+
+// findingFault is why ContextMatrix would reject finding i (0-based), or nil.
+func findingFault(i int, f protocol.FrictionFinding) error {
+	if !slices.Contains(findingKinds, f.Kind) {
+		return fmt.Errorf("finding %d: kind %q is not one of %s", i+1, f.Kind, strings.Join(findingKinds, ", "))
+	}
+
+	if strings.TrimSpace(f.Text) == "" {
+		return fmt.Errorf("finding %d: text is empty", i+1)
+	}
+
+	return nil
+}
 
 // limitFindings drops each finding whose title or text is over its limit
 // before it keeps the first 50, and truncates evidence. A non-nil input stays
