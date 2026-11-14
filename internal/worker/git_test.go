@@ -1908,3 +1908,60 @@ func TestRemoteHeads(t *testing.T) {
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"cm/abc-12", "cm/abc-12-PROJ-7"}, heads)
 }
+
+func TestCommitPath(t *testing.T) {
+	t.Parallel()
+
+	_, ws, _ := setupClonedRepo(t)
+	g := NewGit(ws, "", "", "")
+	ctx := context.Background()
+
+	writeFile(t, ws, "AGENTS.md", []byte("one\n"), 0o644)
+	writeFile(t, ws, "other.txt", []byte("one\n"), 0o644)
+	runGit(t, ws, "add", "AGENTS.md", "other.txt")
+	runGit(t, ws, "commit", "-m", "seed")
+
+	headNames := func() string {
+		out, err := g.run(ctx, "show", "--format=", "--name-only", "HEAD")
+		require.NoError(t, err)
+
+		return strings.TrimSpace(out)
+	}
+	head := func() string {
+		out, err := g.run(ctx, "rev-parse", "HEAD")
+		require.NoError(t, err)
+
+		return strings.TrimSpace(out)
+	}
+
+	// Unchanged path: no commit.
+	before := head()
+	committed, err := g.CommitPath(ctx, "AGENTS.md", "msg")
+	require.NoError(t, err)
+	assert.False(t, committed)
+	assert.Equal(t, before, head())
+
+	// Only the named path is committed; the other change stays dirty.
+	writeFile(t, ws, "AGENTS.md", []byte("two\n"), 0o644)
+	writeFile(t, ws, "other.txt", []byte("two\n"), 0o644)
+
+	committed, err = g.CommitPath(ctx, "AGENTS.md", "update guidance")
+	require.NoError(t, err)
+	assert.True(t, committed)
+	assert.Equal(t, "AGENTS.md", headNames())
+
+	status, err := g.run(ctx, "status", "--porcelain")
+	require.NoError(t, err)
+	assert.Contains(t, status, "other.txt")
+
+	// Something else already staged: refuse and commit nothing.
+	runGit(t, ws, "add", "other.txt")
+	writeFile(t, ws, "AGENTS.md", []byte("three\n"), 0o644)
+
+	before = head()
+	committed, err = g.CommitPath(ctx, "AGENTS.md", "again")
+	require.Error(t, err)
+	assert.False(t, committed)
+	assert.Contains(t, err.Error(), "other.txt")
+	assert.Equal(t, before, head())
+}

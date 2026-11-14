@@ -287,6 +287,71 @@ func (p *PRCreator) Create(ctx context.Context, title, body, base, head string) 
 	return url, nil
 }
 
+// openPRForHeadArgs lists the open PRs whose head is the given branch.
+func openPRForHeadArgs(head string) []string {
+	return []string{"pr", "list", "--head", head, "--state", "open", "--json", "url,headRefOid"}
+}
+
+// parseOpenPRs reads gh pr list output for one head branch: no PR gives empty
+// values, one gives its URL and head commit, several are ambiguous and an error.
+func parseOpenPRs(out string) (url, headSHA string, err error) {
+	var prs []struct {
+		URL        string `json:"url"`
+		HeadRefOid string `json:"headRefOid"`
+	}
+
+	if err := json.Unmarshal([]byte(out), &prs); err != nil {
+		return "", "", fmt.Errorf("parse gh pr list output: %w", err)
+	}
+
+	switch len(prs) {
+	case 0:
+		return "", "", nil
+	case 1:
+		return prs[0].URL, prs[0].HeadRefOid, nil
+	default:
+		return "", "", fmt.Errorf("gh pr list: %d open PRs for one head branch", len(prs))
+	}
+}
+
+// OpenPRForHead returns the URL and head commit of the open PR from head, or
+// empty strings when there is none.
+func (p *PRCreator) OpenPRForHead(ctx context.Context, head string) (url, headSHA string, err error) {
+	out, err := p.runGH(ctx, false, openPRForHeadArgs(head)...)
+	if err != nil {
+		return "", "", err
+	}
+
+	return parseOpenPRs(out)
+}
+
+// editPRArgs sets a PR's title and reads its body from stdin.
+func editPRArgs(prURL, title string) []string {
+	return []string{"pr", "edit", prURL, "--title", title, "--body-file", "-"}
+}
+
+// EditPR replaces a PR's title and body; the body goes on stdin so arbitrary
+// markdown is safe.
+func (p *PRCreator) EditPR(ctx context.Context, prURL, title, body string) error {
+	cmd, err := p.ghCmd(ctx, body, editPRArgs(prURL, title)...)
+	if err != nil {
+		return fmt.Errorf("gh pr edit: %w", err)
+	}
+
+	out, err := cmd.Output()
+	if err != nil {
+		detail := strings.TrimSpace(string(out))
+
+		if ee, ok := errors.AsType[*exec.ExitError](err); ok {
+			detail = strings.TrimSpace(detail + "\n" + string(ee.Stderr))
+		}
+
+		return fmt.Errorf("gh pr edit: %w: %s", err, detail)
+	}
+
+	return nil
+}
+
 // parsePRURL returns the first http(s) URL in gh's stdout, or "" if none.
 func parsePRURL(out string) string {
 	return prURLPattern.FindString(out)

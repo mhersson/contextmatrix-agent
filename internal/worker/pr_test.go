@@ -1257,3 +1257,54 @@ exit 1
 	assert.Contains(t, err.Error(), "gh api request copilot reviewer")
 	assert.Contains(t, err.Error(), "HTTP 422")
 }
+
+func TestOpenPRForHeadArgs(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t,
+		[]string{"pr", "list", "--head", "cm/sentinel/alpha", "--state", "open", "--json", "url,headRefOid"},
+		openPRForHeadArgs("cm/sentinel/alpha"))
+}
+
+func TestParseOpenPRs(t *testing.T) {
+	t.Parallel()
+
+	url, sha, err := parseOpenPRs("[]")
+	require.NoError(t, err)
+	assert.Empty(t, url)
+	assert.Empty(t, sha)
+
+	url, sha, err = parseOpenPRs(`[{"url":"https://example.net/o/r/pull/7","headRefOid":"abc"}]`)
+	require.NoError(t, err)
+	assert.Equal(t, "https://example.net/o/r/pull/7", url)
+	assert.Equal(t, "abc", sha)
+
+	_, _, err = parseOpenPRs(`[{"url":"a","headRefOid":"1"},{"url":"b","headRefOid":"2"}]`)
+	require.Error(t, err)
+
+	_, _, err = parseOpenPRs("not json")
+	require.Error(t, err)
+}
+
+func TestEditPRArgs(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t,
+		[]string{"pr", "edit", "https://example.net/o/r/pull/7", "--title", "New title", "--body-file", "-"},
+		editPRArgs("https://example.net/o/r/pull/7", "New title"))
+}
+
+func TestEditPRSendsTheBodyOnStdin(t *testing.T) {
+	t.Parallel()
+
+	pc := NewPRCreator("/work/space", writeSecrets(t, "ghs_secrettoken"), "", "")
+
+	cmd, err := pc.ghCmd(t.Context(), "the body\nwith detail", editPRArgs("https://example.net/o/r/pull/7", "T")...)
+	require.NoError(t, err)
+
+	require.NotNil(t, cmd.Stdin)
+	body, readErr := io.ReadAll(cmd.Stdin)
+	require.NoError(t, readErr)
+	assert.Equal(t, "the body\nwith detail", string(body))
+	assert.Contains(t, cmd.Env, "GH_TOKEN=ghs_secrettoken")
+}
